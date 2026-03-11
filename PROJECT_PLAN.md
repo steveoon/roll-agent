@@ -541,26 +541,26 @@ roll run wechat-agent send_message --userId xxx --content "你好"
 
 **目标**：一个 Agent 能通过 CLI 被注册、调用、返回结果
 
-- [ ] 项目脚手架搭建（monorepo、TypeScript 严格模式、CI 基础）
-- [ ] `roll.config.yaml` 配置加载与校验
-- [ ] `roll agent add <path>` — SKILL.md 解析 + 依赖安装 + 注册
-- [ ] `roll agent list` — 列出已注册 Agent
-- [ ] MCP Client Manager — stdio 传输模式
-- [ ] `roll run <agent> <tool>` — 声明式调用
-- [ ] LLM Engine 基础（单 Provider 接入，如 Anthropic）
-- [ ] `boss-reply-agent` 示例 Agent（1-2 个简单 tool）
-- [ ] `@roll-agent/sdk` 基础（defineAgent + defineTool + listen）
+- [x] 项目脚手架搭建（monorepo、TypeScript 严格模式、CI 基础）
+- [x] `roll.config.yaml` 配置加载与校验
+- [x] `roll agent add <path>` — SKILL.md 解析 + 依赖安装 + 注册
+- [x] `roll agent list` — 列出已注册 Agent
+- [x] MCP Client Manager — stdio 传输模式
+- [x] `roll run <agent> <tool>` — 声明式调用
+- [x] LLM Engine 基础（单 Provider 接入，如 Anthropic）
+- [x] `boss-reply-agent` 示例 Agent（1-2 个简单 tool）
+- [x] `@roll-agent/sdk` 基础（defineAgent + defineTool + listen）
 
 ### Phase 2 — 智能路由 + 多传输
 
 **目标**：支持 LLM 路由和远程 Agent
 
-- [ ] `roll ask` — LLM 智能路由
-- [ ] MCP Streamable HTTP 传输支持
+- [x] `roll ask` — LLM 智能路由
+- [x] MCP Streamable HTTP 传输支持
 - [ ] MCP Sampling 处理（子 Agent 使用指挥官 LLM）
-- [ ] 多 LLM Provider 支持（Qwen、OpenAI）
-- [ ] `roll agent start/stop` — 远程 Agent 生命周期
-- [ ] `roll doctor` — 系统诊断
+- [x] 多 LLM Provider 支持（Qwen、OpenAI）
+- [x] `roll agent start/stop` — Agent 生命周期管理
+- [x] `roll doctor` — 系统诊断
 - [ ] `roll agent add <git-url>` — 从 Git 仓库注册
 
 ### Phase 3 — 生产就绪
