@@ -568,8 +568,8 @@ roll run wechat-agent send_message --userId xxx --content "你好"
 **目标**：健壮性、可观测性、开发体验
 
 - [ ] Agent 健康检查与自动重启
-- [ ] 结构化日志与错误追踪
-- [ ] `roll config init` 交互式配置向导
+- [x] 结构化日志与错误追踪
+- [x] `roll config init` 交互式配置向导
 - [ ] SDK 完善：context.logger、错误处理模式
 - [ ] 完整测试覆盖（核心模块 80%+）
 - [ ] npm 发布（`@roll-agent/core`、`@roll-agent/sdk`）
