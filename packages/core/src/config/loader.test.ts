@@ -98,6 +98,7 @@ agents:
     writeFileSync(join(tmpDir, "roll.config.yaml"), yaml);
 
     const { config } = loadConfig({ cwd: tmpDir });
+    // eslint-disable-next-line no-template-curly-in-string
     assert.equal(config.llm.providers["anthropic"]?.apiKey, "${NONEXISTENT_VAR_12345}");
   });
 

@@ -8,4 +8,8 @@ const agent = defineAgent({
   tools: [getUnread, replyCandidate, batchReply],
 });
 
-console.log(`Agent "${agent.name}" loaded with ${agent.tools.length} tools`);
+// 启动 MCP Server (stdio 模式)
+agent.listen().catch((err: unknown) => {
+  console.error("Fatal error:", err);
+  process.exit(1);
+});

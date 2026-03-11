@@ -20,5 +20,10 @@ export interface ToolDefinition<TInput = unknown, TOutput = unknown> extends Any
 export interface AgentDefinition {
   readonly name: string;
   readonly tools: ReadonlyArray<AnyToolDefinition>;
-  readonly listen?: () => void;
+}
+
+/** defineAgent() 返回的可运行 Agent */
+export interface RunnableAgent extends AgentDefinition {
+  /** 启动 MCP Server (stdio 模式)，阻塞直到连接关闭 */
+  readonly listen: () => Promise<void>;
 }
