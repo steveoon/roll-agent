@@ -1,2 +1,3 @@
-// Agent Registry — SKILL.md 解析、Agent 发现、注册信息持久化
-// TODO: implement
+export { discoverAgent } from "./discovery.ts";
+export type { DiscoveredAgent } from "./discovery.ts";
+export { AgentStore } from "./store.ts";
