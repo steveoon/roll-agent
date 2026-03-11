@@ -74,6 +74,13 @@ export default defineCommand({
       return;
     }
 
+    // 为子 Agent 创建 Sampling model（复用路由用的 LLM model）
+    const samplingModel = createProviderModel(
+      routerProvider,
+      config.llm.defaultModel,
+      providerConfig.apiKey,
+    );
+
     const clientManager = new McpClientManager();
     try {
       log.info(`连接 Agent "${agent.skill.name}"...`);
@@ -81,6 +88,7 @@ export default defineCommand({
         agent.skill.name,
         agent.transport,
         agent.installPath,
+        { samplingModel },
       );
 
       log.info(`调用 ${agent.skill.name}.${decision.toolName}(${JSON.stringify(decision.input)})`);

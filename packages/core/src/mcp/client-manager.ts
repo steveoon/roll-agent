@@ -2,7 +2,9 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
+import type { LanguageModelV3 } from "@ai-sdk/provider";
 import type { AgentTransport } from "../types/agent.ts";
+import { registerSamplingHandler } from "./sampling-handler.ts";
 
 /** 默认连接超时（毫秒） */
 const DEFAULT_CONNECT_TIMEOUT_MS = 30_000;
@@ -16,6 +18,8 @@ interface ManagedConnection {
 export interface ConnectOptions {
   /** 连接超时（毫秒），默认 30s */
   readonly timeoutMs?: number;
+  /** 为子 Agent 提供的 LLM model（启用 Sampling 支持） */
+  readonly samplingModel?: LanguageModelV3;
 }
 
 /**
@@ -47,7 +51,16 @@ export class McpClientManager {
     }
 
     const timeoutMs = options.timeoutMs ?? DEFAULT_CONNECT_TIMEOUT_MS;
-    const client = new Client({ name: `roll-client-${agentName}`, version: "0.0.1" });
+    const samplingCapabilities = options.samplingModel ? { sampling: {} } : {};
+    const client = new Client(
+      { name: `roll-client-${agentName}`, version: "0.0.1" },
+      { capabilities: samplingCapabilities },
+    );
+
+    // 注册 Sampling Handler（子 Agent 可通过 createMessage 使用指挥官 LLM）
+    if (options.samplingModel) {
+      registerSamplingHandler(client, options.samplingModel);
+    }
 
     // 创建 MCP 传输（强制转换为 Transport 以绕过 exactOptionalPropertyTypes 与库类型的不兼容）
     const mcpTransport: Transport =

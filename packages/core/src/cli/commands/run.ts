@@ -2,6 +2,7 @@ import { defineCommand } from "citty";
 import { loadConfig } from "../../config/loader.ts";
 import { AgentStore } from "../../registry/store.ts";
 import { McpClientManager } from "../../mcp/client-manager.ts";
+import { createProviderModel } from "../../llm/providers.ts";
 import { log } from "../utils/output.ts";
 
 export default defineCommand({
@@ -29,11 +30,19 @@ export default defineCommand({
     // 3. 连接 MCP Server
     const clientManager = new McpClientManager();
     try {
+      // 尝试创建 Sampling model（为子 Agent 提供 LLM 能力）
+      const providerName = config.llm.defaultProvider;
+      const providerConfig = config.llm.providers[providerName];
+      const samplingModel = providerConfig
+        ? createProviderModel(providerName, config.llm.defaultModel, providerConfig.apiKey)
+        : undefined;
+
       log.info(`连接 Agent "${agent.skill.name}"...`);
       const client = await clientManager.connect(
         agent.skill.name,
         agent.transport,
         agent.installPath,
+        ...(samplingModel ? [{ samplingModel }] : []),
       );
 
       // 4. 列出 tools 验证目标 tool 存在

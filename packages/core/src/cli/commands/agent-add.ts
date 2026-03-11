@@ -1,6 +1,6 @@
 import { defineCommand } from "citty";
 import { resolve } from "node:path";
-import { existsSync } from "node:fs";
+import { existsSync, mkdirSync } from "node:fs";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { loadConfig } from "../../config/loader.ts";
@@ -11,18 +11,68 @@ import type { RegisteredAgent } from "../../types/agent.ts";
 
 const execFileAsync = promisify(execFile);
 
+/** 判断输入是否为 Git URL */
+function isGitUrl(input: string): boolean {
+  return (
+    input.startsWith("https://") ||
+    input.startsWith("http://") ||
+    input.startsWith("git@") ||
+    input.endsWith(".git")
+  );
+}
+
+/** 从 Git URL 中提取仓库名作为目录名 */
+function repoNameFromUrl(url: string): string {
+  const last = url.split("/").pop() ?? url;
+  return last.replace(/\.git$/, "");
+}
+
 export default defineCommand({
-  meta: { description: "注册一个 Agent" },
+  meta: { description: "注册一个 Agent（本地路径或 Git URL）" },
   args: {
-    path: { type: "positional", description: "Agent 本地路径", required: true },
+    path: { type: "positional", description: "Agent 本地路径或 Git URL", required: true },
   },
   async run({ args }) {
-    const agentDir = resolve(args.path);
+    let agentDir: string;
 
-    if (!existsSync(agentDir)) {
-      log.error(`路径不存在: ${agentDir}`);
-      process.exitCode = 1;
-      return;
+    if (isGitUrl(args.path)) {
+      // Git URL 模式：克隆到 dataDir 下
+      const { config } = loadConfig();
+      const repoName = repoNameFromUrl(args.path);
+      const cloneTarget = resolve(config.agents.dataDir, "repos", repoName);
+
+      if (existsSync(cloneTarget)) {
+        log.info(`仓库目录已存在，拉取最新代码: ${cloneTarget}`);
+        try {
+          await execFileAsync("git", ["pull"], { cwd: cloneTarget });
+        } catch (err) {
+          log.error(`git pull 失败: ${err instanceof Error ? err.message : String(err)}`);
+          process.exitCode = 1;
+          return;
+        }
+      } else {
+        log.info(`克隆 ${args.path}...`);
+        const parentDir = resolve(config.agents.dataDir, "repos");
+        if (!existsSync(parentDir)) {
+          mkdirSync(parentDir, { recursive: true });
+        }
+        try {
+          await execFileAsync("git", ["clone", args.path, cloneTarget]);
+          log.success("克隆完成");
+        } catch (err) {
+          log.error(`git clone 失败: ${err instanceof Error ? err.message : String(err)}`);
+          process.exitCode = 1;
+          return;
+        }
+      }
+      agentDir = cloneTarget;
+    } else {
+      agentDir = resolve(args.path);
+      if (!existsSync(agentDir)) {
+        log.error(`路径不存在: ${agentDir}`);
+        process.exitCode = 1;
+        return;
+      }
     }
 
     // 1. 解析 SKILL.md

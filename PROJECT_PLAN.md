@@ -557,20 +557,20 @@ roll run wechat-agent send_message --userId xxx --content "你好"
 
 - [x] `roll ask` — LLM 智能路由
 - [x] MCP Streamable HTTP 传输支持
-- [ ] MCP Sampling 处理（子 Agent 使用指挥官 LLM）
+- [x] MCP Sampling 处理（子 Agent 使用指挥官 LLM）
 - [x] 多 LLM Provider 支持（Qwen、OpenAI）
 - [x] `roll agent start/stop` — Agent 生命周期管理
 - [x] `roll doctor` — 系统诊断
-- [ ] `roll agent add <git-url>` — 从 Git 仓库注册
+- [x] `roll agent add <git-url>` — 从 Git 仓库注册
 
 ### Phase 3 — 生产就绪
 
 **目标**：健壮性、可观测性、开发体验
 
-- [ ] Agent 健康检查与自动重启
+- [x] Agent 健康检查与自动重启
 - [x] 结构化日志与错误追踪
 - [x] `roll config init` 交互式配置向导
-- [ ] SDK 完善：context.logger、错误处理模式
+- [x] SDK 完善：context.logger、错误处理模式
 - [ ] 完整测试覆盖（核心模块 80%+）
 - [ ] npm 发布（`@roll-agent/core`、`@roll-agent/sdk`）
 - [ ] 文档站（使用指南、集成商接入指南、API Reference）
