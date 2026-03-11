@@ -1,0 +1,117 @@
+# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
+## Project Overview
+
+**花卷 Agent (Roll)** — 轻量级 Agent 编排系统。CLI 命令：`roll`，npm 组织：`@roll-agent`。
+
+指挥官（roll-core）提供 LLM 基座 + Agent 发现/调度 + CLI 交互，子 Agent 通过 MCP 协议接入。
+
+## Development Commands
+
+```bash
+# 开发（零编译，Node.js Type Stripping 直接运行 .ts）
+pnpm dev                          # 运行 CLI 入口
+pnpm dev -- agent list            # 运行子命令
+
+# 构建与检查
+pnpm build                        # tsc 构建所有包（输出 dist/）
+pnpm typecheck                    # tsc --noEmit 类型检查
+pnpm lint                         # ESLint 9 + neostandard
+pnpm format                       # Prettier 格式化
+pnpm format:check                 # 检查格式
+
+# 测试（node:test + node:assert/strict）
+pnpm test                         # 运行所有包的测试
+node --experimental-strip-types --test packages/core/src/config/schema.test.ts  # 单个测试文件
+
+# 单包操作
+pnpm --filter @roll-agent/core typecheck
+pnpm --filter @roll-agent/sdk build
+pnpm --filter boss-reply-agent dev
+```
+
+**环境要求**：Node.js ≥22.6.0，pnpm 10+
+
+## Architecture
+
+### Monorepo 结构（pnpm workspace）
+
+| 包 | 作用 |
+|------|------|
+| `packages/core` | 指挥官：CLI (citty) + Agent Registry + Router + MCP Client + LLM Engine |
+| `packages/sdk` | 子 Agent 开发 SDK：`defineAgent()` + `defineTool()` |
+| `agents/boss-reply` | 示例 Agent（BOSS直聘回复，3 个 tool） |
+
+### 双层标准架构
+
+- **描述层**：Agent Skills 标准（SKILL.md frontmatter）— 告诉指挥官"我是谁"
+- **运行时层**：MCP 协议 — 指挥官实际调用子 Agent（stdio 本地子进程 / Streamable HTTP 远程服务）
+
+### CLI 命令树（citty，懒加载子命令）
+
+```
+roll agent add|remove|list|start|stop|info   Agent 管理
+roll run <agent> <tool> [args]               声明式调用
+roll ask "<message>"                         LLM 智能路由
+roll config set|get|init                     配置管理
+roll doctor                                  系统诊断
+```
+
+### Core 模块
+
+- `cli/` — 命令定义 + 终端 UI 工具（chalk/ora/cli-table3）
+- `registry/` — SKILL.md 解析（gray-matter）、Agent 发现、注册持久化（~/.roll-agent/）
+- `router/` — 声明式路由 + LLM 智能路由
+- `mcp/` — MCP Client 连接池（stdio/HTTP 传输）、Sampling 处理
+- `llm/` — 统一 LLM 引擎（AI SDK v6 + 多 Provider）
+- `config/` — roll.config.yaml 加载与 Zod 校验
+
+### SDK 公开 API
+
+```typescript
+import { defineAgent, defineTool } from "@roll-agent/sdk";
+// 类型：AgentContext, ToolDefinition, AgentDefinition, AnyToolDefinition
+```
+
+`AnyToolDefinition` 用于异构 tool 集合（类型擦除），`ToolDefinition<TInput, TOutput>` 保留泛型类型安全。
+
+## TypeScript 约束
+
+### Type Stripping 兼容（erasableSyntaxOnly）
+
+- 使用 `import type` 分离类型导入（`verbatimModuleSyntax`）
+- 禁止 `enum`、`namespace`、构造函数参数属性 — 用 `as const` 对象替代
+- 导入路径**必须**使用 `.ts` 扩展名（`allowImportingTsExtensions`）
+- 构建时 `rewriteRelativeImportExtensions` 自动将 `.ts` 重写为 `.js`
+
+### 严格模式
+
+- 零 `any` — 使用 `unknown` + 类型收窄
+- `exactOptionalPropertyTypes`、`noUncheckedIndexedAccess` 均开启
+- 所有 strict 标志启用
+
+### tsconfig 策略
+
+- `tsconfig.base.json` — 开发/IDE 用（noEmit）
+- `tsconfig.build.json` — 发布构建用（输出 .js + .d.ts + .map）
+- 各包 `tsconfig.json` extends base，`tsconfig.build.json` extends root build
+
+## Workspace 依赖解析
+
+SDK 的 `exports` 在开发时指向 `./src/index.ts`（直接引用源码），发布时通过 `publishConfig.exports` 指向 `./dist/`。这样 workspace 内其他包（如 boss-reply-agent）无需先构建 SDK 即可获得类型。
+
+## Configuration
+
+`roll.config.yaml` — YAML 格式，支持 `${ENV_VAR}` 环境变量引用。Zod schema 定义在 `packages/core/src/config/schema.ts`。
+
+## Testing
+
+使用 Node.js 内置 `node:test` + `node:assert/strict`，零外部测试依赖。测试文件与源码同目录，命名 `*.test.ts`。
+
+## Code Style
+
+- ESLint 9 flat config + neostandard（`noStyle: true` 避免与 Prettier 冲突）
+- Prettier：双引号、分号、尾逗号、100 字符行宽
+- ESM Only：`"type": "module"`，使用 `import.meta.dirname` 替代 `__dirname`

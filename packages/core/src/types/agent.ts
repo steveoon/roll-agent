@@ -32,9 +32,18 @@ export interface RegisteredAgent {
   readonly status: AgentStatus;
 }
 
+/** JSON Schema 子集，对应 MCP tool 的 inputSchema */
+export interface JsonSchemaObject {
+  readonly type: "object";
+  readonly properties?: Readonly<Record<string, Readonly<Record<string, unknown>>>>;
+  readonly required?: readonly string[];
+  readonly additionalProperties?: boolean;
+  readonly [key: string]: unknown;
+}
+
 /** MCP Tool Schema */
 export interface AgentTool {
   readonly name: string;
   readonly description: string;
-  readonly inputSchema: Readonly<Record<string, unknown>>;
+  readonly inputSchema: JsonSchemaObject;
 }
