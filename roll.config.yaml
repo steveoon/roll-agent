@@ -1,0 +1,12 @@
+llm:
+  default-provider: anthropic
+  default-model: claude-sonnet-4-20250514
+  providers:
+    anthropic:
+      api-key: ${ANTHROPIC_API_KEY}
+
+router:
+  mode: declarative
+
+agents:
+  data-dir: ~/.roll-agent/agents
