@@ -1,2 +1,2 @@
-// Router — 声明式路由 + LLM 智能路由
-// TODO: implement
+export { routeWithLLM } from "./llm-router.ts";
+export { resolveAgent } from "./declarative.ts";
