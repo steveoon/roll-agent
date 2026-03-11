@@ -92,6 +92,18 @@ import { defineAgent, defineTool } from "@roll-agent/sdk";
 - `exactOptionalPropertyTypes`、`noUncheckedIndexedAccess` 均开启
 - 所有 strict 标志启用
 
+### 类型设计规范（遵循 `/typescript-magician`）
+
+定义或修改类型时**必须主动使用** `/typescript-magician` skill 审查，确保：
+
+- 用 `as const` + `typeof` 从运行时值派生类型，避免手动维护重复的 string literal union
+- Zod schema 作为单一数据源，接口类型通过 `z.infer<typeof schema>` 或索引访问（如 `Config["router"]["mode"]`）派生
+- 泛型约束恰到好处（`extends` 只约束实际使用的属性），避免过度约束或遗漏约束
+- 异构集合使用类型擦除基础接口（如 `AnyToolDefinition`），具体泛型接口 extends 基础接口
+- 语义性强的值使用 brand type（如 `Confidence`），附带运行时校验工厂函数
+- 用 type predicate（`x is T`）替代 `as` 类型断言做收窄
+- 用 `Record` mapping / handler pattern 替代 `if-else` / `switch`
+
 ### tsconfig 策略
 
 - `tsconfig.base.json` — 开发/IDE 用（noEmit）

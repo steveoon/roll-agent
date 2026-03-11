@@ -11,7 +11,10 @@
   "bin": {
     "roll": "./bin/roll.js"
   },
-  "files": ["dist", "bin"],
+  "files": [
+    "dist",
+    "bin"
+  ],
   "engines": {
     "node": ">=22.6.0"
   },
@@ -23,14 +26,16 @@
     "clean": "rm -rf dist"
   },
   "dependencies": {
+    "@ai-sdk/anthropic": "^3.0.58",
+    "@ai-sdk/openai": "^3.0.41",
+    "@ai-sdk/provider": "^3.0.8",
     "@modelcontextprotocol/sdk": "^1.12.0",
-    "ai": "^4.3.0",
-    "@ai-sdk/anthropic": "^1.2.0",
-    "citty": "^0.1.6",
+    "ai": "^6.0.116",
     "chalk": "^5.4.0",
-    "ora": "^8.1.0",
+    "citty": "^0.1.6",
     "cli-table3": "^0.6.5",
     "gray-matter": "^4.0.3",
+    "ora": "^8.1.0",
     "yaml": "^2.7.0",
     "zod": "^3.25.0"
   },

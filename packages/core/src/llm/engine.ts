@@ -1,5 +1,5 @@
 import { generateText } from "ai";
-import type { LanguageModel } from "ai";
+import type { LanguageModelV3 } from "@ai-sdk/provider";
 import { createProviderModel } from "./providers.ts";
 import type { RollConfig } from "../config/schema.ts";
 
@@ -31,7 +31,7 @@ export class LLMEngine {
   }
 
   /** 解析 provider + model，创建 AI SDK LanguageModel 实例 */
-  private resolveModel(options: LLMEngineOptions): LanguageModel {
+  private resolveModel(options: LLMEngineOptions): LanguageModelV3 {
     const providerName = options.provider ?? this.config.llm.defaultProvider;
     const modelName = options.model ?? this.config.llm.defaultModel;
     const providerConfig = this.config.llm.providers[providerName];

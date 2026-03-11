@@ -1,6 +1,6 @@
 import { generateObject } from "ai";
 import { z } from "zod";
-import type { LanguageModel } from "ai";
+import type { LanguageModelV3 } from "@ai-sdk/provider";
 import type { RegisteredAgent } from "../types/agent.ts";
 import type { RouteDecision } from "../types/router.ts";
 import { asConfidence } from "../types/router.ts";
@@ -38,7 +38,7 @@ function buildAgentCatalog(agents: ReadonlyArray<RegisteredAgent>): string {
 export async function routeWithLLM(
   message: string,
   agents: ReadonlyArray<RegisteredAgent>,
-  model: LanguageModel,
+  model: LanguageModelV3,
 ): Promise<RouteDecision> {
   const catalog = buildAgentCatalog(agents);
 
