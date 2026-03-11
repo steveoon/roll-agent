@@ -73,7 +73,8 @@ export function defineAgent(definition: AgentDefinition, options: DefineAgentOpt
 
 /** 将单个 tool 注册到 MCP Server */
 function registerTool(server: McpServer, tool: AnyToolDefinition, ctx: AgentContext): void {
-  // 使用 registerTool API（支持 Zod schema 作为 inputSchema）
+  // MCP SDK 的 registerTool 要求 ZodObject，但 AnyToolDefinition.input 是更宽泛的 ZodType（类型擦除代价）
+  // AnyToolDefinition.execute 签名为 (never, ctx) 以阻止直接调用，注册时需转型为可调用签名
   server.registerTool(
     tool.name,
     {

@@ -15,10 +15,22 @@ describe("createProviderModel", () => {
     assert.equal(model.modelId, "gpt-4o");
   });
 
+  it("should create a deepseek model", () => {
+    const model = createProviderModel("deepseek", "deepseek-chat", "test-key");
+    assert.ok(model);
+    assert.equal(model.modelId, "deepseek-chat");
+  });
+
   it("should create a qwen model", () => {
     const model = createProviderModel("qwen", "qwen-plus", "test-key");
     assert.ok(model);
     assert.equal(model.modelId, "qwen-plus");
+  });
+
+  it("should accept custom baseURL", () => {
+    const model = createProviderModel("openai", "gpt-4o", "test-key", "https://custom-api.example.com/v1");
+    assert.ok(model);
+    assert.equal(model.modelId, "gpt-4o");
   });
 
   it("should throw for unknown provider", () => {

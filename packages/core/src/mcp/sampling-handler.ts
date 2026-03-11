@@ -18,11 +18,16 @@ export function registerSamplingHandler(client: Client, model: LanguageModelV3):
     const messages = convertToModelMessages(request.params.messages);
     const maxTokens = request.params.maxTokens;
 
-    const result = await generateText({
-      model,
-      messages,
-      ...(maxTokens > 0 ? { maxTokens } : {}),
-    });
+    let result;
+    try {
+      result = await generateText({
+        model,
+        messages,
+        ...(maxTokens > 0 ? { maxOutputTokens: maxTokens } : {}),
+      });
+    } catch (error) {
+      throw new Error("Sampling handler: LLM generation failed", { cause: error });
+    }
 
     return {
       role: "assistant",

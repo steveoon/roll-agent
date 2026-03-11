@@ -1,14 +1,16 @@
 import { defineCommand } from "citty";
-import { writeFileSync, existsSync } from "node:fs";
+import { readFileSync, writeFileSync, existsSync } from "node:fs";
 import { resolve } from "node:path";
 import { createInterface } from "node:readline/promises";
+import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
 import { loadConfig } from "../../config/loader.ts";
 
 export default defineCommand({
   meta: { description: "管理全局配置" },
   args: {
-    action: { type: "positional", description: "操作（init/get）", required: true },
-    key: { type: "positional", description: "配置键（get 时使用）", required: false },
+    action: { type: "positional", description: "操作（init/get/set）", required: true },
+    key: { type: "positional", description: "配置键（get/set 时使用，点号分隔）", required: false },
+    value: { type: "positional", description: "配置值（set 时使用）", required: false },
   },
   async run({ args }) {
     if (args.action === "init") {
@@ -21,7 +23,12 @@ export default defineCommand({
       return;
     }
 
-    console.error(`✗ 未知操作: ${args.action}。可用: init, get`);
+    if (args.action === "set") {
+      setConfig(args.key, args.value);
+      return;
+    }
+
+    console.error(`✗ 未知操作: ${args.action}。可用: init, get, set`);
     process.exitCode = 1;
   },
 });
@@ -98,4 +105,61 @@ function getConfig(key: string | undefined): void {
   }
 
   console.log(typeof current === "object" ? JSON.stringify(current, null, 2) : String(current));
+}
+
+/**
+ * camelCase 键转换为 kebab-case（与 YAML 文件格式保持一致）。
+ * 例如 `defaultProvider` → `default-provider`
+ */
+function camelToKebab(str: string): string {
+  return str.replace(/[A-Z]/g, (ch) => `-${ch.toLowerCase()}`);
+}
+
+/** 设置配置值并写回 YAML 文件 */
+function setConfig(key: string | undefined, value: string | undefined): void {
+  if (!key || value === undefined) {
+    console.error("✗ 用法: roll config set <key> <value>");
+    console.error("  示例: roll config set llm.defaultModel claude-sonnet-4-20250514");
+    process.exitCode = 1;
+    return;
+  }
+
+  const { configPath } = loadConfig();
+
+  if (!configPath) {
+    console.error("✗ 未找到配置文件。请先运行 roll config init");
+    process.exitCode = 1;
+    return;
+  }
+
+  // 读取原始 YAML 为 JS 对象
+  const raw = readFileSync(configPath, "utf-8");
+  const doc = (parseYaml(raw) ?? {}) as Record<string, unknown>;
+
+  // 按点号路径设置值（使用 kebab-case 键匹配 YAML 格式）
+  const parts = key.split(".");
+  let current: Record<string, unknown> = doc;
+
+  for (let i = 0; i < parts.length - 1; i++) {
+    const kebabKey = camelToKebab(parts[i] as string);
+    const next = current[kebabKey];
+    if (typeof next !== "object" || next === null || Array.isArray(next)) {
+      current[kebabKey] = {};
+    }
+    current = current[kebabKey] as Record<string, unknown>;
+  }
+
+  const lastKey = camelToKebab(parts[parts.length - 1] as string);
+
+  // 尝试解析为数字/布尔值，否则保持字符串
+  let parsed: unknown = value;
+  if (value === "true") parsed = true;
+  else if (value === "false") parsed = false;
+  else if (/^\d+(\.\d+)?$/.test(value)) parsed = Number(value);
+
+  current[lastKey] = parsed;
+
+  writeFileSync(configPath, stringifyYaml(doc, { lineWidth: 0 }), "utf-8");
+  console.log(`✓ ${key} = ${String(parsed)}`);
+  console.error(`  (已写入: ${configPath})`);
 }

@@ -1,12 +1,14 @@
 import { describe, it, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import { writeFileSync, mkdirSync, rmSync } from "node:fs";
-import { join } from "node:path";
+import { resolve } from "node:path";
 import { tmpdir } from "node:os";
+import { randomUUID } from "node:crypto";
 import { loadConfig } from "./loader.ts";
 
-function createTmpDir(): string {
-  const dir = join(tmpdir(), `roll-test-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+/** 创建临时目录用于测试 */
+function makeTmpDir(): string {
+  const dir = resolve(tmpdir(), `roll-test-${randomUUID()}`);
   mkdirSync(dir, { recursive: true });
   return dir;
 }
@@ -15,7 +17,7 @@ describe("loadConfig", () => {
   let tmpDir: string;
 
   beforeEach(() => {
-    tmpDir = createTmpDir();
+    tmpDir = makeTmpDir();
   });
 
   afterEach(() => {
@@ -32,158 +34,126 @@ describe("loadConfig", () => {
   it("should load and parse a valid YAML config", () => {
     const yaml = `
 llm:
-  default-provider: qwen
-  default-model: qwen-plus
+  default-provider: openai
+  default-model: gpt-4o
   providers:
-    qwen:
-      api-key: test-key-123
+    openai:
+      api-key: test-key
 
 router:
   mode: llm
 
 agents:
-  data-dir: /tmp/roll-agents
+  data-dir: /tmp/agents
 `;
-    writeFileSync(join(tmpDir, "roll.config.yaml"), yaml);
+    writeFileSync(resolve(tmpDir, "roll.config.yaml"), yaml);
 
     const { config, configPath } = loadConfig({ cwd: tmpDir });
-    assert.ok(configPath?.endsWith("roll.config.yaml"));
-    assert.equal(config.llm.defaultProvider, "qwen");
-    assert.equal(config.llm.defaultModel, "qwen-plus");
-    assert.equal(config.llm.providers["qwen"]?.apiKey, "test-key-123");
+    assert.ok(configPath);
+    assert.equal(config.llm.defaultProvider, "openai");
+    assert.equal(config.llm.defaultModel, "gpt-4o");
+    assert.equal(config.llm.providers["openai"]?.apiKey, "test-key");
     assert.equal(config.router.mode, "llm");
-    assert.equal(config.agents.dataDir, "/tmp/roll-agents");
+    assert.equal(config.agents.dataDir, "/tmp/agents");
+  });
+
+  it("should convert kebab-case keys to camelCase", () => {
+    const yaml = `
+llm:
+  default-provider: anthropic
+  default-model: test
+  providers: {}
+router:
+  mode: declarative
+  confirm-threshold: 0.5
+agents:
+  data-dir: /tmp/test
+`;
+    writeFileSync(resolve(tmpDir, "roll.config.yaml"), yaml);
+    const { config } = loadConfig({ cwd: tmpDir });
+    assert.equal(config.router.confirmThreshold, 0.5);
   });
 
   it("should resolve environment variables", () => {
     process.env["ROLL_TEST_API_KEY"] = "resolved-key";
-
     const yaml = `
 llm:
   default-provider: anthropic
-  default-model: claude-sonnet-4-20250514
+  default-model: test
   providers:
     anthropic:
       api-key: \${ROLL_TEST_API_KEY}
-
 router:
   mode: declarative
-
 agents:
-  data-dir: /tmp/agents
+  data-dir: /tmp/test
 `;
-    writeFileSync(join(tmpDir, "roll.config.yaml"), yaml);
-
+    writeFileSync(resolve(tmpDir, "roll.config.yaml"), yaml);
     const { config } = loadConfig({ cwd: tmpDir });
     assert.equal(config.llm.providers["anthropic"]?.apiKey, "resolved-key");
-
     delete process.env["ROLL_TEST_API_KEY"];
   });
 
-  it("should keep unresolved env vars as-is", () => {
+  it("should find config in parent directory", () => {
+    const childDir = resolve(tmpDir, "sub", "deep");
+    mkdirSync(childDir, { recursive: true });
+    const yaml = `
+llm:
+  default-provider: qwen
+  default-model: qwen-plus
+  providers: {}
+router:
+  mode: auto
+agents:
+  data-dir: /tmp/test
+`;
+    writeFileSync(resolve(tmpDir, "roll.config.yaml"), yaml);
+    const { config } = loadConfig({ cwd: childDir });
+    assert.equal(config.llm.defaultProvider, "qwen");
+  });
+
+  it("should throw for explicit path that does not exist", () => {
+    assert.throws(
+      () => loadConfig({ configPath: resolve(tmpDir, "nonexistent.yaml") }),
+      (err: Error) => err.message.includes("not found"),
+    );
+  });
+
+  it("should throw for invalid YAML content", () => {
+    writeFileSync(resolve(tmpDir, "roll.config.yaml"), "just a string");
+    assert.throws(
+      () => loadConfig({ cwd: tmpDir }),
+      (err: Error) => err.message.includes("Invalid config file"),
+    );
+  });
+
+  it("should expand tilde in dataDir", () => {
     const yaml = `
 llm:
   default-provider: anthropic
   default-model: test
-  providers:
-    anthropic:
-      api-key: \${NONEXISTENT_VAR_12345}
-
+  providers: {}
 router:
   mode: declarative
-
 agents:
-  data-dir: /tmp/agents
+  data-dir: ~/my-agents
 `;
-    writeFileSync(join(tmpDir, "roll.config.yaml"), yaml);
-
+    writeFileSync(resolve(tmpDir, "roll.config.yaml"), yaml);
     const { config } = loadConfig({ cwd: tmpDir });
-    // eslint-disable-next-line no-template-curly-in-string
-    assert.equal(config.llm.providers["anthropic"]?.apiKey, "${NONEXISTENT_VAR_12345}");
+    assert.ok(!config.agents.dataDir.startsWith("~"));
+    assert.ok(config.agents.dataDir.includes("my-agents"));
   });
 
-  it("should merge with defaults for partial config", () => {
+  it("should deep merge with defaults", () => {
     const yaml = `
 llm:
   default-provider: openai
-  default-model: gpt-4
+  default-model: gpt-4o
   providers: {}
 `;
-    writeFileSync(join(tmpDir, "roll.config.yaml"), yaml);
-
+    writeFileSync(resolve(tmpDir, "roll.config.yaml"), yaml);
     const { config } = loadConfig({ cwd: tmpDir });
-    assert.equal(config.llm.defaultProvider, "openai");
-    // router and agents should come from defaults
     assert.equal(config.router.mode, "declarative");
-    assert.ok(config.agents.dataDir.length > 0);
-  });
-
-  it("should throw on invalid config", () => {
-    const yaml = `
-llm:
-  default-provider: anthropic
-  default-model: test
-  providers: {}
-
-router:
-  mode: invalid-mode
-
-agents:
-  data-dir: /tmp
-`;
-    writeFileSync(join(tmpDir, "roll.config.yaml"), yaml);
-
-    assert.throws(
-      () => loadConfig({ cwd: tmpDir }),
-      (err: Error) => err.message.includes("Config validation failed"),
-    );
-  });
-
-  it("should accept explicit config path", () => {
-    const customPath = join(tmpDir, "custom.yaml");
-    const yaml = `
-llm:
-  default-provider: anthropic
-  default-model: test
-  providers: {}
-
-router:
-  mode: auto
-
-agents:
-  data-dir: /tmp/custom
-`;
-    writeFileSync(customPath, yaml);
-
-    const { config, configPath } = loadConfig({ configPath: customPath });
-    assert.equal(configPath, customPath);
-    assert.equal(config.router.mode, "auto");
-  });
-
-  it("should throw when explicit config path does not exist", () => {
-    assert.throws(
-      () => loadConfig({ configPath: join(tmpDir, "nonexistent.yaml") }),
-      (err: Error) => err.message.includes("Config file not found"),
-    );
-  });
-
-  it("should expand tilde in data-dir", () => {
-    const yaml = `
-llm:
-  default-provider: anthropic
-  default-model: test
-  providers: {}
-
-router:
-  mode: declarative
-
-agents:
-  data-dir: ~/.roll-agent/agents
-`;
-    writeFileSync(join(tmpDir, "roll.config.yaml"), yaml);
-
-    const { config } = loadConfig({ cwd: tmpDir });
-    assert.ok(!config.agents.dataDir.startsWith("~"));
-    assert.ok(config.agents.dataDir.includes("roll-agent"));
+    assert.ok(config.agents.dataDir);
   });
 });

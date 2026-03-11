@@ -110,6 +110,41 @@ import { defineAgent, defineTool } from "@roll-agent/sdk";
 - `tsconfig.build.json` — 发布构建用（输出 .js + .d.ts + .map）
 - 各包 `tsconfig.json` extends base，`tsconfig.build.json` extends root build
 
+## 关键架构洞察
+
+### Sampling Handler（子 Agent 借用指挥官 LLM）
+
+子 Agent 通过 MCP Sampling 协议回调指挥官的 LLM。流程：
+1. 指挥官在 `McpClientManager` 连接子 Agent 时注册 `CreateMessageRequestSchema` handler
+2. 子 Agent 调用 `server.createMessage()` → MCP 协议转发到指挥官
+3. 指挥官的 `sampling-handler.ts` 用 AI SDK `generateText()` 完成推理，返回结果
+
+这使子 Agent 无需自带 LLM 配置，解耦了 LLM 提供商与子 Agent。
+
+### SKILL.md body 参与 LLM 路由
+
+SKILL.md 的 frontmatter 用于注册元数据，**body 正文内容**会被 `llm-router.ts` 拼入 Agent 能力描述，供 LLM 理解 Agent 具体能做什么。编写 SKILL.md 时需注意 body 质量。
+
+### 日志输出约定
+
+- **stdout** — 仅输出数据（供管道和 `--json` 结构化输出）
+- **stderr** — 所有日志、状态信息、彩色输出（chalk/ora）
+
+这是为了避免 stdio 模式下日志干扰 MCP 协议通信。SDK 的 `AgentLogger` 也遵循此规则。
+
+### 配置文件发现链
+
+`loadConfig()` 按以下优先级查找配置：
+1. `--config` 显式路径
+2. 从 `cwd` 向上逐级查找 `roll.config.yaml` / `roll.config.yml`
+3. 回退到内置默认配置
+
+加载管线：YAML 解析 → kebab-case→camelCase → `${ENV_VAR}` 替换 → 深度合并默认值 → Zod 校验 → `~/` 路径展开。
+
+### CLI 懒加载
+
+citty 子命令通过动态 `import()` 懒加载，CLI 启动不会加载所有命令模块。
+
 ## Workspace 依赖解析
 
 SDK 的 `exports` 在开发时指向 `./src/index.ts`（直接引用源码），发布时通过 `publishConfig.exports` 指向 `./dist/`。这样 workspace 内其他包（如 boss-reply-agent）无需先构建 SDK 即可获得类型。

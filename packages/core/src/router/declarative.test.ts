@@ -13,12 +13,13 @@ function makeAgent(name: string): RegisteredAgent {
   };
 }
 
-describe("resolveAgent (declarative)", () => {
-  const agents = [makeAgent("agent-a"), makeAgent("agent-b")];
+describe("resolveAgent", () => {
+  const agents = [makeAgent("alpha"), makeAgent("beta"), makeAgent("gamma")];
 
-  it("should find an agent by name", () => {
-    const result = resolveAgent("agent-b", agents);
-    assert.equal(result?.skill.name, "agent-b");
+  it("should find an agent by exact name", () => {
+    const result = resolveAgent("beta", agents);
+    assert.ok(result);
+    assert.equal(result.skill.name, "beta");
   });
 
   it("should return undefined for unknown name", () => {
@@ -26,8 +27,14 @@ describe("resolveAgent (declarative)", () => {
     assert.equal(result, undefined);
   });
 
-  it("should return undefined for empty list", () => {
-    const result = resolveAgent("agent-a", []);
+  it("should return undefined for empty agent list", () => {
+    const result = resolveAgent("alpha", []);
     assert.equal(result, undefined);
+  });
+
+  it("should match first agent when multiple exist", () => {
+    const result = resolveAgent("alpha", agents);
+    assert.ok(result);
+    assert.equal(result.skill.name, "alpha");
   });
 });

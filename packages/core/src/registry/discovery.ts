@@ -1,7 +1,7 @@
 import { readFileSync, existsSync } from "node:fs";
 import { resolve } from "node:path";
 import matter from "gray-matter";
-import type { AgentSkill, AgentTransport, RollSkillMetadata } from "../types/agent.ts";
+import type { AgentSkill, AgentTransport } from "../types/agent.ts";
 
 /** SKILL.md 解析结果 */
 export interface DiscoveredAgent {
@@ -61,16 +61,16 @@ export function discoverAgent(agentDir: string): DiscoveredAgent {
     metadata,
   };
 
-  // 从 metadata 中解析 Roll 扩展字段
-  const rollMeta = metadata as unknown as RollSkillMetadata;
-  const transport = resolveTransport(rollMeta);
+  // 从 metadata 中解析 Roll 扩展字段，直接通过字段访问收窄类型
+  const transport = resolveTransport(metadata);
 
   return { skill, transport, skillPath, skillBody: skillBody.trim() };
 }
 
 /** 根据 SKILL.md metadata 确定传输模式 */
-function resolveTransport(meta: RollSkillMetadata): AgentTransport {
-  const transportType = meta["roll-transport"] ?? "stdio";
+function resolveTransport(meta: Readonly<Record<string, string>>): AgentTransport {
+  const rawTransport = meta["roll-transport"];
+  const transportType = rawTransport === "streamable-http" ? "streamable-http" : "stdio";
 
   if (transportType === "streamable-http") {
     const endpoint = meta["roll-endpoint"];

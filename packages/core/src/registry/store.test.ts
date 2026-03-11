@@ -1,13 +1,14 @@
 import { describe, it, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import { mkdirSync, rmSync } from "node:fs";
-import { join } from "node:path";
+import { resolve } from "node:path";
 import { tmpdir } from "node:os";
+import { randomUUID } from "node:crypto";
 import { AgentStore } from "./store.ts";
 import type { RegisteredAgent } from "../types/agent.ts";
 
-function createTmpDir(): string {
-  const dir = join(tmpdir(), `roll-store-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+function makeTmpDir(): string {
+  const dir = resolve(tmpdir(), `roll-test-${randomUUID()}`);
   mkdirSync(dir, { recursive: true });
   return dir;
 }
@@ -19,7 +20,7 @@ function makeAgent(name: string): RegisteredAgent {
       description: `${name} description`,
       metadata: {},
     },
-    transport: { type: "stdio", command: "node", args: ["src/index.ts"] },
+    transport: { type: "stdio", command: "node" },
     installPath: `/tmp/${name}`,
     registeredAt: new Date().toISOString(),
     status: "idle",
@@ -31,7 +32,7 @@ describe("AgentStore", () => {
   let store: AgentStore;
 
   beforeEach(() => {
-    tmpDir = createTmpDir();
+    tmpDir = makeTmpDir();
     store = new AgentStore(tmpDir);
   });
 
@@ -40,10 +41,11 @@ describe("AgentStore", () => {
   });
 
   it("should return empty list when no agents registered", () => {
-    assert.deepEqual(store.list(), []);
+    const agents = store.list();
+    assert.deepEqual(agents, []);
   });
 
-  it("should add and retrieve an agent", () => {
+  it("should add and list an agent", () => {
     const agent = makeAgent("test-agent");
     store.add(agent);
 
@@ -53,45 +55,62 @@ describe("AgentStore", () => {
   });
 
   it("should find agent by name", () => {
-    store.add(makeAgent("agent-a"));
-    store.add(makeAgent("agent-b"));
+    store.add(makeAgent("alpha"));
+    store.add(makeAgent("beta"));
 
-    const found = store.findByName("agent-b");
-    assert.equal(found?.skill.name, "agent-b");
-    assert.equal(store.findByName("nonexistent"), undefined);
+    const found = store.findByName("beta");
+    assert.ok(found);
+    assert.equal(found.skill.name, "beta");
   });
 
-  it("should throw when adding duplicate name", () => {
-    store.add(makeAgent("dup-agent"));
+  it("should return undefined for unknown agent name", () => {
+    store.add(makeAgent("alpha"));
+    const found = store.findByName("nonexistent");
+    assert.equal(found, undefined);
+  });
+
+  it("should throw when adding duplicate agent name", () => {
+    store.add(makeAgent("dup"));
     assert.throws(
-      () => store.add(makeAgent("dup-agent")),
+      () => store.add(makeAgent("dup")),
       (err: Error) => err.message.includes("already registered"),
     );
   });
 
-  it("should remove an agent", () => {
+  it("should remove an agent by name", () => {
     store.add(makeAgent("to-remove"));
-    assert.equal(store.remove("to-remove"), true);
-    assert.equal(store.list().length, 0);
+    store.add(makeAgent("to-keep"));
+
+    const removed = store.remove("to-remove");
+    assert.equal(removed, true);
+    assert.equal(store.list().length, 1);
+    assert.equal(store.list()[0]?.skill.name, "to-keep");
   });
 
   it("should return false when removing nonexistent agent", () => {
-    assert.equal(store.remove("nonexistent"), false);
+    const removed = store.remove("ghost");
+    assert.equal(removed, false);
   });
 
   it("should update agent status", () => {
-    store.add(makeAgent("status-agent"));
-    store.updateStatus("status-agent", "online");
+    store.add(makeAgent("status-test"));
+    assert.equal(store.findByName("status-test")?.status, "idle");
 
-    const agent = store.findByName("status-agent");
-    assert.equal(agent?.status, "online");
+    store.updateStatus("status-test", "online");
+    assert.equal(store.findByName("status-test")?.status, "online");
   });
 
-  it("should persist across store instances", () => {
-    store.add(makeAgent("persist-agent"));
-
+  it("should persist across new store instances", () => {
+    store.add(makeAgent("persistent"));
     const store2 = new AgentStore(tmpDir);
     assert.equal(store2.list().length, 1);
-    assert.equal(store2.findByName("persist-agent")?.skill.name, "persist-agent");
+    assert.equal(store2.findByName("persistent")?.skill.name, "persistent");
+  });
+
+  it("should create data directory if it does not exist", () => {
+    const deepDir = resolve(tmpDir, "deep", "nested", "dir");
+    const deepStore = new AgentStore(deepDir);
+    deepStore.add(makeAgent("deep-agent"));
+    assert.equal(deepStore.list().length, 1);
   });
 });

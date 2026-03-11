@@ -1,4 +1,4 @@
-import { generateObject } from "ai";
+import { generateText, Output } from "ai";
 import { z } from "zod";
 import type { LanguageModelV3 } from "@ai-sdk/provider";
 import type { RegisteredAgent } from "../types/agent.ts";
@@ -54,17 +54,21 @@ ${catalog}
 - confidence 字段表示你对这个匹配的把握程度（0-1）
 - 如果没有合适的 Agent 匹配，confidence 应该很低（< 0.3）`;
 
-  const { object } = await generateObject({
+  const { output } = await generateText({
     model,
-    schema: routeDecisionSchema,
+    output: Output.object({ schema: routeDecisionSchema }),
     system: systemPrompt,
     prompt: message,
   });
 
+  if (!output) {
+    throw new Error("LLM router: failed to produce structured output");
+  }
+
   return {
-    agentName: object.agentName,
-    toolName: object.toolName,
-    input: object.input,
-    confidence: asConfidence(Math.min(1, Math.max(0, object.confidence))),
+    agentName: output.agentName,
+    toolName: output.toolName,
+    input: output.input,
+    confidence: asConfidence(Math.min(1, Math.max(0, output.confidence))),
   };
 }
