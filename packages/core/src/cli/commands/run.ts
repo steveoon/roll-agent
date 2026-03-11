@@ -2,6 +2,7 @@ import { defineCommand } from "citty";
 import { loadConfig } from "../../config/loader.ts";
 import { AgentStore } from "../../registry/store.ts";
 import { McpClientManager } from "../../mcp/client-manager.ts";
+import { log } from "../utils/output.ts";
 
 export default defineCommand({
   meta: { description: "声明式调用 Agent 的指定 tool" },
@@ -17,7 +18,7 @@ export default defineCommand({
     // 1. 查找已注册的 Agent
     const agent = store.findByName(args.agent);
     if (!agent) {
-      console.error(`✗ Agent "${args.agent}" 未注册。使用 \`roll agent list\` 查看已注册 Agent。`);
+      log.error(`Agent "${args.agent}" 未注册。使用 \`roll agent list\` 查看已注册 Agent。`);
       process.exitCode = 1;
       return;
     }
@@ -28,7 +29,7 @@ export default defineCommand({
     // 3. 连接 MCP Server
     const clientManager = new McpClientManager();
     try {
-      console.error(`→ 连接 Agent "${agent.skill.name}"...`);
+      log.info(`连接 Agent "${agent.skill.name}"...`);
       const client = await clientManager.connect(
         agent.skill.name,
         agent.transport,
@@ -40,19 +41,19 @@ export default defineCommand({
       const targetTool = tools.find((t) => t.name === args.tool);
       if (!targetTool) {
         const available = tools.map((t) => t.name).join(", ");
-        console.error(`✗ Tool "${args.tool}" 不存在。可用 tools: ${available}`);
+        log.error(`Tool "${args.tool}" 不存在。可用 tools: ${available}`);
         process.exitCode = 1;
         return;
       }
 
       // 5. 调用 tool
-      console.error(`→ 调用 ${agent.skill.name}.${args.tool}(${JSON.stringify(toolArgs)})`);
+      log.info(`调用 ${agent.skill.name}.${args.tool}(${JSON.stringify(toolArgs)})`);
       const result = await client.callTool({
         name: args.tool,
         arguments: toolArgs,
       });
 
-      // 6. 输出结果
+      // 6. 输出结果（stdout，不经过 log）
       if (args.json) {
         console.log(JSON.stringify(result, null, 2));
       } else if (Array.isArray(result.content)) {
@@ -70,11 +71,11 @@ export default defineCommand({
         }
       }
 
-      console.error("✓ 调用完成");
+      log.success("调用完成");
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       const cause = err instanceof Error && err.cause ? `\n  cause: ${String(err.cause)}` : "";
-      console.error(`✗ ${message}${cause}`);
+      log.error(`${message}${cause}`);
       process.exitCode = 1;
     } finally {
       await clientManager.disconnectAll();
@@ -91,7 +92,6 @@ function parseToolArgs(rawArgs: string[]): Record<string, unknown> {
 
   // 跳过前面的 positional args（agent 和 tool 名称）
   let i = 0;
-  // 跳过非 -- 开头的参数
   while (i < rawArgs.length && !rawArgs[i]?.startsWith("--")) {
     i++;
   }
@@ -106,12 +106,10 @@ function parseToolArgs(rawArgs: string[]): Record<string, unknown> {
     const key = arg.slice(2);
     const nextArg = rawArgs[i + 1];
 
-    // 如果下一个参数不存在或以 -- 开头，当作布尔标志
     if (!nextArg || nextArg.startsWith("--")) {
       result[key] = true;
       i++;
     } else {
-      // 尝试转换数字
       const num = Number(nextArg);
       result[key] = Number.isNaN(num) ? nextArg : num;
       i += 2;

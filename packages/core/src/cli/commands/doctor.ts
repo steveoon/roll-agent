@@ -32,16 +32,14 @@ export default defineCommand({
         : { name: "Node.js 版本", status: "fail", message: `v${nodeVersion} (需要 ≥22.6.0)` },
     );
 
-    // 2. 配置文件
-    let configOk = false;
+    // 2. 配置文件（只加载一次，后续复用）
+    let loadResult: ReturnType<typeof loadConfig> | undefined;
     try {
-      const { configPath } = loadConfig();
-      if (configPath) {
-        checks.push({ name: "配置文件", status: "ok", message: configPath });
-        configOk = true;
+      loadResult = loadConfig();
+      if (loadResult.configPath) {
+        checks.push({ name: "配置文件", status: "ok", message: loadResult.configPath });
       } else {
         checks.push({ name: "配置文件", status: "warn", message: "未找到，使用默认配置" });
-        configOk = true;
       }
     } catch (err) {
       checks.push({
@@ -52,8 +50,8 @@ export default defineCommand({
     }
 
     // 3. LLM Provider 配置
-    if (configOk) {
-      const { config } = loadConfig();
+    if (loadResult) {
+      const { config } = loadResult;
       const providers = Object.keys(config.llm.providers);
       if (providers.length > 0) {
         // 检查 API key 是否像是未解析的环境变量

@@ -30,6 +30,8 @@ export interface RegisteredAgent {
   readonly installPath: string;
   readonly registeredAt: string;
   readonly status: AgentStatus;
+  /** SKILL.md body 内容（含 tool 描述等），用于 LLM 路由 */
+  readonly skillBody?: string;
 }
 
 /** JSON Schema 子集，对应 MCP tool 的 inputSchema */

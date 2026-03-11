@@ -60,8 +60,9 @@ export class McpClientManager {
           });
 
     const connectPromise = client.connect(mcpTransport);
+    let timeoutId: ReturnType<typeof setTimeout> | undefined;
     const timeoutPromise = new Promise<never>((_resolve, reject) => {
-      setTimeout(
+      timeoutId = setTimeout(
         () => reject(new Error(`Connection to "${agentName}" timed out after ${timeoutMs}ms`)),
         timeoutMs,
       );
@@ -72,6 +73,8 @@ export class McpClientManager {
     } catch (err) {
       await client.close().catch(() => {});
       throw err;
+    } finally {
+      clearTimeout(timeoutId);
     }
 
     this.connections.set(agentName, { client, transportType: transport.type });

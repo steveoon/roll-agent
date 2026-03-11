@@ -8,6 +8,8 @@ export interface DiscoveredAgent {
   readonly skill: AgentSkill;
   readonly transport: AgentTransport;
   readonly skillPath: string;
+  /** SKILL.md body 内容（frontmatter 之后的 markdown 部分） */
+  readonly skillBody: string;
 }
 
 /** SKILL.md 文件名 */
@@ -27,7 +29,7 @@ export function discoverAgent(agentDir: string): DiscoveredAgent {
   }
 
   const raw = readFileSync(skillPath, "utf-8");
-  const { data } = matter(raw);
+  const { data, content: skillBody } = matter(raw);
 
   // 校验必需字段
   const frontmatter = data as Record<string, unknown>;
@@ -63,7 +65,7 @@ export function discoverAgent(agentDir: string): DiscoveredAgent {
   const rollMeta = metadata as unknown as RollSkillMetadata;
   const transport = resolveTransport(rollMeta);
 
-  return { skill, transport, skillPath };
+  return { skill, transport, skillPath, skillBody: skillBody.trim() };
 }
 
 /** 根据 SKILL.md metadata 确定传输模式 */

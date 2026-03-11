@@ -23,7 +23,8 @@ function buildAgentCatalog(agents: ReadonlyArray<RegisteredAgent>): string {
     .map((agent) => {
       const name = agent.skill.name;
       const desc = agent.skill.description;
-      return `Agent: ${name}\n  描述: ${desc}\n  状态: ${agent.status}`;
+      const toolsSection = agent.skillBody ? `\n  能力详情:\n${agent.skillBody}` : "";
+      return `Agent: ${name}\n  描述: ${desc}\n  状态: ${agent.status}${toolsSection}`;
     })
     .join("\n\n");
 }
