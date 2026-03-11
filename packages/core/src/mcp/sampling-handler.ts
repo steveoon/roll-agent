@@ -2,6 +2,7 @@ import type { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { CreateMessageRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 import type { CreateMessageResult } from "@modelcontextprotocol/sdk/types.js";
 import { generateText } from "ai";
+import type { ModelMessage } from "ai";
 import type { LanguageModelV3 } from "@ai-sdk/provider";
 
 /**
@@ -14,14 +15,12 @@ import type { LanguageModelV3 } from "@ai-sdk/provider";
  */
 export function registerSamplingHandler(client: Client, model: LanguageModelV3): void {
   client.setRequestHandler(CreateMessageRequestSchema, async (request): Promise<CreateMessageResult> => {
-    // 将 MCP Sampling 消息格式转换为 AI SDK 的 prompt
-    const prompt = convertMessagesToPrompt(request.params.messages);
-
+    const messages = convertToModelMessages(request.params.messages);
     const maxTokens = request.params.maxTokens;
 
     const result = await generateText({
       model,
-      prompt,
+      messages,
       ...(maxTokens > 0 ? { maxTokens } : {}),
     });
 
@@ -34,19 +33,18 @@ export function registerSamplingHandler(client: Client, model: LanguageModelV3):
   });
 }
 
-/** 将 MCP SamplingMessage[] 转换为纯文本 prompt */
-function convertMessagesToPrompt(
+/** 将 MCP SamplingMessage[] 转换为 AI SDK ModelMessage[] */
+function convertToModelMessages(
   messages: ReadonlyArray<{ readonly role: string; readonly content: unknown }>,
-): string {
-  const parts: string[] = [];
-
-  for (const msg of messages) {
-    const role = msg.role === "assistant" ? "Assistant" : "User";
+): ModelMessage[] {
+  return messages.map((msg): ModelMessage => {
     const text = extractTextContent(msg.content);
-    parts.push(`${role}: ${text}`);
-  }
 
-  return parts.join("\n\n");
+    if (msg.role === "assistant") {
+      return { role: "assistant", content: [{ type: "text", text }] };
+    }
+    return { role: "user", content: [{ type: "text", text }] };
+  });
 }
 
 /** 从 MCP content union 中提取文本 */

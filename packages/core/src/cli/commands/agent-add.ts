@@ -33,11 +33,11 @@ export default defineCommand({
     path: { type: "positional", description: "Agent 本地路径或 Git URL", required: true },
   },
   async run({ args }) {
+    const { config } = loadConfig();
     let agentDir: string;
 
     if (isGitUrl(args.path)) {
       // Git URL 模式：克隆到 dataDir 下
-      const { config } = loadConfig();
       const repoName = repoNameFromUrl(args.path);
       const cloneTarget = resolve(config.agents.dataDir, "repos", repoName);
 
@@ -97,7 +97,6 @@ export default defineCommand({
     }
 
     // 3. 注册到 store
-    const { config } = loadConfig();
     const store = new AgentStore(config.agents.dataDir);
 
     const agent: RegisteredAgent = {
