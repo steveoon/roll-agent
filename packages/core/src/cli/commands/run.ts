@@ -55,9 +55,16 @@ export default defineCommand({
       // 6. 输出结果
       if (args.json) {
         console.log(JSON.stringify(result, null, 2));
-      } else {
-        for (const content of result.content as Array<{ type: string; text?: string }>) {
-          if (content.type === "text" && content.text) {
+      } else if (Array.isArray(result.content)) {
+        for (const content of result.content) {
+          if (
+            typeof content === "object" &&
+            content !== null &&
+            "type" in content &&
+            content.type === "text" &&
+            "text" in content &&
+            typeof content.text === "string"
+          ) {
             console.log(content.text);
           }
         }
@@ -65,7 +72,9 @@ export default defineCommand({
 
       console.error("✓ 调用完成");
     } catch (err) {
-      console.error(`✗ ${err instanceof Error ? err.message : String(err)}`);
+      const message = err instanceof Error ? err.message : String(err);
+      const cause = err instanceof Error && err.cause ? `\n  cause: ${String(err.cause)}` : "";
+      console.error(`✗ ${message}${cause}`);
       process.exitCode = 1;
     } finally {
       await clientManager.disconnectAll();

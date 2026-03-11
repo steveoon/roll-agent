@@ -45,6 +45,15 @@ export function defineAgent(definition: AgentDefinition): RunnableAgent {
       const transport = new StdioServerTransport();
       await server.connect(transport);
       console.error(`MCP Server "${definition.name}" running on stdio`);
+
+      // Graceful shutdown：收到 SIGTERM/SIGINT 时清理 MCP Server
+      const shutdown = async (signal: string): Promise<void> => {
+        console.error(`${signal} received, shutting down MCP Server "${definition.name}"...`);
+        await server.close();
+        process.exit(0);
+      };
+      process.on("SIGTERM", () => { shutdown("SIGTERM").catch(() => process.exit(1)); });
+      process.on("SIGINT", () => { shutdown("SIGINT").catch(() => process.exit(1)); });
     },
   };
 }

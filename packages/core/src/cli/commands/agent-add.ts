@@ -1,18 +1,21 @@
 import { defineCommand } from "citty";
 import { resolve } from "node:path";
 import { existsSync } from "node:fs";
-import { execSync } from "node:child_process";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import { loadConfig } from "../../config/loader.ts";
 import { discoverAgent } from "../../registry/discovery.ts";
 import { AgentStore } from "../../registry/store.ts";
 import type { RegisteredAgent } from "../../types/agent.ts";
+
+const execFileAsync = promisify(execFile);
 
 export default defineCommand({
   meta: { description: "注册一个 Agent" },
   args: {
     path: { type: "positional", description: "Agent 本地路径", required: true },
   },
-  run({ args }) {
+  async run({ args }) {
     const agentDir = resolve(args.path);
 
     if (!existsSync(agentDir)) {
@@ -33,10 +36,10 @@ export default defineCommand({
     if (existsSync(packageJsonPath)) {
       console.log("→ 安装依赖...");
       try {
-        execSync("pnpm install", { cwd: agentDir, stdio: "pipe" });
+        await execFileAsync("pnpm", ["install"], { cwd: agentDir });
         console.log("  ✓ 依赖安装完成");
-      } catch {
-        console.error("  ✗ 依赖安装失败");
+      } catch (err) {
+        console.error("  ✗ 依赖安装失败", err instanceof Error ? err.message : "");
         process.exitCode = 1;
         return;
       }
