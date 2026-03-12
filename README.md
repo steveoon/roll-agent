@@ -92,6 +92,14 @@ agents:
 
 支持的 provider：`anthropic`、`openai`、`deepseek`、`qwen`。每个 provider 可配置 `base-url` 用于自定义 API 端点。
 
+> [!IMPORTANT]
+> `api-key: ${...}` 中的 `${...}` 是“环境变量名占位符”，不是 API Key 本身。
+>
+> - 正确：`api-key: ${ANTHROPIC_API_KEY}`
+> - 错误：`api-key: ${sk-xxxx}`（这会被当作变量名 `sk-xxxx`，`roll doctor` 会提示 API key 未设置）
+>
+> 如果想直接写死 key（不推荐），请写成：`api-key: sk-xxxx`（不要带 `${}`）。
+
 ### 2. 注册 Agent
 
 ```bash
@@ -235,7 +243,9 @@ pnpm build                                    # 确认构建产物正常
 
 推荐方式：通过 GitHub Actions 自动发布（push 到 `main` 或手动触发 `Release` workflow）。
 
-- 需要在 GitHub 仓库配置 `NPM_TOKEN`（具备 `@roll-agent` 组织发布权限）
+- 默认使用 npm Trusted Publishing（OIDC，推荐，无需 `NPM_TOKEN`）
+- 需要先在 npm 为 `@roll-agent/sdk` 和 `@roll-agent/core` 配置 Trusted Publisher（GitHub repo + workflow）
+- workflow 内已启用 `id-token: write`，并固定 npm 版本满足 Trusted Publishing 要求
 - workflow 会执行质量检查，并仅发布 npm 上尚不存在的新版本
 
 本地可先 dry-run：
@@ -248,24 +258,26 @@ pnpm release:dry-run -- --skip-checks --no-registry-check
 
 ```bash
 # 1. 更新版本号
-cd packages/core
+cd packages/sdk
 npm version patch   # 或 minor / major
-cd ../sdk
+cd ../core
 npm version patch
 
 # 2. 构建
 cd ../..
 pnpm build
 
-# 3. 发布（需要 npm 登录 + @roll-agent 组织权限）
-cd packages/core
+# 3. 发布（需要 npm 登录 + @roll-agent 组织权限，先 SDK 再 core）
+cd packages/sdk
 npm publish --access public
-cd ../sdk
+cd ../core
 npm publish --access public
 
-# 4. 打 tag 并推送
+# 4. 提交版本号变更 + 打 tag
+cd ../..
+git add -A && git commit -m "chore: release v$(node -p "require('./packages/core/package.json').version")"
 git tag v$(node -p "require('./packages/core/package.json').version")
-git push --tags
+git push && git push --tags
 ```
 
 发布后用户即可全局安装：

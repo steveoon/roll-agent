@@ -145,6 +145,13 @@ SKILL.md 的 frontmatter 用于注册元数据，**body 正文内容**会被 `ll
 
 citty 子命令通过动态 `import()` 懒加载，CLI 启动不会加载所有命令模块。
 
+#### CLI 懒加载发布坑（必读）
+
+- 历史问题：全局安装后执行 `roll agent health` 报错 `Cannot find module .../agent-health.ts`
+- 本质原因：`tsc` 的 `rewriteRelativeImportExtensions` 对动态 `import()` 的改写并不总是可靠，某些懒加载写法会在 `dist` 中残留 `.ts` specifier，运行时（只存在 `.js`）直接崩溃
+- 编码规则：不要在懒加载点直接写死 `import("./xxx.ts")`；统一用 helper 根据 `import.meta.url` 推断当前后缀（`.ts/.js`），再拼接并 `import()`
+- 发布前校验：必须执行 `pnpm --filter @roll-agent/core build && node packages/core/dist/cli/index.js agent health`，无已注册 agent 时输出“暂无已注册 Agent”即通过
+
 ## Workspace 依赖解析
 
 SDK 的 `exports` 在开发时指向 `./src/index.ts`（直接引用源码），发布时通过 `publishConfig.exports` 指向 `./dist/`。这样 workspace 内其他包（如 boss-reply-agent）无需先构建 SDK 即可获得类型。

@@ -3,6 +3,15 @@ import chalk from "chalk";
 import { checkForUpdate, getCurrentVersion } from "./utils/update-checker.ts";
 
 const CLI_VERSION = getCurrentVersion();
+const commandExtension = import.meta.url.endsWith(".ts") ? "ts" : "js";
+
+function loadMainCommand(commandName: string) {
+  const specifier = new URL(
+    `./commands/${commandName}.${commandExtension}`,
+    import.meta.url,
+  ).href;
+  return import(specifier).then((m) => m.default);
+}
 
 const main = defineCommand({
   meta: {
@@ -11,12 +20,12 @@ const main = defineCommand({
     description: "花卷 Agent — 轻量级 Agent 编排系统",
   },
   subCommands: {
-    agent: () => import("./commands/agent.ts").then((m) => m.default),
-    run: () => import("./commands/run.ts").then((m) => m.default),
-    ask: () => import("./commands/ask.ts").then((m) => m.default),
-    config: () => import("./commands/config.ts").then((m) => m.default),
-    doctor: () => import("./commands/doctor.ts").then((m) => m.default),
-    update: () => import("./commands/update.ts").then((m) => m.default),
+    agent: () => loadMainCommand("agent"),
+    run: () => loadMainCommand("run"),
+    ask: () => loadMainCommand("ask"),
+    config: () => loadMainCommand("config"),
+    doctor: () => loadMainCommand("doctor"),
+    update: () => loadMainCommand("update"),
   },
 });
 

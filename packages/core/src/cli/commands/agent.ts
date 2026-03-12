@@ -1,14 +1,24 @@
 import { defineCommand } from "citty";
 
+const commandExtension = import.meta.url.endsWith(".ts") ? "ts" : "js";
+
+function loadAgentCommand(fileName: string) {
+  const specifier = new URL(
+    `./${fileName}.${commandExtension}`,
+    import.meta.url,
+  ).href;
+  return import(specifier).then((m) => m.default);
+}
+
 export default defineCommand({
   meta: { description: "管理 Agent（stdio 按需生命周期）" },
   subCommands: {
-    add: () => import("./agent-add.ts").then((m) => m.default),
-    remove: () => import("./agent-remove.ts").then((m) => m.default),
-    list: () => import("./agent-list.ts").then((m) => m.default),
-    start: () => import("./agent-start.ts").then((m) => m.default),
-    stop: () => import("./agent-stop.ts").then((m) => m.default),
-    info: () => import("./agent-info.ts").then((m) => m.default),
-    health: () => import("./agent-health.ts").then((m) => m.default),
+    add: () => loadAgentCommand("agent-add"),
+    remove: () => loadAgentCommand("agent-remove"),
+    list: () => loadAgentCommand("agent-list"),
+    start: () => loadAgentCommand("agent-start"),
+    stop: () => loadAgentCommand("agent-stop"),
+    info: () => loadAgentCommand("agent-info"),
+    health: () => loadAgentCommand("agent-health"),
   },
 });
