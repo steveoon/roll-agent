@@ -233,6 +233,19 @@ pnpm build                                    # 确认构建产物正常
 
 ### 发布到 npm
 
+推荐方式：通过 GitHub Actions 自动发布（push 到 `main` 或手动触发 `Release` workflow）。
+
+- 需要在 GitHub 仓库配置 `NPM_TOKEN`（具备 `@roll-agent` 组织发布权限）
+- workflow 会执行质量检查，并仅发布 npm 上尚不存在的新版本
+
+本地可先 dry-run：
+
+```bash
+pnpm release:dry-run -- --skip-checks --no-registry-check
+```
+
+手动发布（保留）：
+
 ```bash
 # 1. 更新版本号
 cd packages/core
