@@ -89,6 +89,23 @@ function ensurePublishFilesExist(pkg) {
   }
 }
 
+function ensureRepositoryMetadata(pkg) {
+  const packageJson = readPackageJson(pkg.dir);
+  const repository = packageJson.repository;
+  const repositoryUrl = typeof repository === "string"
+    ? repository
+    : typeof repository === "object" && repository !== null && "url" in repository
+      ? repository.url
+      : undefined;
+
+  if (typeof repositoryUrl !== "string" || repositoryUrl.trim().length === 0) {
+    throw new Error(
+      `Missing package.json repository.url for ${pkg.name}. ` +
+      "Provenance publishing requires repository metadata.",
+    );
+  }
+}
+
 function publishPackage(pkg) {
   const version = readVersion(pkg.dir);
   const registryChecked = !noRegistryCheck;
@@ -106,6 +123,7 @@ function publishPackage(pkg) {
   }
 
   ensurePublishFilesExist(pkg);
+  ensureRepositoryMetadata(pkg);
 
   const publishArgs = ["publish", "--access", "public"];
   const allowProvenance = process.env["ROLL_NPM_PROVENANCE"] !== "false";
