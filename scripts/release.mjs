@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 
@@ -34,12 +34,20 @@ function run(command, commandArgs, options = {}) {
 }
 
 function readVersion(packageDir) {
-  const packageJsonPath = resolve(packageDir, "package.json");
-  const packageJson = JSON.parse(readFileSync(packageJsonPath, "utf-8"));
+  const packageJson = readPackageJson(packageDir);
   if (typeof packageJson.version !== "string" || packageJson.version.length === 0) {
-    throw new Error(`Invalid version in ${packageJsonPath}`);
+    throw new Error(`Invalid version in ${resolve(packageDir, "package.json")}`);
   }
   return packageJson.version;
+}
+
+function readPackageJson(packageDir) {
+  const packageJsonPath = resolve(packageDir, "package.json");
+  const parsed = JSON.parse(readFileSync(packageJsonPath, "utf-8"));
+  if (typeof parsed !== "object" || parsed === null) {
+    throw new Error(`Invalid package.json content: ${packageJsonPath}`);
+  }
+  return parsed;
 }
 
 function isPublished(packageName, version) {
@@ -66,6 +74,21 @@ function runQualityChecks() {
   run("pnpm", ["build"]);
 }
 
+function ensurePublishFilesExist(pkg) {
+  const packageJson = readPackageJson(pkg.dir);
+  const files = Array.isArray(packageJson.files) ? packageJson.files : [];
+  const missing = files
+    .filter((entry) => typeof entry === "string" && entry.length > 0)
+    .filter((entry) => !existsSync(resolve(pkg.dir, entry)));
+
+  if (missing.length > 0) {
+    throw new Error(
+      `Missing publish files for ${pkg.name}: ${missing.join(", ")}. ` +
+      "Run build before publishing.",
+    );
+  }
+}
+
 function publishPackage(pkg) {
   const version = readVersion(pkg.dir);
   const registryChecked = !noRegistryCheck;
@@ -82,8 +105,11 @@ function publishPackage(pkg) {
     return true;
   }
 
+  ensurePublishFilesExist(pkg);
+
   const publishArgs = ["publish", "--access", "public"];
-  if (process.env["GITHUB_ACTIONS"] === "true") {
+  const allowProvenance = process.env["ROLL_NPM_PROVENANCE"] !== "false";
+  if (process.env["GITHUB_ACTIONS"] === "true" && allowProvenance) {
     publishArgs.push("--provenance");
   }
 
@@ -129,6 +155,15 @@ try {
     console.error("Fix options:");
     console.error("1) Replace NPM_TOKEN with an npm Automation token that has publish access.");
     console.error("2) Switch to npm Trusted Publishing (OIDC) and remove NPM_TOKEN from workflow env.");
+  }
+  if (
+    message.includes("Unsupported GitHub Actions source repository visibility") &&
+    message.includes("provenance")
+  ) {
+    console.error("\nPublish failed because npm provenance currently requires a public GitHub repository.");
+    console.error("Fix options:");
+    console.error("1) Make the repository public, or");
+    console.error("2) Disable provenance in CI: set ROLL_NPM_PROVENANCE=false.");
   }
   process.exit(1);
 }
