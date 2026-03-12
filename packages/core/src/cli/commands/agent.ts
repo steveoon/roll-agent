@@ -1,7 +1,7 @@
 import { defineCommand } from "citty";
 
 export default defineCommand({
-  meta: { description: "管理 Agent（add/remove/list/start/stop/info/health）" },
+  meta: { description: "管理 Agent（stdio 按需生命周期）" },
   subCommands: {
     add: () => import("./agent-add.ts").then((m) => m.default),
     remove: () => import("./agent-remove.ts").then((m) => m.default),

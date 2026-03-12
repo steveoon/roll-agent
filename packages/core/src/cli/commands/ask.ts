@@ -37,7 +37,12 @@ export default defineCommand({
       return;
     }
 
-    const model = createProviderModel(routerProvider, routerModelName, providerConfig.apiKey);
+    const model = createProviderModel(
+      routerProvider,
+      routerModelName,
+      providerConfig.apiKey,
+      providerConfig.baseUrl,
+    );
 
     // 2. LLM 智能路由
     log.info(`分析意图: "${args.message}"`);
@@ -79,6 +84,7 @@ export default defineCommand({
       routerProvider,
       config.llm.defaultModel,
       providerConfig.apiKey,
+      providerConfig.baseUrl,
     );
 
     const clientManager = new McpClientManager();

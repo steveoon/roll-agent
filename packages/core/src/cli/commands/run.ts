@@ -34,7 +34,12 @@ export default defineCommand({
       const providerName = config.llm.defaultProvider;
       const providerConfig = config.llm.providers[providerName];
       const samplingModel = providerConfig
-        ? createProviderModel(providerName, config.llm.defaultModel, providerConfig.apiKey)
+        ? createProviderModel(
+            providerName,
+            config.llm.defaultModel,
+            providerConfig.apiKey,
+            providerConfig.baseUrl,
+          )
         : undefined;
 
       log.info(`连接 Agent "${agent.skill.name}"...`);
@@ -92,11 +97,15 @@ export default defineCommand({
   },
 });
 
+/** run 命令的 CLI 保留参数（不应透传给 tool） */
+const CLI_FLAG_OPTIONS = new Set(["json", "verbose", "v", "help", "h", "version"]);
+const CLI_VALUE_OPTIONS = new Set(["config"]);
+
 /**
  * 从 rawArgs 中解析 --key value 格式的参数。
  * 支持 --limit 10（数字自动转换）和 --dryRun（布尔标志）。
  */
-function parseToolArgs(rawArgs: string[]): Record<string, unknown> {
+export function parseToolArgs(rawArgs: string[]): Record<string, unknown> {
   const result: Record<string, unknown> = {};
 
   // 跳过前面的 positional args（agent 和 tool 名称）
@@ -114,6 +123,17 @@ function parseToolArgs(rawArgs: string[]): Record<string, unknown> {
 
     const key = arg.slice(2);
     const nextArg = rawArgs[i + 1];
+
+    // 跳过 run 命令自身参数，避免污染 tool input
+    if (CLI_FLAG_OPTIONS.has(key)) {
+      i++;
+      continue;
+    }
+
+    if (CLI_VALUE_OPTIONS.has(key)) {
+      i += nextArg && !nextArg.startsWith("--") ? 2 : 1;
+      continue;
+    }
 
     if (!nextArg || nextArg.startsWith("--")) {
       result[key] = true;

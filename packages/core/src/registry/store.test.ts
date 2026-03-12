@@ -1,6 +1,6 @@
 import { describe, it, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
-import { mkdirSync, rmSync } from "node:fs";
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { randomUUID } from "node:crypto";
@@ -112,5 +112,10 @@ describe("AgentStore", () => {
     const deepStore = new AgentStore(deepDir);
     deepStore.add(makeAgent("deep-agent"));
     assert.equal(deepStore.list().length, 1);
+  });
+
+  it("should return empty list when store file contains invalid JSON", () => {
+    writeFileSync(resolve(tmpDir, "agents.json"), "{invalid json", "utf-8");
+    assert.deepEqual(store.list(), []);
   });
 });

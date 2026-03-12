@@ -15,6 +15,25 @@ const STATUS_ICONS: Record<CheckResult["status"], string> = {
   fail: "✗",
 };
 
+const MIN_NODE_VERSION = { major: 22, minor: 6, patch: 0 } as const;
+
+export function isNodeVersionSupported(version: string): boolean {
+  const match = /^(\d+)\.(\d+)\.(\d+)/.exec(version);
+  if (!match) return false;
+
+  const major = Number(match[1]);
+  const minor = Number(match[2]);
+  const patch = Number(match[3]);
+
+  if (major > MIN_NODE_VERSION.major) return true;
+  if (major < MIN_NODE_VERSION.major) return false;
+
+  if (minor > MIN_NODE_VERSION.minor) return true;
+  if (minor < MIN_NODE_VERSION.minor) return false;
+
+  return patch >= MIN_NODE_VERSION.patch;
+}
+
 export default defineCommand({
   meta: { description: "诊断系统状态" },
   args: {
@@ -25,9 +44,8 @@ export default defineCommand({
 
     // 1. Node.js 版本
     const nodeVersion = process.versions.node;
-    const [major] = nodeVersion.split(".").map(Number);
     checks.push(
-      major !== undefined && major >= 22
+      isNodeVersionSupported(nodeVersion)
         ? { name: "Node.js 版本", status: "ok", message: `v${nodeVersion}` }
         : { name: "Node.js 版本", status: "fail", message: `v${nodeVersion} (需要 ≥22.6.0)` },
     );

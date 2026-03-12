@@ -22,7 +22,8 @@
     "dev": "node --experimental-strip-types src/cli/index.ts",
     "build": "tsc -p tsconfig.build.json",
     "typecheck": "tsc --noEmit",
-    "test": "node --experimental-strip-types --test src/**/*.test.ts",
+    "test": "node --experimental-strip-types --test \"src/**/*.test.ts\"",
+    "test:e2e": "node --experimental-strip-types --test \"src/**/*.e2e.ts\"",
     "clean": "rm -rf dist"
   },
   "dependencies": {

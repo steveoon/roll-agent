@@ -15,21 +15,61 @@ export interface DefineAgentOptions {
  * 创建 AgentContext。
  *
  * - logger: 使用结构化日志，输出到 stderr（避免干扰 stdio 协议）
- * - llm: 当前为 stub（提示需要 MCP Sampling 支持），
- *         当指挥官启用 Sampling capability 后子 Agent 可通过 server.createMessage 访问
+ * - llm: 通过 MCP Sampling 请求指挥官 LLM（server.createMessage）
  */
-function createContext(agentName: string, logLevel: LogLevel): AgentContext {
+function createContext(agentName: string, logLevel: LogLevel, server: McpServer): AgentContext {
   return {
     llm: {
-      generateText: async (_prompt: string) => {
-        throw new Error(
-          "LLM context not available. " +
-            "Ensure the roll-core client connects with sampling capability enabled.",
-        );
+      generateText: async (prompt: string) => {
+        try {
+          const response = await server.server.createMessage({
+            messages: [
+              {
+                role: "user",
+                content: {
+                  type: "text",
+                  text: prompt,
+                },
+              },
+            ],
+            maxTokens: 1024,
+          });
+
+          const text = extractSamplingText(response.content);
+          if (text === undefined) {
+            throw new Error("Sampling response did not include text content");
+          }
+          return text;
+        } catch (error) {
+          throw new Error(
+            "LLM sampling unavailable. Ensure roll-core client enables sampling capability.",
+            { cause: error },
+          );
+        }
       },
     },
     logger: createAgentLogger(agentName, logLevel),
   };
+}
+
+function extractSamplingText(content: unknown): string | undefined {
+  if (typeof content === "object" && content !== null) {
+    if ("type" in content && content.type === "text" && "text" in content) {
+      const text = (content as { text?: unknown }).text;
+      return typeof text === "string" ? text : undefined;
+    }
+  }
+
+  if (Array.isArray(content)) {
+    for (const item of content) {
+      const text = extractSamplingText(item);
+      if (text !== undefined) {
+        return text;
+      }
+    }
+  }
+
+  return undefined;
 }
 
 /**
@@ -47,7 +87,7 @@ export function defineAgent(definition: AgentDefinition, options: DefineAgentOpt
         version: "0.0.1",
       });
 
-      const ctx = createContext(definition.name, options.logLevel ?? "info");
+      const ctx = createContext(definition.name, options.logLevel ?? "info", server);
 
       // 注册所有 tool 到 MCP Server
       for (const tool of definition.tools) {

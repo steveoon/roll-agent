@@ -84,7 +84,8 @@ export default defineCommand({
 
     // 2. 安装依赖（如果存在 package.json）
     const packageJsonPath = resolve(agentDir, "package.json");
-    if (existsSync(packageJsonPath)) {
+    const skipInstall = process.env["ROLL_SKIP_INSTALL"] === "1";
+    if (existsSync(packageJsonPath) && !skipInstall) {
       log.info("安装依赖...");
       try {
         await execFileAsync("pnpm", ["install"], { cwd: agentDir });
@@ -94,6 +95,8 @@ export default defineCommand({
         process.exitCode = 1;
         return;
       }
+    } else if (existsSync(packageJsonPath) && skipInstall) {
+      log.warn("检测到 ROLL_SKIP_INSTALL=1，跳过依赖安装。");
     }
 
     // 3. 注册到 store

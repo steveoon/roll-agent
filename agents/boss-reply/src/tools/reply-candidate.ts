@@ -12,9 +12,9 @@ export const replyCandidate = defineTool({
     success: z.boolean(),
     repliedMessage: z.string(),
   }),
-  execute: async (input, _ctx) => {
+  execute: async (input, ctx) => {
     // TODO: implement actual reply logic
-    console.log(`Replying to candidate: ${input.candidateId}`);
+    ctx.logger.info(`Replying to candidate: ${input.candidateId}`);
     return { success: true, repliedMessage: "TODO: generated reply" };
   },
 });

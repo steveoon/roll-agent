@@ -12,9 +12,9 @@ export const batchReply = defineTool({
     succeeded: z.number(),
     failed: z.number(),
   }),
-  execute: async (input, _ctx) => {
+  execute: async (input, ctx) => {
     // TODO: implement batch reply logic
-    console.log(`Batch reply (dryRun: ${String(input.dryRun ?? false)})`);
+    ctx.logger.info(`Batch reply (dryRun: ${String(input.dryRun ?? false)})`);
     return { total: 0, succeeded: 0, failed: 0 };
   },
 });

@@ -16,9 +16,9 @@ export const getUnread = defineTool({
       }),
     ),
   }),
-  execute: async (input, _ctx) => {
+  execute: async (input, ctx) => {
     // TODO: implement actual BOSS API integration
-    console.log(`Fetching unread messages with limit: ${String(input.limit ?? "all")}`);
+    ctx.logger.info(`Fetching unread messages with limit: ${String(input.limit ?? "all")}`);
     return { messages: [] };
   },
 });

@@ -18,11 +18,19 @@ export class AgentStore {
     if (!existsSync(this.storePath)) {
       return [];
     }
-    const raw = readFileSync(this.storePath, "utf-8");
-    const parsed: unknown = JSON.parse(raw);
+
+    let parsed: unknown;
+    try {
+      const raw = readFileSync(this.storePath, "utf-8");
+      parsed = JSON.parse(raw);
+    } catch {
+      return [];
+    }
+
     if (!Array.isArray(parsed)) {
       return [];
     }
+
     return parsed as ReadonlyArray<RegisteredAgent>;
   }
 

@@ -104,7 +104,7 @@
 
 **模式 A：本地子进程（stdio 传输）**
 
-适用于轻量 Agent，由 roll-core 管理生命周期：
+适用于轻量 Agent，由 roll-core 在调用时按需启动并在调用结束后释放（不作为后台 daemon）：
 
 ```
 roll-core  ──fork/spawn──→  子进程
@@ -237,8 +237,8 @@ Commands:
   roll agent add <path|url>       注册一个 Agent（安装依赖）
   roll agent remove <name>        移除一个 Agent
   roll agent list                 列出所有已注册 Agent
-  roll agent start <name>         启动一个 Agent（仅远程模式需手动启动）
-  roll agent stop <name>          停止一个 Agent
+  roll agent start <name>         探测 Agent 可连接性（stdio 无需手动启动）
+  roll agent stop <name>          提示手动停止外部服务（stdio 无需手动停止）
   roll agent info <name>          查看 Agent 详情（SKILL.md + tools）
 
   roll run <agent> <tool> [args]  声明式调用 Agent 的指定 tool
@@ -251,9 +251,9 @@ Commands:
   roll doctor                     诊断系统状态
 
 Options:
-  --verbose, -v                   详细输出
-  --json                          JSON 格式输出（便于管道处理）
-  --config <path>                 指定配置文件
+  --json                          JSON 格式输出（在支持的子命令上可用）
+  --verbose, -v                   （planned）全局详细输出
+  --config <path>                 （planned）全局指定配置文件
   --help, -h                      帮助信息
   --version                       版本号
 ```
@@ -559,7 +559,7 @@ roll run wechat-agent send_message --userId xxx --content "你好"
 - [x] MCP Streamable HTTP 传输支持
 - [x] MCP Sampling 处理（子 Agent 使用指挥官 LLM）
 - [x] 多 LLM Provider 支持（Qwen、OpenAI）
-- [x] `roll agent start/stop` — Agent 生命周期管理
+- [x] Agent 生命周期语义收敛（stdio 按需启动/释放，streamable-http 外部管理）
 - [x] `roll doctor` — 系统诊断
 - [x] `roll agent add <git-url>` — 从 Git 仓库注册
 
@@ -567,7 +567,7 @@ roll run wechat-agent send_message --userId xxx --content "你好"
 
 **目标**：健壮性、可观测性、开发体验
 
-- [x] Agent 健康检查与自动重启
+- [x] Agent 健康检查（stdio 按需模式 / streamable-http 可达性）
 - [x] 结构化日志与错误追踪
 - [x] `roll config init` 交互式配置向导
 - [x] SDK 完善：context.logger、错误处理模式
