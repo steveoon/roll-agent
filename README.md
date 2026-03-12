@@ -92,6 +92,14 @@ agents:
 
 支持的 provider：`anthropic`、`openai`、`deepseek`、`qwen`。每个 provider 可配置 `base-url` 用于自定义 API 端点。
 
+> [!IMPORTANT]
+> `api-key: ${...}` 中的 `${...}` 是“环境变量名占位符”，不是 API Key 本身。
+>
+> - 正确：`api-key: ${ANTHROPIC_API_KEY}`
+> - 错误：`api-key: ${sk-xxxx}`（这会被当作变量名 `sk-xxxx`，`roll doctor` 会提示 API key 未设置）
+>
+> 如果想直接写死 key（不推荐），请写成：`api-key: sk-xxxx`（不要带 `${}`）。
+
 ### 2. 注册 Agent
 
 ```bash
