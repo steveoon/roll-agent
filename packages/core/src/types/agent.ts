@@ -16,6 +16,12 @@ export interface AgentSkill {
 export const AGENT_STATUSES = ["idle", "starting", "online", "error", "stopped"] as const;
 export type AgentStatus = (typeof AGENT_STATUSES)[number];
 
+/** Agent 来源（用于 update 策略判断） */
+export type AgentSource =
+  | { readonly type: "git"; readonly url: string }
+  | { readonly type: "local"; readonly path: string }
+  | { readonly type: "remote" };
+
 /** 已注册的 Agent 完整信息 */
 export interface RegisteredAgent {
   readonly skill: AgentSkill;
@@ -25,6 +31,8 @@ export interface RegisteredAgent {
   readonly status: AgentStatus;
   /** SKILL.md body 内容（含 tool 描述等），用于 LLM 路由 */
   readonly skillBody?: string;
+  /** Agent 来源，用于 roll update 判断更新策略。旧数据可能缺失此字段 */
+  readonly source?: AgentSource;
 }
 
 /** JSON Schema 子集，对应 MCP tool 的 inputSchema */

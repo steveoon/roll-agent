@@ -65,6 +65,24 @@ export class AgentStore {
     return true;
   }
 
+  /** 原子替换指定 Agent（名称可变更） */
+  replace(name: string, next: RegisteredAgent): boolean {
+    const agents = [...this.list()];
+    const targetIndex = agents.findIndex((a) => a.skill.name === name);
+    if (targetIndex === -1) return false;
+
+    const conflictIndex = agents.findIndex(
+      (a, index) => index !== targetIndex && a.skill.name === next.skill.name,
+    );
+    if (conflictIndex !== -1) {
+      throw new Error(`Agent "${next.skill.name}" is already registered`);
+    }
+
+    agents[targetIndex] = next;
+    this.save(agents);
+    return true;
+  }
+
   /** 更新指定 Agent 的状态 */
   updateStatus(name: string, status: RegisteredAgent["status"]): void {
     const agents = this.list().map((a) =>
