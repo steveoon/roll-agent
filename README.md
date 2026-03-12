@@ -246,6 +246,7 @@ pnpm build                                    # 确认构建产物正常
 - 默认使用 npm Trusted Publishing（OIDC，推荐，无需 `NPM_TOKEN`）
 - 需要先在 npm 为 `@roll-agent/sdk` 和 `@roll-agent/core` 配置 Trusted Publisher（GitHub repo + workflow）
 - workflow 内已启用 `id-token: write`，并固定 npm 版本满足 Trusted Publishing 要求
+- 当前仓库为 public，CI 发布默认开启 `--provenance`（可通过 `ROLL_NPM_PROVENANCE=false` 临时关闭）
 - workflow 会执行质量检查，并仅发布 npm 上尚不存在的新版本
 
 本地可先 dry-run：
