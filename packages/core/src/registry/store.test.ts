@@ -100,6 +100,35 @@ describe("AgentStore", () => {
     assert.equal(store.findByName("status-test")?.status, "online");
   });
 
+  it("should replace agent atomically", () => {
+    store.add(makeAgent("alpha"));
+    store.add(makeAgent("beta"));
+
+    const next = makeAgent("alpha");
+    const replaced = store.replace("alpha", {
+      ...next,
+      skill: { ...next.skill, description: "new description" },
+      transport: { type: "streamable-http", endpoint: "http://localhost:3000/mcp" },
+    });
+
+    assert.equal(replaced, true);
+    assert.equal(store.findByName("alpha")?.skill.description, "new description");
+    assert.equal(store.list().length, 2);
+  });
+
+  it("should throw when replace would conflict with existing name", () => {
+    store.add(makeAgent("alpha"));
+    store.add(makeAgent("beta"));
+
+    const renamed = makeAgent("beta");
+    assert.throws(
+      () => store.replace("alpha", renamed),
+      (err: Error) => err.message.includes("already registered"),
+    );
+    assert.equal(store.findByName("alpha")?.skill.name, "alpha");
+    assert.equal(store.findByName("beta")?.skill.name, "beta");
+  });
+
   it("should persist across new store instances", () => {
     store.add(makeAgent("persistent"));
     const store2 = new AgentStore(tmpDir);

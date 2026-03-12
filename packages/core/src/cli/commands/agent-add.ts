@@ -7,7 +7,7 @@ import { loadConfig } from "../../config/loader.ts";
 import { discoverAgent } from "../../registry/discovery.ts";
 import { AgentStore } from "../../registry/store.ts";
 import { log } from "../utils/output.ts";
-import type { RegisteredAgent } from "../../types/agent.ts";
+import type { AgentSource, RegisteredAgent } from "../../types/agent.ts";
 
 const execFileAsync = promisify(execFile);
 
@@ -99,7 +99,14 @@ export default defineCommand({
       log.warn("检测到 ROLL_SKIP_INSTALL=1，跳过依赖安装。");
     }
 
-    // 3. 注册到 store
+    // 3. 确定 Agent 来源
+    const source: AgentSource = isGitUrl(args.path)
+      ? { type: "git", url: args.path }
+      : discovered.transport.type === "streamable-http"
+        ? { type: "remote" }
+        : { type: "local", path: agentDir };
+
+    // 4. 注册到 store
     const store = new AgentStore(config.agents.dataDir);
 
     const agent: RegisteredAgent = {
@@ -108,6 +115,7 @@ export default defineCommand({
       installPath: agentDir,
       registeredAt: new Date().toISOString(),
       status: "idle",
+      source,
       ...(discovered.skillBody.length > 0 ? { skillBody: discovered.skillBody } : {}),
     };
 
