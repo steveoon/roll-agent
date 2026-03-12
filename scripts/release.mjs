@@ -122,6 +122,13 @@ function main() {
 try {
   main();
 } catch (error) {
-  console.error(error instanceof Error ? error.message : String(error));
+  const message = error instanceof Error ? error.message : String(error);
+  console.error(message);
+  if (message.includes("EOTP")) {
+    console.error("\nPublish failed because npm requires OTP for this token.");
+    console.error("Fix options:");
+    console.error("1) Replace NPM_TOKEN with an npm Automation token that has publish access.");
+    console.error("2) Switch to npm Trusted Publishing (OIDC) and remove NPM_TOKEN from workflow env.");
+  }
   process.exit(1);
 }

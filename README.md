@@ -235,7 +235,9 @@ pnpm build                                    # 确认构建产物正常
 
 推荐方式：通过 GitHub Actions 自动发布（push 到 `main` 或手动触发 `Release` workflow）。
 
-- 需要在 GitHub 仓库配置 `NPM_TOKEN`（具备 `@roll-agent` 组织发布权限）
+- 默认使用 npm Trusted Publishing（OIDC，推荐，无需 `NPM_TOKEN`）
+- 需要先在 npm 为 `@roll-agent/sdk` 和 `@roll-agent/core` 配置 Trusted Publisher（GitHub repo + workflow）
+- workflow 内已启用 `id-token: write`，并固定 npm 版本满足 Trusted Publishing 要求
 - workflow 会执行质量检查，并仅发布 npm 上尚不存在的新版本
 
 本地可先 dry-run：
