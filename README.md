@@ -250,24 +250,26 @@ pnpm release:dry-run -- --skip-checks --no-registry-check
 
 ```bash
 # 1. 更新版本号
-cd packages/core
+cd packages/sdk
 npm version patch   # 或 minor / major
-cd ../sdk
+cd ../core
 npm version patch
 
 # 2. 构建
 cd ../..
 pnpm build
 
-# 3. 发布（需要 npm 登录 + @roll-agent 组织权限）
-cd packages/core
+# 3. 发布（需要 npm 登录 + @roll-agent 组织权限，先 SDK 再 core）
+cd packages/sdk
 npm publish --access public
-cd ../sdk
+cd ../core
 npm publish --access public
 
-# 4. 打 tag 并推送
+# 4. 提交版本号变更 + 打 tag
+cd ../..
+git add -A && git commit -m "chore: release v$(node -p "require('./packages/core/package.json').version")"
 git tag v$(node -p "require('./packages/core/package.json').version")
-git push --tags
+git push && git push --tags
 ```
 
 发布后用户即可全局安装：
