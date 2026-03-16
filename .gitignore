@@ -5,3 +5,7 @@ coverage/
 .env
 .env.*
 !.env.example
+
+# Smart Reply Agent 业务数据（含敏感信息）
+agents/smart-reply/data/brand-config.json
+agents/smart-reply/data/reply-policy.json

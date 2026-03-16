@@ -1,0 +1,83 @@
+{
+  "city": "深圳",
+  "defaultBrand": "示例品牌",
+  "stores": [
+    {
+      "id": "store-001",
+      "name": "示例品牌南山店",
+      "city": "深圳",
+      "location": "深圳市南山区科技园路1号",
+      "district": "南山区",
+      "subarea": "科技园",
+      "coordinates": { "lat": 22.5431, "lng": 113.9531 },
+      "brand": "示例品牌",
+      "positions": [
+        {
+          "id": "pos-001",
+          "name": "服务员",
+          "timeSlots": ["08:00-14:00", "14:00-22:00"],
+          "salary": {
+            "base": 22,
+            "range": "20-25",
+            "memo": "时薪制，多劳多得"
+          },
+          "workHours": "6-8小时/天",
+          "benefits": {
+            "items": ["包工作餐", "交通补贴"]
+          },
+          "requirements": ["18-45岁", "健康证"],
+          "urgent": false,
+          "scheduleType": "flexible",
+          "attendancePolicy": {
+            "punctualityRequired": true,
+            "lateToleranceMinutes": 10,
+            "attendanceTracking": "strict",
+            "makeupShiftsAllowed": true
+          },
+          "availableSlots": [
+            {
+              "slot": "08:00-14:00",
+              "maxCapacity": 5,
+              "currentBooked": 3,
+              "isAvailable": true,
+              "priority": "high"
+            }
+          ],
+          "schedulingFlexibility": {
+            "canSwapShifts": true,
+            "advanceNoticeHours": 24,
+            "partTimeAllowed": true,
+            "weekendRequired": false,
+            "holidayRequired": false
+          },
+          "hiringRequirements": {
+            "minAge": 18,
+            "maxAge": 45
+          }
+        }
+      ]
+    }
+  ],
+  "brands": {
+    "示例品牌": {
+      "templates": {
+        "initial_inquiry": ["你好！我们这边有兼职岗位在招，你方便做哪个时间段呢？"],
+        "salary_inquiry": ["时薪在20-25元之间，具体看岗位和班次哦"],
+        "schedule_inquiry": ["排班比较灵活，可以根据你的时间来安排"],
+        "location_inquiry": ["我们在南山科技园有门店，交通很方便"],
+        "interview_request": ["好的，你什么时候方便来店里面试呢？"],
+        "general_chat": ["有什么问题都可以问我哦～"],
+        "age_concern": ["我们的岗位对年龄要求比较宽松的"],
+        "insurance_inquiry": ["兼职岗位暂时没有五险一金，但有其他福利"],
+        "followup_chat": ["还有什么想了解的吗？"],
+        "no_location_match": ["这个区域暂时没有门店，但附近有其他选择"],
+        "attendance_inquiry": ["出勤要求不会太严格，提前排好班就行"],
+        "flexibility_inquiry": ["排班很灵活，可以换班"],
+        "attendance_policy_inquiry": ["迟到10分钟以内是允许的"],
+        "work_hours_inquiry": ["每天工作6-8小时"],
+        "availability_inquiry": ["目前还有名额"],
+        "part_time_support": ["支持兼职，每周做几天都可以商量"]
+      }
+    }
+  }
+}
