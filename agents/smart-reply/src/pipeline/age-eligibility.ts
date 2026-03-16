@@ -1,7 +1,5 @@
 import { z } from "zod";
 
-const DULIDAY_JOB_LIST_ENDPOINT = "https://k8s.duliday.com/persistence/ai/api/job/list";
-
 export type AgeEligibilityStatus = "pass" | "fail" | "unknown";
 
 export type AgeEligibilitySummary = {
@@ -58,6 +56,11 @@ const JOB_LIST_CACHE_TTL_MS = 60_000;
 const JOB_LIST_PAGE_SIZE = 200;
 let jobListCache: { cacheKey: string; payload: unknown; fetchedAt: number } | null = null;
 let inflightJobListRequest: { cacheKey: string; promise: Promise<unknown> } | null = null;
+
+function getDulidayJobListEndpoint(): string | undefined {
+  const endpoint = process.env.DULIDAY_JOB_LIST_URL;
+  return typeof endpoint === "string" && endpoint.trim().length > 0 ? endpoint : undefined;
+}
 
 function normalizeText(value: string | null | undefined): string {
   return (value ?? "").trim().toLowerCase();
@@ -148,6 +151,7 @@ function buildBrandCandidates(brandAlias?: string | null, cityName?: string | nu
 
 async function fetchJobList(
   token: string,
+  endpoint: string,
   options?: { brandAlias?: string | null | undefined; cityName?: string | null | undefined },
 ): Promise<unknown> {
   const shouldUseCache = process.env.NODE_ENV !== "test";
@@ -181,7 +185,7 @@ async function fetchJobList(
       options: { includeBasicInfo: true, includeHiringRequirement: true },
     };
     try {
-      const response = await fetch(DULIDAY_JOB_LIST_ENDPOINT, {
+      const response = await fetch(endpoint, {
         method: "POST",
         headers: { "Content-Type": "application/json", "Duliday-Token": token },
         body: JSON.stringify(requestBody),
@@ -215,6 +219,7 @@ export async function evaluateAgeEligibility({
   strategy?: AgeQualificationPolicy;
 }): Promise<AgeEligibilityResult> {
   const token = process.env.DULIDAY_TOKEN;
+  const endpoint = getDulidayJobListEndpoint();
   const summary: AgeEligibilitySummary = {
     minAgeObserved: null,
     maxAgeObserved: null,
@@ -229,9 +234,16 @@ export async function evaluateAgeEligibility({
       appliedStrategy: buildAppliedStrategy("unknown", strategy),
     };
   }
+  if (!endpoint) {
+    return {
+      status: "unknown",
+      summary,
+      appliedStrategy: buildAppliedStrategy("unknown", strategy),
+    };
+  }
 
   try {
-    const payload = await fetchJobList(token, { brandAlias, cityName });
+    const payload = await fetchJobList(token, endpoint, { brandAlias, cityName });
     const { items, total } = extractResults(payload);
     summary.total = total;
     const hasAdditionalPages = total > items.length && items.length >= JOB_LIST_PAGE_SIZE;

@@ -103,38 +103,32 @@ export type ModelId = keyof typeof MODEL_DICTIONARY;
 
 // ========== Default Configs ==========
 
+/**
+ * Anthropic/OpenAI/OhMyGPT 默认走共享代理，保证“统一 key + 默认模型”开箱可用。
+ * 如果需要切换，优先使用 SMART_REPLY_PROXY_BASE_URL，或为单个 provider 指定专属 base URL。
+ */
+const PROXY_BASE_URL = process.env.SMART_REPLY_PROXY_BASE_URL;
+const DEFAULT_SHARED_PROXY_BASE_URL = "https://apic1.ohmycdn.com/v1";
+const SHARED_PROXY_BASE_URL = PROXY_BASE_URL || DEFAULT_SHARED_PROXY_BASE_URL;
+
+const FALLBACK_URLS = {
+  anthropic: process.env.ANTHROPIC_BASE_URL || SHARED_PROXY_BASE_URL,
+  openai: process.env.OPENAI_BASE_URL || SHARED_PROXY_BASE_URL,
+  ohmygpt: process.env.OHMYGPT_BASE_URL || SHARED_PROXY_BASE_URL,
+  moonshotai: process.env.MOONSHOT_BASE_URL || "https://api.moonshot.cn/v1",
+  deepseek: process.env.DEEPSEEK_BASE_URL || "https://api.deepseek.com",
+  qwen: process.env.QWEN_BASE_URL || "https://dashscope.aliyuncs.com/compatible-mode/v1",
+  google: process.env.GOOGLE_BASE_URL || "https://generativelanguage.googleapis.com/v1beta",
+} as const;
+
 export const DEFAULT_PROVIDER_CONFIGS: Record<string, ProviderConfig> = {
-  anthropic: {
-    name: "Anthropic",
-    baseURL: "https://apic1.ohmycdn.com/v1",
-    description: "Anthropic Claude",
-  },
-  openai: {
-    name: "OpenAI",
-    baseURL: "https://apic1.ohmycdn.com/v1",
-    description: "OpenAI GPT",
-  },
-  ohmygpt: {
-    name: "OhMyGPT",
-    baseURL: "https://apic1.ohmycdn.com/v1",
-    description: "OhMyGPT",
-  },
-  moonshotai: {
-    name: "MoonshotAI",
-    baseURL: "https://api.moonshot.cn/v1",
-    description: "MoonshotAI",
-  },
-  deepseek: { name: "DeepSeek", baseURL: "https://api.deepseek.com", description: "DeepSeek" },
-  qwen: {
-    name: "Qwen",
-    baseURL: "https://dashscope.aliyuncs.com/compatible-mode/v1",
-    description: "Qwen",
-  },
-  google: {
-    name: "Google",
-    baseURL: "https://generativelanguage.googleapis.com/v1beta",
-    description: "Google Gemini",
-  },
+  anthropic: { name: "Anthropic", baseURL: FALLBACK_URLS.anthropic, description: "Anthropic Claude" },
+  openai: { name: "OpenAI", baseURL: FALLBACK_URLS.openai, description: "OpenAI GPT" },
+  ohmygpt: { name: "OhMyGPT", baseURL: FALLBACK_URLS.ohmygpt, description: "OhMyGPT" },
+  moonshotai: { name: "MoonshotAI", baseURL: FALLBACK_URLS.moonshotai, description: "MoonshotAI" },
+  deepseek: { name: "DeepSeek", baseURL: FALLBACK_URLS.deepseek, description: "DeepSeek" },
+  qwen: { name: "Qwen", baseURL: FALLBACK_URLS.qwen, description: "Qwen" },
+  google: { name: "Google", baseURL: FALLBACK_URLS.google, description: "Google Gemini" },
 };
 
 export const DEFAULT_MODEL_CONFIG = {
@@ -183,36 +177,34 @@ function createDynamicRegistry(providerConfigs: Record<string, ProviderConfig>) 
     {
       anthropic: createAnthropic({
         apiKey: sharedProxyApiKey,
-        baseURL: providerConfigs.anthropic?.baseURL || "https://apic1.ohmycdn.com/v1",
+        baseURL: providerConfigs.anthropic?.baseURL || FALLBACK_URLS.anthropic,
       }),
       openai: createCustomOpenAI({
         apiKey: sharedProxyApiKey,
-        baseURL: providerConfigs.openai?.baseURL || "https://apic1.ohmycdn.com/v1",
+        baseURL: providerConfigs.openai?.baseURL || FALLBACK_URLS.openai,
       }),
       ohmygpt: createOpenAICompatible({
         name: "ohmygpt",
-        baseURL: providerConfigs.ohmygpt?.baseURL || "https://apic1.ohmycdn.com/v1",
+        baseURL: providerConfigs.ohmygpt?.baseURL || FALLBACK_URLS.ohmygpt,
         apiKey: sharedProxyApiKey,
       }),
       moonshotai: createOpenAICompatible({
         name: "moonshotai",
-        baseURL: providerConfigs.moonshotai?.baseURL || "https://api.moonshot.cn/v1",
+        baseURL: providerConfigs.moonshotai?.baseURL || FALLBACK_URLS.moonshotai,
         apiKey: process.env.MOONSHOT_API_KEY || "",
       }),
       deepseek: createDeepSeek({
-        baseURL: providerConfigs.deepseek?.baseURL || "https://api.deepseek.com",
+        baseURL: providerConfigs.deepseek?.baseURL || FALLBACK_URLS.deepseek,
         apiKey: process.env.DEEPSEEK_API_KEY || "",
       }),
       google: createGoogleGenerativeAI({
         apiKey: process.env.GEMINI_API_KEY || "",
-        baseURL:
-          providerConfigs.google?.baseURL || "https://generativelanguage.googleapis.com/v1beta",
+        baseURL: providerConfigs.google?.baseURL || FALLBACK_URLS.google,
       }),
       qwen: createOpenAICompatible({
         name: "qwen",
         apiKey: process.env.DASHSCOPE_API_KEY || "",
-        baseURL:
-          providerConfigs.qwen?.baseURL || "https://dashscope.aliyuncs.com/compatible-mode/v1",
+        baseURL: providerConfigs.qwen?.baseURL || FALLBACK_URLS.qwen,
       }),
     },
     { separator: "/" },

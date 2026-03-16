@@ -40,13 +40,18 @@ function isCacheValid(): boolean {
 
 // ========== Constants ==========
 
-const DULIDAY_BRAND_LIST_URL = "https://k8s.duliday.com/persistence/ai/api/brand/list";
 const REQUEST_TIMEOUT_MS = 30_000;
+
+function getDulidayBrandListUrl(): string | undefined {
+  const endpoint = process.env.DULIDAY_BRAND_LIST_URL;
+  return typeof endpoint === "string" && endpoint.trim().length > 0 ? endpoint : undefined;
+}
 
 // ========== API Fetch ==========
 
 async function fetchBrandAliasesFromApi(dulidayToken?: string): Promise<DulidayBrandItem[]> {
   const token = dulidayToken || process.env.DULIDAY_TOKEN;
+  const endpoint = getDulidayBrandListUrl();
   if (!token) {
     throw new AppError({
       code: ErrorCode.CONFIG_MISSING_FIELD,
@@ -54,12 +59,19 @@ async function fetchBrandAliasesFromApi(dulidayToken?: string): Promise<DulidayB
       userMessage: "品牌别名数据加载失败：缺少 Duliday Token 配置",
     });
   }
+  if (!endpoint) {
+    throw new AppError({
+      code: ErrorCode.CONFIG_MISSING_FIELD,
+      message: "DULIDAY_BRAND_LIST_URL 未配置，无法获取品牌别名数据",
+      userMessage: "品牌别名数据加载失败：缺少 Duliday 品牌接口配置",
+    });
+  }
 
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
 
   try {
-    const response = await fetch(DULIDAY_BRAND_LIST_URL, {
+    const response = await fetch(endpoint, {
       method: "POST",
       headers: { "Content-Type": "application/json", "Duliday-Token": token },
       body: JSON.stringify({ pageNum: 1, pageSize: 1000 }),

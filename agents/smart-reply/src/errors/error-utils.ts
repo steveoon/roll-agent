@@ -47,7 +47,7 @@ export function parseAISDKError(error: unknown): AISDKErrorInfo | null {
 
   let provider: string | undefined;
   if (url) {
-    if (url.includes("openai.com") || url.includes("hash070.com")) provider = "openai";
+    if (url.includes("openai.com")) provider = "openai";
     else if (url.includes("anthropic.com")) provider = "anthropic";
     else if (url.includes("dashscope.aliyuncs.com")) provider = "qwen";
     else if (url.includes("openrouter.ai")) provider = "openrouter";
