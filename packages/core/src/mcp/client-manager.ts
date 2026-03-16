@@ -20,6 +20,8 @@ export interface ConnectOptions {
   readonly timeoutMs?: number;
   /** 为子 Agent 提供的 LLM model（启用 Sampling 支持） */
   readonly samplingModel?: LanguageModelV3;
+  /** 注入到 stdio 子进程的环境变量（与 process.env 合并） */
+  readonly env?: Readonly<Record<string, string>>;
 }
 
 /**
@@ -70,6 +72,7 @@ export class McpClientManager {
             command: transport.command,
             args: [...(transport.args ?? [])],
             cwd,
+            ...(options.env ? { env: { ...process.env, ...options.env } as Record<string, string> } : {}),
           });
 
     const connectPromise = client.connect(mcpTransport);

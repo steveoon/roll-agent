@@ -38,7 +38,11 @@ export function getAgentPid(dataDir: string, agentName: string): number | undefi
  * 仅对 stdio 模式有意义——后台运行 MCP Server。
  * Streamable HTTP Agent 应由用户自行管理（独立服务）。
  */
-export function startAgent(agent: RegisteredAgent, dataDir: string): number {
+export function startAgent(
+  agent: RegisteredAgent,
+  dataDir: string,
+  env?: Readonly<Record<string, string>>,
+): number {
   if (agent.transport.type === "streamable-http") {
     throw new Error(
       `Agent "${agent.skill.name}" 使用 streamable-http 传输，请手动启动服务。` +
@@ -55,6 +59,7 @@ export function startAgent(agent: RegisteredAgent, dataDir: string): number {
     cwd: agent.installPath,
     detached: true,
     stdio: "ignore",
+    ...(env ? { env: { ...process.env, ...env } } : {}),
   });
 
   child.unref();

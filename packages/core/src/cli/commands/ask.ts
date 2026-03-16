@@ -1,5 +1,6 @@
 import { defineCommand } from "citty";
 import { loadConfig } from "../../config/loader.ts";
+import { getAgentEnv } from "../../config/schema.ts";
 import { AgentStore } from "../../registry/store.ts";
 import { McpClientManager } from "../../mcp/client-manager.ts";
 import { routeWithLLM } from "../../router/llm-router.ts";
@@ -92,11 +93,12 @@ export default defineCommand({
     const clientManager = new McpClientManager();
     try {
       log.info(`连接 Agent "${agent.skill.name}"...`);
+      const agentEnv = getAgentEnv(config, agent.skill.name);
       const client = await clientManager.connect(
         agent.skill.name,
         agent.transport,
         agent.installPath,
-        { samplingModel },
+        { samplingModel, ...(agentEnv ? { env: agentEnv } : {}) },
       );
 
       log.info(`调用 ${agent.skill.name}.${decision.toolName}(${JSON.stringify(decision.input)})`);

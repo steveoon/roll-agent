@@ -19,6 +19,8 @@ export const routerConfigSchema = z.object({
 
 export const agentsConfigSchema = z.object({
   dataDir: z.string(),
+  /** per-agent 环境变量：键为 agent name，值为 key-value 对 */
+  env: z.record(z.string(), z.record(z.string(), z.string())).optional(),
 });
 
 export const rollConfigSchema = z.object({
@@ -28,3 +30,11 @@ export const rollConfigSchema = z.object({
 });
 
 export type RollConfig = z.infer<typeof rollConfigSchema>;
+
+/** 获取指定 Agent 的环境变量配置，没有则返回 undefined */
+export function getAgentEnv(
+  config: RollConfig,
+  agentName: string,
+): Readonly<Record<string, string>> | undefined {
+  return config.agents.env?.[agentName];
+}

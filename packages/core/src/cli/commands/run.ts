@@ -1,5 +1,6 @@
 import { defineCommand } from "citty";
 import { loadConfig } from "../../config/loader.ts";
+import { getAgentEnv } from "../../config/schema.ts";
 import { AgentStore } from "../../registry/store.ts";
 import { McpClientManager } from "../../mcp/client-manager.ts";
 import { createProviderModel } from "../../llm/providers.ts";
@@ -43,11 +44,12 @@ export default defineCommand({
         : undefined;
 
       log.info(`连接 Agent "${agent.skill.name}"...`);
+      const agentEnv = getAgentEnv(config, agent.skill.name);
       const client = await clientManager.connect(
         agent.skill.name,
         agent.transport,
         agent.installPath,
-        ...(samplingModel ? [{ samplingModel }] : []),
+        { ...(samplingModel ? { samplingModel } : {}), ...(agentEnv ? { env: agentEnv } : {}) },
       );
 
       // 4. 列出 tools 验证目标 tool 存在
