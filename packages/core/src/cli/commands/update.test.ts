@@ -46,11 +46,25 @@ describe("update — inferSourceType", () => {
 
   test("returns remote when source.type is remote", () => {
     const agent = makeAgent({
-      source: { type: "remote" as const },
+      source: { type: "remote" as const, endpoint: "http://localhost:3000/mcp" },
       transport: { type: "streamable-http" as const, endpoint: "http://localhost:3000" },
       installPath: "/tmp/remote-skill",
     });
     assert.equal(inferSourceType(agent), "remote");
+  });
+
+  test("returns installed when source.type is installed", () => {
+    const agent = makeAgent({
+      source: {
+        type: "installed" as const,
+        packageName: "@roll-agent/smart-reply",
+        packageSpec: "@roll-agent/smart-reply@latest",
+        installDir: "/tmp/installed/smart-reply",
+      },
+      transport: { type: "stdio" as const, command: "node" },
+      installPath: "/tmp/installed/smart-reply/node_modules/@roll-agent/smart-reply",
+    });
+    assert.equal(inferSourceType(agent), "installed");
   });
 
   test("falls back to remote for streamable-http without source", () => {

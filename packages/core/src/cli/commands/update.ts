@@ -6,30 +6,21 @@ import { promisify } from "node:util";
 import { loadConfig } from "../../config/loader.ts";
 import { AgentStore } from "../../registry/store.ts";
 import { discoverAgent } from "../../registry/discovery.ts";
+import {
+  inferAgentSourceType,
+  resolveInstalledPackageRoot,
+} from "../../registry/source.ts";
 import { McpClientManager } from "../../mcp/client-manager.ts";
 import { log, createSpinner } from "../utils/output.ts";
 import {
   checkForUpdate,
   getCurrentVersion,
 } from "../utils/update-checker.ts";
-import type { RegisteredAgent } from "../../types/agent.ts";
+import type { AgentSourceType, RegisteredAgent } from "../../types/agent.ts";
 
 const execFileAsync = promisify(execFile);
 
-/** 推断旧 Agent（无 source 字段）的来源类型 */
-export function inferSourceType(
-  agent: RegisteredAgent,
-): "git" | "local" | "remote" {
-  if (agent.source) {
-    if (agent.source.type === "git") return "git";
-    if (agent.source.type === "local") return "local";
-    return "remote";
-  }
-  // 旧数据兼容：检查 installPath 下是否有 .git 目录
-  if (agent.transport.type === "streamable-http") return "remote";
-  if (existsSync(resolve(agent.installPath, ".git"))) return "git";
-  return "local";
-}
+export { inferAgentSourceType as inferSourceType } from "../../registry/source.ts";
 
 /** 更新 roll-core 自身 */
 async function updateSelf(latest: string, dryRun: boolean): Promise<boolean> {
@@ -88,6 +79,37 @@ async function updateGitAgent(agent: RegisteredAgent): Promise<boolean> {
   }
 }
 
+/** 重新安装 npm 来源的 Agent */
+async function updateInstalledAgent(agent: RegisteredAgent): Promise<boolean> {
+  if (agent.source?.type !== "installed") {
+    return false;
+  }
+
+  const spinner = createSpinner(`更新 ${agent.skill.name} (npm install)...`).start();
+  try {
+    await execFileAsync(
+      "npm",
+      ["install", "--prefix", agent.source.installDir, agent.source.packageSpec],
+      { timeout: 120_000 },
+    );
+
+    const packageRoot = resolveInstalledPackageRoot(
+      agent.source.installDir,
+      agent.source.packageName,
+    );
+    if (!existsSync(packageRoot)) {
+      throw new Error(`Installed package root not found: ${packageRoot}`);
+    }
+
+    spinner.succeed(`${agent.skill.name} 已重新安装`);
+    return true;
+  } catch (err) {
+    spinner.fail(`${agent.skill.name} 更新失败`);
+    log.error(err instanceof Error ? err.message : String(err));
+    return false;
+  }
+}
+
 /** 刷新远程 Agent 的 MCP 元数据 */
 async function refreshRemoteAgent(agent: RegisteredAgent): Promise<boolean> {
   const spinner = createSpinner(`刷新 ${agent.skill.name} (MCP tools/list)...`).start();
@@ -137,16 +159,19 @@ export default defineCommand({
 
     const agentSummary: Array<{
       name: string;
-      sourceType: "git" | "local" | "remote";
+      sourceType: AgentSourceType;
       action: string;
     }> = [];
 
     for (const agent of agents) {
-      const sourceType = inferSourceType(agent);
+      const sourceType = inferAgentSourceType(agent);
       let action: string;
       switch (sourceType) {
         case "git":
           action = "git pull + 重新安装依赖";
+          break;
+        case "installed":
+          action = "重新安装 npm 包";
           break;
         case "remote":
           action = "刷新 MCP 元数据 (tools/list)";
@@ -188,13 +213,37 @@ export default defineCommand({
     let failedCount = 0;
 
     for (const agent of agents) {
-      const sourceType = inferSourceType(agent);
+      const sourceType = inferAgentSourceType(agent);
 
       switch (sourceType) {
         case "git": {
           const ok = await updateGitAgent(agent);
           if (ok) {
             // 重新解析 SKILL.md 并更新 store
+            try {
+              const discovered = discoverAgent(agent.installPath);
+              const updated: RegisteredAgent = {
+                ...agent,
+                skill: discovered.skill,
+                transport: discovered.transport,
+                ...(discovered.skillBody.length > 0 ? { skillBody: discovered.skillBody } : {}),
+              };
+              const replaced = store.replace(agent.skill.name, updated);
+              if (!replaced) {
+                log.warn(`${agent.skill.name} 已从注册表中移除，跳过元数据刷新`);
+              }
+            } catch (err) {
+              log.warn(`${agent.skill.name} SKILL.md 重新解析失败: ${err instanceof Error ? err.message : String(err)}`);
+            }
+            updatedCount++;
+          } else {
+            failedCount++;
+          }
+          break;
+        }
+        case "installed": {
+          const ok = await updateInstalledAgent(agent);
+          if (ok) {
             try {
               const discovered = discoverAgent(agent.installPath);
               const updated: RegisteredAgent = {

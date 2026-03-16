@@ -21,7 +21,9 @@ export default defineCommand({
     const agents = store.list();
 
     if (agents.length === 0) {
-      log.error("暂无已注册的 Agent。使用 `roll agent add <path>` 注册。");
+      log.error(
+        "暂无已注册的 Agent。可使用 `roll agent add <path>`、`roll agent install <package>` 或 `roll agent add --remote <endpoint>`。",
+      );
       process.exitCode = 1;
       return;
     }

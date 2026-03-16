@@ -1,6 +1,11 @@
 import { defineCommand } from "citty";
 import Table from "cli-table3";
 import { loadConfig } from "../../config/loader.ts";
+import {
+  formatAgentSourceType,
+  getAgentLocation,
+  inferAgentSourceType,
+} from "../../registry/source.ts";
 import { AgentStore } from "../../registry/store.ts";
 
 export default defineCommand({
@@ -14,7 +19,9 @@ export default defineCommand({
     const agents = store.list();
 
     if (agents.length === 0) {
-      console.log("暂无已注册的 Agent。使用 `roll agent add <path>` 注册。");
+      console.log(
+        "暂无已注册的 Agent。可使用 `roll agent add <path>`、`roll agent install <package>` 或 `roll agent add --remote <endpoint>`。",
+      );
       return;
     }
 
@@ -24,7 +31,7 @@ export default defineCommand({
     }
 
     const table = new Table({
-      head: ["Name", "Status", "Transport", "Path"],
+      head: ["Name", "Status", "Source", "Transport", "Location"],
       style: { head: ["cyan"] },
     });
 
@@ -32,8 +39,9 @@ export default defineCommand({
       table.push([
         agent.skill.name,
         agent.status,
+        formatAgentSourceType(inferAgentSourceType(agent)),
         agent.transport.type,
-        agent.installPath,
+        getAgentLocation(agent),
       ]);
     }
 
