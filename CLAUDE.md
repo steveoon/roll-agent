@@ -187,3 +187,4 @@ SDK 的 `exports` 在开发时指向 `./src/index.ts`（直接引用源码），
 - ESLint 9 flat config + neostandard（`noStyle: true` 避免与 Prettier 冲突）
 - Prettier：双引号、分号、尾逗号、100 字符行宽
 - ESM Only：`"type": "module"`，使用 `import.meta.dirname` 替代 `__dirname`
+- CLI 参数命名一律使用 `kebab-case`（如 `--input-json`、`--input-file`），citty 内部自动转为 camelCase 访问。`--help` 输出中呈现的参数名必须是 kebab-case
