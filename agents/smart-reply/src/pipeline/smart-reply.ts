@@ -10,7 +10,7 @@ import {
   resolveDefaultBrandName,
   resolvePrimaryCity,
 } from "../services/brand-config-selectors.ts";
-import type { ZhipinData, MessageClassification, CandidateInfo } from "../types/zhipin.ts";
+import type { ZhipinData, CandidateInfo } from "../types/zhipin.ts";
 import type { BrandPriorityStrategy } from "../types/config.ts";
 import type { StoreWithDistance } from "../types/geocoding.ts";
 import type {
@@ -20,7 +20,6 @@ import type {
   ChannelType,
   ReplyPolicyConfig,
 } from "../types/reply-policy.ts";
-import { stageToLegacyReplyType } from "../types/classification.ts";
 import type { ProviderConfigs } from "../types/classification.ts";
 import { planTurn } from "./classification.ts";
 import { buildContextInfoByNeeds } from "./context-builder.ts";
@@ -63,9 +62,9 @@ export interface SmartReplyDebugInfo {
   relevantStores: StoreWithDistance[];
   storeCount: number;
   detailLevel: string;
+  resolvedBrand: string;
   turnPlan: TurnPlan;
   aliasLookupError?: string | undefined;
-  classification: MessageClassification;
   gateStatus: AgeEligibilityStatus;
   appliedStrategy: AgeEligibilityAppliedStrategy;
   ageRangeSummary: AgeEligibilitySummary;
@@ -73,31 +72,15 @@ export interface SmartReplyDebugInfo {
 
 export interface SmartReplyAgentResult {
   turnPlan: TurnPlan;
-  classification: MessageClassification;
   suggestedReply: string;
   confidence: number;
   shouldExchangeWechat?: boolean | undefined;
+  factGateRewritten: boolean;
   contextInfo?: string | undefined;
   debugInfo?: SmartReplyDebugInfo | undefined;
   usage: SafeGenerateTextUsage | undefined;
   latencyMs?: number | undefined;
   error?: AppError | undefined;
-}
-
-function toClassification(turnPlan: TurnPlan): MessageClassification {
-  return {
-    replyType: stageToLegacyReplyType(turnPlan.stage),
-    extractedInfo: {
-      mentionedBrand: turnPlan.extractedInfo.mentionedBrand ?? null,
-      city: turnPlan.extractedInfo.city ?? null,
-      mentionedLocations: turnPlan.extractedInfo.mentionedLocations ?? null,
-      mentionedDistricts: turnPlan.extractedInfo.mentionedDistricts ?? null,
-      specificAge: turnPlan.extractedInfo.specificAge ?? null,
-      hasUrgency: turnPlan.extractedInfo.hasUrgency ?? null,
-      preferredSchedule: turnPlan.extractedInfo.preferredSchedule ?? null,
-    },
-    reasoningText: turnPlan.reasoningText,
-  };
 }
 
 function formatAgeRange(summary: AgeEligibilitySummary): string | null {
@@ -307,8 +290,6 @@ export async function generateSmartReply(
     ...(replyPolicy !== undefined ? { replyPolicy } : {}),
   });
 
-  const classification = toClassification(turnPlan);
-
   // toolBrand 优先；fallback 到 LLM 从消息中提取的 mentionedBrand
   const effectiveToolBrand = toolBrand || turnPlan.extractedInfo.mentionedBrand || undefined;
 
@@ -364,14 +345,14 @@ export async function generateSmartReply(
     logError("SmartReply 生成失败", replyResult.error);
     return {
       turnPlan,
-      classification,
       suggestedReply: "",
       confidence: 0,
       shouldExchangeWechat: shouldExchangeWechatByStage(turnPlan.stage),
+      factGateRewritten: false,
       contextInfo,
       debugInfo: {
         ...debugInfo,
-        classification,
+        resolvedBrand,
         gateStatus: ageEligibility.status,
         appliedStrategy: ageEligibility.appliedStrategy,
         ageRangeSummary: ageEligibility.summary,
@@ -384,11 +365,13 @@ export async function generateSmartReply(
   let finalText = replyResult.text;
   let finalUsage = replyResult.usage;
   let finalLatencyMs = replyResult.latencyMs;
+  let factGateRewritten = false;
 
   if (replyPolicy?.factGate.mode === "strict") {
     const violation =
       hasFactClaims(finalText) && !(needsFacts(turnPlan.needs) && hasFactsInContext(contextInfo));
     if (violation) {
+      factGateRewritten = true;
       const rewritten = await rewriteForFactGate(finalText, model, contextInfo);
       finalText = rewritten.text;
       if (rewritten.usage) finalUsage = rewritten.usage;
@@ -400,14 +383,14 @@ export async function generateSmartReply(
 
   return {
     turnPlan,
-    classification,
     suggestedReply: finalText,
     confidence: Math.max(0, Math.min(1, turnPlan.confidence)),
     shouldExchangeWechat: shouldExchangeWechatByStage(turnPlan.stage),
+    factGateRewritten,
     contextInfo: `${contextInfo}\n当前品牌：${resolvedBrand}`,
     debugInfo: {
       ...debugInfo,
-      classification,
+      resolvedBrand,
       gateStatus: ageEligibility.status,
       appliedStrategy: ageEligibility.appliedStrategy,
       ageRangeSummary: ageEligibility.summary,

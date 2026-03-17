@@ -1,10 +1,4 @@
-import type {
-  ZhipinData,
-  Store,
-  MessageClassification,
-  SalaryDetails,
-  CandidateInfo,
-} from "../types/zhipin.ts";
+import type { ZhipinData, Store, SalaryDetails, CandidateInfo } from "../types/zhipin.ts";
 import {
   findBrandByName,
   getAvailableBrandNames,
@@ -13,7 +7,7 @@ import {
 import type { BrandPriorityStrategy } from "../types/config.ts";
 import type { BrandResolutionInput, BrandResolutionOutput } from "../types/brand-resolution.ts";
 import type { StoreWithDistance } from "../types/geocoding.ts";
-import type { TurnPlan, ReplyNeed, ReplyPolicyConfig } from "../types/reply-policy.ts";
+import type { TurnPlan, TurnExtractedInfo, ReplyNeed, ReplyPolicyConfig } from "../types/reply-policy.ts";
 import { getSharedBrandAliasMap } from "../services/brand-alias.ts";
 
 // ========== Helpers ==========
@@ -227,9 +221,9 @@ export function resolveBrandConflict(input: BrandResolutionInput): BrandResoluti
 
 function rankStoresByTextMatch(
   stores: Store[],
-  classification: MessageClassification,
+  extractedInfo: TurnExtractedInfo,
 ): StoreWithDistance[] {
-  const { mentionedLocations, mentionedDistricts } = classification.extractedInfo;
+  const { mentionedLocations, mentionedDistricts } = extractedInfo;
   const scoredStores: StoreScore[] = stores.map((store) => {
     let locationMatch = 0;
     let districtMatch = 0;
@@ -385,20 +379,7 @@ export async function buildContextInfoByNeeds(
 
   let rankedStoresWithDistance: StoreWithDistance[] = [];
   if (relevantStores.length > 0) {
-    const pseudoClassification: MessageClassification = {
-      replyType: "general_chat",
-      extractedInfo: {
-        mentionedBrand: extractedInfo.mentionedBrand ?? null,
-        city: extractedInfo.city ?? null,
-        mentionedLocations: extractedInfo.mentionedLocations ?? null,
-        mentionedDistricts: extractedInfo.mentionedDistricts ?? null,
-        specificAge: extractedInfo.specificAge ?? null,
-        hasUrgency: extractedInfo.hasUrgency ?? null,
-        preferredSchedule: extractedInfo.preferredSchedule ?? null,
-      },
-      reasoningText: turnPlan.reasoningText || "",
-    };
-    rankedStoresWithDistance = rankStoresByTextMatch(relevantStores, pseudoClassification);
+    rankedStoresWithDistance = rankStoresByTextMatch(relevantStores, extractedInfo);
   }
 
   const storeCount = Math.min(

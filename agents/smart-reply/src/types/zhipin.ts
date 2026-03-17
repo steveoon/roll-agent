@@ -126,27 +126,6 @@ export const StoreSchema = z.object({
   positions: z.array(PositionSchema),
 });
 
-// ========== 回复上下文 ==========
-
-export const ReplyContextSchema = z.enum([
-  "initial_inquiry",
-  "location_inquiry",
-  "no_location_match",
-  "schedule_inquiry",
-  "interview_request",
-  "general_chat",
-  "salary_inquiry",
-  "age_concern",
-  "insurance_inquiry",
-  "followup_chat",
-  "attendance_inquiry",
-  "flexibility_inquiry",
-  "attendance_policy_inquiry",
-  "work_hours_inquiry",
-  "availability_inquiry",
-  "part_time_support",
-]);
-
 // ========== 品牌与数据 ==========
 
 export const BrandDatasetMetaSchema = z.object({
@@ -167,39 +146,6 @@ export const ZhipinDataSchema = z.object({
   brands: z.array(BrandSchema),
 });
 
-// ========== 消息分类 ==========
-
-export const MessageClassificationSchema = z.object({
-  replyType: ReplyContextSchema,
-  extractedInfo: z.object({
-    mentionedBrand: z.string().nullable().optional(),
-    city: z.string().nullable().optional(),
-    mentionedLocations: z
-      .array(
-        z.object({
-          location: z.string(),
-          confidence: z.number(),
-        }),
-      )
-      .nullable()
-      .optional(),
-    mentionedDistricts: z
-      .array(
-        z.object({
-          district: z.string().describe("区域名称"),
-          confidence: z.number().min(0).max(1).describe("区域识别置信度 0-1"),
-        }),
-      )
-      .max(3)
-      .nullable()
-      .optional(),
-    specificAge: z.number().nullable().optional(),
-    hasUrgency: z.boolean().nullable().optional(),
-    preferredSchedule: z.string().nullable().optional(),
-  }),
-  reasoningText: z.string(),
-});
-
 // ========== 类型导出 ==========
 
 export type SalaryDetails = z.infer<typeof SalaryDetailsSchema>;
@@ -214,5 +160,3 @@ export type Store = z.infer<typeof StoreSchema>;
 export type BrandDatasetMeta = z.infer<typeof BrandDatasetMetaSchema>;
 export type Brand = z.infer<typeof BrandSchema>;
 export type ZhipinData = z.infer<typeof ZhipinDataSchema>;
-export type ReplyContext = z.infer<typeof ReplyContextSchema>;
-export type MessageClassification = z.infer<typeof MessageClassificationSchema>;

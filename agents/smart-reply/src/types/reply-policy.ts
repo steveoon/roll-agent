@@ -73,8 +73,8 @@ export const RiskFlagSchema = z.enum([
 ]);
 
 export const TurnExtractedInfoSchema = z.object({
-  mentionedBrand: z.string().nullable().optional(),
-  city: z.string().nullable().optional(),
+  mentionedBrand: z.string().nullable(),
+  city: z.string().nullable(),
   mentionedLocations: z
     .array(
       z.object({
@@ -82,8 +82,7 @@ export const TurnExtractedInfoSchema = z.object({
         confidence: z.number().min(0).max(1),
       }),
     )
-    .nullable()
-    .optional(),
+    .nullable(),
   mentionedDistricts: z
     .array(
       z.object({
@@ -92,11 +91,10 @@ export const TurnExtractedInfoSchema = z.object({
       }),
     )
     .max(10)
-    .nullable()
-    .optional(),
-  specificAge: z.number().nullable().optional(),
-  hasUrgency: z.boolean().nullable().optional(),
-  preferredSchedule: z.string().nullable().optional(),
+    .nullable(),
+  specificAge: z.number().nullable(),
+  hasUrgency: z.boolean().nullable(),
+  preferredSchedule: z.string().nullable(),
 });
 
 export const TurnPlanSchema = z.object({
