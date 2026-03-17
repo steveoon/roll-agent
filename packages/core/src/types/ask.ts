@@ -13,6 +13,7 @@ export type AskFailureStage = (typeof ASK_FAILURE_STAGES)[number];
 
 export const ASK_VALIDATION_ISSUE_CODES = [
   "missing_required",
+  "requires_explicit_input",
   "invalid_type",
   "invalid_enum",
   "unexpected_property",

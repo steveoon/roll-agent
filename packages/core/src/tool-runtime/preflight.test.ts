@@ -30,6 +30,26 @@ const generateReplyTool: AgentTool = {
   },
 };
 
+const ingestionTool: AgentTool = {
+  name: "sync_config",
+  description: "Sync structured config",
+  inputSchema: {
+    type: "object",
+    properties: {
+      name: {
+        type: "string",
+        description: "配置名称",
+      },
+      metadata: {
+        type: "object",
+        description: "开放对象配置，需显式提供 JSON",
+      },
+    },
+    required: ["name", "metadata"],
+    additionalProperties: false,
+  },
+};
+
 describe("tool-runtime preflight", () => {
   it("detects missing required tool inputs", () => {
     const issues = getInputValidationIssues(generateReplyTool, {});
@@ -119,6 +139,20 @@ describe("tool-runtime preflight", () => {
     });
   });
 
+  it("flags required open-ended object fields as requiring explicit input", () => {
+    const issues = getInputValidationIssues(ingestionTool, {
+      name: "demo",
+    });
+    assert.deepEqual(issues, [
+      {
+        path: "metadata",
+        code: "requires_explicit_input",
+        message: "metadata 无法从自然语言可靠提取，需要显式提供",
+        description: "开放对象配置，需显式提供 JSON",
+      },
+    ]);
+  });
+
   it("formats a human-readable validation message", () => {
     const message = formatValidationIssuesMessage("smart-reply-agent", "generate_reply", [
       {
@@ -130,5 +164,26 @@ describe("tool-runtime preflight", () => {
     ]);
     assert.match(message, /smart-reply-agent\.generate_reply/);
     assert.match(message, /candidateMessage/);
+  });
+
+  it("formats explicit-input guidance separately from missing required fields", () => {
+    const message = formatValidationIssuesMessage("smart-reply-agent", "sync_config", [
+      {
+        path: "candidateMessage",
+        code: "missing_required",
+        message: "candidateMessage 为必填字段",
+        description: "候选人的原始消息",
+      },
+      {
+        path: "metadata",
+        code: "requires_explicit_input",
+        message: "metadata 无法从自然语言可靠提取，需要显式提供",
+        description: "开放对象配置，需显式提供 JSON",
+      },
+    ]);
+
+    assert.match(message, /还缺少必填信息：candidateMessage/);
+    assert.match(message, /无法从自然语言可靠提取/);
+    assert.match(message, /--input-json/);
   });
 });

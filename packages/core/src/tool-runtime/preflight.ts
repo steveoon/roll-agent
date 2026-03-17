@@ -9,6 +9,7 @@ import {
   getSchemaProperties,
   getSchemaRequired,
   getSchemaType,
+  isNaturallyExtractableSchema,
   isJsonSchemaObject,
   isPlainObject,
 } from "./schema.ts";
@@ -138,8 +139,13 @@ function validateObjectInput(
     const fieldPath = pathPrefix ? `${pathPrefix}.${fieldName}` : fieldName;
     issues.push({
       path: fieldPath,
-      code: "missing_required",
-      message: `${fieldPath} 为必填字段`,
+      code: fieldSchema && !isNaturallyExtractableSchema(fieldSchema)
+        ? "requires_explicit_input"
+        : "missing_required",
+      message:
+        fieldSchema && !isNaturallyExtractableSchema(fieldSchema)
+          ? `${fieldPath} 无法从自然语言可靠提取，需要显式提供`
+          : `${fieldPath} 为必填字段`,
       ...(description ? { description } : {}),
     });
   }
