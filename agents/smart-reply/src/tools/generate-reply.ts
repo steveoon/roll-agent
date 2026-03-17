@@ -28,6 +28,30 @@ export const generateReply = defineTool({
     stage: z.string(),
     shouldExchangeWechat: z.boolean().optional(),
     error: z.string().optional(),
+    diagnostics: z
+      .object({
+        subGoals: z.array(z.string()),
+        needs: z.array(z.string()),
+        riskFlags: z.array(z.string()),
+        reasoningText: z.string(),
+        extractedInfo: z.object({
+          mentionedBrand: z.string().nullable(),
+          city: z.string().nullable(),
+          specificAge: z.number().nullable(),
+          hasUrgency: z.boolean().nullable(),
+          preferredSchedule: z.string().nullable(),
+        }),
+        ageGate: z.object({
+          enabled: z.boolean(),
+          status: z.string(),
+          strategy: z.string(),
+        }),
+        resolvedBrand: z.string(),
+        storeCount: z.number(),
+        detailLevel: z.string(),
+        factGateRewritten: z.boolean(),
+      })
+      .optional(),
   }),
   execute: async (input, ctx) => {
     ctx.logger.info(`Processing message: ${input.candidateMessage.slice(0, 50)}...`);
@@ -63,12 +87,37 @@ export const generateReply = defineTool({
       `Reply generated. Stage: ${result.turnPlan.stage}, Confidence: ${result.confidence}`,
     );
 
+    const debug = result.debugInfo;
     return {
       suggestedReply: result.suggestedReply,
       confidence: result.confidence,
       stage: result.turnPlan.stage,
       shouldExchangeWechat: result.shouldExchangeWechat,
       error: result.error?.userMessage,
+      diagnostics: debug
+        ? {
+            subGoals: result.turnPlan.subGoals,
+            needs: result.turnPlan.needs,
+            riskFlags: result.turnPlan.riskFlags,
+            reasoningText: result.turnPlan.reasoningText,
+            extractedInfo: {
+              mentionedBrand: result.turnPlan.extractedInfo.mentionedBrand ?? null,
+              city: result.turnPlan.extractedInfo.city ?? null,
+              specificAge: result.turnPlan.extractedInfo.specificAge ?? null,
+              hasUrgency: result.turnPlan.extractedInfo.hasUrgency ?? null,
+              preferredSchedule: result.turnPlan.extractedInfo.preferredSchedule ?? null,
+            },
+            ageGate: {
+              enabled: debug.appliedStrategy.enabled,
+              status: debug.gateStatus,
+              strategy: debug.appliedStrategy.strategy,
+            },
+            resolvedBrand: debug.resolvedBrand,
+            storeCount: debug.storeCount,
+            detailLevel: debug.detailLevel,
+            factGateRewritten: result.factGateRewritten,
+          }
+        : undefined,
     };
   },
 });
