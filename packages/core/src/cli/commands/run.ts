@@ -1,9 +1,11 @@
 import { defineCommand } from "citty";
 import { loadConfig } from "../../config/loader.ts";
-import { getAgentEnv } from "../../config/schema.ts";
+import { getAgentEnv } from "../../config/helpers.ts";
 import { AgentStore } from "../../registry/store.ts";
 import { McpClientManager } from "../../mcp/client-manager.ts";
 import { createProviderModel } from "../../llm/providers.ts";
+import { formatValidationIssuesMessage } from "../../tool-runtime/messages.ts";
+import { preflightToolCall } from "../../tool-runtime/preflight.ts";
 import { log } from "../utils/output.ts";
 
 export default defineCommand({
@@ -58,6 +60,13 @@ export default defineCommand({
       if (!targetTool) {
         const available = tools.map((t) => t.name).join(", ");
         log.error(`Tool "${args.tool}" 不存在。可用 tools: ${available}`);
+        process.exitCode = 1;
+        return;
+      }
+
+      const preflightResult = preflightToolCall(targetTool, toolArgs);
+      if (!preflightResult.ok) {
+        log.error(formatValidationIssuesMessage(agent.skill.name, args.tool, preflightResult.issues));
         process.exitCode = 1;
         return;
       }

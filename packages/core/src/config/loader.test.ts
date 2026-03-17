@@ -4,7 +4,8 @@ import { writeFileSync, mkdirSync, rmSync } from "node:fs";
 import { resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { randomUUID } from "node:crypto";
-import { loadConfig } from "./loader.ts";
+import { loadConfig, validateConfigText } from "./loader.ts";
+import { getAgentEnv } from "./helpers.ts";
 
 /** 创建临时目录用于测试 */
 function makeTmpDir(): string {
@@ -74,6 +75,30 @@ agents:
     assert.equal(config.router.confirmThreshold, 0.5);
   });
 
+  it("should resolve kebab-case agent env keys through getAgentEnv", () => {
+    const yaml = `
+llm:
+  default-provider: anthropic
+  default-model: test
+  providers: {}
+router:
+  mode: declarative
+agents:
+  data-dir: /tmp/test
+  env:
+    smart-reply-agent:
+      ANTHROPIC_API_KEY: test-key
+      DULIDAY_TOKEN: duliday-token
+`;
+    writeFileSync(resolve(tmpDir, "roll.config.yaml"), yaml);
+    const { config } = loadConfig({ cwd: tmpDir });
+
+    assert.deepEqual(getAgentEnv(config, "smart-reply-agent"), {
+      ANTHROPIC_API_KEY: "test-key",
+      DULIDAY_TOKEN: "duliday-token",
+    });
+  });
+
   it("should resolve environment variables", () => {
     process.env["ROLL_TEST_API_KEY"] = "resolved-key";
     const yaml = `
@@ -127,6 +152,16 @@ agents:
     );
   });
 
+  it("should throw with line and column for YAML syntax errors", () => {
+    writeFileSync(resolve(tmpDir, "roll.config.yaml"), "llm: [\n");
+    assert.throws(
+      () => loadConfig({ cwd: tmpDir }),
+      (err: Error) =>
+        err.message.includes("Invalid YAML syntax in config file") &&
+        err.message.includes("line 2, column 1"),
+    );
+  });
+
   it("should expand tilde in dataDir", () => {
     const yaml = `
 llm:
@@ -155,5 +190,23 @@ llm:
     const { config } = loadConfig({ cwd: tmpDir });
     assert.equal(config.router.mode, "declarative");
     assert.ok(config.agents.dataDir);
+  });
+
+  it("should validate config text against schema", () => {
+    const yaml = `
+llm:
+  default-provider: anthropic
+  default-model: test
+  providers: {}
+router:
+  mode: invalid
+agents:
+  data-dir: /tmp/test
+`;
+    assert.throws(
+      () => validateConfigText(yaml, resolve(tmpDir, "roll.config.yaml")),
+      (err: Error) =>
+        err.message.includes("Config validation failed") && err.message.includes("router.mode"),
+    );
   });
 });

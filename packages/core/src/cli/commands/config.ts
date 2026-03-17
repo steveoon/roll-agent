@@ -2,8 +2,8 @@ import { defineCommand } from "citty";
 import { readFileSync, writeFileSync, existsSync } from "node:fs";
 import { resolve } from "node:path";
 import { createInterface } from "node:readline/promises";
-import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
-import { loadConfig } from "../../config/loader.ts";
+import { stringify as stringifyYaml } from "yaml";
+import { loadConfig, parseConfigDocument, validateConfigText } from "../../config/loader.ts";
 
 export default defineCommand({
   meta: { description: "管理全局配置" },
@@ -13,23 +13,29 @@ export default defineCommand({
     value: { type: "positional", description: "配置值（set 时使用）", required: false },
   },
   async run({ args }) {
-    if (args.action === "init") {
-      await initConfig();
-      return;
-    }
+    try {
+      if (args.action === "init") {
+        await initConfig();
+        return;
+      }
 
-    if (args.action === "get") {
-      getConfig(args.key);
-      return;
-    }
+      if (args.action === "get") {
+        getConfig(args.key);
+        return;
+      }
 
-    if (args.action === "set") {
-      setConfig(args.key, args.value);
-      return;
-    }
+      if (args.action === "set") {
+        setConfig(args.key, args.value);
+        return;
+      }
 
-    console.error(`✗ 未知操作: ${args.action}。可用: init, get, set`);
-    process.exitCode = 1;
+      console.error(`✗ 未知操作: ${args.action}。可用: init, get, set`);
+      process.exitCode = 1;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      console.error(`✗ ${message}`);
+      process.exitCode = 1;
+    }
   },
 });
 
@@ -38,6 +44,13 @@ async function initConfig(): Promise<void> {
   const configPath = resolve(process.cwd(), "roll.config.yaml");
 
   if (existsSync(configPath)) {
+    try {
+      validateConfigText(readFileSync(configPath, "utf-8"), configPath);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      console.error(`⚠ 现有配置文件存在问题:\n${message}`);
+    }
+
     console.error(`⚠ 配置文件已存在: ${configPath}`);
     const rl = createInterface({ input: process.stdin, output: process.stderr });
     const answer = await rl.question("是否覆盖？(y/N) ");
@@ -50,9 +63,12 @@ async function initConfig(): Promise<void> {
 
   const rl = createInterface({ input: process.stdin, output: process.stderr });
 
-  const provider = (await rl.question("默认 LLM provider (anthropic/openai/qwen) [anthropic]: ")) || "anthropic";
-  const model = (await rl.question("默认 model [claude-sonnet-4-20250514]: ")) || "claude-sonnet-4-20250514";
-  const apiKeyEnv = (await rl.question("API Key 环境变量名 [ANTHROPIC_API_KEY]: ")) || "ANTHROPIC_API_KEY";
+  const provider =
+    (await rl.question("默认 LLM provider (anthropic/openai/qwen) [anthropic]: ")) || "anthropic";
+  const model =
+    (await rl.question("默认 model [claude-sonnet-4-20250514]: ")) || "claude-sonnet-4-20250514";
+  const apiKeyEnv =
+    (await rl.question("API Key 环境变量名 [ANTHROPIC_API_KEY]: ")) || "ANTHROPIC_API_KEY";
 
   rl.close();
 
@@ -70,6 +86,7 @@ agents:
   data-dir: ~/.roll-agent/agents
 `;
 
+  validateConfigText(yaml, configPath);
   writeFileSync(configPath, yaml, "utf-8");
   console.log(`✓ 配置文件已创建: ${configPath}`);
 }
@@ -134,7 +151,7 @@ function setConfig(key: string | undefined, value: string | undefined): void {
 
   // 读取原始 YAML 为 JS 对象
   const raw = readFileSync(configPath, "utf-8");
-  const doc = (parseYaml(raw) ?? {}) as Record<string, unknown>;
+  const doc = parseConfigDocument(raw, configPath);
 
   // 按点号路径设置值（使用 kebab-case 键匹配 YAML 格式）
   const parts = key.split(".");
@@ -159,7 +176,9 @@ function setConfig(key: string | undefined, value: string | undefined): void {
 
   current[lastKey] = parsed;
 
-  writeFileSync(configPath, stringifyYaml(doc, { lineWidth: 0 }), "utf-8");
+  const nextYaml = stringifyYaml(doc, { lineWidth: 0 });
+  validateConfigText(nextYaml, configPath);
+  writeFileSync(configPath, nextYaml, "utf-8");
   console.log(`✓ ${key} = ${String(parsed)}`);
   console.error(`  (已写入: ${configPath})`);
 }
