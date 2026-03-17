@@ -10,6 +10,13 @@
 
 ## 核心抽象
 
+最近这套架构又补齐了几个关键能力：
+
+- 路由结果拆成了“先选 tool 的 `RouteSelection`”和“带输入可执行的 `RouteDecision`”
+- commander 新增了 `tool-runtime` 适配层，统一负责参数提取、preflight 校验和调用前错误分类
+- `ask` 改成两阶段：路由与提参分离
+- `run` 增加了显式结构化输入能力：`--input-json` / `--input-file`
+
 ### Tool 抽象
 
 `defineTool` 让每个 tool 以统一结构声明：
@@ -19,6 +26,20 @@
 - 执行函数（业务逻辑）
 
 这样可以把“协议细节”从“业务函数”中分离出去。
+
+`roll-core` 对 tool 的调用也依赖这层 schema：`roll ask` 会先选择 tool，再按 tool 的 `inputSchema` 提取参数。因此，输入 schema 不只是类型定义，也是 commander 的调用契约。
+
+这带来一个重要约束：
+
+- 字段明确、描述充分的对象 schema，适合 `roll ask` 从自然语言提参
+- 开放对象、任意 map、复杂 JSON payload，不适合让 `ask` 猜测
+
+因此 commander 采用的原则是：**原始 `inputSchema` 的类型语义不可被提参适配层篡改。** 如果某个必填字段无法从自然语言可靠提取（例如 `z.record()`），`ask` 会返回需要显式输入，而不是把 `object` 偷换成 `string` 之类的伪兼容 schema。
+
+这也是为什么：
+
+- 面向自然语言的 tool，应该尽量使用字段清晰的输入对象
+- 面向程序化调用的 tool，应该明确支持 `roll run --input-json` / `--input-file`
 
 ### Agent 抽象
 

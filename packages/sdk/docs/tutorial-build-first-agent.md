@@ -8,6 +8,7 @@
 - 一个 `echo-agent` 项目
 - 一个可调用的 `echo` tool
 - 可通过 `roll run` 成功执行
+- 并理解什么时候该用 `roll ask`，什么时候该改用 `roll run --input-json`
 
 ## 前置条件
 
@@ -104,6 +105,13 @@ roll run echo-agent echo --text "hello"
 
 - `roll agent list` 中能看到 `echo-agent`
 - `roll run` 返回 JSON 文本，包含 `echo: hello`
+
+如果后续你的 tool 需要开放对象或复杂 JSON 输入，也可以这样调用：
+
+```bash
+roll run my-agent some_tool --input-json '{"payload":{"foo":"bar"}}'
+roll run my-agent some_tool --input-file ./payload.json
+```
 
 ## 下一步
 

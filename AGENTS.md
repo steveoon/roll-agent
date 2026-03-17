@@ -141,6 +141,22 @@ SKILL.md 的 frontmatter 用于注册元数据，**body 正文内容**会被 `ll
 
 加载管线：YAML 解析 → kebab-case→camelCase → `${ENV_VAR}` 替换 → 深度合并默认值 → Zod 校验 → `~/` 路径展开。
 
+### `roll ask` 两阶段调用与 Tool Schema 语义不可篡改原则
+
+`roll ask` 将自然语言转为 tool 调用，分两阶段：
+
+1. **路由阶段**（`llm-router.ts`）— LLM 只选择 agent + tool，不提取参数
+2. **提参阶段**（`extraction-schema.ts` / `argument-extractor.ts`）— LLM 按 tool `inputSchema` 提取参数，preflight 校验后再调用
+
+**核心原则：extraction schema 不得改写原始 tool `inputSchema` 的类型语义。**
+
+- 原始 `inputSchema` 是 MCP tool 的契约，preflight 和 `callTool()` 始终以它为准
+- extraction schema 只做“适配 LLM structured output”的变换，例如 `additionalProperties: false`、provider 兼容的 `required` 处理
+- **不可提取的字段必须剔除，不得降级类型**。例如 `z.record()` 这类开放 object 无法从自然语言可靠提取，应从 extraction schema 中移除，让 preflight 返回 `needs_input` / `requires_explicit_input`
+- 这类参数由 `roll run --input-json` 或上层编排器显式提供
+
+**禁止的反模式：** 为兼容某个 provider 的 structured output 限制，把合法 tool 输入的 schema 类型从 `object` 改成 `string`。这会导致 extraction 产出的类型与 preflight 期望的类型前后不一致，让一整类合法 MCP tool 在 `roll ask` 下不可用。
+
 ### CLI 懒加载
 
 citty 子命令通过动态 `import()` 懒加载，CLI 启动不会加载所有命令模块。

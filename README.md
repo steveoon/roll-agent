@@ -67,6 +67,14 @@ roll --help
 
 ## 快速开始
 
+## 最近关键改进
+
+- `roll ask` 现在是**两阶段调用**：先路由到 `agent + tool`，再按目标 tool 的真实 `inputSchema` 提取参数，不再让 LLM 自由发明参数名。
+- `roll-core` 新增了 `tool-runtime` 适配层：统一做参数提取、preflight 校验、错误分类和用户提示。
+- 路由结果已拆成 `RouteSelection` 与 `RouteDecision`：先选 tool，再补参数，CLI 和上层编排器都更容易复用这套状态机。
+- `roll run` 已支持 `--input-json` / `--input-file`：适合显式传递复杂对象、开放对象和批量 payload。
+- `smart-reply-agent` 的品牌数据同步已从“手工 push 数据”改成“从 Duliday pull 数据”，并升级为新的品牌数据模型：`meta + brands[] + stores[] + positions[]`。
+
 ### 1. 初始化配置
 
 ```bash
@@ -138,9 +146,23 @@ agents:
 # 声明式调用（明确指定 Agent + Tool）
 pnpm dev -- run boss-reply-agent get_unread --limit 10
 
+# 显式传入结构化 JSON（适合 object / record / 复杂 payload）
+pnpm dev -- run smart-reply-agent sync_brand_data \
+  --input-json '{"cityName":"上海市","brandAlias":"肯德基"}'
+
+# 或从文件读取完整 payload
+pnpm dev -- run some-agent sync_config --input-file ./payload.json
+
 # LLM 智能路由（自然语言，自动选择 Agent + Tool）
 pnpm dev -- ask "帮我查看未读消息"
 ```
+
+说明：
+
+- `roll run` 现在同时支持 `--key value`、`--input-json`、`--input-file`
+- `--input-json` / `--input-file` 适合传递复杂对象参数；命令行 `--key value` 更适合简单标量参数
+- `roll ask` 适合“自然语言可以可靠映射到 tool 参数”的场景；如果某个必填字段是开放对象（如 `z.record()` / 任意 JSON payload），`ask` 会返回 `needs_input`，提示改用 `roll run --input-json` 或上层编排器显式提供
+- `roll ask` 不会篡改原始 tool schema 的类型语义；对于无法可靠从自然语言提取的字段，会显式降级为“需要显式输入”，而不是伪造错误类型的参数
 
 ## CLI 命令参考
 
@@ -155,7 +177,7 @@ roll agent stop <name>          提示手动停止外部服务（stdio 无需手
 roll agent info <name>          查看 Agent 详情（SKILL.md + tools）
 roll agent health               健康检查（stdio 按需模式 / streamable-http 可达性）
 
-roll run <agent> <tool> [args]  声明式调用（--key value 传参）
+roll run <agent> <tool> [args]  声明式调用（支持 --key value / --input-json / --input-file）
 roll ask "<message>"            LLM 智能路由
 
 roll config init                交互式初始化配置
