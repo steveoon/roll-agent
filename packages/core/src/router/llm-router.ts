@@ -2,14 +2,13 @@ import { generateText, Output } from "ai";
 import { z } from "zod";
 import type { LanguageModelV3 } from "@ai-sdk/provider";
 import type { RegisteredAgent } from "../types/agent.ts";
-import type { RouteDecision } from "../types/router.ts";
+import type { RouteSelection } from "../types/router.ts";
 import { asConfidence } from "../types/router.ts";
 
 /** LLM 路由决策的 Zod schema */
-const routeDecisionSchema = z.object({
+const routeSelectionSchema = z.object({
   agentName: z.string().describe("选择的 Agent 名称"),
   toolName: z.string().describe("选择的 Tool 名称"),
-  input: z.record(z.string(), z.unknown()).describe("传递给 Tool 的参数"),
   confidence: z.number().min(0).max(1).describe("决策置信度 0-1"),
 });
 
@@ -40,7 +39,7 @@ export async function routeWithLLM(
   message: string,
   agents: ReadonlyArray<RegisteredAgent>,
   model: LanguageModelV3,
-): Promise<RouteDecision> {
+): Promise<RouteSelection> {
   const catalog = buildAgentCatalog(agents);
 
   const systemPrompt = `你是 Roll Agent 的智能路由器。根据用户的自然语言请求，从已注册的 Agent 中选择最合适的 Agent 和 Tool。
@@ -50,13 +49,13 @@ ${catalog}
 
 规则：
 - 选择与用户意图最匹配的 Agent 和 Tool
-- 如果用户指定了参数（如数量限制），提取到 input 对象中
+- 这一阶段只负责选择 Agent 和 Tool，不要推测或生成 Tool 参数
 - confidence 字段表示你对这个匹配的把握程度（0-1）
 - 如果没有合适的 Agent 匹配，confidence 应该很低（< 0.3）`;
 
   const { output } = await generateText({
     model,
-    output: Output.object({ schema: routeDecisionSchema }),
+    output: Output.object({ schema: routeSelectionSchema }),
     system: systemPrompt,
     prompt: message,
   });
@@ -68,7 +67,6 @@ ${catalog}
   return {
     agentName: output.agentName,
     toolName: output.toolName,
-    input: output.input,
     confidence: asConfidence(Math.min(1, Math.max(0, output.confidence))),
   };
 }
