@@ -116,6 +116,7 @@ export const PositionSchema = z.object({
 
 export const StoreSchema = z.object({
   id: z.string(),
+  brandId: z.string(),
   name: z.string(),
   city: z.string().optional(),
   location: z.string(),
@@ -123,7 +124,6 @@ export const StoreSchema = z.object({
   subarea: z.string(),
   coordinates: CoordinatesSchema,
   positions: z.array(PositionSchema),
-  brand: z.string(),
 });
 
 // ========== 回复上下文 ==========
@@ -149,22 +149,22 @@ export const ReplyContextSchema = z.enum([
 
 // ========== 品牌与数据 ==========
 
-export const BaseTemplatesSchema = z.record(ReplyContextSchema, z.array(z.string()));
+export const BrandDatasetMetaSchema = z.object({
+  defaultBrandId: z.string().optional(),
+  syncedAt: z.string().optional(),
+  source: z.string().optional(),
+});
 
-export const RequiredTemplatesSchema = BaseTemplatesSchema.refine(
-  (val) => val !== undefined && typeof val === "object",
-  { message: "品牌配置必须包含templates字段" },
-);
-
-export const BrandConfigSchema = z.object({
-  templates: RequiredTemplatesSchema,
+export const BrandSchema = z.object({
+  id: z.string(),
+  name: z.string(),
+  aliases: z.array(z.string()).optional(),
+  stores: z.array(StoreSchema),
 });
 
 export const ZhipinDataSchema = z.object({
-  city: z.string(),
-  stores: z.array(StoreSchema),
-  brands: z.record(z.string(), BrandConfigSchema),
-  defaultBrand: z.string().optional(),
+  meta: BrandDatasetMetaSchema,
+  brands: z.array(BrandSchema),
 });
 
 // ========== 消息分类 ==========
@@ -211,7 +211,8 @@ export type TimeSlotAvailability = z.infer<typeof TimeSlotAvailabilitySchema>;
 export type SchedulingFlexibility = z.infer<typeof SchedulingFlexibilitySchema>;
 export type Position = z.infer<typeof PositionSchema>;
 export type Store = z.infer<typeof StoreSchema>;
-export type BrandConfig = z.infer<typeof BrandConfigSchema>;
+export type BrandDatasetMeta = z.infer<typeof BrandDatasetMetaSchema>;
+export type Brand = z.infer<typeof BrandSchema>;
 export type ZhipinData = z.infer<typeof ZhipinDataSchema>;
 export type ReplyContext = z.infer<typeof ReplyContextSchema>;
 export type MessageClassification = z.infer<typeof MessageClassificationSchema>;

@@ -5,6 +5,11 @@ import type {
   SalaryDetails,
   CandidateInfo,
 } from "../types/zhipin.ts";
+import {
+  findBrandByName,
+  getAvailableBrandNames,
+  resolveDefaultBrandName,
+} from "../services/brand-config-selectors.ts";
 import type { BrandPriorityStrategy } from "../types/config.ts";
 import type { BrandResolutionInput, BrandResolutionOutput } from "../types/brand-resolution.ts";
 import type { StoreWithDistance } from "../types/geocoding.ts";
@@ -322,9 +327,9 @@ export async function buildContextInfoByNeeds(
 
   const brandResolution = resolveBrandConflict({
     uiSelectedBrand,
-    configDefaultBrand: data.defaultBrand,
+    configDefaultBrand: resolveDefaultBrandName(data),
     conversationBrand: toolBrand || undefined,
-    availableBrands: Object.keys(data.brands),
+    availableBrands: getAvailableBrandNames(data),
     strategy: brandPriorityStrategy || "smart",
     aliasMap,
   });
@@ -334,7 +339,8 @@ export async function buildContextInfoByNeeds(
     `[品牌解析] 工具传参: ${toolBrand ?? "(未指定)"} → 结果: ${targetBrand} (${brandResolution.matchType}, ${brandResolution.source})`,
   );
 
-  const brandStores = data.stores.filter((store) => store.brand === targetBrand);
+  const targetBrandData = findBrandByName(data, targetBrand);
+  const brandStores = targetBrandData?.stores ?? [];
   let relevantStores = brandStores;
 
   if (relevantStores.length > 0) {

@@ -23,7 +23,7 @@ export const ModelConfigSchema = z.object({
 // ========== Classification Agent Schema ==========
 
 export const BrandDataSchema = z.object({
-  city: z.string(),
+  city: z.string().optional(),
   defaultBrand: z.string(),
   availableBrands: z.array(z.string()),
   storeCount: z.number(),

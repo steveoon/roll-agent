@@ -4,6 +4,12 @@ import {
   DEFAULT_PROVIDER_CONFIGS,
 } from "../ai/model-registry.ts";
 import type { ModelId } from "../ai/model-registry.ts";
+import {
+  getAllStores,
+  getAvailableBrandNames,
+  resolveDefaultBrandName,
+  resolvePrimaryCity,
+} from "../services/brand-config-selectors.ts";
 import type { ZhipinData, MessageClassification, CandidateInfo } from "../types/zhipin.ts";
 import type { BrandPriorityStrategy } from "../types/config.ts";
 import type { StoreWithDistance } from "../types/geocoding.ts";
@@ -284,11 +290,12 @@ export async function generateSmartReply(
   } = options;
 
   const providerConfigs = modelConfig?.providerConfigs || DEFAULT_PROVIDER_CONFIGS;
+  const primaryCity = resolvePrimaryCity(configData);
   const brandData = {
-    city: configData.city,
-    defaultBrand: configData.defaultBrand || Object.keys(configData.brands)[0] || "",
-    availableBrands: Object.keys(configData.brands),
-    storeCount: configData.stores.length,
+    ...(primaryCity ? { city: primaryCity } : {}),
+    defaultBrand: resolveDefaultBrandName(configData),
+    availableBrands: getAvailableBrandNames(configData),
+    storeCount: getAllStores(configData).length,
   };
 
   const turnPlan = await planTurn(candidateMessage, {
@@ -318,10 +325,11 @@ export async function generateSmartReply(
 
   const candidateAge = resolveCandidateAge(turnPlan, candidateInfo);
   const regionName = resolveRegionName(turnPlan, candidateInfo);
+  const ageEligibilityCity = turnPlan.extractedInfo.city ?? resolvePrimaryCity(configData, resolvedBrand);
   const ageEligibility = await evaluateAgeEligibility({
     ...(candidateAge !== undefined ? { age: candidateAge } : {}),
     brandAlias: resolvedBrand,
-    cityName: turnPlan.extractedInfo.city ?? configData.city,
+    ...(typeof ageEligibilityCity === "string" ? { cityName: ageEligibilityCity } : {}),
     ...(regionName !== undefined ? { regionName } : {}),
     ...(replyPolicy?.qualificationPolicy?.age !== undefined
       ? { strategy: replyPolicy.qualificationPolicy.age }

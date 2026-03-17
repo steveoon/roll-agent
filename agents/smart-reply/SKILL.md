@@ -12,8 +12,8 @@ metadata:
 
 ## Tools
 
-- `generate_reply` — 根据候选人消息生成智能回复。输入候选人消息、对话历史、候选人信息等，输出建议回复文本、置信度、漏斗阶段等。内部流程：回合规划 → needs 驱动上下文构建 → 年龄资格校验 → 策略化回复生成 → FactGate 校验。
-- `sync_brand_data` — 同步品牌配置数据（门店、岗位、薪资等）和回复策略到本地。Agent 运行依赖该数据，首次使用前需先调用此工具写入数据。
+- `generate_reply(candidateMessage, conversationHistory?, candidateInfo?, preferredBrand?, channelType?, defaultWechatId?, industryVoiceId?, modelConfig?)` — 根据候选人消息生成智能回复。输出建议回复文本、置信度、漏斗阶段等。内部流程：回合规划 → needs 驱动上下文构建 → 年龄资格校验 → 策略化回复生成 → FactGate 校验。
+- `sync_brand_data(cityName, brandAlias?)` — 从 Duliday API 拉取并同步品牌配置数据（门店、岗位、薪资等）到本地。`cityName` 为必填城市名称（如"上海市"），`brandAlias` 为可选品牌别名过滤。Agent 运行依赖该数据，首次使用前需先调用此工具同步。
 
 ## Environment Variables
 

@@ -1,4 +1,11 @@
-import { z } from "zod";
+import {
+  fetchJobListPage,
+  getDulidayToken,
+  getDulidayJobListEndpoint,
+  extractResults,
+  buildCityCandidates,
+  buildBrandCandidates,
+} from "../services/duliday-api.ts";
 
 export type AgeEligibilityStatus = "pass" | "fail" | "unknown";
 
@@ -40,27 +47,7 @@ const fallbackPolicy: AgeQualificationPolicy = {
   redirectPriority: "low",
 };
 
-const jobListResponseSchema = z.object({
-  data: z
-    .object({
-      result: z.array(z.unknown()).optional(),
-      list: z.array(z.unknown()).optional(),
-      total: z.number().optional(),
-    })
-    .nullable()
-    .optional(),
-  result: z.array(z.unknown()).optional(),
-});
-
-const JOB_LIST_CACHE_TTL_MS = 60_000;
 const JOB_LIST_PAGE_SIZE = 200;
-let jobListCache: { cacheKey: string; payload: unknown; fetchedAt: number } | null = null;
-let inflightJobListRequest: { cacheKey: string; promise: Promise<unknown> } | null = null;
-
-function getDulidayJobListEndpoint(): string | undefined {
-  const endpoint = process.env.DULIDAY_JOB_LIST_URL;
-  return typeof endpoint === "string" && endpoint.trim().length > 0 ? endpoint : undefined;
-}
 
 function normalizeText(value: string | null | undefined): string {
   return (value ?? "").trim().toLowerCase();
@@ -112,99 +99,6 @@ function buildAppliedStrategy(
   return { ...effective, status, strategy };
 }
 
-function extractResults(payload: unknown): { items: unknown[]; total: number } {
-  const parsed = jobListResponseSchema.safeParse(payload);
-  if (!parsed.success) return { items: [], total: 0 };
-  const data = parsed.data;
-  const items =
-    data.data?.result ?? data.data?.list ?? (Array.isArray(data.result) ? data.result : []);
-  const total = data.data?.total ?? (Array.isArray(items) ? items.length : 0);
-  return { items: Array.isArray(items) ? items : [], total: typeof total === "number" ? total : 0 };
-}
-
-function normalizeName(value: string | null | undefined): string {
-  return (value ?? "").trim();
-}
-
-function buildCityCandidates(cityName?: string | null): string[] {
-  const city = normalizeName(cityName);
-  if (!city) return [];
-  const candidates = new Set<string>([city]);
-  if (city.endsWith("市")) candidates.add(city.slice(0, -1));
-  else candidates.add(`${city}市`);
-  return Array.from(candidates).filter(Boolean);
-}
-
-function buildBrandCandidates(brandAlias?: string | null, cityName?: string | null): string[] {
-  const brand = normalizeName(brandAlias);
-  if (!brand) return [];
-  const candidates = new Set<string>([brand]);
-  const cityCandidates = buildCityCandidates(cityName);
-  for (const city of cityCandidates) {
-    if (brand.startsWith(city)) {
-      const stripped = brand.slice(city.length).trim();
-      if (stripped) candidates.add(stripped);
-    }
-  }
-  return Array.from(candidates).filter(Boolean);
-}
-
-async function fetchJobList(
-  token: string,
-  endpoint: string,
-  options?: { brandAlias?: string | null | undefined; cityName?: string | null | undefined },
-): Promise<unknown> {
-  const shouldUseCache = process.env.NODE_ENV !== "test";
-  const brandCandidates = buildBrandCandidates(options?.brandAlias, options?.cityName);
-  const cityCandidates = buildCityCandidates(options?.cityName);
-  const cacheKey = JSON.stringify({ token, brandCandidates, cityCandidates });
-
-  const now = Date.now();
-  if (
-    shouldUseCache &&
-    jobListCache &&
-    jobListCache.cacheKey === cacheKey &&
-    now - jobListCache.fetchedAt < JOB_LIST_CACHE_TTL_MS
-  ) {
-    return jobListCache.payload;
-  }
-  if (shouldUseCache && inflightJobListRequest?.cacheKey === cacheKey) {
-    return inflightJobListRequest.promise;
-  }
-
-  const requestPromise = (async () => {
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 20000);
-    const queryParam: Record<string, unknown> = {};
-    if (brandCandidates.length > 0) queryParam.brandAliasList = brandCandidates;
-    if (cityCandidates.length > 0) queryParam.cityNameList = cityCandidates;
-    const requestBody = {
-      pageNum: 1,
-      pageSize: JOB_LIST_PAGE_SIZE,
-      queryParam,
-      options: { includeBasicInfo: true, includeHiringRequirement: true },
-    };
-    try {
-      const response = await fetch(endpoint, {
-        method: "POST",
-        headers: { "Content-Type": "application/json", "Duliday-Token": token },
-        body: JSON.stringify(requestBody),
-        signal: controller.signal,
-      });
-      if (!response.ok) throw new Error(`Duliday job list fetch failed: ${response.status}`);
-      const payload = await response.json();
-      jobListCache = { cacheKey, payload, fetchedAt: Date.now() };
-      return payload;
-    } finally {
-      clearTimeout(timeoutId);
-      inflightJobListRequest = null;
-    }
-  })();
-
-  if (shouldUseCache) inflightJobListRequest = { cacheKey, promise: requestPromise };
-  return requestPromise;
-}
-
 export async function evaluateAgeEligibility({
   age,
   brandAlias,
@@ -218,7 +112,7 @@ export async function evaluateAgeEligibility({
   regionName?: string | null;
   strategy?: AgeQualificationPolicy;
 }): Promise<AgeEligibilityResult> {
-  const token = process.env.DULIDAY_TOKEN;
+  const token = getDulidayToken();
   const endpoint = getDulidayJobListEndpoint();
   const summary: AgeEligibilitySummary = {
     minAgeObserved: null,
@@ -243,7 +137,10 @@ export async function evaluateAgeEligibility({
   }
 
   try {
-    const payload = await fetchJobList(token, endpoint, { brandAlias, cityName });
+    const payload = await fetchJobListPage(token, endpoint, 1, JOB_LIST_PAGE_SIZE, {
+      brandAlias: brandAlias ?? null,
+      cityName: cityName ?? null,
+    });
     const { items, total } = extractResults(payload);
     summary.total = total;
     const hasAdditionalPages = total > items.length && items.length >= JOB_LIST_PAGE_SIZE;

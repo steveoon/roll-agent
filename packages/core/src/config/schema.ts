@@ -30,11 +30,3 @@ export const rollConfigSchema = z.object({
 });
 
 export type RollConfig = z.infer<typeof rollConfigSchema>;
-
-/** 获取指定 Agent 的环境变量配置，没有则返回 undefined */
-export function getAgentEnv(
-  config: RollConfig,
-  agentName: string,
-): Readonly<Record<string, string>> | undefined {
-  return config.agents.env?.[agentName];
-}
