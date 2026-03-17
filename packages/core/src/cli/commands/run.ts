@@ -15,8 +15,8 @@ export default defineCommand({
     agent: { type: "positional", description: "Agent 名称", required: true },
     tool: { type: "positional", description: "Tool 名称", required: true },
     json: { type: "boolean", description: "JSON 格式输出", default: false },
-    inputJson: { type: "string", description: "以 JSON 字符串提供完整 tool 输入对象" },
-    inputFile: { type: "string", description: "从 JSON 文件读取完整 tool 输入对象" },
+    "input-json": { type: "string", description: "以 JSON 字符串提供完整 tool 输入对象" },
+    "input-file": { type: "string", description: "从 JSON 文件读取完整 tool 输入对象" },
   },
   async run({ args, rawArgs }) {
     const { config } = loadConfig();
