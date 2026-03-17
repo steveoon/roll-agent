@@ -42,6 +42,18 @@ export function getSchemaProperties(
   return Object.fromEntries(properties);
 }
 
+export function isNaturallyExtractableSchema(schema: object | undefined): boolean {
+  if (!schema) {
+    return false;
+  }
+
+  if (getSchemaType(schema) !== "object") {
+    return true;
+  }
+
+  return Object.keys(getSchemaProperties(schema)).length > 0;
+}
+
 export function getSchemaRequired(tool: Pick<AgentTool, "inputSchema">): ReadonlyArray<string> {
   return tool.inputSchema.required ?? [];
 }

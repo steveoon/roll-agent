@@ -1,6 +1,6 @@
 import { jsonSchema } from "ai";
 import type { AgentTool } from "../types/agent.ts";
-import { isPlainObject } from "./schema.ts";
+import { isNaturallyExtractableSchema, isPlainObject } from "./schema.ts";
 
 type AiSdkJsonSchema = Parameters<typeof jsonSchema<Readonly<Record<string, unknown>>>>[0];
 type JsonPrimitive = string | number | boolean | null;
@@ -102,22 +102,39 @@ function getSchemaProperties(
   return schema.properties;
 }
 
+/**
+ * Whether a schema describes a field that can be reliably extracted from
+ * natural language. Open-ended objects without explicit `properties`
+ * (e.g. `z.record()`) cannot — they require programmatic input via
+ * `roll run --input-json` or an upstream orchestrator.
+ *
+ * Dropping these fields from the extraction schema is intentional: the
+ * original tool inputSchema is still authoritative for preflight and
+ * callTool, so preflight will surface `needs_input` for any required
+ * field that the extractor could not produce.
+ */
+function isExtractableField(schema: JsonSchemaNode): boolean {
+  return isNaturallyExtractableSchema(schema);
+}
+
 function toExtractionSchema(schema: JsonSchemaNode, requiredByParent: boolean): JsonSchemaNode {
   const schemaType = schema.type;
   const properties = getSchemaProperties(schema);
 
   if (schemaType === "object" && properties) {
+    const requiredChildren = Array.isArray(schema.required) ? schema.required : [];
     const nextProperties = Object.fromEntries(
-      Object.entries(properties).map(([key, value]) => {
-        const requiredChildren = Array.isArray(schema.required) ? schema.required : [];
-        return [key, toExtractionSchema(value, requiredChildren.includes(key))];
-      }),
+      Object.entries(properties)
+        .filter(([, value]) => isExtractableField(value))
+        .map(([key, value]) => [key, toExtractionSchema(value, requiredChildren.includes(key))]),
     );
 
     const nextSchema: JsonSchemaNode = {
-      ...schema,
+      type: "object",
       properties: nextProperties,
       required: Object.keys(nextProperties),
+      additionalProperties: false,
+      ...(schema.description ? { description: schema.description } : {}),
     };
 
     return requiredByParent ? nextSchema : addNullability(nextSchema);

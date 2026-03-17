@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { MockLanguageModelV3 } from "ai/test";
 import type { AgentTool } from "../types/agent.ts";
 import { extractToolInput } from "./argument-extractor.ts";
+import { createExtractionSchema } from "./extraction-schema.ts";
 
 function makeMockModel(jsonText: string): MockLanguageModelV3 {
   return new MockLanguageModelV3({
@@ -55,5 +56,84 @@ describe("extractToolInput", () => {
       brandAlias: "肯德基",
       cityName: "上海市",
     });
+  });
+});
+
+type JsonSchemaLike = Record<string, unknown> & {
+  properties?: Record<string, Record<string, unknown>>;
+  additionalProperties?: boolean;
+};
+
+describe("createExtractionSchema", () => {
+  it("adds additionalProperties: false to all object nodes", () => {
+    const result = createExtractionSchema({
+      type: "object",
+      properties: {
+        name: { type: "string" },
+        nested: {
+          type: "object",
+          properties: {
+            foo: { type: "string" },
+          },
+          required: [],
+        },
+      },
+      required: ["name"],
+    }) as JsonSchemaLike;
+
+    assert.equal(result.additionalProperties, false);
+    const nestedProp = result.properties?.nested;
+    // optional object becomes nullable ["object", "null"]
+    assert.deepEqual(nestedProp?.type, ["object", "null"]);
+    assert.equal(nestedProp?.additionalProperties, false);
+  });
+
+  it("drops z.record()-like fields (object without properties) from extraction schema", () => {
+    const result = createExtractionSchema({
+      type: "object",
+      properties: {
+        message: { type: "string" },
+        config: {
+          type: "object",
+          properties: {
+            chatModel: { type: "string" },
+            providerConfigs: {
+              type: "object",
+              // no properties — z.record() pattern, not extractable from NL
+            },
+          },
+          required: [],
+        },
+      },
+      required: ["message"],
+    }) as JsonSchemaLike;
+
+    const configProp = result.properties?.config;
+    const configProperties = configProp?.properties as Record<string, Record<string, unknown>>;
+    // providerConfigs dropped entirely — not collapsed to string
+    assert.equal(configProperties?.providerConfigs, undefined);
+    // extractable sibling field retained
+    assert.ok(configProperties?.chatModel);
+  });
+
+  it("drops top-level z.record() fields, preflight catches missing required ones", () => {
+    const result = createExtractionSchema({
+      type: "object",
+      properties: {
+        name: { type: "string" },
+        metadata: {
+          type: "object",
+          // no properties — open-ended record
+        },
+      },
+      required: ["name", "metadata"],
+    }) as JsonSchemaLike;
+
+    // metadata is dropped from extraction schema
+    assert.equal(result.properties?.metadata, undefined);
+    // name is retained
+    assert.ok(result.properties?.name);
+    // required only lists extractable fields
+    assert.deepEqual(result.required, ["name"]);
   });
 });
