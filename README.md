@@ -103,12 +103,34 @@ agents:
 ### 2. 注册 Agent
 
 ```bash
-# 本地路径
+# 本地目录（开发态）
 pnpm dev -- agent add ./agents/boss-reply
+
+# 已编译 npm 包（分发态）
+pnpm dev -- agent install @roll-agent/smart-reply-agent
 
 # Git URL
 pnpm dev -- agent add https://github.com/someone/my-agent.git
+
+# 远程 MCP 服务
+pnpm dev -- agent add --remote https://example.com/mcp --name remote-agent --description "远程 Agent"
 ```
+
+如果你安装的是 `smart-reply-agent` 这类需要独立环境变量的 Agent，推荐在 `roll.config.yaml` 中通过 `agents.env` 为它单独注入配置：
+
+```yaml
+agents:
+  data-dir: ~/.roll-agent/agents
+  env:
+    smart-reply-agent:
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
+      SMART_REPLY_PROXY_BASE_URL: ${SMART_REPLY_PROXY_BASE_URL}
+      DULIDAY_TOKEN: ${DULIDAY_TOKEN}
+      DULIDAY_BRAND_LIST_URL: ${DULIDAY_BRAND_LIST_URL}
+      DULIDAY_JOB_LIST_URL: ${DULIDAY_JOB_LIST_URL}
+```
+
+这样 `roll-core` 在启动 `smart-reply-agent` 的 stdio 子进程时会自动注入这些变量，不需要用户手工在 shell 里 `export` 一大串值。
 
 ### 3. 调用 Agent
 
@@ -123,7 +145,9 @@ pnpm dev -- ask "帮我查看未读消息"
 ## CLI 命令参考
 
 ```
-roll agent add <path|url>       注册 Agent（解析 SKILL.md + 安装依赖）
+roll agent add <path|url>       注册本地目录或 Git Agent（解析 SKILL.md + 安装依赖）
+roll agent add --remote <url>   注册远程 streamable-http Agent（需配合 --name/--description）
+roll agent install <package>    安装并注册已编译 Agent 包
 roll agent remove <name>        移除 Agent
 roll agent list                 列出所有已注册 Agent
 roll agent start <name>         探测 Agent 可连接性（stdio 无需手动启动）
@@ -163,7 +187,7 @@ const greet = defineTool({
 });
 
 const agent = defineAgent({ name: "greeting-agent", tools: [greet] });
-agent.listen(); // 启动 MCP Server（stdio 模式）
+agent.listen(); // 启动 MCP Server（当前 SDK 提供 stdio 模式）
 ```
 
 配套 SKILL.md：
@@ -198,6 +222,8 @@ metadata:
 
 ```bash
 roll agent add ./wechat-agent
+# 或者直接注册远程服务
+roll agent add --remote http://localhost:8100/mcp --name wechat-agent --description "微信自动回复"
 roll run wechat-agent send_message --userId xxx --content "你好"
 ```
 

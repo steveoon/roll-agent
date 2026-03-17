@@ -48,7 +48,7 @@
 - ✅ Workspace 级别的 Agent 配置管理 → 简化为 `roll.config.yaml`
 - ✅ 声明式路由（channel → agent 映射）→ `roll run <agent> <tool>`
 - ✅ Agent 间通信（sessions_send）→ 指挥官作为中枢协调
-- ✅ 三级 Skill 体系（bundled/managed/workspace）→ 简化为 local/remote 两种模式
+- ✅ 三级 Skill 体系（bundled/managed/workspace）→ 当前落地为 local-path / installed / remote 三种交付形态
 - ❌ 不需要 20+ 消息平台适配器（垂直场景）
 - ❌ 不需要设备节点（Node pairing）
 - ❌ 不需要 WebSocket 全双工控制面（CLI 足够）
@@ -234,7 +234,9 @@ nano-agent/
 roll — 花卷 Agent，轻量级 Agent 编排系统
 
 Commands:
-  roll agent add <path|url>       注册一个 Agent（安装依赖）
+  roll agent add <path|url>       注册本地目录或 Git Agent（安装依赖）
+  roll agent add --remote <url>   注册远程 streamable-http Agent
+  roll agent install <package>    安装并注册已编译 Agent 包
   roll agent remove <name>        移除一个 Agent
   roll agent list                 列出所有已注册 Agent
   roll agent start <name>         探测 Agent 可连接性（stdio 无需手动启动）
@@ -543,7 +545,9 @@ roll run wechat-agent send_message --userId xxx --content "你好"
 
 - [x] 项目脚手架搭建（monorepo、TypeScript 严格模式、CI 基础）
 - [x] `roll.config.yaml` 配置加载与校验
-- [x] `roll agent add <path>` — SKILL.md 解析 + 依赖安装 + 注册
+- [x] `roll agent add <path>` — 本地目录注册
+- [x] `roll agent install <package>` — 已编译 Agent 包安装与注册
+- [x] `roll agent add --remote <url>` — 远程 streamable-http Agent 注册
 - [x] `roll agent list` — 列出已注册 Agent
 - [x] MCP Client Manager — stdio 传输模式
 - [x] `roll run <agent> <tool>` — 声明式调用

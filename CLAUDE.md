@@ -52,7 +52,7 @@ pnpm --filter boss-reply-agent dev
 ### CLI 命令树（citty，懒加载子命令）
 
 ```
-roll agent add|remove|list|start|stop|info   Agent 管理
+roll agent add|install|remove|list|start|stop|info   Agent 管理
 roll run <agent> <tool> [args]               声明式调用
 roll ask "<message>"                         LLM 智能路由
 roll config set|get|init                     配置管理
