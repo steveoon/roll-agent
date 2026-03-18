@@ -1,5 +1,5 @@
 {
-  "name": "boss-reply-agent",
+  "name": "browser-use-agent",
   "version": "0.0.1",
   "private": true,
   "type": "module",
@@ -10,6 +10,7 @@
   },
   "dependencies": {
     "@roll-agent/sdk": "workspace:*",
+    "@roll-agent/browser": "workspace:*",
     "zod": "^3.25.0"
   },
   "devDependencies": {

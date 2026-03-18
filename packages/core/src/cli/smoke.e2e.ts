@@ -12,17 +12,17 @@ interface CliResult {
   readonly stderr: string;
 }
 
-function runRoll(args: readonly string[], cwd: string, env: Readonly<Record<string, string>> = {}): CliResult {
+function runRoll(
+  args: readonly string[],
+  cwd: string,
+  env: Readonly<Record<string, string>> = {},
+): CliResult {
   const cliEntry = resolve(import.meta.dirname, "index.ts");
-  const result = spawnSync(
-    process.execPath,
-    ["--experimental-strip-types", cliEntry, ...args],
-    {
-      cwd,
-      encoding: "utf-8",
-      env: { ...process.env, NO_COLOR: "1", ...env },
-    },
-  );
+  const result = spawnSync(process.execPath, ["--experimental-strip-types", cliEntry, ...args], {
+    cwd,
+    encoding: "utf-8",
+    env: { ...process.env, NO_COLOR: "1", ...env },
+  });
 
   return {
     status: result.status,
@@ -45,17 +45,19 @@ agents:
 `;
 }
 
-test("e2e smoke: register boss-reply agent and run get_unread", { timeout: 120_000 }, () => {
+test("e2e smoke: register fixture agent and run ping", { timeout: 120_000 }, () => {
   const workspace = mkdtempSync(resolve(tmpdir(), `roll-e2e-${randomUUID()}-`));
 
   try {
-    const repoRoot = resolve(import.meta.dirname, "../../../../");
-    const bossAgentPath = resolve(repoRoot, "agents/boss-reply");
+    const smokeAgentPath = resolve(
+      import.meta.dirname,
+      "../../../../packages/sdk/test-fixtures/smoke-agent",
+    );
     const dataDir = resolve(workspace, "agents-data");
 
     writeFileSync(resolve(workspace, "roll.config.yaml"), buildConfigYaml(dataDir), "utf-8");
 
-    const addResult = runRoll(["agent", "add", bossAgentPath], workspace, {
+    const addResult = runRoll(["agent", "add", smokeAgentPath], workspace, {
       ROLL_SKIP_INSTALL: "1",
     });
     assert.equal(
@@ -74,9 +76,9 @@ test("e2e smoke: register boss-reply agent and run get_unread", { timeout: 120_0
     const listedAgents = JSON.parse(listResult.stdout) as ReadonlyArray<{
       readonly skill: { readonly name: string };
     }>;
-    assert.ok(listedAgents.some((agent) => agent.skill.name === "boss-reply-agent"));
+    assert.ok(listedAgents.some((agent) => agent.skill.name === "smoke-test-agent"));
 
-    const runResult = runRoll(["run", "boss-reply-agent", "get_unread"], workspace);
+    const runResult = runRoll(["run", "smoke-test-agent", "ping"], workspace);
     assert.equal(
       runResult.status,
       0,

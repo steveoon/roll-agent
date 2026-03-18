@@ -22,8 +22,18 @@ export interface AgentDefinition {
   readonly tools: ReadonlyArray<AnyToolDefinition>;
 }
 
+// ========== Transport 配置 ==========
+
+export type TransportConfig =
+  | { readonly type: "stdio" }
+  | { readonly type: "http"; readonly port: number; readonly host?: string };
+
+export interface ListenOptions {
+  readonly transport?: TransportConfig;
+}
+
 /** defineAgent() 返回的可运行 Agent */
 export interface RunnableAgent extends AgentDefinition {
-  /** 启动 MCP Server (stdio 模式)，阻塞直到连接关闭 */
-  readonly listen: () => Promise<void>;
+  /** 启动 MCP Server，阻塞直到连接关闭 */
+  readonly listen: (options?: ListenOptions) => Promise<void>;
 }
