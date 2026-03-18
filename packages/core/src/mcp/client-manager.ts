@@ -72,7 +72,9 @@ export class McpClientManager {
             command: transport.command,
             args: [...(transport.args ?? [])],
             cwd,
-            ...(options.env ? { env: { ...process.env, ...options.env } as Record<string, string> } : {}),
+            ...(options.env
+              ? { env: { ...process.env, ...options.env } as Record<string, string> }
+              : {}),
           });
 
     const connectPromise = client.connect(mcpTransport);

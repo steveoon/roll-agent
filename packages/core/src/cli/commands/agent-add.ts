@@ -129,7 +129,7 @@ export default defineCommand({
         ? { type: "git", url: args.path }
         : discovered.transport.type === "streamable-http"
           ? { type: "remote", endpoint: discovered.transport.endpoint }
-        : { type: "local", path: agentDir };
+          : { type: "local", path: agentDir };
 
     // 4. 注册到 store
     const store = new AgentStore(config.agents.dataDir);

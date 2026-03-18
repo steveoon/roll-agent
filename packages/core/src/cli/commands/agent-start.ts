@@ -44,8 +44,7 @@ export default defineCommand({
       );
     } catch (err) {
       console.error(
-        `✗ Agent "${args.name}" 不可连接 (${agent.transport.endpoint})。` +
-          "请先在外部启动服务。",
+        `✗ Agent "${args.name}" 不可连接 (${agent.transport.endpoint})。` + "请先在外部启动服务。",
       );
       console.error(`  ${err instanceof Error ? err.message : String(err)}`);
       process.exitCode = 1;

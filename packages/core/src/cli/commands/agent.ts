@@ -3,10 +3,7 @@ import { defineCommand } from "citty";
 const commandExtension = import.meta.url.endsWith(".ts") ? "ts" : "js";
 
 function loadAgentCommand(fileName: string) {
-  const specifier = new URL(
-    `./${fileName}.${commandExtension}`,
-    import.meta.url,
-  ).href;
+  const specifier = new URL(`./${fileName}.${commandExtension}`, import.meta.url).href;
   return import(specifier).then((m) => m.default);
 }
 

@@ -31,14 +31,21 @@ export function getSchemaItems(schema: object | undefined): object | undefined {
 export function getSchemaProperties(
   schema: Pick<AgentTool, "inputSchema">["inputSchema"] | object | undefined,
 ): Readonly<Record<string, object>> {
-  if (!schema || !("properties" in schema) || !schema.properties || !isPlainObject(schema.properties)) {
+  if (
+    !schema ||
+    !("properties" in schema) ||
+    !schema.properties ||
+    !isPlainObject(schema.properties)
+  ) {
     return {};
   }
 
-  const properties = Object.entries(schema.properties).filter((entry): entry is [string, object] => {
-    const [, value] = entry;
-    return typeof value === "object" && value !== null;
-  });
+  const properties = Object.entries(schema.properties).filter(
+    (entry): entry is [string, object] => {
+      const [, value] = entry;
+      return typeof value === "object" && value !== null;
+    },
+  );
   return Object.fromEntries(properties);
 }
 

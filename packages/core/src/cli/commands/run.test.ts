@@ -12,24 +12,12 @@ describe("parseToolArgs", () => {
   });
 
   it("should not pass --json to tool input", () => {
-    const parsed = parseToolArgs([
-      "boss-reply-agent",
-      "get_unread",
-      "--json",
-      "--limit",
-      "10",
-    ]);
+    const parsed = parseToolArgs(["boss-reply-agent", "get_unread", "--json", "--limit", "10"]);
     assert.deepEqual(parsed, { limit: 10 });
   });
 
   it("should not pass --verbose to tool input", () => {
-    const parsed = parseToolArgs([
-      "boss-reply-agent",
-      "get_unread",
-      "--verbose",
-      "--limit",
-      "10",
-    ]);
+    const parsed = parseToolArgs(["boss-reply-agent", "get_unread", "--verbose", "--limit", "10"]);
     assert.deepEqual(parsed, { limit: 10 });
   });
 

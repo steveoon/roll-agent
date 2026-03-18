@@ -139,9 +139,10 @@ function validateObjectInput(
     const fieldPath = pathPrefix ? `${pathPrefix}.${fieldName}` : fieldName;
     issues.push({
       path: fieldPath,
-      code: fieldSchema && !isNaturallyExtractableSchema(fieldSchema)
-        ? "requires_explicit_input"
-        : "missing_required",
+      code:
+        fieldSchema && !isNaturallyExtractableSchema(fieldSchema)
+          ? "requires_explicit_input"
+          : "missing_required",
       message:
         fieldSchema && !isNaturallyExtractableSchema(fieldSchema)
           ? `${fieldPath} 无法从自然语言可靠提取，需要显式提供`

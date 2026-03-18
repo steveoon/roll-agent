@@ -85,9 +85,7 @@ export class AgentStore {
 
   /** 更新指定 Agent 的状态 */
   updateStatus(name: string, status: RegisteredAgent["status"]): void {
-    const agents = this.list().map((a) =>
-      a.skill.name === name ? { ...a, status } : a,
-    );
+    const agents = this.list().map((a) => (a.skill.name === name ? { ...a, status } : a));
     this.save([...agents]);
   }
 

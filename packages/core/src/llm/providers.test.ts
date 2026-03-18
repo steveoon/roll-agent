@@ -28,7 +28,12 @@ describe("createProviderModel", () => {
   });
 
   it("should accept custom baseURL", () => {
-    const model = createProviderModel("openai", "gpt-4o", "test-key", "https://custom-api.example.com/v1");
+    const model = createProviderModel(
+      "openai",
+      "gpt-4o",
+      "test-key",
+      "https://custom-api.example.com/v1",
+    );
     assert.ok(model);
     assert.equal(model.modelId, "gpt-4o");
   });

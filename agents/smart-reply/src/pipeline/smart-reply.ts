@@ -306,7 +306,8 @@ export async function generateSmartReply(
 
   const candidateAge = resolveCandidateAge(turnPlan, candidateInfo);
   const regionName = resolveRegionName(turnPlan, candidateInfo);
-  const ageEligibilityCity = turnPlan.extractedInfo.city ?? resolvePrimaryCity(configData, resolvedBrand);
+  const ageEligibilityCity =
+    turnPlan.extractedInfo.city ?? resolvePrimaryCity(configData, resolvedBrand);
   const ageEligibility = await evaluateAgeEligibility({
     ...(candidateAge !== undefined ? { age: candidateAge } : {}),
     brandAlias: resolvedBrand,

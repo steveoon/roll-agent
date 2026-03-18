@@ -19,16 +19,10 @@ describe("asConfidence", () => {
   });
 
   it("should throw for negative values", () => {
-    assert.throws(
-      () => asConfidence(-0.1),
-      RangeError,
-    );
+    assert.throws(() => asConfidence(-0.1), RangeError);
   });
 
   it("should throw for values above 1", () => {
-    assert.throws(
-      () => asConfidence(1.1),
-      RangeError,
-    );
+    assert.throws(() => asConfidence(1.1), RangeError);
   });
 });

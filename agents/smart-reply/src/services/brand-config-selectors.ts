@@ -29,7 +29,11 @@ export function resolveDefaultBrandName(data: ZhipinData): string {
   return resolveDefaultBrand(data)?.name ?? "";
 }
 
-export function resolvePrimaryCity(data: ZhipinData, brandName?: string | null): string | undefined {
+export function resolvePrimaryCity(
+  data: ZhipinData,
+  brandName?: string | null,
+): string | undefined {
   const stores = brandName ? (findBrandByName(data, brandName)?.stores ?? []) : getAllStores(data);
-  return stores.find((store) => typeof store.city === "string" && store.city.trim().length > 0)?.city;
+  return stores.find((store) => typeof store.city === "string" && store.city.trim().length > 0)
+    ?.city;
 }

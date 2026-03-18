@@ -6,16 +6,10 @@ import { promisify } from "node:util";
 import { loadConfig } from "../../config/loader.ts";
 import { AgentStore } from "../../registry/store.ts";
 import { discoverAgent } from "../../registry/discovery.ts";
-import {
-  inferAgentSourceType,
-  resolveInstalledPackageRoot,
-} from "../../registry/source.ts";
+import { inferAgentSourceType, resolveInstalledPackageRoot } from "../../registry/source.ts";
 import { McpClientManager } from "../../mcp/client-manager.ts";
 import { log, createSpinner } from "../utils/output.ts";
-import {
-  checkForUpdate,
-  getCurrentVersion,
-} from "../utils/update-checker.ts";
+import { checkForUpdate, getCurrentVersion } from "../utils/update-checker.ts";
 import type { AgentSourceType, RegisteredAgent } from "../../types/agent.ts";
 
 const execFileAsync = promisify(execFile);
@@ -117,9 +111,7 @@ async function refreshRemoteAgent(agent: RegisteredAgent): Promise<boolean> {
   try {
     const client = await manager.connect(agent.skill.name, agent.transport, agent.installPath);
     const { tools } = await client.listTools();
-    spinner.succeed(
-      `${agent.skill.name} 元数据已刷新（${tools.length} 个 tool）`,
-    );
+    spinner.succeed(`${agent.skill.name} 元数据已刷新（${tools.length} 个 tool）`);
     return true;
   } catch (err) {
     spinner.fail(`${agent.skill.name} 刷新失败`);
@@ -233,7 +225,9 @@ export default defineCommand({
                 log.warn(`${agent.skill.name} 已从注册表中移除，跳过元数据刷新`);
               }
             } catch (err) {
-              log.warn(`${agent.skill.name} SKILL.md 重新解析失败: ${err instanceof Error ? err.message : String(err)}`);
+              log.warn(
+                `${agent.skill.name} SKILL.md 重新解析失败: ${err instanceof Error ? err.message : String(err)}`,
+              );
             }
             updatedCount++;
           } else {
@@ -257,7 +251,9 @@ export default defineCommand({
                 log.warn(`${agent.skill.name} 已从注册表中移除，跳过元数据刷新`);
               }
             } catch (err) {
-              log.warn(`${agent.skill.name} SKILL.md 重新解析失败: ${err instanceof Error ? err.message : String(err)}`);
+              log.warn(
+                `${agent.skill.name} SKILL.md 重新解析失败: ${err instanceof Error ? err.message : String(err)}`,
+              );
             }
             updatedCount++;
           } else {
@@ -275,7 +271,9 @@ export default defineCommand({
           break;
         }
         case "local":
-          log.warn(`${agent.skill.name} 是本地 Agent，请手动更新后运行 roll agent add <path> 重新注册`);
+          log.warn(
+            `${agent.skill.name} 是本地 Agent，请手动更新后运行 roll agent add <path> 重新注册`,
+          );
           skippedCount++;
           break;
       }

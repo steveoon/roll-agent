@@ -122,7 +122,11 @@ const FALLBACK_URLS = {
 } as const;
 
 export const DEFAULT_PROVIDER_CONFIGS: Record<string, ProviderConfig> = {
-  anthropic: { name: "Anthropic", baseURL: FALLBACK_URLS.anthropic, description: "Anthropic Claude" },
+  anthropic: {
+    name: "Anthropic",
+    baseURL: FALLBACK_URLS.anthropic,
+    description: "Anthropic Claude",
+  },
   openai: { name: "OpenAI", baseURL: FALLBACK_URLS.openai, description: "OpenAI GPT" },
   ohmygpt: { name: "OhMyGPT", baseURL: FALLBACK_URLS.ohmygpt, description: "OhMyGPT" },
   moonshotai: { name: "MoonshotAI", baseURL: FALLBACK_URLS.moonshotai, description: "MoonshotAI" },
@@ -135,8 +139,7 @@ export const DEFAULT_MODEL_CONFIG = {
   chatModel: "anthropic/claude-haiku-4-5" as ModelId,
   classifyModel:
     (process.env.SMART_REPLY_CLASSIFY_MODEL as ModelId) || ("openai/gpt-5-mini" as ModelId),
-  replyModel:
-    (process.env.SMART_REPLY_REPLY_MODEL as ModelId) || ("openai/gpt-5.4" as ModelId),
+  replyModel: (process.env.SMART_REPLY_REPLY_MODEL as ModelId) || ("openai/gpt-5.4" as ModelId),
 } as const;
 
 function getSharedProxyApiKey(): string {

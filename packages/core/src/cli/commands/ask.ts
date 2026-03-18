@@ -45,10 +45,7 @@ function isToolErrorResult(
   result: unknown,
 ): result is { readonly isError: true; readonly content?: unknown } {
   return (
-    typeof result === "object" &&
-    result !== null &&
-    "isError" in result &&
-    result.isError === true
+    typeof result === "object" && result !== null && "isError" in result && result.isError === true
   );
 }
 
@@ -136,7 +133,9 @@ export default defineCommand({
       return;
     }
 
-    log.info(`路由决策: ${decision.agentName}.${decision.toolName} (置信度: ${String(decision.confidence)})`);
+    log.info(
+      `路由决策: ${decision.agentName}.${decision.toolName} (置信度: ${String(decision.confidence)})`,
+    );
 
     const threshold = config.router.confirmThreshold ?? DEFAULT_CONFIRM_THRESHOLD;
     if (decision.confidence < threshold) {
@@ -223,7 +222,9 @@ export default defineCommand({
         return;
       }
 
-      log.info(`调用 ${agent.skill.name}.${decision.toolName}(${JSON.stringify(finalDecision.input)})`);
+      log.info(
+        `调用 ${agent.skill.name}.${decision.toolName}(${JSON.stringify(finalDecision.input)})`,
+      );
       const toolResult = await client.callTool({
         name: decision.toolName,
         arguments: finalDecision.input,
@@ -243,7 +244,11 @@ export default defineCommand({
         return;
       }
 
-      const result: AskSuccessResult = { status: "success", decision: finalDecision, result: toolResult };
+      const result: AskSuccessResult = {
+        status: "success",
+        decision: finalDecision,
+        result: toolResult,
+      };
       outputResult(result);
       log.success("调用完成");
     } catch (err) {

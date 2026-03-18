@@ -1,10 +1,7 @@
 import { generateText, jsonSchema, Output } from "ai";
 import type { LanguageModelV3 } from "@ai-sdk/provider";
 import type { AgentTool } from "../types/agent.ts";
-import {
-  createExtractionSchema,
-  normalizeExtractedToolInput,
-} from "./extraction-schema.ts";
+import { createExtractionSchema, normalizeExtractedToolInput } from "./extraction-schema.ts";
 
 function buildToolInputPrompt(
   message: string,
@@ -36,7 +33,9 @@ export async function extractToolInput(
   const { output } = await generateText({
     model,
     output: Output.object({
-      schema: jsonSchema<Readonly<Record<string, unknown>>>(createExtractionSchema(tool.inputSchema)),
+      schema: jsonSchema<Readonly<Record<string, unknown>>>(
+        createExtractionSchema(tool.inputSchema),
+      ),
     }),
     prompt: buildToolInputPrompt(message, tool),
   });

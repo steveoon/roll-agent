@@ -7,7 +7,12 @@ import {
 import type { BrandPriorityStrategy } from "../types/config.ts";
 import type { BrandResolutionInput, BrandResolutionOutput } from "../types/brand-resolution.ts";
 import type { StoreWithDistance } from "../types/geocoding.ts";
-import type { TurnPlan, TurnExtractedInfo, ReplyNeed, ReplyPolicyConfig } from "../types/reply-policy.ts";
+import type {
+  TurnPlan,
+  TurnExtractedInfo,
+  ReplyNeed,
+  ReplyPolicyConfig,
+} from "../types/reply-policy.ts";
 import { getSharedBrandAliasMap } from "../services/brand-alias.ts";
 
 // ========== Helpers ==========

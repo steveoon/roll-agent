@@ -207,9 +207,7 @@ export const DulidayNewWorkTimeSchema = z
           .array(
             z
               .object({
-                CombinedArrangementWeekdays: z
-                  .union([z.string(), z.array(z.number())])
-                  .optional(),
+                CombinedArrangementWeekdays: z.union([z.string(), z.array(z.number())]).optional(),
                 CombinedArrangementStartTime: z.number().optional(),
                 CombinedArrangementEndTime: z.number().optional(),
                 startTime: z.number().optional(),

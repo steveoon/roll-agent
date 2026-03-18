@@ -84,7 +84,7 @@ function ensurePublishFilesExist(pkg) {
   if (missing.length > 0) {
     throw new Error(
       `Missing publish files for ${pkg.name}: ${missing.join(", ")}. ` +
-      "Run build before publishing.",
+        "Run build before publishing.",
     );
   }
 }
@@ -92,16 +92,17 @@ function ensurePublishFilesExist(pkg) {
 function ensureRepositoryMetadata(pkg) {
   const packageJson = readPackageJson(pkg.dir);
   const repository = packageJson.repository;
-  const repositoryUrl = typeof repository === "string"
-    ? repository
-    : typeof repository === "object" && repository !== null && "url" in repository
-      ? repository.url
-      : undefined;
+  const repositoryUrl =
+    typeof repository === "string"
+      ? repository
+      : typeof repository === "object" && repository !== null && "url" in repository
+        ? repository.url
+        : undefined;
 
   if (typeof repositoryUrl !== "string" || repositoryUrl.trim().length === 0) {
     throw new Error(
       `Missing package.json repository.url for ${pkg.name}. ` +
-      "Provenance publishing requires repository metadata.",
+        "Provenance publishing requires repository metadata.",
     );
   }
 }
@@ -172,13 +173,17 @@ try {
     console.error("\nPublish failed because npm requires OTP for this token.");
     console.error("Fix options:");
     console.error("1) Replace NPM_TOKEN with an npm Automation token that has publish access.");
-    console.error("2) Switch to npm Trusted Publishing (OIDC) and remove NPM_TOKEN from workflow env.");
+    console.error(
+      "2) Switch to npm Trusted Publishing (OIDC) and remove NPM_TOKEN from workflow env.",
+    );
   }
   if (
     message.includes("Unsupported GitHub Actions source repository visibility") &&
     message.includes("provenance")
   ) {
-    console.error("\nPublish failed because npm provenance currently requires a public GitHub repository.");
+    console.error(
+      "\nPublish failed because npm provenance currently requires a public GitHub repository.",
+    );
     console.error("Fix options:");
     console.error("1) Make the repository public, or");
     console.error("2) Disable provenance in CI: set ROLL_NPM_PROVENANCE=false.");

@@ -16,7 +16,4 @@ export const DEFAULT_CONFIG: RollConfig = {
 };
 
 /** 配置文件查找顺序 */
-export const CONFIG_FILE_NAMES = [
-  "roll.config.yaml",
-  "roll.config.yml",
-] as const;
+export const CONFIG_FILE_NAMES = ["roll.config.yaml", "roll.config.yml"] as const;

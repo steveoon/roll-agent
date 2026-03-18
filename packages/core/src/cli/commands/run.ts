@@ -76,7 +76,9 @@ export default defineCommand({
 
       const preflightResult = preflightToolCall(targetTool, toolArgs);
       if (!preflightResult.ok) {
-        log.error(formatValidationIssuesMessage(agent.skill.name, args.tool, preflightResult.issues));
+        log.error(
+          formatValidationIssuesMessage(agent.skill.name, args.tool, preflightResult.issues),
+        );
         process.exitCode = 1;
         return;
       }

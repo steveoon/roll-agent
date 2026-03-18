@@ -69,17 +69,13 @@ function parsePosition(raw: unknown): ParsedPosition | null {
 
   const resolvedSalary =
     salary.salary ??
-    salary.salaryScenarioList
-      ?.find((s) => s.salaryType === "正式")
-      ?.basicSalary?.basicSalary ??
+    salary.salaryScenarioList?.find((s) => s.salaryType === "正式")?.basicSalary?.basicSalary ??
     salary.salaryScenarioList?.[0]?.basicSalary?.basicSalary ??
     0;
 
   const resolvedSalaryUnit =
     salary.salaryUnitStr ??
-    salary.salaryScenarioList
-      ?.find((s) => s.salaryType === "正式")
-      ?.basicSalary?.basicSalaryUnit ??
+    salary.salaryScenarioList?.find((s) => s.salaryType === "正式")?.basicSalary?.basicSalaryUnit ??
     salary.salaryScenarioList?.[0]?.basicSalary?.basicSalaryUnit ??
     "元/小时";
 
@@ -182,7 +178,7 @@ export function convertPositionsToZhipinData(
 
   return {
     meta: {
-      ...(defaultBrandId ?? brands.values().next().value?.id
+      ...((defaultBrandId ?? brands.values().next().value?.id)
         ? { defaultBrandId: defaultBrandId ?? brands.values().next().value?.id }
         : {}),
       syncedAt: new Date().toISOString(),
@@ -222,9 +218,7 @@ function convertToPosition(p: ParsedPosition): Position {
   if (wta.combinedArrangementTimes?.length) {
     timeSlots = convertTimeSlots(wta.combinedArrangementTimes);
   } else if (wta.fixedArrangementTimes?.length) {
-    timeSlots = convertTimeSlots(
-      wta.fixedArrangementTimes.map((s) => ({ ...s, weekdays: [] })),
-    );
+    timeSlots = convertTimeSlots(wta.fixedArrangementTimes.map((s) => ({ ...s, weekdays: [] })));
   }
 
   return {
@@ -268,12 +262,16 @@ type FlatWorkTime = {
   maxWorkTakingTime: number;
   workTimeRemark: string | null;
   fixedArrangementTimes: Array<{ startTime: number; endTime: number }> | null;
-  combinedArrangementTimes:
-    | Array<{ startTime: number; endTime: number; weekdays: number[] }>
-    | null;
-  customWorkTimes:
-    | Array<{ weekdays: number[]; minWorkDays: number | null; maxWorkDays: number | null }>
-    | null;
+  combinedArrangementTimes: Array<{
+    startTime: number;
+    endTime: number;
+    weekdays: number[];
+  }> | null;
+  customWorkTimes: Array<{
+    weekdays: number[];
+    minWorkDays: number | null;
+    maxWorkDays: number | null;
+  }> | null;
 };
 
 function normalizeNewWorkTime(nwt: DulidayNewWorkTime): FlatWorkTime {
@@ -295,8 +293,7 @@ function normalizeNewWorkTime(nwt: DulidayNewWorkTime): FlatWorkTime {
     (arrangementTypeMap[String(schedule?.arrangementType)] ?? 0);
 
   const rawPerDay = day?.perDayMinWorkHours != null ? Number(day.perDayMinWorkHours) : null;
-  const perDayMinWorkHours =
-    rawPerDay !== null && Number.isFinite(rawPerDay) ? rawPerDay : null;
+  const perDayMinWorkHours = rawPerDay !== null && Number.isFinite(rawPerDay) ? rawPerDay : null;
 
   const customWorkTimes =
     week?.customnWorkTimeList?.map((item) => ({
@@ -560,19 +557,14 @@ function generateAttendancePolicy(cooperationMode: number): AttendancePolicy {
   };
 }
 
-function generateAvailableSlots(
-  p: ParsedPosition,
-  wta: FlatWorkTime,
-): TimeSlotAvailability[] {
+function generateAvailableSlots(p: ParsedPosition, wta: FlatWorkTime): TimeSlotAvailability[] {
   const slots: TimeSlotAvailability[] = [];
   let timeSlots: string[] = [];
 
   if (wta.combinedArrangementTimes?.length) {
     timeSlots = convertTimeSlots(wta.combinedArrangementTimes);
   } else if (wta.fixedArrangementTimes?.length) {
-    timeSlots = convertTimeSlots(
-      wta.fixedArrangementTimes.map((s) => ({ ...s, weekdays: [] })),
-    );
+    timeSlots = convertTimeSlots(wta.fixedArrangementTimes.map((s) => ({ ...s, weekdays: [] })));
   }
 
   for (const slot of timeSlots) {

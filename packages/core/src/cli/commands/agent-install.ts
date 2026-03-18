@@ -25,11 +25,7 @@ export default defineCommand({
     const { config } = loadConfig();
     const packageSpec = args.package;
     const packageName = parsePackageName(packageSpec);
-    const installDir = resolve(
-      config.agents.dataDir,
-      "installed",
-      sanitizeInstallId(packageName),
-    );
+    const installDir = resolve(config.agents.dataDir, "installed", sanitizeInstallId(packageName));
 
     if (!existsSync(installDir)) {
       mkdirSync(installDir, { recursive: true });

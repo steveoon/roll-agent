@@ -14,28 +14,33 @@ import type { LanguageModelV3 } from "@ai-sdk/provider";
  * @see https://spec.modelcontextprotocol.io/specification/client/sampling/
  */
 export function registerSamplingHandler(client: Client, model: LanguageModelV3): void {
-  client.setRequestHandler(CreateMessageRequestSchema, async (request): Promise<CreateMessageResult> => {
-    const messages = convertToModelMessages(request.params.messages);
-    const maxTokens = request.params.maxTokens;
+  client.setRequestHandler(
+    CreateMessageRequestSchema,
+    async (request): Promise<CreateMessageResult> => {
+      const messages = convertToModelMessages(request.params.messages);
+      const maxTokens = request.params.maxTokens;
 
-    let result;
-    try {
-      result = await generateText({
-        model,
-        messages,
-        ...(maxTokens > 0 ? { maxOutputTokens: maxTokens } : {}),
-      });
-    } catch (error) {
-      throw new Error("Sampling handler: LLM generation failed", { cause: error });
-    }
+      let result;
+      try {
+        result = await generateText({
+          model,
+          messages,
+          ...(maxTokens > 0 ? { maxOutputTokens: maxTokens } : {}),
+        });
+      } catch (error) {
+        throw new Error("Sampling handler: LLM generation failed", { cause: error });
+      }
 
-    return {
-      role: "assistant",
-      content: { type: "text", text: result.text },
-      model: result.response.modelId,
-      ...(result.finishReason === "length" ? { stopReason: "maxTokens" } : { stopReason: "endTurn" }),
-    };
-  });
+      return {
+        role: "assistant",
+        content: { type: "text", text: result.text },
+        model: result.response.modelId,
+        ...(result.finishReason === "length"
+          ? { stopReason: "maxTokens" }
+          : { stopReason: "endTurn" }),
+      };
+    },
+  );
 }
 
 /** 将 MCP SamplingMessage[] 转换为 AI SDK ModelMessage[] */

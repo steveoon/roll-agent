@@ -86,7 +86,8 @@ export const syncBrandData = defineTool({
 
       const storesCount = zhipinData.brands.reduce((sum, brand) => sum + brand.stores.length, 0);
       const positionsCount = zhipinData.brands.reduce(
-        (sum, brand) => sum + brand.stores.reduce((inner, store) => inner + store.positions.length, 0),
+        (sum, brand) =>
+          sum + brand.stores.reduce((inner, store) => inner + store.positions.length, 0),
         0,
       );
 

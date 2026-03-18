@@ -6,10 +6,7 @@ const CLI_VERSION = getCurrentVersion();
 const commandExtension = import.meta.url.endsWith(".ts") ? "ts" : "js";
 
 function loadMainCommand(commandName: string) {
-  const specifier = new URL(
-    `./commands/${commandName}.${commandExtension}`,
-    import.meta.url,
-  ).href;
+  const specifier = new URL(`./commands/${commandName}.${commandExtension}`, import.meta.url).href;
   return import(specifier).then((m) => m.default);
 }
 
@@ -30,9 +27,7 @@ const main = defineCommand({
 });
 
 // 启动提示只读缓存，保证不阻塞 CLI 退出。
-const updateCheckPromise = checkForUpdate({ allowNetwork: false }).catch(
-  () => undefined,
-);
+const updateCheckPromise = checkForUpdate({ allowNetwork: false }).catch(() => undefined);
 
 runMain(main).then(() => {
   updateCheckPromise
