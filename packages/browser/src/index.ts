@@ -5,6 +5,11 @@ export type { Page, BrowserContext, Browser } from "playwright-core";
 export {
   PLATFORMS,
   PlatformSchema,
+  BROWSER_CHANNELS,
+  BROWSER_RUNTIME_MODES,
+  BrowserChannelSchema,
+  BrowserLoginStateSourceSchema,
+  BrowserRuntimeModeSchema,
   BrowserRuntimeConfigSchema,
   BrowserSessionInfoSchema,
   BrowserStatusSchema,
@@ -13,6 +18,9 @@ export {
 } from "./types/index.ts";
 export type {
   Platform,
+  BrowserChannel,
+  BrowserLoginStateSource,
+  BrowserRuntimeMode,
   BrowserRuntimeConfig,
   BrowserSessionInfo,
   BrowserStatus,

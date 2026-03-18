@@ -15,7 +15,7 @@ metadata:
 ## Tools
 
 - `browser_status()` — 查询浏览器运行状态和活跃 session
-- `browser_login(platform, timeoutSeconds?)` — 导航到登录页，等待人工扫码/登录
+- `open_platform(platform)` — 打开并聚焦招聘平台主页，供用户手动登录或后续站内操作
 - `zhipin_read_messages(limit?)` — 读取 BOSS直聘未读消息列表
 - `zhipin_send_reply(conversationId, message)` — 向指定对话发送回复
 - `zhipin_get_candidate_info(conversationId)` — 提取候选人资料信息

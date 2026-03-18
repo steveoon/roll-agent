@@ -16,23 +16,41 @@ export const browserStatus = defineTool({
     const ctxManager = getContextManager();
     const store = getSessionStore();
     const running = runtime.isRunning();
-    const headless = runtime.getConfig().headless;
+    const { headless, mode } = runtime.getConfig();
 
     const platforms = ctxManager.getActivePlatforms();
     const activeSessions: BrowserSessionInfo[] = [];
 
     for (const platform of platforms) {
       const pagesOpen = ctxManager.getPageCount(platform);
-      const [cookies, localStorage] = await Promise.all([
-        store.loadCookies(platform),
-        store.loadLocalStorage(platform),
-      ]);
-      const hasLoginState =
-        (cookies !== undefined && cookies.length > 0) ||
-        (localStorage !== undefined && Object.keys(localStorage).length > 0);
-      activeSessions.push({ platform, pagesOpen, hasLoginState });
+      const currentUrl = ctxManager.getCurrentUrl(platform);
+
+      let hasLoginState: BrowserSessionInfo["hasLoginState"] = null;
+      let loginStateSource: BrowserSessionInfo["loginStateSource"] = "unknown";
+
+      if (runtime.shouldRestoreSessionSnapshot()) {
+        const [cookies, localStorage] = await Promise.all([
+          store.loadCookies(platform),
+          store.loadLocalStorage(platform),
+        ]);
+        hasLoginState =
+          (cookies !== undefined && cookies.length > 0) ||
+          (localStorage !== undefined && Object.keys(localStorage).length > 0);
+        loginStateSource = hasLoginState ? "snapshot" : "none";
+      } else if (runtime.usesPersistentProfile()) {
+        hasLoginState = null;
+        loginStateSource = "profile";
+      }
+
+      activeSessions.push({
+        platform,
+        pagesOpen,
+        currentUrl,
+        hasLoginState,
+        loginStateSource,
+      });
     }
 
-    return { running, headless, activeSessions };
+    return { running, headless, mode, activeSessions };
   },
 });

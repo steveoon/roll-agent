@@ -1,47 +1,258 @@
+import { spawn } from "node:child_process";
+import type { ChildProcessWithoutNullStreams } from "node:child_process";
+import { existsSync, mkdirSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
 import { chromium } from "playwright-core";
 import type { Browser } from "playwright-core";
-import type { BrowserRuntimeConfig } from "../types/index.ts";
+import type { BrowserChannel, BrowserRuntimeConfig, BrowserRuntimeMode } from "../types/index.ts";
+
+const MANAGED_CDP_READY_TIMEOUT_MS = 15_000;
+const MANAGED_CDP_READY_POLL_MS = 250;
+const MANAGED_SHUTDOWN_TIMEOUT_MS = 5_000;
+
+const DEFAULT_MANAGED_PROFILE_DIR = join(
+  homedir(),
+  ".roll-agent",
+  "browser",
+  "profiles",
+  "managed-default",
+);
+
+type SupportedPlatform = "darwin" | "linux" | "win32";
+
+const CHANNEL_EXECUTABLE_CANDIDATES = {
+  chrome: {
+    darwin: [
+      "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+      "/Applications/Google Chrome Canary.app/Contents/MacOS/Google Chrome Canary",
+    ],
+    linux: ["google-chrome", "google-chrome-stable", "chromium-browser", "chromium"],
+    win32: [
+      "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
+      "C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe",
+    ],
+  },
+  chromium: {
+    darwin: ["/Applications/Chromium.app/Contents/MacOS/Chromium"],
+    linux: ["chromium", "chromium-browser"],
+    win32: [
+      "C:\\Program Files\\Chromium\\Application\\chrome.exe",
+      "C:\\Program Files (x86)\\Chromium\\Application\\chrome.exe",
+    ],
+  },
+  msedge: {
+    darwin: ["/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge"],
+    linux: ["microsoft-edge", "microsoft-edge-stable"],
+    win32: [
+      "C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe",
+      "C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe",
+    ],
+  },
+} as const satisfies Record<BrowserChannel, Record<SupportedPlatform, readonly string[]>>;
+
+type BrowserRuntimeOwnership = {
+  ownsBrowserProcess: boolean;
+  managedProcess?: ChildProcessWithoutNullStreams;
+};
+
+function isSupportedExecutablePlatform(value: NodeJS.Platform): value is SupportedPlatform {
+  return value === "darwin" || value === "linux" || value === "win32";
+}
+
+function resolveChannelExecutable(channel: BrowserChannel): string {
+  if (!isSupportedExecutablePlatform(process.platform)) {
+    throw new Error(`Unsupported platform for managed-cdp browser launch: ${process.platform}`);
+  }
+
+  const candidates = CHANNEL_EXECUTABLE_CANDIDATES[channel][process.platform];
+  if (process.platform === "linux") {
+    const firstCandidate = candidates[0];
+    if (!firstCandidate) {
+      throw new Error(`No executable candidates configured for channel "${channel}".`);
+    }
+    return firstCandidate;
+  }
+
+  for (const candidate of candidates) {
+    if (existsSync(candidate)) {
+      return candidate;
+    }
+  }
+
+  throw new Error(`No installed browser found for channel "${channel}".`);
+}
+
+function resolveExecutable(config: BrowserRuntimeConfig): string {
+  if (config.executablePath !== undefined) {
+    return config.executablePath;
+  }
+  return resolveChannelExecutable(config.channel);
+}
+
+function resolveManagedUserDataDir(config: BrowserRuntimeConfig): string {
+  return config.userDataDir ?? DEFAULT_MANAGED_PROFILE_DIR;
+}
+
+function resolveManagedCdpUrl(config: BrowserRuntimeConfig): string {
+  return `http://${config.cdpHost}:${config.cdpPort}`;
+}
+
+async function isHttpCdpReady(cdpUrl: string): Promise<boolean> {
+  try {
+    const versionUrl = new URL("/json/version", cdpUrl);
+    const response = await fetch(versionUrl, {
+      signal: AbortSignal.timeout(1_000),
+    });
+    return response.ok;
+  } catch {
+    return false;
+  }
+}
+
+async function waitForManagedCdp(
+  cdpUrl: string,
+  proc: ChildProcessWithoutNullStreams,
+): Promise<void> {
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < MANAGED_CDP_READY_TIMEOUT_MS) {
+    if (proc.exitCode !== null) {
+      throw new Error(
+        `Managed browser exited before CDP became ready (exit code ${proc.exitCode}).`,
+      );
+    }
+    if (await isHttpCdpReady(cdpUrl)) {
+      return;
+    }
+    await delay(MANAGED_CDP_READY_POLL_MS);
+  }
+  throw new Error(`Managed browser did not expose CDP within ${MANAGED_CDP_READY_TIMEOUT_MS}ms.`);
+}
+
+async function terminateProcess(proc: ChildProcessWithoutNullStreams): Promise<void> {
+  if (proc.exitCode !== null) {
+    return;
+  }
+
+  proc.kill("SIGTERM");
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < MANAGED_SHUTDOWN_TIMEOUT_MS) {
+    if (proc.exitCode !== null) {
+      return;
+    }
+    await delay(50);
+  }
+
+  if (proc.exitCode === null) {
+    proc.kill("SIGKILL");
+  }
+}
 
 /**
- * 管理 Chromium 浏览器进程的生命周期。
- *
- * 由 Agent 进程持有，生命周期 = Agent 服务进程生命周期。
+ * Browser runtime with explicit connection modes:
+ * - managed-cdp: launch a real browser with persistent profile, then attach via CDP
+ * - remote-cdp: connect to a remote CDP endpoint
+ * - existing-session: attach to an already running user browser session
  */
 export class BrowserRuntime {
   private browser: Browser | undefined;
   private readonly config: BrowserRuntimeConfig;
+  private ownership: BrowserRuntimeOwnership = { ownsBrowserProcess: false };
 
   constructor(config: BrowserRuntimeConfig) {
     this.config = config;
   }
 
-  /** 启动 Chromium 进程 */
   async start(): Promise<void> {
     if (this.browser) return;
 
-    this.browser = await chromium.launch({
-      headless: this.config.headless,
-      ...(this.config.executablePath !== undefined
-        ? { executablePath: this.config.executablePath }
-        : {}),
-      ...(this.config.args !== undefined ? { args: this.config.args } : {}),
+    switch (this.config.mode) {
+      case "managed-cdp":
+        await this.startManagedCdp();
+        break;
+      case "remote-cdp":
+      case "existing-session":
+        await this.connectViaCdp(this.requireCdpUrl());
+        break;
+    }
+  }
+
+  private requireCdpUrl(): string {
+    const cdpUrl = this.config.cdpUrl;
+    if (cdpUrl === undefined) {
+      throw new Error(`Browser runtime mode "${this.config.mode}" requires cdpUrl.`);
+    }
+    return cdpUrl;
+  }
+
+  private async connectViaCdp(cdpUrl: string): Promise<void> {
+    this.browser = await chromium.connectOverCDP(cdpUrl, {
+      timeout: 10_000,
     });
+    this.ownership = { ownsBrowserProcess: false };
   }
 
-  /** 关闭 Chromium 进程 */
+  private async startManagedCdp(): Promise<void> {
+    const executable = resolveExecutable(this.config);
+    const userDataDir = resolveManagedUserDataDir(this.config);
+    const cdpUrl = resolveManagedCdpUrl(this.config);
+
+    mkdirSync(userDataDir, { recursive: true });
+
+    const proc = spawn(
+      executable,
+      [
+        `--remote-debugging-port=${this.config.cdpPort}`,
+        `--user-data-dir=${userDataDir}`,
+        "--no-first-run",
+        "--no-default-browser-check",
+        "--disable-background-networking",
+        "--disable-component-update",
+        "--disable-session-crashed-bubble",
+        "--hide-crash-restore-bubble",
+        ...(this.config.headless ? ["--headless=new", "--disable-gpu"] : []),
+        ...(this.config.args ?? []),
+        "about:blank",
+      ],
+      {
+        stdio: "pipe",
+      },
+    );
+
+    try {
+      await waitForManagedCdp(cdpUrl, proc);
+      await this.connectViaCdp(cdpUrl);
+      this.ownership = {
+        ownsBrowserProcess: true,
+        managedProcess: proc,
+      };
+    } catch (error) {
+      await terminateProcess(proc).catch(() => {});
+      throw error;
+    }
+  }
+
   async stop(): Promise<void> {
-    if (!this.browser) return;
+    const browser = this.browser;
+    const ownership = this.ownership;
 
-    await this.browser.close();
     this.browser = undefined;
+    this.ownership = { ownsBrowserProcess: false };
+
+    if (browser) {
+      await browser.close();
+    }
+
+    if (ownership.ownsBrowserProcess && ownership.managedProcess) {
+      await terminateProcess(ownership.managedProcess);
+    }
   }
 
-  /** Chromium 是否正在运行 */
   isRunning(): boolean {
     return this.browser !== undefined && this.browser.isConnected();
   }
 
-  /** 获取 Browser 实例（未启动时抛出异常） */
   getBrowser(): Browser {
     if (!this.browser) {
       throw new Error("BrowserRuntime not started. Call start() first.");
@@ -49,8 +260,27 @@ export class BrowserRuntime {
     return this.browser;
   }
 
-  /** 当前配置 */
   getConfig(): BrowserRuntimeConfig {
     return this.config;
+  }
+
+  get mode(): BrowserRuntimeMode {
+    return this.config.mode;
+  }
+
+  usesPersistentProfile(): boolean {
+    return this.mode === "managed-cdp" || this.mode === "existing-session";
+  }
+
+  prefersExistingContext(): boolean {
+    return true;
+  }
+
+  allowsNewContext(): boolean {
+    return this.mode === "remote-cdp";
+  }
+
+  shouldRestoreSessionSnapshot(): boolean {
+    return this.mode === "remote-cdp";
   }
 }

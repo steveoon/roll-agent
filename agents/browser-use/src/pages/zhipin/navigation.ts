@@ -27,12 +27,28 @@ export async function goToConversation(page: Page, conversationId: string): Prom
   await waitForSelector(page, ZHIPIN_SELECTORS.chat.input, { timeout: 15_000 });
 }
 
-/** 检测是否已登录（检查页面上有无用户信息元素） */
+/**
+ * 检测是否已登录。
+ *
+ * 策略：先等 header 渲染（BOSS直聘是 SPA，header 由 JS 动态挂载），
+ * 再检测"登录/注册"按钮是否存在。
+ *
+ * 关键：不能在 header 渲染前就检查 — 按钮不存在可能是因为还没渲染，
+ * 而不是因为已登录。
+ */
 export async function isLoggedIn(page: Page): Promise<boolean> {
+  // 1. 等 header 渲染出来（SPA 水合后才有内容）
   try {
-    await waitForSelector(page, ZHIPIN_SELECTORS.login.loginSuccess, { timeout: 3_000 });
-    return true;
+    await page.waitForSelector("#header, .header-v2, header", {
+      state: "visible",
+      timeout: 10_000,
+    });
   } catch {
+    // header 都没渲染出来 — 无法判断，保守返回 false
     return false;
   }
+
+  // 2. header 已渲染，检查"登录/注册"按钮是否存在 — 存在则未登录
+  const loginBtn = await page.$(ZHIPIN_SELECTORS.login.notLoggedIn);
+  return loginBtn === null;
 }

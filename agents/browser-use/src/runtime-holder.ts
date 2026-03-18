@@ -42,12 +42,15 @@ export function getSessionStore(): SessionStore {
 
 export async function shutdownRuntime(): Promise<void> {
   if (contextManager) {
+    console.error("[browser-use-agent] Closing browser contexts...");
     await contextManager.closeAll();
     contextManager = undefined;
   }
   if (runtime) {
+    console.error("[browser-use-agent] Stopping browser process...");
     await runtime.stop();
     runtime = undefined;
   }
   sessionStore = undefined;
+  console.error("[browser-use-agent] Browser runtime shutdown complete");
 }

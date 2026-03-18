@@ -5,8 +5,9 @@
  */
 export const ZHIPIN_SELECTORS = {
   login: {
+    /** 未登录时页面上存在的"登录/注册"按钮 */
+    notLoggedIn: ".header-login-btn",
     qrCode: ".login-scan-code img, .qr-code-box img",
-    loginSuccess: ".user-nav, .header-user-info",
     switchQrLogin: ".switch-tip, .qr-login-btn",
   },
   messageList: {
