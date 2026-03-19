@@ -17,11 +17,7 @@ interface RunRollOptions {
   readonly input?: string;
 }
 
-function runRoll(
-  args: readonly string[],
-  cwd: string,
-  options: RunRollOptions = {},
-): CliResult {
+function runRoll(args: readonly string[], cwd: string, options: RunRollOptions = {}): CliResult {
   const cliEntry = resolve(import.meta.dirname, "index.ts");
   const result = spawnSync(process.execPath, ["--experimental-strip-types", cliEntry, ...args], {
     cwd,
@@ -184,10 +180,7 @@ test("e2e smoke: config init writes ask section and ask config can be set/get", 
     assert.equal(getModelResult.status, 0, getModelResult.stderr);
     assert.equal(getModelResult.stdout.trim(), "gpt-4.1-mini");
 
-    const setThresholdResult = runRoll(
-      ["config", "set", "ask.confirmThreshold", "0.7"],
-      workspace,
-    );
+    const setThresholdResult = runRoll(["config", "set", "ask.confirmThreshold", "0.7"], workspace);
     assert.equal(setThresholdResult.status, 0, setThresholdResult.stderr);
 
     const getThresholdResult = runRoll(["config", "get", "ask.confirmThreshold"], workspace);

@@ -1,6 +1,6 @@
 import { jsonSchema } from "ai";
 import type { AgentTool } from "../types/agent.ts";
-import { isNaturallyExtractableSchema, isPlainObject } from "./schema.ts";
+import { isPlainObject } from "./schema.ts";
 
 type AiSdkJsonSchema = Parameters<typeof jsonSchema<Readonly<Record<string, unknown>>>>[0];
 type JsonPrimitive = string | number | boolean | null;
@@ -32,6 +32,13 @@ type JsonSchemaNode = {
   readonly description?: string | undefined;
   readonly enum?: readonly JsonSchemaEnumValue[] | undefined;
 };
+
+export const EXTRACTION_SCHEMA_PROFILES = {
+  minimalCompatible: "minimal-compatible",
+} as const;
+
+export type ExtractionSchemaProfile =
+  (typeof EXTRACTION_SCHEMA_PROFILES)[keyof typeof EXTRACTION_SCHEMA_PROFILES];
 
 function toJsonSchemaNode(schema: object): JsonSchemaNode {
   const type =
@@ -83,19 +90,6 @@ function toJsonSchemaNode(schema: object): JsonSchemaNode {
   };
 }
 
-function addNullability(schema: JsonSchemaNode): JsonSchemaNode {
-  const schemaType = schema.type;
-  if (typeof schemaType === "string") {
-    return { ...schema, type: [schemaType, "null"] };
-  }
-
-  if (Array.isArray(schemaType) && !schemaType.includes("null")) {
-    return { ...schema, type: [...schemaType, "null"] };
-  }
-
-  return schema;
-}
-
 function getSchemaProperties(
   schema: JsonSchemaNode,
 ): Readonly<Record<string, JsonSchemaNode>> | undefined {
@@ -103,53 +97,137 @@ function getSchemaProperties(
 }
 
 /**
- * Whether a schema describes a field that can be reliably extracted from
- * natural language. Open-ended objects without explicit `properties`
- * (e.g. `z.record()`) cannot — they require programmatic input via
- * `roll run --input-json` or an upstream orchestrator.
- *
- * Dropping these fields from the extraction schema is intentional: the
- * original tool inputSchema is still authoritative for preflight and
- * callTool, so preflight will surface `needs_input` for any required
- * field that the extractor could not produce.
+ * Canonical extraction schema:
+ * - keeps the original JSON Schema type semantics intact
+ * - drops fields that cannot be reliably extracted from natural language
+ * - preserves optionality via omission instead of nullable unions
  */
-function isExtractableField(schema: JsonSchemaNode): boolean {
-  return isNaturallyExtractableSchema(schema);
-}
-
-function toExtractionSchema(schema: JsonSchemaNode, requiredByParent: boolean): JsonSchemaNode {
+function toCanonicalExtractionSchema(schema: JsonSchemaNode): JsonSchemaNode | undefined {
   const schemaType = schema.type;
   const properties = getSchemaProperties(schema);
 
   if (schemaType === "object" && properties) {
     const requiredChildren = Array.isArray(schema.required) ? schema.required : [];
-    const nextProperties = Object.fromEntries(
-      Object.entries(properties)
-        .filter(([, value]) => isExtractableField(value))
-        .map(([key, value]) => [key, toExtractionSchema(value, requiredChildren.includes(key))]),
-    );
+    const nextEntries = Object.entries(properties)
+      .map(([key, value]) => [key, toCanonicalExtractionSchema(value)] as const)
+      .filter((entry): entry is readonly [string, JsonSchemaNode] => entry[1] !== undefined);
 
-    const nextSchema: JsonSchemaNode = {
+    if (nextEntries.length === 0) {
+      return undefined;
+    }
+
+    const nextProperties = Object.fromEntries(nextEntries);
+    const nextRequired = requiredChildren.filter((key) => key in nextProperties);
+    return {
       type: "object",
       properties: nextProperties,
-      required: Object.keys(nextProperties),
+      ...(nextRequired.length > 0 ? { required: nextRequired } : {}),
       additionalProperties: false,
       ...(schema.description ? { description: schema.description } : {}),
     };
+  }
 
-    return requiredByParent ? nextSchema : addNullability(nextSchema);
+  if (schemaType === "object") {
+    return undefined;
   }
 
   if (schemaType === "array" && schema.items) {
-    const nextSchema: JsonSchemaNode = {
-      ...schema,
-      items: toExtractionSchema(schema.items, true),
-    };
+    const nextItems = toCanonicalExtractionSchema(schema.items);
+    if (!nextItems) {
+      return undefined;
+    }
 
-    return requiredByParent ? nextSchema : addNullability(nextSchema);
+    return {
+      ...schema,
+      items: nextItems,
+    };
   }
 
-  return requiredByParent ? schema : addNullability(schema);
+  if (schemaType === "array") {
+    return undefined;
+  }
+
+  return schema;
+}
+
+function createEmptyObjectSchema(description?: string): JsonSchemaNode {
+  return {
+    type: "object",
+    properties: {},
+    required: [],
+    additionalProperties: false,
+    ...(description ? { description } : {}),
+  };
+}
+
+function lowerCanonicalExtractionSchema(
+  schema: JsonSchemaNode,
+  profile: ExtractionSchemaProfile,
+): JsonSchemaNode {
+  switch (profile) {
+    case EXTRACTION_SCHEMA_PROFILES.minimalCompatible:
+      return schema;
+    default:
+      return schema;
+  }
+}
+
+function createCanonicalToolExtractionSchema(schema: JsonSchemaNode): JsonSchemaNode {
+  const canonical = toCanonicalExtractionSchema(schema);
+  if (canonical?.type === "object") {
+    return canonical;
+  }
+
+  return createEmptyObjectSchema(schema.description);
+}
+
+function normalizeRootSchema(schema: JsonSchemaNode): JsonSchemaNode {
+  const rootProperties = getSchemaProperties(schema);
+  if (schema.type === "object" && rootProperties) {
+    return schema;
+  }
+
+  return createEmptyObjectSchema(schema.description);
+}
+
+function getCanonicalExtractionSchema(
+  schema: AgentTool["inputSchema"],
+  profile: ExtractionSchemaProfile,
+): JsonSchemaNode {
+  return normalizeRootSchema(
+    lowerCanonicalExtractionSchema(
+      createCanonicalToolExtractionSchema(toJsonSchemaNode(schema)),
+      profile,
+    ),
+  );
+}
+
+function toExtractionSchema(schema: JsonSchemaNode): JsonSchemaNode {
+  const properties = getSchemaProperties(schema);
+
+  if (schema.type === "object" && properties) {
+    const requiredChildren = Array.isArray(schema.required) ? schema.required : [];
+    const nextProperties = Object.fromEntries(
+      Object.entries(properties).map(([key, value]) => [key, toExtractionSchema(value)]),
+    );
+
+    return {
+      type: "object",
+      properties: nextProperties,
+      ...(requiredChildren.length > 0 ? { required: requiredChildren } : {}),
+      additionalProperties: false,
+      ...(schema.description ? { description: schema.description } : {}),
+    };
+  }
+
+  if (schema.type === "array" && schema.items) {
+    return {
+      ...schema,
+      items: toExtractionSchema(schema.items),
+    };
+  }
+
+  return schema;
 }
 
 function toJsonSchemaTypeName(value: string): LocalJsonSchemaTypeName | undefined {
@@ -248,7 +326,11 @@ function normalizeExtractedValue(
 }
 
 export function createExtractionSchema(schema: AgentTool["inputSchema"]): AiSdkJsonSchema {
-  return toMutableJsonSchema(toExtractionSchema(toJsonSchemaNode(schema), true));
+  return toMutableJsonSchema(
+    toExtractionSchema(
+      getCanonicalExtractionSchema(schema, EXTRACTION_SCHEMA_PROFILES.minimalCompatible),
+    ),
+  );
 }
 
 export function normalizeExtractedToolInput(

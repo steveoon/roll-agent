@@ -10,6 +10,7 @@ type TestPageState = {
   readonly page: Page;
   readonly getCloseCalls: () => number;
   readonly getBringToFrontCalls: () => number;
+  readonly getGotoCalls: () => number;
   readonly setContext: (context: BrowserContext) => void;
 };
 
@@ -32,15 +33,22 @@ type TestSessionStoreState = {
   readonly getLoadLocalStorageCalls: () => number;
 };
 
-function createTestPage(params?: { url?: string; title?: string }): TestPageState {
+function createTestPage(params?: {
+  url?: string;
+  title?: string;
+  hasFocus?: boolean;
+  visibilityState?: "visible" | "hidden" | "prerender" | "unloaded";
+}): TestPageState {
   let closed = false;
   let closeCalls = 0;
   let bringToFrontCalls = 0;
+  let gotoCalls = 0;
+  let currentUrl = params?.url ?? "about:blank";
   let assignedContext: BrowserContext | undefined;
 
   const page = {
     url() {
-      return params?.url ?? "about:blank";
+      return currentUrl;
     },
     async title() {
       return params?.title ?? "";
@@ -53,6 +61,16 @@ function createTestPage(params?: { url?: string; title?: string }): TestPageStat
     },
     async bringToFront() {
       bringToFrontCalls += 1;
+    },
+    async goto(url: string) {
+      gotoCalls += 1;
+      currentUrl = url;
+    },
+    async evaluate() {
+      return {
+        hasFocus: params?.hasFocus ?? false,
+        visibilityState: params?.visibilityState ?? "hidden",
+      };
     },
     isClosed() {
       return closed;
@@ -72,6 +90,7 @@ function createTestPage(params?: { url?: string; title?: string }): TestPageStat
     page,
     getCloseCalls: () => closeCalls,
     getBringToFrontCalls: () => bringToFrontCalls,
+    getGotoCalls: () => gotoCalls,
     setContext: (context) => {
       mutablePage.setContext?.(context);
     },
@@ -332,4 +351,104 @@ test("listPages assigns stable page ids and selectPage rebinds the platform page
   assert.equal(manager.getBoundPlatformForPage(zhipinPage.page), "zhipin");
   assert.equal(manager.isSelectedPageForPlatform(zhipinPage.page), true);
   assert.equal(zhipinPage.getBringToFrontCalls(), 1);
+});
+
+test("getActivePage prefers the focused tab", async () => {
+  const hiddenPage = createTestPage({
+    url: "https://www.baidu.com",
+    visibilityState: "hidden",
+  });
+  const focusedPage = createTestPage({
+    url: "https://www.zhipin.com/web/geek/chat",
+    hasFocus: true,
+    visibilityState: "visible",
+  });
+  const attachedContext = createTestContext([hiddenPage.page, focusedPage.page]);
+  const browser = createTestBrowser({
+    existingContexts: [attachedContext.context],
+  });
+  const runtime = createRuntime({
+    browser: browser.browser,
+    mode: "managed-cdp",
+    allowsNewContext: false,
+  });
+  const sessionStore = createSessionStore();
+  const manager = new BrowserContextManager(runtime, sessionStore.store);
+
+  const page = await manager.getActivePage();
+
+  assert.equal(page, focusedPage.page);
+});
+
+test("getActivePage falls back to a visible tab when no tab has focus", async () => {
+  const hiddenPage = createTestPage({
+    url: "https://www.baidu.com",
+    visibilityState: "hidden",
+  });
+  const visiblePage = createTestPage({
+    url: "https://www.zhipin.com/web/geek/chat",
+    visibilityState: "visible",
+  });
+  const attachedContext = createTestContext([hiddenPage.page, visiblePage.page]);
+  const browser = createTestBrowser({
+    existingContexts: [attachedContext.context],
+  });
+  const runtime = createRuntime({
+    browser: browser.browser,
+    mode: "managed-cdp",
+    allowsNewContext: false,
+  });
+  const sessionStore = createSessionStore();
+  const manager = new BrowserContextManager(runtime, sessionStore.store);
+
+  const page = await manager.getActivePage();
+
+  assert.equal(page, visiblePage.page);
+});
+
+test("getActivePage falls back to the sole page when activity cannot be inferred", async () => {
+  const onlyPage = createTestPage({
+    url: "https://www.baidu.com",
+    visibilityState: "hidden",
+  });
+  const attachedContext = createTestContext([onlyPage.page]);
+  const browser = createTestBrowser({
+    existingContexts: [attachedContext.context],
+  });
+  const runtime = createRuntime({
+    browser: browser.browser,
+    mode: "managed-cdp",
+    allowsNewContext: false,
+  });
+  const sessionStore = createSessionStore();
+  const manager = new BrowserContextManager(runtime, sessionStore.store);
+
+  const page = await manager.getActivePage();
+
+  assert.equal(page, onlyPage.page);
+});
+
+test("rebinding a page to another platform clears the previous platform selection", async () => {
+  const sharedPage = createTestPage({
+    url: "https://www.zhipin.com/web/geek/chat",
+    visibilityState: "visible",
+  });
+  const attachedContext = createTestContext([sharedPage.page]);
+  const browser = createTestBrowser({
+    existingContexts: [attachedContext.context],
+  });
+  const runtime = createRuntime({
+    browser: browser.browser,
+    mode: "managed-cdp",
+    allowsNewContext: false,
+  });
+  const sessionStore = createSessionStore();
+  const manager = new BrowserContextManager(runtime, sessionStore.store);
+
+  await manager.getPage("zhipin");
+  const rebound = await manager.selectPage("yupao", manager.getPageId(sharedPage.page));
+
+  assert.equal(rebound, sharedPage.page);
+  assert.equal(manager.getBoundPlatformForPage(sharedPage.page), "yupao");
+  assert.equal(manager.getCurrentUrl("zhipin"), undefined);
 });

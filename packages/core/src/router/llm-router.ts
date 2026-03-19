@@ -9,7 +9,7 @@ import { asConfidence } from "../types/router.ts";
 const routeSelectionSchema = z.object({
   agentName: z.string().describe("选择的 Agent 名称"),
   toolName: z.string().describe("选择的 Tool 名称"),
-  confidence: z.number().min(0).max(1).describe("决策置信度 0-1"),
+  confidence: z.number().describe("决策置信度 0-1"),
 });
 
 /** 构建 Agent 能力描述，供 LLM 理解 */

@@ -14,6 +14,13 @@ type ManagedPage = {
   readonly owned: boolean;
 };
 
+type PageVisibilityState = "visible" | "hidden" | "prerender" | "unloaded";
+
+type PageActivityState = {
+  readonly hasFocus: boolean;
+  readonly visibilityState: PageVisibilityState;
+};
+
 function findManagedContext(
   managedContexts: ReadonlyMap<Platform, ManagedContext>,
   context: BrowserContext,
@@ -37,6 +44,20 @@ function findManagedPage(
 
 function isPageAssigned(managedPages: ReadonlyMap<Platform, ManagedPage>, page: Page): boolean {
   return [...managedPages.values()].some((entry) => entry.page === page);
+}
+
+async function readPageActivityState(page: Page): Promise<PageActivityState> {
+  try {
+    return await page.evaluate(() => ({
+      hasFocus: document.hasFocus(),
+      visibilityState: document.visibilityState,
+    }));
+  } catch {
+    return {
+      hasFocus: false,
+      visibilityState: "hidden",
+    };
+  }
 }
 
 /**
@@ -87,6 +108,14 @@ export class BrowserContextManager {
     );
   }
 
+  private clearPageBindings(page: Page): void {
+    for (const [platform, entry] of this.pages.entries()) {
+      if (entry.page === page) {
+        this.pages.delete(platform);
+      }
+    }
+  }
+
   private bindPage(platform: Platform, page: Page, owned: boolean): Page {
     this.bindContext(platform, page.context());
     this.getOrAssignPageId(page);
@@ -96,6 +125,7 @@ export class BrowserContextManager {
       page,
       owned: shared?.owned ?? owned,
     } satisfies ManagedPage;
+    this.clearPageBindings(page);
     this.pages.set(platform, managedPage);
     return page;
   }
@@ -197,6 +227,38 @@ export class BrowserContextManager {
 
   getPageId(page: Page): string {
     return this.getOrAssignPageId(page);
+  }
+
+  clearBindingForPage(page: Page): void {
+    this.clearPageBindings(page);
+  }
+
+  async getActivePage(): Promise<Page | undefined> {
+    const pages = this.listPages();
+    if (pages.length === 0) {
+      return undefined;
+    }
+
+    const pageStates = await Promise.all(
+      pages.map(async (page) => ({
+        page,
+        activity: await readPageActivityState(page),
+      })),
+    );
+
+    const focusedPage = pageStates.find((entry) => entry.activity.hasFocus)?.page;
+    if (focusedPage) {
+      return focusedPage;
+    }
+
+    const visiblePage = pageStates.find(
+      (entry) => entry.activity.visibilityState === "visible",
+    )?.page;
+    if (visiblePage) {
+      return visiblePage;
+    }
+
+    return pages.length === 1 ? pages[0] : undefined;
   }
 
   getBoundPlatformForPage(page: Page): Platform | undefined {

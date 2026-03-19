@@ -26,9 +26,6 @@ export default defineCommand({
     json: { type: "boolean", description: "JSON 格式输出", default: false },
   },
   async run({ args }) {
-    void args.message;
-    void args.session;
-
     const result = createUnavailableResult();
 
     if (args.json) {

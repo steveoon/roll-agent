@@ -19,6 +19,30 @@ function makeMockModel(jsonText: string): MockLanguageModelV3 {
   });
 }
 
+function makeStructuredOutputFallbackModel(fallbackText: string): MockLanguageModelV3 {
+  let callCount = 0;
+
+  return new MockLanguageModelV3({
+    doGenerate: async () => {
+      callCount += 1;
+
+      if (callCount === 1) {
+        throw new Error("provider rejected structured output schema");
+      }
+
+      return {
+        content: [{ type: "text", text: fallbackText }],
+        finishReason: { unified: "stop", raw: undefined },
+        usage: {
+          inputTokens: { total: 10, noCache: 10, cacheRead: undefined, cacheWrite: undefined },
+          outputTokens: { total: 10, text: 10, reasoning: undefined },
+        },
+        warnings: [],
+      };
+    },
+  });
+}
+
 const syncBrandDataTool: AgentTool = {
   name: "sync_brand_data",
   description: "同步品牌数据到本地",
@@ -57,6 +81,20 @@ describe("extractToolInput", () => {
       cityName: "上海市",
     });
   });
+
+  it("falls back to plain JSON text when structured output is rejected", async () => {
+    const model = makeStructuredOutputFallbackModel(
+      '```json\n{"brandAlias":"肯德基","cityName":"上海市"}\n```',
+    );
+
+    const input = await extractToolInput("同步一下肯德基上海的品牌数据", syncBrandDataTool, model);
+
+    assert.deepEqual(input, {
+      brandAlias: "肯德基",
+      cityName: "上海市",
+    });
+    assert.equal(model.doGenerateCalls.length, 2);
+  });
 });
 
 type JsonSchemaLike = Record<string, unknown> & {
@@ -83,9 +121,9 @@ describe("createExtractionSchema", () => {
 
     assert.equal(result.additionalProperties, false);
     const nestedProp = result.properties?.nested;
-    // optional object becomes nullable ["object", "null"]
-    assert.deepEqual(nestedProp?.type, ["object", "null"]);
+    assert.equal(nestedProp?.type, "object");
     assert.equal(nestedProp?.additionalProperties, false);
+    assert.deepEqual(result.required, ["name"]);
   });
 
   it("drops z.record()-like fields (object without properties) from extraction schema", () => {
@@ -135,5 +173,90 @@ describe("createExtractionSchema", () => {
     assert.ok(result.properties?.name);
     // required only lists extractable fields
     assert.deepEqual(result.required, ["name"]);
+  });
+
+  it("keeps optional enum fields as omitted fields instead of nullable unions", () => {
+    const result = createExtractionSchema({
+      type: "object",
+      properties: {
+        channelType: {
+          type: "string",
+          enum: ["public", "private"],
+        },
+      },
+      required: [],
+    }) as JsonSchemaLike;
+
+    const channelType = result.properties?.channelType;
+    assert.equal(channelType?.type, "string");
+    assert.deepEqual(channelType?.enum, ["public", "private"]);
+    assert.equal(result.required, undefined);
+  });
+
+  it("keeps optional scalar fields optional without adding null to the type", () => {
+    const result = createExtractionSchema({
+      type: "object",
+      properties: {
+        limit: {
+          type: "integer",
+        },
+      },
+      required: [],
+    }) as JsonSchemaLike;
+
+    const limit = result.properties?.limit;
+    assert.equal(limit?.type, "integer");
+    assert.equal(result.required, undefined);
+  });
+
+  it("preserves optional object omission while keeping nested required fields", () => {
+    const result = createExtractionSchema({
+      type: "object",
+      properties: {
+        context: {
+          type: "object",
+          properties: {
+            channelType: {
+              type: "string",
+              enum: ["public", "private"],
+            },
+            message: {
+              type: "string",
+            },
+          },
+          required: ["channelType"],
+        },
+      },
+      required: [],
+    }) as JsonSchemaLike;
+
+    const context = result.properties?.context as JsonSchemaLike | undefined;
+    assert.equal(context?.type, "object");
+    assert.equal(result.required, undefined);
+    assert.deepEqual(context?.required, ["channelType"]);
+    assert.deepEqual(context?.properties?.channelType?.enum, ["public", "private"]);
+  });
+
+  it("preserves enum items inside arrays", () => {
+    const result = createExtractionSchema({
+      type: "object",
+      properties: {
+        tags: {
+          type: "array",
+          items: {
+            type: "string",
+            enum: ["a", "b"],
+          },
+        },
+      },
+      required: [],
+    }) as JsonSchemaLike;
+
+    const tags = result.properties?.tags;
+    assert.equal(tags?.type, "array");
+    assert.deepEqual(tags?.items, {
+      type: "string",
+      enum: ["a", "b"],
+    });
   });
 });

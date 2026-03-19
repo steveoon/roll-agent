@@ -53,4 +53,24 @@ describe("routeWithLLM", () => {
       confidence: 0.96,
     });
   });
+
+  it("clamps confidence into the supported runtime range", async () => {
+    const selection = await routeWithLLM(
+      "同步一下肯德基上海的品牌数据",
+      agents,
+      makeMockModel(
+        JSON.stringify({
+          agentName: "smart-reply-agent",
+          toolName: "sync_brand_data",
+          confidence: 7,
+        }),
+      ),
+    );
+
+    assert.deepEqual(selection, {
+      agentName: "smart-reply-agent",
+      toolName: "sync_brand_data",
+      confidence: 1,
+    });
+  });
 });
