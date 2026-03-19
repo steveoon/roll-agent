@@ -69,7 +69,9 @@
     │
     ├─ roll run boss-reply get_unread        ← 声明式路由
     │
-    └─ roll ask "帮我回复boss上的候选人"       ← LLM 智能路由
+    ├─ roll ask "帮我回复boss上的候选人"       ← 单轮 LLM 路由
+    │
+    └─ roll chat "帮我处理这批候选人"         ← 会话式统一入口（规划中）
     │
     ▼
 ┌──────────────────────────────────────────┐
@@ -148,6 +150,7 @@ nano-agent/
 │   │   │   │   ├── commands/
 │   │   │   │   │   ├── run.ts       # roll run <agent> <tool>
 │   │   │   │   │   ├── ask.ts       # roll ask "自然语言"
+│   │   │   │   │   ├── chat.ts      # roll chat [message]
 │   │   │   │   │   ├── agent.ts     # roll agent add/remove/list/start/stop
 │   │   │   │   │   ├── config.ts    # roll config set/get
 │   │   │   │   │   └── doctor.ts    # roll doctor（诊断）
@@ -245,6 +248,7 @@ Commands:
 
   roll run <agent> <tool> [args]  声明式调用 Agent 的指定 tool
   roll ask "<message>"            LLM 智能路由，自动选择 Agent 和 tool
+  roll chat [message]             Experimental：未来会话式统一入口（当前仅提供骨架）
 
   roll config set <key> <value>   设置全局配置
   roll config get [key]           查看配置
@@ -327,9 +331,9 @@ llm:
     qwen:
       api-key: ${DASHSCOPE_API_KEY}
 
-router:
-  mode: declarative                    # declarative | llm | auto
-  llm-model: qwen-plus                # LLM 路由使用的模型（可选较便宜的）
+ask:
+  llm-model: qwen-plus                # `roll ask` 使用的模型（默认回退到 llm.default-model）
+  confirm-threshold: 0.5             # 低于阈值时返回 needs_confirmation
 
 agents:
   data-dir: ~/.roll-agent/agents       # Agent 注册数据存储位置
@@ -388,8 +392,6 @@ interface AgentTool {
 ### 6.3 路由类型
 
 ```typescript
-type RouterMode = "declarative" | "llm" | "auto";
-
 /** LLM 路由决策结果 */
 interface RouteDecision {
   readonly agentName: string;
@@ -404,7 +406,7 @@ interface RouteDecision {
 ```typescript
 interface RollConfig {
   readonly llm: LLMConfig;
-  readonly router: RouterConfig;
+  readonly ask: AskConfig;
   readonly agents: AgentsConfig;
 }
 
@@ -419,8 +421,7 @@ interface ProviderConfig {
   readonly baseUrl?: string;
 }
 
-interface RouterConfig {
-  readonly mode: RouterMode;
+interface AskConfig {
   readonly llmModel?: string;
   readonly confirmThreshold?: number;     // LLM 路由置信度确认阈值
 }

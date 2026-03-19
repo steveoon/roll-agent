@@ -14,11 +14,25 @@ type ManagedPage = {
   readonly owned: boolean;
 };
 
+function findManagedContext(
+  managedContexts: ReadonlyMap<Platform, ManagedContext>,
+  context: BrowserContext,
+): ManagedContext | undefined {
+  return [...managedContexts.values()].find((entry) => entry.context === context);
+}
+
 function isContextAssigned(
   managedContexts: ReadonlyMap<Platform, ManagedContext>,
   context: BrowserContext,
 ): boolean {
   return [...managedContexts.values()].some((entry) => entry.context === context);
+}
+
+function findManagedPage(
+  managedPages: ReadonlyMap<Platform, ManagedPage>,
+  page: Page,
+): ManagedPage | undefined {
+  return [...managedPages.values()].find((entry) => entry.page === page);
 }
 
 function isPageAssigned(managedPages: ReadonlyMap<Platform, ManagedPage>, page: Page): boolean {
@@ -35,6 +49,8 @@ function isPageAssigned(managedPages: ReadonlyMap<Platform, ManagedPage>, page: 
 export class BrowserContextManager {
   private readonly contexts = new Map<Platform, ManagedContext>();
   private readonly pages = new Map<Platform, ManagedPage>();
+  private readonly pageIds = new WeakMap<Page, string>();
+  private nextPageId = 1;
   private readonly runtime: BrowserRuntime;
   private readonly sessionStore: SessionStore;
 
@@ -43,10 +59,42 @@ export class BrowserContextManager {
     this.sessionStore = sessionStore;
   }
 
+  private getOrAssignPageId(page: Page): string {
+    const existing = this.pageIds.get(page);
+    if (existing !== undefined) {
+      return existing;
+    }
+
+    const nextId = `page-${this.nextPageId}`;
+    this.nextPageId += 1;
+    this.pageIds.set(page, nextId);
+    return nextId;
+  }
+
+  private bindContext(platform: Platform, context: BrowserContext): void {
+    const existing = this.contexts.get(platform);
+    if (existing?.context === context) {
+      return;
+    }
+
+    const shared = findManagedContext(this.contexts, context);
+    this.contexts.set(
+      platform,
+      shared ?? {
+        context,
+        owned: false,
+      },
+    );
+  }
+
   private bindPage(platform: Platform, page: Page, owned: boolean): Page {
+    this.bindContext(platform, page.context());
+    this.getOrAssignPageId(page);
+
+    const shared = findManagedPage(this.pages, page);
     const managedPage = {
       page,
-      owned,
+      owned: shared?.owned ?? owned,
     } satisfies ManagedPage;
     this.pages.set(platform, managedPage);
     return page;
@@ -131,6 +179,43 @@ export class BrowserContextManager {
 
     const page = await context.newPage();
     return this.bindPage(platform, page, true);
+  }
+
+  listPages(): ReadonlyArray<Page> {
+    const browser = this.runtime.getBrowser();
+    const pages = browser
+      .contexts()
+      .flatMap((context) => context.pages())
+      .filter((page) => !page.isClosed());
+
+    for (const page of pages) {
+      this.getOrAssignPageId(page);
+    }
+
+    return pages;
+  }
+
+  getPageId(page: Page): string {
+    return this.getOrAssignPageId(page);
+  }
+
+  getBoundPlatformForPage(page: Page): Platform | undefined {
+    return [...this.pages.entries()].find(([, entry]) => entry.page === page)?.[0];
+  }
+
+  isSelectedPageForPlatform(page: Page): boolean {
+    return [...this.pages.values()].some((entry) => entry.page === page);
+  }
+
+  async selectPage(platform: Platform, pageId: string): Promise<Page> {
+    const page = this.listPages().find((candidate) => this.getPageId(candidate) === pageId);
+    if (!page) {
+      throw new Error(`Page "${pageId}" not found.`);
+    }
+
+    this.bindPage(platform, page, false);
+    await page.bringToFront().catch(() => {});
+    return page;
   }
 
   async useExistingPage(

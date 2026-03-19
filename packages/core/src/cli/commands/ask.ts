@@ -101,7 +101,7 @@ export default defineCommand({
     };
 
     const routerProvider = config.llm.defaultProvider;
-    const routerModelName = config.router.llmModel ?? config.llm.defaultModel;
+    const routerModelName = config.ask.llmModel ?? config.llm.defaultModel;
     const providerConfig = config.llm.providers[routerProvider];
 
     if (!providerConfig) {
@@ -137,7 +137,7 @@ export default defineCommand({
       `路由决策: ${decision.agentName}.${decision.toolName} (置信度: ${String(decision.confidence)})`,
     );
 
-    const threshold = config.router.confirmThreshold ?? DEFAULT_CONFIRM_THRESHOLD;
+    const threshold = config.ask.confirmThreshold ?? DEFAULT_CONFIRM_THRESHOLD;
     if (decision.confidence < threshold) {
       const result: AskNeedsConfirmationResult = {
         status: "needs_confirmation",

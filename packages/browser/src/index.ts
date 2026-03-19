@@ -8,6 +8,7 @@ export {
   BROWSER_CHANNELS,
   BROWSER_RUNTIME_MODES,
   BrowserChannelSchema,
+  BrowserPageInfoSchema,
   BrowserLoginStateSourceSchema,
   BrowserRuntimeModeSchema,
   BrowserRuntimeConfigSchema,
@@ -19,6 +20,7 @@ export {
 export type {
   Platform,
   BrowserChannel,
+  BrowserPageInfo,
   BrowserLoginStateSource,
   BrowserRuntimeMode,
   BrowserRuntimeConfig,

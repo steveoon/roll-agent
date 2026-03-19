@@ -20,6 +20,7 @@ const main = defineCommand({
     agent: () => loadMainCommand("agent"),
     run: () => loadMainCommand("run"),
     ask: () => loadMainCommand("ask"),
+    chat: () => loadMainCommand("chat"),
     config: () => loadMainCommand("config"),
     doctor: () => loadMainCommand("doctor"),
     update: () => loadMainCommand("update"),

@@ -15,7 +15,9 @@ metadata:
 ## Tools
 
 - `browser_status()` — 查询浏览器运行状态和活跃 session
+- `list_pages(platform?)` — 列出当前浏览器中可见的页面、pageId 和绑定状态
 - `open_platform(platform)` — 打开并聚焦招聘平台主页，供用户手动登录或后续站内操作
+- `select_page(platform, pageId)` — 将指定页面绑定为平台当前活跃页并切到前台
 - `zhipin_read_messages(limit?)` — 读取 BOSS直聘未读消息列表
 - `zhipin_send_reply(conversationId, message)` — 向指定对话发送回复
 - `zhipin_get_candidate_info(conversationId)` — 提取候选人资料信息

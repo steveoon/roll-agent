@@ -9,8 +9,8 @@ llm:
       api-key: ${ANTHROPIC_API_KEY}
       base-url: https://apic1.ohmycdn.com/v1
 
-router:
-  mode: declarative
+ask:
+  confirm-threshold: 0.5
 
 agents:
   data-dir: ~/.roll-agent/agents

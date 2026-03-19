@@ -1,8 +1,8 @@
 import { defineTool } from "@roll-agent/sdk";
 import { z } from "zod";
 import { PlatformSchema } from "@roll-agent/browser";
-import type { Platform } from "@roll-agent/browser";
 import { getContextManager } from "../runtime-holder.ts";
+import { PLATFORM_HOME, matchesPlatformHost } from "../platforms.ts";
 
 const OpenPlatformInputSchema = z.object({
   platform: PlatformSchema.describe("目标平台：`zhipin` 代表 BOSS直聘，`yupao` 代表鱼泡"),
@@ -14,16 +14,6 @@ const OpenPlatformOutputSchema = z.object({
   url: z.string(),
   reusedExistingTab: z.boolean(),
 });
-
-const PLATFORM_HOME: Readonly<Record<Platform, string>> = {
-  zhipin: "https://www.zhipin.com",
-  yupao: "https://www.yupao.com",
-};
-
-function matchesPlatformHost(url: string, platform: Platform): boolean {
-  const platformHost = new URL(PLATFORM_HOME[platform]).host;
-  return url.includes(platformHost);
-}
 
 export const openPlatform = defineTool({
   name: "open_platform",

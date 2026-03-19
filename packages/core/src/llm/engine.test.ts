@@ -11,7 +11,7 @@ const baseConfig: RollConfig = {
       anthropic: { apiKey: "test-key" },
     },
   },
-  router: { mode: "declarative" },
+  ask: {},
   agents: { dataDir: "/tmp/agents" },
 };
 

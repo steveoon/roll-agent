@@ -90,6 +90,16 @@ function formatYamlSyntaxError(configPath: string, error: unknown): string {
   return `${baseMessage}\n${error.message}`;
 }
 
+function formatDeprecatedRouterConfigError(configPath: string): string {
+  return [
+    `Config validation failed (${configPath}):`,
+    "  - `router` 配置段已废弃，请改用 `ask`。",
+    "  - 将 `router.llm-model` 迁移为 `ask.llm-model`。",
+    "  - 将 `router.confirm-threshold` 迁移为 `ask.confirm-threshold`。",
+    "  - 删除 `router.mode`；命令本身已决定策略（`run` / `ask` / `chat`）。",
+  ].join("\n");
+}
+
 /** 在指定目录及其父目录中查找配置文件 */
 function findConfigFile(startDir: string): string | undefined {
   let dir = resolve(startDir);
@@ -166,6 +176,10 @@ export function validateConfigText(raw: string, configPath: string): RollConfig 
   const transformed = resolveEnvVars(kebabToCamelDeep(parsed));
   if (!isRecord(transformed)) {
     throw new Error(`Invalid config file: ${configPath} (expected YAML object)`);
+  }
+
+  if (Object.hasOwn(transformed, "router")) {
+    throw new Error(formatDeprecatedRouterConfigError(configPath));
   }
 
   // Zod 校验（与默认值深度合并）

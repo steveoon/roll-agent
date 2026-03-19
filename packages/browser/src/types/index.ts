@@ -106,6 +106,17 @@ export const BrowserStatusSchema = z.object({
 
 export type BrowserStatus = z.infer<typeof BrowserStatusSchema>;
 
+export const BrowserPageInfoSchema = z.object({
+  pageId: z.string(),
+  url: z.string(),
+  title: z.string(),
+  boundPlatform: PlatformSchema.nullable(),
+  detectedPlatform: PlatformSchema.nullable(),
+  isSelectedForPlatform: z.boolean(),
+});
+
+export type BrowserPageInfo = z.infer<typeof BrowserPageInfoSchema>;
+
 // ========== Page Snapshot ==========
 
 export const PageSnapshotSchema = z.object({

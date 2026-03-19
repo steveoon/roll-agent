@@ -73,6 +73,7 @@ roll --help
 - `roll-core` 新增了 `tool-runtime` 适配层：统一做参数提取、preflight 校验、错误分类和用户提示。
 - 路由结果已拆成 `RouteSelection` 与 `RouteDecision`：先选 tool，再补参数，CLI 和上层编排器都更容易复用这套状态机。
 - `roll run` 已支持 `--input-json` / `--input-file`：适合显式传递复杂对象、开放对象和批量 payload。
+- `roll chat` 已预留为未来会话式统一入口，但当前仅提供 experimental 命令骨架，不做多步编排。
 - `smart-reply-agent` 的品牌数据同步已从“手工 push 数据”改成“从 Duliday pull 数据”，并升级为新的品牌数据模型：`meta + brands[] + stores[] + positions[]`。
 
 ### 1. 初始化配置
@@ -91,14 +92,15 @@ llm:
     anthropic:
       api-key: ${ANTHROPIC_API_KEY}
 
-router:
-  mode: declarative
+ask:
+  confirm-threshold: 0.5
 
 agents:
   data-dir: ~/.roll-agent/agents
 ```
 
 支持的 provider：`anthropic`、`openai`、`deepseek`、`qwen`。每个 provider 可配置 `base-url` 用于自定义 API 端点。
+`ask.llmModel` 可选；未设置时会回退到 `llm.defaultModel`。
 
 > [!IMPORTANT]
 > `api-key: ${...}` 中的 `${...}` 是“环境变量名占位符”，不是 API Key 本身。
@@ -155,6 +157,9 @@ pnpm dev -- run some-agent sync_config --input-file ./payload.json
 
 # LLM 智能路由（自然语言，自动选择 Agent + Tool）
 pnpm dev -- ask "帮我查看未读消息"
+
+# 未来会话式入口（experimental，当前只返回 unavailable）
+pnpm dev -- chat "帮我把这批候选人处理掉"
 ```
 
 说明：
@@ -163,6 +168,7 @@ pnpm dev -- ask "帮我查看未读消息"
 - `--input-json` / `--input-file` 适合传递复杂对象参数；命令行 `--key value` 更适合简单标量参数
 - `roll ask` 适合“自然语言可以可靠映射到 tool 参数”的场景；如果某个必填字段是开放对象（如 `z.record()` / 任意 JSON payload），`ask` 会返回 `needs_input`，提示改用 `roll run --input-json` 或上层编排器显式提供
 - `roll ask` 不会篡改原始 tool schema 的类型语义；对于无法可靠从自然语言提取的字段，会显式降级为“需要显式输入”，而不是伪造错误类型的参数
+- `roll chat` 当前是 experimental 骨架，不会执行会话编排、不会恢复 session，也不会隐式降级到 `roll ask`
 
 ## CLI 命令参考
 
@@ -179,6 +185,7 @@ roll agent health               健康检查（stdio 按需模式 / streamable-h
 
 roll run <agent> <tool> [args]  声明式调用（支持 --key value / --input-json / --input-file）
 roll ask "<message>"            LLM 智能路由
+roll chat [message]             Experimental：未来会话式统一入口（当前仅提供骨架）
 
 roll config init                交互式初始化配置
 roll config get [key]           查看配置（支持点号路径如 llm.defaultModel）
@@ -189,6 +196,16 @@ roll doctor                     诊断系统状态（Node.js / 配置 / Provider
 
 说明：`--json` 为子命令级参数（在支持的命令上可用）；全局 `--verbose` / `--config <path>`
 当前为 planned，尚未统一透传到所有子命令。
+
+## OpenClaw 接入
+
+当 `roll-core` 被当作上层编排器的一个 CLI skill 使用时，推荐默认调用顺序为：
+
+- 已知 `agent + tool` 时优先 `roll run --json`
+- 只知道自然语言意图时使用 `roll ask --json`
+- 不要默认使用 `roll chat`，它当前仍是 experimental
+
+可直接参考模板：[openclaw-roll-core-skill-template.md](./openclaw-roll-core-skill-template.md)。
 
 ## 开发子 Agent
 

@@ -1,13 +1,8 @@
-import type { RollConfig } from "../config/schema.ts";
-
-/** 路由模式 — 从 Zod schema 派生，保持单一数据源 */
-export type RouterMode = RollConfig["router"]["mode"];
-
 /** LLM 路由选中的目标 */
 export interface RouteSelection {
   readonly agentName: string;
   readonly toolName: string;
-  /** 置信度，取值范围 0–1，低于 confirmThreshold 时请求用户确认 */
+  /** 置信度，取值范围 0–1，低于 ask.confirmThreshold 时请求用户确认 */
   readonly confidence: Confidence;
 }
 

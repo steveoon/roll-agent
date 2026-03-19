@@ -11,8 +11,7 @@ export const llmConfigSchema = z.object({
   providers: z.record(z.string(), providerConfigSchema),
 });
 
-export const routerConfigSchema = z.object({
-  mode: z.enum(["declarative", "llm", "auto"]),
+export const askConfigSchema = z.object({
   llmModel: z.string().optional(),
   confirmThreshold: z.number().optional(),
 });
@@ -25,7 +24,7 @@ export const agentsConfigSchema = z.object({
 
 export const rollConfigSchema = z.object({
   llm: llmConfigSchema,
-  router: routerConfigSchema,
+  ask: askConfigSchema,
   agents: agentsConfigSchema,
 });
 

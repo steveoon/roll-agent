@@ -9,6 +9,8 @@ import { BrowserContextManager } from "./context-manager.ts";
 type TestPageState = {
   readonly page: Page;
   readonly getCloseCalls: () => number;
+  readonly getBringToFrontCalls: () => number;
+  readonly setContext: (context: BrowserContext) => void;
 };
 
 type TestContextState = {
@@ -30,11 +32,28 @@ type TestSessionStoreState = {
   readonly getLoadLocalStorageCalls: () => number;
 };
 
-function createTestPage(): TestPageState {
+function createTestPage(params?: { url?: string; title?: string }): TestPageState {
   let closed = false;
   let closeCalls = 0;
+  let bringToFrontCalls = 0;
+  let assignedContext: BrowserContext | undefined;
 
   const page = {
+    url() {
+      return params?.url ?? "about:blank";
+    },
+    async title() {
+      return params?.title ?? "";
+    },
+    context() {
+      if (!assignedContext) {
+        throw new Error("Page context not assigned in test.");
+      }
+      return assignedContext;
+    },
+    async bringToFront() {
+      bringToFrontCalls += 1;
+    },
     isClosed() {
       return closed;
     },
@@ -44,9 +63,18 @@ function createTestPage(): TestPageState {
     },
   } as unknown as Page;
 
+  const mutablePage = page as Page & { setContext?: (context: BrowserContext) => void };
+  mutablePage.setContext = (context) => {
+    assignedContext = context;
+  };
+
   return {
     page,
     getCloseCalls: () => closeCalls,
+    getBringToFrontCalls: () => bringToFrontCalls,
+    setContext: (context) => {
+      mutablePage.setContext?.(context);
+    },
   };
 }
 
@@ -63,7 +91,9 @@ function createTestContext(initialPages: ReadonlyArray<Page> = []): TestContextS
     },
     async newPage() {
       newPageCalls += 1;
-      const nextPage = createTestPage().page;
+      const nextPageState = createTestPage();
+      nextPageState.setContext(context as BrowserContext);
+      const nextPage = nextPageState.page;
       pages = [...pages, nextPage];
       return nextPage;
     },
@@ -77,6 +107,11 @@ function createTestContext(initialPages: ReadonlyArray<Page> = []): TestContextS
       closeCalls += 1;
     },
   } as unknown as BrowserContext;
+
+  for (const page of pages) {
+    const testPage = page as Page & { setContext?: (context: BrowserContext) => void };
+    testPage.setContext?.(context);
+  }
 
   return {
     context,
@@ -213,23 +248,9 @@ test("shared attached context creates a dedicated tab for the second platform", 
 });
 
 test("useExistingPage binds a matching site tab to the platform", async () => {
-  const otherPage = {
-    url() {
-      return "https://www.baidu.com";
-    },
-    isClosed() {
-      return false;
-    },
-  } as unknown as Page;
-  const zhipinPage = {
-    url() {
-      return "https://www.zhipin.com/web/geek/chat";
-    },
-    isClosed() {
-      return false;
-    },
-  } as unknown as Page;
-  const attachedContext = createTestContext([otherPage, zhipinPage]);
+  const otherPage = createTestPage({ url: "https://www.baidu.com" });
+  const zhipinPage = createTestPage({ url: "https://www.zhipin.com/web/geek/chat" });
+  const attachedContext = createTestContext([otherPage.page, zhipinPage.page]);
   const browser = createTestBrowser({
     existingContexts: [attachedContext.context],
   });
@@ -245,9 +266,9 @@ test("useExistingPage binds a matching site tab to the platform", async () => {
     page.url().includes("zhipin.com"),
   );
 
-  assert.equal(selected, zhipinPage);
+  assert.equal(selected, zhipinPage.page);
   const reused = await manager.getPage("zhipin");
-  assert.equal(reused, zhipinPage);
+  assert.equal(reused, zhipinPage.page);
   assert.equal(attachedContext.getNewPageCalls(), 0);
 });
 
@@ -278,4 +299,37 @@ test("remote-cdp falls back to newContext and restores sidecar session snapshots
 
   await manager.closeAll();
   assert.equal(ownedContext.getCloseCalls(), 1);
+});
+
+test("listPages assigns stable page ids and selectPage rebinds the platform page", async () => {
+  const baiduPage = createTestPage({ url: "https://www.baidu.com", title: "百度" });
+  const zhipinPage = createTestPage({
+    url: "https://www.zhipin.com/web/geek/chat",
+    title: "BOSS直聘",
+  });
+  const attachedContext = createTestContext([baiduPage.page, zhipinPage.page]);
+  const browser = createTestBrowser({
+    existingContexts: [attachedContext.context],
+  });
+  const runtime = createRuntime({
+    browser: browser.browser,
+    mode: "managed-cdp",
+    allowsNewContext: false,
+  });
+  const sessionStore = createSessionStore();
+  const manager = new BrowserContextManager(runtime, sessionStore.store);
+
+  await manager.getPage("zhipin");
+  const pages = manager.listPages();
+  const zhipinPageId = manager.getPageId(zhipinPage.page);
+
+  assert.equal(pages.length, 2);
+  assert.equal(manager.getPageId(zhipinPage.page), zhipinPageId);
+
+  const selected = await manager.selectPage("zhipin", zhipinPageId);
+
+  assert.equal(selected, zhipinPage.page);
+  assert.equal(manager.getBoundPlatformForPage(zhipinPage.page), "zhipin");
+  assert.equal(manager.isSelectedPageForPlatform(zhipinPage.page), true);
+  assert.equal(zhipinPage.getBringToFrontCalls(), 1);
 });

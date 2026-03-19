@@ -39,6 +39,62 @@ export default defineCommand({
   },
 });
 
+interface InitConfigAnswers {
+  readonly provider: string;
+  readonly model: string;
+  readonly apiKeyEnv: string;
+}
+
+function normalizeAnswer(value: string | undefined, fallback: string): string {
+  const trimmed = value?.trim();
+  return trimmed ? trimmed : fallback;
+}
+
+function buildInitialConfigYaml({ provider, model, apiKeyEnv }: InitConfigAnswers): string {
+  return `llm:
+  default-provider: ${provider}
+  default-model: ${model}
+  providers:
+    ${provider}:
+      api-key: \${${apiKeyEnv}}
+
+ask:
+  confirm-threshold: 0.5
+
+agents:
+  data-dir: ~/.roll-agent/agents
+`;
+}
+
+async function readInitConfigAnswers(): Promise<InitConfigAnswers> {
+  if (!process.stdin.isTTY) {
+    const [provider, model, apiKeyEnv] = readFileSync(0, "utf-8").split(/\r?\n/u);
+    return {
+      provider: normalizeAnswer(provider, "anthropic"),
+      model: normalizeAnswer(model, "claude-sonnet-4-20250514"),
+      apiKeyEnv: normalizeAnswer(apiKeyEnv, "ANTHROPIC_API_KEY"),
+    };
+  }
+
+  const rl = createInterface({ input: process.stdin, output: process.stderr });
+
+  const provider = normalizeAnswer(
+    await rl.question("默认 LLM provider (anthropic/openai/qwen) [anthropic]: "),
+    "anthropic",
+  );
+  const model = normalizeAnswer(
+    await rl.question("默认 model [claude-sonnet-4-20250514]: "),
+    "claude-sonnet-4-20250514",
+  );
+  const apiKeyEnv = normalizeAnswer(
+    await rl.question("API Key 环境变量名 [ANTHROPIC_API_KEY]: "),
+    "ANTHROPIC_API_KEY",
+  );
+
+  rl.close();
+  return { provider, model, apiKeyEnv };
+}
+
 /** 交互式初始化配置文件 */
 async function initConfig(): Promise<void> {
   const configPath = resolve(process.cwd(), "roll.config.yaml");
@@ -52,6 +108,9 @@ async function initConfig(): Promise<void> {
     }
 
     console.error(`⚠ 配置文件已存在: ${configPath}`);
+    if (!process.stdin.isTTY) {
+      throw new Error("非交互模式下不会覆盖现有配置文件，请手动删除后重试。");
+    }
     const rl = createInterface({ input: process.stdin, output: process.stderr });
     const answer = await rl.question("是否覆盖？(y/N) ");
     rl.close();
@@ -61,30 +120,7 @@ async function initConfig(): Promise<void> {
     }
   }
 
-  const rl = createInterface({ input: process.stdin, output: process.stderr });
-
-  const provider =
-    (await rl.question("默认 LLM provider (anthropic/openai/qwen) [anthropic]: ")) || "anthropic";
-  const model =
-    (await rl.question("默认 model [claude-sonnet-4-20250514]: ")) || "claude-sonnet-4-20250514";
-  const apiKeyEnv =
-    (await rl.question("API Key 环境变量名 [ANTHROPIC_API_KEY]: ")) || "ANTHROPIC_API_KEY";
-
-  rl.close();
-
-  const yaml = `llm:
-  default-provider: ${provider}
-  default-model: ${model}
-  providers:
-    ${provider}:
-      api-key: \${${apiKeyEnv}}
-
-router:
-  mode: declarative
-
-agents:
-  data-dir: ~/.roll-agent/agents
-`;
+  const yaml = buildInitialConfigYaml(await readInitConfigAnswers());
 
   validateConfigText(yaml, configPath);
   writeFileSync(configPath, yaml, "utf-8");
@@ -103,7 +139,7 @@ function getConfig(key: string | undefined): void {
     return;
   }
 
-  // 支持点号路径访问：llm.defaultProvider
+  // 支持点号路径访问：llm.defaultProvider / ask.confirmThreshold
   const parts = key.split(".");
   let current: unknown = config;
   for (const part of parts) {
@@ -136,7 +172,7 @@ function camelToKebab(str: string): string {
 function setConfig(key: string | undefined, value: string | undefined): void {
   if (!key || value === undefined) {
     console.error("✗ 用法: roll config set <key> <value>");
-    console.error("  示例: roll config set llm.defaultModel claude-sonnet-4-20250514");
+    console.error("  示例: roll config set ask.confirmThreshold 0.5");
     process.exitCode = 1;
     return;
   }
