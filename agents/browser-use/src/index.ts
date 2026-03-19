@@ -1,10 +1,24 @@
 import { defineAgent } from "@roll-agent/sdk";
 import { BrowserRuntimeConfigSchema } from "@roll-agent/browser";
 import { browserStatus } from "./tools/browser-status.ts";
+import { listPages } from "./tools/list-pages.ts";
+import { navigateActiveTab } from "./tools/navigate-active-tab.ts";
 import { openPlatform } from "./tools/open-platform.ts";
+import { selectPage } from "./tools/select-page.ts";
+// Zhipin — 聊天
 import { zhipinReadMessages } from "./tools/zhipin-read-messages.ts";
-import { zhipinSendReply } from "./tools/zhipin-send-reply.ts";
+import { zhipinOpenChat } from "./tools/zhipin-open-chat.ts";
 import { zhipinGetCandidateInfo } from "./tools/zhipin-get-candidate-info.ts";
+import { zhipinSendReply } from "./tools/zhipin-send-reply.ts";
+import { zhipinExchangeWechat } from "./tools/zhipin-exchange-wechat.ts";
+import { zhipinGetUsername } from "./tools/zhipin-get-username.ts";
+// Zhipin — 推荐列表
+import { zhipinGetCandidateList } from "./tools/zhipin-get-candidate-list.ts";
+import { zhipinSayHello } from "./tools/zhipin-say-hello.ts";
+import { zhipinOpenResume } from "./tools/zhipin-open-resume.ts";
+import { zhipinLocateResumeCanvas } from "./tools/zhipin-locate-resume-canvas.ts";
+import { zhipinCloseResume } from "./tools/zhipin-close-resume.ts";
+// Yupao
 import { yupaoReadMessages } from "./tools/yupao-read-messages.ts";
 import { yupaoSendReply } from "./tools/yupao-send-reply.ts";
 import { initRuntime, shutdownRuntime } from "./runtime-holder.ts";
@@ -53,11 +67,26 @@ const agent = defineAgent(
   {
     name: "browser-use-agent",
     tools: [
+      // 通用
       browserStatus,
+      listPages,
+      navigateActiveTab,
       openPlatform,
+      selectPage,
+      // Zhipin 聊天
       zhipinReadMessages,
-      zhipinSendReply,
+      zhipinOpenChat,
       zhipinGetCandidateInfo,
+      zhipinSendReply,
+      zhipinExchangeWechat,
+      zhipinGetUsername,
+      // Zhipin 推荐列表
+      zhipinGetCandidateList,
+      zhipinSayHello,
+      zhipinOpenResume,
+      zhipinLocateResumeCanvas,
+      zhipinCloseResume,
+      // Yupao
       yupaoReadMessages,
       yupaoSendReply,
     ],
