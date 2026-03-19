@@ -186,6 +186,7 @@ roll agent health               健康检查（stdio 按需模式 / streamable-h
 roll run <agent> <tool> [args]  声明式调用（支持 --key value / --input-json / --input-file）
 roll ask "<message>"            LLM 智能路由
 roll chat [message]             Experimental：未来会话式统一入口（当前仅提供骨架）
+roll update                     更新 roll 及已注册的 Agent（对不同来源行为不同）
 
 roll config init                交互式初始化配置
 roll config get [key]           查看配置（支持点号路径如 llm.defaultModel）
@@ -206,6 +207,14 @@ roll doctor                     诊断系统状态（Node.js / 配置 / Provider
 - 不要默认使用 `roll chat`，它当前仍是 experimental
 
 可直接参考模板：[openclaw-roll-core-skill-template.md](./openclaw-roll-core-skill-template.md)。
+
+## Agent 更新注意事项
+
+- `roll update` 适合更新 `git` / `installed` 来源的 Agent，但不会替你重启长驻 HTTP Agent 进程
+- `local-path` Agent 当前不会被 `roll update` 自动刷新注册信息
+- 如果改的是 `SKILL.md` 的名称、endpoint、transport 等注册层信息，通常需要 `roll agent remove` 后重新 `add`
+
+完整说明见：[docs/how-to-update-registered-agents.md](./docs/how-to-update-registered-agents.md)。
 
 ## 开发子 Agent
 

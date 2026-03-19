@@ -26,6 +26,7 @@ export const generateReply = defineTool({
     suggestedReply: z.string(),
     confidence: z.number(),
     stage: z.string(),
+    latencyMs: z.number().optional(),
     shouldExchangeWechat: z.boolean().optional(),
     error: z.string().optional(),
     diagnostics: z
@@ -92,6 +93,7 @@ export const generateReply = defineTool({
       suggestedReply: result.suggestedReply,
       confidence: result.confidence,
       stage: result.turnPlan.stage,
+      latencyMs: result.latencyMs,
       shouldExchangeWechat: result.shouldExchangeWechat,
       error: result.error?.userMessage,
       diagnostics: debug
