@@ -2,6 +2,7 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { MockLanguageModelV3 } from "ai/test";
 import { routeWithLLM } from "./llm-router.ts";
+import { createDefaultRuntimeForTransport } from "../types/agent.ts";
 import type { RegisteredAgent } from "../types/agent.ts";
 
 function makeMockModel(jsonText: string): MockLanguageModelV3 {
@@ -26,6 +27,7 @@ const agents: RegisteredAgent[] = [
       metadata: {},
     },
     transport: { type: "stdio", command: "node" },
+    runtime: createDefaultRuntimeForTransport({ type: "stdio", command: "node" }),
     installPath: "/tmp/smart-reply-agent",
     registeredAt: "2026-01-01T00:00:00.000Z",
     status: "online",

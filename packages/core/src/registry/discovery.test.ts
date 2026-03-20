@@ -40,6 +40,7 @@ This agent does testing.
     assert.equal(result.skill.name, "test-agent");
     assert.equal(result.skill.description, "A test agent");
     assert.equal(result.transport.type, "stdio");
+    assert.equal(result.runtime.ownership, "on-demand");
     if (result.transport.type === "stdio") {
       assert.equal(result.transport.command, "node");
       assert.deepEqual(result.transport.args, ["src/index.ts"]);
@@ -60,6 +61,7 @@ metadata:
 
     const result = discoverAgent(tmpDir);
     assert.equal(result.transport.type, "streamable-http");
+    assert.equal(result.runtime.ownership, "external-managed");
     if (result.transport.type === "streamable-http") {
       assert.equal(result.transport.endpoint, "http://localhost:8100/mcp");
     }
@@ -76,6 +78,7 @@ metadata: {}
 
     const result = discoverAgent(tmpDir);
     assert.equal(result.transport.type, "stdio");
+    assert.equal(result.runtime.ownership, "on-demand");
   });
 
   it("should throw when SKILL.md is missing", () => {
@@ -143,5 +146,151 @@ metadata: {}
     const result = discoverAgent(tmpDir);
     assert.equal(result.skill.license, "MIT");
     assert.equal(result.skill.compatibility, ">=22.6.0");
+  });
+
+  it("should prefer package.json#rollAgent for core-managed http agents", () => {
+    const skillMd = `---
+name: browser-use-agent
+description: Browser use agent
+---
+
+Tools list
+`;
+    const packageJson = JSON.stringify({
+      name: "@roll-agent/browser-use-agent",
+      version: "0.1.0",
+      rollAgent: {
+        runtime: {
+          ownership: "core-managed",
+          transport: "streamable-http",
+        },
+        start: {
+          command: "node",
+          args: ["dist/index.js"],
+        },
+        endpoint: {
+          path: "/mcp",
+          port: 3100,
+        },
+        setup: {
+          playwright: {
+            browsers: ["chromium"],
+          },
+        },
+      },
+    });
+
+    writeFileSync(resolve(tmpDir, "SKILL.md"), skillMd);
+    writeFileSync(resolve(tmpDir, "package.json"), packageJson, "utf-8");
+
+    const result = discoverAgent(tmpDir);
+    assert.equal(result.transport.type, "streamable-http");
+    assert.equal(result.transport.endpoint, "http://127.0.0.1:3100/mcp");
+    assert.equal(result.runtime.ownership, "core-managed");
+    if (result.runtime.ownership === "core-managed") {
+      assert.equal(result.runtime.start.command, "node");
+      assert.deepEqual(result.runtime.start.args, ["dist/index.js"]);
+      assert.deepEqual(result.runtime.endpoint, { path: "/mcp", port: 3100 });
+      assert.deepEqual(result.runtime.setup, { playwright: { browsers: ["chromium"] } });
+    }
+  });
+
+  it("should prefer package.json#rollAgent for stdio on-demand agents", () => {
+    const skillMd = `---
+name: installable-stdio
+description: Installable stdio agent
+---
+`;
+    const packageJson = JSON.stringify({
+      name: "@roll-agent/installable-stdio",
+      version: "0.1.0",
+      rollAgent: {
+        runtime: {
+          ownership: "on-demand",
+          transport: "stdio",
+        },
+        start: {
+          command: "node",
+          args: ["dist/index.js"],
+        },
+      },
+    });
+
+    writeFileSync(resolve(tmpDir, "SKILL.md"), skillMd);
+    writeFileSync(resolve(tmpDir, "package.json"), packageJson, "utf-8");
+
+    const result = discoverAgent(tmpDir);
+    assert.equal(result.transport.type, "stdio");
+    assert.equal(result.runtime.ownership, "on-demand");
+    if (result.transport.type === "stdio") {
+      assert.equal(result.transport.command, "node");
+      assert.deepEqual(result.transport.args, ["dist/index.js"]);
+    }
+  });
+
+  it("should support package.json#rollAgent for external-managed streamable-http agents", () => {
+    const skillMd = `---
+name: external-http-agent
+description: External managed HTTP agent
+---
+`;
+    const packageJson = JSON.stringify({
+      name: "@roll-agent/external-http-agent",
+      version: "0.1.0",
+      rollAgent: {
+        runtime: {
+          ownership: "external-managed",
+          transport: "streamable-http",
+        },
+        endpoint: {
+          url: "https://api.example.com/mcp",
+        },
+      },
+    });
+
+    writeFileSync(resolve(tmpDir, "SKILL.md"), skillMd);
+    writeFileSync(resolve(tmpDir, "package.json"), packageJson, "utf-8");
+
+    const result = discoverAgent(tmpDir);
+    assert.equal(result.transport.type, "streamable-http");
+    assert.equal(result.transport.endpoint, "https://api.example.com/mcp");
+    assert.equal(result.runtime.ownership, "external-managed");
+  });
+
+  it("should throw when rollAgent conflicts with legacy runtime metadata", () => {
+    const skillMd = `---
+name: conflict-agent
+description: conflicting runtime config
+metadata:
+  roll-transport: streamable-http
+  roll-endpoint: http://localhost:9999/mcp
+---
+`;
+    const packageJson = JSON.stringify({
+      name: "@roll-agent/conflict-agent",
+      version: "0.1.0",
+      rollAgent: {
+        runtime: {
+          ownership: "core-managed",
+          transport: "streamable-http",
+        },
+        start: {
+          command: "node",
+          args: ["dist/index.js"],
+        },
+        endpoint: {
+          path: "/mcp",
+          port: 3100,
+        },
+      },
+    });
+
+    writeFileSync(resolve(tmpDir, "SKILL.md"), skillMd);
+    writeFileSync(resolve(tmpDir, "package.json"), packageJson, "utf-8");
+
+    assert.throws(
+      () => discoverAgent(tmpDir),
+      (err: Error) => err.message.includes("Conflicting runtime metadata"),
+    );
   });
 });

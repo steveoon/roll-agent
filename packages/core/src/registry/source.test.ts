@@ -36,7 +36,7 @@ describe("registry/source", () => {
   });
 
   it("formats source labels for CLI display", () => {
-    assert.equal(formatAgentSourceType("local"), "local-path");
-    assert.equal(formatAgentSourceType("installed"), "installed");
+    assert.equal(formatAgentSourceType("local-path"), "local-path");
+    assert.equal(formatAgentSourceType("installed-package"), "installed");
   });
 });
