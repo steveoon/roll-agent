@@ -31,7 +31,7 @@ export default defineCommand({
     console.log(`位置:     ${getAgentLocation(agent)}`);
     console.log(`注册时间: ${agent.registeredAt}`);
 
-    if (agent.source?.type === "installed") {
+    if (agent.source?.type === "installed-package") {
       console.log(`安装包:   ${agent.source.packageSpec}`);
       console.log(`安装目录: ${agent.source.installDir}`);
     }

@@ -1,9 +1,16 @@
 import { defineCommand } from "citty";
 import { resolve } from "node:path";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { loadConfig } from "../../config/loader.ts";
+import {
+  getAgentPid,
+  startAgent,
+  stopAgentGracefully,
+  waitForAgentReady,
+} from "../../registry/process-manager.ts";
+import { runAgentSetup } from "../../registry/runtime-setup.ts";
 import { AgentStore } from "../../registry/store.ts";
 import { discoverAgent } from "../../registry/discovery.ts";
 import { inferAgentSourceType, resolveInstalledPackageRoot } from "../../registry/source.ts";
@@ -54,14 +61,26 @@ async function updateGitAgent(agent: RegisteredAgent): Promise<boolean> {
     // 重新安装依赖
     const packageJsonPath = resolve(agent.installPath, "package.json");
     if (existsSync(packageJsonPath)) {
-      const depSpinner = createSpinner(`安装 ${agent.skill.name} 依赖...`).start();
-      try {
-        await execFileAsync("pnpm", ["install"], { cwd: agent.installPath, timeout: 60_000 });
-        depSpinner.succeed(`${agent.skill.name} 依赖已更新`);
-      } catch (err) {
-        depSpinner.fail(`${agent.skill.name} 依赖安装失败`);
-        log.error(err instanceof Error ? err.message : String(err));
-        return false;
+      const installCommand = detectInstallCommand(agent.installPath);
+      if (!installCommand) {
+        log.warn(
+          `${agent.skill.name} 未检测到 packageManager 或 lockfile，跳过依赖安装。`,
+        );
+      } else {
+        const depSpinner = createSpinner(`安装 ${agent.skill.name} 依赖...`).start();
+        try {
+          await execFileAsync(installCommand.command, installCommand.args, {
+            cwd: agent.installPath,
+            timeout: 60_000,
+          });
+          depSpinner.succeed(
+            `${agent.skill.name} 依赖已更新 (${installCommand.command} ${installCommand.args.join(" ")})`,
+          );
+        } catch (err) {
+          depSpinner.fail(`${agent.skill.name} 依赖安装失败`);
+          log.error(err instanceof Error ? err.message : String(err));
+          return false;
+        }
       }
     }
 
@@ -75,7 +94,7 @@ async function updateGitAgent(agent: RegisteredAgent): Promise<boolean> {
 
 /** 重新安装 npm 来源的 Agent */
 async function updateInstalledAgent(agent: RegisteredAgent): Promise<boolean> {
-  if (agent.source?.type !== "installed") {
+  if (agent.source?.type !== "installed-package") {
     return false;
   }
 
@@ -130,6 +149,11 @@ export default defineCommand({
       description: "仅检查可用更新，不执行",
       default: false,
     },
+    skipBrowserSetup: {
+      type: "boolean",
+      description: "跳过浏览器运行时安装",
+      default: false,
+    },
   },
   async run({ args }) {
     const isCheckOnly = args.check;
@@ -162,14 +186,14 @@ export default defineCommand({
         case "git":
           action = "git pull + 重新安装依赖";
           break;
-        case "installed":
+        case "installed-package":
           action = "重新安装 npm 包";
           break;
-        case "remote":
-          action = "刷新 MCP 元数据 (tools/list)";
+        case "remote-manifest":
+          action = "刷新本地 manifest + MCP 元数据";
           break;
-        case "local":
-          action = "跳过（本地 Agent 请手动更新）";
+        case "local-path":
+          action = "刷新本地 SKILL/manifest";
           break;
       }
       agentSummary.push({ name: agent.skill.name, sourceType, action });
@@ -178,7 +202,7 @@ export default defineCommand({
     if (agents.length > 0) {
       log.info(`\n已注册 Agent (${agents.length}):`);
       for (const s of agentSummary) {
-        const tag = s.sourceType === "local" ? "⏭" : "⬆";
+        const tag = s.sourceType === "local-path" ? "⏭" : "⬆";
         log.info(`  ${tag} ${s.name} [${s.sourceType}] — ${s.action}`);
       }
     } else {
@@ -201,7 +225,6 @@ export default defineCommand({
 
     // 3b. 更新 Agent
     let updatedCount = 0;
-    let skippedCount = 0;
     let failedCount = 0;
 
     for (const agent of agents) {
@@ -209,6 +232,9 @@ export default defineCommand({
 
       switch (sourceType) {
         case "git": {
+          const wasRunning =
+            agent.runtime.ownership === "core-managed" &&
+            getAgentPid(config.agents.dataDir, agent.skill.name) !== undefined;
           const ok = await updateGitAgent(agent);
           if (ok) {
             // 重新解析 SKILL.md 并更新 store
@@ -218,64 +244,141 @@ export default defineCommand({
                 ...agent,
                 skill: discovered.skill,
                 transport: discovered.transport,
+                runtime: discovered.runtime,
                 ...(discovered.skillBody.length > 0 ? { skillBody: discovered.skillBody } : {}),
               };
               const replaced = store.replace(agent.skill.name, updated);
               if (!replaced) {
                 log.warn(`${agent.skill.name} 已从注册表中移除，跳过元数据刷新`);
+                failedCount++;
+              } else {
+                await maybeRestartManagedAgent(updated, wasRunning, config.agents.dataDir);
+                updatedCount++;
               }
             } catch (err) {
+              store.updateStatus(agent.skill.name, "error");
               log.warn(
-                `${agent.skill.name} SKILL.md 重新解析失败: ${err instanceof Error ? err.message : String(err)}`,
+                `${agent.skill.name} metadata 刷新或重启失败: ${err instanceof Error ? err.message : String(err)}`,
               );
+              failedCount++;
             }
-            updatedCount++;
           } else {
             failedCount++;
           }
           break;
         }
-        case "installed": {
+        case "installed-package": {
+          const wasRunning =
+            agent.runtime.ownership === "core-managed" &&
+            getAgentPid(config.agents.dataDir, agent.skill.name) !== undefined;
           const ok = await updateInstalledAgent(agent);
           if (ok) {
             try {
-              const discovered = discoverAgent(agent.installPath);
+              const packageRoot =
+                agent.source?.type === "installed-package"
+                  ? resolveInstalledPackageRoot(agent.source.installDir, agent.source.packageName)
+                  : agent.installPath;
+              const discovered = discoverAgent(packageRoot);
               const updated: RegisteredAgent = {
                 ...agent,
                 skill: discovered.skill,
                 transport: discovered.transport,
+                runtime: discovered.runtime,
+                installPath: packageRoot,
                 ...(discovered.skillBody.length > 0 ? { skillBody: discovered.skillBody } : {}),
               };
+              const setupResult = await runAgentSetup(updated, {
+                skipBrowserSetup: args.skipBrowserSetup,
+              });
+              if (!setupResult.ok) {
+                log.warn(`${updated.skill.name} setup 失败：${setupResult.message}`);
+                if (setupResult.retryCommand) {
+                  log.info(`重试命令: ${setupResult.retryCommand}`);
+                }
+              }
               const replaced = store.replace(agent.skill.name, updated);
               if (!replaced) {
                 log.warn(`${agent.skill.name} 已从注册表中移除，跳过元数据刷新`);
+                failedCount++;
+              } else if (!setupResult.ok) {
+                store.updateStatus(updated.skill.name, "error");
+                failedCount++;
+              } else {
+                await maybeRestartManagedAgent(updated, wasRunning, config.agents.dataDir);
+                updatedCount++;
               }
             } catch (err) {
+              store.updateStatus(agent.skill.name, "error");
               log.warn(
-                `${agent.skill.name} SKILL.md 重新解析失败: ${err instanceof Error ? err.message : String(err)}`,
+                `${agent.skill.name} metadata 刷新、setup 或重启失败: ${err instanceof Error ? err.message : String(err)}`,
               );
+              failedCount++;
             }
-            updatedCount++;
           } else {
             failedCount++;
           }
           break;
         }
-        case "remote": {
-          const ok = await refreshRemoteAgent(agent);
-          if (ok) {
-            updatedCount++;
-          } else {
+        case "remote-manifest": {
+          try {
+            const discovered = discoverAgent(agent.installPath);
+            const updated: RegisteredAgent = {
+              ...agent,
+              skill: discovered.skill,
+              transport: discovered.transport,
+              runtime: discovered.runtime,
+              ...(discovered.skillBody.length > 0 ? { skillBody: discovered.skillBody } : {}),
+            };
+            const replaced = store.replace(agent.skill.name, updated);
+            if (!replaced) {
+              log.warn(`${agent.skill.name} 已从注册表中移除，跳过元数据刷新`);
+              failedCount++;
+              break;
+            }
+            const ok = await refreshRemoteAgent(updated);
+            if (ok) {
+              updatedCount++;
+            } else {
+              failedCount++;
+            }
+          } catch (err) {
+            log.warn(
+              `${agent.skill.name} manifest 刷新失败: ${err instanceof Error ? err.message : String(err)}`,
+            );
             failedCount++;
           }
           break;
         }
-        case "local":
-          log.warn(
-            `${agent.skill.name} 是本地 Agent，请手动更新后运行 roll agent add <path> 重新注册`,
-          );
-          skippedCount++;
+        case "local-path": {
+          const wasRunning =
+            agent.runtime.ownership === "core-managed" &&
+            getAgentPid(config.agents.dataDir, agent.skill.name) !== undefined;
+          try {
+            const discovered = discoverAgent(agent.installPath);
+            const updated: RegisteredAgent = {
+              ...agent,
+              skill: discovered.skill,
+              transport: discovered.transport,
+              runtime: discovered.runtime,
+              ...(discovered.skillBody.length > 0 ? { skillBody: discovered.skillBody } : {}),
+            };
+            const replaced = store.replace(agent.skill.name, updated);
+            if (!replaced) {
+              log.warn(`${agent.skill.name} 已从注册表中移除，跳过元数据刷新`);
+              failedCount++;
+            } else {
+              await maybeRestartManagedAgent(updated, wasRunning, config.agents.dataDir);
+              updatedCount++;
+            }
+          } catch (err) {
+            store.updateStatus(agent.skill.name, "error");
+            log.warn(
+              `${agent.skill.name} 本地 metadata 刷新或重启失败: ${err instanceof Error ? err.message : String(err)}`,
+            );
+            failedCount++;
+          }
           break;
+        }
       }
     }
 
@@ -292,9 +395,7 @@ export default defineCommand({
       log.warn(
         `更新完成但有失败：${rollStatus}${
           failedCount > 0 ? `，${failedCount} 个 Agent 更新失败` : ""
-        }${updatedCount > 0 ? `，${updatedCount} 个 Agent 已更新` : ""}${
-          skippedCount > 0 ? `，${skippedCount} 个已跳过` : ""
-        }`,
+        }${updatedCount > 0 ? `，${updatedCount} 个 Agent 已更新` : ""}`,
       );
       return;
     }
@@ -303,10 +404,90 @@ export default defineCommand({
       log.success(
         `更新完成：${selfUpdated ? "roll ✓" : "roll 无更新"}${
           updatedCount > 0 ? `，${updatedCount} 个 Agent 已更新` : ""
-        }${skippedCount > 0 ? `，${skippedCount} 个已跳过` : ""}`,
+        }`,
       );
     } else {
       log.success("一切都已是最新版本");
     }
   },
 });
+
+interface InstallCommandSpec {
+  readonly command: "bun" | "npm" | "pnpm" | "yarn";
+  readonly args: readonly ["install"];
+}
+
+export function detectInstallCommand(projectDir: string): InstallCommandSpec | undefined {
+  const packageJsonPath = resolve(projectDir, "package.json");
+  if (existsSync(packageJsonPath)) {
+    const packageManager = readPackageManager(packageJsonPath);
+    if (packageManager) {
+      return {
+        command: packageManager,
+        args: ["install"],
+      };
+    }
+  }
+
+  const lockfileEntries: ReadonlyArray<readonly [string, InstallCommandSpec["command"]]> = [
+    ["pnpm-lock.yaml", "pnpm"],
+    ["package-lock.json", "npm"],
+    ["npm-shrinkwrap.json", "npm"],
+    ["yarn.lock", "yarn"],
+    ["bun.lock", "bun"],
+    ["bun.lockb", "bun"],
+  ];
+
+  for (const [lockfile, command] of lockfileEntries) {
+    if (existsSync(resolve(projectDir, lockfile))) {
+      return {
+        command,
+        args: ["install"],
+      };
+    }
+  }
+
+  return undefined;
+}
+
+async function maybeRestartManagedAgent(
+  agent: RegisteredAgent,
+  wasRunning: boolean,
+  dataDir: string,
+): Promise<void> {
+  if (!wasRunning || agent.runtime.ownership !== "core-managed") {
+    return;
+  }
+
+  await stopAgentGracefully(dataDir, agent.skill.name);
+  let started = false;
+  try {
+    startAgent(agent, dataDir);
+    started = true;
+    await waitForAgentReady(agent, { startupTimeoutMs: 15_000, probeTimeoutMs: 2_000 });
+  } catch (err) {
+    if (started) {
+      await stopAgentGracefully(dataDir, agent.skill.name).catch(() => {});
+    }
+    throw err;
+  }
+}
+
+function readPackageManager(packageJsonPath: string): InstallCommandSpec["command"] | undefined {
+  try {
+    const parsed = JSON.parse(readFileSync(packageJsonPath, "utf-8")) as {
+      readonly packageManager?: unknown;
+    };
+    if (typeof parsed.packageManager !== "string" || parsed.packageManager.length === 0) {
+      return undefined;
+    }
+
+    const name = parsed.packageManager.split("@", 1)[0];
+    if (name === "pnpm" || name === "npm" || name === "yarn" || name === "bun") {
+      return name;
+    }
+    return undefined;
+  } catch {
+    return undefined;
+  }
+}

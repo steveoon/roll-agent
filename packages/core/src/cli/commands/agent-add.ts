@@ -124,12 +124,10 @@ export default defineCommand({
 
     // 3. 确定 Agent 来源
     const source: AgentSource = args.remote
-      ? { type: "remote", endpoint: args.remote }
+      ? { type: "remote-manifest", endpoint: args.remote }
       : args.path && isGitUrl(args.path)
         ? { type: "git", url: args.path }
-        : discovered.transport.type === "streamable-http"
-          ? { type: "remote", endpoint: discovered.transport.endpoint }
-          : { type: "local", path: agentDir };
+        : { type: "local-path", path: agentDir };
 
     // 4. 注册到 store
     const store = new AgentStore(config.agents.dataDir);
@@ -137,6 +135,7 @@ export default defineCommand({
     const agent: RegisteredAgent = {
       skill: discovered.skill,
       transport: discovered.transport,
+      runtime: discovered.runtime,
       installPath: agentDir,
       registeredAt: new Date().toISOString(),
       status: "idle",

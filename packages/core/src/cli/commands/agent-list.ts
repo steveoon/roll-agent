@@ -18,15 +18,15 @@ export default defineCommand({
     const store = new AgentStore(config.agents.dataDir);
     const agents = store.list();
 
+    if (args.json) {
+      console.log(JSON.stringify(agents, null, 2));
+      return;
+    }
+
     if (agents.length === 0) {
       console.log(
         "暂无已注册的 Agent。可使用 `roll agent add <path>`、`roll agent install <package>` 或 `roll agent add --remote <endpoint>`。",
       );
-      return;
-    }
-
-    if (args.json) {
-      console.log(JSON.stringify(agents, null, 2));
       return;
     }
 
