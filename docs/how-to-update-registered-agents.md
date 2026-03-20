@@ -1,6 +1,6 @@
 # How To Update Registered Agents
 
-本指南说明在 Roll 里更新一个已注册子 Agent 时，什么时候只需要重启进程，什么时候可以用 `roll update`，什么时候必须 `remove + add`。
+本指南说明在 Roll 里更新一个已注册子 Agent 时，什么时候只需要重启进程，什么时候可以用 `roll update`，什么时候仍然建议 `remove + add`。
 
 ## 适用范围
 
@@ -50,9 +50,9 @@
 - `stdio`：重新执行即可
 - `http`：重启服务进程
 
-## Step 3. 如果 Agent 来源是 `git` 或 `installed`
+## Step 3. 如果 Agent 来源是 `git` / `installed-package` / `local-path`
 
-这两类来源可以优先尝试：
+这三类来源都可以优先尝试：
 
 ```bash
 roll update
@@ -60,27 +60,30 @@ roll update
 
 `roll update` 当前会做这些事：
 
-- `git` 来源：`git pull` + 安装依赖 + 重新解析 `SKILL.md` 并刷新注册表
-- `installed` 来源：重新安装 npm 包 + 重新解析 `SKILL.md` 并刷新注册表
+- `git` 来源：`git pull` + 安装依赖 + 刷新 `SKILL.md` / manifest
+- `installed-package` 来源：重新安装 npm 包 + 刷新 `SKILL.md` / manifest
+- `local-path` 来源：不拉代码，但会重新解析本地 `SKILL.md` / manifest 并刷新注册表
 
 但要注意：
 
-- 如果这个 Agent 实际跑的是长驻 HTTP 服务，`roll update` **不会替你重启那个服务进程**
-- 所以代码更新后，仍然要手动重启 HTTP Agent
+- 如果这个 Agent 是 **正在运行中的 `core-managed` HTTP Agent**，`roll update` 会自动重启并重新探活
+- 如果这个 Agent 是 **external-managed HTTP 服务**，`roll update` 只会刷新 metadata / 连通性，不会替你接管外部进程
 
 ## Step 4. 出现这些情况时，必须 `remove + add`
 
 以下变更属于“注册表层变化”，需要重新注册：
 
 - `SKILL.md` 中的 `name` 变了
-- `description` 变了，且你希望注册表里的展示信息更新
-- `SKILL.md` body 变了，且你希望 `ask` 的路由语义更新
-- `roll-command` 变了
-- `roll-endpoint` 变了
-- transport 从 `stdio` 改成 `streamable-http`，或反过来
 - Agent 的来源变了
   - 例如从本地 path 改成 npm 包
   - 或从本地 path 改成远程 endpoint
+
+以下变更现在通常可以直接用 `roll update` 刷新，不必 `remove + add`：
+
+- `description` 变了
+- `SKILL.md` body 变了，且你希望 `ask` 的路由语义更新
+- `roll-command` / `roll-endpoint` 变了，但 Agent 名称没变且来源没变
+- `package.json#rollAgent` 的 runtime metadata 变了，但 Agent 名称没变且来源没变
 
 这时建议显式执行：
 
@@ -103,9 +106,9 @@ roll agent remove <agent-name>
 roll agent add --remote <endpoint> --name <name> --description "<description>"
 ```
 
-## Step 5. `local-path` Agent 要特别注意
+## Step 5. `local-path` Agent 现在也可以用 `roll update`
 
-当前 `roll update` **不会自动更新** `local-path` Agent。
+当前 `roll update` **会刷新** `local-path` Agent 的本地 metadata。
 
 如果你是这样注册的：
 
@@ -117,8 +120,11 @@ roll agent add ./agents/my-agent
 
 - 只改 tool 逻辑 / schema：
   - `stdio` Agent 直接重跑
-  - `http` Agent 重启服务
-- 改注册信息：
+  - `core-managed http` Agent 可先用 `roll update`
+  - `external-managed http` Agent 仍需重启外部服务
+- 改 metadata / manifest：
+  - 可优先尝试 `roll update`
+- 改 Agent 名称或来源：
   - 需要 `remove + add`
 
 ## Step 6. 更新后如何确认是否真的生效
@@ -142,11 +148,11 @@ roll run <agent> <tool> ...
 | --- | --- | --- | --- |
 | `stdio` Agent 只改 tool 逻辑 | 否 | 否 | 否 |
 | `http` Agent 只改 tool 逻辑 | 是 | 否 | 否 |
-| `git` Agent 更新代码 | 如果是 HTTP，则要 | 建议 | 否 |
-| `installed` Agent 更新包 | 如果是 HTTP，则要 | 建议 | 否 |
-| `local-path` Agent 更新代码 | 如果是 HTTP，则要 | 否 | 否 |
-| `SKILL.md` name / endpoint / transport 改了 | 视 transport 而定 | 不够 | 是 |
-| 想刷新本地 path 注册信息 | 视 transport 而定 | 不适用 | 是 |
+| `git` Agent 更新代码 | `core-managed` 会自动重启，`external-managed` 仍需外部重启 | 建议 | 否 |
+| `installed-package` Agent 更新包 | `core-managed` 会自动重启，`external-managed` 仍需外部重启 | 建议 | 否 |
+| `local-path` Agent 更新代码 / metadata | `core-managed` 会自动重启，`external-managed` 仍需外部重启 | 建议 | 否 |
+| `SKILL.md` name 改了 | 视 transport 而定 | 不够 | 是 |
+| 想刷新本地 path 注册信息 | 视 transport 而定 | 适用 | 否 |
 
 ## 预期结果
 

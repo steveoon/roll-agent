@@ -1,9 +1,6 @@
 ---
 name: browser-use-agent
 description: 浏览器操控 Agent。控制浏览器操作招聘平台——读取消息、打开聊天、发送回复、换微信、查看推荐列表、打招呼、查看简历。
-metadata:
-  roll-transport: streamable-http
-  roll-endpoint: http://localhost:3100/mcp
 ---
 
 # Browser Use Agent

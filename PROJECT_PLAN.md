@@ -69,7 +69,7 @@
     │
     ├─ roll run boss-reply get_unread        ← 声明式路由
     │
-    ├─ roll ask "帮我回复boss上的候选人"       ← 单轮 LLM 路由
+    ├─ roll ask "上海肯德基还招人吗?"       ← 单轮 LLM 路由
     │
     └─ roll chat "帮我处理这批候选人"         ← 会话式统一入口（规划中）
     │

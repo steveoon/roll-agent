@@ -178,10 +178,10 @@ roll agent add --remote <url>   注册远程 streamable-http Agent（需配合 -
 roll agent install <package>    安装并注册已编译 Agent 包
 roll agent remove <name>        移除 Agent
 roll agent list                 列出所有已注册 Agent
-roll agent start <name>         探测 Agent 可连接性（stdio 无需手动启动）
-roll agent stop <name>          提示手动停止外部服务（stdio 无需手动停止）
+roll agent start <name>         启动 Agent（兼容 on-demand / core-managed / external-managed）
+roll agent stop <name>          停止 Agent（core-managed HTTP 可由 Roll 托管）
 roll agent info <name>          查看 Agent 详情（SKILL.md + tools）
-roll agent health               健康检查（stdio 按需模式 / streamable-http 可达性）
+roll agent health               健康检查（兼容 on-demand / core-managed / external-managed）
 
 roll run <agent> <tool> [args]  声明式调用（支持 --key value / --input-json / --input-file）
 roll ask "<message>"            LLM 智能路由
@@ -210,9 +210,10 @@ roll doctor                     诊断系统状态（Node.js / 配置 / Provider
 
 ## Agent 更新注意事项
 
-- `roll update` 适合更新 `git` / `installed` 来源的 Agent，但不会替你重启长驻 HTTP Agent 进程
-- `local-path` Agent 当前不会被 `roll update` 自动刷新注册信息
-- 如果改的是 `SKILL.md` 的名称、endpoint、transport 等注册层信息，通常需要 `roll agent remove` 后重新 `add`
+- `roll update` 现在会刷新 `git` / `installed-package` / `local-path` Agent 的本地 metadata
+- 对正在运行的 `core-managed` HTTP Agent，`roll update` 会在刷新后自动重启并重新探活
+- 对 `external-managed` 远程服务，代码/工具逻辑更新后仍需要你在外部重启服务
+- 如果改的是 Agent 名称或分发来源，仍建议 `roll agent remove` 后重新注册
 
 完整说明见：[docs/how-to-update-registered-agents.md](./docs/how-to-update-registered-agents.md)。
 
@@ -318,7 +319,11 @@ pnpm build                                    # 确认构建产物正常
 推荐方式：通过 GitHub Actions 自动发布（push 到 `main` 或手动触发 `Release` workflow）。
 
 - 默认使用 npm Trusted Publishing（OIDC，推荐，无需 `NPM_TOKEN`）
-- 需要先在 npm 为 `@roll-agent/sdk` 和 `@roll-agent/core` 配置 Trusted Publisher（GitHub repo + workflow）
+- 需要先在 npm 为这些包配置 Trusted Publisher（GitHub repo + workflow）：
+  - `@roll-agent/sdk`
+  - `@roll-agent/browser`
+  - `@roll-agent/core`
+  - `@roll-agent/browser-use-agent`
 - workflow 内已启用 `id-token: write`，并固定 npm 版本满足 Trusted Publishing 要求
 - 当前仓库为 public，CI 发布默认开启 `--provenance`（可通过 `ROLL_NPM_PROVENANCE=false` 临时关闭）
 - workflow 会执行质量检查，并仅发布 npm 上尚不存在的新版本
@@ -335,18 +340,27 @@ pnpm release:dry-run -- --skip-checks --no-registry-check
 # 1. 更新版本号
 cd packages/sdk
 npm version patch   # 或 minor / major
-cd ../core
+cd ../browser
+npm version patch
+cd ../../agents/browser-use
+npm version patch
+cd ../../packages/core
 npm version patch
 
 # 2. 构建
 cd ../..
 pnpm build
 
-# 3. 发布（需要 npm 登录 + @roll-agent 组织权限，先 SDK 再 core）
+# 3. 发布（需要 npm 登录 + @roll-agent 组织权限）
+# 建议顺序：sdk -> browser -> core -> browser-use-agent
 cd packages/sdk
-npm publish --access public
-cd ../core
-npm publish --access public
+pnpm publish --access public
+cd ../browser
+pnpm publish --access public
+cd ../../packages/core
+pnpm publish --access public
+cd ../../agents/browser-use
+pnpm publish --access public
 
 # 4. 提交版本号变更 + 打 tag
 cd ../..
