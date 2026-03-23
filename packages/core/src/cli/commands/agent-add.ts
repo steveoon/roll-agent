@@ -3,7 +3,7 @@ import { resolve } from "node:path";
 import { existsSync, mkdirSync } from "node:fs";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { loadConfig } from "../../config/loader.ts";
+import { loadAgentsConfig } from "../../config/loader.ts";
 import { discoverAgent } from "../../registry/discovery.ts";
 import { writeRemoteSkillManifest } from "../../registry/manifest.ts";
 import { AgentStore } from "../../registry/store.ts";
@@ -37,7 +37,7 @@ export default defineCommand({
     description: { type: "string", description: "远程 Agent 描述" },
   },
   async run({ args }) {
-    const { config } = loadConfig();
+    const { agentsConfig } = loadAgentsConfig();
     let agentDir: string;
 
     if (args.remote) {
@@ -48,7 +48,7 @@ export default defineCommand({
       }
 
       agentDir = writeRemoteSkillManifest({
-        dataDir: config.agents.dataDir,
+        dataDir: agentsConfig.dataDir,
         name: args.name,
         description: args.description,
         endpoint: args.remote,
@@ -60,7 +60,7 @@ export default defineCommand({
     } else if (isGitUrl(args.path)) {
       // Git URL 模式：克隆到 dataDir 下
       const repoName = repoNameFromUrl(args.path);
-      const cloneTarget = resolve(config.agents.dataDir, "repos", repoName);
+      const cloneTarget = resolve(agentsConfig.dataDir, "repos", repoName);
 
       if (existsSync(cloneTarget)) {
         log.info(`仓库目录已存在，拉取最新代码: ${cloneTarget}`);
@@ -73,7 +73,7 @@ export default defineCommand({
         }
       } else {
         log.info(`克隆 ${args.path}...`);
-        const parentDir = resolve(config.agents.dataDir, "repos");
+        const parentDir = resolve(agentsConfig.dataDir, "repos");
         if (!existsSync(parentDir)) {
           mkdirSync(parentDir, { recursive: true });
         }
@@ -130,7 +130,7 @@ export default defineCommand({
         : { type: "local-path", path: agentDir };
 
     // 4. 注册到 store
-    const store = new AgentStore(config.agents.dataDir);
+    const store = new AgentStore(agentsConfig.dataDir);
 
     const agent: RegisteredAgent = {
       skill: discovered.skill,

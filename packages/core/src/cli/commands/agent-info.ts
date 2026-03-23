@@ -1,5 +1,5 @@
 import { defineCommand } from "citty";
-import { loadConfig } from "../../config/loader.ts";
+import { loadAgentsConfig } from "../../config/loader.ts";
 import {
   formatAgentSourceType,
   getAgentLocation,
@@ -13,8 +13,8 @@ export default defineCommand({
     name: { type: "positional", description: "Agent 名称", required: true },
   },
   run({ args }) {
-    const { config } = loadConfig();
-    const store = new AgentStore(config.agents.dataDir);
+    const { agentsConfig } = loadAgentsConfig();
+    const store = new AgentStore(agentsConfig.dataDir);
     const agent = store.findByName(args.name);
 
     if (!agent) {

@@ -29,7 +29,7 @@ node --experimental-strip-types --test packages/core/src/config/schema.test.ts  
 # 单包操作
 pnpm --filter @roll-agent/core typecheck
 pnpm --filter @roll-agent/sdk build
-pnpm --filter boss-reply-agent dev
+pnpm --filter smart-reply-agent dev
 ```
 
 **环境要求**：Node.js ≥22.6.0，pnpm 10+
@@ -42,20 +42,45 @@ pnpm --filter boss-reply-agent dev
 |------|------|
 | `packages/core` | 指挥官：CLI (citty) + Agent Registry + Router + MCP Client + LLM Engine |
 | `packages/sdk` | 子 Agent 开发 SDK：`defineAgent()` + `defineTool()` |
-| `agents/boss-reply` | 示例 Agent（BOSS直聘回复，3 个 tool） |
+| `packages/browser` | 浏览器运行时抽象层：BrowserRuntime + ContextManager + SessionStore |
+| `agents/browser-use` | 浏览器操控 Agent（streamable-http 常驻服务） |
+| `agents/smart-reply` | 智能回复 Agent（stdio 按需模式） |
+
+### Agent 三层模型
+
+Agent 注册信息由三个维度描述：
+
+- `source`：`local-path` | `git` | `installed-package` | `remote-manifest`
+- `transport`：`stdio` | `streamable-http`
+- `runtime ownership`：`on-demand` | `core-managed` | `external-managed`
+
+Installable Agent 通过 `package.json#rollAgent` 提供 runtime 信息，优先于 `SKILL.md metadata` 的 legacy fallback。
+
+非 Node/TypeScript Agent 的接入说明见：
+
+- `docs/how-to-integrate-non-node-agents.md`
+
+当前推荐：
+
+- 本地工具型 Agent：`stdio + local-path`
+- 常驻服务型 Agent：`streamable-http + external-managed`
+- 非 Node repo 如果不想引入 `package.json`，继续使用 `SKILL.md metadata` 即可
 
 ### 双层标准架构
 
-- **描述层**：Agent Skills 标准（SKILL.md frontmatter）— 告诉指挥官"我是谁"
-- **运行时层**：MCP 协议 — 指挥官实际调用子 Agent（stdio 本地子进程 / Streamable HTTP 远程服务）
+- **描述层**：Agent Skills 标准（SKILL.md frontmatter + body）— 告诉指挥官"我是谁、我会什么"
+- **运行时层**：MCP 协议 — 指挥官实际调用子 Agent（stdio 本地子进程 / Streamable HTTP 服务）
+- **Runtime Manifest**：`package.json#rollAgent` — 告诉指挥官"怎么启动我、怎么连接我"
 
 ### CLI 命令树（citty，懒加载子命令）
 
 ```
-roll agent add|install|remove|list|start|stop|info   Agent 管理
+roll agent add|install|remove|list|start|stop|info|health   Agent 管理
 roll run <agent> <tool> [args]               声明式调用
 roll ask "<message>"                         LLM 智能路由
-roll config set|get|init                     配置管理
+roll chat [message]                          Experimental 会话入口骨架
+roll config set|get|init|migrate             配置管理
+roll update [--check]                        更新 roll 及已注册 Agent
 roll doctor                                  系统诊断
 ```
 
@@ -66,7 +91,7 @@ roll doctor                                  系统诊断
 - `router/` — 声明式路由 + LLM 智能路由
 - `mcp/` — MCP Client 连接池（stdio/HTTP 传输）、Sampling 处理
 - `llm/` — 统一 LLM 引擎（AI SDK v6 + 多 Provider）
-- `config/` — roll.config.yaml 加载与 Zod 校验
+- `config/` — roll.config.yaml 加载、Zod 校验、breaking schema migration 检测
 
 ### SDK 公开 API
 
@@ -97,7 +122,7 @@ import { defineAgent, defineTool } from "@roll-agent/sdk";
 定义或修改类型时**必须主动使用** `/typescript-magician` skill 审查，确保：
 
 - 用 `as const` + `typeof` 从运行时值派生类型，避免手动维护重复的 string literal union
-- Zod schema 作为单一数据源，接口类型通过 `z.infer<typeof schema>` 或索引访问（如 `Config["router"]["mode"]`）派生
+- Zod schema 作为单一数据源，接口类型通过 `z.infer<typeof schema>` 或索引访问（如 `Config["ask"]["llmModel"]`）派生
 - 泛型约束恰到好处（`extends` 只约束实际使用的属性），避免过度约束或遗漏约束
 - 异构集合使用类型擦除基础接口（如 `AnyToolDefinition`），具体泛型接口 extends 基础接口
 - 语义性强的值使用 brand type（如 `Confidence`），附带运行时校验工厂函数
@@ -139,7 +164,16 @@ SKILL.md 的 frontmatter 用于注册元数据，**body 正文内容**会被 `ll
 2. 从 `cwd` 向上逐级查找 `roll.config.yaml` / `roll.config.yml`
 3. 回退到内置默认配置
 
-加载管线：YAML 解析 → kebab-case→camelCase → `${ENV_VAR}` 替换 → 深度合并默认值 → Zod 校验 → `~/` 路径展开。
+加载管线：YAML 解析 → kebab-case→camelCase → `${ENV_VAR}` 替换 → 迁移检测（命中则提示 `roll config migrate`）→ 深度合并默认值 → Zod 校验 → `~/` 路径展开。
+
+Agent 管理命令（start/stop/health/list 等）使用 `loadAgentsConfig()` 只解析 `agents` 段，不应被无关的全局 schema breaking change 误伤。
+
+### 配置迁移（Breaking Schema Change）
+
+- breaking config schema change 不恢复旧字段兼容，而是通过 `config/migration.ts` 注册迁移规则
+- `roll config migrate` 负责备份原文件并应用最小自动迁移
+- `roll doctor` 与 `roll update --check` 会报告“配置需要迁移”状态
+- `roll update` 不隐式改写用户配置，只在升级前后输出高可见提醒
 
 ### `roll ask` 两阶段调用与 Tool Schema 语义不可篡改原则
 
@@ -170,11 +204,23 @@ citty 子命令通过动态 `import()` 懒加载，CLI 启动不会加载所有�
 
 ## Workspace 依赖解析
 
-SDK 的 `exports` 在开发时指向 `./src/index.ts`（直接引用源码），发布时通过 `publishConfig.exports` 指向 `./dist/`。这样 workspace 内其他包（如 boss-reply-agent）无需先构建 SDK 即可获得类型。
+SDK 的 `exports` 在开发时指向 `./src/index.ts`（直接引用源码），发布时通过 `publishConfig.exports` 指向 `./dist/`。这样 workspace 内其他包（如 `smart-reply-agent`）无需先构建 SDK 即可获得类型。
 
 ## Configuration
 
 `roll.config.yaml` — YAML 格式，支持 `${ENV_VAR}` 环境变量引用。Zod schema 定义在 `packages/core/src/config/schema.ts`。
+
+## Release & Versioning
+
+使用 [Changesets](https://github.com/changesets/changesets) 管理版本和发布：
+
+```bash
+pnpm changeset
+pnpm version-packages
+pnpm release-packages
+```
+
+工作流：功能 PR 附带 `.changeset/*.md` → 合入 `main` → GitHub Action 自动创建 release PR（通常标题为 `chore: version packages`）→ 合并该 PR → 自动 publish。
 
 ## Testing
 

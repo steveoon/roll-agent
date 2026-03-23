@@ -14,6 +14,7 @@ roll ask "帮我查看boss直聘上有多少未读消息"
 用户 ──CLI──→ roll-core（指挥官）
                 ├── Agent Registry（SKILL.md 注册）
                 ├── Router（声明式 / LLM 智能）
+                ├── Runtime Manifest（package.json#rollAgent）
                 ├── MCP Client Manager
                 └── LLM Engine（AI SDK v6 多 Provider）
                        │
@@ -102,6 +103,18 @@ agents:
 支持的 provider：`anthropic`、`openai`、`deepseek`、`qwen`。每个 provider 可配置 `base-url` 用于自定义 API 端点。
 `ask.llmModel` 可选；未设置时会回退到 `llm.defaultModel`。
 
+如果本地还留着旧版 `router:` 配置段：
+
+- `roll doctor` 会提示“配置需要迁移”
+- `roll update --check` / `roll update` 会给出迁移提醒
+- 可直接运行：
+
+```bash
+roll config migrate
+```
+
+它会自动备份原文件，再将已知旧字段迁到新 schema。
+
 > [!IMPORTANT]
 > `api-key: ${...}` 中的 `${...}` 是“环境变量名占位符”，不是 API Key 本身。
 >
@@ -114,10 +127,10 @@ agents:
 
 ```bash
 # 本地目录（开发态）
-pnpm dev -- agent add ./agents/boss-reply
+pnpm dev -- agent add ./agents/browser-use
 
 # 已编译 npm 包（分发态）
-pnpm dev -- agent install @roll-agent/smart-reply-agent
+pnpm dev -- agent install @roll-agent/browser-use-agent
 
 # Git URL
 pnpm dev -- agent add https://github.com/someone/my-agent.git
@@ -125,6 +138,11 @@ pnpm dev -- agent add https://github.com/someone/my-agent.git
 # 远程 MCP 服务
 pnpm dev -- agent add --remote https://example.com/mcp --name remote-agent --description "远程 Agent"
 ```
+
+说明：
+
+- `browser-use-agent` 当前默认使用系统 Chrome，不会在安装时自动下载 Playwright Chromium
+- 如果后续需要显式使用 Playwright 自带 Chromium，再单独补 setup/配置更合理
 
 如果你安装的是 `smart-reply-agent` 这类需要独立环境变量的 Agent，推荐在 `roll.config.yaml` 中通过 `agents.env` 为它单独注入配置：
 
@@ -146,7 +164,7 @@ agents:
 
 ```bash
 # 声明式调用（明确指定 Agent + Tool）
-pnpm dev -- run boss-reply-agent get_unread --limit 10
+pnpm dev -- run browser-use-agent zhipin_read_messages --limit 10
 
 # 显式传入结构化 JSON（适合 object / record / 复杂 payload）
 pnpm dev -- run smart-reply-agent sync_brand_data \
@@ -187,12 +205,15 @@ roll run <agent> <tool> [args]  声明式调用（支持 --key value / --input-j
 roll ask "<message>"            LLM 智能路由
 roll chat [message]             Experimental：未来会话式统一入口（当前仅提供骨架）
 roll update                     更新 roll 及已注册的 Agent（对不同来源行为不同）
+roll update --check             检查 roll/Agent 更新，并提醒配置迁移问题
 
 roll config init                交互式初始化配置
 roll config get [key]           查看配置（支持点号路径如 llm.defaultModel）
 roll config set <key> <value>   修改配置
+roll config migrate             自动迁移旧版配置（备份原文件 + 写回新格式）
 
 roll doctor                     诊断系统状态（Node.js / 配置 / Provider / Agent）
+roll doctor --json              JSON 诊断结果（配置损坏时返回非零退出码）
 ```
 
 说明：`--json` 为子命令级参数（在支持的命令上可用）；全局 `--verbose` / `--config <path>`
@@ -214,6 +235,7 @@ roll doctor                     诊断系统状态（Node.js / 配置 / Provider
 - 对正在运行的 `core-managed` HTTP Agent，`roll update` 会在刷新后自动重启并重新探活
 - 对 `external-managed` 远程服务，代码/工具逻辑更新后仍需要你在外部重启服务
 - 如果改的是 Agent 名称或分发来源，仍建议 `roll agent remove` 后重新注册
+- 如果 `roll update` 同时提示本地配置 schema 需要迁移，它不会阻塞 self-update；升级完成后可执行 `roll config migrate`
 
 完整说明见：[docs/how-to-update-registered-agents.md](./docs/how-to-update-registered-agents.md)。
 
@@ -236,10 +258,15 @@ const greet = defineTool({
 });
 
 const agent = defineAgent({ name: "greeting-agent", tools: [greet] });
-agent.listen(); // 启动 MCP Server（当前 SDK 提供 stdio 模式）
+agent.listen(); // 默认以 stdio MCP Server 启动
+
+// 也支持显式启动为 HTTP MCP 服务
+// await agent.listen({
+//   transport: { type: "http", host: "127.0.0.1", port: 3100 },
+// });
 ```
 
-配套 SKILL.md：
+对于 `local-path` / legacy fallback 场景，可在 SKILL.md metadata 中声明运行时信息：
 
 ```markdown
 ---
@@ -255,9 +282,17 @@ metadata:
 - `greet` - 向用户打招呼
 ```
 
+如果 Agent 需要作为 npm installable package 分发，推荐把 runtime 信息迁到 `package.json#rollAgent`，让 `SKILL.md` 只负责名字、描述和工具说明。
+
 ### 方式 B：任意语言（实现 MCP Server）
 
-任何语言的 MCP Server 都可以接入（Python/Go/Rust/Java 均有官方 SDK），只需在 SKILL.md 中声明传输方式：
+任何语言的 MCP Server 都可以接入（Python/Go/Rust/Java 均有官方 SDK）。
+
+- 对 `local-path` / `remote-manifest` 注册，可继续在 `SKILL.md` 中声明 legacy runtime metadata
+- 对 npm installable Agent，优先使用 `package.json#rollAgent`
+- 如果是非 Node Agent，本地接入通常优先 `stdio`，常驻服务通常优先 `streamable-http`
+
+下面是 `remote-manifest` / legacy fallback 的最小示例：
 
 ```markdown
 ---
@@ -276,14 +311,20 @@ roll agent add --remote http://localhost:8100/mcp --name wechat-agent --descript
 roll run wechat-agent send_message --userId xxx --content "你好"
 ```
 
+完整接入指南见：
+
+- [docs/how-to-integrate-non-node-agents.md](./docs/how-to-integrate-non-node-agents.md)
+
 ## 项目结构
 
 ```
 packages/
-  core/       指挥官：CLI + Registry + Router + MCP Client + LLM Engine
-  sdk/        子 Agent SDK：defineAgent() + defineTool()
+  core/          指挥官：CLI + Registry + Router + MCP Client + LLM Engine
+  sdk/           子 Agent 开发 SDK：defineAgent() + defineTool()
+  browser/       浏览器运行时抽象层：BrowserRuntime + ContextManager + SessionStore
 agents/
-  boss-reply/ 示例 Agent（BOSS直聘回复）
+  browser-use/   浏览器操控 Agent（17 个 tool，streamable-http 常驻服务）
+  smart-reply/   智能回复 Agent（stdio 按需模式）
 ```
 
 ## 开发
@@ -307,67 +348,37 @@ node --experimental-strip-types --test packages/core/src/config/schema.test.ts
 
 ## 发布
 
-### 前置检查
+使用 [Changesets](https://github.com/changesets/changesets) 管理版本和发布。
+
+### 日常工作流
 
 ```bash
-pnpm typecheck && pnpm lint && pnpm test     # 三件套必须全过
-pnpm build                                    # 确认构建产物正常
+# 1. 开发完成后创建 changeset（选择影响的包 + semver 级别）
+pnpm changeset
+
+# 2. 将 .changeset/*.md 文件随 PR 一起提交
+git add .changeset/ && git commit -m "chore: add changeset"
+
+# 3. 合入 main 后 GitHub Action 自动开 release PR（标题通常为 "chore: version packages"）
+#    审批合入该 PR → 自动 publish 到 npm
 ```
 
-### 发布到 npm
-
-推荐方式：通过 GitHub Actions 自动发布（push 到 `main` 或手动触发 `Release` workflow）。
-
-- 默认使用 npm Trusted Publishing（OIDC，推荐，无需 `NPM_TOKEN`）
-- 需要先在 npm 为这些包配置 Trusted Publisher（GitHub repo + workflow）：
-  - `@roll-agent/sdk`
-  - `@roll-agent/browser`
-  - `@roll-agent/core`
-  - `@roll-agent/browser-use-agent`
-- workflow 内已启用 `id-token: write`，并固定 npm 版本满足 Trusted Publishing 要求
-- 当前仓库为 public，CI 发布默认开启 `--provenance`（可通过 `ROLL_NPM_PROVENANCE=false` 临时关闭）
-- workflow 会执行质量检查，并仅发布 npm 上尚不存在的新版本
-
-本地可先 dry-run：
+### 本地操作（调试/紧急发布）
 
 ```bash
-pnpm release:dry-run -- --skip-checks --no-registry-check
+pnpm version-packages              # 应用 changeset，更新版本号 + CHANGELOG
+pnpm release-packages              # 构建 + 发布到 npm
+pnpm release:legacy:dry-run        # 旧脚本 dry-run（诊断用）
 ```
 
-手动发布（保留）：
+### 发布包列表
 
-```bash
-# 1. 更新版本号
-cd packages/sdk
-npm version patch   # 或 minor / major
-cd ../browser
-npm version patch
-cd ../../agents/browser-use
-npm version patch
-cd ../../packages/core
-npm version patch
+- `@roll-agent/sdk`
+- `@roll-agent/browser`
+- `@roll-agent/core`
+- `@roll-agent/browser-use-agent`
 
-# 2. 构建
-cd ../..
-pnpm build
-
-# 3. 发布（需要 npm 登录 + @roll-agent 组织权限）
-# 建议顺序：sdk -> browser -> core -> browser-use-agent
-cd packages/sdk
-pnpm publish --access public
-cd ../browser
-pnpm publish --access public
-cd ../../packages/core
-pnpm publish --access public
-cd ../../agents/browser-use
-pnpm publish --access public
-
-# 4. 提交版本号变更 + 打 tag
-cd ../..
-git add -A && git commit -m "chore: release v$(node -p "require('./packages/core/package.json').version")"
-git tag v$(node -p "require('./packages/core/package.json').version")
-git push && git push --tags
-```
+内部依赖自动级联：修改 `@roll-agent/browser` 会自动 bump `browser-use-agent` 的依赖版本。
 
 发布后用户即可全局安装：
 
@@ -389,6 +400,7 @@ roll --help
 | 测试 | node:test + node:assert（零外部依赖） |
 | 构建 | tsc（输出 .js + .d.ts） |
 | 包管理 | pnpm workspace |
+| 版本管理 | Changesets（自动版本号 + CHANGELOG + npm publish） |
 
 ## License
 

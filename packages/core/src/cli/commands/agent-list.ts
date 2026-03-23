@@ -1,6 +1,6 @@
 import { defineCommand } from "citty";
 import Table from "cli-table3";
-import { loadConfig } from "../../config/loader.ts";
+import { loadAgentsConfig } from "../../config/loader.ts";
 import {
   formatAgentSourceType,
   getAgentLocation,
@@ -14,8 +14,8 @@ export default defineCommand({
     json: { type: "boolean", description: "JSON 格式输出", default: false },
   },
   run({ args }) {
-    const { config } = loadConfig();
-    const store = new AgentStore(config.agents.dataDir);
+    const { agentsConfig } = loadAgentsConfig();
+    const store = new AgentStore(agentsConfig.dataDir);
     const agents = store.list();
 
     if (args.json) {

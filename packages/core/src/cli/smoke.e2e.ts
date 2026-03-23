@@ -1,6 +1,14 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { randomUUID } from "node:crypto";
@@ -60,6 +68,27 @@ router:
 agents:
   data-dir: ${dataDir}
 `;
+}
+
+function createFakeNpm(binDir: string, latestVersion: string): void {
+  mkdirSync(binDir, { recursive: true });
+  const npmPath = resolve(binDir, "npm");
+  writeFileSync(
+    npmPath,
+    `#!/usr/bin/env node
+const args = process.argv.slice(2);
+if (args[0] === "view" && args[1] === "@roll-agent/core" && args[2] === "version") {
+  process.stdout.write(${JSON.stringify(latestVersion)} + "\\n");
+  process.exit(0);
+}
+if (args[0] === "install" && args[1] === "-g") {
+  process.exit(0);
+}
+process.exit(0);
+`,
+    "utf-8",
+  );
+  chmodSync(npmPath, 0o755);
 }
 
 function createCoreManagedHttpFixtureAgent(
@@ -308,6 +337,256 @@ test("e2e smoke: deprecated router config fails with migration guidance", () => 
     assert.match(result.stderr, /`router` 配置段已废弃/);
     assert.match(result.stderr, /ask\.llm-model/);
     assert.match(result.stderr, /ask\.confirm-threshold/);
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("e2e smoke: config migrate rewrites router config and creates backup", () => {
+  const workspace = mkdtempSync(resolve(tmpdir(), `roll-config-migrate-${randomUUID()}-`));
+
+  try {
+    const configPath = resolve(workspace, "roll.config.yaml");
+    writeFileSync(
+      configPath,
+      buildDeprecatedConfigYaml(resolve(workspace, "agents-data")),
+      "utf-8",
+    );
+
+    const migrateResult = runRoll(["config", "migrate"], workspace);
+    assert.equal(
+      migrateResult.status,
+      0,
+      `config migrate failed\nstdout:\n${migrateResult.stdout}\nstderr:\n${migrateResult.stderr}`,
+    );
+    assert.match(migrateResult.stdout, /配置文件已迁移/);
+    assert.match(migrateResult.stdout, /已备份原文件/);
+
+    const migratedConfig = readFileSync(configPath, "utf-8");
+    assert.match(migratedConfig, /^ask:/m);
+    assert.ok(!migratedConfig.includes("router:"));
+
+    const backupPath = migrateResult.stdout
+      .split(/\r?\n/u)
+      .find((line) => line.includes("已备份原文件: "))
+      ?.split("已备份原文件: ", 2)[1]
+      ?.trim();
+    assert.ok(backupPath);
+    assert.equal(existsSync(backupPath), true);
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("e2e smoke: config migrate fails when router and ask values conflict", () => {
+  const workspace = mkdtempSync(resolve(tmpdir(), `roll-config-conflict-${randomUUID()}-`));
+
+  try {
+    const configPath = resolve(workspace, "roll.config.yaml");
+    writeFileSync(
+      configPath,
+      `llm:
+  default-provider: anthropic
+  default-model: claude-sonnet-4-20250514
+  providers: {}
+
+ask:
+  llm-model: gpt-4.1-mini
+
+router:
+  llm-model: claude-sonnet-4-20250514
+
+agents:
+  data-dir: ${resolve(workspace, "agents-data")}
+`,
+      "utf-8",
+    );
+
+    const original = readFileSync(configPath, "utf-8");
+    const migrateResult = runRoll(["config", "migrate"], workspace);
+    assert.equal(migrateResult.status, 1, migrateResult.stdout);
+    assert.match(migrateResult.stderr, /值冲突/);
+    assert.equal(readFileSync(configPath, "utf-8"), original);
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("e2e smoke: agent list still works with deprecated router config", () => {
+  const workspace = mkdtempSync(resolve(tmpdir(), `roll-agent-list-router-${randomUUID()}-`));
+
+  try {
+    const smokeAgentPath = resolve(
+      import.meta.dirname,
+      "../../../../packages/sdk/test-fixtures/smoke-agent",
+    );
+    const dataDir = resolve(workspace, "agents-data");
+
+    writeFileSync(resolve(workspace, "roll.config.yaml"), buildDeprecatedConfigYaml(dataDir), "utf-8");
+
+    const addResult = runRoll(["agent", "add", smokeAgentPath], workspace, {
+      env: { ROLL_SKIP_INSTALL: "1" },
+    });
+    assert.equal(
+      addResult.status,
+      0,
+      `agent add with deprecated router config failed\nstdout:\n${addResult.stdout}\nstderr:\n${addResult.stderr}`,
+    );
+
+    const listResult = runRoll(["agent", "list", "--json"], workspace);
+    assert.equal(
+      listResult.status,
+      0,
+      `agent list with deprecated router config failed\nstdout:\n${listResult.stdout}\nstderr:\n${listResult.stderr}`,
+    );
+
+    const listedAgents = JSON.parse(listResult.stdout) as ReadonlyArray<{
+      readonly skill: { readonly name: string };
+    }>;
+    assert.ok(listedAgents.some((agent) => agent.skill.name === "smoke-test-agent"));
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("e2e smoke: config init suggests migrate when existing config uses deprecated router schema", () => {
+  const workspace = mkdtempSync(resolve(tmpdir(), `roll-config-init-router-${randomUUID()}-`));
+
+  try {
+    writeFileSync(
+      resolve(workspace, "roll.config.yaml"),
+      buildDeprecatedConfigYaml(resolve(workspace, "agents-data")),
+      "utf-8",
+    );
+
+    const result = runRoll(["config", "init"], workspace, { input: "" });
+    assert.equal(result.status, 1, result.stdout);
+    assert.match(result.stderr, /建议先运行 `roll config migrate`/);
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("e2e smoke: doctor reports config that needs migration", () => {
+  const workspace = mkdtempSync(resolve(tmpdir(), `roll-doctor-router-${randomUUID()}-`));
+
+  try {
+    writeFileSync(
+      resolve(workspace, "roll.config.yaml"),
+      buildDeprecatedConfigYaml(resolve(workspace, "agents-data")),
+      "utf-8",
+    );
+
+    const result = runRoll(["doctor", "--json"], workspace);
+    assert.equal(result.status, 0, result.stderr);
+
+    const checks = JSON.parse(result.stdout) as ReadonlyArray<{
+      readonly name: string;
+      readonly status: string;
+      readonly message: string;
+    }>;
+    const configCheck = checks.find((check) => check.name === "配置文件");
+    assert.ok(configCheck);
+    assert.equal(configCheck.status, "warn");
+    assert.match(configCheck.message, /需要迁移/);
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("e2e smoke: doctor reports invalid config file", () => {
+  const workspace = mkdtempSync(resolve(tmpdir(), `roll-doctor-invalid-${randomUUID()}-`));
+
+  try {
+    writeFileSync(resolve(workspace, "roll.config.yaml"), "llm: [\n", "utf-8");
+
+    const result = runRoll(["doctor", "--json"], workspace);
+    assert.equal(result.status, 1, result.stdout);
+
+    const checks = JSON.parse(result.stdout) as ReadonlyArray<{
+      readonly name: string;
+      readonly status: string;
+      readonly message: string;
+    }>;
+    const configCheck = checks.find((check) => check.name === "配置文件");
+    assert.ok(configCheck);
+    assert.equal(configCheck.status, "fail");
+    assert.match(configCheck.message, /Invalid YAML syntax/);
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("e2e smoke: update --check warns about deprecated config without failing", () => {
+  const workspace = mkdtempSync(resolve(tmpdir(), `roll-update-check-router-${randomUUID()}-`));
+
+  try {
+    const fakeBinDir = resolve(workspace, "fake-bin");
+    createFakeNpm(fakeBinDir, "0.2.1");
+    writeFileSync(
+      resolve(workspace, "roll.config.yaml"),
+      buildDeprecatedConfigYaml(resolve(workspace, "agents-data")),
+      "utf-8",
+    );
+
+    const result = runRoll(["update", "--check"], workspace, {
+      env: {
+        HOME: workspace,
+        PATH: `${fakeBinDir}:${process.env["PATH"] ?? ""}`,
+      },
+    });
+    assert.equal(result.status, 0, result.stdout);
+    assert.match(result.stderr, /检测到本地配置需要迁移/);
+    assert.match(result.stderr, /roll config migrate/);
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("e2e smoke: update warns after self-update when config needs migration", () => {
+  const workspace = mkdtempSync(resolve(tmpdir(), `roll-update-router-${randomUUID()}-`));
+
+  try {
+    const fakeBinDir = resolve(workspace, "fake-bin");
+    createFakeNpm(fakeBinDir, "0.2.1");
+    writeFileSync(
+      resolve(workspace, "roll.config.yaml"),
+      buildDeprecatedConfigYaml(resolve(workspace, "agents-data")),
+      "utf-8",
+    );
+
+    const result = runRoll(["update"], workspace, {
+      env: {
+        HOME: workspace,
+        PATH: `${fakeBinDir}:${process.env["PATH"] ?? ""}`,
+      },
+    });
+    assert.equal(result.status, 0, result.stdout);
+    assert.match(result.stderr, /升级后需要迁移本地配置/);
+    assert.match(result.stderr, /roll config migrate/);
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("e2e smoke: update still self-updates when config YAML is invalid", () => {
+  const workspace = mkdtempSync(resolve(tmpdir(), `roll-update-invalid-config-${randomUUID()}-`));
+
+  try {
+    const fakeBinDir = resolve(workspace, "fake-bin");
+    createFakeNpm(fakeBinDir, "0.2.1");
+    writeFileSync(resolve(workspace, "roll.config.yaml"), "llm: [\n", "utf-8");
+
+    const result = runRoll(["update"], workspace, {
+      env: {
+        HOME: workspace,
+        PATH: `${fakeBinDir}:${process.env["PATH"] ?? ""}`,
+      },
+    });
+    assert.equal(result.status, 0, result.stdout);
+    assert.match(result.stderr, /本地配置存在问题/);
+    assert.match(result.stderr, /roll 已更新到 v0.2.1/);
+    assert.match(result.stderr, /请修复配置文件后再继续使用相关命令/);
   } finally {
     rmSync(workspace, { recursive: true, force: true });
   }

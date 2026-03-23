@@ -1,6 +1,6 @@
 import { defineCommand } from "citty";
 import { existsSync } from "node:fs";
-import { loadConfig } from "../../config/loader.ts";
+import { inspectConfigFile, loadAgentsConfig, loadConfig } from "../../config/loader.ts";
 import { AgentStore } from "../../registry/store.ts";
 
 interface CheckResult {
@@ -41,6 +41,7 @@ export default defineCommand({
   },
   run({ args }) {
     const checks: CheckResult[] = [];
+    let effectiveConfig: ReturnType<typeof loadConfig>["config"] | undefined;
 
     // 1. Node.js 版本
     const nodeVersion = process.versions.node;
@@ -51,30 +52,51 @@ export default defineCommand({
     );
 
     // 2. 配置文件（只加载一次，后续复用）
-    let loadResult: ReturnType<typeof loadConfig> | undefined;
-    try {
-      loadResult = loadConfig();
-      if (loadResult.configPath) {
-        checks.push({ name: "配置文件", status: "ok", message: loadResult.configPath });
-      } else {
+    const configInspection = inspectConfigFile();
+    let fullConfig: ReturnType<typeof loadAgentsConfig>["agentsConfig"] | undefined;
+
+    switch (configInspection.status) {
+      case "not-found":
         checks.push({ name: "配置文件", status: "warn", message: "未找到，使用默认配置" });
-      }
+        effectiveConfig = loadConfig().config;
+        break;
+      case "valid":
+        checks.push({ name: "配置文件", status: "ok", message: configInspection.configPath });
+        effectiveConfig = configInspection.config;
+        break;
+      case "needs-migration":
+        checks.push({
+          name: "配置文件",
+          status: "warn",
+          message: `${configInspection.configPath} (需要迁移，运行 roll config migrate)`,
+        });
+        break;
+      case "invalid":
+        checks.push({
+          name: "配置文件",
+          status: "fail",
+          message: configInspection.error.message,
+        });
+        break;
+    }
+
+    try {
+      fullConfig = loadAgentsConfig().agentsConfig;
     } catch (err) {
       checks.push({
-        name: "配置文件",
+        name: "Agent 配置",
         status: "fail",
         message: err instanceof Error ? err.message : String(err),
       });
     }
 
     // 3. LLM Provider 配置
-    if (loadResult) {
-      const { config } = loadResult;
-      const providers = Object.keys(config.llm.providers);
+    if (effectiveConfig) {
+      const providers = Object.keys(effectiveConfig.llm.providers);
       if (providers.length > 0) {
         // 检查 API key 是否像是未解析的环境变量
         const unresolved = providers.filter((p) => {
-          const key = config.llm.providers[p]?.apiKey ?? "";
+          const key = effectiveConfig.llm.providers[p]?.apiKey ?? "";
           return key.startsWith("${") || key.length === 0;
         });
         if (unresolved.length > 0) {
@@ -97,9 +119,19 @@ export default defineCommand({
           message: "未配置任何 provider",
         });
       }
+    } else if (configInspection.status === "needs-migration") {
+      checks.push(
+        {
+          name: "LLM Providers",
+          status: "warn",
+          message: "配置需要迁移，跳过完整 LLM 配置校验",
+        },
+      );
+    }
 
+    if (fullConfig) {
       // 4. Agent 数据目录
-      const dataDir = config.agents.dataDir;
+      const dataDir = fullConfig.dataDir;
       checks.push(
         existsSync(dataDir)
           ? { name: "Agent 数据目录", status: "ok", message: dataDir }
@@ -111,7 +143,7 @@ export default defineCommand({
       );
 
       // 5. 已注册 Agent
-      const store = new AgentStore(config.agents.dataDir);
+      const store = new AgentStore(fullConfig.dataDir);
       const agents = store.list();
       checks.push({
         name: "已注册 Agent",
@@ -123,9 +155,14 @@ export default defineCommand({
       });
     }
 
+    const hasFailure = checks.some((c) => c.status === "fail");
+
     // 输出
     if (args.json) {
       console.log(JSON.stringify(checks, null, 2));
+      if (hasFailure) {
+        process.exitCode = 1;
+      }
       return;
     }
 
@@ -135,7 +172,6 @@ export default defineCommand({
       console.log(`  ${icon} ${check.name}: ${check.message}`);
     }
 
-    const hasFailure = checks.some((c) => c.status === "fail");
     console.log(hasFailure ? "\n存在问题，请修复后重试。" : "\n系统状态正常。");
 
     if (hasFailure) {

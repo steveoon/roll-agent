@@ -3,12 +3,18 @@ import { readFileSync, writeFileSync, existsSync } from "node:fs";
 import { resolve } from "node:path";
 import { createInterface } from "node:readline/promises";
 import { stringify as stringifyYaml } from "yaml";
-import { loadConfig, parseConfigDocument, validateConfigText } from "../../config/loader.ts";
+import {
+  inspectConfigFile,
+  loadConfig,
+  parseConfigDocument,
+  validateConfigText,
+} from "../../config/loader.ts";
+import { applyKnownConfigMigrations } from "../../config/migration.ts";
 
 export default defineCommand({
   meta: { description: "管理全局配置" },
   args: {
-    action: { type: "positional", description: "操作（init/get/set）", required: true },
+    action: { type: "positional", description: "操作（init/get/set/migrate）", required: true },
     key: { type: "positional", description: "配置键（get/set 时使用，点号分隔）", required: false },
     value: { type: "positional", description: "配置值（set 时使用）", required: false },
   },
@@ -29,7 +35,12 @@ export default defineCommand({
         return;
       }
 
-      console.error(`✗ 未知操作: ${args.action}。可用: init, get, set`);
+      if (args.action === "migrate") {
+        migrateConfig();
+        return;
+      }
+
+      console.error(`✗ 未知操作: ${args.action}。可用: init, get, set, migrate`);
       process.exitCode = 1;
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -100,11 +111,15 @@ async function initConfig(): Promise<void> {
   const configPath = resolve(process.cwd(), "roll.config.yaml");
 
   if (existsSync(configPath)) {
-    try {
-      validateConfigText(readFileSync(configPath, "utf-8"), configPath);
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      console.error(`⚠ 现有配置文件存在问题:\n${message}`);
+    const inspection = inspectConfigFile({ configPath });
+    switch (inspection.status) {
+      case "needs-migration":
+        console.error(`⚠ 现有配置文件需要迁移: ${configPath}`);
+        console.error("  建议先运行 `roll config migrate`，再决定是否重新初始化。");
+        break;
+      case "invalid":
+        console.error(`⚠ 现有配置文件存在问题:\n${inspection.error.message}`);
+        break;
     }
 
     console.error(`⚠ 配置文件已存在: ${configPath}`);
@@ -125,6 +140,62 @@ async function initConfig(): Promise<void> {
   validateConfigText(yaml, configPath);
   writeFileSync(configPath, yaml, "utf-8");
   console.log(`✓ 配置文件已创建: ${configPath}`);
+}
+
+function buildBackupPath(configPath: string): string {
+  const now = new Date();
+  const timestamp = [
+    now.getFullYear().toString().padStart(4, "0"),
+    (now.getMonth() + 1).toString().padStart(2, "0"),
+    now.getDate().toString().padStart(2, "0"),
+    "-",
+    now.getHours().toString().padStart(2, "0"),
+    now.getMinutes().toString().padStart(2, "0"),
+    now.getSeconds().toString().padStart(2, "0"),
+  ].join("");
+  return `${configPath}.bak.${timestamp}`;
+}
+
+function migrateConfig(): void {
+  const inspection = inspectConfigFile();
+
+  if (inspection.status === "not-found") {
+    throw new Error("未找到配置文件。请先运行 roll config init");
+  }
+
+  if (inspection.status === "valid") {
+    console.log(`✓ 配置文件已是最新格式，无需迁移: ${inspection.configPath}`);
+    return;
+  }
+
+  if (inspection.status === "invalid") {
+    throw inspection.error;
+  }
+
+  const document = parseConfigDocument(inspection.raw, inspection.configPath);
+  const migrationResult = applyKnownConfigMigrations(document);
+  if (!migrationResult.ok) {
+    const issues = migrationResult.issues.map((issue) => `  - ${issue.message}`).join("\n");
+    throw new Error(`配置无法自动迁移:\n${issues}`);
+  }
+
+  if (!migrationResult.changed) {
+    console.log(`✓ 配置文件已是最新格式，无需迁移: ${inspection.configPath}`);
+    return;
+  }
+
+  const backupPath = buildBackupPath(inspection.configPath);
+  writeFileSync(backupPath, inspection.raw, "utf-8");
+
+  const nextYaml = stringifyYaml(migrationResult.document, { lineWidth: 0 });
+  validateConfigText(nextYaml, inspection.configPath);
+  writeFileSync(inspection.configPath, nextYaml, "utf-8");
+
+  console.log(`✓ 配置文件已迁移: ${inspection.configPath}`);
+  console.log(`✓ 已备份原文件: ${backupPath}`);
+  for (const step of migrationResult.summary) {
+    console.log(`  - ${step}`);
+  }
 }
 
 /** 查看配置值 */

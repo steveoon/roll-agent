@@ -1,5 +1,5 @@
 import { defineCommand } from "citty";
-import { loadConfig } from "../../config/loader.ts";
+import { loadAgentsConfig } from "../../config/loader.ts";
 import { stopAgentGracefully } from "../../registry/process-manager.ts";
 import { AgentStore } from "../../registry/store.ts";
 import { log } from "../utils/output.ts";
@@ -10,8 +10,8 @@ export default defineCommand({
     name: { type: "positional", description: "Agent 名称", required: true },
   },
   async run({ args }) {
-    const { config } = loadConfig();
-    const store = new AgentStore(config.agents.dataDir);
+    const { agentsConfig } = loadAgentsConfig();
+    const store = new AgentStore(agentsConfig.dataDir);
     const agent = store.findByName(args.name);
 
     if (!agent) {
@@ -36,7 +36,7 @@ export default defineCommand({
 
     let stopped = false;
     try {
-      stopped = await stopAgentGracefully(config.agents.dataDir, agent.skill.name);
+      stopped = await stopAgentGracefully(agentsConfig.dataDir, agent.skill.name);
     } catch (err) {
       log.error(`停止 Agent "${args.name}" 失败：${err instanceof Error ? err.message : String(err)}`);
       process.exitCode = 1;

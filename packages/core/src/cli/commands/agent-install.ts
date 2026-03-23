@@ -3,7 +3,7 @@ import { existsSync, mkdirSync } from "node:fs";
 import { resolve } from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { loadConfig } from "../../config/loader.ts";
+import { loadAgentsConfig } from "../../config/loader.ts";
 import { discoverAgent } from "../../registry/discovery.ts";
 import {
   startAgent,
@@ -38,10 +38,10 @@ export default defineCommand({
     },
   },
   async run({ args }) {
-    const { config } = loadConfig();
+    const { agentsConfig } = loadAgentsConfig();
     const packageSpec = args.package;
     const packageName = parsePackageName(packageSpec);
-    const installDir = resolve(config.agents.dataDir, "installed", sanitizeInstallId(packageName));
+    const installDir = resolve(agentsConfig.dataDir, "installed", sanitizeInstallId(packageName));
 
     if (!existsSync(installDir)) {
       mkdirSync(installDir, { recursive: true });
@@ -67,7 +67,7 @@ export default defineCommand({
 
     log.info("解析已安装 Agent 的 SKILL.md...");
     const discovered = discoverAgent(packageRoot);
-    const store = new AgentStore(config.agents.dataDir);
+    const store = new AgentStore(agentsConfig.dataDir);
 
     const agent: RegisteredAgent = {
       skill: discovered.skill,
@@ -129,18 +129,18 @@ export default defineCommand({
 
       if (agent.runtime.ownership === "core-managed" && !args.noStart) {
         if (wasRunning) {
-          await stopAgentGracefully(config.agents.dataDir, agent.skill.name);
+          await stopAgentGracefully(agentsConfig.dataDir, agent.skill.name);
         }
         store.updateStatus(agent.skill.name, "starting");
         let started = false;
         try {
-          startAgent(agent, config.agents.dataDir);
+          startAgent(agent, agentsConfig.dataDir);
           started = true;
           await waitForAgentReady(agent, { startupTimeoutMs: 15_000, probeTimeoutMs: 2_000 });
           store.updateStatus(agent.skill.name, "online");
         } catch (err) {
           if (started) {
-            await stopAgentGracefully(config.agents.dataDir, agent.skill.name).catch(() => {});
+            await stopAgentGracefully(agentsConfig.dataDir, agent.skill.name).catch(() => {});
           }
           store.updateStatus(agent.skill.name, "error");
           log.error(

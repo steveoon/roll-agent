@@ -10,6 +10,7 @@
 - tool schema 更新了
 - `SKILL.md` 的名称、描述、body、transport、endpoint 变了
 - 你发现 `roll run` / `roll ask` 还是打到了旧逻辑
+- `roll update` 提示本地配置 schema 需要迁移
 
 ## Step 1. 先判断变更发生在哪一层
 
@@ -68,6 +69,13 @@ roll update
 
 - 如果这个 Agent 是 **正在运行中的 `core-managed` HTTP Agent**，`roll update` 会自动重启并重新探活
 - 如果这个 Agent 是 **external-managed HTTP 服务**，`roll update` 只会刷新 metadata / 连通性，不会替你接管外部进程
+- 如果 `roll update` 同时提示本地 `roll.config.yaml` 需要迁移，先执行：
+
+```bash
+roll config migrate
+```
+
+然后再继续验证命令行为是否符合预期
 
 ## Step 4. 出现这些情况时，必须 `remove + add`
 
@@ -82,7 +90,7 @@ roll update
 
 - `description` 变了
 - `SKILL.md` body 变了，且你希望 `ask` 的路由语义更新
-- `roll-command` / `roll-endpoint` 变了，但 Agent 名称没变且来源没变
+- legacy `roll-command` / `roll-endpoint` 变了，但 Agent 名称没变且来源没变
 - `package.json#rollAgent` 的 runtime metadata 变了，但 Agent 名称没变且来源没变
 
 这时建议显式执行：

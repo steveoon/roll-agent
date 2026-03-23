@@ -195,6 +195,16 @@ Tools list
     }
   });
 
+  it("browser-use-agent should default to no browser setup", () => {
+    const result = discoverAgent(resolve(import.meta.dirname, "../../../../agents/browser-use"));
+
+    assert.equal(result.skill.name, "browser-use-agent");
+    assert.equal(result.runtime.ownership, "core-managed");
+    if (result.runtime.ownership === "core-managed") {
+      assert.equal(result.runtime.setup, undefined);
+    }
+  });
+
   it("should prefer package.json#rollAgent for stdio on-demand agents", () => {
     const skillMd = `---
 name: installable-stdio

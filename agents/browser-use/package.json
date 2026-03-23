@@ -46,13 +46,6 @@
     "endpoint": {
       "path": "/mcp",
       "port": 3100
-    },
-    "setup": {
-      "playwright": {
-        "browsers": [
-          "chromium"
-        ]
-      }
     }
   },
   "dependencies": {
