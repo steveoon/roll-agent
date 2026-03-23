@@ -67,6 +67,7 @@ function createCoreManagedHttpFixtureAgent(
   port: number,
   options: {
     readonly shutdownDelayMs?: number;
+    readonly createBrokenDistEntry?: boolean;
   } = {},
 ): void {
   const sdkEntry = resolve(import.meta.dirname, "../../../../packages/sdk/src/index.ts");
@@ -96,16 +97,16 @@ Provides a single ping tool for lifecycle smoke tests.
         private: true,
         type: "module",
         rollAgent: {
-        runtime: {
-          ownership: "core-managed",
-          transport: "streamable-http",
-        },
-        start: {
-          command: process.execPath,
-          args: ["dist/index.js"],
-        },
-        endpoint: {
-          path: "/mcp",
+          runtime: {
+            ownership: "core-managed",
+            transport: "streamable-http",
+          },
+          start: {
+            command: process.execPath,
+            args: ["dist/index.js"],
+          },
+          endpoint: {
+            path: "/mcp",
             port,
           },
         },
@@ -152,6 +153,15 @@ await agent.listen({
 `,
     "utf-8",
   );
+
+  if (options.createBrokenDistEntry) {
+    mkdirSync(resolve(agentDir, "dist"), { recursive: true });
+    writeFileSync(
+      resolve(agentDir, "dist/index.js"),
+      'throw new Error("dist entry should not be used for local-path fixture");\n',
+      "utf-8",
+    );
+  }
 }
 
 test("e2e smoke: register fixture agent and run ping", { timeout: 120_000 }, () => {
@@ -331,7 +341,10 @@ test("e2e smoke: core-managed http agent can start, report health, and stop", {
     const dataDir = resolve(workspace, "agents-data");
     const port = 32_000 + Math.floor(Math.random() * 5_000);
 
-    createCoreManagedHttpFixtureAgent(agentDir, port, { shutdownDelayMs: 1_200 });
+    createCoreManagedHttpFixtureAgent(agentDir, port, {
+      shutdownDelayMs: 1_200,
+      createBrokenDistEntry: true,
+    });
     writeFileSync(resolve(workspace, "roll.config.yaml"), buildConfigYaml(dataDir), "utf-8");
 
     const addResult = runRoll(["agent", "add", agentDir], workspace, {
@@ -406,7 +419,7 @@ test("e2e smoke: removing a running core-managed http agent stops it and deregis
     const dataDir = resolve(workspace, "agents-data");
     const port = 37_000 + Math.floor(Math.random() * 5_000);
 
-    createCoreManagedHttpFixtureAgent(agentDir, port);
+    createCoreManagedHttpFixtureAgent(agentDir, port, { createBrokenDistEntry: true });
     writeFileSync(resolve(workspace, "roll.config.yaml"), buildConfigYaml(dataDir), "utf-8");
 
     const addResult = runRoll(["agent", "add", agentDir], workspace, {
@@ -447,7 +460,7 @@ test("e2e smoke: updating a running local-path core-managed http agent refreshes
     const dataDir = resolve(workspace, "agents-data");
     const port = 42_000 + Math.floor(Math.random() * 5_000);
 
-    createCoreManagedHttpFixtureAgent(agentDir, port);
+    createCoreManagedHttpFixtureAgent(agentDir, port, { createBrokenDistEntry: true });
     writeFileSync(resolve(workspace, "roll.config.yaml"), buildConfigYaml(dataDir), "utf-8");
 
     const addResult = runRoll(["agent", "add", agentDir], workspace, {
@@ -518,7 +531,7 @@ test("e2e smoke: failed managed restart during update returns non-zero and clean
     const dataDir = resolve(workspace, "agents-data");
     const port = 47_000 + Math.floor(Math.random() * 2_000);
 
-    createCoreManagedHttpFixtureAgent(agentDir, port);
+    createCoreManagedHttpFixtureAgent(agentDir, port, { createBrokenDistEntry: true });
     writeFileSync(resolve(workspace, "roll.config.yaml"), buildConfigYaml(dataDir), "utf-8");
 
     const addResult = runRoll(["agent", "add", agentDir], workspace, {

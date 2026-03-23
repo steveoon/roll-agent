@@ -259,11 +259,6 @@ function resolveManagedDevSpawnSpec(agent: RegisteredAgent): {
     return undefined;
   }
 
-  const builtEntry = resolve(agent.installPath, entryArg);
-  if (existsSync(builtEntry)) {
-    return undefined;
-  }
-
   const sourceEntry = entryArg.replace(/^dist\//, "src/").replace(/\.js$/, ".ts");
   if (!existsSync(resolve(agent.installPath, sourceEntry))) {
     return undefined;
