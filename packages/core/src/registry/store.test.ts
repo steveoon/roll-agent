@@ -1,10 +1,11 @@
 import { describe, it, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
-import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { randomUUID } from "node:crypto";
 import { AgentStore } from "./store.ts";
+import { createDefaultRuntimeForTransport } from "../types/agent.ts";
 import type { RegisteredAgent } from "../types/agent.ts";
 
 function makeTmpDir(): string {
@@ -14,13 +15,15 @@ function makeTmpDir(): string {
 }
 
 function makeAgent(name: string): RegisteredAgent {
+  const transport = { type: "stdio", command: "node" } as const;
   return {
     skill: {
       name,
       description: `${name} description`,
       metadata: {},
     },
-    transport: { type: "stdio", command: "node" },
+    transport,
+    runtime: createDefaultRuntimeForTransport(transport),
     installPath: `/tmp/${name}`,
     registeredAt: new Date().toISOString(),
     status: "idle",
@@ -146,5 +149,70 @@ describe("AgentStore", () => {
   it("should return empty list when store file contains invalid JSON", () => {
     writeFileSync(resolve(tmpDir, "agents.json"), "{invalid json", "utf-8");
     assert.deepEqual(store.list(), []);
+  });
+
+  it("should migrate legacy array store format into the v2 envelope on next save", () => {
+    writeFileSync(
+      resolve(tmpDir, "agents.json"),
+      JSON.stringify([
+        {
+          skill: {
+            name: "legacy-agent",
+            description: "legacy",
+            metadata: {},
+          },
+          transport: { type: "stdio", command: "node" },
+          installPath: "/tmp/legacy-agent",
+          registeredAt: "2026-01-01T00:00:00.000Z",
+          status: "idle",
+          source: { type: "local", path: "/tmp/legacy-agent" },
+        },
+      ]),
+      "utf-8",
+    );
+
+    const agents = store.list();
+    assert.equal(agents.length, 1);
+    assert.equal(agents[0]?.source?.type, "local-path");
+    assert.equal(agents[0]?.runtime.ownership, "on-demand");
+
+    store.updateStatus("legacy-agent", "online");
+    const persisted = JSON.parse(readFileSync(resolve(tmpDir, "agents.json"), "utf-8")) as {
+      schemaVersion: number;
+      agents: Array<{ source?: { type?: string }; runtime?: { ownership?: string } }>;
+    };
+
+    assert.equal(persisted.schemaVersion, 2);
+    assert.equal(persisted.agents[0]?.source?.type, "local-path");
+    assert.equal(persisted.agents[0]?.runtime?.ownership, "on-demand");
+  });
+
+  it("should correct legacy remote source back to local-path when installPath is a local agent dir", () => {
+    const localAgentDir = resolve(tmpDir, "browser-use-agent");
+    mkdirSync(localAgentDir, { recursive: true });
+    writeFileSync(resolve(localAgentDir, "SKILL.md"), "---\nname: test\ndescription: test\n---\n", "utf-8");
+
+    writeFileSync(
+      resolve(tmpDir, "agents.json"),
+      JSON.stringify([
+        {
+          skill: {
+            name: "browser-use-agent",
+            description: "browser",
+            metadata: {},
+          },
+          transport: { type: "streamable-http", endpoint: "http://localhost:3100/mcp" },
+          installPath: localAgentDir,
+          registeredAt: "2026-01-01T00:00:00.000Z",
+          status: "idle",
+          source: { type: "remote", endpoint: "http://localhost:3100/mcp" },
+        },
+      ]),
+      "utf-8",
+    );
+
+    const agent = store.findByName("browser-use-agent");
+    assert.equal(agent?.source?.type, "local-path");
+    assert.equal(agent?.runtime.ownership, "external-managed");
   });
 });

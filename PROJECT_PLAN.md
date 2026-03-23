@@ -48,7 +48,7 @@
 - ✅ Workspace 级别的 Agent 配置管理 → 简化为 `roll.config.yaml`
 - ✅ 声明式路由（channel → agent 映射）→ `roll run <agent> <tool>`
 - ✅ Agent 间通信（sessions_send）→ 指挥官作为中枢协调
-- ✅ 三级 Skill 体系（bundled/managed/workspace）→ 简化为 local/remote 两种模式
+- ✅ 三级 Skill 体系（bundled/managed/workspace）→ 当前落地为 local-path / installed / remote 三种交付形态
 - ❌ 不需要 20+ 消息平台适配器（垂直场景）
 - ❌ 不需要设备节点（Node pairing）
 - ❌ 不需要 WebSocket 全双工控制面（CLI 足够）
@@ -69,7 +69,9 @@
     │
     ├─ roll run boss-reply get_unread        ← 声明式路由
     │
-    └─ roll ask "帮我回复boss上的候选人"       ← LLM 智能路由
+    ├─ roll ask "上海肯德基还招人吗?"       ← 单轮 LLM 路由
+    │
+    └─ roll chat "帮我处理这批候选人"         ← 会话式统一入口（规划中）
     │
     ▼
 ┌──────────────────────────────────────────┐
@@ -148,6 +150,7 @@ nano-agent/
 │   │   │   │   ├── commands/
 │   │   │   │   │   ├── run.ts       # roll run <agent> <tool>
 │   │   │   │   │   ├── ask.ts       # roll ask "自然语言"
+│   │   │   │   │   ├── chat.ts      # roll chat [message]
 │   │   │   │   │   ├── agent.ts     # roll agent add/remove/list/start/stop
 │   │   │   │   │   ├── config.ts    # roll config set/get
 │   │   │   │   │   └── doctor.ts    # roll doctor（诊断）
@@ -234,7 +237,9 @@ nano-agent/
 roll — 花卷 Agent，轻量级 Agent 编排系统
 
 Commands:
-  roll agent add <path|url>       注册一个 Agent（安装依赖）
+  roll agent add <path|url>       注册本地目录或 Git Agent（安装依赖）
+  roll agent add --remote <url>   注册远程 streamable-http Agent
+  roll agent install <package>    安装并注册已编译 Agent 包
   roll agent remove <name>        移除一个 Agent
   roll agent list                 列出所有已注册 Agent
   roll agent start <name>         探测 Agent 可连接性（stdio 无需手动启动）
@@ -243,6 +248,7 @@ Commands:
 
   roll run <agent> <tool> [args]  声明式调用 Agent 的指定 tool
   roll ask "<message>"            LLM 智能路由，自动选择 Agent 和 tool
+  roll chat [message]             Experimental：未来会话式统一入口（当前仅提供骨架）
 
   roll config set <key> <value>   设置全局配置
   roll config get [key]           查看配置
@@ -325,9 +331,9 @@ llm:
     qwen:
       api-key: ${DASHSCOPE_API_KEY}
 
-router:
-  mode: declarative                    # declarative | llm | auto
-  llm-model: qwen-plus                # LLM 路由使用的模型（可选较便宜的）
+ask:
+  llm-model: qwen-plus                # `roll ask` 使用的模型（默认回退到 llm.default-model）
+  confirm-threshold: 0.5             # 低于阈值时返回 needs_confirmation
 
 agents:
   data-dir: ~/.roll-agent/agents       # Agent 注册数据存储位置
@@ -386,8 +392,6 @@ interface AgentTool {
 ### 6.3 路由类型
 
 ```typescript
-type RouterMode = "declarative" | "llm" | "auto";
-
 /** LLM 路由决策结果 */
 interface RouteDecision {
   readonly agentName: string;
@@ -402,7 +406,7 @@ interface RouteDecision {
 ```typescript
 interface RollConfig {
   readonly llm: LLMConfig;
-  readonly router: RouterConfig;
+  readonly ask: AskConfig;
   readonly agents: AgentsConfig;
 }
 
@@ -417,8 +421,7 @@ interface ProviderConfig {
   readonly baseUrl?: string;
 }
 
-interface RouterConfig {
-  readonly mode: RouterMode;
+interface AskConfig {
   readonly llmModel?: string;
   readonly confirmThreshold?: number;     // LLM 路由置信度确认阈值
 }
@@ -543,7 +546,9 @@ roll run wechat-agent send_message --userId xxx --content "你好"
 
 - [x] 项目脚手架搭建（monorepo、TypeScript 严格模式、CI 基础）
 - [x] `roll.config.yaml` 配置加载与校验
-- [x] `roll agent add <path>` — SKILL.md 解析 + 依赖安装 + 注册
+- [x] `roll agent add <path>` — 本地目录注册
+- [x] `roll agent install <package>` — 已编译 Agent 包安装与注册
+- [x] `roll agent add --remote <url>` — 远程 streamable-http Agent 注册
 - [x] `roll agent list` — 列出已注册 Agent
 - [x] MCP Client Manager — stdio 传输模式
 - [x] `roll run <agent> <tool>` — 声明式调用

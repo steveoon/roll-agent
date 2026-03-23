@@ -7,7 +7,8 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
+  pull-requests: write
   id-token: write
 
 concurrency:
@@ -51,7 +52,7 @@ jobs:
       - name: Build
         run: pnpm build
 
-  publish:
+  release:
     runs-on: ubuntu-latest
     needs: quality
     steps:
@@ -79,5 +80,13 @@ jobs:
       - name: Build packages
         run: pnpm build
 
-      - name: Publish packages if new versions exist
-        run: pnpm release -- --skip-checks
+      - name: Create Release PR or Publish
+        uses: changesets/action@v1
+        with:
+          version: pnpm version-packages
+          publish: pnpm release-packages
+          title: "chore: version packages"
+          commit: "chore: version packages"
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}

@@ -1,6 +1,9 @@
+import { mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { parseToolArgs } from "./run.ts";
+import { parseExplicitToolInput, parseToolArgs, resolveToolArgs } from "./run.ts";
 
 describe("parseToolArgs", () => {
   it("should parse regular tool args", () => {
@@ -9,24 +12,12 @@ describe("parseToolArgs", () => {
   });
 
   it("should not pass --json to tool input", () => {
-    const parsed = parseToolArgs([
-      "boss-reply-agent",
-      "get_unread",
-      "--json",
-      "--limit",
-      "10",
-    ]);
+    const parsed = parseToolArgs(["boss-reply-agent", "get_unread", "--json", "--limit", "10"]);
     assert.deepEqual(parsed, { limit: 10 });
   });
 
   it("should not pass --verbose to tool input", () => {
-    const parsed = parseToolArgs([
-      "boss-reply-agent",
-      "get_unread",
-      "--verbose",
-      "--limit",
-      "10",
-    ]);
+    const parsed = parseToolArgs(["boss-reply-agent", "get_unread", "--verbose", "--limit", "10"]);
     assert.deepEqual(parsed, { limit: 10 });
   });
 
@@ -40,5 +31,87 @@ describe("parseToolArgs", () => {
       "10",
     ]);
     assert.deepEqual(parsed, { limit: 10 });
+  });
+
+  it("should not pass --input-json and its value to tool input", () => {
+    const parsed = parseToolArgs([
+      "boss-reply-agent",
+      "get_unread",
+      "--input-json",
+      '{"metadata":{"foo":"bar"}}',
+      "--limit",
+      "10",
+    ]);
+    assert.deepEqual(parsed, { limit: 10 });
+  });
+
+  it("should not pass --input-file and its value to tool input", () => {
+    const parsed = parseToolArgs([
+      "boss-reply-agent",
+      "get_unread",
+      "--input-file",
+      "./payload.json",
+      "--limit",
+      "10",
+    ]);
+    assert.deepEqual(parsed, { limit: 10 });
+  });
+});
+
+describe("parseExplicitToolInput", () => {
+  it("should parse --input-json as a JSON object", () => {
+    const parsed = parseExplicitToolInput([
+      "boss-reply-agent",
+      "sync_config",
+      "--input-json",
+      '{"metadata":{"foo":"bar"}}',
+    ]);
+    assert.deepEqual(parsed, { metadata: { foo: "bar" } });
+  });
+
+  it("should parse --input-file as a JSON object", () => {
+    const dir = mkdtempSync(join(tmpdir(), "roll-run-"));
+    const filePath = join(dir, "payload.json");
+    writeFileSync(filePath, '{"metadata":{"foo":"bar"}}');
+
+    const parsed = parseExplicitToolInput([
+      "boss-reply-agent",
+      "sync_config",
+      "--input-file",
+      filePath,
+    ]);
+    assert.deepEqual(parsed, { metadata: { foo: "bar" } });
+  });
+
+  it("should reject using --input-json and --input-file together", () => {
+    assert.throws(
+      () =>
+        parseExplicitToolInput([
+          "boss-reply-agent",
+          "sync_config",
+          "--input-json",
+          '{"metadata":{"foo":"bar"}}',
+          "--input-file",
+          "./payload.json",
+        ]),
+      /不能同时使用 --input-json 和 --input-file/,
+    );
+  });
+});
+
+describe("resolveToolArgs", () => {
+  it("should merge explicit JSON input with flag args", () => {
+    const parsed = resolveToolArgs([
+      "boss-reply-agent",
+      "sync_config",
+      "--input-json",
+      '{"metadata":{"foo":"bar"}}',
+      "--limit",
+      "10",
+    ]);
+    assert.deepEqual(parsed, {
+      metadata: { foo: "bar" },
+      limit: 10,
+    });
   });
 });

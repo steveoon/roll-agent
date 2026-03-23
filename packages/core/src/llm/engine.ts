@@ -43,6 +43,11 @@ export class LLMEngine {
       );
     }
 
-    return createProviderModel(providerName, modelName, providerConfig.apiKey, providerConfig.baseUrl);
+    return createProviderModel(
+      providerName,
+      modelName,
+      providerConfig.apiKey,
+      providerConfig.baseUrl,
+    );
   }
 }

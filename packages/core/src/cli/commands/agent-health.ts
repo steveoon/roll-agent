@@ -1,13 +1,9 @@
 import { defineCommand } from "citty";
 import { loadConfig } from "../../config/loader.ts";
+import { getAgentLogPath, getAgentPid, probeAgentEndpoint } from "../../registry/process-manager.ts";
 import { AgentStore } from "../../registry/store.ts";
-import { McpClientManager } from "../../mcp/client-manager.ts";
 import { log } from "../utils/output.ts";
 import type { RegisteredAgent } from "../../types/agent.ts";
-
-type StreamableHttpAgent = RegisteredAgent & {
-  readonly transport: Extract<RegisteredAgent["transport"], { readonly type: "streamable-http" }>;
-};
 
 interface AgentHealthResult {
   readonly agentName: string;
@@ -16,12 +12,8 @@ interface AgentHealthResult {
   readonly message: string;
 }
 
-function isStreamableHttpAgent(agent: RegisteredAgent): agent is StreamableHttpAgent {
-  return agent.transport.type === "streamable-http";
-}
-
 export default defineCommand({
-  meta: { description: "检查 Agent 健康状态（stdio 为按需模式）" },
+  meta: { description: "检查 Agent 健康状态（兼容 on-demand / core-managed / external-managed）" },
   args: {
     restart: {
       type: "boolean",
@@ -36,31 +28,30 @@ export default defineCommand({
     const agents = store.list();
 
     if (args.restart) {
-      log.warn("`--restart` 仅为兼容保留参数；stdio Agent 为按需启动，不执行重启逻辑。");
+      log.warn("`--restart` 仅为兼容保留参数；v1 不执行自动重启逻辑。");
     }
 
     if (agents.length === 0) {
+      if (args.json) {
+        console.log("[]");
+        return;
+      }
       log.info("暂无已注册 Agent。");
       return;
     }
 
     const results: AgentHealthResult[] = [];
     for (const agent of agents) {
-      if (!isStreamableHttpAgent(agent)) {
-        results.push({
-          agentName: agent.skill.name,
-          transport: "stdio",
-          healthy: true,
-          message: "按需模式：由 run/ask 自动启动并在调用后释放",
-        });
-        continue;
-      }
-
-      results.push(await checkStreamableHttpHealth(agent));
+      results.push(await checkAgentHealth(agent, store, config.agents.dataDir));
     }
+
+    const unhealthy = results.filter((result) => !result.healthy);
 
     if (args.json) {
       console.log(JSON.stringify(results, null, 2));
+      if (unhealthy.length > 0) {
+        process.exitCode = 1;
+      }
       return;
     }
 
@@ -72,39 +63,100 @@ export default defineCommand({
       }
     }
 
-    const unhealthy = results.filter((r) => !r.healthy);
     if (unhealthy.length > 0) {
       process.exitCode = 1;
     }
   },
 });
 
-async function checkStreamableHttpHealth(agent: StreamableHttpAgent): Promise<AgentHealthResult> {
-  const clientManager = new McpClientManager();
+async function checkAgentHealth(
+  agent: RegisteredAgent,
+  store: AgentStore,
+  dataDir: string,
+): Promise<AgentHealthResult> {
+  switch (agent.runtime.ownership) {
+    case "on-demand":
+      return {
+        agentName: agent.skill.name,
+        transport: agent.transport.type,
+        healthy: true,
+        message: "按需模式：无需常驻进程，由 run/ask 在调用时启动",
+      };
+    case "external-managed":
+      return checkExternalManagedHealth(agent, store);
+    case "core-managed":
+      return checkCoreManagedHealth(agent, store, dataDir);
+  }
+}
 
+async function checkExternalManagedHealth(
+  agent: RegisteredAgent,
+  store: AgentStore,
+): Promise<AgentHealthResult> {
   try {
-    const client = await clientManager.connect(
-      agent.skill.name,
-      agent.transport,
-      agent.installPath,
-      { timeoutMs: 5000 },
-    );
-    await client.listTools();
-
+    await probeAgentEndpoint(agent, { timeoutMs: 5_000 });
+    store.updateStatus(agent.skill.name, "online");
     return {
       agentName: agent.skill.name,
-      transport: "streamable-http",
+      transport: agent.transport.type,
       healthy: true,
-      message: `可连接 (${agent.transport.endpoint})`,
+      message:
+        agent.transport.type === "streamable-http"
+          ? `外部服务可连接 (${agent.transport.endpoint})`
+          : "外部服务可连接",
     };
   } catch (err) {
+    store.updateStatus(agent.skill.name, "error");
     return {
       agentName: agent.skill.name,
-      transport: "streamable-http",
+      transport: agent.transport.type,
       healthy: false,
-      message: `不可连接 (${agent.transport.endpoint}): ${err instanceof Error ? err.message : String(err)}`,
+      message:
+        agent.transport.type === "streamable-http"
+          ? `外部服务不可连接 (${agent.transport.endpoint}): ${err instanceof Error ? err.message : String(err)}`
+          : `外部服务不可连接: ${err instanceof Error ? err.message : String(err)}`,
     };
-  } finally {
-    await clientManager.disconnectAll();
+  }
+}
+
+async function checkCoreManagedHealth(
+  agent: RegisteredAgent,
+  store: AgentStore,
+  dataDir: string,
+): Promise<AgentHealthResult> {
+  const pid = getAgentPid(dataDir, agent.skill.name);
+  if (pid === undefined) {
+    store.updateStatus(agent.skill.name, "stopped");
+    return {
+      agentName: agent.skill.name,
+      transport: agent.transport.type,
+      healthy: false,
+      message: `未运行（缺少活动 PID）。日志: ${getAgentLogPath(dataDir, agent.skill.name)}`,
+    };
+  }
+
+  try {
+    await probeAgentEndpoint(agent, { timeoutMs: 5_000 });
+    store.updateStatus(agent.skill.name, "online");
+    return {
+      agentName: agent.skill.name,
+      transport: agent.transport.type,
+      healthy: true,
+      message:
+        agent.transport.type === "streamable-http"
+          ? `运行中 (PID: ${String(pid)})，可连接 (${agent.transport.endpoint})`
+          : `运行中 (PID: ${String(pid)})`,
+    };
+  } catch (err) {
+    store.updateStatus(agent.skill.name, "error");
+    return {
+      agentName: agent.skill.name,
+      transport: agent.transport.type,
+      healthy: false,
+      message:
+        agent.transport.type === "streamable-http"
+          ? `进程存在但不可连接 (${agent.transport.endpoint}): ${err instanceof Error ? err.message : String(err)}。日志: ${getAgentLogPath(dataDir, agent.skill.name)}`
+          : `进程存在但不可连接: ${err instanceof Error ? err.message : String(err)}。日志: ${getAgentLogPath(dataDir, agent.skill.name)}`,
+    };
   }
 }

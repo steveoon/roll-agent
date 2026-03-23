@@ -4,7 +4,8 @@ import { writeFileSync, mkdirSync, rmSync } from "node:fs";
 import { resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { randomUUID } from "node:crypto";
-import { loadConfig } from "./loader.ts";
+import { loadConfig, validateConfigText } from "./loader.ts";
+import { getAgentEnv } from "./helpers.ts";
 
 /** 创建临时目录用于测试 */
 function makeTmpDir(): string {
@@ -28,7 +29,7 @@ describe("loadConfig", () => {
     const { config, configPath } = loadConfig({ cwd: tmpDir });
     assert.equal(configPath, undefined);
     assert.equal(config.llm.defaultProvider, "anthropic");
-    assert.equal(config.router.mode, "declarative");
+    assert.deepEqual(config.ask, {});
   });
 
   it("should load and parse a valid YAML config", () => {
@@ -40,8 +41,9 @@ llm:
     openai:
       api-key: test-key
 
-router:
-  mode: llm
+ask:
+  llm-model: gpt-4.1-mini
+  confirm-threshold: 0.8
 
 agents:
   data-dir: /tmp/agents
@@ -53,7 +55,8 @@ agents:
     assert.equal(config.llm.defaultProvider, "openai");
     assert.equal(config.llm.defaultModel, "gpt-4o");
     assert.equal(config.llm.providers["openai"]?.apiKey, "test-key");
-    assert.equal(config.router.mode, "llm");
+    assert.equal(config.ask.llmModel, "gpt-4.1-mini");
+    assert.equal(config.ask.confirmThreshold, 0.8);
     assert.equal(config.agents.dataDir, "/tmp/agents");
   });
 
@@ -63,15 +66,36 @@ llm:
   default-provider: anthropic
   default-model: test
   providers: {}
-router:
-  mode: declarative
+ask:
   confirm-threshold: 0.5
 agents:
   data-dir: /tmp/test
 `;
     writeFileSync(resolve(tmpDir, "roll.config.yaml"), yaml);
     const { config } = loadConfig({ cwd: tmpDir });
-    assert.equal(config.router.confirmThreshold, 0.5);
+    assert.equal(config.ask.confirmThreshold, 0.5);
+  });
+
+  it("should resolve kebab-case agent env keys through getAgentEnv", () => {
+    const yaml = `
+llm:
+  default-provider: anthropic
+  default-model: test
+  providers: {}
+agents:
+  data-dir: /tmp/test
+  env:
+    smart-reply-agent:
+      ANTHROPIC_API_KEY: test-key
+      DULIDAY_TOKEN: duliday-token
+`;
+    writeFileSync(resolve(tmpDir, "roll.config.yaml"), yaml);
+    const { config } = loadConfig({ cwd: tmpDir });
+
+    assert.deepEqual(getAgentEnv(config, "smart-reply-agent"), {
+      ANTHROPIC_API_KEY: "test-key",
+      DULIDAY_TOKEN: "duliday-token",
+    });
   });
 
   it("should resolve environment variables", () => {
@@ -83,8 +107,8 @@ llm:
   providers:
     anthropic:
       api-key: \${ROLL_TEST_API_KEY}
-router:
-  mode: declarative
+ask:
+  confirm-threshold: 0.5
 agents:
   data-dir: /tmp/test
 `;
@@ -102,14 +126,15 @@ llm:
   default-provider: qwen
   default-model: qwen-plus
   providers: {}
-router:
-  mode: auto
+ask:
+  llm-model: qwen-plus
 agents:
   data-dir: /tmp/test
 `;
     writeFileSync(resolve(tmpDir, "roll.config.yaml"), yaml);
     const { config } = loadConfig({ cwd: childDir });
     assert.equal(config.llm.defaultProvider, "qwen");
+    assert.equal(config.ask.llmModel, "qwen-plus");
   });
 
   it("should throw for explicit path that does not exist", () => {
@@ -127,14 +152,22 @@ agents:
     );
   });
 
+  it("should throw with line and column for YAML syntax errors", () => {
+    writeFileSync(resolve(tmpDir, "roll.config.yaml"), "llm: [\n");
+    assert.throws(
+      () => loadConfig({ cwd: tmpDir }),
+      (err: Error) =>
+        err.message.includes("Invalid YAML syntax in config file") &&
+        err.message.includes("line 2, column 1"),
+    );
+  });
+
   it("should expand tilde in dataDir", () => {
     const yaml = `
 llm:
   default-provider: anthropic
   default-model: test
   providers: {}
-router:
-  mode: declarative
 agents:
   data-dir: ~/my-agents
 `;
@@ -153,7 +186,49 @@ llm:
 `;
     writeFileSync(resolve(tmpDir, "roll.config.yaml"), yaml);
     const { config } = loadConfig({ cwd: tmpDir });
-    assert.equal(config.router.mode, "declarative");
+    assert.deepEqual(config.ask, {});
     assert.ok(config.agents.dataDir);
+  });
+
+  it("should validate config text against schema", () => {
+    const yaml = `
+llm:
+  default-provider: anthropic
+  default-model: test
+  providers: {}
+ask:
+  confirm-threshold: invalid
+agents:
+  data-dir: /tmp/test
+`;
+    assert.throws(
+      () => validateConfigText(yaml, resolve(tmpDir, "roll.config.yaml")),
+      (err: Error) =>
+        err.message.includes("Config validation failed") &&
+        err.message.includes("ask.confirmThreshold"),
+    );
+  });
+
+  it("should reject deprecated router config with migration guidance", () => {
+    const yaml = `
+llm:
+  default-provider: anthropic
+  default-model: test
+  providers: {}
+router:
+  mode: declarative
+  llm-model: claude-3-5-sonnet
+  confirm-threshold: 0.5
+agents:
+  data-dir: /tmp/test
+`;
+    assert.throws(
+      () => validateConfigText(yaml, resolve(tmpDir, "roll.config.yaml")),
+      (err: Error) =>
+        err.message.includes("`router` 配置段已废弃") &&
+        err.message.includes("ask.llm-model") &&
+        err.message.includes("ask.confirm-threshold") &&
+        err.message.includes("router.mode"),
+    );
   });
 });

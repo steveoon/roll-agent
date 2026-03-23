@@ -2,6 +2,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { spawnSync } from "node:child_process";
+import { tmpdir } from "node:os";
 
 const args = new Set(process.argv.slice(2));
 const isDryRun = args.has("--dry-run");
@@ -9,16 +10,25 @@ const skipChecks = args.has("--skip-checks");
 const noRegistryCheck = args.has("--no-registry-check");
 
 const repoRoot = resolve(import.meta.dirname, "..");
+const npmCacheDir = resolve(tmpdir(), "roll-agent-npm-cache");
+const publishBranch = process.env["ROLL_PUBLISH_BRANCH"] ?? "main";
 
 const packages = [
   { name: "@roll-agent/sdk", dir: resolve(repoRoot, "packages/sdk") },
+  { name: "@roll-agent/browser", dir: resolve(repoRoot, "packages/browser") },
   { name: "@roll-agent/core", dir: resolve(repoRoot, "packages/core") },
+  { name: "@roll-agent/browser-use-agent", dir: resolve(repoRoot, "agents/browser-use") },
 ];
 
 function run(command, commandArgs, options = {}) {
   const result = spawnSync(command, commandArgs, {
     cwd: options.cwd ?? repoRoot,
-    env: { ...process.env, ...(options.env ?? {}) },
+    env: {
+      ...process.env,
+      npm_config_cache: process.env["npm_config_cache"] ?? npmCacheDir,
+      NPM_CONFIG_CACHE: process.env["NPM_CONFIG_CACHE"] ?? npmCacheDir,
+      ...(options.env ?? {}),
+    },
     stdio: options.capture ? "pipe" : "inherit",
     encoding: "utf-8",
   });
@@ -53,6 +63,11 @@ function readPackageJson(packageDir) {
 function isPublished(packageName, version) {
   const result = spawnSync("npm", ["view", `${packageName}@${version}`, "version", "--json"], {
     cwd: repoRoot,
+    env: {
+      ...process.env,
+      npm_config_cache: process.env["npm_config_cache"] ?? npmCacheDir,
+      NPM_CONFIG_CACHE: process.env["NPM_CONFIG_CACHE"] ?? npmCacheDir,
+    },
     stdio: "pipe",
     encoding: "utf-8",
   });
@@ -79,12 +94,13 @@ function ensurePublishFilesExist(pkg) {
   const files = Array.isArray(packageJson.files) ? packageJson.files : [];
   const missing = files
     .filter((entry) => typeof entry === "string" && entry.length > 0)
+    .filter((entry) => !entry.startsWith("!"))
     .filter((entry) => !existsSync(resolve(pkg.dir, entry)));
 
   if (missing.length > 0) {
     throw new Error(
       `Missing publish files for ${pkg.name}: ${missing.join(", ")}. ` +
-      "Run build before publishing.",
+        "Run build before publishing.",
     );
   }
 }
@@ -92,16 +108,17 @@ function ensurePublishFilesExist(pkg) {
 function ensureRepositoryMetadata(pkg) {
   const packageJson = readPackageJson(pkg.dir);
   const repository = packageJson.repository;
-  const repositoryUrl = typeof repository === "string"
-    ? repository
-    : typeof repository === "object" && repository !== null && "url" in repository
-      ? repository.url
-      : undefined;
+  const repositoryUrl =
+    typeof repository === "string"
+      ? repository
+      : typeof repository === "object" && repository !== null && "url" in repository
+        ? repository.url
+        : undefined;
 
   if (typeof repositoryUrl !== "string" || repositoryUrl.trim().length === 0) {
     throw new Error(
       `Missing package.json repository.url for ${pkg.name}. ` +
-      "Provenance publishing requires repository metadata.",
+        "Provenance publishing requires repository metadata.",
     );
   }
 }
@@ -116,23 +133,27 @@ function publishPackage(pkg) {
     return false;
   }
 
-  if (isDryRun) {
-    const suffix = registryChecked ? "" : " (registry check skipped)";
-    console.log(`- [dry-run] would publish ${pkg.name}@${version}${suffix}`);
-    return true;
-  }
-
   ensurePublishFilesExist(pkg);
   ensureRepositoryMetadata(pkg);
 
-  const publishArgs = ["publish", "--access", "public"];
+  const publishArgs = ["publish", "--access", "public", "--publish-branch", publishBranch];
+  if (isDryRun) {
+    publishArgs.push("--dry-run", "--no-git-checks");
+  }
+
   const allowProvenance = process.env["ROLL_NPM_PROVENANCE"] !== "false";
   if (process.env["GITHUB_ACTIONS"] === "true" && allowProvenance) {
     publishArgs.push("--provenance");
   }
 
-  console.log(`- Publishing ${pkg.name}@${version}`);
-  run("npm", publishArgs, { cwd: pkg.dir });
+  if (isDryRun) {
+    const suffix = registryChecked ? "" : " (registry check skipped)";
+    console.log(`- [dry-run] verifying publishability for ${pkg.name}@${version}${suffix}`);
+  } else {
+    console.log(`- Publishing ${pkg.name}@${version}`);
+  }
+
+  run("pnpm", publishArgs, { cwd: pkg.dir });
   return true;
 }
 
@@ -172,13 +193,17 @@ try {
     console.error("\nPublish failed because npm requires OTP for this token.");
     console.error("Fix options:");
     console.error("1) Replace NPM_TOKEN with an npm Automation token that has publish access.");
-    console.error("2) Switch to npm Trusted Publishing (OIDC) and remove NPM_TOKEN from workflow env.");
+    console.error(
+      "2) Switch to npm Trusted Publishing (OIDC) and remove NPM_TOKEN from workflow env.",
+    );
   }
   if (
     message.includes("Unsupported GitHub Actions source repository visibility") &&
     message.includes("provenance")
   ) {
-    console.error("\nPublish failed because npm provenance currently requires a public GitHub repository.");
+    console.error(
+      "\nPublish failed because npm provenance currently requires a public GitHub repository.",
+    );
     console.error("Fix options:");
     console.error("1) Make the repository public, or");
     console.error("2) Disable provenance in CI: set ROLL_NPM_PROVENANCE=false.");

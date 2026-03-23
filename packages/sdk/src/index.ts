@@ -8,4 +8,6 @@ export type {
   ToolDefinition,
   AgentDefinition,
   RunnableAgent,
+  TransportConfig,
+  ListenOptions,
 } from "./types/index.ts";

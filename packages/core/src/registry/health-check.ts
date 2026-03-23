@@ -19,7 +19,10 @@ export interface HealthCheckResult {
 export function checkAgentHealth(
   store: AgentStore,
   dataDir: string,
-  options: { readonly autoRestart: boolean } = { autoRestart: false },
+  options: {
+    readonly autoRestart: boolean;
+    readonly agentEnvMap?: Readonly<Record<string, Readonly<Record<string, string>>>>;
+  } = { autoRestart: false },
 ): ReadonlyArray<HealthCheckResult> {
   const agents = store.list();
   const results: HealthCheckResult[] = [];
@@ -44,7 +47,7 @@ export function checkAgentHealth(
 
     // 进程已死
     if (options.autoRestart) {
-      const restarted = tryRestart(agent, store, dataDir);
+      const restarted = tryRestart(agent, store, dataDir, options.agentEnvMap?.[agent.skill.name]);
       results.push(restarted);
     } else {
       store.updateStatus(agent.skill.name, "error");
@@ -61,9 +64,14 @@ export function checkAgentHealth(
 }
 
 /** 尝试重启 Agent */
-function tryRestart(agent: RegisteredAgent, store: AgentStore, dataDir: string): HealthCheckResult {
+function tryRestart(
+  agent: RegisteredAgent,
+  store: AgentStore,
+  dataDir: string,
+  env?: Readonly<Record<string, string>>,
+): HealthCheckResult {
   try {
-    const newPid = startAgent(agent, dataDir);
+    const newPid = startAgent(agent, dataDir, env);
     store.updateStatus(agent.skill.name, "online");
     return {
       agentName: agent.skill.name,

@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { randomUUID } from "node:crypto";
@@ -12,17 +12,19 @@ interface CliResult {
   readonly stderr: string;
 }
 
-function runRoll(args: readonly string[], cwd: string, env: Readonly<Record<string, string>> = {}): CliResult {
+interface RunRollOptions {
+  readonly env?: Readonly<Record<string, string>>;
+  readonly input?: string;
+}
+
+function runRoll(args: readonly string[], cwd: string, options: RunRollOptions = {}): CliResult {
   const cliEntry = resolve(import.meta.dirname, "index.ts");
-  const result = spawnSync(
-    process.execPath,
-    ["--experimental-strip-types", cliEntry, ...args],
-    {
-      cwd,
-      encoding: "utf-8",
-      env: { ...process.env, NO_COLOR: "1", ...env },
-    },
-  );
+  const result = spawnSync(process.execPath, ["--experimental-strip-types", cliEntry, ...args], {
+    cwd,
+    encoding: "utf-8",
+    env: { ...process.env, NO_COLOR: "1", ...(options.env ?? {}) },
+    input: options.input,
+  });
 
   return {
     status: result.status,
@@ -37,26 +39,145 @@ function buildConfigYaml(dataDir: string): string {
   default-model: claude-sonnet-4-20250514
   providers: {}
 
-router:
-  mode: declarative
+ask:
+  confirm-threshold: 0.5
 
 agents:
   data-dir: ${dataDir}
 `;
 }
 
-test("e2e smoke: register boss-reply agent and run get_unread", { timeout: 120_000 }, () => {
+function buildDeprecatedConfigYaml(dataDir: string): string {
+  return `llm:
+  default-provider: anthropic
+  default-model: claude-sonnet-4-20250514
+  providers: {}
+
+router:
+  mode: declarative
+  llm-model: claude-sonnet-4-20250514
+
+agents:
+  data-dir: ${dataDir}
+`;
+}
+
+function createCoreManagedHttpFixtureAgent(
+  agentDir: string,
+  port: number,
+  options: {
+    readonly shutdownDelayMs?: number;
+    readonly createBrokenDistEntry?: boolean;
+  } = {},
+): void {
+  const sdkEntry = resolve(import.meta.dirname, "../../../../packages/sdk/src/index.ts");
+  const zodEntry = resolve(import.meta.dirname, "../../../../packages/sdk/node_modules/zod/index.js");
+  const shutdownDelayMs = options.shutdownDelayMs ?? 0;
+
+  mkdirSync(resolve(agentDir, "src"), { recursive: true });
+
+  writeFileSync(
+    resolve(agentDir, "SKILL.md"),
+    `---
+name: http-fixture-agent
+description: Core managed HTTP fixture agent
+---
+
+Provides a single ping tool for lifecycle smoke tests.
+`,
+    "utf-8",
+  );
+
+  writeFileSync(
+    resolve(agentDir, "package.json"),
+    JSON.stringify(
+      {
+        name: "http-fixture-agent",
+        version: "0.0.1",
+        private: true,
+        type: "module",
+        rollAgent: {
+          runtime: {
+            ownership: "core-managed",
+            transport: "streamable-http",
+          },
+          start: {
+            command: process.execPath,
+            args: ["dist/index.js"],
+          },
+          endpoint: {
+            path: "/mcp",
+            port,
+          },
+        },
+      },
+      null,
+      2,
+    ),
+    "utf-8",
+  );
+
+  writeFileSync(
+    resolve(agentDir, "src/index.ts"),
+    `import { defineAgent, defineTool } from ${JSON.stringify(sdkEntry)};
+import { z } from ${JSON.stringify(zodEntry)};
+
+if (${shutdownDelayMs} > 0) {
+  process.on("SIGTERM", () => {
+    setTimeout(() => {
+      process.exit(0);
+    }, ${shutdownDelayMs});
+  });
+}
+
+const ping = defineTool({
+  name: "ping",
+  description: "health ping",
+  input: z.object({}),
+  output: z.object({ ok: z.boolean() }),
+  execute: async () => ({ ok: true }),
+});
+
+const agent = defineAgent({
+  name: "http-fixture-agent",
+  tools: [ping],
+});
+
+await agent.listen({
+  transport: {
+    type: "http",
+    host: "127.0.0.1",
+    port: ${port},
+  },
+});
+`,
+    "utf-8",
+  );
+
+  if (options.createBrokenDistEntry) {
+    mkdirSync(resolve(agentDir, "dist"), { recursive: true });
+    writeFileSync(
+      resolve(agentDir, "dist/index.js"),
+      'throw new Error("dist entry should not be used for local-path fixture");\n',
+      "utf-8",
+    );
+  }
+}
+
+test("e2e smoke: register fixture agent and run ping", { timeout: 120_000 }, () => {
   const workspace = mkdtempSync(resolve(tmpdir(), `roll-e2e-${randomUUID()}-`));
 
   try {
-    const repoRoot = resolve(import.meta.dirname, "../../../../");
-    const bossAgentPath = resolve(repoRoot, "agents/boss-reply");
+    const smokeAgentPath = resolve(
+      import.meta.dirname,
+      "../../../../packages/sdk/test-fixtures/smoke-agent",
+    );
     const dataDir = resolve(workspace, "agents-data");
 
     writeFileSync(resolve(workspace, "roll.config.yaml"), buildConfigYaml(dataDir), "utf-8");
 
-    const addResult = runRoll(["agent", "add", bossAgentPath], workspace, {
-      ROLL_SKIP_INSTALL: "1",
+    const addResult = runRoll(["agent", "add", smokeAgentPath], workspace, {
+      env: { ROLL_SKIP_INSTALL: "1" },
     });
     assert.equal(
       addResult.status,
@@ -74,9 +195,9 @@ test("e2e smoke: register boss-reply agent and run get_unread", { timeout: 120_0
     const listedAgents = JSON.parse(listResult.stdout) as ReadonlyArray<{
       readonly skill: { readonly name: string };
     }>;
-    assert.ok(listedAgents.some((agent) => agent.skill.name === "boss-reply-agent"));
+    assert.ok(listedAgents.some((agent) => agent.skill.name === "smoke-test-agent"));
 
-    const runResult = runRoll(["run", "boss-reply-agent", "get_unread"], workspace);
+    const runResult = runRoll(["run", "smoke-test-agent", "ping"], workspace);
     assert.equal(
       runResult.status,
       0,
@@ -84,6 +205,395 @@ test("e2e smoke: register boss-reply agent and run get_unread", { timeout: 120_0
     );
     assert.match(runResult.stdout, /"messages"\s*:\s*\[\]/);
   } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("e2e smoke: roll --help includes chat", () => {
+  const workspace = mkdtempSync(resolve(tmpdir(), `roll-help-${randomUUID()}-`));
+
+  try {
+    const result = runRoll(["--help"], workspace);
+    assert.equal(result.status, 0, `roll --help failed\nstderr:\n${result.stderr}`);
+    assert.match(result.stdout, /\bchat\b/);
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("e2e smoke: roll chat --help marks command experimental", () => {
+  const workspace = mkdtempSync(resolve(tmpdir(), `roll-chat-help-${randomUUID()}-`));
+
+  try {
+    const result = runRoll(["chat", "--help"], workspace);
+    assert.equal(result.status, 0, `roll chat --help failed\nstderr:\n${result.stderr}`);
+    assert.match(`${result.stdout}\n${result.stderr}`, /Experimental/i);
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("e2e smoke: roll chat --json returns unavailable snapshot", () => {
+  const workspace = mkdtempSync(resolve(tmpdir(), `roll-chat-json-${randomUUID()}-`));
+
+  try {
+    const result = runRoll(["chat", "--json"], workspace);
+    assert.equal(
+      result.status,
+      1,
+      `roll chat --json should fail while experimental\nstdout:\n${result.stdout}\nstderr:\n${result.stderr}`,
+    );
+
+    const parsed = JSON.parse(result.stdout) as {
+      readonly status: string;
+      readonly message: string;
+    };
+    assert.equal(parsed.status, "unavailable");
+    assert.match(parsed.message, /experimental/);
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("e2e smoke: config init writes ask section and ask config can be set/get", () => {
+  const workspace = mkdtempSync(resolve(tmpdir(), `roll-config-${randomUUID()}-`));
+
+  try {
+    const initResult = runRoll(["config", "init"], workspace, { input: "\n\n\n" });
+    assert.equal(
+      initResult.status,
+      0,
+      `config init failed\nstdout:\n${initResult.stdout}\nstderr:\n${initResult.stderr}`,
+    );
+
+    const configPath = resolve(workspace, "roll.config.yaml");
+    const configText = readFileSync(configPath, "utf-8");
+    assert.match(configText, /^ask:/m);
+    assert.ok(!configText.includes("router:"));
+
+    const setModelResult = runRoll(["config", "set", "ask.llmModel", "gpt-4.1-mini"], workspace);
+    assert.equal(
+      setModelResult.status,
+      0,
+      `config set ask.llmModel failed\nstdout:\n${setModelResult.stdout}\nstderr:\n${setModelResult.stderr}`,
+    );
+
+    const getModelResult = runRoll(["config", "get", "ask.llmModel"], workspace);
+    assert.equal(getModelResult.status, 0, getModelResult.stderr);
+    assert.equal(getModelResult.stdout.trim(), "gpt-4.1-mini");
+
+    const setThresholdResult = runRoll(["config", "set", "ask.confirmThreshold", "0.7"], workspace);
+    assert.equal(setThresholdResult.status, 0, setThresholdResult.stderr);
+
+    const getThresholdResult = runRoll(["config", "get", "ask.confirmThreshold"], workspace);
+    assert.equal(getThresholdResult.status, 0, getThresholdResult.stderr);
+    assert.equal(getThresholdResult.stdout.trim(), "0.7");
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("e2e smoke: deprecated router config fails with migration guidance", () => {
+  const workspace = mkdtempSync(resolve(tmpdir(), `roll-router-migration-${randomUUID()}-`));
+
+  try {
+    writeFileSync(
+      resolve(workspace, "roll.config.yaml"),
+      buildDeprecatedConfigYaml(resolve(workspace, "agents-data")),
+      "utf-8",
+    );
+
+    const result = runRoll(["config", "get"], workspace);
+    assert.equal(result.status, 1, `config get should fail\nstdout:\n${result.stdout}`);
+    assert.match(result.stderr, /`router` 配置段已废弃/);
+    assert.match(result.stderr, /ask\.llm-model/);
+    assert.match(result.stderr, /ask\.confirm-threshold/);
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("e2e smoke: agent health --json returns empty array when no agents are registered", () => {
+  const workspace = mkdtempSync(resolve(tmpdir(), `roll-health-empty-${randomUUID()}-`));
+
+  try {
+    writeFileSync(
+      resolve(workspace, "roll.config.yaml"),
+      buildConfigYaml(resolve(workspace, "agents-data")),
+      "utf-8",
+    );
+
+    const result = runRoll(["agent", "health", "--json"], workspace);
+    assert.equal(result.status, 0, `agent health --json failed\nstderr:\n${result.stderr}`);
+    assert.equal(result.stdout.trim(), "[]");
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("e2e smoke: core-managed http agent can start, report health, and stop", {
+  timeout: 120_000,
+}, () => {
+  const workspace = mkdtempSync(resolve(tmpdir(), `roll-http-agent-${randomUUID()}-`));
+
+  try {
+    const agentDir = resolve(workspace, "http-fixture-agent");
+    const dataDir = resolve(workspace, "agents-data");
+    const port = 32_000 + Math.floor(Math.random() * 5_000);
+
+    createCoreManagedHttpFixtureAgent(agentDir, port, {
+      shutdownDelayMs: 1_200,
+      createBrokenDistEntry: true,
+    });
+    writeFileSync(resolve(workspace, "roll.config.yaml"), buildConfigYaml(dataDir), "utf-8");
+
+    const addResult = runRoll(["agent", "add", agentDir], workspace, {
+      env: { ROLL_SKIP_INSTALL: "1" },
+    });
+    assert.equal(
+      addResult.status,
+      0,
+      `agent add failed\nstdout:\n${addResult.stdout}\nstderr:\n${addResult.stderr}`,
+    );
+
+    const startResult = runRoll(["agent", "start", "http-fixture-agent"], workspace);
+    assert.equal(
+      startResult.status,
+      0,
+      `agent start failed\nstdout:\n${startResult.stdout}\nstderr:\n${startResult.stderr}`,
+    );
+    assert.match(startResult.stderr, /已启动|已在运行/);
+
+    const healthResult = runRoll(["agent", "health", "--json"], workspace);
+    assert.equal(
+      healthResult.status,
+      0,
+      `agent health failed\nstdout:\n${healthResult.stdout}\nstderr:\n${healthResult.stderr}`,
+    );
+    const health = JSON.parse(healthResult.stdout) as ReadonlyArray<{
+      readonly agentName: string;
+      readonly healthy: boolean;
+      readonly message: string;
+    }>;
+    const runningEntry = health.find((entry) => entry.agentName === "http-fixture-agent");
+    assert.ok(runningEntry);
+    assert.equal(runningEntry.healthy, true);
+    assert.match(runningEntry.message, /运行中|可连接/);
+
+    const stopResult = runRoll(["agent", "stop", "http-fixture-agent"], workspace);
+    assert.equal(
+      stopResult.status,
+      0,
+      `agent stop failed\nstdout:\n${stopResult.stdout}\nstderr:\n${stopResult.stderr}`,
+    );
+    assert.match(stopResult.stderr, /已停止|当前未运行/);
+
+    const healthAfterStopResult = runRoll(["agent", "health", "--json"], workspace);
+    assert.equal(
+      healthAfterStopResult.status,
+      1,
+      `agent health after stop should report unhealthy\nstdout:\n${healthAfterStopResult.stdout}\nstderr:\n${healthAfterStopResult.stderr}`,
+    );
+    const healthAfterStop = JSON.parse(healthAfterStopResult.stdout) as ReadonlyArray<{
+      readonly agentName: string;
+      readonly healthy: boolean;
+      readonly message: string;
+    }>;
+    const stoppedEntry = healthAfterStop.find((entry) => entry.agentName === "http-fixture-agent");
+    assert.ok(stoppedEntry);
+    assert.equal(stoppedEntry.healthy, false);
+    assert.match(stoppedEntry.message, /未运行|PID/);
+  } finally {
+    runRoll(["agent", "stop", "http-fixture-agent"], workspace);
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("e2e smoke: removing a running core-managed http agent stops it and deregisters it", {
+  timeout: 120_000,
+}, () => {
+  const workspace = mkdtempSync(resolve(tmpdir(), `roll-http-remove-${randomUUID()}-`));
+
+  try {
+    const agentDir = resolve(workspace, "http-fixture-agent");
+    const dataDir = resolve(workspace, "agents-data");
+    const port = 37_000 + Math.floor(Math.random() * 5_000);
+
+    createCoreManagedHttpFixtureAgent(agentDir, port, { createBrokenDistEntry: true });
+    writeFileSync(resolve(workspace, "roll.config.yaml"), buildConfigYaml(dataDir), "utf-8");
+
+    const addResult = runRoll(["agent", "add", agentDir], workspace, {
+      env: { ROLL_SKIP_INSTALL: "1" },
+    });
+    assert.equal(addResult.status, 0, addResult.stderr);
+
+    const startResult = runRoll(["agent", "start", "http-fixture-agent"], workspace);
+    assert.equal(startResult.status, 0, startResult.stderr);
+
+    const removeResult = runRoll(["agent", "remove", "http-fixture-agent"], workspace);
+    assert.equal(
+      removeResult.status,
+      0,
+      `agent remove failed\nstdout:\n${removeResult.stdout}\nstderr:\n${removeResult.stderr}`,
+    );
+    assert.match(removeResult.stderr, /已移除/);
+
+    const listResult = runRoll(["agent", "list", "--json"], workspace);
+    assert.equal(listResult.status, 0, listResult.stderr);
+    const agents = JSON.parse(listResult.stdout) as ReadonlyArray<{
+      readonly skill: { readonly name: string };
+    }>;
+    assert.ok(!agents.some((agent) => agent.skill.name === "http-fixture-agent"));
+  } finally {
+    runRoll(["agent", "stop", "http-fixture-agent"], workspace);
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("e2e smoke: updating a running local-path core-managed http agent refreshes metadata and restarts it", {
+  timeout: 120_000,
+}, () => {
+  const workspace = mkdtempSync(resolve(tmpdir(), `roll-http-update-${randomUUID()}-`));
+
+  try {
+    const agentDir = resolve(workspace, "http-fixture-agent");
+    const dataDir = resolve(workspace, "agents-data");
+    const port = 42_000 + Math.floor(Math.random() * 5_000);
+
+    createCoreManagedHttpFixtureAgent(agentDir, port, { createBrokenDistEntry: true });
+    writeFileSync(resolve(workspace, "roll.config.yaml"), buildConfigYaml(dataDir), "utf-8");
+
+    const addResult = runRoll(["agent", "add", agentDir], workspace, {
+      env: { ROLL_SKIP_INSTALL: "1" },
+    });
+    assert.equal(addResult.status, 0, addResult.stderr);
+
+    const startResult = runRoll(["agent", "start", "http-fixture-agent"], workspace);
+    assert.equal(startResult.status, 0, startResult.stderr);
+
+    const pidPath = resolve(dataDir, "pids", "http-fixture-agent.pid");
+    const originalPid = readFileSync(pidPath, "utf-8").trim();
+
+    writeFileSync(
+      resolve(agentDir, "SKILL.md"),
+      `---
+name: http-fixture-agent
+description: Updated core managed HTTP fixture agent
+---
+
+Provides a single ping tool for lifecycle smoke tests after update.
+`,
+      "utf-8",
+    );
+
+    const updateResult = runRoll(["update"], workspace);
+    assert.equal(
+      updateResult.status,
+      0,
+      `roll update failed\nstdout:\n${updateResult.stdout}\nstderr:\n${updateResult.stderr}`,
+    );
+    assert.match(updateResult.stderr, /1 个 Agent 已更新|更新完成/);
+
+    const updatedPid = readFileSync(pidPath, "utf-8").trim();
+    assert.notEqual(updatedPid, originalPid);
+
+    const listResult = runRoll(["agent", "list", "--json"], workspace);
+    assert.equal(listResult.status, 0, listResult.stderr);
+    const agents = JSON.parse(listResult.stdout) as ReadonlyArray<{
+      readonly skill: { readonly name: string; readonly description: string };
+    }>;
+    const fixtureAgent = agents.find((agent) => agent.skill.name === "http-fixture-agent");
+    assert.ok(fixtureAgent);
+    assert.equal(fixtureAgent.skill.description, "Updated core managed HTTP fixture agent");
+
+    const healthResult = runRoll(["agent", "health", "--json"], workspace);
+    assert.equal(healthResult.status, 0, healthResult.stderr);
+    const health = JSON.parse(healthResult.stdout) as ReadonlyArray<{
+      readonly agentName: string;
+      readonly healthy: boolean;
+    }>;
+    const updatedEntry = health.find((entry) => entry.agentName === "http-fixture-agent");
+    assert.ok(updatedEntry);
+    assert.equal(updatedEntry.healthy, true);
+  } finally {
+    runRoll(["agent", "stop", "http-fixture-agent"], workspace);
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("e2e smoke: failed managed restart during update returns non-zero and cleans up the process", {
+  timeout: 120_000,
+}, () => {
+  const workspace = mkdtempSync(resolve(tmpdir(), `roll-http-update-fail-${randomUUID()}-`));
+
+  try {
+    const agentDir = resolve(workspace, "http-fixture-agent");
+    const dataDir = resolve(workspace, "agents-data");
+    const port = 47_000 + Math.floor(Math.random() * 2_000);
+
+    createCoreManagedHttpFixtureAgent(agentDir, port, { createBrokenDistEntry: true });
+    writeFileSync(resolve(workspace, "roll.config.yaml"), buildConfigYaml(dataDir), "utf-8");
+
+    const addResult = runRoll(["agent", "add", agentDir], workspace, {
+      env: { ROLL_SKIP_INSTALL: "1" },
+    });
+    assert.equal(addResult.status, 0, addResult.stderr);
+
+    const startResult = runRoll(["agent", "start", "http-fixture-agent"], workspace);
+    assert.equal(startResult.status, 0, startResult.stderr);
+
+    const packageJsonPath = resolve(agentDir, "package.json");
+    const packageJson = JSON.parse(readFileSync(packageJsonPath, "utf-8")) as {
+      readonly rollAgent?: {
+        readonly endpoint?: {
+          readonly path?: string;
+          readonly port?: number;
+        };
+      };
+    };
+    writeFileSync(
+      packageJsonPath,
+      JSON.stringify(
+        {
+          ...packageJson,
+          rollAgent: {
+            ...packageJson.rollAgent,
+            endpoint: {
+              ...packageJson.rollAgent?.endpoint,
+              path: "/broken-mcp",
+            },
+          },
+        },
+        null,
+        2,
+      ),
+      "utf-8",
+    );
+
+    const updateResult = runRoll(["update"], workspace);
+    assert.equal(
+      updateResult.status,
+      1,
+      `roll update should fail when managed restart cannot become ready\nstdout:\n${updateResult.stdout}\nstderr:\n${updateResult.stderr}`,
+    );
+    assert.match(updateResult.stderr, /更新完成但有失败|重启失败|metadata 刷新或重启失败/);
+
+    const pidPath = resolve(dataDir, "pids", "http-fixture-agent.pid");
+    assert.equal(existsSync(pidPath), false);
+
+    const healthResult = runRoll(["agent", "health", "--json"], workspace);
+    assert.equal(healthResult.status, 1, healthResult.stderr);
+    const health = JSON.parse(healthResult.stdout) as ReadonlyArray<{
+      readonly agentName: string;
+      readonly healthy: boolean;
+      readonly message: string;
+    }>;
+    const entry = health.find((item) => item.agentName === "http-fixture-agent");
+    assert.ok(entry);
+    assert.equal(entry.healthy, false);
+    assert.match(entry.message, /未运行|缺少活动 PID/);
+  } finally {
+    runRoll(["agent", "stop", "http-fixture-agent"], workspace);
     rmSync(workspace, { recursive: true, force: true });
   }
 });

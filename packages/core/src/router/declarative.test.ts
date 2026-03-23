@@ -1,12 +1,15 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { resolveAgent } from "./declarative.ts";
+import { createDefaultRuntimeForTransport } from "../types/agent.ts";
 import type { RegisteredAgent } from "../types/agent.ts";
 
 function makeAgent(name: string): RegisteredAgent {
+  const transport = { type: "stdio", command: "node" } as const;
   return {
     skill: { name, description: `${name} desc`, metadata: {} },
-    transport: { type: "stdio", command: "node" },
+    transport,
+    runtime: createDefaultRuntimeForTransport(transport),
     installPath: `/tmp/${name}`,
     registeredAt: new Date().toISOString(),
     status: "idle",

@@ -32,10 +32,7 @@ interface CheckForUpdateOptions {
 function isUpdateCache(value: unknown): value is UpdateCache {
   if (typeof value !== "object" || value === null) return false;
   if (!("latestVersion" in value) || !("checkedAt" in value)) return false;
-  return (
-    typeof value.latestVersion === "string" &&
-    typeof value.checkedAt === "number"
-  );
+  return typeof value.latestVersion === "string" && typeof value.checkedAt === "number";
 }
 
 /** 读取缓存 */
@@ -107,8 +104,7 @@ export interface UpdateInfo {
 
 /** 比较语义化版本，返回 a > b */
 function isNewerVersion(latest: string, current: string): boolean {
-  const parse = (v: string): readonly number[] =>
-    v.replace(/^v/, "").split(".").map(Number);
+  const parse = (v: string): readonly number[] => v.replace(/^v/, "").split(".").map(Number);
   const l = parse(latest);
   const c = parse(current);
   for (let i = 0; i < 3; i++) {
@@ -126,9 +122,7 @@ function isNewerVersion(latest: string, current: string): boolean {
  * 使用 24h 文件缓存避免频繁网络请求。
  * 设计为不抛异常 — 任何失败静默返回无更新。
  */
-export async function checkForUpdate(
-  options: CheckForUpdateOptions = {},
-): Promise<UpdateInfo> {
+export async function checkForUpdate(options: CheckForUpdateOptions = {}): Promise<UpdateInfo> {
   const forceRefresh = options.forceRefresh ?? false;
   const allowNetwork = options.allowNetwork ?? true;
   const current = getCurrentVersion();

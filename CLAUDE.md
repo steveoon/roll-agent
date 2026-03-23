@@ -52,7 +52,7 @@ pnpm --filter boss-reply-agent dev
 ### CLI 命令树（citty，懒加载子命令）
 
 ```
-roll agent add|remove|list|start|stop|info   Agent 管理
+roll agent add|install|remove|list|start|stop|info   Agent 管理
 roll run <agent> <tool> [args]               声明式调用
 roll ask "<message>"                         LLM 智能路由
 roll config set|get|init                     配置管理
@@ -141,6 +141,24 @@ SKILL.md 的 frontmatter 用于注册元数据，**body 正文内容**会被 `ll
 
 加载管线：YAML 解析 → kebab-case→camelCase → `${ENV_VAR}` 替换 → 深度合并默认值 → Zod 校验 → `~/` 路径展开。
 
+### `roll ask` 两阶段调用与 Tool Schema 语义不可篡改原则
+
+`roll ask` 将自然语言转为 tool 调用，分两阶段：
+
+1. **路由阶段**（`llm-router.ts`）— LLM 选择 agent + tool，不提取参数
+2. **提参阶段**（`extraction-schema.ts`）— LLM 按 tool inputSchema 提取参数，preflight 校验后调用
+
+**核心原则：extraction schema 不得改写原始 tool inputSchema 的类型语义。**
+
+- 原始 `inputSchema` 是 MCP tool 的契约，preflight 和 `callTool()` 始终以它为准
+- extraction schema 只做"适配 LLM structured output"的变换（如 OpenAI strict mode 要求 `additionalProperties: false`、所有字段进 `required`）
+- **不可提取的字段必须剔除，不得降级类型**。例如 `z.record()` 这类开放 object 无法从自然语言可靠提取，应从 extraction schema 中移除，让 preflight 返回 `needs_input`，而非将 `type: "object"` 偷换成 `type: "string"`
+- 不可提取的参数由 `roll run --input-json` 或上层编排器显式提供
+
+**反模式（禁止）：** 为兼容某个 provider 的 structured output 限制，把合法 tool 输入的 schema 类型从 object 改成 string。这会导致 extraction 产出的类型与 preflight 期望的类型前后不一致，让一整类合法 MCP tool 在 `roll ask` 下直接不可用。
+
+**判断标准：** 如果一个 schema 变换使得 `createExtractionSchema(s)` 产出的某字段类型与 `s` 中对应字段的原始类型不同，这个变换就是有问题的。
+
 ### CLI 懒加载
 
 citty 子命令通过动态 `import()` 懒加载，CLI 启动不会加载所有命令模块。
@@ -169,3 +187,4 @@ SDK 的 `exports` 在开发时指向 `./src/index.ts`（直接引用源码），
 - ESLint 9 flat config + neostandard（`noStyle: true` 避免与 Prettier 冲突）
 - Prettier：双引号、分号、尾逗号、100 字符行宽
 - ESM Only：`"type": "module"`，使用 `import.meta.dirname` 替代 `__dirname`
+- CLI 参数命名一律使用 `kebab-case`（如 `--input-json`、`--input-file`），citty 内部自动转为 camelCase 访问。`--help` 输出中呈现的参数名必须是 kebab-case

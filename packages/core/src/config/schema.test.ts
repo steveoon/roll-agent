@@ -12,16 +12,16 @@ describe("rollConfigSchema", () => {
           anthropic: { apiKey: "test-key" },
         },
       },
-      router: { mode: "declarative" },
+      ask: { confirmThreshold: 0.5 },
       agents: { dataDir: "~/.roll-agent/agents" },
     });
     assert.equal(result.success, true);
   });
 
-  it("should reject invalid router mode", () => {
+  it("should reject invalid ask confirm threshold", () => {
     const result = rollConfigSchema.safeParse({
       llm: { defaultProvider: "x", defaultModel: "y", providers: {} },
-      router: { mode: "invalid" },
+      ask: { confirmThreshold: "invalid" },
       agents: { dataDir: "/tmp" },
     });
     assert.equal(result.success, false);

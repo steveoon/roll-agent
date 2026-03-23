@@ -1,0 +1,72 @@
+{
+  "meta": {
+    "defaultBrandId": "10001",
+    "syncedAt": "2026-03-17T00:00:00.000Z",
+    "source": "sample"
+  },
+  "brands": [
+    {
+      "id": "10001",
+      "name": "示例品牌",
+      "stores": [
+        {
+          "id": "store-001",
+          "brandId": "10001",
+          "name": "示例品牌南山店",
+          "city": "深圳",
+          "location": "深圳市南山区科技园路1号",
+          "district": "南山区",
+          "subarea": "科技园",
+          "coordinates": { "lat": 22.5431, "lng": 113.9531 },
+          "positions": [
+            {
+              "id": "pos-001",
+              "name": "服务员",
+              "brandId": "10001",
+              "brandName": "示例品牌",
+              "timeSlots": ["08:00-14:00", "14:00-22:00"],
+              "salary": {
+                "base": 22,
+                "range": "20-25",
+                "memo": "时薪制，多劳多得"
+              },
+              "workHours": "6-8小时/天",
+              "benefits": {
+                "items": ["包工作餐", "交通补贴"]
+              },
+              "requirements": ["18-45岁", "健康证"],
+              "urgent": false,
+              "scheduleType": "flexible",
+              "attendancePolicy": {
+                "punctualityRequired": true,
+                "lateToleranceMinutes": 10,
+                "attendanceTracking": "strict",
+                "makeupShiftsAllowed": true
+              },
+              "availableSlots": [
+                {
+                  "slot": "08:00-14:00",
+                  "maxCapacity": 5,
+                  "currentBooked": 3,
+                  "isAvailable": true,
+                  "priority": "high"
+                }
+              ],
+              "schedulingFlexibility": {
+                "canSwapShifts": true,
+                "advanceNoticeHours": 24,
+                "partTimeAllowed": true,
+                "weekendRequired": false,
+                "holidayRequired": false
+              },
+              "hiringRequirements": {
+                "minAge": 18,
+                "maxAge": 45
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

@@ -3,17 +3,15 @@ import { defineCommand } from "citty";
 const commandExtension = import.meta.url.endsWith(".ts") ? "ts" : "js";
 
 function loadAgentCommand(fileName: string) {
-  const specifier = new URL(
-    `./${fileName}.${commandExtension}`,
-    import.meta.url,
-  ).href;
+  const specifier = new URL(`./${fileName}.${commandExtension}`, import.meta.url).href;
   return import(specifier).then((m) => m.default);
 }
 
 export default defineCommand({
-  meta: { description: "管理 Agent（stdio 按需生命周期）" },
+  meta: { description: "管理 Agent（支持本地目录、已安装产物、远程服务）" },
   subCommands: {
     add: () => loadAgentCommand("agent-add"),
+    install: () => loadAgentCommand("agent-install"),
     remove: () => loadAgentCommand("agent-remove"),
     list: () => loadAgentCommand("agent-list"),
     start: () => loadAgentCommand("agent-start"),

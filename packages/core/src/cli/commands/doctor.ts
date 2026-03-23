@@ -103,7 +103,11 @@ export default defineCommand({
       checks.push(
         existsSync(dataDir)
           ? { name: "Agent 数据目录", status: "ok", message: dataDir }
-          : { name: "Agent 数据目录", status: "warn", message: `${dataDir} (不存在，首次 add 时创建)` },
+          : {
+              name: "Agent 数据目录",
+              status: "warn",
+              message: `${dataDir} (不存在，首次 add 时创建)`,
+            },
       );
 
       // 5. 已注册 Agent
@@ -112,9 +116,10 @@ export default defineCommand({
       checks.push({
         name: "已注册 Agent",
         status: agents.length > 0 ? "ok" : "warn",
-        message: agents.length > 0
-          ? `${String(agents.length)} 个 (${agents.map((a) => a.skill.name).join(", ")})`
-          : "无",
+        message:
+          agents.length > 0
+            ? `${String(agents.length)} 个 (${agents.map((a) => a.skill.name).join(", ")})`
+            : "无",
       });
     }
 

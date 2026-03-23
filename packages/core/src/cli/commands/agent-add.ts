@@ -5,6 +5,7 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { loadConfig } from "../../config/loader.ts";
 import { discoverAgent } from "../../registry/discovery.ts";
+import { writeRemoteSkillManifest } from "../../registry/manifest.ts";
 import { AgentStore } from "../../registry/store.ts";
 import { log } from "../utils/output.ts";
 import type { AgentSource, RegisteredAgent } from "../../types/agent.ts";
@@ -28,15 +29,35 @@ function repoNameFromUrl(url: string): string {
 }
 
 export default defineCommand({
-  meta: { description: "注册一个 Agent（本地路径或 Git URL）" },
+  meta: { description: "注册一个 Agent（本地路径、Git URL 或远程 endpoint）" },
   args: {
-    path: { type: "positional", description: "Agent 本地路径或 Git URL", required: true },
+    path: { type: "positional", description: "Agent 本地路径或 Git URL", required: false },
+    remote: { type: "string", description: "远程 MCP endpoint（需配合 --name/--description）" },
+    name: { type: "string", description: "远程 Agent 名称" },
+    description: { type: "string", description: "远程 Agent 描述" },
   },
   async run({ args }) {
     const { config } = loadConfig();
     let agentDir: string;
 
-    if (isGitUrl(args.path)) {
+    if (args.remote) {
+      if (!args.name || !args.description) {
+        log.error("远程注册需要同时提供 --name 和 --description");
+        process.exitCode = 1;
+        return;
+      }
+
+      agentDir = writeRemoteSkillManifest({
+        dataDir: config.agents.dataDir,
+        name: args.name,
+        description: args.description,
+        endpoint: args.remote,
+      });
+    } else if (!args.path) {
+      log.error("请提供本地路径、Git URL，或使用 --remote <endpoint> 注册远程 Agent");
+      process.exitCode = 1;
+      return;
+    } else if (isGitUrl(args.path)) {
       // Git URL 模式：克隆到 dataDir 下
       const repoName = repoNameFromUrl(args.path);
       const cloneTarget = resolve(config.agents.dataDir, "repos", repoName);
@@ -85,7 +106,9 @@ export default defineCommand({
     // 2. 安装依赖（如果存在 package.json）
     const packageJsonPath = resolve(agentDir, "package.json");
     const skipInstall = process.env["ROLL_SKIP_INSTALL"] === "1";
-    if (existsSync(packageJsonPath) && !skipInstall) {
+    if (args.remote) {
+      log.info("远程 Agent 使用本地 manifest，无需安装依赖。");
+    } else if (existsSync(packageJsonPath) && !skipInstall) {
       log.info("安装依赖...");
       try {
         await execFileAsync("pnpm", ["install"], { cwd: agentDir });
@@ -100,11 +123,11 @@ export default defineCommand({
     }
 
     // 3. 确定 Agent 来源
-    const source: AgentSource = isGitUrl(args.path)
-      ? { type: "git", url: args.path }
-      : discovered.transport.type === "streamable-http"
-        ? { type: "remote" }
-        : { type: "local", path: agentDir };
+    const source: AgentSource = args.remote
+      ? { type: "remote-manifest", endpoint: args.remote }
+      : args.path && isGitUrl(args.path)
+        ? { type: "git", url: args.path }
+        : { type: "local-path", path: agentDir };
 
     // 4. 注册到 store
     const store = new AgentStore(config.agents.dataDir);
@@ -112,6 +135,7 @@ export default defineCommand({
     const agent: RegisteredAgent = {
       skill: discovered.skill,
       transport: discovered.transport,
+      runtime: discovered.runtime,
       installPath: agentDir,
       registeredAt: new Date().toISOString(),
       status: "idle",

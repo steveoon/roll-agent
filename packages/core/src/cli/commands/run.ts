@@ -1,8 +1,12 @@
+import { readFileSync } from "node:fs";
 import { defineCommand } from "citty";
 import { loadConfig } from "../../config/loader.ts";
+import { getAgentEnv } from "../../config/helpers.ts";
 import { AgentStore } from "../../registry/store.ts";
 import { McpClientManager } from "../../mcp/client-manager.ts";
 import { createProviderModel } from "../../llm/providers.ts";
+import { formatValidationIssuesMessage } from "../../tool-runtime/messages.ts";
+import { preflightToolCall } from "../../tool-runtime/preflight.ts";
 import { log } from "../utils/output.ts";
 
 export default defineCommand({
@@ -11,6 +15,8 @@ export default defineCommand({
     agent: { type: "positional", description: "Agent 名称", required: true },
     tool: { type: "positional", description: "Tool 名称", required: true },
     json: { type: "boolean", description: "JSON 格式输出", default: false },
+    "input-json": { type: "string", description: "以 JSON 字符串提供完整 tool 输入对象" },
+    "input-file": { type: "string", description: "从 JSON 文件读取完整 tool 输入对象" },
   },
   async run({ args, rawArgs }) {
     const { config } = loadConfig();
@@ -25,7 +31,14 @@ export default defineCommand({
     }
 
     // 2. 解析额外参数 (--key value 格式)
-    const toolArgs = parseToolArgs(rawArgs);
+    let toolArgs: Record<string, unknown>;
+    try {
+      toolArgs = resolveToolArgs(rawArgs);
+    } catch (err) {
+      log.error(err instanceof Error ? err.message : String(err));
+      process.exitCode = 1;
+      return;
+    }
 
     // 3. 连接 MCP Server
     const clientManager = new McpClientManager();
@@ -43,11 +56,12 @@ export default defineCommand({
         : undefined;
 
       log.info(`连接 Agent "${agent.skill.name}"...`);
+      const agentEnv = getAgentEnv(config, agent.skill.name);
       const client = await clientManager.connect(
         agent.skill.name,
         agent.transport,
         agent.installPath,
-        ...(samplingModel ? [{ samplingModel }] : []),
+        { ...(samplingModel ? { samplingModel } : {}), ...(agentEnv ? { env: agentEnv } : {}) },
       );
 
       // 4. 列出 tools 验证目标 tool 存在
@@ -56,6 +70,15 @@ export default defineCommand({
       if (!targetTool) {
         const available = tools.map((t) => t.name).join(", ");
         log.error(`Tool "${args.tool}" 不存在。可用 tools: ${available}`);
+        process.exitCode = 1;
+        return;
+      }
+
+      const preflightResult = preflightToolCall(targetTool, toolArgs);
+      if (!preflightResult.ok) {
+        log.error(
+          formatValidationIssuesMessage(agent.skill.name, args.tool, preflightResult.issues),
+        );
         process.exitCode = 1;
         return;
       }
@@ -99,7 +122,78 @@ export default defineCommand({
 
 /** run 命令的 CLI 保留参数（不应透传给 tool） */
 const CLI_FLAG_OPTIONS = new Set(["json", "verbose", "v", "help", "h", "version"]);
-const CLI_VALUE_OPTIONS = new Set(["config"]);
+const CLI_VALUE_OPTIONS = new Set(["config", "input-json", "input-file"]);
+
+function isRecordObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function parseJsonObjectInput(source: string, context: string): Record<string, unknown> {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(source);
+  } catch (err) {
+    throw new Error(
+      `${context} 不是合法 JSON: ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
+
+  if (!isRecordObject(parsed)) {
+    throw new Error(`${context} 必须是 JSON object`);
+  }
+
+  return parsed;
+}
+
+function getCliValueOption(rawArgs: string[], optionName: string): string | undefined {
+  let i = 0;
+  while (i < rawArgs.length && !rawArgs[i]?.startsWith("--")) {
+    i++;
+  }
+
+  while (i < rawArgs.length) {
+    const arg = rawArgs[i];
+    if (arg !== `--${optionName}`) {
+      i++;
+      continue;
+    }
+
+    const nextArg = rawArgs[i + 1];
+    if (!nextArg || nextArg.startsWith("--")) {
+      throw new Error(`选项 --${optionName} 需要提供值`);
+    }
+
+    return nextArg;
+  }
+
+  return undefined;
+}
+
+export function parseExplicitToolInput(rawArgs: string[]): Record<string, unknown> | undefined {
+  const inputJson = getCliValueOption(rawArgs, "input-json");
+  const inputFile = getCliValueOption(rawArgs, "input-file");
+
+  if (inputJson && inputFile) {
+    throw new Error("不能同时使用 --input-json 和 --input-file");
+  }
+
+  if (inputJson) {
+    return parseJsonObjectInput(inputJson, "--input-json");
+  }
+
+  if (inputFile) {
+    const fileContent = readFileSync(inputFile, "utf-8");
+    return parseJsonObjectInput(fileContent, `输入文件 ${inputFile}`);
+  }
+
+  return undefined;
+}
+
+export function resolveToolArgs(rawArgs: string[]): Record<string, unknown> {
+  const explicitInput = parseExplicitToolInput(rawArgs) ?? {};
+  const flagInput = parseToolArgs(rawArgs);
+  return { ...explicitInput, ...flagInput };
+}
 
 /**
  * 从 rawArgs 中解析 --key value 格式的参数。
