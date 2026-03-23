@@ -1,5 +1,5 @@
 import { defineCommand } from "citty";
-import { loadConfig } from "../../config/loader.ts";
+import { loadAgentsConfig } from "../../config/loader.ts";
 import { getAgentLogPath, getAgentPid, probeAgentEndpoint } from "../../registry/process-manager.ts";
 import { AgentStore } from "../../registry/store.ts";
 import { log } from "../utils/output.ts";
@@ -23,8 +23,8 @@ export default defineCommand({
     json: { type: "boolean", description: "JSON 格式输出", default: false },
   },
   async run({ args }) {
-    const { config } = loadConfig();
-    const store = new AgentStore(config.agents.dataDir);
+    const { agentsConfig } = loadAgentsConfig();
+    const store = new AgentStore(agentsConfig.dataDir);
     const agents = store.list();
 
     if (args.restart) {
@@ -42,7 +42,7 @@ export default defineCommand({
 
     const results: AgentHealthResult[] = [];
     for (const agent of agents) {
-      results.push(await checkAgentHealth(agent, store, config.agents.dataDir));
+      results.push(await checkAgentHealth(agent, store, agentsConfig.dataDir));
     }
 
     const unhealthy = results.filter((result) => !result.healthy);

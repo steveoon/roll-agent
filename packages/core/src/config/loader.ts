@@ -1,9 +1,14 @@
 import { readFileSync, existsSync } from "node:fs";
 import { resolve } from "node:path";
 import { parse as parseYaml } from "yaml";
-import { rollConfigSchema } from "./schema.ts";
+import { agentsConfigSchema, rollConfigSchema } from "./schema.ts";
 import type { RollConfig } from "./schema.ts";
 import { DEFAULT_CONFIG, CONFIG_FILE_NAMES } from "./defaults.ts";
+import {
+  detectKnownConfigMigrations,
+  formatConfigMigrationError,
+  type ConfigMigrationReport,
+} from "./migration.ts";
 
 interface YamlLinePosition {
   readonly line: number;
@@ -90,16 +95,6 @@ function formatYamlSyntaxError(configPath: string, error: unknown): string {
   return `${baseMessage}\n${error.message}`;
 }
 
-function formatDeprecatedRouterConfigError(configPath: string): string {
-  return [
-    `Config validation failed (${configPath}):`,
-    "  - `router` 配置段已废弃，请改用 `ask`。",
-    "  - 将 `router.llm-model` 迁移为 `ask.llm-model`。",
-    "  - 将 `router.confirm-threshold` 迁移为 `ask.confirm-threshold`。",
-    "  - 删除 `router.mode`；命令本身已决定策略（`run` / `ask` / `chat`）。",
-  ].join("\n");
-}
-
 /** 在指定目录及其父目录中查找配置文件 */
 function findConfigFile(startDir: string): string | undefined {
   let dir = resolve(startDir);
@@ -152,6 +147,57 @@ export interface LoadConfigResult {
   readonly configPath: string | undefined;
 }
 
+export interface LoadAgentsConfigResult {
+  readonly agentsConfig: RollConfig["agents"];
+  /** 实际加载的配置文件路径，undefined 表示使用默认配置 */
+  readonly configPath: string | undefined;
+}
+
+const CONFIG_INSPECTION_STATUSES = {
+  notFound: "not-found",
+  valid: "valid",
+  needsMigration: "needs-migration",
+  invalid: "invalid",
+} as const;
+
+type ConfigInspectionStatus =
+  (typeof CONFIG_INSPECTION_STATUSES)[keyof typeof CONFIG_INSPECTION_STATUSES];
+
+interface ConfigInspectionBase {
+  readonly status: ConfigInspectionStatus;
+}
+
+export interface ConfigInspectionNotFound extends ConfigInspectionBase {
+  readonly status: typeof CONFIG_INSPECTION_STATUSES.notFound;
+  readonly configPath: undefined;
+}
+
+export interface ConfigInspectionValid extends ConfigInspectionBase {
+  readonly status: typeof CONFIG_INSPECTION_STATUSES.valid;
+  readonly configPath: string;
+  readonly config: RollConfig;
+}
+
+export interface ConfigInspectionNeedsMigration extends ConfigInspectionBase {
+  readonly status: typeof CONFIG_INSPECTION_STATUSES.needsMigration;
+  readonly configPath: string;
+  readonly raw: string;
+  readonly report: ConfigMigrationReport;
+}
+
+export interface ConfigInspectionInvalid extends ConfigInspectionBase {
+  readonly status: typeof CONFIG_INSPECTION_STATUSES.invalid;
+  readonly configPath: string;
+  readonly raw: string;
+  readonly error: Error;
+}
+
+export type ConfigInspectionResult =
+  | ConfigInspectionNotFound
+  | ConfigInspectionValid
+  | ConfigInspectionNeedsMigration
+  | ConfigInspectionInvalid;
+
 export function parseConfigDocument(raw: string, configPath: string): Record<string, unknown> {
   let parsed: unknown;
   try {
@@ -178,8 +224,9 @@ export function validateConfigText(raw: string, configPath: string): RollConfig 
     throw new Error(`Invalid config file: ${configPath} (expected YAML object)`);
   }
 
-  if (Object.hasOwn(transformed, "router")) {
-    throw new Error(formatDeprecatedRouterConfigError(configPath));
+  const migrationReport = detectKnownConfigMigrations(parsed);
+  if (migrationReport.needsMigration) {
+    throw new Error(formatConfigMigrationError(configPath, migrationReport));
   }
 
   // Zod 校验（与默认值深度合并）
@@ -196,6 +243,34 @@ export function validateConfigText(raw: string, configPath: string): RollConfig 
   return expandPaths(result.data);
 }
 
+function validateAgentsConfigText(raw: string, configPath: string): RollConfig["agents"] {
+  const parsed = parseConfigDocument(raw, configPath);
+
+  const transformed = resolveEnvVars(kebabToCamelDeep(parsed));
+  if (!isRecord(transformed)) {
+    throw new Error(`Invalid config file: ${configPath} (expected YAML object)`);
+  }
+
+  const agentsSection = isRecord(transformed["agents"]) ? transformed["agents"] : {};
+  const merged = deepMerge(
+    DEFAULT_CONFIG.agents as unknown as Record<string, unknown>,
+    agentsSection,
+  );
+  const result = agentsConfigSchema.safeParse(merged);
+
+  if (!result.success) {
+    const issues = result.error.issues
+      .map((issue) => `  - agents.${issue.path.join(".")}: ${issue.message}`)
+      .join("\n");
+    throw new Error(`Config validation failed (${configPath}):\n${issues}`);
+  }
+
+  return {
+    ...result.data,
+    dataDir: expandTilde(result.data.dataDir),
+  };
+}
+
 /**
  * 加载并校验 Roll 配置。
  *
@@ -207,10 +282,8 @@ export function validateConfigText(raw: string, configPath: string): RollConfig 
  * 6. 路径展开（~/）
  */
 export function loadConfig(options: LoadConfigOptions = {}): LoadConfigResult {
-  const { configPath: explicitPath, cwd = process.cwd() } = options;
-
   // 1. 查找配置文件
-  const configPath = explicitPath ?? findConfigFile(cwd);
+  const configPath = resolveConfigPath(options);
 
   if (!configPath) {
     return { config: expandPaths(DEFAULT_CONFIG), configPath: undefined };
@@ -222,6 +295,91 @@ export function loadConfig(options: LoadConfigOptions = {}): LoadConfigResult {
 
   const raw = readFileSync(configPath, "utf-8");
   return { config: validateConfigText(raw, configPath), configPath };
+}
+
+export function loadAgentsConfig(options: LoadConfigOptions = {}): LoadAgentsConfigResult {
+  const configPath = resolveConfigPath(options);
+
+  if (!configPath) {
+    return {
+      agentsConfig: {
+        ...DEFAULT_CONFIG.agents,
+        dataDir: expandTilde(DEFAULT_CONFIG.agents.dataDir),
+      },
+      configPath: undefined,
+    };
+  }
+
+  if (!existsSync(configPath)) {
+    throw new Error(`Config file not found: ${configPath}`);
+  }
+
+  const raw = readFileSync(configPath, "utf-8");
+  return { agentsConfig: validateAgentsConfigText(raw, configPath), configPath };
+}
+
+export function resolveConfigPath(options: LoadConfigOptions = {}): string | undefined {
+  const { configPath, cwd = process.cwd() } = options;
+  return configPath ?? findConfigFile(cwd);
+}
+
+export function inspectConfigFile(options: LoadConfigOptions = {}): ConfigInspectionResult {
+  const configPath = resolveConfigPath(options);
+
+  if (!configPath) {
+    return {
+      status: CONFIG_INSPECTION_STATUSES.notFound,
+      configPath: undefined,
+    };
+  }
+
+  if (!existsSync(configPath)) {
+    return {
+      status: CONFIG_INSPECTION_STATUSES.invalid,
+      configPath,
+      raw: "",
+      error: new Error(`Config file not found: ${configPath}`),
+    };
+  }
+
+  const raw = readFileSync(configPath, "utf-8");
+
+  let parsed: Record<string, unknown>;
+  try {
+    parsed = parseConfigDocument(raw, configPath);
+  } catch (error) {
+    return {
+      status: CONFIG_INSPECTION_STATUSES.invalid,
+      configPath,
+      raw,
+      error: error instanceof Error ? error : new Error(String(error)),
+    };
+  }
+
+  const migrationReport = detectKnownConfigMigrations(parsed);
+  if (migrationReport.needsMigration) {
+    return {
+      status: CONFIG_INSPECTION_STATUSES.needsMigration,
+      configPath,
+      raw,
+      report: migrationReport,
+    };
+  }
+
+  try {
+    return {
+      status: CONFIG_INSPECTION_STATUSES.valid,
+      configPath,
+      config: validateConfigText(raw, configPath),
+    };
+  } catch (error) {
+    return {
+      status: CONFIG_INSPECTION_STATUSES.invalid,
+      configPath,
+      raw,
+      error: error instanceof Error ? error : new Error(String(error)),
+    };
+  }
 }
 
 /** 简单的深度合并：target 中的值覆盖 defaults */

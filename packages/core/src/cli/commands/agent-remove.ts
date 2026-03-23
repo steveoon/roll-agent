@@ -1,6 +1,6 @@
 import { defineCommand } from "citty";
 import { existsSync, rmSync } from "node:fs";
-import { loadConfig } from "../../config/loader.ts";
+import { loadAgentsConfig } from "../../config/loader.ts";
 import { inferAgentSourceType } from "../../registry/source.ts";
 import { stopAgentGracefully } from "../../registry/process-manager.ts";
 import { AgentStore } from "../../registry/store.ts";
@@ -12,8 +12,8 @@ export default defineCommand({
     name: { type: "positional", description: "Agent 名称", required: true },
   },
   async run({ args }) {
-    const { config } = loadConfig();
-    const store = new AgentStore(config.agents.dataDir);
+    const { agentsConfig } = loadAgentsConfig();
+    const store = new AgentStore(agentsConfig.dataDir);
     const agent = store.findByName(args.name);
 
     if (!agent) {
@@ -24,7 +24,7 @@ export default defineCommand({
 
     if (agent.runtime.ownership === "core-managed") {
       try {
-        await stopAgentGracefully(config.agents.dataDir, agent.skill.name);
+        await stopAgentGracefully(agentsConfig.dataDir, agent.skill.name);
       } catch (err) {
         log.error(`停止 ${args.name} 失败：${err instanceof Error ? err.message : String(err)}`);
         process.exitCode = 1;

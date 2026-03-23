@@ -4,7 +4,7 @@ import { writeFileSync, mkdirSync, rmSync } from "node:fs";
 import { resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { randomUUID } from "node:crypto";
-import { loadConfig, validateConfigText } from "./loader.ts";
+import { inspectConfigFile, loadConfig, validateConfigText } from "./loader.ts";
 import { getAgentEnv } from "./helpers.ts";
 
 /** 创建临时目录用于测试 */
@@ -228,7 +228,33 @@ agents:
         err.message.includes("`router` 配置段已废弃") &&
         err.message.includes("ask.llm-model") &&
         err.message.includes("ask.confirm-threshold") &&
-        err.message.includes("router.mode"),
+        err.message.includes("router.mode") &&
+        err.message.includes("roll config migrate"),
     );
+  });
+
+  it("should inspect deprecated router config as needs-migration", () => {
+    const configPath = resolve(tmpDir, "roll.config.yaml");
+    writeFileSync(
+      configPath,
+      `
+llm:
+  default-provider: anthropic
+  default-model: test
+  providers: {}
+router:
+  llm-model: claude-sonnet-4-6
+agents:
+  data-dir: /tmp/test
+`,
+    );
+
+    const inspection = inspectConfigFile({ cwd: tmpDir });
+    assert.equal(inspection.status, "needs-migration");
+    if (inspection.status !== "needs-migration") {
+      return;
+    }
+    assert.equal(inspection.configPath, configPath);
+    assert.equal(inspection.report.canAutoMigrate, true);
   });
 });

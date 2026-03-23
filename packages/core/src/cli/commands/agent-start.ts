@@ -1,5 +1,5 @@
 import { defineCommand } from "citty";
-import { loadConfig } from "../../config/loader.ts";
+import { loadAgentsConfig } from "../../config/loader.ts";
 import {
   getAgentLogPath,
   getAgentPid,
@@ -17,8 +17,8 @@ export default defineCommand({
     name: { type: "positional", description: "Agent 名称", required: true },
   },
   async run({ args }) {
-    const { config } = loadConfig();
-    const store = new AgentStore(config.agents.dataDir);
+    const { agentsConfig } = loadAgentsConfig();
+    const store = new AgentStore(agentsConfig.dataDir);
     const agent = store.findByName(args.name);
 
     if (!agent) {
@@ -41,7 +41,7 @@ export default defineCommand({
         break;
     }
 
-    const existingPid = getAgentPid(config.agents.dataDir, agent.skill.name);
+    const existingPid = getAgentPid(agentsConfig.dataDir, agent.skill.name);
     if (existingPid !== undefined) {
       try {
         await probeAgentEndpoint(agent, { timeoutMs: 3_000 });
@@ -56,7 +56,7 @@ export default defineCommand({
         log.error(
           `Agent "${args.name}" 进程存在但不可连接：${err instanceof Error ? err.message : String(err)}`,
         );
-        log.info(`日志: ${getAgentLogPath(config.agents.dataDir, agent.skill.name)}`);
+        log.info(`日志: ${getAgentLogPath(agentsConfig.dataDir, agent.skill.name)}`);
         process.exitCode = 1;
         return;
       }
@@ -65,21 +65,21 @@ export default defineCommand({
     store.updateStatus(agent.skill.name, "starting");
     let pid: number | undefined;
     try {
-      pid = startAgent(agent, config.agents.dataDir);
+      pid = startAgent(agent, agentsConfig.dataDir);
       await waitForAgentReady(agent, { startupTimeoutMs: 15_000, probeTimeoutMs: 2_000 });
       store.updateStatus(agent.skill.name, "online");
       log.success(
         `Agent "${args.name}" 已启动 (PID: ${String(pid)})` +
           `\n  端点: ${agent.transport.type === "streamable-http" ? agent.transport.endpoint : "n/a"}` +
-          `\n  日志: ${getAgentLogPath(config.agents.dataDir, agent.skill.name)}`,
+          `\n  日志: ${getAgentLogPath(agentsConfig.dataDir, agent.skill.name)}`,
       );
     } catch (err) {
       if (pid !== undefined) {
-        await stopAgentGracefully(config.agents.dataDir, agent.skill.name).catch(() => {});
+        await stopAgentGracefully(agentsConfig.dataDir, agent.skill.name).catch(() => {});
       }
       store.updateStatus(agent.skill.name, "error");
       log.error(`Agent "${args.name}" 启动失败：${err instanceof Error ? err.message : String(err)}`);
-      log.info(`日志: ${getAgentLogPath(config.agents.dataDir, agent.skill.name)}`);
+      log.info(`日志: ${getAgentLogPath(agentsConfig.dataDir, agent.skill.name)}`);
       process.exitCode = 1;
     }
   },

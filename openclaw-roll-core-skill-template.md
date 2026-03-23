@@ -26,7 +26,7 @@ description: Use roll to invoke registered MCP agents through a stable CLI surfa
 
 ### browser-use-agent (HTTP, persistent)
 
-浏览器操控 Agent。需要预先启动服务进程（`node agents/browser-use/src/index.ts`），session 跨调用持久。
+浏览器操控 Agent。建议先通过 `roll agent install @roll-agent/browser-use-agent` 安装，再用 `roll agent start browser-use-agent` 启动。session 跨调用持久。
 
 **Chat tools:**
 - `zhipin_read_messages(limit?, onlyUnread?, sortBy?)` — 读取消息列表

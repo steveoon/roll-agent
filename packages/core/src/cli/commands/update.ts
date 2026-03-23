@@ -3,7 +3,7 @@ import { resolve } from "node:path";
 import { existsSync, readFileSync } from "node:fs";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { loadConfig } from "../../config/loader.ts";
+import { inspectConfigFile, loadAgentsConfig, type ConfigInspectionResult } from "../../config/loader.ts";
 import {
   getAgentPid,
   startAgent,
@@ -22,6 +22,36 @@ import type { AgentSourceType, RegisteredAgent } from "../../types/agent.ts";
 const execFileAsync = promisify(execFile);
 
 export { inferAgentSourceType as inferSourceType } from "../../registry/source.ts";
+
+function logConfigInspectionNotice(
+  inspection: ConfigInspectionResult,
+  mode: "check" | "pre-update" | "post-update",
+): void {
+  switch (inspection.status) {
+    case "needs-migration": {
+      const title =
+        mode === "post-update" ? "升级后需要迁移本地配置" : "检测到本地配置需要迁移";
+      log.warn(`${title}: ${inspection.configPath}`);
+      for (const issue of inspection.report.issues) {
+        log.warn(`  - ${issue.message}`);
+      }
+      if (inspection.report.canAutoMigrate) {
+        log.info("建议命令: roll config migrate");
+      }
+      break;
+    }
+    case "invalid": {
+      log.warn(`本地配置存在问题: ${inspection.configPath ?? "(unknown path)"}`);
+      log.warn(`  - ${inspection.error.message}`);
+      if (mode === "post-update") {
+        log.info("请修复配置文件后再继续使用相关命令。");
+      }
+      break;
+    }
+    default:
+      break;
+  }
+}
 
 /** 更新 roll-core 自身 */
 async function updateSelf(latest: string, dryRun: boolean): Promise<boolean> {
@@ -157,6 +187,7 @@ export default defineCommand({
   },
   async run({ args }) {
     const isCheckOnly = args.check;
+    const configInspection = inspectConfigFile();
 
     // === 1. 检查 roll-core 自身 ===
     log.info("检查 roll 更新...");
@@ -169,9 +200,17 @@ export default defineCommand({
     }
 
     // === 2. 检查已注册 Agent ===
-    const { config } = loadConfig();
-    const store = new AgentStore(config.agents.dataDir);
-    const agents = store.list();
+    let agentsConfig: ReturnType<typeof loadAgentsConfig>["agentsConfig"] | undefined;
+    let store: AgentStore | undefined;
+    let agents: readonly RegisteredAgent[] = [];
+
+    try {
+      agentsConfig = loadAgentsConfig().agentsConfig;
+      store = new AgentStore(agentsConfig.dataDir);
+      agents = store.list();
+    } catch (err) {
+      log.warn(`无法读取 Agent 配置，跳过已注册 Agent 检查：${err instanceof Error ? err.message : String(err)}`);
+    }
 
     const agentSummary: Array<{
       name: string;
@@ -205,8 +244,13 @@ export default defineCommand({
         const tag = s.sourceType === "local-path" ? "⏭" : "⬆";
         log.info(`  ${tag} ${s.name} [${s.sourceType}] — ${s.action}`);
       }
-    } else {
+    } else if (agentsConfig) {
       log.info("无已注册 Agent");
+    }
+
+    if (configInspection.status === "needs-migration" || configInspection.status === "invalid") {
+      log.info("");
+      logConfigInspectionNotice(configInspection, isCheckOnly ? "check" : "pre-update");
     }
 
     // --check 模式到此结束
@@ -223,18 +267,29 @@ export default defineCommand({
       if (!selfUpdated) selfUpdateFailed = true;
     }
 
+    if (
+      selfUpdated &&
+      (configInspection.status === "needs-migration" || configInspection.status === "invalid")
+    ) {
+      log.info("");
+      logConfigInspectionNotice(configInspection, "post-update");
+    }
+
     // 3b. 更新 Agent
     let updatedCount = 0;
     let failedCount = 0;
 
     for (const agent of agents) {
+      if (!store || !agentsConfig) {
+        break;
+      }
       const sourceType = inferAgentSourceType(agent);
 
       switch (sourceType) {
         case "git": {
           const wasRunning =
             agent.runtime.ownership === "core-managed" &&
-            getAgentPid(config.agents.dataDir, agent.skill.name) !== undefined;
+            getAgentPid(agentsConfig.dataDir, agent.skill.name) !== undefined;
           const ok = await updateGitAgent(agent);
           if (ok) {
             // 重新解析 SKILL.md 并更新 store
@@ -252,7 +307,7 @@ export default defineCommand({
                 log.warn(`${agent.skill.name} 已从注册表中移除，跳过元数据刷新`);
                 failedCount++;
               } else {
-                await maybeRestartManagedAgent(updated, wasRunning, config.agents.dataDir);
+                await maybeRestartManagedAgent(updated, wasRunning, agentsConfig.dataDir);
                 updatedCount++;
               }
             } catch (err) {
@@ -270,7 +325,7 @@ export default defineCommand({
         case "installed-package": {
           const wasRunning =
             agent.runtime.ownership === "core-managed" &&
-            getAgentPid(config.agents.dataDir, agent.skill.name) !== undefined;
+            getAgentPid(agentsConfig.dataDir, agent.skill.name) !== undefined;
           const ok = await updateInstalledAgent(agent);
           if (ok) {
             try {
@@ -304,7 +359,7 @@ export default defineCommand({
                 store.updateStatus(updated.skill.name, "error");
                 failedCount++;
               } else {
-                await maybeRestartManagedAgent(updated, wasRunning, config.agents.dataDir);
+                await maybeRestartManagedAgent(updated, wasRunning, agentsConfig.dataDir);
                 updatedCount++;
               }
             } catch (err) {
@@ -350,9 +405,9 @@ export default defineCommand({
           break;
         }
         case "local-path": {
-          const wasRunning =
-            agent.runtime.ownership === "core-managed" &&
-            getAgentPid(config.agents.dataDir, agent.skill.name) !== undefined;
+            const wasRunning =
+              agent.runtime.ownership === "core-managed" &&
+              getAgentPid(agentsConfig.dataDir, agent.skill.name) !== undefined;
           try {
             const discovered = discoverAgent(agent.installPath);
             const updated: RegisteredAgent = {
@@ -367,7 +422,7 @@ export default defineCommand({
               log.warn(`${agent.skill.name} 已从注册表中移除，跳过元数据刷新`);
               failedCount++;
             } else {
-              await maybeRestartManagedAgent(updated, wasRunning, config.agents.dataDir);
+              await maybeRestartManagedAgent(updated, wasRunning, agentsConfig.dataDir);
               updatedCount++;
             }
           } catch (err) {
