@@ -19,6 +19,9 @@
   "bin": {
     "roll": "./bin/roll.js"
   },
+  "publishConfig": {
+    "access": "public"
+  },
   "files": [
     "dist",
     "bin"
