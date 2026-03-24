@@ -25,6 +25,9 @@ interface RunRollOptions {
   readonly input?: string;
 }
 
+const CURRENT_CORE_VERSION = readCurrentCoreVersion();
+const NEXT_PATCH_CORE_VERSION = bumpPatchVersion(CURRENT_CORE_VERSION);
+
 function runRoll(args: readonly string[], cwd: string, options: RunRollOptions = {}): CliResult {
   const cliEntry = resolve(import.meta.dirname, "index.ts");
   const result = spawnSync(process.execPath, ["--experimental-strip-types", cliEntry, ...args], {
@@ -68,6 +71,31 @@ router:
 agents:
   data-dir: ${dataDir}
 `;
+}
+
+function readCurrentCoreVersion(): string {
+  const packageJsonPath = resolve(import.meta.dirname, "../../package.json");
+  const parsed = JSON.parse(readFileSync(packageJsonPath, "utf-8")) as { version?: unknown };
+  if (typeof parsed.version !== "string" || parsed.version.length === 0) {
+    throw new Error(`Unable to read @roll-agent/core version from ${packageJsonPath}`);
+  }
+  return parsed.version;
+}
+
+function bumpPatchVersion(version: string): string {
+  const parts = version.split(".");
+  if (parts.length !== 3) {
+    throw new Error(`Unsupported semver version: ${version}`);
+  }
+
+  const [majorRaw, minorRaw, patchRaw] = parts;
+  const major = Number.parseInt(majorRaw ?? "", 10);
+  const minor = Number.parseInt(minorRaw ?? "", 10);
+  const patch = Number.parseInt(patchRaw ?? "", 10);
+  if (!Number.isInteger(major) || !Number.isInteger(minor) || !Number.isInteger(patch)) {
+    throw new Error(`Unsupported semver version: ${version}`);
+  }
+  return `${major}.${minor}.${patch + 1}`;
 }
 
 function createFakeNpm(binDir: string, latestVersion: string): void {
@@ -548,7 +576,7 @@ test("e2e smoke: update warns after self-update when config needs migration", ()
 
   try {
     const fakeBinDir = resolve(workspace, "fake-bin");
-    createFakeNpm(fakeBinDir, "0.2.1");
+    createFakeNpm(fakeBinDir, NEXT_PATCH_CORE_VERSION);
     writeFileSync(
       resolve(workspace, "roll.config.yaml"),
       buildDeprecatedConfigYaml(resolve(workspace, "agents-data")),
@@ -562,6 +590,7 @@ test("e2e smoke: update warns after self-update when config needs migration", ()
       },
     });
     assert.equal(result.status, 0, result.stdout);
+    assert.match(result.stderr, new RegExp(`roll 已更新到 v${NEXT_PATCH_CORE_VERSION}`));
     assert.match(result.stderr, /升级后需要迁移本地配置/);
     assert.match(result.stderr, /roll config migrate/);
   } finally {
@@ -574,7 +603,7 @@ test("e2e smoke: update still self-updates when config YAML is invalid", () => {
 
   try {
     const fakeBinDir = resolve(workspace, "fake-bin");
-    createFakeNpm(fakeBinDir, "0.2.1");
+    createFakeNpm(fakeBinDir, NEXT_PATCH_CORE_VERSION);
     writeFileSync(resolve(workspace, "roll.config.yaml"), "llm: [\n", "utf-8");
 
     const result = runRoll(["update"], workspace, {
@@ -585,7 +614,7 @@ test("e2e smoke: update still self-updates when config YAML is invalid", () => {
     });
     assert.equal(result.status, 0, result.stdout);
     assert.match(result.stderr, /本地配置存在问题/);
-    assert.match(result.stderr, /roll 已更新到 v0.2.1/);
+    assert.match(result.stderr, new RegExp(`roll 已更新到 v${NEXT_PATCH_CORE_VERSION}`));
     assert.match(result.stderr, /请修复配置文件后再继续使用相关命令/);
   } finally {
     rmSync(workspace, { recursive: true, force: true });
