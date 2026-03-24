@@ -1,5 +1,11 @@
 # @roll-agent/browser-use-agent
 
+## 0.2.1
+
+### Patch Changes
+
+- [#10](https://github.com/steveoon/roll-agent/pull/10) [`0d86a7c`](https://github.com/steveoon/roll-agent/commit/0d86a7cafc515be6d240377fdf21894ea072c4f3) Thanks [@steveoon](https://github.com/steveoon)! - Make browser-use-agent default to system Chrome without downloading Playwright Chromium during install.
+
 ## 0.2.0
 
 ### Minor Changes
