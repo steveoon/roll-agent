@@ -38,6 +38,7 @@
     "clean": "rm -rf dist"
   },
   "dependencies": {
+    "@ai-sdk/alibaba": "^1.0.13",
     "@ai-sdk/anthropic": "^3.0.58",
     "@ai-sdk/deepseek": "^2.0.24",
     "@ai-sdk/openai": "^3.0.41",
