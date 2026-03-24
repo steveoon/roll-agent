@@ -1,0 +1,4 @@
+interface:
+  display_name: "Roll Core"
+  short_description: "Operate MCP agents through the roll CLI"
+  default_prompt: "Use roll to check agent health, start required services, and call the right agent/tool through `roll run --json` or `roll ask --json`."
