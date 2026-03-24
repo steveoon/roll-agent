@@ -28,6 +28,7 @@
     "node": ">=22.6.0"
   },
   "scripts": {
+    "prepublishOnly": "node ../../scripts/require-pnpm-publish.mjs",
     "build": "rm -rf dist && tsc -p tsconfig.build.json",
     "typecheck": "tsc --noEmit",
     "test": "node --experimental-strip-types --test \"src/**/*.test.ts\"",
