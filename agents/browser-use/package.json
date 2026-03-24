@@ -27,6 +27,7 @@
     "access": "public"
   },
   "scripts": {
+    "prepublishOnly": "node ../../scripts/require-pnpm-publish.mjs",
     "dev": "node --experimental-strip-types src/index.ts",
     "build": "rm -rf dist && tsc -p tsconfig.build.json",
     "typecheck": "tsc --noEmit",
