@@ -1,5 +1,14 @@
 # @roll-agent/browser-use-agent
 
+## 0.2.2
+
+### Patch Changes
+
+- [#13](https://github.com/steveoon/roll-agent/pull/13) [`55e3417`](https://github.com/steveoon/roll-agent/commit/55e34178bcd18063ecc63b5fd7dc456d79e6baed) Thanks [@steveoon](https://github.com/steveoon)! - Fix the published `@roll-agent/browser` npm manifest to export `dist` files instead of `src` files, and republish `@roll-agent/browser-use-agent` against the fixed browser package.
+
+- Updated dependencies [[`55e3417`](https://github.com/steveoon/roll-agent/commit/55e34178bcd18063ecc63b5fd7dc456d79e6baed)]:
+  - @roll-agent/browser@0.1.2
+
 ## 0.2.1
 
 ### Patch Changes
