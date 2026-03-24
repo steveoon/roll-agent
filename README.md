@@ -219,15 +219,31 @@ roll doctor --json              JSON 诊断结果（配置损坏时返回非零�
 说明：`--json` 为子命令级参数（在支持的命令上可用）；全局 `--verbose` / `--config <path>`
 当前为 planned，尚未统一透传到所有子命令。
 
-## OpenClaw 接入
+## Skill Agent 接入
 
-当 `roll-core` 被当作上层编排器的一个 CLI skill 使用时，推荐默认调用顺序为：
+当 `roll-core` 被当作上层编排器或支持 SKILL 的 coding agent 的一个 CLI skill 使用时，推荐默认调用顺序为：
 
 - 已知 `agent + tool` 时优先 `roll run --json`
 - 只知道自然语言意图时使用 `roll ask --json`
 - 不要默认使用 `roll chat`，它当前仍是 experimental
 
-可直接参考模板：[openclaw-roll-core-skill-template.md](./openclaw-roll-core-skill-template.md)。
+可直接参考模板：[openclaw-roll-core-skill-template/SKILL.md](./openclaw-roll-core-skill-template/SKILL.md)。
+
+如果只想单独拉取这个 skill 模板目录，可用 sparse-checkout：
+
+```bash
+git clone --filter=blob:none --no-checkout https://github.com/steveoon/roll-agent.git
+cd roll-agent
+git sparse-checkout init --cone
+git sparse-checkout set openclaw-roll-core-skill-template
+git checkout main
+```
+
+拉取完成后，可直接复制整个目录：
+
+```bash
+cp -R openclaw-roll-core-skill-template /path/to/your/skills/roll-core
+```
 
 ## Agent 更新注意事项
 

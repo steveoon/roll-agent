@@ -1,4 +1,5 @@
 import { createAnthropic } from "@ai-sdk/anthropic";
+import { createAlibaba } from "@ai-sdk/alibaba";
 import { createProviderRegistry } from "ai";
 import type { LanguageModel } from "ai";
 import { createOpenAICompatible } from "@ai-sdk/openai-compatible";
@@ -204,9 +205,8 @@ function createDynamicRegistry(providerConfigs: Record<string, ProviderConfig>) 
         apiKey: process.env.GEMINI_API_KEY || "",
         baseURL: providerConfigs.google?.baseURL || FALLBACK_URLS.google,
       }),
-      qwen: createOpenAICompatible({
-        name: "qwen",
-        apiKey: process.env.DASHSCOPE_API_KEY || "",
+      qwen: createAlibaba({
+        apiKey: process.env.DASHSCOPE_API_KEY || process.env.ALIBABA_API_KEY || "",
         baseURL: providerConfigs.qwen?.baseURL || FALLBACK_URLS.qwen,
       }),
     },

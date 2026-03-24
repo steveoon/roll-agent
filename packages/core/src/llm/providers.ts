@@ -1,4 +1,5 @@
 import type { LanguageModelV3 } from "@ai-sdk/provider";
+import { createAlibaba } from "@ai-sdk/alibaba";
 import { createAnthropic } from "@ai-sdk/anthropic";
 import { createOpenAI } from "@ai-sdk/openai";
 import { createDeepSeek } from "@ai-sdk/deepseek";
@@ -16,7 +17,7 @@ interface ProviderOptions {
  */
 type ProviderFactory = (modelName: string, options: ProviderOptions) => LanguageModelV3;
 
-/** Qwen（通义千问）DashScope OpenAI 兼容 API 地址 */
+/** Qwen（通义千问）DashScope 兼容 API 地址 */
 const QWEN_BASE_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1";
 
 /** 已注册的 Provider 工厂 */
@@ -34,7 +35,7 @@ const PROVIDER_FACTORIES: Record<string, ProviderFactory> = {
     return provider(modelName);
   },
   qwen: (modelName, { apiKey, baseURL }) => {
-    const provider = createOpenAI({ apiKey, baseURL: baseURL ?? QWEN_BASE_URL });
+    const provider = createAlibaba({ apiKey, baseURL: baseURL ?? QWEN_BASE_URL });
     return provider(modelName);
   },
 };
