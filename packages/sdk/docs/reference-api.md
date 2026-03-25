@@ -62,6 +62,20 @@
 
 说明：当前 SDK 只内置 `stdio` 服务端启动能力，未直接提供 `streamable-http` server transport。
 
+## Agent 注册约定
+
+SDK 负责定义和运行 stdio Agent，本身不负责注册到 `roll-core`。要让 `roll` 发现你的 Agent，通常还需要：
+
+- 项目根目录的 `SKILL.md`
+- `SKILL.md metadata` 中的 `roll-transport` / `roll-command`
+- 如果 Agent 需要机器可读的 env 契约，可在 `metadata.roll-env-file` 中指向例如 `references/env.yaml`
+
+说明：
+
+- 本地源码目录 / Git 仓库通常使用 `roll agent add`
+- 已发布的已编译 npm 包或 `.tgz` 安装包通常使用 `roll agent install`
+- 业务 Agent 自己的运行配置应显式放在 `roll.config.yaml` 的 `agents.env.<agent-name>`，而不是依赖 `roll-core` 的全局 `llm.*`
+
 ## `createAgentLogger(agentName, minLevel?)`
 
 创建 Agent 日志器（stderr 输出）。
@@ -92,6 +106,8 @@
 
 - `ctx.logger`：结构化日志（stderr）
 - `ctx.llm.generateText(prompt)`：通过 MCP Sampling 调用指挥官 LLM
+
+注意：这里的 `ctx.llm` 只覆盖“通过 Sampling 借用 roll-core LLM”的场景。如果你的 Agent 自己内嵌了 provider 调用逻辑，那么它的模型、API key、代理地址等配置应由该 Agent 自己显式声明和读取。
 
 ## 版本兼容
 

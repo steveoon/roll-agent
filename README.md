@@ -141,6 +141,8 @@ pnpm dev -- agent add --remote https://example.com/mcp --name remote-agent --des
 
 说明：
 
+- 本地源码目录 / Git 仓库请使用 `roll agent add`
+- `roll agent install` 适用于已编译 npm 包或 `.tgz` 包，不适用于本地源码目录
 - `browser-use-agent` 当前默认使用系统 Chrome，不会在安装时自动下载 Playwright Chromium
 - 如果后续需要显式使用 Playwright 自带 Chromium，再单独补 setup/配置更合理
 
@@ -193,7 +195,7 @@ pnpm dev -- chat "帮我把这批候选人处理掉"
 ```
 roll agent add <path|url>       注册本地目录或 Git Agent（解析 SKILL.md + 安装依赖）
 roll agent add --remote <url>   注册远程 streamable-http Agent（需配合 --name/--description）
-roll agent install <package>    安装并注册已编译 Agent 包
+roll agent install <package>    安装并注册已编译 Agent 包（本地源码目录/Git URL 请改用 add）
 roll agent remove <name>        移除 Agent
 roll agent list                 列出所有已注册 Agent
 roll agent start <name>         启动 Agent（兼容 on-demand / core-managed / external-managed）
