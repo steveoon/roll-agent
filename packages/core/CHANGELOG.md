@@ -1,5 +1,21 @@
 # @roll-agent/core
 
+## 0.3.0
+
+### Minor Changes
+
+- [#17](https://github.com/steveoon/roll-agent/pull/17) [`dd6fee8`](https://github.com/steveoon/roll-agent/commit/dd6fee846ca32421457b5c7c44b8f0370e7a52eb) Thanks [@steveoon](https://github.com/steveoon)! - Agent env declaration system, install safety, and config migration detection
+  - Fix env placeholder detection: `${FOO}` values in agents.env are now
+    correctly reported as "missing" instead of falsely passing checks
+  - Fix tgz/tarball install: resolveInstalledPackageRoot 3-level fallback
+    for non-standard package specs
+  - Fix symlink safety: roll-env-file path check uses realpathSync
+  - Add agent env declaration system: SKILL.md roll-env-file + env.yaml
+    contract, inspectAgentEnvRequirements in doctor/add/install/info
+  - agent-install rejects git URLs and local directories with guidance
+  - doctor reports per-agent env status (ok/warn/fail)
+  - Config migration detection in roll update and roll doctor
+
 ## 0.2.2
 
 ### Patch Changes
