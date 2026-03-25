@@ -177,7 +177,7 @@ optional:
         {
           name: "API_TOKEN",
           purpose: "Access upstream API",
-          example: "${API_TOKEN}",
+          example: "$" + "{API_TOKEN}",
         },
       ],
       optional: [
