@@ -1,5 +1,12 @@
 # @roll-agent/core
 
+## 0.2.2
+
+### Patch Changes
+
+- [#15](https://github.com/steveoon/roll-agent/pull/15) [`04a1f9a`](https://github.com/steveoon/roll-agent/commit/04a1f9a17f18722ec958af89e0085714f10e8097) Thanks [@steveoon](https://github.com/steveoon)! - Switch the qwen provider integration to the official `@ai-sdk/alibaba` provider.
+  This fixes `roll ask` / `roll run` compatibility when using DashScope Qwen models through the core LLM layer.
+
 ## 0.2.1
 
 ### Patch Changes
