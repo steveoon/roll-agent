@@ -1,5 +1,6 @@
 import { defineCommand } from "citty";
 import { loadAgentsConfig } from "../../config/loader.ts";
+import { inspectAgentEnvRequirements } from "../../config/helpers.ts";
 import {
   formatAgentSourceType,
   getAgentLocation,
@@ -40,6 +41,30 @@ export default defineCommand({
       console.log(`元数据:`);
       for (const [key, value] of Object.entries(agent.skill.metadata)) {
         console.log(`  ${key}: ${value}`);
+      }
+    }
+
+    const envReport = inspectAgentEnvRequirements(
+      agent.skill.name,
+      agent.skill.env,
+      agentsConfig.env,
+    );
+    if (envReport) {
+      console.log(`环境变量:`);
+      for (const item of envReport.items) {
+        const status =
+          item.source === "agents.env"
+            ? "已配置于 agents.env"
+            : item.source === "process.env"
+              ? "仅当前 shell 环境"
+              : item.source === "default"
+                ? `默认值 (${item.default})`
+                : "缺失";
+        const level = item.required ? "必填" : "可选";
+        console.log(`  ${item.name}: [${level}] ${status}`);
+        if (item.purpose) {
+          console.log(`    用途: ${item.purpose}`);
+        }
       }
     }
   },

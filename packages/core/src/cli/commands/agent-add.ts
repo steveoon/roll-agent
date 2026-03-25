@@ -3,6 +3,7 @@ import { resolve } from "node:path";
 import { existsSync, mkdirSync } from "node:fs";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
+import { inspectAgentEnvRequirements } from "../../config/helpers.ts";
 import { loadAgentsConfig } from "../../config/loader.ts";
 import { discoverAgent } from "../../registry/discovery.ts";
 import { writeRemoteSkillManifest } from "../../registry/manifest.ts";
@@ -146,9 +147,36 @@ export default defineCommand({
     try {
       store.add(agent);
       log.success(`Agent "${discovered.skill.name}" 注册成功`);
+      reportAgentEnvGuidance(discovered.skill.name, discovered.skill.env, agentsConfig.env);
     } catch (err) {
       log.error(err instanceof Error ? err.message : String(err));
       process.exitCode = 1;
     }
   },
 });
+
+function reportAgentEnvGuidance(
+  agentName: string,
+  envDeclarations: RegisteredAgent["skill"]["env"],
+  envMap: ReturnType<typeof loadAgentsConfig>["agentsConfig"]["env"],
+): void {
+  const envReport = inspectAgentEnvRequirements(agentName, envDeclarations, envMap);
+  if (!envReport) {
+    return;
+  }
+
+  if (envReport.missingRequired.length > 0) {
+    log.warn(
+      `Agent "${agentName}" 仍缺少必填环境变量: ${envReport.missingRequired.map((item) => item.name).join(", ")}`,
+    );
+    log.info(`请在 roll.config.yaml 的 agents.env.${agentName} 中显式配置这些项。`);
+    return;
+  }
+
+  if (envReport.processEnvOnlyRequired.length > 0) {
+    log.warn(
+      `Agent "${agentName}" 当前依赖 shell 环境变量: ${envReport.processEnvOnlyRequired.map((item) => item.name).join(", ")}`,
+    );
+    log.info(`建议将这些项写入 roll.config.yaml 的 agents.env.${agentName}。`);
+  }
+}

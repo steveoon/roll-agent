@@ -1,8 +1,9 @@
 import { defineCommand } from "citty";
-import { existsSync, mkdirSync } from "node:fs";
+import { existsSync, mkdirSync, statSync } from "node:fs";
 import { resolve } from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
+import { inspectAgentEnvRequirements } from "../../config/helpers.ts";
 import { loadAgentsConfig } from "../../config/loader.ts";
 import { discoverAgent } from "../../registry/discovery.ts";
 import {
@@ -22,6 +23,17 @@ import type { RegisteredAgent } from "../../types/agent.ts";
 
 const execFileAsync = promisify(execFile);
 
+function isGitUrl(input: string): boolean {
+  return (
+    input.startsWith("git@") ||
+    input.startsWith("git+") ||
+    input.startsWith("github:") ||
+    input.startsWith("gitlab:") ||
+    input.startsWith("bitbucket:") ||
+    input.endsWith(".git")
+  );
+}
+
 export default defineCommand({
   meta: { description: "安装已编译的 Agent 包并注册到本地" },
   args: {
@@ -40,6 +52,22 @@ export default defineCommand({
   async run({ args }) {
     const { agentsConfig } = loadAgentsConfig();
     const packageSpec = args.package;
+
+    if (isGitUrl(packageSpec)) {
+      log.error(`Git URL 请使用 \`roll agent add ${packageSpec}\` 注册，不要使用 \`roll agent install\``);
+      process.exitCode = 1;
+      return;
+    }
+
+    const resolvedInputPath = resolve(packageSpec);
+    if (existsSync(resolvedInputPath) && statSync(resolvedInputPath).isDirectory()) {
+      log.error(
+        `本地源码目录请使用 \`roll agent add ${packageSpec}\` 注册，不要使用 \`roll agent install\``,
+      );
+      process.exitCode = 1;
+      return;
+    }
+
     const packageName = parsePackageName(packageSpec);
     const installDir = resolve(agentsConfig.dataDir, "installed", sanitizeInstallId(packageName));
 
@@ -152,9 +180,36 @@ export default defineCommand({
       }
 
       log.success(`Agent "${discovered.skill.name}" 安装并注册成功`);
+      reportAgentEnvGuidance(discovered.skill.name, discovered.skill.env, agentsConfig.env);
     } catch (err) {
       log.error(err instanceof Error ? err.message : String(err));
       process.exitCode = 1;
     }
   },
 });
+
+function reportAgentEnvGuidance(
+  agentName: string,
+  envDeclarations: RegisteredAgent["skill"]["env"],
+  envMap: ReturnType<typeof loadAgentsConfig>["agentsConfig"]["env"],
+): void {
+  const envReport = inspectAgentEnvRequirements(agentName, envDeclarations, envMap);
+  if (!envReport) {
+    return;
+  }
+
+  if (envReport.missingRequired.length > 0) {
+    log.warn(
+      `Agent "${agentName}" 仍缺少必填环境变量: ${envReport.missingRequired.map((item) => item.name).join(", ")}`,
+    );
+    log.info(`请在 roll.config.yaml 的 agents.env.${agentName} 中显式配置这些项。`);
+    return;
+  }
+
+  if (envReport.processEnvOnlyRequired.length > 0) {
+    log.warn(
+      `Agent "${agentName}" 当前依赖 shell 环境变量: ${envReport.processEnvOnlyRequired.map((item) => item.name).join(", ")}`,
+    );
+    log.info(`建议将这些项写入 roll.config.yaml 的 agents.env.${agentName}。`);
+  }
+}
