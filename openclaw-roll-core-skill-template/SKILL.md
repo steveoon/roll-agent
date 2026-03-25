@@ -29,7 +29,7 @@ Run `roll agent health --json` before any `browser-use-agent` tool call.
 
 ## References
 
-- For first-time machine setup, config migration, and login gates, read [references/setup.md](./references/setup.md).
+- For first-time machine setup, config migration, login gates, and **the difference between `roll agent add` (local source) vs `roll agent install` (published package)**, read [references/setup.md](./references/setup.md).
 - For `browser-use-agent` tool catalog, page context rules, and navigation behavior, read [references/browser-use-agent.md](./references/browser-use-agent.md).
 - For `smart-reply-agent` capability boundaries and input expectations, read [references/smart-reply-agent.md](./references/smart-reply-agent.md).
 - For multi-step command recipes, read [references/workflows.md](./references/workflows.md).
