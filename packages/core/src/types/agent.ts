@@ -4,12 +4,25 @@ export type AgentTransport =
   | { readonly type: "streamable-http"; readonly endpoint: string };
 
 /** SKILL.md frontmatter 解析结果 */
+export interface AgentEnvDeclaration {
+  readonly name: string;
+  readonly purpose?: string;
+  readonly example?: string;
+  readonly default?: string;
+}
+
+export interface AgentSkillEnvDeclarations {
+  readonly required?: readonly AgentEnvDeclaration[];
+  readonly optional?: readonly AgentEnvDeclaration[];
+}
+
 export interface AgentSkill {
   readonly name: string;
   readonly description: string;
   readonly license?: string;
   readonly compatibility?: string;
   readonly metadata: Readonly<Record<string, string>>;
+  readonly env?: AgentSkillEnvDeclarations;
 }
 
 /** Agent 运行状态 */

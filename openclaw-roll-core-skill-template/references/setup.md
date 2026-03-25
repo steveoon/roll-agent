@@ -32,6 +32,9 @@ roll run browser-use-agent open_platform --input-json '{"platform":"zhipin"}' --
 
 ## Important Notes
 
+- Use `roll agent add <path-or-git-url>` for local source directories or Git repositories.
+- Use `roll agent install <package-or-tgz>` only for compiled npm packages or tarballs.
+- If `roll agent install` receives a local source directory or Git URL, switch to `roll agent add` instead of retrying the same command.
 - `browser-use-agent` now defaults to system Chrome. Installation does not default to Playwright Chromium download.
 - Login is still a manual step. Wait for the user to finish QR-code scan or credential entry before proceeding.
 - Verify login with:

@@ -7,6 +7,7 @@ import {
   createDefaultRuntimeForTransport,
 } from "../types/agent.ts";
 import type {
+  AgentEnvDeclaration,
   AgentStartCommand,
   AgentRuntime,
   AgentSkill,
@@ -201,6 +202,7 @@ function normalizeSkill(value: unknown): AgentSkill | undefined {
 
   const license = readString(value["license"]);
   const compatibility = readString(value["compatibility"]);
+  const env = normalizeSkillEnv(value["env"]);
 
   return {
     name,
@@ -208,6 +210,7 @@ function normalizeSkill(value: unknown): AgentSkill | undefined {
     ...(license ? { license } : {}),
     ...(compatibility ? { compatibility } : {}),
     metadata: normalizeMetadata(value["metadata"]),
+    ...(env ? { env } : {}),
   };
 }
 
@@ -221,6 +224,55 @@ function normalizeMetadata(value: unknown): Readonly<Record<string, string>> {
     metadata[key] = String(entry);
   }
   return metadata;
+}
+
+function normalizeSkillEnv(value: unknown): AgentSkill["env"] | undefined {
+  if (!isJsonRecord(value)) {
+    return undefined;
+  }
+
+  const required = normalizeEnvDeclarations(value["required"]);
+  const optional = normalizeEnvDeclarations(value["optional"]);
+  if (!required && !optional) {
+    return undefined;
+  }
+
+  return {
+    ...(required ? { required } : {}),
+    ...(optional ? { optional } : {}),
+  };
+}
+
+function normalizeEnvDeclarations(value: unknown): readonly AgentEnvDeclaration[] | undefined {
+  if (!Array.isArray(value)) {
+    return undefined;
+  }
+
+  const declarations = value.flatMap((entry) => {
+    if (!isJsonRecord(entry)) {
+      return [];
+    }
+
+    const name = readString(entry["name"]);
+    if (!name) {
+      return [];
+    }
+
+    const purpose = readString(entry["purpose"]);
+    const example = readString(entry["example"]);
+    const defaultValue = readString(entry["default"]);
+
+    return [
+      {
+        name,
+        ...(purpose ? { purpose } : {}),
+        ...(example ? { example } : {}),
+        ...(defaultValue ? { default: defaultValue } : {}),
+      },
+    ];
+  });
+
+  return declarations.length > 0 ? declarations : undefined;
 }
 
 function normalizeTransport(value: unknown): AgentTransport | undefined {

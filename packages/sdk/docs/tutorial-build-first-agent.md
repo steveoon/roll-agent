@@ -9,6 +9,7 @@
 - 一个可调用的 `echo` tool
 - 可通过 `roll run` 成功执行
 - 并理解什么时候该用 `roll ask`，什么时候该改用 `roll run --input-json`
+- 并理解本地源码目录为什么应使用 `roll agent add`
 
 ## 前置条件
 
@@ -93,6 +94,12 @@ metadata:
 
 预期结果：`SKILL.md` 与 `src/index.ts` 同级。
 
+说明：
+
+- 本地源码目录通过 `roll agent add` 注册时，`roll-core` 会读取 `SKILL.md`
+- 如果你的 Agent 需要业务侧环境变量或私有 LLM 配置，建议在 `SKILL.md` 的 `metadata` 中增加 `roll-env-file`，并在 `references/env.yaml` 里声明机器可读的 env 契约
+- 这类 Agent 配置应显式写入 `roll.config.yaml` 的 `agents.env.<agent-name>`，不要依赖 `roll-core` 的全局 `llm.*` 自动继承
+
 ## 步骤 5：注册并调用
 
 ```bash
@@ -105,6 +112,11 @@ roll run echo-agent echo --text "hello"
 
 - `roll agent list` 中能看到 `echo-agent`
 - `roll run` 返回 JSON 文本，包含 `echo: hello`
+
+注意：
+
+- 本地源码目录请使用 `roll agent add`
+- `roll agent install` 适用于已编译、可分发的 npm 包或 `.tgz` 安装包，不适合直接对源码目录使用
 
 如果后续你的 tool 需要开放对象或复杂 JSON 输入，也可以这样调用：
 

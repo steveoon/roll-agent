@@ -69,6 +69,22 @@ MCP stdio 场景中 stdout 用于协议数据传输。
 
 代价是：调用方（roll-core）必须在连接时声明 sampling capability。
 
+## 为什么业务 Agent 的 env 配置要保持显式
+
+并不是所有 Agent 都只通过 `ctx.llm.generateText()` 借用指挥官的 LLM。有些业务 Agent 会在内部直接访问自己的 provider、模型或后端 API。
+
+这类配置不应自动继承 `roll-core` 的全局 `llm.*`，原因有三点：
+
+- 职责边界更清晰：`roll-core` 的 `llm.*` 只描述 commander 自己的路由与 Sampling 行为
+- 业务 Agent 更可移植：它需要什么 env，应由自己的 skill 契约显式声明
+- 诊断更可解释：上层编排器和用户可以直接在 `agents.env.<agent-name>` 中看到业务 Agent 的真实依赖
+
+因此推荐的模式是：
+
+- 在 `SKILL.md` 中保留人类可读的配置说明
+- 用 `metadata.roll-env-file` 指向 `references/env.yaml` 之类的 sidecar 文件，声明机器可读的 env 契约
+- 让 `roll-core` 负责检查和提示这些 env 是否缺失，而不是替业务 Agent 自动猜测或注入配置
+
 ## 类型设计取舍
 
 - `ToolDefinition<TInput, TOutput>` 提供强类型开发体验

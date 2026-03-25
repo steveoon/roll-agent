@@ -1,5 +1,6 @@
 import { defineCommand } from "citty";
 import { existsSync } from "node:fs";
+import { inspectAgentEnvRequirements } from "../../config/helpers.ts";
 import { inspectConfigFile, loadAgentsConfig, loadConfig } from "../../config/loader.ts";
 import { AgentStore } from "../../registry/store.ts";
 
@@ -153,6 +154,41 @@ export default defineCommand({
             ? `${String(agents.length)} 个 (${agents.map((a) => a.skill.name).join(", ")})`
             : "无",
       });
+
+      for (const agent of agents) {
+        const envReport = inspectAgentEnvRequirements(
+          agent.skill.name,
+          agent.skill.env,
+          fullConfig.env,
+        );
+        if (!envReport) {
+          continue;
+        }
+
+        if (envReport.missingRequired.length > 0) {
+          checks.push({
+            name: `Agent 环境变量 (${agent.skill.name})`,
+            status: "fail",
+            message: `缺少必填项: ${envReport.missingRequired.map((item) => item.name).join(", ")}`,
+          });
+          continue;
+        }
+
+        if (envReport.processEnvOnlyRequired.length > 0) {
+          checks.push({
+            name: `Agent 环境变量 (${agent.skill.name})`,
+            status: "warn",
+            message: `依赖当前 shell 环境: ${envReport.processEnvOnlyRequired.map((item) => item.name).join(", ")}；建议写入 agents.env`,
+          });
+          continue;
+        }
+
+        checks.push({
+          name: `Agent 环境变量 (${agent.skill.name})`,
+          status: "ok",
+          message: "声明的必填项已满足",
+        });
+      }
     }
 
     const hasFailure = checks.some((c) => c.status === "fail");

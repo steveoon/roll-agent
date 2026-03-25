@@ -4,6 +4,7 @@ description: 招聘智能回复 Agent。根据候选人消息、品牌数据和�
 metadata:
   roll-transport: stdio
   roll-command: node --experimental-strip-types src/index.ts
+  roll-env-file: references/env.yaml
 ---
 
 # Smart Reply Agent
@@ -17,8 +18,11 @@ metadata:
 
 ## Environment Variables
 
+机器可读的 env 契约见 `references/env.yaml`。如果你是上层编排 Agent，请优先读取它来生成/校验 `agents.env.smart-reply-agent` 配置。
+
 - `ANTHROPIC_API_KEY` — Anthropic/OpenAI/OhMyGPT 统一鉴权 key（回退读取 `OPENAI_API_KEY`）
 - `SMART_REPLY_PROXY_BASE_URL` — 可选，统一代理地址（同时覆盖 anthropic/openai/ohmygpt 端点）
+- `SMART_REPLY_CLASSIFY_MODEL` / `SMART_REPLY_REPLY_MODEL` — 可选，覆盖默认分类/回复模型；未设置时分别回退到 `openai/gpt-5-mini` / `openai/gpt-5.4`
 - `DULIDAY_TOKEN` — Duliday 品牌别名 & 岗位 API 鉴权 token
 - `DULIDAY_BRAND_LIST_URL` / `DULIDAY_JOB_LIST_URL` — 必填，Duliday 品牌/岗位 API 端点；public 仓库中不内置默认地址
 
@@ -32,6 +36,8 @@ agents:
     smart-reply-agent:
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
       SMART_REPLY_PROXY_BASE_URL: ${SMART_REPLY_PROXY_BASE_URL}
+      SMART_REPLY_CLASSIFY_MODEL: qwen/qwen-plus-latest
+      SMART_REPLY_REPLY_MODEL: qwen/qwen-plus-latest
       DULIDAY_TOKEN: ${DULIDAY_TOKEN}
       DULIDAY_BRAND_LIST_URL: ${DULIDAY_BRAND_LIST_URL}
       DULIDAY_JOB_LIST_URL: ${DULIDAY_JOB_LIST_URL}
