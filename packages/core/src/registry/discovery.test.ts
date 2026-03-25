@@ -1,6 +1,6 @@
 import { describe, it, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
-import { writeFileSync, mkdirSync, rmSync } from "node:fs";
+import { writeFileSync, mkdirSync, rmSync, symlinkSync } from "node:fs";
 import { resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { randomUUID } from "node:crypto";
@@ -148,6 +148,102 @@ metadata: {}
     assert.equal(result.skill.compatibility, ">=22.6.0");
   });
 
+  it("should parse structured env declarations from roll-env-file", () => {
+    const skillMd = `---
+name: env-agent
+description: Agent with env requirements
+metadata:
+  roll-env-file: references/env.yaml
+---
+`;
+    writeFileSync(resolve(tmpDir, "SKILL.md"), skillMd);
+    mkdirSync(resolve(tmpDir, "references"), { recursive: true });
+    writeFileSync(
+      resolve(tmpDir, "references/env.yaml"),
+      `required:
+  - name: API_TOKEN
+    purpose: Access upstream API
+    example: \${API_TOKEN}
+optional:
+  - name: MODEL_ID
+    purpose: Override model selection
+    default: provider/default-model
+`,
+    );
+
+    const result = discoverAgent(tmpDir);
+    assert.deepEqual(result.skill.env, {
+      required: [
+        {
+          name: "API_TOKEN",
+          purpose: "Access upstream API",
+          example: "${API_TOKEN}",
+        },
+      ],
+      optional: [
+        {
+          name: "MODEL_ID",
+          purpose: "Override model selection",
+          default: "provider/default-model",
+        },
+      ],
+    });
+  });
+
+  it("should throw when roll-env-file is missing", () => {
+    const skillMd = `---
+name: missing-env-agent
+description: Missing env file
+metadata:
+  roll-env-file: references/env.yaml
+---
+`;
+    writeFileSync(resolve(tmpDir, "SKILL.md"), skillMd);
+
+    assert.throws(
+      () => discoverAgent(tmpDir),
+      (err: Error) => err.message.includes("roll-env-file not found"),
+    );
+  });
+
+  it("should reject roll-env-file that escapes agent directory", () => {
+    const skillMd = `---
+name: escaped-env-agent
+description: Escaped env file
+metadata:
+  roll-env-file: ../env.yaml
+---
+`;
+    writeFileSync(resolve(tmpDir, "SKILL.md"), skillMd);
+    writeFileSync(resolve(tmpDir, "..", "env.yaml"), "required: []\n", "utf-8");
+
+    assert.throws(
+      () => discoverAgent(tmpDir),
+      (err: Error) => err.message.includes("must stay within agent directory"),
+    );
+  });
+
+  it("should reject roll-env-file symlinks that escape agent directory", () => {
+    const externalEnvPath = resolve(tmpDir, "..", `external-env-${randomUUID()}.yaml`);
+    const skillMd = `---
+name: escaped-env-agent
+description: Escaped env file
+metadata:
+  roll-env-file: references/env.yaml
+---
+`;
+
+    writeFileSync(resolve(tmpDir, "SKILL.md"), skillMd);
+    mkdirSync(resolve(tmpDir, "references"), { recursive: true });
+    writeFileSync(externalEnvPath, "required:\n  - name: API_TOKEN\n", "utf-8");
+    symlinkSync(externalEnvPath, resolve(tmpDir, "references", "env.yaml"));
+
+    assert.throws(
+      () => discoverAgent(tmpDir),
+      (err: Error) => err.message.includes("must stay within agent directory"),
+    );
+  });
+
   it("should prefer package.json#rollAgent for core-managed http agents", () => {
     const skillMd = `---
 name: browser-use-agent
@@ -203,6 +299,27 @@ Tools list
     if (result.runtime.ownership === "core-managed") {
       assert.equal(result.runtime.setup, undefined);
     }
+  });
+
+  it("smart-reply-agent should expose env declarations", () => {
+    const result = discoverAgent(resolve(import.meta.dirname, "../../../../agents/smart-reply"));
+
+    assert.equal(result.skill.name, "smart-reply-agent");
+    assert.ok(result.skill.env);
+    assert.deepEqual(
+      result.skill.env?.required?.map((item) => item.name),
+      ["DULIDAY_TOKEN", "DULIDAY_BRAND_LIST_URL", "DULIDAY_JOB_LIST_URL"],
+    );
+    assert.deepEqual(
+      result.skill.env?.optional?.map((item) => item.name),
+      [
+        "ANTHROPIC_API_KEY",
+        "OPENAI_API_KEY",
+        "SMART_REPLY_PROXY_BASE_URL",
+        "SMART_REPLY_CLASSIFY_MODEL",
+        "SMART_REPLY_REPLY_MODEL",
+      ],
+    );
   });
 
   it("should prefer package.json#rollAgent for stdio on-demand agents", () => {

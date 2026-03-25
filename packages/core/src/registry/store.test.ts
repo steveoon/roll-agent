@@ -139,6 +139,26 @@ describe("AgentStore", () => {
     assert.equal(store2.findByName("persistent")?.skill.name, "persistent");
   });
 
+  it("should persist structured env declarations", () => {
+    const agent = makeAgent("env-agent");
+    store.add({
+      ...agent,
+      skill: {
+        ...agent.skill,
+        env: {
+          required: [{ name: "API_TOKEN", purpose: "Access upstream API" }],
+          optional: [{ name: "MODEL_ID", default: "provider/default-model" }],
+        },
+      },
+    });
+
+    const reloaded = new AgentStore(tmpDir).findByName("env-agent");
+    assert.deepEqual(reloaded?.skill.env, {
+      required: [{ name: "API_TOKEN", purpose: "Access upstream API" }],
+      optional: [{ name: "MODEL_ID", default: "provider/default-model" }],
+    });
+  });
+
   it("should create data directory if it does not exist", () => {
     const deepDir = resolve(tmpDir, "deep", "nested", "dir");
     const deepStore = new AgentStore(deepDir);

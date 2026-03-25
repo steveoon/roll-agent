@@ -1,4 +1,4 @@
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { resolve } from "node:path";
 import type { AgentSource, AgentSourceType, RegisteredAgent } from "../types/agent.ts";
 
@@ -99,5 +99,79 @@ export function parsePackageName(packageSpec: string): string {
 
 /** 计算 `npm install --prefix` 后包在 node_modules 中的根目录。 */
 export function resolveInstalledPackageRoot(installDir: string, packageName: string): string {
-  return resolve(installDir, "node_modules", ...packageName.split("/"));
+  const expectedRoot = resolve(installDir, "node_modules", ...packageName.split("/"));
+  if (existsSync(expectedRoot)) {
+    return expectedRoot;
+  }
+
+  const manifestPackageName = readInstalledDependencyName(installDir);
+  if (manifestPackageName) {
+    const manifestResolvedRoot = resolve(
+      installDir,
+      "node_modules",
+      ...manifestPackageName.split("/"),
+    );
+    if (existsSync(manifestResolvedRoot)) {
+      return manifestResolvedRoot;
+    }
+  }
+
+  return findInstalledAgentRoot(installDir) ?? expectedRoot;
+}
+
+function readInstalledDependencyName(installDir: string): string | undefined {
+  const packageJsonPath = resolve(installDir, "package.json");
+  if (!existsSync(packageJsonPath)) {
+    return undefined;
+  }
+
+  try {
+    const parsed = JSON.parse(readFileSync(packageJsonPath, "utf-8")) as {
+      dependencies?: Record<string, unknown>;
+    };
+    const dependencyNames = Object.keys(parsed.dependencies ?? {});
+    return dependencyNames.length === 1 ? dependencyNames[0] : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function findInstalledAgentRoot(installDir: string): string | undefined {
+  const nodeModulesDir = resolve(installDir, "node_modules");
+  if (!existsSync(nodeModulesDir)) {
+    return undefined;
+  }
+
+  const candidates = listInstalledPackageDirs(nodeModulesDir).filter((packageDir) => {
+    return (
+      existsSync(resolve(packageDir, "package.json")) &&
+      existsSync(resolve(packageDir, SKILL_FILE_NAME))
+    );
+  });
+
+  return candidates.length === 1 ? candidates[0] : undefined;
+}
+
+function listInstalledPackageDirs(nodeModulesDir: string): string[] {
+  const packageDirs: string[] = [];
+
+  for (const entry of readdirSync(nodeModulesDir, { withFileTypes: true })) {
+    if (!entry.isDirectory() || entry.name === ".bin") {
+      continue;
+    }
+
+    const entryPath = resolve(nodeModulesDir, entry.name);
+    if (entry.name.startsWith("@")) {
+      for (const scopedEntry of readdirSync(entryPath, { withFileTypes: true })) {
+        if (scopedEntry.isDirectory()) {
+          packageDirs.push(resolve(entryPath, scopedEntry.name));
+        }
+      }
+      continue;
+    }
+
+    packageDirs.push(entryPath);
+  }
+
+  return packageDirs;
 }

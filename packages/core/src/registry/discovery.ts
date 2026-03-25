@@ -1,8 +1,15 @@
-import { readFileSync, existsSync } from "node:fs";
-import { resolve } from "node:path";
+import { readFileSync, existsSync, realpathSync } from "node:fs";
+import { resolve, sep } from "node:path";
 import matter from "gray-matter";
+import { z } from "zod";
+import { parse as parseYaml } from "yaml";
 import { createDefaultRuntimeForTransport } from "../types/agent.ts";
-import type { AgentRuntime, AgentSkill, AgentTransport } from "../types/agent.ts";
+import type {
+  AgentEnvDeclaration,
+  AgentRuntime,
+  AgentSkill,
+  AgentTransport,
+} from "../types/agent.ts";
 
 /** SKILL.md 解析结果 */
 export interface DiscoveredAgent {
@@ -19,6 +26,18 @@ const SKILL_FILE_NAME = "SKILL.md";
 const PACKAGE_JSON_FILE_NAME = "package.json";
 
 type JsonRecord = Record<string, unknown>;
+
+const skillEnvDeclarationSchema = z.object({
+  name: z.string().min(1),
+  purpose: z.string().optional(),
+  example: z.string().optional(),
+  default: z.string().optional(),
+});
+
+const skillEnvDeclarationsSchema = z.object({
+  required: z.array(skillEnvDeclarationSchema).optional(),
+  optional: z.array(skillEnvDeclarationSchema).optional(),
+});
 
 interface RollAgentManifest {
   runtime: {
@@ -81,6 +100,7 @@ export function discoverAgent(agentDir: string): DiscoveredAgent {
   const license = typeof frontmatter["license"] === "string" ? frontmatter["license"] : undefined;
   const compatibility =
     typeof frontmatter["compatibility"] === "string" ? frontmatter["compatibility"] : undefined;
+  const env = loadSkillEnv(absDir, metadata, skillPath);
 
   const skill: AgentSkill = {
     name,
@@ -88,6 +108,7 @@ export function discoverAgent(agentDir: string): DiscoveredAgent {
     ...(license ? { license } : {}),
     ...(compatibility ? { compatibility } : {}),
     metadata,
+    ...(env ? { env } : {}),
   };
 
   const manifestResolution = manifest ? resolveRuntimeFromManifest(manifest) : undefined;
@@ -104,6 +125,84 @@ export function discoverAgent(agentDir: string): DiscoveredAgent {
   const runtime = manifestResolution?.runtime ?? createDefaultRuntimeForTransport(transport);
 
   return { skill, transport, runtime, skillPath, skillBody: skillBody.trim() };
+}
+
+function normalizeSkillEnv(value: unknown, skillPath: string): AgentSkill["env"] | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+
+  const parsed = skillEnvDeclarationsSchema.safeParse(value);
+  if (!parsed.success) {
+    const issues = parsed.error.issues
+      .map((issue) => {
+        const path = issue.path.length > 0 ? `env.${issue.path.join(".")}` : "env";
+        return `${path}: ${issue.message}`;
+      })
+      .join("; ");
+    throw new Error(`SKILL.md has invalid "env" declaration in ${skillPath}: ${issues}`);
+  }
+
+  const env = parsed.data;
+  if (!env.required && !env.optional) {
+    return undefined;
+  }
+
+  return {
+    ...(env.required ? { required: env.required.map(normalizeParsedSkillEnvDeclaration) } : {}),
+    ...(env.optional ? { optional: env.optional.map(normalizeParsedSkillEnvDeclaration) } : {}),
+  };
+}
+
+function loadSkillEnv(
+  agentDir: string,
+  metadata: Readonly<Record<string, string>>,
+  skillPath: string,
+): AgentSkill["env"] | undefined {
+  const envFile = metadata["roll-env-file"];
+  if (!envFile) {
+    return undefined;
+  }
+
+  const envPath = resolve(agentDir, envFile);
+  if (!isPathInside(agentDir, envPath)) {
+    throw new Error(`SKILL.md roll-env-file must stay within agent directory: ${skillPath}`);
+  }
+  if (!existsSync(envPath)) {
+    throw new Error(`SKILL.md roll-env-file not found: ${envPath}`);
+  }
+
+  const realAgentDir = realpathSync(agentDir);
+  const realEnvPath = realpathSync(envPath);
+  if (!isPathInside(realAgentDir, realEnvPath)) {
+    throw new Error(`SKILL.md roll-env-file must stay within agent directory: ${skillPath}`);
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = parseYaml(readFileSync(realEnvPath, "utf-8"));
+  } catch (error) {
+    throw new Error(
+      `Failed to parse roll-env-file for ${skillPath}: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+
+  return normalizeSkillEnv(parsed, realEnvPath);
+}
+
+function isPathInside(rootDir: string, targetPath: string): boolean {
+  return targetPath === rootDir || targetPath.startsWith(`${rootDir}${sep}`);
+}
+
+function normalizeParsedSkillEnvDeclaration(
+  value: z.infer<typeof skillEnvDeclarationSchema>,
+): AgentEnvDeclaration {
+  return {
+    name: value.name,
+    ...(value.purpose ? { purpose: value.purpose } : {}),
+    ...(value.example ? { example: value.example } : {}),
+    ...(value.default ? { default: value.default } : {}),
+  };
 }
 
 /** 根据 SKILL.md metadata 确定传输模式 */
