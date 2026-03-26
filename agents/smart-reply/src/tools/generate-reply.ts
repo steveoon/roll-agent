@@ -3,13 +3,24 @@ import { z } from "zod";
 import { CandidateInfoSchema } from "../types/zhipin.ts";
 import { loadBrandConfig, loadReplyPolicy } from "../services/config-loader.ts";
 import { generateSmartReply } from "../pipeline/smart-reply.ts";
-import { ChannelTypeSchema } from "../types/reply-policy.ts";
+import { AGE_ELIGIBILITY_STATUSES } from "../pipeline/age-eligibility.ts";
+import {
+  ChannelTypeSchema,
+  EffectiveDisclosureModeSchema,
+  FunnelStageSchema,
+  ReplyNeedSchema,
+  RiskFlagSchema,
+} from "../types/reply-policy.ts";
+import { REPLY_GATE_VIOLATION_CODES } from "../pipeline/reply-gate.ts";
 import { ModelConfigSchema } from "../types/classification.ts";
+
+const ReplyGateViolationCodeSchema = z.enum(REPLY_GATE_VIOLATION_CODES);
+const AgeEligibilityStatusSchema = z.enum(AGE_ELIGIBILITY_STATUSES);
 
 export const generateReply = defineTool({
   name: "generate_reply",
   description:
-    "根据候选人消息、对话历史和品牌数据生成智能招聘回复。内部流程：回合规划 → needs 驱动上下文构建 → 年龄资格校验 → 策略化回复生成 → FactGate 校验。",
+    "根据候选人消息、对话历史和品牌数据生成智能招聘回复。内部流程：回合规划 → primaryNeed 驱动上下文构建 → 年龄资格校验 → 策略化回复生成 → FactGate/ReplyGate 校验。",
   input: z.object({
     candidateMessage: z.string().describe("候选人发送的消息"),
     conversationHistory: z.array(z.string()).optional().describe("对话历史（最近几轮）"),
@@ -20,20 +31,22 @@ export const generateReply = defineTool({
     ),
     defaultWechatId: z.string().optional().describe("默认微信号"),
     industryVoiceId: z.string().optional().describe("行业语调ID"),
+    turnIndex: z.number().int().min(1).optional().describe("当前会话回复轮次"),
     modelConfig: ModelConfigSchema.optional().describe("模型配置覆盖"),
   }),
   output: z.object({
     suggestedReply: z.string(),
     confidence: z.number(),
-    stage: z.string(),
+    stage: FunnelStageSchema,
     latencyMs: z.number().optional(),
     shouldExchangeWechat: z.boolean().optional(),
     error: z.string().optional(),
     diagnostics: z
       .object({
         subGoals: z.array(z.string()),
-        needs: z.array(z.string()),
-        riskFlags: z.array(z.string()),
+        needs: z.array(ReplyNeedSchema),
+        primaryNeed: ReplyNeedSchema,
+        riskFlags: z.array(RiskFlagSchema),
         reasoningText: z.string(),
         extractedInfo: z.object({
           mentionedBrand: z.string().nullable(),
@@ -44,12 +57,16 @@ export const generateReply = defineTool({
         }),
         ageGate: z.object({
           enabled: z.boolean(),
-          status: z.string(),
+          status: AgeEligibilityStatusSchema,
           strategy: z.string(),
         }),
         resolvedBrand: z.string(),
         storeCount: z.number(),
-        detailLevel: z.string(),
+        detailLevel: EffectiveDisclosureModeSchema,
+        turnIndex: z.number(),
+        effectiveDisclosureMode: EffectiveDisclosureModeSchema,
+        replyGateRewritten: z.boolean(),
+        gateViolations: z.array(ReplyGateViolationCodeSchema),
         factGateRewritten: z.boolean(),
       })
       .optional(),
@@ -64,7 +81,7 @@ export const generateReply = defineTool({
       return {
         suggestedReply: "",
         confidence: 0,
-        stage: "trust_building",
+        stage: "trust_building" as const,
         error: "品牌数据未配置，请先调用 sync_brand_data 写入数据",
       };
     }
@@ -79,6 +96,7 @@ export const generateReply = defineTool({
       channelType: input.channelType,
       defaultWechatId: input.defaultWechatId,
       industryVoiceId: input.industryVoiceId,
+      turnIndex: input.turnIndex,
       modelConfig: input.modelConfig,
       configData,
       replyPolicy,
@@ -100,6 +118,7 @@ export const generateReply = defineTool({
         ? {
             subGoals: result.turnPlan.subGoals,
             needs: result.turnPlan.needs,
+            primaryNeed: result.turnPlan.primaryNeed,
             riskFlags: result.turnPlan.riskFlags,
             reasoningText: result.turnPlan.reasoningText,
             extractedInfo: {
@@ -117,6 +136,10 @@ export const generateReply = defineTool({
             resolvedBrand: debug.resolvedBrand,
             storeCount: debug.storeCount,
             detailLevel: debug.detailLevel,
+            turnIndex: debug.turnIndex,
+            effectiveDisclosureMode: debug.effectiveDisclosureMode,
+            replyGateRewritten: result.replyGateRewritten,
+            gateViolations: result.gateViolations,
             factGateRewritten: result.factGateRewritten,
           }
         : undefined,

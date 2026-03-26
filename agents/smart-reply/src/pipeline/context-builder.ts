@@ -12,12 +12,14 @@ import type {
   TurnExtractedInfo,
   ReplyNeed,
   ReplyPolicyConfig,
+  EffectiveDisclosureMode,
+  ReplyFactFamily,
 } from "../types/reply-policy.ts";
+import { PRIMARY_NEED_FACT_MAP } from "../types/reply-policy.ts";
+import { verboseLog } from "../log-control.ts";
 import { getSharedBrandAliasMap } from "../services/brand-alias.ts";
 
 // ========== Helpers ==========
-
-type DetailLevel = "minimal" | "focused";
 
 interface StoreScore {
   store: Store;
@@ -33,7 +35,8 @@ interface StoreScore {
 interface PolicyContextDebugInfo {
   relevantStores: StoreWithDistance[];
   storeCount: number;
-  detailLevel: DetailLevel;
+  detailLevel: EffectiveDisclosureMode;
+  primaryNeed: ReplyNeed;
   turnPlan: TurnPlan;
   aliasLookupError?: string | undefined;
 }
@@ -279,6 +282,23 @@ function getScheduleTypeText(scheduleType: string): string {
   return typeMap[scheduleType] || "灵活排班";
 }
 
+function allowsFactInjection(primaryNeed: ReplyNeed): boolean {
+  return PRIMARY_NEED_FACT_MAP[primaryNeed].length > 0;
+}
+
+function hasFactFamily(allowedFactFamilies: Set<ReplyFactFamily>, family: ReplyFactFamily): boolean {
+  return allowedFactFamilies.has(family);
+}
+
+function shouldUseMinimalContext(
+  turnIndex: number,
+  disclosureMode: EffectiveDisclosureMode,
+  stage: TurnPlan["stage"],
+): boolean {
+  if (disclosureMode === "minimal") return true;
+  return turnIndex === 1 || stage === "trust_building" || stage === "private_channel";
+}
+
 // ========== Main Export ==========
 
 export async function buildContextInfoByNeeds(
@@ -290,21 +310,27 @@ export async function buildContextInfoByNeeds(
   candidateInfo?: CandidateInfo,
   replyPolicy?: ReplyPolicyConfig,
   industryVoiceId?: string,
+  turnIndex = 1,
+  disclosureMode: EffectiveDisclosureMode = "minimal",
+  factNeeds: ReplyNeed[] = [turnPlan.primaryNeed],
 ): Promise<{
   contextInfo: string;
   resolvedBrand: string;
   debugInfo: PolicyContextDebugInfo;
 }> {
   const extractedInfo = turnPlan.extractedInfo;
-  const needs = new Set<ReplyNeed>(turnPlan.needs || []);
-  const requiresFacts =
-    needs.has("stores") ||
-    needs.has("location") ||
-    needs.has("salary") ||
-    needs.has("schedule") ||
-    needs.has("policy") ||
-    needs.has("availability") ||
-    needs.has("requirements");
+  const primaryNeed = turnPlan.primaryNeed;
+  const effectiveFactNeeds =
+    factNeeds.length > 0
+      ? Array.from(new Set(factNeeds.filter((need) => need !== "none")))
+      : primaryNeed === "none"
+        ? []
+        : [primaryNeed];
+  const allowedFactFamilies = new Set<ReplyFactFamily>(
+    effectiveFactNeeds.flatMap((need) => PRIMARY_NEED_FACT_MAP[need]),
+  );
+  const useMinimalContext = shouldUseMinimalContext(turnIndex, disclosureMode, turnPlan.stage);
+  const requiresFacts = !useMinimalContext && allowsFactInjection(primaryNeed);
 
   let aliasMap: Map<string, string> | undefined;
   let aliasLookupError: string | undefined;
@@ -321,7 +347,7 @@ export async function buildContextInfoByNeeds(
           ? error.message
           : String(error);
     aliasLookupError = errorMessage;
-    console.error(`[buildContextInfoByNeeds] 品牌别名服务不可用，回退 fuzzy 解析: ${errorMessage}`);
+    verboseLog(`[buildContextInfoByNeeds] 品牌别名服务不可用，回退 fuzzy 解析: ${errorMessage}`);
   }
 
   const brandResolution = resolveBrandConflict({
@@ -334,7 +360,7 @@ export async function buildContextInfoByNeeds(
   });
 
   const targetBrand = brandResolution.resolvedBrand;
-  console.error(
+  verboseLog(
     `[品牌解析] 工具传参: ${toolBrand ?? "(未指定)"} → 结果: ${targetBrand} (${brandResolution.matchType}, ${brandResolution.source})`,
   );
 
@@ -369,7 +395,7 @@ export async function buildContextInfoByNeeds(
     if (
       relevantStores.length === brandStores.length &&
       candidateInfo?.jobAddress &&
-      (needs.has("stores") || needs.has("location"))
+      hasFactFamily(allowedFactFamilies, "location")
     ) {
       const filtered = relevantStores.filter(
         (s) =>
@@ -387,11 +413,8 @@ export async function buildContextInfoByNeeds(
     rankedStoresWithDistance = rankStoresByTextMatch(relevantStores, extractedInfo);
   }
 
-  const storeCount = Math.min(
-    needs.has("stores") || needs.has("location") ? 5 : 3,
-    rankedStoresWithDistance.length,
-  );
-  const detailLevel: DetailLevel = requiresFacts ? "focused" : "minimal";
+  const storeCount = requiresFacts ? Math.min(1, rankedStoresWithDistance.length) : 0;
+  const detailLevel: EffectiveDisclosureMode = requiresFacts ? "focused" : "minimal";
 
   let context = `阶段目标：${turnPlan.stage}\n默认推荐品牌：${targetBrand}\n`;
   if (aliasLookupError) {
@@ -404,39 +427,54 @@ export async function buildContextInfoByNeeds(
     const voice = replyPolicy.industryVoices[voiceId];
     context += `策略目标：${stageGoal.primaryGoal}\n`;
     context += `推进方式：${stageGoal.ctaStrategy}\n`;
+    context += `主回答轴：${primaryNeed}\n`;
     if (voice) context += `行业指纹：${voice.name} | 风格：${voice.styleKeywords.join("、")}\n`;
     context += `红线：${replyPolicy.hardConstraints.rules.map((r) => r.rule).join("；")}\n`;
   }
 
   if (!requiresFacts) {
-    context += "候选人当前未深入咨询岗位细节，请优先建立信任与推进下一步。\n";
+    if (useMinimalContext) {
+      context += "当前处于首轮或浅层沟通，优先泛化回答，不主动展开具体门店、数字或筛选条件。\n";
+    } else {
+      context += "本轮以推进沟通为主，无需展开岗位细节，请保持回答聚焦且克制。\n";
+    }
   } else if (storeCount === 0) {
     context += "暂无可用的门店事实信息，请使用泛化回答，避免任何具体承诺。\n";
   } else {
     context += "匹配到的门店信息：\n";
     rankedStoresWithDistance.slice(0, storeCount).forEach(({ store }) => {
-      context += `• ${store.name}（${store.district}${store.subarea}）：${store.location}\n`;
-      store.positions.forEach((position) => {
+      const includeLocationFacts = hasFactFamily(allowedFactFamilies, "location");
+      const includePositionFacts = Array.from(allowedFactFamilies).some((family) => family !== "location");
+      context += includeLocationFacts
+        ? `• ${store.name}（${store.district}${store.subarea}）：${store.location}\n`
+        : `• ${store.name}\n`;
+      if (!includePositionFacts) {
+        return;
+      }
+
+      store.positions.slice(0, 3).forEach((position) => {
         context += `  职位：${position.name}\n`;
-        if (needs.has("salary")) context += `  薪资：${buildSalaryDescription(position.salary)}\n`;
-        if (needs.has("schedule")) {
+        if (hasFactFamily(allowedFactFamilies, "salary")) {
+          context += `  薪资：${buildSalaryDescription(position.salary)}\n`;
+        }
+        if (hasFactFamily(allowedFactFamilies, "schedule")) {
           context += `  排班：${getScheduleTypeText(position.scheduleType)}\n`;
           context += `  时间：${position.timeSlots.slice(0, 3).join("、")}\n`;
           if (position.minHoursPerWeek || position.maxHoursPerWeek) {
             context += `  每周工时：${position.minHoursPerWeek || 0}-${position.maxHoursPerWeek || "不限"}小时\n`;
           }
         }
-        if (needs.has("policy")) {
+        if (hasFactFamily(allowedFactFamilies, "policy")) {
           context += `  考勤：最多迟到${position.attendancePolicy.lateToleranceMinutes}分钟\n`;
           if (position.attendanceRequirement?.description) {
             context += `  出勤要求：${position.attendanceRequirement.description}\n`;
           }
         }
-        if (needs.has("availability")) {
+        if (hasFactFamily(allowedFactFamilies, "availability")) {
           const slots = position.availableSlots?.filter((s) => s.isAvailable).slice(0, 3) || [];
           if (slots.length > 0) context += `  可用时段：${slots.map((s) => s.slot).join("、")}\n`;
         }
-        if (needs.has("requirements")) {
+        if (hasFactFamily(allowedFactFamilies, "requirements")) {
           if (position.hiringRequirements) {
             const hr = position.hiringRequirements;
             const parts: string[] = [];
@@ -466,6 +504,7 @@ export async function buildContextInfoByNeeds(
           : relevantStores.map((s) => ({ store: s, distance: undefined })),
       storeCount,
       detailLevel,
+      primaryNeed,
       turnPlan,
       aliasLookupError,
     },

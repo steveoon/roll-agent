@@ -6,24 +6,16 @@ import {
   buildCityCandidates,
   buildBrandCandidates,
 } from "../services/duliday-api.ts";
+import type { AgeQualificationPolicy } from "../types/reply-policy.ts";
 
-export type AgeEligibilityStatus = "pass" | "fail" | "unknown";
+export const AGE_ELIGIBILITY_STATUSES = ["pass", "fail", "unknown"] as const;
+export type AgeEligibilityStatus = (typeof AGE_ELIGIBILITY_STATUSES)[number];
 
 export type AgeEligibilitySummary = {
   minAgeObserved: number | null;
   maxAgeObserved: number | null;
   matchedCount: number;
   total: number;
-};
-
-export type AgeQualificationPolicy = {
-  enabled: boolean;
-  revealRange: boolean;
-  failStrategy: string;
-  unknownStrategy: string;
-  passStrategy: string;
-  allowRedirect: boolean;
-  redirectPriority: "low" | "medium" | "high";
 };
 
 export type AgeEligibilityAppliedStrategy = AgeQualificationPolicy & {

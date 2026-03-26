@@ -7,6 +7,7 @@ import { createDeepSeek } from "@ai-sdk/deepseek";
 import { createGoogleGenerativeAI } from "@ai-sdk/google";
 import { createOpenAI } from "@ai-sdk/openai";
 import type { ProviderConfig } from "../types/classification.ts";
+import { verboseLog } from "../log-control.ts";
 
 // ========== Model Dictionary ==========
 
@@ -227,7 +228,7 @@ export function getDynamicRegistry(providerConfigs: Record<string, ProviderConfi
   if (cachedRegistry && lastConfigHash === configHash) return cachedRegistry;
   cachedRegistry = createDynamicRegistry(providerConfigs);
   lastConfigHash = configHash;
-  console.error(
+  verboseLog(
     "[DYNAMIC REGISTRY] 创建新的动态registry，配置哈希:",
     configHash.substring(0, 16) + "...",
   );
