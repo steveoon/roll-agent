@@ -42,6 +42,7 @@ function buildDynamicPlanningSchema(
     stage: z.enum(activeStages as [FunnelStage, ...FunnelStage[]]),
     subGoals: TurnPlanSchema.shape.subGoals,
     needs: TurnPlanSchema.shape.needs,
+    primaryNeed: TurnPlanSchema.shape.primaryNeed,
     riskFlags: TurnPlanSchema.shape.riskFlags,
     confidence: TurnPlanSchema.shape.confidence,
     extractedInfo: TurnPlanSchema.shape.extractedInfo,
@@ -61,8 +62,20 @@ const NEED_RULES: Array<{ need: ReplyNeed; patterns: RegExp[] }> = [
   { need: "wechat", patterns: [/微信|vx|私聊|联系方式|加你/i] },
 ];
 
-function detectRuleNeeds(message: string, history: string[]): Set<ReplyNeed> {
-  const text = `${history.slice(-4).join(" ")} ${message}`;
+export const PRIMARY_NEED_PRIORITY = [
+  "salary",
+  "schedule",
+  "location",
+  "stores",
+  "policy",
+  "requirements",
+  "availability",
+  "interview",
+  "wechat",
+  "none",
+] as const satisfies readonly ReplyNeed[];
+
+function detectNeedsByText(text: string): Set<ReplyNeed> {
   const needs = new Set<ReplyNeed>();
   for (const rule of NEED_RULES) {
     if (rule.patterns.some((p) => p.test(text))) needs.add(rule.need);
@@ -72,12 +85,70 @@ function detectRuleNeeds(message: string, history: string[]): Set<ReplyNeed> {
   return needs;
 }
 
-function sanitizePlan(plan: TurnPlan, ruleNeeds: Set<ReplyNeed>): TurnPlan {
+export function detectRuleNeeds(message: string, history: string[]): Set<ReplyNeed> {
+  return detectNeedsByText(`${history.slice(-4).join(" ")} ${message}`);
+}
+
+function detectCurrentMessageNeeds(message: string): Set<ReplyNeed> {
+  return detectNeedsByText(message);
+}
+
+export function selectContextNeeds(
+  primaryNeed: ReplyNeed,
+  availableNeedsInput: Iterable<ReplyNeed>,
+  message: string,
+  maxNeeds = 1,
+): ReplyNeed[] {
+  const availableNeeds = new Set<ReplyNeed>(availableNeedsInput);
+  if (availableNeeds.size > 1 && availableNeeds.has("none")) availableNeeds.delete("none");
+  const currentMessageNeeds = detectCurrentMessageNeeds(message);
+  currentMessageNeeds.delete("none");
+
+  const selected: ReplyNeed[] = [];
+  if (primaryNeed !== "none" && availableNeeds.has(primaryNeed)) selected.push(primaryNeed);
+
+  for (const need of PRIMARY_NEED_PRIORITY) {
+    if (selected.length >= maxNeeds) break;
+    if (need === "none" || need === primaryNeed) continue;
+    if (currentMessageNeeds.has(need) && availableNeeds.has(need)) selected.push(need);
+  }
+
+  if (selected.length > 0) return selected;
+  return primaryNeed === "none" ? ["none"] : availableNeeds.has(primaryNeed) ? [primaryNeed] : ["none"];
+}
+
+export function selectPrimaryNeed(
+  plannedPrimaryNeed: ReplyNeed | undefined,
+  mergedNeedsInput: Iterable<ReplyNeed>,
+  message: string,
+): ReplyNeed {
+  const mergedNeeds = new Set<ReplyNeed>(mergedNeedsInput);
+  if (mergedNeeds.size > 1 && mergedNeeds.has("none")) mergedNeeds.delete("none");
+
+  if (plannedPrimaryNeed && mergedNeeds.has(plannedPrimaryNeed)) return plannedPrimaryNeed;
+
+  const currentMessageNeeds = detectCurrentMessageNeeds(message);
+  currentMessageNeeds.delete("none");
+
+  for (const need of PRIMARY_NEED_PRIORITY) {
+    if (currentMessageNeeds.has(need) && mergedNeeds.has(need)) return need;
+  }
+
+  for (const need of PRIMARY_NEED_PRIORITY) {
+    if (mergedNeeds.has(need)) return need;
+  }
+
+  return "none";
+}
+
+export function sanitizePlan(plan: TurnPlan, ruleNeeds: Set<ReplyNeed>, message: string): TurnPlan {
   const mergedNeeds = new Set<ReplyNeed>([...plan.needs, ...Array.from(ruleNeeds)]);
   if (mergedNeeds.size > 1 && mergedNeeds.has("none")) mergedNeeds.delete("none");
   return {
     ...plan,
+    subGoals: plan.subGoals.slice(0, 2),
     needs: Array.from(mergedNeeds),
+    primaryNeed: selectPrimaryNeed(plan.primaryNeed, mergedNeeds, message),
     confidence: Number.isFinite(plan.confidence) ? Math.max(0, Math.min(1, plan.confidence)) : 0.5,
   };
 }
@@ -92,7 +163,7 @@ function buildPlanningPrompt(
   const system = [
     "你是招聘对话回合规划器，不直接回复候选人。",
     "你只输出结构化规划结果，用于后续回复生成。",
-    "规划目标：确定阶段目标(stage)、子目标(subGoals)、事实需求(needs)、风险标记(riskFlags)。",
+    "规划目标：确定阶段目标(stage)、子目标(subGoals)、事实需求(needs)、主回答轴(primaryNeed)、风险标记(riskFlags)。",
   ].join("\n");
 
   const normalizedChannelType = normalizeChannelType(channelType);
@@ -119,8 +190,9 @@ function buildPlanningPrompt(
     "- insurance_promise_risk, age_sensitive, confrontation_emotion, urgency_high, qualification_mismatch",
     "",
     "[规则]",
-    "- 优先判断本轮主阶段(stage)；subGoals 可多项。",
+    "- 优先判断本轮主阶段(stage)；subGoals 最多 2 项，只保留最关键的。",
     "- 候选人追问事实时，必须打开对应 needs。",
+    "- primaryNeed 必须从 needs 中选择一个最主的 need；如果没有明确事实轴则填 none。",
     "- 不确定时 confidence 降低，不要臆断。",
     "- 根据转入条件判断阶段转化，不要停留在不匹配的阶段。",
     "",
@@ -177,12 +249,14 @@ export async function planTurn(
   });
 
   const ruleNeeds = detectRuleNeeds(message, conversationHistory);
+  const fallbackPrimaryNeed = selectPrimaryNeed(undefined, ruleNeeds, message);
 
   if (!result.success) {
     return {
       stage: "trust_building",
       subGoals: ["保持对话并澄清需求"],
       needs: Array.from(ruleNeeds),
+      primaryNeed: fallbackPrimaryNeed,
       riskFlags: [],
       confidence: 0.35,
       extractedInfo: {
@@ -198,5 +272,5 @@ export async function planTurn(
     };
   }
 
-  return sanitizePlan(result.data as TurnPlan, ruleNeeds);
+  return sanitizePlan(result.data as TurnPlan, ruleNeeds, message);
 }

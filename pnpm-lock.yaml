@@ -62,13 +62,16 @@ importers:
         version: 3.0.41(zod@3.25.76)
       '@ai-sdk/openai-compatible':
         specifier: ^2.0.33
-        version: 2.0.35(zod@3.25.76)
+        version: 2.0.37(zod@3.25.76)
       '@roll-agent/sdk':
         specifier: workspace:*
         version: link:../../packages/sdk
       ai:
         specifier: ^6.0.108
         version: 6.0.116(zod@3.25.76)
+      ora:
+        specifier: ^8.2.0
+        version: 8.2.0
       zod:
         specifier: ^3.25.0
         version: 3.25.76
@@ -180,12 +183,6 @@ packages:
 
   '@ai-sdk/google@3.0.43':
     resolution: {integrity: sha512-NGCgP5g8HBxrNdxvF8Dhww+UKfqAkZAmyYBvbu9YLoBkzAmGKDBGhVptN/oXPB5Vm0jggMdoLycZ8JReQM8Zqg==}
-    engines: {node: '>=18'}
-    peerDependencies:
-      zod: ^3.25.76 || ^4.1.8
-
-  '@ai-sdk/openai-compatible@2.0.35':
-    resolution: {integrity: sha512-g3wA57IAQFb+3j4YuFndgkUdXyRETZVvbfAWM+UX7bZSxA3xjes0v3XKgIdKdekPtDGsh4ZX2byHD0gJIMPfiA==}
     engines: {node: '>=18'}
     peerDependencies:
       zod: ^3.25.76 || ^4.1.8
@@ -2154,12 +2151,6 @@ snapshots:
       zod: 3.25.76
 
   '@ai-sdk/google@3.0.43(zod@3.25.76)':
-    dependencies:
-      '@ai-sdk/provider': 3.0.8
-      '@ai-sdk/provider-utils': 4.0.19(zod@3.25.76)
-      zod: 3.25.76
-
-  '@ai-sdk/openai-compatible@2.0.35(zod@3.25.76)':
     dependencies:
       '@ai-sdk/provider': 3.0.8
       '@ai-sdk/provider-utils': 4.0.19(zod@3.25.76)

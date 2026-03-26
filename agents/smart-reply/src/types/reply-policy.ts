@@ -11,6 +11,15 @@ export const FunnelStageSchema = z.enum([
 
 export const ChannelTypeSchema = z.enum(["public", "private"]);
 export type ChannelType = z.infer<typeof ChannelTypeSchema>;
+export const EffectiveDisclosureModeSchema = z.enum(["minimal", "focused"]);
+export const ReplyFactFamilySchema = z.enum([
+  "salary",
+  "schedule",
+  "location",
+  "policy",
+  "requirements",
+  "availability",
+]);
 
 export interface StageDefinition {
   description: string;
@@ -30,7 +39,7 @@ export const STAGE_DEFINITIONS: Record<FunnelStage, StageDefinition> = {
     applicableChannels: ["public"],
   },
   qualify_candidate: {
-    description: "确认候选人基本匹配度（年龄、时间、岗位条件）",
+    description: "轻量确认候选人的关键匹配信息，避免审查式盘问",
     transitionSignal: "候选人表达求职意向后，需要核实基本资格",
     applicableChannels: ["public", "private"],
   },
@@ -72,6 +81,19 @@ export const RiskFlagSchema = z.enum([
   "qualification_mismatch",
 ]);
 
+export const PRIMARY_NEED_FACT_MAP = {
+  stores: ["location"],
+  location: ["location"],
+  salary: ["salary"],
+  schedule: ["schedule"],
+  policy: ["policy"],
+  availability: ["availability"],
+  requirements: ["requirements"],
+  interview: [],
+  wechat: [],
+  none: [],
+} as const satisfies Record<z.infer<typeof ReplyNeedSchema>, z.infer<typeof ReplyFactFamilySchema>[]>;
+
 export const TurnExtractedInfoSchema = z.object({
   mentionedBrand: z.string().nullable(),
   city: z.string().nullable(),
@@ -99,8 +121,9 @@ export const TurnExtractedInfoSchema = z.object({
 
 export const TurnPlanSchema = z.object({
   stage: FunnelStageSchema,
-  subGoals: z.array(z.string()).max(6),
+  subGoals: z.array(z.string()).max(2),
   needs: z.array(ReplyNeedSchema).max(8),
+  primaryNeed: ReplyNeedSchema,
   riskFlags: z.array(RiskFlagSchema).max(6),
   confidence: z.number().min(0).max(1),
   extractedInfo: TurnExtractedInfoSchema,
@@ -154,6 +177,27 @@ export const FactGatePolicySchema = z.object({
   verifiableClaimTypes: z.array(z.string()),
   fallbackBehavior: z.enum(["generic_answer", "ask_followup", "handoff"]),
   forbiddenWhenMissingFacts: z.array(z.string()),
+});
+
+export const DEFAULT_OUTPUT_GUARDS = {
+  maxQuestionsByMode: { minimal: 1, focused: 2 },
+  blockedAuditPhrases: [
+    "是否满足",
+    "是否符合",
+    "基本入职要求",
+    "先确认资格",
+    "年龄是否符合",
+  ],
+  blockFirstTurnSpecificFacts: true,
+};
+
+export const OutputGuardsPolicySchema = z.object({
+  maxQuestionsByMode: z.object({
+    minimal: z.number().int().min(0),
+    focused: z.number().int().min(0),
+  }),
+  blockedAuditPhrases: z.array(z.string()),
+  blockFirstTurnSpecificFacts: z.boolean(),
 });
 
 export const AgeQualificationPolicySchema = z.object({
@@ -212,10 +256,13 @@ export const ReplyPolicyConfigSchema = z.object({
   hardConstraints: HardConstraintsPolicySchema,
   factGate: FactGatePolicySchema,
   qualificationPolicy: QualificationPolicySchema,
+  outputGuards: OutputGuardsPolicySchema.default(DEFAULT_OUTPUT_GUARDS),
 });
 
 export type FunnelStage = z.infer<typeof FunnelStageSchema>;
 export type ReplyNeed = z.infer<typeof ReplyNeedSchema>;
+export type EffectiveDisclosureMode = z.infer<typeof EffectiveDisclosureModeSchema>;
+export type ReplyFactFamily = z.infer<typeof ReplyFactFamilySchema>;
 export type RiskFlag = z.infer<typeof RiskFlagSchema>;
 export type TurnExtractedInfo = z.infer<typeof TurnExtractedInfoSchema>;
 export type TurnPlan = z.infer<typeof TurnPlanSchema>;
@@ -226,6 +273,7 @@ export type IndustryVoicePolicy = z.infer<typeof IndustryVoicePolicySchema>;
 export type HardConstraintRule = z.infer<typeof HardConstraintRuleSchema>;
 export type HardConstraintsPolicy = z.infer<typeof HardConstraintsPolicySchema>;
 export type FactGatePolicy = z.infer<typeof FactGatePolicySchema>;
+export type OutputGuardsPolicy = z.infer<typeof OutputGuardsPolicySchema>;
 export type AgeQualificationPolicy = z.infer<typeof AgeQualificationPolicySchema>;
 export type QualificationPolicy = z.infer<typeof QualificationPolicySchema>;
 export type ReplyPolicyConfig = z.infer<typeof ReplyPolicyConfigSchema>;
@@ -247,11 +295,11 @@ export const DEFAULT_REPLY_POLICY: ReplyPolicyConfig = {
       disallowedActions: ["强迫式要微信"],
     },
     qualify_candidate: {
-      description: "确认候选人基本匹配度（年龄、时间、岗位条件）",
-      primaryGoal: "确认基本匹配度",
-      successCriteria: ["完成年龄/时间/岗位匹配确认"],
-      ctaStrategy: "逐条确认关键条件",
-      disallowedActions: ["直接否定候选人"],
+      description: "轻量确认候选人的关键匹配信息，避免审查式盘问",
+      primaryGoal: "确认一个关键匹配信息并保持继续沟通意愿",
+      successCriteria: ["明确一个关键匹配信息", "候选人愿意继续沟通"],
+      ctaStrategy: "先回应关切，再顺带确认一个最关键条件",
+      disallowedActions: ["连续盘问多个资格条件", "直接否定候选人"],
     },
     job_consultation: {
       description: "回答岗位相关问题（薪资、排班、地点等）并提升兴趣",
@@ -333,4 +381,5 @@ export const DEFAULT_REPLY_POLICY: ReplyPolicyConfig = {
       redirectPriority: "medium",
     },
   },
+  outputGuards: DEFAULT_OUTPUT_GUARDS,
 };

@@ -7,6 +7,7 @@ import {
 } from "ai";
 import { z } from "zod";
 import { wrapError, logError, ErrorCode, type AppError } from "../errors/index.ts";
+import { verboseLog } from "../log-control.ts";
 
 // ========== safeGenerateObject ==========
 
@@ -131,7 +132,7 @@ export async function safeGenerateText(
       outputTokens: rawUsage?.outputTokens,
       totalTokens,
     };
-    console.error(
+    verboseLog(
       `[${context}] 生成成功 | 耗时: ${latencyMs}ms | Tokens: ${totalTokens ?? "N/A"} (input: ${usage.inputTokens ?? "?"}, output: ${usage.outputTokens ?? "?"})`,
     );
     return { success: true, text: result.text, usage, latencyMs };

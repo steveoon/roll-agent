@@ -9,15 +9,16 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@roll-agent/sdk": "workspace:*",
-    "zod": "^3.25.0",
-    "ai": "^6.0.108",
     "@ai-sdk/alibaba": "^1.0.13",
     "@ai-sdk/anthropic": "^3.0.53",
+    "@ai-sdk/deepseek": "^2.0.22",
+    "@ai-sdk/google": "^3.0.36",
     "@ai-sdk/openai": "^3.0.39",
     "@ai-sdk/openai-compatible": "^2.0.33",
-    "@ai-sdk/deepseek": "^2.0.22",
-    "@ai-sdk/google": "^3.0.36"
+    "@roll-agent/sdk": "workspace:*",
+    "ai": "^6.0.108",
+    "ora": "^8.2.0",
+    "zod": "^3.25.0"
   },
   "devDependencies": {
     "@types/node": "^22.0.0"
