@@ -159,6 +159,7 @@ function buildPlanningPrompt(
   brandData?: z.infer<typeof BrandDataSchema>,
   channelType: ChannelType = "public",
   replyPolicy?: Pick<ReplyPolicyConfig, "stageGoals">,
+  knownCandidateFields?: string[],
 ): { system: string; prompt: string } {
   const system = [
     "你是招聘对话回合规划器，不直接回复候选人。",
@@ -195,6 +196,9 @@ function buildPlanningPrompt(
     "- primaryNeed 必须从 needs 中选择一个最主的 need；如果没有明确事实轴则填 none。",
     "- 不确定时 confidence 降低，不要臆断。",
     "- 根据转入条件判断阶段转化，不要停留在不匹配的阶段。",
+    ...(knownCandidateFields && knownCandidateFields.length > 0
+      ? [`- 候选人资料中已有：${knownCandidateFields.join("、")}。不要生成追问这些字段的 subGoal。`]
+      : []),
     "",
     "[品牌数据]",
     JSON.stringify(brandData || {}),
@@ -214,6 +218,7 @@ export async function planTurn(
   options: Omit<ClassificationOptions, "candidateMessage"> & {
     providerConfigs?: ProviderConfigs;
     replyPolicy?: Pick<ReplyPolicyConfig, "stageGoals">;
+    knownCandidateFields?: string[];
   },
 ): Promise<TurnPlan> {
   const {
@@ -223,6 +228,7 @@ export async function planTurn(
     brandData,
     channelType,
     replyPolicy,
+    knownCandidateFields,
   } = options;
 
   const registry = getDynamicRegistry(providerConfigs);
@@ -238,6 +244,7 @@ export async function planTurn(
     brandData,
     normalizedChannelType,
     replyPolicy,
+    knownCandidateFields,
   );
 
   const result = await safeGenerateObject({

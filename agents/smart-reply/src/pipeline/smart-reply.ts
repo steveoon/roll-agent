@@ -46,6 +46,8 @@ import type {
   AgeEligibilitySummary,
 } from "./age-eligibility.ts";
 import { resolveCandidateAge, resolveRegionName } from "./candidate-utils.ts";
+import { buildKnownCandidateContext } from "./candidate-context.ts";
+import type { KnownCandidateContext } from "./candidate-context.ts";
 
 export interface SmartReplyAgentOptions {
   modelConfig?:
@@ -156,6 +158,7 @@ function buildPolicyPrompt(
   conversationHistory: string[],
   turnIndex: number,
   effectiveDisclosureMode: EffectiveDisclosureMode,
+  knownCandidate: KnownCandidateContext,
   industryVoiceId?: string,
   defaultWechatId?: string,
   ageEligibility?: AgeEligibilityResult,
@@ -191,6 +194,9 @@ function buildPolicyPrompt(
     `红线规则：${policy.hardConstraints.rules.map((r) => r.rule).join("；")}`,
     `FactGate模式：${policy.factGate.mode}；缺事实回退=${policy.factGate.fallbackBehavior}`,
     `禁止审查措辞：${policy.outputGuards.blockedAuditPhrases.join("、")}`,
+    ...(knownCandidate.knownFieldNames.length > 0
+      ? [`候选人资料已确认：${knownCandidate.knownFieldNames.join("、")}。这些信息不得重复追问；如需引用，自然带过即可，不要像念资料一样复述。`]
+      : []),
     ...buildAgeQualificationConstraints(ageEligibility, policy, turnPlan),
     defaultWechatId
       ? `如涉及换微信，优先引导平台交换，必要时可提供默认微信号：${defaultWechatId}`
@@ -215,6 +221,9 @@ function buildPolicyPrompt(
     `[业务上下文]`,
     contextInfo,
     "",
+    ...(knownCandidate.factsText
+      ? [`[候选人已知信息]`, knownCandidate.factsText, ""]
+      : []),
     `[候选人消息]`,
     message,
     "",
@@ -429,6 +438,7 @@ async function generateSmartReplyInner(
     availableBrands: getAvailableBrandNames(configData),
     storeCount: getAllStores(configData).length,
   };
+  const knownCandidate = buildKnownCandidateContext(candidateInfo);
 
   progress.update("分析对话意图...");
   const turnPlan = await planTurn(candidateMessage, {
@@ -438,6 +448,9 @@ async function generateSmartReplyInner(
     providerConfigs,
     ...(channelType !== undefined ? { channelType } : {}),
     ...(replyPolicy !== undefined ? { replyPolicy } : {}),
+    ...(knownCandidate.knownFieldNames.length > 0
+      ? { knownCandidateFields: knownCandidate.knownFieldNames }
+      : {}),
   });
   const resolvedTurnIndex = resolveTurnIndex(conversationHistory, turnIndex);
   const effectiveDisclosureMode = resolveEffectiveDisclosureMode(resolvedTurnIndex, turnPlan.stage);
@@ -492,6 +505,7 @@ async function generateSmartReplyInner(
     conversationHistory,
     resolvedTurnIndex,
     effectiveDisclosureMode,
+    knownCandidate,
     industryVoiceId,
     defaultWechatId,
     ageEligibility,
