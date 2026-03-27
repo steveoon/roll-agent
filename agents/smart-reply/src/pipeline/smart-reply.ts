@@ -149,6 +149,19 @@ function buildAgeQualificationConstraints(
   return lines;
 }
 
+function buildDisclosureOutputRules(mode: EffectiveDisclosureMode): string[] {
+  if (mode === "minimal") {
+    return [
+      "4. 当前为浅层沟通，优先泛化回答，不主动抛具体数字、时间、地址或筛选条件。",
+      "5. 若候选人追问具体事实，承接需求并引导进一步沟通，不编造细节。",
+    ];
+  }
+  return [
+    "4. 围绕 primaryNeed 回答，上下文中有的事实可以正常引用，不要刻意回避。",
+    "5. 不主动展开其他事实轴；若候选人同时问两个点，只在上下文支持时简要带上次要问题。",
+  ];
+}
+
 function buildPolicyPrompt(
   policy: ReplyPolicyConfig | undefined,
   turnPlan: TurnPlan,
@@ -228,13 +241,10 @@ function buildPolicyPrompt(
     message,
     "",
     `[输出要求]`,
-    "1. 直接给候选人的单条回复。",
-    "2. 不得输出多段解释或元信息。",
-    "3. 围绕 primaryNeed 回答，不主动展开其他事实轴。",
-    `4. 最多追问 ${maxQuestions} 个关键问题。`,
-    "5. 首轮优先泛化回答，不主动抛具体数字、时间、地址或筛选条件。",
-    "6. 禁止使用“是否满足”“是否符合”“基本入职要求”等审查措辞。",
-    "7. 若候选人同时问两个点，只在上下文支持时简要带上次要问题；没有事实时只做泛化承接，不编造细节。",
+    "1. 直接给候选人的单条回复，不得输出多段解释或元信息。",
+    `2. 最多追问 ${maxQuestions} 个关键问题。`,
+    "3. 禁止使用“是否满足”“是否符合”“基本入职要求”等审查措辞。",
+    ...buildDisclosureOutputRules(effectiveDisclosureMode),
   ].join("\n");
 
   return { system, prompt };
