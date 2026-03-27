@@ -15,7 +15,7 @@
     "@ai-sdk/google": "^3.0.36",
     "@ai-sdk/openai": "^3.0.39",
     "@ai-sdk/openai-compatible": "^2.0.33",
-    "@roll-agent/sdk": "workspace:*",
+    "@roll-agent/sdk": "^0.1.2",
     "ai": "^6.0.108",
     "ora": "^8.2.0",
     "zod": "^3.25.0"

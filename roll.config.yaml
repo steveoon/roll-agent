@@ -1,6 +1,6 @@
 llm:
-  default-provider: qwen
-  default-model: qwen-plus-latest
+  default-provider: openai
+  default-model: gpt-5.4
   providers:
     openai:
       api-key: ${ANTHROPIC_API_KEY}
@@ -21,3 +21,4 @@ agents:
       DULIDAY_TOKEN: ${DULIDAY_TOKEN}
       DULIDAY_JOB_LIST_URL: ${DULIDAY_JOB_LIST_URL}
       DULIDAY_BRAND_LIST_URL: ${DULIDAY_BRAND_LIST_URL}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
