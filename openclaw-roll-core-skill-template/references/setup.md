@@ -20,14 +20,21 @@ roll config init
 # 4. If an existing config uses deprecated schema, migrate it
 roll config migrate
 
-# 5. Install browser-use-agent
-roll agent install @roll-agent/browser-use-agent
+# 5. Register the target subagent
+# Published package:
+roll agent install <package-name>
 
-# 6. Start browser-use-agent
-roll agent start browser-use-agent
+# OR local source directory:
+roll agent add /path/to/agent
 
-# 7. Open the target platform
-roll run browser-use-agent open_platform --input-json '{"platform":"zhipin"}' --json
+# 6. Inspect runtime ownership, transport, and env status
+roll agent info <agent-name>
+
+# 7. If the agent is a persistent service, start it
+roll agent start <agent-name>
+
+# 8. Verify health before tool calls
+roll agent health --json
 ```
 
 ## Local Agent Source vs Package Install
@@ -68,19 +75,13 @@ roll agent install /path/to/local-agent
 
 This can mis-handle the local path as a package spec and fail during registration.
 
-### D. Important caveat for `npm pack` / `.tgz`
+### D. Note on monorepo dependencies
 
-If a local agent uses monorepo dependencies such as:
+If an agent uses published dependency versions, it can usually be added as a standalone local-path target.
 
-```json
-"@roll-agent/sdk": "workspace:*"
-```
-
-then `npm pack` + `roll agent install xxx.tgz` may fail with npm `EUNSUPPORTEDPROTOCOL`.
-
-In that case, either:
-- use `roll agent add /path/to/agent`, or
-- replace `workspace:*` dependencies with real version numbers before packing.
+If an agent still uses `workspace:*` dependencies, either:
+- use `roll agent add /path/to/agent` from within the monorepo, or
+- replace `workspace:*` with real version numbers before standalone install.
 
 ## Agent env and re-registration pitfalls
 
@@ -95,9 +96,9 @@ roll agent add /path/to/agent
 
 This is especially useful after upstream changes to:
 - `SKILL.md`
-- `references/setup.md`
-- `references/env.yaml`
+- runtime manifest metadata
 - env metadata / required variables
+- reference docs that describe capability boundaries
 
 ### 2. `llm:` config is not enough for agent runtime env
 
@@ -117,6 +118,11 @@ agents:
 In other words:
 - `llm:` controls shared/default model routing
 - `agents.env.<agent-name>` controls what the agent process actually receives at runtime
+
+Prefer `roll agent info <agent-name>` as the source of truth for required env:
+- it reflects the env metadata declared by the subagent itself
+- it shows which vars are still missing after registration
+- it avoids hard-coding per-agent env lists into this shared Roll skill template
 
 ### 3. Symptom of missing agent env
 
@@ -139,23 +145,18 @@ roll run <agent-name> <tool-name> --input-json '{...}' --json
 
 If `roll agent info <agent-name>` still shows required env vars as missing, fix `agents.env.<agent-name>` first.
 
-## Important Notes
-
-- `browser-use-agent` now defaults to system Chrome. Installation does not default to Playwright Chromium download.
-- Login is still a manual step. Wait for the user to finish QR-code scan or credential entry before proceeding.
-- Verify login with:
-
-```bash
-roll run browser-use-agent zhipin_get_username --json
-```
-
-- If this returns a username, the session is active.
-
 ## Subsequent Sessions
 
 After first-time setup, the common path is:
 
 ```bash
-roll agent start browser-use-agent
+roll agent info <agent-name>
+roll agent health --json
+```
+
+If the target agent is a persistent service and is not healthy:
+
+```bash
+roll agent start <agent-name>
 roll agent health --json
 ```

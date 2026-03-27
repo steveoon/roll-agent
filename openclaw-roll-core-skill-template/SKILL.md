@@ -1,6 +1,6 @@
 ---
 name: roll-core
-description: Use the `roll` CLI to invoke registered MCP agents, manage their lifecycle, and route user intents through `roll run --json`, `roll ask --json`, `roll agent start`, `roll agent health`, and `roll agent install`. Trigger when a skill-capable orchestrator or coding agent should operate `browser-use-agent`, `smart-reply-agent`, or other installed Roll agents through a stable CLI surface.
+description: Use the `roll` CLI to inspect registered MCP agents, verify lifecycle and env status, invoke tools through `roll run --json`, and route unclear intents through `roll ask --json`. Trigger when an orchestrator or coding agent should operate or troubleshoot registered Roll agents through the stable Roll CLI surface.
 ---
 
 # Roll Core
@@ -10,15 +10,19 @@ Prefer deterministic execution.
 - Use `roll run --json` when the target agent and tool are known.
 - Use `roll ask --json` only when intent is known but the target agent/tool is not.
 - Do not default to `roll chat`; it is still experimental.
+- Do not embed subagent-specific tool contracts into this shared Roll skill. Read the target subagent's own `SKILL.md` / manifest / reference docs when you need tool-level semantics.
 
 ## Startup Gate
 
-Run `roll agent health --json` before any `browser-use-agent` tool call.
+When the target agent's runtime ownership is unclear, inspect it first:
 
-- If `browser-use-agent` is unhealthy, run `roll agent start browser-use-agent`.
-- If login state is uncertain, verify it with `roll run browser-use-agent zhipin_get_username --json`.
-- Treat `browser-use-agent` as a persistent HTTP service. It must be healthy before tool calls.
-- Treat `smart-reply-agent` as on-demand. It does not need pre-start.
+```bash
+roll agent info <agent-name>
+```
+
+- If the agent is a persistent service (`core-managed` / `external-managed`), run `roll agent health --json` before tool calls.
+- If that agent is unhealthy and Roll owns its lifecycle, run `roll agent start <agent-name>`.
+- If the agent is `stdio + on-demand`, do not pre-start it.
 
 ## Output Handling
 
@@ -29,8 +33,8 @@ Run `roll agent health --json` before any `browser-use-agent` tool call.
 
 ## References
 
-- For first-time machine setup, config migration, login gates, and **the difference between `roll agent add` (local source) vs `roll agent install` (published package)**, read [references/setup.md](./references/setup.md).
-- For `browser-use-agent` tool catalog, page context rules, and navigation behavior, read [references/browser-use-agent.md](./references/browser-use-agent.md).
-- For `smart-reply-agent` capability boundaries and input expectations, read [references/smart-reply-agent.md](./references/smart-reply-agent.md).
-- For multi-step command recipes, read [references/workflows.md](./references/workflows.md).
-- For common failures and recovery paths, read [references/errors.md](./references/errors.md).
+- For first-time machine setup, config migration, and **the difference between `roll agent add` (local source) vs `roll agent install` (published package)**, read [references/setup.md](./references/setup.md).
+- For multi-step Roll CLI recipes and troubleshooting sequences, read [references/workflows.md](./references/workflows.md).
+- For common Roll-layer failures and recovery paths, read [references/errors.md](./references/errors.md).
+- For cross-agent sequencing, verification patterns, and shared orchestration pitfalls, read [references/cross-agent-orchestration.md](./references/cross-agent-orchestration.md).
+- For tool input/output details, env declarations, and capability boundaries, read the target subagent's own `SKILL.md` or runtime metadata.
