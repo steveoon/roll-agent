@@ -24,7 +24,7 @@ description: 浏览器操控 Agent。控制浏览器操作招聘平台——读�
 - `zhipin_get_candidate_info(candidateName?, index?, maxMessages?)` — 提取候选人资料和聊天记录。指定 candidateName 会自动打开对应聊天
 - `zhipin_send_reply(message, candidateName?, index?)` — 发送消息。指定 candidateName 会自动打开对应聊天后发送
 - `zhipin_exchange_wechat(candidateName?, index?)` — 换微信。指定 candidateName 会自动打开对应聊天后执行
-- `zhipin_get_username()` — 获取当前登录的招聘者用户名
+- `zhipin_get_username()` — 获取当前登录的招聘者用户名（依赖已跟踪页面，需先 open_platform 或 select_page）
 
 ## BOSS直聘 — 推荐列表 Tools
 
