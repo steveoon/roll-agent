@@ -51,7 +51,7 @@
     "gray-matter": "^4.0.3",
     "ora": "^8.1.0",
     "yaml": "^2.7.0",
-    "zod": "^3.25.0"
+    "zod": "^3.25.76"
   },
   "devDependencies": {
     "@types/node": "^22.0.0"
