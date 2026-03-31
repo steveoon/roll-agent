@@ -1,5 +1,23 @@
 # @roll-agent/browser-use-agent
 
+## 0.3.0
+
+### Minor Changes
+
+- [#21](https://github.com/steveoon/roll-agent/pull/21) [`a6747b8`](https://github.com/steveoon/roll-agent/commit/a6747b8a1f3995246817054d36de120dd921e84e) Thanks [@steveoon](https://github.com/steveoon)! - refactor(browser-use): zhipin_get_username 升级为语义定位优先 + CSS 兜底的混合定位
+  - 四策略证据收集：P1 语义角色（getByRole）+ P2 ARIA snapshot + P3 叶子文本 + P4 CSS 兜底
+  - 纯函数打分择优，支持位置权重（xRatio）和跨策略交叉确认
+  - 输出 schema 增量扩展：新增 usedStrategy/source 字段，保留 usedSelector 兼容
+  - 抽取 platform-page.ts 复用平台页面查找逻辑
+  - zhipin_get_username 现在仅复用当前 runtime 已跟踪的 BOSS直聘页面，不再对未跟踪页面做隐式扫描或副作用恢复；首次使用需先 open_platform，或通过 list_pages + select_page 恢复跟踪
+  - 修复 username 长度判断 off-by-one（< 改回 <=）
+
+### Patch Changes
+
+- Updated dependencies [[`6e92776`](https://github.com/steveoon/roll-agent/commit/6e9277676a9c9a654906f5d75f998de7033765ac)]:
+  - @roll-agent/sdk@0.1.3
+  - @roll-agent/browser@0.1.3
+
 ## 0.2.2
 
 ### Patch Changes
