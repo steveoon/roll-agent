@@ -29,6 +29,7 @@
   "scripts": {
     "prepublishOnly": "node ../../scripts/require-pnpm-publish.mjs",
     "dev": "node --experimental-strip-types src/index.ts",
+    "test": "node --experimental-strip-types --test \"src/**/*.test.ts\"",
     "build": "rm -rf dist && tsc -p tsconfig.build.json",
     "typecheck": "tsc --noEmit",
     "clean": "rm -rf dist"
@@ -52,7 +53,7 @@
   "dependencies": {
     "@roll-agent/sdk": "workspace:*",
     "@roll-agent/browser": "workspace:*",
-    "zod": "^3.25.0"
+    "zod": "^3.25.76"
   },
   "devDependencies": {
     "@types/node": "^22.0.0"

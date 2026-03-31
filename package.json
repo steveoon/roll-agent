@@ -5,7 +5,7 @@
   "engines": {
     "node": ">=22.6.0"
   },
-  "packageManager": "pnpm@10.11.0",
+  "packageManager": "pnpm@10.31.0",
   "scripts": {
     "dev": "node --experimental-strip-types packages/core/src/cli/index.ts",
     "build": "pnpm -r run build",
