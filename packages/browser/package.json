@@ -29,7 +29,7 @@
   },
   "scripts": {
     "prepublishOnly": "node ../../scripts/require-pnpm-publish.mjs",
-    "build": "rm -rf dist && tsc -p tsconfig.build.json",
+    "build": "rm -rf dist && tsc -p tsconfig.build.json && node ../../scripts/obfuscate.mjs",
     "typecheck": "tsc --noEmit",
     "test": "node --experimental-strip-types --test \"src/**/*.test.ts\"",
     "clean": "rm -rf dist"

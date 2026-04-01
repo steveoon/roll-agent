@@ -31,7 +31,7 @@
   },
   "scripts": {
     "dev": "node --experimental-strip-types src/cli/index.ts",
-    "build": "rm -rf dist && tsc -p tsconfig.build.json",
+    "build": "rm -rf dist && tsc -p tsconfig.build.json && node ../../scripts/obfuscate.mjs",
     "typecheck": "tsc --noEmit",
     "test": "node --experimental-strip-types --test \"src/**/*.test.ts\"",
     "test:e2e": "node --experimental-strip-types --test \"src/**/*.e2e.ts\"",
