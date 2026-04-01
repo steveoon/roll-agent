@@ -2,8 +2,6 @@
 name: smart-reply-agent
 description: 招聘智能回复 Agent。根据候选人消息、品牌数据和回复策略，生成个性化招聘回复。
 metadata:
-  roll-transport: stdio
-  roll-command: node --experimental-strip-types src/index.ts
   roll-env-file: references/env.yaml
 ---
 
