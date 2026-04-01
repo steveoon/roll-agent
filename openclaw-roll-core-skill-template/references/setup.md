@@ -59,10 +59,11 @@ If the agent is published as an npm package, use:
 roll agent install <package-name>
 ```
 
-Example:
+Examples:
 
 ```bash
 roll agent install @roll-agent/browser-use-agent
+roll agent install @roll-agent/smart-reply-agent
 ```
 
 ### C. Important caveat for local `install`
