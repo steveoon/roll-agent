@@ -1,6 +1,6 @@
 {
   "name": "@roll-agent/smart-reply-agent",
-  "version": "0.0.2",
+  "version": "0.1.0",
   "type": "module",
   "repository": {
     "type": "git",
@@ -48,7 +48,9 @@
     },
     "start": {
       "command": "node",
-      "args": ["dist/index.js"]
+      "args": [
+        "dist/index.js"
+      ]
     }
   },
   "dependencies": {
