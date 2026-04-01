@@ -8,3 +8,5 @@ feat(smart-reply): publish as public npm package with pipeline sub-path export
 - Add `./pipeline` sub-path export exposing `generateSmartReply` and all related types
 - Add `rollAgent` manifest for stdio on-demand agent registration
 - Exclude test files from build output
+- Update SKILL.md with capability boundary, routing signals, and cross-agent workflow
+- Add `references/reply-policy-schema.md` documenting all configurable policy fields
