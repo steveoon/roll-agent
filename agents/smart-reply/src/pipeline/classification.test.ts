@@ -1,7 +1,12 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { sanitizePlan, selectContextNeeds, selectPrimaryNeed } from "./classification.ts";
-import type { TurnPlan } from "../types/reply-policy.ts";
+import {
+  normalizeGeneratedTurnPlanOutput,
+  sanitizePlan,
+  selectContextNeeds,
+  selectPrimaryNeed,
+} from "./classification.ts";
+import { TurnPlanSchema, type TurnPlan } from "../types/reply-policy.ts";
 
 function makePlan(overrides?: Partial<TurnPlan>): TurnPlan {
   return {
@@ -45,6 +50,58 @@ describe("sanitizePlan", () => {
     assert.deepEqual(sanitized.subGoals, ["回答问题", "推进下一步"]);
     assert.deepEqual(sanitized.needs, ["schedule"]);
     assert.equal(sanitized.primaryNeed, "schedule");
+  });
+});
+
+describe("normalizeGeneratedTurnPlanOutput", () => {
+  it("clips Anthropic-compatible array fields back to the internal schema limits", () => {
+    const normalized = normalizeGeneratedTurnPlanOutput(
+      makePlan({
+        subGoals: ["1", "2", "3"],
+        needs: [
+          "salary",
+          "schedule",
+          "location",
+          "stores",
+          "policy",
+          "availability",
+          "requirements",
+          "interview",
+          "wechat",
+        ],
+        riskFlags: [
+          "insurance_promise_risk",
+          "age_sensitive",
+          "confrontation_emotion",
+          "urgency_high",
+          "qualification_mismatch",
+          "age_sensitive",
+          "urgency_high",
+        ],
+        extractedInfo: {
+          mentionedBrand: null,
+          city: "佛山",
+          mentionedLocations: null,
+          mentionedDistricts: Array.from({ length: 12 }, (_, index) => ({
+            district: `区${index + 1}`,
+            confidence: 0.8,
+          })),
+          specificAge: null,
+          hasUrgency: null,
+          preferredSchedule: null,
+        },
+      }),
+    );
+
+    const parsed = TurnPlanSchema.safeParse(normalized);
+
+    assert.equal(parsed.success, true);
+    if (!parsed.success) return;
+
+    assert.equal(parsed.data.subGoals.length, 2);
+    assert.equal(parsed.data.needs.length, 8);
+    assert.equal(parsed.data.riskFlags.length, 6);
+    assert.equal(parsed.data.extractedInfo.mentionedDistricts?.length, 10);
   });
 });
 
