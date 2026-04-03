@@ -206,6 +206,18 @@ citty 子命令通过动态 `import()` 懒加载，CLI 启动不会加载所有�
 - 编码规则：不要在懒加载点直接写死 `import("./xxx.ts")`；统一用 helper 根据 `import.meta.url` 推断当前后缀（`.ts/.js`），再拼接并 `import()`
 - 发布前校验：必须执行 `pnpm --filter @roll-agent/core build && node packages/core/dist/cli/index.js agent health`，无已注册 agent 时输出“暂无已注册 Agent”即通过
 
+### Dev Spawn Fallback（开发模式自动 type-strip）
+
+`pnpm dev` 下 roll-core 自身有 `--experimental-strip-types`，但 spawn 子 Agent 子进程时读的是 `package.json#rollAgent.start`（生产配置 `node dist/index.js`）。workspace 内 SDK 的 exports 指向 `src/index.ts`，裸 `node` 无法处理 `.ts`。
+
+`registry/dev-spawn.ts` 提供共享 helper `resolveDevSpawnSpec()`，在 spawn 前自动检测并降级：
+
+- 仅对 `local-path` / `git` source 生效（`installed-package` / `remote-manifest` 跳过）
+- 仅当 `node` + 单参数 `dist/*.js` + 对应 `src/*.ts` 存在时触发
+- 将 `node dist/index.js` → `node --experimental-strip-types src/index.ts`
+
+调用点在 `run.ts`、`ask.ts`、`update.ts`（on-demand stdio）和 `process-manager.ts`（core-managed），均在调用 `connect()` / `spawn()` 之前解析。`McpClientManager.connect()` 签名不感知此机制。
+
 ## Workspace 依赖解析
 
 SDK 的 `exports` 在开发时指向 `./src/index.ts`（直接引用源码），发布时通过 `publishConfig.exports` 指向 `./dist/`。这样 workspace 内其他包（如 `smart-reply-agent`）无需先构建 SDK 即可获得类型。
