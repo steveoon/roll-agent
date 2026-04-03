@@ -1,5 +1,20 @@
 # @roll-agent/browser-use-agent
 
+## 0.3.2
+
+### Patch Changes
+
+- [#33](https://github.com/steveoon/roll-agent/pull/33) [`5661430`](https://github.com/steveoon/roll-agent/commit/5661430138b6e86d6025d209702271ad3d3cd793) Thanks [@steveoon](https://github.com/steveoon)! - build: bundle published packages into single JS files via esbuild
+
+  Replace multi-file tsc output with esbuild single-file bundles to eliminate
+  internal file structure from dist/. Build pipeline is now
+  tsc --emitDeclarationOnly → esbuild bundle → terser minification.
+  .d.ts files preserved as-is for TypeScript consumers.
+
+- Updated dependencies [[`5661430`](https://github.com/steveoon/roll-agent/commit/5661430138b6e86d6025d209702271ad3d3cd793)]:
+  - @roll-agent/sdk@0.1.5
+  - @roll-agent/browser@0.1.5
+
 ## 0.3.1
 
 ### Patch Changes
