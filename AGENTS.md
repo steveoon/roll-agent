@@ -16,7 +16,7 @@ pnpm dev                          # 运行 CLI 入口
 pnpm dev -- agent list            # 运行子命令
 
 # 构建与检查
-pnpm build                        # tsc 构建所有包（输出 dist/）
+pnpm build                        # tsc 构建 + terser 混淆所有包（输出 dist/）
 pnpm typecheck                    # tsc --noEmit 类型检查
 pnpm lint                         # ESLint 9 + neostandard
 pnpm format                       # Prettier 格式化
@@ -131,8 +131,8 @@ import { defineAgent, defineTool } from "@roll-agent/sdk";
 
 ### tsconfig 策略
 
-- `tsconfig.base.json` — 开发/IDE 用（noEmit）
-- `tsconfig.build.json` — 发布构建用（输出 .js + .d.ts + .map）
+- `tsconfig.base.json` — 开发/IDE 用（noEmit，`"types": ["node"]`）
+- `tsconfig.build.json` — 发布构建用（输出 .js + .d.ts，无 source map）
 - 各包 `tsconfig.json` extends base，`tsconfig.build.json` extends root build
 
 ## 关键架构洞察
@@ -201,6 +201,14 @@ citty 子命令通过动态 `import()` 懒加载，CLI 启动不会加载所有�
 - 本质原因：`tsc` 的 `rewriteRelativeImportExtensions` 对动态 `import()` 的改写并不总是可靠，某些懒加载写法会在 `dist` 中残留 `.ts` specifier，运行时（只存在 `.js`）直接崩溃
 - 编码规则：不要在懒加载点直接写死 `import("./xxx.ts")`；统一用 helper 根据 `import.meta.url` 推断当前后缀（`.ts/.js`），再拼接并 `import()`
 - 发布前校验：必须执行 `pnpm --filter @roll-agent/core build && node packages/core/dist/cli/index.js agent health`，无已注册 agent 时输出“暂无已注册 Agent”即通过
+
+### 本地开发态启动回退（Dev Spawn Fallback）
+
+`pnpm dev` 下 roll-core spawn 子 Agent 时读 `package.json#rollAgent.start`（`node dist/index.js`），但 workspace 内 SDK exports 指向 `.ts` 源码，裸 `node` 无法处理。`registry/dev-spawn.ts` 在 spawn 前自动检测并回退：
+
+- 仅 `local-path` / `git` source 生效；`installed-package` / `remote-manifest` 跳过
+- 仅 `node` + 单参数 `dist/*.js` + 对应 `src/*.ts` 存在时触发
+- 覆盖 on-demand stdio（run/ask/update）和 core-managed（process-manager）两条路径
 
 ## Workspace 依赖解析
 

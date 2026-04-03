@@ -4,6 +4,7 @@ import { getAgentEnv } from "../../config/helpers.ts";
 import { createProviderModel } from "../../llm/providers.ts";
 import { McpClientManager } from "../../mcp/client-manager.ts";
 import { AgentStore } from "../../registry/store.ts";
+import { resolveTransportWithDevSpawnSpec } from "../../registry/dev-spawn.ts";
 import { routeWithLLM } from "../../router/llm-router.ts";
 import { extractToolInput } from "../../tool-runtime/argument-extractor.ts";
 import { formatValidationIssuesMessage } from "../../tool-runtime/messages.ts";
@@ -178,9 +179,10 @@ export default defineCommand({
     try {
       log.info(`连接 Agent "${agent.skill.name}"...`);
       const agentEnv = getAgentEnv(config, agent.skill.name);
+      const transport = resolveTransportWithDevSpawnSpec(agent);
       const client = await clientManager.connect(
         agent.skill.name,
-        agent.transport,
+        transport,
         agent.installPath,
         { samplingModel, ...(agentEnv ? { env: agentEnv } : {}) },
       );

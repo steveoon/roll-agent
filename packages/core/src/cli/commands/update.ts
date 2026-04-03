@@ -10,6 +10,7 @@ import {
   stopAgentGracefully,
   waitForAgentReady,
 } from "../../registry/process-manager.ts";
+import { resolveTransportWithDevSpawnSpec } from "../../registry/dev-spawn.ts";
 import { runAgentSetup } from "../../registry/runtime-setup.ts";
 import { AgentStore } from "../../registry/store.ts";
 import { discoverAgent } from "../../registry/discovery.ts";
@@ -158,7 +159,8 @@ async function refreshRemoteAgent(agent: RegisteredAgent): Promise<boolean> {
   const spinner = createSpinner(`刷新 ${agent.skill.name} (MCP tools/list)...`).start();
   const manager = new McpClientManager();
   try {
-    const client = await manager.connect(agent.skill.name, agent.transport, agent.installPath);
+    const transport = resolveTransportWithDevSpawnSpec(agent);
+    const client = await manager.connect(agent.skill.name, transport, agent.installPath);
     const { tools } = await client.listTools();
     spinner.succeed(`${agent.skill.name} 元数据已刷新（${tools.length} 个 tool）`);
     return true;
