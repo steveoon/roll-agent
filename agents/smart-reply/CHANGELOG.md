@@ -1,5 +1,15 @@
 # smart-reply-agent
 
+## 0.1.2
+
+### Patch Changes
+
+- [#28](https://github.com/steveoon/roll-agent/pull/28) [`5bbcc8e`](https://github.com/steveoon/roll-agent/commit/5bbcc8e5a5dee102dab477bf5654281359ca9aba) Thanks [@steveoon](https://github.com/steveoon)! - fix: Anthropic structured output compatibility for planTurn
+  - Strip unsupported JSON Schema keywords (`maxItems`, `maximum`, `minimum`, `exclusiveMaximum`, `exclusiveMinimum`) from output schema sent to Anthropic models
+  - Add `normalizeGeneratedTurnPlanOutput` to clip over-limit arrays before strict Zod validation
+  - Only triggered when `classifyModel` starts with `anthropic/`; other providers unaffected
+  - Original strict schema remains the internal contract — compatibility layer only affects what is sent to the LLM
+
 ## 0.1.1
 
 ### Patch Changes
