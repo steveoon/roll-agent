@@ -28,6 +28,7 @@ const PACKAGE_CHECKS = [
     name: "@roll-agent/sdk",
     cwd: resolve(repoRoot, "packages/sdk"),
     expectedFiles: ["package/dist/index.js", "package/dist/index.d.ts"],
+    expectedJavaScriptFiles: ["package/dist/index.js"],
     verifyManifest(manifest) {
       assert.equal(manifest.exports?.["."].default, "./dist/index.js");
       assert.equal(manifest.exports?.["."].types, "./dist/index.d.ts");
@@ -37,6 +38,7 @@ const PACKAGE_CHECKS = [
     name: "@roll-agent/browser",
     cwd: resolve(repoRoot, "packages/browser"),
     expectedFiles: ["package/dist/index.js", "package/dist/index.d.ts"],
+    expectedJavaScriptFiles: ["package/dist/index.js"],
     verifyManifest(manifest) {
       assert.equal(manifest.exports?.["."].default, "./dist/index.js");
       assert.equal(manifest.exports?.["."].types, "./dist/index.d.ts");
@@ -46,6 +48,7 @@ const PACKAGE_CHECKS = [
     name: "@roll-agent/browser-use-agent",
     cwd: resolve(repoRoot, "agents/browser-use"),
     expectedFiles: ["package/dist/index.js", "package/dist/index.d.ts", "package/SKILL.md"],
+    expectedJavaScriptFiles: ["package/dist/index.js"],
     verifyManifest(manifest) {
       assert.equal(manifest.exports?.["."].default, "./dist/index.js");
       assert.equal(manifest.exports?.["."].types, "./dist/index.d.ts");
@@ -64,6 +67,7 @@ const PACKAGE_CHECKS = [
       "package/SKILL.md",
       "package/references/reply-policy-schema.md",
     ],
+    expectedJavaScriptFiles: ["package/dist/index.js", "package/dist/pipeline.js"],
     verifyManifest(manifest) {
       assert.equal(manifest.exports?.["."].default, "./dist/index.js");
       assert.equal(manifest.exports?.["."].types, "./dist/index.d.ts");
@@ -89,6 +93,7 @@ async function main() {
       pkg.verifyManifest(manifest);
       assertNoMapFiles(pkg.name, tarEntries);
       assertExpectedFiles(pkg.name, tarEntries, pkg.expectedFiles);
+      assertExpectedJavaScriptFiles(pkg.name, tarEntries, pkg.expectedJavaScriptFiles);
       await assertNoSourceMapComments(pkg.name, tarballPath, tarEntries);
 
       console.log(`  OK: ${pkg.name}`);
@@ -135,6 +140,21 @@ function assertExpectedFiles(packageName, tarEntries, expectedFiles) {
     missingFiles.length,
     0,
     `${packageName} tarball is missing expected files:\n${missingFiles.join("\n")}`,
+  );
+}
+
+function assertExpectedJavaScriptFiles(packageName, tarEntries, expectedJavaScriptFiles = undefined) {
+  if (!expectedJavaScriptFiles) {
+    return;
+  }
+
+  const actualJavaScriptFiles = tarEntries.filter((entry) => entry.endsWith(".js")).sort();
+  const expectedSorted = [...expectedJavaScriptFiles].sort();
+
+  assert.deepEqual(
+    actualJavaScriptFiles,
+    expectedSorted,
+    `${packageName} tarball has unexpected JavaScript files:\nactual=${actualJavaScriptFiles.join("\n")}\nexpected=${expectedSorted.join("\n")}`,
   );
 }
 
