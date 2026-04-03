@@ -1,5 +1,17 @@
 # @roll-agent/core
 
+## 0.3.3
+
+### Patch Changes
+
+- [#30](https://github.com/steveoon/roll-agent/pull/30) [`d4409be`](https://github.com/steveoon/roll-agent/commit/d4409bec1ad398a28dcaac1edc481f4d89da317d) Thanks [@steveoon](https://github.com/steveoon)! - feat: auto-detect local dev agents and fallback to type-stripping
+
+  When spawning on-demand stdio agents registered via `local-path` or `git`,
+  automatically fall back from `node dist/index.js` to
+  `node --experimental-strip-types src/index.ts` if the source file exists.
+  This unifies the dev fallback behavior already available for `core-managed`
+  agents (like browser-use) to also cover `on-demand` agents (like smart-reply).
+
 ## 0.3.2
 
 ### Patch Changes
