@@ -131,9 +131,18 @@ import { defineAgent, defineTool } from "@roll-agent/sdk";
 
 ### tsconfig 策略
 
-- `tsconfig.base.json` — 开发/IDE 用（noEmit）
-- `tsconfig.build.json` — 发布构建用（输出 .js + .d.ts + .map）
+- `tsconfig.base.json` — 开发/IDE 用（noEmit，`"types": ["node"]`）
+- `tsconfig.build.json` — 发布构建用（输出 .js + .d.ts，无 source map）
 - 各包 `tsconfig.json` extends base，`tsconfig.build.json` extends root build
+
+### 构建与混淆
+
+各包 build 脚本统一为 `tsc → scripts/obfuscate.mjs`：
+
+1. `tsc -p tsconfig.build.json` — 编译 .ts → .js + .d.ts
+2. `scripts/obfuscate.mjs` — terser 压缩 + mangle（`keep_classnames: true`），删除 .map 文件，strip sourceMappingURL
+
+`.d.ts` 文件不受混淆影响，TypeScript 消费者的类型体验不变。开发模式（`pnpm dev`/`pnpm test`）使用 `--experimental-strip-types` 直接运行 .ts，不经过 dist。
 
 ## 关键架构洞察
 
