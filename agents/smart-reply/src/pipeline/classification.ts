@@ -5,7 +5,10 @@ import {
   DEFAULT_PROVIDER_CONFIGS,
 } from "../ai/model-registry.ts";
 import type { ModelId } from "../ai/model-registry.ts";
-import { safeGenerateObject } from "../ai/structured-output.ts";
+import {
+  createStructuredOutputCompatibilitySchema,
+  safeGenerateObject,
+} from "../ai/structured-output.ts";
 import {
   FunnelStageSchema,
   ChannelTypeSchema,
@@ -37,7 +40,7 @@ function getActiveStages(channelType: unknown = "public"): FunnelStage[] {
 
 function buildDynamicPlanningSchema(
   activeStages: FunnelStage[],
-): z.ZodObject<Record<string, z.ZodTypeAny>> {
+): z.ZodType<TurnPlan> {
   return z.object({
     stage: z.enum(activeStages as [FunnelStage, ...FunnelStage[]]),
     subGoals: TurnPlanSchema.shape.subGoals,
@@ -48,6 +51,57 @@ function buildDynamicPlanningSchema(
     extractedInfo: TurnPlanSchema.shape.extractedInfo,
     reasoningText: TurnPlanSchema.shape.reasoningText,
   });
+}
+
+/**
+ * 数组字段的最大长度限制，必须与 TurnPlanSchema / TurnExtractedInfoSchema 的 .max() 保持一致。
+ * @see {@link TurnPlanSchema} — subGoals.max(2), needs.max(8), riskFlags.max(6)
+ * @see {@link TurnExtractedInfoSchema} — mentionedDistricts.max(10)
+ */
+const STRUCTURED_OUTPUT_ARRAY_LIMITS = {
+  subGoals: 2,
+  needs: 8,
+  riskFlags: 6,
+  mentionedDistricts: 10,
+} as const;
+
+function isAnthropicModelId(modelId: string): boolean {
+  return modelId.startsWith("anthropic/");
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+export function normalizeGeneratedTurnPlanOutput(value: unknown): unknown {
+  if (!isRecord(value)) return value;
+
+  const normalized: Record<string, unknown> = { ...value };
+
+  if (Array.isArray(normalized.subGoals)) {
+    normalized.subGoals = normalized.subGoals.slice(0, STRUCTURED_OUTPUT_ARRAY_LIMITS.subGoals);
+  }
+
+  if (Array.isArray(normalized.needs)) {
+    normalized.needs = normalized.needs.slice(0, STRUCTURED_OUTPUT_ARRAY_LIMITS.needs);
+  }
+
+  if (Array.isArray(normalized.riskFlags)) {
+    normalized.riskFlags = normalized.riskFlags.slice(0, STRUCTURED_OUTPUT_ARRAY_LIMITS.riskFlags);
+  }
+
+  if (isRecord(normalized.extractedInfo)) {
+    const extractedInfo: Record<string, unknown> = { ...normalized.extractedInfo };
+    if (Array.isArray(extractedInfo.mentionedDistricts)) {
+      extractedInfo.mentionedDistricts = extractedInfo.mentionedDistricts.slice(
+        0,
+        STRUCTURED_OUTPUT_ARRAY_LIMITS.mentionedDistricts,
+      );
+    }
+    normalized.extractedInfo = extractedInfo;
+  }
+
+  return normalized;
 }
 
 const NEED_RULES: Array<{ need: ReplyNeed; patterns: RegExp[] }> = [
@@ -238,6 +292,7 @@ export async function planTurn(
   const normalizedChannelType = normalizeChannelType(channelType);
   const activeStages = getActiveStages(normalizedChannelType);
   const dynamicSchema = buildDynamicPlanningSchema(activeStages);
+  const useAnthropicStructuredOutputCompatibility = isAnthropicModelId(classifyModel);
   const prompts = buildPlanningPrompt(
     message,
     conversationHistory,
@@ -250,6 +305,17 @@ export async function planTurn(
   const result = await safeGenerateObject({
     model: registry.languageModel(classifyModel),
     schema: dynamicSchema,
+    ...(useAnthropicStructuredOutputCompatibility
+      ? {
+          outputSchema: createStructuredOutputCompatibilitySchema(dynamicSchema, {
+            unsupportedKeywordsByType: {
+              array: ["maxItems", "minItems"],
+              number: ["maximum", "minimum", "exclusiveMaximum", "exclusiveMinimum"],
+            },
+          }),
+          transformOutput: normalizeGeneratedTurnPlanOutput,
+        }
+      : {}),
     schemaName: "TurnPlanningOutput",
     system: prompts.system,
     prompt: prompts.prompt,
@@ -279,5 +345,5 @@ export async function planTurn(
     };
   }
 
-  return sanitizePlan(result.data as TurnPlan, ruleNeeds, message);
+  return sanitizePlan(result.data, ruleNeeds, message);
 }
