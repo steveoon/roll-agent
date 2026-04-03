@@ -1,11 +1,29 @@
-import { readFileSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { ZhipinDataSchema } from "../types/zhipin.ts";
 import type { ZhipinData } from "../types/zhipin.ts";
 import { ReplyPolicyConfigSchema, DEFAULT_REPLY_POLICY } from "../types/reply-policy.ts";
 import type { ReplyPolicyConfig } from "../types/reply-policy.ts";
 
-const DATA_DIR = join(import.meta.dirname, "../../data");
+function resolvePackageRoot(startDir: string): string {
+  let currentDir = startDir;
+
+  while (true) {
+    if (existsSync(join(currentDir, "package.json"))) {
+      return currentDir;
+    }
+
+    const parentDir = dirname(currentDir);
+    if (parentDir === currentDir) {
+      throw new Error(`Could not locate package root from ${startDir}`);
+    }
+
+    currentDir = parentDir;
+  }
+}
+
+// Support both source execution (`src/services`) and bundled execution (`dist`).
+const DATA_DIR = join(resolvePackageRoot(import.meta.dirname), "data");
 const BRAND_CONFIG_PATH = join(DATA_DIR, "brand-config.json");
 const REPLY_POLICY_PATH = join(DATA_DIR, "reply-policy.json");
 

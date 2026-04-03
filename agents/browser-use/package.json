@@ -30,7 +30,7 @@
     "prepublishOnly": "node ../../scripts/require-pnpm-publish.mjs",
     "dev": "node --experimental-strip-types src/index.ts",
     "test": "node --experimental-strip-types --test \"src/**/*.test.ts\"",
-    "build": "rm -rf dist && tsc -p tsconfig.build.json && node ../../scripts/obfuscate.mjs",
+    "build": "rm -rf dist && tsc -p tsconfig.build.json --emitDeclarationOnly && node ../../scripts/bundle.mjs && node ../../scripts/obfuscate.mjs",
     "typecheck": "tsc --noEmit",
     "clean": "rm -rf dist"
   },
