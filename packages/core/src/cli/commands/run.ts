@@ -4,6 +4,7 @@ import { loadConfig } from "../../config/loader.ts";
 import { getAgentEnv } from "../../config/helpers.ts";
 import { AgentStore } from "../../registry/store.ts";
 import { McpClientManager } from "../../mcp/client-manager.ts";
+import { resolveTransportWithDevSpawnSpec } from "../../registry/dev-spawn.ts";
 import { createProviderModel } from "../../llm/providers.ts";
 import { formatValidationIssuesMessage } from "../../tool-runtime/messages.ts";
 import { preflightToolCall } from "../../tool-runtime/preflight.ts";
@@ -57,9 +58,10 @@ export default defineCommand({
 
       log.info(`连接 Agent "${agent.skill.name}"...`);
       const agentEnv = getAgentEnv(config, agent.skill.name);
+      const transport = resolveTransportWithDevSpawnSpec(agent);
       const client = await clientManager.connect(
         agent.skill.name,
-        agent.transport,
+        transport,
         agent.installPath,
         { ...(samplingModel ? { samplingModel } : {}), ...(agentEnv ? { env: agentEnv } : {}) },
       );

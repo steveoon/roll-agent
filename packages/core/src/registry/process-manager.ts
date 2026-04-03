@@ -8,8 +8,10 @@ import {
   unlinkSync,
   writeFileSync,
 } from "node:fs";
-import { resolve, dirname, basename } from "node:path";
+import { resolve, dirname } from "node:path";
 import { McpClientManager } from "../mcp/client-manager.ts";
+import { resolveDevSpawnSpec } from "./dev-spawn.ts";
+import { inferAgentSourceType } from "./source.ts";
 import type { RegisteredAgent } from "../types/agent.ts";
 
 /** PID 文件存放目录 */
@@ -216,6 +218,16 @@ function resolveSpawnSpec(agent: RegisteredAgent): {
   readonly args?: readonly string[];
 } {
   if (agent.transport.type === "stdio") {
+    const fallbackSpec = resolveDevSpawnSpec(
+      agent.transport.command,
+      agent.transport.args,
+      agent.installPath,
+      inferAgentSourceType(agent),
+    );
+    if (fallbackSpec) {
+      return fallbackSpec;
+    }
+
     return {
       command: agent.transport.command,
       ...(agent.transport.args ? { args: agent.transport.args } : {}),
@@ -223,7 +235,12 @@ function resolveSpawnSpec(agent: RegisteredAgent): {
   }
 
   if (agent.runtime.ownership === "core-managed") {
-    const fallbackSpec = resolveManagedDevSpawnSpec(agent);
+    const fallbackSpec = resolveDevSpawnSpec(
+      agent.runtime.start.command,
+      agent.runtime.start.args,
+      agent.installPath,
+      inferAgentSourceType(agent),
+    );
     if (fallbackSpec) {
       return fallbackSpec;
     }
@@ -235,45 +252,6 @@ function resolveSpawnSpec(agent: RegisteredAgent): {
   }
 
   throw new Error(`Agent "${agent.skill.name}" does not have a managed runtime start command`);
-}
-
-function resolveManagedDevSpawnSpec(agent: RegisteredAgent): {
-  readonly command: string;
-  readonly args: readonly string[];
-} | undefined {
-  if (
-    agent.runtime.ownership !== "core-managed" ||
-    !isNodeCommand(agent.runtime.start.command) ||
-    !agent.runtime.start.args ||
-    agent.runtime.start.args.length !== 1
-  ) {
-    return undefined;
-  }
-
-  if (agent.source?.type === "installed-package" || agent.source?.type === "remote-manifest") {
-    return undefined;
-  }
-
-  const [entryArg] = agent.runtime.start.args;
-  if (!entryArg?.startsWith("dist/") || !entryArg.endsWith(".js")) {
-    return undefined;
-  }
-
-  const sourceEntry = entryArg.replace(/^dist\//, "src/").replace(/\.js$/, ".ts");
-  if (!existsSync(resolve(agent.installPath, sourceEntry))) {
-    return undefined;
-  }
-
-  // Local-path / git development sources may not have dist built yet.
-  return {
-    command: agent.runtime.start.command,
-    args: ["--experimental-strip-types", sourceEntry],
-  };
-}
-
-function isNodeCommand(command: string): boolean {
-  const normalized = basename(command).toLowerCase();
-  return command === "node" || normalized === "node" || normalized === "node.exe";
 }
 
 function sleep(ms: number): Promise<void> {
