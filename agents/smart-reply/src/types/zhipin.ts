@@ -32,7 +32,7 @@ export const SalaryDetailsSchema = z.object({
   unit: z.string().nullable(),
   range: z.string().optional(),
   bonus: z.string().optional(),
-  memo: z.string(),
+  memo: z.string().nullable(),
   scenarioSummary: z.string().optional(),
   settlementCycle: z.string().optional(),
 });
@@ -51,7 +51,7 @@ export const BenefitsSchema = z.object({
 export const AttendanceRequirementSchema = z.object({
   requiredDays: z.array(z.number().min(1).max(7)).optional(),
   minimumDays: z.number().min(0).nullable(),
-  description: z.string(),
+  description: z.string().nullable(),
 });
 
 export const TimeSlotAvailabilitySchema = z.object({
@@ -106,6 +106,7 @@ export const PositionSchema = z.object({
   minHoursPerWeek: z.number().min(0).nullable(),
   maxHoursPerWeek: z.number().min(0).nullable(),
   perMonthMinWorkTime: z.number().nullable(),
+  perMonthMinWorkTimeUnit: z.union([z.string(), z.number()]).nullable(),
   attendanceRequirement: AttendanceRequirementSchema.optional(),
 
   // 可用时段（预留未来精细化推荐）

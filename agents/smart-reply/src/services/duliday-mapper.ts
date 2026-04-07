@@ -59,6 +59,7 @@ type ParsedPosition = {
   recruitmentRemark: string | null;
   workTime: DulidayNewWorkTime;
   perMonthMinWorkTime: number | null;
+  perMonthMinWorkTimeUnit: string | number | null;
 };
 
 // ========== 解析入口 ==========
@@ -142,6 +143,7 @@ function parsePosition(raw: unknown): ParsedPosition | null {
     recruitmentRemark: hiring.remark ?? null,
     workTime: pos.workTime,
     perMonthMinWorkTime: pos.workTime.monthWorkTime?.perMonthMinWorkTime ?? null,
+    perMonthMinWorkTimeUnit: pos.workTime.monthWorkTime?.perMonthMinWorkTimeUnit ?? null,
   };
 }
 
@@ -266,6 +268,7 @@ function convertToPosition(p: ParsedPosition): Position {
     minHoursPerWeek: calculateMinHoursPerWeek(wta),
     maxHoursPerWeek: calculateMaxHoursPerWeek(wta),
     perMonthMinWorkTime: p.perMonthMinWorkTime,
+    perMonthMinWorkTimeUnit: p.perMonthMinWorkTimeUnit,
     attendanceRequirement: generateAttendanceRequirement(wta),
 
     // 可用时段
@@ -332,6 +335,14 @@ function normalizeNewWorkTime(nwt: DulidayNewWorkTime): FlatWorkTime {
 
   const combinedArrangementTimes =
     schedule?.combinedArrangement?.map((item) => {
+      const parsedLowercaseStartTime =
+        item.combinedArrangementStartTime != null
+          ? parseTimeStringToSeconds(item.combinedArrangementStartTime)
+          : undefined;
+      const parsedLowercaseEndTime =
+        item.combinedArrangementEndTime != null
+          ? parseTimeStringToSeconds(item.combinedArrangementEndTime)
+          : undefined;
       const rawWeekdays =
         item.weekdays ??
         (typeof item.CombinedArrangementWeekdays === "string"
@@ -343,8 +354,9 @@ function normalizeNewWorkTime(nwt: DulidayNewWorkTime): FlatWorkTime {
         .map((d: unknown) => (typeof d === "number" ? d : Number(d)))
         .filter((d: number) => Number.isFinite(d));
       return {
-        startTime: item.startTime ?? item.CombinedArrangementStartTime ?? 0,
-        endTime: item.endTime ?? item.CombinedArrangementEndTime ?? 0,
+        startTime:
+          item.startTime ?? item.CombinedArrangementStartTime ?? parsedLowercaseStartTime ?? 0,
+        endTime: item.endTime ?? item.CombinedArrangementEndTime ?? parsedLowercaseEndTime ?? 0,
         weekdays,
       };
     }) ?? null;
@@ -371,10 +383,10 @@ export function parseSalaryDetails(
   salaryUnit: string | null,
   welfare: DulidayNewWelfare,
 ): SalaryDetails {
-  const memo = welfare.memo || "";
-  const rangeMatch = memo.match(/(\d+元?-\d+元?)/);
+  const memo = welfare.memo ?? null;
+  const rangeMatch = memo?.match(/(\d+元?-\d+元?)/);
   const range = rangeMatch ? rangeMatch[1] : undefined;
-  const bonusMatch = memo.match(/(奖金[\d～\-~元]+)/);
+  const bonusMatch = memo?.match(/(奖金[\d～\-~元]+)/);
   const bonus = bonusMatch ? bonusMatch[1] : undefined;
 
   return { base: baseSalary, unit: salaryUnit, range, bonus, memo };
@@ -579,7 +591,7 @@ function generateAttendanceRequirement(wta: FlatWorkTime): AttendanceRequirement
   return {
     minimumDays,
     requiredDays: convertWeekdays(requiredDays),
-    description: wta.workTimeRemark || "",
+    description: wta.workTimeRemark ?? null,
   };
 }
 

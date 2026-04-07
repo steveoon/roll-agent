@@ -120,6 +120,7 @@ describe("convertPositionsToZhipinData", () => {
     assert.equal(pos.laborForm, null);
     assert.equal(pos.employmentForm, "长期用工");
     assert.equal(pos.description, "负责门店服务");
+    assert.equal(pos.perMonthMinWorkTimeUnit, null);
   });
 
   it("handles empty positions array", () => {
@@ -223,7 +224,95 @@ describe("parseSalaryDetails", () => {
 
   it("handles null memo", () => {
     const result = parseSalaryDetails(15, null, { haveInsurance: "无", accommodation: "无", memo: null });
-    assert.equal(result.memo, "");
+    assert.equal(result.memo, null);
+  });
+
+  it("keeps null memo as null in converted position", () => {
+    const result = convertPositionsToZhipinData(
+      [
+        makeMinimalPosition({
+          welfare: {
+            haveInsurance: "无",
+            accommodation: "无",
+            memo: null,
+          },
+        }),
+      ],
+      "测试品牌",
+    );
+
+    const pos = result.brands[0]!.stores[0]!.positions[0]!;
+    assert.equal(pos.salary.memo, null);
+  });
+
+  it("keeps null attendance description as null", () => {
+    const result = convertPositionsToZhipinData(
+      [
+        makeMinimalPosition({
+          workTime: {
+            employmentForm: "长期用工",
+            workTimeRemark: null,
+            dayWorkTime: {
+              perDayMinWorkHours: 4,
+            },
+          },
+        }),
+      ],
+      "测试品牌",
+    );
+
+    const pos = result.brands[0]!.stores[0]!.positions[0]!;
+    assert.equal(pos.attendanceRequirement?.description, null);
+  });
+
+  it("parses lowercase combinedArrangement string times from live-like payload", () => {
+    const result = convertPositionsToZhipinData(
+      [
+        makeMinimalPosition({
+          workTime: {
+            employmentForm: "长期用工",
+            dailyShiftSchedule: {
+              arrangementType: "组合排班制",
+              combinedArrangement: [
+                {
+                  combinedArrangementStartTime: "09:00",
+                  combinedArrangementEndTime: "18:30",
+                },
+                {
+                  combinedArrangementStartTime: "13:00",
+                  combinedArrangementEndTime: "22:30",
+                },
+              ],
+            },
+          },
+        }),
+      ],
+      "测试品牌",
+    );
+
+    const pos = result.brands[0]!.stores[0]!.positions[0]!;
+    assert.deepEqual(pos.timeSlots, ["09:00~18:30", "13:00~22:30"]);
+  });
+
+  it("passes through perMonthMinWorkTimeUnit", () => {
+    const result = convertPositionsToZhipinData(
+      [
+        makeMinimalPosition({
+          workTime: {
+            employmentForm: "长期用工",
+            monthWorkTime: {
+              perMonthMinWorkTime: 26,
+              perMonthMinWorkTimeUnit: "天",
+            },
+          },
+        }),
+      ],
+      "测试品牌",
+    );
+
+    const pos = result.brands[0]!.stores[0]!.positions[0]!;
+    assert.equal(pos.perMonthMinWorkTime, 26);
+    assert.equal(pos.perMonthMinWorkTimeUnit, "天");
   });
 });
 

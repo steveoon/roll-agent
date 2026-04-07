@@ -225,6 +225,8 @@ export const DulidayNewWorkTimeSchema = z
                 CombinedArrangementWeekdays: z.union([z.string(), z.array(z.number())]).optional(),
                 CombinedArrangementStartTime: z.number().optional(),
                 CombinedArrangementEndTime: z.number().optional(),
+                combinedArrangementStartTime: z.union([z.string(), z.number()]).optional(),
+                combinedArrangementEndTime: z.union([z.string(), z.number()]).optional(),
                 startTime: z.number().optional(),
                 endTime: z.number().optional(),
                 weekdays: z.array(z.number()).optional(),

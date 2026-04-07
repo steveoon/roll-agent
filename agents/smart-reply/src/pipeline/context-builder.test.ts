@@ -61,6 +61,7 @@ const sampleData: ZhipinData = {
               minHoursPerWeek: null,
               maxHoursPerWeek: null,
               perMonthMinWorkTime: 80,
+              perMonthMinWorkTimeUnit: "小时",
               attendanceRequirement: {
                 minimumDays: 3,
                 description: "每周至少 3 天",
@@ -167,7 +168,7 @@ describe("buildContextInfoByNeeds", () => {
     data.brands[0]!.stores[0]!.positions[0]!.salary = {
       base: null,
       unit: null,
-      memo: "",
+      memo: null,
     };
 
     const result = await buildContextInfoByNeeds(
@@ -200,8 +201,7 @@ describe("buildContextInfoByNeeds", () => {
       "focused",
     );
 
-    assert.ok(result.contextInfo.includes("月最低工时：80"));
-    assert.ok(!result.contextInfo.includes("月最低工时：80小时"));
+    assert.ok(result.contextInfo.includes("月最低工时：80小时"));
   });
 
   it("formats store location without null placeholders", async () => {

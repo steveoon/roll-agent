@@ -45,7 +45,7 @@ export type { PolicyContextDebugInfo };
 
 function buildSalaryDescription(salary: SalaryDetails): string {
   const { base, unit, range, memo } = salary;
-  const normalizedMemo = memo.replace(/\n/g, " ").trim();
+  const normalizedMemo = memo?.replace(/\n/g, " ").trim() ?? "";
 
   if (base == null) {
     if (salary.scenarioSummary && normalizedMemo) {
@@ -476,7 +476,9 @@ export async function buildContextInfoByNeeds(
             context += `  每周工时：${position.minHoursPerWeek || 0}-${position.maxHoursPerWeek || "不限"}小时\n`;
           }
           if (position.perMonthMinWorkTime != null) {
-            context += `  月最低工时：${position.perMonthMinWorkTime}\n`;
+            const monthWorkTimeUnit =
+              position.perMonthMinWorkTimeUnit != null ? String(position.perMonthMinWorkTimeUnit) : "";
+            context += `  月最低工时：${position.perMonthMinWorkTime}${monthWorkTimeUnit}\n`;
           }
         }
         if (hasFactFamily(allowedFactFamilies, "policy")) {
