@@ -28,7 +28,8 @@ export type CandidateInfo = z.infer<typeof CandidateInfoSchema>;
 // ========== 薪资与福利 ==========
 
 export const SalaryDetailsSchema = z.object({
-  base: z.number(),
+  base: z.number().nullable(),
+  unit: z.string().nullable(),
   range: z.string().optional(),
   bonus: z.string().optional(),
   memo: z.string(),
@@ -37,25 +38,20 @@ export const SalaryDetailsSchema = z.object({
 });
 
 export const BenefitsSchema = z.object({
-  items: z.array(z.string()),
-  promotion: z.string().optional(),
+  insurance: z.string().nullable(),
+  accommodation: z.string().nullable(),
+  catering: z.string().nullable(),
+  moreWelfares: z.array(z.string()).nullable(),
+  memo: z.string().nullable(),
+  promotion: z.string().nullable(),
 });
 
 // ========== 出勤/排班 ==========
 
 export const AttendanceRequirementSchema = z.object({
   requiredDays: z.array(z.number().min(1).max(7)).optional(),
-  minimumDays: z.number().min(0).optional(),
+  minimumDays: z.number().min(0).nullable(),
   description: z.string(),
-});
-
-export const ScheduleTypeSchema = z.enum(["fixed", "flexible", "rotating", "on_call"]);
-
-export const AttendancePolicySchema = z.object({
-  punctualityRequired: z.boolean(),
-  lateToleranceMinutes: z.number().min(0),
-  attendanceTracking: z.enum(["strict", "flexible", "none"]),
-  makeupShiftsAllowed: z.boolean(),
 });
 
 export const TimeSlotAvailabilitySchema = z.object({
@@ -66,14 +62,6 @@ export const TimeSlotAvailabilitySchema = z.object({
   priority: z.enum(["high", "medium", "low"]),
 });
 
-export const SchedulingFlexibilitySchema = z.object({
-  canSwapShifts: z.boolean(),
-  advanceNoticeHours: z.number().min(0),
-  partTimeAllowed: z.boolean(),
-  weekendRequired: z.boolean(),
-  holidayRequired: z.boolean(),
-});
-
 // ========== 招聘要求 ==========
 
 export const HiringRequirementsSchema = z.object({
@@ -82,6 +70,9 @@ export const HiringRequirementsSchema = z.object({
   genderRequirement: z.string().nullable().optional(),
   education: z.string().nullable().optional(),
   healthCertificate: z.string().nullable().optional(),
+  languages: z.string().nullable().optional(),
+  certificatesRaw: z.string().nullable().optional(),
+  recruitmentRemark: z.string().nullable().optional(),
 });
 
 export type HiringRequirements = z.infer<typeof HiringRequirementsSchema>;
@@ -89,27 +80,42 @@ export type HiringRequirements = z.infer<typeof HiringRequirementsSchema>;
 // ========== 岗位 ==========
 
 export const PositionSchema = z.object({
+  // 基础信息
   id: z.string(),
   name: z.string(),
+  sourceJobName: z.string(),
+  jobCategory: z.string().nullable(),
   brandId: z.string().optional(),
   brandName: z.string().optional(),
   projectId: z.string().optional(),
   projectName: z.string().optional(),
-  timeSlots: z.array(z.string()),
+  description: z.string().nullable(),
+
+  // 用工形式
+  laborForm: z.string().nullable(),
+  employmentForm: z.string().nullable(),
+  trainingRequired: z.string().nullable(),
+  probationRequired: z.string().nullable(),
+
+  // 薪资
   salary: SalaryDetailsSchema,
-  workHours: z.string(),
-  benefits: BenefitsSchema,
-  requirements: z.array(z.string()),
-  urgent: z.boolean(),
-  scheduleType: ScheduleTypeSchema,
-  attendancePolicy: AttendancePolicySchema,
-  availableSlots: z.array(TimeSlotAvailabilitySchema),
-  schedulingFlexibility: SchedulingFlexibilitySchema,
-  minHoursPerWeek: z.number().min(0).optional(),
-  maxHoursPerWeek: z.number().min(0).optional(),
+
+  // 排班与工时
+  timeSlots: z.array(z.string()),
+  workHours: z.string().nullable(),
+  minHoursPerWeek: z.number().min(0).nullable(),
+  maxHoursPerWeek: z.number().min(0).nullable(),
+  perMonthMinWorkTime: z.number().nullable(),
   attendanceRequirement: AttendanceRequirementSchema.optional(),
+
+  // 可用时段（预留未来精细化推荐）
+  availableSlots: z.array(TimeSlotAvailabilitySchema),
+
+  // 福利
+  benefits: BenefitsSchema,
+
+  // 招聘要求
   hiringRequirements: HiringRequirementsSchema.optional(),
-  description: z.string().optional(),
 });
 
 // ========== 门店 ==========
@@ -120,8 +126,8 @@ export const StoreSchema = z.object({
   name: z.string(),
   city: z.string().optional(),
   location: z.string(),
-  district: z.string(),
-  subarea: z.string(),
+  district: z.string().nullable(),
+  subarea: z.string().nullable(),
   coordinates: CoordinatesSchema,
   positions: z.array(PositionSchema),
 });
@@ -151,10 +157,7 @@ export const ZhipinDataSchema = z.object({
 export type SalaryDetails = z.infer<typeof SalaryDetailsSchema>;
 export type Benefits = z.infer<typeof BenefitsSchema>;
 export type AttendanceRequirement = z.infer<typeof AttendanceRequirementSchema>;
-export type ScheduleType = z.infer<typeof ScheduleTypeSchema>;
-export type AttendancePolicy = z.infer<typeof AttendancePolicySchema>;
 export type TimeSlotAvailability = z.infer<typeof TimeSlotAvailabilitySchema>;
-export type SchedulingFlexibility = z.infer<typeof SchedulingFlexibilitySchema>;
 export type Position = z.infer<typeof PositionSchema>;
 export type Store = z.infer<typeof StoreSchema>;
 export type BrandDatasetMeta = z.infer<typeof BrandDatasetMetaSchema>;

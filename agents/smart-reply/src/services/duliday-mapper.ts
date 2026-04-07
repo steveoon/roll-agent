@@ -11,8 +11,6 @@ import type {
   Position,
   SalaryDetails,
   Benefits,
-  AttendancePolicy,
-  SchedulingFlexibility,
   TimeSlotAvailability,
   AttendanceRequirement,
   HiringRequirements,
@@ -23,7 +21,13 @@ import type {
 type ParsedPosition = {
   jobId: number;
   jobName: string;
+  jobNickName: string | null;
+  jobCategoryName: string | null;
   jobContent: string | null;
+  laborForm: string | null;
+  employmentForm: string;
+  trainingRequired: string | null;
+  probationRequired: string | null;
   brandId: string | undefined;
   brandName: string | undefined;
   projectId: number | undefined;
@@ -35,13 +39,11 @@ type ParsedPosition = {
   storeAddress: string;
   longitude: number | undefined;
   latitude: number | undefined;
-  salary: number;
-  salaryUnitStr: string;
+  salary: number | null;
+  salaryUnitStr: string | null;
   salaryScenarioList: DulidaySalaryScenario[] | null;
   welfare: DulidayNewWelfare;
-  cooperationMode: number;
   requirementNum: number;
-  thresholdNum: number;
   signUpNum: number | null;
   basicPersonalRequirements: {
     minAge?: number | null;
@@ -52,7 +54,11 @@ type ParsedPosition = {
     education?: string | null;
     healthCertificate?: string | null;
   } | null;
+  languages: string | null;
+  certificatesRaw: string | null;
+  recruitmentRemark: string | null;
   workTime: DulidayNewWorkTime;
+  perMonthMinWorkTime: number | null;
 };
 
 // ========== 解析入口 ==========
@@ -71,13 +77,13 @@ function parsePosition(raw: unknown): ParsedPosition | null {
     salary.salary ??
     salary.salaryScenarioList?.find((s) => s.salaryType === "正式")?.basicSalary?.basicSalary ??
     salary.salaryScenarioList?.[0]?.basicSalary?.basicSalary ??
-    0;
+    null;
 
   const resolvedSalaryUnit =
     salary.salaryUnitStr ??
     salary.salaryScenarioList?.find((s) => s.salaryType === "正式")?.basicSalary?.basicSalaryUnit ??
     salary.salaryScenarioList?.[0]?.basicSalary?.basicSalaryUnit ??
-    "元/小时";
+    null;
 
   // storeId fallback: hash from storeName+address
   let storeId = store?.storeId;
@@ -89,7 +95,13 @@ function parsePosition(raw: unknown): ParsedPosition | null {
   return {
     jobId: basic.jobId,
     jobName: basic.jobName,
+    jobNickName: basic.jobNickName ?? null,
+    jobCategoryName: basic.jobCategoryName ?? null,
     jobContent: basic.jobContent ?? null,
+    laborForm: basic.laborForm ?? null,
+    employmentForm: pos.workTime.employmentForm,
+    trainingRequired: basic.needTraining ?? null,
+    probationRequired: basic.needProbationWork ?? null,
     brandId:
       basic.brandId !== undefined
         ? String(basic.brandId)
@@ -110,9 +122,7 @@ function parsePosition(raw: unknown): ParsedPosition | null {
     salaryUnitStr: resolvedSalaryUnit,
     salaryScenarioList: salary.salaryScenarioList ?? null,
     welfare: pos.welfare,
-    cooperationMode: hiring.cooperationMode ?? 0,
     requirementNum: hiring.requirementNum ?? 0,
-    thresholdNum: hiring.thresholdNum ?? 0,
     signUpNum: hiring.signUpNum ?? null,
     basicPersonalRequirements: hiring.basicPersonalRequirements
       ? {
@@ -127,7 +137,11 @@ function parsePosition(raw: unknown): ParsedPosition | null {
           healthCertificate: hiring.certificate.healthCertificate ?? null,
         }
       : null,
+    languages: hiring.language?.languages ?? null,
+    certificatesRaw: hiring.certificate?.certificates ?? null,
+    recruitmentRemark: hiring.remark ?? null,
     workTime: pos.workTime,
+    perMonthMinWorkTime: pos.workTime.monthWorkTime?.perMonthMinWorkTime ?? null,
   };
 }
 
@@ -222,38 +236,52 @@ function convertToPosition(p: ParsedPosition): Position {
   }
 
   return {
+    // 基础信息
     id: `pos_${p.jobId}`,
-    name: extractPositionType(p.jobName),
+    name: p.jobNickName ?? extractPositionType(p.jobName),
+    sourceJobName: p.jobName,
+    jobCategory: p.jobCategoryName,
     brandId: p.brandId,
     brandName: p.brandName,
     projectId: p.projectId !== undefined ? String(p.projectId) : undefined,
     projectName: p.projectName,
-    timeSlots,
+    description: p.jobContent || null,
+
+    // 用工形式
+    laborForm: p.laborForm,
+    employmentForm: p.employmentForm,
+    trainingRequired: p.trainingRequired,
+    probationRequired: p.probationRequired,
+
+    // 薪资
     salary: {
-      ...parseSalaryDetails(p.salary, p.welfare),
+      ...parseSalaryDetails(p.salary, p.salaryUnitStr, p.welfare),
       scenarioSummary: buildScenarioSummary(p.salaryScenarioList),
       settlementCycle: extractSettlementCycle(p.salaryScenarioList),
     },
-    workHours: String(wta.perDayMinWorkHours ?? 8),
-    benefits: parseBenefits(p.welfare),
-    requirements: generateRequirements(p),
-    urgent: p.requirementNum > 3,
-    scheduleType: p.cooperationMode === 2 ? "flexible" : "fixed",
-    attendancePolicy: generateAttendancePolicy(p.cooperationMode),
-    availableSlots: generateAvailableSlots(p, wta),
-    schedulingFlexibility: generateSchedulingFlexibility(p, wta),
+
+    // 排班与工时
+    timeSlots,
+    workHours: wta.perDayMinWorkHours != null ? String(wta.perDayMinWorkHours) : null,
     minHoursPerWeek: calculateMinHoursPerWeek(wta),
     maxHoursPerWeek: calculateMaxHoursPerWeek(wta),
+    perMonthMinWorkTime: p.perMonthMinWorkTime,
     attendanceRequirement: generateAttendanceRequirement(wta),
+
+    // 可用时段
+    availableSlots: generateAvailableSlots(p, wta),
+
+    // 福利
+    benefits: parseBenefits(p.welfare),
+
+    // 招聘要求
     hiringRequirements: extractHiringRequirements(p),
-    description: p.jobContent || undefined,
   };
 }
 
 // ========== WorkTime 归一化 ==========
 
 type FlatWorkTime = {
-  employmentForm: number;
   perDayMinWorkHours: number | null;
   perWeekWorkDays: number | null;
   perWeekNeedWorkDays: number | null;
@@ -279,15 +307,7 @@ function normalizeNewWorkTime(nwt: DulidayNewWorkTime): FlatWorkTime {
   const day = nwt.dayWorkTime;
   const schedule = nwt.dailyShiftSchedule;
 
-  const employmentFormMap: Record<string, number> = {
-    长期用工: 1,
-    临时用工: 2,
-    短期用工: 2,
-  };
   const arrangementTypeMap: Record<string, number> = { 固定排班制: 1, 组合排班制: 3 };
-
-  const employmentForm =
-    Number(nwt.employmentForm) || (employmentFormMap[String(nwt.employmentForm)] ?? 1);
   const arrangementType =
     Number(schedule?.arrangementType) ||
     (arrangementTypeMap[String(schedule?.arrangementType)] ?? 0);
@@ -330,7 +350,6 @@ function normalizeNewWorkTime(nwt: DulidayNewWorkTime): FlatWorkTime {
     }) ?? null;
 
   return {
-    employmentForm,
     perDayMinWorkHours,
     perWeekWorkDays: week?.perWeekWorkDays ?? null,
     perWeekNeedWorkDays:
@@ -347,14 +366,18 @@ function normalizeNewWorkTime(nwt: DulidayNewWorkTime): FlatWorkTime {
 
 // ========== 薪资 ==========
 
-export function parseSalaryDetails(baseSalary: number, welfare: DulidayNewWelfare): SalaryDetails {
+export function parseSalaryDetails(
+  baseSalary: number | null,
+  salaryUnit: string | null,
+  welfare: DulidayNewWelfare,
+): SalaryDetails {
   const memo = welfare.memo || "";
   const rangeMatch = memo.match(/(\d+元?-\d+元?)/);
   const range = rangeMatch ? rangeMatch[1] : undefined;
   const bonusMatch = memo.match(/(奖金[\d～\-~元]+)/);
   const bonus = bonusMatch ? bonusMatch[1] : undefined;
 
-  return { base: baseSalary, range, bonus, memo };
+  return { base: baseSalary, unit: salaryUnit, range, bonus, memo };
 }
 
 export function buildScenarioSummary(
@@ -418,123 +441,29 @@ export function extractSettlementCycle(
 // ========== 福利 ==========
 
 export function parseBenefits(welfare: DulidayNewWelfare): Benefits {
-  const benefitItems: string[] = [];
-
-  if (welfare.haveInsurance && welfare.haveInsurance !== "无" && welfare.haveInsurance !== "0") {
-    benefitItems.push("五险一金");
-  }
-
-  if (welfare.accommodation && welfare.accommodation !== "无" && welfare.accommodation !== "0") {
-    benefitItems.push("住宿");
-  }
-
-  if (welfare.catering && welfare.catering !== "无" && welfare.catering !== "0") {
-    benefitItems.push("餐饮");
-  }
-
-  if (welfare.moreWelfares && Array.isArray(welfare.moreWelfares)) {
-    for (const item of welfare.moreWelfares) {
-      const content = item.content;
-      const benefitKeywords = ["保险", "年假", "补贴", "福利", "股票", "学历提升"];
-      for (const keyword of benefitKeywords) {
-        if (
-          content.includes(keyword) &&
-          !benefitItems.some((existing) => existing.includes(keyword))
-        ) {
-          const match = content.match(new RegExp(`\\d*[天个月年]*${keyword}[^，。]*`));
-          benefitItems.push(match ? match[0] : keyword);
-        }
-      }
-    }
-  }
-
-  if (welfare.memo) {
-    const benefitKeywords = ["年假", "补贴", "商保", "股票", "学历提升"];
-    for (const keyword of benefitKeywords) {
-      if (welfare.memo.includes(keyword) && !benefitItems.some((item) => item.includes(keyword))) {
-        benefitItems.push(keyword);
-      }
-    }
-  }
-
-  if (benefitItems.length === 0) {
-    benefitItems.push("按国家规定");
-  }
+  const moreWelfares =
+    welfare.moreWelfares && Array.isArray(welfare.moreWelfares) && welfare.moreWelfares.length > 0
+      ? welfare.moreWelfares.map((item) => item.content)
+      : null;
 
   return {
-    items: benefitItems,
-    promotion: welfare.promotionWelfare || undefined,
+    insurance: welfare.haveInsurance || null,
+    accommodation: welfare.accommodation || null,
+    catering: welfare.catering ?? null,
+    moreWelfares,
+    memo: welfare.memo ?? null,
+    promotion: welfare.promotionWelfare ?? null,
   };
 }
 
 // ========== 招聘要求 ==========
 
-export type RequirementsInput = Pick<
-  ParsedPosition,
-  "basicPersonalRequirements" | "certificate" | "jobName"
->;
-
-export function generateRequirements(p: RequirementsInput): string[] {
-  const reqs: string[] = [];
-  const bpr = p.basicPersonalRequirements;
-  const cert = p.certificate;
-
-  if (bpr?.minAge != null || bpr?.maxAge != null) {
-    const min = bpr?.minAge ?? "不限";
-    const max = bpr?.maxAge ?? "不限";
-    reqs.push(`年龄${min}-${max}岁`);
-  }
-
-  if (bpr?.genderRequirement && bpr.genderRequirement !== "0") {
-    const noRestriction = /男性.*女性|女性.*男性|不限/.test(bpr.genderRequirement);
-    if (!noRestriction) {
-      const genderMap: Record<string, string> = {
-        男性: "限男性",
-        女性: "限女性",
-      };
-      reqs.push(genderMap[bpr.genderRequirement] ?? `性别要求:${bpr.genderRequirement}`);
-    }
-  }
-
-  if (cert?.education && cert.education !== "不限") {
-    const eduMap: Record<string, string> = {
-      本科: "本科及以上",
-      专科: "专科及以上",
-      高中: "高中及以上",
-      初中: "初中及以上",
-    };
-    reqs.push(eduMap[cert.education] ?? `学历${cert.education}`);
-  }
-
-  if (cert?.healthCertificate) {
-    const hcMap: Record<string, string> = {
-      食品健康证: "需食品健康证",
-      零售健康证: "需零售健康证",
-    };
-    reqs.push(hcMap[cert.healthCertificate] ?? "需健康证");
-  }
-
-  if (reqs.length === 0) {
-    return generateDefaultRequirements(p.jobName);
-  }
-  return reqs;
-}
-
-function generateDefaultRequirements(jobName: string): string[] {
-  const base = ["工作认真负责", "团队合作精神"];
-  if (jobName.includes("服务员")) {
-    return [...base, "有服务行业经验优先", "沟通能力强"];
-  }
-  if (jobName.includes("经理")) {
-    return [...base, "有管理经验", "责任心强"];
-  }
-  return [...base, "有相关工作经验者优先"];
-}
-
 function extractHiringRequirements(p: ParsedPosition): HiringRequirements | undefined {
   const bpr = p.basicPersonalRequirements;
   const cert = p.certificate;
-  if (!bpr && !cert) return undefined;
+  if (!bpr && !cert && !p.languages && !p.certificatesRaw && !p.recruitmentRemark) {
+    return undefined;
+  }
 
   return {
     minAge: bpr?.minAge ?? null,
@@ -542,20 +471,13 @@ function extractHiringRequirements(p: ParsedPosition): HiringRequirements | unde
     genderRequirement: bpr?.genderRequirement ?? null,
     education: cert?.education ?? null,
     healthCertificate: cert?.healthCertificate ?? null,
+    languages: p.languages,
+    certificatesRaw: p.certificatesRaw,
+    recruitmentRemark: p.recruitmentRemark,
   };
 }
 
-// ========== 考勤 ==========
-
-function generateAttendancePolicy(cooperationMode: number): AttendancePolicy {
-  const isFullTime = cooperationMode === 3;
-  return {
-    punctualityRequired: isFullTime,
-    lateToleranceMinutes: isFullTime ? 5 : 15,
-    attendanceTracking: isFullTime ? "strict" : "flexible",
-    makeupShiftsAllowed: !isFullTime,
-  };
-}
+// ========== 可用时段 ==========
 
 function generateAvailableSlots(p: ParsedPosition, wta: FlatWorkTime): TimeSlotAvailability[] {
   const slots: TimeSlotAvailability[] = [];
@@ -580,30 +502,12 @@ function generateAvailableSlots(p: ParsedPosition, wta: FlatWorkTime): TimeSlotA
   return slots;
 }
 
-function generateSchedulingFlexibility(
-  p: ParsedPosition,
-  wta: FlatWorkTime,
-): SchedulingFlexibility {
-  const isFlexible = p.cooperationMode === 2;
+// ========== 工时计算 ==========
 
-  return {
-    canSwapShifts: wta.arrangementType === 3 || isFlexible,
-    advanceNoticeHours: wta.maxWorkTakingTime / 60,
-    partTimeAllowed: isFlexible,
-    weekendRequired: hasWeekendInSchedule(wta),
-    holidayRequired: false,
-  };
-}
+function calculateMinHoursPerWeek(wta: FlatWorkTime): number | null {
+  const dailyHours = wta.perDayMinWorkHours;
+  if (dailyHours == null) return null;
 
-function hasWeekendInSchedule(wta: FlatWorkTime): boolean {
-  if (!wta.combinedArrangementTimes) return false;
-  return wta.combinedArrangementTimes.some(
-    (slot) => slot.weekdays.includes(0) || slot.weekdays.includes(6),
-  );
-}
-
-function calculateMinHoursPerWeek(wta: FlatWorkTime): number {
-  const dailyHours = wta.perDayMinWorkHours ?? 8;
   let workDays: number | null = null;
 
   if (wta.perWeekWorkDays != null) {
@@ -623,16 +527,16 @@ function calculateMinHoursPerWeek(wta: FlatWorkTime): number {
     workDays = wta.perWeekNeedWorkDays;
   }
 
-  if (workDays === null) {
-    workDays = 5;
-  }
+  if (workDays === null) return null;
 
   return dailyHours * workDays;
 }
 
-function calculateMaxHoursPerWeek(wta: FlatWorkTime): number {
-  const dailyHours = wta.perDayMinWorkHours ?? 8;
-  return dailyHours * 7;
+function calculateMaxHoursPerWeek(wta: FlatWorkTime): number | null {
+  const dailyHours = wta.perDayMinWorkHours;
+  if (dailyHours == null || wta.perWeekWorkDays == null) return null;
+  const maxDays = wta.perWeekWorkDays;
+  return dailyHours * maxDays;
 }
 
 function generateAttendanceRequirement(wta: FlatWorkTime): AttendanceRequirement {
@@ -672,10 +576,6 @@ function generateAttendanceRequirement(wta: FlatWorkTime): AttendanceRequirement
   if (minimumDays === null && wta.perWeekNeedWorkDays != null) {
     minimumDays = wta.perWeekNeedWorkDays;
   }
-  if (minimumDays === null) {
-    minimumDays = 5;
-  }
-
   return {
     minimumDays,
     requiredDays: convertWeekdays(requiredDays),
@@ -707,20 +607,20 @@ function convertTimeSlots(
 
 // ========== 地理 / 名称工具 ==========
 
-function extractDistrict(storeAddress: string, storeRegionName?: string): string {
+function extractDistrict(storeAddress: string, storeRegionName?: string): string | null {
   if (storeRegionName) return storeRegionName;
   const parts = storeAddress.split("-");
-  return parts[1] || "未知区域";
+  return parts[1] || null;
 }
 
-function extractSubarea(storeName: string): string {
+function extractSubarea(storeName: string): string | null {
   const match = storeName.match(/(.+?)(附近|周边|旁边|店)/);
-  return match?.[1] ?? storeName;
+  return match?.[1] ?? null;
 }
 
 function extractPositionType(jobName: string): string {
   const parts = jobName.split("-");
-  return parts[parts.length - 2] || "服务员";
+  return parts[parts.length - 2] || jobName;
 }
 
 function convertWeekdays(dulidayWeekdays: number[]): number[] {
