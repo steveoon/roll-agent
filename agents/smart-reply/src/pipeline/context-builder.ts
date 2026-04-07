@@ -468,7 +468,13 @@ export async function buildContextInfoByNeeds(
           if (salaryDescription) context += `  薪资：${salaryDescription}\n`;
         }
         if (hasFactFamily(allowedFactFamilies, "schedule")) {
-          if (position.laborForm) context += `  用工形式：${position.laborForm}\n`;
+          if (position.laborForm) {
+            const formParts = [position.laborForm];
+            if (position.employmentForm && position.employmentForm !== "长期用工") {
+              formParts.push(position.employmentForm);
+            }
+            context += `  用工形式：${formParts.join("，")}\n`;
+          }
           if (position.timeSlots.length > 0) {
             context += `  时间：${position.timeSlots.slice(0, 3).join("、")}\n`;
           }
