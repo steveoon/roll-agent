@@ -168,7 +168,10 @@ describe("convertPositionsToZhipinData", () => {
   });
 
   it("keeps missing salary as null instead of defaulting to 0", () => {
-    const result = convertPositionsToZhipinData([makeMinimalPosition({ jobSalary: {} })], "测试品牌");
+    const result = convertPositionsToZhipinData(
+      [makeMinimalPosition({ jobSalary: {} })],
+      "测试品牌",
+    );
     const pos = result.brands[0]!.stores[0]!.positions[0]!;
     assert.equal(pos.salary.base, null);
   });
@@ -223,7 +226,11 @@ describe("parseSalaryDetails", () => {
   });
 
   it("handles null memo", () => {
-    const result = parseSalaryDetails(15, null, { haveInsurance: "无", accommodation: "无", memo: null });
+    const result = parseSalaryDetails(15, null, {
+      haveInsurance: "无",
+      accommodation: "无",
+      memo: null,
+    });
     assert.equal(result.memo, null);
   });
 
@@ -353,7 +360,6 @@ describe("parseBenefits", () => {
     assert.equal(result.promotion, null);
   });
 });
-
 
 // ========== buildScenarioSummary ==========
 

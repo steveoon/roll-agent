@@ -289,7 +289,10 @@ function allowsFactInjection(primaryNeed: ReplyNeed): boolean {
   return PRIMARY_NEED_FACT_MAP[primaryNeed].length > 0;
 }
 
-function hasFactFamily(allowedFactFamilies: Set<ReplyFactFamily>, family: ReplyFactFamily): boolean {
+function hasFactFamily(
+  allowedFactFamilies: Set<ReplyFactFamily>,
+  family: ReplyFactFamily,
+): boolean {
   return allowedFactFamilies.has(family);
 }
 
@@ -391,8 +394,7 @@ export async function buildContextInfoByNeeds(
     if (districts.length > 0) {
       const filtered = relevantStores.filter((s) =>
         districts.some(
-          (d) =>
-            (s.district ?? "").includes(d.district) || (s.subarea ?? "").includes(d.district),
+          (d) => (s.district ?? "").includes(d.district) || (s.subarea ?? "").includes(d.district),
         ),
       );
       if (filtered.length > 0) relevantStores = filtered;
@@ -450,8 +452,12 @@ export async function buildContextInfoByNeeds(
     context += "匹配到的门店信息：\n";
     rankedStoresWithDistance.slice(0, storeCount).forEach(({ store }) => {
       const includeLocationFacts = hasFactFamily(allowedFactFamilies, "location");
-      const includePositionFacts = Array.from(allowedFactFamilies).some((family) => family !== "location");
-      const storeArea = [store.district, store.subarea].filter((part): part is string => Boolean(part)).join("");
+      const includePositionFacts = Array.from(allowedFactFamilies).some(
+        (family) => family !== "location",
+      );
+      const storeArea = [store.district, store.subarea]
+        .filter((part): part is string => Boolean(part))
+        .join("");
       context += includeLocationFacts
         ? storeArea
           ? `• ${store.name}（${storeArea}）：${store.location}\n`
@@ -483,7 +489,9 @@ export async function buildContextInfoByNeeds(
           }
           if (position.perMonthMinWorkTime != null) {
             const monthWorkTimeUnit =
-              position.perMonthMinWorkTimeUnit != null ? String(position.perMonthMinWorkTimeUnit) : "";
+              position.perMonthMinWorkTimeUnit != null
+                ? String(position.perMonthMinWorkTimeUnit)
+                : "";
             context += `  月最低工时：${position.perMonthMinWorkTime}${monthWorkTimeUnit}\n`;
           }
         }
