@@ -105,8 +105,10 @@ function createFakeNpm(binDir: string, latestVersion: string): void {
     npmPath,
     `#!/usr/bin/env node
 const args = process.argv.slice(2);
-if (args[0] === "view" && args[1] === "@roll-agent/core" && args[2] === "version") {
-  process.stdout.write(${JSON.stringify(latestVersion)} + "\\n");
+if (args[0] === "view" && args[2] === "version") {
+  const useJson = args.includes("--json");
+  const output = useJson ? JSON.stringify(${JSON.stringify(latestVersion)}) : ${JSON.stringify(latestVersion)};
+  process.stdout.write(output + "\\n");
   process.exit(0);
 }
 if (args[0] === "install" && args[1] === "-g") {
