@@ -25,23 +25,29 @@ const sampleData: ZhipinData = {
             {
               id: "pos-1",
               name: "餐厅服务员",
+              sourceJobName: "必胜客-万达广场-餐厅服务员-兼职",
+              jobCategory: "普通服务员",
               brandId: "brand-1",
               brandName: "必胜客",
+              description: "负责门店服务",
+              laborForm: "兼职",
+              employmentForm: "长期用工",
+              trainingRequired: "不需要",
+              probationRequired: "不需要",
               timeSlots: ["09:00~14:00", "18:00~22:00"],
               salary: {
                 base: 22,
+                unit: "元/小时",
                 memo: "时薪",
               },
-              workHours: "4-8小时",
-              benefits: { items: [] },
-              requirements: ["有服务意识"],
-              urgent: true,
-              scheduleType: "flexible",
-              attendancePolicy: {
-                punctualityRequired: true,
-                lateToleranceMinutes: 10,
-                attendanceTracking: "strict",
-                makeupShiftsAllowed: false,
+              workHours: "4",
+              benefits: {
+                insurance: null,
+                accommodation: null,
+                catering: null,
+                moreWelfares: null,
+                memo: null,
+                promotion: null,
               },
               availableSlots: [
                 {
@@ -52,14 +58,12 @@ const sampleData: ZhipinData = {
                   priority: "high",
                 },
               ],
-              schedulingFlexibility: {
-                canSwapShifts: false,
-                advanceNoticeHours: 24,
-                partTimeAllowed: true,
-                weekendRequired: false,
-                holidayRequired: false,
-              },
+              minHoursPerWeek: null,
+              maxHoursPerWeek: null,
+              perMonthMinWorkTime: 80,
+              perMonthMinWorkTimeUnit: "小时",
               attendanceRequirement: {
+                minimumDays: 3,
                 description: "每周至少 3 天",
               },
               hiringRequirements: {
@@ -157,5 +161,69 @@ describe("buildContextInfoByNeeds", () => {
 
     assert.ok(result.contextInfo.includes("薪资："));
     assert.ok(result.contextInfo.includes("万达广场1层"));
+  });
+
+  it("omits salary line when base and memo are both missing", async () => {
+    const data = structuredClone(sampleData);
+    data.brands[0]!.stores[0]!.positions[0]!.salary = {
+      base: null,
+      unit: null,
+      memo: null,
+    };
+
+    const result = await buildContextInfoByNeeds(
+      data,
+      makePlan(),
+      undefined,
+      "必胜客",
+      undefined,
+      undefined,
+      DEFAULT_REPLY_POLICY,
+      undefined,
+      2,
+      "focused",
+    );
+
+    assert.ok(!result.contextInfo.includes("薪资："));
+  });
+
+  it("renders monthly minimum work time without hardcoded hour unit", async () => {
+    const result = await buildContextInfoByNeeds(
+      sampleData,
+      makePlan({ needs: ["schedule"], primaryNeed: "schedule" }),
+      undefined,
+      "必胜客",
+      undefined,
+      undefined,
+      DEFAULT_REPLY_POLICY,
+      undefined,
+      2,
+      "focused",
+    );
+
+    assert.ok(result.contextInfo.includes("月最低工时：80小时"));
+  });
+
+  it("formats store location without null placeholders", async () => {
+    const data = structuredClone(sampleData);
+    data.brands[0]!.stores[0]!.district = null;
+    data.brands[0]!.stores[0]!.subarea = null;
+
+    const result = await buildContextInfoByNeeds(
+      data,
+      makePlan({ needs: ["location"], primaryNeed: "location" }),
+      undefined,
+      "必胜客",
+      undefined,
+      undefined,
+      DEFAULT_REPLY_POLICY,
+      undefined,
+      2,
+      "focused",
+      ["location"],
+    );
+
+    assert.ok(result.contextInfo.includes("• 佛山南海万达店：南海区桂澜路万达广场1层"));
+    assert.ok(!result.contextInfo.includes("null"));
   });
 });

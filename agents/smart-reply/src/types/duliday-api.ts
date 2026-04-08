@@ -25,7 +25,12 @@ export const DulidayBasicInfoSchema = z
   .object({
     jobId: z.number(),
     jobName: z.string(),
+    jobNickName: z.string().nullable().optional(),
+    jobCategoryName: z.string().nullable().optional(),
     jobContent: z.string().nullable().optional(),
+    laborForm: z.string().nullable().optional(),
+    needTraining: z.string().nullable().optional(),
+    needProbationWork: z.string().nullable().optional(),
     brandId: z.number().optional(),
     brandName: z.string().optional(),
     projectId: z.number().optional(),
@@ -120,6 +125,14 @@ export const DulidayCertificateSchema = z
   .object({
     education: z.string().nullable().optional(),
     healthCertificate: z.string().nullable().optional(),
+    certificates: z.string().nullable().optional(),
+  })
+  .passthrough();
+
+export const DulidayLanguageSchema = z
+  .object({
+    languages: z.string().nullable().optional(),
+    languageRemark: z.string().nullable().optional(),
   })
   .passthrough();
 
@@ -131,6 +144,9 @@ export const DulidayHiringRequirementSchema = z
     signUpNum: z.number().nullable().optional(),
     basicPersonalRequirements: DulidayBasicPersonalRequirementsSchema.nullable().optional(),
     certificate: DulidayCertificateSchema.nullable().optional(),
+    language: DulidayLanguageSchema.nullable().optional(),
+    figure: z.string().nullable().optional(),
+    remark: z.string().nullable().optional(),
   })
   .passthrough();
 
@@ -210,6 +226,8 @@ export const DulidayNewWorkTimeSchema = z
                 CombinedArrangementWeekdays: z.union([z.string(), z.array(z.number())]).optional(),
                 CombinedArrangementStartTime: z.number().optional(),
                 CombinedArrangementEndTime: z.number().optional(),
+                combinedArrangementStartTime: z.union([z.string(), z.number()]).optional(),
+                combinedArrangementEndTime: z.union([z.string(), z.number()]).optional(),
                 startTime: z.number().optional(),
                 endTime: z.number().optional(),
                 weekdays: z.array(z.number()).optional(),

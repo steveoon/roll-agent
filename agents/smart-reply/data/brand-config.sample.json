@@ -22,46 +22,57 @@
             {
               "id": "pos-001",
               "name": "服务员",
+              "sourceJobName": "示例品牌-南山店-服务员-兼职",
+              "jobCategory": "普通服务员",
               "brandId": "10001",
               "brandName": "示例品牌",
-              "timeSlots": ["08:00-14:00", "14:00-22:00"],
+              "description": "负责门店日常服务工作",
+              "laborForm": "兼职",
+              "employmentForm": "长期用工",
+              "trainingRequired": "不需要",
+              "probationRequired": "不需要",
+              "timeSlots": ["08:00~14:00", "14:00~22:00"],
               "salary": {
                 "base": 22,
+                "unit": "元/时",
                 "range": "20-25",
                 "memo": "时薪制，多劳多得"
               },
-              "workHours": "6-8小时/天",
+              "workHours": "6",
               "benefits": {
-                "items": ["包工作餐", "交通补贴"]
-              },
-              "requirements": ["18-45岁", "健康证"],
-              "urgent": false,
-              "scheduleType": "flexible",
-              "attendancePolicy": {
-                "punctualityRequired": true,
-                "lateToleranceMinutes": 10,
-                "attendanceTracking": "strict",
-                "makeupShiftsAllowed": true
+                "insurance": "独立日购买",
+                "accommodation": "无住宿福利",
+                "catering": "包吃",
+                "moreWelfares": null,
+                "memo": null,
+                "promotion": null
               },
               "availableSlots": [
                 {
-                  "slot": "08:00-14:00",
+                  "slot": "08:00~14:00",
                   "maxCapacity": 5,
                   "currentBooked": 3,
                   "isAvailable": true,
                   "priority": "high"
                 }
               ],
-              "schedulingFlexibility": {
-                "canSwapShifts": true,
-                "advanceNoticeHours": 24,
-                "partTimeAllowed": true,
-                "weekendRequired": false,
-                "holidayRequired": false
+              "minHoursPerWeek": 18,
+              "maxHoursPerWeek": 42,
+              "perMonthMinWorkTime": 80,
+              "attendanceRequirement": {
+                "minimumDays": 3,
+                "requiredDays": [1, 2, 3, 4, 5],
+                "description": "每周至少3天"
               },
               "hiringRequirements": {
                 "minAge": 18,
-                "maxAge": 45
+                "maxAge": 45,
+                "genderRequirement": null,
+                "education": "不限",
+                "healthCertificate": "食品健康证",
+                "languages": "普通话",
+                "certificatesRaw": "健康证",
+                "recruitmentRemark": null
               }
             }
           ]

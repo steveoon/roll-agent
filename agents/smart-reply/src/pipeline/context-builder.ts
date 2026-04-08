@@ -44,15 +44,27 @@ interface PolicyContextDebugInfo {
 export type { PolicyContextDebugInfo };
 
 function buildSalaryDescription(salary: SalaryDetails): string {
-  const { base, range, memo } = salary;
+  const { base, unit, range, memo } = salary;
+  const normalizedMemo = memo?.replace(/\n/g, " ").trim() ?? "";
+
+  if (base == null) {
+    if (salary.scenarioSummary && normalizedMemo) {
+      return `${normalizedMemo}（${salary.scenarioSummary}）`;
+    }
+    if (salary.scenarioSummary) return salary.scenarioSummary;
+    return normalizedMemo;
+  }
+
   const isPossiblyPieceRate = base < 10;
   let description = "";
   if (isPossiblyPieceRate && memo) {
-    description = `${base}元（${memo.replace(/\n/g, " ").trim()}）`;
+    description = `${base}${unit ?? ""}（${normalizedMemo}）`;
   } else {
-    description = `${base}元/时`;
-    if (range && range !== `${base}-${base}`) description += `，范围${range}元`;
-    if (memo && memo.length < 50) description += `（${memo.replace(/\n/g, " ").trim()}）`;
+    description = `${base}${unit ?? ""}`;
+    if (range && range !== `${base}-${base}` && range !== `${base}元-${base}元`) {
+      description += `，范围${range}`;
+    }
+    if (normalizedMemo && normalizedMemo.length < 50) description += `（${normalizedMemo}）`;
   }
   if (salary.scenarioSummary) description += `（${salary.scenarioSummary}）`;
   return description;
@@ -243,13 +255,15 @@ function rankStoresByTextMatch(
         (loc) =>
           store.name.includes(loc.location) ||
           store.location.includes(loc.location) ||
-          store.subarea.includes(loc.location),
+          (store.subarea ?? "").includes(loc.location),
       );
       if (matchingLocation) locationMatch = matchingLocation.confidence * 40;
     }
     if (mentionedDistricts && mentionedDistricts.length > 0) {
       const matchingDistrict = mentionedDistricts.find(
-        (dist) => store.district.includes(dist.district) || store.subarea.includes(dist.district),
+        (dist) =>
+          (store.district ?? "").includes(dist.district) ||
+          (store.subarea ?? "").includes(dist.district),
       );
       if (matchingDistrict) districtMatch = matchingDistrict.confidence * 30;
     }
@@ -271,22 +285,14 @@ function rankStoresByTextMatch(
   return ranked.map((item) => ({ store: item.store, distance: undefined }));
 }
 
-function getScheduleTypeText(scheduleType: string): string {
-  if (!scheduleType) return "灵活排班";
-  const typeMap: Record<string, string> = {
-    fixed: "固定排班",
-    flexible: "灵活排班",
-    rotating: "轮班制",
-    on_call: "随叫随到",
-  };
-  return typeMap[scheduleType] || "灵活排班";
-}
-
 function allowsFactInjection(primaryNeed: ReplyNeed): boolean {
   return PRIMARY_NEED_FACT_MAP[primaryNeed].length > 0;
 }
 
-function hasFactFamily(allowedFactFamilies: Set<ReplyFactFamily>, family: ReplyFactFamily): boolean {
+function hasFactFamily(
+  allowedFactFamilies: Set<ReplyFactFamily>,
+  family: ReplyFactFamily,
+): boolean {
   return allowedFactFamilies.has(family);
 }
 
@@ -377,8 +383,8 @@ export async function buildContextInfoByNeeds(
           (s) =>
             s.name.includes(location) ||
             s.location.includes(location) ||
-            s.district.includes(location) ||
-            s.subarea.includes(location),
+            (s.district ?? "").includes(location) ||
+            (s.subarea ?? "").includes(location),
         );
         if (filtered.length > 0) relevantStores = filtered;
       }
@@ -387,7 +393,9 @@ export async function buildContextInfoByNeeds(
     const districts = extractedInfo.mentionedDistricts || [];
     if (districts.length > 0) {
       const filtered = relevantStores.filter((s) =>
-        districts.some((d) => s.district.includes(d.district) || s.subarea.includes(d.district)),
+        districts.some(
+          (d) => (s.district ?? "").includes(d.district) || (s.subarea ?? "").includes(d.district),
+        ),
       );
       if (filtered.length > 0) relevantStores = filtered;
     }
@@ -401,8 +409,8 @@ export async function buildContextInfoByNeeds(
         (s) =>
           s.name.includes(candidateInfo.jobAddress || "") ||
           s.location.includes(candidateInfo.jobAddress || "") ||
-          s.district.includes(candidateInfo.jobAddress || "") ||
-          s.subarea.includes(candidateInfo.jobAddress || ""),
+          (s.district ?? "").includes(candidateInfo.jobAddress || "") ||
+          (s.subarea ?? "").includes(candidateInfo.jobAddress || ""),
       );
       if (filtered.length > 0) relevantStores = filtered;
     }
@@ -444,9 +452,16 @@ export async function buildContextInfoByNeeds(
     context += "匹配到的门店信息：\n";
     rankedStoresWithDistance.slice(0, storeCount).forEach(({ store }) => {
       const includeLocationFacts = hasFactFamily(allowedFactFamilies, "location");
-      const includePositionFacts = Array.from(allowedFactFamilies).some((family) => family !== "location");
+      const includePositionFacts = Array.from(allowedFactFamilies).some(
+        (family) => family !== "location",
+      );
+      const storeArea = [store.district, store.subarea]
+        .filter((part): part is string => Boolean(part))
+        .join("");
       context += includeLocationFacts
-        ? `• ${store.name}（${store.district}${store.subarea}）：${store.location}\n`
+        ? storeArea
+          ? `• ${store.name}（${storeArea}）：${store.location}\n`
+          : `• ${store.name}：${store.location}\n`
         : `• ${store.name}\n`;
       if (!includePositionFacts) {
         return;
@@ -455,19 +470,40 @@ export async function buildContextInfoByNeeds(
       store.positions.slice(0, 3).forEach((position) => {
         context += `  职位：${position.name}\n`;
         if (hasFactFamily(allowedFactFamilies, "salary")) {
-          context += `  薪资：${buildSalaryDescription(position.salary)}\n`;
+          const salaryDescription = buildSalaryDescription(position.salary);
+          if (salaryDescription) context += `  薪资：${salaryDescription}\n`;
         }
         if (hasFactFamily(allowedFactFamilies, "schedule")) {
-          context += `  排班：${getScheduleTypeText(position.scheduleType)}\n`;
-          context += `  时间：${position.timeSlots.slice(0, 3).join("、")}\n`;
+          if (position.laborForm) {
+            const formParts = [position.laborForm];
+            if (position.employmentForm && position.employmentForm !== "长期用工") {
+              formParts.push(position.employmentForm);
+            }
+            context += `  用工形式：${formParts.join("，")}\n`;
+          }
+          if (position.timeSlots.length > 0) {
+            context += `  时间：${position.timeSlots.slice(0, 3).join("、")}\n`;
+          }
           if (position.minHoursPerWeek || position.maxHoursPerWeek) {
             context += `  每周工时：${position.minHoursPerWeek || 0}-${position.maxHoursPerWeek || "不限"}小时\n`;
           }
+          if (position.perMonthMinWorkTime != null) {
+            const monthWorkTimeUnit =
+              position.perMonthMinWorkTimeUnit != null
+                ? String(position.perMonthMinWorkTimeUnit)
+                : "";
+            context += `  月最低工时：${position.perMonthMinWorkTime}${monthWorkTimeUnit}\n`;
+          }
         }
         if (hasFactFamily(allowedFactFamilies, "policy")) {
-          context += `  考勤：最多迟到${position.attendancePolicy.lateToleranceMinutes}分钟\n`;
           if (position.attendanceRequirement?.description) {
             context += `  出勤要求：${position.attendanceRequirement.description}\n`;
+          }
+          if (position.trainingRequired && position.trainingRequired !== "不需要") {
+            context += `  培训要求：${position.trainingRequired}\n`;
+          }
+          if (position.probationRequired && position.probationRequired !== "不需要") {
+            context += `  试岗要求：${position.probationRequired}\n`;
           }
         }
         if (hasFactFamily(allowedFactFamilies, "availability")) {
@@ -484,10 +520,16 @@ export async function buildContextInfoByNeeds(
             if (hr.genderRequirement && hr.genderRequirement !== "0") {
               parts.push(`性别:${hr.genderRequirement}`);
             }
-            if (hr.education && hr.education !== "1") parts.push(`学历:${hr.education}`);
+            if (hr.education && hr.education !== "不限") parts.push(`学历:${hr.education}`);
+            if (hr.healthCertificate) parts.push(hr.healthCertificate);
+            if (hr.languages) parts.push(`语言:${hr.languages}`);
+            if (hr.socialIdentity && hr.socialIdentity !== "不限") {
+              parts.push(`社会身份:${hr.socialIdentity}`);
+            }
             if (parts.length > 0) context += `  要求：${parts.join("、")}\n`;
-          } else if (position.requirements?.length) {
-            context += `  要求：${position.requirements.filter((r) => r !== "无").join("、")}\n`;
+            if (hr.recruitmentRemark) {
+              context += `  招聘备注：${hr.recruitmentRemark.slice(0, 200)}\n`;
+            }
           }
         }
       });
