@@ -57,6 +57,7 @@ type ParsedPosition = {
   languages: string | null;
   certificatesRaw: string | null;
   recruitmentRemark: string | null;
+  socialIdentity: string | null;
   workTime: DulidayNewWorkTime;
   perMonthMinWorkTime: number | null;
   perMonthMinWorkTimeUnit: string | number | null;
@@ -141,6 +142,7 @@ function parsePosition(raw: unknown): ParsedPosition | null {
     languages: hiring.language?.languages ?? null,
     certificatesRaw: hiring.certificate?.certificates ?? null,
     recruitmentRemark: hiring.remark ?? null,
+    socialIdentity: hiring.figure ?? null,
     workTime: pos.workTime,
     perMonthMinWorkTime: pos.workTime.monthWorkTime?.perMonthMinWorkTime ?? null,
     perMonthMinWorkTimeUnit: pos.workTime.monthWorkTime?.perMonthMinWorkTimeUnit ?? null,
@@ -473,7 +475,14 @@ export function parseBenefits(welfare: DulidayNewWelfare): Benefits {
 function extractHiringRequirements(p: ParsedPosition): HiringRequirements | undefined {
   const bpr = p.basicPersonalRequirements;
   const cert = p.certificate;
-  if (!bpr && !cert && !p.languages && !p.certificatesRaw && !p.recruitmentRemark) {
+  if (
+    !bpr &&
+    !cert &&
+    !p.languages &&
+    !p.certificatesRaw &&
+    !p.recruitmentRemark &&
+    !p.socialIdentity
+  ) {
     return undefined;
   }
 
@@ -486,6 +495,7 @@ function extractHiringRequirements(p: ParsedPosition): HiringRequirements | unde
     languages: p.languages,
     certificatesRaw: p.certificatesRaw,
     recruitmentRemark: p.recruitmentRemark,
+    socialIdentity: p.socialIdentity,
   };
 }
 

@@ -145,6 +145,7 @@ export const DulidayHiringRequirementSchema = z
     basicPersonalRequirements: DulidayBasicPersonalRequirementsSchema.nullable().optional(),
     certificate: DulidayCertificateSchema.nullable().optional(),
     language: DulidayLanguageSchema.nullable().optional(),
+    figure: z.string().nullable().optional(),
     remark: z.string().nullable().optional(),
   })
   .passthrough();

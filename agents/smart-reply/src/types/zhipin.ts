@@ -73,6 +73,7 @@ export const HiringRequirementsSchema = z.object({
   languages: z.string().nullable().optional(),
   certificatesRaw: z.string().nullable().optional(),
   recruitmentRemark: z.string().nullable().optional(),
+  socialIdentity: z.string().nullable().optional(),
 });
 
 export type HiringRequirements = z.infer<typeof HiringRequirementsSchema>;
