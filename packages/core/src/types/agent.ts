@@ -62,6 +62,7 @@ export interface InstalledAgentSource {
   readonly packageName: string;
   readonly packageSpec: string;
   readonly installDir: string;
+  readonly installedVersion?: string;
 }
 
 export interface RemoteAgentSource {

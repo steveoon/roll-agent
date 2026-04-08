@@ -15,6 +15,7 @@ import { runAgentSetup } from "../../registry/runtime-setup.ts";
 import { AgentStore } from "../../registry/store.ts";
 import {
   parsePackageName,
+  readInstalledPackageManifest,
   resolveInstalledPackageRoot,
   sanitizeInstallId,
 } from "../../registry/source.ts";
@@ -92,6 +93,7 @@ export default defineCommand({
       process.exitCode = 1;
       return;
     }
+    const installedManifest = readInstalledPackageManifest(packageRoot);
 
     log.info("解析已安装 Agent 的 SKILL.md...");
     const discovered = discoverAgent(packageRoot);
@@ -106,9 +108,10 @@ export default defineCommand({
       status: "idle",
       source: {
         type: "installed-package",
-        packageName,
+        packageName: installedManifest?.name ?? packageName,
         packageSpec,
         installDir,
+        ...(installedManifest?.version ? { installedVersion: installedManifest.version } : {}),
       },
       ...(discovered.skillBody.length > 0 ? { skillBody: discovered.skillBody } : {}),
     };

@@ -4,6 +4,11 @@ import type { AgentSource, AgentSourceType, RegisteredAgent } from "../types/age
 
 const SKILL_FILE_NAME = "SKILL.md";
 
+export interface InstalledPackageManifestInfo {
+  readonly name?: string;
+  readonly version?: string;
+}
+
 /** 推断 Agent 来源类型，兼容旧 store 数据。 */
 export function inferAgentSourceType(agent: RegisteredAgent): AgentSourceType {
   if (agent.source) {
@@ -117,6 +122,34 @@ export function resolveInstalledPackageRoot(installDir: string, packageName: str
   }
 
   return findInstalledAgentRoot(installDir) ?? expectedRoot;
+}
+
+export function readInstalledPackageManifest(
+  packageRoot: string,
+): InstalledPackageManifestInfo | undefined {
+  const packageJsonPath = resolve(packageRoot, "package.json");
+  if (!existsSync(packageJsonPath)) {
+    return undefined;
+  }
+
+  try {
+    const parsed = JSON.parse(readFileSync(packageJsonPath, "utf-8")) as {
+      readonly name?: unknown;
+      readonly version?: unknown;
+    };
+    const name = typeof parsed.name === "string" && parsed.name.length > 0 ? parsed.name : undefined;
+    const version =
+      typeof parsed.version === "string" && parsed.version.length > 0 ? parsed.version : undefined;
+    if (!name && !version) {
+      return undefined;
+    }
+    return {
+      ...(name ? { name } : {}),
+      ...(version ? { version } : {}),
+    };
+  } catch {
+    return undefined;
+  }
 }
 
 function readInstalledDependencyName(installDir: string): string | undefined {
