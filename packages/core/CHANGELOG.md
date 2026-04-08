@@ -1,5 +1,16 @@
 # @roll-agent/core
 
+## 0.4.0
+
+### Minor Changes
+
+- [#39](https://github.com/steveoon/roll-agent/pull/39) [`69c0cec`](https://github.com/steveoon/roll-agent/commit/69c0cec9096cc4c5d43e2959fb6f9a6265d42d6e) Thanks [@steveoon](https://github.com/steveoon)! - feat: installed-package subagent 真实版本检测
+  - `roll update --check` 对 installed-package 类型 Agent 做真实 npm 版本比较，不再固定显示 ⬆ 图标
+  - 五分类版本状态：up-to-date(✅) / update-available(⬆) / pinned-behind(📌) / unsupported-spec(?) / unknown(?)
+  - `InstalledAgentSource` 新增 `installedVersion` 字段，install/update 后自动记录
+  - 版本查询结果按包名缓存（TTL 24h），不阻塞 CLI 命令
+  - installed-package + core-managed Agent 升级顺序修正为 stop → install → restart
+
 ## 0.3.3
 
 ### Patch Changes
