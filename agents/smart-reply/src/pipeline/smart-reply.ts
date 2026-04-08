@@ -10,6 +10,10 @@ import {
   resolveDefaultBrandName,
   resolvePrimaryCity,
 } from "../services/brand-config-selectors.ts";
+import {
+  getDulidayJobListEndpoint,
+  getDulidayToken,
+} from "../services/duliday-api.ts";
 import type { ZhipinData, CandidateInfo } from "../types/zhipin.ts";
 import type { BrandPriorityStrategy } from "../types/config.ts";
 import type { StoreWithDistance } from "../types/geocoding.ts";
@@ -38,8 +42,13 @@ import type { AppError } from "../errors/index.ts";
 import { setSuppressVerboseLogs } from "../log-control.ts";
 import { createPipelineProgress } from "./pipeline-progress.ts";
 import type { PipelineProgress } from "./pipeline-progress.ts";
-import { evaluateAgeEligibility } from "./age-eligibility.ts";
+import {
+  collectAgeEvidenceFromSources,
+  createDefaultAgeEligibilitySources,
+  evaluateAgeEligibility,
+} from "./age-eligibility.ts";
 import type {
+  AgeEligibilitySource,
   AgeEligibilityAppliedStrategy,
   AgeEligibilityResult,
   AgeEligibilityStatus,
@@ -70,6 +79,7 @@ export interface SmartReplyAgentOptions {
   industryVoiceId?: string | undefined;
   channelType?: ChannelType | undefined;
   turnIndex?: number | undefined;
+  ageEligibilitySources?: AgeEligibilitySource[] | undefined;
 }
 
 export interface SmartReplyDebugInfo {
@@ -438,6 +448,7 @@ async function generateSmartReplyInner(
     industryVoiceId,
     channelType,
     turnIndex,
+    ageEligibilitySources,
   } = options;
 
   const providerConfigs = modelConfig?.providerConfigs || DEFAULT_PROVIDER_CONFIGS;
@@ -492,11 +503,25 @@ async function generateSmartReplyInner(
   const regionName = resolveRegionName(turnPlan, candidateInfo);
   const ageEligibilityCity =
     turnPlan.extractedInfo.city ?? resolvePrimaryCity(configData, resolvedBrand);
-  const ageEligibility = await evaluateAgeEligibility({
-    ...(candidateAge !== undefined ? { age: candidateAge } : {}),
+  const effectiveAgeEligibilitySources =
+    ageEligibilitySources ??
+    createDefaultAgeEligibilitySources({
+      configData,
+      token: getDulidayToken(),
+      jobListUrl: getDulidayJobListEndpoint(),
+    });
+  const ageEvidence = await collectAgeEvidenceFromSources({
+    sources: effectiveAgeEligibilitySources,
     brandAlias: resolvedBrand,
     ...(typeof ageEligibilityCity === "string" ? { cityName: ageEligibilityCity } : {}),
     ...(regionName !== undefined ? { regionName } : {}),
+  });
+  const ageEligibility = evaluateAgeEligibility({
+    ...(candidateAge !== undefined ? { age: candidateAge } : {}),
+    evidence: ageEvidence.evidence,
+    matchedCount: ageEvidence.matchedCount,
+    total: ageEvidence.total,
+    isComplete: ageEvidence.isComplete,
     ...(replyPolicy?.qualificationPolicy?.age !== undefined
       ? { strategy: replyPolicy.qualificationPolicy.age }
       : {}),
