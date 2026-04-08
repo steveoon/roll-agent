@@ -523,8 +523,9 @@ export async function buildContextInfoByNeeds(
             if (hr.education && hr.education !== "不限") parts.push(`学历:${hr.education}`);
             if (hr.healthCertificate) parts.push(hr.healthCertificate);
             if (hr.languages) parts.push(`语言:${hr.languages}`);
-            if (hr.socialIdentity && hr.socialIdentity !== "不限")
+            if (hr.socialIdentity && hr.socialIdentity !== "不限") {
               parts.push(`社会身份:${hr.socialIdentity}`);
+            }
             if (parts.length > 0) context += `  要求：${parts.join("、")}\n`;
             if (hr.recruitmentRemark) {
               context += `  招聘备注：${hr.recruitmentRemark.slice(0, 200)}\n`;
