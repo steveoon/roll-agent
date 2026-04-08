@@ -6,94 +6,43 @@ import { homedir } from "node:os";
 
 const execFileAsync = promisify(execFile);
 
-/** 缓存有效期：24 小时 */
 const CACHE_TTL_MS = 24 * 60 * 60 * 1000;
+const CORE_PACKAGE_NAME = "@roll-agent/core";
 
-/** 包名 */
-const PACKAGE_NAME = "@roll-agent/core";
+export const PUBLISHED_PACKAGE_UPDATE_STATUSES = [
+  "up-to-date",
+  "update-available",
+  "pinned-behind",
+  "unsupported-spec",
+  "unknown",
+] as const;
+export type PublishedPackageUpdateStatus =
+  (typeof PUBLISHED_PACKAGE_UPDATE_STATUSES)[number];
 
-/** 缓存文件路径 */
-function getCachePath(): string {
-  return resolve(homedir(), ".roll-agent", "update-check.json");
-}
-
-interface UpdateCache {
+interface PackageVersionCacheEntry {
   readonly latestVersion: string;
   readonly checkedAt: number;
 }
 
-interface CheckForUpdateOptions {
-  /** 强制忽略缓存，始终尝试联网查询 */
+interface PackageVersionCacheFile {
+  readonly packages: Readonly<Record<string, PackageVersionCacheEntry>>;
+}
+
+interface LegacyUpdateCache {
+  readonly latestVersion: string;
+  readonly checkedAt: number;
+}
+
+interface PackageVersionQueryOptions {
   readonly forceRefresh?: boolean;
-  /** 是否允许联网查询 npm registry */
   readonly allowNetwork?: boolean;
 }
 
-function isUpdateCache(value: unknown): value is UpdateCache {
-  if (typeof value !== "object" || value === null) return false;
-  if (!("latestVersion" in value) || !("checkedAt" in value)) return false;
-  return typeof value.latestVersion === "string" && typeof value.checkedAt === "number";
-}
-
-/** 读取缓存 */
-function readCache(): UpdateCache | undefined {
-  const cachePath = getCachePath();
-  if (!existsSync(cachePath)) return undefined;
-
-  try {
-    const raw = readFileSync(cachePath, "utf-8");
-    const parsed: unknown = JSON.parse(raw);
-    if (isUpdateCache(parsed)) return parsed;
-  } catch {
-    // 缓存损坏，忽略
-  }
-  return undefined;
-}
-
-/** 写入缓存 */
-function writeCache(latestVersion: string): void {
-  try {
-    const cachePath = getCachePath();
-    const dir = dirname(cachePath);
-    if (!existsSync(dir)) {
-      mkdirSync(dir, { recursive: true });
-    }
-    const cache: UpdateCache = { latestVersion, checkedAt: Date.now() };
-    writeFileSync(cachePath, JSON.stringify(cache), "utf-8");
-  } catch {
-    // 缓存写入失败不影响主流程
-  }
-}
-
-/** 从 npm registry 查询最新版本 */
-export async function fetchLatestVersion(): Promise<string | undefined> {
-  try {
-    const { stdout } = await execFileAsync("npm", ["view", PACKAGE_NAME, "version"], {
-      timeout: 5000,
-      encoding: "utf-8",
-    });
-    const version = stdout.trim();
-    return version.length > 0 ? version : undefined;
-  } catch {
-    return undefined;
-  }
-}
-
-/** 获取当前安装的版本 */
-export function getCurrentVersion(): string {
-  // 从 package.json 读取，兼容开发和安装环境
-  try {
-    const pkgPath = resolve(import.meta.dirname, "../../../package.json");
-    const raw = readFileSync(pkgPath, "utf-8");
-    const pkg: unknown = JSON.parse(raw);
-    if (typeof pkg === "object" && pkg !== null && "version" in pkg) {
-      const version = (pkg as { version: unknown }).version;
-      if (typeof version === "string") return version;
-    }
-  } catch {
-    // fallback
-  }
-  return "0.0.0";
+export interface PublishedPackageUpdateInfo {
+  readonly packageName: string;
+  readonly currentVersion?: string;
+  readonly latestVersion?: string;
+  readonly status: PublishedPackageUpdateStatus;
 }
 
 export interface UpdateInfo {
@@ -102,67 +51,278 @@ export interface UpdateInfo {
   readonly hasUpdate: boolean;
 }
 
-/** 比较语义化版本，返回 a > b */
-function isNewerVersion(latest: string, current: string): boolean {
-  const parse = (v: string): readonly number[] => v.replace(/^v/, "").split(".").map(Number);
-  const l = parse(latest);
-  const c = parse(current);
-  for (let i = 0; i < 3; i++) {
-    const lv = l[i] ?? 0;
-    const cv = c[i] ?? 0;
-    if (lv > cv) return true;
-    if (lv < cv) return false;
+function getCachePath(): string {
+  return resolve(homedir(), ".roll-agent", "update-check.json");
+}
+
+function isPackageVersionCacheEntry(value: unknown): value is PackageVersionCacheEntry {
+  if (typeof value !== "object" || value === null) {
+    return false;
+  }
+  if (!("latestVersion" in value) || !("checkedAt" in value)) {
+    return false;
+  }
+  return (
+    typeof value.latestVersion === "string" &&
+    value.latestVersion.length > 0 &&
+    typeof value.checkedAt === "number"
+  );
+}
+
+function isPackageVersionCacheFile(value: unknown): value is PackageVersionCacheFile {
+  if (typeof value !== "object" || value === null || !("packages" in value)) {
+    return false;
+  }
+  if (typeof value.packages !== "object" || value.packages === null) {
+    return false;
+  }
+  return Object.values(value.packages).every((entry) => isPackageVersionCacheEntry(entry));
+}
+
+function isLegacyUpdateCache(value: unknown): value is LegacyUpdateCache {
+  return isPackageVersionCacheEntry(value);
+}
+
+function readCache(): PackageVersionCacheFile | undefined {
+  const cachePath = getCachePath();
+  if (!existsSync(cachePath)) {
+    return undefined;
+  }
+
+  try {
+    const raw = readFileSync(cachePath, "utf-8");
+    const parsed: unknown = JSON.parse(raw);
+    if (isPackageVersionCacheFile(parsed)) {
+      return parsed;
+    }
+    if (isLegacyUpdateCache(parsed)) {
+      return {
+        packages: {
+          [CORE_PACKAGE_NAME]: {
+            latestVersion: parsed.latestVersion,
+            checkedAt: parsed.checkedAt,
+          },
+        },
+      };
+    }
+  } catch {
+    // ignore invalid cache file
+  }
+  return undefined;
+}
+
+function writeCache(cache: PackageVersionCacheFile): void {
+  try {
+    const cachePath = getCachePath();
+    const dir = dirname(cachePath);
+    if (!existsSync(dir)) {
+      mkdirSync(dir, { recursive: true });
+    }
+    writeFileSync(cachePath, JSON.stringify(cache), "utf-8");
+  } catch {
+    // cache write failure should not block the main flow
+  }
+}
+
+function writePackageCacheEntry(packageName: string, latestVersion: string): void {
+  const previous = readCache();
+  const nextPackages = {
+    ...(previous?.packages ?? {}),
+    [packageName]: {
+      latestVersion,
+      checkedAt: Date.now(),
+    },
+  };
+  writeCache({ packages: nextPackages });
+}
+
+function readPackageCacheEntry(packageName: string): PackageVersionCacheEntry | undefined {
+  return readCache()?.packages[packageName];
+}
+
+async function fetchLatestPublishedVersionFromRegistry(
+  packageName: string,
+): Promise<string | undefined> {
+  try {
+    const { stdout } = await execFileAsync("npm", ["view", packageName, "version", "--json"], {
+      timeout: 5000,
+      encoding: "utf-8",
+    });
+    const trimmed = stdout.trim();
+    if (trimmed.length === 0) {
+      return undefined;
+    }
+    const parsed: unknown = JSON.parse(trimmed);
+    return typeof parsed === "string" && parsed.length > 0 ? parsed : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+export async function fetchLatestPublishedVersion(
+  packageName: string,
+  options: PackageVersionQueryOptions = {},
+): Promise<string | undefined> {
+  const forceRefresh = options.forceRefresh ?? false;
+  const allowNetwork = options.allowNetwork ?? true;
+  const cache = readPackageCacheEntry(packageName);
+
+  if (!forceRefresh && cache && Date.now() - cache.checkedAt < CACHE_TTL_MS) {
+    return cache.latestVersion;
+  }
+
+  if (!allowNetwork) {
+    return cache?.latestVersion;
+  }
+
+  const latest = await fetchLatestPublishedVersionFromRegistry(packageName);
+  if (latest) {
+    writePackageCacheEntry(packageName, latest);
+    return latest;
+  }
+
+  return cache?.latestVersion;
+}
+
+export function getCurrentVersion(): string {
+  try {
+    const pkgPath = resolve(import.meta.dirname, "../../../package.json");
+    const raw = readFileSync(pkgPath, "utf-8");
+    const pkg: unknown = JSON.parse(raw);
+    if (typeof pkg === "object" && pkg !== null && "version" in pkg) {
+      const version = (pkg as { version: unknown }).version;
+      if (typeof version === "string") {
+        return version;
+      }
+    }
+  } catch {
+    // fallback
+  }
+  return "0.0.0";
+}
+
+export function isNewerVersion(latest: string, current: string): boolean {
+  const parse = (value: string): readonly number[] => {
+    return value.replace(/^v/, "").split(".").map(Number);
+  };
+  const latestParts = parse(latest);
+  const currentParts = parse(current);
+  for (let i = 0; i < 3; i += 1) {
+    const latestValue = latestParts[i] ?? 0;
+    const currentValue = currentParts[i] ?? 0;
+    if (latestValue > currentValue) {
+      return true;
+    }
+    if (latestValue < currentValue) {
+      return false;
+    }
   }
   return false;
 }
 
-/**
- * 检查是否有新版本可用。
- *
- * 使用 24h 文件缓存避免频繁网络请求。
- * 设计为不抛异常 — 任何失败静默返回无更新。
- */
-export async function checkForUpdate(options: CheckForUpdateOptions = {}): Promise<UpdateInfo> {
-  const forceRefresh = options.forceRefresh ?? false;
-  const allowNetwork = options.allowNetwork ?? true;
+function isRegistryPublishedPackageSpec(packageName: string, packageSpec: string): boolean {
+  const unsupportedPrefixes = ["file:", "git+", "http://", "https://", "link:", "workspace:", "npm:"];
+  if (unsupportedPrefixes.some((prefix) => packageSpec.startsWith(prefix))) {
+    return false;
+  }
+  if (
+    packageSpec.startsWith(".") ||
+    packageSpec.startsWith("/") ||
+    packageSpec.startsWith("~") ||
+    packageSpec.endsWith(".tgz") ||
+    packageSpec.endsWith(".tar.gz")
+  ) {
+    return false;
+  }
+  return packageSpec === packageName || packageSpec.startsWith(`${packageName}@`);
+}
+
+function getVersionSpecifier(packageName: string, packageSpec: string): string | undefined {
+  if (!packageSpec.startsWith(`${packageName}@`)) {
+    return undefined;
+  }
+  return packageSpec.slice(packageName.length + 1);
+}
+
+function isPinnedPublishedPackageSpec(packageName: string, packageSpec: string): boolean {
+  const versionSpecifier = getVersionSpecifier(packageName, packageSpec);
+  if (!versionSpecifier) {
+    return false;
+  }
+  const normalized = versionSpecifier.replace(/^v/, "");
+  return /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/.test(normalized);
+}
+
+export async function checkPublishedPackageUpdate(
+  input: {
+    packageName: string;
+    packageSpec: string;
+    currentVersion?: string;
+  },
+  options: PackageVersionQueryOptions = {},
+): Promise<PublishedPackageUpdateInfo> {
+  const { packageName, packageSpec, currentVersion } = input;
+
+  if (!isRegistryPublishedPackageSpec(packageName, packageSpec)) {
+    return {
+      packageName,
+      ...(currentVersion ? { currentVersion } : {}),
+      status: "unsupported-spec",
+    };
+  }
+
+  if (!currentVersion) {
+    return {
+      packageName,
+      status: "unknown",
+    };
+  }
+
+  const latestVersion = await fetchLatestPublishedVersion(packageName, options);
+  if (!latestVersion) {
+    return {
+      packageName,
+      currentVersion,
+      status: "unknown",
+    };
+  }
+
+  if (!isNewerVersion(latestVersion, currentVersion)) {
+    return {
+      packageName,
+      currentVersion,
+      latestVersion,
+      status: "up-to-date",
+    };
+  }
+
+  if (isPinnedPublishedPackageSpec(packageName, packageSpec)) {
+    return {
+      packageName,
+      currentVersion,
+      latestVersion,
+      status: "pinned-behind",
+    };
+  }
+
+  return {
+    packageName,
+    currentVersion,
+    latestVersion,
+    status: "update-available",
+  };
+}
+
+export async function checkForUpdate(
+  options: PackageVersionQueryOptions = {},
+): Promise<UpdateInfo> {
   const current = getCurrentVersion();
-  const cache = readCache();
+  const latest =
+    (await fetchLatestPublishedVersion(CORE_PACKAGE_NAME, options)) ?? current;
 
-  // 优先读缓存
-  if (!forceRefresh && cache && Date.now() - cache.checkedAt < CACHE_TTL_MS) {
-    return {
-      current,
-      latest: cache.latestVersion,
-      hasUpdate: isNewerVersion(cache.latestVersion, current),
-    };
-  }
-
-  if (!allowNetwork) {
-    if (cache) {
-      return {
-        current,
-        latest: cache.latestVersion,
-        hasUpdate: isNewerVersion(cache.latestVersion, current),
-      };
-    }
-    return { current, latest: current, hasUpdate: false };
-  }
-
-  // 缓存过期或不存在，查询 npm
-  const latest = await fetchLatestVersion();
-  if (latest) {
-    writeCache(latest);
-    return { current, latest, hasUpdate: isNewerVersion(latest, current) };
-  }
-
-  // 查询失败，使用旧缓存或返回无更新
-  if (cache) {
-    return {
-      current,
-      latest: cache.latestVersion,
-      hasUpdate: isNewerVersion(cache.latestVersion, current),
-    };
-  }
-
-  return { current, latest: current, hasUpdate: false };
+  return {
+    current,
+    latest,
+    hasUpdate: isNewerVersion(latest, current),
+  };
 }

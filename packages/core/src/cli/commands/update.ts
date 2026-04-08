@@ -14,10 +14,20 @@ import { resolveTransportWithDevSpawnSpec } from "../../registry/dev-spawn.ts";
 import { runAgentSetup } from "../../registry/runtime-setup.ts";
 import { AgentStore } from "../../registry/store.ts";
 import { discoverAgent } from "../../registry/discovery.ts";
-import { inferAgentSourceType, resolveInstalledPackageRoot } from "../../registry/source.ts";
+import {
+  inferAgentSourceType,
+  readInstalledPackageManifest,
+  resolveInstalledPackageRoot,
+} from "../../registry/source.ts";
 import { McpClientManager } from "../../mcp/client-manager.ts";
 import { log, createSpinner } from "../utils/output.ts";
-import { checkForUpdate, getCurrentVersion } from "../utils/update-checker.ts";
+import {
+  checkForUpdate,
+  checkPublishedPackageUpdate,
+  getCurrentVersion,
+  type PublishedPackageUpdateInfo,
+  type PublishedPackageUpdateStatus,
+} from "../utils/update-checker.ts";
 import type { AgentSourceType, RegisteredAgent } from "../../types/agent.ts";
 
 const execFileAsync = promisify(execFile);
@@ -52,6 +62,102 @@ function logConfigInspectionNotice(
     default:
       break;
   }
+}
+
+interface InstalledPackageUpdateResult {
+  readonly packageRoot: string;
+  readonly packageName: string;
+  readonly installedVersion?: string;
+}
+
+interface AgentCheckSummary {
+  readonly name: string;
+  readonly sourceType: AgentSourceType;
+  readonly icon: string;
+  readonly action: string;
+}
+
+function getInstalledPackageCheckIcon(status: PublishedPackageUpdateStatus): string {
+  switch (status) {
+    case "up-to-date":
+      return "✅";
+    case "update-available":
+      return "⬆";
+    case "pinned-behind":
+      return "📌";
+    case "unsupported-spec":
+      return "?";
+    case "unknown":
+      return "?";
+  }
+}
+
+function formatInstalledPackageCheckAction(
+  info: PublishedPackageUpdateInfo,
+  packageSpec: string,
+): string {
+  switch (info.status) {
+    case "up-to-date":
+      return info.currentVersion
+        ? `已是最新版本 (v${info.currentVersion})`
+        : "已是最新版本";
+    case "update-available":
+      if (info.currentVersion && info.latestVersion) {
+        return `可更新 v${info.currentVersion} → v${info.latestVersion}`;
+      }
+      return "检测到可用更新";
+    case "pinned-behind":
+      if (info.currentVersion && info.latestVersion) {
+        return `固定版本 v${info.currentVersion}；latest=v${info.latestVersion}`;
+      }
+      return "固定版本，需手动调整 package spec";
+    case "unsupported-spec":
+      return `不支持检查此 package spec: ${packageSpec}`;
+    case "unknown":
+      if (info.currentVersion) {
+        return `无法检查最新版本 (current=v${info.currentVersion})`;
+      }
+      return "无法检查最新版本";
+  }
+}
+
+function hydrateInstalledPackageAgent(agent: RegisteredAgent, store?: AgentStore): RegisteredAgent {
+  if (agent.source?.type !== "installed-package") {
+    return agent;
+  }
+
+  const packageRoot = resolveInstalledPackageRoot(
+    agent.source.installDir,
+    agent.source.packageName,
+  );
+  const manifest = readInstalledPackageManifest(packageRoot);
+  if (!manifest) {
+    return agent;
+  }
+
+  const nextSource = {
+    ...agent.source,
+    ...(manifest.name ? { packageName: manifest.name } : {}),
+    ...(manifest.version ? { installedVersion: manifest.version } : {}),
+  };
+  const sourceChanged =
+    nextSource.packageName !== agent.source.packageName ||
+    nextSource.installedVersion !== agent.source.installedVersion;
+  const installPathChanged = packageRoot !== agent.installPath;
+
+  if (!sourceChanged && !installPathChanged) {
+    return agent;
+  }
+
+  const nextAgent: RegisteredAgent = {
+    ...agent,
+    installPath: packageRoot,
+    source: nextSource,
+  };
+  if (store) {
+    store.replace(agent.skill.name, nextAgent);
+  }
+  return nextAgent;
 }
 
 /** 更新 roll-core 自身 */
@@ -124,9 +230,11 @@ async function updateGitAgent(agent: RegisteredAgent): Promise<boolean> {
 }
 
 /** 重新安装 npm 来源的 Agent */
-async function updateInstalledAgent(agent: RegisteredAgent): Promise<boolean> {
+async function updateInstalledAgent(
+  agent: RegisteredAgent,
+): Promise<InstalledPackageUpdateResult | undefined> {
   if (agent.source?.type !== "installed-package") {
-    return false;
+    return undefined;
   }
 
   const spinner = createSpinner(`更新 ${agent.skill.name} (npm install)...`).start();
@@ -144,13 +252,18 @@ async function updateInstalledAgent(agent: RegisteredAgent): Promise<boolean> {
     if (!existsSync(packageRoot)) {
       throw new Error(`Installed package root not found: ${packageRoot}`);
     }
+    const manifest = readInstalledPackageManifest(packageRoot);
 
     spinner.succeed(`${agent.skill.name} 已重新安装`);
-    return true;
+    return {
+      packageRoot,
+      packageName: manifest?.name ?? agent.source.packageName,
+      ...(manifest?.version ? { installedVersion: manifest.version } : {}),
+    };
   } catch (err) {
     spinner.fail(`${agent.skill.name} 更新失败`);
     log.error(err instanceof Error ? err.message : String(err));
-    return false;
+    return undefined;
   }
 }
 
@@ -214,37 +327,74 @@ export default defineCommand({
       log.warn(`无法读取 Agent 配置，跳过已注册 Agent 检查：${err instanceof Error ? err.message : String(err)}`);
     }
 
-    const agentSummary: Array<{
-      name: string;
-      sourceType: AgentSourceType;
-      action: string;
-    }> = [];
+    const agentSummary: AgentCheckSummary[] = [];
 
-    for (const agent of agents) {
+    for (const listedAgent of agents) {
+      let agent = listedAgent;
+      const initialSourceType = inferAgentSourceType(agent);
+
+      if (initialSourceType === "installed-package") {
+        agent = hydrateInstalledPackageAgent(agent, store);
+      }
+
       const sourceType = inferAgentSourceType(agent);
-      let action: string;
       switch (sourceType) {
         case "git":
-          action = "git pull + 重新安装依赖";
+          agentSummary.push({
+            name: agent.skill.name,
+            sourceType,
+            icon: "~",
+            action: "可执行 git pull + 重新安装依赖",
+          });
           break;
-        case "installed-package":
-          action = "重新安装 npm 包";
+        case "installed-package": {
+          if (agent.source?.type !== "installed-package") {
+            agentSummary.push({
+              name: agent.skill.name,
+              sourceType,
+              icon: "?",
+              action: "无法检查已安装包版本",
+            });
+            break;
+          }
+          const info = await checkPublishedPackageUpdate({
+            packageName: agent.source.packageName,
+            packageSpec: agent.source.packageSpec,
+            ...(agent.source.installedVersion
+              ? { currentVersion: agent.source.installedVersion }
+              : {}),
+          });
+          agentSummary.push({
+            name: agent.skill.name,
+            sourceType,
+            icon: getInstalledPackageCheckIcon(info.status),
+            action: formatInstalledPackageCheckAction(info, agent.source.packageSpec),
+          });
           break;
+        }
         case "remote-manifest":
-          action = "刷新本地 manifest + MCP 元数据";
+          agentSummary.push({
+            name: agent.skill.name,
+            sourceType,
+            icon: "~",
+            action: "可刷新本地 manifest + MCP 元数据",
+          });
           break;
         case "local-path":
-          action = "刷新本地 SKILL/manifest";
+          agentSummary.push({
+            name: agent.skill.name,
+            sourceType,
+            icon: "⏭",
+            action: "刷新本地 SKILL/manifest",
+          });
           break;
       }
-      agentSummary.push({ name: agent.skill.name, sourceType, action });
     }
 
     if (agents.length > 0) {
       log.info(`\n已注册 Agent (${agents.length}):`);
       for (const s of agentSummary) {
-        const tag = s.sourceType === "local-path" ? "⏭" : "⬆";
-        log.info(`  ${tag} ${s.name} [${s.sourceType}] — ${s.action}`);
+        log.info(`  ${s.icon} ${s.name} [${s.sourceType}] — ${s.action}`);
       }
     } else if (agentsConfig) {
       log.info("无已注册 Agent");
@@ -328,20 +478,40 @@ export default defineCommand({
           const wasRunning =
             agent.runtime.ownership === "core-managed" &&
             getAgentPid(agentsConfig.dataDir, agent.skill.name) !== undefined;
-          const ok = await updateInstalledAgent(agent);
-          if (ok) {
+          if (wasRunning) {
             try {
-              const packageRoot =
+              await stopAgentGracefully(agentsConfig.dataDir, agent.skill.name);
+            } catch (err) {
+              store.updateStatus(agent.skill.name, "error");
+              log.warn(
+                `${agent.skill.name} 停止失败，无法继续升级: ${err instanceof Error ? err.message : String(err)}`,
+              );
+              failedCount++;
+              break;
+            }
+          }
+
+          const updateResult = await updateInstalledAgent(agent);
+          if (updateResult) {
+            try {
+              const discovered = discoverAgent(updateResult.packageRoot);
+              const updatedSource =
                 agent.source?.type === "installed-package"
-                  ? resolveInstalledPackageRoot(agent.source.installDir, agent.source.packageName)
-                  : agent.installPath;
-              const discovered = discoverAgent(packageRoot);
+                  ? {
+                      ...agent.source,
+                      packageName: updateResult.packageName,
+                      ...(updateResult.installedVersion
+                        ? { installedVersion: updateResult.installedVersion }
+                        : {}),
+                    }
+                  : undefined;
               const updated: RegisteredAgent = {
                 ...agent,
                 skill: discovered.skill,
                 transport: discovered.transport,
                 runtime: discovered.runtime,
-                installPath: packageRoot,
+                installPath: updateResult.packageRoot,
+                ...(updatedSource ? { source: updatedSource } : {}),
                 ...(discovered.skillBody.length > 0 ? { skillBody: discovered.skillBody } : {}),
               };
               const setupResult = await runAgentSetup(updated, {
@@ -361,7 +531,9 @@ export default defineCommand({
                 store.updateStatus(updated.skill.name, "error");
                 failedCount++;
               } else {
-                await maybeRestartManagedAgent(updated, wasRunning, agentsConfig.dataDir);
+                if (wasRunning) {
+                  await startManagedAgentAndWait(updated, agentsConfig.dataDir);
+                }
                 updatedCount++;
               }
             } catch (err) {
@@ -372,6 +544,13 @@ export default defineCommand({
               failedCount++;
             }
           } else {
+            if (wasRunning) {
+              try {
+                await startManagedAgentAndWait(agent, agentsConfig.dataDir);
+              } catch {
+                store.updateStatus(agent.skill.name, "error");
+              }
+            }
             failedCount++;
           }
           break;
@@ -517,6 +696,13 @@ async function maybeRestartManagedAgent(
   }
 
   await stopAgentGracefully(dataDir, agent.skill.name);
+  await startManagedAgentAndWait(agent, dataDir);
+}
+
+async function startManagedAgentAndWait(
+  agent: RegisteredAgent,
+  dataDir: string,
+): Promise<void> {
   let started = false;
   try {
     startAgent(agent, dataDir);

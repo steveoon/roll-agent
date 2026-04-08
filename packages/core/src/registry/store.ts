@@ -404,11 +404,18 @@ function normalizeSource(
       const packageName = readString(value["packageName"]);
       const packageSpec = readString(value["packageSpec"]);
       const installDir = readString(value["installDir"]);
+      const installedVersion = readString(value["installedVersion"]);
       if (!packageName || !packageSpec || !installDir) {
         return undefined;
       }
 
-      return { type, packageName, packageSpec, installDir };
+      return {
+        type,
+        packageName,
+        packageSpec,
+        installDir,
+        ...(installedVersion ? { installedVersion } : {}),
+      };
     }
     case "remote-manifest": {
       const endpoint =
@@ -436,11 +443,18 @@ function normalizeLegacySource(
       const packageName = readString(value["packageName"]);
       const packageSpec = readString(value["packageSpec"]);
       const installDir = readString(value["installDir"]);
+      const installedVersion = readString(value["installedVersion"]);
       if (!packageName || !packageSpec || !installDir) {
         return undefined;
       }
 
-      return { type: "installed-package", packageName, packageSpec, installDir };
+      return {
+        type: "installed-package",
+        packageName,
+        packageSpec,
+        installDir,
+        ...(installedVersion ? { installedVersion } : {}),
+      };
     }
     case "remote": {
       const localSource = inferAgentSourceFromInstallPath(installPath, transport);

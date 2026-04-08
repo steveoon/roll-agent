@@ -159,6 +159,29 @@ describe("AgentStore", () => {
     });
   });
 
+  it("should persist installed-package source version metadata", () => {
+    const agent = makeAgent("installed-agent");
+    store.add({
+      ...agent,
+      source: {
+        type: "installed-package",
+        packageName: "@roll-agent/installed-agent",
+        packageSpec: "@roll-agent/installed-agent@latest",
+        installDir: "/tmp/installed-agent",
+        installedVersion: "1.2.3",
+      },
+    });
+
+    const reloaded = new AgentStore(tmpDir).findByName("installed-agent");
+    assert.deepEqual(reloaded?.source, {
+      type: "installed-package",
+      packageName: "@roll-agent/installed-agent",
+      packageSpec: "@roll-agent/installed-agent@latest",
+      installDir: "/tmp/installed-agent",
+      installedVersion: "1.2.3",
+    });
+  });
+
   it("should create data directory if it does not exist", () => {
     const deepDir = resolve(tmpDir, "deep", "nested", "dir");
     const deepStore = new AgentStore(deepDir);
