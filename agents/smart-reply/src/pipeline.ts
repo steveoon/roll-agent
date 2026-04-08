@@ -32,7 +32,20 @@ export type { ProviderConfigs } from "./types/classification.ts";
 // ---- types from SmartReplyAgentResult / SmartReplyDebugInfo ----
 export type { ReplyGateViolationCode } from "./pipeline/reply-gate.ts";
 export type { SafeGenerateTextUsage } from "./ai/structured-output.ts";
+export {
+  collectAgeEvidenceFromSources,
+  createConfigDataAgeSource,
+  createDefaultAgeEligibilitySources,
+  createDulidayApiAgeSource,
+  evaluateAgeEligibility,
+} from "./pipeline/age-eligibility.ts";
 export type {
+  AgeEvidence,
+  AgeEvidenceCollection,
+  AgeEvidenceSourceResult,
+  AgeEligibilityQuery,
+  AgeEligibilityResult,
+  AgeEligibilitySource,
   AgeEligibilityStatus,
   AgeEligibilityAppliedStrategy,
   AgeEligibilitySummary,
