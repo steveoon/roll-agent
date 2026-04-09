@@ -51,21 +51,33 @@ export function saveBrandConfig(data: ZhipinData): void {
   brandConfigCache = { data, loadedAt: Date.now() };
 }
 
-export function loadReplyPolicy(): ReplyPolicyConfig {
+export type ReplyPolicySource = "file" | "default";
+
+export interface ReplyPolicyLoadResult {
+  readonly policy: ReplyPolicyConfig;
+  readonly source: ReplyPolicySource;
+}
+
+let lastReplyPolicySource: ReplyPolicySource = "default";
+
+export function loadReplyPolicy(): ReplyPolicyLoadResult {
   if (replyPolicyCache && isFresh(replyPolicyCache.loadedAt)) {
-    return replyPolicyCache.data;
+    return { policy: replyPolicyCache.data, source: lastReplyPolicySource };
   }
   try {
     const raw = readFileSync(REPLY_POLICY_PATH, "utf-8");
     const data = ReplyPolicyConfigSchema.parse(JSON.parse(raw));
     replyPolicyCache = { data, loadedAt: Date.now() };
-    return data;
+    lastReplyPolicySource = "file";
+    return { policy: data, source: "file" };
   } catch {
-    return DEFAULT_REPLY_POLICY;
+    lastReplyPolicySource = "default";
+    return { policy: DEFAULT_REPLY_POLICY, source: "default" };
   }
 }
 
 export function saveReplyPolicy(policy: ReplyPolicyConfig): void {
   writeFileSync(REPLY_POLICY_PATH, JSON.stringify(policy, null, 2), "utf-8");
   replyPolicyCache = { data: policy, loadedAt: Date.now() };
+  lastReplyPolicySource = "file";
 }

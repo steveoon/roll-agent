@@ -38,6 +38,7 @@ export const generateReply = defineTool({
     suggestedReply: z.string(),
     confidence: z.number(),
     stage: FunnelStageSchema,
+    replyPolicySource: z.enum(["file", "default"]).describe("回复策略来源: file=自定义配置文件, default=内置默认策略"),
     latencyMs: z.number().optional(),
     shouldExchangeWechat: z.boolean().optional(),
     error: z.string().optional(),
@@ -74,6 +75,8 @@ export const generateReply = defineTool({
   execute: async (input, ctx) => {
     ctx.logger.info(`Processing message: ${input.candidateMessage.slice(0, 50)}...`);
 
+    const { policy: replyPolicy, source: replyPolicySource } = loadReplyPolicy();
+
     let configData;
     try {
       configData = loadBrandConfig();
@@ -82,11 +85,10 @@ export const generateReply = defineTool({
         suggestedReply: "",
         confidence: 0,
         stage: "trust_building" as const,
+        replyPolicySource,
         error: "品牌数据未配置，请先调用 sync_brand_data 写入数据",
       };
     }
-
-    const replyPolicy = loadReplyPolicy();
 
     const result = await generateSmartReply({
       candidateMessage: input.candidateMessage,
@@ -111,6 +113,7 @@ export const generateReply = defineTool({
       suggestedReply: result.suggestedReply,
       confidence: result.confidence,
       stage: result.turnPlan.stage,
+      replyPolicySource,
       latencyMs: result.latencyMs,
       shouldExchangeWechat: result.shouldExchangeWechat,
       error: result.error?.userMessage,
