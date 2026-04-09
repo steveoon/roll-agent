@@ -8,6 +8,9 @@ coverage/
 .env.*
 !.env.example
 
+# Claude Code skills（本地 symlink，不随仓库分发）
+.claude/skills/roll-core
+
 # Smart Reply Agent 业务数据（含敏感信息）
 agents/smart-reply/data/brand-config.json
 agents/smart-reply/data/reply-policy.json
