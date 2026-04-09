@@ -1,4 +1,4 @@
-import type { LanguageModelV3 } from "@ai-sdk/provider";
+import type { LanguageModelV3, SharedV3ProviderOptions } from "@ai-sdk/provider";
 import { createAlibaba } from "@ai-sdk/alibaba";
 import { createAnthropic } from "@ai-sdk/anthropic";
 import { createOpenAI } from "@ai-sdk/openai";
@@ -59,4 +59,38 @@ export function createProviderModel(
   }
 
   return factory(modelName, { apiKey, baseURL });
+}
+
+/** generateText 调用目的 */
+export type LLMCallPurpose = "structured-output" | "text" | "sampling";
+
+/** resolveLLMCall 的返回值 */
+export interface ResolvedLLMCall {
+  readonly model: LanguageModelV3;
+  readonly providerOptions?: SharedV3ProviderOptions;
+}
+
+/**
+ * 按 provider + 调用目的解析 generateText 的完整调用上下文。
+ *
+ * structured-output 场景下，对 qwen provider 自动注入 enableThinking: false，
+ * 因为阿里云 thinking mode 不支持 structured output。
+ */
+export function resolveLLMCall(
+  providerName: string,
+  modelName: string,
+  apiKey: string,
+  purpose: LLMCallPurpose,
+  baseURL?: string,
+): ResolvedLLMCall {
+  const model = createProviderModel(providerName, modelName, apiKey, baseURL);
+
+  if (purpose === "structured-output" && providerName === "qwen") {
+    return {
+      model,
+      providerOptions: { alibaba: { enableThinking: false } },
+    };
+  }
+
+  return { model };
 }

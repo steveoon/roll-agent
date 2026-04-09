@@ -1,5 +1,5 @@
 import { generateText, jsonSchema, Output } from "ai";
-import type { LanguageModelV3 } from "@ai-sdk/provider";
+import type { LanguageModelV3, SharedV3ProviderOptions } from "@ai-sdk/provider";
 import type { AgentTool } from "../types/agent.ts";
 import { isPlainObject } from "./schema.ts";
 import { createExtractionSchema, normalizeExtractedToolInput } from "./extraction-schema.ts";
@@ -10,7 +10,7 @@ function buildToolInputPrompt(
   extractionSchema: object,
 ): string {
   return [
-    "你要为一个工具调用提取参数。",
+    "你要为一个工具调用提取参数。以 JSON 格式返回结果。",
     "这里只提取能从当前消息中明确得到的字段，不要发明新字段。",
     "如果用户没有提供某个值，不要猜测，也不要填充默认值。",
     "如果用户明确提到了某个名字、品牌、城市、数字或其他实体，并且 schema 中有最匹配的字段，即使该字段是可选的，也应当提取出来。",
@@ -88,6 +88,7 @@ export async function extractToolInput(
   message: string,
   tool: Pick<AgentTool, "name" | "description" | "inputSchema">,
   model: LanguageModelV3,
+  structuredOutputProviderOptions?: SharedV3ProviderOptions,
 ): Promise<Readonly<Record<string, unknown>>> {
   const extractionSchema = createExtractionSchema(tool.inputSchema);
 
@@ -98,6 +99,9 @@ export async function extractToolInput(
         schema: jsonSchema<Readonly<Record<string, unknown>>>(extractionSchema),
       }),
       prompt: buildToolInputPrompt(message, tool, extractionSchema),
+      ...(structuredOutputProviderOptions
+        ? { providerOptions: structuredOutputProviderOptions }
+        : {}),
     });
 
     if (!output) {

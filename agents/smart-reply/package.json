@@ -54,14 +54,14 @@
     }
   },
   "dependencies": {
-    "@ai-sdk/alibaba": "^1.0.13",
-    "@ai-sdk/anthropic": "^3.0.53",
-    "@ai-sdk/deepseek": "^2.0.22",
-    "@ai-sdk/google": "^3.0.36",
-    "@ai-sdk/openai": "^3.0.39",
-    "@ai-sdk/openai-compatible": "^2.0.33",
+    "@ai-sdk/alibaba": "^1.0.17",
+    "@ai-sdk/anthropic": "^3.0.68",
+    "@ai-sdk/deepseek": "^2.0.29",
+    "@ai-sdk/google": "^3.0.60",
+    "@ai-sdk/openai": "^3.0.52",
+    "@ai-sdk/openai-compatible": "^2.0.41",
     "@roll-agent/sdk": "workspace:*",
-    "ai": "^6.0.108",
+    "ai": "^6.0.154",
     "ora": "^8.2.0",
     "zod": "^3.25.76"
   },

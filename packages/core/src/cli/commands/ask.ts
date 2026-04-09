@@ -1,7 +1,7 @@
 import { defineCommand } from "citty";
 import { loadConfig } from "../../config/loader.ts";
 import { getAgentEnv } from "../../config/helpers.ts";
-import { createProviderModel } from "../../llm/providers.ts";
+import { createProviderModel, resolveLLMCall } from "../../llm/providers.ts";
 import { McpClientManager } from "../../mcp/client-manager.ts";
 import { AgentStore } from "../../registry/store.ts";
 import { resolveTransportWithDevSpawnSpec } from "../../registry/dev-spawn.ts";
@@ -111,17 +111,18 @@ export default defineCommand({
       return;
     }
 
-    const model = createProviderModel(
+    const { model, providerOptions: structuredOutputProviderOptions } = resolveLLMCall(
       routerProvider,
       routerModelName,
       providerConfig.apiKey,
+      "structured-output",
       providerConfig.baseUrl,
     );
 
     log.info(`分析意图: "${args.message}"`);
     let decision;
     try {
-      decision = await routeWithLLM(args.message, agents, model);
+      decision = await routeWithLLM(args.message, agents, model, structuredOutputProviderOptions);
     } catch (err) {
       const result: AskFailedResult = {
         status: "failed",
@@ -203,7 +204,12 @@ export default defineCommand({
       }
 
       failureStage = "execute";
-      const extractedInput = await extractToolInput(args.message, targetTool, model);
+      const extractedInput = await extractToolInput(
+        args.message,
+        targetTool,
+        model,
+        structuredOutputProviderOptions,
+      );
       const finalDecision = { ...decision, input: extractedInput };
 
       const preflightResult = preflightToolCall(targetTool, finalDecision.input);
