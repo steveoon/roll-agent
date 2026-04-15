@@ -99,9 +99,7 @@ function createTestPage(options: TestPageOptions = {}) {
       waitForFunctionCalls += 1;
       return {};
     },
-    async bringToFront() {
-      return;
-    },
+    async bringToFront() {},
     isClosed() {
       return false;
     },
