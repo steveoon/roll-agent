@@ -5,6 +5,7 @@ import {
   performInitialScrollPattern,
   performRandomScroll,
 } from "../pages/zhipin/anti-detection.ts";
+import { ensureChatListLoaded } from "../pages/zhipin/chat-navigation.ts";
 
 const CandidateItemSchema = z.object({
   name: z.string(),
@@ -41,19 +42,16 @@ export const zhipinReadMessages = defineTool({
     const ctxManager = getContextManager();
     const page = await ctxManager.getPage("zhipin");
 
-    if (!page.url().includes("/web/geek/chat") && !page.url().includes("/web/chat")) {
-      await page.goto("https://www.zhipin.com/web/geek/chat", { waitUntil: "domcontentloaded" });
-    }
-
-    try {
-      await page.waitForSelector(".chat-list-wrap, .geek-item", { timeout: 10_000 });
-    } catch {
+    const listReady = await ensureChatListLoaded(ctxManager, page);
+    if (!listReady) {
       return { success: false, candidates: [], total: 0, stats: { withName: 0, withUnread: 0 } };
     }
 
-    await performInitialScrollPattern(page);
+    const activePage = await ctxManager.getPage("zhipin");
 
-    const candidates = await page.evaluate(() => {
+    await performInitialScrollPattern(activePage);
+
+    const candidates = await activePage.evaluate(() => {
       const items = document.querySelectorAll(".geek-item");
       const result: Array<{
         name: string;
@@ -107,7 +105,7 @@ export const zhipinReadMessages = defineTool({
       withName: candidates.filter((c) => c.name.length > 0).length,
       withUnread: candidates.filter((c) => c.hasUnread).length,
     };
-    await performRandomScroll(page);
+    await performRandomScroll(activePage);
 
     ctx.logger.info(`Found ${filtered.length} candidates (${stats.withUnread} with unread)`);
     return { success: true, candidates: filtered, total: candidates.length, stats };

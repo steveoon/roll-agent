@@ -1,6 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { createProviderModel } from "./providers.ts";
+import { createProviderModel, resolveLLMCall } from "./providers.ts";
 
 describe("createProviderModel", () => {
   it("should create an anthropic model", () => {
@@ -43,5 +43,38 @@ describe("createProviderModel", () => {
       () => createProviderModel("nonexistent", "model", "key"),
       (err: Error) => err.message.includes("Unknown LLM provider"),
     );
+  });
+});
+
+describe("resolveLLMCall", () => {
+  it("disables thinking for qwen structured-output calls", () => {
+    const resolved = resolveLLMCall("qwen", "qwen3.6-plus", "test-key", "structured-output");
+
+    assert.equal(resolved.model.modelId, "qwen3.6-plus");
+    assert.deepEqual(resolved.providerOptions, {
+      alibaba: {
+        enableThinking: false,
+      },
+    });
+  });
+
+  it("does not inject providerOptions for qwen text calls", () => {
+    const resolved = resolveLLMCall("qwen", "qwen3.6-plus", "test-key", "text");
+
+    assert.equal(resolved.model.modelId, "qwen3.6-plus");
+    assert.equal(resolved.providerOptions, undefined);
+  });
+
+  it("does not inject providerOptions for non-qwen structured-output calls", () => {
+    const resolved = resolveLLMCall(
+      "openai",
+      "gpt-4o",
+      "test-key",
+      "structured-output",
+      "https://custom-api.example.com/v1",
+    );
+
+    assert.equal(resolved.model.modelId, "gpt-4o");
+    assert.equal(resolved.providerOptions, undefined);
   });
 });

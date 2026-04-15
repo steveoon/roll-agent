@@ -1,4 +1,5 @@
-import type { Page } from "@roll-agent/browser";
+import { setTimeout as delay } from "node:timers/promises";
+import type { BrowserContextManager, Page } from "@roll-agent/browser";
 import { randomDelay } from "./anti-detection.ts";
 
 export interface ChatTarget {
@@ -19,6 +20,10 @@ export interface OpenChatResult extends ChatListItem {
   readonly found: boolean;
   readonly error?: string;
 }
+
+const ZHIPIN_CHAT_URL = "https://www.zhipin.com/web/geek/chat";
+const CHAT_LIST_SELECTOR = ".chat-list-wrap, .geek-item";
+const MESSAGE_ENTRY_TEXT = new Set(["消息"]);
 
 function normalizeCandidateName(name: string): string {
   return name.trim().toLocaleLowerCase("zh-CN");
@@ -68,17 +73,150 @@ export function selectChatCandidate(
   });
 }
 
-export async function ensureChatListLoaded(page: Page): Promise<boolean> {
-  if (!page.url().includes("/web/geek/chat") && !page.url().includes("/web/chat")) {
-    await page.goto("https://www.zhipin.com/web/geek/chat", { waitUntil: "domcontentloaded" });
-  }
+function isChatPageUrl(url: string): boolean {
+  return url.includes("/web/geek/chat") || url.includes("/web/chat");
+}
 
+async function waitForChatList(page: Page, timeout = 10_000): Promise<boolean> {
   try {
-    await page.waitForSelector(".geek-item", { timeout: 10_000 });
+    await page.waitForSelector(CHAT_LIST_SELECTOR, { timeout });
     return true;
   } catch {
     return false;
   }
+}
+
+async function findOpenChatTab(
+  ctxManager: BrowserContextManager,
+  currentPage?: Page,
+): Promise<Page | undefined> {
+  const pages = await ctxManager.listAttachedPages();
+  const matched = pages.find((page) => page !== currentPage && isChatPageUrl(page.url()));
+  if (!matched) {
+    return undefined;
+  }
+
+  return await ctxManager.selectAttachedPage("zhipin", ctxManager.getPageId(matched));
+}
+
+async function clickMessageEntry(page: Page): Promise<boolean> {
+  return await page.evaluate((messageLabels: string[]) => {
+    const isVisible = (element: Element): boolean => {
+      const rect = element.getBoundingClientRect();
+      return rect.width > 0 && rect.height > 0;
+    };
+
+    const hasMessageText = (text: string): boolean =>
+      messageLabels.some((label) => text === label || text.includes(label));
+
+    const directTargets = Array.from(
+      document.querySelectorAll('a[href*="/web/geek/chat"], a[href*="/web/chat"]'),
+    );
+    for (const element of directTargets) {
+      if (isVisible(element)) {
+        (element as HTMLElement).click();
+        return true;
+      }
+    }
+
+    const fallbackTargets = Array.from(
+      document.querySelectorAll('a, button, [role="link"], [role="button"], span, div'),
+    );
+    for (const element of fallbackTargets) {
+      const text = element.textContent?.trim() ?? "";
+      if (!hasMessageText(text) || !isVisible(element)) {
+        continue;
+      }
+
+      (element as HTMLElement).click();
+      return true;
+    }
+
+    return false;
+  }, [...MESSAGE_ENTRY_TEXT]);
+}
+
+function isErrAborted(error: unknown): boolean {
+  return error instanceof Error && /ERR_ABORTED/i.test(error.message);
+}
+
+async function softGotoChatList(page: Page): Promise<boolean> {
+  try {
+    await page.goto(ZHIPIN_CHAT_URL, { waitUntil: "domcontentloaded" });
+    return true;
+  } catch (error) {
+    if (!isErrAborted(error)) {
+      return false;
+    }
+
+    if (isChatPageUrl(page.url())) {
+      return true;
+    }
+
+    return await waitForChatList(page, 2_000);
+  }
+}
+
+async function tryReachChatListViaUi(
+  ctxManager: BrowserContextManager,
+  page: Page,
+): Promise<boolean> {
+  const clicked = await clickMessageEntry(page);
+  if (!clicked) {
+    return false;
+  }
+
+  if (await waitForChatList(page, 5_000)) {
+    return true;
+  }
+
+  const reusedPage = await findOpenChatTab(ctxManager, page);
+  if (!reusedPage) {
+    return false;
+  }
+
+  return await waitForChatList(reusedPage, 5_000);
+}
+
+/**
+ * 聊天页进入策略：
+ * 1. 当前页已经是聊天页
+ * 2. 复用已打开的聊天 tab
+ * 3. 在当前 BOSS 页面点击“消息”入口
+ * 4. 最后才用 goto 兜底；若 `ERR_ABORTED`，则检查页面是否已进入可用状态
+ */
+export async function ensureChatListLoaded(
+  ctxManager: BrowserContextManager,
+  page: Page,
+): Promise<boolean> {
+  if (isChatPageUrl(page.url()) && (await waitForChatList(page))) {
+    return true;
+  }
+
+  const reusedPage = await findOpenChatTab(ctxManager, page);
+  if (reusedPage && (await waitForChatList(reusedPage))) {
+    return true;
+  }
+
+  if (await tryReachChatListViaUi(ctxManager, page)) {
+    return true;
+  }
+
+  if (!(await softGotoChatList(page))) {
+    return false;
+  }
+
+  if (await waitForChatList(page)) {
+    return true;
+  }
+
+  await delay(300);
+  const reusedAfterGoto = await findOpenChatTab(ctxManager, page);
+  if (!reusedAfterGoto) {
+    return false;
+  }
+
+  return await waitForChatList(reusedAfterGoto, 5_000);
 }
 
 export async function getChatCandidates(page: Page): Promise<ReadonlyArray<ChatListItem>> {
@@ -160,6 +298,7 @@ async function waitForChatReady(page: Page, candidateName: string): Promise<void
  * - 都没有 → 不做任何导航，假设当前窗口已就绪
  */
 export async function ensureChatOpen(
+  ctxManager: BrowserContextManager,
   page: Page,
   target: ChatTarget,
 ): Promise<OpenChatResult | undefined> {
@@ -167,7 +306,7 @@ export async function ensureChatOpen(
     return undefined;
   }
 
-  const listReady = await ensureChatListLoaded(page);
+  const listReady = await ensureChatListLoaded(ctxManager, page);
   if (!listReady) {
     return {
       found: false,
@@ -181,7 +320,8 @@ export async function ensureChatOpen(
     };
   }
 
-  const candidates = await getChatCandidates(page);
+  const activePage = await ctxManager.getPage("zhipin");
+  const candidates = await getChatCandidates(activePage);
   const selected = selectChatCandidate(candidates, target);
   if (!selected) {
     const who = target.candidateName ?? `index ${target.index}`;
@@ -197,7 +337,7 @@ export async function ensureChatOpen(
     };
   }
 
-  const clicked = await clickChatItem(page, selected.index);
+  const clicked = await clickChatItem(activePage, selected.index);
   if (!clicked) {
     return {
       ...selected,
@@ -206,7 +346,7 @@ export async function ensureChatOpen(
     };
   }
 
-  await waitForChatReady(page, selected.name);
+  await waitForChatReady(activePage, selected.name);
 
   return { ...selected, found: true };
 }

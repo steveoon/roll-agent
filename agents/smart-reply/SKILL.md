@@ -32,13 +32,13 @@ npm 包名：`@roll-agent/smart-reply-agent`
 ## Tools
 
 - `generate_reply(candidateMessage, conversationHistory?, candidateInfo?, preferredBrand?, channelType?, defaultWechatId?, industryVoiceId?, turnIndex?, modelConfig?)`
-  根据候选人消息生成智能回复，返回建议回复文本、置信度、漏斗阶段和诊断信息。适用于“已拿到消息内容，想生成怎么回”的场景。内部流程：回合规划 → primaryNeed 驱动上下文构建 → 年龄资格校验 → 策略化回复生成 → FactGate/ReplyGate 校验。
+  根据候选人消息生成智能回复，返回建议回复文本、置信度、漏斗阶段和诊断信息。输出包含 `replyPolicySource`（`”file”` = 自定义配置, `”default”` = 内置默认策略），调用方据此判断当前回复是否受自定义策略驱动。内部流程：回合规划 → primaryNeed 驱动上下文构建 → 年龄资格校验 → 策略化回复生成 → FactGate/ReplyGate 校验。
 - `sync_brand_data(cityName, brandAlias?)`
   从 Duliday API 拉取并同步品牌配置数据（门店、岗位、薪资等）到本地。`cityName` 为必填城市名称，`brandAlias` 为可选品牌过滤。适用于首次初始化、定期刷新或切换城市/品牌数据源的场景。
 
 ## Reply Policy（回复策略配置）
 
-回复行为由 `data/reply-policy.json` 驱动。上层编排器应只修改文档化字段，不要添加自定义字段；未声明字段不属于稳定契约，可能被忽略。完整字段说明见 [references/reply-policy-schema.md](./references/reply-policy-schema.md)。
+回复行为由 `data/reply-policy.json` 驱动。文件不存在时回退到内置默认策略（`generate_reply` 输出 `replyPolicySource: "default"` 可识别）。上层编排器应只修改文档化字段，不要添加自定义字段；未声明字段不属于稳定契约，可能被忽略。完整字段说明见 [references/reply-policy-schema.md](./references/reply-policy-schema.md)。
 
 主要可配置维度：
 - **stageGoals** — 6 个漏斗阶段各自的目标、成功标准和推进策略

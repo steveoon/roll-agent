@@ -43,7 +43,7 @@ export const zhipinOpenChat = defineTool({
     };
 
     if (input.preferUnread && input.candidateName === undefined && input.index === undefined) {
-      const listReady = await ensureChatListLoaded(page);
+      const listReady = await ensureChatListLoaded(ctxManager, page);
       if (!listReady) {
         return {
           success: false,
@@ -57,7 +57,8 @@ export const zhipinOpenChat = defineTool({
         };
       }
 
-      const unreadCandidate = (await getChatCandidates(page)).find(
+      const activePage = await ctxManager.getPage("zhipin");
+      const unreadCandidate = (await getChatCandidates(activePage)).find(
         (candidate) => candidate.hasUnread,
       );
       if (unreadCandidate) {
@@ -68,7 +69,7 @@ export const zhipinOpenChat = defineTool({
       }
     }
 
-    const result = await ensureChatOpen(page, navTarget);
+    const result = await ensureChatOpen(ctxManager, page, navTarget);
     if (!result || !result.found) {
       return {
         success: false,

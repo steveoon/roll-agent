@@ -57,7 +57,7 @@ export const zhipinGetCandidateInfo = defineTool({
     const page = await ctxManager.getPage("zhipin");
 
     // 如果指定了候选人，先导航到对应聊天
-    const nav = await ensureChatOpen(page, {
+    const nav = await ensureChatOpen(ctxManager, page, {
       candidateName: input.candidateName,
       index: input.index,
     });
@@ -84,10 +84,11 @@ export const zhipinGetCandidateInfo = defineTool({
     }
 
     ctx.logger.info(`Extracting candidate info${nav ? ` for ${nav.name}` : " (current window)"}`);
+    const activePage = await ctxManager.getPage("zhipin");
 
     // 等待聊天消息加载（DOM: .conversation-message > .chat-message-list > .message-item）
     try {
-      await page.waitForSelector(
+      await activePage.waitForSelector(
         ".chat-message-list .message-item, .conversation-message .message-item",
         { timeout: 8_000 },
       );
@@ -95,7 +96,7 @@ export const zhipinGetCandidateInfo = defineTool({
       // 可能是空对话（无消息），继续提取 candidateInfo
     }
 
-    const data = await page.evaluate((maxMsgs: number) => {
+    const data = await activePage.evaluate((maxMsgs: number) => {
       // ===== Candidate Info =====
       // 限定到聊天头部的详情区域，避免匹配左侧列表
       const detailArea = document.querySelector(".base-info-single-detial, .base-info-content");

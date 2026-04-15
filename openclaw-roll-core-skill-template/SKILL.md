@@ -24,6 +24,15 @@ roll agent info <agent-name>
 - If that agent is unhealthy and Roll owns its lifecycle, run `roll agent start <agent-name>`.
 - If the agent is `stdio + on-demand`, do not pre-start it.
 
+## Diagnostics & Maintenance
+
+- `roll doctor --json` — system health check (env, config, agents). Use when tool calls fail or env is unclear.
+- `roll update --check` — check available updates for roll-core and all registered agents without applying.
+- `roll update` — apply all available updates (lifecycle varies by source type).
+- `roll config migrate` — run when doctor or update reports `needs-migration`.
+
+For output formats, status icons, update lifecycle details, and follow-up actions, see [references/workflows.md](./references/workflows.md).
+
 ## Output Handling
 
 - Parse JSON from stdout.

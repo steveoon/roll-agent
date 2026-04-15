@@ -3,6 +3,7 @@ import { BrowserPageInfoSchema } from "@roll-agent/browser";
 import { z } from "zod";
 import { getContextManager } from "../runtime-holder.ts";
 import { detectPlatformFromUrl } from "../platforms.ts";
+import { toAttachedPageInfo } from "../page-info.ts";
 
 const NavigateActiveTabInputSchema = z.object({
   url: z.string().url().describe("要导航到的目标 URL"),
@@ -35,24 +36,14 @@ export const navigateActiveTab = defineTool({
 
     const detectedPlatform = detectPlatformFromUrl(page.url());
     if (detectedPlatform) {
-      await ctxManager.selectPage(detectedPlatform, ctxManager.getPageId(page));
+      await ctxManager.selectAttachedPage(detectedPlatform, ctxManager.getPageId(page));
     } else {
       ctxManager.clearBindingForPage(page);
     }
 
-    const url = page.url();
-    const title = await page.title().catch(() => "");
-
     return {
       success: true,
-      page: {
-        pageId: ctxManager.getPageId(page),
-        url,
-        title,
-        boundPlatform: ctxManager.getBoundPlatformForPage(page) ?? null,
-        detectedPlatform: detectPlatformFromUrl(url) ?? null,
-        isSelectedForPlatform: ctxManager.isSelectedPageForPlatform(page),
-      },
+      page: await toAttachedPageInfo(ctxManager, page),
     };
   },
 });

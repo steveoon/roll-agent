@@ -1,5 +1,5 @@
 import type { BrowserContextManager, Page } from "@roll-agent/browser";
-import { findExistingPlatformPage } from "../platform-page.ts";
+import { findTrackedPlatformPage } from "../platform-page.ts";
 import { ZHIPIN_SELECTORS } from "./selectors.ts";
 
 // ---------------------------------------------------------------------------
@@ -374,5 +374,5 @@ export async function selectExistingZhipinPage(ctxManager: BrowserContextManager
   if (!ctxManager.hasContext("zhipin")) {
     return undefined;
   }
-  return findExistingPlatformPage(ctxManager, "zhipin");
+  return findTrackedPlatformPage(ctxManager, "zhipin");
 }

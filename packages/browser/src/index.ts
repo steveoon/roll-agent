@@ -32,6 +32,7 @@ export type {
 
 // Runtime
 export { BrowserRuntime } from "./runtime/browser-runtime.ts";
+export type { BrowserInspectablePage } from "./runtime/native-cdp-page-client.ts";
 export { BrowserContextManager } from "./runtime/context-manager.ts";
 
 // Session

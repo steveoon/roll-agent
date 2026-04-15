@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { Browser, BrowserContext, Page } from "playwright-core";
 import type { BrowserRuntime } from "./browser-runtime.ts";
+import type { BrowserInspectablePage } from "./native-cdp-page-client.ts";
 import type { BrowserRuntimeMode, Platform } from "../types/index.ts";
 import type { SessionStore } from "../session/session-store.ts";
 import { BrowserContextManager } from "./context-manager.ts";
@@ -176,7 +177,7 @@ function createRuntime(params: {
 }): BrowserRuntime {
   return {
     mode: params.mode,
-    getBrowser() {
+    async getBrowser() {
       return params.browser;
     },
     prefersExistingContext() {
@@ -189,6 +190,63 @@ function createRuntime(params: {
       return params.shouldRestoreSessionSnapshot ?? params.mode === "remote-cdp";
     },
   } as unknown as BrowserRuntime;
+}
+
+function createInspectablePage(params: {
+  targetId: string;
+  url: string;
+  title?: string;
+}): BrowserInspectablePage {
+  return {
+    targetId: params.targetId,
+    type: "page",
+    url: params.url,
+    title: params.title ?? "",
+  };
+}
+
+function createNativeRuntime(params: {
+  browser: Browser;
+  mode: BrowserRuntimeMode;
+  inspectablePages: ReadonlyArray<BrowserInspectablePage>;
+}): {
+  readonly runtime: BrowserRuntime;
+  readonly getBrowserCalls: () => number;
+  readonly getInspectablePageCalls: () => number;
+  readonly getActivatedTargets: () => ReadonlyArray<string>;
+} {
+  let getBrowserCalls = 0;
+  let getInspectablePageCalls = 0;
+  const activatedTargets: string[] = [];
+
+  return {
+    runtime: {
+      mode: params.mode,
+      async getBrowser() {
+        getBrowserCalls += 1;
+        return params.browser;
+      },
+      async listNativePages() {
+        getInspectablePageCalls += 1;
+        return params.inspectablePages;
+      },
+      async activateNativePage(targetId: string) {
+        activatedTargets.push(targetId);
+      },
+      prefersExistingContext() {
+        return true;
+      },
+      allowsNewContext() {
+        return params.mode === "remote-cdp";
+      },
+      shouldRestoreSessionSnapshot() {
+        return params.mode === "remote-cdp";
+      },
+    } as unknown as BrowserRuntime,
+    getBrowserCalls: () => getBrowserCalls,
+    getInspectablePageCalls: () => getInspectablePageCalls,
+    getActivatedTargets: () => activatedTargets,
+  };
 }
 
 function createSessionStore(params?: {
@@ -266,7 +324,7 @@ test("shared attached context creates a dedicated tab for the second platform", 
   assert.equal(attachedContext.getNewPageCalls(), 1);
 });
 
-test("useExistingPage binds a matching site tab to the platform", async () => {
+test("useTrackedPage binds a matching site tab to the platform", async () => {
   const otherPage = createTestPage({ url: "https://www.baidu.com" });
   const zhipinPage = createTestPage({ url: "https://www.zhipin.com/web/geek/chat" });
   const attachedContext = createTestContext([otherPage.page, zhipinPage.page]);
@@ -281,7 +339,7 @@ test("useExistingPage binds a matching site tab to the platform", async () => {
   const sessionStore = createSessionStore();
   const manager = new BrowserContextManager(runtime, sessionStore.store);
 
-  const selected = await manager.useExistingPage("zhipin", (page) =>
+  const selected = await manager.useTrackedPage("zhipin", (page) =>
     page.url().includes("zhipin.com"),
   );
 
@@ -312,7 +370,7 @@ test("remote-cdp falls back to newContext and restores sidecar session snapshots
   assert.ok(page);
   assert.equal(browser.getNewContextCalls(), 1);
   assert.equal(ownedContext.getAddCookiesCalls(), 1);
-  assert.equal(ownedContext.getAddInitScriptCalls(), 2);
+  assert.equal(ownedContext.getAddInitScriptCalls(), 1);
   assert.equal(sessionStore.getLoadCookiesCalls(), 1);
   assert.equal(sessionStore.getLoadLocalStorageCalls(), 1);
 
@@ -339,18 +397,109 @@ test("listPages assigns stable page ids and selectPage rebinds the platform page
   const manager = new BrowserContextManager(runtime, sessionStore.store);
 
   await manager.getPage("zhipin");
-  const pages = manager.listPages();
+  const pages = await manager.listAttachedPages();
   const zhipinPageId = manager.getPageId(zhipinPage.page);
 
   assert.equal(pages.length, 2);
   assert.equal(manager.getPageId(zhipinPage.page), zhipinPageId);
 
-  const selected = await manager.selectPage("zhipin", zhipinPageId);
+  const selected = await manager.selectAttachedPage("zhipin", zhipinPageId);
 
   assert.equal(selected, zhipinPage.page);
   assert.equal(manager.getBoundPlatformForPage(zhipinPage.page), "zhipin");
   assert.equal(manager.isSelectedPageForPlatform(zhipinPage.page), true);
   assert.equal(zhipinPage.getBringToFrontCalls(), 1);
+});
+
+test("listNativePages uses native CDP metadata without attaching Playwright", async () => {
+  const browser = createTestBrowser({
+    existingContexts: [],
+  });
+  const runtime = createNativeRuntime({
+    browser: browser.browser,
+    mode: "managed-cdp",
+    inspectablePages: [
+      createInspectablePage({
+        targetId: "target-zhipin",
+        url: "https://www.zhipin.com/web/geek/chat",
+        title: "BOSS直聘",
+      }),
+    ],
+  });
+  const sessionStore = createSessionStore();
+  const manager = new BrowserContextManager(runtime.runtime, sessionStore.store);
+
+  const pages = await manager.listNativePages();
+
+  assert.equal(pages.length, 1);
+  assert.equal(pages[0]?.targetId, "target-zhipin");
+  assert.equal(runtime.getInspectablePageCalls(), 1);
+  assert.equal(runtime.getBrowserCalls(), 0);
+});
+
+test("selectNativePage activates native target and records selection metadata", async () => {
+  const browser = createTestBrowser({
+    existingContexts: [],
+  });
+  const runtime = createNativeRuntime({
+    browser: browser.browser,
+    mode: "managed-cdp",
+    inspectablePages: [
+      createInspectablePage({
+        targetId: "target-zhipin",
+        url: "https://www.zhipin.com/web/geek/chat",
+        title: "BOSS直聘",
+      }),
+    ],
+  });
+  const sessionStore = createSessionStore();
+  const manager = new BrowserContextManager(runtime.runtime, sessionStore.store);
+
+  const page = await manager.selectNativePage("zhipin", "target-zhipin");
+
+  assert.equal(page.targetId, "target-zhipin");
+  assert.deepEqual(runtime.getActivatedTargets(), ["target-zhipin"]);
+  assert.equal(manager.getBoundPlatformForNativePage("target-zhipin"), "zhipin");
+  assert.equal(manager.isNativePageSelected("target-zhipin"), true);
+  assert.equal(manager.getCurrentUrl("zhipin"), "https://www.zhipin.com/web/geek/chat");
+  assert.equal(runtime.getBrowserCalls(), 0);
+});
+
+test("getPage prefers the natively selected platform tab after later Playwright attach", async () => {
+  const otherBossPage = createTestPage({
+    url: "https://www.zhipin.com/web/geek/chat?conversation=other",
+    visibilityState: "hidden",
+  });
+  const selectedBossPage = createTestPage({
+    url: "https://www.zhipin.com/web/geek/chat?conversation=selected",
+    hasFocus: true,
+    visibilityState: "visible",
+  });
+  const attachedContext = createTestContext([otherBossPage.page, selectedBossPage.page]);
+  const browser = createTestBrowser({
+    existingContexts: [attachedContext.context],
+  });
+  const runtime = createNativeRuntime({
+    browser: browser.browser,
+    mode: "managed-cdp",
+    inspectablePages: [
+      createInspectablePage({
+        targetId: "target-selected",
+        url: "https://www.zhipin.com/web/geek/chat",
+        title: "BOSS直聘",
+      }),
+    ],
+  });
+  const sessionStore = createSessionStore();
+  const manager = new BrowserContextManager(runtime.runtime, sessionStore.store);
+
+  await manager.selectNativePage("zhipin", "target-selected");
+  const page = await manager.getPage("zhipin");
+
+  assert.equal(page, selectedBossPage.page);
+  assert.equal(manager.getPageId(page), "target-selected");
+  assert.equal(runtime.getBrowserCalls(), 1);
+  assert.equal(attachedContext.getNewPageCalls(), 0);
 });
 
 test("getActivePage prefers the focused tab", async () => {
@@ -446,7 +595,7 @@ test("rebinding a page to another platform clears the previous platform selectio
   const manager = new BrowserContextManager(runtime, sessionStore.store);
 
   await manager.getPage("zhipin");
-  const rebound = await manager.selectPage("yupao", manager.getPageId(sharedPage.page));
+  const rebound = await manager.selectAttachedPage("yupao", manager.getPageId(sharedPage.page));
 
   assert.equal(rebound, sharedPage.page);
   assert.equal(manager.getBoundPlatformForPage(sharedPage.page), "yupao");

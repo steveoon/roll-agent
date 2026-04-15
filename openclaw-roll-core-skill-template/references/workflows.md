@@ -56,6 +56,39 @@ Use this after upstream edits to:
 - env declarations
 - tool names or schemas
 
+## Check & Update Agents
+
+```bash
+roll update --check
+```
+
+Use this to inspect available updates before applying. For `installed-package` agents, the output includes real npm version comparison (up-to-date / update-available / pinned-behind / unsupported-spec / unknown).
+
+To apply all updates:
+
+```bash
+roll update
+```
+
+For `installed-package` + `core-managed` agents, the update lifecycle is: stop → npm install → re-discover → setup → update store → restart. Note: setup may fail (e.g. browser runtime install), in which case the agent is marked `error` and a retry command is printed. For `pinned-behind` agents, `npm install` uses the original fixed spec — it will not auto-upgrade to latest.
+
+Both `roll update --check` and `roll update` also inspect the local config file. If the config `needs-migration` or is `invalid`, a notice is printed with suggested fix (`roll config migrate`).
+
+## System Diagnostics
+
+```bash
+roll doctor --json
+```
+
+Use this when tool calls fail unexpectedly or env setup is unclear. Checks Node.js version, config validity, LLM provider keys, data directory, registered agents, and per-agent env requirements.
+
+`--json` outputs `CheckResult[]` where each entry has `status: "ok" | "warn" | "fail"`. Non-zero exit code when any check is `fail`.
+
+Follow-up based on output:
+- `needs-migration` → `roll config migrate`
+- Missing env → configure `agents.env` in `roll.config.yaml`
+- Agent count is 0 → `roll agent install <package>` or `roll agent add <path>`
+
 ## Tool Call Failure Triage
 
 ```bash

@@ -1,5 +1,6 @@
 import { defineAgent } from "@roll-agent/sdk";
 import { BrowserRuntimeConfigSchema } from "@roll-agent/browser";
+import { attachBrowserSession } from "./tools/attach-browser-session.ts";
 import { browserStatus } from "./tools/browser-status.ts";
 import { listPages } from "./tools/list-pages.ts";
 import { navigateActiveTab } from "./tools/navigate-active-tab.ts";
@@ -89,6 +90,8 @@ const agent = defineAgent(
       // Yupao
       yupaoReadMessages,
       yupaoSendReply,
+      // 调试
+      attachBrowserSession,
     ],
   },
   {

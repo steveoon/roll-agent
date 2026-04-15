@@ -95,6 +95,25 @@ describe("extractToolInput", () => {
     });
     assert.equal(model.doGenerateCalls.length, 2);
   });
+
+  it("does not inject providerOptions into the text fallback call", async () => {
+    const model = makeStructuredOutputFallbackModel(
+      '```json\n{"brandAlias":"肯德基","cityName":"上海市"}\n```',
+    );
+
+    await extractToolInput("同步一下肯德基上海的品牌数据", syncBrandDataTool, model, {
+      alibaba: {
+        enableThinking: false,
+      },
+    });
+
+    assert.deepEqual(model.doGenerateCalls[0]?.providerOptions, {
+      alibaba: {
+        enableThinking: false,
+      },
+    });
+    assert.equal(model.doGenerateCalls[1]?.providerOptions, undefined);
+  });
 });
 
 type JsonSchemaLike = Record<string, unknown> & {
