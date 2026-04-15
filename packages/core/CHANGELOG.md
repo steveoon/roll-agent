@@ -1,5 +1,14 @@
 # @roll-agent/core
 
+## 0.5.0
+
+### Minor Changes
+
+- [#41](https://github.com/steveoon/roll-agent/pull/41) [`c52f598`](https://github.com/steveoon/roll-agent/commit/c52f59849b1f26731c28ce1af261779741f3b671) Thanks [@steveoon](https://github.com/steveoon)! - feat(core): qwen provider structured output 兼容性增强
+  - 新增 resolveLLMCall()，qwen + structured-output 场景自动注入 enableThinking: false
+  - LLM 路由新增 text fallback，模型不遵循 json_schema 时降级为纯文本 + JSON.parse
+  - 升级 AI SDK 全线依赖至最新版本
+
 ## 0.4.0
 
 ### Minor Changes

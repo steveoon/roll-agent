@@ -1,5 +1,11 @@
 # smart-reply-agent
 
+## 0.4.0
+
+### Minor Changes
+
+- [#41](https://github.com/steveoon/roll-agent/pull/41) [`521c7c5`](https://github.com/steveoon/roll-agent/commit/521c7c5e138512f2c999d5563d372ddd0f07be8e) Thanks [@steveoon](https://github.com/steveoon)! - feat(smart-reply): generate_reply 输出新增 replyPolicySource 字段，透传回复策略来源（file/default）
+
 ## 0.3.0
 
 ### Minor Changes
