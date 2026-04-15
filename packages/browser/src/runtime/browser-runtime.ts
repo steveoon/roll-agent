@@ -1,5 +1,5 @@
-import { spawn } from "node:child_process";
-import type { ChildProcessWithoutNullStreams } from "node:child_process";
+import * as childProcess from "node:child_process";
+import type { ChildProcess } from "node:child_process";
 import { existsSync, mkdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -7,6 +7,9 @@ import { setTimeout as delay } from "node:timers/promises";
 import { chromium } from "playwright-core";
 import type { Browser } from "playwright-core";
 import type { BrowserChannel, BrowserRuntimeConfig, BrowserRuntimeMode } from "../types/index.ts";
+import { NativeCdpPageClient } from "./native-cdp-page-client.ts";
+import type { BrowserInspectablePage } from "./native-cdp-page-client.ts";
+import { decorateManagedProfile, ensureProfileCleanExit } from "./profile-decoration.ts";
 
 const MANAGED_CDP_READY_TIMEOUT_MS = 15_000;
 const MANAGED_CDP_READY_POLL_MS = 250;
@@ -54,8 +57,38 @@ const CHANNEL_EXECUTABLE_CANDIDATES = {
 
 type BrowserRuntimeOwnership = {
   ownsBrowserProcess: boolean;
-  managedProcess?: ChildProcessWithoutNullStreams;
+  managedProcess?: ChildProcess;
 };
+
+type SpawnBrowserProcess = (
+  command: string,
+  args: ReadonlyArray<string>,
+  options: childProcess.SpawnOptions,
+) => ChildProcess;
+
+type ConnectBrowserOverCdp = (
+  cdpUrl: string,
+  options?: {
+    readonly timeout?: number;
+  },
+) => Promise<Browser>;
+
+type FetchCdpEndpoint = (
+  input: Parameters<typeof globalThis.fetch>[0],
+  init?: Parameters<typeof globalThis.fetch>[1],
+) => ReturnType<typeof globalThis.fetch>;
+
+type BrowserRuntimeDependencies = {
+  readonly spawn: SpawnBrowserProcess;
+  readonly connectOverCDP: ConnectBrowserOverCdp;
+  readonly fetch: FetchCdpEndpoint;
+};
+
+const DEFAULT_BROWSER_RUNTIME_DEPENDENCIES = {
+  spawn: (...args) => childProcess.spawn(...args),
+  connectOverCDP: (...args) => chromium.connectOverCDP(...args),
+  fetch: (...args) => globalThis.fetch(...args),
+} satisfies BrowserRuntimeDependencies;
 
 function isSupportedExecutablePlatform(value: NodeJS.Platform): value is SupportedPlatform {
   return value === "darwin" || value === "linux" || value === "win32";
@@ -99,10 +132,37 @@ function resolveManagedCdpUrl(config: BrowserRuntimeConfig): string {
   return `http://${config.cdpHost}:${config.cdpPort}`;
 }
 
-async function isHttpCdpReady(cdpUrl: string): Promise<boolean> {
+function resolveInspectableCdpBaseUrl(config: BrowserRuntimeConfig): string {
+  if (config.mode === "managed-cdp") {
+    return resolveManagedCdpUrl(config);
+  }
+
+  const cdpUrl = config.cdpUrl;
+  if (cdpUrl === undefined) {
+    throw new Error(`Browser runtime mode "${config.mode}" requires cdpUrl.`);
+  }
+
+  const parsed = new URL(cdpUrl);
+  switch (parsed.protocol) {
+    case "http:":
+    case "https:":
+      return `${parsed.protocol}//${parsed.host}`;
+    case "ws:":
+      return `http://${parsed.host}`;
+    case "wss:":
+      return `https://${parsed.host}`;
+    default:
+      throw new Error(`Unsupported CDP protocol for inspectable pages: ${parsed.protocol}`);
+  }
+}
+
+async function isHttpCdpReady(
+  cdpUrl: string,
+  deps: BrowserRuntimeDependencies,
+): Promise<boolean> {
   try {
     const versionUrl = new URL("/json/version", cdpUrl);
-    const response = await fetch(versionUrl, {
+    const response = await deps.fetch(versionUrl, {
       signal: AbortSignal.timeout(1_000),
     });
     return response.ok;
@@ -113,7 +173,8 @@ async function isHttpCdpReady(cdpUrl: string): Promise<boolean> {
 
 async function waitForManagedCdp(
   cdpUrl: string,
-  proc: ChildProcessWithoutNullStreams,
+  proc: ChildProcess,
+  deps: BrowserRuntimeDependencies,
 ): Promise<void> {
   const startedAt = Date.now();
   while (Date.now() - startedAt < MANAGED_CDP_READY_TIMEOUT_MS) {
@@ -122,7 +183,7 @@ async function waitForManagedCdp(
         `Managed browser exited before CDP became ready (exit code ${proc.exitCode}).`,
       );
     }
-    if (await isHttpCdpReady(cdpUrl)) {
+    if (await isHttpCdpReady(cdpUrl, deps)) {
       return;
     }
     await delay(MANAGED_CDP_READY_POLL_MS);
@@ -130,7 +191,7 @@ async function waitForManagedCdp(
   throw new Error(`Managed browser did not expose CDP within ${MANAGED_CDP_READY_TIMEOUT_MS}ms.`);
 }
 
-async function terminateProcess(proc: ChildProcessWithoutNullStreams): Promise<void> {
+async function terminateProcess(proc: ChildProcess): Promise<void> {
   if (proc.exitCode !== null) {
     return;
   }
@@ -151,21 +212,31 @@ async function terminateProcess(proc: ChildProcessWithoutNullStreams): Promise<v
 
 /**
  * Browser runtime with explicit connection modes:
- * - managed-cdp: launch a real browser with persistent profile, then attach via CDP
- * - remote-cdp: connect to a remote CDP endpoint
- * - existing-session: attach to an already running user browser session
+ * - lifecycle: launch / stop / own the browser process
+ * - attach: expose Playwright Browser on demand
+ * - native pages: delegate pre-attach tab management to NativeCdpPageClient
  */
 export class BrowserRuntime {
   private browser: Browser | undefined;
+  private nativePages: NativeCdpPageClient | undefined;
   private readonly config: BrowserRuntimeConfig;
+  private readonly deps: BrowserRuntimeDependencies;
   private ownership: BrowserRuntimeOwnership = { ownsBrowserProcess: false };
 
-  constructor(config: BrowserRuntimeConfig) {
+  constructor(
+    config: BrowserRuntimeConfig,
+    deps: Partial<BrowserRuntimeDependencies> = {},
+  ) {
     this.config = config;
+    this.deps = {
+      ...DEFAULT_BROWSER_RUNTIME_DEPENDENCIES,
+      ...deps,
+    };
   }
 
   async start(): Promise<void> {
-    if (this.browser) return;
+    if (this.hasConnectedBrowser()) return;
+    if (this.mode === "managed-cdp" && this.hasManagedProcess()) return;
 
     switch (this.config.mode) {
       case "managed-cdp":
@@ -186,11 +257,69 @@ export class BrowserRuntime {
     return cdpUrl;
   }
 
-  private async connectViaCdp(cdpUrl: string): Promise<void> {
-    this.browser = await chromium.connectOverCDP(cdpUrl, {
+  private hasConnectedBrowser(): boolean {
+    return this.browser !== undefined && this.browser.isConnected();
+  }
+
+  private hasManagedProcess(): boolean {
+    return (
+      this.ownership.ownsBrowserProcess &&
+      this.ownership.managedProcess !== undefined &&
+      this.ownership.managedProcess.exitCode === null
+    );
+  }
+
+  private async connectViaCdp(
+    cdpUrl: string,
+    options: { readonly preserveOwnership?: boolean } = {},
+  ): Promise<Browser> {
+    const browser = await this.deps.connectOverCDP(cdpUrl, {
       timeout: 10_000,
     });
-    this.ownership = { ownsBrowserProcess: false };
+    this.browser = browser;
+    if (!options.preserveOwnership) {
+      this.ownership = { ownsBrowserProcess: false };
+    }
+    return browser;
+  }
+
+  private async ensureInspectableCdpReady(): Promise<void> {
+    if (this.mode === "managed-cdp" && !this.hasManagedProcess()) {
+      await this.startManagedCdp();
+    }
+  }
+
+  private getInspectableCdpBaseUrl(): string {
+    return resolveInspectableCdpBaseUrl(this.config);
+  }
+
+  private getNativePageClient(): NativeCdpPageClient {
+    if (!this.nativePages) {
+      this.nativePages = new NativeCdpPageClient({
+        fetch: this.deps.fetch,
+        ensureReady: async () => await this.ensureInspectableCdpReady(),
+        resolveBaseUrl: () => this.getInspectableCdpBaseUrl(),
+      });
+    }
+    return this.nativePages;
+  }
+
+  private buildLaunchArgs(userDataDir: string): string[] {
+    return [
+      `--remote-debugging-port=${this.config.cdpPort}`,
+      `--user-data-dir=${userDataDir}`,
+      "--no-first-run",
+      "--no-default-browser-check",
+      "--disable-sync",
+      "--disable-background-networking",
+      "--disable-component-update",
+      "--disable-features=Translate,MediaRouter",
+      "--disable-session-crashed-bubble",
+      "--hide-crash-restore-bubble",
+      "--password-store=basic",
+      ...(this.config.headless ? ["--headless=new", "--disable-gpu"] : []),
+      ...(this.config.args ?? []),
+    ];
   }
 
   private async startManagedCdp(): Promise<void> {
@@ -199,30 +328,15 @@ export class BrowserRuntime {
     const cdpUrl = resolveManagedCdpUrl(this.config);
 
     mkdirSync(userDataDir, { recursive: true });
+    decorateManagedProfile(userDataDir);
+    ensureProfileCleanExit(userDataDir);
 
-    const proc = spawn(
-      executable,
-      [
-        `--remote-debugging-port=${this.config.cdpPort}`,
-        `--user-data-dir=${userDataDir}`,
-        "--no-first-run",
-        "--no-default-browser-check",
-        "--disable-background-networking",
-        "--disable-component-update",
-        "--disable-session-crashed-bubble",
-        "--hide-crash-restore-bubble",
-        ...(this.config.headless ? ["--headless=new", "--disable-gpu"] : []),
-        ...(this.config.args ?? []),
-        "about:blank",
-      ],
-      {
-        stdio: "pipe",
-      },
-    );
+    const proc = this.deps.spawn(executable, this.buildLaunchArgs(userDataDir), {
+      stdio: ["ignore", "ignore", "pipe"],
+    });
 
     try {
-      await waitForManagedCdp(cdpUrl, proc);
-      await this.connectViaCdp(cdpUrl);
+      await waitForManagedCdp(cdpUrl, proc, this.deps);
       this.ownership = {
         ownsBrowserProcess: true,
         managedProcess: proc,
@@ -250,14 +364,38 @@ export class BrowserRuntime {
   }
 
   isRunning(): boolean {
-    return this.browser !== undefined && this.browser.isConnected();
+    return this.hasConnectedBrowser() || this.hasManagedProcess();
   }
 
-  getBrowser(): Browser {
-    if (!this.browser) {
-      throw new Error("BrowserRuntime not started. Call start() first.");
+  async getBrowser(): Promise<Browser> {
+    if (this.hasConnectedBrowser() && this.browser) {
+      return this.browser;
     }
-    return this.browser;
+
+    switch (this.mode) {
+      case "managed-cdp":
+        if (!this.hasManagedProcess()) {
+          await this.startManagedCdp();
+        }
+        return await this.connectViaCdp(resolveManagedCdpUrl(this.config), {
+          preserveOwnership: true,
+        });
+      case "remote-cdp":
+      case "existing-session":
+        return await this.connectViaCdp(this.requireCdpUrl());
+    }
+  }
+
+  async listNativePages(): Promise<ReadonlyArray<BrowserInspectablePage>> {
+    return await this.getNativePageClient().listPages();
+  }
+
+  async activateNativePage(targetId: string): Promise<void> {
+    await this.getNativePageClient().activatePage(targetId);
+  }
+
+  async openNativePage(url: string): Promise<BrowserInspectablePage> {
+    return await this.getNativePageClient().openPage(url);
   }
 
   getConfig(): BrowserRuntimeConfig {

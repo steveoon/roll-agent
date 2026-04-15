@@ -1,33 +1,43 @@
-import type { BrowserContextManager, Page, Platform } from "@roll-agent/browser";
+import type {
+  BrowserContextManager,
+  BrowserInspectablePage,
+  BrowserRuntime,
+  Page,
+  Platform,
+} from "@roll-agent/browser";
 import { PLATFORM_HOME, matchesPlatformHost } from "../platforms.ts";
 
-export type ResolvedPlatformPage = {
-  page: Page;
-  reusedExistingPage: boolean;
-};
-
-export async function findExistingPlatformPage(
+export async function findTrackedPlatformPage(
   ctxManager: BrowserContextManager,
   platform: Platform,
 ): Promise<Page | undefined> {
-  return ctxManager.useExistingPage(platform, (page) => matchesPlatformHost(page.url(), platform));
+  return ctxManager.useTrackedPage(platform, (page) => matchesPlatformHost(page.url(), platform));
 }
 
-export async function ensurePlatformHomePage(
-  ctxManager: BrowserContextManager,
+export async function findOpenPlatformTarget(
+  runtime: BrowserRuntime,
   platform: Platform,
-): Promise<ResolvedPlatformPage> {
-  const matchedPage = await findExistingPlatformPage(ctxManager, platform);
-  const page = matchedPage ?? (await ctxManager.getPage(platform));
+): Promise<BrowserInspectablePage | undefined> {
+  const pages = await runtime.listNativePages();
+  return pages.find((page) => matchesPlatformHost(page.url, platform));
+}
 
-  await page.bringToFront().catch(() => {});
-
-  if (!matchesPlatformHost(page.url(), platform)) {
-    await page.goto(PLATFORM_HOME[platform], { waitUntil: "domcontentloaded" });
+export async function openPlatformHomeTarget(
+  runtime: BrowserRuntime,
+  platform: Platform,
+): Promise<{ page: BrowserInspectablePage; reusedExistingPage: boolean }> {
+  const matchedPage = await findOpenPlatformTarget(runtime, platform);
+  if (matchedPage) {
+    await runtime.activateNativePage(matchedPage.targetId);
+    return {
+      page: matchedPage,
+      reusedExistingPage: true,
+    };
   }
 
+  const page = await runtime.openNativePage(PLATFORM_HOME[platform]);
   return {
     page,
-    reusedExistingPage: matchedPage !== undefined,
+    reusedExistingPage: false,
   };
 }

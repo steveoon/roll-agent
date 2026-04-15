@@ -12,10 +12,14 @@ description: 浏览器操控 Agent。控制浏览器操作招聘平台——读�
 ## 通用 Tools
 
 - `browser_status()` — 查询浏览器运行状态和活跃 session
-- `list_pages(platform?)` — 列出当前浏览器中可见的页面和 pageId
+- `open_platform(platform)` — 通过原生 CDP 打开并聚焦招聘平台主页；登录前不会触发 Playwright attach
+- `list_pages(platform?)` — 通过原生 CDP 列出当前浏览器中可见的页面和 pageId（登录前 `pageId` 即原生 targetId）
+- `select_page(platform, pageId)` — 将指定页面绑定为平台当前活跃页；登录前优先走原生 CDP target 激活
 - `navigate_active_tab(url)` — 将当前激活 tab 导航到指定 URL
-- `open_platform(platform)` — 打开并聚焦招聘平台主页
-- `select_page(platform, pageId)` — 将指定页面绑定为平台当前活跃页
+
+## 调试 Tools
+
+- `attach_browser_session()` — 调试工具。显式执行一次 `connectOverCDP()`，用于隔离验证“仅 attach”是否会触发站点风控
 
 ## BOSS直聘 — 聊天 Tools
 
@@ -24,7 +28,7 @@ description: 浏览器操控 Agent。控制浏览器操作招聘平台——读�
 - `zhipin_get_candidate_info(candidateName?, index?, maxMessages?)` — 提取候选人资料和聊天记录。指定 candidateName 会自动打开对应聊天
 - `zhipin_send_reply(message, candidateName?, index?)` — 发送消息。指定 candidateName 会自动打开对应聊天后发送
 - `zhipin_exchange_wechat(candidateName?, index?)` — 换微信。指定 candidateName 会自动打开对应聊天后执行
-- `zhipin_get_username()` — 获取当前登录的招聘者用户名（依赖当前 runtime 已跟踪页面；首次使用请先 open_platform，已打开但未跟踪页面可先 list_pages + select_page）。常用于外部通知消息中的账号标识，参见 notify-agent 的跨 Agent 工作流
+- `zhipin_get_username()` — 获取当前登录的招聘者用户名（依赖当前 runtime 已跟踪页面；首次使用请先 `open_platform`，已打开但未跟踪页面可先 `list_pages + select_page`，确认登录后如需单独验证 attach，可先调用 `attach_browser_session`）。常用于外部通知消息中的账号标识，参见 notify-agent 的跨 Agent 工作流
 
 ## BOSS直聘 — 推荐列表 Tools
 

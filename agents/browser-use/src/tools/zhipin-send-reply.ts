@@ -30,7 +30,7 @@ export const zhipinSendReply = defineTool({
     const page = await ctxManager.getPage("zhipin");
 
     // 如果指定了候选人，先导航到对应聊天
-    const nav = await ensureChatOpen(page, {
+    const nav = await ensureChatOpen(ctxManager, page, {
       candidateName: input.candidateName,
       index: input.index,
     });
@@ -39,18 +39,19 @@ export const zhipinSendReply = defineTool({
     }
 
     ctx.logger.info(`Sending message (${message.length} chars)${nav ? ` to ${nav.name}` : ""}`);
+    const activePage = await ctxManager.getPage("zhipin");
 
     try {
       const inputSelector = "#boss-chat-editor-input, textarea.chat-input, .chat-input";
-      await page.waitForSelector(inputSelector, { timeout: 5_000 });
+      await activePage.waitForSelector(inputSelector, { timeout: 5_000 });
 
-      const isContentEditable = await page.evaluate((sel: string) => {
+      const isContentEditable = await activePage.evaluate((sel: string) => {
         const el = document.querySelector(sel);
         return el?.getAttribute("contenteditable") === "true";
       }, inputSelector);
 
       if (isContentEditable) {
-        await page.evaluate(
+        await activePage.evaluate(
           (args: { sel: string; msg: string }) => {
             const el = document.querySelector(args.sel) as HTMLElement | null;
             if (!el) return;
@@ -64,12 +65,12 @@ export const zhipinSendReply = defineTool({
           { sel: inputSelector, msg: message },
         );
       } else {
-        await page.fill(inputSelector, message);
+        await activePage.fill(inputSelector, message);
       }
 
-      await randomDelay(page, 200, 500);
+      await randomDelay(activePage, 200, 500);
 
-      const sendClicked = await page.evaluate(() => {
+      const sendClicked = await activePage.evaluate(() => {
         const selectors = [
           ".submit-content .submit.active",
           ".submit-content .submit",
@@ -97,7 +98,7 @@ export const zhipinSendReply = defineTool({
         return { success: false, sentMessage: message, error: "未找到发送按钮" };
       }
 
-      await randomDelay(page, 500, 1200);
+      await randomDelay(activePage, 500, 1200);
       ctx.logger.info("Message sent successfully");
       return { success: true, sentMessage: message };
     } catch (err) {

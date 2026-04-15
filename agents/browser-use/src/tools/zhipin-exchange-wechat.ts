@@ -28,7 +28,7 @@ export const zhipinExchangeWechat = defineTool({
     const page = await ctxManager.getPage("zhipin");
 
     // 如果指定了候选人，先导航到对应聊天
-    const nav = await ensureChatOpen(page, {
+    const nav = await ensureChatOpen(ctxManager, page, {
       candidateName: input.candidateName,
       index: input.index,
     });
@@ -37,11 +37,12 @@ export const zhipinExchangeWechat = defineTool({
     }
 
     ctx.logger.info(`Starting WeChat exchange${nav ? ` with ${nav.name}` : ""}`);
+    const activePage = await ctxManager.getPage("zhipin");
 
     try {
       // Step 1: 多策略查找"换微信"按钮
       // 用 getBoundingClientRect 判断可见性（offsetParent 对 fixed 定位不可靠）
-      const btnData = await page.evaluate(() => {
+      const btnData = await activePage.evaluate(() => {
         const check = (el: Element): boolean => {
           const r = el.getBoundingClientRect();
           return r.width > 0 && r.height > 0;
@@ -81,21 +82,21 @@ export const zhipinExchangeWechat = defineTool({
       }
 
       // 用 Playwright 的 click（模拟真实鼠标事件，带坐标）
-      await randomDelay(page, 200, 400);
-      await page.click('[data-roll-wechat-btn="true"]');
+      await randomDelay(activePage, 200, 400);
+      await activePage.click('[data-roll-wechat-btn="true"]');
 
       // 清理标记
-      await page.evaluate(() => {
+      await activePage.evaluate(() => {
         document.querySelector("[data-roll-wechat-btn]")?.removeAttribute("data-roll-wechat-btn");
       });
 
       // Step 2: 等确认对话框出现（polling 模式，对动画更宽容）
       // 先等待 400-800ms，然后 polling 检查，最多 ~5 秒
-      await randomDelay(page, 400, 800);
+      await randomDelay(activePage, 400, 800);
 
       let dialogFound = false;
       for (let attempt = 0; attempt < 8; attempt++) {
-        const found = await page.evaluate(() => {
+        const found = await activePage.evaluate(() => {
           const check = (el: Element): boolean => {
             const r = el.getBoundingClientRect();
             return r.width > 0 && r.height > 0;
@@ -120,17 +121,17 @@ export const zhipinExchangeWechat = defineTool({
           dialogFound = true;
           break;
         }
-        await randomDelay(page, 400, 800);
+        await randomDelay(activePage, 400, 800);
       }
 
       if (!dialogFound) {
         return { success: false, exchanged: false, error: "确认对话框未弹出" };
       }
 
-      await humanDelay(page);
+      await humanDelay(activePage);
 
       // Step 3: 多策略查找确认按钮（不限定在 .exchange-tooltip 内）
-      const confirmData = await page.evaluate(() => {
+      const confirmData = await activePage.evaluate(() => {
         const check = (el: Element): boolean => {
           const r = el.getBoundingClientRect();
           return r.width > 0 && r.height > 0;
@@ -180,18 +181,18 @@ export const zhipinExchangeWechat = defineTool({
       }
 
       // 点击前稍等（模拟人类阅读弹窗）
-      await randomDelay(page, 200, 400);
-      await page.click('[data-roll-confirm-btn="true"]');
+      await randomDelay(activePage, 200, 400);
+      await activePage.click('[data-roll-confirm-btn="true"]');
 
       // 清理标记
-      await page.evaluate(() => {
+      await activePage.evaluate(() => {
         document.querySelector("[data-roll-confirm-btn]")?.removeAttribute("data-roll-confirm-btn");
       });
 
       // Step 4: 等待交换完成，提取微信号
-      await randomDelay(page, 1500, 2500);
+      await randomDelay(activePage, 1500, 2500);
 
-      const wechatNumber = await page.evaluate(() => {
+      const wechatNumber = await activePage.evaluate(() => {
         // 策略 1: 从微信交换卡片提取
         const cardSelectors = [
           ".message-card-top-wrap",

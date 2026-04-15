@@ -1,6 +1,7 @@
 import type { BrowserContext, Cookie, Page } from "playwright-core";
 import type { Platform } from "../types/index.ts";
 import type { BrowserRuntime } from "./browser-runtime.ts";
+import type { BrowserInspectablePage } from "./native-cdp-page-client.ts";
 import type { SessionStore } from "../session/session-store.ts";
 import { installLocalStorageSnapshot } from "../session/session-state.ts";
 
@@ -12,6 +13,19 @@ type ManagedContext = {
 type ManagedPage = {
   readonly page: Page;
   readonly owned: boolean;
+  readonly pageId: string;
+};
+
+type NativePageSelection = {
+  readonly targetId: string;
+  readonly url: string;
+  readonly title: string;
+};
+
+type PlatformRuntimeState = {
+  context?: ManagedContext;
+  page?: ManagedPage;
+  nativeSelection?: NativePageSelection;
 };
 
 type PageVisibilityState = "visible" | "hidden" | "prerender" | "unloaded";
@@ -22,28 +36,41 @@ type PageActivityState = {
 };
 
 function findManagedContext(
-  managedContexts: ReadonlyMap<Platform, ManagedContext>,
+  platformStates: ReadonlyMap<Platform, PlatformRuntimeState>,
   context: BrowserContext,
 ): ManagedContext | undefined {
-  return [...managedContexts.values()].find((entry) => entry.context === context);
+  return [...platformStates.values()]
+    .map((state) => state.context)
+    .find((entry) => entry?.context === context);
 }
 
 function isContextAssigned(
-  managedContexts: ReadonlyMap<Platform, ManagedContext>,
+  platformStates: ReadonlyMap<Platform, PlatformRuntimeState>,
   context: BrowserContext,
+  exceptPlatform?: Platform,
 ): boolean {
-  return [...managedContexts.values()].some((entry) => entry.context === context);
+  return [...platformStates.entries()].some(
+    ([platform, state]) => platform !== exceptPlatform && state.context?.context === context,
+  );
 }
 
 function findManagedPage(
-  managedPages: ReadonlyMap<Platform, ManagedPage>,
+  platformStates: ReadonlyMap<Platform, PlatformRuntimeState>,
   page: Page,
 ): ManagedPage | undefined {
-  return [...managedPages.values()].find((entry) => entry.page === page);
+  return [...platformStates.values()]
+    .map((state) => state.page)
+    .find((entry) => entry?.page === page);
 }
 
-function isPageAssigned(managedPages: ReadonlyMap<Platform, ManagedPage>, page: Page): boolean {
-  return [...managedPages.values()].some((entry) => entry.page === page);
+function isPageAssigned(
+  platformStates: ReadonlyMap<Platform, PlatformRuntimeState>,
+  page: Page,
+  exceptPlatform?: Platform,
+): boolean {
+  return [...platformStates.entries()].some(
+    ([platform, state]) => platform !== exceptPlatform && state.page?.page === page,
+  );
 }
 
 async function readPageActivityState(page: Page): Promise<PageActivityState> {
@@ -60,18 +87,47 @@ async function readPageActivityState(page: Page): Promise<PageActivityState> {
   }
 }
 
+function sharesPageOrigin(leftUrl: string, rightUrl: string): boolean {
+  try {
+    const left = new URL(leftUrl);
+    const right = new URL(rightUrl);
+    return left.origin === right.origin;
+  } catch {
+    return false;
+  }
+}
+
+async function preferActivePage(pages: ReadonlyArray<Page>): Promise<Page | undefined> {
+  if (pages.length === 0) {
+    return undefined;
+  }
+
+  const pageStates = await Promise.all(
+    pages.map(async (page) => ({
+      page,
+      activity: await readPageActivityState(page),
+    })),
+  );
+
+  const focusedPage = pageStates.find((entry) => entry.activity.hasFocus)?.page;
+  if (focusedPage) {
+    return focusedPage;
+  }
+
+  return pageStates.find((entry) => entry.activity.visibilityState === "visible")?.page;
+}
+
 /**
  * BrowserContext / Page manager.
  *
- * - managed-cdp / existing-session: 优先复用浏览器已有 context 与 page
- * - remote-cdp: 优先复用已有 context，必要时退回 newContext()
- * - SessionStore 仅在 remote-cdp 这类无 profile 主真相的模式下作为恢复兜底
+ * - 登录前：维护平台 -> native CDP target 选择状态
+ * - attach 后：维护平台 -> Playwright context/page 绑定状态
+ * - 两条路径最终都汇总到同一份 platform state，避免双轨 Map 分裂
  */
 export class BrowserContextManager {
-  private readonly contexts = new Map<Platform, ManagedContext>();
-  private readonly pages = new Map<Platform, ManagedPage>();
-  private readonly pageIds = new WeakMap<Page, string>();
-  private nextPageId = 1;
+  private readonly platformStates = new Map<Platform, PlatformRuntimeState>();
+  private readonly generatedPageIds = new WeakMap<Page, string>();
+  private nextGeneratedPageId = 1;
   private readonly runtime: BrowserRuntime;
   private readonly sessionStore: SessionStore;
 
@@ -80,70 +136,163 @@ export class BrowserContextManager {
     this.sessionStore = sessionStore;
   }
 
-  private getOrAssignPageId(page: Page): string {
-    const existing = this.pageIds.get(page);
+  private getOrCreateState(platform: Platform): PlatformRuntimeState {
+    const existing = this.platformStates.get(platform);
+    if (existing) {
+      return existing;
+    }
+
+    const state = {} satisfies PlatformRuntimeState;
+    this.platformStates.set(platform, state);
+    return state;
+  }
+
+  private pruneState(platform: Platform): void {
+    const state = this.platformStates.get(platform);
+    if (!state) {
+      return;
+    }
+
+    if (state.context || state.page || state.nativeSelection) {
+      return;
+    }
+
+    this.platformStates.delete(platform);
+  }
+
+  private getOrAssignGeneratedPageId(page: Page): string {
+    const existing = this.generatedPageIds.get(page);
     if (existing !== undefined) {
       return existing;
     }
 
-    const nextId = `page-${this.nextPageId}`;
-    this.nextPageId += 1;
-    this.pageIds.set(page, nextId);
+    const nextId = `page-${this.nextGeneratedPageId}`;
+    this.nextGeneratedPageId += 1;
+    this.generatedPageIds.set(page, nextId);
     return nextId;
   }
 
-  private bindContext(platform: Platform, context: BrowserContext): void {
-    const existing = this.contexts.get(platform);
-    if (existing?.context === context) {
+  private bindContext(platform: Platform, context: BrowserContext, owned: boolean): void {
+    const state = this.getOrCreateState(platform);
+    if (state.context?.context === context) {
+      state.context = {
+        context,
+        owned: state.context.owned || owned,
+      };
       return;
     }
 
-    const shared = findManagedContext(this.contexts, context);
-    this.contexts.set(
-      platform,
-      shared ?? {
-        context,
-        owned: false,
-      },
-    );
+    state.context = findManagedContext(this.platformStates, context) ?? {
+      context,
+      owned,
+    };
   }
 
-  private clearPageBindings(page: Page): void {
-    for (const [platform, entry] of this.pages.entries()) {
-      if (entry.page === page) {
-        this.pages.delete(platform);
+  private clearSelectionForPlatform(platform: Platform): void {
+    const state = this.platformStates.get(platform);
+    if (!state) {
+      return;
+    }
+
+    delete state.page;
+    delete state.nativeSelection;
+    this.pruneState(platform);
+  }
+
+  private clearSelectionsForPage(page: Page, keepPlatform?: Platform): void {
+    for (const [platform, state] of this.platformStates.entries()) {
+      if (platform === keepPlatform || state.page?.page !== page) {
+        continue;
       }
+
+      delete state.page;
+      delete state.nativeSelection;
+      this.pruneState(platform);
     }
   }
 
   private bindPage(platform: Platform, page: Page, owned: boolean): Page {
-    this.bindContext(platform, page.context());
-    this.getOrAssignPageId(page);
+    const state = this.getOrCreateState(platform);
+    this.bindContext(platform, page.context(), false);
 
-    const shared = findManagedPage(this.pages, page);
-    const managedPage = {
+    const sharedPage = findManagedPage(this.platformStates, page);
+    const pageId =
+      sharedPage?.pageId ?? state.nativeSelection?.targetId ?? this.getOrAssignGeneratedPageId(page);
+
+    this.clearSelectionsForPage(page, platform);
+    state.page = {
       page,
-      owned: shared?.owned ?? owned,
-    } satisfies ManagedPage;
-    this.clearPageBindings(page);
-    this.pages.set(platform, managedPage);
+      owned: sharedPage?.owned ?? owned,
+      pageId,
+    };
+    delete state.nativeSelection;
     return page;
   }
 
-  async getOrCreateContext(platform: Platform): Promise<BrowserContext> {
-    const existing = this.contexts.get(platform);
-    if (existing) return existing.context;
+  private async findPreferredPageForPlatform(
+    platform: Platform,
+    pages: ReadonlyArray<Page>,
+  ): Promise<Page | undefined> {
+    const selection = this.platformStates.get(platform)?.nativeSelection;
+    if (!selection) {
+      return undefined;
+    }
 
-    const browser = this.runtime.getBrowser();
+    const openPages = pages.filter((page) => !page.isClosed());
+    const exactUrlMatches = openPages.filter((page) => page.url() === selection.url);
+    if (exactUrlMatches.length === 1) {
+      return exactUrlMatches[0];
+    }
+
+    const exactUrlActive = await preferActivePage(exactUrlMatches);
+    if (exactUrlActive) {
+      return exactUrlActive;
+    }
+
+    const sameOriginMatches = openPages.filter((page) => sharesPageOrigin(page.url(), selection.url));
+    if (sameOriginMatches.length === 1) {
+      return sameOriginMatches[0];
+    }
+
+    const sameOriginActive = await preferActivePage(sameOriginMatches);
+    if (sameOriginActive) {
+      return sameOriginActive;
+    }
+
+    if (selection.title.length === 0) {
+      return undefined;
+    }
+
+    const titleMatches = (
+      await Promise.all(
+        openPages.map(async (page) => ({
+          page,
+          title: await page.title().catch(() => ""),
+        })),
+      )
+    )
+      .filter((entry) => entry.title === selection.title)
+      .map((entry) => entry.page);
+
+    if (titleMatches.length === 1) {
+      return titleMatches[0];
+    }
+
+    return await preferActivePage(titleMatches);
+  }
+
+  async getOrCreateContext(platform: Platform): Promise<BrowserContext> {
+    const existingContext = this.platformStates.get(platform)?.context;
+    if (existingContext) {
+      return existingContext.context;
+    }
+
+    const browser = await this.runtime.getBrowser();
 
     if (this.runtime.prefersExistingContext()) {
       const connectedContext = browser.contexts()[0];
       if (connectedContext) {
-        const managedContext = {
-          context: connectedContext,
-          owned: false,
-        } satisfies ManagedContext;
-        this.contexts.set(platform, managedContext);
+        this.bindContext(platform, connectedContext, false);
         return connectedContext;
       }
     }
@@ -157,10 +306,6 @@ export class BrowserContextManager {
     const context = await browser.newContext({
       viewport: { width: 1280, height: 800 },
       locale: "zh-CN",
-    });
-
-    await context.addInitScript(() => {
-      Object.defineProperty(navigator, "webdriver", { get: () => false });
     });
 
     if (this.runtime.shouldRestoreSessionSnapshot()) {
@@ -183,26 +328,32 @@ export class BrowserContextManager {
       }
     }
 
-    const managedContext = {
-      context,
-      owned: true,
-    } satisfies ManagedContext;
-    this.contexts.set(platform, managedContext);
+    this.bindContext(platform, context, true);
     return context;
   }
 
   async getPage(platform: Platform): Promise<Page> {
-    const existing = this.pages.get(platform);
-    if (existing && !existing.page.isClosed()) {
-      return existing.page;
+    const existingPage = this.platformStates.get(platform)?.page;
+    if (existingPage && !existingPage.page.isClosed()) {
+      return existingPage.page;
     }
-    if (existing?.page.isClosed()) {
-      this.pages.delete(platform);
+    if (existingPage?.page.isClosed()) {
+      const state = this.platformStates.get(platform);
+      if (state) {
+        delete state.page;
+        this.pruneState(platform);
+      }
     }
 
     const context = await this.getOrCreateContext(platform);
+    const preferredPage = await this.findPreferredPageForPlatform(platform, context.pages());
+    if (preferredPage) {
+      return this.bindPage(platform, preferredPage, false);
+    }
 
-    const reusablePage = context.pages().find((page) => !isPageAssigned(this.pages, page));
+    const reusablePage = context
+      .pages()
+      .find((page) => !isPageAssigned(this.platformStates, page));
     if (reusablePage) {
       return this.bindPage(platform, reusablePage, false);
     }
@@ -211,66 +362,90 @@ export class BrowserContextManager {
     return this.bindPage(platform, page, true);
   }
 
-  listPages(): ReadonlyArray<Page> {
-    const browser = this.runtime.getBrowser();
+  async listAttachedPages(): Promise<ReadonlyArray<Page>> {
+    const browser = await this.runtime.getBrowser();
     const pages = browser
       .contexts()
       .flatMap((context) => context.pages())
       .filter((page) => !page.isClosed());
 
     for (const page of pages) {
-      this.getOrAssignPageId(page);
+      this.getOrAssignGeneratedPageId(page);
     }
 
     return pages;
   }
 
+  async listNativePages(): Promise<ReadonlyArray<BrowserInspectablePage>> {
+    return await this.runtime.listNativePages();
+  }
+
   getPageId(page: Page): string {
-    return this.getOrAssignPageId(page);
+    return findManagedPage(this.platformStates, page)?.pageId ?? this.getOrAssignGeneratedPageId(page);
   }
 
   clearBindingForPage(page: Page): void {
-    this.clearPageBindings(page);
+    const entry = [...this.platformStates.entries()].find(([, state]) => state.page?.page === page);
+    if (!entry) {
+      return;
+    }
+
+    this.clearSelectionForPlatform(entry[0]);
   }
 
   async getActivePage(): Promise<Page | undefined> {
-    const pages = this.listPages();
+    const pages = await this.listAttachedPages();
     if (pages.length === 0) {
       return undefined;
     }
 
-    const pageStates = await Promise.all(
-      pages.map(async (page) => ({
-        page,
-        activity: await readPageActivityState(page),
-      })),
-    );
-
-    const focusedPage = pageStates.find((entry) => entry.activity.hasFocus)?.page;
+    const focusedPage = await preferActivePage(pages);
     if (focusedPage) {
       return focusedPage;
-    }
-
-    const visiblePage = pageStates.find(
-      (entry) => entry.activity.visibilityState === "visible",
-    )?.page;
-    if (visiblePage) {
-      return visiblePage;
     }
 
     return pages.length === 1 ? pages[0] : undefined;
   }
 
   getBoundPlatformForPage(page: Page): Platform | undefined {
-    return [...this.pages.entries()].find(([, entry]) => entry.page === page)?.[0];
+    return [...this.platformStates.entries()].find(([, state]) => state.page?.page === page)?.[0];
   }
 
   isSelectedPageForPlatform(page: Page): boolean {
-    return [...this.pages.values()].some((entry) => entry.page === page);
+    return [...this.platformStates.values()].some((state) => state.page?.page === page);
   }
 
-  async selectPage(platform: Platform, pageId: string): Promise<Page> {
-    const page = this.listPages().find((candidate) => this.getPageId(candidate) === pageId);
+  getBoundPlatformForNativePage(targetId: string): Platform | undefined {
+    return [...this.platformStates.entries()].find(([, state]) => state.nativeSelection?.targetId === targetId)?.[0];
+  }
+
+  isNativePageSelected(targetId: string): boolean {
+    return this.getBoundPlatformForNativePage(targetId) !== undefined;
+  }
+
+  rememberNativePageSelection(platform: Platform, page: BrowserInspectablePage): void {
+    const state = this.getOrCreateState(platform);
+    delete state.page;
+    state.nativeSelection = {
+      targetId: page.targetId,
+      url: page.url,
+      title: page.title,
+    };
+  }
+
+  async selectNativePage(platform: Platform, targetId: string): Promise<BrowserInspectablePage> {
+    const page = (await this.runtime.listNativePages()).find((candidate) => candidate.targetId === targetId);
+    if (!page) {
+      throw new Error(`Page "${targetId}" not found.`);
+    }
+
+    await this.runtime.activateNativePage(page.targetId);
+    this.rememberNativePageSelection(platform, page);
+    return page;
+  }
+
+  async selectAttachedPage(platform: Platform, pageId: string): Promise<Page> {
+    const page = (await this.listAttachedPages()).find((candidate) => this.getPageId(candidate) === pageId);
     if (!page) {
       throw new Error(`Page "${pageId}" not found.`);
     }
@@ -280,16 +455,24 @@ export class BrowserContextManager {
     return page;
   }
 
-  async useExistingPage(
+  async useTrackedPage(
     platform: Platform,
     predicate: (page: Page) => boolean,
   ): Promise<Page | undefined> {
-    const existing = this.pages.get(platform);
-    if (existing && !existing.page.isClosed() && predicate(existing.page)) {
-      return existing.page;
+    const existingPage = this.platformStates.get(platform)?.page;
+    if (existingPage && !existingPage.page.isClosed() && predicate(existingPage.page)) {
+      return existingPage.page;
     }
 
     const context = await this.getOrCreateContext(platform);
+    const preferredPage = await this.findPreferredPageForPlatform(
+      platform,
+      context.pages().filter((page) => predicate(page)),
+    );
+    if (preferredPage) {
+      return this.bindPage(platform, preferredPage, false);
+    }
+
     const matchedPage = context.pages().find((page) => !page.isClosed() && predicate(page));
     if (!matchedPage) {
       return undefined;
@@ -299,53 +482,59 @@ export class BrowserContextManager {
   }
 
   hasContext(platform: Platform): boolean {
-    return this.contexts.has(platform);
+    return this.platformStates.get(platform)?.context !== undefined;
   }
 
   getPageCount(platform: Platform): number {
-    const entry = this.contexts.get(platform);
-    return entry ? entry.context.pages().length : 0;
+    const state = this.platformStates.get(platform);
+    if (state?.context) {
+      return state.context.context.pages().length;
+    }
+    return state?.nativeSelection ? 1 : 0;
   }
 
   getCurrentUrl(platform: Platform): string | undefined {
-    const entry = this.pages.get(platform);
-    if (!entry || entry.page.isClosed()) {
+    const state = this.platformStates.get(platform);
+    if (!state) {
       return undefined;
     }
-    return entry.page.url();
+
+    if (state.page && !state.page.page.isClosed()) {
+      return state.page.page.url();
+    }
+
+    return state.nativeSelection?.url;
   }
 
   getActivePlatforms(): ReadonlyArray<Platform> {
-    return [...this.contexts.keys()];
+    return [...this.platformStates.keys()];
   }
 
   async closeContext(platform: Platform): Promise<void> {
-    const pageEntry = this.pages.get(platform);
-    if (pageEntry) {
-      if (pageEntry.owned && !pageEntry.page.isClosed()) {
-        await pageEntry.page.close();
-      }
-      this.pages.delete(platform);
-    }
-
-    const contextEntry = this.contexts.get(platform);
-    if (!contextEntry) return;
-
-    this.contexts.delete(platform);
-
-    if (!contextEntry.owned) {
+    const state = this.platformStates.get(platform);
+    if (!state) {
       return;
     }
 
-    if (isContextAssigned(this.contexts, contextEntry.context)) {
+    this.platformStates.delete(platform);
+
+    if (state.page?.owned && !state.page.page.isClosed()) {
+      await state.page.page.close();
+    }
+
+    if (!state.context?.owned) {
       return;
     }
 
-    await contextEntry.context.close();
+    if (isContextAssigned(this.platformStates, state.context.context, platform)) {
+      return;
+    }
+
+    await state.context.context.close();
   }
 
   async closeAll(): Promise<void> {
-    const platforms = [...this.contexts.keys()];
+    const platforms = [...this.platformStates.keys()];
     for (const platform of platforms) {
       await this.closeContext(platform);
     }

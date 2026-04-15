@@ -1,8 +1,9 @@
 import { defineTool } from "@roll-agent/sdk";
+import { BrowserPageInfoSchema, PlatformSchema } from "@roll-agent/browser";
 import { z } from "zod";
-import { PlatformSchema } from "@roll-agent/browser";
-import { getContextManager } from "../runtime-holder.ts";
-import { ensurePlatformHomePage } from "../pages/platform-page.ts";
+import { getContextManager, getRuntime } from "../runtime-holder.ts";
+import { openPlatformHomeTarget } from "../pages/platform-page.ts";
+import { toNativePageInfo } from "../page-info.ts";
 
 const OpenPlatformInputSchema = z.object({
   platform: PlatformSchema.describe("目标平台：`zhipin` 代表 BOSS直聘，`yupao` 代表鱼泡"),
@@ -10,8 +11,7 @@ const OpenPlatformInputSchema = z.object({
 
 const OpenPlatformOutputSchema = z.object({
   success: z.boolean(),
-  platform: PlatformSchema,
-  url: z.string(),
+  page: BrowserPageInfoSchema,
   reusedExistingTab: z.boolean(),
 });
 
@@ -22,16 +22,17 @@ export const openPlatform = defineTool({
   output: OpenPlatformOutputSchema,
   execute: async (input, ctx) => {
     const { platform } = input;
+    const runtime = getRuntime();
     const ctxManager = getContextManager();
 
     ctx.logger.info(`Opening platform page for ${platform}`);
 
-    const { page, reusedExistingPage } = await ensurePlatformHomePage(ctxManager, platform);
+    const { page, reusedExistingPage } = await openPlatformHomeTarget(runtime, platform);
+    ctxManager.rememberNativePageSelection(platform, page);
 
     return {
       success: true,
-      platform,
-      url: page.url(),
+      page: toNativePageInfo(ctxManager, page),
       reusedExistingTab: reusedExistingPage,
     };
   },
