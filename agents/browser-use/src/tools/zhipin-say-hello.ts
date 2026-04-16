@@ -6,6 +6,11 @@ import {
   shouldAddRandomBehavior,
   performRandomScroll,
 } from "../pages/zhipin/anti-detection.ts";
+import {
+  getRecommendTarget,
+  inspectRecommendCard,
+  waitForRecommendList,
+} from "../pages/zhipin/recommend-list.ts";
 
 const ResultItemSchema = z.object({
   index: z.number(),
@@ -31,9 +36,22 @@ export const zhipinSayHello = defineTool({
 
     const ctxManager = getContextManager();
     const page = await ctxManager.getPage("zhipin");
-    const frame =
-      page.frame("recommendFrame") ?? page.frames().find((f) => f.url().includes("recommend"));
-    const target = frame ?? page;
+    const target = getRecommendTarget(page);
+    const listReady = await waitForRecommendList(target);
+    if (!listReady) {
+      const results = input.indices.map((index) => ({
+        index,
+        candidateName: "",
+        candidateId: "",
+        success: false,
+        error: "推荐列表未加载",
+      }));
+      return {
+        success: false,
+        results,
+        summary: { total: results.length, succeeded: 0, failed: results.length },
+      };
+    }
 
     const results: Array<{
       index: number;
@@ -45,47 +63,7 @@ export const zhipinSayHello = defineTool({
 
     for (const idx of input.indices) {
       try {
-        const r = await target.evaluate((targetIdx: number) => {
-          // 优先用 .candidate-card-wrap 定位（按钮在这一层），fallback 到 [data-geek]
-          let items = Array.from(document.querySelectorAll(".candidate-card-wrap"));
-          if (items.length === 0) {
-            items = Array.from(document.querySelectorAll("[data-geek], .geek-item"));
-          }
-          const item = items[targetIdx];
-          if (!item) return { found: false as const, error: "索引超出范围" };
-
-          // candidateId 可能在自身或子元素 .card-inner 上
-          const candidateId =
-            item.getAttribute("data-geek") ??
-            item.querySelector("[data-geek]")?.getAttribute("data-geek") ??
-            "";
-          const name = item.querySelector(".name")?.textContent?.trim() ?? "";
-
-          // 按钮在 .candidate-card-wrap 层，不在 .card-inner 内
-          const btn = item.querySelector("button.btn.btn-greet") as HTMLElement | null;
-          if (!btn || btn.offsetWidth === 0) {
-            return {
-              found: true as const,
-              candidateId,
-              name,
-              clicked: false,
-              error: "未找到打招呼按钮",
-            };
-          }
-
-          // 模拟完整点击事件序列
-          btn.scrollIntoView({ behavior: "instant", block: "center" });
-          const rect = btn.getBoundingClientRect();
-          const x = rect.left + rect.width / 2;
-          const y = rect.top + rect.height / 2;
-          const evtOpts = { bubbles: true, cancelable: true, view: window, clientX: x, clientY: y, button: 0 };
-          btn.dispatchEvent(new MouseEvent("mousedown", evtOpts));
-          btn.dispatchEvent(new MouseEvent("mouseup", evtOpts));
-          btn.dispatchEvent(new MouseEvent("click", evtOpts));
-          btn.click();
-
-          return { found: true as const, candidateId, name, clicked: true };
-        }, idx);
+        const r = await inspectRecommendCard(target, idx);
 
         if (!r.found) {
           results.push({
@@ -95,15 +73,23 @@ export const zhipinSayHello = defineTool({
             success: false,
             ...(r.error !== undefined ? { error: r.error } : {}),
           });
-        } else if (!r.clicked) {
+        } else if (!r.hasGreetButton) {
           results.push({
             index: idx,
             candidateName: r.name,
             candidateId: r.candidateId,
             success: false,
-            ...(r.error !== undefined ? { error: r.error } : {}),
+            error: "未找到打招呼按钮",
           });
         } else {
+          const card = target.locator(r.cardSelector).nth(idx);
+          const greetButton = card.locator("button.btn.btn-greet").first();
+
+          await greetButton.scrollIntoViewIfNeeded();
+          await greetButton.hover();
+          await humanDelay(page);
+          await greetButton.click();
+
           results.push({
             index: idx,
             candidateName: r.name,

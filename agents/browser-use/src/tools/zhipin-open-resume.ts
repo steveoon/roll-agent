@@ -2,6 +2,11 @@ import { defineTool } from "@roll-agent/sdk";
 import { z } from "zod";
 import { getContextManager } from "../runtime-holder.ts";
 import { randomDelay } from "../pages/zhipin/anti-detection.ts";
+import {
+  getRecommendTarget,
+  inspectRecommendCard,
+  waitForRecommendList,
+} from "../pages/zhipin/recommend-list.ts";
 
 const OutputSchema = z.object({
   success: z.boolean(),
@@ -20,34 +25,34 @@ export const zhipinOpenResume = defineTool({
 
     const ctxManager = getContextManager();
     const page = await ctxManager.getPage("zhipin");
-    const frame =
-      page.frame("recommendFrame") ?? page.frames().find((f) => f.url().includes("recommend"));
-    const target = frame ?? page;
+    const target = getRecommendTarget(page);
 
-    try {
-      await target.waitForSelector("[data-geek], .geek-item", { timeout: 10_000 });
-    } catch {
+    const listReady = await waitForRecommendList(target);
+    if (!listReady) {
       return { success: false, candidateName: "", candidateId: "", error: "推荐列表未加载" };
     }
 
-    const clickResult = await target.evaluate((idx: number) => {
-      const items = document.querySelectorAll("[data-geek], .geek-item");
-      const item = items[idx] as HTMLElement | undefined;
-      if (!item) return { found: false as const };
-      const candidateId = item.getAttribute("data-geek") ?? "";
-      const name = item.querySelector(".name")?.textContent?.trim() ?? "";
-      item.click();
-      return { found: true as const, candidateId, name };
-    }, input.index);
+    const clickResult = await inspectRecommendCard(target, input.index);
 
     if (!clickResult.found) {
       return {
         success: false,
         candidateName: "",
         candidateId: "",
-        error: `索引 ${input.index} 超出范围`,
+        error: clickResult.error ?? `索引 ${input.index} 超出范围`,
       };
     }
+
+    const card = target.locator(clickResult.cardSelector).nth(input.index);
+    const clickSurface =
+      (await card.locator("[data-geek], .card-inner, .geek-item").count()) > 0
+        ? card.locator("[data-geek], .card-inner, .geek-item").first()
+        : card;
+
+    await clickSurface.scrollIntoViewIfNeeded();
+    await clickSurface.hover();
+    await randomDelay(page, 200, 400);
+    await clickSurface.click();
 
     await randomDelay(page, 1000, 2000);
     ctx.logger.info(`Opened resume for ${clickResult.name}`);
