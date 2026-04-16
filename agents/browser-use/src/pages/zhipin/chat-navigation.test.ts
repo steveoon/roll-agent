@@ -53,6 +53,19 @@ function createTestPage(options: TestPageOptions = {}) {
   let clickChatItemCalls = 0;
   let waitForFunctionCalls = 0;
 
+  const createLocator = (_selector: string) => {
+    const locator = {
+      first() {
+        return locator;
+      },
+      async scrollIntoViewIfNeeded() {},
+      async hover() {},
+      async click() {},
+    };
+
+    return locator;
+  };
+
   const page = {
     url() {
       return currentUrl;
@@ -66,6 +79,7 @@ function createTestPage(options: TestPageOptions = {}) {
       }
       throw new Error("selector timeout");
     },
+    async waitForTimeout() {},
     async goto(url: string) {
       gotoCalls += 1;
       currentUrl = options.gotoResultUrl ?? url;
@@ -77,20 +91,36 @@ function createTestPage(options: TestPageOptions = {}) {
         throw new Error("net::ERR_CONNECTION_REFUSED");
       }
     },
+    locator(selector: string) {
+      return createLocator(selector);
+    },
     async evaluate(_fn: unknown, arg?: unknown) {
-      if (Array.isArray(arg)) {
+      if (
+        typeof arg === "object" &&
+        arg !== null &&
+        "messageLabels" in arg &&
+        Array.isArray(arg.messageLabels)
+      ) {
         clickMessageEntryCalls += 1;
         if (!options.clickMessageEntryWorks) {
-          return false;
+          return { found: false as const };
         }
         currentUrl = ZHIPIN_CHAT_URL;
         chatListLoaded = options.clickLoadsChatList ?? true;
-        return true;
+        return { found: true as const, selector: '[data-roll-chat-entry-target="true"]' };
       }
 
-      if (typeof arg === "number") {
+      if (
+        typeof arg === "object" &&
+        arg !== null &&
+        "targetIndex" in arg &&
+        typeof arg.targetIndex === "number"
+      ) {
         clickChatItemCalls += 1;
-        return options.clickChatItemWorks ?? true;
+        if (!(options.clickChatItemWorks ?? true)) {
+          return { found: false as const };
+        }
+        return { found: true as const, selector: '[data-roll-chat-item-target="true"]' };
       }
 
       return [...(options.chatCandidates ?? [])];
