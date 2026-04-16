@@ -10,3 +10,4 @@ zhipin_say_hello 和 zhipin_open_resume 的点击操作从 evaluate() 内合成 
 - zhipin_say_hello: 移除 dispatchEvent(mousedown/mouseup/click) + btn.click()，改为 locator.scrollIntoViewIfNeeded() → hover() → humanDelay() → click()
 - zhipin_open_resume: 移除 evaluate 内 item.click()，改为 locator 定位 clickSurface → hover() → randomDelay() → click()
 - 保留原有时序随机化逻辑（humanDelay、performRandomScroll）
+- zhipin_get_username: 修复 lazy attach 后因 hasContext 前置检查导致的"未找到已跟踪页面"回归，改为 getPage() 自动发现并绑定页面
