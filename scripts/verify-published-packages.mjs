@@ -62,17 +62,13 @@ const PACKAGE_CHECKS = [
     expectedFiles: [
       "package/dist/index.js",
       "package/dist/index.d.ts",
-      "package/dist/pipeline.js",
-      "package/dist/pipeline.d.ts",
       "package/SKILL.md",
-      "package/references/reply-policy-schema.md",
+      "package/references/env.yaml",
     ],
-    expectedJavaScriptFiles: ["package/dist/index.js", "package/dist/pipeline.js"],
+    expectedJavaScriptFiles: ["package/dist/index.js"],
     verifyManifest(manifest) {
       assert.equal(manifest.exports?.["."].default, "./dist/index.js");
       assert.equal(manifest.exports?.["."].types, "./dist/index.d.ts");
-      assert.equal(manifest.exports?.["./pipeline"].default, "./dist/pipeline.js");
-      assert.equal(manifest.exports?.["./pipeline"].types, "./dist/pipeline.d.ts");
       assert.equal(manifest.rollAgent?.start?.command, "node");
       assert.deepEqual(manifest.rollAgent?.start?.args, ["dist/index.js"]);
     },
