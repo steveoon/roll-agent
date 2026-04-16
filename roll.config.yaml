@@ -10,17 +10,15 @@ llm:
       base-url: https://apic1.ohmycdn.com/v1
     qwen:
       api-key: ${DASHSCOPE_API_KEY}
-
 ask:
   confirm-threshold: 0.5
-
 agents:
   data-dir: ~/.roll-agent/agents
   env:
     smart-reply-agent:
-      DULIDAY_TOKEN: ${DULIDAY_TOKEN}
-      DULIDAY_JOB_LIST_URL: ${DULIDAY_JOB_LIST_URL}
-      DULIDAY_BRAND_LIST_URL: ${DULIDAY_BRAND_LIST_URL}
-      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
+      REPLY_AUTHORITY_URL: https://reply-authority.duliday.com
+      REPLY_AUTHORITY_BEARER_TOKEN: ${REPLY_AUTHORITY_BEARER_TOKEN}
     notify-agent:
       FEISHU_BOT_WEBHOOK: ${FEISHU_BOT_WEBHOOK}
+    browser-use-agent:
+      REPLY_AUTHORITY_KEYS_URL: https://reply-authority.duliday.com/.well-known/reply-authority-keys

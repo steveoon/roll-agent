@@ -86,15 +86,15 @@ agents:
   data-dir: /tmp/test
   env:
     smart-reply-agent:
-      ANTHROPIC_API_KEY: test-key
-      DULIDAY_TOKEN: duliday-token
+      REPLY_AUTHORITY_URL: https://reply-authority.example.com
+      REPLY_AUTHORITY_BEARER_TOKEN: test-token
 `;
     writeFileSync(resolve(tmpDir, "roll.config.yaml"), yaml);
     const { config } = loadConfig({ cwd: tmpDir });
 
     assert.deepEqual(getAgentEnv(config, "smart-reply-agent"), {
-      ANTHROPIC_API_KEY: "test-key",
-      DULIDAY_TOKEN: "duliday-token",
+      REPLY_AUTHORITY_URL: "https://reply-authority.example.com",
+      REPLY_AUTHORITY_BEARER_TOKEN: "test-token",
     });
   });
 

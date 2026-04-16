@@ -234,8 +234,14 @@ function getConfig(key: string | undefined): void {
 /**
  * camelCase 键转换为 kebab-case（与 YAML 文件格式保持一致）。
  * 例如 `defaultProvider` → `default-provider`
+ *
+ * 如果 key 已经是 SCREAMING_SNAKE_CASE（如 `REPLY_AUTHORITY_URL`），
+ * 则原样保留，不做转换——这类 key 通常是环境变量名。
  */
 function camelToKebab(str: string): string {
+  if (/^[A-Z][A-Z0-9_]*$/.test(str)) {
+    return str;
+  }
   return str.replace(/[A-Z]/g, (ch) => `-${ch.toLowerCase()}`);
 }
 

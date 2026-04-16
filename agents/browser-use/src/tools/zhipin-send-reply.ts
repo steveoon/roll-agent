@@ -1,8 +1,14 @@
 import { defineTool } from "@roll-agent/sdk";
 import { z } from "zod";
+import { getSelectedChatTarget } from "../pages/zhipin/chat-target.ts";
 import { getContextManager } from "../runtime-holder.ts";
 import { randomDelay, humanDelay } from "../pages/zhipin/anti-detection.ts";
-import { ensureChatOpen } from "../pages/zhipin/chat-navigation.ts";
+import { ensureChatListLoaded, ensureChatOpen } from "../pages/zhipin/chat-navigation.ts";
+import {
+  isReplyEnvelopeConsumed,
+  markReplyEnvelopeConsumed,
+} from "../reply-authority/replay-store.ts";
+import { verifySignedReplyEnvelope } from "../reply-authority/verifier.ts";
 
 const OutputSchema = z.object({
   success: z.boolean(),
@@ -13,9 +19,9 @@ const OutputSchema = z.object({
 export const zhipinSendReply = defineTool({
   name: "zhipin_send_reply",
   description:
-    "发送消息。可指定 candidateName 自动打开对应聊天后发送，或不传则发送到当前窗口；例如“回复鲁倩：你好”应提取 candidateName=鲁倩。",
+    "发送消息。只接受由 Reply Authority Service 签发的 signedEnvelope；可指定 candidateName 自动打开对应聊天后发送，或不传则发送到当前选中的聊天窗口。",
   input: z.object({
-    message: z.string().describe("要发送的消息内容"),
+    signedEnvelope: z.string().describe("Reply Authority Service 返回的紧凑签名信封"),
     candidateName: z
       .string()
       .optional()
@@ -24,24 +30,53 @@ export const zhipinSendReply = defineTool({
   }),
   output: OutputSchema,
   execute: async (input, ctx) => {
-    const { message } = input;
+    let sentMessage = "";
 
     const ctxManager = getContextManager();
     const page = await ctxManager.getPage("zhipin");
-
-    // 如果指定了候选人，先导航到对应聊天
-    const nav = await ensureChatOpen(ctxManager, page, {
-      candidateName: input.candidateName,
-      index: input.index,
-    });
-    if (nav && !nav.found) {
-      return { success: false, sentMessage: message, error: nav.error };
-    }
-
-    ctx.logger.info(`Sending message (${message.length} chars)${nav ? ` to ${nav.name}` : ""}`);
-    const activePage = await ctxManager.getPage("zhipin");
+    let activePage = page;
 
     try {
+      const envelopePayload = await verifySignedReplyEnvelope(input.signedEnvelope);
+      sentMessage = envelopePayload.reply;
+
+      if (isReplyEnvelopeConsumed(envelopePayload.jti)) {
+        return { success: false, sentMessage, error: "token 已消费，禁止重放" };
+      }
+
+      const nav = await ensureChatOpen(ctxManager, page, {
+        candidateName: input.candidateName,
+        index: input.index,
+      });
+      if (nav && !nav.found) {
+        return { success: false, sentMessage, error: nav.error };
+      }
+      if (!nav) {
+        const listReady = await ensureChatListLoaded(ctxManager, page);
+        if (!listReady) {
+          return { success: false, sentMessage, error: "消息列表未加载" };
+        }
+      }
+
+      activePage = await ctxManager.getPage("zhipin");
+      const chatTarget = await getSelectedChatTarget(activePage);
+      if (!chatTarget) {
+        return {
+          success: false,
+          sentMessage,
+          error: "未能提取当前聊天的 conversationId/candidateId",
+        };
+      }
+      if (
+        chatTarget.conversationId !== envelopePayload.conversationId ||
+        chatTarget.candidateId !== envelopePayload.candidateId
+      ) {
+        return { success: false, sentMessage, error: "发送目标与签名不匹配" };
+      }
+
+      ctx.logger.info(
+        `Sending message (${sentMessage.length} chars) to ${chatTarget.candidateName || chatTarget.candidateId}`,
+      );
       const inputSelector = "#boss-chat-editor-input, textarea.chat-input, .chat-input";
       await activePage.waitForSelector(inputSelector, { timeout: 5_000 });
 
@@ -62,12 +97,12 @@ export const zhipinSendReply = defineTool({
               .map((line) => `<p>${line}</p>`)
               .join("");
           },
-          { sel: inputSelector, msg: message },
+          { sel: inputSelector, msg: sentMessage },
         );
         // 用 Playwright dispatchEvent 触发 input 监听；这仍然是程序派发事件，不是用户真实输入
         await editor.dispatchEvent("input", { bubbles: true });
       } else {
-        await activePage.fill(inputSelector, message);
+        await activePage.fill(inputSelector, sentMessage);
       }
 
       await randomDelay(activePage, 200, 500);
@@ -102,7 +137,7 @@ export const zhipinSendReply = defineTool({
       });
 
       if (!sendSelector.found) {
-        return { success: false, sentMessage: message, error: "未找到发送按钮" };
+        return { success: false, sentMessage, error: "未找到发送按钮" };
       }
 
       // Playwright locator 点击（isTrusted: true）
@@ -113,12 +148,13 @@ export const zhipinSendReply = defineTool({
       await sendBtn.click();
 
       await randomDelay(activePage, 500, 1200);
+      markReplyEnvelopeConsumed(envelopePayload.jti, envelopePayload.exp);
       ctx.logger.info("Message sent successfully");
-      return { success: true, sentMessage: message };
+      return { success: true, sentMessage };
     } catch (err) {
       return {
         success: false,
-        sentMessage: message,
+        sentMessage,
         error: err instanceof Error ? err.message : String(err),
       };
     } finally {

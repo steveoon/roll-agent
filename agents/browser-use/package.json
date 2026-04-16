@@ -12,7 +12,8 @@
   },
   "files": [
     "dist",
-    "SKILL.md"
+    "SKILL.md",
+    "references"
   ],
   "engines": {
     "node": ">=22.6.0"

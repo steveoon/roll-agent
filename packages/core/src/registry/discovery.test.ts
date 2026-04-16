@@ -308,18 +308,9 @@ Tools list
     assert.ok(result.skill.env);
     assert.deepEqual(
       result.skill.env?.required?.map((item) => item.name),
-      ["DULIDAY_TOKEN", "DULIDAY_BRAND_LIST_URL", "DULIDAY_JOB_LIST_URL"],
+      ["REPLY_AUTHORITY_URL", "REPLY_AUTHORITY_BEARER_TOKEN"],
     );
-    assert.deepEqual(
-      result.skill.env?.optional?.map((item) => item.name),
-      [
-        "ANTHROPIC_API_KEY",
-        "OPENAI_API_KEY",
-        "SMART_REPLY_PROXY_BASE_URL",
-        "SMART_REPLY_CLASSIFY_MODEL",
-        "SMART_REPLY_REPLY_MODEL",
-      ],
-    );
+    assert.equal(result.skill.env?.optional, undefined);
   });
 
   it("should prefer package.json#rollAgent for stdio on-demand agents", () => {

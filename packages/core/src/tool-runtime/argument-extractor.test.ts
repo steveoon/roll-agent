@@ -43,22 +43,22 @@ function makeStructuredOutputFallbackModel(fallbackText: string): MockLanguageMo
   });
 }
 
-const syncBrandDataTool: AgentTool = {
-  name: "sync_brand_data",
-  description: "同步品牌数据到本地",
+const generateReplyTool: AgentTool = {
+  name: "generate_reply",
+  description: "为候选人生成签名回复",
   inputSchema: {
     type: "object",
     properties: {
-      brandAlias: {
+      candidateMessage: {
         type: "string",
-        description: "品牌别名，如 肯德基、KFC",
+        description: "候选人消息文本",
       },
-      cityName: {
+      preferredBrand: {
         type: "string",
-        description: '标准城市名，如 "上海市"',
+        description: '偏好品牌，如 "肯德基"',
       },
     },
-    required: ["cityName"],
+    required: ["candidateMessage"],
     additionalProperties: false,
   },
 };
@@ -66,46 +66,55 @@ const syncBrandDataTool: AgentTool = {
 describe("extractToolInput", () => {
   it("extracts tool arguments using the schema field names", async () => {
     const input = await extractToolInput(
-      "同步一下肯德基上海的品牌数据",
-      syncBrandDataTool,
+      "帮我给想看肯德基岗位的候选人生成回复",
+      generateReplyTool,
       makeMockModel(
         JSON.stringify({
-          brandAlias: "肯德基",
-          cityName: "上海市",
+          candidateMessage: "想了解肯德基的岗位安排",
+          preferredBrand: "肯德基",
         }),
       ),
     );
 
     assert.deepEqual(input, {
-      brandAlias: "肯德基",
-      cityName: "上海市",
+      candidateMessage: "想了解肯德基的岗位安排",
+      preferredBrand: "肯德基",
     });
   });
 
   it("falls back to plain JSON text when structured output is rejected", async () => {
     const model = makeStructuredOutputFallbackModel(
-      '```json\n{"brandAlias":"肯德基","cityName":"上海市"}\n```',
+      '```json\n{"candidateMessage":"想了解肯德基的岗位安排","preferredBrand":"肯德基"}\n```',
     );
 
-    const input = await extractToolInput("同步一下肯德基上海的品牌数据", syncBrandDataTool, model);
+    const input = await extractToolInput(
+      "帮我给想看肯德基岗位的候选人生成回复",
+      generateReplyTool,
+      model,
+    );
 
     assert.deepEqual(input, {
-      brandAlias: "肯德基",
-      cityName: "上海市",
+      candidateMessage: "想了解肯德基的岗位安排",
+      preferredBrand: "肯德基",
     });
     assert.equal(model.doGenerateCalls.length, 2);
   });
 
   it("does not inject providerOptions into the text fallback call", async () => {
     const model = makeStructuredOutputFallbackModel(
-      '```json\n{"brandAlias":"肯德基","cityName":"上海市"}\n```',
+      '```json\n{"candidateMessage":"想了解肯德基的岗位安排","preferredBrand":"肯德基"}\n```',
     );
 
-    await extractToolInput("同步一下肯德基上海的品牌数据", syncBrandDataTool, model, {
-      alibaba: {
-        enableThinking: false,
+    await extractToolInput(
+      "帮我给想看肯德基岗位的候选人生成回复",
+      generateReplyTool,
+      model,
+      {
+        alibaba: {
+          enableThinking: false,
+        },
       },
-    });
+    );
 
     assert.deepEqual(model.doGenerateCalls[0]?.providerOptions, {
       alibaba: {
@@ -156,7 +165,7 @@ describe("createExtractionSchema", () => {
             chatModel: { type: "string" },
             providerConfigs: {
               type: "object",
-              // no properties — z.record() pattern, not extractable from NL
+              // no properties - z.record() pattern, not extractable from NL
             },
           },
           required: [],
