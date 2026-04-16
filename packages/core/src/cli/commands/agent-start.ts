@@ -1,5 +1,6 @@
 import { defineCommand } from "citty";
-import { loadAgentsConfig } from "../../config/loader.ts";
+import { getAgentEnv } from "../../config/helpers.ts";
+import { loadAgentsConfig, loadConfig } from "../../config/loader.ts";
 import {
   getAgentLogPath,
   getAgentPid,
@@ -65,7 +66,8 @@ export default defineCommand({
     store.updateStatus(agent.skill.name, "starting");
     let pid: number | undefined;
     try {
-      pid = startAgent(agent, agentsConfig.dataDir);
+      const agentEnv = getAgentEnv(loadConfig().config, agent.skill.name);
+      pid = startAgent(agent, agentsConfig.dataDir, agentEnv);
       await waitForAgentReady(agent, { startupTimeoutMs: 15_000, probeTimeoutMs: 2_000 });
       store.updateStatus(agent.skill.name, "online");
       log.success(

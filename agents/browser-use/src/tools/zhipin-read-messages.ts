@@ -9,6 +9,8 @@ import { ensureChatListLoaded } from "../pages/zhipin/chat-navigation.ts";
 
 const CandidateItemSchema = z.object({
   name: z.string(),
+  conversationId: z.string(),
+  candidateId: z.string(),
   position: z.string(),
   time: z.string(),
   preview: z.string(),
@@ -55,6 +57,8 @@ export const zhipinReadMessages = defineTool({
       const items = document.querySelectorAll(".geek-item");
       const result: Array<{
         name: string;
+        conversationId: string;
+        candidateId: string;
         position: string;
         time: string;
         preview: string;
@@ -64,6 +68,14 @@ export const zhipinReadMessages = defineTool({
       }> = [];
 
       items.forEach((item, index) => {
+        const conversationId =
+          item.getAttribute("data-id") ??
+          item.closest('[role="listitem"]')?.getAttribute("key") ??
+          "";
+        const candidateId =
+          item.getAttribute("data-geek") ??
+          item.querySelector("[data-geek]")?.getAttribute("data-geek") ??
+          conversationId;
         const nameEl = item.querySelector(
           '[class*="name"], .nickname, .geek-name, .candidate-name',
         );
@@ -84,7 +96,17 @@ export const zhipinReadMessages = defineTool({
         if (badgeEl) unreadCount = parseInt(badgeEl.textContent?.trim() ?? "0", 10) || 0;
         const hasUnread = unreadCount > 0 || item.querySelector(".red-dot") !== null;
 
-        result.push({ name, position, time, preview, unreadCount, hasUnread, index });
+        result.push({
+          name,
+          conversationId,
+          candidateId,
+          position,
+          time,
+          preview,
+          unreadCount,
+          hasUnread,
+          index,
+        });
       });
       return result;
     });

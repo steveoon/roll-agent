@@ -22,6 +22,7 @@ import { zhipinCloseResume } from "./tools/zhipin-close-resume.ts";
 // Yupao
 import { yupaoReadMessages } from "./tools/yupao-read-messages.ts";
 import { yupaoSendReply } from "./tools/yupao-send-reply.ts";
+import { preloadReplyAuthorityKeys } from "./reply-authority/key-store.ts";
 import { initRuntime, shutdownRuntime } from "./runtime-holder.ts";
 
 function parseBooleanEnv(value: string | undefined): boolean | undefined {
@@ -101,6 +102,13 @@ const agent = defineAgent(
 
 async function main(): Promise<void> {
   await initRuntime(loadRuntimeConfigFromEnv());
+  await preloadReplyAuthorityKeys().catch((error: unknown) => {
+    console.error(
+      `[browser-use-agent] Failed to preload Reply Authority keys: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+    );
+  });
 
   // 以 HTTP 模式启动 MCP Server
   await agent.listen({

@@ -1,6 +1,7 @@
 import { defineTool } from "@roll-agent/sdk";
 import { z } from "zod";
 import { getContextManager } from "../runtime-holder.ts";
+import { getSelectedChatTarget } from "../pages/zhipin/chat-target.ts";
 import { ensureChatOpen } from "../pages/zhipin/chat-navigation.ts";
 
 const ChatMessageSchema = z.object({
@@ -25,6 +26,8 @@ const CandidateInfoSchema = z.object({
 
 const OutputSchema = z.object({
   success: z.boolean(),
+  conversationId: z.string(),
+  candidateId: z.string(),
   candidateInfo: CandidateInfoSchema,
   chatMessages: z.array(ChatMessageSchema),
   formattedHistory: z.array(z.string()),
@@ -75,6 +78,8 @@ export const zhipinGetCandidateInfo = defineTool({
       };
       return {
         success: false,
+        conversationId: "",
+        candidateId: "",
         candidateInfo: empty,
         chatMessages: [],
         formattedHistory: [],
@@ -85,6 +90,7 @@ export const zhipinGetCandidateInfo = defineTool({
 
     ctx.logger.info(`Extracting candidate info${nav ? ` for ${nav.name}` : " (current window)"}`);
     const activePage = await ctxManager.getPage("zhipin");
+    const selectedTarget = await getSelectedChatTarget(activePage);
 
     // 等待聊天消息加载（DOM: .conversation-message > .chat-message-list > .message-item）
     try {
@@ -268,6 +274,8 @@ export const zhipinGetCandidateInfo = defineTool({
     );
     return {
       success: true,
+      conversationId: selectedTarget?.conversationId ?? "",
+      candidateId: selectedTarget?.candidateId ?? "",
       candidateInfo: data.candidateInfo,
       chatMessages: data.messages,
       formattedHistory,
