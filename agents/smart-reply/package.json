@@ -13,9 +13,7 @@
   "files": [
     "dist",
     "SKILL.md",
-    "references",
-    "data/brand-config.sample.json",
-    "data/reply-policy.json"
+    "references"
   ],
   "engines": {
     "node": ">=22.6.0"
@@ -24,10 +22,6 @@
     ".": {
       "types": "./dist/index.d.ts",
       "default": "./dist/index.js"
-    },
-    "./pipeline": {
-      "types": "./dist/pipeline.d.ts",
-      "default": "./dist/pipeline.js"
     }
   },
   "publishConfig": {
@@ -54,15 +48,7 @@
     }
   },
   "dependencies": {
-    "@ai-sdk/alibaba": "^1.0.17",
-    "@ai-sdk/anthropic": "^3.0.68",
-    "@ai-sdk/deepseek": "^2.0.29",
-    "@ai-sdk/google": "^3.0.60",
-    "@ai-sdk/openai": "^3.0.52",
-    "@ai-sdk/openai-compatible": "^2.0.41",
     "@roll-agent/sdk": "workspace:*",
-    "ai": "^6.0.154",
-    "ora": "^8.2.0",
     "zod": "^3.25.76"
   },
   "devDependencies": {

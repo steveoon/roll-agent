@@ -1,6 +1,6 @@
 ---
 name: smart-reply-agent
-description: 招聘智能回复 Agent。根据候选人消息、品牌数据和回复策略，生成个性化招聘回复。
+description: 招聘智能回复 Agent。根据候选人消息和上下文，向 Reply Authority Service 请求已签名回复。
 metadata:
   roll-env-file: references/env.yaml
 ---
@@ -16,14 +16,13 @@ npm 包名：`@roll-agent/smart-reply-agent`
 当任务是以下类型时，应优先选择本 Agent：
 
 - 根据候选人消息生成一条招聘回复
-- 结合对话历史、候选人信息和品牌数据草拟回复
+- 结合对话历史和候选人信息草拟回复
 - 判断当前沟通处于哪个招聘漏斗阶段
 - 按既定回复策略生成更稳妥、更合规的回复
-- 同步 Duliday 品牌/岗位数据，供后续回复生成使用
 
 ## 能力边界
 
-本 Agent 只负责**向 Reply Authority Service 请求已签名回复**，以及**维护 `sync_brand_data` 所需品牌数据**。
+本 Agent 只负责**向 Reply Authority Service 请求已签名回复**。
 
 不会：打开聊天页面、读取候选人资料页面、抓取当前聊天记录、直接发送消息、交换微信、执行浏览器自动化。
 
@@ -33,8 +32,6 @@ npm 包名：`@roll-agent/smart-reply-agent`
 
 - `generate_reply(candidateMessage, conversationHistory?, candidateInfo?, preferredBrand?, channelType?, defaultWechatId?, industryVoiceId?, turnIndex?, modelConfig?, target)`
   调用 Reply Authority Service 的 `POST /generate-signed-reply`，返回 `suggestedReply`、`signedEnvelope`、`envelopeExp`、`confidence`、`stage` 和可选 `diagnostics`。`target` 为必填，至少包含 `platform=zhipin`、`tenantId`、`conversationId`、`candidateId`。
-- `sync_brand_data(cityName, brandAlias?)`
-  从 Duliday API 拉取并同步品牌配置数据（门店、岗位、薪资等）到本地。`cityName` 为必填城市名称，`brandAlias` 为可选品牌过滤。适用于首次初始化、定期刷新或切换城市/品牌数据源的场景。
 
 ## Reply Authority 集成说明
 
@@ -49,7 +46,6 @@ npm 包名：`@roll-agent/smart-reply-agent`
 
 - `REPLY_AUTHORITY_URL` — Reply Authority Service 基础地址
 - `REPLY_AUTHORITY_BEARER_TOKEN` — 调用 `POST /generate-signed-reply` 的 Bearer token
-- `DULIDAY_TOKEN` / `DULIDAY_BRAND_LIST_URL` / `DULIDAY_JOB_LIST_URL` — 仅 `sync_brand_data` 需要
 
 ## 典型跨 Agent 工作流
 
@@ -69,7 +65,4 @@ agents:
     smart-reply-agent:
       REPLY_AUTHORITY_URL: https://reply-authority.duliday.com
       REPLY_AUTHORITY_BEARER_TOKEN: ${REPLY_AUTHORITY_BEARER_TOKEN}
-      DULIDAY_TOKEN: ${DULIDAY_TOKEN}                   # 仅 sync_brand_data 需要
-      DULIDAY_BRAND_LIST_URL: ${DULIDAY_BRAND_LIST_URL} # 仅 sync_brand_data 需要
-      DULIDAY_JOB_LIST_URL: ${DULIDAY_JOB_LIST_URL}     # 仅 sync_brand_data 需要
 ```

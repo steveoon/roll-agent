@@ -1,7 +1,7 @@
 import { z } from "zod";
-import { ModelConfigSchema } from "./classification.ts";
-import { FunnelStageSchema } from "./reply-policy.ts";
-import { CandidateInfoSchema } from "./zhipin.ts";
+import { ModelConfigSchema } from "./model-config.ts";
+import { FunnelStageSchema } from "./funnel-stage.ts";
+import { CandidateInfoSchema } from "./candidate-info.ts";
 
 export const ReplyAuthorityTargetSchema = z.object({
   platform: z.literal("zhipin"),

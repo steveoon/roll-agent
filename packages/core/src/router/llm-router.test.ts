@@ -63,7 +63,7 @@ const agents: RegisteredAgent[] = [
   {
     skill: {
       name: "smart-reply-agent",
-      description: "回复候选人并同步品牌数据",
+      description: "生成并签发候选人回复信封",
       metadata: {},
     },
     transport: { type: "stdio", command: "node" },
@@ -71,19 +71,19 @@ const agents: RegisteredAgent[] = [
     installPath: "/tmp/smart-reply-agent",
     registeredAt: "2026-01-01T00:00:00.000Z",
     status: "online",
-    skillBody: "Tools: generate_reply, sync_brand_data",
+    skillBody: "Tools: generate_reply",
   },
 ];
 
 describe("routeWithLLM", () => {
   it("returns only agent, tool, and confidence from the routing stage", async () => {
     const selection = await routeWithLLM(
-      "同步一下肯德基上海的品牌数据",
+      "给这个 BOSS 直聘候选人生成签名回复",
       agents,
       makeMockModel(
         JSON.stringify({
           agentName: "smart-reply-agent",
-          toolName: "sync_brand_data",
+          toolName: "generate_reply",
           confidence: 0.96,
         }),
       ),
@@ -91,19 +91,19 @@ describe("routeWithLLM", () => {
 
     assert.deepEqual(selection, {
       agentName: "smart-reply-agent",
-      toolName: "sync_brand_data",
+      toolName: "generate_reply",
       confidence: 0.96,
     });
   });
 
   it("clamps confidence into the supported runtime range", async () => {
     const selection = await routeWithLLM(
-      "同步一下肯德基上海的品牌数据",
+      "给这个 BOSS 直聘候选人生成签名回复",
       agents,
       makeMockModel(
         JSON.stringify({
           agentName: "smart-reply-agent",
-          toolName: "sync_brand_data",
+          toolName: "generate_reply",
           confidence: 7,
         }),
       ),
@@ -111,7 +111,7 @@ describe("routeWithLLM", () => {
 
     assert.deepEqual(selection, {
       agentName: "smart-reply-agent",
-      toolName: "sync_brand_data",
+      toolName: "generate_reply",
       confidence: 1,
     });
   });
@@ -120,12 +120,12 @@ describe("routeWithLLM", () => {
     const model = makeMockModel(
       JSON.stringify({
         agentName: "smart-reply-agent",
-        toolName: "sync_brand_data",
+        toolName: "generate_reply",
         confidence: 0.96,
       }),
     );
 
-    await routeWithLLM("同步一下肯德基上海的品牌数据", agents, model, {
+    await routeWithLLM("给这个 BOSS 直聘候选人生成签名回复", agents, model, {
       alibaba: {
         enableThinking: false,
       },
@@ -142,13 +142,13 @@ describe("routeWithLLM", () => {
     const model = makeStructuredOutputFallbackModel(
       JSON.stringify({
         agent: "smart-reply-agent",
-        tool: "sync_brand_data",
+        tool: "generate_reply",
         confidence: 0.96,
       }),
-      '```json\n{"agentName":"smart-reply-agent","toolName":"sync_brand_data","confidence":0.96}\n```',
+      '```json\n{"agentName":"smart-reply-agent","toolName":"generate_reply","confidence":0.96}\n```',
     );
 
-    const selection = await routeWithLLM("同步一下肯德基上海的品牌数据", agents, model, {
+    const selection = await routeWithLLM("给这个 BOSS 直聘候选人生成签名回复", agents, model, {
       alibaba: {
         enableThinking: false,
       },
@@ -156,7 +156,7 @@ describe("routeWithLLM", () => {
 
     assert.deepEqual(selection, {
       agentName: "smart-reply-agent",
-      toolName: "sync_brand_data",
+      toolName: "generate_reply",
       confidence: 0.96,
     });
     assert.deepEqual(model.doGenerateCalls[0]?.providerOptions, {
@@ -171,7 +171,7 @@ describe("routeWithLLM", () => {
     const model = makeApiErrorModel();
 
     await assert.rejects(
-      () => routeWithLLM("同步一下肯德基上海的品牌数据", agents, model),
+      () => routeWithLLM("给这个 BOSS 直聘候选人生成签名回复", agents, model),
       (error: unknown) => error instanceof Error && error.message.includes("upstream unavailable"),
     );
     assert.ok(model.doGenerateCalls.length > 0);

@@ -310,10 +310,7 @@ Tools list
       result.skill.env?.required?.map((item) => item.name),
       ["REPLY_AUTHORITY_URL", "REPLY_AUTHORITY_BEARER_TOKEN"],
     );
-    assert.deepEqual(
-      result.skill.env?.optional?.map((item) => item.name),
-      ["DULIDAY_TOKEN", "DULIDAY_BRAND_LIST_URL", "DULIDAY_JOB_LIST_URL"],
-    );
+    assert.equal(result.skill.env?.optional, undefined);
   });
 
   it("should prefer package.json#rollAgent for stdio on-demand agents", () => {

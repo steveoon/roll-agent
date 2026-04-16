@@ -153,11 +153,8 @@ agents:
   data-dir: ~/.roll-agent/agents
   env:
     smart-reply-agent:
-      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
-      SMART_REPLY_PROXY_BASE_URL: ${SMART_REPLY_PROXY_BASE_URL}
-      DULIDAY_TOKEN: ${DULIDAY_TOKEN}
-      DULIDAY_BRAND_LIST_URL: ${DULIDAY_BRAND_LIST_URL}
-      DULIDAY_JOB_LIST_URL: ${DULIDAY_JOB_LIST_URL}
+      REPLY_AUTHORITY_URL: https://reply-authority.duliday.com
+      REPLY_AUTHORITY_BEARER_TOKEN: ${REPLY_AUTHORITY_BEARER_TOKEN}
 ```
 
 这样 `roll-core` 在启动 `smart-reply-agent` 的 stdio 子进程时会自动注入这些变量，不需要用户手工在 shell 里 `export` 一大串值。
@@ -169,8 +166,8 @@ agents:
 pnpm dev -- run browser-use-agent zhipin_read_messages --limit 10
 
 # 显式传入结构化 JSON（适合 object / record / 复杂 payload）
-pnpm dev -- run smart-reply-agent sync_brand_data \
-  --input-json '{"cityName":"上海市","brandAlias":"肯德基"}'
+pnpm dev -- run smart-reply-agent generate_reply \
+  --input-json '{"candidateMessage":"你好，请问薪资是多少？","target":{"platform":"zhipin","tenantId":"tenant-001","conversationId":"685501091-0","candidateId":"candidate-123"}}'
 
 # 或从文件读取完整 payload
 pnpm dev -- run some-agent sync_config --input-file ./payload.json
