@@ -1,5 +1,46 @@
 # smart-reply-agent
 
+## 1.0.0
+
+### Major Changes
+
+- [#47](https://github.com/steveoon/roll-agent/pull/47) [`3b47ef0`](https://github.com/steveoon/roll-agent/commit/3b47ef041d8361621300e28ac69d619bd3164edb) Thanks [@steveoon](https://github.com/steveoon)! - refactor(smart-reply): 移除本地回复管线和 sync_brand_data
+
+  generate_reply 已全切 Reply Authority Service 云端签发，本地 pipeline 不再需要。
+
+  BREAKING CHANGES:
+  - 移除 `sync_brand_data` tool，品牌数据同步改由 reply-authority-service admin API 负责
+  - 移除 `./pipeline` 公开导出（package.json#exports）
+  - 移除 DULIDAY_TOKEN / DULIDAY_BRAND_LIST_URL / DULIDAY_JOB_LIST_URL 环境变量需求
+  - 删除本地 pipeline/、ai/、errors/ 模块和 data/ 目录
+  - 类型层收缩为最小 schema（CandidateInfoSchema、ModelConfigSchema、FunnelStageSchema）
+
+### Minor Changes
+
+- [#47](https://github.com/steveoon/roll-agent/pull/47) [`289dc16`](https://github.com/steveoon/roll-agent/commit/289dc1660ec2d1c2973e024454a3192cef6f812e) Thanks [@steveoon](https://github.com/steveoon)! - feat(smart-reply): generate_reply 全切 Reply Authority Service 云端签发
+
+  smart-reply-agent 不再本地执行回复管线，改为向 Reply Authority Service 转发请求。
+  输入新增必填 target（platform/tenantId/conversationId/candidateId），
+  输出新增 signedEnvelope 和 envelopeExp。
+  环境变量：REPLY_AUTHORITY_URL + REPLY_AUTHORITY_BEARER_TOKEN。
+
+  feat(browser-use): zhipin_send_reply 实现本地 Ed25519 信封验签
+
+  输入从 message 改为 signedEnvelope，发送前执行完整验证链路：
+  Ed25519 签名校验 → iss/aud/platform 校验 → exp/iat 时间戳校验 →
+  jti 防重放 → conversationId/candidateId 目标绑定校验。
+  zhipin_read_messages 和 zhipin_get_candidate_info 输出补充 conversationId/candidateId。
+
+  fix(core): agent-start 未注入 agents.env 到 core-managed 进程
+
+  roll agent start 启动 core-managed agent 时未传递 agents.env 配置的环境变量，
+  改为通过 getAgentEnv() 查找并注入。
+
+  fix(core): config set 错误转换 SCREAMING_SNAKE_CASE 键名
+
+  camelToKebab 对全大写+下划线格式的环境变量名（如 REPLY_AUTHORITY_KEYS_URL）
+  逐字符插入连字符，现跳过此类键名。
+
 ## 0.4.0
 
 ### Minor Changes
