@@ -67,33 +67,9 @@ importers:
 
   agents/smart-reply:
     dependencies:
-      '@ai-sdk/alibaba':
-        specifier: ^1.0.17
-        version: 1.0.17(zod@3.25.76)
-      '@ai-sdk/anthropic':
-        specifier: ^3.0.68
-        version: 3.0.68(zod@3.25.76)
-      '@ai-sdk/deepseek':
-        specifier: ^2.0.29
-        version: 2.0.29(zod@3.25.76)
-      '@ai-sdk/google':
-        specifier: ^3.0.60
-        version: 3.0.60(zod@3.25.76)
-      '@ai-sdk/openai':
-        specifier: ^3.0.52
-        version: 3.0.52(zod@3.25.76)
-      '@ai-sdk/openai-compatible':
-        specifier: ^2.0.41
-        version: 2.0.41(zod@3.25.76)
       '@roll-agent/sdk':
         specifier: workspace:*
         version: link:../../packages/sdk
-      ai:
-        specifier: ^6.0.154
-        version: 6.0.154(zod@3.25.76)
-      ora:
-        specifier: ^8.2.0
-        version: 8.2.0
       zod:
         specifier: ^3.25.76
         version: 3.25.76
@@ -199,12 +175,6 @@ packages:
 
   '@ai-sdk/gateway@3.0.94':
     resolution: {integrity: sha512-uDDwLZhCkvC89crVS3S90D5L7AcVN8WriGuYVNYgVAaVcvy3Mthy3R9ICfzG75BObhz6pm2FWnhxDfNRK+t69Q==}
-    engines: {node: '>=18'}
-    peerDependencies:
-      zod: ^3.25.76 || ^4.1.8
-
-  '@ai-sdk/google@3.0.60':
-    resolution: {integrity: sha512-ye/hG0LeO24VmjLbfgkFZV8V8k/l4nVBODutpJQkFPyUiGOCbFtFUTgxSeC7+njrk5+HhgyHrzJay4zmhwMH+w==}
     engines: {node: '>=18'}
     peerDependencies:
       zod: ^3.25.76 || ^4.1.8
@@ -2374,12 +2344,6 @@ snapshots:
       '@ai-sdk/provider': 3.0.8
       '@ai-sdk/provider-utils': 4.0.23(zod@3.25.76)
       '@vercel/oidc': 3.1.0
-      zod: 3.25.76
-
-  '@ai-sdk/google@3.0.60(zod@3.25.76)':
-    dependencies:
-      '@ai-sdk/provider': 3.0.8
-      '@ai-sdk/provider-utils': 4.0.23(zod@3.25.76)
       zod: 3.25.76
 
   '@ai-sdk/openai-compatible@2.0.41(zod@3.25.76)':
