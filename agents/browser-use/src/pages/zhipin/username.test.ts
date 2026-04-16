@@ -1,10 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import type { BrowserContextManager, Page } from "@roll-agent/browser";
 import {
   isPlausibleUsername,
   parseAccessibleNames,
   scoreUsernameEvidence,
   pickBestUsername,
+  selectExistingZhipinPage,
   ZHIPIN_USERNAME_LENGTH_LIMIT,
 } from "./username.ts";
 import type { UsernameEvidence } from "./username.ts";
@@ -247,4 +249,56 @@ test("pickBestUsername: right-side element wins over left-side nav link", () => 
   if (result.found) {
     assert.equal(result.userName, "任思文");
   }
+});
+
+// ---------------------------------------------------------------------------
+// Page selection
+// ---------------------------------------------------------------------------
+
+test("selectExistingZhipinPage returns undefined when no tracked page state exists", async () => {
+  let useTrackedPageCalled = false;
+  const ctxManager = {
+    getPageCount(platform: string) {
+      assert.equal(platform, "zhipin");
+      return 0;
+    },
+    async useTrackedPage() {
+      useTrackedPageCalled = true;
+      return undefined;
+    },
+  } as unknown as BrowserContextManager;
+
+  const page = await selectExistingZhipinPage(ctxManager);
+
+  assert.equal(page, undefined);
+  assert.equal(useTrackedPageCalled, false);
+});
+
+test("selectExistingZhipinPage continues through tracked-page selection when only native state exists", async () => {
+  const trackedPage = {
+    url() {
+      return "https://www.zhipin.com/web/geek/chat";
+    },
+  } as unknown as Page;
+  let predicateResult = false;
+
+  const ctxManager = {
+    getPageCount(platform: string) {
+      assert.equal(platform, "zhipin");
+      return 1;
+    },
+    async useTrackedPage(
+      platform: string,
+      predicate: (page: Page) => boolean,
+    ) {
+      assert.equal(platform, "zhipin");
+      predicateResult = predicate(trackedPage);
+      return trackedPage;
+    },
+  } as unknown as BrowserContextManager;
+
+  const page = await selectExistingZhipinPage(ctxManager);
+
+  assert.equal(page, trackedPage);
+  assert.equal(predicateResult, true);
 });

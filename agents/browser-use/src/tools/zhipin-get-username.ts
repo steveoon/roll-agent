@@ -1,10 +1,6 @@
 import { defineTool } from "@roll-agent/sdk";
 import { z } from "zod";
-import {
-  collectUsernameEvidence,
-  pickBestUsername,
-  selectExistingZhipinPage,
-} from "../pages/zhipin/username.ts";
+import { collectUsernameEvidence, pickBestUsername } from "../pages/zhipin/username.ts";
 import { getContextManager } from "../runtime-holder.ts";
 
 const OutputSchema = z.object({
@@ -18,7 +14,7 @@ const OutputSchema = z.object({
 
 export const zhipinGetUsername = defineTool({
   name: "zhipin_get_username",
-  description: "获取当前登录的招聘者用户名，仅复用当前 runtime 已跟踪的 BOSS直聘页面。",
+  description: "获取当前登录的招聘者用户名",
   input: z.object({}),
   output: OutputSchema,
   execute: async (_input, ctx) => {
@@ -26,16 +22,7 @@ export const zhipinGetUsername = defineTool({
 
     try {
       const ctxManager = getContextManager();
-      const page = await selectExistingZhipinPage(ctxManager);
-
-      if (!page) {
-        return {
-          success: false,
-          userName: "",
-          error:
-            "未找到当前 runtime 已跟踪的 BOSS直聘页面，请先执行 open_platform，或通过 list_pages + select_page 恢复跟踪。",
-        };
-      }
+      const page = await ctxManager.getPage("zhipin");
 
       await page.bringToFront().catch(() => {});
 

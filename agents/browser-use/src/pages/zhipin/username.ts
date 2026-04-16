@@ -371,7 +371,7 @@ export async function collectUsernameEvidence(
 // ---------------------------------------------------------------------------
 
 export async function selectExistingZhipinPage(ctxManager: BrowserContextManager) {
-  if (!ctxManager.hasContext("zhipin")) {
+  if (ctxManager.getPageCount("zhipin") === 0) {
     return undefined;
   }
   return findTrackedPlatformPage(ctxManager, "zhipin");

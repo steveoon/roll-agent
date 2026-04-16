@@ -24,6 +24,8 @@ export interface OpenChatResult extends ChatListItem {
 const ZHIPIN_CHAT_URL = "https://www.zhipin.com/web/geek/chat";
 const CHAT_LIST_SELECTOR = ".chat-list-wrap, .geek-item";
 const MESSAGE_ENTRY_TEXT = new Set(["消息"]);
+const CHAT_ENTRY_MARKER_ATTR = "data-roll-chat-entry-target";
+const CHAT_ITEM_MARKER_ATTR = "data-roll-chat-item-target";
 
 function normalizeCandidateName(name: string): string {
   return name.trim().toLocaleLowerCase("zh-CN");
@@ -99,41 +101,79 @@ async function findOpenChatTab(
   return await ctxManager.selectAttachedPage("zhipin", ctxManager.getPageId(matched));
 }
 
+async function clearTemporaryMarker(page: Page, attr: string): Promise<void> {
+  await page
+    .evaluate((markerAttr: string) => {
+      document.querySelectorAll(`[${markerAttr}]`).forEach((element) => {
+        element.removeAttribute(markerAttr);
+      });
+    }, attr)
+    .catch(() => {});
+}
+
+async function clickMarkedElement(page: Page, selector: string): Promise<void> {
+  const target = page.locator(selector).first();
+  await target.scrollIntoViewIfNeeded();
+  await target.hover();
+  await randomDelay(page, 200, 400);
+  await target.click();
+}
+
 async function clickMessageEntry(page: Page): Promise<boolean> {
-  return await page.evaluate((messageLabels: string[]) => {
-    const isVisible = (element: Element): boolean => {
-      const rect = element.getBoundingClientRect();
-      return rect.width > 0 && rect.height > 0;
-    };
+  const markedTarget = await page.evaluate(
+    (args: { markerAttr: string; messageLabels: string[] }) => {
+      const isVisible = (element: Element): boolean => {
+        const rect = element.getBoundingClientRect();
+        return rect.width > 0 && rect.height > 0;
+      };
 
-    const hasMessageText = (text: string): boolean =>
-      messageLabels.some((label) => text === label || text.includes(label));
+      const hasMessageText = (text: string): boolean =>
+        args.messageLabels.some((label) => text === label || text.includes(label));
 
-    const directTargets = Array.from(
-      document.querySelectorAll('a[href*="/web/geek/chat"], a[href*="/web/chat"]'),
-    );
-    for (const element of directTargets) {
-      if (isVisible(element)) {
-        (element as HTMLElement).click();
-        return true;
-      }
-    }
+      document.querySelectorAll(`[${args.markerAttr}]`).forEach((element) => {
+        element.removeAttribute(args.markerAttr);
+      });
 
-    const fallbackTargets = Array.from(
-      document.querySelectorAll('a, button, [role="link"], [role="button"], span, div'),
-    );
-    for (const element of fallbackTargets) {
-      const text = element.textContent?.trim() ?? "";
-      if (!hasMessageText(text) || !isVisible(element)) {
-        continue;
+      const directTargets = Array.from(
+        document.querySelectorAll('a[href*="/web/geek/chat"], a[href*="/web/chat"]'),
+      );
+      for (const element of directTargets) {
+        if (!isVisible(element)) {
+          continue;
+        }
+
+        element.setAttribute(args.markerAttr, "true");
+        return { found: true as const, selector: `[${args.markerAttr}="true"]` };
       }
 
-      (element as HTMLElement).click();
-      return true;
-    }
+      const fallbackTargets = Array.from(
+        document.querySelectorAll('a, button, [role="link"], [role="button"], span, div'),
+      );
+      for (const element of fallbackTargets) {
+        const text = element.textContent?.trim() ?? "";
+        if (!hasMessageText(text) || !isVisible(element)) {
+          continue;
+        }
 
+        element.setAttribute(args.markerAttr, "true");
+        return { found: true as const, selector: `[${args.markerAttr}="true"]` };
+      }
+
+      return { found: false as const };
+    },
+    { markerAttr: CHAT_ENTRY_MARKER_ATTR, messageLabels: [...MESSAGE_ENTRY_TEXT] },
+  );
+
+  if (!markedTarget.found) {
     return false;
-  }, [...MESSAGE_ENTRY_TEXT]);
+  }
+
+  try {
+    await clickMarkedElement(page, markedTarget.selector);
+    return true;
+  } finally {
+    await clearTemporaryMarker(page, CHAT_ENTRY_MARKER_ATTR);
+  }
 }
 
 function isErrAborted(error: unknown): boolean {
@@ -247,15 +287,35 @@ export async function getChatCandidates(page: Page): Promise<ReadonlyArray<ChatL
 }
 
 async function clickChatItem(page: Page, index: number): Promise<boolean> {
-  return page.evaluate((targetIndex: number) => {
-    const items = Array.from(document.querySelectorAll(".geek-item"));
-    const target = items[targetIndex];
-    if (!target) return false;
+  const markedTarget = await page.evaluate(
+    (args: { markerAttr: string; targetIndex: number }) => {
+      document.querySelectorAll(`[${args.markerAttr}]`).forEach((element) => {
+        element.removeAttribute(args.markerAttr);
+      });
 
-    const clickArea = target.querySelector(".chat-item-content") ?? target;
-    (clickArea as HTMLElement).click();
+      const items = Array.from(document.querySelectorAll(".geek-item"));
+      const target = items[args.targetIndex];
+      if (!target) {
+        return { found: false as const };
+      }
+
+      const clickArea = target.querySelector(".chat-item-content") ?? target;
+      clickArea.setAttribute(args.markerAttr, "true");
+      return { found: true as const, selector: `[${args.markerAttr}="true"]` };
+    },
+    { markerAttr: CHAT_ITEM_MARKER_ATTR, targetIndex: index },
+  );
+
+  if (!markedTarget.found) {
+    return false;
+  }
+
+  try {
+    await clickMarkedElement(page, markedTarget.selector);
     return true;
-  }, index);
+  } finally {
+    await clearTemporaryMarker(page, CHAT_ITEM_MARKER_ATTR);
+  }
 }
 
 async function waitForChatReady(page: Page, candidateName: string): Promise<void> {
