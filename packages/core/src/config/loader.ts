@@ -4,34 +4,17 @@ import { parse as parseYaml } from "yaml";
 import { agentsConfigSchema, rollConfigSchema } from "./schema.ts";
 import type { RollConfig } from "./schema.ts";
 import { DEFAULT_CONFIG, CONFIG_FILE_NAMES } from "./defaults.ts";
+import { decodeFromYaml } from "./key-codec.ts";
 import {
   detectKnownConfigMigrations,
   formatConfigMigrationError,
   type ConfigMigrationReport,
+  type ConfigMigrationScope,
 } from "./migration.ts";
 
 interface YamlLinePosition {
   readonly line: number;
   readonly col: number;
-}
-
-/**
- * 将 YAML 中 kebab-case 键递归转换为 camelCase。
- * 例如 `default-provider` → `defaultProvider`
- */
-function kebabToCamelDeep(obj: unknown): unknown {
-  if (Array.isArray(obj)) {
-    return obj.map(kebabToCamelDeep);
-  }
-  if (isRecord(obj)) {
-    const result: Record<string, unknown> = {};
-    for (const [key, value] of Object.entries(obj)) {
-      const camelKey = key.replace(/-([a-z])/g, (_, ch: string) => ch.toUpperCase());
-      result[camelKey] = kebabToCamelDeep(value);
-    }
-    return result;
-  }
-  return obj;
 }
 
 /**
@@ -215,21 +198,27 @@ export function parseConfigDocument(raw: string, configPath: string): Record<str
   return parsed;
 }
 
-export function validateConfigText(raw: string, configPath: string): RollConfig {
+function parseAndCheckMigrations(
+  raw: string,
+  configPath: string,
+  options: { readonly scope?: ConfigMigrationScope } = {},
+): Record<string, unknown> {
   const parsed = parseConfigDocument(raw, configPath);
+  const migrationReport = detectKnownConfigMigrations(parsed, options);
+  if (migrationReport.needsMigration) {
+    throw new Error(formatConfigMigrationError(configPath, migrationReport));
+  }
+  return parsed;
+}
 
-  // 键转换 + 环境变量替换
-  const transformed = resolveEnvVars(kebabToCamelDeep(parsed));
+export function validateConfigText(raw: string, configPath: string): RollConfig {
+  const parsed = parseAndCheckMigrations(raw, configPath);
+
+  const transformed = resolveEnvVars(decodeFromYaml(parsed));
   if (!isRecord(transformed)) {
     throw new Error(`Invalid config file: ${configPath} (expected YAML object)`);
   }
 
-  const migrationReport = detectKnownConfigMigrations(parsed);
-  if (migrationReport.needsMigration) {
-    throw new Error(formatConfigMigrationError(configPath, migrationReport));
-  }
-
-  // Zod 校验（与默认值深度合并）
   const merged = deepMerge(DEFAULT_CONFIG, transformed);
   const result = rollConfigSchema.safeParse(merged);
 
@@ -244,9 +233,9 @@ export function validateConfigText(raw: string, configPath: string): RollConfig 
 }
 
 function validateAgentsConfigText(raw: string, configPath: string): RollConfig["agents"] {
-  const parsed = parseConfigDocument(raw, configPath);
+  const parsed = parseAndCheckMigrations(raw, configPath, { scope: "agents" });
 
-  const transformed = resolveEnvVars(kebabToCamelDeep(parsed));
+  const transformed = resolveEnvVars(decodeFromYaml(parsed));
   if (!isRecord(transformed)) {
     throw new Error(`Invalid config file: ${configPath} (expected YAML object)`);
   }
