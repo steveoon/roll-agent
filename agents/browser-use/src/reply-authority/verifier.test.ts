@@ -12,7 +12,7 @@ function createSignedEnvelope(overrides: Partial<Record<string, unknown>> = {}):
   const { privateKey, publicKey } = generateKeyPairSync("ed25519");
   const now = Math.floor(Date.now() / 1000);
   const payload = {
-    v: 1,
+    v: 2,
     iss: "reply-authority-service",
     kid: "reply-signing-key-2026-04",
     jti: "550e8400-e29b-41d4-a716-446655440000",
@@ -25,6 +25,10 @@ function createSignedEnvelope(overrides: Partial<Record<string, unknown>> = {}):
     candidateId: "candidate-123",
     reply: "你好，欢迎了解这个岗位。",
     policyVersion: "tenant:file:v1",
+    recruiterBinding: {
+      platform: "zhipin",
+      username: "recruiter-alice",
+    },
     ...overrides,
   };
 
@@ -61,6 +65,16 @@ describe("verifySignedReplyEnvelope", () => {
 
     assert.equal(payload.aud, "browser-use-agent/zhipin_send_reply");
     assert.equal(payload.candidateId, "candidate-123");
+    assert.equal(payload.recruiterBinding.username, "recruiter-alice");
+  });
+
+  it("rejects envelopes with an unsupported version", async () => {
+    const envelope = createSignedEnvelope({ v: 1 });
+
+    await assert.rejects(
+      async () => await verifySignedReplyEnvelope(envelope),
+      /unexpected envelope version/,
+    );
   });
 
   it("rejects expired envelopes", async () => {

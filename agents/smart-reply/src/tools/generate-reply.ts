@@ -8,7 +8,7 @@ import {
 export const generateReply = defineTool({
   name: "generate_reply",
   description:
-    "根据候选人消息生成智能招聘回复，并向 Reply Authority Service 请求签名信封；调用方必须显式提供 target 以绑定 tenantId/conversationId/candidateId。",
+    "根据候选人消息生成智能招聘回复，并向 Reply Authority Service 请求签名信封；调用方必须提供 target 以绑定会话和招聘者身份，可直接传 tenantId+recruiterBinding，或只传 recruiterUsername 交给 smart-reply 代理解析。",
   input: GenerateReplyToolInputSchema,
   output: GenerateSignedReplyResponseSchema,
   execute: async (input, ctx) => {

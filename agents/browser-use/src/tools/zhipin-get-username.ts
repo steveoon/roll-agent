@@ -1,11 +1,11 @@
 import { defineTool } from "@roll-agent/sdk";
 import { z } from "zod";
-import { collectUsernameEvidence, pickBestUsername } from "../pages/zhipin/username.ts";
+import { getCurrentZhipinRecruiterIdentity } from "../pages/zhipin/recruiter-identity.ts";
 import { getContextManager } from "../runtime-holder.ts";
 
 const OutputSchema = z.object({
   success: z.boolean(),
-  userName: z.string(),
+  username: z.string(),
   usedSelector: z.string().optional(),
   usedStrategy: z.string().optional(),
   source: z.string().optional(),
@@ -26,31 +26,22 @@ export const zhipinGetUsername = defineTool({
 
       await page.bringToFront().catch(() => {});
 
-      const evidence = await collectUsernameEvidence(page);
-      const result = pickBestUsername(evidence);
-
-      if (!result.found) {
-        return {
-          success: false,
-          userName: "",
-          error: "未找到用户名，请确认当前页面已登录招聘者账号。",
-        };
-      }
+      const identity = await getCurrentZhipinRecruiterIdentity(page);
 
       ctx.logger.info(
-        `Username: ${result.userName} (strategy: ${result.strategy}, source: ${result.source})`,
+        `Username: ${identity.username} (strategy: ${identity.strategy}, source: ${identity.source})`,
       );
       return {
         success: true,
-        userName: result.userName,
-        usedSelector: result.strategy === "css-fallback" ? result.source : undefined,
-        usedStrategy: result.strategy,
-        source: result.source,
+        username: identity.username,
+        usedSelector: identity.strategy === "css-fallback" ? identity.source : undefined,
+        usedStrategy: identity.strategy,
+        source: identity.source,
       };
     } catch (error) {
       return {
         success: false,
-        userName: "",
+        username: "",
         error: error instanceof Error ? `获取用户名失败：${error.message}` : "获取用户名失败",
       };
     }
