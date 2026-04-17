@@ -52,7 +52,7 @@ metadata:
 3. `zhipin_get_candidate_info` → 查看候选人资料、聊天记录，并拿到 `conversationId` / `candidateId`
 4. `smart-reply-agent.generate_reply(..., target)` → 获取 `suggestedReply + signedEnvelope`
 5. `zhipin_send_reply(signedEnvelope)` → 验签、校验 recruiterBinding 后发送回复
-5. `zhipin_exchange_wechat` → 交换微信（可选）
+6. `zhipin_exchange_wechat` → 交换微信（可选）
 
 ## 支持平台
 
