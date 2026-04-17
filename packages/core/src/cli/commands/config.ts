@@ -9,6 +9,7 @@ import {
   parseConfigDocument,
   validateConfigText,
 } from "../../config/loader.ts";
+import { encodePathToYaml, normalizeUserPath } from "../../config/key-codec.ts";
 import { applyKnownConfigMigrations } from "../../config/migration.ts";
 
 export default defineCommand({
@@ -210,8 +211,7 @@ function getConfig(key: string | undefined): void {
     return;
   }
 
-  // 支持点号路径访问：llm.defaultProvider / ask.confirmThreshold
-  const parts = key.split(".");
+  const parts = normalizeUserPath(key.split("."));
   let current: unknown = config;
   for (const part of parts) {
     if (typeof current !== "object" || current === null) {
@@ -231,20 +231,6 @@ function getConfig(key: string | undefined): void {
   console.log(typeof current === "object" ? JSON.stringify(current, null, 2) : String(current));
 }
 
-/**
- * camelCase 键转换为 kebab-case（与 YAML 文件格式保持一致）。
- * 例如 `defaultProvider` → `default-provider`
- *
- * 如果 key 已经是 SCREAMING_SNAKE_CASE（如 `REPLY_AUTHORITY_URL`），
- * 则原样保留，不做转换——这类 key 通常是环境变量名。
- */
-function camelToKebab(str: string): string {
-  if (/^[A-Z][A-Z0-9_]*$/.test(str)) {
-    return str;
-  }
-  return str.replace(/[A-Z]/g, (ch) => `-${ch.toLowerCase()}`);
-}
-
 /** 设置配置值并写回 YAML 文件 */
 function setConfig(key: string | undefined, value: string | undefined): void {
   if (!key || value === undefined) {
@@ -262,24 +248,26 @@ function setConfig(key: string | undefined, value: string | undefined): void {
     return;
   }
 
-  // 读取原始 YAML 为 JS 对象
   const raw = readFileSync(configPath, "utf-8");
   const doc = parseConfigDocument(raw, configPath);
 
-  // 按点号路径设置值（使用 kebab-case 键匹配 YAML 格式）
-  const parts = key.split(".");
-  let current: Record<string, unknown> = doc;
-
-  for (let i = 0; i < parts.length - 1; i++) {
-    const kebabKey = camelToKebab(parts[i] as string);
-    const next = current[kebabKey];
-    if (typeof next !== "object" || next === null || Array.isArray(next)) {
-      current[kebabKey] = {};
-    }
-    current = current[kebabKey] as Record<string, unknown>;
+  const yamlParts = encodePathToYaml(key.split("."));
+  const lastKey = yamlParts[yamlParts.length - 1];
+  if (lastKey === undefined) {
+    console.error("✗ 配置键不能为空");
+    process.exitCode = 1;
+    return;
   }
 
-  const lastKey = camelToKebab(parts[parts.length - 1] as string);
+  let current: Record<string, unknown> = doc;
+  for (let i = 0; i < yamlParts.length - 1; i++) {
+    const segment = yamlParts[i] as string;
+    const next = current[segment];
+    if (typeof next !== "object" || next === null || Array.isArray(next)) {
+      current[segment] = {};
+    }
+    current = current[segment] as Record<string, unknown>;
+  }
 
   // 尝试解析为数字/布尔值，否则保持字符串
   let parsed: unknown = value;

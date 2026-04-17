@@ -519,6 +519,79 @@ test("e2e smoke: config init writes ask section and ask config can be set/get", 
   }
 });
 
+test("e2e smoke: config get accepts kebab and camel paths equivalently", () => {
+  const workspace = mkdtempSync(resolve(tmpdir(), `roll-config-get-codec-${randomUUID()}-`));
+
+  try {
+    writeFileSync(
+      resolve(workspace, "roll.config.yaml"),
+      `llm:
+  default-provider: anthropic
+  default-model: claude-sonnet-4-20250514
+  providers:
+    anthropic:
+      api-key: sk-test
+      base-url: https://example.com
+agents:
+  data-dir: ${resolve(workspace, "agents-data")}
+`,
+      "utf-8",
+    );
+
+    const kebabResult = runRoll(["config", "get", "llm.default-provider"], workspace);
+    assert.equal(kebabResult.status, 0, kebabResult.stderr);
+    assert.equal(kebabResult.stdout.trim(), "anthropic");
+
+    const camelResult = runRoll(["config", "get", "llm.defaultProvider"], workspace);
+    assert.equal(camelResult.status, 0, camelResult.stderr);
+    assert.equal(camelResult.stdout.trim(), "anthropic");
+
+    const nestedKebabResult = runRoll(
+      ["config", "get", "llm.providers.anthropic.base-url"],
+      workspace,
+    );
+    assert.equal(nestedKebabResult.status, 0, nestedKebabResult.stderr);
+    assert.equal(nestedKebabResult.stdout.trim(), "https://example.com");
+
+    const nestedCamelResult = runRoll(
+      ["config", "get", "llm.providers.anthropic.baseUrl"],
+      workspace,
+    );
+    assert.equal(nestedCamelResult.status, 0, nestedCamelResult.stderr);
+    assert.equal(nestedCamelResult.stdout.trim(), "https://example.com");
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("e2e smoke: agent list blocks legacy camelCase agents.env keys with migration guidance", () => {
+  const workspace = mkdtempSync(resolve(tmpdir(), `roll-legacy-agents-env-${randomUUID()}-`));
+
+  try {
+    writeFileSync(
+      resolve(workspace, "roll.config.yaml"),
+      `llm:
+  default-provider: anthropic
+  default-model: claude-sonnet-4-20250514
+  providers: {}
+agents:
+  data-dir: ${resolve(workspace, "agents-data")}
+  env:
+    smartReplyAgent:
+      REPLY_AUTHORITY_URL: https://legacy.example.com
+`,
+      "utf-8",
+    );
+
+    const result = runRoll(["agent", "list"], workspace);
+    assert.equal(result.status, 1, `agent list should fail\nstdout:\n${result.stdout}`);
+    assert.match(result.stderr, /smartReplyAgent/);
+    assert.match(result.stderr, /roll config migrate/);
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
 test("e2e smoke: deprecated router config fails with migration guidance", () => {
   const workspace = mkdtempSync(resolve(tmpdir(), `roll-router-migration-${randomUUID()}-`));
 

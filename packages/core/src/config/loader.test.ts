@@ -4,7 +4,7 @@ import { writeFileSync, mkdirSync, rmSync } from "node:fs";
 import { resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { randomUUID } from "node:crypto";
-import { inspectConfigFile, loadConfig, validateConfigText } from "./loader.ts";
+import { inspectConfigFile, loadAgentsConfig, loadConfig, validateConfigText } from "./loader.ts";
 import { getAgentEnv } from "./helpers.ts";
 
 /** 创建临时目录用于测试 */
@@ -96,6 +96,30 @@ agents:
       REPLY_AUTHORITY_URL: "https://reply-authority.example.com",
       REPLY_AUTHORITY_BEARER_TOKEN: "test-token",
     });
+  });
+
+  it("should preserve kebab-case keys under agents.env (dynamic record)", () => {
+    const yaml = `
+llm:
+  default-provider: anthropic
+  default-model: test
+  providers: {}
+agents:
+  data-dir: /tmp/test
+  env:
+    smart-reply-agent:
+      REPLY_AUTHORITY_URL: https://reply-authority.example.com
+    browser-use-agent:
+      REPLY_AUTHORITY_KEYS_URL: https://reply-authority.example.com/keys
+`;
+    writeFileSync(resolve(tmpDir, "roll.config.yaml"), yaml);
+    const { config } = loadConfig({ cwd: tmpDir });
+
+    const envMap = config.agents.env ?? {};
+    assert.ok("smart-reply-agent" in envMap, "kebab-case agent name should be preserved");
+    assert.ok("browser-use-agent" in envMap, "kebab-case agent name should be preserved");
+    assert.equal("smartReplyAgent" in envMap, false, "should not introduce camelCase variant");
+    assert.equal("browserUseAgent" in envMap, false, "should not introduce camelCase variant");
   });
 
   it("should resolve environment variables", () => {
@@ -230,6 +254,47 @@ agents:
         err.message.includes("ask.confirm-threshold") &&
         err.message.includes("router.mode") &&
         err.message.includes("roll config migrate"),
+    );
+  });
+
+  it("validateConfigText should reject YAML containing camelCase agent env keys", () => {
+    const yaml = `
+llm:
+  default-provider: anthropic
+  default-model: test
+  providers: {}
+agents:
+  data-dir: /tmp/test
+  env:
+    smartReplyAgent:
+      REPLY_AUTHORITY_URL: https://legacy.example.com
+`;
+
+    assert.throws(
+      () => validateConfigText(yaml, resolve(tmpDir, "roll.config.yaml")),
+      (err: Error) =>
+        err.message.includes("smartReplyAgent") && err.message.includes("roll config migrate"),
+    );
+  });
+
+  it("loadAgentsConfig should block legacy camelCase agent env keys with migration guidance", () => {
+    const yaml = `
+llm:
+  default-provider: anthropic
+  default-model: test
+  providers: {}
+agents:
+  data-dir: /tmp/test
+  env:
+    smartReplyAgent:
+      REPLY_AUTHORITY_URL: https://legacy.example.com
+`;
+    writeFileSync(resolve(tmpDir, "roll.config.yaml"), yaml);
+
+    assert.throws(
+      () => loadAgentsConfig({ cwd: tmpDir }),
+      (err: Error) =>
+        err.message.includes("smartReplyAgent") && err.message.includes("roll config migrate"),
     );
   });
 

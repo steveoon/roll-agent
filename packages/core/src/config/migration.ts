@@ -1,3 +1,5 @@
+import { camelToKebab } from "./key-codec.ts";
+
 const CONFIG_MIGRATION_ISSUE_CODES = {
   deprecatedRouterSection: "deprecated-router-section",
   invalidAskSection: "invalid-ask-section",
@@ -5,6 +7,8 @@ const CONFIG_MIGRATION_ISSUE_CODES = {
   routerAskConflict: "router-ask-conflict",
   duplicateEquivalentKeys: "duplicate-equivalent-keys",
   unknownRouterKeys: "unknown-router-keys",
+  legacyCamelCaseAgentEnvKey: "legacy-camelcase-agent-env-key",
+  legacyAgentEnvKeyConflict: "legacy-agent-env-key-conflict",
 } as const;
 
 type ConfigMigrationIssueCode =
@@ -34,6 +38,7 @@ const BLOCKING_MIGRATION_ISSUE_CODES = new Set<ConfigMigrationIssueCode>([
   CONFIG_MIGRATION_ISSUE_CODES.invalidRouterSection,
   CONFIG_MIGRATION_ISSUE_CODES.routerAskConflict,
   CONFIG_MIGRATION_ISSUE_CODES.unknownRouterKeys,
+  CONFIG_MIGRATION_ISSUE_CODES.legacyAgentEnvKeyConflict,
 ]);
 
 export interface ConfigMigrationIssue {
@@ -67,8 +72,11 @@ interface ConfigMigrationRuleInspection {
   readonly issues: readonly ConfigMigrationIssue[];
 }
 
+export type ConfigMigrationScope = "llm" | "ask" | "agents";
+
 interface ConfigMigrationRule {
   readonly id: string;
+  readonly scopes: ReadonlySet<ConfigMigrationScope>;
   inspect(document: Record<string, unknown>): ConfigMigrationRuleInspection;
   apply(document: Record<string, unknown>): ApplyKnownConfigMigrationsResult;
 }
@@ -99,7 +107,9 @@ function getSingleMappedValue(
   sectionName: string,
   record: Record<string, unknown>,
   candidateKeys: readonly string[],
-): { ok: true; key: string | undefined; value: unknown } | { ok: false; issue: ConfigMigrationIssue } {
+):
+  | { ok: true; key: string | undefined; value: unknown }
+  | { ok: false; issue: ConfigMigrationIssue } {
   const presentKeys = findPresentKeys(record, candidateKeys);
   if (presentKeys.length === 0) {
     return { ok: true, key: undefined, value: undefined };
@@ -121,7 +131,9 @@ function getSingleMappedValue(
   return { ok: true, key: firstKey, value: firstValue };
 }
 
-function inspectRouterToAskMigration(document: Record<string, unknown>): ConfigMigrationRuleInspection {
+function inspectRouterToAskMigration(
+  document: Record<string, unknown>,
+): ConfigMigrationRuleInspection {
   if (!hasOwnStringKey(document, "router")) {
     return { matches: false, canAutoMigrate: false, issues: [] };
   }
@@ -183,17 +195,11 @@ function inspectRouterToAskMigration(document: Record<string, unknown>): ConfigM
       keyof typeof ROUTER_MIGRATABLE_FIELDS
     >) {
       const field = ROUTER_MIGRATABLE_FIELDS[fieldName];
-      const routerMappedValue = getSingleMappedValue(
-        "router",
-        routerValue,
-        field.routerKeys,
-      );
+      const routerMappedValue = getSingleMappedValue("router", routerValue, field.routerKeys);
       const askMappedValue = getSingleMappedValue("ask", askValue, field.askKeys);
 
       if (!routerMappedValue.ok) {
-        issues.push(
-          routerMappedValue.issue,
-        );
+        issues.push(routerMappedValue.issue);
         continue;
       }
 
@@ -327,16 +333,150 @@ function applyRouterToAskMigration(
   };
 }
 
-const CONFIG_MIGRATION_RULES = [
+const CANONICAL_AGENT_NAME_PATTERN = /^[a-z0-9]+(-[a-z0-9]+)*$/;
+
+function isNonCanonicalAgentName(key: string): boolean {
+  return !CANONICAL_AGENT_NAME_PATTERN.test(key);
+}
+
+function canonicalizeAgentName(key: string): string | undefined {
+  const candidate = camelToKebab(key).toLowerCase();
+  return CANONICAL_AGENT_NAME_PATTERN.test(candidate) ? candidate : undefined;
+}
+
+function inspectLegacyAgentEnvKeys(
+  document: Record<string, unknown>,
+): ConfigMigrationRuleInspection {
+  const agents = document["agents"];
+  if (!isRecord(agents)) {
+    return { matches: false, canAutoMigrate: false, issues: [] };
+  }
+  const env = agents["env"];
+  if (!isRecord(env)) {
+    return { matches: false, canAutoMigrate: false, issues: [] };
+  }
+
+  const legacy = Object.keys(env).filter(isNonCanonicalAgentName);
+  if (legacy.length === 0) {
+    return { matches: false, canAutoMigrate: false, issues: [] };
+  }
+
+  const issues: ConfigMigrationIssue[] = [];
+  let hasBlocking = false;
+
+  for (const key of legacy) {
+    const canonical = canonicalizeAgentName(key);
+    if (canonical === undefined) {
+      hasBlocking = true;
+      issues.push(
+        createIssue(
+          CONFIG_MIGRATION_ISSUE_CODES.legacyAgentEnvKeyConflict,
+          `\`agents.env.${key}\` 命名不符合 kebab-case 规范，无法自动迁移，请手动重命名。`,
+        ),
+      );
+      continue;
+    }
+    if (hasOwnStringKey(env, canonical)) {
+      hasBlocking = true;
+      issues.push(
+        createIssue(
+          CONFIG_MIGRATION_ISSUE_CODES.legacyAgentEnvKeyConflict,
+          `\`agents.env\` 下同时存在 \`${key}\` 与 \`${canonical}\`，无法自动合并，请手动处理。`,
+        ),
+      );
+      continue;
+    }
+    issues.push(
+      createIssue(
+        CONFIG_MIGRATION_ISSUE_CODES.legacyCamelCaseAgentEnvKey,
+        `\`agents.env.${key}\` 应使用 kebab-case（\`${canonical}\`）。`,
+      ),
+    );
+  }
+
+  return {
+    matches: true,
+    canAutoMigrate: !hasBlocking,
+    issues,
+  };
+}
+
+function applyLegacyAgentEnvKeys(
+  document: Record<string, unknown>,
+): ApplyKnownConfigMigrationsResult {
+  const inspection = inspectLegacyAgentEnvKeys(document);
+  if (!inspection.matches) {
+    return {
+      ok: true,
+      changed: false,
+      document: structuredClone(document) as Record<string, unknown>,
+      issues: [],
+      summary: [],
+    };
+  }
+  if (!inspection.canAutoMigrate) {
+    return {
+      ok: false,
+      changed: false,
+      issues: inspection.issues,
+    };
+  }
+
+  const next = structuredClone(document) as Record<string, unknown>;
+  const agents = next["agents"];
+  if (!isRecord(agents)) {
+    return { ok: false, changed: false, issues: inspection.issues };
+  }
+  const env = agents["env"];
+  if (!isRecord(env)) {
+    return { ok: false, changed: false, issues: inspection.issues };
+  }
+
+  const summary: string[] = [];
+  for (const key of Object.keys(env).filter(isNonCanonicalAgentName)) {
+    const canonical = canonicalizeAgentName(key);
+    if (canonical === undefined) {
+      continue;
+    }
+    env[canonical] = env[key];
+    delete env[key];
+    summary.push(`将 \`agents.env.${key}\` 重命名为 \`agents.env.${canonical}\``);
+  }
+
+  return {
+    ok: true,
+    changed: summary.length > 0,
+    document: next,
+    issues: inspection.issues,
+    summary,
+  };
+}
+
+const CONFIG_MIGRATION_RULES: readonly ConfigMigrationRule[] = [
   {
     id: "router-to-ask",
+    scopes: new Set<ConfigMigrationScope>(["ask"]),
     inspect: inspectRouterToAskMigration,
     apply: applyRouterToAskMigration,
   },
-] as const satisfies readonly ConfigMigrationRule[];
+  {
+    id: "legacy-agent-env-keys",
+    scopes: new Set<ConfigMigrationScope>(["agents"]),
+    inspect: inspectLegacyAgentEnvKeys,
+    apply: applyLegacyAgentEnvKeys,
+  },
+];
 
-export function detectKnownConfigMigrations(document: Record<string, unknown>): ConfigMigrationReport {
-  const inspections = CONFIG_MIGRATION_RULES.map((rule) => rule.inspect(document));
+export function detectKnownConfigMigrations(
+  document: Record<string, unknown>,
+  options: { readonly scope?: ConfigMigrationScope } = {},
+): ConfigMigrationReport {
+  const { scope } = options;
+  const rules =
+    scope !== undefined
+      ? CONFIG_MIGRATION_RULES.filter((rule) => rule.scopes.has(scope))
+      : CONFIG_MIGRATION_RULES;
+  const inspections = rules.map((rule) => rule.inspect(document));
   const matchingInspections = inspections.filter((inspection) => inspection.matches);
 
   if (matchingInspections.length === 0) {
