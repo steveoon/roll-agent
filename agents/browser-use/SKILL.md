@@ -28,9 +28,9 @@ metadata:
 - `zhipin_read_messages(limit?, onlyUnread?, sortBy?)` — 读取消息列表中的候选人，返回姓名、消息摘要，以及 `conversationId` / `candidateId`
 - `zhipin_open_chat(candidateName?, index?, preferUnread?)` — 打开指定候选人的聊天窗口（按姓名模糊匹配或列表索引）
 - `zhipin_get_candidate_info(candidateName?, index?, maxMessages?)` — 提取候选人资料、聊天记录，以及当前选中聊天的 `conversationId` / `candidateId`
-- `zhipin_send_reply(signedEnvelope, candidateName?, index?)` — 发送消息。只接受 Reply Authority Service 签发的 `signedEnvelope`；本地会先做 Ed25519 验签、过期检查、重放检查和目标绑定校验
+- `zhipin_send_reply(signedEnvelope, candidateName?, index?)` — 发送消息。只接受 Reply Authority Service 签发的 `signedEnvelope`；本地会先做 Ed25519 验签、过期检查、重放检查、目标绑定校验和 recruiter 绑定校验
 - `zhipin_exchange_wechat(candidateName?, index?)` — 换微信。指定 candidateName 会自动打开对应聊天后执行
-- `zhipin_get_username()` — 获取当前登录的招聘者用户名（依赖当前 runtime 已跟踪页面；首次使用请先 `open_platform`，已打开但未跟踪页面可先 `list_pages + select_page`，确认登录后如需单独验证 attach，可先调用 `attach_browser_session`）。常用于外部通知消息中的账号标识，参见 notify-agent 的跨 Agent 工作流
+- `zhipin_get_username()` — 获取当前登录的招聘者用户名，返回 `username`（依赖当前 runtime 已跟踪页面；首次使用请先 `open_platform`，已打开但未跟踪页面可先 `list_pages + select_page`，确认登录后如需单独验证 attach，可先调用 `attach_browser_session`）。常用于 recruiter binding 解析和外部通知消息中的账号标识
 
 ## BOSS直聘 — 推荐列表 Tools
 
@@ -51,8 +51,8 @@ metadata:
 2. `zhipin_open_chat(candidateName)` → 打开某人的聊天
 3. `zhipin_get_candidate_info` → 查看候选人资料、聊天记录，并拿到 `conversationId` / `candidateId`
 4. `smart-reply-agent.generate_reply(..., target)` → 获取 `suggestedReply + signedEnvelope`
-5. `zhipin_send_reply(signedEnvelope)` → 验签后发送回复
-5. `zhipin_exchange_wechat` → 交换微信（可选）
+5. `zhipin_send_reply(signedEnvelope)` → 验签、校验 recruiterBinding 后发送回复
+6. `zhipin_exchange_wechat` → 交换微信（可选）
 
 ## 支持平台
 
@@ -63,5 +63,5 @@ metadata:
 
 - `zhipin_send_reply` 不再接受裸文本 `message`
 - 实际发送文本来自验签后的 envelope payload 内部 `reply` 字段
-- envelope 绑定 `conversationId + candidateId`，若当前选中聊天与签名目标不一致，会拒绝发送
+- envelope 绑定 `conversationId + candidateId + recruiterBinding`，若当前选中聊天或当前登录招聘者与签名目标不一致，会拒绝发送
 - Agent 启动时会尝试从 `REPLY_AUTHORITY_KEYS_URL` 预拉公钥；若拉取失败，其他只读工具仍可用，但发送会失败关闭

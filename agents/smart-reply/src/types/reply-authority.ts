@@ -3,11 +3,59 @@ import { ModelConfigSchema } from "./model-config.ts";
 import { FunnelStageSchema } from "./funnel-stage.ts";
 import { CandidateInfoSchema } from "./candidate-info.ts";
 
-export const ReplyAuthorityTargetSchema = z.object({
+export const RecruiterBindingSchema = z.object({
   platform: z.literal("zhipin"),
-  tenantId: z.string().min(1),
+  username: z.string().min(1),
+  accountId: z.string().min(1).optional(),
+});
+
+const ReplyAuthorityTargetBaseSchema = z.object({
+  platform: z.literal("zhipin"),
+  tenantId: z.string().min(1).optional(),
   conversationId: z.string().min(1),
   candidateId: z.string().min(1),
+});
+
+export const ReplyAuthorityTargetSchema = ReplyAuthorityTargetBaseSchema.extend({
+  recruiterBinding: RecruiterBindingSchema.optional(),
+  recruiterUsername: z.string().min(1).optional(),
+}).superRefine((target, ctx) => {
+  const hasRecruiterBinding = target.recruiterBinding !== undefined;
+  const hasRecruiterUsername = target.recruiterUsername !== undefined;
+
+  if (!hasRecruiterBinding && !hasRecruiterUsername) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: "target.recruiterBinding 或 target.recruiterUsername 至少需要提供一个。",
+      path: ["recruiterBinding"],
+    });
+  }
+
+  if (hasRecruiterBinding && !hasRecruiterUsername && target.tenantId === undefined) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: "直接传 target.recruiterBinding 时，target.tenantId 也必须显式提供。",
+      path: ["tenantId"],
+    });
+  }
+
+  if (
+    hasRecruiterBinding &&
+    hasRecruiterUsername &&
+    target.recruiterBinding !== undefined &&
+    target.recruiterBinding.username !== target.recruiterUsername
+  ) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: "target.recruiterUsername 必须与 target.recruiterBinding.username 一致。",
+      path: ["recruiterUsername"],
+    });
+  }
+});
+
+export const ResolvedReplyAuthorityTargetSchema = ReplyAuthorityTargetBaseSchema.extend({
+  tenantId: z.string().min(1),
+  recruiterBinding: RecruiterBindingSchema,
 });
 
 export const GenerateReplyToolInputSchema = z.object({
@@ -26,13 +74,16 @@ export const GenerateReplyToolInputSchema = z.object({
   target: ReplyAuthorityTargetSchema.describe("签名绑定目标：租户、会话和候选人标识"),
 });
 
-export const GenerateSignedReplyRequestSchema = GenerateReplyToolInputSchema.extend({
+export const GenerateSignedReplyRequestSchema = GenerateReplyToolInputSchema.omit({
+  target: true,
+}).extend({
+  target: ResolvedReplyAuthorityTargetSchema,
   requestId: z.string().optional(),
 });
 
 export const GenerateSignedReplyResponseSchema = z.object({
   suggestedReply: z.string(),
-  signedEnvelope: z.string(),
+  signedEnvelope: z.string().describe("Reply Authority Service v2 紧凑签名信封"),
   envelopeExp: z.number().int(),
   confidence: z.number(),
   stage: FunnelStageSchema,
@@ -43,13 +94,28 @@ export const GenerateSignedReplyResponseSchema = z.object({
   diagnostics: z.record(z.unknown()).optional(),
 });
 
+export const ResolveRecruiterBindingRequestSchema = z.object({
+  platform: z.literal("zhipin"),
+  username: z.string().min(1),
+  accountId: z.string().min(1).optional(),
+});
+
+export const ResolveRecruiterBindingResponseSchema = z.object({
+  tenantId: z.string().min(1),
+  recruiterBinding: RecruiterBindingSchema,
+});
+
 export const ReplyAuthorityErrorResponseSchema = z.object({
   statusCode: z.number().int(),
   error: z.string(),
   message: z.string(),
 });
 
+export type RecruiterBinding = z.infer<typeof RecruiterBindingSchema>;
 export type ReplyAuthorityTarget = z.infer<typeof ReplyAuthorityTargetSchema>;
+export type ResolvedReplyAuthorityTarget = z.infer<typeof ResolvedReplyAuthorityTargetSchema>;
 export type GenerateReplyToolInput = z.infer<typeof GenerateReplyToolInputSchema>;
 export type GenerateSignedReplyRequest = z.infer<typeof GenerateSignedReplyRequestSchema>;
 export type GenerateSignedReplyResponse = z.infer<typeof GenerateSignedReplyResponseSchema>;
+export type ResolveRecruiterBindingRequest = z.infer<typeof ResolveRecruiterBindingRequestSchema>;
+export type ResolveRecruiterBindingResponse = z.infer<typeof ResolveRecruiterBindingResponseSchema>;

@@ -1,6 +1,10 @@
 import { defineTool } from "@roll-agent/sdk";
 import { z } from "zod";
 import { getSelectedChatTarget } from "../pages/zhipin/chat-target.ts";
+import {
+  getCurrentZhipinRecruiterIdentity,
+  matchesRecruiterBinding,
+} from "../pages/zhipin/recruiter-identity.ts";
 import { getContextManager } from "../runtime-holder.ts";
 import { randomDelay, humanDelay } from "../pages/zhipin/anti-detection.ts";
 import { ensureChatListLoaded, ensureChatOpen } from "../pages/zhipin/chat-navigation.ts";
@@ -72,6 +76,17 @@ export const zhipinSendReply = defineTool({
         chatTarget.candidateId !== envelopePayload.candidateId
       ) {
         return { success: false, sentMessage, error: "发送目标与签名不匹配" };
+      }
+
+      const recruiterIdentity = await getCurrentZhipinRecruiterIdentity(activePage);
+      if (!matchesRecruiterBinding(recruiterIdentity, envelopePayload.recruiterBinding)) {
+        return {
+          success: false,
+          sentMessage,
+          error:
+            `recruiter 绑定不匹配：当前账号 ${recruiterIdentity.username}` +
+            ` 与签发时 ${envelopePayload.recruiterBinding.username} 不一致`,
+        };
       }
 
       ctx.logger.info(

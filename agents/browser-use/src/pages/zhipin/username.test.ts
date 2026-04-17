@@ -156,7 +156,7 @@ test("pickBestUsername selects best-scored candidate from mixed evidence", () =>
   const result = pickBestUsername(evidence);
   assert.equal(result.found, true);
   if (result.found) {
-    assert.equal(result.userName, "任思文");
+    assert.equal(result.username, "任思文");
     assert.equal(result.strategy, "role-link");
   }
 });
@@ -180,7 +180,7 @@ test("pickBestUsername: original bug scenario — '招聘规范' vs '任思文'"
   const result = pickBestUsername(evidence);
   assert.equal(result.found, true);
   if (result.found) {
-    assert.equal(result.userName, "任思文");
+    assert.equal(result.username, "任思文");
   }
 });
 
@@ -194,7 +194,7 @@ test("pickBestUsername: cross-confirmation boosts same text from different strat
   assert.equal(result.found, true);
   if (result.found) {
     // "任思文" appears in 2 distinct strategies → cross-confirmation bonus → wins
-    assert.equal(result.userName, "任思文");
+    assert.equal(result.username, "任思文");
   }
 });
 
@@ -209,7 +209,7 @@ test("pickBestUsername: same-strategy duplicates do NOT trigger cross-confirmati
   assert.equal(result.found, true);
   if (result.found) {
     // "任思文" is a CJK name (bonus) and "VIP" duplicates from same strategy get no bonus
-    assert.equal(result.userName, "任思文");
+    assert.equal(result.username, "任思文");
   }
 });
 
@@ -247,7 +247,7 @@ test("pickBestUsername: right-side element wins over left-side nav link", () => 
   const result = pickBestUsername(evidence);
   assert.equal(result.found, true);
   if (result.found) {
-    assert.equal(result.userName, "任思文");
+    assert.equal(result.username, "任思文");
   }
 });
 
@@ -287,10 +287,7 @@ test("selectExistingZhipinPage continues through tracked-page selection when onl
       assert.equal(platform, "zhipin");
       return 1;
     },
-    async useTrackedPage(
-      platform: string,
-      predicate: (page: Page) => boolean,
-    ) {
+    async useTrackedPage(platform: string, predicate: (page: Page) => boolean) {
       assert.equal(platform, "zhipin");
       predicateResult = predicate(trackedPage);
       return trackedPage;

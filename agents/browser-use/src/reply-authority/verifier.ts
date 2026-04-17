@@ -12,6 +12,18 @@ interface ParsedCompactEnvelope {
   readonly signatureBase64: string;
 }
 
+function validateEnvelopeVersion(payloadUnknown: unknown): void {
+  if (
+    typeof payloadUnknown === "object" &&
+    payloadUnknown !== null &&
+    "v" in payloadUnknown &&
+    typeof payloadUnknown.v === "number" &&
+    payloadUnknown.v !== 2
+  ) {
+    throw new Error("unexpected envelope version");
+  }
+}
+
 function parseCompactEnvelope(signedEnvelope: string): ParsedCompactEnvelope {
   const parts = signedEnvelope.split(".");
   const payloadBase64 = parts[0];
@@ -40,6 +52,7 @@ function parseCompactEnvelope(signedEnvelope: string): ParsedCompactEnvelope {
   } catch {
     throw new Error("Envelope payload schema validation failed");
   }
+  validateEnvelopeVersion(payloadUnknown);
 
   const parsed = ReplyAuthorityEnvelopePayloadSchema.safeParse(payloadUnknown);
   if (!parsed.success) {

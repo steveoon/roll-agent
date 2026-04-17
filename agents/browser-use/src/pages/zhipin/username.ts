@@ -65,7 +65,7 @@ export type UsernameEvidence = {
 };
 
 export type UsernameLookupResult =
-  | { found: true; userName: string; strategy: UsernameStrategy; source: string }
+  | { found: true; username: string; strategy: UsernameStrategy; source: string }
   | { found: false };
 
 export type ParsedAccessibleName = {
@@ -166,7 +166,7 @@ export function pickBestUsername(evidence: ReadonlyArray<UsernameEvidence>): Use
 
   return {
     found: true,
-    userName: best.evidence.text.trim(),
+    username: best.evidence.text.trim(),
     strategy: best.evidence.strategy,
     source: best.evidence.source,
   };
@@ -267,20 +267,17 @@ async function collectAriaSnapshotEvidence(scope: Locator): Promise<UsernameEvid
 async function collectLeafTextEvidence(scope: Locator): Promise<UsernameEvidence[]> {
   const evidence: UsernameEvidence[] = [];
   try {
-    const leafTexts = await scope.evaluate(
-      (el: Element, limit: number) => {
-        const texts: string[] = [];
-        const walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT);
-        while (walker.nextNode()) {
-          const t = walker.currentNode.textContent?.trim();
-          if (t && t.length > 0 && t.length <= limit) {
-            texts.push(t);
-          }
+    const leafTexts = await scope.evaluate((el: Element, limit: number) => {
+      const texts: string[] = [];
+      const walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT);
+      while (walker.nextNode()) {
+        const t = walker.currentNode.textContent?.trim();
+        if (t && t.length > 0 && t.length <= limit) {
+          texts.push(t);
         }
-        return texts;
-      },
-      ZHIPIN_USERNAME_LENGTH_LIMIT,
-    );
+      }
+      return texts;
+    }, ZHIPIN_USERNAME_LENGTH_LIMIT);
     for (const text of leafTexts) {
       evidence.push({
         text,
@@ -346,7 +343,7 @@ export async function collectUsernameEvidence(
   // Short-circuit only if at least 2 different strategies confirm the same text
   const earlyResult = pickBestUsername(p1p2);
   if (earlyResult.found) {
-    const confirmedText = earlyResult.userName;
+    const confirmedText = earlyResult.username;
     const distinctStrategies = new Set(
       p1p2.filter((e) => e.text.trim() === confirmedText).map((e) => e.strategy),
     );
