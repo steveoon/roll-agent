@@ -257,6 +257,98 @@ optional:
   );
 }
 
+function createDiagnosticEnvFixtureAgent(agentDir: string): void {
+  const sdkEntry = resolve(import.meta.dirname, "../../../../packages/sdk/src/index.ts");
+  const zodEntry = resolve(
+    import.meta.dirname,
+    "../../../../packages/sdk/node_modules/zod/index.js",
+  );
+
+  mkdirSync(resolve(agentDir, "src"), { recursive: true });
+  mkdirSync(resolve(agentDir, "references"), { recursive: true });
+
+  writeFileSync(
+    resolve(agentDir, "SKILL.md"),
+    `---
+name: diagnostic-env-agent
+description: Agent that exposes runtime env diagnostics
+metadata:
+  roll-transport: stdio
+  roll-command: node --experimental-strip-types src/index.ts
+  roll-env-file: references/env.yaml
+---
+`,
+    "utf-8",
+  );
+
+  writeFileSync(
+    resolve(agentDir, "references/env.yaml"),
+    `required:
+  - name: CONFIG_TOKEN
+    purpose: Config-managed token
+  - name: SHELL_ONLY_TOKEN
+    purpose: Shell-inherited token
+optional:
+  - name: OPTIONAL_MODEL
+    purpose: Optional model override
+    default: provider/default-model
+`,
+    "utf-8",
+  );
+
+  writeFileSync(
+    resolve(agentDir, "src/index.ts"),
+    `import { createHash } from "node:crypto";
+import { z } from ${JSON.stringify(zodEntry)};
+import { defineAgent, defineTool } from ${JSON.stringify(sdkEntry)};
+
+const declaredEnvKeys = ["CONFIG_TOKEN", "SHELL_ONLY_TOKEN", "OPTIONAL_MODEL"] as const;
+
+function createEnvFingerprint(value: string): string {
+  return createHash("sha256").update(value).digest("hex").slice(0, 8);
+}
+
+function collectEffectiveEnvSources(env = process.env) {
+  return Object.fromEntries(
+    declaredEnvKeys.map((name) => {
+      const value = env[name];
+      if (typeof value === "string" && value.length > 0) {
+        return [name, { present: true, fingerprint: createEnvFingerprint(value) }];
+      }
+
+      return [name, { present: false }];
+    }),
+  );
+}
+
+const diagnosticStatus = defineTool({
+  name: "diagnostic_status",
+  description: "Expose effective env sources for smoke tests",
+  input: z.object({}),
+  output: z.object({
+    effectiveEnvSources: z.record(
+      z.object({
+        present: z.boolean(),
+        fingerprint: z.string().optional(),
+      }),
+    ),
+  }),
+  execute: async () => ({
+    effectiveEnvSources: collectEffectiveEnvSources(),
+  }),
+});
+
+const agent = defineAgent({
+  name: "diagnostic-env-agent",
+  tools: [diagnosticStatus],
+});
+
+await agent.listen();
+`,
+    "utf-8",
+  );
+}
+
 function createPreflightFixtureAgent(agentDir: string): void {
   const sdkEntry = resolve(import.meta.dirname, "../../../../packages/sdk/src/index.ts");
   const zodEntry = resolve(
@@ -570,6 +662,106 @@ agents:
     assert.ok(envCheck);
     assert.equal(envCheck.status, "fail");
     assert.match(envCheck.message, /REQUIRED_TOKEN/);
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("e2e smoke: agent info compares declared env with runtime diagnostics", () => {
+  const workspace = mkdtempSync(resolve(tmpdir(), `roll-diagnostic-env-${randomUUID()}-`));
+
+  try {
+    const agentDir = resolve(workspace, "diagnostic-env-agent");
+    const dataDir = resolve(workspace, "agents-data");
+    createDiagnosticEnvFixtureAgent(agentDir);
+    writeFileSync(
+      resolve(workspace, "roll.config.yaml"),
+      `llm:
+  default-provider: anthropic
+  default-model: claude-sonnet-4-20250514
+  providers: {}
+
+ask:
+  confirm-threshold: 0.5
+
+agents:
+  data-dir: ${dataDir}
+  env:
+    diagnostic-env-agent:
+      CONFIG_TOKEN: config-token
+`,
+      "utf-8",
+    );
+
+    const addResult = runRoll(["agent", "add", agentDir], workspace);
+    assert.equal(addResult.status, 0, addResult.stderr);
+
+    const infoResult = runRoll(["agent", "info", "diagnostic-env-agent"], workspace, {
+      env: { SHELL_ONLY_TOKEN: "shell-token" },
+    });
+    assert.equal(infoResult.status, 0, infoResult.stderr);
+    assert.match(infoResult.stdout, /运行态校验: 已验证（diagnostic_status）/);
+    assert.match(
+      infoResult.stdout,
+      /CONFIG_TOKEN: \[必填\] 已配置于 agents\.env；运行态: ✓ from yaml \(stable\)/,
+    );
+    assert.match(
+      infoResult.stdout,
+      /SHELL_ONLY_TOKEN: \[必填\] 仅当前 shell 环境；运行态: ⚠ from shell \(ephemeral\)/,
+    );
+    assert.match(
+      infoResult.stdout,
+      /OPTIONAL_MODEL: \[可选\] 默认值 \(provider\/default-model\)；运行态: 未设置（使用默认值）/,
+    );
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("e2e smoke: doctor surfaces runtime env drift as warn", () => {
+  const workspace = mkdtempSync(resolve(tmpdir(), `roll-diagnostic-doctor-${randomUUID()}-`));
+
+  try {
+    const agentDir = resolve(workspace, "diagnostic-env-agent");
+    const dataDir = resolve(workspace, "agents-data");
+    createDiagnosticEnvFixtureAgent(agentDir);
+    writeFileSync(
+      resolve(workspace, "roll.config.yaml"),
+      `llm:
+  default-provider: anthropic
+  default-model: claude-sonnet-4-20250514
+  providers: {}
+
+ask:
+  confirm-threshold: 0.5
+
+agents:
+  data-dir: ${dataDir}
+  env:
+    diagnostic-env-agent:
+      CONFIG_TOKEN: config-token
+`,
+      "utf-8",
+    );
+
+    const addResult = runRoll(["agent", "add", agentDir], workspace);
+    assert.equal(addResult.status, 0, addResult.stderr);
+
+    const doctorResult = runRoll(["doctor", "--json"], workspace, {
+      env: { SHELL_ONLY_TOKEN: "shell-token" },
+    });
+    assert.equal(doctorResult.status, 0, doctorResult.stderr);
+
+    const checks = JSON.parse(doctorResult.stdout) as ReadonlyArray<{
+      readonly name: string;
+      readonly status: string;
+      readonly message: string;
+    }>;
+
+    const envCheck = checks.find((check) => check.name === "Agent 环境变量 (diagnostic-env-agent)");
+    assert.ok(envCheck);
+    assert.equal(envCheck.status, "warn");
+    assert.match(envCheck.message, /SHELL_ONLY_TOKEN/);
   } finally {
     rmSync(workspace, { recursive: true, force: true });
   }

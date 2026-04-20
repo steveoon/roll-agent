@@ -3,6 +3,11 @@ import { z } from "zod";
 import { BrowserStatusSchema } from "@roll-agent/browser";
 import type { BrowserSessionInfo } from "@roll-agent/browser";
 import {
+  BROWSER_USE_DECLARED_ENV_KEYS,
+  collectEffectiveEnvSources,
+  EffectiveEnvSourcesSchema,
+} from "../diagnostics/effective-env.ts";
+import {
   getRuntime,
   getContextManager,
   getSessionStore,
@@ -11,6 +16,7 @@ import {
 
 const BrowserUseStatusSchema = BrowserStatusSchema.extend({
   replyAuthorityKeysLoaded: z.boolean(),
+  effectiveEnvSources: EffectiveEnvSourcesSchema,
 });
 
 export const browserStatus = defineTool({
@@ -66,6 +72,7 @@ export const browserStatus = defineTool({
       mode,
       activeSessions,
       replyAuthorityKeysLoaded: getReplyAuthorityKeysLoaded(),
+      effectiveEnvSources: collectEffectiveEnvSources(BROWSER_USE_DECLARED_ENV_KEYS),
     };
   },
 });
