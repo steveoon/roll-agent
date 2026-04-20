@@ -27,9 +27,13 @@ roll ask "<natural-language intent>" --json
 
 Handle `roll ask --json` like this:
 - `success`: run is complete
-- `needs_input`: gather missing arguments, then switch to `roll run`
+- `needs_input`: gather missing arguments, then switch to `roll run`. The JSON payload contains two separate lists:
+  - `validationIssues` — input schema fields (recursively expanded from parent missing to leaf, shown once per field)
+  - `runtimeIssues` — runtime prerequisites (e.g. missing env). Configure `agents.env.<agent-name>` in `roll.config.yaml` or export before retrying.
 - `needs_confirmation`: confirm the agent/tool explicitly, or bypass with `roll run`
 - `failed`: inspect routing and target-agent state
+
+Both lists are surfaced at once, not layer-by-layer. Collect all fields and env keys in a single pass before retrying.
 
 ## Persistent Agent Recovery
 
@@ -88,6 +92,27 @@ Follow-up based on output:
 - `needs-migration` → `roll config migrate`
 - Missing env → configure `agents.env` in `roll.config.yaml`
 - Agent count is 0 → `roll agent install <package>` or `roll agent add <path>`
+
+## Env Drift Detection
+
+When a tool fails with an env-related symptom (e.g. upstream 401, missing config, unexpected endpoint behavior), don't assume `roll.config.yaml` alone is authoritative — the agent process may have been started before the yaml update, or may be inheriting values from the shell.
+
+```bash
+roll doctor --json
+roll agent info <agent-name>
+```
+
+Both commands now call the target agent's diagnostic tool (if running) and compare declared env keys with yaml declarations. Expect one of these status labels per key:
+
+- `✓ from yaml (stable)` — agent process sees the value and its fingerprint matches yaml
+- `⚠ differs from yaml (ephemeral)` — agent process sees a value that does **not** match yaml; likely stale after a config edit, or shadowed by shell export
+- `⚠ from shell (ephemeral)` — yaml did not declare, but agent process has it (inherited from shell)
+- `✗ missing` — yaml declared, agent process does not have it
+
+Remediation:
+- Drift on `ephemeral` keys → `roll agent stop <name>` then `roll agent start <name>` (persistent services) or `roll agent remove` + `roll agent add` (local-path) to pick up the new yaml.
+- `✗ missing` → fix `agents.env.<agent-name>` then restart.
+- If the agent is not running, drift cannot be verified and the label falls back to "未校验 / unverified".
 
 ## Tool Call Failure Triage
 

@@ -30,10 +30,43 @@ npm 包名：`@roll-agent/smart-reply-agent`
 
 ## Tools
 
+完整 inputSchema 可通过 `roll agent tools smart-reply-agent`（或 `--json`）查询。
+
 - `generate_reply(candidateMessage, conversationHistory?, candidateInfo?, preferredBrand?, channelType?, defaultWechatId?, industryVoiceId?, turnIndex?, modelConfig?, target)`
   调用 Reply Authority Service 的 `POST /generate-signed-reply`，返回 `suggestedReply`、`signedEnvelope`、`envelopeExp`、`confidence`、`stage` 和可选 `diagnostics`。`target` 为必填，至少包含 `platform=zhipin`、`conversationId`、`candidateId`，以及以下两种 recruiter 绑定方式之一：
   1. 直接传完整绑定：`tenantId + recruiterBinding`
   2. 便利代理模式：`recruiterUsername`（smart-reply 会先调用 `POST /resolve-recruiter-binding` 解析出 `tenantId + recruiterBinding`）
+
+  Minimal valid input 示例（代理模式）：
+
+  ```json
+  {
+    "candidateMessage": "你好，我想了解一下这个岗位",
+    "target": {
+      "platform": "zhipin",
+      "conversationId": "642438677-0",
+      "candidateId": "642438677-0",
+      "recruiterUsername": "郭晓阳"
+    }
+  }
+  ```
+
+  Minimal valid input 示例（直接模式）：
+
+  ```json
+  {
+    "candidateMessage": "你好，我想了解一下这个岗位",
+    "target": {
+      "platform": "zhipin",
+      "tenantId": "chengdu-liujie",
+      "conversationId": "642438677-0",
+      "candidateId": "642438677-0",
+      "recruiterBinding": { "platform": "zhipin", "username": "郭晓阳" }
+    }
+  }
+  ```
+
+- `diagnostic_status()` — 返回本 agent 进程里声明过的 env key 的 `{present, fingerprint}`（SHA256 前 8 位，不泄漏 value）。`roll doctor` / `roll agent info` 据此对比 yaml 声明与运行态，检测 env drift（详见 roll-core skill template）。
 
 ## Reply Authority 集成说明
 
@@ -41,6 +74,7 @@ npm 包名：`@roll-agent/smart-reply-agent`
 - 若缺少 `REPLY_AUTHORITY_URL` 或 `REPLY_AUTHORITY_BEARER_TOKEN`，tool 会直接报错
 - 实际回复生成、reply-policy、FactGate、ReplyGate、年龄校验都在云端执行
 - 返回的 `signedEnvelope` 为 v2 信封，已绑定 `tenantId + recruiterBinding + conversationId + candidateId`，供 `browser-use-agent.zhipin_send_reply` 本地验签后发送
+- 调用失败时抛 `ReplyAuthorityRequestError`，携带 `meta: {url, timeoutMs, requestId}` 与 `Error.cause` 链。通过 `roll run` 运行时 stderr 会展开 `cause: ...` 行用于定位；透传的 `x-request-id` 可跨服务端追踪
 
 ## Environment Variables
 

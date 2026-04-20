@@ -24,9 +24,20 @@ roll agent info <agent-name>
 - If that agent is unhealthy and Roll owns its lifecycle, run `roll agent start <agent-name>`.
 - If the agent is `stdio + on-demand`, do not pre-start it.
 
+## Tool Discovery
+
+Before calling a tool, discover its exact name and input schema:
+
+```bash
+roll agent tools <agent-name>        # table view
+roll agent tools <agent-name> --json # machine-readable
+```
+
+If `roll run <agent> <tool>` is invoked with a misspelled tool name, Roll returns a fuzzy-matched "Did you mean: ..." suggestion and a pointer to `roll agent tools`. Prefer calling this discovery command instead of guessing from memory.
+
 ## Diagnostics & Maintenance
 
-- `roll doctor --json` — system health check (env, config, agents). Use when tool calls fail or env is unclear.
+- `roll doctor --json` — system health check. Now also includes per-agent runtime env drift detection: Roll calls each running agent's diagnostic tool (`browser_status` / `diagnostic_status`) to fetch declared env keys' `{present, fingerprint}`, then compares against `agents.env` in `roll.config.yaml`. Output labels include `✓ from yaml (stable)` / `⚠ differs from yaml (ephemeral)` / `⚠ from shell (ephemeral)` / `✗ missing`.
 - `roll update --check` — check available updates for roll-core and all registered agents without applying.
 - `roll update` — apply all available updates (lifecycle varies by source type).
 - `roll config migrate` — run when doctor or update reports `needs-migration`.
