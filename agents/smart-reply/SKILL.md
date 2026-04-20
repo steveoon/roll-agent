@@ -80,8 +80,9 @@ npm 包名：`@roll-agent/smart-reply-agent`
 
 机器可读的 env 契约见 `references/env.yaml`。如果你是上层编排 Agent，请优先读取它来生成/校验 `agents.env.smart-reply-agent` 配置。
 
-- `REPLY_AUTHORITY_URL` — Reply Authority Service 基础地址
-- `REPLY_AUTHORITY_BEARER_TOKEN` — 调用 `POST /generate-signed-reply` 的 Bearer token
+- `REPLY_AUTHORITY_URL` — Reply Authority Service 基础地址（必填）
+- `REPLY_AUTHORITY_BEARER_TOKEN` — 调用 `POST /generate-signed-reply` 的 Bearer token（必填）
+- `REPLY_AUTHORITY_TIMEOUT_MS` — Reply Authority Service HTTP 请求超时毫秒数（可选，默认 `30000`）。非正整数或非法值会被静默忽略并回落到默认值
 
 ## 典型跨 Agent 工作流
 
@@ -103,4 +104,6 @@ agents:
     smart-reply-agent:
       REPLY_AUTHORITY_URL: https://reply-authority.duliday.com
       REPLY_AUTHORITY_BEARER_TOKEN: ${REPLY_AUTHORITY_BEARER_TOKEN}
+      # 可选：自定义 HTTP 超时（毫秒，默认 30000）
+      # REPLY_AUTHORITY_TIMEOUT_MS: "45000"
 ```
