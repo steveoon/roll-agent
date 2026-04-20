@@ -14,6 +14,7 @@ export default defineCommand({
     install: () => loadAgentCommand("agent-install"),
     remove: () => loadAgentCommand("agent-remove"),
     list: () => loadAgentCommand("agent-list"),
+    tools: () => loadAgentCommand("agent-tools"),
     start: () => loadAgentCommand("agent-start"),
     stop: () => loadAgentCommand("agent-stop"),
     info: () => loadAgentCommand("agent-info"),

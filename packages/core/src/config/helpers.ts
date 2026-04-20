@@ -27,13 +27,19 @@ function getAgentEnvFromMap(
   return envMap?.[agentName];
 }
 
+export function getAgentEnvFromAgentsConfig(
+  agentsConfig: RollConfig["agents"],
+  agentName: string,
+): Readonly<Record<string, string>> | undefined {
+  return filterResolvedAgentEnv(getAgentEnvFromMap(agentsConfig.env, agentName));
+}
+
 /** 获取指定 Agent 的环境变量配置，没有则返回 undefined */
 export function getAgentEnv(
   config: RollConfig,
   agentName: string,
 ): Readonly<Record<string, string>> | undefined {
-  const configuredEnv = getAgentEnvFromMap(config.agents.env, agentName);
-  return filterResolvedAgentEnv(configuredEnv);
+  return getAgentEnvFromAgentsConfig(config.agents, agentName);
 }
 
 export function inspectAgentEnvRequirements(

@@ -16,6 +16,7 @@ import type {
   AskNeedsInputResult,
   AskSuccessResult,
 } from "../../types/ask.ts";
+import { formatMissingToolMessage, normalizeListedTools } from "../utils/agent-tools.ts";
 import { log } from "../utils/output.ts";
 
 /** 默认确认阈值：低于此值时跳过执行 */
@@ -187,7 +188,7 @@ export default defineCommand({
         agent.installPath,
         { samplingModel, ...(agentEnv ? { env: agentEnv } : {}) },
       );
-      const { tools } = await client.listTools();
+      const tools = normalizeListedTools((await client.listTools()).tools);
       const targetTool = tools.find((tool) => tool.name === decision.toolName);
 
       if (!targetTool) {
@@ -195,7 +196,7 @@ export default defineCommand({
           status: "failed",
           stage: "route",
           decision,
-          message: `Tool "${decision.toolName}" 不存在于 Agent "${agent.skill.name}" 中`,
+          message: formatMissingToolMessage(agent.skill.name, decision.toolName, tools),
         };
         log.error(result.message);
         outputResult(result);

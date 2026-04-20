@@ -8,6 +8,7 @@ import { resolveTransportWithDevSpawnSpec } from "../../registry/dev-spawn.ts";
 import { createProviderModel } from "../../llm/providers.ts";
 import { formatValidationIssuesMessage } from "../../tool-runtime/messages.ts";
 import { preflightToolCall } from "../../tool-runtime/preflight.ts";
+import { formatMissingToolMessage, normalizeListedTools } from "../utils/agent-tools.ts";
 import { log } from "../utils/output.ts";
 
 export default defineCommand({
@@ -67,11 +68,10 @@ export default defineCommand({
       );
 
       // 4. 列出 tools 验证目标 tool 存在
-      const { tools } = await client.listTools();
-      const targetTool = tools.find((t) => t.name === args.tool);
+      const tools = normalizeListedTools((await client.listTools()).tools);
+      const targetTool = tools.find((tool) => tool.name === args.tool);
       if (!targetTool) {
-        const available = tools.map((t) => t.name).join(", ");
-        log.error(`Tool "${args.tool}" 不存在。可用 tools: ${available}`);
+        log.error(formatMissingToolMessage(agent.skill.name, args.tool, tools));
         process.exitCode = 1;
         return;
       }

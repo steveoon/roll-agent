@@ -1,6 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { inspectAgentEnvRequirements, getAgentEnv } from "./helpers.ts";
+import { inspectAgentEnvRequirements, getAgentEnv, getAgentEnvFromAgentsConfig } from "./helpers.ts";
 import { validateConfigText } from "./loader.ts";
 
 describe("config/helpers", () => {
@@ -70,6 +70,27 @@ agents:
     );
 
     assert.deepEqual(getAgentEnv(config, "placeholder-agent"), {
+      API_URL: "https://example.com",
+    });
+  });
+
+  it("should expose filtered runtime env from agents config only", () => {
+    const config = validateConfigText(
+      `llm:
+  default-provider: anthropic
+  default-model: test
+  providers: {}
+agents:
+  data-dir: /tmp/test
+  env:
+    placeholder-agent:
+      API_KEY: \${MISSING_API_KEY}
+      API_URL: https://example.com
+`,
+      "/tmp/roll.config.yaml",
+    );
+
+    assert.deepEqual(getAgentEnvFromAgentsConfig(config.agents, "placeholder-agent"), {
       API_URL: "https://example.com",
     });
   });

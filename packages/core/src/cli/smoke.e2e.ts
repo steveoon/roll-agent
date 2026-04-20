@@ -302,6 +302,83 @@ test("e2e smoke: register fixture agent and run ping", { timeout: 120_000 }, () 
   }
 });
 
+test("e2e smoke: agent tools prints tool schemas in text and json", { timeout: 120_000 }, () => {
+  const workspace = mkdtempSync(resolve(tmpdir(), `roll-tools-${randomUUID()}-`));
+
+  try {
+    const smokeAgentPath = resolve(
+      import.meta.dirname,
+      "../../../../packages/sdk/test-fixtures/smoke-agent",
+    );
+    const dataDir = resolve(workspace, "agents-data");
+
+    writeFileSync(resolve(workspace, "roll.config.yaml"), buildConfigYaml(dataDir), "utf-8");
+
+    const addResult = runRoll(["agent", "add", smokeAgentPath], workspace, {
+      env: { ROLL_SKIP_INSTALL: "1" },
+    });
+    assert.equal(addResult.status, 0, addResult.stderr);
+
+    const textResult = runRoll(["agent", "tools", "smoke-test-agent"], workspace);
+    assert.equal(
+      textResult.status,
+      0,
+      `agent tools failed\nstdout:\n${textResult.stdout}\nstderr:\n${textResult.stderr}`,
+    );
+    assert.match(textResult.stdout, /Input Schema/);
+    assert.match(textResult.stdout, /\bping\b/);
+    assert.match(textResult.stdout, /"type": "object"/);
+
+    const jsonResult = runRoll(["agent", "tools", "smoke-test-agent", "--json"], workspace);
+    assert.equal(
+      jsonResult.status,
+      0,
+      `agent tools --json failed\nstdout:\n${jsonResult.stdout}\nstderr:\n${jsonResult.stderr}`,
+    );
+
+    const tools = JSON.parse(jsonResult.stdout) as ReadonlyArray<{
+      readonly name: string;
+      readonly description?: string;
+      readonly inputSchema: {
+        readonly type: string;
+      };
+    }>;
+    assert.equal(tools.length, 1);
+    assert.equal(tools[0]?.name, "ping");
+    assert.equal(tools[0]?.description, "Return a deterministic empty message list for smoke tests");
+    assert.equal(tools[0]?.inputSchema.type, "object");
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("e2e smoke: run suggests the closest tool name when the requested tool is missing", () => {
+  const workspace = mkdtempSync(resolve(tmpdir(), `roll-run-suggest-${randomUUID()}-`));
+
+  try {
+    const smokeAgentPath = resolve(
+      import.meta.dirname,
+      "../../../../packages/sdk/test-fixtures/smoke-agent",
+    );
+    const dataDir = resolve(workspace, "agents-data");
+
+    writeFileSync(resolve(workspace, "roll.config.yaml"), buildConfigYaml(dataDir), "utf-8");
+
+    const addResult = runRoll(["agent", "add", smokeAgentPath], workspace, {
+      env: { ROLL_SKIP_INSTALL: "1" },
+    });
+    assert.equal(addResult.status, 0, addResult.stderr);
+
+    const runResult = runRoll(["run", "smoke-test-agent", "pnig"], workspace);
+    assert.equal(runResult.status, 1);
+    assert.match(runResult.stderr, /Tool "pnig" 不存在于 Agent "smoke-test-agent" 中/);
+    assert.match(runResult.stderr, /Did you mean: `ping`\?/);
+    assert.match(runResult.stderr, /roll agent tools smoke-test-agent/);
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
 test("e2e smoke: agent install rejects local source directories", () => {
   const workspace = mkdtempSync(resolve(tmpdir(), `roll-install-local-${randomUUID()}-`));
 
