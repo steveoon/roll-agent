@@ -278,6 +278,83 @@ describe("generateSignedReply", () => {
     });
   });
 
+  it("wraps malformed recruiter-resolution payloads with request metadata", async () => {
+    process.env.REPLY_AUTHORITY_URL = "https://reply-authority.duliday.com";
+    process.env.REPLY_AUTHORITY_BEARER_TOKEN = "client-token";
+
+    globalThis.fetch = async () =>
+      new Response(
+        JSON.stringify({
+          recruiterBinding: {
+            platform: "zhipin",
+            username: "recruiter-alice",
+          },
+        }),
+        {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        },
+      );
+
+    const { generateSignedReply, ReplyAuthorityRequestError } = (await import(
+      `./reply-authority-client.ts?case=${Date.now()}`
+    )) as ReplyAuthorityClientModule;
+
+    await assert.rejects(async () => await generateSignedReply(PROXY_REQUEST), (error: unknown) => {
+      if (!(error instanceof ReplyAuthorityRequestError)) {
+        return false;
+      }
+
+      assert.match(error.message, /Reply Authority Service recruiter 解析 响应校验失败。/);
+      assert.equal(
+        error.meta.url,
+        "https://reply-authority.duliday.com/resolve-recruiter-binding",
+      );
+      assert.equal(error.meta.timeoutMs, 20_000);
+      assert.match(error.meta.requestId ?? "", UUID_PATTERN);
+      assert.ok(error.cause instanceof Error);
+      assert.match(error.cause.message, /tenantId/);
+      return true;
+    });
+  });
+
+  it("wraps malformed signed-reply payloads with request metadata", async () => {
+    process.env.REPLY_AUTHORITY_URL = "https://reply-authority.duliday.com";
+    process.env.REPLY_AUTHORITY_BEARER_TOKEN = "client-token";
+
+    globalThis.fetch = async () =>
+      new Response(
+        JSON.stringify({
+          suggestedReply: "感谢你的关注！我们这边薪资是综合计算的。",
+        }),
+        {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        },
+      );
+
+    const { generateSignedReply, ReplyAuthorityRequestError } = (await import(
+      `./reply-authority-client.ts?case=${Date.now()}`
+    )) as ReplyAuthorityClientModule;
+
+    await assert.rejects(async () => await generateSignedReply(VALID_REQUEST), (error: unknown) => {
+      if (!(error instanceof ReplyAuthorityRequestError)) {
+        return false;
+      }
+
+      assert.match(error.message, /Reply Authority Service 签名回复 响应校验失败。/);
+      assert.equal(
+        error.meta.url,
+        "https://reply-authority.duliday.com/generate-signed-reply",
+      );
+      assert.equal(error.meta.timeoutMs, 20_000);
+      assert.match(error.meta.requestId ?? "", UUID_PATTERN);
+      assert.ok(error.cause instanceof Error);
+      assert.match(error.cause.message, /signedEnvelope/);
+      return true;
+    });
+  });
+
   it("wraps AbortError with request metadata and preserves the cause", async () => {
     process.env.REPLY_AUTHORITY_URL = "https://reply-authority.duliday.com";
     process.env.REPLY_AUTHORITY_BEARER_TOKEN = "client-token";

@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import type { ZodType } from "zod";
 import {
   GenerateReplyToolInputSchema,
   ResolveRecruiterBindingRequestSchema,
@@ -136,6 +137,23 @@ function wrapReplyAuthorityRequestError(
   });
 }
 
+function parseReplyAuthorityPayload<T>(
+  schema: ZodType<T>,
+  payload: unknown,
+  meta: ReplyAuthorityRequestMeta,
+  responseLabel: string,
+): T {
+  const parsed = schema.safeParse(payload);
+  if (parsed.success) {
+    return parsed.data;
+  }
+
+  throw new ReplyAuthorityRequestError(`${responseLabel} 响应校验失败。`, {
+    cause: parsed.error,
+    meta,
+  });
+}
+
 async function parseJsonResponse(response: Response): Promise<unknown> {
   const text = await response.text();
   if (text.trim().length === 0) {
@@ -192,7 +210,12 @@ async function resolveRecruiterBinding(
 ): Promise<ResolveRecruiterBindingResponse> {
   const request = buildResolveRecruiterBindingRequest(target);
   const payload = await postJson(config, "resolve-recruiter-binding", request, requestContext);
-  return ResolveRecruiterBindingResponseSchema.parse(payload);
+  return parseReplyAuthorityPayload(
+    ResolveRecruiterBindingResponseSchema,
+    payload,
+    buildRequestMeta(config, "resolve-recruiter-binding", requestContext),
+    "Reply Authority Service recruiter 解析",
+  );
 }
 
 function resolveTargetOrThrow(
@@ -274,7 +297,12 @@ export async function generateSignedReply(
         })
       : await buildGenerateSignedReplyRequest(parsedToolInput, config, requestContext);
     const payload = await postJson(config, "generate-signed-reply", request, requestContext);
-    return GenerateSignedReplyResponseSchema.parse(payload);
+    return parseReplyAuthorityPayload(
+      GenerateSignedReplyResponseSchema,
+      payload,
+      buildRequestMeta(config, "generate-signed-reply", requestContext),
+      "Reply Authority Service 签名回复",
+    );
   } finally {
     clearTimeout(timeoutId);
   }

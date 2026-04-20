@@ -52,18 +52,52 @@ export function getReplyAuthorityKeysLoaded(): boolean {
   return replyAuthorityKeysLoaded;
 }
 
+export function setRuntimeStateForTests(state: {
+  readonly runtime?: BrowserRuntime;
+  readonly contextManager?: BrowserContextManager;
+  readonly sessionStore?: SessionStore;
+}): void {
+  runtime = state.runtime;
+  contextManager = state.contextManager;
+  sessionStore = state.sessionStore;
+}
+
 export async function shutdownRuntime(): Promise<void> {
-  if (contextManager) {
-    logger.info("Closing browser contexts...");
-    await contextManager.closeAll();
-    contextManager = undefined;
-  }
-  if (runtime) {
-    logger.info("Stopping browser process...");
-    await runtime.stop();
-    runtime = undefined;
-  }
+  const currentContextManager = contextManager;
+  const currentRuntime = runtime;
+  const cleanupErrors: Error[] = [];
+
+  contextManager = undefined;
+  runtime = undefined;
   sessionStore = undefined;
   replyAuthorityKeysLoaded = false;
+
+  if (currentContextManager) {
+    logger.info("Closing browser contexts...");
+    try {
+      await currentContextManager.closeAll();
+    } catch (error) {
+      cleanupErrors.push(new Error("Failed to close browser contexts", { cause: error }));
+      logger.error(
+        `Failed to close browser contexts: ${error instanceof Error ? error.stack ?? error.message : String(error)}`,
+      );
+    }
+  }
+  if (currentRuntime) {
+    logger.info("Stopping browser process...");
+    try {
+      await currentRuntime.stop();
+    } catch (error) {
+      cleanupErrors.push(new Error("Failed to stop browser runtime", { cause: error }));
+      logger.error(
+        `Failed to stop browser runtime: ${error instanceof Error ? error.stack ?? error.message : String(error)}`,
+      );
+    }
+  }
+
   logger.info("Browser runtime shutdown complete");
+
+  if (cleanupErrors.length > 0) {
+    throw new AggregateError(cleanupErrors, "Browser runtime shutdown failed");
+  }
 }
