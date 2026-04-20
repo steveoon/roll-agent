@@ -16,7 +16,21 @@ import {
   type ResolveRecruiterBindingResponse,
 } from "../types/reply-authority.ts";
 
-const REQUEST_TIMEOUT_MS = 20_000;
+const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
+
+function resolveRequestTimeoutMs(): number {
+  const raw = process.env.REPLY_AUTHORITY_TIMEOUT_MS?.trim();
+  if (!raw) {
+    return DEFAULT_REQUEST_TIMEOUT_MS;
+  }
+
+  const parsed = Number.parseInt(raw, 10);
+  if (!Number.isInteger(parsed) || parsed <= 0 || String(parsed) !== raw) {
+    return DEFAULT_REQUEST_TIMEOUT_MS;
+  }
+
+  return parsed;
+}
 
 interface ReplyAuthorityConfig {
   readonly baseUrl: string;
@@ -281,13 +295,14 @@ export async function generateSignedReply(
   const parsedToolInput = GenerateReplyToolInputSchema.parse(input);
   const parsedInput = GenerateSignedReplyRequestSchema.safeParse(parsedToolInput);
   const config = loadReplyAuthorityConfig();
+  const timeoutMs = resolveRequestTimeoutMs();
   const controller = new AbortController();
   const requestContext = {
     signal: controller.signal,
-    timeoutMs: REQUEST_TIMEOUT_MS,
+    timeoutMs,
     requestId: randomUUID(),
   } as const;
-  const timeoutId = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
 
   try {
     const request = parsedInput.success

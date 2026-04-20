@@ -30,6 +30,7 @@ const PROXY_REQUEST = {
 const ORIGINAL_FETCH = globalThis.fetch;
 const ORIGINAL_URL = process.env.REPLY_AUTHORITY_URL;
 const ORIGINAL_TOKEN = process.env.REPLY_AUTHORITY_BEARER_TOKEN;
+const ORIGINAL_TIMEOUT = process.env.REPLY_AUTHORITY_TIMEOUT_MS;
 const UUID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 type ReplyAuthorityClientModule = typeof import("./reply-authority-client.ts");
@@ -42,6 +43,9 @@ afterEach(() => {
 
   if (ORIGINAL_TOKEN === undefined) delete process.env.REPLY_AUTHORITY_BEARER_TOKEN;
   else process.env.REPLY_AUTHORITY_BEARER_TOKEN = ORIGINAL_TOKEN;
+
+  if (ORIGINAL_TIMEOUT === undefined) delete process.env.REPLY_AUTHORITY_TIMEOUT_MS;
+  else process.env.REPLY_AUTHORITY_TIMEOUT_MS = ORIGINAL_TIMEOUT;
 });
 
 describe("generateSignedReply", () => {
@@ -229,7 +233,7 @@ describe("generateSignedReply", () => {
           error.meta.url,
           "https://reply-authority.duliday.com/resolve-recruiter-binding",
         );
-        assert.equal(error.meta.timeoutMs, 20_000);
+        assert.equal(error.meta.timeoutMs, 30_000);
         assert.match(error.meta.requestId ?? "", UUID_PATTERN);
         assert.equal(error.cause, undefined);
         return true;
@@ -264,13 +268,13 @@ describe("generateSignedReply", () => {
       }
       assert.match(error.message, /Reply Authority Service 请求失败 \(403\): tenant is not allowed/);
       assert.match(error.message, /url=https:\/\/reply-authority\.duliday\.com\/generate-signed-reply/);
-      assert.match(error.message, /timeoutMs=20000/);
+      assert.match(error.message, /timeoutMs=30000/);
       assert.match(error.message, /requestId=/);
       assert.equal(
         error.meta.url,
         "https://reply-authority.duliday.com/generate-signed-reply",
       );
-      assert.equal(error.meta.timeoutMs, 20_000);
+      assert.equal(error.meta.timeoutMs, 30_000);
       assert.match(error.meta.requestId ?? "", UUID_PATTERN);
       assert.ok(error.cause instanceof Error);
       assert.match(error.cause.message, /tenant is not allowed/);
@@ -310,7 +314,7 @@ describe("generateSignedReply", () => {
         error.meta.url,
         "https://reply-authority.duliday.com/resolve-recruiter-binding",
       );
-      assert.equal(error.meta.timeoutMs, 20_000);
+      assert.equal(error.meta.timeoutMs, 30_000);
       assert.match(error.meta.requestId ?? "", UUID_PATTERN);
       assert.ok(error.cause instanceof Error);
       assert.match(error.cause.message, /tenantId/);
@@ -347,7 +351,7 @@ describe("generateSignedReply", () => {
         error.meta.url,
         "https://reply-authority.duliday.com/generate-signed-reply",
       );
-      assert.equal(error.meta.timeoutMs, 20_000);
+      assert.equal(error.meta.timeoutMs, 30_000);
       assert.match(error.meta.requestId ?? "", UUID_PATTERN);
       assert.ok(error.cause instanceof Error);
       assert.match(error.cause.message, /signedEnvelope/);
@@ -376,11 +380,63 @@ describe("generateSignedReply", () => {
         error.meta.url,
         "https://reply-authority.duliday.com/generate-signed-reply",
       );
-      assert.equal(error.meta.timeoutMs, 20_000);
+      assert.equal(error.meta.timeoutMs, 30_000);
       assert.match(error.meta.requestId ?? "", UUID_PATTERN);
       assert.ok(error.cause instanceof Error);
       assert.equal(error.cause.name, "AbortError");
       return true;
     });
+  });
+
+  it("honors REPLY_AUTHORITY_TIMEOUT_MS when set to a positive integer", async () => {
+    process.env.REPLY_AUTHORITY_URL = "https://reply-authority.duliday.com";
+    process.env.REPLY_AUTHORITY_BEARER_TOKEN = "client-token";
+    process.env.REPLY_AUTHORITY_TIMEOUT_MS = "45000";
+
+    globalThis.fetch = async () => {
+      throw new DOMException("This operation was aborted", "AbortError");
+    };
+
+    const { generateSignedReply, ReplyAuthorityRequestError } = (await import(
+      `./reply-authority-client.ts?case=${Date.now()}`
+    )) as ReplyAuthorityClientModule;
+
+    await assert.rejects(async () => await generateSignedReply(VALID_REQUEST), (error: unknown) => {
+      if (!(error instanceof ReplyAuthorityRequestError)) {
+        return false;
+      }
+      assert.equal(error.meta.timeoutMs, 45_000);
+      assert.match(error.message, /timeoutMs=45000/);
+      return true;
+    });
+  });
+
+  it("falls back to the default when REPLY_AUTHORITY_TIMEOUT_MS is invalid", async () => {
+    process.env.REPLY_AUTHORITY_URL = "https://reply-authority.duliday.com";
+    process.env.REPLY_AUTHORITY_BEARER_TOKEN = "client-token";
+
+    globalThis.fetch = async () => {
+      throw new DOMException("This operation was aborted", "AbortError");
+    };
+
+    for (const invalid of ["", "   ", "abc", "0", "-1", "1.5", "1e3"]) {
+      process.env.REPLY_AUTHORITY_TIMEOUT_MS = invalid;
+
+      const { generateSignedReply, ReplyAuthorityRequestError } = (await import(
+        `./reply-authority-client.ts?case=${Date.now()}-${encodeURIComponent(invalid)}`
+      )) as ReplyAuthorityClientModule;
+
+      await assert.rejects(async () => await generateSignedReply(VALID_REQUEST), (error: unknown) => {
+        if (!(error instanceof ReplyAuthorityRequestError)) {
+          return false;
+        }
+        assert.equal(
+          error.meta.timeoutMs,
+          30_000,
+          `invalid value ${JSON.stringify(invalid)} should fall back to 30000`,
+        );
+        return true;
+      });
+    }
   });
 });

@@ -4,6 +4,7 @@ import { z } from "zod";
 export const SMART_REPLY_DECLARED_ENV_KEYS = [
   "REPLY_AUTHORITY_URL",
   "REPLY_AUTHORITY_BEARER_TOKEN",
+  "REPLY_AUTHORITY_TIMEOUT_MS",
 ] as const;
 
 const EFFECTIVE_ENV_FINGERPRINT_PATTERN = /^[0-9a-f]{8}$/;

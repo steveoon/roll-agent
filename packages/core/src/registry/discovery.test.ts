@@ -310,7 +310,10 @@ Tools list
       result.skill.env?.required?.map((item) => item.name),
       ["REPLY_AUTHORITY_URL", "REPLY_AUTHORITY_BEARER_TOKEN"],
     );
-    assert.equal(result.skill.env?.optional, undefined);
+    assert.deepEqual(
+      result.skill.env?.optional?.map((item) => ({ name: item.name, default: item.default })),
+      [{ name: "REPLY_AUTHORITY_TIMEOUT_MS", default: "30000" }],
+    );
   });
 
   it("should prefer package.json#rollAgent for stdio on-demand agents", () => {
