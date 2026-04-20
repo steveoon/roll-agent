@@ -1,5 +1,13 @@
 # @roll-agent/browser-use-agent
 
+## 0.6.0
+
+### Minor Changes
+
+- [#52](https://github.com/steveoon/roll-agent/pull/52) [`a73f10a`](https://github.com/steveoon/roll-agent/commit/a73f10ae62a591a4e8c66aef8336b211af0db68e) Thanks [@steveoon](https://github.com/steveoon)! - feat: add recruiter binding resolution and v2 envelope verification
+  - smart-reply agent now accepts direct `recruiterBinding` or proxy `recruiterUsername`, resolving recruiter bindings before calling Reply Authority Service when needed
+  - browser-use agent now expects v2 signed envelopes and validates recruiter binding before sending replies
+
 ## 0.5.0
 
 ### Minor Changes
