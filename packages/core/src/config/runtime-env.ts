@@ -44,7 +44,7 @@ export type AgentRuntimeEnvVerification =
   | {
       readonly verified: true;
       readonly present: true;
-      readonly fingerprint: string;
+      readonly fingerprint?: string;
       readonly matchesAgentsEnv: boolean;
     };
 
@@ -94,9 +94,13 @@ export function inspectAgentRuntimeEnvRequirements(
         runtime: {
           verified: true,
           present: true,
-          fingerprint: runtimeEntry.fingerprint ?? "",
+          ...(runtimeEntry.fingerprint !== undefined
+            ? { fingerprint: runtimeEntry.fingerprint }
+            : {}),
           matchesAgentsEnv:
-            configuredValue !== undefined && createEnvFingerprint(configuredValue) === runtimeEntry.fingerprint,
+            configuredValue !== undefined &&
+            runtimeEntry.fingerprint !== undefined &&
+            createEnvFingerprint(configuredValue) === runtimeEntry.fingerprint,
         },
       } satisfies AgentRuntimeEnvCheckItem;
     }

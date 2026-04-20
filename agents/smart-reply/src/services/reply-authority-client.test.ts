@@ -203,20 +203,37 @@ describe("generateSignedReply", () => {
         },
       );
 
-    const { generateSignedReply } = (await import(
+    const { generateSignedReply, ReplyAuthorityRequestError } = (await import(
       `./reply-authority-client.ts?case=${Date.now()}`
     )) as ReplyAuthorityClientModule;
 
     await assert.rejects(
-      async () =>
+      async () => {
         await generateSignedReply({
           ...PROXY_REQUEST,
           target: {
             ...PROXY_REQUEST.target,
             tenantId: "tenant-001",
           },
-        }),
-      /Reply Authority Service recruiter 解析结果与 target\.tenantId 不一致：tenant-002/,
+        });
+      },
+      (error: unknown) => {
+        if (!(error instanceof ReplyAuthorityRequestError)) {
+          return false;
+        }
+        assert.match(
+          error.message,
+          /Reply Authority Service recruiter 解析结果与 target\.tenantId 不一致：tenant-002/,
+        );
+        assert.equal(
+          error.meta.url,
+          "https://reply-authority.duliday.com/resolve-recruiter-binding",
+        );
+        assert.equal(error.meta.timeoutMs, 20_000);
+        assert.match(error.meta.requestId ?? "", UUID_PATTERN);
+        assert.equal(error.cause, undefined);
+        return true;
+      },
     );
   });
 

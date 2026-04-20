@@ -177,7 +177,10 @@ export function formatMissingToolMessage(
   const messageLines = [`Tool "${requestedToolName}" 不存在于 Agent "${agentName}" 中。`];
 
   if (suggestions.length === 1) {
-    messageLines.push(`Did you mean: \`${suggestions[0]}\`?`);
+    const [suggestedTool] = suggestions;
+    if (suggestedTool !== undefined) {
+      messageLines.push(`Did you mean: \`${suggestedTool}\`?`);
+    }
   } else if (suggestions.length > 1) {
     messageLines.push(`Did you mean one of: ${suggestions.map((name) => `\`${name}\``).join(", ")}?`);
   }

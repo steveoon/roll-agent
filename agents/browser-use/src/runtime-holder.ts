@@ -1,3 +1,4 @@
+import { createAgentLogger } from "@roll-agent/sdk";
 import { BrowserRuntime, BrowserContextManager, SessionStore } from "@roll-agent/browser";
 import type { BrowserRuntimeConfig } from "@roll-agent/browser";
 
@@ -10,6 +11,7 @@ let runtime: BrowserRuntime | undefined;
 let contextManager: BrowserContextManager | undefined;
 let sessionStore: SessionStore | undefined;
 let replyAuthorityKeysLoaded = false;
+const logger = createAgentLogger("browser-use-agent");
 
 export async function initRuntime(config: BrowserRuntimeConfig): Promise<void> {
   if (runtime) return;
@@ -52,16 +54,16 @@ export function getReplyAuthorityKeysLoaded(): boolean {
 
 export async function shutdownRuntime(): Promise<void> {
   if (contextManager) {
-    console.error("[browser-use-agent] Closing browser contexts...");
+    logger.info("Closing browser contexts...");
     await contextManager.closeAll();
     contextManager = undefined;
   }
   if (runtime) {
-    console.error("[browser-use-agent] Stopping browser process...");
+    logger.info("Stopping browser process...");
     await runtime.stop();
     runtime = undefined;
   }
   sessionStore = undefined;
   replyAuthorityKeysLoaded = false;
-  console.error("[browser-use-agent] Browser runtime shutdown complete");
+  logger.info("Browser runtime shutdown complete");
 }

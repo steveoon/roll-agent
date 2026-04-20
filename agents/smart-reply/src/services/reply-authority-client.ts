@@ -96,6 +96,18 @@ function formatRequestMeta(meta: ReplyAuthorityRequestMeta): string {
   return details.join(", ");
 }
 
+function buildRequestMeta(
+  config: ReplyAuthorityConfig,
+  pathname: string,
+  requestContext: ReplyAuthorityRequestContext,
+): ReplyAuthorityRequestMeta {
+  return {
+    url: buildEndpoint(config.baseUrl, pathname),
+    timeoutMs: requestContext.timeoutMs,
+    requestId: requestContext.requestId,
+  };
+}
+
 function wrapReplyAuthorityRequestError(
   error: unknown,
   meta: ReplyAuthorityRequestMeta,
@@ -143,10 +155,10 @@ async function postJson(
   body: unknown,
   requestContext: ReplyAuthorityRequestContext,
 ): Promise<unknown> {
-  const url = buildEndpoint(config.baseUrl, pathname);
+  const meta = buildRequestMeta(config, pathname, requestContext);
 
   try {
-    const response = await fetch(url, {
+    const response = await fetch(meta.url, {
       method: "POST",
       headers: buildHeaders(config, requestContext),
       body: JSON.stringify(body),
@@ -160,11 +172,7 @@ async function postJson(
 
     return payload;
   } catch (error) {
-    throw wrapReplyAuthorityRequestError(error, {
-      url,
-      timeoutMs: requestContext.timeoutMs,
-      requestId: requestContext.requestId,
-    });
+    throw wrapReplyAuthorityRequestError(error, meta);
   }
 }
 
@@ -190,10 +198,12 @@ async function resolveRecruiterBinding(
 function resolveTargetOrThrow(
   resolved: ResolveRecruiterBindingResponse,
   target: ReplyAuthorityTarget,
+  meta: ReplyAuthorityRequestMeta,
 ): { tenantId: string; recruiterBinding: RecruiterBinding } {
   if (target.tenantId !== undefined && target.tenantId !== resolved.tenantId) {
-    throw new Error(
+    throw new ReplyAuthorityRequestError(
       `Reply Authority Service recruiter 解析结果与 target.tenantId 不一致：${resolved.tenantId}`,
+      { meta },
     );
   }
 
@@ -223,7 +233,11 @@ async function buildGenerateSignedReplyRequest(
   }
 
   const resolved = await resolveRecruiterBinding(config, input.target, requestContext);
-  const resolvedTarget = resolveTargetOrThrow(resolved, input.target);
+  const resolvedTarget = resolveTargetOrThrow(
+    resolved,
+    input.target,
+    buildRequestMeta(config, "resolve-recruiter-binding", requestContext),
+  );
 
   return GenerateSignedReplyRequestSchema.parse({
     ...input,

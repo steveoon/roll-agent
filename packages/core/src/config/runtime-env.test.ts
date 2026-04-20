@@ -164,6 +164,45 @@ describe("config/runtime-env", () => {
         "依赖当前 shell 环境: REQUIRED_TOKEN；agent 未暴露 diagnostic_status / browser_status.effectiveEnvSources",
     });
   });
+
+  it("keeps runtime fingerprint optional instead of coercing it to an empty string sentinel", () => {
+    const declarationReport = inspectAgentEnvRequirements(
+      "browser-use-agent",
+      {
+        required: [{ name: "REPLY_AUTHORITY_KEYS_URL" }],
+      },
+      {
+        "browser-use-agent": {
+          REPLY_AUTHORITY_KEYS_URL: "https://reply-authority.example.com/keys",
+        },
+      },
+    );
+
+    if (!declarationReport) {
+      assert.fail("expected declaration report");
+    }
+
+    const runtimeReport = inspectAgentRuntimeEnvRequirements(
+      declarationReport,
+      {
+        REPLY_AUTHORITY_KEYS_URL: "https://reply-authority.example.com/keys",
+      },
+      verifiedInspection({
+        REPLY_AUTHORITY_KEYS_URL: {
+          present: true,
+        },
+      }),
+    );
+
+    const runtimeItem = runtimeReport.items[0] ?? fail("missing runtime item");
+    if (!runtimeItem.runtime.verified || !runtimeItem.runtime.present) {
+      assert.fail("expected a verified present runtime item");
+    }
+
+    assert.equal(runtimeItem.runtime.fingerprint, undefined);
+    assert.equal(runtimeItem.runtime.matchesAgentsEnv, false);
+    assert.equal(formatAgentEnvRuntimeStatus(runtimeItem), "⚠ differs from yaml (ephemeral)");
+  });
 });
 
 function verifiedInspection(
