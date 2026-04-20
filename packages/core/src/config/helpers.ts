@@ -1,4 +1,5 @@
 import type { AgentSkillEnvDeclarations } from "../types/agent.ts";
+import type { AskRuntimeIssue } from "../types/ask.ts";
 import type { RollConfig } from "./schema.ts";
 
 const ENV_PLACEHOLDER_PATTERN = /\$\{[^}]+\}/;
@@ -67,6 +68,23 @@ export function inspectAgentEnvRequirements(
     missingRequired: items.filter((item) => item.required && item.source === "missing"),
     processEnvOnlyRequired: items.filter((item) => item.required && item.source === "process.env"),
   };
+}
+
+export function getMissingAgentEnvRuntimeIssues(
+  report: AgentEnvCheckReport | undefined,
+): ReadonlyArray<AskRuntimeIssue> {
+  if (!report) {
+    return [];
+  }
+
+  return report.missingRequired.map((item) => ({
+    category: "env",
+    code: "missing_required_env",
+    name: item.name,
+    message: `必填环境变量 ${item.name} 未配置`,
+    ...(item.purpose ? { purpose: item.purpose } : {}),
+    ...(item.example ? { example: item.example } : {}),
+  }));
 }
 
 function buildAgentEnvCheckItems(

@@ -1,7 +1,11 @@
 import { readFileSync } from "node:fs";
 import { defineCommand } from "citty";
 import { loadConfig } from "../../config/loader.ts";
-import { getAgentEnv } from "../../config/helpers.ts";
+import {
+  getAgentEnv,
+  getMissingAgentEnvRuntimeIssues,
+  inspectAgentEnvRequirements,
+} from "../../config/helpers.ts";
 import { AgentStore } from "../../registry/store.ts";
 import { McpClientManager } from "../../mcp/client-manager.ts";
 import { resolveTransportWithDevSpawnSpec } from "../../registry/dev-spawn.ts";
@@ -76,10 +80,22 @@ export default defineCommand({
         return;
       }
 
-      const preflightResult = preflightToolCall(targetTool, toolArgs);
+      const envReport = inspectAgentEnvRequirements(
+        agent.skill.name,
+        agent.skill.env,
+        config.agents.env,
+      );
+      const preflightResult = preflightToolCall(targetTool, toolArgs, {
+        runtimeIssues: getMissingAgentEnvRuntimeIssues(envReport),
+      });
       if (!preflightResult.ok) {
         log.error(
-          formatValidationIssuesMessage(agent.skill.name, args.tool, preflightResult.issues),
+          formatValidationIssuesMessage(
+            agent.skill.name,
+            args.tool,
+            preflightResult.issues,
+            preflightResult.runtimeIssues,
+          ),
         );
         process.exitCode = 1;
         return;

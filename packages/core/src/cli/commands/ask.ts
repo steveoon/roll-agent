@@ -1,6 +1,10 @@
 import { defineCommand } from "citty";
 import { loadConfig } from "../../config/loader.ts";
-import { getAgentEnv } from "../../config/helpers.ts";
+import {
+  getAgentEnv,
+  getMissingAgentEnvRuntimeIssues,
+  inspectAgentEnvRequirements,
+} from "../../config/helpers.ts";
 import { createProviderModel, resolveLLMCall } from "../../llm/providers.ts";
 import { McpClientManager } from "../../mcp/client-manager.ts";
 import { AgentStore } from "../../registry/store.ts";
@@ -213,16 +217,25 @@ export default defineCommand({
       );
       const finalDecision = { ...decision, input: extractedInput };
 
-      const preflightResult = preflightToolCall(targetTool, finalDecision.input);
+      const envReport = inspectAgentEnvRequirements(
+        agent.skill.name,
+        agent.skill.env,
+        config.agents.env,
+      );
+      const preflightResult = preflightToolCall(targetTool, finalDecision.input, {
+        runtimeIssues: getMissingAgentEnvRuntimeIssues(envReport),
+      });
       if (!preflightResult.ok) {
         const result: AskNeedsInputResult = {
           status: "needs_input",
           decision: finalDecision,
           validationIssues: preflightResult.issues,
+          runtimeIssues: preflightResult.runtimeIssues,
           message: formatValidationIssuesMessage(
             agent.skill.name,
             decision.toolName,
             preflightResult.issues,
+            preflightResult.runtimeIssues,
           ),
         };
         log.warn(result.message);

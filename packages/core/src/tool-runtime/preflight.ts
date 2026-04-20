@@ -1,5 +1,5 @@
 import type { AgentTool } from "../types/agent.ts";
-import type { AskValidationIssue } from "../types/ask.ts";
+import type { AskRuntimeIssue, AskValidationIssue } from "../types/ask.ts";
 import {
   describeValueType,
   getAdditionalPropertiesSetting,
@@ -21,9 +21,45 @@ export interface ToolCallPreflightSuccess {
 export interface ToolCallPreflightFailure {
   readonly ok: false;
   readonly issues: ReadonlyArray<AskValidationIssue>;
+  readonly runtimeIssues: ReadonlyArray<AskRuntimeIssue>;
 }
 
 export type ToolCallPreflightResult = ToolCallPreflightSuccess | ToolCallPreflightFailure;
+
+export interface ToolCallPreflightOptions {
+  readonly runtimeIssues?: ReadonlyArray<AskRuntimeIssue>;
+}
+
+function buildMissingRequiredIssue(
+  fieldPath: string,
+  fieldSchema: object | undefined,
+): AskValidationIssue {
+  const description = getSchemaDescription(fieldSchema);
+  const isExplicitInputField = fieldSchema && !isNaturallyExtractableSchema(fieldSchema);
+
+  return {
+    path: fieldPath,
+    code: isExplicitInputField ? "requires_explicit_input" : "missing_required",
+    message: isExplicitInputField
+      ? `${fieldPath} 无法从自然语言可靠提取，需要显式提供`
+      : `${fieldPath} 为必填字段`,
+    ...(description ? { description } : {}),
+  };
+}
+
+function getMissingRequiredIssues(
+  fieldPath: string,
+  fieldSchema: object | undefined,
+): ReadonlyArray<AskValidationIssue> {
+  if (fieldSchema && isJsonSchemaObject(fieldSchema)) {
+    const nestedIssues = validateObjectInput({ inputSchema: fieldSchema }, {}, fieldPath);
+    if (nestedIssues.length > 0) {
+      return nestedIssues;
+    }
+  }
+
+  return [buildMissingRequiredIssue(fieldPath, fieldSchema)];
+}
 
 function validateSchemaValue(
   schema: object,
@@ -135,20 +171,8 @@ function validateObjectInput(
     }
 
     const fieldSchema = properties[fieldName];
-    const description = getSchemaDescription(fieldSchema);
     const fieldPath = pathPrefix ? `${pathPrefix}.${fieldName}` : fieldName;
-    issues.push({
-      path: fieldPath,
-      code:
-        fieldSchema && !isNaturallyExtractableSchema(fieldSchema)
-          ? "requires_explicit_input"
-          : "missing_required",
-      message:
-        fieldSchema && !isNaturallyExtractableSchema(fieldSchema)
-          ? `${fieldPath} 无法从自然语言可靠提取，需要显式提供`
-          : `${fieldPath} 为必填字段`,
-      ...(description ? { description } : {}),
-    });
+    issues.push(...getMissingRequiredIssues(fieldPath, fieldSchema));
   }
 
   for (const [fieldName, value] of Object.entries(input)) {
@@ -181,7 +205,11 @@ export function getInputValidationIssues(
 export function preflightToolCall(
   tool: Pick<AgentTool, "inputSchema">,
   input: Readonly<Record<string, unknown>>,
+  options: ToolCallPreflightOptions = {},
 ): ToolCallPreflightResult {
   const issues = getInputValidationIssues(tool, input);
-  return issues.length === 0 ? { ok: true } : { ok: false, issues };
+  const runtimeIssues = options.runtimeIssues ?? [];
+  return issues.length === 0 && runtimeIssues.length === 0
+    ? { ok: true }
+    : { ok: false, issues, runtimeIssues };
 }

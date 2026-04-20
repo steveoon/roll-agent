@@ -1,6 +1,11 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { inspectAgentEnvRequirements, getAgentEnv, getAgentEnvFromAgentsConfig } from "./helpers.ts";
+import {
+  getAgentEnv,
+  getAgentEnvFromAgentsConfig,
+  getMissingAgentEnvRuntimeIssues,
+  inspectAgentEnvRequirements,
+} from "./helpers.ts";
 import { validateConfigText } from "./loader.ts";
 
 describe("config/helpers", () => {
@@ -93,5 +98,30 @@ agents:
     assert.deepEqual(getAgentEnvFromAgentsConfig(config.agents, "placeholder-agent"), {
       API_URL: "https://example.com",
     });
+  });
+
+  it("should convert missing required env items into runtime issues", () => {
+    const report = inspectAgentEnvRequirements(
+      "placeholder-agent",
+      {
+        required: [
+          {
+            name: "API_KEY",
+            purpose: "Provider API key",
+          },
+        ],
+      },
+      {},
+    );
+
+    assert.deepEqual(getMissingAgentEnvRuntimeIssues(report), [
+      {
+        category: "env",
+        code: "missing_required_env",
+        name: "API_KEY",
+        message: "必填环境变量 API_KEY 未配置",
+        purpose: "Provider API key",
+      },
+    ]);
   });
 });

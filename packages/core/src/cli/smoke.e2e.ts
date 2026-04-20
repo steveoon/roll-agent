@@ -257,6 +257,69 @@ optional:
   );
 }
 
+function createPreflightFixtureAgent(agentDir: string): void {
+  const sdkEntry = resolve(import.meta.dirname, "../../../../packages/sdk/src/index.ts");
+  const zodEntry = resolve(
+    import.meta.dirname,
+    "../../../../packages/sdk/node_modules/zod/index.js",
+  );
+
+  mkdirSync(resolve(agentDir, "src"), { recursive: true });
+  mkdirSync(resolve(agentDir, "references"), { recursive: true });
+
+  writeFileSync(
+    resolve(agentDir, "SKILL.md"),
+    `---
+name: preflight-fixture-agent
+description: Agent for preflight aggregation smoke tests
+metadata:
+  roll-transport: stdio
+  roll-command: node --experimental-strip-types src/index.ts
+  roll-env-file: references/env.yaml
+---
+`,
+    "utf-8",
+  );
+
+  writeFileSync(
+    resolve(agentDir, "references/env.yaml"),
+    `required:
+  - name: REQUIRED_TOKEN
+    purpose: Reply authority bearer token
+`,
+    "utf-8",
+  );
+
+  writeFileSync(
+    resolve(agentDir, "src/index.ts"),
+    `import { z } from ${JSON.stringify(zodEntry)};
+import { defineAgent, defineTool } from ${JSON.stringify(sdkEntry)};
+
+const generateReply = defineTool({
+  name: "generate_reply",
+  description: "Generate reply for a recruiter thread",
+  input: z.object({
+    field: z.string().describe("候选人的原始消息"),
+    target: z.object({
+      platform: z.enum(["zhipin"]).describe("目标平台"),
+      recruiterUsername: z.string().describe("招聘者用户名"),
+    }),
+  }),
+  output: z.object({ ok: z.boolean() }),
+  execute: async () => ({ ok: true }),
+});
+
+const agent = defineAgent({
+  name: "preflight-fixture-agent",
+  tools: [generateReply],
+});
+
+await agent.listen();
+`,
+    "utf-8",
+  );
+}
+
 test("e2e smoke: register fixture agent and run ping", { timeout: 120_000 }, () => {
   const workspace = mkdtempSync(resolve(tmpdir(), `roll-e2e-${randomUUID()}-`));
 
@@ -507,6 +570,35 @@ agents:
     assert.ok(envCheck);
     assert.equal(envCheck.status, "fail");
     assert.match(envCheck.message, /REQUIRED_TOKEN/);
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("e2e smoke: roll run aggregates missing input fields and env requirements", () => {
+  const workspace = mkdtempSync(resolve(tmpdir(), `roll-preflight-${randomUUID()}-`));
+
+  try {
+    const agentDir = resolve(workspace, "preflight-fixture-agent");
+    const dataDir = resolve(workspace, "agents-data");
+    createPreflightFixtureAgent(agentDir);
+    writeFileSync(resolve(workspace, "roll.config.yaml"), buildConfigYaml(dataDir), "utf-8");
+
+    const addResult = runRoll(["agent", "add", agentDir], workspace);
+    assert.equal(addResult.status, 0, addResult.stderr);
+
+    const runResult = runRoll(
+      ["run", "preflight-fixture-agent", "generate_reply", "--input-json", "{}"],
+      workspace,
+    );
+    assert.equal(runResult.status, 1);
+    assert.match(runResult.stderr, /A\. 输入缺失 \/ 参数校验/);
+    assert.match(runResult.stderr, /field 为必填字段/);
+    assert.match(runResult.stderr, /target\.platform 为必填字段/);
+    assert.match(runResult.stderr, /target\.recruiterUsername 为必填字段/);
+    assert.match(runResult.stderr, /B\. 运行条件缺失/);
+    assert.match(runResult.stderr, /REQUIRED_TOKEN/);
+    assert.match(runResult.stderr, /agents\.env\.preflight-fixture-agent/);
   } finally {
     rmSync(workspace, { recursive: true, force: true });
   }
