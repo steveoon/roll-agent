@@ -11,9 +11,11 @@ metadata:
 
 需要先启动 Agent 服务进程（HTTP 常驻），浏览器 session 跨调用持久。
 
+完整 inputSchema 可通过 `roll agent tools browser-use-agent`（或 `--json`）查询。
+
 ## 通用 Tools
 
-- `browser_status()` — 查询浏览器运行状态和活跃 session
+- `browser_status()` — 查询浏览器运行状态和活跃 session；输出含 `replyAuthorityKeysLoaded`（启动期 Reply Authority 公钥是否预加载成功）和 `effectiveEnvSources`（声明过的 env key 的 `{present, fingerprint}`，SHA256 前 8 位，不泄漏 value）。后者被 `roll doctor` / `roll agent info` 消费，用于检测 env 声明与运行态的 drift
 - `open_platform(platform)` — 通过原生 CDP 打开并聚焦招聘平台主页；登录前不会触发 Playwright attach
 - `list_pages(platform?)` — 通过原生 CDP 列出当前浏览器中可见的页面和 pageId（登录前 `pageId` 即原生 targetId）
 - `select_page(platform, pageId)` — 将指定页面绑定为平台当前活跃页；登录前优先走原生 CDP target 激活
@@ -28,7 +30,7 @@ metadata:
 - `zhipin_read_messages(limit?, onlyUnread?, sortBy?)` — 读取消息列表中的候选人，返回姓名、消息摘要，以及 `conversationId` / `candidateId`
 - `zhipin_open_chat(candidateName?, index?, preferUnread?)` — 打开指定候选人的聊天窗口（按姓名模糊匹配或列表索引）
 - `zhipin_get_candidate_info(candidateName?, index?, maxMessages?)` — 提取候选人资料、聊天记录，以及当前选中聊天的 `conversationId` / `candidateId`
-- `zhipin_send_reply(signedEnvelope, candidateName?, index?)` — 发送消息。只接受 Reply Authority Service 签发的 `signedEnvelope`；本地会先做 Ed25519 验签、过期检查、重放检查、目标绑定校验和 recruiter 绑定校验
+- `zhipin_send_reply(signedEnvelope, candidateName?, index?)` — 发送消息。只接受 Reply Authority Service 签发的 `signedEnvelope`；本地会先做 Ed25519 验签、过期检查、重放检查、目标绑定校验和 recruiter 绑定校验。启动期公钥预加载失败时直接前置拒绝，错误指向 `browser_status.replyAuthorityKeysLoaded`
 - `zhipin_exchange_wechat(candidateName?, index?)` — 换微信。指定 candidateName 会自动打开对应聊天后执行
 - `zhipin_get_username()` — 获取当前登录的招聘者用户名，返回 `username`（依赖当前 runtime 已跟踪页面；首次使用请先 `open_platform`，已打开但未跟踪页面可先 `list_pages + select_page`，确认登录后如需单独验证 attach，可先调用 `attach_browser_session`）。常用于 recruiter binding 解析和外部通知消息中的账号标识
 
@@ -64,4 +66,7 @@ metadata:
 - `zhipin_send_reply` 不再接受裸文本 `message`
 - 实际发送文本来自验签后的 envelope payload 内部 `reply` 字段
 - envelope 绑定 `conversationId + candidateId + recruiterBinding`，若当前选中聊天或当前登录招聘者与签名目标不一致，会拒绝发送
-- Agent 启动时会尝试从 `REPLY_AUTHORITY_KEYS_URL` 预拉公钥；若拉取失败，其他只读工具仍可用，但发送会失败关闭
+- Agent 启动时会尝试从 `REPLY_AUTHORITY_KEYS_URL` 预拉公钥；若拉取失败：
+  - `runtime-holder` 写入 `replyAuthorityKeysLoaded=false`，`browser_status` 输出该字段
+  - `zhipin_send_reply` 在验签前直接前置拒绝并返回结构化错误，不再走到 verify 才失败
+  - 其他只读工具仍可用，排障时优先 `roll run browser-use-agent browser_status --json` 或 `roll doctor --json`

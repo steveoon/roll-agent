@@ -1,38 +1,43 @@
-import type { AskValidationIssue } from "../types/ask.ts";
+import type { AskRuntimeIssue, AskValidationIssue } from "../types/ask.ts";
 
-function formatIssueLabel(issue: AskValidationIssue): string {
-  return issue.description ? `${issue.path}（${issue.description}）` : issue.path;
+function appendIssueDescription(text: string, description?: string): string {
+  return description ? `${text}（${description}）` : text;
 }
 
 export function formatValidationIssuesMessage(
   agentName: string,
   toolName: string,
   validationIssues: ReadonlyArray<AskValidationIssue>,
+  runtimeIssues: ReadonlyArray<AskRuntimeIssue> = [],
 ): string {
-  const missingRequired = validationIssues
-    .filter((issue) => issue.code === "missing_required")
-    .map(formatIssueLabel);
-  const requiresExplicitInput = validationIssues
-    .filter((issue) => issue.code === "requires_explicit_input")
-    .map(formatIssueLabel);
-  const otherIssues = validationIssues
-    .filter(
-      (issue) => issue.code !== "missing_required" && issue.code !== "requires_explicit_input",
-    )
-    .map(formatIssueLabel);
+  const sections = [`已路由到 ${agentName}.${toolName}`];
 
-  const segments = [`已路由到 ${agentName}.${toolName}`];
-  if (missingRequired.length > 0) {
-    segments.push(`还缺少必填信息：${missingRequired.join("、")}`);
-  }
-  if (requiresExplicitInput.length > 0) {
-    segments.push(
-      `以下字段无法从自然语言可靠提取，需要使用 \`roll run ${agentName} ${toolName} --input-json\` 或上游编排器显式提供：${requiresExplicitInput.join("、")}`,
-    );
-  }
-  if (otherIssues.length > 0) {
-    segments.push(`参数校验未通过：${otherIssues.join("、")}`);
+  if (validationIssues.length > 0) {
+    const validationLines = validationIssues.map((issue) => {
+      if (issue.code === "requires_explicit_input") {
+        return (
+          "- " +
+          appendIssueDescription(
+            `${issue.message}；请使用 \`roll run ${agentName} ${toolName} --input-json\` 或上游编排器显式提供`,
+            issue.description,
+          )
+        );
+      }
+
+      return `- ${appendIssueDescription(issue.message, issue.description)}`;
+    });
+    sections.push(["A. 输入缺失 / 参数校验", ...validationLines].join("\n"));
   }
 
-  return segments.join("；");
+  if (runtimeIssues.length > 0) {
+    const runtimeLines = runtimeIssues.map((issue) => {
+      const guidance =
+        `请在 \`roll.config.yaml\` 的 \`agents.env.${agentName}\` 中配置，` +
+        "或在当前 shell 环境导出后重试";
+      return `- ${appendIssueDescription(`${issue.message}；${guidance}`, issue.purpose)}`;
+    });
+    sections.push(["B. 运行条件缺失", ...runtimeLines].join("\n"));
+  }
+
+  return sections.join("\n");
 }

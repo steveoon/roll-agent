@@ -40,11 +40,22 @@ afterEach(() => {
 
 describe("generateSignedReply smoke", () => {
   it("proxies recruiter resolution through a local mock authority service", async () => {
-    const requests: Array<{ path: string; body: unknown }> = [];
+    const requests: Array<{
+      path: string;
+      body: unknown;
+      requestId: string | undefined;
+    }> = [];
     const server = createServer(async (request, response) => {
       const path = request.url ?? "/";
       const body = request.method === "POST" ? await readJson(request) : null;
-      requests.push({ path, body });
+      requests.push({
+        path,
+        body,
+        requestId:
+          typeof request.headers["x-request-id"] === "string"
+            ? request.headers["x-request-id"]
+            : undefined,
+      });
 
       if (path === "/resolve-recruiter-binding") {
         writeJson(response, 200, {
@@ -93,6 +104,8 @@ describe("generateSignedReply smoke", () => {
       assert.equal(result.signedEnvelope, "payload.signature");
       assert.equal(requests.length, 2);
       assert.equal(requests[0]?.path, "/resolve-recruiter-binding");
+      assert.ok(requests[0]?.requestId);
+      assert.equal(requests[0]?.requestId, requests[1]?.requestId);
       assert.deepEqual(requests[0]?.body, {
         platform: "zhipin",
         username: "recruiter-alice",
@@ -110,6 +123,7 @@ describe("generateSignedReply smoke", () => {
             username: "recruiter-alice",
           },
         },
+        requestId: requests[1]?.requestId,
       });
     } finally {
       server.close();

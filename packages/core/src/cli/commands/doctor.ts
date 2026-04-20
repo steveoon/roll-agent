@@ -1,7 +1,12 @@
 import { defineCommand } from "citty";
 import { existsSync } from "node:fs";
-import { inspectAgentEnvRequirements } from "../../config/helpers.ts";
+import { getAgentEnvFromAgentsConfig, inspectAgentEnvRequirements } from "../../config/helpers.ts";
 import { inspectConfigFile, loadAgentsConfig, loadConfig } from "../../config/loader.ts";
+import {
+  inspectAgentRuntimeEnvRequirements,
+  summarizeAgentRuntimeEnvReport,
+} from "../../config/runtime-env.ts";
+import { inspectAgentRuntimeEnv } from "../../mcp/agent-diagnostics.ts";
 import { AgentStore } from "../../registry/store.ts";
 
 interface CheckResult {
@@ -40,7 +45,7 @@ export default defineCommand({
   args: {
     json: { type: "boolean", description: "JSON 格式输出", default: false },
   },
-  run({ args }) {
+  async run({ args }) {
     const checks: CheckResult[] = [];
     let effectiveConfig: ReturnType<typeof loadConfig>["config"] | undefined;
 
@@ -165,28 +170,17 @@ export default defineCommand({
           continue;
         }
 
-        if (envReport.missingRequired.length > 0) {
-          checks.push({
-            name: `Agent 环境变量 (${agent.skill.name})`,
-            status: "fail",
-            message: `缺少必填项: ${envReport.missingRequired.map((item) => item.name).join(", ")}`,
-          });
-          continue;
-        }
-
-        if (envReport.processEnvOnlyRequired.length > 0) {
-          checks.push({
-            name: `Agent 环境变量 (${agent.skill.name})`,
-            status: "warn",
-            message: `依赖当前 shell 环境: ${envReport.processEnvOnlyRequired.map((item) => item.name).join(", ")}；建议写入 agents.env`,
-          });
-          continue;
-        }
-
+        const runtimeInspection = await inspectAgentRuntimeEnv(agent, { agentsConfig: fullConfig });
+        const runtimeReport = inspectAgentRuntimeEnvRequirements(
+          envReport,
+          getAgentEnvFromAgentsConfig(fullConfig, agent.skill.name),
+          runtimeInspection,
+        );
+        const summary = summarizeAgentRuntimeEnvReport(runtimeReport);
         checks.push({
           name: `Agent 环境变量 (${agent.skill.name})`,
-          status: "ok",
-          message: "声明的必填项已满足",
+          status: summary.status,
+          message: summary.message,
         });
       }
     }

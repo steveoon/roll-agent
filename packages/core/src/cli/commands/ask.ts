@@ -1,6 +1,11 @@
 import { defineCommand } from "citty";
 import { loadConfig } from "../../config/loader.ts";
-import { getAgentEnv } from "../../config/helpers.ts";
+import {
+  getAgentEnv,
+  getMissingAgentEnvRuntimeIssues,
+  inspectAgentEnvRequirements,
+} from "../../config/helpers.ts";
+import { shouldSkipRuntimeReadinessForTool } from "../../config/runtime-env.ts";
 import { createProviderModel, resolveLLMCall } from "../../llm/providers.ts";
 import { McpClientManager } from "../../mcp/client-manager.ts";
 import { AgentStore } from "../../registry/store.ts";
@@ -16,39 +21,12 @@ import type {
   AskNeedsInputResult,
   AskSuccessResult,
 } from "../../types/ask.ts";
+import { formatMissingToolMessage, normalizeListedTools } from "../utils/agent-tools.ts";
 import { log } from "../utils/output.ts";
+import { extractTextContent, isToolErrorResult } from "../utils/tool-results.ts";
 
 /** 默认确认阈值：低于此值时跳过执行 */
 const DEFAULT_CONFIRM_THRESHOLD = 0.5;
-
-function extractTextContent(content: unknown): string[] {
-  if (!Array.isArray(content)) {
-    return [];
-  }
-
-  const texts: string[] = [];
-  for (const item of content) {
-    if (
-      typeof item === "object" &&
-      item !== null &&
-      "type" in item &&
-      item.type === "text" &&
-      "text" in item &&
-      typeof item.text === "string"
-    ) {
-      texts.push(item.text);
-    }
-  }
-  return texts;
-}
-
-function isToolErrorResult(
-  result: unknown,
-): result is { readonly isError: true; readonly content?: unknown } {
-  return (
-    typeof result === "object" && result !== null && "isError" in result && result.isError === true
-  );
-}
 
 function printAskJson(result: AskCommandResult): void {
   console.log(JSON.stringify(result, null, 2));
@@ -187,7 +165,7 @@ export default defineCommand({
         agent.installPath,
         { samplingModel, ...(agentEnv ? { env: agentEnv } : {}) },
       );
-      const { tools } = await client.listTools();
+      const tools = normalizeListedTools((await client.listTools()).tools);
       const targetTool = tools.find((tool) => tool.name === decision.toolName);
 
       if (!targetTool) {
@@ -195,7 +173,7 @@ export default defineCommand({
           status: "failed",
           stage: "route",
           decision,
-          message: `Tool "${decision.toolName}" 不存在于 Agent "${agent.skill.name}" 中`,
+          message: formatMissingToolMessage(agent.skill.name, decision.toolName, tools),
         };
         log.error(result.message);
         outputResult(result);
@@ -212,16 +190,28 @@ export default defineCommand({
       );
       const finalDecision = { ...decision, input: extractedInput };
 
-      const preflightResult = preflightToolCall(targetTool, finalDecision.input);
+      const envReport = inspectAgentEnvRequirements(
+        agent.skill.name,
+        agent.skill.env,
+        config.agents.env,
+      );
+      const runtimeIssues = shouldSkipRuntimeReadinessForTool(targetTool.name)
+        ? []
+        : getMissingAgentEnvRuntimeIssues(envReport);
+      const preflightResult = preflightToolCall(targetTool, finalDecision.input, {
+        runtimeIssues,
+      });
       if (!preflightResult.ok) {
         const result: AskNeedsInputResult = {
           status: "needs_input",
           decision: finalDecision,
           validationIssues: preflightResult.issues,
+          runtimeIssues: preflightResult.runtimeIssues,
           message: formatValidationIssuesMessage(
             agent.skill.name,
             decision.toolName,
             preflightResult.issues,
+            preflightResult.runtimeIssues,
           ),
         };
         log.warn(result.message);

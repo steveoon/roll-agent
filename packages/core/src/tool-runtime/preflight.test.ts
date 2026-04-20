@@ -50,6 +50,36 @@ const ingestionTool: AgentTool = {
   },
 };
 
+const nestedTargetTool: AgentTool = {
+  name: "generate_reply",
+  description: "Generate reply for boss recruiter",
+  inputSchema: {
+    type: "object",
+    properties: {
+      field: {
+        type: "string",
+        description: "候选人的原始消息",
+      },
+      target: {
+        type: "object",
+        properties: {
+          platform: {
+            type: "string",
+            description: "目标平台",
+          },
+          recruiterUsername: {
+            type: "string",
+            description: "招聘者用户名",
+          },
+        },
+        required: ["platform", "recruiterUsername"],
+      },
+    },
+    required: ["field", "target"],
+    additionalProperties: false,
+  },
+};
+
 describe("tool-runtime preflight", () => {
   it("detects missing required tool inputs", () => {
     const issues = getInputValidationIssues(generateReplyTool, {});
@@ -136,6 +166,7 @@ describe("tool-runtime preflight", () => {
           description: "候选人的原始消息",
         },
       ],
+      runtimeIssues: [],
     });
   });
 
@@ -153,6 +184,30 @@ describe("tool-runtime preflight", () => {
     ]);
   });
 
+  it("expands missing nested object inputs into leaf required fields in one pass", () => {
+    const issues = getInputValidationIssues(nestedTargetTool, {});
+    assert.deepEqual(issues, [
+      {
+        path: "field",
+        code: "missing_required",
+        message: "field 为必填字段",
+        description: "候选人的原始消息",
+      },
+      {
+        path: "target.platform",
+        code: "missing_required",
+        message: "target.platform 为必填字段",
+        description: "目标平台",
+      },
+      {
+        path: "target.recruiterUsername",
+        code: "missing_required",
+        message: "target.recruiterUsername 为必填字段",
+        description: "招聘者用户名",
+      },
+    ]);
+  });
+
   it("formats a human-readable validation message", () => {
     const message = formatValidationIssuesMessage("smart-reply-agent", "generate_reply", [
       {
@@ -163,7 +218,8 @@ describe("tool-runtime preflight", () => {
       },
     ]);
     assert.match(message, /smart-reply-agent\.generate_reply/);
-    assert.match(message, /candidateMessage/);
+    assert.match(message, /A\. 输入缺失 \/ 参数校验/);
+    assert.match(message, /candidateMessage 为必填字段/);
   });
 
   it("formats explicit-input guidance separately from missing required fields", () => {
@@ -182,8 +238,77 @@ describe("tool-runtime preflight", () => {
       },
     ]);
 
-    assert.match(message, /还缺少必填信息：candidateMessage/);
-    assert.match(message, /无法从自然语言可靠提取/);
+    assert.match(message, /A\. 输入缺失 \/ 参数校验/);
+    assert.match(message, /candidateMessage 为必填字段/);
+    assert.match(message, /metadata 无法从自然语言可靠提取/);
     assert.match(message, /--input-json/);
+  });
+
+  it("formats runtime requirements in a separate section", () => {
+    const message = formatValidationIssuesMessage(
+      "smart-reply-agent",
+      "generate_reply",
+      [
+        {
+          path: "candidateMessage",
+          code: "missing_required",
+          message: "candidateMessage 为必填字段",
+          description: "候选人的原始消息",
+        },
+      ],
+      [
+        {
+          category: "env",
+          code: "missing_required_env",
+          name: "REPLY_AUTHORITY_BEARER_TOKEN",
+          message: "必填环境变量 REPLY_AUTHORITY_BEARER_TOKEN 未配置",
+          purpose: "Reply Authority bearer token",
+        },
+      ],
+    );
+
+    assert.match(message, /A\. 输入缺失 \/ 参数校验/);
+    assert.match(message, /B\. 运行条件缺失/);
+    assert.match(message, /REPLY_AUTHORITY_BEARER_TOKEN/);
+    assert.match(message, /agents\.env\.smart-reply-agent/);
+  });
+
+  it("returns runtime issues alongside input validation failures", () => {
+    const result = preflightToolCall(
+      generateReplyTool,
+      {},
+      {
+        runtimeIssues: [
+          {
+            category: "env",
+            code: "missing_required_env",
+            name: "REPLY_AUTHORITY_BEARER_TOKEN",
+            message: "必填环境变量 REPLY_AUTHORITY_BEARER_TOKEN 未配置",
+            purpose: "Reply Authority bearer token",
+          },
+        ],
+      },
+    );
+
+    assert.deepEqual(result, {
+      ok: false,
+      issues: [
+        {
+          path: "candidateMessage",
+          code: "missing_required",
+          message: "candidateMessage 为必填字段",
+          description: "候选人的原始消息",
+        },
+      ],
+      runtimeIssues: [
+        {
+          category: "env",
+          code: "missing_required_env",
+          name: "REPLY_AUTHORITY_BEARER_TOKEN",
+          message: "必填环境变量 REPLY_AUTHORITY_BEARER_TOKEN 未配置",
+          purpose: "Reply Authority bearer token",
+        },
+      ],
+    });
   });
 });

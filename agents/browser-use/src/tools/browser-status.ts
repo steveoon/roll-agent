@@ -2,13 +2,28 @@ import { defineTool } from "@roll-agent/sdk";
 import { z } from "zod";
 import { BrowserStatusSchema } from "@roll-agent/browser";
 import type { BrowserSessionInfo } from "@roll-agent/browser";
-import { getRuntime, getContextManager, getSessionStore } from "../runtime-holder.ts";
+import {
+  BROWSER_USE_DECLARED_ENV_KEYS,
+  collectEffectiveEnvSources,
+  EffectiveEnvSourcesSchema,
+} from "../diagnostics/effective-env.ts";
+import {
+  getRuntime,
+  getContextManager,
+  getSessionStore,
+  getReplyAuthorityKeysLoaded,
+} from "../runtime-holder.ts";
+
+const BrowserUseStatusSchema = BrowserStatusSchema.extend({
+  replyAuthorityKeysLoaded: z.boolean(),
+  effectiveEnvSources: EffectiveEnvSourcesSchema,
+});
 
 export const browserStatus = defineTool({
   name: "browser_status",
   description: "查询浏览器运行状态和活跃 session 信息",
   input: z.object({}),
-  output: BrowserStatusSchema,
+  output: BrowserUseStatusSchema,
   execute: async (_input, ctx) => {
     ctx.logger.info("Querying browser status");
 
@@ -51,6 +66,13 @@ export const browserStatus = defineTool({
       });
     }
 
-    return { running, headless, mode, activeSessions };
+    return {
+      running,
+      headless,
+      mode,
+      activeSessions,
+      replyAuthorityKeysLoaded: getReplyAuthorityKeysLoaded(),
+      effectiveEnvSources: collectEffectiveEnvSources(BROWSER_USE_DECLARED_ENV_KEYS),
+    };
   },
 });

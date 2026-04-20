@@ -20,6 +20,12 @@ export const ASK_VALIDATION_ISSUE_CODES = [
 ] as const;
 export type AskValidationIssueCode = (typeof ASK_VALIDATION_ISSUE_CODES)[number];
 
+export const ASK_RUNTIME_ISSUE_CATEGORIES = ["env"] as const;
+export type AskRuntimeIssueCategory = (typeof ASK_RUNTIME_ISSUE_CATEGORIES)[number];
+
+export const ASK_RUNTIME_ISSUE_CODES = ["missing_required_env"] as const;
+export type AskRuntimeIssueCode = (typeof ASK_RUNTIME_ISSUE_CODES)[number];
+
 export interface AskValidationIssue {
   readonly path: string;
   readonly code: AskValidationIssueCode;
@@ -29,10 +35,20 @@ export interface AskValidationIssue {
   readonly actual?: string;
 }
 
+export interface AskRuntimeIssue {
+  readonly category: AskRuntimeIssueCategory;
+  readonly code: AskRuntimeIssueCode;
+  readonly name: string;
+  readonly message: string;
+  readonly purpose?: string;
+  readonly example?: string;
+}
+
 export interface AskNeedsInputResult {
   readonly status: "needs_input";
   readonly decision: RouteDecision;
   readonly validationIssues: ReadonlyArray<AskValidationIssue>;
+  readonly runtimeIssues: ReadonlyArray<AskRuntimeIssue>;
   readonly message: string;
 }
 

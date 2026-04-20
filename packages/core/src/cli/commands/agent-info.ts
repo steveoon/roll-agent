@@ -1,6 +1,13 @@
 import { defineCommand } from "citty";
+import { getAgentEnvFromAgentsConfig, inspectAgentEnvRequirements } from "../../config/helpers.ts";
+import {
+  formatAgentEnvDeclarationSource,
+  formatAgentEnvRuntimeStatus,
+  formatAgentRuntimeVerification,
+  inspectAgentRuntimeEnvRequirements,
+} from "../../config/runtime-env.ts";
 import { loadAgentsConfig } from "../../config/loader.ts";
-import { inspectAgentEnvRequirements } from "../../config/helpers.ts";
+import { inspectAgentRuntimeEnv } from "../../mcp/agent-diagnostics.ts";
 import {
   formatAgentSourceType,
   getAgentLocation,
@@ -13,7 +20,7 @@ export default defineCommand({
   args: {
     name: { type: "positional", description: "Agent 名称", required: true },
   },
-  run({ args }) {
+  async run({ args }) {
     const { agentsConfig } = loadAgentsConfig();
     const store = new AgentStore(agentsConfig.dataDir);
     const agent = store.findByName(args.name);
@@ -50,18 +57,22 @@ export default defineCommand({
       agentsConfig.env,
     );
     if (envReport) {
+      const runtimeInspection = await inspectAgentRuntimeEnv(agent, { agentsConfig });
+      const runtimeReport = inspectAgentRuntimeEnvRequirements(
+        envReport,
+        getAgentEnvFromAgentsConfig(agentsConfig, agent.skill.name),
+        runtimeInspection,
+      );
+
       console.log(`环境变量:`);
-      for (const item of envReport.items) {
-        const status =
-          item.source === "agents.env"
-            ? "已配置于 agents.env"
-            : item.source === "process.env"
-              ? "仅当前 shell 环境"
-              : item.source === "default"
-                ? `默认值 (${item.default})`
-                : "缺失";
+      console.log(`  运行态校验: ${formatAgentRuntimeVerification(runtimeReport)}`);
+      for (const item of runtimeReport.items) {
+        const status = formatAgentEnvDeclarationSource(item);
         const level = item.required ? "必填" : "可选";
-        console.log(`  ${item.name}: [${level}] ${status}`);
+        const runtimeStatus = formatAgentEnvRuntimeStatus(item);
+        console.log(
+          `  ${item.name}: [${level}] ${status}${runtimeStatus ? `；运行态: ${runtimeStatus}` : ""}`,
+        );
         if (item.purpose) {
           console.log(`    用途: ${item.purpose}`);
         }

@@ -1,5 +1,18 @@
 # Workflows
 
+## Table of Contents
+
+- [Inventory And Preflight](#inventory-and-preflight)
+- [Known Agent, Unknown Tool](#known-agent-unknown-tool)
+- [Known Agent + Tool](#known-agent--tool)
+- [Known Intent, Unknown Tool](#known-intent-unknown-tool)
+- [Persistent Agent Recovery](#persistent-agent-recovery)
+- [Local-Path Agent Refresh](#local-path-agent-refresh)
+- [Check & Update Agents](#check--update-agents)
+- [System Diagnostics](#system-diagnostics)
+- [Env Drift Detection](#env-drift-detection)
+- [Tool Call Failure Triage](#tool-call-failure-triage)
+
 ## Inventory And Preflight
 
 ```bash
@@ -12,6 +25,18 @@ Use this order when the target agent is not yet fully understood:
 - `roll agent list` to confirm the registered name
 - `roll agent info <agent-name>` to inspect source, transport, runtime ownership, and env status
 - `roll agent health --json` before calling tools on persistent agents
+
+## Known Agent, Unknown Tool
+
+```bash
+roll agent tools <agent-name> --json
+```
+
+Use this when the target agent is known but the exact tool name or `inputSchema` is not.
+
+- Parse the JSON from stdout.
+- Use `roll agent tools <agent-name>` without `--json` only for manual inspection.
+- If a prior `roll run` or `roll ask` printed `Did you mean: ...` in stderr, treat it as a hint and re-discover here instead of choosing a tool name blindly.
 
 ## Known Agent + Tool
 
@@ -26,10 +51,22 @@ roll ask "<natural-language intent>" --json
 ```
 
 Handle `roll ask --json` like this:
-- `success`: run is complete
-- `needs_input`: gather missing arguments, then switch to `roll run`
-- `needs_confirmation`: confirm the agent/tool explicitly, or bypass with `roll run`
-- `failed`: inspect routing and target-agent state
+
+| `status` | Meaning | Next step |
+|----------|---------|-----------|
+| `success` | Run is complete | Stop |
+| `needs_input` | Router found a tool, but safe execution still needs input or runtime prerequisites | Read both issue arrays, resolve all items in one pass, then switch to `roll run` |
+| `needs_confirmation` | Routing confidence was below the confirm threshold | Confirm the agent/tool explicitly, or bypass with `roll run` |
+| `failed` | Routing, connect, or execute stage failed | Inspect `stage`, stderr diagnostics, and target-agent state |
+
+For `needs_input`, the stdout JSON contains:
+
+| Field | Meaning | Remediation |
+|-------|---------|-------------|
+| `validationIssues` | Input schema fields. Parent missing objects are recursively expanded to leaf fields and shown once per field | Collect the values and pass them with `roll run <agent-name> <tool-name> --input-json '{...}' --json` |
+| `runtimeIssues` | Runtime prerequisites such as missing env | Configure `agents.env.<agent-name>` in `roll.config.yaml` or export in the current shell before retrying |
+
+Both arrays are returned at once, not layer-by-layer. Resolve the full set before retrying.
 
 ## Persistent Agent Recovery
 
@@ -82,12 +119,42 @@ roll doctor --json
 
 Use this when tool calls fail unexpectedly or env setup is unclear. Checks Node.js version, config validity, LLM provider keys, data directory, registered agents, and per-agent env requirements.
 
-`--json` outputs `CheckResult[]` where each entry has `status: "ok" | "warn" | "fail"`. Non-zero exit code when any check is `fail`.
+`--json` outputs `CheckResult[]` where each entry has `name`, `status: "ok" | "warn" | "fail"`, and `message`. Parse stdout only. For per-key env declaration and runtime labels, follow with `roll agent info <agent-name>`.
 
 Follow-up based on output:
 - `needs-migration` → `roll config migrate`
 - Missing env → configure `agents.env` in `roll.config.yaml`
 - Agent count is 0 → `roll agent install <package>` or `roll agent add <path>`
+
+## Env Drift Detection
+
+When a tool fails with an env-related symptom (e.g. upstream 401, missing config, unexpected endpoint behavior), don't assume `roll.config.yaml` alone is authoritative — the agent process may have been started before the yaml update, or may be inheriting values from the shell.
+
+```bash
+roll doctor --json
+roll agent info <agent-name>
+```
+
+Use this pair when config and runtime may have drifted. `roll doctor --json` gives the fleet-level summary; `roll agent info <agent-name>` gives the per-key declaration and runtime labels.
+
+| Command | What to read | Use it for |
+|---------|--------------|------------|
+| `roll doctor --json` | Fleet-level `CheckResult[]` summary such as `运行态漂移: ...` or `运行态缺失: ...` | Detect whether an env problem exists |
+| `roll agent info <agent-name>` | Per-key declaration source plus runtime verification labels | Fix the exact key that drifted or is missing |
+
+Per-key labels from `roll agent info <agent-name>`:
+
+| Label | Meaning | Next step |
+|-------|---------|-----------|
+| `✓ from yaml (stable)` | Agent process sees the value and its fingerprint matches `agents.env` | None |
+| `⚠ differs from yaml (ephemeral)` | Agent process sees a value that does **not** match `agents.env`; likely stale after a config edit or shadowed by shell export | Restart the persistent agent, or re-register the local-path agent |
+| `⚠ from shell (ephemeral)` | YAML did not declare the key, but the agent process inherited it from the shell | Move the value into `agents.env.<agent-name>` if it must persist; then restart |
+| `✗ missing` | YAML declared the key, but the running agent process does not have it | Fix `agents.env.<agent-name>` and restart |
+
+Remediation:
+- Drift on `ephemeral` keys → `roll agent stop <name>` then `roll agent start <name>` (persistent services) or `roll agent remove` + `roll agent add` (local-path) to pick up the new yaml.
+- `✗ missing` → fix `agents.env.<agent-name>` then restart.
+- If the agent is not running or exposes no diagnostic tool, `roll agent info <agent-name>` falls back to `运行态校验: 未校验（...）`. In JSON-oriented diagnostics, the underlying inspection state is `unverified`.
 
 ## Tool Call Failure Triage
 

@@ -1,14 +1,21 @@
 import { readFileSync } from "node:fs";
 import { defineCommand } from "citty";
 import { loadConfig } from "../../config/loader.ts";
-import { getAgentEnv } from "../../config/helpers.ts";
+import {
+  getAgentEnv,
+  getMissingAgentEnvRuntimeIssues,
+  inspectAgentEnvRequirements,
+} from "../../config/helpers.ts";
 import { AgentStore } from "../../registry/store.ts";
 import { McpClientManager } from "../../mcp/client-manager.ts";
 import { resolveTransportWithDevSpawnSpec } from "../../registry/dev-spawn.ts";
 import { createProviderModel } from "../../llm/providers.ts";
 import { formatValidationIssuesMessage } from "../../tool-runtime/messages.ts";
 import { preflightToolCall } from "../../tool-runtime/preflight.ts";
+import { formatMissingToolMessage, normalizeListedTools } from "../utils/agent-tools.ts";
+import { extractTextContent, isToolErrorResult } from "../utils/tool-results.ts";
 import { log } from "../utils/output.ts";
+import { shouldSkipRuntimeReadinessForTool } from "../../config/runtime-env.ts";
 
 export default defineCommand({
   meta: { description: "声明式调用 Agent 的指定 tool" },
@@ -67,19 +74,33 @@ export default defineCommand({
       );
 
       // 4. 列出 tools 验证目标 tool 存在
-      const { tools } = await client.listTools();
-      const targetTool = tools.find((t) => t.name === args.tool);
+      const tools = normalizeListedTools((await client.listTools()).tools);
+      const targetTool = tools.find((tool) => tool.name === args.tool);
       if (!targetTool) {
-        const available = tools.map((t) => t.name).join(", ");
-        log.error(`Tool "${args.tool}" 不存在。可用 tools: ${available}`);
+        log.error(formatMissingToolMessage(agent.skill.name, args.tool, tools));
         process.exitCode = 1;
         return;
       }
 
-      const preflightResult = preflightToolCall(targetTool, toolArgs);
+      const envReport = inspectAgentEnvRequirements(
+        agent.skill.name,
+        agent.skill.env,
+        config.agents.env,
+      );
+      const runtimeIssues = shouldSkipRuntimeReadinessForTool(targetTool.name)
+        ? []
+        : getMissingAgentEnvRuntimeIssues(envReport);
+      const preflightResult = preflightToolCall(targetTool, toolArgs, {
+        runtimeIssues,
+      });
       if (!preflightResult.ok) {
         log.error(
-          formatValidationIssuesMessage(agent.skill.name, args.tool, preflightResult.issues),
+          formatValidationIssuesMessage(
+            agent.skill.name,
+            args.tool,
+            preflightResult.issues,
+            preflightResult.runtimeIssues,
+          ),
         );
         process.exitCode = 1;
         return;
@@ -95,19 +116,16 @@ export default defineCommand({
       // 6. 输出结果（stdout，不经过 log）
       if (args.json) {
         console.log(JSON.stringify(result, null, 2));
-      } else if (Array.isArray(result.content)) {
-        for (const content of result.content) {
-          if (
-            typeof content === "object" &&
-            content !== null &&
-            "type" in content &&
-            content.type === "text" &&
-            "text" in content &&
-            typeof content.text === "string"
-          ) {
-            console.log(content.text);
-          }
+      } else {
+        for (const text of extractTextContent(result.content)) {
+          console.log(text);
         }
+      }
+
+      if (isToolErrorResult(result)) {
+        log.error("tool 返回 isError=true");
+        process.exitCode = 1;
+        return;
       }
 
       log.success("调用完成");

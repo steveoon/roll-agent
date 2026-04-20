@@ -5,7 +5,7 @@ import {
   getCurrentZhipinRecruiterIdentity,
   matchesRecruiterBinding,
 } from "../pages/zhipin/recruiter-identity.ts";
-import { getContextManager } from "../runtime-holder.ts";
+import { getContextManager, getReplyAuthorityKeysLoaded } from "../runtime-holder.ts";
 import { randomDelay, humanDelay } from "../pages/zhipin/anti-detection.ts";
 import { ensureChatListLoaded, ensureChatOpen } from "../pages/zhipin/chat-navigation.ts";
 import {
@@ -35,6 +35,14 @@ export const zhipinSendReply = defineTool({
   output: OutputSchema,
   execute: async (input, ctx) => {
     let sentMessage = "";
+
+    if (!getReplyAuthorityKeysLoaded()) {
+      const error =
+        "Reply Authority 公钥尚未成功预加载，当前无法发送签名回复。请检查启动日志、" +
+        "`REPLY_AUTHORITY_KEYS_URL` 配置，以及 `browser_status.replyAuthorityKeysLoaded`。";
+      ctx.logger.error(error);
+      return { success: false, sentMessage, error };
+    }
 
     const ctxManager = getContextManager();
     const page = await ctxManager.getPage("zhipin");
