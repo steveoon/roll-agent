@@ -5,6 +5,7 @@ import {
   getMissingAgentEnvRuntimeIssues,
   inspectAgentEnvRequirements,
 } from "../../config/helpers.ts";
+import { shouldSkipRuntimeReadinessForTool } from "../../config/runtime-env.ts";
 import { createProviderModel, resolveLLMCall } from "../../llm/providers.ts";
 import { McpClientManager } from "../../mcp/client-manager.ts";
 import { AgentStore } from "../../registry/store.ts";
@@ -22,38 +23,10 @@ import type {
 } from "../../types/ask.ts";
 import { formatMissingToolMessage, normalizeListedTools } from "../utils/agent-tools.ts";
 import { log } from "../utils/output.ts";
+import { extractTextContent, isToolErrorResult } from "../utils/tool-results.ts";
 
 /** 默认确认阈值：低于此值时跳过执行 */
 const DEFAULT_CONFIRM_THRESHOLD = 0.5;
-
-function extractTextContent(content: unknown): string[] {
-  if (!Array.isArray(content)) {
-    return [];
-  }
-
-  const texts: string[] = [];
-  for (const item of content) {
-    if (
-      typeof item === "object" &&
-      item !== null &&
-      "type" in item &&
-      item.type === "text" &&
-      "text" in item &&
-      typeof item.text === "string"
-    ) {
-      texts.push(item.text);
-    }
-  }
-  return texts;
-}
-
-function isToolErrorResult(
-  result: unknown,
-): result is { readonly isError: true; readonly content?: unknown } {
-  return (
-    typeof result === "object" && result !== null && "isError" in result && result.isError === true
-  );
-}
 
 function printAskJson(result: AskCommandResult): void {
   console.log(JSON.stringify(result, null, 2));
@@ -222,8 +195,11 @@ export default defineCommand({
         agent.skill.env,
         config.agents.env,
       );
+      const runtimeIssues = shouldSkipRuntimeReadinessForTool(targetTool.name)
+        ? []
+        : getMissingAgentEnvRuntimeIssues(envReport);
       const preflightResult = preflightToolCall(targetTool, finalDecision.input, {
-        runtimeIssues: getMissingAgentEnvRuntimeIssues(envReport),
+        runtimeIssues,
       });
       if (!preflightResult.ok) {
         const result: AskNeedsInputResult = {

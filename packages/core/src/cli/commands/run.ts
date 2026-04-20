@@ -13,7 +13,9 @@ import { createProviderModel } from "../../llm/providers.ts";
 import { formatValidationIssuesMessage } from "../../tool-runtime/messages.ts";
 import { preflightToolCall } from "../../tool-runtime/preflight.ts";
 import { formatMissingToolMessage, normalizeListedTools } from "../utils/agent-tools.ts";
+import { extractTextContent, isToolErrorResult } from "../utils/tool-results.ts";
 import { log } from "../utils/output.ts";
+import { shouldSkipRuntimeReadinessForTool } from "../../config/runtime-env.ts";
 
 export default defineCommand({
   meta: { description: "声明式调用 Agent 的指定 tool" },
@@ -85,8 +87,11 @@ export default defineCommand({
         agent.skill.env,
         config.agents.env,
       );
+      const runtimeIssues = shouldSkipRuntimeReadinessForTool(targetTool.name)
+        ? []
+        : getMissingAgentEnvRuntimeIssues(envReport);
       const preflightResult = preflightToolCall(targetTool, toolArgs, {
-        runtimeIssues: getMissingAgentEnvRuntimeIssues(envReport),
+        runtimeIssues,
       });
       if (!preflightResult.ok) {
         log.error(
@@ -111,19 +116,16 @@ export default defineCommand({
       // 6. 输出结果（stdout，不经过 log）
       if (args.json) {
         console.log(JSON.stringify(result, null, 2));
-      } else if (Array.isArray(result.content)) {
-        for (const content of result.content) {
-          if (
-            typeof content === "object" &&
-            content !== null &&
-            "type" in content &&
-            content.type === "text" &&
-            "text" in content &&
-            typeof content.text === "string"
-          ) {
-            console.log(content.text);
-          }
+      } else {
+        for (const text of extractTextContent(result.content)) {
+          console.log(text);
         }
+      }
+
+      if (isToolErrorResult(result)) {
+        log.error("tool 返回 isError=true");
+        process.exitCode = 1;
+        return;
       }
 
       log.success("调用完成");

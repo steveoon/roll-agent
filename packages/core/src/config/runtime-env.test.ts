@@ -6,6 +6,7 @@ import {
   type AgentRuntimeEnvDiagnosticPayload,
   formatAgentEnvRuntimeStatus,
   inspectAgentRuntimeEnvRequirements,
+  shouldSkipRuntimeReadinessForTool,
   summarizeAgentRuntimeEnvReport,
   type AgentRuntimeEnvInspection,
 } from "./runtime-env.ts";
@@ -202,6 +203,12 @@ describe("config/runtime-env", () => {
     assert.equal(runtimeItem.runtime.fingerprint, undefined);
     assert.equal(runtimeItem.runtime.matchesAgentsEnv, false);
     assert.equal(formatAgentEnvRuntimeStatus(runtimeItem), "⚠ differs from yaml (ephemeral)");
+  });
+
+  it("skips runtime readiness checks only for diagnostic tools", () => {
+    assert.equal(shouldSkipRuntimeReadinessForTool("diagnostic_status"), true);
+    assert.equal(shouldSkipRuntimeReadinessForTool("browser_status"), true);
+    assert.equal(shouldSkipRuntimeReadinessForTool("generate_reply"), false);
   });
 });
 
