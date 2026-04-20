@@ -30,6 +30,9 @@ const PROXY_REQUEST = {
 const ORIGINAL_FETCH = globalThis.fetch;
 const ORIGINAL_URL = process.env.REPLY_AUTHORITY_URL;
 const ORIGINAL_TOKEN = process.env.REPLY_AUTHORITY_BEARER_TOKEN;
+const UUID_PATTERN =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+type ReplyAuthorityClientModule = typeof import("./reply-authority-client.ts");
 
 afterEach(() => {
   globalThis.fetch = ORIGINAL_FETCH;
@@ -46,7 +49,9 @@ describe("generateSignedReply", () => {
     delete process.env.REPLY_AUTHORITY_URL;
     process.env.REPLY_AUTHORITY_BEARER_TOKEN = "token";
 
-    const { generateSignedReply } = await import(`./reply-authority-client.ts?case=${Date.now()}`);
+    const { generateSignedReply } = (await import(
+      `./reply-authority-client.ts?case=${Date.now()}`
+    )) as ReplyAuthorityClientModule;
 
     await assert.rejects(
       async () => await generateSignedReply(VALID_REQUEST),
@@ -81,16 +86,22 @@ describe("generateSignedReply", () => {
       );
     };
 
-    const { generateSignedReply } = await import(`./reply-authority-client.ts?case=${Date.now()}`);
+    const { generateSignedReply } = (await import(
+      `./reply-authority-client.ts?case=${Date.now()}`
+    )) as ReplyAuthorityClientModule;
     const result = await generateSignedReply(VALID_REQUEST);
+    const headers = capturedInit?.headers as Record<string, string> | undefined;
+    const requestBody = JSON.parse(String(capturedInit?.body)) as Record<string, unknown>;
+    const requestId = headers?.["x-request-id"];
 
     assert.equal(capturedUrl, "https://reply-authority.duliday.com/generate-signed-reply");
     assert.equal(capturedInit?.method, "POST");
-    assert.equal(
-      (capturedInit?.headers as Record<string, string>)?.Authorization,
-      "Bearer client-token",
-    );
-    assert.deepEqual(JSON.parse(String(capturedInit?.body)), VALID_REQUEST);
+    assert.equal(headers?.Authorization, "Bearer client-token");
+    assert.match(requestId ?? "", UUID_PATTERN);
+    assert.deepEqual(requestBody, {
+      ...VALID_REQUEST,
+      requestId,
+    });
     assert.equal(result.signedEnvelope, "payload.signature");
     assert.equal(result.replyPolicySource, "file");
   });
@@ -99,11 +110,16 @@ describe("generateSignedReply", () => {
     process.env.REPLY_AUTHORITY_URL = "https://reply-authority.duliday.com";
     process.env.REPLY_AUTHORITY_BEARER_TOKEN = "client-token";
 
-    const requests: Array<{ url: string; body: unknown }> = [];
+    const requests: Array<{
+      url: string;
+      body: Record<string, unknown>;
+      headers: Record<string, string>;
+    }> = [];
     globalThis.fetch = async (input: string | URL | Request, init?: RequestInit) => {
       const url = String(input);
-      const body = JSON.parse(String(init?.body));
-      requests.push({ url, body });
+      const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      const headers = (init?.headers as Record<string, string>) ?? {};
+      requests.push({ url, body, headers });
 
       if (url.endsWith("/resolve-recruiter-binding")) {
         return new Response(
@@ -137,11 +153,15 @@ describe("generateSignedReply", () => {
       );
     };
 
-    const { generateSignedReply } = await import(`./reply-authority-client.ts?case=${Date.now()}`);
+    const { generateSignedReply } = (await import(
+      `./reply-authority-client.ts?case=${Date.now()}`
+    )) as ReplyAuthorityClientModule;
     const result = await generateSignedReply(PROXY_REQUEST);
 
     assert.equal(requests.length, 2);
     assert.equal(requests[0]?.url, "https://reply-authority.duliday.com/resolve-recruiter-binding");
+    assert.match(requests[0]?.headers["x-request-id"] ?? "", UUID_PATTERN);
+    assert.equal(requests[0]?.headers["x-request-id"], requests[1]?.headers["x-request-id"]);
     assert.deepEqual(requests[0]?.body, {
       platform: "zhipin",
       username: "recruiter-alice",
@@ -159,6 +179,7 @@ describe("generateSignedReply", () => {
           username: "recruiter-alice",
         },
       },
+      requestId: requests[1]?.headers["x-request-id"],
     });
     assert.equal(result.signedEnvelope, "payload.signature");
   });
@@ -182,7 +203,9 @@ describe("generateSignedReply", () => {
         },
       );
 
-    const { generateSignedReply } = await import(`./reply-authority-client.ts?case=${Date.now()}`);
+    const { generateSignedReply } = (await import(
+      `./reply-authority-client.ts?case=${Date.now()}`
+    )) as ReplyAuthorityClientModule;
 
     await assert.rejects(
       async () =>
@@ -214,11 +237,56 @@ describe("generateSignedReply", () => {
         },
       );
 
-    const { generateSignedReply } = await import(`./reply-authority-client.ts?case=${Date.now()}`);
+    const { generateSignedReply, ReplyAuthorityRequestError } = (await import(
+      `./reply-authority-client.ts?case=${Date.now()}`
+    )) as ReplyAuthorityClientModule;
 
-    await assert.rejects(
-      async () => await generateSignedReply(VALID_REQUEST),
-      /Reply Authority Service 请求失败 \(403\): tenant is not allowed/,
-    );
+    await assert.rejects(async () => await generateSignedReply(VALID_REQUEST), (error: unknown) => {
+      if (!(error instanceof ReplyAuthorityRequestError)) {
+        return false;
+      }
+      assert.match(error.message, /Reply Authority Service 请求失败 \(403\): tenant is not allowed/);
+      assert.match(error.message, /url=https:\/\/reply-authority\.duliday\.com\/generate-signed-reply/);
+      assert.match(error.message, /timeoutMs=20000/);
+      assert.match(error.message, /requestId=/);
+      assert.equal(
+        error.meta.url,
+        "https://reply-authority.duliday.com/generate-signed-reply",
+      );
+      assert.equal(error.meta.timeoutMs, 20_000);
+      assert.match(error.meta.requestId ?? "", UUID_PATTERN);
+      assert.ok(error.cause instanceof Error);
+      assert.match(error.cause.message, /tenant is not allowed/);
+      return true;
+    });
+  });
+
+  it("wraps AbortError with request metadata and preserves the cause", async () => {
+    process.env.REPLY_AUTHORITY_URL = "https://reply-authority.duliday.com";
+    process.env.REPLY_AUTHORITY_BEARER_TOKEN = "client-token";
+
+    globalThis.fetch = async () => {
+      throw new DOMException("This operation was aborted", "AbortError");
+    };
+
+    const { generateSignedReply, ReplyAuthorityRequestError } = (await import(
+      `./reply-authority-client.ts?case=${Date.now()}`
+    )) as ReplyAuthorityClientModule;
+
+    await assert.rejects(async () => await generateSignedReply(VALID_REQUEST), (error: unknown) => {
+      if (!(error instanceof ReplyAuthorityRequestError)) {
+        return false;
+      }
+      assert.match(error.message, /Reply Authority Service 请求超时。/);
+      assert.equal(
+        error.meta.url,
+        "https://reply-authority.duliday.com/generate-signed-reply",
+      );
+      assert.equal(error.meta.timeoutMs, 20_000);
+      assert.match(error.meta.requestId ?? "", UUID_PATTERN);
+      assert.ok(error.cause instanceof Error);
+      assert.equal(error.cause.name, "AbortError");
+      return true;
+    });
   });
 });

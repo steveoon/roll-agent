@@ -9,10 +9,12 @@ import type { BrowserRuntimeConfig } from "@roll-agent/browser";
 let runtime: BrowserRuntime | undefined;
 let contextManager: BrowserContextManager | undefined;
 let sessionStore: SessionStore | undefined;
+let replyAuthorityKeysLoaded = false;
 
 export async function initRuntime(config: BrowserRuntimeConfig): Promise<void> {
   if (runtime) return;
 
+  replyAuthorityKeysLoaded = false;
   sessionStore = new SessionStore(config.sessionsDir);
   runtime = new BrowserRuntime(config);
   await runtime.start();
@@ -40,6 +42,14 @@ export function getSessionStore(): SessionStore {
   return sessionStore;
 }
 
+export function setReplyAuthorityKeysLoaded(loaded: boolean): void {
+  replyAuthorityKeysLoaded = loaded;
+}
+
+export function getReplyAuthorityKeysLoaded(): boolean {
+  return replyAuthorityKeysLoaded;
+}
+
 export async function shutdownRuntime(): Promise<void> {
   if (contextManager) {
     console.error("[browser-use-agent] Closing browser contexts...");
@@ -52,5 +62,6 @@ export async function shutdownRuntime(): Promise<void> {
     runtime = undefined;
   }
   sessionStore = undefined;
+  replyAuthorityKeysLoaded = false;
   console.error("[browser-use-agent] Browser runtime shutdown complete");
 }

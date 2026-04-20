@@ -1,4 +1,4 @@
-import { defineAgent } from "@roll-agent/sdk";
+import { defineAgent, createAgentLogger } from "@roll-agent/sdk";
 import { BrowserRuntimeConfigSchema } from "@roll-agent/browser";
 import { attachBrowserSession } from "./tools/attach-browser-session.ts";
 import { browserStatus } from "./tools/browser-status.ts";
@@ -23,7 +23,9 @@ import { zhipinCloseResume } from "./tools/zhipin-close-resume.ts";
 import { yupaoReadMessages } from "./tools/yupao-read-messages.ts";
 import { yupaoSendReply } from "./tools/yupao-send-reply.ts";
 import { preloadReplyAuthorityKeys } from "./reply-authority/key-store.ts";
-import { initRuntime, shutdownRuntime } from "./runtime-holder.ts";
+import { initRuntime, setReplyAuthorityKeysLoaded, shutdownRuntime } from "./runtime-holder.ts";
+
+const logger = createAgentLogger("browser-use-agent");
 
 function parseBooleanEnv(value: string | undefined): boolean | undefined {
   if (value === undefined) return undefined;
@@ -102,13 +104,18 @@ const agent = defineAgent(
 
 async function main(): Promise<void> {
   await initRuntime(loadRuntimeConfigFromEnv());
-  await preloadReplyAuthorityKeys().catch((error: unknown) => {
-    console.error(
-      `[browser-use-agent] Failed to preload Reply Authority keys: ${
-        error instanceof Error ? error.message : String(error)
-      }`,
+
+  try {
+    await preloadReplyAuthorityKeys();
+    setReplyAuthorityKeysLoaded(true);
+  } catch (error) {
+    setReplyAuthorityKeysLoaded(false);
+    logger.error(
+      `Failed to preload Reply Authority keys during startup; ` +
+        `browser_status.replyAuthorityKeysLoaded=false. ` +
+        `${error instanceof Error ? error.stack ?? error.message : String(error)}`,
     );
-  });
+  }
 
   // 以 HTTP 模式启动 MCP Server
   await agent.listen({
@@ -121,7 +128,7 @@ async function main(): Promise<void> {
 }
 
 main().catch(async (err: unknown) => {
-  console.error("Fatal error:", err);
+  logger.error(`Fatal error: ${err instanceof Error ? err.stack ?? err.message : String(err)}`);
   await shutdownRuntime().catch(() => {});
   process.exit(1);
 });

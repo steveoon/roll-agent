@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import {
   GenerateReplyToolInputSchema,
   ResolveRecruiterBindingRequestSchema,
@@ -21,6 +22,32 @@ interface ReplyAuthorityConfig {
   readonly bearerToken: string;
 }
 
+interface ReplyAuthorityRequestMeta {
+  readonly url: string;
+  readonly timeoutMs: number;
+  readonly requestId?: string;
+}
+
+interface ReplyAuthorityRequestContext {
+  readonly signal: AbortSignal;
+  readonly timeoutMs: number;
+  readonly requestId: string;
+}
+
+interface ReplyAuthorityRequestErrorOptions extends ErrorOptions {
+  readonly meta: ReplyAuthorityRequestMeta;
+}
+
+export class ReplyAuthorityRequestError extends Error {
+  readonly meta: ReplyAuthorityRequestMeta;
+
+  constructor(message: string, options: ReplyAuthorityRequestErrorOptions) {
+    super(`${message} (${formatRequestMeta(options.meta)})`, { cause: options.cause });
+    this.name = "ReplyAuthorityRequestError";
+    this.meta = options.meta;
+  }
+}
+
 function getRequiredEnv(name: "REPLY_AUTHORITY_URL" | "REPLY_AUTHORITY_BEARER_TOKEN"): string {
   const value = process.env[name]?.trim();
   if (!value) {
@@ -41,10 +68,14 @@ function buildEndpoint(baseUrl: string, pathname: string): string {
   return new URL(pathname, normalizedBaseUrl).toString();
 }
 
-function buildHeaders(config: ReplyAuthorityConfig): Record<string, string> {
+function buildHeaders(
+  config: ReplyAuthorityConfig,
+  requestContext: ReplyAuthorityRequestContext,
+): Record<string, string> {
   return {
     "Content-Type": "application/json",
     Authorization: `Bearer ${config.bearerToken}`,
+    "x-request-id": requestContext.requestId,
   };
 }
 
@@ -55,6 +86,42 @@ function parseErrorMessage(status: number, payload: unknown): string {
   }
 
   return `Reply Authority Service 请求失败 (${status})`;
+}
+
+function formatRequestMeta(meta: ReplyAuthorityRequestMeta): string {
+  const details = [`url=${meta.url}`, `timeoutMs=${String(meta.timeoutMs)}`];
+  if (meta.requestId !== undefined) {
+    details.push(`requestId=${meta.requestId}`);
+  }
+  return details.join(", ");
+}
+
+function wrapReplyAuthorityRequestError(
+  error: unknown,
+  meta: ReplyAuthorityRequestMeta,
+): ReplyAuthorityRequestError {
+  if (error instanceof ReplyAuthorityRequestError) {
+    return error;
+  }
+
+  if (error instanceof Error && error.name === "AbortError") {
+    return new ReplyAuthorityRequestError("Reply Authority Service 请求超时。", {
+      cause: error,
+      meta,
+    });
+  }
+
+  if (error instanceof Error) {
+    return new ReplyAuthorityRequestError(error.message, {
+      cause: error,
+      meta,
+    });
+  }
+
+  return new ReplyAuthorityRequestError("Reply Authority Service 请求失败。", {
+    cause: error,
+    meta,
+  });
 }
 
 async function parseJsonResponse(response: Response): Promise<unknown> {
@@ -74,21 +141,31 @@ async function postJson(
   config: ReplyAuthorityConfig,
   pathname: string,
   body: unknown,
-  signal: AbortSignal,
+  requestContext: ReplyAuthorityRequestContext,
 ): Promise<unknown> {
-  const response = await fetch(buildEndpoint(config.baseUrl, pathname), {
-    method: "POST",
-    headers: buildHeaders(config),
-    body: JSON.stringify(body),
-    signal,
-  });
+  const url = buildEndpoint(config.baseUrl, pathname);
 
-  const payload = await parseJsonResponse(response);
-  if (!response.ok) {
-    throw new Error(parseErrorMessage(response.status, payload));
+  try {
+    const response = await fetch(url, {
+      method: "POST",
+      headers: buildHeaders(config, requestContext),
+      body: JSON.stringify(body),
+      signal: requestContext.signal,
+    });
+
+    const payload = await parseJsonResponse(response);
+    if (!response.ok) {
+      throw new Error(parseErrorMessage(response.status, payload));
+    }
+
+    return payload;
+  } catch (error) {
+    throw wrapReplyAuthorityRequestError(error, {
+      url,
+      timeoutMs: requestContext.timeoutMs,
+      requestId: requestContext.requestId,
+    });
   }
-
-  return payload;
 }
 
 function buildResolveRecruiterBindingRequest(
@@ -103,10 +180,10 @@ function buildResolveRecruiterBindingRequest(
 async function resolveRecruiterBinding(
   config: ReplyAuthorityConfig,
   target: ReplyAuthorityTarget,
-  signal: AbortSignal,
+  requestContext: ReplyAuthorityRequestContext,
 ): Promise<ResolveRecruiterBindingResponse> {
   const request = buildResolveRecruiterBindingRequest(target);
-  const payload = await postJson(config, "resolve-recruiter-binding", request, signal);
+  const payload = await postJson(config, "resolve-recruiter-binding", request, requestContext);
   return ResolveRecruiterBindingResponseSchema.parse(payload);
 }
 
@@ -129,7 +206,7 @@ function resolveTargetOrThrow(
 async function buildGenerateSignedReplyRequest(
   input: GenerateReplyToolInput,
   config: ReplyAuthorityConfig,
-  signal: AbortSignal,
+  requestContext: ReplyAuthorityRequestContext,
 ): Promise<GenerateSignedReplyRequest> {
   if (input.target.recruiterBinding !== undefined && input.target.tenantId !== undefined) {
     return GenerateSignedReplyRequestSchema.parse({
@@ -141,10 +218,11 @@ async function buildGenerateSignedReplyRequest(
         candidateId: input.target.candidateId,
         recruiterBinding: input.target.recruiterBinding,
       },
+      requestId: requestContext.requestId,
     });
   }
 
-  const resolved = await resolveRecruiterBinding(config, input.target, signal);
+  const resolved = await resolveRecruiterBinding(config, input.target, requestContext);
   const resolvedTarget = resolveTargetOrThrow(resolved, input.target);
 
   return GenerateSignedReplyRequestSchema.parse({
@@ -156,6 +234,7 @@ async function buildGenerateSignedReplyRequest(
       candidateId: input.target.candidateId,
       recruiterBinding: resolvedTarget.recruiterBinding,
     },
+    requestId: requestContext.requestId,
   });
 }
 
@@ -166,19 +245,22 @@ export async function generateSignedReply(
   const parsedInput = GenerateSignedReplyRequestSchema.safeParse(parsedToolInput);
   const config = loadReplyAuthorityConfig();
   const controller = new AbortController();
+  const requestContext = {
+    signal: controller.signal,
+    timeoutMs: REQUEST_TIMEOUT_MS,
+    requestId: randomUUID(),
+  } as const;
   const timeoutId = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
 
   try {
     const request = parsedInput.success
-      ? parsedInput.data
-      : await buildGenerateSignedReplyRequest(parsedToolInput, config, controller.signal);
-    const payload = await postJson(config, "generate-signed-reply", request, controller.signal);
+      ? GenerateSignedReplyRequestSchema.parse({
+          ...parsedInput.data,
+          requestId: parsedInput.data.requestId ?? requestContext.requestId,
+        })
+      : await buildGenerateSignedReplyRequest(parsedToolInput, config, requestContext);
+    const payload = await postJson(config, "generate-signed-reply", request, requestContext);
     return GenerateSignedReplyResponseSchema.parse(payload);
-  } catch (error) {
-    if (error instanceof Error && error.name === "AbortError") {
-      throw new Error("Reply Authority Service 请求超时。");
-    }
-    throw error;
   } finally {
     clearTimeout(timeoutId);
   }
