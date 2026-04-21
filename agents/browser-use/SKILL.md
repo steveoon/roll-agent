@@ -58,7 +58,7 @@ metadata:
    - 严禁把通用岗位名（如“餐饮兼职服务员”“门店服务员”）或 `zhipin_get_candidate_list.company`（候选人现/前雇主）伪装成 `preferredBrand`
 5. `smart-reply-agent.generate_reply(..., target)` → 获取 `suggestedReply + signedEnvelope`
 6. `zhipin_send_reply(signedEnvelope)` → 验签、校验 recruiterBinding 后发送回复
-6. `zhipin_exchange_wechat` → 交换微信（可选）
+7. `zhipin_exchange_wechat` → 交换微信（可选）
 
 ## 支持平台
 
