@@ -37,6 +37,12 @@ npm 包名：`@roll-agent/smart-reply-agent`
   1. 直接传完整绑定：`tenantId + recruiterBinding`
   2. 便利代理模式：`recruiterUsername`（smart-reply 会先调用 `POST /resolve-recruiter-binding` 解析出 `tenantId + recruiterBinding`）
 
+  招聘场景调用约束：
+
+  - 调用前应先尝试从页面读取 `preferredBrand`、`candidateInfo.communicationPosition`、`candidateInfo.expectedLocation`、`candidateInfo.expectedPosition`
+  - 能读到就如实透传；读不到就省略该字段
+  - 严禁把通用岗位名（如“餐饮兼职服务员”“门店服务员”）或候选人现/前雇主公司名塞进 `preferredBrand`
+
   Minimal valid input 示例（代理模式）：
 
   ```json
@@ -75,6 +81,7 @@ npm 包名：`@roll-agent/smart-reply-agent`
 - 实际回复生成、reply-policy、FactGate、ReplyGate、年龄校验都在云端执行
 - 返回的 `signedEnvelope` 为 v2 信封，已绑定 `tenantId + recruiterBinding + conversationId + candidateId`，供 `browser-use-agent.zhipin_send_reply` 本地验签后发送
 - 调用失败时抛 `ReplyAuthorityRequestError`，携带 `meta: {url, timeoutMs, requestId}` 与 `Error.cause` 链。通过 `roll run` 运行时 stderr 会展开 `cause: ...` 行用于定位；透传的 `x-request-id` 可跨服务端追踪
+- `diagnostics.brandResolutionSource="none"`、`diagnostics.resolvedBrand=""`、`diagnostics.ageGate.status="unknown"` 都是合法服务端结果，不代表 tool 调用失败。是否补问用户或转人工，是 orch 层策略，不是本 Agent 的重试条件
 
 ## Environment Variables
 
@@ -88,11 +95,17 @@ npm 包名：`@roll-agent/smart-reply-agent`
 
 1. `browser-use-agent.zhipin_get_username()` → 获取当前 BOSS 账号 `username`
 2. `browser-use-agent` 读取候选人资料、聊天记录或当前页面上下文，并从 `zhipin_read_messages` / `zhipin_get_candidate_info` 获取 `conversationId + candidateId`
-3. 调用 `smart-reply-agent.generate_reply(..., target)`：
+3. 调用前先尝试补齐页面信号：
+   - `preferredBrand`：仅当页面里有明确品牌词时传
+   - `candidateInfo.communicationPosition`
+   - `candidateInfo.expectedLocation`
+   - `candidateInfo.expectedPosition`
+   - 如果读不到，保持缺省；不要用通用岗位名或候选人公司名冒充品牌
+4. 调用 `smart-reply-agent.generate_reply(..., target)`：
    - 直接模式：传 `target.tenantId + target.recruiterBinding`
    - 代理模式：只传 `target.recruiterUsername=username`，由 smart-reply 代调用 `POST /resolve-recruiter-binding`
-4. `smart-reply-agent.generate_reply(..., target)` 获取 `suggestedReply + signedEnvelope`
-5. `browser-use-agent.zhipin_send_reply(signedEnvelope)` 本地验签并校验 recruiter 绑定后发送
+5. `smart-reply-agent.generate_reply(..., target)` 获取 `suggestedReply + signedEnvelope`
+6. `browser-use-agent.zhipin_send_reply(signedEnvelope)` 本地验签并校验 recruiter 绑定后发送
 
 ## Recommended roll.config.yaml
 
