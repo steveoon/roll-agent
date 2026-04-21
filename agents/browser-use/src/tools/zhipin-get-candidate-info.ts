@@ -3,6 +3,7 @@ import { z } from "zod";
 import { getContextManager } from "../runtime-holder.ts";
 import { getSelectedChatTarget } from "../pages/zhipin/chat-target.ts";
 import { ensureChatOpen } from "../pages/zhipin/chat-navigation.ts";
+import { resolveConversationSignals } from "../pages/zhipin/job-signals.ts";
 
 const ChatMessageSchema = z.object({
   index: z.number(),
@@ -29,6 +30,7 @@ const OutputSchema = z.object({
   conversationId: z.string(),
   candidateId: z.string(),
   candidateInfo: CandidateInfoSchema,
+  preferredBrand: z.string().optional(),
   chatMessages: z.array(ChatMessageSchema),
   formattedHistory: z.array(z.string()),
   stats: z.object({
@@ -132,13 +134,10 @@ export const zhipinGetCandidateInfo = defineTool({
         communicationPosition = cloned.textContent?.trim() ?? "";
       }
 
-      let expectedPosition = "";
-      let expectedLocation = "";
+      let expectedJobText = "";
       const expectValue = document.querySelector(".position-item.expect .value.job");
       if (expectValue) {
-        const parts = (expectValue.textContent?.trim() ?? "").split("·").map((s) => s.trim());
-        expectedLocation = parts[0] ?? "";
-        expectedPosition = parts[1] ?? "";
+        expectedJobText = expectValue.textContent?.trim() ?? "";
       }
       const expectedSalary =
         document.querySelector(".position-item.expect .high-light-orange")?.textContent?.trim() ??
@@ -245,14 +244,18 @@ export const zhipinGetCandidateInfo = defineTool({
           experience,
           education,
           communicationPosition,
-          expectedPosition,
-          expectedLocation,
+          expectedJobText,
           expectedSalary,
           tags,
         },
         messages,
       };
     }, maxMessages);
+
+    const signals = resolveConversationSignals({
+      communicationPosition: data.candidateInfo.communicationPosition,
+      expectedJobText: data.candidateInfo.expectedJobText,
+    });
 
     // formattedHistory 只保留 candidate + recruiter 对话，过滤系统消息噪音
     const formattedHistory = data.messages
@@ -276,7 +279,18 @@ export const zhipinGetCandidateInfo = defineTool({
       success: true,
       conversationId: selectedTarget?.conversationId ?? "",
       candidateId: selectedTarget?.candidateId ?? "",
-      candidateInfo: data.candidateInfo,
+      candidateInfo: {
+        name: data.candidateInfo.name,
+        age: data.candidateInfo.age,
+        experience: data.candidateInfo.experience,
+        education: data.candidateInfo.education,
+        communicationPosition: signals.communicationPosition,
+        expectedPosition: signals.expectedPosition,
+        expectedLocation: signals.expectedLocation,
+        expectedSalary: data.candidateInfo.expectedSalary,
+        tags: data.candidateInfo.tags,
+      },
+      ...(signals.preferredBrand !== undefined ? { preferredBrand: signals.preferredBrand } : {}),
       chatMessages: data.messages,
       formattedHistory,
       stats,
