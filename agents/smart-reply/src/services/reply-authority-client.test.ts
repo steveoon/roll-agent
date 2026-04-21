@@ -27,6 +27,16 @@ const PROXY_REQUEST = {
   },
 };
 
+const ENRICHED_REQUEST = {
+  ...VALID_REQUEST,
+  candidateInfo: {
+    communicationPosition: "餐饮兼职服务员",
+    expectedLocation: "上海",
+    expectedPosition: "服务员",
+  },
+  preferredBrand: "肯德基",
+};
+
 const ORIGINAL_FETCH = globalThis.fetch;
 const ORIGINAL_URL = process.env.REPLY_AUTHORITY_URL;
 const ORIGINAL_TOKEN = process.env.REPLY_AUTHORITY_BEARER_TOKEN;
@@ -108,6 +118,44 @@ describe("generateSignedReply", () => {
     });
     assert.equal(result.signedEnvelope, "payload.signature");
     assert.equal(result.replyPolicySource, "file");
+  });
+
+  it("forwards preferredBrand and candidateInfo signals without local guessing", async () => {
+    process.env.REPLY_AUTHORITY_URL = "https://reply-authority.duliday.com";
+    process.env.REPLY_AUTHORITY_BEARER_TOKEN = "client-token";
+
+    let capturedInit: RequestInit | undefined;
+    globalThis.fetch = async (_input: string | URL | Request, init?: RequestInit) => {
+      capturedInit = init;
+
+      return new Response(
+        JSON.stringify({
+          suggestedReply: "请问您更方便在哪个区域面试？",
+          signedEnvelope: "payload.signature",
+          envelopeExp: 1712736600,
+          confidence: 0.82,
+          stage: "job_consultation",
+          replyPolicySource: "file",
+        }),
+        {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        },
+      );
+    };
+
+    const { generateSignedReply } = (await import(
+      `./reply-authority-client.ts?case=${Date.now()}`
+    )) as ReplyAuthorityClientModule;
+    await generateSignedReply(ENRICHED_REQUEST);
+
+    const headers = capturedInit?.headers as Record<string, string> | undefined;
+    const requestBody = JSON.parse(String(capturedInit?.body)) as Record<string, unknown>;
+
+    assert.deepEqual(requestBody, {
+      ...ENRICHED_REQUEST,
+      requestId: headers?.["x-request-id"],
+    });
   });
 
   it("resolves recruiter binding before signing when only recruiterUsername is provided", async () => {
