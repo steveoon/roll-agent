@@ -1,5 +1,15 @@
 # smart-reply-agent
 
+## 1.2.1
+
+### Patch Changes
+
+- [#56](https://github.com/steveoon/roll-agent/pull/56) [`51a83d6`](https://github.com/steveoon/roll-agent/commit/51a83d62863d6f4a6eb7f0d142240b603065a6a0) Thanks [@steveoon](https://github.com/steveoon)! - feat(smart-reply): make Reply Authority HTTP timeout configurable via `REPLY_AUTHORITY_TIMEOUT_MS`
+  - 新增可选环境变量 `REPLY_AUTHORITY_TIMEOUT_MS`，支持通过 `agents.env.smart-reply-agent` 注入，覆盖默认超时
+  - 默认超时从 20_000ms 调整为 30_000ms（更贴近真实网络波动下 Reply Authority Service 的响应分布）
+  - 严格解析：非正整数、含空白或科学记数法等非规范值会静默回落到默认，避免意外的短超时
+  - `diagnostic_status` 诊断 tool 会返回该 env 的 `{present, fingerprint}`，`roll agent info` 据此展示 `未设置（使用默认值）` / `✓ from yaml (stable)` / `⚠ from shell (ephemeral)` 等漂移标签
+
 ## 1.2.0
 
 ### Minor Changes
