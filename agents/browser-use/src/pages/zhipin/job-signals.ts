@@ -1,46 +1,20 @@
-const BRAND_ALIAS_TO_NAME = {
-  KFC: "肯德基",
-  kfc: "肯德基",
-  肯德基: "肯德基",
-  McCafe: "麦咖啡",
-  mccafe: "麦咖啡",
-  MCDONALDS: "麦当劳",
-  McDonalds: "麦当劳",
-  Mcdonalds: "麦当劳",
-  mcdonalds: "麦当劳",
-  麦当劳: "麦当劳",
-  必胜客: "必胜客",
-  PizzaHut: "必胜客",
-  pizzahut: "必胜客",
-  星巴克: "星巴克",
-  Starbucks: "星巴克",
-  starbucks: "星巴克",
-} as const;
-
-const COMMUNICATION_POSITION_SEPARATOR = /[\s\-－—–]+/;
 const EXPECTED_JOB_SEPARATOR = "·";
+const BRAND_POSITION_SEPARATOR = /[-－—–]/;
 
 function normalizeText(value: string | null | undefined): string {
   return (value ?? "").trim();
 }
 
-function extractFirstSegment(value: string): string {
-  const [firstSegment = ""] = value.split(COMMUNICATION_POSITION_SEPARATOR);
-  return normalizeText(firstSegment);
-}
-
 export function resolvePreferredBrand(communicationPosition: string): string | undefined {
   const normalizedPosition = normalizeText(communicationPosition);
-  if (!normalizedPosition) {
+  if (!normalizedPosition || !BRAND_POSITION_SEPARATOR.test(normalizedPosition)) {
     return undefined;
   }
 
-  const firstSegment = extractFirstSegment(normalizedPosition);
-  if (!firstSegment) {
-    return undefined;
-  }
+  const [preferredBrand = ""] = normalizedPosition.split(BRAND_POSITION_SEPARATOR);
+  const normalizedBrand = normalizeText(preferredBrand);
 
-  return BRAND_ALIAS_TO_NAME[firstSegment as keyof typeof BRAND_ALIAS_TO_NAME];
+  return normalizedBrand || undefined;
 }
 
 export function resolveExpectedSignals(expectedJobText: string): {
