@@ -226,6 +226,18 @@ roll doctor --json              JSON 诊断结果（配置损坏时返回非零�
 - 只知道自然语言意图时使用 `roll ask --json`
 - 不要默认使用 `roll chat`，它当前仍是 experimental
 
+### 招聘回复编排约定
+
+当上层 orch 组合 `browser-use-agent` 与 `smart-reply-agent` 处理 BOSS 直聘聊天时：
+
+- 调 `smart-reply-agent.generate_reply` 前，先尝试从页面读取并透传：
+  - `candidateInfo.communicationPosition`
+  - `candidateInfo.expectedLocation`
+  - `candidateInfo.expectedPosition`
+- `preferredBrand`：`zhipin_get_candidate_info` 在 `communicationPosition` 含连字符类分隔符（`-` / `－` / `—` / `–`）时自动取第一段透传，例如"肯德基-服务员"→`preferredBrand: "肯德基"`；无分隔符时不输出；服务端也会基于租户配置做品牌解析，两者互补
+- 严禁把通用岗位名（如“餐饮兼职服务员”“门店服务员”）或候选人现/前雇主公司名当作 `preferredBrand`
+- `diagnostics.brandResolutionSource="none"` 是合法结果，不是调用失败；是否补问用户或转人工，由 orch 自己决定
+
 可直接参考模板：[openclaw-roll-core-skill-template/SKILL.md](./openclaw-roll-core-skill-template/SKILL.md)。
 
 如果只想单独拉取这个 skill 模板目录，可用 sparse-checkout：

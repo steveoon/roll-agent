@@ -29,7 +29,7 @@ metadata:
 
 - `zhipin_read_messages(limit?, onlyUnread?, sortBy?)` — 读取消息列表中的候选人，返回姓名、消息摘要，以及 `conversationId` / `candidateId`
 - `zhipin_open_chat(candidateName?, index?, preferUnread?)` — 打开指定候选人的聊天窗口（按姓名模糊匹配或列表索引）
-- `zhipin_get_candidate_info(candidateName?, index?, maxMessages?)` — 提取候选人资料、聊天记录，以及当前选中聊天的 `conversationId` / `candidateId`
+- `zhipin_get_candidate_info(candidateName?, index?, maxMessages?)` — 提取候选人资料、聊天记录，以及当前选中聊天的 `conversationId` / `candidateId`。输出里的 `candidateInfo.communicationPosition`、`candidateInfo.expectedLocation`、`candidateInfo.expectedPosition` 已按“沟通职位 + 最近关注”结构化解析；若 `communicationPosition` 含连字符类分隔符（`-` / `－` / `—` / `–`），则取第一段作为可选 `preferredBrand`，否则不输出该字段
 - `zhipin_send_reply(signedEnvelope, candidateName?, index?)` — 发送消息。只接受 Reply Authority Service 签发的 `signedEnvelope`；本地会先做 Ed25519 验签、过期检查、重放检查、目标绑定校验和 recruiter 绑定校验。启动期公钥预加载失败时直接前置拒绝，错误指向 `browser_status.replyAuthorityKeysLoaded`
 - `zhipin_exchange_wechat(candidateName?, index?)` — 换微信。指定 candidateName 会自动打开对应聊天后执行
 - `zhipin_get_username()` — 获取当前登录的招聘者用户名，返回 `username`（依赖当前 runtime 已跟踪页面；首次使用请先 `open_platform`，已打开但未跟踪页面可先 `list_pages + select_page`，确认登录后如需单独验证 attach，可先调用 `attach_browser_session`）。常用于 recruiter binding 解析和外部通知消息中的账号标识
@@ -52,9 +52,14 @@ metadata:
 1. `zhipin_read_messages` → 获取未读候选人列表
 2. `zhipin_open_chat(candidateName)` → 打开某人的聊天
 3. `zhipin_get_candidate_info` → 查看候选人资料、聊天记录，并拿到 `conversationId` / `candidateId`
-4. `smart-reply-agent.generate_reply(..., target)` → 获取 `suggestedReply + signedEnvelope`
-5. `zhipin_send_reply(signedEnvelope)` → 验签、校验 recruiterBinding 后发送回复
-6. `zhipin_exchange_wechat` → 交换微信（可选）
+4. 调 `smart-reply-agent.generate_reply` 前，先尝试透传以下信号：
+   - 能读到就传：`candidateInfo.communicationPosition`、`candidateInfo.expectedLocation`、`candidateInfo.expectedPosition`
+   - 读不到就如实不传
+   - `preferredBrand`：仅当 `communicationPosition` 含连字符类分隔符（`-` / `－` / `—` / `–`）时，取第一段透传；没有分隔符就不传
+   - 严禁把通用岗位名（如“餐饮兼职服务员”“门店服务员”）或 `zhipin_get_candidate_list.company`（候选人现/前雇主）伪装成 `preferredBrand`
+5. `smart-reply-agent.generate_reply(..., target)` → 获取 `suggestedReply + signedEnvelope`
+6. `zhipin_send_reply(signedEnvelope)` → 验签、校验 recruiterBinding 后发送回复
+7. `zhipin_exchange_wechat` → 交换微信（可选）
 
 ## 支持平台
 
