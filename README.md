@@ -231,14 +231,12 @@ roll doctor --json              JSON 诊断结果（配置损坏时返回非零�
 当上层 orch 组合 `browser-use-agent` 与 `smart-reply-agent` 处理 BOSS 直聘聊天时：
 
 - 调 `smart-reply-agent.generate_reply` 前，先尝试从页面读取并透传：
-  - `preferredBrand`
   - `candidateInfo.communicationPosition`
   - `candidateInfo.expectedLocation`
   - `candidateInfo.expectedPosition`
-- `preferredBrand` 只在页面里有明确品牌词时才传；读不到就不传
+- `preferredBrand`：`zhipin_get_candidate_info` 在 `communicationPosition` 含连字符类分隔符（`-` / `－` / `—` / `–`）时自动取第一段透传，例如"肯德基-服务员"→`preferredBrand: "肯德基"`；无分隔符时不输出；服务端也会基于租户配置做品牌解析，两者互补
 - 严禁把通用岗位名（如“餐饮兼职服务员”“门店服务员”）或候选人现/前雇主公司名当作 `preferredBrand`
 - `diagnostics.brandResolutionSource="none"` 是合法结果，不是调用失败；是否补问用户或转人工，由 orch 自己决定
-- 当前 `browser-use-agent.zhipin_get_candidate_info` 会保守输出上述岗位/城市信号，并仅在沟通职位首段显式命中品牌白名单时返回 `preferredBrand`
 
 可直接参考模板：[openclaw-roll-core-skill-template/SKILL.md](./openclaw-roll-core-skill-template/SKILL.md)。
 

@@ -39,8 +39,9 @@ npm 包名：`@roll-agent/smart-reply-agent`
 
   招聘场景调用约束：
 
-  - 调用前应先尝试从页面读取 `preferredBrand`、`candidateInfo.communicationPosition`、`candidateInfo.expectedLocation`、`candidateInfo.expectedPosition`
+  - 调用前应先尝试从页面读取 `candidateInfo.communicationPosition`、`candidateInfo.expectedLocation`、`candidateInfo.expectedPosition`
   - 能读到就如实透传；读不到就省略该字段
+  - `preferredBrand` 为可选页面信号：若 `browser-use-agent` 提取到的 `communicationPosition` 含连字符类分隔符（`-` / `－` / `—` / `–`），则取第一段透传；没有分隔符就省略该字段
   - 严禁把通用岗位名（如“餐饮兼职服务员”“门店服务员”）或候选人现/前雇主公司名塞进 `preferredBrand`
 
   Minimal valid input 示例（代理模式）：
@@ -96,10 +97,10 @@ npm 包名：`@roll-agent/smart-reply-agent`
 1. `browser-use-agent.zhipin_get_username()` → 获取当前 BOSS 账号 `username`
 2. `browser-use-agent` 读取候选人资料、聊天记录或当前页面上下文，并从 `zhipin_read_messages` / `zhipin_get_candidate_info` 获取 `conversationId + candidateId`
 3. 调用前先尝试补齐页面信号：
-   - `preferredBrand`：仅当页面里有明确品牌词时传
    - `candidateInfo.communicationPosition`
    - `candidateInfo.expectedLocation`
    - `candidateInfo.expectedPosition`
+   - `preferredBrand`：若 `browser-use-agent` 从 `communicationPosition` 里识别到“品牌-职位”格式，则透传第一段；否则保持缺省
    - 如果读不到，保持缺省；不要用通用岗位名或候选人公司名冒充品牌
 4. 调用 `smart-reply-agent.generate_reply(..., target)`：
    - 直接模式：传 `target.tenantId + target.recruiterBinding`
