@@ -37,6 +37,29 @@ const ENRICHED_REQUEST = {
   preferredBrand: "肯德基",
 };
 
+const GENERIC_SIGNAL_REQUEST = {
+  candidateMessage: "兼职怎么算的？两个人需要吗？",
+  conversationHistory: [
+    "我: 你好，我们正在诚招餐饮兼职服务员，想跟你沟通一下",
+    "候选人: 兼职怎么算的？",
+    "候选人: 两个人需要吗？",
+  ],
+  candidateInfo: {
+    name: "阳志园",
+    age: "24岁",
+    experience: "6年",
+    communicationPosition: "餐饮兼职服务员",
+    expectedLocation: "上海",
+    expectedPosition: "服务员",
+  },
+  target: {
+    platform: "zhipin" as const,
+    conversationId: "708401971-0",
+    candidateId: "708401971-0",
+    recruiterUsername: "任思文",
+  },
+};
+
 const ORIGINAL_FETCH = globalThis.fetch;
 const ORIGINAL_URL = process.env.REPLY_AUTHORITY_URL;
 const ORIGINAL_TOKEN = process.env.REPLY_AUTHORITY_BEARER_TOKEN;
@@ -155,6 +178,80 @@ describe("generateSignedReply", () => {
     assert.deepEqual(requestBody, {
       ...ENRICHED_REQUEST,
       requestId: headers?.["x-request-id"],
+    });
+  });
+
+  it("does not invent preferredBrand for generic job titles", async () => {
+    process.env.REPLY_AUTHORITY_URL = "https://reply-authority.duliday.com";
+    process.env.REPLY_AUTHORITY_BEARER_TOKEN = "client-token";
+
+    let capturedInit: RequestInit | undefined;
+    globalThis.fetch = async (_input: string | URL | Request, init?: RequestInit) => {
+      capturedInit = init;
+
+      if (String(_input).endsWith("/resolve-recruiter-binding")) {
+        return new Response(
+          JSON.stringify({
+            tenantId: "tenant-001",
+            recruiterBinding: {
+              platform: "zhipin",
+              username: "任思文",
+            },
+          }),
+          {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          },
+        );
+      }
+
+      return new Response(
+        JSON.stringify({
+          suggestedReply: "先和您确认下方便的门店区域，我再帮您继续对接。",
+          signedEnvelope: "payload.signature",
+          envelopeExp: 1712736600,
+          confidence: 0.72,
+          stage: "job_consultation",
+          replyPolicySource: "file",
+          diagnostics: {
+            brandResolutionSource: "none",
+            resolvedBrand: "",
+            ageGate: { status: "unknown" },
+          },
+        }),
+        {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        },
+      );
+    };
+
+    const { generateSignedReply } = (await import(
+      `./reply-authority-client.ts?case=${Date.now()}`
+    )) as ReplyAuthorityClientModule;
+    const result = await generateSignedReply(GENERIC_SIGNAL_REQUEST);
+
+    const requestBody = JSON.parse(String(capturedInit?.body)) as Record<string, unknown>;
+
+    assert.deepEqual(requestBody, {
+      ...GENERIC_SIGNAL_REQUEST,
+      target: {
+        platform: "zhipin",
+        tenantId: "tenant-001",
+        conversationId: "708401971-0",
+        candidateId: "708401971-0",
+        recruiterBinding: {
+          platform: "zhipin",
+          username: "任思文",
+        },
+      },
+      requestId: requestBody.requestId,
+    });
+    assert.equal("preferredBrand" in requestBody, false);
+    assert.deepEqual(result.diagnostics, {
+      brandResolutionSource: "none",
+      resolvedBrand: "",
+      ageGate: { status: "unknown" },
     });
   });
 
