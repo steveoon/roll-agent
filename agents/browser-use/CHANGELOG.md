@@ -1,5 +1,15 @@
 # @roll-agent/browser-use-agent
 
+## 0.7.1
+
+### Patch Changes
+
+- [#58](https://github.com/steveoon/roll-agent/pull/58) [`8a0dd50`](https://github.com/steveoon/roll-agent/commit/8a0dd50253cd452b3651950e69aa2d6a1b1ce20a) Thanks [@steveoon](https://github.com/steveoon)! - feat(browser-use): replace brand whitelist with hyphen-format preferredBrand extraction
+  - `zhipin_get_candidate_info` 现在通过连字符类分隔符（`-` / `－` / `—` / `–`）从 `communicationPosition` 提取 `preferredBrand`，不再依赖硬编码白名单
+  - 提取结果作为可选字段透传给 `generate_reply`，供 smart-reply-agent 做品牌锁定
+  - 新增 `resolvePreferredBrand()` / `resolveExpectedSignals()` 纯函数，`resolveConversationSignals()` 统一出口
+  - 移除 `BRAND_ALIAS_TO_NAME` 白名单和空格兼容分隔符逻辑
+
 ## 0.7.0
 
 ### Minor Changes
