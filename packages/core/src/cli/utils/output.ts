@@ -11,7 +11,11 @@ const LOG_LEVELS = {
   silent: 4,
 } as const;
 
-type LogLevel = keyof typeof LOG_LEVELS;
+export type LogLevel = keyof typeof LOG_LEVELS;
+
+const DEBUG_FLAGS = new Set(["--verbose", "-v"]);
+const SENSITIVE_KEY_PATTERN =
+  /signed[-_]?envelope|token|secret|password|cookie|authorization|api[-_]?key/i;
 
 /** 全局日志级别，可通过 setLogLevel 修改 */
 let currentLevel: LogLevel = "info";
@@ -19,6 +23,55 @@ let currentLevel: LogLevel = "info";
 /** 设置全局日志级别 */
 export function setLogLevel(level: LogLevel): void {
   currentLevel = level;
+}
+
+export function resolveLogLevelFromArgv(argv: readonly string[]): LogLevel {
+  return argv.some((arg) => DEBUG_FLAGS.has(arg)) ? "debug" : "info";
+}
+
+export function redactToolArgsForLog(value: unknown): unknown {
+  return redactValue(value);
+}
+
+function redactValue(value: unknown, key?: string): unknown {
+  if (key && SENSITIVE_KEY_PATTERN.test(key)) {
+    return summarizeRedactedValue(value);
+  }
+
+  if (Array.isArray(value)) {
+    return value.map((item) => redactValue(item));
+  }
+
+  if (isRecordObject(value)) {
+    const redacted: Record<string, unknown> = {};
+    for (const [entryKey, entryValue] of Object.entries(value)) {
+      redacted[entryKey] = redactValue(entryValue, entryKey);
+    }
+    return redacted;
+  }
+
+  return value;
+}
+
+function summarizeRedactedValue(value: unknown): string {
+  if (typeof value === "string") {
+    return `[redacted,len=${value.length}]`;
+  }
+
+  const serialized = safeStringify(value);
+  return serialized === undefined ? "[redacted]" : `[redacted,len=${serialized.length}]`;
+}
+
+function safeStringify(value: unknown): string | undefined {
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return undefined;
+  }
+}
+
+function isRecordObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function shouldLog(level: LogLevel): boolean {

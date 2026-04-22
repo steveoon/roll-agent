@@ -1,6 +1,7 @@
 import { defineCommand, runMain } from "citty";
 import chalk from "chalk";
 import { checkForUpdate, getCurrentVersion } from "./utils/update-checker.ts";
+import { resolveLogLevelFromArgv, setLogLevel } from "./utils/output.ts";
 
 const CLI_VERSION = getCurrentVersion();
 const commandExtension = import.meta.url.endsWith(".ts") ? "ts" : "js";
@@ -16,6 +17,14 @@ const main = defineCommand({
     version: CLI_VERSION,
     description: "花卷 Agent — 轻量级 Agent 编排系统",
   },
+  args: {
+    verbose: {
+      type: "boolean",
+      alias: "v",
+      description: "输出调试日志",
+      default: false,
+    },
+  },
   subCommands: {
     agent: () => loadMainCommand("agent"),
     run: () => loadMainCommand("run"),
@@ -29,6 +38,8 @@ const main = defineCommand({
 
 // 启动提示只读缓存，保证不阻塞 CLI 退出。
 const updateCheckPromise = checkForUpdate({ allowNetwork: false }).catch(() => undefined);
+
+setLogLevel(resolveLogLevelFromArgv(process.argv.slice(2)));
 
 runMain(main).then(() => {
   updateCheckPromise

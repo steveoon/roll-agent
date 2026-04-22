@@ -19,6 +19,28 @@ export function extractTextContent(content: unknown): string[] {
   return texts;
 }
 
+export function formatToolResultForJsonOutput(result: unknown): unknown {
+  if (typeof result !== "object" || result === null || !("content" in result)) {
+    return result;
+  }
+
+  const texts = extractTextContent(result.content);
+  if (texts.length !== 1) {
+    return result;
+  }
+
+  const [text] = texts;
+  if (text === undefined) {
+    return result;
+  }
+
+  try {
+    return JSON.parse(text) as unknown;
+  } catch {
+    return result;
+  }
+}
+
 export function isToolErrorResult(
   result: unknown,
 ): result is { readonly isError: true; readonly content?: unknown } {

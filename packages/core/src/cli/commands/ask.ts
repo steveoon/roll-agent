@@ -22,7 +22,7 @@ import type {
   AskSuccessResult,
 } from "../../types/ask.ts";
 import { formatMissingToolMessage, normalizeListedTools } from "../utils/agent-tools.ts";
-import { log } from "../utils/output.ts";
+import { log, redactToolArgsForLog } from "../utils/output.ts";
 import { extractTextContent, isToolErrorResult } from "../utils/tool-results.ts";
 
 /** 默认确认阈值：低于此值时跳过执行 */
@@ -48,6 +48,7 @@ export default defineCommand({
   args: {
     message: { type: "positional", description: "自然语言消息", required: true },
     json: { type: "boolean", description: "JSON 格式输出", default: false },
+    verbose: { type: "boolean", alias: "v", description: "输出调试日志", default: false },
   },
   async run({ args }) {
     const { config } = loadConfig();
@@ -220,9 +221,8 @@ export default defineCommand({
         return;
       }
 
-      log.info(
-        `调用 ${agent.skill.name}.${decision.toolName}(${JSON.stringify(finalDecision.input)})`,
-      );
+      log.info(`调用 ${agent.skill.name}.${decision.toolName}`);
+      log.debug(`调用参数: ${JSON.stringify(redactToolArgsForLog(finalDecision.input))}`);
       const toolResult = await client.callTool({
         name: decision.toolName,
         arguments: finalDecision.input,
