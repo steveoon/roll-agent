@@ -1,6 +1,10 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { extractTextContent, isToolErrorResult } from "./tool-results.ts";
+import {
+  extractTextContent,
+  formatToolResultForJsonOutput,
+  isToolErrorResult,
+} from "./tool-results.ts";
 
 describe("cli/utils/tool-results", () => {
   it("extracts only text content blocks", () => {
@@ -19,5 +23,19 @@ describe("cli/utils/tool-results", () => {
     assert.equal(isToolErrorResult({ isError: false, content: [] }), false);
     assert.equal(isToolErrorResult({ content: [] }), false);
     assert.equal(isToolErrorResult(null), false);
+  });
+
+  it("unwraps SDK JSON text content for --json output", () => {
+    const result = formatToolResultForJsonOutput({
+      content: [{ type: "text", text: '{"signedEnvelope":"payload.signature","ok":true}' }],
+    });
+
+    assert.deepEqual(result, { signedEnvelope: "payload.signature", ok: true });
+  });
+
+  it("falls back to the raw MCP result when text content is not JSON", () => {
+    const result = { content: [{ type: "text", text: "plain text response" }] };
+
+    assert.deepEqual(formatToolResultForJsonOutput(result), result);
   });
 });

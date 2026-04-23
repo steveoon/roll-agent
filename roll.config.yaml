@@ -18,7 +18,9 @@ agents:
     smart-reply-agent:
       REPLY_AUTHORITY_URL: https://reply-authority.duliday.com
       REPLY_AUTHORITY_BEARER_TOKEN: ${REPLY_AUTHORITY_BEARER_TOKEN}
+      REPLY_AUTHORITY_TIMEOUT_MS: "60000"
     notify-agent:
       FEISHU_BOT_WEBHOOK: ${FEISHU_BOT_WEBHOOK}
     browser-use-agent:
       REPLY_AUTHORITY_KEYS_URL: https://reply-authority.duliday.com/.well-known/reply-authority-keys
+      BROWSER_VISUAL_CURSOR: "true"

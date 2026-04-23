@@ -13,8 +13,12 @@ import { createProviderModel } from "../../llm/providers.ts";
 import { formatValidationIssuesMessage } from "../../tool-runtime/messages.ts";
 import { preflightToolCall } from "../../tool-runtime/preflight.ts";
 import { formatMissingToolMessage, normalizeListedTools } from "../utils/agent-tools.ts";
-import { extractTextContent, isToolErrorResult } from "../utils/tool-results.ts";
-import { log } from "../utils/output.ts";
+import {
+  extractTextContent,
+  formatToolResultForJsonOutput,
+  isToolErrorResult,
+} from "../utils/tool-results.ts";
+import { log, redactToolArgsForLog } from "../utils/output.ts";
 import { shouldSkipRuntimeReadinessForTool } from "../../config/runtime-env.ts";
 
 export default defineCommand({
@@ -23,6 +27,7 @@ export default defineCommand({
     agent: { type: "positional", description: "Agent 名称", required: true },
     tool: { type: "positional", description: "Tool 名称", required: true },
     json: { type: "boolean", description: "JSON 格式输出", default: false },
+    verbose: { type: "boolean", alias: "v", description: "输出调试日志", default: false },
     "input-json": { type: "string", description: "以 JSON 字符串提供完整 tool 输入对象" },
     "input-file": { type: "string", description: "从 JSON 文件读取完整 tool 输入对象" },
   },
@@ -107,7 +112,8 @@ export default defineCommand({
       }
 
       // 5. 调用 tool
-      log.info(`调用 ${agent.skill.name}.${args.tool}(${JSON.stringify(toolArgs)})`);
+      log.info(`调用 ${agent.skill.name}.${args.tool}`);
+      log.debug(`调用参数: ${JSON.stringify(redactToolArgsForLog(toolArgs))}`);
       const result = await client.callTool({
         name: args.tool,
         arguments: toolArgs,
@@ -115,7 +121,7 @@ export default defineCommand({
 
       // 6. 输出结果（stdout，不经过 log）
       if (args.json) {
-        console.log(JSON.stringify(result, null, 2));
+        console.log(JSON.stringify(formatToolResultForJsonOutput(result), null, 2));
       } else {
         for (const text of extractTextContent(result.content)) {
           console.log(text);

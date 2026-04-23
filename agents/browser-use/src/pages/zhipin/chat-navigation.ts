@@ -1,15 +1,21 @@
 import { setTimeout as delay } from "node:timers/promises";
 import type { BrowserContextManager, Page } from "@roll-agent/browser";
 import { randomDelay } from "./anti-detection.ts";
+import { getActiveChatPanel, getSelectedChatTarget } from "./chat-target.ts";
+import { moveVisualCursorToLocator, showVisualClickOnLocator } from "../../visual-cursor.ts";
 
 export interface ChatTarget {
+  readonly conversationId: string | undefined;
   readonly candidateName: string | undefined;
   readonly index: number | undefined;
 }
 
 export interface ChatListItem {
+  readonly conversationId: string;
+  readonly candidateId: string;
   readonly name: string;
   readonly index: number;
+  readonly position: string;
   readonly hasUnread: boolean;
   readonly unreadCount: number;
   readonly lastMessageTime: string;
@@ -31,6 +37,16 @@ function normalizeCandidateName(name: string): string {
   return name.trim().toLocaleLowerCase("zh-CN");
 }
 
+function namesCompatible(expectedName: string, actualName: string): boolean {
+  const expected = normalizeCandidateName(expectedName);
+  const actual = normalizeCandidateName(actualName);
+  return (
+    expected.length > 0 &&
+    actual.length > 0 &&
+    (expected === actual || expected.includes(actual) || actual.includes(expected))
+  );
+}
+
 function countMatchedCharacters(left: string, right: string): number {
   let matched = 0;
   for (const char of left) {
@@ -43,36 +59,46 @@ export function selectChatCandidate(
   candidates: ReadonlyArray<ChatListItem>,
   target: ChatTarget,
 ): ChatListItem | undefined {
+  if (target.conversationId !== undefined) {
+    const byConversation = candidates.find(
+      (candidate) => candidate.conversationId === target.conversationId,
+    );
+    if (byConversation) {
+      return byConversation;
+    }
+  }
+
+  const rawName = target.candidateName;
+  if (rawName) {
+    const expectedName = normalizeCandidateName(rawName);
+    const namedCandidates = candidates.filter((candidate) => candidate.name.length > 0);
+
+    let selected = namedCandidates.find(
+      (candidate) => normalizeCandidateName(candidate.name) === expectedName,
+    );
+    if (selected) return selected;
+
+    selected = namedCandidates.find((candidate) => {
+      const actualName = normalizeCandidateName(candidate.name);
+      return actualName.includes(expectedName) || expectedName.includes(actualName);
+    });
+    if (selected) return selected;
+
+    const requiredRatio = expectedName.length <= 2 ? 1 : expectedName.length <= 4 ? 0.75 : 0.6;
+
+    selected = namedCandidates.find((candidate) => {
+      const actualName = normalizeCandidateName(candidate.name);
+      const matched = countMatchedCharacters(expectedName, actualName);
+      return matched >= Math.ceil(Math.min(expectedName.length, actualName.length) * requiredRatio);
+    });
+    if (selected) return selected;
+  }
+
   if (target.index !== undefined) {
     return candidates[target.index];
   }
 
-  const rawName = target.candidateName;
-  if (!rawName) {
-    return undefined;
-  }
-
-  const expectedName = normalizeCandidateName(rawName);
-  const namedCandidates = candidates.filter((candidate) => candidate.name.length > 0);
-
-  let selected = namedCandidates.find(
-    (candidate) => normalizeCandidateName(candidate.name) === expectedName,
-  );
-  if (selected) return selected;
-
-  selected = namedCandidates.find((candidate) => {
-    const actualName = normalizeCandidateName(candidate.name);
-    return actualName.includes(expectedName) || expectedName.includes(actualName);
-  });
-  if (selected) return selected;
-
-  const requiredRatio = expectedName.length <= 2 ? 1 : expectedName.length <= 4 ? 0.75 : 0.6;
-
-  return namedCandidates.find((candidate) => {
-    const actualName = normalizeCandidateName(candidate.name);
-    const matched = countMatchedCharacters(expectedName, actualName);
-    return matched >= Math.ceil(Math.min(expectedName.length, actualName.length) * requiredRatio);
-  });
+  return undefined;
 }
 
 function isChatPageUrl(url: string): boolean {
@@ -114,8 +140,10 @@ async function clearTemporaryMarker(page: Page, attr: string): Promise<void> {
 async function clickMarkedElement(page: Page, selector: string): Promise<void> {
   const target = page.locator(selector).first();
   await target.scrollIntoViewIfNeeded();
+  await moveVisualCursorToLocator(page, target);
   await target.hover();
   await randomDelay(page, 200, 400);
+  await showVisualClickOnLocator(page, target);
   await target.click();
 }
 
@@ -264,8 +292,17 @@ export async function getChatCandidates(page: Page): Promise<ReadonlyArray<ChatL
     const items = Array.from(document.querySelectorAll(".geek-item"));
 
     return items.map((item, idx) => {
+      const conversationId =
+        item.getAttribute("data-id") ??
+        item.closest('[role="listitem"]')?.getAttribute("key") ??
+        "";
+      const candidateId =
+        item.getAttribute("data-geek") ??
+        item.querySelector("[data-geek]")?.getAttribute("data-geek") ??
+        conversationId;
       const nameEl = item.querySelector('[class*="name"], .nickname, .geek-name, .candidate-name');
       const name = nameEl?.textContent?.trim() ?? "";
+      const position = item.querySelector(".source-job")?.textContent?.trim() ?? "";
       const badgeEl = item.querySelector(".badge-count");
       const unreadCount = parseInt(badgeEl?.textContent?.trim() ?? "0", 10) || 0;
       const hasUnread = unreadCount > 0 || item.querySelector(".red-dot") !== null;
@@ -275,8 +312,11 @@ export async function getChatCandidates(page: Page): Promise<ReadonlyArray<ChatL
       ).slice(0, 100);
 
       return {
+        conversationId,
+        candidateId,
         name,
         index: idx,
+        position,
         hasUnread,
         unreadCount,
         lastMessageTime,
@@ -286,15 +326,25 @@ export async function getChatCandidates(page: Page): Promise<ReadonlyArray<ChatL
   });
 }
 
-async function clickChatItem(page: Page, index: number): Promise<boolean> {
+async function clickChatItem(
+  page: Page,
+  targetCandidate: Pick<ChatListItem, "conversationId" | "index">,
+): Promise<boolean> {
   const markedTarget = await page.evaluate(
-    (args: { markerAttr: string; targetIndex: number }) => {
+    (args: { markerAttr: string; targetConversationId: string; targetIndex: number }) => {
       document.querySelectorAll(`[${args.markerAttr}]`).forEach((element) => {
         element.removeAttribute(args.markerAttr);
       });
 
       const items = Array.from(document.querySelectorAll(".geek-item"));
-      const target = items[args.targetIndex];
+      const target =
+        items.find((item) => {
+          const conversationId =
+            item.getAttribute("data-id") ??
+            item.closest('[role="listitem"]')?.getAttribute("key") ??
+            "";
+          return conversationId === args.targetConversationId;
+        }) ?? items[args.targetIndex];
       if (!target) {
         return { found: false as const };
       }
@@ -303,7 +353,11 @@ async function clickChatItem(page: Page, index: number): Promise<boolean> {
       clickArea.setAttribute(args.markerAttr, "true");
       return { found: true as const, selector: `[${args.markerAttr}="true"]` };
     },
-    { markerAttr: CHAT_ITEM_MARKER_ATTR, targetIndex: index },
+    {
+      markerAttr: CHAT_ITEM_MARKER_ATTR,
+      targetConversationId: targetCandidate.conversationId,
+      targetIndex: targetCandidate.index,
+    },
   );
 
   if (!markedTarget.found) {
@@ -318,36 +372,75 @@ async function clickChatItem(page: Page, index: number): Promise<boolean> {
   }
 }
 
-async function waitForChatReady(page: Page, candidateName: string): Promise<void> {
-  if (candidateName.length === 0) {
+async function waitForChatReady(page: Page, candidate: ChatListItem): Promise<boolean> {
+  if (candidate.conversationId.length === 0 && candidate.name.length === 0) {
     await randomDelay(page, 500, 900);
-    return;
+    return true;
   }
-
-  const expectedName = normalizeCandidateName(candidateName);
 
   try {
     await page.waitForFunction(
-      (name: string) => {
-        const selectors = [".name-box", ".geek-name", ".base-name", ".chat-user-name"];
+      (args: { conversationId: string; candidateName: string }) => {
+        const normalize = (value: string): string => value.trim().toLocaleLowerCase("zh-CN");
+        const matchNames = (expectedName: string, actualName: string): boolean => {
+          const expected = normalize(expectedName);
+          const actual = normalize(actualName);
+          return (
+            expected.length > 0 &&
+            actual.length > 0 &&
+            (expected === actual || expected.includes(actual) || actual.includes(expected))
+          );
+        };
+        const readPanelName = (): string => {
+          const rootSelectors = [".chat-conversation", ".conversation-box", ".conversation-message"];
+          const nameSelectors = [
+            ".base-info-single-detial .name-box",
+            ".base-info-content .name-box",
+            ".base-info-single-container .name-box",
+            ".base-info-content .base-name",
+            ".chat-user-name",
+            ".name-box",
+            ".base-name",
+          ];
 
-        for (const selector of selectors) {
-          const headerText = document.querySelector(selector)?.textContent?.trim();
-          if (!headerText) continue;
+          for (const rootSelector of rootSelectors) {
+            const root = document.querySelector(rootSelector);
+            if (!root) continue;
 
-          const normalized = headerText.trim().toLocaleLowerCase("zh-CN");
-          if (normalized.includes(name) || name.includes(normalized)) {
-            return true;
+            for (const nameSelector of nameSelectors) {
+              const text = root.querySelector(nameSelector)?.textContent?.trim() ?? "";
+              if (text.length > 0) {
+                return text;
+              }
+            }
           }
-        }
 
-        return false;
+          return "";
+        };
+
+        const selected = document.querySelector(".geek-item.selected");
+        const selectedConversationId =
+          selected?.getAttribute("data-id") ??
+          selected?.closest('[role="listitem"]')?.getAttribute("key") ??
+          "";
+        const selectedMatches =
+          args.conversationId.length === 0 || selectedConversationId === args.conversationId;
+        const panelName = readPanelName();
+        const panelMatches =
+          args.candidateName.length === 0 || matchNames(args.candidateName, panelName);
+
+        return selectedMatches && panelMatches;
       },
-      expectedName,
+      {
+        conversationId: candidate.conversationId,
+        candidateName: candidate.name,
+      },
       { timeout: 5_000 },
     );
+    return true;
   } catch {
     await randomDelay(page, 800, 1_200);
+    return false;
   }
 }
 
@@ -362,7 +455,11 @@ export async function ensureChatOpen(
   page: Page,
   target: ChatTarget,
 ): Promise<OpenChatResult | undefined> {
-  if (target.candidateName === undefined && target.index === undefined) {
+  if (
+    target.conversationId === undefined &&
+    target.candidateName === undefined &&
+    target.index === undefined
+  ) {
     return undefined;
   }
 
@@ -370,8 +467,11 @@ export async function ensureChatOpen(
   if (!listReady) {
     return {
       found: false,
+      conversationId: "",
+      candidateId: "",
       name: "",
       index: -1,
+      position: "",
       hasUnread: false,
       unreadCount: 0,
       lastMessageTime: "",
@@ -384,11 +484,14 @@ export async function ensureChatOpen(
   const candidates = await getChatCandidates(activePage);
   const selected = selectChatCandidate(candidates, target);
   if (!selected) {
-    const who = target.candidateName ?? `index ${target.index}`;
+    const who = target.conversationId ?? target.candidateName ?? `index ${target.index}`;
     return {
       found: false,
+      conversationId: "",
+      candidateId: "",
       name: "",
       index: -1,
+      position: "",
       hasUnread: false,
       unreadCount: 0,
       lastMessageTime: "",
@@ -397,7 +500,7 @@ export async function ensureChatOpen(
     };
   }
 
-  const clicked = await clickChatItem(activePage, selected.index);
+  const clicked = await clickChatItem(activePage, selected);
   if (!clicked) {
     return {
       ...selected,
@@ -406,7 +509,42 @@ export async function ensureChatOpen(
     };
   }
 
-  await waitForChatReady(activePage, selected.name);
+  let ready = await waitForChatReady(activePage, selected);
+  if (!ready) {
+    const retried = await clickChatItem(activePage, selected);
+    if (retried) {
+      ready = await waitForChatReady(activePage, selected);
+    }
+  }
+
+  if (!ready) {
+    return {
+      ...selected,
+      found: false,
+      error: `打开候选人聊天后，右侧会话未同步切换到 ${selected.name || selected.conversationId}`,
+    };
+  }
+
+  const syncedTarget = await getSelectedChatTarget(activePage);
+  if (!syncedTarget || syncedTarget.conversationId !== selected.conversationId) {
+    return {
+      ...selected,
+      found: false,
+      error: `当前选中会话与目标会话不一致: ${selected.name || selected.conversationId}`,
+    };
+  }
+
+  const activePanel = await getActiveChatPanel(activePage);
+  if (
+    selected.name.length > 0 &&
+    (!activePanel || !namesCompatible(selected.name, activePanel.candidateName))
+  ) {
+    return {
+      ...selected,
+      found: false,
+      error: `右侧聊天面板仍未切换到 ${selected.name}`,
+    };
+  }
 
   return { ...selected, found: true };
 }

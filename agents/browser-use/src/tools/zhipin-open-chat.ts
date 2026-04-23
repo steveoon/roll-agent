@@ -9,6 +9,8 @@ import {
 
 const OutputSchema = z.object({
   success: z.boolean(),
+  conversationId: z.string(),
+  candidateId: z.string(),
   candidateName: z.string(),
   index: z.number(),
   hasUnread: z.boolean(),
@@ -20,13 +22,17 @@ const OutputSchema = z.object({
 
 export const zhipinOpenChat = defineTool({
   name: "zhipin_open_chat",
-  description: "打开指定候选人的聊天窗口（按姓名模糊匹配或索引）",
+  description: "打开指定候选人的聊天窗口（优先按 conversationId，其次姓名，最后才用索引）",
   input: z.object({
+    conversationId: z
+      .string()
+      .optional()
+      .describe("会话 ID。若已从 `zhipin_read_messages` 获取，优先传这个，最稳定"),
     candidateName: z
       .string()
       .optional()
       .describe("候选人姓名。若用户说“打开鲁倩的聊天”，这里应提取为“鲁倩”"),
-    index: z.number().optional().describe("候选人在列表中的索引"),
+    index: z.number().optional().describe("候选人在列表中的索引。仅在缺少 conversationId 时兜底"),
     preferUnread: z.boolean().default(false).describe("优先选择有未读消息的候选人"),
   }),
   output: OutputSchema,
@@ -38,15 +44,23 @@ export const zhipinOpenChat = defineTool({
     const ctxManager = getContextManager();
     const page = await ctxManager.getPage("zhipin");
     let navTarget = {
+      conversationId: input.conversationId,
       candidateName: input.candidateName,
       index: input.index,
     };
 
-    if (input.preferUnread && input.candidateName === undefined && input.index === undefined) {
+    if (
+      input.preferUnread &&
+      input.conversationId === undefined &&
+      input.candidateName === undefined &&
+      input.index === undefined
+    ) {
       const listReady = await ensureChatListLoaded(ctxManager, page);
       if (!listReady) {
         return {
           success: false,
+          conversationId: "",
+          candidateId: "",
           candidateName: "",
           index: -1,
           hasUnread: false,
@@ -63,6 +77,7 @@ export const zhipinOpenChat = defineTool({
       );
       if (unreadCandidate) {
         navTarget = {
+          conversationId: unreadCandidate.conversationId,
           candidateName: unreadCandidate.name,
           index: unreadCandidate.index,
         };
@@ -73,6 +88,8 @@ export const zhipinOpenChat = defineTool({
     if (!result || !result.found) {
       return {
         success: false,
+        conversationId: "",
+        candidateId: "",
         candidateName: input.candidateName ?? "",
         index: input.index ?? -1,
         hasUnread: false,
@@ -86,6 +103,8 @@ export const zhipinOpenChat = defineTool({
     ctx.logger.info(`Opened chat with ${result.name} (index: ${result.index})`);
     return {
       success: true,
+      conversationId: result.conversationId,
+      candidateId: result.candidateId,
       candidateName: result.name,
       index: result.index,
       hasUnread: result.hasUnread,

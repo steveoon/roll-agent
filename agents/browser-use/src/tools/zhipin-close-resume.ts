@@ -1,6 +1,7 @@
 import { defineTool } from "@roll-agent/sdk";
 import { z } from "zod";
 import { getContextManager } from "../runtime-holder.ts";
+import { moveVisualCursorToLocator, showVisualClickOnLocator } from "../visual-cursor.ts";
 
 const OutputSchema = z.object({
   success: z.boolean(),
@@ -42,8 +43,10 @@ export const zhipinCloseResume = defineTool({
       // 优先在 iframe 中查找
       if (frame) {
         for (const sel of CLOSE_SELECTORS_IFRAME) {
-          const btn = await frame.$(sel);
-          if (btn && (await btn.isVisible())) {
+          const btn = frame.locator(sel).first();
+          if (await btn.isVisible()) {
+            await moveVisualCursorToLocator(page, btn, { target: frame });
+            await showVisualClickOnLocator(page, btn, { target: frame });
             await btn.click();
             return true;
           }
@@ -52,8 +55,10 @@ export const zhipinCloseResume = defineTool({
 
       // 回退到主页面
       for (const sel of CLOSE_SELECTORS_PAGE) {
-        const btn = await page.$(sel);
-        if (btn && (await btn.isVisible())) {
+        const btn = page.locator(sel).first();
+        if (await btn.isVisible()) {
+          await moveVisualCursorToLocator(page, btn);
+          await showVisualClickOnLocator(page, btn);
           await btn.click();
           return true;
         }

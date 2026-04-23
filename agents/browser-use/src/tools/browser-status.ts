@@ -13,9 +13,13 @@ import {
   getSessionStore,
   getReplyAuthorityKeysLoaded,
 } from "../runtime-holder.ts";
+import { isVisualCursorEnabled } from "../visual-cursor.ts";
+import { isVisualActivityEnabled } from "../visual-activity.ts";
 
 const BrowserUseStatusSchema = BrowserStatusSchema.extend({
   replyAuthorityKeysLoaded: z.boolean(),
+  visualCursorEnabled: z.boolean(),
+  visualActivityEnabled: z.boolean(),
   effectiveEnvSources: EffectiveEnvSourcesSchema,
 });
 
@@ -72,6 +76,8 @@ export const browserStatus = defineTool({
       mode,
       activeSessions,
       replyAuthorityKeysLoaded: getReplyAuthorityKeysLoaded(),
+      visualCursorEnabled: isVisualCursorEnabled(),
+      visualActivityEnabled: isVisualActivityEnabled(),
       effectiveEnvSources: collectEffectiveEnvSources(BROWSER_USE_DECLARED_ENV_KEYS),
     };
   },

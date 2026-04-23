@@ -1,6 +1,6 @@
 import { defineTool } from "@roll-agent/sdk";
 import { z } from "zod";
-import { getSelectedChatTarget } from "../pages/zhipin/chat-target.ts";
+import { getActiveChatPanel, getSelectedChatTarget } from "../pages/zhipin/chat-target.ts";
 import {
   getCurrentZhipinRecruiterIdentity,
   matchesRecruiterBinding,
@@ -13,12 +13,23 @@ import {
   markReplyEnvelopeConsumed,
 } from "../reply-authority/replay-store.ts";
 import { verifySignedReplyEnvelope } from "../reply-authority/verifier.ts";
+import { moveVisualCursorToLocator, showVisualClickOnLocator } from "../visual-cursor.ts";
 
 const OutputSchema = z.object({
   success: z.boolean(),
   sentMessage: z.string(),
   error: z.string().optional(),
 });
+
+function namesCompatible(expectedName: string, actualName: string): boolean {
+  const expected = expectedName.trim().toLocaleLowerCase("zh-CN");
+  const actual = actualName.trim().toLocaleLowerCase("zh-CN");
+  return (
+    expected.length > 0 &&
+    actual.length > 0 &&
+    (expected === actual || expected.includes(actual) || actual.includes(expected))
+  );
+}
 
 export const zhipinSendReply = defineTool({
   name: "zhipin_send_reply",
@@ -57,6 +68,7 @@ export const zhipinSendReply = defineTool({
       }
 
       const nav = await ensureChatOpen(ctxManager, page, {
+        conversationId: envelopePayload.conversationId,
         candidateName: input.candidateName,
         index: input.index,
       });
@@ -71,12 +83,26 @@ export const zhipinSendReply = defineTool({
       }
 
       activePage = await ctxManager.getPage("zhipin");
+      const activePanel = await getActiveChatPanel(activePage);
       const chatTarget = await getSelectedChatTarget(activePage);
       if (!chatTarget) {
         return {
           success: false,
           sentMessage,
           error: "未能提取当前聊天的 conversationId/candidateId",
+        };
+      }
+      if (
+        activePanel &&
+        chatTarget.candidateName.length > 0 &&
+        !namesCompatible(chatTarget.candidateName, activePanel.candidateName)
+      ) {
+        return {
+          success: false,
+          sentMessage,
+          error:
+            `左侧选中会话与右侧聊天面板不一致: ` +
+            `${chatTarget.candidateName} / ${activePanel.candidateName}`,
         };
       }
       if (
@@ -102,6 +128,8 @@ export const zhipinSendReply = defineTool({
       );
       const inputSelector = "#boss-chat-editor-input, textarea.chat-input, .chat-input";
       await activePage.waitForSelector(inputSelector, { timeout: 5_000 });
+      const inputLocator = activePage.locator(inputSelector).first();
+      await moveVisualCursorToLocator(activePage, inputLocator);
 
       const isContentEditable = await activePage.evaluate((sel: string) => {
         const el = document.querySelector(sel);
@@ -109,8 +137,7 @@ export const zhipinSendReply = defineTool({
       }, inputSelector);
 
       if (isContentEditable) {
-        const editor = activePage.locator(inputSelector).first();
-        await editor.focus();
+        await inputLocator.focus();
         await activePage.evaluate(
           (args: { sel: string; msg: string }) => {
             const el = document.querySelector(args.sel) as HTMLElement | null;
@@ -123,7 +150,7 @@ export const zhipinSendReply = defineTool({
           { sel: inputSelector, msg: sentMessage },
         );
         // 用 Playwright dispatchEvent 触发 input 监听；这仍然是程序派发事件，不是用户真实输入
-        await editor.dispatchEvent("input", { bubbles: true });
+        await inputLocator.dispatchEvent("input", { bubbles: true });
       } else {
         await activePage.fill(inputSelector, sentMessage);
       }
@@ -166,8 +193,10 @@ export const zhipinSendReply = defineTool({
       // Playwright locator 点击（isTrusted: true）
       const sendBtn = activePage.locator(sendSelector.selector).first();
       await sendBtn.scrollIntoViewIfNeeded();
+      await moveVisualCursorToLocator(activePage, sendBtn);
       await sendBtn.hover();
       await humanDelay(activePage);
+      await showVisualClickOnLocator(activePage, sendBtn);
       await sendBtn.click();
 
       await randomDelay(activePage, 500, 1200);

@@ -6,6 +6,10 @@ export interface ZhipinChatTarget {
   readonly candidateName: string;
 }
 
+export interface ZhipinActiveChatPanel {
+  readonly candidateName: string;
+}
+
 const SELECTED_CHAT_ITEM_SELECTOR = ".geek-item.selected";
 
 export async function getSelectedChatTarget(page: Page): Promise<ZhipinChatTarget | null> {
@@ -48,4 +52,39 @@ export async function getSelectedChatTarget(page: Page): Promise<ZhipinChatTarge
   }
 
   return target;
+}
+
+export async function getActiveChatPanel(page: Page): Promise<ZhipinActiveChatPanel | null> {
+  const panel = await page.evaluate(() => {
+    const rootSelectors = [".chat-conversation", ".conversation-box", ".conversation-message"];
+    const nameSelectors = [
+      ".base-info-single-detial .name-box",
+      ".base-info-content .name-box",
+      ".base-info-single-container .name-box",
+      ".base-info-content .base-name",
+      ".chat-user-name",
+      ".name-box",
+      ".base-name",
+    ];
+
+    for (const rootSelector of rootSelectors) {
+      const root = document.querySelector(rootSelector);
+      if (!root) continue;
+
+      for (const nameSelector of nameSelectors) {
+        const candidateName = root.querySelector(nameSelector)?.textContent?.trim() ?? "";
+        if (candidateName.length > 0) {
+          return { candidateName };
+        }
+      }
+    }
+
+    return null;
+  });
+
+  if (!panel || typeof panel.candidateName !== "string" || panel.candidateName.length === 0) {
+    return null;
+  }
+
+  return panel;
 }

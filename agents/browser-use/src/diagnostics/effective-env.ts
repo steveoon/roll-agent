@@ -1,7 +1,11 @@
 import { createHash } from "node:crypto";
 import { z } from "zod";
 
-export const BROWSER_USE_DECLARED_ENV_KEYS = ["REPLY_AUTHORITY_KEYS_URL"] as const;
+export const BROWSER_USE_DECLARED_ENV_KEYS = [
+  "REPLY_AUTHORITY_KEYS_URL",
+  "BROWSER_VISUAL_CURSOR",
+  "BROWSER_VISUAL_ACTIVITY",
+] as const;
 
 const EFFECTIVE_ENV_FINGERPRINT_PATTERN = /^[0-9a-f]{8}$/;
 

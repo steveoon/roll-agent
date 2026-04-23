@@ -7,24 +7,33 @@ const ZHIPIN_CHAT_URL = "https://www.zhipin.com/web/geek/chat";
 
 const candidates = [
   {
+    conversationId: "conv-1",
+    candidateId: "candidate-1",
     name: "鲁伟",
     index: 0,
+    position: "餐饮兼职服务员",
     hasUnread: true,
     unreadCount: 1,
     lastMessageTime: "10:00",
     messagePreview: "您好",
   },
   {
+    conversationId: "conv-2",
+    candidateId: "candidate-2",
     name: "鲁杰",
     index: 1,
+    position: "餐饮兼职服务员",
     hasUnread: false,
     unreadCount: 0,
     lastMessageTime: "09:30",
     messagePreview: "收到",
   },
   {
+    conversationId: "conv-3",
+    candidateId: "candidate-3",
     name: "张三丰",
     index: 2,
+    position: "餐饮兼职服务员",
     hasUnread: false,
     unreadCount: 0,
     lastMessageTime: "09:00",
@@ -43,6 +52,8 @@ type TestPageOptions = {
   gotoLoadsChatList?: boolean;
   chatCandidates?: ReadonlyArray<unknown>;
   clickChatItemWorks?: boolean;
+  selectedChatTarget?: { conversationId: string; candidateId: string; candidateName: string } | null;
+  activeChatPanel?: { candidateName: string } | null;
 };
 
 function createTestPage(options: TestPageOptions = {}) {
@@ -95,6 +106,8 @@ function createTestPage(options: TestPageOptions = {}) {
       return createLocator(selector);
     },
     async evaluate(_fn: unknown, arg?: unknown) {
+      const source = typeof _fn === "function" ? String(_fn) : "";
+
       if (
         typeof arg === "object" &&
         arg !== null &&
@@ -121,6 +134,14 @@ function createTestPage(options: TestPageOptions = {}) {
           return { found: false as const };
         }
         return { found: true as const, selector: '[data-roll-chat-item-target="true"]' };
+      }
+
+      if (source.includes('document.querySelector(".geek-item.selected")')) {
+        return options.selectedChatTarget ?? null;
+      }
+
+      if (source.includes('const rootSelectors = [".chat-conversation"')) {
+        return options.activeChatPanel ?? null;
       }
 
       return [...(options.chatCandidates ?? [])];
@@ -184,6 +205,7 @@ function createContextManager(params: {
 
 test("selectChatCandidate matches exact candidate names first", () => {
   const selected = selectChatCandidate(candidates, {
+    conversationId: undefined,
     candidateName: "鲁伟",
     index: undefined,
   });
@@ -194,6 +216,7 @@ test("selectChatCandidate matches exact candidate names first", () => {
 
 test("selectChatCandidate does not fuzzy-match two-character names on one shared character", () => {
   const selected = selectChatCandidate(candidates, {
+    conversationId: undefined,
     candidateName: "鲁明",
     index: undefined,
   });
@@ -203,12 +226,35 @@ test("selectChatCandidate does not fuzzy-match two-character names on one shared
 
 test("selectChatCandidate allows broader fuzzy matching for longer names", () => {
   const selected = selectChatCandidate(candidates, {
+    conversationId: undefined,
     candidateName: "张三",
     index: undefined,
   });
 
   assert.equal(selected?.name, "张三丰");
   assert.equal(selected?.index, 2);
+});
+
+test("selectChatCandidate prefers conversationId over a stale index", () => {
+  const selected = selectChatCandidate(candidates, {
+    conversationId: "conv-2",
+    candidateName: "鲁伟",
+    index: 0,
+  });
+
+  assert.equal(selected?.conversationId, "conv-2");
+  assert.equal(selected?.name, "鲁杰");
+});
+
+test("selectChatCandidate prefers candidateName over a stale index", () => {
+  const selected = selectChatCandidate(candidates, {
+    conversationId: undefined,
+    candidateName: "张三丰",
+    index: 0,
+  });
+
+  assert.equal(selected?.conversationId, "conv-3");
+  assert.equal(selected?.name, "张三丰");
 });
 
 test("ensureChatListLoaded returns immediately when already on a loaded chat page", async () => {
@@ -298,6 +344,14 @@ test("ensureChatOpen continues on the rebound chat page after reusing another ta
     chatListLoaded: true,
     chatCandidates: candidates,
     clickChatItemWorks: true,
+    selectedChatTarget: {
+      conversationId: "conv-1",
+      candidateId: "candidate-1",
+      candidateName: "鲁伟",
+    },
+    activeChatPanel: {
+      candidateName: "鲁伟",
+    },
   });
   const ctxManager = createContextManager({
     pages: [current.page, chatTab.page],
@@ -305,6 +359,7 @@ test("ensureChatOpen continues on the rebound chat page after reusing another ta
   });
 
   const result = await ensureChatOpen(ctxManager.manager, current.page, {
+    conversationId: undefined,
     candidateName: "鲁伟",
     index: undefined,
   });
@@ -315,4 +370,34 @@ test("ensureChatOpen continues on the rebound chat page after reusing another ta
   assert.equal(chatTab.getClickChatItemCalls(), 1);
   assert.equal(chatTab.getWaitForFunctionCalls(), 1);
   assert.equal(current.getClickChatItemCalls(), 0);
+});
+
+test("ensureChatOpen fails when the right panel is still showing another candidate", async () => {
+  const chatTab = createTestPage({
+    url: `${ZHIPIN_CHAT_URL}?conversation=4`,
+    chatListLoaded: true,
+    chatCandidates: candidates,
+    clickChatItemWorks: true,
+    selectedChatTarget: {
+      conversationId: "conv-1",
+      candidateId: "candidate-1",
+      candidateName: "鲁伟",
+    },
+    activeChatPanel: {
+      candidateName: "赵慧珍",
+    },
+  });
+  const ctxManager = createContextManager({
+    pages: [chatTab.page],
+    currentPage: chatTab.page,
+  });
+
+  const result = await ensureChatOpen(ctxManager.manager, chatTab.page, {
+    conversationId: "conv-1",
+    candidateName: "鲁伟",
+    index: 0,
+  });
+
+  assert.equal(result?.found, false);
+  assert.match(result?.error ?? "", /右侧聊天面板/);
 });

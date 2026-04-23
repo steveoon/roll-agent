@@ -8,6 +8,7 @@ import { openPlatform } from "./tools/open-platform.ts";
 import { selectPage } from "./tools/select-page.ts";
 // Zhipin — 聊天
 import { zhipinReadMessages } from "./tools/zhipin-read-messages.ts";
+import { zhipinOpenChatPage } from "./tools/zhipin-open-chat-page.ts";
 import { zhipinOpenChat } from "./tools/zhipin-open-chat.ts";
 import { zhipinGetCandidateInfo } from "./tools/zhipin-get-candidate-info.ts";
 import { zhipinSendReply } from "./tools/zhipin-send-reply.ts";
@@ -15,6 +16,7 @@ import { zhipinExchangeWechat } from "./tools/zhipin-exchange-wechat.ts";
 import { zhipinGetUsername } from "./tools/zhipin-get-username.ts";
 // Zhipin — 推荐列表
 import { zhipinGetCandidateList } from "./tools/zhipin-get-candidate-list.ts";
+import { zhipinOpenRecommendPage } from "./tools/zhipin-open-recommend-page.ts";
 import { zhipinSayHello } from "./tools/zhipin-say-hello.ts";
 import { zhipinOpenResume } from "./tools/zhipin-open-resume.ts";
 import { zhipinLocateResumeCanvas } from "./tools/zhipin-locate-resume-canvas.ts";
@@ -79,12 +81,14 @@ const agent = defineAgent(
       selectPage,
       // Zhipin 聊天
       zhipinReadMessages,
+      zhipinOpenChatPage,
       zhipinOpenChat,
       zhipinGetCandidateInfo,
       zhipinSendReply,
       zhipinExchangeWechat,
       zhipinGetUsername,
       // Zhipin 推荐列表
+      zhipinOpenRecommendPage,
       zhipinGetCandidateList,
       zhipinSayHello,
       zhipinOpenResume,

@@ -68,6 +68,18 @@ describe("verifySignedReplyEnvelope", () => {
     assert.equal(payload.recruiterBinding.username, "recruiter-alice");
   });
 
+  it("round-trips CJK recruiterBinding.username through base64url decode", async () => {
+    const envelope = createSignedEnvelope({
+      recruiterBinding: {
+        platform: "zhipin",
+        username: "祝东升",
+      },
+    });
+    const payload = await verifySignedReplyEnvelope(envelope);
+
+    assert.equal(payload.recruiterBinding.username, "祝东升");
+  });
+
   it("rejects envelopes with an unsupported version", async () => {
     const envelope = createSignedEnvelope({ v: 1 });
 

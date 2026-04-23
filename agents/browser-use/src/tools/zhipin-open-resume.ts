@@ -7,6 +7,7 @@ import {
   inspectRecommendCard,
   waitForRecommendList,
 } from "../pages/zhipin/recommend-list.ts";
+import { moveVisualCursorToLocator, showVisualClickOnLocator } from "../visual-cursor.ts";
 
 const OutputSchema = z.object({
   success: z.boolean(),
@@ -50,8 +51,10 @@ export const zhipinOpenResume = defineTool({
         : card;
 
     await clickSurface.scrollIntoViewIfNeeded();
+    await moveVisualCursorToLocator(page, clickSurface, { target });
     await clickSurface.hover();
     await randomDelay(page, 200, 400);
+    await showVisualClickOnLocator(page, clickSurface, { target });
     await clickSurface.click();
 
     await randomDelay(page, 1000, 2000);

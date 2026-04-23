@@ -102,6 +102,11 @@ export const ZHIPIN_SELECTORS = {
       "#header .label-name",
     ] as readonly string[],
   },
+  nav: {
+    sidebar: ".side-wrap.side-wrap-v2",
+    chatLink: '.side-wrap.side-wrap-v2 a[href*="/web/chat/index"]',
+    recommendLink: '.side-wrap.side-wrap-v2 a[href*="/web/geek/recommend"]',
+  },
   recommend: {
     iframe: "#recommendFrame",
     resumeIframe: 'iframe[src*="c-resume"]',
