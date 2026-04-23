@@ -2,6 +2,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import type { BrowserContextManager, Page } from "@roll-agent/browser";
 import { randomDelay } from "./anti-detection.ts";
 import { getActiveChatPanel, getSelectedChatTarget } from "./chat-target.ts";
+import { moveVisualCursorToLocator, showVisualClickOnLocator } from "../../visual-cursor.ts";
 
 export interface ChatTarget {
   readonly conversationId: string | undefined;
@@ -139,8 +140,10 @@ async function clearTemporaryMarker(page: Page, attr: string): Promise<void> {
 async function clickMarkedElement(page: Page, selector: string): Promise<void> {
   const target = page.locator(selector).first();
   await target.scrollIntoViewIfNeeded();
+  await moveVisualCursorToLocator(page, target);
   await target.hover();
   await randomDelay(page, 200, 400);
+  await showVisualClickOnLocator(page, target);
   await target.click();
 }
 

@@ -23,3 +23,4 @@ agents:
       FEISHU_BOT_WEBHOOK: ${FEISHU_BOT_WEBHOOK}
     browser-use-agent:
       REPLY_AUTHORITY_KEYS_URL: https://reply-authority.duliday.com/.well-known/reply-authority-keys
+      BROWSER_VISUAL_CURSOR: "true"

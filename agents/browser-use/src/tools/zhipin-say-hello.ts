@@ -11,6 +11,8 @@ import {
   inspectRecommendCard,
   waitForRecommendList,
 } from "../pages/zhipin/recommend-list.ts";
+import { VisualActivitySession } from "../visual-activity-session.ts";
+import { moveVisualCursorToLocator, showVisualClickOnLocator } from "../visual-cursor.ts";
 
 const ResultItemSchema = z.object({
   index: z.number(),
@@ -26,6 +28,48 @@ const OutputSchema = z.object({
   summary: z.object({ total: z.number(), succeeded: z.number(), failed: z.number() }),
 });
 
+type RecommendTarget = ReturnType<typeof getRecommendTarget>;
+type VisualActivitySessionLike = Pick<
+  VisualActivitySession,
+  "begin" | "highlightSelector" | "highlightLocator" | "succeed" | "fail" | "retarget"
+>;
+type ZhipinSayHelloDeps = {
+  readonly getContextManager: typeof getContextManager;
+  readonly getRecommendTarget: typeof getRecommendTarget;
+  readonly waitForRecommendList: typeof waitForRecommendList;
+  readonly inspectRecommendCard: typeof inspectRecommendCard;
+  readonly moveVisualCursorToLocator: typeof moveVisualCursorToLocator;
+  readonly showVisualClickOnLocator: typeof showVisualClickOnLocator;
+  readonly humanDelay: typeof humanDelay;
+  readonly shouldAddRandomBehavior: typeof shouldAddRandomBehavior;
+  readonly performRandomScroll: typeof performRandomScroll;
+  readonly createVisualActivitySession: (target: RecommendTarget) => VisualActivitySessionLike;
+};
+
+let zhipinSayHelloDepsOverride: Partial<ZhipinSayHelloDeps> | undefined;
+
+function getZhipinSayHelloDeps(): ZhipinSayHelloDeps {
+  return {
+    getContextManager,
+    getRecommendTarget,
+    waitForRecommendList,
+    inspectRecommendCard,
+    moveVisualCursorToLocator,
+    showVisualClickOnLocator,
+    humanDelay,
+    shouldAddRandomBehavior,
+    performRandomScroll,
+    createVisualActivitySession: (target) => new VisualActivitySession(target),
+    ...zhipinSayHelloDepsOverride,
+  };
+}
+
+export function setZhipinSayHelloDepsForTests(
+  override: Partial<ZhipinSayHelloDeps> | undefined,
+): void {
+  zhipinSayHelloDepsOverride = override;
+}
+
 export const zhipinSayHello = defineTool({
   name: "zhipin_say_hello",
   description: "在推荐列表页对候选人点击「打招呼」按钮（支持批量）",
@@ -34,11 +78,20 @@ export const zhipinSayHello = defineTool({
   execute: async (input, ctx) => {
     ctx.logger.info(`Saying hello to ${input.indices.length} candidates`);
 
-    const ctxManager = getContextManager();
+    const deps = getZhipinSayHelloDeps();
+    const ctxManager = deps.getContextManager();
     const page = await ctxManager.getPage("zhipin");
-    const target = getRecommendTarget(page);
-    const listReady = await waitForRecommendList(target);
+    let target = deps.getRecommendTarget(page);
+    const session = deps.createVisualActivitySession(target);
+    const beginLabel = "正在打开推荐列表";
+    const batchLabel = input.indices.length > 1 ? "正在批量打招呼" : "正在打招呼";
+
+    await session.begin(beginLabel);
+    const listReady = await deps.waitForRecommendList(target);
+    target = deps.getRecommendTarget(page);
+    await session.retarget(target);
     if (!listReady) {
+      await session.fail("推荐列表未加载");
       const results = input.indices.map((index) => ({
         index,
         candidateName: "",
@@ -53,6 +106,12 @@ export const zhipinSayHello = defineTool({
       };
     }
 
+    await session.begin(batchLabel);
+    await session.highlightSelector(".candidate-card-wrap, [data-geek], .geek-item", {
+      label: batchLabel,
+      padding: 8,
+    });
+
     const results: Array<{
       index: number;
       candidateName: string;
@@ -63,7 +122,7 @@ export const zhipinSayHello = defineTool({
 
     for (const idx of input.indices) {
       try {
-        const r = await inspectRecommendCard(target, idx);
+        const r = await deps.inspectRecommendCard(target, idx);
 
         if (!r.found) {
           results.push({
@@ -85,9 +144,21 @@ export const zhipinSayHello = defineTool({
           const card = target.locator(r.cardSelector).nth(idx);
           const greetButton = card.locator("button.btn.btn-greet").first();
 
+          await session.highlightLocator(card, {
+            label: `正在定位第 ${idx + 1} 位候选人`,
+            padding: 10,
+          });
           await greetButton.scrollIntoViewIfNeeded();
+          await deps.moveVisualCursorToLocator(page, greetButton, {
+            durationMs: 90,
+            settleMs: 20,
+            target,
+          });
           await greetButton.hover();
-          await humanDelay(page);
+          await deps.showVisualClickOnLocator(page, greetButton, {
+            pulseDurationMs: 160,
+            target,
+          });
           await greetButton.click();
 
           results.push({
@@ -98,9 +169,9 @@ export const zhipinSayHello = defineTool({
           });
         }
 
-        await humanDelay(page);
-        if (shouldAddRandomBehavior(0.3)) {
-          await performRandomScroll(page);
+        await deps.humanDelay(page);
+        if (deps.shouldAddRandomBehavior(0.3)) {
+          await deps.performRandomScroll(page);
         }
       } catch (err) {
         results.push({
@@ -118,6 +189,11 @@ export const zhipinSayHello = defineTool({
       succeeded: results.filter((r) => r.success).length,
       failed: results.filter((r) => !r.success).length,
     };
+    if (summary.failed === 0) {
+      await session.succeed(`已完成 ${summary.succeeded}/${summary.total} 位候选人`);
+    } else {
+      await session.fail(`已完成 ${summary.succeeded}/${summary.total} 位候选人`);
+    }
     ctx.logger.info(`Say hello: ${summary.succeeded}/${summary.total} succeeded`);
     return { success: summary.failed === 0, results, summary };
   },

@@ -11,11 +11,18 @@ metadata:
 
 需要先启动 Agent 服务进程（HTTP 常驻），浏览器 session 跨调用持久。
 
+默认情况下，agent 会在可见浏览器页面内同时启用两类页内反馈：
+
+- `BROWSER_VISUAL_CURSOR`：点击/输入前显示虚拟指针和点击波纹
+- `BROWSER_VISUAL_ACTIVITY`：读取消息列表、识别账号、提取聊天详情等非点击型操作期间，显示状态胶囊、区域柔光和完成态反馈
+
+若不需要，可分别设为 `false` 关闭。
+
 完整 inputSchema 可通过 `roll agent tools browser-use-agent`（或 `--json`）查询。
 
 ## 通用 Tools
 
-- `browser_status()` — 查询浏览器运行状态和活跃 session；输出含 `replyAuthorityKeysLoaded`（启动期 Reply Authority 公钥是否预加载成功）和 `effectiveEnvSources`（声明过的 env key 的 `{present, fingerprint}`，SHA256 前 8 位，不泄漏 value）。后者被 `roll doctor` / `roll agent info` 消费，用于检测 env 声明与运行态的 drift
+ - `browser_status()` — 查询浏览器运行状态和活跃 session；输出含 `replyAuthorityKeysLoaded`（启动期 Reply Authority 公钥是否预加载成功）、`visualCursorEnabled`（页内虚拟指针是否启用）、`visualActivityEnabled`（页内读操作反馈是否启用）和 `effectiveEnvSources`（声明过的 env key 的 `{present, fingerprint}`，SHA256 前 8 位，不泄漏 value）。后者被 `roll doctor` / `roll agent info` 消费，用于检测 env 声明与运行态的 drift
 - `open_platform(platform)` — 通过原生 CDP 打开并聚焦招聘平台主页；登录前不会触发 Playwright attach
 - `list_pages(platform?)` — 通过原生 CDP 列出当前浏览器中可见的页面和 pageId（登录前 `pageId` 即原生 targetId）
 - `select_page(platform, pageId)` — 将指定页面绑定为平台当前活跃页；登录前优先走原生 CDP target 激活
@@ -27,7 +34,7 @@ metadata:
 
 ## BOSS直聘 — 聊天 Tools
 
-- `zhipin_read_messages(limit?, onlyUnread?, sortBy?)` — 读取消息列表中的候选人，返回姓名、消息摘要，以及 `conversationId` / `candidateId`
+- `zhipin_read_messages(limit?, onlyUnread?, sortBy?)` — 读取消息列表中的候选人，默认返回全部消息；若只看未读，显式传 `onlyUnread=true`
 - `zhipin_open_chat(conversationId?, candidateName?, index?, preferUnread?)` — 打开指定候选人的聊天窗口；匹配优先级是 `conversationId` > `candidateName` > `index`
 - `zhipin_get_candidate_info(conversationId?, candidateName?, index?, maxMessages?)` — 提取候选人资料、聊天记录，以及当前选中聊天的 `conversationId` / `candidateId`。输出里的 `candidateInfo.communicationPosition`、`candidateInfo.expectedLocation`、`candidateInfo.expectedPosition` 已按“沟通职位 + 最近关注”结构化解析；若 `communicationPosition` 含连字符类分隔符（`-` / `－` / `—` / `–`），则取第一段作为可选 `preferredBrand`，否则不输出该字段
 - `zhipin_send_reply(signedEnvelope, candidateName?, index?)` — 发送消息。只接受 Reply Authority Service 签发的 `signedEnvelope`；本地会先做 Ed25519 验签、过期检查、重放检查、目标绑定校验和 recruiter 绑定校验。启动期公钥预加载失败时直接前置拒绝，错误指向 `browser_status.replyAuthorityKeysLoaded`
@@ -83,7 +90,7 @@ metadata:
 
 ## 典型工作流
 
-1. `zhipin_read_messages` → 获取未读候选人列表，并记录 `conversationId` / `candidateId`
+1. `zhipin_read_messages` → 获取消息列表，并记录 `conversationId` / `candidateId`
 2. `zhipin_open_chat(conversationId)` → 按稳定会话 ID 打开聊天
 3. `zhipin_get_candidate_info(conversationId)` → 查看候选人资料、聊天记录
 4. 调 `smart-reply-agent.generate_reply` 前，先尝试透传以下信号：

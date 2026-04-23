@@ -3,6 +3,10 @@ import { z } from "zod";
 import { getContextManager } from "../runtime-holder.ts";
 import { randomDelay, humanDelay } from "../pages/zhipin/anti-detection.ts";
 import { ensureChatOpen } from "../pages/zhipin/chat-navigation.ts";
+import {
+  moveVisualCursorToSelector,
+  showVisualClickOnSelector,
+} from "../visual-cursor.ts";
 
 const OutputSchema = z.object({
   success: z.boolean(),
@@ -88,6 +92,8 @@ export const zhipinExchangeWechat = defineTool({
 
       // 用 Playwright 的 click（模拟真实鼠标事件，带坐标）
       await randomDelay(activePage, 200, 400);
+      await moveVisualCursorToSelector(activePage, '[data-roll-wechat-btn="true"]');
+      await showVisualClickOnSelector(activePage, '[data-roll-wechat-btn="true"]');
       await activePage.click('[data-roll-wechat-btn="true"]');
 
       // 清理标记
@@ -187,6 +193,8 @@ export const zhipinExchangeWechat = defineTool({
 
       // 点击前稍等（模拟人类阅读弹窗）
       await randomDelay(activePage, 200, 400);
+      await moveVisualCursorToSelector(activePage, '[data-roll-confirm-btn="true"]');
+      await showVisualClickOnSelector(activePage, '[data-roll-confirm-btn="true"]');
       await activePage.click('[data-roll-confirm-btn="true"]');
 
       // 清理标记

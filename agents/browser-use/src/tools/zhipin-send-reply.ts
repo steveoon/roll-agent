@@ -13,6 +13,7 @@ import {
   markReplyEnvelopeConsumed,
 } from "../reply-authority/replay-store.ts";
 import { verifySignedReplyEnvelope } from "../reply-authority/verifier.ts";
+import { moveVisualCursorToLocator, showVisualClickOnLocator } from "../visual-cursor.ts";
 
 const OutputSchema = z.object({
   success: z.boolean(),
@@ -127,6 +128,8 @@ export const zhipinSendReply = defineTool({
       );
       const inputSelector = "#boss-chat-editor-input, textarea.chat-input, .chat-input";
       await activePage.waitForSelector(inputSelector, { timeout: 5_000 });
+      const inputLocator = activePage.locator(inputSelector).first();
+      await moveVisualCursorToLocator(activePage, inputLocator);
 
       const isContentEditable = await activePage.evaluate((sel: string) => {
         const el = document.querySelector(sel);
@@ -134,8 +137,7 @@ export const zhipinSendReply = defineTool({
       }, inputSelector);
 
       if (isContentEditable) {
-        const editor = activePage.locator(inputSelector).first();
-        await editor.focus();
+        await inputLocator.focus();
         await activePage.evaluate(
           (args: { sel: string; msg: string }) => {
             const el = document.querySelector(args.sel) as HTMLElement | null;
@@ -148,7 +150,7 @@ export const zhipinSendReply = defineTool({
           { sel: inputSelector, msg: sentMessage },
         );
         // 用 Playwright dispatchEvent 触发 input 监听；这仍然是程序派发事件，不是用户真实输入
-        await editor.dispatchEvent("input", { bubbles: true });
+        await inputLocator.dispatchEvent("input", { bubbles: true });
       } else {
         await activePage.fill(inputSelector, sentMessage);
       }
@@ -191,8 +193,10 @@ export const zhipinSendReply = defineTool({
       // Playwright locator 点击（isTrusted: true）
       const sendBtn = activePage.locator(sendSelector.selector).first();
       await sendBtn.scrollIntoViewIfNeeded();
+      await moveVisualCursorToLocator(activePage, sendBtn);
       await sendBtn.hover();
       await humanDelay(activePage);
+      await showVisualClickOnLocator(activePage, sendBtn);
       await sendBtn.click();
 
       await randomDelay(activePage, 500, 1200);
