@@ -3,9 +3,8 @@ import { z } from "zod";
 import { getContextManager } from "../runtime-holder.ts";
 import {
   performInitialScrollPattern,
-  performRandomScroll,
 } from "../pages/zhipin/anti-detection.ts";
-import { ensureChatListLoaded } from "../pages/zhipin/chat-navigation.ts";
+import { ensureChatListLoaded, getChatCandidates } from "../pages/zhipin/chat-navigation.ts";
 
 const CandidateItemSchema = z.object({
   name: z.string(),
@@ -53,69 +52,22 @@ export const zhipinReadMessages = defineTool({
 
     await performInitialScrollPattern(activePage);
 
-    const candidates = await activePage.evaluate(() => {
-      const items = document.querySelectorAll(".geek-item");
-      const result: Array<{
-        name: string;
-        conversationId: string;
-        candidateId: string;
-        position: string;
-        time: string;
-        preview: string;
-        unreadCount: number;
-        hasUnread: boolean;
-        index: number;
-      }> = [];
-
-      items.forEach((item, index) => {
-        const conversationId =
-          item.getAttribute("data-id") ??
-          item.closest('[role="listitem"]')?.getAttribute("key") ??
-          "";
-        const candidateId =
-          item.getAttribute("data-geek") ??
-          item.querySelector("[data-geek]")?.getAttribute("data-geek") ??
-          conversationId;
-        const nameEl = item.querySelector(
-          '[class*="name"], .nickname, .geek-name, .candidate-name',
-        );
-        let name = nameEl?.textContent?.trim() ?? "";
-        if (name.length > 10) {
-          const match = name.match(/[\u4e00-\u9fa5]{2,4}/);
-          if (match) name = match[0];
-        }
-
-        const position = item.querySelector(".source-job")?.textContent?.trim() ?? "";
-        const time = item.querySelector(".time, .time-shadow")?.textContent?.trim() ?? "";
-        const preview = (
-          item.querySelector(".push-text, .chat-last-msg")?.textContent?.trim() ?? ""
-        ).slice(0, 100);
-
-        let unreadCount = 0;
-        const badgeEl = item.querySelector(".badge-count");
-        if (badgeEl) unreadCount = parseInt(badgeEl.textContent?.trim() ?? "0", 10) || 0;
-        const hasUnread = unreadCount > 0 || item.querySelector(".red-dot") !== null;
-
-        result.push({
-          name,
-          conversationId,
-          candidateId,
-          position,
-          time,
-          preview,
-          unreadCount,
-          hasUnread,
-          index,
-        });
-      });
-      return result;
-    });
+    const candidates = (await getChatCandidates(activePage)).map((candidate) => ({
+      name: candidate.name,
+      conversationId: candidate.conversationId,
+      candidateId: candidate.candidateId,
+      position: candidate.position,
+      time: candidate.lastMessageTime,
+      preview: candidate.messagePreview,
+      unreadCount: candidate.unreadCount,
+      hasUnread: candidate.hasUnread,
+      index: candidate.index,
+    }));
 
     let filtered = onlyUnread ? candidates.filter((c) => c.hasUnread) : candidates;
     const sortBy = input.sortBy ?? "time";
     if (sortBy === "time") {
-      // DOM 顺序即为时间倒序（最新在上），但做一次稳定排序以防万一
-      filtered.sort((a, b) => b.time.localeCompare(a.time));
+      // Boss 聊天列表是混合时间格式（例如“昨天”/“04月21日”），保留 DOM 原始顺序最稳妥
     } else if (sortBy === "unreadCount") {
       filtered.sort((a, b) => b.unreadCount - a.unreadCount);
     } else if (sortBy === "name") {
@@ -127,7 +79,6 @@ export const zhipinReadMessages = defineTool({
       withName: candidates.filter((c) => c.name.length > 0).length,
       withUnread: candidates.filter((c) => c.hasUnread).length,
     };
-    await performRandomScroll(activePage);
 
     ctx.logger.info(`Found ${filtered.length} candidates (${stats.withUnread} with unread)`);
     return { success: true, candidates: filtered, total: candidates.length, stats };

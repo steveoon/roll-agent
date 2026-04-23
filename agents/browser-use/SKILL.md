@@ -28,11 +28,45 @@ metadata:
 ## BOSS直聘 — 聊天 Tools
 
 - `zhipin_read_messages(limit?, onlyUnread?, sortBy?)` — 读取消息列表中的候选人，返回姓名、消息摘要，以及 `conversationId` / `candidateId`
-- `zhipin_open_chat(candidateName?, index?, preferUnread?)` — 打开指定候选人的聊天窗口（按姓名模糊匹配或列表索引）
-- `zhipin_get_candidate_info(candidateName?, index?, maxMessages?)` — 提取候选人资料、聊天记录，以及当前选中聊天的 `conversationId` / `candidateId`。输出里的 `candidateInfo.communicationPosition`、`candidateInfo.expectedLocation`、`candidateInfo.expectedPosition` 已按“沟通职位 + 最近关注”结构化解析；若 `communicationPosition` 含连字符类分隔符（`-` / `－` / `—` / `–`），则取第一段作为可选 `preferredBrand`，否则不输出该字段
+- `zhipin_open_chat(conversationId?, candidateName?, index?, preferUnread?)` — 打开指定候选人的聊天窗口；匹配优先级是 `conversationId` > `candidateName` > `index`
+- `zhipin_get_candidate_info(conversationId?, candidateName?, index?, maxMessages?)` — 提取候选人资料、聊天记录，以及当前选中聊天的 `conversationId` / `candidateId`。输出里的 `candidateInfo.communicationPosition`、`candidateInfo.expectedLocation`、`candidateInfo.expectedPosition` 已按“沟通职位 + 最近关注”结构化解析；若 `communicationPosition` 含连字符类分隔符（`-` / `－` / `—` / `–`），则取第一段作为可选 `preferredBrand`，否则不输出该字段
 - `zhipin_send_reply(signedEnvelope, candidateName?, index?)` — 发送消息。只接受 Reply Authority Service 签发的 `signedEnvelope`；本地会先做 Ed25519 验签、过期检查、重放检查、目标绑定校验和 recruiter 绑定校验。启动期公钥预加载失败时直接前置拒绝，错误指向 `browser_status.replyAuthorityKeysLoaded`
-- `zhipin_exchange_wechat(candidateName?, index?)` — 换微信。指定 candidateName 会自动打开对应聊天后执行
+- `zhipin_exchange_wechat(conversationId?, candidateName?, index?)` — 换微信。若已知 `conversationId`，优先传它；`candidateName/index` 只作兜底
 - `zhipin_get_username()` — 获取当前登录的招聘者用户名，返回 `username`（依赖当前 runtime 已跟踪页面；首次使用请先 `open_platform`，已打开但未跟踪页面可先 `list_pages + select_page`，确认登录后如需单独验证 attach，可先调用 `attach_browser_session`）。常用于 recruiter binding 解析和外部通知消息中的账号标识
+
+## BOSS直聘 — 聊天编排硬规则
+
+聊天工具链必须把 `conversationId` / `candidateId` 当作稳定主键，而不是把左侧列表的瞬时 `index` 当主键。
+
+原因：
+
+- BOSS 左侧消息列表是虚拟列表，DOM 只保留当前窗口内的若干条记录
+- 点击会话、发送消息、收到新消息后，列表会实时重排
+- 同一个人上一轮是 `index=3`，下一轮可能已经变成 `index=0`
+- 因此 `index` 只适合“当前这一轮、当前这个 DOM 快照内”的临时兜底，不适合跨 tool / 跨 agent 透传
+
+编排要求：
+
+1. 先调用 `zhipin_read_messages`
+2. 一旦返回了 `conversationId` / `candidateId`，后续所有 related tool 都复用这两个值
+3. 调 `zhipin_open_chat` / `zhipin_get_candidate_info` / `zhipin_exchange_wechat` 时，优先传 `conversationId`
+4. 调 `smart-reply-agent.generate_reply(..., target)` 时，`target.conversationId` / `target.candidateId` 必须直接来自 `browser-use-agent` 的真实输出
+5. 禁止把 `zhipin_read_messages` 返回数组里的 `index` 缓存到下一轮，再把它当作会话主键使用
+6. 只有在当前轮次拿不到 `conversationId` 时，才允许临时退回 `candidateName` 或 `index`
+
+错误做法：
+
+- `zhipin_read_messages` 拿到 `index=2`，几轮之后再调用 `zhipin_open_chat(index=2)`
+- 用 `candidateName` 重新模糊匹配一个会话，再把历史 `candidateId` 假定为同一个人
+- `smart-reply-agent` 的 `target` 不用 `browser-use-agent` 返回的 `conversationId/candidateId`，而是由 orch 自己重建
+
+推荐做法：
+
+1. `zhipin_read_messages` → 记录 `conversationId + candidateId + candidateName`
+2. `zhipin_open_chat(conversationId)`
+3. `zhipin_get_candidate_info(conversationId)`
+4. `smart-reply-agent.generate_reply(..., target={ platform, conversationId, candidateId, recruiterUsername|recruiterBinding })`
+5. `zhipin_send_reply(signedEnvelope)`
 
 ## BOSS直聘 — 推荐列表 Tools
 
@@ -49,9 +83,9 @@ metadata:
 
 ## 典型工作流
 
-1. `zhipin_read_messages` → 获取未读候选人列表
-2. `zhipin_open_chat(candidateName)` → 打开某人的聊天
-3. `zhipin_get_candidate_info` → 查看候选人资料、聊天记录，并拿到 `conversationId` / `candidateId`
+1. `zhipin_read_messages` → 获取未读候选人列表，并记录 `conversationId` / `candidateId`
+2. `zhipin_open_chat(conversationId)` → 按稳定会话 ID 打开聊天
+3. `zhipin_get_candidate_info(conversationId)` → 查看候选人资料、聊天记录
 4. 调 `smart-reply-agent.generate_reply` 前，先尝试透传以下信号：
    - 能读到就传：`candidateInfo.communicationPosition`、`candidateInfo.expectedLocation`、`candidateInfo.expectedPosition`
    - 读不到就如实不传

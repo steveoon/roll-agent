@@ -1,6 +1,6 @@
 import { defineTool } from "@roll-agent/sdk";
 import { z } from "zod";
-import { getSelectedChatTarget } from "../pages/zhipin/chat-target.ts";
+import { getActiveChatPanel, getSelectedChatTarget } from "../pages/zhipin/chat-target.ts";
 import {
   getCurrentZhipinRecruiterIdentity,
   matchesRecruiterBinding,
@@ -19,6 +19,16 @@ const OutputSchema = z.object({
   sentMessage: z.string(),
   error: z.string().optional(),
 });
+
+function namesCompatible(expectedName: string, actualName: string): boolean {
+  const expected = expectedName.trim().toLocaleLowerCase("zh-CN");
+  const actual = actualName.trim().toLocaleLowerCase("zh-CN");
+  return (
+    expected.length > 0 &&
+    actual.length > 0 &&
+    (expected === actual || expected.includes(actual) || actual.includes(expected))
+  );
+}
 
 export const zhipinSendReply = defineTool({
   name: "zhipin_send_reply",
@@ -57,6 +67,7 @@ export const zhipinSendReply = defineTool({
       }
 
       const nav = await ensureChatOpen(ctxManager, page, {
+        conversationId: envelopePayload.conversationId,
         candidateName: input.candidateName,
         index: input.index,
       });
@@ -71,12 +82,26 @@ export const zhipinSendReply = defineTool({
       }
 
       activePage = await ctxManager.getPage("zhipin");
+      const activePanel = await getActiveChatPanel(activePage);
       const chatTarget = await getSelectedChatTarget(activePage);
       if (!chatTarget) {
         return {
           success: false,
           sentMessage,
           error: "未能提取当前聊天的 conversationId/candidateId",
+        };
+      }
+      if (
+        activePanel &&
+        chatTarget.candidateName.length > 0 &&
+        !namesCompatible(chatTarget.candidateName, activePanel.candidateName)
+      ) {
+        return {
+          success: false,
+          sentMessage,
+          error:
+            `左侧选中会话与右侧聊天面板不一致: ` +
+            `${chatTarget.candidateName} / ${activePanel.candidateName}`,
         };
       }
       if (

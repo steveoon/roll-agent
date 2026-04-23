@@ -16,6 +16,10 @@ export const zhipinExchangeWechat = defineTool({
   description:
     '换微信。可指定 candidateName 自动打开对应聊天后执行，或不传则在当前窗口执行；例如"和鲁倩换微信"应提取 candidateName=鲁倩。',
   input: z.object({
+    conversationId: z
+      .string()
+      .optional()
+      .describe("会话 ID。若已从消息列表拿到，优先传这个"),
     candidateName: z
       .string()
       .optional()
@@ -29,6 +33,7 @@ export const zhipinExchangeWechat = defineTool({
 
     // 如果指定了候选人，先导航到对应聊天
     const nav = await ensureChatOpen(ctxManager, page, {
+      conversationId: input.conversationId,
       candidateName: input.candidateName,
       index: input.index,
     });

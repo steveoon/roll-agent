@@ -37,6 +37,12 @@ npm 包名：`@roll-agent/smart-reply-agent`
   1. 直接传完整绑定：`tenantId + recruiterBinding`
   2. 便利代理模式：`recruiterUsername`（smart-reply 会先调用 `POST /resolve-recruiter-binding` 解析出 `tenantId + recruiterBinding`）
 
+  `target.conversationId` / `target.candidateId` 的来源约束：
+
+  - 应直接复用 `browser-use-agent.zhipin_read_messages`、`browser-use-agent.zhipin_open_chat` 或 `browser-use-agent.zhipin_get_candidate_info` 的真实输出
+  - 不要由 orchestrator 根据 `candidateName` 或左侧列表 `index` 自行重建
+  - 不要跨轮次缓存 `index` 再推断 target；BOSS 左侧消息列表会实时重排，`index` 不是稳定主键
+
   招聘场景调用约束：
 
   - 调用前应先尝试从页面读取 `candidateInfo.communicationPosition`、`candidateInfo.expectedLocation`、`candidateInfo.expectedPosition`
@@ -96,6 +102,7 @@ npm 包名：`@roll-agent/smart-reply-agent`
 
 1. `browser-use-agent.zhipin_get_username()` → 获取当前 BOSS 账号 `username`
 2. `browser-use-agent` 读取候选人资料、聊天记录或当前页面上下文，并从 `zhipin_read_messages` / `zhipin_get_candidate_info` 获取 `conversationId + candidateId`
+   - 一旦拿到这两个 ID，后续整个链路都应原样复用，不要再退回 `index`
 3. 调用前先尝试补齐页面信号：
    - `candidateInfo.communicationPosition`
    - `candidateInfo.expectedLocation`

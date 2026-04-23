@@ -1,7 +1,7 @@
 import { defineTool } from "@roll-agent/sdk";
 import { z } from "zod";
 import { getContextManager } from "../runtime-holder.ts";
-import { getSelectedChatTarget } from "../pages/zhipin/chat-target.ts";
+import { getActiveChatPanel, getSelectedChatTarget } from "../pages/zhipin/chat-target.ts";
 import { ensureChatOpen } from "../pages/zhipin/chat-navigation.ts";
 import { resolveConversationSignals } from "../pages/zhipin/job-signals.ts";
 
@@ -42,16 +42,57 @@ const OutputSchema = z.object({
   error: z.string().optional(),
 });
 
+function emptyCandidateInfo() {
+  return {
+    name: "",
+    age: "",
+    experience: "",
+    education: "",
+    communicationPosition: "",
+    expectedPosition: "",
+    expectedLocation: "",
+    expectedSalary: "",
+    tags: [] as string[],
+  };
+}
+
+function buildFailureResult(error: string) {
+  return {
+    success: false,
+    conversationId: "",
+    candidateId: "",
+    candidateInfo: emptyCandidateInfo(),
+    chatMessages: [],
+    formattedHistory: [],
+    stats: { totalMessages: 0, candidateMessages: 0, recruiterMessages: 0, systemMessages: 0 },
+    error,
+  };
+}
+
+function namesCompatible(expectedName: string, actualName: string): boolean {
+  const expected = expectedName.trim().toLocaleLowerCase("zh-CN");
+  const actual = actualName.trim().toLocaleLowerCase("zh-CN");
+  return (
+    expected.length > 0 &&
+    actual.length > 0 &&
+    (expected === actual || expected.includes(actual) || actual.includes(expected))
+  );
+}
+
 export const zhipinGetCandidateInfo = defineTool({
   name: "zhipin_get_candidate_info",
   description:
-    "提取候选人资料和完整聊天记录。可指定 candidateName 自动打开对应聊天，或不传则读取当前窗口；例如“查看鲁倩的聊天详情”应提取 candidateName=鲁倩。",
+    "提取候选人资料和完整聊天记录。可指定 conversationId 或 candidateName 自动打开对应聊天；若已从 `zhipin_read_messages` 获取 conversationId，优先传它。",
   input: z.object({
+    conversationId: z
+      .string()
+      .optional()
+      .describe("会话 ID。若已从 `zhipin_read_messages` 获取，优先传这个，最稳定"),
     candidateName: z
       .string()
       .optional()
       .describe("候选人姓名。若用户说“查看鲁倩的聊天详情”，这里应提取为“鲁倩”"),
-    index: z.number().optional().describe("候选人在列表中的索引（可选）"),
+    index: z.number().optional().describe("候选人在列表中的索引（可选，仅兜底）"),
     maxMessages: z.number().default(100).describe("最多返回的消息条数"),
   }),
   output: OutputSchema,
@@ -63,36 +104,38 @@ export const zhipinGetCandidateInfo = defineTool({
 
     // 如果指定了候选人，先导航到对应聊天
     const nav = await ensureChatOpen(ctxManager, page, {
+      conversationId: input.conversationId,
       candidateName: input.candidateName,
       index: input.index,
     });
     if (nav && !nav.found) {
-      const empty = {
-        name: "",
-        age: "",
-        experience: "",
-        education: "",
-        communicationPosition: "",
-        expectedPosition: "",
-        expectedLocation: "",
-        expectedSalary: "",
-        tags: [] as string[],
-      };
-      return {
-        success: false,
-        conversationId: "",
-        candidateId: "",
-        candidateInfo: empty,
-        chatMessages: [],
-        formattedHistory: [],
-        stats: { totalMessages: 0, candidateMessages: 0, recruiterMessages: 0, systemMessages: 0 },
-        error: nav.error,
-      };
+      return buildFailureResult(nav.error ?? "打开聊天失败");
     }
 
     ctx.logger.info(`Extracting candidate info${nav ? ` for ${nav.name}` : " (current window)"}`);
     const activePage = await ctxManager.getPage("zhipin");
+    const expectedName = nav?.name ?? input.candidateName ?? "";
+    const activePanel = await getActiveChatPanel(activePage);
+    if (expectedName.length > 0 && (!activePanel || !namesCompatible(expectedName, activePanel.candidateName))) {
+      return buildFailureResult(`右侧聊天面板未切换到 ${expectedName}`);
+    }
+
     const selectedTarget = await getSelectedChatTarget(activePage);
+    if (!selectedTarget) {
+      return buildFailureResult("未能提取当前选中聊天的 conversationId/candidateId");
+    }
+    if (nav && selectedTarget.conversationId !== nav.conversationId) {
+      return buildFailureResult(`当前选中会话与目标会话不一致: ${nav.name || nav.conversationId}`);
+    }
+    if (
+      activePanel &&
+      selectedTarget.candidateName.length > 0 &&
+      !namesCompatible(selectedTarget.candidateName, activePanel.candidateName)
+    ) {
+      return buildFailureResult(
+        `左侧选中会话与右侧聊天面板不一致: ${selectedTarget.candidateName} / ${activePanel.candidateName}`,
+      );
+    }
 
     // 等待聊天消息加载（DOM: .conversation-message > .chat-message-list > .message-item）
     try {
@@ -105,14 +148,24 @@ export const zhipinGetCandidateInfo = defineTool({
     }
 
     const data = await activePage.evaluate((maxMsgs: number) => {
+      const conversationRoot =
+        document.querySelector(".chat-conversation") ??
+        document.querySelector(".conversation-box") ??
+        document;
+
       // ===== Candidate Info =====
       // 限定到聊天头部的详情区域，避免匹配左侧列表
-      const detailArea = document.querySelector(".base-info-single-detial, .base-info-content");
-      const name = detailArea?.querySelector(".name-box")?.textContent?.trim() ?? "";
+      const detailArea = conversationRoot.querySelector(
+        ".base-info-single-detial, .base-info-content, .base-info-single-container",
+      );
+      const name =
+        detailArea
+          ?.querySelector(".name-box, .base-name, .chat-user-name, .geek-name")
+          ?.textContent?.trim() ?? "";
 
       const infoItems = detailArea
         ? detailArea.querySelectorAll(":scope > div")
-        : document.querySelectorAll(".geek-info-item, .base-info-item");
+        : conversationRoot.querySelectorAll(".geek-info-item, .base-info-item");
       const infoTexts: string[] = [];
       infoItems.forEach((el) => {
         const t = el.textContent?.trim();
@@ -127,7 +180,7 @@ export const zhipinGetCandidateInfo = defineTool({
       const education = fullInfo.match(/(初中|高中|中专|大专|本科|硕士|博士)/)?.[1] ?? "";
 
       let communicationPosition = "";
-      const posNameEl = document.querySelector(".position-name");
+      const posNameEl = conversationRoot.querySelector(".position-name");
       if (posNameEl) {
         const cloned = posNameEl.cloneNode(true) as HTMLElement;
         cloned.querySelectorAll(".popover-wrap, .tooltip-job").forEach((e) => e.remove());
@@ -135,12 +188,14 @@ export const zhipinGetCandidateInfo = defineTool({
       }
 
       let expectedJobText = "";
-      const expectValue = document.querySelector(".position-item.expect .value.job");
+      const expectValue = conversationRoot.querySelector(".position-item.expect .value.job");
       if (expectValue) {
         expectedJobText = expectValue.textContent?.trim() ?? "";
       }
       const expectedSalary =
-        document.querySelector(".position-item.expect .high-light-orange")?.textContent?.trim() ??
+        conversationRoot
+          .querySelector(".position-item.expect .high-light-orange")
+          ?.textContent?.trim() ??
         "";
 
       // tags 只取详情区域内的标签，排除沟通职位区域的 .high-light-boss
@@ -156,7 +211,9 @@ export const zhipinGetCandidateInfo = defineTool({
       // ===== Chat Messages =====
       // 实际 DOM: .conversation-message > .chat-message-list > .message-item
       // 直接查 .chat-message-list 的直接子 .message-item，跳过中间层
-      const msgItems = document.querySelectorAll(".chat-message-list > .message-item");
+      const msgItems = conversationRoot.querySelectorAll(
+        ".chat-message-list > .message-item, .conversation-message .message-item",
+      );
       const timeRegex = /\d{1,2}:\d{2}(?::\d{2})?|\d{4}-\d{2}-\d{2}/;
 
       type Msg = {
@@ -277,8 +334,8 @@ export const zhipinGetCandidateInfo = defineTool({
     );
     return {
       success: true,
-      conversationId: selectedTarget?.conversationId ?? "",
-      candidateId: selectedTarget?.candidateId ?? "",
+      conversationId: selectedTarget.conversationId,
+      candidateId: selectedTarget.candidateId,
       candidateInfo: {
         name: data.candidateInfo.name,
         age: data.candidateInfo.age,
