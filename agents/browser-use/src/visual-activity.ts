@@ -10,9 +10,6 @@ type VisualRect = {
   readonly height: number;
 };
 
-const VISUAL_ACTIVITY_TONES = ["info", "success", "error"] as const;
-export type VisualActivityTone = (typeof VISUAL_ACTIVITY_TONES)[number];
-
 type VisualActivityTheme = {
   readonly accent: string;
   readonly accentSoft: string;
@@ -71,7 +68,9 @@ const VISUAL_ACTIVITY_THEMES = {
     text: "#FFFBEB",
     dot: "#FBBF24",
   },
-} as const satisfies Record<VisualActivityTone, VisualActivityTheme>;
+} as const;
+
+export type VisualActivityTone = keyof typeof VISUAL_ACTIVITY_THEMES;
 
 const DEFAULT_REGION_PADDING = 14;
 const DEFAULT_COMPLETION_LINGER_MS = 720;
