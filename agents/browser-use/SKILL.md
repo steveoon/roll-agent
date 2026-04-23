@@ -26,7 +26,7 @@ metadata:
 - `open_platform(platform)` — 通过原生 CDP 打开并聚焦招聘平台主页；登录前不会触发 Playwright attach
 - `list_pages(platform?)` — 通过原生 CDP 列出当前浏览器中可见的页面和 pageId（登录前 `pageId` 即原生 targetId）
 - `select_page(platform, pageId)` — 将指定页面绑定为平台当前活跃页；登录前优先走原生 CDP target 激活
-- `navigate_active_tab(url)` — 将当前激活 tab 导航到指定 URL
+- `navigate_active_tab(url)` — 导航到指定 URL；若 URL 属于 `zhipin/yupao`，优先复用已打开的平台页，避免把无关 tab 导航成第二个平台页
 
 ## 调试 Tools
 
@@ -35,6 +35,7 @@ metadata:
 ## BOSS直聘 — 聊天 Tools
 
 - `zhipin_read_messages(limit?, onlyUnread?, sortBy?)` — 读取消息列表中的候选人，默认返回全部消息；若只看未读，显式传 `onlyUnread=true`
+- `zhipin_open_chat_page()` — 通过点击 Boss 左侧导航切换回「沟通」页；优先复用当前已登录的 Boss 页面，不让编排器去猜站内 URL
 - `zhipin_open_chat(conversationId?, candidateName?, index?, preferUnread?)` — 打开指定候选人的聊天窗口；匹配优先级是 `conversationId` > `candidateName` > `index`
 - `zhipin_get_candidate_info(conversationId?, candidateName?, index?, maxMessages?)` — 提取候选人资料、聊天记录，以及当前选中聊天的 `conversationId` / `candidateId`。输出里的 `candidateInfo.communicationPosition`、`candidateInfo.expectedLocation`、`candidateInfo.expectedPosition` 已按“沟通职位 + 最近关注”结构化解析；若 `communicationPosition` 含连字符类分隔符（`-` / `－` / `—` / `–`），则取第一段作为可选 `preferredBrand`，否则不输出该字段
 - `zhipin_send_reply(signedEnvelope, candidateName?, index?)` — 发送消息。只接受 Reply Authority Service 签发的 `signedEnvelope`；本地会先做 Ed25519 验签、过期检查、重放检查、目标绑定校验和 recruiter 绑定校验。启动期公钥预加载失败时直接前置拒绝，错误指向 `browser_status.replyAuthorityKeysLoaded`
@@ -77,6 +78,7 @@ metadata:
 
 ## BOSS直聘 — 推荐列表 Tools
 
+- `zhipin_open_recommend_page()` — 通过点击 Boss 左侧导航切换到「推荐牛人」页；优先复用当前已登录的 Boss 页面，不让编排器去猜站内 URL
 - `zhipin_get_candidate_list(maxResults?)` — 获取推荐列表页的候选人卡片信息（姓名、年龄、学历、期望薪资等）
 - `zhipin_say_hello(indices)` — 对推荐列表中的候选人批量点击「打招呼」
 - `zhipin_open_resume(index)` — 点击候选人卡片打开简历详情弹窗
@@ -91,16 +93,23 @@ metadata:
 ## 典型工作流
 
 1. `zhipin_read_messages` → 获取消息列表，并记录 `conversationId` / `candidateId`
-2. `zhipin_open_chat(conversationId)` → 按稳定会话 ID 打开聊天
-3. `zhipin_get_candidate_info(conversationId)` → 查看候选人资料、聊天记录
-4. 调 `smart-reply-agent.generate_reply` 前，先尝试透传以下信号：
+2. `zhipin_open_chat_page()` → 通过左侧导航切回 `沟通`（需要时）
+3. `zhipin_open_chat(conversationId)` → 按稳定会话 ID 打开聊天
+4. `zhipin_get_candidate_info(conversationId)` → 查看候选人资料、聊天记录
+5. 调 `smart-reply-agent.generate_reply` 前，先尝试透传以下信号：
    - 能读到就传：`candidateInfo.communicationPosition`、`candidateInfo.expectedLocation`、`candidateInfo.expectedPosition`
    - 读不到就如实不传
    - `preferredBrand`：仅当 `communicationPosition` 含连字符类分隔符（`-` / `－` / `—` / `–`）时，取第一段透传；没有分隔符就不传
    - 严禁把通用岗位名（如“餐饮兼职服务员”“门店服务员”）或 `zhipin_get_candidate_list.company`（候选人现/前雇主）伪装成 `preferredBrand`
-5. `smart-reply-agent.generate_reply(..., target)` → 获取 `suggestedReply + signedEnvelope`
-6. `zhipin_send_reply(signedEnvelope)` → 验签、校验 recruiterBinding 后发送回复
-7. `zhipin_exchange_wechat` → 交换微信（可选）
+6. `smart-reply-agent.generate_reply(..., target)` → 获取 `suggestedReply + signedEnvelope`
+7. `zhipin_send_reply(signedEnvelope)` → 验签、校验 recruiterBinding 后发送回复
+8. `zhipin_exchange_wechat` → 交换微信（可选）
+
+推荐列表链路建议：
+
+1. `zhipin_open_recommend_page()` → 通过左侧导航切到 `推荐牛人`
+2. `zhipin_get_candidate_list(maxResults?)` → 读取候选人卡片
+3. `zhipin_say_hello(indices)` → 批量打招呼
 
 ## 支持平台
 

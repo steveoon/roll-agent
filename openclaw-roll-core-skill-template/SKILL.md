@@ -38,6 +38,22 @@ roll agent tools <agent-name> --json # machine-readable
 - Use `--json` when another agent or script will parse the result.
 - If `roll run <agent> <tool>` prints `Did you mean: ...` in stderr, treat it as a hint and re-run `roll agent tools` instead of guessing from memory.
 
+## Navigation Tool Choice
+
+When the task involves switching pages, tabs, or in-app sections, choose the tool by semantic level instead of defaulting to raw URL navigation.
+
+Priority:
+
+1. Prefer target-agent-specific navigation tools that express the user intent directly, such as `*_open_*_page()`, `*_switch_*()`, or other section-level tools documented by the target subagent.
+2. If the target page is already open and identifiable, prefer `list_pages` + `select_page` over re-navigation.
+3. Use generic URL navigation tools such as `navigate_active_tab(url)` only when no higher-level navigation tool exists for that subagent/workflow.
+
+Practical rule:
+
+- Do not guess internal site/app URLs when the target subagent already exposes a semantic navigation tool.
+- Read the target subagent's own `SKILL.md` first for these higher-level navigation affordances.
+- In this repo, `browser-use-agent` documents platform-specific section openers in its own `SKILL.md`; treat those as the source of truth instead of hardcoding site routes into the shared Roll skill.
+
 ## Diagnostics & Maintenance
 
 - `roll doctor --json` — system health check, including runtime env drift summary for registered agents.
