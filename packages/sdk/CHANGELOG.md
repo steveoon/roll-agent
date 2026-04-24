@@ -1,5 +1,11 @@
 # @roll-agent/sdk
 
+## 0.1.6
+
+### Patch Changes
+
+- [#65](https://github.com/steveoon/roll-agent/pull/65) [`256d676`](https://github.com/steveoon/roll-agent/commit/256d6765dfb451e7aca57121e304bfba54e56752) Thanks [@steveoon](https://github.com/steveoon)! - Preserve MCP `tools/list` input schemas for tools whose root Zod object is wrapped by refinements while still enforcing the original schema before execution.
+
 ## 0.1.5
 
 ### Patch Changes
