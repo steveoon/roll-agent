@@ -1,6 +1,6 @@
 ---
 name: browser-use-agent
-description: 浏览器操控 Agent。控制浏览器操作招聘平台——读取消息、打开聊天、发送回复、换微信、查看推荐列表、打招呼、查看简历。
+description: 浏览器操控 Agent。控制浏览器操作招聘平台——读取消息、打开聊天、发送回复、换微信、滚动动态列表、查看推荐列表、打招呼、查看简历。
 metadata:
   roll-env-file: references/env.yaml
 ---
@@ -31,10 +31,11 @@ metadata:
 ## 调试 Tools
 
 - `attach_browser_session()` — 调试工具。显式执行一次 `connectOverCDP()`，用于隔离验证“仅 attach”是否会触发站点风控
+- `zhipin_scroll_view(surface, direction?, steps?, distance?, settleMs?)` — 滚动 BOSS直聘页面内部动态列表容器，用于调试或显式翻页。`surface` 支持 `chat-list`、`chat-history`、`recommend-list`；不传 `direction` 时使用该 surface 的默认方向
 
 ## BOSS直聘 — 聊天 Tools
 
-- `zhipin_read_messages(limit?, onlyUnread?, sortBy?)` — 读取消息列表中的候选人，默认返回全部消息；若只看未读，显式传 `onlyUnread=true`
+- `zhipin_read_messages(limit?, onlyUnread?, sortBy?, autoScroll?, maxScrolls?)` — 读取消息列表中的候选人，默认返回全部消息；若只看未读，显式传 `onlyUnread=true`。默认 `autoScroll=true`，会向下滚动左侧消息列表内部容器并按 `conversationId` 合并去重；`maxScrolls` 默认 `4`，用于限制动态列表采集成本
 - `zhipin_open_chat_page()` — 通过点击 Boss 左侧导航切换回「沟通」页；优先复用当前已登录的 Boss 页面，不让编排器去猜站内 URL
 - `zhipin_open_chat(conversationId?, candidateName?, index?, preferUnread?)` — 打开指定候选人的聊天窗口；匹配优先级是 `conversationId` > `candidateName` > `index`
 - `zhipin_get_candidate_info(conversationId?, candidateName?, index?, maxMessages?)` — 提取候选人资料、聊天记录，以及当前选中聊天的 `conversationId` / `candidateId`。输出里的 `candidateInfo.communicationPosition`、`candidateInfo.expectedLocation`、`candidateInfo.expectedPosition` 已按“沟通职位 + 最近关注”结构化解析；若 `communicationPosition` 含连字符类分隔符（`-` / `－` / `—` / `–`），则取第一段作为可选 `preferredBrand`，否则不输出该字段
@@ -62,11 +63,19 @@ metadata:
 5. 禁止把 `zhipin_read_messages` 返回数组里的 `index` 缓存到下一轮，再把它当作会话主键使用
 6. 只有在当前轮次拿不到 `conversationId` 时，才允许临时退回 `candidateName` 或 `index`
 
+动态列表要求：
+
+- `zhipin_read_messages` 默认会自动滚动左侧消息列表；只有明确需要“只读当前可见 DOM”时才传 `autoScroll=false`
+- 若要手动补采或诊断滚动状态，调用 `zhipin_scroll_view(surface="chat-list")`
+- `onlyUnread=true` 时不要依赖 `limit` 提前停止采集；未读会话可能在当前首屏之后
+- `zhipin_scroll_view(surface="chat-history", direction="up")` 可用于显式加载当前聊天更早的历史消息，但业务回复链路仍应优先用 `zhipin_get_candidate_info(conversationId)` 读取结构化详情
+
 错误做法：
 
 - `zhipin_read_messages` 拿到 `index=2`，几轮之后再调用 `zhipin_open_chat(index=2)`
 - 用 `candidateName` 重新模糊匹配一个会话，再把历史 `candidateId` 假定为同一个人
 - `smart-reply-agent` 的 `target` 不用 `browser-use-agent` 返回的 `conversationId/candidateId`，而是由 orch 自己重建
+- 手动滚动后继续用旧的 `index` 打开候选人；滚动和动态渲染后 `index` 仍只表示当前 DOM 快照
 
 推荐做法：
 
@@ -79,11 +88,30 @@ metadata:
 ## BOSS直聘 — 推荐列表 Tools
 
 - `zhipin_open_recommend_page()` — 通过点击 Boss 左侧导航切换到「推荐牛人」页；优先复用当前已登录的 Boss 页面，不让编排器去猜站内 URL
-- `zhipin_get_candidate_list(maxResults?)` — 获取推荐列表页的候选人卡片信息（姓名、年龄、学历、期望薪资等）
+- `zhipin_filter_recommend_candidates(ageMin?, ageMax?, gender?, activity?)` — 在「推荐牛人」页打开筛选面板，只设置年龄、性别、活跃度[单选] 三个维度并提交。未传的维度会重置为 `不限`（年龄默认为 `16-不限`），不会点击岗位下拉，也不会清除学历、薪资、求职状态等其它筛选项
+- `zhipin_get_candidate_list(maxResults?, autoScroll?, maxScrolls?)` — 获取推荐列表页的候选人卡片信息（姓名、年龄、学历、期望薪资等）。默认 `autoScroll=true`，会向下滚动推荐列表内部容器并按 `candidateId` / `data-geek` 合并去重；`maxScrolls` 默认 `4`。返回的 `scrollStats.stopReason` 可用于判断未达到 `maxResults` 的原因：`target-count`、`boundary`、`no-new-items`、`max-steps`
 - `zhipin_say_hello(indices)` — 对推荐列表中的候选人批量点击「打招呼」
 - `zhipin_open_resume(index)` — 点击候选人卡片打开简历详情弹窗
 - `zhipin_locate_resume_canvas()` — 定位简历弹窗中嵌套 iframe 内的 canvas 坐标（用于截图）
 - `zhipin_close_resume()` — 关闭简历详情弹窗
+
+## BOSS直聘 — 动态列表滚动规则
+
+BOSS 页面通常不是整页滚动，而是内部容器滚动：
+
+```text
+chat-list       -> 左侧消息列表，默认向下滚动，去重主键 conversationId
+chat-history    -> 右侧聊天记录，默认向上滚动，用于加载更早历史
+recommend-list  -> 推荐牛人列表，默认向下滚动，去重主键 candidateId/data-geek
+```
+
+使用原则：
+
+1. 业务读取优先用自带 `autoScroll` 的工具：`zhipin_read_messages`、`zhipin_get_candidate_list`
+2. `zhipin_scroll_view` 只作为显式翻页、调试和补救工具，不作为业务读取的必经步骤
+3. 动态列表滚动后，`index` 会随当前 DOM 窗口变化；跨 tool 传递必须用 `conversationId` / `candidateId`
+4. `maxScrolls` 用于成本控制；需要更完整列表时再显式调大，不要无界滚动
+5. 推荐列表若 `total < maxResults`，先看 `scrollStats.stopReason`：`boundary` 表示触底后等待追加数据仍无新增，`no-new-items` 表示连续滚动没有新去重项，`max-steps` 表示到达滚动步数上限
 
 ## 鱼泡 Tools
 
@@ -108,8 +136,9 @@ metadata:
 推荐列表链路建议：
 
 1. `zhipin_open_recommend_page()` → 通过左侧导航切到 `推荐牛人`
-2. `zhipin_get_candidate_list(maxResults?)` → 读取候选人卡片
-3. `zhipin_say_hello(indices)` → 批量打招呼
+2. `zhipin_filter_recommend_candidates(ageMin?, ageMax?, gender?, activity?)` → 需要限定目标人群时先设置年龄、性别、活跃度；例如“男性，20-40 岁，刚刚活跃”对应 `gender="男", ageMin=20, ageMax=40, activity="刚刚活跃"`
+3. `zhipin_get_candidate_list(maxResults?, autoScroll=true, maxScrolls=4)` → 读取候选人卡片；默认会滚动动态列表并去重合并
+4. `zhipin_say_hello(indices)` → 批量打招呼
 
 ## 支持平台
 

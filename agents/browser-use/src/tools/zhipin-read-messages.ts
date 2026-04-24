@@ -2,9 +2,12 @@ import { defineTool } from "@roll-agent/sdk";
 import { z } from "zod";
 import { getContextManager } from "../runtime-holder.ts";
 import {
-  performInitialScrollPattern,
-} from "../pages/zhipin/anti-detection.ts";
-import { ensureChatListLoaded, getChatCandidates } from "../pages/zhipin/chat-navigation.ts";
+  ensureChatListLoaded,
+  getChatCandidates,
+  type ChatListItem,
+} from "../pages/zhipin/chat-navigation.ts";
+import { getZhipinListSurfaceConfig } from "../pages/zhipin/list-surfaces.ts";
+import { collectDynamicListItems } from "../pages/shared/dynamic-list-scroller.ts";
 import { VisualActivitySession } from "../visual-activity-session.ts";
 
 const CandidateItemSchema = z.object({
@@ -26,6 +29,13 @@ const OutputSchema = z.object({
   stats: z.object({ withName: z.number(), withUnread: z.number() }),
 });
 
+function getChatCandidateKey(candidate: ChatListItem): string | undefined {
+  if (candidate.conversationId.length > 0) return candidate.conversationId;
+  if (candidate.candidateId.length > 0) return candidate.candidateId;
+  if (candidate.name.length === 0) return undefined;
+  return [candidate.name, candidate.position, candidate.lastMessageTime].join("|");
+}
+
 export const zhipinReadMessages = defineTool({
   name: "zhipin_read_messages",
   description: "读取 BOSS直聘消息列表，默认返回全部候选人；若只看未读消息，传 onlyUnread=true",
@@ -36,6 +46,8 @@ export const zhipinReadMessages = defineTool({
       .default(false)
       .describe("是否只返回有未读消息的候选人；用户说“全部/所有消息列表”时应为 false，说“未读消息”时应为 true"),
     sortBy: z.enum(["time", "unreadCount", "name"]).default("time"),
+    autoScroll: z.boolean().default(true).describe("是否自动向下滚动消息列表并合并采集结果"),
+    maxScrolls: z.number().int().min(0).max(50).default(4).describe("自动滚动的最大步数"),
   }),
   output: OutputSchema,
   execute: async (input, ctx) => {
@@ -71,9 +83,29 @@ export const zhipinReadMessages = defineTool({
         ".user-list.b-scroll-stable, .chat-user .user-container, .chat-list-wrap",
         { label: readLabel, padding: 8 },
       );
-      await performInitialScrollPattern(activePage);
 
-      const candidates = (await getChatCandidates(activePage)).map((candidate) => ({
+      const autoScroll = input.autoScroll ?? true;
+      const maxScrolls = input.maxScrolls ?? 4;
+      const targetCount =
+        !onlyUnread && input.limit !== undefined ? { targetCount: input.limit } : {};
+      const rawCandidates =
+        autoScroll && maxScrolls > 0
+          ? (
+              await collectDynamicListItems(
+                activePage,
+                getZhipinListSurfaceConfig("chat-list"),
+                () => getChatCandidates(activePage),
+                getChatCandidateKey,
+                {
+                  direction: "down",
+                  steps: maxScrolls,
+                  ...targetCount,
+                },
+              )
+            ).items
+          : await getChatCandidates(activePage);
+
+      const candidates = rawCandidates.map((candidate) => ({
         name: candidate.name,
         conversationId: candidate.conversationId,
         candidateId: candidate.candidateId,
