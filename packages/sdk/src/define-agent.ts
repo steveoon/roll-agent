@@ -4,7 +4,6 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
-import { z } from "zod";
 import type {
   AgentDefinition,
   RunnableAgent,
@@ -13,6 +12,7 @@ import type {
 } from "./types/index.ts";
 import { createAgentLogger } from "./context.ts";
 import type { AgentContext, LogLevel } from "./context.ts";
+import { getMcpCompatibleInputSchema, parseToolInput } from "./mcp-schema.ts";
 
 /** defineAgent 额外选项 */
 export interface DefineAgentOptions {
@@ -311,18 +311,18 @@ async function listenHttp(
 
 /** 将单个 tool 注册到 MCP Server */
 function registerTool(server: McpServer, tool: AnyToolDefinition, ctx: AgentContext): void {
-  // MCP SDK 的 registerTool 要求 ZodObject，但 AnyToolDefinition.input 是更宽泛的 ZodType（类型擦除代价）
   // AnyToolDefinition.execute 签名为 (never, ctx) 以阻止直接调用，注册时需转型为可调用签名
   server.registerTool(
     tool.name,
     {
       description: tool.description,
-      inputSchema: tool.input as z.ZodObject<z.ZodRawShape>,
+      inputSchema: getMcpCompatibleInputSchema(tool.input),
     },
     async (params: Record<string, unknown>) => {
+      const parsedInput = await parseToolInput(tool.input, params);
       const result = await (
         tool.execute as (input: unknown, ctx: AgentContext) => Promise<unknown>
-      )(params, ctx);
+      )(parsedInput, ctx);
       return {
         content: [{ type: "text" as const, text: JSON.stringify(result) }],
       };
