@@ -14,6 +14,7 @@ import { zhipinGetCandidateInfo } from "./tools/zhipin-get-candidate-info.ts";
 import { zhipinSendReply } from "./tools/zhipin-send-reply.ts";
 import { zhipinExchangeWechat } from "./tools/zhipin-exchange-wechat.ts";
 import { zhipinGetUsername } from "./tools/zhipin-get-username.ts";
+import { zhipinScrollView } from "./tools/zhipin-scroll-view.ts";
 // Zhipin — 推荐列表
 import { zhipinGetCandidateList } from "./tools/zhipin-get-candidate-list.ts";
 import { zhipinOpenRecommendPage } from "./tools/zhipin-open-recommend-page.ts";
@@ -87,6 +88,7 @@ const agent = defineAgent(
       zhipinSendReply,
       zhipinExchangeWechat,
       zhipinGetUsername,
+      zhipinScrollView,
       // Zhipin 推荐列表
       zhipinOpenRecommendPage,
       zhipinGetCandidateList,

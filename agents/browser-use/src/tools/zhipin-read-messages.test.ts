@@ -8,5 +8,7 @@ describe("zhipin_read_messages", () => {
 
     assert.equal(parsed.onlyUnread, false);
     assert.equal(parsed.sortBy, "time");
+    assert.equal(parsed.autoScroll, true);
+    assert.equal(parsed.maxScrolls, 4);
   });
 });

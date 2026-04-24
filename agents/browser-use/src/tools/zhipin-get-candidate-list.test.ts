@@ -25,6 +25,13 @@ afterEach(() => {
 });
 
 describe("zhipin_get_candidate_list", () => {
+  it("defaults to auto-scrolling with a bounded number of scrolls", () => {
+    const parsed = zhipinGetCandidateList.input.parse({});
+
+    assert.equal(parsed.autoScroll, true);
+    assert.equal(parsed.maxScrolls, 4);
+  });
+
   it("uses visual activity feedback while reading the recommend list", async () => {
     const calls: string[] = [];
     const page = {};
@@ -85,7 +92,10 @@ describe("zhipin_get_candidate_list", () => {
       }),
     });
 
-    const result = await zhipinGetCandidateList.execute({ maxResults: 1 }, createTestContext());
+    const result = await zhipinGetCandidateList.execute(
+      { maxResults: 1, autoScroll: false },
+      createTestContext(),
+    );
 
     assert.equal(result.success, true);
     assert.equal(result.total, 1);

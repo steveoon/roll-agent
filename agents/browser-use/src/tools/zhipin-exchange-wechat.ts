@@ -3,6 +3,7 @@ import { z } from "zod";
 import { getContextManager } from "../runtime-holder.ts";
 import { randomDelay, humanDelay } from "../pages/zhipin/anti-detection.ts";
 import { ensureChatOpen } from "../pages/zhipin/chat-navigation.ts";
+import { getActiveChatPanel, getSelectedChatTarget } from "../pages/zhipin/chat-target.ts";
 import {
   moveVisualCursorToSelector,
   showVisualClickOnSelector,
@@ -14,6 +15,19 @@ const OutputSchema = z.object({
   wechatNumber: z.string().optional(),
   error: z.string().optional(),
 });
+
+const WECHAT_BUTTON_MARKER_ATTR = "data-roll-wechat-btn";
+const CONFIRM_BUTTON_MARKER_ATTR = "data-roll-confirm-btn";
+
+function namesCompatible(expectedName: string, actualName: string): boolean {
+  const expected = expectedName.trim().toLocaleLowerCase("zh-CN");
+  const actual = actualName.trim().toLocaleLowerCase("zh-CN");
+  return (
+    expected.length > 0 &&
+    actual.length > 0 &&
+    (expected === actual || expected.includes(actual) || actual.includes(expected))
+  );
+}
 
 export const zhipinExchangeWechat = defineTool({
   name: "zhipin_exchange_wechat",
@@ -49,52 +63,79 @@ export const zhipinExchangeWechat = defineTool({
     const activePage = await ctxManager.getPage("zhipin");
 
     try {
-      // Step 1: 多策略查找"换微信"按钮
+      const chatTarget = await getSelectedChatTarget(activePage);
+      if (!chatTarget) {
+        return {
+          success: false,
+          exchanged: false,
+          error: "未选中聊天联系人，无法点击当前聊天输入区的「换微信」按钮",
+        };
+      }
+
+      const activePanel = await getActiveChatPanel(activePage);
+      if (
+        activePanel &&
+        chatTarget.candidateName.length > 0 &&
+        !namesCompatible(chatTarget.candidateName, activePanel.candidateName)
+      ) {
+        return {
+          success: false,
+          exchanged: false,
+          error:
+            `左侧选中会话与右侧聊天面板不一致: ` +
+            `${chatTarget.candidateName} / ${activePanel.candidateName}`,
+        };
+      }
+
+      // Step 1: 只在右侧聊天操作区查找精确文本为"换微信"的按钮
       // 用 getBoundingClientRect 判断可见性（offsetParent 对 fixed 定位不可靠）
-      const btnData = await activePage.evaluate(() => {
+      const btnData = await activePage.evaluate((markerAttr: string) => {
         const check = (el: Element): boolean => {
           const r = el.getBoundingClientRect();
           return r.width > 0 && r.height > 0;
         };
+        const normalize = (text: string): string => text.replace(/\s+/g, "").trim();
 
-        // 策略 1: 直接选择器查找
+        document.querySelectorAll(`[${markerAttr}]`).forEach((element) => {
+          element.removeAttribute(markerAttr);
+        });
+
+        // 顶部筛选项也可能包含"已交换微信"，因此必须限定在右侧会话操作区。
         const selectors = [
-          ".operate-exchange-left .operate-btn",
-          "span.operate-btn",
+          ".chat-conversation .conversation-operate .operate-exchange-left span.operate-btn",
+          ".chat-conversation .conversation-operate span.operate-btn",
+          ".conversation-box .conversation-operate .operate-exchange-left span.operate-btn",
+          ".conversation-box .conversation-operate span.operate-btn",
+          ".conversation-operate .operate-exchange-left span.operate-btn",
+          ".conversation-operate .operate-exchange-left span",
         ];
         for (const sel of selectors) {
           const elements = Array.from(document.querySelectorAll(sel));
           for (const el of elements) {
-            const text = el.textContent?.trim() ?? "";
-            if (text.includes("换微信") && check(el)) {
-              (el as HTMLElement).setAttribute("data-roll-wechat-btn", "true");
+            const text = normalize(el.textContent ?? "");
+            if (text === "换微信" && check(el)) {
+              (el as HTMLElement).setAttribute(markerAttr, "true");
               return { found: true, text };
             }
           }
         }
 
-        // 策略 2: 全量 span 文本搜索 fallback
-        const allSpans = Array.from(document.querySelectorAll("span"));
-        for (const span of allSpans) {
-          const text = span.textContent?.trim() ?? "";
-          if (text.includes("换微信") && check(span)) {
-            span.setAttribute("data-roll-wechat-btn", "true");
-            return { found: true, text };
-          }
-        }
-
         return { found: false };
-      });
+      }, WECHAT_BUTTON_MARKER_ATTR);
 
       if (!btnData.found) {
-        return { success: false, exchanged: false, error: "未找到「换微信」按钮" };
+        return {
+          success: false,
+          exchanged: false,
+          error: "未找到当前聊天输入区的「换微信」按钮",
+        };
       }
 
       // 用 Playwright 的 click（模拟真实鼠标事件，带坐标）
       await randomDelay(activePage, 200, 400);
-      await moveVisualCursorToSelector(activePage, '[data-roll-wechat-btn="true"]');
-      await showVisualClickOnSelector(activePage, '[data-roll-wechat-btn="true"]');
-      await activePage.click('[data-roll-wechat-btn="true"]');
+      await moveVisualCursorToSelector(activePage, `[${WECHAT_BUTTON_MARKER_ATTR}="true"]`);
+      await showVisualClickOnSelector(activePage, `[${WECHAT_BUTTON_MARKER_ATTR}="true"]`);
+      await activePage.click(`[${WECHAT_BUTTON_MARKER_ATTR}="true"]`);
 
       // 清理标记
       await activePage.evaluate(() => {
@@ -142,11 +183,15 @@ export const zhipinExchangeWechat = defineTool({
       await humanDelay(activePage);
 
       // Step 3: 多策略查找确认按钮（不限定在 .exchange-tooltip 内）
-      const confirmData = await activePage.evaluate(() => {
+      const confirmData = await activePage.evaluate((markerAttr: string) => {
         const check = (el: Element): boolean => {
           const r = el.getBoundingClientRect();
           return r.width > 0 && r.height > 0;
         };
+
+        document.querySelectorAll(`[${markerAttr}]`).forEach((element) => {
+          element.removeAttribute(markerAttr);
+        });
 
         // 策略 1: 在 .exchange-tooltip 内查找
         const tooltip = document.querySelector(".exchange-tooltip");
@@ -160,7 +205,7 @@ export const zhipinExchangeWechat = defineTool({
           for (const sel of selectors) {
             const btn = tooltip.querySelector(sel) as HTMLElement | null;
             if (btn && check(btn)) {
-              btn.setAttribute("data-roll-confirm-btn", "true");
+              btn.setAttribute(markerAttr, "true");
               return { found: true, text: btn.textContent?.trim() ?? "" };
             }
           }
@@ -178,14 +223,14 @@ export const zhipinExchangeWechat = defineTool({
           for (const btn of Array.from(btns)) {
             const bText = btn.textContent?.trim() ?? "";
             if (bText === "确定" && check(btn)) {
-              (btn as HTMLElement).setAttribute("data-roll-confirm-btn", "true");
+              (btn as HTMLElement).setAttribute(markerAttr, "true");
               return { found: true, text: bText };
             }
           }
         }
 
         return { found: false };
-      });
+      }, CONFIRM_BUTTON_MARKER_ATTR);
 
       if (!confirmData.found) {
         return { success: false, exchanged: false, error: "未找到确认按钮" };
@@ -193,9 +238,9 @@ export const zhipinExchangeWechat = defineTool({
 
       // 点击前稍等（模拟人类阅读弹窗）
       await randomDelay(activePage, 200, 400);
-      await moveVisualCursorToSelector(activePage, '[data-roll-confirm-btn="true"]');
-      await showVisualClickOnSelector(activePage, '[data-roll-confirm-btn="true"]');
-      await activePage.click('[data-roll-confirm-btn="true"]');
+      await moveVisualCursorToSelector(activePage, `[${CONFIRM_BUTTON_MARKER_ATTR}="true"]`);
+      await showVisualClickOnSelector(activePage, `[${CONFIRM_BUTTON_MARKER_ATTR}="true"]`);
+      await activePage.click(`[${CONFIRM_BUTTON_MARKER_ATTR}="true"]`);
 
       // 清理标记
       await activePage.evaluate(() => {
@@ -255,6 +300,16 @@ export const zhipinExchangeWechat = defineTool({
         exchanged: false,
         error: err instanceof Error ? err.message : String(err),
       };
+    } finally {
+      await activePage
+        .evaluate((markerAttrs: string[]) => {
+          for (const markerAttr of markerAttrs) {
+            document.querySelectorAll(`[${markerAttr}]`).forEach((element) => {
+              element.removeAttribute(markerAttr);
+            });
+          }
+        }, [WECHAT_BUTTON_MARKER_ATTR, CONFIRM_BUTTON_MARKER_ATTR])
+        .catch(() => {});
     }
   },
 });
