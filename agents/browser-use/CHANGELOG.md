@@ -1,5 +1,12 @@
 # @roll-agent/browser-use-agent
 
+## 0.7.4
+
+### Patch Changes
+
+- Updated dependencies [[`256d676`](https://github.com/steveoon/roll-agent/commit/256d6765dfb451e7aca57121e304bfba54e56752)]:
+  - @roll-agent/sdk@0.1.6
+
 ## 0.7.3
 
 ### Patch Changes
