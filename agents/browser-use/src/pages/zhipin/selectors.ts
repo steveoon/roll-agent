@@ -110,6 +110,9 @@ export const ZHIPIN_SELECTORS = {
   recommend: {
     iframe: "#recommendFrame",
     resumeIframe: 'iframe[src*="c-resume"]',
+    filterButton:
+      ".recommend-filter .filter-label, .filter-label-wrap .filter-label, .filter-label",
+    filterPanel: ".filter-panel",
     candidateItem: "[data-geek], .geek-item",
     candidateName: ".name",
     candidateBaseInfo: ".base-info",

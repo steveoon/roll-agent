@@ -16,6 +16,7 @@ import { zhipinExchangeWechat } from "./tools/zhipin-exchange-wechat.ts";
 import { zhipinGetUsername } from "./tools/zhipin-get-username.ts";
 import { zhipinScrollView } from "./tools/zhipin-scroll-view.ts";
 // Zhipin — 推荐列表
+import { zhipinFilterRecommendCandidates } from "./tools/zhipin-filter-recommend-candidates.ts";
 import { zhipinGetCandidateList } from "./tools/zhipin-get-candidate-list.ts";
 import { zhipinOpenRecommendPage } from "./tools/zhipin-open-recommend-page.ts";
 import { zhipinSayHello } from "./tools/zhipin-say-hello.ts";
@@ -91,6 +92,7 @@ const agent = defineAgent(
       zhipinScrollView,
       // Zhipin 推荐列表
       zhipinOpenRecommendPage,
+      zhipinFilterRecommendCandidates,
       zhipinGetCandidateList,
       zhipinSayHello,
       zhipinOpenResume,
@@ -119,7 +121,7 @@ async function main(): Promise<void> {
     logger.error(
       `Failed to preload Reply Authority keys during startup; ` +
         `browser_status.replyAuthorityKeysLoaded=false. ` +
-        `${error instanceof Error ? error.stack ?? error.message : String(error)}`,
+        `${error instanceof Error ? (error.stack ?? error.message) : String(error)}`,
     );
   }
 
@@ -134,7 +136,7 @@ async function main(): Promise<void> {
 }
 
 main().catch(async (err: unknown) => {
-  logger.error(`Fatal error: ${err instanceof Error ? err.stack ?? err.message : String(err)}`);
+  logger.error(`Fatal error: ${err instanceof Error ? (err.stack ?? err.message) : String(err)}`);
   await shutdownRuntime().catch(() => {});
   process.exit(1);
 });

@@ -88,6 +88,7 @@ metadata:
 ## BOSS直聘 — 推荐列表 Tools
 
 - `zhipin_open_recommend_page()` — 通过点击 Boss 左侧导航切换到「推荐牛人」页；优先复用当前已登录的 Boss 页面，不让编排器去猜站内 URL
+- `zhipin_filter_recommend_candidates(ageMin?, ageMax?, gender?, activity?)` — 在「推荐牛人」页打开筛选面板，只设置年龄、性别、活跃度[单选] 三个维度并提交。未传的维度会重置为 `不限`（年龄默认为 `16-不限`），不会点击岗位下拉，也不会清除学历、薪资、求职状态等其它筛选项
 - `zhipin_get_candidate_list(maxResults?, autoScroll?, maxScrolls?)` — 获取推荐列表页的候选人卡片信息（姓名、年龄、学历、期望薪资等）。默认 `autoScroll=true`，会向下滚动推荐列表内部容器并按 `candidateId` / `data-geek` 合并去重；`maxScrolls` 默认 `4`。返回的 `scrollStats.stopReason` 可用于判断未达到 `maxResults` 的原因：`target-count`、`boundary`、`no-new-items`、`max-steps`
 - `zhipin_say_hello(indices)` — 对推荐列表中的候选人批量点击「打招呼」
 - `zhipin_open_resume(index)` — 点击候选人卡片打开简历详情弹窗
@@ -135,8 +136,9 @@ recommend-list  -> 推荐牛人列表，默认向下滚动，去重主键 candid
 推荐列表链路建议：
 
 1. `zhipin_open_recommend_page()` → 通过左侧导航切到 `推荐牛人`
-2. `zhipin_get_candidate_list(maxResults?, autoScroll=true, maxScrolls=4)` → 读取候选人卡片；默认会滚动动态列表并去重合并
-3. `zhipin_say_hello(indices)` → 批量打招呼
+2. `zhipin_filter_recommend_candidates(ageMin?, ageMax?, gender?, activity?)` → 需要限定目标人群时先设置年龄、性别、活跃度；例如“男性，20-40 岁，刚刚活跃”对应 `gender="男", ageMin=20, ageMax=40, activity="刚刚活跃"`
+3. `zhipin_get_candidate_list(maxResults?, autoScroll=true, maxScrolls=4)` → 读取候选人卡片；默认会滚动动态列表并去重合并
+4. `zhipin_say_hello(indices)` → 批量打招呼
 
 ## 支持平台
 
