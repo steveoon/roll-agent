@@ -8,6 +8,8 @@ description: Operates registered MCP agents through the stable `roll` CLI surfac
 Prefer deterministic execution.
 
 - Use `roll run --json` when the target agent and tool are known.
+- When passing a structured object, use `roll run <agent> <tool> --input-json '{...}' --json`.
+  This is the orchestrator-safe form across Roll versions and shell environments.
 - Use `roll agent tools <agent-name> --json` when the agent is known but the tool name or `inputSchema` is not.
 - Use `roll ask --json` only when intent is known but the target agent/tool is not.
 - Do not default to `roll chat`; it is still experimental.
@@ -37,6 +39,24 @@ roll agent tools <agent-name> --json # machine-readable
 - Use the table view for manual inspection.
 - Use `--json` when another agent or script will parse the result.
 - If `roll run <agent> <tool>` prints `Did you mean: ...` in stderr, treat it as a hint and re-run `roll agent tools` instead of guessing from memory.
+
+## Tool Invocation Inputs
+
+Choose the input format by payload shape:
+
+| Payload shape | Preferred command form | Notes |
+| --- | --- | --- |
+| No input | `roll run <agent> <tool> --json` | Sends `{}`. |
+| Simple scalar fields | `roll run <agent> <tool> --key value --json` | Good for one-off manual calls. |
+| JSON object / nested object / arrays | `roll run <agent> <tool> --input-json '{...}' --json` | Preferred for orchestrators and chained workflows. |
+| Large or generated payload | `roll run <agent> <tool> --input-file ./payload.json --json` | Avoids shell quoting issues. |
+
+Boundary rules:
+
+- Do not pass tool JSON as an unflagged third positional argument in orchestrator code.
+- Newer Roll versions may accept positional JSON as a compatibility convenience, but `--input-json` is the stable contract.
+- When a tool call fails with symptoms like a missing required field even though the command visibly contains JSON, retry with `--input-json` before debugging the target subagent.
+- Keep `--json` for output format separate from `--input-json`; `--json` does not provide tool input.
 
 ## Navigation Tool Choice
 

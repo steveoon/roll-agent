@@ -83,6 +83,17 @@ describe("parseExplicitToolInput", () => {
     assert.deepEqual(parsed, { metadata: { foo: "bar" } });
   });
 
+  it("should parse a third positional JSON object as explicit tool input", () => {
+    const parsed = parseExplicitToolInput([
+      "browser-use-agent",
+      "zhipin_open_chat",
+      '{"conversationId":"541920402-0"}',
+      "--json",
+    ]);
+
+    assert.deepEqual(parsed, { conversationId: "541920402-0" });
+  });
+
   it("should reject using --input-json and --input-file together", () => {
     assert.throws(
       () =>
@@ -94,7 +105,33 @@ describe("parseExplicitToolInput", () => {
           "--input-file",
           "./payload.json",
         ]),
-      /不能同时使用 --input-json 和 --input-file/,
+      /不能同时使用 positional JSON、--input-json 和 --input-file/,
+    );
+  });
+
+  it("should reject positional JSON together with --input-json", () => {
+    assert.throws(
+      () =>
+        parseExplicitToolInput([
+          "browser-use-agent",
+          "zhipin_open_chat",
+          '{"conversationId":"541920402-0"}',
+          "--input-json",
+          '{"conversationId":"another"}',
+        ]),
+      /不能同时使用 positional JSON、--input-json 和 --input-file/,
+    );
+  });
+
+  it("should reject extra non-json positional arguments", () => {
+    assert.throws(
+      () =>
+        parseExplicitToolInput([
+          "browser-use-agent",
+          "zhipin_open_chat",
+          "conversationId=541920402-0",
+        ]),
+      /只接受 agent\/tool 两个位置参数/,
     );
   });
 });
@@ -112,6 +149,20 @@ describe("resolveToolArgs", () => {
     assert.deepEqual(parsed, {
       metadata: { foo: "bar" },
       limit: 10,
+    });
+  });
+
+  it("should merge positional JSON input with flag args", () => {
+    const parsed = resolveToolArgs([
+      "browser-use-agent",
+      "zhipin_open_chat",
+      '{"conversationId":"541920402-0"}',
+      "--preferUnread",
+    ]);
+
+    assert.deepEqual(parsed, {
+      conversationId: "541920402-0",
+      preferUnread: true,
     });
   });
 });
