@@ -35,6 +35,47 @@ describe("zhipin_diagnose_browser_state", () => {
     assert.equal(input.networkEventLimit, 30);
   });
 
+  it("accepts native CDP diagnostic phases", () => {
+    assert.equal(
+      zhipinDiagnoseBrowserState.input.parse({ phase: "native-ws-connect" }).phase,
+      "native-ws-connect",
+    );
+    assert.equal(
+      zhipinDiagnoseBrowserState.input.parse({ phase: "native-page-bring-front" }).phase,
+      "native-page-bring-front",
+    );
+    assert.equal(
+      zhipinDiagnoseBrowserState.input.parse({
+        phase: "native-evaluate-url-no-runtime-enable",
+      }).phase,
+      "native-evaluate-url-no-runtime-enable",
+    );
+    assert.equal(
+      zhipinDiagnoseBrowserState.input.parse({
+        phase: "native-dom-read-no-runtime-enable",
+      }).phase,
+      "native-dom-read-no-runtime-enable",
+    );
+    assert.equal(
+      zhipinDiagnoseBrowserState.input.parse({
+        phase: "native-input-move-no-runtime-enable",
+      }).phase,
+      "native-input-move-no-runtime-enable",
+    );
+    assert.equal(
+      zhipinDiagnoseBrowserState.input.parse({ phase: "native-runtime-enable" }).phase,
+      "native-runtime-enable",
+    );
+    assert.equal(
+      zhipinDiagnoseBrowserState.input.parse({ phase: "native-evaluate-url" }).phase,
+      "native-evaluate-url",
+    );
+    assert.equal(
+      zhipinDiagnoseBrowserState.input.parse({ phase: "native-dom-read" }).phase,
+      "native-dom-read",
+    );
+  });
+
   it("summarizes security counters without returning raw storage values", () => {
     const summary = summarizeStorageEntry("localStorage", {
       key: "_ZP_CNT_",
@@ -242,6 +283,120 @@ describe("zhipin_diagnose_browser_state", () => {
     assert.equal(parsed.nativeTimeline[1]?.urlChangedFromPrevious, true);
   });
 
+  it("accepts native CDP probe diagnostics", () => {
+    const parsed = zhipinDiagnoseBrowserState.output.parse({
+      success: true,
+      requestedPhase: "native-dom-read",
+      mode: "managed-cdp",
+      nativePages: [],
+      browserAttached: false,
+      pageAttached: false,
+      nativeTimeline: [
+        {
+          phase: "native-evaluate-url-watch",
+          capturedAt: "2026-04-24T00:00:00.500Z",
+          targetFound: true,
+          page: {
+            pageId: "target-1",
+            url: "https://www.zhipin.com/web/chat/index",
+            title: "BOSS直聘",
+            boundPlatform: null,
+            detectedPlatform: "zhipin",
+            isSelectedForPlatform: true,
+          },
+          urlChangedFromPrevious: false,
+          titleChangedFromPrevious: false,
+          currentUrl: "https://www.zhipin.com/web/chat/index",
+          currentTitle: "BOSS直聘",
+        },
+      ],
+      nativeCdp: {
+        targetId: "target-1",
+        websocketUrlAvailable: true,
+        connected: true,
+        runtimeEnabled: true,
+        evaluate: {
+          url: "https://www.zhipin.com/web/chat/index",
+          title: "BOSS直聘",
+          visibilityState: "visible",
+          hasFocus: true,
+        },
+        dom: {
+          rootNodeId: 1,
+          rootNodeName: "#document",
+          childNodeCount: 2,
+          bodyTextLength: 120,
+          elementCount: 42,
+        },
+      },
+      phases: [
+        { phase: "native", success: true, durationMs: 3 },
+        { phase: "native-ws-connect", success: true, durationMs: 5 },
+        { phase: "native-runtime-enable", success: true, durationMs: 2 },
+        { phase: "native-evaluate-url", success: true, durationMs: 2 },
+        { phase: "native-dom-read", success: true, durationMs: 4 },
+      ],
+      warnings: [],
+    });
+
+    assert.equal(parsed.requestedPhase, "native-dom-read");
+    assert.equal(parsed.browserAttached, false);
+    assert.equal(parsed.pageAttached, false);
+    assert.equal(parsed.nativeCdp?.connected, true);
+    assert.equal(parsed.nativeCdp?.dom?.elementCount, 42);
+  });
+
+  it("accepts native CDP no-runtime probe diagnostics", () => {
+    const parsed = zhipinDiagnoseBrowserState.output.parse({
+      success: true,
+      requestedPhase: "native-input-move-no-runtime-enable",
+      mode: "managed-cdp",
+      nativePages: [],
+      browserAttached: false,
+      pageAttached: false,
+      nativeTimeline: [
+        {
+          phase: "native-input-move-no-runtime-enable-watch",
+          capturedAt: "2026-04-24T00:00:00.500Z",
+          targetFound: true,
+          page: {
+            pageId: "target-1",
+            url: "https://www.zhipin.com/web/chat/index",
+            title: "BOSS直聘",
+            boundPlatform: null,
+            detectedPlatform: "zhipin",
+            isSelectedForPlatform: true,
+          },
+          urlChangedFromPrevious: false,
+          titleChangedFromPrevious: false,
+          currentUrl: "https://www.zhipin.com/web/chat/index",
+          currentTitle: "BOSS直聘",
+        },
+      ],
+      nativeCdp: {
+        targetId: "target-1",
+        websocketUrlAvailable: true,
+        connected: true,
+        input: {
+          type: "mouseMoved",
+          x: 0,
+          y: 0,
+        },
+      },
+      phases: [
+        { phase: "native", success: true, durationMs: 3 },
+        { phase: "native-ws-connect", success: true, durationMs: 5 },
+        { phase: "native-input-move-no-runtime-enable", success: true, durationMs: 2 },
+      ],
+      warnings: [],
+    });
+
+    assert.equal(parsed.browserAttached, false);
+    assert.equal(parsed.pageAttached, false);
+    assert.equal(parsed.nativeCdp?.runtimeEnabled, undefined);
+    assert.equal(parsed.nativeCdp?.input?.type, "mouseMoved");
+  });
+
   it("keeps native diagnostics read-only and does not remember page selection", async () => {
     let rememberCalls = 0;
     const contextManager = {
@@ -284,6 +439,57 @@ describe("zhipin_diagnose_browser_state", () => {
     assert.equal(result.targetPage?.isSelectedForPlatform, false);
   });
 
+  it("native CDP diagnostics do not fall back to Playwright browser attach", async () => {
+    let getBrowserCalls = 0;
+    const contextManager = {
+      async listNativePages() {
+        return [
+          {
+            targetId: "target-1",
+            type: "page",
+            url: "https://www.zhipin.com/web/chat/index",
+            title: "BOSS直聘",
+          },
+        ];
+      },
+      getBoundPlatformForNativePage() {
+        return undefined;
+      },
+      isNativePageSelected() {
+        return false;
+      },
+      rememberNativePageSelection() {
+        throw new Error("native CDP diagnostics should not remember page selection");
+      },
+    } as unknown as BrowserContextManager;
+    const runtime = {
+      mode: "managed-cdp",
+      async getBrowser() {
+        getBrowserCalls += 1;
+        throw new Error("native CDP diagnostics should not browser-attach");
+      },
+    } as unknown as BrowserRuntime;
+    setRuntimeStateForTests({ runtime, contextManager });
+
+    const result = await zhipinDiagnoseBrowserState.execute(
+      zhipinDiagnoseBrowserState.input.parse({
+        phase: "native-ws-connect",
+        watchMs: 500,
+      }),
+      testContext,
+    );
+
+    assert.equal(result.success, false);
+    assert.equal(result.browserAttached, false);
+    assert.equal(result.pageAttached, false);
+    assert.equal(result.nativeCdp?.websocketUrlAvailable, false);
+    assert.equal(result.nativeCdp?.connected, false);
+    assert.equal(getBrowserCalls, 0);
+    assert.equal(result.phases[1]?.phase, "native-ws-connect");
+    assert.equal(result.phases[1]?.success, false);
+    assert.match(result.phases[1]?.error ?? "", /webSocketDebuggerUrl/);
+  });
+
   it("does not browser-attach when the target zhipin page is ambiguous", async () => {
     let getBrowserCalls = 0;
     const contextManager = {
@@ -298,7 +504,7 @@ describe("zhipin_diagnose_browser_state", () => {
           {
             targetId: "target-2",
             type: "page",
-            url: "https://www.zhipin.com/web/geek/recommend",
+            url: "https://www.zhipin.com/web/chat/recommend",
             title: "BOSS直聘",
           },
         ];

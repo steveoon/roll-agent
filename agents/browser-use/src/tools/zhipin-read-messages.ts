@@ -1,14 +1,9 @@
 import { defineTool } from "@roll-agent/sdk";
 import { z } from "zod";
-import { getContextManager } from "../runtime-holder.ts";
-import {
-  ensureChatListLoaded,
-  getChatCandidates,
-  type ChatListItem,
-} from "../pages/zhipin/chat-navigation.ts";
-import { getZhipinListSurfaceConfig } from "../pages/zhipin/list-surfaces.ts";
-import { collectDynamicListItems } from "../pages/shared/dynamic-list-scroller.ts";
-import { VisualActivitySession } from "../visual-activity-session.ts";
+import type { ChatListItem } from "../pages/zhipin/chat-navigation.ts";
+import { NativeVisualActivitySession } from "../native-visual-activity-session.ts";
+import { openZhipinNativePagePort } from "../pages/zhipin/native-page.ts";
+import type { ZhipinNativePagePort } from "../pages/zhipin/native-page.ts";
 
 const CandidateItemSchema = z.object({
   name: z.string(),
@@ -29,11 +24,52 @@ const OutputSchema = z.object({
   stats: z.object({ withName: z.number(), withUnread: z.number() }),
 });
 
+type ZhipinReadMessagesDeps = {
+  readonly openNativePagePort: typeof openZhipinNativePagePort;
+  readonly createNativeVisualActivitySession: (
+    page: ZhipinNativePagePort,
+  ) => NativeVisualActivitySession;
+};
+
+let zhipinReadMessagesDepsOverride: Partial<ZhipinReadMessagesDeps> | undefined;
+
+function getZhipinReadMessagesDeps(): ZhipinReadMessagesDeps {
+  return {
+    openNativePagePort: openZhipinNativePagePort,
+    createNativeVisualActivitySession: (page) => new NativeVisualActivitySession(page),
+    ...zhipinReadMessagesDepsOverride,
+  };
+}
+
+export function setZhipinReadMessagesDepsForTests(
+  override: Partial<ZhipinReadMessagesDeps> | undefined,
+): void {
+  zhipinReadMessagesDepsOverride = override;
+}
+
 function getChatCandidateKey(candidate: ChatListItem): string | undefined {
   if (candidate.conversationId.length > 0) return candidate.conversationId;
   if (candidate.candidateId.length > 0) return candidate.candidateId;
   if (candidate.name.length === 0) return undefined;
   return [candidate.name, candidate.position, candidate.lastMessageTime].join("|");
+}
+
+function dedupeChatCandidates(candidates: ReadonlyArray<ChatListItem>): ChatListItem[] {
+  const seen = new Set<string>();
+  const deduped: ChatListItem[] = [];
+
+  for (const candidate of candidates) {
+    const key = getChatCandidateKey(candidate);
+    if (key !== undefined && seen.has(key)) {
+      continue;
+    }
+    if (key !== undefined) {
+      seen.add(key);
+    }
+    deduped.push(candidate);
+  }
+
+  return deduped;
 }
 
 export const zhipinReadMessages = defineTool({
@@ -56,18 +92,20 @@ export const zhipinReadMessages = defineTool({
       `Reading zhipin messages (limit: ${input.limit ?? "all"}, onlyUnread: ${onlyUnread})`,
     );
 
-    const ctxManager = getContextManager();
-    const page = await ctxManager.getPage("zhipin");
-    const session = new VisualActivitySession(page);
-    const beginLabel = "正在打开消息列表";
-    const readLabel = onlyUnread ? "正在读取未读消息列表" : "正在读取消息列表";
-
-    await session.begin(beginLabel);
+    let nativePage: ZhipinNativePagePort | undefined;
+    let session: NativeVisualActivitySession | undefined;
+    const deps = getZhipinReadMessagesDeps();
 
     try {
-      const listReady = await ensureChatListLoaded(ctxManager, page);
-      const activePage = await ctxManager.getPage("zhipin");
-      await session.retarget(activePage);
+      nativePage = await deps.openNativePagePort({ requireChatPage: true });
+      session = deps.createNativeVisualActivitySession(nativePage);
+
+      await session.begin("正在读取消息列表");
+
+      const listReady = await nativePage.waitForSelector(
+        ".user-list.b-scroll-stable, .user-list.b-scroll-stable [role=\"listitem\"], .geek-item",
+        5_000,
+      );
       if (!listReady) {
         await session.fail("未找到消息列表");
         return {
@@ -77,33 +115,21 @@ export const zhipinReadMessages = defineTool({
           stats: { withName: 0, withUnread: 0 },
         };
       }
-
-      await session.begin(readLabel);
+      const readLabel = onlyUnread ? "正在读取未读消息列表" : "正在读取消息列表";
       await session.highlightSelector(
-        ".user-list.b-scroll-stable, .chat-user .user-container, .chat-list-wrap",
+        ".user-list.b-scroll-stable, .chat-user .user-container, .chat-user",
         { label: readLabel, padding: 8 },
       );
 
       const autoScroll = input.autoScroll ?? true;
       const maxScrolls = input.maxScrolls ?? 4;
-      const targetCount =
-        !onlyUnread && input.limit !== undefined ? { targetCount: input.limit } : {};
-      const rawCandidates =
-        autoScroll && maxScrolls > 0
-          ? (
-              await collectDynamicListItems(
-                activePage,
-                getZhipinListSurfaceConfig("chat-list"),
-                () => getChatCandidates(activePage),
-                getChatCandidateKey,
-                {
-                  direction: "down",
-                  steps: maxScrolls,
-                  ...targetCount,
-                },
-              )
-            ).items
-          : await getChatCandidates(activePage);
+      const rawCandidates = dedupeChatCandidates(
+        await nativePage.readChatCandidates({
+          autoScroll,
+          maxScrolls,
+          ...(input.limit !== undefined && !onlyUnread ? { targetCount: input.limit } : {}),
+        }),
+      );
 
       const candidates = rawCandidates.map((candidate) => ({
         name: candidate.name,
@@ -140,8 +166,18 @@ export const zhipinReadMessages = defineTool({
       ctx.logger.info(`Found ${filtered.length} candidates (${stats.withUnread} with unread)`);
       return { success: true, candidates: filtered, total: candidates.length, stats };
     } catch (error) {
-      await session.fail("读取消息列表失败");
-      throw error;
+      await session?.fail("读取消息列表失败");
+      ctx.logger.warn(
+        `Native zhipin message read failed: ${error instanceof Error ? error.message : String(error)}`,
+      );
+      return {
+        success: false,
+        candidates: [],
+        total: 0,
+        stats: { withName: 0, withUnread: 0 },
+      };
+    } finally {
+      nativePage?.close();
     }
   },
 });

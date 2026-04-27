@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { afterEach, describe, it } from "node:test";
 import type { AgentContext } from "@roll-agent/sdk";
+import type { ZhipinNativePagePort } from "../pages/zhipin/native-page.ts";
 import {
   setZhipinOpenChatPageDepsForTests,
   zhipinOpenChatPage,
@@ -20,12 +21,73 @@ function createTestContext(): AgentContext {
   };
 }
 
-function createPage(url = "https://www.zhipin.com/web/geek/recommend") {
+function createNoopSession(calls: string[]) {
   return {
-    url() {
-      return url;
+    async begin(label: string) {
+      calls.push(`begin:${label}`);
+      return true;
     },
-    async bringToFront() {},
+    async highlightSelector(selector: string) {
+      calls.push(`highlight:${selector}`);
+      return true;
+    },
+    async succeed(label: string) {
+      calls.push(`succeed:${label}`);
+      return true;
+    },
+    async fail(label: string) {
+      calls.push(`fail:${label}`);
+      return true;
+    },
+  };
+}
+
+function createNativePage(options: {
+  readonly alreadyOnChat?: boolean;
+  readonly clickResult?: boolean;
+  readonly chatReady?: boolean;
+  readonly calls: string[];
+}): ZhipinNativePagePort {
+  return {
+    targetId: "target-boss",
+    async bringToFront() {
+      options.calls.push("bring-to-front");
+    },
+    async isChatSurfaceOpen() {
+      return options.alreadyOnChat ?? false;
+    },
+    async clickSidebarSection(section: "chat" | "recommend") {
+      options.calls.push(`click:${section}`);
+      return options.clickResult ?? true;
+    },
+    async waitForChatSurface() {
+      return options.chatReady ?? true;
+    },
+    async inspectPage() {
+      return {
+        targetId: "target-boss",
+        type: "page",
+        url: options.alreadyOnChat
+          ? "https://www.zhipin.com/web/chat/index"
+          : "https://www.zhipin.com/web/chat/recommend",
+        title: "BOSS直聘",
+        webSocketDebuggerUrl: "ws://127.0.0.1/devtools/page/target-boss",
+      };
+    },
+    close() {
+      options.calls.push("close");
+    },
+  } as unknown as ZhipinNativePagePort;
+}
+
+function createContextManager() {
+  return {
+    getBoundPlatformForNativePage() {
+      return "zhipin";
+    },
+    isNativePageSelected() {
+      return true;
+    },
   };
 }
 
@@ -36,47 +98,11 @@ afterEach(() => {
 describe("zhipin_open_chat_page", () => {
   it("returns success without clicking when already on the chat surface", async () => {
     const calls: string[] = [];
-    const page = createPage("https://www.zhipin.com/web/chat/index");
 
     setZhipinOpenChatPageDepsForTests({
-      getContextManager: () =>
-        ({
-          async getPage(platform: string) {
-            assert.equal(platform, "zhipin");
-            return page;
-          },
-        }) as never,
-      isZhipinChatSurfaceOpen: async () => true,
-      findZhipinSidebarSectionLink: async () => {
-        throw new Error("sidebar lookup should not run when already on chat");
-      },
-      waitForZhipinChatSurface: async () => true,
-      createVisualActivitySession: () => ({
-        async begin(label: string) {
-          calls.push(`begin:${label}`);
-          return true;
-        },
-        async highlightSelector(selector: string) {
-          calls.push(`highlight:${selector}`);
-          return true;
-        },
-        async succeed(label: string) {
-          calls.push(`succeed:${label}`);
-          return true;
-        },
-        async fail(label: string) {
-          calls.push(`fail:${label}`);
-          return true;
-        },
-      }),
-      toAttachedPageInfo: async () => ({
-        pageId: "page-boss",
-        url: page.url(),
-        title: "BOSS直聘",
-        boundPlatform: "zhipin",
-        detectedPlatform: "zhipin",
-        isSelectedForPlatform: true,
-      }),
+      getContextManager: () => createContextManager() as never,
+      openNativePagePort: async () => createNativePage({ alreadyOnChat: true, calls }),
+      createNativeVisualActivitySession: () => createNoopSession(calls),
     });
 
     const result = await zhipinOpenChatPage.execute({}, createTestContext());
@@ -86,78 +112,21 @@ describe("zhipin_open_chat_page", () => {
     assert.equal(result.usedSidebarClick, false);
     assert.equal(result.chatReady, true);
     assert.deepEqual(calls, [
+      "bring-to-front",
       "begin:正在切换到沟通页",
       "highlight:.side-wrap.side-wrap-v2",
       "succeed:已在沟通页",
+      "close",
     ]);
   });
 
-  it("clicks the sidebar chat link and waits for the chat surface", async () => {
+  it("clicks the sidebar chat link through native input and waits for the chat surface", async () => {
     const calls: string[] = [];
-    const page = createPage();
-    const link = {
-      async scrollIntoViewIfNeeded() {
-        calls.push("scroll");
-      },
-      async hover() {
-        calls.push("hover");
-      },
-      async click() {
-        calls.push("click");
-      },
-    };
 
     setZhipinOpenChatPageDepsForTests({
-      getContextManager: () =>
-        ({
-          async getPage(platform: string) {
-            assert.equal(platform, "zhipin");
-            return page;
-          },
-        }) as never,
-      isZhipinChatSurfaceOpen: async () => false,
-      findZhipinSidebarSectionLink: async (_page, section) => {
-        assert.equal(section, "chat");
-        return link as never;
-      },
-      waitForZhipinChatSurface: async () => true,
-      moveVisualCursorToLocator: async () => {
-        calls.push("move-cursor");
-        return true;
-      },
-      showVisualClickOnLocator: async () => {
-        calls.push("show-click");
-        return true;
-      },
-      randomDelay: async () => {
-        calls.push("random-delay");
-      },
-      createVisualActivitySession: () => ({
-        async begin(label: string) {
-          calls.push(`begin:${label}`);
-          return true;
-        },
-        async highlightSelector(selector: string) {
-          calls.push(`highlight:${selector}`);
-          return true;
-        },
-        async succeed(label: string) {
-          calls.push(`succeed:${label}`);
-          return true;
-        },
-        async fail(label: string) {
-          calls.push(`fail:${label}`);
-          return true;
-        },
-      }),
-      toAttachedPageInfo: async () => ({
-        pageId: "page-boss",
-        url: "https://www.zhipin.com/web/chat/index",
-        title: "BOSS直聘",
-        boundPlatform: "zhipin",
-        detectedPlatform: "zhipin",
-        isSelectedForPlatform: true,
-      }),
+      getContextManager: () => createContextManager() as never,
+      openNativePagePort: async () => createNativePage({ calls }),
+      createNativeVisualActivitySession: () => createNoopSession(calls),
     });
 
     const result = await zhipinOpenChatPage.execute({}, createTestContext());
@@ -167,58 +136,22 @@ describe("zhipin_open_chat_page", () => {
     assert.equal(result.usedSidebarClick, true);
     assert.equal(result.chatReady, true);
     assert.deepEqual(calls, [
+      "bring-to-front",
       "begin:正在切换到沟通页",
       "highlight:.side-wrap.side-wrap-v2",
-      "scroll",
-      "move-cursor",
-      "hover",
-      "random-delay",
-      "show-click",
-      "click",
+      "click:chat",
       "succeed:已切换到沟通页",
+      "close",
     ]);
   });
 
   it("returns a structured failure when the chat nav is missing", async () => {
     const calls: string[] = [];
-    const page = createPage();
 
     setZhipinOpenChatPageDepsForTests({
-      getContextManager: () =>
-        ({
-          async getPage() {
-            return page;
-          },
-        }) as never,
-      isZhipinChatSurfaceOpen: async () => false,
-      findZhipinSidebarSectionLink: async () => null,
-      waitForZhipinChatSurface: async () => false,
-      createVisualActivitySession: () => ({
-        async begin(label: string) {
-          calls.push(`begin:${label}`);
-          return true;
-        },
-        async highlightSelector(selector: string) {
-          calls.push(`highlight:${selector}`);
-          return true;
-        },
-        async succeed(label: string) {
-          calls.push(`succeed:${label}`);
-          return true;
-        },
-        async fail(label: string) {
-          calls.push(`fail:${label}`);
-          return true;
-        },
-      }),
-      toAttachedPageInfo: async () => ({
-        pageId: "page-boss",
-        url: page.url(),
-        title: "BOSS直聘",
-        boundPlatform: "zhipin",
-        detectedPlatform: "zhipin",
-        isSelectedForPlatform: true,
-      }),
+      getContextManager: () => createContextManager() as never,
+      openNativePagePort: async () => createNativePage({ calls, clickResult: false }),
+      createNativeVisualActivitySession: () => createNoopSession(calls),
     });
 
     const result = await zhipinOpenChatPage.execute({}, createTestContext());
@@ -227,9 +160,12 @@ describe("zhipin_open_chat_page", () => {
     assert.equal(result.usedSidebarClick, false);
     assert.match(result.error ?? "", /未找到沟通导航/);
     assert.deepEqual(calls, [
+      "bring-to-front",
       "begin:正在切换到沟通页",
       "highlight:.side-wrap.side-wrap-v2",
+      "click:chat",
       "fail:未找到沟通导航",
+      "close",
     ]);
   });
 });

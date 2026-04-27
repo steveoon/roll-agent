@@ -32,6 +32,24 @@ export type {
 
 // Runtime
 export { BrowserRuntime } from "./runtime/browser-runtime.ts";
+export { NativeCdpController } from "./runtime/native-cdp-controller.ts";
+export type {
+  NativeCdpControllerOptions,
+  NativeCdpCreateIsolatedWorldOptions,
+  NativeCdpEvaluateOptions,
+  NativeCdpFrame,
+  NativeCdpFrameTree,
+  NativeCdpMouseEventInput,
+} from "./runtime/native-cdp-controller.ts";
+export { NativeCdpLocator } from "./runtime/native-cdp-locator.ts";
+export type {
+  NativeCdpLocatorClickResult,
+  NativeCdpLocatorClickOptions,
+  NativeCdpLocatorOptions,
+  NativeCdpLocatorTarget,
+  NativeCdpLocatorWaitOptions,
+  NativeCdpRect,
+} from "./runtime/native-cdp-locator.ts";
 export type { BrowserInspectablePage } from "./runtime/native-cdp-page-client.ts";
 export { BrowserContextManager } from "./runtime/context-manager.ts";
 

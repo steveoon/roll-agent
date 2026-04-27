@@ -3,7 +3,7 @@ import { test } from "node:test";
 import type { BrowserContextManager, Page } from "@roll-agent/browser";
 import { ensureChatListLoaded, ensureChatOpen, selectChatCandidate } from "./chat-navigation.ts";
 
-const ZHIPIN_CHAT_URL = "https://www.zhipin.com/web/geek/chat";
+const ZHIPIN_CHAT_URL = "https://www.zhipin.com/web/chat/index";
 
 const candidates = [
   {
@@ -276,7 +276,7 @@ test("ensureChatListLoaded returns immediately when already on a loaded chat pag
 
 test("ensureChatListLoaded reuses an already opened chat tab before trying UI click or goto", async () => {
   const current = createTestPage({
-    url: "https://www.zhipin.com/web/geek/recommend",
+    url: "https://www.zhipin.com/web/chat/recommend",
     clickMessageEntryWorks: false,
   });
   const chatTab = createTestPage({
@@ -298,7 +298,7 @@ test("ensureChatListLoaded reuses an already opened chat tab before trying UI cl
 
 test("ensureChatListLoaded prefers clicking the message entry before goto", async () => {
   const current = createTestPage({
-    url: "https://www.zhipin.com/web/geek/recommend",
+    url: "https://www.zhipin.com/web/chat/recommend",
     clickMessageEntryWorks: true,
     clickLoadsChatList: true,
   });
@@ -316,7 +316,7 @@ test("ensureChatListLoaded prefers clicking the message entry before goto", asyn
 
 test("ensureChatListLoaded soft-recovers from ERR_ABORTED when goto still lands on the chat page", async () => {
   const current = createTestPage({
-    url: "https://www.zhipin.com/web/geek/recommend",
+    url: "https://www.zhipin.com/web/chat/recommend",
     clickMessageEntryWorks: false,
     gotoBehavior: "err_aborted",
     gotoResultUrl: ZHIPIN_CHAT_URL,
@@ -336,7 +336,7 @@ test("ensureChatListLoaded soft-recovers from ERR_ABORTED when goto still lands 
 
 test("ensureChatOpen continues on the rebound chat page after reusing another tab", async () => {
   const current = createTestPage({
-    url: "https://www.zhipin.com/web/geek/recommend",
+    url: "https://www.zhipin.com/web/chat/recommend",
     clickMessageEntryWorks: false,
   });
   const chatTab = createTestPage({

@@ -104,7 +104,7 @@ describe("navigate_active_tab", () => {
   });
 
   it("reuses an existing native Boss page before falling back to the active tab", async () => {
-    const attachedBoss = createPage("https://www.zhipin.com/web/geek/recommend");
+    const attachedBoss = createPage("https://www.zhipin.com/web/chat/recommend");
     let getActivePageCalls = 0;
     const nativeSelections: string[] = [];
     const attachedSelections: Array<{ platform: string; pageId: string }> = [];
@@ -121,7 +121,7 @@ describe("navigate_active_tab", () => {
               {
                 targetId: "target-boss",
                 type: "page",
-                url: "https://www.zhipin.com/web/geek/recommend",
+                url: "https://www.zhipin.com/web/chat/recommend",
                 title: "BOSS直聘",
               },
             ];
@@ -131,7 +131,7 @@ describe("navigate_active_tab", () => {
             return {
               targetId: pageId,
               type: "page",
-              url: "https://www.zhipin.com/web/geek/recommend",
+              url: "https://www.zhipin.com/web/chat/recommend",
               title: "BOSS直聘",
             } as never;
           },

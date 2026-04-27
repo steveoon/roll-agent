@@ -1,19 +1,13 @@
-import type { AgentContext } from "@roll-agent/sdk";
-import { defineTool } from "@roll-agent/sdk";
-import type { BrowserPageInfo, Page } from "@roll-agent/browser";
+import type { BrowserContextManager, BrowserPageInfo } from "@roll-agent/browser";
 import { BrowserPageInfoSchema } from "@roll-agent/browser";
+import { defineTool } from "@roll-agent/sdk";
 import { z } from "zod";
-import { randomDelay } from "../pages/zhipin/anti-detection.ts";
+import { NativeVisualActivitySession } from "../native-visual-activity-session.ts";
+import { openZhipinNativePagePort } from "../pages/zhipin/native-page.ts";
+import type { ZhipinNativePagePort } from "../pages/zhipin/native-page.ts";
 import { ZHIPIN_SELECTORS } from "../pages/zhipin/selectors.ts";
-import {
-  findZhipinSidebarSectionLink,
-  isZhipinChatSurfaceOpen,
-  waitForZhipinChatSurface,
-} from "../pages/zhipin/sidebar-navigation.ts";
-import { toAttachedPageInfo } from "../page-info.ts";
+import { toNativePageInfo } from "../page-info.ts";
 import { getContextManager } from "../runtime-holder.ts";
-import { VisualActivitySession } from "../visual-activity-session.ts";
-import { moveVisualCursorToLocator, showVisualClickOnLocator } from "../visual-cursor.ts";
 
 const OutputSchema = z.object({
   success: z.boolean(),
@@ -24,22 +18,19 @@ const OutputSchema = z.object({
   error: z.string().optional(),
 });
 
-type VisualActivitySessionLike = Pick<
-  VisualActivitySession,
+type NativeVisualActivitySessionLike = Pick<
+  NativeVisualActivitySession,
   "begin" | "highlightSelector" | "succeed" | "fail"
->;
-type PageLocator = ReturnType<Page["locator"]>;
+> & {
+  readonly highlightPoint?: NativeVisualActivitySession["highlightPoint"];
+};
 
 type ZhipinOpenChatPageDeps = {
   readonly getContextManager: typeof getContextManager;
-  readonly findZhipinSidebarSectionLink: typeof findZhipinSidebarSectionLink;
-  readonly isZhipinChatSurfaceOpen: typeof isZhipinChatSurfaceOpen;
-  readonly waitForZhipinChatSurface: typeof waitForZhipinChatSurface;
-  readonly moveVisualCursorToLocator: typeof moveVisualCursorToLocator;
-  readonly showVisualClickOnLocator: typeof showVisualClickOnLocator;
-  readonly randomDelay: typeof randomDelay;
-  readonly toAttachedPageInfo: typeof toAttachedPageInfo;
-  readonly createVisualActivitySession: (page: Page) => VisualActivitySessionLike;
+  readonly openNativePagePort: typeof openZhipinNativePagePort;
+  readonly createNativeVisualActivitySession: (
+    page: ZhipinNativePagePort,
+  ) => NativeVisualActivitySessionLike;
 };
 
 let zhipinOpenChatPageDepsOverride: Partial<ZhipinOpenChatPageDeps> | undefined;
@@ -47,14 +38,8 @@ let zhipinOpenChatPageDepsOverride: Partial<ZhipinOpenChatPageDeps> | undefined;
 function getZhipinOpenChatPageDeps(): ZhipinOpenChatPageDeps {
   return {
     getContextManager,
-    findZhipinSidebarSectionLink,
-    isZhipinChatSurfaceOpen,
-    waitForZhipinChatSurface,
-    moveVisualCursorToLocator,
-    showVisualClickOnLocator,
-    randomDelay,
-    toAttachedPageInfo,
-    createVisualActivitySession: (page) => new VisualActivitySession(page),
+    openNativePagePort: openZhipinNativePagePort,
+    createNativeVisualActivitySession: (page) => new NativeVisualActivitySession(page),
     ...zhipinOpenChatPageDepsOverride,
   };
 }
@@ -66,47 +51,10 @@ export function setZhipinOpenChatPageDepsForTests(
 }
 
 async function buildPageInfo(
-  ctxManager: ReturnType<typeof getContextManager>,
-  deps: ZhipinOpenChatPageDeps,
-  page: Page,
+  ctxManager: BrowserContextManager,
+  nativePage: ZhipinNativePagePort,
 ): Promise<BrowserPageInfo> {
-  return (await deps.toAttachedPageInfo(ctxManager, page)) satisfies BrowserPageInfo;
-}
-
-async function failOpenChat(
-  ctxManager: ReturnType<typeof getContextManager>,
-  deps: ZhipinOpenChatPageDeps,
-  session: VisualActivitySessionLike,
-  page: Page,
-  error: string,
-  options: {
-    readonly alreadyOnChat: boolean;
-    readonly usedSidebarClick: boolean;
-    readonly chatReady: boolean;
-  },
-) {
-  await session.fail(error);
-  return {
-    success: false,
-    ...options,
-    page: await buildPageInfo(ctxManager, deps, page),
-    error,
-  };
-}
-
-async function clickSidebarLink(
-  page: Page,
-  deps: ZhipinOpenChatPageDeps,
-  link: PageLocator,
-  logger: AgentContext["logger"],
-): Promise<void> {
-  await link.scrollIntoViewIfNeeded();
-  await deps.moveVisualCursorToLocator(page, link, { durationMs: 110, settleMs: 30 });
-  await link.hover();
-  await deps.randomDelay(page, 100, 180);
-  await deps.showVisualClickOnLocator(page, link, { pulseDurationMs: 180 });
-  await link.click();
-  logger.info("Clicked Boss sidebar nav: 沟通");
+  return toNativePageInfo(ctxManager, await nativePage.inspectPage());
 }
 
 export const zhipinOpenChatPage = defineTool({
@@ -117,73 +65,84 @@ export const zhipinOpenChatPage = defineTool({
   execute: async (_input, ctx) => {
     const deps = getZhipinOpenChatPageDeps();
     const ctxManager = deps.getContextManager();
+    let nativePage: ZhipinNativePagePort | undefined;
+    let session: NativeVisualActivitySessionLike | undefined;
 
-    ctx.logger.info("Opening Boss chat page via sidebar navigation");
-
-    const page = await ctxManager.getPage("zhipin");
-    await page.bringToFront().catch(() => {});
-    const session = deps.createVisualActivitySession(page);
-    const beginLabel = "正在切换到沟通页";
-
-    await session.begin(beginLabel);
-    await session.highlightSelector(ZHIPIN_SELECTORS.nav.sidebar, {
-      label: beginLabel,
-      padding: 10,
-    });
-
-    if (await deps.isZhipinChatSurfaceOpen(page)) {
-      await session.succeed("已在沟通页");
-      return {
-        success: true,
-        alreadyOnChat: true,
-        usedSidebarClick: false,
-        chatReady: true,
-        page: await buildPageInfo(ctxManager, deps, page),
-      };
-    }
-
-    const chatLink = await deps.findZhipinSidebarSectionLink(page, "chat");
-    if (!chatLink) {
-      return await failOpenChat(ctxManager, deps, session, page, "未找到沟通导航", {
-        alreadyOnChat: false,
-        usedSidebarClick: false,
-        chatReady: false,
-      });
-    }
+    ctx.logger.info("Opening Boss chat page via native sidebar navigation");
 
     try {
-      await clickSidebarLink(page, deps, chatLink, ctx.logger);
-    } catch (error) {
-      return await failOpenChat(
-        ctxManager,
-        deps,
-        session,
-        page,
-        error instanceof Error ? error.message : "点击沟通导航失败",
-        {
+      nativePage = await deps.openNativePagePort();
+      session = deps.createNativeVisualActivitySession(nativePage);
+      await nativePage.bringToFront().catch(() => {});
+
+      const beginLabel = "正在切换到沟通页";
+      await session.begin(beginLabel);
+      await session.highlightSelector(ZHIPIN_SELECTORS.nav.sidebar, {
+        label: beginLabel,
+        padding: 10,
+      });
+
+      if (await nativePage.isChatSurfaceOpen()) {
+        await session.succeed("已在沟通页");
+        return {
+          success: true,
+          alreadyOnChat: true,
+          usedSidebarClick: false,
+          chatReady: true,
+          page: await buildPageInfo(ctxManager, nativePage),
+        };
+      }
+
+      const clicked = await nativePage.clickSidebarSection("chat", {
+        onTargetResolved: async (target) => {
+          await session?.highlightPoint?.(target.x, target.y);
+        },
+      });
+      if (!clicked) {
+        await session.fail("未找到沟通导航");
+        return {
+          success: false,
+          alreadyOnChat: false,
+          usedSidebarClick: false,
+          chatReady: false,
+          page: await buildPageInfo(ctxManager, nativePage),
+          error: "未找到沟通导航",
+        };
+      }
+
+      ctx.logger.info("Clicked Boss sidebar nav: 沟通");
+      const chatReady = await nativePage.waitForChatSurface();
+      if (!chatReady) {
+        await session.fail("沟通页未就绪");
+        return {
+          success: false,
           alreadyOnChat: false,
           usedSidebarClick: true,
           chatReady: false,
-        },
-      );
-    }
+          page: await buildPageInfo(ctxManager, nativePage),
+          error: "沟通页未就绪",
+        };
+      }
 
-    const chatReady = await deps.waitForZhipinChatSurface(page);
-    if (!chatReady) {
-      return await failOpenChat(ctxManager, deps, session, page, "沟通页未就绪", {
+      await session.succeed("已切换到沟通页");
+      return {
+        success: true,
         alreadyOnChat: false,
         usedSidebarClick: true,
+        chatReady: true,
+        page: await buildPageInfo(ctxManager, nativePage),
+      };
+    } catch (error) {
+      await session?.fail("切换沟通页失败");
+      return {
+        success: false,
+        alreadyOnChat: false,
+        usedSidebarClick: false,
         chatReady: false,
-      });
+        error: error instanceof Error ? error.message : "切换沟通页失败",
+      };
+    } finally {
+      nativePage?.close();
     }
-
-    await session.succeed("已切换到沟通页");
-    return {
-      success: true,
-      alreadyOnChat: false,
-      usedSidebarClick: true,
-      chatReady: true,
-      page: await buildPageInfo(ctxManager, deps, page),
-    };
   },
 });

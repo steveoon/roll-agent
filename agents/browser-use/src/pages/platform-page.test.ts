@@ -25,7 +25,7 @@ test("openPlatformHomeTarget reuses an existing native platform page", async () 
       return [
         createInspectablePage({
           targetId: "target-zhipin",
-          url: "https://www.zhipin.com/web/geek/chat",
+          url: "https://www.zhipin.com/web/chat/index",
           title: "BOSS直聘",
         }),
       ];
@@ -78,7 +78,7 @@ test("openPlatformHomeTarget opens the platform homepage when no native page exi
 test("findTrackedPlatformPage delegates to the tracked-page selection path", async () => {
   const trackedPage = {
     url() {
-      return "https://www.zhipin.com/web/geek/chat";
+      return "https://www.zhipin.com/web/chat/index";
     },
   } as unknown as Page;
   let predicateResult = false;

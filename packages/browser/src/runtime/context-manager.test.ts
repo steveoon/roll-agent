@@ -326,7 +326,7 @@ test("shared attached context creates a dedicated tab for the second platform", 
 
 test("useTrackedPage binds a matching site tab to the platform", async () => {
   const otherPage = createTestPage({ url: "https://www.baidu.com" });
-  const zhipinPage = createTestPage({ url: "https://www.zhipin.com/web/geek/chat" });
+  const zhipinPage = createTestPage({ url: "https://www.zhipin.com/web/chat/index" });
   const attachedContext = createTestContext([otherPage.page, zhipinPage.page]);
   const browser = createTestBrowser({
     existingContexts: [attachedContext.context],
@@ -381,7 +381,7 @@ test("remote-cdp falls back to newContext and restores sidecar session snapshots
 test("listPages assigns stable page ids and selectPage rebinds the platform page", async () => {
   const baiduPage = createTestPage({ url: "https://www.baidu.com", title: "百度" });
   const zhipinPage = createTestPage({
-    url: "https://www.zhipin.com/web/geek/chat",
+    url: "https://www.zhipin.com/web/chat/index",
     title: "BOSS直聘",
   });
   const attachedContext = createTestContext([baiduPage.page, zhipinPage.page]);
@@ -421,7 +421,7 @@ test("listNativePages uses native CDP metadata without attaching Playwright", as
     inspectablePages: [
       createInspectablePage({
         targetId: "target-zhipin",
-        url: "https://www.zhipin.com/web/geek/chat",
+        url: "https://www.zhipin.com/web/chat/index",
         title: "BOSS直聘",
       }),
     ],
@@ -447,7 +447,7 @@ test("selectNativePage activates native target and records selection metadata", 
     inspectablePages: [
       createInspectablePage({
         targetId: "target-zhipin",
-        url: "https://www.zhipin.com/web/geek/chat",
+        url: "https://www.zhipin.com/web/chat/index",
         title: "BOSS直聘",
       }),
     ],
@@ -461,17 +461,17 @@ test("selectNativePage activates native target and records selection metadata", 
   assert.deepEqual(runtime.getActivatedTargets(), ["target-zhipin"]);
   assert.equal(manager.getBoundPlatformForNativePage("target-zhipin"), "zhipin");
   assert.equal(manager.isNativePageSelected("target-zhipin"), true);
-  assert.equal(manager.getCurrentUrl("zhipin"), "https://www.zhipin.com/web/geek/chat");
+  assert.equal(manager.getCurrentUrl("zhipin"), "https://www.zhipin.com/web/chat/index");
   assert.equal(runtime.getBrowserCalls(), 0);
 });
 
 test("getPage prefers the natively selected platform tab after later Playwright attach", async () => {
   const otherBossPage = createTestPage({
-    url: "https://www.zhipin.com/web/geek/chat?conversation=other",
+    url: "https://www.zhipin.com/web/chat/index?conversation=other",
     visibilityState: "hidden",
   });
   const selectedBossPage = createTestPage({
-    url: "https://www.zhipin.com/web/geek/chat?conversation=selected",
+    url: "https://www.zhipin.com/web/chat/index?conversation=selected",
     hasFocus: true,
     visibilityState: "visible",
   });
@@ -485,7 +485,7 @@ test("getPage prefers the natively selected platform tab after later Playwright 
     inspectablePages: [
       createInspectablePage({
         targetId: "target-selected",
-        url: "https://www.zhipin.com/web/geek/chat",
+        url: "https://www.zhipin.com/web/chat/index",
         title: "BOSS直聘",
       }),
     ],
@@ -508,7 +508,7 @@ test("getActivePage prefers the focused tab", async () => {
     visibilityState: "hidden",
   });
   const focusedPage = createTestPage({
-    url: "https://www.zhipin.com/web/geek/chat",
+    url: "https://www.zhipin.com/web/chat/index",
     hasFocus: true,
     visibilityState: "visible",
   });
@@ -535,7 +535,7 @@ test("getActivePage falls back to a visible tab when no tab has focus", async ()
     visibilityState: "hidden",
   });
   const visiblePage = createTestPage({
-    url: "https://www.zhipin.com/web/geek/chat",
+    url: "https://www.zhipin.com/web/chat/index",
     visibilityState: "visible",
   });
   const attachedContext = createTestContext([hiddenPage.page, visiblePage.page]);
@@ -579,7 +579,7 @@ test("getActivePage falls back to the sole page when activity cannot be inferred
 
 test("rebinding a page to another platform clears the previous platform selection", async () => {
   const sharedPage = createTestPage({
-    url: "https://www.zhipin.com/web/geek/chat",
+    url: "https://www.zhipin.com/web/chat/index",
     visibilityState: "visible",
   });
   const attachedContext = createTestContext([sharedPage.page]);

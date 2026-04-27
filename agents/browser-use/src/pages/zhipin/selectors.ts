@@ -105,7 +105,7 @@ export const ZHIPIN_SELECTORS = {
   nav: {
     sidebar: ".side-wrap.side-wrap-v2",
     chatLink: '.side-wrap.side-wrap-v2 a[href*="/web/chat/index"]',
-    recommendLink: '.side-wrap.side-wrap-v2 a[href*="/web/geek/recommend"]',
+    recommendLink: '.side-wrap.side-wrap-v2 a[href*="/web/chat/recommend"]',
   },
   recommend: {
     iframe: "#recommendFrame",

@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { afterEach, describe, it } from "node:test";
 import type { AgentContext } from "@roll-agent/sdk";
+import type { ZhipinNativePagePort } from "../pages/zhipin/native-page.ts";
 import {
   setZhipinOpenRecommendPageDepsForTests,
   zhipinOpenRecommendPage,
@@ -20,12 +21,73 @@ function createTestContext(): AgentContext {
   };
 }
 
-function createPage(url = "https://www.zhipin.com/web/chat/index") {
+function createNoopSession(calls: string[]) {
   return {
-    url() {
-      return url;
+    async begin(label: string) {
+      calls.push(`begin:${label}`);
+      return true;
     },
-    async bringToFront() {},
+    async highlightSelector(selector: string) {
+      calls.push(`highlight:${selector}`);
+      return true;
+    },
+    async succeed(label: string) {
+      calls.push(`succeed:${label}`);
+      return true;
+    },
+    async fail(label: string) {
+      calls.push(`fail:${label}`);
+      return true;
+    },
+  };
+}
+
+function createNativePage(options: {
+  readonly alreadyOnRecommend?: boolean;
+  readonly clickResult?: boolean;
+  readonly recommendReady?: boolean;
+  readonly calls: string[];
+}): ZhipinNativePagePort {
+  return {
+    targetId: "target-boss",
+    async bringToFront() {
+      options.calls.push("bring-to-front");
+    },
+    async isRecommendSurfaceOpen() {
+      return options.alreadyOnRecommend ?? false;
+    },
+    async clickSidebarSection(section: "chat" | "recommend") {
+      options.calls.push(`click:${section}`);
+      return options.clickResult ?? true;
+    },
+    async waitForRecommendSurface() {
+      return options.recommendReady ?? true;
+    },
+    async inspectPage() {
+      return {
+        targetId: "target-boss",
+        type: "page",
+        url: options.alreadyOnRecommend
+          ? "https://www.zhipin.com/web/chat/recommend"
+          : "https://www.zhipin.com/web/chat/index",
+        title: "BOSS直聘",
+        webSocketDebuggerUrl: "ws://127.0.0.1/devtools/page/target-boss",
+      };
+    },
+    close() {
+      options.calls.push("close");
+    },
+  } as unknown as ZhipinNativePagePort;
+}
+
+function createContextManager() {
+  return {
+    getBoundPlatformForNativePage() {
+      return "zhipin";
+    },
+    isNativePageSelected() {
+      return true;
+    },
   };
 }
 
@@ -36,52 +98,11 @@ afterEach(() => {
 describe("zhipin_open_recommend_page", () => {
   it("returns success without clicking when already on the recommend surface", async () => {
     const calls: string[] = [];
-    const page = createPage("https://www.zhipin.com/web/geek/recommend");
 
     setZhipinOpenRecommendPageDepsForTests({
-      getContextManager: () =>
-        ({
-          async getPage(platform: string) {
-            assert.equal(platform, "zhipin");
-            return page;
-          },
-        }) as never,
-      isZhipinRecommendSurfaceOpen: () => true,
-      getRecommendTarget: () => page as never,
-      findZhipinSidebarSectionLink: async () => {
-        throw new Error("sidebar lookup should not run when already on recommend");
-      },
-      waitForZhipinRecommendSurface: async () => true,
-      createVisualActivitySession: () => ({
-        async begin(label: string) {
-          calls.push(`begin:${label}`);
-          return true;
-        },
-        async highlightSelector(selector: string) {
-          calls.push(`highlight:${selector}`);
-          return true;
-        },
-        async retarget() {
-          calls.push("retarget");
-          return true;
-        },
-        async succeed(label: string) {
-          calls.push(`succeed:${label}`);
-          return true;
-        },
-        async fail(label: string) {
-          calls.push(`fail:${label}`);
-          return true;
-        },
-      }),
-      toAttachedPageInfo: async () => ({
-        pageId: "page-boss",
-        url: page.url(),
-        title: "BOSS直聘",
-        boundPlatform: "zhipin",
-        detectedPlatform: "zhipin",
-        isSelectedForPlatform: true,
-      }),
+      getContextManager: () => createContextManager() as never,
+      openNativePagePort: async () => createNativePage({ alreadyOnRecommend: true, calls }),
+      createNativeVisualActivitySession: () => createNoopSession(calls),
     });
 
     const result = await zhipinOpenRecommendPage.execute({}, createTestContext());
@@ -91,85 +112,21 @@ describe("zhipin_open_recommend_page", () => {
     assert.equal(result.usedSidebarClick, false);
     assert.equal(result.recommendReady, true);
     assert.deepEqual(calls, [
+      "bring-to-front",
       "begin:正在切换到推荐牛人页",
       "highlight:.side-wrap.side-wrap-v2",
-      "retarget",
       "succeed:已在推荐牛人页",
+      "close",
     ]);
   });
 
-  it("clicks the sidebar recommend link and waits for the recommend surface", async () => {
+  it("clicks the sidebar recommend link through native input", async () => {
     const calls: string[] = [];
-    const page = createPage();
-    const recommendTarget = { kind: "recommend-frame" };
-    const link = {
-      async scrollIntoViewIfNeeded() {
-        calls.push("scroll");
-      },
-      async hover() {
-        calls.push("hover");
-      },
-      async click() {
-        calls.push("click");
-      },
-    };
 
     setZhipinOpenRecommendPageDepsForTests({
-      getContextManager: () =>
-        ({
-          async getPage(platform: string) {
-            assert.equal(platform, "zhipin");
-            return page;
-          },
-        }) as never,
-      isZhipinRecommendSurfaceOpen: () => false,
-      getRecommendTarget: () => recommendTarget as never,
-      findZhipinSidebarSectionLink: async (_page, section) => {
-        assert.equal(section, "recommend");
-        return link as never;
-      },
-      waitForZhipinRecommendSurface: async () => true,
-      moveVisualCursorToLocator: async () => {
-        calls.push("move-cursor");
-        return true;
-      },
-      showVisualClickOnLocator: async () => {
-        calls.push("show-click");
-        return true;
-      },
-      randomDelay: async () => {
-        calls.push("random-delay");
-      },
-      createVisualActivitySession: () => ({
-        async begin(label: string) {
-          calls.push(`begin:${label}`);
-          return true;
-        },
-        async highlightSelector(selector: string) {
-          calls.push(`highlight:${selector}`);
-          return true;
-        },
-        async retarget(target: unknown) {
-          calls.push(`retarget:${target === recommendTarget ? "recommend" : "other"}`);
-          return true;
-        },
-        async succeed(label: string) {
-          calls.push(`succeed:${label}`);
-          return true;
-        },
-        async fail(label: string) {
-          calls.push(`fail:${label}`);
-          return true;
-        },
-      }),
-      toAttachedPageInfo: async () => ({
-        pageId: "page-boss",
-        url: "https://www.zhipin.com/web/geek/recommend",
-        title: "BOSS直聘",
-        boundPlatform: "zhipin",
-        detectedPlatform: "zhipin",
-        isSelectedForPlatform: true,
-      }),
+      getContextManager: () => createContextManager() as never,
+      openNativePagePort: async () => createNativePage({ calls }),
+      createNativeVisualActivitySession: () => createNoopSession(calls),
     });
 
     const result = await zhipinOpenRecommendPage.execute({}, createTestContext());
@@ -179,64 +136,22 @@ describe("zhipin_open_recommend_page", () => {
     assert.equal(result.usedSidebarClick, true);
     assert.equal(result.recommendReady, true);
     assert.deepEqual(calls, [
+      "bring-to-front",
       "begin:正在切换到推荐牛人页",
       "highlight:.side-wrap.side-wrap-v2",
-      "scroll",
-      "move-cursor",
-      "hover",
-      "random-delay",
-      "show-click",
-      "click",
-      "retarget:recommend",
+      "click:recommend",
       "succeed:已切换到推荐牛人页",
+      "close",
     ]);
   });
 
   it("returns a structured failure when the sidebar nav is missing", async () => {
     const calls: string[] = [];
-    const page = createPage();
 
     setZhipinOpenRecommendPageDepsForTests({
-      getContextManager: () =>
-        ({
-          async getPage() {
-            return page;
-          },
-        }) as never,
-      isZhipinRecommendSurfaceOpen: () => false,
-      getRecommendTarget: () => page as never,
-      findZhipinSidebarSectionLink: async () => null,
-      waitForZhipinRecommendSurface: async () => false,
-      createVisualActivitySession: () => ({
-        async begin(label: string) {
-          calls.push(`begin:${label}`);
-          return true;
-        },
-        async highlightSelector(selector: string) {
-          calls.push(`highlight:${selector}`);
-          return true;
-        },
-        async retarget() {
-          calls.push("retarget");
-          return true;
-        },
-        async succeed(label: string) {
-          calls.push(`succeed:${label}`);
-          return true;
-        },
-        async fail(label: string) {
-          calls.push(`fail:${label}`);
-          return true;
-        },
-      }),
-      toAttachedPageInfo: async () => ({
-        pageId: "page-boss",
-        url: page.url(),
-        title: "BOSS直聘",
-        boundPlatform: "zhipin",
-        detectedPlatform: "zhipin",
-        isSelectedForPlatform: true,
-      }),
+      getContextManager: () => createContextManager() as never,
+      openNativePagePort: async () => createNativePage({ calls, clickResult: false }),
+      createNativeVisualActivitySession: () => createNoopSession(calls),
     });
 
     const result = await zhipinOpenRecommendPage.execute({}, createTestContext());
@@ -245,9 +160,12 @@ describe("zhipin_open_recommend_page", () => {
     assert.equal(result.usedSidebarClick, false);
     assert.match(result.error ?? "", /未找到推荐牛人导航/);
     assert.deepEqual(calls, [
+      "bring-to-front",
       "begin:正在切换到推荐牛人页",
       "highlight:.side-wrap.side-wrap-v2",
+      "click:recommend",
       "fail:未找到推荐牛人导航",
+      "close",
     ]);
   });
 });

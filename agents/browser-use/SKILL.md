@@ -31,8 +31,8 @@ metadata:
 ## 调试 Tools
 
 - `attach_browser_session()` — 调试工具。显式执行一次 `connectOverCDP()`，用于隔离验证“仅 attach”是否会触发站点风控
-- `zhipin_diagnose_browser_state(phase?, targetPageId?, watchMs?, networkEventLimit?)` — BOSS直聘分阶段诊断工具。默认 `phase="native"`，只通过原生 CDP `/json/list` 枚举页面；`phase="browser-attach"` 会执行 Playwright Browser CDP attach 并追加 `watchMs` 的原生 URL 观察窗口，用于捕捉 attach 成功后异步回退；只有显式传更深 `phase` 才会继续执行 Page attach、网络监听、最小 `evaluate()`、检测指纹快照和 storage/cookie 脱敏摘要读取。用于定位“哪个阶段触发 Boss 自动回退/风控”，不用于正常招聘业务流程
-- `zhipin_scroll_view(surface, direction?, steps?, distance?, settleMs?)` — 滚动 BOSS直聘页面内部动态列表容器，用于调试或显式翻页。`surface` 支持 `chat-list`、`chat-history`、`recommend-list`；不传 `direction` 时使用该 surface 的默认方向
+- `zhipin_diagnose_browser_state(phase?, targetPageId?, watchMs?, networkEventLimit?)` — BOSS直聘分阶段诊断工具。默认 `phase="native"`，只通过原生 CDP `/json/list` 枚举页面；`native-*` 阶段使用原生 CDP page WebSocket，不调用 Playwright/Puppeteer，并区分是否调用 `Runtime.enable`；`phase="browser-attach"` 才会执行 Playwright Browser CDP attach 并追加 `watchMs` 的原生 URL 观察窗口。用于定位“哪个阶段触发 Boss 自动回退/风控”，不用于正常招聘业务流程
+- `zhipin_scroll_view(surface, direction?, steps?, distance?, settleMs?)` — 使用 native CDP backend 滚动 BOSS直聘页面内部动态列表容器，用于调试或显式翻页。`surface` 支持 `chat-list`、`chat-history`、`recommend-list`；不传 `direction` 时使用该 surface 的默认方向；失败时返回 `success:false`，不会 fallback Playwright
 
 ## BOSS直聘 — CDP/风控诊断流程
 
@@ -52,6 +52,15 @@ metadata:
 低侵入分支:
   native -> native-watch
 
+原生 CDP page WebSocket 分支:
+  native -> native-ws-connect -> native-runtime-enable -> native-evaluate-url -> native-dom-read
+
+原生 CDP no-Runtime.enable 分支:
+  native -> native-ws-connect -> native-page-bring-front
+  native -> native-ws-connect -> native-evaluate-url-no-runtime-enable
+  native -> native-ws-connect -> native-dom-read-no-runtime-enable
+  native -> native-ws-connect -> native-input-move-no-runtime-enable
+
 attach / 网络分支:
   native -> browser-attach -> browser-attach-watch -> page-attach -> network-watch
 
@@ -65,6 +74,14 @@ evaluate / storage 分支:
 | --- | --- | --- |
 | `native` | 只调用原生 CDP `/json/list` 枚举页面 | 当前有哪些 BOSS target；最低风险默认阶段 |
 | `native-watch` | 不 attach，只在 `watchMs` 内重复读取原生 target URL/title | 不连接 Playwright 时页面是否自己跳转或回退 |
+| `native-ws-connect` | 连接目标页的 `webSocketDebuggerUrl`，不调用 Playwright/Puppeteer | 仅建立原生 page CDP WebSocket 是否触发 |
+| `native-page-bring-front` | 连接 WebSocket 后直接发送 `Page.bringToFront`，不调用 `Runtime.enable` | Page domain 前台切换是否触发 |
+| `native-evaluate-url-no-runtime-enable` | 连接 WebSocket 后直接 `Runtime.evaluate`，不先调用 `Runtime.enable` | 是否是 `Runtime.enable` 独有触发，还是 evaluate 本身触发 |
+| `native-dom-read-no-runtime-enable` | 连接 WebSocket 后直接 `DOM.getDocument`，不先调用 `Runtime.enable` / `DOM.enable` | DOM domain 最小读取是否触发 |
+| `native-input-move-no-runtime-enable` | 连接 WebSocket 后直接 `Input.dispatchMouseEvent(mouseMoved)`，不先调用 `Runtime.enable` | Input domain 最小事件是否触发 |
+| `native-runtime-enable` | 原生 CDP 发送 `Runtime.enable` | 开启 Runtime domain 是否触发 |
+| `native-evaluate-url` | 原生 CDP `Runtime.evaluate` 只读 `location.href` / `document.title` / 可见状态 | 最小页面 JS evaluate 是否触发 |
+| `native-dom-read` | 原生 CDP `DOM.getDocument`，并只返回 DOM 数量/长度摘要 | DOM domain 读取是否触发 |
 | `browser-attach` | 执行 `runtime.getBrowser()`，随后用原生 CDP 在 `watchMs` 内观察 URL/title | 仅建立 Playwright Browser CDP 连接是否触发异步回退 |
 | `page-attach` | 执行 `ctxManager.getPage("zhipin")` | 绑定具体 BOSS 页面/context 是否触发 |
 | `network-watch` | 在 `watchMs` 内监听相关 request/response 和 frame navigation | attach 后是否出现 `device-action-report` / APM / security 请求，或 URL 自动变化 |
@@ -77,16 +94,43 @@ orchestrator 使用规则：
 1. 先调用 `zhipin_diagnose_browser_state()` 或 `zhipin_diagnose_browser_state({ phase: "native" })`
 2. 如果 `nativePages` 中只有一个 BOSS 页，可继续递进；如果有多个 BOSS 页，后续必须传 `targetPageId`
 3. 高风险账号先跑 `native-watch`，确认不 attach 时 URL 是否已经变化
-4. 每次只推进一个阶段，并在每次调用后观察页面是否自动回退
-5. 如果 `phase="browser-attach"` 返回 `success=false`，或 `nativeTimeline` 中出现 `phase="browser-attach-watch"` 且 `urlChangedFromPrevious=true`，立即停止；不要继续调用任何 Playwright-backed BOSS 工具，包括 `zhipin_read_messages`、`zhipin_open_chat_page`、`zhipin_open_recommend_page`、`zhipin_send_reply`
-6. 要验证“是否上报”，只能在 `browser-attach` 未触发 URL 变化后继续跑 `page-attach` / `network-watch`；工具会在可行时先挂网络监听再绑定 page
-7. 一旦某个阶段触发回退，停止继续加深，记录该阶段的 `phases`、`nativeTimeline`、`networkEvents`、`navigationEvents`、`warnings`
-8. `storage-summary` 返回的是脱敏摘要；禁止要求或传播 cookie/localStorage/sessionStorage 原始值
+4. 要验证“原生 CDP 是否可行”，先跑 `native-ws-connect`；若稳定，再优先跑 no-Runtime.enable 分支：`native-page-bring-front`、`native-evaluate-url-no-runtime-enable`、`native-dom-read-no-runtime-enable`、`native-input-move-no-runtime-enable`
+5. 每次只推进一个阶段，并在每次调用后观察页面是否自动回退
+6. 如果 `phase="browser-attach"` 返回 `success=false`，或 `nativeTimeline` 中出现 `phase="browser-attach-watch"` 且 `urlChangedFromPrevious=true`，立即停止；不要继续调用任何仍依赖 Playwright-backed 页面 attach 的 BOSS 工具，例如 `zhipin_send_reply`、`zhipin_filter_recommend_candidates`、`zhipin_say_hello`
+7. 如果任意 `native-*-watch` 快照出现 `urlChangedFromPrevious=true`，停止继续加深原生 CDP 实验，并记录触发阶段
+8. 只有需要复现 `Runtime.enable` 红线时，才跑 `native-runtime-enable`；如果该阶段触发，不要继续 `native-evaluate-url` / `native-dom-read` 这条 with-Runtime.enable 分支
+9. 要验证“是否上报”，只能在 `browser-attach` 未触发 URL 变化后继续跑 `page-attach` / `network-watch`；工具会在可行时先挂网络监听再绑定 page
+10. 一旦某个阶段触发回退，停止继续加深，记录该阶段的 `phases`、`nativeTimeline`、`networkEvents`、`navigationEvents`、`warnings`
+11. `storage-summary` 返回的是脱敏摘要；禁止要求或传播 cookie/localStorage/sessionStorage 原始值
 
 典型测试序列：
 
 ```json
 {}
+```
+
+```json
+{ "phase": "native-ws-connect", "targetPageId": "<nativePages[].pageId>", "watchMs": 3000 }
+```
+
+```json
+{ "phase": "native-page-bring-front", "targetPageId": "<nativePages[].pageId>", "watchMs": 3000 }
+```
+
+```json
+{ "phase": "native-evaluate-url-no-runtime-enable", "targetPageId": "<nativePages[].pageId>", "watchMs": 3000 }
+```
+
+```json
+{ "phase": "native-dom-read-no-runtime-enable", "targetPageId": "<nativePages[].pageId>", "watchMs": 3000 }
+```
+
+```json
+{ "phase": "native-input-move-no-runtime-enable", "targetPageId": "<nativePages[].pageId>", "watchMs": 3000 }
+```
+
+```json
+{ "phase": "native-runtime-enable", "targetPageId": "<nativePages[].pageId>", "watchMs": 3000 }
 ```
 
 ```json
@@ -118,7 +162,8 @@ orchestrator 使用规则：
 - `nativePages`：原生 CDP 页面列表，`pageId` 可作为后续 `targetPageId`
 - `targetPage`：本次绑定/诊断的 BOSS 页面
 - `browserAttached` / `pageAttached`：是否已经进入更深 attach 阶段
-- `nativeTimeline`：每个阶段后的原生 target URL/title 快照；`browser-attach-watch` 表示 Browser attach 成功后的后置观察窗口；如果 `urlChangedFromPrevious=true`，优先认为该阶段和自动回退相关
+- `nativeTimeline`：每个阶段后的原生 target URL/title 快照；`browser-attach-watch` 表示 Browser attach 成功后的后置观察窗口，`native-*-watch` 表示原生 CDP page WebSocket 阶段后的后置观察窗口；如果 `urlChangedFromPrevious=true`，优先认为该阶段和自动回退相关
+- `nativeCdp`：原生 CDP page WebSocket 探测摘要，只包含是否连接、是否启用 Runtime、是否 bringToFront、URL/title 可见状态、DOM 节点数量/文本长度、最小 input 事件摘要，不包含页面正文
 - `networkEvents`：只记录相关 APM/security 请求，不抓请求体；用于判断是否出现 `device-action-report` / `boss_risk_report` 等上报端点
 - `navigationEvents`：记录 attach 后 frame URL 变化，用于定位自动 `history.back()` / 跳转发生在哪个阶段
 - `detectorFingerprint`：读取自动化相关公开标志，如 `navigator.webdriver`、`window.cdc_*`、Playwright binding 标记
@@ -128,13 +173,13 @@ orchestrator 使用规则：
 
 ## BOSS直聘 — 聊天 Tools
 
-- `zhipin_read_messages(limit?, onlyUnread?, sortBy?, autoScroll?, maxScrolls?)` — 读取消息列表中的候选人，默认返回全部消息；若只看未读，显式传 `onlyUnread=true`。默认 `autoScroll=true`，会向下滚动左侧消息列表内部容器并按 `conversationId` 合并去重；`maxScrolls` 默认 `4`，用于限制动态列表采集成本
-- `zhipin_open_chat_page()` — 通过点击 Boss 左侧导航切换回「沟通」页；优先复用当前已登录的 Boss 页面，不让编排器去猜站内 URL
+- `zhipin_read_messages(limit?, onlyUnread?, sortBy?, autoScroll?, maxScrolls?)` — 使用 native CDP 只读 backend 读取消息列表，不触发 Playwright browser/page attach；默认返回全部消息，若只看未读，显式传 `onlyUnread=true`。默认 `autoScroll=true`，会向下滚动左侧消息列表内部容器并按 `conversationId` 合并去重；`maxScrolls` 默认 `4`，用于限制动态列表采集成本。native backend 不可用时返回 `success:false`，不会自动 fallback 到 Playwright；仍会保留页内视觉活动和虚拟鼠标反馈
+- `zhipin_open_chat_page()` — 使用 native CDP backend 点击 Boss 左侧导航切换回「沟通」页；优先复用当前已登录的 Boss 页面，不让编排器去猜站内 URL；不触发 Playwright attach，仍保留页内视觉活动和虚拟鼠标反馈
 - `zhipin_open_chat(conversationId?, candidateName?, index?, preferUnread?)` — 打开指定候选人的聊天窗口；匹配优先级是 `conversationId` > `candidateName` > `index`
 - `zhipin_get_candidate_info(conversationId?, candidateName?, index?, maxMessages?)` — 提取候选人资料、聊天记录，以及当前选中聊天的 `conversationId` / `candidateId`。输出里的 `candidateInfo.communicationPosition`、`candidateInfo.expectedLocation`、`candidateInfo.expectedPosition` 已按“沟通职位 + 最近关注”结构化解析；若 `communicationPosition` 含连字符类分隔符（`-` / `－` / `—` / `–`），则取第一段作为可选 `preferredBrand`，否则不输出该字段
 - `zhipin_send_reply(signedEnvelope, candidateName?, index?)` — 发送消息。只接受 Reply Authority Service 签发的 `signedEnvelope`；本地会先做 Ed25519 验签、过期检查、重放检查、目标绑定校验和 recruiter 绑定校验。启动期公钥预加载失败时直接前置拒绝，错误指向 `browser_status.replyAuthorityKeysLoaded`
 - `zhipin_exchange_wechat(conversationId?, candidateName?, index?)` — 换微信。若已知 `conversationId`，优先传它；`candidateName/index` 只作兜底
-- `zhipin_get_username()` — 获取当前登录的招聘者用户名，返回 `username`（依赖当前 runtime 已跟踪页面；首次使用请先 `open_platform`，已打开但未跟踪页面可先 `list_pages + select_page`，确认登录后如需单独验证 attach，可先调用 `attach_browser_session`）。常用于 recruiter binding 解析和外部通知消息中的账号标识
+- `zhipin_get_username()` — 使用 native CDP 只读 backend 获取当前登录的招聘者用户名，返回 `username`；依赖当前已有 BOSS native 页面，首次使用请先 `open_platform`，已打开但未跟踪页面可先 `list_pages + select_page`。native backend 不可用时返回 `success:false`，不会自动 fallback 到 Playwright；仍会保留页内视觉活动和虚拟鼠标反馈。常用于 recruiter binding 解析和外部通知消息中的账号标识
 
 ## BOSS直聘 — 聊天编排硬规则
 
@@ -183,9 +228,9 @@ orchestrator 使用规则：
 
 ## BOSS直聘 — 推荐列表 Tools
 
-- `zhipin_open_recommend_page()` — 通过点击 Boss 左侧导航切换到「推荐牛人」页；优先复用当前已登录的 Boss 页面，不让编排器去猜站内 URL
+- `zhipin_open_recommend_page()` — 使用 native CDP backend 点击 Boss 左侧导航切换到「推荐牛人」页；优先复用当前已登录的 Boss 页面，不让编排器去猜站内 URL；不触发 Playwright attach，仍保留页内视觉活动和虚拟鼠标反馈
 - `zhipin_filter_recommend_candidates(ageMin?, ageMax?, gender?, activity?)` — 在「推荐牛人」页打开筛选面板，只设置年龄、性别、活跃度[单选] 三个维度并提交。未传的维度会重置为 `不限`（年龄默认为 `16-不限`），不会点击岗位下拉，也不会清除学历、薪资、求职状态等其它筛选项
-- `zhipin_get_candidate_list(maxResults?, autoScroll?, maxScrolls?)` — 获取推荐列表页的候选人卡片信息（姓名、年龄、学历、期望薪资等）。默认 `autoScroll=true`，会向下滚动推荐列表内部容器并按 `candidateId` / `data-geek` 合并去重；`maxScrolls` 默认 `4`。返回的 `scrollStats.stopReason` 可用于判断未达到 `maxResults` 的原因：`target-count`、`boundary`、`no-new-items`、`max-steps`
+- `zhipin_get_candidate_list(maxResults?, autoScroll?, maxScrolls?)` — 使用 native CDP backend 获取推荐列表页的候选人卡片信息（姓名、年龄、学历、期望薪资等），不触发 Playwright attach。默认 `autoScroll=true`，会向下滚动推荐列表内部容器并按 `candidateId` / `data-geek` 合并去重；`maxScrolls` 默认 `4`。返回的 `scrollStats.stopReason` 可用于判断未达到 `maxResults` 的原因：`target-count`、`boundary`、`no-new-items`、`max-steps`
 - `zhipin_say_hello(indices)` — 对推荐列表中的候选人批量点击「打招呼」
 - `zhipin_open_resume(index)` — 点击候选人卡片打开简历详情弹窗
 - `zhipin_locate_resume_canvas()` — 定位简历弹窗中嵌套 iframe 内的 canvas 坐标（用于截图）
