@@ -6,6 +6,7 @@ import { listPages } from "./tools/list-pages.ts";
 import { navigateActiveTab } from "./tools/navigate-active-tab.ts";
 import { openPlatform } from "./tools/open-platform.ts";
 import { selectPage } from "./tools/select-page.ts";
+import { zhipinDiagnoseBrowserState } from "./tools/zhipin-diagnose-browser-state.ts";
 // Zhipin — 聊天
 import { zhipinReadMessages } from "./tools/zhipin-read-messages.ts";
 import { zhipinOpenChatPage } from "./tools/zhipin-open-chat-page.ts";
@@ -81,6 +82,7 @@ const agent = defineAgent(
       navigateActiveTab,
       openPlatform,
       selectPage,
+      zhipinDiagnoseBrowserState,
       // Zhipin 聊天
       zhipinReadMessages,
       zhipinOpenChatPage,

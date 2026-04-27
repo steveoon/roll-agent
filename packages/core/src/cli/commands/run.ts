@@ -198,9 +198,13 @@ function getCliValueOption(rawArgs: string[], optionName: string): string | unde
 export function parseExplicitToolInput(rawArgs: string[]): Record<string, unknown> | undefined {
   const inputJson = getCliValueOption(rawArgs, "input-json");
   const inputFile = getCliValueOption(rawArgs, "input-file");
+  const positionalJson = getPositionalJsonInput(rawArgs);
 
-  if (inputJson && inputFile) {
-    throw new Error("不能同时使用 --input-json 和 --input-file");
+  const explicitInputCount = [inputJson, inputFile, positionalJson].filter(
+    (value) => value !== undefined,
+  ).length;
+  if (explicitInputCount > 1) {
+    throw new Error("不能同时使用 positional JSON、--input-json 和 --input-file");
   }
 
   if (inputJson) {
@@ -212,7 +216,35 @@ export function parseExplicitToolInput(rawArgs: string[]): Record<string, unknow
     return parseJsonObjectInput(fileContent, `输入文件 ${inputFile}`);
   }
 
+  if (positionalJson) {
+    return parseJsonObjectInput(positionalJson, "positional JSON input");
+  }
+
   return undefined;
+}
+
+function getPositionalJsonInput(rawArgs: string[]): string | undefined {
+  const leadingPositionals: string[] = [];
+
+  for (const arg of rawArgs) {
+    if (arg.startsWith("--")) {
+      break;
+    }
+    leadingPositionals.push(arg);
+  }
+
+  const extraPositionals = leadingPositionals.slice(2);
+  if (extraPositionals.length === 0) {
+    return undefined;
+  }
+
+  if (extraPositionals.length === 1 && extraPositionals[0]?.trim().startsWith("{")) {
+    return extraPositionals[0];
+  }
+
+  throw new Error(
+    "roll run 只接受 agent/tool 两个位置参数；tool 输入请使用 --key value、--input-json、--input-file，或第三个位置参数 JSON object",
+  );
 }
 
 export function resolveToolArgs(rawArgs: string[]): Record<string, unknown> {

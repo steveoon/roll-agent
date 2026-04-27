@@ -1,6 +1,6 @@
 ---
 name: browser-use-agent
-description: 浏览器操控 Agent。控制浏览器操作招聘平台——读取消息、打开聊天、发送回复、换微信、滚动动态列表、查看推荐列表、打招呼、查看简历。
+description: 浏览器操控 Agent。控制浏览器操作招聘平台——读取消息、打开聊天、发送回复、换微信、滚动动态列表、查看推荐列表、打招呼、查看简历，并提供 BOSS直聘 CDP/页面 attach 风控触发点的分阶段诊断工具。
 metadata:
   roll-env-file: references/env.yaml
 ---
@@ -31,7 +31,100 @@ metadata:
 ## 调试 Tools
 
 - `attach_browser_session()` — 调试工具。显式执行一次 `connectOverCDP()`，用于隔离验证“仅 attach”是否会触发站点风控
+- `zhipin_diagnose_browser_state(phase?, targetPageId?, watchMs?, networkEventLimit?)` — BOSS直聘分阶段诊断工具。默认 `phase="native"`，只通过原生 CDP `/json/list` 枚举页面；`phase="browser-attach"` 会执行 Playwright Browser CDP attach 并追加 `watchMs` 的原生 URL 观察窗口，用于捕捉 attach 成功后异步回退；只有显式传更深 `phase` 才会继续执行 Page attach、网络监听、最小 `evaluate()`、检测指纹快照和 storage/cookie 脱敏摘要读取。用于定位“哪个阶段触发 Boss 自动回退/风控”，不用于正常招聘业务流程
 - `zhipin_scroll_view(surface, direction?, steps?, distance?, settleMs?)` — 滚动 BOSS直聘页面内部动态列表容器，用于调试或显式翻页。`surface` 支持 `chat-list`、`chat-history`、`recommend-list`；不传 `direction` 时使用该 surface 的默认方向
+
+## BOSS直聘 — CDP/风控诊断流程
+
+`zhipin_diagnose_browser_state` 的目标是把黑盒风控触发拆成可观测阶段。它不能替代 `zhipin_read_messages`，也不负责规避检测。
+
+触发场景：
+
+- 调用 `zhipin_read_messages`、`zhipin_get_username`、`zhipin_open_chat_page` 等 BOSS 工具后，页面自动 `history.goBack()` 或回到上一页
+- 某个账号/某个浏览器 profile 触发，但其它账号或其它浏览器实例不触发
+- 需要对比“仅 CDP 连接”、“页面绑定”、“执行 `evaluate()`”、“读取 storage/cookie”哪个阶段开始异常
+
+不要在正常业务路径里默认调用该工具。只有出现上述异常或用户明确要求诊断时，orchestrator 才使用它。
+
+阶段模型：
+
+```text
+低侵入分支:
+  native -> native-watch
+
+attach / 网络分支:
+  native -> browser-attach -> browser-attach-watch -> page-attach -> network-watch
+
+evaluate / storage 分支:
+  native -> browser-attach -> browser-attach-watch -> page-attach -> page-evaluate -> detector-fingerprint -> storage-summary
+```
+
+阶段含义：
+
+| `phase` | 动作 | 诊断问题 |
+| --- | --- | --- |
+| `native` | 只调用原生 CDP `/json/list` 枚举页面 | 当前有哪些 BOSS target；最低风险默认阶段 |
+| `native-watch` | 不 attach，只在 `watchMs` 内重复读取原生 target URL/title | 不连接 Playwright 时页面是否自己跳转或回退 |
+| `browser-attach` | 执行 `runtime.getBrowser()`，随后用原生 CDP 在 `watchMs` 内观察 URL/title | 仅建立 Playwright Browser CDP 连接是否触发异步回退 |
+| `page-attach` | 执行 `ctxManager.getPage("zhipin")` | 绑定具体 BOSS 页面/context 是否触发 |
+| `network-watch` | 在 `watchMs` 内监听相关 request/response 和 frame navigation | attach 后是否出现 `device-action-report` / APM / security 请求，或 URL 自动变化 |
+| `page-evaluate` | 最小读取 `location.href`、`document.title`、`visibilityState` | 页面 JS evaluate 是否触发 |
+| `detector-fingerprint` | 读取 `navigator.webdriver`、`window.cdc_*`、`__playwright__binding__` 等检测标志 | attach/evaluate 后是否暴露自动化指纹 |
+| `storage-summary` | 读取 `localStorage`、`sessionStorage`、cookies 摘要 | storage/cookie 读取是否触发 |
+
+orchestrator 使用规则：
+
+1. 先调用 `zhipin_diagnose_browser_state()` 或 `zhipin_diagnose_browser_state({ phase: "native" })`
+2. 如果 `nativePages` 中只有一个 BOSS 页，可继续递进；如果有多个 BOSS 页，后续必须传 `targetPageId`
+3. 高风险账号先跑 `native-watch`，确认不 attach 时 URL 是否已经变化
+4. 每次只推进一个阶段，并在每次调用后观察页面是否自动回退
+5. 如果 `phase="browser-attach"` 返回 `success=false`，或 `nativeTimeline` 中出现 `phase="browser-attach-watch"` 且 `urlChangedFromPrevious=true`，立即停止；不要继续调用任何 Playwright-backed BOSS 工具，包括 `zhipin_read_messages`、`zhipin_open_chat_page`、`zhipin_open_recommend_page`、`zhipin_send_reply`
+6. 要验证“是否上报”，只能在 `browser-attach` 未触发 URL 变化后继续跑 `page-attach` / `network-watch`；工具会在可行时先挂网络监听再绑定 page
+7. 一旦某个阶段触发回退，停止继续加深，记录该阶段的 `phases`、`nativeTimeline`、`networkEvents`、`navigationEvents`、`warnings`
+8. `storage-summary` 返回的是脱敏摘要；禁止要求或传播 cookie/localStorage/sessionStorage 原始值
+
+典型测试序列：
+
+```json
+{}
+```
+
+```json
+{ "phase": "browser-attach", "targetPageId": "<nativePages[].pageId>" }
+```
+
+```json
+{ "phase": "page-attach", "targetPageId": "<nativePages[].pageId>" }
+```
+
+```json
+{ "phase": "network-watch", "targetPageId": "<nativePages[].pageId>", "watchMs": 3000 }
+```
+
+```json
+{ "phase": "page-evaluate", "targetPageId": "<nativePages[].pageId>" }
+```
+
+```json
+{ "phase": "detector-fingerprint", "targetPageId": "<nativePages[].pageId>" }
+```
+
+```json
+{ "phase": "storage-summary", "targetPageId": "<nativePages[].pageId>", "watchMs": 3000 }
+```
+
+返回结果重点：
+
+- `nativePages`：原生 CDP 页面列表，`pageId` 可作为后续 `targetPageId`
+- `targetPage`：本次绑定/诊断的 BOSS 页面
+- `browserAttached` / `pageAttached`：是否已经进入更深 attach 阶段
+- `nativeTimeline`：每个阶段后的原生 target URL/title 快照；`browser-attach-watch` 表示 Browser attach 成功后的后置观察窗口；如果 `urlChangedFromPrevious=true`，优先认为该阶段和自动回退相关
+- `networkEvents`：只记录相关 APM/security 请求，不抓请求体；用于判断是否出现 `device-action-report` / `boss_risk_report` 等上报端点
+- `navigationEvents`：记录 attach 后 frame URL 变化，用于定位自动 `history.back()` / 跳转发生在哪个阶段
+- `detectorFingerprint`：读取自动化相关公开标志，如 `navigator.webdriver`、`window.cdc_*`、Playwright binding 标记
+- `phases`：每个阶段的成功状态、耗时、错误
+- `warnings`：多页面、未找到目标页、目标页不是 BOSS 页面、Browser attach 后 URL 变化等边界提示
+- `storage`：只包含 key、value 长度、JSON 顶层形状、计数器差分、cookie 域/path/过期/HttpOnly/Secure/SameSite，不包含任何 token 或原始值
 
 ## BOSS直聘 — 聊天 Tools
 
@@ -52,7 +145,8 @@ metadata:
 - BOSS 左侧消息列表是虚拟列表，DOM 只保留当前窗口内的若干条记录
 - 点击会话、发送消息、收到新消息后，列表会实时重排
 - 同一个人上一轮是 `index=3`，下一轮可能已经变成 `index=0`
-- 因此 `index` 只适合“当前这一轮、当前这个 DOM 快照内”的临时兜底，不适合跨 tool / 跨 agent 透传
+- `zhipin_open_chat` 不复用 `zhipin_read_messages` 的 DOM 句柄或索引缓存；它会重新读取当前页面上的 `.geek-item`，再按 `conversationId` > `candidateName` > `index` 匹配
+- 因此 `index` 只适合“当前可见 DOM、没有滚动/过滤/重排后的即时兜底”，不适合跨 tool / 跨 agent 透传，也不能作为 `zhipin_read_messages` 到 `zhipin_open_chat` 的稳定点击映射
 
 编排要求：
 
@@ -60,8 +154,9 @@ metadata:
 2. 一旦返回了 `conversationId` / `candidateId`，后续所有 related tool 都复用这两个值
 3. 调 `zhipin_open_chat` / `zhipin_get_candidate_info` / `zhipin_exchange_wechat` 时，优先传 `conversationId`
 4. 调 `smart-reply-agent.generate_reply(..., target)` 时，`target.conversationId` / `target.candidateId` 必须直接来自 `browser-use-agent` 的真实输出
-5. 禁止把 `zhipin_read_messages` 返回数组里的 `index` 缓存到下一轮，再把它当作会话主键使用
-6. 只有在当前轮次拿不到 `conversationId` 时，才允许临时退回 `candidateName` 或 `index`
+5. 禁止把 `zhipin_read_messages` 返回数组里的 `index` 当作后续 `zhipin_open_chat(index)` 的稳定句柄或会话主键
+6. 只有在当前轮次拿不到 `conversationId` 时，才允许临时退回 `candidateName`
+7. 只有在刚读取当前可见 DOM、且未发生滚动/过滤/列表重排时，才允许临时退回 `index`
 
 动态列表要求：
 
@@ -72,6 +167,7 @@ metadata:
 
 错误做法：
 
+- 认为 `zhipin_read_messages` 已经建立了可复用的 `index -> DOM element` 点击映射
 - `zhipin_read_messages` 拿到 `index=2`，几轮之后再调用 `zhipin_open_chat(index=2)`
 - 用 `candidateName` 重新模糊匹配一个会话，再把历史 `candidateId` 假定为同一个人
 - `smart-reply-agent` 的 `target` 不用 `browser-use-agent` 返回的 `conversationId/candidateId`，而是由 orch 自己重建
