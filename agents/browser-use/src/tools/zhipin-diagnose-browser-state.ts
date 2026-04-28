@@ -4,6 +4,8 @@ import type {
   BrowserContextManager,
   BrowserInspectablePage,
   BrowserPageInfo,
+  BrowserRuntime,
+  NativeCdpController,
   Page,
 } from "@roll-agent/browser";
 import { BrowserPageInfoSchema } from "@roll-agent/browser";
@@ -15,6 +17,14 @@ import { toAttachedPageInfo, toNativePageInfo } from "../page-info.ts";
 const ZHIPIN_DIAGNOSTIC_PHASES = [
   "native",
   "native-watch",
+  "native-ws-connect",
+  "native-page-bring-front",
+  "native-evaluate-url-no-runtime-enable",
+  "native-dom-read-no-runtime-enable",
+  "native-input-move-no-runtime-enable",
+  "native-runtime-enable",
+  "native-evaluate-url",
+  "native-dom-read",
   "browser-attach",
   "page-attach",
   "network-watch",
@@ -25,6 +35,14 @@ const ZHIPIN_DIAGNOSTIC_PHASES = [
 
 const NATIVE_TARGET_SNAPSHOT_PHASES = [
   ...ZHIPIN_DIAGNOSTIC_PHASES,
+  "native-ws-connect-watch",
+  "native-page-bring-front-watch",
+  "native-evaluate-url-no-runtime-enable-watch",
+  "native-dom-read-no-runtime-enable-watch",
+  "native-input-move-no-runtime-enable-watch",
+  "native-runtime-enable-watch",
+  "native-evaluate-url-watch",
+  "native-dom-read-watch",
   "browser-attach-watch",
 ] as const;
 
@@ -113,6 +131,31 @@ const DetectorFingerprintSummarySchema = z.object({
   automationLikeWindowKeys: z.array(z.string()),
 });
 
+const NativeCdpDomSummarySchema = z.object({
+  rootNodeId: z.number().int(),
+  rootNodeName: z.string(),
+  childNodeCount: z.number().int().nonnegative().optional(),
+  bodyTextLength: z.number().int().nonnegative().optional(),
+  elementCount: z.number().int().nonnegative().optional(),
+});
+
+const NativeCdpInputSummarySchema = z.object({
+  type: z.literal("mouseMoved"),
+  x: z.number(),
+  y: z.number(),
+});
+
+const NativeCdpProbeSummarySchema = z.object({
+  targetId: z.string(),
+  websocketUrlAvailable: z.boolean(),
+  connected: z.boolean(),
+  pageBroughtToFront: z.boolean().optional(),
+  runtimeEnabled: z.boolean().optional(),
+  evaluate: PageEvaluateSummarySchema.optional(),
+  dom: NativeCdpDomSummarySchema.optional(),
+  input: NativeCdpInputSummarySchema.optional(),
+});
+
 const DiagnosticPhaseResultSchema = z.object({
   phase: ZhipinDiagnosticPhaseSchema,
   success: z.boolean(),
@@ -150,7 +193,7 @@ const NavigationEventSummarySchema = z.object({
 
 const ZhipinDiagnoseBrowserStateInputSchema = z.object({
   phase: ZhipinDiagnosticPhaseSchema.default("native").describe(
-    "诊断阶段。默认 native 只枚举原生 CDP target；需要显式传更深阶段才会 attach browser/page、监听网络、evaluate、读取检测指纹或读取 storage。",
+    "诊断阶段。默认 native 只枚举原生 CDP target；native-* 阶段使用原生 CDP page WebSocket；browser-attach 及更深阶段才会使用 Playwright attach。",
   ),
   targetPageId: z
     .string()
@@ -185,6 +228,7 @@ const ZhipinDiagnoseBrowserStateOutputSchema = z.object({
   nativeTimeline: z.array(NativeTargetSnapshotSchema),
   networkEvents: z.array(NetworkEventSummarySchema).optional(),
   navigationEvents: z.array(NavigationEventSummarySchema).optional(),
+  nativeCdp: NativeCdpProbeSummarySchema.optional(),
   evaluate: PageEvaluateSummarySchema.optional(),
   detectorFingerprint: DetectorFingerprintSummarySchema.optional(),
   storage: z
@@ -204,6 +248,9 @@ type ZhipinDiagnosticPhase = z.infer<typeof ZhipinDiagnosticPhaseSchema>;
 type StorageEntrySummary = z.infer<typeof StorageEntrySummarySchema>;
 type CookieSummary = z.infer<typeof CookieSummarySchema>;
 type PageEvaluateSummary = z.infer<typeof PageEvaluateSummarySchema>;
+type NativeCdpDomSummary = z.infer<typeof NativeCdpDomSummarySchema>;
+type NativeCdpInputSummary = z.infer<typeof NativeCdpInputSummarySchema>;
+type NativeCdpProbeSummary = z.infer<typeof NativeCdpProbeSummarySchema>;
 type DiagnosticPhaseResult = z.infer<typeof DiagnosticPhaseResultSchema>;
 type NativeTargetSnapshotPhase = z.infer<typeof NativeTargetSnapshotPhaseSchema>;
 type NativeTargetSnapshot = z.infer<typeof NativeTargetSnapshotSchema>;
@@ -242,8 +289,43 @@ type NetworkWatchResult = {
   readonly navigationEvents: NavigationEventSummary[];
 };
 
+type NativeCdpProbeResult = {
+  readonly summary: NativeCdpProbeSummary;
+  readonly triggeredNavigation: boolean;
+};
+
 const SECURITY_COUNTER_STORAGE_KEYS = ["_AEG_CNT", "_ZP_CNT_", "__local__sec__store___"] as const;
 const SECURITY_COUNTER_STORAGE_KEY_SET = new Set<string>(SECURITY_COUNTER_STORAGE_KEYS);
+const NATIVE_CDP_DIAGNOSTIC_PHASES = [
+  "native-ws-connect",
+  "native-page-bring-front",
+  "native-evaluate-url-no-runtime-enable",
+  "native-dom-read-no-runtime-enable",
+  "native-input-move-no-runtime-enable",
+  "native-runtime-enable",
+  "native-evaluate-url",
+  "native-dom-read",
+] as const satisfies ReadonlyArray<ZhipinDiagnosticPhase>;
+type NativeCdpDiagnosticPhase = (typeof NATIVE_CDP_DIAGNOSTIC_PHASES)[number];
+
+const NATIVE_CDP_NO_RUNTIME_PHASES = [
+  "native-page-bring-front",
+  "native-evaluate-url-no-runtime-enable",
+  "native-dom-read-no-runtime-enable",
+  "native-input-move-no-runtime-enable",
+] as const satisfies ReadonlyArray<NativeCdpDiagnosticPhase>;
+type NativeCdpNoRuntimePhase = (typeof NATIVE_CDP_NO_RUNTIME_PHASES)[number];
+
+const NATIVE_CDP_WATCH_PHASE_BY_PHASE = {
+  "native-ws-connect": "native-ws-connect-watch",
+  "native-page-bring-front": "native-page-bring-front-watch",
+  "native-evaluate-url-no-runtime-enable": "native-evaluate-url-no-runtime-enable-watch",
+  "native-dom-read-no-runtime-enable": "native-dom-read-no-runtime-enable-watch",
+  "native-input-move-no-runtime-enable": "native-input-move-no-runtime-enable-watch",
+  "native-runtime-enable": "native-runtime-enable-watch",
+  "native-evaluate-url": "native-evaluate-url-watch",
+  "native-dom-read": "native-dom-read-watch",
+} as const satisfies Record<NativeCdpDiagnosticPhase, NativeTargetSnapshotPhase>;
 
 function getJsonKind(value: unknown): z.infer<typeof JsonKindSchema> {
   if (value === null) return "null";
@@ -264,6 +346,18 @@ function getJsonKind(value: unknown): z.infer<typeof JsonKindSchema> {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isNativeCdpDiagnosticPhase(
+  phase: ZhipinDiagnosticPhase,
+): phase is NativeCdpDiagnosticPhase {
+  return NATIVE_CDP_DIAGNOSTIC_PHASES.includes(phase as NativeCdpDiagnosticPhase);
+}
+
+function isNativeCdpNoRuntimePhase(
+  phase: NativeCdpDiagnosticPhase,
+): phase is NativeCdpNoRuntimePhase {
+  return NATIVE_CDP_NO_RUNTIME_PHASES.includes(phase as NativeCdpNoRuntimePhase);
 }
 
 function parseJsonValue(value: string): unknown | undefined {
@@ -523,6 +617,350 @@ async function appendNativeWatchSnapshots(
   return nativeTimeline
     .slice(startedLength)
     .some((snapshot) => snapshot.urlChangedFromPrevious);
+}
+
+function readPageEvaluateSummaryFromUnknown(value: unknown): PageEvaluateSummary {
+  if (!isRecord(value)) {
+    throw new Error("Native CDP evaluate did not return an object value.");
+  }
+
+  const url = value["url"];
+  const title = value["title"];
+  const visibilityState = value["visibilityState"];
+  const hasFocus = value["hasFocus"];
+
+  if (
+    typeof url !== "string" ||
+    typeof title !== "string" ||
+    typeof visibilityState !== "string" ||
+    typeof hasFocus !== "boolean"
+  ) {
+    throw new Error("Native CDP evaluate returned an unexpected page summary shape.");
+  }
+
+  return {
+    url,
+    title,
+    visibilityState,
+    hasFocus,
+  };
+}
+
+function readNativeDomSummaryFromUnknown(
+  documentPayload: unknown,
+  metricsValue: unknown,
+): NativeCdpDomSummary {
+  if (!isRecord(documentPayload)) {
+    throw new Error("Native CDP DOM.getDocument did not return an object.");
+  }
+  const root = documentPayload["root"];
+  if (!isRecord(root)) {
+    throw new Error("Native CDP DOM.getDocument did not return a root node.");
+  }
+
+  const rootNodeId = root["nodeId"];
+  const rootNodeName = root["nodeName"];
+  const childNodeCount = root["childNodeCount"];
+  if (typeof rootNodeId !== "number" || typeof rootNodeName !== "string") {
+    throw new Error("Native CDP DOM root node has an unexpected shape.");
+  }
+
+  const metrics = isRecord(metricsValue) ? metricsValue : {};
+  const bodyTextLength = metrics["bodyTextLength"];
+  const elementCount = metrics["elementCount"];
+
+  return {
+    rootNodeId,
+    rootNodeName,
+    ...(typeof childNodeCount === "number" ? { childNodeCount } : {}),
+    ...(typeof bodyTextLength === "number" ? { bodyTextLength } : {}),
+    ...(typeof elementCount === "number" ? { elementCount } : {}),
+  };
+}
+
+async function readNativeCdpPageEvaluateSummary(
+  client: NativeCdpController,
+): Promise<PageEvaluateSummary> {
+  const value = await client.evaluateJson(
+    `(() => ({
+      url: location.href,
+      title: document.title,
+      visibilityState: document.visibilityState,
+      hasFocus: document.hasFocus()
+    }))()`,
+  );
+  return readPageEvaluateSummaryFromUnknown(value);
+}
+
+async function readNativeCdpDomSummary(
+  client: NativeCdpController,
+): Promise<NativeCdpDomSummary> {
+  const documentPayload = await client.getDocument({
+    depth: 1,
+    pierce: false,
+  });
+  const metricsValue = await client.evaluateJson(
+    `(() => ({
+      bodyTextLength: document.body?.innerText?.length ?? 0,
+      elementCount: document.querySelectorAll("*").length
+    }))()`,
+  );
+  return readNativeDomSummaryFromUnknown(documentPayload, metricsValue);
+}
+
+async function readNativeCdpDomDocumentSummary(
+  client: NativeCdpController,
+): Promise<NativeCdpDomSummary> {
+  const documentPayload = await client.getDocument({
+    depth: 1,
+    pierce: false,
+  });
+  return readNativeDomSummaryFromUnknown(documentPayload, undefined);
+}
+
+async function bringNativeCdpPageToFront(client: NativeCdpController): Promise<boolean> {
+  await client.bringToFront();
+  return true;
+}
+
+async function dispatchNativeCdpMouseMove(
+  client: NativeCdpController,
+): Promise<NativeCdpInputSummary> {
+  const inputSummary = {
+    type: "mouseMoved",
+    x: 0,
+    y: 0,
+  } as const satisfies NativeCdpInputSummary;
+  await client.dispatchMouseEvent({
+    type: inputSummary.type,
+    x: inputSummary.x,
+    y: inputSummary.y,
+  });
+  return inputSummary;
+}
+
+async function observeAfterNativeCdpPhase(
+  ctxManager: BrowserContextManager,
+  nativeTimeline: NativeTargetSnapshot[],
+  phase: NativeCdpDiagnosticPhase,
+  targetPageId: string | undefined,
+  watchMs: number,
+  warnings: string[],
+): Promise<boolean> {
+  await appendNativeSnapshot(ctxManager, nativeTimeline, phase, targetPageId, warnings);
+  const triggeredNavigation = await appendNativeWatchSnapshots(
+    ctxManager,
+    nativeTimeline,
+    NATIVE_CDP_WATCH_PHASE_BY_PHASE[phase],
+    targetPageId,
+    watchMs,
+    warnings,
+  );
+  if (triggeredNavigation) {
+    warnings.push(
+      `Native CDP phase ${phase} was followed by a native URL change; stop before deeper native CDP operations.`,
+    );
+  }
+  return triggeredNavigation;
+}
+
+async function executeNativeCdpNoRuntimePhase(
+  phase: NativeCdpNoRuntimePhase,
+  client: NativeCdpController,
+  phases: DiagnosticPhaseResult[],
+  summary: NativeCdpProbeSummary,
+): Promise<DiagnosticPhaseResult> {
+  switch (phase) {
+    case "native-page-bring-front": {
+      const phaseRun = await measurePhase(
+        phase,
+        async () => await bringNativeCdpPageToFront(client),
+      );
+      phases.push(phaseRun.phaseResult);
+      if (phaseRun.result !== undefined) {
+        summary.pageBroughtToFront = phaseRun.result;
+      }
+      return phaseRun.phaseResult;
+    }
+    case "native-evaluate-url-no-runtime-enable": {
+      const phaseRun = await measurePhase(
+        phase,
+        async () => await readNativeCdpPageEvaluateSummary(client),
+      );
+      phases.push(phaseRun.phaseResult);
+      if (phaseRun.result !== undefined) {
+        summary.evaluate = phaseRun.result;
+      }
+      return phaseRun.phaseResult;
+    }
+    case "native-dom-read-no-runtime-enable": {
+      const phaseRun = await measurePhase(
+        phase,
+        async () => await readNativeCdpDomDocumentSummary(client),
+      );
+      phases.push(phaseRun.phaseResult);
+      if (phaseRun.result !== undefined) {
+        summary.dom = phaseRun.result;
+      }
+      return phaseRun.phaseResult;
+    }
+    case "native-input-move-no-runtime-enable": {
+      const phaseRun = await measurePhase(
+        phase,
+        async () => await dispatchNativeCdpMouseMove(client),
+      );
+      phases.push(phaseRun.phaseResult);
+      if (phaseRun.result !== undefined) {
+        summary.input = phaseRun.result;
+      }
+      return phaseRun.phaseResult;
+    }
+  }
+}
+
+async function runNativeCdpProbe(params: {
+  readonly requestedPhase: NativeCdpDiagnosticPhase;
+  readonly target: BrowserInspectablePage;
+  readonly runtime: BrowserRuntime;
+  readonly ctxManager: BrowserContextManager;
+  readonly targetPageId: string | undefined;
+  readonly watchMs: number;
+  readonly phases: DiagnosticPhaseResult[];
+  readonly nativeTimeline: NativeTargetSnapshot[];
+  readonly warnings: string[];
+}): Promise<NativeCdpProbeResult> {
+  const summary: NativeCdpProbeSummary = {
+    targetId: params.target.targetId,
+    websocketUrlAvailable:
+      typeof params.target.webSocketDebuggerUrl === "string" &&
+      params.target.webSocketDebuggerUrl.length > 0,
+    connected: false,
+  };
+  const webSocketDebuggerUrl = params.target.webSocketDebuggerUrl;
+  let client: NativeCdpController | undefined;
+
+  try {
+    const connectPhase = await measurePhase(
+      "native-ws-connect",
+      async () => {
+        if (webSocketDebuggerUrl === undefined || webSocketDebuggerUrl.length === 0) {
+          throw new Error("Native CDP target does not expose webSocketDebuggerUrl.");
+        }
+        return await params.runtime.connectNativePage(params.target, {
+          allowUnsafeRuntimeEnableForDiagnostics: true,
+        });
+      },
+    );
+    params.phases.push(connectPhase.phaseResult);
+    client = connectPhase.result;
+    summary.connected = connectPhase.phaseResult.success;
+    if (!connectPhase.phaseResult.success || client === undefined) {
+      return { summary, triggeredNavigation: false };
+    }
+    const connectedClient = client;
+
+    let triggeredNavigation = await observeAfterNativeCdpPhase(
+      params.ctxManager,
+      params.nativeTimeline,
+      "native-ws-connect",
+      params.targetPageId,
+      params.watchMs,
+      params.warnings,
+    );
+    if (params.requestedPhase === "native-ws-connect" || triggeredNavigation) {
+      return { summary, triggeredNavigation };
+    }
+
+    if (isNativeCdpNoRuntimePhase(params.requestedPhase)) {
+      await executeNativeCdpNoRuntimePhase(
+        params.requestedPhase,
+        connectedClient,
+        params.phases,
+        summary,
+      );
+      triggeredNavigation = await observeAfterNativeCdpPhase(
+        params.ctxManager,
+        params.nativeTimeline,
+        params.requestedPhase,
+        params.targetPageId,
+        params.watchMs,
+        params.warnings,
+      );
+      return {
+        summary,
+        triggeredNavigation,
+      };
+    }
+
+    const runtimeEnablePhase = await measurePhase(
+      "native-runtime-enable",
+      async () => await connectedClient.unsafeEnableRuntimeForDiagnostics(),
+    );
+    params.phases.push(runtimeEnablePhase.phaseResult);
+    summary.runtimeEnabled = runtimeEnablePhase.phaseResult.success;
+    triggeredNavigation = await observeAfterNativeCdpPhase(
+      params.ctxManager,
+      params.nativeTimeline,
+      "native-runtime-enable",
+      params.targetPageId,
+      params.watchMs,
+      params.warnings,
+    );
+    if (
+      !runtimeEnablePhase.phaseResult.success ||
+      params.requestedPhase === "native-runtime-enable" ||
+      triggeredNavigation
+    ) {
+      return { summary, triggeredNavigation };
+    }
+
+    const evaluatePhase = await measurePhase(
+      "native-evaluate-url",
+      async () => await readNativeCdpPageEvaluateSummary(connectedClient),
+    );
+    params.phases.push(evaluatePhase.phaseResult);
+    if (evaluatePhase.result !== undefined) {
+      summary.evaluate = evaluatePhase.result;
+    }
+    triggeredNavigation = await observeAfterNativeCdpPhase(
+      params.ctxManager,
+      params.nativeTimeline,
+      "native-evaluate-url",
+      params.targetPageId,
+      params.watchMs,
+      params.warnings,
+    );
+    if (
+      !evaluatePhase.phaseResult.success ||
+      params.requestedPhase === "native-evaluate-url" ||
+      triggeredNavigation
+    ) {
+      return { summary, triggeredNavigation };
+    }
+
+    const domPhase = await measurePhase(
+      "native-dom-read",
+      async () => await readNativeCdpDomSummary(connectedClient),
+    );
+    params.phases.push(domPhase.phaseResult);
+    if (domPhase.result !== undefined) {
+      summary.dom = domPhase.result;
+    }
+    triggeredNavigation = await observeAfterNativeCdpPhase(
+      params.ctxManager,
+      params.nativeTimeline,
+      "native-dom-read",
+      params.targetPageId,
+      params.watchMs,
+      params.warnings,
+    );
+    if (!domPhase.phaseResult.success) {
+      return { summary, triggeredNavigation };
+    }
+    return { summary, triggeredNavigation };
+  } finally {
+    client?.close();
+  }
 }
 
 function classifyNetworkUrl(url: string): NetworkEventReason | undefined {
@@ -876,7 +1314,7 @@ async function readStorageSummary(page: Page, counterBaseline: ReadonlyArray<Sto
 export const zhipinDiagnoseBrowserState = defineTool({
   name: "zhipin_diagnose_browser_state",
   description:
-    "分阶段诊断 Boss 页面在 CDP attach、页面绑定、网络上报、evaluate、检测指纹、storage/cookie 读取时的状态；browser-attach 会追加 native URL 观察窗口；默认只做 native target 枚举，所有 storage/cookie 值均脱敏。",
+    "分阶段诊断 Boss 页面在原生 CDP page WebSocket、Playwright CDP attach、页面绑定、网络上报、evaluate、检测指纹、storage/cookie 读取时的状态；默认只做 native target 枚举，所有 storage/cookie 值均脱敏。",
   input: ZhipinDiagnoseBrowserStateInputSchema,
   output: ZhipinDiagnoseBrowserStateOutputSchema,
   execute: async (input, ctx) => {
@@ -958,6 +1396,34 @@ export const zhipinDiagnoseBrowserState = defineTool({
         browserAttached,
         pageAttached,
         nativeTimeline,
+        phases,
+        warnings,
+      };
+    }
+
+    if (isNativeCdpDiagnosticPhase(requestedPhase)) {
+      const nativeCdpProbe = await runNativeCdpProbe({
+        requestedPhase,
+        target,
+        runtime,
+        ctxManager,
+        targetPageId,
+        watchMs,
+        phases,
+        nativeTimeline,
+        warnings,
+      });
+
+      return {
+        success: phases.every((phase) => phase.success) && !nativeCdpProbe.triggeredNavigation,
+        requestedPhase,
+        mode: runtime.mode,
+        nativePages,
+        ...(targetPage !== undefined ? { targetPage } : {}),
+        browserAttached,
+        pageAttached,
+        nativeTimeline,
+        nativeCdp: nativeCdpProbe.summary,
         phases,
         warnings,
       };

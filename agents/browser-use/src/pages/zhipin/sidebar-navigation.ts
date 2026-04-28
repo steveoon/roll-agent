@@ -56,7 +56,7 @@ export async function findZhipinSidebarSectionLink(
 }
 
 export function isZhipinRecommendSurfaceOpen(page: Page): boolean {
-  if (page.url().includes("/web/geek/recommend")) {
+  if (page.url().includes("/web/chat/recommend")) {
     return true;
   }
 

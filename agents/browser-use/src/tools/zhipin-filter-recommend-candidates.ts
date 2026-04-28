@@ -1,22 +1,18 @@
 import { defineTool } from "@roll-agent/sdk";
 import { z } from "zod";
-import { getContextManager } from "../runtime-holder.ts";
+import { NativeVisualActivitySession } from "../native-visual-activity-session.ts";
+import { openZhipinNativePagePort } from "../pages/zhipin/native-page.ts";
+import type { ZhipinNativePagePort } from "../pages/zhipin/native-page.ts";
 import {
-  applyRecommendFilter,
-  waitForRecommendFilterSurface,
   ZHIPIN_RECOMMEND_ACTIVITY_VALUES,
   ZHIPIN_RECOMMEND_FILTER_STATUS_VALUES,
   ZHIPIN_RECOMMEND_GENDER_VALUES,
-  type RecommendTarget,
   type ZhipinRecommendActivity,
   type ZhipinRecommendFilterApplyResult,
   type ZhipinRecommendFilterRequest,
   type ZhipinRecommendGender,
 } from "../pages/zhipin/recommend-filter.ts";
-import { getRecommendTarget } from "../pages/zhipin/recommend-list.ts";
 import { ZHIPIN_SELECTORS } from "../pages/zhipin/selectors.ts";
-import { VisualActivitySession } from "../visual-activity-session.ts";
-import { moveVisualCursorToLocator, showVisualClickOnLocator } from "../visual-cursor.ts";
 
 const RequestedSchema = z.object({
   ageMin: z.number().int().min(16).optional(),
@@ -63,20 +59,21 @@ const InputSchema = z
     },
   );
 
+const FILTER_CLICK_PRE_DELAY_MS = 350;
+const FILTER_CLICK_PRESS_MS = 130;
+const FILTER_CLICK_SETTLE_MS = 600;
+
 type FilterRecommendCandidatesInput = z.input<typeof InputSchema>;
-type VisualActivitySessionLike = Pick<
-  VisualActivitySession,
-  "begin" | "highlightSelector" | "retarget" | "succeed" | "fail"
+type NativeVisualActivitySessionLike = Pick<
+  NativeVisualActivitySession,
+  "begin" | "highlightSelector" | "highlightPoint" | "succeed" | "fail"
 >;
 
 type ZhipinFilterRecommendCandidatesDeps = {
-  readonly getContextManager: typeof getContextManager;
-  readonly getRecommendTarget: typeof getRecommendTarget;
-  readonly waitForRecommendFilterSurface: typeof waitForRecommendFilterSurface;
-  readonly applyRecommendFilter: typeof applyRecommendFilter;
-  readonly moveVisualCursorToLocator: typeof moveVisualCursorToLocator;
-  readonly showVisualClickOnLocator: typeof showVisualClickOnLocator;
-  readonly createVisualActivitySession: (target: RecommendTarget) => VisualActivitySessionLike;
+  readonly openNativePagePort: typeof openZhipinNativePagePort;
+  readonly createNativeVisualActivitySession: (
+    page: ZhipinNativePagePort,
+  ) => NativeVisualActivitySessionLike;
 };
 
 let zhipinFilterRecommendCandidatesDepsOverride:
@@ -85,13 +82,8 @@ let zhipinFilterRecommendCandidatesDepsOverride:
 
 function getZhipinFilterRecommendCandidatesDeps(): ZhipinFilterRecommendCandidatesDeps {
   return {
-    getContextManager,
-    getRecommendTarget,
-    waitForRecommendFilterSurface,
-    applyRecommendFilter,
-    moveVisualCursorToLocator,
-    showVisualClickOnLocator,
-    createVisualActivitySession: (target) => new VisualActivitySession(target),
+    openNativePagePort: openZhipinNativePagePort,
+    createNativeVisualActivitySession: (page) => new NativeVisualActivitySession(page),
     ...zhipinFilterRecommendCandidatesDepsOverride,
   };
 }
@@ -133,54 +125,62 @@ export const zhipinFilterRecommendCandidates = defineTool({
   execute: async (input, ctx) => {
     const deps = getZhipinFilterRecommendCandidatesDeps();
     const requested = buildRequested(input);
+    let nativePage: ZhipinNativePagePort | undefined;
+    let session: NativeVisualActivitySessionLike | undefined;
 
     ctx.logger.info(
-      `Filtering Boss recommend candidates: gender=${requested.gender}, ` +
+      `Filtering Boss recommend candidates through native CDP: gender=${requested.gender}, ` +
         `activity=${requested.activity}, ageMin=${requested.ageMin ?? "16"}, ` +
         `ageMax=${requested.ageMax ?? "不限"}`,
     );
 
-    const ctxManager = deps.getContextManager();
-    const page = await ctxManager.getPage("zhipin");
-    await page.bringToFront().catch(() => {});
+    try {
+      nativePage = await deps.openNativePagePort();
+      session = deps.createNativeVisualActivitySession(nativePage);
+      await nativePage.bringToFront().catch(() => {});
 
-    let target = deps.getRecommendTarget(page);
-    const session = deps.createVisualActivitySession(target);
+      await session.begin("正在打开推荐筛选");
+      const ready = await nativePage.waitForRecommendList(3_000);
+      if (!ready) {
+        await session.fail("推荐牛人页未就绪");
+        return toToolOutput({
+          status: "recommend_not_ready",
+          requested,
+          error: "推荐牛人页未就绪",
+        });
+      }
 
-    await session.begin("正在打开推荐筛选");
-    let ready = await deps.waitForRecommendFilterSurface(target);
-    if (!ready) {
-      target = deps.getRecommendTarget(page);
-      await session.retarget(target);
-      ready = await deps.waitForRecommendFilterSurface(target, 2_500);
-    }
-
-    if (!ready) {
-      await session.fail("推荐牛人页未就绪");
-      return toToolOutput({
-        status: "recommend_not_ready",
-        requested,
-        error: "推荐牛人页未就绪",
+      await session.begin("正在设置推荐筛选");
+      await session.highlightSelector(ZHIPIN_SELECTORS.recommend.filterButton, {
+        label: "正在设置推荐筛选",
+        padding: 8,
       });
+
+      const result = await nativePage.applyRecommendFilter(requested, {
+        preClickDelayMs: FILTER_CLICK_PRE_DELAY_MS,
+        pressDurationMs: FILTER_CLICK_PRESS_MS,
+        settleMs: FILTER_CLICK_SETTLE_MS,
+        onTargetResolved: async (target) => {
+          await session?.highlightPoint(target.x, target.y);
+        },
+      });
+      if (result.status === "applied") {
+        await session.succeed("已应用推荐筛选");
+      } else {
+        await session.fail(result.error ?? result.status);
+      }
+
+      return toToolOutput(result);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "推荐筛选失败";
+      await session?.fail(message);
+      return toToolOutput({
+        status: "error",
+        requested,
+        error: message,
+      });
+    } finally {
+      nativePage?.close();
     }
-
-    await session.retarget(target);
-    await session.begin("正在设置推荐筛选");
-    await session.highlightSelector(ZHIPIN_SELECTORS.recommend.filterButton, {
-      label: "正在设置推荐筛选",
-      padding: 8,
-    });
-
-    const result = await deps.applyRecommendFilter(page, target, requested, {
-      moveToLocator: deps.moveVisualCursorToLocator,
-      showClickOnLocator: deps.showVisualClickOnLocator,
-    });
-    if (result.status === "applied") {
-      await session.succeed("已应用推荐筛选");
-    } else {
-      await session.fail(result.error ?? result.status);
-    }
-
-    return toToolOutput(result);
   },
 });

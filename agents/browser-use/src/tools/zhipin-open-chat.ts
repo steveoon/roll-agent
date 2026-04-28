@@ -1,11 +1,8 @@
 import { defineTool } from "@roll-agent/sdk";
 import { z } from "zod";
-import { getContextManager } from "../runtime-holder.ts";
-import {
-  ensureChatListLoaded,
-  ensureChatOpen,
-  getChatCandidates,
-} from "../pages/zhipin/chat-navigation.ts";
+import { NativeVisualActivitySession } from "../native-visual-activity-session.ts";
+import { openZhipinNativePagePort } from "../pages/zhipin/native-page.ts";
+import type { ZhipinNativePagePort } from "../pages/zhipin/native-page.ts";
 
 const OutputSchema = z.object({
   success: z.boolean(),
@@ -19,6 +16,34 @@ const OutputSchema = z.object({
   messagePreview: z.string(),
   error: z.string().optional(),
 });
+
+type NativeVisualActivitySessionLike = Pick<
+  NativeVisualActivitySession,
+  "begin" | "highlightSelector" | "succeed" | "fail"
+>;
+
+type ZhipinOpenChatDeps = {
+  readonly openNativePagePort: typeof openZhipinNativePagePort;
+  readonly createNativeVisualActivitySession: (
+    page: ZhipinNativePagePort,
+  ) => NativeVisualActivitySessionLike;
+};
+
+let zhipinOpenChatDepsOverride: Partial<ZhipinOpenChatDeps> | undefined;
+
+function getZhipinOpenChatDeps(): ZhipinOpenChatDeps {
+  return {
+    openNativePagePort: openZhipinNativePagePort,
+    createNativeVisualActivitySession: (page) => new NativeVisualActivitySession(page),
+    ...zhipinOpenChatDepsOverride,
+  };
+}
+
+export function setZhipinOpenChatDepsForTests(
+  override: Partial<ZhipinOpenChatDeps> | undefined,
+): void {
+  zhipinOpenChatDepsOverride = override;
+}
 
 export const zhipinOpenChat = defineTool({
   name: "zhipin_open_chat",
@@ -41,51 +66,59 @@ export const zhipinOpenChat = defineTool({
       `Opening chat: name=${input.candidateName ?? "N/A"}, index=${input.index ?? "N/A"}`,
     );
 
-    const ctxManager = getContextManager();
-    const page = await ctxManager.getPage("zhipin");
-    let navTarget = {
-      conversationId: input.conversationId,
-      candidateName: input.candidateName,
-      index: input.index,
-    };
+    const deps = getZhipinOpenChatDeps();
+    let nativePage: ZhipinNativePagePort | undefined;
+    let session: NativeVisualActivitySessionLike | undefined;
 
-    if (
-      input.preferUnread &&
-      input.conversationId === undefined &&
-      input.candidateName === undefined &&
-      input.index === undefined
-    ) {
-      const listReady = await ensureChatListLoaded(ctxManager, page);
-      if (!listReady) {
+    try {
+      nativePage = await deps.openNativePagePort();
+      session = deps.createNativeVisualActivitySession(nativePage);
+      await session.begin("正在打开目标聊天");
+      await session.highlightSelector(
+        ".user-list.b-scroll-stable, .chat-user .user-container, .chat-user",
+        { label: "正在定位候选人", padding: 8 },
+      );
+
+      const result = await nativePage.openChat({
+        conversationId: input.conversationId,
+        candidateName: input.candidateName,
+        index: input.index,
+        preferUnread: input.preferUnread ?? false,
+      });
+      if (!result.found) {
+        await session.fail("打开聊天失败");
         return {
           success: false,
           conversationId: "",
           candidateId: "",
-          candidateName: "",
-          index: -1,
+          candidateName: input.candidateName ?? "",
+          index: input.index ?? -1,
           hasUnread: false,
           unreadCount: 0,
           lastMessageTime: "",
           messagePreview: "",
-          error: "消息列表未加载",
+          error: result.error ?? `未找到候选人: ${input.candidateName ?? `index ${input.index}`}`,
         };
       }
 
-      const activePage = await ctxManager.getPage("zhipin");
-      const unreadCandidate = (await getChatCandidates(activePage)).find(
-        (candidate) => candidate.hasUnread,
+      await session.succeed(`已打开 ${result.name || "目标"} 的聊天`);
+      ctx.logger.info(`Opened chat with ${result.name} (index: ${result.index})`);
+      return {
+        success: true,
+        conversationId: result.conversationId,
+        candidateId: result.candidateId,
+        candidateName: result.name,
+        index: result.index,
+        hasUnread: result.hasUnread,
+        unreadCount: result.unreadCount,
+        lastMessageTime: result.lastMessageTime,
+        messagePreview: result.messagePreview,
+      };
+    } catch (error) {
+      await session?.fail("打开聊天失败");
+      ctx.logger.warn(
+        `Native zhipin open chat failed: ${error instanceof Error ? error.message : String(error)}`,
       );
-      if (unreadCandidate) {
-        navTarget = {
-          conversationId: unreadCandidate.conversationId,
-          candidateName: unreadCandidate.name,
-          index: unreadCandidate.index,
-        };
-      }
-    }
-
-    const result = await ensureChatOpen(ctxManager, page, navTarget);
-    if (!result || !result.found) {
       return {
         success: false,
         conversationId: "",
@@ -96,21 +129,10 @@ export const zhipinOpenChat = defineTool({
         unreadCount: 0,
         lastMessageTime: "",
         messagePreview: "",
-        error: result?.error ?? `未找到候选人: ${input.candidateName ?? `index ${input.index}`}`,
+        error: error instanceof Error ? error.message : "打开聊天失败",
       };
+    } finally {
+      nativePage?.close();
     }
-
-    ctx.logger.info(`Opened chat with ${result.name} (index: ${result.index})`);
-    return {
-      success: true,
-      conversationId: result.conversationId,
-      candidateId: result.candidateId,
-      candidateName: result.name,
-      index: result.index,
-      hasUnread: result.hasUnread,
-      unreadCount: result.unreadCount,
-      lastMessageTime: result.lastMessageTime,
-      messagePreview: result.messagePreview,
-    };
   },
 });

@@ -1,18 +1,8 @@
 import { defineTool } from "@roll-agent/sdk";
 import { z } from "zod";
-import { getContextManager } from "../runtime-holder.ts";
-import {
-  humanDelay,
-  shouldAddRandomBehavior,
-  performRandomScroll,
-} from "../pages/zhipin/anti-detection.ts";
-import {
-  getRecommendTarget,
-  inspectRecommendCard,
-  waitForRecommendList,
-} from "../pages/zhipin/recommend-list.ts";
-import { VisualActivitySession } from "../visual-activity-session.ts";
-import { moveVisualCursorToLocator, showVisualClickOnLocator } from "../visual-cursor.ts";
+import { NativeVisualActivitySession } from "../native-visual-activity-session.ts";
+import { openZhipinNativePagePort } from "../pages/zhipin/native-page.ts";
+import type { ZhipinNativePagePort } from "../pages/zhipin/native-page.ts";
 
 const ResultItemSchema = z.object({
   index: z.number(),
@@ -28,38 +18,34 @@ const OutputSchema = z.object({
   summary: z.object({ total: z.number(), succeeded: z.number(), failed: z.number() }),
 });
 
-type RecommendTarget = ReturnType<typeof getRecommendTarget>;
-type VisualActivitySessionLike = Pick<
-  VisualActivitySession,
-  "begin" | "highlightSelector" | "highlightLocator" | "succeed" | "fail" | "retarget"
+const SAY_HELLO_BATCH_INTERVAL_MS = [2_400, 3_100, 3_800] as const;
+const SAY_HELLO_CLICK_PRE_DELAY_MS = 650;
+const SAY_HELLO_CLICK_PRESS_MS = 140;
+const SAY_HELLO_CLICK_SETTLE_MS = 1_200;
+
+type NativeVisualActivitySessionLike = Pick<
+  NativeVisualActivitySession,
+  "begin" | "highlightSelector" | "highlightPoint" | "succeed" | "fail"
 >;
+
 type ZhipinSayHelloDeps = {
-  readonly getContextManager: typeof getContextManager;
-  readonly getRecommendTarget: typeof getRecommendTarget;
-  readonly waitForRecommendList: typeof waitForRecommendList;
-  readonly inspectRecommendCard: typeof inspectRecommendCard;
-  readonly moveVisualCursorToLocator: typeof moveVisualCursorToLocator;
-  readonly showVisualClickOnLocator: typeof showVisualClickOnLocator;
-  readonly humanDelay: typeof humanDelay;
-  readonly shouldAddRandomBehavior: typeof shouldAddRandomBehavior;
-  readonly performRandomScroll: typeof performRandomScroll;
-  readonly createVisualActivitySession: (target: RecommendTarget) => VisualActivitySessionLike;
+  readonly openNativePagePort: typeof openZhipinNativePagePort;
+  readonly createNativeVisualActivitySession: (
+    page: ZhipinNativePagePort,
+  ) => NativeVisualActivitySessionLike;
+  readonly sleep: (ms: number) => Promise<void>;
 };
 
 let zhipinSayHelloDepsOverride: Partial<ZhipinSayHelloDeps> | undefined;
 
 function getZhipinSayHelloDeps(): ZhipinSayHelloDeps {
   return {
-    getContextManager,
-    getRecommendTarget,
-    waitForRecommendList,
-    inspectRecommendCard,
-    moveVisualCursorToLocator,
-    showVisualClickOnLocator,
-    humanDelay,
-    shouldAddRandomBehavior,
-    performRandomScroll,
-    createVisualActivitySession: (target) => new VisualActivitySession(target),
+    openNativePagePort: openZhipinNativePagePort,
+    createNativeVisualActivitySession: (page) => new NativeVisualActivitySession(page),
+    sleep: async (ms) =>
+      await new Promise((resolve) => {
+        setTimeout(resolve, ms);
+      }),
     ...zhipinSayHelloDepsOverride,
   };
 }
@@ -73,128 +59,102 @@ export function setZhipinSayHelloDepsForTests(
 export const zhipinSayHello = defineTool({
   name: "zhipin_say_hello",
   description: "在推荐列表页对候选人点击「打招呼」按钮（支持批量）",
-  input: z.object({ indices: z.array(z.number()).describe("要打招呼的候选人索引列表") }),
+  input: z.object({
+    indices: z.array(z.number()).min(1).describe("要打招呼的候选人索引列表"),
+  }),
   output: OutputSchema,
   execute: async (input, ctx) => {
-    ctx.logger.info(`Saying hello to ${input.indices.length} candidates`);
+    ctx.logger.info(`Saying hello to ${input.indices.length} candidates through native CDP`);
 
     const deps = getZhipinSayHelloDeps();
-    const ctxManager = deps.getContextManager();
-    const page = await ctxManager.getPage("zhipin");
-    let target = deps.getRecommendTarget(page);
-    const session = deps.createVisualActivitySession(target);
-    const beginLabel = "正在打开推荐列表";
-    const batchLabel = input.indices.length > 1 ? "正在批量打招呼" : "正在打招呼";
+    let nativePage: ZhipinNativePagePort | undefined;
+    let session: NativeVisualActivitySessionLike | undefined;
 
-    await session.begin(beginLabel);
-    const listReady = await deps.waitForRecommendList(target);
-    target = deps.getRecommendTarget(page);
-    await session.retarget(target);
-    if (!listReady) {
-      await session.fail("推荐列表未加载");
+    try {
+      nativePage = await deps.openNativePagePort();
+      session = deps.createNativeVisualActivitySession(nativePage);
+
+      await session.begin("正在打开推荐列表");
+      const listReady = await nativePage.waitForRecommendList();
+      if (!listReady) {
+        await session.fail("推荐列表未加载");
+        const results = input.indices.map((index) => ({
+          index,
+          candidateName: "",
+          candidateId: "",
+          success: false,
+          error: "推荐列表未加载",
+        }));
+        return {
+          success: false,
+          results,
+          summary: { total: results.length, succeeded: 0, failed: results.length },
+        };
+      }
+
+      const batchLabel = input.indices.length > 1 ? "正在批量打招呼" : "正在打招呼";
+      await session.begin(batchLabel);
+      await session.highlightSelector(".candidate-card-wrap, [data-geek], .geek-item", {
+        label: batchLabel,
+        padding: 8,
+      });
+
+      const results: Array<z.infer<typeof ResultItemSchema>> = [];
+      for (const [position, idx] of input.indices.entries()) {
+        if (position > 0) {
+          const interval =
+            SAY_HELLO_BATCH_INTERVAL_MS[(position - 1) % SAY_HELLO_BATCH_INTERVAL_MS.length] ??
+            SAY_HELLO_BATCH_INTERVAL_MS[0];
+          await deps.sleep(interval);
+        }
+
+        const result = await nativePage.clickRecommendGreet(idx, {
+          preClickDelayMs: SAY_HELLO_CLICK_PRE_DELAY_MS,
+          pressDurationMs: SAY_HELLO_CLICK_PRESS_MS,
+          settleMs: SAY_HELLO_CLICK_SETTLE_MS,
+          onTargetResolved: async (target) => {
+            await session?.highlightPoint(target.x, target.y);
+          },
+        });
+
+        results.push({
+          index: idx,
+          candidateName: result.name,
+          candidateId: result.candidateId,
+          success: result.clicked,
+          ...(result.error !== undefined ? { error: result.error } : {}),
+        });
+      }
+
+      const summary = {
+        total: results.length,
+        succeeded: results.filter((result) => result.success).length,
+        failed: results.filter((result) => !result.success).length,
+      };
+      if (summary.failed === 0) {
+        await session.succeed(`已完成 ${summary.succeeded}/${summary.total} 位候选人`);
+      } else {
+        await session.fail(`已完成 ${summary.succeeded}/${summary.total} 位候选人`);
+      }
+
+      return { success: summary.failed === 0, results, summary };
+    } catch (err) {
+      const error = err instanceof Error ? err.message : String(err);
+      await session?.fail(error);
       const results = input.indices.map((index) => ({
         index,
         candidateName: "",
         candidateId: "",
         success: false,
-        error: "推荐列表未加载",
+        error,
       }));
       return {
         success: false,
         results,
         summary: { total: results.length, succeeded: 0, failed: results.length },
       };
+    } finally {
+      nativePage?.close();
     }
-
-    await session.begin(batchLabel);
-    await session.highlightSelector(".candidate-card-wrap, [data-geek], .geek-item", {
-      label: batchLabel,
-      padding: 8,
-    });
-
-    const results: Array<{
-      index: number;
-      candidateName: string;
-      candidateId: string;
-      success: boolean;
-      error?: string;
-    }> = [];
-
-    for (const idx of input.indices) {
-      try {
-        const r = await deps.inspectRecommendCard(target, idx);
-
-        if (!r.found) {
-          results.push({
-            index: idx,
-            candidateName: "",
-            candidateId: "",
-            success: false,
-            ...(r.error !== undefined ? { error: r.error } : {}),
-          });
-        } else if (!r.hasGreetButton) {
-          results.push({
-            index: idx,
-            candidateName: r.name,
-            candidateId: r.candidateId,
-            success: false,
-            error: "未找到打招呼按钮",
-          });
-        } else {
-          const card = target.locator(r.cardSelector).nth(idx);
-          const greetButton = card.locator("button.btn.btn-greet").first();
-
-          await session.highlightLocator(card, {
-            label: `正在定位第 ${idx + 1} 位候选人`,
-            padding: 10,
-          });
-          await greetButton.scrollIntoViewIfNeeded();
-          await deps.moveVisualCursorToLocator(page, greetButton, {
-            durationMs: 90,
-            settleMs: 20,
-            target,
-          });
-          await greetButton.hover();
-          await deps.showVisualClickOnLocator(page, greetButton, {
-            pulseDurationMs: 160,
-            target,
-          });
-          await greetButton.click();
-
-          results.push({
-            index: idx,
-            candidateName: r.name,
-            candidateId: r.candidateId,
-            success: true,
-          });
-        }
-
-        await deps.humanDelay(page);
-        if (deps.shouldAddRandomBehavior(0.3)) {
-          await deps.performRandomScroll(page);
-        }
-      } catch (err) {
-        results.push({
-          index: idx,
-          candidateName: "",
-          candidateId: "",
-          success: false,
-          error: err instanceof Error ? err.message : String(err),
-        });
-      }
-    }
-
-    const summary = {
-      total: results.length,
-      succeeded: results.filter((r) => r.success).length,
-      failed: results.filter((r) => !r.success).length,
-    };
-    if (summary.failed === 0) {
-      await session.succeed(`已完成 ${summary.succeeded}/${summary.total} 位候选人`);
-    } else {
-      await session.fail(`已完成 ${summary.succeeded}/${summary.total} 位候选人`);
-    }
-    ctx.logger.info(`Say hello: ${summary.succeeded}/${summary.total} succeeded`);
-    return { success: summary.failed === 0, results, summary };
   },
 });

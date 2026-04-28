@@ -277,7 +277,7 @@ test("selectExistingZhipinPage returns undefined when no tracked page state exis
 test("selectExistingZhipinPage continues through tracked-page selection when only native state exists", async () => {
   const trackedPage = {
     url() {
-      return "https://www.zhipin.com/web/geek/chat";
+      return "https://www.zhipin.com/web/chat/index";
     },
   } as unknown as Page;
   let predicateResult = false;

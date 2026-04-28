@@ -1,8 +1,15 @@
 import type { Page } from "@roll-agent/browser";
-
-const PRIMARY_CARD_SELECTOR = ".candidate-card-wrap";
-const FALLBACK_CARD_SELECTOR = "[data-geek], .geek-item";
-const RECOMMEND_LIST_SELECTOR = `${PRIMARY_CARD_SELECTOR}, ${FALLBACK_CARD_SELECTOR}`;
+import {
+  resolveRecommendTargetKind,
+  resolveResumeCandidateIdentity,
+  resolveResumeCardSelector,
+  ZHIPIN_RESUME_CANDIDATE_ID_SELECTOR,
+  ZHIPIN_RESUME_CANDIDATE_NAME_SELECTOR,
+  ZHIPIN_RESUME_CARD_LIST_SELECTOR,
+  ZHIPIN_RESUME_CARD_PRIMARY_SELECTOR,
+  ZHIPIN_RESUME_RECOMMEND_FRAME_NAME,
+  ZHIPIN_RESUME_RECOMMEND_FRAME_URL_MARKER,
+} from "./resume-dom-contract.ts";
 
 type RecommendTarget = Page | NonNullable<ReturnType<Page["frame"]>>;
 type RecommendCardInfo = {
@@ -15,21 +22,30 @@ type RecommendCardInfo = {
 };
 
 function getCardSelector(target: RecommendTarget): Promise<string> {
-  return target.evaluate(
-    (selectors: { primarySelector: string; fallbackSelector: string }) => {
-      return document.querySelectorAll(selectors.primarySelector).length > 0
-        ? selectors.primarySelector
-        : selectors.fallbackSelector;
-    },
-    {
-      primarySelector: PRIMARY_CARD_SELECTOR,
-      fallbackSelector: FALLBACK_CARD_SELECTOR,
-    },
-  );
+  return target
+    .evaluate((primarySelector: string) => {
+      return document.querySelectorAll(primarySelector).length;
+    }, ZHIPIN_RESUME_CARD_PRIMARY_SELECTOR)
+    .then(resolveResumeCardSelector);
 }
 
 export function getRecommendTarget(page: Page): RecommendTarget {
-  return page.frame("recommendFrame") ?? page.frames().find((f) => f.url().includes("recommend")) ?? page;
+  const namedFrame = page.frame(ZHIPIN_RESUME_RECOMMEND_FRAME_NAME);
+  const recommendUrlFrame = page
+    .frames()
+    .find((frame) => frame.url().includes(ZHIPIN_RESUME_RECOMMEND_FRAME_URL_MARKER));
+  const targetKind = resolveRecommendTargetKind({
+    hasNamedRecommendFrame: namedFrame !== null,
+    hasRecommendUrlFrame: recommendUrlFrame !== undefined,
+  });
+
+  if (targetKind === "named-frame") {
+    return namedFrame ?? page;
+  }
+  if (targetKind === "recommend-url-frame") {
+    return recommendUrlFrame ?? page;
+  }
+  return page;
 }
 
 export async function waitForRecommendList(
@@ -37,7 +53,7 @@ export async function waitForRecommendList(
   timeout = 10_000,
 ): Promise<boolean> {
   try {
-    await target.waitForSelector(RECOMMEND_LIST_SELECTOR, { timeout });
+    await target.waitForSelector(ZHIPIN_RESUME_CARD_LIST_SELECTOR, { timeout });
     return true;
   } catch {
     return false;
@@ -62,24 +78,36 @@ export async function inspectRecommendCard(
   }
 
   const card = cards.nth(index);
-  const info = await card.evaluate((item) => {
-    const candidateId =
-      item.getAttribute("data-geek") ?? item.querySelector("[data-geek]")?.getAttribute("data-geek") ?? "";
-    const name = item.querySelector(".name")?.textContent?.trim() ?? "";
-    const greetButton = item.querySelector("button.btn.btn-greet") as HTMLElement | null;
+  const info = await card.evaluate(
+    (item, selectors) => {
+      const candidateId =
+        item.getAttribute("data-geek") ??
+        item.querySelector(selectors.candidateIdSelector)?.getAttribute("data-geek") ??
+        "";
+      const name = item.querySelector(selectors.candidateNameSelector)?.textContent?.trim() ?? "";
+      const greetButton = item.querySelector("button.btn.btn-greet") as HTMLElement | null;
 
-    return {
-      candidateId,
-      name,
-      hasGreetButton: greetButton !== null && greetButton.offsetWidth > 0,
-    };
+      return {
+        candidateId,
+        name,
+        hasGreetButton: greetButton !== null && greetButton.offsetWidth > 0,
+      };
+    },
+    {
+      candidateIdSelector: ZHIPIN_RESUME_CANDIDATE_ID_SELECTOR,
+      candidateNameSelector: ZHIPIN_RESUME_CANDIDATE_NAME_SELECTOR,
+    },
+  );
+  const identity = resolveResumeCandidateIdentity({
+    ownDataGeek: info.candidateId,
+    nameText: info.name,
   });
 
   return {
     found: true,
     cardSelector,
-    candidateId: info.candidateId,
-    name: info.name,
+    candidateId: identity.candidateId,
+    name: identity.name,
     hasGreetButton: info.hasGreetButton,
   };
 }

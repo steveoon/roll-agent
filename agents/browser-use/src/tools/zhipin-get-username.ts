@@ -1,10 +1,9 @@
-import type { Page } from "@roll-agent/browser";
 import { defineTool } from "@roll-agent/sdk";
 import { z } from "zod";
-import { getCurrentZhipinRecruiterIdentity } from "../pages/zhipin/recruiter-identity.ts";
-import { findHeaderScope } from "../pages/zhipin/username.ts";
-import { getContextManager } from "../runtime-holder.ts";
-import { VisualActivitySession } from "../visual-activity-session.ts";
+import { NativeVisualActivitySession } from "../native-visual-activity-session.ts";
+import { openZhipinNativePagePort } from "../pages/zhipin/native-page.ts";
+import type { ZhipinNativePagePort } from "../pages/zhipin/native-page.ts";
+import { pickBestUsername } from "../pages/zhipin/username.ts";
 
 const OutputSchema = z.object({
   success: z.boolean(),
@@ -16,20 +15,20 @@ const OutputSchema = z.object({
 });
 
 type ZhipinGetUsernameDeps = {
-  readonly getContextManager: typeof getContextManager;
-  readonly findHeaderScope: typeof findHeaderScope;
-  readonly getCurrentZhipinRecruiterIdentity: typeof getCurrentZhipinRecruiterIdentity;
-  readonly createVisualActivitySession: (page: Page) => VisualActivitySession;
+  readonly openNativePagePort: typeof openZhipinNativePagePort;
+  readonly pickBestUsername: typeof pickBestUsername;
+  readonly createNativeVisualActivitySession: (
+    page: ZhipinNativePagePort,
+  ) => NativeVisualActivitySession;
 };
 
 let zhipinGetUsernameDepsOverride: Partial<ZhipinGetUsernameDeps> | undefined;
 
 function getZhipinGetUsernameDeps(): ZhipinGetUsernameDeps {
   return {
-    getContextManager,
-    findHeaderScope,
-    getCurrentZhipinRecruiterIdentity,
-    createVisualActivitySession: (page) => new VisualActivitySession(page),
+    openNativePagePort: openZhipinNativePagePort,
+    pickBestUsername,
+    createNativeVisualActivitySession: (page) => new NativeVisualActivitySession(page),
     ...zhipinGetUsernameDepsOverride,
   };
 }
@@ -48,36 +47,33 @@ export const zhipinGetUsername = defineTool({
   execute: async (_input, ctx) => {
     ctx.logger.info("Getting zhipin username");
     const deps = getZhipinGetUsernameDeps();
-    let session: VisualActivitySession | undefined;
+    let nativePage: ZhipinNativePagePort | undefined;
+    let session: NativeVisualActivitySession | undefined;
 
     try {
-      const ctxManager = deps.getContextManager();
-      const page = await ctxManager.getPage("zhipin");
-      session = deps.createVisualActivitySession(page);
-
-      await page.bringToFront().catch(() => {});
+      nativePage = await deps.openNativePagePort();
+      session = deps.createNativeVisualActivitySession(nativePage);
       await session.begin("正在识别登录账号");
+      await session.highlightSelector("header, #header, [role=\"banner\"], [role=\"navigation\"]", {
+        label: "正在识别登录账号",
+        padding: 10,
+      });
 
-      const headerScope = await deps.findHeaderScope(page);
-      if (headerScope) {
-        await session.highlightLocator(headerScope, {
-          label: "正在识别登录账号",
-          padding: 10,
-        });
+      const result = deps.pickBestUsername(await nativePage.readUsernameEvidence());
+      if (!result.found) {
+        throw new Error("未找到用户名，请确认当前页面已登录招聘者账号。");
       }
-
-      const identity = await deps.getCurrentZhipinRecruiterIdentity(page);
-      await session.succeed(`已识别账号：${identity.username}`);
+      await session.succeed(`已识别账号：${result.username}`);
 
       ctx.logger.info(
-        `Username: ${identity.username} (strategy: ${identity.strategy}, source: ${identity.source})`,
+        `Username: ${result.username} (strategy: ${result.strategy}, source: ${result.source})`,
       );
       return {
         success: true,
-        username: identity.username,
-        usedSelector: identity.strategy === "css-fallback" ? identity.source : undefined,
-        usedStrategy: identity.strategy,
-        source: identity.source,
+        username: result.username,
+        usedSelector: result.strategy === "css-fallback" ? result.source : undefined,
+        usedStrategy: result.strategy,
+        source: result.source,
       };
     } catch (error) {
       await session?.fail("获取用户名失败");
@@ -87,6 +83,8 @@ export const zhipinGetUsername = defineTool({
         username: "",
         error: error instanceof Error ? `获取用户名失败：${error.message}` : "获取用户名失败",
       };
+    } finally {
+      nativePage?.close();
     }
   },
 });

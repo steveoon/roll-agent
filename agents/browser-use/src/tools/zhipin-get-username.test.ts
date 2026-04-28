@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { afterEach, describe, it } from "node:test";
 import type { AgentContext } from "@roll-agent/sdk";
 import { setVisualActivityEnabledForTests } from "../visual-activity.ts";
+import type { ZhipinNativePagePort } from "../pages/zhipin/native-page.ts";
 import {
   setZhipinGetUsernameDepsForTests,
   zhipinGetUsername,
@@ -21,9 +22,46 @@ function createTestContext(): AgentContext {
   };
 }
 
-function createPage() {
+function createNativePage(
+  options: {
+    readonly evidence?: ReadonlyArray<{
+      readonly text: string;
+      readonly strategy: "css-fallback";
+      readonly priority: number;
+      readonly source: string;
+    }>;
+    readonly throwOnEvidence?: Error;
+    readonly onClose?: () => void;
+  } = {},
+): ZhipinNativePagePort {
   return {
-    bringToFront: async () => {},
+    async readUsernameEvidence() {
+      if (options.throwOnEvidence !== undefined) {
+        throw options.throwOnEvidence;
+      }
+      return (
+        options.evidence ?? [
+          {
+            text: "任思文",
+            strategy: "css-fallback",
+            priority: 4,
+            source: ".user-name",
+          },
+        ]
+      );
+    },
+    close() {
+      options.onClose?.();
+    },
+  } as unknown as ZhipinNativePagePort;
+}
+
+function createNoopNativeSession() {
+  return {
+    begin: async () => true,
+    highlightSelector: async () => true,
+    succeed: async () => true,
+    fail: async () => true,
   };
 }
 
@@ -33,27 +71,21 @@ afterEach(() => {
 });
 
 describe("zhipin_get_username", () => {
-  it("reads the username successfully without calling getPage twice", async () => {
+  it("reads the username successfully through native backend", async () => {
     setVisualActivityEnabledForTests(false);
-    const page = createPage();
-    let getPageCalls = 0;
+    let openNativePageCalls = 0;
+    let closeCalls = 0;
 
     setZhipinGetUsernameDepsForTests({
-      getContextManager: () =>
-        ({
-          async getPage(platform: string) {
-            assert.equal(platform, "zhipin");
-            getPageCalls += 1;
-            return page;
+      openNativePagePort: async () => {
+        openNativePageCalls += 1;
+        return createNativePage({
+          onClose: () => {
+            closeCalls += 1;
           },
-        }) as never,
-      findHeaderScope: async () => null,
-      getCurrentZhipinRecruiterIdentity: async () => ({
-        platform: "zhipin",
-        username: "任思文",
-        strategy: "css-fallback",
-        source: ".user-name",
-      }),
+        });
+      },
+      createNativeVisualActivitySession: () => createNoopNativeSession() as never,
     });
 
     const result = await zhipinGetUsername.execute({}, createTestContext());
@@ -61,27 +93,26 @@ describe("zhipin_get_username", () => {
     assert.equal(result.success, true);
     assert.equal(result.username, "任思文");
     assert.equal(result.usedSelector, ".user-name");
-    assert.equal(getPageCalls, 1);
+    assert.equal(openNativePageCalls, 1);
+    assert.equal(closeCalls, 1);
   });
 
-  it("returns a failure result without calling getPage again in the catch path", async () => {
+  it("returns a failure result without falling back to Playwright", async () => {
     setVisualActivityEnabledForTests(false);
-    const page = createPage();
-    let getPageCalls = 0;
+    let openNativePageCalls = 0;
+    let closeCalls = 0;
 
     setZhipinGetUsernameDepsForTests({
-      getContextManager: () =>
-        ({
-          async getPage(platform: string) {
-            assert.equal(platform, "zhipin");
-            getPageCalls += 1;
-            return page;
+      openNativePagePort: async () => {
+        openNativePageCalls += 1;
+        return createNativePage({
+          evidence: [],
+          onClose: () => {
+            closeCalls += 1;
           },
-        }) as never,
-      findHeaderScope: async () => null,
-      getCurrentZhipinRecruiterIdentity: async () => {
-        throw new Error("未找到用户名");
+        });
       },
+      createNativeVisualActivitySession: () => createNoopNativeSession() as never,
     });
 
     const result = await zhipinGetUsername.execute({}, createTestContext());
@@ -89,6 +120,7 @@ describe("zhipin_get_username", () => {
     assert.equal(result.success, false);
     assert.equal(result.username, "");
     assert.match(result.error ?? "", /未找到用户名/);
-    assert.equal(getPageCalls, 1);
+    assert.equal(openNativePageCalls, 1);
+    assert.equal(closeCalls, 1);
   });
 });

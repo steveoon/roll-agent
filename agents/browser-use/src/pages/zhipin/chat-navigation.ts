@@ -27,7 +27,7 @@ export interface OpenChatResult extends ChatListItem {
   readonly error?: string;
 }
 
-const ZHIPIN_CHAT_URL = "https://www.zhipin.com/web/geek/chat";
+const ZHIPIN_CHAT_URL = "https://www.zhipin.com/web/chat/index";
 const CHAT_LIST_SELECTOR = ".chat-list-wrap, .geek-item";
 const MESSAGE_ENTRY_TEXT = new Set(["消息"]);
 const CHAT_ENTRY_MARKER_ATTR = "data-roll-chat-entry-target";
@@ -102,7 +102,7 @@ export function selectChatCandidate(
 }
 
 function isChatPageUrl(url: string): boolean {
-  return url.includes("/web/geek/chat") || url.includes("/web/chat");
+  return url.includes("/web/chat/index");
 }
 
 async function waitForChatList(page: Page, timeout = 10_000): Promise<boolean> {
@@ -163,7 +163,7 @@ async function clickMessageEntry(page: Page): Promise<boolean> {
       });
 
       const directTargets = Array.from(
-        document.querySelectorAll('a[href*="/web/geek/chat"], a[href*="/web/chat"]'),
+        document.querySelectorAll('a[href*="/web/chat/index"]'),
       );
       for (const element of directTargets) {
         if (!isVisible(element)) {

@@ -7,6 +7,8 @@ import { setTimeout as delay } from "node:timers/promises";
 import { chromium } from "playwright-core";
 import type { Browser } from "playwright-core";
 import type { BrowserChannel, BrowserRuntimeConfig, BrowserRuntimeMode } from "../types/index.ts";
+import { NativeCdpController } from "./native-cdp-controller.ts";
+import type { NativeCdpControllerOptions } from "./native-cdp-controller.ts";
 import { NativeCdpPageClient } from "./native-cdp-page-client.ts";
 import type { BrowserInspectablePage } from "./native-cdp-page-client.ts";
 import { decorateManagedProfile, ensureProfileCleanExit } from "./profile-decoration.ts";
@@ -78,16 +80,22 @@ type FetchCdpEndpoint = (
   init?: Parameters<typeof globalThis.fetch>[1],
 ) => ReturnType<typeof globalThis.fetch>;
 
+type ConnectNativeCdpPage = (
+  options: NativeCdpControllerOptions,
+) => Promise<NativeCdpController>;
+
 type BrowserRuntimeDependencies = {
   readonly spawn: SpawnBrowserProcess;
   readonly connectOverCDP: ConnectBrowserOverCdp;
   readonly fetch: FetchCdpEndpoint;
+  readonly connectNativePage: ConnectNativeCdpPage;
 };
 
 const DEFAULT_BROWSER_RUNTIME_DEPENDENCIES = {
   spawn: (...args) => childProcess.spawn(...args),
   connectOverCDP: (...args) => chromium.connectOverCDP(...args),
   fetch: (...args) => globalThis.fetch(...args),
+  connectNativePage: (...args) => NativeCdpController.connect(...args),
 } satisfies BrowserRuntimeDependencies;
 
 function isSupportedExecutablePlatform(value: NodeJS.Platform): value is SupportedPlatform {
@@ -396,6 +404,34 @@ export class BrowserRuntime {
 
   async openNativePage(url: string): Promise<BrowserInspectablePage> {
     return await this.getNativePageClient().openPage(url);
+  }
+
+  async connectNativePage(
+    pageOrTargetId: string | BrowserInspectablePage,
+    options: {
+      readonly commandTimeoutMs?: number;
+      readonly connectTimeoutMs?: number;
+      readonly allowUnsafeRuntimeEnableForDiagnostics?: boolean;
+    } = {},
+  ): Promise<NativeCdpController> {
+    const page =
+      typeof pageOrTargetId === "string"
+        ? (await this.listNativePages()).find((candidate) => candidate.targetId === pageOrTargetId)
+        : pageOrTargetId;
+
+    if (page === undefined) {
+      throw new Error(`Native CDP target "${pageOrTargetId}" was not found in /json/list.`);
+    }
+
+    if (page.webSocketDebuggerUrl === undefined) {
+      throw new Error(`Native CDP target "${page.targetId}" does not expose webSocketDebuggerUrl.`);
+    }
+
+    await this.ensureInspectableCdpReady();
+    return await this.deps.connectNativePage({
+      webSocketDebuggerUrl: page.webSocketDebuggerUrl,
+      ...options,
+    });
   }
 
   getConfig(): BrowserRuntimeConfig {

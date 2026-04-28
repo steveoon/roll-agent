@@ -28,6 +28,12 @@ export function getSchemaItems(schema: object | undefined): object | undefined {
     : undefined;
 }
 
+export function getSchemaMinItems(schema: object | undefined): number | undefined {
+  return schema && "minItems" in schema && typeof schema.minItems === "number"
+    ? schema.minItems
+    : undefined;
+}
+
 export function getSchemaProperties(
   schema: Pick<AgentTool, "inputSchema">["inputSchema"] | object | undefined,
 ): Readonly<Record<string, object>> {

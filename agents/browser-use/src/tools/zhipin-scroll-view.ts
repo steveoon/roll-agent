@@ -1,19 +1,14 @@
 import { defineTool } from "@roll-agent/sdk";
 import { z } from "zod";
-import { ensureChatListLoaded } from "../pages/zhipin/chat-navigation.ts";
-import { getRecommendTarget, waitForRecommendList } from "../pages/zhipin/recommend-list.ts";
+import { NativeVisualActivitySession } from "../native-visual-activity-session.ts";
 import {
   getZhipinListSurfaceConfig,
   ZHIPIN_LIST_SURFACE_VALUES,
 } from "../pages/zhipin/list-surfaces.ts";
 import type { ZhipinListSurface } from "../pages/zhipin/list-surfaces.ts";
-import {
-  scrollDynamicList,
-  type DynamicListTarget,
-  type ScrollDirection,
-} from "../pages/shared/dynamic-list-scroller.ts";
-import { getContextManager } from "../runtime-holder.ts";
-import { VisualActivitySession } from "../visual-activity-session.ts";
+import { openZhipinNativePagePort } from "../pages/zhipin/native-page.ts";
+import type { ZhipinNativePagePort } from "../pages/zhipin/native-page.ts";
+import type { ScrollDirection } from "../pages/shared/dynamic-list-scroller.ts";
 
 const ScrollSnapshotSchema = z.object({
   containerFound: z.boolean(),
@@ -38,31 +33,45 @@ const OutputSchema = z.object({
   error: z.string().optional(),
 });
 
-async function getSurfaceTarget(
-  surface: ZhipinListSurface,
-): Promise<{ target: DynamicListTarget; session: VisualActivitySession; ready: boolean }> {
-  const ctxManager = getContextManager();
-  const page = await ctxManager.getPage("zhipin");
+type NativeVisualActivitySessionLike = Pick<
+  NativeVisualActivitySession,
+  "begin" | "highlightSelector" | "succeed" | "fail"
+>;
 
-  if (surface === "chat-list") {
-    const ready = await ensureChatListLoaded(ctxManager, page);
-    const activePage = await ctxManager.getPage("zhipin");
-    return { target: activePage, session: new VisualActivitySession(activePage), ready };
-  }
+type ZhipinScrollViewDeps = {
+  readonly openNativePagePort: typeof openZhipinNativePagePort;
+  readonly createNativeVisualActivitySession: (
+    page: ZhipinNativePagePort,
+  ) => NativeVisualActivitySessionLike;
+};
 
-  if (surface === "recommend-list") {
-    const target = getRecommendTarget(page);
-    const ready = await waitForRecommendList(target);
-    return { target, session: new VisualActivitySession(target), ready };
-  }
+let zhipinScrollViewDepsOverride: Partial<ZhipinScrollViewDeps> | undefined;
 
-  try {
-    const config = getZhipinListSurfaceConfig(surface);
-    await page.waitForSelector(config.itemSelector, { timeout: 3_000 });
-    return { target: page, session: new VisualActivitySession(page), ready: true };
-  } catch {
-    return { target: page, session: new VisualActivitySession(page), ready: false };
-  }
+function getZhipinScrollViewDeps(): ZhipinScrollViewDeps {
+  return {
+    openNativePagePort: openZhipinNativePagePort,
+    createNativeVisualActivitySession: (page) => new NativeVisualActivitySession(page),
+    ...zhipinScrollViewDepsOverride,
+  };
+}
+
+export function setZhipinScrollViewDepsForTests(
+  override: Partial<ZhipinScrollViewDeps> | undefined,
+): void {
+  zhipinScrollViewDepsOverride = override;
+}
+
+function createEmptySnapshot() {
+  return {
+    containerFound: false,
+    containerLabel: "",
+    scrollTop: 0,
+    scrollHeight: 0,
+    clientHeight: 0,
+    itemCount: 0,
+    atStart: true,
+    atEnd: true,
+  };
 }
 
 export const zhipinScrollView = defineTool({
@@ -78,48 +87,45 @@ export const zhipinScrollView = defineTool({
   }),
   output: OutputSchema,
   execute: async (input, ctx) => {
+    const deps = getZhipinScrollViewDeps();
     const config = getZhipinListSurfaceConfig(input.surface);
     const direction: ScrollDirection = input.direction ?? config.defaultDirection;
     const steps = input.steps ?? 1;
     const settleMs = input.settleMs ?? 700;
-    const { target, session, ready } = await getSurfaceTarget(input.surface);
-    const label = `正在滚动 ${input.surface}`;
-
-    await session.begin(label);
-    await session.highlightSelector(config.highlightSelector, { label, padding: 8 });
-
-    if (!ready) {
-      await session.fail("列表未加载");
-      const emptySnapshot = {
-        containerFound: false,
-        containerLabel: "",
-        scrollTop: 0,
-        scrollHeight: 0,
-        clientHeight: 0,
-        itemCount: 0,
-        atStart: true,
-        atEnd: true,
-      };
-      return {
-        success: false,
-        surface: input.surface,
-        direction,
-        stepsRequested: steps,
-        stepsCompleted: 0,
-        reachedBoundary: true,
-        before: emptySnapshot,
-        after: emptySnapshot,
-        error: "列表未加载",
-      };
-    }
+    let nativePage: ZhipinNativePagePort | undefined;
+    let session: NativeVisualActivitySessionLike | undefined;
 
     try {
-      const result = await scrollDynamicList(target, config, {
+      nativePage = await deps.openNativePagePort({
+        requireChatPage: input.surface === "chat-list" || input.surface === "chat-history",
+      });
+      session = deps.createNativeVisualActivitySession(nativePage);
+      const label = `正在滚动 ${input.surface}`;
+
+      await session.begin(label);
+      await session.highlightSelector(config.highlightSelector, { label, padding: 8 });
+
+      const result = await nativePage.scrollSurface(input.surface as ZhipinListSurface, {
         direction,
         steps,
         settleMs,
         ...(input.distance !== undefined ? { distance: input.distance } : {}),
       });
+
+      if (!result.success) {
+        await session.fail("列表未加载");
+        return {
+          success: false,
+          surface: input.surface,
+          direction,
+          stepsRequested: steps,
+          stepsCompleted: 0,
+          reachedBoundary: true,
+          before: result.before,
+          after: result.after,
+          error: "列表未加载",
+        };
+      }
 
       await session.succeed(`已滚动 ${result.stepsCompleted}/${result.stepsRequested} 步`);
       ctx.logger.info(
@@ -137,8 +143,21 @@ export const zhipinScrollView = defineTool({
         after: result.after,
       };
     } catch (error) {
-      await session.fail("滚动失败");
-      throw error;
+      await session?.fail("滚动失败");
+      const emptySnapshot = createEmptySnapshot();
+      return {
+        success: false,
+        surface: input.surface,
+        direction,
+        stepsRequested: steps,
+        stepsCompleted: 0,
+        reachedBoundary: true,
+        before: emptySnapshot,
+        after: emptySnapshot,
+        error: error instanceof Error ? error.message : "滚动失败",
+      };
+    } finally {
+      nativePage?.close();
     }
   },
 });

@@ -1,25 +1,52 @@
 import { defineTool } from "@roll-agent/sdk";
 import { z } from "zod";
-import { getActiveChatPanel, getSelectedChatTarget } from "../pages/zhipin/chat-target.ts";
-import {
-  getCurrentZhipinRecruiterIdentity,
-  matchesRecruiterBinding,
-} from "../pages/zhipin/recruiter-identity.ts";
-import { getContextManager, getReplyAuthorityKeysLoaded } from "../runtime-holder.ts";
-import { randomDelay, humanDelay } from "../pages/zhipin/anti-detection.ts";
-import { ensureChatListLoaded, ensureChatOpen } from "../pages/zhipin/chat-navigation.ts";
+import { NativeVisualActivitySession } from "../native-visual-activity-session.ts";
+import { openZhipinNativePagePort } from "../pages/zhipin/native-page.ts";
+import type { ZhipinNativePagePort } from "../pages/zhipin/native-page.ts";
+import { matchesRecruiterBinding } from "../pages/zhipin/recruiter-identity.ts";
+import { pickBestUsername } from "../pages/zhipin/username.ts";
+import { getReplyAuthorityKeysLoaded } from "../runtime-holder.ts";
 import {
   isReplyEnvelopeConsumed,
   markReplyEnvelopeConsumed,
 } from "../reply-authority/replay-store.ts";
 import { verifySignedReplyEnvelope } from "../reply-authority/verifier.ts";
-import { moveVisualCursorToLocator, showVisualClickOnLocator } from "../visual-cursor.ts";
 
 const OutputSchema = z.object({
   success: z.boolean(),
   sentMessage: z.string(),
   error: z.string().optional(),
 });
+
+type NativeVisualActivitySessionLike = Pick<
+  NativeVisualActivitySession,
+  "begin" | "highlightPoint" | "succeed" | "fail"
+>;
+
+type ZhipinSendReplyDeps = {
+  readonly getReplyAuthorityKeysLoaded: typeof getReplyAuthorityKeysLoaded;
+  readonly openNativePagePort: typeof openZhipinNativePagePort;
+  readonly createNativeVisualActivitySession: (
+    page: ZhipinNativePagePort,
+  ) => NativeVisualActivitySessionLike;
+};
+
+let zhipinSendReplyDepsOverride: Partial<ZhipinSendReplyDeps> | undefined;
+
+function getZhipinSendReplyDeps(): ZhipinSendReplyDeps {
+  return {
+    getReplyAuthorityKeysLoaded,
+    openNativePagePort: openZhipinNativePagePort,
+    createNativeVisualActivitySession: (page) => new NativeVisualActivitySession(page),
+    ...zhipinSendReplyDepsOverride,
+  };
+}
+
+export function setZhipinSendReplyDepsForTests(
+  override: Partial<ZhipinSendReplyDeps> | undefined,
+): void {
+  zhipinSendReplyDepsOverride = override;
+}
 
 function namesCompatible(expectedName: string, actualName: string): boolean {
   const expected = expectedName.trim().toLocaleLowerCase("zh-CN");
@@ -45,19 +72,18 @@ export const zhipinSendReply = defineTool({
   }),
   output: OutputSchema,
   execute: async (input, ctx) => {
+    const deps = getZhipinSendReplyDeps();
+    let nativePage: ZhipinNativePagePort | undefined;
+    let session: NativeVisualActivitySessionLike | undefined;
     let sentMessage = "";
 
-    if (!getReplyAuthorityKeysLoaded()) {
+    if (!deps.getReplyAuthorityKeysLoaded()) {
       const error =
         "Reply Authority 公钥尚未成功预加载，当前无法发送签名回复。请检查启动日志、" +
         "`REPLY_AUTHORITY_KEYS_URL` 配置，以及 `browser_status.replyAuthorityKeysLoaded`。";
       ctx.logger.error(error);
       return { success: false, sentMessage, error };
     }
-
-    const ctxManager = getContextManager();
-    const page = await ctxManager.getPage("zhipin");
-    let activePage = page;
 
     try {
       const envelopePayload = await verifySignedReplyEnvelope(input.signedEnvelope);
@@ -67,25 +93,25 @@ export const zhipinSendReply = defineTool({
         return { success: false, sentMessage, error: "token 已消费，禁止重放" };
       }
 
-      const nav = await ensureChatOpen(ctxManager, page, {
+      nativePage = await deps.openNativePagePort();
+      session = deps.createNativeVisualActivitySession(nativePage);
+      await nativePage.bringToFront().catch(() => {});
+      await session.begin("正在发送回复");
+
+      const nav = await nativePage.openChat({
         conversationId: envelopePayload.conversationId,
         candidateName: input.candidateName,
         index: input.index,
       });
-      if (nav && !nav.found) {
-        return { success: false, sentMessage, error: nav.error };
-      }
-      if (!nav) {
-        const listReady = await ensureChatListLoaded(ctxManager, page);
-        if (!listReady) {
-          return { success: false, sentMessage, error: "消息列表未加载" };
-        }
+      if (!nav.found) {
+        await session.fail(nav.error ?? "未找到目标聊天");
+        return { success: false, sentMessage, error: nav.error ?? "未找到目标聊天" };
       }
 
-      activePage = await ctxManager.getPage("zhipin");
-      const activePanel = await getActiveChatPanel(activePage);
-      const chatTarget = await getSelectedChatTarget(activePage);
-      if (!chatTarget) {
+      const activePanel = await nativePage.readActiveChatPanel();
+      const chatTarget = await nativePage.readSelectedChatTarget();
+      if (chatTarget === null) {
+        await session.fail("未能提取当前聊天的 conversationId/candidateId");
         return {
           success: false,
           sentMessage,
@@ -93,130 +119,71 @@ export const zhipinSendReply = defineTool({
         };
       }
       if (
-        activePanel &&
+        activePanel !== null &&
         chatTarget.candidateName.length > 0 &&
         !namesCompatible(chatTarget.candidateName, activePanel.candidateName)
       ) {
-        return {
-          success: false,
-          sentMessage,
-          error:
-            `左侧选中会话与右侧聊天面板不一致: ` +
-            `${chatTarget.candidateName} / ${activePanel.candidateName}`,
-        };
+        const error =
+          `左侧选中会话与右侧聊天面板不一致: ` +
+          `${chatTarget.candidateName} / ${activePanel.candidateName}`;
+        await session.fail(error);
+        return { success: false, sentMessage, error };
       }
       if (
         chatTarget.conversationId !== envelopePayload.conversationId ||
         chatTarget.candidateId !== envelopePayload.candidateId
       ) {
+        await session.fail("发送目标与签名不匹配");
         return { success: false, sentMessage, error: "发送目标与签名不匹配" };
       }
 
-      const recruiterIdentity = await getCurrentZhipinRecruiterIdentity(activePage);
-      if (!matchesRecruiterBinding(recruiterIdentity, envelopePayload.recruiterBinding)) {
+      const usernameResult = pickBestUsername(await nativePage.readUsernameEvidence());
+      if (!usernameResult.found) {
+        await session.fail("未找到用户名");
         return {
           success: false,
           sentMessage,
-          error:
-            `recruiter 绑定不匹配：当前账号 ${recruiterIdentity.username}` +
-            ` 与签发时 ${envelopePayload.recruiterBinding.username} 不一致`,
+          error: "未找到用户名，请确认当前页面已登录招聘者账号。",
         };
+      }
+      const recruiterIdentity = {
+        platform: "zhipin" as const,
+        username: usernameResult.username,
+        strategy: usernameResult.strategy,
+        source: usernameResult.source,
+      };
+      if (!matchesRecruiterBinding(recruiterIdentity, envelopePayload.recruiterBinding)) {
+        const error =
+          `recruiter 绑定不匹配：当前账号 ${recruiterIdentity.username}` +
+          ` 与签发时 ${envelopePayload.recruiterBinding.username} 不一致`;
+        await session.fail(error);
+        return { success: false, sentMessage, error };
       }
 
       ctx.logger.info(
-        `Sending message (${sentMessage.length} chars) to ${chatTarget.candidateName || chatTarget.candidateId}`,
+        `Sending native message (${sentMessage.length} chars) to ${
+          chatTarget.candidateName || chatTarget.candidateId
+        }`,
       );
-      const inputSelector = "#boss-chat-editor-input, textarea.chat-input, .chat-input";
-      await activePage.waitForSelector(inputSelector, { timeout: 5_000 });
-      const inputLocator = activePage.locator(inputSelector).first();
-      await moveVisualCursorToLocator(activePage, inputLocator);
-
-      const isContentEditable = await activePage.evaluate((sel: string) => {
-        const el = document.querySelector(sel);
-        return el?.getAttribute("contenteditable") === "true";
-      }, inputSelector);
-
-      if (isContentEditable) {
-        await inputLocator.focus();
-        await activePage.evaluate(
-          (args: { sel: string; msg: string }) => {
-            const el = document.querySelector(args.sel) as HTMLElement | null;
-            if (!el) return;
-            el.innerHTML = args.msg
-              .split("\n")
-              .map((line) => `<p>${line}</p>`)
-              .join("");
-          },
-          { sel: inputSelector, msg: sentMessage },
-        );
-        // 用 Playwright dispatchEvent 触发 input 监听；这仍然是程序派发事件，不是用户真实输入
-        await inputLocator.dispatchEvent("input", { bubbles: true });
-      } else {
-        await activePage.fill(inputSelector, sentMessage);
-      }
-
-      await randomDelay(activePage, 200, 500);
-
-      // 查找发送按钮（evaluate 只做定位，不做点击）
-      const sendSelector = await activePage.evaluate(() => {
-        document.querySelectorAll("[data-roll-send-btn]").forEach((element) => {
-          element.removeAttribute("data-roll-send-btn");
-        });
-
-        const selectors = [
-          ".submit-content .submit.active",
-          ".submit-content .submit",
-          ".submit-content",
-          ".btn-send",
-        ];
-        for (const sel of selectors) {
-          const btn = document.querySelector(sel) as HTMLElement | null;
-          if (btn && btn.offsetWidth > 0) {
-            return { found: true as const, selector: sel };
-          }
-        }
-        // fallback: 查找文本为"发送"的 span
-        const spans = Array.from(document.querySelectorAll("span"));
-        for (const span of spans) {
-          if (span.textContent?.trim() === "发送" && span.offsetWidth > 0) {
-            span.setAttribute("data-roll-send-btn", "true");
-            return { found: true as const, selector: '[data-roll-send-btn="true"]' };
-          }
-        }
-        return { found: false as const };
+      const sendResult = await nativePage.sendChatReply(sentMessage, {
+        onTargetResolved: async (target) => {
+          await session?.highlightPoint(target.x, target.y);
+        },
       });
-
-      if (!sendSelector.found) {
-        return { success: false, sentMessage, error: "未找到发送按钮" };
+      if (!sendResult.success) {
+        await session.fail(sendResult.error ?? "发送失败");
+        return { success: false, sentMessage, error: sendResult.error ?? "发送失败" };
       }
 
-      // Playwright locator 点击（isTrusted: true）
-      const sendBtn = activePage.locator(sendSelector.selector).first();
-      await sendBtn.scrollIntoViewIfNeeded();
-      await moveVisualCursorToLocator(activePage, sendBtn);
-      await sendBtn.hover();
-      await humanDelay(activePage);
-      await showVisualClickOnLocator(activePage, sendBtn);
-      await sendBtn.click();
-
-      await randomDelay(activePage, 500, 1200);
       markReplyEnvelopeConsumed(envelopePayload.jti, envelopePayload.exp);
-      ctx.logger.info("Message sent successfully");
+      await session.succeed("已发送回复");
       return { success: true, sentMessage };
     } catch (err) {
-      return {
-        success: false,
-        sentMessage,
-        error: err instanceof Error ? err.message : String(err),
-      };
+      const error = err instanceof Error ? err.message : String(err);
+      await session?.fail(error);
+      return { success: false, sentMessage, error };
     } finally {
-      await activePage
-        .evaluate(() => {
-          document.querySelectorAll("[data-roll-send-btn]").forEach((element) => {
-            element.removeAttribute("data-roll-send-btn");
-          });
-        })
-        .catch(() => {});
+      nativePage?.close();
     }
   },
 });

@@ -8,6 +8,7 @@ import type { Browser } from "playwright-core";
 import type { ChildProcess } from "node:child_process";
 import { BrowserRuntimeConfigSchema } from "../types/index.ts";
 import { BrowserRuntime } from "./browser-runtime.ts";
+import type { NativeCdpController } from "./native-cdp-controller.ts";
 
 function makeTmpUserDataDir(): string {
   return mkdtempSync(join(tmpdir(), `roll-browser-runtime-${randomUUID()}-`));
@@ -195,7 +196,8 @@ test("managed-cdp can inspect pages via native CDP without attaching Playwright"
                   id: "target-boss",
                   type: "page",
                   title: "BOSS直聘",
-                  url: "https://www.zhipin.com/web/geek/chat",
+                  url: "https://www.zhipin.com/web/chat/index",
+                  webSocketDebuggerUrl: "ws://127.0.0.1:9333/devtools/page/target-boss",
                 },
                 {
                   id: "target-worker",
@@ -224,7 +226,8 @@ test("managed-cdp can inspect pages via native CDP without attaching Playwright"
         targetId: "target-boss",
         type: "page",
         title: "BOSS直聘",
-        url: "https://www.zhipin.com/web/geek/chat",
+        url: "https://www.zhipin.com/web/chat/index",
+        webSocketDebuggerUrl: "ws://127.0.0.1:9333/devtools/page/target-boss",
       },
     ]);
     assert.equal(connectCalls, 0);
@@ -312,6 +315,89 @@ test("managed-cdp can open and activate tabs via native CDP without attaching Pl
       {
         url: "http://127.0.0.1:9444/json/new?https%3A%2F%2Fwww.zhipin.com",
         method: "PUT",
+      },
+    ]);
+
+    await runtime.stop();
+  } finally {
+    rmSync(userDataDir, { recursive: true, force: true });
+  }
+});
+
+test("managed-cdp can connect a native page WebSocket without attaching Playwright", async () => {
+  const userDataDir = makeTmpUserDataDir();
+  try {
+    const managedProcess = createManagedProcessState();
+    let connectOverCdpCalls = 0;
+    let nativeConnectCalls = 0;
+    const fetchCalls: FetchCall[] = [];
+    const connectedController = {} as NativeCdpController;
+
+    const runtime = new BrowserRuntime(
+      BrowserRuntimeConfigSchema.parse({
+        mode: "managed-cdp",
+        userDataDir,
+        cdpPort: 9555,
+      }),
+      {
+        spawn() {
+          return managedProcess.proc;
+        },
+        async fetch(input, init) {
+          const url = String(input);
+          fetchCalls.push({
+            url,
+            method: init?.method ?? "GET",
+          });
+
+          if (url === "http://127.0.0.1:9555/json/version") {
+            return createResponse("{}");
+          }
+          if (url === "http://127.0.0.1:9555/json/list") {
+            return createResponse(
+              JSON.stringify([
+                {
+                  id: "target-boss",
+                  type: "page",
+                  title: "BOSS直聘",
+                  url: "https://www.zhipin.com/web/chat/index",
+                  webSocketDebuggerUrl: "ws://127.0.0.1:9555/devtools/page/target-boss",
+                },
+              ]),
+            );
+          }
+
+          throw new Error(`Unexpected fetch URL: ${url}`);
+        },
+        async connectOverCDP() {
+          connectOverCdpCalls += 1;
+          throw new Error("connectOverCDP should not be called");
+        },
+        async connectNativePage(options) {
+          nativeConnectCalls += 1;
+          assert.equal(
+            options.webSocketDebuggerUrl,
+            "ws://127.0.0.1:9555/devtools/page/target-boss",
+          );
+          return connectedController;
+        },
+      },
+    );
+
+    await runtime.start();
+    const controller = await runtime.connectNativePage("target-boss");
+
+    assert.equal(controller, connectedController);
+    assert.equal(connectOverCdpCalls, 0);
+    assert.equal(nativeConnectCalls, 1);
+    assert.deepEqual(fetchCalls, [
+      {
+        url: "http://127.0.0.1:9555/json/version",
+        method: "GET",
+      },
+      {
+        url: "http://127.0.0.1:9555/json/list",
+        method: "GET",
       },
     ]);
 

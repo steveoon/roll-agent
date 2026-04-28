@@ -3,6 +3,7 @@ export type BrowserInspectablePage = {
   readonly type: string;
   readonly url: string;
   readonly title: string;
+  readonly webSocketDebuggerUrl?: string;
 };
 
 type FetchCdpEndpoint = (
@@ -26,6 +27,7 @@ function toInspectablePage(value: unknown): BrowserInspectablePage | undefined {
   const type = candidate["type"];
   const url = candidate["url"];
   const title = candidate["title"];
+  const webSocketDebuggerUrl = candidate["webSocketDebuggerUrl"];
 
   if (
     typeof targetId !== "string" ||
@@ -41,6 +43,7 @@ function toInspectablePage(value: unknown): BrowserInspectablePage | undefined {
     type,
     url,
     title,
+    ...(typeof webSocketDebuggerUrl === "string" ? { webSocketDebuggerUrl } : {}),
   };
 }
 

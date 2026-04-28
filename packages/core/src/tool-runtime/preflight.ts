@@ -6,6 +6,7 @@ import {
   getSchemaDescription,
   getSchemaEnum,
   getSchemaItems,
+  getSchemaMinItems,
   getSchemaProperties,
   getSchemaRequired,
   getSchemaType,
@@ -132,14 +133,29 @@ function validateSchemaValue(
       }
 
       {
+        const minItems = getSchemaMinItems(schema);
+        if (minItems !== undefined && value.length < minItems) {
+          issues.push({
+            path,
+            code: "too_small",
+            message: `${path} 至少需要 ${String(minItems)} 个元素，当前是 ${String(value.length)} 个`,
+            ...(description ? { description } : {}),
+            expected: `minItems: ${String(minItems)}`,
+            actual: `length: ${String(value.length)}`,
+          });
+        }
+
         const itemSchema = getSchemaItems(schema);
         if (!itemSchema) {
           return issues;
         }
 
-        return value.flatMap((item, index) =>
-          validateSchemaValue(itemSchema, item, `${path}[${String(index)}]`),
+        issues.push(
+          ...value.flatMap((item, index) =>
+            validateSchemaValue(itemSchema, item, `${path}[${String(index)}]`),
+          ),
         );
+        return issues;
       }
     case "object":
       if (!isPlainObject(value)) {

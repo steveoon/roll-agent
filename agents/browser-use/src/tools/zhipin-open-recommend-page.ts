@@ -1,20 +1,13 @@
-import type { AgentContext } from "@roll-agent/sdk";
-import { defineTool } from "@roll-agent/sdk";
-import type { BrowserPageInfo, Page } from "@roll-agent/browser";
+import type { BrowserContextManager, BrowserPageInfo } from "@roll-agent/browser";
 import { BrowserPageInfoSchema } from "@roll-agent/browser";
+import { defineTool } from "@roll-agent/sdk";
 import { z } from "zod";
-import { randomDelay } from "../pages/zhipin/anti-detection.ts";
-import { getRecommendTarget } from "../pages/zhipin/recommend-list.ts";
+import { NativeVisualActivitySession } from "../native-visual-activity-session.ts";
+import { openZhipinNativePagePort } from "../pages/zhipin/native-page.ts";
+import type { ZhipinNativePagePort } from "../pages/zhipin/native-page.ts";
 import { ZHIPIN_SELECTORS } from "../pages/zhipin/selectors.ts";
-import {
-  findZhipinSidebarSectionLink,
-  isZhipinRecommendSurfaceOpen,
-  waitForZhipinRecommendSurface,
-} from "../pages/zhipin/sidebar-navigation.ts";
-import { toAttachedPageInfo } from "../page-info.ts";
+import { toNativePageInfo } from "../page-info.ts";
 import { getContextManager } from "../runtime-holder.ts";
-import { VisualActivitySession } from "../visual-activity-session.ts";
-import { moveVisualCursorToLocator, showVisualClickOnLocator } from "../visual-cursor.ts";
 
 const OutputSchema = z.object({
   success: z.boolean(),
@@ -25,26 +18,19 @@ const OutputSchema = z.object({
   error: z.string().optional(),
 });
 
-type RecommendTarget = ReturnType<typeof getRecommendTarget>;
-type VisualActivitySessionLike = Pick<
-  VisualActivitySession,
-  "begin" | "highlightSelector" | "retarget" | "succeed" | "fail"
->;
-type PageLocator = ReturnType<Page["locator"]>;
+type NativeVisualActivitySessionLike = Pick<
+  NativeVisualActivitySession,
+  "begin" | "highlightSelector" | "succeed" | "fail"
+> & {
+  readonly highlightPoint?: NativeVisualActivitySession["highlightPoint"];
+};
 
 type ZhipinOpenRecommendPageDeps = {
   readonly getContextManager: typeof getContextManager;
-  readonly getRecommendTarget: typeof getRecommendTarget;
-  readonly findZhipinSidebarSectionLink: typeof findZhipinSidebarSectionLink;
-  readonly isZhipinRecommendSurfaceOpen: typeof isZhipinRecommendSurfaceOpen;
-  readonly waitForZhipinRecommendSurface: typeof waitForZhipinRecommendSurface;
-  readonly moveVisualCursorToLocator: typeof moveVisualCursorToLocator;
-  readonly showVisualClickOnLocator: typeof showVisualClickOnLocator;
-  readonly randomDelay: typeof randomDelay;
-  readonly toAttachedPageInfo: typeof toAttachedPageInfo;
-  readonly createVisualActivitySession: (
-    target: RecommendTarget,
-  ) => VisualActivitySessionLike;
+  readonly openNativePagePort: typeof openZhipinNativePagePort;
+  readonly createNativeVisualActivitySession: (
+    page: ZhipinNativePagePort,
+  ) => NativeVisualActivitySessionLike;
 };
 
 let zhipinOpenRecommendPageDepsOverride: Partial<ZhipinOpenRecommendPageDeps> | undefined;
@@ -52,15 +38,8 @@ let zhipinOpenRecommendPageDepsOverride: Partial<ZhipinOpenRecommendPageDeps> | 
 function getZhipinOpenRecommendPageDeps(): ZhipinOpenRecommendPageDeps {
   return {
     getContextManager,
-    getRecommendTarget,
-    findZhipinSidebarSectionLink,
-    isZhipinRecommendSurfaceOpen,
-    waitForZhipinRecommendSurface,
-    moveVisualCursorToLocator,
-    showVisualClickOnLocator,
-    randomDelay,
-    toAttachedPageInfo,
-    createVisualActivitySession: (target) => new VisualActivitySession(target),
+    openNativePagePort: openZhipinNativePagePort,
+    createNativeVisualActivitySession: (page) => new NativeVisualActivitySession(page),
     ...zhipinOpenRecommendPageDepsOverride,
   };
 }
@@ -72,47 +51,10 @@ export function setZhipinOpenRecommendPageDepsForTests(
 }
 
 async function buildPageInfo(
-  ctxManager: ReturnType<typeof getContextManager>,
-  deps: ZhipinOpenRecommendPageDeps,
-  page: Page,
+  ctxManager: BrowserContextManager,
+  nativePage: ZhipinNativePagePort,
 ): Promise<BrowserPageInfo> {
-  return (await deps.toAttachedPageInfo(ctxManager, page)) satisfies BrowserPageInfo;
-}
-
-async function failOpenRecommend(
-  ctxManager: ReturnType<typeof getContextManager>,
-  deps: ZhipinOpenRecommendPageDeps,
-  session: VisualActivitySessionLike,
-  page: Page,
-  error: string,
-  options: {
-    readonly alreadyOnRecommend: boolean;
-    readonly usedSidebarClick: boolean;
-    readonly recommendReady: boolean;
-  },
-) {
-  await session.fail(error);
-  return {
-    success: false,
-    ...options,
-    page: await buildPageInfo(ctxManager, deps, page),
-    error,
-  };
-}
-
-async function clickSidebarLink(
-  page: Page,
-  deps: ZhipinOpenRecommendPageDeps,
-  link: PageLocator,
-  logger: AgentContext["logger"],
-): Promise<void> {
-  await link.scrollIntoViewIfNeeded();
-  await deps.moveVisualCursorToLocator(page, link, { durationMs: 110, settleMs: 30 });
-  await link.hover();
-  await deps.randomDelay(page, 100, 180);
-  await deps.showVisualClickOnLocator(page, link, { pulseDurationMs: 180 });
-  await link.click();
-  logger.info("Clicked Boss sidebar nav: 推荐牛人");
+  return toNativePageInfo(ctxManager, await nativePage.inspectPage());
 }
 
 export const zhipinOpenRecommendPage = defineTool({
@@ -124,82 +66,84 @@ export const zhipinOpenRecommendPage = defineTool({
   execute: async (_input, ctx) => {
     const deps = getZhipinOpenRecommendPageDeps();
     const ctxManager = deps.getContextManager();
+    let nativePage: ZhipinNativePagePort | undefined;
+    let session: NativeVisualActivitySessionLike | undefined;
 
-    ctx.logger.info("Opening Boss recommend page via sidebar navigation");
+    ctx.logger.info("Opening Boss recommend page via native sidebar navigation");
 
-    const page = await ctxManager.getPage("zhipin");
-    await page.bringToFront().catch(() => {});
-    const session = deps.createVisualActivitySession(page);
-    const beginLabel = "正在切换到推荐牛人页";
+    try {
+      nativePage = await deps.openNativePagePort();
+      session = deps.createNativeVisualActivitySession(nativePage);
+      await nativePage.bringToFront().catch(() => {});
 
-    await session.begin(beginLabel);
-    await session.highlightSelector(ZHIPIN_SELECTORS.nav.sidebar, {
-      label: beginLabel,
-      padding: 10,
-    });
+      const beginLabel = "正在切换到推荐牛人页";
+      await session.begin(beginLabel);
+      await session.highlightSelector(ZHIPIN_SELECTORS.nav.sidebar, {
+        label: beginLabel,
+        padding: 10,
+      });
 
-    if (deps.isZhipinRecommendSurfaceOpen(page)) {
-      await session.retarget(deps.getRecommendTarget(page));
-      await session.succeed("已在推荐牛人页");
+      if (await nativePage.isRecommendSurfaceOpen()) {
+        await session.succeed("已在推荐牛人页");
+        return {
+          success: true,
+          alreadyOnRecommend: true,
+          usedSidebarClick: false,
+          recommendReady: true,
+          page: await buildPageInfo(ctxManager, nativePage),
+        };
+      }
+
+      const clicked = await nativePage.clickSidebarSection("recommend", {
+        onTargetResolved: async (target) => {
+          await session?.highlightPoint?.(target.x, target.y);
+        },
+      });
+      if (!clicked) {
+        await session.fail("未找到推荐牛人导航");
+        return {
+          success: false,
+          alreadyOnRecommend: false,
+          usedSidebarClick: false,
+          recommendReady: false,
+          page: await buildPageInfo(ctxManager, nativePage),
+          error: "未找到推荐牛人导航",
+        };
+      }
+
+      ctx.logger.info("Clicked Boss sidebar nav: 推荐牛人");
+      const recommendReady = await nativePage.waitForRecommendSurface();
+      if (!recommendReady) {
+        await session.fail("推荐牛人页未就绪");
+        return {
+          success: false,
+          alreadyOnRecommend: false,
+          usedSidebarClick: true,
+          recommendReady: false,
+          page: await buildPageInfo(ctxManager, nativePage),
+          error: "推荐牛人页未就绪",
+        };
+      }
+
+      await session.succeed("已切换到推荐牛人页");
       return {
         success: true,
-        alreadyOnRecommend: true,
-        usedSidebarClick: false,
+        alreadyOnRecommend: false,
+        usedSidebarClick: true,
         recommendReady: true,
-        page: await buildPageInfo(ctxManager, deps, page),
+        page: await buildPageInfo(ctxManager, nativePage),
       };
-    }
-
-    const recommendLink = await deps.findZhipinSidebarSectionLink(page, "recommend");
-    if (!recommendLink) {
-      return await failOpenRecommend(ctxManager, deps, session, page, "未找到推荐牛人导航", {
+    } catch (error) {
+      await session?.fail("切换推荐牛人页失败");
+      return {
+        success: false,
         alreadyOnRecommend: false,
         usedSidebarClick: false,
         recommendReady: false,
-      });
+        error: error instanceof Error ? error.message : "切换推荐牛人页失败",
+      };
+    } finally {
+      nativePage?.close();
     }
-
-    try {
-      await clickSidebarLink(page, deps, recommendLink, ctx.logger);
-    } catch (error) {
-      return await failOpenRecommend(
-        ctxManager,
-        deps,
-        session,
-        page,
-        error instanceof Error ? error.message : "点击推荐牛人导航失败",
-        {
-          alreadyOnRecommend: false,
-          usedSidebarClick: true,
-          recommendReady: false,
-        },
-      );
-    }
-
-    const recommendReady = await deps.waitForZhipinRecommendSurface(page);
-    await session.retarget(deps.getRecommendTarget(page));
-    if (!recommendReady) {
-      return await failOpenRecommend(
-        ctxManager,
-        deps,
-        session,
-        page,
-        "推荐牛人页未就绪",
-        {
-          alreadyOnRecommend: false,
-          usedSidebarClick: true,
-          recommendReady: false,
-        },
-      );
-    }
-
-    await session.succeed("已切换到推荐牛人页");
-    return {
-      success: true,
-      alreadyOnRecommend: false,
-      usedSidebarClick: true,
-      recommendReady: true,
-      page: await buildPageInfo(ctxManager, deps, page),
-    };
   },
 });
