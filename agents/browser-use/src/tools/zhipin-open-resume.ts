@@ -7,6 +7,7 @@ import {
   inspectRecommendCard,
   waitForRecommendList,
 } from "../pages/zhipin/recommend-list.ts";
+import { ZHIPIN_RESUME_CARD_CLICK_SURFACE_SELECTOR } from "../pages/zhipin/resume-dom-contract.ts";
 import { moveVisualCursorToLocator, showVisualClickOnLocator } from "../visual-cursor.ts";
 
 const OutputSchema = z.object({
@@ -46,8 +47,8 @@ export const zhipinOpenResume = defineTool({
 
     const card = target.locator(clickResult.cardSelector).nth(input.index);
     const clickSurface =
-      (await card.locator("[data-geek], .card-inner, .geek-item").count()) > 0
-        ? card.locator("[data-geek], .card-inner, .geek-item").first()
+      (await card.locator(ZHIPIN_RESUME_CARD_CLICK_SURFACE_SELECTOR).count()) > 0
+        ? card.locator(ZHIPIN_RESUME_CARD_CLICK_SURFACE_SELECTOR).first()
         : card;
 
     await clickSurface.scrollIntoViewIfNeeded();

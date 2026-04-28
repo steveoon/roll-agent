@@ -10,6 +10,8 @@ const NORMAL_NATIVE_CDP_METHODS = [
   "Page.getFrameTree",
   "Page.createIsolatedWorld",
   "Input.dispatchMouseEvent",
+  "Input.dispatchKeyEvent",
+  "Input.insertText",
 ] as const;
 
 const UNSAFE_DIAGNOSTIC_NATIVE_CDP_METHODS = ["Runtime.enable"] as const;
@@ -34,7 +36,10 @@ export type NativeCdpWebSocketLike = {
   send(data: string): void;
   close(): void;
   addEventListener(type: "open", listener: () => void): void;
-  addEventListener(type: "message", listener: (event: NativeCdpWebSocketMessageEvent) => void): void;
+  addEventListener(
+    type: "message",
+    listener: (event: NativeCdpWebSocketMessageEvent) => void,
+  ): void;
   addEventListener(type: "error", listener: (event: Event) => void): void;
   addEventListener(type: "close", listener: () => void): void;
   removeEventListener(type: "open", listener: () => void): void;
@@ -75,6 +80,17 @@ export type NativeCdpMouseEventInput = {
   readonly modifiers?: number;
   readonly deltaX?: number;
   readonly deltaY?: number;
+};
+
+export type NativeCdpKeyEventInput = {
+  readonly type: "keyDown" | "keyUp" | "rawKeyDown" | "char";
+  readonly key?: string;
+  readonly code?: string;
+  readonly text?: string;
+  readonly unmodifiedText?: string;
+  readonly windowsVirtualKeyCode?: number;
+  readonly nativeVirtualKeyCode?: number;
+  readonly modifiers?: number;
 };
 
 export type NativeCdpFrame = {
@@ -169,7 +185,9 @@ function createCdpResponseError(error: NativeCdpErrorResponse["error"]): Error {
   return new Error(`${message}${code}`);
 }
 
-function assertNormalMethod(method: NativeCdpCommandMethod): asserts method is NormalNativeCdpMethod {
+function assertNormalMethod(
+  method: NativeCdpCommandMethod,
+): asserts method is NormalNativeCdpMethod {
   if (!NORMAL_NATIVE_CDP_METHODS.includes(method as NormalNativeCdpMethod)) {
     throw new Error(`Native CDP command "${method}" is not allowed by NativeCdpController.`);
   }
@@ -378,9 +396,7 @@ export class NativeCdpController {
   }
 
   async getFrameTree(options: { readonly timeoutMs?: number } = {}): Promise<NativeCdpFrameTree> {
-    return readFrameTreeResponse(
-      await this.sendNormal("Page.getFrameTree", {}, options.timeoutMs),
-    );
+    return readFrameTreeResponse(await this.sendNormal("Page.getFrameTree", {}, options.timeoutMs));
   }
 
   async createIsolatedWorld(
@@ -414,6 +430,27 @@ export class NativeCdpController {
       ...(input.deltaX !== undefined ? { deltaX: input.deltaX } : {}),
       ...(input.deltaY !== undefined ? { deltaY: input.deltaY } : {}),
     });
+  }
+
+  async dispatchKeyEvent(input: NativeCdpKeyEventInput): Promise<void> {
+    await this.sendNormal("Input.dispatchKeyEvent", {
+      type: input.type,
+      ...(input.key !== undefined ? { key: input.key } : {}),
+      ...(input.code !== undefined ? { code: input.code } : {}),
+      ...(input.text !== undefined ? { text: input.text } : {}),
+      ...(input.unmodifiedText !== undefined ? { unmodifiedText: input.unmodifiedText } : {}),
+      ...(input.windowsVirtualKeyCode !== undefined
+        ? { windowsVirtualKeyCode: input.windowsVirtualKeyCode }
+        : {}),
+      ...(input.nativeVirtualKeyCode !== undefined
+        ? { nativeVirtualKeyCode: input.nativeVirtualKeyCode }
+        : {}),
+      ...(input.modifiers !== undefined ? { modifiers: input.modifiers } : {}),
+    });
+  }
+
+  async insertText(text: string): Promise<void> {
+    await this.sendNormal("Input.insertText", { text });
   }
 
   locator(selector: string, options: NativeCdpLocatorOptions = {}): NativeCdpLocator {

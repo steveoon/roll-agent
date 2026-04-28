@@ -146,6 +146,39 @@ describe("tool-runtime preflight", () => {
     ]);
   });
 
+  it("detects arrays that are shorter than minItems", () => {
+    const tool: AgentTool = {
+      name: "zhipin_say_hello",
+      description: "Say hello to recommended candidates",
+      inputSchema: {
+        type: "object",
+        properties: {
+          indices: {
+            type: "array",
+            minItems: 1,
+            description: "要打招呼的候选人索引列表",
+            items: { type: "number" },
+          },
+        },
+        required: ["indices"],
+        additionalProperties: false,
+      },
+    };
+
+    const issues = getInputValidationIssues(tool, { indices: [] });
+
+    assert.deepEqual(issues, [
+      {
+        path: "indices",
+        code: "too_small",
+        message: "indices 至少需要 1 个元素，当前是 0 个",
+        description: "要打招呼的候选人索引列表",
+        expected: "minItems: 1",
+        actual: "length: 0",
+      },
+    ]);
+  });
+
   it("returns a structured success result when preflight passes", () => {
     const result = preflightToolCall(generateReplyTool, {
       candidateMessage: "你好，请问还招人吗？",

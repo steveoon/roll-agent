@@ -1,6 +1,14 @@
 import { defineTool } from "@roll-agent/sdk";
 import { z } from "zod";
 import { getContextManager } from "../runtime-holder.ts";
+import {
+  ZHIPIN_RESUME_DIALOG_SELECTOR,
+  ZHIPIN_RESUME_IFRAME_CLOSE_SELECTORS,
+  ZHIPIN_RESUME_PAGE_CLOSE_SELECTORS,
+  ZHIPIN_RESUME_PAGE_DIALOG_SELECTOR,
+  ZHIPIN_RESUME_RECOMMEND_FRAME_NAME,
+  ZHIPIN_RESUME_RECOMMEND_FRAME_URL_MARKER,
+} from "../pages/zhipin/resume-dom-contract.ts";
 import { moveVisualCursorToLocator, showVisualClickOnLocator } from "../visual-cursor.ts";
 
 const OutputSchema = z.object({
@@ -8,23 +16,6 @@ const OutputSchema = z.object({
   closed: z.boolean(),
   error: z.string().optional(),
 });
-
-// 旧代码使用的关闭按钮选择器（boss-popup__close 系列）
-const CLOSE_SELECTORS_IFRAME = [
-  ".recommendV2 .boss-popup__close",
-  ".dialog-lib-resume .boss-popup__close",
-  ".boss-dialog .boss-popup__close",
-  ".boss-popup__close",
-  ".close-btn",
-  ".dialog-close",
-] as const;
-
-const CLOSE_SELECTORS_PAGE = [
-  ".boss-popup__close",
-  ".close-btn",
-  ".dialog-close",
-  ".modal-close",
-] as const;
 
 export const zhipinCloseResume = defineTool({
   name: "zhipin_close_resume",
@@ -37,12 +28,13 @@ export const zhipinCloseResume = defineTool({
     const ctxManager = getContextManager();
     const page = await ctxManager.getPage("zhipin");
     const frame =
-      page.frame("recommendFrame") ?? page.frames().find((f) => f.url().includes("recommend"));
+      page.frame(ZHIPIN_RESUME_RECOMMEND_FRAME_NAME) ??
+      page.frames().find((frame) => frame.url().includes(ZHIPIN_RESUME_RECOMMEND_FRAME_URL_MARKER));
 
     const closed = await (async () => {
       // 优先在 iframe 中查找
       if (frame) {
-        for (const sel of CLOSE_SELECTORS_IFRAME) {
+        for (const sel of ZHIPIN_RESUME_IFRAME_CLOSE_SELECTORS) {
           const btn = frame.locator(sel).first();
           if (await btn.isVisible()) {
             await moveVisualCursorToLocator(page, btn, { target: frame });
@@ -54,7 +46,7 @@ export const zhipinCloseResume = defineTool({
       }
 
       // 回退到主页面
-      for (const sel of CLOSE_SELECTORS_PAGE) {
+      for (const sel of ZHIPIN_RESUME_PAGE_CLOSE_SELECTORS) {
         const btn = page.locator(sel).first();
         if (await btn.isVisible()) {
           await moveVisualCursorToLocator(page, btn);
@@ -73,8 +65,8 @@ export const zhipinCloseResume = defineTool({
     for (let i = 0; i < 5; i++) {
       await page.waitForTimeout(300);
       const dialogExists = frame
-        ? await frame.$(".boss-popup__wrapper, .dialog-lib-resume, .boss-dialog")
-        : await page.$(".boss-popup__wrapper");
+        ? await frame.$(ZHIPIN_RESUME_DIALOG_SELECTOR)
+        : await page.$(ZHIPIN_RESUME_PAGE_DIALOG_SELECTOR);
       if (!dialogExists || !(await dialogExists.isVisible())) {
         verified = true;
         break;

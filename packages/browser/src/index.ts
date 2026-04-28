@@ -39,6 +39,7 @@ export type {
   NativeCdpEvaluateOptions,
   NativeCdpFrame,
   NativeCdpFrameTree,
+  NativeCdpKeyEventInput,
   NativeCdpMouseEventInput,
 } from "./runtime/native-cdp-controller.ts";
 export { NativeCdpLocator } from "./runtime/native-cdp-locator.ts";

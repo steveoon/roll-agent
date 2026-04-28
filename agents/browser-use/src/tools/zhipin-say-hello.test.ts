@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { afterEach, describe, it } from "node:test";
 import type { AgentContext } from "@roll-agent/sdk";
+import type { ZhipinNativePagePort } from "../pages/zhipin/native-page.ts";
 import { setZhipinSayHelloDepsForTests, zhipinSayHello } from "./zhipin-say-hello.ts";
 
 function createTestContext(): AgentContext {
@@ -22,111 +23,136 @@ afterEach(() => {
 });
 
 describe("zhipin_say_hello", () => {
-  it("keeps visual cursor and adds visual activity feedback", async () => {
-    const activityCalls: string[] = [];
-    const cursorCalls: string[] = [];
-    const cursorOptions: Array<Record<string, unknown> | undefined> = [];
-    const page = {};
-    const greetButton = {
-      async scrollIntoViewIfNeeded() {},
-      async hover() {},
-      async click() {},
-    };
-    const card = {
-      locator(selector: string) {
-        assert.equal(selector, "button.btn.btn-greet");
+  it("clicks greet buttons through the native page port and keeps visual feedback", async () => {
+    const calls: string[] = [];
+    const nativePage = {
+      async waitForRecommendList() {
+        calls.push("wait-list");
+        return true;
+      },
+      async clickRecommendGreet(
+        index: number,
+        options?: {
+          readonly preClickDelayMs?: number;
+          readonly pressDurationMs?: number;
+          readonly settleMs?: number;
+          readonly onTargetResolved?: (target: { x: number; y: number }) => Promise<void>;
+        },
+      ) {
+        calls.push(`greet:${index}`);
+        calls.push(
+          `timing:${options?.preClickDelayMs}:${options?.pressDurationMs}:${options?.settleMs}`,
+        );
+        await options?.onTargetResolved?.({ x: 120, y: 240 });
         return {
-          first() {
-            return greetButton;
-          },
+          found: true,
+          cardSelector: ".candidate-card-wrap",
+          candidateId: "candidate-1",
+          name: "赵慧珍",
+          hasGreetButton: true,
+          clicked: true,
         };
       },
-    };
-    const target = {
-      locator(selector: string) {
-        assert.equal(selector, ".candidate-card-wrap");
-        return {
-          nth(index: number) {
-            assert.equal(index, 0);
-            return card;
-          },
-        };
+      close() {
+        calls.push("close");
       },
-    };
+    } as unknown as ZhipinNativePagePort;
 
     setZhipinSayHelloDepsForTests({
-      getContextManager: () =>
-        ({
-          async getPage(platform: string) {
-            assert.equal(platform, "zhipin");
-            return page;
-          },
-        }) as never,
-      getRecommendTarget: () => target as never,
-      waitForRecommendList: async () => true,
-      inspectRecommendCard: async () => ({
-        found: true,
-        cardSelector: ".candidate-card-wrap",
-        candidateId: "candidate-1",
-        name: "赵慧珍",
-        hasGreetButton: true,
-      }),
-      moveVisualCursorToLocator: async (_page, _locator, options) => {
-        cursorCalls.push("move");
-        cursorOptions.push(options as Record<string, unknown> | undefined);
-        return true;
-      },
-      showVisualClickOnLocator: async (_page, _locator, options) => {
-        cursorCalls.push("click");
-        cursorOptions.push(options as Record<string, unknown> | undefined);
-        return true;
-      },
-      humanDelay: async () => {},
-      shouldAddRandomBehavior: () => false,
-      performRandomScroll: async () => {},
-      createVisualActivitySession: () => ({
+      openNativePagePort: async () => nativePage,
+      createNativeVisualActivitySession: () => ({
         async begin(label: string) {
-          activityCalls.push(`begin:${label}`);
+          calls.push(`begin:${label}`);
           return true;
         },
         async highlightSelector(selector: string) {
-          activityCalls.push(`highlight-selector:${selector}`);
+          calls.push(`highlight:${selector}`);
           return true;
         },
-        async highlightLocator() {
-          activityCalls.push("highlight-locator");
+        async highlightPoint(x: number, y: number) {
+          calls.push(`point:${x}:${y}`);
           return true;
         },
         async succeed(label: string) {
-          activityCalls.push(`succeed:${label}`);
+          calls.push(`succeed:${label}`);
           return true;
         },
         async fail(label: string) {
-          activityCalls.push(`fail:${label}`);
+          calls.push(`fail:${label}`);
           return true;
         },
-        async retarget() {
-          activityCalls.push("retarget");
+      }),
+      sleep: async (ms: number) => {
+        calls.push(`sleep:${ms}`);
+      },
+    });
+
+    const result = await zhipinSayHello.execute({ indices: [0, 1] }, createTestContext());
+
+    assert.equal(result.success, true);
+    assert.deepEqual(result.results, [
+      {
+        index: 0,
+        candidateName: "赵慧珍",
+        candidateId: "candidate-1",
+        success: true,
+      },
+      {
+        index: 1,
+        candidateName: "赵慧珍",
+        candidateId: "candidate-1",
+        success: true,
+      },
+    ]);
+    assert.deepEqual(calls, [
+      "begin:正在打开推荐列表",
+      "wait-list",
+      "begin:正在批量打招呼",
+      "highlight:.candidate-card-wrap, [data-geek], .geek-item",
+      "greet:0",
+      "timing:650:140:1200",
+      "point:120:240",
+      "sleep:2400",
+      "greet:1",
+      "timing:650:140:1200",
+      "point:120:240",
+      "succeed:已完成 2/2 位候选人",
+      "close",
+    ]);
+  });
+
+  it("fails closed when the native recommend list is unavailable", async () => {
+    const nativePage = {
+      async waitForRecommendList() {
+        return false;
+      },
+      close() {},
+    } as unknown as ZhipinNativePagePort;
+
+    setZhipinSayHelloDepsForTests({
+      openNativePagePort: async () => nativePage,
+      createNativeVisualActivitySession: () => ({
+        async begin() {
+          return true;
+        },
+        async highlightSelector() {
+          return true;
+        },
+        async highlightPoint() {
+          return true;
+        },
+        async succeed() {
+          return true;
+        },
+        async fail() {
           return true;
         },
       }),
     });
 
-    const result = await zhipinSayHello.execute({ indices: [0] }, createTestContext());
+    const result = await zhipinSayHello.execute({ indices: [2] }, createTestContext());
 
-    assert.equal(result.success, true);
-    assert.deepEqual(cursorCalls, ["move", "click"]);
-    assert.deepEqual(cursorOptions, [
-      { durationMs: 90, settleMs: 20, target },
-      { pulseDurationMs: 160, target },
-    ]);
-    assert.deepEqual(activityCalls, [
-      "begin:正在打开推荐列表",
-      "retarget",
-      "begin:正在打招呼",
-      "highlight-selector:.candidate-card-wrap, [data-geek], .geek-item",
-      "highlight-locator",
-      "succeed:已完成 1/1 位候选人",
-    ]);
+    assert.equal(result.success, false);
+    assert.equal(result.results[0]?.error, "推荐列表未加载");
   });
 });

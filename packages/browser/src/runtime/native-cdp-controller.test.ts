@@ -64,14 +64,19 @@ class FakeNativeCdpWebSocket implements NativeCdpWebSocketLike {
   addEventListener(type: "close", listener: () => void): void;
   addEventListener(
     type: keyof ListenerMap,
-    listener: (() => void) | ((event: Event) => void) | ((event: Event & { readonly data?: unknown }) => void),
+    listener:
+      | (() => void)
+      | ((event: Event) => void)
+      | ((event: Event & { readonly data?: unknown }) => void),
   ): void {
     switch (type) {
       case "open":
         this.listeners.open.add(listener as () => void);
         break;
       case "message":
-        this.listeners.message.add(listener as (event: Event & { readonly data?: unknown }) => void);
+        this.listeners.message.add(
+          listener as (event: Event & { readonly data?: unknown }) => void,
+        );
         break;
       case "error":
         this.listeners.error.add(listener as (event: Event) => void);
@@ -91,14 +96,19 @@ class FakeNativeCdpWebSocket implements NativeCdpWebSocketLike {
   removeEventListener(type: "close", listener: () => void): void;
   removeEventListener(
     type: keyof ListenerMap,
-    listener: (() => void) | ((event: Event) => void) | ((event: Event & { readonly data?: unknown }) => void),
+    listener:
+      | (() => void)
+      | ((event: Event) => void)
+      | ((event: Event & { readonly data?: unknown }) => void),
   ): void {
     switch (type) {
       case "open":
         this.listeners.open.delete(listener as () => void);
         break;
       case "message":
-        this.listeners.message.delete(listener as (event: Event & { readonly data?: unknown }) => void);
+        this.listeners.message.delete(
+          listener as (event: Event & { readonly data?: unknown }) => void,
+        );
         break;
       case "error":
         this.listeners.error.delete(listener as (event: Event) => void);
@@ -253,11 +263,27 @@ test("normal allowlist methods do not send Runtime.enable", async () => {
   const mouseCommand = socket.takeSentCommand();
   socket.respond(mouseCommand.id, {});
 
+  const keyPromise = controller.dispatchKeyEvent({
+    type: "rawKeyDown",
+    key: "a",
+    code: "KeyA",
+    windowsVirtualKeyCode: 65,
+    modifiers: 4,
+  });
+  const keyCommand = socket.takeSentCommand();
+  socket.respond(keyCommand.id, {});
+
+  const insertPromise = controller.insertText("hello");
+  const insertCommand = socket.takeSentCommand();
+  socket.respond(insertCommand.id, {});
+
   await documentPromise;
   await frontPromise;
   assert.equal((await frameTreePromise).frame.id, "main-frame");
   assert.equal(await worldPromise, 99);
   await mousePromise;
+  await keyPromise;
+  await insertPromise;
 
   assert.equal(documentCommand.method, "DOM.getDocument");
   assert.equal(frontCommand.method, "Page.bringToFront");
@@ -267,11 +293,18 @@ test("normal allowlist methods do not send Runtime.enable", async () => {
   assert.equal(mouseCommand.method, "Input.dispatchMouseEvent");
   assert.equal((mouseCommand.params as Record<string, unknown>)["buttons"], 0);
   assert.equal((mouseCommand.params as Record<string, unknown>)["deltaY"], 480);
+  assert.equal(keyCommand.method, "Input.dispatchKeyEvent");
+  assert.equal((keyCommand.params as Record<string, unknown>)["key"], "a");
+  assert.equal((keyCommand.params as Record<string, unknown>)["modifiers"], 4);
+  assert.equal(insertCommand.method, "Input.insertText");
+  assert.deepEqual(insertCommand.params, { text: "hello" });
   assert.notEqual(documentCommand.method, "Runtime.enable");
   assert.notEqual(frontCommand.method, "Runtime.enable");
   assert.notEqual(frameTreeCommand.method, "Runtime.enable");
   assert.notEqual(worldCommand.method, "Runtime.enable");
   assert.notEqual(mouseCommand.method, "Runtime.enable");
+  assert.notEqual(keyCommand.method, "Runtime.enable");
+  assert.notEqual(insertCommand.method, "Runtime.enable");
   controller.close();
 });
 

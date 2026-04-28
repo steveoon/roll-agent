@@ -1,6 +1,14 @@
 import { defineTool } from "@roll-agent/sdk";
 import { z } from "zod";
 import { getContextManager } from "../runtime-holder.ts";
+import {
+  composeResumeCanvasArea,
+  ZHIPIN_RESUME_CANVAS_SELECTOR,
+  ZHIPIN_RESUME_IFRAME_SELECTOR,
+  ZHIPIN_RESUME_RECOMMEND_FRAME_NAME,
+  ZHIPIN_RESUME_RECOMMEND_FRAME_SELECTOR,
+  ZHIPIN_RESUME_RECOMMEND_FRAME_URL_MARKER,
+} from "../pages/zhipin/resume-dom-contract.ts";
 
 const CanvasPositionSchema = z.object({
   x: z.number(),
@@ -29,25 +37,26 @@ export const zhipinLocateResumeCanvas = defineTool({
 
     try {
       const recommendFrame =
-        page.frame("recommendFrame") ?? page.frames().find((f) => f.url().includes("recommend"));
+        page.frame(ZHIPIN_RESUME_RECOMMEND_FRAME_NAME) ??
+        page
+          .frames()
+          .find((frame) => frame.url().includes(ZHIPIN_RESUME_RECOMMEND_FRAME_URL_MARKER));
       if (!recommendFrame) return { success: false, error: "未找到推荐页 iframe" };
 
-      const resumeFrameHandle = await recommendFrame.$('iframe[src*="c-resume"]');
+      const resumeFrameHandle = await recommendFrame.$(ZHIPIN_RESUME_IFRAME_SELECTOR);
       if (!resumeFrameHandle) return { success: false, error: "未找到简历 iframe" };
 
       const resumeFrame = await resumeFrameHandle.contentFrame();
       if (!resumeFrame) return { success: false, error: "无法访问简历 iframe 内容" };
 
       try {
-        await resumeFrame.waitForSelector("canvas#resume, div#resume canvas", { timeout: 5_000 });
+        await resumeFrame.waitForSelector(ZHIPIN_RESUME_CANVAS_SELECTOR, { timeout: 5_000 });
       } catch {
         return { success: false, error: "简历 canvas 未加载" };
       }
 
-      const canvasInfo = await resumeFrame.evaluate(() => {
-        const canvas = document.querySelector(
-          "canvas#resume, div#resume canvas",
-        ) as HTMLCanvasElement | null;
+      const canvasInfo = await resumeFrame.evaluate((canvasSelector: string) => {
+        const canvas = document.querySelector(canvasSelector) as HTMLCanvasElement | null;
         if (!canvas) return null;
         const rect = canvas.getBoundingClientRect();
         return {
@@ -58,37 +67,38 @@ export const zhipinLocateResumeCanvas = defineTool({
           x: rect.x,
           y: rect.y,
         };
-      });
+      }, ZHIPIN_RESUME_CANVAS_SELECTOR);
       if (!canvasInfo) return { success: false, error: "无法获取 canvas 信息" };
 
-      const recommendFrameRect = await page.evaluate(() => {
-        const iframe = document.querySelector("#recommendFrame") as HTMLIFrameElement | null;
+      const recommendFrameRect = await page.evaluate((frameSelector: string) => {
+        const iframe = document.querySelector(frameSelector) as HTMLIFrameElement | null;
         if (!iframe) return null;
         const rect = iframe.getBoundingClientRect();
         return { x: rect.x, y: rect.y };
-      });
+      }, ZHIPIN_RESUME_RECOMMEND_FRAME_SELECTOR);
 
-      const resumeFrameRect = await recommendFrame.evaluate(() => {
-        const iframe = document.querySelector(
-          'iframe[src*="c-resume"]',
-        ) as HTMLIFrameElement | null;
+      const resumeFrameRect = await recommendFrame.evaluate((resumeIframeSelector: string) => {
+        const iframe = document.querySelector(resumeIframeSelector) as HTMLIFrameElement | null;
         if (!iframe) return null;
         const rect = iframe.getBoundingClientRect();
         return { x: rect.x, y: rect.y };
+      }, ZHIPIN_RESUME_IFRAME_SELECTOR);
+
+      const screenshotArea = composeResumeCanvasArea({
+        recommendFrameRect,
+        resumeFrameRect,
+        canvasRect: {
+          x: canvasInfo.x,
+          y: canvasInfo.y,
+          width: canvasInfo.clientWidth,
+          height: canvasInfo.clientHeight,
+        },
       });
 
-      const offsetX = (recommendFrameRect?.x ?? 0) + (resumeFrameRect?.x ?? 0);
-      const offsetY = (recommendFrameRect?.y ?? 0) + (resumeFrameRect?.y ?? 0);
-
-      ctx.logger.info(`Canvas located at (${offsetX + canvasInfo.x}, ${offsetY + canvasInfo.y})`);
+      ctx.logger.info(`Canvas located at (${screenshotArea.x}, ${screenshotArea.y})`);
       return {
         success: true,
-        screenshotArea: {
-          x: Math.round(offsetX + canvasInfo.x),
-          y: Math.round(offsetY + canvasInfo.y),
-          width: Math.round(canvasInfo.clientWidth),
-          height: Math.round(canvasInfo.clientHeight),
-        },
+        screenshotArea,
         canvasInfo: { width: canvasInfo.width, height: canvasInfo.height },
       };
     } catch (err) {

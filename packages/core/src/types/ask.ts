@@ -16,6 +16,7 @@ export const ASK_VALIDATION_ISSUE_CODES = [
   "requires_explicit_input",
   "invalid_type",
   "invalid_enum",
+  "too_small",
   "unexpected_property",
 ] as const;
 export type AskValidationIssueCode = (typeof ASK_VALIDATION_ISSUE_CODES)[number];

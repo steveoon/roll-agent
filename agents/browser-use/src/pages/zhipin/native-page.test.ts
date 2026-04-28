@@ -5,7 +5,9 @@ import { ZhipinNativePagePort } from "./native-page.ts";
 
 function createPort(
   evaluateJson: (expression: string) => Promise<unknown>,
-  controllerOverrides: Partial<Pick<NativeCdpController, "dispatchMouseEvent">> = {},
+  controllerOverrides: Partial<
+    Pick<NativeCdpController, "dispatchMouseEvent" | "dispatchKeyEvent" | "insertText">
+  > = {},
 ): ZhipinNativePagePort {
   return new ZhipinNativePagePort({
     target: {
@@ -70,6 +72,67 @@ describe("ZhipinNativePagePort", () => {
         messagePreview: "方便聊聊吗",
       },
     ]);
+  });
+
+  it("opens a chat through native candidate matching and mouse input", async () => {
+    const mouseInputs: NativeCdpMouseEventInput[] = [];
+    const port = createPort(
+      async (expression) => {
+        if (expression.includes("location.href.includes")) {
+          return true;
+        }
+        if (expression.includes("items.map((item, idx)")) {
+          return [
+            {
+              conversationId: "conversation-1",
+              candidateId: "geek-1",
+              name: "李四",
+              index: 0,
+              position: "后端工程师",
+              hasUnread: false,
+              unreadCount: 0,
+              lastMessageTime: "昨天",
+              messagePreview: "方便聊聊吗",
+            },
+          ];
+        }
+        if (expression.includes("const expected =")) {
+          assert.match(expression, /conversation-1/);
+          return { found: true, x: 88, y: 216 };
+        }
+        if (expression.includes('const selected = document.querySelector(".geek-item.selected")')) {
+          return {
+            conversationId: "conversation-1",
+            candidateId: "geek-1",
+            candidateName: "李四",
+          };
+        }
+        if (expression.includes('const rootSelectors = [".chat-conversation"')) {
+          return { candidateName: "李四" };
+        }
+        return false;
+      },
+      {
+        async dispatchMouseEvent(input) {
+          mouseInputs.push(input);
+        },
+      },
+    );
+
+    const result = await port.openChat({
+      conversationId: "conversation-1",
+      candidateName: undefined,
+      index: undefined,
+    });
+
+    assert.equal(result.found, true);
+    assert.equal(result.conversationId, "conversation-1");
+    assert.deepEqual(
+      mouseInputs.map((input) => input.type),
+      ["mouseMoved", "mousePressed", "mouseReleased"],
+    );
+    assert.equal(mouseInputs[0]?.x, 88);
+    assert.equal(mouseInputs[0]?.y, 216);
   });
 
   it("scrolls chat candidates through the chat-list surface container resolution", async () => {
@@ -552,6 +615,127 @@ describe("ZhipinNativePagePort", () => {
     assert.equal(result.success, true);
     assert.equal(result.uniqueCount, 1);
     assert.equal(result.items[0]?.candidateId, "candidate-frame-1");
+  });
+
+  it("clicks a recommend greet button without Playwright locators or DOM markers", async () => {
+    const mouseInputs: NativeCdpMouseEventInput[] = [];
+    const port = createPort(
+      async (expression) => {
+        assert.doesNotMatch(expression, /data-roll/);
+        if (expression.includes("hasGreetButton")) {
+          assert.match(expression, /\.candidate-card-wrap/);
+          return {
+            found: true,
+            cardSelector: ".candidate-card-wrap",
+            candidateId: "candidate-1",
+            name: "赵慧珍",
+            hasGreetButton: true,
+          };
+        }
+        if (expression.includes("button.btn.btn-greet")) {
+          return { found: true, x: 160, y: 260 };
+        }
+        return false;
+      },
+      {
+        async dispatchMouseEvent(input) {
+          mouseInputs.push(input);
+        },
+      },
+    );
+
+    const result = await port.clickRecommendGreet(0);
+
+    assert.equal(result.clicked, true);
+    assert.equal(result.candidateId, "candidate-1");
+    assert.deepEqual(
+      mouseInputs.map((input) => input.type),
+      ["mouseMoved", "mousePressed", "mouseReleased"],
+    );
+    assert.equal(mouseInputs[0]?.x, 160);
+    assert.equal(mouseInputs[0]?.y, 260);
+  });
+
+  it("sends chat replies through native focus, key events, insertText, and native send click", async () => {
+    const keyInputs: Array<Record<string, unknown>> = [];
+    const inserted: string[] = [];
+    const mouseInputs: NativeCdpMouseEventInput[] = [];
+    const port = createPort(
+      async (expression) => {
+        if (expression.includes("#boss-chat-editor-input")) {
+          return { found: true, x: 400, y: 700 };
+        }
+        if (expression.includes(".submit-content")) {
+          return { found: true, x: 860, y: 720 };
+        }
+        return false;
+      },
+      {
+        async dispatchMouseEvent(input) {
+          mouseInputs.push(input);
+        },
+        async dispatchKeyEvent(input) {
+          keyInputs.push(input);
+        },
+        async insertText(text) {
+          inserted.push(text);
+        },
+      },
+    );
+
+    const result = await port.sendChatReply("您好，方便沟通吗");
+
+    assert.equal(result.success, true);
+    assert.deepEqual(inserted, ["您好，方便沟通吗"]);
+    assert.equal(
+      keyInputs.some((input) => input["key"] === "Backspace"),
+      true,
+    );
+    assert.equal(
+      keyInputs.some((input) => input["key"] === "a" && input["modifiers"] === 4),
+      true,
+    );
+    assert.equal(
+      keyInputs.some((input) => input["key"] === "a" && input["modifiers"] === 2),
+      true,
+    );
+    assert.equal(mouseInputs.filter((input) => input.type === "mousePressed").length, 2);
+  });
+
+  it("exchanges WeChat through native button and confirm clicks", async () => {
+    let phase = 0;
+    const mouseInputs: NativeCdpMouseEventInput[] = [];
+    const port = createPort(
+      async (expression) => {
+        if (expression.includes("operate-exchange-left")) {
+          phase = 1;
+          return { found: true, x: 720, y: 640 };
+        }
+        if (expression.includes("exchange-tooltip") && expression.includes("return true")) {
+          return true;
+        }
+        if (expression.includes("boss-btn-primary")) {
+          phase = 2;
+          return { found: true, x: 760, y: 520 };
+        }
+        if (expression.includes("message-card-top-wrap")) {
+          return "wxid_12345";
+        }
+        return false;
+      },
+      {
+        async dispatchMouseEvent(input) {
+          mouseInputs.push(input);
+        },
+      },
+    );
+
+    const result = await port.exchangeWechat();
+
+    assert.equal(result.success, true);
+    assert.equal(result.wechatNumber, "wxid_12345");
+    assert.equal(phase, 2);
+    assert.equal(mouseInputs.filter((input) => input.type === "mousePressed").length, 2);
   });
 
   it("clicks sidebar sections through narrow native targets", async () => {

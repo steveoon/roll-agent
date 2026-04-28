@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { afterEach, describe, it } from "node:test";
 import type { AgentContext } from "@roll-agent/sdk";
+import type { ZhipinNativePagePort } from "../pages/zhipin/native-page.ts";
 import {
   setZhipinFilterRecommendCandidatesDepsForTests,
   zhipinFilterRecommendCandidates,
@@ -39,41 +40,43 @@ describe("zhipin_filter_recommend_candidates", () => {
     );
   });
 
-  it("applies the normalized filter request through the page helper", async () => {
+  it("applies the normalized filter request through the native page port", async () => {
     const calls: string[] = [];
-    const target = {};
-    const page = {
-      async bringToFront() {},
-    };
-
-    setZhipinFilterRecommendCandidatesDepsForTests({
-      getContextManager: () =>
-        ({
-          async getPage(platform: string) {
-            assert.equal(platform, "zhipin");
-            return page;
-          },
-        }) as never,
-      getRecommendTarget: () => target as never,
-      waitForRecommendFilterSurface: async () => true,
-      applyRecommendFilter: async (_page, _target, requested, visualFeedback) => {
-        assert.equal(_page, page);
-        assert.equal(_target, target);
-        assert.ok(visualFeedback);
+    const nativePage = {
+      async bringToFront() {
+        calls.push("front");
+      },
+      async waitForRecommendList(timeoutMs?: number) {
+        calls.push(`wait-list:${timeoutMs}`);
+        return true;
+      },
+      async applyRecommendFilter(
+        requested: {
+          readonly ageMin?: number;
+          readonly ageMax?: number;
+          readonly gender: string;
+          readonly activity: string;
+        },
+        options?: {
+          readonly preClickDelayMs?: number;
+          readonly pressDurationMs?: number;
+          readonly settleMs?: number;
+          readonly onTargetResolved?: (target: { x: number; y: number }) => Promise<void>;
+        },
+      ) {
+        calls.push(`apply:${requested.gender}:${requested.activity}`);
+        calls.push(
+          `timing:${options?.preClickDelayMs}:${options?.pressDurationMs}:${options?.settleMs}`,
+        );
         assert.deepEqual(requested, {
           ageMin: 20,
           ageMax: 40,
           gender: "男",
           activity: "刚刚活跃",
         });
-        await visualFeedback.moveToLocator(page as never, {} as never, {
-          target: target as never,
-        });
-        await visualFeedback.showClickOnLocator(page as never, {} as never, {
-          target: target as never,
-        });
+        await options?.onTargetResolved?.({ x: 300, y: 420 });
         return {
-          status: "applied",
+          status: "applied" as const,
           requested,
           applied: {
             ageMin: 20,
@@ -84,15 +87,14 @@ describe("zhipin_filter_recommend_candidates", () => {
           filterButtonText: "筛选·3",
         };
       },
-      moveVisualCursorToLocator: async (_page, _locator, options) => {
-        calls.push(`cursor-move:${String(options?.target === target)}`);
-        return true;
+      close() {
+        calls.push("close");
       },
-      showVisualClickOnLocator: async (_page, _locator, options) => {
-        calls.push(`cursor-click:${String(options?.target === target)}`);
-        return true;
-      },
-      createVisualActivitySession: () => ({
+    } as unknown as ZhipinNativePagePort;
+
+    setZhipinFilterRecommendCandidatesDepsForTests({
+      openNativePagePort: async () => nativePage,
+      createNativeVisualActivitySession: () => ({
         async begin(label: string) {
           calls.push(`begin:${label}`);
           return true;
@@ -101,8 +103,8 @@ describe("zhipin_filter_recommend_candidates", () => {
           calls.push(`highlight:${selector}`);
           return true;
         },
-        async retarget() {
-          calls.push("retarget");
+        async highlightPoint(x: number, y: number) {
+          calls.push(`point:${x}:${y}`);
           return true;
         },
         async succeed(label: string) {
@@ -130,44 +132,48 @@ describe("zhipin_filter_recommend_candidates", () => {
     assert.equal(result.status, "applied");
     assert.equal(result.filterButtonText, "筛选·3");
     assert.deepEqual(calls, [
+      "front",
       "begin:正在打开推荐筛选",
-      "retarget",
+      "wait-list:3000",
       "begin:正在设置推荐筛选",
       "highlight:.recommend-filter .filter-label, .filter-label-wrap .filter-label, .filter-label",
-      "cursor-move:true",
-      "cursor-click:true",
+      "apply:男:刚刚活跃",
+      "timing:350:130:600",
+      "point:300:420",
       "succeed:已应用推荐筛选",
+      "close",
     ]);
   });
 
-  it("returns structured failure when the helper reports a VIP gate", async () => {
-    const target = {};
-    const page = {
+  it("returns structured failure when the native helper reports a VIP gate", async () => {
+    const nativePage = {
       async bringToFront() {},
-    };
+      async waitForRecommendList() {
+        return true;
+      },
+      async applyRecommendFilter(requested: {
+        readonly gender: string;
+        readonly activity: string;
+      }) {
+        return {
+          status: "requires_vip" as const,
+          requested,
+          error: "筛选条件触发 VIP 弹窗",
+        };
+      },
+      close() {},
+    } as unknown as ZhipinNativePagePort;
 
     setZhipinFilterRecommendCandidatesDepsForTests({
-      getContextManager: () =>
-        ({
-          async getPage() {
-            return page;
-          },
-        }) as never,
-      getRecommendTarget: () => target as never,
-      waitForRecommendFilterSurface: async () => true,
-      applyRecommendFilter: async (_page, _target, requested) => ({
-        status: "requires_vip",
-        requested,
-        error: "筛选条件触发 VIP 弹窗",
-      }),
-      createVisualActivitySession: () => ({
+      openNativePagePort: async () => nativePage,
+      createNativeVisualActivitySession: () => ({
         async begin() {
           return true;
         },
         async highlightSelector() {
           return true;
         },
-        async retarget() {
+        async highlightPoint() {
           return true;
         },
         async succeed() {
