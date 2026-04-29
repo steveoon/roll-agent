@@ -1,8 +1,10 @@
 import assert from "node:assert/strict";
 import { afterEach, describe, it } from "node:test";
 import type { AgentContext } from "@roll-agent/sdk";
-import type { NativeRecommendJobSelectRequest } from "../pages/zhipin/native-page.ts";
-import type { ZhipinNativePagePort } from "../pages/zhipin/native-page.ts";
+import type {
+  NativeRecommendJobSelectRequest,
+  ZhipinNativePagePort,
+} from "../pages/zhipin/native-page.ts";
 import {
   setZhipinSelectRecommendJobDepsForTests,
   zhipinSelectRecommendJob,
