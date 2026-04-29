@@ -1,6 +1,11 @@
 import { isVisualActivityEnabled } from "./visual-activity.ts";
 import type { VisualActivityTone } from "./visual-activity.ts";
 import { isVisualCursorEnabled } from "./visual-cursor.ts";
+import type {
+  NativeMouseClickPreview,
+  NativeMouseMotionObserver,
+  NativeMouseMotionPreview,
+} from "./native-mouse-motion.ts";
 
 type NativeVisualTarget = {
   evaluateJson<T = unknown>(expression: string): Promise<T>;
@@ -12,13 +17,8 @@ type NativeVisualHighlightOptions = {
   readonly tone?: VisualActivityTone;
 };
 
-type NativeVisualPointOptions = {
-  readonly durationMs?: number;
-};
-
 const DEFAULT_REGION_PADDING = 14;
 const DEFAULT_COMPLETION_LINGER_MS = 720;
-const DEFAULT_CURSOR_MOVE_DURATION_MS = 180;
 
 function buildNativeVisualScript(args: unknown): string {
   return `(() => {
@@ -258,42 +258,127 @@ function buildNativeVisualScript(args: unknown): string {
       return root;
     };
 
-    const readCursorPoint = () => {
-      if (args.cursor?.point) {
-        const x = Number(args.cursor.point.x);
-        const y = Number(args.cursor.point.y);
-        if (Number.isFinite(x) && Number.isFinite(y)) {
-          return {
-            centerX: Math.round(x),
-            centerY: Math.round(y)
-          };
-        }
-      }
+    const readCursorPath = () => {
+      if (!Array.isArray(args.cursor?.path?.points)) return null;
+      const points = args.cursor.path.points
+        .map((point) => {
+          const x = Number(point?.x);
+          const y = Number(point?.y);
+          return Number.isFinite(x) && Number.isFinite(y)
+            ? { centerX: Math.round(x), centerY: Math.round(y) }
+            : null;
+        })
+        .filter((point) => point !== null);
+      return points.length > 0 ? points : null;
+    };
 
-      if (!args.cursor?.selector) return null;
-      const rect = readRect(args.cursor.selector, 0);
-      if (!rect) return null;
+    const readCursorClick = () => {
+      const point = args.cursor?.click?.point;
+      const x = Number(point?.x);
+      const y = Number(point?.y);
+      if (!Number.isFinite(x) || !Number.isFinite(y)) return null;
       return {
-        centerX: rect.centerX,
-        centerY: rect.centerY
+        point: { centerX: Math.round(x), centerY: Math.round(y) },
+        durationMs: Math.max(Number(args.cursor?.click?.durationMs ?? 620), 0)
       };
     };
 
+    const renderClickPulse = (root, point, durationMs) => {
+      const createPulse = (size, border, background, shadow, startScale, endScale, delayMs) => {
+        const radius = size / 2;
+        const pulse = document.createElement("div");
+        pulse.setAttribute("aria-hidden", "true");
+        pulse.style.position = "fixed";
+        pulse.style.left = "0";
+        pulse.style.top = "0";
+        pulse.style.width = size + "px";
+        pulse.style.height = size + "px";
+        pulse.style.borderRadius = "9999px";
+        pulse.style.border = border;
+        pulse.style.background = background;
+        pulse.style.boxShadow = shadow;
+        pulse.style.pointerEvents = "none";
+        pulse.style.opacity = "0.96";
+        pulse.style.transformOrigin = "center center";
+        pulse.style.transform =
+          "translate(" + (point.centerX - radius) + "px, " + (point.centerY - radius) + "px) scale(" + startScale + ")";
+        pulse.style.transition =
+          "transform " + durationMs + "ms cubic-bezier(0.16, 1, 0.3, 1), opacity " + durationMs + "ms ease-out";
+        root.append(pulse);
+
+        window.setTimeout(() => {
+          window.requestAnimationFrame(() => {
+            pulse.style.opacity = "0";
+            pulse.style.transform =
+              "translate(" + (point.centerX - radius) + "px, " + (point.centerY - radius) + "px) scale(" + endScale + ")";
+          });
+        }, delayMs);
+
+        window.setTimeout(() => {
+          pulse.remove();
+        }, durationMs + delayMs + 80);
+      };
+
+      createPulse(
+        28,
+        "3px solid rgba(45, 212, 191, 0.98)",
+        "rgba(20, 184, 166, 0.24)",
+        "0 0 0 5px rgba(20, 184, 166, 0.18), 0 0 26px rgba(20, 184, 166, 0.34)",
+        0.55,
+        2.35,
+        0
+      );
+      createPulse(
+        14,
+        "2px solid rgba(255, 255, 255, 0.95)",
+        "rgba(255, 255, 255, 0.34)",
+        "0 0 18px rgba(45, 212, 191, 0.45)",
+        0.7,
+        1.55,
+        65
+      );
+    };
+
     const renderCursor = () => {
-      const point = readCursorPoint();
+      const path = readCursorPath();
+      const click = readCursorClick();
+      const point = path ? path[path.length - 1] : click?.point ?? null;
       if (!point) return;
-      ensureCursorRoot();
+      const root = ensureCursorRoot();
       const pointer = document.getElementById(cursorPointerId);
       if (!pointer) return;
-      const state = window[cursorStateKey];
       const targetX = point.centerX - 2;
       const targetY = point.centerY - 2;
-      pointer.style.transition = state
-        ? "transform " + (args.cursor.durationMs ?? 180) + "ms cubic-bezier(0.22, 1, 0.36, 1), opacity 120ms ease"
-        : "opacity 120ms ease";
+      if (path && path.length > 1 && typeof pointer.animate === "function") {
+        for (const animation of pointer.getAnimations()) {
+          animation.cancel();
+        }
+        pointer.style.opacity = "1";
+        const keyframes = path.map((entry) => ({
+          transform: "translate(" + (entry.centerX - 2) + "px, " + (entry.centerY - 2) + "px)"
+        }));
+        const duration = Math.max(args.cursor.path.durationMs ?? 180, 0);
+        const animation = pointer.animate(keyframes, {
+          duration,
+          easing: "cubic-bezier(0.22, 1, 0.36, 1)",
+          fill: "forwards"
+        });
+        animation.onfinish = () => {
+          pointer.style.transform = "translate(" + targetX + "px, " + targetY + "px)";
+        };
+        window[cursorStateKey] = { x: point.centerX, y: point.centerY };
+        if (click) {
+          renderClickPulse(root, click.point, click.durationMs);
+        }
+        return;
+      }
+      pointer.style.transition = "opacity 120ms ease";
       pointer.style.opacity = "1";
       pointer.style.transform = "translate(" + targetX + "px, " + targetY + "px)";
       window[cursorStateKey] = { x: point.centerX, y: point.centerY };
+      if (click) {
+        renderClickPulse(root, click.point, click.durationMs);
+      }
     };
 
     renderActivity();
@@ -302,7 +387,7 @@ function buildNativeVisualScript(args: unknown): string {
   })()`;
 }
 
-export class NativeVisualActivitySession {
+export class NativeVisualActivitySession implements NativeMouseMotionObserver {
   private readonly target: NativeVisualTarget;
 
   constructor(target: NativeVisualTarget) {
@@ -339,32 +424,41 @@ export class NativeVisualActivitySession {
             },
           }
         : {}),
-      ...(isVisualCursorEnabled()
-        ? {
-            cursor: {
-              selector,
-              durationMs: DEFAULT_CURSOR_MOVE_DURATION_MS,
-            },
-          }
-        : {}),
     };
 
-    if (!("activity" in payload) && !("cursor" in payload)) {
+    if (!("activity" in payload)) {
       return false;
     }
 
     return await this.render(payload);
   }
 
-  async highlightPoint(x: number, y: number, options: NativeVisualPointOptions = {}): Promise<boolean> {
-    if (!isVisualCursorEnabled()) {
-      return false;
+  async previewMouseMotion(preview: NativeMouseMotionPreview): Promise<void> {
+    if (!isVisualCursorEnabled() || preview.points.length === 0) {
+      return;
     }
 
-    return await this.render({
+    await this.render({
       cursor: {
-        point: { x, y },
-        durationMs: options.durationMs ?? DEFAULT_CURSOR_MOVE_DURATION_MS,
+        path: {
+          points: preview.points,
+          durationMs: preview.durationMs,
+        },
+      },
+    });
+  }
+
+  async previewMouseClick(preview: NativeMouseClickPreview): Promise<void> {
+    if (!isVisualCursorEnabled()) {
+      return;
+    }
+
+    await this.render({
+      cursor: {
+        click: {
+          point: preview.point,
+          durationMs: preview.durationMs,
+        },
       },
     });
   }

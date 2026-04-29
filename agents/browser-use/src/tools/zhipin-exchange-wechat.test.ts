@@ -61,13 +61,11 @@ describe("zhipin_exchange_wechat", () => {
         readonly preClickDelayMs?: number;
         readonly pressDurationMs?: number;
         readonly settleMs?: number;
-        readonly onTargetResolved?: (target: { x: number; y: number }) => Promise<void>;
       }) {
         calls.push("exchange");
         calls.push(
           `timing:${options?.preClickDelayMs}:${options?.pressDurationMs}:${options?.settleMs}`,
         );
-        await options?.onTargetResolved?.({ x: 660, y: 520 });
         return { success: true, exchanged: true, wechatNumber: "wxid_12345" };
       },
       close() {
@@ -82,10 +80,7 @@ describe("zhipin_exchange_wechat", () => {
           calls.push(`begin:${label}`);
           return true;
         },
-        async highlightPoint(x: number, y: number) {
-          calls.push(`point:${x}:${y}`);
-          return true;
-        },
+        async previewMouseMotion() {},
         async succeed(label: string) {
           calls.push(`succeed:${label}`);
           return true;
@@ -113,7 +108,6 @@ describe("zhipin_exchange_wechat", () => {
       "open:conversation-1",
       "exchange",
       "timing:900:160:1100",
-      "point:660:520",
       "succeed:已完成换微信",
       "close",
     ]);

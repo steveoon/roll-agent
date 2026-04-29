@@ -14,7 +14,7 @@ metadata:
 - 先启动 `browser-use-agent` HTTP 常驻服务；浏览器 session 跨调用持久。
 - 完整 `inputSchema` 以 `roll agent tools browser-use-agent --json` 为准。
 - 页内反馈默认开启：
-  - `BROWSER_VISUAL_CURSOR`：点击/输入前显示虚拟指针和点击波纹。
+  - `BROWSER_VISUAL_CURSOR`：native CDP 点击/拖拽/滚动前显示同源虚拟鼠标轨迹和点击波纹；简历弹窗等 Playwright-backed 工具仍使用旧虚拟指针。
   - `BROWSER_VISUAL_ACTIVITY`：读取、识别、提取等操作显示状态胶囊和区域高亮。
 - 需要关闭反馈时，将对应环境变量设为 `false`。
 

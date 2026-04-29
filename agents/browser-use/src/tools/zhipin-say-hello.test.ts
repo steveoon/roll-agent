@@ -36,14 +36,12 @@ describe("zhipin_say_hello", () => {
           readonly preClickDelayMs?: number;
           readonly pressDurationMs?: number;
           readonly settleMs?: number;
-          readonly onTargetResolved?: (target: { x: number; y: number }) => Promise<void>;
         },
       ) {
         calls.push(`greet:${index}`);
         calls.push(
           `timing:${options?.preClickDelayMs}:${options?.pressDurationMs}:${options?.settleMs}`,
         );
-        await options?.onTargetResolved?.({ x: 120, y: 240 });
         return {
           found: true,
           cardSelector: ".candidate-card-wrap",
@@ -69,10 +67,7 @@ describe("zhipin_say_hello", () => {
           calls.push(`highlight:${selector}`);
           return true;
         },
-        async highlightPoint(x: number, y: number) {
-          calls.push(`point:${x}:${y}`);
-          return true;
-        },
+        async previewMouseMotion() {},
         async succeed(label: string) {
           calls.push(`succeed:${label}`);
           return true;
@@ -111,11 +106,9 @@ describe("zhipin_say_hello", () => {
       "highlight:.candidate-card-wrap, [data-geek], .geek-item",
       "greet:0",
       "timing:650:140:1200",
-      "point:120:240",
       "sleep:2400",
       "greet:1",
       "timing:650:140:1200",
-      "point:120:240",
       "succeed:已完成 2/2 位候选人",
       "close",
     ]);
@@ -138,9 +131,7 @@ describe("zhipin_say_hello", () => {
         async highlightSelector() {
           return true;
         },
-        async highlightPoint() {
-          return true;
-        },
+        async previewMouseMotion() {},
         async succeed() {
           return true;
         },

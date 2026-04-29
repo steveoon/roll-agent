@@ -19,7 +19,7 @@ const OutputSchema = z.object({
 
 type NativeVisualActivitySessionLike = Pick<
   NativeVisualActivitySession,
-  "begin" | "highlightSelector" | "succeed" | "fail"
+  "begin" | "highlightSelector" | "previewMouseMotion" | "succeed" | "fail"
 >;
 
 type ZhipinOpenChatDeps = {
@@ -84,6 +84,7 @@ export const zhipinOpenChat = defineTool({
         candidateName: input.candidateName,
         index: input.index,
         preferUnread: input.preferUnread ?? false,
+        ...(session !== undefined ? { motionObserver: session } : {}),
       });
       if (!result.found) {
         await session.fail("打开聊天失败");

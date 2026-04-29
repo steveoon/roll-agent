@@ -25,7 +25,7 @@ const SAY_HELLO_CLICK_SETTLE_MS = 1_200;
 
 type NativeVisualActivitySessionLike = Pick<
   NativeVisualActivitySession,
-  "begin" | "highlightSelector" | "highlightPoint" | "succeed" | "fail"
+  "begin" | "highlightSelector" | "previewMouseMotion" | "succeed" | "fail"
 >;
 
 type ZhipinSayHelloDeps = {
@@ -112,9 +112,7 @@ export const zhipinSayHello = defineTool({
           preClickDelayMs: SAY_HELLO_CLICK_PRE_DELAY_MS,
           pressDurationMs: SAY_HELLO_CLICK_PRESS_MS,
           settleMs: SAY_HELLO_CLICK_SETTLE_MS,
-          onTargetResolved: async (target) => {
-            await session?.highlightPoint(target.x, target.y);
-          },
+          ...(session !== undefined ? { motionObserver: session } : {}),
         });
 
         results.push({

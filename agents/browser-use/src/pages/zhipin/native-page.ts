@@ -5,6 +5,11 @@ import type {
   NativeCdpController,
   NativeCdpFrameTree,
 } from "@roll-agent/browser";
+import {
+  NativeMouseMotionController,
+  type NativeMouseMotionObserver,
+  type NativeMousePoint,
+} from "../../native-mouse-motion.ts";
 import { matchesPlatformHost } from "../../platforms.ts";
 import { getContextManager, getRuntime } from "../../runtime-holder.ts";
 import type {
@@ -122,6 +127,7 @@ export type ReadNativeRecommendCandidatesOptions = {
 export type OpenNativeChatOptions = ChatTarget & {
   readonly preferUnread?: boolean;
   readonly maxScrolls?: number;
+  readonly motionObserver?: NativeMouseMotionObserver;
 };
 
 export type NativeChatMessage = {
@@ -206,7 +212,7 @@ type NativeFrameOffset = {
 };
 
 type NativeClickOptions = {
-  readonly onTargetResolved?: (target: NativeClickTarget) => Promise<void>;
+  readonly motionObserver?: NativeMouseMotionObserver;
   readonly preClickDelayMs?: number;
   readonly pressDurationMs?: number;
   readonly settleMs?: number;
@@ -222,11 +228,11 @@ function delay(ms: number): Promise<void> {
   });
 }
 
-async function delayIfPositive(ms: number | undefined): Promise<void> {
-  const safeMs = Math.max(0, Math.floor(ms ?? 0));
-  if (safeMs > 0) {
-    await delay(safeMs);
-  }
+function toNativeMousePoint(target: NativeClickTarget): NativeMousePoint {
+  return {
+    x: target.x,
+    y: target.y,
+  };
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -662,12 +668,14 @@ export async function openZhipinNativePagePort(
 export class ZhipinNativePagePort {
   private readonly target: BrowserInspectablePage;
   private readonly controller: NativeCdpController;
+  private readonly mouse: NativeMouseMotionController;
   private recommendFrameContextId: number | undefined;
   private recommendFrameContextFrameId: string | undefined;
 
   constructor(options: ZhipinNativePagePortOptions) {
     this.target = options.target;
     this.controller = options.controller;
+    this.mouse = new NativeMouseMotionController(options.controller);
   }
 
   get targetId(): string {
@@ -865,32 +873,14 @@ export class ZhipinNativePagePort {
       return false;
     }
 
-    await options.onTargetResolved?.(target);
-    await delayIfPositive(options.preClickDelayMs);
-    await this.controller.dispatchMouseEvent({
-      type: "mouseMoved",
-      x: target.x,
-      y: target.y,
-      buttons: 0,
+    await this.mouse.click(toNativeMousePoint(target), {
+      ...(options.motionObserver !== undefined ? { motionObserver: options.motionObserver } : {}),
+      ...(options.preClickDelayMs !== undefined
+        ? { preClickDelayMs: options.preClickDelayMs }
+        : {}),
+      pressDurationMs: options.pressDurationMs ?? NATIVE_CLICK_PRESS_MS,
+      settleMs: options.settleMs ?? NATIVE_CLICK_SETTLE_MS,
     });
-    await this.controller.dispatchMouseEvent({
-      type: "mousePressed",
-      x: target.x,
-      y: target.y,
-      button: "left",
-      buttons: 1,
-      clickCount: 1,
-    });
-    await delay(options.pressDurationMs ?? NATIVE_CLICK_PRESS_MS);
-    await this.controller.dispatchMouseEvent({
-      type: "mouseReleased",
-      x: target.x,
-      y: target.y,
-      button: "left",
-      buttons: 0,
-      clickCount: 1,
-    });
-    await delay(options.settleMs ?? NATIVE_CLICK_SETTLE_MS);
     return true;
   }
 
@@ -928,19 +918,11 @@ export class ZhipinNativePagePort {
   ): Promise<boolean> {
     const selector =
       section === "chat" ? ZHIPIN_SELECTORS.nav.chatLink : ZHIPIN_SELECTORS.nav.recommendLink;
-    const directClick = await this.controller.locator(selector).click({
-      settleMs: NATIVE_CLICK_SETTLE_MS,
-      ...(options.onTargetResolved !== undefined
-        ? { onTargetResolved: options.onTargetResolved }
-        : {}),
-    });
-    if (directClick.success) {
-      return true;
-    }
 
     const target = toNativeClickTarget(
       await this.evaluateJson(
         `(() => {
+          const selector = ${JSON.stringify(selector)};
           const labels = ${JSON.stringify(section === "chat" ? ["沟通", "消息"] : ["推荐牛人"])};
           const normalizedLabels = labels.map((label) => label.replace(/\\s+/g, ""));
           const interactiveSelector = 'a, button, [role="link"], [role="button"]';
@@ -979,6 +961,13 @@ export class ZhipinNativePagePort {
           };
 
           const sidebar = document.querySelector(${JSON.stringify(ZHIPIN_SELECTORS.nav.sidebar)}) ?? document;
+          const selectorTargets = Array.from(document.querySelectorAll(selector))
+            .filter((element) => visible(element))
+            .sort((left, right) => area(left) - area(right));
+          if (selectorTargets[0]) {
+            return readCenter(selectorTargets[0]);
+          }
+
           const interactiveTargets = Array.from(sidebar.querySelectorAll(interactiveSelector))
             .filter((element) => visible(element) && matchesInteractiveLabel(element))
             .sort((left, right) => area(left) - area(right));
@@ -1002,31 +991,7 @@ export class ZhipinNativePagePort {
       return false;
     }
 
-    await options.onTargetResolved?.(target);
-    await this.controller.dispatchMouseEvent({
-      type: "mouseMoved",
-      x: target.x,
-      y: target.y,
-      buttons: 0,
-    });
-    await this.controller.dispatchMouseEvent({
-      type: "mousePressed",
-      x: target.x,
-      y: target.y,
-      button: "left",
-      buttons: 1,
-      clickCount: 1,
-    });
-    await this.controller.dispatchMouseEvent({
-      type: "mouseReleased",
-      x: target.x,
-      y: target.y,
-      button: "left",
-      buttons: 0,
-      clickCount: 1,
-    });
-    await delay(NATIVE_CLICK_SETTLE_MS);
-    return true;
+    return await this.dispatchNativeClick(target, options);
   }
 
   async scrollSurface(
@@ -1134,7 +1099,9 @@ export class ZhipinNativePagePort {
     await this.bringToFront().catch(() => {});
 
     if (!(await this.isChatSurfaceOpen().catch(() => false))) {
-      const clicked = await this.clickSidebarSection("chat");
+      const clicked = await this.clickSidebarSection("chat", {
+        ...(options.motionObserver !== undefined ? { motionObserver: options.motionObserver } : {}),
+      });
       if (!clicked || !(await this.waitForChatSurface())) {
         return {
           found: false,
@@ -1168,7 +1135,11 @@ export class ZhipinNativePagePort {
           : selectChatCandidate(candidates, options);
 
       if (selected !== undefined) {
-        const clicked = await this.clickChatCandidate(selected);
+        const clicked = await this.clickChatCandidate(selected, {
+          ...(options.motionObserver !== undefined
+            ? { motionObserver: options.motionObserver }
+            : {}),
+        });
         if (!clicked) {
           return {
             ...selected,
@@ -1179,7 +1150,11 @@ export class ZhipinNativePagePort {
         await delay(NATIVE_CLICK_SETTLE_MS);
         let ready = await this.waitForNativeChatReady(selected);
         if (!ready) {
-          const retried = await this.clickChatCandidate(selected);
+          const retried = await this.clickChatCandidate(selected, {
+            ...(options.motionObserver !== undefined
+              ? { motionObserver: options.motionObserver }
+              : {}),
+          });
           if (retried) {
             await delay(NATIVE_CLICK_SETTLE_MS);
             ready = await this.waitForNativeChatReady(selected);
@@ -2716,42 +2691,14 @@ export class ZhipinNativePagePort {
     toY: number,
     options: NativeClickOptions = {},
   ): Promise<void> {
-    await options.onTargetResolved?.({ found: true, x: Math.round(fromX), y: Math.round(fromY) });
-    await this.controller.dispatchMouseEvent({
-      type: "mouseMoved",
-      x: Math.round(fromX),
-      y: Math.round(fromY),
-      buttons: 0,
-    });
-    await this.controller.dispatchMouseEvent({
-      type: "mousePressed",
-      x: Math.round(fromX),
-      y: Math.round(fromY),
-      button: "left",
-      buttons: 1,
-      clickCount: 1,
-    });
-    await delay(options.pressDurationMs ?? NATIVE_CLICK_PRESS_MS);
-    const stepCount = 18;
-    for (let step = 1; step <= stepCount; step += 1) {
-      const ratio = step / stepCount;
-      await this.controller.dispatchMouseEvent({
-        type: "mouseMoved",
-        x: Math.round(fromX + (toX - fromX) * ratio),
-        y: Math.round(fromY + (toY - fromY) * ratio),
-        button: "left",
-        buttons: 1,
-      });
-      await delay(24);
-    }
-    await this.controller.dispatchMouseEvent({
-      type: "mouseReleased",
-      x: Math.round(toX),
-      y: Math.round(toY),
-      button: "left",
-      buttons: 0,
-      clickCount: 1,
-    });
+    await this.mouse.drag(
+      { x: fromX, y: fromY },
+      { x: toX, y: toY },
+      {
+        ...(options.motionObserver !== undefined ? { motionObserver: options.motionObserver } : {}),
+        pressDurationMs: options.pressDurationMs ?? NATIVE_CLICK_PRESS_MS,
+      },
+    );
   }
 
   private async dragAgeHandleToRatio(
@@ -3080,7 +3027,10 @@ export class ZhipinNativePagePort {
     return false;
   }
 
-  private async clickChatCandidate(candidate: ChatListItem): Promise<boolean> {
+  private async clickChatCandidate(
+    candidate: ChatListItem,
+    options: NativeClickOptions = {},
+  ): Promise<boolean> {
     const target = toNativeClickTarget(
       await this.evaluateJson(
         `(() => {
@@ -3137,30 +3087,7 @@ export class ZhipinNativePagePort {
       return false;
     }
 
-    await this.controller.dispatchMouseEvent({
-      type: "mouseMoved",
-      x: target.x,
-      y: target.y,
-      buttons: 0,
-    });
-    await this.controller.dispatchMouseEvent({
-      type: "mousePressed",
-      x: target.x,
-      y: target.y,
-      button: "left",
-      buttons: 1,
-      clickCount: 1,
-    });
-    await this.controller.dispatchMouseEvent({
-      type: "mouseReleased",
-      x: target.x,
-      y: target.y,
-      button: "left",
-      buttons: 0,
-      clickCount: 1,
-    });
-
-    return true;
+    return await this.dispatchNativeClick(target, options);
   }
 
   private async readVisibleRecommendCandidates(): Promise<NativeRecommendCandidateCard[]> {
@@ -3590,12 +3517,7 @@ export class ZhipinNativePagePort {
       return undefined;
     }
 
-    await this.controller.dispatchMouseEvent({
-      type: "mouseMoved",
-      x: target.x,
-      y: target.y,
-      buttons: 0,
-    });
+    await this.mouse.moveTo(toNativeMousePoint(target));
     await this.controller.dispatchMouseEvent({
       type: "mouseWheel",
       x: target.x,

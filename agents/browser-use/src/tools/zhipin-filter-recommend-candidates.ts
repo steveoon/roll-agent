@@ -66,7 +66,7 @@ const FILTER_CLICK_SETTLE_MS = 600;
 type FilterRecommendCandidatesInput = z.input<typeof InputSchema>;
 type NativeVisualActivitySessionLike = Pick<
   NativeVisualActivitySession,
-  "begin" | "highlightSelector" | "highlightPoint" | "succeed" | "fail"
+  "begin" | "highlightSelector" | "previewMouseMotion" | "succeed" | "fail"
 >;
 
 type ZhipinFilterRecommendCandidatesDeps = {
@@ -160,9 +160,7 @@ export const zhipinFilterRecommendCandidates = defineTool({
         preClickDelayMs: FILTER_CLICK_PRE_DELAY_MS,
         pressDurationMs: FILTER_CLICK_PRESS_MS,
         settleMs: FILTER_CLICK_SETTLE_MS,
-        onTargetResolved: async (target) => {
-          await session?.highlightPoint(target.x, target.y);
-        },
+        ...(session !== undefined ? { motionObserver: session } : {}),
       });
       if (result.status === "applied") {
         await session.succeed("已应用推荐筛选");
