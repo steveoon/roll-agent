@@ -1,5 +1,11 @@
 # @roll-agent/browser-use-agent
 
+## 0.7.7
+
+### Patch Changes
+
+- [#71](https://github.com/steveoon/roll-agent/pull/71) [`203e573`](https://github.com/steveoon/roll-agent/commit/203e5739477f6ad59180d8bfc9eec59ff3318d30) Thanks [@steveoon](https://github.com/steveoon)! - Slow down native CDP mouse movement previews and make click pulses more visible.
+
 ## 0.7.6
 
 ### Patch Changes
