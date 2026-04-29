@@ -19,6 +19,25 @@
 4. `smart-reply-agent.generate_reply(..., target)`。
 5. `zhipin_send_reply(signedEnvelope)`。
 
+## 推荐岗位筛选
+
+推荐牛人页顶部岗位下拉的稳定主键是 `.job-list .job-item[value]`。
+
+优先级：
+
+1. 已知岗位 `value` 时，调用 `zhipin_select_recommend_job({ jobValue })`。
+2. 只知道标题时，调用 `zhipin_select_recommend_job({ jobName })`；工具会先匹配当前下拉项，未命中再使用下拉搜索框。
+3. `index` 只表示当前下拉快照顺序，筛选、搜索或岗位列表刷新后必须重新读取/选择，不要跨步骤长期保存。
+
+推荐链路：
+
+```text
+zhipin_open_recommend_page()
+  -> zhipin_select_recommend_job({ jobValue | jobName })
+  -> zhipin_filter_recommend_candidates(...)
+  -> zhipin_get_candidate_list(...)
+```
+
 ## 动态列表
 
 BOSS 页面通常不是整页滚动，而是内部容器滚动：
@@ -33,9 +52,10 @@ recommend-list  -> 推荐牛人列表，默认向下滚动，去重主键 candid
 
 1. 业务读取优先用自带 `autoScroll` 的工具：`zhipin_read_messages`、`zhipin_get_candidate_list`。
 2. `zhipin_scroll_view` 只用于显式翻页、调试和补救。
-3. `onlyUnread=true` 时不要依赖 `limit` 提前停止；未读会话可能在首屏之后。
-4. `maxScrolls` 用于成本控制，需要更完整列表时显式调大。
-5. 推荐列表若 `total < maxResults`，先看 `scrollStats.stopReason`：
+3. 只想检查聊天列表是否到顶/到底时调用 `zhipin_scroll_view({ surface: "chat-list", steps: 0 })`，读取顶层 `atTop` / `atBottom` / `canScrollUp` / `canScrollDown` / `position`。
+4. `onlyUnread=true` 时不要依赖 `limit` 提前停止；未读会话可能在首屏之后。
+5. `maxScrolls` 用于成本控制，需要更完整列表时显式调大。
+6. 推荐列表若 `total < maxResults`，先看 `scrollStats.stopReason`：
    - `target-count`：已达到目标数量。
    - `boundary`：触底并等待追加数据后仍无新增。
    - `no-new-items`：连续滚动没有新去重项。

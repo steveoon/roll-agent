@@ -20,6 +20,7 @@ import { zhipinScrollView } from "./tools/zhipin-scroll-view.ts";
 import { zhipinFilterRecommendCandidates } from "./tools/zhipin-filter-recommend-candidates.ts";
 import { zhipinGetCandidateList } from "./tools/zhipin-get-candidate-list.ts";
 import { zhipinOpenRecommendPage } from "./tools/zhipin-open-recommend-page.ts";
+import { zhipinSelectRecommendJob } from "./tools/zhipin-select-recommend-job.ts";
 import { zhipinSayHello } from "./tools/zhipin-say-hello.ts";
 import { zhipinOpenResume } from "./tools/zhipin-open-resume.ts";
 import { zhipinLocateResumeCanvas } from "./tools/zhipin-locate-resume-canvas.ts";
@@ -94,6 +95,7 @@ const agent = defineAgent(
       zhipinScrollView,
       // Zhipin 推荐列表
       zhipinOpenRecommendPage,
+      zhipinSelectRecommendJob,
       zhipinFilterRecommendCandidates,
       zhipinGetCandidateList,
       zhipinSayHello,

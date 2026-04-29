@@ -10,6 +10,8 @@ import { openZhipinNativePagePort } from "../pages/zhipin/native-page.ts";
 import type { ZhipinNativePagePort } from "../pages/zhipin/native-page.ts";
 import type { ScrollDirection } from "../pages/shared/dynamic-list-scroller.ts";
 
+const SCROLL_POSITIONS = ["unknown", "top", "middle", "bottom", "only-page"] as const;
+
 const ScrollSnapshotSchema = z.object({
   containerFound: z.boolean(),
   containerLabel: z.string(),
@@ -28,10 +30,18 @@ const OutputSchema = z.object({
   stepsRequested: z.number(),
   stepsCompleted: z.number(),
   reachedBoundary: z.boolean(),
+  atTop: z.boolean(),
+  atBottom: z.boolean(),
+  canScrollUp: z.boolean(),
+  canScrollDown: z.boolean(),
+  position: z.enum(SCROLL_POSITIONS),
   before: ScrollSnapshotSchema,
   after: ScrollSnapshotSchema,
   error: z.string().optional(),
 });
+
+type ScrollSnapshot = z.infer<typeof ScrollSnapshotSchema>;
+type ScrollPosition = (typeof SCROLL_POSITIONS)[number];
 
 type NativeVisualActivitySessionLike = Pick<
   NativeVisualActivitySession,
@@ -74,16 +84,46 @@ function createEmptySnapshot() {
   };
 }
 
+function getScrollPosition(snapshot: ScrollSnapshot): ScrollPosition {
+  if (!snapshot.containerFound) return "unknown";
+  if (snapshot.atStart && snapshot.atEnd) return "only-page";
+  if (snapshot.atStart) return "top";
+  if (snapshot.atEnd) return "bottom";
+  return "middle";
+}
+
+function createBoundaryState(snapshot: ScrollSnapshot) {
+  return {
+    atTop: snapshot.containerFound && snapshot.atStart,
+    atBottom: snapshot.containerFound && snapshot.atEnd,
+    canScrollUp: snapshot.containerFound && !snapshot.atStart,
+    canScrollDown: snapshot.containerFound && !snapshot.atEnd,
+    position: getScrollPosition(snapshot),
+  };
+}
+
 export const zhipinScrollView = defineTool({
   name: "zhipin_scroll_view",
   description:
-    "滚动 BOSS直聘页面内部动态列表容器。用于调试或显式翻页，支持 chat-list、chat-history、recommend-list。",
+    "滚动或检查 BOSS直聘页面内部动态列表容器。用于调试或显式翻页，支持 chat-list、chat-history、recommend-list；steps=0 时只返回当前位置和顶部/底部边界。",
   input: z.object({
     surface: z.enum(ZHIPIN_LIST_SURFACE_VALUES).describe("要滚动的页面区域"),
     direction: z.enum(["up", "down"]).optional().describe("滚动方向；不传则使用该区域默认方向"),
-    steps: z.number().int().min(1).max(20).default(1).describe("滚动步数"),
+    steps: z
+      .number()
+      .int()
+      .min(0)
+      .max(20)
+      .default(1)
+      .describe("滚动步数；传 0 时不滚动，只检查当前列表是否在顶部/底部"),
     distance: z.number().int().positive().optional().describe("每步滚动像素；不传则按容器高度估算"),
-    settleMs: z.number().int().min(0).max(5_000).default(700).describe("每步后等待 DOM 更新的毫秒数"),
+    settleMs: z
+      .number()
+      .int()
+      .min(0)
+      .max(5_000)
+      .default(700)
+      .describe("每步后等待 DOM 更新的毫秒数"),
   }),
   output: OutputSchema,
   execute: async (input, ctx) => {
@@ -121,6 +161,7 @@ export const zhipinScrollView = defineTool({
           stepsRequested: steps,
           stepsCompleted: 0,
           reachedBoundary: true,
+          ...createBoundaryState(result.after),
           before: result.before,
           after: result.after,
           error: "列表未加载",
@@ -139,6 +180,7 @@ export const zhipinScrollView = defineTool({
         stepsRequested: result.stepsRequested,
         stepsCompleted: result.stepsCompleted,
         reachedBoundary: result.reachedBoundary,
+        ...createBoundaryState(result.after),
         before: result.before,
         after: result.after,
       };
@@ -152,6 +194,7 @@ export const zhipinScrollView = defineTool({
         stepsRequested: steps,
         stepsCompleted: 0,
         reachedBoundary: true,
+        ...createBoundaryState(emptySnapshot),
         before: emptySnapshot,
         after: emptySnapshot,
         error: error instanceof Error ? error.message : "滚动失败",

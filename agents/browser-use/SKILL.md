@@ -34,7 +34,7 @@ metadata:
 | --- | --- |
 | `attach_browser_session()` | 只在调试时显式执行一次 `connectOverCDP()`，用于验证“仅 attach”是否触发风控。 |
 | `zhipin_diagnose_browser_state(phase?, targetPageId?, watchMs?, networkEventLimit?)` | 分阶段定位 BOSS 页面在 native CDP、Playwright attach、evaluate、storage/cookie 读取时的回退/风控触发点。 |
-| `zhipin_scroll_view(surface, direction?, steps?, distance?, settleMs?)` | native CDP 滚动 `chat-list`、`chat-history`、`recommend-list` 内部动态列表。 |
+| `zhipin_scroll_view(surface, direction?, steps?, distance?, settleMs?)` | native CDP 滚动或检查 `chat-list`、`chat-history`、`recommend-list` 内部动态列表；`steps=0` 只返回 `atTop` / `atBottom` / `canScrollUp` / `canScrollDown` / `position`。 |
 
 诊断细节见 `references/zhipin-diagnostics.md`。正常业务路径不要默认调用 `zhipin_diagnose_browser_state()`。
 
@@ -59,6 +59,7 @@ metadata:
 | Tool | Backend | 说明 |
 | --- | --- | --- |
 | `zhipin_open_recommend_page()` | native CDP | 点击左侧导航切到「推荐牛人」。 |
+| `zhipin_select_recommend_job(jobValue?, jobName?, index?, searchKeyword?, useSearch?)` | native CDP | 切换推荐页顶部招聘岗位筛选；优先传 `jobValue`，其次 `jobName`，`index` 只作当前下拉快照兜底。 |
 | `zhipin_filter_recommend_candidates(ageMin?, ageMax?, gender?, activity?)` | native CDP | 只设置年龄、性别、活跃度；未传维度重置为 `不限`，年龄默认 `16-不限`。 |
 | `zhipin_get_candidate_list(maxResults?, autoScroll?, maxScrolls?)` | native CDP | 读取推荐候选人卡片；默认滚动并按 `candidateId` / `data-geek` 去重。 |
 | `zhipin_say_hello(indices)` | native CDP | 按当前推荐列表 DOM `index` 批量点击「打招呼」。 |
