@@ -1,5 +1,27 @@
 # @roll-agent/browser-use-agent
 
+## 0.7.6
+
+### Patch Changes
+
+- [#69](https://github.com/steveoon/roll-agent/pull/69) [`2da5f7f`](https://github.com/steveoon/roll-agent/commit/2da5f7f3a1c0bf3a473260c22297ff0e9d2acbcd) Thanks [@steveoon](https://github.com/steveoon)! - Add native CDP primitives and migrate the BOSS Zhipin main workflow to the native backend.
+
+  `@roll-agent/browser` now exposes native CDP controller utilities for page inspection,
+  DOM evaluation, mouse input, keyboard input, text insertion, and native locators without
+  requiring a Playwright page attach.
+
+  `browser-use-agent` now routes the BOSS Zhipin chat, reply sending, WeChat exchange,
+  recommend-list reading, filtering, scrolling, and greet flows through the native backend.
+  The remaining resume popup tools stay Playwright-backed and share their DOM contract through
+  `resume-dom-contract.ts`.
+
+  `roll ask` preflight validation now catches array `minItems` constraints before dispatching
+  tool calls, so underspecified semantic requests can return `needs_input` instead of reaching
+  MCP tool validation.
+
+- Updated dependencies [[`2da5f7f`](https://github.com/steveoon/roll-agent/commit/2da5f7f3a1c0bf3a473260c22297ff0e9d2acbcd)]:
+  - @roll-agent/browser@0.3.0
+
 ## 0.7.5
 
 ### Patch Changes
