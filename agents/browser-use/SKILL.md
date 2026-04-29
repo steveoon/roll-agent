@@ -59,7 +59,7 @@ metadata:
 | Tool | Backend | 说明 |
 | --- | --- | --- |
 | `zhipin_open_recommend_page()` | native CDP | 点击左侧导航切到「推荐牛人」。 |
-| `zhipin_select_recommend_job(jobValue?, jobName?, index?, searchKeyword?, useSearch?)` | native CDP | 切换推荐页顶部招聘岗位筛选；优先传 `jobValue`，其次 `jobName`，`index` 只作当前下拉快照兜底。 |
+| `zhipin_select_recommend_job(jobValue?, jobName?, index?, searchKeyword?, useSearch?)` | native CDP | 切换推荐页顶部招聘岗位筛选；优先传 `jobValue`，其次 `jobName`，`index` 只作当前下拉快照兜底；返回 `current` / `selected` / `options`。 |
 | `zhipin_filter_recommend_candidates(ageMin?, ageMax?, gender?, activity?)` | native CDP | 只设置年龄、性别、活跃度；未传维度重置为 `不限`，年龄默认 `16-不限`。 |
 | `zhipin_get_candidate_list(maxResults?, autoScroll?, maxScrolls?)` | native CDP | 读取推荐候选人卡片；默认滚动并按 `candidateId` / `data-geek` 去重。 |
 | `zhipin_say_hello(indices)` | native CDP | 按当前推荐列表 DOM `index` 批量点击「打招呼」。 |
@@ -85,6 +85,10 @@ metadata:
 5. 发送回复只能调用 `zhipin_send_reply(signedEnvelope)`；不要构造裸文本发送路径。
 6. `zhipin_send_reply` 会校验 envelope 的 `conversationId + candidateId + recruiterBinding`，当前页面目标或招聘者不一致时拒绝。
 7. `preferredBrand` 只来自 `zhipin_get_candidate_info` 对 `communicationPosition` 的连字符格式解析；不要用通用岗位名或候选人公司名伪造。
+8. 推荐页岗位筛选的稳定主键是 `zhipin_select_recommend_job` 返回的 `options[].value`；已知岗位 `value` 时必须优先传 `jobValue`。
+9. 推荐岗位只知道标题时传 `jobName`；`index` 只表示当前岗位下拉快照，不要在搜索、筛选、刷新或跨步骤后复用。
+10. `zhipin_select_recommend_job` 返回 `status:"selected"` 或 `status:"already_selected"` 都表示目标岗位已生效。
+11. `zhipin_select_recommend_job` 返回 `status:"not_found"` 时不要盲目重试；先读取返回的 `options`，选择最接近岗位并复用其 `value` 作为 `jobValue`。
 
 ## 典型链路
 
@@ -99,6 +103,7 @@ zhipin_read_messages
 
 推荐候选人:
 zhipin_open_recommend_page
+  -> zhipin_select_recommend_job(jobValue | jobName)
   -> zhipin_filter_recommend_candidates(...)
   -> zhipin_get_candidate_list(maxResults?, autoScroll=true)
   -> zhipin_say_hello(indices)
