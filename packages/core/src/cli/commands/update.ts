@@ -357,13 +357,16 @@ export default defineCommand({
             });
             break;
           }
-          const info = await checkPublishedPackageUpdate({
-            packageName: agent.source.packageName,
-            packageSpec: agent.source.packageSpec,
-            ...(agent.source.installedVersion
-              ? { currentVersion: agent.source.installedVersion }
-              : {}),
-          });
+          const info = await checkPublishedPackageUpdate(
+            {
+              packageName: agent.source.packageName,
+              packageSpec: agent.source.packageSpec,
+              ...(agent.source.installedVersion
+                ? { currentVersion: agent.source.installedVersion }
+                : {}),
+            },
+            { forceRefresh: true },
+          );
           agentSummary.push({
             name: agent.skill.name,
             sourceType,

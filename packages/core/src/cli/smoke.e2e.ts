@@ -98,16 +98,23 @@ function bumpPatchVersion(version: string): string {
   return `${major}.${minor}.${patch + 1}`;
 }
 
-function createFakeNpm(binDir: string, latestVersion: string): void {
+function createFakeNpm(
+  binDir: string,
+  latestVersion: string | Readonly<Record<string, string>>,
+): void {
   mkdirSync(binDir, { recursive: true });
   const npmPath = resolve(binDir, "npm");
+  const versionsByPackage =
+    typeof latestVersion === "string" ? { "*": latestVersion } : latestVersion;
   writeFileSync(
     npmPath,
     `#!/usr/bin/env node
 const args = process.argv.slice(2);
 if (args[0] === "view" && args[2] === "version") {
   const useJson = args.includes("--json");
-  const output = useJson ? JSON.stringify(${JSON.stringify(latestVersion)}) : ${JSON.stringify(latestVersion)};
+  const versionsByPackage = ${JSON.stringify(versionsByPackage)};
+  const latestVersion = versionsByPackage[args[1]] ?? versionsByPackage["*"];
+  const output = useJson ? JSON.stringify(latestVersion) : latestVersion;
   process.stdout.write(output + "\\n");
   process.exit(0);
 }
@@ -1207,6 +1214,92 @@ test("e2e smoke: update --check warns about deprecated config without failing", 
     assert.equal(result.status, 0, result.stdout);
     assert.match(result.stderr, /检测到本地配置需要迁移/);
     assert.match(result.stderr, /roll config migrate/);
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("e2e smoke: update --check refreshes installed-package agent versions", () => {
+  const workspace = mkdtempSync(resolve(tmpdir(), `roll-update-check-agent-${randomUUID()}-`));
+
+  try {
+    const fakeBinDir = resolve(workspace, "fake-bin");
+    const dataDir = resolve(workspace, "agents-data");
+    const installDir = resolve(workspace, "installed-agents");
+    const packageRoot = resolve(installDir, "node_modules/@roll-agent/browser-use-agent");
+
+    createFakeNpm(fakeBinDir, {
+      "@roll-agent/core": CURRENT_CORE_VERSION,
+      "@roll-agent/browser-use-agent": "0.8.0",
+    });
+    mkdirSync(packageRoot, { recursive: true });
+    mkdirSync(resolve(workspace, ".roll-agent"), { recursive: true });
+    mkdirSync(dataDir, { recursive: true });
+    writeFileSync(
+      resolve(workspace, "roll.config.yaml"),
+      `agents:
+  data-dir: ${JSON.stringify(dataDir)}
+`,
+      "utf-8",
+    );
+    writeFileSync(
+      resolve(packageRoot, "package.json"),
+      JSON.stringify({
+        name: "@roll-agent/browser-use-agent",
+        version: "0.7.7",
+      }),
+      "utf-8",
+    );
+    writeFileSync(
+      resolve(workspace, ".roll-agent/update-check.json"),
+      JSON.stringify({
+        packages: {
+          "@roll-agent/browser-use-agent": {
+            latestVersion: "0.7.7",
+            checkedAt: Date.now(),
+          },
+        },
+      }),
+      "utf-8",
+    );
+    writeFileSync(
+      resolve(dataDir, "agents.json"),
+      JSON.stringify({
+        schemaVersion: 2,
+        agents: [
+          {
+            skill: {
+              name: "browser-use-agent",
+              description: "Browser automation agent",
+              metadata: {},
+            },
+            transport: { type: "stdio", command: "node" },
+            runtime: { ownership: "on-demand" },
+            installPath: packageRoot,
+            registeredAt: "2026-01-01T00:00:00.000Z",
+            status: "idle",
+            source: {
+              type: "installed-package",
+              packageName: "@roll-agent/browser-use-agent",
+              packageSpec: "@roll-agent/browser-use-agent@latest",
+              installDir,
+              installedVersion: "0.7.7",
+            },
+          },
+        ],
+      }),
+      "utf-8",
+    );
+
+    const result = runRoll(["update", "--check"], workspace, {
+      env: {
+        HOME: workspace,
+        PATH: `${fakeBinDir}:${process.env["PATH"] ?? ""}`,
+      },
+    });
+
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stderr, /browser-use-agent \[installed-package\].*可更新 v0\.7\.7 → v0\.8\.0/);
   } finally {
     rmSync(workspace, { recursive: true, force: true });
   }
