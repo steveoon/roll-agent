@@ -1,5 +1,16 @@
 # @roll-agent/browser-use-agent
 
+## 0.7.5
+
+### Patch Changes
+
+- [#67](https://github.com/steveoon/roll-agent/pull/67) [`4d11426`](https://github.com/steveoon/roll-agent/commit/4d11426060071f4c1dfceaa5019f4a397d332677) Thanks [@steveoon](https://github.com/steveoon)! - Fix `roll run` JSON object input handling and add browser-use diagnostics for BOSS page attach state.
+
+  `roll run` now accepts a third positional JSON object as explicit tool input while keeping
+  `--input-json` as the recommended orchestration-safe form. `browser-use-agent` also adds
+  `zhipin_diagnose_browser_state` for inspecting BOSS native page selection, attach state, page
+  readiness, and automation fingerprint exposure.
+
 ## 0.7.4
 
 ### Patch Changes
