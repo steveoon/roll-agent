@@ -127,12 +127,11 @@ describe("ZhipinNativePagePort", () => {
 
     assert.equal(result.found, true);
     assert.equal(result.conversationId, "conversation-1");
-    assert.deepEqual(
-      mouseInputs.map((input) => input.type),
-      ["mouseMoved", "mousePressed", "mouseReleased"],
-    );
-    assert.equal(mouseInputs[0]?.x, 88);
-    assert.equal(mouseInputs[0]?.y, 216);
+    assert.equal(mouseInputs.filter((input) => input.type === "mouseMoved").length > 1, true);
+    assert.equal(mouseInputs.at(-2)?.type, "mousePressed");
+    assert.equal(mouseInputs.at(-1)?.type, "mouseReleased");
+    assert.equal(mouseInputs.at(-1)?.x, 88);
+    assert.equal(mouseInputs.at(-1)?.y, 216);
   });
 
   it("scrolls chat candidates through the chat-list surface container resolution", async () => {
@@ -648,12 +647,11 @@ describe("ZhipinNativePagePort", () => {
 
     assert.equal(result.clicked, true);
     assert.equal(result.candidateId, "candidate-1");
-    assert.deepEqual(
-      mouseInputs.map((input) => input.type),
-      ["mouseMoved", "mousePressed", "mouseReleased"],
-    );
-    assert.equal(mouseInputs[0]?.x, 160);
-    assert.equal(mouseInputs[0]?.y, 260);
+    assert.equal(mouseInputs.filter((input) => input.type === "mouseMoved").length > 1, true);
+    assert.equal(mouseInputs.at(-2)?.type, "mousePressed");
+    assert.equal(mouseInputs.at(-1)?.type, "mouseReleased");
+    assert.equal(mouseInputs.at(-1)?.x, 160);
+    assert.equal(mouseInputs.at(-1)?.y, 260);
   });
 
   it("sends chat replies through native focus, key events, insertText, and native send click", async () => {
@@ -740,7 +738,6 @@ describe("ZhipinNativePagePort", () => {
 
   it("clicks sidebar sections through narrow native targets", async () => {
     const dispatched: Array<Record<string, unknown>> = [];
-    const resolved: Array<Record<string, unknown>> = [];
     const port = new ZhipinNativePagePort({
       target: {
         targetId: "target-boss",
@@ -760,7 +757,8 @@ describe("ZhipinNativePagePort", () => {
         },
         async evaluateJson(expression: string) {
           if (expression.includes("querySelectorAll(selector)")) {
-            return { found: false };
+            assert.match(expression, /web\/chat\/recommend/);
+            return { found: true, x: 36, y: 72 };
           }
           assert.match(expression, /interactiveTargets/);
           assert.match(expression, /exactTextTargets/);
@@ -777,19 +775,26 @@ describe("ZhipinNativePagePort", () => {
       } as unknown as NativeCdpController,
     });
 
-    const clicked = await port.clickSidebarSection("recommend", {
-      onTargetResolved: async (target) => {
-        resolved.push(target);
-      },
-    });
+    const clicked = await port.clickSidebarSection("recommend");
 
     assert.equal(clicked, true);
-    assert.deepEqual(resolved, [{ found: true, x: 36, y: 72 }]);
-    assert.deepEqual(dispatched, [
-      { type: "mouseMoved", x: 36, y: 72, buttons: 0 },
-      { type: "mousePressed", x: 36, y: 72, button: "left", buttons: 1, clickCount: 1 },
-      { type: "mouseReleased", x: 36, y: 72, button: "left", buttons: 0, clickCount: 1 },
-    ]);
+    assert.equal(dispatched.filter((input) => input["type"] === "mouseMoved").length > 1, true);
+    assert.deepEqual(dispatched.at(-2), {
+      type: "mousePressed",
+      x: 36,
+      y: 72,
+      button: "left",
+      buttons: 1,
+      clickCount: 1,
+    });
+    assert.deepEqual(dispatched.at(-1), {
+      type: "mouseReleased",
+      x: 36,
+      y: 72,
+      button: "left",
+      buttons: 0,
+      clickCount: 1,
+    });
   });
 
   it("gates recommend surface detection on not being on the chat URL", async () => {

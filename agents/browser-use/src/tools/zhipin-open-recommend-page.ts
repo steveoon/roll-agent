@@ -20,10 +20,8 @@ const OutputSchema = z.object({
 
 type NativeVisualActivitySessionLike = Pick<
   NativeVisualActivitySession,
-  "begin" | "highlightSelector" | "succeed" | "fail"
-> & {
-  readonly highlightPoint?: NativeVisualActivitySession["highlightPoint"];
-};
+  "begin" | "highlightSelector" | "previewMouseMotion" | "succeed" | "fail"
+>;
 
 type ZhipinOpenRecommendPageDeps = {
   readonly getContextManager: typeof getContextManager;
@@ -59,8 +57,7 @@ async function buildPageInfo(
 
 export const zhipinOpenRecommendPage = defineTool({
   name: "zhipin_open_recommend_page",
-  description:
-    "通过点击 Boss 左侧导航切换到「推荐牛人」页，避免让编排器依赖站内 URL 猜测。",
+  description: "通过点击 Boss 左侧导航切换到「推荐牛人」页，避免让编排器依赖站内 URL 猜测。",
   input: z.object({}),
   output: OutputSchema,
   execute: async (_input, ctx) => {
@@ -95,9 +92,7 @@ export const zhipinOpenRecommendPage = defineTool({
       }
 
       const clicked = await nativePage.clickSidebarSection("recommend", {
-        onTargetResolved: async (target) => {
-          await session?.highlightPoint?.(target.x, target.y);
-        },
+        ...(session !== undefined ? { motionObserver: session } : {}),
       });
       if (!clicked) {
         await session.fail("未找到推荐牛人导航");

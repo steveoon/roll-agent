@@ -29,6 +29,7 @@ function createNoopSession(calls: string[]) {
       calls.push(`highlight:${selector}`);
       return true;
     },
+    async previewMouseMotion() {},
     async succeed(label: string) {
       calls.push(`succeed:${label}`);
       return true;

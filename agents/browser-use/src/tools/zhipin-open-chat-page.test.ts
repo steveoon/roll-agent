@@ -2,10 +2,7 @@ import assert from "node:assert/strict";
 import { afterEach, describe, it } from "node:test";
 import type { AgentContext } from "@roll-agent/sdk";
 import type { ZhipinNativePagePort } from "../pages/zhipin/native-page.ts";
-import {
-  setZhipinOpenChatPageDepsForTests,
-  zhipinOpenChatPage,
-} from "./zhipin-open-chat-page.ts";
+import { setZhipinOpenChatPageDepsForTests, zhipinOpenChatPage } from "./zhipin-open-chat-page.ts";
 
 function createTestContext(): AgentContext {
   return {
@@ -31,6 +28,7 @@ function createNoopSession(calls: string[]) {
       calls.push(`highlight:${selector}`);
       return true;
     },
+    async previewMouseMotion() {},
     async succeed(label: string) {
       calls.push(`succeed:${label}`);
       return true;

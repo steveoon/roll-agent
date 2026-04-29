@@ -20,7 +20,7 @@ const OutputSchema = z.object({
 
 type NativeVisualActivitySessionLike = Pick<
   NativeVisualActivitySession,
-  "begin" | "highlightPoint" | "succeed" | "fail"
+  "begin" | "previewMouseMotion" | "succeed" | "fail"
 >;
 
 type ZhipinSendReplyDeps = {
@@ -166,9 +166,7 @@ export const zhipinSendReply = defineTool({
         }`,
       );
       const sendResult = await nativePage.sendChatReply(sentMessage, {
-        onTargetResolved: async (target) => {
-          await session?.highlightPoint(target.x, target.y);
-        },
+        ...(session !== undefined ? { motionObserver: session } : {}),
       });
       if (!sendResult.success) {
         await session.fail(sendResult.error ?? "发送失败");

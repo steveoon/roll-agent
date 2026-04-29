@@ -61,7 +61,6 @@ describe("zhipin_filter_recommend_candidates", () => {
           readonly preClickDelayMs?: number;
           readonly pressDurationMs?: number;
           readonly settleMs?: number;
-          readonly onTargetResolved?: (target: { x: number; y: number }) => Promise<void>;
         },
       ) {
         calls.push(`apply:${requested.gender}:${requested.activity}`);
@@ -74,7 +73,6 @@ describe("zhipin_filter_recommend_candidates", () => {
           gender: "男",
           activity: "刚刚活跃",
         });
-        await options?.onTargetResolved?.({ x: 300, y: 420 });
         return {
           status: "applied" as const,
           requested,
@@ -103,10 +101,7 @@ describe("zhipin_filter_recommend_candidates", () => {
           calls.push(`highlight:${selector}`);
           return true;
         },
-        async highlightPoint(x: number, y: number) {
-          calls.push(`point:${x}:${y}`);
-          return true;
-        },
+        async previewMouseMotion() {},
         async succeed(label: string) {
           calls.push(`succeed:${label}`);
           return true;
@@ -139,7 +134,6 @@ describe("zhipin_filter_recommend_candidates", () => {
       "highlight:.recommend-filter .filter-label, .filter-label-wrap .filter-label, .filter-label",
       "apply:男:刚刚活跃",
       "timing:350:130:600",
-      "point:300:420",
       "succeed:已应用推荐筛选",
       "close",
     ]);
@@ -173,9 +167,7 @@ describe("zhipin_filter_recommend_candidates", () => {
         async highlightSelector() {
           return true;
         },
-        async highlightPoint() {
-          return true;
-        },
+        async previewMouseMotion() {},
         async succeed() {
           return true;
         },

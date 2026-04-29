@@ -1,6 +1,7 @@
 import { isVisualActivityEnabled } from "./visual-activity.ts";
 import type { VisualActivityTone } from "./visual-activity.ts";
 import { isVisualCursorEnabled } from "./visual-cursor.ts";
+import type { NativeMouseMotionObserver, NativeMouseMotionPreview } from "./native-mouse-motion.ts";
 
 type NativeVisualTarget = {
   evaluateJson<T = unknown>(expression: string): Promise<T>;
@@ -12,13 +13,8 @@ type NativeVisualHighlightOptions = {
   readonly tone?: VisualActivityTone;
 };
 
-type NativeVisualPointOptions = {
-  readonly durationMs?: number;
-};
-
 const DEFAULT_REGION_PADDING = 14;
 const DEFAULT_COMPLETION_LINGER_MS = 720;
-const DEFAULT_CURSOR_MOVE_DURATION_MS = 180;
 
 function buildNativeVisualScript(args: unknown): string {
   return `(() => {
@@ -258,39 +254,50 @@ function buildNativeVisualScript(args: unknown): string {
       return root;
     };
 
-    const readCursorPoint = () => {
-      if (args.cursor?.point) {
-        const x = Number(args.cursor.point.x);
-        const y = Number(args.cursor.point.y);
-        if (Number.isFinite(x) && Number.isFinite(y)) {
-          return {
-            centerX: Math.round(x),
-            centerY: Math.round(y)
-          };
-        }
-      }
-
-      if (!args.cursor?.selector) return null;
-      const rect = readRect(args.cursor.selector, 0);
-      if (!rect) return null;
-      return {
-        centerX: rect.centerX,
-        centerY: rect.centerY
-      };
+    const readCursorPath = () => {
+      if (!Array.isArray(args.cursor?.path?.points)) return null;
+      const points = args.cursor.path.points
+        .map((point) => {
+          const x = Number(point?.x);
+          const y = Number(point?.y);
+          return Number.isFinite(x) && Number.isFinite(y)
+            ? { centerX: Math.round(x), centerY: Math.round(y) }
+            : null;
+        })
+        .filter((point) => point !== null);
+      return points.length > 0 ? points : null;
     };
 
     const renderCursor = () => {
-      const point = readCursorPoint();
+      const path = readCursorPath();
+      const point = path ? path[path.length - 1] : null;
       if (!point) return;
       ensureCursorRoot();
       const pointer = document.getElementById(cursorPointerId);
       if (!pointer) return;
-      const state = window[cursorStateKey];
       const targetX = point.centerX - 2;
       const targetY = point.centerY - 2;
-      pointer.style.transition = state
-        ? "transform " + (args.cursor.durationMs ?? 180) + "ms cubic-bezier(0.22, 1, 0.36, 1), opacity 120ms ease"
-        : "opacity 120ms ease";
+      if (path && path.length > 1 && typeof pointer.animate === "function") {
+        for (const animation of pointer.getAnimations()) {
+          animation.cancel();
+        }
+        pointer.style.opacity = "1";
+        const keyframes = path.map((entry) => ({
+          transform: "translate(" + (entry.centerX - 2) + "px, " + (entry.centerY - 2) + "px)"
+        }));
+        const duration = Math.max(args.cursor.path.durationMs ?? 180, 0);
+        const animation = pointer.animate(keyframes, {
+          duration,
+          easing: "cubic-bezier(0.22, 1, 0.36, 1)",
+          fill: "forwards"
+        });
+        animation.onfinish = () => {
+          pointer.style.transform = "translate(" + targetX + "px, " + targetY + "px)";
+        };
+        window[cursorStateKey] = { x: point.centerX, y: point.centerY };
+        return;
+      }
+      pointer.style.transition = "opacity 120ms ease";
       pointer.style.opacity = "1";
       pointer.style.transform = "translate(" + targetX + "px, " + targetY + "px)";
       window[cursorStateKey] = { x: point.centerX, y: point.centerY };
@@ -302,7 +309,7 @@ function buildNativeVisualScript(args: unknown): string {
   })()`;
 }
 
-export class NativeVisualActivitySession {
+export class NativeVisualActivitySession implements NativeMouseMotionObserver {
   private readonly target: NativeVisualTarget;
 
   constructor(target: NativeVisualTarget) {
@@ -339,32 +346,26 @@ export class NativeVisualActivitySession {
             },
           }
         : {}),
-      ...(isVisualCursorEnabled()
-        ? {
-            cursor: {
-              selector,
-              durationMs: DEFAULT_CURSOR_MOVE_DURATION_MS,
-            },
-          }
-        : {}),
     };
 
-    if (!("activity" in payload) && !("cursor" in payload)) {
+    if (!("activity" in payload)) {
       return false;
     }
 
     return await this.render(payload);
   }
 
-  async highlightPoint(x: number, y: number, options: NativeVisualPointOptions = {}): Promise<boolean> {
-    if (!isVisualCursorEnabled()) {
-      return false;
+  async previewMouseMotion(preview: NativeMouseMotionPreview): Promise<void> {
+    if (!isVisualCursorEnabled() || preview.points.length === 0) {
+      return;
     }
 
-    return await this.render({
+    await this.render({
       cursor: {
-        point: { x, y },
-        durationMs: options.durationMs ?? DEFAULT_CURSOR_MOVE_DURATION_MS,
+        path: {
+          points: preview.points,
+          durationMs: preview.durationMs,
+        },
       },
     });
   }

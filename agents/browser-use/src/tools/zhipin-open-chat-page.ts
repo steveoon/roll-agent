@@ -20,10 +20,8 @@ const OutputSchema = z.object({
 
 type NativeVisualActivitySessionLike = Pick<
   NativeVisualActivitySession,
-  "begin" | "highlightSelector" | "succeed" | "fail"
-> & {
-  readonly highlightPoint?: NativeVisualActivitySession["highlightPoint"];
-};
+  "begin" | "highlightSelector" | "previewMouseMotion" | "succeed" | "fail"
+>;
 
 type ZhipinOpenChatPageDeps = {
   readonly getContextManager: typeof getContextManager;
@@ -94,9 +92,7 @@ export const zhipinOpenChatPage = defineTool({
       }
 
       const clicked = await nativePage.clickSidebarSection("chat", {
-        onTargetResolved: async (target) => {
-          await session?.highlightPoint?.(target.x, target.y);
-        },
+        ...(session !== undefined ? { motionObserver: session } : {}),
       });
       if (!clicked) {
         await session.fail("未找到沟通导航");

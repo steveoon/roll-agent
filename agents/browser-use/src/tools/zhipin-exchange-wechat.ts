@@ -17,7 +17,7 @@ const EXCHANGE_WECHAT_CLICK_SETTLE_MS = 1_100;
 
 type NativeVisualActivitySessionLike = Pick<
   NativeVisualActivitySession,
-  "begin" | "highlightPoint" | "succeed" | "fail"
+  "begin" | "previewMouseMotion" | "succeed" | "fail"
 >;
 
 type ZhipinExchangeWechatDeps = {
@@ -86,6 +86,7 @@ export const zhipinExchangeWechat = defineTool({
           conversationId: input.conversationId,
           candidateName: input.candidateName,
           index: input.index,
+          ...(session !== undefined ? { motionObserver: session } : {}),
         });
         if (!nav.found) {
           await session.fail(nav.error ?? "未找到目标聊天");
@@ -128,9 +129,7 @@ export const zhipinExchangeWechat = defineTool({
         preClickDelayMs: EXCHANGE_WECHAT_CLICK_PRE_DELAY_MS,
         pressDurationMs: EXCHANGE_WECHAT_CLICK_PRESS_MS,
         settleMs: EXCHANGE_WECHAT_CLICK_SETTLE_MS,
-        onTargetResolved: async (target) => {
-          await session?.highlightPoint(target.x, target.y);
-        },
+        ...(session !== undefined ? { motionObserver: session } : {}),
       });
 
       if (result.success) {
