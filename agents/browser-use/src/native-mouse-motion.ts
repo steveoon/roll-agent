@@ -10,8 +10,14 @@ export type NativeMouseMotionPreview = {
   readonly durationMs: number;
 };
 
+export type NativeMouseClickPreview = {
+  readonly point: NativeMousePoint;
+  readonly durationMs: number;
+};
+
 export type NativeMouseMotionObserver = {
   previewMouseMotion(preview: NativeMouseMotionPreview): Promise<void>;
+  previewMouseClick?(preview: NativeMouseClickPreview): Promise<void>;
 };
 
 export type NativeMouseMotionControllerOptions = {
@@ -43,12 +49,13 @@ export type NativeMouseDragOptions = {
 
 type NativeMouseDispatcher = Pick<NativeCdpController, "dispatchMouseEvent">;
 
-const DEFAULT_STEP_DELAY_MS = 16;
+const DEFAULT_STEP_DELAY_MS = 28;
 const DEFAULT_PRESS_DURATION_MS = 90;
 const DEFAULT_SETTLE_MS = 250;
+const DEFAULT_CLICK_PREVIEW_DURATION_MS = 620;
 const SHORT_DISTANCE_PX = 8;
-const MAX_PATH_STEPS = 24;
-const MIN_PATH_STEPS = 6;
+const MAX_PATH_STEPS = 32;
+const MIN_PATH_STEPS = 8;
 
 function defaultSleep(ms: number): Promise<void> {
   return new Promise((resolve) => {
@@ -101,7 +108,7 @@ function createPathPoints(
     return [from, to];
   }
 
-  const stepCount = clamp(Math.round(distance / 42), MIN_PATH_STEPS, MAX_PATH_STEPS);
+  const stepCount = clamp(Math.round(distance / 30), MIN_PATH_STEPS, MAX_PATH_STEPS);
   const dx = to.x - from.x;
   const dy = to.y - from.y;
   const normalLength = Math.max(distance, 1);
@@ -195,6 +202,10 @@ export class NativeMouseMotionController {
     });
 
     await this.delayIfPositive(options.preClickDelayMs);
+    await options.motionObserver?.previewMouseClick?.({
+      point: toSafePoint(targetPoint),
+      durationMs: DEFAULT_CLICK_PREVIEW_DURATION_MS,
+    });
     await this.dispatcher.dispatchMouseEvent({
       type: "mousePressed",
       x: Math.round(targetPoint.x),

@@ -1,7 +1,11 @@
 import { isVisualActivityEnabled } from "./visual-activity.ts";
 import type { VisualActivityTone } from "./visual-activity.ts";
 import { isVisualCursorEnabled } from "./visual-cursor.ts";
-import type { NativeMouseMotionObserver, NativeMouseMotionPreview } from "./native-mouse-motion.ts";
+import type {
+  NativeMouseClickPreview,
+  NativeMouseMotionObserver,
+  NativeMouseMotionPreview,
+} from "./native-mouse-motion.ts";
 
 type NativeVisualTarget = {
   evaluateJson<T = unknown>(expression: string): Promise<T>;
@@ -268,11 +272,79 @@ function buildNativeVisualScript(args: unknown): string {
       return points.length > 0 ? points : null;
     };
 
+    const readCursorClick = () => {
+      const point = args.cursor?.click?.point;
+      const x = Number(point?.x);
+      const y = Number(point?.y);
+      if (!Number.isFinite(x) || !Number.isFinite(y)) return null;
+      return {
+        point: { centerX: Math.round(x), centerY: Math.round(y) },
+        durationMs: Math.max(Number(args.cursor?.click?.durationMs ?? 620), 0)
+      };
+    };
+
+    const renderClickPulse = (root, point, durationMs) => {
+      const createPulse = (size, border, background, shadow, startScale, endScale, delayMs) => {
+        const radius = size / 2;
+        const pulse = document.createElement("div");
+        pulse.setAttribute("aria-hidden", "true");
+        pulse.style.position = "fixed";
+        pulse.style.left = "0";
+        pulse.style.top = "0";
+        pulse.style.width = size + "px";
+        pulse.style.height = size + "px";
+        pulse.style.borderRadius = "9999px";
+        pulse.style.border = border;
+        pulse.style.background = background;
+        pulse.style.boxShadow = shadow;
+        pulse.style.pointerEvents = "none";
+        pulse.style.opacity = "0.96";
+        pulse.style.transformOrigin = "center center";
+        pulse.style.transform =
+          "translate(" + (point.centerX - radius) + "px, " + (point.centerY - radius) + "px) scale(" + startScale + ")";
+        pulse.style.transition =
+          "transform " + durationMs + "ms cubic-bezier(0.16, 1, 0.3, 1), opacity " + durationMs + "ms ease-out";
+        root.append(pulse);
+
+        window.setTimeout(() => {
+          window.requestAnimationFrame(() => {
+            pulse.style.opacity = "0";
+            pulse.style.transform =
+              "translate(" + (point.centerX - radius) + "px, " + (point.centerY - radius) + "px) scale(" + endScale + ")";
+          });
+        }, delayMs);
+
+        window.setTimeout(() => {
+          pulse.remove();
+        }, durationMs + delayMs + 80);
+      };
+
+      createPulse(
+        28,
+        "3px solid rgba(45, 212, 191, 0.98)",
+        "rgba(20, 184, 166, 0.24)",
+        "0 0 0 5px rgba(20, 184, 166, 0.18), 0 0 26px rgba(20, 184, 166, 0.34)",
+        0.55,
+        2.35,
+        0
+      );
+      createPulse(
+        14,
+        "2px solid rgba(255, 255, 255, 0.95)",
+        "rgba(255, 255, 255, 0.34)",
+        "0 0 18px rgba(45, 212, 191, 0.45)",
+        0.7,
+        1.55,
+        65
+      );
+    };
+
     const renderCursor = () => {
       const path = readCursorPath();
-      const point = path ? path[path.length - 1] : null;
+      const click = readCursorClick();
+      const point = path ? path[path.length - 1] : click?.point ?? null;
       if (!point) return;
-      ensureCursorRoot();
+      const root = ensureCursorRoot();
       const pointer = document.getElementById(cursorPointerId);
       if (!pointer) return;
       const targetX = point.centerX - 2;
@@ -295,12 +367,18 @@ function buildNativeVisualScript(args: unknown): string {
           pointer.style.transform = "translate(" + targetX + "px, " + targetY + "px)";
         };
         window[cursorStateKey] = { x: point.centerX, y: point.centerY };
+        if (click) {
+          renderClickPulse(root, click.point, click.durationMs);
+        }
         return;
       }
       pointer.style.transition = "opacity 120ms ease";
       pointer.style.opacity = "1";
       pointer.style.transform = "translate(" + targetX + "px, " + targetY + "px)";
       window[cursorStateKey] = { x: point.centerX, y: point.centerY };
+      if (click) {
+        renderClickPulse(root, click.point, click.durationMs);
+      }
     };
 
     renderActivity();
@@ -364,6 +442,21 @@ export class NativeVisualActivitySession implements NativeMouseMotionObserver {
       cursor: {
         path: {
           points: preview.points,
+          durationMs: preview.durationMs,
+        },
+      },
+    });
+  }
+
+  async previewMouseClick(preview: NativeMouseClickPreview): Promise<void> {
+    if (!isVisualCursorEnabled()) {
+      return;
+    }
+
+    await this.render({
+      cursor: {
+        click: {
+          point: preview.point,
           durationMs: preview.durationMs,
         },
       },

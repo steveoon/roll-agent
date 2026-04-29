@@ -17,6 +17,7 @@ describe("NativeMouseMotionController", () => {
   it("dispatches native mouse movement before press and release", async () => {
     const events: NativeCdpMouseEventInput[] = [];
     const previews: number[] = [];
+    const clickPreviews: Array<{ readonly x: number; readonly y: number }> = [];
     const controller = new NativeMouseMotionController(
       {
         async dispatchMouseEvent(input) {
@@ -36,15 +37,49 @@ describe("NativeMouseMotionController", () => {
           async previewMouseMotion(preview) {
             previews.push(preview.points.length);
           },
+          async previewMouseClick(preview) {
+            clickPreviews.push(preview.point);
+          },
         },
       },
     );
 
     assert.equal(previews.length, 1);
+    assert.deepEqual(clickPreviews, [{ x: 180, y: 220 }]);
     assert.equal(previews[0], events.filter((event) => event.type === "mouseMoved").length);
     assert.equal(events.at(-2)?.type, "mousePressed");
     assert.equal(events.at(-1)?.type, "mouseReleased");
     assert.equal(events.at(-1)?.x, 180);
     assert.equal(events.at(-1)?.y, 220);
+  });
+
+  it("uses a visible default movement duration", async () => {
+    const durations: number[] = [];
+    const controller = new NativeMouseMotionController(
+      {
+        async dispatchMouseEvent() {},
+      },
+      {
+        sleep: async () => {},
+      },
+    );
+
+    await controller.moveTo(
+      { x: 320, y: 240 },
+      {
+        motionObserver: {
+          async previewMouseMotion(preview) {
+            durations.push(preview.durationMs);
+          },
+        },
+      },
+    );
+
+    assert.equal(durations.length, 1);
+    const duration = durations[0];
+    if (duration === undefined) {
+      assert.fail("expected a preview duration");
+    }
+    assert.equal(duration >= 220, true);
   });
 });
