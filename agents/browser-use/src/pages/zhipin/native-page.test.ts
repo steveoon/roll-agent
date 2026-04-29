@@ -134,6 +134,107 @@ describe("ZhipinNativePagePort", () => {
     assert.equal(mouseInputs.at(-1)?.y, 216);
   });
 
+  it("resets to the chat-list top before scanning for an explicit chat target", async () => {
+    let scrollTop = 520;
+    const maxScrollTop = 1040;
+    const mouseInputs: NativeCdpMouseEventInput[] = [];
+    const visibleWindows: string[] = [];
+
+    const port = createPort(
+      async (expression) => {
+        if (expression.includes("location.href.includes")) {
+          return true;
+        }
+        if (expression.includes("const expected =")) {
+          assert.equal(scrollTop, 0);
+          assert.match(expression, /conversation-1/);
+          return { found: true, x: 88, y: 216 };
+        }
+        if (
+          expression.includes('.user-list.b-scroll-stable [role=\\"listitem\\"]') &&
+          !expression.includes('const surface = "chat-list"')
+        ) {
+          visibleWindows.push(scrollTop === 0 ? "top" : "lower");
+          return scrollTop === 0
+            ? [
+                {
+                  conversationId: "conversation-1",
+                  candidateId: "geek-1",
+                  name: "李四",
+                  index: 0,
+                  position: "后端工程师",
+                  hasUnread: true,
+                  unreadCount: 1,
+                  lastMessageTime: "15:41",
+                  messagePreview: "方便聊聊吗",
+                },
+              ]
+            : [
+                {
+                  conversationId: "conversation-lower",
+                  candidateId: "geek-lower",
+                  name: "王五",
+                  index: 0,
+                  position: "前端工程师",
+                  hasUnread: true,
+                  unreadCount: 1,
+                  lastMessageTime: "昨天",
+                  messagePreview: "可以沟通",
+                },
+              ];
+        }
+        if (expression.includes("nativeWheelTarget")) {
+          return { found: true, x: 96, y: 240 };
+        }
+        if (expression.includes('const surface = "chat-list"')) {
+          return {
+            containerFound: true,
+            containerLabel: "user-list.b-scroll-stable",
+            scrollTop,
+            scrollHeight: 2096,
+            clientHeight: 1056,
+            itemCount: 40,
+            atStart: scrollTop <= 0,
+            atEnd: scrollTop >= maxScrollTop,
+          };
+        }
+        if (expression.includes('const selected = document.querySelector(".geek-item.selected")')) {
+          return {
+            conversationId: "conversation-1",
+            candidateId: "geek-1",
+            candidateName: "李四",
+          };
+        }
+        if (expression.includes('const rootSelectors = [".chat-conversation"')) {
+          return { candidateName: "李四" };
+        }
+        return false;
+      },
+      {
+        async dispatchMouseEvent(input) {
+          mouseInputs.push(input);
+          if (input.type !== "mouseWheel") return;
+          scrollTop = Math.max(0, Math.min(maxScrollTop, scrollTop + (input.deltaY ?? 0)));
+        },
+      },
+    );
+
+    const result = await port.openChat({
+      conversationId: "conversation-1",
+      candidateName: undefined,
+      index: undefined,
+      maxScrolls: 2,
+    });
+
+    assert.equal(result.found, true);
+    assert.equal(result.conversationId, "conversation-1");
+    assert.deepEqual(visibleWindows, ["lower", "top"]);
+    assert.equal(
+      mouseInputs.some((input) => input.type === "mouseWheel" && (input.deltaY ?? 0) < 0),
+      true,
+    );
+  });
+
   it("scrolls chat candidates through the chat-list surface container resolution", async () => {
     let readCount = 0;
     let surfaceEvaluations = 0;
@@ -652,6 +753,68 @@ describe("ZhipinNativePagePort", () => {
     assert.equal(mouseInputs.at(-1)?.type, "mouseReleased");
     assert.equal(mouseInputs.at(-1)?.x, 160);
     assert.equal(mouseInputs.at(-1)?.y, 260);
+  });
+
+  it("selects a recommend job by stable job value", async () => {
+    let selectorOpen = false;
+    let selectedValue = "job-1";
+    const mouseInputs: NativeCdpMouseEventInput[] = [];
+    const port = createPort(
+      async (expression) => {
+        if (expression.includes("recommendUrlMarkers")) {
+          return true;
+        }
+        if (expression.includes(".candidate-card-wrap")) {
+          return true;
+        }
+        if (expression.includes("currentLabel") && expression.includes(".job-selecter-wrap")) {
+          return {
+            found: true,
+            isOpen: selectorOpen,
+            currentLabel: selectedValue === "job-2" ? "后厨 _ 上海 6-7K" : "服务员 _ 上海 5-6K",
+            currentValue: selectedValue,
+            options: [
+              {
+                index: 0,
+                value: "job-1",
+                label: "服务员 _ 上海 5-6K",
+                isCurrent: selectedValue === "job-1",
+              },
+              {
+                index: 1,
+                value: "job-2",
+                label: "后厨 _ 上海 6-7K",
+                isCurrent: selectedValue === "job-2",
+              },
+            ],
+          };
+        }
+        if (expression.includes(".ui-dropmenu-label")) {
+          return { found: true, x: 620, y: 100 };
+        }
+        if (expression.includes(".job-list .job-item")) {
+          selectedValue = "job-2";
+          return { found: true, x: 660, y: 220 };
+        }
+        return false;
+      },
+      {
+        async dispatchMouseEvent(input) {
+          mouseInputs.push(input);
+          if (input.type === "mouseReleased" && input.x === 620) {
+            selectorOpen = true;
+          }
+        },
+      },
+    );
+
+    const result = await port.selectRecommendJob({ jobValue: "job-2" });
+
+    assert.equal(result.success, true);
+    assert.equal(result.status, "selected");
+    assert.equal(result.selected?.value, "job-2");
+    assert.equal(result.current?.value, "job-2");
+    assert.equal(mouseInputs.filter((input) => input.type === "mousePressed").length, 2);
   });
 
   it("sends chat replies through native focus, key events, insertText, and native send click", async () => {

@@ -179,6 +179,45 @@ export type NativeRecommendGreetResult = NativeRecommendCardInspection & {
   readonly clicked: boolean;
 };
 
+export type NativeRecommendJobOption = {
+  readonly index: number;
+  readonly value: string;
+  readonly label: string;
+  readonly isCurrent: boolean;
+};
+
+export type NativeRecommendJobSelectorState = {
+  readonly found: boolean;
+  readonly isOpen: boolean;
+  readonly currentLabel: string;
+  readonly currentValue: string;
+  readonly options: readonly NativeRecommendJobOption[];
+};
+
+export type NativeRecommendJobSelectRequest = {
+  readonly jobValue?: string;
+  readonly jobName?: string;
+  readonly index?: number;
+  readonly searchKeyword?: string;
+  readonly useSearch?: boolean;
+};
+
+export type NativeRecommendJobSelectResult = {
+  readonly success: boolean;
+  readonly status:
+    | "selected"
+    | "already_selected"
+    | "not_found"
+    | "recommend_not_ready"
+    | "selector_not_found";
+  readonly requested: NativeRecommendJobSelectRequest;
+  readonly current?: NativeRecommendJobOption;
+  readonly selected?: NativeRecommendJobOption;
+  readonly options: readonly NativeRecommendJobOption[];
+  readonly matchedCount: number;
+  readonly error?: string;
+};
+
 export type NativeWechatExchangeResult = {
   readonly success: boolean;
   readonly exchanged: boolean;
@@ -245,6 +284,10 @@ function isChatPageUrl(url: string): boolean {
 
 function normalizeCandidateName(name: string): string {
   return name.trim().toLocaleLowerCase("zh-CN");
+}
+
+function normalizeRecommendJobText(text: string): string {
+  return text.replace(/\s+/g, "").trim().toLocaleLowerCase("zh-CN");
 }
 
 function namesCompatible(expectedName: string, actualName: string): boolean {
@@ -365,6 +408,45 @@ function toNativeRecommendCandidates(value: unknown): NativeRecommendCandidateCa
       buttonText: requireString(candidate["buttonText"]),
     };
   });
+}
+
+function toNativeRecommendJobOptions(value: unknown): NativeRecommendJobOption[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  return value.map((item, index) => {
+    const option = isRecord(item) ? item : {};
+    return {
+      index:
+        typeof option["index"] === "number" && Number.isInteger(option["index"])
+          ? option["index"]
+          : index,
+      value: requireString(option["value"]),
+      label: requireString(option["label"]),
+      isCurrent: requireBoolean(option["isCurrent"]),
+    };
+  });
+}
+
+function toNativeRecommendJobSelectorState(value: unknown): NativeRecommendJobSelectorState {
+  if (!isRecord(value)) {
+    return {
+      found: false,
+      isOpen: false,
+      currentLabel: "",
+      currentValue: "",
+      options: [],
+    };
+  }
+
+  return {
+    found: requireBoolean(value["found"]),
+    isOpen: requireBoolean(value["isOpen"]),
+    currentLabel: requireString(value["currentLabel"]),
+    currentValue: requireString(value["currentValue"]),
+    options: toNativeRecommendJobOptions(value["options"]),
+  };
 }
 
 function toNativeSelectedChatTarget(value: unknown): NativeSelectedChatTarget | null {
@@ -912,6 +994,387 @@ export class ZhipinNativePagePort {
     return await this.hasRecommendList().catch(() => false);
   }
 
+  async readRecommendJobSelectorState(): Promise<NativeRecommendJobSelectorState> {
+    const expression = `(() => {
+      const visible = (element) => {
+        const rect = element.getBoundingClientRect();
+        return rect.width > 0 && rect.height > 0;
+      };
+      const text = (element) => (element.textContent ?? "").replace(/\\s+/g, " ").trim();
+      const wrap = document.querySelector(".job-selecter-wrap");
+      if (!wrap) {
+        return {
+          found: false,
+          isOpen: false,
+          currentLabel: "",
+          currentValue: "",
+          options: []
+        };
+      }
+
+      const list = wrap.querySelector(".ui-dropmenu-list");
+      const options = Array.from(wrap.querySelectorAll(".job-list .job-item")).map(
+        (item, index) => {
+          const labelElement = item.querySelector(".label") ?? item;
+          return {
+            index,
+            value: item.getAttribute("value") ?? item.getAttribute("data-value") ?? "",
+            label: text(labelElement),
+            isCurrent: item.classList.contains("curr")
+          };
+        },
+      );
+      const current = options.find((option) => option.isCurrent);
+      const label = wrap.querySelector(".ui-dropmenu-label");
+      return {
+        found: true,
+        isOpen: Boolean(list && visible(list)),
+        currentLabel: current?.label ?? (label ? text(label) : ""),
+        currentValue: current?.value ?? "",
+        options
+      };
+    })()`;
+
+    const mainState = toNativeRecommendJobSelectorState(
+      await this.evaluateJson(expression).catch(() => undefined),
+    );
+    if (mainState.found) {
+      return mainState;
+    }
+
+    return toNativeRecommendJobSelectorState(await this.evaluateRecommendFrameJson(expression));
+  }
+
+  private async openRecommendJobSelector(options: NativeClickOptions = {}): Promise<boolean> {
+    const current = await this.readRecommendJobSelectorState();
+    if (current.isOpen) {
+      return true;
+    }
+
+    const target = await this.resolveRecommendClickTarget(
+      `(() => {
+        const visible = (element) => {
+          const rect = element.getBoundingClientRect();
+          return rect.width > 0 && rect.height > 0;
+        };
+        const wrap = document.querySelector(".job-selecter-wrap");
+        const label = wrap?.querySelector(".ui-dropmenu-label") ?? wrap;
+        if (!label || !visible(label)) {
+          return { found: false, x: 0, y: 0 };
+        }
+        label.scrollIntoView({ block: "center", inline: "center" });
+        const rect = label.getBoundingClientRect();
+        return {
+          found: true,
+          x: Math.round(rect.left + rect.width / 2),
+          y: Math.round(rect.top + rect.height / 2)
+        };
+      })()`,
+    );
+
+    if (!(await this.dispatchNativeClick(target, options))) {
+      return false;
+    }
+
+    await delay(900);
+    return (await this.readRecommendJobSelectorState()).isOpen;
+  }
+
+  private async setRecommendJobSearch(
+    query: string,
+    options: NativeClickOptions = {},
+  ): Promise<boolean> {
+    const target = await this.resolveRecommendClickTarget(
+      `(() => {
+        const visible = (element) => {
+          const rect = element.getBoundingClientRect();
+          return rect.width > 0 && rect.height > 0;
+        };
+        const input = document.querySelector(".job-selecter-wrap .top-chat-search input.ipt.chat-job-search");
+        if (!(input instanceof HTMLInputElement) || !visible(input)) {
+          return { found: false, x: 0, y: 0 };
+        }
+        input.scrollIntoView({ block: "center", inline: "center" });
+        const rect = input.getBoundingClientRect();
+        return {
+          found: true,
+          x: Math.round(rect.left + rect.width / 2),
+          y: Math.round(rect.top + rect.height / 2)
+        };
+      })()`,
+    );
+
+    if (!(await this.dispatchNativeClick(target, options))) {
+      return false;
+    }
+
+    await delay(260);
+    await this.selectAllFocusedText();
+    await delay(160);
+    await this.controller.dispatchKeyEvent({
+      type: "rawKeyDown",
+      key: "Backspace",
+      code: "Backspace",
+      windowsVirtualKeyCode: 8,
+      nativeVirtualKeyCode: 8,
+    });
+    await delay(90);
+    await this.controller.dispatchKeyEvent({
+      type: "keyUp",
+      key: "Backspace",
+      code: "Backspace",
+      windowsVirtualKeyCode: 8,
+      nativeVirtualKeyCode: 8,
+    });
+
+    if (query.length === 0) {
+      await delay(500);
+      return true;
+    }
+
+    await delay(350);
+    for (const char of Array.from(query)) {
+      await this.controller.insertText(char);
+      await delay(110);
+    }
+    await delay(650);
+    return true;
+  }
+
+  private selectRecommendJobMatch(
+    request: NativeRecommendJobSelectRequest,
+    options: readonly NativeRecommendJobOption[],
+  ): { readonly selected?: NativeRecommendJobOption; readonly matchedCount: number } {
+    const buildMatch = (
+      matches: readonly NativeRecommendJobOption[],
+    ): { readonly selected?: NativeRecommendJobOption; readonly matchedCount: number } => {
+      const selected = matches[0];
+      return {
+        ...(selected !== undefined ? { selected } : {}),
+        matchedCount: matches.length,
+      };
+    };
+
+    if (request.jobValue !== undefined) {
+      const matches = options.filter((option) => option.value === request.jobValue);
+      return buildMatch(matches);
+    }
+
+    if (request.jobName !== undefined) {
+      const expected = normalizeRecommendJobText(request.jobName);
+      const exactMatches = options.filter(
+        (option) => normalizeRecommendJobText(option.label) === expected,
+      );
+      if (exactMatches.length > 0) {
+        return buildMatch(exactMatches);
+      }
+
+      const containsMatches = options.filter((option) =>
+        normalizeRecommendJobText(option.label).includes(expected),
+      );
+      return buildMatch(containsMatches);
+    }
+
+    if (request.index !== undefined) {
+      const matches = options.filter((option) => option.index === request.index);
+      return buildMatch(matches);
+    }
+
+    return { matchedCount: 0 };
+  }
+
+  private getCurrentRecommendJobOption(
+    state: NativeRecommendJobSelectorState,
+  ): NativeRecommendJobOption | undefined {
+    const current = state.options.find((option) => option.isCurrent);
+    if (current !== undefined) {
+      return current;
+    }
+    if (state.currentLabel.length === 0 && state.currentValue.length === 0) {
+      return undefined;
+    }
+    return {
+      index: -1,
+      value: state.currentValue,
+      label: state.currentLabel,
+      isCurrent: true,
+    };
+  }
+
+  private currentRecommendJobMatchesRequest(
+    request: NativeRecommendJobSelectRequest,
+    current: NativeRecommendJobOption | undefined,
+  ): boolean {
+    if (current === undefined) {
+      return false;
+    }
+    if (request.jobValue !== undefined && current.value.length > 0) {
+      return current.value === request.jobValue;
+    }
+    if (request.jobName !== undefined && current.label.length > 0) {
+      const expected = normalizeRecommendJobText(request.jobName);
+      const actual = normalizeRecommendJobText(current.label);
+      return actual === expected || actual.includes(expected);
+    }
+    return request.index !== undefined && current.index === request.index;
+  }
+
+  private async clickRecommendJobOption(
+    selected: NativeRecommendJobOption,
+    options: NativeClickOptions = {},
+  ): Promise<boolean> {
+    const target = await this.resolveRecommendClickTarget(
+      `(() => {
+        const expectedValue = ${JSON.stringify(selected.value)};
+        const expectedIndex = ${JSON.stringify(selected.index)};
+        const visible = (element) => {
+          const rect = element.getBoundingClientRect();
+          return rect.width > 0 && rect.height > 0;
+        };
+        const items = Array.from(document.querySelectorAll(".job-selecter-wrap .job-list .job-item"));
+        const item = items.find((candidate, index) => {
+          const value = candidate.getAttribute("value") ?? candidate.getAttribute("data-value") ?? "";
+          return expectedValue.length > 0 ? value === expectedValue : index === expectedIndex;
+        });
+        if (!item || !visible(item)) {
+          return { found: false, x: 0, y: 0 };
+        }
+        item.scrollIntoView({ block: "center", inline: "center" });
+        const rect = item.getBoundingClientRect();
+        return {
+          found: true,
+          x: Math.round(rect.left + rect.width / 2),
+          y: Math.round(rect.top + rect.height / 2)
+        };
+      })()`,
+    );
+
+    return await this.dispatchNativeClick(target, options);
+  }
+
+  async selectRecommendJob(
+    request: NativeRecommendJobSelectRequest,
+    options: NativeClickOptions = {},
+  ): Promise<NativeRecommendJobSelectResult> {
+    const requested = { ...request };
+    if (!(await this.waitForRecommendList(3_000))) {
+      return {
+        success: false,
+        status: "recommend_not_ready",
+        requested,
+        options: [],
+        matchedCount: 0,
+        error: "推荐牛人页未就绪",
+      };
+    }
+
+    if (!(await this.openRecommendJobSelector(options))) {
+      const state = await this.readRecommendJobSelectorState();
+      const current = state.options.find((option) => option.isCurrent);
+      return {
+        success: false,
+        status: state.found ? "selector_not_found" : "recommend_not_ready",
+        requested,
+        ...(current !== undefined ? { current } : {}),
+        options: state.options,
+        matchedCount: 0,
+        error: state.found ? "未找到或无法打开岗位下拉" : "未找到岗位下拉",
+      };
+    }
+
+    await this.setRecommendJobSearch("", options);
+    await delay(700);
+    let state = await this.readRecommendJobSelectorState();
+    const initialCurrent = this.getCurrentRecommendJobOption(state);
+    if (
+      initialCurrent !== undefined &&
+      this.currentRecommendJobMatchesRequest(requested, initialCurrent)
+    ) {
+      return {
+        success: true,
+        status: "already_selected",
+        requested,
+        current: initialCurrent,
+        selected: initialCurrent,
+        options: state.options,
+        matchedCount: 1,
+      };
+    }
+
+    let match = this.selectRecommendJobMatch(requested, state.options);
+    const searchKeyword = requested.searchKeyword ?? requested.jobName;
+    if (
+      match.selected === undefined &&
+      requested.useSearch !== false &&
+      searchKeyword !== undefined &&
+      searchKeyword.trim().length > 0 &&
+      (await this.setRecommendJobSearch(searchKeyword, options))
+    ) {
+      await delay(900);
+      state = await this.readRecommendJobSelectorState();
+      match = this.selectRecommendJobMatch(requested, state.options);
+    }
+
+    const current = this.getCurrentRecommendJobOption(state);
+    if (match.selected === undefined) {
+      return {
+        success: false,
+        status: "not_found",
+        requested,
+        ...(current !== undefined ? { current } : {}),
+        options: state.options,
+        matchedCount: match.matchedCount,
+        error: "未找到匹配的招聘岗位",
+      };
+    }
+
+    if (match.selected.isCurrent) {
+      return {
+        success: true,
+        status: "already_selected",
+        requested,
+        current: match.selected,
+        selected: match.selected,
+        options: state.options,
+        matchedCount: match.matchedCount,
+      };
+    }
+
+    if (!(await this.clickRecommendJobOption(match.selected, options))) {
+      return {
+        success: false,
+        status: "selector_not_found",
+        requested,
+        ...(current !== undefined ? { current } : {}),
+        selected: match.selected,
+        options: state.options,
+        matchedCount: match.matchedCount,
+        error: "未能点击匹配的招聘岗位",
+      };
+    }
+
+    let nextState = await this.readRecommendJobSelectorState();
+    for (let attempt = 0; attempt < 6; attempt += 1) {
+      const current = this.getCurrentRecommendJobOption(nextState);
+      if (current?.value === match.selected.value || current?.label === match.selected.label) {
+        break;
+      }
+      await delay(600);
+      nextState = await this.readRecommendJobSelectorState();
+    }
+    const selected =
+      nextState.options.find((option) => option.value === match.selected?.value) ?? match.selected;
+    return {
+      success: true,
+      status: "selected",
+      requested,
+      current: selected,
+      selected,
+      options: nextState.options.length > 0 ? nextState.options : state.options,
+      matchedCount: match.matchedCount,
+    };
+  }
+
   async clickSidebarSection(
     section: "chat" | "recommend",
     options: NativeClickOptions = {},
@@ -1119,66 +1582,100 @@ export class ZhipinNativePagePort {
       }
     }
 
-    const maxScrolls = Math.max(0, Math.floor(options.maxScrolls ?? 4));
     const hasExplicitTarget =
       options.conversationId !== undefined ||
       options.candidateName !== undefined ||
       options.index !== undefined;
-    const snapshots: ChatListItem[] = [];
+    const maxScrolls = Math.max(0, Math.floor(options.maxScrolls ?? (hasExplicitTarget ? 12 : 4)));
 
-    for (let attempt = 0; attempt <= maxScrolls; attempt += 1) {
-      snapshots.push(...(await this.readVisibleChatCandidates()));
-      const candidates = dedupeChatItems(snapshots);
-      const selected =
-        options.preferUnread === true && !hasExplicitTarget
-          ? candidates.find((candidate) => candidate.hasUnread)
-          : selectChatCandidate(candidates, options);
-
-      if (selected !== undefined) {
-        const clicked = await this.clickChatCandidate(selected, {
+    const openSelected = async (selected: ChatListItem): Promise<OpenChatResult> => {
+      const clicked = await this.clickChatCandidate(selected, {
+        ...(options.motionObserver !== undefined ? { motionObserver: options.motionObserver } : {}),
+      });
+      if (!clicked) {
+        return {
+          ...selected,
+          found: false,
+          error: `未能点击候选人: ${selected.name || selected.conversationId}`,
+        };
+      }
+      await delay(NATIVE_CLICK_SETTLE_MS);
+      let ready = await this.waitForNativeChatReady(selected);
+      if (!ready) {
+        const retried = await this.clickChatCandidate(selected, {
           ...(options.motionObserver !== undefined
             ? { motionObserver: options.motionObserver }
             : {}),
         });
-        if (!clicked) {
-          return {
-            ...selected,
-            found: false,
-            error: `未能点击候选人: ${selected.name || selected.conversationId}`,
-          };
+        if (retried) {
+          await delay(NATIVE_CLICK_SETTLE_MS);
+          ready = await this.waitForNativeChatReady(selected);
         }
-        await delay(NATIVE_CLICK_SETTLE_MS);
-        let ready = await this.waitForNativeChatReady(selected);
-        if (!ready) {
-          const retried = await this.clickChatCandidate(selected, {
-            ...(options.motionObserver !== undefined
-              ? { motionObserver: options.motionObserver }
-              : {}),
-          });
-          if (retried) {
-            await delay(NATIVE_CLICK_SETTLE_MS);
-            ready = await this.waitForNativeChatReady(selected);
-          }
+      }
+      if (!ready) {
+        return {
+          ...selected,
+          found: false,
+          error: `打开候选人聊天后，右侧会话未同步切换到 ${selected.name || selected.conversationId}`,
+        };
+      }
+      return { ...selected, found: true };
+    };
+
+    const scanChatList = async (
+      direction: ScrollDirection,
+      scrollAttempts: number,
+    ): Promise<OpenChatResult | undefined> => {
+      const snapshots: ChatListItem[] = [];
+
+      for (let attempt = 0; attempt <= scrollAttempts; attempt += 1) {
+        snapshots.push(...(await this.readVisibleChatCandidates()));
+        const candidates = dedupeChatItems(snapshots);
+        const selected =
+          options.preferUnread === true && !hasExplicitTarget
+            ? candidates.find((candidate) => candidate.hasUnread)
+            : selectChatCandidate(candidates, options);
+
+        if (selected !== undefined) {
+          return await openSelected(selected);
         }
-        if (!ready) {
-          return {
-            ...selected,
-            found: false,
-            error: `打开候选人聊天后，右侧会话未同步切换到 ${selected.name || selected.conversationId}`,
-          };
+
+        if (attempt >= scrollAttempts) {
+          break;
         }
-        return { ...selected, found: true };
+
+        const scrollResult = await this.scrollChatList(direction);
+        if (!scrollResult.ok) {
+          break;
+        }
+        await delay(NATIVE_SCROLL_PAUSE_MS);
       }
 
-      if (attempt >= maxScrolls) {
-        break;
+      return undefined;
+    };
+
+    const currentScanResult = await scanChatList("down", hasExplicitTarget ? 0 : maxScrolls);
+    if (currentScanResult !== undefined) {
+      return currentScanResult;
+    }
+
+    if (hasExplicitTarget && maxScrolls > 0) {
+      for (let attempt = 0; attempt < maxScrolls; attempt += 1) {
+        const scrollResult = await this.scrollChatList("up");
+        if (
+          !scrollResult.ok ||
+          scrollResult.after <= 1 ||
+          scrollResult.after >= scrollResult.before
+        ) {
+          break;
+        }
+        await delay(NATIVE_SCROLL_PAUSE_MS);
       }
 
-      const scrollResult = await this.scrollChatList();
-      if (!scrollResult.ok) {
-        break;
+      const topScanResult = await scanChatList("down", maxScrolls);
+      if (topScanResult !== undefined) {
+        return topScanResult;
       }
-      await delay(NATIVE_SCROLL_PAUSE_MS);
     }
 
     return {
@@ -1192,7 +1689,12 @@ export class ZhipinNativePagePort {
       unreadCount: 0,
       lastMessageTime: "",
       messagePreview: "",
-      error: `未找到候选人: ${options.candidateName ?? `index ${options.index ?? 0}`}`,
+      error: `未找到候选人: ${
+        options.candidateName ??
+        (options.conversationId !== undefined
+          ? `conversationId ${options.conversationId}`
+          : `index ${options.index ?? 0}`)
+      }`,
     };
   }
 
@@ -3691,9 +4193,9 @@ export class ZhipinNativePagePort {
     return frameSnapshot.itemCount > 0 ? frameSnapshot : mainSnapshot;
   }
 
-  private async scrollChatList(): Promise<NativeScrollResult> {
+  private async scrollChatList(direction: ScrollDirection = "down"): Promise<NativeScrollResult> {
     const result = await this.scrollSurface("chat-list", {
-      direction: "down",
+      direction,
       steps: 1,
       settleMs: 0,
     });
