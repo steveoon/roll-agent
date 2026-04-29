@@ -1,5 +1,15 @@
 # @roll-agent/browser-use-agent
 
+## 0.8.0
+
+### Minor Changes
+
+- [#73](https://github.com/steveoon/roll-agent/pull/73) [`9ee8d5e`](https://github.com/steveoon/roll-agent/commit/9ee8d5e87c88f78ff033a4ed714e1e388bc73a09) Thanks [@steveoon](https://github.com/steveoon)! - Add BOSS recommend job selection support and expose scroll boundary state for dynamic lists.
+
+  The BOSS native CDP workflow can now select the active recommend-page job by stable
+  `jobValue`, `jobName`, or current dropdown `index`, and `zhipin_scroll_view` reports
+  top/bottom boundary fields so orchestrators can reason about virtual list position.
+
 ## 0.7.7
 
 ### Patch Changes
