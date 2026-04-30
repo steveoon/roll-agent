@@ -1,9 +1,13 @@
 import { defineCommand } from "citty";
 import { resolve } from "node:path";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync } from "node:fs";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { inspectConfigFile, loadAgentsConfig, type ConfigInspectionResult } from "../../config/loader.ts";
+import {
+  inspectConfigFile,
+  loadAgentsConfig,
+  type ConfigInspectionResult,
+} from "../../config/loader.ts";
 import {
   getAgentPid,
   startAgent,
@@ -28,11 +32,18 @@ import {
   type PublishedPackageUpdateInfo,
   type PublishedPackageUpdateStatus,
 } from "../utils/update-checker.ts";
+import {
+  detectInstallCommand,
+  formatPackageManagerError,
+  runPackageManager,
+  type PackageManagerRunSpec,
+} from "../utils/package-manager.ts";
 import type { AgentSourceType, RegisteredAgent } from "../../types/agent.ts";
 
 const execFileAsync = promisify(execFile);
 
 export { inferAgentSourceType as inferSourceType } from "../../registry/source.ts";
+export { detectInstallCommand } from "../utils/package-manager.ts";
 
 function logConfigInspectionNotice(
   inspection: ConfigInspectionResult,
@@ -40,8 +51,7 @@ function logConfigInspectionNotice(
 ): void {
   switch (inspection.status) {
     case "needs-migration": {
-      const title =
-        mode === "post-update" ? "升级后需要迁移本地配置" : "检测到本地配置需要迁移";
+      const title = mode === "post-update" ? "升级后需要迁移本地配置" : "检测到本地配置需要迁移";
       log.warn(`${title}: ${inspection.configPath}`);
       for (const issue of inspection.report.issues) {
         log.warn(`  - ${issue.message}`);
@@ -98,9 +108,7 @@ function formatInstalledPackageCheckAction(
 ): string {
   switch (info.status) {
     case "up-to-date":
-      return info.currentVersion
-        ? `已是最新版本 (v${info.currentVersion})`
-        : "已是最新版本";
+      return info.currentVersion ? `已是最新版本 (v${info.currentVersion})` : "已是最新版本";
     case "update-available":
       if (info.currentVersion && info.latestVersion) {
         return `可更新 v${info.currentVersion} → v${info.latestVersion}`;
@@ -175,15 +183,17 @@ async function updateSelf(latest: string, dryRun: boolean): Promise<boolean> {
   }
 
   const spinner = createSpinner("正在更新 @roll-agent/core...").start();
+  const installSpec: PackageManagerRunSpec = {
+    command: "npm",
+    args: ["install", "-g", `@roll-agent/core@${latest}`],
+  };
   try {
-    await execFileAsync("npm", ["install", "-g", `@roll-agent/core@${latest}`], {
-      timeout: 60_000,
-    });
+    await runPackageManager(installSpec, { timeout: 60_000 });
     spinner.succeed(`roll 已更新到 v${latest}`);
     return true;
   } catch (err) {
     spinner.fail("更新失败");
-    log.error(err instanceof Error ? err.message : String(err));
+    log.error(formatPackageManagerError(installSpec, err));
     return false;
   }
 }
@@ -200,13 +210,11 @@ async function updateGitAgent(agent: RegisteredAgent): Promise<boolean> {
     if (existsSync(packageJsonPath)) {
       const installCommand = detectInstallCommand(agent.installPath);
       if (!installCommand) {
-        log.warn(
-          `${agent.skill.name} 未检测到 packageManager 或 lockfile，跳过依赖安装。`,
-        );
+        log.warn(`${agent.skill.name} 未检测到 packageManager 或 lockfile，跳过依赖安装。`);
       } else {
         const depSpinner = createSpinner(`安装 ${agent.skill.name} 依赖...`).start();
         try {
-          await execFileAsync(installCommand.command, installCommand.args, {
+          await runPackageManager(installCommand, {
             cwd: agent.installPath,
             timeout: 60_000,
           });
@@ -215,7 +223,7 @@ async function updateGitAgent(agent: RegisteredAgent): Promise<boolean> {
           );
         } catch (err) {
           depSpinner.fail(`${agent.skill.name} 依赖安装失败`);
-          log.error(err instanceof Error ? err.message : String(err));
+          log.error(formatPackageManagerError(installCommand, err));
           return false;
         }
       }
@@ -238,12 +246,12 @@ async function updateInstalledAgent(
   }
 
   const spinner = createSpinner(`更新 ${agent.skill.name} (npm install)...`).start();
+  const installSpec: PackageManagerRunSpec = {
+    command: "npm",
+    args: ["install", "--prefix", agent.source.installDir, agent.source.packageSpec],
+  };
   try {
-    await execFileAsync(
-      "npm",
-      ["install", "--prefix", agent.source.installDir, agent.source.packageSpec],
-      { timeout: 120_000 },
-    );
+    await runPackageManager(installSpec, { timeout: 120_000 });
 
     const packageRoot = resolveInstalledPackageRoot(
       agent.source.installDir,
@@ -262,7 +270,7 @@ async function updateInstalledAgent(
     };
   } catch (err) {
     spinner.fail(`${agent.skill.name} 更新失败`);
-    log.error(err instanceof Error ? err.message : String(err));
+    log.error(formatPackageManagerError(installSpec, err));
     return undefined;
   }
 }
@@ -324,7 +332,9 @@ export default defineCommand({
       store = new AgentStore(agentsConfig.dataDir);
       agents = store.list();
     } catch (err) {
-      log.warn(`无法读取 Agent 配置，跳过已注册 Agent 检查：${err instanceof Error ? err.message : String(err)}`);
+      log.warn(
+        `无法读取 Agent 配置，跳过已注册 Agent 检查：${err instanceof Error ? err.message : String(err)}`,
+      );
     }
 
     const agentSummary: AgentCheckSummary[] = [];
@@ -357,13 +367,16 @@ export default defineCommand({
             });
             break;
           }
-          const info = await checkPublishedPackageUpdate({
-            packageName: agent.source.packageName,
-            packageSpec: agent.source.packageSpec,
-            ...(agent.source.installedVersion
-              ? { currentVersion: agent.source.installedVersion }
-              : {}),
-          });
+          const info = await checkPublishedPackageUpdate(
+            {
+              packageName: agent.source.packageName,
+              packageSpec: agent.source.packageSpec,
+              ...(agent.source.installedVersion
+                ? { currentVersion: agent.source.installedVersion }
+                : {}),
+            },
+            { forceRefresh: true },
+          );
           agentSummary.push({
             name: agent.skill.name,
             sourceType,
@@ -586,9 +599,9 @@ export default defineCommand({
           break;
         }
         case "local-path": {
-            const wasRunning =
-              agent.runtime.ownership === "core-managed" &&
-              getAgentPid(agentsConfig.dataDir, agent.skill.name) !== undefined;
+          const wasRunning =
+            agent.runtime.ownership === "core-managed" &&
+            getAgentPid(agentsConfig.dataDir, agent.skill.name) !== undefined;
           try {
             const discovered = discoverAgent(agent.installPath);
             const updated: RegisteredAgent = {
@@ -648,44 +661,6 @@ export default defineCommand({
   },
 });
 
-interface InstallCommandSpec {
-  readonly command: "bun" | "npm" | "pnpm" | "yarn";
-  readonly args: readonly ["install"];
-}
-
-export function detectInstallCommand(projectDir: string): InstallCommandSpec | undefined {
-  const packageJsonPath = resolve(projectDir, "package.json");
-  if (existsSync(packageJsonPath)) {
-    const packageManager = readPackageManager(packageJsonPath);
-    if (packageManager) {
-      return {
-        command: packageManager,
-        args: ["install"],
-      };
-    }
-  }
-
-  const lockfileEntries: ReadonlyArray<readonly [string, InstallCommandSpec["command"]]> = [
-    ["pnpm-lock.yaml", "pnpm"],
-    ["package-lock.json", "npm"],
-    ["npm-shrinkwrap.json", "npm"],
-    ["yarn.lock", "yarn"],
-    ["bun.lock", "bun"],
-    ["bun.lockb", "bun"],
-  ];
-
-  for (const [lockfile, command] of lockfileEntries) {
-    if (existsSync(resolve(projectDir, lockfile))) {
-      return {
-        command,
-        args: ["install"],
-      };
-    }
-  }
-
-  return undefined;
-}
-
 async function maybeRestartManagedAgent(
   agent: RegisteredAgent,
   wasRunning: boolean,
@@ -699,10 +674,7 @@ async function maybeRestartManagedAgent(
   await startManagedAgentAndWait(agent, dataDir);
 }
 
-async function startManagedAgentAndWait(
-  agent: RegisteredAgent,
-  dataDir: string,
-): Promise<void> {
+async function startManagedAgentAndWait(agent: RegisteredAgent, dataDir: string): Promise<void> {
   let started = false;
   try {
     startAgent(agent, dataDir);
@@ -713,24 +685,5 @@ async function startManagedAgentAndWait(
       await stopAgentGracefully(dataDir, agent.skill.name).catch(() => {});
     }
     throw err;
-  }
-}
-
-function readPackageManager(packageJsonPath: string): InstallCommandSpec["command"] | undefined {
-  try {
-    const parsed = JSON.parse(readFileSync(packageJsonPath, "utf-8")) as {
-      readonly packageManager?: unknown;
-    };
-    if (typeof parsed.packageManager !== "string" || parsed.packageManager.length === 0) {
-      return undefined;
-    }
-
-    const name = parsed.packageManager.split("@", 1)[0];
-    if (name === "pnpm" || name === "npm" || name === "yarn" || name === "bun") {
-      return name;
-    }
-    return undefined;
-  } catch {
-    return undefined;
   }
 }

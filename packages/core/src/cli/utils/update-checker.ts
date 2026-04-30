@@ -1,10 +1,7 @@
 import { readFileSync, writeFileSync, mkdirSync, existsSync } from "node:fs";
 import { resolve, dirname } from "node:path";
-import { execFile } from "node:child_process";
-import { promisify } from "node:util";
 import { homedir } from "node:os";
-
-const execFileAsync = promisify(execFile);
+import { runPackageManager } from "./package-manager.ts";
 
 const CACHE_TTL_MS = 24 * 60 * 60 * 1000;
 const CORE_PACKAGE_NAME = "@roll-agent/core";
@@ -16,8 +13,7 @@ export const PUBLISHED_PACKAGE_UPDATE_STATUSES = [
   "unsupported-spec",
   "unknown",
 ] as const;
-export type PublishedPackageUpdateStatus =
-  (typeof PUBLISHED_PACKAGE_UPDATE_STATUSES)[number];
+export type PublishedPackageUpdateStatus = (typeof PUBLISHED_PACKAGE_UPDATE_STATUSES)[number];
 
 interface PackageVersionCacheEntry {
   readonly latestVersion: string;
@@ -144,10 +140,15 @@ async function fetchLatestPublishedVersionFromRegistry(
   packageName: string,
 ): Promise<string | undefined> {
   try {
-    const { stdout } = await execFileAsync("npm", ["view", packageName, "version", "--json"], {
-      timeout: 5000,
-      encoding: "utf-8",
-    });
+    const { stdout } = await runPackageManager(
+      {
+        command: "npm",
+        args: ["view", packageName, "version", "--json"],
+      },
+      {
+        timeout: 5000,
+      },
+    );
     const trimmed = stdout.trim();
     if (trimmed.length === 0) {
       return undefined;
@@ -221,7 +222,15 @@ export function isNewerVersion(latest: string, current: string): boolean {
 }
 
 function isRegistryPublishedPackageSpec(packageName: string, packageSpec: string): boolean {
-  const unsupportedPrefixes = ["file:", "git+", "http://", "https://", "link:", "workspace:", "npm:"];
+  const unsupportedPrefixes = [
+    "file:",
+    "git+",
+    "http://",
+    "https://",
+    "link:",
+    "workspace:",
+    "npm:",
+  ];
   if (unsupportedPrefixes.some((prefix) => packageSpec.startsWith(prefix))) {
     return false;
   }
@@ -317,8 +326,7 @@ export async function checkForUpdate(
   options: PackageVersionQueryOptions = {},
 ): Promise<UpdateInfo> {
   const current = getCurrentVersion();
-  const latest =
-    (await fetchLatestPublishedVersion(CORE_PACKAGE_NAME, options)) ?? current;
+  const latest = (await fetchLatestPublishedVersion(CORE_PACKAGE_NAME, options)) ?? current;
 
   return {
     current,
