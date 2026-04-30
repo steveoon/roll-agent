@@ -1,5 +1,13 @@
 # @roll-agent/core
 
+## 0.6.4
+
+### Patch Changes
+
+- [#75](https://github.com/steveoon/roll-agent/pull/75) [`5ebc424`](https://github.com/steveoon/roll-agent/commit/5ebc424f330790bf34e5d84b87a017a52d5980da) Thanks [@steveoon](https://github.com/steveoon)! - Force `roll update --check` to refresh npm-installed Agent versions instead of reusing the 24h update reminder cache.
+
+- [#75](https://github.com/steveoon/roll-agent/pull/75) [`5ebc424`](https://github.com/steveoon/roll-agent/commit/5ebc424f330790bf34e5d84b87a017a52d5980da) Thanks [@steveoon](https://github.com/steveoon)! - Improve Windows compatibility for npm and pnpm calls used by Agent install, add, update, and update checks.
+
 ## 0.6.3
 
 ### Patch Changes
