@@ -9,6 +9,13 @@ import { discoverAgent } from "../../registry/discovery.ts";
 import { writeRemoteSkillManifest } from "../../registry/manifest.ts";
 import { AgentStore } from "../../registry/store.ts";
 import { log } from "../utils/output.ts";
+import {
+  createInstallCommand,
+  detectInstallCommand,
+  formatPackageManagerCommand,
+  formatPackageManagerError,
+  runPackageManager,
+} from "../utils/package-manager.ts";
 import type { AgentSource, RegisteredAgent } from "../../types/agent.ts";
 
 const execFileAsync = promisify(execFile);
@@ -110,12 +117,13 @@ export default defineCommand({
     if (args.remote) {
       log.info("远程 Agent 使用本地 manifest，无需安装依赖。");
     } else if (existsSync(packageJsonPath) && !skipInstall) {
-      log.info("安装依赖...");
+      const installCommand = detectInstallCommand(agentDir) ?? createInstallCommand("pnpm");
+      log.info(`安装依赖 (${formatPackageManagerCommand(installCommand)})...`);
       try {
-        await execFileAsync("pnpm", ["install"], { cwd: agentDir });
+        await runPackageManager(installCommand, { cwd: agentDir });
         log.success("依赖安装完成");
       } catch (err) {
-        log.error(`依赖安装失败: ${err instanceof Error ? err.message : ""}`);
+        log.error(`依赖安装失败: ${formatPackageManagerError(installCommand, err)}`);
         process.exitCode = 1;
         return;
       }

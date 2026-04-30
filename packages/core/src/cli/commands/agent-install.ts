@@ -1,8 +1,6 @@
 import { defineCommand } from "citty";
 import { existsSync, mkdirSync, statSync } from "node:fs";
 import { resolve } from "node:path";
-import { execFile } from "node:child_process";
-import { promisify } from "node:util";
 import { inspectAgentEnvRequirements } from "../../config/helpers.ts";
 import { loadAgentsConfig } from "../../config/loader.ts";
 import { discoverAgent } from "../../registry/discovery.ts";
@@ -20,9 +18,12 @@ import {
   sanitizeInstallId,
 } from "../../registry/source.ts";
 import { log } from "../utils/output.ts";
+import {
+  formatPackageManagerError,
+  runPackageManager,
+  type PackageManagerRunSpec,
+} from "../utils/package-manager.ts";
 import type { RegisteredAgent } from "../../types/agent.ts";
-
-const execFileAsync = promisify(execFile);
 
 function isGitUrl(input: string): boolean {
   return (
@@ -55,7 +56,9 @@ export default defineCommand({
     const packageSpec = args.package;
 
     if (isGitUrl(packageSpec)) {
-      log.error(`Git URL 请使用 \`roll agent add ${packageSpec}\` 注册，不要使用 \`roll agent install\``);
+      log.error(
+        `Git URL 请使用 \`roll agent add ${packageSpec}\` 注册，不要使用 \`roll agent install\``,
+      );
       process.exitCode = 1;
       return;
     }
@@ -77,12 +80,14 @@ export default defineCommand({
     }
 
     log.info(`安装 ${packageSpec}...`);
+    const installSpec: PackageManagerRunSpec = {
+      command: "npm",
+      args: ["install", "--prefix", installDir, packageSpec],
+    };
     try {
-      await execFileAsync("npm", ["install", "--prefix", installDir, packageSpec], {
-        timeout: 120_000,
-      });
+      await runPackageManager(installSpec, { timeout: 120_000 });
     } catch (err) {
-      log.error(`安装失败: ${err instanceof Error ? err.message : String(err)}`);
+      log.error(`安装失败: ${formatPackageManagerError(installSpec, err)}`);
       process.exitCode = 1;
       return;
     }
@@ -143,8 +148,7 @@ export default defineCommand({
     const existing = store.findByName(discovered.skill.name);
     try {
       const wasRunning =
-        existing?.runtime.ownership === "core-managed" &&
-        existing.status === "online";
+        existing?.runtime.ownership === "core-managed" && existing.status === "online";
 
       if (existing?.source?.type === "installed-package") {
         store.replace(existing.skill.name, agent);
