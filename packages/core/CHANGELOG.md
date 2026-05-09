@@ -1,5 +1,11 @@
 # @roll-agent/core
 
+## 0.6.6
+
+### Patch Changes
+
+- [#80](https://github.com/steveoon/roll-agent/pull/80) [`60f9fea`](https://github.com/steveoon/roll-agent/commit/60f9feaa027950c21e8c3cc80ce41a5aaffb85d4) Thanks [@steveoon](https://github.com/steveoon)! - Clarify CLI help text for config keys, Agent registration/update commands, and multi-word options. Multi-word flags now render as kebab-case, including `--skip-browser-setup` and `--no-start`.
+
 ## 0.6.5
 
 ### Patch Changes
