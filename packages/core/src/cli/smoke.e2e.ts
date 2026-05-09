@@ -859,7 +859,7 @@ test("e2e smoke: config set help clarifies dotted key syntax", () => {
       0,
       `config set --help failed\nstdout:\n${result.stdout}\nstderr:\n${result.stderr}`,
     );
-    assert.match(result.stdout, /英文句点 \. 分隔/);
+    assert.match(result.stdout, /英文句点 [`]?\.[`]? 分隔/);
     assert.match(result.stdout, /ask\.confirm-threshold/);
   } finally {
     rmSync(workspace, { recursive: true, force: true });
