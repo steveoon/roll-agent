@@ -74,7 +74,7 @@ roll --help
 - `roll-core` 新增了 `tool-runtime` 适配层：统一做参数提取、preflight 校验、错误分类和用户提示。
 - 路由结果已拆成 `RouteSelection` 与 `RouteDecision`：先选 tool，再补参数，CLI 和上层编排器都更容易复用这套状态机。
 - `roll run` 已支持 `--input-json` / `--input-file`：适合显式传递复杂对象、开放对象和批量 payload。
-- `roll chat` 已预留为未来会话式统一入口，但当前仅提供 experimental 命令骨架，不做多步编排。
+- `roll chat` 是 experimental 会话式入口骨架，当前只返回 unavailable，不做多步编排。
 - `smart-reply-agent` 的品牌数据同步已从“手工 push 数据”改成“从 Duliday pull 数据”，并升级为新的品牌数据模型：`meta + brands[] + stores[] + positions[]`。
 
 ### 1. 初始化配置
@@ -101,7 +101,7 @@ agents:
 ```
 
 支持的 provider：`anthropic`、`openai`、`deepseek`、`qwen`。每个 provider 可配置 `base-url` 用于自定义 API 端点。
-`ask.llmModel` 可选；未设置时会回退到 `llm.defaultModel`。
+`ask.llm-model` 可选；未设置时会回退到 `llm.default-model`。
 
 如果本地还留着旧版 `router:` 配置段：
 
@@ -162,7 +162,7 @@ agents:
 ### 3. 调用 Agent
 
 ```bash
-# 声明式调用（明确指定 Agent + Tool）
+# 直接调用（明确指定 Agent + MCP tool）
 pnpm dev -- run browser-use-agent zhipin_read_messages --limit 10
 
 # 显式传入结构化 JSON（适合 object / record / 复杂 payload）
@@ -175,7 +175,7 @@ pnpm dev -- run some-agent sync_config --input-file ./payload.json
 # LLM 智能路由（自然语言，自动选择 Agent + Tool）
 pnpm dev -- ask "帮我查看未读消息"
 
-# 未来会话式入口（experimental，当前只返回 unavailable）
+# 会话式入口骨架（experimental，当前只返回 unavailable）
 pnpm dev -- chat "帮我把这批候选人处理掉"
 ```
 
@@ -192,31 +192,44 @@ pnpm dev -- chat "帮我把这批候选人处理掉"
 ```
 roll agent add <path|url>       注册本地目录或 Git Agent（解析 SKILL.md + 安装依赖）
 roll agent add --remote <url>   注册远程 streamable-http Agent（需配合 --name/--description）
-roll agent install <package>    安装并注册已编译 Agent 包（本地源码目录/Git URL 请改用 add）
+roll agent install <package>    安装并注册已发布 Agent npm 包（本地源码目录/Git URL 请改用 add）
 roll agent remove <name>        移除 Agent
 roll agent list                 列出所有已注册 Agent
-roll agent start <name>         启动 Agent（兼容 on-demand / core-managed / external-managed）
-roll agent stop <name>          停止 Agent（core-managed HTTP 可由 Roll 托管）
-roll agent info <name>          查看 Agent 详情（SKILL.md + tools）
+roll agent tools <name>         查看 Agent 暴露的 MCP tools 及输入 schema
+roll agent start <name>         启动由 Roll 托管的 core-managed Agent
+roll agent stop <name>          停止由 Roll 托管的 core-managed Agent
+roll agent info <name>          查看 Agent 详情（SKILL.md / runtime / env）
 roll agent health               健康检查（兼容 on-demand / core-managed / external-managed）
 
-roll run <agent> <tool> [args]  声明式调用（支持 --key value / --input-json / --input-file）
-roll ask "<message>"            LLM 智能路由
-roll chat [message]             Experimental：未来会话式统一入口（当前仅提供骨架）
-roll update                     更新 roll 及已注册的 Agent（对不同来源行为不同）
-roll update --check             检查 roll/Agent 更新，并提醒配置迁移问题
+roll run <agent> <tool> [args]  直接调用 MCP tool（支持 --key value / --input-json / --input-file）
+roll ask "<message>"            用 LLM 从自然语言中选择 Agent 和 MCP tool
+roll chat [message]             Experimental：会话式入口骨架（当前不可用）
+roll update                     检查并更新 roll 及已注册 Agent（对不同来源行为不同）
+roll update --check             仅检查 roll/Agent 更新，不执行安装或刷新
 
 roll config init                交互式初始化配置
-roll config get [key]           查看配置（支持点号路径如 llm.defaultModel）
-roll config set <key> <value>   修改配置
+roll config get [key]           查看配置（支持英文句点路径，如 llm.default-model）
+roll config set <key> <value>   修改配置（key 用英文句点分隔，如 ask.confirm-threshold）
 roll config migrate             自动迁移旧版配置（备份原文件 + 写回新格式）
 
-roll doctor                     诊断系统状态（Node.js / 配置 / Provider / Agent）
+roll doctor                     诊断 Roll 配置、Agent 注册表和运行时状态
 roll doctor --json              JSON 诊断结果（配置损坏时返回非零退出码）
 ```
 
-说明：`--json` 为子命令级参数（在支持的命令上可用）；全局 `--verbose` / `--config <path>`
-当前为 planned，尚未统一透传到所有子命令。
+常用选项：
+
+| 命令 | 选项 | 作用 |
+|------|------|------|
+| `roll agent install` | `--skip-browser-setup` | 跳过 Playwright 浏览器运行时安装/校验 |
+| `roll agent install` | `--no-start` | 安装后不自动启动 `core-managed` Agent |
+| `roll update` | `--check` | 仅检查可用更新，不执行安装或刷新 |
+| `roll update` | `--skip-browser-setup` | 更新 Agent 后跳过 Playwright 浏览器运行时安装/校验 |
+| `roll run` | `--input-json <json>` | 以 JSON 字符串提供完整 tool 输入对象 |
+| `roll run` | `--input-file <path>` | 从 JSON 文件读取完整 tool 输入对象 |
+| 支持 JSON 输出的命令 | `--json` | 输出结构化 JSON |
+
+说明：`--verbose` 可用于全局或 `roll run` / `roll ask` 输出调试日志；`--config <path>`
+尚未作为稳定 CLI help 入口暴露，不建议在用户文档中依赖。
 
 ## Skill Agent 接入
 
