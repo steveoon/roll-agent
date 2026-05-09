@@ -13,10 +13,40 @@ metadata:
 
 - 先启动 `browser-use-agent` HTTP 常驻服务；浏览器 session 跨调用持久。
 - 完整 `inputSchema` 以 `roll agent tools browser-use-agent --json` 为准。
+- `REPLY_AUTHORITY_KEYS_URL` 是必填环境变量；`roll doctor` 会通过 `references/env.yaml` 和 `browser_status.effectiveEnvSources` 检查它是否声明并在运行态生效。
 - 页内反馈默认开启：
   - `BROWSER_VISUAL_CURSOR`：native CDP 点击/拖拽/滚动前显示同源虚拟鼠标轨迹和点击波纹；简历弹窗等 Playwright-backed 工具仍使用旧虚拟指针。
   - `BROWSER_VISUAL_ACTIVITY`：读取、识别、提取等操作显示状态胶囊和区域高亮。
 - 需要关闭反馈时，将对应环境变量设为 `false`。
+
+## 招聘事件埋点
+
+`browser-use-agent` 可在 zhipin 工具成功路径异步写入招聘事件 Open API。当前只支持**单 browser-use 实例 / 单 Boss 账号**口径，多浏览器实例 / 多 Boss 账号归因设计见 GitHub issue #77。
+
+| 事件 | 触发工具 | 触发时机 |
+| --- | --- | --- |
+| `message_received` | `zhipin_read_messages` | 返回候选人 `hasUnread=true` 且存在稳定职位口径时 |
+| `message_sent` | `zhipin_send_reply` | Reply Authority envelope 验签、目标校验、消息发送成功后 |
+| `candidate_contacted` | `zhipin_say_hello` | 推荐卡片「打招呼」点击成功后 |
+| `wechat_exchanged` | `zhipin_exchange_wechat` / `zhipin_get_candidate_info` | 主动换微信成功，或聊天详情检测到微信交换卡片 |
+
+配置口径：
+
+| 环境变量 | 说明 |
+| --- | --- |
+| `RECRUITMENT_EVENTS_DEFAULT_AGENT_ID` | 必填；当前单实例绑定的招聘业务 `agentId`，用于事件归因 |
+| `RECRUITMENT_EVENTS_API_TOKEN` | 必填；Open API Bearer token，公开 npm 包不内置兜底 token |
+| `RECRUITMENT_EVENTS_ENABLED` | 可选；未设置时默认启用，设为 `false` 可关闭 |
+| `RECRUITMENT_EVENTS_API_BASE_URL` | 可选；默认走 `https://huajune.duliday.com`，实际调用 `/api/v1/recruitment-events` |
+
+检查边界：
+
+- `RECRUITMENT_EVENTS_DEFAULT_AGENT_ID`、`RECRUITMENT_EVENTS_API_TOKEN` 在 `references/env.yaml` 中声明为 required，`roll agent info` / `roll doctor` 会检查它们。
+- `RECRUITMENT_EVENTS_ENABLED`、`RECRUITMENT_EVENTS_API_BASE_URL` 在 `references/env.yaml` 中声明为 optional，并带默认值说明。
+- `browser_status.effectiveEnvSources` 会暴露这些变量的运行态指纹，`doctor` 可发现已配置但运行态不同的漂移。
+- 如果 `RECRUITMENT_EVENTS_API_TOKEN` 或 `RECRUITMENT_EVENTS_DEFAULT_AGENT_ID` 缺失，工具成功路径只输出一次 `warn` 并跳过上报。
+- 当前 `doctor` 不能表达“`RECRUITMENT_EVENTS_ENABLED=false` 时不要求 token / `agentId`”的条件规则；关闭埋点但不配必填项仍会被静态声明检查提示。
+- 埋点 API 请求失败不影响工具返回结果，只写入 agent 日志。
 
 ## 通用 Tools
 

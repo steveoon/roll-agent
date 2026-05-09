@@ -3,6 +3,7 @@ import { z } from "zod";
 import { NativeVisualActivitySession } from "../native-visual-activity-session.ts";
 import { openZhipinNativePagePort } from "../pages/zhipin/native-page.ts";
 import type { ZhipinNativePagePort } from "../pages/zhipin/native-page.ts";
+import { recordZhipinCandidateContactedEvent } from "../recruitment-events/zhipin-events.ts";
 
 const ResultItemSchema = z.object({
   index: z.number(),
@@ -122,6 +123,7 @@ export const zhipinSayHello = defineTool({
           success: result.clicked,
           ...(result.error !== undefined ? { error: result.error } : {}),
         });
+        recordZhipinCandidateContactedEvent(result, ctx.logger);
       }
 
       const summary = {

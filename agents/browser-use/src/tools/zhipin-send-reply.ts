@@ -2,10 +2,14 @@ import { defineTool } from "@roll-agent/sdk";
 import { z } from "zod";
 import { NativeVisualActivitySession } from "../native-visual-activity-session.ts";
 import { openZhipinNativePagePort } from "../pages/zhipin/native-page.ts";
-import type { ZhipinNativePagePort } from "../pages/zhipin/native-page.ts";
+import type {
+  NativeCandidateChatDetails,
+  ZhipinNativePagePort,
+} from "../pages/zhipin/native-page.ts";
 import { matchesRecruiterBinding } from "../pages/zhipin/recruiter-identity.ts";
 import { pickBestUsername } from "../pages/zhipin/username.ts";
 import { getReplyAuthorityKeysLoaded } from "../runtime-holder.ts";
+import { recordZhipinMessageSentEvent } from "../recruitment-events/zhipin-events.ts";
 import {
   isReplyEnvelopeConsumed,
   markReplyEnvelopeConsumed,
@@ -56,6 +60,24 @@ function namesCompatible(expectedName: string, actualName: string): boolean {
     actual.length > 0 &&
     (expected === actual || expected.includes(actual) || actual.includes(expected))
   );
+}
+
+type CandidateDetailsReader = {
+  readonly readCandidateChatDetails: (maxMessages?: number) => Promise<NativeCandidateChatDetails>;
+};
+
+function canReadCandidateDetails(
+  nativePage: ZhipinNativePagePort,
+): nativePage is ZhipinNativePagePort & CandidateDetailsReader {
+  const candidate = nativePage as Partial<CandidateDetailsReader>;
+  return typeof candidate.readCandidateChatDetails === "function";
+}
+
+async function readCandidateDetailsSafely(
+  nativePage: ZhipinNativePagePort,
+): Promise<NativeCandidateChatDetails | undefined> {
+  if (!canReadCandidateDetails(nativePage)) return undefined;
+  return await nativePage.readCandidateChatDetails(50).catch(() => undefined);
 }
 
 export const zhipinSendReply = defineTool({
@@ -173,6 +195,19 @@ export const zhipinSendReply = defineTool({
         return { success: false, sentMessage, error: sendResult.error ?? "发送失败" };
       }
 
+      const candidateDetails = await readCandidateDetailsSafely(nativePage);
+      recordZhipinMessageSentEvent(
+        {
+          conversationId: chatTarget.conversationId,
+          candidateId: chatTarget.candidateId,
+          replyId: envelopePayload.jti,
+          candidateName: chatTarget.candidateName,
+          message: sentMessage,
+          unreadCountBeforeReply: nav.unreadCount,
+          ...(candidateDetails !== undefined ? { candidateDetails } : {}),
+        },
+        ctx.logger,
+      );
       markReplyEnvelopeConsumed(envelopePayload.jti, envelopePayload.exp);
       await session.succeed("已发送回复");
       return { success: true, sentMessage };
