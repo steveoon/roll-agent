@@ -1,11 +1,11 @@
 import { defineCommand } from "citty";
-import Table from "cli-table3";
 import { getAgentEnvFromAgentsConfig } from "../../config/helpers.ts";
 import { loadAgentsConfig } from "../../config/loader.ts";
 import { McpClientManager } from "../../mcp/client-manager.ts";
 import { resolveTransportWithDevSpawnSpec } from "../../registry/dev-spawn.ts";
 import { AgentStore } from "../../registry/store.ts";
 import { normalizeListedTools } from "../utils/agent-tools.ts";
+import { formatAgentToolsTextOutput } from "../utils/agent-tools-output.ts";
 import { log } from "../utils/output.ts";
 
 export default defineCommand({
@@ -46,20 +46,7 @@ export default defineCommand({
         return;
       }
 
-      const table = new Table({
-        head: ["Name", "Description", "Input Schema"],
-        style: { head: ["cyan"] },
-      });
-
-      for (const tool of normalizedTools) {
-        table.push([
-          tool.name,
-          tool.description ?? "",
-          JSON.stringify(tool.inputSchema, null, 2),
-        ]);
-      }
-
-      console.log(table.toString());
+      console.log(formatAgentToolsTextOutput(agent.skill.name, normalizedTools));
     } catch (error) {
       log.error(error instanceof Error ? error.message : String(error));
       process.exitCode = 1;

@@ -2,7 +2,11 @@ import { defineTool } from "@roll-agent/sdk";
 import { z } from "zod";
 import { NativeVisualActivitySession } from "../native-visual-activity-session.ts";
 import { openZhipinNativePagePort } from "../pages/zhipin/native-page.ts";
-import type { ZhipinNativePagePort } from "../pages/zhipin/native-page.ts";
+import type {
+  NativeCandidateChatDetails,
+  ZhipinNativePagePort,
+} from "../pages/zhipin/native-page.ts";
+import { recordZhipinWechatRequestedEvent } from "../recruitment-events/zhipin-events.ts";
 
 const OutputSchema = z.object({
   success: z.boolean(),
@@ -51,6 +55,24 @@ function namesCompatible(expectedName: string, actualName: string): boolean {
     actual.length > 0 &&
     (expected === actual || expected.includes(actual) || actual.includes(expected))
   );
+}
+
+type CandidateDetailsReader = {
+  readonly readCandidateChatDetails: (maxMessages?: number) => Promise<NativeCandidateChatDetails>;
+};
+
+function canReadCandidateDetails(
+  nativePage: ZhipinNativePagePort,
+): nativePage is ZhipinNativePagePort & CandidateDetailsReader {
+  const candidate = nativePage as Partial<CandidateDetailsReader>;
+  return typeof candidate.readCandidateChatDetails === "function";
+}
+
+async function readCandidateDetailsSafely(
+  nativePage: ZhipinNativePagePort,
+): Promise<NativeCandidateChatDetails | undefined> {
+  if (!canReadCandidateDetails(nativePage)) return undefined;
+  return await nativePage.readCandidateChatDetails(50).catch(() => undefined);
 }
 
 export const zhipinExchangeWechat = defineTool({
@@ -125,6 +147,7 @@ export const zhipinExchangeWechat = defineTool({
       }
 
       ctx.logger.info(`Starting native WeChat exchange with ${chatTarget.candidateName}`);
+      const candidateDetails = await readCandidateDetailsSafely(nativePage);
       const result = await nativePage.exchangeWechat({
         preClickDelayMs: EXCHANGE_WECHAT_CLICK_PRE_DELAY_MS,
         pressDurationMs: EXCHANGE_WECHAT_CLICK_PRESS_MS,
@@ -133,6 +156,18 @@ export const zhipinExchangeWechat = defineTool({
       });
 
       if (result.success) {
+        if (result.exchanged) {
+          recordZhipinWechatRequestedEvent(
+            {
+              conversationId: chatTarget.conversationId,
+              candidateId: chatTarget.candidateId,
+              candidateName: chatTarget.candidateName,
+              ...(result.wechatNumber !== undefined ? { wechatNumber: result.wechatNumber } : {}),
+              ...(candidateDetails !== undefined ? { candidateDetails } : {}),
+            },
+            ctx.logger,
+          );
+        }
         await session.succeed("已完成换微信");
         return result;
       }

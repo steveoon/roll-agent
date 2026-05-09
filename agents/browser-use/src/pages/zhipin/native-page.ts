@@ -171,6 +171,15 @@ export type NativeRecommendCardInspection = {
   readonly cardSelector: string;
   readonly candidateId: string;
   readonly name: string;
+  readonly age?: string;
+  readonly experience?: string;
+  readonly education?: string;
+  readonly workStatus?: string;
+  readonly company?: string;
+  readonly currentPosition?: string;
+  readonly expectedLocation?: string;
+  readonly expectedPosition?: string;
+  readonly expectedSalary?: string;
   readonly hasGreetButton: boolean;
   readonly error?: string;
 };
@@ -586,6 +595,23 @@ function toNativeRecommendCardInspection(value: unknown): NativeRecommendCardIns
     cardSelector: requireString(value["cardSelector"]) || RECOMMEND_CARD_SELECTOR,
     candidateId: requireString(value["candidateId"]),
     name: requireString(value["name"]),
+    ...(typeof value["age"] === "string" ? { age: value["age"] } : {}),
+    ...(typeof value["experience"] === "string" ? { experience: value["experience"] } : {}),
+    ...(typeof value["education"] === "string" ? { education: value["education"] } : {}),
+    ...(typeof value["workStatus"] === "string" ? { workStatus: value["workStatus"] } : {}),
+    ...(typeof value["company"] === "string" ? { company: value["company"] } : {}),
+    ...(typeof value["currentPosition"] === "string"
+      ? { currentPosition: value["currentPosition"] }
+      : {}),
+    ...(typeof value["expectedLocation"] === "string"
+      ? { expectedLocation: value["expectedLocation"] }
+      : {}),
+    ...(typeof value["expectedPosition"] === "string"
+      ? { expectedPosition: value["expectedPosition"] }
+      : {}),
+    ...(typeof value["expectedSalary"] === "string"
+      ? { expectedSalary: value["expectedSalary"] }
+      : {}),
     hasGreetButton: requireBoolean(value["hasGreetButton"]),
     ...(typeof value["error"] === "string" ? { error: value["error"] } : {}),
   };
@@ -2488,11 +2514,69 @@ export class ZhipinNativePagePort {
       }
 
       const item = cards[index];
+      const splitParts = (text) => (text ?? "")
+        .split(/[丨·|]/)
+        .map((part) => part.trim())
+        .filter(Boolean);
       const candidateId =
         item.getAttribute("data-geek") ??
         item.querySelector("[data-geek]")?.getAttribute("data-geek") ??
         "";
       const name = item.querySelector(".name")?.textContent?.trim() ?? "";
+      let age = "";
+      let experience = "";
+      let education = "";
+      let workStatus = "";
+      const baseInfoEl = item.querySelector(".base-info.join-text-wrap, .base-info");
+      if (baseInfoEl) {
+        let textParts = Array.from(baseInfoEl.querySelectorAll(":scope > *"))
+          .map((child) => child.textContent?.trim() ?? "")
+          .filter(Boolean);
+
+        if (textParts.length <= 1) {
+          textParts = splitParts(baseInfoEl.textContent?.trim() ?? "");
+        }
+
+        for (const part of textParts) {
+          if (!age && part.includes("岁")) {
+            age = part;
+          } else if (!experience && (part.includes("年") || part.includes("应届") || part.includes("在校"))) {
+            experience = part;
+          } else if (!education && /(初中|高中|中专|中技|大专|本科|硕士|博士)/.test(part)) {
+            education = part;
+          } else if (!workStatus && /(在职|离职|在校)/.test(part)) {
+            workStatus = part;
+          }
+        }
+      }
+      const workExpEl =
+        item.querySelector(".timeline-wrap.work-exps .content.join-text-wrap") ??
+        item.querySelector(".timeline-wrap.work-exps .content");
+      const workParts = splitParts(workExpEl?.textContent?.trim() ?? "");
+      const company = workParts[0] ?? "";
+      const currentPosition = workParts[1] ?? "";
+      let expectedLocation = "";
+      let expectedPosition = "";
+      const expectRow = item.querySelector(".row-flex:not(.geek-desc)");
+      if (expectRow) {
+        const labelText = expectRow.querySelector(".label")?.textContent ?? "";
+        const contentEl = expectRow.querySelector(".content");
+        if ((labelText.includes("期望") || labelText.includes("最近关注")) && contentEl) {
+          const parts = splitParts(contentEl.textContent?.trim() ?? "");
+          expectedLocation = parts[0] ?? "";
+          expectedPosition = parts[1] ?? "";
+        }
+      }
+      if (!expectedLocation) {
+        const expectEl =
+          item.querySelector(".timeline-wrap.expect .content.join-text-wrap") ??
+          item.querySelector(".timeline-wrap.expect .content");
+        if (expectEl) {
+          const parts = splitParts(expectEl.textContent?.trim() ?? "");
+          expectedLocation = parts[0] ?? "";
+          expectedPosition = parts[1] ?? "";
+        }
+      }
       const greetButton =
         item.querySelector("button.btn.btn-greet") ??
         item.querySelector("button.btn-greet") ??
@@ -2501,7 +2585,22 @@ export class ZhipinNativePagePort {
       const rect = greetButton?.getBoundingClientRect();
       const hasGreetButton = Boolean(rect && rect.width > 0 && rect.height > 0);
 
-      return { found: true, cardSelector, candidateId, name, hasGreetButton };
+      return {
+        found: true,
+        cardSelector,
+        candidateId,
+        name,
+        age,
+        experience,
+        education,
+        workStatus,
+        company,
+        currentPosition,
+        expectedLocation,
+        expectedPosition,
+        expectedSalary: item.querySelector(".salary-wrap")?.textContent?.trim() ?? "",
+        hasGreetButton
+      };
     })()`;
   }
 

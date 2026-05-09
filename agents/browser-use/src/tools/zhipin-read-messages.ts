@@ -4,6 +4,7 @@ import type { ChatListItem } from "../pages/zhipin/chat-navigation.ts";
 import { NativeVisualActivitySession } from "../native-visual-activity-session.ts";
 import { openZhipinNativePagePort } from "../pages/zhipin/native-page.ts";
 import type { ZhipinNativePagePort } from "../pages/zhipin/native-page.ts";
+import { recordZhipinMessageReceivedEvents } from "../recruitment-events/zhipin-events.ts";
 
 const CandidateItemSchema = z.object({
   name: z.string(),
@@ -80,7 +81,9 @@ export const zhipinReadMessages = defineTool({
     onlyUnread: z
       .boolean()
       .default(false)
-      .describe("是否只返回有未读消息的候选人；用户说“全部/所有消息列表”时应为 false，说“未读消息”时应为 true"),
+      .describe(
+        "是否只返回有未读消息的候选人；用户说“全部/所有消息列表”时应为 false，说“未读消息”时应为 true",
+      ),
     sortBy: z.enum(["time", "unreadCount", "name"]).default("time"),
     autoScroll: z.boolean().default(true).describe("是否自动向下滚动消息列表并合并采集结果"),
     maxScrolls: z.number().int().min(0).max(50).default(4).describe("自动滚动的最大步数"),
@@ -103,7 +106,7 @@ export const zhipinReadMessages = defineTool({
       await session.begin("正在读取消息列表");
 
       const listReady = await nativePage.waitForSelector(
-        ".user-list.b-scroll-stable, .user-list.b-scroll-stable [role=\"listitem\"], .geek-item",
+        '.user-list.b-scroll-stable, .user-list.b-scroll-stable [role="listitem"], .geek-item',
         5_000,
       );
       if (!listReady) {
@@ -164,6 +167,7 @@ export const zhipinReadMessages = defineTool({
       );
 
       ctx.logger.info(`Found ${filtered.length} candidates (${stats.withUnread} with unread)`);
+      recordZhipinMessageReceivedEvents(filtered, ctx.logger);
       return { success: true, candidates: filtered, total: candidates.length, stats };
     } catch (error) {
       await session?.fail("读取消息列表失败");

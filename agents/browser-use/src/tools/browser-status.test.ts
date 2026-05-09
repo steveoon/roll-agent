@@ -82,6 +82,18 @@ describe("browser_status", () => {
         BROWSER_VISUAL_ACTIVITY: {
           present: false,
         },
+        RECRUITMENT_EVENTS_API_BASE_URL: {
+          present: true,
+          fingerprint: "aaaaaaaa",
+        },
+        RECRUITMENT_EVENTS_API_TOKEN: {
+          present: true,
+          fingerprint: "bbbbbbbb",
+        },
+        RECRUITMENT_EVENTS_DEFAULT_AGENT_ID: {
+          present: true,
+          fingerprint: "cccccccc",
+        },
       },
     });
 
@@ -91,5 +103,9 @@ describe("browser_status", () => {
     assert.equal(parsed.effectiveEnvSources["REPLY_AUTHORITY_KEYS_URL"]?.fingerprint, "0123abcd");
     assert.equal(parsed.effectiveEnvSources["BROWSER_VISUAL_CURSOR"]?.fingerprint, "89abcdef");
     assert.equal(parsed.effectiveEnvSources["BROWSER_VISUAL_ACTIVITY"]?.present, false);
+    assert.equal(
+      parsed.effectiveEnvSources["RECRUITMENT_EVENTS_DEFAULT_AGENT_ID"]?.fingerprint,
+      "cccccccc",
+    );
   });
 });

@@ -7,6 +7,7 @@ import type {
   NativeCandidateChatDetails,
   ZhipinNativePagePort,
 } from "../pages/zhipin/native-page.ts";
+import { recordZhipinWechatCompletedEvents } from "../recruitment-events/zhipin-events.ts";
 
 const ChatMessageSchema = z.object({
   index: z.number(),
@@ -237,6 +238,12 @@ export const zhipinGetCandidateInfo = defineTool({
 
       ctx.logger.info(
         `Extracted info for ${data.candidateInfo.name}: ${stats.totalMessages} messages`,
+      );
+      recordZhipinWechatCompletedEvents(
+        data,
+        selectedTarget.conversationId,
+        selectedTarget.candidateId,
+        ctx.logger,
       );
       return {
         success: true,
