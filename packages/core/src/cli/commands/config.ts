@@ -16,7 +16,11 @@ export default defineCommand({
   meta: { description: "管理全局配置" },
   args: {
     action: { type: "positional", description: "操作（init/get/set/migrate）", required: true },
-    key: { type: "positional", description: "配置键（get/set 时使用，点号分隔）", required: false },
+    key: {
+      type: "positional",
+      description: "配置键（get/set 时使用，用英文句点 `.` 分隔，如 ask.confirm-threshold）",
+      required: false,
+    },
     value: { type: "positional", description: "配置值（set 时使用）", required: false },
   },
   async run({ args }) {
@@ -235,7 +239,7 @@ function getConfig(key: string | undefined): void {
 function setConfig(key: string | undefined, value: string | undefined): void {
   if (!key || value === undefined) {
     console.error("✗ 用法: roll config set <key> <value>");
-    console.error("  示例: roll config set ask.confirmThreshold 0.5");
+    console.error("  示例: roll config set ask.confirm-threshold 0.5");
     process.exitCode = 1;
     return;
   }
