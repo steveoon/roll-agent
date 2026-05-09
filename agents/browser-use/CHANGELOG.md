@@ -1,5 +1,11 @@
 # @roll-agent/browser-use-agent
 
+## 0.9.0
+
+### Minor Changes
+
+- [#78](https://github.com/steveoon/roll-agent/pull/78) [`225d8cc`](https://github.com/steveoon/roll-agent/commit/225d8ccc416ef21f607278c20ca9b4706615b265) Thanks [@steveoon](https://github.com/steveoon)! - Add Zhipin recruitment event tracking for message, contact, and WeChat exchange flows with environment-driven Open API configuration.
+
 ## 0.8.0
 
 ### Minor Changes
