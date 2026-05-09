@@ -22,14 +22,20 @@ import { log, redactToolArgsForLog } from "../utils/output.ts";
 import { shouldSkipRuntimeReadinessForTool } from "../../config/runtime-env.ts";
 
 export default defineCommand({
-  meta: { description: "声明式调用 Agent 的指定 tool" },
+  meta: { description: "直接调用已注册 Agent 的指定 MCP tool" },
   args: {
     agent: { type: "positional", description: "Agent 名称", required: true },
-    tool: { type: "positional", description: "Tool 名称", required: true },
+    tool: { type: "positional", description: "MCP tool 名称", required: true },
     json: { type: "boolean", description: "JSON 格式输出", default: false },
     verbose: { type: "boolean", alias: "v", description: "输出调试日志", default: false },
-    "input-json": { type: "string", description: "以 JSON 字符串提供完整 tool 输入对象" },
-    "input-file": { type: "string", description: "从 JSON 文件读取完整 tool 输入对象" },
+    "input-json": {
+      type: "string",
+      description: "以 JSON 字符串提供完整 tool 输入对象；不能与 --input-file 同用",
+    },
+    "input-file": {
+      type: "string",
+      description: "从 JSON 文件读取完整 tool 输入对象；不能与 --input-json 同用",
+    },
   },
   async run({ args, rawArgs }) {
     const { config } = loadConfig();

@@ -9,7 +9,7 @@ import { formatAgentToolsTextOutput } from "../utils/agent-tools-output.ts";
 import { log } from "../utils/output.ts";
 
 export default defineCommand({
-  meta: { description: "查看 Agent 暴露的 MCP tools 与 inputSchema" },
+  meta: { description: "查看 Agent 暴露的 MCP tools 及输入 schema" },
   args: {
     name: { type: "positional", description: "Agent 名称", required: true },
     json: { type: "boolean", description: "JSON 格式输出", default: false },

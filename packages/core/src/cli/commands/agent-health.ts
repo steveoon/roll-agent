@@ -17,7 +17,7 @@ export default defineCommand({
   args: {
     restart: {
       type: "boolean",
-      description: "兼容旧参数，stdio 按需模式下不生效",
+      description: "兼容旧参数；当前不会执行自动重启",
       default: false,
     },
     json: { type: "boolean", description: "JSON 格式输出", default: false },

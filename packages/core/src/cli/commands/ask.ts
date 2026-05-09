@@ -44,7 +44,7 @@ function printSuccessText(result: AskSuccessResult): void {
 }
 
 export default defineCommand({
-  meta: { description: "LLM 智能路由，自动选择 Agent 和 tool" },
+  meta: { description: "用 LLM 从自然语言中选择 Agent 和 MCP tool" },
   args: {
     message: { type: "positional", description: "自然语言消息", required: true },
     json: { type: "boolean", description: "JSON 格式输出", default: false },

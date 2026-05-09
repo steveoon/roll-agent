@@ -2,4 +2,4 @@
 "@roll-agent/core": patch
 ---
 
-Clarify `roll config set --help` key syntax by spelling out that nested config keys use the English dot (`.`) separator.
+Clarify CLI help text for config keys, Agent registration/update commands, and multi-word options. Multi-word flags now render as kebab-case, including `--skip-browser-setup` and `--no-start`.

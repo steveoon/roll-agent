@@ -849,6 +849,33 @@ test("e2e smoke: roll chat --json returns unavailable snapshot", () => {
   }
 });
 
+test("e2e smoke: multi-word help options are rendered as kebab-case", () => {
+  const workspace = mkdtempSync(resolve(tmpdir(), `roll-help-options-${randomUUID()}-`));
+
+  try {
+    const installHelp = runRoll(["agent", "install", "--help"], workspace);
+    assert.equal(
+      installHelp.status,
+      0,
+      `roll agent install --help failed\nstdout:\n${installHelp.stdout}\nstderr:\n${installHelp.stderr}`,
+    );
+    assert.match(installHelp.stdout, /--skip-browser-setup/);
+    assert.match(installHelp.stdout, /--no-start/);
+    assert.doesNotMatch(installHelp.stdout, /--skipBrowserSetup|--noStart/);
+
+    const updateHelp = runRoll(["update", "--help"], workspace);
+    assert.equal(
+      updateHelp.status,
+      0,
+      `roll update --help failed\nstdout:\n${updateHelp.stdout}\nstderr:\n${updateHelp.stderr}`,
+    );
+    assert.match(updateHelp.stdout, /--skip-browser-setup/);
+    assert.doesNotMatch(updateHelp.stdout, /--skipBrowserSetup/);
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
 test("e2e smoke: config set help clarifies dotted key syntax", () => {
   const workspace = mkdtempSync(resolve(tmpdir(), `roll-config-help-${randomUUID()}-`));
 

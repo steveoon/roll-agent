@@ -8,7 +8,7 @@ function loadAgentCommand(fileName: string) {
 }
 
 export default defineCommand({
-  meta: { description: "管理 Agent（支持本地目录、已安装产物、远程服务）" },
+  meta: { description: "管理 Agent（本地目录、Git 仓库、已安装 npm 包、远程服务）" },
   subCommands: {
     add: () => loadAgentCommand("agent-add"),
     install: () => loadAgentCommand("agent-install"),

@@ -37,12 +37,19 @@ function repoNameFromUrl(url: string): string {
 }
 
 export default defineCommand({
-  meta: { description: "注册一个 Agent（本地路径、Git URL 或远程 endpoint）" },
+  meta: { description: "注册本地目录、Git 仓库或远程 MCP endpoint" },
   args: {
-    path: { type: "positional", description: "Agent 本地路径或 Git URL", required: false },
-    remote: { type: "string", description: "远程 MCP endpoint（需配合 --name/--description）" },
-    name: { type: "string", description: "远程 Agent 名称" },
-    description: { type: "string", description: "远程 Agent 描述" },
+    path: {
+      type: "positional",
+      description: "本地 Agent 目录或 Git 仓库 URL；远程 endpoint 请用 --remote",
+      required: false,
+    },
+    remote: {
+      type: "string",
+      description: "远程 MCP endpoint；需要同时提供 --name 和 --description",
+    },
+    name: { type: "string", description: "远程 Agent 名称（仅 --remote 时使用）" },
+    description: { type: "string", description: "远程 Agent 描述（仅 --remote 时使用）" },
   },
   async run({ args }) {
     const { agentsConfig } = loadAgentsConfig();

@@ -37,18 +37,22 @@ function isGitUrl(input: string): boolean {
 }
 
 export default defineCommand({
-  meta: { description: "安装已编译的 Agent 包并注册到本地" },
+  meta: { description: "安装已发布的 Agent npm 包并注册到本地" },
   args: {
-    package: { type: "positional", description: "npm package spec", required: true },
-    skipBrowserSetup: {
+    package: {
+      type: "positional",
+      description: "npm 包名、版本范围或 .tgz 路径（源码目录请用 roll agent add）",
+      required: true,
+    },
+    "skip-browser-setup": {
       type: "boolean",
-      description: "跳过浏览器运行时安装",
+      description: "跳过 Playwright 浏览器运行时安装/校验",
       default: false,
     },
-    noStart: {
+    start: {
       type: "boolean",
       description: "安装后不自动启动 core-managed Agent",
-      default: false,
+      default: true,
     },
   },
   async run({ args }) {
@@ -124,7 +128,7 @@ export default defineCommand({
     if (
       agent.runtime.ownership === "core-managed" &&
       agent.runtime.setup?.playwright &&
-      !args.skipBrowserSetup
+      !args["skip-browser-setup"]
     ) {
       log.info(
         `即将安装浏览器运行时 (${agent.runtime.setup.playwright.browsers.join(", ")})，这可能需要一些时间...`,
@@ -132,7 +136,7 @@ export default defineCommand({
     }
 
     const setupResult = await runAgentSetup(agent, {
-      skipBrowserSetup: args.skipBrowserSetup,
+      skipBrowserSetup: args["skip-browser-setup"],
     });
     if (!setupResult.ok) {
       log.warn(`Agent setup 失败：${setupResult.message}`);
@@ -162,7 +166,7 @@ export default defineCommand({
         return;
       }
 
-      if (agent.runtime.ownership === "core-managed" && !args.noStart) {
+      if (agent.runtime.ownership === "core-managed" && args.start) {
         if (wasRunning) {
           await stopAgentGracefully(agentsConfig.dataDir, agent.skill.name);
         }
