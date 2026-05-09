@@ -1,5 +1,11 @@
 # @roll-agent/core
 
+## 0.6.5
+
+### Patch Changes
+
+- [#78](https://github.com/steveoon/roll-agent/pull/78) [`bf52fc7`](https://github.com/steveoon/roll-agent/commit/bf52fc720626db9dda77087cfd608e58ef69b6ec) Thanks [@steveoon](https://github.com/steveoon)! - Improve `roll agent list` and `roll agent tools` terminal output with width-aware tables, compact locations, and readable tool schema sections.
+
 ## 0.6.4
 
 ### Patch Changes
