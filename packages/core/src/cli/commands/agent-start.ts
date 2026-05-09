@@ -13,7 +13,7 @@ import { AgentStore } from "../../registry/store.ts";
 import { log } from "../utils/output.ts";
 
 export default defineCommand({
-  meta: { description: "启动 Agent（core-managed HTTP 可由 Roll 托管）" },
+  meta: { description: "启动由 Roll 托管的 core-managed Agent" },
   args: {
     name: { type: "positional", description: "Agent 名称", required: true },
   },

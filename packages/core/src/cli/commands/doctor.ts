@@ -41,7 +41,7 @@ export function isNodeVersionSupported(version: string): boolean {
 }
 
 export default defineCommand({
-  meta: { description: "诊断系统状态" },
+  meta: { description: "诊断 Roll 配置、Agent 注册表和运行时状态" },
   args: {
     json: { type: "boolean", description: "JSON 格式输出", default: false },
   },

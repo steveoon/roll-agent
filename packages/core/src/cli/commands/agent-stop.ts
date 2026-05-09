@@ -5,7 +5,7 @@ import { AgentStore } from "../../registry/store.ts";
 import { log } from "../utils/output.ts";
 
 export default defineCommand({
-  meta: { description: "停止 Agent（core-managed HTTP 可由 Roll 托管）" },
+  meta: { description: "停止由 Roll 托管的 core-managed Agent" },
   args: {
     name: { type: "positional", description: "Agent 名称", required: true },
   },

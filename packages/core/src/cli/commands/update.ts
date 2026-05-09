@@ -295,16 +295,16 @@ async function refreshRemoteAgent(agent: RegisteredAgent): Promise<boolean> {
 }
 
 export default defineCommand({
-  meta: { description: "更新 roll 及已注册的 Agent" },
+  meta: { description: "检查并更新 roll 及已注册 Agent" },
   args: {
     check: {
       type: "boolean",
-      description: "仅检查可用更新，不执行",
+      description: "仅检查 roll/Agent 可用更新，不执行安装或刷新",
       default: false,
     },
-    skipBrowserSetup: {
+    "skip-browser-setup": {
       type: "boolean",
-      description: "跳过浏览器运行时安装",
+      description: "跳过 Playwright 浏览器运行时安装/校验",
       default: false,
     },
   },
@@ -528,7 +528,7 @@ export default defineCommand({
                 ...(discovered.skillBody.length > 0 ? { skillBody: discovered.skillBody } : {}),
               };
               const setupResult = await runAgentSetup(updated, {
-                skipBrowserSetup: args.skipBrowserSetup,
+                skipBrowserSetup: args["skip-browser-setup"],
               });
               if (!setupResult.ok) {
                 log.warn(`${updated.skill.name} setup 失败：${setupResult.message}`);

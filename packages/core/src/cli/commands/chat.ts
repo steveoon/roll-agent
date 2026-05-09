@@ -18,11 +18,11 @@ function printChatJson(result: ChatCommandResult): void {
 
 export default defineCommand({
   meta: {
-    description: "Experimental: 未来会话式统一入口（当前仅提供命令骨架）",
+    description: "Experimental: 会话式入口骨架（当前不可用）",
   },
   args: {
     message: { type: "positional", description: "起始消息", required: false },
-    session: { type: "string", description: "继续指定会话 ID" },
+    session: { type: "string", description: "继续已有会话的 session ID" },
     json: { type: "boolean", description: "JSON 格式输出", default: false },
   },
   async run({ args }) {
