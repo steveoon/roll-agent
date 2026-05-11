@@ -117,6 +117,18 @@ recommend-list  -> 推荐牛人列表，默认向下滚动，去重主键 candid
 1. `zhipin_open_recommend_page()`。
 2. `zhipin_filter_recommend_candidates(ageMin?, ageMax?, gender?, activity?)`。
 3. `zhipin_get_candidate_list(maxResults?, autoScroll=true, maxScrolls=4)`。
-4. `zhipin_say_hello(indices)`。
+4. `zhipin_say_hello(candidateRefs)`。
 
-`zhipin_say_hello(indices)` 的 `indices` 也是当前 DOM 快照索引；筛选、滚动或列表刷新后必须重新读取列表。
+`zhipin_get_candidate_list` 会给每个候选人返回 `candidateRef`，例如 `@c1`。
+
+优先级：
+
+1. 上层 orchestrator 优先把 `candidateRef` 传给 `zhipin_say_hello({ candidateRefs })` 或 `zhipin_open_resume({ candidateRef })`。
+2. `indices` / `index` 只作为当前 DOM 快照兜底。
+3. 筛选、滚动加载、搜索、刷新或页面重开后必须重新调用 `zhipin_get_candidate_list`，不要复用旧 `candidateRef`。
+4. 不要由 orchestrator 自己构造 `@c1`；只使用 tool 输出中的 `candidateRef`。
+
+失效保护：
+
+- 如果 `candidateRef` 对应的 `candidateId` / `name` 与当前 DOM 不一致，工具会返回 `success:false` 并提示“候选人引用已过期”。
+- 收到过期提示后，重新执行推荐候选人链路的第 3 步，再提交新的 `candidateRefs`。

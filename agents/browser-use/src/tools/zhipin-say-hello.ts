@@ -3,10 +3,17 @@ import { z } from "zod";
 import { NativeVisualActivitySession } from "../native-visual-activity-session.ts";
 import { openZhipinNativePagePort } from "../pages/zhipin/native-page.ts";
 import type { ZhipinNativePagePort } from "../pages/zhipin/native-page.ts";
+import {
+  ZHIPIN_CANDIDATE_REF_PATTERN,
+  isZhipinCandidateTargetCurrent,
+  resolveZhipinCandidateTargets,
+  type ZhipinCandidateRefTarget,
+} from "../pages/zhipin/semantic-refs.ts";
 import { recordZhipinCandidateContactedEvent } from "../recruitment-events/zhipin-events.ts";
 
 const ResultItemSchema = z.object({
   index: z.number(),
+  candidateRef: z.string(),
   candidateName: z.string(),
   candidateId: z.string(),
   success: z.boolean(),
@@ -23,6 +30,24 @@ const SAY_HELLO_BATCH_INTERVAL_MS = [2_400, 3_100, 3_800] as const;
 const SAY_HELLO_CLICK_PRE_DELAY_MS = 650;
 const SAY_HELLO_CLICK_PRESS_MS = 140;
 const SAY_HELLO_CLICK_SETTLE_MS = 1_200;
+
+const InputSchema = z
+  .object({
+    indices: z
+      .array(z.number().int().min(0))
+      .min(1)
+      .optional()
+      .describe("要打招呼的候选人索引列表"),
+    candidateRefs: z
+      .array(z.string().regex(ZHIPIN_CANDIDATE_REF_PATTERN, "candidateRef 应类似 @c1"))
+      .min(1)
+      .optional()
+      .describe("要打招呼的候选人语义引用列表，如 @c1；来自 zhipin_get_candidate_list 输出"),
+  })
+  .refine(
+    (input) => (input.indices?.length ?? 0) > 0 || (input.candidateRefs?.length ?? 0) > 0,
+    "必须提供 indices 或 candidateRefs",
+  );
 
 type NativeVisualActivitySessionLike = Pick<
   NativeVisualActivitySession,
@@ -60,12 +85,11 @@ export function setZhipinSayHelloDepsForTests(
 export const zhipinSayHello = defineTool({
   name: "zhipin_say_hello",
   description: "在推荐列表页对候选人点击「打招呼」按钮（支持批量）",
-  input: z.object({
-    indices: z.array(z.number()).min(1).describe("要打招呼的候选人索引列表"),
-  }),
+  input: InputSchema,
   output: OutputSchema,
   execute: async (input, ctx) => {
-    ctx.logger.info(`Saying hello to ${input.indices.length} candidates through native CDP`);
+    const candidateTargets = resolveZhipinCandidateTargets(input);
+    ctx.logger.info(`Saying hello to ${candidateTargets.length} candidates through native CDP`);
 
     const deps = getZhipinSayHelloDeps();
     let nativePage: ZhipinNativePagePort | undefined;
@@ -79,8 +103,9 @@ export const zhipinSayHello = defineTool({
       const listReady = await nativePage.waitForRecommendList();
       if (!listReady) {
         await session.fail("推荐列表未加载");
-        const results = input.indices.map((index) => ({
-          index,
+        const results = candidateTargets.map((target) => ({
+          index: target.index,
+          candidateRef: target.candidateRef,
           candidateName: "",
           candidateId: "",
           success: false,
@@ -93,7 +118,7 @@ export const zhipinSayHello = defineTool({
         };
       }
 
-      const batchLabel = input.indices.length > 1 ? "正在批量打招呼" : "正在打招呼";
+      const batchLabel = candidateTargets.length > 1 ? "正在批量打招呼" : "正在打招呼";
       await session.begin(batchLabel);
       await session.highlightSelector(".candidate-card-wrap, [data-geek], .geek-item", {
         label: batchLabel,
@@ -101,7 +126,7 @@ export const zhipinSayHello = defineTool({
       });
 
       const results: Array<z.infer<typeof ResultItemSchema>> = [];
-      for (const [position, idx] of input.indices.entries()) {
+      for (const [position, target] of candidateTargets.entries()) {
         if (position > 0) {
           const interval =
             SAY_HELLO_BATCH_INTERVAL_MS[(position - 1) % SAY_HELLO_BATCH_INTERVAL_MS.length] ??
@@ -109,7 +134,22 @@ export const zhipinSayHello = defineTool({
           await deps.sleep(interval);
         }
 
-        const result = await nativePage.clickRecommendGreet(idx, {
+        if (hasStableCandidateIdentity(target)) {
+          const currentCandidate = await nativePage.inspectRecommendCard(target.index);
+          if (!isZhipinCandidateTargetCurrent(target, currentCandidate)) {
+            results.push({
+              index: target.index,
+              candidateRef: target.candidateRef,
+              candidateName: currentCandidate.name,
+              candidateId: currentCandidate.candidateId,
+              success: false,
+              error: `候选人引用 ${target.candidateRef} 已过期，请重新获取推荐列表`,
+            });
+            continue;
+          }
+        }
+
+        const result = await nativePage.clickRecommendGreet(target.index, {
           preClickDelayMs: SAY_HELLO_CLICK_PRE_DELAY_MS,
           pressDurationMs: SAY_HELLO_CLICK_PRESS_MS,
           settleMs: SAY_HELLO_CLICK_SETTLE_MS,
@@ -117,7 +157,8 @@ export const zhipinSayHello = defineTool({
         });
 
         results.push({
-          index: idx,
+          index: target.index,
+          candidateRef: target.candidateRef,
           candidateName: result.name,
           candidateId: result.candidateId,
           success: result.clicked,
@@ -141,8 +182,9 @@ export const zhipinSayHello = defineTool({
     } catch (err) {
       const error = err instanceof Error ? err.message : String(err);
       await session?.fail(error);
-      const results = input.indices.map((index) => ({
-        index,
+      const results = candidateTargets.map((target) => ({
+        index: target.index,
+        candidateRef: target.candidateRef,
         candidateName: "",
         candidateId: "",
         success: false,
@@ -158,3 +200,7 @@ export const zhipinSayHello = defineTool({
     }
   },
 });
+
+function hasStableCandidateIdentity(target: ZhipinCandidateRefTarget): boolean {
+  return target.candidateId.length > 0 || (target.name !== undefined && target.name.length > 0);
+}

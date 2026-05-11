@@ -1,7 +1,11 @@
 import assert from "node:assert/strict";
 import { afterEach, describe, it } from "node:test";
 import type { AgentContext } from "@roll-agent/sdk";
-import type { ZhipinNativePagePort } from "../pages/zhipin/native-page.ts";
+import type {
+  NativeRecommendCandidateCard,
+  ZhipinNativePagePort,
+} from "../pages/zhipin/native-page.ts";
+import { clearZhipinCandidateRefsForTests } from "../pages/zhipin/semantic-refs.ts";
 import {
   setZhipinGetCandidateListDepsForTests,
   zhipinGetCandidateList,
@@ -46,6 +50,7 @@ function createNativePage(
   calls: string[],
   options: {
     readonly listReady?: boolean;
+    readonly items?: readonly NativeRecommendCandidateCard[];
   } = {},
 ): ZhipinNativePagePort {
   return {
@@ -79,7 +84,7 @@ function createNativePage(
           atStart: true,
           atEnd: false,
         },
-        items: [
+        items: options.items ?? [
           {
             index: 0,
             candidateId: "candidate-1",
@@ -111,6 +116,7 @@ function createNativePage(
 
 afterEach(() => {
   setZhipinGetCandidateListDepsForTests(undefined);
+  clearZhipinCandidateRefsForTests();
 });
 
 describe("zhipin_get_candidate_list", () => {
@@ -136,6 +142,7 @@ describe("zhipin_get_candidate_list", () => {
 
     assert.equal(result.success, true);
     assert.equal(result.total, 1);
+    assert.equal(result.candidates[0]?.candidateRef, "@c1");
     assert.deepEqual(calls, [
       "begin:正在打开推荐列表",
       "begin:正在读取推荐列表",
@@ -143,6 +150,31 @@ describe("zhipin_get_candidate_list", () => {
       "succeed:已读取 1 位候选人",
       "close",
     ]);
+  });
+
+  it("uses output-order refs even when collected candidates share the same visible DOM index", async () => {
+    const calls: string[] = [];
+
+    setZhipinGetCandidateListDepsForTests({
+      openNativePagePort: async () =>
+        createNativePage(calls, {
+          items: [
+            createCandidateCard({ index: 0, candidateId: "candidate-1", name: "候选人 A" }),
+            createCandidateCard({ index: 0, candidateId: "candidate-2", name: "候选人 B" }),
+          ],
+        }),
+      createNativeVisualActivitySession: () => createNoopSession(calls),
+    });
+
+    const result = await zhipinGetCandidateList.execute(
+      { maxResults: 2, autoScroll: false },
+      createTestContext(),
+    );
+
+    assert.deepEqual(
+      result.candidates.map((candidate) => candidate.candidateRef),
+      ["@c1", "@c2"],
+    );
   });
 
   it("returns a structured failure when the native recommend list is not ready", async () => {
@@ -165,3 +197,24 @@ describe("zhipin_get_candidate_list", () => {
     assert.deepEqual(calls, ["begin:正在打开推荐列表", "fail:推荐列表未加载", "close"]);
   });
 });
+
+function createCandidateCard(
+  overrides: Pick<NativeRecommendCandidateCard, "index" | "candidateId" | "name">,
+): NativeRecommendCandidateCard {
+  return {
+    index: overrides.index,
+    candidateId: overrides.candidateId,
+    name: overrides.name,
+    age: "24岁",
+    experience: "3年",
+    education: "本科",
+    workStatus: "在职",
+    company: "花卷科技",
+    currentPosition: "前端工程师",
+    expectedLocation: "上海",
+    expectedPosition: "前端工程师",
+    expectedSalary: "20-30K",
+    tags: ["React"],
+    buttonText: "打招呼",
+  };
+}

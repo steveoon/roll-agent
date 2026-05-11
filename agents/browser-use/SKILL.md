@@ -12,8 +12,10 @@ metadata:
 ## 使用前提
 
 - 先启动 `browser-use-agent` HTTP 常驻服务；浏览器 session 跨调用持久。
+- 上层 orchestrator 若通过 Roll 调用，先用 `roll skills get browser-use-agent --include-references --json` 读取当前说明和 `references/*`，再用 `roll agent tools browser-use-agent --json` 读取真实 schema。
 - 完整 `inputSchema` 以 `roll agent tools browser-use-agent --json` 为准。
 - `REPLY_AUTHORITY_KEYS_URL` 是必填环境变量；`roll doctor` 会通过 `references/env.yaml` 和 `browser_status.effectiveEnvSources` 检查它是否声明并在运行态生效。
+- 长任务前或状态异常时先跑 `roll doctor --fix-plan --json`；仅对配置迁移、`agents.dataDir`、孤儿 runtime 元数据这类安全项才使用 `roll doctor --fix --json`。
 - 页内反馈默认开启：
   - `BROWSER_VISUAL_CURSOR`：native CDP 点击/拖拽/滚动前显示同源虚拟鼠标轨迹和点击波纹；简历弹窗等 Playwright-backed 工具仍使用旧虚拟指针。
   - `BROWSER_VISUAL_ACTIVITY`：读取、识别、提取等操作显示状态胶囊和区域高亮。
@@ -62,9 +64,9 @@ metadata:
 | `zhipin_open_recommend_page()` | native CDP | 点击左侧导航切到「推荐牛人」。 |
 | `zhipin_select_recommend_job(jobValue?, jobName?, index?, searchKeyword?, useSearch?)` | native CDP | 切换推荐页顶部招聘岗位筛选；优先传 `jobValue`，其次 `jobName`，`index` 只作当前下拉快照兜底；返回 `current` / `selected` / `options`。 |
 | `zhipin_filter_recommend_candidates(ageMin?, ageMax?, gender?, activity?)` | native CDP | 只设置年龄、性别、活跃度；未传维度重置为 `不限`，年龄默认 `16-不限`。 |
-| `zhipin_get_candidate_list(maxResults?, autoScroll?, maxScrolls?)` | native CDP | 读取推荐候选人卡片；默认滚动并按 `candidateId` / `data-geek` 去重。 |
-| `zhipin_say_hello(indices)` | native CDP | 按当前推荐列表 DOM `index` 批量点击「打招呼」。 |
-| `zhipin_open_resume(index)` | Playwright-backed | 打开简历弹窗；低优先级未迁移项。 |
+| `zhipin_get_candidate_list(maxResults?, autoScroll?, maxScrolls?)` | native CDP | 读取推荐候选人卡片；默认滚动并按 `candidateId` / `data-geek` 去重，返回 `candidateRef`。 |
+| `zhipin_say_hello(indices?, candidateRefs?)` | native CDP | 批量点击「打招呼」；orchestrator 优先传 `candidateRefs`，`indices` 只作当前 DOM 快照兜底。 |
+| `zhipin_open_resume(index?, candidateRef?)` | Playwright-backed | 打开简历弹窗；orchestrator 优先传 `candidateRef`，低优先级未迁移项。 |
 | `zhipin_locate_resume_canvas()` | Playwright-backed | 定位 `#recommendFrame -> iframe[src*="c-resume"] -> canvas#resume, div#resume canvas`。 |
 | `zhipin_close_resume()` | Playwright-backed | 关闭简历弹窗；selector 契约见 `src/pages/zhipin/resume-dom-contract.ts`。 |
 
@@ -90,6 +92,10 @@ metadata:
 9. 推荐岗位只知道标题时传 `jobName`；`index` 只表示当前岗位下拉快照，不要在搜索、筛选、刷新或跨步骤后复用。
 10. `zhipin_select_recommend_job` 返回 `status:"selected"` 或 `status:"already_selected"` 都表示目标岗位已生效。
 11. `zhipin_select_recommend_job` 返回 `status:"not_found"` 时不要盲目重试；先读取返回的 `options`，选择最接近岗位并复用其 `value` 作为 `jobValue`。
+12. 推荐候选人列表的 `candidateRef` 来自 `zhipin_get_candidate_list` 输出，格式如 `@c1`；后续 `zhipin_say_hello` / `zhipin_open_resume` 优先传它。
+13. `candidateRef` 只对最近一次推荐列表快照有意义；筛选、搜索、滚动加载、刷新或页面重开后先重新调用 `zhipin_get_candidate_list`。
+14. orchestrator 不要自行构造 `candidateRef`；只能传目标 agent 刚返回的 `candidateRef`。
+15. 高频连续 tool call 可由上层用 `roll run --batch-stdin --json` 批量提交，但每项仍要显式声明 `agent` / `tool` / `input`，不要假设 batch 自动传递上一步输出。
 
 ## 典型链路
 
@@ -107,7 +113,7 @@ zhipin_open_recommend_page
   -> zhipin_select_recommend_job(jobValue | jobName)
   -> zhipin_filter_recommend_candidates(...)
   -> zhipin_get_candidate_list(maxResults?, autoScroll=true)
-  -> zhipin_say_hello(indices)
+  -> zhipin_say_hello(candidateRefs)
 ```
 
 ## 参考资料

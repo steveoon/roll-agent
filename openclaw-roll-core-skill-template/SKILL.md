@@ -11,6 +11,8 @@ Prefer deterministic execution.
 - Use `roll run --json` when the target agent and tool are known.
 - When passing a structured object, use `roll run <agent> <tool> --input-json '{...}' --json`.
   This is the orchestrator-safe form across Roll versions and shell environments.
+- Use `roll skills get <agent-name>` to read the currently registered agent skill before relying on
+  embedded or remembered instructions.
 - Use `roll agent tools <agent-name> --json` when the agent is known but the tool name or `inputSchema` is not.
 - Use `roll ask --json` only when intent is known but the target agent/tool is not.
 - Do not default to `roll chat`; it is still experimental.
@@ -29,6 +31,30 @@ roll agent info <agent-name>
 - If the agent is `stdio + on-demand`, do not pre-start it.
 
 ## Tool Discovery
+
+Read the registered skill first, then inspect the runtime tool schema:
+
+```bash
+roll skills get <agent-name> --include-references --json
+roll agent tools <agent-name> --json
+```
+
+Use the skill document and its references for orchestration rules, stable IDs, and business
+sequencing. Use `roll agent tools` for exact `inputSchema` / `outputSchema`.
+
+For fleet-level skill discovery:
+
+```bash
+roll skills list --json
+roll skills path <agent-name>
+```
+
+- `roll skills list --json` tells an orchestrator which registered agents expose live skill docs.
+- `roll skills get <agent-name> --json` returns `{ name, description, source, content, path? }`.
+- `roll skills get <agent-name> --include-references --json` also returns `references[]` with
+  `relativePath`, `path`, and `content` for referenced local `references/*` files.
+- `roll skills path <agent-name>` is only available when Roll can read a local `SKILL.md`; installed or
+  snapshot-only agents may fall back to registry content.
 
 Before first call or after agent updates, discover the exact tool names and `inputSchema`:
 
@@ -59,6 +85,28 @@ Boundary rules:
 - When a tool call fails with symptoms like a missing required field even though the command visibly contains JSON, retry with `--input-json` before debugging the target subagent.
 - Keep `--json` for output format separate from `--input-json`; `--json` does not provide tool input.
 
+## Batch Tool Calls
+
+Use batch mode when an orchestrator already knows a sequence of independent or serial `roll run`
+calls and wants one CLI process:
+
+```bash
+printf '%s\n' '[{"agent":"browser-use-agent","tool":"browser_status","input":{}}]' \
+  | roll run --batch-stdin --json
+```
+
+Each item is:
+
+```json
+{ "agent": "<agent-name>", "tool": "<tool-name>", "input": {}, "label": "optional" }
+```
+
+Rules:
+
+- Do not pass positional `agent/tool` together with `--batch-json`, `--batch-file`, or `--batch-stdin`.
+- `input` must be a JSON object; omit it only when the tool accepts `{}`.
+- Use `--bail` when later steps should stop after the first failed item.
+
 ## Navigation Tool Choice
 
 When the task involves switching pages, tabs, or in-app sections, choose the tool by semantic level instead of defaulting to raw URL navigation.
@@ -78,6 +126,9 @@ Practical rule:
 ## Diagnostics & Maintenance
 
 - `roll doctor --json` — system health check, including runtime env drift summary for registered agents.
+- `roll doctor --fix-plan --json` — include safe remediation hints without mutating local state.
+- `roll doctor --fix --json` — apply safe fixes only: config migration, `agents.dataDir` creation, and
+  orphan core-managed runtime metadata cleanup.
 - `roll update --check` — check available updates for roll-core and all registered agents without applying.
 - `roll update` — apply all available updates (lifecycle varies by source type).
 - `roll config migrate` — run when doctor or update reports `needs-migration`.
