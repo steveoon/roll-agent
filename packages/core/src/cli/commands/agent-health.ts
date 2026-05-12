@@ -1,6 +1,11 @@
 import { defineCommand } from "citty";
 import { loadAgentsConfig } from "../../config/loader.ts";
-import { getAgentLogPath, getAgentPid, probeAgentEndpoint } from "../../registry/process-manager.ts";
+import {
+  getAgentLogPath,
+  getAgentPid,
+  inspectManagedAgentRuntime,
+  probeAgentEndpoint,
+} from "../../registry/process-manager.ts";
 import { AgentStore } from "../../registry/store.ts";
 import { log } from "../utils/output.ts";
 import type { RegisteredAgent } from "../../types/agent.ts";
@@ -132,6 +137,19 @@ async function checkCoreManagedHealth(
       transport: agent.transport.type,
       healthy: false,
       message: `未运行（缺少活动 PID）。日志: ${getAgentLogPath(dataDir, agent.skill.name)}`,
+    };
+  }
+
+  const runtimeInspection = inspectManagedAgentRuntime(agent, dataDir);
+  if (runtimeInspection.issues.length > 0) {
+    store.updateStatus(agent.skill.name, "error");
+    return {
+      agentName: agent.skill.name,
+      transport: agent.transport.type,
+      healthy: false,
+      message:
+        `${runtimeInspection.issues.map((issue) => issue.message).join("；")}。` +
+        `日志: ${getAgentLogPath(dataDir, agent.skill.name)}`,
     };
   }
 

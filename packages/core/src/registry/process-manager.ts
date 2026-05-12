@@ -14,16 +14,68 @@ import { resolveDevSpawnSpec } from "./dev-spawn.ts";
 import { inferAgentSourceType } from "./source.ts";
 import type { RegisteredAgent } from "../types/agent.ts";
 
+const RUNTIME_SIDECAR_SCHEMA_VERSION = 1 as const;
+const UNKNOWN_CORE_VERSION = "unknown";
+
+export type ManagedAgentRuntimeIssueCode =
+  | "missing-sidecar"
+  | "invalid-sidecar"
+  | "orphan-sidecar"
+  | "pid-mismatch"
+  | "version-mismatch"
+  | "endpoint-mismatch";
+
+export interface ManagedAgentRuntimeSidecar {
+  readonly schemaVersion: typeof RUNTIME_SIDECAR_SCHEMA_VERSION;
+  readonly agentName: string;
+  readonly pid: number;
+  readonly coreVersion: string;
+  readonly startedAt: string;
+  readonly endpoint?: string;
+}
+
+export interface ManagedAgentRuntimeIssue {
+  readonly code: ManagedAgentRuntimeIssueCode;
+  readonly message: string;
+  readonly fix: string;
+}
+
+export interface ManagedAgentRuntimeInspection {
+  readonly pid?: number;
+  readonly sidecar?: ManagedAgentRuntimeSidecar;
+  readonly expectedCoreVersion: string;
+  readonly expectedEndpoint?: string;
+  readonly issues: readonly ManagedAgentRuntimeIssue[];
+}
+
 /** PID 文件存放目录 */
 function pidFilePath(dataDir: string, agentName: string): string {
   return resolve(dataDir, "pids", `${agentName}.pid`);
 }
 
-function removePidFile(dataDir: string, agentName: string): void {
-  const pidFile = pidFilePath(dataDir, agentName);
-  if (existsSync(pidFile)) {
-    unlinkSync(pidFile);
+function runtimeSidecarPath(dataDir: string, agentName: string): string {
+  return resolve(dataDir, "pids", `${agentName}.runtime.json`);
+}
+
+function removeAgentRuntimeFiles(dataDir: string, agentName: string): void {
+  for (const filePath of [
+    pidFilePath(dataDir, agentName),
+    runtimeSidecarPath(dataDir, agentName),
+  ]) {
+    if (existsSync(filePath)) {
+      unlinkSync(filePath);
+    }
   }
+}
+
+/** 仅在没有活动 PID 时清理 runtime 元数据。 */
+export function cleanupOrphanAgentRuntimeMetadata(dataDir: string, agentName: string): boolean {
+  if (getAgentPid(dataDir, agentName) !== undefined) {
+    return false;
+  }
+
+  removeAgentRuntimeFiles(dataDir, agentName);
+  return true;
 }
 
 /** Agent 日志文件路径 */
@@ -49,10 +101,142 @@ export function getAgentPid(dataDir: string, agentName: string): number | undefi
   const pid = Number(readFileSync(pidFile, "utf-8").trim());
   if (Number.isNaN(pid) || !isProcessAlive(pid)) {
     // 清理过期的 PID 文件
-    removePidFile(dataDir, agentName);
+    removeAgentRuntimeFiles(dataDir, agentName);
     return undefined;
   }
   return pid;
+}
+
+export function getRollCoreVersion(): string {
+  try {
+    const packageJsonPath = resolve(import.meta.dirname, "../../package.json");
+    const packageJson = JSON.parse(readFileSync(packageJsonPath, "utf-8")) as unknown;
+    return isRecordObject(packageJson) && typeof packageJson.version === "string"
+      ? packageJson.version
+      : UNKNOWN_CORE_VERSION;
+  } catch {
+    return UNKNOWN_CORE_VERSION;
+  }
+}
+
+export function writeAgentRuntimeSidecar(
+  agent: RegisteredAgent,
+  dataDir: string,
+  pid: number,
+): void {
+  const sidecarPath = runtimeSidecarPath(dataDir, agent.skill.name);
+  const sidecarDir = dirname(sidecarPath);
+  if (!existsSync(sidecarDir)) {
+    mkdirSync(sidecarDir, { recursive: true });
+  }
+
+  const sidecar: ManagedAgentRuntimeSidecar = {
+    schemaVersion: RUNTIME_SIDECAR_SCHEMA_VERSION,
+    agentName: agent.skill.name,
+    pid,
+    coreVersion: getRollCoreVersion(),
+    startedAt: new Date().toISOString(),
+    ...(agent.transport.type === "streamable-http" ? { endpoint: agent.transport.endpoint } : {}),
+  };
+  writeFileSync(sidecarPath, `${JSON.stringify(sidecar, null, 2)}\n`, "utf-8");
+}
+
+export function inspectManagedAgentRuntime(
+  agent: RegisteredAgent,
+  dataDir: string,
+): ManagedAgentRuntimeInspection {
+  const pid = getAgentPid(dataDir, agent.skill.name);
+  const expectedCoreVersion = getRollCoreVersion();
+  const expectedEndpoint =
+    agent.transport.type === "streamable-http" ? agent.transport.endpoint : undefined;
+  if (pid === undefined) {
+    const sidecar = readAgentRuntimeSidecar(dataDir, agent.skill.name);
+    if (sidecar !== undefined) {
+      return {
+        ...(sidecar !== "invalid" ? { sidecar } : {}),
+        expectedCoreVersion,
+        ...(expectedEndpoint ? { expectedEndpoint } : {}),
+        issues: [
+          {
+            code: "orphan-sidecar",
+            message:
+              sidecar === "invalid"
+                ? "runtime sidecar 存在但没有活动 PID，且无法解析"
+                : `runtime sidecar 记录 PID ${String(sidecar.pid)}，但没有活动 PID`,
+            fix: `运行 \`roll doctor --fix\` 清理 ${agent.skill.name} 的过期 runtime 元数据`,
+          },
+        ],
+      };
+    }
+
+    return {
+      expectedCoreVersion,
+      ...(expectedEndpoint ? { expectedEndpoint } : {}),
+      issues: [],
+    };
+  }
+
+  const issues: ManagedAgentRuntimeIssue[] = [];
+  const sidecar = readAgentRuntimeSidecar(dataDir, agent.skill.name);
+  if (sidecar === "invalid") {
+    issues.push({
+      code: "invalid-sidecar",
+      message: "runtime sidecar 无法解析",
+      fix: `运行 \`roll agent stop ${agent.skill.name}\` 后重新 \`roll agent start ${agent.skill.name}\``,
+    });
+    return {
+      pid,
+      expectedCoreVersion,
+      ...(expectedEndpoint ? { expectedEndpoint } : {}),
+      issues,
+    };
+  }
+
+  if (!sidecar) {
+    issues.push({
+      code: "missing-sidecar",
+      message: "进程存在但缺少 runtime sidecar",
+      fix: `运行 \`roll agent stop ${agent.skill.name}\` 后重新 \`roll agent start ${agent.skill.name}\``,
+    });
+    return {
+      pid,
+      expectedCoreVersion,
+      ...(expectedEndpoint ? { expectedEndpoint } : {}),
+      issues,
+    };
+  }
+
+  if (sidecar.pid !== pid) {
+    issues.push({
+      code: "pid-mismatch",
+      message: `runtime sidecar PID ${String(sidecar.pid)} 与活动 PID ${String(pid)} 不一致`,
+      fix: `运行 \`roll agent stop ${agent.skill.name}\` 后重新 \`roll agent start ${agent.skill.name}\``,
+    });
+  }
+
+  if (sidecar.coreVersion !== expectedCoreVersion) {
+    issues.push({
+      code: "version-mismatch",
+      message: `runtime sidecar 来自 core ${sidecar.coreVersion}，当前 core 是 ${expectedCoreVersion}`,
+      fix: `运行 \`roll agent stop ${agent.skill.name}\` 后重新 \`roll agent start ${agent.skill.name}\``,
+    });
+  }
+
+  if (expectedEndpoint && sidecar.endpoint !== expectedEndpoint) {
+    issues.push({
+      code: "endpoint-mismatch",
+      message: `runtime sidecar endpoint 是 ${sidecar.endpoint ?? "n/a"}，当前配置是 ${expectedEndpoint}`,
+      fix: `运行 \`roll agent stop ${agent.skill.name}\` 后重新 \`roll agent start ${agent.skill.name}\``,
+    });
+  }
+
+  return {
+    pid,
+    sidecar,
+    expectedCoreVersion,
+    ...(expectedEndpoint ? { expectedEndpoint } : {}),
+    issues,
+  };
 }
 
 /** 检查 core-managed Agent 对应的 MCP endpoint 是否已就绪。 */
@@ -146,8 +330,6 @@ export function startAgent(
   });
   closeSync(logFd);
 
-  child.unref();
-
   if (!child.pid) {
     throw new Error(`Failed to start agent "${agent.skill.name}"`);
   }
@@ -158,7 +340,22 @@ export function startAgent(
   if (!existsSync(pidDir)) {
     mkdirSync(pidDir, { recursive: true });
   }
-  writeFileSync(pidFile, String(child.pid), "utf-8");
+  try {
+    writeFileSync(pidFile, String(child.pid), "utf-8");
+    writeAgentRuntimeSidecar(agent, dataDir, child.pid);
+  } catch (err) {
+    try {
+      process.kill(child.pid, "SIGTERM");
+    } catch {
+      // The child may already have exited after spawn; cleanup below still removes stale metadata.
+    }
+    removeAgentRuntimeFiles(dataDir, agent.skill.name);
+    throw new Error(`Failed to persist runtime metadata for agent "${agent.skill.name}"`, {
+      cause: err,
+    });
+  }
+
+  child.unref();
 
   return child.pid;
 }
@@ -174,8 +371,8 @@ export function stopAgent(dataDir: string, agentName: string): boolean {
     // 进程可能已退出
   }
 
-  // 清理 PID 文件
-  removePidFile(dataDir, agentName);
+  // 清理 PID 与 runtime sidecar
+  removeAgentRuntimeFiles(dataDir, agentName);
 
   return true;
 }
@@ -194,7 +391,7 @@ export async function stopAgentGracefully(
   try {
     process.kill(pid, "SIGTERM");
   } catch {
-    removePidFile(dataDir, agentName);
+    removeAgentRuntimeFiles(dataDir, agentName);
     return true;
   }
 
@@ -204,7 +401,7 @@ export async function stopAgentGracefully(
 
   while (Date.now() < deadline) {
     if (!isProcessAlive(pid)) {
-      removePidFile(dataDir, agentName);
+      removeAgentRuntimeFiles(dataDir, agentName);
       return true;
     }
     await sleep(intervalMs);
@@ -258,4 +455,53 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => {
     setTimeout(resolve, ms);
   });
+}
+
+function readAgentRuntimeSidecar(
+  dataDir: string,
+  agentName: string,
+): ManagedAgentRuntimeSidecar | "invalid" | undefined {
+  const sidecarPath = runtimeSidecarPath(dataDir, agentName);
+  if (!existsSync(sidecarPath)) {
+    return undefined;
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(readFileSync(sidecarPath, "utf-8")) as unknown;
+  } catch {
+    return "invalid";
+  }
+
+  if (!isManagedAgentRuntimeSidecar(parsed)) {
+    return "invalid";
+  }
+
+  return parsed;
+}
+
+function isManagedAgentRuntimeSidecar(value: unknown): value is ManagedAgentRuntimeSidecar {
+  if (!isRecordObject(value)) {
+    return false;
+  }
+
+  if (value.schemaVersion !== RUNTIME_SIDECAR_SCHEMA_VERSION) {
+    return false;
+  }
+
+  if (
+    typeof value.agentName !== "string" ||
+    typeof value.pid !== "number" ||
+    !Number.isInteger(value.pid) ||
+    typeof value.coreVersion !== "string" ||
+    typeof value.startedAt !== "string"
+  ) {
+    return false;
+  }
+
+  return value.endpoint === undefined || typeof value.endpoint === "string";
+}
+
+function isRecordObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }

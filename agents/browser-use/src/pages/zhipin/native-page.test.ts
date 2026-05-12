@@ -755,6 +755,114 @@ describe("ZhipinNativePagePort", () => {
     assert.equal(mouseInputs.at(-1)?.y, 260);
   });
 
+  it("lists recommend jobs without selecting another job", async () => {
+    let selectorOpen = false;
+    const mouseInputs: NativeCdpMouseEventInput[] = [];
+    const port = createPort(
+      async (expression) => {
+        if (expression.includes("recommendUrlMarkers")) {
+          return true;
+        }
+        if (expression.includes(".candidate-card-wrap")) {
+          return true;
+        }
+        if (expression.includes("currentLabel") && expression.includes(".job-selecter-wrap")) {
+          return {
+            found: true,
+            isOpen: selectorOpen,
+            currentLabel: "服务员 _ 上海 5-6K",
+            currentValue: "job-1",
+            options: [
+              {
+                index: 0,
+                value: "job-1",
+                label: "服务员 _ 上海 5-6K",
+                isCurrent: true,
+              },
+              {
+                index: 1,
+                value: "job-2",
+                label: "后厨 _ 上海 6-7K",
+                isCurrent: false,
+              },
+            ],
+          };
+        }
+        if (expression.includes(".ui-dropmenu-label")) {
+          return { found: true, x: 620, y: 100 };
+        }
+        assert.doesNotMatch(expression, /\.job-list \.job-item/);
+        return false;
+      },
+      {
+        async dispatchMouseEvent(input) {
+          mouseInputs.push(input);
+          if (input.type === "mouseReleased" && input.x === 620) {
+            selectorOpen = true;
+          }
+        },
+      },
+    );
+
+    const result = await port.listRecommendJobs();
+
+    assert.equal(result.success, true);
+    assert.equal(result.status, "listed");
+    assert.equal(result.availableCount, 2);
+    assert.equal(result.canSwitch, true);
+    assert.equal(result.current?.value, "job-1");
+    assert.equal(result.options[1]?.value, "job-2");
+    assert.equal(mouseInputs.filter((input) => input.type === "mousePressed").length, 1);
+  });
+
+  it("does not report canSwitch when the only recommend job has no current marker", async () => {
+    let selectorOpen = false;
+    const port = createPort(
+      async (expression) => {
+        if (expression.includes("recommendUrlMarkers")) {
+          return true;
+        }
+        if (expression.includes(".candidate-card-wrap")) {
+          return true;
+        }
+        if (expression.includes("currentLabel") && expression.includes(".job-selecter-wrap")) {
+          return {
+            found: true,
+            isOpen: selectorOpen,
+            currentLabel: "",
+            currentValue: "",
+            options: [
+              {
+                index: 0,
+                value: "job-1",
+                label: "服务员 _ 上海 5-6K",
+                isCurrent: false,
+              },
+            ],
+          };
+        }
+        if (expression.includes(".ui-dropmenu-label")) {
+          return { found: true, x: 620, y: 100 };
+        }
+        return false;
+      },
+      {
+        async dispatchMouseEvent(input) {
+          if (input.type === "mouseReleased" && input.x === 620) {
+            selectorOpen = true;
+          }
+        },
+      },
+    );
+
+    const result = await port.listRecommendJobs();
+
+    assert.equal(result.success, true);
+    assert.equal(result.availableCount, 1);
+    assert.equal(result.canSwitch, false);
+    assert.equal(result.current, undefined);
+  });
+
   it("selects a recommend job by stable job value", async () => {
     let selectorOpen = false;
     let selectedValue = "job-1";
@@ -815,6 +923,59 @@ describe("ZhipinNativePagePort", () => {
     assert.equal(result.selected?.value, "job-2");
     assert.equal(result.current?.value, "job-2");
     assert.equal(mouseInputs.filter((input) => input.type === "mousePressed").length, 2);
+  });
+
+  it("force-clicks the current recommend job when requested", async () => {
+    let selectorOpen = false;
+    const clickedTargets: string[] = [];
+    const port = createPort(
+      async (expression) => {
+        if (expression.includes("recommendUrlMarkers")) {
+          return true;
+        }
+        if (expression.includes(".candidate-card-wrap")) {
+          return true;
+        }
+        if (expression.includes("currentLabel") && expression.includes(".job-selecter-wrap")) {
+          return {
+            found: true,
+            isOpen: selectorOpen,
+            currentLabel: "服务员 _ 上海 5-6K",
+            currentValue: "job-1",
+            options: [
+              {
+                index: 0,
+                value: "job-1",
+                label: "服务员 _ 上海 5-6K",
+                isCurrent: true,
+              },
+            ],
+          };
+        }
+        if (expression.includes(".ui-dropmenu-label")) {
+          clickedTargets.push("label");
+          return { found: true, x: 620, y: 100 };
+        }
+        if (expression.includes(".job-list .job-item")) {
+          clickedTargets.push("job");
+          return { found: true, x: 660, y: 220 };
+        }
+        return false;
+      },
+      {
+        async dispatchMouseEvent(input) {
+          if (input.type === "mouseReleased" && input.x === 620) {
+            selectorOpen = true;
+          }
+        },
+      },
+    );
+
+    const result = await port.selectRecommendJob({ jobValue: "job-1", forceClick: true });
+
+    assert.equal(result.success, true);
+    assert.equal(result.status, "selected");
+    assert.deepEqual(clickedTargets, ["label", "job"]);
   });
 
   it("sends chat replies through native focus, key events, insertText, and native send click", async () => {

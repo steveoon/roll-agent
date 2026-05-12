@@ -4,9 +4,11 @@ import { NativeVisualActivitySession } from "../native-visual-activity-session.t
 import { DYNAMIC_LIST_COLLECTION_STOP_REASONS } from "../pages/shared/dynamic-list-scroller.ts";
 import { openZhipinNativePagePort } from "../pages/zhipin/native-page.ts";
 import type { ZhipinNativePagePort } from "../pages/zhipin/native-page.ts";
+import { rememberZhipinCandidateRefs } from "../pages/zhipin/semantic-refs.ts";
 
 const CandidateCardSchema = z.object({
   index: z.number(),
+  candidateRef: z.string(),
   candidateId: z.string(),
   name: z.string(),
   age: z.string(),
@@ -119,6 +121,17 @@ export const zhipinGetCandidateList = defineTool({
         input.maxResults !== undefined
           ? collection.items.slice(0, input.maxResults)
           : [...collection.items];
+      const candidateRefTargets = rememberZhipinCandidateRefs(candidates);
+      const candidatesWithRefs = candidates.map((candidate, position) => {
+        const refTarget = candidateRefTargets[position];
+        if (!refTarget) {
+          throw new Error(`候选人引用生成失败：position ${String(position)}`);
+        }
+        return {
+          ...candidate,
+          candidateRef: refTarget.candidateRef,
+        };
+      });
       const scrollStats =
         input.autoScroll === false
           ? undefined
@@ -137,16 +150,16 @@ export const zhipinGetCandidateList = defineTool({
               afterScrollHeight: collection.after.scrollHeight,
             };
 
-      await session.succeed(`已读取 ${candidates.length} 位候选人`);
+      await session.succeed(`已读取 ${candidatesWithRefs.length} 位候选人`);
       ctx.logger.info(
-        `Found ${candidates.length} candidates in recommend list` +
+        `Found ${candidatesWithRefs.length} candidates in recommend list` +
           (scrollStats ? `, scroll stop: ${scrollStats.stopReason}` : ""),
       );
 
       return {
         success: true,
-        candidates,
-        total: candidates.length,
+        candidates: candidatesWithRefs,
+        total: candidatesWithRefs.length,
         ...(scrollStats !== undefined ? { scrollStats } : {}),
       };
     } catch (error) {

@@ -40,6 +40,26 @@ Use this when:
 - smart-reply-agent generates candidate replies
 - message delivery must be confirmed externally
 
+For generated side effects:
+- Never batch-send every generated result blindly.
+- Parse each generation result first.
+- Pass only the final authorized artifact required by the sender tool, such as `signedEnvelope`.
+- Filter out low-confidence, policy-risk, validation-risk, stale-target, or otherwise unsafe results
+  before constructing the send batch.
+- Do not send provisional draft text or model output directly unless the sender tool explicitly
+  allows raw text.
+
+Batching this pattern:
+
+```text
+read batch
+  -> orchestrator parse/filter
+  -> generate batch
+  -> orchestrator parse/filter
+  -> side-effect batch
+  -> verify batch/read
+```
+
 ## Pattern 2: Brand / Tenant / Workspace Switch Before Generation
 
 If the generator depends on mutable shared context (brand data, tenant config, project data), refresh it before generation.
@@ -110,6 +130,22 @@ Examples:
 A practical rule:
 - if the action changes external state, add one read-back step unless the platform guarantees strong confirmation
 
+## Pattern 6: Agent-Provided Refs Over Raw UI Indices
+
+When a reader tool returns both raw UI positions and semantic refs, pass the semantic refs to later
+tools.
+
+Use this when:
+- a browser/list tool returns refs such as `@c1` alongside DOM indices
+- the list may scroll, filter, refresh, or reorder between steps
+- an upstream orchestrator needs to keep a compact handle for the next tool call
+
+Rules:
+1. Treat raw `index` as a current-snapshot fallback.
+2. Treat agent-provided refs as the preferred handle for follow-up tool calls.
+3. Refresh the reader tool before reusing refs after a filter, search, navigation, or page reload.
+4. Do not invent refs in orchestrator code; only pass refs emitted by the target agent.
+
 ## Common Pitfalls
 
 ### 1. Process healthy != page healthy
@@ -123,6 +159,10 @@ If a generator uses a mutable shared context file or last-synced brand/tenant st
 
 ### 4. Reader and sender may need an explicit target-open step
 Do not assume the sender is still focused on the same target the reader inspected earlier.
+
+### 5. UI index != stable business identity
+Raw list indices are only valid for the latest page snapshot. Prefer IDs or refs emitted by the
+reader tool.
 
 ## Boundary Of This File
 

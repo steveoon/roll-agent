@@ -204,11 +204,13 @@ export type NativeRecommendJobSelectorState = {
 };
 
 export type NativeRecommendJobSelectRequest = {
+  readonly jobRef?: string;
   readonly jobValue?: string;
   readonly jobName?: string;
   readonly index?: number;
   readonly searchKeyword?: string;
   readonly useSearch?: boolean;
+  readonly forceClick?: boolean;
 };
 
 export type NativeRecommendJobSelectResult = {
@@ -224,6 +226,16 @@ export type NativeRecommendJobSelectResult = {
   readonly selected?: NativeRecommendJobOption;
   readonly options: readonly NativeRecommendJobOption[];
   readonly matchedCount: number;
+  readonly error?: string;
+};
+
+export type NativeRecommendJobListResult = {
+  readonly success: boolean;
+  readonly status: "listed" | "recommend_not_ready" | "selector_not_found";
+  readonly current?: NativeRecommendJobOption;
+  readonly options: readonly NativeRecommendJobOption[];
+  readonly availableCount: number;
+  readonly canSwitch: boolean;
   readonly error?: string;
 };
 
@@ -1245,6 +1257,24 @@ export class ZhipinNativePagePort {
     return request.index !== undefined && current.index === request.index;
   }
 
+  private hasRecommendJobAlternative(
+    current: NativeRecommendJobOption | undefined,
+    options: readonly NativeRecommendJobOption[],
+  ): boolean {
+    return options.some((option) => {
+      if (option.isCurrent) {
+        return false;
+      }
+      if (current === undefined) {
+        return options.length > 1;
+      }
+      if (option.value.length > 0 && current.value.length > 0) {
+        return option.value !== current.value;
+      }
+      return option.label !== current.label || option.index !== current.index;
+    });
+  }
+
   private async clickRecommendJobOption(
     selected: NativeRecommendJobOption,
     options: NativeClickOptions = {},
@@ -1276,6 +1306,46 @@ export class ZhipinNativePagePort {
     );
 
     return await this.dispatchNativeClick(target, options);
+  }
+
+  async listRecommendJobs(options: NativeClickOptions = {}): Promise<NativeRecommendJobListResult> {
+    if (!(await this.waitForRecommendList(3_000))) {
+      return {
+        success: false,
+        status: "recommend_not_ready",
+        options: [],
+        availableCount: 0,
+        canSwitch: false,
+        error: "推荐牛人页未就绪",
+      };
+    }
+
+    if (!(await this.openRecommendJobSelector(options))) {
+      const state = await this.readRecommendJobSelectorState();
+      const current = this.getCurrentRecommendJobOption(state);
+      return {
+        success: false,
+        status: state.found ? "selector_not_found" : "recommend_not_ready",
+        ...(current !== undefined ? { current } : {}),
+        options: state.options,
+        availableCount: state.options.length,
+        canSwitch: false,
+        error: state.found ? "未找到或无法打开岗位下拉" : "未找到岗位下拉",
+      };
+    }
+
+    await this.setRecommendJobSearch("", options);
+    await delay(700);
+    const state = await this.readRecommendJobSelectorState();
+    const current = this.getCurrentRecommendJobOption(state);
+    return {
+      success: true,
+      status: "listed",
+      ...(current !== undefined ? { current } : {}),
+      options: state.options,
+      availableCount: state.options.length,
+      canSwitch: this.hasRecommendJobAlternative(current, state.options),
+    };
   }
 
   async selectRecommendJob(
@@ -1314,7 +1384,8 @@ export class ZhipinNativePagePort {
     const initialCurrent = this.getCurrentRecommendJobOption(state);
     if (
       initialCurrent !== undefined &&
-      this.currentRecommendJobMatchesRequest(requested, initialCurrent)
+      this.currentRecommendJobMatchesRequest(requested, initialCurrent) &&
+      requested.forceClick !== true
     ) {
       return {
         success: true,
@@ -1354,7 +1425,7 @@ export class ZhipinNativePagePort {
       };
     }
 
-    if (match.selected.isCurrent) {
+    if (match.selected.isCurrent && requested.forceClick !== true) {
       return {
         success: true,
         status: "already_selected",

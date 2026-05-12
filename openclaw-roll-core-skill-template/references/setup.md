@@ -20,20 +20,26 @@ roll config init
 # 4. If an existing config uses deprecated schema, migrate it
 roll config migrate
 
-# 5. Register the target subagent
+# 5. Inspect fixable setup issues without mutating state
+roll doctor --fix-plan --json
+
+# 6. Optionally apply safe fixes only
+roll doctor --fix --json
+
+# 7. Register the target subagent
 # Published package:
 roll agent install <package-name>
 
 # OR local source directory:
 roll agent add /path/to/agent
 
-# 6. Inspect runtime ownership, transport, and env status
+# 8. Inspect runtime ownership, transport, and env status
 roll agent info <agent-name>
 
-# 7. If the agent is a persistent service, start it
+# 9. If the agent is a persistent service, start it
 roll agent start <agent-name>
 
-# 8. Verify health before tool calls
+# 10. Verify health before tool calls
 roll agent health --json
 ```
 

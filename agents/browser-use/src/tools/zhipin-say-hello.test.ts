@@ -2,6 +2,10 @@ import assert from "node:assert/strict";
 import { afterEach, describe, it } from "node:test";
 import type { AgentContext } from "@roll-agent/sdk";
 import type { ZhipinNativePagePort } from "../pages/zhipin/native-page.ts";
+import {
+  clearZhipinCandidateRefsForTests,
+  rememberZhipinCandidateRefs,
+} from "../pages/zhipin/semantic-refs.ts";
 import { setZhipinSayHelloDepsForTests, zhipinSayHello } from "./zhipin-say-hello.ts";
 
 function createTestContext(): AgentContext {
@@ -20,6 +24,7 @@ function createTestContext(): AgentContext {
 
 afterEach(() => {
   setZhipinSayHelloDepsForTests(undefined);
+  clearZhipinCandidateRefsForTests();
 });
 
 describe("zhipin_say_hello", () => {
@@ -82,18 +87,23 @@ describe("zhipin_say_hello", () => {
       },
     });
 
-    const result = await zhipinSayHello.execute({ indices: [0, 1] }, createTestContext());
+    const result = await zhipinSayHello.execute(
+      { candidateRefs: ["@c1", "@c2"] },
+      createTestContext(),
+    );
 
     assert.equal(result.success, true);
     assert.deepEqual(result.results, [
       {
         index: 0,
+        candidateRef: "@c1",
         candidateName: "赵慧珍",
         candidateId: "candidate-1",
         success: true,
       },
       {
         index: 1,
+        candidateRef: "@c2",
         candidateName: "赵慧珍",
         candidateId: "candidate-1",
         success: true,
@@ -105,10 +115,10 @@ describe("zhipin_say_hello", () => {
       "begin:正在批量打招呼",
       "highlight:.candidate-card-wrap, [data-geek], .geek-item",
       "greet:0",
-      "timing:650:140:1200",
-      "sleep:2400",
+      "timing:450:140:750",
+      "sleep:1400",
       "greet:1",
-      "timing:650:140:1200",
+      "timing:450:140:750",
       "succeed:已完成 2/2 位候选人",
       "close",
     ]);
@@ -141,9 +151,79 @@ describe("zhipin_say_hello", () => {
       }),
     });
 
-    const result = await zhipinSayHello.execute({ indices: [2] }, createTestContext());
+    const result = await zhipinSayHello.execute({ candidateRefs: ["@c3"] }, createTestContext());
 
     assert.equal(result.success, false);
+    assert.equal(result.results[0]?.candidateRef, "@c3");
     assert.equal(result.results[0]?.error, "推荐列表未加载");
+  });
+
+  it("does not click when a remembered candidate ref no longer matches the current DOM index", async () => {
+    const calls: string[] = [];
+    rememberZhipinCandidateRefs([
+      { index: 0, candidateId: "candidate-expected", name: "候选人 A" },
+    ]);
+    const nativePage = {
+      async waitForRecommendList() {
+        return true;
+      },
+      async inspectRecommendCard(index: number) {
+        calls.push(`inspect:${index}`);
+        return {
+          found: true,
+          cardSelector: ".candidate-card-wrap",
+          candidateId: "candidate-other",
+          name: "候选人 B",
+          hasGreetButton: true,
+        };
+      },
+      async clickRecommendGreet(index: number) {
+        calls.push(`greet:${index}`);
+        return {
+          found: true,
+          cardSelector: ".candidate-card-wrap",
+          candidateId: "candidate-other",
+          name: "候选人 B",
+          hasGreetButton: true,
+          clicked: true,
+        };
+      },
+      close() {
+        calls.push("close");
+      },
+    } as unknown as ZhipinNativePagePort;
+
+    setZhipinSayHelloDepsForTests({
+      openNativePagePort: async () => nativePage,
+      createNativeVisualActivitySession: () => ({
+        async begin() {
+          return true;
+        },
+        async highlightSelector() {
+          return true;
+        },
+        async previewMouseMotion() {},
+        async succeed() {
+          return true;
+        },
+        async fail() {
+          return true;
+        },
+      }),
+    });
+
+    const result = await zhipinSayHello.execute({ candidateRefs: ["@c1"] }, createTestContext());
+
+    assert.equal(result.success, false);
+    assert.equal(result.results[0]?.candidateRef, "@c1");
+    assert.match(result.results[0]?.error ?? "", /已过期/);
+    assert.deepEqual(calls, ["inspect:0", "close"]);
+  });
+
+  it("rejects invalid candidate refs before execution", () => {
+    assert.throws(
+      () => zhipinSayHello.input.parse({ candidateRefs: ["candidate-1"] }),
+      /candidateRef 应类似 @c1/,
+    );
   });
 });

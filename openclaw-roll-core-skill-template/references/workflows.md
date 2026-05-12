@@ -3,8 +3,10 @@
 ## Table of Contents
 
 - [Inventory And Preflight](#inventory-and-preflight)
+- [CLI-Served Skill Discovery](#cli-served-skill-discovery)
 - [Known Agent, Unknown Tool](#known-agent-unknown-tool)
 - [Known Agent + Tool](#known-agent--tool)
+- [Batch Tool Calls](#batch-tool-calls)
 - [Known Intent, Unknown Tool](#known-intent-unknown-tool)
 - [Persistent Agent Recovery](#persistent-agent-recovery)
 - [Local-Path Agent Refresh](#local-path-agent-refresh)
@@ -26,6 +28,37 @@ Use this order when the target agent is not yet fully understood:
 - `roll agent info <agent-name>` to inspect source, transport, runtime ownership, and env status
 - `roll agent health --json` before calling tools on persistent agents
 
+## CLI-Served Skill Discovery
+
+```bash
+roll skills list --json
+roll skills get <agent-name> --include-references --json
+roll skills path <agent-name>
+```
+
+Use this when an orchestrator needs the current agent instructions instead of stale bundled
+knowledge.
+
+| Command | Output | Use it for |
+|---------|--------|------------|
+| `roll skills list --json` | Registered skill names, descriptions, source labels, and optional paths | Build an agent inventory |
+| `roll skills get <agent-name> --json` | `{ name, description, source, content, path? }` | Load the live `SKILL.md` text before planning tool calls |
+| `roll skills get <agent-name> --include-references --json` | Skill document plus `references[]` | Load referenced `references/*` docs for deeper orchestration rules |
+| `roll skills path <agent-name>` | Local `SKILL.md` path when available | Read adjacent references from a local-path agent |
+
+Priority:
+1. Use `roll skills get <agent-name> --include-references --json` for orchestration rules, stable
+   identifier rules, and referenced workflow docs.
+2. Use `roll agent tools <agent-name> --json` for the exact runtime schema.
+3. Use local reference files only after `skills path` confirms a filesystem-backed skill.
+
+Boundary:
+- `roll skills get` is documentation, not runtime schema.
+- `--include-references` only returns referenced local `references/*` files. If `source` is
+  `registry`, `references` is empty because Roll does not have adjacent files.
+- `roll agent tools` is schema, not workflow guidance.
+- If `source` is `registry`, do not assume adjacent reference files exist on disk.
+
 ## Known Agent, Unknown Tool
 
 ```bash
@@ -43,6 +76,47 @@ Use this when the target agent is known but the exact tool name or `inputSchema`
 ```bash
 roll run <agent-name> <tool-name> --input-json '{...}' --json
 ```
+
+## Batch Tool Calls
+
+```bash
+roll run --batch-stdin --json
+```
+
+Use this when an orchestrator already has multiple explicit tool calls and wants one Roll process.
+The stdin payload must be a JSON array:
+
+```json
+[
+  { "agent": "browser-use-agent", "tool": "browser_status", "input": {}, "label": "status" },
+  {
+    "agent": "browser-use-agent",
+    "tool": "zhipin_get_username",
+    "input": {},
+    "label": "recruiter"
+  }
+]
+```
+
+Batch item contract:
+
+| Field | Required | Meaning |
+|-------|----------|---------|
+| `agent` | yes | Registered agent name |
+| `tool` | yes | MCP tool name |
+| `input` | no | JSON object, defaults to `{}` |
+| `label` | no | Orchestrator label copied to the result |
+
+Rules:
+- Do not combine batch mode with positional `agent/tool`.
+- Do not combine batch mode with `--input-json` or `--input-file`.
+- Use `--bail` when later calls depend on all prior calls succeeding.
+- Batch mode reduces CLI startup overhead, but it does not create implicit dataflow. The orchestrator
+  still needs to read each result and construct the next explicit input.
+- Batch mode executes items sequentially and waits for each tool call to finish. It does not surface
+  per-item streaming progress.
+- For dependent workflows, split the workflow into multiple batches:
+  read batch -> parse/filter results -> generate batch -> parse/filter results -> side-effect batch.
 
 ## Known Intent, Unknown Tool
 
@@ -115,16 +189,25 @@ Both `roll update --check` and `roll update` also inspect the local config file.
 
 ```bash
 roll doctor --json
+roll doctor --fix-plan --json
+roll doctor --fix --json
 ```
 
 Use this when tool calls fail unexpectedly or env setup is unclear. Checks Node.js version, config validity, LLM provider keys, data directory, registered agents, and per-agent env requirements.
 
-`--json` outputs `CheckResult[]` where each entry has `name`, `status: "ok" | "warn" | "fail"`, and `message`. Parse stdout only. For per-key env declaration and runtime labels, follow with `roll agent info <agent-name>`.
+`--json` outputs `CheckResult[]` where each entry has `name`, `status: "ok" | "warn" | "fail"`, and `message`. With `--fix-plan`, entries can include `fix`. With `--fix`, the JSON also includes fix results. Parse stdout only. For per-key env declaration and runtime labels, follow with `roll agent info <agent-name>`.
 
 Follow-up based on output:
 - `needs-migration` → `roll config migrate`
 - Missing env → configure `agents.env` in `roll.config.yaml`
 - Agent count is 0 → `roll agent install <package>` or `roll agent add <path>`
+- Stale core-managed runtime metadata → `roll doctor --fix`
+- Missing `agents.dataDir` → `roll doctor --fix`
+
+Safe-fix boundary:
+- `roll doctor --fix` only applies known safe repairs: config migration with backup,
+  `agents.dataDir` creation, and orphan runtime metadata cleanup.
+- It does not install packages, edit arbitrary env values, restart agents, or remove registered agents.
 
 ## Env Drift Detection
 
