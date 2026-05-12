@@ -106,6 +106,11 @@ Rules:
 - Do not pass positional `agent/tool` together with `--batch-json`, `--batch-file`, or `--batch-stdin`.
 - `input` must be a JSON object; omit it only when the tool accepts `{}`.
 - Use `--bail` when later steps should stop after the first failed item.
+- Batch mode is sequential execution in one CLI process, not a workflow engine.
+- Batch mode does not pass one item's output into another item, does not provide result references,
+  and does not expose streaming progress between items.
+- For dependent chains, split the work into explicit phases and let the orchestrator parse and
+  filter each phase before constructing the next batch.
 
 ## Navigation Tool Choice
 

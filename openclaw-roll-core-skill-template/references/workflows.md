@@ -113,6 +113,10 @@ Rules:
 - Use `--bail` when later calls depend on all prior calls succeeding.
 - Batch mode reduces CLI startup overhead, but it does not create implicit dataflow. The orchestrator
   still needs to read each result and construct the next explicit input.
+- Batch mode executes items sequentially and waits for each tool call to finish. It does not surface
+  per-item streaming progress.
+- For dependent workflows, split the workflow into multiple batches:
+  read batch -> parse/filter results -> generate batch -> parse/filter results -> side-effect batch.
 
 ## Known Intent, Unknown Tool
 

@@ -40,6 +40,26 @@ Use this when:
 - smart-reply-agent generates candidate replies
 - message delivery must be confirmed externally
 
+For generated side effects:
+- Never batch-send every generated result blindly.
+- Parse each generation result first.
+- Pass only the final authorized artifact required by the sender tool, such as `signedEnvelope`.
+- Filter out low-confidence, policy-risk, validation-risk, stale-target, or otherwise unsafe results
+  before constructing the send batch.
+- Do not send provisional draft text or model output directly unless the sender tool explicitly
+  allows raw text.
+
+Batching this pattern:
+
+```text
+read batch
+  -> orchestrator parse/filter
+  -> generate batch
+  -> orchestrator parse/filter
+  -> side-effect batch
+  -> verify batch/read
+```
+
 ## Pattern 2: Brand / Tenant / Workspace Switch Before Generation
 
 If the generator depends on mutable shared context (brand data, tenant config, project data), refresh it before generation.

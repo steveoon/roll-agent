@@ -29,7 +29,7 @@ metadata:
 | `open_platform(platform)` | 通过 native CDP 打开并聚焦招聘平台主页；登录前不触发 Playwright attach。 |
 | `list_pages(platform?)` | 通过 native CDP 列出浏览器页面和 `pageId`。 |
 | `select_page(platform, pageId)` | 将指定页面绑定为平台活跃页；登录前优先走 native target 激活。 |
-| `navigate_active_tab(url)` | 导航当前平台页；对 `zhipin` / `yupao` 优先复用已打开平台 tab。 |
+| `navigate_active_tab(url)` | 通过 native CDP 打开/导航页面；不触发 Playwright attach，不支持直接跳转 BOSS `/web/chat/*` 后台路径。 |
 
 ## 调试 Tools
 
@@ -62,8 +62,9 @@ metadata:
 | Tool | Backend | 说明 |
 | --- | --- | --- |
 | `zhipin_open_recommend_page()` | native CDP | 点击左侧导航切到「推荐牛人」。 |
-| `zhipin_select_recommend_job(jobValue?, jobName?, index?, searchKeyword?, useSearch?)` | native CDP | 切换推荐页顶部招聘岗位筛选；优先传 `jobValue`，其次 `jobName`，`index` 只作当前下拉快照兜底；返回 `current` / `selected` / `options`。 |
-| `zhipin_filter_recommend_candidates(ageMin?, ageMax?, gender?, activity?)` | native CDP | 只设置年龄、性别、活跃度；未传维度重置为 `不限`，年龄默认 `16-不限`。 |
+| `zhipin_list_recommend_jobs()` | native CDP | 只读推荐页顶部招聘岗位下拉；返回 `jobs[].jobRef` / `jobs[].value` / `current` / `canSwitch`，不切换岗位。 |
+| `zhipin_select_recommend_job(jobRef?, jobValue?, jobName?, index?, searchKeyword?, useSearch?, forceClick?)` | native CDP | 切换推荐页顶部招聘岗位筛选；优先传 `jobRef`，其次 `jobValue`，再次 `jobName`，`index` 只作当前下拉快照兜底；`forceClick:true` 时目标已选中也会点击一次岗位项。 |
+| `zhipin_filter_recommend_candidates(ageMin?, ageMax?, gender?, activity?)` | native CDP | 只设置年龄、性别、活跃度；未传维度重置为 `不限`，年龄默认 `16-不限`；若返回 `status:"requires_vip"`，表示当前账号无法使用该筛选。 |
 | `zhipin_get_candidate_list(maxResults?, autoScroll?, maxScrolls?)` | native CDP | 读取推荐候选人卡片；默认滚动并按 `candidateId` / `data-geek` 去重，返回 `candidateRef`。 |
 | `zhipin_say_hello(indices?, candidateRefs?)` | native CDP | 批量点击「打招呼」；orchestrator 优先传 `candidateRefs`，`indices` 只作当前 DOM 快照兜底。 |
 | `zhipin_open_resume(index?, candidateRef?)` | Playwright-backed | 打开简历弹窗；orchestrator 优先传 `candidateRef`，低优先级未迁移项。 |
@@ -88,14 +89,24 @@ metadata:
 5. 发送回复只能调用 `zhipin_send_reply(signedEnvelope)`；不要构造裸文本发送路径。
 6. `zhipin_send_reply` 会校验 envelope 的 `conversationId + candidateId + recruiterBinding`，当前页面目标或招聘者不一致时拒绝。
 7. `preferredBrand` 只来自 `zhipin_get_candidate_info` 对 `communicationPosition` 的连字符格式解析；不要用通用岗位名或候选人公司名伪造。
-8. 推荐页岗位筛选的稳定主键是 `zhipin_select_recommend_job` 返回的 `options[].value`；已知岗位 `value` 时必须优先传 `jobValue`。
-9. 推荐岗位只知道标题时传 `jobName`；`index` 只表示当前岗位下拉快照，不要在搜索、筛选、刷新或跨步骤后复用。
-10. `zhipin_select_recommend_job` 返回 `status:"selected"` 或 `status:"already_selected"` 都表示目标岗位已生效。
-11. `zhipin_select_recommend_job` 返回 `status:"not_found"` 时不要盲目重试；先读取返回的 `options`，选择最接近岗位并复用其 `value` 作为 `jobValue`。
-12. 推荐候选人列表的 `candidateRef` 来自 `zhipin_get_candidate_list` 输出，格式如 `@c1`；后续 `zhipin_say_hello` / `zhipin_open_resume` 优先传它。
-13. `candidateRef` 只对最近一次推荐列表快照有意义；筛选、搜索、滚动加载、刷新或页面重开后先重新调用 `zhipin_get_candidate_list`。
-14. orchestrator 不要自行构造 `candidateRef`；只能传目标 agent 刚返回的 `candidateRef`。
-15. 高频连续 tool call 可由上层用 `roll run --batch-stdin --json` 批量提交，但每项仍要显式声明 `agent` / `tool` / `input`，不要假设 batch 自动传递上一步输出。
+8. 推荐页岗位筛选优先调用 `zhipin_list_recommend_jobs()`；若返回 `canSwitch:false`，说明当前账号/页面没有可切换目标，不要继续盲试岗位名。
+9. `jobRef` 来自 `zhipin_list_recommend_jobs` 输出，格式如 `@j1`；选择岗位时优先传 `zhipin_select_recommend_job({ jobRef })`。
+10. `jobRef` 只对最近一次岗位下拉快照有意义；筛选、搜索、刷新或页面重开后先重新调用 `zhipin_list_recommend_jobs`。
+11. 推荐页岗位筛选的稳定主键是 `zhipin_list_recommend_jobs` / `zhipin_select_recommend_job` 返回的 `value`；已知 `value` 时传 `jobValue`。
+12. 推荐岗位只知道标题时传 `jobName`；`index` 只表示当前岗位下拉快照，不要在搜索、筛选、刷新或跨步骤后复用。
+13. `zhipin_select_recommend_job` 返回 `status:"selected"` 或 `status:"already_selected"` 都表示目标岗位已生效。
+14. `zhipin_select_recommend_job` 返回 `status:"not_found"` 时不要盲目重试；先调用 `zhipin_list_recommend_jobs`，再选择最接近岗位的 `jobRef` 或 `value`。
+15. 只有明确需要重新点击已选中岗位项时才传 `forceClick:true`；默认不要传，避免无意义重复点击。
+16. `zhipin_filter_recommend_candidates` 返回 `status:"requires_vip"` 时不要反复尝试绕过筛选 UI；当前账号没有权限使用该筛选，改为直接读取当前推荐列表或调整业务策略。
+17. 聊天消息列表不产生 `candidateRef`；聊天回复链路使用 `conversationId` / `candidateId`，推荐候选人链路才使用 `candidateRef`。
+18. 推荐候选人列表的 `candidateRef` 来自 `zhipin_get_candidate_list` 输出，格式如 `@c1`；后续 `zhipin_say_hello` / `zhipin_open_resume` 优先传它。
+19. `candidateRef` 只对最近一次推荐列表快照有意义；筛选、搜索、滚动加载、刷新或页面重开后先重新调用 `zhipin_get_candidate_list`。
+20. orchestrator 不要自行构造 `jobRef` / `candidateRef`；只能传目标 agent 刚返回的 ref。
+21. 调 `zhipin_say_hello` 前，先从 `zhipin_get_candidate_list` 结果中过滤 `buttonText:"打招呼"` 的候选人；`buttonText` 为空通常表示已经打过招呼。
+22. 如果业务有年龄、资格或岗位匹配约束，orchestrator 必须先按 `age` / `expectedPosition` / `tags` 等列表字段过滤；不要把刚读到的全部 `candidateRefs` 盲目提交。
+23. `zhipin_say_hello({ candidateRefs })` 支持同一快照内连续提交多个 ref；若返回“候选人引用已过期”，说明 BOSS 列表已重排，重新执行 `zhipin_get_candidate_list` 后只重试剩余目标。
+24. 高频连续 tool call 可由上层用 `roll run --batch-stdin --json` 批量提交，但每项仍要显式声明 `agent` / `tool` / `input`，不要假设 batch 自动传递上一步输出。
+25. 不要用 `navigate_active_tab` 直接跳转 `https://www.zhipin.com/web/chat/*`；聊天页用 `zhipin_open_chat_page()`，推荐页用 `zhipin_open_recommend_page()`。
 
 ## 典型链路
 
@@ -110,9 +121,11 @@ zhipin_read_messages
 
 推荐候选人:
 zhipin_open_recommend_page
-  -> zhipin_select_recommend_job(jobValue | jobName)
-  -> zhipin_filter_recommend_candidates(...)
+  -> zhipin_list_recommend_jobs()
+  -> zhipin_select_recommend_job(jobRef | jobValue | jobName)  # 可选；canSwitch=false 时跳过
+  -> zhipin_filter_recommend_candidates(...)  # 可选；requires_vip 时跳过筛选
   -> zhipin_get_candidate_list(maxResults?, autoScroll=true)
+  -> orchestrator 过滤 buttonText/年龄/业务资格
   -> zhipin_say_hello(candidateRefs)
 ```
 
