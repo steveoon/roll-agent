@@ -1,5 +1,22 @@
 # @roll-agent/browser-use-agent
 
+## 0.9.1
+
+### Patch Changes
+
+- [#82](https://github.com/steveoon/roll-agent/pull/82) [`bff87f0`](https://github.com/steveoon/roll-agent/commit/bff87f022ef0411f5e97397f13d59d163ea0a2fe) Thanks [@steveoon](https://github.com/steveoon)! - Add orchestrator-focused runtime improvements across Roll and browser-use.
+
+  Core now serves registered agent skill documents through `roll skills list|get|path`, including an opt-in `roll skills get <agent> --include-references` mode that returns referenced local `references/*` documents. `roll run` also supports `--batch-json`, `--batch-file`, and `--batch-stdin` for multiple explicit tool calls in one CLI process; `--bail` stops on first failure. `roll doctor` adds `--fix-plan` and safe `--fix` handling for config migration, missing agent data directories, and orphan core-managed runtime metadata. `roll agent health` also surfaces runtime sidecar issues (version mismatch, orphan sidecar, PID mismatch) before probing the endpoint.
+
+  The browser-use agent now emits and accepts BOSS recommend-list `candidateRef` handles so orchestrators can pass stable tool-facing references to `zhipin_say_hello` and `zhipin_open_resume` instead of relying only on raw DOM indices.
+
+- [#82](https://github.com/steveoon/roll-agent/pull/82) [`2003604`](https://github.com/steveoon/roll-agent/commit/20036040a3a29cabc9022d6a34d092f4f908d4a7) Thanks [@steveoon](https://github.com/steveoon)! - Add native CDP page navigation support and move `navigate_active_tab` onto the native CDP path. The tool now avoids Playwright attach, reuses native platform tabs, opens non-platform URLs in a native page, and blocks direct BOSS `/web/chat/*` backend navigation in favor of semantic BOSS navigation tools.
+
+- [#82](https://github.com/steveoon/roll-agent/pull/82) [`b17c360`](https://github.com/steveoon/roll-agent/commit/b17c3602400572c04a7a3aa8db9808de332feb89) Thanks [@steveoon](https://github.com/steveoon)! - Improve BOSS recommend-page orchestration with `zhipin_list_recommend_jobs`, `jobRef` based job selection, optional force-click behavior, and shorter batched greeting delays.
+
+- Updated dependencies [[`2003604`](https://github.com/steveoon/roll-agent/commit/20036040a3a29cabc9022d6a34d092f4f908d4a7)]:
+  - @roll-agent/browser@0.3.1
+
 ## 0.9.0
 
 ### Minor Changes
