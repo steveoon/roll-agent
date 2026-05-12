@@ -238,6 +238,13 @@ test("normal allowlist methods do not send Runtime.enable", async () => {
   const frontCommand = socket.takeSentCommand();
   socket.respond(frontCommand.id, {});
 
+  const navigatePromise = controller.navigate("https://www.zhipin.com");
+  const navigateCommand = socket.takeSentCommand();
+  socket.respond(navigateCommand.id, {
+    frameId: "main-frame",
+    loaderId: "loader-1",
+  });
+
   const frameTreePromise = controller.getFrameTree();
   const frameTreeCommand = socket.takeSentCommand();
   socket.respond(frameTreeCommand.id, {
@@ -279,6 +286,10 @@ test("normal allowlist methods do not send Runtime.enable", async () => {
 
   await documentPromise;
   await frontPromise;
+  assert.deepEqual(await navigatePromise, {
+    frameId: "main-frame",
+    loaderId: "loader-1",
+  });
   assert.equal((await frameTreePromise).frame.id, "main-frame");
   assert.equal(await worldPromise, 99);
   await mousePromise;
@@ -287,6 +298,8 @@ test("normal allowlist methods do not send Runtime.enable", async () => {
 
   assert.equal(documentCommand.method, "DOM.getDocument");
   assert.equal(frontCommand.method, "Page.bringToFront");
+  assert.equal(navigateCommand.method, "Page.navigate");
+  assert.deepEqual(navigateCommand.params, { url: "https://www.zhipin.com" });
   assert.equal(frameTreeCommand.method, "Page.getFrameTree");
   assert.equal(worldCommand.method, "Page.createIsolatedWorld");
   assert.deepEqual(worldCommand.params, { frameId: "frame-recommend" });
@@ -300,11 +313,28 @@ test("normal allowlist methods do not send Runtime.enable", async () => {
   assert.deepEqual(insertCommand.params, { text: "hello" });
   assert.notEqual(documentCommand.method, "Runtime.enable");
   assert.notEqual(frontCommand.method, "Runtime.enable");
+  assert.notEqual(navigateCommand.method, "Runtime.enable");
   assert.notEqual(frameTreeCommand.method, "Runtime.enable");
   assert.notEqual(worldCommand.method, "Runtime.enable");
   assert.notEqual(mouseCommand.method, "Runtime.enable");
   assert.notEqual(keyCommand.method, "Runtime.enable");
   assert.notEqual(insertCommand.method, "Runtime.enable");
+  controller.close();
+});
+
+test("navigate rejects native Page.navigate errorText", async () => {
+  const socket = new FakeNativeCdpWebSocket();
+  const controller = await createController(socket);
+
+  const pending = controller.navigate("https://www.zhipin.com");
+  const command = socket.takeSentCommand();
+  assert.equal(command.method, "Page.navigate");
+  socket.respond(command.id, {
+    frameId: "main-frame",
+    errorText: "net::ERR_ABORTED",
+  });
+
+  await assert.rejects(pending, /net::ERR_ABORTED/);
   controller.close();
 });
 

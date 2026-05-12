@@ -7,6 +7,7 @@ const NORMAL_NATIVE_CDP_METHODS = [
   "Runtime.evaluate",
   "DOM.getDocument",
   "Page.bringToFront",
+  "Page.navigate",
   "Page.getFrameTree",
   "Page.createIsolatedWorld",
   "Input.dispatchMouseEvent",
@@ -103,6 +104,12 @@ export type NativeCdpFrame = {
 export type NativeCdpFrameTree = {
   readonly frame: NativeCdpFrame;
   readonly childFrames?: readonly NativeCdpFrameTree[];
+};
+
+export type NativeCdpNavigateResult = {
+  readonly frameId?: string;
+  readonly loaderId?: string;
+  readonly errorText?: string;
 };
 
 export type NativeCdpCreateIsolatedWorldOptions = {
@@ -272,6 +279,22 @@ function readFrameTreeResponse(value: unknown): NativeCdpFrameTree {
   return frameTree;
 }
 
+function readNavigateResponse(value: unknown): NativeCdpNavigateResult {
+  if (!isRecord(value)) {
+    return {};
+  }
+
+  const frameId = value["frameId"];
+  const loaderId = value["loaderId"];
+  const errorText = value["errorText"];
+
+  return {
+    ...(typeof frameId === "string" ? { frameId } : {}),
+    ...(typeof loaderId === "string" ? { loaderId } : {}),
+    ...(typeof errorText === "string" ? { errorText } : {}),
+  };
+}
+
 function readExecutionContextId(value: unknown): number {
   if (!isRecord(value)) {
     throw new Error("Native CDP Page.createIsolatedWorld returned an unexpected response.");
@@ -393,6 +416,19 @@ export class NativeCdpController {
 
   async bringToFront(): Promise<void> {
     await this.sendNormal("Page.bringToFront", {});
+  }
+
+  async navigate(
+    url: string,
+    options: { readonly timeoutMs?: number } = {},
+  ): Promise<NativeCdpNavigateResult> {
+    const result = readNavigateResponse(
+      await this.sendNormal("Page.navigate", { url }, options.timeoutMs),
+    );
+    if (result.errorText !== undefined) {
+      throw new Error(`Native CDP Page.navigate failed: ${result.errorText}`);
+    }
+    return result;
   }
 
   async getFrameTree(options: { readonly timeoutMs?: number } = {}): Promise<NativeCdpFrameTree> {
