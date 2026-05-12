@@ -1,5 +1,11 @@
 # @roll-agent/browser
 
+## 0.3.1
+
+### Patch Changes
+
+- [#82](https://github.com/steveoon/roll-agent/pull/82) [`2003604`](https://github.com/steveoon/roll-agent/commit/20036040a3a29cabc9022d6a34d092f4f908d4a7) Thanks [@steveoon](https://github.com/steveoon)! - Add native CDP page navigation support and move `navigate_active_tab` onto the native CDP path. The tool now avoids Playwright attach, reuses native platform tabs, opens non-platform URLs in a native page, and blocks direct BOSS `/web/chat/*` backend navigation in favor of semantic BOSS navigation tools.
+
 ## 0.3.0
 
 ### Minor Changes
