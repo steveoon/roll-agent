@@ -8,6 +8,10 @@ import type {
   NativeRecommendJobSelectRequest,
   ZhipinNativePagePort,
 } from "../pages/zhipin/native-page.ts";
+import {
+  ZHIPIN_RECOMMEND_JOB_REF_PATTERN,
+  resolveZhipinRecommendJobRefTarget,
+} from "../pages/zhipin/semantic-refs.ts";
 
 const RECOMMEND_JOB_SELECT_STATUS_VALUES = [
   "selected",
@@ -25,11 +29,13 @@ const JobOptionSchema = z.object({
 });
 
 const RequestedSchema = z.object({
+  jobRef: z.string().optional(),
   jobValue: z.string().optional(),
   jobName: z.string().optional(),
   index: z.number().optional(),
   searchKeyword: z.string().optional(),
   useSearch: z.boolean().optional(),
+  forceClick: z.boolean().optional(),
 });
 
 const OutputSchema = z.object({
@@ -45,6 +51,11 @@ const OutputSchema = z.object({
 
 const InputSchema = z
   .object({
+    jobRef: z
+      .string()
+      .regex(ZHIPIN_RECOMMEND_JOB_REF_PATTERN, "jobRef 应类似 @j1")
+      .optional()
+      .describe("岗位语义引用，如 @j1；来自 zhipin_list_recommend_jobs 输出，优先级最高"),
     jobValue: z
       .string()
       .min(1)
@@ -63,13 +74,20 @@ const InputSchema = z
       .optional()
       .describe("下拉搜索框关键词；不传时用 jobName 作为搜索关键词"),
     useSearch: z.boolean().default(true).describe("初始可见项未命中时是否使用下拉搜索框收敛候选项"),
+    forceClick: z
+      .boolean()
+      .default(false)
+      .describe("目标岗位已选中时是否仍点击一次岗位项；默认 false，避免无意义重复点击"),
   })
   .refine(
     (input) =>
-      input.jobValue !== undefined || input.jobName !== undefined || input.index !== undefined,
+      input.jobRef !== undefined ||
+      input.jobValue !== undefined ||
+      input.jobName !== undefined ||
+      input.index !== undefined,
     {
-      path: ["jobValue"],
-      message: "jobValue、jobName、index 至少需要提供一个",
+      path: ["jobRef"],
+      message: "jobRef、jobValue、jobName、index 至少需要提供一个",
     },
   );
 
@@ -109,12 +127,38 @@ export function setZhipinSelectRecommendJobDepsForTests(
 }
 
 function buildRequest(input: SelectRecommendJobInput): NativeRecommendJobSelectRequest {
+  if (input.jobRef !== undefined) {
+    const target = resolveZhipinRecommendJobRefTarget(input.jobRef);
+    return {
+      jobRef: target.jobRef,
+      ...(target.value.length > 0 ? { jobValue: target.value } : {}),
+      ...(target.value.length === 0 && target.label.length > 0 ? { jobName: target.label } : {}),
+      index: target.index,
+      ...(input.searchKeyword !== undefined ? { searchKeyword: input.searchKeyword } : {}),
+      useSearch: input.useSearch ?? true,
+      forceClick: input.forceClick ?? false,
+    };
+  }
+
   return {
     ...(input.jobValue !== undefined ? { jobValue: input.jobValue } : {}),
     ...(input.jobName !== undefined ? { jobName: input.jobName } : {}),
     ...(input.index !== undefined ? { index: input.index } : {}),
     ...(input.searchKeyword !== undefined ? { searchKeyword: input.searchKeyword } : {}),
     useSearch: input.useSearch ?? true,
+    forceClick: input.forceClick ?? false,
+  };
+}
+
+function buildUnresolvedRequest(input: SelectRecommendJobInput): NativeRecommendJobSelectRequest {
+  return {
+    ...(input.jobRef !== undefined ? { jobRef: input.jobRef } : {}),
+    ...(input.jobValue !== undefined ? { jobValue: input.jobValue } : {}),
+    ...(input.jobName !== undefined ? { jobName: input.jobName } : {}),
+    ...(input.index !== undefined ? { index: input.index } : {}),
+    ...(input.searchKeyword !== undefined ? { searchKeyword: input.searchKeyword } : {}),
+    useSearch: input.useSearch ?? true,
+    forceClick: input.forceClick ?? false,
   };
 }
 
@@ -143,21 +187,22 @@ function toToolOutput(result: NativeRecommendJobSelectResult): SelectRecommendJo
 export const zhipinSelectRecommendJob = defineTool({
   name: "zhipin_select_recommend_job",
   description:
-    "在 BOSS「推荐牛人」页切换顶部招聘岗位筛选。优先传 jobValue，其次 jobName，index 仅作当前快照兜底。",
+    "在 BOSS「推荐牛人」页切换顶部招聘岗位筛选。优先传 jobRef，其次 jobValue，再次 jobName，index 仅作当前快照兜底。",
   input: InputSchema,
   output: OutputSchema,
   execute: async (input, ctx) => {
     const deps = getZhipinSelectRecommendJobDeps();
-    const request = buildRequest(input);
     let nativePage: ZhipinNativePagePort | undefined;
     let session: NativeVisualActivitySessionLike | undefined;
 
-    ctx.logger.info(
-      `Selecting Boss recommend job: value=${request.jobValue ?? "N/A"}, ` +
-        `name=${request.jobName ?? "N/A"}, index=${request.index ?? "N/A"}`,
-    );
-
     try {
+      const request = buildRequest(input);
+      ctx.logger.info(
+        `Selecting Boss recommend job: ref=${request.jobRef ?? "N/A"}, ` +
+          `value=${request.jobValue ?? "N/A"}, name=${request.jobName ?? "N/A"}, ` +
+          `index=${request.index ?? "N/A"}, forceClick=${request.forceClick === true}`,
+      );
+
       nativePage = await deps.openNativePagePort();
       session = deps.createNativeVisualActivitySession(nativePage);
       await nativePage.bringToFront().catch(() => {});
@@ -189,8 +234,8 @@ export const zhipinSelectRecommendJob = defineTool({
       await session?.fail(message);
       return toToolOutput({
         success: false,
-        status: "selector_not_found",
-        requested: request,
+        status: input.jobRef !== undefined ? "not_found" : "selector_not_found",
+        requested: buildUnresolvedRequest(input),
         options: [],
         matchedCount: 0,
         error: message,

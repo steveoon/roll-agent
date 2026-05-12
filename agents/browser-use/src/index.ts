@@ -19,6 +19,7 @@ import { zhipinScrollView } from "./tools/zhipin-scroll-view.ts";
 // Zhipin — 推荐列表
 import { zhipinFilterRecommendCandidates } from "./tools/zhipin-filter-recommend-candidates.ts";
 import { zhipinGetCandidateList } from "./tools/zhipin-get-candidate-list.ts";
+import { zhipinListRecommendJobs } from "./tools/zhipin-list-recommend-jobs.ts";
 import { zhipinOpenRecommendPage } from "./tools/zhipin-open-recommend-page.ts";
 import { zhipinSelectRecommendJob } from "./tools/zhipin-select-recommend-job.ts";
 import { zhipinSayHello } from "./tools/zhipin-say-hello.ts";
@@ -95,6 +96,7 @@ const agent = defineAgent(
       zhipinScrollView,
       // Zhipin 推荐列表
       zhipinOpenRecommendPage,
+      zhipinListRecommendJobs,
       zhipinSelectRecommendJob,
       zhipinFilterRecommendCandidates,
       zhipinGetCandidateList,

@@ -115,10 +115,10 @@ describe("zhipin_say_hello", () => {
       "begin:正在批量打招呼",
       "highlight:.candidate-card-wrap, [data-geek], .geek-item",
       "greet:0",
-      "timing:650:140:1200",
-      "sleep:2400",
+      "timing:450:140:750",
+      "sleep:1400",
       "greet:1",
-      "timing:650:140:1200",
+      "timing:450:140:750",
       "succeed:已完成 2/2 位候选人",
       "close",
     ]);

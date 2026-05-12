@@ -1,6 +1,8 @@
 export const ZHIPIN_CANDIDATE_REF_PREFIX = "@c" as const;
+export const ZHIPIN_RECOMMEND_JOB_REF_PREFIX = "@j" as const;
 
 export const ZHIPIN_CANDIDATE_REF_PATTERN = /^@?c([1-9]\d*)$/i;
+export const ZHIPIN_RECOMMEND_JOB_REF_PATTERN = /^@?j([1-9]\d*)$/i;
 
 export interface ZhipinCandidateRefSource {
   readonly index: number;
@@ -12,7 +14,19 @@ export interface ZhipinCandidateRefTarget extends ZhipinCandidateRefSource {
   readonly candidateRef: string;
 }
 
+export interface ZhipinRecommendJobRefSource {
+  readonly index: number;
+  readonly value: string;
+  readonly label: string;
+  readonly isCurrent: boolean;
+}
+
+export interface ZhipinRecommendJobRefTarget extends ZhipinRecommendJobRefSource {
+  readonly jobRef: string;
+}
+
 let latestCandidateRefTargets = new Map<string, ZhipinCandidateRefTarget>();
+let latestRecommendJobRefTargets = new Map<string, ZhipinRecommendJobRefTarget>();
 
 export function buildZhipinCandidateRef(index: number): string {
   if (!Number.isInteger(index) || index < 0) {
@@ -22,8 +36,27 @@ export function buildZhipinCandidateRef(index: number): string {
   return `${ZHIPIN_CANDIDATE_REF_PREFIX}${String(index + 1)}`;
 }
 
+export function buildZhipinRecommendJobRef(index: number): string {
+  if (!Number.isInteger(index) || index < 0) {
+    throw new Error("岗位索引必须是从 0 开始的非负整数");
+  }
+
+  return `${ZHIPIN_RECOMMEND_JOB_REF_PREFIX}${String(index + 1)}`;
+}
+
 export function parseZhipinCandidateRef(ref: string): number | undefined {
   const match = ZHIPIN_CANDIDATE_REF_PATTERN.exec(ref.trim());
+  const rawOrdinal = match?.[1];
+  if (!rawOrdinal) {
+    return undefined;
+  }
+
+  const ordinal = Number(rawOrdinal);
+  return Number.isInteger(ordinal) ? ordinal - 1 : undefined;
+}
+
+export function parseZhipinRecommendJobRef(ref: string): number | undefined {
+  const match = ZHIPIN_RECOMMEND_JOB_REF_PATTERN.exec(ref.trim());
   const rawOrdinal = match?.[1];
   if (!rawOrdinal) {
     return undefined;
@@ -69,8 +102,23 @@ export function rememberZhipinCandidateRefs(
   return targets;
 }
 
+export function rememberZhipinRecommendJobRefs(
+  jobs: readonly ZhipinRecommendJobRefSource[],
+): ZhipinRecommendJobRefTarget[] {
+  const targets = jobs.map((job, position) => ({
+    ...job,
+    jobRef: buildZhipinRecommendJobRef(position),
+  }));
+  latestRecommendJobRefTargets = new Map(targets.map((target) => [target.jobRef, target]));
+  return targets;
+}
+
 export function clearZhipinCandidateRefsForTests(): void {
   latestCandidateRefTargets = new Map();
+}
+
+export function clearZhipinRecommendJobRefsForTests(): void {
+  latestRecommendJobRefTargets = new Map();
 }
 
 export function resolveZhipinCandidateRefTarget(candidateRef: string): ZhipinCandidateRefTarget {
@@ -87,6 +135,21 @@ export function resolveZhipinCandidateRefTarget(candidateRef: string): ZhipinCan
       candidateId: "",
     }
   );
+}
+
+export function resolveZhipinRecommendJobRefTarget(jobRef: string): ZhipinRecommendJobRefTarget {
+  const index = parseZhipinRecommendJobRef(jobRef);
+  if (index === undefined) {
+    throw new Error(`jobRef "${jobRef}" 格式无效，应类似 @j1`);
+  }
+
+  const normalizedRef = buildZhipinRecommendJobRef(index);
+  const target = latestRecommendJobRefTargets.get(normalizedRef);
+  if (target === undefined) {
+    throw new Error(`岗位引用 ${normalizedRef} 已过期，请先调用 zhipin_list_recommend_jobs`);
+  }
+
+  return target;
 }
 
 export function resolveZhipinCandidateTargets(input: {

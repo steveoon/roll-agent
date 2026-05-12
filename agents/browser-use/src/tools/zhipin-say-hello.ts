@@ -26,10 +26,10 @@ const OutputSchema = z.object({
   summary: z.object({ total: z.number(), succeeded: z.number(), failed: z.number() }),
 });
 
-const SAY_HELLO_BATCH_INTERVAL_MS = [2_400, 3_100, 3_800] as const;
-const SAY_HELLO_CLICK_PRE_DELAY_MS = 650;
+const SAY_HELLO_BATCH_INTERVAL_MS = [1_400, 1_800, 2_200] as const;
+const SAY_HELLO_CLICK_PRE_DELAY_MS = 450;
 const SAY_HELLO_CLICK_PRESS_MS = 140;
-const SAY_HELLO_CLICK_SETTLE_MS = 1_200;
+const SAY_HELLO_CLICK_SETTLE_MS = 750;
 
 const InputSchema = z
   .object({
