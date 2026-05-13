@@ -1,3 +1,11 @@
 packages:
   - "packages/*"
   - "agents/*"
+
+minimumReleaseAge: 10080
+blockExoticSubdeps: true
+savePrefix: ""
+
+allowBuilds:
+  esbuild: false
+  unrs-resolver: false
