@@ -2,6 +2,8 @@ import { createHash } from "node:crypto";
 import { z } from "zod";
 
 export const BROWSER_USE_DECLARED_ENV_KEYS = [
+  "REPLY_AUTHORITY_URL",
+  "REPLY_AUTHORITY_BEARER_TOKEN",
   "REPLY_AUTHORITY_KEYS_URL",
   "RECRUITMENT_EVENTS_ENABLED",
   "RECRUITMENT_EVENTS_API_BASE_URL",

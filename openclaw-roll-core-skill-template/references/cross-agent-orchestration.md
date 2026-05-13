@@ -25,7 +25,7 @@ roll run <reader-agent> <read-tool> --input-json '{...}' --json
 # 2. Generate response from validated input
 roll run <generator-agent> <generate-tool> --input-json '{...}' --json
 
-# 3. Open the exact target context before sending
+# 3. Prepare or verify the exact target context before sending when the target skill requires it
 roll run <reader-agent> <open-target-tool> --input-json '{...}' --json
 
 # 4. Send
@@ -43,11 +43,15 @@ Use this when:
 For generated side effects:
 - Never batch-send every generated result blindly.
 - Parse each generation result first.
-- Pass only the final authorized artifact required by the sender tool, such as `signedEnvelope`.
+- Pass only the minimum opaque artifact required by the sender tool, such as `preparedReplyId`,
+  instead of exposing or storing lower-level authorization envelopes in the orchestrator.
 - Filter out low-confidence, policy-risk, validation-risk, stale-target, or otherwise unsafe results
   before constructing the send batch.
 - Do not send provisional draft text or model output directly unless the sender tool explicitly
   allows raw text.
+- Treat target-opening requirements as agent-specific. For example, a sender tool may validate the
+  current target itself and only reopen when the selected target is stale; read that agent's own
+  `SKILL.md` before adding explicit open steps.
 
 Batching this pattern:
 

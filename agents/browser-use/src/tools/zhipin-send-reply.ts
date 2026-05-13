@@ -1,19 +1,23 @@
 import { defineTool } from "@roll-agent/sdk";
+import type { AgentContext } from "@roll-agent/sdk";
 import { z } from "zod";
 import { NativeVisualActivitySession } from "../native-visual-activity-session.ts";
 import { openZhipinNativePagePort } from "../pages/zhipin/native-page.ts";
 import type {
   NativeCandidateChatDetails,
+  NativeSelectedChatTarget,
   ZhipinNativePagePort,
 } from "../pages/zhipin/native-page.ts";
 import { matchesRecruiterBinding } from "../pages/zhipin/recruiter-identity.ts";
 import { pickBestUsername } from "../pages/zhipin/username.ts";
 import { getReplyAuthorityKeysLoaded } from "../runtime-holder.ts";
 import { recordZhipinMessageSentEvent } from "../recruitment-events/zhipin-events.ts";
+import type { ReplyAuthorityEnvelopePayload } from "../reply-authority/schemas.ts";
 import {
   isReplyEnvelopeConsumed,
   markReplyEnvelopeConsumed,
 } from "../reply-authority/replay-store.ts";
+import { NativeReplyPreviewVisualSession } from "../reply-authority/reply-preview-visual.ts";
 import { verifySignedReplyEnvelope } from "../reply-authority/verifier.ts";
 
 const OutputSchema = z.object({
@@ -22,12 +26,14 @@ const OutputSchema = z.object({
   error: z.string().optional(),
 });
 
+export type ZhipinSendReplyResult = z.infer<typeof OutputSchema>;
+
 type NativeVisualActivitySessionLike = Pick<
   NativeVisualActivitySession,
   "begin" | "previewMouseMotion" | "succeed" | "fail"
 >;
 
-type ZhipinSendReplyDeps = {
+export type ZhipinSendReplyDeps = {
   readonly getReplyAuthorityKeysLoaded: typeof getReplyAuthorityKeysLoaded;
   readonly openNativePagePort: typeof openZhipinNativePagePort;
   readonly createNativeVisualActivitySession: (
@@ -80,6 +86,173 @@ async function readCandidateDetailsSafely(
   return await nativePage.readCandidateChatDetails(50).catch(() => undefined);
 }
 
+function targetMatchesEnvelope(
+  chatTarget: NativeSelectedChatTarget | null,
+  envelopePayload: ReplyAuthorityEnvelopePayload,
+): chatTarget is NativeSelectedChatTarget {
+  return (
+    chatTarget !== null &&
+    chatTarget.conversationId === envelopePayload.conversationId &&
+    chatTarget.candidateId === envelopePayload.candidateId
+  );
+}
+
+function panelMatchesTarget(
+  chatTarget: NativeSelectedChatTarget,
+  activePanel: { readonly candidateName: string } | null,
+): boolean {
+  return (
+    activePanel === null ||
+    chatTarget.candidateName.length === 0 ||
+    namesCompatible(chatTarget.candidateName, activePanel.candidateName)
+  );
+}
+
+export async function sendSignedZhipinReply(
+  input: {
+    readonly signedEnvelope: string;
+    readonly candidateName?: string | undefined;
+    readonly index?: number | undefined;
+  },
+  ctx: AgentContext,
+): Promise<ZhipinSendReplyResult> {
+  const deps = getZhipinSendReplyDeps();
+  let nativePage: ZhipinNativePagePort | undefined;
+  let session: NativeVisualActivitySessionLike | undefined;
+  let sentMessage = "";
+
+  if (!deps.getReplyAuthorityKeysLoaded()) {
+    const error =
+      "Reply Authority 公钥尚未成功预加载，当前无法发送签名回复。请检查启动日志、" +
+      "`REPLY_AUTHORITY_KEYS_URL` 配置，以及 `browser_status.replyAuthorityKeysLoaded`。";
+    ctx.logger.error(error);
+    return { success: false, sentMessage, error };
+  }
+
+  try {
+    const envelopePayload = await verifySignedReplyEnvelope(input.signedEnvelope);
+    sentMessage = envelopePayload.reply;
+
+    if (isReplyEnvelopeConsumed(envelopePayload.jti)) {
+      return { success: false, sentMessage, error: "token 已消费，禁止重放" };
+    }
+
+    nativePage = await deps.openNativePagePort();
+    session = deps.createNativeVisualActivitySession(nativePage);
+    await nativePage.bringToFront().catch(() => {});
+    await new NativeReplyPreviewVisualSession(nativePage).clear();
+    await session.begin("正在发送回复");
+
+    let activePanel = await nativePage.readActiveChatPanel().catch(() => null);
+    let chatTarget = await nativePage.readSelectedChatTarget().catch(() => null);
+    let unreadCountBeforeReply = 0;
+
+    if (
+      !targetMatchesEnvelope(chatTarget, envelopePayload) ||
+      !panelMatchesTarget(chatTarget, activePanel)
+    ) {
+      const nav = await nativePage.openChat({
+        conversationId: envelopePayload.conversationId,
+        candidateName: input.candidateName,
+        index: input.index,
+      });
+      if (!nav.found) {
+        await session.fail(nav.error ?? "未找到目标聊天");
+        return { success: false, sentMessage, error: nav.error ?? "未找到目标聊天" };
+      }
+      unreadCountBeforeReply = nav.unreadCount;
+      activePanel = await nativePage.readActiveChatPanel();
+      chatTarget = await nativePage.readSelectedChatTarget();
+    }
+
+    if (chatTarget === null) {
+      await session.fail("未能提取当前聊天的 conversationId/candidateId");
+      return {
+        success: false,
+        sentMessage,
+        error: "未能提取当前聊天的 conversationId/candidateId",
+      };
+    }
+    if (
+      activePanel !== null &&
+      chatTarget.candidateName.length > 0 &&
+      !namesCompatible(chatTarget.candidateName, activePanel.candidateName)
+    ) {
+      const error =
+        `左侧选中会话与右侧聊天面板不一致: ` +
+        `${chatTarget.candidateName} / ${activePanel.candidateName}`;
+      await session.fail(error);
+      return { success: false, sentMessage, error };
+    }
+    if (
+      chatTarget.conversationId !== envelopePayload.conversationId ||
+      chatTarget.candidateId !== envelopePayload.candidateId
+    ) {
+      await session.fail("发送目标与签名不匹配");
+      return { success: false, sentMessage, error: "发送目标与签名不匹配" };
+    }
+
+    const usernameResult = pickBestUsername(await nativePage.readUsernameEvidence());
+    if (!usernameResult.found) {
+      await session.fail("未找到用户名");
+      return {
+        success: false,
+        sentMessage,
+        error: "未找到用户名，请确认当前页面已登录招聘者账号。",
+      };
+    }
+    const recruiterIdentity = {
+      platform: "zhipin" as const,
+      username: usernameResult.username,
+      strategy: usernameResult.strategy,
+      source: usernameResult.source,
+    };
+    if (!matchesRecruiterBinding(recruiterIdentity, envelopePayload.recruiterBinding)) {
+      const error =
+        `recruiter 绑定不匹配：当前账号 ${recruiterIdentity.username}` +
+        ` 与签发时 ${envelopePayload.recruiterBinding.username} 不一致`;
+      await session.fail(error);
+      return { success: false, sentMessage, error };
+    }
+
+    ctx.logger.info(
+      `Sending native message (${sentMessage.length} chars) to ${
+        chatTarget.candidateName || chatTarget.candidateId
+      }`,
+    );
+    const sendResult = await nativePage.sendChatReply(sentMessage, {
+      ...(session !== undefined ? { motionObserver: session } : {}),
+    });
+    if (!sendResult.success) {
+      await session.fail(sendResult.error ?? "发送失败");
+      return { success: false, sentMessage, error: sendResult.error ?? "发送失败" };
+    }
+
+    const candidateDetails = await readCandidateDetailsSafely(nativePage);
+    recordZhipinMessageSentEvent(
+      {
+        conversationId: chatTarget.conversationId,
+        candidateId: chatTarget.candidateId,
+        replyId: envelopePayload.jti,
+        candidateName: chatTarget.candidateName,
+        message: sentMessage,
+        unreadCountBeforeReply,
+        ...(candidateDetails !== undefined ? { candidateDetails } : {}),
+      },
+      ctx.logger,
+    );
+    markReplyEnvelopeConsumed(envelopePayload.jti, envelopePayload.exp);
+    await session.succeed("已发送回复");
+    return { success: true, sentMessage };
+  } catch (err) {
+    const error = err instanceof Error ? err.message : String(err);
+    await session?.fail(error);
+    return { success: false, sentMessage, error };
+  } finally {
+    nativePage?.close();
+  }
+}
+
 export const zhipinSendReply = defineTool({
   name: "zhipin_send_reply",
   description:
@@ -93,130 +266,5 @@ export const zhipinSendReply = defineTool({
     index: z.number().optional().describe("候选人在列表中的索引（可选）"),
   }),
   output: OutputSchema,
-  execute: async (input, ctx) => {
-    const deps = getZhipinSendReplyDeps();
-    let nativePage: ZhipinNativePagePort | undefined;
-    let session: NativeVisualActivitySessionLike | undefined;
-    let sentMessage = "";
-
-    if (!deps.getReplyAuthorityKeysLoaded()) {
-      const error =
-        "Reply Authority 公钥尚未成功预加载，当前无法发送签名回复。请检查启动日志、" +
-        "`REPLY_AUTHORITY_KEYS_URL` 配置，以及 `browser_status.replyAuthorityKeysLoaded`。";
-      ctx.logger.error(error);
-      return { success: false, sentMessage, error };
-    }
-
-    try {
-      const envelopePayload = await verifySignedReplyEnvelope(input.signedEnvelope);
-      sentMessage = envelopePayload.reply;
-
-      if (isReplyEnvelopeConsumed(envelopePayload.jti)) {
-        return { success: false, sentMessage, error: "token 已消费，禁止重放" };
-      }
-
-      nativePage = await deps.openNativePagePort();
-      session = deps.createNativeVisualActivitySession(nativePage);
-      await nativePage.bringToFront().catch(() => {});
-      await session.begin("正在发送回复");
-
-      const nav = await nativePage.openChat({
-        conversationId: envelopePayload.conversationId,
-        candidateName: input.candidateName,
-        index: input.index,
-      });
-      if (!nav.found) {
-        await session.fail(nav.error ?? "未找到目标聊天");
-        return { success: false, sentMessage, error: nav.error ?? "未找到目标聊天" };
-      }
-
-      const activePanel = await nativePage.readActiveChatPanel();
-      const chatTarget = await nativePage.readSelectedChatTarget();
-      if (chatTarget === null) {
-        await session.fail("未能提取当前聊天的 conversationId/candidateId");
-        return {
-          success: false,
-          sentMessage,
-          error: "未能提取当前聊天的 conversationId/candidateId",
-        };
-      }
-      if (
-        activePanel !== null &&
-        chatTarget.candidateName.length > 0 &&
-        !namesCompatible(chatTarget.candidateName, activePanel.candidateName)
-      ) {
-        const error =
-          `左侧选中会话与右侧聊天面板不一致: ` +
-          `${chatTarget.candidateName} / ${activePanel.candidateName}`;
-        await session.fail(error);
-        return { success: false, sentMessage, error };
-      }
-      if (
-        chatTarget.conversationId !== envelopePayload.conversationId ||
-        chatTarget.candidateId !== envelopePayload.candidateId
-      ) {
-        await session.fail("发送目标与签名不匹配");
-        return { success: false, sentMessage, error: "发送目标与签名不匹配" };
-      }
-
-      const usernameResult = pickBestUsername(await nativePage.readUsernameEvidence());
-      if (!usernameResult.found) {
-        await session.fail("未找到用户名");
-        return {
-          success: false,
-          sentMessage,
-          error: "未找到用户名，请确认当前页面已登录招聘者账号。",
-        };
-      }
-      const recruiterIdentity = {
-        platform: "zhipin" as const,
-        username: usernameResult.username,
-        strategy: usernameResult.strategy,
-        source: usernameResult.source,
-      };
-      if (!matchesRecruiterBinding(recruiterIdentity, envelopePayload.recruiterBinding)) {
-        const error =
-          `recruiter 绑定不匹配：当前账号 ${recruiterIdentity.username}` +
-          ` 与签发时 ${envelopePayload.recruiterBinding.username} 不一致`;
-        await session.fail(error);
-        return { success: false, sentMessage, error };
-      }
-
-      ctx.logger.info(
-        `Sending native message (${sentMessage.length} chars) to ${
-          chatTarget.candidateName || chatTarget.candidateId
-        }`,
-      );
-      const sendResult = await nativePage.sendChatReply(sentMessage, {
-        ...(session !== undefined ? { motionObserver: session } : {}),
-      });
-      if (!sendResult.success) {
-        await session.fail(sendResult.error ?? "发送失败");
-        return { success: false, sentMessage, error: sendResult.error ?? "发送失败" };
-      }
-
-      const candidateDetails = await readCandidateDetailsSafely(nativePage);
-      recordZhipinMessageSentEvent(
-        {
-          conversationId: chatTarget.conversationId,
-          candidateId: chatTarget.candidateId,
-          replyId: envelopePayload.jti,
-          candidateName: chatTarget.candidateName,
-          message: sentMessage,
-          unreadCountBeforeReply: nav.unreadCount,
-          ...(candidateDetails !== undefined ? { candidateDetails } : {}),
-        },
-        ctx.logger,
-      );
-      markReplyEnvelopeConsumed(envelopePayload.jti, envelopePayload.exp);
-      await session.succeed("已发送回复");
-      return { success: true, sentMessage };
-    } catch (err) {
-      const error = err instanceof Error ? err.message : String(err);
-      await session?.fail(error);
-      return { success: false, sentMessage, error };
-    } finally {
-      nativePage?.close();
-    }
-  },
+  execute: async (input, ctx) => await sendSignedZhipinReply(input, ctx),
 });

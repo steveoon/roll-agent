@@ -12,7 +12,8 @@ import { zhipinReadMessages } from "./tools/zhipin-read-messages.ts";
 import { zhipinOpenChatPage } from "./tools/zhipin-open-chat-page.ts";
 import { zhipinOpenChat } from "./tools/zhipin-open-chat.ts";
 import { zhipinGetCandidateInfo } from "./tools/zhipin-get-candidate-info.ts";
-import { zhipinSendReply } from "./tools/zhipin-send-reply.ts";
+import { zhipinGenerateReplyPreview } from "./tools/zhipin-generate-reply-preview.ts";
+import { zhipinSendPreparedReply } from "./tools/zhipin-send-prepared-reply.ts";
 import { zhipinExchangeWechat } from "./tools/zhipin-exchange-wechat.ts";
 import { zhipinGetUsername } from "./tools/zhipin-get-username.ts";
 import { zhipinScrollView } from "./tools/zhipin-scroll-view.ts";
@@ -90,7 +91,8 @@ const agent = defineAgent(
       zhipinOpenChatPage,
       zhipinOpenChat,
       zhipinGetCandidateInfo,
-      zhipinSendReply,
+      zhipinGenerateReplyPreview,
+      zhipinSendPreparedReply,
       zhipinExchangeWechat,
       zhipinGetUsername,
       zhipinScrollView,
