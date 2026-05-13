@@ -8,6 +8,46 @@ import { promisify } from "node:util";
 
 const execFileAsync = promisify(execFile);
 const repoRoot = resolve(import.meta.dirname, "..");
+const BLOCKED_LIFECYCLE_SCRIPTS = [
+  "preinstall",
+  "install",
+  "postinstall",
+  "prepare",
+  "prepublish",
+  "prepack",
+  "postpack",
+  "publish",
+  "postpublish",
+];
+const ALLOWED_LIFECYCLE_SCRIPTS = new Map([
+  [
+    "@roll-agent/browser",
+    new Map([["prepublishOnly", "node ../../scripts/require-pnpm-publish.mjs"]]),
+  ],
+  [
+    "@roll-agent/browser-use-agent",
+    new Map([["prepublishOnly", "node ../../scripts/require-pnpm-publish.mjs"]]),
+  ],
+  [
+    "@roll-agent/smart-reply-agent",
+    new Map([["prepublishOnly", "node ../../scripts/require-pnpm-publish.mjs"]]),
+  ],
+]);
+const SUSPICIOUS_FILE_NAMES = new Set([
+  "router_init.js",
+  "router_runtime.js",
+  "tanstack_runner.js",
+  "setup.mjs",
+  "gh-token-monitor",
+]);
+const SUSPICIOUS_TEXT_IOCS = [
+  "IfYouRevoke",
+  "toJSON(secrets)",
+  ".claude/settings",
+  ".vscode/tasks",
+  "@tanstack/setup",
+  "filev2.getsession",
+];
 
 const PACKAGE_CHECKS = [
   {
@@ -87,10 +127,13 @@ async function main() {
       const manifest = await readPackedJson(tarballPath, "package/package.json");
 
       pkg.verifyManifest(manifest);
+      assertNoBlockedLifecycleScripts(pkg.name, manifest);
       assertNoMapFiles(pkg.name, tarEntries);
+      assertNoSuspiciousFileNames(pkg.name, tarEntries);
       assertExpectedFiles(pkg.name, tarEntries, pkg.expectedFiles);
       assertExpectedJavaScriptFiles(pkg.name, tarEntries, pkg.expectedJavaScriptFiles);
       await assertNoSourceMapComments(pkg.name, tarballPath, tarEntries);
+      await assertNoSuspiciousText(pkg.name, tarballPath, tarEntries);
 
       console.log(`  OK: ${pkg.name}`);
     }
@@ -124,9 +167,60 @@ async function readPackedJson(tarballPath, entryPath) {
   return JSON.parse(stdout);
 }
 
+async function readPackedText(tarballPath, entryPath) {
+  const { stdout } = await execFileAsync("tar", ["-xOf", tarballPath, entryPath], {
+    maxBuffer: 1024 * 1024 * 8,
+  });
+  return stdout;
+}
+
+function assertNoBlockedLifecycleScripts(packageName, manifest) {
+  const scripts = manifest.scripts;
+  if (typeof scripts !== "object" || scripts === null || Array.isArray(scripts)) {
+    return;
+  }
+
+  const allowedScripts = ALLOWED_LIFECYCLE_SCRIPTS.get(packageName) ?? new Map();
+  const blockedScripts = BLOCKED_LIFECYCLE_SCRIPTS.filter((scriptName) => scriptName in scripts);
+  assert.equal(
+    blockedScripts.length,
+    0,
+    `${packageName} package.json contains blocked lifecycle scripts:\n${blockedScripts.join("\n")}`,
+  );
+
+  const prepublishOnly = scripts.prepublishOnly;
+  const allowedPrepublishOnly = allowedScripts.get("prepublishOnly");
+  if (prepublishOnly !== undefined) {
+    assert.equal(
+      prepublishOnly,
+      allowedPrepublishOnly,
+      `${packageName} package.json has an unexpected prepublishOnly script`,
+    );
+  }
+}
+
 function assertNoMapFiles(packageName, tarEntries) {
-  const mapFiles = tarEntries.filter((entry) => entry.endsWith(".js.map") || entry.endsWith(".d.ts.map"));
-  assert.equal(mapFiles.length, 0, `${packageName} tarball still contains source maps:\n${mapFiles.join("\n")}`);
+  const mapFiles = tarEntries.filter(
+    (entry) => entry.endsWith(".js.map") || entry.endsWith(".d.ts.map"),
+  );
+  assert.equal(
+    mapFiles.length,
+    0,
+    `${packageName} tarball still contains source maps:\n${mapFiles.join("\n")}`,
+  );
+}
+
+function assertNoSuspiciousFileNames(packageName, tarEntries) {
+  const suspiciousFiles = tarEntries.filter((entry) => {
+    const fileName = entry.split("/").at(-1);
+    return fileName !== undefined && SUSPICIOUS_FILE_NAMES.has(fileName);
+  });
+
+  assert.equal(
+    suspiciousFiles.length,
+    0,
+    `${packageName} tarball contains suspicious file names:\n${suspiciousFiles.join("\n")}`,
+  );
 }
 
 function assertExpectedFiles(packageName, tarEntries, expectedFiles) {
@@ -139,7 +233,11 @@ function assertExpectedFiles(packageName, tarEntries, expectedFiles) {
   );
 }
 
-function assertExpectedJavaScriptFiles(packageName, tarEntries, expectedJavaScriptFiles = undefined) {
+function assertExpectedJavaScriptFiles(
+  packageName,
+  tarEntries,
+  expectedJavaScriptFiles = undefined,
+) {
   if (!expectedJavaScriptFiles) {
     return;
   }
@@ -155,15 +253,28 @@ function assertExpectedJavaScriptFiles(packageName, tarEntries, expectedJavaScri
 }
 
 async function assertNoSourceMapComments(packageName, tarballPath, tarEntries) {
-  const textEntries = tarEntries.filter((entry) => entry.endsWith(".js") || entry.endsWith(".d.ts"));
+  const textEntries = tarEntries.filter(
+    (entry) => entry.endsWith(".js") || entry.endsWith(".d.ts"),
+  );
 
   for (const entry of textEntries) {
-    const { stdout } = await execFileAsync("tar", ["-xOf", tarballPath, entry], {
-      maxBuffer: 1024 * 1024 * 8,
-    });
+    const stdout = await readPackedText(tarballPath, entry);
     assert.ok(
       !stdout.includes("sourceMappingURL="),
       `${packageName} packaged file still references a source map: ${entry}`,
+    );
+  }
+}
+
+async function assertNoSuspiciousText(packageName, tarballPath, tarEntries) {
+  for (const entry of tarEntries) {
+    const text = await readPackedText(tarballPath, entry);
+    const matches = SUSPICIOUS_TEXT_IOCS.filter((indicator) => text.includes(indicator));
+
+    assert.equal(
+      matches.length,
+      0,
+      `${packageName} packaged file contains suspicious text indicators in ${entry}:\n${matches.join("\n")}`,
     );
   }
 }

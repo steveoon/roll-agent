@@ -15,7 +15,7 @@
     "test:e2e": "pnpm --filter @roll-agent/core run test:e2e",
     "changeset": "changeset",
     "version-packages": "changeset version",
-    "release-packages": "pnpm build && pnpm verify:published-packages && changeset publish",
+    "release-packages": "node scripts/release-packages.mjs",
     "release:legacy": "node scripts/release.mjs",
     "release:legacy:dry-run": "node scripts/release.mjs --dry-run",
     "lint": "eslint .",

@@ -106,6 +106,8 @@ Rules:
 - Do not pass positional `agent/tool` together with `--batch-json`, `--batch-file`, or `--batch-stdin`.
 - `input` must be a JSON object; omit it only when the tool accepts `{}`.
 - Use `--bail` when later steps should stop after the first failed item.
+- Parse the stdout JSON as an array of per-item results. Branch on each item's `ok` field, not only
+  the process exit code.
 - Batch mode is sequential execution in one CLI process, not a workflow engine.
 - Batch mode does not pass one item's output into another item, does not provide result references,
   and does not expose streaming progress between items.
@@ -134,9 +136,19 @@ Practical rule:
 - `roll doctor --fix-plan --json` — include safe remediation hints without mutating local state.
 - `roll doctor --fix --json` — apply safe fixes only: config migration, `agents.dataDir` creation, and
   orphan core-managed runtime metadata cleanup.
+- `roll agent health --json` — per-agent runtime check. In v0.6.7+, persistent agents can also report
+  sidecar issues such as version mismatch, orphan metadata, or PID mismatch before endpoint probing.
 - `roll update --check` — check available updates for roll-core and all registered agents without applying.
 - `roll update` — apply all available updates (lifecycle varies by source type).
 - `roll config migrate` — run when doctor or update reports `needs-migration`.
+
+Decision flow:
+
+1. Unknown system state or unexpected tool failure -> run `roll doctor --json`.
+2. `doctor` returns `warn` / `fail` and a fix may exist -> run `roll doctor --fix-plan --json`.
+3. The proposed fix is within the safe-fix boundary -> run `roll doctor --fix --json`.
+4. A persistent agent still fails -> run `roll agent info <agent-name>` and
+   `roll agent health --json`; restart only when Roll owns that agent lifecycle.
 
 For output formats, env drift labels, update lifecycle details, and follow-up actions, see [references/workflows.md](./references/workflows.md).
 

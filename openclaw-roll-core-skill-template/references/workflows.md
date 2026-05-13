@@ -84,7 +84,16 @@ roll run --batch-stdin --json
 ```
 
 Use this when an orchestrator already has multiple explicit tool calls and wants one Roll process.
-The stdin payload must be a JSON array:
+
+Input can come from one of three sources:
+
+| Source | Command | Use it when |
+|--------|---------|-------------|
+| Inline JSON | `roll run --batch-json '[...]' --json` | Small static batches |
+| File | `roll run --batch-file ./batch.json --json` | Generated or large batches |
+| Stdin | `roll run --batch-stdin --json` | Another process writes the batch |
+
+The batch payload must be a JSON array:
 
 ```json
 [
@@ -111,12 +120,26 @@ Rules:
 - Do not combine batch mode with positional `agent/tool`.
 - Do not combine batch mode with `--input-json` or `--input-file`.
 - Use `--bail` when later calls depend on all prior calls succeeding.
+- Parse stdout as a JSON array. Each result keeps `index`, `agent`, `tool`, optional `label`,
+  `ok`, and either `result` or `error`.
+- In batch mode, one failed item usually makes the process exit non-zero. Still read stdout JSON
+  because it contains the per-item failure and any prior successful results.
 - Batch mode reduces CLI startup overhead, but it does not create implicit dataflow. The orchestrator
   still needs to read each result and construct the next explicit input.
 - Batch mode executes items sequentially and waits for each tool call to finish. It does not surface
   per-item streaming progress.
 - For dependent workflows, split the workflow into multiple batches:
   read batch -> parse/filter results -> generate batch -> parse/filter results -> side-effect batch.
+
+Result handling:
+
+```text
+batch stdout array
+  -> for each item:
+       ok=true  -> read result
+       ok=false -> read error; decide retry/stop/recover
+  -> never assume item N+1 consumed item N output
+```
 
 ## Known Intent, Unknown Tool
 
@@ -197,6 +220,22 @@ Use this when tool calls fail unexpectedly or env setup is unclear. Checks Node.
 
 `--json` outputs `CheckResult[]` where each entry has `name`, `status: "ok" | "warn" | "fail"`, and `message`. With `--fix-plan`, entries can include `fix`. With `--fix`, the JSON also includes fix results. Parse stdout only. For per-key env declaration and runtime labels, follow with `roll agent info <agent-name>`.
 
+Decision flow:
+
+```text
+unexpected failure / unknown setup
+  -> roll doctor --json
+      all ok:
+        continue to agent-specific checks
+      warn/fail:
+        -> roll doctor --fix-plan --json
+            no fix:
+              report the check message and ask for explicit user action
+            safe fix proposed:
+              -> roll doctor --fix --json
+              -> rerun roll doctor --json
+```
+
 Follow-up based on output:
 - `needs-migration` → `roll config migrate`
 - Missing env → configure `agents.env` in `roll.config.yaml`
@@ -208,6 +247,39 @@ Safe-fix boundary:
 - `roll doctor --fix` only applies known safe repairs: config migration with backup,
   `agents.dataDir` creation, and orphan runtime metadata cleanup.
 - It does not install packages, edit arbitrary env values, restart agents, or remove registered agents.
+
+## Agent Health And Runtime Sidecar
+
+```bash
+roll agent info <agent-name>
+roll agent health --json
+```
+
+Use this after `doctor` when a specific persistent agent still cannot be used.
+
+Responsibilities:
+
+| Command | Scope | Use it for |
+|---------|-------|------------|
+| `roll doctor --json` | Whole Roll installation | Config, data dirs, registered agents, env drift summary |
+| `roll agent info <agent-name>` | One agent declaration | Source, transport, ownership, declared env, runtime env labels |
+| `roll agent health --json` | One persistent runtime | Process/endpoint health and runtime sidecar consistency |
+
+PR82 sidecar cases:
+
+| Health symptom | Meaning | Orchestrator action |
+|----------------|---------|---------------------|
+| Version mismatch | Runtime metadata was written by another Roll version | Prefer `roll agent stop <agent-name>` then `roll agent start <agent-name>` if Roll owns lifecycle |
+| Orphan sidecar / stale metadata | Sidecar exists but process is gone or unrelated | Run `roll doctor --fix --json`, then re-check health |
+| PID mismatch | Metadata PID does not match the running process | Stop/start the core-managed agent; if external-managed, report to the user |
+| Endpoint probe failed | Process metadata exists but MCP endpoint is not reachable | Start or restart only if `runtime ownership` is `core-managed` |
+
+Boundary:
+- `roll doctor --fix` can clean orphan core-managed runtime metadata.
+- `roll doctor --fix` does not restart agents.
+- `roll agent start` should be used only for agents Roll owns (`core-managed`).
+- For `external-managed` agents, report the failing endpoint/process state instead of trying to
+  control the process.
 
 ## Env Drift Detection
 
