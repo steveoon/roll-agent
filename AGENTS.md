@@ -230,6 +230,53 @@ pnpm release-packages
 
 工作流：功能 PR 附带 `.changeset/*.md` → 合入 `main` → GitHub Action 自动创建 release PR（通常标题为 `chore: version packages`）→ 合并该 PR → 自动 publish。
 
+### 发布供应链防护检查清单
+
+每个新的 package version 被 publish 前，都必须按以下链路检查：
+
+```
+声明层 -> CI 权限层 -> 依赖解析层 -> 构建层 -> tarball 审计层 -> npm 发布层
+```
+
+| 层级 | 必查点 | 代码/配置位置 | 失败处理 |
+|------|------|------|------|
+| 声明层 | 发布包必须属于当前 npm scope，且只覆盖 `@roll-agent/core`、`@roll-agent/sdk`、`@roll-agent/browser`、`@roll-agent/browser-use-agent`、`@roll-agent/smart-reply-agent` | `scripts/verify-published-packages.mjs` | 不把未知包加入发布清单；先明确包边界 |
+| CI 权限层 | GitHub Actions 必须使用 full SHA pin，不能使用 tag；PR CI 和 release workflow 都要满足仓库级 SHA pin 规则 | `.github/workflows/ci.yml`、`.github/workflows/release.yml` | CI 会在下载 action 前失败；先 pin SHA 再重跑 |
+| CI 权限层 | workflow 顶层保持 `permissions: {}`；`quality` 只给 `contents: read`；`release` 只给 `contents: write` 和 `pull-requests: write` | `.github/workflows/release.yml` | 不扩大默认 `GITHUB_TOKEN` 权限 |
+| CI 权限层 | 本轮发布继续使用 `NPM_TOKEN`；除非正式迁移 Trusted Publishing，否则不能加回 `id-token: write` | `.github/workflows/release.yml` | 需要 Trusted Publishing 时单独设计迁移方案 |
+| token 暴露层 | `NPM_TOKEN` 只能注入真正 publish step，不能出现在 install/build/test/verify 步骤 | `.github/workflows/release.yml`、`scripts/release-packages.mjs` | 发现扩大暴露面时必须拆回 publish-only |
+| 依赖解析层 | 使用 `pnpm install --frozen-lockfile`，发布前不能隐式刷新 lockfile | `.github/workflows/*.yml` | lockfile 不一致时先本地审查依赖变化 |
+| 依赖解析层 | `minimumReleaseAge: 10080` 必须保留，新解析依赖至少发布满 7 天 | `pnpm-workspace.yaml` | 不能为了临时升级绕过冷却期 |
+| 依赖解析层 | `blockExoticSubdeps: true` 必须保留，阻断传递依赖使用 git/tarball 等 exotic source | `pnpm-workspace.yaml` | 需要例外时先做人工供应链审计 |
+| 依赖解析层 | `savePrefix: ""` 必须保留，新加依赖默认保存精确版本 | `pnpm-workspace.yaml` | 不机械移除既有 range，但新增依赖应 exact |
+| build script 层 | `allowBuilds` denylist 必须显式拒绝当前已知 dependency build scripts，例如 `esbuild`、`unrs-resolver` | `pnpm-workspace.yaml` | 新增 build script 先审计再决定是否允许 |
+| 发布 job 层 | `release` job 不能启用 `cache: pnpm`；`quality` job 可以保留 cache | `.github/workflows/release.yml` | 发布 job 发现缓存时必须删除 |
+| 发布命令层 | CI publish 必须走 `pnpm release-packages` / `node scripts/release-packages.mjs`，不能直接裸跑 `changeset publish` | `package.json`、`scripts/release-packages.mjs` | 保证 publish 前置校验不会被跳过 |
+| 发布命令层 | `scripts/release-packages.mjs` 必须在无 publish token 阶段完成 build 和 verify，只在 publish 窗口临时写入 npm token | `scripts/release-packages.mjs` | 不允许 token 长时间存在于 workspace |
+| tarball 审计层 | packed manifest 禁止 `preinstall`、`install`、`postinstall`、`prepare` lifecycle | `scripts/verify-published-packages.mjs` | 命中即失败，禁止发布 |
+| tarball 审计层 | packed files 禁止已知可疑文件名：`router_init.js`、`router_runtime.js`、`tanstack_runner.js`、`setup.mjs`、`gh-token-monitor` | `scripts/verify-published-packages.mjs` | 命中即失败，先定位来源 |
+| tarball 审计层 | packed text 必须扫描已知 IoC：`IfYouRevoke`、`toJSON(secrets)`、`.claude/settings`、`.vscode/tasks`、`@tanstack/setup`、`filev2.getsession` | `scripts/verify-published-packages.mjs` | 命中即失败，不能人工忽略 |
+
+发布前最小验证命令：
+
+```bash
+pnpm install --frozen-lockfile
+pnpm typecheck
+pnpm lint
+pnpm test
+pnpm test:e2e
+pnpm build
+pnpm verify:published-packages
+node scripts/release-packages.mjs --dry-run
+```
+
+边界条件：
+
+- 这套防护不替代 npm token 轮换、npm org 2FA enforcement、GitHub App 权限收敛和分支保护。
+- 这套防护不要求每次发布新增人工审批，`Changesets -> release PR -> merge -> npm publish` 体验保持不变。
+- 这套防护不要求机械移除所有既有 `^` / `~`，但新增依赖默认必须 exact。
+- 这套防护不覆盖发布后的 runtime 行为审计；它只阻断 CI 依赖解析、发布 job、packed tarball 和 npm publish 链路中的高风险入口。
+
 ## Testing
 
 使用 Node.js 内置 `node:test` + `node:assert/strict`，零外部测试依赖。测试文件与源码同目录，命名 `*.test.ts`。
