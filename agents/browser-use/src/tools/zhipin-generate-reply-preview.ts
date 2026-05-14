@@ -1,9 +1,11 @@
 import { defineTool } from "@roll-agent/sdk";
 import {
   GenerateSignedReplyResponseSchema,
+  ReasoningConfigSchema,
   ReplyStreamFinalEventSchema,
   streamGenerateSignedReply,
   type GenerateReplyToolInput,
+  type ReasoningConfig,
   type ReplyStreamEvent,
 } from "@roll-agent/reply-authority-client";
 import { z } from "zod";
@@ -32,6 +34,9 @@ const InputSchema = z.object({
     .describe("候选人姓名。若用户说“给鲁倩生成回复”，这里应提取为“鲁倩”"),
   index: z.number().optional().describe("候选人在列表中的索引（可选，仅兜底）"),
   maxMessages: z.number().default(100).describe("最多读取的聊天消息条数"),
+  reasoning: ReasoningConfigSchema.optional().describe(
+    "可选 reasoning/thinking 控制。enabled=true 会请求 Reply Authority 使用模型推理模式；effort 可选 low/medium/high；scope 可选 reply/all",
+  ),
 });
 
 const OutputSchema = z.object({
@@ -134,6 +139,7 @@ function buildGenerateReplyInput(input: {
   readonly conversationId: string;
   readonly candidateId: string;
   readonly recruiterUsername: string;
+  readonly reasoning?: ReasoningConfig | undefined;
 }): GenerateReplyToolInput {
   const signals = resolveConversationSignals({
     communicationPosition: input.data.candidateInfo.communicationPosition,
@@ -155,6 +161,7 @@ function buildGenerateReplyInput(input: {
       info: [...input.data.candidateInfo.tags],
     },
     ...(signals.preferredBrand !== undefined ? { preferredBrand: signals.preferredBrand } : {}),
+    ...(input.reasoning !== undefined ? { modelConfig: { reasoning: input.reasoning } } : {}),
     target: {
       platform: "zhipin",
       conversationId: input.conversationId,
@@ -330,6 +337,7 @@ export const zhipinGenerateReplyPreview = defineTool({
         conversationId: selectedTarget.conversationId,
         candidateId: selectedTarget.candidateId,
         recruiterUsername: usernameResult.username,
+        reasoning: input.reasoning,
       });
       if (replyInput.candidateMessage.length === 0) {
         const error = "未找到候选人最新消息，无法生成回复";

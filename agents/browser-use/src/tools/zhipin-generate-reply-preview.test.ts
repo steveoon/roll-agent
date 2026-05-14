@@ -233,6 +233,7 @@ describe("zhipin_generate_reply_preview", () => {
   it("renders stream progress and stores a prepared reply without exposing the envelope", async () => {
     const calls: string[] = [];
     let capturedCandidateMessage = "";
+    let capturedReasoning: unknown;
 
     setZhipinGenerateReplyPreviewDepsForTests({
       openNativePagePort: async () => createNativePage(calls),
@@ -240,12 +241,21 @@ describe("zhipin_generate_reply_preview", () => {
       createReplyPreviewVisualSession: () => createPreviewSession(calls),
       streamGenerateSignedReply: (input) => {
         capturedCandidateMessage = input.candidateMessage;
+        capturedReasoning = input.modelConfig?.reasoning;
         return createMockStream();
       },
     });
 
     const result = await zhipinGenerateReplyPreview.execute(
-      { conversationId: "conv-1", maxMessages: 20 },
+      {
+        conversationId: "conv-1",
+        maxMessages: 20,
+        reasoning: {
+          enabled: true,
+          effort: "high",
+          scope: "all",
+        },
+      },
       createTestContext(),
     );
 
@@ -253,6 +263,11 @@ describe("zhipin_generate_reply_preview", () => {
     assert.equal(result.suggestedReply, "您好，薪资可以详聊。");
     assert.equal(result.requestId, "req-1");
     assert.equal(capturedCandidateMessage, "薪资多少？");
+    assert.deepEqual(capturedReasoning, {
+      enabled: true,
+      effort: "high",
+      scope: "all",
+    });
     assert.equal("signedEnvelope" in result, false);
     assert.ok(result.preparedReplyId);
     assert.equal(calls.includes("preview:draft:draft:您好，薪资可以详聊。"), true);

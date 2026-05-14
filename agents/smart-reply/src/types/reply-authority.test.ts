@@ -41,6 +41,29 @@ test("GenerateReplyToolInputSchema accepts proxy mode with recruiterUsername", (
   assert.equal(parsed.target.tenantId, undefined);
 });
 
+test("GenerateReplyToolInputSchema accepts modelConfig reasoning controls", () => {
+  const parsed = GenerateReplyToolInputSchema.parse({
+    ...BASE_INPUT,
+    modelConfig: {
+      reasoning: {
+        enabled: true,
+        effort: "medium",
+        scope: "reply",
+      },
+    },
+    target: {
+      ...BASE_INPUT.target,
+      recruiterUsername: "recruiter-alice",
+    },
+  });
+
+  assert.deepEqual(parsed.modelConfig?.reasoning, {
+    enabled: true,
+    effort: "medium",
+    scope: "reply",
+  });
+});
+
 test("GenerateReplyToolInputSchema rejects targets without recruiter information", () => {
   assert.throws(
     () => GenerateReplyToolInputSchema.parse(BASE_INPUT),

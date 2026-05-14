@@ -23,10 +23,17 @@ export const ProviderConfigSchema = z.object({
 
 export const ProviderConfigsSchema = z.record(z.string(), ProviderConfigSchema);
 
+export const ReasoningConfigSchema = z.object({
+  enabled: z.boolean(),
+  effort: z.enum(["low", "medium", "high"]).optional(),
+  scope: z.enum(["reply", "all"]).optional(),
+});
+
 export const ModelConfigSchema = z.object({
   chatModel: z.string().optional(),
   classifyModel: z.string().optional(),
   replyModel: z.string().optional(),
+  reasoning: ReasoningConfigSchema.optional(),
   providerConfigs: ProviderConfigsSchema.optional(),
 });
 
@@ -233,6 +240,7 @@ export class ReplyAuthorityRequestError extends Error {
 export type FunnelStage = z.infer<typeof FunnelStageSchema>;
 export type ProviderConfig = z.infer<typeof ProviderConfigSchema>;
 export type ProviderConfigs = z.infer<typeof ProviderConfigsSchema>;
+export type ReasoningConfig = z.infer<typeof ReasoningConfigSchema>;
 export type ModelConfig = z.infer<typeof ModelConfigSchema>;
 export type CandidateInfo = z.infer<typeof CandidateInfoSchema>;
 export type RecruiterBinding = z.infer<typeof RecruiterBindingSchema>;
