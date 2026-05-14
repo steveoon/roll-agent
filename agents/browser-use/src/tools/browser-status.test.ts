@@ -71,6 +71,14 @@ describe("browser_status", () => {
       visualCursorEnabled: true,
       visualActivityEnabled: true,
       effectiveEnvSources: {
+        REPLY_AUTHORITY_URL: {
+          present: true,
+          fingerprint: "1111aaaa",
+        },
+        REPLY_AUTHORITY_BEARER_TOKEN: {
+          present: true,
+          fingerprint: "2222bbbb",
+        },
         REPLY_AUTHORITY_KEYS_URL: {
           present: true,
           fingerprint: "0123abcd",
@@ -100,6 +108,11 @@ describe("browser_status", () => {
     assert.equal(parsed.replyAuthorityKeysLoaded, true);
     assert.equal(parsed.visualCursorEnabled, true);
     assert.equal(parsed.visualActivityEnabled, true);
+    assert.equal(parsed.effectiveEnvSources["REPLY_AUTHORITY_URL"]?.fingerprint, "1111aaaa");
+    assert.equal(
+      parsed.effectiveEnvSources["REPLY_AUTHORITY_BEARER_TOKEN"]?.fingerprint,
+      "2222bbbb",
+    );
     assert.equal(parsed.effectiveEnvSources["REPLY_AUTHORITY_KEYS_URL"]?.fingerprint, "0123abcd");
     assert.equal(parsed.effectiveEnvSources["BROWSER_VISUAL_CURSOR"]?.fingerprint, "89abcdef");
     assert.equal(parsed.effectiveEnvSources["BROWSER_VISUAL_ACTIVITY"]?.present, false);

@@ -41,6 +41,9 @@ importers:
       '@roll-agent/browser':
         specifier: workspace:*
         version: link:../../packages/browser
+      '@roll-agent/reply-authority-client':
+        specifier: workspace:*
+        version: link:../../packages/reply-authority-client
       '@roll-agent/sdk':
         specifier: workspace:*
         version: link:../../packages/sdk
@@ -67,6 +70,9 @@ importers:
 
   agents/smart-reply:
     dependencies:
+      '@roll-agent/reply-authority-client':
+        specifier: workspace:*
+        version: link:../../packages/reply-authority-client
       '@roll-agent/sdk':
         specifier: workspace:*
         version: link:../../packages/sdk
@@ -132,6 +138,16 @@ importers:
       yaml:
         specifier: ^2.7.0
         version: 2.8.3
+      zod:
+        specifier: ^3.25.76
+        version: 3.25.76
+    devDependencies:
+      '@types/node':
+        specifier: ^22.0.0
+        version: 22.19.15
+
+  packages/reply-authority-client:
+    dependencies:
       zod:
         specifier: ^3.25.76
         version: 3.25.76
