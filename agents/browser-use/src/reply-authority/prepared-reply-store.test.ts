@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { afterEach, describe, it } from "node:test";
 import {
   consumePreparedReply,
+  inspectPreparedReply,
   resetPreparedReplyStoreForTests,
   savePreparedReply,
 } from "./prepared-reply-store.ts";
@@ -33,6 +34,27 @@ describe("prepared reply store", () => {
 
     const second = consumePreparedReply(saved.preparedReplyId, 121);
     assert.deepEqual(second, { ok: false, reason: "consumed" });
+  });
+
+  it("inspects a prepared reply without consuming it", () => {
+    const saved = savePreparedReply(
+      {
+        signedEnvelope: "payload.signature",
+        suggestedReply: "你好",
+        stage: "job_consultation",
+        confidence: 0.9,
+        expiresAt: 200,
+      },
+      100,
+    );
+
+    const inspected = inspectPreparedReply(saved.preparedReplyId, 120);
+    assert.equal(inspected.ok, true);
+    if (inspected.ok) {
+      assert.equal(inspected.record.signedEnvelope, "payload.signature");
+    }
+
+    assert.equal(consumePreparedReply(saved.preparedReplyId, 121).ok, true);
   });
 
   it("expires stale prepared replies", () => {

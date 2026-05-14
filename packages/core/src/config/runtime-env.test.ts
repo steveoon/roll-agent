@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import { describe, it } from "node:test";
 import { inspectAgentEnvRequirements } from "./helpers.ts";
 import {
+  AgentRuntimeEnvDiagnosticPayloadSchema,
   type AgentRuntimeEnvDiagnosticPayload,
   formatAgentEnvRuntimeStatus,
   inspectAgentRuntimeEnvRequirements,
@@ -12,6 +13,37 @@ import {
 } from "./runtime-env.ts";
 
 describe("config/runtime-env", () => {
+  it("accepts browser security diagnostics as optional browser_status payload", () => {
+    const parsed = AgentRuntimeEnvDiagnosticPayloadSchema.parse({
+      effectiveEnvSources: {},
+      security: {
+        domainAllowlist: ["zhipin.com"],
+        maxPageContentBytes: 102_400,
+        maxSnapshotNodes: 500,
+        actionPolicy: "log",
+      },
+      toolPolicy: {
+        approvalTtlMs: 300_000,
+        tools: {
+          zhipin_send_prepared_reply: {
+            policy: "confirm",
+          },
+        },
+      },
+      policyWarnings: [
+        {
+          code: "double_confirmation",
+          message: "double confirmation",
+        },
+      ],
+    });
+
+    assert.equal(parsed.security?.actionPolicy, "log");
+    assert.deepEqual(parsed.security?.domainAllowlist, ["zhipin.com"]);
+    assert.equal(parsed.toolPolicy?.tools["zhipin_send_prepared_reply"]?.policy, "confirm");
+    assert.equal(parsed.policyWarnings?.[0]?.code, "double_confirmation");
+  });
+
   it("marks matching runtime env as stable", () => {
     const declarationReport = inspectAgentEnvRequirements(
       "browser-use-agent",

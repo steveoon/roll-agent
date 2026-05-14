@@ -10,6 +10,28 @@ test("BrowserRuntimeConfigSchema defaults to managed-cdp", () => {
   assert.equal(config.cdpHost, "127.0.0.1");
   assert.equal(config.cdpPort, 9222);
   assert.equal(config.channel, "chrome");
+  assert.deepEqual(config.security, {
+    domainAllowlist: [],
+    maxPageContentBytes: 102_400,
+    maxSnapshotNodes: 500,
+    actionPolicy: "log",
+  });
+});
+
+test("BrowserRuntimeConfigSchema normalizes security config", () => {
+  const config = BrowserRuntimeConfigSchema.parse({
+    security: {
+      domainAllowlist: [" ZHIPIN.COM ", "liepin.com"],
+      maxPageContentBytes: 512,
+      maxSnapshotNodes: 10,
+      actionPolicy: "confirm",
+    },
+  });
+
+  assert.deepEqual(config.security.domainAllowlist, ["zhipin.com", "liepin.com"]);
+  assert.equal(config.security.maxPageContentBytes, 512);
+  assert.equal(config.security.maxSnapshotNodes, 10);
+  assert.equal(config.security.actionPolicy, "confirm");
 });
 
 test("BrowserRuntimeConfigSchema requires cdpUrl in remote-cdp mode", () => {

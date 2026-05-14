@@ -8,6 +8,7 @@ import type { Browser } from "playwright-core";
 import type { ChildProcess } from "node:child_process";
 import { BrowserRuntimeConfigSchema } from "../types/index.ts";
 import { BrowserRuntime } from "./browser-runtime.ts";
+import { BrowserActionPolicyError } from "./security.ts";
 import type { NativeCdpController } from "./native-cdp-controller.ts";
 
 function makeTmpUserDataDir(): string {
@@ -121,6 +122,22 @@ test("managed-cdp start launches Chrome without eagerly attaching Playwright", a
   } finally {
     rmSync(userDataDir, { recursive: true, force: true });
   }
+});
+
+test("openNativePage enforces domain allowlist before native CDP requests", async () => {
+  const runtime = new BrowserRuntime(
+    BrowserRuntimeConfigSchema.parse({
+      security: {
+        domainAllowlist: ["zhipin.com"],
+      },
+    }),
+  );
+
+  await assert.rejects(runtime.openNativePage("https://example.com"), (error) => {
+    assert.ok(error instanceof BrowserActionPolicyError);
+    assert.equal(error.payload.code, "action_denied");
+    return true;
+  });
 });
 
 test("managed-cdp stop terminates the launched browser even before first attach", async () => {

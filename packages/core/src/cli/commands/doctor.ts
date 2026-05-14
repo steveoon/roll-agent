@@ -14,6 +14,10 @@ import { applyKnownConfigMigrations } from "../../config/migration.ts";
 import {
   inspectAgentRuntimeEnvRequirements,
   summarizeAgentRuntimeEnvReport,
+  type AgentRuntimeEnvInspection,
+  type BrowserSecurityDiagnostic,
+  type BrowserUsePolicyWarningDiagnostic,
+  type BrowserUseToolPolicyDiagnostic,
 } from "../../config/runtime-env.ts";
 import { inspectAgentRuntimeEnv } from "../../mcp/agent-diagnostics.ts";
 import {
@@ -48,6 +52,78 @@ const FIX_STATUS_ICONS: Record<DoctorFixResult["status"], string> = {
 };
 
 const MIN_NODE_VERSION = { major: 22, minor: 6, patch: 0 } as const;
+
+function formatBrowserSecurityCheck(inspection: AgentRuntimeEnvInspection): CheckResult {
+  const name = "Browser security (browser-use-agent)";
+
+  if (inspection.status === "unverified") {
+    return {
+      name,
+      status: "warn",
+      message: `未校验: ${inspection.message}`,
+      fix: "启动 browser-use-agent 后重新运行 `roll doctor`",
+    };
+  }
+
+  const security = inspection.payload.security;
+  if (security === undefined) {
+    return {
+      name,
+      status: "warn",
+      message: "browser_status.security 未返回，无法确认浏览器安全策略",
+      fix: "升级并重启 browser-use-agent",
+    };
+  }
+
+  const policyWarnings = inspection.payload.policyWarnings ?? [];
+  return {
+    name,
+    status: policyWarnings.length > 0 ? "warn" : "ok",
+    message: formatBrowserPolicySummary(security, inspection.payload.toolPolicy, policyWarnings),
+    ...(policyWarnings.length > 0
+      ? {
+          fix: "检查 BROWSER_SECURITY_JSON 与 BROWSER_USE_POLICY_JSON 的组合；Boss 日常编排建议 browser actionPolicy=log",
+        }
+      : {}),
+  };
+}
+
+function formatBrowserPolicySummary(
+  security: BrowserSecurityDiagnostic,
+  toolPolicy: BrowserUseToolPolicyDiagnostic | undefined,
+  policyWarnings: readonly BrowserUsePolicyWarningDiagnostic[],
+): string {
+  const allowlist =
+    security.domainAllowlist.length > 0 ? security.domainAllowlist.join(", ") : "none";
+  const toolPolicySummary = formatBrowserUseToolPolicySummary(toolPolicy);
+  const warningSummary =
+    policyWarnings.length > 0
+      ? `; warnings=${policyWarnings.map((warning) => warning.code).join(", ")}`
+      : "";
+  return (
+    `actionPolicy=${security.actionPolicy}; ` +
+    `domainAllowlist=${allowlist}; ` +
+    `maxPageContentBytes=${String(security.maxPageContentBytes)}; ` +
+    `maxSnapshotNodes=${String(security.maxSnapshotNodes)}; ` +
+    `toolPolicy=${toolPolicySummary}` +
+    warningSummary
+  );
+}
+
+function formatBrowserUseToolPolicySummary(
+  toolPolicy: BrowserUseToolPolicyDiagnostic | undefined,
+): string {
+  if (toolPolicy === undefined) {
+    return "unavailable";
+  }
+
+  const configuredTools = Object.entries(toolPolicy.tools);
+  const toolSummary =
+    configuredTools.length > 0
+      ? configuredTools.map(([tool, entry]) => `${tool}:${entry.policy}`).join(",")
+      : "none";
+  return `approvalTtlMs=${String(toolPolicy.approvalTtlMs)},tools=${toolSummary}`;
+}
 
 export function isNodeVersionSupported(version: string): boolean {
   const match = /^(\d+)\.(\d+)\.(\d+)/.exec(version);
@@ -230,6 +306,12 @@ export default defineCommand({
       });
 
       for (const agent of agents) {
+        let runtimeInspection: AgentRuntimeEnvInspection | undefined;
+        const getRuntimeInspection = async (): Promise<AgentRuntimeEnvInspection> => {
+          runtimeInspection ??= await inspectAgentRuntimeEnv(agent, { agentsConfig: fullConfig });
+          return runtimeInspection;
+        };
+
         if (agent.runtime.ownership === "core-managed") {
           let managedRuntime = inspectManagedAgentRuntime(agent, fullConfig.dataDir);
           if (shouldFix && managedRuntime.issues.some((issue) => issue.code === "orphan-sidecar")) {
@@ -261,10 +343,13 @@ export default defineCommand({
           fullConfig.env,
         );
         if (!envReport) {
+          if (agent.skill.name === "browser-use-agent") {
+            checks.push(formatBrowserSecurityCheck(await getRuntimeInspection()));
+          }
           continue;
         }
 
-        const runtimeInspection = await inspectAgentRuntimeEnv(agent, { agentsConfig: fullConfig });
+        runtimeInspection = await getRuntimeInspection();
         const runtimeReport = inspectAgentRuntimeEnvRequirements(
           envReport,
           getAgentEnvFromAgentsConfig(fullConfig, agent.skill.name),
@@ -281,6 +366,10 @@ export default defineCommand({
                 fix: `在 \`roll.config.yaml\` 的 \`agents.env.${agent.skill.name}\` 或 shell 环境中配置缺失变量`,
               }),
         });
+
+        if (agent.skill.name === "browser-use-agent") {
+          checks.push(formatBrowserSecurityCheck(runtimeInspection));
+        }
       }
     }
 

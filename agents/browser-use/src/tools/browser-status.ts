@@ -1,6 +1,6 @@
 import { defineTool } from "@roll-agent/sdk";
 import { z } from "zod";
-import { BrowserStatusSchema } from "@roll-agent/browser";
+import { BrowserSecurityConfigSchema, BrowserStatusSchema } from "@roll-agent/browser";
 import type { BrowserSessionInfo } from "@roll-agent/browser";
 import {
   BROWSER_USE_DECLARED_ENV_KEYS,
@@ -15,11 +15,20 @@ import {
 } from "../runtime-holder.ts";
 import { isVisualCursorEnabled } from "../visual-cursor.ts";
 import { isVisualActivityEnabled } from "../visual-activity.ts";
+import {
+  BrowserUsePolicyConfigSchema,
+  BrowserUsePolicyWarningSchema,
+  collectBrowserUsePolicyWarnings,
+  getBrowserUsePolicy,
+} from "../browser-use-policy.ts";
 
 const BrowserUseStatusSchema = BrowserStatusSchema.extend({
   replyAuthorityKeysLoaded: z.boolean(),
   visualCursorEnabled: z.boolean(),
   visualActivityEnabled: z.boolean(),
+  security: BrowserSecurityConfigSchema,
+  toolPolicy: BrowserUsePolicyConfigSchema,
+  policyWarnings: z.array(BrowserUsePolicyWarningSchema),
   effectiveEnvSources: EffectiveEnvSourcesSchema,
 });
 
@@ -35,7 +44,8 @@ export const browserStatus = defineTool({
     const ctxManager = getContextManager();
     const store = getSessionStore();
     const running = runtime.isRunning();
-    const { headless, mode } = runtime.getConfig();
+    const { headless, mode, security } = runtime.getConfig();
+    const toolPolicy = getBrowserUsePolicy();
 
     const platforms = ctxManager.getActivePlatforms();
     const activeSessions: BrowserSessionInfo[] = [];
@@ -78,6 +88,9 @@ export const browserStatus = defineTool({
       replyAuthorityKeysLoaded: getReplyAuthorityKeysLoaded(),
       visualCursorEnabled: isVisualCursorEnabled(),
       visualActivityEnabled: isVisualActivityEnabled(),
+      security,
+      toolPolicy,
+      policyWarnings: collectBrowserUsePolicyWarnings({ browserSecurity: security, toolPolicy }),
       effectiveEnvSources: collectEffectiveEnvSources(BROWSER_USE_DECLARED_ENV_KEYS),
     };
   },

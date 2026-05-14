@@ -18,6 +18,8 @@ export type PreparedReplyConsumeResult =
   | { readonly ok: true; readonly record: PreparedReplyRecord }
   | { readonly ok: false; readonly reason: "not_found" | "expired" | "consumed" };
 
+export type PreparedReplyInspectResult = PreparedReplyConsumeResult;
+
 let preparedReplies = new Map<string, StoredPreparedReply>();
 
 function pruneExpiredPreparedReplies(nowSeconds: number): void {
@@ -69,15 +71,45 @@ export function consumePreparedReply(
   preparedReplies.set(preparedReplyId, { ...record, consumed: true });
   return {
     ok: true,
-    record: {
-      preparedReplyId: record.preparedReplyId,
-      signedEnvelope: record.signedEnvelope,
-      suggestedReply: record.suggestedReply,
-      stage: record.stage,
-      confidence: record.confidence,
-      expiresAt: record.expiresAt,
-      ...(record.requestId !== undefined ? { requestId: record.requestId } : {}),
-    },
+    record: toPreparedReplyRecord(record),
+  };
+}
+
+export function inspectPreparedReply(
+  preparedReplyId: string,
+  nowSeconds = Math.floor(Date.now() / 1000),
+): PreparedReplyInspectResult {
+  const record = preparedReplies.get(preparedReplyId);
+  if (record === undefined) {
+    pruneExpiredPreparedReplies(nowSeconds);
+    return { ok: false, reason: "not_found" };
+  }
+
+  if (record.expiresAt <= nowSeconds) {
+    preparedReplies.delete(preparedReplyId);
+    pruneExpiredPreparedReplies(nowSeconds);
+    return { ok: false, reason: "expired" };
+  }
+
+  if (record.consumed) {
+    return { ok: false, reason: "consumed" };
+  }
+
+  return {
+    ok: true,
+    record: toPreparedReplyRecord(record),
+  };
+}
+
+function toPreparedReplyRecord(record: StoredPreparedReply): PreparedReplyRecord {
+  return {
+    preparedReplyId: record.preparedReplyId,
+    signedEnvelope: record.signedEnvelope,
+    suggestedReply: record.suggestedReply,
+    stage: record.stage,
+    confidence: record.confidence,
+    expiresAt: record.expiresAt,
+    ...(record.requestId !== undefined ? { requestId: record.requestId } : {}),
   };
 }
 

@@ -134,7 +134,14 @@ export default defineCommand({
         }
         log.success("调用完成");
       } else {
-        log.error(outcome.error);
+        if (args.json) {
+          console.log(JSON.stringify(formatRunToolResultForJsonOutput(outcome), null, 2));
+        } else {
+          log.error(outcome.error);
+          if (outcome.result !== undefined) {
+            printToolResultText(outcome.result);
+          }
+        }
         process.exitCode = 1;
       }
     } catch (err) {
@@ -680,7 +687,7 @@ function printToolResultText(result: unknown): void {
   console.log(JSON.stringify(result, null, 2));
 }
 
-function formatRunToolResultForJsonOutput(result: RunToolResult): RunToolResult {
+export function formatRunToolResultForJsonOutput(result: RunToolResult): RunToolResult {
   if (result.ok) {
     return { ...result, result: formatToolResultForJsonOutput(result.result) };
   }

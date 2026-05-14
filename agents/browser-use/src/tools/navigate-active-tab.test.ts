@@ -5,8 +5,12 @@ import type {
   BrowserContextManager,
   BrowserInspectablePage,
   BrowserRuntime,
+  BrowserSecurityConfig,
   NativeCdpController,
 } from "@roll-agent/browser";
+import { BrowserRuntimeConfigSchema } from "@roll-agent/browser";
+import { StructuredToolError } from "@roll-agent/sdk";
+import { resetBrowserActionApprovalsForTests } from "../browser-action-approval.ts";
 import { navigateActiveTab, setNavigateActiveTabDepsForTests } from "./navigate-active-tab.ts";
 
 type NativeLoadState = {
@@ -29,11 +33,12 @@ type FakeNativeController = Pick<
 
 type FakeRuntime = Pick<
   BrowserRuntime,
-  "listNativePages" | "activateNativePage" | "openNativePage" | "connectNativePage"
+  "getConfig" | "listNativePages" | "activateNativePage" | "openNativePage" | "connectNativePage"
 > & {
   readonly activatedTargets: readonly string[];
   readonly openedUrls: readonly string[];
   readonly connectedTargets: readonly string[];
+  readonly connectedOptions: readonly unknown[];
 };
 
 function createTestContext(): AgentContext {
@@ -48,6 +53,17 @@ function createTestContext(): AgentContext {
       error: () => {},
     },
   };
+}
+
+function readApprovalIdFromError(error: unknown): string {
+  assert.ok(error instanceof StructuredToolError);
+  const details = error.payload.details;
+  assert.ok(details !== undefined);
+  const approvalRequest = details["approvalRequest"];
+  assert.equal(typeof approvalRequest, "object");
+  assert.notEqual(approvalRequest, null);
+  assert.equal(typeof (approvalRequest as Record<string, unknown>)["id"], "string");
+  return (approvalRequest as { id: string }).id;
 }
 
 const immediateDelay: DelayFunction = async <T = void>(_delay?: number, value?: T): Promise<T> =>
@@ -119,16 +135,22 @@ function createFakeController(loadStates: readonly NativeLoadState[]): FakeNativ
 function createFakeRuntime(
   initialPages: readonly BrowserInspectablePage[],
   controller: FakeNativeController,
+  security?: Partial<BrowserSecurityConfig>,
 ): FakeRuntime {
   const activatedTargets: string[] = [];
   const openedUrls: string[] = [];
   const connectedTargets: string[] = [];
+  const connectedOptions: unknown[] = [];
   const pages = [...initialPages];
 
   return {
     activatedTargets,
     openedUrls,
     connectedTargets,
+    connectedOptions,
+    getConfig() {
+      return BrowserRuntimeConfigSchema.parse({ security });
+    },
     async listNativePages() {
       return pages;
     },
@@ -141,9 +163,10 @@ function createFakeRuntime(
       pages.push(page);
       return page;
     },
-    async connectNativePage(page: string | BrowserInspectablePage) {
+    async connectNativePage(page: string | BrowserInspectablePage, options?: unknown) {
       const targetId = typeof page === "string" ? page : page.targetId;
       connectedTargets.push(targetId);
+      connectedOptions.push(options);
       return controller as unknown as NativeCdpController;
     },
   };
@@ -151,6 +174,7 @@ function createFakeRuntime(
 
 afterEach(() => {
   setNavigateActiveTabDepsForTests(undefined);
+  resetBrowserActionApprovalsForTests();
 });
 
 describe("navigate_active_tab", () => {
@@ -285,5 +309,106 @@ describe("navigate_active_tab", () => {
     assert.deepEqual(runtime.activatedTargets, []);
     assert.deepEqual(runtime.connectedTargets, []);
     assert.equal(controller.closeCalls.length, 0);
+  });
+
+  it("denies navigation outside domainAllowlist before CDP calls", async () => {
+    const controller = createFakeController([]);
+    const runtime = createFakeRuntime([], controller, {
+      domainAllowlist: ["zhipin.com"],
+    });
+    const ctxManager = createFakeContextManager();
+
+    setNavigateActiveTabDepsForTests({
+      getContextManager: () => ctxManager,
+      getRuntime: () => runtime as unknown as BrowserRuntime,
+      delay: immediateDelay,
+    });
+
+    await assert.rejects(
+      navigateActiveTab.execute({ url: "https://evilzhipin.com" }, createTestContext()),
+      (error) => {
+        assert.ok(error instanceof StructuredToolError);
+        assert.equal(error.payload.code, "action_denied");
+        assert.match(error.payload.message, /domainAllowlist/);
+        return true;
+      },
+    );
+
+    assert.deepEqual(runtime.openedUrls, []);
+    assert.deepEqual(runtime.activatedTargets, []);
+    assert.deepEqual(runtime.connectedTargets, []);
+    assert.equal(controller.closeCalls.length, 0);
+  });
+
+  it("returns needs_confirmation for confirm action policy before CDP calls", async () => {
+    const controller = createFakeController([]);
+    const runtime = createFakeRuntime([], controller, {
+      actionPolicy: "confirm",
+    });
+    const ctxManager = createFakeContextManager();
+
+    setNavigateActiveTabDepsForTests({
+      getContextManager: () => ctxManager,
+      getRuntime: () => runtime as unknown as BrowserRuntime,
+      delay: immediateDelay,
+    });
+
+    await assert.rejects(
+      navigateActiveTab.execute({ url: "https://example.com" }, createTestContext()),
+      (error) => {
+        assert.ok(error instanceof StructuredToolError);
+        assert.equal(error.payload.code, "needs_confirmation");
+        assert.match(error.payload.message, /requires confirmation/);
+        assert.equal(typeof error.payload.details?.["approvalRequest"], "object");
+        return true;
+      },
+    );
+
+    assert.deepEqual(runtime.openedUrls, []);
+    assert.deepEqual(runtime.activatedTargets, []);
+    assert.deepEqual(runtime.connectedTargets, []);
+    assert.equal(controller.closeCalls.length, 0);
+  });
+
+  it("executes confirm-gated navigation when retried with matching approval", async () => {
+    const controller = createFakeController([
+      {
+        url: "https://example.com/dashboard",
+        title: "Example",
+        readyState: "complete",
+      },
+    ]);
+    const runtime = createFakeRuntime([], controller, {
+      actionPolicy: "confirm",
+    });
+    const ctxManager = createFakeContextManager();
+
+    setNavigateActiveTabDepsForTests({
+      getContextManager: () => ctxManager,
+      getRuntime: () => runtime as unknown as BrowserRuntime,
+      delay: immediateDelay,
+    });
+
+    let approvalId = "";
+    await assert.rejects(
+      navigateActiveTab.execute({ url: "https://example.com/dashboard" }, createTestContext()),
+      (error) => {
+        approvalId = readApprovalIdFromError(error);
+        return true;
+      },
+    );
+
+    const result = await navigateActiveTab.execute(
+      {
+        url: "https://example.com/dashboard",
+        browserActionApproval: { id: approvalId },
+      },
+      createTestContext(),
+    );
+
+    assert.equal(result.success, true);
+    assert.deepEqual(runtime.openedUrls, ["https://example.com/dashboard"]);
+    assert.deepEqual(runtime.connectedTargets, ["target-opened-1"]);
+    assert.equal(controller.closeCalls.length, 1);
   });
 });

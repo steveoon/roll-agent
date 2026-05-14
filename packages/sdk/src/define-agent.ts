@@ -13,6 +13,7 @@ import type {
 import { createAgentLogger } from "./context.ts";
 import type { AgentContext, LogLevel } from "./context.ts";
 import { getMcpCompatibleInputSchema, parseToolInput } from "./mcp-schema.ts";
+import { isStructuredToolError } from "./tool-error.ts";
 
 /** defineAgent 额外选项 */
 export interface DefineAgentOptions {
@@ -318,14 +319,42 @@ function registerTool(server: McpServer, tool: AnyToolDefinition, ctx: AgentCont
       description: tool.description,
       inputSchema: getMcpCompatibleInputSchema(tool.input),
     },
-    async (params: Record<string, unknown>) => {
-      const parsedInput = await parseToolInput(tool.input, params);
-      const result = await (
-        tool.execute as (input: unknown, ctx: AgentContext) => Promise<unknown>
-      )(parsedInput, ctx);
-      return {
-        content: [{ type: "text" as const, text: JSON.stringify(result) }],
-      };
-    },
+    async (params: Record<string, unknown>) => await executeToolForMcp(tool, ctx, params),
   );
+}
+
+type McpTextToolResult = {
+  isError?: true;
+  content: [
+    {
+      type: "text";
+      text: string;
+    },
+  ];
+};
+
+export async function executeToolForMcp(
+  tool: AnyToolDefinition,
+  ctx: AgentContext,
+  params: Record<string, unknown>,
+): Promise<McpTextToolResult> {
+  const parsedInput = await parseToolInput(tool.input, params);
+  try {
+    const result = await (tool.execute as (input: unknown, ctx: AgentContext) => Promise<unknown>)(
+      parsedInput,
+      ctx,
+    );
+    return {
+      content: [{ type: "text", text: JSON.stringify(result) }],
+    };
+  } catch (error) {
+    if (isStructuredToolError(error)) {
+      return {
+        isError: true,
+        content: [{ type: "text", text: JSON.stringify(error.payload) }],
+      };
+    }
+
+    throw error;
+  }
 }

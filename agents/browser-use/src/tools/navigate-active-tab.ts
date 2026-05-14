@@ -9,11 +9,15 @@ import type {
   NativeCdpController,
   Platform,
 } from "@roll-agent/browser";
-import { BrowserPageInfoSchema } from "@roll-agent/browser";
+import { BrowserActionApprovalSchema, BrowserPageInfoSchema } from "@roll-agent/browser";
 import { z } from "zod";
 import { getContextManager, getRuntime } from "../runtime-holder.ts";
 import { detectPlatformFromUrl, matchesPlatformHost } from "../platforms.ts";
 import { toNativePageInfo } from "../page-info.ts";
+import {
+  assertBrowserActionAllowed,
+  createBrowserActionPolicyOptions,
+} from "../browser-security.ts";
 
 const NATIVE_NAVIGATION_READY_TIMEOUT_MS = 15_000;
 const NATIVE_NAVIGATION_READY_POLL_MS = 250;
@@ -21,6 +25,9 @@ const ZHIPIN_BLOCKED_PATH_PREFIXES = ["/web/chat"] as const;
 
 const NavigateActiveTabInputSchema = z.object({
   url: z.string().url().describe("要导航到的目标 URL"),
+  browserActionApproval: BrowserActionApprovalSchema.optional().describe(
+    "当 actionPolicy=confirm 返回 needs_confirmation 后，由 orchestrator 原样带回的批准 ID。",
+  ),
 });
 
 const NavigateActiveTabOutputSchema = z.object({
@@ -246,6 +253,14 @@ export const navigateActiveTab = defineTool({
     const inputPlatform = deps.detectPlatformFromUrl(input.url);
 
     assertNavigationAllowed(input.url, inputPlatform);
+    const guard = assertBrowserActionAllowed(ctx, runtime, {
+      action: "navigate",
+      target: input.url,
+      url: input.url,
+      ...(input.browserActionApproval !== undefined
+        ? { approval: input.browserActionApproval }
+        : {}),
+    });
     ctx.logger.info(`Native navigating to ${input.url}`);
 
     const target = await resolveNativeNavigationTarget(
@@ -255,7 +270,13 @@ export const navigateActiveTab = defineTool({
       input.url,
       ctx.logger,
     );
-    const controller = await runtime.connectNativePage(target.page);
+    const controller = await runtime.connectNativePage(target.page, {
+      ...createBrowserActionPolicyOptions(ctx, runtime, {
+        approval: input.browserActionApproval,
+        approvedByConfirmation: guard.approvedByConfirmation,
+        logActions: false,
+      }),
+    });
 
     try {
       await controller.bringToFront().catch(() => {});

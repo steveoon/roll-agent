@@ -2,6 +2,7 @@ import type {
   BrowserContextManager,
   BrowserInspectablePage,
   BrowserRuntime,
+  BrowserActionPolicyOptions,
   Page,
   Platform,
 } from "@roll-agent/browser";
@@ -25,6 +26,7 @@ export async function findOpenPlatformTarget(
 export async function openPlatformHomeTarget(
   runtime: BrowserRuntime,
   platform: Platform,
+  options: BrowserActionPolicyOptions = {},
 ): Promise<{ page: BrowserInspectablePage; reusedExistingPage: boolean }> {
   const matchedPage = await findOpenPlatformTarget(runtime, platform);
   if (matchedPage) {
@@ -35,7 +37,7 @@ export async function openPlatformHomeTarget(
     };
   }
 
-  const page = await runtime.openNativePage(PLATFORM_HOME[platform]);
+  const page = await runtime.openNativePage(PLATFORM_HOME[platform], options);
   return {
     page,
     reusedExistingPage: false,
