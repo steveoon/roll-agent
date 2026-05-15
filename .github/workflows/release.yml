@@ -39,6 +39,12 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
+      - name: Dependency denylist
+        run: pnpm verify:dependency-denylist
+
+      - name: Security audit
+        run: pnpm security:audit
+
       - name: Typecheck
         run: pnpm typecheck
 

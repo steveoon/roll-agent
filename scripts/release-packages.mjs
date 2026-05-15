@@ -44,6 +44,7 @@ const BLOCKED_PUBLISH_LIFECYCLE_SCRIPTS = [
 ];
 
 async function main() {
+  await run("pnpm", ["verify:dependency-denylist"], { env: withoutPublishSecrets(process.env) });
   await run("pnpm", ["build"], { env: withoutPublishSecrets(process.env) });
   await run("pnpm", ["verify:published-packages"], { env: withoutPublishSecrets(process.env) });
   await assertPublishSurface();
