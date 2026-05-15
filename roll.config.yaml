@@ -24,3 +24,10 @@ agents:
     browser-use-agent:
       REPLY_AUTHORITY_KEYS_URL: https://reply-authority.duliday.com/.well-known/reply-authority-keys
       BROWSER_VISUAL_CURSOR: "true"
+      BROWSER_SECURITY_JSON: '{"domainAllowlist":["zhipin.com"],"actionPolicy":"log"}'
+      BROWSER_USE_POLICY_JSON: '{"tools":{"zhipin_send_prepared_reply":{"policy":"confirm"}}}'
+      REPLY_AUTHORITY_URL: https://reply-authority.duliday.com
+      REPLY_AUTHORITY_BEARER_TOKEN: ${REPLY_AUTHORITY_BEARER_TOKEN}
+      RECRUITMENT_EVENTS_DEFAULT_AGENT_ID: "siwen-boss-test"
+      RECRUITMENT_EVENTS_API_TOKEN: ${RECRUITMENT_EVENTS_API_TOKEN}
+      REPLY_AUTHORITY_TIMEOUT_MS: "60000"

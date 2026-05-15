@@ -14,7 +14,9 @@ metadata:
 - 先启动 `browser-use-agent` HTTP 常驻服务；浏览器 session 跨调用持久。
 - 通过 Roll 调用本 Agent 时，先用 `roll skills get browser-use-agent --include-references --json` 读取当前说明和 `references/*`，再用 `roll agent tools browser-use-agent --json` 读取真实 schema。
 - 完整 `inputSchema` 以 `roll agent tools browser-use-agent --json` 为准。
-- `REPLY_AUTHORITY_KEYS_URL` 是必填环境变量；`roll doctor` 会通过 `references/env.yaml` 和 `browser_status.effectiveEnvSources` 检查它是否声明并在运行态生效。
+- `REPLY_AUTHORITY_URL` / `REPLY_AUTHORITY_BEARER_TOKEN` 是生成智能回复预览的必填环境变量；`REPLY_AUTHORITY_KEYS_URL` 是发送预备回复前验签的必填环境变量。`roll doctor` 会通过 `references/env.yaml` 和 `browser_status.effectiveEnvSources` 检查它们是否声明并在运行态生效。
+- `BROWSER_SECURITY_JSON` 可选配置浏览器硬安全策略；`browser_status.security` 会返回实际加载后的 `domainAllowlist`、`maxPageContentBytes`、`maxSnapshotNodes` 和 `actionPolicy`。Boss 日常编排建议使用 `actionPolicy:"log"`，`confirm/deny` 只作为高级调试模式。
+- `BROWSER_USE_POLICY_JSON` 可选配置 browser-use 工具级业务策略；日常推荐只把 `zhipin_send_prepared_reply` 配为 `confirm`。
 - 长任务前或状态异常时先跑 `roll doctor --fix-plan --json`；仅对配置迁移、`agents.dataDir`、孤儿 runtime 元数据这类安全项才使用 `roll doctor --fix --json`。
 - 页内反馈默认开启：
   - `BROWSER_VISUAL_CURSOR`：native CDP 点击/拖拽/滚动前显示同源虚拟鼠标轨迹和点击波纹；简历弹窗等 Playwright-backed 工具仍使用旧虚拟指针。
@@ -25,7 +27,7 @@ metadata:
 
 | Tool | 用途 |
 | --- | --- |
-| `browser_status()` | 查询浏览器 runtime、session、Reply Authority 公钥预加载状态、视觉反馈开关和 env 指纹。 |
+| `browser_status()` | 查询浏览器 runtime、session、Reply Authority 公钥预加载状态、视觉反馈开关、安全策略和 env 指纹。 |
 | `open_platform(platform)` | 通过 native CDP 打开并聚焦招聘平台主页；登录前不触发 Playwright attach。 |
 | `list_pages(platform?)` | 通过 native CDP 列出浏览器页面和 `pageId`。 |
 | `select_page(platform, pageId)` | 将指定页面绑定为平台活跃页；登录前优先走 native target 激活。 |
@@ -51,8 +53,8 @@ metadata:
 | `zhipin_open_chat_page()` | native CDP | 点击左侧导航切回「沟通」。 |
 | `zhipin_open_chat(conversationId?, candidateName?, index?, preferUnread?)` | native CDP | 打开目标聊天；匹配优先级为 `conversationId` > `candidateName` > `index`。 |
 | `zhipin_get_candidate_info(conversationId?, candidateName?, index?, maxMessages?)` | native CDP | 提取候选人资料、聊天记录、`conversationId`、`candidateId` 和页面职位信号。 |
-| `zhipin_generate_reply_preview(conversationId?, candidateName?, index?, maxMessages?)` | native CDP | 读取聊天上下文，调用 Reply Authority SSE 流式生成回复，并在浏览器内展示阶段与临时草稿；返回 `preparedReplyId`，不返回 `signedEnvelope`。 |
-| `zhipin_send_prepared_reply(preparedReplyId)` | native CDP | 发送 `zhipin_generate_reply_preview` 生成的预备回复；内部取回并验签 envelope；调用方只需要传 `preparedReplyId`，不需要保存或传递 `signedEnvelope`。 |
+| `zhipin_generate_reply_preview(conversationId?, candidateName?, index?, maxMessages?, reasoning?)` | native CDP | 读取聊天上下文，调用 Reply Authority SSE 流式生成回复，并在浏览器内展示阶段与临时草稿；可用 `reasoning` 控制是否请求 thinking/reasoning；返回 `preparedReplyId`，不返回 `signedEnvelope`。 |
+| `zhipin_send_prepared_reply(preparedReplyId, toolActionApproval?, browserActionApproval?)` | native CDP | 发送 `zhipin_generate_reply_preview` 生成的预备回复；内部取回并验签 envelope；若 `BROWSER_USE_POLICY_JSON.tools.zhipin_send_prepared_reply.policy="confirm"`，首次调用返回 `needs_confirmation`，确认后带 `toolActionApproval` 重试；若同时启用 `BROWSER_SECURITY_JSON.actionPolicy="confirm"`，还需按返回的 `browserActionApproval` 再次重试。 |
 | `zhipin_exchange_wechat(conversationId?, candidateName?, index?)` | native CDP | 点击「换微信」和确认弹窗，优先按 `conversationId` 定位聊天。 |
 | `zhipin_get_username()` | native CDP | 读取当前登录招聘者用户名；用于 `recruiterUsername` / `recruiterBinding` 链路。 |
 
@@ -88,27 +90,28 @@ metadata:
 3. 调 `zhipin_open_chat`、`zhipin_get_candidate_info`、`zhipin_exchange_wechat` 时优先传 `conversationId`。
 4. 生成聊天回复优先调用 `zhipin_generate_reply_preview(conversationId)`；它会打开目标聊天、在浏览器内展示 Reply Authority SSE 的阶段、工具执行状态和临时草稿，不需要先额外调用 `zhipin_open_chat`。
 5. `draft.delta` 只能展示，不能发送；真正可发送内容只来自 Reply Authority `final` 事件生成的内部签名结果。
-6. 发送回复只能调用 `zhipin_send_prepared_reply(preparedReplyId)`；不要构造裸文本发送路径，也不要保存或传递 `signedEnvelope`。
+6. 发送回复只能调用 `zhipin_send_prepared_reply(preparedReplyId, toolActionApproval?, browserActionApproval?)`；主输入只能使用 `preparedReplyId`，确认重试时可原样带回 `needs_confirmation` 返回的 approval；不要构造裸文本发送路径，也不要保存或传递 `signedEnvelope`。
 7. `zhipin_send_prepared_reply` 会校验 envelope 的 `conversationId + candidateId + recruiterBinding`，当前页面目标或招聘者不一致时拒绝。
-8. `preferredBrand` 只来自 `zhipin_get_candidate_info` 对 `communicationPosition` 的连字符格式解析；不要用通用岗位名或候选人公司名伪造。
-9. 推荐页岗位筛选优先调用 `zhipin_list_recommend_jobs()`；若返回 `canSwitch:false`，说明当前账号/页面没有可切换目标，不要继续盲试岗位名。
-10. `jobRef` 来自 `zhipin_list_recommend_jobs` 输出，格式如 `@j1`；选择岗位时优先传 `zhipin_select_recommend_job({ jobRef })`。
-11. `jobRef` 只对最近一次岗位下拉快照有意义；筛选、搜索、刷新或页面重开后先重新调用 `zhipin_list_recommend_jobs`。
-12. 推荐页岗位筛选的稳定主键是 `zhipin_list_recommend_jobs` / `zhipin_select_recommend_job` 返回的 `value`；已知 `value` 时传 `jobValue`。
-13. 推荐岗位只知道标题时传 `jobName`；`index` 只表示当前岗位下拉快照，不要在搜索、筛选、刷新或跨步骤后复用。
-14. `zhipin_select_recommend_job` 返回 `status:"selected"` 或 `status:"already_selected"` 都表示目标岗位已生效。
-15. `zhipin_select_recommend_job` 返回 `status:"not_found"` 时不要盲目重试；先调用 `zhipin_list_recommend_jobs`，再选择最接近岗位的 `jobRef` 或 `value`。
-16. 只有明确需要重新点击已选中岗位项时才传 `forceClick:true`；默认不要传，避免无意义重复点击。
-17. `zhipin_filter_recommend_candidates` 返回 `status:"requires_vip"` 时不要反复尝试绕过筛选 UI；当前账号没有权限使用该筛选，改为直接读取当前推荐列表或调整业务策略。
-18. 聊天消息列表不产生 `candidateRef`；聊天回复链路使用 `conversationId` / `candidateId`，推荐候选人链路才使用 `candidateRef`。
-19. 推荐候选人列表的 `candidateRef` 来自 `zhipin_get_candidate_list` 输出，格式如 `@c1`；后续 `zhipin_say_hello` / `zhipin_open_resume` 优先传它。
-20. `candidateRef` 只对最近一次推荐列表快照有意义；筛选、搜索、滚动加载、刷新或页面重开后先重新调用 `zhipin_get_candidate_list`。
-21. 不要自行构造 `jobRef` / `candidateRef`；只能传本 Agent 刚返回的 ref。
-22. 调 `zhipin_say_hello` 前，先从 `zhipin_get_candidate_list` 结果中过滤 `buttonText:"打招呼"` 的候选人；`buttonText` 为空通常表示已经打过招呼。
-23. 如果业务有年龄、资格或岗位匹配约束，必须先按 `age` / `expectedPosition` / `tags` 等列表字段过滤；不要把刚读到的全部 `candidateRefs` 盲目提交。
-24. `zhipin_say_hello({ candidateRefs })` 支持同一快照内连续提交多个 ref；若返回“候选人引用已过期”，说明 BOSS 列表已重排，重新执行 `zhipin_get_candidate_list` 后只重试剩余目标。
-25. 高频连续 tool call 可用 `roll run --batch-stdin --json` 批量提交，但每项仍要显式声明 `agent` / `tool` / `input`，不要假设 batch 自动传递上一步输出。
-26. 不要用 `navigate_active_tab` 直接跳转 `https://www.zhipin.com/web/chat/*`；聊天页用 `zhipin_open_chat_page()`，推荐页用 `zhipin_open_recommend_page()`。
+8. 需要更强推理时，可给 `zhipin_generate_reply_preview` 传 `reasoning:{enabled:true, effort:"low"|"medium"|"high", scope:"reply"|"all"}`；不传则沿用 Reply Authority Service 默认策略。
+9. `preferredBrand` 只来自 `zhipin_get_candidate_info` 对 `communicationPosition` 的连字符格式解析；不要用通用岗位名或候选人公司名伪造。
+10. 推荐页岗位筛选优先调用 `zhipin_list_recommend_jobs()`；若返回 `canSwitch:false`，说明当前账号/页面没有可切换目标，不要继续盲试岗位名。
+11. `jobRef` 来自 `zhipin_list_recommend_jobs` 输出，格式如 `@j1`；选择岗位时优先传 `zhipin_select_recommend_job({ jobRef })`。
+12. `jobRef` 只对最近一次岗位下拉快照有意义；筛选、搜索、刷新或页面重开后先重新调用 `zhipin_list_recommend_jobs`。
+13. 推荐页岗位筛选的稳定主键是 `zhipin_list_recommend_jobs` / `zhipin_select_recommend_job` 返回的 `value`；已知 `value` 时传 `jobValue`。
+14. 推荐岗位只知道标题时传 `jobName`；`index` 只表示当前岗位下拉快照，不要在搜索、筛选、刷新或跨步骤后复用。
+15. `zhipin_select_recommend_job` 返回 `status:"selected"` 或 `status:"already_selected"` 都表示目标岗位已生效。
+16. `zhipin_select_recommend_job` 返回 `status:"not_found"` 时不要盲目重试；先调用 `zhipin_list_recommend_jobs`，再选择最接近岗位的 `jobRef` 或 `value`。
+17. 只有明确需要重新点击已选中岗位项时才传 `forceClick:true`；默认不要传，避免无意义重复点击。
+18. `zhipin_filter_recommend_candidates` 返回 `status:"requires_vip"` 时不要反复尝试绕过筛选 UI；当前账号没有权限使用该筛选，改为直接读取当前推荐列表或调整业务策略。
+19. 聊天消息列表不产生 `candidateRef`；聊天回复链路使用 `conversationId` / `candidateId`，推荐候选人链路才使用 `candidateRef`。
+20. 推荐候选人列表的 `candidateRef` 来自 `zhipin_get_candidate_list` 输出，格式如 `@c1`；后续 `zhipin_say_hello` / `zhipin_open_resume` 优先传它。
+21. `candidateRef` 只对最近一次推荐列表快照有意义；筛选、搜索、滚动加载、刷新或页面重开后先重新调用 `zhipin_get_candidate_list`。
+22. 不要自行构造 `jobRef` / `candidateRef`；只能传本 Agent 刚返回的 ref。
+23. 调 `zhipin_say_hello` 前，先从 `zhipin_get_candidate_list` 结果中过滤 `buttonText:"打招呼"` 的候选人；`buttonText` 为空通常表示已经打过招呼。
+24. 如果业务有年龄、资格或岗位匹配约束，必须先按 `age` / `expectedPosition` / `tags` 等列表字段过滤；不要把刚读到的全部 `candidateRefs` 盲目提交。
+25. `zhipin_say_hello({ candidateRefs })` 支持同一快照内连续提交多个 ref；若返回“候选人引用已过期”，说明 BOSS 列表已重排，重新执行 `zhipin_get_candidate_list` 后只重试剩余目标。
+26. 高频连续 tool call 可用 `roll run --batch-stdin --json` 批量提交，但每项仍要显式声明 `agent` / `tool` / `input`，不要假设 batch 自动传递上一步输出。
+27. 不要用 `navigate_active_tab` 直接跳转 `https://www.zhipin.com/web/chat/*`；聊天页用 `zhipin_open_chat_page()`，推荐页用 `zhipin_open_recommend_page()`。
 
 ## 典型链路
 

@@ -22,6 +22,37 @@ export const BROWSER_RUNTIME_MODES = ["managed-cdp", "remote-cdp", "existing-ses
 export const BrowserRuntimeModeSchema = z.enum(BROWSER_RUNTIME_MODES);
 export type BrowserRuntimeMode = z.infer<typeof BrowserRuntimeModeSchema>;
 
+export const BROWSER_ACTION_POLICIES = ["log", "deny", "confirm"] as const;
+export const BrowserActionPolicySchema = z.enum(BROWSER_ACTION_POLICIES);
+export type BrowserActionPolicy = z.infer<typeof BrowserActionPolicySchema>;
+
+export const BrowserActionApprovalSchema = z.object({
+  id: z.string().trim().min(1),
+});
+export type BrowserActionApproval = z.infer<typeof BrowserActionApprovalSchema>;
+
+const BrowserSecurityDomainSchema = z
+  .string()
+  .trim()
+  .min(1)
+  .transform((value) => value.toLowerCase())
+  .refine((value) => !value.includes("/") && !value.includes(":") && !value.endsWith("."), {
+    message: "domainAllowlist entries must be bare domain names such as zhipin.com",
+  });
+
+export const BrowserSecurityConfigSchema = z.object({
+  /** 空数组表示不限制导航域名 */
+  domainAllowlist: z.array(BrowserSecurityDomainSchema).default([]),
+  /** 页面正文类输出上限，超限截断并返回截断元信息 */
+  maxPageContentBytes: z.number().int().positive().default(102_400),
+  /** AX snapshot 节点数量上限，供 browser_snapshot 复用 */
+  maxSnapshotNodes: z.number().int().positive().default(500),
+  /** 浏览器动作策略：log 执行并记录，deny/confirm 返回结构化错误 */
+  actionPolicy: BrowserActionPolicySchema.default("log"),
+});
+
+export type BrowserSecurityConfig = z.infer<typeof BrowserSecurityConfigSchema>;
+
 export const BrowserRuntimeConfigSchema = z
   .object({
     /**
@@ -53,6 +84,8 @@ export const BrowserRuntimeConfigSchema = z
     args: z.array(z.string()).optional(),
     /** Session 持久化目录（默认 ~/.roll-agent/browser/sessions） */
     sessionsDir: z.string().optional(),
+    /** 浏览器安全策略，默认宽松兼容现有行为 */
+    security: BrowserSecurityConfigSchema.default({}),
   })
   .superRefine((config, ctx) => {
     if (
@@ -123,6 +156,9 @@ export const PageSnapshotSchema = z.object({
   url: z.string(),
   title: z.string(),
   html: z.string(),
+  truncated: z.boolean().optional(),
+  originalBytes: z.number().int().nonnegative().optional(),
+  returnedBytes: z.number().int().nonnegative().optional(),
 });
 
 export type PageSnapshot = z.infer<typeof PageSnapshotSchema>;

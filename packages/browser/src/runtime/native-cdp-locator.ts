@@ -198,6 +198,10 @@ export class NativeCdpLocator {
   }
 
   async click(options: NativeCdpLocatorClickOptions = {}): Promise<NativeCdpLocatorClickResult> {
+    this.controller.preflightAction({
+      action: "click",
+      target: this.selector,
+    });
     const target = await this.resolveTarget({
       scrollIntoView: true,
       ...(options.timeoutMs !== undefined ? { timeoutMs: options.timeoutMs } : {}),
@@ -243,7 +247,9 @@ export class NativeCdpLocator {
     return { success: true, target };
   }
 
-  private async resolveTarget(options: { readonly scrollIntoView?: boolean; readonly timeoutMs?: number } = {}) {
+  private async resolveTarget(
+    options: { readonly scrollIntoView?: boolean; readonly timeoutMs?: number } = {},
+  ) {
     return toLocatorTarget(
       await this.controller.evaluateJson(
         this.buildExpression(options.scrollIntoView ? "targetWithScroll" : "target"),

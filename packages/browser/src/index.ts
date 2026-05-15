@@ -7,11 +7,15 @@ export {
   PlatformSchema,
   BROWSER_CHANNELS,
   BROWSER_RUNTIME_MODES,
+  BROWSER_ACTION_POLICIES,
+  BrowserActionPolicySchema,
+  BrowserActionApprovalSchema,
   BrowserChannelSchema,
   BrowserPageInfoSchema,
   BrowserLoginStateSourceSchema,
   BrowserRuntimeModeSchema,
   BrowserRuntimeConfigSchema,
+  BrowserSecurityConfigSchema,
   BrowserSessionInfoSchema,
   BrowserStatusSchema,
   PageSnapshotSchema,
@@ -19,11 +23,14 @@ export {
 } from "./types/index.ts";
 export type {
   Platform,
+  BrowserActionPolicy,
+  BrowserActionApproval,
   BrowserChannel,
   BrowserPageInfo,
   BrowserLoginStateSource,
   BrowserRuntimeMode,
   BrowserRuntimeConfig,
+  BrowserSecurityConfig,
   BrowserSessionInfo,
   BrowserStatus,
   PageSnapshot,
@@ -54,6 +61,26 @@ export type {
 } from "./runtime/native-cdp-locator.ts";
 export type { BrowserInspectablePage } from "./runtime/native-cdp-page-client.ts";
 export { BrowserContextManager } from "./runtime/context-manager.ts";
+export {
+  BrowserActionPolicyError,
+  assertBrowserActionPreflight,
+  isBrowserActionPolicyError,
+  isUrlAllowedByDomainAllowlist,
+  preflightBrowserAction,
+  truncateTextToUtf8Bytes,
+} from "./runtime/security.ts";
+export type {
+  BrowserActionLogHandler,
+  BrowserActionApprovalValidationInput,
+  BrowserActionApprovalValidator,
+  BrowserActionPolicyOptions,
+  BrowserActionPreflightDetails,
+  BrowserActionPreflightInput,
+  BrowserActionPreflightResult,
+  BrowserSecurityErrorPayload,
+  BrowserSecurityFailureCode,
+  TextTruncationResult,
+} from "./runtime/security.ts";
 
 // Session
 export { SessionStore } from "./session/session-store.ts";

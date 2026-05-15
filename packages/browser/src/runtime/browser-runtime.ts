@@ -12,6 +12,8 @@ import type { NativeCdpControllerOptions } from "./native-cdp-controller.ts";
 import { NativeCdpPageClient } from "./native-cdp-page-client.ts";
 import type { BrowserInspectablePage } from "./native-cdp-page-client.ts";
 import { decorateManagedProfile, ensureProfileCleanExit } from "./profile-decoration.ts";
+import { assertBrowserActionPreflight } from "./security.ts";
+import type { BrowserActionPolicyOptions } from "./security.ts";
 
 const MANAGED_CDP_READY_TIMEOUT_MS = 15_000;
 const MANAGED_CDP_READY_POLL_MS = 250;
@@ -80,9 +82,7 @@ type FetchCdpEndpoint = (
   init?: Parameters<typeof globalThis.fetch>[1],
 ) => ReturnType<typeof globalThis.fetch>;
 
-type ConnectNativeCdpPage = (
-  options: NativeCdpControllerOptions,
-) => Promise<NativeCdpController>;
+type ConnectNativeCdpPage = (options: NativeCdpControllerOptions) => Promise<NativeCdpController>;
 
 type BrowserRuntimeDependencies = {
   readonly spawn: SpawnBrowserProcess;
@@ -164,10 +164,7 @@ function resolveInspectableCdpBaseUrl(config: BrowserRuntimeConfig): string {
   }
 }
 
-async function isHttpCdpReady(
-  cdpUrl: string,
-  deps: BrowserRuntimeDependencies,
-): Promise<boolean> {
+async function isHttpCdpReady(cdpUrl: string, deps: BrowserRuntimeDependencies): Promise<boolean> {
   try {
     const versionUrl = new URL("/json/version", cdpUrl);
     const response = await deps.fetch(versionUrl, {
@@ -231,10 +228,7 @@ export class BrowserRuntime {
   private readonly deps: BrowserRuntimeDependencies;
   private ownership: BrowserRuntimeOwnership = { ownsBrowserProcess: false };
 
-  constructor(
-    config: BrowserRuntimeConfig,
-    deps: Partial<BrowserRuntimeDependencies> = {},
-  ) {
+  constructor(config: BrowserRuntimeConfig, deps: Partial<BrowserRuntimeDependencies> = {}) {
     this.config = config;
     this.deps = {
       ...DEFAULT_BROWSER_RUNTIME_DEPENDENCIES,
@@ -402,7 +396,19 @@ export class BrowserRuntime {
     await this.getNativePageClient().activatePage(targetId);
   }
 
-  async openNativePage(url: string): Promise<BrowserInspectablePage> {
+  async openNativePage(
+    url: string,
+    options: BrowserActionPolicyOptions = {},
+  ): Promise<BrowserInspectablePage> {
+    assertBrowserActionPreflight({
+      action: "navigate",
+      target: url,
+      url,
+      security: options.security ?? this.config.security,
+      ...(options.approval !== undefined ? { approval: options.approval } : {}),
+      ...(options.approveAction !== undefined ? { approveAction: options.approveAction } : {}),
+      ...(options.onActionLog !== undefined ? { onActionLog: options.onActionLog } : {}),
+    });
     return await this.getNativePageClient().openPage(url);
   }
 
@@ -412,7 +418,7 @@ export class BrowserRuntime {
       readonly commandTimeoutMs?: number;
       readonly connectTimeoutMs?: number;
       readonly allowUnsafeRuntimeEnableForDiagnostics?: boolean;
-    } = {},
+    } & BrowserActionPolicyOptions = {},
   ): Promise<NativeCdpController> {
     const page =
       typeof pageOrTargetId === "string"

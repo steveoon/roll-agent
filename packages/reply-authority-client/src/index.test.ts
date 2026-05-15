@@ -3,6 +3,7 @@ import { afterEach, describe, it } from "node:test";
 import {
   collectFinalSignedReply,
   generateSignedReply,
+  GenerateReplyToolInputSchema,
   parseSseFrame,
   ReplyAuthorityRequestError,
   streamGenerateSignedReply,
@@ -317,5 +318,95 @@ describe("@roll-agent/reply-authority-client", () => {
 
     assert.equal(final.signedEnvelope, "payload.signature");
     assert.equal((capturedBody as { readonly stream?: unknown } | undefined)?.stream, undefined);
+  });
+
+  it("preserves modelConfig.reasoning in one-shot requests", async () => {
+    process.env.REPLY_AUTHORITY_URL = "https://reply-authority.duliday.com";
+    process.env.REPLY_AUTHORITY_BEARER_TOKEN = "client-token";
+
+    const parsed = GenerateReplyToolInputSchema.parse({
+      ...VALID_REQUEST,
+      modelConfig: {
+        reasoning: {
+          enabled: true,
+          effort: "high",
+          scope: "all",
+        },
+      },
+    });
+    assert.deepEqual(parsed.modelConfig?.reasoning, {
+      enabled: true,
+      effort: "high",
+      scope: "all",
+    });
+
+    let capturedBody: unknown;
+    globalThis.fetch = async (_input: string | URL | Request, init?: RequestInit) => {
+      capturedBody = JSON.parse(String(init?.body)) as unknown;
+
+      return new Response(
+        JSON.stringify({
+          suggestedReply: "感谢你的关注！我们这边薪资是综合计算的。",
+          signedEnvelope: "payload.signature",
+          envelopeExp: 1_712_736_600,
+          confidence: 0.85,
+          stage: "job_consultation",
+          replyPolicySource: "file",
+        }),
+        {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        },
+      );
+    };
+
+    await generateSignedReply(parsed);
+
+    assert.deepEqual(
+      (capturedBody as { readonly modelConfig?: { readonly reasoning?: unknown } } | undefined)
+        ?.modelConfig?.reasoning,
+      {
+        enabled: true,
+        effort: "high",
+        scope: "all",
+      },
+    );
+  });
+
+  it("preserves modelConfig.reasoning in streaming requests", async () => {
+    process.env.REPLY_AUTHORITY_URL = "https://reply-authority.duliday.com";
+    process.env.REPLY_AUTHORITY_BEARER_TOKEN = "client-token";
+
+    let capturedBody: unknown;
+    globalThis.fetch = async (_input: string | URL | Request, init?: RequestInit) => {
+      capturedBody = JSON.parse(String(init?.body)) as unknown;
+      return sseResponse([{ ...FINAL_EVENT, sequence: 1 }]);
+    };
+
+    const events: ReplyStreamEvent[] = [];
+    for await (const event of streamGenerateSignedReply({
+      ...VALID_REQUEST,
+      modelConfig: {
+        reasoning: {
+          enabled: false,
+        },
+      },
+    })) {
+      events.push(event);
+    }
+
+    assert.equal(events[0]?.type, "final");
+    assert.deepEqual(
+      (
+        capturedBody as
+          | {
+              readonly stream?: unknown;
+              readonly modelConfig?: { readonly reasoning?: unknown };
+            }
+          | undefined
+      )?.modelConfig?.reasoning,
+      { enabled: false },
+    );
+    assert.equal((capturedBody as { readonly stream?: unknown } | undefined)?.stream, true);
   });
 });

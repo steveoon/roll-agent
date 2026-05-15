@@ -14,11 +14,42 @@ export const EffectiveEnvSourceSchema = z.object({
   fingerprint: z.string().regex(EFFECTIVE_ENV_FINGERPRINT_PATTERN).optional(),
 });
 
-export const AgentRuntimeEnvDiagnosticPayloadSchema = z.object({
-  effectiveEnvSources: z.record(EffectiveEnvSourceSchema),
+export const BrowserSecurityDiagnosticSchema = z.object({
+  domainAllowlist: z.array(z.string()),
+  maxPageContentBytes: z.number(),
+  maxSnapshotNodes: z.number(),
+  actionPolicy: z.enum(["log", "deny", "confirm"]),
 });
 
-export type AgentRuntimeEnvDiagnosticPayload = z.infer<typeof AgentRuntimeEnvDiagnosticPayloadSchema>;
+export const BrowserUseToolPolicyDiagnosticSchema = z.object({
+  approvalTtlMs: z.number(),
+  tools: z.record(
+    z.object({
+      policy: z.enum(["log", "deny", "confirm"]),
+    }),
+  ),
+});
+
+export const BrowserUsePolicyWarningDiagnosticSchema = z.object({
+  code: z.string(),
+  message: z.string(),
+});
+
+export const AgentRuntimeEnvDiagnosticPayloadSchema = z.object({
+  effectiveEnvSources: z.record(EffectiveEnvSourceSchema),
+  security: BrowserSecurityDiagnosticSchema.optional(),
+  toolPolicy: BrowserUseToolPolicyDiagnosticSchema.optional(),
+  policyWarnings: z.array(BrowserUsePolicyWarningDiagnosticSchema).optional(),
+});
+
+export type AgentRuntimeEnvDiagnosticPayload = z.infer<
+  typeof AgentRuntimeEnvDiagnosticPayloadSchema
+>;
+export type BrowserSecurityDiagnostic = z.infer<typeof BrowserSecurityDiagnosticSchema>;
+export type BrowserUseToolPolicyDiagnostic = z.infer<typeof BrowserUseToolPolicyDiagnosticSchema>;
+export type BrowserUsePolicyWarningDiagnostic = z.infer<
+  typeof BrowserUsePolicyWarningDiagnosticSchema
+>;
 
 export type AgentRuntimeEnvInspection =
   | {
@@ -128,7 +159,9 @@ export function inspectAgentRuntimeEnvRequirements(
   };
 }
 
-export function summarizeAgentRuntimeEnvReport(report: AgentRuntimeEnvCheckReport): AgentRuntimeEnvSummary {
+export function summarizeAgentRuntimeEnvReport(
+  report: AgentRuntimeEnvCheckReport,
+): AgentRuntimeEnvSummary {
   if (report.missingRequired.length > 0) {
     const missingNames = joinItemNames(report.missingRequired);
     if (report.inspection.status === "verified") {

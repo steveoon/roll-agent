@@ -1,5 +1,8 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { BrowserSecurityConfigSchema } from "../types/index.ts";
+import type { BrowserSecurityConfig } from "../types/index.ts";
+import { BrowserActionPolicyError } from "./security.ts";
 import { NativeCdpController } from "./native-cdp-controller.ts";
 import type { NativeCdpWebSocketLike } from "./native-cdp-controller.ts";
 
@@ -160,6 +163,7 @@ async function createController(
   options: {
     readonly commandTimeoutMs?: number;
     readonly allowUnsafeRuntimeEnableForDiagnostics?: boolean;
+    readonly security?: BrowserSecurityConfig;
   } = {},
 ): Promise<NativeCdpController> {
   return await NativeCdpController.connect({
@@ -420,6 +424,26 @@ test("native locator resolves and clicks through Runtime.evaluate plus Input.dis
       { type: "mouseReleased", x: 42, y: 64, button: "left", buttons: 0, clickCount: 1 },
     ],
   );
+  controller.close();
+});
+
+test("security policy blocks native CDP actions before commands are sent", async () => {
+  const socket = new FakeNativeCdpWebSocket();
+  const controller = await createController(socket, {
+    security: BrowserSecurityConfigSchema.parse({ actionPolicy: "confirm" }),
+  });
+
+  await assert.rejects(controller.navigate("https://www.zhipin.com"), (error) => {
+    assert.ok(error instanceof BrowserActionPolicyError);
+    assert.equal(error.payload.code, "needs_confirmation");
+    return true;
+  });
+  await assert.rejects(
+    controller.locator("button.primary").click({ settleMs: 0 }),
+    BrowserActionPolicyError,
+  );
+  await assert.rejects(controller.insertText("hello"), BrowserActionPolicyError);
+  assert.deepEqual(socket.getSentMethods(), []);
   controller.close();
 });
 

@@ -1,5 +1,8 @@
 import { NativeCdpLocator } from "./native-cdp-locator.ts";
 import type { NativeCdpLocatorOptions } from "./native-cdp-locator.ts";
+import { assertBrowserActionPreflight } from "./security.ts";
+import type { BrowserActionLogHandler } from "./security.ts";
+import type { BrowserSecurityConfig } from "../types/index.ts";
 
 const DEFAULT_NATIVE_CDP_COMMAND_TIMEOUT_MS = 5_000;
 
@@ -58,6 +61,8 @@ export type NativeCdpControllerOptions = {
   readonly connectTimeoutMs?: number;
   readonly createWebSocket?: (url: string) => NativeCdpWebSocketLike;
   readonly allowUnsafeRuntimeEnableForDiagnostics?: boolean;
+  readonly security?: BrowserSecurityConfig;
+  readonly onActionLog?: BrowserActionLogHandler;
 };
 
 export type NativeCdpEvaluateOptions = {
@@ -315,12 +320,16 @@ export class NativeCdpController {
   private readonly webSocket: NativeCdpWebSocketLike;
   private readonly commandTimeoutMs: number;
   private readonly allowUnsafeRuntimeEnableForDiagnostics: boolean;
+  private readonly security: BrowserSecurityConfig | undefined;
+  private readonly onActionLog: BrowserActionLogHandler | undefined;
 
   private constructor(webSocket: NativeCdpWebSocketLike, options: NativeCdpControllerOptions) {
     this.webSocket = webSocket;
     this.commandTimeoutMs = options.commandTimeoutMs ?? DEFAULT_NATIVE_CDP_COMMAND_TIMEOUT_MS;
     this.allowUnsafeRuntimeEnableForDiagnostics =
       options.allowUnsafeRuntimeEnableForDiagnostics ?? false;
+    this.security = options.security;
+    this.onActionLog = options.onActionLog;
 
     this.webSocket.addEventListener("message", this.handleMessage);
     this.webSocket.addEventListener("error", this.handleError);
@@ -422,6 +431,7 @@ export class NativeCdpController {
     url: string,
     options: { readonly timeoutMs?: number } = {},
   ): Promise<NativeCdpNavigateResult> {
+    this.preflightAction({ action: "navigate", target: url, url });
     const result = readNavigateResponse(
       await this.sendNormal("Page.navigate", { url }, options.timeoutMs),
     );
@@ -455,6 +465,10 @@ export class NativeCdpController {
   }
 
   async dispatchMouseEvent(input: NativeCdpMouseEventInput): Promise<void> {
+    this.preflightAction({
+      action: input.type === "mouseWheel" ? "scroll" : "click",
+      target: `viewport(${String(input.x)},${String(input.y)})`,
+    });
     await this.sendNormal("Input.dispatchMouseEvent", {
       type: input.type,
       x: input.x,
@@ -469,6 +483,10 @@ export class NativeCdpController {
   }
 
   async dispatchKeyEvent(input: NativeCdpKeyEventInput): Promise<void> {
+    this.preflightAction({
+      action: "type",
+      target: input.code ?? input.key ?? input.type,
+    });
     await this.sendNormal("Input.dispatchKeyEvent", {
       type: input.type,
       ...(input.key !== undefined ? { key: input.key } : {}),
@@ -486,11 +504,29 @@ export class NativeCdpController {
   }
 
   async insertText(text: string): Promise<void> {
+    this.preflightAction({
+      action: "type",
+      target: `${String(text.length)} characters`,
+    });
     await this.sendNormal("Input.insertText", { text });
   }
 
   locator(selector: string, options: NativeCdpLocatorOptions = {}): NativeCdpLocator {
     return new NativeCdpLocator(this, selector, options);
+  }
+
+  preflightAction(input: {
+    readonly action: string;
+    readonly target: string;
+    readonly url?: string;
+  }): void {
+    assertBrowserActionPreflight({
+      action: input.action,
+      target: input.target,
+      ...(this.security !== undefined ? { security: this.security } : {}),
+      ...(this.onActionLog !== undefined ? { onActionLog: this.onActionLog } : {}),
+      ...(input.url !== undefined ? { url: input.url } : {}),
+    });
   }
 
   async unsafeEnableRuntimeForDiagnostics(): Promise<void> {

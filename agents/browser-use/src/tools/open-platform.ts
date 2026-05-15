@@ -1,12 +1,24 @@
 import { defineTool } from "@roll-agent/sdk";
-import { BrowserPageInfoSchema, PlatformSchema } from "@roll-agent/browser";
+import {
+  BrowserActionApprovalSchema,
+  BrowserPageInfoSchema,
+  PlatformSchema,
+} from "@roll-agent/browser";
 import { z } from "zod";
 import { getContextManager, getRuntime } from "../runtime-holder.ts";
 import { openPlatformHomeTarget } from "../pages/platform-page.ts";
 import { toNativePageInfo } from "../page-info.ts";
+import { PLATFORM_HOME } from "../platforms.ts";
+import {
+  assertBrowserActionAllowed,
+  createBrowserActionPolicyOptions,
+} from "../browser-security.ts";
 
 const OpenPlatformInputSchema = z.object({
   platform: PlatformSchema.describe("目标平台：`zhipin` 代表 BOSS直聘，`yupao` 代表鱼泡"),
+  browserActionApproval: BrowserActionApprovalSchema.optional().describe(
+    "当 actionPolicy=confirm 返回 needs_confirmation 后，由 orchestrator 原样带回的批准 ID。",
+  ),
 });
 
 const OpenPlatformOutputSchema = z.object({
@@ -24,10 +36,27 @@ export const openPlatform = defineTool({
     const { platform } = input;
     const runtime = getRuntime();
     const ctxManager = getContextManager();
+    const targetUrl = PLATFORM_HOME[platform];
 
+    const guard = assertBrowserActionAllowed(ctx, runtime, {
+      action: "navigate",
+      target: targetUrl,
+      url: targetUrl,
+      ...(input.browserActionApproval !== undefined
+        ? { approval: input.browserActionApproval }
+        : {}),
+    });
     ctx.logger.info(`Opening platform page for ${platform}`);
 
-    const { page, reusedExistingPage } = await openPlatformHomeTarget(runtime, platform);
+    const { page, reusedExistingPage } = await openPlatformHomeTarget(
+      runtime,
+      platform,
+      createBrowserActionPolicyOptions(ctx, runtime, {
+        approval: input.browserActionApproval,
+        approvedByConfirmation: guard.approvedByConfirmation,
+        logActions: false,
+      }),
+    );
     ctxManager.rememberNativePageSelection(platform, page);
 
     return {
