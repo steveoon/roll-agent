@@ -7,8 +7,13 @@ import type { BrowserSecurityConfig } from "../types/index.ts";
 const DEFAULT_NATIVE_CDP_COMMAND_TIMEOUT_MS = 5_000;
 
 const NORMAL_NATIVE_CDP_METHODS = [
+  "Accessibility.getFullAXTree",
+  "DOM.describeNode",
+  "DOM.getBoxModel",
   "Runtime.evaluate",
   "DOM.getDocument",
+  "DOM.querySelectorAll",
+  "DOM.scrollIntoViewIfNeeded",
   "Page.bringToFront",
   "Page.navigate",
   "Page.getFrameTree",
@@ -74,6 +79,55 @@ export type NativeCdpGetDocumentOptions = {
   readonly depth?: number;
   readonly pierce?: boolean;
   readonly timeoutMs?: number;
+};
+
+export type NativeCdpQuerySelectorAllOptions = {
+  readonly nodeId: number;
+  readonly selector: string;
+  readonly timeoutMs?: number;
+};
+
+export type NativeCdpDescribeNodeOptions = {
+  readonly nodeId?: number;
+  readonly backendNodeId?: number;
+  readonly objectId?: string;
+  readonly depth?: number;
+  readonly pierce?: boolean;
+  readonly timeoutMs?: number;
+};
+
+export type NativeCdpGetFullAxTreeOptions = {
+  readonly depth?: number;
+  readonly frameId?: string;
+  readonly timeoutMs?: number;
+};
+
+export type NativeCdpScrollIntoViewOptions = {
+  readonly backendNodeId: number;
+  readonly timeoutMs?: number;
+};
+
+export type NativeCdpGetBoxModelOptions = {
+  readonly backendNodeId: number;
+  readonly timeoutMs?: number;
+};
+
+export type NativeCdpBoxModel = {
+  readonly content?: readonly number[];
+  readonly padding?: readonly number[];
+  readonly border?: readonly number[];
+  readonly margin?: readonly number[];
+  readonly width?: number;
+  readonly height?: number;
+};
+
+export type NativeCdpDomNode = {
+  readonly nodeId?: number;
+  readonly backendNodeId?: number;
+  readonly nodeName?: string;
+  readonly frameId?: string;
+  readonly contentDocumentFrameId?: string;
+  readonly attributes?: readonly string[];
 };
 
 export type NativeCdpMouseEventInput = {
@@ -300,6 +354,90 @@ function readNavigateResponse(value: unknown): NativeCdpNavigateResult {
   };
 }
 
+function readNumberArray(value: unknown): readonly number[] | undefined {
+  if (!Array.isArray(value) || value.some((item) => typeof item !== "number")) {
+    return undefined;
+  }
+  return value;
+}
+
+function readNumberList(value: unknown): readonly number[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return value.filter((item): item is number => typeof item === "number");
+}
+
+function readStringList(value: unknown): readonly string[] | undefined {
+  if (!Array.isArray(value) || value.some((item) => typeof item !== "string")) {
+    return undefined;
+  }
+  return value;
+}
+
+function readDomNode(value: unknown): NativeCdpDomNode | undefined {
+  if (!isRecord(value)) {
+    return undefined;
+  }
+
+  const nodeId = value["nodeId"];
+  const backendNodeId = value["backendNodeId"];
+  const nodeName = value["nodeName"];
+  const frameId = value["frameId"];
+  const contentDocument = value["contentDocument"];
+  const contentDocumentFrameId = isRecord(contentDocument) ? contentDocument["frameId"] : undefined;
+  const attributes = readStringList(value["attributes"]);
+  return {
+    ...(typeof nodeId === "number" && Number.isInteger(nodeId) ? { nodeId } : {}),
+    ...(typeof backendNodeId === "number" && Number.isInteger(backendNodeId)
+      ? { backendNodeId }
+      : {}),
+    ...(typeof nodeName === "string" ? { nodeName } : {}),
+    ...(typeof frameId === "string" ? { frameId } : {}),
+    ...(typeof contentDocumentFrameId === "string" ? { contentDocumentFrameId } : {}),
+    ...(attributes !== undefined ? { attributes } : {}),
+  };
+}
+
+function readDescribeNodeResponse(value: unknown): NativeCdpDomNode {
+  if (!isRecord(value)) {
+    throw new Error("Native CDP DOM.describeNode returned an unexpected response.");
+  }
+
+  const node = readDomNode(value["node"]);
+  if (node === undefined) {
+    throw new Error("Native CDP DOM.describeNode did not return a valid node.");
+  }
+  return node;
+}
+
+function readBoxModelResponse(value: unknown): NativeCdpBoxModel | undefined {
+  if (!isRecord(value)) {
+    return undefined;
+  }
+
+  const model = value["model"];
+  if (!isRecord(model)) {
+    return undefined;
+  }
+
+  const content = readNumberArray(model["content"]);
+  const padding = readNumberArray(model["padding"]);
+  const border = readNumberArray(model["border"]);
+  const margin = readNumberArray(model["margin"]);
+  const width = model["width"];
+  const height = model["height"];
+
+  return {
+    ...(content !== undefined ? { content } : {}),
+    ...(padding !== undefined ? { padding } : {}),
+    ...(border !== undefined ? { border } : {}),
+    ...(margin !== undefined ? { margin } : {}),
+    ...(typeof width === "number" ? { width } : {}),
+    ...(typeof height === "number" ? { height } : {}),
+  };
+}
+
 function readExecutionContextId(value: unknown): number {
   if (!isRecord(value)) {
     throw new Error("Native CDP Page.createIsolatedWorld returned an unexpected response.");
@@ -420,6 +558,79 @@ export class NativeCdpController {
         pierce: options.pierce ?? false,
       },
       options.timeoutMs,
+    );
+  }
+
+  async querySelectorAllByNodeId(
+    options: NativeCdpQuerySelectorAllOptions,
+  ): Promise<readonly number[]> {
+    const response = await this.sendNormal(
+      "DOM.querySelectorAll",
+      {
+        nodeId: options.nodeId,
+        selector: options.selector,
+      },
+      options.timeoutMs,
+    );
+
+    if (!isRecord(response)) {
+      return [];
+    }
+    return readNumberList(response["nodeIds"]);
+  }
+
+  async describeNode(options: NativeCdpDescribeNodeOptions): Promise<NativeCdpDomNode> {
+    return readDescribeNodeResponse(
+      await this.sendNormal(
+        "DOM.describeNode",
+        {
+          ...(options.nodeId !== undefined ? { nodeId: options.nodeId } : {}),
+          ...(options.backendNodeId !== undefined ? { backendNodeId: options.backendNodeId } : {}),
+          ...(options.objectId !== undefined ? { objectId: options.objectId } : {}),
+          ...(options.depth !== undefined ? { depth: options.depth } : {}),
+          ...(options.pierce !== undefined ? { pierce: options.pierce } : {}),
+        },
+        options.timeoutMs,
+      ),
+    );
+  }
+
+  async getFullAccessibilityTree(
+    options: NativeCdpGetFullAxTreeOptions = {},
+  ): Promise<readonly unknown[]> {
+    const response = await this.sendNormal(
+      "Accessibility.getFullAXTree",
+      {
+        ...(options.depth !== undefined ? { depth: options.depth } : {}),
+        ...(options.frameId !== undefined ? { frameId: options.frameId } : {}),
+      },
+      options.timeoutMs,
+    );
+
+    if (!isRecord(response) || !Array.isArray(response["nodes"])) {
+      throw new Error("Native CDP Accessibility.getFullAXTree returned an unexpected response.");
+    }
+
+    return response["nodes"];
+  }
+
+  async scrollIntoViewByBackendNodeId(options: NativeCdpScrollIntoViewOptions): Promise<void> {
+    await this.sendNormal(
+      "DOM.scrollIntoViewIfNeeded",
+      { backendNodeId: options.backendNodeId },
+      options.timeoutMs,
+    );
+  }
+
+  async getBoxModelByBackendNodeId(
+    options: NativeCdpGetBoxModelOptions,
+  ): Promise<NativeCdpBoxModel | undefined> {
+    return readBoxModelResponse(
+      await this.sendNormal(
+        "DOM.getBoxModel",
+        { backendNodeId: options.backendNodeId },
+        options.timeoutMs,
+      ),
     );
   }
 

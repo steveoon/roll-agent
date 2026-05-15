@@ -1,6 +1,6 @@
 ---
 name: browser-use-agent
-description: 浏览器操控 Agent。控制浏览器操作招聘平台：读取消息、打开聊天、发送签名回复、换微信、滚动动态列表、查看推荐列表、筛选候选人、打招呼、查看简历，并提供 BOSS直聘 native CDP / Playwright attach 风控诊断。
+description: 浏览器操控 Agent。控制浏览器操作招聘平台：读取消息、打开聊天、发送签名回复、换微信、滚动动态列表、查看推荐列表、筛选候选人、打招呼、查看简历；也提供通用 AX snapshot、@eN element ref 点击/输入，以及 BOSS直聘 native CDP / Playwright attach 风控诊断。
 metadata:
   roll-env-file: references/env.yaml
 ---
@@ -32,6 +32,50 @@ metadata:
 | `list_pages(platform?)` | 通过 native CDP 列出浏览器页面和 `pageId`。 |
 | `select_page(platform, pageId)` | 将指定页面绑定为平台活跃页；登录前优先走 native target 激活。 |
 | `navigate_active_tab(url)` | 通过 native CDP 打开/导航页面；不触发 Playwright attach，不支持直接跳转 BOSS `/web/chat/*` 后台路径。 |
+| `browser_snapshot(pageId?, maxDepth?, maxNodes?, interactiveOnly?)` | 读取当前或指定页面的 Accessibility Tree；默认只返回可交互节点，并为可交互节点生成 `@eN`；也会补充有限的非语义 DOM 可操作短文本，例如 `span` 渲染的 tab/filter 标签，并递归内联同 target iframe 中的可操作 AX 节点。 |
+| `click_ref(ref, pageId?, browserActionApproval?)` | 点击 `browser_snapshot` 返回的 `@eN`；优先用 `backendNodeId`，失效时用 `role/name/nth` fallback；iframe 子节点会携带并复用 `frameId`。 |
+| `type_ref(ref, text, clear?, pageId?, browserActionApproval?)` | 向 `browser_snapshot` 返回的 `@eN` 输入文本；`clear:true` 会先清空当前控件；iframe 子节点会携带并复用 `frameId`。 |
+
+## 通用页面操作编排
+
+这组三个通用工具用于“没有专用业务 tool 的可访问控件操作”，不是 BOSS 专用工具的替代品。
+
+工具选择优先级：
+
+| 场景 | 首选 | 兜底 |
+| --- | --- | --- |
+| BOSS 已建模业务链路，例如读消息、打开聊天、换微信、打招呼、筛选候选人 | `zhipin_*` 专用 tool | 只有专用 tool 缺失或无法覆盖新按钮时，才使用 `browser_snapshot` + `click_ref` / `type_ref` |
+| 通用网页上点击语义明确的按钮、链接、输入框 | `browser_snapshot` 找 `role/name`，再用 `click_ref` / `type_ref` | 操作后重新 `browser_snapshot` 或用业务 read tool 验证 |
+| 页面、tab、平台选择 | `list_pages` + `select_page` 或平台专用 opener | 不要直接猜内部 URL |
+| 风控或底层行为诊断 | `zhipin_diagnose_browser_state` | 正常业务路径不要默认诊断 |
+
+两阶段流程：
+
+```text
+观察阶段:
+list_pages/select_page  # 仅多页面或目标页不明确时
+  -> browser_snapshot(interactiveOnly=true)
+  -> orchestrator 按 role/name/disabled 选择 @eN
+
+动作阶段:
+click_ref(@eN) 或 type_ref(@eN, text, clear?)
+  -> 若 actionPolicy=confirm，原样带回 browserActionApproval 重试
+  -> 重新 browser_snapshot 或调用业务 read tool 验证页面状态
+```
+
+关键规则：
+
+1. `@eN` 只来自最近一次 `browser_snapshot`，只能用于同一 `pageId` 的后续 `click_ref` / `type_ref`。
+2. `@eN` 不等同于 BOSS 推荐页的 `@cN` / `@jN`；`@cN`、`@jN` 只服务对应 `zhipin_*` 工具。
+3. 不要自行构造 `@eN`；只能传 `browser_snapshot.snapshot.refs[].ref`。
+4. 选择目标时优先匹配 `role + name`，并排除 `disabled:true` 的节点；若目标是非语义短文本控件，使用 `role:"clickable"` / `role:"focusable"` / `role:"editable"`、可见文案和 `properties.domActionable:true` 判断。
+5. 如果 `refs[]` 或 `nodes[]` 中出现 `frameId`，说明该 ref 来自 iframe 子 frame；orchestrator 只需要继续传 `ref` 和必要的 `pageId`，不要手工传或改写 `frameId`。
+6. `snapshot.truncated:true` 表示节点达到 `maxNodes` 上限；先缩小 `maxDepth`、指定 `pageId` 或切到更明确页面后再决策。
+7. 页面导航、刷新、弹窗出现、列表重排、筛选变化后，先重新 `browser_snapshot`，不要复用旧 `@eN`。
+8. `browser_snapshot` 是 AX 语义快照，不是完整 HTML、截图或网络状态；需要业务数据时仍应使用对应 read tool。
+9. 当前 iframe 支持是同 target / 同 CDP session 内递归内联；递归受 `maxNodes`、frame 去重和 CDP frame 可解析性限制。跨 target / OOPIF iframe 需要 Native CDP session multiplexing，当前不承诺覆盖。
+
+通用页面操作细节见 `references/generic-browser-refs.md`。
 
 ## 调试 Tools
 
@@ -112,6 +156,8 @@ metadata:
 25. `zhipin_say_hello({ candidateRefs })` 支持同一快照内连续提交多个 ref；若返回“候选人引用已过期”，说明 BOSS 列表已重排，重新执行 `zhipin_get_candidate_list` 后只重试剩余目标。
 26. 高频连续 tool call 可用 `roll run --batch-stdin --json` 批量提交，但每项仍要显式声明 `agent` / `tool` / `input`，不要假设 batch 自动传递上一步输出。
 27. 不要用 `navigate_active_tab` 直接跳转 `https://www.zhipin.com/web/chat/*`；聊天页用 `zhipin_open_chat_page()`，推荐页用 `zhipin_open_recommend_page()`。
+28. BOSS 已有专用工具能表达业务意图时，不要为了“看见按钮”而绕开专用工具改用 `click_ref` / `type_ref`。
+29. 对 BOSS 未建模按钮，例如新出现的“交换电话”，可以先用 `browser_snapshot` 找到对应 `@eN`，再 `click_ref`；弹窗确认类二次动作必须重新 snapshot 后再点击。
 
 ## 典型链路
 
@@ -135,4 +181,5 @@ zhipin_open_recommend_page
 
 - `references/zhipin-diagnostics.md`：BOSS native CDP / attach 诊断阶段、推进顺序和返回字段。
 - `references/zhipin-workflows.md`：聊天主键、动态列表、`preferredBrand`、Reply Authority 编排细节。
+- `references/generic-browser-refs.md`：通用 AX snapshot、`@eN` ref、点击/输入闭环和边界条件。
 - `references/env.yaml`：运行所需环境变量声明。
