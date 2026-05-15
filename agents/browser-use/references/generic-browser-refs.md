@@ -19,7 +19,7 @@ when they already express the business action.
 
 | Tool | Input | Output | Use it for |
 | --- | --- | --- | --- |
-| `browser_snapshot` | `pageId?`, `maxDepth?`, `maxNodes?`, `interactiveOnly?` | `page`, `snapshot` | Observe the current page's AX tree and get `@eN` refs. It also merges limited DOM-action hints for non-semantic controls such as clickable tabs rendered as `span`, and recursively inlines same-target iframe AX refs when Chrome exposes child `frameId` values. |
+| `browser_snapshot` | `pageId?`, `maxDepth?`, `maxNodes?`, `interactiveOnly?` | `page`, `snapshot` | Observe the current page's AX tree and get `@eN` refs. It also merges limited DOM-action hints for non-semantic controls such as clickable tabs rendered as `span`, including same-target iframes when Chrome exposes child `frameId` values. |
 | `click_ref` | `ref`, `pageId?`, `browserActionApproval?` | `success`, `ref`, `resolvedBy`, `target` | Click a ref returned by `browser_snapshot`. |
 | `type_ref` | `ref`, `text`, `clear?`, `pageId?`, `browserActionApproval?` | `success`, `ref`, `resolvedBy`, `target` | Focus a ref, optionally clear it, then insert text. |
 
@@ -45,6 +45,8 @@ Iframe handling:
 
 ```text
 main AX tree -> iframe node backendNodeId -> DOM.describeNode -> child frameId
+  -> Page.createIsolatedWorld({ frameId }) + Runtime.evaluate in that frame
+  -> DOM.getDocument({ pierce:true }) maps marker attributes back to backendNodeId
   -> Accessibility.getFullAXTree({ frameId })
   -> repeat for nested same-target iframes until maxNodes or frame de-duplication
   -> child refs carry frameId
@@ -128,10 +130,13 @@ Do not pass one ref family into another tool family.
 
 - This is an Accessibility Tree snapshot, not a full HTML dump, screenshot, network log, or page state database.
 - DOM-action refs are intentionally narrow: short visible non-semantic elements with click hints such as
-  `cursor:pointer`, `onclick`, `tabIndex`, or nearby class names like `filter`, `tab`, `menu`, `button`, or
-  `toggle`. Plain article text is not exposed as clickable.
-- DOM-action augmentation is collected from the active document path. Iframe refs are primarily AX-based;
-  non-semantic iframe controls that Chrome exposes only as static text may still need a dedicated tool.
+  `cursor:pointer`, `onclick`, `tabIndex`, or nearby class names like `filter`, `tab`, `menu`, `dropdown`,
+  `button`, or `toggle`. Plain article text is not exposed as clickable.
+- DOM-action augmentation is collected from the active document and same-target iframe execution contexts.
+  Non-semantic iframe controls can be promoted when they are visible short-label `span`/`div`/`li`-style
+  elements with action hints and Chrome can map their marker attributes back to `backendNodeId`.
+- Composite dropdown option rows such as `li.company-item` are promoted by using their visible descendant
+  text only inside dropdown/menu/select/option contexts, so large page containers are still filtered out.
 - Canvas, image-map hotspots, non-accessible custom widgets, and deeply nested iframe/Shadow DOM flows may not expose
   enough AX semantics for reliable operation.
 - Same-target iframe refs are recursively inlined while Chrome's normal page-scoped CDP session can

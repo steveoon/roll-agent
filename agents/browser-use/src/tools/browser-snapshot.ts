@@ -44,7 +44,12 @@ type IframeSnapshot = {
 
 type IframeSnapshotController = Pick<
   NativeCdpController,
-  "describeNode" | "getFullAccessibilityTree"
+  | "createIsolatedWorld"
+  | "describeNode"
+  | "evaluateJson"
+  | "getDocument"
+  | "getFullAccessibilityTree"
+  | "querySelectorAllByNodeId"
 >;
 
 function collectIframeNodes(nodes: readonly BrowserAxNode[]): readonly BrowserAxNode[] {
@@ -165,8 +170,13 @@ async function inlineIframeSnapshots(input: {
     }
     visitedFrameIds.add(target.frameId);
 
+    const childDomActionHints = await collectDomActionHints(input.controller, {
+      frameId: target.frameId,
+      maxCandidates: remainingNodes,
+    }).catch(() => []);
     const childSnapshot = await createBrowserAxSnapshot(input.controller, {
       depthOffset: target.node.depth + 1,
+      domActionHints: childDomActionHints,
       frameId: target.frameId,
       initialRefCount: refCount,
       interactiveOnly: input.snapshot.interactiveOnly,

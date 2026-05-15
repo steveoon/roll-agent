@@ -19,6 +19,7 @@ type FakeNativeController = Pick<
   NativeCdpController,
   | "bringToFront"
   | "close"
+  | "createIsolatedWorld"
   | "dispatchKeyEvent"
   | "dispatchMouseEvent"
   | "describeNode"
@@ -105,7 +106,9 @@ function createFakeController(): FakeNativeController & {
   readonly evaluateExpressions: string[];
   readonly insertedTexts: string[];
   readonly axTreeCalls: Array<{ readonly frameId?: string }>;
+  readonly isolatedWorldCalls: string[];
   domActionCandidates: unknown;
+  frameDomActionCandidates: unknown;
   fallbackTarget: unknown;
   includeIframe: boolean;
   includeNestedIframe: boolean;
@@ -117,8 +120,13 @@ function createFakeController(): FakeNativeController & {
   const evaluateExpressions: string[] = [];
   const insertedTexts: string[] = [];
   const axTreeCalls: Array<{ readonly frameId?: string }> = [];
+  const isolatedWorldCalls: string[] = [];
+  const frameIdByContextId = new Map<number, string>();
   let domActionMarkerAttribute = "data-roll-browser-action-test";
+  let frameDomActionMarkerAttribute = "data-roll-browser-action-frame-test";
+  let lastFrameDomActionFrameId: string | undefined;
   let domActionCandidates: unknown = [];
+  let frameDomActionCandidates: unknown = [];
   let fallbackTarget: unknown = {
     found: true,
     x: 20,
@@ -138,11 +146,18 @@ function createFakeController(): FakeNativeController & {
     evaluateExpressions,
     insertedTexts,
     axTreeCalls,
+    isolatedWorldCalls,
     get domActionCandidates() {
       return domActionCandidates;
     },
     set domActionCandidates(value: unknown) {
       domActionCandidates = value;
+    },
+    get frameDomActionCandidates() {
+      return frameDomActionCandidates;
+    },
+    set frameDomActionCandidates(value: unknown) {
+      frameDomActionCandidates = value;
     },
     get fallbackTarget() {
       return fallbackTarget;
@@ -248,12 +263,34 @@ function createFakeController(): FakeNativeController & {
       ];
     },
     async bringToFront() {},
-    async evaluateJson<T = unknown>(expression: string): Promise<T> {
+    async createIsolatedWorld(frameId: string) {
+      isolatedWorldCalls.push(frameId);
+      const contextId = frameId === "payment-frame" ? 501 : 502;
+      frameIdByContextId.set(contextId, frameId);
+      return contextId;
+    },
+    async evaluateJson<T = unknown>(
+      expression: string,
+      options: { readonly contextId?: number } = {},
+    ): Promise<T> {
       evaluateExpressions.push(expression);
       if (expression.includes("removeAttribute")) {
         return true as T;
       }
       if (expression.includes("data-roll-browser-action-")) {
+        const marker = expression.match(/data-roll-browser-action-[a-f0-9]+/)?.[0];
+        const frameId =
+          options.contextId === undefined ? undefined : frameIdByContextId.get(options.contextId);
+        if (frameId !== undefined) {
+          lastFrameDomActionFrameId = frameId;
+          if (marker !== undefined) {
+            frameDomActionMarkerAttribute = marker;
+          }
+          return frameDomActionCandidates as T;
+        }
+        if (marker !== undefined) {
+          domActionMarkerAttribute = marker;
+        }
         return domActionCandidates as T;
       }
       if (expression.includes("targetRole")) {
@@ -261,7 +298,31 @@ function createFakeController(): FakeNativeController & {
       }
       return true as T;
     },
-    async getDocument() {
+    async getDocument(input: { readonly pierce?: boolean } = {}) {
+      if (input.pierce === true && lastFrameDomActionFrameId !== undefined) {
+        return {
+          root: {
+            nodeId: 1,
+            children: [
+              {
+                nodeId: 2,
+                nodeName: "IFRAME",
+                contentDocument: {
+                  nodeId: 3,
+                  children: [
+                    {
+                      nodeId: 4,
+                      backendNodeId: 87,
+                      attributes: [frameDomActionMarkerAttribute, "0"],
+                    },
+                  ],
+                },
+              },
+            ],
+          },
+        };
+      }
+
       return {
         root: {
           nodeId: 1,
@@ -552,6 +613,121 @@ describe("browser generic ref tools", () => {
     assert.equal(clickResult.target.frameId, "payment-frame");
     assert.equal(clickResult.target.backendNodeId, 88);
     assert.deepEqual(controller.scrollCalls, [88]);
+  });
+
+  it("browser_snapshot adds DOM actionable refs inside same-target iframes", async () => {
+    const page = createNativePage("target-1");
+    const controller = createFakeController();
+    controller.includeIframe = true;
+    controller.frameDomActionCandidates = [
+      {
+        marker: "0",
+        name: "发布职位",
+        disabled: false,
+        hasClassHint: true,
+        hasCursorPointer: true,
+        hasOnClick: false,
+        hasTabIndex: false,
+        isEditable: false,
+      },
+    ];
+    setRuntimeStateForTests({
+      runtime: createFakeRuntime({
+        page,
+        controller,
+      }),
+      contextManager: createFakeContextManager(),
+    });
+
+    const snapshotResult = await browserSnapshot.execute(
+      { pageId: "target-1", maxNodes: 10, interactiveOnly: true },
+      createTestContext(),
+    );
+
+    const publishRef = snapshotResult.snapshot.refs.find((ref) => ref.name === "发布职位");
+    assert.notEqual(publishRef, undefined);
+    if (publishRef === undefined) {
+      throw new Error("Expected iframe DOM-action ref to be emitted");
+    }
+
+    assert.equal(publishRef.ref, "@e5");
+    assert.equal(publishRef.role, "clickable");
+    assert.equal(publishRef.frameId, "payment-frame");
+    assert.equal(publishRef.backendNodeId, 87);
+    assert.equal(
+      snapshotResult.snapshot.nodes.some(
+        (node) =>
+          node.ref === publishRef.ref &&
+          node.frameId === "payment-frame" &&
+          node.properties?.["domActionable"] === true &&
+          node.properties?.["domActionHints"] === "cursor:pointer, class:action",
+      ),
+      true,
+    );
+    assert.deepEqual(controller.isolatedWorldCalls, ["payment-frame"]);
+
+    const clickResult = await clickRef.execute(
+      { pageId: "target-1", ref: publishRef.ref },
+      createTestContext(),
+    );
+
+    assert.equal(clickResult.success, true);
+    assert.equal(clickResult.resolvedBy, "backend_node_id");
+    assert.equal(clickResult.target.name, "发布职位");
+    assert.equal(clickResult.target.frameId, "payment-frame");
+    assert.deepEqual(controller.scrollCalls, [87]);
+  });
+
+  it("browser_snapshot promotes composite dropdown option rows inside iframes", async () => {
+    const page = createNativePage("target-1");
+    const controller = createFakeController();
+    controller.includeIframe = true;
+    controller.frameDomActionCandidates = [
+      {
+        marker: "0",
+        name: "乡村基（重庆）投资有限公司 餐饮",
+        disabled: false,
+        hasClassHint: true,
+        hasCursorPointer: false,
+        hasOnClick: false,
+        hasTabIndex: false,
+        isEditable: false,
+      },
+    ];
+    setRuntimeStateForTests({
+      runtime: createFakeRuntime({
+        page,
+        controller,
+      }),
+      contextManager: createFakeContextManager(),
+    });
+
+    const snapshotResult = await browserSnapshot.execute(
+      { pageId: "target-1", maxNodes: 10, interactiveOnly: true },
+      createTestContext(),
+    );
+
+    const companyRef = snapshotResult.snapshot.refs.find((ref) =>
+      ref.name.includes("乡村基（重庆）投资有限公司"),
+    );
+    assert.notEqual(companyRef, undefined);
+    if (companyRef === undefined) {
+      throw new Error("Expected iframe dropdown company ref to be emitted");
+    }
+
+    assert.equal(companyRef.role, "clickable");
+    assert.equal(companyRef.frameId, "payment-frame");
+    assert.equal(companyRef.backendNodeId, 87);
+    assert.equal(
+      snapshotResult.snapshot.nodes.some(
+        (node) =>
+          node.ref === companyRef.ref &&
+          node.frameId === "payment-frame" &&
+          node.properties?.["domActionable"] === true &&
+          node.properties?.["domActionHints"] === "class:action",
+      ),
+      true,
+    );
   });
 
   it("browser_snapshot recursively inlines nested same-target iframe refs", async () => {

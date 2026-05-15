@@ -19,11 +19,31 @@ type RawDomActionCandidate = {
 
 type DomActionCandidateController = Pick<
   NativeCdpController,
-  "describeNode" | "evaluateJson" | "getDocument" | "querySelectorAllByNodeId"
+  | "createIsolatedWorld"
+  | "describeNode"
+  | "evaluateJson"
+  | "getDocument"
+  | "querySelectorAllByNodeId"
 >;
 
 const DOM_ACTION_MARKER_ATTR_PREFIX = "data-roll-browser-action-";
 const MAX_DOM_ACTION_CANDIDATES = 120;
+
+type DomActionCandidateOptions = {
+  readonly frameId?: string;
+  readonly maxCandidates?: number;
+};
+
+type DomDocumentNode = {
+  readonly nodeId?: number;
+  readonly backendNodeId?: number;
+  readonly attributes?: readonly string[];
+  readonly children: readonly DomDocumentNode[];
+  readonly contentDocument?: DomDocumentNode;
+  readonly pseudoElements: readonly DomDocumentNode[];
+  readonly shadowRoots: readonly DomDocumentNode[];
+  readonly templateContent?: DomDocumentNode;
+};
 
 function createDomActionMarkerAttribute(): string {
   return `${DOM_ACTION_MARKER_ATTR_PREFIX}${randomUUID().replaceAll("-", "")}`;
@@ -47,6 +67,49 @@ function readRootNodeId(value: unknown): number | undefined {
 
   const nodeId = value["root"]["nodeId"];
   return typeof nodeId === "number" && Number.isInteger(nodeId) ? nodeId : undefined;
+}
+
+function readStringList(value: unknown): readonly string[] | undefined {
+  if (!Array.isArray(value) || value.some((item) => typeof item !== "string")) {
+    return undefined;
+  }
+  return value;
+}
+
+function toDomDocumentNodeList(value: unknown): readonly DomDocumentNode[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  return value.flatMap((item) => {
+    const node = toDomDocumentNode(item);
+    return node === undefined ? [] : [node];
+  });
+}
+
+function toDomDocumentNode(value: unknown): DomDocumentNode | undefined {
+  if (!isRecord(value)) {
+    return undefined;
+  }
+
+  const nodeId = value["nodeId"];
+  const backendNodeId = value["backendNodeId"];
+  const attributes = readStringList(value["attributes"]);
+  const contentDocument = toDomDocumentNode(value["contentDocument"]);
+  const templateContent = toDomDocumentNode(value["templateContent"]);
+
+  return {
+    ...(typeof nodeId === "number" && Number.isInteger(nodeId) ? { nodeId } : {}),
+    ...(typeof backendNodeId === "number" && Number.isInteger(backendNodeId)
+      ? { backendNodeId }
+      : {}),
+    ...(attributes !== undefined ? { attributes } : {}),
+    children: toDomDocumentNodeList(value["children"]),
+    ...(contentDocument !== undefined ? { contentDocument } : {}),
+    pseudoElements: toDomDocumentNodeList(value["pseudoElements"]),
+    shadowRoots: toDomDocumentNodeList(value["shadowRoots"]),
+    ...(templateContent !== undefined ? { templateContent } : {}),
+  };
 }
 
 function readMarker(
@@ -143,6 +206,38 @@ function createBackendNodeIdByMarker(
   return backendNodeIdByMarker;
 }
 
+function createBackendNodeIdByMarkerFromDomTree(
+  markerAttribute: string,
+  root: DomDocumentNode,
+): ReadonlyMap<string, number> {
+  const backendNodeIdByMarker = new Map<string, number>();
+  const visit = (node: DomDocumentNode): void => {
+    const marker = readMarker(markerAttribute, node.attributes);
+    if (marker !== undefined && node.backendNodeId !== undefined) {
+      backendNodeIdByMarker.set(marker, node.backendNodeId);
+    }
+
+    for (const child of node.children) {
+      visit(child);
+    }
+    if (node.contentDocument !== undefined) {
+      visit(node.contentDocument);
+    }
+    for (const pseudoElement of node.pseudoElements) {
+      visit(pseudoElement);
+    }
+    for (const shadowRoot of node.shadowRoots) {
+      visit(shadowRoot);
+    }
+    if (node.templateContent !== undefined) {
+      visit(node.templateContent);
+    }
+  };
+
+  visit(root);
+  return backendNodeIdByMarker;
+}
+
 function buildDomActionCandidateExpression(markerAttribute: string, maxCandidates: number): string {
   return `(() => {
     const markerAttribute = ${JSON.stringify(markerAttribute)};
@@ -153,10 +248,24 @@ function buildDomActionCandidateExpression(markerAttribute: string, maxCandidate
       .filter((node) => node.nodeType === Node.TEXT_NODE)
       .map((node) => node.textContent ?? "")
       .join(" "));
+    const visibleTextOf = (element) => normalize(
+      element instanceof HTMLElement ? element.innerText : element.textContent
+    );
+    const hasCompositeOptionHint = (element) => {
+      const pattern = /dropdown|menu|option|select|item/i;
+      let current = element;
+      for (let depth = 0; current && depth < 4; depth += 1) {
+        if (pattern.test(classTextOf(current))) return true;
+        current = current.parentElement;
+      }
+      return false;
+    };
     const domActionNameOf = (element) => {
       const direct = directTextOf(element);
       if (direct) return direct;
-      return element.childElementCount === 0 ? normalize(element.textContent) : "";
+      if (element.childElementCount === 0) return visibleTextOf(element);
+      if (hasCompositeOptionHint(element)) return visibleTextOf(element);
+      return "";
     };
     const isVisible = (element) => {
       if (element.closest("[hidden], [aria-hidden=\\"true\\"]")) return false;
@@ -183,7 +292,7 @@ function buildDomActionCandidateExpression(markerAttribute: string, maxCandidate
       );
     };
     const hasNearbyClassHint = (element) => {
-      const pattern = /btn|button|click|tab|tabs|filter|menu|nav|option|select|switch|toggle/i;
+      const pattern = /btn|button|click|dropdown|tab|tabs|filter|menu|nav|option|select|switch|toggle/i;
       let current = element;
       for (let depth = 0; current && depth < 4; depth += 1) {
         if (pattern.test(classTextOf(current))) return true;
@@ -218,6 +327,7 @@ function buildDomActionCandidateExpression(markerAttribute: string, maxCandidate
     const output = [];
     for (const element of document.querySelectorAll("body *")) {
       if (!isCandidate(element)) continue;
+      if (element.closest("[" + markerAttribute + "]")) continue;
       const marker = String(output.length);
       const style = window.getComputedStyle(element);
       const contentEditable = element.getAttribute("contenteditable");
@@ -252,7 +362,20 @@ function buildCleanupExpression(markerAttribute: string): string {
 async function resolveCandidateBackendNodeIds(
   controller: DomActionCandidateController,
   markerAttribute: string,
+  options: DomActionCandidateOptions,
 ): Promise<ReadonlyMap<string, number>> {
+  if (options.frameId !== undefined) {
+    const document = await controller.getDocument({ depth: -1, pierce: true });
+    if (!isRecord(document)) {
+      return new Map();
+    }
+
+    const root = toDomDocumentNode(document["root"]);
+    return root === undefined
+      ? new Map()
+      : createBackendNodeIdByMarkerFromDomTree(markerAttribute, root);
+  }
+
   const document = await controller.getDocument({ depth: 0 });
   const rootNodeId = readRootNodeId(document);
   if (rootNodeId === undefined) {
@@ -271,17 +394,38 @@ async function resolveCandidateBackendNodeIds(
 
 export async function collectDomActionHints(
   controller: DomActionCandidateController,
-  maxCandidates = MAX_DOM_ACTION_CANDIDATES,
+  optionsOrMaxCandidates: DomActionCandidateOptions | number = {},
 ): Promise<readonly BrowserDomActionHint[]> {
-  const candidateLimit = normalizeCandidateLimit(maxCandidates);
+  const options =
+    typeof optionsOrMaxCandidates === "number"
+      ? { maxCandidates: optionsOrMaxCandidates }
+      : optionsOrMaxCandidates;
+  const candidateLimit = normalizeCandidateLimit(
+    options.maxCandidates ?? MAX_DOM_ACTION_CANDIDATES,
+  );
   if (candidateLimit === 0) {
     return [];
   }
 
   const markerAttribute = createDomActionMarkerAttribute();
+  const contextId =
+    options.frameId === undefined
+      ? undefined
+      : await controller
+          .createIsolatedWorld(options.frameId, {
+            worldName: `roll-dom-action-${markerAttribute.slice(DOM_ACTION_MARKER_ATTR_PREFIX.length)}`,
+          })
+          .catch(() => undefined);
+  if (options.frameId !== undefined && contextId === undefined) {
+    return [];
+  }
+  const evaluateOptions = contextId === undefined ? {} : { contextId };
   const candidates = toRawDomActionCandidates(
     await controller
-      .evaluateJson(buildDomActionCandidateExpression(markerAttribute, candidateLimit))
+      .evaluateJson(
+        buildDomActionCandidateExpression(markerAttribute, candidateLimit),
+        evaluateOptions,
+      )
       .catch(() => []),
   );
 
@@ -290,7 +434,11 @@ export async function collectDomActionHints(
       return [];
     }
 
-    const backendNodeIdByMarker = await resolveCandidateBackendNodeIds(controller, markerAttribute);
+    const backendNodeIdByMarker = await resolveCandidateBackendNodeIds(
+      controller,
+      markerAttribute,
+      options,
+    );
     return candidates.flatMap((candidate) => {
       const backendNodeId = backendNodeIdByMarker.get(candidate.marker);
       if (backendNodeId === undefined) {
@@ -308,6 +456,8 @@ export async function collectDomActionHints(
       ];
     });
   } finally {
-    await controller.evaluateJson(buildCleanupExpression(markerAttribute)).catch(() => undefined);
+    await controller
+      .evaluateJson(buildCleanupExpression(markerAttribute), evaluateOptions)
+      .catch(() => undefined);
   }
 }
