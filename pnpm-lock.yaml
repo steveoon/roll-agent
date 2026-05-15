@@ -58,8 +58,8 @@ importers:
   agents/notify:
     dependencies:
       '@roll-agent/sdk':
-        specifier: ^0.1.2
-        version: 0.1.2
+        specifier: workspace:*
+        version: link:../../packages/sdk
       zod:
         specifier: ^3.25.76
         version: 3.25.76
@@ -580,10 +580,6 @@ packages:
 
   '@package-json/types@0.0.12':
     resolution: {integrity: sha512-uu43FGU34B5VM9mCNjXCwLaGHYjXdNincqKLaraaCW+7S2+SmiBg1Nv8bPnmschrIfZmfKNY9f3fC376MRrObw==}
-
-  '@roll-agent/sdk@0.1.2':
-    resolution: {integrity: sha512-ovskzxgP5uBJiHxfG0lyqD/b0bOazu2x4nSmyUkkK13lw6g6uRygXPE4B6ysOsrI51qwO3ulsPPPbMzlOYoArA==}
-    engines: {node: '>=22.6.0'}
 
   '@standard-schema/spec@1.1.0':
     resolution: {integrity: sha512-l2aFy5jALhniG5HgqrD6jXLi/rUWrKvqN/qJx6yoJsgKhblVd+iqqU4RCXavm/jPityDo5TCvKMnpjKnOriy0w==}
@@ -2793,14 +2789,6 @@ snapshots:
   '@opentelemetry/api@1.9.0': {}
 
   '@package-json/types@0.0.12': {}
-
-  '@roll-agent/sdk@0.1.2':
-    dependencies:
-      '@modelcontextprotocol/sdk': 1.28.0(zod@3.25.76)
-      zod: 3.25.76
-    transitivePeerDependencies:
-      - '@cfworker/json-schema'
-      - supports-color
 
   '@standard-schema/spec@1.1.0': {}
 
