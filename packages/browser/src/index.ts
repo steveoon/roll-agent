@@ -18,6 +18,11 @@ export {
   BrowserSecurityConfigSchema,
   BrowserSessionInfoSchema,
   BrowserStatusSchema,
+  BrowserAxNodeSchema,
+  BrowserAxPropertyValueSchema,
+  BrowserAxSnapshotSchema,
+  BrowserElementRefHandleSchema,
+  BrowserElementRefSchema,
   PageSnapshotSchema,
   WaitOptionsSchema,
 } from "./types/index.ts";
@@ -33,6 +38,11 @@ export type {
   BrowserSecurityConfig,
   BrowserSessionInfo,
   BrowserStatus,
+  BrowserAxNode,
+  BrowserAxPropertyValue,
+  BrowserAxSnapshot,
+  BrowserElementRef,
+  BrowserElementRefHandle,
   PageSnapshot,
   WaitOptions,
 } from "./types/index.ts";
@@ -43,12 +53,20 @@ export { NativeCdpController } from "./runtime/native-cdp-controller.ts";
 export type {
   NativeCdpControllerOptions,
   NativeCdpCreateIsolatedWorldOptions,
+  NativeCdpDescribeNodeOptions,
+  NativeCdpDomNode,
   NativeCdpEvaluateOptions,
+  NativeCdpBoxModel,
   NativeCdpFrame,
   NativeCdpFrameTree,
+  NativeCdpGetBoxModelOptions,
+  NativeCdpGetDocumentOptions,
+  NativeCdpGetFullAxTreeOptions,
   NativeCdpKeyEventInput,
   NativeCdpMouseEventInput,
   NativeCdpNavigateResult,
+  NativeCdpQuerySelectorAllOptions,
+  NativeCdpScrollIntoViewOptions,
 } from "./runtime/native-cdp-controller.ts";
 export { NativeCdpLocator } from "./runtime/native-cdp-locator.ts";
 export type {
@@ -81,6 +99,22 @@ export type {
   BrowserSecurityFailureCode,
   TextTruncationResult,
 } from "./runtime/security.ts";
+export { createBrowserAxSnapshot, isBrowserElementRefHandle } from "./runtime/ax-snapshot.ts";
+export { BROWSER_DOM_ACTION_KINDS } from "./runtime/ax-snapshot.ts";
+export type {
+  BrowserAxSnapshotOptions,
+  BrowserDomActionHint,
+  BrowserDomActionKind,
+} from "./runtime/ax-snapshot.ts";
+export { BrowserElementRefStore, clickElementRef, typeElementRef } from "./runtime/element-ref.ts";
+export type {
+  BrowserElementRefActionResult,
+  BrowserElementRefClickDispatcher,
+  BrowserElementRefClickOptions,
+  BrowserElementRefResolveStrategy,
+  BrowserElementRefTarget,
+  BrowserElementRefTypeOptions,
+} from "./runtime/element-ref.ts";
 
 // Session
 export { SessionStore } from "./session/session-store.ts";

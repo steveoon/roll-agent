@@ -10,7 +10,7 @@ When multiple agents cooperate:
 1. Verify the upstream agent/runtime state first.
 2. Refresh shared context before generation when the target brand / tenant / workspace changes.
 3. Pass only the minimum validated output from one agent into the next.
-4. Add an external verification step after side effects (send, write, create, update).
+4. Add an external verification step after side effects (send, write, create, update, click, type).
 
 ## Pattern 1: Read -> Generate -> Send -> Verify
 
@@ -140,7 +140,7 @@ When a reader tool returns both raw UI positions and semantic refs, pass the sem
 tools.
 
 Use this when:
-- a browser/list tool returns refs such as `@c1` alongside DOM indices
+- a browser/list tool returns refs such as `@e1`, `@c1`, or `@j1` alongside DOM indices
 - the list may scroll, filter, refresh, or reorder between steps
 - an upstream orchestrator needs to keep a compact handle for the next tool call
 
@@ -149,6 +149,47 @@ Rules:
 2. Treat agent-provided refs as the preferred handle for follow-up tool calls.
 3. Refresh the reader tool before reusing refs after a filter, search, navigation, or page reload.
 4. Do not invent refs in orchestrator code; only pass refs emitted by the target agent.
+5. Do not mix ref families. A ref emitted by one tool family is only valid for tools documented to consume it.
+
+## Pattern 7: Observe -> Ref Action -> Re-Observe
+
+Use this pattern when a browser agent exposes a generic page snapshot and ref-based click/type tools.
+It is useful for unmodeled accessible controls, not for replacing domain-specific business tools.
+
+Example shape:
+
+```bash
+# 1. Observe the current page through the browser agent
+roll run <browser-agent> <snapshot-tool> --input-json '{"interactiveOnly":true}' --json
+
+# 2. Parse stdout JSON, pick a ref emitted by the snapshot
+roll run <browser-agent> <click-or-type-ref-tool> --input-json '{"ref":"@e1"}' --json
+
+# 3. Verify with a fresh observation or a domain-specific read tool
+roll run <browser-agent> <snapshot-or-read-tool> --input-json '{...}' --json
+```
+
+Selection rules:
+
+1. Match the user intent against semantic fields such as `role`, `name`, and disabled state.
+   Some browser agents may also expose constrained DOM-action text refs for non-semantic controls
+   such as clickable `span` tabs; use the target agent's docs to identify markers like
+   `properties.domActionable:true`.
+2. Use an explicit page id when multiple pages are open.
+3. If the emitted ref includes browser-internal metadata such as `frameId`, pass only the documented
+   ref handle and page id back to the browser agent; do not synthesize or rewrite that metadata in the
+   orchestrator.
+4. If the snapshot is truncated, narrow the page/context before taking the action.
+5. After any side effect that can re-render the page, take a fresh snapshot before the next ref action.
+6. When an action returns a confirmation gate, retry the same tool with the approval object exactly
+   as returned by that target agent.
+
+Boundary:
+
+- A generic page snapshot is not a complete HTML dump, screenshot, or business data model.
+- Element refs are current-page handles, not durable IDs.
+- Non-accessible widgets, canvas controls, cross-target iframes, and gestures may still need dedicated
+  target-agent tools.
 
 ## Common Pitfalls
 
@@ -167,6 +208,10 @@ Do not assume the sender is still focused on the same target the reader inspecte
 ### 5. UI index != stable business identity
 Raw list indices are only valid for the latest page snapshot. Prefer IDs or refs emitted by the
 reader tool.
+
+### 6. Generic element ref != business identity
+Refs such as `@e1` point to current page elements. They are appropriate for click/type actions, but
+they should not be stored as candidate, job, account, or conversation identity.
 
 ## Boundary Of This File
 

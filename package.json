@@ -9,7 +9,9 @@
   "scripts": {
     "dev": "node --experimental-strip-types packages/core/src/cli/index.ts",
     "build": "pnpm -r run build",
-    "verify:published-packages": "node scripts/verify-published-packages.mjs",
+    "security:audit": "pnpm audit --audit-level high",
+    "verify:dependency-denylist": "node scripts/verify-dependency-denylist.mjs",
+    "verify:published-packages": "pnpm verify:dependency-denylist && node scripts/verify-published-packages.mjs",
     "typecheck": "pnpm -r run typecheck",
     "test": "pnpm -r run test",
     "test:e2e": "pnpm --filter @roll-agent/core run test:e2e",

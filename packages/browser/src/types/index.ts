@@ -163,6 +163,57 @@ export const PageSnapshotSchema = z.object({
 
 export type PageSnapshot = z.infer<typeof PageSnapshotSchema>;
 
+// ========== Accessibility Snapshot / Element Ref ==========
+
+export const BrowserElementRefHandleSchema = z.string().regex(/^@e[1-9]\d*$/);
+export type BrowserElementRefHandle = z.infer<typeof BrowserElementRefHandleSchema>;
+
+export const BrowserAxPropertyValueSchema = z.union([z.string(), z.number(), z.boolean()]);
+export type BrowserAxPropertyValue = z.infer<typeof BrowserAxPropertyValueSchema>;
+
+export const BrowserElementRefSchema = z.object({
+  ref: BrowserElementRefHandleSchema,
+  backendNodeId: z.number().int().positive().optional(),
+  frameId: z.string().optional(),
+  role: z.string(),
+  name: z.string(),
+  nth: z.number().int().nonnegative(),
+  disabled: z.boolean(),
+});
+export type BrowserElementRef = z.infer<typeof BrowserElementRefSchema>;
+
+const BrowserAxNodeBaseSchema = z.object({
+  ref: BrowserElementRefHandleSchema.optional(),
+  role: z.string(),
+  name: z.string().optional(),
+  value: z.string().optional(),
+  description: z.string().optional(),
+  ignored: z.boolean(),
+  depth: z.number().int().nonnegative(),
+  backendNodeId: z.number().int().positive().optional(),
+  frameId: z.string().optional(),
+  properties: z.record(BrowserAxPropertyValueSchema).optional(),
+});
+
+export type BrowserAxNode = z.infer<typeof BrowserAxNodeBaseSchema> & {
+  readonly children?: readonly BrowserAxNode[] | undefined;
+};
+
+export const BrowserAxNodeSchema: z.ZodType<BrowserAxNode> = BrowserAxNodeBaseSchema.extend({
+  children: z.lazy(() => z.array(BrowserAxNodeSchema)).optional(),
+});
+
+export const BrowserAxSnapshotSchema = z.object({
+  nodes: z.array(BrowserAxNodeSchema),
+  refs: z.array(BrowserElementRefSchema),
+  nodeCount: z.number().int().nonnegative(),
+  truncated: z.boolean(),
+  maxNodes: z.number().int().positive(),
+  interactiveOnly: z.boolean(),
+  maxDepth: z.number().int().nonnegative().optional(),
+});
+export type BrowserAxSnapshot = z.infer<typeof BrowserAxSnapshotSchema>;
+
 // ========== Wait 策略选项 ==========
 
 export const WaitOptionsSchema = z.object({

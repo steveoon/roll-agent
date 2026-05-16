@@ -342,6 +342,89 @@ test("navigate rejects native Page.navigate errorText", async () => {
   controller.close();
 });
 
+test("accessibility tree and backend node helpers use allowlisted CDP commands", async () => {
+  const socket = new FakeNativeCdpWebSocket();
+  const controller = await createController(socket);
+
+  const axPromise = controller.getFullAccessibilityTree({ depth: 3 });
+  const axCommand = socket.takeSentCommand();
+  assert.equal(axCommand.method, "Accessibility.getFullAXTree");
+  assert.deepEqual(axCommand.params, { depth: 3 });
+  socket.respond(axCommand.id, {
+    nodes: [
+      {
+        nodeId: "1",
+        role: { value: "RootWebArea" },
+      },
+    ],
+  });
+
+  const scrollPromise = controller.scrollIntoViewByBackendNodeId({ backendNodeId: 123 });
+  const scrollCommand = socket.takeSentCommand();
+  assert.equal(scrollCommand.method, "DOM.scrollIntoViewIfNeeded");
+  assert.deepEqual(scrollCommand.params, { backendNodeId: 123 });
+  socket.respond(scrollCommand.id, {});
+
+  const boxPromise = controller.getBoxModelByBackendNodeId({ backendNodeId: 123 });
+  const boxCommand = socket.takeSentCommand();
+  assert.equal(boxCommand.method, "DOM.getBoxModel");
+  assert.deepEqual(boxCommand.params, { backendNodeId: 123 });
+  socket.respond(boxCommand.id, {
+    model: {
+      border: [0, 0, 10, 0, 10, 20, 0, 20],
+      width: 10,
+      height: 20,
+    },
+  });
+
+  const queryPromise = controller.querySelectorAllByNodeId({
+    nodeId: 1,
+    selector: "[data-roll-browser-action-candidate]",
+  });
+  const queryCommand = socket.takeSentCommand();
+  assert.equal(queryCommand.method, "DOM.querySelectorAll");
+  assert.deepEqual(queryCommand.params, {
+    nodeId: 1,
+    selector: "[data-roll-browser-action-candidate]",
+  });
+  socket.respond(queryCommand.id, { nodeIds: [7, 8] });
+
+  const describePromise = controller.describeNode({ nodeId: 7 });
+  const describeCommand = socket.takeSentCommand();
+  assert.equal(describeCommand.method, "DOM.describeNode");
+  assert.deepEqual(describeCommand.params, { nodeId: 7 });
+  socket.respond(describeCommand.id, {
+    node: {
+      nodeId: 7,
+      backendNodeId: 44,
+      nodeName: "IFRAME",
+      frameId: "iframe-node-frame",
+      contentDocument: {
+        frameId: "iframe-content-frame",
+      },
+      attributes: ["data-roll-browser-action-candidate", "0"],
+    },
+  });
+
+  assert.equal((await axPromise).length, 1);
+  await scrollPromise;
+  assert.deepEqual(await boxPromise, {
+    border: [0, 0, 10, 0, 10, 20, 0, 20],
+    width: 10,
+    height: 20,
+  });
+  assert.deepEqual(await queryPromise, [7, 8]);
+  assert.deepEqual(await describePromise, {
+    nodeId: 7,
+    backendNodeId: 44,
+    nodeName: "IFRAME",
+    frameId: "iframe-node-frame",
+    contentDocumentFrameId: "iframe-content-frame",
+    attributes: ["data-roll-browser-action-candidate", "0"],
+  });
+  controller.close();
+});
+
 test("native locator resolves and clicks through Runtime.evaluate plus Input.dispatchMouseEvent", async () => {
   const socket = new FakeNativeCdpWebSocket();
   const controller = await createController(socket);

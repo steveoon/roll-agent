@@ -130,6 +130,43 @@ Practical rule:
 - Read the target subagent's own `SKILL.md` first for these higher-level navigation affordances.
 - In this repo, `browser-use-agent` documents platform-specific section openers in its own `SKILL.md`; treat those as the source of truth instead of hardcoding site routes into the shared Roll skill.
 
+## UI Observation And Ref Actions
+
+When a browser-like target agent exposes page snapshots and element refs, treat them as an
+observe/action/verify loop rather than as a one-shot command.
+
+Priority:
+
+1. Prefer domain-specific tools that express the user intent directly, such as `send`, `open`,
+   `filter`, `select`, or `exchange` tools documented by the target subagent.
+2. Use generic snapshot/ref tools for unmodeled accessible controls when the target subagent
+   documents them.
+3. Use raw navigation, attach, evaluate, diagnostics, or selector-like tools only when the target
+   subagent explicitly recommends them for that workflow.
+
+Generic flow:
+
+```text
+roll skills get <agent-name> --include-references --json
+  -> roll agent tools <agent-name> --json
+  -> observe current page through the target agent's snapshot tool
+  -> choose only a ref emitted by that snapshot
+  -> run the target agent's ref action tool
+  -> verify with a fresh snapshot or a domain-specific read tool
+```
+
+Rules:
+
+- Do not invent element refs or reuse refs across page navigations, reloads, filtering, or modal changes.
+- If multiple browser pages are open, pass the explicit page identity returned by the target agent's page-listing tool.
+- If a browser agent returns `frameId` on an element ref, treat it as internal ref metadata owned by
+  that browser agent. Continue passing the emitted ref handle; do not synthesize or edit frame IDs in
+  the orchestrator.
+- Treat element refs as current-snapshot handles, not durable business IDs.
+- If the target agent also exposes business refs, keep each ref family scoped to the tools that emitted it.
+- Keep exact tool names, schemas, ref formats, and action-policy confirmation details in the target subagent's own
+  `SKILL.md` / references. This shared Roll skill only defines the orchestration pattern.
+
 ## Diagnostics & Maintenance
 
 - `roll doctor --json` — system health check, including runtime env drift summary for registered agents.
