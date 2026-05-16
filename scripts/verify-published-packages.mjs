@@ -29,6 +29,10 @@ const ALLOWED_LIFECYCLE_SCRIPTS = new Map([
     new Map([["prepublishOnly", "node ../../scripts/require-pnpm-publish.mjs"]]),
   ],
   [
+    "@roll-agent/reply-authority-client",
+    new Map([["prepublishOnly", "node ../../scripts/require-pnpm-publish.mjs"]]),
+  ],
+  [
     "@roll-agent/smart-reply-agent",
     new Map([["prepublishOnly", "node ../../scripts/require-pnpm-publish.mjs"]]),
   ],
@@ -77,6 +81,16 @@ const PACKAGE_CHECKS = [
   {
     name: "@roll-agent/browser",
     cwd: resolve(repoRoot, "packages/browser"),
+    expectedFiles: ["package/dist/index.js", "package/dist/index.d.ts"],
+    expectedJavaScriptFiles: ["package/dist/index.js"],
+    verifyManifest(manifest) {
+      assert.equal(manifest.exports?.["."].default, "./dist/index.js");
+      assert.equal(manifest.exports?.["."].types, "./dist/index.d.ts");
+    },
+  },
+  {
+    name: "@roll-agent/reply-authority-client",
+    cwd: resolve(repoRoot, "packages/reply-authority-client"),
     expectedFiles: ["package/dist/index.js", "package/dist/index.d.ts"],
     expectedJavaScriptFiles: ["package/dist/index.js"],
     verifyManifest(manifest) {

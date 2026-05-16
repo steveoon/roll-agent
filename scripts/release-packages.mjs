@@ -21,6 +21,11 @@ const PUBLISHED_PACKAGES = [
     prepublishOnly: ALLOWED_PREPUBLISH_ONLY,
   },
   {
+    name: "@roll-agent/reply-authority-client",
+    packageJson: "packages/reply-authority-client/package.json",
+    prepublishOnly: ALLOWED_PREPUBLISH_ONLY,
+  },
+  {
     name: "@roll-agent/browser-use-agent",
     packageJson: "agents/browser-use/package.json",
     prepublishOnly: ALLOWED_PREPUBLISH_ONLY,

@@ -1,5 +1,16 @@
 # @roll-agent/sdk
 
+## 0.2.0
+
+### Minor Changes
+
+- [#91](https://github.com/steveoon/roll-agent/pull/91) [`e84cba2`](https://github.com/steveoon/roll-agent/commit/e84cba281b5f5a999577175db296a48e843eeff9) Thanks [@steveoon](https://github.com/steveoon)! - Add browser security policy and browser-use tool confirmation policy.
+  - Add env-driven browser hard boundaries for domain allowlists, action policy decisions, and output caps.
+  - Add browser-use tool-level policy with one-time approval tokens for confirm-gated tools.
+  - Gate `zhipin_send_prepared_reply` with non-consuming prepared reply inspection and approval retry support.
+  - Add structured tool errors in the SDK and expose them through `roll run --json`.
+  - Surface browser security and tool policy summaries in `browser_status` and `roll doctor`.
+
 ## 0.1.6
 
 ### Patch Changes
