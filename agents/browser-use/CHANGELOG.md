@@ -1,5 +1,21 @@
 # @roll-agent/browser-use-agent
 
+## 0.12.0
+
+### Minor Changes
+
+- [#94](https://github.com/steveoon/roll-agent/pull/94) [`2013aea`](https://github.com/steveoon/roll-agent/commit/2013aeada6d7269826133ed0e6c1e765d06a70b7) Thanks [@steveoon](https://github.com/steveoon)! - Add generic browser Accessibility snapshots and stable `@eN` element refs.
+  - Add AX snapshot schemas, `Accessibility.getFullAXTree` support, and `@eN` ref generation in `@roll-agent/browser`.
+  - Add backendNodeId-first element ref actions with role/name/nth fallback for stale refs, including recursive same-target iframe refs that carry `frameId`.
+  - Promote non-semantic DOM-action controls inside same-target iframes, such as visible `div`/`span` buttons with `cursor:pointer` or button-like class hints.
+  - Promote composite dropdown option rows by reading visible descendant text in dropdown/menu/select contexts.
+  - Expose `browser_snapshot`, `click_ref`, and `type_ref` in `browser-use-agent`, capped by `security.maxSnapshotNodes` and gated by browser action policy.
+
+### Patch Changes
+
+- Updated dependencies [[`2013aea`](https://github.com/steveoon/roll-agent/commit/2013aeada6d7269826133ed0e6c1e765d06a70b7)]:
+  - @roll-agent/browser@0.5.0
+
 ## 0.11.0
 
 ### Minor Changes
