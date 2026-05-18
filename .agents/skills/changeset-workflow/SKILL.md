@@ -1,0 +1,75 @@
+---
+name: changeset-workflow
+description: Use when creating, checking, reviewing, or debugging Changesets release workflows in this monorepo, including changeset files, version package PRs, changelog previews, release PRs, semver bumps, and npm publish validation.
+---
+
+## Published Packages
+
+| npm 包名 | 本地路径 |
+|---|---|
+| `@roll-agent/core` | `packages/core` |
+| `@roll-agent/sdk` | `packages/sdk` |
+| `@roll-agent/browser` | `packages/browser` |
+| `@roll-agent/reply-authority-client` | `packages/reply-authority-client` |
+| `@roll-agent/browser-use-agent` | `agents/browser-use` |
+| `@roll-agent/smart-reply-agent` | `agents/smart-reply` |
+
+## Step 1: 在功能分支中创建 Changeset
+
+```bash
+pnpm changeset
+```
+
+交互式提示：选择受影响的包 -> 选择 semver 级别 -> 输入变更描述。
+完成后会在 `.changeset/` 下生成一个随机命名的 `.md` 文件，**必须随 PR 一起提交**。
+
+**Semver 选择标准：**
+
+- `patch` — bug fix、内部重构，不改变公开 API 行为
+- `minor` — 新功能，向后兼容
+- `major` — breaking change，调用方需要适配
+
+**内部依赖自动传播（`updateInternalDependencies: "patch"`）：**
+修改 `@roll-agent/browser` 时，`@roll-agent/browser-use-agent` 会自动获得一个 patch bump，无需手动选它。其余包同理。
+
+## Step 2: 合并前本地验证清单
+
+```bash
+pnpm typecheck
+pnpm lint
+pnpm test
+pnpm test:e2e
+
+# CLI 懒加载发布校验（必做）
+pnpm --filter @roll-agent/core build && node packages/core/dist/cli/index.js agent health
+```
+
+最后一条命令无已注册 Agent 时输出“暂无已注册 Agent”即通过。失败说明 `dist/` 中存在残留 `.ts` specifier，需在合并前修复。
+
+## Step 3: PR 合入 main 后的自动化流程
+
+PR 合入 `main` 后，GitHub Actions `release.yml` 自动执行：
+
+1. **quality job** — 依次运行 dependency-denylist、security audit、typecheck、lint、test、e2e、build
+2. **release job**（依赖 quality）— 调用 `changesets/action`：
+   - 若存在 changeset 文件 -> 创建或更新标题为 **`chore: version packages`** 的 release PR（执行 `pnpm version-packages` 更新版本号和 CHANGELOG）
+   - 若不存在 changeset 文件（即 release PR 刚被合并）-> 执行 `node scripts/release-packages.mjs` 发布
+
+## Step 4: 发布流程（自动）
+
+`scripts/release-packages.mjs` 自动完成：
+
+1. `pnpm verify:dependency-denylist`
+2. `pnpm build`
+3. `pnpm verify:published-packages`（校验 `package.json` 中 name / lifecycle scripts 合规）
+4. `pnpm exec changeset publish`（使用 `secrets.NPM_TOKEN`）
+
+**不需要也不应该手动执行发布命令。**
+
+## 本地 dry-run 诊断
+
+```bash
+pnpm release:legacy:dry-run
+```
+
+仅用于本地诊断，不会发布到 npm。
