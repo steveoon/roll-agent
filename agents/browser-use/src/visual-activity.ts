@@ -171,9 +171,41 @@ async function renderActivityFrame(
       document.head.append(style);
     };
 
+    const normalizeViewport = (viewport: HTMLElement): void => {
+      viewport.style.position = "fixed";
+      viewport.style.inset = "0";
+      viewport.style.opacity = "0";
+      viewport.style.pointerEvents = "none";
+      viewport.style.display = "none";
+      viewport.style.border = "0";
+      viewport.style.boxShadow = "none";
+      viewport.style.borderRadius = "0";
+      viewport.style.transform = "none";
+      viewport.style.transition = "none";
+      viewport.style.background = "transparent";
+    };
+
+    const showViewportFrame = (
+      viewport: HTMLElement,
+      theme: VisualActivityTheme,
+      mode: "begin" | "highlight" | "complete" | "clear",
+    ): void => {
+      normalizeViewport(viewport);
+      viewport.style.display = "block";
+      viewport.style.opacity = mode === "complete" ? "0.28" : "0.22";
+      viewport.style.background =
+        `linear-gradient(180deg, ${theme.accentGlow} 0%, transparent 16%, transparent 84%, ${theme.accentGlow} 100%), ` +
+        `linear-gradient(90deg, ${theme.accentGlow} 0%, transparent 12%, transparent 88%, ${theme.accentGlow} 100%)`;
+      viewport.style.boxShadow = `inset 0 0 0 2px ${theme.accentSoft}, inset 0 0 28px ${theme.accentGlow}`;
+    };
+
     const ensureRoot = (): HTMLElement => {
       const existing = document.getElementById(rootId);
       if (existing) {
+        const existingViewport = document.getElementById(viewportId) as HTMLElement | null;
+        if (existingViewport) {
+          normalizeViewport(existingViewport);
+        }
         return existing;
       }
 
@@ -187,12 +219,7 @@ async function renderActivityFrame(
       const viewport = document.createElement("div");
       viewport.id = viewportId;
       viewport.setAttribute("aria-hidden", "true");
-      viewport.style.position = "fixed";
-      viewport.style.inset = "10px";
-      viewport.style.borderRadius = "20px";
-      viewport.style.opacity = "0";
-      viewport.style.transform = "scale(0.995)";
-      viewport.style.transition = "opacity 180ms ease, transform 220ms ease";
+      normalizeViewport(viewport);
 
       const region = document.createElement("div");
       region.id = regionId;
@@ -265,13 +292,11 @@ async function renderActivityFrame(
       immediate = false,
     ): void => {
       if (immediate) {
-        viewport.style.transition = "none";
         region.style.transition = "none";
         capsule.style.transition = "none";
       }
 
-      viewport.style.opacity = "0";
-      viewport.style.transform = "scale(0.995)";
+      normalizeViewport(viewport);
       region.style.opacity = "0";
       capsule.style.opacity = "0";
       capsule.style.transform = "translate(-50%, -8px)";
@@ -279,7 +304,6 @@ async function renderActivityFrame(
 
       if (immediate) {
         requestAnimationFrame(() => {
-          viewport.style.transition = "opacity 180ms ease, transform 220ms ease";
           region.style.transition =
             "transform 220ms cubic-bezier(0.22, 1, 0.36, 1), width 220ms ease, height 220ms ease, opacity 180ms ease";
           capsule.style.transition = "opacity 180ms ease, transform 220ms ease";
@@ -299,6 +323,7 @@ async function renderActivityFrame(
     if (!viewport || !region || !shine || !capsule || !dot || !label) {
       return;
     }
+    normalizeViewport(viewport);
 
     const timers = ((window as typeof window & {
       [stateKey]:
@@ -319,8 +344,7 @@ async function renderActivityFrame(
 
     const theme = args.theme;
     if (theme !== undefined) {
-      viewport.style.border = `1px solid ${theme.accentSoft}`;
-      viewport.style.boxShadow = `inset 0 0 0 1px ${theme.accentSoft}, 0 0 52px ${theme.accentGlow}`;
+      showViewportFrame(viewport, theme, args.mode);
       capsule.style.border = `1px solid ${theme.capsuleBorder}`;
       capsule.style.background = theme.capsuleBg;
       capsule.style.color = theme.text;
@@ -340,8 +364,6 @@ async function renderActivityFrame(
 
     capsule.style.opacity = "1";
     capsule.style.transform = "translate(-50%, 0)";
-    viewport.style.opacity = args.mode === "complete" ? "0.9" : "0.72";
-    viewport.style.transform = "scale(1)";
 
     if (args.mode === "begin") {
       region.style.opacity = "0";
