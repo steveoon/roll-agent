@@ -1,5 +1,11 @@
 # @roll-agent/browser-use-agent
 
+## 0.12.1
+
+### Patch Changes
+
+- [#96](https://github.com/steveoon/roll-agent/pull/96) [`db6d46b`](https://github.com/steveoon/roll-agent/commit/db6d46b3ea482650024b307e1593406846286dce) Thanks [@steveoon](https://github.com/steveoon)! - Keep the browser visual activity viewport frame safe by clearing stale full-page overlay styles before rendering a low-opacity edge glow, preventing the page from appearing inset while preserving visual progress feedback.
+
 ## 0.12.0
 
 ### Minor Changes
