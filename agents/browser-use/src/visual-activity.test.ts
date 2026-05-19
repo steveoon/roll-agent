@@ -51,6 +51,12 @@ function createPage() {
   };
 }
 
+function readFirstEvaluateFunctionSource(evaluateCalls: readonly unknown[]): string {
+  const firstCall = evaluateCalls.at(0);
+  assert.ok(Array.isArray(firstCall));
+  return String(firstCall.at(0));
+}
+
 afterEach(() => {
   setVisualActivityEnabledForTests(undefined);
 });
@@ -90,6 +96,32 @@ describe("visual-activity", () => {
 
     assert.equal(started, true);
     assert.equal(getEvaluateCalls().length, 1);
+  });
+
+  it("normalizes stale full-page viewport styles before showing the safe viewport frame", async () => {
+    setVisualActivityEnabledForTests(true);
+    const { page, getEvaluateCalls } = createPage();
+
+    const started = await beginVisualActivity(page, { label: "正在读取消息列表" });
+
+    assert.equal(started, true);
+    const renderSource = readFirstEvaluateFunctionSource(getEvaluateCalls());
+    assert.match(renderSource, /const normalizeViewport = /);
+    assert.match(renderSource, /viewport\.style\.display = "none"/);
+    assert.match(renderSource, /viewport\.style\.border = "0"/);
+    assert.match(renderSource, /viewport\.style\.boxShadow = "none"/);
+    assert.match(renderSource, /viewport\.style\.transform = "none"/);
+    assert.match(renderSource, /const showViewportFrame = /);
+    assert.match(renderSource, /viewport\.style\.display = "block"/);
+    assert.match(renderSource, /viewport\.style\.background =/);
+    assert.match(renderSource, /linear-gradient\(180deg,/);
+    assert.match(renderSource, /linear-gradient\(90deg,/);
+    assert.match(renderSource, /viewport\.style\.boxShadow = `inset 0 0 0 2px/);
+    assert.match(renderSource, /inset 0 0 28px/);
+    assert.doesNotMatch(renderSource, /viewport\.style\.inset = "10px"/);
+    assert.doesNotMatch(renderSource, /viewport\.style\.borderRadius = "20px"/);
+    assert.doesNotMatch(renderSource, /viewport\.style\.transform = "scale/);
+    assert.doesNotMatch(renderSource, /0 0 52px/);
   });
 
   it("highlights a region when enabled", async () => {

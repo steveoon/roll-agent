@@ -84,9 +84,45 @@ function buildNativeVisualScript(args: unknown): string {
       };
     };
 
+    const normalizeActivityViewport = (viewport) => {
+      viewport.style.position = "fixed";
+      viewport.style.inset = "0";
+      viewport.style.opacity = "0";
+      viewport.style.pointerEvents = "none";
+      viewport.style.display = "none";
+      viewport.style.border = "0";
+      viewport.style.boxShadow = "none";
+      viewport.style.borderRadius = "0";
+      viewport.style.transform = "none";
+      viewport.style.transition = "none";
+      viewport.style.background = "transparent";
+    };
+
+    const showActivityViewportFrame = (viewport, theme, mode) => {
+      normalizeActivityViewport(viewport);
+      viewport.style.display = "block";
+      viewport.style.opacity = mode === "complete" ? "0.28" : "0.22";
+      viewport.style.background =
+        "linear-gradient(180deg, " +
+        theme.accentGlow +
+        " 0%, transparent 16%, transparent 84%, " +
+        theme.accentGlow +
+        " 100%), linear-gradient(90deg, " +
+        theme.accentGlow +
+        " 0%, transparent 12%, transparent 88%, " +
+        theme.accentGlow +
+        " 100%)";
+      viewport.style.boxShadow =
+        "inset 0 0 0 2px " + theme.accentSoft + ", inset 0 0 28px " + theme.accentGlow;
+    };
+
     const ensureActivityRoot = () => {
       let root = document.getElementById(activityRootId);
-      if (root) return root;
+      if (root) {
+        const viewport = document.getElementById(activityViewportId);
+        if (viewport) normalizeActivityViewport(viewport);
+        return root;
+      }
       root = document.createElement("div");
       root.id = activityRootId;
       root.style.position = "fixed";
@@ -96,11 +132,7 @@ function buildNativeVisualScript(args: unknown): string {
 
       const viewport = document.createElement("div");
       viewport.id = activityViewportId;
-      viewport.style.position = "fixed";
-      viewport.style.inset = "10px";
-      viewport.style.borderRadius = "20px";
-      viewport.style.opacity = "0";
-      viewport.style.transition = "opacity 180ms ease";
+      normalizeActivityViewport(viewport);
 
       const region = document.createElement("div");
       region.id = activityRegionId;
@@ -150,16 +182,14 @@ function buildNativeVisualScript(args: unknown): string {
       return root;
     };
 
-    const applyTheme = (themeName) => {
+    const applyTheme = (themeName, mode) => {
       const theme = themes[themeName] ?? themes.info;
       const viewport = document.getElementById(activityViewportId);
       const region = document.getElementById(activityRegionId);
       const capsule = document.getElementById(activityCapsuleId);
       const dot = document.getElementById(activityDotId);
       if (!viewport || !region || !capsule || !dot) return;
-      viewport.style.border = "1px solid " + theme.accentSoft;
-      viewport.style.boxShadow =
-        "inset 0 0 0 1px " + theme.accentSoft + ", 0 0 52px " + theme.accentGlow;
+      showActivityViewportFrame(viewport, theme, mode);
       region.style.border = "1px solid " + theme.accentSoft;
       region.style.background = theme.accentGlow;
       region.style.boxShadow =
@@ -176,7 +206,6 @@ function buildNativeVisualScript(args: unknown): string {
     const renderActivity = () => {
       if (!args.activity) return;
       ensureActivityRoot();
-      applyTheme(args.activity.tone ?? "info");
       const viewport = document.getElementById(activityViewportId);
       const region = document.getElementById(activityRegionId);
       const capsule = document.getElementById(activityCapsuleId);
@@ -184,7 +213,7 @@ function buildNativeVisualScript(args: unknown): string {
       if (!viewport || !region || !capsule || !label) return;
 
       if (args.activity.mode === "clear") {
-        viewport.style.opacity = "0";
+        normalizeActivityViewport(viewport);
         region.style.opacity = "0";
         region.style.transform = "translate(-9999px, -9999px)";
         capsule.style.opacity = "0";
@@ -192,11 +221,12 @@ function buildNativeVisualScript(args: unknown): string {
         return;
       }
 
+      applyTheme(args.activity.tone ?? "info", args.activity.mode);
+
       if (typeof args.activity.label === "string") {
         label.textContent = args.activity.label;
       }
 
-      viewport.style.opacity = args.activity.mode === "complete" ? "0.9" : "0.72";
       capsule.style.opacity = "1";
       capsule.style.transform = "translate(-50%, 0)";
 
@@ -215,7 +245,7 @@ function buildNativeVisualScript(args: unknown): string {
 
       if (args.activity.mode === "complete") {
         window.setTimeout(() => {
-          viewport.style.opacity = "0";
+          normalizeActivityViewport(viewport);
           region.style.opacity = "0";
           capsule.style.opacity = "0";
           capsule.style.transform = "translate(-50%, -8px)";
