@@ -46,6 +46,38 @@ describe("config/runtime-env", () => {
     assert.equal(parsed.policyWarnings?.[0]?.code, "double_confirmation");
   });
 
+  it("accepts browser instance health diagnostics from browser_status", () => {
+    const parsed = AgentRuntimeEnvDiagnosticPayloadSchema.parse({
+      effectiveEnvSources: {},
+      defaultInstanceId: "boss-a",
+      instances: [
+        {
+          id: "boss-a",
+          platform: "zhipin",
+          mode: "managed-cdp",
+          cdp: {
+            endpoint: "http://127.0.0.1:9222",
+            port: 9222,
+            versionReachable: true,
+            listReachable: true,
+          },
+          profile: {
+            userDataDir: "/tmp/boss-a",
+            exists: true,
+            writable: true,
+          },
+          tracking: {
+            source: "instance",
+            agentIdFingerprint: "1111aaaa",
+          },
+        },
+      ],
+    });
+
+    assert.equal(parsed.defaultInstanceId, "boss-a");
+    assert.equal(parsed.instances?.[0]?.tracking.source, "instance");
+  });
+
   it("marks matching runtime env as stable", () => {
     const declarationReport = inspectAgentEnvRequirements(
       "browser-use-agent",

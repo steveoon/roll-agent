@@ -1,8 +1,8 @@
 import { defineCommand } from "citty";
 import { existsSync, mkdirSync, statSync } from "node:fs";
 import { resolve } from "node:path";
-import { inspectAgentEnvRequirements } from "../../config/helpers.ts";
-import { loadAgentsConfig } from "../../config/loader.ts";
+import { getAgentEnv, inspectAgentEnvRequirements } from "../../config/helpers.ts";
+import { loadAgentsConfig, loadConfig } from "../../config/loader.ts";
 import { discoverAgent } from "../../registry/discovery.ts";
 import {
   startAgent,
@@ -173,7 +173,11 @@ export default defineCommand({
         store.updateStatus(agent.skill.name, "starting");
         let started = false;
         try {
-          startAgent(agent, agentsConfig.dataDir);
+          startAgent(
+            agent,
+            agentsConfig.dataDir,
+            getAgentEnv(loadConfig().config, agent.skill.name),
+          );
           started = true;
           await waitForAgentReady(agent, { startupTimeoutMs: 15_000, probeTimeoutMs: 2_000 });
           store.updateStatus(agent.skill.name, "online");

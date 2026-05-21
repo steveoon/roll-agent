@@ -36,11 +36,35 @@ export const BrowserUsePolicyWarningDiagnosticSchema = z.object({
   message: z.string(),
 });
 
+export const BrowserInstanceStatusDiagnosticSchema = z.object({
+  id: z.string(),
+  platform: z.enum(["zhipin", "yupao"]).optional(),
+  mode: z.enum(["managed-cdp", "remote-cdp", "existing-session"]),
+  cdp: z.object({
+    endpoint: z.string(),
+    port: z.number().int().min(1).max(65_535).optional(),
+    versionReachable: z.boolean(),
+    listReachable: z.boolean(),
+  }),
+  profile: z.object({
+    userDataDir: z.string().optional(),
+    exists: z.boolean(),
+    writable: z.boolean(),
+  }),
+  tracking: z.object({
+    source: z.enum(["instance", "default-env", "missing"]),
+    agentIdFingerprint: z.string().regex(EFFECTIVE_ENV_FINGERPRINT_PATTERN).optional(),
+  }),
+});
+
 export const AgentRuntimeEnvDiagnosticPayloadSchema = z.object({
   effectiveEnvSources: z.record(EffectiveEnvSourceSchema),
   security: BrowserSecurityDiagnosticSchema.optional(),
   toolPolicy: BrowserUseToolPolicyDiagnosticSchema.optional(),
   policyWarnings: z.array(BrowserUsePolicyWarningDiagnosticSchema).optional(),
+  defaultInstanceId: z.string().optional(),
+  primaryInstanceId: z.string().optional(),
+  instances: z.array(BrowserInstanceStatusDiagnosticSchema).optional(),
 });
 
 export type AgentRuntimeEnvDiagnosticPayload = z.infer<
@@ -51,6 +75,7 @@ export type BrowserUseToolPolicyDiagnostic = z.infer<typeof BrowserUseToolPolicy
 export type BrowserUsePolicyWarningDiagnostic = z.infer<
   typeof BrowserUsePolicyWarningDiagnosticSchema
 >;
+export type BrowserInstanceStatusDiagnostic = z.infer<typeof BrowserInstanceStatusDiagnosticSchema>;
 
 export type AgentRuntimeEnvInspection =
   | {

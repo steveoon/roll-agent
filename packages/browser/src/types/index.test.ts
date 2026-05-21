@@ -37,6 +37,28 @@ test("BrowserRuntimeConfigSchema normalizes security config", () => {
   assert.equal(config.security.foregroundPolicy, "never");
 });
 
+test("BrowserRuntimeConfigSchema accepts instance display and window bounds config", () => {
+  const config = BrowserRuntimeConfigSchema.parse({
+    instanceId: "boss-a",
+    profileName: "Boss A",
+    windowBounds: {
+      x: 0,
+      y: 24,
+      width: 680,
+      height: 1000,
+    },
+  });
+
+  assert.equal(config.instanceId, "boss-a");
+  assert.equal(config.profileName, "Boss A");
+  assert.deepEqual(config.windowBounds, {
+    x: 0,
+    y: 24,
+    width: 680,
+    height: 1000,
+  });
+});
+
 test("BrowserRuntimeConfigSchema requires cdpUrl in remote-cdp mode", () => {
   assert.throws(() => BrowserRuntimeConfigSchema.parse({ mode: "remote-cdp" }), /cdpUrl/);
 });

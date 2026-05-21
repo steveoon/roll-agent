@@ -1,12 +1,16 @@
 import { defineCommand } from "citty";
-import { getAgentEnvFromAgentsConfig, inspectAgentEnvRequirements } from "../../config/helpers.ts";
+import {
+  getAgentEnv,
+  getAgentEnvFromAgentsConfig,
+  inspectAgentEnvRequirements,
+} from "../../config/helpers.ts";
 import {
   formatAgentEnvDeclarationSource,
   formatAgentEnvRuntimeStatus,
   formatAgentRuntimeVerification,
   inspectAgentRuntimeEnvRequirements,
 } from "../../config/runtime-env.ts";
-import { loadAgentsConfig } from "../../config/loader.ts";
+import { loadAgentsConfig, loadConfig } from "../../config/loader.ts";
 import { inspectAgentRuntimeEnv } from "../../mcp/agent-diagnostics.ts";
 import {
   formatAgentSourceType,
@@ -51,16 +55,22 @@ export default defineCommand({
       }
     }
 
+    const config = tryLoadFullConfig();
     const envReport = inspectAgentEnvRequirements(
       agent.skill.name,
       agent.skill.env,
       agentsConfig.env,
     );
     if (envReport) {
-      const runtimeInspection = await inspectAgentRuntimeEnv(agent, { agentsConfig });
+      const runtimeInspection = await inspectAgentRuntimeEnv(
+        agent,
+        config !== undefined ? { config } : { agentsConfig },
+      );
       const runtimeReport = inspectAgentRuntimeEnvRequirements(
         envReport,
-        getAgentEnvFromAgentsConfig(agentsConfig, agent.skill.name),
+        config !== undefined
+          ? getAgentEnv(config, agent.skill.name)
+          : getAgentEnvFromAgentsConfig(agentsConfig, agent.skill.name),
         runtimeInspection,
       );
 
@@ -80,3 +90,11 @@ export default defineCommand({
     }
   },
 });
+
+function tryLoadFullConfig(): ReturnType<typeof loadConfig>["config"] | undefined {
+  try {
+    return loadConfig().config;
+  } catch {
+    return undefined;
+  }
+}

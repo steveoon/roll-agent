@@ -40,7 +40,15 @@ export function getAgentEnv(
   config: RollConfig,
   agentName: string,
 ): Readonly<Record<string, string>> | undefined {
-  return getAgentEnvFromAgentsConfig(config.agents, agentName);
+  const configuredEnv = getAgentEnvFromAgentsConfig(config.agents, agentName);
+  if (agentName !== "browser-use-agent" || Object.keys(config.browser.instances).length === 0) {
+    return configuredEnv;
+  }
+
+  return {
+    ...(configuredEnv ?? {}),
+    BROWSER_INSTANCES_JSON: JSON.stringify(config.browser),
+  };
 }
 
 export function inspectAgentEnvRequirements(

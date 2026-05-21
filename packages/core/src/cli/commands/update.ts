@@ -6,8 +6,10 @@ import { promisify } from "node:util";
 import {
   inspectConfigFile,
   loadAgentsConfig,
+  loadConfig,
   type ConfigInspectionResult,
 } from "../../config/loader.ts";
+import { getAgentEnv } from "../../config/helpers.ts";
 import {
   getAgentPid,
   startAgent,
@@ -677,7 +679,7 @@ async function maybeRestartManagedAgent(
 async function startManagedAgentAndWait(agent: RegisteredAgent, dataDir: string): Promise<void> {
   let started = false;
   try {
-    startAgent(agent, dataDir);
+    startAgent(agent, dataDir, getAgentEnv(loadConfig().config, agent.skill.name));
     started = true;
     await waitForAgentReady(agent, { startupTimeoutMs: 15_000, probeTimeoutMs: 2_000 });
   } catch (err) {

@@ -11,6 +11,7 @@ export {
   BROWSER_FOREGROUND_POLICIES,
   BrowserActionPolicySchema,
   BrowserForegroundPolicySchema,
+  BrowserWindowBoundsSchema,
   BrowserActionApprovalSchema,
   BrowserChannelSchema,
   BrowserPageInfoSchema,
@@ -19,6 +20,8 @@ export {
   BrowserRuntimeConfigSchema,
   BrowserSecurityConfigSchema,
   BrowserSessionInfoSchema,
+  BrowserInstanceStatusSchema,
+  BrowserInstanceTrackingSourceSchema,
   BrowserStatusSchema,
   BrowserAxNodeSchema,
   BrowserAxPropertyValueSchema,
@@ -32,6 +35,7 @@ export type {
   Platform,
   BrowserActionPolicy,
   BrowserForegroundPolicy,
+  BrowserWindowBounds,
   BrowserActionApproval,
   BrowserChannel,
   BrowserPageInfo,
@@ -40,6 +44,8 @@ export type {
   BrowserRuntimeConfig,
   BrowserSecurityConfig,
   BrowserSessionInfo,
+  BrowserInstanceStatus,
+  BrowserInstanceTrackingSource,
   BrowserStatus,
   BrowserAxNode,
   BrowserAxPropertyValue,
@@ -52,6 +58,11 @@ export type {
 
 // Runtime
 export { BrowserRuntime } from "./runtime/browser-runtime.ts";
+export {
+  probeBrowserRuntimeCdpHealth,
+  resolveBrowserRuntimeCdpEndpoint,
+} from "./runtime/cdp-health.ts";
+export type { BrowserCdpHealth, FetchCdpHealth } from "./runtime/cdp-health.ts";
 export { NativeCdpController } from "./runtime/native-cdp-controller.ts";
 export type {
   NativeCdpControllerOptions,
@@ -70,6 +81,8 @@ export type {
   NativeCdpNavigateResult,
   NativeCdpQuerySelectorAllOptions,
   NativeCdpScrollIntoViewOptions,
+  NativeCdpSettableWindowState,
+  NativeCdpWindowBounds,
   NativeCdpWindowState,
 } from "./runtime/native-cdp-controller.ts";
 export { NativeCdpLocator } from "./runtime/native-cdp-locator.ts";

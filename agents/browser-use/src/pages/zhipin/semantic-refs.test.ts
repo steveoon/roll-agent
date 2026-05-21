@@ -13,6 +13,7 @@ import {
   resolveZhipinCandidateIndices,
   resolveZhipinCandidateRefTarget,
   resolveZhipinRecommendJobRefTarget,
+  runWithZhipinSemanticRefScopeForTests,
 } from "./semantic-refs.ts";
 
 afterEach(() => {
@@ -105,5 +106,34 @@ describe("zhipin semantic refs", () => {
 
     clearZhipinRecommendJobRefsForTests();
     assert.throws(() => resolveZhipinRecommendJobRefTarget("@j2"), /已过期/);
+  });
+
+  it("scopes remembered refs by browser instance", () => {
+    runWithZhipinSemanticRefScopeForTests("boss-a", () => {
+      rememberZhipinCandidateRefs([{ index: 0, candidateId: "candidate-a", name: "候选人 A" }]);
+      rememberZhipinRecommendJobRefs([
+        { index: 0, value: "job-a", label: "服务员 _ 上海 5-6K", isCurrent: true },
+      ]);
+    });
+    runWithZhipinSemanticRefScopeForTests("boss-b", () => {
+      rememberZhipinCandidateRefs([{ index: 0, candidateId: "candidate-b", name: "候选人 B" }]);
+      rememberZhipinRecommendJobRefs([
+        { index: 0, value: "job-b", label: "后厨 _ 上海 6-7K", isCurrent: true },
+      ]);
+    });
+
+    const bossA = runWithZhipinSemanticRefScopeForTests("boss-a", () => ({
+      candidate: resolveZhipinCandidateRefTarget("@c1"),
+      job: resolveZhipinRecommendJobRefTarget("@j1"),
+    }));
+    const bossB = runWithZhipinSemanticRefScopeForTests("boss-b", () => ({
+      candidate: resolveZhipinCandidateRefTarget("@c1"),
+      job: resolveZhipinRecommendJobRefTarget("@j1"),
+    }));
+
+    assert.equal(bossA.candidate.candidateId, "candidate-a");
+    assert.equal(bossA.job.value, "job-a");
+    assert.equal(bossB.candidate.candidateId, "candidate-b");
+    assert.equal(bossB.job.value, "job-b");
   });
 });

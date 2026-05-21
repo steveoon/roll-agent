@@ -3,6 +3,7 @@ import { dirname, join } from "node:path";
 
 const DEFAULT_PROFILE_NAME = "Roll Agent";
 const DEFAULT_PROFILE_COLOR = "#6C5CE7";
+const PROFILE_DECORATION_MARKER_VERSION = 2;
 
 function markerPath(userDataDir: string): string {
   return join(userDataDir, ".roll-agent-profile-decorated");
@@ -27,6 +28,22 @@ function safeReadJson(filePath: string): Record<string, unknown> | null {
 function safeWriteJson(filePath: string, data: Record<string, unknown>): void {
   mkdirSync(dirname(filePath), { recursive: true });
   writeFileSync(filePath, JSON.stringify(data, null, 2));
+}
+
+function readMarkerSignature(userDataDir: string): string | undefined {
+  try {
+    return readFileSync(markerPath(userDataDir), "utf-8").trim();
+  } catch {
+    return undefined;
+  }
+}
+
+function createMarkerSignature(input: { readonly name: string; readonly color: string }): string {
+  return JSON.stringify({
+    version: PROFILE_DECORATION_MARKER_VERSION,
+    name: input.name,
+    color: input.color,
+  });
 }
 
 function setDeep(obj: Record<string, unknown>, keys: readonly string[], value: unknown): void {
@@ -62,12 +79,16 @@ export function decorateManagedProfile(
   userDataDir: string,
   opts?: { name?: string; color?: string },
 ): void {
-  if (existsSync(markerPath(userDataDir))) {
+  const desiredName = opts?.name ?? DEFAULT_PROFILE_NAME;
+  const desiredColor = (opts?.color ?? DEFAULT_PROFILE_COLOR).toUpperCase();
+  const markerSignature = createMarkerSignature({
+    name: desiredName,
+    color: desiredColor,
+  });
+  if (readMarkerSignature(userDataDir) === markerSignature) {
     return;
   }
 
-  const desiredName = opts?.name ?? DEFAULT_PROFILE_NAME;
-  const desiredColor = (opts?.color ?? DEFAULT_PROFILE_COLOR).toUpperCase();
   const desiredColorInt = parseHexRgbToSignedArgbInt(desiredColor);
 
   const localStatePath = join(userDataDir, "Local State");
@@ -114,7 +135,7 @@ export function decorateManagedProfile(
   safeWriteJson(preferencesPath, prefs);
 
   try {
-    writeFileSync(markerPath(userDataDir), `${Date.now()}\n`, "utf-8");
+    writeFileSync(markerPath(userDataDir), `${markerSignature}\n`, "utf-8");
   } catch {
     // ignore
   }

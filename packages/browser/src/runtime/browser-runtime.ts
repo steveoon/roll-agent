@@ -6,9 +6,18 @@ import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { chromium } from "playwright-core";
 import type { Browser } from "playwright-core";
-import type { BrowserChannel, BrowserRuntimeConfig, BrowserRuntimeMode } from "../types/index.ts";
+import type {
+  BrowserChannel,
+  BrowserRuntimeConfig,
+  BrowserRuntimeMode,
+  BrowserWindowBounds,
+} from "../types/index.ts";
 import { NativeCdpController } from "./native-cdp-controller.ts";
-import type { NativeCdpControllerOptions, NativeCdpWindowState } from "./native-cdp-controller.ts";
+import type {
+  NativeCdpControllerOptions,
+  NativeCdpWindowBounds,
+  NativeCdpWindowState,
+} from "./native-cdp-controller.ts";
 import { NativeCdpPageClient } from "./native-cdp-page-client.ts";
 import type { BrowserInspectablePage } from "./native-cdp-page-client.ts";
 import { decorateManagedProfile, ensureProfileCleanExit } from "./profile-decoration.ts";
@@ -140,6 +149,10 @@ function resolveManagedCdpUrl(config: BrowserRuntimeConfig): string {
   return `http://${config.cdpHost}:${config.cdpPort}`;
 }
 
+function resolveManagedProfileName(config: BrowserRuntimeConfig): string | undefined {
+  return config.profileName ?? config.instanceId;
+}
+
 function resolveInspectableCdpBaseUrl(config: BrowserRuntimeConfig): string {
   if (config.mode === "managed-cdp") {
     return resolveManagedCdpUrl(config);
@@ -178,6 +191,31 @@ async function isHttpCdpReady(cdpUrl: string, deps: BrowserRuntimeDependencies):
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
+}
+
+function buildWindowLaunchArgs(bounds: BrowserWindowBounds | undefined): string[] {
+  if (bounds === undefined) {
+    return [];
+  }
+
+  return [
+    ...(bounds.x !== undefined && bounds.y !== undefined
+      ? [`--window-position=${String(bounds.x)},${String(bounds.y)}`]
+      : []),
+    ...(bounds.width !== undefined && bounds.height !== undefined
+      ? [`--window-size=${String(bounds.width)},${String(bounds.height)}`]
+      : []),
+  ];
+}
+
+function toNormalNativeWindowBounds(bounds: BrowserWindowBounds): NativeCdpWindowBounds {
+  return {
+    ...(bounds.x !== undefined ? { x: bounds.x } : {}),
+    ...(bounds.y !== undefined ? { y: bounds.y } : {}),
+    ...(bounds.width !== undefined ? { width: bounds.width } : {}),
+    ...(bounds.height !== undefined ? { height: bounds.height } : {}),
+    state: "normal",
+  };
 }
 
 async function waitForManagedCdp(
@@ -330,6 +368,7 @@ export class BrowserRuntime {
   }
 
   private buildLaunchArgs(userDataDir: string): string[] {
+    const profileName = resolveManagedProfileName(this.config);
     return [
       `--remote-debugging-port=${this.config.cdpPort}`,
       `--user-data-dir=${userDataDir}`,
@@ -342,18 +381,61 @@ export class BrowserRuntime {
       "--disable-session-crashed-bubble",
       "--hide-crash-restore-bubble",
       "--password-store=basic",
+      ...(profileName !== undefined ? [`--window-name=${profileName}`] : []),
+      ...(!this.config.headless ? buildWindowLaunchArgs(this.config.windowBounds) : []),
       ...(this.config.headless ? ["--headless=new", "--disable-gpu"] : []),
       ...(this.config.args ?? []),
     ];
+  }
+
+  private async applyManagedWindowBounds(): Promise<void> {
+    const bounds = this.config.windowBounds;
+    if (bounds === undefined || this.config.headless) {
+      return;
+    }
+
+    try {
+      const browserWebSocketDebuggerUrl = await this.getBrowserWebSocketDebuggerUrl();
+      if (browserWebSocketDebuggerUrl === undefined) {
+        return;
+      }
+
+      const page = (await this.getNativePageClient().listPages())[0];
+      if (page === undefined) {
+        return;
+      }
+
+      const controller = await this.deps.connectNativePage({
+        webSocketDebuggerUrl: browserWebSocketDebuggerUrl,
+        commandTimeoutMs: 2_000,
+      });
+      try {
+        const windowId = await controller.getWindowIdForTarget(page.targetId, {
+          timeoutMs: 2_000,
+        });
+        await controller.setWindowBounds(windowId, toNormalNativeWindowBounds(bounds), {
+          timeoutMs: 2_000,
+        });
+      } finally {
+        controller.close();
+      }
+    } catch {
+      // Window placement is a desktop UX hint. Browser startup must not fail if
+      // the OS/window manager rejects the move or the CDP window target is absent.
+    }
   }
 
   private async startManagedCdp(): Promise<void> {
     const executable = resolveExecutable(this.config);
     const userDataDir = resolveManagedUserDataDir(this.config);
     const cdpUrl = resolveManagedCdpUrl(this.config);
+    const profileName = resolveManagedProfileName(this.config);
 
     mkdirSync(userDataDir, { recursive: true });
-    decorateManagedProfile(userDataDir);
+    decorateManagedProfile(
+      userDataDir,
+      profileName !== undefined ? { name: profileName } : undefined,
+    );
     ensureProfileCleanExit(userDataDir);
 
     const proc = this.deps.spawn(executable, this.buildLaunchArgs(userDataDir), {
@@ -366,6 +448,7 @@ export class BrowserRuntime {
         ownsBrowserProcess: true,
         managedProcess: proc,
       };
+      await this.applyManagedWindowBounds();
     } catch (error) {
       await terminateProcess(proc).catch(() => {});
       throw error;

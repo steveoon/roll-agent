@@ -1,5 +1,9 @@
+import { AsyncLocalStorage } from "node:async_hooks";
+import { getCurrentBrowserBundle } from "../../runtime-holder.ts";
+
 export const ZHIPIN_CANDIDATE_REF_PREFIX = "@c" as const;
 export const ZHIPIN_RECOMMEND_JOB_REF_PREFIX = "@j" as const;
+const LEGACY_SEMANTIC_REF_SCOPE = "legacy";
 
 export const ZHIPIN_CANDIDATE_REF_PATTERN = /^@?c([1-9]\d*)$/i;
 export const ZHIPIN_RECOMMEND_JOB_REF_PATTERN = /^@?j([1-9]\d*)$/i;
@@ -25,8 +29,12 @@ export interface ZhipinRecommendJobRefTarget extends ZhipinRecommendJobRefSource
   readonly jobRef: string;
 }
 
-let latestCandidateRefTargets = new Map<string, ZhipinCandidateRefTarget>();
-let latestRecommendJobRefTargets = new Map<string, ZhipinRecommendJobRefTarget>();
+let latestCandidateRefTargetsByScope = new Map<string, Map<string, ZhipinCandidateRefTarget>>();
+let latestRecommendJobRefTargetsByScope = new Map<
+  string,
+  Map<string, ZhipinRecommendJobRefTarget>
+>();
+const semanticRefScopeForTests = new AsyncLocalStorage<string | undefined>();
 
 export function buildZhipinCandidateRef(index: number): string {
   if (!Number.isInteger(index) || index < 0) {
@@ -98,7 +106,10 @@ export function rememberZhipinCandidateRefs(
     ...candidate,
     candidateRef: buildZhipinCandidateRef(position),
   }));
-  latestCandidateRefTargets = new Map(targets.map((target) => [target.candidateRef, target]));
+  latestCandidateRefTargetsByScope.set(
+    getCurrentSemanticRefScope(),
+    new Map(targets.map((target) => [target.candidateRef, target])),
+  );
   return targets;
 }
 
@@ -109,16 +120,23 @@ export function rememberZhipinRecommendJobRefs(
     ...job,
     jobRef: buildZhipinRecommendJobRef(position),
   }));
-  latestRecommendJobRefTargets = new Map(targets.map((target) => [target.jobRef, target]));
+  latestRecommendJobRefTargetsByScope.set(
+    getCurrentSemanticRefScope(),
+    new Map(targets.map((target) => [target.jobRef, target])),
+  );
   return targets;
 }
 
 export function clearZhipinCandidateRefsForTests(): void {
-  latestCandidateRefTargets = new Map();
+  latestCandidateRefTargetsByScope = new Map();
 }
 
 export function clearZhipinRecommendJobRefsForTests(): void {
-  latestRecommendJobRefTargets = new Map();
+  latestRecommendJobRefTargetsByScope = new Map();
+}
+
+export function runWithZhipinSemanticRefScopeForTests<T>(scope: string, run: () => T): T {
+  return semanticRefScopeForTests.run(scope, run);
 }
 
 export function resolveZhipinCandidateRefTarget(candidateRef: string): ZhipinCandidateRefTarget {
@@ -129,7 +147,7 @@ export function resolveZhipinCandidateRefTarget(candidateRef: string): ZhipinCan
 
   const normalizedRef = buildZhipinCandidateRef(index);
   return (
-    latestCandidateRefTargets.get(normalizedRef) ?? {
+    latestCandidateRefTargetsByScope.get(getCurrentSemanticRefScope())?.get(normalizedRef) ?? {
       index,
       candidateRef: normalizedRef,
       candidateId: "",
@@ -144,7 +162,9 @@ export function resolveZhipinRecommendJobRefTarget(jobRef: string): ZhipinRecomm
   }
 
   const normalizedRef = buildZhipinRecommendJobRef(index);
-  const target = latestRecommendJobRefTargets.get(normalizedRef);
+  const target = latestRecommendJobRefTargetsByScope
+    .get(getCurrentSemanticRefScope())
+    ?.get(normalizedRef);
   if (target === undefined) {
     throw new Error(`岗位引用 ${normalizedRef} 已过期，请先调用 zhipin_list_recommend_jobs`);
   }
@@ -214,4 +234,17 @@ function dedupeZhipinCandidateTargets(
 
 function normalizeCandidateName(name: string): string {
   return name.trim().toLocaleLowerCase("zh-CN");
+}
+
+function getCurrentSemanticRefScope(): string {
+  const testScope = semanticRefScopeForTests.getStore();
+  if (testScope !== undefined) {
+    return testScope;
+  }
+
+  try {
+    return getCurrentBrowserBundle().id;
+  } catch {
+    return LEGACY_SEMANTIC_REF_SCOPE;
+  }
 }

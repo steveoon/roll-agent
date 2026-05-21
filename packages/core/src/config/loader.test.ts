@@ -30,6 +30,7 @@ describe("loadConfig", () => {
     assert.equal(configPath, undefined);
     assert.equal(config.llm.defaultProvider, "anthropic");
     assert.deepEqual(config.ask, {});
+    assert.deepEqual(config.browser.instances, {});
   });
 
   it("should load and parse a valid YAML config", () => {
@@ -76,6 +77,73 @@ agents:
     assert.equal(config.ask.confirmThreshold, 0.5);
   });
 
+  it("should parse browser instances from kebab-case YAML", () => {
+    const yaml = `
+llm:
+  default-provider: anthropic
+  default-model: test
+  providers: {}
+agents:
+  data-dir: /tmp/test
+browser:
+  default-instance: boss-a
+  instances:
+    boss-a:
+      platform: zhipin
+      mode: managed-cdp
+      cdp-port: 9222
+      user-data-dir: ~/roll-browser/boss-a
+      sessions-dir: ~/roll-browser-sessions/boss-a
+      profile-name: Boss A
+      window-bounds:
+        x: 0
+        y: 24
+        width: 680
+        height: 1000
+      tracking-agent-id: zhipin-boss-a
+`;
+    writeFileSync(resolve(tmpDir, "roll.config.yaml"), yaml);
+    const { config } = loadConfig({ cwd: tmpDir });
+
+    assert.equal(config.browser.defaultInstance, "boss-a");
+    assert.equal(config.browser.instances["boss-a"]?.cdpPort, 9222);
+    assert.equal(config.browser.instances["boss-a"]?.profileName, "Boss A");
+    assert.deepEqual(config.browser.instances["boss-a"]?.windowBounds, {
+      x: 0,
+      y: 24,
+      width: 680,
+      height: 1000,
+    });
+    assert.equal(config.browser.instances["boss-a"]?.trackingAgentId, "zhipin-boss-a");
+    assert.ok(!config.browser.instances["boss-a"]?.userDataDir.startsWith("~"));
+    assert.ok(!config.browser.instances["boss-a"]?.sessionsDir?.startsWith("~"));
+  });
+
+  it("should reject duplicate browser cdp ports and profile dirs", () => {
+    const yaml = `
+llm:
+  default-provider: anthropic
+  default-model: test
+  providers: {}
+agents:
+  data-dir: /tmp/test
+browser:
+  instances:
+    boss-a:
+      cdp-port: 9222
+      user-data-dir: /tmp/roll-browser/profile
+    boss-b:
+      cdp-port: 9222
+      user-data-dir: /tmp/roll-browser/profile
+`;
+    writeFileSync(resolve(tmpDir, "roll.config.yaml"), yaml);
+
+    assert.throws(
+      () => loadConfig({ cwd: tmpDir }),
+      (err: Error) => err.message.includes("cdpPort 9222") && err.message.includes("userDataDir"),
+    );
+  });
+
   it("should resolve kebab-case agent env keys through getAgentEnv", () => {
     const yaml = `
 llm:
@@ -95,6 +163,60 @@ agents:
     assert.deepEqual(getAgentEnv(config, "smart-reply-agent"), {
       REPLY_AUTHORITY_URL: "https://reply-authority.example.com",
       REPLY_AUTHORITY_BEARER_TOKEN: "test-token",
+    });
+  });
+
+  it("should inject browser instances env for browser-use-agent", () => {
+    const yaml = `
+llm:
+  default-provider: anthropic
+  default-model: test
+  providers: {}
+agents:
+  data-dir: /tmp/test
+  env:
+    browser-use-agent:
+      BROWSER_VISUAL_CURSOR: "true"
+browser:
+  default-instance: boss-a
+  instances:
+    boss-a:
+      platform: zhipin
+      cdp-port: 9222
+      user-data-dir: /tmp/roll-browser/boss-a
+      profile-name: Boss A
+      window-bounds:
+        x: 0
+        y: 24
+        width: 680
+        height: 1000
+`;
+    writeFileSync(resolve(tmpDir, "roll.config.yaml"), yaml);
+    const { config } = loadConfig({ cwd: tmpDir });
+    const env = getAgentEnv(config, "browser-use-agent");
+    const instancesJson = env?.["BROWSER_INSTANCES_JSON"];
+
+    assert.equal(env?.["BROWSER_VISUAL_CURSOR"], "true");
+    assert.equal(typeof instancesJson, "string");
+    const parsed = JSON.parse(instancesJson ?? "{}") as {
+      defaultInstance?: string;
+      instances?: Record<
+        string,
+        {
+          cdpPort?: number;
+          profileName?: string;
+          windowBounds?: { x?: number; y?: number; width?: number; height?: number };
+        }
+      >;
+    };
+    assert.equal(parsed.defaultInstance, "boss-a");
+    assert.equal(parsed.instances?.["boss-a"]?.cdpPort, 9222);
+    assert.equal(parsed.instances?.["boss-a"]?.profileName, "Boss A");
+    assert.deepEqual(parsed.instances?.["boss-a"]?.windowBounds, {
+      x: 0,
+      y: 24,
+      width: 680,
+      height: 1000,
     });
   });
 

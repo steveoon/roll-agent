@@ -72,6 +72,56 @@ describe("key-codec: decodeFromYaml", () => {
     assert.equal(result.agents.env["browser-use-agent"]?.REPLY_AUTHORITY_KEYS_URL, "https://y");
   });
 
+  it("should preserve browser instance ids while camelizing instance fields", () => {
+    const input = {
+      browser: {
+        "default-instance": "boss-a",
+        instances: {
+          "boss-a": {
+            "cdp-port": 9222,
+            "user-data-dir": "/tmp/boss-a",
+            "profile-name": "Boss A",
+            "window-bounds": {
+              x: 0,
+              y: 24,
+              width: 680,
+              height: 1000,
+            },
+            "tracking-agent-id": "zhipin-boss-a",
+          },
+        },
+      },
+    };
+
+    const result = decodeFromYaml(input) as {
+      browser: {
+        defaultInstance: string;
+        instances: Record<
+          string,
+          {
+            cdpPort: number;
+            userDataDir: string;
+            profileName: string;
+            windowBounds: { x: number; y: number; width: number; height: number };
+            trackingAgentId: string;
+          }
+        >;
+      };
+    };
+
+    assert.equal(result.browser.defaultInstance, "boss-a");
+    assert.equal(result.browser.instances["boss-a"]?.cdpPort, 9222);
+    assert.equal(result.browser.instances["boss-a"]?.userDataDir, "/tmp/boss-a");
+    assert.equal(result.browser.instances["boss-a"]?.profileName, "Boss A");
+    assert.deepEqual(result.browser.instances["boss-a"]?.windowBounds, {
+      x: 0,
+      y: 24,
+      width: 680,
+      height: 1000,
+    });
+    assert.equal(result.browser.instances["boss-a"]?.trackingAgentId, "zhipin-boss-a");
+  });
+
   it("should leave unknown schema fields as identity (not recurse into camel rules)", () => {
     const input = {
       futureSection: {
@@ -129,6 +179,25 @@ describe("key-codec: encodePathToYaml", () => {
     assert.deepEqual(
       encodePathToYaml(["agents", "env", "smartReplyAgent", "REPLY_AUTHORITY_URL"]),
       ["agents", "env", "smartReplyAgent", "REPLY_AUTHORITY_URL"],
+    );
+  });
+
+  it("should preserve browser instance ids when encoding fields", () => {
+    assert.deepEqual(encodePathToYaml(["browser", "instances", "boss-a", "trackingAgentId"]), [
+      "browser",
+      "instances",
+      "boss-a",
+      "tracking-agent-id",
+    ]);
+    assert.deepEqual(encodePathToYaml(["browser", "instances", "boss-a", "windowBounds"]), [
+      "browser",
+      "instances",
+      "boss-a",
+      "window-bounds",
+    ]);
+    assert.deepEqual(
+      encodePathToYaml(["browser", "instances", "boss-a", "windowBounds", "width"]),
+      ["browser", "instances", "boss-a", "window-bounds", "width"],
     );
   });
 });

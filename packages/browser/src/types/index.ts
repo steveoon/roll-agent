@@ -30,6 +30,14 @@ export const BROWSER_FOREGROUND_POLICIES = ["when-minimized", "always", "never"]
 export const BrowserForegroundPolicySchema = z.enum(BROWSER_FOREGROUND_POLICIES);
 export type BrowserForegroundPolicy = z.infer<typeof BrowserForegroundPolicySchema>;
 
+export const BrowserWindowBoundsSchema = z.object({
+  x: z.number().int().optional(),
+  y: z.number().int().optional(),
+  width: z.number().int().positive().optional(),
+  height: z.number().int().positive().optional(),
+});
+export type BrowserWindowBounds = z.infer<typeof BrowserWindowBoundsSchema>;
+
 export const BrowserActionApprovalSchema = z.object({
   id: z.string().trim().min(1),
 });
@@ -70,6 +78,10 @@ export const BrowserRuntimeConfigSchema = z
     mode: BrowserRuntimeModeSchema.default("managed-cdp"),
     /** 是否无头模式（默认 false，仅 managed-cdp 模式生效） */
     headless: z.boolean().default(false),
+    /** 多 browser.instances 下的运行时实例标识，主要用于 profile/window 可视化。 */
+    instanceId: z.string().trim().min(1).optional(),
+    /** Chrome profile 展示名；未配置时由 instanceId 派生。 */
+    profileName: z.string().trim().min(1).optional(),
     /**
      * CDP 连接地址。
      * - remote-cdp / existing-session: 必填
@@ -88,6 +100,8 @@ export const BrowserRuntimeConfigSchema = z
     userDataDir: z.string().optional(),
     /** 浏览器额外启动参数（仅 managed-cdp 模式） */
     args: z.array(z.string()).optional(),
+    /** 托管浏览器窗口位置与尺寸（仅 managed-cdp 非 headless 模式生效）。 */
+    windowBounds: BrowserWindowBoundsSchema.optional(),
     /** Session 持久化目录（默认 ~/.roll-agent/browser/sessions） */
     sessionsDir: z.string().optional(),
     /** 浏览器安全策略，默认宽松兼容现有行为 */
@@ -115,6 +129,8 @@ export const BrowserLoginStateSourceSchema = z.enum(BROWSER_LOGIN_STATE_SOURCES)
 export type BrowserLoginStateSource = z.infer<typeof BrowserLoginStateSourceSchema>;
 
 export const BrowserSessionInfoSchema = z.object({
+  /** 多 browser.instances 运行时下标识该 session 来自哪个 browser instance。 */
+  browserInstance: z.string().optional(),
   platform: PlatformSchema,
   pagesOpen: z.number(),
   currentUrl: z.string().optional(),
@@ -136,11 +152,43 @@ export const BrowserSessionInfoSchema = z.object({
 
 export type BrowserSessionInfo = z.infer<typeof BrowserSessionInfoSchema>;
 
+export const BrowserInstanceTrackingSourceSchema = z.enum(["instance", "default-env", "missing"]);
+export type BrowserInstanceTrackingSource = z.infer<typeof BrowserInstanceTrackingSourceSchema>;
+
+export const BrowserInstanceStatusSchema = z.object({
+  id: z.string(),
+  platform: PlatformSchema.optional(),
+  mode: BrowserRuntimeModeSchema,
+  cdp: z.object({
+    endpoint: z.string(),
+    port: z.number().int().min(1).max(65_535).optional(),
+    versionReachable: z.boolean(),
+    listReachable: z.boolean(),
+  }),
+  profile: z.object({
+    userDataDir: z.string().optional(),
+    exists: z.boolean(),
+    writable: z.boolean(),
+  }),
+  tracking: z.object({
+    source: BrowserInstanceTrackingSourceSchema,
+    agentIdFingerprint: z
+      .string()
+      .regex(/^[0-9a-f]{8}$/)
+      .optional(),
+  }),
+});
+
+export type BrowserInstanceStatus = z.infer<typeof BrowserInstanceStatusSchema>;
+
 export const BrowserStatusSchema = z.object({
   running: z.boolean(),
   headless: z.boolean(),
   mode: BrowserRuntimeModeSchema,
   activeSessions: z.array(BrowserSessionInfoSchema),
+  defaultInstanceId: z.string().optional(),
+  primaryInstanceId: z.string().optional(),
+  instances: z.array(BrowserInstanceStatusSchema).default([]),
 });
 
 export type BrowserStatus = z.infer<typeof BrowserStatusSchema>;

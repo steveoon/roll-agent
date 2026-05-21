@@ -251,6 +251,16 @@ test("normal allowlist methods do not send Runtime.enable", async () => {
     },
   });
 
+  const windowBoundsPromise = controller.setWindowBounds(1, {
+    x: 0,
+    y: 24,
+    width: 680,
+    height: 1000,
+    state: "normal",
+  });
+  const windowBoundsCommand = socket.takeSentCommand();
+  socket.respond(windowBoundsCommand.id, {});
+
   const navigatePromise = controller.navigate("https://www.zhipin.com");
   const navigateCommand = socket.takeSentCommand();
   socket.respond(navigateCommand.id, {
@@ -300,6 +310,7 @@ test("normal allowlist methods do not send Runtime.enable", async () => {
   await documentPromise;
   await frontPromise;
   assert.equal(await windowStatePromise, "minimized");
+  await windowBoundsPromise;
   assert.deepEqual(await navigatePromise, {
     frameId: "main-frame",
     loaderId: "loader-1",
@@ -314,6 +325,17 @@ test("normal allowlist methods do not send Runtime.enable", async () => {
   assert.equal(frontCommand.method, "Page.bringToFront");
   assert.equal(windowStateCommand.method, "Browser.getWindowForTarget");
   assert.deepEqual(windowStateCommand.params, { targetId: "target-boss" });
+  assert.equal(windowBoundsCommand.method, "Browser.setWindowBounds");
+  assert.deepEqual(windowBoundsCommand.params, {
+    windowId: 1,
+    bounds: {
+      left: 0,
+      top: 24,
+      width: 680,
+      height: 1000,
+      windowState: "normal",
+    },
+  });
   assert.equal(navigateCommand.method, "Page.navigate");
   assert.deepEqual(navigateCommand.params, { url: "https://www.zhipin.com" });
   assert.equal(frameTreeCommand.method, "Page.getFrameTree");
@@ -330,6 +352,7 @@ test("normal allowlist methods do not send Runtime.enable", async () => {
   assert.notEqual(documentCommand.method, "Runtime.enable");
   assert.notEqual(frontCommand.method, "Runtime.enable");
   assert.notEqual(windowStateCommand.method, "Runtime.enable");
+  assert.notEqual(windowBoundsCommand.method, "Runtime.enable");
   assert.notEqual(navigateCommand.method, "Runtime.enable");
   assert.notEqual(frameTreeCommand.method, "Runtime.enable");
   assert.notEqual(worldCommand.method, "Runtime.enable");
@@ -352,6 +375,25 @@ test("navigate rejects native Page.navigate errorText", async () => {
   });
 
   await assert.rejects(pending, /net::ERR_ABORTED/);
+  controller.close();
+});
+
+test("getWindowIdForTarget parses Browser.getWindowForTarget window id", async () => {
+  const socket = new FakeNativeCdpWebSocket();
+  const controller = await createController(socket);
+
+  const pending = controller.getWindowIdForTarget("target-boss");
+  const command = socket.takeSentCommand();
+  assert.equal(command.method, "Browser.getWindowForTarget");
+  assert.deepEqual(command.params, { targetId: "target-boss" });
+  socket.respond(command.id, {
+    windowId: 7,
+    bounds: {
+      windowState: "normal",
+    },
+  });
+
+  assert.equal(await pending, 7);
   controller.close();
 });
 
