@@ -423,3 +423,70 @@ test("managed-cdp can connect a native page WebSocket without attaching Playwrig
     rmSync(userDataDir, { recursive: true, force: true });
   }
 });
+
+test("getNativePageWindowState reads window state through the browser CDP target", async () => {
+  let closeCalls = 0;
+  const connectCalls: string[] = [];
+  const fetchCalls: FetchCall[] = [];
+  const runtime = new BrowserRuntime(
+    BrowserRuntimeConfigSchema.parse({
+      mode: "existing-session",
+      cdpUrl: "http://127.0.0.1:9666",
+    }),
+    {
+      async fetch(input, init) {
+        const url = String(input);
+        fetchCalls.push({
+          url,
+          method: init?.method ?? "GET",
+        });
+        if (url === "http://127.0.0.1:9666/json/version") {
+          return createResponse(
+            JSON.stringify({
+              webSocketDebuggerUrl: "ws://127.0.0.1:9666/devtools/browser/root",
+            }),
+          );
+        }
+        return createResponse("{}", { status: 404 });
+      },
+      async connectNativePage(options) {
+        connectCalls.push(options.webSocketDebuggerUrl);
+        return {
+          async getWindowStateForTarget(targetId: string) {
+            assert.equal(targetId, "target-boss");
+            return "minimized";
+          },
+          close() {
+            closeCalls += 1;
+          },
+        } as unknown as NativeCdpController;
+      },
+    },
+  );
+
+  const windowState = await runtime.getNativePageWindowState("target-boss");
+
+  assert.equal(windowState, "minimized");
+  assert.deepEqual(connectCalls, ["ws://127.0.0.1:9666/devtools/browser/root"]);
+  assert.equal(closeCalls, 1);
+  assert.equal(fetchCalls[0]?.url, "http://127.0.0.1:9666/json/version");
+});
+
+test("getNativePageWindowState returns unknown when browser window inspection fails", async () => {
+  const runtime = new BrowserRuntime(
+    BrowserRuntimeConfigSchema.parse({
+      mode: "existing-session",
+      cdpUrl: "http://127.0.0.1:9777",
+    }),
+    {
+      async fetch() {
+        return createResponse("{}", { status: 500 });
+      },
+      async connectNativePage() {
+        throw new Error("connectNativePage should not be called");
+      },
+    },
+  );
+
+  assert.equal(await runtime.getNativePageWindowState("target-boss"), "unknown");
+});

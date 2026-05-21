@@ -18,6 +18,7 @@ import {
   clickBrowserRefVisualTarget,
   createBrowserRefVisualSession,
 } from "./browser-ref-visual.ts";
+import { maybeBringToFront } from "../browser-foreground.ts";
 
 const ClickRefInputSchema = z.object({
   ref: BrowserElementRefHandleSchema.describe("browser_snapshot 返回的 @eN element ref"),
@@ -69,7 +70,15 @@ export const clickRef = defineTool({
       }),
     });
     try {
-      await controller.bringToFront().catch(() => {});
+      await maybeBringToFront(
+        {
+          targetId: page.targetId,
+          bringToFront: async () => {
+            await controller.bringToFront();
+          },
+        },
+        { runtime },
+      );
       const session = createBrowserRefVisualSession(controller);
       await session.begin(`正在点击 ${input.ref}`);
       const result = await clickElementRef({

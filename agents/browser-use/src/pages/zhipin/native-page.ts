@@ -12,6 +12,7 @@ import {
 } from "../../native-mouse-motion.ts";
 import { matchesPlatformHost } from "../../platforms.ts";
 import { getContextManager, getRuntime } from "../../runtime-holder.ts";
+import { maybeBringToFront } from "../../browser-foreground.ts";
 import type {
   DynamicListCollectionStopReason,
   DynamicListScrollResult,
@@ -1656,7 +1657,7 @@ export class ZhipinNativePagePort {
   }
 
   async openChat(options: OpenNativeChatOptions): Promise<OpenChatResult> {
-    await this.bringToFront().catch(() => {});
+    await maybeBringToFront(this);
 
     if (!(await this.isChatSurfaceOpen().catch(() => false))) {
       const clicked = await this.clickSidebarSection("chat", {
@@ -4122,7 +4123,7 @@ export class ZhipinNativePagePort {
     distance: number | undefined,
   ): Promise<DynamicListSnapshot | undefined> {
     const config = getZhipinListSurfaceConfig(surface);
-    await this.bringToFront();
+    await maybeBringToFront(this);
 
     const target = toNativeClickTarget(
       await this.evaluateJson(

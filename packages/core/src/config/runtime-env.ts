@@ -19,6 +19,7 @@ export const BrowserSecurityDiagnosticSchema = z.object({
   maxPageContentBytes: z.number(),
   maxSnapshotNodes: z.number(),
   actionPolicy: z.enum(["log", "deny", "confirm"]),
+  foregroundPolicy: z.enum(["when-minimized", "always", "never"]).default("when-minimized"),
 });
 
 export const BrowserUseToolPolicyDiagnosticSchema = z.object({

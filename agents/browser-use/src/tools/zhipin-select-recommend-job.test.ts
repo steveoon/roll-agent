@@ -114,7 +114,6 @@ describe("zhipin_select_recommend_job", () => {
     assert.equal(result.success, true);
     assert.equal(result.selected?.value, "job-2");
     assert.deepEqual(calls, [
-      "front",
       "begin:正在选择推荐岗位",
       "highlight:.job-selecter-wrap",
       "select:job-2:后厨:true:false",
@@ -190,7 +189,7 @@ describe("zhipin_select_recommend_job", () => {
     assert.equal(result.success, true);
     assert.equal(result.requested.jobRef, "@j2");
     assert.equal(result.requested.jobValue, "job-b");
-    assert.deepEqual(calls, ["front", "select:@j2:job-b:undefined:1:false", "close"]);
+    assert.deepEqual(calls, ["select:@j2:job-b:undefined:1:false", "close"]);
   });
 
   it("passes forceClick through when explicitly requested", async () => {
@@ -257,6 +256,6 @@ describe("zhipin_select_recommend_job", () => {
 
     assert.equal(result.success, true);
     assert.equal(result.requested.forceClick, true);
-    assert.deepEqual(calls, ["front", "select:@j1:job-a:0:true", "close"]);
+    assert.deepEqual(calls, ["select:@j1:job-a:0:true", "close"]);
   });
 });

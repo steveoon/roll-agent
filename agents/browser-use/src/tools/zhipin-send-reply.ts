@@ -19,6 +19,7 @@ import {
 } from "../reply-authority/replay-store.ts";
 import { NativeReplyPreviewVisualSession } from "../reply-authority/reply-preview-visual.ts";
 import { verifySignedReplyEnvelope } from "../reply-authority/verifier.ts";
+import { maybeBringToFront } from "../browser-foreground.ts";
 
 const OutputSchema = z.object({
   success: z.boolean(),
@@ -139,7 +140,7 @@ export async function sendSignedZhipinReply(
 
     nativePage = await deps.openNativePagePort();
     session = deps.createNativeVisualActivitySession(nativePage);
-    await nativePage.bringToFront().catch(() => {});
+    await maybeBringToFront(nativePage);
     await new NativeReplyPreviewVisualSession(nativePage).clear();
     await session.begin("正在发送回复");
 

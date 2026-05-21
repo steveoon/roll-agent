@@ -22,6 +22,7 @@ import {
   type PreparedReplyRecord,
 } from "../reply-authority/prepared-reply-store.ts";
 import { NativeReplyPreviewVisualSession } from "../reply-authority/reply-preview-visual.ts";
+import { maybeBringToFront } from "../browser-foreground.ts";
 
 const InputSchema = z.object({
   conversationId: z
@@ -243,7 +244,7 @@ export const zhipinGenerateReplyPreview = defineTool({
       nativePage = await deps.openNativePagePort();
       session = deps.createNativeVisualActivitySession(nativePage);
       preview = deps.createReplyPreviewVisualSession(nativePage);
-      await nativePage.bringToFront().catch(() => {});
+      await maybeBringToFront(nativePage);
       await session.begin(hasNavigationTarget ? "正在打开目标聊天" : "正在准备当前聊天");
 
       const nav = hasNavigationTarget

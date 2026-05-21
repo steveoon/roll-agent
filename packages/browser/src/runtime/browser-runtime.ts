@@ -8,7 +8,7 @@ import { chromium } from "playwright-core";
 import type { Browser } from "playwright-core";
 import type { BrowserChannel, BrowserRuntimeConfig, BrowserRuntimeMode } from "../types/index.ts";
 import { NativeCdpController } from "./native-cdp-controller.ts";
-import type { NativeCdpControllerOptions } from "./native-cdp-controller.ts";
+import type { NativeCdpControllerOptions, NativeCdpWindowState } from "./native-cdp-controller.ts";
 import { NativeCdpPageClient } from "./native-cdp-page-client.ts";
 import type { BrowserInspectablePage } from "./native-cdp-page-client.ts";
 import { decorateManagedProfile, ensureProfileCleanExit } from "./profile-decoration.ts";
@@ -176,6 +176,10 @@ async function isHttpCdpReady(cdpUrl: string, deps: BrowserRuntimeDependencies):
   }
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
+
 async function waitForManagedCdp(
   cdpUrl: string,
   proc: ChildProcess,
@@ -304,6 +308,25 @@ export class BrowserRuntime {
       });
     }
     return this.nativePages;
+  }
+
+  private async getBrowserWebSocketDebuggerUrl(): Promise<string | undefined> {
+    await this.ensureInspectableCdpReady();
+    const versionUrl = new URL("/json/version", this.getInspectableCdpBaseUrl());
+    const response = await this.deps.fetch(versionUrl, {
+      signal: AbortSignal.timeout(5_000),
+    });
+    if (!response.ok) {
+      return undefined;
+    }
+
+    const payload: unknown = await response.json().catch(() => undefined);
+    if (!isRecord(payload)) {
+      return undefined;
+    }
+
+    const webSocketDebuggerUrl = payload["webSocketDebuggerUrl"];
+    return typeof webSocketDebuggerUrl === "string" ? webSocketDebuggerUrl : undefined;
   }
 
   private buildLaunchArgs(userDataDir: string): string[] {
@@ -438,6 +461,30 @@ export class BrowserRuntime {
       webSocketDebuggerUrl: page.webSocketDebuggerUrl,
       ...options,
     });
+  }
+
+  async getNativePageWindowState(targetId: string): Promise<NativeCdpWindowState> {
+    try {
+      const webSocketDebuggerUrl = await this.getBrowserWebSocketDebuggerUrl();
+      if (webSocketDebuggerUrl === undefined) {
+        return "unknown";
+      }
+
+      const controller = await this.deps.connectNativePage({
+        webSocketDebuggerUrl,
+        commandTimeoutMs: 2_000,
+        connectTimeoutMs: 2_000,
+      });
+      try {
+        return await controller.getWindowStateForTarget(targetId, {
+          timeoutMs: 2_000,
+        });
+      } finally {
+        controller.close();
+      }
+    } catch {
+      return "unknown";
+    }
   }
 
   getConfig(): BrowserRuntimeConfig {

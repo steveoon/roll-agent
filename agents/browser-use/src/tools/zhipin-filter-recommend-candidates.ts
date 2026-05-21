@@ -13,6 +13,7 @@ import {
   type ZhipinRecommendGender,
 } from "../pages/zhipin/recommend-filter.ts";
 import { ZHIPIN_SELECTORS } from "../pages/zhipin/selectors.ts";
+import { maybeBringToFront } from "../browser-foreground.ts";
 
 const RequestedSchema = z.object({
   ageMin: z.number().int().min(16).optional(),
@@ -137,7 +138,7 @@ export const zhipinFilterRecommendCandidates = defineTool({
     try {
       nativePage = await deps.openNativePagePort();
       session = deps.createNativeVisualActivitySession(nativePage);
-      await nativePage.bringToFront().catch(() => {});
+      await maybeBringToFront(nativePage);
 
       await session.begin("正在打开推荐筛选");
       const ready = await nativePage.waitForRecommendList(3_000);

@@ -10,6 +10,7 @@ describe("browser-use runtime config", () => {
         maxPageContentBytes: 1_024,
         maxSnapshotNodes: 42,
         actionPolicy: "confirm",
+        foregroundPolicy: "never",
       }),
     });
 
@@ -18,6 +19,7 @@ describe("browser-use runtime config", () => {
       maxPageContentBytes: 1_024,
       maxSnapshotNodes: 42,
       actionPolicy: "confirm",
+      foregroundPolicy: "never",
     });
   });
 

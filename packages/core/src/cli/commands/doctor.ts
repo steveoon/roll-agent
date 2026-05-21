@@ -102,6 +102,7 @@ function formatBrowserPolicySummary(
       : "";
   return (
     `actionPolicy=${security.actionPolicy}; ` +
+    `foregroundPolicy=${security.foregroundPolicy}; ` +
     `domainAllowlist=${allowlist}; ` +
     `maxPageContentBytes=${String(security.maxPageContentBytes)}; ` +
     `maxSnapshotNodes=${String(security.maxSnapshotNodes)}; ` +

@@ -7,6 +7,7 @@ import type {
   BrowserRuntime,
   BrowserSecurityConfig,
   NativeCdpController,
+  NativeCdpWindowState,
 } from "@roll-agent/browser";
 import { BrowserRuntimeConfigSchema } from "@roll-agent/browser";
 import { StructuredToolError } from "@roll-agent/sdk";
@@ -33,12 +34,18 @@ type FakeNativeController = Pick<
 
 type FakeRuntime = Pick<
   BrowserRuntime,
-  "getConfig" | "listNativePages" | "activateNativePage" | "openNativePage" | "connectNativePage"
+  | "getConfig"
+  | "listNativePages"
+  | "activateNativePage"
+  | "openNativePage"
+  | "connectNativePage"
+  | "getNativePageWindowState"
 > & {
   readonly activatedTargets: readonly string[];
   readonly openedUrls: readonly string[];
   readonly connectedTargets: readonly string[];
   readonly connectedOptions: readonly unknown[];
+  readonly windowStateQueries: readonly string[];
 };
 
 function createTestContext(): AgentContext {
@@ -136,11 +143,13 @@ function createFakeRuntime(
   initialPages: readonly BrowserInspectablePage[],
   controller: FakeNativeController,
   security?: Partial<BrowserSecurityConfig>,
+  windowState: NativeCdpWindowState = "normal",
 ): FakeRuntime {
   const activatedTargets: string[] = [];
   const openedUrls: string[] = [];
   const connectedTargets: string[] = [];
   const connectedOptions: unknown[] = [];
+  const windowStateQueries: string[] = [];
   const pages = [...initialPages];
 
   return {
@@ -148,8 +157,13 @@ function createFakeRuntime(
     openedUrls,
     connectedTargets,
     connectedOptions,
+    windowStateQueries,
     getConfig() {
       return BrowserRuntimeConfigSchema.parse({ security });
+    },
+    async getNativePageWindowState(targetId: string) {
+      windowStateQueries.push(targetId);
+      return windowState;
     },
     async listNativePages() {
       return pages;
@@ -214,8 +228,9 @@ describe("navigate_active_tab", () => {
     assert.equal(result.page.boundPlatform, "zhipin");
     assert.deepEqual(runtime.activatedTargets, ["target-boss"]);
     assert.deepEqual(runtime.connectedTargets, ["target-boss"]);
+    assert.deepEqual(runtime.windowStateQueries, ["target-boss"]);
     assert.deepEqual(controller.navigateCalls, ["https://www.zhipin.com/web/user/index"]);
-    assert.equal(controller.bringToFrontCalls.length, 1);
+    assert.equal(controller.bringToFrontCalls.length, 0);
     assert.equal(controller.evaluateCalls.length, 2);
     assert.equal(controller.closeCalls.length, 1);
   });
@@ -282,7 +297,8 @@ describe("navigate_active_tab", () => {
 
     assert.equal(result.success, true);
     assert.deepEqual(controller.navigateCalls, []);
-    assert.equal(controller.bringToFrontCalls.length, 1);
+    assert.deepEqual(runtime.windowStateQueries, ["target-boss"]);
+    assert.equal(controller.bringToFrontCalls.length, 0);
     assert.equal(controller.evaluateCalls.length, 1);
   });
 
