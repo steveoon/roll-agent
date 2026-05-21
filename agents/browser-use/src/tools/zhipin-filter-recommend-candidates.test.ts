@@ -127,7 +127,6 @@ describe("zhipin_filter_recommend_candidates", () => {
     assert.equal(result.status, "applied");
     assert.equal(result.filterButtonText, "筛选·3");
     assert.deepEqual(calls, [
-      "front",
       "begin:正在打开推荐筛选",
       "wait-list:3000",
       "begin:正在设置推荐筛选",

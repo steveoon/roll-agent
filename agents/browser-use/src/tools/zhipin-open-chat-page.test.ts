@@ -110,7 +110,6 @@ describe("zhipin_open_chat_page", () => {
     assert.equal(result.usedSidebarClick, false);
     assert.equal(result.chatReady, true);
     assert.deepEqual(calls, [
-      "bring-to-front",
       "begin:正在切换到沟通页",
       "highlight:.side-wrap.side-wrap-v2",
       "succeed:已在沟通页",
@@ -134,7 +133,6 @@ describe("zhipin_open_chat_page", () => {
     assert.equal(result.usedSidebarClick, true);
     assert.equal(result.chatReady, true);
     assert.deepEqual(calls, [
-      "bring-to-front",
       "begin:正在切换到沟通页",
       "highlight:.side-wrap.side-wrap-v2",
       "click:chat",
@@ -158,7 +156,6 @@ describe("zhipin_open_chat_page", () => {
     assert.equal(result.usedSidebarClick, false);
     assert.match(result.error ?? "", /未找到沟通导航/);
     assert.deepEqual(calls, [
-      "bring-to-front",
       "begin:正在切换到沟通页",
       "highlight:.side-wrap.side-wrap-v2",
       "click:chat",

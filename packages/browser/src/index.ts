@@ -8,7 +8,9 @@ export {
   BROWSER_CHANNELS,
   BROWSER_RUNTIME_MODES,
   BROWSER_ACTION_POLICIES,
+  BROWSER_FOREGROUND_POLICIES,
   BrowserActionPolicySchema,
+  BrowserForegroundPolicySchema,
   BrowserActionApprovalSchema,
   BrowserChannelSchema,
   BrowserPageInfoSchema,
@@ -29,6 +31,7 @@ export {
 export type {
   Platform,
   BrowserActionPolicy,
+  BrowserForegroundPolicy,
   BrowserActionApproval,
   BrowserChannel,
   BrowserPageInfo,
@@ -67,6 +70,7 @@ export type {
   NativeCdpNavigateResult,
   NativeCdpQuerySelectorAllOptions,
   NativeCdpScrollIntoViewOptions,
+  NativeCdpWindowState,
 } from "./runtime/native-cdp-controller.ts";
 export { NativeCdpLocator } from "./runtime/native-cdp-locator.ts";
 export type {

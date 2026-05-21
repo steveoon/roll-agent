@@ -14,6 +14,7 @@ const NORMAL_NATIVE_CDP_METHODS = [
   "DOM.getDocument",
   "DOM.querySelectorAll",
   "DOM.scrollIntoViewIfNeeded",
+  "Browser.getWindowForTarget",
   "Page.bringToFront",
   "Page.navigate",
   "Page.getFrameTree",
@@ -170,6 +171,15 @@ export type NativeCdpNavigateResult = {
   readonly loaderId?: string;
   readonly errorText?: string;
 };
+
+export const NATIVE_CDP_WINDOW_STATES = [
+  "normal",
+  "minimized",
+  "maximized",
+  "fullscreen",
+  "unknown",
+] as const;
+export type NativeCdpWindowState = (typeof NATIVE_CDP_WINDOW_STATES)[number];
 
 export type NativeCdpCreateIsolatedWorldOptions = {
   readonly worldName?: string;
@@ -352,6 +362,17 @@ function readNavigateResponse(value: unknown): NativeCdpNavigateResult {
     ...(typeof loaderId === "string" ? { loaderId } : {}),
     ...(typeof errorText === "string" ? { errorText } : {}),
   };
+}
+
+function readWindowStateForTargetResponse(value: unknown): NativeCdpWindowState {
+  if (!isRecord(value) || !isRecord(value["bounds"])) {
+    return "unknown";
+  }
+
+  const windowState = value["bounds"]["windowState"];
+  return NATIVE_CDP_WINDOW_STATES.includes(windowState as NativeCdpWindowState)
+    ? (windowState as NativeCdpWindowState)
+    : "unknown";
 }
 
 function readNumberArray(value: unknown): readonly number[] | undefined {
@@ -636,6 +657,21 @@ export class NativeCdpController {
 
   async bringToFront(): Promise<void> {
     await this.sendNormal("Page.bringToFront", {});
+  }
+
+  async getWindowStateForTarget(
+    targetId: string,
+    options: { readonly timeoutMs?: number } = {},
+  ): Promise<NativeCdpWindowState> {
+    return readWindowStateForTargetResponse(
+      await this.sendNormal(
+        "Browser.getWindowForTarget",
+        {
+          targetId,
+        },
+        options.timeoutMs,
+      ),
+    );
   }
 
   async navigate(

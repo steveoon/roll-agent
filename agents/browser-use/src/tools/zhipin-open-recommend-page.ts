@@ -8,6 +8,7 @@ import type { ZhipinNativePagePort } from "../pages/zhipin/native-page.ts";
 import { ZHIPIN_SELECTORS } from "../pages/zhipin/selectors.ts";
 import { toNativePageInfo } from "../page-info.ts";
 import { getContextManager } from "../runtime-holder.ts";
+import { maybeBringToFront } from "../browser-foreground.ts";
 
 const OutputSchema = z.object({
   success: z.boolean(),
@@ -71,7 +72,7 @@ export const zhipinOpenRecommendPage = defineTool({
     try {
       nativePage = await deps.openNativePagePort();
       session = deps.createNativeVisualActivitySession(nativePage);
-      await nativePage.bringToFront().catch(() => {});
+      await maybeBringToFront(nativePage);
 
       const beginLabel = "正在切换到推荐牛人页";
       await session.begin(beginLabel);

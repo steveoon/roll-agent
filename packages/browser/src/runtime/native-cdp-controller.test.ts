@@ -242,6 +242,15 @@ test("normal allowlist methods do not send Runtime.enable", async () => {
   const frontCommand = socket.takeSentCommand();
   socket.respond(frontCommand.id, {});
 
+  const windowStatePromise = controller.getWindowStateForTarget("target-boss");
+  const windowStateCommand = socket.takeSentCommand();
+  socket.respond(windowStateCommand.id, {
+    windowId: 1,
+    bounds: {
+      windowState: "minimized",
+    },
+  });
+
   const navigatePromise = controller.navigate("https://www.zhipin.com");
   const navigateCommand = socket.takeSentCommand();
   socket.respond(navigateCommand.id, {
@@ -290,6 +299,7 @@ test("normal allowlist methods do not send Runtime.enable", async () => {
 
   await documentPromise;
   await frontPromise;
+  assert.equal(await windowStatePromise, "minimized");
   assert.deepEqual(await navigatePromise, {
     frameId: "main-frame",
     loaderId: "loader-1",
@@ -302,6 +312,8 @@ test("normal allowlist methods do not send Runtime.enable", async () => {
 
   assert.equal(documentCommand.method, "DOM.getDocument");
   assert.equal(frontCommand.method, "Page.bringToFront");
+  assert.equal(windowStateCommand.method, "Browser.getWindowForTarget");
+  assert.deepEqual(windowStateCommand.params, { targetId: "target-boss" });
   assert.equal(navigateCommand.method, "Page.navigate");
   assert.deepEqual(navigateCommand.params, { url: "https://www.zhipin.com" });
   assert.equal(frameTreeCommand.method, "Page.getFrameTree");
@@ -317,6 +329,7 @@ test("normal allowlist methods do not send Runtime.enable", async () => {
   assert.deepEqual(insertCommand.params, { text: "hello" });
   assert.notEqual(documentCommand.method, "Runtime.enable");
   assert.notEqual(frontCommand.method, "Runtime.enable");
+  assert.notEqual(windowStateCommand.method, "Runtime.enable");
   assert.notEqual(navigateCommand.method, "Runtime.enable");
   assert.notEqual(frameTreeCommand.method, "Runtime.enable");
   assert.notEqual(worldCommand.method, "Runtime.enable");

@@ -92,6 +92,7 @@ describe("browser_status", () => {
         maxPageContentBytes: 102_400,
         maxSnapshotNodes: 500,
         actionPolicy: "log",
+        foregroundPolicy: "when-minimized",
       },
     });
 
@@ -233,6 +234,7 @@ describe("browser_status", () => {
     assert.equal(parsed.effectiveEnvSources["BROWSER_SECURITY_JSON"]?.present, false);
     assert.equal(parsed.effectiveEnvSources["BROWSER_USE_POLICY_JSON"]?.fingerprint, "dddddddd");
     assert.equal(parsed.security.actionPolicy, "log");
+    assert.equal(parsed.security.foregroundPolicy, "when-minimized");
     assert.equal(parsed.toolPolicy.tools?.["zhipin_send_prepared_reply"]?.policy, "confirm");
     assert.equal(parsed.policyWarnings.length, 0);
     assert.equal(

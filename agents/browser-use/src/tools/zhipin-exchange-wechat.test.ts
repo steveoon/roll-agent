@@ -103,7 +103,6 @@ describe("zhipin_exchange_wechat", () => {
       wechatNumber: "wxid_12345",
     });
     assert.deepEqual(calls, [
-      "front",
       "begin:正在换微信",
       "open:conversation-1",
       "exchange",

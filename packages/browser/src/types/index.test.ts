@@ -15,6 +15,7 @@ test("BrowserRuntimeConfigSchema defaults to managed-cdp", () => {
     maxPageContentBytes: 102_400,
     maxSnapshotNodes: 500,
     actionPolicy: "log",
+    foregroundPolicy: "when-minimized",
   });
 });
 
@@ -25,6 +26,7 @@ test("BrowserRuntimeConfigSchema normalizes security config", () => {
       maxPageContentBytes: 512,
       maxSnapshotNodes: 10,
       actionPolicy: "confirm",
+      foregroundPolicy: "never",
     },
   });
 
@@ -32,6 +34,7 @@ test("BrowserRuntimeConfigSchema normalizes security config", () => {
   assert.equal(config.security.maxPageContentBytes, 512);
   assert.equal(config.security.maxSnapshotNodes, 10);
   assert.equal(config.security.actionPolicy, "confirm");
+  assert.equal(config.security.foregroundPolicy, "never");
 });
 
 test("BrowserRuntimeConfigSchema requires cdpUrl in remote-cdp mode", () => {

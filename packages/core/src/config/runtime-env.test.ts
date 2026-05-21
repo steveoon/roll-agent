@@ -21,6 +21,7 @@ describe("config/runtime-env", () => {
         maxPageContentBytes: 102_400,
         maxSnapshotNodes: 500,
         actionPolicy: "log",
+        foregroundPolicy: "when-minimized",
       },
       toolPolicy: {
         approvalTtlMs: 300_000,
@@ -39,6 +40,7 @@ describe("config/runtime-env", () => {
     });
 
     assert.equal(parsed.security?.actionPolicy, "log");
+    assert.equal(parsed.security?.foregroundPolicy, "when-minimized");
     assert.deepEqual(parsed.security?.domainAllowlist, ["zhipin.com"]);
     assert.equal(parsed.toolPolicy?.tools["zhipin_send_prepared_reply"]?.policy, "confirm");
     assert.equal(parsed.policyWarnings?.[0]?.code, "double_confirmation");

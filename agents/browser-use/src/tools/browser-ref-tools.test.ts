@@ -77,6 +77,8 @@ function createFakeRuntime(input: {
   readonly controller: FakeNativeController;
   readonly maxSnapshotNodes?: number;
   readonly actionPolicy?: "log" | "deny" | "confirm";
+  readonly foregroundPolicy?: "when-minimized" | "always" | "never";
+  readonly windowState?: "normal" | "minimized" | "maximized" | "fullscreen" | "unknown";
 }): BrowserRuntime {
   return {
     getConfig() {
@@ -86,6 +88,9 @@ function createFakeRuntime(input: {
             ? { maxSnapshotNodes: input.maxSnapshotNodes }
             : {}),
           ...(input.actionPolicy !== undefined ? { actionPolicy: input.actionPolicy } : {}),
+          ...(input.foregroundPolicy !== undefined
+            ? { foregroundPolicy: input.foregroundPolicy }
+            : {}),
         },
       });
     },
@@ -94,6 +99,9 @@ function createFakeRuntime(input: {
     },
     async connectNativePage() {
       return input.controller as NativeCdpController;
+    },
+    async getNativePageWindowState() {
+      return input.windowState ?? "normal";
     },
   } as unknown as BrowserRuntime;
 }
@@ -105,6 +113,7 @@ function createFakeController(): FakeNativeController & {
   readonly closeCalls: string[];
   readonly evaluateExpressions: string[];
   readonly insertedTexts: string[];
+  readonly bringToFrontCalls: string[];
   readonly axTreeCalls: Array<{ readonly frameId?: string }>;
   readonly isolatedWorldCalls: string[];
   domActionCandidates: unknown;
@@ -119,6 +128,7 @@ function createFakeController(): FakeNativeController & {
   const closeCalls: string[] = [];
   const evaluateExpressions: string[] = [];
   const insertedTexts: string[] = [];
+  const bringToFrontCalls: string[] = [];
   const axTreeCalls: Array<{ readonly frameId?: string }> = [];
   const isolatedWorldCalls: string[] = [];
   const frameIdByContextId = new Map<number, string>();
@@ -145,6 +155,7 @@ function createFakeController(): FakeNativeController & {
     closeCalls,
     evaluateExpressions,
     insertedTexts,
+    bringToFrontCalls,
     axTreeCalls,
     isolatedWorldCalls,
     get domActionCandidates() {
@@ -262,7 +273,9 @@ function createFakeController(): FakeNativeController & {
           : []),
       ];
     },
-    async bringToFront() {},
+    async bringToFront() {
+      bringToFrontCalls.push("front");
+    },
     async createIsolatedWorld(frameId: string) {
       isolatedWorldCalls.push(frameId);
       const contextId = frameId === "payment-frame" ? 501 : 502;
@@ -495,6 +508,103 @@ describe("browser generic ref tools", () => {
     assert.ok(
       controller.evaluateExpressions.some((expression) => expression.includes("removeAttribute")),
     );
+  });
+
+  it("click_ref brings the browser forward when foregroundPolicy is always", async () => {
+    const page = createNativePage("target-1");
+    const controller = createFakeController();
+    setRuntimeStateForTests({
+      runtime: createFakeRuntime({
+        page,
+        controller,
+        foregroundPolicy: "always",
+      }),
+      contextManager: createFakeContextManager(),
+    });
+
+    await browserSnapshot.execute(
+      { pageId: "target-1", maxNodes: 10, interactiveOnly: true },
+      createTestContext(),
+    );
+    await clickRef.execute({ pageId: "target-1", ref: "@e1" }, createTestContext());
+
+    assert.deepEqual(controller.bringToFrontCalls, ["front"]);
+  });
+
+  it("click_ref does not bring the browser forward when foregroundPolicy is never", async () => {
+    const page = createNativePage("target-1");
+    const controller = createFakeController();
+    setRuntimeStateForTests({
+      runtime: createFakeRuntime({
+        page,
+        controller,
+        foregroundPolicy: "never",
+      }),
+      contextManager: createFakeContextManager(),
+    });
+
+    await browserSnapshot.execute(
+      { pageId: "target-1", maxNodes: 10, interactiveOnly: true },
+      createTestContext(),
+    );
+    await clickRef.execute({ pageId: "target-1", ref: "@e1" }, createTestContext());
+
+    assert.deepEqual(controller.bringToFrontCalls, []);
+  });
+
+  it("click_ref only brings the browser forward for minimized windows by default", async () => {
+    const normalPage = createNativePage("target-normal");
+    const normalController = createFakeController();
+    setRuntimeStateForTests({
+      runtime: createFakeRuntime({
+        page: normalPage,
+        controller: normalController,
+        windowState: "normal",
+      }),
+      contextManager: createFakeContextManager("target-normal"),
+    });
+    await browserSnapshot.execute(
+      { pageId: "target-normal", maxNodes: 10, interactiveOnly: true },
+      createTestContext(),
+    );
+    await clickRef.execute({ pageId: "target-normal", ref: "@e1" }, createTestContext());
+    assert.deepEqual(normalController.bringToFrontCalls, []);
+
+    browserElementRefStore.clear();
+    const minimizedPage = createNativePage("target-minimized");
+    const minimizedController = createFakeController();
+    setRuntimeStateForTests({
+      runtime: createFakeRuntime({
+        page: minimizedPage,
+        controller: minimizedController,
+        windowState: "minimized",
+      }),
+      contextManager: createFakeContextManager("target-minimized"),
+    });
+    await browserSnapshot.execute(
+      { pageId: "target-minimized", maxNodes: 10, interactiveOnly: true },
+      createTestContext(),
+    );
+    await clickRef.execute({ pageId: "target-minimized", ref: "@e1" }, createTestContext());
+    assert.deepEqual(minimizedController.bringToFrontCalls, ["front"]);
+
+    browserElementRefStore.clear();
+    const unknownPage = createNativePage("target-unknown");
+    const unknownController = createFakeController();
+    setRuntimeStateForTests({
+      runtime: createFakeRuntime({
+        page: unknownPage,
+        controller: unknownController,
+        windowState: "unknown",
+      }),
+      contextManager: createFakeContextManager("target-unknown"),
+    });
+    await browserSnapshot.execute(
+      { pageId: "target-unknown", maxNodes: 10, interactiveOnly: true },
+      createTestContext(),
+    );
+    await clickRef.execute({ pageId: "target-unknown", ref: "@e1" }, createTestContext());
+    assert.deepEqual(unknownController.bringToFrontCalls, []);
   });
 
   it("browser_snapshot classifies editable DOM action candidates before clickable hints", async () => {

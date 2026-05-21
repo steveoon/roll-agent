@@ -7,6 +7,7 @@ import type {
   ZhipinNativePagePort,
 } from "../pages/zhipin/native-page.ts";
 import { recordZhipinWechatRequestedEvent } from "../recruitment-events/zhipin-events.ts";
+import { maybeBringToFront } from "../browser-foreground.ts";
 
 const OutputSchema = z.object({
   success: z.boolean(),
@@ -96,7 +97,7 @@ export const zhipinExchangeWechat = defineTool({
     try {
       nativePage = await deps.openNativePagePort();
       session = deps.createNativeVisualActivitySession(nativePage);
-      await nativePage.bringToFront().catch(() => {});
+      await maybeBringToFront(nativePage);
       await session.begin("正在换微信");
 
       if (

@@ -110,7 +110,6 @@ describe("zhipin_list_recommend_jobs", () => {
       ],
     );
     assert.deepEqual(calls, [
-      "front",
       "begin:正在读取推荐岗位",
       "highlight:.job-selecter-wrap",
       "timing:450:140:750",

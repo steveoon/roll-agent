@@ -26,6 +26,10 @@ export const BROWSER_ACTION_POLICIES = ["log", "deny", "confirm"] as const;
 export const BrowserActionPolicySchema = z.enum(BROWSER_ACTION_POLICIES);
 export type BrowserActionPolicy = z.infer<typeof BrowserActionPolicySchema>;
 
+export const BROWSER_FOREGROUND_POLICIES = ["when-minimized", "always", "never"] as const;
+export const BrowserForegroundPolicySchema = z.enum(BROWSER_FOREGROUND_POLICIES);
+export type BrowserForegroundPolicy = z.infer<typeof BrowserForegroundPolicySchema>;
+
 export const BrowserActionApprovalSchema = z.object({
   id: z.string().trim().min(1),
 });
@@ -49,6 +53,8 @@ export const BrowserSecurityConfigSchema = z.object({
   maxSnapshotNodes: z.number().int().positive().default(500),
   /** 浏览器动作策略：log 执行并记录，deny/confirm 返回结构化错误 */
   actionPolicy: BrowserActionPolicySchema.default("log"),
+  /** 浏览器前台策略：默认仅在窗口最小化时置前，避免打断用户当前桌面工作 */
+  foregroundPolicy: BrowserForegroundPolicySchema.default("when-minimized"),
 });
 
 export type BrowserSecurityConfig = z.infer<typeof BrowserSecurityConfigSchema>;

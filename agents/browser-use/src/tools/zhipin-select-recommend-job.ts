@@ -12,6 +12,7 @@ import {
   ZHIPIN_RECOMMEND_JOB_REF_PATTERN,
   resolveZhipinRecommendJobRefTarget,
 } from "../pages/zhipin/semantic-refs.ts";
+import { maybeBringToFront } from "../browser-foreground.ts";
 
 const RECOMMEND_JOB_SELECT_STATUS_VALUES = [
   "selected",
@@ -205,7 +206,7 @@ export const zhipinSelectRecommendJob = defineTool({
 
       nativePage = await deps.openNativePagePort();
       session = deps.createNativeVisualActivitySession(nativePage);
-      await nativePage.bringToFront().catch(() => {});
+      await maybeBringToFront(nativePage);
 
       await session.begin("正在选择推荐岗位");
       await session.highlightSelector(".job-selecter-wrap", {

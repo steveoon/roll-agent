@@ -18,6 +18,7 @@ import {
   assertBrowserActionAllowed,
   createBrowserActionPolicyOptions,
 } from "../browser-security.ts";
+import { maybeBringToFront } from "../browser-foreground.ts";
 
 const NATIVE_NAVIGATION_READY_TIMEOUT_MS = 15_000;
 const NATIVE_NAVIGATION_READY_POLL_MS = 250;
@@ -279,7 +280,15 @@ export const navigateActiveTab = defineTool({
     });
 
     try {
-      await controller.bringToFront().catch(() => {});
+      await maybeBringToFront(
+        {
+          targetId: target.page.targetId,
+          bringToFront: async () => {
+            await controller.bringToFront();
+          },
+        },
+        { runtime },
+      );
       await navigateNativePageIfNeeded(controller, target.page, input.url);
       const loadState = await waitForNativePageReady(controller, deps, input.url, target.page.url);
       const finalPage = await readRefreshedNativePage(runtime, target.page, loadState);
