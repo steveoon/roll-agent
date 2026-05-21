@@ -128,8 +128,29 @@ Rules:
   still needs to read each result and construct the next explicit input.
 - Batch mode executes items sequentially and waits for each tool call to finish. It does not surface
   per-item streaming progress.
+- Batch mode does not inherit routing keys. If a target agent uses a field such as `browserInstance`,
+  `tenantId`, or `workspaceId`, put that field in every item `input`.
 - For dependent workflows, split the workflow into multiple batches:
   read batch -> parse/filter results -> generate batch -> parse/filter results -> side-effect batch.
+
+Example with an account/profile routing key:
+
+```json
+[
+  {
+    "agent": "browser-use-agent",
+    "tool": "open_platform",
+    "input": { "browserInstance": "boss-a", "platform": "zhipin" },
+    "label": "boss-a-open"
+  },
+  {
+    "agent": "browser-use-agent",
+    "tool": "zhipin_get_username",
+    "input": { "browserInstance": "boss-a" },
+    "label": "boss-a-user"
+  }
+]
+```
 
 Result handling:
 
@@ -170,11 +191,14 @@ Both arrays are returned at once, not layer-by-layer. Resolve the full set befor
 ```bash
 roll agent info <agent-name>
 roll agent health --json
+# core-managed only:
 roll agent start <agent-name>
 roll agent health --json
 ```
 
-Use this only when `roll agent info <agent-name>` shows a persistent runtime.
+Use this only when `roll agent info <agent-name>` shows a persistent runtime. If ownership is
+`core-managed`, `roll agent start <agent-name>` can start or restart it; if ownership is
+`external-managed`, fix the external service endpoint/process instead of asking Roll to start it.
 
 ## Local-Path Agent Refresh
 

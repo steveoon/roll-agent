@@ -1,7 +1,7 @@
 ---
 name: roll-core
 description: >-
-  Operates registered MCP agents through the stable `roll` CLI surface: inspects lifecycle and env status, discovers tools with `roll agent tools`, invokes tools with `roll run --json`, and routes ambiguous intents with `roll ask --json`. Use when an orchestrator or coding agent must operate or troubleshoot registered Roll agents deterministically.
+  Operates registered MCP agents through the stable `roll` CLI surface: inspects lifecycle and env status, discovers tools with `roll agent tools`, invokes tools with `roll run --json`, preserves agent-scoped routing keys such as browserInstance, and routes ambiguous intents with `roll ask --json`. Use when an orchestrator or coding agent must operate or troubleshoot registered Roll agents deterministically.
 ---
 
 # Roll Core
@@ -85,6 +85,44 @@ Boundary rules:
 - When a tool call fails with symptoms like a missing required field even though the command visibly contains JSON, retry with `--input-json` before debugging the target subagent.
 - Keep `--json` for output format separate from `--input-json`; `--json` does not provide tool input.
 
+## Agent-Scoped Routing Keys
+
+Some persistent agents expose a routing key that selects an isolated runtime, profile, tenant, workspace, or account. Treat that key as part of the workflow identity, not as an optional convenience.
+
+Pattern:
+
+```text
+orchestrator task/thread
+  -> choose one explicit routing key
+  -> pass the same key in every target-agent tool input
+  -> never pass refs, prepared artifacts, or page ids across different routing keys
+```
+
+Rules:
+
+- Read the target agent's `SKILL.md` for the exact routing field name and fallback behavior.
+- If a target browser agent exposes `browserInstance`, include it in every tool call for that browser workflow, including no-input tools via `--input-json`.
+- Do not rely on a global default when operating multiple accounts concurrently; defaults are only safe for single-account or deliberately pinned deployments.
+- Keep routing keys out of unstructured prompts. Put them in the JSON input object passed to `roll run`.
+- Treat agent-returned refs, page ids, prepared reply ids, and session state as scoped to the routing key that produced them.
+
+Example browser workflow:
+
+```bash
+roll run browser-use-agent open_platform \
+  --input-json '{"browserInstance":"boss-a","platform":"zhipin"}' --json
+
+roll run browser-use-agent zhipin_read_messages \
+  --input-json '{"browserInstance":"boss-a","onlyUnread":true,"limit":5}' --json
+```
+
+For multi-worker orchestration, assign one worker to one routing key:
+
+```text
+worker A -> browserInstance=boss-a -> all browser-use calls include boss-a
+worker B -> browserInstance=boss-b -> all browser-use calls include boss-b
+```
+
 ## Batch Tool Calls
 
 Use batch mode when an orchestrator already knows a sequence of independent or serial `roll run`
@@ -105,6 +143,7 @@ Rules:
 
 - Do not pass positional `agent/tool` together with `--batch-json`, `--batch-file`, or `--batch-stdin`.
 - `input` must be a JSON object; omit it only when the tool accepts `{}`.
+- If a target agent requires an account/profile routing key, include it in every batch item `input`; batch mode does not inherit input fields between items.
 - Use `--bail` when later steps should stop after the first failed item.
 - Parse the stdout JSON as an array of per-item results. Branch on each item's `ok` field, not only
   the process exit code.
