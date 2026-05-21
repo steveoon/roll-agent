@@ -14,10 +14,12 @@ VALIDATE_OPEN_CHAT="$SCRIPT_DIR/validate-open-chat.mjs"
 VALIDATE_GENERATE="$SCRIPT_DIR/validate-generate.mjs"
 VALIDATE_SEND="$SCRIPT_DIR/validate-send.mjs"
 CHECK_AGENT_HEALTH="$SCRIPT_DIR/check-agent-health.mjs"
+VALIDATE_BROWSER_SELECTION="$SCRIPT_DIR/validate-browser-selection.mjs"
 DETECT_EXPIRED="$SCRIPT_DIR/detect-expired-banner.mjs"
 PARSE_PAGE_META="$SCRIPT_DIR/parse-page-meta.mjs"
 
 AGENT="${ROLL_AGENT:-browser-use-agent}"
+BROWSER_INSTANCE="${ROLL_BROWSER_INSTANCE:-}"
 LIMIT=""
 DRY_RUN=0
 CLICK_UNREAD_FILTER=1
@@ -41,6 +43,7 @@ Implements team skip rules, exchange-wechat, and rate limits.
 
 Options:
   --agent NAME           MCP agent (default: browser-use-agent)
+  --browser-instance ID  browser.instances id passed to every browser-use tool
   --limit N              Max candidates to handle this run (default: all unread)
   --dry-run              Evaluate skip rules; do not generate/send/exchange
   --no-unread-filter     Skip clicking the "未读" tab
@@ -67,6 +70,7 @@ need_arg() {
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --agent) need_arg "$1" "${2:-}"; AGENT="$2"; shift 2 ;;
+    --browser-instance) need_arg "$1" "${2:-}"; BROWSER_INSTANCE="$2"; shift 2 ;;
     --limit) need_arg "$1" "${2:-}"; LIMIT="$2"; shift 2 ;;
     --dry-run) DRY_RUN=1; shift ;;
     --no-unread-filter) CLICK_UNREAD_FILTER=0; shift ;;
@@ -106,11 +110,23 @@ trap cleanup EXIT
 roll_json_file() {
   local tool="$1"
   local file="$2"
+  if [[ -n "$BROWSER_INSTANCE" ]]; then
+    node -e '
+      const fs = require("node:fs");
+      const filePath = process.argv[1];
+      const browserInstance = process.argv[2];
+      const payload = JSON.parse(fs.readFileSync(filePath, "utf8"));
+      payload.browserInstance = browserInstance;
+      fs.writeFileSync(filePath, JSON.stringify(payload));
+    ' "$file" "$BROWSER_INSTANCE"
+  fi
   roll run "$AGENT" "$tool" --input-file "$file" --json 2>&1 || true
 }
 
 roll_no_input() {
-  roll run "$AGENT" "$1" --json 2>&1 || true
+  local file="$WORK_DIR/input-$1.json"
+  write_json "$file" '{}'
+  roll_json_file "$1" "$file"
 }
 
 extract_json_object() {
@@ -143,13 +159,24 @@ append_result() {
 
 ensure_agent_healthy() {
   local health
-  health=$(roll agent health "$AGENT" --json 2>&1) || health=""
+  health=$(roll agent health --json 2>&1) || health=""
   if printf '%s' "$health" | node "$CHECK_AGENT_HEALTH" 2>/dev/null; then
     return 0
   fi
   log "starting agent $AGENT..."
   roll agent start "$AGENT" >&2 || true
   sleep 2
+}
+
+ensure_browser_instance_selection() {
+  local status
+  status=$(roll_no_input browser_status)
+  if ! printf '%s' "$status" | ROLL_BROWSER_INSTANCE="$BROWSER_INSTANCE" node "$VALIDATE_BROWSER_SELECTION" >&2; then
+    exit 1
+  fi
+  if [[ -n "$BROWSER_INSTANCE" ]]; then
+    log "browserInstance -> $BROWSER_INSTANCE"
+  fi
 }
 
 # Return to chat list only (no 未读 click).
@@ -334,6 +361,7 @@ main() {
   log "results -> $RESULTS_FILE"
   log "workdir -> $WORK_DIR"
   ensure_agent_healthy
+  ensure_browser_instance_selection
   apply_unread_filter_if_needed
 
   local processed=0

@@ -54,4 +54,42 @@ const captcha = runHelper(
 );
 assert.equal(JSON.parse(captcha.stdout).captcha, true);
 
+const multiInstanceNoSelection = runHelper(
+  "validate-browser-selection.mjs",
+  JSON.stringify({
+    defaultInstanceId: null,
+    instances: [{ id: "boss-a" }, { id: "boss-b" }],
+  }),
+);
+assert.equal(multiInstanceNoSelection.status, 1);
+assert.match(multiInstanceNoSelection.stderr, /pass --browser-instance/);
+
+const explicitSelection = spawnSync("node", [path.join(dir, "validate-browser-selection.mjs")], {
+  input: JSON.stringify({
+    defaultInstanceId: null,
+    instances: [{ id: "boss-a" }, { id: "boss-b" }],
+  }),
+  encoding: "utf8",
+  env: { ...process.env, ROLL_BROWSER_INSTANCE: "boss-b" },
+});
+assert.equal(explicitSelection.status, 0, explicitSelection.stderr);
+
+const missingSelection = spawnSync("node", [path.join(dir, "validate-browser-selection.mjs")], {
+  input: JSON.stringify({
+    defaultInstanceId: null,
+    instances: [{ id: "boss-a" }, { id: "boss-b" }],
+  }),
+  encoding: "utf8",
+  env: { ...process.env, ROLL_BROWSER_INSTANCE: "boss-x" },
+});
+assert.equal(missingSelection.status, 1);
+assert.match(missingSelection.stderr, /not declared/);
+
+const failedStatusShape = runHelper(
+  "validate-browser-selection.mjs",
+  JSON.stringify({ ok: false, error: "browserInstance is unknown" }),
+);
+assert.equal(failedStatusShape.status, 1);
+assert.match(failedStatusShape.stderr, /instances array/);
+
 console.log("roll-helpers.test.mjs: ok");

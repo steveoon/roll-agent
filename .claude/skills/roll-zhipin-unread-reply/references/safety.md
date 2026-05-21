@@ -32,11 +32,58 @@ look shrunk inside the window.
 
 ## Operator checklist
 
-1. Confirm `roll agent health browser-use-agent` is healthy.
+1. Confirm `roll agent health --json` reports `browser-use-agent` as healthy.
 2. Run `--dry-run` and confirm the candidate list.
 3. Start with `--limit 3` on a risky account if unsure.
 4. If exit code 2: complete verification in the browser; wait before re-running.
 5. Review JSONL results; do not assume exit 0 means every row was sent (skipped rows have `ok:false`).
+
+## Multi-profile pre-flight
+
+Complete per target `browserInstance` before `--dry-run` or a live script run. A passing MCP
+health check alone is not enough.
+
+1. `browser_status`: target instance has `cdp.versionReachable: true` and expected profile.
+2. `zhipin_get_username`: returns the expected recruiter name, not generic placeholders like `我要招聘`.
+3. `zhipin_open_chat_page`: returns `chatReady: true` and URL contains `/web/chat/`.
+4. `zhipin_read_messages` with `onlyUnread: true`, `limit: 1`: returns a row when the user expects unread mail.
+5. Keep `browser-use-agent` running across a batch; avoid `roll agent stop` / restart mid-test.
+
+Safe smoke for two accounts:
+
+```bash
+for id in boss-b boss-c; do
+  roll run browser-use-agent zhipin_get_username --input-json "{\"browserInstance\":\"$id\"}" --json
+  roll run browser-use-agent zhipin_read_messages --input-json "{\"browserInstance\":\"$id\",\"onlyUnread\":true,\"limit\":1}" --json
+done
+```
+
+## Session recovery
+
+Use when pre-flight fails after an agent restart, Chrome relaunch, or `open_platform` landed on the
+marketing home.
+
+Symptoms: `zhipin_open_chat_page` -> `未找到沟通导航`; `zhipin_read_messages` -> 0 unread;
+script -> `no unread (empty reads: 2)` / `handled=0`; username -> `我要招聘`.
+
+Recovery per instance:
+
+1. `open_platform` with `{ "browserInstance": "<id>", "platform": "zhipin" }` if the tab is missing or on `about:blank`.
+2. `browser_snapshot` (`interactiveOnly: true`) -> `click_ref` on 登录/注册; do not hard-code refs across runs.
+3. `zhipin_get_username` again; expect the real recruiter name from the saved profile.
+4. `zhipin_open_chat_page`; expect `chatReady: true` and `/web/chat/index`.
+5. Re-run the `read_messages` smoke before starting `reply-unread-safely`.
+
+Do not use `navigate_active_tab` to guess recruiter URLs; wrong paths can land on 404 and waste the tab.
+
+## Send confirmation
+
+If `BROWSER_USE_POLICY_JSON` sets `zhipin_send_prepared_reply` to `confirm`, or browser action policy
+requires approval, `zhipin_send_prepared_reply` may return `needs_confirmation`.
+
+- `reply-unread-safely.sh` / `.ps1` do not auto-retry with approval payloads today.
+- Orchestrators must confirm with the user, then retry `zhipin_send_prepared_reply` with the same
+  `preparedReplyId` plus the returned approval object.
 
 ## Not covered yet
 

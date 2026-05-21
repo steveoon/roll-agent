@@ -26,18 +26,26 @@ Team business rules: [references/business-rules.md](references/business-rules.md
 ```bash
 .claude/skills/roll-zhipin-unread-reply/scripts/reply-unread-safely.sh --dry-run
 .claude/skills/roll-zhipin-unread-reply/scripts/reply-unread-safely.sh --limit 3
+.claude/skills/roll-zhipin-unread-reply/scripts/reply-unread-safely.sh --browser-instance boss-a --limit 3
 ```
 
 **Windows (pure PowerShell — no bash)**
 
 ```powershell
-Set-ExecutionPolicy -Scope Process Bypass -Force
 .\.claude\skills\roll-zhipin-unread-reply\scripts\reply-unread-safely.ps1 -DryRun -Limit 3
+.\.claude\skills\roll-zhipin-unread-reply\scripts\reply-unread-safely.ps1 -BrowserInstance boss-a -Limit 3
 # bash-style flags also work: --dry-run --limit 3
+```
+
+If local PowerShell policy blocks `.ps1` execution, use process-scoped bypass for that shell only:
+
+```powershell
+Set-ExecutionPolicy -Scope Process Bypass -Force
 ```
 
 | Bash flag | PowerShell | Purpose |
 | --- | --- | --- |
+| `--browser-instance ID` | `-BrowserInstance` | Target `browser.instances` id for every browser-use tool call |
 | `--dry-run` | `-DryRun` | Open chat + skip rules only |
 | `--limit N` | `-Limit N` | Cap candidates this run |
 | `--no-unread-filter` | `-NoUnreadFilter` | Skip clicking 「未读」 |
@@ -47,6 +55,34 @@ Set-ExecutionPolicy -Scope Process Bypass -Force
 | `--keep-workdir` | `-KeepWorkDir` | Keep temp JSON files after run |
 
 Requires: `roll` + `node` on PATH; `browser-use-agent` healthy; Reply Authority env (`roll skills get browser-use-agent --include-references`).
+
+### Multi-profile mode
+
+Use `--browser-instance <id>` / `-BrowserInstance <id>` whenever `roll.config.yaml` defines multiple `browser.instances`.
+
+```text
+script flag / ROLL_BROWSER_INSTANCE
+  -> every browser-use input file gets browserInstance
+  -> browser-use selects matching profile/CDP/session
+```
+
+- Run one script process per Boss account/profile.
+- Do not run two script processes against the same `browserInstance`.
+- If no flag is provided, browser-use falls back to `browser.default-instance` or single-instance mode.
+
+#### Parallel orchestration (multi-account)
+
+Supported pattern: **one `reply-unread-safely` process per `browserInstance`**, started in parallel (e.g. boss-b + boss-c each with their own `--limit`).
+
+| Operation class | Parallel-safe? | Notes |
+| --- | --- | --- |
+| Read-only (`zhipin_get_username`, `zhipin_read_messages`, `browser_status`) | Yes | Good smoke test before a batch run |
+| Full script (open chat → generate → send) | Yes, **after pre-flight passes on every instance** | Each process must target a **different** `--browser-instance` |
+| Two processes on the **same** `browserInstance` | No | Will fight over the same CDP tab/session |
+
+If parallel scripts finish with `handled=0`, `no unread (empty reads: 2)`, or open the wrong candidate, **do not assume instance isolation is broken first** — check [Pre-flight checklist](#pre-flight-checklist) and [Session recovery](#session-recovery) below.
+
+When parallel full-reply runs misbehave but sequential runs on the same instances succeed, stagger script start by a few seconds or finish pre-flight sequentially before launching both send loops.
 
 ### Script layout
 
@@ -62,6 +98,7 @@ Requires: `roll` + `node` on PATH; `browser-use-agent` healthy; Reply Authority 
 | `find-unread-ref.mjs` | Locate 未读 tab ref (regex fallback) |
 | `parse-read-candidate.mjs` | Parse `zhipin_read_messages` output |
 | `validate-*.mjs` / `check-agent-health.mjs` | Roll output validators |
+| `validate-browser-selection.mjs` | Fail fast when multi-instance config needs explicit `browserInstance` |
 | `detect-expired-banner.mjs` / `parse-page-meta.mjs` | Page guards |
 
 Quick test (no roll):
@@ -75,7 +112,8 @@ node scripts/roll-helpers.test.mjs
 
 | Issue | Script fix |
 | --- | --- |
-| PS 5.1 reads `.ps1` as system ANSI without UTF-8 BOM | **No Chinese literals in `.ps1`** — UTF-8 strings live in `.mjs` helpers |
+| PS 5.1 native-command pipes can garble UTF-8 output | `.ps1` avoids non-ASCII runtime literals and forces console/pipeline UTF-8 where possible |
+| `Get-Content` / `Set-Content` can re-encode JSON as ANSI | JSON input/results use `.NET` `ReadAllText` / `WriteAllText` with UTF-8 no BOM |
 | `Invoke-NodeStdin` given inline JS instead of file path | All logic in `*.mjs`; first arg is always a path |
 | `require()` inside `.mjs` / temp `.js` confusion | Helpers use ESM only (`import` from `roll-json-extract.mjs`) |
 | `Out-String` re-encodes roll output as ANSI | `Invoke-RollCapture` joins stream lines; no `Out-String` |
@@ -90,8 +128,8 @@ read_messages(limit=1, onlyUnread) → one candidate (read-only, no list click)
 → c.json + zhipin_open_chat(conversationId)     ← only list-row click
 → info.json {maxMessages} + get_candidate_info  ← current chat
 → evaluate-skip-rules.mjs → skip? → back to list
-→ gp.json {maxMessages} + generate_reply_preview
-→ sp.json + send_prepared_reply
+→ gp.json {maxMessages} + generate_reply_preview → preparedReplyId
+→ sp.json {preparedReplyId} + send_prepared_reply
 → wx.json {} + exchange_wechat (current chat)
 → back to list → repeat
 ```
@@ -103,6 +141,13 @@ read_messages(limit=1, onlyUnread) → one candidate (read-only, no list click)
 Note: `zhipin_open_chat` may still **retry one list click** internally if the right panel does not sync (browser-use-agent behavior).
 
 All `roll run` inputs use **`--input-file`** (PowerShell-safe; macOS/Linux compatible).
+
+### Operational guardrails
+
+- `needs_confirmation`: scripts do **not** auto-retry with approval payloads today; see [references/safety.md](references/safety.md).
+- Multi-instance selection is validated at startup through `browser_status`; when multiple instances exist without a configured default, the script exits before touching BOSS unless `--browser-instance` / `-BrowserInstance` is provided.
+- Pre-flight is per `browserInstance`: check `browser_status`, `zhipin_get_username`, `zhipin_open_chat_page`, then one `zhipin_read_messages`.
+- Recovery is per `browserInstance`: if the tab is logged out, on marketing home, or returns empty reads unexpectedly, recover that profile before running the script.
 
 ## Skip rules (script-enforced)
 
@@ -133,12 +178,13 @@ Tell the user to complete verification manually; do not retry immediately.
 
 ## Agent checklist
 
-1. `roll agent health browser-use-agent --json` → `roll agent start browser-use-agent` if needed.
-2. `--dry-run` first unless user explicitly ordered send now.
-3. Run script; read JSONL path from stderr (`results -> …`).
-4. Summarize: sent / skipped (by reason) / failed / captcha stop.
-5. For tool schemas and BOSS nuances: `roll skills get browser-use-agent --include-references --json`.
-6. For generic roll CLI: `roll-core` skill.
+1. Complete [references/safety.md](references/safety.md) pre-flight for every `--browser-instance` you will use.
+2. `roll agent health --json` → `roll agent start browser-use-agent` only when the agent is down — avoid restart during an active batch.
+3. `--dry-run` first unless user explicitly ordered send now.
+4. Run script; read JSONL path from stderr (`results -> …`).
+5. Summarize: sent / skipped (by reason) / failed / captcha stop.
+6. For tool schemas and BOSS nuances: `roll skills get browser-use-agent --include-references --json`.
+7. For generic roll CLI: `roll-core` skill.
 
 ## Exit codes
 
@@ -152,4 +198,5 @@ Tell the user to complete verification manually; do not retry immediately.
 ## References
 
 - [references/business-rules.md](references/business-rules.md) — team workflow source
-- [references/safety.md](references/safety.md) — rate limits and incident notes
+- [references/safety.md](references/safety.md) — rate limits, `needs_confirmation` gaps, and incident notes
+- `agents/browser-use/SKILL.md` — `open_platform` vs `zhipin_open_chat_page`, send policy, multi-instance tools
