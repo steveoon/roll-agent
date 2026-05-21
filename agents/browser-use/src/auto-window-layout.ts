@@ -20,6 +20,11 @@ const MACOS_TOP_INSET = 25;
 /** Default dock reservation when auto-detect is unavailable. */
 const MACOS_BOTTOM_INSET = 80;
 const MAX_AUTO_LAYOUT_COLUMNS = 4;
+const WINDOWS_WORK_AREA_SCRIPT = [
+  "Add-Type -AssemblyName System.Windows.Forms;",
+  "$area = [System.Windows.Forms.Screen]::PrimaryScreen.WorkingArea;",
+  "[pscustomobject]@{ x = $area.X; y = $area.Y; width = $area.Width; height = $area.Height } | ConvertTo-Json -Compress",
+].join(" ");
 
 let cachedWorkArea: WorkArea | undefined;
 
@@ -109,7 +114,7 @@ function detectPrimaryWorkArea(): WorkArea {
   }
 
   if (process.platform === "darwin") {
-    const desktop = detectMacOsDesktopBounds();
+    const desktop = detectMacOsDisplayBounds();
     if (desktop !== undefined) {
       return {
         x: desktop.x,
@@ -124,6 +129,13 @@ function detectPrimaryWorkArea(): WorkArea {
     const linux = detectLinuxPrimaryResolution();
     if (linux !== undefined) {
       return linux;
+    }
+  }
+
+  if (process.platform === "win32") {
+    const windows = detectWindowsPrimaryWorkArea();
+    if (windows !== undefined) {
+      return windows;
     }
   }
 
@@ -148,26 +160,115 @@ function parseWorkAreaEnv(raw: string | undefined): WorkArea | undefined {
   return { x, y, width, height };
 }
 
-function detectMacOsDesktopBounds(): WorkArea | undefined {
+export function parseMacOsDisplayBounds(raw: string): WorkArea | undefined {
+  const uiLooksLike = parseResolutionLine(raw, /UI Looks like:\s*(\d+)\s*x\s*(\d+)/i);
+  if (uiLooksLike !== undefined) {
+    return uiLooksLike;
+  }
+
+  for (const line of raw.split("\n")) {
+    if (!line.includes("Resolution:") || /\bRetina\b/i.test(line)) {
+      continue;
+    }
+
+    const resolution = parseResolutionLine(line, /Resolution:\s*(\d+)\s*x\s*(\d+)/i);
+    if (resolution !== undefined) {
+      return resolution;
+    }
+  }
+
+  return undefined;
+}
+
+function parseResolutionLine(raw: string, pattern: RegExp): WorkArea | undefined {
+  const match = raw.match(pattern);
+  if (match?.[1] === undefined || match[2] === undefined) {
+    return undefined;
+  }
+
+  const width = Number.parseInt(match[1], 10);
+  const height = Number.parseInt(match[2], 10);
+  if (width <= 0 || height <= 0) {
+    return undefined;
+  }
+
+  return { x: 0, y: 0, width, height };
+}
+
+export function parseWindowsWorkAreaJson(raw: string): WorkArea | undefined {
+  const trimmed = raw.trim().replace(/^\uFEFF/, "");
+  if (trimmed.length === 0) {
+    return undefined;
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(trimmed) as unknown;
+  } catch {
+    return undefined;
+  }
+
+  if (!isRecord(parsed)) {
+    return undefined;
+  }
+
+  const x = numberFromUnknown(parsed["x"]);
+  const y = numberFromUnknown(parsed["y"]);
+  const width = numberFromUnknown(parsed["width"]);
+  const height = numberFromUnknown(parsed["height"]);
+  if (x === undefined || y === undefined || width === undefined || height === undefined) {
+    return undefined;
+  }
+  if (width <= 0 || height <= 0) {
+    return undefined;
+  }
+
+  return { x, y, width, height };
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function numberFromUnknown(value: unknown): number | undefined {
+  if (typeof value === "number" && Number.isInteger(value)) {
+    return value;
+  }
+
+  if (typeof value === "string" && value.trim().length > 0) {
+    const parsed = Number(value.trim());
+    return Number.isInteger(parsed) ? parsed : undefined;
+  }
+
+  return undefined;
+}
+
+function detectMacOsDisplayBounds(): WorkArea | undefined {
+  try {
+    const output = execFileSync("system_profiler", ["SPDisplaysDataType"], {
+      encoding: "utf8",
+      timeout: 2_000,
+      stdio: ["ignore", "pipe", "ignore"],
+    }).trim();
+    return parseMacOsDisplayBounds(output);
+  } catch {
+    return undefined;
+  }
+}
+
+function detectWindowsPrimaryWorkArea(): WorkArea | undefined {
   try {
     const output = execFileSync(
-      "osascript",
-      ["-e", 'tell application "Finder" to get bounds of window of desktop'],
-      { encoding: "utf8", timeout: 2_000, stdio: ["ignore", "pipe", "ignore"] },
-    ).trim();
-    const parts = output.split(",").map((part) => Number.parseInt(part.trim(), 10));
-    if (parts.length !== 4 || parts.some((value) => !Number.isFinite(value))) {
-      return undefined;
-    }
-
-    const [left, top, right, bottom] = parts as [number, number, number, number];
-    const width = right - left;
-    const height = bottom - top;
-    if (width <= 0 || height <= 0) {
-      return undefined;
-    }
-
-    return { x: left, y: top, width, height };
+      "powershell.exe",
+      ["-NoProfile", "-NonInteractive", "-Command", WINDOWS_WORK_AREA_SCRIPT],
+      {
+        encoding: "utf8",
+        timeout: 2_000,
+        windowsHide: true,
+        stdio: ["ignore", "pipe", "ignore"],
+      },
+    );
+    return parseWindowsWorkAreaJson(output);
   } catch {
     return undefined;
   }

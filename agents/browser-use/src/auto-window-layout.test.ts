@@ -3,6 +3,8 @@ import { describe, it } from "node:test";
 import {
   computeAutoLayoutGrid,
   computeAutoLayoutRows,
+  parseMacOsDisplayBounds,
+  parseWindowsWorkAreaJson,
   resolveAutoWindowBoundsForIndex,
 } from "./auto-window-layout.ts";
 
@@ -145,5 +147,85 @@ describe("resolveAutoWindowBoundsForIndex", () => {
       () => resolveAutoWindowBoundsForIndex({ index: 5, total: 5, workArea: WORK_AREA }),
       RangeError,
     );
+  });
+});
+
+describe("parseMacOsDisplayBounds", () => {
+  it("prefers logical UI dimensions from macOS display output", () => {
+    assert.deepEqual(
+      parseMacOsDisplayBounds(`
+Displays:
+  Built-in Liquid Retina Display:
+    Resolution: 3456 x 2234 Retina
+    UI Looks like: 1728 x 1117 @ 120.00Hz
+`),
+      {
+        x: 0,
+        y: 0,
+        width: 1728,
+        height: 1117,
+      },
+    );
+  });
+
+  it("uses non-Retina physical resolution when no logical UI dimensions are available", () => {
+    assert.deepEqual(
+      parseMacOsDisplayBounds(`
+Displays:
+  External Display:
+    Resolution: 1920 x 1080
+    Main Display: Yes
+`),
+      {
+        x: 0,
+        y: 0,
+        width: 1920,
+        height: 1080,
+      },
+    );
+  });
+
+  it("skips Retina physical pixels without logical UI dimensions", () => {
+    assert.equal(
+      parseMacOsDisplayBounds(`
+Displays:
+  Built-in Liquid Retina Display:
+    Resolution: 3456 x 2234 Retina
+`),
+      undefined,
+    );
+  });
+});
+
+describe("parseWindowsWorkAreaJson", () => {
+  it("parses primary screen working area JSON from PowerShell", () => {
+    assert.deepEqual(parseWindowsWorkAreaJson('{"x":0,"y":0,"width":2560,"height":1392}'), {
+      x: 0,
+      y: 0,
+      width: 2560,
+      height: 1392,
+    });
+  });
+
+  it("accepts taskbar offsets and numeric strings", () => {
+    assert.deepEqual(
+      parseWindowsWorkAreaJson('{"x":"0","y":"40","width":"1920","height":"1040"}'),
+      {
+        x: 0,
+        y: 40,
+        width: 1920,
+        height: 1040,
+      },
+    );
+  });
+
+  it("rejects invalid Windows working area JSON", () => {
+    assert.equal(parseWindowsWorkAreaJson("not-json"), undefined);
+    assert.equal(
+      parseWindowsWorkAreaJson('{"x":"0px","y":0,"width":1920,"height":1080}'),
+      undefined,
+    );
+    assert.equal(parseWindowsWorkAreaJson('{"x":0,"y":0,"width":0,"height":1080}'), undefined);
+    assert.equal(parseWindowsWorkAreaJson('{"x":0,"y":0,"width":1920}'), undefined);
   });
 });

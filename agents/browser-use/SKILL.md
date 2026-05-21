@@ -15,7 +15,7 @@ metadata:
 - 通过 Roll 调用本 Agent 时，先用 `roll skills get browser-use-agent --include-references --json` 读取当前说明和 `references/*`，再用 `roll agent tools browser-use-agent --json` 读取真实 schema。
 - 完整 `inputSchema` 以 `roll agent tools browser-use-agent --json` 为准。
 - 多账号/多 profile 场景下，Roll 会从 `browser.instances` 注入 `BROWSER_INSTANCES_JSON`；所有 browser-use tool 都支持可选 `browserInstance` 输入，用于选择目标 `profile/userDataDir + cdpPort + sessionsDir`。未传时按 `browser.defaultInstance`，再按单实例自动选择；多实例且无默认值时会返回 `needs_input`。
-- 多个 `managed-cdp` 实例首次启动时会自动把 Chrome profile 展示名设为实例 ID，并按声明顺序自适应平铺窗口：2–3 个实例横向并列并撑满桌面可用高度；4 个实例 2×2 铺满屏幕；5 个及以上按「最多 4 列、每行撑满宽度」均衡排列（5→3+2、6→3+3、8→4+4、10→4+3+3）。macOS 会读取桌面分辨率并预留菜单栏/ Dock 边距；也可通过 `ROLL_BROWSER_WORK_AREA=x,y,width,height` 覆盖。需要固定布局时在实例上配置 `profile-name` / `window-bounds`。
+- 多个 `managed-cdp` 实例首次启动时会自动把 Chrome profile 展示名设为实例 ID，并按声明顺序自适应平铺窗口：2–3 个实例横向并列并撑满桌面可用高度；4 个实例 2×2 铺满屏幕；5 个及以上按「最多 4 列、每行撑满宽度」均衡排列（5→3+2、6→3+3、8→4+4、10→4+3+3）。macOS 使用只读 `system_profiler SPDisplaysDataType` 探测逻辑分辨率；Windows 使用只读 PowerShell/.NET `PrimaryScreen.WorkingArea` 探测扣除任务栏后的工作区；探测不到时回退默认工作区；也可通过 `ROLL_BROWSER_WORK_AREA=x,y,width,height` 覆盖。需要固定布局时在实例上配置 `profile-name` / `window-bounds`。
 - 浏览器实例采用 **lazy start**：agent 启动不会立刻拉起全部 Chrome，首次访问某个 `browserInstance` 时才启动对应 profile/CDP runtime。
 - `browser_status` 是无副作用诊断工具；它不会为了查询状态而启动尚未启动的 Chrome。需要启动某个实例时，调用带 `browserInstance` 的业务工具，例如 `open_platform({ browserInstance, platform:"zhipin" })`。
 - `browser_status.primaryInstanceId` 表示顶层 `running/headless/mode/security` 所采用的 primary bundle；多实例详情请看 `instances[]`。
