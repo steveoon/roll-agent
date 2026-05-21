@@ -32,6 +32,7 @@ const main = defineCommand({
     chat: () => loadMainCommand("chat"),
     config: () => loadMainCommand("config"),
     skills: () => loadMainCommand("skills"),
+    browser: () => loadMainCommand("browser"),
     doctor: () => loadMainCommand("doctor"),
     update: () => loadMainCommand("update"),
   },
