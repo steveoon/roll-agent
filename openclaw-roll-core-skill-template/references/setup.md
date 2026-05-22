@@ -36,7 +36,8 @@ roll agent add /path/to/agent
 # 8. Inspect runtime ownership, transport, and env status
 roll agent info <agent-name>
 
-# 9. If the agent is a persistent service, start it
+# 9. If the agent is core-managed, start it through Roll.
+# If it is external-managed, start the external service by its own runbook instead.
 roll agent start <agent-name>
 
 # 10. Verify health before tool calls
@@ -161,9 +162,12 @@ roll agent info <agent-name>
 roll agent health --json
 ```
 
-If the target agent is a persistent service and is not healthy:
+If the target agent is a `core-managed` persistent service and is not healthy:
 
 ```bash
 roll agent start <agent-name>
 roll agent health --json
 ```
+
+For `external-managed` agents, report or fix the external endpoint/process instead of running
+`roll agent start`.

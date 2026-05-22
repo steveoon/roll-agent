@@ -61,6 +61,35 @@ describe("formatDoctorChecksForJsonOutput", () => {
     ]);
     assert.deepEqual(formatDoctorChecksForJsonOutput(checks, { fixPlan: true }), checks);
   });
+
+  it("should preserve structured details in JSON output", () => {
+    const checks = [
+      {
+        name: "Browser runtime (browser-use-agent)",
+        status: "warn" as const,
+        message: "runtime=boss-a:cdp=warn,profile=ok,tracking=missing",
+        fix: "重启 browser-use-agent",
+        details: {
+          type: "browser-runtime",
+          declaredInstanceIds: ["boss-a"],
+          runtimeInstances: [],
+        },
+      },
+    ];
+
+    assert.deepEqual(formatDoctorChecksForJsonOutput(checks, { fixPlan: false }), [
+      {
+        name: "Browser runtime (browser-use-agent)",
+        status: "warn",
+        message: "runtime=boss-a:cdp=warn,profile=ok,tracking=missing",
+        details: {
+          type: "browser-runtime",
+          declaredInstanceIds: ["boss-a"],
+          runtimeInstances: [],
+        },
+      },
+    ]);
+  });
 });
 
 describe("formatDoctorJsonOutput", () => {

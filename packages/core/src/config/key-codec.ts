@@ -13,6 +13,34 @@ const PROVIDER_NODE: KeyCodecNode = {
   },
 };
 
+const BROWSER_INSTANCE_NODE: KeyCodecNode = {
+  kind: "object",
+  fields: {
+    platform: LEAF,
+    mode: LEAF,
+    headless: LEAF,
+    cdpUrl: LEAF,
+    cdpHost: LEAF,
+    cdpPort: LEAF,
+    channel: LEAF,
+    executablePath: LEAF,
+    userDataDir: LEAF,
+    sessionsDir: LEAF,
+    args: LEAF,
+    profileName: LEAF,
+    windowBounds: {
+      kind: "object",
+      fields: {
+        x: LEAF,
+        y: LEAF,
+        width: LEAF,
+        height: LEAF,
+      },
+    },
+    trackingAgentId: LEAF,
+  },
+};
+
 export const CONFIG_KEY_CODEC: KeyCodecNode = {
   kind: "object",
   fields: {
@@ -44,6 +72,16 @@ export const CONFIG_KEY_CODEC: KeyCodecNode = {
             kind: "record",
             value: LEAF,
           },
+        },
+      },
+    },
+    browser: {
+      kind: "object",
+      fields: {
+        defaultInstance: LEAF,
+        instances: {
+          kind: "record",
+          value: BROWSER_INSTANCE_NODE,
         },
       },
     },

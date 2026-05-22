@@ -13,6 +13,7 @@ const baseConfig: RollConfig = {
   },
   ask: {},
   agents: { dataDir: "/tmp/agents" },
+  browser: { instances: {} },
 };
 
 describe("LLMEngine", () => {

@@ -99,6 +99,21 @@ roll run <browser-agent> open_platform --input-json '{"platform":"..."}' --json
 # then re-run the real read/check tool
 ```
 
+If the browser agent exposes an account/profile routing key, pass it through every recovery call:
+
+```bash
+roll run browser-use-agent browser_status \
+  --input-json '{"browserInstance":"boss-a"}' --json
+roll run browser-use-agent open_platform \
+  --input-json '{"browserInstance":"boss-a","platform":"zhipin"}' --json
+```
+
+Rules:
+
+1. Do not use one browser worker to recover another worker's profile.
+2. Do not reuse page ids, element refs, prepared replies, or conversation-local state across different routing keys.
+3. When multiple account workers run concurrently, each worker must pin its routing key before the first browser call and keep it unchanged for the whole workflow.
+
 If the service is still unusable and Roll owns lifecycle:
 
 ```bash

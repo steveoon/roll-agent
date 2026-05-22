@@ -114,6 +114,21 @@ function expandPaths(config: RollConfig): RollConfig {
       ...config.agents,
       dataDir: expandTilde(config.agents.dataDir),
     },
+    browser: {
+      ...config.browser,
+      instances: Object.fromEntries(
+        Object.entries(config.browser.instances).map(([id, instance]) => [
+          id,
+          {
+            ...instance,
+            userDataDir: expandTilde(instance.userDataDir),
+            ...(instance.sessionsDir !== undefined
+              ? { sessionsDir: expandTilde(instance.sessionsDir) }
+              : {}),
+          },
+        ]),
+      ),
+    },
   };
 }
 

@@ -12,6 +12,30 @@ llm:
       api-key: ${DASHSCOPE_API_KEY}
 ask:
   confirm-threshold: 0.5
+browser:
+  default-instance: boss-a
+  instances:
+    boss-a:
+      platform: zhipin
+      mode: managed-cdp
+      cdp-port: 9222
+      user-data-dir: ~/.roll-agent/browser/profiles/boss-a
+      sessions-dir: ~/.roll-agent/browser/sessions/boss-a
+      tracking-agent-id: zhipin-boss-a
+    boss-b:
+      platform: zhipin
+      mode: managed-cdp
+      cdp-port: 9223
+      user-data-dir: ~/.roll-agent/browser/profiles/boss-b
+      sessions-dir: ~/.roll-agent/browser/sessions/boss-b
+      tracking-agent-id: zhipin-boss-b
+    boss-c:
+      platform: zhipin
+      mode: managed-cdp
+      cdp-port: 9224
+      user-data-dir: ~/.roll-agent/browser/profiles/boss-c
+      sessions-dir: ~/.roll-agent/browser/sessions/boss-c
+      tracking-agent-id: zhipin-boss-c
 agents:
   data-dir: ~/.roll-agent/agents
   env:

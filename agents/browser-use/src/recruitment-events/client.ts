@@ -1,5 +1,9 @@
 import { createHash } from "node:crypto";
 import type { AgentLogger } from "@roll-agent/sdk";
+import {
+  isConfiguredMultiBrowserInstancePool,
+  resolveRecruitmentTrackingAgentId,
+} from "../runtime-holder.ts";
 
 export const RECRUITMENT_EVENT_TYPES = [
   "message_received",
@@ -99,8 +103,24 @@ function loadRecruitmentEventsConfig(env: NodeJS.ProcessEnv): RecruitmentEventsC
   };
 }
 
-function resolveRecruitmentAgentId(config: RecruitmentEventsConfig): string | undefined {
-  return config.defaultAgentId;
+function resolveRecruitmentAgentId(
+  config: RecruitmentEventsConfig,
+  logger: AgentLogger,
+): string | undefined {
+  const agentId = resolveRecruitmentTrackingAgentId(config.defaultAgentId);
+  if (agentId !== undefined) {
+    return agentId;
+  }
+
+  if (isConfiguredMultiBrowserInstancePool()) {
+    warnOnce(
+      logger,
+      "missing-instance-tracking",
+      "Recruitment event skipped: select a browserInstance, configure tracking-agent-id on the active browser instance, or set RECRUITMENT_EVENTS_DEFAULT_AGENT_ID.",
+    );
+  }
+
+  return undefined;
 }
 
 function warnOnce(logger: AgentLogger, key: string, message: string): void {
@@ -152,13 +172,24 @@ async function postRecruitmentEvent(
     return;
   }
 
-  const agentId = resolveRecruitmentAgentId(config);
-  if (config.apiToken === undefined || agentId === undefined) {
+  const agentId = resolveRecruitmentAgentId(config, logger);
+  if (config.apiToken === undefined) {
     warnOnce(
       logger,
       "missing-required-config",
-      "Recruitment events tracking is enabled by default; require RECRUITMENT_EVENTS_API_TOKEN and RECRUITMENT_EVENTS_DEFAULT_AGENT_ID.",
+      "Recruitment events tracking is enabled by default; require RECRUITMENT_EVENTS_API_TOKEN.",
     );
+    return;
+  }
+
+  if (agentId === undefined) {
+    if (!isConfiguredMultiBrowserInstancePool()) {
+      warnOnce(
+        logger,
+        "missing-required-config",
+        "Recruitment events tracking is enabled by default; require RECRUITMENT_EVENTS_DEFAULT_AGENT_ID.",
+      );
+    }
     return;
   }
 

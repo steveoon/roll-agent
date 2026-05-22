@@ -1,4 +1,4 @@
-import { getAgentEnvFromAgentsConfig } from "../config/helpers.ts";
+import { getAgentEnv, getAgentEnvFromAgentsConfig } from "../config/helpers.ts";
 import {
   AgentRuntimeEnvDiagnosticPayloadSchema,
   DIAGNOSTIC_TOOL_CANDIDATES,
@@ -13,12 +13,18 @@ import { McpClientManager } from "./client-manager.ts";
 export async function inspectAgentRuntimeEnv(
   agent: RegisteredAgent,
   options: {
-    readonly agentsConfig: RollConfig["agents"];
+    readonly config?: RollConfig;
+    readonly agentsConfig?: RollConfig["agents"];
     readonly timeoutMs?: number;
   },
 ): Promise<AgentRuntimeEnvInspection> {
+  const agentsConfig = options.config?.agents ?? options.agentsConfig;
+  if (agentsConfig === undefined) {
+    throw new Error("inspectAgentRuntimeEnv requires config or agentsConfig.");
+  }
+
   if (agent.runtime.ownership === "core-managed") {
-    const pid = getAgentPid(options.agentsConfig.dataDir, agent.skill.name);
+    const pid = getAgentPid(agentsConfig.dataDir, agent.skill.name);
     if (pid === undefined) {
       return {
         status: "unverified",
@@ -32,7 +38,10 @@ export async function inspectAgentRuntimeEnv(
 
   try {
     const transport = resolveTransportWithDevSpawnSpec(agent);
-    const agentEnv = getAgentEnvFromAgentsConfig(options.agentsConfig, agent.skill.name);
+    const agentEnv =
+      options.config !== undefined
+        ? getAgentEnv(options.config, agent.skill.name)
+        : getAgentEnvFromAgentsConfig(agentsConfig, agent.skill.name);
     const client = await clientManager.connect(agent.skill.name, transport, agent.installPath, {
       ...(options.timeoutMs !== undefined ? { timeoutMs: options.timeoutMs } : {}),
       ...(agentEnv ? { env: agentEnv } : {}),

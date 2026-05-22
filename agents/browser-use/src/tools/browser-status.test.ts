@@ -160,6 +160,7 @@ describe("browser_status", () => {
       headless: false,
       mode: "managed-cdp",
       activeSessions: [],
+      instances: [],
       replyAuthorityKeysLoaded: true,
       visualCursorEnabled: true,
       visualActivityEnabled: true,
@@ -223,6 +224,7 @@ describe("browser_status", () => {
     assert.equal(parsed.replyAuthorityKeysLoaded, true);
     assert.equal(parsed.visualCursorEnabled, true);
     assert.equal(parsed.visualActivityEnabled, true);
+    assert.deepEqual(parsed.instances, []);
     assert.equal(parsed.effectiveEnvSources["REPLY_AUTHORITY_URL"]?.fingerprint, "1111aaaa");
     assert.equal(
       parsed.effectiveEnvSources["REPLY_AUTHORITY_BEARER_TOKEN"]?.fingerprint,
@@ -241,5 +243,94 @@ describe("browser_status", () => {
       parsed.effectiveEnvSources["RECRUITMENT_EVENTS_DEFAULT_AGENT_ID"]?.fingerprint,
       "cccccccc",
     );
+  });
+
+  it("accepts per-instance runtime health diagnostics", () => {
+    const parsed = browserStatus.output.parse({
+      running: true,
+      headless: false,
+      mode: "managed-cdp",
+      activeSessions: [],
+      defaultInstanceId: "boss-a",
+      primaryInstanceId: "boss-a",
+      instances: [
+        {
+          id: "boss-a",
+          platform: "zhipin",
+          mode: "managed-cdp",
+          cdp: {
+            endpoint: "http://127.0.0.1:9222",
+            port: 9222,
+            versionReachable: true,
+            listReachable: true,
+          },
+          profile: {
+            userDataDir: "/tmp/boss-a",
+            exists: true,
+            writable: true,
+          },
+          tracking: {
+            source: "instance",
+            agentIdFingerprint: "1111aaaa",
+          },
+        },
+      ],
+      replyAuthorityKeysLoaded: true,
+      visualCursorEnabled: true,
+      visualActivityEnabled: true,
+      security: {
+        domainAllowlist: [],
+        maxPageContentBytes: 102_400,
+        maxSnapshotNodes: 500,
+        actionPolicy: "log",
+      },
+      toolPolicy: {
+        approvalTtlMs: 300_000,
+        tools: {},
+      },
+      policyWarnings: [],
+      effectiveEnvSources: {},
+    });
+
+    assert.equal(parsed.defaultInstanceId, "boss-a");
+    assert.equal(parsed.primaryInstanceId, "boss-a");
+    assert.equal(parsed.instances?.[0]?.cdp.versionReachable, true);
+    assert.equal(parsed.instances?.[0]?.tracking.source, "instance");
+  });
+
+  it("accepts browserInstance on active sessions", () => {
+    const parsed = browserStatus.output.parse({
+      running: true,
+      headless: false,
+      mode: "managed-cdp",
+      activeSessions: [
+        {
+          browserInstance: "boss-a",
+          platform: "zhipin",
+          pagesOpen: 1,
+          currentUrl: "https://www.zhipin.com/web/geek/chat",
+          hasLoginState: null,
+          loginStateSource: "profile",
+        },
+      ],
+      instances: [],
+      replyAuthorityKeysLoaded: true,
+      visualCursorEnabled: true,
+      visualActivityEnabled: true,
+      security: {
+        domainAllowlist: [],
+        maxPageContentBytes: 102_400,
+        maxSnapshotNodes: 500,
+        actionPolicy: "log",
+      },
+      toolPolicy: {
+        approvalTtlMs: 300_000,
+        tools: {},
+      },
+      policyWarnings: [],
+      effectiveEnvSources: {},
+    });
+
+    assert.equal(parsed.activeSessions[0]?.browserInstance, "boss-a");
   });
 });

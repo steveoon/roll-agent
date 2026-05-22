@@ -1,7 +1,12 @@
 import { defineCommand } from "citty";
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { stringify as stringifyYaml } from "yaml";
-import { getAgentEnvFromAgentsConfig, inspectAgentEnvRequirements } from "../../config/helpers.ts";
+import {
+  getAgentEnv,
+  getAgentEnvFromAgentsConfig,
+  inspectAgentEnvRequirements,
+} from "../../config/helpers.ts";
+import { collectBrowserConfigWarnings } from "../../config/browser-inspection.ts";
 import {
   inspectConfigFile,
   loadAgentsConfig,
@@ -15,6 +20,7 @@ import {
   inspectAgentRuntimeEnvRequirements,
   summarizeAgentRuntimeEnvReport,
   type AgentRuntimeEnvInspection,
+  type BrowserInstanceStatusDiagnostic,
   type BrowserSecurityDiagnostic,
   type BrowserUsePolicyWarningDiagnostic,
   type BrowserUseToolPolicyDiagnostic,
@@ -25,12 +31,14 @@ import {
   inspectManagedAgentRuntime,
 } from "../../registry/process-manager.ts";
 import { AgentStore } from "../../registry/store.ts";
+import type { BrowserConfig } from "../../config/schema.ts";
 
 export interface CheckResult {
   readonly name: string;
   readonly status: "ok" | "warn" | "fail";
   readonly message: string;
   readonly fix?: string;
+  readonly details?: unknown;
 }
 
 export interface DoctorFixResult {
@@ -86,6 +94,119 @@ function formatBrowserSecurityCheck(inspection: AgentRuntimeEnvInspection): Chec
         }
       : {}),
   };
+}
+
+function formatBrowserConfigDeclarationCheck(
+  browserConfig: BrowserConfig,
+  agentEnv: Readonly<Record<string, string>> | undefined,
+): CheckResult | undefined {
+  const warnings = collectBrowserConfigWarnings(browserConfig, agentEnv);
+  if (warnings.length === 0) {
+    return undefined;
+  }
+
+  return {
+    name: "Browser config (browser.instances)",
+    status: "warn",
+    message: warnings.join("；"),
+    fix: "在 roll.config.yaml 中配置 browser.default-instance，并移除 agents.env.browser-use-agent 下已废弃的 BROWSER_CDP_* / BROWSER_USER_DATA_DIR 等实例身份 env",
+    details: {
+      type: "browser-config",
+      warnings,
+    },
+  };
+}
+
+function formatBrowserRuntimeCheck(
+  browserConfig: BrowserConfig,
+  inspection: AgentRuntimeEnvInspection,
+): CheckResult {
+  const name = "Browser runtime (browser-use-agent)";
+  const declaredIds = Object.keys(browserConfig.instances);
+
+  if (declaredIds.length === 0) {
+    return {
+      name,
+      status: "ok",
+      message: "跳过（未配置 browser.instances，使用 legacy 单实例运行时）",
+    };
+  }
+
+  if (inspection.status === "unverified") {
+    return {
+      name,
+      status: "warn",
+      message: `未校验: ${inspection.message}`,
+      fix: "启动 browser-use-agent 后重新运行 `roll doctor`",
+    };
+  }
+
+  const runtimeInstances = inspection.payload.instances ?? [];
+  if (runtimeInstances.length === 0) {
+    return {
+      name,
+      status: "warn",
+      message: "browser_status.instances 未返回，无法确认浏览器实例运行态",
+      fix: "升级并重启 browser-use-agent",
+    };
+  }
+
+  const runtimeIds = new Set(runtimeInstances.map((instance) => instance.id));
+  const missingIds = declaredIds.filter((id) => !runtimeIds.has(id));
+  const unhealthy = runtimeInstances.filter(isBrowserInstanceUnhealthy);
+  const missingTracking = runtimeInstances.filter(
+    (instance) => instance.tracking.source === "missing",
+  );
+  const details = {
+    type: "browser-runtime",
+    declaredInstanceIds: declaredIds,
+    ...(browserConfig.defaultInstance !== undefined
+      ? { defaultInstanceId: browserConfig.defaultInstance }
+      : {}),
+    runtimeInstances,
+    missingInstanceIds: missingIds,
+    unhealthyInstanceIds: unhealthy.map((instance) => instance.id),
+    missingTrackingInstanceIds: missingTracking.map((instance) => instance.id),
+  };
+
+  const status =
+    missingIds.length > 0 || unhealthy.length > 0 || missingTracking.length > 0 ? "warn" : "ok";
+  return {
+    name,
+    status,
+    details,
+    message: [
+      `declared=${declaredIds.join(",")}`,
+      `runtime=${runtimeInstances.map(formatBrowserInstanceRuntimeSummary).join(";")}`,
+      ...(missingIds.length > 0 ? [`missing=${missingIds.join(",")}`] : []),
+      ...(missingTracking.length > 0
+        ? [`trackingMissing=${missingTracking.map((instance) => instance.id).join(",")}`]
+        : []),
+    ].join(" "),
+    ...(status === "warn"
+      ? {
+          fix: "检查 browser.instances、BROWSER_INSTANCES_JSON、CDP 端口和 profile 目录；必要时重启 browser-use-agent",
+        }
+      : {}),
+  };
+}
+
+function isBrowserInstanceUnhealthy(instance: BrowserInstanceStatusDiagnostic): boolean {
+  return (
+    !instance.cdp.versionReachable ||
+    !instance.cdp.listReachable ||
+    !instance.profile.exists ||
+    !instance.profile.writable
+  );
+}
+
+function formatBrowserInstanceRuntimeSummary(instance: BrowserInstanceStatusDiagnostic): string {
+  return (
+    `${instance.id}:` +
+    `cdp=${instance.cdp.versionReachable && instance.cdp.listReachable ? "ok" : "warn"},` +
+    `profile=${instance.profile.exists && instance.profile.writable ? "ok" : "warn"},` +
+    `tracking=${instance.tracking.source}`
+  );
 }
 
 function formatBrowserPolicySummary(
@@ -306,10 +427,45 @@ export default defineCommand({
         ...(agents.length === 0 ? { fix: "运行 `roll agent add <path|git-url>` 注册 Agent" } : {}),
       });
 
+      if (
+        effectiveConfig &&
+        Object.keys(effectiveConfig.browser.instances).length > 0 &&
+        !agents.some((agent) => agent.skill.name === "browser-use-agent")
+      ) {
+        checks.push({
+          name: "Browser runtime (browser-use-agent)",
+          status: "fail",
+          message: "已配置 browser.instances，但 browser-use-agent 未注册",
+          fix: "运行 `roll agent add agents/browser-use` 或安装并注册 browser-use-agent",
+          details: {
+            type: "browser-runtime",
+            declaredInstanceIds: Object.keys(effectiveConfig.browser.instances),
+            missingAgent: "browser-use-agent",
+          },
+        });
+      }
+
+      if (effectiveConfig && Object.keys(effectiveConfig.browser.instances).length > 0) {
+        const browserConfigCheck = formatBrowserConfigDeclarationCheck(
+          effectiveConfig.browser,
+          getAgentEnv(effectiveConfig, "browser-use-agent"),
+        );
+        if (browserConfigCheck) {
+          checks.push(browserConfigCheck);
+        }
+      }
+
       for (const agent of agents) {
         let runtimeInspection: AgentRuntimeEnvInspection | undefined;
         const getRuntimeInspection = async (): Promise<AgentRuntimeEnvInspection> => {
-          runtimeInspection ??= await inspectAgentRuntimeEnv(agent, { agentsConfig: fullConfig });
+          if (!effectiveConfig) {
+            return {
+              status: "unverified",
+              reason: "connection-failed",
+              message: "无法校验运行态: 配置未加载",
+            };
+          }
+          runtimeInspection ??= await inspectAgentRuntimeEnv(agent, { config: effectiveConfig });
           return runtimeInspection;
         };
 
@@ -345,15 +501,23 @@ export default defineCommand({
         );
         if (!envReport) {
           if (agent.skill.name === "browser-use-agent") {
-            checks.push(formatBrowserSecurityCheck(await getRuntimeInspection()));
+            runtimeInspection = await getRuntimeInspection();
+            if (effectiveConfig) {
+              checks.push(formatBrowserRuntimeCheck(effectiveConfig.browser, runtimeInspection));
+            }
+            checks.push(formatBrowserSecurityCheck(runtimeInspection));
           }
           continue;
         }
 
         runtimeInspection = await getRuntimeInspection();
+        const comparableAgentEnv =
+          effectiveConfig !== undefined
+            ? getAgentEnv(effectiveConfig, agent.skill.name)
+            : getAgentEnvFromAgentsConfig(fullConfig, agent.skill.name);
         const runtimeReport = inspectAgentRuntimeEnvRequirements(
           envReport,
-          getAgentEnvFromAgentsConfig(fullConfig, agent.skill.name),
+          comparableAgentEnv,
           runtimeInspection,
         );
         const summary = summarizeAgentRuntimeEnvReport(runtimeReport);
@@ -369,6 +533,9 @@ export default defineCommand({
         });
 
         if (agent.skill.name === "browser-use-agent") {
+          if (effectiveConfig) {
+            checks.push(formatBrowserRuntimeCheck(effectiveConfig.browser, runtimeInspection));
+          }
           checks.push(formatBrowserSecurityCheck(runtimeInspection));
         }
       }
@@ -448,11 +615,7 @@ export function formatDoctorChecksForJsonOutput(
     return checks;
   }
 
-  return checks.map((check) => ({
-    name: check.name,
-    status: check.status,
-    message: check.message,
-  }));
+  return checks.map(({ fix: _fix, ...check }) => check);
 }
 
 export function formatDoctorJsonOutput(

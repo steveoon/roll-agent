@@ -34,10 +34,18 @@ import { yupaoReadMessages } from "./tools/yupao-read-messages.ts";
 import { yupaoSendReply } from "./tools/yupao-send-reply.ts";
 import { preloadReplyAuthorityKeys } from "./reply-authority/key-store.ts";
 import { initRuntime, setReplyAuthorityKeysLoaded, shutdownRuntime } from "./runtime-holder.ts";
-import { loadRuntimeConfigFromEnv } from "./runtime-config.ts";
+import { loadBrowserInstancesConfigFromEnv, loadRuntimeConfigFromEnv } from "./runtime-config.ts";
 import { loadBrowserUsePolicyFromEnv, setBrowserUsePolicy } from "./browser-use-policy.ts";
+import { withBrowserInstanceInput } from "./tools/browser-instance-input.ts";
+import type { AnyToolDefinition } from "@roll-agent/sdk";
 
 const logger = createAgentLogger("browser-use-agent");
+
+function withBrowserInstanceRuntimeSelection(tool: AnyToolDefinition): AnyToolDefinition {
+  return withBrowserInstanceInput(tool, {
+    startRuntime: tool.name !== "browser_status",
+  });
+}
 
 const agent = defineAgent(
   {
@@ -78,7 +86,7 @@ const agent = defineAgent(
       yupaoSendReply,
       // 调试
       attachBrowserSession,
-    ],
+    ].map(withBrowserInstanceRuntimeSelection),
   },
   {
     onShutdown: shutdownRuntime,
@@ -87,7 +95,7 @@ const agent = defineAgent(
 
 async function main(): Promise<void> {
   setBrowserUsePolicy(loadBrowserUsePolicyFromEnv());
-  await initRuntime(loadRuntimeConfigFromEnv());
+  await initRuntime(loadRuntimeConfigFromEnv(), loadBrowserInstancesConfigFromEnv());
 
   try {
     await preloadReplyAuthorityKeys();

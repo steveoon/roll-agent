@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -9,7 +9,7 @@ import type { ChildProcess } from "node:child_process";
 import { BrowserRuntimeConfigSchema } from "../types/index.ts";
 import { BrowserRuntime } from "./browser-runtime.ts";
 import { BrowserActionPolicyError } from "./security.ts";
-import type { NativeCdpController } from "./native-cdp-controller.ts";
+import type { NativeCdpController, NativeCdpWindowBounds } from "./native-cdp-controller.ts";
 
 function makeTmpUserDataDir(): string {
   return mkdtempSync(join(tmpdir(), `roll-browser-runtime-${randomUUID()}-`));
@@ -75,6 +75,18 @@ function createResponse(body: string, init?: ResponseInit): Response {
   });
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
+
+function readNestedRecord(
+  value: Record<string, unknown>,
+  key: string,
+): Record<string, unknown> | undefined {
+  const child = value[key];
+  return isRecord(child) ? child : undefined;
+}
+
 test("managed-cdp start launches Chrome without eagerly attaching Playwright", async () => {
   const userDataDir = makeTmpUserDataDir();
   try {
@@ -119,6 +131,138 @@ test("managed-cdp start launches Chrome without eagerly attaching Playwright", a
     await runtime.stop();
     assert.equal(connectedBrowser.getCloseCalls(), 1);
     assert.equal(managedProcess.getKillCalls(), 1);
+  } finally {
+    rmSync(userDataDir, { recursive: true, force: true });
+  }
+});
+
+test("managed-cdp start applies instance profile label and window bounds", async () => {
+  const userDataDir = makeTmpUserDataDir();
+  try {
+    const managedProcess = createManagedProcessState();
+    const fetchCalls: FetchCall[] = [];
+    let spawnedArgs: ReadonlyArray<string> = [];
+    let connectedNativeBrowserWs: string | undefined;
+    let requestedWindowTargetId: string | undefined;
+    let appliedWindowBounds:
+      | {
+          readonly windowId: number;
+          readonly bounds: NativeCdpWindowBounds;
+        }
+      | undefined;
+    let nativeCloseCalls = 0;
+
+    const runtime = new BrowserRuntime(
+      BrowserRuntimeConfigSchema.parse({
+        mode: "managed-cdp",
+        executablePath: "/bin/chrome-for-test",
+        userDataDir,
+        cdpPort: 9888,
+        instanceId: "boss-a",
+        profileName: "boss-a",
+        windowBounds: {
+          x: 0,
+          y: 24,
+          width: 680,
+          height: 1000,
+        },
+      }),
+      {
+        spawn(_command, args) {
+          spawnedArgs = args;
+          return managedProcess.proc;
+        },
+        async fetch(input, init) {
+          const url = String(input);
+          fetchCalls.push({
+            url,
+            method: init?.method ?? "GET",
+          });
+
+          if (url === "http://127.0.0.1:9888/json/version") {
+            return createResponse(
+              JSON.stringify({
+                webSocketDebuggerUrl: "ws://127.0.0.1:9888/devtools/browser/root",
+              }),
+            );
+          }
+          if (url === "http://127.0.0.1:9888/json/list") {
+            return createResponse(
+              JSON.stringify([
+                {
+                  id: "target-boss",
+                  type: "page",
+                  title: "BOSS直聘",
+                  url: "https://www.zhipin.com/web/chat/index",
+                  webSocketDebuggerUrl: "ws://127.0.0.1:9888/devtools/page/target-boss",
+                },
+              ]),
+            );
+          }
+
+          throw new Error(`Unexpected fetch URL: ${url}`);
+        },
+        async connectOverCDP() {
+          throw new Error("connectOverCDP should not be called");
+        },
+        async connectNativePage(options) {
+          connectedNativeBrowserWs = options.webSocketDebuggerUrl;
+          return {
+            async getWindowIdForTarget(targetId: string) {
+              requestedWindowTargetId = targetId;
+              return 42;
+            },
+            async setWindowBounds(windowId: number, bounds: NativeCdpWindowBounds) {
+              appliedWindowBounds = { windowId, bounds };
+            },
+            close() {
+              nativeCloseCalls += 1;
+            },
+          } as unknown as NativeCdpController;
+        },
+      },
+    );
+
+    await runtime.start();
+
+    assert.ok(spawnedArgs.includes("--window-name=boss-a"));
+    assert.ok(spawnedArgs.includes("--window-position=0,24"));
+    assert.ok(spawnedArgs.includes("--window-size=680,1000"));
+    assert.equal(connectedNativeBrowserWs, "ws://127.0.0.1:9888/devtools/browser/root");
+    assert.equal(requestedWindowTargetId, "target-boss");
+    assert.deepEqual(appliedWindowBounds, {
+      windowId: 42,
+      bounds: {
+        x: 0,
+        y: 24,
+        width: 680,
+        height: 1000,
+        state: "normal",
+      },
+    });
+    assert.equal(nativeCloseCalls, 1);
+    const localState: unknown = JSON.parse(readFileSync(join(userDataDir, "Local State"), "utf-8"));
+    assert.ok(isRecord(localState));
+    const profile = readNestedRecord(localState, "profile");
+    const infoCache = profile ? readNestedRecord(profile, "info_cache") : undefined;
+    const defaultProfile = infoCache ? readNestedRecord(infoCache, "Default") : undefined;
+    assert.equal(defaultProfile?.["name"], "boss-a");
+    assert.deepEqual(fetchCalls, [
+      {
+        url: "http://127.0.0.1:9888/json/version",
+        method: "GET",
+      },
+      {
+        url: "http://127.0.0.1:9888/json/version",
+        method: "GET",
+      },
+      {
+        url: "http://127.0.0.1:9888/json/list",
+        method: "GET",
+      },
+    ]);
+
+    await runtime.stop();
   } finally {
     rmSync(userDataDir, { recursive: true, force: true });
   }

@@ -11,6 +11,9 @@ export const DEFAULT_CONFIG: RollConfig = {
   agents: {
     dataDir: "~/.roll-agent/agents",
   },
+  browser: {
+    instances: {},
+  },
 };
 
 /** 配置文件查找顺序 */

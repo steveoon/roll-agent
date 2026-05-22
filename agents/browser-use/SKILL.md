@@ -14,6 +14,11 @@ metadata:
 - 先启动 `browser-use-agent` HTTP 常驻服务；浏览器 session 跨调用持久。
 - 通过 Roll 调用本 Agent 时，先用 `roll skills get browser-use-agent --include-references --json` 读取当前说明和 `references/*`，再用 `roll agent tools browser-use-agent --json` 读取真实 schema。
 - 完整 `inputSchema` 以 `roll agent tools browser-use-agent --json` 为准。
+- 多账号/多 profile 场景下，Roll 会从 `browser.instances` 注入 `BROWSER_INSTANCES_JSON`；所有 browser-use tool 都支持可选 `browserInstance` 输入，用于选择目标 `profile/userDataDir + cdpPort + sessionsDir`。未传时按 `browser.defaultInstance`，再按单实例自动选择；多实例且无默认值时会返回 `needs_input`。
+- 多个 `managed-cdp` 实例首次启动时会自动把 Chrome profile 展示名设为实例 ID，并按声明顺序自适应平铺窗口：2–3 个实例横向并列并撑满桌面可用高度；4 个实例 2×2 铺满屏幕；5 个及以上按「最多 4 列、每行撑满宽度」均衡排列（5→3+2、6→3+3、8→4+4、10→4+3+3）。macOS 使用只读 `system_profiler SPDisplaysDataType` 探测逻辑分辨率；Windows 使用只读 PowerShell/.NET `PrimaryScreen.WorkingArea` 探测扣除任务栏后的工作区；探测不到时回退默认工作区；也可通过 `ROLL_BROWSER_WORK_AREA=x,y,width,height` 覆盖。需要固定布局时在实例上配置 `profile-name` / `window-bounds`。
+- 浏览器实例采用 **lazy start**：agent 启动不会立刻拉起全部 Chrome，首次访问某个 `browserInstance` 时才启动对应 profile/CDP runtime。
+- `browser_status` 是无副作用诊断工具；它不会为了查询状态而启动尚未启动的 Chrome。需要启动某个实例时，调用带 `browserInstance` 的业务工具，例如 `open_platform({ browserInstance, platform:"zhipin" })`。
+- `browser_status.primaryInstanceId` 表示顶层 `running/headless/mode/security` 所采用的 primary bundle；多实例详情请看 `instances[]`。
 - `REPLY_AUTHORITY_URL` / `REPLY_AUTHORITY_BEARER_TOKEN` 是生成智能回复预览的必填环境变量；`REPLY_AUTHORITY_KEYS_URL` 是发送预备回复前验签的必填环境变量。`roll doctor` 会通过 `references/env.yaml` 和 `browser_status.effectiveEnvSources` 检查它们是否声明并在运行态生效。
 - `BROWSER_SECURITY_JSON` 可选配置浏览器硬安全策略；`browser_status.security` 会返回实际加载后的 `domainAllowlist`、`maxPageContentBytes`、`maxSnapshotNodes`、`actionPolicy` 和 `foregroundPolicy`。`foregroundPolicy` 默认 `when-minimized`，普通后台窗口不抢桌面焦点；仅需要旧行为时才显式设为 `always`。
 - `BROWSER_USE_POLICY_JSON` 可选配置 browser-use 工具级业务策略；日常推荐只把 `zhipin_send_prepared_reply` 配为 `confirm`。
@@ -22,6 +27,94 @@ metadata:
   - `BROWSER_VISUAL_CURSOR`：native CDP 点击/拖拽/滚动前显示同源虚拟鼠标轨迹和点击波纹；简历弹窗等 Playwright-backed 工具仍使用旧虚拟指针。
   - `BROWSER_VISUAL_ACTIVITY`：读取、识别、提取等操作显示状态胶囊和区域高亮。
 - 需要关闭反馈时，将对应环境变量设为 `false`。
+
+## 多 Boss 账号 / 多 Profile 托管模式
+
+目标：让 orchestrator 同时托管多个 BOSS 招聘账号时，每个账号固定绑定一个独立 Chrome profile、CDP port、session 目录和招聘事件归因 ID。
+
+声明模型：
+
+```text
+browserInstance
+  -> userDataDir/profile
+  -> cdpPort 或 cdpUrl
+  -> sessionsDir
+  -> trackingAgentId
+```
+
+配置示例：
+
+```yaml
+browser:
+  default-instance: boss-a
+  instances:
+    boss-a:
+      platform: zhipin
+      mode: managed-cdp
+      cdp-port: 9222
+      user-data-dir: ~/.roll-agent/browser/profiles/boss-a
+      sessions-dir: ~/.roll-agent/browser/sessions/boss-a
+      # window-bounds 可选；省略时按实例数量自动平铺
+      tracking-agent-id: zhipin-boss-a
+    boss-b:
+      platform: zhipin
+      mode: managed-cdp
+      cdp-port: 9223
+      user-data-dir: ~/.roll-agent/browser/profiles/boss-b
+      sessions-dir: ~/.roll-agent/browser/sessions/boss-b
+      tracking-agent-id: zhipin-boss-b
+```
+
+orchestrator 规则：
+
+1. 多账号托管时，把 `browserInstance` 当作账号路由键；同一个任务线程中的每一次 browser-use tool call 都必须传同一个 `browserInstance`。
+2. 不要把 `boss-a` 产生的 `pageId`、`@eN`、`@cN`、`@jN`、`preparedReplyId` 或当前页面状态传给 `boss-b`。
+3. `browserInstance` 只标识浏览器/profile；业务归因使用该实例的 `trackingAgentId`，缺失时才 fallback 到 `RECRUITMENT_EVENTS_DEFAULT_AGENT_ID`，仍缺失则跳过招聘事件上报并 warn。
+4. `platform` 与实例配置不一致时会返回 `platform_mismatch`。例如 `browserInstance:"boss-a"` 声明为 `zhipin`，就不要调用 `yupao_*` 工具或 `open_platform({ platform:"yupao" })`。
+5. 多实例没有 `browser.defaultInstance` 时，任何未显式传 `browserInstance` 的业务调用都会返回 `needs_input`。并行托管建议显式传，不依赖 default。
+6. `browser_status()` 可先用于读取声明态/运行态；真正启动某个账号 profile 使用 `open_platform({ browserInstance, platform:"zhipin" })`。
+7. 每个账号首次托管时，需要人工在对应 Chrome 窗口完成 BOSS 登录；之后 session 跟随对应 `userDataDir` 和 `sessionsDir`。
+8. Chrome 原生 tab group 只通过扩展 API 暴露，browser-use 不注入扩展；用 profile 名称和窗口并排布局作为稳定识别方式。
+
+启动/检查流程：
+
+```text
+roll doctor --json
+  -> roll agent health --json  # parse browser-use-agent entry
+  -> roll run browser-use-agent browser_status --json
+  -> roll run browser-use-agent open_platform --input-json '{"browserInstance":"boss-a","platform":"zhipin"}' --json
+  -> 人工确认 boss-a 窗口登录
+  -> roll run browser-use-agent zhipin_get_username --input-json '{"browserInstance":"boss-a"}' --json
+```
+
+多账号批量示例：
+
+```json
+[
+  {
+    "agent": "browser-use-agent",
+    "tool": "open_platform",
+    "input": { "browserInstance": "boss-a", "platform": "zhipin" },
+    "label": "boss-a-open"
+  },
+  {
+    "agent": "browser-use-agent",
+    "tool": "open_platform",
+    "input": { "browserInstance": "boss-b", "platform": "zhipin" },
+    "label": "boss-b-open"
+  }
+]
+```
+
+Boss 聊天托管模板：
+
+```text
+对每个 browserInstance 独立执行:
+zhipin_read_messages({ browserInstance, onlyUnread:true, limit:N })
+  -> zhipin_generate_reply_preview({ browserInstance, conversationId })
+  -> zhipin_send_prepared_reply({ browserInstance, preparedReplyId })
+  -> zhipin_read_messages({ browserInstance, onlyUnread:true, limit:N })  # 验证
+```
 
 ## 通用 Tools
 

@@ -15,6 +15,7 @@ const NORMAL_NATIVE_CDP_METHODS = [
   "DOM.querySelectorAll",
   "DOM.scrollIntoViewIfNeeded",
   "Browser.getWindowForTarget",
+  "Browser.setWindowBounds",
   "Page.bringToFront",
   "Page.navigate",
   "Page.getFrameTree",
@@ -180,6 +181,23 @@ export const NATIVE_CDP_WINDOW_STATES = [
   "unknown",
 ] as const;
 export type NativeCdpWindowState = (typeof NATIVE_CDP_WINDOW_STATES)[number];
+export type NativeCdpSettableWindowState = Exclude<NativeCdpWindowState, "unknown">;
+
+export type NativeCdpWindowBounds = {
+  readonly x?: number;
+  readonly y?: number;
+  readonly width?: number;
+  readonly height?: number;
+  readonly state?: NativeCdpSettableWindowState;
+};
+
+type NativeCdpProtocolWindowBounds = {
+  readonly left?: number;
+  readonly top?: number;
+  readonly width?: number;
+  readonly height?: number;
+  readonly windowState?: NativeCdpSettableWindowState;
+};
 
 export type NativeCdpCreateIsolatedWorldOptions = {
   readonly worldName?: string;
@@ -373,6 +391,28 @@ function readWindowStateForTargetResponse(value: unknown): NativeCdpWindowState 
   return NATIVE_CDP_WINDOW_STATES.includes(windowState as NativeCdpWindowState)
     ? (windowState as NativeCdpWindowState)
     : "unknown";
+}
+
+function readWindowIdForTargetResponse(value: unknown): number {
+  if (!isRecord(value)) {
+    throw new Error("Native CDP Browser.getWindowForTarget returned an unexpected response.");
+  }
+
+  const windowId = value["windowId"];
+  if (typeof windowId !== "number" || !Number.isInteger(windowId)) {
+    throw new Error("Native CDP Browser.getWindowForTarget did not return windowId.");
+  }
+  return windowId;
+}
+
+function toProtocolWindowBounds(bounds: NativeCdpWindowBounds): NativeCdpProtocolWindowBounds {
+  return {
+    ...(bounds.x !== undefined ? { left: bounds.x } : {}),
+    ...(bounds.y !== undefined ? { top: bounds.y } : {}),
+    ...(bounds.width !== undefined ? { width: bounds.width } : {}),
+    ...(bounds.height !== undefined ? { height: bounds.height } : {}),
+    ...(bounds.state !== undefined ? { windowState: bounds.state } : {}),
+  };
 }
 
 function readNumberArray(value: unknown): readonly number[] | undefined {
@@ -671,6 +711,36 @@ export class NativeCdpController {
         },
         options.timeoutMs,
       ),
+    );
+  }
+
+  async getWindowIdForTarget(
+    targetId: string,
+    options: { readonly timeoutMs?: number } = {},
+  ): Promise<number> {
+    return readWindowIdForTargetResponse(
+      await this.sendNormal(
+        "Browser.getWindowForTarget",
+        {
+          targetId,
+        },
+        options.timeoutMs,
+      ),
+    );
+  }
+
+  async setWindowBounds(
+    windowId: number,
+    bounds: NativeCdpWindowBounds,
+    options: { readonly timeoutMs?: number } = {},
+  ): Promise<void> {
+    await this.sendNormal(
+      "Browser.setWindowBounds",
+      {
+        windowId,
+        bounds: toProtocolWindowBounds(bounds),
+      },
+      options.timeoutMs,
     );
   }
 

@@ -4,6 +4,29 @@
 
 `conversationId` / `candidateId` 是跨 tool 的稳定主键，`index` 只表示当前 DOM 快照。
 
+## 多账号 browserInstance 作用域
+
+多 Boss 账号托管时，`browserInstance` 是账号/profile 路由键。orchestrator 必须把它贯穿同一账号任务的所有 browser-use 调用。
+
+作用域规则：
+
+1. 同一个账号线程固定一个 `browserInstance`，例如 `boss-a`。
+2. 该线程中的 `zhipin_*`、`browser_snapshot`、`click_ref`、`type_ref`、`list_pages`、`select_page` 都显式传同一个 `browserInstance`。
+3. `conversationId` / `candidateId` 是业务主键，但不替代 `browserInstance`；同一个候选会话仍必须在正确账号 profile 中执行。
+4. `pageId`、`@eN`、`@cN`、`@jN`、`jobRef`、`candidateRef`、`preparedReplyId` 只在产生它们的 `browserInstance` 内有效。
+5. 多实例没有 `browser.defaultInstance` 时，不传 `browserInstance` 的调用会返回 `needs_input`。
+6. 不要把 `boss-a` 生成的 `preparedReplyId` 交给 `boss-b` 发送；发送工具会校验当前页面目标和招聘者绑定。
+
+示例：
+
+```json
+{
+  "browserInstance": "boss-a",
+  "conversationId": "610630074-0",
+  "maxMessages": 100
+}
+```
+
 ## BOSS 页面入口
 
 `navigate_active_tab(url)` 是通用 native CDP 导航工具，但不能直接跳转 BOSS `/web/chat/*` 后台路径。
@@ -25,10 +48,9 @@
 推荐做法：
 
 1. `zhipin_read_messages` 记录 `conversationId + candidateId + candidateName`。
-2. `zhipin_open_chat(conversationId)`。
-3. `zhipin_get_candidate_info(conversationId)`。
-4. `smart-reply-agent.generate_reply(..., target)`。
-5. `zhipin_send_reply(signedEnvelope)`。
+2. `zhipin_generate_reply_preview({ browserInstance, conversationId })`。
+3. `zhipin_send_prepared_reply({ browserInstance, preparedReplyId })`。
+4. 发送后用 `zhipin_read_messages({ browserInstance, onlyUnread:true })` 或目标会话读取做验证。
 
 ## 推荐岗位筛选
 
@@ -120,7 +142,7 @@ recommend-list  -> 推荐牛人列表，默认向下滚动，去重主键 candid
 
 ## Reply Authority
 
-`zhipin_send_reply` 只接受 Reply Authority Service 签发的 `signedEnvelope`。
+`zhipin_send_prepared_reply` 只接受 `zhipin_generate_reply_preview` 生成的 `preparedReplyId`，内部再取回 Reply Authority Service 签发的 envelope 并完成验签。
 
 发送前校验：
 
@@ -130,6 +152,7 @@ recommend-list  -> 推荐牛人列表，默认向下滚动，去重主键 candid
 4. replay `jti` 是否已消费。
 5. 当前选中聊天是否匹配 `conversationId + candidateId`。
 6. 当前登录招聘者是否匹配 `recruiterBinding`。
+7. 当前 `browserInstance` 是否仍是生成 `preparedReplyId` 的账号/profile 作用域。
 
 `generate_reply` 的 `target` 两种模式：
 

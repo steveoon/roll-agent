@@ -1,4 +1,4 @@
-﻿# BOSS Zhipin unread reply — PowerShell 5.1+ (Windows). Same behavior as reply-unread-safely.sh
+# BOSS Zhipin unread reply - PowerShell 5.1+ (Windows). Same behavior as reply-unread-safely.sh
 #Requires -Version 5.1
 
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
@@ -12,10 +12,11 @@ $ValidateOpenChat = Join-Path $ScriptDir "validate-open-chat.mjs"
 $ValidateGenerate = Join-Path $ScriptDir "validate-generate.mjs"
 $ValidateSend = Join-Path $ScriptDir "validate-send.mjs"
 $CheckAgentHealth = Join-Path $ScriptDir "check-agent-health.mjs"
+$ValidateBrowserSelection = Join-Path $ScriptDir "validate-browser-selection.mjs"
 $DetectExpiredBanner = Join-Path $ScriptDir "detect-expired-banner.mjs"
 $ParsePageMeta = Join-Path $ScriptDir "parse-page-meta.mjs"
 
-# UTF-8 for child processes (roll/node). Chinese literals stay in .mjs helpers, not this file.
+# UTF-8 for child processes (roll/node) and PowerShell 5.1 native-command pipes.
 try {
   [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
   [Console]::InputEncoding = [System.Text.Encoding]::UTF8
@@ -26,6 +27,7 @@ catch {
 }
 
 $Agent = if ($env:ROLL_AGENT) { $env:ROLL_AGENT } else { "browser-use-agent" }
+$BrowserInstance = if ($env:ROLL_BROWSER_INSTANCE) { $env:ROLL_BROWSER_INSTANCE } else { "" }
 $Limit = 0
 $DryRun = $false
 $ClickUnreadFilter = $true
@@ -50,6 +52,8 @@ Requires: roll and node on PATH.
 
   -DryRun / --dry-run       Evaluate skip rules only
   -Limit 3 / --limit 3      Max candidates this run
+  -BrowserInstance boss-a / --browser-instance boss-a
+                            Target browser.instances id for every browser-use tool call
   -NoUnreadFilter           Skip clicking unread tab
   -NoExchangeWechat         Skip exchange-wechat after send
   -KeepWorkDir              Do not delete temp workdir (debug)
@@ -74,6 +78,12 @@ function Parse-Args([string[]]$Argv) {
       { $_ -in "-Agent", "--agent" } {
         Require-NextArg $Argv $i $_
         $script:Agent = $Argv[$i + 1]
+        $i += 2
+        continue
+      }
+      { $_ -in "-BrowserInstance", "--browser-instance" } {
+        Require-NextArg $Argv $i $_
+        $script:BrowserInstance = $Argv[$i + 1]
         $i += 2
         continue
       }
@@ -136,6 +146,10 @@ function Write-JsonFile([string]$Path, [string]$Content) {
 
 function Write-TextFile([string]$Path, [string]$Content) {
   [System.IO.File]::WriteAllText($Path, $Content, [System.Text.UTF8Encoding]::new($false))
+}
+
+function Read-TextFile([string]$Path) {
+  return [System.IO.File]::ReadAllText($Path, [System.Text.UTF8Encoding]::new($false))
 }
 
 function Append-ResultObject([hashtable]$Row) {
@@ -205,12 +219,34 @@ function Extract-RollJson([string]$RollOutput) {
   return (Invoke-NodeStdin $script:ExtractRollJson $RollOutput).Trim()
 }
 
+function Add-BrowserInstanceToJsonFile([string]$File) {
+  if ([string]::IsNullOrWhiteSpace($script:BrowserInstance)) {
+    return
+  }
+  $payloadRaw = Read-TextFile $File
+  if ([string]::IsNullOrWhiteSpace($payloadRaw)) {
+    $payloadRaw = "{}"
+  }
+  $payload = $payloadRaw | ConvertFrom-Json
+  $payload | Add-Member -NotePropertyName browserInstance -NotePropertyValue $script:BrowserInstance -Force
+  Write-JsonFile $File ($payload | ConvertTo-Json -Compress -Depth 16)
+}
+
 function Invoke-RollJsonFile([string]$Tool, [string]$File) {
+  Add-BrowserInstanceToJsonFile $File
   return Invoke-RollCapture -RollArgs @("run", $script:Agent, $Tool, "--input-file", $File, "--json")
 }
 
 function Invoke-RollNoInput([string]$Tool) {
-  return Invoke-RollCapture -RollArgs @("run", $script:Agent, $Tool, "--json")
+  $baseDir = if ($script:WorkDir -and (Test-Path $script:WorkDir)) {
+    $script:WorkDir
+  }
+  else {
+    [System.IO.Path]::GetTempPath()
+  }
+  $inputFile = Join-Path $baseDir ("input-{0}.json" -f ([guid]::NewGuid().ToString("N")))
+  Write-JsonFile $inputFile "{}"
+  return Invoke-RollJsonFile $Tool $inputFile
 }
 
 function Get-RandomGap {
@@ -220,12 +256,39 @@ function Get-RandomGap {
 
 function Ensure-AgentHealthy {
   $env:REPLY_AGENT = $script:Agent
-  $health = Invoke-RollCapture -RollArgs @("agent", "health", $script:Agent, "--json")
+  $health = Invoke-RollCapture -RollArgs @("agent", "health", "--json")
   $code = Invoke-NodeStdinExit $script:CheckAgentHealth $health @()
   if ($code -ne 0) {
     Write-Log "starting agent $($script:Agent)..."
     $null = Invoke-RollCapture -RollArgs @("agent", "start", $script:Agent)
     Start-Sleep -Seconds 2
+  }
+}
+
+function Ensure-BrowserInstanceSelection {
+  $status = Invoke-RollNoInput "browser_status"
+  $previous = $env:ROLL_BROWSER_INSTANCE
+  $env:ROLL_BROWSER_INSTANCE = $script:BrowserInstance
+  try {
+    $message = (Invoke-NodeStdin $script:ValidateBrowserSelection $status).Trim()
+    $code = $LASTEXITCODE
+  }
+  finally {
+    $env:ROLL_BROWSER_INSTANCE = $previous
+  }
+
+  if ($code -ne 0) {
+    if ($message) {
+      Write-Error $message
+    }
+    else {
+      Write-Error "browser instance selection validation failed"
+    }
+    exit 1
+  }
+
+  if (-not [string]::IsNullOrWhiteSpace($script:BrowserInstance)) {
+    Write-Log "browserInstance -> $($script:BrowserInstance)"
   }
 }
 
@@ -428,7 +491,7 @@ if (-not (Get-Command node -ErrorAction SilentlyContinue)) {
 $helpers = @(
   $ExtractRollJson, $BuildSkipInput, $AppendJsonl, $SkipRulesJs,
   $FindUnreadRef, $ParseReadCandidate, $ValidateOpenChat, $ValidateGenerate,
-  $ValidateSend, $CheckAgentHealth, $DetectExpiredBanner, $ParsePageMeta
+  $ValidateSend, $CheckAgentHealth, $ValidateBrowserSelection, $DetectExpiredBanner, $ParsePageMeta
 )
 foreach ($helper in $helpers) {
   if (-not (Test-Path $helper)) {
@@ -447,6 +510,7 @@ try {
   Write-Log "workdir -> $WorkDir"
 
   Ensure-AgentHealthy
+  Ensure-BrowserInstanceSelection
   Apply-UnreadFilterIfNeeded
 
   $processed = 0

@@ -7,12 +7,7 @@ import {
   collectEffectiveEnvSources,
   EffectiveEnvSourcesSchema,
 } from "../diagnostics/effective-env.ts";
-import {
-  getRuntime,
-  getContextManager,
-  getSessionStore,
-  getReplyAuthorityKeysLoaded,
-} from "../runtime-holder.ts";
+import { getReplyAuthorityKeysLoaded, getBrowserInstancePool } from "../runtime-holder.ts";
 import { isVisualCursorEnabled } from "../visual-cursor.ts";
 import { isVisualActivityEnabled } from "../visual-activity.ts";
 import {
@@ -40,44 +35,56 @@ export const browserStatus = defineTool({
   execute: async (_input, ctx) => {
     ctx.logger.info("Querying browser status");
 
-    const runtime = getRuntime();
-    const ctxManager = getContextManager();
-    const store = getSessionStore();
-    const running = runtime.isRunning();
-    const { headless, mode, security } = runtime.getConfig();
+    const instancePool = getBrowserInstancePool();
+    const bundles = instancePool.listBundles();
+    const primaryInstanceId = instancePool.resolvePrimaryInstanceId();
+    const primaryBundle =
+      bundles.find((bundle) => bundle.id === primaryInstanceId) ?? bundles[0];
+    if (primaryBundle === undefined) {
+      throw new Error("BrowserInstancePool has no runtime bundles.");
+    }
+    const running = bundles.some((bundle) => bundle.runtime.isRunning());
+    const { headless, mode, security } = primaryBundle.runtime.getConfig();
     const toolPolicy = getBrowserUsePolicy();
 
-    const platforms = ctxManager.getActivePlatforms();
     const activeSessions: BrowserSessionInfo[] = [];
 
-    for (const platform of platforms) {
-      const pagesOpen = ctxManager.getPageCount(platform);
-      const currentUrl = ctxManager.getCurrentUrl(platform);
+    for (const bundle of bundles) {
+      const runtime = bundle.runtime;
+      const ctxManager = bundle.contextManager;
+      const store = bundle.sessionStore;
+      const platforms = ctxManager.getActivePlatforms();
 
-      let hasLoginState: BrowserSessionInfo["hasLoginState"] = null;
-      let loginStateSource: BrowserSessionInfo["loginStateSource"] = "unknown";
+      for (const platform of platforms) {
+        const pagesOpen = ctxManager.getPageCount(platform);
+        const currentUrl = ctxManager.getCurrentUrl(platform);
 
-      if (runtime.shouldRestoreSessionSnapshot()) {
-        const [cookies, localStorage] = await Promise.all([
-          store.loadCookies(platform),
-          store.loadLocalStorage(platform),
-        ]);
-        hasLoginState =
-          (cookies !== undefined && cookies.length > 0) ||
-          (localStorage !== undefined && Object.keys(localStorage).length > 0);
-        loginStateSource = hasLoginState ? "snapshot" : "none";
-      } else if (runtime.usesPersistentProfile()) {
-        hasLoginState = null;
-        loginStateSource = "profile";
+        let hasLoginState: BrowserSessionInfo["hasLoginState"] = null;
+        let loginStateSource: BrowserSessionInfo["loginStateSource"] = "unknown";
+
+        if (runtime.shouldRestoreSessionSnapshot()) {
+          const [cookies, localStorage] = await Promise.all([
+            store.loadCookies(platform),
+            store.loadLocalStorage(platform),
+          ]);
+          hasLoginState =
+            (cookies !== undefined && cookies.length > 0) ||
+            (localStorage !== undefined && Object.keys(localStorage).length > 0);
+          loginStateSource = hasLoginState ? "snapshot" : "none";
+        } else if (runtime.usesPersistentProfile()) {
+          hasLoginState = null;
+          loginStateSource = "profile";
+        }
+
+        activeSessions.push({
+          browserInstance: bundle.id,
+          platform,
+          pagesOpen,
+          currentUrl,
+          hasLoginState,
+          loginStateSource,
+        });
       }
-
-      activeSessions.push({
-        platform,
-        pagesOpen,
-        currentUrl,
-        hasLoginState,
-        loginStateSource,
-      });
     }
 
     return {
@@ -85,6 +92,9 @@ export const browserStatus = defineTool({
       headless,
       mode,
       activeSessions,
+      defaultInstanceId: instancePool.getDefaultInstanceId(),
+      primaryInstanceId,
+      instances: await instancePool.getInstanceStatuses(),
       replyAuthorityKeysLoaded: getReplyAuthorityKeysLoaded(),
       visualCursorEnabled: isVisualCursorEnabled(),
       visualActivityEnabled: isVisualActivityEnabled(),
