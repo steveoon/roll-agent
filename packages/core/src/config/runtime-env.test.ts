@@ -271,9 +271,10 @@ describe("config/runtime-env", () => {
     assert.equal(formatAgentEnvRuntimeStatus(runtimeItem), "⚠ differs from yaml (ephemeral)");
   });
 
-  it("skips runtime readiness checks only for diagnostic tools", () => {
+  it("skips runtime readiness checks for diagnostic and lifecycle tools", () => {
     assert.equal(shouldSkipRuntimeReadinessForTool("diagnostic_status"), true);
     assert.equal(shouldSkipRuntimeReadinessForTool("browser_status"), true);
+    assert.equal(shouldSkipRuntimeReadinessForTool("browser_stop"), true);
     assert.equal(shouldSkipRuntimeReadinessForTool("generate_reply"), false);
   });
 });

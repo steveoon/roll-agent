@@ -8,6 +8,7 @@
 - [Known Agent + Tool](#known-agent--tool)
 - [Batch Tool Calls](#batch-tool-calls)
 - [Known Intent, Unknown Tool](#known-intent-unknown-tool)
+- [Browser Runtime Lifecycle](#browser-runtime-lifecycle)
 - [Persistent Agent Recovery](#persistent-agent-recovery)
 - [Local-Path Agent Refresh](#local-path-agent-refresh)
 - [Check & Update Agents](#check--update-agents)
@@ -186,6 +187,44 @@ For `needs_input`, the stdout JSON contains:
 
 Both arrays are returned at once, not layer-by-layer. Resolve the full set before retrying.
 
+## Browser Runtime Lifecycle
+
+Use this section for browser runtime cleanup without confusing it with agent service shutdown.
+
+| Need | Command | Output/Effect |
+|------|---------|---------------|
+| Close one started browser runtime | `roll browser stop boss-a` | Closes `boss-a`; keeps `browser-use-agent` running; keeps profile/session data. |
+| Close multiple started browser runtimes | `roll browser stop boss-a boss-b` | Closes only the listed instances; other started instances keep running. |
+| Close all started browser runtimes | `roll browser stop --all` | Closes all browser runtimes managed by the current agent; the agent process stays available. |
+| Delete browser profile/session data | `roll browser clear-data [browserInstance] --yes` | Deletes declared `userDataDir` / `sessionsDir` paths; run without `--yes` first for the dry-run plan. |
+| Stop the service process | `roll agent stop browser-use-agent` | Stops `browser-use-agent`; later browser tool calls fail until the agent is started again. |
+
+Decision flow:
+
+```text
+browser page/window/runtime stale
+  -> roll browser stop <browserInstance>
+  -> retry the target browser tool with the same browserInstance
+
+all browser windows should close, service should stay usable
+  -> roll browser stop --all
+
+profile/session data must be reset
+  -> roll browser clear-data [browserInstance]
+  -> verify dry-run scope
+  -> roll browser clear-data [browserInstance] --yes
+
+service process unhealthy or env changed
+  -> roll agent stop browser-use-agent
+  -> roll agent start browser-use-agent
+```
+
+Boundary:
+- `roll browser stop --all` is not the same as `roll agent stop browser-use-agent`.
+- `roll browser stop` does not delete profile/session data.
+- `roll browser clear-data` deletes declared browser data; it is not a runtime restart command.
+- Do not scan operating-system browser processes or kill Chrome by port/path from orchestration code.
+
 ## Persistent Agent Recovery
 
 ```bash
@@ -199,6 +238,20 @@ roll agent health --json
 Use this only when `roll agent info <agent-name>` shows a persistent runtime. If ownership is
 `core-managed`, `roll agent start <agent-name>` can start or restart it; if ownership is
 `external-managed`, fix the external service endpoint/process instead of asking Roll to start it.
+
+For browser agents, distinguish process recovery from runtime recovery:
+
+```bash
+# Browser runtime/page state is broken, but the service is healthy:
+roll browser stop boss-a
+roll run browser-use-agent open_platform \
+  --input-json '{"browserInstance":"boss-a","platform":"zhipin"}' --json
+
+# Service process itself is unhealthy:
+roll agent stop browser-use-agent
+roll agent start browser-use-agent
+roll agent health --json
+```
 
 ## Local-Path Agent Refresh
 

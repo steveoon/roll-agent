@@ -92,9 +92,13 @@ export default defineCommand({
       if (shouldDelete) {
         const pid = getAgentPid(config.agents.dataDir, BROWSER_USE_AGENT_NAME);
         if (pid !== undefined && args.force !== true) {
+          const stopCommand =
+            instanceId !== undefined
+              ? `roll browser stop ${instanceId}`
+              : "roll browser stop --all";
           const message =
             `${BROWSER_USE_AGENT_NAME} 仍在运行 (PID: ${String(pid)})，` +
-            "请先运行 `roll agent stop browser-use-agent`，或确认风险后加 --force";
+            `请先运行 \`${stopCommand}\`，或确认风险后加 --force`;
           if (args.json) {
             console.log(JSON.stringify({ ok: false, message, targets }, null, 2));
           } else {

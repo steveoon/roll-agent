@@ -5,6 +5,7 @@ export const LEGACY_BROWSER_IDENTITY_ENV_KEYS = [
   "BROWSER_USER_DATA_DIR",
   "BROWSER_CDP_URL",
   "BROWSER_SESSIONS_DIR",
+  "BROWSER_PROFILE_COLOR",
 ] as const;
 
 export type LegacyBrowserIdentityEnvKey = (typeof LEGACY_BROWSER_IDENTITY_ENV_KEYS)[number];

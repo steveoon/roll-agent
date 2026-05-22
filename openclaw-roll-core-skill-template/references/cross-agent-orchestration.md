@@ -108,15 +108,26 @@ roll run browser-use-agent open_platform \
   --input-json '{"browserInstance":"boss-a","platform":"zhipin"}' --json
 ```
 
+If the service is healthy but a specific browser runtime/page is stale, close only that runtime:
+
+```bash
+roll browser stop boss-a
+roll run browser-use-agent open_platform \
+  --input-json '{"browserInstance":"boss-a","platform":"zhipin"}' --json
+```
+
 Rules:
 
 1. Do not use one browser worker to recover another worker's profile.
 2. Do not reuse page ids, element refs, prepared replies, or conversation-local state across different routing keys.
 3. When multiple account workers run concurrently, each worker must pin its routing key before the first browser call and keep it unchanged for the whole workflow.
+4. Use `roll browser stop --all` only when every currently started browser runtime should be closed while the browser agent service stays available.
+5. Use `roll browser clear-data` only for intentional profile/session deletion, after inspecting the dry-run scope.
 
 If the service is still unusable and Roll owns lifecycle:
 
 ```bash
+roll agent stop <browser-agent>
 roll agent start <browser-agent>
 roll agent health --json
 ```

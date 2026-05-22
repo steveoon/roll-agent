@@ -95,6 +95,7 @@ browser:
       user-data-dir: ~/roll-browser/boss-a
       sessions-dir: ~/roll-browser-sessions/boss-a
       profile-name: Boss A
+      profile-color: "#dc2626"
       window-bounds:
         x: 0
         y: 24
@@ -108,6 +109,7 @@ browser:
     assert.equal(config.browser.defaultInstance, "boss-a");
     assert.equal(config.browser.instances["boss-a"]?.cdpPort, 9222);
     assert.equal(config.browser.instances["boss-a"]?.profileName, "Boss A");
+    assert.equal(config.browser.instances["boss-a"]?.profileColor, "#DC2626");
     assert.deepEqual(config.browser.instances["boss-a"]?.windowBounds, {
       x: 0,
       y: 24,
@@ -185,6 +187,7 @@ browser:
       cdp-port: 9222
       user-data-dir: /tmp/roll-browser/boss-a
       profile-name: Boss A
+      profile-color: "#dc2626"
       window-bounds:
         x: 0
         y: 24
@@ -205,6 +208,7 @@ browser:
         {
           cdpPort?: number;
           profileName?: string;
+          profileColor?: string;
           windowBounds?: { x?: number; y?: number; width?: number; height?: number };
         }
       >;
@@ -212,6 +216,7 @@ browser:
     assert.equal(parsed.defaultInstance, "boss-a");
     assert.equal(parsed.instances?.["boss-a"]?.cdpPort, 9222);
     assert.equal(parsed.instances?.["boss-a"]?.profileName, "Boss A");
+    assert.equal(parsed.instances?.["boss-a"]?.profileColor, "#DC2626");
     assert.deepEqual(parsed.instances?.["boss-a"]?.windowBounds, {
       x: 0,
       y: 24,

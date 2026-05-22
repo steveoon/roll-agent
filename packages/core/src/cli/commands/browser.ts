@@ -11,5 +11,6 @@ export default defineCommand({
   meta: { description: "管理浏览器运行时数据" },
   subCommands: {
     "clear-data": () => loadBrowserCommand("browser-clear-data"),
+    stop: () => loadBrowserCommand("browser-stop"),
   },
 });

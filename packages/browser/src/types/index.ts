@@ -38,6 +38,13 @@ export const BrowserWindowBoundsSchema = z.object({
 });
 export type BrowserWindowBounds = z.infer<typeof BrowserWindowBoundsSchema>;
 
+export const BrowserProfileColorSchema = z
+  .string()
+  .trim()
+  .regex(/^#[\da-fA-F]{6}$/, "profileColor must be a hex RGB color such as #2563EB")
+  .transform((value) => value.toUpperCase());
+export type BrowserProfileColor = z.infer<typeof BrowserProfileColorSchema>;
+
 export const BrowserActionApprovalSchema = z.object({
   id: z.string().trim().min(1),
 });
@@ -82,6 +89,8 @@ export const BrowserRuntimeConfigSchema = z
     instanceId: z.string().trim().min(1).optional(),
     /** Chrome profile 展示名；未配置时由 instanceId 派生。 */
     profileName: z.string().trim().min(1).optional(),
+    /** Chrome profile 主题色；用于多 browser.instances 场景下区分窗口。 */
+    profileColor: BrowserProfileColorSchema.optional(),
     /**
      * CDP 连接地址。
      * - remote-cdp / existing-session: 必填

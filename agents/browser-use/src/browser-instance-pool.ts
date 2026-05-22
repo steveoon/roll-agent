@@ -16,14 +16,21 @@ import {
   type BrowserWindowBounds,
   type Platform,
 } from "@roll-agent/browser";
-import {
-  getPrimaryWorkArea,
-  resolveAutoWindowBoundsForIndex,
-} from "./auto-window-layout.ts";
+import { getPrimaryWorkArea, resolveAutoWindowBoundsForIndex } from "./auto-window-layout.ts";
 import type { BrowserInstancesConfig } from "./runtime-config.ts";
 
 export const LEGACY_INSTANCE_ID = "default";
 const DEFAULT_SESSIONS_ROOT = join(homedir(), ".roll-agent", "browser", "sessions");
+const DEFAULT_BROWSER_INSTANCE_PROFILE_COLORS = [
+  "#2563EB",
+  "#DC2626",
+  "#16A34A",
+  "#D97706",
+  "#7C3AED",
+  "#0891B2",
+  "#DB2777",
+  "#65A30D",
+] as const;
 
 export interface BrowserRuntimeBundle {
   readonly id: string;
@@ -33,6 +40,21 @@ export interface BrowserRuntimeBundle {
   readonly contextManager: BrowserContextManager;
   readonly sessionStore: SessionStore;
   readonly config: BrowserRuntimeConfig;
+}
+
+export const BROWSER_INSTANCE_STOP_STATUSES = [
+  "stopped",
+  "not_running",
+  "not_found",
+  "failed",
+] as const;
+export type BrowserInstanceStopStatus = (typeof BROWSER_INSTANCE_STOP_STATUSES)[number];
+
+export interface BrowserInstanceStopResult {
+  readonly browserInstance: string;
+  readonly status: BrowserInstanceStopStatus;
+  readonly mode?: BrowserRuntimeConfig["mode"];
+  readonly message?: string;
 }
 
 type BrowserInstanceRuntimeConfig = BrowserInstancesConfig["instances"][string];
@@ -176,40 +198,99 @@ export class BrowserInstancePool {
   }
 
   async closeAll(): Promise<void> {
-    const cleanupErrors: Error[] = [];
-    const pendingStarts = [...this.startPromises.entries()];
-    const startResults = await Promise.allSettled(pendingStarts.map(([, promise]) => promise));
-    for (const [index, result] of startResults.entries()) {
-      if (result.status === "rejected") {
-        cleanupErrors.push(
+    const results = await this.closeInstances([...this.bundles.keys()]);
+    const cleanupErrors = results
+      .filter((result) => result.status === "failed")
+      .map(
+        (result) =>
           new Error(
-            `Failed to finish browser startup for ${pendingStarts[index]?.[0] ?? "unknown"}`,
-            { cause: result.reason },
+            `Failed to stop browser runtime for ${result.browserInstance}: ${
+              result.message ?? "unknown error"
+            }`,
           ),
-        );
-      }
-    }
-
-    for (const bundle of this.bundles.values()) {
-      try {
-        await bundle.contextManager.closeAll();
-      } catch (error) {
-        cleanupErrors.push(
-          new Error(`Failed to close browser contexts for ${bundle.id}`, { cause: error }),
-        );
-      }
-      try {
-        await bundle.runtime.stop();
-      } catch (error) {
-        cleanupErrors.push(
-          new Error(`Failed to stop browser runtime for ${bundle.id}`, { cause: error }),
-        );
-      }
-    }
+      );
 
     if (cleanupErrors.length > 0) {
       throw new AggregateError(cleanupErrors, "Browser instance pool shutdown failed");
     }
+  }
+
+  async closeInstances(
+    instanceIds: readonly string[],
+  ): Promise<readonly BrowserInstanceStopResult[]> {
+    const uniqueInstanceIds = [...new Set(instanceIds)];
+    return await Promise.all(uniqueInstanceIds.map(async (id) => await this.closeInstance(id)));
+  }
+
+  private async closeInstance(id: string): Promise<BrowserInstanceStopResult> {
+    const bundle = this.bundles.get(id);
+    if (bundle === undefined) {
+      return {
+        browserInstance: id,
+        status: "not_found",
+        message: `Browser instance "${id}" was not found.`,
+      };
+    }
+
+    const cleanupErrors: Error[] = [];
+    const pendingStart = this.startPromises.get(id);
+    if (pendingStart !== undefined) {
+      try {
+        await pendingStart;
+      } catch (error) {
+        cleanupErrors.push(
+          new Error(`Failed to finish browser startup for ${id}`, { cause: error }),
+        );
+      }
+    }
+
+    if (!bundle.runtime.isRunning()) {
+      if (cleanupErrors.length > 0) {
+        return {
+          browserInstance: id,
+          status: "failed",
+          mode: bundle.config.mode,
+          message: formatCleanupErrors(cleanupErrors),
+        };
+      }
+
+      return {
+        browserInstance: id,
+        status: "not_running",
+        mode: bundle.config.mode,
+      };
+    }
+
+    try {
+      await bundle.contextManager.closeAll();
+    } catch (error) {
+      cleanupErrors.push(new Error(`Failed to close browser contexts for ${id}`, { cause: error }));
+    }
+
+    try {
+      if (bundle.config.mode === "managed-cdp") {
+        await bundle.runtime.stop();
+      } else {
+        await bundle.runtime.disconnect();
+      }
+    } catch (error) {
+      cleanupErrors.push(new Error(`Failed to stop browser runtime for ${id}`, { cause: error }));
+    }
+
+    if (cleanupErrors.length > 0) {
+      return {
+        browserInstance: id,
+        status: "failed",
+        mode: bundle.config.mode,
+        message: formatCleanupErrors(cleanupErrors),
+      };
+    }
+
+    return {
+      browserInstance: id,
+      status: "stopped",
+      mode: bundle.config.mode,
+    };
   }
 
   private getOnlyInstanceId(): string | undefined {
@@ -218,6 +299,18 @@ export class BrowserInstancePool {
     }
     return this.bundles.keys().next().value;
   }
+}
+
+function formatCleanupErrors(errors: readonly Error[]): string {
+  return errors
+    .map((error) =>
+      error.cause === undefined ? error.message : `${error.message}: ${formatUnknown(error.cause)}`,
+    )
+    .join("; ");
+}
+
+function formatUnknown(value: unknown): string {
+  return value instanceof Error ? value.message : String(value);
 }
 
 export async function runWithBrowserInstance<T>(
@@ -243,6 +336,7 @@ function buildInstanceRuntimeConfig(
     headless,
     instanceId: id,
     profileName: instance.profileName ?? id,
+    profileColor: instance.profileColor ?? resolveAutoProfileColor(layout.index),
     cdpUrl: instance.cdpUrl,
     cdpHost: instance.cdpHost,
     cdpPort: instance.cdpPort,
@@ -253,6 +347,46 @@ function buildInstanceRuntimeConfig(
     windowBounds,
     sessionsDir: instance.sessionsDir ?? join(DEFAULT_SESSIONS_ROOT, id),
   });
+}
+
+function resolveAutoProfileColor(index: number): string {
+  return DEFAULT_BROWSER_INSTANCE_PROFILE_COLORS[index] ?? createIndexedProfileColor(index);
+}
+
+function createIndexedProfileColor(index: number): string {
+  const hue = (index * 137.508) % 360;
+  return hslToHex(hue, 0.68, 0.45);
+}
+
+function hslToHex(hue: number, saturation: number, lightness: number): string {
+  const chroma = (1 - Math.abs(2 * lightness - 1)) * saturation;
+  const huePrime = hue / 60;
+  const x = chroma * (1 - Math.abs((huePrime % 2) - 1));
+  let red1: number;
+  let green1: number;
+  let blue1: number;
+  if (huePrime < 1) {
+    [red1, green1, blue1] = [chroma, x, 0];
+  } else if (huePrime < 2) {
+    [red1, green1, blue1] = [x, chroma, 0];
+  } else if (huePrime < 3) {
+    [red1, green1, blue1] = [0, chroma, x];
+  } else if (huePrime < 4) {
+    [red1, green1, blue1] = [0, x, chroma];
+  } else if (huePrime < 5) {
+    [red1, green1, blue1] = [x, 0, chroma];
+  } else {
+    [red1, green1, blue1] = [chroma, 0, x];
+  }
+  const match = lightness - chroma / 2;
+  return `#${toHexChannel(red1 + match)}${toHexChannel(green1 + match)}${toHexChannel(blue1 + match)}`;
+}
+
+function toHexChannel(value: number): string {
+  return Math.round(value * 255)
+    .toString(16)
+    .padStart(2, "0")
+    .toUpperCase();
 }
 
 function resolveAutoWindowBounds(input: {

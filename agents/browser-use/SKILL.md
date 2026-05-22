@@ -15,8 +15,9 @@ metadata:
 - 通过 Roll 调用本 Agent 时，先用 `roll skills get browser-use-agent --include-references --json` 读取当前说明和 `references/*`，再用 `roll agent tools browser-use-agent --json` 读取真实 schema。
 - 完整 `inputSchema` 以 `roll agent tools browser-use-agent --json` 为准。
 - 多账号/多 profile 场景下，Roll 会从 `browser.instances` 注入 `BROWSER_INSTANCES_JSON`；所有 browser-use tool 都支持可选 `browserInstance` 输入，用于选择目标 `profile/userDataDir + cdpPort + sessionsDir`。未传时按 `browser.defaultInstance`，再按单实例自动选择；多实例且无默认值时会返回 `needs_input`。
-- 多个 `managed-cdp` 实例首次启动时会自动把 Chrome profile 展示名设为实例 ID，并按声明顺序自适应平铺窗口：2–3 个实例横向并列并撑满桌面可用高度；4 个实例 2×2 铺满屏幕；5 个及以上按「最多 4 列、每行撑满宽度」均衡排列（5→3+2、6→3+3、8→4+4、10→4+3+3）。macOS 使用只读 `system_profiler SPDisplaysDataType` 探测逻辑分辨率；Windows 使用只读 PowerShell/.NET `PrimaryScreen.WorkingArea` 探测扣除任务栏后的工作区；探测不到时回退默认工作区；也可通过 `ROLL_BROWSER_WORK_AREA=x,y,width,height` 覆盖。需要固定布局时在实例上配置 `profile-name` / `window-bounds`。
+- 多个 `managed-cdp` 实例首次启动时会自动把 Chrome profile 展示名设为实例 ID，并按声明顺序分配 profile 颜色和自适应平铺窗口：2–3 个实例横向并列并撑满桌面可用高度；4 个实例 2×2 铺满屏幕；5 个及以上按「最多 4 列、每行撑满宽度」均衡排列（5→3+2、6→3+3、8→4+4、10→4+3+3）。macOS 使用只读 `system_profiler SPDisplaysDataType` 探测逻辑分辨率；Windows 使用只读 PowerShell/.NET `PrimaryScreen.WorkingArea` 探测扣除任务栏后的工作区；探测不到时回退默认工作区；也可通过 `ROLL_BROWSER_WORK_AREA=x,y,width,height` 覆盖。需要固定展示时在实例上配置 `profile-name` / `profile-color` / `window-bounds`。
 - 浏览器实例采用 **lazy start**：agent 启动不会立刻拉起全部 Chrome，首次访问某个 `browserInstance` 时才启动对应 profile/CDP runtime。
+- 实例级关闭使用 `roll browser stop <browserInstance...>` 或 `roll browser stop --all`；它只关闭当前 `browser-use-agent` 托管的浏览器 runtime，不停止 agent 服务进程，也不删除 `userDataDir` / `sessionsDir` 数据。停止整个服务仍使用 `roll agent stop browser-use-agent`。
 - `browser_status` 是无副作用诊断工具；它不会为了查询状态而启动尚未启动的 Chrome。需要启动某个实例时，调用带 `browserInstance` 的业务工具，例如 `open_platform({ browserInstance, platform:"zhipin" })`。
 - `browser_status.primaryInstanceId` 表示顶层 `running/headless/mode/security` 所采用的 primary bundle；多实例详情请看 `instances[]`。
 - `REPLY_AUTHORITY_URL` / `REPLY_AUTHORITY_BEARER_TOKEN` 是生成智能回复预览的必填环境变量；`REPLY_AUTHORITY_KEYS_URL` 是发送预备回复前验签的必填环境变量。`roll doctor` 会通过 `references/env.yaml` 和 `browser_status.effectiveEnvSources` 检查它们是否声明并在运行态生效。
@@ -54,6 +55,7 @@ browser:
       cdp-port: 9222
       user-data-dir: ~/.roll-agent/browser/profiles/boss-a
       sessions-dir: ~/.roll-agent/browser/sessions/boss-a
+      profile-color: "#2563EB"
       # window-bounds 可选；省略时按实例数量自动平铺
       tracking-agent-id: zhipin-boss-a
     boss-b:
@@ -62,6 +64,7 @@ browser:
       cdp-port: 9223
       user-data-dir: ~/.roll-agent/browser/profiles/boss-b
       sessions-dir: ~/.roll-agent/browser/sessions/boss-b
+      profile-color: "#DC2626"
       tracking-agent-id: zhipin-boss-b
 ```
 
@@ -76,6 +79,22 @@ orchestrator 规则：
 7. 每个账号首次托管时，需要人工在对应 Chrome 窗口完成 BOSS 登录；之后 session 跟随对应 `userDataDir` 和 `sessionsDir`。
 8. Chrome 原生 tab group 只通过扩展 API 暴露，browser-use 不注入扩展；用 profile 名称和窗口并排布局作为稳定识别方式。
 
+浏览器生命周期命令：
+
+| 目的 | 命令 | 行为 |
+| --- | --- | --- |
+| 关闭一个或多个实例窗口/runtime | `roll browser stop boss-a boss-b` | 只关闭指定 browser runtime；`browser-use-agent` 保持运行；`userDataDir` / `sessionsDir` 保留，后续调用会 lazy start。 |
+| 关闭全部已启动实例 | `roll browser stop --all` | 关闭当前 agent 托管的所有已启动 browser runtime；不停止服务进程，不删除数据。 |
+| 停止整个服务进程 | `roll agent stop browser-use-agent` | 停止 `browser-use-agent`；后续 tool 调用不可用，直到重新 `roll agent start browser-use-agent`。 |
+| 清理 profile/session 数据 | `roll browser clear-data [browserInstance] --yes` | 删除声明的 `userDataDir` / `sessionsDir`；先用无 `--yes` dry-run 确认范围，运行中的实例需先 stop，除非显式使用 force。 |
+
+规则：
+
+1. 人类或上层编排器做生命周期控制时优先使用 `roll browser stop`；`browser_stop` tool 主要服务 MCP/agent 内部集成。
+2. 只想重启某个浏览器窗口或释放 runtime 时，不要用 `roll agent stop browser-use-agent`。
+3. `remote-cdp` / `existing-session` 实例关闭时只断开 Roll 侧连接；不会关闭外部浏览器进程。
+4. 不扫描系统 Chrome 进程，也不按端口或目录强杀未由当前 agent 托管的浏览器。
+
 启动/检查流程：
 
 ```text
@@ -85,6 +104,7 @@ roll doctor --json
   -> roll run browser-use-agent open_platform --input-json '{"browserInstance":"boss-a","platform":"zhipin"}' --json
   -> 人工确认 boss-a 窗口登录
   -> roll run browser-use-agent zhipin_get_username --input-json '{"browserInstance":"boss-a"}' --json
+  -> roll browser stop boss-a  # 只关闭 boss-a 浏览器 runtime；agent 保持运行
 ```
 
 多账号批量示例：
@@ -121,6 +141,7 @@ zhipin_read_messages({ browserInstance, onlyUnread:true, limit:N })
 | Tool | 用途 |
 | --- | --- |
 | `browser_status()` | 查询浏览器 runtime、session、Reply Authority 公钥预加载状态、视觉反馈开关、安全策略和 env 指纹。 |
+| `browser_stop(browserInstance? / browserInstances? / all?)` | 关闭一个、多个或全部已启动 browser runtime；不停止 `browser-use-agent` 服务进程，未启动实例返回 `not_running`。 |
 | `open_platform(platform)` | 通过 native CDP 打开并聚焦招聘平台主页；登录前不触发 Playwright attach。 |
 | `list_pages(platform?)` | 通过 native CDP 列出浏览器页面和 `pageId`。 |
 | `select_page(platform, pageId)` | 将指定页面绑定为平台活跃页；登录前优先走 native target 激活。 |

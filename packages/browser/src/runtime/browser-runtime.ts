@@ -153,6 +153,20 @@ function resolveManagedProfileName(config: BrowserRuntimeConfig): string | undef
   return config.profileName ?? config.instanceId;
 }
 
+function resolveManagedProfileDecoration(
+  config: BrowserRuntimeConfig,
+): { readonly name?: string; readonly color?: string } | undefined {
+  const name = resolveManagedProfileName(config);
+  const color = config.profileColor;
+  if (name === undefined && color === undefined) {
+    return undefined;
+  }
+  return {
+    ...(name !== undefined ? { name } : {}),
+    ...(color !== undefined ? { color } : {}),
+  };
+}
+
 function resolveInspectableCdpBaseUrl(config: BrowserRuntimeConfig): string {
   if (config.mode === "managed-cdp") {
     return resolveManagedCdpUrl(config);
@@ -429,13 +443,9 @@ export class BrowserRuntime {
     const executable = resolveExecutable(this.config);
     const userDataDir = resolveManagedUserDataDir(this.config);
     const cdpUrl = resolveManagedCdpUrl(this.config);
-    const profileName = resolveManagedProfileName(this.config);
 
     mkdirSync(userDataDir, { recursive: true });
-    decorateManagedProfile(
-      userDataDir,
-      profileName !== undefined ? { name: profileName } : undefined,
-    );
+    decorateManagedProfile(userDataDir, resolveManagedProfileDecoration(this.config));
     ensureProfileCleanExit(userDataDir);
 
     const proc = this.deps.spawn(executable, this.buildLaunchArgs(userDataDir), {
@@ -468,6 +478,15 @@ export class BrowserRuntime {
 
     if (ownership.ownsBrowserProcess && ownership.managedProcess) {
       await terminateProcess(ownership.managedProcess);
+    }
+  }
+
+  async disconnect(): Promise<void> {
+    const browser = this.browser;
+    this.browser = undefined;
+
+    if (browser) {
+      await browser.close();
     }
   }
 

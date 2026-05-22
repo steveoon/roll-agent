@@ -123,6 +123,25 @@ worker A -> browserInstance=boss-a -> all browser-use calls include boss-a
 worker B -> browserInstance=boss-b -> all browser-use calls include boss-b
 ```
 
+## Browser Runtime Lifecycle
+
+Use lifecycle commands at the correct layer:
+
+| Need | Command | Effect |
+| --- | --- | --- |
+| Close one or more browser runtimes | `roll browser stop <browserInstance...>` | Closes only the selected browser runtime(s); keeps `browser-use-agent` running; profile/session data stays on disk; later tool calls may lazy-start the runtime. |
+| Close all started browser runtimes | `roll browser stop --all` | Closes all currently started browser runtimes managed by the current agent; keeps the service process running. |
+| Stop the browser agent service | `roll agent stop browser-use-agent` | Stops the whole service process; browser tools are unavailable until `roll agent start browser-use-agent`. |
+| Delete browser profile/session data | `roll browser clear-data [browserInstance] --yes` | Deletes declared browser data paths. Run without `--yes` first to inspect the deletion plan. |
+
+Boundary rules:
+
+- Prefer `roll browser stop` when only a browser window/runtime is stale, stuck, or no longer needed.
+- Use `roll agent stop browser-use-agent` only for service-process lifecycle, not for routine window cleanup.
+- Do not scan or kill system Chrome processes from orchestration code. Roll lifecycle commands operate on runtimes declared in config and owned by the current agent.
+- For browser agents with external sessions, runtime stop may mean disconnecting Roll from the browser rather than killing an external browser process. Read the target agent's `SKILL.md` for exact mode semantics.
+- Before deleting profile/session data, stop the target runtime or use the agent's documented force option only when intentional.
+
 ## Batch Tool Calls
 
 Use batch mode when an orchestrator already knows a sequence of independent or serial `roll run`
