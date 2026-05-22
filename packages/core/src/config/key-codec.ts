@@ -28,6 +28,7 @@ const BROWSER_INSTANCE_NODE: KeyCodecNode = {
     sessionsDir: LEAF,
     args: LEAF,
     profileName: LEAF,
+    profileColor: LEAF,
     windowBounds: {
       kind: "object",
       fields: {

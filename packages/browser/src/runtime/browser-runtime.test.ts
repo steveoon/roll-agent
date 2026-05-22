@@ -160,6 +160,7 @@ test("managed-cdp start applies instance profile label and window bounds", async
         cdpPort: 9888,
         instanceId: "boss-a",
         profileName: "boss-a",
+        profileColor: "#dc2626",
         windowBounds: {
           x: 0,
           y: 24,
@@ -247,6 +248,7 @@ test("managed-cdp start applies instance profile label and window bounds", async
     const infoCache = profile ? readNestedRecord(profile, "info_cache") : undefined;
     const defaultProfile = infoCache ? readNestedRecord(infoCache, "Default") : undefined;
     assert.equal(defaultProfile?.["name"], "boss-a");
+    assert.equal(defaultProfile?.["profile_color"], "#DC2626");
     assert.deepEqual(fetchCalls, [
       {
         url: "http://127.0.0.1:9888/json/version",
@@ -318,6 +320,47 @@ test("managed-cdp stop terminates the launched browser even before first attach"
     assert.equal(connectCalls, 0);
     assert.equal(managedProcess.getKillCalls(), 1);
     assert.equal(runtime.isRunning(), false);
+  } finally {
+    rmSync(userDataDir, { recursive: true, force: true });
+  }
+});
+
+test("disconnect closes the Playwright connection without terminating a managed browser", async () => {
+  const userDataDir = makeTmpUserDataDir();
+  try {
+    const managedProcess = createManagedProcessState();
+    const connectedBrowser = createBrowserState();
+    let connectCalls = 0;
+
+    const runtime = new BrowserRuntime(
+      BrowserRuntimeConfigSchema.parse({
+        mode: "managed-cdp",
+        userDataDir,
+      }),
+      {
+        spawn() {
+          return managedProcess.proc;
+        },
+        async fetch() {
+          return { ok: true } as Response;
+        },
+        async connectOverCDP() {
+          connectCalls += 1;
+          return connectedBrowser.browser;
+        },
+      },
+    );
+
+    await runtime.start();
+    await runtime.getBrowser();
+    await runtime.disconnect();
+
+    assert.equal(connectCalls, 1);
+    assert.equal(connectedBrowser.getCloseCalls(), 1);
+    assert.equal(managedProcess.getKillCalls(), 0);
+    assert.equal(runtime.isRunning(), true);
+
+    await runtime.stop();
   } finally {
     rmSync(userDataDir, { recursive: true, force: true });
   }

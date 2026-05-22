@@ -48,12 +48,14 @@ describe("browser config inspection", () => {
       {
         BROWSER_CDP_PORT: "9222",
         BROWSER_USER_DATA_DIR: "/tmp/legacy",
+        BROWSER_PROFILE_COLOR: "#2563EB",
       },
       {},
     );
 
     assert.equal(warnings.length, 1);
     assert.match(warnings[0] ?? "", /BROWSER_CDP_PORT/);
+    assert.match(warnings[0] ?? "", /BROWSER_PROFILE_COLOR/);
     assert.match(warnings[0] ?? "", /会被忽略/);
   });
 

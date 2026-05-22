@@ -2,6 +2,7 @@ import {
   BrowserRuntimeConfigSchema,
   BrowserRuntimeModeSchema,
   BrowserChannelSchema,
+  BrowserProfileColorSchema,
   BrowserWindowBoundsSchema,
   PlatformSchema,
 } from "@roll-agent/browser";
@@ -22,6 +23,7 @@ export const BrowserInstanceConfigSchema = z
     sessionsDir: z.string().trim().min(1).optional(),
     args: z.array(z.string()).optional(),
     profileName: z.string().trim().min(1).optional(),
+    profileColor: BrowserProfileColorSchema.optional(),
     windowBounds: BrowserWindowBoundsSchema.optional(),
     trackingAgentId: z.string().trim().min(1).optional(),
   })
@@ -158,6 +160,7 @@ export function loadRuntimeConfigFromEnv(
     executablePath: env["BROWSER_EXECUTABLE_PATH"],
     userDataDir: env["BROWSER_USER_DATA_DIR"],
     args: parseArgsJson(env["BROWSER_ARGS_JSON"]),
+    profileColor: env["BROWSER_PROFILE_COLOR"],
     sessionsDir: env["BROWSER_SESSIONS_DIR"],
     security: parseSecurityJson(env["BROWSER_SECURITY_JSON"]),
   });

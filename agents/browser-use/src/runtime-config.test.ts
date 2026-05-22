@@ -5,6 +5,7 @@ import { loadBrowserInstancesConfigFromEnv, loadRuntimeConfigFromEnv } from "./r
 describe("browser-use runtime config", () => {
   it("loads normalized browser security config from BROWSER_SECURITY_JSON", () => {
     const config = loadRuntimeConfigFromEnv({
+      BROWSER_PROFILE_COLOR: "#0ea5e9",
       BROWSER_SECURITY_JSON: JSON.stringify({
         domainAllowlist: [" ZHIPIN.COM "],
         maxPageContentBytes: 1_024,
@@ -21,6 +22,7 @@ describe("browser-use runtime config", () => {
       actionPolicy: "confirm",
       foregroundPolicy: "never",
     });
+    assert.equal(config.profileColor, "#0EA5E9");
   });
 
   it("reports invalid BROWSER_SECURITY_JSON clearly", () => {
@@ -45,6 +47,7 @@ describe("browser-use runtime config", () => {
             cdpPort: 9222,
             userDataDir: "/tmp/roll-browser/boss-a",
             profileName: "Boss A",
+            profileColor: "#dc2626",
             windowBounds: {
               x: 0,
               y: 24,
@@ -61,6 +64,7 @@ describe("browser-use runtime config", () => {
     assert.equal(config?.instances["boss-a"]?.mode, "managed-cdp");
     assert.equal(config?.instances["boss-a"]?.cdpPort, 9222);
     assert.equal(config?.instances["boss-a"]?.profileName, "Boss A");
+    assert.equal(config?.instances["boss-a"]?.profileColor, "#DC2626");
     assert.deepEqual(config?.instances["boss-a"]?.windowBounds, {
       x: 0,
       y: 24,
@@ -106,6 +110,22 @@ describe("browser-use runtime config", () => {
           }),
         }),
       /managed-cdp browser instance requires cdpPort/,
+    );
+
+    assert.throws(
+      () =>
+        loadBrowserInstancesConfigFromEnv({
+          BROWSER_INSTANCES_JSON: JSON.stringify({
+            instances: {
+              "boss-a": {
+                cdpPort: 9222,
+                userDataDir: "/tmp/roll-browser/boss-a",
+                profileColor: "red",
+              },
+            },
+          }),
+        }),
+      /profileColor/,
     );
 
     assert.throws(

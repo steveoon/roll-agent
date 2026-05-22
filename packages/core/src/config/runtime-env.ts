@@ -3,7 +3,8 @@ import { z } from "zod";
 import type { AgentEnvCheckItem, AgentEnvCheckReport } from "./helpers.ts";
 
 export const DIAGNOSTIC_TOOL_CANDIDATES = ["diagnostic_status", "browser_status"] as const;
-const DIAGNOSTIC_TOOL_NAME_SET = new Set<string>(DIAGNOSTIC_TOOL_CANDIDATES);
+const RUNTIME_READINESS_SKIP_TOOL_NAMES = [...DIAGNOSTIC_TOOL_CANDIDATES, "browser_stop"] as const;
+const RUNTIME_READINESS_SKIP_TOOL_NAME_SET = new Set<string>(RUNTIME_READINESS_SKIP_TOOL_NAMES);
 
 export type DiagnosticToolName = (typeof DIAGNOSTIC_TOOL_CANDIDATES)[number];
 
@@ -124,7 +125,7 @@ export interface AgentRuntimeEnvSummary {
 }
 
 export function shouldSkipRuntimeReadinessForTool(toolName: string): boolean {
-  return DIAGNOSTIC_TOOL_NAME_SET.has(toolName);
+  return RUNTIME_READINESS_SKIP_TOOL_NAME_SET.has(toolName);
 }
 
 export function inspectAgentRuntimeEnvRequirements(

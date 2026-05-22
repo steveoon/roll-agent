@@ -114,6 +114,9 @@ describe("BrowserInstancePool", () => {
 
     assert.equal(pool.getBundle("boss-a").config.profileName, "boss-a");
     assert.equal(pool.getBundle("boss-a").config.instanceId, "boss-a");
+    assert.equal(pool.getBundle("boss-a").config.profileColor, "#2563EB");
+    assert.equal(pool.getBundle("boss-b").config.profileColor, "#DC2626");
+    assert.equal(pool.getBundle("boss-c").config.profileColor, "#16A34A");
     assert.deepEqual(pool.getBundle("boss-a").config.windowBounds, {
       x: 0,
       y: 0,
@@ -147,6 +150,7 @@ describe("BrowserInstancePool", () => {
           channel: "chrome",
           userDataDir: "/tmp/roll-browser/boss-a",
           profileName: "Boss Account A",
+          profileColor: "#0ea5e9",
           windowBounds: {
             x: 12,
             y: 34,
@@ -165,12 +169,41 @@ describe("BrowserInstancePool", () => {
     });
 
     assert.equal(pool.getBundle("boss-a").config.profileName, "Boss Account A");
+    assert.equal(pool.getBundle("boss-a").config.profileColor, "#0EA5E9");
+    assert.equal(pool.getBundle("boss-b").config.profileColor, "#DC2626");
     assert.deepEqual(pool.getBundle("boss-a").config.windowBounds, {
       x: 12,
       y: 34,
       width: 900,
       height: 700,
     });
+  });
+
+  it("generates unique automatic profile colors beyond the base palette", () => {
+    const instances = Object.fromEntries(
+      Array.from({ length: 10 }, (_, index) => {
+        const id = `boss-${String(index + 1)}`;
+        return [
+          id,
+          {
+            mode: "managed-cdp" as const,
+            cdpHost: "127.0.0.1",
+            cdpPort: 9222 + index,
+            channel: "chrome" as const,
+            userDataDir: `/tmp/roll-browser/${id}`,
+          },
+        ];
+      }),
+    );
+    const pool = new BrowserInstancePool(BrowserRuntimeConfigSchema.parse({}), {
+      instances,
+    });
+
+    const colors = Object.keys(instances).map((id) => pool.getBundle(id).config.profileColor);
+    assert.equal(new Set(colors).size, colors.length);
+    for (const color of colors) {
+      assert.match(color ?? "", /^#[\dA-F]{6}$/);
+    }
   });
 
   it("does not cache completed lazy-start promises as running state", async () => {
@@ -200,6 +233,200 @@ describe("BrowserInstancePool", () => {
     await pool.ensureBundleStarted("boss-a");
 
     assert.equal(startCount, 2);
+  });
+
+  it("stops only selected browser instances", async () => {
+    const pool = new BrowserInstancePool(BrowserRuntimeConfigSchema.parse({}), {
+      instances: {
+        "boss-a": {
+          mode: "managed-cdp",
+          cdpHost: "127.0.0.1",
+          cdpPort: 9222,
+          channel: "chrome",
+          userDataDir: "/tmp/roll-browser/boss-a",
+        },
+        "boss-b": {
+          mode: "managed-cdp",
+          cdpHost: "127.0.0.1",
+          cdpPort: 9223,
+          channel: "chrome",
+          userDataDir: "/tmp/roll-browser/boss-b",
+        },
+      },
+    });
+    const running = new Map([
+      ["boss-a", true],
+      ["boss-b", true],
+    ]);
+    const events: string[] = [];
+    for (const bundle of pool.listBundles()) {
+      bundle.runtime.isRunning = () => running.get(bundle.id) === true;
+      bundle.contextManager.closeAll = async () => {
+        events.push(`contexts:${bundle.id}`);
+      };
+      bundle.runtime.stop = async () => {
+        events.push(`stop:${bundle.id}`);
+        running.set(bundle.id, false);
+      };
+    }
+
+    const results = await pool.closeInstances(["boss-a"]);
+
+    assert.deepEqual(results, [
+      {
+        browserInstance: "boss-a",
+        status: "stopped",
+        mode: "managed-cdp",
+      },
+    ]);
+    assert.deepEqual(events, ["contexts:boss-a", "stop:boss-a"]);
+    assert.equal(running.get("boss-a"), false);
+    assert.equal(running.get("boss-b"), true);
+  });
+
+  it("reports not running and missing browser instances without failing the batch", async () => {
+    const pool = new BrowserInstancePool(BrowserRuntimeConfigSchema.parse({}), {
+      instances: {
+        "boss-a": {
+          mode: "managed-cdp",
+          cdpHost: "127.0.0.1",
+          cdpPort: 9222,
+          channel: "chrome",
+          userDataDir: "/tmp/roll-browser/boss-a",
+        },
+      },
+    });
+    const bundle = pool.getBundle("boss-a");
+    bundle.runtime.isRunning = () => false;
+
+    const results = await pool.closeInstances(["boss-a", "missing"]);
+
+    assert.deepEqual(results, [
+      {
+        browserInstance: "boss-a",
+        status: "not_running",
+        mode: "managed-cdp",
+      },
+      {
+        browserInstance: "missing",
+        status: "not_found",
+        message: 'Browser instance "missing" was not found.',
+      },
+    ]);
+  });
+
+  it("disconnects remote browser instances instead of stopping external browsers", async () => {
+    const pool = new BrowserInstancePool(BrowserRuntimeConfigSchema.parse({}), {
+      instances: {
+        "remote-a": {
+          mode: "remote-cdp",
+          cdpUrl: "http://127.0.0.1:9333",
+          cdpHost: "127.0.0.1",
+          channel: "chrome",
+          userDataDir: "/tmp/roll-browser/remote-a",
+        },
+      },
+    });
+    const bundle = pool.getBundle("remote-a");
+    const events: string[] = [];
+    bundle.runtime.isRunning = () => true;
+    bundle.contextManager.closeAll = async () => {
+      events.push("contexts");
+    };
+    bundle.runtime.disconnect = async () => {
+      events.push("disconnect");
+    };
+    bundle.runtime.stop = async () => {
+      events.push("stop");
+    };
+
+    const results = await pool.closeInstances(["remote-a"]);
+
+    assert.deepEqual(results, [
+      {
+        browserInstance: "remote-a",
+        status: "stopped",
+        mode: "remote-cdp",
+      },
+    ]);
+    assert.deepEqual(events, ["contexts", "disconnect"]);
+  });
+
+  it("still stops the runtime when context cleanup fails", async () => {
+    const pool = new BrowserInstancePool(BrowserRuntimeConfigSchema.parse({}), {
+      instances: {
+        "boss-a": {
+          mode: "managed-cdp",
+          cdpHost: "127.0.0.1",
+          cdpPort: 9222,
+          channel: "chrome",
+          userDataDir: "/tmp/roll-browser/boss-a",
+        },
+      },
+    });
+    const bundle = pool.getBundle("boss-a");
+    const events: string[] = [];
+    bundle.runtime.isRunning = () => true;
+    bundle.contextManager.closeAll = async () => {
+      events.push("contexts");
+      throw new Error("context close failed");
+    };
+    bundle.runtime.stop = async () => {
+      events.push("stop");
+    };
+
+    const results = await pool.closeInstances(["boss-a"]);
+
+    assert.equal(results[0]?.status, "failed");
+    assert.match(results[0]?.message ?? "", /Failed to close browser contexts/);
+    assert.deepEqual(events, ["contexts", "stop"]);
+  });
+
+  it("still stops the runtime after an in-flight lazy start fails", async () => {
+    const pool = new BrowserInstancePool(BrowserRuntimeConfigSchema.parse({}), {
+      instances: {
+        "boss-a": {
+          mode: "managed-cdp",
+          cdpHost: "127.0.0.1",
+          cdpPort: 9222,
+          channel: "chrome",
+          userDataDir: "/tmp/roll-browser/boss-a",
+        },
+      },
+    });
+    const bundle = pool.getBundle("boss-a");
+    const events: string[] = [];
+    let running = false;
+    let rejectStart: ((error: Error) => void) | undefined;
+    const startGate = new Promise<void>((_resolve, reject) => {
+      rejectStart = reject;
+    });
+
+    bundle.runtime.isRunning = () => running;
+    bundle.runtime.start = async () => {
+      events.push("start");
+      await startGate;
+    };
+    bundle.contextManager.closeAll = async () => {
+      events.push("contexts");
+    };
+    bundle.runtime.stop = async () => {
+      events.push("stop");
+    };
+
+    const startPromise = pool.ensureBundleStarted("boss-a").catch(() => undefined);
+    await Promise.resolve();
+    const closePromise = pool.closeInstances(["boss-a"]);
+    await Promise.resolve();
+    running = true;
+    rejectStart?.(new Error("start failed"));
+
+    await startPromise;
+    const results = await closePromise;
+
+    assert.equal(results[0]?.status, "failed");
+    assert.match(results[0]?.message ?? "", /Failed to finish browser startup/);
+    assert.deepEqual(events, ["start", "contexts", "stop"]);
   });
 
   it("waits for in-flight lazy starts before stopping bundles", async () => {

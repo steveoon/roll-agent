@@ -81,6 +81,7 @@ describe("key-codec: decodeFromYaml", () => {
             "cdp-port": 9222,
             "user-data-dir": "/tmp/boss-a",
             "profile-name": "Boss A",
+            "profile-color": "#dc2626",
             "window-bounds": {
               x: 0,
               y: 24,
@@ -102,6 +103,7 @@ describe("key-codec: decodeFromYaml", () => {
             cdpPort: number;
             userDataDir: string;
             profileName: string;
+            profileColor: string;
             windowBounds: { x: number; y: number; width: number; height: number };
             trackingAgentId: string;
           }
@@ -113,6 +115,7 @@ describe("key-codec: decodeFromYaml", () => {
     assert.equal(result.browser.instances["boss-a"]?.cdpPort, 9222);
     assert.equal(result.browser.instances["boss-a"]?.userDataDir, "/tmp/boss-a");
     assert.equal(result.browser.instances["boss-a"]?.profileName, "Boss A");
+    assert.equal(result.browser.instances["boss-a"]?.profileColor, "#dc2626");
     assert.deepEqual(result.browser.instances["boss-a"]?.windowBounds, {
       x: 0,
       y: 24,

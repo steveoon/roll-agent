@@ -37,10 +37,11 @@ test("BrowserRuntimeConfigSchema normalizes security config", () => {
   assert.equal(config.security.foregroundPolicy, "never");
 });
 
-test("BrowserRuntimeConfigSchema accepts instance display and window bounds config", () => {
+test("BrowserRuntimeConfigSchema accepts instance display, color, and window bounds config", () => {
   const config = BrowserRuntimeConfigSchema.parse({
     instanceId: "boss-a",
     profileName: "Boss A",
+    profileColor: "#dc2626",
     windowBounds: {
       x: 0,
       y: 24,
@@ -51,12 +52,17 @@ test("BrowserRuntimeConfigSchema accepts instance display and window bounds conf
 
   assert.equal(config.instanceId, "boss-a");
   assert.equal(config.profileName, "Boss A");
+  assert.equal(config.profileColor, "#DC2626");
   assert.deepEqual(config.windowBounds, {
     x: 0,
     y: 24,
     width: 680,
     height: 1000,
   });
+});
+
+test("BrowserRuntimeConfigSchema rejects invalid profile colors", () => {
+  assert.throws(() => BrowserRuntimeConfigSchema.parse({ profileColor: "blue" }), /profileColor/);
 });
 
 test("BrowserRuntimeConfigSchema requires cdpUrl in remote-cdp mode", () => {

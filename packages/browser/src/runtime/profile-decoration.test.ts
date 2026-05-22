@@ -41,6 +41,9 @@ test("decorateManagedProfile refreshes legacy marker when desired profile label 
     const infoCache = getRecord(profile, "info_cache");
     const defaultProfile = getRecord(infoCache, "Default");
     assert.equal(defaultProfile["name"], "boss-a");
+    assert.equal(defaultProfile["profile_color"], "#2DD4BF");
+    assert.equal(defaultProfile["user_color"], "#2DD4BF");
+    assert.equal(typeof defaultProfile["profile_color_seed"], "number");
     assert.match(
       readFileSync(join(userDataDir, ".roll-agent-profile-decorated"), "utf-8"),
       /"name":"boss-a"/,

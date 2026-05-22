@@ -69,6 +69,12 @@ script flag / ROLL_BROWSER_INSTANCE
 - Run one script process per Boss account/profile.
 - Do not run two script processes against the same `browserInstance`.
 - If no flag is provided, browser-use falls back to `browser.default-instance` or single-instance mode.
+- Browser runtimes are lazy-started by the first browser-use tool call. The script does not need to
+  pre-open every configured instance.
+- To close one profile after a run, use `roll browser stop <browserInstance>`; this keeps
+  `browser-use-agent` alive and preserves `userDataDir` / `sessionsDir`.
+- Do not use `roll agent stop browser-use-agent` for routine per-profile cleanup, especially while
+  another `reply-unread-safely` process is running on a different `browserInstance`.
 
 #### Parallel orchestration (multi-account)
 
@@ -147,7 +153,7 @@ All `roll run` inputs use **`--input-file`** (PowerShell-safe; macOS/Linux compa
 - `needs_confirmation`: scripts do **not** auto-retry with approval payloads today; see [references/safety.md](references/safety.md).
 - Multi-instance selection is validated at startup through `browser_status`; when multiple instances exist without a configured default, the script exits before touching BOSS unless `--browser-instance` / `-BrowserInstance` is provided.
 - Pre-flight is per `browserInstance`: check `browser_status`, `zhipin_get_username`, `zhipin_open_chat_page`, then one `zhipin_read_messages`.
-- Recovery is per `browserInstance`: if the tab is logged out, on marketing home, or returns empty reads unexpectedly, recover that profile before running the script.
+- Recovery is per `browserInstance`: if the tab is logged out, on marketing home, or returns empty reads unexpectedly, recover that profile before running the script. If only one browser runtime is stale, prefer `roll browser stop <browserInstance>` then reopen that same instance; do not restart the whole agent.
 
 ## Skip rules (script-enforced)
 
@@ -179,7 +185,7 @@ Tell the user to complete verification manually; do not retry immediately.
 ## Agent checklist
 
 1. Complete [references/safety.md](references/safety.md) pre-flight for every `--browser-instance` you will use.
-2. `roll agent health --json` → `roll agent start browser-use-agent` only when the agent is down — avoid restart during an active batch.
+2. `roll agent health --json` → `roll agent start browser-use-agent` only when the service is down; use `roll browser stop <browserInstance>` for stale browser runtime/page state.
 3. `--dry-run` first unless user explicitly ordered send now.
 4. Run script; read JSONL path from stderr (`results -> …`).
 5. Summarize: sent / skipped (by reason) / failed / captcha stop.

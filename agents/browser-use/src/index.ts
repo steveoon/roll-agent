@@ -1,6 +1,7 @@
 import { defineAgent, createAgentLogger } from "@roll-agent/sdk";
 import { attachBrowserSession } from "./tools/attach-browser-session.ts";
 import { browserStatus } from "./tools/browser-status.ts";
+import { browserStop } from "./tools/browser-stop.ts";
 import { listPages } from "./tools/list-pages.ts";
 import { navigateActiveTab } from "./tools/navigate-active-tab.ts";
 import { openPlatform } from "./tools/open-platform.ts";
@@ -41,7 +42,15 @@ import type { AnyToolDefinition } from "@roll-agent/sdk";
 
 const logger = createAgentLogger("browser-use-agent");
 
+function isGlobalBrowserRuntimeTool(toolName: string): boolean {
+  return toolName === "browser_stop";
+}
+
 function withBrowserInstanceRuntimeSelection(tool: AnyToolDefinition): AnyToolDefinition {
+  if (isGlobalBrowserRuntimeTool(tool.name)) {
+    return tool;
+  }
+
   return withBrowserInstanceInput(tool, {
     startRuntime: tool.name !== "browser_status",
   });
@@ -86,6 +95,7 @@ const agent = defineAgent(
       yupaoSendReply,
       // 调试
       attachBrowserSession,
+      browserStop,
     ].map(withBrowserInstanceRuntimeSelection),
   },
   {

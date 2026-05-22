@@ -4,6 +4,12 @@ const browserPlatforms = ["zhipin", "yupao"] as const;
 const browserRuntimeModes = ["managed-cdp", "remote-cdp", "existing-session"] as const;
 const browserChannels = ["chrome", "chromium", "msedge"] as const;
 
+const browserProfileColorSchema = z
+  .string()
+  .trim()
+  .regex(/^#[\da-fA-F]{6}$/, "profileColor must be a hex RGB color such as #2563EB")
+  .transform((value) => value.toUpperCase());
+
 export const browserWindowBoundsSchema = z.object({
   x: z.number().int().optional(),
   y: z.number().int().optional(),
@@ -47,6 +53,7 @@ export const browserInstanceConfigSchema = z
     sessionsDir: z.string().trim().min(1).optional(),
     args: z.array(z.string()).optional(),
     profileName: z.string().trim().min(1).optional(),
+    profileColor: browserProfileColorSchema.optional(),
     windowBounds: browserWindowBoundsSchema.optional(),
     trackingAgentId: z.string().trim().min(1).optional(),
   })
