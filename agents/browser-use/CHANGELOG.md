@@ -1,5 +1,18 @@
 # @roll-agent/browser-use-agent
 
+## 0.15.0
+
+### Minor Changes
+
+- [#102](https://github.com/steveoon/roll-agent/pull/102) [`ba1c045`](https://github.com/steveoon/roll-agent/commit/ba1c045008316a33e6f482efcedeaa6991fda3ea) Thanks [@steveoon](https://github.com/steveoon)! - Add per-instance browser profile colors for managed multi-browser runtimes.
+
+- [#102](https://github.com/steveoon/roll-agent/pull/102) [`ba1c045`](https://github.com/steveoon/roll-agent/commit/ba1c045008316a33e6f482efcedeaa6991fda3ea) Thanks [@steveoon](https://github.com/steveoon)! - Add instance-level browser stop commands that close managed browser runtimes without stopping browser-use-agent.
+
+### Patch Changes
+
+- Updated dependencies [[`ba1c045`](https://github.com/steveoon/roll-agent/commit/ba1c045008316a33e6f482efcedeaa6991fda3ea), [`ba1c045`](https://github.com/steveoon/roll-agent/commit/ba1c045008316a33e6f482efcedeaa6991fda3ea)]:
+  - @roll-agent/browser@0.8.0
+
 ## 0.14.0
 
 ### Minor Changes
