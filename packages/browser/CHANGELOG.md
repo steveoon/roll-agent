@@ -1,5 +1,11 @@
 # @roll-agent/browser
 
+## 0.7.0
+
+### Minor Changes
+
+- [#100](https://github.com/steveoon/roll-agent/pull/100) [`fd4917d`](https://github.com/steveoon/roll-agent/commit/fd4917d6720fd76a4b8a4f1e466ca3fa6d7ecc26) Thanks [@steveoon](https://github.com/steveoon)! - Add managed multi-browser instance support with per-instance runtime config, status reporting, profile labeling, and adaptive visible window tiling for browser-use workflows.
+
 ## 0.6.0
 
 ### Minor Changes
