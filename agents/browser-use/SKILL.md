@@ -146,6 +146,7 @@ zhipin_read_messages({ browserInstance, onlyUnread:true, limit:N })
 | `list_pages(platform?)` | 通过 native CDP 列出浏览器页面和 `pageId`。 |
 | `select_page(platform, pageId)` | 将指定页面绑定为平台活跃页；登录前优先走 native target 激活。 |
 | `navigate_active_tab(url)` | 通过 native CDP 打开/导航页面；不触发 Playwright attach，不支持直接跳转 BOSS `/web/chat/*` 后台路径。 |
+| `browser_reload_active_tab(ignoreCache?, browserActionApproval?)` | 对当前 tracked native page 执行 CDP `Page.reload`，清空页面内 DOM 与 SPA 状态后等待文档换页；不触发 Playwright attach，走现有 actionPolicy / domainAllowlist 边界。reload 后所有 `@eN` / `candidateRef` 失效，必须重新 snapshot / 读列表。 |
 | `browser_snapshot(pageId?, maxDepth?, maxNodes?, interactiveOnly?)` | 读取当前或指定页面的 Accessibility Tree；默认只返回可交互节点，并为可交互节点生成 `@eN`；也会补充有限的非语义 DOM 可操作短文本，例如 `span` 渲染的 tab/filter 标签，并递归内联同 target iframe 中的可操作 AX 节点。 |
 | `click_ref(ref, pageId?, browserActionApproval?)` | 点击 `browser_snapshot` 返回的 `@eN`；优先用 `backendNodeId`，失效时用 `role/name/nth` fallback；iframe 子节点会携带并复用 `frameId`。 |
 | `type_ref(ref, text, clear?, pageId?, browserActionApproval?)` | 向 `browser_snapshot` 返回的 `@eN` 输入文本；`clear:true` 会先清空当前控件；iframe 子节点会携带并复用 `frameId`。 |
@@ -208,7 +209,7 @@ click_ref(@eN) 或 type_ref(@eN, text, clear?)
 | Tool | Backend | 说明 |
 | --- | --- | --- |
 | `zhipin_read_messages(limit?, onlyUnread?, sortBy?, autoScroll?, maxScrolls?)` | native CDP | 读取消息列表；默认 `autoScroll=true`，按 `conversationId` 去重。 |
-| `zhipin_open_chat_page()` | native CDP | 点击左侧导航切回「沟通」。 |
+| `zhipin_open_chat_page(forceReload?, browserActionApproval?)` | native CDP | 点击左侧导航切回「沟通」；`forceReload:true` 时只对当前沟通页执行 `Page.reload` 做长跑恢复，返回 `usedReload`；若实时页面已不是沟通页，会跳过 reload 并返回 `reloadSkippedReason`。 |
 | `zhipin_open_chat(conversationId?, candidateName?, index?, preferUnread?)` | native CDP | 打开目标聊天；匹配优先级为 `conversationId` > `candidateName` > `index`。 |
 | `zhipin_get_candidate_info(conversationId?, candidateName?, index?, maxMessages?)` | native CDP | 提取候选人资料、聊天记录、`conversationId`、`candidateId` 和页面职位信号。 |
 | `zhipin_generate_reply_preview(conversationId?, candidateName?, index?, maxMessages?, reasoning?)` | native CDP | 读取聊天上下文，调用 Reply Authority SSE 流式生成回复，并在浏览器内展示阶段与临时草稿；可用 `reasoning` 控制是否请求 thinking/reasoning；返回 `preparedReplyId`，不返回 `signedEnvelope`。 |
@@ -272,6 +273,10 @@ click_ref(@eN) 或 type_ref(@eN, text, clear?)
 27. 不要用 `navigate_active_tab` 直接跳转 `https://www.zhipin.com/web/chat/*`；聊天页用 `zhipin_open_chat_page()`，推荐页用 `zhipin_open_recommend_page()`。
 28. BOSS 已有专用工具能表达业务意图时，不要为了“看见按钮”而绕开专用工具改用 `click_ref` / `type_ref`。
 29. 对 BOSS 未建模按钮，例如新出现的“交换电话”，可以先用 `browser_snapshot` 找到对应 `@eN`，再 `click_ref`；弹窗确认类二次动作必须重新 snapshot 后再点击。
+30. 长跑同一 BOSS tab 出现「选中态丢失 / 列表错乱 / 依赖当前选中聊天的工具失败」时，做 periodic recovery 的边界：
+    - 优先 `zhipin_open_chat_page({ forceReload: true })`（或通用 `browser_reload_active_tab`）：等价手动 F5，清空当前 document 的 DOM 与页面内 SPA 状态，保留 Chrome 窗口与 profile 登录态；reload 后所有 `@eN` / `candidateRef` 失效，必须重新 snapshot / 读列表。
+    - 普通 `zhipin_open_chat_page()`（不带 forceReload）在已处于沟通页时只返回 `alreadyOnChat`，**不会**卸载 document，无法清状态。
+    - `roll browser stop` 才能回收 renderer 进程内存，但会关闭浏览器窗口；reload 只清 document 级状态，**不保证** renderer 100% 把内存归还 OS，杀进程仍由 `roll browser stop` 负责。
 
 ## 典型链路
 

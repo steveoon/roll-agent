@@ -13,6 +13,7 @@ import {
 import { matchesPlatformHost } from "../../platforms.ts";
 import { getContextManager, getRuntime } from "../../runtime-holder.ts";
 import { maybeBringToFront } from "../../browser-foreground.ts";
+import { reloadNativePageAndWaitForSwap } from "../../native-reload.ts";
 import type {
   DynamicListCollectionStopReason,
   DynamicListScrollResult,
@@ -95,6 +96,28 @@ export type ZhipinNativePagePortOptions = {
   readonly target: BrowserInspectablePage;
   readonly controller: NativeCdpController;
 };
+
+export type ZhipinNativeReloadOptions = {
+  readonly url: string;
+  readonly ignoreCache?: boolean;
+  readonly onReloadSent?: () => void;
+};
+
+export const ZHIPIN_CHAT_RELOAD_SKIPPED_REASONS = ["not_chat_page"] as const;
+export type ZhipinChatReloadSkippedReason =
+  (typeof ZHIPIN_CHAT_RELOAD_SKIPPED_REASONS)[number];
+
+export type ZhipinChatReloadTarget =
+  | {
+      readonly ok: true;
+      readonly url: string;
+    }
+  | {
+      readonly ok: false;
+      readonly url: string;
+      readonly skippedReason: ZhipinChatReloadSkippedReason;
+      readonly error: string;
+    };
 
 export type ReadNativeChatCandidatesOptions = {
   readonly targetCount?: number;
@@ -301,7 +324,11 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 function isChatPageUrl(url: string): boolean {
-  return url.includes("/web/chat/index");
+  try {
+    return new URL(url).pathname === "/web/chat/index";
+  } catch {
+    return url.includes("/web/chat/index");
+  }
 }
 
 function normalizeCandidateName(name: string): string {
@@ -841,6 +868,28 @@ export class ZhipinNativePagePort {
 
   async bringToFront(): Promise<void> {
     await this.controller.bringToFront();
+  }
+
+  async inspectChatReloadTarget(): Promise<ZhipinChatReloadTarget> {
+    const url = await this.url().catch(() => this.target.url);
+    if (!isChatPageUrl(url)) {
+      return {
+        ok: false,
+        url,
+        skippedReason: "not_chat_page",
+        error: "当前 BOSS 页面不是沟通页，已跳过 reload；请先切换到沟通页。",
+      };
+    }
+
+    return { ok: true, url };
+  }
+
+  async reload(options: ZhipinNativeReloadOptions): Promise<void> {
+    await reloadNativePageAndWaitForSwap(this.controller, {
+      url: options.url,
+      ...(options.ignoreCache !== undefined ? { ignoreCache: options.ignoreCache } : {}),
+      ...(options.onReloadSent !== undefined ? { onReloadSent: options.onReloadSent } : {}),
+    });
   }
 
   async isChatSurfaceOpen(): Promise<boolean> {

@@ -18,6 +18,7 @@ const NORMAL_NATIVE_CDP_METHODS = [
   "Browser.setWindowBounds",
   "Page.bringToFront",
   "Page.navigate",
+  "Page.reload",
   "Page.getFrameTree",
   "Page.createIsolatedWorld",
   "Input.dispatchMouseEvent",
@@ -756,6 +757,25 @@ export class NativeCdpController {
       throw new Error(`Native CDP Page.navigate failed: ${result.errorText}`);
     }
     return result;
+  }
+
+  async reload(
+    options: {
+      readonly url?: string;
+      readonly ignoreCache?: boolean;
+      readonly timeoutMs?: number;
+    } = {},
+  ): Promise<void> {
+    this.preflightAction({
+      action: "navigate",
+      target: options.url ?? "reload",
+      ...(options.url !== undefined ? { url: options.url } : {}),
+    });
+    await this.sendNormal(
+      "Page.reload",
+      { ignoreCache: options.ignoreCache ?? false },
+      options.timeoutMs,
+    );
   }
 
   async getFrameTree(options: { readonly timeoutMs?: number } = {}): Promise<NativeCdpFrameTree> {

@@ -68,7 +68,7 @@
 `jobRef` 规则：
 
 - `jobRef` 格式如 `@j1`，只来自 `zhipin_list_recommend_jobs()` 输出。
-- `jobRef` 只对最近一次岗位下拉快照有效；筛选、搜索、刷新或页面重开后必须重新读取。
+- `jobRef` 只对最近一次岗位下拉快照有效；筛选、搜索、刷新、页面 reload 或页面重开后必须重新读取。
 - orchestrator 不要自行构造 `jobRef`。
 - `jobRef` 不是安全边界，只是降低编排认知负担；真实 DOM 点击仍由工具解析到 `value` / `index` 后执行。
 - 默认不要传 `forceClick:true`；只有需要重新点击已选中的岗位项时才使用。
@@ -191,7 +191,7 @@ recommend-list  -> 推荐牛人列表，默认向下滚动，去重主键 candid
 
 1. 上层 orchestrator 优先把 `candidateRef` 传给 `zhipin_say_hello({ candidateRefs })` 或 `zhipin_open_resume({ candidateRef })`。
 2. `indices` / `index` 只作为当前 DOM 快照兜底。
-3. 筛选、滚动加载、搜索、刷新或页面重开后必须重新调用 `zhipin_get_candidate_list`，不要复用旧 `candidateRef`。
+3. 筛选、滚动加载、搜索、刷新、页面 reload 或页面重开后必须重新调用 `zhipin_get_candidate_list`，不要复用旧 `candidateRef`。
 4. 不要由 orchestrator 自己构造 `@c1`；只使用 tool 输出中的 `candidateRef`。
 5. 聊天消息列表没有 `candidateRef`；聊天回复链路继续使用 `conversationId` / `candidateId`。
 6. 调 `zhipin_say_hello` 前先过滤 `buttonText:"打招呼"`；`buttonText` 为空通常表示已打过招呼，不应重复点击。
@@ -202,3 +202,16 @@ recommend-list  -> 推荐牛人列表，默认向下滚动，去重主键 candid
 - 如果 `candidateRef` 对应的 `candidateId` / `name` 与当前 DOM 不一致，工具会返回 `success:false` 并提示“候选人引用已过期”。
 - 收到过期提示后，重新执行推荐候选人链路的第 3 步，再提交新的 `candidateRefs`。
 - 同一快照内可以一次提交多个 `candidateRefs` 连续打招呼；如果 BOSS 在点击后重排列表，工具会拒绝过期 ref，orchestrator 应刷新列表后只重试剩余目标。
+
+## 长跑 tab 的 reload recovery
+
+Chrome 全天不关、同一沟通 tab 连续跑多批任务时，前端 SPA 状态会在同一 renderer 内累积，常见症状是 `.geek-item.selected` 选中态丢失、依赖「当前选中聊天」的工具（如 `zhipin_exchange_wechat`）失败，且失败率随运行时长上升。
+
+recovery 优先级与边界：
+
+1. `zhipin_open_chat_page({ forceReload: true })`：只对当前沟通页执行 native CDP `Page.reload`，等价手动 F5，清空当前 document 的 DOM 与页面内 SPA 状态，保留 Chrome 窗口与 profile 登录态；reload 后返回 `usedReload: true` 与 `chatReady`。如果实时页面已不是沟通页，会跳过 reload 并返回 `reloadSkippedReason`。
+2. 通用 `browser_reload_active_tab`：对当前 tracked native page 做同样的 reload，用于非沟通页或不需要确认聊天就绪的场景。
+3. 普通 `zhipin_open_chat_page()`（不带 forceReload）在已处于沟通页时只返回 `alreadyOnChat: true`，**不会**卸载 document，无法清状态。
+4. `roll browser stop` 才能回收 renderer 进程内存，但会关闭浏览器窗口；reload 只清 document 级状态，**不保证** renderer 把内存归还 OS。
+
+reload / 页面重开后，所有 `@eN` / `candidateRef` / `jobRef` 一律失效，必须重新 `browser_snapshot` 或重新读列表后再继续。

@@ -39,6 +39,34 @@ function createPort(
 }
 
 describe("ZhipinNativePagePort", () => {
+  it("accepts a chat reload target from the realtime page URL", async () => {
+    const port = createPort(async (expression) => {
+      assert.equal(expression, "location.href");
+      return "https://www.zhipin.com/web/chat/index";
+    });
+
+    assert.deepEqual(await port.inspectChatReloadTarget(), {
+      ok: true,
+      url: "https://www.zhipin.com/web/chat/index",
+    });
+  });
+
+  it("rejects a chat reload target when the realtime page URL is no longer chat", async () => {
+    const port = createPort(async (expression) => {
+      assert.equal(expression, "location.href");
+      return "https://www.zhipin.com/web/user/safe/verify";
+    });
+
+    const result = await port.inspectChatReloadTarget();
+
+    assert.equal(result.ok, false);
+    if (!result.ok) {
+      assert.equal(result.url, "https://www.zhipin.com/web/user/safe/verify");
+      assert.equal(result.skippedReason, "not_chat_page");
+      assert.match(result.error, /不是沟通页/);
+    }
+  });
+
   it("reads chat candidates from the native chat item DOM expression", async () => {
     const port = createPort(async (expression) => {
       assert.match(expression, /\.user-list\.b-scroll-stable \[role=\\"listitem\\"\], \.geek-item/);

@@ -54,6 +54,9 @@ jobs:
       - name: Unit tests
         run: pnpm test
 
+      - name: Script tests
+        run: pnpm test:scripts
+
       - name: E2E smoke
         run: pnpm test:e2e
 
@@ -105,3 +108,9 @@ jobs:
         run: node scripts/release-packages.mjs
         env:
           NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Create GitHub Releases
+        if: steps.changesets.outputs.hasChangesets == 'false'
+        run: pnpm release-github-releases
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
