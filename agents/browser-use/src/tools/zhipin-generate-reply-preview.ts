@@ -135,6 +135,33 @@ function getLatestCandidateMessage(messages: NativeCandidateChatDetails["message
   return latest?.content.trim() ?? "";
 }
 
+function getLatestHumanMessage(
+  messages: NativeCandidateChatDetails["messages"],
+): NativeCandidateChatDetails["messages"][number] | undefined {
+  return [...messages]
+    .reverse()
+    .find(
+      (message) =>
+        (message.sender === "candidate" || message.sender === "recruiter") &&
+        message.content.trim().length > 0,
+    );
+}
+
+function normalizeUnreadCount(value: number | undefined): number {
+  if (value === undefined || !Number.isFinite(value) || value <= 0) return 0;
+  return Math.floor(value);
+}
+
+function resolveUnreadCountBeforeReply(input: {
+  readonly navigationUnreadCount?: number | undefined;
+  readonly data: NativeCandidateChatDetails;
+}): number {
+  const navigationUnreadCount = normalizeUnreadCount(input.navigationUnreadCount);
+  if (navigationUnreadCount > 0) return navigationUnreadCount;
+
+  return getLatestHumanMessage(input.data.messages)?.sender === "candidate" ? 1 : 0;
+}
+
 function buildGenerateReplyInput(input: {
   readonly data: NativeCandidateChatDetails;
   readonly conversationId: string;
@@ -340,6 +367,10 @@ export const zhipinGenerateReplyPreview = defineTool({
         recruiterUsername: usernameResult.username,
         reasoning: input.reasoning,
       });
+      const unreadCountBeforeReply = resolveUnreadCountBeforeReply({
+        navigationUnreadCount: nav?.unreadCount,
+        data,
+      });
       if (replyInput.candidateMessage.length === 0) {
         const error = "未找到候选人最新消息，无法生成回复";
         await session.fail("候选人消息为空");
@@ -389,6 +420,7 @@ export const zhipinGenerateReplyPreview = defineTool({
             stage: finalReply.stage,
             confidence: finalReply.confidence,
             expiresAt: finalReply.envelopeExp,
+            unreadCountBeforeReply,
             ...(requestId !== undefined ? { requestId } : {}),
           });
           await preview.complete("回复已生成", finalReply.suggestedReply);

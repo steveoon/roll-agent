@@ -57,6 +57,34 @@ describe("prepared reply store", () => {
     assert.equal(consumePreparedReply(saved.preparedReplyId, 121).ok, true);
   });
 
+  it("preserves unread context across save, inspect, and consume", () => {
+    const saved = savePreparedReply(
+      {
+        signedEnvelope: "payload.signature",
+        suggestedReply: "你好",
+        stage: "job_consultation",
+        confidence: 0.9,
+        expiresAt: 200,
+        unreadCountBeforeReply: 2,
+      },
+      100,
+    );
+
+    assert.equal(saved.unreadCountBeforeReply, 2);
+
+    const inspected = inspectPreparedReply(saved.preparedReplyId, 120);
+    assert.equal(inspected.ok, true);
+    if (inspected.ok) {
+      assert.equal(inspected.record.unreadCountBeforeReply, 2);
+    }
+
+    const consumed = consumePreparedReply(saved.preparedReplyId, 121);
+    assert.equal(consumed.ok, true);
+    if (consumed.ok) {
+      assert.equal(consumed.record.unreadCountBeforeReply, 2);
+    }
+  });
+
   it("expires stale prepared replies", () => {
     const saved = savePreparedReply(
       {
