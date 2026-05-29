@@ -4,6 +4,7 @@ import { browserStatus } from "./tools/browser-status.ts";
 import { browserStop } from "./tools/browser-stop.ts";
 import { listPages } from "./tools/list-pages.ts";
 import { navigateActiveTab } from "./tools/navigate-active-tab.ts";
+import { browserReloadActiveTab } from "./tools/browser-reload-active-tab.ts";
 import { openPlatform } from "./tools/open-platform.ts";
 import { selectPage } from "./tools/select-page.ts";
 import { browserSnapshot } from "./tools/browser-snapshot.ts";
@@ -64,6 +65,7 @@ const agent = defineAgent(
       browserStatus,
       listPages,
       navigateActiveTab,
+      browserReloadActiveTab,
       openPlatform,
       selectPage,
       browserSnapshot,

@@ -378,6 +378,52 @@ test("navigate rejects native Page.navigate errorText", async () => {
   controller.close();
 });
 
+test("reload sends Page.reload with ignoreCache default false", async () => {
+  const socket = new FakeNativeCdpWebSocket();
+  const controller = await createController(socket);
+
+  const pending = controller.reload();
+  const command = socket.takeSentCommand();
+  assert.equal(command.method, "Page.reload");
+  assert.deepEqual(command.params, { ignoreCache: false });
+  socket.respond(command.id, {});
+
+  await pending;
+  controller.close();
+});
+
+test("reload forwards ignoreCache true", async () => {
+  const socket = new FakeNativeCdpWebSocket();
+  const controller = await createController(socket);
+
+  const pending = controller.reload({ ignoreCache: true });
+  const command = socket.takeSentCommand();
+  assert.equal(command.method, "Page.reload");
+  assert.deepEqual(command.params, { ignoreCache: true });
+  socket.respond(command.id, {});
+
+  await pending;
+  controller.close();
+});
+
+test("reload honors actionPolicy before sending Page.reload", async () => {
+  const socket = new FakeNativeCdpWebSocket();
+  const controller = await createController(socket, {
+    security: BrowserSecurityConfigSchema.parse({ actionPolicy: "confirm" }),
+  });
+
+  await assert.rejects(
+    controller.reload({ url: "https://www.zhipin.com/web/chat/index" }),
+    (error) => {
+      assert.ok(error instanceof BrowserActionPolicyError);
+      assert.equal(error.payload.code, "needs_confirmation");
+      return true;
+    },
+  );
+  assert.deepEqual(socket.getSentMethods(), []);
+  controller.close();
+});
+
 test("getWindowIdForTarget parses Browser.getWindowForTarget window id", async () => {
   const socket = new FakeNativeCdpWebSocket();
   const controller = await createController(socket);
