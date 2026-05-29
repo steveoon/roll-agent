@@ -400,7 +400,7 @@ pnpm changeset
 git add .changeset/ && git commit -m "chore: add changeset"
 
 # 3. 合入 main 后 GitHub Action 自动开 release PR（标题通常为 "chore: version packages"）
-#    审批合入该 PR → 自动 publish 到 npm
+#    审批合入该 PR → 自动 publish 到 npm → 创建 GitHub Releases
 ```
 
 ### 本地操作（调试/紧急发布）
@@ -408,6 +408,7 @@ git add .changeset/ && git commit -m "chore: add changeset"
 ```bash
 pnpm version-packages              # 应用 changeset，更新版本号 + CHANGELOG
 pnpm release-packages              # 构建 + 发布到 npm
+pnpm release-github-releases -- --dry-run  # 预览将补齐的 GitHub Releases
 pnpm release:legacy:dry-run        # 旧脚本 dry-run（诊断用）
 ```
 
@@ -416,7 +417,9 @@ pnpm release:legacy:dry-run        # 旧脚本 dry-run（诊断用）
 - `@roll-agent/sdk`
 - `@roll-agent/browser`
 - `@roll-agent/core`
+- `@roll-agent/reply-authority-client`
 - `@roll-agent/browser-use-agent`
+- `@roll-agent/smart-reply-agent`
 
 内部依赖自动级联：修改 `@roll-agent/browser` 会自动 bump `browser-use-agent` 的依赖版本。
 

@@ -5,37 +5,13 @@ import { createHash } from "node:crypto";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { PUBLISHED_PACKAGES } from "./published-packages.mjs";
 
 const repoRoot = resolve(import.meta.dirname, "..");
 const publishToken = process.env["NPM_TOKEN"] ?? process.env["NODE_AUTH_TOKEN"];
 const dryRun =
   process.argv.includes("--dry-run") || process.env["ROLL_AGENT_RELEASE_DRY_RUN"] === "1";
 const PUBLISH_GUARD_HASH = "f48e27617b0e572bfed877cda9a59845eb354fe4e49ba2b00f07d1733e08d574";
-const ALLOWED_PREPUBLISH_ONLY = "node ../../scripts/require-pnpm-publish.mjs";
-const PUBLISHED_PACKAGES = [
-  { name: "@roll-agent/core", packageJson: "packages/core/package.json" },
-  { name: "@roll-agent/sdk", packageJson: "packages/sdk/package.json" },
-  {
-    name: "@roll-agent/browser",
-    packageJson: "packages/browser/package.json",
-    prepublishOnly: ALLOWED_PREPUBLISH_ONLY,
-  },
-  {
-    name: "@roll-agent/reply-authority-client",
-    packageJson: "packages/reply-authority-client/package.json",
-    prepublishOnly: ALLOWED_PREPUBLISH_ONLY,
-  },
-  {
-    name: "@roll-agent/browser-use-agent",
-    packageJson: "agents/browser-use/package.json",
-    prepublishOnly: ALLOWED_PREPUBLISH_ONLY,
-  },
-  {
-    name: "@roll-agent/smart-reply-agent",
-    packageJson: "agents/smart-reply/package.json",
-    prepublishOnly: ALLOWED_PREPUBLISH_ONLY,
-  },
-];
 const BLOCKED_PUBLISH_LIFECYCLE_SCRIPTS = [
   "preinstall",
   "install",

@@ -226,25 +226,27 @@ SDK 的 `exports` 在开发时指向 `./src/index.ts`（直接引用源码），
 pnpm changeset
 pnpm version-packages
 pnpm release-packages
+pnpm release-github-releases
 ```
 
-工作流：功能 PR 附带 `.changeset/*.md` → 合入 `main` → GitHub Action 自动创建 release PR（通常标题为 `chore: version packages`）→ 合并该 PR → 自动 publish。
+工作流：功能 PR 附带 `.changeset/*.md` → 合入 `main` → GitHub Action 自动创建 release PR（通常标题为 `chore: version packages`）→ 合并该 PR → 自动 publish → 自动创建 GitHub Releases。
 
 ### 发布供应链防护检查清单
 
 每个新的 package version 被 publish 前，都必须按以下链路检查：
 
 ```
-声明层 -> CI 权限层 -> 依赖解析层 -> 构建层 -> tarball 审计层 -> npm 发布层
+声明层 -> CI 权限层 -> 依赖解析层 -> 构建层 -> tarball 审计层 -> npm 发布层 -> GitHub Release 层
 ```
 
 | 层级 | 必查点 | 代码/配置位置 | 失败处理 |
 |------|------|------|------|
-| 声明层 | 发布包必须属于当前 npm scope，且只覆盖 `@roll-agent/core`、`@roll-agent/sdk`、`@roll-agent/browser`、`@roll-agent/browser-use-agent`、`@roll-agent/smart-reply-agent` | `scripts/verify-published-packages.mjs` | 不把未知包加入发布清单；先明确包边界 |
+| 声明层 | 发布包必须属于当前 npm scope，且只覆盖 `@roll-agent/core`、`@roll-agent/sdk`、`@roll-agent/browser`、`@roll-agent/reply-authority-client`、`@roll-agent/browser-use-agent`、`@roll-agent/smart-reply-agent` | `scripts/verify-published-packages.mjs` | 不把未知包加入发布清单；先明确包边界 |
 | CI 权限层 | GitHub Actions 必须使用 full SHA pin，不能使用 tag；PR CI 和 release workflow 都要满足仓库级 SHA pin 规则 | `.github/workflows/ci.yml`、`.github/workflows/release.yml` | CI 会在下载 action 前失败；先 pin SHA 再重跑 |
 | CI 权限层 | workflow 顶层保持 `permissions: {}`；`quality` 只给 `contents: read`；`release` 只给 `contents: write` 和 `pull-requests: write` | `.github/workflows/release.yml` | 不扩大默认 `GITHUB_TOKEN` 权限 |
 | CI 权限层 | 本轮发布继续使用 `NPM_TOKEN`；除非正式迁移 Trusted Publishing，否则不能加回 `id-token: write` | `.github/workflows/release.yml` | 需要 Trusted Publishing 时单独设计迁移方案 |
 | token 暴露层 | `NPM_TOKEN` 只能注入真正 publish step，不能出现在 install/build/test/verify 步骤 | `.github/workflows/release.yml`、`scripts/release-packages.mjs` | 发现扩大暴露面时必须拆回 publish-only |
+| token 暴露层 | GitHub Release 创建必须放在 npm publish 之后的独立 step，只注入 GitHub token，不能注入 `NPM_TOKEN` | `.github/workflows/release.yml`、`scripts/create-github-releases.mjs` | 不把 npm 发布权限和 GitHub 写权限交给同一个第三方 action |
 | 依赖解析层 | 使用 `pnpm install --frozen-lockfile`，发布前不能隐式刷新 lockfile | `.github/workflows/*.yml` | lockfile 不一致时先本地审查依赖变化 |
 | 依赖解析层 | `minimumReleaseAge: 10080` 必须保留，新解析依赖至少发布满 7 天 | `pnpm-workspace.yaml` | 不能为了临时升级绕过冷却期 |
 | 依赖解析层 | `blockExoticSubdeps: true` 必须保留，阻断传递依赖使用 git/tarball 等 exotic source | `pnpm-workspace.yaml` | 需要例外时先做人工供应链审计 |
@@ -253,6 +255,7 @@ pnpm release-packages
 | 发布 job 层 | `release` job 不能启用 `cache: pnpm`；`quality` job 可以保留 cache | `.github/workflows/release.yml` | 发布 job 发现缓存时必须删除 |
 | 发布命令层 | CI publish 必须走 `pnpm release-packages` / `node scripts/release-packages.mjs`，不能直接裸跑 `changeset publish` | `package.json`、`scripts/release-packages.mjs` | 保证 publish 前置校验不会被跳过 |
 | 发布命令层 | `scripts/release-packages.mjs` 必须在无 publish token 阶段完成 build 和 verify，只在 publish 窗口临时写入 npm token | `scripts/release-packages.mjs` | 不允许 token 长时间存在于 workspace |
+| GitHub Release 层 | npm publish 成功后必须运行 `pnpm release-github-releases`，为当前已发布包版本补齐 GitHub Release | `.github/workflows/release.yml`、`scripts/create-github-releases.mjs` | 不能只发布 npm 而丢失 GitHub Releases |
 | tarball 审计层 | packed manifest 禁止 `preinstall`、`install`、`postinstall`、`prepare` lifecycle | `scripts/verify-published-packages.mjs` | 命中即失败，禁止发布 |
 | tarball 审计层 | packed files 禁止已知可疑文件名：`router_init.js`、`router_runtime.js`、`tanstack_runner.js`、`setup.mjs`、`gh-token-monitor` | `scripts/verify-published-packages.mjs` | 命中即失败，先定位来源 |
 | tarball 审计层 | packed text 必须扫描已知 IoC：`IfYouRevoke`、`toJSON(secrets)`、`.claude/settings`、`.vscode/tasks`、`@tanstack/setup`、`filev2.getsession` | `scripts/verify-published-packages.mjs` | 命中即失败，不能人工忽略 |
@@ -264,10 +267,12 @@ pnpm install --frozen-lockfile
 pnpm typecheck
 pnpm lint
 pnpm test
+pnpm test:scripts
 pnpm test:e2e
 pnpm build
 pnpm verify:published-packages
 node scripts/release-packages.mjs --dry-run
+node scripts/create-github-releases.mjs --dry-run
 ```
 
 边界条件：
