@@ -8,6 +8,7 @@ export type PreparedReplyRecord = {
   readonly confidence: number;
   readonly expiresAt: number;
   readonly requestId?: string;
+  readonly unreadCountBeforeReply?: number;
 };
 
 type StoredPreparedReply = PreparedReplyRecord & {
@@ -110,6 +111,9 @@ function toPreparedReplyRecord(record: StoredPreparedReply): PreparedReplyRecord
     confidence: record.confidence,
     expiresAt: record.expiresAt,
     ...(record.requestId !== undefined ? { requestId: record.requestId } : {}),
+    ...(record.unreadCountBeforeReply !== undefined
+      ? { unreadCountBeforeReply: record.unreadCountBeforeReply }
+      : {}),
   };
 }
 

@@ -2,7 +2,10 @@ import assert from "node:assert/strict";
 import { generateKeyPairSync, sign } from "node:crypto";
 import { afterEach, describe, it } from "node:test";
 import type { AgentContext } from "@roll-agent/sdk";
-import type { ZhipinNativePagePort } from "../pages/zhipin/native-page.ts";
+import type {
+  NativeCandidateChatDetails,
+  ZhipinNativePagePort,
+} from "../pages/zhipin/native-page.ts";
 import {
   resetReplyAuthorityKeyStoreForTests,
   setReplyAuthorityKeysForTests,
@@ -10,7 +13,15 @@ import {
 import { resetReplyEnvelopeReplayStoreForTests } from "../reply-authority/replay-store.ts";
 import { setReplyAuthorityKeysLoaded } from "../runtime-holder.ts";
 import { setVisualActivityEnabledForTests } from "../visual-activity.ts";
-import { setZhipinSendReplyDepsForTests, zhipinSendReply } from "./zhipin-send-reply.ts";
+import {
+  setRecruitmentEventRecorderForTests,
+  type RecruitmentEventDraft,
+} from "../recruitment-events/client.ts";
+import {
+  sendSignedZhipinReply,
+  setZhipinSendReplyDepsForTests,
+  zhipinSendReply,
+} from "./zhipin-send-reply.ts";
 
 function createTestContext(errorLogs: string[]): AgentContext {
   return {
@@ -128,10 +139,46 @@ function createNativePage(
   } as unknown as ZhipinNativePagePort;
 }
 
+function createCandidateDetails(): NativeCandidateChatDetails {
+  return {
+    selectedTarget: {
+      conversationId: "685501091-0",
+      candidateId: "candidate-123",
+      candidateName: "张三",
+    },
+    activePanel: { candidateName: "张三" },
+    candidateInfo: {
+      name: "张三",
+      age: "22岁",
+      experience: "1年",
+      education: "高中",
+      communicationPosition: "服务员",
+      expectedJobText: "上海·服务员",
+      expectedSalary: "5-6K",
+      tags: [],
+    },
+    messages: [],
+  };
+}
+
+async function captureRecruitmentEvents(
+  run: () => Promise<void>,
+): Promise<RecruitmentEventDraft[]> {
+  const events: RecruitmentEventDraft[] = [];
+  setRecruitmentEventRecorderForTests((event) => {
+    events.push(event);
+  });
+
+  await run();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  return events;
+}
+
 afterEach(() => {
   setReplyAuthorityKeysLoaded(false);
   setZhipinSendReplyDepsForTests(undefined);
   setVisualActivityEnabledForTests(undefined);
+  setRecruitmentEventRecorderForTests(undefined);
   resetReplyAuthorityKeyStoreForTests();
   resetReplyEnvelopeReplayStoreForTests();
 });
@@ -195,6 +242,57 @@ describe("zhipin_send_reply", () => {
     assert.equal(calls.includes("open"), false);
     assert.ok(calls.indexOf("preview:clear") < calls.indexOf("session:begin:正在发送回复"));
     assert.ok(calls.some((call) => call.startsWith("send:")));
+  });
+
+  it("uses provided unread context when the signed target is already selected", async () => {
+    const calls: string[] = [];
+    const errorLogs: string[] = [];
+    let result: Awaited<ReturnType<typeof sendSignedZhipinReply>> | undefined;
+
+    setVisualActivityEnabledForTests(true);
+    setReplyAuthorityKeysLoaded(true);
+    setZhipinSendReplyDepsForTests({
+      getReplyAuthorityKeysLoaded: () => true,
+      openNativePagePort: async () =>
+        createNativePage(calls, {
+          async readCandidateChatDetails() {
+            return createCandidateDetails();
+          },
+        }),
+      createNativeVisualActivitySession: () => ({
+        async begin(label: string) {
+          calls.push(`session:begin:${label}`);
+          return true;
+        },
+        async previewMouseMotion() {
+          return undefined;
+        },
+        async succeed(label: string) {
+          calls.push(`session:succeed:${label}`);
+          return true;
+        },
+        async fail(label: string) {
+          calls.push(`session:fail:${label}`);
+          return true;
+        },
+      }),
+    });
+
+    const events = await captureRecruitmentEvents(async () => {
+      result = await sendSignedZhipinReply(
+        {
+          signedEnvelope: createSignedEnvelope("reply-selected-unread-test"),
+          unreadCountBeforeReply: 1,
+        },
+        createTestContext(errorLogs),
+      );
+    });
+
+    assert.equal(result?.success, true);
+    assert.equal(calls.includes("open"), false);
+    assert.equal(events.length, 1);
+    assert.equal(events[0]?.details["unreadCountBeforeReply"], 1);
+    assert.equal(events[0]?.details["wasUnreadBeforeReply"], true);
   });
 
   it("reopens the signed target when the current selected chat differs", async () => {
@@ -271,5 +369,89 @@ describe("zhipin_send_reply", () => {
     assert.equal(result.success, true);
     assert.equal(calls.includes("open"), true);
     assert.ok(calls.indexOf("open") < calls.findIndex((call) => call.startsWith("send:")));
+  });
+
+  it("keeps the larger real unread count when reopening the signed target", async () => {
+    const calls: string[] = [];
+    const errorLogs: string[] = [];
+    let opened = false;
+
+    setVisualActivityEnabledForTests(true);
+    setReplyAuthorityKeysLoaded(true);
+    setZhipinSendReplyDepsForTests({
+      getReplyAuthorityKeysLoaded: () => true,
+      openNativePagePort: async () =>
+        createNativePage(calls, {
+          async openChat() {
+            opened = true;
+            calls.push("open");
+            return {
+              found: true,
+              conversationId: "685501091-0",
+              candidateId: "candidate-123",
+              name: "张三",
+              index: 0,
+              position: "服务员",
+              hasUnread: true,
+              unreadCount: 3,
+              lastMessageTime: "10:20",
+              messagePreview: "你好",
+            };
+          },
+          async readActiveChatPanel() {
+            return { candidateName: opened ? "张三" : "李四" };
+          },
+          async readSelectedChatTarget() {
+            if (!opened) {
+              return {
+                conversationId: "other-conversation",
+                candidateId: "other-candidate",
+                candidateName: "李四",
+              };
+            }
+            return {
+              conversationId: "685501091-0",
+              candidateId: "candidate-123",
+              candidateName: "张三",
+            };
+          },
+          async readCandidateChatDetails() {
+            return createCandidateDetails();
+          },
+        }),
+      createNativeVisualActivitySession: () => ({
+        async begin(label: string) {
+          calls.push(`session:begin:${label}`);
+          return true;
+        },
+        async previewMouseMotion() {
+          return undefined;
+        },
+        async succeed(label: string) {
+          calls.push(`session:succeed:${label}`);
+          return true;
+        },
+        async fail(label: string) {
+          calls.push(`session:fail:${label}`);
+          return true;
+        },
+      }),
+    });
+
+    const events = await captureRecruitmentEvents(async () => {
+      const result = await sendSignedZhipinReply(
+        {
+          signedEnvelope: createSignedEnvelope("reply-reopen-unread-test"),
+          unreadCountBeforeReply: 1,
+        },
+        createTestContext(errorLogs),
+      );
+      assert.equal(result.success, true);
+    });
+
+    assert.equal(calls.includes("open"), true);
+    assert.equal(events.length, 1);
+    assert.equal(events[0]?.details["unreadCountBeforeReply"], 3);
+    assert.equal(events[0]?.details["wasUnreadBeforeReply"], true);
   });
 });

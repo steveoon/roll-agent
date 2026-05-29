@@ -69,6 +69,7 @@ function createPreparedReplyDigest(record: PreparedReplyRecord): string {
         record.signedEnvelope,
         record.suggestedReply,
         record.expiresAt,
+        record.unreadCountBeforeReply,
       ]),
     )
     .digest("hex")}`;
@@ -133,6 +134,9 @@ export const zhipinSendPreparedReply = defineTool({
     return await deps.sendSignedZhipinReply(
       {
         signedEnvelope: consumed.record.signedEnvelope,
+        ...(consumed.record.unreadCountBeforeReply !== undefined
+          ? { unreadCountBeforeReply: consumed.record.unreadCountBeforeReply }
+          : {}),
       },
       ctx,
     );

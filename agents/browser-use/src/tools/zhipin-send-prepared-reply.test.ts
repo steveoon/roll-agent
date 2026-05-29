@@ -57,7 +57,7 @@ afterEach(() => {
 });
 
 describe("zhipin_send_prepared_reply", () => {
-  function saveTestPreparedReply(suggestedReply = "你好") {
+  function saveTestPreparedReply(suggestedReply = "你好", unreadCountBeforeReply?: number) {
     return savePreparedReply(
       {
         signedEnvelope: `payload.${suggestedReply}.signature`,
@@ -65,6 +65,7 @@ describe("zhipin_send_prepared_reply", () => {
         stage: "job_consultation",
         confidence: 0.9,
         expiresAt: 4_102_444_800,
+        ...(unreadCountBeforeReply !== undefined ? { unreadCountBeforeReply } : {}),
       },
       1_800_000_000,
     );
@@ -134,6 +135,25 @@ describe("zhipin_send_prepared_reply", () => {
       ok: false,
       reason: "consumed",
     });
+  });
+
+  it("passes prepared unread context to signed reply sending", async () => {
+    const sentUnreadCounts: Array<number | undefined> = [];
+    const saved = saveTestPreparedReply("你好", 2);
+    setZhipinSendPreparedReplyDepsForTests({
+      sendSignedZhipinReply: async (input) => {
+        sentUnreadCounts.push(input.unreadCountBeforeReply);
+        return { success: true, sentMessage: "你好" };
+      },
+    });
+
+    const result = await zhipinSendPreparedReply.execute(
+      { preparedReplyId: saved.preparedReplyId },
+      createTestContext(),
+    );
+
+    assert.equal(result.success, true);
+    assert.deepEqual(sentUnreadCounts, [2]);
   });
 
   it("returns needs_confirmation without consuming the prepared reply when policy is confirm", async () => {

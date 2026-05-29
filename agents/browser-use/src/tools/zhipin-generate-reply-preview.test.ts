@@ -81,6 +81,22 @@ function createChatDetails(
     candidateId: "cand-1",
     candidateName: "张三",
   },
+  messages: NativeCandidateChatDetails["messages"] = [
+    {
+      index: 0,
+      sender: "recruiter" as const,
+      messageType: "text" as const,
+      content: "你好",
+      time: "10:19",
+    },
+    {
+      index: 1,
+      sender: "candidate" as const,
+      messageType: "text" as const,
+      content: "薪资多少？",
+      time: "10:20",
+    },
+  ],
 ): NativeCandidateChatDetails {
   return {
     selectedTarget,
@@ -95,22 +111,7 @@ function createChatDetails(
       expectedSalary: "5-6K",
       tags: ["全职"],
     },
-    messages: [
-      {
-        index: 0,
-        sender: "recruiter" as const,
-        messageType: "text" as const,
-        content: "你好",
-        time: "10:19",
-      },
-      {
-        index: 1,
-        sender: "candidate" as const,
-        messageType: "text" as const,
-        content: "薪资多少？",
-        time: "10:20",
-      },
-    ],
+    messages,
   };
 }
 
@@ -132,7 +133,7 @@ function createNativePage(
         index: 0,
         position: "服务员",
         hasUnread: true,
-        unreadCount: 1,
+        unreadCount: 2,
         lastMessageTime: "10:20",
         messagePreview: "薪资多少？",
       };
@@ -277,6 +278,105 @@ describe("zhipin_generate_reply_preview", () => {
     assert.equal(consumed.ok, true);
     if (consumed.ok) {
       assert.equal(consumed.record.signedEnvelope, "payload.signature");
+      assert.equal(consumed.record.unreadCountBeforeReply, 2);
+    }
+  });
+
+  it("infers unread context when the latest human message is from the candidate", async () => {
+    const calls: string[] = [];
+
+    setZhipinGenerateReplyPreviewDepsForTests({
+      openNativePagePort: async () =>
+        createNativePage(calls, {
+          async openChat(input: unknown) {
+            calls.push(`open:${JSON.stringify(input)}`);
+            return {
+              found: true,
+              conversationId: "conv-1",
+              candidateId: "cand-1",
+              name: "张三",
+              index: 0,
+              position: "服务员",
+              hasUnread: false,
+              unreadCount: 0,
+              lastMessageTime: "10:20",
+              messagePreview: "薪资多少？",
+            };
+          },
+        }),
+      createNativeVisualActivitySession: () => createNoopSession(calls),
+      createReplyPreviewVisualSession: () => createPreviewSession(calls),
+      streamGenerateSignedReply: () => createMockStream(),
+    });
+
+    const result = await zhipinGenerateReplyPreview.execute(
+      { conversationId: "conv-1", maxMessages: 20 },
+      createTestContext(),
+    );
+
+    assert.equal(result.success, true);
+    const consumed = consumePreparedReply(result.preparedReplyId ?? "", 1_800_000_000);
+    assert.equal(consumed.ok, true);
+    if (consumed.ok) {
+      assert.equal(consumed.record.unreadCountBeforeReply, 1);
+    }
+  });
+
+  it("does not infer unread context when the latest human message is from the recruiter", async () => {
+    const calls: string[] = [];
+
+    setZhipinGenerateReplyPreviewDepsForTests({
+      openNativePagePort: async () =>
+        createNativePage(calls, {
+          async openChat(input: unknown) {
+            calls.push(`open:${JSON.stringify(input)}`);
+            return {
+              found: true,
+              conversationId: "conv-1",
+              candidateId: "cand-1",
+              name: "张三",
+              index: 0,
+              position: "服务员",
+              hasUnread: false,
+              unreadCount: 0,
+              lastMessageTime: "10:20",
+              messagePreview: "我这边先发一条",
+            };
+          },
+          async readCandidateChatDetails() {
+            return createChatDetails(undefined, [
+              {
+                index: 0,
+                sender: "candidate" as const,
+                messageType: "text" as const,
+                content: "薪资多少？",
+                time: "10:19",
+              },
+              {
+                index: 1,
+                sender: "recruiter" as const,
+                messageType: "text" as const,
+                content: "我这边先发一条",
+                time: "10:20",
+              },
+            ]);
+          },
+        }),
+      createNativeVisualActivitySession: () => createNoopSession(calls),
+      createReplyPreviewVisualSession: () => createPreviewSession(calls),
+      streamGenerateSignedReply: () => createMockStream(),
+    });
+
+    const result = await zhipinGenerateReplyPreview.execute(
+      { conversationId: "conv-1", maxMessages: 20 },
+      createTestContext(),
+    );
+
+    assert.equal(result.success, true);
+    const consumed = consumePreparedReply(result.preparedReplyId ?? "", 1_800_000_000);
+    assert.equal(consumed.ok, true);
+    if (consumed.ok) {
+      assert.equal(consumed.record.unreadCountBeforeReply, 0);
     }
   });
 

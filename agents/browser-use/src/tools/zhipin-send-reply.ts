@@ -109,11 +109,17 @@ function panelMatchesTarget(
   );
 }
 
+function normalizeUnreadCount(value: number | undefined): number {
+  if (value === undefined || !Number.isFinite(value) || value <= 0) return 0;
+  return Math.floor(value);
+}
+
 export async function sendSignedZhipinReply(
   input: {
     readonly signedEnvelope: string;
     readonly candidateName?: string | undefined;
     readonly index?: number | undefined;
+    readonly unreadCountBeforeReply?: number | undefined;
   },
   ctx: AgentContext,
 ): Promise<ZhipinSendReplyResult> {
@@ -146,7 +152,7 @@ export async function sendSignedZhipinReply(
 
     let activePanel = await nativePage.readActiveChatPanel().catch(() => null);
     let chatTarget = await nativePage.readSelectedChatTarget().catch(() => null);
-    let unreadCountBeforeReply = 0;
+    let unreadCountBeforeReply = normalizeUnreadCount(input.unreadCountBeforeReply);
 
     if (
       !targetMatchesEnvelope(chatTarget, envelopePayload) ||
@@ -161,7 +167,10 @@ export async function sendSignedZhipinReply(
         await session.fail(nav.error ?? "未找到目标聊天");
         return { success: false, sentMessage, error: nav.error ?? "未找到目标聊天" };
       }
-      unreadCountBeforeReply = nav.unreadCount;
+      unreadCountBeforeReply = Math.max(
+        unreadCountBeforeReply,
+        normalizeUnreadCount(nav.unreadCount),
+      );
       activePanel = await nativePage.readActiveChatPanel();
       chatTarget = await nativePage.readSelectedChatTarget();
     }
