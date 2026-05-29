@@ -203,7 +203,10 @@ Decision flow:
 
 ```text
 browser page/window/runtime stale
-  -> roll browser stop <browserInstance>
+  -> read target agent SKILL/references for page-level reload/recovery tools
+  -> run the documented recovery tool if available
+  -> discard stale refs and re-read current page/list state
+  -> if page recovery fails, roll browser stop <browserInstance>
   -> retry the target browser tool with the same browserInstance
 
 all browser windows should close, service should stay usable
@@ -224,6 +227,39 @@ Boundary:
 - `roll browser stop` does not delete profile/session data.
 - `roll browser clear-data` deletes declared browser data; it is not a runtime restart command.
 - Do not scan operating-system browser processes or kill Chrome by port/path from orchestration code.
+
+## Browser Page Recovery
+
+Use this section when a page has stale in-document state, stale refs, broken selection, or a stuck SPA,
+but the browser runtime and agent service are still responding.
+
+Recovery order:
+
+```text
+roll skills get <agent-name> --include-references --json
+  -> find the target agent's documented reload/recovery/semantic opener tools
+  -> run the documented page recovery tool
+  -> discard old @eN / business refs / page-derived handles
+  -> run a fresh snapshot or domain-specific reader tool
+  -> continue only with newly emitted refs and ids
+```
+
+Fallback:
+
+```text
+document/page recovery failed
+  -> roll browser stop <browserInstance>
+  -> reopen the platform/workflow with the same browserInstance
+  -> re-read current state before side effects
+```
+
+Rules:
+
+1. Prefer the target agent's recovery tool over raw URL navigation or runtime stop.
+2. Never hardcode platform-internal recovery URLs in the shared Roll orchestrator.
+3. Treat reload as page/document-state recovery, not guaranteed renderer memory reclamation.
+4. Escalate to `roll browser stop` only when page-level recovery is unavailable or insufficient.
+5. Escalate to `roll agent stop <agent-name>` only when `roll agent health --json` indicates the service process itself is unhealthy.
 
 ## Persistent Agent Recovery
 

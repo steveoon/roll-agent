@@ -142,6 +142,25 @@ Boundary rules:
 - For browser agents with external sessions, runtime stop may mean disconnecting Roll from the browser rather than killing an external browser process. Read the target agent's `SKILL.md` for exact mode semantics.
 - Before deleting profile/session data, stop the target runtime or use the agent's documented force option only when intentional.
 
+## Browser Page Recovery
+
+When a browser page is stale but the browser runtime and agent service are still healthy, prefer a
+target-agent-provided page recovery tool before closing the runtime.
+
+Recovery priority:
+
+1. Read the target agent's current `SKILL.md` / references with `roll skills get <agent-name> --include-references --json`.
+2. If the target agent documents a page reload, recovery, or semantic section opener with a reload option, use that documented tool first.
+3. After any reload/recovery action, discard all page snapshot refs and business refs returned before the reload; run the relevant snapshot or reader tool again.
+4. If page-level recovery fails or the runtime itself is stuck, then use `roll browser stop <browserInstance>` and reopen the workflow with the same routing key.
+
+Boundary rules:
+
+- Do not invent a reload URL or hardcode a platform-internal route. Use the target agent's documented recovery tool.
+- Do not assume reload frees renderer process memory. It refreshes page/document state; runtime/process cleanup remains `roll browser stop`.
+- Do not use `roll agent stop <agent-name>` for page state recovery unless the service process itself is unhealthy.
+- Keep exact recovery tool names, approval fields, and output flags in the target agent's own `SKILL.md`.
+
 ## Batch Tool Calls
 
 Use batch mode when an orchestrator already knows a sequence of independent or serial `roll run`
