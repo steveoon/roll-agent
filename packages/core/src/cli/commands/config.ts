@@ -4,6 +4,12 @@ import { resolve } from "node:path";
 import { createInterface } from "node:readline/promises";
 import { stringify as stringifyYaml } from "yaml";
 import {
+  DEFAULT_CONFIG,
+  DEFAULT_LLM_MODELS,
+  LLM_PROVIDER_OPTIONS,
+  type LlmProviderOption,
+} from "../../config/defaults.ts";
+import {
   inspectConfigFile,
   loadConfig,
   parseConfigDocument,
@@ -11,11 +17,17 @@ import {
 } from "../../config/loader.ts";
 import { encodePathToYaml, normalizeUserPath } from "../../config/key-codec.ts";
 import { applyKnownConfigMigrations } from "../../config/migration.ts";
+import { explainConfig } from "./config-explain.ts";
+import { runConfigSetup } from "./config-setup.ts";
 
 export default defineCommand({
   meta: { description: "管理全局配置" },
   args: {
-    action: { type: "positional", description: "操作（init/get/set/migrate）", required: true },
+    action: {
+      type: "positional",
+      description: "操作（init/get/set/migrate/setup/explain）",
+      required: true,
+    },
     key: {
       type: "positional",
       description: "配置键（get/set 时使用，用英文句点 `.` 分隔，如 ask.confirm-threshold）",
@@ -45,7 +57,26 @@ export default defineCommand({
         return;
       }
 
-      console.error(`✗ 未知操作: ${args.action}。可用: init, get, set, migrate`);
+      if (args.action === "setup") {
+        if (!process.stdin.isTTY) {
+          console.error("✗ `roll config setup` 需要交互式终端。");
+          console.error(
+            "  非交互环境请改用 `roll config set <key> <value>` 或直接编辑 roll.config.yaml。",
+          );
+          console.error("  查看配置说明：`roll config explain <key>`。");
+          process.exitCode = 1;
+          return;
+        }
+        await runConfigSetup(args.key, args.value);
+        return;
+      }
+
+      if (args.action === "explain") {
+        explainConfig(args.key);
+        return;
+      }
+
+      console.error(`✗ 未知操作: ${args.action}。可用: init, get, set, migrate, setup, explain`);
       process.exitCode = 1;
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -61,9 +92,32 @@ interface InitConfigAnswers {
   readonly apiKeyEnv: string;
 }
 
+const INIT_API_KEY_ENV_BY_PROVIDER = {
+  anthropic: "ANTHROPIC_API_KEY",
+  openai: "OPENAI_API_KEY",
+  qwen: "DASHSCOPE_API_KEY",
+  deepseek: "DEEPSEEK_API_KEY",
+} as const satisfies Record<LlmProviderOption, string>;
+
 function normalizeAnswer(value: string | undefined, fallback: string): string {
   const trimmed = value?.trim();
   return trimmed || fallback;
+}
+
+function isLlmProviderOption(value: string): value is LlmProviderOption {
+  return LLM_PROVIDER_OPTIONS.some((candidate) => candidate === value);
+}
+
+function getDefaultModelForProvider(provider: string): string {
+  return isLlmProviderOption(provider)
+    ? DEFAULT_LLM_MODELS[provider]
+    : DEFAULT_CONFIG.llm.defaultModel;
+}
+
+function getDefaultApiKeyEnvForProvider(provider: string): string {
+  return isLlmProviderOption(provider)
+    ? INIT_API_KEY_ENV_BY_PROVIDER[provider]
+    : INIT_API_KEY_ENV_BY_PROVIDER.anthropic;
 }
 
 function buildInitialConfigYaml({ provider, model, apiKeyEnv }: InitConfigAnswers): string {
@@ -85,26 +139,28 @@ agents:
 async function readInitConfigAnswers(): Promise<InitConfigAnswers> {
   if (!process.stdin.isTTY) {
     const [provider, model, apiKeyEnv] = readFileSync(0, "utf-8").split(/\r?\n/u);
+    const normalizedProvider = normalizeAnswer(provider, DEFAULT_CONFIG.llm.defaultProvider);
     return {
-      provider: normalizeAnswer(provider, "anthropic"),
-      model: normalizeAnswer(model, "claude-sonnet-4-20250514"),
-      apiKeyEnv: normalizeAnswer(apiKeyEnv, "ANTHROPIC_API_KEY"),
+      provider: normalizedProvider,
+      model: normalizeAnswer(model, getDefaultModelForProvider(normalizedProvider)),
+      apiKeyEnv: normalizeAnswer(apiKeyEnv, getDefaultApiKeyEnvForProvider(normalizedProvider)),
     };
   }
 
   const rl = createInterface({ input: process.stdin, output: process.stderr });
 
   const provider = normalizeAnswer(
-    await rl.question("默认 LLM provider (anthropic/openai/qwen) [anthropic]: "),
-    "anthropic",
+    await rl.question(
+      `默认 LLM provider (${LLM_PROVIDER_OPTIONS.join("/")}) [${DEFAULT_CONFIG.llm.defaultProvider}]: `,
+    ),
+    DEFAULT_CONFIG.llm.defaultProvider,
   );
-  const model = normalizeAnswer(
-    await rl.question("默认 model [claude-sonnet-4-20250514]: "),
-    "claude-sonnet-4-20250514",
-  );
+  const defaultModel = getDefaultModelForProvider(provider);
+  const model = normalizeAnswer(await rl.question(`默认 model [${defaultModel}]: `), defaultModel);
+  const defaultApiKeyEnv = getDefaultApiKeyEnvForProvider(provider);
   const apiKeyEnv = normalizeAnswer(
-    await rl.question("API Key 环境变量名 [ANTHROPIC_API_KEY]: "),
-    "ANTHROPIC_API_KEY",
+    await rl.question(`API Key 环境变量名 [${defaultApiKeyEnv}]: `),
+    defaultApiKeyEnv,
   );
 
   rl.close();

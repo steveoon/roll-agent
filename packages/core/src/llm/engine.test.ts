@@ -1,19 +1,21 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
+import { DEFAULT_CONFIG } from "../config/defaults.ts";
 import { LLMEngine } from "./engine.ts";
 import type { RollConfig } from "../config/schema.ts";
 
 const baseConfig: RollConfig = {
   llm: {
-    defaultProvider: "anthropic",
-    defaultModel: "claude-sonnet-4-20250514",
+    defaultProvider: DEFAULT_CONFIG.llm.defaultProvider,
+    defaultModel: DEFAULT_CONFIG.llm.defaultModel,
     providers: {
       anthropic: { apiKey: "test-key" },
     },
   },
   ask: {},
   agents: { dataDir: "/tmp/agents" },
-  browser: { instances: {} },
+  install: DEFAULT_CONFIG.install,
+  browser: DEFAULT_CONFIG.browser,
 };
 
 describe("LLMEngine", () => {

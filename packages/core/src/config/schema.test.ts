@@ -1,13 +1,14 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
+import { DEFAULT_CONFIG } from "./defaults.ts";
 import { rollConfigSchema } from "./schema.ts";
 
 describe("rollConfigSchema", () => {
   it("should validate a valid config", () => {
     const result = rollConfigSchema.safeParse({
       llm: {
-        defaultProvider: "anthropic",
-        defaultModel: "claude-sonnet-4-20250514",
+        defaultProvider: DEFAULT_CONFIG.llm.defaultProvider,
+        defaultModel: DEFAULT_CONFIG.llm.defaultModel,
         providers: {
           anthropic: { apiKey: "test-key" },
         },

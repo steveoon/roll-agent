@@ -2,7 +2,7 @@ import { defineCommand } from "citty";
 import { existsSync, mkdirSync, statSync } from "node:fs";
 import { resolve } from "node:path";
 import { getAgentEnv, inspectAgentEnvRequirements } from "../../config/helpers.ts";
-import { loadAgentsConfig, loadConfig } from "../../config/loader.ts";
+import { loadAgentsConfig, loadConfig, loadInstallConfig } from "../../config/loader.ts";
 import { discoverAgent } from "../../registry/discovery.ts";
 import {
   startAgent,
@@ -19,11 +19,22 @@ import {
 } from "../../registry/source.ts";
 import { log } from "../utils/output.ts";
 import {
+  buildNpmRetryPolicy,
   formatPackageManagerError,
-  runPackageManager,
+  npmInstallNetworkArgs,
+  runPackageManagerWithRetry,
   type PackageManagerRunSpec,
 } from "../utils/package-manager.ts";
 import type { RegisteredAgent } from "../../types/agent.ts";
+import type { RollConfig } from "../../config/schema.ts";
+
+function buildInstallNetworkArgs(install: RollConfig["install"]): string[] {
+  return npmInstallNetworkArgs({
+    ...(install.registry ? { registry: install.registry } : {}),
+    fetchRetries: install.fetchRetries,
+    preferOffline: install.preferOffline,
+  });
+}
 
 function isGitUrl(input: string): boolean {
   return (
@@ -57,6 +68,16 @@ export default defineCommand({
   },
   async run({ args }) {
     const { agentsConfig } = loadAgentsConfig();
+    let installConfig: RollConfig["install"];
+    try {
+      installConfig = loadInstallConfig().installConfig;
+    } catch (error) {
+      log.error(
+        `install 配置无效，已停止安装：${error instanceof Error ? error.message : String(error)}`,
+      );
+      process.exitCode = 1;
+      return;
+    }
     const packageSpec = args.package;
 
     if (isGitUrl(packageSpec)) {
@@ -83,13 +104,34 @@ export default defineCommand({
       mkdirSync(installDir, { recursive: true });
     }
 
+    if (installConfig.registry) {
+      log.info(`使用 npm registry: ${installConfig.registry}（roll.config.yaml install.registry）`);
+    }
+
     log.info(`安装 ${packageSpec}...`);
     const installSpec: PackageManagerRunSpec = {
       command: "npm",
-      args: ["install", "--prefix", installDir, packageSpec],
+      args: [
+        "install",
+        "--prefix",
+        installDir,
+        packageSpec,
+        ...buildInstallNetworkArgs(installConfig),
+      ],
     };
     try {
-      await runPackageManager(installSpec, { timeout: 120_000 });
+      await runPackageManagerWithRetry(
+        installSpec,
+        { timeout: installConfig.networkTimeoutMs },
+        {
+          ...buildNpmRetryPolicy(installConfig.fetchRetries),
+          onRetry: ({ attempt, delayMs }) => {
+            log.warn(
+              `安装遇到网络问题，${Math.round(delayMs / 1000)}s 后重试（第 ${attempt + 1} 次）...`,
+            );
+          },
+        },
+      );
     } catch (err) {
       log.error(`安装失败: ${formatPackageManagerError(installSpec, err)}`);
       process.exitCode = 1;
@@ -217,7 +259,8 @@ function reportAgentEnvGuidance(
     log.warn(
       `Agent "${agentName}" 仍缺少必填环境变量: ${envReport.missingRequired.map((item) => item.name).join(", ")}`,
     );
-    log.info(`请在 roll.config.yaml 的 agents.env.${agentName} 中显式配置这些项。`);
+    log.info(`运行 \`roll config setup agent ${agentName}\` 交互式配置。`);
+    log.info(`运行 \`roll config explain agents.env.${agentName}\` 查看配置说明。`);
     return;
   }
 
@@ -225,6 +268,6 @@ function reportAgentEnvGuidance(
     log.warn(
       `Agent "${agentName}" 当前依赖 shell 环境变量: ${envReport.processEnvOnlyRequired.map((item) => item.name).join(", ")}`,
     );
-    log.info(`建议将这些项写入 roll.config.yaml 的 agents.env.${agentName}。`);
+    log.info(`建议运行 \`roll config setup agent ${agentName}\` 持久写入 roll.config.yaml。`);
   }
 }

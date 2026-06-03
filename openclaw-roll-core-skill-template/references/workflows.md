@@ -33,7 +33,7 @@ Use this order when the target agent is not yet fully understood:
 
 ```bash
 roll skills list --json
-roll skills get <agent-name> --include-references --json
+roll skills get <agent-name> --json
 roll skills path <agent-name>
 ```
 
@@ -48,10 +48,11 @@ knowledge.
 | `roll skills path <agent-name>` | Local `SKILL.md` path when available | Read adjacent references from a local-path agent |
 
 Priority:
-1. Use `roll skills get <agent-name> --include-references --json` for orchestration rules, stable
-   identifier rules, and referenced workflow docs.
-2. Use `roll agent tools <agent-name> --json` for the exact runtime schema.
-3. Use local reference files only after `skills path` confirms a filesystem-backed skill.
+1. Use `roll skills get <agent-name> --json` for first-pass planning from the live registered skill.
+2. Add `--include-references` only when the task needs stable identifier rules, routing keys,
+   recovery steps, or referenced workflow docs.
+3. Use `roll agent tools <agent-name> --json` for the exact runtime schema.
+4. Use local reference files only after `skills path` confirms a filesystem-backed skill.
 
 Boundary:
 - `roll skills get` is documentation, not runtime schema.
@@ -183,7 +184,7 @@ For `needs_input`, the stdout JSON contains:
 | Field | Meaning | Remediation |
 |-------|---------|-------------|
 | `validationIssues` | Input schema fields. Parent missing objects are recursively expanded to leaf fields and shown once per field | Collect the values and pass them with `roll run <agent-name> <tool-name> --input-json '{...}' --json` |
-| `runtimeIssues` | Runtime prerequisites such as missing env | Configure `agents.env.<agent-name>` in `roll.config.yaml` or export in the current shell before retrying |
+| `runtimeIssues` | Runtime prerequisites such as missing env | Prefer `roll config setup agent <agent-name>`; use `roll config explain agents.env.<agent-name>` to inspect required keys. Temporary shell exports are acceptable only for one-off retries |
 
 Both arrays are returned at once, not layer-by-layer. Resolve the full set before retrying.
 
@@ -319,7 +320,32 @@ roll update
 
 For `installed-package` + `core-managed` agents, the update lifecycle is: stop → npm install → re-discover → setup → update store → restart. Note: setup may fail (e.g. browser runtime install), in which case the agent is marked `error` and a retry command is printed. For `pinned-behind` agents, `npm install` uses the original fixed spec — it will not auto-upgrade to latest.
 
-Both `roll update --check` and `roll update` also inspect the local config file. If the config `needs-migration` or is `invalid`, a notice is printed with suggested fix (`roll config migrate`).
+`roll update --check` and `roll update` use the `install` section from `roll.config.yaml` for npm
+version checks and npm installs:
+
+```bash
+roll config explain install.registry
+roll config setup install
+```
+
+Equivalent YAML shape:
+
+```yaml
+install:
+  registry: https://registry.npmmirror.com
+  fetch-retries: 3
+  prefer-offline: false
+  network-timeout-ms: 120000
+```
+
+Rules:
+
+- `registry` is opt-in; no registry value means npm default source.
+- `fetch-retries` is applied to `npm view` / `npm install`; install commands also get Roll-level retry for network or timeout failures.
+- `prefer-offline` defaults to `false` so update installs do not reuse stale npm metadata by default.
+- Invalid `install` config stops update/install commands instead of silently switching to npm default source.
+
+Both `roll update --check` and `roll update` also inspect the local config file. If the config `needs-migration` or is `invalid`, a notice is printed with suggested fix (`roll config migrate`). The `install` loader is independent from unrelated global migration notices, but the `install` section itself must be valid.
 
 ## System Diagnostics
 
@@ -351,7 +377,7 @@ unexpected failure / unknown setup
 
 Follow-up based on output:
 - `needs-migration` → `roll config migrate`
-- Missing env → configure `agents.env` in `roll.config.yaml`
+- Missing env → `roll config explain agents.env.<agent-name>` then `roll config setup agent <agent-name>`
 - Agent count is 0 → `roll agent install <package>` or `roll agent add <path>`
 - Stale core-managed runtime metadata → `roll doctor --fix`
 - Missing `agents.dataDir` → `roll doctor --fix`
@@ -416,12 +442,12 @@ Per-key labels from `roll agent info <agent-name>`:
 |-------|---------|-----------|
 | `✓ from yaml (stable)` | Agent process sees the value and its fingerprint matches `agents.env` | None |
 | `⚠ differs from yaml (ephemeral)` | Agent process sees a value that does **not** match `agents.env`; likely stale after a config edit or shadowed by shell export | Restart the persistent agent, or re-register the local-path agent |
-| `⚠ from shell (ephemeral)` | YAML did not declare the key, but the agent process inherited it from the shell | Move the value into `agents.env.<agent-name>` if it must persist; then restart |
-| `✗ missing` | YAML declared the key, but the running agent process does not have it | Fix `agents.env.<agent-name>` and restart |
+| `⚠ from shell (ephemeral)` | YAML did not declare the key, but the agent process inherited it from the shell | Run `roll config setup agent <agent-name>` to persist it if needed; then restart |
+| `✗ missing` | YAML declared the key, but the running agent process does not have it | Run `roll config setup agent <agent-name>` or fix `agents.env.<agent-name>`, then restart |
 
 Remediation:
 - Drift on `ephemeral` keys → `roll agent stop <name>` then `roll agent start <name>` (persistent services) or `roll agent remove` + `roll agent add` (local-path) to pick up the new yaml.
-- `✗ missing` → fix `agents.env.<agent-name>` then restart.
+- `✗ missing` → `roll config explain agents.env.<agent-name>`, then `roll config setup agent <agent-name>`, then restart.
 - If the agent is not running or exposes no diagnostic tool, `roll agent info <agent-name>` falls back to `运行态校验: 未校验（...）`. In JSON-oriented diagnostics, the underlying inspection state is `unverified`.
 
 ## Tool Call Failure Triage

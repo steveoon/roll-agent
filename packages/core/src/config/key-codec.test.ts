@@ -13,7 +13,7 @@ describe("key-codec: decodeFromYaml", () => {
     const input = {
       llm: {
         "default-provider": "openai",
-        "default-model": "gpt-4o",
+        "default-model": "gpt-5.5",
         providers: {},
       },
       ask: { "confirm-threshold": 0.5 },
@@ -23,7 +23,7 @@ describe("key-codec: decodeFromYaml", () => {
     assert.deepEqual(decodeFromYaml(input), {
       llm: {
         defaultProvider: "openai",
-        defaultModel: "gpt-4o",
+        defaultModel: "gpt-5.5",
         providers: {},
       },
       ask: { confirmThreshold: 0.5 },

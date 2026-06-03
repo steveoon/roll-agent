@@ -16,6 +16,9 @@ import type { RegisteredAgent } from "../types/agent.ts";
 
 const RUNTIME_SIDECAR_SCHEMA_VERSION = 1 as const;
 const UNKNOWN_CORE_VERSION = "unknown";
+const DEFAULT_READY_STARTUP_TIMEOUT_MS = 15_000;
+const DEFAULT_READY_PROBE_TIMEOUT_MS = 2_000;
+const DEFAULT_READY_INTERVAL_MS = 500;
 
 export type ManagedAgentRuntimeIssueCode =
   | "missing-sidecar"
@@ -259,6 +262,19 @@ export async function probeAgentEndpoint(
   }
 }
 
+function readPositiveIntegerEnv(name: string): number | undefined {
+  const raw = process.env[name];
+  if (raw === undefined || raw.trim().length === 0) {
+    return undefined;
+  }
+
+  const value = Number.parseInt(raw, 10);
+  if (!Number.isInteger(value) || value <= 0 || String(value) !== raw.trim()) {
+    return undefined;
+  }
+  return value;
+}
+
 /** 轮询等待 Agent MCP endpoint 就绪。 */
 export async function waitForAgentReady(
   agent: RegisteredAgent,
@@ -268,9 +284,18 @@ export async function waitForAgentReady(
     readonly intervalMs?: number;
   } = {},
 ): Promise<void> {
-  const startupTimeoutMs = options.startupTimeoutMs ?? 15_000;
-  const probeTimeoutMs = options.probeTimeoutMs ?? 2_000;
-  const intervalMs = options.intervalMs ?? 500;
+  const startupTimeoutMs =
+    readPositiveIntegerEnv("ROLL_AGENT_READY_STARTUP_TIMEOUT_MS") ??
+    options.startupTimeoutMs ??
+    DEFAULT_READY_STARTUP_TIMEOUT_MS;
+  const probeTimeoutMs =
+    readPositiveIntegerEnv("ROLL_AGENT_READY_PROBE_TIMEOUT_MS") ??
+    options.probeTimeoutMs ??
+    DEFAULT_READY_PROBE_TIMEOUT_MS;
+  const intervalMs =
+    readPositiveIntegerEnv("ROLL_AGENT_READY_INTERVAL_MS") ??
+    options.intervalMs ??
+    DEFAULT_READY_INTERVAL_MS;
   const deadline = Date.now() + startupTimeoutMs;
   let lastError: unknown;
 

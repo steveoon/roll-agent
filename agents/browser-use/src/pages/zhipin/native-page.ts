@@ -2830,26 +2830,30 @@ export class ZhipinNativePagePort {
   }
 
   private async selectAllFocusedText(): Promise<void> {
-    const modifierVariants = [4, 2];
-    for (const modifiers of modifierVariants) {
-      await this.controller.dispatchKeyEvent({
-        type: "rawKeyDown",
-        key: "a",
-        code: "KeyA",
-        windowsVirtualKeyCode: 65,
-        nativeVirtualKeyCode: 65,
-        modifiers,
-      });
-      await this.controller.dispatchKeyEvent({
-        type: "keyUp",
-        key: "a",
-        code: "KeyA",
-        windowsVirtualKeyCode: 65,
-        nativeVirtualKeyCode: 65,
-        modifiers,
-      });
-      await delay(40);
-    }
+    await this.evaluateJson<boolean>(
+      `(() => {
+        const el = document.activeElement;
+        if (!el) return false;
+        if (el.tagName === "INPUT" || el.tagName === "TEXTAREA") {
+          try {
+            el.select();
+            return true;
+          } catch {
+            return false;
+          }
+        }
+        if (el.isContentEditable) {
+          const range = document.createRange();
+          range.selectNodeContents(el);
+          const selection = window.getSelection();
+          if (!selection) return false;
+          selection.removeAllRanges();
+          selection.addRange(range);
+          return true;
+        }
+        return false;
+      })()`,
+    ).catch(() => undefined);
   }
 
   private async waitForRecommendFilterSurface(timeoutMs = 10_000): Promise<boolean> {

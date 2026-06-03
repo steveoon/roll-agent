@@ -4,7 +4,13 @@ import { writeFileSync, mkdirSync, rmSync } from "node:fs";
 import { resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { randomUUID } from "node:crypto";
-import { inspectConfigFile, loadAgentsConfig, loadConfig, validateConfigText } from "./loader.ts";
+import {
+  inspectConfigFile,
+  loadAgentsConfig,
+  loadConfig,
+  loadInstallConfig,
+  validateConfigText,
+} from "./loader.ts";
 import { getAgentEnv } from "./helpers.ts";
 
 /** 创建临时目录用于测试 */
@@ -37,7 +43,7 @@ describe("loadConfig", () => {
     const yaml = `
 llm:
   default-provider: openai
-  default-model: gpt-4o
+  default-model: gpt-5.5
   providers:
     openai:
       api-key: test-key
@@ -54,7 +60,7 @@ agents:
     const { config, configPath } = loadConfig({ cwd: tmpDir });
     assert.ok(configPath);
     assert.equal(config.llm.defaultProvider, "openai");
-    assert.equal(config.llm.defaultModel, "gpt-4o");
+    assert.equal(config.llm.defaultModel, "gpt-5.5");
     assert.equal(config.llm.providers["openai"]?.apiKey, "test-key");
     assert.equal(config.ask.llmModel, "gpt-4.1-mini");
     assert.equal(config.ask.confirmThreshold, 0.8);
@@ -275,17 +281,17 @@ agents:
     const yaml = `
 llm:
   default-provider: qwen
-  default-model: qwen-plus
+  default-model: qwen3.6-plus
   providers: {}
 ask:
-  llm-model: qwen-plus
+  llm-model: qwen3.6-plus
 agents:
   data-dir: /tmp/test
 `;
     writeFileSync(resolve(tmpDir, "roll.config.yaml"), yaml);
     const { config } = loadConfig({ cwd: childDir });
     assert.equal(config.llm.defaultProvider, "qwen");
-    assert.equal(config.ask.llmModel, "qwen-plus");
+    assert.equal(config.ask.llmModel, "qwen3.6-plus");
   });
 
   it("should throw for explicit path that does not exist", () => {
@@ -332,7 +338,7 @@ agents:
     const yaml = `
 llm:
   default-provider: openai
-  default-model: gpt-4o
+  default-model: gpt-5.5
   providers: {}
 `;
     writeFileSync(resolve(tmpDir, "roll.config.yaml"), yaml);
@@ -448,5 +454,96 @@ agents:
     }
     assert.equal(inspection.configPath, configPath);
     assert.equal(inspection.report.canAutoMigrate, true);
+  });
+
+  it("loadInstallConfig should return defaults when no config file exists", () => {
+    const { installConfig, configPath } = loadInstallConfig({ cwd: tmpDir });
+    assert.equal(configPath, undefined);
+    assert.equal(installConfig.registry, undefined);
+    assert.equal(installConfig.fetchRetries, 3);
+    assert.equal(installConfig.preferOffline, false);
+    assert.equal(installConfig.networkTimeoutMs, 120_000);
+  });
+
+  it("loadInstallConfig should parse an explicit registry and overrides", () => {
+    const yaml = `
+llm:
+  default-provider: anthropic
+  default-model: test
+  providers: {}
+agents:
+  data-dir: /tmp/test
+install:
+  registry: https://registry.npmmirror.com
+  fetch-retries: 5
+  prefer-offline: false
+  network-timeout-ms: 200000
+`;
+    writeFileSync(resolve(tmpDir, "roll.config.yaml"), yaml);
+
+    const { installConfig } = loadInstallConfig({ cwd: tmpDir });
+    assert.equal(installConfig.registry, "https://registry.npmmirror.com");
+    assert.equal(installConfig.fetchRetries, 5);
+    assert.equal(installConfig.preferOffline, false);
+    assert.equal(installConfig.networkTimeoutMs, 200_000);
+  });
+
+  it("loadInstallConfig should resolve env var placeholders in registry", () => {
+    const yaml = `
+install:
+  registry: \${ROLL_TEST_REGISTRY}
+`;
+    writeFileSync(resolve(tmpDir, "roll.config.yaml"), yaml);
+    process.env["ROLL_TEST_REGISTRY"] = "https://mirror.internal.example.com";
+    try {
+      const { installConfig } = loadInstallConfig({ cwd: tmpDir });
+      assert.equal(installConfig.registry, "https://mirror.internal.example.com");
+    } finally {
+      delete process.env["ROLL_TEST_REGISTRY"];
+    }
+  });
+
+  it("loadInstallConfig should reject a non-URL registry", () => {
+    const yaml = `
+install:
+  registry: not-a-url
+`;
+    writeFileSync(resolve(tmpDir, "roll.config.yaml"), yaml);
+    assert.throws(
+      () => loadInstallConfig({ cwd: tmpDir }),
+      (err: Error) => err.message.includes("install.registry"),
+    );
+  });
+
+  it("loadInstallConfig should reject an invalid install section instead of falling back", () => {
+    const yaml = `
+install:
+  fetch-retries: 999
+`;
+    writeFileSync(resolve(tmpDir, "roll.config.yaml"), yaml);
+    assert.throws(
+      () => loadInstallConfig({ cwd: tmpDir }),
+      (err: Error) => err.message.includes("install.fetchRetries"),
+    );
+  });
+
+  it("loadInstallConfig should stay usable even when other sections need migration", () => {
+    const yaml = `
+llm:
+  default-provider: anthropic
+  default-model: test
+  providers: {}
+router:
+  llm-model: claude-sonnet-4-6
+agents:
+  data-dir: /tmp/test
+install:
+  registry: https://registry.npmmirror.com
+`;
+    writeFileSync(resolve(tmpDir, "roll.config.yaml"), yaml);
+
+    // 全局配置处于待迁移状态，但安装链路仍应可读取 install 段。
+    const { installConfig } = loadInstallConfig({ cwd: tmpDir });
+    assert.equal(installConfig.registry, "https://registry.npmmirror.com");
   });
 });

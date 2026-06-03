@@ -1,0 +1,163 @@
+import { DEFAULT_CONFIG } from "../../config/defaults.ts";
+import { normalizeUserPath } from "../../config/key-codec.ts";
+import type { AgentEnvDeclaration, AgentSkillEnvDeclarations } from "../../types/agent.ts";
+
+export const INSTALL_SCENARIOS = [
+  "default-network",
+  "china-dev",
+  "private-registry",
+  "advanced",
+] as const;
+export type InstallScenario = (typeof INSTALL_SCENARIOS)[number];
+
+export interface ConfigGuidanceEntry {
+  readonly path: string;
+  readonly title: string;
+  readonly purpose: string;
+  readonly defaultBehavior?: string;
+  readonly example?: string;
+  readonly setupCommand?: string;
+}
+
+export const CONFIG_GUIDANCE_ENTRIES = [
+  {
+    path: "llm.default-provider",
+    title: "默认 LLM Provider",
+    purpose: "`roll ask` / `roll chat` 默认使用的模型提供商。",
+    defaultBehavior: `默认值为 \`${DEFAULT_CONFIG.llm.defaultProvider}\`。`,
+    example: `llm:\n  default-provider: ${DEFAULT_CONFIG.llm.defaultProvider}`,
+    setupCommand: "roll config setup llm",
+  },
+  {
+    path: "llm.default-model",
+    title: "默认 LLM Model",
+    purpose: "`roll ask` / `roll chat` 默认使用的模型名称。",
+    defaultBehavior: `默认值为 \`${DEFAULT_CONFIG.llm.defaultModel}\`。`,
+    example: `llm:\n  default-model: ${DEFAULT_CONFIG.llm.defaultModel}`,
+    setupCommand: "roll config setup llm",
+  },
+  {
+    path: "llm.providers.<provider>.api-key",
+    title: "Provider API Key",
+    purpose:
+      "指定 LLM provider 的 API key。可以写真实 key，也可以写 `" + "$" + "{ENV_VAR}` 占位符。",
+    example: "llm:\n  providers:\n    anthropic:\n      api-key: $" + "{ANTHROPIC_API_KEY}",
+    setupCommand: "roll config setup llm",
+  },
+  {
+    path: "llm.providers.<provider>.base-url",
+    title: "Provider Base URL",
+    purpose: "指定 LLM provider 的自定义 API base URL，通常只在代理、兼容网关或私有部署时需要。",
+    defaultBehavior: "不配置时使用 provider SDK 默认地址。",
+    example: "llm:\n  providers:\n    openai:\n      base-url: https://api.openai.com/v1",
+    setupCommand: "roll config setup llm",
+  },
+  {
+    path: "install.registry",
+    title: "npm Registry",
+    purpose: "`roll agent install` / `roll update` 查询和安装 npm 包时使用的 registry。",
+    defaultBehavior: "不配置时走 npm 自身默认源；Roll 不做隐式镜像 fallback。",
+    example: "install:\n  registry: https://registry.npmmirror.com",
+    setupCommand: "roll config setup install",
+  },
+  {
+    path: "install.fetch-retries",
+    title: "npm Fetch Retries",
+    purpose: "透传给 npm 的 `--fetch-retries`，同时影响 Roll 层整体网络重试次数。",
+    defaultBehavior: `默认值为 \`${DEFAULT_CONFIG.install.fetchRetries}\`。`,
+    example: `install:\n  fetch-retries: ${DEFAULT_CONFIG.install.fetchRetries}`,
+    setupCommand: "roll config setup install",
+  },
+  {
+    path: "install.prefer-offline",
+    title: "Prefer Offline",
+    purpose: "安装时是否附加 `--prefer-offline`。",
+    defaultBehavior: `默认值为 \`${DEFAULT_CONFIG.install.preferOffline}\`，避免更新时复用过期 npm 元数据。`,
+    example: `install:\n  prefer-offline: ${DEFAULT_CONFIG.install.preferOffline}`,
+    setupCommand: "roll config setup install",
+  },
+  {
+    path: "install.network-timeout-ms",
+    title: "Install Network Timeout",
+    purpose: "单次 npm install 命令的超时时间，单位毫秒。",
+    defaultBehavior: `默认值为 \`${DEFAULT_CONFIG.install.networkTimeoutMs}\`，即 120 秒。`,
+    example: `install:\n  network-timeout-ms: ${DEFAULT_CONFIG.install.networkTimeoutMs}`,
+    setupCommand: "roll config setup install",
+  },
+  {
+    path: "agents.data-dir",
+    title: "Agent 数据目录",
+    purpose: "Roll 持久化已注册 Agent、PID、日志和 runtime sidecar 的目录。",
+    defaultBehavior: `默认值为 \`${DEFAULT_CONFIG.agents.dataDir}\`。`,
+    example: `agents:\n  data-dir: ${DEFAULT_CONFIG.agents.dataDir}`,
+  },
+  {
+    path: "agents.env.<agent-name>",
+    title: "Agent 环境变量",
+    purpose: "按 Agent 名称声明注入到子 Agent 进程的环境变量。",
+    defaultBehavior:
+      "未配置时只会继承当前 shell 环境变量；core-managed Agent 需要重启才会看到新值。",
+    example:
+      "agents:\n  env:\n    browser-use-agent:\n      REPLY_AUTHORITY_URL: https://example.com",
+    setupCommand: "roll config setup agent <agent-name>",
+  },
+  {
+    path: "ask.confirm-threshold",
+    title: "Ask 确认阈值",
+    purpose: "`roll ask` 路由置信度低于该阈值时，倾向要求用户确认。",
+    defaultBehavior: "未配置时使用内置路由默认行为。",
+    example: "ask:\n  confirm-threshold: 0.5",
+  },
+  {
+    path: "browser.default-instance",
+    title: "默认浏览器实例",
+    purpose: "多浏览器实例配置下，未显式指定 browserInstance 时使用的默认实例。",
+    defaultBehavior: "不配置且只有一个实例时可自动推断；多个实例时工具可能返回 needs_input。",
+    example: "browser:\n  default-instance: boss-a",
+  },
+  {
+    path: "browser.instances",
+    title: "浏览器实例声明",
+    purpose: "声明 browser-use-agent 可使用的浏览器 profile、CDP 端口、会话目录和业务归因信息。",
+    defaultBehavior: "不配置时 browser-use-agent 使用 legacy 单实例环境变量路径。",
+    example:
+      "browser:\n  instances:\n    boss-a:\n      platform: zhipin\n      mode: managed-cdp\n      cdp-port: 9222\n      user-data-dir: ~/.roll-agent/browser/boss-a",
+  },
+] as const satisfies readonly ConfigGuidanceEntry[];
+
+export function listConfigGuidanceEntries(): readonly ConfigGuidanceEntry[] {
+  return CONFIG_GUIDANCE_ENTRIES;
+}
+
+export function findConfigGuidance(path: string): ConfigGuidanceEntry | undefined {
+  const normalizedPath = normalizeUserPath(path.split(".")).join(".");
+  return CONFIG_GUIDANCE_ENTRIES.find((entry) => matchesGuidancePath(entry.path, normalizedPath));
+}
+
+function matchesGuidancePath(pattern: string, normalizedPath: string): boolean {
+  const normalizedPattern = normalizeUserPath(pattern.split(".")).join(".");
+  if (normalizedPattern === normalizedPath) {
+    return true;
+  }
+
+  const patternParts = normalizedPattern.split(".");
+  const pathParts = normalizedPath.split(".");
+  if (patternParts.length !== pathParts.length) {
+    return false;
+  }
+
+  return patternParts.every((part, index) => part.startsWith("<") || part === pathParts[index]);
+}
+
+export function flattenAgentEnvDeclarations(
+  declarations: AgentSkillEnvDeclarations | undefined,
+): ReadonlyArray<AgentEnvDeclaration & { readonly required: boolean }> {
+  return [
+    ...(declarations?.required ?? []).map((item) => ({ ...item, required: true })),
+    ...(declarations?.optional ?? []).map((item) => ({ ...item, required: false })),
+  ];
+}
+
+export function isSecretEnvName(name: string): boolean {
+  return /(?:TOKEN|KEY|SECRET|PASSWORD)/iu.test(name);
+}

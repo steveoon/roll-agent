@@ -5,11 +5,16 @@ import { resolve } from "node:path";
 import { randomUUID } from "node:crypto";
 import { tmpdir } from "node:os";
 import {
+  buildNpmRetryPolicy,
   createPackageManagerExecInvocation,
   createInstallCommand,
   detectInstallCommand,
   formatPackageManagerCommand,
   formatPackageManagerError,
+  isLikelyNetworkError,
+  isRetryablePackageManagerError,
+  npmInstallNetworkArgs,
+  npmViewNetworkArgs,
   shouldRunPackageManagerViaShell,
 } from "./package-manager.ts";
 
@@ -162,5 +167,141 @@ describe("package-manager — formatting", () => {
       formatPackageManagerError({ command: "pnpm", args: ["install"] }, error, "win32"),
       /pnpm\.cmd/,
     );
+  });
+
+  test("appends mirror-source hint for network errors", () => {
+    const error = Object.assign(new Error("network request to https://registry.npmjs.org failed"), {
+      code: "ETIMEDOUT",
+    });
+
+    const message = formatPackageManagerError(
+      { command: "npm", args: ["install", "--prefix", "/tmp/x", "left-pad"] },
+      error,
+      "linux",
+    );
+    assert.match(message, /install\.registry/);
+    assert.match(message, /registry\.npmmirror\.com/);
+  });
+
+  test("formats timeout-kill as a network-flavored failure", () => {
+    const error = Object.assign(new Error("Command failed"), {
+      killed: true,
+      signal: "SIGTERM",
+      code: null,
+    });
+
+    const message = formatPackageManagerError(
+      { command: "npm", args: ["install"] },
+      error,
+      "linux",
+    );
+    assert.match(message, /超时被终止/);
+    assert.match(message, /install\.registry/);
+  });
+});
+
+describe("package-manager — Windows shell resolution", () => {
+  test("prefers ComSpec when set on win32", () => {
+    const original = process.env["ComSpec"];
+    process.env["ComSpec"] = "D:\\custom\\cmd.exe";
+    try {
+      const invocation = createPackageManagerExecInvocation(
+        { command: "npm", args: ["install", "left-pad"] },
+        "win32",
+      );
+      assert.equal(invocation.file, "D:\\custom\\cmd.exe");
+    } finally {
+      if (original === undefined) {
+        delete process.env["ComSpec"];
+      } else {
+        process.env["ComSpec"] = original;
+      }
+    }
+  });
+
+  test("falls back to cmd.exe when ComSpec is empty on win32", () => {
+    const original = process.env["ComSpec"];
+    delete process.env["ComSpec"];
+    try {
+      const invocation = createPackageManagerExecInvocation(
+        { command: "npm", args: ["install", "left-pad"] },
+        "win32",
+      );
+      assert.equal(invocation.file, "cmd.exe");
+    } finally {
+      if (original !== undefined) {
+        process.env["ComSpec"] = original;
+      }
+    }
+  });
+});
+
+describe("package-manager — npm network args", () => {
+  test("install args always include --no-audit/--no-fund", () => {
+    assert.deepEqual(npmInstallNetworkArgs(), ["--no-audit", "--no-fund"]);
+  });
+
+  test("install args include registry, fetch-retries and prefer-offline when set", () => {
+    assert.deepEqual(
+      npmInstallNetworkArgs({
+        registry: "https://registry.npmmirror.com",
+        fetchRetries: 5,
+        preferOffline: true,
+      }),
+      [
+        "--no-audit",
+        "--no-fund",
+        "--registry=https://registry.npmmirror.com",
+        "--fetch-retries=5",
+        "--prefer-offline",
+      ],
+    );
+  });
+
+  test("view args only add registry and fetch-retries", () => {
+    assert.deepEqual(
+      npmViewNetworkArgs({ registry: "https://registry.npmmirror.com", fetchRetries: 2 }),
+      ["--registry=https://registry.npmmirror.com", "--fetch-retries=2"],
+    );
+    assert.deepEqual(npmViewNetworkArgs(), []);
+  });
+});
+
+describe("package-manager — error classification & retry", () => {
+  test("recognizes network error codes and messages", () => {
+    assert.equal(isLikelyNetworkError(Object.assign(new Error("x"), { code: "ECONNRESET" })), true);
+    assert.equal(isLikelyNetworkError(new Error("getaddrinfo ENOTFOUND registry")), true);
+    assert.equal(isLikelyNetworkError(new Error("npm error code E429")), true);
+    assert.equal(isLikelyNetworkError(new Error("npm ERR! code E429")), true);
+    assert.equal(isLikelyNetworkError(new Error("npm error code E404")), false);
+    assert.equal(isLikelyNetworkError(new Error("npm error code E401")), false);
+    assert.equal(isLikelyNetworkError(new Error("ERR_PNPM_NO_MATCHING_VERSION")), false);
+  });
+
+  test("retryable covers network errors and timeout kills", () => {
+    assert.equal(
+      isRetryablePackageManagerError(Object.assign(new Error("x"), { code: "ETIMEDOUT" })),
+      true,
+    );
+    assert.equal(
+      isRetryablePackageManagerError(
+        Object.assign(new Error("Command failed"), {
+          killed: true,
+          signal: "SIGTERM",
+          code: null,
+        }),
+      ),
+      true,
+    );
+    assert.equal(isRetryablePackageManagerError(new Error("ENOENT")), false);
+  });
+
+  test("retry policy caps total attempts at 3", () => {
+    assert.equal(buildNpmRetryPolicy(0).attempts, 1);
+    assert.equal(buildNpmRetryPolicy(1).attempts, 2);
+    assert.equal(buildNpmRetryPolicy(3).attempts, 3);
+    assert.equal(buildNpmRetryPolicy(10).attempts, 3);
+    assert.deepEqual(buildNpmRetryPolicy(0).backoffMs, []);
+    assert.deepEqual(buildNpmRetryPolicy(3).backoffMs, [2000, 5000]);
   });
 });

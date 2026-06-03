@@ -1010,8 +1010,10 @@ describe("ZhipinNativePagePort", () => {
     const keyInputs: Array<Record<string, unknown>> = [];
     const inserted: string[] = [];
     const mouseInputs: NativeCdpMouseEventInput[] = [];
+    const evalExpressions: string[] = [];
     const port = createPort(
       async (expression) => {
+        evalExpressions.push(expression);
         if (expression.includes("#boss-chat-editor-input")) {
           return { found: true, x: 400, y: 700 };
         }
@@ -1042,11 +1044,11 @@ describe("ZhipinNativePagePort", () => {
       true,
     );
     assert.equal(
-      keyInputs.some((input) => input["key"] === "a" && input["modifiers"] === 4),
+      evalExpressions.some((expression) => expression.includes("isContentEditable")),
       true,
     );
     assert.equal(
-      keyInputs.some((input) => input["key"] === "a" && input["modifiers"] === 2),
+      keyInputs.every((input) => input["modifiers"] === undefined),
       true,
     );
     assert.equal(mouseInputs.filter((input) => input.type === "mousePressed").length, 2);

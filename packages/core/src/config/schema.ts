@@ -39,6 +39,23 @@ export const agentsConfigSchema = z.object({
   env: z.record(z.string(), z.record(z.string(), z.string())).optional(),
 });
 
+/**
+ * npm 安装/更新行为配置（影响 `roll agent install` / `roll update`）。
+ *
+ * 安全口径：默认走 npm 自身的源（通常官方源），只有用户显式配置 `registry`
+ * 才切换镜像源；roll 不做隐式自动 fallback。
+ */
+export const installConfigSchema = z.object({
+  /** 显式 opt-in 的 npm registry（如国内镜像）。未配置时使用 npm 默认源。 */
+  registry: z.string().trim().url().optional(),
+  /** 透传给 npm 的 `--fetch-retries`，并用于 roll 层整体重试次数。 */
+  fetchRetries: z.number().int().min(0).max(10).default(3),
+  /** 安装时附加 `--prefer-offline`，默认关闭以避免更新时复用过期 npm 元数据。 */
+  preferOffline: z.boolean().default(false),
+  /** 单次 npm 安装命令的超时（毫秒）。 */
+  networkTimeoutMs: z.number().int().min(10_000).default(120_000),
+});
+
 export const browserInstanceConfigSchema = z
   .object({
     platform: z.enum(browserPlatforms).optional(),
@@ -128,8 +145,10 @@ export const rollConfigSchema = z.object({
   llm: llmConfigSchema,
   ask: askConfigSchema,
   agents: agentsConfigSchema,
+  install: installConfigSchema.default({}),
   browser: browserConfigSchema.default({}),
 });
 
 export type RollConfig = z.infer<typeof rollConfigSchema>;
 export type BrowserConfig = z.infer<typeof browserConfigSchema>;
+export type InstallConfig = z.infer<typeof installConfigSchema>;

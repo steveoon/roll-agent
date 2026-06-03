@@ -1,15 +1,32 @@
 import type { RollConfig } from "./schema.ts";
 
+export const LLM_PROVIDER_OPTIONS = ["anthropic", "openai", "qwen", "deepseek"] as const;
+export type LlmProviderOption = (typeof LLM_PROVIDER_OPTIONS)[number];
+
+export const DEFAULT_LLM_PROVIDER: LlmProviderOption = "anthropic";
+
+export const DEFAULT_LLM_MODELS = {
+  anthropic: "claude-sonnet-4-6",
+  openai: "gpt-5.5",
+  qwen: "qwen3.6-plus",
+  deepseek: "deepseek-v4-flash",
+} as const satisfies Record<LlmProviderOption, string>;
+
 /** 默认配置值 */
 export const DEFAULT_CONFIG: RollConfig = {
   llm: {
-    defaultProvider: "anthropic",
-    defaultModel: "claude-sonnet-4-20250514",
+    defaultProvider: DEFAULT_LLM_PROVIDER,
+    defaultModel: DEFAULT_LLM_MODELS[DEFAULT_LLM_PROVIDER],
     providers: {},
   },
   ask: {},
   agents: {
     dataDir: "~/.roll-agent/agents",
+  },
+  install: {
+    fetchRetries: 3,
+    preferOffline: false,
+    networkTimeoutMs: 120_000,
   },
   browser: {
     instances: {},

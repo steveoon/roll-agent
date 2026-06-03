@@ -11,12 +11,45 @@ Prefer deterministic execution.
 - Use `roll run --json` when the target agent and tool are known.
 - When passing a structured object, use `roll run <agent> <tool> --input-json '{...}' --json`.
   This is the orchestrator-safe form across Roll versions and shell environments.
-- Use `roll skills get <agent-name>` to read the currently registered agent skill before relying on
+- Use `roll skills get <agent-name> --json` to read the currently registered agent skill before relying on
   embedded or remembered instructions.
 - Use `roll agent tools <agent-name> --json` when the agent is known but the tool name or `inputSchema` is not.
 - Use `roll ask --json` only when intent is known but the target agent/tool is not.
 - Do not default to `roll chat`; it is still experimental.
 - Do not embed subagent-specific tool contracts into this shared Roll skill. Read the target subagent's own `SKILL.md` / manifest / reference docs when you need tool-level semantics.
+
+## Orchestrator Quick Path
+
+Use this minimal loop before loading long references:
+
+```bash
+roll skills list --json
+roll skills get <agent-name> --json
+roll agent tools <agent-name> --json
+roll run <agent-name> <tool-name> --input-json '{...}' --json
+```
+
+Deepen only when needed:
+
+| Need | Next command |
+| --- | --- |
+| Stable refs, routing keys, browser workflow rules, or subagent recovery docs | `roll skills get <agent-name> --include-references --json` |
+| Fleet-level diagnostics | `roll doctor --json` |
+| Per-agent runtime ownership, env labels, or human-readable drift details | `roll agent info <agent-name>` |
+| Config field meaning or setup guidance | `roll config explain <path>` |
+
+Machine-readable boundaries:
+
+| Parse stdout as JSON | Treat as human-readable text |
+| --- | --- |
+| `roll skills list --json` | `roll agent info <agent-name>` |
+| `roll skills get <agent-name> --json` | `roll config explain [path]` |
+| `roll skills get <agent-name> --include-references --json` | `roll config setup ...` |
+| `roll agent list --json` |  |
+| `roll agent tools <agent-name> --json` |  |
+| `roll agent health --json` |  |
+| `roll doctor --json` |  |
+| `roll run ... --json` / `roll run --batch-* --json` |  |
 
 ## Startup Gate
 
@@ -35,12 +68,13 @@ roll agent info <agent-name>
 Read the registered skill first, then inspect the runtime tool schema:
 
 ```bash
-roll skills get <agent-name> --include-references --json
+roll skills get <agent-name> --json
 roll agent tools <agent-name> --json
 ```
 
-Use the skill document and its references for orchestration rules, stable IDs, and business
-sequencing. Use `roll agent tools` for exact `inputSchema` / `outputSchema`.
+Use the skill document for first-pass planning. Add `--include-references` only when the task needs
+stable refs, routing keys, browser workflow rules, recovery steps, or deeper business sequencing.
+Use `roll agent tools` for exact `inputSchema` / `outputSchema`.
 
 For fleet-level skill discovery:
 
@@ -254,6 +288,8 @@ Rules:
   sidecar issues such as version mismatch, orphan metadata, or PID mismatch before endpoint probing.
 - `roll update --check` — check available updates for roll-core and all registered agents without applying.
 - `roll update` — apply all available updates (lifecycle varies by source type).
+- `roll config explain [path]` — document a config key (purpose, defaults, examples); omit `path` to list common entries.
+- `roll config setup [llm|install|agent] [agent-name]` — interactive config wizard (TTY required; cancel → non-zero exit).
 - `roll config migrate` — run when doctor or update reports `needs-migration`.
 
 Decision flow:
@@ -277,7 +313,7 @@ For output formats, env drift labels, update lifecycle details, and follow-up ac
 
 ## References
 
-- For first-time machine setup, config migration, and **the difference between `roll agent add` (local source) vs `roll agent install` (published package)**, read [references/setup.md](./references/setup.md).
+- For first-time machine setup, `roll config setup/explain`, config migration, npm install network config, and **the difference between `roll agent add` (local source) vs `roll agent install` (published package)**, read [references/setup.md](./references/setup.md).
 - For multi-step Roll CLI recipes and troubleshooting sequences, read [references/workflows.md](./references/workflows.md).
 - For common Roll-layer failures and recovery paths, read [references/errors.md](./references/errors.md).
 - For cross-agent sequencing, verification patterns, and shared orchestration pitfalls, read [references/cross-agent-orchestration.md](./references/cross-agent-orchestration.md).

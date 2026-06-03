@@ -7,8 +7,10 @@ import {
   inspectConfigFile,
   loadAgentsConfig,
   loadConfig,
+  loadInstallConfig,
   type ConfigInspectionResult,
 } from "../../config/loader.ts";
+import { DEFAULT_CONFIG } from "../../config/defaults.ts";
 import { getAgentEnv } from "../../config/helpers.ts";
 import {
   getAgentPid,
@@ -35,12 +37,50 @@ import {
   type PublishedPackageUpdateStatus,
 } from "../utils/update-checker.ts";
 import {
+  buildNpmRetryPolicy,
   detectInstallCommand,
   formatPackageManagerError,
+  npmInstallNetworkArgs,
   runPackageManager,
+  runPackageManagerWithRetry,
   type PackageManagerRunSpec,
 } from "../utils/package-manager.ts";
 import type { AgentSourceType, RegisteredAgent } from "../../types/agent.ts";
+import type { RollConfig } from "../../config/schema.ts";
+
+type InstallConfig = RollConfig["install"];
+
+/** install 配置 → npm install 网络韧性参数。 */
+function buildInstallNetworkArgs(install: InstallConfig): string[] {
+  return npmInstallNetworkArgs({
+    ...(install.registry ? { registry: install.registry } : {}),
+    fetchRetries: install.fetchRetries,
+    preferOffline: install.preferOffline,
+  });
+}
+
+/** install 配置 → 版本检查（npm view）的查询选项。 */
+function buildVersionQueryOptions(install: InstallConfig): {
+  forceRefresh: true;
+  fetchRetries: number;
+  registry?: string;
+} {
+  return {
+    forceRefresh: true,
+    fetchRetries: install.fetchRetries,
+    ...(install.registry ? { registry: install.registry } : {}),
+  };
+}
+
+function isUnreadableConfigInspection(inspection: ConfigInspectionResult): boolean {
+  if (inspection.status !== "invalid") {
+    return false;
+  }
+  return (
+    inspection.error.message.startsWith("Invalid YAML syntax") ||
+    inspection.error.message.includes("(expected YAML object)")
+  );
+}
 
 const execFileAsync = promisify(execFile);
 
@@ -171,7 +211,11 @@ function hydrateInstalledPackageAgent(agent: RegisteredAgent, store?: AgentStore
 }
 
 /** 更新 roll-core 自身 */
-async function updateSelf(latest: string, dryRun: boolean): Promise<boolean> {
+async function updateSelf(
+  latest: string,
+  dryRun: boolean,
+  install: InstallConfig,
+): Promise<boolean> {
   const current = getCurrentVersion();
   if (current === latest) {
     log.info(`roll 已是最新版本 (v${current})`);
@@ -187,10 +231,19 @@ async function updateSelf(latest: string, dryRun: boolean): Promise<boolean> {
   const spinner = createSpinner("正在更新 @roll-agent/core...").start();
   const installSpec: PackageManagerRunSpec = {
     command: "npm",
-    args: ["install", "-g", `@roll-agent/core@${latest}`],
+    args: ["install", "-g", `@roll-agent/core@${latest}`, ...buildInstallNetworkArgs(install)],
   };
   try {
-    await runPackageManager(installSpec, { timeout: 60_000 });
+    await runPackageManagerWithRetry(
+      installSpec,
+      { timeout: install.networkTimeoutMs },
+      {
+        ...buildNpmRetryPolicy(install.fetchRetries),
+        onRetry: ({ attempt, delayMs }) => {
+          spinner.text = `roll 更新遇到网络问题，${Math.round(delayMs / 1000)}s 后重试（第 ${attempt + 1} 次）...`;
+        },
+      },
+    );
     spinner.succeed(`roll 已更新到 v${latest}`);
     return true;
   } catch (err) {
@@ -242,6 +295,7 @@ async function updateGitAgent(agent: RegisteredAgent): Promise<boolean> {
 /** 重新安装 npm 来源的 Agent */
 async function updateInstalledAgent(
   agent: RegisteredAgent,
+  install: InstallConfig,
 ): Promise<InstalledPackageUpdateResult | undefined> {
   if (agent.source?.type !== "installed-package") {
     return undefined;
@@ -250,10 +304,25 @@ async function updateInstalledAgent(
   const spinner = createSpinner(`更新 ${agent.skill.name} (npm install)...`).start();
   const installSpec: PackageManagerRunSpec = {
     command: "npm",
-    args: ["install", "--prefix", agent.source.installDir, agent.source.packageSpec],
+    args: [
+      "install",
+      "--prefix",
+      agent.source.installDir,
+      agent.source.packageSpec,
+      ...buildInstallNetworkArgs(install),
+    ],
   };
   try {
-    await runPackageManager(installSpec, { timeout: 120_000 });
+    await runPackageManagerWithRetry(
+      installSpec,
+      { timeout: install.networkTimeoutMs },
+      {
+        ...buildNpmRetryPolicy(install.fetchRetries),
+        onRetry: ({ attempt, delayMs }) => {
+          spinner.text = `更新 ${agent.skill.name} 遇到网络问题，${Math.round(delayMs / 1000)}s 后重试（第 ${attempt + 1} 次）...`;
+        },
+      },
+    );
 
     const packageRoot = resolveInstalledPackageRoot(
       agent.source.installDir,
@@ -314,9 +383,31 @@ export default defineCommand({
     const isCheckOnly = args.check;
     const configInspection = inspectConfigFile();
 
+    let installConfig: InstallConfig;
+    try {
+      installConfig = loadInstallConfig().installConfig;
+    } catch (error) {
+      if (isUnreadableConfigInspection(configInspection)) {
+        installConfig = DEFAULT_CONFIG.install;
+        log.warn(
+          `无法读取 install 配置，使用默认值：${error instanceof Error ? error.message : String(error)}`,
+        );
+      } else {
+        log.error(
+          `install 配置无效，已停止更新：${error instanceof Error ? error.message : String(error)}`,
+        );
+        process.exitCode = 1;
+        return;
+      }
+    }
+    if (installConfig.registry) {
+      log.info(`使用 npm registry: ${installConfig.registry}（roll.config.yaml install.registry）`);
+    }
+    const versionQuery = buildVersionQueryOptions(installConfig);
+
     // === 1. 检查 roll-core 自身 ===
     log.info("检查 roll 更新...");
-    const info = await checkForUpdate({ forceRefresh: true });
+    const info = await checkForUpdate(versionQuery);
 
     if (info.hasUpdate) {
       log.success(`roll 有新版本: v${info.current} → v${info.latest}`);
@@ -377,7 +468,7 @@ export default defineCommand({
                 ? { currentVersion: agent.source.installedVersion }
                 : {}),
             },
-            { forceRefresh: true },
+            versionQuery,
           );
           agentSummary.push({
             name: agent.skill.name,
@@ -430,7 +521,7 @@ export default defineCommand({
     let selfUpdated = false;
     let selfUpdateFailed = false;
     if (info.hasUpdate) {
-      selfUpdated = await updateSelf(info.latest, false);
+      selfUpdated = await updateSelf(info.latest, false, installConfig);
       if (!selfUpdated) selfUpdateFailed = true;
     }
 
@@ -506,7 +597,7 @@ export default defineCommand({
             }
           }
 
-          const updateResult = await updateInstalledAgent(agent);
+          const updateResult = await updateInstalledAgent(agent, installConfig);
           if (updateResult) {
             try {
               const discovered = discoverAgent(updateResult.packageRoot);
