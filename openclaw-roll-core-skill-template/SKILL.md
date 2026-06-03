@@ -277,7 +277,7 @@ For output formats, env drift labels, update lifecycle details, and follow-up ac
 
 ## References
 
-- For first-time machine setup, config migration, and **the difference between `roll agent add` (local source) vs `roll agent install` (published package)**, read [references/setup.md](./references/setup.md).
+- For first-time machine setup, config migration, npm install network config, and **the difference between `roll agent add` (local source) vs `roll agent install` (published package)**, read [references/setup.md](./references/setup.md).
 - For multi-step Roll CLI recipes and troubleshooting sequences, read [references/workflows.md](./references/workflows.md).
 - For common Roll-layer failures and recovery paths, read [references/errors.md](./references/errors.md).
 - For cross-agent sequencing, verification patterns, and shared orchestration pitfalls, read [references/cross-agent-orchestration.md](./references/cross-agent-orchestration.md).

@@ -319,7 +319,25 @@ roll update
 
 For `installed-package` + `core-managed` agents, the update lifecycle is: stop → npm install → re-discover → setup → update store → restart. Note: setup may fail (e.g. browser runtime install), in which case the agent is marked `error` and a retry command is printed. For `pinned-behind` agents, `npm install` uses the original fixed spec — it will not auto-upgrade to latest.
 
-Both `roll update --check` and `roll update` also inspect the local config file. If the config `needs-migration` or is `invalid`, a notice is printed with suggested fix (`roll config migrate`).
+`roll update --check` and `roll update` use the `install` section from `roll.config.yaml` for npm
+version checks and npm installs:
+
+```yaml
+install:
+  registry: https://registry.npmmirror.com
+  fetch-retries: 3
+  prefer-offline: false
+  network-timeout-ms: 120000
+```
+
+Rules:
+
+- `registry` is opt-in; no registry value means npm default source.
+- `fetch-retries` is applied to `npm view` / `npm install`; install commands also get Roll-level retry for network or timeout failures.
+- `prefer-offline` defaults to `false` so update installs do not reuse stale npm metadata by default.
+- Invalid `install` config stops update/install commands instead of silently switching to npm default source.
+
+Both `roll update --check` and `roll update` also inspect the local config file. If the config `needs-migration` or is `invalid`, a notice is printed with suggested fix (`roll config migrate`). The `install` loader is independent from unrelated global migration notices, but the `install` section itself must be valid.
 
 ## System Diagnostics
 

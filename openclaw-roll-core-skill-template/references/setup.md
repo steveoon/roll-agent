@@ -73,7 +73,28 @@ roll agent install @roll-agent/browser-use-agent
 roll agent install @roll-agent/smart-reply-agent
 ```
 
-### C. Important caveat for local `install`
+### C. Install network config
+
+If `roll agent install` or `roll update` fails because the npm registry is slow or unreachable,
+configure the `install` section in `roll.config.yaml` instead of changing package specs:
+
+```yaml
+install:
+  registry: https://registry.npmmirror.com
+  fetch-retries: 3
+  prefer-offline: false
+  network-timeout-ms: 120000
+```
+
+Rules:
+
+- `registry` is explicit opt-in. If omitted, Roll lets npm use its default registry.
+- `fetch-retries` is passed to npm and also controls Roll-level whole-command retry attempts, capped at 3 total attempts.
+- `prefer-offline` defaults to `false`; enable it only when stale npm metadata is acceptable for the workflow.
+- `network-timeout-ms` controls the timeout for each npm install attempt.
+- If the `install` section itself is invalid, `roll agent install` / `roll update` should stop instead of silently falling back to npm's default registry.
+
+### D. Important caveat for local `install`
 
 Do **not** default to:
 
@@ -83,7 +104,7 @@ roll agent install /path/to/local-agent
 
 This can mis-handle the local path as a package spec and fail during registration.
 
-### D. Note on monorepo dependencies
+### E. Note on monorepo dependencies
 
 If an agent uses published dependency versions, it can usually be added as a standalone local-path target.
 
