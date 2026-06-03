@@ -10,6 +10,7 @@ import {
   loadInstallConfig,
   type ConfigInspectionResult,
 } from "../../config/loader.ts";
+import { DEFAULT_CONFIG } from "../../config/defaults.ts";
 import { getAgentEnv } from "../../config/helpers.ts";
 import {
   getAgentPid,
@@ -69,6 +70,16 @@ function buildVersionQueryOptions(install: InstallConfig): {
     fetchRetries: install.fetchRetries,
     ...(install.registry ? { registry: install.registry } : {}),
   };
+}
+
+function isUnreadableConfigInspection(inspection: ConfigInspectionResult): boolean {
+  if (inspection.status !== "invalid") {
+    return false;
+  }
+  return (
+    inspection.error.message.startsWith("Invalid YAML syntax") ||
+    inspection.error.message.includes("(expected YAML object)")
+  );
 }
 
 const execFileAsync = promisify(execFile);
@@ -376,9 +387,18 @@ export default defineCommand({
     try {
       installConfig = loadInstallConfig().installConfig;
     } catch (error) {
-      log.error(`install 配置无效，已停止更新：${error instanceof Error ? error.message : String(error)}`);
-      process.exitCode = 1;
-      return;
+      if (isUnreadableConfigInspection(configInspection)) {
+        installConfig = DEFAULT_CONFIG.install;
+        log.warn(
+          `无法读取 install 配置，使用默认值：${error instanceof Error ? error.message : String(error)}`,
+        );
+      } else {
+        log.error(
+          `install 配置无效，已停止更新：${error instanceof Error ? error.message : String(error)}`,
+        );
+        process.exitCode = 1;
+        return;
+      }
     }
     if (installConfig.registry) {
       log.info(`使用 npm registry: ${installConfig.registry}（roll.config.yaml install.registry）`);
