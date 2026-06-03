@@ -90,7 +90,7 @@ function formatHttpFixtureStartFailure(result: CliResult, dataDir: string): stri
 function buildConfigYaml(dataDir: string): string {
   return `llm:
   default-provider: anthropic
-  default-model: claude-sonnet-4-20250514
+  default-model: claude-sonnet-4-6
   providers: {}
 
 ask:
@@ -104,12 +104,12 @@ agents:
 function buildDeprecatedConfigYaml(dataDir: string): string {
   return `llm:
   default-provider: anthropic
-  default-model: claude-sonnet-4-20250514
+  default-model: claude-sonnet-4-6
   providers: {}
 
 router:
   mode: declarative
-  llm-model: claude-sonnet-4-20250514
+  llm-model: claude-sonnet-4-6
 
 agents:
   data-dir: ${dataDir}
@@ -741,7 +741,8 @@ test("e2e smoke: agent add warns when declared required env is missing", () => {
     const addResult = runRoll(["agent", "add", agentDir], workspace);
     assert.equal(addResult.status, 0, addResult.stderr);
     assert.match(addResult.stderr, /仍缺少必填环境变量: REQUIRED_TOKEN, REQUIRED_URL/);
-    assert.match(addResult.stderr, /agents\.env\.declared-env-agent/);
+    assert.match(addResult.stderr, /roll config setup agent declared-env-agent/);
+    assert.match(addResult.stderr, /roll config explain agents\.env\.declared-env-agent/);
   } finally {
     rmSync(workspace, { recursive: true, force: true });
   }
@@ -758,7 +759,7 @@ test("e2e smoke: agent info shows declared env satisfaction sources", () => {
       resolve(workspace, "roll.config.yaml"),
       `llm:
   default-provider: anthropic
-  default-model: claude-sonnet-4-20250514
+  default-model: claude-sonnet-4-6
   providers: {}
 
 ask:
@@ -801,7 +802,7 @@ test("e2e smoke: unresolved agents.env placeholders are treated as missing", () 
       resolve(workspace, "roll.config.yaml"),
       `llm:
   default-provider: anthropic
-  default-model: claude-sonnet-4-20250514
+  default-model: claude-sonnet-4-6
   providers: {}
 
 ask:
@@ -819,6 +820,7 @@ agents:
     const addResult = runRoll(["agent", "add", agentDir], workspace);
     assert.equal(addResult.status, 0, addResult.stderr);
     assert.match(addResult.stderr, /仍缺少必填环境变量: REQUIRED_TOKEN, REQUIRED_URL/);
+    assert.match(addResult.stderr, /roll config setup agent declared-env-agent/);
 
     const infoResult = runRoll(["agent", "info", "declared-env-agent"], workspace);
     assert.equal(infoResult.status, 0, infoResult.stderr);
@@ -853,7 +855,7 @@ test("e2e smoke: agent info compares declared env with runtime diagnostics", () 
       resolve(workspace, "roll.config.yaml"),
       `llm:
   default-provider: anthropic
-  default-model: claude-sonnet-4-20250514
+  default-model: claude-sonnet-4-6
   providers: {}
 
 ask:
@@ -904,7 +906,7 @@ test("e2e smoke: doctor surfaces runtime env drift as warn", () => {
       resolve(workspace, "roll.config.yaml"),
       `llm:
   default-provider: anthropic
-  default-model: claude-sonnet-4-20250514
+  default-model: claude-sonnet-4-6
   providers: {}
 
 ask:
@@ -1061,6 +1063,41 @@ test("e2e smoke: config set help clarifies dotted key syntax", () => {
   }
 });
 
+test("e2e smoke: config explain describes install registry", () => {
+  const workspace = mkdtempSync(resolve(tmpdir(), `roll-config-explain-${randomUUID()}-`));
+
+  try {
+    const result = runRoll(["config", "explain", "install.registry"], workspace);
+    assert.equal(
+      result.status,
+      0,
+      `config explain failed\nstdout:\n${result.stdout}\nstderr:\n${result.stderr}`,
+    );
+    assert.match(result.stdout, /npm Registry/);
+    assert.match(result.stdout, /显式|默认源|registry/);
+    assert.match(result.stdout, /roll config setup install/);
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("e2e smoke: config setup fails clearly without a TTY", () => {
+  const workspace = mkdtempSync(resolve(tmpdir(), `roll-config-setup-tty-${randomUUID()}-`));
+
+  try {
+    const result = runRoll(["config", "setup", "llm"], workspace);
+    assert.equal(
+      result.status,
+      1,
+      `expected non-zero exit\nstdout:\n${result.stdout}\nstderr:\n${result.stderr}`,
+    );
+    assert.match(result.stderr, /需要交互式终端/);
+    assert.match(result.stderr, /roll config set/);
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
 test("e2e smoke: config init writes ask section and ask config can be set/get", () => {
   const workspace = mkdtempSync(resolve(tmpdir(), `roll-config-${randomUUID()}-`));
 
@@ -1107,7 +1144,7 @@ test("e2e smoke: config get accepts kebab and camel paths equivalently", () => {
       resolve(workspace, "roll.config.yaml"),
       `llm:
   default-provider: anthropic
-  default-model: claude-sonnet-4-20250514
+  default-model: claude-sonnet-4-6
   providers:
     anthropic:
       api-key: sk-test
@@ -1152,7 +1189,7 @@ test("e2e smoke: agent list blocks legacy camelCase agents.env keys with migrati
       resolve(workspace, "roll.config.yaml"),
       `llm:
   default-provider: anthropic
-  default-model: claude-sonnet-4-20250514
+  default-model: claude-sonnet-4-6
   providers: {}
 agents:
   data-dir: ${resolve(workspace, "agents-data")}
@@ -1237,14 +1274,14 @@ test("e2e smoke: config migrate fails when router and ask values conflict", () =
       configPath,
       `llm:
   default-provider: anthropic
-  default-model: claude-sonnet-4-20250514
+  default-model: claude-sonnet-4-6
   providers: {}
 
 ask:
   llm-model: gpt-4.1-mini
 
 router:
-  llm-model: claude-sonnet-4-20250514
+  llm-model: claude-sonnet-4-6
 
 agents:
   data-dir: ${resolve(workspace, "agents-data")}
@@ -1648,11 +1685,7 @@ test(
       );
 
       const startResult = runRoll(["agent", "start", "http-fixture-agent"], workspace);
-      assert.equal(
-        startResult.status,
-        0,
-        formatHttpFixtureStartFailure(startResult, dataDir),
-      );
+      assert.equal(startResult.status, 0, formatHttpFixtureStartFailure(startResult, dataDir));
       assert.match(startResult.stderr, /已启动|已在运行/);
 
       const healthResult = runRoll(["agent", "health", "--json"], workspace);
@@ -1725,11 +1758,7 @@ test(
       assert.equal(addResult.status, 0, addResult.stderr);
 
       const startResult = runRoll(["agent", "start", "http-fixture-agent"], workspace);
-      assert.equal(
-        startResult.status,
-        0,
-        formatHttpFixtureStartFailure(startResult, dataDir),
-      );
+      assert.equal(startResult.status, 0, formatHttpFixtureStartFailure(startResult, dataDir));
 
       const removeResult = runRoll(["agent", "remove", "http-fixture-agent"], workspace);
       assert.equal(
@@ -1774,11 +1803,7 @@ test(
       assert.equal(addResult.status, 0, addResult.stderr);
 
       const startResult = runRoll(["agent", "start", "http-fixture-agent"], workspace);
-      assert.equal(
-        startResult.status,
-        0,
-        formatHttpFixtureStartFailure(startResult, dataDir),
-      );
+      assert.equal(startResult.status, 0, formatHttpFixtureStartFailure(startResult, dataDir));
 
       const pidPath = resolve(dataDir, "pids", "http-fixture-agent.pid");
       const originalPid = readFileSync(pidPath, "utf-8").trim();
@@ -1853,11 +1878,7 @@ test(
       assert.equal(addResult.status, 0, addResult.stderr);
 
       const startResult = runRoll(["agent", "start", "http-fixture-agent"], workspace);
-      assert.equal(
-        startResult.status,
-        0,
-        formatHttpFixtureStartFailure(startResult, dataDir),
-      );
+      assert.equal(startResult.status, 0, formatHttpFixtureStartFailure(startResult, dataDir));
 
       const packageJsonPath = resolve(agentDir, "package.json");
       const packageJson = JSON.parse(readFileSync(packageJsonPath, "utf-8")) as {

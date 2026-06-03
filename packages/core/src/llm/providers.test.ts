@@ -4,38 +4,38 @@ import { createProviderModel, resolveLLMCall } from "./providers.ts";
 
 describe("createProviderModel", () => {
   it("should create an anthropic model", () => {
-    const model = createProviderModel("anthropic", "claude-sonnet-4-20250514", "test-key");
+    const model = createProviderModel("anthropic", "claude-sonnet-4-6", "test-key");
     assert.ok(model);
-    assert.equal(model.modelId, "claude-sonnet-4-20250514");
+    assert.equal(model.modelId, "claude-sonnet-4-6");
   });
 
   it("should create an openai model", () => {
-    const model = createProviderModel("openai", "gpt-4o", "test-key");
+    const model = createProviderModel("openai", "gpt-5.5", "test-key");
     assert.ok(model);
-    assert.equal(model.modelId, "gpt-4o");
+    assert.equal(model.modelId, "gpt-5.5");
   });
 
   it("should create a deepseek model", () => {
-    const model = createProviderModel("deepseek", "deepseek-chat", "test-key");
+    const model = createProviderModel("deepseek", "deepseek-v4-flash", "test-key");
     assert.ok(model);
-    assert.equal(model.modelId, "deepseek-chat");
+    assert.equal(model.modelId, "deepseek-v4-flash");
   });
 
   it("should create a qwen model", () => {
-    const model = createProviderModel("qwen", "qwen-plus", "test-key");
+    const model = createProviderModel("qwen", "qwen3.6-plus", "test-key");
     assert.ok(model);
-    assert.equal(model.modelId, "qwen-plus");
+    assert.equal(model.modelId, "qwen3.6-plus");
   });
 
   it("should accept custom baseURL", () => {
     const model = createProviderModel(
       "openai",
-      "gpt-4o",
+      "gpt-5.5",
       "test-key",
       "https://custom-api.example.com/v1",
     );
     assert.ok(model);
-    assert.equal(model.modelId, "gpt-4o");
+    assert.equal(model.modelId, "gpt-5.5");
   });
 
   it("should throw for unknown provider", () => {
@@ -68,13 +68,13 @@ describe("resolveLLMCall", () => {
   it("does not inject providerOptions for non-qwen structured-output calls", () => {
     const resolved = resolveLLMCall(
       "openai",
-      "gpt-4o",
+      "gpt-5.5",
       "test-key",
       "structured-output",
       "https://custom-api.example.com/v1",
     );
 
-    assert.equal(resolved.model.modelId, "gpt-4o");
+    assert.equal(resolved.model.modelId, "gpt-5.5");
     assert.equal(resolved.providerOptions, undefined);
   });
 });

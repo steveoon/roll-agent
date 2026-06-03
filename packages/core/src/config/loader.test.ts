@@ -43,7 +43,7 @@ describe("loadConfig", () => {
     const yaml = `
 llm:
   default-provider: openai
-  default-model: gpt-4o
+  default-model: gpt-5.5
   providers:
     openai:
       api-key: test-key
@@ -60,7 +60,7 @@ agents:
     const { config, configPath } = loadConfig({ cwd: tmpDir });
     assert.ok(configPath);
     assert.equal(config.llm.defaultProvider, "openai");
-    assert.equal(config.llm.defaultModel, "gpt-4o");
+    assert.equal(config.llm.defaultModel, "gpt-5.5");
     assert.equal(config.llm.providers["openai"]?.apiKey, "test-key");
     assert.equal(config.ask.llmModel, "gpt-4.1-mini");
     assert.equal(config.ask.confirmThreshold, 0.8);
@@ -281,17 +281,17 @@ agents:
     const yaml = `
 llm:
   default-provider: qwen
-  default-model: qwen-plus
+  default-model: qwen3.6-plus
   providers: {}
 ask:
-  llm-model: qwen-plus
+  llm-model: qwen3.6-plus
 agents:
   data-dir: /tmp/test
 `;
     writeFileSync(resolve(tmpDir, "roll.config.yaml"), yaml);
     const { config } = loadConfig({ cwd: childDir });
     assert.equal(config.llm.defaultProvider, "qwen");
-    assert.equal(config.ask.llmModel, "qwen-plus");
+    assert.equal(config.ask.llmModel, "qwen3.6-plus");
   });
 
   it("should throw for explicit path that does not exist", () => {
@@ -338,7 +338,7 @@ agents:
     const yaml = `
 llm:
   default-provider: openai
-  default-model: gpt-4o
+  default-model: gpt-5.5
   providers: {}
 `;
     writeFileSync(resolve(tmpDir, "roll.config.yaml"), yaml);

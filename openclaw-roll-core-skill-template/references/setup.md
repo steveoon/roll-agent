@@ -15,7 +15,8 @@ roll --version
 
 # 3. Initialize config
 roll config init
-# User must edit roll.config.yaml and set provider API keys
+# `init` creates a minimal skeleton; prefer `roll config setup llm` for provider/model/API key.
+roll config setup llm
 
 # 4. If an existing config uses deprecated schema, migrate it
 roll config migrate
@@ -36,13 +37,39 @@ roll agent add /path/to/agent
 # 8. Inspect runtime ownership, transport, and env status
 roll agent info <agent-name>
 
-# 9. If the agent is core-managed, start it through Roll.
+# 9. If the registered agent declares required env, configure it interactively.
+roll config explain agents.env.<agent-name>
+roll config setup agent <agent-name>
+
+# 10. If the agent is core-managed, start it through Roll.
 # If it is external-managed, start the external service by its own runbook instead.
 roll agent start <agent-name>
 
-# 10. Verify health before tool calls
+# 11. Verify health before tool calls
 roll agent health --json
 ```
+
+## Config setup / explain
+
+Use these when you need field documentation or guided edits without hand-writing YAML keys:
+
+```bash
+roll config explain              # list common paths
+roll config explain install.registry
+roll config setup llm
+roll config setup install
+roll config setup agent <agent-name>
+```
+
+Rules:
+
+- `roll config explain [path]` — shows purpose, default behavior, examples, and the matching `roll config setup` command when available.
+- `roll config setup [llm|install|agent] [agent-name]` — interactive wizard; **requires a TTY**.
+  - In CI, pipes, or other non-interactive shells: use `roll config set <key> <value>` or edit `roll.config.yaml` directly; use `roll config explain <path>` for guidance.
+  - User cancellation exits with a **non-zero** exit code; treat as failure in scripts.
+  - Overwriting an existing file creates `roll.config.yaml.bak.<timestamp>` first.
+- Agent secret env vars (names matching `TOKEN`, `KEY`, `SECRET`, or `PASSWORD`): if YAML already has a resolved value, **press Enter to keep it** instead of retyping.
+- Plaintext secrets written to YAML trigger a warning; prefer `${ENV_VAR}` references and avoid committing config files.
 
 ## Local Agent Source vs Package Install
 
@@ -76,7 +103,14 @@ roll agent install @roll-agent/smart-reply-agent
 ### C. Install network config
 
 If `roll agent install` or `roll update` fails because the npm registry is slow or unreachable,
-configure the `install` section in `roll.config.yaml` instead of changing package specs:
+configure install networking through the setup wizard instead of changing package specs:
+
+```bash
+roll config explain install.registry
+roll config setup install
+```
+
+Equivalent YAML shape:
 
 ```yaml
 install:
@@ -133,7 +167,15 @@ This is especially useful after upstream changes to:
 
 The top-level `llm:` section in `roll.config.yaml` is **not sufficient** for agents that read secrets or runtime configuration from environment variables.
 
-If an agent declares its own env requirements, those values must be injected under:
+If an agent declares its own env requirements, prefer the interactive setup/explain entry points:
+
+```bash
+roll config explain agents.env.<agent-name>
+roll config setup agent <agent-name>
+```
+
+These commands read the env declarations registered from the subagent's own `SKILL.md` /
+`roll-env-file` metadata. `setup agent` writes the resulting values under:
 
 ```yaml
 agents:
@@ -148,7 +190,8 @@ In other words:
 - `llm:` controls shared/default model routing
 - `agents.env.<agent-name>` controls what the agent process actually receives at runtime
 
-Prefer `roll agent info <agent-name>` as the source of truth for required env:
+Prefer `roll config explain agents.env.<agent-name>` and `roll agent info <agent-name>` as the source of truth for required env:
+- `config explain` shows purpose/example/default metadata and the setup command
 - it reflects the env metadata declared by the subagent itself
 - it shows which vars are still missing after registration
 - it avoids hard-coding per-agent env lists into this shared Roll skill template
@@ -172,7 +215,10 @@ roll agent info <agent-name>
 roll run <agent-name> <tool-name> --input-json '{...}' --json
 ```
 
-If `roll agent info <agent-name>` still shows required env vars as missing, fix `agents.env.<agent-name>` first.
+If `roll agent info <agent-name>` still shows required env vars as missing, run
+`roll config explain agents.env.<agent-name>` and `roll config setup agent <agent-name>` first.
+Then restart or re-register the agent
+if it is persistent or if runtime labels still show stale values.
 
 ## Subsequent Sessions
 
