@@ -13,6 +13,7 @@ const baseConfig: RollConfig = {
   },
   ask: {},
   agents: { dataDir: "/tmp/agents" },
+  install: { fetchRetries: 3, preferOffline: false, networkTimeoutMs: 120_000 },
   browser: { instances: {} },
 };
 

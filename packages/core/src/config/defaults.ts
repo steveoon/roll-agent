@@ -11,6 +11,11 @@ export const DEFAULT_CONFIG: RollConfig = {
   agents: {
     dataDir: "~/.roll-agent/agents",
   },
+  install: {
+    fetchRetries: 3,
+    preferOffline: false,
+    networkTimeoutMs: 120_000,
+  },
   browser: {
     instances: {},
   },

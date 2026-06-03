@@ -1,7 +1,7 @@
 import { readFileSync, existsSync } from "node:fs";
 import { resolve } from "node:path";
 import { parse as parseYaml } from "yaml";
-import { agentsConfigSchema, rollConfigSchema } from "./schema.ts";
+import { agentsConfigSchema, installConfigSchema, rollConfigSchema } from "./schema.ts";
 import type { RollConfig } from "./schema.ts";
 import { DEFAULT_CONFIG, CONFIG_FILE_NAMES } from "./defaults.ts";
 import { decodeFromYaml } from "./key-codec.ts";
@@ -151,6 +151,12 @@ export interface LoadAgentsConfigResult {
   readonly configPath: string | undefined;
 }
 
+export interface LoadInstallConfigResult {
+  readonly installConfig: RollConfig["install"];
+  /** 实际加载的配置文件路径，undefined 表示使用默认配置 */
+  readonly configPath: string | undefined;
+}
+
 const CONFIG_INSPECTION_STATUSES = {
   notFound: "not-found",
   valid: "valid",
@@ -273,6 +279,59 @@ function validateAgentsConfigText(raw: string, configPath: string): RollConfig["
     ...result.data,
     dataDir: expandTilde(result.data.dataDir),
   };
+}
+
+/**
+ * 仅解析并校验 `install` 段。
+ *
+ * 与 {@link validateAgentsConfigText} 同理，刻意只读取一个 section，
+ * 且不做 breaking schema migration 检测——即使全局配置处于待迁移状态，
+ * `roll agent install` / `roll update` 的安装链路也应保持可用。
+ */
+function validateInstallConfigText(raw: string, configPath: string): RollConfig["install"] {
+  const parsed = parseConfigDocument(raw, configPath);
+
+  const transformed = resolveEnvVars(decodeFromYaml(parsed));
+  if (!isRecord(transformed)) {
+    throw new Error(`Invalid config file: ${configPath} (expected YAML object)`);
+  }
+
+  const installSection = isRecord(transformed["install"]) ? transformed["install"] : {};
+  const merged = deepMerge(
+    DEFAULT_CONFIG.install as unknown as Record<string, unknown>,
+    installSection,
+  );
+  const result = installConfigSchema.safeParse(merged);
+
+  if (!result.success) {
+    const issues = result.error.issues
+      .map((issue) => `  - install.${issue.path.join(".")}: ${issue.message}`)
+      .join("\n");
+    throw new Error(`Config validation failed (${configPath}):\n${issues}`);
+  }
+
+  return result.data;
+}
+
+/**
+ * 加载 `install` 段配置（npm 安装/更新行为）。
+ *
+ * 解析失败（缺失文件、YAML 语法错误、install 段非法）时抛错，
+ * 避免用户显式配置 registry 时因局部错误静默回退到 npm 默认源。
+ */
+export function loadInstallConfig(options: LoadConfigOptions = {}): LoadInstallConfigResult {
+  const configPath = resolveConfigPath(options);
+
+  if (!configPath) {
+    return { installConfig: DEFAULT_CONFIG.install, configPath: undefined };
+  }
+
+  if (!existsSync(configPath)) {
+    throw new Error(`Config file not found: ${configPath}`);
+  }
+
+  const raw = readFileSync(configPath, "utf-8");
+  return { installConfig: validateInstallConfigText(raw, configPath), configPath };
 }
 
 /**

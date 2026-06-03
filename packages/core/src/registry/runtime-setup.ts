@@ -22,9 +22,10 @@ export async function runAgentSetup(
   agent: RegisteredAgent,
   options: AgentSetupOptions = {},
 ): Promise<AgentSetupResult> {
-  const browsers = agent.runtime.ownership === "core-managed"
-    ? agent.runtime.setup?.playwright?.browsers
-    : undefined;
+  const browsers =
+    agent.runtime.ownership === "core-managed"
+      ? agent.runtime.setup?.playwright?.browsers
+      : undefined;
 
   if (!browsers || browsers.length === 0) {
     return {
@@ -55,6 +56,8 @@ export async function runAgentSetup(
     await execFileAsync(process.execPath, [cliPath, "install", ...browsers], {
       cwd: agent.installPath,
       timeout: 300_000,
+      // 浏览器下载日志可能超过 execFile 默认 1MB 上限，放大避免误判失败。
+      maxBuffer: 64 * 1024 * 1024,
     });
     return {
       ok: true,

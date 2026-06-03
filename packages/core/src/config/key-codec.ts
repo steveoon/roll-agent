@@ -76,6 +76,15 @@ export const CONFIG_KEY_CODEC: KeyCodecNode = {
         },
       },
     },
+    install: {
+      kind: "object",
+      fields: {
+        registry: LEAF,
+        fetchRetries: LEAF,
+        preferOffline: LEAF,
+        networkTimeoutMs: LEAF,
+      },
+    },
     browser: {
       kind: "object",
       fields: {

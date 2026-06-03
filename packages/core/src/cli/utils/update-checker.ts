@@ -1,10 +1,11 @@
 import { readFileSync, writeFileSync, mkdirSync, existsSync } from "node:fs";
 import { resolve, dirname } from "node:path";
 import { homedir } from "node:os";
-import { runPackageManager } from "./package-manager.ts";
+import { npmViewNetworkArgs, runPackageManager } from "./package-manager.ts";
 
 const CACHE_TTL_MS = 24 * 60 * 60 * 1000;
 const CORE_PACKAGE_NAME = "@roll-agent/core";
+const DEFAULT_VIEW_TIMEOUT_MS = 10_000;
 
 export const PUBLISHED_PACKAGE_UPDATE_STATUSES = [
   "up-to-date",
@@ -32,6 +33,12 @@ interface LegacyUpdateCache {
 interface PackageVersionQueryOptions {
   readonly forceRefresh?: boolean;
   readonly allowNetwork?: boolean;
+  /** 显式 registry（镜像源），透传给 `npm view`。 */
+  readonly registry?: string;
+  /** 透传给 npm 的 `--fetch-retries`。 */
+  readonly fetchRetries?: number;
+  /** `npm view` 单次超时（毫秒），默认 10s。慢网下仍有缓存兜底。 */
+  readonly timeoutMs?: number;
 }
 
 export interface PublishedPackageUpdateInfo {
@@ -138,15 +145,20 @@ function readPackageCacheEntry(packageName: string): PackageVersionCacheEntry | 
 
 async function fetchLatestPublishedVersionFromRegistry(
   packageName: string,
+  options: PackageVersionQueryOptions = {},
 ): Promise<string | undefined> {
   try {
+    const networkArgs = npmViewNetworkArgs({
+      ...(options.registry ? { registry: options.registry } : {}),
+      ...(options.fetchRetries !== undefined ? { fetchRetries: options.fetchRetries } : {}),
+    });
     const { stdout } = await runPackageManager(
       {
         command: "npm",
-        args: ["view", packageName, "version", "--json"],
+        args: ["view", packageName, "version", "--json", ...networkArgs],
       },
       {
-        timeout: 5000,
+        timeout: options.timeoutMs ?? DEFAULT_VIEW_TIMEOUT_MS,
       },
     );
     const trimmed = stdout.trim();
@@ -176,7 +188,7 @@ export async function fetchLatestPublishedVersion(
     return cache?.latestVersion;
   }
 
-  const latest = await fetchLatestPublishedVersionFromRegistry(packageName);
+  const latest = await fetchLatestPublishedVersionFromRegistry(packageName, options);
   if (latest) {
     writePackageCacheEntry(packageName, latest);
     return latest;
