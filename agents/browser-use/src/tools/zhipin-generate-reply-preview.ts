@@ -4,13 +4,18 @@ import {
   ReasoningConfigSchema,
   ReplyStreamFinalEventSchema,
   streamGenerateSignedReply,
+  type CandidateLocationSignal,
   type GenerateReplyToolInput,
   type ReasoningConfig,
   type ReplyStreamEvent,
 } from "@roll-agent/reply-authority-client";
 import { z } from "zod";
 import { NativeVisualActivitySession } from "../native-visual-activity-session.ts";
-import { resolveConversationSignals } from "../pages/zhipin/job-signals.ts";
+import {
+  resolveConversationSignals,
+  resolveLocationSignalsWithLlm,
+  shouldAnalyzeLocationSignals,
+} from "../pages/zhipin/job-signals.ts";
 import { openZhipinNativePagePort } from "../pages/zhipin/native-page.ts";
 import type {
   NativeCandidateChatDetails,
@@ -62,6 +67,7 @@ const PHASE_LABELS: Readonly<Record<string, string>> = {
   reply_gate: "检查回复策略",
   signing: "签发安全信封",
 };
+const LOCATION_SIGNAL_LABEL = "正在分析对话记录，提取可能的位置线索";
 
 type NativeVisualActivitySessionLike = Pick<
   NativeVisualActivitySession,
@@ -167,6 +173,7 @@ function buildGenerateReplyInput(input: {
   readonly conversationId: string;
   readonly candidateId: string;
   readonly recruiterUsername: string;
+  readonly locationSignals: readonly CandidateLocationSignal[];
   readonly reasoning?: ReasoningConfig | undefined;
 }): GenerateReplyToolInput {
   const signals = resolveConversationSignals({
@@ -188,6 +195,7 @@ function buildGenerateReplyInput(input: {
       expectedSalary: input.data.candidateInfo.expectedSalary,
       info: [...input.data.candidateInfo.tags],
     },
+    ...(input.locationSignals.length > 0 ? { locationSignals: [...input.locationSignals] } : {}),
     ...(signals.preferredBrand !== undefined ? { preferredBrand: signals.preferredBrand } : {}),
     ...(input.reasoning !== undefined ? { modelConfig: { reasoning: input.reasoning } } : {}),
     target: {
@@ -353,6 +361,12 @@ export const zhipinGenerateReplyPreview = defineTool({
         return createFailure(error);
       }
 
+      if (getLatestCandidateMessage(data.messages).length === 0) {
+        const error = "未找到候选人最新消息，无法生成回复";
+        await session.fail("候选人消息为空");
+        return createFailure(error);
+      }
+
       const usernameResult = pickBestUsername(await nativePage.readUsernameEvidence());
       if (!usernameResult.found) {
         const error = "未找到用户名，请确认当前页面已登录招聘者账号。";
@@ -360,22 +374,38 @@ export const zhipinGenerateReplyPreview = defineTool({
         return createFailure(error);
       }
 
+      const signals = resolveConversationSignals({
+        communicationPosition: data.candidateInfo.communicationPosition,
+        expectedJobText: data.candidateInfo.expectedJobText,
+      });
+      if (
+        shouldAnalyzeLocationSignals({
+          messages: data.messages,
+          expectedLocation: signals.expectedLocation,
+          communicationPosition: signals.communicationPosition,
+        })
+      ) {
+        await session.begin(LOCATION_SIGNAL_LABEL);
+      }
+      const locationSignals = await resolveLocationSignalsWithLlm({
+        llm: ctx.llm,
+        logger: ctx.logger,
+        messages: data.messages,
+        expectedLocation: signals.expectedLocation,
+        communicationPosition: signals.communicationPosition,
+      });
       const replyInput = buildGenerateReplyInput({
         data,
         conversationId: selectedTarget.conversationId,
         candidateId: selectedTarget.candidateId,
         recruiterUsername: usernameResult.username,
+        locationSignals,
         reasoning: input.reasoning,
       });
       const unreadCountBeforeReply = resolveUnreadCountBeforeReply({
         navigationUnreadCount: nav?.unreadCount,
         data,
       });
-      if (replyInput.candidateMessage.length === 0) {
-        const error = "未找到候选人最新消息，无法生成回复";
-        await session.fail("候选人消息为空");
-        return createFailure(error);
-      }
 
       ctx.logger.info(
         `Generating reply preview for ${

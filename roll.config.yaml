@@ -1,6 +1,6 @@
 llm:
-  default-provider: openai
-  default-model: gpt-5.4
+  default-provider: deepseek
+  default-model: deepseek-v4-flash
   providers:
     openai:
       api-key: ${ANTHROPIC_API_KEY}
@@ -10,6 +10,8 @@ llm:
       base-url: https://apic1.ohmycdn.com/v1
     qwen:
       api-key: ${DASHSCOPE_API_KEY}
+    deepseek:
+      api-key: ${DEEPSEEK_API_KEY}
 ask:
   confirm-threshold: 0.5
 browser:

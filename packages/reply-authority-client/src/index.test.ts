@@ -320,6 +320,31 @@ describe("@roll-agent/reply-authority-client", () => {
     assert.equal((capturedBody as { readonly stream?: unknown } | undefined)?.stream, undefined);
   });
 
+  it("accepts candidate location signals in tool input", async () => {
+    const parsed = GenerateReplyToolInputSchema.parse({
+      ...VALID_REQUEST,
+      locationSignals: [
+        {
+          text: "人民广场",
+          source: "candidate_message",
+          city: "上海",
+          intent: "nearby_store",
+          confidence: 0.93,
+        },
+      ],
+    });
+
+    assert.deepEqual(parsed.locationSignals, [
+      {
+        text: "人民广场",
+        source: "candidate_message",
+        city: "上海",
+        intent: "nearby_store",
+        confidence: 0.93,
+      },
+    ]);
+  });
+
   it("preserves modelConfig.reasoning in one-shot requests", async () => {
     process.env.REPLY_AUTHORITY_URL = "https://reply-authority.duliday.com";
     process.env.REPLY_AUTHORITY_BEARER_TOKEN = "client-token";

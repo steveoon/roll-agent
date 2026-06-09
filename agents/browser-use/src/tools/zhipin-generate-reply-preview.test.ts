@@ -15,10 +15,10 @@ import {
   zhipinGenerateReplyPreview,
 } from "./zhipin-generate-reply-preview.ts";
 
-function createTestContext(): AgentContext {
+function createTestContext(llmText = ""): AgentContext {
   return {
     llm: {
-      generateText: async () => "",
+      generateText: async () => llmText,
     },
     logger: {
       debug: () => {},
@@ -271,6 +271,7 @@ describe("zhipin_generate_reply_preview", () => {
     });
     assert.equal("signedEnvelope" in result, false);
     assert.ok(result.preparedReplyId);
+    assert.equal(calls.includes("session:正在分析对话记录，提取可能的位置线索"), false);
     assert.equal(calls.includes("preview:draft:draft:您好，薪资可以详聊。"), true);
     assert.equal(calls.includes("preview:complete:回复已生成:您好，薪资可以详聊。"), true);
 
@@ -320,6 +321,75 @@ describe("zhipin_generate_reply_preview", () => {
     if (consumed.ok) {
       assert.equal(consumed.record.unreadCountBeforeReply, 1);
     }
+  });
+
+  it("passes extracted location signals into the Reply Authority stream input", async () => {
+    const calls: string[] = [];
+    let capturedLocationSignals: unknown;
+
+    setZhipinGenerateReplyPreviewDepsForTests({
+      openNativePagePort: async () =>
+        createNativePage(calls, {
+          async readCandidateChatDetails() {
+            return createChatDetails(undefined, [
+              {
+                index: 0,
+                sender: "recruiter" as const,
+                messageType: "text" as const,
+                content: "你好",
+                time: "10:19",
+              },
+              {
+                index: 1,
+                sender: "candidate" as const,
+                messageType: "text" as const,
+                content: "人民广场附近有吗",
+                time: "10:20",
+              },
+            ]);
+          },
+        }),
+      createNativeVisualActivitySession: () => createNoopSession(calls),
+      createReplyPreviewVisualSession: () => createPreviewSession(calls),
+      streamGenerateSignedReply: (input) => {
+        capturedLocationSignals = input.locationSignals;
+        return createMockStream();
+      },
+    });
+
+    const result = await zhipinGenerateReplyPreview.execute(
+      { conversationId: "conv-1", maxMessages: 20 },
+      createTestContext(
+        JSON.stringify([
+          {
+            text: "人民广场",
+            source: "candidate_message",
+            city: "上海",
+            intent: "nearby_store",
+            confidence: 0.93,
+          },
+        ]),
+      ),
+    );
+
+    assert.equal(result.success, true);
+    assert.deepEqual(capturedLocationSignals, [
+      {
+        text: "人民广场",
+        source: "candidate_message",
+        city: "上海",
+        intent: "nearby_store",
+        confidence: 0.93,
+      },
+      {
+        text: "上海",
+        source: "candidate_expected_location",
+        city: "上海",
+        intent: "expected_area",
+        confidence: 0.6,
+      },
+    ]);
+    assert.equal(calls.includes("session:正在分析对话记录，提取可能的位置线索"), true);
   });
 
   it("does not infer unread context when the latest human message is from the recruiter", async () => {

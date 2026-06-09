@@ -1,5 +1,8 @@
 export {
   CandidateInfoSchema,
+  CandidateLocationSignalIntentValues,
+  CandidateLocationSignalSchema,
+  CandidateLocationSignalSourceValues,
   FunnelStageSchema,
   FunnelStageValues,
   GenerateReplyToolInputSchema,
@@ -18,6 +21,7 @@ export {
 } from "@roll-agent/reply-authority-client";
 export type {
   CandidateInfo,
+  CandidateLocationSignal,
   FunnelStage,
   GenerateReplyToolInput,
   GenerateSignedReplyRequest,
