@@ -64,6 +64,35 @@ test("GenerateReplyToolInputSchema accepts modelConfig reasoning controls", () =
   });
 });
 
+test("GenerateReplyToolInputSchema accepts locationSignals", () => {
+  const parsed = GenerateReplyToolInputSchema.parse({
+    ...BASE_INPUT,
+    locationSignals: [
+      {
+        text: "人民广场",
+        source: "candidate_message",
+        city: "上海",
+        intent: "nearby_store",
+        confidence: 0.93,
+      },
+    ],
+    target: {
+      ...BASE_INPUT.target,
+      recruiterUsername: "recruiter-alice",
+    },
+  });
+
+  assert.deepEqual(parsed.locationSignals, [
+    {
+      text: "人民广场",
+      source: "candidate_message",
+      city: "上海",
+      intent: "nearby_store",
+      confidence: 0.93,
+    },
+  ]);
+});
+
 test("GenerateReplyToolInputSchema rejects targets without recruiter information", () => {
   assert.throws(
     () => GenerateReplyToolInputSchema.parse(BASE_INPUT),

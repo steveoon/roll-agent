@@ -57,6 +57,27 @@ export const CandidateInfoSchema = z.object({
   fullText: z.string().optional(),
 });
 
+export const CandidateLocationSignalSourceValues = [
+  "candidate_message",
+  "conversation_history",
+  "candidate_expected_location",
+  "communication_position",
+] as const;
+
+export const CandidateLocationSignalIntentValues = [
+  "nearby_store",
+  "store_address",
+  "expected_area",
+] as const;
+
+export const CandidateLocationSignalSchema = z.object({
+  text: z.string().min(1),
+  source: z.enum(CandidateLocationSignalSourceValues),
+  city: z.string().min(1).optional(),
+  intent: z.enum(CandidateLocationSignalIntentValues).optional(),
+  confidence: z.number().min(0).max(1),
+});
+
 export const RecruiterBindingSchema = z.object({
   platform: z.literal("zhipin"),
   username: z.string().min(1),
@@ -116,6 +137,10 @@ export const GenerateReplyToolInputSchema = z.object({
   candidateMessage: z.string().describe("候选人发送的消息"),
   conversationHistory: z.array(z.string()).optional().describe("对话历史（最近几轮）"),
   candidateInfo: CandidateInfoSchema.optional().describe("候选人基本信息"),
+  locationSignals: z
+    .array(CandidateLocationSignalSchema)
+    .optional()
+    .describe("候选人地点查询证据，由上游 browser-use 抽取并原样透传"),
   preferredBrand: z.string().optional().describe("偏好品牌"),
   channelType: z
     .enum(["public", "private"])
@@ -243,6 +268,7 @@ export type ProviderConfigs = z.infer<typeof ProviderConfigsSchema>;
 export type ReasoningConfig = z.infer<typeof ReasoningConfigSchema>;
 export type ModelConfig = z.infer<typeof ModelConfigSchema>;
 export type CandidateInfo = z.infer<typeof CandidateInfoSchema>;
+export type CandidateLocationSignal = z.infer<typeof CandidateLocationSignalSchema>;
 export type RecruiterBinding = z.infer<typeof RecruiterBindingSchema>;
 export type ReplyAuthorityTarget = z.infer<typeof ReplyAuthorityTargetSchema>;
 export type ResolvedReplyAuthorityTarget = z.infer<typeof ResolvedReplyAuthorityTargetSchema>;

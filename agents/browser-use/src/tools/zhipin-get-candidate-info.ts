@@ -1,7 +1,8 @@
 import { defineTool } from "@roll-agent/sdk";
+import { CandidateLocationSignalSchema } from "@roll-agent/reply-authority-client";
 import { z } from "zod";
 import { NativeVisualActivitySession } from "../native-visual-activity-session.ts";
-import { resolveConversationSignals } from "../pages/zhipin/job-signals.ts";
+import { resolveConversationSignals, resolveLocationSignals } from "../pages/zhipin/job-signals.ts";
 import { openZhipinNativePagePort } from "../pages/zhipin/native-page.ts";
 import type {
   NativeCandidateChatDetails,
@@ -35,6 +36,7 @@ const OutputSchema = z.object({
   candidateId: z.string(),
   candidateInfo: CandidateInfoSchema,
   preferredBrand: z.string().optional(),
+  locationSignals: z.array(CandidateLocationSignalSchema),
   chatMessages: z.array(ChatMessageSchema),
   formattedHistory: z.array(z.string()),
   stats: z.object({
@@ -66,6 +68,7 @@ function buildFailureResult(error: string) {
     conversationId: "",
     candidateId: "",
     candidateInfo: emptyCandidateInfo(),
+    locationSignals: [],
     chatMessages: [],
     formattedHistory: [],
     stats: { totalMessages: 0, candidateMessages: 0, recruiterMessages: 0, systemMessages: 0 },
@@ -139,6 +142,7 @@ export const zhipinGetCandidateInfo = defineTool({
     let session: NativeVisualActivitySessionLike | undefined;
     const openLabel = hasNavigationTarget ? "正在打开目标聊天" : "正在准备当前聊天";
     const extractLabel = "正在提取聊天记录";
+    const locationSignalLabel = "正在分析地点线索…";
     const fail = async (label: string, error: string) => {
       await session?.fail(label);
       return buildFailureResult(error);
@@ -218,6 +222,15 @@ export const zhipinGetCandidateInfo = defineTool({
         communicationPosition: data.candidateInfo.communicationPosition,
         expectedJobText: data.candidateInfo.expectedJobText,
       });
+      await session.begin(locationSignalLabel);
+      const locationResolution = await resolveLocationSignals({
+        llm: ctx.llm,
+        logger: ctx.logger,
+        messages: data.messages,
+        expectedLocation: signals.expectedLocation,
+        communicationPosition: signals.communicationPosition,
+      });
+      const locationSignals = [...locationResolution.signals];
 
       // formattedHistory 只保留 candidate + recruiter 对话，过滤系统消息噪音
       const formattedHistory = data.messages
@@ -261,6 +274,7 @@ export const zhipinGetCandidateInfo = defineTool({
           tags: [...data.candidateInfo.tags],
         },
         ...(signals.preferredBrand !== undefined ? { preferredBrand: signals.preferredBrand } : {}),
+        locationSignals,
         chatMessages: [...data.messages],
         formattedHistory,
         stats,

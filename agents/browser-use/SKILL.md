@@ -211,8 +211,8 @@ click_ref(@eN) 或 type_ref(@eN, text, clear?)
 | `zhipin_read_messages(limit?, onlyUnread?, sortBy?, autoScroll?, maxScrolls?)` | native CDP | 读取消息列表；默认 `autoScroll=true`，按 `conversationId` 去重。 |
 | `zhipin_open_chat_page(forceReload?, browserActionApproval?)` | native CDP | 点击左侧导航切回「沟通」；`forceReload:true` 时只对当前沟通页执行 `Page.reload` 做长跑恢复，返回 `usedReload`；若实时页面已不是沟通页，会跳过 reload 并返回 `reloadSkippedReason`。 |
 | `zhipin_open_chat(conversationId?, candidateName?, index?, preferUnread?)` | native CDP | 打开目标聊天；匹配优先级为 `conversationId` > `candidateName` > `index`。 |
-| `zhipin_get_candidate_info(conversationId?, candidateName?, index?, maxMessages?)` | native CDP | 提取候选人资料、聊天记录、`conversationId`、`candidateId` 和页面职位信号。 |
-| `zhipin_generate_reply_preview(conversationId?, candidateName?, index?, maxMessages?, reasoning?)` | native CDP | 读取聊天上下文，调用 Reply Authority SSE 流式生成回复，并在浏览器内展示阶段与临时草稿；可用 `reasoning` 控制是否请求 thinking/reasoning；返回 `preparedReplyId`，不返回 `signedEnvelope`。 |
+| `zhipin_get_candidate_info(conversationId?, candidateName?, index?, maxMessages?)` | native CDP | 提取候选人资料、聊天记录、`conversationId`、`candidateId`、页面职位信号和结构化地点证据 `locationSignals`。 |
+| `zhipin_generate_reply_preview(conversationId?, candidateName?, index?, maxMessages?, reasoning?)` | native CDP | 读取聊天上下文，抽取 `locationSignals` 并透传给 Reply Authority SSE 流式生成回复，在浏览器内展示阶段与临时草稿；可用 `reasoning` 控制是否请求 thinking/reasoning；返回 `preparedReplyId`，不返回 `signedEnvelope`。 |
 | `zhipin_send_prepared_reply(preparedReplyId, toolActionApproval?, browserActionApproval?)` | native CDP | 发送 `zhipin_generate_reply_preview` 生成的预备回复；内部取回并验签 envelope；若 `BROWSER_USE_POLICY_JSON.tools.zhipin_send_prepared_reply.policy="confirm"`，首次调用返回 `needs_confirmation`，确认后带 `toolActionApproval` 重试；若同时启用 `BROWSER_SECURITY_JSON.actionPolicy="confirm"`，还需按返回的 `browserActionApproval` 再次重试。 |
 | `zhipin_exchange_wechat(conversationId?, candidateName?, index?)` | native CDP | 点击「换微信」和确认弹窗，优先按 `conversationId` 定位聊天。 |
 | `zhipin_get_username()` | native CDP | 读取当前登录招聘者用户名；用于 `recruiterUsername` / `recruiterBinding` 链路。 |
@@ -253,27 +253,29 @@ click_ref(@eN) 或 type_ref(@eN, text, clear?)
 7. `zhipin_send_prepared_reply` 会校验 envelope 的 `conversationId + candidateId + recruiterBinding`，当前页面目标或招聘者不一致时拒绝。
 8. 需要更强推理时，可给 `zhipin_generate_reply_preview` 传 `reasoning:{enabled:true, effort:"low"|"medium"|"high", scope:"reply"|"all"}`；不传则沿用 Reply Authority Service 默认策略。
 9. `preferredBrand` 只来自 `zhipin_get_candidate_info` 对 `communicationPosition` 的连字符格式解析；不要用通用岗位名或候选人公司名伪造。
-10. 推荐页岗位筛选优先调用 `zhipin_list_recommend_jobs()`；若返回 `canSwitch:false`，说明当前账号/页面没有可切换目标，不要继续盲试岗位名。
-11. `jobRef` 来自 `zhipin_list_recommend_jobs` 输出，格式如 `@j1`；选择岗位时优先传 `zhipin_select_recommend_job({ jobRef })`。
-12. `jobRef` 只对最近一次岗位下拉快照有意义；筛选、搜索、刷新或页面重开后先重新调用 `zhipin_list_recommend_jobs`。
-13. 推荐页岗位筛选的稳定主键是 `zhipin_list_recommend_jobs` / `zhipin_select_recommend_job` 返回的 `value`；已知 `value` 时传 `jobValue`。
-14. 推荐岗位只知道标题时传 `jobName`；`index` 只表示当前岗位下拉快照，不要在搜索、筛选、刷新或跨步骤后复用。
-15. `zhipin_select_recommend_job` 返回 `status:"selected"` 或 `status:"already_selected"` 都表示目标岗位已生效。
-16. `zhipin_select_recommend_job` 返回 `status:"not_found"` 时不要盲目重试；先调用 `zhipin_list_recommend_jobs`，再选择最接近岗位的 `jobRef` 或 `value`。
-17. 只有明确需要重新点击已选中岗位项时才传 `forceClick:true`；默认不要传，避免无意义重复点击。
-18. `zhipin_filter_recommend_candidates` 返回 `status:"requires_vip"` 时不要反复尝试绕过筛选 UI；当前账号没有权限使用该筛选，改为直接读取当前推荐列表或调整业务策略。
-19. 聊天消息列表不产生 `candidateRef`；聊天回复链路使用 `conversationId` / `candidateId`，推荐候选人链路才使用 `candidateRef`。
-20. 推荐候选人列表的 `candidateRef` 来自 `zhipin_get_candidate_list` 输出，格式如 `@c1`；后续 `zhipin_say_hello` / `zhipin_open_resume` 优先传它。
-21. `candidateRef` 只对最近一次推荐列表快照有意义；筛选、搜索、滚动加载、刷新或页面重开后先重新调用 `zhipin_get_candidate_list`。
-22. 不要自行构造 `jobRef` / `candidateRef`；只能传本 Agent 刚返回的 ref。
-23. 调 `zhipin_say_hello` 前，先从 `zhipin_get_candidate_list` 结果中过滤 `buttonText:"打招呼"` 的候选人；`buttonText` 为空通常表示已经打过招呼。
-24. 如果业务有年龄、资格或岗位匹配约束，必须先按 `age` / `expectedPosition` / `tags` 等列表字段过滤；不要把刚读到的全部 `candidateRefs` 盲目提交。
-25. `zhipin_say_hello({ candidateRefs })` 支持同一快照内连续提交多个 ref；若返回“候选人引用已过期”，说明 BOSS 列表已重排，重新执行 `zhipin_get_candidate_list` 后只重试剩余目标。
-26. 高频连续 tool call 可用 `roll run --batch-stdin --json` 批量提交，但每项仍要显式声明 `agent` / `tool` / `input`，不要假设 batch 自动传递上一步输出。
-27. 不要用 `navigate_active_tab` 直接跳转 `https://www.zhipin.com/web/chat/*`；聊天页用 `zhipin_open_chat_page()`，推荐页用 `zhipin_open_recommend_page()`。
-28. BOSS 已有专用工具能表达业务意图时，不要为了“看见按钮”而绕开专用工具改用 `click_ref` / `type_ref`。
-29. 对 BOSS 未建模按钮，例如新出现的“交换电话”，可以先用 `browser_snapshot` 找到对应 `@eN`，再 `click_ref`；弹窗确认类二次动作必须重新 snapshot 后再点击。
-30. 长跑同一 BOSS tab 出现「选中态丢失 / 列表错乱 / 依赖当前选中聊天的工具失败」时，做 periodic recovery 的边界：
+10. `locationSignals` 由 `zhipin_get_candidate_info` / `zhipin_generate_reply_preview` 在读取聊天记录后自动抽取并透传；orchestrator 不要自行伪造或改写。`candidateInfo.expectedLocation` 只是城市/区域弱信号，不能替代候选人本轮追问的具体 POI（地铁站、商圈、道路附近等）。
+11. browser-use 只输出地点文本证据，不调用外部地图、不做 geocode、不计算门店距离；地理解析与岗位/门店匹配由下游 Reply Authority 消费 `locationSignals` 后执行。
+12. 推荐页岗位筛选优先调用 `zhipin_list_recommend_jobs()`；若返回 `canSwitch:false`，说明当前账号/页面没有可切换目标，不要继续盲试岗位名。
+13. `jobRef` 来自 `zhipin_list_recommend_jobs` 输出，格式如 `@j1`；选择岗位时优先传 `zhipin_select_recommend_job({ jobRef })`。
+14. `jobRef` 只对最近一次岗位下拉快照有意义；筛选、搜索、刷新或页面重开后先重新调用 `zhipin_list_recommend_jobs`。
+15. 推荐页岗位筛选的稳定主键是 `zhipin_list_recommend_jobs` / `zhipin_select_recommend_job` 返回的 `value`；已知 `value` 时传 `jobValue`。
+16. 推荐岗位只知道标题时传 `jobName`；`index` 只表示当前岗位下拉快照，不要在搜索、筛选、刷新或跨步骤后复用。
+17. `zhipin_select_recommend_job` 返回 `status:"selected"` 或 `status:"already_selected"` 都表示目标岗位已生效。
+18. `zhipin_select_recommend_job` 返回 `status:"not_found"` 时不要盲目重试；先调用 `zhipin_list_recommend_jobs`，再选择最接近岗位的 `jobRef` 或 `value`。
+19. 只有明确需要重新点击已选中岗位项时才传 `forceClick:true`；默认不要传，避免无意义重复点击。
+20. `zhipin_filter_recommend_candidates` 返回 `status:"requires_vip"` 时不要反复尝试绕过筛选 UI；当前账号没有权限使用该筛选，改为直接读取当前推荐列表或调整业务策略。
+21. 聊天消息列表不产生 `candidateRef`；聊天回复链路使用 `conversationId` / `candidateId`，推荐候选人链路才使用 `candidateRef`。
+22. 推荐候选人列表的 `candidateRef` 来自 `zhipin_get_candidate_list` 输出，格式如 `@c1`；后续 `zhipin_say_hello` / `zhipin_open_resume` 优先传它。
+23. `candidateRef` 只对最近一次推荐列表快照有意义；筛选、搜索、滚动加载、刷新或页面重开后先重新调用 `zhipin_get_candidate_list`。
+24. 不要自行构造 `jobRef` / `candidateRef`；只能传本 Agent 刚返回的 ref。
+25. 调 `zhipin_say_hello` 前，先从 `zhipin_get_candidate_list` 结果中过滤 `buttonText:"打招呼"` 的候选人；`buttonText` 为空通常表示已经打过招呼。
+26. 如果业务有年龄、资格或岗位匹配约束，必须先按 `age` / `expectedPosition` / `tags` 等列表字段过滤；不要把刚读到的全部 `candidateRefs` 盲目提交。
+27. `zhipin_say_hello({ candidateRefs })` 支持同一快照内连续提交多个 ref；若返回“候选人引用已过期”，说明 BOSS 列表已重排，重新执行 `zhipin_get_candidate_list` 后只重试剩余目标。
+28. 高频连续 tool call 可用 `roll run --batch-stdin --json` 批量提交，但每项仍要显式声明 `agent` / `tool` / `input`，不要假设 batch 自动传递上一步输出。
+29. 不要用 `navigate_active_tab` 直接跳转 `https://www.zhipin.com/web/chat/*`；聊天页用 `zhipin_open_chat_page()`，推荐页用 `zhipin_open_recommend_page()`。
+30. BOSS 已有专用工具能表达业务意图时，不要为了“看见按钮”而绕开专用工具改用 `click_ref` / `type_ref`。
+31. 对 BOSS 未建模按钮，例如新出现的“交换电话”，可以先用 `browser_snapshot` 找到对应 `@eN`，再 `click_ref`；弹窗确认类二次动作必须重新 snapshot 后再点击。
+32. 长跑同一 BOSS tab 出现「选中态丢失 / 列表错乱 / 依赖当前选中聊天的工具失败」时，做 periodic recovery 的边界：
     - 优先 `zhipin_open_chat_page({ forceReload: true })`（或通用 `browser_reload_active_tab`）：等价手动 F5，清空当前 document 的 DOM 与页面内 SPA 状态，保留 Chrome 窗口与 profile 登录态；reload 后所有 `@eN` / `candidateRef` 失效，必须重新 snapshot / 读列表。
     - 普通 `zhipin_open_chat_page()`（不带 forceReload）在已处于沟通页时只返回 `alreadyOnChat`，**不会**卸载 document，无法清状态。
     - `roll browser stop` 才能回收 renderer 进程内存，但会关闭浏览器窗口；reload 只清 document 级状态，**不保证** renderer 100% 把内存归还 OS，杀进程仍由 `roll browser stop` 负责。
@@ -299,6 +301,6 @@ zhipin_open_recommend_page
 ## 参考资料
 
 - `references/zhipin-diagnostics.md`：BOSS native CDP / attach 诊断阶段、推进顺序和返回字段。
-- `references/zhipin-workflows.md`：聊天主键、动态列表、`preferredBrand`、Reply Authority 编排细节。
+- `references/zhipin-workflows.md`：聊天主键、动态列表、`preferredBrand`、`locationSignals`、Reply Authority 编排细节。
 - `references/generic-browser-refs.md`：通用 AX snapshot、`@eN` ref、点击/输入闭环和边界条件。
 - `references/env.yaml`：运行所需环境变量声明。

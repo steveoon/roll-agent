@@ -140,6 +140,49 @@ recommend-list  -> 推荐牛人列表，默认向下滚动，去重主键 candid
 - 没有分隔符时不输出。
 - 禁止用通用岗位名或 `zhipin_get_candidate_list.company` 伪造品牌。
 
+## locationSignals
+
+`zhipin_get_candidate_info` 和 `zhipin_generate_reply_preview` 会在读取聊天记录后输出/透传结构化地点证据 `locationSignals`，供下游 Reply Authority 做 geocode 与门店/岗位距离匹配。
+
+字段形状（与 `@roll-agent/reply-authority-client` 契约一致）：
+
+```json
+{
+  "text": "人民广场",
+  "source": "candidate_message",
+  "city": "上海",
+  "intent": "nearby_store",
+  "confidence": 0.93
+}
+```
+
+`source` 取值：
+
+| `source` | 含义 |
+| --- | --- |
+| `candidate_message` | 候选人消息中的地点片段（最高优先级） |
+| `conversation_history` | 近几轮对话中的地点引用 |
+| `candidate_expected_location` | 候选人资料里的期望城市/区域（弱信号） |
+| `communication_position` | 沟通岗位文本中可确认的城市/门店片段 |
+
+`intent` 常见取值：`nearby_store`（附近门店/岗位）、`store_address`（门店地址）、`expected_area`（期望区域）。
+
+抽取规则：
+
+1. browser-use 通过指挥官 LLM 抽取，并在超时或失败时回退到规则匹配；`text` 必须来自输入原文，不改写成下游门店名。
+2. 多轮对话会扫描全部候选人消息（去重），避免「历史问过地点、最新一句非地点」时丢失证据。
+3. `candidateInfo.expectedLocation` 只作城市边界弱信号（confidence 通常 ≤ 0.6），不能替代候选人本轮追问的具体 POI。
+4. 问候/职位介绍类消息可能跳过 LLM 抽取，仅保留 `expectedLocation` 弱信号。
+5. orchestrator 不要自行构造或改写 `locationSignals`；需要地点证据时调用 `zhipin_get_candidate_info` 或 `zhipin_generate_reply_preview`，由工具自动填充。
+
+边界：
+
+- browser-use **不**调用外部地图、**不**做 geocode、**不**计算门店距离。
+- 岗位/门店事实源仍是下游同步的岗位配置；外部地图 POI 不能当作门店或岗位事实。
+- `smart-reply-agent.generate_reply` 只校验 schema 并原样转发 `locationSignals`，不做地点推断。
+
+`zhipin_generate_reply_preview` 会把非空 `locationSignals` 写入 Reply Authority stream input；`zhipin_get_candidate_info` 在 output 中返回同结构数组，便于编排器先读证据再决定是否生成回复。
+
 ## Reply Authority
 
 `zhipin_send_prepared_reply` 只接受 `zhipin_generate_reply_preview` 生成的 `preparedReplyId`，内部再取回 Reply Authority Service 签发的 envelope 并完成验签。

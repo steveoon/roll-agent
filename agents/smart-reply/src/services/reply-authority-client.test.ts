@@ -34,6 +34,15 @@ const ENRICHED_REQUEST = {
     expectedLocation: "上海",
     expectedPosition: "服务员",
   },
+  locationSignals: [
+    {
+      text: "人民广场",
+      source: "candidate_message" as const,
+      city: "上海",
+      intent: "nearby_store" as const,
+      confidence: 0.93,
+    },
+  ],
   preferredBrand: "肯德基",
 };
 
