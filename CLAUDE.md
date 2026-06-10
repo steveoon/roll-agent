@@ -268,7 +268,7 @@ pnpm release-packages             # 构建 + 发布到 npm
 <!-- gitnexus:start -->
 # GitNexus — Code Intelligence
 
-This project is indexed by GitNexus as **roll-agent** (8457 symbols, 16323 relationships, 300 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
+This project is indexed by GitNexus as **roll-agent** (8645 symbols, 16619 relationships, 300 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
 
 > If any GitNexus tool warns the index is stale, run `npx gitnexus analyze` in terminal first.
 
@@ -300,32 +300,11 @@ This project is indexed by GitNexus as **roll-agent** (8457 symbols, 16323 relat
 
 | Task | Read this skill file |
 |------|---------------------|
-| Understand architecture / "How does X work?" | `~/.claude/skills/gitnexus-exploring/SKILL.md` |
-| Blast radius / "What breaks if I change X?" | `~/.claude/skills/gitnexus-impact-analysis/SKILL.md` |
-| Trace bugs / "Why is X failing?" | `~/.claude/skills/gitnexus-debugging/SKILL.md` |
-| Rename / extract / split / refactor | `~/.claude/skills/gitnexus-refactoring/SKILL.md` |
-| Tools, resources, schema reference | `~/.claude/skills/gitnexus-guide/SKILL.md` |
-| Index, status, clean, wiki CLI commands | `~/.claude/skills/gitnexus-cli/SKILL.md` |
-| PR review / merge risk | `~/.claude/skills/gitnexus-pr-review/SKILL.md` |
-| Work in the Tools area (347 symbols) | `.claude/skills/generated/tools/SKILL.md` |
-| Work in the Zhipin area (271 symbols) | `.claude/skills/generated/zhipin/SKILL.md` |
-| Work in the Commands area (253 symbols) | `.claude/skills/generated/commands/SKILL.md` |
-| Work in the Runtime area (247 symbols) | `.claude/skills/generated/runtime/SKILL.md` |
-| Work in the Registry area (69 symbols) | `.claude/skills/generated/registry/SKILL.md` |
-| Work in the Config area (65 symbols) | `.claude/skills/generated/config/SKILL.md` |
-| Work in the Scripts area (57 symbols) | `.claude/skills/generated/scripts/SKILL.md` |
-| Work in the Tool-runtime area (45 symbols) | `.claude/skills/generated/tool-runtime/SKILL.md` |
-| Work in the Recruitment-events area (33 symbols) | `.claude/skills/generated/recruitment-events/SKILL.md` |
-| Work in the Reply-authority area (26 symbols) | `.claude/skills/generated/reply-authority/SKILL.md` |
-| Work in the Services area (15 symbols) | `.claude/skills/generated/services/SKILL.md` |
-| Work in the Cluster_391 area (14 symbols) | `.claude/skills/generated/cluster-391/SKILL.md` |
-| Work in the Mcp area (13 symbols) | `.claude/skills/generated/mcp/SKILL.md` |
-| Work in the Cluster_397 area (11 symbols) | `.claude/skills/generated/cluster-397/SKILL.md` |
-| Work in the Cli area (11 symbols) | `.claude/skills/generated/cli/SKILL.md` |
-| Work in the Diagnostics area (11 symbols) | `.claude/skills/generated/diagnostics/SKILL.md` |
-| Work in the Cluster_36 area (10 symbols) | `.claude/skills/generated/cluster-36/SKILL.md` |
-| Work in the Cluster_348 area (9 symbols) | `.claude/skills/generated/cluster-348/SKILL.md` |
-| Work in the Cluster_20 area (8 symbols) | `.claude/skills/generated/cluster-20/SKILL.md` |
-| Work in the Cluster_393 area (8 symbols) | `.claude/skills/generated/cluster-393/SKILL.md` |
+| Understand architecture / "How does X work?" | `.claude/skills/gitnexus/gitnexus-exploring/SKILL.md` |
+| Blast radius / "What breaks if I change X?" | `.claude/skills/gitnexus/gitnexus-impact-analysis/SKILL.md` |
+| Trace bugs / "Why is X failing?" | `.claude/skills/gitnexus/gitnexus-debugging/SKILL.md` |
+| Rename / extract / split / refactor | `.claude/skills/gitnexus/gitnexus-refactoring/SKILL.md` |
+| Tools, resources, schema reference | `.claude/skills/gitnexus/gitnexus-guide/SKILL.md` |
+| Index, status, clean, wiki CLI commands | `.claude/skills/gitnexus/gitnexus-cli/SKILL.md` |
 
 <!-- gitnexus:end -->

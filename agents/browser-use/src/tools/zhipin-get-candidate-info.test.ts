@@ -27,6 +27,14 @@ function createTestContext(llmText = ""): AgentContext {
   };
 }
 
+function buildLocationInquiryLlmText(locationSignals: readonly unknown[]): string {
+  return JSON.stringify({
+    inquiryType: "location_inquiry",
+    reason: "候选人正在咨询地点",
+    locationSignals,
+  });
+}
+
 function createNoopSession(calls: string[]) {
   return {
     async begin(label: string) {
@@ -171,7 +179,7 @@ describe("zhipin_get_candidate_info", () => {
     assert.equal(result.stats.totalMessages, 2);
     assert.equal(calls.includes("wait-messages"), true);
     assert.equal(calls.includes("read-details"), true);
-    assert.equal(calls.includes("begin:正在分析对话记录，提取可能的位置线索"), false);
+    assert.equal(calls.includes("begin:正在分析地点线索…"), true);
     assert.equal(calls.at(-1), "close");
   });
 
@@ -200,6 +208,7 @@ describe("zhipin_get_candidate_info", () => {
 
   it("returns LLM extracted location signals with candidate info", async () => {
     const calls: string[] = [];
+    let llmCalled = false;
 
     setZhipinGetCandidateInfoDepsForTests({
       openNativePagePort: async () =>
@@ -238,20 +247,32 @@ describe("zhipin_get_candidate_info", () => {
 
     const result = await zhipinGetCandidateInfo.execute(
       { conversationId: "conversation-1", maxMessages: 20 },
-      createTestContext(
-        JSON.stringify([
-          {
-            text: "徐家汇",
-            source: "candidate_message",
-            city: "上海",
-            intent: "nearby_store",
-            confidence: 0.91,
+      {
+        llm: {
+          generateText: async () => {
+            llmCalled = true;
+            return buildLocationInquiryLlmText([
+              {
+                text: "徐家汇",
+                source: "candidate_message",
+                city: "上海",
+                intent: "nearby_store",
+                confidence: 0.91,
+              },
+            ]);
           },
-        ]),
-      ),
+        },
+        logger: {
+          debug: () => {},
+          info: () => {},
+          warn: () => {},
+          error: () => {},
+        },
+      },
     );
 
     assert.equal(result.success, true);
+    assert.equal(llmCalled, true);
     assert.deepEqual(result.locationSignals, [
       {
         text: "徐家汇",
@@ -268,6 +289,6 @@ describe("zhipin_get_candidate_info", () => {
         confidence: 0.6,
       },
     ]);
-    assert.equal(calls.includes("begin:正在分析对话记录，提取可能的位置线索"), true);
+    assert.equal(calls.includes("begin:正在分析地点线索…"), true);
   });
 });

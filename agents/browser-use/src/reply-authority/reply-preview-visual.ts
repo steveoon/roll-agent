@@ -7,6 +7,7 @@ type NativePreviewTarget = {
 function buildPreviewScript(input: {
   readonly mode: "begin" | "status" | "draft" | "final" | "complete" | "fail" | "clear";
   readonly label?: string;
+  readonly locationSummary?: string;
   readonly draftText?: string;
   readonly provisional?: boolean;
 }): string {
@@ -16,22 +17,42 @@ function buildPreviewScript(input: {
     const statusId = "roll-agent-reply-preview-status";
     const draftId = "roll-agent-reply-preview-draft";
     const badgeId = "roll-agent-reply-preview-badge";
+    const locationId = "roll-agent-reply-preview-location";
     const spinnerId = "roll-agent-reply-preview-spinner";
     const styleId = "roll-agent-reply-preview-style";
+    const stateKey = "__rollAgentReplyPreviewState";
+    const state = window[stateKey] || {};
+    window[stateKey] = state;
+
+    const cancelPendingRemove = () => {
+      if (state.removeTimer) {
+        window.clearTimeout(state.removeTimer);
+        state.removeTimer = undefined;
+      }
+    };
 
     if (input.mode === "clear") {
       const existingRoot = document.getElementById(rootId);
       if (!existingRoot) return true;
 
+      cancelPendingRemove();
       existingRoot.style.opacity = "0";
       existingRoot.style.transform = "translateY(8px) scale(0.98)";
-      window.setTimeout(() => existingRoot.remove(), 240);
+      state.removeTimer = window.setTimeout(() => {
+        if (document.getElementById(rootId) === existingRoot) {
+          existingRoot.remove();
+        }
+        state.removeTimer = undefined;
+      }, 240);
       return true;
     }
 
     const ensureRoot = () => {
       let root = document.getElementById(rootId);
-      if (root) return root;
+      if (root) {
+        cancelPendingRemove();
+        return root;
+      }
 
       if (!document.getElementById(styleId)) {
         const style = document.createElement("style");
@@ -105,6 +126,15 @@ function buildPreviewScript(input: {
       badge.style.color = "#99F6E4";
       badge.textContent = "临时草稿";
 
+      const location = document.createElement("div");
+      location.id = locationId;
+      location.style.display = "none";
+      location.style.flexWrap = "wrap";
+      location.style.gap = "6px";
+      location.style.fontSize = "11px";
+      location.style.lineHeight = "16px";
+      location.style.color = "#99F6E4";
+
       const draft = document.createElement("div");
       draft.id = draftId;
       draft.style.maxHeight = "30vh";
@@ -115,23 +145,32 @@ function buildPreviewScript(input: {
       draft.style.color = "#E2E8F0";
 
       header.append(spinner, status);
-      root.append(header, badge, draft);
+      root.append(header, location, badge, draft);
       document.documentElement.append(root);
       return root;
     };
 
     const root = ensureRoot();
     const status = document.getElementById(statusId);
+    const location = document.getElementById(locationId);
     const draft = document.getElementById(draftId);
     const badge = document.getElementById(badgeId);
     const spinner = document.getElementById(spinnerId);
-    if (!status || !draft || !badge || !spinner) return false;
+    if (!status || !location || !draft || !badge || !spinner) return false;
 
     root.style.opacity = "1";
     root.style.transform = "translateY(0)";
 
     if (typeof input.label === "string") {
       status.textContent = input.label;
+    }
+
+    if (typeof input.locationSummary === "string" && input.locationSummary.length > 0) {
+      location.textContent = input.locationSummary;
+      location.style.display = "flex";
+    } else if (input.mode === "begin") {
+      location.textContent = "";
+      location.style.display = "none";
     }
 
     if (typeof input.draftText === "string") {
@@ -183,8 +222,14 @@ export class NativeReplyPreviewVisualSession {
     this.target = target;
   }
 
-  async begin(label: string): Promise<boolean> {
-    return await this.render({ mode: "begin", label, draftText: "", provisional: true });
+  async begin(label: string, locationSummary?: string): Promise<boolean> {
+    return await this.render({
+      mode: "begin",
+      label,
+      ...(locationSummary !== undefined && locationSummary.length > 0 ? { locationSummary } : {}),
+      draftText: "",
+      provisional: true,
+    });
   }
 
   async updateStatus(label: string): Promise<boolean> {

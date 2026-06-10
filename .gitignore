@@ -4,6 +4,7 @@ dist/
 coverage/
 /outputs/
 /projects/
+.tmp-location-preview-report.json
 *.tsbuildinfo
 .DS_Store
 .env

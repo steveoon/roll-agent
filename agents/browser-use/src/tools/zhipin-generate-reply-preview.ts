@@ -12,9 +12,9 @@ import {
 import { z } from "zod";
 import { NativeVisualActivitySession } from "../native-visual-activity-session.ts";
 import {
+  formatLocationSignalsVisualLabel,
   resolveConversationSignals,
-  resolveLocationSignalsWithLlm,
-  shouldAnalyzeLocationSignals,
+  resolveLocationSignals,
 } from "../pages/zhipin/job-signals.ts";
 import { openZhipinNativePagePort } from "../pages/zhipin/native-page.ts";
 import type {
@@ -67,11 +67,13 @@ const PHASE_LABELS: Readonly<Record<string, string>> = {
   reply_gate: "检查回复策略",
   signing: "签发安全信封",
 };
-const LOCATION_SIGNAL_LABEL = "正在分析对话记录，提取可能的位置线索";
+const LOCATION_SIGNAL_LABEL = "正在分析地点线索…";
+const LOCATION_SIGNAL_WAIT_LABEL = "仍在分析地点线索，请稍候…";
+const LOCATION_SIGNAL_PROGRESS_DELAY_MS = 2_500;
 
 type NativeVisualActivitySessionLike = Pick<
   NativeVisualActivitySession,
-  "begin" | "highlightSelector" | "succeed" | "fail"
+  "begin" | "highlightSelector" | "succeed" | "fail" | "clear"
 >;
 
 type ReplyPreviewVisualSessionLike = Pick<
@@ -378,22 +380,45 @@ export const zhipinGenerateReplyPreview = defineTool({
         communicationPosition: data.candidateInfo.communicationPosition,
         expectedJobText: data.candidateInfo.expectedJobText,
       });
-      if (
-        shouldAnalyzeLocationSignals({
-          messages: data.messages,
-          expectedLocation: signals.expectedLocation,
-          communicationPosition: signals.communicationPosition,
-        })
-      ) {
-        await session.begin(LOCATION_SIGNAL_LABEL);
-      }
-      const locationSignals = await resolveLocationSignalsWithLlm({
-        llm: ctx.llm,
-        logger: ctx.logger,
+      const locationDecisionInput = {
         messages: data.messages,
         expectedLocation: signals.expectedLocation,
         communicationPosition: signals.communicationPosition,
-      });
+      };
+      const locationSession = session;
+      await locationSession.begin(LOCATION_SIGNAL_LABEL);
+      let locationAnalysisDone = false;
+      let locationProgressUpdate: Promise<unknown> = Promise.resolve();
+      const locationProgressTimer = setTimeout(() => {
+        locationProgressUpdate = locationProgressUpdate
+          .then(async () => {
+            if (!locationAnalysisDone) {
+              await locationSession.begin(LOCATION_SIGNAL_WAIT_LABEL);
+            }
+          })
+          .catch((error: unknown) => {
+            ctx.logger.debug(
+              `Location signal progress update failed: ${
+                error instanceof Error ? error.message : String(error)
+              }`,
+            );
+          });
+      }, LOCATION_SIGNAL_PROGRESS_DELAY_MS);
+      let locationResolution: Awaited<ReturnType<typeof resolveLocationSignals>>;
+      try {
+        locationResolution = await resolveLocationSignals({
+          llm: ctx.llm,
+          logger: ctx.logger,
+          ...locationDecisionInput,
+        });
+      } finally {
+        locationAnalysisDone = true;
+        clearTimeout(locationProgressTimer);
+        await locationProgressUpdate;
+      }
+      const locationSummary = formatLocationSignalsVisualLabel(locationResolution);
+      const locationSignals = [...locationResolution.signals];
+      await session.succeed(locationSummary.length > 0 ? locationSummary : "地点线索分析完成");
       const replyInput = buildGenerateReplyInput({
         data,
         conversationId: selectedTarget.conversationId,
@@ -412,8 +437,7 @@ export const zhipinGenerateReplyPreview = defineTool({
           selectedTarget.candidateName || selectedTarget.candidateId
         }`,
       );
-      await session.begin("正在生成回复");
-      await preview.begin("正在生成回复");
+      await preview.begin("正在生成回复", locationSummary.length > 0 ? locationSummary : undefined);
 
       let draftText = "";
       let requestId: string | undefined;
@@ -426,7 +450,6 @@ export const zhipinGenerateReplyPreview = defineTool({
 
         const label = resolveProgressLabel(event);
         if (label !== undefined) {
-          await session.begin(label);
           await preview.updateStatus(label);
         }
 
@@ -460,11 +483,9 @@ export const zhipinGenerateReplyPreview = defineTool({
       if (preparedRecord === undefined) {
         const error = "Reply Authority stream 未返回 final";
         await preview.fail(error);
-        await session.fail(error);
         return createFailure(error);
       }
 
-      await session.succeed("回复已生成");
       return toOutput(preparedRecord);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);

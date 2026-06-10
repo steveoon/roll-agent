@@ -1,27 +1,42 @@
+import { createHash } from "node:crypto";
 import type { AgentLLM, AgentLogger } from "@roll-agent/sdk";
 import {
   CandidateLocationSignalSchema,
   type CandidateLocationSignal,
 } from "@roll-agent/reply-authority-client";
+import { z } from "zod";
 
 const EXPECTED_JOB_SEPARATOR = "·";
 const BRAND_POSITION_SEPARATOR = /[-－—–]/;
 const RECENT_LOCATION_SIGNAL_MESSAGE_LIMIT = 12;
 const EXPECTED_LOCATION_CONFIDENCE = 0.6;
-const RULE_BASED_LOCATION_CONFIDENCE = 0.74;
-const LOCATION_SIGNAL_LLM_TIMEOUT_MS = 8_000;
-const LOCATION_SIGNAL_QUERY_PATTERN =
-  /(附近|周边|旁边|就近|地址|位置|在哪里|在哪|哪里|哪边|远吗|太远|不远|地铁|号线|门店|工作地址)/u;
-const EXPECTED_LOCATION_QUERY_PATTERN =
-  /(有吗|还招|招吗|招聘吗|附近|周边|地址|门店|在哪里|在哪|哪里|哪边|远吗|太远|不远)/u;
-const LOCATION_NAME_EVIDENCE_PATTERN =
-  /[\p{Script=Han}A-Za-z0-9]{2,16}(?:地铁站|号线|区|县|镇|街道|路|坊|广场|商场|店)/u;
-const RULE_BASED_LOCATION_PATTERNS = [
-  /是在([^，。？！,.!?\s]{2,16})吗/u,
-  /我在([^，。？！,.!?\s]{2,16}?)(?:附近|这边|那边|，|,|。|！|!|？|\?)/u,
-  /([^，。？！,.!?\s]{2,16}?)(?:附近|周边|旁边|招兼职|有吗|还招)/u,
-  /([^，。？！,.!?\s]{2,16}(?:地铁站|号线|区|镇|街道|路|坊|广场|商场|店))/u,
+const LOCATION_SIGNAL_LLM_TIMEOUT_MS = 15_000;
+const LOCATION_SIGNAL_CACHE_TTL_MS = 5 * 60_000;
+const LOCATION_SIGNAL_CACHE_MAX_ENTRIES = 200;
+
+export const LocationSignalAnalysisPathValues = ["llm", "fallback", "profile_only"] as const;
+
+export type LocationSignalAnalysisPath = (typeof LocationSignalAnalysisPathValues)[number];
+
+export const LocationSignalInquiryTypeValues = [
+  "location_inquiry",
+  "non_location_inquiry",
 ] as const;
+
+export type LocationSignalInquiryType = (typeof LocationSignalInquiryTypeValues)[number];
+
+export type LocationSignalResolution = {
+  readonly signals: readonly CandidateLocationSignal[];
+  readonly analysisPath: LocationSignalAnalysisPath;
+  readonly inquiryType?: LocationSignalInquiryType;
+};
+const LocationSignalLlmDecisionSchema = z.object({
+  inquiryType: z.enum(LocationSignalInquiryTypeValues),
+  reason: z.string().trim().max(200).optional(),
+  locationSignals: z.array(CandidateLocationSignalSchema).default([]),
+});
+type LocationSignalLlmDecision = z.infer<typeof LocationSignalLlmDecisionSchema>;
+
 const LOCATION_SIGNAL_SOURCE_PRIORITY: Readonly<Record<CandidateLocationSignal["source"], number>> =
   {
     candidate_message: 0,
@@ -52,11 +67,13 @@ type ResolveLocationSignalsInput = {
   readonly timeoutMs?: number | undefined;
 };
 
-type LocationSignalAnalysisInput = {
-  readonly messages: readonly LocationSignalMessage[];
-  readonly expectedLocation: string;
-  readonly communicationPosition: string;
+type LocationSignalResolutionCacheEntry = {
+  readonly createdAtMs: number;
+  readonly resolution: LocationSignalResolution;
 };
+
+const locationSignalResolutionCache = new Map<string, LocationSignalResolutionCacheEntry>();
+const pendingLocationSignalResolutions = new Map<string, Promise<LocationSignalResolution>>();
 
 class LocationSignalExtractionTimeoutError extends Error {
   constructor(timeoutMs: number) {
@@ -80,10 +97,6 @@ function normalizeTimeoutMs(value: number | undefined): number {
 function clampConfidence(value: number): number {
   if (!Number.isFinite(value)) return 0;
   return Math.min(1, Math.max(0, value));
-}
-
-function isPlainRecord(value: unknown): value is Readonly<Record<string, unknown>> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function getLatestCandidateMessage(messages: readonly LocationSignalMessage[]): string {
@@ -144,23 +157,17 @@ function parseJsonFromText(text: string): unknown {
   throw new Error("Location signal extraction did not produce valid JSON");
 }
 
-function readLocationSignalItems(parsed: unknown): readonly unknown[] {
-  if (Array.isArray(parsed)) {
-    return parsed;
+function parseLocationSignalDecision(parsed: unknown): LocationSignalLlmDecision {
+  const decision = LocationSignalLlmDecisionSchema.safeParse(parsed);
+  if (decision.success) {
+    return decision.data;
   }
 
-  if (isPlainRecord(parsed) && Array.isArray(parsed["locationSignals"])) {
-    return parsed["locationSignals"];
-  }
-
-  throw new Error("Location signal extraction did not produce a JSON array");
+  throw new Error("Location signal extraction did not produce a valid JSON decision");
 }
 
-function parseLocationSignalsFromText(text: string): CandidateLocationSignal[] {
-  return readLocationSignalItems(parseJsonFromText(text)).flatMap((item) => {
-    const parsed = CandidateLocationSignalSchema.safeParse(item);
-    return parsed.success ? [parsed.data] : [];
-  });
+function parseLocationSignalDecisionFromText(text: string): LocationSignalLlmDecision {
+  return parseLocationSignalDecision(parseJsonFromText(text));
 }
 
 function resolveWeakProfileLocationSignals(
@@ -182,54 +189,11 @@ function resolveWeakProfileLocationSignals(
   ];
 }
 
-function normalizeRuleBasedLocationText(value: string | null | undefined): string {
-  return normalizeText(value)
-    .replace(/^[那这]/u, "")
-    .replace(/^(是在|我在|在|到|去|离)/u, "")
-    .replace(/[吗呢啊呀吧了，。？！,.!?]+$/u, "")
-    .trim();
-}
-
-function stripKnownContextText(text: string, input: LocationSignalEvidenceInput): string {
-  const knownFragments = [normalizeText(input.communicationPosition)].filter(
-    (fragment) => fragment.length >= 2,
-  );
-
-  return knownFragments.reduce(
-    (current, fragment) => current.split(fragment).join(""),
-    normalizeText(text),
-  );
-}
-
-function shouldAttemptLocationSignalLlm(input: LocationSignalEvidenceInput): boolean {
-  const candidateTexts = [
-    input.latestCandidateMessage,
-    ...input.recentMessages
-      .filter((message) => message.sender === "candidate")
-      .map((message) => message.content),
-  ];
-
-  return candidateTexts.some((text) => {
-    const stripped = stripKnownContextText(text, input);
-    return (
-      LOCATION_SIGNAL_QUERY_PATTERN.test(stripped) ||
-      LOCATION_NAME_EVIDENCE_PATTERN.test(stripped) ||
-      hasExpectedLocationQuery(stripped, input)
-    );
-  });
-}
-
-function hasExpectedLocationQuery(text: string, input: LocationSignalEvidenceInput): boolean {
-  const expectedLocation = normalizeText(input.expectedLocation);
-  return (
-    expectedLocation.length >= 2 &&
-    normalizeText(text).includes(expectedLocation) &&
-    EXPECTED_LOCATION_QUERY_PATTERN.test(text)
-  );
-}
-
 function buildLocationSignalEvidenceInput(
-  input: LocationSignalAnalysisInput,
+  input: Pick<
+    ResolveLocationSignalsInput,
+    "messages" | "expectedLocation" | "communicationPosition"
+  >,
 ): LocationSignalEvidenceInput {
   return {
     latestCandidateMessage: getLatestCandidateMessage(input.messages),
@@ -239,20 +203,77 @@ function buildLocationSignalEvidenceInput(
   };
 }
 
-export function shouldAnalyzeLocationSignals(input: LocationSignalAnalysisInput): boolean {
-  return shouldAttemptLocationSignalLlm(buildLocationSignalEvidenceInput(input));
+function cloneLocationSignal(signal: CandidateLocationSignal): CandidateLocationSignal {
+  return { ...signal };
 }
 
-function inferRuleBasedLocationIntent(
-  message: string,
-): CandidateLocationSignal["intent"] | undefined {
-  if (message.includes("地址")) {
-    return "store_address";
+function cloneLocationSignalResolution(
+  resolution: LocationSignalResolution,
+): LocationSignalResolution {
+  return {
+    analysisPath: resolution.analysisPath,
+    signals: resolution.signals.map(cloneLocationSignal),
+    ...(resolution.inquiryType !== undefined ? { inquiryType: resolution.inquiryType } : {}),
+  };
+}
+
+function buildLocationSignalCacheKey(input: {
+  readonly evidenceInput: LocationSignalEvidenceInput;
+  readonly timeoutMs: number;
+}): string {
+  const payload = {
+    latestCandidateMessage: input.evidenceInput.latestCandidateMessage,
+    recentMessages: input.evidenceInput.recentMessages.map((message) => ({
+      index: message.index,
+      sender: message.sender,
+      content: normalizeText(message.content),
+    })),
+    expectedLocation: input.evidenceInput.expectedLocation,
+    communicationPosition: input.evidenceInput.communicationPosition,
+    timeoutMs: input.timeoutMs,
+  };
+
+  return createHash("sha256").update(JSON.stringify(payload)).digest("hex");
+}
+
+function readCachedLocationSignalResolution(
+  cacheKey: string,
+  nowMs: number,
+): LocationSignalResolution | undefined {
+  const cached = locationSignalResolutionCache.get(cacheKey);
+  if (cached === undefined) {
+    return undefined;
   }
-  if (/(附近|周边|旁边|就近|太远|远吗|离)/u.test(message)) {
-    return "nearby_store";
+
+  if (nowMs - cached.createdAtMs > LOCATION_SIGNAL_CACHE_TTL_MS) {
+    locationSignalResolutionCache.delete(cacheKey);
+    return undefined;
   }
-  return "expected_area";
+
+  return cloneLocationSignalResolution(cached.resolution);
+}
+
+function writeCachedLocationSignalResolution(input: {
+  readonly cacheKey: string;
+  readonly resolution: LocationSignalResolution;
+  readonly nowMs: number;
+}): void {
+  if (input.resolution.analysisPath === "fallback") {
+    return;
+  }
+
+  locationSignalResolutionCache.set(input.cacheKey, {
+    createdAtMs: input.nowMs,
+    resolution: cloneLocationSignalResolution(input.resolution),
+  });
+
+  while (locationSignalResolutionCache.size > LOCATION_SIGNAL_CACHE_MAX_ENTRIES) {
+    const oldestKey = locationSignalResolutionCache.keys().next().value;
+    if (oldestKey === undefined) {
+      break;
+    }
+    locationSignalResolutionCache.delete(oldestKey);
+  }
 }
 
 function getCandidateMessageTexts(input: LocationSignalEvidenceInput): readonly string[] {
@@ -275,44 +296,6 @@ function getCandidateMessageTexts(input: LocationSignalEvidenceInput): readonly 
   }
 
   return texts;
-}
-
-function resolveRuleBasedLocationSignals(
-  input: LocationSignalEvidenceInput,
-): CandidateLocationSignal[] {
-  const candidateMessages = getCandidateMessageTexts(input);
-  if (candidateMessages.length === 0) {
-    return [];
-  }
-
-  const signals: CandidateLocationSignal[] = [];
-  const seen = new Set<string>();
-  const city = normalizeText(input.expectedLocation);
-
-  for (const message of candidateMessages) {
-    for (const pattern of RULE_BASED_LOCATION_PATTERNS) {
-      const rawText = pattern.exec(message)?.[1];
-      const text = normalizeRuleBasedLocationText(rawText);
-      const overlappingText = [...seen].find(
-        (existingText) => existingText.includes(text) || text.includes(existingText),
-      );
-      if (!text || overlappingText !== undefined) {
-        continue;
-      }
-
-      seen.add(text);
-      const intent = inferRuleBasedLocationIntent(message);
-      signals.push({
-        text,
-        source: "candidate_message",
-        ...(city ? { city } : {}),
-        ...(intent !== undefined ? { intent } : {}),
-        confidence: RULE_BASED_LOCATION_CONFIDENCE,
-      });
-    }
-  }
-
-  return signals;
 }
 
 function hasCityEvidence(city: string, input: LocationSignalEvidenceInput): boolean {
@@ -423,19 +406,43 @@ function mergeValidateAndRankLocationSignals(
 
 function buildLocationSignalPrompt(input: LocationSignalEvidenceInput): string {
   return [
-    "你要从 BOSS 直聘招聘对话中抽取候选人的地点查询证据。",
-    "只抽取候选人明确提到、或能从给定对话历史和候选人资料中直接定位的地点文本。",
-    "不要补全真实 POI，不要使用外部知识，不要把地点改写成门店名。",
-    "text 必须逐字来自输入里的 latestCandidateMessage、recentMessages.content、expectedLocation 或 communicationPosition。",
-    "如果无法确定地点，返回 []。",
-    "只输出 JSON array，不要输出 Markdown，不要解释。",
+    "你要判断 BOSS 直聘候选人的最新消息是不是地点咨询，并抽取可验证的地点证据。",
+    "先判断 inquiryType，再决定是否输出 locationSignals。",
     "",
-    "字段：",
-    "- text: 原文地点片段",
-    "- source: candidate_message | conversation_history | candidate_expected_location | communication_position",
-    "- city: 只有输入中可确认城市时才填",
-    "- intent: nearby_store | store_address | expected_area，不确定时省略",
-    "- confidence: 0 到 1",
+    "地点咨询 location_inquiry 包括：",
+    "- 候选人询问门店/工作地址/在哪/远不远/附近有没有/某区域是否还招/能否就近安排。",
+    "- 候选人提到自己所在区域、地铁站、线路、商圈、区县，并用来询问距离、门店或岗位可用性。",
+    "- 最新消息是“那边远吗/那徐家汇呢”这类上下文指代时，可以用 recentMessages 里的地点作为证据。",
+    "",
+    "非地点咨询 non_location_inquiry 包括：",
+    "- 打招呼、发简历、问是否还招、问薪资、问日结周结、问兼职/全职、问人数、问管吃住、问岗位细节。",
+    "- “就近分配/就近安排”只出现在岗位名、招聘方描述或 communicationPosition 中，但候选人没有询问地点。",
+    "- latestCandidateMessage 只是“请问/您好/贵公司/老板”等礼貌开头，本身不是地点。",
+    "",
+    "输出规则：",
+    "- 如果 inquiryType 是 non_location_inquiry，locationSignals 必须是 []。",
+    "- 如果 inquiryType 是 location_inquiry，只抽取候选人明确提到、或能从给定对话历史和资料中直接定位的地点文本。",
+    "- expectedLocation 只是候选人资料里的城市/区域弱信号，不能把非地点咨询变成地点咨询。",
+    "- 不要补全真实 POI，不要使用外部知识，不要把地点改写成门店名。",
+    "- text 必须逐字来自输入里的 latestCandidateMessage、recentMessages.content、expectedLocation 或 communicationPosition。",
+    "- city 只有输入中可确认城市时才填。",
+    "- 不确定 intent 时省略。",
+    "- 只输出 JSON object，不要输出 Markdown，不要解释。",
+    "",
+    "JSON schema：",
+    "{",
+    '  "inquiryType": "location_inquiry | non_location_inquiry",',
+    '  "reason": "简短说明判断依据",',
+    '  "locationSignals": [',
+    "    {",
+    '      "text": "原文地点片段",',
+    '      "source": "candidate_message | conversation_history | candidate_expected_location | communication_position",',
+    '      "city": "输入中可确认的城市，可省略",',
+    '      "intent": "nearby_store | store_address | expected_area，可省略",',
+    '      "confidence": 0.0',
+    "    }",
+    "  ]",
+    "}",
     "",
     "[Input JSON]",
     JSON.stringify(
@@ -458,23 +465,35 @@ function buildLocationSignalPrompt(input: LocationSignalEvidenceInput): string {
 export function resolveLocationSignalsFromLlmText(
   input: LocationSignalEvidenceInput & { readonly llmText: string },
 ): CandidateLocationSignal[] {
-  return mergeValidateAndRankLocationSignals(
-    [
-      ...parseLocationSignalsFromText(input.llmText),
-      ...resolveRuleBasedLocationSignals(input),
-      ...resolveWeakProfileLocationSignals(input),
-    ],
-    input,
-  );
+  return resolveLocationSignalResolutionFromLlmText(input).signals.map(cloneLocationSignal);
+}
+
+function resolveLocationSignalResolutionFromLlmText(
+  input: LocationSignalEvidenceInput & { readonly llmText: string },
+): LocationSignalResolution {
+  const decision = parseLocationSignalDecisionFromText(input.llmText);
+  if (decision.inquiryType === "non_location_inquiry") {
+    return {
+      signals: [],
+      analysisPath: "llm",
+      inquiryType: "non_location_inquiry",
+    };
+  }
+
+  return {
+    signals: mergeValidateAndRankLocationSignals(
+      [...decision.locationSignals, ...resolveWeakProfileLocationSignals(input)],
+      input,
+    ),
+    analysisPath: "llm",
+    inquiryType: "location_inquiry",
+  };
 }
 
 function resolveFallbackLocationSignals(
   input: LocationSignalEvidenceInput,
 ): CandidateLocationSignal[] {
-  return mergeValidateAndRankLocationSignals(
-    [...resolveRuleBasedLocationSignals(input), ...resolveWeakProfileLocationSignals(input)],
-    input,
-  );
+  return mergeValidateAndRankLocationSignals(resolveWeakProfileLocationSignals(input), input);
 }
 
 async function waitForLocationSignalLlmText(input: {
@@ -500,31 +519,90 @@ async function waitForLocationSignalLlmText(input: {
   }
 }
 
-export async function resolveLocationSignalsWithLlm(
-  input: ResolveLocationSignalsInput,
-): Promise<CandidateLocationSignal[]> {
-  const evidenceInput = buildLocationSignalEvidenceInput(input);
-  const timeoutMs = normalizeTimeoutMs(input.timeoutMs);
+function hasStrongLocationSignals(signals: readonly CandidateLocationSignal[]): boolean {
+  return signals.some((signal) => signal.source !== "candidate_expected_location");
+}
 
-  if (!shouldAttemptLocationSignalLlm(evidenceInput)) {
-    return resolveFallbackLocationSignals(evidenceInput);
-  }
-
+async function resolveUncachedLocationSignals(input: {
+  readonly llm: AgentLLM;
+  readonly logger?: Pick<AgentLogger, "warn"> | undefined;
+  readonly evidenceInput: LocationSignalEvidenceInput;
+  readonly timeoutMs: number;
+}): Promise<LocationSignalResolution> {
   try {
     const llmText = await waitForLocationSignalLlmText({
       llm: input.llm,
-      prompt: buildLocationSignalPrompt(evidenceInput),
-      timeoutMs,
+      prompt: buildLocationSignalPrompt(input.evidenceInput),
+      timeoutMs: input.timeoutMs,
     });
-    return resolveLocationSignalsFromLlmText({ ...evidenceInput, llmText });
+    return resolveLocationSignalResolutionFromLlmText({ ...input.evidenceInput, llmText });
   } catch (error) {
     input.logger?.warn(
       `Location signal extraction failed; using fallback location signals: ${
         error instanceof Error ? error.message : String(error)
       }`,
     );
-    return resolveFallbackLocationSignals(evidenceInput);
+    return {
+      signals: resolveFallbackLocationSignals(input.evidenceInput),
+      analysisPath: "fallback",
+    };
   }
+}
+
+export async function resolveLocationSignals(
+  input: ResolveLocationSignalsInput,
+): Promise<LocationSignalResolution> {
+  const evidenceInput = buildLocationSignalEvidenceInput(input);
+  const timeoutMs = normalizeTimeoutMs(input.timeoutMs);
+  const cacheKey = buildLocationSignalCacheKey({ evidenceInput, timeoutMs });
+  const nowMs = Date.now();
+  const cached = readCachedLocationSignalResolution(cacheKey, nowMs);
+
+  if (cached !== undefined) {
+    return cached;
+  }
+
+  if (getCandidateMessageTexts(evidenceInput).length === 0) {
+    const resolution: LocationSignalResolution = {
+      signals: resolveFallbackLocationSignals(evidenceInput),
+      analysisPath: "profile_only",
+    };
+    writeCachedLocationSignalResolution({ cacheKey, resolution, nowMs });
+    return resolution;
+  }
+
+  const pending = pendingLocationSignalResolutions.get(cacheKey);
+  if (pending !== undefined) {
+    return cloneLocationSignalResolution(await pending);
+  }
+
+  const pendingResolution = resolveUncachedLocationSignals({
+    llm: input.llm,
+    logger: input.logger,
+    evidenceInput,
+    timeoutMs,
+  });
+  pendingLocationSignalResolutions.set(cacheKey, pendingResolution);
+
+  try {
+    const resolution = await pendingResolution;
+    writeCachedLocationSignalResolution({ cacheKey, resolution, nowMs: Date.now() });
+    return cloneLocationSignalResolution(resolution);
+  } finally {
+    pendingLocationSignalResolutions.delete(cacheKey);
+  }
+}
+
+export function clearLocationSignalResolutionCacheForTest(): void {
+  locationSignalResolutionCache.clear();
+  pendingLocationSignalResolutions.clear();
+}
+
+export async function resolveLocationSignalsWithLlm(
+  input: ResolveLocationSignalsInput,
+): Promise<CandidateLocationSignal[]> {
+  const resolution = await resolveLocationSignals(input);
+  return [...resolution.signals];
 }
 
 export function resolvePreferredBrand(communicationPosition: string): string | undefined {
@@ -559,6 +637,56 @@ export function resolveExpectedSignals(expectedJobText: string): {
     expectedLocation,
     expectedPosition,
   };
+}
+
+function formatLocationSignalParts(signals: readonly CandidateLocationSignal[]): string {
+  const hasStrongSignals = hasStrongLocationSignals(signals);
+  const displaySignals = hasStrongSignals
+    ? signals.filter((signal) => signal.source !== "candidate_expected_location")
+    : signals;
+  const parts = displaySignals.slice(0, 3).map((signal) => {
+    const weakMarker = signal.source === "candidate_expected_location" ? "（弱）" : "";
+    return `${signal.text}${weakMarker}`;
+  });
+  const overflow = displaySignals.length > 3 ? ` 等${String(displaySignals.length)}项` : "";
+  return `${parts.join("、")}${overflow}`;
+}
+
+function isLocationSignalResolution(
+  value: LocationSignalResolution | readonly CandidateLocationSignal[],
+): value is LocationSignalResolution {
+  return !Array.isArray(value) && "analysisPath" in value && "signals" in value;
+}
+
+export function formatLocationSignalsVisualLabel(
+  resolution: LocationSignalResolution | readonly CandidateLocationSignal[],
+): string {
+  const signals = isLocationSignalResolution(resolution) ? resolution.signals : resolution;
+  const analysisPath = isLocationSignalResolution(resolution) ? resolution.analysisPath : undefined;
+  const inquiryType = isLocationSignalResolution(resolution) ? resolution.inquiryType : undefined;
+
+  if (signals.length === 0) {
+    if (inquiryType === "non_location_inquiry") {
+      return "非地点咨询";
+    }
+    return analysisPath === "profile_only" ? "" : "未识别到地点线索";
+  }
+
+  const summary = formatLocationSignalParts(signals);
+  const onlyWeakProfileSignals = !hasStrongLocationSignals(signals);
+
+  if (onlyWeakProfileSignals) {
+    if (analysisPath === "profile_only") {
+      return `资料城市提示：${summary}`;
+    }
+    return "未识别到地点线索";
+  }
+
+  if (analysisPath === "fallback") {
+    return `已识别地点（兜底）：${summary}`;
+  }
+
+  return `已识别地点：${summary}`;
 }
 
 export function resolveConversationSignals(input: {

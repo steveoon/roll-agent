@@ -29,6 +29,14 @@ function createTestContext(llmText = ""): AgentContext {
   };
 }
 
+function buildLocationInquiryLlmText(locationSignals: readonly unknown[]): string {
+  return JSON.stringify({
+    inquiryType: "location_inquiry",
+    reason: "候选人正在咨询地点",
+    locationSignals,
+  });
+}
+
 function createNoopSession(calls: string[]) {
   return {
     async begin(label: string) {
@@ -47,13 +55,19 @@ function createNoopSession(calls: string[]) {
       calls.push(`fail:${label}`);
       return true;
     },
+    async clear() {
+      calls.push("session:clear");
+      return true;
+    },
   };
 }
 
 function createPreviewSession(calls: string[]) {
   return {
-    async begin(label: string) {
-      calls.push(`preview:begin:${label}`);
+    async begin(label: string, locationSummary?: string) {
+      calls.push(
+        `preview:begin:${label}${locationSummary !== undefined ? `:${locationSummary}` : ""}`,
+      );
       return true;
     },
     async updateStatus(label: string) {
@@ -360,7 +374,7 @@ describe("zhipin_generate_reply_preview", () => {
     const result = await zhipinGenerateReplyPreview.execute(
       { conversationId: "conv-1", maxMessages: 20 },
       createTestContext(
-        JSON.stringify([
+        buildLocationInquiryLlmText([
           {
             text: "人民广场",
             source: "candidate_message",
@@ -389,7 +403,13 @@ describe("zhipin_generate_reply_preview", () => {
         confidence: 0.6,
       },
     ]);
-    assert.equal(calls.includes("session:正在分析对话记录，提取可能的位置线索"), true);
+    assert.equal(calls.includes("session:正在分析地点线索…"), true);
+    assert.match(calls.find((call) => call.startsWith("succeed:")) ?? "", /已识别地点：人民广场/);
+    assert.equal(calls.includes("session:clear"), false);
+    assert.equal(
+      calls.some((call) => call.startsWith("preview:begin:正在生成回复:已识别地点：")),
+      true,
+    );
   });
 
   it("does not infer unread context when the latest human message is from the recruiter", async () => {
