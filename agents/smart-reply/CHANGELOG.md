@@ -1,5 +1,12 @@
 # smart-reply-agent
 
+## 1.3.1
+
+### Patch Changes
+
+- Updated dependencies [[`d40bc83`](https://github.com/steveoon/roll-agent/commit/d40bc835be0defdfa0068623534c7831c16c5ee6)]:
+  - @roll-agent/reply-authority-client@0.3.0
+
 ## 1.3.0
 
 ### Minor Changes
