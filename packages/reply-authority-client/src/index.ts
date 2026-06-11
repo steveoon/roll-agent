@@ -140,7 +140,9 @@ export const GenerateReplyToolInputSchema = z.object({
   locationSignals: z
     .array(CandidateLocationSignalSchema)
     .optional()
-    .describe("候选人地点查询证据，由上游 browser-use 抽取并原样透传"),
+    .describe(
+      "已废弃：候选人地点查询证据。服务端合并规划上线后由服务端自行提取并校验，新调用方不应传入",
+    ),
   preferredBrand: z.string().optional().describe("偏好品牌"),
   channelType: z
     .enum(["public", "private"])
@@ -162,6 +164,28 @@ export const GenerateSignedReplyRequestSchema = GenerateReplyToolInputSchema.omi
 
 export const GenerateSignedReplyStreamRequestSchema = GenerateSignedReplyRequestSchema.extend({
   stream: z.literal(true),
+});
+
+export const PrepareReplyContextInputSchema = GenerateReplyToolInputSchema.omit({
+  defaultWechatId: true,
+  locationSignals: true,
+});
+
+export const PrepareReplyContextRequestSchema = PrepareReplyContextInputSchema.omit({
+  target: true,
+}).extend({
+  target: ResolvedReplyAuthorityTargetSchema,
+  requestId: z.string().optional(),
+});
+
+export const PrepareReplyContextStatusValues = ["created", "reused", "throttled"] as const;
+
+export const PrepareReplyContextResponseSchema = z.object({
+  prepared: z.boolean(),
+  hasPreviousState: z.boolean().optional(),
+  conversationKey: z.string().min(1),
+  expiresAt: z.number().int().min(0),
+  status: z.enum(PrepareReplyContextStatusValues),
 });
 
 export const GenerateSignedReplyResponseSchema = z.object({
@@ -224,6 +248,20 @@ export const ReplyStreamFinalEventSchema = ReplyStreamEventSchema.extend({
   diagnostics: z.record(z.unknown()).optional(),
 });
 
+export const LocationResolvedInquiryTypeValues = [
+  "location_inquiry",
+  "non_location_inquiry",
+] as const;
+
+export const LocationResolvedAnalysisPathValues = ["llm", "speculative", "none"] as const;
+
+export const ReplyStreamLocationResolvedEventSchema = ReplyStreamEventSchema.extend({
+  type: z.literal("location.resolved"),
+  inquiryType: z.enum(LocationResolvedInquiryTypeValues),
+  signals: z.array(CandidateLocationSignalSchema).default([]),
+  analysisPath: z.enum(LocationResolvedAnalysisPathValues),
+});
+
 export interface ReplyAuthorityConfig {
   readonly baseUrl: string;
   readonly bearerToken: string;
@@ -250,15 +288,18 @@ interface ReplyAuthorityRequestContext {
 
 interface ReplyAuthorityRequestErrorOptions extends ErrorOptions {
   readonly meta: ReplyAuthorityRequestMeta;
+  readonly statusCode?: number;
 }
 
 export class ReplyAuthorityRequestError extends Error {
   readonly meta: ReplyAuthorityRequestMeta;
+  readonly statusCode: number | undefined;
 
   constructor(message: string, options: ReplyAuthorityRequestErrorOptions) {
     super(`${message} (${formatRequestMeta(options.meta)})`, { cause: options.cause });
     this.name = "ReplyAuthorityRequestError";
     this.meta = options.meta;
+    this.statusCode = options.statusCode;
   }
 }
 
@@ -278,10 +319,19 @@ export type GenerateSignedReplyResponse = z.infer<typeof GenerateSignedReplyResp
 export type GenerateSignedReplyStreamRequest = z.infer<
   typeof GenerateSignedReplyStreamRequestSchema
 >;
+export type PrepareReplyContextInput = z.infer<typeof PrepareReplyContextInputSchema>;
+export type PrepareReplyContextRequest = z.infer<typeof PrepareReplyContextRequestSchema>;
+export type PrepareReplyContextStatus = (typeof PrepareReplyContextStatusValues)[number];
+export type PrepareReplyContextResponse = z.infer<typeof PrepareReplyContextResponseSchema>;
 export type ResolveRecruiterBindingRequest = z.infer<typeof ResolveRecruiterBindingRequestSchema>;
 export type ResolveRecruiterBindingResponse = z.infer<typeof ResolveRecruiterBindingResponseSchema>;
 export type ReplyStreamEvent = z.infer<typeof ReplyStreamEventSchema>;
 export type ReplyStreamFinalEvent = z.infer<typeof ReplyStreamFinalEventSchema>;
+export type ReplyStreamLocationResolvedEvent = z.infer<
+  typeof ReplyStreamLocationResolvedEventSchema
+>;
+export type LocationResolvedInquiryType = (typeof LocationResolvedInquiryTypeValues)[number];
+export type LocationResolvedAnalysisPath = (typeof LocationResolvedAnalysisPathValues)[number];
 
 function resolveRequestTimeoutMs(configuredTimeoutMs: number | undefined): number {
   if (configuredTimeoutMs !== undefined) {
@@ -440,7 +490,12 @@ async function postJson(
 
     const payload = await parseJsonResponse(response);
     if (!response.ok) {
-      throw new Error(parseErrorMessage(response.status, payload));
+      const failure = new Error(parseErrorMessage(response.status, payload));
+      throw new ReplyAuthorityRequestError(failure.message, {
+        meta,
+        statusCode: response.status,
+        cause: failure,
+      });
     }
 
     return payload;
@@ -491,41 +546,57 @@ function resolveTargetOrThrow(
   };
 }
 
+async function resolveReplyAuthorityTarget(
+  config: ResolvedReplyAuthorityConfig,
+  target: ReplyAuthorityTarget,
+  requestContext: ReplyAuthorityRequestContext,
+): Promise<ResolvedReplyAuthorityTarget> {
+  if (target.recruiterBinding !== undefined && target.tenantId !== undefined) {
+    return ResolvedReplyAuthorityTargetSchema.parse({
+      platform: target.platform,
+      tenantId: target.tenantId,
+      conversationId: target.conversationId,
+      candidateId: target.candidateId,
+      recruiterBinding: target.recruiterBinding,
+    });
+  }
+
+  const resolved = await resolveRecruiterBinding(config, target, requestContext);
+  const resolvedTarget = resolveTargetOrThrow(
+    resolved,
+    target,
+    buildRequestMeta(config, "resolve-recruiter-binding", requestContext),
+  );
+
+  return ResolvedReplyAuthorityTargetSchema.parse({
+    platform: target.platform,
+    tenantId: resolvedTarget.tenantId,
+    conversationId: target.conversationId,
+    candidateId: target.candidateId,
+    recruiterBinding: resolvedTarget.recruiterBinding,
+  });
+}
+
 async function buildGenerateSignedReplyRequest(
   input: GenerateReplyToolInput,
   config: ResolvedReplyAuthorityConfig,
   requestContext: ReplyAuthorityRequestContext,
 ): Promise<GenerateSignedReplyRequest> {
-  if (input.target.recruiterBinding !== undefined && input.target.tenantId !== undefined) {
-    return GenerateSignedReplyRequestSchema.parse({
-      ...input,
-      target: {
-        platform: input.target.platform,
-        tenantId: input.target.tenantId,
-        conversationId: input.target.conversationId,
-        candidateId: input.target.candidateId,
-        recruiterBinding: input.target.recruiterBinding,
-      },
-      requestId: requestContext.requestId,
-    });
-  }
-
-  const resolved = await resolveRecruiterBinding(config, input.target, requestContext);
-  const resolvedTarget = resolveTargetOrThrow(
-    resolved,
-    input.target,
-    buildRequestMeta(config, "resolve-recruiter-binding", requestContext),
-  );
-
   return GenerateSignedReplyRequestSchema.parse({
     ...input,
-    target: {
-      platform: input.target.platform,
-      tenantId: resolvedTarget.tenantId,
-      conversationId: input.target.conversationId,
-      candidateId: input.target.candidateId,
-      recruiterBinding: resolvedTarget.recruiterBinding,
-    },
+    target: await resolveReplyAuthorityTarget(config, input.target, requestContext),
+    requestId: requestContext.requestId,
+  });
+}
+
+async function buildPrepareReplyContextRequest(
+  input: PrepareReplyContextInput,
+  config: ResolvedReplyAuthorityConfig,
+  requestContext: ReplyAuthorityRequestContext,
+): Promise<PrepareReplyContextRequest> {
+  return PrepareReplyContextRequestSchema.parse({
+    ...input,
+    target: await resolveReplyAuthorityTarget(config, input.target, requestContext),
     requestId: requestContext.requestId,
   });
 }
@@ -563,6 +634,22 @@ async function prepareGenerateSignedReplyRequest(
     : await buildGenerateSignedReplyRequest(parsedToolInput, config, requestContext);
 }
 
+async function preparePrepareReplyContextRequest(
+  input: PrepareReplyContextInput,
+  config: ResolvedReplyAuthorityConfig,
+  requestContext: ReplyAuthorityRequestContext,
+): Promise<PrepareReplyContextRequest> {
+  const parsedToolInput = PrepareReplyContextInputSchema.parse(input);
+  const parsedInput = PrepareReplyContextRequestSchema.safeParse(parsedToolInput);
+
+  return parsedInput.success
+    ? PrepareReplyContextRequestSchema.parse({
+        ...parsedInput.data,
+        requestId: parsedInput.data.requestId ?? requestContext.requestId,
+      })
+    : await buildPrepareReplyContextRequest(parsedToolInput, config, requestContext);
+}
+
 export async function generateSignedReply(
   input: GenerateReplyToolInput,
   configInput?: ReplyAuthorityConfig,
@@ -578,6 +665,27 @@ export async function generateSignedReply(
       payload,
       buildRequestMeta(config, "generate-signed-reply", requestContext),
       "Reply Authority Service 签名回复",
+    );
+  } finally {
+    clear();
+  }
+}
+
+export async function prepareReplyContext(
+  input: PrepareReplyContextInput,
+  configInput?: ReplyAuthorityConfig,
+): Promise<PrepareReplyContextResponse> {
+  const config = loadReplyAuthorityConfig(configInput);
+  const { context: requestContext, clear } = createRequestContext(config.timeoutMs);
+
+  try {
+    const request = await preparePrepareReplyContextRequest(input, config, requestContext);
+    const payload = await postJson(config, "prepare-reply-context", request, requestContext);
+    return parseReplyAuthorityPayload(
+      PrepareReplyContextResponseSchema,
+      payload,
+      buildRequestMeta(config, "prepare-reply-context", requestContext),
+      "Reply Authority Service 回复上下文预热",
     );
   } finally {
     clear();
@@ -611,7 +719,7 @@ function throwSseErrorEvent(event: ReplyStreamEvent, meta: ReplyAuthorityRequest
   if (parsed.success) {
     throw new ReplyAuthorityRequestError(
       `Reply Authority Service stream 失败 (${String(parsed.data.statusCode)}): ${parsed.data.message}`,
-      { meta },
+      { meta, statusCode: parsed.data.statusCode },
     );
   }
 
@@ -637,7 +745,12 @@ async function openSseResponse(
     if (!response.ok || !contentType.includes("text/event-stream")) {
       const payload = await parseJsonResponse(response).catch(() => undefined);
       if (!response.ok) {
-        throw new Error(parseErrorMessage(response.status, payload));
+        const failure = new Error(parseErrorMessage(response.status, payload));
+        throw new ReplyAuthorityRequestError(failure.message, {
+          meta,
+          statusCode: response.status,
+          cause: failure,
+        });
       }
       throw new Error("Reply Authority Service 返回了非 SSE 响应。");
     }
