@@ -15,10 +15,13 @@ import {
   zhipinGenerateReplyPreview,
 } from "./zhipin-generate-reply-preview.ts";
 
-function createTestContext(llmText = ""): AgentContext {
+function createTestContext(llmText = "", onGenerateText?: () => void): AgentContext {
   return {
     llm: {
-      generateText: async () => llmText,
+      generateText: async () => {
+        onGenerateText?.();
+        return llmText;
+      },
     },
     logger: {
       debug: () => {},
@@ -27,14 +30,6 @@ function createTestContext(llmText = ""): AgentContext {
       error: () => {},
     },
   };
-}
-
-function buildLocationInquiryLlmText(locationSignals: readonly unknown[]): string {
-  return JSON.stringify({
-    inquiryType: "location_inquiry",
-    reason: "候选人正在咨询地点",
-    locationSignals,
-  });
 }
 
 function createNoopSession(calls: string[]) {
@@ -196,32 +191,46 @@ async function* createMockStream(): AsyncGenerator<ReplyStreamEvent> {
     requestId: "req-1",
   };
   yield {
-    type: "phase.started",
+    type: "phase.completed",
     sequence: 2,
+    timestamp: "2026-05-11T00:00:01.000Z",
+    phase: "turn_planning",
+    latencyMs: 12,
+  };
+  yield {
+    type: "phase.completed",
+    sequence: 3,
+    timestamp: "2026-05-11T00:00:01.100Z",
+    phase: "context_building",
+    latencyMs: 18,
+  };
+  yield {
+    type: "phase.started",
+    sequence: 4,
     timestamp: "2026-05-11T00:00:01.000Z",
     phase: "reply_generation",
     label: "生成回复草稿",
   };
   yield {
     type: "draft.started",
-    sequence: 3,
+    sequence: 5,
     timestamp: "2026-05-11T00:00:02.000Z",
   };
   yield {
     type: "draft.delta",
-    sequence: 4,
+    sequence: 6,
     timestamp: "2026-05-11T00:00:03.000Z",
     delta: "您好，",
   };
   yield {
     type: "draft.delta",
-    sequence: 5,
+    sequence: 7,
     timestamp: "2026-05-11T00:00:04.000Z",
     delta: "薪资可以详聊。",
   };
   yield {
     type: "final",
-    sequence: 6,
+    sequence: 8,
     timestamp: "2026-05-11T00:00:05.000Z",
     safeToSend: true,
     suggestedReply: "您好，薪资可以详聊。",
@@ -230,10 +239,11 @@ async function* createMockStream(): AsyncGenerator<ReplyStreamEvent> {
     confidence: 0.9,
     stage: "job_consultation",
     replyPolicySource: "file",
+    latencyMs: 3_210,
   };
   yield {
     type: "stream.completed",
-    sequence: 7,
+    sequence: 9,
     timestamp: "2026-05-11T00:00:06.000Z",
     ok: true,
   };
@@ -285,9 +295,20 @@ describe("zhipin_generate_reply_preview", () => {
     });
     assert.equal("signedEnvelope" in result, false);
     assert.ok(result.preparedReplyId);
+    assert.equal(result.timing?.replyLatencyMs, 3_210);
+    assert.equal(result.timing?.turnPlanningLatencyMs, 12);
+    assert.equal(result.timing?.contextBuildingLatencyMs, 18);
+    assert.equal(result.timing?.preparedContextHit, true);
     assert.equal(calls.includes("session:正在分析对话记录，提取可能的位置线索"), false);
     assert.equal(calls.includes("preview:draft:draft:您好，薪资可以详聊。"), true);
-    assert.equal(calls.includes("preview:complete:回复已生成:您好，薪资可以详聊。"), true);
+    assert.equal(
+      calls.some((call) =>
+        /^preview:complete:回复已生成 · 总 .* · 生成 3\.2s · 预热命中:您好，薪资可以详聊。$/.test(
+          call,
+        ),
+      ),
+      true,
+    );
 
     const consumed = consumePreparedReply(result.preparedReplyId ?? "", 1_800_000_000);
     assert.equal(consumed.ok, true);
@@ -337,9 +358,10 @@ describe("zhipin_generate_reply_preview", () => {
     }
   });
 
-  it("passes extracted location signals into the Reply Authority stream input", async () => {
+  it("leaves location planning to Reply Authority and omits local location signals", async () => {
     const calls: string[] = [];
-    let capturedLocationSignals: unknown;
+    let capturedLocationSignals: unknown = "unset";
+    let llmCalls = 0;
 
     setZhipinGenerateReplyPreviewDepsForTests({
       openNativePagePort: async () =>
@@ -373,8 +395,39 @@ describe("zhipin_generate_reply_preview", () => {
 
     const result = await zhipinGenerateReplyPreview.execute(
       { conversationId: "conv-1", maxMessages: 20 },
-      createTestContext(
-        buildLocationInquiryLlmText([
+      createTestContext("", () => {
+        llmCalls += 1;
+      }),
+    );
+
+    assert.equal(result.success, true);
+    assert.equal(capturedLocationSignals, undefined);
+    assert.equal(llmCalls, 0);
+    assert.equal(calls.includes("session:正在分析地点线索…"), false);
+    assert.equal(
+      calls.some(
+        (call) => call.startsWith("preview:begin:正在生成回复:") || call.startsWith("succeed:"),
+      ),
+      false,
+    );
+  });
+
+  it("renders the server resolved location label from the stream", async () => {
+    const calls: string[] = [];
+
+    async function* createStreamWithLocationResolved(): AsyncGenerator<ReplyStreamEvent> {
+      yield {
+        type: "stream.started",
+        sequence: 1,
+        timestamp: "2026-05-11T00:00:00.000Z",
+        requestId: "req-1",
+      };
+      yield {
+        type: "location.resolved",
+        sequence: 2,
+        timestamp: "2026-05-11T00:00:01.000Z",
+        inquiryType: "location_inquiry",
+        signals: [
           {
             text: "人民广场",
             source: "candidate_message",
@@ -382,33 +435,148 @@ describe("zhipin_generate_reply_preview", () => {
             intent: "nearby_store",
             confidence: 0.93,
           },
-        ]),
-      ),
+        ],
+        analysisPath: "speculative",
+      };
+      yield {
+        type: "draft.started",
+        sequence: 3,
+        timestamp: "2026-05-11T00:00:02.000Z",
+      };
+      yield {
+        type: "final",
+        sequence: 4,
+        timestamp: "2026-05-11T00:00:03.000Z",
+        safeToSend: true,
+        suggestedReply: "您好，门店离人民广场很近。",
+        signedEnvelope: "payload.signature",
+        envelopeExp: 4_102_444_800,
+        confidence: 0.9,
+        stage: "job_consultation",
+        replyPolicySource: "file",
+      };
+      yield {
+        type: "stream.completed",
+        sequence: 5,
+        timestamp: "2026-05-11T00:00:04.000Z",
+        ok: true,
+      };
+    }
+
+    setZhipinGenerateReplyPreviewDepsForTests({
+      openNativePagePort: async () => createNativePage(calls),
+      createNativeVisualActivitySession: () => createNoopSession(calls),
+      createReplyPreviewVisualSession: () => createPreviewSession(calls),
+      streamGenerateSignedReply: () => createStreamWithLocationResolved(),
+    });
+
+    const result = await zhipinGenerateReplyPreview.execute(
+      { conversationId: "conv-1", maxMessages: 20 },
+      createTestContext(),
     );
 
     assert.equal(result.success, true);
-    assert.deepEqual(capturedLocationSignals, [
-      {
-        text: "人民广场",
-        source: "candidate_message",
-        city: "上海",
-        intent: "nearby_store",
-        confidence: 0.93,
-      },
-      {
-        text: "上海",
-        source: "candidate_expected_location",
-        city: "上海",
-        intent: "expected_area",
-        confidence: 0.6,
-      },
-    ]);
-    assert.equal(calls.includes("session:正在分析地点线索…"), true);
-    assert.match(calls.find((call) => call.startsWith("succeed:")) ?? "", /已识别地点：人民广场/);
-    assert.equal(calls.includes("session:clear"), false);
+    assert.equal(calls.includes("preview:status:已识别地点：人民广场"), true);
+  });
+
+  it("surfaces gate rewrites in the completion label and tool output", async () => {
+    const calls: string[] = [];
+
+    async function* createStreamWithGateRewrite(): AsyncGenerator<ReplyStreamEvent> {
+      yield {
+        type: "stream.started",
+        sequence: 1,
+        timestamp: "2026-05-11T00:00:00.000Z",
+        requestId: "req-1",
+      };
+      yield {
+        type: "draft.started",
+        sequence: 2,
+        timestamp: "2026-05-11T00:00:01.000Z",
+      };
+      yield {
+        type: "draft.delta",
+        sequence: 3,
+        timestamp: "2026-05-11T00:00:02.000Z",
+        delta: "白班时薪 30 元，包吃住。",
+      };
+      yield {
+        type: "gate.completed",
+        sequence: 4,
+        timestamp: "2026-05-11T00:00:03.000Z",
+        gate: "fact",
+        rewritten: true,
+      };
+      yield {
+        type: "gate.completed",
+        sequence: 5,
+        timestamp: "2026-05-11T00:00:04.000Z",
+        gate: "reply",
+        rewritten: false,
+        violations: [],
+      };
+      yield {
+        type: "final",
+        sequence: 6,
+        timestamp: "2026-05-11T00:00:05.000Z",
+        safeToSend: true,
+        suggestedReply: "白班时薪 25-30 元，详细可以聊聊。",
+        signedEnvelope: "payload.signature",
+        envelopeExp: 4_102_444_800,
+        confidence: 0.9,
+        stage: "job_consultation",
+        replyPolicySource: "file",
+      };
+      yield {
+        type: "stream.completed",
+        sequence: 7,
+        timestamp: "2026-05-11T00:00:06.000Z",
+        ok: true,
+      };
+    }
+
+    setZhipinGenerateReplyPreviewDepsForTests({
+      openNativePagePort: async () => createNativePage(calls),
+      createNativeVisualActivitySession: () => createNoopSession(calls),
+      createReplyPreviewVisualSession: () => createPreviewSession(calls),
+      streamGenerateSignedReply: () => createStreamWithGateRewrite(),
+    });
+
+    const result = await zhipinGenerateReplyPreview.execute(
+      { conversationId: "conv-1", maxMessages: 20 },
+      createTestContext(),
+    );
+
+    assert.equal(result.success, true);
+    assert.equal(result.gateRewritten, true);
     assert.equal(
-      calls.some((call) => call.startsWith("preview:begin:正在生成回复:已识别地点：")),
+      calls.some(
+        (call) => call.startsWith("preview:complete:") && call.includes("终稿经安全门调整"),
+      ),
       true,
+    );
+  });
+
+  it("omits the gate rewrite marker when no gate rewrote the reply", async () => {
+    const calls: string[] = [];
+
+    setZhipinGenerateReplyPreviewDepsForTests({
+      openNativePagePort: async () => createNativePage(calls),
+      createNativeVisualActivitySession: () => createNoopSession(calls),
+      createReplyPreviewVisualSession: () => createPreviewSession(calls),
+      streamGenerateSignedReply: () => createMockStream(),
+    });
+
+    const result = await zhipinGenerateReplyPreview.execute(
+      { conversationId: "conv-1", maxMessages: 20 },
+      createTestContext(),
+    );
+
+    assert.equal(result.success, true);
+    assert.equal("gateRewritten" in result, false);
+    assert.equal(
+      calls.some((call) => call.includes("终稿经安全门调整")),
+      false,
     );
   });
 

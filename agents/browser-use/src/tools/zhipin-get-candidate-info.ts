@@ -1,13 +1,20 @@
 import { defineTool } from "@roll-agent/sdk";
-import { CandidateLocationSignalSchema } from "@roll-agent/reply-authority-client";
+import {
+  CandidateLocationSignalSchema,
+  prepareReplyContext,
+  ReplyAuthorityRequestError,
+  type PrepareReplyContextInput,
+} from "@roll-agent/reply-authority-client";
 import { z } from "zod";
 import { NativeVisualActivitySession } from "../native-visual-activity-session.ts";
-import { resolveConversationSignals, resolveLocationSignals } from "../pages/zhipin/job-signals.ts";
+import { resolveConversationSignals } from "../pages/zhipin/job-signals.ts";
 import { openZhipinNativePagePort } from "../pages/zhipin/native-page.ts";
 import type {
   NativeCandidateChatDetails,
+  NativeSelectedChatTarget,
   ZhipinNativePagePort,
 } from "../pages/zhipin/native-page.ts";
+import { pickBestUsername } from "../pages/zhipin/username.ts";
 import { recordZhipinWechatCompletedEvents } from "../recruitment-events/zhipin-events.ts";
 
 const ChatMessageSchema = z.object({
@@ -36,7 +43,9 @@ const OutputSchema = z.object({
   candidateId: z.string(),
   candidateInfo: CandidateInfoSchema,
   preferredBrand: z.string().optional(),
-  locationSignals: z.array(CandidateLocationSignalSchema),
+  locationSignals: z
+    .array(CandidateLocationSignalSchema)
+    .describe("已废弃：地点证据改由 Reply Authority 服务端提取，此字段恒为空数组，仅为兼容保留"),
   chatMessages: z.array(ChatMessageSchema),
   formattedHistory: z.array(z.string()),
   stats: z.object({
@@ -96,6 +105,7 @@ type ZhipinGetCandidateInfoDeps = {
   readonly createNativeVisualActivitySession: (
     page: ZhipinNativePagePort,
   ) => NativeVisualActivitySessionLike;
+  readonly prepareReplyContext: typeof prepareReplyContext;
 };
 
 let zhipinGetCandidateInfoDepsOverride: Partial<ZhipinGetCandidateInfoDeps> | undefined;
@@ -104,8 +114,162 @@ function getZhipinGetCandidateInfoDeps(): ZhipinGetCandidateInfoDeps {
   return {
     openNativePagePort: openZhipinNativePagePort,
     createNativeVisualActivitySession: (page) => new NativeVisualActivitySession(page),
+    prepareReplyContext,
     ...zhipinGetCandidateInfoDepsOverride,
   };
+}
+
+function buildFormattedHistory(messages: NativeCandidateChatDetails["messages"]): string[] {
+  return messages
+    .filter((message) => message.sender === "candidate" || message.sender === "recruiter")
+    .map((message) => {
+      const prefix = message.sender === "candidate" ? "求职者" : "我";
+      return `${prefix}: ${message.content}`;
+    });
+}
+
+function getLatestCandidateMessage(messages: NativeCandidateChatDetails["messages"]): string {
+  const latest = [...messages]
+    .reverse()
+    .find((message) => message.sender === "candidate" && message.content.trim().length > 0);
+  return latest?.content.trim() ?? "";
+}
+
+function buildPrepareReplyContextInput(input: {
+  readonly data: NativeCandidateChatDetails;
+  readonly selectedTarget: NativeSelectedChatTarget;
+  readonly recruiterUsername: string;
+  readonly formattedHistory: readonly string[];
+  readonly communicationPosition: string;
+  readonly expectedPosition: string;
+  readonly expectedLocation: string;
+  readonly preferredBrand?: string | undefined;
+}): PrepareReplyContextInput {
+  return {
+    candidateMessage: getLatestCandidateMessage(input.data.messages),
+    conversationHistory: [...input.formattedHistory],
+    candidateInfo: {
+      name: input.data.candidateInfo.name,
+      age: input.data.candidateInfo.age,
+      experience: input.data.candidateInfo.experience,
+      education: input.data.candidateInfo.education,
+      communicationPosition: input.communicationPosition,
+      expectedPosition: input.expectedPosition,
+      expectedLocation: input.expectedLocation,
+      expectedSalary: input.data.candidateInfo.expectedSalary,
+      info: [...input.data.candidateInfo.tags],
+    },
+    ...(input.preferredBrand !== undefined ? { preferredBrand: input.preferredBrand } : {}),
+    target: {
+      platform: "zhipin",
+      conversationId: input.selectedTarget.conversationId,
+      candidateId: input.selectedTarget.candidateId,
+      recruiterUsername: input.recruiterUsername,
+    },
+  };
+}
+
+const PREPARE_COOLDOWN_MS = 10 * 60_000;
+let prepareCooldownUntilMs = 0;
+
+export function resetPrepareReplyContextCooldownForTests(): void {
+  prepareCooldownUntilMs = 0;
+}
+
+function isPersistentPrepareError(error: unknown): boolean {
+  if (error instanceof ReplyAuthorityRequestError) {
+    return error.statusCode === 403;
+  }
+  return error instanceof Error && error.message.includes("未配置");
+}
+
+function recordPrepareFailure(error: unknown): void {
+  if (isPersistentPrepareError(error)) {
+    prepareCooldownUntilMs = Date.now() + PREPARE_COOLDOWN_MS;
+  }
+}
+
+async function startReplyContextPreparation(input: {
+  readonly nativePage: ZhipinNativePagePort;
+  readonly deps: ZhipinGetCandidateInfoDeps;
+  readonly data: NativeCandidateChatDetails;
+  readonly selectedTarget: NativeSelectedChatTarget;
+  readonly formattedHistory: readonly string[];
+  readonly communicationPosition: string;
+  readonly expectedPosition: string;
+  readonly expectedLocation: string;
+  readonly preferredBrand?: string | undefined;
+  readonly logger: {
+    readonly debug: (message: string) => void;
+    readonly info: (message: string) => void;
+  };
+}): Promise<void> {
+  if (Date.now() < prepareCooldownUntilMs) {
+    input.logger.debug("Skip Reply Authority prepare: cooling down after a persistent failure.");
+    return;
+  }
+
+  const candidateMessage = getLatestCandidateMessage(input.data.messages);
+  if (candidateMessage.length === 0) {
+    input.logger.debug("Skip Reply Authority prepare: latest candidate message is empty.");
+    return;
+  }
+
+  let usernameResult: ReturnType<typeof pickBestUsername>;
+  try {
+    usernameResult = pickBestUsername(await input.nativePage.readUsernameEvidence());
+  } catch (error) {
+    input.logger.debug(
+      `Skip Reply Authority prepare: recruiter username read failed: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+    );
+    return;
+  }
+
+  if (!usernameResult.found) {
+    input.logger.debug("Skip Reply Authority prepare: recruiter username was not detected.");
+    return;
+  }
+
+  const prepareInput = buildPrepareReplyContextInput({
+    data: input.data,
+    selectedTarget: input.selectedTarget,
+    recruiterUsername: usernameResult.username,
+    formattedHistory: input.formattedHistory,
+    communicationPosition: input.communicationPosition,
+    expectedPosition: input.expectedPosition,
+    expectedLocation: input.expectedLocation,
+    preferredBrand: input.preferredBrand,
+  });
+
+  const startedAtMs = Date.now();
+  try {
+    const preparePromise = input.deps.prepareReplyContext(prepareInput);
+    preparePromise
+      .then((response) => {
+        input.logger.info(
+          `Reply Authority prepare ${response.status} for ${input.selectedTarget.conversationId} in ${String(
+            Date.now() - startedAtMs,
+          )}ms`,
+        );
+      })
+      .catch((error: unknown) => {
+        recordPrepareFailure(error);
+        input.logger.debug(
+          `Reply Authority prepare skipped or failed: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        );
+      });
+  } catch (error) {
+    recordPrepareFailure(error);
+    input.logger.debug(
+      `Reply Authority prepare failed to start: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+    );
+  }
 }
 
 export function setZhipinGetCandidateInfoDepsForTests(
@@ -142,7 +306,6 @@ export const zhipinGetCandidateInfo = defineTool({
     let session: NativeVisualActivitySessionLike | undefined;
     const openLabel = hasNavigationTarget ? "正在打开目标聊天" : "正在准备当前聊天";
     const extractLabel = "正在提取聊天记录";
-    const locationSignalLabel = "正在分析地点线索…";
     const fail = async (label: string, error: string) => {
       await session?.fail(label);
       return buildFailureResult(error);
@@ -222,23 +385,9 @@ export const zhipinGetCandidateInfo = defineTool({
         communicationPosition: data.candidateInfo.communicationPosition,
         expectedJobText: data.candidateInfo.expectedJobText,
       });
-      await session.begin(locationSignalLabel);
-      const locationResolution = await resolveLocationSignals({
-        llm: ctx.llm,
-        logger: ctx.logger,
-        messages: data.messages,
-        expectedLocation: signals.expectedLocation,
-        communicationPosition: signals.communicationPosition,
-      });
-      const locationSignals = [...locationResolution.signals];
 
       // formattedHistory 只保留 candidate + recruiter 对话，过滤系统消息噪音
-      const formattedHistory = data.messages
-        .filter((m) => m.sender === "candidate" || m.sender === "recruiter")
-        .map((m) => {
-          const prefix = m.sender === "candidate" ? "求职者" : "我";
-          return `${prefix}: ${m.content}`;
-        });
+      const formattedHistory = buildFormattedHistory(data.messages);
 
       const stats = {
         totalMessages: data.messages.length,
@@ -258,6 +407,19 @@ export const zhipinGetCandidateInfo = defineTool({
         selectedTarget.candidateId,
         ctx.logger,
       );
+      await startReplyContextPreparation({
+        nativePage,
+        deps,
+        data,
+        selectedTarget,
+        formattedHistory,
+        communicationPosition: signals.communicationPosition,
+        expectedPosition: signals.expectedPosition,
+        expectedLocation: signals.expectedLocation,
+        preferredBrand: signals.preferredBrand,
+        logger: ctx.logger,
+      });
+
       return {
         success: true,
         conversationId: selectedTarget.conversationId,
@@ -274,7 +436,7 @@ export const zhipinGetCandidateInfo = defineTool({
           tags: [...data.candidateInfo.tags],
         },
         ...(signals.preferredBrand !== undefined ? { preferredBrand: signals.preferredBrand } : {}),
-        locationSignals,
+        locationSignals: [],
         chatMessages: [...data.messages],
         formattedHistory,
         stats,

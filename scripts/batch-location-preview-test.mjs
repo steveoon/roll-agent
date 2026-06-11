@@ -37,7 +37,8 @@ function buildReportRow(input) {
     success: input.success,
     stage: input.stage ?? "",
     confidence: input.confidence ?? null,
-    locationSignals: input.locationSignals ?? [],
+    timing: input.timing ?? null,
+    gateRewritten: input.gateRewritten ?? false,
     error: input.error ?? "",
   };
 
@@ -120,17 +121,6 @@ for (const [index, row] of picked.entries()) {
       candidateName: name,
       maxMessages: 50,
     });
-    let locationSignals = [];
-    try {
-      const info = runRoll("zhipin_get_candidate_info", {
-        conversationId,
-        candidateName: name,
-        maxMessages: 30,
-      });
-      locationSignals = Array.isArray(info.locationSignals) ? info.locationSignals : [];
-    } catch {
-      locationSignals = [];
-    }
     results.push(
       buildReportRow({
         name,
@@ -141,7 +131,8 @@ for (const [index, row] of picked.entries()) {
         suggestedReply: previewResult.suggestedReply ?? "",
         stage: previewResult.stage ?? "",
         confidence: previewResult.confidence ?? null,
-        locationSignals,
+        timing: previewResult.timing ?? null,
+        gateRewritten: previewResult.gateRewritten ?? false,
         error: previewResult.error ?? "",
       }),
     );

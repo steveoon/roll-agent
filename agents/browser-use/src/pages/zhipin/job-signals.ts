@@ -14,7 +14,13 @@ const LOCATION_SIGNAL_LLM_TIMEOUT_MS = 15_000;
 const LOCATION_SIGNAL_CACHE_TTL_MS = 5 * 60_000;
 const LOCATION_SIGNAL_CACHE_MAX_ENTRIES = 200;
 
-export const LocationSignalAnalysisPathValues = ["llm", "fallback", "profile_only"] as const;
+export const LocationSignalAnalysisPathValues = [
+  "llm",
+  "fallback",
+  "profile_only",
+  "speculative",
+  "none",
+] as const;
 
 export type LocationSignalAnalysisPath = (typeof LocationSignalAnalysisPathValues)[number];
 

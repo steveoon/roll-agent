@@ -5,7 +5,10 @@ import {
   generateSignedReply,
   GenerateReplyToolInputSchema,
   parseSseFrame,
+  prepareReplyContext,
+  PrepareReplyContextResponseSchema,
   ReplyAuthorityRequestError,
+  ReplyStreamLocationResolvedEventSchema,
   streamGenerateSignedReply,
 } from "./index.ts";
 import type { ReplyStreamEvent } from "./index.ts";
@@ -320,6 +323,119 @@ describe("@roll-agent/reply-authority-client", () => {
     assert.equal((capturedBody as { readonly stream?: unknown } | undefined)?.stream, undefined);
   });
 
+  it("parses prepare reply context responses", () => {
+    const parsed = PrepareReplyContextResponseSchema.parse({
+      prepared: true,
+      hasPreviousState: false,
+      conversationKey: "zhipin:tenant-001:conv-1",
+      expiresAt: 1_712_736_600,
+      status: "created",
+    });
+
+    assert.equal(parsed.prepared, true);
+    assert.equal(parsed.status, "created");
+  });
+
+  it("prepares reply context with a resolved recruiter binding", async () => {
+    process.env.REPLY_AUTHORITY_URL = "https://reply-authority.duliday.com";
+    process.env.REPLY_AUTHORITY_BEARER_TOKEN = "client-token";
+
+    const captured: Array<{
+      readonly url: string;
+      readonly body: unknown;
+    }> = [];
+
+    globalThis.fetch = async (input: string | URL | Request, init?: RequestInit) => {
+      const url = String(input);
+      captured.push({
+        url,
+        body: JSON.parse(String(init?.body)) as unknown,
+      });
+
+      if (url.endsWith("/resolve-recruiter-binding")) {
+        return new Response(
+          JSON.stringify({
+            tenantId: "tenant-001",
+            recruiterBinding: {
+              platform: "zhipin",
+              username: "recruiter-alice",
+            },
+          }),
+          {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          },
+        );
+      }
+
+      return new Response(
+        JSON.stringify({
+          prepared: true,
+          hasPreviousState: true,
+          conversationKey: "zhipin:tenant-001:conv-1",
+          expiresAt: 1_712_736_600,
+          status: "reused",
+        }),
+        {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        },
+      );
+    };
+
+    const response = await prepareReplyContext({
+      candidateMessage: "人民广场附近有门店吗",
+      conversationHistory: ["求职者: 人民广场附近有门店吗"],
+      candidateInfo: {
+        name: "张三",
+        expectedLocation: "上海",
+      },
+      preferredBrand: "肯德基",
+      modelConfig: {
+        reasoning: {
+          enabled: true,
+          effort: "low",
+          scope: "all",
+        },
+      },
+      target: {
+        platform: "zhipin",
+        conversationId: "conv-1",
+        candidateId: "cand-1",
+        recruiterUsername: "recruiter-alice",
+      },
+    });
+
+    assert.equal(response.status, "reused");
+    assert.equal(captured.length, 2);
+    assert.match(captured[0]?.url ?? "", /\/resolve-recruiter-binding$/);
+    assert.match(captured[1]?.url ?? "", /\/prepare-reply-context$/);
+
+    const prepareBody = captured[1]?.body as
+      | {
+          readonly requestId?: string;
+          readonly locationSignals?: unknown;
+          readonly defaultWechatId?: unknown;
+          readonly target?: {
+            readonly tenantId?: string;
+            readonly recruiterBinding?: { readonly username?: string };
+          };
+          readonly modelConfig?: { readonly reasoning?: unknown };
+        }
+      | undefined;
+
+    assert.equal(typeof prepareBody?.requestId, "string");
+    assert.equal("locationSignals" in (prepareBody ?? {}), false);
+    assert.equal("defaultWechatId" in (prepareBody ?? {}), false);
+    assert.equal(prepareBody?.target?.tenantId, "tenant-001");
+    assert.equal(prepareBody?.target?.recruiterBinding?.username, "recruiter-alice");
+    assert.deepEqual(prepareBody?.modelConfig?.reasoning, {
+      enabled: true,
+      effort: "low",
+      scope: "all",
+    });
+  });
+
   it("accepts candidate location signals in tool input", async () => {
     const parsed = GenerateReplyToolInputSchema.parse({
       ...VALID_REQUEST,
@@ -343,6 +459,58 @@ describe("@roll-agent/reply-authority-client", () => {
         confidence: 0.93,
       },
     ]);
+  });
+
+  it("parses location.resolved stream events", async () => {
+    const parsed = ReplyStreamLocationResolvedEventSchema.parse({
+      type: "location.resolved",
+      sequence: 2,
+      timestamp: "2026-05-11T00:00:01.000Z",
+      inquiryType: "location_inquiry",
+      signals: [
+        {
+          text: "人民广场",
+          source: "candidate_message",
+          city: "上海",
+          intent: "nearby_store",
+          confidence: 0.93,
+        },
+      ],
+      analysisPath: "speculative",
+    });
+
+    assert.equal(parsed.inquiryType, "location_inquiry");
+    assert.equal(parsed.analysisPath, "speculative");
+    assert.equal(parsed.signals.length, 1);
+
+    const nonLocation = ReplyStreamLocationResolvedEventSchema.parse({
+      type: "location.resolved",
+      sequence: 2,
+      timestamp: "2026-05-11T00:00:01.000Z",
+      inquiryType: "non_location_inquiry",
+      analysisPath: "none",
+    });
+
+    assert.deepEqual(nonLocation.signals, []);
+  });
+
+  it("exposes the HTTP status code on request errors", async () => {
+    process.env.REPLY_AUTHORITY_URL = "https://reply-authority.duliday.com";
+    process.env.REPLY_AUTHORITY_BEARER_TOKEN = "client-token";
+
+    globalThis.fetch = async () =>
+      new Response(
+        JSON.stringify({ statusCode: 403, error: "Forbidden", message: "该租户未开启回复预热" }),
+        { status: 403, headers: { "Content-Type": "application/json" } },
+      );
+
+    await assert.rejects(
+      generateSignedReply(VALID_REQUEST),
+      (error: unknown) =>
+        error instanceof ReplyAuthorityRequestError &&
+        error.statusCode === 403 &&
+        error.message.includes("该租户未开启回复预热"),
+    );
   });
 
   it("preserves modelConfig.reasoning in one-shot requests", async () => {

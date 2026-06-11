@@ -3,8 +3,8 @@ import {
   GenerateSignedReplyResponseSchema,
   ReasoningConfigSchema,
   ReplyStreamFinalEventSchema,
+  ReplyStreamLocationResolvedEventSchema,
   streamGenerateSignedReply,
-  type CandidateLocationSignal,
   type GenerateReplyToolInput,
   type ReasoningConfig,
   type ReplyStreamEvent,
@@ -14,7 +14,6 @@ import { NativeVisualActivitySession } from "../native-visual-activity-session.t
 import {
   formatLocationSignalsVisualLabel,
   resolveConversationSignals,
-  resolveLocationSignals,
 } from "../pages/zhipin/job-signals.ts";
 import { openZhipinNativePagePort } from "../pages/zhipin/native-page.ts";
 import type {
@@ -53,6 +52,19 @@ const OutputSchema = z.object({
   confidence: z.number().optional(),
   expiresAt: z.number().optional(),
   requestId: z.string().optional(),
+  timing: z
+    .object({
+      totalLatencyMs: z.number().int().min(0),
+      replyLatencyMs: z.number().int().min(0).optional(),
+      turnPlanningLatencyMs: z.number().int().min(0).optional(),
+      contextBuildingLatencyMs: z.number().int().min(0).optional(),
+      preparedContextHit: z.boolean(),
+    })
+    .optional(),
+  gateRewritten: z
+    .boolean()
+    .optional()
+    .describe("服务端事实/质量门调整过终稿时为 true，此时最终回复可能与流式草稿不一致"),
   error: z.string().optional(),
 });
 
@@ -67,9 +79,6 @@ const PHASE_LABELS: Readonly<Record<string, string>> = {
   reply_gate: "检查回复策略",
   signing: "签发安全信封",
 };
-const LOCATION_SIGNAL_LABEL = "正在分析地点线索…";
-const LOCATION_SIGNAL_WAIT_LABEL = "仍在分析地点线索，请稍候…";
-const LOCATION_SIGNAL_PROGRESS_DELAY_MS = 2_500;
 
 type NativeVisualActivitySessionLike = Pick<
   NativeVisualActivitySession,
@@ -127,6 +136,16 @@ function readEventString(event: ReplyStreamEvent, key: string): string | undefin
   return typeof value === "string" && value.trim().length > 0 ? value : undefined;
 }
 
+function readEventNumber(event: ReplyStreamEvent, key: string): number | undefined {
+  const value = event[key];
+  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
+function readEventBoolean(event: ReplyStreamEvent, key: string): boolean | undefined {
+  const value = event[key];
+  return typeof value === "boolean" ? value : undefined;
+}
+
 function buildHistory(messages: NativeCandidateChatDetails["messages"]): string[] {
   return messages
     .filter((message) => message.sender === "candidate" || message.sender === "recruiter")
@@ -175,7 +194,6 @@ function buildGenerateReplyInput(input: {
   readonly conversationId: string;
   readonly candidateId: string;
   readonly recruiterUsername: string;
-  readonly locationSignals: readonly CandidateLocationSignal[];
   readonly reasoning?: ReasoningConfig | undefined;
 }): GenerateReplyToolInput {
   const signals = resolveConversationSignals({
@@ -197,7 +215,6 @@ function buildGenerateReplyInput(input: {
       expectedSalary: input.data.candidateInfo.expectedSalary,
       info: [...input.data.candidateInfo.tags],
     },
-    ...(input.locationSignals.length > 0 ? { locationSignals: [...input.locationSignals] } : {}),
     ...(signals.preferredBrand !== undefined ? { preferredBrand: signals.preferredBrand } : {}),
     ...(input.reasoning !== undefined ? { modelConfig: { reasoning: input.reasoning } } : {}),
     target: {
@@ -248,7 +265,60 @@ function createFailure(error: string) {
   };
 }
 
-function toOutput(record: PreparedReplyRecord) {
+function formatLatency(ms: number): string {
+  if (ms < 1_000) {
+    return `${String(ms)}ms`;
+  }
+
+  return `${(ms / 1_000).toFixed(ms < 10_000 ? 1 : 0)}s`;
+}
+
+function isPreparedContextHit(input: {
+  readonly turnPlanningLatencyMs?: number | undefined;
+  readonly contextBuildingLatencyMs?: number | undefined;
+}): boolean {
+  return (
+    input.turnPlanningLatencyMs !== undefined &&
+    input.contextBuildingLatencyMs !== undefined &&
+    input.turnPlanningLatencyMs <= 50 &&
+    input.contextBuildingLatencyMs <= 50
+  );
+}
+
+function buildCompletionLabel(input: {
+  readonly totalLatencyMs: number;
+  readonly replyLatencyMs?: number | undefined;
+  readonly preparedContextHit: boolean;
+  readonly gateRewritten: boolean;
+}): string {
+  const parts = [`回复已生成`, `总 ${formatLatency(input.totalLatencyMs)}`];
+
+  if (input.replyLatencyMs !== undefined) {
+    parts.push(`生成 ${formatLatency(input.replyLatencyMs)}`);
+  }
+  if (input.preparedContextHit) {
+    parts.push("预热命中");
+  }
+  if (input.gateRewritten) {
+    parts.push("终稿经安全门调整");
+  }
+
+  return parts.join(" · ");
+}
+
+function toOutput(
+  record: PreparedReplyRecord,
+  timing:
+    | {
+        readonly totalLatencyMs: number;
+        readonly replyLatencyMs?: number | undefined;
+        readonly turnPlanningLatencyMs?: number | undefined;
+        readonly contextBuildingLatencyMs?: number | undefined;
+        readonly preparedContextHit: boolean;
+      }
+    | undefined = undefined,
+  gateRewritten = false,
+) {
   return {
     success: true,
     preparedReplyId: record.preparedReplyId,
@@ -257,6 +327,8 @@ function toOutput(record: PreparedReplyRecord) {
     confidence: record.confidence,
     expiresAt: record.expiresAt,
     ...(record.requestId !== undefined ? { requestId: record.requestId } : {}),
+    ...(timing !== undefined ? { timing } : {}),
+    ...(gateRewritten ? { gateRewritten } : {}),
   };
 }
 
@@ -376,55 +448,11 @@ export const zhipinGenerateReplyPreview = defineTool({
         return createFailure(error);
       }
 
-      const signals = resolveConversationSignals({
-        communicationPosition: data.candidateInfo.communicationPosition,
-        expectedJobText: data.candidateInfo.expectedJobText,
-      });
-      const locationDecisionInput = {
-        messages: data.messages,
-        expectedLocation: signals.expectedLocation,
-        communicationPosition: signals.communicationPosition,
-      };
-      const locationSession = session;
-      await locationSession.begin(LOCATION_SIGNAL_LABEL);
-      let locationAnalysisDone = false;
-      let locationProgressUpdate: Promise<unknown> = Promise.resolve();
-      const locationProgressTimer = setTimeout(() => {
-        locationProgressUpdate = locationProgressUpdate
-          .then(async () => {
-            if (!locationAnalysisDone) {
-              await locationSession.begin(LOCATION_SIGNAL_WAIT_LABEL);
-            }
-          })
-          .catch((error: unknown) => {
-            ctx.logger.debug(
-              `Location signal progress update failed: ${
-                error instanceof Error ? error.message : String(error)
-              }`,
-            );
-          });
-      }, LOCATION_SIGNAL_PROGRESS_DELAY_MS);
-      let locationResolution: Awaited<ReturnType<typeof resolveLocationSignals>>;
-      try {
-        locationResolution = await resolveLocationSignals({
-          llm: ctx.llm,
-          logger: ctx.logger,
-          ...locationDecisionInput,
-        });
-      } finally {
-        locationAnalysisDone = true;
-        clearTimeout(locationProgressTimer);
-        await locationProgressUpdate;
-      }
-      const locationSummary = formatLocationSignalsVisualLabel(locationResolution);
-      const locationSignals = [...locationResolution.signals];
-      await session.succeed(locationSummary.length > 0 ? locationSummary : "地点线索分析完成");
       const replyInput = buildGenerateReplyInput({
         data,
         conversationId: selectedTarget.conversationId,
         candidateId: selectedTarget.candidateId,
         recruiterUsername: usernameResult.username,
-        locationSignals,
         reasoning: input.reasoning,
       });
       const unreadCountBeforeReply = resolveUnreadCountBeforeReply({
@@ -437,20 +465,58 @@ export const zhipinGenerateReplyPreview = defineTool({
           selectedTarget.candidateName || selectedTarget.candidateId
         }`,
       );
-      await preview.begin("正在生成回复", locationSummary.length > 0 ? locationSummary : undefined);
+      const previewStartedAtMs = Date.now();
+      await preview.begin("正在生成回复");
 
       let draftText = "";
       let requestId: string | undefined;
       let preparedRecord: PreparedReplyRecord | undefined;
+      let timingSummary:
+        | {
+            readonly totalLatencyMs: number;
+            readonly replyLatencyMs?: number | undefined;
+            readonly turnPlanningLatencyMs?: number | undefined;
+            readonly contextBuildingLatencyMs?: number | undefined;
+            readonly preparedContextHit: boolean;
+          }
+        | undefined;
+      const phaseLatencies = new Map<string, number>();
+      let gateRewritten = false;
 
       for await (const event of deps.streamGenerateSignedReply(replyInput)) {
         if (event.type === "stream.started") {
           requestId = readEventString(event, "requestId");
         }
 
+        if (event.type === "phase.completed") {
+          const phase = readEventString(event, "phase");
+          const latencyMs = readEventNumber(event, "latencyMs");
+          if (phase !== undefined && latencyMs !== undefined) {
+            phaseLatencies.set(phase, Math.round(latencyMs));
+          }
+        }
+
+        if (event.type === "gate.completed" && readEventBoolean(event, "rewritten") === true) {
+          gateRewritten = true;
+        }
+
         const label = resolveProgressLabel(event);
         if (label !== undefined) {
           await preview.updateStatus(label);
+        }
+
+        if (event.type === "location.resolved") {
+          const locationEvent = ReplyStreamLocationResolvedEventSchema.safeParse(event);
+          if (locationEvent.success) {
+            const serverLocationLabel = formatLocationSignalsVisualLabel({
+              signals: locationEvent.data.signals,
+              analysisPath: locationEvent.data.analysisPath,
+              inquiryType: locationEvent.data.inquiryType,
+            });
+            if (serverLocationLabel.length > 0) {
+              await preview.updateStatus(serverLocationLabel);
+            }
+          }
         }
 
         if (event.type === "draft.started") {
@@ -467,6 +533,22 @@ export const zhipinGenerateReplyPreview = defineTool({
         if (event.type === "final") {
           const finalEvent = ReplyStreamFinalEventSchema.parse(event);
           const finalReply = GenerateSignedReplyResponseSchema.parse(finalEvent);
+          const turnPlanningLatencyMs = phaseLatencies.get("turn_planning");
+          const contextBuildingLatencyMs = phaseLatencies.get("context_building");
+          const totalLatencyMs = Math.max(0, Math.round(Date.now() - previewStartedAtMs));
+          const replyLatencyMs =
+            finalReply.latencyMs !== undefined ? Math.round(finalReply.latencyMs) : undefined;
+          const preparedContextHit = isPreparedContextHit({
+            turnPlanningLatencyMs,
+            contextBuildingLatencyMs,
+          });
+          timingSummary = {
+            totalLatencyMs,
+            ...(replyLatencyMs !== undefined ? { replyLatencyMs } : {}),
+            ...(turnPlanningLatencyMs !== undefined ? { turnPlanningLatencyMs } : {}),
+            ...(contextBuildingLatencyMs !== undefined ? { contextBuildingLatencyMs } : {}),
+            preparedContextHit,
+          };
           preparedRecord = deps.savePreparedReply({
             signedEnvelope: finalReply.signedEnvelope,
             suggestedReply: finalReply.suggestedReply,
@@ -476,7 +558,10 @@ export const zhipinGenerateReplyPreview = defineTool({
             unreadCountBeforeReply,
             ...(requestId !== undefined ? { requestId } : {}),
           });
-          await preview.complete("回复已生成", finalReply.suggestedReply);
+          await preview.complete(
+            buildCompletionLabel({ ...timingSummary, gateRewritten }),
+            finalReply.suggestedReply,
+          );
         }
       }
 
@@ -486,7 +571,7 @@ export const zhipinGenerateReplyPreview = defineTool({
         return createFailure(error);
       }
 
-      return toOutput(preparedRecord);
+      return toOutput(preparedRecord, timingSummary, gateRewritten);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       await preview?.fail(message);
