@@ -252,7 +252,7 @@ click_ref(@eN) 或 type_ref(@eN, text, clear?)
 6. 发送回复只能调用 `zhipin_send_prepared_reply(preparedReplyId, toolActionApproval?, browserActionApproval?)`；主输入只能使用 `preparedReplyId`，确认重试时可原样带回 `needs_confirmation` 返回的 approval；不要构造裸文本发送路径，也不要保存或传递 `signedEnvelope`。
 7. `zhipin_send_prepared_reply` 会校验 envelope 的 `conversationId + candidateId + recruiterBinding`，当前页面目标或招聘者不一致时拒绝。
 8. 需要更强推理时，可给 `zhipin_generate_reply_preview` 传 `reasoning:{enabled:true, effort:"low"|"medium"|"high", scope:"reply"|"all"}`；不传则沿用 Reply Authority Service 默认策略。
-9. `preferredBrand` 只来自 `zhipin_get_candidate_info` 对 `communicationPosition` 的连字符格式解析；不要用通用岗位名或候选人公司名伪造。
+9. 品牌信号只来自 `zhipin_get_candidate_info` 的输出，原样透传：沟通职位带 `[品牌ID]` 尾缀（如 `咖啡早班店员-接受小白-免费咖啡[10027]`）时输出 `preferredBrandId`；老格式 `品牌名-职位` 输出 `preferredBrand`；两者互斥。不要自行解析 `communicationPosition`，不要用通用岗位名或候选人公司名伪造，不要把 ID 尾缀格式的第一段当品牌名。
 10. 地点证据由 Reply Authority 服务端在 turn_planning 阶段从原始对话中提取并逐字校验；orchestrator 不要自行构造 `locationSignals`（请求字段已废弃），也不要依赖 `zhipin_get_candidate_info` 输出中的 `locationSignals`（恒为空数组，仅为兼容保留）。`candidateInfo.expectedLocation` 只是城市/区域弱信号，不能替代候选人本轮追问的具体 POI。
 11. browser-use 只上送原始对话与候选人资料文本，不抽取地点、不调用外部地图、不做 geocode、不计算门店距离；地理解析与岗位/门店匹配全部由 Reply Authority 服务端执行。
 12. 推荐页岗位筛选优先调用 `zhipin_list_recommend_jobs()`；若返回 `canSwitch:false`，说明当前账号/页面没有可切换目标，不要继续盲试岗位名。
@@ -301,6 +301,6 @@ zhipin_open_recommend_page
 ## 参考资料
 
 - `references/zhipin-diagnostics.md`：BOSS native CDP / attach 诊断阶段、推进顺序和返回字段。
-- `references/zhipin-workflows.md`：聊天主键、动态列表、`preferredBrand`、服务端地点解析（`location.resolved`）、Reply Authority 编排细节。
+- `references/zhipin-workflows.md`：聊天主键、动态列表、`preferredBrand` / `preferredBrandId`、服务端地点解析（`location.resolved`）、Reply Authority 编排细节。
 - `references/generic-browser-refs.md`：通用 AX snapshot、`@eN` ref、点击/输入闭环和边界条件。
 - `references/env.yaml`：运行所需环境变量声明。

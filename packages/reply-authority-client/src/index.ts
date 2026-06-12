@@ -144,6 +144,12 @@ export const GenerateReplyToolInputSchema = z.object({
       "已废弃：候选人地点查询证据。服务端合并规划上线后由服务端自行提取并校验，新调用方不应传入",
     ),
   preferredBrand: z.string().optional().describe("偏好品牌"),
+  preferredBrandId: z
+    .number()
+    .int()
+    .positive()
+    .optional()
+    .describe("沟通职位尾缀 [品牌ID] 解析出的 Duliday 品牌 ID"),
   channelType: z
     .enum(["public", "private"])
     .optional()

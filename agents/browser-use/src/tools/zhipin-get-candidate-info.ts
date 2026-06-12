@@ -43,6 +43,7 @@ const OutputSchema = z.object({
   candidateId: z.string(),
   candidateInfo: CandidateInfoSchema,
   preferredBrand: z.string().optional(),
+  preferredBrandId: z.number().int().positive().optional(),
   locationSignals: z
     .array(CandidateLocationSignalSchema)
     .describe("已废弃：地点证据改由 Reply Authority 服务端提取，此字段恒为空数组，仅为兼容保留"),
@@ -144,6 +145,7 @@ function buildPrepareReplyContextInput(input: {
   readonly expectedPosition: string;
   readonly expectedLocation: string;
   readonly preferredBrand?: string | undefined;
+  readonly preferredBrandId?: number | undefined;
 }): PrepareReplyContextInput {
   return {
     candidateMessage: getLatestCandidateMessage(input.data.messages),
@@ -160,6 +162,7 @@ function buildPrepareReplyContextInput(input: {
       info: [...input.data.candidateInfo.tags],
     },
     ...(input.preferredBrand !== undefined ? { preferredBrand: input.preferredBrand } : {}),
+    ...(input.preferredBrandId !== undefined ? { preferredBrandId: input.preferredBrandId } : {}),
     target: {
       platform: "zhipin",
       conversationId: input.selectedTarget.conversationId,
@@ -199,6 +202,7 @@ async function startReplyContextPreparation(input: {
   readonly expectedPosition: string;
   readonly expectedLocation: string;
   readonly preferredBrand?: string | undefined;
+  readonly preferredBrandId?: number | undefined;
   readonly logger: {
     readonly debug: (message: string) => void;
     readonly info: (message: string) => void;
@@ -241,6 +245,7 @@ async function startReplyContextPreparation(input: {
     expectedPosition: input.expectedPosition,
     expectedLocation: input.expectedLocation,
     preferredBrand: input.preferredBrand,
+    preferredBrandId: input.preferredBrandId,
   });
 
   const startedAtMs = Date.now();
@@ -417,6 +422,7 @@ export const zhipinGetCandidateInfo = defineTool({
         expectedPosition: signals.expectedPosition,
         expectedLocation: signals.expectedLocation,
         preferredBrand: signals.preferredBrand,
+        preferredBrandId: signals.preferredBrandId,
         logger: ctx.logger,
       });
 
@@ -436,6 +442,9 @@ export const zhipinGetCandidateInfo = defineTool({
           tags: [...data.candidateInfo.tags],
         },
         ...(signals.preferredBrand !== undefined ? { preferredBrand: signals.preferredBrand } : {}),
+        ...(signals.preferredBrandId !== undefined
+          ? { preferredBrandId: signals.preferredBrandId }
+          : {}),
         locationSignals: [],
         chatMessages: [...data.messages],
         formattedHistory,

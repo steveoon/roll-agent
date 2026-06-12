@@ -125,20 +125,20 @@ recommend-list  -> 推荐牛人列表，默认向下滚动，去重主键 candid
    - `no-new-items`：连续滚动没有新去重项。
    - `max-steps`：达到滚动步数上限。
 
-## preferredBrand
+## preferredBrand / preferredBrandId
 
-`zhipin_get_candidate_info` 会从 `candidateInfo.communicationPosition` 中解析：
+`zhipin_get_candidate_info` 会从页面信号中解析：
 
-- `expectedLocation`
-- `expectedPosition`
-- `preferredBrand`
+- `expectedLocation` / `expectedPosition`（来自期望职位文本）
+- `preferredBrandId` 或 `preferredBrand`（来自 `candidateInfo.communicationPosition`，互斥，最多输出一个）
 
-`preferredBrand` 规则：
+沟通职位有两种命名格式，解析规则：
 
-- 仅当 `communicationPosition` 含连字符类分隔符时输出：`-` / `－` / `—` / `–`。
-- 取分隔符前的第一段，例如 `肯德基-服务员` -> `preferredBrand: "肯德基"`。
-- 没有分隔符时不输出。
-- 禁止用通用岗位名或 `zhipin_get_candidate_list.company` 伪造品牌。
+- 新格式 `自定义描述…[品牌ID]`（末尾方括号包数字，兼容全角 `【】` / `［］` 与括号内空白）：输出 `preferredBrandId`，例如 `咖啡早班店员-接受小白-免费咖啡[10027]` -> `preferredBrandId: 10027`。此时**不输出** `preferredBrand`——新格式第一段是岗位描述，不是品牌名。
+- 老格式 `品牌名-职位`（含连字符类分隔符 `-` / `－` / `—` / `–`，且无 ID 尾缀）：取第一段输出 `preferredBrand`，例如 `肯德基-服务员` -> `preferredBrand: "肯德基"`。
+- 两者都不满足时不输出任何品牌字段。
+- 编排器原样透传工具输出即可，不要自行解析 `communicationPosition`；Reply Authority 服务端会以 `candidateInfo.communicationPosition` 为权威再次提取品牌 ID 并与 `preferredBrandId` 对账（不一致以服务端提取为准）。
+- 禁止用通用岗位名或 `zhipin_get_candidate_list.company` 伪造品牌；禁止把新格式的第一段当品牌名。
 
 ## 地点证据（服务端提取）
 
