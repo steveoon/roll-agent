@@ -216,6 +216,9 @@ function buildGenerateReplyInput(input: {
       info: [...input.data.candidateInfo.tags],
     },
     ...(signals.preferredBrand !== undefined ? { preferredBrand: signals.preferredBrand } : {}),
+    ...(signals.preferredBrandId !== undefined
+      ? { preferredBrandId: signals.preferredBrandId }
+      : {}),
     ...(input.reasoning !== undefined ? { modelConfig: { reasoning: input.reasoning } } : {}),
     target: {
       platform: "zhipin",

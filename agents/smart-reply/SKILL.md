@@ -32,7 +32,7 @@ npm 包名：`@roll-agent/smart-reply-agent`
 
 完整 inputSchema 可通过 `roll agent tools smart-reply-agent`（或 `--json`）查询。
 
-- `generate_reply(candidateMessage, conversationHistory?, candidateInfo?, preferredBrand?, channelType?, defaultWechatId?, industryVoiceId?, turnIndex?, modelConfig?, target)`
+- `generate_reply(candidateMessage, conversationHistory?, candidateInfo?, preferredBrand?, preferredBrandId?, channelType?, defaultWechatId?, industryVoiceId?, turnIndex?, modelConfig?, target)`
   调用 Reply Authority Service 的 `POST /generate-signed-reply`，返回 `suggestedReply`、`signedEnvelope`、`envelopeExp`、`confidence`、`stage` 和可选 `diagnostics`。`target` 为必填，至少包含 `platform=zhipin`、`conversationId`、`candidateId`，以及以下两种 recruiter 绑定方式之一：
   1. 直接传完整绑定：`tenantId + recruiterBinding`
   2. 便利代理模式：`recruiterUsername`（smart-reply 会先调用 `POST /resolve-recruiter-binding` 解析出 `tenantId + recruiterBinding`）
@@ -54,8 +54,8 @@ npm 包名：`@roll-agent/smart-reply-agent`
 
   - 调用前应先尝试从页面读取 `candidateInfo.communicationPosition`、`candidateInfo.expectedLocation`、`candidateInfo.expectedPosition`
   - 能读到就如实透传；读不到就省略该字段
-  - `preferredBrand` 为可选页面信号：若 `browser-use-agent` 提取到的 `communicationPosition` 含连字符类分隔符（`-` / `－` / `—` / `–`），则取第一段透传；没有分隔符就省略该字段
-  - 严禁把通用岗位名（如“餐饮兼职服务员”“门店服务员”）或候选人现/前雇主公司名塞进 `preferredBrand`
+  - `preferredBrand` / `preferredBrandId` 为可选页面信号，只能原样透传 `browser-use-agent` `zhipin_get_candidate_info` 的输出字段：沟通职位带 `[品牌ID]` 尾缀（如 `咖啡早班店员-接受小白-免费咖啡[10027]`）时工具会输出 `preferredBrandId`，只透传它；老格式 `品牌名-职位` 时工具输出 `preferredBrand`，只透传它；都读不到就都省略
+  - 不要自行从 `communicationPosition` 解析品牌（服务端会以 `candidateInfo.communicationPosition` 为权威自行提取品牌 ID 并对账）；严禁把通用岗位名（如“餐饮兼职服务员”“门店服务员”）、候选人现/前雇主公司名或新格式的第一段塞进 `preferredBrand`
 
   Minimal valid input 示例（代理模式）：
 
@@ -136,7 +136,7 @@ npm 包名：`@roll-agent/smart-reply-agent`
    - `candidateInfo.communicationPosition`
    - `candidateInfo.expectedLocation`
    - `candidateInfo.expectedPosition`
-   - `preferredBrand`：若 `browser-use-agent` 从 `communicationPosition` 里识别到“品牌-职位”格式，则透传第一段；否则保持缺省
+   - `preferredBrand` / `preferredBrandId`：原样透传 `zhipin_get_candidate_info` 的输出字段（新命名 `…[品牌ID]` 给 `preferredBrandId`，老命名“品牌-职位”给 `preferredBrand`，互斥）；否则保持缺省
    - 如果读不到，保持缺省；不要用通用岗位名或候选人公司名冒充品牌
 4. 调用 `smart-reply-agent.generate_reply(..., target)`：
    - 直接模式：传 `target.tenantId + target.recruiterBinding`
