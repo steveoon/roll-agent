@@ -31,7 +31,7 @@
     "@changesets/changelog-github": "^0.6.0",
     "@changesets/cli": "^2.30.0",
     "@types/node": "^22.19.15",
-    "esbuild": "^0.28.0",
+    "esbuild": "0.28.1",
     "eslint": "^9.0.0",
     "neostandard": "^0.12.0",
     "prettier": "^3.4.0",
