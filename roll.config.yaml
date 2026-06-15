@@ -51,7 +51,6 @@ agents:
       REPLY_AUTHORITY_KEYS_URL: https://reply-authority.duliday.com/.well-known/reply-authority-keys
       BROWSER_VISUAL_CURSOR: "true"
       BROWSER_SECURITY_JSON: '{"domainAllowlist":["zhipin.com"],"maxSnapshotNodes":1000}'
-      BROWSER_USE_POLICY_JSON: '{"approvalTtlMs":300000,"tools":{"zhipin_send_prepared_reply":{"policy":"confirm"}}}'
       REPLY_AUTHORITY_URL: https://reply-authority.duliday.com
       REPLY_AUTHORITY_BEARER_TOKEN: ${REPLY_AUTHORITY_BEARER_TOKEN}
       RECRUITMENT_EVENTS_DEFAULT_AGENT_ID: siwen-boss-test

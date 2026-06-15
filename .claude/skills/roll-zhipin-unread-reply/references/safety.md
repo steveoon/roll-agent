@@ -92,6 +92,22 @@ requires approval, `zhipin_send_prepared_reply` may return `needs_confirmation`.
 - Orchestrators must confirm with the user, then retry `zhipin_send_prepared_reply` with the same
   `preparedReplyId` plus the returned approval object.
 
+## Dual-draft judge
+
+When `zhipin_generate_reply_preview` returns `replyVariantSelection`, the script:
+
+1. Calls `zhipin_judge_prepared_reply` (no `browserInstance` on this global tool).
+2. Passes returned `variantDecision` (includes `reason`) into `zhipin_send_prepared_reply`.
+3. Logs `hasDualDraft`, `chosenOption`, `judgeFallback`, and `feedbackStatus` in JSONL.
+
+If judge fails (`fallback: true`), the script sends the recommended option without `variantDecision`
+(same as legacy behavior; `feedbackStatus` is `skipped`).
+
+Hard judge failures (`success: false`, e.g. expired/consumed `preparedReplyId`) abort at `send_build`
+without calling `zhipin_send_prepared_reply`.
+
+Pass `--no-judge` to skip the judge step and always send the recommended option.
+
 ## Not covered yet
 
 - Auto-retry for `needs_confirmation` / `browserActionApproval`

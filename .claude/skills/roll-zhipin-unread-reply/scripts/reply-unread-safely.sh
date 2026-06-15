@@ -12,6 +12,13 @@ FIND_UNREAD_REF="$SCRIPT_DIR/find-unread-ref.mjs"
 PARSE_READ_CANDIDATE="$SCRIPT_DIR/parse-read-candidate.mjs"
 VALIDATE_OPEN_CHAT="$SCRIPT_DIR/validate-open-chat.mjs"
 VALIDATE_GENERATE="$SCRIPT_DIR/validate-generate.mjs"
+PARSE_GENERATE_PREVIEW="$SCRIPT_DIR/parse-generate-preview.mjs"
+BUILD_SEND_PAYLOAD="$SCRIPT_DIR/build-send-payload.mjs"
+APPLY_SEND_BUNDLE="$SCRIPT_DIR/apply-send-bundle.mjs"
+WRITE_JUDGE_INPUT="$SCRIPT_DIR/write-judge-input.mjs"
+COMPOSE_RESULT_INPUT="$SCRIPT_DIR/compose-result-input.mjs"
+FORMAT_CANDIDATE_RESULT="$SCRIPT_DIR/format-candidate-result.mjs"
+PARSE_SEND_RESULT="$SCRIPT_DIR/parse-send-result.mjs"
 VALIDATE_SEND="$SCRIPT_DIR/validate-send.mjs"
 CHECK_AGENT_HEALTH="$SCRIPT_DIR/check-agent-health.mjs"
 VALIDATE_BROWSER_SELECTION="$SCRIPT_DIR/validate-browser-selection.mjs"
@@ -31,6 +38,7 @@ BATCH_PAUSE=0
 MAX_CONSECUTIVE_FAILURES=2
 MAX_EMPTY_READS=2
 KEEP_WORKDIR=0
+NO_JUDGE=0
 RESULTS_FILE="${TMPDIR:-/tmp}/roll-zhipin-unread-reply-$(date +%Y%m%d-%H%M%S).jsonl"
 WORK_DIR=""
 
@@ -48,6 +56,7 @@ Options:
   --dry-run              Evaluate skip rules; do not generate/send/exchange
   --no-unread-filter     Skip clicking the "未读" tab
   --no-exchange-wechat   Do not call zhipin_exchange_wechat after send
+  --no-judge             Skip zhipin_judge_prepared_reply on dual-draft previews
   --min-gap SEC          Min seconds between successful sends (default: 0, no wait)
   --max-gap SEC          Max seconds between successful sends (default: 0)
   --batch-size N         Sends per batch before long pause (default: 4)
@@ -75,6 +84,7 @@ while [[ $# -gt 0 ]]; do
     --dry-run) DRY_RUN=1; shift ;;
     --no-unread-filter) CLICK_UNREAD_FILTER=0; shift ;;
     --no-exchange-wechat) EXCHANGE_WECHAT=0; shift ;;
+    --no-judge) NO_JUDGE=1; shift ;;
     --min-gap) need_arg "$1" "${2:-}"; MIN_GAP="$2"; shift 2 ;;
     --max-gap) need_arg "$1" "${2:-}"; MAX_GAP="$2"; shift 2 ;;
     --batch-size) need_arg "$1" "${2:-}"; BATCH_SIZE="$2"; shift 2 ;;
@@ -95,6 +105,18 @@ if ! command -v node >/dev/null 2>&1; then
   exit 1
 fi
 
+for helper in \
+  "$SKIP_RULES_JS" "$EXTRACT_ROLL_JSON" "$BUILD_SKIP_INPUT" "$APPEND_JSONL" \
+  "$FIND_UNREAD_REF" "$PARSE_READ_CANDIDATE" "$VALIDATE_OPEN_CHAT" \
+  "$PARSE_GENERATE_PREVIEW" "$BUILD_SEND_PAYLOAD" "$APPLY_SEND_BUNDLE" \
+  "$WRITE_JUDGE_INPUT" "$COMPOSE_RESULT_INPUT" "$FORMAT_CANDIDATE_RESULT" "$PARSE_SEND_RESULT" "$VALIDATE_SEND" \
+  "$CHECK_AGENT_HEALTH" "$VALIDATE_BROWSER_SELECTION" "$DETECT_EXPIRED" "$PARSE_PAGE_META"; do
+  if [[ ! -f "$helper" ]]; then
+    echo "error: missing helper script: $helper" >&2
+    exit 1
+  fi
+done
+
 export REPLY_AGENT="$AGENT"
 WORK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/roll-zhipin-reply.XXXXXX")"
 UNREAD_FILTER_APPLIED=0
@@ -110,7 +132,8 @@ trap cleanup EXIT
 roll_json_file() {
   local tool="$1"
   local file="$2"
-  if [[ -n "$BROWSER_INSTANCE" ]]; then
+  local inject_browser="${3:-1}"
+  if [[ -n "$BROWSER_INSTANCE" && "$inject_browser" == "1" ]]; then
     node -e '
       const fs = require("node:fs");
       const filePath = process.argv[1];
@@ -151,11 +174,24 @@ random_gap() {
   fi
 }
 
-log() { echo "[reply-unread] $*" >&2; }
-
 append_result() {
   append_result_json "$1"
 }
+
+format_send_result_line() {
+  local mode="$1"
+  local line_ts="$2"
+  local line_name="$3"
+  local line_cid="$4"
+  local line_prepared_id="$5"
+  local line_send_result="$6"
+  local exchanged_flag="${7:-0}"
+  write_json "$WORK_DIR/send-result.json" "$line_send_result"
+  node "$COMPOSE_RESULT_INPUT" "$WORK_DIR/send-bundle.json" "$WORK_DIR/send-result.json" \
+    | node "$FORMAT_CANDIDATE_RESULT" "$mode" "$line_ts" "$line_name" "$line_cid" "$line_prepared_id" "$exchanged_flag"
+}
+
+log() { echo "[reply-unread] $*" >&2; }
 
 ensure_agent_healthy() {
   local health
@@ -275,7 +311,7 @@ process_one() {
   write_json "$WORK_DIR/info-raw.json" "$(printf '%s' "$info_out" | extract_json_object 2>/dev/null || echo '{}')"
 
   # 3. skip rules (file-based payload avoids shell quoting issues)
-  local skip_result skip skip reason
+  local skip_result skip stop_flag reason
   printf '%s' "$preview" >"$WORK_DIR/preview.txt"
   node "$BUILD_SKIP_INPUT" \
     "$WORK_DIR/info-raw.json" \
@@ -309,9 +345,11 @@ process_one() {
   # 4. generate on current chat (no conversationId — avoids 3rd list click)
   write_json "$WORK_DIR/gp.json" '{"maxMessages":100}'
   log "zhipin_generate_reply_preview (current chat, no re-open)"
-  local preview_out prepared_id
+  local preview_out preview_meta prepared_id has_dual judge_out send_bundle
   preview_out=$(roll_json_file zhipin_generate_reply_preview "$WORK_DIR/gp.json")
-  prepared_id=$(printf '%s' "$preview_out" | node "$VALIDATE_GENERATE" 2>/dev/null) || prepared_id=""
+  preview_meta=$(printf '%s' "$preview_out" | node "$PARSE_GENERATE_PREVIEW" 2>/dev/null) || preview_meta=""
+  prepared_id=$(printf '%s' "$preview_meta" | node -e 'let j={};try{j=JSON.parse(require("fs").readFileSync(0,"utf8"));}catch{};process.stdout.write(j.preparedReplyId||"");' 2>/dev/null) || prepared_id=""
+  has_dual=$(printf '%s' "$preview_meta" | node -e 'let j={};try{j=JSON.parse(require("fs").readFileSync(0,"utf8"));}catch{};process.stdout.write(j.hasDualDraft?"1":"0");' 2>/dev/null) || has_dual="0"
 
   if [[ -z "$prepared_id" ]]; then
     append_result "{\"ts\":\"$ts\",\"name\":\"$name\",\"conversationId\":\"$cid\",\"ok\":false,\"stage\":\"preview\"}"
@@ -319,18 +357,45 @@ process_one() {
     return 1
   fi
 
+  judge_out=""
+  if [[ "$has_dual" == "1" && "$NO_JUDGE" -eq 0 ]]; then
+    if ! node "$WRITE_JUDGE_INPUT" "$WORK_DIR/judge.json" "$prepared_id" 2>/dev/null; then
+      append_result "{\"ts\":\"$ts\",\"name\":\"$name\",\"conversationId\":\"$cid\",\"ok\":false,\"stage\":\"send_build\",\"preparedReplyId\":\"$prepared_id\",\"hasDualDraft\":true}"
+      back_to_list
+      return 1
+    fi
+    log "zhipin_judge_prepared_reply (dual draft)"
+    judge_out=$(roll_json_file zhipin_judge_prepared_reply "$WORK_DIR/judge.json" 0)
+  elif [[ "$has_dual" == "1" ]]; then
+    log "dual draft detected; --no-judge -> send recommended option only"
+  fi
+
+  send_bundle=$(printf '%s' "$judge_out" | node "$BUILD_SEND_PAYLOAD" "$prepared_id" "$has_dual" "$NO_JUDGE") || send_bundle=""
+  write_json "$WORK_DIR/send-bundle.json" "$send_bundle"
+  if [[ -z "$send_bundle" ]] || ! printf '%s' "$send_bundle" | node "$APPLY_SEND_BUNDLE" "$WORK_DIR/sp.json" 2>/dev/null; then
+    append_result "{\"ts\":\"$ts\",\"name\":\"$name\",\"conversationId\":\"$cid\",\"ok\":false,\"stage\":\"send_build\",\"preparedReplyId\":\"$prepared_id\",\"hasDualDraft\":$([ "$has_dual" == "1" ] && echo true || echo false)}"
+    back_to_list
+    return 1
+  fi
+
   # 5. sp.json → send
-  write_json "$WORK_DIR/sp.json" "{\"preparedReplyId\":\"$prepared_id\"}"
-  local send_out send_ok
+  local send_out send_result send_ok
   send_out=$(roll_json_file zhipin_send_prepared_reply "$WORK_DIR/sp.json")
-  if printf '%s' "$send_out" | node "$VALIDATE_SEND" 2>/dev/null; then
+  send_result=$(printf '%s' "$send_out" | node "$PARSE_SEND_RESULT" 2>/dev/null) || send_result='{"ok":false}'
+  if printf '%s' "$send_result" | node -e 'let j={};try{j=JSON.parse(require("fs").readFileSync(0,"utf8"));}catch{};process.exit(j.ok?0:1);' 2>/dev/null; then
     send_ok="1"
   else
     send_ok="0"
   fi
 
   if [[ "$send_ok" != "1" ]]; then
-    append_result "{\"ts\":\"$ts\",\"name\":\"$name\",\"conversationId\":\"$cid\",\"ok\":false,\"stage\":\"send\",\"preparedReplyId\":\"$prepared_id\"}"
+    local result_line
+    result_line=$(format_send_result_line send_failed "$ts" "$name" "$cid" "$prepared_id" "$send_result" 0) || result_line=""
+    if [[ -n "$result_line" ]]; then
+      append_result "$result_line"
+    else
+      append_result "{\"ts\":\"$ts\",\"name\":\"$name\",\"conversationId\":\"$cid\",\"ok\":false,\"stage\":\"send\",\"preparedReplyId\":\"$prepared_id\"}"
+    fi
     back_to_list
     return 1
   fi
@@ -346,7 +411,13 @@ process_one() {
     }
   fi
 
-  append_result "{\"ts\":\"$ts\",\"name\":\"$name\",\"conversationId\":\"$cid\",\"ok\":true,\"preparedReplyId\":\"$prepared_id\",\"exchangedWechat\":$([ "$EXCHANGE_WECHAT" -eq 1 ] && echo true || echo false)}"
+  local success_line
+  success_line=$(format_send_result_line sent "$ts" "$name" "$cid" "$prepared_id" "$send_result" "$EXCHANGE_WECHAT") || success_line=""
+  if [[ -n "$success_line" ]]; then
+    append_result "$success_line"
+  else
+    append_result "{\"ts\":\"$ts\",\"name\":\"$name\",\"conversationId\":\"$cid\",\"ok\":true,\"preparedReplyId\":\"$prepared_id\",\"exchangedWechat\":$([ "$EXCHANGE_WECHAT" -eq 1 ] && echo true || echo false)}"
+  fi
   back_to_list
   return 10
 }

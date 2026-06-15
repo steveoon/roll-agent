@@ -50,6 +50,7 @@ Set-ExecutionPolicy -Scope Process Bypass -Force
 | `--limit N` | `-Limit N` | Cap candidates this run |
 | `--no-unread-filter` | `-NoUnreadFilter` | Skip clicking 「未读」 |
 | `--no-exchange-wechat` | `-NoExchangeWechat` | Skip exchange-wechat |
+| `--no-judge` | `-NoJudge` | Skip `zhipin_judge_prepared_reply`; dual-draft sends recommended option only |
 | `--min-gap` / `--max-gap` | `-MinGap` / `-MaxGap` | Delay between sends (default **0** = immediate next) |
 | `--batch-size` / `--batch-pause` | `-BatchSize` / `-BatchPause` | Burst control (default pause **0** = off) |
 | `--keep-workdir` | `-KeepWorkDir` | Keep temp JSON files after run |
@@ -103,6 +104,13 @@ When parallel full-reply runs misbehave but sequential runs on the same instance
 | `roll-json-extract.mjs` | Shared last-JSON extractor |
 | `find-unread-ref.mjs` | Locate 未读 tab ref (regex fallback) |
 | `parse-read-candidate.mjs` | Parse `zhipin_read_messages` output |
+| `parse-generate-preview.mjs` | Parse preview output (`preparedReplyId`, `hasDualDraft`) |
+| `build-send-payload.mjs` | Build send bundle with optional `variantDecision` from judge |
+| `apply-send-bundle.mjs` | Write validated `sp.json` from send bundle |
+| `write-judge-input.mjs` | Safely write `judge.json` with `preparedReplyId` |
+| `compose-result-input.mjs` | Merge bundle + send result for JSONL formatting |
+| `format-candidate-result.mjs` | Build JSONL result line for sent / send_failed |
+| `parse-send-result.mjs` | Parse send output (`ok`, `feedbackStatus`) |
 | `validate-*.mjs` / `check-agent-health.mjs` | Roll output validators |
 | `validate-browser-selection.mjs` | Fail fast when multi-instance config needs explicit `browserInstance` |
 | `detect-expired-banner.mjs` / `parse-page-meta.mjs` | Page guards |
@@ -112,6 +120,7 @@ Quick test (no roll):
 ```bash
 node scripts/evaluate-skip-rules.test.mjs
 node scripts/roll-helpers.test.mjs
+node scripts/pipeline-judge-send.test.mjs
 ```
 
 ### Windows PowerShell pitfalls (addressed in repo)
@@ -135,7 +144,9 @@ read_messages(limit=1, onlyUnread) → one candidate (read-only, no list click)
 → info.json {maxMessages} + get_candidate_info  ← current chat
 → evaluate-skip-rules.mjs → skip? → back to list
 → gp.json {maxMessages} + generate_reply_preview → preparedReplyId
-→ sp.json {preparedReplyId} + send_prepared_reply
+→ [若 hasDualDraft 且未 --no-judge] judge.json + zhipin_judge_prepared_reply → variantDecision
+→ build-send-payload.mjs → apply-send-bundle.mjs → sp.json
+→ sp.json + send_prepared_reply
 → wx.json {} + exchange_wechat (current chat)
 → back to list → repeat
 ```
@@ -151,6 +162,7 @@ All `roll run` inputs use **`--input-file`** (PowerShell-safe; macOS/Linux compa
 ### Operational guardrails
 
 - `needs_confirmation`: scripts do **not** auto-retry with approval payloads today; see [references/safety.md](references/safety.md).
+- Dual-draft previews default to `zhipin_judge_prepared_reply` before send so `variantDecision.reason` flows into `/reply-feedback`. Use `--no-judge` only when you explicitly want the recommended option without judge latency.
 - Multi-instance selection is validated at startup through `browser_status`; when multiple instances exist without a configured default, the script exits before touching BOSS unless `--browser-instance` / `-BrowserInstance` is provided.
 - Pre-flight is per `browserInstance`: check `browser_status`, `zhipin_get_username`, `zhipin_open_chat_page`, then one `zhipin_read_messages`.
 - Recovery is per `browserInstance`: if the tab is logged out, on marketing home, or returns empty reads unexpectedly, recover that profile before running the script. If only one browser runtime is stale, prefer `roll browser stop <browserInstance>` then reopen that same instance; do not restart the whole agent.
