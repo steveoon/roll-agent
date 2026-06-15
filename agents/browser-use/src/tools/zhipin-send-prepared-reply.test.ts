@@ -71,6 +71,53 @@ describe("zhipin_send_prepared_reply", () => {
     );
   }
 
+  function saveDualPreparedReply() {
+    return savePreparedReply(
+      {
+        signedEnvelope: "payload.draft.signature",
+        suggestedReply: "你好，薪资可以详聊。",
+        stage: "job_consultation",
+        confidence: 0.9,
+        expiresAt: 4_102_444_800,
+        unreadCountBeforeReply: 2,
+        variantGroup: {
+          groupId: "rvg_abc123",
+          options: [
+            {
+              option: "option_1",
+              variant: "draft",
+              suggestedReply: "你好，薪资可以详聊。",
+              signedEnvelope: "payload.draft.signature",
+              envelopeExp: 4_102_444_800,
+            },
+            {
+              option: "option_2",
+              variant: "revised",
+              suggestedReply: "你好，我可以帮你确认薪资范围。",
+              signedEnvelope: "payload.revised.signature",
+              envelopeExp: 4_102_444_800,
+            },
+          ],
+          findings: [
+            {
+              code: "off_axis_fact_disclosure",
+              description: "首稿包含候选人未询问的信息。",
+            },
+          ],
+          rubricVersion: "reply-quality-v1",
+          rubricHash: "sha256:test",
+          target: {
+            platform: "zhipin",
+            tenantId: "tenant-001",
+            conversationId: "conv-1",
+          },
+          recommendedOption: "option_1",
+        },
+      },
+      1_800_000_000,
+    );
+  }
+
   function readApprovalIdFromError(error: unknown): string {
     assert.ok(error instanceof StructuredToolError);
     const approvalRequest = error.payload.details?.["approvalRequest"];
@@ -156,6 +203,150 @@ describe("zhipin_send_prepared_reply", () => {
     assert.deepEqual(sentUnreadCounts, [2]);
   });
 
+  it("sends the selected dual-draft envelope and posts feedback", async () => {
+    const sent: Array<{ readonly envelope: string; readonly unread?: number }> = [];
+    const feedbackBodies: unknown[] = [];
+    const saved = saveDualPreparedReply();
+    setZhipinSendPreparedReplyDepsForTests({
+      sendSignedZhipinReply: async (input) => {
+        sent.push({
+          envelope: input.signedEnvelope,
+          ...(input.unreadCountBeforeReply !== undefined
+            ? { unread: input.unreadCountBeforeReply }
+            : {}),
+        });
+        return { success: true, sentMessage: "你好，我可以帮你确认薪资范围。" };
+      },
+      postReplyFeedback: async (body) => {
+        feedbackBodies.push(body);
+        return { status: "accepted", groupId: body.groupId };
+      },
+    });
+
+    const result = await zhipinSendPreparedReply.execute(
+      {
+        preparedReplyId: saved.preparedReplyId,
+        variantDecision: {
+          chosenOption: "option_2",
+          reason: "option_2 更直接回应薪资问题",
+          confirmedFindingCodes: ["off_axis_fact_disclosure"],
+          judgeModel: "test-judge",
+        },
+      },
+      createTestContext(),
+    );
+
+    assert.equal(result.success, true);
+    assert.equal(result.feedbackStatus, "accepted");
+    assert.deepEqual(sent, [{ envelope: "payload.revised.signature", unread: 2 }]);
+    assert.equal(
+      (feedbackBodies[0] as { readonly chosenVariant?: string } | undefined)?.chosenVariant,
+      "revised",
+    );
+    assert.deepEqual(
+      (feedbackBodies[0] as { readonly confirmedFindingCodes?: readonly string[] } | undefined)
+        ?.confirmedFindingCodes,
+      ["off_axis_fact_disclosure"],
+    );
+  });
+
+  it("keeps old preparedReplyId-only sending usable for dual-draft records", async () => {
+    const sentEnvelopes: string[] = [];
+    const feedbackBodies: unknown[] = [];
+    const saved = saveDualPreparedReply();
+    setZhipinSendPreparedReplyDepsForTests({
+      sendSignedZhipinReply: async (input) => {
+        sentEnvelopes.push(input.signedEnvelope);
+        return { success: true, sentMessage: "你好，薪资可以详聊。" };
+      },
+      postReplyFeedback: async (body) => {
+        feedbackBodies.push(body);
+        return { status: "accepted", groupId: body.groupId };
+      },
+    });
+
+    const result = await zhipinSendPreparedReply.execute(
+      { preparedReplyId: saved.preparedReplyId },
+      createTestContext(),
+    );
+
+    assert.equal(result.success, true);
+    assert.equal(result.feedbackStatus, "skipped");
+    assert.deepEqual(sentEnvelopes, ["payload.draft.signature"]);
+    assert.deepEqual(feedbackBodies, []);
+  });
+
+  it("consumes a dual-draft group after sending one option", async () => {
+    const sentEnvelopes: string[] = [];
+    const saved = saveDualPreparedReply();
+    setZhipinSendPreparedReplyDepsForTests({
+      sendSignedZhipinReply: async (input) => {
+        sentEnvelopes.push(input.signedEnvelope);
+        return { success: true, sentMessage: "sent" };
+      },
+      postReplyFeedback: async (body) => ({ status: "accepted", groupId: body.groupId }),
+    });
+
+    const first = await zhipinSendPreparedReply.execute(
+      {
+        preparedReplyId: saved.preparedReplyId,
+        variantDecision: {
+          chosenOption: "option_1",
+          reason: "首稿已经足够准确",
+        },
+      },
+      createTestContext(),
+    );
+    const second = await zhipinSendPreparedReply.execute(
+      {
+        preparedReplyId: saved.preparedReplyId,
+        variantDecision: {
+          chosenOption: "option_2",
+          reason: "尝试发送另一稿",
+        },
+      },
+      createTestContext(),
+    );
+
+    assert.equal(first.success, true);
+    assert.equal(second.success, false);
+    assert.match(second.error ?? "", /已消费/);
+    assert.deepEqual(sentEnvelopes, ["payload.draft.signature"]);
+  });
+
+  it("marks 404/409/500 feedback failures without rolling back the sent dual-draft reply", async () => {
+    for (const statusCode of [404, 409, 500] as const) {
+      resetPreparedReplyStoreForTests();
+      const sentEnvelopes: string[] = [];
+      const saved = saveDualPreparedReply();
+      setZhipinSendPreparedReplyDepsForTests({
+        sendSignedZhipinReply: async (input) => {
+          sentEnvelopes.push(input.signedEnvelope);
+          return { success: true, sentMessage: "sent" };
+        },
+        postReplyFeedback: async () => {
+          throw new Error(`reply feedback ${String(statusCode)}`);
+        },
+      });
+
+      const result = await zhipinSendPreparedReply.execute(
+        {
+          preparedReplyId: saved.preparedReplyId,
+          variantDecision: {
+            chosenOption: "option_2",
+            reason: "改写稿更聚焦",
+          },
+        },
+        createTestContext(),
+      );
+
+      assert.equal(result.success, true);
+      assert.equal(result.feedbackStatus, "failed");
+      assert.match(result.feedbackError ?? "", new RegExp(`reply feedback ${String(statusCode)}`));
+      assert.deepEqual(sentEnvelopes, ["payload.revised.signature"]);
+    }
+  });
+
   it("returns needs_confirmation without consuming the prepared reply when policy is confirm", async () => {
     const sentEnvelopes: string[] = [];
     const saved = saveTestPreparedReply("你好");
@@ -234,6 +425,64 @@ describe("zhipin_send_prepared_reply", () => {
     });
   });
 
+  it("does not allow a dual-draft tool approval for a different chosen option", async () => {
+    const sentEnvelopes: string[] = [];
+    const saved = saveDualPreparedReply();
+    setBrowserUsePolicy({
+      approvalTtlMs: 300_000,
+      tools: {
+        zhipin_send_prepared_reply: { policy: "confirm" },
+      },
+    });
+    setZhipinSendPreparedReplyDepsForTests({
+      sendSignedZhipinReply: async (input) => {
+        sentEnvelopes.push(input.signedEnvelope);
+        return { success: true, sentMessage: "sent" };
+      },
+      postReplyFeedback: async (body) => ({ status: "accepted", groupId: body.groupId }),
+    });
+
+    let approvalId = "";
+    await assert.rejects(
+      zhipinSendPreparedReply.execute(
+        {
+          preparedReplyId: saved.preparedReplyId,
+          variantDecision: {
+            chosenOption: "option_1",
+            reason: "首稿够好",
+          },
+        },
+        createTestContext(),
+      ),
+      (error) => {
+        approvalId = readApprovalIdFromError(error);
+        return true;
+      },
+    );
+
+    await assert.rejects(
+      zhipinSendPreparedReply.execute(
+        {
+          preparedReplyId: saved.preparedReplyId,
+          variantDecision: {
+            chosenOption: "option_2",
+            reason: "改写稿更好",
+          },
+          toolActionApproval: { id: approvalId },
+        },
+        createTestContext(),
+      ),
+      (error) => {
+        assert.ok(error instanceof StructuredToolError);
+        assert.equal(error.payload.code, "needs_confirmation");
+        return true;
+      },
+    );
+
+    assert.deepEqual(sentEnvelopes, []);
+    assert.equal(consumePreparedReply(saved.preparedReplyId).ok, true);
+  });
+
   it("does not allow a tool approval for a different prepared reply", async () => {
     const sentEnvelopes: string[] = [];
     const first = saveTestPreparedReply("第一条");
@@ -280,6 +529,63 @@ describe("zhipin_send_prepared_reply", () => {
 
     assert.deepEqual(sentEnvelopes, []);
     assert.equal(consumePreparedReply(second.preparedReplyId).ok, true);
+  });
+
+  it("does not allow a dual-draft browser action approval for a different chosen option", async () => {
+    const sentEnvelopes: string[] = [];
+    const saved = saveDualPreparedReply();
+    setRuntimeStateForTests({ runtime: createRuntime("confirm") });
+    setZhipinSendPreparedReplyDepsForTests({
+      sendSignedZhipinReply: async (input) => {
+        sentEnvelopes.push(input.signedEnvelope);
+        return { success: true, sentMessage: "sent" };
+      },
+      postReplyFeedback: async (body) => ({ status: "accepted", groupId: body.groupId }),
+    });
+
+    let approvalId = "";
+    await assert.rejects(
+      zhipinSendPreparedReply.execute(
+        {
+          preparedReplyId: saved.preparedReplyId,
+          variantDecision: {
+            chosenOption: "option_1",
+            reason: "首稿够好",
+          },
+        },
+        createTestContext(),
+      ),
+      (error) => {
+        assert.ok(error instanceof StructuredToolError);
+        assert.equal(error.payload.code, "needs_confirmation");
+        assert.equal(error.payload.details?.["reason"], "action_policy_confirm");
+        approvalId = readApprovalIdFromError(error);
+        return true;
+      },
+    );
+
+    await assert.rejects(
+      zhipinSendPreparedReply.execute(
+        {
+          preparedReplyId: saved.preparedReplyId,
+          variantDecision: {
+            chosenOption: "option_2",
+            reason: "改写稿更好",
+          },
+          browserActionApproval: { id: approvalId },
+        },
+        createTestContext(),
+      ),
+      (error) => {
+        assert.ok(error instanceof StructuredToolError);
+        assert.equal(error.payload.code, "needs_confirmation");
+        assert.equal(error.payload.details?.["reason"], "action_policy_confirm");
+        return true;
+      },
+    );
+
+    assert.deepEqual(sentEnvelopes, []);
+    assert.equal(consumePreparedReply(saved.preparedReplyId).ok, true);
   });
 
   it("denies a prepared reply without consuming it when policy is deny", async () => {

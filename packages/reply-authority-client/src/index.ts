@@ -194,6 +194,80 @@ export const PrepareReplyContextResponseSchema = z.object({
   status: z.enum(PrepareReplyContextStatusValues),
 });
 
+export const ReplyGateAdvisoryCodeValues = [
+  "too_many_questions",
+  "audit_tone",
+  "reply_overpacked",
+  "off_axis_fact_disclosure",
+] as const;
+
+export const ReplyVariantKindValues = ["draft", "revised"] as const;
+
+export const ReplyFeedbackStatusValues = ["accepted", "duplicate"] as const;
+
+export const ReplyGateAdvisoryCodeSchema = z.enum(ReplyGateAdvisoryCodeValues);
+
+export const ReplyVariantKindSchema = z.enum(ReplyVariantKindValues);
+
+export const ReplyVariantItemSchema = z.object({
+  variant: ReplyVariantKindSchema,
+  suggestedReply: z.string(),
+  signedEnvelope: z.string().min(1),
+  envelopeExp: z.number().int().min(0),
+});
+
+export const ReplyVariantFindingSchema = z.object({
+  code: ReplyGateAdvisoryCodeSchema,
+  description: z.string().min(1),
+});
+
+export const ReplyVariantsSchema = z.object({
+  groupId: z.string().min(1),
+  recommended: z.literal("draft"),
+  items: z.array(ReplyVariantItemSchema).min(2).max(2),
+  findings: z.array(ReplyVariantFindingSchema).min(1),
+  rubricVersion: z.string().min(1),
+  rubricHash: z
+    .string()
+    .min(1)
+    .regex(/^sha256:/),
+});
+
+const ReplyFeedbackTargetSchema = z.object({
+  platform: z.literal("zhipin"),
+  tenantId: z.string().min(1),
+  conversationId: z.string().min(1),
+});
+
+export const ReplyFeedbackBodySchema = z.object({
+  groupId: z.string().min(1),
+  target: ReplyFeedbackTargetSchema,
+  chosenVariant: ReplyVariantKindSchema,
+  confirmedFindingCodes: z.array(ReplyGateAdvisoryCodeSchema).optional(),
+  reason: z.string().min(1).max(500),
+  rubricVersion: z.string().min(1),
+  rubricHash: z
+    .string()
+    .min(1)
+    .regex(/^sha256:/),
+  judgeModel: z.string().min(1).optional(),
+});
+
+export const ReplyFeedbackResponseSchema = z.object({
+  status: z.enum(ReplyFeedbackStatusValues),
+  groupId: z.string().min(1),
+});
+
+export const ReplyFeedbackRubricResponseSchema = z.object({
+  rubricVersion: z.string().min(1),
+  rubricHash: z
+    .string()
+    .min(1)
+    .regex(/^sha256:/),
+  rubric: z.record(z.unknown()),
+  advisoryFindings: z.array(ReplyVariantFindingSchema),
+});
+
 export const GenerateSignedReplyResponseSchema = z.object({
   suggestedReply: z.string(),
   signedEnvelope: z.string().describe("Reply Authority Service v2 紧凑签名信封"),
@@ -205,6 +279,7 @@ export const GenerateSignedReplyResponseSchema = z.object({
   shouldExchangeWechat: z.boolean().optional(),
   error: z.string().optional(),
   diagnostics: z.record(z.unknown()).optional(),
+  replyVariants: ReplyVariantsSchema.optional(),
 });
 
 export const ResolveRecruiterBindingRequestSchema = z.object({
@@ -252,6 +327,7 @@ export const ReplyStreamFinalEventSchema = ReplyStreamEventSchema.extend({
   shouldExchangeWechat: z.boolean().optional(),
   error: z.string().optional(),
   diagnostics: z.record(z.unknown()).optional(),
+  replyVariants: ReplyVariantsSchema.optional(),
 });
 
 export const LocationResolvedInquiryTypeValues = [
@@ -329,6 +405,14 @@ export type PrepareReplyContextInput = z.infer<typeof PrepareReplyContextInputSc
 export type PrepareReplyContextRequest = z.infer<typeof PrepareReplyContextRequestSchema>;
 export type PrepareReplyContextStatus = (typeof PrepareReplyContextStatusValues)[number];
 export type PrepareReplyContextResponse = z.infer<typeof PrepareReplyContextResponseSchema>;
+export type ReplyGateAdvisoryCode = z.infer<typeof ReplyGateAdvisoryCodeSchema>;
+export type ReplyVariantKind = z.infer<typeof ReplyVariantKindSchema>;
+export type ReplyVariantItem = z.infer<typeof ReplyVariantItemSchema>;
+export type ReplyVariantFinding = z.infer<typeof ReplyVariantFindingSchema>;
+export type ReplyVariants = z.infer<typeof ReplyVariantsSchema>;
+export type ReplyFeedbackBody = z.infer<typeof ReplyFeedbackBodySchema>;
+export type ReplyFeedbackResponse = z.infer<typeof ReplyFeedbackResponseSchema>;
+export type ReplyFeedbackRubricResponse = z.infer<typeof ReplyFeedbackRubricResponseSchema>;
 export type ResolveRecruiterBindingRequest = z.infer<typeof ResolveRecruiterBindingRequestSchema>;
 export type ResolveRecruiterBindingResponse = z.infer<typeof ResolveRecruiterBindingResponseSchema>;
 export type ReplyStreamEvent = z.infer<typeof ReplyStreamEventSchema>;
@@ -491,6 +575,36 @@ async function postJson(
       method: "POST",
       headers: buildHeaders(config, requestContext),
       body: JSON.stringify(body),
+      signal: requestContext.signal,
+    });
+
+    const payload = await parseJsonResponse(response);
+    if (!response.ok) {
+      const failure = new Error(parseErrorMessage(response.status, payload));
+      throw new ReplyAuthorityRequestError(failure.message, {
+        meta,
+        statusCode: response.status,
+        cause: failure,
+      });
+    }
+
+    return payload;
+  } catch (error) {
+    throw wrapReplyAuthorityRequestError(error, meta);
+  }
+}
+
+async function getJson(
+  config: ResolvedReplyAuthorityConfig,
+  pathname: string,
+  requestContext: ReplyAuthorityRequestContext,
+): Promise<unknown> {
+  const meta = buildRequestMeta(config, pathname, requestContext);
+
+  try {
+    const response = await fetch(meta.url, {
+      method: "GET",
+      headers: buildHeaders(config, requestContext),
       signal: requestContext.signal,
     });
 
@@ -692,6 +806,53 @@ export async function prepareReplyContext(
       payload,
       buildRequestMeta(config, "prepare-reply-context", requestContext),
       "Reply Authority Service 回复上下文预热",
+    );
+  } finally {
+    clear();
+  }
+}
+
+export async function fetchReplyFeedbackRubric(
+  input: {
+    readonly tenantId: string;
+    readonly rubricVersion: string;
+  },
+  configInput?: ReplyAuthorityConfig,
+): Promise<ReplyFeedbackRubricResponse> {
+  const config = loadReplyAuthorityConfig(configInput);
+  const { context: requestContext, clear } = createRequestContext(config.timeoutMs);
+  const tenantId = encodeURIComponent(input.tenantId);
+  const rubricVersion = encodeURIComponent(input.rubricVersion);
+  const pathname = `tenants/${tenantId}/reply-feedback/rubrics/${rubricVersion}`;
+
+  try {
+    const payload = await getJson(config, pathname, requestContext);
+    return parseReplyAuthorityPayload(
+      ReplyFeedbackRubricResponseSchema,
+      payload,
+      buildRequestMeta(config, pathname, requestContext),
+      "Reply Authority Service judge rubric",
+    );
+  } finally {
+    clear();
+  }
+}
+
+export async function postReplyFeedback(
+  body: ReplyFeedbackBody,
+  configInput?: ReplyAuthorityConfig,
+): Promise<ReplyFeedbackResponse> {
+  const config = loadReplyAuthorityConfig(configInput);
+  const { context: requestContext, clear } = createRequestContext(config.timeoutMs);
+
+  try {
+    const request = ReplyFeedbackBodySchema.parse(body);
+    const payload = await postJson(config, "reply-feedback", request, requestContext);
+    return parseReplyAuthorityPayload(
+      ReplyFeedbackResponseSchema,
+      payload,
+      buildRequestMeta(config, "reply-feedback", requestContext),
+      "Reply Authority Service reply feedback",
     );
   } finally {
     clear();

@@ -135,7 +135,8 @@ orchestrator task/thread
 Rules:
 
 - Read the target agent's `SKILL.md` for the exact routing field name and fallback behavior.
-- If a target browser agent exposes `browserInstance`, include it in every tool call for that browser workflow, including no-input tools via `--input-json`.
+- If a target browser agent exposes `browserInstance`, include it in every browser-runtime tool call for that browser workflow, including no-input tools via `--input-json`.
+- If the target agent documents a helper or judge tool as global/no-runtime, follow that tool's exact schema and do not force `browserInstance` into the input. Keep the prepared artifact tied to the workflow that created it, then resume browser-runtime calls with the original routing key.
 - Do not rely on a global default when operating multiple accounts concurrently; defaults are only safe for single-account or deliberately pinned deployments.
 - Keep routing keys out of unstructured prompts. Put them in the JSON input object passed to `roll run`.
 - Treat agent-returned refs, page ids, prepared reply ids, and session state as scoped to the routing key that produced them.
@@ -153,9 +154,29 @@ roll run browser-use-agent zhipin_read_messages \
 For multi-worker orchestration, assign one worker to one routing key:
 
 ```text
-worker A -> browserInstance=boss-a -> all browser-use calls include boss-a
-worker B -> browserInstance=boss-b -> all browser-use calls include boss-b
+worker A -> browserInstance=boss-a -> all browser-runtime browser-use calls include boss-a
+worker B -> browserInstance=boss-b -> all browser-runtime browser-use calls include boss-b
 ```
+
+## Prepared Artifacts And Variant Decisions
+
+Some agents hide sensitive send authorization inside an opaque prepared artifact and may return
+neutral alternatives that require a separate decision before sending.
+
+Rules:
+
+- Prefer the opaque sender contract documented by the target agent, such as `preparedReplyId`, over
+  passing low-level envelopes or raw generated text through the orchestrator.
+- If a tool returns neutral alternatives such as `replyVariantSelection`, do not send immediately
+  unless the target agent documents a compatible default. Run the documented judge/decision helper or
+  choose an option explicitly, then pass the resulting decision object to the sender tool.
+- Do not infer hidden labels behind neutral options. Treat `option_1` / `option_2` style labels as the
+  only orchestrator-visible choices.
+- Retry confirmation-gated sends with the same routing key, prepared artifact, chosen option, reason,
+  and approval object. Do not reuse an approval after changing the prepared artifact or decision.
+- If a generator agent still returns a lower-level envelope, use it only when the target agent's own
+  `SKILL.md` says that is the intended sender contract. For browser-mediated sends, prefer the
+  browser agent's prepared-send flow so sensitive envelopes stay inside that agent.
 
 ## Browser Runtime Lifecycle
 

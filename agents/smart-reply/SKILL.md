@@ -116,6 +116,7 @@ npm 包名：`@roll-agent/smart-reply-agent`
 - 实际回复生成、reply-policy、FactGate、ReplyGate、年龄校验都在云端执行
 - `modelConfig.reasoning` 会透传给 Reply Authority Service；raw reasoning/thinking 文本不会作为业务输出返回
 - 返回的 `signedEnvelope` 为 v2 信封，已绑定 `tenantId + recruiterBinding + conversationId + candidateId`；浏览器发送主链路应优先使用 `browser-use-agent.zhipin_generate_reply_preview(...) -> zhipin_send_prepared_reply(preparedReplyId)`
+- 若服务端返回 `replyVariants`，`generate_reply` 只做协议透传；它不会隐藏 `signedEnvelope`，也不会执行 judge / `/reply-feedback`。需要双稿闭环时，主链路必须改用 `browser-use-agent.zhipin_generate_reply_preview(...) -> zhipin_judge_prepared_reply(...) -> zhipin_send_prepared_reply(...)`
 - 调用失败时抛 `ReplyAuthorityRequestError`，携带 `meta: {url, timeoutMs, requestId}` 与 `Error.cause` 链。通过 `roll run` 运行时 stderr 会展开 `cause: ...` 行用于定位；透传的 `x-request-id` 可跨服务端追踪
 - `diagnostics.brandResolutionSource="none"`、`diagnostics.resolvedBrand=""`、`diagnostics.ageGate.status="unknown"` 都是合法服务端结果，不代表 tool 调用失败。是否补问用户或转人工，是 orch 层策略，不是本 Agent 的重试条件
 
@@ -141,8 +142,8 @@ npm 包名：`@roll-agent/smart-reply-agent`
 4. 调用 `smart-reply-agent.generate_reply(..., target)`：
    - 直接模式：传 `target.tenantId + target.recruiterBinding`
    - 代理模式：只传 `target.recruiterUsername=username`，由 smart-reply 代调用 `POST /resolve-recruiter-binding`
-5. `smart-reply-agent.generate_reply(..., target)` 获取 `suggestedReply + signedEnvelope`
-6. 若需要在 BOSS 浏览器中展示生成过程并发送，优先改用 `browser-use-agent.zhipin_generate_reply_preview(...) -> zhipin_send_prepared_reply(preparedReplyId)`，不要把 `signedEnvelope` 作为跨 Agent 编排参数传递
+5. `smart-reply-agent.generate_reply(..., target)` 获取 `suggestedReply + signedEnvelope`，并在服务端开启双稿时透传 `replyVariants`
+6. 若需要在 BOSS 浏览器中展示生成过程、隐藏 `signedEnvelope`、执行默认 judge 或回传 `/reply-feedback`，优先改用 `browser-use-agent.zhipin_generate_reply_preview(...) -> zhipin_judge_prepared_reply(...) -> zhipin_send_prepared_reply(preparedReplyId, variantDecision?)`，不要把 `signedEnvelope` 作为跨 Agent 编排参数传递
 
 ## Recommended roll.config.yaml
 

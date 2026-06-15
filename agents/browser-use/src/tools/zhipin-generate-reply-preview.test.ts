@@ -249,6 +249,110 @@ async function* createMockStream(): AsyncGenerator<ReplyStreamEvent> {
   };
 }
 
+async function* createDualDraftMockStream(): AsyncGenerator<ReplyStreamEvent> {
+  yield {
+    type: "stream.started",
+    sequence: 1,
+    timestamp: "2026-05-11T00:00:00.000Z",
+    requestId: "req-1",
+    tenantId: "tenant-001",
+  };
+  yield {
+    type: "phase.started",
+    sequence: 2,
+    timestamp: "2026-05-11T00:00:01.000Z",
+    phase: "dual_draft",
+  };
+  yield {
+    type: "final",
+    sequence: 3,
+    timestamp: "2026-05-11T00:00:05.000Z",
+    safeToSend: true,
+    suggestedReply: "您好，薪资可以详聊。",
+    signedEnvelope: "payload.draft.signature",
+    envelopeExp: 4_102_444_800,
+    confidence: 0.9,
+    stage: "job_consultation",
+    replyPolicySource: "file",
+    latencyMs: 3_210,
+    replyVariants: {
+      groupId: "rvg_abc123",
+      recommended: "draft",
+      items: [
+        {
+          variant: "draft",
+          suggestedReply: "您好，薪资可以详聊。",
+          signedEnvelope: "payload.draft.signature",
+          envelopeExp: 4_102_444_800,
+        },
+        {
+          variant: "revised",
+          suggestedReply: "您好，我可以先帮您确认薪资范围。",
+          signedEnvelope: "payload.revised.signature",
+          envelopeExp: 4_102_444_800,
+        },
+      ],
+      findings: [
+        {
+          code: "off_axis_fact_disclosure",
+          description: "首稿包含候选人未询问的信息。",
+        },
+      ],
+      rubricVersion: "reply-quality-v1",
+      rubricHash: "sha256:test",
+    },
+  };
+}
+
+async function* createDuplicateVariantMockStream(): AsyncGenerator<ReplyStreamEvent> {
+  yield {
+    type: "stream.started",
+    sequence: 1,
+    timestamp: "2026-05-11T00:00:00.000Z",
+    requestId: "req-1",
+    tenantId: "tenant-001",
+  };
+  yield {
+    type: "final",
+    sequence: 2,
+    timestamp: "2026-05-11T00:00:05.000Z",
+    safeToSend: true,
+    suggestedReply: "您好，薪资可以详聊。",
+    signedEnvelope: "payload.draft.signature",
+    envelopeExp: 4_102_444_800,
+    confidence: 0.9,
+    stage: "job_consultation",
+    replyPolicySource: "file",
+    latencyMs: 3_210,
+    replyVariants: {
+      groupId: "rvg_abc123",
+      recommended: "draft",
+      items: [
+        {
+          variant: "draft",
+          suggestedReply: "您好，薪资可以详聊。",
+          signedEnvelope: "payload.draft.signature",
+          envelopeExp: 4_102_444_800,
+        },
+        {
+          variant: "draft",
+          suggestedReply: "您好，薪资也可以详聊。",
+          signedEnvelope: "payload.duplicate-draft.signature",
+          envelopeExp: 4_102_444_800,
+        },
+      ],
+      findings: [
+        {
+          code: "off_axis_fact_disclosure",
+          description: "首稿包含候选人未询问的信息。",
+        },
+      ],
+      rubricVersion: "reply-quality-v1",
+      rubricHash: "sha256:test",
+    },
+  };
+}
+
 afterEach(() => {
   setZhipinGenerateReplyPreviewDepsForTests(undefined);
   resetPreparedReplyStoreForTests();
@@ -315,6 +419,203 @@ describe("zhipin_generate_reply_preview", () => {
     if (consumed.ok) {
       assert.equal(consumed.record.signedEnvelope, "payload.signature");
       assert.equal(consumed.record.unreadCountBeforeReply, 2);
+    }
+  });
+
+  it("stores dual-draft variants internally while exposing only neutral options", async () => {
+    const calls: string[] = [];
+
+    setZhipinGenerateReplyPreviewDepsForTests({
+      openNativePagePort: async () => createNativePage(calls),
+      createNativeVisualActivitySession: () => createNoopSession(calls),
+      createReplyPreviewVisualSession: () => createPreviewSession(calls),
+      streamGenerateSignedReply: () => createDualDraftMockStream(),
+      fetchReplyFeedbackRubric: async () => ({
+        rubricVersion: "reply-quality-v1",
+        rubricHash: "sha256:test",
+        rubric: {
+          priorities: ["stay_on_axis"],
+        },
+        advisoryFindings: [
+          {
+            code: "off_axis_fact_disclosure",
+            description: "首稿包含候选人未询问的信息。",
+          },
+        ],
+      }),
+    });
+
+    const result = await zhipinGenerateReplyPreview.execute(
+      { conversationId: "conv-1", maxMessages: 20 },
+      createTestContext(),
+    );
+
+    assert.equal(result.success, true);
+    assert.equal(result.replyVariantSelection?.groupId, "rvg_abc123");
+    assert.deepEqual(result.replyVariantSelection?.options.map((option) => option.option).sort(), [
+      "option_1",
+      "option_2",
+    ]);
+    assert.equal(JSON.stringify(result).includes("signedEnvelope"), false);
+    assert.equal(JSON.stringify(result).includes("payload.draft.signature"), false);
+    assert.equal(JSON.stringify(result).includes('"draft"'), false);
+    assert.equal(JSON.stringify(result).includes('"revised"'), false);
+
+    const consumed = consumePreparedReply(result.preparedReplyId ?? "", 1_800_000_000);
+    assert.equal(consumed.ok, true);
+    if (consumed.ok) {
+      assert.equal(consumed.record.variantGroup?.groupId, "rvg_abc123");
+      assert.deepEqual(
+        consumed.record.variantGroup?.options.map((option) => option.variant).sort(),
+        ["draft", "revised"],
+      );
+      assert.equal(
+        consumed.record.variantGroup?.options.some(
+          (option) => option.signedEnvelope === "payload.revised.signature",
+        ),
+        true,
+      );
+    }
+  });
+
+  it("uses the injected random source to assign neutral option order", async () => {
+    const cases = [
+      {
+        randomValue: 0.49,
+        expectedFirstVariant: "revised",
+        expectedFirstReply: "您好，我可以先帮您确认薪资范围。",
+      },
+      {
+        randomValue: 0.5,
+        expectedFirstVariant: "draft",
+        expectedFirstReply: "您好，薪资可以详聊。",
+      },
+    ] as const;
+
+    for (const scenario of cases) {
+      resetPreparedReplyStoreForTests();
+      const calls: string[] = [];
+
+      setZhipinGenerateReplyPreviewDepsForTests({
+        openNativePagePort: async () => createNativePage(calls),
+        createNativeVisualActivitySession: () => createNoopSession(calls),
+        createReplyPreviewVisualSession: () => createPreviewSession(calls),
+        streamGenerateSignedReply: () => createDualDraftMockStream(),
+        fetchReplyFeedbackRubric: async () => ({
+          rubricVersion: "reply-quality-v1",
+          rubricHash: "sha256:test",
+          rubric: {
+            priorities: ["stay_on_axis"],
+          },
+          advisoryFindings: [
+            {
+              code: "off_axis_fact_disclosure",
+              description: "首稿包含候选人未询问的信息。",
+            },
+          ],
+        }),
+        random: () => scenario.randomValue,
+      });
+
+      const result = await zhipinGenerateReplyPreview.execute(
+        { conversationId: "conv-1", maxMessages: 20 },
+        createTestContext(),
+      );
+
+      assert.equal(result.success, true);
+      assert.equal(result.replyVariantSelection?.options[0]?.option, "option_1");
+      assert.equal(
+        result.replyVariantSelection?.options[0]?.suggestedReply,
+        scenario.expectedFirstReply,
+      );
+
+      const consumed = consumePreparedReply(result.preparedReplyId ?? "", 1_800_000_000);
+      assert.equal(consumed.ok, true);
+      if (consumed.ok) {
+        assert.equal(
+          consumed.record.variantGroup?.options[0]?.variant,
+          scenario.expectedFirstVariant,
+        );
+      }
+    }
+  });
+
+  it("falls back to the top-level draft when dual-draft items do not contain draft and revised", async () => {
+    const calls: string[] = [];
+
+    setZhipinGenerateReplyPreviewDepsForTests({
+      openNativePagePort: async () => createNativePage(calls),
+      createNativeVisualActivitySession: () => createNoopSession(calls),
+      createReplyPreviewVisualSession: () => createPreviewSession(calls),
+      streamGenerateSignedReply: () => createDuplicateVariantMockStream(),
+      fetchReplyFeedbackRubric: async () => ({
+        rubricVersion: "reply-quality-v1",
+        rubricHash: "sha256:test",
+        rubric: {
+          priorities: ["stay_on_axis"],
+        },
+        advisoryFindings: [
+          {
+            code: "off_axis_fact_disclosure",
+            description: "首稿包含候选人未询问的信息。",
+          },
+        ],
+      }),
+    });
+
+    const result = await zhipinGenerateReplyPreview.execute(
+      { conversationId: "conv-1", maxMessages: 20 },
+      createTestContext(),
+    );
+
+    assert.equal(result.success, true);
+    assert.equal(result.replyVariantSelection, undefined);
+
+    const consumed = consumePreparedReply(result.preparedReplyId ?? "", 1_800_000_000);
+    assert.equal(consumed.ok, true);
+    if (consumed.ok) {
+      assert.equal(consumed.record.variantGroup, undefined);
+      assert.equal(consumed.record.signedEnvelope, "payload.draft.signature");
+    }
+  });
+
+  it("falls back to the top-level draft when the feedback rubric hash mismatches", async () => {
+    const calls: string[] = [];
+
+    setZhipinGenerateReplyPreviewDepsForTests({
+      openNativePagePort: async () => createNativePage(calls),
+      createNativeVisualActivitySession: () => createNoopSession(calls),
+      createReplyPreviewVisualSession: () => createPreviewSession(calls),
+      streamGenerateSignedReply: () => createDualDraftMockStream(),
+      fetchReplyFeedbackRubric: async () => ({
+        rubricVersion: "reply-quality-v1",
+        rubricHash: "sha256:other",
+        rubric: {
+          priorities: ["stay_on_axis"],
+        },
+        advisoryFindings: [
+          {
+            code: "off_axis_fact_disclosure",
+            description: "首稿包含候选人未询问的信息。",
+          },
+        ],
+      }),
+    });
+
+    const result = await zhipinGenerateReplyPreview.execute(
+      { conversationId: "conv-1", maxMessages: 20 },
+      createTestContext(),
+    );
+
+    assert.equal(result.success, true);
+    assert.equal(result.suggestedReply, "您好，薪资可以详聊。");
+    assert.equal(result.replyVariantSelection, undefined);
+
+    const consumed = consumePreparedReply(result.preparedReplyId ?? "", 1_800_000_000);
+    assert.equal(consumed.ok, true);
+    if (consumed.ok) {
+      assert.equal(consumed.record.variantGroup, undefined);
+      assert.equal(consumed.record.signedEnvelope, "payload.draft.signature");
     }
   });
 

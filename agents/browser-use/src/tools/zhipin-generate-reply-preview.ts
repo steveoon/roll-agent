@@ -1,5 +1,6 @@
 import { defineTool } from "@roll-agent/sdk";
 import {
+  fetchReplyFeedbackRubric,
   GenerateSignedReplyResponseSchema,
   ReasoningConfigSchema,
   ReplyStreamFinalEventSchema,
@@ -7,7 +8,9 @@ import {
   streamGenerateSignedReply,
   type GenerateReplyToolInput,
   type ReasoningConfig,
+  type ReplyFeedbackRubricResponse,
   type ReplyStreamEvent,
+  type ReplyVariants,
 } from "@roll-agent/reply-authority-client";
 import { z } from "zod";
 import { NativeVisualActivitySession } from "../native-visual-activity-session.ts";
@@ -22,8 +25,10 @@ import type {
 } from "../pages/zhipin/native-page.ts";
 import { pickBestUsername } from "../pages/zhipin/username.ts";
 import {
+  PreparedReplyOptionValues,
   savePreparedReply,
   type PreparedReplyRecord,
+  type PreparedReplyVariantGroup,
 } from "../reply-authority/prepared-reply-store.ts";
 import { NativeReplyPreviewVisualSession } from "../reply-authority/reply-preview-visual.ts";
 import { maybeBringToFront } from "../browser-foreground.ts";
@@ -65,6 +70,32 @@ const OutputSchema = z.object({
     .boolean()
     .optional()
     .describe("服务端事实/质量门调整过终稿时为 true，此时最终回复可能与流式草稿不一致"),
+  replyVariantSelection: z
+    .object({
+      groupId: z.string().min(1),
+      options: z
+        .array(
+          z.object({
+            option: z.enum(PreparedReplyOptionValues),
+            suggestedReply: z.string(),
+            expiresAt: z.number().int().min(0),
+          }),
+        )
+        .min(2)
+        .max(2),
+      findings: z.array(
+        z.object({
+          code: z.string().min(1),
+          description: z.string().min(1),
+        }),
+      ),
+      rubricVersion: z.string().min(1),
+      rubricHash: z.string().min(1),
+    })
+    .optional()
+    .describe(
+      "双稿选择信息；仅暴露中性 option_1/option_2、文本与 rubric 元数据，不暴露 draft/revised 或 signedEnvelope。",
+    ),
   error: z.string().optional(),
 });
 
@@ -75,6 +106,7 @@ const PHASE_LABELS: Readonly<Record<string, string>> = {
   context_building: "准备业务上下文",
   qualification_check: "检查候选人资格",
   reply_generation: "生成回复草稿",
+  dual_draft: "生成可选改写稿",
   fact_gate: "检查事实安全",
   reply_gate: "检查回复策略",
   signing: "签发安全信封",
@@ -99,7 +131,9 @@ type ZhipinGenerateReplyPreviewDeps = {
     page: ZhipinNativePagePort,
   ) => ReplyPreviewVisualSessionLike;
   readonly streamGenerateSignedReply: typeof streamGenerateSignedReply;
+  readonly fetchReplyFeedbackRubric: typeof fetchReplyFeedbackRubric;
   readonly savePreparedReply: typeof savePreparedReply;
+  readonly random: () => number;
 };
 
 let zhipinGenerateReplyPreviewDepsOverride: Partial<ZhipinGenerateReplyPreviewDeps> | undefined;
@@ -110,7 +144,9 @@ function getZhipinGenerateReplyPreviewDeps(): ZhipinGenerateReplyPreviewDeps {
     createNativeVisualActivitySession: (page) => new NativeVisualActivitySession(page),
     createReplyPreviewVisualSession: (page) => new NativeReplyPreviewVisualSession(page),
     streamGenerateSignedReply,
+    fetchReplyFeedbackRubric,
     savePreparedReply,
+    random: Math.random,
     ...zhipinGenerateReplyPreviewDepsOverride,
   };
 }
@@ -332,6 +368,85 @@ function toOutput(
     ...(record.requestId !== undefined ? { requestId: record.requestId } : {}),
     ...(timing !== undefined ? { timing } : {}),
     ...(gateRewritten ? { gateRewritten } : {}),
+    ...(record.variantGroup !== undefined
+      ? {
+          replyVariantSelection: {
+            groupId: record.variantGroup.groupId,
+            options: record.variantGroup.options.map((option) => ({
+              option: option.option,
+              suggestedReply: option.suggestedReply,
+              expiresAt: option.envelopeExp,
+            })),
+            findings: record.variantGroup.findings.map((finding) => ({
+              code: finding.code,
+              description: finding.description,
+            })),
+            rubricVersion: record.variantGroup.rubricVersion,
+            rubricHash: record.variantGroup.rubricHash,
+          },
+        }
+      : {}),
+  };
+}
+
+function reorderReplyVariants(
+  replyVariants: ReplyVariants,
+  random: () => number,
+): ReplyVariants["items"] {
+  const first = replyVariants.items[0];
+  const second = replyVariants.items[1];
+  if (first === undefined || second === undefined) {
+    return replyVariants.items;
+  }
+  return random() < 0.5 ? [second, first] : [first, second];
+}
+
+function buildVariantGroup(input: {
+  readonly replyVariants: ReplyVariants;
+  readonly rubric: ReplyFeedbackRubricResponse;
+  readonly tenantId: string;
+  readonly conversationId: string;
+  readonly random: () => number;
+}): PreparedReplyVariantGroup | undefined {
+  if (
+    input.rubric.rubricVersion !== input.replyVariants.rubricVersion ||
+    input.rubric.rubricHash !== input.replyVariants.rubricHash
+  ) {
+    return undefined;
+  }
+
+  const orderedItems = reorderReplyVariants(input.replyVariants, input.random);
+  if (orderedItems.length !== 2) {
+    return undefined;
+  }
+  const variantKinds = new Set(orderedItems.map((item) => item.variant));
+  if (!variantKinds.has("draft") || !variantKinds.has("revised")) {
+    return undefined;
+  }
+
+  const options = orderedItems.map((item, index) => ({
+    option: PreparedReplyOptionValues[index] ?? "option_1",
+    variant: item.variant,
+    suggestedReply: item.suggestedReply,
+    signedEnvelope: item.signedEnvelope,
+    envelopeExp: item.envelopeExp,
+  }));
+  const recommendedOption =
+    options.find((option) => option.variant === input.replyVariants.recommended)?.option ??
+    "option_1";
+
+  return {
+    groupId: input.replyVariants.groupId,
+    options,
+    findings: input.replyVariants.findings,
+    rubricVersion: input.replyVariants.rubricVersion,
+    rubricHash: input.replyVariants.rubricHash,
+    target: {
+      platform: "zhipin",
+      tenantId: input.tenantId,
+      conversationId: input.conversationId,
+    },
+    recommendedOption,
   };
 }
 
@@ -473,6 +588,7 @@ export const zhipinGenerateReplyPreview = defineTool({
 
       let draftText = "";
       let requestId: string | undefined;
+      let tenantId: string | undefined;
       let preparedRecord: PreparedReplyRecord | undefined;
       let timingSummary:
         | {
@@ -489,6 +605,7 @@ export const zhipinGenerateReplyPreview = defineTool({
       for await (const event of deps.streamGenerateSignedReply(replyInput)) {
         if (event.type === "stream.started") {
           requestId = readEventString(event, "requestId");
+          tenantId = readEventString(event, "tenantId");
         }
 
         if (event.type === "phase.completed") {
@@ -541,6 +658,11 @@ export const zhipinGenerateReplyPreview = defineTool({
           const totalLatencyMs = Math.max(0, Math.round(Date.now() - previewStartedAtMs));
           const replyLatencyMs =
             finalReply.latencyMs !== undefined ? Math.round(finalReply.latencyMs) : undefined;
+          const expiresAt =
+            finalReply.replyVariants?.items.reduce(
+              (minExpiresAt, item) => Math.min(minExpiresAt, item.envelopeExp),
+              finalReply.envelopeExp,
+            ) ?? finalReply.envelopeExp;
           const preparedContextHit = isPreparedContextHit({
             turnPlanningLatencyMs,
             contextBuildingLatencyMs,
@@ -552,14 +674,50 @@ export const zhipinGenerateReplyPreview = defineTool({
             ...(contextBuildingLatencyMs !== undefined ? { contextBuildingLatencyMs } : {}),
             preparedContextHit,
           };
+          let variantGroup: PreparedReplyVariantGroup | undefined;
+          if (finalReply.replyVariants !== undefined) {
+            if (tenantId === undefined) {
+              ctx.logger.warn(
+                "Reply Authority returned replyVariants without stream.started.tenantId; " +
+                  "falling back to single-draft prepared reply.",
+              );
+            } else {
+              try {
+                const rubric = await deps.fetchReplyFeedbackRubric({
+                  tenantId,
+                  rubricVersion: finalReply.replyVariants.rubricVersion,
+                });
+                variantGroup = buildVariantGroup({
+                  replyVariants: finalReply.replyVariants,
+                  rubric,
+                  tenantId,
+                  conversationId: selectedTarget.conversationId,
+                  random: deps.random,
+                });
+                if (variantGroup === undefined) {
+                  ctx.logger.warn(
+                    "Reply feedback rubric mismatch or invalid variant shape; " +
+                      "falling back to single-draft prepared reply.",
+                  );
+                }
+              } catch (error) {
+                ctx.logger.warn(
+                  `Failed to fetch reply feedback rubric; falling back to single draft. ${
+                    error instanceof Error ? error.message : String(error)
+                  }`,
+                );
+              }
+            }
+          }
           preparedRecord = deps.savePreparedReply({
             signedEnvelope: finalReply.signedEnvelope,
             suggestedReply: finalReply.suggestedReply,
             stage: finalReply.stage,
             confidence: finalReply.confidence,
-            expiresAt: finalReply.envelopeExp,
+            expiresAt,
             unreadCountBeforeReply,
             ...(requestId !== undefined ? { requestId } : {}),
+            ...(variantGroup !== undefined ? { variantGroup } : {}),
           });
           await preview.complete(
             buildCompletionLabel({ ...timingSummary, gateRewritten }),

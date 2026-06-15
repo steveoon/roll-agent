@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { GenerateReplyToolInputSchema } from "./reply-authority.ts";
+import {
+  GenerateReplyToolInputSchema,
+  GenerateSignedReplyResponseSchema,
+} from "./reply-authority.ts";
 
 const BASE_INPUT = {
   candidateMessage: "你好，请问薪资是多少？",
@@ -98,4 +101,44 @@ test("GenerateReplyToolInputSchema rejects targets without recruiter information
     () => GenerateReplyToolInputSchema.parse(BASE_INPUT),
     /target\.recruiterBinding 或 target\.recruiterUsername 至少需要提供一个/,
   );
+});
+
+test("GenerateSignedReplyResponseSchema accepts replyVariants passthrough", () => {
+  const parsed = GenerateSignedReplyResponseSchema.parse({
+    suggestedReply: "你好，薪资可以详聊。",
+    signedEnvelope: "payload.draft.signature",
+    envelopeExp: 4_102_444_800,
+    confidence: 0.9,
+    stage: "job_consultation",
+    replyPolicySource: "file",
+    replyVariants: {
+      groupId: "rvg_abc123",
+      recommended: "draft",
+      items: [
+        {
+          variant: "draft",
+          suggestedReply: "你好，薪资可以详聊。",
+          signedEnvelope: "payload.draft.signature",
+          envelopeExp: 4_102_444_800,
+        },
+        {
+          variant: "revised",
+          suggestedReply: "你好，我可以帮你确认薪资范围。",
+          signedEnvelope: "payload.revised.signature",
+          envelopeExp: 4_102_444_800,
+        },
+      ],
+      findings: [
+        {
+          code: "off_axis_fact_disclosure",
+          description: "首稿包含候选人未询问的信息。",
+        },
+      ],
+      rubricVersion: "reply-quality-v1",
+      rubricHash: "sha256:test",
+    },
+  });
+
+  assert.equal(parsed.replyVariants?.groupId, "rvg_abc123");
+  assert.equal(parsed.replyVariants?.items[1]?.variant, "revised");
 });
