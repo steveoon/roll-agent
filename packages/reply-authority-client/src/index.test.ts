@@ -2,9 +2,11 @@ import assert from "node:assert/strict";
 import { afterEach, describe, it } from "node:test";
 import {
   collectFinalSignedReply,
+  fetchReplyFeedbackRubric,
   generateSignedReply,
   GenerateReplyToolInputSchema,
   parseSseFrame,
+  postReplyFeedback,
   prepareReplyContext,
   PrepareReplyContextResponseSchema,
   ReplyAuthorityRequestError,
@@ -44,6 +46,33 @@ const FINAL_EVENT = {
   confidence: 0.85,
   stage: "job_consultation",
   replyPolicySource: "file",
+} as const;
+
+const REPLY_VARIANTS = {
+  groupId: "rvg_abc123",
+  recommended: "draft",
+  items: [
+    {
+      variant: "draft",
+      suggestedReply: "感谢你的关注！我们这边薪资可以详聊。",
+      signedEnvelope: "payload.draft.signature",
+      envelopeExp: 1_712_736_600,
+    },
+    {
+      variant: "revised",
+      suggestedReply: "感谢你的关注，我可以帮你确认薪资范围。",
+      signedEnvelope: "payload.revised.signature",
+      envelopeExp: 1_712_736_600,
+    },
+  ],
+  findings: [
+    {
+      code: "off_axis_fact_disclosure",
+      description: "首稿披露了候选人未询问的事实。",
+    },
+  ],
+  rubricVersion: "reply-quality-v1",
+  rubricHash: "sha256:test",
 } as const;
 
 function sseFrame(event: unknown): string {
@@ -321,6 +350,161 @@ describe("@roll-agent/reply-authority-client", () => {
 
     assert.equal(final.signedEnvelope, "payload.signature");
     assert.equal((capturedBody as { readonly stream?: unknown } | undefined)?.stream, undefined);
+  });
+
+  it("preserves replyVariants in one-shot JSON responses", async () => {
+    process.env.REPLY_AUTHORITY_URL = "https://reply-authority.duliday.com";
+    process.env.REPLY_AUTHORITY_BEARER_TOKEN = "client-token";
+
+    globalThis.fetch = async () =>
+      new Response(
+        JSON.stringify({
+          ...FINAL_EVENT,
+          type: undefined,
+          sequence: undefined,
+          timestamp: undefined,
+          safeToSend: undefined,
+          replyVariants: REPLY_VARIANTS,
+        }),
+        {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        },
+      );
+
+    const final = await generateSignedReply(VALID_REQUEST);
+
+    assert.equal(final.replyVariants?.groupId, "rvg_abc123");
+    assert.equal(final.replyVariants?.items[1]?.variant, "revised");
+    assert.equal(final.replyVariants?.items[1]?.signedEnvelope, "payload.revised.signature");
+  });
+
+  it("preserves replyVariants in SSE final events", async () => {
+    process.env.REPLY_AUTHORITY_URL = "https://reply-authority.duliday.com";
+    process.env.REPLY_AUTHORITY_BEARER_TOKEN = "client-token";
+
+    globalThis.fetch = async () =>
+      sseResponse([
+        {
+          ...FINAL_EVENT,
+          sequence: 1,
+          replyVariants: REPLY_VARIANTS,
+        },
+      ]);
+
+    const final = await collectFinalSignedReply(streamGenerateSignedReply(VALID_REQUEST));
+
+    assert.equal(final.replyVariants?.groupId, "rvg_abc123");
+    assert.equal(final.replyVariants?.recommended, "draft");
+    assert.equal(final.replyVariants?.rubricHash, "sha256:test");
+  });
+
+  it("fetches reply feedback rubrics with the tenant scoped endpoint", async () => {
+    process.env.REPLY_AUTHORITY_URL = "https://reply-authority.duliday.com";
+    process.env.REPLY_AUTHORITY_BEARER_TOKEN = "client-token";
+
+    let capturedUrl = "";
+    let capturedMethod = "";
+    globalThis.fetch = async (input: string | URL | Request, init?: RequestInit) => {
+      capturedUrl = String(input);
+      capturedMethod = init?.method ?? "";
+      return new Response(
+        JSON.stringify({
+          rubricVersion: "reply-quality-v1",
+          rubricHash: "sha256:test",
+          rubric: {
+            priorities: ["stay_on_axis"],
+          },
+          advisoryFindings: REPLY_VARIANTS.findings,
+        }),
+        {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        },
+      );
+    };
+
+    const rubric = await fetchReplyFeedbackRubric({
+      tenantId: "tenant-001",
+      rubricVersion: "reply-quality-v1",
+    });
+
+    assert.equal(capturedMethod, "GET");
+    assert.match(capturedUrl, /\/tenants\/tenant-001\/reply-feedback\/rubrics\/reply-quality-v1$/);
+    assert.equal(rubric.rubricHash, "sha256:test");
+    assert.equal(rubric.advisoryFindings[0]?.code, "off_axis_fact_disclosure");
+  });
+
+  it("posts reply feedback and surfaces service failures", async () => {
+    process.env.REPLY_AUTHORITY_URL = "https://reply-authority.duliday.com";
+    process.env.REPLY_AUTHORITY_BEARER_TOKEN = "client-token";
+
+    const captured: Array<{ readonly url: string; readonly body: unknown }> = [];
+    globalThis.fetch = async (input: string | URL | Request, init?: RequestInit) => {
+      captured.push({
+        url: String(input),
+        body: JSON.parse(String(init?.body)) as unknown,
+      });
+
+      return new Response(JSON.stringify({ status: "accepted", groupId: "rvg_abc123" }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    };
+
+    const response = await postReplyFeedback({
+      groupId: "rvg_abc123",
+      target: {
+        platform: "zhipin",
+        tenantId: "tenant-001",
+        conversationId: "conv-1",
+      },
+      chosenVariant: "revised",
+      confirmedFindingCodes: ["off_axis_fact_disclosure"],
+      reason: "revised 更贴合候选人的问题",
+      rubricVersion: "reply-quality-v1",
+      rubricHash: "sha256:test",
+      judgeModel: "test-model",
+    });
+
+    assert.equal(response.status, "accepted");
+    assert.match(captured[0]?.url ?? "", /\/reply-feedback$/);
+    assert.equal(
+      (captured[0]?.body as { readonly chosenVariant?: string } | undefined)?.chosenVariant,
+      "revised",
+    );
+
+    globalThis.fetch = async () =>
+      new Response(
+        JSON.stringify({
+          statusCode: 409,
+          error: "Conflict",
+          message: "rubric mismatch",
+        }),
+        {
+          status: 409,
+          headers: { "Content-Type": "application/json" },
+        },
+      );
+
+    await assert.rejects(
+      postReplyFeedback({
+        groupId: "rvg_abc123",
+        target: {
+          platform: "zhipin",
+          tenantId: "tenant-001",
+          conversationId: "conv-1",
+        },
+        chosenVariant: "draft",
+        reason: "fallback",
+        rubricVersion: "reply-quality-v1",
+        rubricHash: "sha256:mismatch",
+      }),
+      (error: unknown) =>
+        error instanceof ReplyAuthorityRequestError &&
+        error.statusCode === 409 &&
+        error.message.includes("rubric mismatch"),
+    );
   });
 
   it("parses prepare reply context responses", () => {

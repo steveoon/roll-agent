@@ -85,6 +85,70 @@ describe("prepared reply store", () => {
     }
   });
 
+  it("stores dual-draft variant groups and consumes them at group level", () => {
+    const saved = savePreparedReply(
+      {
+        signedEnvelope: "payload.draft.signature",
+        suggestedReply: "你好，薪资可以详聊。",
+        stage: "job_consultation",
+        confidence: 0.9,
+        expiresAt: 200,
+        variantGroup: {
+          groupId: "rvg_abc123",
+          options: [
+            {
+              option: "option_1",
+              variant: "revised",
+              suggestedReply: "你好，我帮你确认薪资范围。",
+              signedEnvelope: "payload.revised.signature",
+              envelopeExp: 200,
+            },
+            {
+              option: "option_2",
+              variant: "draft",
+              suggestedReply: "你好，薪资可以详聊。",
+              signedEnvelope: "payload.draft.signature",
+              envelopeExp: 200,
+            },
+          ],
+          findings: [
+            {
+              code: "off_axis_fact_disclosure",
+              description: "首稿包含候选人未询问的信息。",
+            },
+          ],
+          rubricVersion: "reply-quality-v1",
+          rubricHash: "sha256:test",
+          target: {
+            platform: "zhipin",
+            tenantId: "tenant-001",
+            conversationId: "conv-1",
+          },
+          recommendedOption: "option_2",
+        },
+      },
+      100,
+    );
+
+    const inspected = inspectPreparedReply(saved.preparedReplyId, 120);
+    assert.equal(inspected.ok, true);
+    if (inspected.ok) {
+      assert.equal(inspected.record.variantGroup?.groupId, "rvg_abc123");
+      assert.equal(inspected.record.variantGroup?.options[0]?.variant, "revised");
+    }
+
+    const first = consumePreparedReply(saved.preparedReplyId, 121);
+    assert.equal(first.ok, true);
+    if (first.ok) {
+      assert.equal(first.record.variantGroup?.recommendedOption, "option_2");
+    }
+
+    assert.deepEqual(consumePreparedReply(saved.preparedReplyId, 122), {
+      ok: false,
+      reason: "consumed",
+    });
+  });
+
   it("expires stale prepared replies", () => {
     const saved = savePreparedReply(
       {

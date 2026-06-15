@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
 import { afterEach, describe, it } from "node:test";
 import type { AgentContext } from "@roll-agent/sdk";
-import type { ReplyStreamEvent } from "@roll-agent/reply-authority-client";
+import {
+  ReplyAuthorityRequestError,
+  type ReplyStreamEvent,
+} from "@roll-agent/reply-authority-client";
 import type {
   NativeCandidateChatDetails,
   ZhipinNativePagePort,
@@ -73,8 +76,14 @@ function createPreviewSession(calls: string[]) {
       calls.push(`preview:draft:${provisional ? "draft" : "final"}:${draftText}`);
       return true;
     },
-    async complete(label: string, finalReply: string) {
-      calls.push(`preview:complete:${label}:${finalReply}`);
+    async complete(
+      label: string,
+      finalReply: string,
+      variantSelection?: { options: readonly unknown[] },
+    ) {
+      calls.push(
+        `preview:complete:${label}:${finalReply}:variants=${variantSelection?.options.length ?? 0}`,
+      );
       return true;
     },
     async fail(label: string) {
@@ -249,6 +258,123 @@ async function* createMockStream(): AsyncGenerator<ReplyStreamEvent> {
   };
 }
 
+async function* createFailingReplyAuthorityStream(
+  statusCode: number,
+  message: string,
+): AsyncGenerator<ReplyStreamEvent> {
+  throw new ReplyAuthorityRequestError(message, {
+    meta: {
+      url: "https://reply-authority.example/generate-signed-reply",
+      timeoutMs: 30_000,
+    },
+    statusCode,
+  });
+}
+
+async function* createDualDraftMockStream(): AsyncGenerator<ReplyStreamEvent> {
+  yield {
+    type: "stream.started",
+    sequence: 1,
+    timestamp: "2026-05-11T00:00:00.000Z",
+    requestId: "req-1",
+    tenantId: "tenant-001",
+  };
+  yield {
+    type: "phase.started",
+    sequence: 2,
+    timestamp: "2026-05-11T00:00:01.000Z",
+    phase: "dual_draft",
+  };
+  yield {
+    type: "final",
+    sequence: 3,
+    timestamp: "2026-05-11T00:00:05.000Z",
+    safeToSend: true,
+    suggestedReply: "您好，薪资可以详聊。",
+    signedEnvelope: "payload.draft.signature",
+    envelopeExp: 4_102_444_800,
+    confidence: 0.9,
+    stage: "job_consultation",
+    replyPolicySource: "file",
+    latencyMs: 3_210,
+    replyVariants: {
+      groupId: "rvg_abc123",
+      recommended: "draft",
+      items: [
+        {
+          variant: "draft",
+          suggestedReply: "您好，薪资可以详聊。",
+          signedEnvelope: "payload.draft.signature",
+          envelopeExp: 4_102_444_800,
+        },
+        {
+          variant: "revised",
+          suggestedReply: "您好，我可以先帮您确认薪资范围。",
+          signedEnvelope: "payload.revised.signature",
+          envelopeExp: 4_102_444_800,
+        },
+      ],
+      findings: [
+        {
+          code: "off_axis_fact_disclosure",
+          description: "首稿包含候选人未询问的信息。",
+        },
+      ],
+      rubricVersion: "reply-quality-v1",
+      rubricHash: "sha256:test",
+    },
+  };
+}
+
+async function* createDuplicateVariantMockStream(): AsyncGenerator<ReplyStreamEvent> {
+  yield {
+    type: "stream.started",
+    sequence: 1,
+    timestamp: "2026-05-11T00:00:00.000Z",
+    requestId: "req-1",
+    tenantId: "tenant-001",
+  };
+  yield {
+    type: "final",
+    sequence: 2,
+    timestamp: "2026-05-11T00:00:05.000Z",
+    safeToSend: true,
+    suggestedReply: "您好，薪资可以详聊。",
+    signedEnvelope: "payload.draft.signature",
+    envelopeExp: 4_102_444_800,
+    confidence: 0.9,
+    stage: "job_consultation",
+    replyPolicySource: "file",
+    latencyMs: 3_210,
+    replyVariants: {
+      groupId: "rvg_abc123",
+      recommended: "draft",
+      items: [
+        {
+          variant: "draft",
+          suggestedReply: "您好，薪资可以详聊。",
+          signedEnvelope: "payload.draft.signature",
+          envelopeExp: 4_102_444_800,
+        },
+        {
+          variant: "draft",
+          suggestedReply: "您好，薪资也可以详聊。",
+          signedEnvelope: "payload.duplicate-draft.signature",
+          envelopeExp: 4_102_444_800,
+        },
+      ],
+      findings: [
+        {
+          code: "off_axis_fact_disclosure",
+          description: "首稿包含候选人未询问的信息。",
+        },
+      ],
+      rubricVersion: "reply-quality-v1",
+      rubricHash: "sha256:test",
+    },
+  };
+}
+
 afterEach(() => {
   setZhipinGenerateReplyPreviewDepsForTests(undefined);
   resetPreparedReplyStoreForTests();
@@ -303,7 +429,7 @@ describe("zhipin_generate_reply_preview", () => {
     assert.equal(calls.includes("preview:draft:draft:您好，薪资可以详聊。"), true);
     assert.equal(
       calls.some((call) =>
-        /^preview:complete:回复已生成 · 总 .* · 生成 3\.2s · 预热命中:您好，薪资可以详聊。$/.test(
+        /^preview:complete:回复已生成 · 总 .* · 生成 3\.2s · 预热命中:您好，薪资可以详聊。:variants=0$/.test(
           call,
         ),
       ),
@@ -315,6 +441,207 @@ describe("zhipin_generate_reply_preview", () => {
     if (consumed.ok) {
       assert.equal(consumed.record.signedEnvelope, "payload.signature");
       assert.equal(consumed.record.unreadCountBeforeReply, 2);
+    }
+  });
+
+  it("stores dual-draft variants internally while exposing only neutral options", async () => {
+    const calls: string[] = [];
+
+    setZhipinGenerateReplyPreviewDepsForTests({
+      openNativePagePort: async () => createNativePage(calls),
+      createNativeVisualActivitySession: () => createNoopSession(calls),
+      createReplyPreviewVisualSession: () => createPreviewSession(calls),
+      streamGenerateSignedReply: () => createDualDraftMockStream(),
+      fetchReplyFeedbackRubric: async () => ({
+        rubricVersion: "reply-quality-v1",
+        rubricHash: "sha256:test",
+        rubric: {
+          priorities: ["stay_on_axis"],
+        },
+        advisoryFindings: [
+          {
+            code: "off_axis_fact_disclosure",
+            description: "首稿包含候选人未询问的信息。",
+          },
+        ],
+      }),
+    });
+
+    const result = await zhipinGenerateReplyPreview.execute(
+      { conversationId: "conv-1", maxMessages: 20 },
+      createTestContext(),
+    );
+
+    assert.equal(result.success, true);
+    assert.equal(result.replyVariantSelection?.groupId, "rvg_abc123");
+    assert.deepEqual(result.replyVariantSelection?.options.map((option) => option.option).sort(), [
+      "option_1",
+      "option_2",
+    ]);
+    assert.equal(JSON.stringify(result).includes("signedEnvelope"), false);
+    assert.equal(JSON.stringify(result).includes("payload.draft.signature"), false);
+    assert.equal(JSON.stringify(result).includes('"draft"'), false);
+    assert.equal(JSON.stringify(result).includes('"revised"'), false);
+    assert.equal(
+      calls.some((call) => call.startsWith("preview:complete:") && call.endsWith(":variants=2")),
+      true,
+    );
+
+    const consumed = consumePreparedReply(result.preparedReplyId ?? "", 1_800_000_000);
+    assert.equal(consumed.ok, true);
+    if (consumed.ok) {
+      assert.equal(consumed.record.variantGroup?.groupId, "rvg_abc123");
+      assert.deepEqual(
+        consumed.record.variantGroup?.options.map((option) => option.variant).sort(),
+        ["draft", "revised"],
+      );
+      assert.equal(
+        consumed.record.variantGroup?.options.some(
+          (option) => option.signedEnvelope === "payload.revised.signature",
+        ),
+        true,
+      );
+    }
+  });
+
+  it("uses the injected random source to assign neutral option order", async () => {
+    const cases = [
+      {
+        randomValue: 0.49,
+        expectedFirstVariant: "revised",
+        expectedFirstReply: "您好，我可以先帮您确认薪资范围。",
+      },
+      {
+        randomValue: 0.5,
+        expectedFirstVariant: "draft",
+        expectedFirstReply: "您好，薪资可以详聊。",
+      },
+    ] as const;
+
+    for (const scenario of cases) {
+      resetPreparedReplyStoreForTests();
+      const calls: string[] = [];
+
+      setZhipinGenerateReplyPreviewDepsForTests({
+        openNativePagePort: async () => createNativePage(calls),
+        createNativeVisualActivitySession: () => createNoopSession(calls),
+        createReplyPreviewVisualSession: () => createPreviewSession(calls),
+        streamGenerateSignedReply: () => createDualDraftMockStream(),
+        fetchReplyFeedbackRubric: async () => ({
+          rubricVersion: "reply-quality-v1",
+          rubricHash: "sha256:test",
+          rubric: {
+            priorities: ["stay_on_axis"],
+          },
+          advisoryFindings: [
+            {
+              code: "off_axis_fact_disclosure",
+              description: "首稿包含候选人未询问的信息。",
+            },
+          ],
+        }),
+        random: () => scenario.randomValue,
+      });
+
+      const result = await zhipinGenerateReplyPreview.execute(
+        { conversationId: "conv-1", maxMessages: 20 },
+        createTestContext(),
+      );
+
+      assert.equal(result.success, true);
+      assert.equal(result.replyVariantSelection?.options[0]?.option, "option_1");
+      assert.equal(
+        result.replyVariantSelection?.options[0]?.suggestedReply,
+        scenario.expectedFirstReply,
+      );
+
+      const consumed = consumePreparedReply(result.preparedReplyId ?? "", 1_800_000_000);
+      assert.equal(consumed.ok, true);
+      if (consumed.ok) {
+        assert.equal(
+          consumed.record.variantGroup?.options[0]?.variant,
+          scenario.expectedFirstVariant,
+        );
+      }
+    }
+  });
+
+  it("falls back to the top-level draft when dual-draft items do not contain draft and revised", async () => {
+    const calls: string[] = [];
+
+    setZhipinGenerateReplyPreviewDepsForTests({
+      openNativePagePort: async () => createNativePage(calls),
+      createNativeVisualActivitySession: () => createNoopSession(calls),
+      createReplyPreviewVisualSession: () => createPreviewSession(calls),
+      streamGenerateSignedReply: () => createDuplicateVariantMockStream(),
+      fetchReplyFeedbackRubric: async () => ({
+        rubricVersion: "reply-quality-v1",
+        rubricHash: "sha256:test",
+        rubric: {
+          priorities: ["stay_on_axis"],
+        },
+        advisoryFindings: [
+          {
+            code: "off_axis_fact_disclosure",
+            description: "首稿包含候选人未询问的信息。",
+          },
+        ],
+      }),
+    });
+
+    const result = await zhipinGenerateReplyPreview.execute(
+      { conversationId: "conv-1", maxMessages: 20 },
+      createTestContext(),
+    );
+
+    assert.equal(result.success, true);
+    assert.equal(result.replyVariantSelection, undefined);
+
+    const consumed = consumePreparedReply(result.preparedReplyId ?? "", 1_800_000_000);
+    assert.equal(consumed.ok, true);
+    if (consumed.ok) {
+      assert.equal(consumed.record.variantGroup, undefined);
+      assert.equal(consumed.record.signedEnvelope, "payload.draft.signature");
+    }
+  });
+
+  it("falls back to the top-level draft when the feedback rubric hash mismatches", async () => {
+    const calls: string[] = [];
+
+    setZhipinGenerateReplyPreviewDepsForTests({
+      openNativePagePort: async () => createNativePage(calls),
+      createNativeVisualActivitySession: () => createNoopSession(calls),
+      createReplyPreviewVisualSession: () => createPreviewSession(calls),
+      streamGenerateSignedReply: () => createDualDraftMockStream(),
+      fetchReplyFeedbackRubric: async () => ({
+        rubricVersion: "reply-quality-v1",
+        rubricHash: "sha256:other",
+        rubric: {
+          priorities: ["stay_on_axis"],
+        },
+        advisoryFindings: [
+          {
+            code: "off_axis_fact_disclosure",
+            description: "首稿包含候选人未询问的信息。",
+          },
+        ],
+      }),
+    });
+
+    const result = await zhipinGenerateReplyPreview.execute(
+      { conversationId: "conv-1", maxMessages: 20 },
+      createTestContext(),
+    );
+
+    assert.equal(result.success, true);
+    assert.equal(result.suggestedReply, "您好，薪资可以详聊。");
+    assert.equal(result.replyVariantSelection, undefined);
+
+    const consumed = consumePreparedReply(result.preparedReplyId ?? "", 1_800_000_000);
+    assert.equal(consumed.ok, true);
+    if (consumed.ok) {
+      assert.equal(consumed.record.variantGroup, undefined);
+      assert.equal(consumed.record.signedEnvelope, "payload.draft.signature");
     }
   });
 
@@ -670,5 +997,56 @@ describe("zhipin_generate_reply_preview", () => {
     assert.match(result.error ?? "", /聊天详情目标与当前选中会话不一致/);
     assert.equal(result.preparedReplyId, undefined);
     assert.equal(streamCalled, false);
+  });
+
+  it("classifies Reply Authority business rejection, timeout, and server errors", async () => {
+    const cases = [
+      {
+        statusCode: 422,
+        message: "BUSINESS_RULE_VIOLATION: rejected_after_regeneration",
+        expectedKind: "rejected",
+        expectedMessage: "回复未通过事实核验",
+      },
+      {
+        statusCode: 504,
+        message: "LLM_TIMEOUT",
+        expectedKind: "timeout",
+        expectedMessage: "AI 响应超时",
+      },
+      {
+        statusCode: 500,
+        message: "Internal Server Error",
+        expectedKind: "server_error",
+        expectedMessage: "Reply Authority 服务端异常",
+      },
+    ] as const;
+
+    for (const scenario of cases) {
+      const calls: string[] = [];
+      setZhipinGenerateReplyPreviewDepsForTests({
+        openNativePagePort: async () => createNativePage(calls),
+        createNativeVisualActivitySession: () => createNoopSession(calls),
+        createReplyPreviewVisualSession: () => createPreviewSession(calls),
+        streamGenerateSignedReply: () =>
+          createFailingReplyAuthorityStream(scenario.statusCode, scenario.message),
+      });
+
+      const result = await zhipinGenerateReplyPreview.execute(
+        { conversationId: "conv-1", maxMessages: 20 },
+        createTestContext(),
+      );
+
+      assert.equal(result.success, false);
+      assert.equal(result.errorKind, scenario.expectedKind);
+      assert.match(result.error ?? "", new RegExp(scenario.expectedMessage));
+      assert.equal(
+        calls.some(
+          (call) => call.startsWith("preview:fail:") && call.includes(scenario.expectedMessage),
+        ),
+        true,
+      );
+      resetPreparedReplyStoreForTests();
+      setZhipinGenerateReplyPreviewDepsForTests(undefined);
+    }
   });
 });

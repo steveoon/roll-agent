@@ -6,6 +6,7 @@
 - [CLI-Served Skill Discovery](#cli-served-skill-discovery)
 - [Known Agent, Unknown Tool](#known-agent-unknown-tool)
 - [Known Agent + Tool](#known-agent--tool)
+- [Prepared Reply And Variant Selection](#prepared-reply-and-variant-selection)
 - [Batch Tool Calls](#batch-tool-calls)
 - [Known Intent, Unknown Tool](#known-intent-unknown-tool)
 - [Browser Runtime Lifecycle](#browser-runtime-lifecycle)
@@ -79,6 +80,41 @@ Use this when the target agent is known but the exact tool name or `inputSchema`
 roll run <agent-name> <tool-name> --input-json '{...}' --json
 ```
 
+## Prepared Reply And Variant Selection
+
+Use this when a preview/generate tool returns an opaque `preparedReplyId` and may also return neutral
+`replyVariantSelection.options` such as `option_1` / `option_2`.
+
+```bash
+roll run browser-use-agent zhipin_generate_reply_preview \
+  --input-json '{"browserInstance":"boss-a","conversationId":"..."}' --json
+```
+
+Decision branch:
+
+| Preview output | Next step |
+|----------------|-----------|
+| `preparedReplyId` only | `zhipin_send_prepared_reply({ browserInstance, preparedReplyId })` |
+| `preparedReplyId` + `replyVariantSelection` | Default: `zhipin_judge_prepared_reply({ preparedReplyId })`, then send with returned `variantDecision` |
+| Orchestrator chooses manually | Build `variantDecision` with `chosenOption: "option_1"` or `"option_2"` only; do not infer hidden draft labels |
+
+Send and verify:
+
+```bash
+roll run browser-use-agent zhipin_send_prepared_reply \
+  --input-json '{"browserInstance":"boss-a","preparedReplyId":"...","variantDecision":{...}}' --json
+
+roll run browser-use-agent zhipin_read_messages \
+  --input-json '{"browserInstance":"boss-a","onlyUnread":true,"limit":5}' --json
+```
+
+Rules:
+
+- `zhipin_judge_prepared_reply` does not take `browserInstance`; keep the prepared artifact tied to the workflow that created it.
+- If judge returns `fallback:true`, omit `variantDecision` and send with `preparedReplyId` only.
+- If send returns `needs_confirmation`, retry with the same routing key, prepared artifact, decision, reason, and approval object.
+- Do not pass `signedEnvelope`, raw draft text, or preview-only strings through the orchestrator unless the target agent explicitly documents that contract.
+
 ## Batch Tool Calls
 
 ```bash
@@ -133,7 +169,8 @@ Rules:
 - Batch mode does not inherit routing keys. If a target agent uses a field such as `browserInstance`,
   `tenantId`, or `workspaceId`, put that field in every item `input`.
 - For dependent workflows, split the workflow into multiple batches:
-  read batch -> parse/filter results -> generate batch -> parse/filter results -> side-effect batch.
+  read batch -> parse/filter results -> generate/preview batch -> parse/filter results ->
+  optional judge/decision batch -> parse/filter results -> side-effect batch.
 
 Example with an account/profile routing key:
 

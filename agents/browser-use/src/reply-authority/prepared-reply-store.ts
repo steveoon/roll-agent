@@ -1,4 +1,36 @@
 import { randomUUID } from "node:crypto";
+import type { ReplyGateAdvisoryCode, ReplyVariantKind } from "@roll-agent/reply-authority-client";
+
+export const PreparedReplyOptionValues = ["option_1", "option_2"] as const;
+
+export type PreparedReplyOption = (typeof PreparedReplyOptionValues)[number];
+
+export type PreparedReplyVariantOption = {
+  readonly option: PreparedReplyOption;
+  readonly variant: ReplyVariantKind;
+  readonly suggestedReply: string;
+  readonly signedEnvelope: string;
+  readonly envelopeExp: number;
+};
+
+export type PreparedReplyVariantFinding = {
+  readonly code: ReplyGateAdvisoryCode;
+  readonly description: string;
+};
+
+export type PreparedReplyVariantGroup = {
+  readonly groupId: string;
+  readonly options: readonly PreparedReplyVariantOption[];
+  readonly findings: readonly PreparedReplyVariantFinding[];
+  readonly rubricVersion: string;
+  readonly rubricHash: string;
+  readonly target: {
+    readonly platform: "zhipin";
+    readonly tenantId: string;
+    readonly conversationId: string;
+  };
+  readonly recommendedOption: PreparedReplyOption;
+};
 
 export type PreparedReplyRecord = {
   readonly preparedReplyId: string;
@@ -9,6 +41,7 @@ export type PreparedReplyRecord = {
   readonly expiresAt: number;
   readonly requestId?: string;
   readonly unreadCountBeforeReply?: number;
+  readonly variantGroup?: PreparedReplyVariantGroup;
 };
 
 type StoredPreparedReply = PreparedReplyRecord & {
@@ -114,6 +147,7 @@ function toPreparedReplyRecord(record: StoredPreparedReply): PreparedReplyRecord
     ...(record.unreadCountBeforeReply !== undefined
       ? { unreadCountBeforeReply: record.unreadCountBeforeReply }
       : {}),
+    ...(record.variantGroup !== undefined ? { variantGroup: record.variantGroup } : {}),
   };
 }
 

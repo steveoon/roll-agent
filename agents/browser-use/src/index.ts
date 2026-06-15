@@ -17,6 +17,7 @@ import { zhipinOpenChatPage } from "./tools/zhipin-open-chat-page.ts";
 import { zhipinOpenChat } from "./tools/zhipin-open-chat.ts";
 import { zhipinGetCandidateInfo } from "./tools/zhipin-get-candidate-info.ts";
 import { zhipinGenerateReplyPreview } from "./tools/zhipin-generate-reply-preview.ts";
+import { zhipinJudgePreparedReply } from "./tools/zhipin-judge-prepared-reply.ts";
 import { zhipinSendPreparedReply } from "./tools/zhipin-send-prepared-reply.ts";
 import { zhipinExchangeWechat } from "./tools/zhipin-exchange-wechat.ts";
 import { zhipinGetUsername } from "./tools/zhipin-get-username.ts";
@@ -44,7 +45,7 @@ import type { AnyToolDefinition } from "@roll-agent/sdk";
 const logger = createAgentLogger("browser-use-agent");
 
 function isGlobalBrowserRuntimeTool(toolName: string): boolean {
-  return toolName === "browser_stop";
+  return toolName === "browser_stop" || toolName === "zhipin_judge_prepared_reply";
 }
 
 function withBrowserInstanceRuntimeSelection(tool: AnyToolDefinition): AnyToolDefinition {
@@ -78,6 +79,7 @@ const agent = defineAgent(
       zhipinOpenChat,
       zhipinGetCandidateInfo,
       zhipinGenerateReplyPreview,
+      zhipinJudgePreparedReply,
       zhipinSendPreparedReply,
       zhipinExchangeWechat,
       zhipinGetUsername,

@@ -81,4 +81,36 @@ describe("NativeReplyPreviewVisualSession", () => {
     assert.match(renderedExpression, /cancelPendingRemove/);
     assert.match(renderedExpression, /state\.removeTimer/);
   });
+
+  it("renders neutral dual-draft variant cards and findings on completion", async () => {
+    let renderedExpression = "";
+    setVisualActivityEnabledForTests(true);
+
+    const session = new NativeReplyPreviewVisualSession({
+      async evaluateJson<T = unknown>(expression: string): Promise<T> {
+        renderedExpression = expression;
+        return true as T;
+      },
+    });
+
+    const rendered = await session.complete("回复已生成", "方案一", {
+      options: [
+        { option: "option_1", suggestedReply: "方案一" },
+        { option: "option_2", suggestedReply: "方案二" },
+      ],
+      findings: [
+        {
+          code: "off_axis_fact_disclosure",
+          description: "首稿包含候选人未询问的信息。",
+        },
+      ],
+    });
+
+    assert.equal(rendered, true);
+    assert.match(renderedExpression, /roll-agent-reply-preview-variants/);
+    assert.match(renderedExpression, /option_1/);
+    assert.match(renderedExpression, /option_2/);
+    assert.match(renderedExpression, /首稿包含候选人未询问的信息。/);
+    assert.match(renderedExpression, /draft\.style\.display = "none"/);
+  });
 });

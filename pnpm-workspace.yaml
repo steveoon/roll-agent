@@ -3,6 +3,9 @@ packages:
   - "agents/*"
 
 minimumReleaseAge: 10080
+minimumReleaseAgeExclude:
+  - esbuild
+  - "@esbuild/*"
 blockExoticSubdeps: true
 savePrefix: ""
 

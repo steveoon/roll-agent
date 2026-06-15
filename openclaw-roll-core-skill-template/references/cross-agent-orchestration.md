@@ -12,9 +12,10 @@ When multiple agents cooperate:
 3. Pass only the minimum validated output from one agent into the next.
 4. Add an external verification step after side effects (send, write, create, update, click, type).
 
-## Pattern 1: Read -> Generate -> Send -> Verify
+## Pattern 1: Read -> Generate/Preview -> Decide -> Send -> Verify
 
-Use this pattern when one agent reads state, another generates content, and the first agent sends it.
+Use this pattern when one agent reads state, a generator or preview tool prepares content, and a
+sender performs the external side effect.
 
 Example shape:
 
@@ -22,16 +23,19 @@ Example shape:
 # 1. Read latest state
 roll run <reader-agent> <read-tool> --input-json '{...}' --json
 
-# 2. Generate response from validated input
-roll run <generator-agent> <generate-tool> --input-json '{...}' --json
+# 2. Generate or preview response from validated input
+roll run <generator-agent> <generate-or-preview-tool> --input-json '{...}' --json
 
-# 3. Prepare or verify the exact target context before sending when the target skill requires it
+# 3. If the output contains neutral alternatives, run the documented judge/decision helper
+roll run <decision-agent> <judge-or-decision-tool> --input-json '{...}' --json
+
+# 4. Prepare or verify the exact target context before sending when the target skill requires it
 roll run <reader-agent> <open-target-tool> --input-json '{...}' --json
 
-# 4. Send
+# 5. Send
 roll run <reader-agent> <send-tool> --input-json '{...}' --json
 
-# 5. Verify with an independent read
+# 6. Verify with an independent read
 roll run <reader-agent> <read-tool> --input-json '{...}' --json
 ```
 
@@ -45,10 +49,17 @@ For generated side effects:
 - Parse each generation result first.
 - Pass only the minimum opaque artifact required by the sender tool, such as `preparedReplyId`,
   instead of exposing or storing lower-level authorization envelopes in the orchestrator.
+- If the generation/preview output includes neutral alternatives such as `replyVariantSelection`,
+  run the target agent's documented judge tool or make an explicit orchestrator choice, then pass
+  only the documented decision object to the sender. Do not infer hidden labels behind `option_1` /
+  `option_2` style choices.
 - Filter out low-confidence, policy-risk, validation-risk, stale-target, or otherwise unsafe results
   before constructing the send batch.
 - Do not send provisional draft text or model output directly unless the sender tool explicitly
   allows raw text.
+- When a send call returns a confirmation gate, retry the same send with the same routing key,
+  prepared artifact, chosen option, reason, and approval object. If any of those fields change, treat
+  it as a new send that needs its own confirmation.
 - Treat target-opening requirements as agent-specific. For example, a sender tool may validate the
   current target itself and only reopen when the selected target is stale; read that agent's own
   `SKILL.md` before adding explicit open steps.
@@ -58,11 +69,45 @@ Batching this pattern:
 ```text
 read batch
   -> orchestrator parse/filter
-  -> generate batch
+  -> generate/preview batch
+  -> orchestrator parse/filter
+  -> optional judge/decision batch
   -> orchestrator parse/filter
   -> side-effect batch
   -> verify batch/read
 ```
+
+### Example: BOSS Zhipin Prepared Reply
+
+When `browser-use-agent` owns the read/preview/send loop:
+
+```bash
+# browser-runtime calls include browserInstance
+roll run browser-use-agent zhipin_read_messages \
+  --input-json '{"browserInstance":"boss-a","onlyUnread":true,"limit":5}' --json
+
+roll run browser-use-agent zhipin_generate_reply_preview \
+  --input-json '{"browserInstance":"boss-a","conversationId":"..."}' --json
+
+# only when preview returns replyVariantSelection
+roll run browser-use-agent zhipin_judge_prepared_reply \
+  --input-json '{"preparedReplyId":"..."}' --json
+
+# resume browser-runtime with the same routing key
+roll run browser-use-agent zhipin_send_prepared_reply \
+  --input-json '{"browserInstance":"boss-a","preparedReplyId":"...","variantDecision":{...}}' --json
+
+roll run browser-use-agent zhipin_read_messages \
+  --input-json '{"browserInstance":"boss-a","onlyUnread":true,"limit":5}' --json
+```
+
+Variant-specific rules:
+
+- `zhipin_judge_prepared_reply` is a global/no-runtime helper. Do not add `browserInstance` to its input.
+- Keep `preparedReplyId` scoped to the workflow that created it; resume browser-runtime calls with the original `browserInstance`.
+- If judge returns `fallback:true`, omit `variantDecision` and call `zhipin_send_prepared_reply` with only `preparedReplyId`; the sender falls back to the recommended draft and skips feedback.
+- If orchestrator chooses manually, pass only `variantDecision.chosenOption` as `option_1` or `option_2`; do not infer hidden draft labels from preview text.
+- If send returns `needs_confirmation`, retry the same send with the same `browserInstance`, `preparedReplyId`, `variantDecision`, reason, and approval object returned by the tool.
 
 ## Pattern 2: Brand / Tenant / Workspace Switch Before Generation
 
