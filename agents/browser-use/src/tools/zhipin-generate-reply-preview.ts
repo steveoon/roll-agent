@@ -3,6 +3,7 @@ import {
   fetchReplyFeedbackRubric,
   GenerateSignedReplyResponseSchema,
   ReasoningConfigSchema,
+  ReplyAuthorityRequestError,
   ReplyStreamFinalEventSchema,
   ReplyStreamLocationResolvedEventSchema,
   streamGenerateSignedReply,
@@ -48,6 +49,9 @@ const InputSchema = z.object({
     "可选 reasoning/thinking 控制。enabled=true 会请求 Reply Authority 使用模型推理模式；effort 可选 low/medium/high；scope 可选 reply/all",
   ),
 });
+
+const ReplyPreviewErrorKindValues = ["rejected", "timeout", "server_error"] as const;
+type ReplyPreviewErrorKind = (typeof ReplyPreviewErrorKindValues)[number];
 
 const OutputSchema = z.object({
   success: z.boolean(),
@@ -97,6 +101,7 @@ const OutputSchema = z.object({
       "双稿选择信息；仅暴露中性 option_1/option_2、文本与 rubric 元数据，不暴露 draft/revised 或 signedEnvelope。",
     ),
   error: z.string().optional(),
+  errorKind: z.enum(ReplyPreviewErrorKindValues).optional(),
 });
 
 const PHASE_LABELS: Readonly<Record<string, string>> = {
@@ -297,11 +302,46 @@ function resolveProgressLabel(event: ReplyStreamEvent): string | undefined {
   return undefined;
 }
 
-function createFailure(error: string) {
+function createFailure(error: string, errorKind?: ReplyPreviewErrorKind) {
   return {
     success: false,
     error,
+    ...(errorKind !== undefined ? { errorKind } : {}),
   };
+}
+
+function stripReplyAuthorityRequestMeta(message: string): string {
+  return message.replace(/\s+\(url=.*\)$/, "");
+}
+
+function classifyReplyPreviewError(error: unknown): {
+  readonly message: string;
+  readonly errorKind?: ReplyPreviewErrorKind;
+} {
+  const message = error instanceof Error ? error.message : String(error);
+  if (error instanceof ReplyAuthorityRequestError) {
+    const cleanMessage = stripReplyAuthorityRequestMeta(message);
+    if (error.statusCode === 422) {
+      return {
+        message: `回复未通过事实核验：${cleanMessage}`,
+        errorKind: "rejected",
+      };
+    }
+    if (error.statusCode === 504 || cleanMessage.includes("请求超时")) {
+      return {
+        message: `AI 响应超时：${cleanMessage}`,
+        errorKind: "timeout",
+      };
+    }
+    if (error.statusCode !== undefined && error.statusCode >= 500) {
+      return {
+        message: `Reply Authority 服务端异常：${cleanMessage}`,
+        errorKind: "server_error",
+      };
+    }
+  }
+
+  return { message };
 }
 
 function formatLatency(ms: number): string {
@@ -722,6 +762,15 @@ export const zhipinGenerateReplyPreview = defineTool({
           await preview.complete(
             buildCompletionLabel({ ...timingSummary, gateRewritten }),
             finalReply.suggestedReply,
+            variantGroup !== undefined
+              ? {
+                  options: variantGroup.options.map((option) => ({
+                    option: option.option,
+                    suggestedReply: option.suggestedReply,
+                  })),
+                  findings: variantGroup.findings,
+                }
+              : undefined,
           );
         }
       }
@@ -734,10 +783,10 @@ export const zhipinGenerateReplyPreview = defineTool({
 
       return toOutput(preparedRecord, timingSummary, gateRewritten);
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      await preview?.fail(message);
-      await session?.fail(message);
-      return createFailure(message);
+      const failure = classifyReplyPreviewError(error);
+      await preview?.fail(failure.message);
+      await session?.fail(failure.message);
+      return createFailure(failure.message, failure.errorKind);
     } finally {
       nativePage?.close();
     }

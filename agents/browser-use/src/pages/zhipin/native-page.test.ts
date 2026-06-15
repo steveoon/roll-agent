@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import type { NativeCdpController, NativeCdpMouseEventInput } from "@roll-agent/browser";
-import { ZhipinNativePagePort } from "./native-page.ts";
+import { parseZhipinCandidateProfileTokens, ZhipinNativePagePort } from "./native-page.ts";
 
 function createPort(
   evaluateJson: (expression: string) => Promise<unknown>,
@@ -39,6 +39,77 @@ function createPort(
 }
 
 describe("ZhipinNativePagePort", () => {
+  it("normalizes graduation-year student labels instead of treating them as work years", () => {
+    assert.deepEqual(parseZhipinCandidateProfileTokens(["吴开越", "19岁", "28年应届生", "本科"]), {
+      age: "19岁",
+      experience: "应届生",
+      education: "本科",
+    });
+    assert.deepEqual(parseZhipinCandidateProfileTokens(["郭淑彬 20岁 25年应届生 本科"]), {
+      age: "20岁",
+      experience: "应届生",
+      education: "本科",
+    });
+  });
+
+  it("keeps real work-experience labels from candidate profile tokens", () => {
+    assert.deepEqual(
+      parseZhipinCandidateProfileTokens(["任文", "50岁", "10年以上", "初中及以下"]),
+      {
+        age: "50岁",
+        experience: "10年以上",
+        education: "初中及以下",
+      },
+    );
+    assert.deepEqual(parseZhipinCandidateProfileTokens(["杨桃", "31岁", "10年以上", "中专/中技"]), {
+      age: "31岁",
+      experience: "10年以上",
+      education: "中专/中技",
+    });
+    assert.deepEqual(
+      parseZhipinCandidateProfileTokens(["任文 50岁 10年以上 初中及以下 牛人来源说明：应届生渠道"]),
+      {
+        age: "50岁",
+        experience: "10年以上",
+        education: "初中及以下",
+      },
+    );
+  });
+
+  it("drops impossible bare work years when age makes them implausible", () => {
+    assert.deepEqual(parseZhipinCandidateProfileTokens(["郭淑彬", "20岁", "25年", "本科"]), {
+      age: "20岁",
+      experience: "",
+      education: "本科",
+    });
+  });
+
+  it("ignores graduation-year labels instead of treating them as work years", () => {
+    assert.deepEqual(parseZhipinCandidateProfileTokens(["陈竞", "38岁", "06年毕业", "大专"]), {
+      age: "38岁",
+      experience: "",
+      education: "大专",
+    });
+    assert.deepEqual(parseZhipinCandidateProfileTokens(["陈竞 38岁 06年毕业 大专"]), {
+      age: "38岁",
+      experience: "",
+      education: "大专",
+    });
+    assert.deepEqual(parseZhipinCandidateProfileTokens(["李华", "26岁", "2020年毕业", "本科"]), {
+      age: "26岁",
+      experience: "",
+      education: "本科",
+    });
+  });
+
+  it("strips leading zeros from bare work-year labels", () => {
+    assert.deepEqual(parseZhipinCandidateProfileTokens(["陈竞", "38岁", "06年", "大专"]), {
+      age: "38岁",
+      experience: "6年",
+      education: "大专",
+    });
+  });
+
   it("accepts a chat reload target from the realtime page URL", async () => {
     const port = createPort(async (expression) => {
       assert.equal(expression, "location.href");

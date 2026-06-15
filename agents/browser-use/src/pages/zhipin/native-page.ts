@@ -104,8 +104,7 @@ export type ZhipinNativeReloadOptions = {
 };
 
 export const ZHIPIN_CHAT_RELOAD_SKIPPED_REASONS = ["not_chat_page"] as const;
-export type ZhipinChatReloadSkippedReason =
-  (typeof ZHIPIN_CHAT_RELOAD_SKIPPED_REASONS)[number];
+export type ZhipinChatReloadSkippedReason = (typeof ZHIPIN_CHAT_RELOAD_SKIPPED_REASONS)[number];
 
 export type ZhipinChatReloadTarget =
   | {
@@ -189,6 +188,172 @@ export type NativeCandidateChatDetails = {
   readonly candidateInfo: NativeCandidateInfo;
   readonly messages: readonly NativeChatMessage[];
 };
+
+export type NativeCandidateProfileSummary = {
+  readonly age: string;
+  readonly experience: string;
+  readonly education: string;
+};
+
+export function parseZhipinCandidateProfileTokens(
+  rawTexts: readonly string[],
+): NativeCandidateProfileSummary {
+  const educationPattern = /(初中及以下|中专\/中技|中专|中技|高中|大专|本科|硕士|博士)/;
+  const profileTokenPattern =
+    /(\d{2,3}岁|(?:\d{2}年|\d{4}届|\d{4}年)?应届生|\d{2,4}年毕业|在校生|经验不限|无经验|\d+\s*年以上|[1一]年以内|\d+\s*-\s*\d+\s*年|\d+\s*年|初中及以下|中专\/中技|中专|中技|高中|大专|本科|硕士|博士)/g;
+
+  function cleanText(text: string): string {
+    return text.replace(/\s+/g, " ").trim();
+  }
+
+  function normalizeWorkExperience(text: string): string {
+    return text.replace(/\s+/g, "");
+  }
+
+  function parseAgeYears(age: string): number | undefined {
+    const match = age.match(/^(\d{2,3})岁$/);
+    if (match?.[1] === undefined) return undefined;
+    const years = Number.parseInt(match[1], 10);
+    return Number.isFinite(years) ? years : undefined;
+  }
+
+  function parseExperienceYears(experience: string): number | undefined {
+    const normalized = normalizeWorkExperience(experience);
+    const rangeMatch = normalized.match(/^(\d+)-(\d+)年$/);
+    if (rangeMatch?.[2] !== undefined) {
+      return Number.parseInt(rangeMatch[2], 10);
+    }
+    const yearsMatch = normalized.match(/^(\d+)年以上$/) ?? normalized.match(/^(\d+)年$/);
+    if (yearsMatch?.[1] !== undefined) {
+      return Number.parseInt(yearsMatch[1], 10);
+    }
+    if (normalized === "1年以内") {
+      return 1;
+    }
+    return undefined;
+  }
+
+  function isPlausibleWorkExperience(age: string, experience: string): boolean {
+    const ageYears = parseAgeYears(age);
+    const experienceYears = parseExperienceYears(experience);
+    if (ageYears === undefined || experienceYears === undefined) {
+      return true;
+    }
+    return experienceYears <= Math.max(0, ageYears - 12);
+  }
+
+  function collectProfileTokens(text: string): string[] {
+    const matches = [...cleanText(text).matchAll(profileTokenPattern)]
+      .map((match) => cleanText(match[1] ?? ""))
+      .filter((match) => match.length > 0);
+    if (matches.length > 0) {
+      return matches;
+    }
+    return text
+      .split(/[丨|·\n\r\t]+/)
+      .map((part) => cleanText(part))
+      .filter((part) => part.length > 0);
+  }
+
+  function normalizeNumericYears(value: string): string {
+    return String(Number.parseInt(value, 10));
+  }
+
+  function normalizeWorkExperienceToken(token: string): string | undefined {
+    const normalized = normalizeWorkExperience(token);
+    if (/^(?:\d{2}年|\d{4}届|\d{4}年)?应届生$/.test(normalized)) {
+      return "应届生";
+    }
+    if (/^\d{2,4}年毕业$/.test(normalized)) {
+      return undefined;
+    }
+    if (normalized === "在校生") {
+      return "在校生";
+    }
+    if (normalized === "经验不限" || normalized === "无经验") {
+      return normalized;
+    }
+    if (normalized === "一年以内") {
+      return "1年以内";
+    }
+    const yearsAboveMatch = normalized.match(/^(\d+)年以上$/);
+    if (yearsAboveMatch?.[1] !== undefined) {
+      return `${normalizeNumericYears(yearsAboveMatch[1])}年以上`;
+    }
+    const rangeMatch = normalized.match(/^(\d+)-(\d+)年$/);
+    if (rangeMatch?.[1] !== undefined && rangeMatch[2] !== undefined) {
+      return `${normalizeNumericYears(rangeMatch[1])}-${normalizeNumericYears(rangeMatch[2])}年`;
+    }
+    const yearsMatch = normalized.match(/^(\d+)年$/);
+    if (yearsMatch?.[1] !== undefined) {
+      return `${normalizeNumericYears(yearsMatch[1])}年`;
+    }
+    if (normalized === "1年以内") {
+      return "1年以内";
+    }
+    return undefined;
+  }
+
+  function classifyProfileToken(
+    token: string,
+  ):
+    | { readonly kind: "age"; readonly value: string }
+    | { readonly kind: "education"; readonly value: string }
+    | { readonly kind: "experience"; readonly value: string }
+    | { readonly kind: "ignored" } {
+    const normalized = normalizeWorkExperience(token);
+
+    const ageMatch = normalized.match(/^(\d{2,3})岁$/);
+    if (ageMatch?.[1] !== undefined) {
+      return { kind: "age", value: `${ageMatch[1]}岁` };
+    }
+
+    const educationMatch = token.match(educationPattern);
+    if (educationMatch?.[1] !== undefined) {
+      return { kind: "education", value: educationMatch[1] };
+    }
+
+    const experience = normalizeWorkExperienceToken(token);
+    if (experience !== undefined) {
+      return { kind: "experience", value: experience };
+    }
+
+    return { kind: "ignored" };
+  }
+
+  const sourceTexts = rawTexts.map((text) => cleanText(text)).filter((text) => text.length > 0);
+  const profileTokens = sourceTexts.flatMap((text) => collectProfileTokens(text));
+  const classifiedTokens = profileTokens.map((text, index) => ({
+    index,
+    token: classifyProfileToken(text),
+  }));
+
+  const ageToken = classifiedTokens.find((item) => item.token.kind === "age")?.token;
+  const educationToken = classifiedTokens.find((item) => item.token.kind === "education")?.token;
+  const ageText = ageToken?.kind === "age" ? ageToken.value : "";
+  const education = educationToken?.kind === "education" ? educationToken.value : "";
+
+  const ageIndex = classifiedTokens.find((item) => item.token.kind === "age")?.index ?? -1;
+  const educationIndex =
+    classifiedTokens.find((item) => item.token.kind === "education")?.index ?? -1;
+  const experienceCandidates = classifiedTokens.flatMap((item) =>
+    item.token.kind === "experience" ? [{ index: item.index, experience: item.token.value }] : [],
+  );
+  const preferredExperience =
+    experienceCandidates.find(
+      (candidate) =>
+        (ageIndex < 0 || candidate.index > ageIndex) &&
+        (educationIndex < 0 || candidate.index < educationIndex),
+    )?.experience ??
+    experienceCandidates[0]?.experience ??
+    "";
+
+  return {
+    age: ageText,
+    experience: isPlausibleWorkExperience(ageText, preferredExperience) ? preferredExperience : "",
+    education,
+  };
+}
 
 export type NativeRecommendCardInspection = {
   readonly found: boolean;
@@ -1989,13 +2154,11 @@ export class ZhipinNativePagePort {
             const text = el.textContent?.trim();
             if (text) infoTexts.push(text);
           });
-          const fullInfo = infoTexts.join(" ");
 
-          const ageMatch = fullInfo.match(/(\\d{2,3})岁/);
-          const age = ageMatch ? ageMatch[1] + "岁" : "";
-          const expMatch = fullInfo.match(/(\\d+年(?:以上)?|应届生|在校生)/);
-          const experience = expMatch?.[1] ?? "";
-          const education = fullInfo.match(/(初中|高中|中专|大专|本科|硕士|博士)/)?.[1] ?? "";
+          const profile = (${parseZhipinCandidateProfileTokens.toString()})(infoTexts);
+          const age = profile.age;
+          const experience = profile.experience;
+          const education = profile.education;
 
           let communicationPosition = "";
           const posNameEl = conversationRoot.querySelector(".position-name");
@@ -2607,6 +2770,7 @@ export class ZhipinNativePagePort {
       const iframe = document.querySelector(${JSON.stringify(ZHIPIN_SELECTORS.recommend.iframe)});
       const href = location.href;
       const recommendUrlMarkers = ${JSON.stringify(ZHIPIN_RECOMMEND_URL_MARKERS)};
+      const parseCandidateProfileTokens = ${parseZhipinCandidateProfileTokens.toString()};
       const hasRecommendUrl = recommendUrlMarkers.some((marker) => href.includes(marker));
       if (!hasRecommendUrl && href.includes("/web/chat/index")) {
         return {
@@ -2658,14 +2822,12 @@ export class ZhipinNativePagePort {
           textParts = splitParts(baseInfoEl.textContent?.trim() ?? "");
         }
 
+        const profile = parseCandidateProfileTokens(textParts);
+        age = profile.age;
+        experience = profile.experience;
+        education = profile.education;
         for (const part of textParts) {
-          if (!age && part.includes("岁")) {
-            age = part;
-          } else if (!experience && (part.includes("年") || part.includes("应届") || part.includes("在校"))) {
-            experience = part;
-          } else if (!education && /(初中|高中|中专|中技|大专|本科|硕士|博士)/.test(part)) {
-            education = part;
-          } else if (!workStatus && /(在职|离职|在校)/.test(part)) {
+          if (!workStatus && /(在职|离职|在校)/.test(part)) {
             workStatus = part;
           }
         }
@@ -3825,6 +3987,7 @@ export class ZhipinNativePagePort {
           const iframe = document.querySelector(${JSON.stringify(ZHIPIN_SELECTORS.recommend.iframe)});
           const href = location.href;
           const recommendUrlMarkers = ${JSON.stringify(ZHIPIN_RECOMMEND_URL_MARKERS)};
+          const parseCandidateProfileTokens = ${parseZhipinCandidateProfileTokens.toString()};
           const hasRecommendUrl = recommendUrlMarkers.some((marker) => href.includes(marker));
           if (!hasRecommendUrl && href.includes("/web/chat/index")) {
             return [];
@@ -3876,14 +4039,12 @@ export class ZhipinNativePagePort {
                   .filter(Boolean);
               }
 
+              const profile = parseCandidateProfileTokens(textParts);
+              age = profile.age;
+              experience = profile.experience;
+              education = profile.education;
               for (const part of textParts) {
-                if (!age && part.includes("岁")) {
-                  age = part;
-                } else if (!experience && (part.includes("年") || part.includes("应届") || part.includes("在校"))) {
-                  experience = part;
-                } else if (!education && /(初中|高中|中专|中技|大专|本科|硕士|博士)/.test(part)) {
-                  education = part;
-                } else if (!workStatus && /(在职|离职|在校)/.test(part)) {
+                if (!workStatus && /(在职|离职|在校)/.test(part)) {
                   workStatus = part;
                 }
               }

@@ -4,18 +4,36 @@ type NativePreviewTarget = {
   evaluateJson<T = unknown>(expression: string): Promise<T>;
 };
 
+export interface NativeReplyPreviewVariantOption {
+  readonly option: string;
+  readonly suggestedReply: string;
+}
+
+export interface NativeReplyPreviewFinding {
+  readonly code: string;
+  readonly description: string;
+}
+
+export interface NativeReplyPreviewVariantSelection {
+  readonly options: readonly NativeReplyPreviewVariantOption[];
+  readonly findings: readonly NativeReplyPreviewFinding[];
+}
+
 function buildPreviewScript(input: {
   readonly mode: "begin" | "status" | "draft" | "final" | "complete" | "fail" | "clear";
   readonly label?: string;
   readonly locationSummary?: string;
   readonly draftText?: string;
   readonly provisional?: boolean;
+  readonly variantSelection?: NativeReplyPreviewVariantSelection;
 }): string {
   return `(() => {
     const input = ${JSON.stringify(input)};
     const rootId = "roll-agent-reply-preview-root";
     const statusId = "roll-agent-reply-preview-status";
     const draftId = "roll-agent-reply-preview-draft";
+    const variantsId = "roll-agent-reply-preview-variants";
+    const findingsId = "roll-agent-reply-preview-findings";
     const badgeId = "roll-agent-reply-preview-badge";
     const locationId = "roll-agent-reply-preview-location";
     const spinnerId = "roll-agent-reply-preview-spinner";
@@ -144,8 +162,25 @@ function buildPreviewScript(input: {
       draft.style.lineHeight = "21px";
       draft.style.color = "#E2E8F0";
 
+      const variants = document.createElement("div");
+      variants.id = variantsId;
+      variants.style.display = "none";
+      variants.style.gridTemplateColumns = "repeat(2, minmax(0, 1fr))";
+      variants.style.gap = "10px";
+      variants.style.minHeight = "0";
+
+      const findings = document.createElement("div");
+      findings.id = findingsId;
+      findings.style.display = "none";
+      findings.style.flexDirection = "column";
+      findings.style.gap = "4px";
+      findings.style.paddingTop = "2px";
+      findings.style.fontSize = "11px";
+      findings.style.lineHeight = "16px";
+      findings.style.color = "#CBD5E1";
+
       header.append(spinner, status);
-      root.append(header, location, badge, draft);
+      root.append(header, location, badge, draft, variants, findings);
       document.documentElement.append(root);
       return root;
     };
@@ -154,12 +189,18 @@ function buildPreviewScript(input: {
     const status = document.getElementById(statusId);
     const location = document.getElementById(locationId);
     const draft = document.getElementById(draftId);
+    const variants = document.getElementById(variantsId);
+    const findings = document.getElementById(findingsId);
     const badge = document.getElementById(badgeId);
     const spinner = document.getElementById(spinnerId);
-    if (!status || !location || !draft || !badge || !spinner) return false;
+    if (!status || !location || !draft || !variants || !findings || !badge || !spinner) return false;
 
     root.style.opacity = "1";
     root.style.transform = "translateY(0)";
+    root.style.width = input.variantSelection
+      ? "min(760px, calc(100vw - 40px))"
+      : "min(420px, calc(100vw - 40px))";
+    root.style.maxHeight = input.variantSelection ? "58vh" : "42vh";
 
     if (typeof input.label === "string") {
       status.textContent = input.label;
@@ -175,6 +216,82 @@ function buildPreviewScript(input: {
 
     if (typeof input.draftText === "string") {
       draft.textContent = input.draftText;
+    }
+
+    const resetVariantSelection = () => {
+      variants.replaceChildren();
+      variants.style.display = "none";
+      findings.replaceChildren();
+      findings.style.display = "none";
+      draft.style.display = "block";
+    };
+
+    const renderVariantSelection = (selection) => {
+      variants.replaceChildren();
+      findings.replaceChildren();
+      draft.style.display = "none";
+      variants.style.display = "grid";
+      variants.style.gridTemplateColumns =
+        window.innerWidth < 640 ? "minmax(0, 1fr)" : "repeat(2, minmax(0, 1fr))";
+
+      for (const option of selection.options) {
+        const card = document.createElement("div");
+        card.style.minWidth = "0";
+        card.style.maxHeight = "32vh";
+        card.style.overflow = "hidden auto";
+        card.style.padding = "10px";
+        card.style.borderRadius = "8px";
+        card.style.border = "1px solid rgba(148, 163, 184, 0.28)";
+        card.style.background = "rgba(15, 23, 42, 0.66)";
+
+        const title = document.createElement("div");
+        title.textContent = option.option;
+        title.style.marginBottom = "6px";
+        title.style.fontSize = "12px";
+        title.style.fontWeight = "700";
+        title.style.lineHeight = "16px";
+        title.style.color = "#A7F3D0";
+
+        const body = document.createElement("div");
+        body.textContent = option.suggestedReply;
+        body.style.whiteSpace = "pre-wrap";
+        body.style.fontSize = "13px";
+        body.style.lineHeight = "20px";
+        body.style.color = "#E2E8F0";
+
+        card.append(title, body);
+        variants.append(card);
+      }
+
+      if (selection.findings.length > 0) {
+        findings.style.display = "flex";
+        const title = document.createElement("div");
+        title.textContent = "检查项";
+        title.style.fontWeight = "700";
+        title.style.color = "#FDE68A";
+        findings.append(title);
+
+        for (const finding of selection.findings) {
+          const item = document.createElement("div");
+          item.textContent = finding.description || finding.code;
+          item.style.color = "#CBD5E1";
+          findings.append(item);
+        }
+      } else {
+        findings.style.display = "none";
+      }
+    };
+
+    if (input.variantSelection && input.variantSelection.options.length > 0) {
+      renderVariantSelection(input.variantSelection);
+    } else if (
+      input.mode === "begin" ||
+      input.mode === "draft" ||
+      input.mode === "final" ||
+      input.mode === "complete" ||
+      input.mode === "fail"
+    ) {
+      resetVariantSelection();
     }
 
     if (input.mode === "final" || input.mode === "complete") {
@@ -244,12 +361,17 @@ export class NativeReplyPreviewVisualSession {
     });
   }
 
-  async complete(label: string, finalReply: string): Promise<boolean> {
+  async complete(
+    label: string,
+    finalReply: string,
+    variantSelection?: NativeReplyPreviewVariantSelection,
+  ): Promise<boolean> {
     return await this.render({
       mode: "complete",
       label,
       draftText: finalReply,
       provisional: false,
+      ...(variantSelection !== undefined ? { variantSelection } : {}),
     });
   }
 

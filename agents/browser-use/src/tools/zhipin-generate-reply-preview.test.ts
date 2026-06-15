@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
 import { afterEach, describe, it } from "node:test";
 import type { AgentContext } from "@roll-agent/sdk";
-import type { ReplyStreamEvent } from "@roll-agent/reply-authority-client";
+import {
+  ReplyAuthorityRequestError,
+  type ReplyStreamEvent,
+} from "@roll-agent/reply-authority-client";
 import type {
   NativeCandidateChatDetails,
   ZhipinNativePagePort,
@@ -73,8 +76,14 @@ function createPreviewSession(calls: string[]) {
       calls.push(`preview:draft:${provisional ? "draft" : "final"}:${draftText}`);
       return true;
     },
-    async complete(label: string, finalReply: string) {
-      calls.push(`preview:complete:${label}:${finalReply}`);
+    async complete(
+      label: string,
+      finalReply: string,
+      variantSelection?: { options: readonly unknown[] },
+    ) {
+      calls.push(
+        `preview:complete:${label}:${finalReply}:variants=${variantSelection?.options.length ?? 0}`,
+      );
       return true;
     },
     async fail(label: string) {
@@ -249,6 +258,19 @@ async function* createMockStream(): AsyncGenerator<ReplyStreamEvent> {
   };
 }
 
+async function* createFailingReplyAuthorityStream(
+  statusCode: number,
+  message: string,
+): AsyncGenerator<ReplyStreamEvent> {
+  throw new ReplyAuthorityRequestError(message, {
+    meta: {
+      url: "https://reply-authority.example/generate-signed-reply",
+      timeoutMs: 30_000,
+    },
+    statusCode,
+  });
+}
+
 async function* createDualDraftMockStream(): AsyncGenerator<ReplyStreamEvent> {
   yield {
     type: "stream.started",
@@ -407,7 +429,7 @@ describe("zhipin_generate_reply_preview", () => {
     assert.equal(calls.includes("preview:draft:draft:您好，薪资可以详聊。"), true);
     assert.equal(
       calls.some((call) =>
-        /^preview:complete:回复已生成 · 总 .* · 生成 3\.2s · 预热命中:您好，薪资可以详聊。$/.test(
+        /^preview:complete:回复已生成 · 总 .* · 生成 3\.2s · 预热命中:您好，薪资可以详聊。:variants=0$/.test(
           call,
         ),
       ),
@@ -460,6 +482,10 @@ describe("zhipin_generate_reply_preview", () => {
     assert.equal(JSON.stringify(result).includes("payload.draft.signature"), false);
     assert.equal(JSON.stringify(result).includes('"draft"'), false);
     assert.equal(JSON.stringify(result).includes('"revised"'), false);
+    assert.equal(
+      calls.some((call) => call.startsWith("preview:complete:") && call.endsWith(":variants=2")),
+      true,
+    );
 
     const consumed = consumePreparedReply(result.preparedReplyId ?? "", 1_800_000_000);
     assert.equal(consumed.ok, true);
@@ -971,5 +997,56 @@ describe("zhipin_generate_reply_preview", () => {
     assert.match(result.error ?? "", /聊天详情目标与当前选中会话不一致/);
     assert.equal(result.preparedReplyId, undefined);
     assert.equal(streamCalled, false);
+  });
+
+  it("classifies Reply Authority business rejection, timeout, and server errors", async () => {
+    const cases = [
+      {
+        statusCode: 422,
+        message: "BUSINESS_RULE_VIOLATION: rejected_after_regeneration",
+        expectedKind: "rejected",
+        expectedMessage: "回复未通过事实核验",
+      },
+      {
+        statusCode: 504,
+        message: "LLM_TIMEOUT",
+        expectedKind: "timeout",
+        expectedMessage: "AI 响应超时",
+      },
+      {
+        statusCode: 500,
+        message: "Internal Server Error",
+        expectedKind: "server_error",
+        expectedMessage: "Reply Authority 服务端异常",
+      },
+    ] as const;
+
+    for (const scenario of cases) {
+      const calls: string[] = [];
+      setZhipinGenerateReplyPreviewDepsForTests({
+        openNativePagePort: async () => createNativePage(calls),
+        createNativeVisualActivitySession: () => createNoopSession(calls),
+        createReplyPreviewVisualSession: () => createPreviewSession(calls),
+        streamGenerateSignedReply: () =>
+          createFailingReplyAuthorityStream(scenario.statusCode, scenario.message),
+      });
+
+      const result = await zhipinGenerateReplyPreview.execute(
+        { conversationId: "conv-1", maxMessages: 20 },
+        createTestContext(),
+      );
+
+      assert.equal(result.success, false);
+      assert.equal(result.errorKind, scenario.expectedKind);
+      assert.match(result.error ?? "", new RegExp(scenario.expectedMessage));
+      assert.equal(
+        calls.some(
+          (call) => call.startsWith("preview:fail:") && call.includes(scenario.expectedMessage),
+        ),
+        true,
+      );
+      resetPreparedReplyStoreForTests();
+      setZhipinGenerateReplyPreviewDepsForTests(undefined);
+    }
   });
 });
