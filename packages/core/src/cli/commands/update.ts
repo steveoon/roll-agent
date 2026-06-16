@@ -33,6 +33,7 @@ import {
   checkForUpdate,
   checkPublishedPackageUpdate,
   getCurrentVersion,
+  isPinnedPublishedPackageSpec,
   type PublishedPackageUpdateInfo,
   type PublishedPackageUpdateStatus,
 } from "../utils/update-checker.ts";
@@ -210,6 +211,26 @@ function hydrateInstalledPackageAgent(agent: RegisteredAgent, store?: AgentStore
   return nextAgent;
 }
 
+function getInstalledPackageUpdateSpec(agent: RegisteredAgent): string | undefined {
+  if (agent.source?.type !== "installed-package") {
+    return undefined;
+  }
+
+  const { packageName, packageSpec } = agent.source;
+
+  // Floating npm specs can reuse an old saved dependency range inside --prefix, e.g. ^0.15.0.
+  // The update checker compares floating registry specs against latest, so install latest explicitly.
+  if (
+    packageSpec === packageName ||
+    (packageSpec.startsWith(`${packageName}@`) &&
+      !isPinnedPublishedPackageSpec(packageName, packageSpec))
+  ) {
+    return `${packageName}@latest`;
+  }
+
+  return packageSpec;
+}
+
 /** 更新 roll-core 自身 */
 async function updateSelf(
   latest: string,
@@ -302,13 +323,18 @@ async function updateInstalledAgent(
   }
 
   const spinner = createSpinner(`更新 ${agent.skill.name} (npm install)...`).start();
+  const packageSpec = getInstalledPackageUpdateSpec(agent);
+  if (!packageSpec) {
+    spinner.fail(`${agent.skill.name} 更新失败`);
+    return undefined;
+  }
   const installSpec: PackageManagerRunSpec = {
     command: "npm",
     args: [
       "install",
       "--prefix",
       agent.source.installDir,
-      agent.source.packageSpec,
+      packageSpec,
       ...buildInstallNetworkArgs(install),
     ],
   };

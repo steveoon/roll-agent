@@ -171,6 +171,102 @@ process.exit(0);
   chmodSync(npmPath, 0o755);
 }
 
+function createFakeNpmAgentInstaller(
+  binDir: string,
+  options: {
+    readonly packageName: string;
+    readonly oldVersion: string;
+    readonly latestVersion: string;
+    readonly coreVersion: string;
+    readonly installLogPath: string;
+  },
+): void {
+  mkdirSync(binDir, { recursive: true });
+  const npmPath = resolve(binDir, "npm");
+  writeFileSync(
+    npmPath,
+    `#!/usr/bin/env node
+const fs = require("node:fs");
+const path = require("node:path");
+
+const args = process.argv.slice(2);
+const packageName = ${JSON.stringify(options.packageName)};
+const oldVersion = ${JSON.stringify(options.oldVersion)};
+const latestVersion = ${JSON.stringify(options.latestVersion)};
+const coreVersion = ${JSON.stringify(options.coreVersion)};
+const installLogPath = ${JSON.stringify(options.installLogPath)};
+
+function packageRoot(prefix) {
+  return path.join(prefix, "node_modules", ...packageName.split("/"));
+}
+
+function writeInstalledPackage(prefix, version) {
+  const root = packageRoot(prefix);
+  fs.mkdirSync(root, { recursive: true });
+  fs.writeFileSync(
+    path.join(root, "package.json"),
+    JSON.stringify(
+      {
+        name: packageName,
+        version,
+        type: "module",
+        rollAgent: {
+          runtime: { ownership: "on-demand", transport: "stdio" },
+          start: { command: "node", args: ["dist/index.js"] },
+        },
+      },
+      null,
+      2,
+    ),
+    "utf-8",
+  );
+  fs.writeFileSync(
+    path.join(root, "SKILL.md"),
+    "---\\nname: browser-use-agent\\ndescription: Browser automation agent\\n---\\n\\nFixture.\\n",
+    "utf-8",
+  );
+}
+
+if (args[0] === "view" && args[2] === "version") {
+  const useJson = args.includes("--json");
+  const latest = args[1] === packageName ? latestVersion : coreVersion;
+  process.stdout.write((useJson ? JSON.stringify(latest) : latest) + "\\n");
+  process.exit(0);
+}
+
+if (args[0] === "install" && args[1] === "-g") {
+  process.exit(0);
+}
+
+if (args[0] === "install") {
+  const prefixIndex = args.indexOf("--prefix");
+  const prefix = prefixIndex === -1 ? undefined : args[prefixIndex + 1];
+  const packageSpec = args.find((arg, index) => {
+    return index > 0 && args[index - 1] !== "--prefix" && !arg.startsWith("--");
+  });
+  if (!prefix || !packageSpec) {
+    process.stderr.write("missing --prefix or package spec\\n");
+    process.exit(1);
+  }
+
+  fs.appendFileSync(installLogPath, packageSpec + "\\n", "utf-8");
+  const pinnedOldSpec = packageName + "@" + oldVersion;
+  const rangedOldSpec = packageName + "@^" + oldVersion;
+  const version =
+    packageSpec === packageName || packageSpec === rangedOldSpec || packageSpec === pinnedOldSpec
+      ? oldVersion
+      : latestVersion;
+  writeInstalledPackage(prefix, version);
+  process.exit(0);
+}
+
+process.exit(0);
+`,
+    "utf-8",
+  );
+  chmodSync(npmPath, 0o755);
+}
+
 function createCoreManagedHttpFixtureAgent(
   agentDir: string,
   port: number,
@@ -1554,6 +1650,150 @@ test("e2e smoke: update --check refreshes installed-package agent versions", () 
     );
   } finally {
     rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("e2e smoke: update resolves installed-package specs consistently", () => {
+  const packageName = "@roll-agent/browser-use-agent";
+  const cases = [
+    {
+      expectedInstallSpec: `${packageName}@latest`,
+      expectedVersion: "0.20.0",
+      label: "bare package",
+      packageSpec: packageName,
+    },
+    {
+      expectedInstallSpec: `${packageName}@latest`,
+      expectedVersion: "0.20.0",
+      label: "version range",
+      packageSpec: `${packageName}@^0.15.0`,
+    },
+    {
+      expectedInstallSpec: `${packageName}@0.15.0`,
+      expectedVersion: "0.15.0",
+      label: "exact version",
+      packageSpec: `${packageName}@0.15.0`,
+    },
+  ] as const;
+
+  for (const testCase of cases) {
+    const workspace = mkdtempSync(resolve(tmpdir(), `roll-update-install-agent-${randomUUID()}-`));
+    const fakeBinDir = resolve(workspace, "fake-bin");
+    const dataDir = resolve(workspace, "agents-data");
+    const installDir = resolve(workspace, "installed-agents");
+    const packageRoot = resolve(installDir, "node_modules/@roll-agent/browser-use-agent");
+    const installLogPath = resolve(workspace, "fake-npm-install.log");
+
+    try {
+      createFakeNpmAgentInstaller(fakeBinDir, {
+        packageName,
+        oldVersion: "0.15.0",
+        latestVersion: "0.20.0",
+        coreVersion: CURRENT_CORE_VERSION,
+        installLogPath,
+      });
+      mkdirSync(packageRoot, { recursive: true });
+      mkdirSync(dataDir, { recursive: true });
+      writeFileSync(
+        resolve(workspace, "roll.config.yaml"),
+        `agents:
+  data-dir: ${JSON.stringify(dataDir)}
+`,
+        "utf-8",
+      );
+      writeFileSync(
+        resolve(installDir, "package.json"),
+        JSON.stringify({ dependencies: { [packageName]: "^0.15.0" } }, null, 2),
+        "utf-8",
+      );
+      writeFileSync(
+        resolve(packageRoot, "package.json"),
+        JSON.stringify(
+          {
+            name: packageName,
+            version: "0.15.0",
+            type: "module",
+            rollAgent: {
+              runtime: { ownership: "on-demand", transport: "stdio" },
+              start: { command: "node", args: ["dist/index.js"] },
+            },
+          },
+          null,
+          2,
+        ),
+        "utf-8",
+      );
+      writeFileSync(
+        resolve(packageRoot, "SKILL.md"),
+        "---\nname: browser-use-agent\ndescription: Browser automation agent\n---\n\nFixture.\n",
+        "utf-8",
+      );
+      writeFileSync(
+        resolve(dataDir, "agents.json"),
+        JSON.stringify(
+          {
+            schemaVersion: 2,
+            agents: [
+              {
+                skill: {
+                  name: "browser-use-agent",
+                  description: "Browser automation agent",
+                  metadata: {},
+                },
+                transport: { type: "stdio", command: "node" },
+                runtime: { ownership: "on-demand" },
+                installPath: packageRoot,
+                registeredAt: "2026-01-01T00:00:00.000Z",
+                status: "idle",
+                source: {
+                  type: "installed-package",
+                  packageName,
+                  packageSpec: testCase.packageSpec,
+                  installDir,
+                  installedVersion: "0.15.0",
+                },
+              },
+            ],
+          },
+          null,
+          2,
+        ),
+        "utf-8",
+      );
+
+      const result = runRoll(["update"], workspace, {
+        env: {
+          HOME: workspace,
+          PATH: `${fakeBinDir}:${process.env["PATH"] ?? ""}`,
+        },
+      });
+
+      assert.equal(result.status, 0, `${testCase.label}: ${result.stderr}`);
+      assert.match(result.stderr, /browser-use-agent 已重新安装/, testCase.label);
+      assert.equal(readFileSync(installLogPath, "utf-8").trim(), testCase.expectedInstallSpec);
+
+      const stored = JSON.parse(readFileSync(resolve(dataDir, "agents.json"), "utf-8")) as {
+        agents?: Array<{
+          source?: {
+            installedVersion?: unknown;
+            packageSpec?: unknown;
+          };
+        }>;
+      };
+      assert.equal(
+        stored.agents?.[0]?.source?.installedVersion,
+        testCase.expectedVersion,
+        testCase.label,
+      );
+      assert.equal(stored.agents?.[0]?.source?.packageSpec, testCase.packageSpec, testCase.label);
+
+      const manifest = JSON.parse(readFileSync(resolve(packageRoot, "package.json"), "utf-8")) as {
+        version?: unknown;
+      };
+      assert.equal(manifest.version, testCase.expectedVersion, testCase.label);
+    } finally {
+      rmSync(workspace, { recursive: true, force: true });
+    }
   }
 });
 

@@ -10,6 +10,13 @@ $FindUnreadRef = Join-Path $ScriptDir "find-unread-ref.mjs"
 $ParseReadCandidate = Join-Path $ScriptDir "parse-read-candidate.mjs"
 $ValidateOpenChat = Join-Path $ScriptDir "validate-open-chat.mjs"
 $ValidateGenerate = Join-Path $ScriptDir "validate-generate.mjs"
+$ParseGeneratePreview = Join-Path $ScriptDir "parse-generate-preview.mjs"
+$BuildSendPayload = Join-Path $ScriptDir "build-send-payload.mjs"
+$ApplySendBundle = Join-Path $ScriptDir "apply-send-bundle.mjs"
+$WriteJudgeInput = Join-Path $ScriptDir "write-judge-input.mjs"
+$ComposeResultInput = Join-Path $ScriptDir "compose-result-input.mjs"
+$FormatCandidateResult = Join-Path $ScriptDir "format-candidate-result.mjs"
+$ParseSendResult = Join-Path $ScriptDir "parse-send-result.mjs"
 $ValidateSend = Join-Path $ScriptDir "validate-send.mjs"
 $CheckAgentHealth = Join-Path $ScriptDir "check-agent-health.mjs"
 $ValidateBrowserSelection = Join-Path $ScriptDir "validate-browser-selection.mjs"
@@ -39,6 +46,7 @@ $BatchPause = 0
 $MaxConsecutiveFailures = 2
 $MaxEmptyReads = 2
 $KeepWorkDir = $false
+$NoJudge = $false
 $ResultsFile = Join-Path ([System.IO.Path]::GetTempPath()) ("roll-zhipin-unread-reply-{0:yyyyMMdd-HHmmss}.jsonl" -f (Get-Date))
 $UnreadFilterApplied = $false
 $WorkDir = $null
@@ -56,6 +64,7 @@ Requires: roll and node on PATH.
                             Target browser.instances id for every browser-use tool call
   -NoUnreadFilter           Skip clicking unread tab
   -NoExchangeWechat         Skip exchange-wechat after send
+  -NoJudge / --no-judge     Skip zhipin_judge_prepared_reply on dual-draft previews
   -KeepWorkDir              Do not delete temp workdir (debug)
   -Help
 
@@ -96,6 +105,7 @@ function Parse-Args([string[]]$Argv) {
       { $_ -in "-DryRun", "--dry-run" } { $script:DryRun = $true; $i++; continue }
       { $_ -in "-NoUnreadFilter", "--no-unread-filter" } { $script:ClickUnreadFilter = $false; $i++; continue }
       { $_ -in "-NoExchangeWechat", "--no-exchange-wechat" } { $script:ExchangeWechat = $false; $i++; continue }
+      { $_ -in "-NoJudge", "--no-judge" } { $script:NoJudge = $true; $i++; continue }
       { $_ -in "-KeepWorkDir", "--keep-workdir" } { $script:KeepWorkDir = $true; $i++; continue }
       { $_ -in "-MinGap", "--min-gap" } {
         Require-NextArg $Argv $i $_
@@ -152,7 +162,7 @@ function Read-TextFile([string]$Path) {
   return [System.IO.File]::ReadAllText($Path, [System.Text.UTF8Encoding]::new($false))
 }
 
-function Append-ResultObject([hashtable]$Row) {
+function Append-ResultObject($Row) {
   $line = $Row | ConvertTo-Json -Compress -Depth 8
   $null = $line | & node $script:AppendJsonl $script:ResultsFile 2>&1
   if ($LASTEXITCODE -ne 0) {
@@ -160,11 +170,14 @@ function Append-ResultObject([hashtable]$Row) {
   }
 }
 
-function Invoke-NodeStdin([string]$MjsPath, [string]$StdinText) {
+function Invoke-NodeStdin([string]$MjsPath, [string]$StdinText, [string[]]$NodeArgs = @()) {
   if ($null -eq $StdinText) { $StdinText = "" }
   $prev = $ErrorActionPreference
   $ErrorActionPreference = "Continue"
   try {
+    if ($NodeArgs.Count -gt 0) {
+      return [string]($StdinText | & node $MjsPath @NodeArgs 2>&1)
+    }
     return [string]($StdinText | & node $MjsPath 2>&1)
   }
   finally {
@@ -188,6 +201,27 @@ function Invoke-NodeStdinExit([string]$MjsPath, [string]$StdinText, [string[]]$N
   finally {
     $ErrorActionPreference = $prev
   }
+}
+
+function Format-SendResultLine(
+  [string]$Mode,
+  [string]$LineTs,
+  [string]$LineName,
+  [string]$LineCid,
+  [string]$LinePreparedId,
+  [string]$LineSendResult,
+  [int]$ExchangedFlag = 0
+) {
+  $sendResultPath = Join-Path $script:WorkDir "send-result.json"
+  Write-JsonFile $sendResultPath $LineSendResult
+  $bundlePath = Join-Path $script:WorkDir "send-bundle.json"
+  $payload = (& node $script:ComposeResultInput $bundlePath $sendResultPath 2>$null).Trim()
+  if (-not $payload) {
+    return ""
+  }
+  return (Invoke-NodeStdin $script:FormatCandidateResult $payload @(
+    $Mode, $LineTs, $LineName, $LineCid, $LinePreparedId, [string]$ExchangedFlag
+  )).Trim()
 }
 
 function Invoke-RollCapture {
@@ -232,8 +266,10 @@ function Add-BrowserInstanceToJsonFile([string]$File) {
   Write-JsonFile $File ($payload | ConvertTo-Json -Compress -Depth 16)
 }
 
-function Invoke-RollJsonFile([string]$Tool, [string]$File) {
-  Add-BrowserInstanceToJsonFile $File
+function Invoke-RollJsonFile([string]$Tool, [string]$File, [switch]$SkipBrowserInstance) {
+  if (-not $SkipBrowserInstance) {
+    Add-BrowserInstanceToJsonFile $File
+  }
   return Invoke-RollCapture -RollArgs @("run", $script:Agent, $Tool, "--input-file", $File, "--json")
 }
 
@@ -441,20 +477,74 @@ function Process-One([string]$Cid, [string]$Name, [string]$Preview) {
   Write-JsonFile $gpFile '{"maxMessages":100}'
   Write-Log "zhipin_generate_reply_preview (current chat, no re-open)"
   $previewOut = Invoke-RollJsonFile "zhipin_generate_reply_preview" $gpFile
-  $preparedId = (Invoke-NodeStdin $script:ValidateGenerate $previewOut).Trim()
-  if (-not $preparedId) {
+  $previewMetaRaw = (Invoke-NodeStdin $script:ParseGeneratePreview $previewOut @()).Trim()
+  if (-not $previewMetaRaw -or -not $previewMetaRaw.StartsWith("{")) {
+    Append-ResultObject @{ ts = $ts; name = $Name; conversationId = $Cid; ok = $false; stage = "preview" }
+    Back-ToList
+    return 1
+  }
+  $previewMeta = $previewMetaRaw | ConvertFrom-Json
+  $preparedId = [string]$previewMeta.preparedReplyId
+  $hasDual = [bool]$previewMeta.hasDualDraft
+  if ([string]::IsNullOrWhiteSpace($preparedId)) {
     Append-ResultObject @{ ts = $ts; name = $Name; conversationId = $Cid; ok = $false; stage = "preview" }
     Back-ToList
     return 1
   }
 
-  $spFile = Join-Path $script:WorkDir "sp.json"
-  Write-JsonFile $spFile (@{ preparedReplyId = $preparedId } | ConvertTo-Json -Compress)
-  $sendOut = Invoke-RollJsonFile "zhipin_send_prepared_reply" $spFile
-  $sendCode = Invoke-NodeStdinExit $script:ValidateSend $sendOut @()
-  if ($sendCode -ne 0) {
+  $judgeOut = ""
+  if ($hasDual -and -not $script:NoJudge) {
+    $judgeFile = Join-Path $script:WorkDir "judge.json"
+    $null = & node $script:WriteJudgeInput $judgeFile $preparedId 2>$null
+    if ($LASTEXITCODE -ne 0) {
+      Append-ResultObject @{
+        ts = $ts; name = $Name; conversationId = $Cid; ok = $false; stage = "send_build"; preparedReplyId = $preparedId; hasDualDraft = $hasDual
+      }
+      Back-ToList
+      return 1
+    }
+    Write-Log "zhipin_judge_prepared_reply (dual draft)"
+    $judgeOut = Invoke-RollJsonFile "zhipin_judge_prepared_reply" $judgeFile -SkipBrowserInstance
+  }
+  elseif ($hasDual) {
+    Write-Log "dual draft detected; --no-judge -> send recommended option only"
+  }
+
+  $hasDualFlag = if ($hasDual) { "1" } else { "0" }
+  $noJudgeFlag = if ($script:NoJudge) { "1" } else { "0" }
+  $sendBundleRaw = (Invoke-NodeStdin $script:BuildSendPayload $judgeOut @($preparedId, $hasDualFlag, $noJudgeFlag)).Trim()
+  if (-not $sendBundleRaw -or -not $sendBundleRaw.StartsWith("{")) {
     Append-ResultObject @{
-      ts = $ts; name = $Name; conversationId = $Cid; ok = $false; stage = "send"; preparedReplyId = $preparedId
+      ts = $ts; name = $Name; conversationId = $Cid; ok = $false; stage = "send_build"; preparedReplyId = $preparedId; hasDualDraft = $hasDual
+    }
+    Back-ToList
+    return 1
+  }
+  $sendBundlePath = Join-Path $script:WorkDir "send-bundle.json"
+  Write-JsonFile $sendBundlePath $sendBundleRaw
+  $spFile = Join-Path $script:WorkDir "sp.json"
+  $applyCode = Invoke-NodeStdinExit $script:ApplySendBundle $sendBundleRaw @($spFile)
+  if ($applyCode -ne 0) {
+    Append-ResultObject @{
+      ts = $ts; name = $Name; conversationId = $Cid; ok = $false; stage = "send_build"; preparedReplyId = $preparedId; hasDualDraft = $hasDual
+    }
+    Back-ToList
+    return 1
+  }
+
+  $sendOut = Invoke-RollJsonFile "zhipin_send_prepared_reply" $spFile
+  $sendResultRaw = (Invoke-NodeStdin $script:ParseSendResult $sendOut).Trim()
+  if (-not $sendResultRaw -or -not $sendResultRaw.StartsWith("{")) {
+    $sendResultRaw = '{"ok":false}'
+  }
+  $sendResult = $sendResultRaw | ConvertFrom-Json
+  if (-not $sendResult.ok) {
+    $failedLine = Format-SendResultLine "send_failed" $ts $Name $Cid $preparedId $sendResultRaw 0
+    if ($failedLine) {
+      Append-ResultObject ($failedLine | ConvertFrom-Json)
+    }
+    else {
+      Append-ResultObject @{ ts = $ts; name = $Name; conversationId = $Cid; ok = $false; stage = "send"; preparedReplyId = $preparedId }
     }
     Back-ToList
     return 1
@@ -469,9 +559,15 @@ function Process-One([string]$Cid, [string]$Name, [string]$Preview) {
     [void](Extract-RollJson (Invoke-RollJsonFile "zhipin_exchange_wechat" $wxFile))
   }
 
-  Append-ResultObject @{
-    ts = $ts; name = $Name; conversationId = $Cid; ok = $true
-    preparedReplyId = $preparedId; exchangedWechat = $script:ExchangeWechat
+  $successLine = Format-SendResultLine "sent" $ts $Name $Cid $preparedId $sendResultRaw $(if ($script:ExchangeWechat) { 1 } else { 0 })
+  if ($successLine) {
+    Append-ResultObject ($successLine | ConvertFrom-Json)
+  }
+  else {
+    Append-ResultObject @{
+      ts = $ts; name = $Name; conversationId = $Cid; ok = $true
+      preparedReplyId = $preparedId; exchangedWechat = $script:ExchangeWechat
+    }
   }
   Back-ToList
   return 10
@@ -490,7 +586,10 @@ if (-not (Get-Command node -ErrorAction SilentlyContinue)) {
 
 $helpers = @(
   $ExtractRollJson, $BuildSkipInput, $AppendJsonl, $SkipRulesJs,
-  $FindUnreadRef, $ParseReadCandidate, $ValidateOpenChat, $ValidateGenerate,
+  $FindUnreadRef, $ParseReadCandidate, $ValidateOpenChat,
+  $ParseGeneratePreview, $BuildSendPayload, $ApplySendBundle, $WriteJudgeInput, $ComposeResultInput,
+  $FormatCandidateResult,
+  $ParseSendResult,
   $ValidateSend, $CheckAgentHealth, $ValidateBrowserSelection, $DetectExpiredBanner, $ParsePageMeta
 )
 foreach ($helper in $helpers) {
