@@ -1,5 +1,11 @@
 # @roll-agent/core
 
+## 0.10.1
+
+### Patch Changes
+
+- [#120](https://github.com/steveoon/roll-agent/pull/120) [`fa22c1e`](https://github.com/steveoon/roll-agent/commit/fa22c1e49ba9bd56166c5a53e2e9945794d53b08) Thanks [@steveoon](https://github.com/steveoon)! - Fix `roll update` for installed agents registered with a bare npm package name so it resolves the latest published version instead of reusing an old saved npm dependency range.
+
 ## 0.10.0
 
 ### Minor Changes
