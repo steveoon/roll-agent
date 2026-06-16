@@ -265,7 +265,7 @@ function getVersionSpecifier(packageName: string, packageSpec: string): string |
   return packageSpec.slice(packageName.length + 1);
 }
 
-function isPinnedPublishedPackageSpec(packageName: string, packageSpec: string): boolean {
+export function isPinnedPublishedPackageSpec(packageName: string, packageSpec: string): boolean {
   const versionSpecifier = getVersionSpecifier(packageName, packageSpec);
   if (!versionSpecifier) {
     return false;
