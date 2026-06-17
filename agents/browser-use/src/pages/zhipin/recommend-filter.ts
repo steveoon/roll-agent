@@ -16,12 +16,109 @@ export const ZHIPIN_RECOMMEND_ACTIVITY_VALUES = [
 
 export type ZhipinRecommendActivity = (typeof ZHIPIN_RECOMMEND_ACTIVITY_VALUES)[number];
 
+export const ZHIPIN_RECOMMEND_FILTER_APPLY_MODE_VALUES = ["patch", "replace"] as const;
+
+export type ZhipinRecommendFilterApplyMode =
+  (typeof ZHIPIN_RECOMMEND_FILTER_APPLY_MODE_VALUES)[number];
+
+export const ZHIPIN_RECOMMEND_FILTER_OPTION_FIELDS = [
+  {
+    key: "gender",
+    label: "性别",
+    selection: "single",
+    clearValue: "不限",
+    values: ZHIPIN_RECOMMEND_GENDER_VALUES,
+  },
+  {
+    key: "activity",
+    label: "活跃度",
+    selection: "single",
+    clearValue: "不限",
+    values: ZHIPIN_RECOMMEND_ACTIVITY_VALUES,
+  },
+  {
+    key: "major",
+    label: "专业",
+    selection: "multi",
+    clearValue: "不限",
+  },
+  {
+    key: "recentNotView",
+    label: "近期没有看过",
+    selection: "single",
+    clearValue: "不限",
+  },
+  {
+    key: "exchangeResumeWithColleague",
+    label: "是否与同事交换简历",
+    selection: "single",
+    clearValue: "不限",
+  },
+  {
+    key: "candidateKeywords",
+    label: "牛人关键词",
+    selection: "multi",
+    clearValue: "不限",
+  },
+  {
+    key: "school",
+    label: "院校",
+    selection: "multi",
+    clearValue: "不限",
+  },
+  {
+    key: "switchJobFrequency",
+    label: "跳槽频率",
+    selection: "single",
+    clearValue: "不限",
+  },
+  {
+    key: "intention",
+    label: "求职意向",
+    selection: "multi",
+    clearValue: "不限",
+  },
+  {
+    key: "salary",
+    label: "薪资待遇",
+    selection: "single",
+    clearValue: "不限",
+  },
+  {
+    key: "degree",
+    label: "学历要求",
+    selection: "multi",
+    clearValue: "不限",
+  },
+  {
+    key: "experience",
+    label: "经验要求",
+    selection: "multi",
+    clearValue: "不限",
+  },
+  {
+    key: "callPhone",
+    label: "是否可拨打电话",
+    selection: "single",
+    clearValue: "不限",
+  },
+] as const;
+
+export type ZhipinRecommendFilterOptionField =
+  (typeof ZHIPIN_RECOMMEND_FILTER_OPTION_FIELDS)[number];
+
+export type ZhipinRecommendFilterOptionFieldKey = ZhipinRecommendFilterOptionField["key"];
+
+export type ZhipinRecommendFilterOptionSelectionMode =
+  ZhipinRecommendFilterOptionField["selection"];
+
 export const ZHIPIN_RECOMMEND_FILTER_STATUS_VALUES = [
   "applied",
   "recommend_not_ready",
   "filter_not_found",
   "requires_vip",
   "age_not_applied",
+  "clear_failed",
   "submit_failed",
   "error",
 ] as const;
@@ -31,18 +128,43 @@ export type ZhipinRecommendFilterStatus = (typeof ZHIPIN_RECOMMEND_FILTER_STATUS
 export type RecommendTarget = Page | NonNullable<ReturnType<Page["frame"]>>;
 type PageLocator = ReturnType<Page["locator"]>;
 
+export type ZhipinRecommendFilterOptionSelection = {
+  readonly fieldKey: ZhipinRecommendFilterOptionFieldKey;
+  readonly label: string;
+  readonly values: readonly string[];
+  readonly selection: ZhipinRecommendFilterOptionSelectionMode;
+  readonly clearValue: string;
+};
+
+export type ZhipinRecommendFilterAgeRange = {
+  readonly min?: number;
+  readonly max?: number;
+};
+
+export type ZhipinRecommendFilterLocationSelection = {
+  readonly city: string;
+  readonly district?: string;
+};
+
 export type ZhipinRecommendFilterRequest = {
+  readonly applyMode: ZhipinRecommendFilterApplyMode;
   readonly ageMin?: number;
   readonly ageMax?: number;
-  readonly gender: ZhipinRecommendGender;
-  readonly activity: ZhipinRecommendActivity;
+  readonly location?: ZhipinRecommendFilterLocationSelection;
+  readonly optionSelections: readonly ZhipinRecommendFilterOptionSelection[];
 };
 
 export type ZhipinRecommendFilterApplied = {
   readonly ageMin?: number;
   readonly ageMax?: number;
-  readonly gender: string;
-  readonly activity: string;
+  readonly location?: ZhipinRecommendFilterLocationSelection;
+  readonly optionSelections: readonly {
+    readonly fieldKey: ZhipinRecommendFilterOptionFieldKey;
+    readonly label: string;
+    readonly values: readonly string[];
+  }[];
+  readonly gender?: string;
+  readonly activity?: string;
 };
 
 export type ZhipinRecommendFilterApplyResult = {
@@ -52,6 +174,20 @@ export type ZhipinRecommendFilterApplyResult = {
   readonly filterButtonText?: string;
   readonly error?: string;
 };
+
+export function getZhipinRecommendFilterOptionField(
+  fieldKey: ZhipinRecommendFilterOptionFieldKey,
+): ZhipinRecommendFilterOptionField {
+  const field = ZHIPIN_RECOMMEND_FILTER_OPTION_FIELDS.find((item) => item.key === fieldKey);
+  if (field === undefined) {
+    throw new Error(`Unknown recommend filter field: ${fieldKey}`);
+  }
+  return field;
+}
+
+export function shouldApplyRecommendAgeRange(requested: ZhipinRecommendFilterRequest): boolean {
+  return requested.ageMin !== undefined || requested.ageMax !== undefined;
+}
 
 export type RecommendFilterVisualFeedback = {
   readonly moveToLocator: (
@@ -870,16 +1006,16 @@ async function detectAndCloseVipModal(page: Page, target: RecommendTarget): Prom
   return false;
 }
 
-async function readSelectedOptionText(
+async function readSelectedOptionTexts(
   target: RecommendTarget,
   rowLabel: string,
-  fallback: string,
-): Promise<string> {
+  fallback: readonly string[],
+): Promise<readonly string[]> {
   return await target.evaluate(
     (args: {
       panelSelector: string;
       rowLabel: string;
-      fallback: string;
+      fallback: readonly string[];
       selectedClassPattern: string;
       clickableOptionSelector: string;
     }) => {
@@ -930,9 +1066,11 @@ async function readSelectedOptionText(
       const selected = Array.from(row.querySelectorAll<HTMLElement>(args.clickableOptionSelector))
         .filter((element) => isVisible(element) && isSelected(element))
         .map((element) => normalizeText(element.textContent))
-        .find((text) => text !== "" && text !== args.rowLabel);
+        .filter((text) => text !== "" && text !== args.rowLabel);
 
-      return selected ?? args.fallback;
+      return Array.from(new Set(selected)).length > 0
+        ? Array.from(new Set(selected))
+        : args.fallback;
     },
     {
       panelSelector: ZHIPIN_SELECTORS.recommend.filterPanel,
@@ -949,11 +1087,28 @@ async function readAppliedState(
   requested: ZhipinRecommendFilterRequest,
   ageState: RecommendAgeState,
 ): Promise<ZhipinRecommendFilterApplied> {
+  const optionSelections = await Promise.all(
+    ZHIPIN_RECOMMEND_FILTER_OPTION_FIELDS.map(async (field) => {
+      const requestedSelection = requested.optionSelections.find(
+        (item) => item.fieldKey === field.key,
+      );
+      const fallback = requestedSelection?.values ?? [];
+      return {
+        fieldKey: field.key,
+        label: field.label,
+        values: await readSelectedOptionTexts(target, field.label, fallback),
+      };
+    }),
+  );
+  const gender = optionSelections.find((item) => item.fieldKey === "gender")?.values[0];
+  const activity = optionSelections.find((item) => item.fieldKey === "activity")?.values[0];
+
   return {
     ...(ageState.ageMin !== undefined ? { ageMin: ageState.ageMin } : {}),
     ...(ageState.ageMax !== undefined ? { ageMax: ageState.ageMax } : {}),
-    gender: await readSelectedOptionText(target, "性别", requested.gender),
-    activity: await readSelectedOptionText(target, "活跃度", requested.activity),
+    optionSelections,
+    ...(gender !== undefined ? { gender } : {}),
+    ...(activity !== undefined ? { activity } : {}),
   };
 }
 
@@ -1018,6 +1173,118 @@ async function clickFilterSubmit(
   } catch {
     return false;
   }
+}
+
+async function clickFilterClear(
+  target: RecommendTarget,
+  page: Page,
+  visualFeedback: RecommendFilterVisualFeedback | undefined,
+): Promise<boolean> {
+  const marked = await target.evaluate(
+    (args: { panelSelector: string; markerAttribute: string }) => {
+      const normalizeText = (value: string | null | undefined): string =>
+        (value ?? "").replace(/\s+/g, " ").trim();
+      const isVisible = (element: Element): boolean => {
+        const rect = element.getBoundingClientRect();
+        const style = window.getComputedStyle(element);
+        return (
+          rect.width > 0 &&
+          rect.height > 0 &&
+          style.display !== "none" &&
+          style.visibility !== "hidden" &&
+          style.opacity !== "0"
+        );
+      };
+
+      document
+        .querySelectorAll(`[${args.markerAttribute}]`)
+        .forEach((element) => element.removeAttribute(args.markerAttribute));
+
+      const panel = Array.from(document.querySelectorAll<HTMLElement>(args.panelSelector)).filter(
+        (element) => isVisible(element),
+      )[0];
+      if (!panel) return false;
+
+      const button = Array.from(
+        panel.querySelectorAll<HTMLElement>("button, a, span, div, [role='button']"),
+      )
+        .filter((element) => isVisible(element))
+        .find((element) => normalizeText(element.textContent) === "清除");
+      if (!button) return false;
+
+      button.setAttribute(args.markerAttribute, "1");
+      return true;
+    },
+    {
+      panelSelector: ZHIPIN_SELECTORS.recommend.filterPanel,
+      markerAttribute: "data-roll-recommend-filter-submit",
+    },
+  );
+
+  if (!marked) return false;
+
+  try {
+    const clear = target.locator('[data-roll-recommend-filter-submit="1"]').first();
+    await showClickFeedback(page, target, clear, visualFeedback);
+    await clear.click({ timeout: 2_000 });
+    await target.waitForTimeout(300);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function selectRecommendFilterValues(
+  target: RecommendTarget,
+  page: Page,
+  selection: ZhipinRecommendFilterOptionSelection,
+  visualFeedback: RecommendFilterVisualFeedback | undefined,
+): Promise<boolean> {
+  const values = Array.from(new Set(selection.values.map((value) => value.trim()))).filter(
+    (value) => value.length > 0,
+  );
+  if (values.length === 0) {
+    return true;
+  }
+
+  if (selection.selection === "single") {
+    const value = values[0];
+    return value !== undefined
+      ? await selectRecommendFilterOption(target, page, selection.label, value, visualFeedback)
+      : true;
+  }
+
+  if (values.includes(selection.clearValue)) {
+    return await selectRecommendFilterOption(
+      target,
+      page,
+      selection.label,
+      selection.clearValue,
+      visualFeedback,
+    );
+  }
+
+  if (
+    !(await selectRecommendFilterOption(
+      target,
+      page,
+      selection.label,
+      selection.clearValue,
+      visualFeedback,
+    ))
+  ) {
+    return false;
+  }
+
+  for (const value of values) {
+    if (
+      !(await selectRecommendFilterOption(target, page, selection.label, value, visualFeedback))
+    ) {
+      return false;
+    }
+  }
+
+  return true;
 }
 
 async function openRecommendFilterPanel(
@@ -1175,31 +1442,45 @@ async function applyRecommendFilterInTarget(
   }
 
   if (
-    !(await selectRecommendFilterOption(target, page, "性别", requested.gender, visualFeedback))
+    requested.applyMode === "replace" &&
+    !(await clickFilterClear(target, page, visualFeedback))
   ) {
-    return buildResult(requested, "filter_not_found", {
-      error: `未找到性别筛选项：${requested.gender}`,
-    });
+    return buildResult(requested, "clear_failed", { error: "筛选清除失败" });
   }
 
-  if (
-    !(await selectRecommendFilterOption(target, page, "活跃度", requested.activity, visualFeedback))
-  ) {
-    return buildResult(requested, "filter_not_found", {
-      error: `未找到活跃度筛选项：${requested.activity}`,
-    });
+  for (const selection of requested.optionSelections) {
+    if (!(await selectRecommendFilterValues(target, page, selection, visualFeedback))) {
+      if (await detectAndCloseVipModal(page, target)) {
+        return buildResult(requested, "requires_vip", {
+          error: `${selection.label}筛选触发 VIP 弹窗`,
+        });
+      }
+      return buildResult(requested, "filter_not_found", {
+        error: `未找到${selection.label}筛选项：${selection.values.join("、")}`,
+      });
+    }
+
+    if (await detectAndCloseVipModal(page, target)) {
+      return buildResult(requested, "requires_vip", {
+        error: `${selection.label}筛选触发 VIP 弹窗`,
+      });
+    }
   }
 
-  const ageResult = await setRecommendAgeRange(target, page, requested, visualFeedback);
-  if (!ageResult.success) {
-    return buildResult(requested, "age_not_applied", { error: ageResult.error });
+  let ageState: RecommendAgeState = {};
+  if (shouldApplyRecommendAgeRange(requested)) {
+    const ageResult = await setRecommendAgeRange(target, page, requested, visualFeedback);
+    if (!ageResult.success) {
+      return buildResult(requested, "age_not_applied", { error: ageResult.error });
+    }
+    ageState = ageResult.state;
   }
 
   if (await detectAndCloseVipModal(page, target)) {
     return buildResult(requested, "requires_vip", { error: "年龄筛选触发 VIP 弹窗" });
   }
 
-  const applied = await readAppliedState(target, requested, ageResult.state);
+  const applied = await readAppliedState(target, requested, ageState);
   if (!(await clickFilterSubmit(target, page, visualFeedback))) {
     return buildResult(requested, "submit_failed", { applied, error: "筛选确认失败" });
   }

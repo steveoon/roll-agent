@@ -262,6 +262,33 @@ Boundary:
 - Non-accessible widgets, canvas controls, cross-target iframes, and gestures may still need dedicated
   target-agent tools.
 
+## Pattern 8: State-Setting Tools Are Not Append Operations
+
+Use this pattern when a tool sets filters, tags, labels, memberships, selections, assignees, or any
+other target state.
+
+Example shape:
+
+```bash
+roll skills get <agent-name> --json
+roll agent tools <agent-name> --json
+roll run <agent-name> <state-setting-tool> --input-json '{"applyMode":"replace", "...":"..."}' --json
+roll run <agent-name> <read-back-tool> --input-json '{...}' --json
+```
+
+Rules:
+
+1. Treat array fields according to the target agent's documentation. They may mean exact final set,
+   append, toggle, ordered priority, or clear.
+2. If a tool exposes `applyMode`, use `replace` when the orchestrator owns the desired final state,
+   and `patch` only when leaving unspecified fields untouched is intentional.
+3. If the target agent documents sentinel values for clearing a field, pass those values exactly
+   instead of omitting the field.
+4. Do not reuse stale refs, indices, prepared artifacts, or cached result lists after a state-setting
+   tool refreshes the underlying view.
+5. Verify the resulting state through a read-back tool or a returned normalized summary before
+   chaining dependent actions.
+
 ## Common Pitfalls
 
 ### 1. Process healthy != page healthy
