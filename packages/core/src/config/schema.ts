@@ -3,6 +3,8 @@ import { z } from "zod";
 const browserPlatforms = ["zhipin", "yupao"] as const;
 const browserRuntimeModes = ["managed-cdp", "remote-cdp", "existing-session"] as const;
 const browserChannels = ["chrome", "chromium", "msedge"] as const;
+const runtimeApprovalDefaults = ["guarded", "auto", "deny"] as const;
+const runtimeApprovalOverrideActions = ["auto", "confirm", "deny"] as const;
 
 const browserProfileColorSchema = z
   .string()
@@ -31,6 +33,19 @@ export const llmConfigSchema = z.object({
 export const askConfigSchema = z.object({
   llmModel: z.string().optional(),
   confirmThreshold: z.number().optional(),
+});
+
+export const runtimeApprovalConfigSchema = z.object({
+  default: z.enum(runtimeApprovalDefaults).default("guarded"),
+  overrides: z.record(z.string(), z.enum(runtimeApprovalOverrideActions)).default({}),
+});
+
+export const runtimeConfigSchema = z.object({
+  provider: z.string().optional(),
+  model: z.string().optional(),
+  maxSteps: z.number().int().min(1).default(16),
+  threadsDir: z.string().default("~/.roll-agent/threads"),
+  approval: runtimeApprovalConfigSchema.default({}),
 });
 
 export const agentsConfigSchema = z.object({
@@ -144,11 +159,14 @@ export const browserConfigSchema = z
 export const rollConfigSchema = z.object({
   llm: llmConfigSchema,
   ask: askConfigSchema,
+  runtime: runtimeConfigSchema.default({}),
   agents: agentsConfigSchema,
   install: installConfigSchema.default({}),
   browser: browserConfigSchema.default({}),
 });
 
 export type RollConfig = z.infer<typeof rollConfigSchema>;
+export type RuntimeConfig = z.infer<typeof runtimeConfigSchema>;
+export type RuntimeApprovalConfig = z.infer<typeof runtimeApprovalConfigSchema>;
 export type BrowserConfig = z.infer<typeof browserConfigSchema>;
 export type InstallConfig = z.infer<typeof installConfigSchema>;

@@ -63,6 +63,25 @@ export const CONFIG_KEY_CODEC: KeyCodecNode = {
         confirmThreshold: LEAF,
       },
     },
+    runtime: {
+      kind: "object",
+      fields: {
+        provider: LEAF,
+        model: LEAF,
+        maxSteps: LEAF,
+        threadsDir: LEAF,
+        approval: {
+          kind: "object",
+          fields: {
+            default: LEAF,
+            overrides: {
+              kind: "record",
+              value: LEAF,
+            },
+          },
+        },
+      },
+    },
     agents: {
       kind: "object",
       fields: {

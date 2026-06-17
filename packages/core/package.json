@@ -14,13 +14,75 @@
     ".": {
       "types": "./dist/cli/index.d.ts",
       "default": "./dist/cli/index.js"
+    },
+    "./mcp/*": {
+      "types": "./src/mcp/*.ts",
+      "default": "./src/mcp/*.ts"
+    },
+    "./llm/*": {
+      "types": "./src/llm/*.ts",
+      "default": "./src/llm/*.ts"
+    },
+    "./registry/*": {
+      "types": "./src/registry/*.ts",
+      "default": "./src/registry/*.ts"
+    },
+    "./tool-runtime/*": {
+      "types": "./src/tool-runtime/*.ts",
+      "default": "./src/tool-runtime/*.ts"
+    },
+    "./config/*": {
+      "types": "./src/config/*.ts",
+      "default": "./src/config/*.ts"
+    },
+    "./types/*": {
+      "types": "./src/types/*.ts",
+      "default": "./src/types/*.ts"
+    },
+    "./cli/utils/*": {
+      "types": "./src/cli/utils/*.ts",
+      "default": "./src/cli/utils/*.ts"
     }
   },
   "bin": {
     "roll": "./bin/roll.js"
   },
   "publishConfig": {
-    "access": "public"
+    "access": "public",
+    "exports": {
+      ".": {
+        "types": "./dist/cli/index.d.ts",
+        "default": "./dist/cli/index.js"
+      },
+      "./mcp/*": {
+        "types": "./dist/mcp/*.d.ts",
+        "default": "./dist/mcp/*.js"
+      },
+      "./llm/*": {
+        "types": "./dist/llm/*.d.ts",
+        "default": "./dist/llm/*.js"
+      },
+      "./registry/*": {
+        "types": "./dist/registry/*.d.ts",
+        "default": "./dist/registry/*.js"
+      },
+      "./tool-runtime/*": {
+        "types": "./dist/tool-runtime/*.d.ts",
+        "default": "./dist/tool-runtime/*.js"
+      },
+      "./config/*": {
+        "types": "./dist/config/*.d.ts",
+        "default": "./dist/config/*.js"
+      },
+      "./types/*": {
+        "types": "./dist/types/*.d.ts",
+        "default": "./dist/types/*.js"
+      },
+      "./cli/utils/*": {
+        "types": "./dist/cli/utils/*.d.ts",
+        "default": "./dist/cli/utils/*.js"
+      }
+    }
   },
   "files": [
     "dist",
@@ -30,11 +92,11 @@
     "node": ">=22.6.0"
   },
   "scripts": {
-    "dev": "node --experimental-strip-types src/cli/index.ts",
+    "dev": "node --experimental-strip-types --experimental-sqlite src/cli/index.ts",
     "build": "rm -rf dist && tsc -p tsconfig.build.json && node ../../scripts/obfuscate.mjs",
     "typecheck": "tsc --noEmit",
-    "test": "node --experimental-strip-types --test \"src/**/*.test.ts\"",
-    "test:e2e": "node --experimental-strip-types --test \"src/**/*.e2e.ts\"",
+    "test": "node --experimental-strip-types --experimental-sqlite --test \"src/**/*.test.ts\"",
+    "test:e2e": "node --experimental-strip-types --experimental-sqlite --test \"src/**/*.e2e.ts\"",
     "clean": "rm -rf dist"
   },
   "dependencies": {
@@ -45,6 +107,7 @@
     "@ai-sdk/provider": "^3.0.8",
     "@clack/prompts": "1.4.0",
     "@modelcontextprotocol/sdk": "^1.12.0",
+    "@roll-agent/runtime": "workspace:*",
     "ai": "^6.0.154",
     "chalk": "^5.4.0",
     "citty": "^0.1.6",

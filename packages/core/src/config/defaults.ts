@@ -20,6 +20,14 @@ export const DEFAULT_CONFIG: RollConfig = {
     providers: {},
   },
   ask: {},
+  runtime: {
+    maxSteps: 16,
+    threadsDir: "~/.roll-agent/threads",
+    approval: {
+      default: "guarded",
+      overrides: {},
+    },
+  },
   agents: {
     dataDir: "~/.roll-agent/agents",
   },
