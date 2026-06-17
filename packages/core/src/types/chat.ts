@@ -16,6 +16,17 @@ export interface ChatStepSummary {
   readonly toolName?: string;
 }
 
+export interface ChatTokenUsage {
+  readonly inputTokens?: number;
+  readonly outputTokens?: number;
+  readonly totalTokens?: number;
+}
+
+export interface ChatStepUsage {
+  readonly finishReason: string;
+  readonly usage?: ChatTokenUsage;
+}
+
 export interface ChatInputRequirement {
   readonly name: string;
   readonly description: string;
@@ -37,6 +48,8 @@ export interface ChatCompletedResult {
   readonly sessionId: string;
   readonly output: string;
   readonly steps: ReadonlyArray<ChatStepSummary>;
+  readonly stepUsages?: ReadonlyArray<ChatStepUsage>;
+  readonly totalUsage?: ChatTokenUsage;
 }
 
 export interface ChatNeedsInputResult {

@@ -36,6 +36,7 @@ describe("loadConfig", () => {
     assert.equal(configPath, undefined);
     assert.equal(config.llm.defaultProvider, "anthropic");
     assert.deepEqual(config.ask, {});
+    assert.deepEqual(config.runtime.approval, { default: "guarded", overrides: {} });
     assert.deepEqual(config.browser.instances, {});
   });
 
@@ -332,6 +333,72 @@ agents:
     const { config } = loadConfig({ cwd: tmpDir });
     assert.ok(!config.agents.dataDir.startsWith("~"));
     assert.ok(config.agents.dataDir.includes("my-agents"));
+  });
+
+  it("should expand tilde in runtime threadsDir", () => {
+    const yaml = `
+llm:
+  default-provider: anthropic
+  default-model: test
+  providers: {}
+runtime:
+  max-steps: 7
+  threads-dir: ~/my-threads
+agents:
+  data-dir: /tmp/test
+`;
+    writeFileSync(resolve(tmpDir, "roll.config.yaml"), yaml);
+    const { config } = loadConfig({ cwd: tmpDir });
+    assert.equal(config.runtime.maxSteps, 7);
+    assert.ok(!config.runtime.threadsDir.startsWith("~"));
+    assert.ok(config.runtime.threadsDir.includes("my-threads"));
+  });
+
+  it("should parse runtime approval config", () => {
+    const yaml = `
+llm:
+  default-provider: anthropic
+  default-model: test
+  providers: {}
+runtime:
+  approval:
+    default: auto
+    overrides:
+      browser-use-agent.zhipin_send_prepared_reply: confirm
+      browser-use-agent.browser_status: auto
+agents:
+  data-dir: /tmp/test
+`;
+    writeFileSync(resolve(tmpDir, "roll.config.yaml"), yaml);
+    const { config } = loadConfig({ cwd: tmpDir });
+
+    assert.equal(config.runtime.approval.default, "auto");
+    assert.deepEqual(config.runtime.approval.overrides, {
+      "browser-use-agent.zhipin_send_prepared_reply": "confirm",
+      "browser-use-agent.browser_status": "auto",
+    });
+  });
+
+  it("should reject invalid runtime approval actions", () => {
+    const yaml = `
+llm:
+  default-provider: anthropic
+  default-model: test
+  providers: {}
+runtime:
+  approval:
+    overrides:
+      browser-use-agent.browser_status: maybe
+agents:
+  data-dir: /tmp/test
+`;
+
+    assert.throws(
+      () => validateConfigText(yaml, resolve(tmpDir, "roll.config.yaml")),
+      (err: Error) =>
+        err.message.includes("Config validation failed") &&
+        err.message.includes("runtime.approval.overrides.browser-use-agent.browser_status"),
+    );
   });
 
   it("should deep merge with defaults", () => {

@@ -79,6 +79,15 @@ const PACKAGE_CHECKS = [
     },
   },
   {
+    name: "@roll-agent/runtime",
+    cwd: resolve(repoRoot, "packages/runtime"),
+    expectedFiles: ["package/dist/index.js", "package/dist/index.d.ts"],
+    verifyManifest(manifest) {
+      assert.equal(manifest.exports?.["."].default, "./dist/index.js");
+      assert.equal(manifest.exports?.["."].types, "./dist/index.d.ts");
+    },
+  },
+  {
     name: "@roll-agent/browser",
     cwd: resolve(repoRoot, "packages/browser"),
     expectedFiles: ["package/dist/index.js", "package/dist/index.d.ts"],

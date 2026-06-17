@@ -114,6 +114,10 @@ function expandPaths(config: RollConfig): RollConfig {
       ...config.agents,
       dataDir: expandTilde(config.agents.dataDir),
     },
+    runtime: {
+      ...config.runtime,
+      threadsDir: expandTilde(config.runtime.threadsDir),
+    },
     browser: {
       ...config.browser,
       instances: Object.fromEntries(

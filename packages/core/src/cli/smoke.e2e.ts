@@ -31,12 +31,16 @@ const NEXT_PATCH_CORE_VERSION = bumpPatchVersion(CURRENT_CORE_VERSION);
 
 function runRoll(args: readonly string[], cwd: string, options: RunRollOptions = {}): CliResult {
   const cliEntry = resolve(import.meta.dirname, "index.ts");
-  const result = spawnSync(process.execPath, ["--experimental-strip-types", cliEntry, ...args], {
-    cwd,
-    encoding: "utf-8",
-    env: { ...process.env, NO_COLOR: "1", ...(options.env ?? {}) },
-    input: options.input,
-  });
+  const result = spawnSync(
+    process.execPath,
+    ["--experimental-strip-types", "--experimental-sqlite", cliEntry, ...args],
+    {
+      cwd,
+      encoding: "utf-8",
+      env: { ...process.env, NO_COLOR: "1", ...(options.env ?? {}) },
+      input: options.input,
+    },
+  );
 
   return {
     status: result.status,
@@ -1081,19 +1085,19 @@ test("e2e smoke: roll --help includes chat", () => {
   }
 });
 
-test("e2e smoke: roll chat --help marks command experimental", () => {
+test("e2e smoke: roll chat --help renders description", () => {
   const workspace = mkdtempSync(resolve(tmpdir(), `roll-chat-help-${randomUUID()}-`));
 
   try {
     const result = runRoll(["chat", "--help"], workspace);
     assert.equal(result.status, 0, `roll chat --help failed\nstderr:\n${result.stderr}`);
-    assert.match(`${result.stdout}\n${result.stderr}`, /Experimental/i);
+    assert.match(`${result.stdout}\n${result.stderr}`, /会话/);
   } finally {
     rmSync(workspace, { recursive: true, force: true });
   }
 });
 
-test("e2e smoke: roll chat --json returns unavailable snapshot", () => {
+test("e2e smoke: roll chat without provider config exits with guidance", () => {
   const workspace = mkdtempSync(resolve(tmpdir(), `roll-chat-json-${randomUUID()}-`));
 
   try {
@@ -1101,15 +1105,47 @@ test("e2e smoke: roll chat --json returns unavailable snapshot", () => {
     assert.equal(
       result.status,
       1,
-      `roll chat --json should fail while experimental\nstdout:\n${result.stdout}\nstderr:\n${result.stderr}`,
+      `roll chat without provider config should exit 1\nstdout:\n${result.stdout}\nstderr:\n${result.stderr}`,
+    );
+    assert.match(result.stderr, /未配置/);
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("e2e smoke: roll chat REPL exits cleanly without leaving an empty session", () => {
+  const workspace = mkdtempSync(resolve(tmpdir(), `roll-chat-repl-${randomUUID()}-`));
+
+  try {
+    const dataDir = resolve(workspace, "agents-data");
+    const threadsDir = resolve(workspace, "threads");
+    writeFileSync(
+      resolve(workspace, "roll.config.yaml"),
+      `llm:
+  default-provider: qwen
+  default-model: qwen3.7-plus
+  providers:
+    qwen:
+      api-key: test-key
+agents:
+  data-dir: ${dataDir}
+runtime:
+  threads-dir: ${threadsDir}
+`,
+      "utf-8",
     );
 
-    const parsed = JSON.parse(result.stdout) as {
-      readonly status: string;
-      readonly message: string;
-    };
-    assert.equal(parsed.status, "unavailable");
-    assert.match(parsed.message, /experimental/);
+    const chatResult = runRoll(["chat"], workspace, { input: "exit\n" });
+    assert.equal(
+      chatResult.status,
+      0,
+      `roll chat REPL should exit cleanly\nstdout:\n${chatResult.stdout}\nstderr:\n${chatResult.stderr}`,
+    );
+    assert.match(chatResult.stdout, /›/);
+
+    const listResult = runRoll(["chat", "--list", "--json"], workspace);
+    assert.equal(listResult.status, 0, listResult.stderr);
+    assert.deepEqual(JSON.parse(listResult.stdout) as unknown, []);
   } finally {
     rmSync(workspace, { recursive: true, force: true });
   }

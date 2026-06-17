@@ -109,6 +109,23 @@ export const CONFIG_GUIDANCE_ENTRIES = [
     example: "ask:\n  confirm-threshold: 0.5",
   },
   {
+    path: "runtime.approval.default",
+    title: "Chat 工具确认默认策略",
+    purpose:
+      "`roll chat` 调用工具时的默认确认策略。`guarded` 使用内置读写启发式，`auto` 默认放行非破坏性工具，`deny` 默认拒绝。",
+    defaultBehavior: `默认值为 \`${DEFAULT_CONFIG.runtime.approval.default}\`。此配置不影响 \`roll ask\`。`,
+    example: `runtime:\n  approval:\n    default: ${DEFAULT_CONFIG.runtime.approval.default}`,
+  },
+  {
+    path: "runtime.approval.overrides",
+    title: "Chat 工具确认精确覆盖",
+    purpose:
+      "`roll chat` 按完整 `agentName.toolName` 覆盖单个工具的确认策略。可选值为 `auto`、`confirm`、`deny`。",
+    defaultBehavior: "未配置时回退到 `runtime.approval.default`。",
+    example:
+      "runtime:\n  approval:\n    overrides:\n      browser-use-agent.zhipin_send_prepared_reply: confirm\n      browser-use-agent.browser_status: auto",
+  },
+  {
     path: "browser.default-instance",
     title: "默认浏览器实例",
     purpose: "多浏览器实例配置下，未显式指定 browserInstance 时使用的默认实例。",

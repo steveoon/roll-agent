@@ -17,6 +17,16 @@ describe("key-codec: decodeFromYaml", () => {
         providers: {},
       },
       ask: { "confirm-threshold": 0.5 },
+      runtime: {
+        "max-steps": 7,
+        "threads-dir": "~/threads",
+        approval: {
+          default: "auto",
+          overrides: {
+            "browser-use-agent.browser_status": "confirm",
+          },
+        },
+      },
       agents: { "data-dir": "/tmp/x" },
     };
 
@@ -27,6 +37,16 @@ describe("key-codec: decodeFromYaml", () => {
         providers: {},
       },
       ask: { confirmThreshold: 0.5 },
+      runtime: {
+        maxSteps: 7,
+        threadsDir: "~/threads",
+        approval: {
+          default: "auto",
+          overrides: {
+            "browser-use-agent.browser_status": "confirm",
+          },
+        },
+      },
       agents: { dataDir: "/tmp/x" },
     });
   });
@@ -147,6 +167,20 @@ describe("key-codec: encodePathToYaml", () => {
     assert.deepEqual(encodePathToYaml(["llm", "defaultProvider"]), ["llm", "default-provider"]);
   });
 
+  it("should normalize runtime config fields to kebab-case", () => {
+    assert.deepEqual(encodePathToYaml(["runtime", "maxSteps"]), ["runtime", "max-steps"]);
+    assert.deepEqual(encodePathToYaml(["runtime", "threadsDir"]), ["runtime", "threads-dir"]);
+    assert.deepEqual(encodePathToYaml(["runtime", "approval", "default"]), [
+      "runtime",
+      "approval",
+      "default",
+    ]);
+    assert.deepEqual(
+      encodePathToYaml(["runtime", "approval", "overrides", "browser-use-agent.browser_status"]),
+      ["runtime", "approval", "overrides", "browser-use-agent.browser_status"],
+    );
+  });
+
   it("should preserve record keys at llm.providers", () => {
     assert.deepEqual(encodePathToYaml(["llm", "providers", "openai", "apiKey"]), [
       "llm",
@@ -212,6 +246,20 @@ describe("key-codec: normalizeUserPath", () => {
 
   it("should normalize schema object fields to camelCase (camel input)", () => {
     assert.deepEqual(normalizeUserPath(["llm", "defaultProvider"]), ["llm", "defaultProvider"]);
+  });
+
+  it("should normalize runtime config fields to camelCase", () => {
+    assert.deepEqual(normalizeUserPath(["runtime", "max-steps"]), ["runtime", "maxSteps"]);
+    assert.deepEqual(normalizeUserPath(["runtime", "threads-dir"]), ["runtime", "threadsDir"]);
+    assert.deepEqual(normalizeUserPath(["runtime", "approval", "default"]), [
+      "runtime",
+      "approval",
+      "default",
+    ]);
+    assert.deepEqual(
+      normalizeUserPath(["runtime", "approval", "overrides", "browser-use-agent.browser_status"]),
+      ["runtime", "approval", "overrides", "browser-use-agent.browser_status"],
+    );
   });
 
   it("should preserve record keys at agents.env (both levels)", () => {
