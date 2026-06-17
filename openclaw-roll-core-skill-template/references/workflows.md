@@ -80,6 +80,17 @@ Use this when the target agent is known but the exact tool name or `inputSchema`
 roll run <agent-name> <tool-name> --input-json '{...}' --json
 ```
 
+Use this form for structured state changes, especially when the input contains arrays, nested
+objects, or mode fields such as `applyMode`. Read the target skill and runtime schema before
+constructing the JSON:
+
+| Input pattern | Orchestrator rule |
+|---------------|-------------------|
+| Array field | Do not assume append semantics; use the target agent's documented meaning. |
+| `replace` / `patch` mode | Choose `replace` for deterministic final state, `patch` to keep unspecified fields. |
+| Documented clear sentinel | Pass the sentinel explicitly; omission usually means "leave unchanged". |
+| State-changing call | Re-read or verify before reusing refs, indices, or cached lists. |
+
 ## Prepared Reply And Variant Selection
 
 Use this when a preview/generate tool returns an opaque `preparedReplyId` and may also return neutral

@@ -119,6 +119,14 @@ Boundary rules:
 - When a tool call fails with symptoms like a missing required field even though the command visibly contains JSON, retry with `--input-json` before debugging the target subagent.
 - Keep `--json` for output format separate from `--input-json`; `--json` does not provide tool input.
 
+State-setting inputs:
+
+- Some tools model filters, labels, membership, selections, or other target state. Do not assume an array field means "append".
+- Read the target agent's `SKILL.md` and `roll agent tools <agent-name> --json` schema to learn whether an array means replace, append, toggle, or clear.
+- If a tool exposes fields such as `applyMode`, `patch`, `replace`, or documented clear sentinel values, preserve those exact semantics in generated input.
+- Prefer explicit replace-style calls when the desired final state must be deterministic. Use patch-style calls only when unspecified fields should remain unchanged.
+- After state-changing calls, verify through the tool output or a read-back tool before reusing refs, indices, or downstream artifacts that may have become stale.
+
 ## Agent-Scoped Routing Keys
 
 Some persistent agents expose a routing key that selects an isolated runtime, profile, tenant, workspace, or account. Treat that key as part of the workflow identity, not as an optional convenience.

@@ -228,7 +228,7 @@ click_ref(@eN) 或 type_ref(@eN, text, clear?)
 | `zhipin_open_recommend_page()` | native CDP | 点击左侧导航切到「推荐牛人」。 |
 | `zhipin_list_recommend_jobs()` | native CDP | 只读推荐页顶部招聘岗位下拉；返回 `jobs[].jobRef` / `jobs[].value` / `current` / `canSwitch`，不切换岗位。 |
 | `zhipin_select_recommend_job(jobRef?, jobValue?, jobName?, index?, searchKeyword?, useSearch?, forceClick?)` | native CDP | 切换推荐页顶部招聘岗位筛选；优先传 `jobRef`，其次 `jobValue`，再次 `jobName`，`index` 只作当前下拉快照兜底；`forceClick:true` 时目标已选中也会点击一次岗位项。 |
-| `zhipin_filter_recommend_candidates(ageMin?, ageMax?, gender?, activity?)` | native CDP | 只设置年龄、性别、活跃度；未传维度重置为 `不限`，年龄默认 `16-不限`；若返回 `status:"requires_vip"`，表示当前账号无法使用该筛选。 |
+| `zhipin_filter_recommend_candidates(applyMode?, locationCity?, locationDistrict?, ageMin?, ageMax?, gender?, activity?, major?, recentNotView?, exchangeResumeWithColleague?, candidateKeywords?, school?, switchJobFrequency?, intention?, salary?, degree?, experience?, callPhone?)` | native CDP | 标准推荐筛选工具，覆盖推荐页顶部地区筛选和当前筛选面板里的年龄、性别、活跃度、专业、近期没有看过、是否与同事交换简历、牛人关键词、院校、跳槽频率、求职意向、薪资、学历、经验、是否可拨打电话；`locationCity:"上海市", locationDistrict:"浦东新区"` 可筛到区级；`applyMode:"patch"` 只改显式传入字段，`applyMode:"replace"` 先点普通筛选面板的 `清除` 再设置显式字段，地区只在显式传入 `locationCity/locationDistrict` 时修改；旧式 `{}` / 只传 `age/gender/activity` 仍按原三项重置语义执行。若返回 `status:"requires_vip"`，表示当前账号无法使用该筛选。 |
 | `zhipin_get_candidate_list(maxResults?, autoScroll?, maxScrolls?)` | native CDP | 读取推荐候选人卡片；默认滚动并按 `candidateId` / `data-geek` 去重，返回 `candidateRef`。 |
 | `zhipin_say_hello(indices?, candidateRefs?)` | native CDP | 批量点击「打招呼」；优先传 `candidateRefs`，`indices` 只作当前 DOM 快照兜底。 |
 | `zhipin_open_resume(index?, candidateRef?)` | Playwright-backed | 打开简历弹窗；优先传 `candidateRef`，低优先级未迁移项。 |
@@ -236,6 +236,27 @@ click_ref(@eN) 或 type_ref(@eN, text, clear?)
 | `zhipin_close_resume()` | Playwright-backed | 关闭简历弹窗；selector 契约见 `src/pages/zhipin/resume-dom-contract.ts`。 |
 
 推荐链路和动态列表细节见 `references/zhipin-workflows.md`。
+
+### 推荐筛选编排规则
+
+`zhipin_filter_recommend_candidates` 的输入表示目标筛选状态，而不是对当前页面做增量点击：
+
+| 输入类型 | 语义 | 例子 |
+| --- | --- | --- |
+| 地区 | 顶部地区下拉；`locationDistrict` 可到区级，传 `不限` 表示城市不限区 | `locationCity:"上海市", locationDistrict:"浦东新区"` |
+| 单选字段 | 直接设置为目标可见文案 | `gender:"女"`、`activity:"今日活跃"`、`salary:"5-10K"` |
+| 多选字段 | 数组表示该字段最终应保留的完整值集合，不是追加 | `degree:["大专","本科"]` |
+| 清空单个多选字段 | 传 `["不限"]` | `major:["不限"]` |
+| 清空普通筛选面板 | `applyMode:"replace"` 会先点面板底部 `清除` | `{ "applyMode": "replace" }` |
+
+编排注意：
+
+1. 多选字段为了精确覆盖，native 路径会先点该字段里的 `不限`，再点目标值；这是防止旧选项残留或重复点击已选项导致反选。
+2. `applyMode:"replace"` 会先清空普通筛选面板；地区不属于普通筛选面板，只有显式传 `locationCity/locationDistrict` 才会修改。
+3. `applyMode:"patch"` 只处理显式传入字段；未传字段保持页面现状。
+4. 传给筛选工具的值必须是当前 BOSS 页面可见文案；页面把选项文案改名时，调用方应传新文案，不要依赖旧固定枚举。
+5. 工具实测支持同一次调用混合设置：地区、年龄、性别、活跃度、专业、近期没有看过、是否与同事交换简历、牛人关键词、院校、跳槽频率、求职意向、薪资、学历、经验、是否可拨打电话。
+6. 筛选成功后推荐列表会刷新，之前的 `candidateRef` 全部失效；下一步必须重新调用 `zhipin_get_candidate_list`。
 
 ## 鱼泡 Tools
 
@@ -268,7 +289,7 @@ click_ref(@eN) 或 type_ref(@eN, text, clear?)
 20. `zhipin_select_recommend_job` 返回 `status:"selected"` 或 `status:"already_selected"` 都表示目标岗位已生效。
 21. `zhipin_select_recommend_job` 返回 `status:"not_found"` 时不要盲目重试；先调用 `zhipin_list_recommend_jobs`，再选择最接近岗位的 `jobRef` 或 `value`。
 22. 只有明确需要重新点击已选中岗位项时才传 `forceClick:true`；默认不要传，避免无意义重复点击。
-23. `zhipin_filter_recommend_candidates` 返回 `status:"requires_vip"` 时不要反复尝试绕过筛选 UI；当前账号没有权限使用该筛选，改为直接读取当前推荐列表或调整业务策略。
+23. `zhipin_filter_recommend_candidates` 对筛选条件使用标准字段建模；地区筛选传 `locationCity` 和可选 `locationDistrict`（如 `上海市` + `浦东新区`），多选字段传字符串数组且表示该字段最终值集合，传 `["不限"]` 表示清空该字段，单选字段传目标文本；`applyMode:"replace"` 只清普通筛选面板，地区仍需显式传入。返回 `status:"requires_vip"` 时不要反复尝试绕过筛选 UI；当前账号没有权限使用该筛选，改为直接读取当前推荐列表或调整业务策略。
 24. 聊天消息列表不产生 `candidateRef`；聊天回复链路使用 `conversationId` / `candidateId`，推荐候选人链路才使用 `candidateRef`。
 25. 推荐候选人列表的 `candidateRef` 来自 `zhipin_get_candidate_list` 输出，格式如 `@c1`；后续 `zhipin_say_hello` / `zhipin_open_resume` 优先传它。
 26. `candidateRef` 只对最近一次推荐列表快照有意义；筛选、搜索、滚动加载、刷新或页面重开后先重新调用 `zhipin_get_candidate_list`。

@@ -29,8 +29,14 @@ import {
 import { getZhipinListSurfaceConfig, type ZhipinListSurface } from "./list-surfaces.ts";
 import type {
   ZhipinRecommendFilterApplied,
+  ZhipinRecommendFilterLocationSelection,
+  ZhipinRecommendFilterOptionSelection,
   ZhipinRecommendFilterApplyResult,
   ZhipinRecommendFilterRequest,
+} from "./recommend-filter.ts";
+import {
+  ZHIPIN_RECOMMEND_FILTER_OPTION_FIELDS,
+  shouldApplyRecommendAgeRange,
 } from "./recommend-filter.ts";
 import { ZHIPIN_SELECTORS } from "./selectors.ts";
 import type { UsernameEvidence } from "./username.ts";
@@ -2520,11 +2526,46 @@ export class ZhipinNativePagePort {
     options: NativeClickOptions = {},
   ): Promise<ZhipinRecommendFilterApplyResult> {
     const surfaceReady = await this.waitForRecommendFilterSurface(3_000);
+    if (!surfaceReady) {
+      return {
+        status: "recommend_not_ready",
+        requested,
+        error: "推荐牛人页未就绪",
+      };
+    }
+
+    let locationState = requested.location;
+    if (requested.location !== undefined) {
+      if (!(await this.applyRecommendLocationFilter(requested.location, options))) {
+        return {
+          status: "filter_not_found",
+          requested,
+          error: `未能设置地区筛选：${requested.location.city}${
+            requested.location.district !== undefined ? `-${requested.location.district}` : ""
+          }`,
+        };
+      }
+      locationState = requested.location;
+    }
+
+    if (!shouldApplyRecommendAgeRange(requested) && requested.optionSelections.length === 0) {
+      const filterButtonText = await this.readRecommendFilterButtonText();
+      return {
+        status: "applied",
+        requested,
+        applied: {
+          ...(locationState !== undefined ? { location: locationState } : {}),
+          optionSelections: [],
+        },
+        ...(filterButtonText !== undefined ? { filterButtonText } : {}),
+      };
+    }
+
     if (!(await this.openRecommendFilterPanel(options))) {
       return {
-        status: surfaceReady ? "filter_not_found" : "recommend_not_ready",
+        status: "filter_not_found",
         requested,
-        error: surfaceReady ? "未找到或无法打开筛选按钮" : "推荐牛人页未就绪",
+        error: "未找到或无法打开筛选按钮",
       };
     }
 
@@ -2532,32 +2573,45 @@ export class ZhipinNativePagePort {
       return { status: "requires_vip", requested, error: "筛选条件触发 VIP 弹窗" };
     }
 
-    if (!(await this.clickRecommendFilterOption("性别", requested.gender, options))) {
-      return {
-        status: "filter_not_found",
-        requested,
-        error: `未找到性别筛选项：${requested.gender}`,
-      };
+    if (requested.applyMode === "replace" && !(await this.clickRecommendFilterClear(options))) {
+      return { status: "clear_failed", requested, error: "筛选清除失败" };
     }
 
-    if (!(await this.clickRecommendFilterOption("活跃度", requested.activity, options))) {
-      return {
-        status: "filter_not_found",
-        requested,
-        error: `未找到活跃度筛选项：${requested.activity}`,
-      };
+    for (const selection of requested.optionSelections) {
+      if (!(await this.clickRecommendFilterValues(selection, options))) {
+        if (await this.detectVipModal()) {
+          return {
+            status: "requires_vip",
+            requested,
+            error: `${selection.label}筛选触发 VIP 弹窗`,
+          };
+        }
+        return {
+          status: "filter_not_found",
+          requested,
+          error: `未找到${selection.label}筛选项：${selection.values.join("、")}`,
+        };
+      }
+
+      if (await this.detectVipModal()) {
+        return { status: "requires_vip", requested, error: `${selection.label}筛选触发 VIP 弹窗` };
+      }
     }
 
-    const ageResult = await this.setRecommendAgeRange(requested, options);
-    if (!ageResult.success) {
-      return { status: "age_not_applied", requested, error: ageResult.error };
+    let ageState: NativeRecommendAgeState = {};
+    if (shouldApplyRecommendAgeRange(requested)) {
+      const ageResult = await this.setRecommendAgeRange(requested, options);
+      if (!ageResult.success) {
+        return { status: "age_not_applied", requested, error: ageResult.error };
+      }
+      ageState = ageResult.state;
     }
 
     if (await this.detectVipModal()) {
       return { status: "requires_vip", requested, error: "年龄筛选触发 VIP 弹窗" };
     }
 
-    const applied = await this.readNativeAppliedFilterState(requested, ageResult.state);
+    const applied = await this.readNativeAppliedFilterState(requested, ageState, locationState);
     if (!(await this.clickRecommendFilterSubmit(options))) {
       return { status: "submit_failed", requested, applied, error: "筛选确认失败" };
     }
@@ -3237,6 +3291,338 @@ export class ZhipinNativePagePort {
     return await this.dispatchNativeClick(target, options);
   }
 
+  private async clickRecommendFilterValues(
+    selection: ZhipinRecommendFilterOptionSelection,
+    options: NativeClickOptions,
+  ): Promise<boolean> {
+    const values = Array.from(new Set(selection.values.map((value) => value.trim()))).filter(
+      (value) => value.length > 0,
+    );
+    if (values.length === 0) {
+      return true;
+    }
+
+    if (selection.selection === "single") {
+      const value = values[0];
+      return value !== undefined
+        ? await this.clickRecommendFilterOption(selection.label, value, options)
+        : true;
+    }
+
+    if (values.includes(selection.clearValue)) {
+      return await this.clickRecommendFilterOption(selection.label, selection.clearValue, options);
+    }
+
+    if (!(await this.clickRecommendFilterOption(selection.label, selection.clearValue, options))) {
+      return false;
+    }
+
+    for (const value of values) {
+      if (!(await this.clickRecommendFilterOption(selection.label, value, options))) {
+        return false;
+      }
+    }
+
+    return true;
+  }
+
+  private async isRecommendLocationPanelVisible(): Promise<boolean> {
+    const expression = `(() => {
+      const normalize = (text) => (text ?? "").replace(/\\s+/g, "").trim();
+      const visible = (element) => {
+        const rect = element.getBoundingClientRect();
+        return rect.width > 0 && rect.height > 0;
+      };
+      const roots = Array.from(document.querySelectorAll("div, section, aside"))
+        .filter((element) => visible(element))
+        .sort((a, b) => {
+          const aRect = a.getBoundingClientRect();
+          const bRect = b.getBoundingClientRect();
+          return aRect.width * aRect.height - bRect.width * bRect.height;
+        });
+      const isLocationPanel = (root) => {
+        const text = normalize(root.textContent);
+        return (
+          text.includes("仅推荐期望城市为本城市的牛人") &&
+          text.includes("清除") &&
+          text.includes("确认")
+        );
+      };
+      const explicitPanel = Array.from(document.querySelectorAll(".check-area-warp, .check-area-top"))
+        .some((element) => visible(element) && isLocationPanel(element));
+      if (explicitPanel) return true;
+      return roots.some((root) => {
+        const rect = root.getBoundingClientRect();
+        return (
+          rect.width >= 240 &&
+          rect.width <= 900 &&
+          rect.height >= 120 &&
+          rect.height <= 520 &&
+          isLocationPanel(root)
+        );
+      });
+    })()`;
+    return (
+      (await this.evaluateJson<boolean>(expression).catch(() => false)) ||
+      ((await this.evaluateRecommendFrameJson<boolean>(expression)) ?? false)
+    );
+  }
+
+  private async openRecommendLocationPanel(
+    location: ZhipinRecommendFilterLocationSelection,
+    options: NativeClickOptions,
+  ): Promise<boolean> {
+    if (await this.isRecommendLocationPanelVisible()) {
+      return true;
+    }
+
+    const target = await this.resolveRecommendClickTarget(
+      `(() => {
+        const expectedCity = ${JSON.stringify(location.city)};
+        const normalize = (text) => (text ?? "").replace(/\\s+/g, "").trim();
+        const normalizeCity = (text) => normalize(text).replace(/市$/, "");
+        const expected = normalizeCity(expectedCity);
+        const visible = (element) => {
+          const rect = element.getBoundingClientRect();
+          return rect.width > 0 && rect.height > 0;
+        };
+        const area = (element) => {
+          const rect = element.getBoundingClientRect();
+          return rect.width * rect.height;
+        };
+        const centerY = (element) => {
+          const rect = element.getBoundingClientRect();
+          return rect.top + rect.height / 2;
+        };
+        const readCenter = (element) => {
+          element.scrollIntoView({ block: "center", inline: "center" });
+          const rect = element.getBoundingClientRect();
+          return {
+            found: true,
+            x: Math.round(rect.left + rect.width / 2),
+            y: Math.round(rect.top + rect.height / 2)
+          };
+        };
+
+        const controls = Array.from(document.querySelectorAll("button, a, span, div, [role='button']"))
+          .filter((element) => visible(element));
+        const filterButton = controls
+          .filter((element) => /^筛选(?:·\\d+)?$/.test(normalize(element.textContent)))
+          .sort((a, b) => area(a) - area(b))[0];
+        if (filterButton) {
+          const filterRect = filterButton.getBoundingClientRect();
+          const sameRowCandidates = controls
+            .filter((element) => {
+              if (element === filterButton) return false;
+              const text = normalize(element.textContent);
+              if (text.length === 0 || text.length > 12) return false;
+              if (text.includes("_") || text.includes("筛选") || text.includes("推荐")) return false;
+              const rect = element.getBoundingClientRect();
+              return (
+                rect.right <= filterRect.left + 8 &&
+                Math.abs(centerY(element) - centerY(filterButton)) <= 36
+              );
+            })
+            .sort((a, b) => {
+              const aRect = a.getBoundingClientRect();
+              const bRect = b.getBoundingClientRect();
+              return Math.abs(filterRect.left - aRect.right) - Math.abs(filterRect.left - bRect.right);
+            });
+          if (sameRowCandidates[0]) return readCenter(sameRowCandidates[0]);
+        }
+
+        const cityCandidates = controls
+          .filter((element) => {
+            const text = normalizeCity(element.textContent);
+            const rect = element.getBoundingClientRect();
+            return text === expected && rect.top < 160;
+          })
+          .sort((a, b) => area(a) - area(b));
+        if (cityCandidates[0]) return readCenter(cityCandidates[0]);
+
+        return { found: false, x: 0, y: 0 };
+      })()`,
+    );
+
+    if (!(await this.dispatchNativeClick(target, options))) {
+      return false;
+    }
+
+    const openedAt = Date.now();
+    while (Date.now() - openedAt < 4_000) {
+      if (await this.isRecommendLocationPanelVisible()) {
+        return true;
+      }
+      await delay(NATIVE_SELECTOR_POLL_MS);
+    }
+
+    return false;
+  }
+
+  private async clickRecommendLocationValue(
+    kind: "city" | "district",
+    value: string,
+    options: NativeClickOptions,
+  ): Promise<boolean> {
+    const target = await this.resolveRecommendClickTarget(
+      `(() => {
+        const kind = ${JSON.stringify(kind)};
+        const rawValue = ${JSON.stringify(value)};
+        const normalize = (text) => (text ?? "").replace(/\\s+/g, "").trim();
+        const normalizeCity = (text) => normalize(text).replace(/市$/, "");
+        const expected = kind === "city" ? normalizeCity(rawValue) : normalize(rawValue);
+        const visible = (element) => {
+          const rect = element.getBoundingClientRect();
+          return rect.width > 0 && rect.height > 0;
+        };
+        const area = (element) => {
+          const rect = element.getBoundingClientRect();
+          return rect.width * rect.height;
+        };
+        const roots = Array.from(document.querySelectorAll("div, section, aside"))
+          .filter((element) => visible(element))
+          .sort((a, b) => area(a) - area(b));
+        const isLocationPanel = (root) => {
+          const text = normalize(root.textContent);
+          return (
+            text.includes("仅推荐期望城市为本城市的牛人") &&
+            text.includes("清除") &&
+            text.includes("确认") &&
+            text.includes(expected)
+          );
+        };
+        const panels = Array.from(document.querySelectorAll(".check-area-warp, .check-area-top"))
+          .filter((element) => visible(element) && isLocationPanel(element))
+          .sort((a, b) => area(a) - area(b));
+        const panel = panels[0] ?? roots.find((root) => {
+          const rect = root.getBoundingClientRect();
+          return (
+            rect.width >= 240 &&
+            rect.width <= 900 &&
+            rect.height >= 140 &&
+            rect.height <= 520 &&
+            isLocationPanel(root)
+          );
+        });
+        if (!panel) return { found: false, x: 0, y: 0 };
+
+        const panelRect = panel.getBoundingClientRect();
+        const leftLimit = panelRect.left + panelRect.width * (kind === "city" ? 0 : 0.22);
+        const rightLimit = panelRect.left + panelRect.width * (kind === "city" ? 0.34 : 0.72);
+        const candidates = Array.from(
+          panel.querySelectorAll("button, a, label, li, span, div, [role='button'], [role='checkbox']")
+        )
+          .filter((element) => {
+            if (!visible(element)) return false;
+            const text = kind === "city" ? normalizeCity(element.textContent) : normalize(element.textContent);
+            if (text !== expected) return false;
+            const rect = element.getBoundingClientRect();
+            const centerX = rect.left + rect.width / 2;
+            return centerX >= leftLimit && centerX <= rightLimit;
+          })
+          .sort((a, b) => area(a) - area(b));
+        const candidate = candidates[0];
+        if (!candidate) return { found: false, x: 0, y: 0 };
+        candidate.scrollIntoView({ block: "center", inline: "center" });
+        const rect = candidate.getBoundingClientRect();
+        return {
+          found: true,
+          x: Math.round(rect.left + rect.width / 2),
+          y: Math.round(rect.top + rect.height / 2)
+        };
+      })()`,
+    );
+
+    if (!(await this.dispatchNativeClick(target, options))) {
+      return false;
+    }
+
+    await delay(250);
+    return true;
+  }
+
+  private async clickRecommendLocationSubmit(options: NativeClickOptions): Promise<boolean> {
+    const target = await this.resolveRecommendClickTarget(
+      `(() => {
+        const normalize = (text) => (text ?? "").replace(/\\s+/g, "").trim();
+        const visible = (element) => {
+          const rect = element.getBoundingClientRect();
+          return rect.width > 0 && rect.height > 0;
+        };
+        const area = (element) => {
+          const rect = element.getBoundingClientRect();
+          return rect.width * rect.height;
+        };
+        const roots = Array.from(document.querySelectorAll("div, section, aside"))
+          .filter((element) => visible(element))
+          .sort((a, b) => area(a) - area(b));
+        const isLocationPanel = (root) => {
+          const text = normalize(root.textContent);
+          return (
+            text.includes("仅推荐期望城市为本城市的牛人") &&
+            text.includes("清除") &&
+            text.includes("确认")
+          );
+        };
+        const panels = Array.from(document.querySelectorAll(".check-area-warp, .check-area-top"))
+          .filter((element) => visible(element) && isLocationPanel(element))
+          .sort((a, b) => area(a) - area(b));
+        const panel = panels[0] ?? roots.find((root) => {
+          const rect = root.getBoundingClientRect();
+          return (
+            rect.width >= 240 &&
+            rect.width <= 900 &&
+            rect.height >= 140 &&
+            rect.height <= 520 &&
+            isLocationPanel(root)
+          );
+        });
+        if (!panel) return { found: false, x: 0, y: 0 };
+        const button = Array.from(
+          panel.querySelectorAll("button, a, span, div, [role='button']")
+        )
+          .filter((element) => visible(element) && normalize(element.textContent) === "确认")
+          .sort((a, b) => area(a) - area(b))[0];
+        if (!button) return { found: false, x: 0, y: 0 };
+        const rect = button.getBoundingClientRect();
+        return {
+          found: true,
+          x: Math.round(rect.left + rect.width / 2),
+          y: Math.round(rect.top + rect.height / 2)
+        };
+      })()`,
+    );
+
+    if (!(await this.dispatchNativeClick(target, options))) {
+      return false;
+    }
+
+    await delay(500);
+    return true;
+  }
+
+  private async applyRecommendLocationFilter(
+    location: ZhipinRecommendFilterLocationSelection,
+    options: NativeClickOptions,
+  ): Promise<boolean> {
+    if (!(await this.openRecommendLocationPanel(location, options))) {
+      return false;
+    }
+
+    if (!(await this.clickRecommendLocationValue("city", location.city, options))) {
+      return false;
+    }
+
+    if (
+      location.district !== undefined &&
+      !(await this.clickRecommendLocationValue("district", location.district, options))
+    ) {
+      return false;
+    }
+
+    return await this.clickRecommendLocationSubmit(options);
+  }
+
   private async detectVipModal(): Promise<boolean> {
     const expression = `(() => {
       const normalize = (text) => (text ?? "").replace(/\\s+/g, " ").trim();
@@ -3723,10 +4109,10 @@ export class ZhipinNativePagePort {
     return { success: true, state: finalState };
   }
 
-  private async readSelectedRecommendOptionText(
+  private async readSelectedRecommendOptionTexts(
     rowLabel: string,
-    fallback: string,
-  ): Promise<string> {
+    fallback: readonly string[],
+  ): Promise<readonly string[]> {
     const expression = `(() => {
       const panelSelector = ${JSON.stringify(ZHIPIN_SELECTORS.recommend.filterPanel)};
       const rowLabel = ${JSON.stringify(rowLabel)};
@@ -3765,27 +4151,80 @@ export class ZhipinNativePagePort {
       const selected = Array.from(row.querySelectorAll(clickableSelector))
         .filter((element) => visible(element) && isSelected(element))
         .map((element) => normalize(element.textContent))
-        .find((text) => text !== "" && text !== rowLabel);
-      return selected ?? fallback;
+        .filter((text) => text !== "" && text !== rowLabel);
+      return selected.length > 0 ? Array.from(new Set(selected)) : fallback;
     })()`;
-    const mainValue = await this.evaluateJson<string>(expression).catch(() => "");
-    if (mainValue.length > 0 && mainValue !== fallback) {
+    const mainValue = await this.evaluateJson<readonly string[]>(expression).catch(() => []);
+    if (mainValue.length > 0) {
       return mainValue;
     }
-    const frameValue = await this.evaluateRecommendFrameJson<string>(expression);
-    return typeof frameValue === "string" && frameValue.length > 0 ? frameValue : fallback;
+    const frameValue = await this.evaluateRecommendFrameJson<readonly string[]>(expression);
+    return Array.isArray(frameValue) && frameValue.length > 0 ? frameValue : fallback;
   }
 
   private async readNativeAppliedFilterState(
     requested: ZhipinRecommendFilterRequest,
     ageState: NativeRecommendAgeState,
+    locationState: ZhipinRecommendFilterLocationSelection | undefined,
   ): Promise<ZhipinRecommendFilterApplied> {
+    const optionSelections = await Promise.all(
+      ZHIPIN_RECOMMEND_FILTER_OPTION_FIELDS.map(async (field) => {
+        const requestedSelection = requested.optionSelections.find(
+          (selection) => selection.fieldKey === field.key,
+        );
+        const fallback = requestedSelection?.values ?? [];
+        return {
+          fieldKey: field.key,
+          label: field.label,
+          values: await this.readSelectedRecommendOptionTexts(field.label, fallback),
+        };
+      }),
+    );
+    const gender = optionSelections.find((selection) => selection.fieldKey === "gender")?.values[0];
+    const activity = optionSelections.find((selection) => selection.fieldKey === "activity")
+      ?.values[0];
+
     return {
       ...(ageState.ageMin !== undefined ? { ageMin: ageState.ageMin } : {}),
       ...(ageState.ageMax !== undefined ? { ageMax: ageState.ageMax } : {}),
-      gender: await this.readSelectedRecommendOptionText("性别", requested.gender),
-      activity: await this.readSelectedRecommendOptionText("活跃度", requested.activity),
+      ...(locationState !== undefined ? { location: locationState } : {}),
+      optionSelections,
+      ...(gender !== undefined ? { gender } : {}),
+      ...(activity !== undefined ? { activity } : {}),
     };
+  }
+
+  private async clickRecommendFilterClear(options: NativeClickOptions): Promise<boolean> {
+    const target = await this.resolveRecommendClickTarget(
+      `(() => {
+        const panelSelector = ${JSON.stringify(ZHIPIN_SELECTORS.recommend.filterPanel)};
+        const normalize = (text) => (text ?? "").replace(/\\s+/g, "").trim();
+        const visible = (element) => {
+          const rect = element.getBoundingClientRect();
+          return rect.width > 0 && rect.height > 0;
+        };
+        const panel = Array.from(document.querySelectorAll(panelSelector)).filter(visible)[0];
+        if (!panel) return { found: false, x: 0, y: 0 };
+        const button = Array.from(
+          panel.querySelectorAll("button, a, span, div, [role='button']")
+        )
+          .filter(visible)
+          .find((element) => normalize(element.textContent) === "清除");
+        if (!button) return { found: false, x: 0, y: 0 };
+        const rect = button.getBoundingClientRect();
+        return {
+          found: true,
+          x: Math.round(rect.left + rect.width / 2),
+          y: Math.round(rect.top + rect.height / 2)
+        };
+      })()`,
+    );
+    if (!(await this.dispatchNativeClick(target, options))) {
+      return false;
+    }
+
+    await delay(300);
+    return true;
   }
 
   private async clickRecommendFilterSubmit(options: NativeClickOptions): Promise<boolean> {

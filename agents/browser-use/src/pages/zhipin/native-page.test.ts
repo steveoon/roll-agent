@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import type { NativeCdpController, NativeCdpMouseEventInput } from "@roll-agent/browser";
 import { parseZhipinCandidateProfileTokens, ZhipinNativePagePort } from "./native-page.ts";
+import { ZHIPIN_SELECTORS } from "./selectors.ts";
 
 function createPort(
   evaluateJson: (expression: string) => Promise<unknown>,
@@ -1075,6 +1076,85 @@ describe("ZhipinNativePagePort", () => {
     assert.equal(result.success, true);
     assert.equal(result.status, "selected");
     assert.deepEqual(clickedTargets, ["label", "job"]);
+  });
+
+  it("applies a city and district location filter without opening the standard filter panel", async () => {
+    let locationPanelOpen = false;
+    const clickedTargets: string[] = [];
+    const evaluatedExpressions: string[] = [];
+    const port = createPort(
+      async (expression) => {
+        evaluatedExpressions.push(expression);
+        if (expression.includes(".candidate-card-wrap")) {
+          return true;
+        }
+        if (
+          expression.includes("roots.some") &&
+          expression.includes("仅推荐期望城市为本城市的牛人")
+        ) {
+          return locationPanelOpen;
+        }
+        if (expression.includes("const expectedCity")) {
+          return { found: true, x: 900, y: 70 };
+        }
+        if (expression.includes('rawValue = "上海市"')) {
+          assert.match(expression, /上海市/);
+          return { found: true, x: 850, y: 120 };
+        }
+        if (expression.includes('rawValue = "浦东新区"')) {
+          assert.match(expression, /浦东新区/);
+          assert.match(expression, /text\.includes\(expected\)/);
+          assert.match(expression, /\.check-area-warp, \.check-area-top/);
+          assert.match(expression, /rect\.width >= 240/);
+          assert.match(expression, /rect\.width <= 900/);
+          assert.match(expression, /rect\.height <= 520/);
+          return { found: true, x: 1040, y: 260 };
+        }
+        if (expression.includes('normalize(element.textContent) === "确认"')) {
+          return { found: true, x: 1290, y: 370 };
+        }
+        if (expression.includes(ZHIPIN_SELECTORS.recommend.filterButton)) {
+          return "筛选";
+        }
+        return false;
+      },
+      {
+        async dispatchMouseEvent(input) {
+          if (input.type !== "mouseReleased") return;
+          if (input.x === 900) {
+            locationPanelOpen = true;
+            clickedTargets.push("open-location");
+          } else if (input.x === 850) {
+            clickedTargets.push("city");
+          } else if (input.x === 1040) {
+            clickedTargets.push("district");
+          } else if (input.x === 1290) {
+            locationPanelOpen = false;
+            clickedTargets.push("confirm");
+          }
+        },
+      },
+    );
+
+    const result = await port.applyRecommendFilter({
+      applyMode: "patch",
+      location: {
+        city: "上海市",
+        district: "浦东新区",
+      },
+      optionSelections: [],
+    });
+
+    assert.equal(result.status, "applied");
+    assert.deepEqual(result.applied?.location, {
+      city: "上海市",
+      district: "浦东新区",
+    });
+    assert.deepEqual(clickedTargets, ["open-location", "city", "district", "confirm"]);
+    assert.equal(
+      evaluatedExpressions.some((expression) => expression.includes("filterPanel")),
+      false,
+    );
   });
 
   it("sends chat replies through native focus, key events, insertText, and native send click", async () => {
