@@ -1,5 +1,13 @@
 # @roll-agent/browser-use-agent
 
+## 0.21.0
+
+### Minor Changes
+
+- [#122](https://github.com/steveoon/roll-agent/pull/122) [`05b75c1`](https://github.com/steveoon/roll-agent/commit/05b75c15786501f665e76c77d7ee0ffbd711fafd) Thanks [@steveoon](https://github.com/steveoon)! - Upgrade the BOSS recommend candidate filter tool to model the region selector and all visible filter panel fields through the native CDP workflow.
+
+  The browser-use skill now documents the recommend filter as a target-state contract, including region-to-district filtering, patch versus replace behavior, multi-select clearing, and stale candidate refs after filtering. The Roll core skill template now also reminds orchestrators that array inputs in state-setting tools are not automatically append operations.
+
 ## 0.20.0
 
 ### Minor Changes
