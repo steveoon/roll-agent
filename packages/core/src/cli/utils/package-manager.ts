@@ -302,7 +302,24 @@ export function isLikelyNetworkError(error: unknown): boolean {
 
 /** 网络/超时类错误才值得对整条命令重试。 */
 export function isRetryablePackageManagerError(error: unknown): boolean {
-  return isProcessTimeoutKill(error) || isLikelyNetworkError(error);
+  return (
+    isProcessTimeoutKill(error) ||
+    isLikelyNetworkError(error) ||
+    isLikelyRollAgentRegistryPropagationError(error)
+  );
+}
+
+/**
+ * npm 新 package / 新 scoped package 发布后，registry edge 有时会短暂返回 package
+ * metadata 404。只对 @roll-agent scope 放行重试，避免把普通包名写错也当成网络问题。
+ */
+export function isLikelyRollAgentRegistryPropagationError(error: unknown): boolean {
+  const message = readErrorMessage(error);
+  return (
+    /\bnpm\s+(?:error|ERR!)\s+code\s+E404\b/i.test(message) &&
+    /(?:@roll-agent%2f|@roll-agent\/)[a-z0-9._-]+/i.test(message) &&
+    /(?:Not Found - GET|is not in this registry)/i.test(message)
+  );
 }
 
 export function formatPackageManagerError(

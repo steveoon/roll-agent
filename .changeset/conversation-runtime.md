@@ -16,4 +16,5 @@
 
 - `roll chat` 现已可用:多轮 REPL、`--session`/`--last` 续聊、`--list` 列出会话、`--json`、`--server` daemon;新会话自动以首条消息为标题
 - `exports` 扩展引擎层子路径供 runtime 复用;config 新增 `runtime` 段(`provider`/`model`/`maxSteps`/`threadsDir`/`approval`)
-- `bin/roll.js` 在本地源码树下自动补 `--experimental-sqlite` / `--experimental-strip-types`
+- `bin/roll.js` 在 `roll chat` 需要时自动补 `--experimental-sqlite`,并静默 `node:sqlite` 的实验特性提示;本地源码树仍自动补 `--experimental-strip-types`
+- `roll update` 对刚发布的 `@roll-agent/*` 包 metadata 传播型 `E404` 增加整条安装命令重试,降低 npm registry edge 短暂不一致导致的升级失败

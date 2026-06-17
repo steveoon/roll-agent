@@ -12,6 +12,7 @@ import {
   formatPackageManagerCommand,
   formatPackageManagerError,
   isLikelyNetworkError,
+  isLikelyRollAgentRegistryPropagationError,
   isRetryablePackageManagerError,
   npmInstallNetworkArgs,
   npmViewNetworkArgs,
@@ -276,6 +277,33 @@ describe("package-manager — error classification & retry", () => {
     assert.equal(isLikelyNetworkError(new Error("npm error code E404")), false);
     assert.equal(isLikelyNetworkError(new Error("npm error code E401")), false);
     assert.equal(isLikelyNetworkError(new Error("ERR_PNPM_NO_MATCHING_VERSION")), false);
+  });
+
+  test("recognizes transient @roll-agent registry 404 during package propagation", () => {
+    const error = new Error(
+      [
+        "npm error code E404",
+        "npm error 404 Not Found - GET https://registry.npmjs.org/@roll-agent%2fruntime - Not found",
+        "npm error 404  '@roll-agent/runtime@0.1.0' is not in this registry.",
+      ].join("\n"),
+    );
+
+    assert.equal(isLikelyNetworkError(error), false);
+    assert.equal(isLikelyRollAgentRegistryPropagationError(error), true);
+    assert.equal(isRetryablePackageManagerError(error), true);
+  });
+
+  test("does not retry generic npm 404 package misses", () => {
+    const error = new Error(
+      [
+        "npm error code E404",
+        "npm error 404 Not Found - GET https://registry.npmjs.org/not-a-roll-package - Not found",
+        "npm error 404  'not-a-roll-package@1.0.0' is not in this registry.",
+      ].join("\n"),
+    );
+
+    assert.equal(isLikelyRollAgentRegistryPropagationError(error), false);
+    assert.equal(isRetryablePackageManagerError(error), false);
   });
 
   test("retryable covers network errors and timeout kills", () => {
