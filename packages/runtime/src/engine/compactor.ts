@@ -8,6 +8,7 @@ export interface CompactionInput {
   readonly keepRecentTurns: number;
   readonly keepRecentTokens: number;
   readonly model: LanguageModelV3;
+  readonly abortSignal?: AbortSignal;
 }
 
 export interface CompactionResult {
@@ -119,9 +120,16 @@ function renderMessage(message: ModelMessage): string {
   return `${message.role}: ${text}`;
 }
 
+function throwIfAborted(abortSignal: AbortSignal | undefined): void {
+  if (abortSignal?.aborted) {
+    throw new Error("aborted");
+  }
+}
+
 async function summarizePrefix(
   prefix: readonly ModelMessage[],
   model: LanguageModelV3,
+  abortSignal: AbortSignal | undefined,
 ): Promise<ModelMessage[]> {
   const transcript = prefix.map(renderMessage).join("\n\n");
   const { text } = await generateText({
@@ -130,6 +138,7 @@ async function summarizePrefix(
     prompt: transcript,
     maxOutputTokens: 1024,
     maxRetries: 0,
+    ...(abortSignal ? { abortSignal } : {}),
     timeout: { totalMs: SUMMARY_TIMEOUT_MS },
   });
   return [
@@ -170,6 +179,7 @@ function truncateToolResults(messages: readonly ModelMessage[]): {
 }
 
 export async function compactMessages(input: CompactionInput): Promise<CompactionResult> {
+  throwIfAborted(input.abortSignal);
   const cut = cutIndex(input.messages, input.keepRecentTurns, input.keepRecentTokens);
   if (cut === 0) {
     const { messages, truncated } = truncateToolResults(input.messages);
@@ -178,7 +188,11 @@ export async function compactMessages(input: CompactionInput): Promise<Compactio
   const prefix = input.messages.slice(0, cut);
   const suffix = input.messages.slice(cut);
   const { messages: keptSuffix, truncated } = truncateToolResults(suffix);
-  const head = input.strategy === "summarize" ? await summarizePrefix(prefix, input.model) : [];
+  const head =
+    input.strategy === "summarize"
+      ? await summarizePrefix(prefix, input.model, input.abortSignal)
+      : [];
+  throwIfAborted(input.abortSignal);
   return {
     messages: [...head, ...keptSuffix],
     removed: prefix.length,

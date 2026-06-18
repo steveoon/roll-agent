@@ -2,7 +2,11 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { simulateReadableStream } from "ai";
 import { MockLanguageModelV3 } from "ai/test";
-import type { LanguageModelV3FinishReason, LanguageModelV3StreamPart } from "@ai-sdk/provider";
+import type {
+  LanguageModelV3CallOptions,
+  LanguageModelV3FinishReason,
+  LanguageModelV3StreamPart,
+} from "@ai-sdk/provider";
 import type { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { AgentSession } from "./agent-session.ts";
 import type { AgentToolSource } from "../tool-bridge/build-tools.ts";
@@ -688,6 +692,84 @@ test("AgentSession replace 持久化失败时不替换内存历史", async () =>
   const error = events.find((event) => event.type === "error");
   assert.ok(error && error.type === "error");
   assert.match(error.message, /persist failed/);
+  assert.deepEqual([...session.getMessages()], original);
+});
+
+test("AgentSession compact iterator 提前关闭时取消 summary 且不替换历史", async () => {
+  const original = [
+    { role: "user" as const, content: "old-1" },
+    { role: "assistant" as const, content: "answer-1" },
+    { role: "user" as const, content: "old-2" },
+    { role: "assistant" as const, content: "answer-2" },
+  ];
+  let resolveGenerateStarted: () => void = () => undefined;
+  let resolveGenerateReleased: () => void = () => undefined;
+  let resolveGenerateSettled: () => void = () => undefined;
+  const generateStarted = new Promise<void>((resolve) => {
+    resolveGenerateStarted = resolve;
+  });
+  const generateReleased = new Promise<void>((resolve) => {
+    resolveGenerateReleased = resolve;
+  });
+  const generateSettled = new Promise<void>((resolve) => {
+    resolveGenerateSettled = resolve;
+  });
+  let abortObserved = false;
+  let replaceCalls = 0;
+  const model = new MockLanguageModelV3({
+    doGenerate: async (options: LanguageModelV3CallOptions) => {
+      options.abortSignal?.addEventListener(
+        "abort",
+        () => {
+          abortObserved = true;
+          resolveGenerateReleased();
+        },
+        { once: true },
+      );
+      if (options.abortSignal?.aborted) {
+        abortObserved = true;
+        resolveGenerateReleased();
+      }
+      resolveGenerateStarted();
+      await generateReleased;
+      resolveGenerateSettled();
+      return {
+        content: [{ type: "text", text: "SUMMARY-TEXT" }],
+        finishReason: STOP,
+        usage: usage(5, 3),
+        warnings: [],
+      };
+    },
+  });
+  const session = new AgentSession({
+    id: "c1-compact-abort",
+    model,
+    sources: [],
+    maxSteps: 2,
+    initialMessages: original,
+    compaction: {
+      enabled: true,
+      strategy: "summarize",
+      threshold: 0.75,
+      keepRecentTurns: 1,
+      keepRecentTokens: 1,
+    },
+    onReplace: () => {
+      replaceCalls += 1;
+    },
+  });
+
+  const iterator = session.compact("manual")[Symbol.asyncIterator]();
+  const first = await iterator.next();
+  assert.equal(first.done, false);
+  assert.equal(first.value.type, "compaction-start");
+  await generateStarted;
+
+  await iterator.return?.();
+  await generateSettled;
+
+  assert.equal(abortObserved, true);
+  assert.equal(replaceCalls, 0);
   assert.deepEqual([...session.getMessages()], original);
 });
 

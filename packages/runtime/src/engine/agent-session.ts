@@ -242,7 +242,7 @@ export class AgentSession {
       }
     } finally {
       if (this.activeTurn === activeTurn) {
-        this.activeTurn = undefined;
+        this.abort();
       }
       if (this.emit !== undefined) {
         this.emit = undefined;
@@ -271,7 +271,7 @@ export class AgentSession {
           ...(this.lastInputTokens !== undefined ? { lastInputTokens: this.lastInputTokens } : {}),
         });
         try {
-          await this.runCompaction(queue, "auto");
+          await this.runCompaction(queue, "auto", activeTurn);
         } catch (error) {
           queue.push({ type: "error", stage: "plan", message: errorMessage(error) });
           return;
@@ -438,7 +438,7 @@ export class AgentSession {
       if (streamError !== undefined) {
         this.messages.splice(turnStart);
         if (this.needsCompaction) {
-          await this.recoverFromContextError(queue);
+          await this.recoverFromContextError(queue, activeTurn);
         }
         return;
       }
@@ -497,7 +497,7 @@ export class AgentSession {
         this.messages.splice(turnStart);
         queue.push({ type: "error", stage: "execute", message: errorMessage(error) });
         if (this.needsCompaction) {
-          await this.recoverFromContextError(queue);
+          await this.recoverFromContextError(queue, activeTurn);
         }
         return;
       } finally {
@@ -542,7 +542,7 @@ export class AgentSession {
       this.debug(queue, "turn", "error", turnStartedAt, { message: errorMessage(error) });
       queue.push({ type: "error", stage: "execute", message: errorMessage(error) });
       if (this.needsCompaction) {
-        await this.recoverFromContextError(queue);
+        await this.recoverFromContextError(queue, activeTurn);
       }
     } finally {
       if (this.activeTurn === activeTurn) {
@@ -612,7 +612,7 @@ export class AgentSession {
     reason: ContextCompactionReason,
   ): Promise<void> {
     try {
-      await this.runCompaction(queue, reason);
+      await this.runCompaction(queue, reason, activeTurn);
     } catch (error) {
       queue.push({ type: "error", stage: "plan", message: errorMessage(error) });
     } finally {
@@ -626,6 +626,7 @@ export class AgentSession {
   private async runCompaction(
     queue: AsyncEventQueue<SessionEvent>,
     reason: ContextCompactionReason,
+    activeTurn?: ActiveTurn,
   ): Promise<void> {
     const startedAt = Date.now();
     const settings = this.compaction;
@@ -635,6 +636,10 @@ export class AgentSession {
       messages: this.messages.length,
     });
     queue.push({ type: "compaction-start", reason });
+    if (this.isTurnAborted(activeTurn)) {
+      queue.push({ type: "error", stage: "plan", message: "aborted" });
+      return;
+    }
     if (!settings) {
       queue.push({
         type: "context-compacted",
@@ -648,6 +653,7 @@ export class AgentSession {
 
     const before = this.lastInputTokens;
     let strategy = settings.strategy;
+    const abortSignal = activeTurn?.abortController.signal;
     let result: Awaited<ReturnType<typeof compactMessages>>;
     try {
       result = await compactMessages({
@@ -656,8 +662,13 @@ export class AgentSession {
         keepRecentTurns: settings.keepRecentTurns,
         keepRecentTokens: settings.keepRecentTokens,
         model: this.model,
+        ...(abortSignal ? { abortSignal } : {}),
       });
     } catch (error) {
+      if (this.isTurnAborted(activeTurn)) {
+        queue.push({ type: "error", stage: "plan", message: "aborted" });
+        return;
+      }
       if (strategy !== "summarize") {
         throw error;
       }
@@ -671,7 +682,13 @@ export class AgentSession {
         keepRecentTurns: settings.keepRecentTurns,
         keepRecentTokens: settings.keepRecentTokens,
         model: this.model,
+        ...(abortSignal ? { abortSignal } : {}),
       });
+    }
+
+    if (this.isTurnAborted(activeTurn)) {
+      queue.push({ type: "error", stage: "plan", message: "aborted" });
+      return;
     }
 
     const progressed = result.removed > 0 || result.truncatedTools > 0;
@@ -701,15 +718,22 @@ export class AgentSession {
     });
   }
 
-  private async recoverFromContextError(queue: AsyncEventQueue<SessionEvent>): Promise<void> {
+  private async recoverFromContextError(
+    queue: AsyncEventQueue<SessionEvent>,
+    activeTurn?: ActiveTurn,
+  ): Promise<void> {
     if (!this.compaction?.enabled) {
       return;
     }
     try {
-      await this.runCompaction(queue, "auto");
+      await this.runCompaction(queue, "auto", activeTurn);
     } catch (error) {
       queue.push({ type: "error", stage: "plan", message: errorMessage(error) });
     }
+  }
+
+  private isTurnAborted(activeTurn: ActiveTurn | undefined): boolean {
+    return activeTurn?.aborted === true || activeTurn?.abortController.signal.aborted === true;
   }
 
   abort(): void {
