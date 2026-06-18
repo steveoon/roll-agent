@@ -137,8 +137,8 @@ test("ChatApp confirm flow approves on y and resumes the turn", async () => {
   stdin.write("go");
   await delay(10);
   stdin.write("\r");
-  await delay(40);
-  assert.match(lastFrame() ?? "", /执行 browser-use-agent\.click_ref/);
+  await waitFor(() => assert.match(lastFrame() ?? "", /执行 browser-use-agent\.click_ref/));
+  await delay(100);
 
   stdin.write("y");
   await waitFor(() => assert.deepEqual(sink.approved, ["a1"]));
