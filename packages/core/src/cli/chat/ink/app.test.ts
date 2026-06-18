@@ -33,6 +33,24 @@ function makeSession(
   } as unknown as AgentSession;
 }
 
+async function waitFor(assertion: () => void, timeoutMs = 1000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  let lastError: unknown;
+  while (Date.now() < deadline) {
+    try {
+      assertion();
+      return;
+    } catch (error) {
+      lastError = error;
+      await delay(10);
+    }
+  }
+  if (lastError instanceof Error) {
+    throw lastError;
+  }
+  assert.fail("Timed out waiting for assertion");
+}
+
 test("ChatApp streams an assistant reply into history and shows status", async () => {
   const sink: Sink = { approved: [], rejected: [] };
   async function* send(): AsyncIterable<SessionEvent> {
@@ -123,8 +141,7 @@ test("ChatApp confirm flow approves on y and resumes the turn", async () => {
   assert.match(lastFrame() ?? "", /执行 browser-use-agent\.click_ref/);
 
   stdin.write("y");
-  await delay(40);
-  assert.deepEqual(sink.approved, ["a1"]);
+  await waitFor(() => assert.deepEqual(sink.approved, ["a1"]));
   unmount();
 });
 
@@ -376,14 +393,29 @@ test("plain 'exit' is sent as a message; only /exit quits", async () => {
   stdin.write("exit");
   await delay(10);
   stdin.write("\r");
-  await delay(30);
-  assert.equal(exited, false);
-  assert.deepEqual(submitted, ["exit"]);
-
-  stdin.write("/exit");
-  await delay(10);
-  stdin.write("\r");
-  await delay(20);
-  assert.equal(exited, true);
+  await waitFor(() => {
+    assert.equal(exited, false);
+    assert.deepEqual(submitted, ["exit"]);
+  });
   unmount();
+
+  const second = render(
+    h(ChatApp, {
+      session: makeSession(send, sink),
+      model: "qwen",
+      contextWindow: undefined,
+      onUserSubmit: (text: string) => submitted.push(text),
+      onExit: () => {
+        exited = true;
+      },
+    }),
+  );
+  await delay(10);
+  for (const ch of "/exit") {
+    second.stdin.write(ch);
+  }
+  await waitFor(() => assert.match(second.lastFrame() ?? "", /\/exit/));
+  second.stdin.write("\r");
+  await waitFor(() => assert.equal(exited, true));
+  second.unmount();
 });
