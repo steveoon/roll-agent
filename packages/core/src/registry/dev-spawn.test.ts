@@ -99,10 +99,21 @@ describe("resolveDevSpawnSpec", () => {
     try {
       writeSourceEntry(installPath);
 
-      assert.equal(resolveDevSpawnSpec("bun", ["dist/index.js"], installPath, "local-path"), undefined);
-      assert.equal(resolveDevSpawnSpec("node", ["src/index.ts"], installPath, "local-path"), undefined);
       assert.equal(
-        resolveDevSpawnSpec("node", ["--trace-warnings", "dist/index.js"], installPath, "local-path"),
+        resolveDevSpawnSpec("bun", ["dist/index.js"], installPath, "local-path"),
+        undefined,
+      );
+      assert.equal(
+        resolveDevSpawnSpec("node", ["src/index.ts"], installPath, "local-path"),
+        undefined,
+      );
+      assert.equal(
+        resolveDevSpawnSpec(
+          "node",
+          ["--trace-warnings", "dist/index.js"],
+          installPath,
+          "local-path",
+        ),
         undefined,
       );
     } finally {
@@ -113,7 +124,10 @@ describe("resolveDevSpawnSpec", () => {
   it("skips when source entry does not exist", () => {
     const installPath = makeTmpDir();
     try {
-      assert.equal(resolveDevSpawnSpec("node", ["dist/index.js"], installPath, "local-path"), undefined);
+      assert.equal(
+        resolveDevSpawnSpec("node", ["dist/index.js"], installPath, "local-path"),
+        undefined,
+      );
     } finally {
       rmSync(installPath, { recursive: true, force: true });
     }

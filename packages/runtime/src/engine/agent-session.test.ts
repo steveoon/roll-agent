@@ -226,6 +226,29 @@ test("AgentSession 透出 cached 与 reasoning token", async () => {
   assert.equal(finish.sessionUsage?.cachedInputTokens, 40);
 });
 
+test("setProviderOptions only affects the next turn's streamText", async () => {
+  const seen: Array<unknown> = [];
+  const model = new MockLanguageModelV3({
+    doStream: async (options: LanguageModelV3CallOptions) => {
+      seen.push(options.providerOptions);
+      return streamChunks(textStep("ok"));
+    },
+  });
+  const session = new AgentSession({
+    id: "s-po",
+    model,
+    sources: [],
+    maxSteps: 2,
+    providerOptions: { alibaba: { enableThinking: false } },
+  });
+  await collect(session.send("a"));
+  session.setProviderOptions({ alibaba: { enableThinking: true, thinkingBudget: 8192 } });
+  await collect(session.send("b"));
+
+  assert.deepEqual(seen[0], { alibaba: { enableThinking: false } });
+  assert.deepEqual(seen[1], { alibaba: { enableThinking: true, thinkingBudget: 8192 } });
+});
+
 test("AgentSession 达到 maxSteps 上限且仍在调工具时标记 stoppedAtStepLimit", async () => {
   const model = sequencedModel([toolCallStep("echo-agent__echo", { q: "x" })]);
   const session = new AgentSession({

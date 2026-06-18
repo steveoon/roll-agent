@@ -1,7 +1,7 @@
 import { defineCommand } from "citty";
 import type { AgentSession } from "@roll-agent/runtime";
 import { loadConfig } from "../../config/loader.ts";
-import { resolveLLMCall } from "../../llm/providers.ts";
+import { resolveLLMCall, thinkingProviderOptions } from "../../llm/providers.ts";
 import { createInterface, type Interface as ReadlineInterface } from "node:readline/promises";
 import chalk from "chalk";
 import Table from "cli-table3";
@@ -90,6 +90,7 @@ async function runServer(config: RollConfig): Promise<void> {
     providerConfig.apiKey,
     "chat",
     providerConfig.baseUrl,
+    config.runtime.thinkingLevel,
   );
   const store = new ThreadStore(config.runtime.threadsDir);
   const engine = new ConversationEngine({
@@ -360,6 +361,7 @@ export default defineCommand({
       providerConfig.apiKey,
       "chat",
       providerConfig.baseUrl,
+      config.runtime.thinkingLevel,
     );
     const store = new ThreadStore(config.runtime.threadsDir);
     const engine = new ConversationEngine({
@@ -428,7 +430,12 @@ export default defineCommand({
             const { runInkRepl } = (await import(
               inkReplSpecifier
             )) as typeof import("../chat/ink/run-ink-repl.ts");
-            await runInkRepl(session, store, isNewSession, modelName);
+            await runInkRepl(session, store, isNewSession, {
+              model: modelName,
+              initialThinkingLevel: config.runtime.thinkingLevel,
+              onThinkingChange: (level) =>
+                session.setProviderOptions(thinkingProviderOptions(provider, modelName, level)),
+            });
             usedInk = true;
           } catch (inkError) {
             log.warn(

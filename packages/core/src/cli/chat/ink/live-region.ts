@@ -11,7 +11,9 @@ export function LiveRegion({ live }: { live: LiveState }): ReactElement {
     Box,
     { flexDirection: "column" },
     live.streamingText.length > 0 ? h(ThinkingText, { text: live.streamingText }) : null,
-    live.thinking ? h(Box, null, h(Spinner, null), h(Text, { dimColor: true }, " 思考中…")) : null,
+    live.thinking
+      ? h(Box, { marginTop: 1 }, h(Spinner, null), h(Text, { dimColor: true }, " 思考中…"))
+      : null,
     ...live.activeTools.map((tool) =>
       h(
         Box,

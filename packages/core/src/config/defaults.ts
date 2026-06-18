@@ -24,6 +24,7 @@ export const DEFAULT_CONFIG: RollConfig = {
     maxSteps: 80,
     turnTimeoutMs: 300_000,
     threadsDir: "~/.roll-agent/threads",
+    thinkingLevel: "medium",
     approval: {
       default: "guarded",
       overrides: {},

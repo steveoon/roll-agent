@@ -1,14 +1,26 @@
 import { randomUUID } from "node:crypto";
 import { useCallback, useReducer, useRef } from "react";
 import type { AgentSession, SessionEvent } from "@roll-agent/runtime";
-import { chatReducer, createInitialState, type ChatUiState } from "./state.ts";
+import { chatReducer, createInitialState, type ChatUiState, type HistoryItem } from "./state.ts";
+import type { ThinkingLevel } from "../../../llm/providers.ts";
 import { log } from "../../utils/output.ts";
+
+export interface UseSessionOptions {
+  readonly model: string;
+  readonly contextWindow: number | undefined;
+  readonly initialHistory?: readonly HistoryItem[];
+  readonly initialThinkingLevel?: ThinkingLevel;
+  readonly onThinkingChange?: (level: ThinkingLevel) => void;
+}
 
 export interface UseSessionResult {
   readonly state: ChatUiState;
   readonly submit: (text: string) => void;
   readonly compact: () => void;
   readonly resolveConfirm: (approved: boolean) => void;
+  readonly setDraft: (value: string) => void;
+  readonly setThinking: (level: ThinkingLevel) => void;
+  readonly commitHistory: (item: HistoryItem) => void;
 }
 
 const TEXT_FLUSH_MS = 32;
@@ -17,12 +29,15 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-export function useSession(
-  session: AgentSession,
-  model: string,
-  contextWindow: number | undefined,
-): UseSessionResult {
-  const [state, dispatch] = useReducer(chatReducer, createInitialState(model, contextWindow));
+export function useSession(session: AgentSession, options: UseSessionOptions): UseSessionResult {
+  const [state, dispatch] = useReducer(
+    chatReducer,
+    createInitialState(options.model, options.contextWindow, {
+      ...(options.initialHistory ? { history: options.initialHistory } : {}),
+      ...(options.initialThinkingLevel ? { thinkingLevel: options.initialThinkingLevel } : {}),
+    }),
+  );
+  const onThinkingChange = options.onThinkingChange;
   const decisionRef = useRef<((approved: boolean) => void) | null>(null);
   const busyRef = useRef(false);
 
@@ -116,5 +131,21 @@ export function useSession(
     decisionRef.current?.(approved);
   }, []);
 
-  return { state, submit, compact, resolveConfirm };
+  const setDraft = useCallback((value: string) => {
+    dispatch({ type: "set-draft", value });
+  }, []);
+
+  const setThinking = useCallback(
+    (level: ThinkingLevel) => {
+      dispatch({ type: "set-thinking", level });
+      onThinkingChange?.(level);
+    },
+    [onThinkingChange],
+  );
+
+  const commitHistory = useCallback((item: HistoryItem) => {
+    dispatch({ type: "commit-history", item });
+  }, []);
+
+  return { state, submit, compact, resolveConfirm, setDraft, setThinking, commitHistory };
 }

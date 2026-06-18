@@ -182,3 +182,33 @@ test("turn-end returns to idle", () => {
   state = chatReducer(state, { type: "turn-end" });
   assert.equal(state.phase, "idle");
 });
+
+test("createInitialState seeds provided history and thinking level", () => {
+  const state = createInitialState("qwen", 200000, {
+    history: [{ kind: "user", id: "h-0", text: "hi" }],
+    thinkingLevel: "high",
+  });
+  assert.equal(state.history.length, 1);
+  assert.equal(state.status.thinkingLevel, "high");
+  assert.equal(state.draft, "");
+});
+
+test("createInitialState defaults thinking level to medium and empty draft", () => {
+  const state = createInitialState("qwen", undefined);
+  assert.equal(state.status.thinkingLevel, "medium");
+  assert.equal(state.draft, "");
+});
+
+test("set-draft / set-thinking / commit-history actions", () => {
+  let state = createInitialState("qwen", undefined);
+  state = chatReducer(state, { type: "set-draft", value: "/th" });
+  assert.equal(state.draft, "/th");
+  state = chatReducer(state, { type: "set-thinking", level: "off" });
+  assert.equal(state.status.thinkingLevel, "off");
+  state = chatReducer(state, {
+    type: "commit-history",
+    item: { kind: "notice", id: "n1", text: "hi" },
+  });
+  assert.equal(state.history.at(-1)?.kind, "notice");
+  assert.equal(state.draft, "");
+});

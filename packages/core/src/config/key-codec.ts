@@ -72,6 +72,7 @@ export const CONFIG_KEY_CODEC: KeyCodecNode = {
         turnTimeoutMs: LEAF,
         threadsDir: LEAF,
         contextWindow: LEAF,
+        thinkingLevel: LEAF,
         approval: {
           kind: "object",
           fields: {

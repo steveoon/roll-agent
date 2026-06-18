@@ -159,7 +159,7 @@ export class AgentSession {
   private readonly contextWindow: number | undefined;
   private readonly compaction: SessionCompactionSettings | undefined;
   private readonly turnTimeoutMs: number | undefined;
-  private readonly providerOptions: SharedV3ProviderOptions | undefined;
+  private providerOptions: SharedV3ProviderOptions | undefined;
   private readonly debugEvents: boolean;
   private readonly gate = new ApprovalGate();
   private readonly tools: ToolSet;
@@ -592,6 +592,10 @@ export class AgentSession {
 
   getSessionUsage(): SessionTokenUsage {
     return { ...this.sessionUsage };
+  }
+
+  setProviderOptions(providerOptions: SharedV3ProviderOptions | undefined): void {
+    this.providerOptions = providerOptions;
   }
 
   private shouldAutoCompact(): boolean {

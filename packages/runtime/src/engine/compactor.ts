@@ -24,9 +24,9 @@ const TOKEN_ESTIMATE_DIVISOR = 3.5;
 
 const SUMMARY_SYSTEM =
   "你在执行上下文 checkpoint 压缩,为另一个将接手这项任务的语言模型撰写交接摘要。请包含:当前进度与已做的关键决定;重要约束、上下文与用户偏好;尚未完成的事项与明确的下一步;继续工作所需的关键数据、示例或引用。简洁、结构化,聚焦于让下一个模型无缝接续,不要寒暄,直接输出摘要正文。";
-const SUMMARY_PREFIX =
+export const SUMMARY_PREFIX =
   "以下摘要由另一个语言模型在压缩早前对话后产出。请据此继续推进、避免重复已完成的工作:";
-const SUMMARY_ACK = "好的,我已读取之前工作的交接摘要,继续推进。";
+export const SUMMARY_ACK = "好的,我已读取之前工作的交接摘要,继续推进。";
 
 export function findTurnBoundaries(messages: readonly ModelMessage[]): number[] {
   const boundaries: number[] = [];

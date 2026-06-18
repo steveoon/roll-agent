@@ -22,6 +22,7 @@ describe("key-codec: decodeFromYaml", () => {
         "turn-timeout-ms": 45_000,
         "threads-dir": "~/threads",
         "context-window": 128_000,
+        "thinking-level": "high",
         approval: {
           default: "auto",
           overrides: {
@@ -47,6 +48,7 @@ describe("key-codec: decodeFromYaml", () => {
         turnTimeoutMs: 45_000,
         threadsDir: "~/threads",
         contextWindow: 128_000,
+        thinkingLevel: "high",
         approval: {
           default: "auto",
           overrides: {

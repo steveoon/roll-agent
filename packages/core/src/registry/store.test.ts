@@ -233,7 +233,11 @@ describe("AgentStore", () => {
   it("should correct legacy remote source back to local-path when installPath is a local agent dir", () => {
     const localAgentDir = resolve(tmpDir, "browser-use-agent");
     mkdirSync(localAgentDir, { recursive: true });
-    writeFileSync(resolve(localAgentDir, "SKILL.md"), "---\nname: test\ndescription: test\n---\n", "utf-8");
+    writeFileSync(
+      resolve(localAgentDir, "SKILL.md"),
+      "---\nname: test\ndescription: test\n---\n",
+      "utf-8",
+    );
 
     writeFileSync(
       resolve(tmpDir, "agents.json"),

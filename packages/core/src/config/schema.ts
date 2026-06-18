@@ -49,6 +49,8 @@ export const runtimeCompactionConfigSchema = z.object({
   keepRecentTokens: z.number().int().min(1).default(32_000),
 });
 
+export const runtimeThinkingLevels = ["off", "low", "medium", "high"] as const;
+
 export const runtimeConfigSchema = z.object({
   provider: z.string().optional(),
   model: z.string().optional(),
@@ -56,6 +58,7 @@ export const runtimeConfigSchema = z.object({
   turnTimeoutMs: z.number().int().min(10_000).default(300_000),
   threadsDir: z.string().default("~/.roll-agent/threads"),
   contextWindow: z.number().int().min(1).optional(),
+  thinkingLevel: z.enum(runtimeThinkingLevels).default("medium"),
   approval: runtimeApprovalConfigSchema.default({}),
   compaction: runtimeCompactionConfigSchema.default({}),
 });

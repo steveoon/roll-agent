@@ -3,6 +3,7 @@ import type { ReactElement } from "react";
 import { Box, Text, useStdout } from "ink";
 import type { StatusState } from "./state.ts";
 import { computeUsageParts, formatTokens } from "../../utils/token-format.ts";
+import { thinkingLabel } from "./thinking.ts";
 
 export function StatusLine({ status }: { status: StatusState }): ReactElement {
   const { stdout } = useStdout();
@@ -13,7 +14,17 @@ export function StatusLine({ status }: { status: StatusState }): ReactElement {
     status.contextWindow,
     status.contextInputTokens,
   );
-  const segments: ReactElement[] = [h(Text, { key: "model", color: "magenta" }, status.model)];
+  const thinkSegment = h(
+    Text,
+    status.thinkingLevel === "off"
+      ? { key: "think", color: "yellow" }
+      : { key: "think", dimColor: true },
+    ` · ${thinkingLabel(status.thinkingLevel)}`,
+  );
+  const segments: ReactElement[] = [
+    h(Text, { key: "model", color: "magenta" }, status.model),
+    thinkSegment,
+  ];
   if (
     parts.percentLeft !== undefined &&
     parts.usedTokens !== undefined &&

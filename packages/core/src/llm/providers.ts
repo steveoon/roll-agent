@@ -3,6 +3,62 @@ import { createAlibaba } from "@ai-sdk/alibaba";
 import { createAnthropic } from "@ai-sdk/anthropic";
 import { createOpenAI } from "@ai-sdk/openai";
 import { createDeepSeek } from "@ai-sdk/deepseek";
+import { runtimeThinkingLevels } from "../config/schema.ts";
+
+export type ThinkingLevel = (typeof runtimeThinkingLevels)[number];
+
+const THINKING_BUDGETS = { low: 2048, medium: 8192, high: 16384 } as const;
+const OPENAI_NONE_REASONING_PREFIXES = ["gpt-5.1", "gpt-5.2", "gpt-5.3", "gpt-5.4"] as const;
+
+function supportsOpenAINoneReasoningEffort(modelName: string): boolean {
+  return OPENAI_NONE_REASONING_PREFIXES.some((prefix) => modelName.startsWith(prefix));
+}
+
+function supportsAnthropicAdaptiveThinking(modelName: string): boolean {
+  const match = /^claude-(?:sonnet|opus)-(\d+)-(\d+)(?:\b|-)/.exec(modelName);
+  const majorText = match?.[1];
+  const minorText = match?.[2];
+  if (!majorText || !minorText) {
+    return false;
+  }
+
+  const major = Number(majorText);
+  const minor = Number(minorText);
+  return major > 4 || (major === 4 && minor >= 6);
+}
+
+export function thinkingProviderOptions(
+  providerName: string,
+  modelName: string,
+  level: ThinkingLevel,
+): SharedV3ProviderOptions | undefined {
+  if (providerName === "openai") {
+    if (level === "off") {
+      return supportsOpenAINoneReasoningEffort(modelName)
+        ? { openai: { reasoningEffort: "none" } }
+        : undefined;
+    }
+    return { openai: { reasoningEffort: level } };
+  }
+  if (providerName === "anthropic") {
+    if (level === "off") {
+      return { anthropic: { thinking: { type: "disabled" } } };
+    }
+    if (supportsAnthropicAdaptiveThinking(modelName)) {
+      return { anthropic: { thinking: { type: "adaptive" }, effort: level } };
+    }
+    return { anthropic: { thinking: { type: "enabled", budgetTokens: THINKING_BUDGETS[level] } } };
+  }
+  if (providerName === "qwen") {
+    return level === "off"
+      ? { alibaba: { enableThinking: false } }
+      : { alibaba: { enableThinking: true, thinkingBudget: THINKING_BUDGETS[level] } };
+  }
+  if (providerName === "deepseek") {
+    return { deepseek: { thinking: { type: level === "off" ? "disabled" : "enabled" } } };
+  }
+  return undefined;
+}
 
 /** Provider 工厂接收的配置 */
 interface ProviderOptions {
@@ -82,6 +138,7 @@ export function resolveLLMCall(
   apiKey: string,
   purpose: LLMCallPurpose,
   baseURL?: string,
+  thinkingLevel: ThinkingLevel = "medium",
 ): ResolvedLLMCall {
   const model = createProviderModel(providerName, modelName, apiKey, baseURL);
 
@@ -90,6 +147,11 @@ export function resolveLLMCall(
       model,
       providerOptions: { alibaba: { enableThinking: false } },
     };
+  }
+
+  if (purpose === "chat") {
+    const providerOptions = thinkingProviderOptions(providerName, modelName, thinkingLevel);
+    return providerOptions ? { model, providerOptions } : { model };
   }
 
   return { model };

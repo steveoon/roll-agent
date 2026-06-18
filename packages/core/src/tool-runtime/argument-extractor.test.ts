@@ -105,16 +105,11 @@ describe("extractToolInput", () => {
       '```json\n{"candidateMessage":"想了解肯德基的岗位安排","preferredBrand":"肯德基"}\n```',
     );
 
-    await extractToolInput(
-      "帮我给想看肯德基岗位的候选人生成回复",
-      generateReplyTool,
-      model,
-      {
-        alibaba: {
-          enableThinking: false,
-        },
+    await extractToolInput("帮我给想看肯德基岗位的候选人生成回复", generateReplyTool, model, {
+      alibaba: {
+        enableThinking: false,
       },
-    );
+    });
 
     assert.deepEqual(model.doGenerateCalls[0]?.providerOptions, {
       alibaba: {

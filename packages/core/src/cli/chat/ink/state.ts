@@ -1,5 +1,6 @@
 import type { SessionEvent, SessionTokenUsage } from "@roll-agent/runtime";
 import { formatToolInput } from "../../utils/tool-format.ts";
+import type { ThinkingLevel } from "../../../llm/providers.ts";
 
 export interface ToolRowState {
   readonly toolCallId: string;
@@ -35,6 +36,7 @@ export interface StatusState {
   readonly turnUsage: SessionTokenUsage | undefined;
   readonly sessionUsage: SessionTokenUsage | undefined;
   readonly contextInputTokens: number | undefined;
+  readonly thinkingLevel: ThinkingLevel;
 }
 
 export type ChatPhase = "idle" | "busy" | "confirm";
@@ -46,6 +48,7 @@ export interface PendingConfirm {
 
 export interface ChatUiState {
   readonly history: readonly HistoryItem[];
+  readonly draft: string;
   readonly live: LiveState;
   readonly status: StatusState;
   readonly phase: ChatPhase;
@@ -54,10 +57,18 @@ export interface ChatUiState {
 
 export type ChatUiAction =
   | { readonly type: "submit-user"; readonly id: string; readonly text: string }
+  | { readonly type: "set-draft"; readonly value: string }
+  | { readonly type: "set-thinking"; readonly level: ThinkingLevel }
+  | { readonly type: "commit-history"; readonly item: HistoryItem }
   | { readonly type: "start-compaction" }
   | { readonly type: "session-event"; readonly id: string; readonly event: SessionEvent }
   | { readonly type: "confirm-resolved" }
   | { readonly type: "turn-end" };
+
+export interface InitialStateOptions {
+  readonly history?: readonly HistoryItem[];
+  readonly thinkingLevel?: ThinkingLevel;
+}
 
 const EMPTY_LIVE: LiveState = {
   streamingText: "",
@@ -67,9 +78,14 @@ const EMPTY_LIVE: LiveState = {
   producedOutput: false,
 };
 
-export function createInitialState(model: string, contextWindow: number | undefined): ChatUiState {
+export function createInitialState(
+  model: string,
+  contextWindow: number | undefined,
+  options?: InitialStateOptions,
+): ChatUiState {
   return {
-    history: [],
+    history: options?.history ?? [],
+    draft: "",
     live: EMPTY_LIVE,
     status: {
       model,
@@ -77,6 +93,7 @@ export function createInitialState(model: string, contextWindow: number | undefi
       turnUsage: undefined,
       sessionUsage: undefined,
       contextInputTokens: undefined,
+      thinkingLevel: options?.thinkingLevel ?? "medium",
     },
     phase: "idle",
     pendingConfirm: undefined,
@@ -223,10 +240,17 @@ export function chatReducer(state: ChatUiState, action: ChatUiAction): ChatUiSta
       return {
         ...state,
         history: [...state.history, { kind: "user", id: action.id, text: action.text }],
+        draft: "",
         live: { ...EMPTY_LIVE },
         phase: "busy",
         pendingConfirm: undefined,
       };
+    case "set-draft":
+      return { ...state, draft: action.value };
+    case "set-thinking":
+      return { ...state, status: { ...state.status, thinkingLevel: action.level } };
+    case "commit-history":
+      return { ...state, history: [...state.history, action.item], draft: "" };
     case "start-compaction":
       return { ...state, live: { ...EMPTY_LIVE }, phase: "busy", pendingConfirm: undefined };
     case "session-event":
