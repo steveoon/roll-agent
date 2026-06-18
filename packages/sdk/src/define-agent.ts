@@ -23,6 +23,18 @@ export interface DefineAgentOptions {
   readonly onShutdown?: () => Promise<void>;
 }
 
+export function resolveAgentLogLevel(explicit?: LogLevel): LogLevel {
+  return explicit ?? readLogLevelFromEnv() ?? "info";
+}
+
+function readLogLevelFromEnv(): LogLevel | undefined {
+  const value = process.env["ROLL_AGENT_LOG_LEVEL"];
+  if (value === "debug" || value === "info" || value === "warn" || value === "error") {
+    return value;
+  }
+  return undefined;
+}
+
 /**
  * 创建 AgentContext。
  *
@@ -99,7 +111,7 @@ export function defineAgent(
     ...definition,
     listen: async (listenOptions?: ListenOptions) => {
       const transport = listenOptions?.transport ?? { type: "stdio" as const };
-      const logLevel = options.logLevel ?? "info";
+      const logLevel = resolveAgentLogLevel(options.logLevel);
 
       if (transport.type === "http") {
         await listenHttp(definition, logLevel, transport.port, transport.host, options.onShutdown);

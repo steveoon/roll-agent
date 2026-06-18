@@ -8,6 +8,8 @@ import { registerSamplingHandler } from "./sampling-handler.ts";
 
 /** 默认连接超时（毫秒） */
 const DEFAULT_CONNECT_TIMEOUT_MS = 30_000;
+const EXPERIMENTAL_WARNING_SUPPRESSION_FLAG = "--disable-warning=ExperimentalWarning";
+type StdioAgentTransport = Extract<AgentTransport, { readonly type: "stdio" }>;
 
 /** MCP 客户端连接信息 */
 interface ManagedConnection {
@@ -22,6 +24,84 @@ export interface ConnectOptions {
   readonly samplingModel?: LanguageModelV3;
   /** 注入到 stdio 子进程的环境变量（与 process.env 合并） */
   readonly env?: Readonly<Record<string, string>>;
+}
+
+export function buildStdioChildEnv(env?: Readonly<Record<string, string>>): Record<string, string> {
+  const baseEnv = env ? ({ ...process.env, ...env } as Record<string, string>) : {};
+
+  return {
+    ...baseEnv,
+    NODE_OPTIONS: appendNodeOption(baseEnv["NODE_OPTIONS"], EXPERIMENTAL_WARNING_SUPPRESSION_FLAG),
+    ROLL_AGENT_LOG_LEVEL: baseEnv["ROLL_AGENT_LOG_LEVEL"] ?? "warn",
+  };
+}
+
+function appendNodeOption(current: string | undefined, option: string): string {
+  const normalized = current?.trim();
+  if (!normalized) {
+    return option;
+  }
+
+  const flags = normalized.split(/\s+/);
+  if (flags.includes("--no-warnings") || flags.includes(option)) {
+    return normalized;
+  }
+
+  return `${normalized} ${option}`;
+}
+
+export function shouldSuppressStdioChildStderrLine(line: string): boolean {
+  const trimmed = line.trim();
+  return (
+    trimmed.includes("ExperimentalWarning:") ||
+    trimmed.startsWith("(Use `node --trace-warnings") ||
+    /\[INFO\s*\]\s*\[[^\]]+\]\s*MCP Server running on stdio$/.test(trimmed)
+  );
+}
+
+function createStdioTransport(
+  transport: StdioAgentTransport,
+  cwd: string,
+  env?: Readonly<Record<string, string>>,
+): Transport {
+  const stdioTransport = new StdioClientTransport({
+    command: transport.command,
+    args: [...(transport.args ?? [])],
+    cwd,
+    env: buildStdioChildEnv(env),
+    stderr: "pipe",
+  });
+  pipeFilteredStdioChildStderr(stdioTransport);
+  return stdioTransport as Transport;
+}
+
+function pipeFilteredStdioChildStderr(transport: StdioClientTransport): void {
+  const stderr = transport.stderr;
+  if (!stderr) {
+    return;
+  }
+
+  let buffered = "";
+  const flushLine = (line: string): void => {
+    if (!shouldSuppressStdioChildStderrLine(line)) {
+      process.stderr.write(`${line}\n`);
+    }
+  };
+
+  stderr.on("data", (chunk: Buffer | string) => {
+    buffered += chunk.toString();
+    const lines = buffered.split(/\r?\n/);
+    buffered = lines.pop() ?? "";
+    for (const line of lines) {
+      flushLine(line);
+    }
+  });
+  stderr.on("end", () => {
+    if (buffered.length > 0) {
+      flushLine(buffered);
+      buffered = "";
+    }
+  });
 }
 
 /**
@@ -68,14 +148,7 @@ export class McpClientManager {
     const mcpTransport: Transport =
       transport.type === "streamable-http"
         ? (new StreamableHTTPClientTransport(new URL(transport.endpoint)) as Transport)
-        : new StdioClientTransport({
-            command: transport.command,
-            args: [...(transport.args ?? [])],
-            cwd,
-            ...(options.env
-              ? { env: { ...process.env, ...options.env } as Record<string, string> }
-              : {}),
-          });
+        : createStdioTransport(transport, cwd, options.env);
 
     const connectPromise = client.connect(mcpTransport);
     let timeoutId: ReturnType<typeof setTimeout> | undefined;

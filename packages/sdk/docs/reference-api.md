@@ -46,7 +46,7 @@
 
 - `definition.name: string` agent 名称
 - `definition.tools: ReadonlyArray<AnyToolDefinition>`
-- `options.logLevel?: "debug" | "info" | "warn" | "error"`（默认 `info`）
+- `options.logLevel?: "debug" | "info" | "warn" | "error"`（默认读取 `ROLL_AGENT_LOG_LEVEL`，未设置时为 `info`；显式传入优先级最高）
 
 ### 返回
 

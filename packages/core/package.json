@@ -92,7 +92,7 @@
     "node": ">=22.6.0"
   },
   "scripts": {
-    "dev": "node --experimental-strip-types --experimental-sqlite src/cli/index.ts",
+    "dev": "node --disable-warning=ExperimentalWarning --experimental-strip-types --experimental-sqlite src/cli/index.ts",
     "build": "rm -rf dist && tsc -p tsconfig.build.json && node ../../scripts/obfuscate.mjs",
     "typecheck": "tsc --noEmit",
     "test": "node --experimental-strip-types --experimental-sqlite --test \"src/**/*.test.ts\"",
