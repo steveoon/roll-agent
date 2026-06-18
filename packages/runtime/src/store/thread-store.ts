@@ -156,6 +156,29 @@ export class ThreadStore {
     }
   }
 
+  replaceMessages(threadId: string, messages: readonly ModelMessage[]): void {
+    if (!this.hasThread(threadId)) {
+      throw new Error(`Thread "${threadId}" 不存在`);
+    }
+    const now = new Date().toISOString();
+    const insert = this.db.prepare(
+      "INSERT INTO messages (thread_id, idx, role, content_json, created_at) VALUES (?, ?, ?, ?, ?)",
+    );
+
+    this.db.exec("BEGIN");
+    try {
+      this.db.prepare("DELETE FROM messages WHERE thread_id = ?").run(threadId);
+      messages.forEach((message, idx) => {
+        insert.run(threadId, idx, message.role, JSON.stringify(message), now);
+      });
+      this.db.prepare("UPDATE threads SET updated_at = ? WHERE id = ?").run(now, threadId);
+      this.db.exec("COMMIT");
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
   getMessages(threadId: string): ModelMessage[] {
     const rows = this.db
       .prepare("SELECT content_json FROM messages WHERE thread_id = ? ORDER BY idx ASC")

@@ -157,6 +157,12 @@ SKILL.md 的 frontmatter 用于注册元数据，**body 正文内容**会被 `ll
 
 这是为了避免 stdio 模式下日志干扰 MCP 协议通信。SDK 的 `AgentLogger` 也遵循此规则。
 
+### CLI 交互约定
+
+- 不要随意改变已有 CLI 交互方式；交互形态也是产品契约的一部分。
+- `roll chat` 的工具确认交互应保持 `clack` 选择式提示（键盘方向键选择，回车确认），不要改成裸 `y/N` 输入，除非用户明确要求或方案已先确认。
+- 如果为了 REPL/stdin 复用重构确认逻辑，必须保持用户可见交互不变，并补充测试覆盖确认后输入流仍可继续使用。
+
 ### 配置文件发现链
 
 `loadConfig()` 按以下优先级查找配置：
@@ -296,7 +302,7 @@ node scripts/create-github-releases.mjs --dry-run
 <!-- gitnexus:start -->
 # GitNexus — Code Intelligence
 
-This project is indexed by GitNexus as **roll-agent** (5483 symbols, 13429 relationships, 300 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
+This project is indexed by GitNexus as **roll-agent** (5826 symbols, 14454 relationships, 300 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
 
 > Index stale? Run `node .gitnexus/run.cjs analyze` from the project root — it auto-selects an available runner. No `.gitnexus/run.cjs` yet? `npx gitnexus analyze` (npm 11 crash → `npm i -g gitnexus`; #1939).
 

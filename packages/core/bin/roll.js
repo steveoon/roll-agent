@@ -21,11 +21,28 @@ function hasExecFlag(flag) {
   return process.execArgv.includes(flag);
 }
 
-const needsSqliteFlag = !(await sqliteAvailable());
+function hasWarningSuppression() {
+  return (
+    process.execArgv.includes("--no-warnings") ||
+    process.execArgv.includes("--disable-warning=ExperimentalWarning")
+  );
+}
+
+function resolveCommandName(argv) {
+  return argv.find((arg) => !arg.startsWith("-"));
+}
+
+const commandName = resolveCommandName(process.argv.slice(2));
+const shouldEnableSqlite = commandName === "chat";
+const hasSqliteFlag = hasExecFlag("--experimental-sqlite");
+const needsSqliteFlag = shouldEnableSqlite && !hasSqliteFlag && !(await sqliteAvailable());
 const needsTypeStripFlag = sourceTreeAvailable() && !hasExecFlag("--experimental-strip-types");
+const needsExperimentalWarningSuppression =
+  shouldEnableSqlite && (needsSqliteFlag || hasSqliteFlag) && !hasWarningSuppression();
 
 if (!process.env.ROLL_SQLITE_RESPAWNED && (needsSqliteFlag || needsTypeStripFlag)) {
   const nodeFlags = [
+    ...(needsExperimentalWarningSuppression ? ["--disable-warning=ExperimentalWarning"] : []),
     ...(needsSqliteFlag ? ["--experimental-sqlite"] : []),
     ...(needsTypeStripFlag ? ["--experimental-strip-types"] : []),
   ];

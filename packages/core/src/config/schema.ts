@@ -5,6 +5,7 @@ const browserRuntimeModes = ["managed-cdp", "remote-cdp", "existing-session"] as
 const browserChannels = ["chrome", "chromium", "msedge"] as const;
 const runtimeApprovalDefaults = ["guarded", "auto", "deny"] as const;
 const runtimeApprovalOverrideActions = ["auto", "confirm", "deny"] as const;
+const runtimeCompactionStrategies = ["summarize", "truncate"] as const;
 
 const browserProfileColorSchema = z
   .string()
@@ -40,12 +41,26 @@ export const runtimeApprovalConfigSchema = z.object({
   overrides: z.record(z.string(), z.enum(runtimeApprovalOverrideActions)).default({}),
 });
 
+export const runtimeCompactionConfigSchema = z.object({
+  enabled: z.boolean().default(true),
+  strategy: z.enum(runtimeCompactionStrategies).default("summarize"),
+  threshold: z.number().min(0.1).max(0.95).default(0.75),
+  keepRecentTurns: z.number().int().min(1).default(4),
+  keepRecentTokens: z.number().int().min(1).default(32_000),
+});
+
+export const runtimeThinkingLevels = ["off", "low", "medium", "high"] as const;
+
 export const runtimeConfigSchema = z.object({
   provider: z.string().optional(),
   model: z.string().optional(),
-  maxSteps: z.number().int().min(1).default(16),
+  maxSteps: z.number().int().min(1).default(80),
+  turnTimeoutMs: z.number().int().min(10_000).default(300_000),
   threadsDir: z.string().default("~/.roll-agent/threads"),
+  contextWindow: z.number().int().min(1).optional(),
+  thinkingLevel: z.enum(runtimeThinkingLevels).default("medium"),
   approval: runtimeApprovalConfigSchema.default({}),
+  compaction: runtimeCompactionConfigSchema.default({}),
 });
 
 export const agentsConfigSchema = z.object({

@@ -7,7 +7,7 @@
   },
   "packageManager": "pnpm@10.31.0",
   "scripts": {
-    "dev": "node --experimental-strip-types --experimental-sqlite packages/core/src/cli/index.ts",
+    "dev": "node --disable-warning=ExperimentalWarning --experimental-strip-types --experimental-sqlite packages/core/src/cli/index.ts",
     "build": "pnpm -r run build",
     "security:audit": "pnpm audit --audit-level high",
     "verify:dependency-denylist": "node scripts/verify-dependency-denylist.mjs",

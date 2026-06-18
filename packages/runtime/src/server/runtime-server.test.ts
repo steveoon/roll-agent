@@ -177,6 +177,43 @@ test("RuntimeServer 完整往返：create → send → confirmation → approve 
   assert.ok(events.some((event) => event.type === "message-finish"));
 });
 
+test("RuntimeServer 支持 session.compact 并透传压缩事件", async () => {
+  const { serverConn, clientConn } = memoryPair();
+  const engine = new ConversationEngine({
+    config,
+    model: sequencedModel([[]]),
+    sources: [],
+  });
+  const server = new RuntimeServer(engine, serverConn);
+  assert.ok(server);
+
+  const events: SessionEvent[] = [];
+  const responses = new Map<number, (result: unknown) => void>();
+  clientConn.onMessage((message) => {
+    if ("method" in message && message.method === EVENT_NOTIFICATION) {
+      const params = message.params as { readonly event: SessionEvent };
+      events.push(params.event);
+    } else if ("id" in message && "result" in message && typeof message.id === "number") {
+      responses.get(message.id)?.(message.result);
+    }
+  });
+
+  const request = (id: number, method: string, params: unknown): Promise<unknown> =>
+    new Promise((resolve) => {
+      responses.set(id, resolve);
+      clientConn.send({ jsonrpc: "2.0", id, method, params });
+    });
+
+  const created = (await request(1, RpcMethod.Create, {})) as { sessionId: string };
+  const compacted = (await request(2, RpcMethod.Compact, {
+    sessionId: created.sessionId,
+  })) as { status: string };
+
+  assert.equal(compacted.status, "completed");
+  assert.ok(events.some((event) => event.type === "context-compacted"));
+  await engine.dispose();
+});
+
 test("RuntimeServer 未知 session 返回错误响应", async () => {
   const { serverConn, clientConn } = memoryPair();
   const engine = new ConversationEngine({

@@ -2,11 +2,22 @@ export interface SessionTokenUsage {
   readonly inputTokens?: number;
   readonly outputTokens?: number;
   readonly totalTokens?: number;
+  readonly cachedInputTokens?: number;
+  readonly reasoningTokens?: number;
 }
 
 export type SessionEventStage = "bootstrap" | "plan" | "execute";
+export type SessionDebugStage = "turn" | "compaction" | "model" | "persist";
+export type SessionDebugData = Readonly<Record<string, string | number | boolean>>;
 
 export type SessionEvent =
+  | {
+      readonly type: "debug";
+      readonly stage: SessionDebugStage;
+      readonly message: string;
+      readonly elapsedMs?: number;
+      readonly data?: SessionDebugData;
+    }
   | { readonly type: "message-start"; readonly messageId: string }
   | { readonly type: "text-delta"; readonly delta: string }
   | {
@@ -41,5 +52,25 @@ export type SessionEvent =
       readonly type: "message-finish";
       readonly text: string;
       readonly totalUsage?: SessionTokenUsage;
+      readonly sessionUsage?: SessionTokenUsage;
+      readonly contextInputTokens?: number;
+      readonly stoppedAtStepLimit?: boolean;
+    }
+  | {
+      readonly type: "compaction-start";
+      readonly reason: ContextCompactionReason;
+    }
+  | {
+      readonly type: "context-compacted";
+      readonly reason: ContextCompactionReason;
+      readonly strategy: ContextCompactionStrategy;
+      readonly removed: number;
+      readonly kept: number;
+      readonly truncatedTools?: number;
+      readonly beforeInputTokens?: number;
     }
   | { readonly type: "error"; readonly stage: SessionEventStage; readonly message: string };
+
+export type ContextCompactionReason = "auto" | "manual";
+
+export type ContextCompactionStrategy = "summarize" | "truncate";

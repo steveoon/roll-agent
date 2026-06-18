@@ -48,6 +48,62 @@ test("ThreadStore append/get messages 保序且可多次追加", () => {
   }
 });
 
+test("ThreadStore replaceMessages 重写历史并 reindex,append 衔接", () => {
+  const dir = tempDir();
+  try {
+    const store = new ThreadStore(dir);
+    const id = store.createThread();
+    store.appendMessages(id, [
+      { role: "user", content: "t1-u" },
+      { role: "assistant", content: "t1-a" },
+      { role: "user", content: "t2-u" },
+      { role: "assistant", content: "t2-a" },
+    ]);
+
+    store.replaceMessages(id, [
+      { role: "user", content: "summary" },
+      { role: "assistant", content: "ok" },
+      { role: "user", content: "t2-u" },
+      { role: "assistant", content: "t2-a" },
+    ]);
+
+    let got = store.getMessages(id);
+    assert.equal(got.length, 4);
+    assert.equal(got[0]?.content, "summary");
+
+    store.appendMessages(id, [{ role: "user", content: "t3-u" }]);
+    got = store.getMessages(id);
+    assert.equal(got.length, 5);
+    assert.equal(got[4]?.content, "t3-u");
+    store.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("ThreadStore replaceMessages 持久化跨实例可 resume", () => {
+  const dir = tempDir();
+  try {
+    const first = new ThreadStore(dir);
+    const id = first.createThread();
+    first.appendMessages(id, [
+      { role: "user", content: "a" },
+      { role: "assistant", content: "b" },
+      { role: "user", content: "c" },
+    ]);
+    first.replaceMessages(id, [{ role: "user", content: "compacted" }]);
+    first.close();
+
+    const second = new ThreadStore(dir);
+    const got = second.getMessages(id);
+    assert.equal(got.length, 1);
+    assert.equal(got[0]?.content, "compacted");
+    second.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("ThreadStore resume round-trip 跨实例持久化", () => {
   const dir = tempDir();
   try {

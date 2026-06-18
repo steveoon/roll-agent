@@ -1,10 +1,15 @@
 import { randomUUID } from "node:crypto";
 import type { ModelMessage } from "ai";
-import type { LanguageModelV3 } from "@ai-sdk/provider";
+import type { LanguageModelV3, SharedV3ProviderOptions } from "@ai-sdk/provider";
 import { McpClientManager } from "@roll-agent/core/mcp/client-manager";
 import { createProviderModel } from "@roll-agent/core/llm/providers";
 import { AgentStore } from "@roll-agent/core/registry/store";
 import { resolveTransportWithDevSpawnSpec } from "@roll-agent/core/registry/dev-spawn";
+import {
+  getAgentPid,
+  startAgent,
+  waitForAgentReady,
+} from "@roll-agent/core/registry/process-manager";
 import { normalizeListedTools } from "@roll-agent/core/cli/utils/agent-tools";
 import { getAgentEnv } from "@roll-agent/core/config/helpers";
 import type { RollConfig } from "@roll-agent/core/config/schema";
@@ -13,8 +18,14 @@ import type { AgentToolSource, SourceTool } from "../tool-bridge/build-tools.ts"
 import type { ToolAnnotations, ToolPolicy } from "../types/policy.ts";
 import type { ThreadStore } from "../store/thread-store.ts";
 import { AgentSession } from "./agent-session.ts";
+import { resolveContextWindow } from "./context-window.ts";
 
-const DEFAULT_MAX_STEPS = 16;
+const DEFAULT_MAX_STEPS = 80;
+
+export type EnsureAgentReady = (
+  agent: RegisteredAgent,
+  env: Readonly<Record<string, string>> | undefined,
+) => Promise<void>;
 
 export interface ConversationEngineOptions {
   readonly config: RollConfig;
@@ -25,6 +36,9 @@ export interface ConversationEngineOptions {
   readonly store?: ThreadStore;
   readonly policy?: ToolPolicy;
   readonly maxSteps?: number;
+  readonly providerOptions?: SharedV3ProviderOptions;
+  readonly ensureAgentReady?: EnsureAgentReady;
+  readonly debugEvents?: boolean;
   readonly onAgentBootstrapIssue?: (issue: AgentBootstrapIssue) => void;
 }
 
@@ -68,12 +82,30 @@ function extractAnnotations(listed: unknown): ToolAnnotations | undefined {
     : result;
 }
 
+async function ensureCoreManagedAgentReady(
+  agent: RegisteredAgent,
+  dataDir: string,
+  env: Readonly<Record<string, string>> | undefined,
+): Promise<void> {
+  if (agent.runtime.ownership !== "core-managed") {
+    return;
+  }
+
+  if (getAgentPid(dataDir, agent.skill.name) === undefined) {
+    startAgent(agent, dataDir, env);
+  }
+  await waitForAgentReady(agent);
+}
+
 export class ConversationEngine {
   private readonly config: RollConfig;
   private readonly clientManager: McpClientManager;
   private readonly store: ThreadStore | undefined;
   private readonly policy: ToolPolicy | undefined;
   private readonly maxSteps: number;
+  private readonly providerOptions: SharedV3ProviderOptions | undefined;
+  private readonly ensureAgentReady: EnsureAgentReady;
+  private readonly debugEvents: boolean;
   private readonly explicitAgents: readonly RegisteredAgent[] | undefined;
   private readonly explicitModel: LanguageModelV3 | undefined;
   private readonly explicitSources: readonly AgentToolSource[] | undefined;
@@ -86,6 +118,11 @@ export class ConversationEngine {
     this.store = options.store;
     this.policy = options.policy;
     this.maxSteps = options.maxSteps ?? DEFAULT_MAX_STEPS;
+    this.providerOptions = options.providerOptions;
+    this.ensureAgentReady =
+      options.ensureAgentReady ??
+      ((agent, env) => ensureCoreManagedAgentReady(agent, this.config.agents.dataDir, env));
+    this.debugEvents = options.debugEvents ?? false;
     this.explicitAgents = options.agents;
     this.explicitModel = options.model;
     this.explicitSources = options.sources;
@@ -120,14 +157,28 @@ export class ConversationEngine {
     initialMessages: readonly ModelMessage[],
   ): AgentSession {
     const store = this.store;
+    const contextWindow = resolveContextWindow(
+      this.resolveModelName(),
+      this.config.runtime.contextWindow,
+    );
     return new AgentSession({
       id,
       model: context.model,
       sources: context.sources,
       maxSteps: this.maxSteps,
+      compaction: this.config.runtime.compaction,
+      turnTimeoutMs: this.config.runtime.turnTimeoutMs,
+      debugEvents: this.debugEvents,
+      ...(this.providerOptions ? { providerOptions: this.providerOptions } : {}),
+      ...(contextWindow !== undefined ? { contextWindow } : {}),
       ...(this.policy ? { policy: this.policy } : {}),
       initialMessages,
-      ...(store ? { onPersist: (messages) => store.appendMessages(id, messages) } : {}),
+      ...(store
+        ? {
+            onPersist: (messages) => store.appendMessages(id, messages),
+            onReplace: (messages) => store.replaceMessages(id, messages),
+          }
+        : {}),
     });
   }
 
@@ -150,6 +201,7 @@ export class ConversationEngine {
       try {
         const transport = resolveTransportWithDevSpawnSpec(agent);
         const env = getAgentEnv(this.config, agent.skill.name);
+        await this.ensureAgentReady(agent, env);
         const client = await this.clientManager.connect(
           agent.skill.name,
           transport,

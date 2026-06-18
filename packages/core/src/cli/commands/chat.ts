@@ -1,22 +1,26 @@
 import { defineCommand } from "citty";
 import type { AgentSession } from "@roll-agent/runtime";
 import { loadConfig } from "../../config/loader.ts";
-import { createProviderModel } from "../../llm/providers.ts";
-import { createInterface } from "node:readline/promises";
+import { resolveLLMCall, thinkingProviderOptions } from "../../llm/providers.ts";
+import { createInterface, type Interface as ReadlineInterface } from "node:readline/promises";
 import chalk from "chalk";
 import Table from "cli-table3";
-import { log } from "../utils/output.ts";
+import { isDebugLogEnabled, log } from "../utils/output.ts";
 import { ChatRenderer, clackConfirm, type ChatConfirm } from "../utils/chat-renderer.ts";
 import type {
   ChatCommandResult,
+  ChatCompactionSummary,
   ChatPendingAction,
   ChatStepSummary,
   ChatStepUsage,
   ChatTokenUsage,
 } from "../../types/chat.ts";
 import type { RollConfig } from "../../config/schema.ts";
+import { titleFromMessage } from "../chat/title.ts";
 
 type RuntimeModule = typeof import("@roll-agent/runtime");
+
+const moduleExtension = import.meta.url.endsWith(".ts") ? "ts" : "js";
 
 function createToolPolicy(runtime: RuntimeModule, config: RollConfig) {
   return new runtime.ConfigurableToolPolicy({
@@ -27,9 +31,10 @@ function createToolPolicy(runtime: RuntimeModule, config: RollConfig) {
 
 type ThreadStoreInstance = InstanceType<RuntimeModule["ThreadStore"]>;
 
-function titleFromMessage(message: string): string {
-  const trimmed = message.trim().replace(/\s+/g, " ");
-  return trimmed.length > 40 ? `${trimmed.slice(0, 39)}…` : trimmed;
+interface ReplIo {
+  readonly input: NodeJS.ReadableStream;
+  readonly output: NodeJS.WritableStream;
+  readonly confirm?: ChatConfirm;
 }
 
 function printChatJson(result: ChatCommandResult): void {
@@ -41,6 +46,26 @@ function reportAgentBootstrapIssue(issue: {
   readonly message: string;
 }): void {
   log.warn(`Agent "${issue.agentName}" 启动失败：${issue.message}`);
+}
+
+async function readReplLine(
+  rl: ReadlineInterface,
+  prompt: string,
+  label: string,
+): Promise<string | undefined> {
+  log.debug(`chat.repl input waiting · ${label}`);
+  rl.resume();
+  try {
+    const line = await rl.question(prompt);
+    log.debug(`chat.repl input received · ${label} · chars=${String(line.length)}`);
+    return line;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    log.debug(`chat.repl input closed · ${label} · ${message}`);
+    return undefined;
+  } finally {
+    rl.pause();
+  }
 }
 
 async function loadRuntime(): Promise<RuntimeModule> {
@@ -59,11 +84,13 @@ async function runServer(config: RollConfig): Promise<void> {
 
   const runtime = await loadRuntime();
   const { ConversationEngine, ThreadStore, RuntimeServer, createStdioConnection } = runtime;
-  const model = createProviderModel(
+  const { model, providerOptions } = resolveLLMCall(
     provider,
     modelName,
     providerConfig.apiKey,
+    "chat",
     providerConfig.baseUrl,
+    config.runtime.thinkingLevel,
   );
   const store = new ThreadStore(config.runtime.threadsDir);
   const engine = new ConversationEngine({
@@ -72,6 +99,8 @@ async function runServer(config: RollConfig): Promise<void> {
     store,
     policy: createToolPolicy(runtime, config),
     maxSteps: config.runtime.maxSteps,
+    ...(providerOptions ? { providerOptions } : {}),
+    debugEvents: isDebugLogEnabled(),
     onAgentBootstrapIssue: reportAgentBootstrapIssue,
   });
   const connection = createStdioConnection(process.stdin, process.stdout);
@@ -132,10 +161,13 @@ export async function runJsonTurn(
 ): Promise<ChatCommandResult> {
   const steps: ChatStepSummary[] = [];
   const stepUsages: ChatStepUsage[] = [];
+  const compactions: ChatCompactionSummary[] = [];
   const pendingActions: ChatPendingAction[] = [];
   let output = "";
   let failure: string | undefined;
   let totalUsage: ChatTokenUsage | undefined;
+  let sessionUsage: ChatTokenUsage | undefined;
+  let contextInputTokens: number | undefined;
 
   for await (const event of session.send(message)) {
     switch (event.type) {
@@ -165,6 +197,20 @@ export async function runJsonTurn(
         break;
       case "message-finish":
         totalUsage = event.totalUsage;
+        sessionUsage = event.sessionUsage;
+        contextInputTokens = event.contextInputTokens;
+        break;
+      case "context-compacted":
+        compactions.push({
+          reason: event.reason,
+          strategy: event.strategy,
+          removed: event.removed,
+          kept: event.kept,
+          ...(event.truncatedTools !== undefined ? { truncatedTools: event.truncatedTools } : {}),
+          ...(event.beforeInputTokens !== undefined
+            ? { beforeInputTokens: event.beforeInputTokens }
+            : {}),
+        });
         break;
       case "error":
         failure = event.message;
@@ -173,6 +219,8 @@ export async function runJsonTurn(
         break;
     }
   }
+
+  const contextWindow = session.getContextWindow();
 
   if (failure !== undefined) {
     return { status: "failed", stage: "execute", message: failure, sessionId: session.id };
@@ -192,47 +240,66 @@ export async function runJsonTurn(
     steps,
     ...(stepUsages.length > 0 ? { stepUsages } : {}),
     ...(totalUsage ? { totalUsage } : {}),
+    ...(sessionUsage ? { sessionUsage } : {}),
+    ...(contextWindow !== undefined ? { contextWindow } : {}),
+    ...(contextInputTokens !== undefined ? { contextInputTokens } : {}),
+    ...(compactions.length > 0 ? { compactions } : {}),
   };
 }
 
-async function runRepl(
+export async function runRepl(
   session: AgentSession,
   store: ThreadStoreInstance,
   isNewSession: boolean,
+  io: ReplIo = { input: process.stdin, output: process.stdout },
 ): Promise<void> {
-  const rl = createInterface({ input: process.stdin, output: process.stdout });
+  const rl = createInterface({ input: io.input, output: io.output });
   rl.on("SIGINT", () => rl.close());
-  const confirmFn: ChatConfirm = async (message) => {
-    const answer = (await rl.question(`${message} (y/N) `)).trim().toLowerCase();
-    return answer === "y" || answer === "yes";
-  };
-  const renderer = new ChatRenderer(confirmFn);
-  log.info("进入多轮对话（输入 exit / quit 或 Ctrl-C 退出）");
+  const confirmFn: ChatConfirm =
+    io.confirm ??
+    (async (message) => {
+      log.debug("chat.repl input waiting · confirm");
+      rl.pause();
+      const approved = await clackConfirm(message);
+      log.debug(`chat.repl input received · confirm · approved=${String(approved)}`);
+      return approved;
+    });
+  const renderer = new ChatRenderer(confirmFn, session.getContextWindow());
+  log.info("进入多轮对话（输入 exit / quit 或 Ctrl-C 退出，/compact 手动压缩上下文）");
 
   let titled = !isNewSession;
   let submitted = false;
   try {
     while (true) {
-      let input: string;
-      try {
-        input = (await rl.question(chalk.green("› "))).trim();
-      } catch {
+      const answer = await readReplLine(rl, chalk.green("› "), "prompt");
+      if (answer === undefined) {
         break;
       }
+      const input = answer.trim();
       if (input.length === 0) {
         continue;
       }
       if (input === "exit" || input === "quit") {
         break;
       }
+      if (input === "/compact") {
+        log.debug("chat.repl manual compact requested");
+        for await (const event of session.compact("manual")) {
+          await renderer.handle(event, session);
+        }
+        log.debug("chat.repl manual compact completed");
+        continue;
+      }
       if (!titled) {
         store.updateTitle(session.id, titleFromMessage(input));
         titled = true;
       }
       submitted = true;
+      log.debug(`chat.repl send start · chars=${String(input.length)}`);
       for await (const event of session.send(input)) {
         await renderer.handle(event, session);
       }
+      log.debug("chat.repl send completed");
     }
   } finally {
     rl.close();
@@ -288,11 +355,13 @@ export default defineCommand({
 
     const runtime = await loadRuntime();
     const { ConversationEngine, ThreadStore } = runtime;
-    const model = createProviderModel(
+    const { model, providerOptions } = resolveLLMCall(
       provider,
       modelName,
       providerConfig.apiKey,
+      "chat",
       providerConfig.baseUrl,
+      config.runtime.thinkingLevel,
     );
     const store = new ThreadStore(config.runtime.threadsDir);
     const engine = new ConversationEngine({
@@ -301,6 +370,8 @@ export default defineCommand({
       store,
       policy: createToolPolicy(runtime, config),
       maxSteps: config.runtime.maxSteps,
+      ...(providerOptions ? { providerOptions } : {}),
+      debugEvents: isDebugLogEnabled(),
       onAgentBootstrapIssue: reportAgentBootstrapIssue,
     });
 
@@ -332,13 +403,49 @@ export default defineCommand({
       }
 
       log.info(`会话 ${session.id}`);
+      if (config.runtime.compaction.enabled && session.getContextWindow() === undefined) {
+        log.warn(
+          `未知模型 "${modelName}" 的 context window，阈值自动压缩不可用。可在 roll.config.yaml 设置 runtime.context-window`,
+        );
+      }
       if (args.message) {
-        const renderer = new ChatRenderer(clackConfirm);
+        const renderer = new ChatRenderer(clackConfirm, session.getContextWindow());
         for await (const event of session.send(args.message)) {
           await renderer.handle(event, session);
         }
       } else {
-        await runRepl(session, store, !args.session && !args.last);
+        const isNewSession = !args.session && !args.last;
+        const interactive = Boolean(
+          process.stdout.isTTY &&
+          process.stdin.isTTY &&
+          typeof process.stdin.setRawMode === "function",
+        );
+        let usedInk = false;
+        if (interactive) {
+          try {
+            const inkReplSpecifier = new URL(
+              `../chat/ink/run-ink-repl.${moduleExtension}`,
+              import.meta.url,
+            ).href;
+            const { runInkRepl } = (await import(
+              inkReplSpecifier
+            )) as typeof import("../chat/ink/run-ink-repl.ts");
+            await runInkRepl(session, store, isNewSession, {
+              model: modelName,
+              initialThinkingLevel: config.runtime.thinkingLevel,
+              onThinkingChange: (level) =>
+                session.setProviderOptions(thinkingProviderOptions(provider, modelName, level)),
+            });
+            usedInk = true;
+          } catch (inkError) {
+            log.warn(
+              `Ink TUI 不可用，回退到基础多轮模式：${inkError instanceof Error ? inkError.message : String(inkError)}`,
+            );
+          }
+        }
+        if (!usedInk) {
+          await runRepl(session, store, isNewSession);
+        }
       }
     } catch (error) {
       log.error(error instanceof Error ? error.message : String(error));

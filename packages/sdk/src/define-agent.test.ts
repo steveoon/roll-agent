@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
-import { describe, it } from "node:test";
+import { afterEach, describe, it } from "node:test";
 import { z } from "zod";
 import type { AgentContext } from "./context.ts";
-import { executeToolForMcp } from "./define-agent.ts";
+import { executeToolForMcp, resolveAgentLogLevel } from "./define-agent.ts";
 import { defineTool } from "./define-tool.ts";
 import { StructuredToolError } from "./tool-error.ts";
 
@@ -90,5 +90,35 @@ describe("defineAgent tool execution", () => {
         target: "button.submit",
       },
     });
+  });
+});
+
+describe("resolveAgentLogLevel", () => {
+  const originalLogLevel = process.env["ROLL_AGENT_LOG_LEVEL"];
+
+  afterEach(() => {
+    if (originalLogLevel === undefined) {
+      delete process.env["ROLL_AGENT_LOG_LEVEL"];
+      return;
+    }
+    process.env["ROLL_AGENT_LOG_LEVEL"] = originalLogLevel;
+  });
+
+  it("defaults to info without env override", () => {
+    delete process.env["ROLL_AGENT_LOG_LEVEL"];
+
+    assert.equal(resolveAgentLogLevel(), "info");
+  });
+
+  it("uses ROLL_AGENT_LOG_LEVEL when explicit level is absent", () => {
+    process.env["ROLL_AGENT_LOG_LEVEL"] = "warn";
+
+    assert.equal(resolveAgentLogLevel(), "warn");
+  });
+
+  it("keeps explicit log level above env override", () => {
+    process.env["ROLL_AGENT_LOG_LEVEL"] = "warn";
+
+    assert.equal(resolveAgentLogLevel("debug"), "debug");
   });
 });

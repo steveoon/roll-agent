@@ -80,7 +80,9 @@ export default defineCommand({
         await stopAgentGracefully(agentsConfig.dataDir, agent.skill.name).catch(() => {});
       }
       store.updateStatus(agent.skill.name, "error");
-      log.error(`Agent "${args.name}" 启动失败：${err instanceof Error ? err.message : String(err)}`);
+      log.error(
+        `Agent "${args.name}" 启动失败：${err instanceof Error ? err.message : String(err)}`,
+      );
       log.info(`日志: ${getAgentLogPath(agentsConfig.dataDir, agent.skill.name)}`);
       process.exitCode = 1;
     }

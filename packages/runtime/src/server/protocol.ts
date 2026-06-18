@@ -48,6 +48,7 @@ export const RpcMethod = {
   Reject: "session.reject",
   Abort: "session.abort",
   Messages: "session.messages",
+  Compact: "session.compact",
 } as const;
 
 export const EVENT_NOTIFICATION = "session.event";
@@ -63,6 +64,7 @@ export const rejectParamsSchema = z.object({
 });
 export const abortParamsSchema = z.object({ sessionId: z.string() });
 export const messagesParamsSchema = z.object({ sessionId: z.string() });
+export const compactParamsSchema = z.object({ sessionId: z.string() });
 
 export function isRequest(message: JsonRpcMessage): message is JsonRpcRequest {
   return "method" in message && "id" in message;
