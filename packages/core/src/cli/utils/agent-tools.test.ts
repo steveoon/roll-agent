@@ -57,10 +57,10 @@ describe("cli/utils/agent-tools", () => {
     ];
 
     assert.deepEqual(getToolNameSuggestions("pnig", tools), ["ping"]);
-    assert.deepEqual(
-      getToolNameSuggestions("zhipin_get_candidates_list", tools),
-      ["zhipin_get_candidate_list", "zhipin_send_reply"],
-    );
+    assert.deepEqual(getToolNameSuggestions("zhipin_get_candidates_list", tools), [
+      "zhipin_get_candidate_list",
+      "zhipin_send_reply",
+    ]);
     assert.deepEqual(getToolNameSuggestions("completely_different", tools), []);
   });
 

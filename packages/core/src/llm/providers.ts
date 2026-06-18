@@ -62,7 +62,7 @@ export function createProviderModel(
 }
 
 /** generateText 调用目的 */
-export type LLMCallPurpose = "structured-output" | "text" | "sampling";
+export type LLMCallPurpose = "structured-output" | "text" | "sampling" | "chat";
 
 /** resolveLLMCall 的返回值 */
 export interface ResolvedLLMCall {

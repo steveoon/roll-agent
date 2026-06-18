@@ -5,6 +5,7 @@ import {
   RpcMethod,
   abortParamsSchema,
   approveParamsSchema,
+  compactParamsSchema,
   createParamsSchema,
   isRequest,
   messagesParamsSchema,
@@ -109,6 +110,18 @@ export class RuntimeServer {
       case RpcMethod.Messages: {
         const params = messagesParamsSchema.parse(request.params);
         return { messages: this.requireSession(params.sessionId).getMessages() };
+      }
+      case RpcMethod.Compact: {
+        const params = compactParamsSchema.parse(request.params);
+        const session = this.requireSession(params.sessionId);
+        for await (const event of session.compact("manual")) {
+          this.connection.send({
+            jsonrpc: "2.0",
+            method: EVENT_NOTIFICATION,
+            params: { sessionId: params.sessionId, event },
+          });
+        }
+        return { status: "completed" };
       }
       default:
         throw new Error(`Unknown method: ${request.method}`);

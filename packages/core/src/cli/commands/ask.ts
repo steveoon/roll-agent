@@ -160,12 +160,10 @@ export default defineCommand({
       log.info(`连接 Agent "${agent.skill.name}"...`);
       const agentEnv = getAgentEnv(config, agent.skill.name);
       const transport = resolveTransportWithDevSpawnSpec(agent);
-      const client = await clientManager.connect(
-        agent.skill.name,
-        transport,
-        agent.installPath,
-        { samplingModel, ...(agentEnv ? { env: agentEnv } : {}) },
-      );
+      const client = await clientManager.connect(agent.skill.name, transport, agent.installPath, {
+        samplingModel,
+        ...(agentEnv ? { env: agentEnv } : {}),
+      });
       const tools = normalizeListedTools((await client.listTools()).tools);
       const targetTool = tools.find((tool) => tool.name === decision.toolName);
 

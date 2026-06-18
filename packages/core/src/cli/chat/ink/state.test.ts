@@ -1,0 +1,184 @@
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import type { SessionEvent } from "@roll-agent/runtime";
+import { chatReducer, createInitialState, type ChatUiState } from "./state.ts";
+
+function event(state: ChatUiState, id: string, e: SessionEvent): ChatUiState {
+  return chatReducer(state, { type: "session-event", id, event: e });
+}
+
+test("createInitialState seeds model + idle phase", () => {
+  const state = createInitialState("qwen", 131072);
+  assert.equal(state.phase, "idle");
+  assert.equal(state.status.model, "qwen");
+  assert.equal(state.status.contextWindow, 131072);
+  assert.deepEqual(state.history, []);
+});
+
+test("submit-user commits a user bubble and goes busy", () => {
+  const state = chatReducer(createInitialState("qwen", undefined), {
+    type: "submit-user",
+    id: "u1",
+    text: "hello",
+  });
+  assert.equal(state.phase, "busy");
+  assert.deepEqual(state.history, [{ kind: "user", id: "u1", text: "hello" }]);
+});
+
+test("text-delta accumulates streaming text and clears thinking", () => {
+  let state = createInitialState("qwen", undefined);
+  state = event(state, "x", { type: "message-start", messageId: "m" });
+  assert.equal(state.live.thinking, true);
+  state = event(state, "x", { type: "text-delta", delta: "Hel" });
+  state = event(state, "x", { type: "text-delta", delta: "lo" });
+  assert.equal(state.live.thinking, false);
+  assert.equal(state.live.streamingText, "Hello");
+});
+
+test("tool-call adds a live row; tool-result commits it to history", () => {
+  let state = createInitialState("qwen", undefined);
+  state = event(state, "x", {
+    type: "tool-call",
+    toolCallId: "c1",
+    agentName: "browser-use-agent",
+    toolName: "click_ref",
+    input: { ref: "a" },
+  });
+  assert.equal(state.live.activeTools.length, 1);
+  assert.equal(state.live.activeTools[0]?.name, "browser-use-agent.click_ref");
+  state = event(state, "t1", {
+    type: "tool-result",
+    toolCallId: "c1",
+    agentName: "browser-use-agent",
+    toolName: "click_ref",
+    output: { ok: true },
+    isError: false,
+  });
+  assert.equal(state.live.activeTools.length, 0);
+  assert.deepEqual(state.history, [
+    { kind: "tool", id: "t1", name: "browser-use-agent.click_ref", args: '{"ref":"a"}', ok: true },
+  ]);
+});
+
+test("narration commits ahead of the tool it triggers (correct order)", () => {
+  let state = createInitialState("qwen", undefined);
+  state = event(state, "x", { type: "text-delta", delta: "我来点击按钮" });
+  state = event(state, "tc", {
+    type: "tool-call",
+    toolCallId: "c1",
+    agentName: "browser-use-agent",
+    toolName: "click_ref",
+    input: {},
+  });
+  state = event(state, "tr", {
+    type: "tool-result",
+    toolCallId: "c1",
+    agentName: "browser-use-agent",
+    toolName: "click_ref",
+    output: {},
+    isError: false,
+  });
+  assert.equal(state.history.length, 2);
+  assert.deepEqual(state.history[0], { kind: "assistant", id: "tc", text: "我来点击按钮" });
+  assert.equal(state.history[1]?.kind, "tool");
+  assert.equal(state.live.streamingText, "");
+});
+
+test("message-finish with stoppedAtStepLimit appends a step-limit notice", () => {
+  let state = createInitialState("qwen", undefined);
+  state = event(state, "x", { type: "text-delta", delta: "做了一半" });
+  state = event(state, "f1", {
+    type: "message-finish",
+    text: "做了一半",
+    stoppedAtStepLimit: true,
+  });
+  assert.equal(state.history.length, 2);
+  assert.equal(state.history[0]?.kind, "assistant");
+  const notice = state.history[1];
+  assert.equal(notice?.kind, "notice");
+  assert.match(notice?.kind === "notice" ? notice.text : "", /最大工具步数/);
+});
+
+test("confirmation-required enters confirm phase; confirm-resolved returns to busy", () => {
+  let state = createInitialState("qwen", undefined);
+  state = event(state, "x", {
+    type: "confirmation-required",
+    approvalId: "a1",
+    agentName: "browser-use-agent",
+    toolName: "click_ref",
+    input: {},
+    reason: "高风险",
+  });
+  assert.equal(state.phase, "confirm");
+  assert.deepEqual(state.pendingConfirm, {
+    approvalId: "a1",
+    prompt: "执行 browser-use-agent.click_ref（高风险）?",
+  });
+  state = chatReducer(state, { type: "confirm-resolved" });
+  assert.equal(state.phase, "busy");
+  assert.equal(state.pendingConfirm, undefined);
+});
+
+test("compaction events toggle spinner and commit a notice", () => {
+  let state = createInitialState("qwen", undefined);
+  state = event(state, "x", { type: "compaction-start", reason: "auto" });
+  assert.equal(state.live.compacting, true);
+  state = event(state, "k1", {
+    type: "context-compacted",
+    reason: "auto",
+    strategy: "summarize",
+    removed: 58,
+    kept: 14,
+    truncatedTools: 3,
+  });
+  assert.equal(state.live.compacting, false);
+  const notice = state.history.at(-1);
+  assert.match(
+    notice?.kind === "compaction" ? notice.notice : "",
+    /移除 58 条 → 保留 14 条，精简 3 个工具结果/,
+  );
+});
+
+test("message-finish commits streamed assistant text and updates status", () => {
+  let state = createInitialState("qwen", 200000);
+  state = event(state, "x", { type: "text-delta", delta: "答案" });
+  state = event(state, "a1", {
+    type: "message-finish",
+    text: "答案",
+    totalUsage: { inputTokens: 100, outputTokens: 20 },
+    sessionUsage: { inputTokens: 100, outputTokens: 20, totalTokens: 120 },
+    contextInputTokens: 100,
+  });
+  assert.deepEqual(state.history, [{ kind: "assistant", id: "a1", text: "答案" }]);
+  assert.equal(state.live.streamingText, "");
+  assert.equal(state.status.contextInputTokens, 100);
+  assert.equal(state.status.sessionUsage?.totalTokens, 120);
+});
+
+test("message-finish with empty text but output tokens commits a notice", () => {
+  let state = createInitialState("qwen", undefined);
+  state = event(state, "n1", {
+    type: "message-finish",
+    text: "",
+    totalUsage: { outputTokens: 12 },
+  });
+  assert.equal(state.history.at(-1)?.kind, "notice");
+});
+
+test("error commits an error row and clears the live region", () => {
+  let state = createInitialState("qwen", undefined);
+  state = event(state, "x", { type: "text-delta", delta: "partial" });
+  state = event(state, "e1", { type: "error", stage: "execute", message: "boom" });
+  assert.deepEqual(state.history.at(-1), { kind: "error", id: "e1", message: "boom" });
+  assert.equal(state.live.streamingText, "");
+});
+
+test("turn-end returns to idle", () => {
+  let state = chatReducer(createInitialState("qwen", undefined), {
+    type: "submit-user",
+    id: "u1",
+    text: "hi",
+  });
+  state = chatReducer(state, { type: "turn-end" });
+  assert.equal(state.phase, "idle");
+});

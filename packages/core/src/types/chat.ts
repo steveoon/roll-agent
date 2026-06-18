@@ -27,6 +27,15 @@ export interface ChatStepUsage {
   readonly usage?: ChatTokenUsage;
 }
 
+export interface ChatCompactionSummary {
+  readonly reason: "auto" | "manual";
+  readonly strategy: "summarize" | "truncate";
+  readonly removed: number;
+  readonly kept: number;
+  readonly truncatedTools?: number;
+  readonly beforeInputTokens?: number;
+}
+
 export interface ChatInputRequirement {
   readonly name: string;
   readonly description: string;
@@ -50,6 +59,10 @@ export interface ChatCompletedResult {
   readonly steps: ReadonlyArray<ChatStepSummary>;
   readonly stepUsages?: ReadonlyArray<ChatStepUsage>;
   readonly totalUsage?: ChatTokenUsage;
+  readonly sessionUsage?: ChatTokenUsage;
+  readonly contextWindow?: number;
+  readonly contextInputTokens?: number;
+  readonly compactions?: ReadonlyArray<ChatCompactionSummary>;
 }
 
 export interface ChatNeedsInputResult {

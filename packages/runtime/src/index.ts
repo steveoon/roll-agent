@@ -5,7 +5,10 @@ export type {
   CreateSessionInput,
 } from "./engine/conversation-engine.ts";
 export { AgentSession } from "./engine/agent-session.ts";
-export type { AgentSessionOptions } from "./engine/agent-session.ts";
+export type { AgentSessionOptions, SessionCompactionSettings } from "./engine/agent-session.ts";
+export { resolveContextWindow, lookupContextWindow } from "./engine/context-window.ts";
+export { compactMessages, findTurnBoundaries } from "./engine/compactor.ts";
+export type { CompactionInput, CompactionResult } from "./engine/compactor.ts";
 export { buildAgentToolset } from "./tool-bridge/build-tools.ts";
 export type {
   AgentToolSource,
@@ -46,4 +49,10 @@ export type {
   JsonRpcNotification,
   JsonRpcId,
 } from "./server/protocol.ts";
-export type { SessionEvent, SessionEventStage, SessionTokenUsage } from "./types/events.ts";
+export type {
+  SessionEvent,
+  SessionEventStage,
+  SessionTokenUsage,
+  ContextCompactionReason,
+  ContextCompactionStrategy,
+} from "./types/events.ts";

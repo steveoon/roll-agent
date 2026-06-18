@@ -65,6 +65,13 @@ describe("resolveLLMCall", () => {
     assert.equal(resolved.providerOptions, undefined);
   });
 
+  it("keeps provider defaults for qwen chat calls", () => {
+    const resolved = resolveLLMCall("qwen", "qwen3.7-plus", "test-key", "chat");
+
+    assert.equal(resolved.model.modelId, "qwen3.7-plus");
+    assert.equal(resolved.providerOptions, undefined);
+  });
+
   it("does not inject providerOptions for non-qwen structured-output calls", () => {
     const resolved = resolveLLMCall(
       "openai",

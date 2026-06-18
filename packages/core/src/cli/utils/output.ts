@@ -25,6 +25,10 @@ export function setLogLevel(level: LogLevel): void {
   currentLevel = level;
 }
 
+export function isDebugLogEnabled(): boolean {
+  return shouldLog("debug");
+}
+
 export function resolveLogLevelFromArgv(argv: readonly string[]): LogLevel {
   return argv.some((arg) => DEBUG_FLAGS.has(arg)) ? "debug" : "info";
 }

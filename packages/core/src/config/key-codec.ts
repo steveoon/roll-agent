@@ -69,7 +69,9 @@ export const CONFIG_KEY_CODEC: KeyCodecNode = {
         provider: LEAF,
         model: LEAF,
         maxSteps: LEAF,
+        turnTimeoutMs: LEAF,
         threadsDir: LEAF,
+        contextWindow: LEAF,
         approval: {
           kind: "object",
           fields: {
@@ -78,6 +80,16 @@ export const CONFIG_KEY_CODEC: KeyCodecNode = {
               kind: "record",
               value: LEAF,
             },
+          },
+        },
+        compaction: {
+          kind: "object",
+          fields: {
+            enabled: LEAF,
+            strategy: LEAF,
+            threshold: LEAF,
+            keepRecentTurns: LEAF,
+            keepRecentTokens: LEAF,
           },
         },
       },

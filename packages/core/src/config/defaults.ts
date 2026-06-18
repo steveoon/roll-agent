@@ -21,11 +21,19 @@ export const DEFAULT_CONFIG: RollConfig = {
   },
   ask: {},
   runtime: {
-    maxSteps: 16,
+    maxSteps: 80,
+    turnTimeoutMs: 300_000,
     threadsDir: "~/.roll-agent/threads",
     approval: {
       default: "guarded",
       overrides: {},
+    },
+    compaction: {
+      enabled: true,
+      strategy: "summarize",
+      threshold: 0.75,
+      keepRecentTurns: 4,
+      keepRecentTokens: 32_000,
     },
   },
   agents: {

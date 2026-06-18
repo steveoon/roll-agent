@@ -1,8 +1,10 @@
 import type { Ora } from "ora";
 import chalk from "chalk";
-import { confirm, isCancel } from "@clack/prompts";
-import type { SessionEvent, SessionTokenUsage } from "@roll-agent/runtime";
-import { createSpinner, log, redactToolArgsForLog } from "./output.ts";
+import { isCancel, select } from "@clack/prompts";
+import type { SessionEvent } from "@roll-agent/runtime";
+import { createSpinner, log } from "./output.ts";
+import { computeUsageParts, formatUsageLine } from "./token-format.ts";
+import { formatToolInput } from "./tool-format.ts";
 
 export interface ChatApprover {
   approve(approvalId: string): void;
@@ -12,48 +14,59 @@ export interface ChatApprover {
 export type ChatConfirm = (message: string) => Promise<boolean>;
 
 export const clackConfirm: ChatConfirm = async (message) => {
-  const answer = await confirm({ message });
-  return !isCancel(answer) && answer === true;
+  const answer = await select({
+    message,
+    options: [
+      { value: "yes", label: "Yes" },
+      { value: "no", label: "No" },
+    ],
+    initialValue: "no",
+  });
+  return !isCancel(answer) && answer === "yes";
 };
 
-function formatInput(input: unknown): string {
-  const json = JSON.stringify(redactToolArgsForLog(input));
-  return json.length > 80 ? `${json.slice(0, 79)}…` : json;
-}
-
-function formatUsage(usage: SessionTokenUsage): string {
-  const parts: string[] = [];
-  if (usage.inputTokens !== undefined) {
-    parts.push(`in ${String(usage.inputTokens)}`);
+function formatDebugEvent(event: Extract<SessionEvent, { type: "debug" }>): string {
+  const parts = [`chat.${event.stage}`, event.message];
+  if (event.elapsedMs !== undefined) {
+    parts.push(`${String(event.elapsedMs)}ms`);
   }
-  if (usage.outputTokens !== undefined) {
-    parts.push(`out ${String(usage.outputTokens)}`);
-  }
-  if (usage.totalTokens !== undefined) {
-    parts.push(`total ${String(usage.totalTokens)}`);
+  if (event.data !== undefined) {
+    parts.push(JSON.stringify(event.data));
   }
   return parts.join(" · ");
 }
 
 export class ChatRenderer {
   private readonly confirm: ChatConfirm;
+  private readonly contextWindow: number | undefined;
   private readonly spinners = new Map<string, Ora>();
+  private compactionSpinner: Ora | undefined;
+  private messageSpinner: Ora | undefined;
   private streaming = false;
 
-  constructor(confirm: ChatConfirm) {
+  constructor(confirm: ChatConfirm, contextWindow?: number) {
     this.confirm = confirm;
+    this.contextWindow = contextWindow;
   }
 
   async handle(event: SessionEvent, approver: ChatApprover): Promise<void> {
     switch (event.type) {
+      case "debug":
+        log.debug(formatDebugEvent(event));
+        break;
+      case "message-start":
+        this.startMessageSpinner();
+        break;
       case "text-delta":
+        this.stopMessageSpinner();
         process.stdout.write(event.delta);
         this.streaming = true;
         break;
       case "tool-call": {
+        this.stopMessageSpinner();
         this.flushLine();
         const spinner = createSpinner(
-          `${chalk.cyan(`${event.agentName}.${event.toolName}`)} ${chalk.gray(formatInput(event.input))}`,
+          `${chalk.cyan(`${event.agentName}.${event.toolName}`)} ${chalk.gray(formatToolInput(event.input))}`,
         );
         spinner.start();
         this.spinners.set(event.toolCallId, spinner);
@@ -72,6 +85,7 @@ export class ChatRenderer {
         break;
       }
       case "confirmation-required": {
+        this.stopMessageSpinner();
         this.flushLine();
         const reason = event.reason ? `（${event.reason}）` : "";
         const approved = await this.confirm(`执行 ${event.agentName}.${event.toolName}${reason}?`);
@@ -82,18 +96,79 @@ export class ChatRenderer {
         }
         break;
       }
+      case "compaction-start": {
+        this.stopMessageSpinner();
+        this.flushLine();
+        this.compactionSpinner = createSpinner(chalk.gray("压缩上下文中…"));
+        this.compactionSpinner.start();
+        break;
+      }
+      case "context-compacted": {
+        this.stopCompactionSpinner();
+        this.flushLine();
+        const label = event.reason === "auto" ? "自动压缩" : "手动压缩";
+        const tools = event.truncatedTools
+          ? `，精简 ${String(event.truncatedTools)} 个工具结果`
+          : "";
+        const text =
+          event.removed === 0 && !event.truncatedTools
+            ? `🗜 ${label}：无需压缩`
+            : `🗜 ${label}(${event.strategy})：移除 ${String(event.removed)} 条 → 保留 ${String(event.kept)} 条${tools}`;
+        process.stderr.write(`${chalk.gray(text)}\n`);
+        break;
+      }
       case "error":
+        this.stopMessageSpinner();
+        this.stopCompactionSpinner();
         this.flushLine();
         log.error(event.message);
         break;
-      case "message-finish":
+      case "message-finish": {
+        this.stopMessageSpinner();
         this.flushLine();
-        if (event.totalUsage) {
-          log.debug(`tokens: ${formatUsage(event.totalUsage)}`);
+        if (event.text.length === 0 && (event.totalUsage?.outputTokens ?? 0) > 0) {
+          log.warn("模型本轮只返回了 thinking/reasoning，没有生成可见回复");
+        }
+        if (event.stoppedAtStepLimit) {
+          log.warn(
+            "已达单轮最大工具步数，任务可能未完成 — 继续追问即可接着做，或调高 runtime.max-steps",
+          );
+        }
+        const line = formatUsageLine(
+          computeUsageParts(
+            event.totalUsage,
+            event.sessionUsage,
+            this.contextWindow,
+            event.contextInputTokens,
+          ),
+        );
+        if (line) {
+          process.stderr.write(`${chalk.gray(line)}\n`);
         }
         break;
+      }
       default:
         break;
+    }
+  }
+
+  private stopCompactionSpinner(): void {
+    if (this.compactionSpinner) {
+      this.compactionSpinner.stop();
+      this.compactionSpinner = undefined;
+    }
+  }
+
+  private startMessageSpinner(): void {
+    this.stopMessageSpinner();
+    this.messageSpinner = createSpinner(chalk.gray("思考中…"));
+    this.messageSpinner.start();
+  }
+
+  private stopMessageSpinner(): void {
+    if (this.messageSpinner) {
+      this.messageSpinner.stop();
+      this.messageSpinner = undefined;
     }
   }
 

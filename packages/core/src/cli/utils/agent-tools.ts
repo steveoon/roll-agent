@@ -49,13 +49,8 @@ function levenshteinDistance(left: string, right: string): number {
       const substitutionCost = left[leftIndex] === right[rightIndex] ? 0 : 1;
       const deleteCost = (previousRow[rightIndex + 1] ?? Number.POSITIVE_INFINITY) + 1;
       const insertCost = (nextRow[rightIndex] ?? Number.POSITIVE_INFINITY) + 1;
-      const replaceCost =
-        (previousRow[rightIndex] ?? Number.POSITIVE_INFINITY) + substitutionCost;
-      nextRow[rightIndex + 1] = Math.min(
-        deleteCost,
-        insertCost,
-        replaceCost,
-      );
+      const replaceCost = (previousRow[rightIndex] ?? Number.POSITIVE_INFINITY) + substitutionCost;
+      nextRow[rightIndex + 1] = Math.min(deleteCost, insertCost, replaceCost);
     }
 
     previousRow.splice(0, previousRow.length, ...nextRow);
@@ -182,7 +177,9 @@ export function formatMissingToolMessage(
       messageLines.push(`Did you mean: \`${suggestedTool}\`?`);
     }
   } else if (suggestions.length > 1) {
-    messageLines.push(`Did you mean one of: ${suggestions.map((name) => `\`${name}\``).join(", ")}?`);
+    messageLines.push(
+      `Did you mean one of: ${suggestions.map((name) => `\`${name}\``).join(", ")}?`,
+    );
   }
 
   if (availableToolNames.length > 0) {

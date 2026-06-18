@@ -38,7 +38,9 @@ export default defineCommand({
     try {
       stopped = await stopAgentGracefully(agentsConfig.dataDir, agent.skill.name);
     } catch (err) {
-      log.error(`停止 Agent "${args.name}" 失败：${err instanceof Error ? err.message : String(err)}`);
+      log.error(
+        `停止 Agent "${args.name}" 失败：${err instanceof Error ? err.message : String(err)}`,
+      );
       process.exitCode = 1;
       return;
     }
