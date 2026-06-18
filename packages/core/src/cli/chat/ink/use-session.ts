@@ -75,10 +75,11 @@ export function useSession(session: AgentSession, options: UseSessionOptions): U
           }
           flushPending();
           if (event.type === "confirmation-required") {
-            dispatch({ type: "session-event", id: randomUUID(), event });
-            const approved = await new Promise<boolean>((resolve) => {
+            const approvedPromise = new Promise<boolean>((resolve) => {
               decisionRef.current = resolve;
             });
+            dispatch({ type: "session-event", id: randomUUID(), event });
+            const approved = await approvedPromise;
             decisionRef.current = null;
             if (approved) {
               session.approve(event.approvalId);
