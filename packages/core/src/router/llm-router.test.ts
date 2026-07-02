@@ -1,13 +1,13 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { MockLanguageModelV3 } from "ai/test";
+import { MockLanguageModelV4 } from "ai/test";
 import { APICallError } from "ai";
 import { routeWithLLM } from "./llm-router.ts";
 import { createDefaultRuntimeForTransport } from "../types/agent.ts";
 import type { RegisteredAgent } from "../types/agent.ts";
 
-function makeMockModel(jsonText: string): MockLanguageModelV3 {
-  return new MockLanguageModelV3({
+function makeMockModel(jsonText: string): MockLanguageModelV4 {
+  return new MockLanguageModelV4({
     doGenerate: async () => ({
       content: [{ type: "text", text: jsonText }],
       finishReason: { unified: "stop", raw: undefined },
@@ -23,10 +23,10 @@ function makeMockModel(jsonText: string): MockLanguageModelV3 {
 function makeStructuredOutputFallbackModel(
   structuredOutputText: string,
   fallbackText: string,
-): MockLanguageModelV3 {
+): MockLanguageModelV4 {
   let callCount = 0;
 
-  return new MockLanguageModelV3({
+  return new MockLanguageModelV4({
     doGenerate: async () => {
       callCount += 1;
 
@@ -43,8 +43,8 @@ function makeStructuredOutputFallbackModel(
   });
 }
 
-function makeApiErrorModel(): MockLanguageModelV3 {
-  return new MockLanguageModelV3({
+function makeApiErrorModel(): MockLanguageModelV4 {
+  return new MockLanguageModelV4({
     doGenerate: async () => {
       throw new APICallError({
         message: "upstream unavailable",

@@ -3,8 +3,13 @@ import assert from "node:assert/strict";
 import { lookupContextWindow, resolveContextWindow } from "./context-window.ts";
 
 test("lookupContextWindow 按子串匹配已知模型", () => {
+  assert.equal(lookupContextWindow("claude-sonnet-5"), 1_000_000);
   assert.equal(lookupContextWindow("claude-sonnet-4-6"), 1_000_000);
+  assert.equal(lookupContextWindow("claude-opus-4-7"), 1_000_000);
+  assert.equal(lookupContextWindow("claude-opus-4-6"), 1_000_000);
+  assert.equal(lookupContextWindow("claude-fable-5"), 1_000_000);
   assert.equal(lookupContextWindow("claude-haiku-4-5"), 200_000);
+  assert.equal(lookupContextWindow("claude-3-haiku-20240307"), 200_000);
   assert.equal(lookupContextWindow("gpt-5.5"), 1_050_000);
   assert.equal(lookupContextWindow("gpt-5.4-mini"), 400_000);
   assert.equal(lookupContextWindow("gpt-5"), 400_000);

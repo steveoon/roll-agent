@@ -115,10 +115,25 @@ describe("thinkingProviderOptions", () => {
     assert.deepEqual(thinkingProviderOptions("anthropic", "claude-opus-5-0", "high"), {
       anthropic: { thinking: { type: "adaptive" }, effort: "high" },
     });
+    assert.deepEqual(thinkingProviderOptions("anthropic", "claude-sonnet-5", "medium"), {
+      anthropic: { thinking: { type: "adaptive" }, effort: "medium" },
+    });
+    assert.deepEqual(thinkingProviderOptions("anthropic", "claude-fable-5", "high"), {
+      anthropic: { thinking: { type: "adaptive" }, effort: "high" },
+    });
+    assert.deepEqual(thinkingProviderOptions("anthropic", "claude-sonnet-5-20260601", "low"), {
+      anthropic: { thinking: { type: "adaptive" }, effort: "low" },
+    });
   });
 
   it("maps older anthropic thinking to enabled/disabled with budget", () => {
     assert.deepEqual(thinkingProviderOptions("anthropic", "claude-sonnet-4-5", "low"), {
+      anthropic: { thinking: { type: "enabled", budgetTokens: 2048 } },
+    });
+    assert.deepEqual(thinkingProviderOptions("anthropic", "claude-sonnet-4-20250514", "low"), {
+      anthropic: { thinking: { type: "enabled", budgetTokens: 2048 } },
+    });
+    assert.deepEqual(thinkingProviderOptions("anthropic", "claude-haiku-4-5", "low"), {
       anthropic: { thinking: { type: "enabled", budgetTokens: 2048 } },
     });
     assert.deepEqual(thinkingProviderOptions("anthropic", "claude-sonnet-4-6", "off"), {

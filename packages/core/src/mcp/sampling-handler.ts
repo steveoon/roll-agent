@@ -3,7 +3,7 @@ import { CreateMessageRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 import type { CreateMessageResult } from "@modelcontextprotocol/sdk/types.js";
 import { generateText } from "ai";
 import type { ModelMessage } from "ai";
-import type { LanguageModelV3 } from "@ai-sdk/provider";
+import type { LanguageModelV4 } from "@ai-sdk/provider";
 
 /**
  * 在 MCP Client 上注册 Sampling Handler。
@@ -13,7 +13,7 @@ import type { LanguageModelV3 } from "@ai-sdk/provider";
  *
  * @see https://spec.modelcontextprotocol.io/specification/client/sampling/
  */
-export function registerSamplingHandler(client: Client, model: LanguageModelV3): void {
+export function registerSamplingHandler(client: Client, model: LanguageModelV4): void {
   client.setRequestHandler(
     CreateMessageRequestSchema,
     async (request): Promise<CreateMessageResult> => {

@@ -1,4 +1,4 @@
-import { jsonSchema, tool, type ToolCallOptions, type ToolSet } from "ai";
+import { jsonSchema, tool, type ToolExecutionOptions, type ToolSet } from "ai";
 import type { JSONSchema7 } from "@ai-sdk/provider";
 import type { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { preflightToolCall } from "@roll-agent/core/tool-runtime/preflight";
@@ -103,7 +103,7 @@ export function buildAgentToolset(
         inputSchema: jsonSchema(agentTool.inputSchema as unknown as JSONSchema7),
         execute: async (
           input: unknown,
-          options: ToolCallOptions,
+          options: ToolExecutionOptions<unknown>,
         ): Promise<NormalizedToolResult> => {
           const args = asRecord(input);
           const preflight = preflightToolCall(agentTool, args);

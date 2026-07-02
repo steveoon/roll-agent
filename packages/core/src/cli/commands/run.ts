@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 import type { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import type { LanguageModelV3 } from "@ai-sdk/provider";
+import type { LanguageModelV4 } from "@ai-sdk/provider";
 import { defineCommand } from "citty";
 import { loadConfig } from "../../config/loader.ts";
 import {
@@ -187,7 +187,7 @@ interface RunToolCallOptions {
   readonly config: RollConfig;
   readonly clientManager: McpClientManager;
   readonly agentConnections: Map<string, ConnectedAgent>;
-  readonly samplingModel?: LanguageModelV3;
+  readonly samplingModel?: LanguageModelV4;
 }
 
 interface RunBatchToolCallsOptions extends Omit<RunToolCallOptions, "item" | "index"> {
@@ -542,7 +542,7 @@ function parseRequiredStringArgument(value: unknown, name: string): string | und
   return value;
 }
 
-function createSamplingModel(config: RollConfig): LanguageModelV3 | undefined {
+function createSamplingModel(config: RollConfig): LanguageModelV4 | undefined {
   const providerName = config.llm.defaultProvider;
   const providerConfig = config.llm.providers[providerName];
   return providerConfig

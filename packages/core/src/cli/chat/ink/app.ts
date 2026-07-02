@@ -148,7 +148,7 @@ export function ChatApp(props: ChatAppProps): ReactElement {
       { flexDirection: "column" },
       ...state.history.map((historyItem) => {
         const spaced = historyItem.kind === "user" || historyItem.kind === "assistant";
-        const indented = historyItem.kind === "tool";
+        const indented = historyItem.kind === "tool" || historyItem.kind === "denied";
         return h(
           Box,
           { key: historyItem.id, marginTop: spaced ? 1 : 0, marginLeft: indented ? 2 : 0 },

@@ -1,12 +1,22 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { computeUsageParts, formatTokens, formatUsageLine, sessionTotal } from "./token-format.ts";
+import {
+  computeUsageParts,
+  contextPressure,
+  formatThroughput,
+  formatTokens,
+  formatUsageLine,
+  sessionTotal,
+} from "./token-format.ts";
 
-test("formatTokens humanizes thousands", () => {
+test("formatTokens humanizes thousands and millions", () => {
   assert.equal(formatTokens(42), "42");
   assert.equal(formatTokens(999), "999");
   assert.equal(formatTokens(1200), "1.2k");
   assert.equal(formatTokens(131072), "131.1k");
+  assert.equal(formatTokens(200_000), "200k");
+  assert.equal(formatTokens(1_000_000), "1M");
+  assert.equal(formatTokens(1_050_000), "1.1M");
 });
 
 test("sessionTotal prefers totalTokens then falls back to in+out", () => {
@@ -73,10 +83,39 @@ test("formatUsageLine renders codex-style line", () => {
   );
   assert.ok(line);
   assert.match(line, /^↳ /);
-  assert.match(line, /in 1\.2k \(\+800 cached\)/);
-  assert.match(line, /out 340/);
-  assert.match(line, /session 45\.0k/);
-  assert.match(line, /% left \(1\.2k\/200\.0k\)/);
+  assert.match(line, /turn in 1\.2k \(\+800 cached\) out 340/);
+  assert.match(line, /session 45k/);
+  assert.match(line, /ctx 1\.2k\/200k \(\d+% left\)/);
+});
+
+test("computeUsageParts surfaces cache write tokens when positive", () => {
+  const parts = computeUsageParts(
+    { inputTokens: 1200, cachedInputTokens: 800, cacheWriteTokens: 200 },
+    undefined,
+    undefined,
+    undefined,
+  );
+  assert.equal(parts.cacheWriteTokens, 200);
+  const line = formatUsageLine(parts);
+  assert.ok(line);
+  assert.match(line, /in 1\.2k \(\+800 cached, \+200 cache-write\)/);
+});
+
+test("formatThroughput rounds and hides non-positive values", () => {
+  assert.equal(formatThroughput(42.6), "43 tok/s");
+  assert.equal(formatThroughput(8.44), "8.4 tok/s");
+  assert.equal(formatThroughput(0), undefined);
+  assert.equal(formatThroughput(undefined), undefined);
+});
+
+test("contextPressure escalates at 25% and 10% left", () => {
+  assert.equal(contextPressure(undefined), "ok");
+  assert.equal(contextPressure(80), "ok");
+  assert.equal(contextPressure(26), "ok");
+  assert.equal(contextPressure(25), "warn");
+  assert.equal(contextPressure(11), "warn");
+  assert.equal(contextPressure(10), "critical");
+  assert.equal(contextPressure(0), "critical");
 });
 
 test("formatUsageLine returns undefined with no data", () => {

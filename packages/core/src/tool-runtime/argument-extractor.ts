@@ -1,5 +1,5 @@
 import { generateText, jsonSchema, Output } from "ai";
-import type { LanguageModelV3, SharedV3ProviderOptions } from "@ai-sdk/provider";
+import type { LanguageModelV4, SharedV4ProviderOptions } from "@ai-sdk/provider";
 import type { AgentTool } from "../types/agent.ts";
 import { isPlainObject } from "./schema.ts";
 import { createExtractionSchema, normalizeExtractedToolInput } from "./extraction-schema.ts";
@@ -87,8 +87,8 @@ function parseJsonObjectFromText(text: string): Readonly<Record<string, unknown>
 export async function extractToolInput(
   message: string,
   tool: Pick<AgentTool, "name" | "description" | "inputSchema">,
-  model: LanguageModelV3,
-  structuredOutputProviderOptions?: SharedV3ProviderOptions,
+  model: LanguageModelV4,
+  structuredOutputProviderOptions?: SharedV4ProviderOptions,
 ): Promise<Readonly<Record<string, unknown>>> {
   const extractionSchema = createExtractionSchema(tool.inputSchema);
 

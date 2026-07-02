@@ -53,12 +53,79 @@ function renderInline(
   });
 }
 
-function cellWidth(text: string): number {
+const WIDE_RANGES: ReadonlyArray<readonly [number, number]> = [
+  [0x1100, 0x115f],
+  [0x2329, 0x232a],
+  [0x2705, 0x2705],
+  [0x274c, 0x274e],
+  [0x2b1b, 0x2b55],
+  [0x2e80, 0x303e],
+  [0x3041, 0x33ff],
+  [0x3400, 0x4dbf],
+  [0x4e00, 0x9fff],
+  [0xa000, 0xa4cf],
+  [0xac00, 0xd7a3],
+  [0xf900, 0xfaff],
+  [0xfe10, 0xfe19],
+  [0xfe30, 0xfe6f],
+  [0xff00, 0xff60],
+  [0xffe0, 0xffe6],
+  [0x1f000, 0x1faff],
+  [0x20000, 0x2fffd],
+  [0x30000, 0x3fffd],
+];
+
+const ZERO_WIDTH_RANGES: ReadonlyArray<readonly [number, number]> = [
+  [0x0300, 0x036f],
+  [0x200b, 0x200f],
+  [0xfe00, 0xfe0f],
+];
+
+function inRanges(codePoint: number, ranges: ReadonlyArray<readonly [number, number]>): boolean {
+  return ranges.some(([start, end]) => codePoint >= start && codePoint <= end);
+}
+
+export function displayWidth(text: string): number {
   let width = 0;
   for (const ch of text) {
-    width += (ch.codePointAt(0) ?? 0) < 128 ? 1 : 2;
+    const codePoint = ch.codePointAt(0) ?? 0;
+    if (inRanges(codePoint, ZERO_WIDTH_RANGES)) {
+      continue;
+    }
+    width += inRanges(codePoint, WIDE_RANGES) ? 2 : 1;
   }
   return width;
+}
+
+function inlineText(tokens: Token[] | undefined): string {
+  if (tokens === undefined) {
+    return "";
+  }
+  return tokens
+    .map((token): string => {
+      switch (token.type) {
+        case "strong":
+        case "em":
+        case "del":
+          return inlineText(token.tokens);
+        case "codespan":
+          return decodeEntities(token.text);
+        case "link":
+          return `${token.text} (${token.href})`;
+        case "br":
+          return "\n";
+        case "text":
+          return token.tokens !== undefined ? inlineText(token.tokens) : decodeEntities(token.text);
+        default:
+          return decodeEntities(token.raw);
+      }
+    })
+    .join("");
+}
+
+function cellWidth(cell: Tokens.TableCell): number {
+  const lines = inlineText(cell.tokens).split("\n");
+  return lines.reduce((max, line) => Math.max(max, displayWidth(line)), 0);
 }
 
 function renderTableRow(
@@ -86,9 +153,12 @@ function renderTableRow(
 
 function renderTable(token: Tokens.Table, key: string): ReactElement {
   const widths = token.header.map((cell: Tokens.TableCell, index: number) => {
-    let width = cellWidth(cell.text);
+    let width = cellWidth(cell);
     for (const row of token.rows) {
-      width = Math.max(width, cellWidth(row[index]?.text ?? ""));
+      const rowCell = row[index];
+      if (rowCell !== undefined) {
+        width = Math.max(width, cellWidth(rowCell));
+      }
     }
     return width;
   });
@@ -99,7 +169,7 @@ function renderTable(token: Tokens.Table, key: string): ReactElement {
       h(
         Box,
         { key: `${key}-sep-${String(index)}`, width: width + 2 },
-        h(Text, { dimColor: true }, "─".repeat(width + 1)),
+        h(Text, { dimColor: true }, "─".repeat(width)),
       ),
     ),
   );
@@ -162,7 +232,12 @@ function renderBlock(token: Token, key: string): ReactElement | null {
 function renderBlocks(tokens: Token[], keyPrefix: string): ReactElement[] {
   return tokens
     .map((token, index) => renderBlock(token, `${keyPrefix}-${String(index)}`))
-    .filter((block): block is ReactElement => block !== null);
+    .filter((block): block is ReactElement => block !== null)
+    .map((block, index) =>
+      index === 0
+        ? block
+        : h(Box, { key: `${keyPrefix}-gap-${String(index)}`, marginTop: 1 }, block),
+    );
 }
 
 export function Markdown({ text }: { text: string }): ReactElement {

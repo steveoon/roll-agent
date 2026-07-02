@@ -1,11 +1,11 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { simulateReadableStream } from "ai";
-import { MockLanguageModelV3 } from "ai/test";
+import { MockLanguageModelV4 } from "ai/test";
 import type {
-  LanguageModelV3CallOptions,
-  LanguageModelV3FinishReason,
-  LanguageModelV3StreamPart,
+  LanguageModelV4CallOptions,
+  LanguageModelV4FinishReason,
+  LanguageModelV4StreamPart,
 } from "@ai-sdk/provider";
 import type { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { AgentSession } from "./agent-session.ts";
@@ -14,8 +14,8 @@ import { DefaultToolPolicy } from "../policy/default-policy.ts";
 import type { PolicyDecision, ToolPolicy } from "../types/policy.ts";
 import type { SessionEvent } from "../types/events.ts";
 
-const STOP: LanguageModelV3FinishReason = { unified: "stop", raw: "stop" };
-const TOOL_CALLS: LanguageModelV3FinishReason = { unified: "tool-calls", raw: "tool-calls" };
+const STOP: LanguageModelV4FinishReason = { unified: "stop", raw: "stop" };
+const TOOL_CALLS: LanguageModelV4FinishReason = { unified: "tool-calls", raw: "tool-calls" };
 
 function usage(inputTokens = 1, outputTokens = 1) {
   return {
@@ -24,9 +24,9 @@ function usage(inputTokens = 1, outputTokens = 1) {
   };
 }
 
-function streamChunks(chunks: LanguageModelV3StreamPart[]) {
+function streamChunks(chunks: LanguageModelV4StreamPart[]) {
   return {
-    stream: simulateReadableStream<LanguageModelV3StreamPart>({
+    stream: simulateReadableStream<LanguageModelV4StreamPart>({
       chunks,
       initialDelayInMs: null,
       chunkDelayInMs: null,
@@ -34,9 +34,9 @@ function streamChunks(chunks: LanguageModelV3StreamPart[]) {
   };
 }
 
-function sequencedModel(steps: LanguageModelV3StreamPart[][]): MockLanguageModelV3 {
+function sequencedModel(steps: LanguageModelV4StreamPart[][]): MockLanguageModelV4 {
   let index = 0;
-  return new MockLanguageModelV3({
+  return new MockLanguageModelV4({
     doStream: async () => {
       const chunks = steps[index] ?? steps[steps.length - 1] ?? [];
       index += 1;
@@ -45,7 +45,7 @@ function sequencedModel(steps: LanguageModelV3StreamPart[][]): MockLanguageModel
   });
 }
 
-function textStep(text: string, inputTokens = 1, outputTokens = 1): LanguageModelV3StreamPart[] {
+function textStep(text: string, inputTokens = 1, outputTokens = 1): LanguageModelV4StreamPart[] {
   return [
     { type: "stream-start", warnings: [] },
     { type: "text-start", id: "t" },
@@ -55,7 +55,7 @@ function textStep(text: string, inputTokens = 1, outputTokens = 1): LanguageMode
   ];
 }
 
-function reasoningOnlyStep(text: string): LanguageModelV3StreamPart[] {
+function reasoningOnlyStep(text: string): LanguageModelV4StreamPart[] {
   return [
     { type: "stream-start", warnings: [] },
     { type: "reasoning-start", id: "r" },
@@ -65,7 +65,7 @@ function reasoningOnlyStep(text: string): LanguageModelV3StreamPart[] {
   ];
 }
 
-function streamErrorStep(message: string): LanguageModelV3StreamPart[] {
+function streamErrorStep(message: string): LanguageModelV4StreamPart[] {
   return [
     { type: "stream-start", warnings: [] },
     { type: "error", error: message },
@@ -77,7 +77,7 @@ function toolCallStep(
   input: unknown,
   inputTokens = 1,
   outputTokens = 1,
-): LanguageModelV3StreamPart[] {
+): LanguageModelV4StreamPart[] {
   return [
     { type: "stream-start", warnings: [] },
     { type: "tool-call", toolCallId: "c1", toolName, input: JSON.stringify(input) },
@@ -91,7 +91,7 @@ function textThenToolCallStep(
   input: unknown,
   inputTokens = 1,
   outputTokens = 1,
-): LanguageModelV3StreamPart[] {
+): LanguageModelV4StreamPart[] {
   return [
     { type: "stream-start", warnings: [] },
     { type: "text-start", id: "t" },
@@ -228,8 +228,8 @@ test("AgentSession 透出 cached 与 reasoning token", async () => {
 
 test("setProviderOptions only affects the next turn's streamText", async () => {
   const seen: Array<unknown> = [];
-  const model = new MockLanguageModelV3({
-    doStream: async (options: LanguageModelV3CallOptions) => {
+  const model = new MockLanguageModelV4({
+    doStream: async (options: LanguageModelV4CallOptions) => {
       seen.push(options.providerOptions);
       return streamChunks(textStep("ok"));
     },
@@ -312,7 +312,7 @@ test("AgentSession 保持 thinking 但不持久化 reasoning-only 输出", async
 
 test("AgentSession chat 调用注入最终回复必须走 text 通道的系统提示", async () => {
   let serializedPrompt = "";
-  const model = new MockLanguageModelV3({
+  const model = new MockLanguageModelV4({
     doStream: async (options) => {
       serializedPrompt = JSON.stringify(options.prompt);
       return streamChunks(textStep("ok"));
@@ -643,7 +643,7 @@ test("AgentSession summarize 自动压缩失败时降级 truncate 且不继续�
   const steps = [textStep("a"), textStep("b"), textStep("c")];
   let index = 0;
   let generateCalls = 0;
-  const model = new MockLanguageModelV3({
+  const model = new MockLanguageModelV4({
     doStream: async () => {
       const chunks = steps[index] ?? steps[steps.length - 1] ?? [];
       index += 1;
@@ -739,8 +739,8 @@ test("AgentSession compact iterator 提前关闭时取消 summary 且不替换�
   });
   let abortObserved = false;
   let replaceCalls = 0;
-  const model = new MockLanguageModelV3({
-    doGenerate: async (options: LanguageModelV3CallOptions) => {
+  const model = new MockLanguageModelV4({
+    doGenerate: async (options: LanguageModelV4CallOptions) => {
       options.abortSignal?.addEventListener(
         "abort",
         () => {

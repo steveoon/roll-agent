@@ -2,7 +2,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
-import type { LanguageModelV3 } from "@ai-sdk/provider";
+import type { LanguageModelV4 } from "@ai-sdk/provider";
 import type { AgentTransport } from "../types/agent.ts";
 import { registerSamplingHandler } from "./sampling-handler.ts";
 
@@ -21,7 +21,7 @@ export interface ConnectOptions {
   /** 连接超时（毫秒），默认 30s */
   readonly timeoutMs?: number;
   /** 为子 Agent 提供的 LLM model（启用 Sampling 支持） */
-  readonly samplingModel?: LanguageModelV3;
+  readonly samplingModel?: LanguageModelV4;
   /** 注入到 stdio 子进程的环境变量（与 process.env 合并） */
   readonly env?: Readonly<Record<string, string>>;
 }

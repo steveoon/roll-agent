@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { MockLanguageModelV3 } from "ai/test";
+import { MockLanguageModelV4 } from "ai/test";
 import { rollConfigSchema } from "@roll-agent/core/config/schema";
 import type { McpClientManager } from "@roll-agent/core/mcp/client-manager";
 import type { RegisteredAgent } from "@roll-agent/core/types/agent";
@@ -30,7 +30,7 @@ test("ConversationEngine records runtime model override on created threads", asy
     const store = new ThreadStore(dir);
     const engine = new ConversationEngine({
       config,
-      model: new MockLanguageModelV3({}),
+      model: new MockLanguageModelV4({}),
       store,
       sources: [],
     });
@@ -73,7 +73,7 @@ test("ConversationEngine reports agent bootstrap failures instead of swallowing 
   } as unknown as McpClientManager;
   const engine = new ConversationEngine({
     config,
-    model: new MockLanguageModelV3({}),
+    model: new MockLanguageModelV4({}),
     agents: [agent],
     clientManager,
     onAgentBootstrapIssue: (issue) => issues.push(issue),
@@ -128,7 +128,7 @@ test("ConversationEngine ensures core-managed agents before connecting", async (
   } as unknown as McpClientManager;
   const engine = new ConversationEngine({
     config,
-    model: new MockLanguageModelV3({}),
+    model: new MockLanguageModelV4({}),
     agents: [agent],
     clientManager,
     ensureAgentReady: async (agent, env) => {

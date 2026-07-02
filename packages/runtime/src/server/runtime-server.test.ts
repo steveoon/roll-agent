@@ -1,8 +1,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { simulateReadableStream } from "ai";
-import { MockLanguageModelV3 } from "ai/test";
-import type { LanguageModelV3FinishReason, LanguageModelV3StreamPart } from "@ai-sdk/provider";
+import { MockLanguageModelV4 } from "ai/test";
+import type { LanguageModelV4FinishReason, LanguageModelV4StreamPart } from "@ai-sdk/provider";
 import type { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { rollConfigSchema } from "@roll-agent/core/config/schema";
 import { ConversationEngine } from "../engine/conversation-engine.ts";
@@ -17,8 +17,8 @@ import {
   type JsonRpcMessage,
 } from "./protocol.ts";
 
-const STOP: LanguageModelV3FinishReason = { unified: "stop", raw: "stop" };
-const TOOL_CALLS: LanguageModelV3FinishReason = { unified: "tool-calls", raw: "tool-calls" };
+const STOP: LanguageModelV4FinishReason = { unified: "stop", raw: "stop" };
+const TOOL_CALLS: LanguageModelV4FinishReason = { unified: "tool-calls", raw: "tool-calls" };
 
 const config = rollConfigSchema.parse({
   llm: { defaultProvider: "mock", defaultModel: "mock", providers: {} },
@@ -33,9 +33,9 @@ function usage() {
   };
 }
 
-function step(chunks: LanguageModelV3StreamPart[]) {
+function step(chunks: LanguageModelV4StreamPart[]) {
   return {
-    stream: simulateReadableStream<LanguageModelV3StreamPart>({
+    stream: simulateReadableStream<LanguageModelV4StreamPart>({
       chunks,
       initialDelayInMs: null,
       chunkDelayInMs: null,
@@ -43,9 +43,9 @@ function step(chunks: LanguageModelV3StreamPart[]) {
   };
 }
 
-function sequencedModel(steps: LanguageModelV3StreamPart[][]): MockLanguageModelV3 {
+function sequencedModel(steps: LanguageModelV4StreamPart[][]): MockLanguageModelV4 {
   let index = 0;
-  return new MockLanguageModelV3({
+  return new MockLanguageModelV4({
     doStream: async () => {
       const chunks = steps[index] ?? steps[steps.length - 1] ?? [];
       index += 1;
