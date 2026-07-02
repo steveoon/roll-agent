@@ -1,14 +1,14 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { MockLanguageModelV3 } from "ai/test";
-import type { LanguageModelV3FinishReason } from "@ai-sdk/provider";
+import { MockLanguageModelV4 } from "ai/test";
+import type { LanguageModelV4FinishReason } from "@ai-sdk/provider";
 import type { ModelMessage } from "ai";
 import { compactMessages, findTurnBoundaries } from "./compactor.ts";
 
-const STOP: LanguageModelV3FinishReason = { unified: "stop", raw: "stop" };
+const STOP: LanguageModelV4FinishReason = { unified: "stop", raw: "stop" };
 
-function summaryModel(text: string): MockLanguageModelV3 {
-  return new MockLanguageModelV3({
+function summaryModel(text: string): MockLanguageModelV4 {
+  return new MockLanguageModelV4({
     doGenerate: async () => ({
       content: [{ type: "text", text }],
       finishReason: STOP,

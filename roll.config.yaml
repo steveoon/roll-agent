@@ -1,6 +1,6 @@
 llm:
-  default-provider: deepseek
-  default-model: deepseek-v4-flash
+  default-provider: anthropic
+  default-model: claude-sonnet-5
   providers:
     openai:
       api-key: ${ANTHROPIC_API_KEY}

@@ -1,5 +1,6 @@
 import type { SessionEvent, SessionTokenUsage } from "@roll-agent/runtime";
 import { formatToolInput } from "../../utils/tool-format.ts";
+import { endsInsideThink } from "./thinking-text.ts";
 import type { ThinkingLevel } from "../../../llm/providers.ts";
 
 export interface ToolRowState {
@@ -18,6 +19,12 @@ export type HistoryItem =
       readonly args: string;
       readonly ok: boolean;
     }
+  | {
+      readonly kind: "denied";
+      readonly id: string;
+      readonly name: string;
+      readonly label: string;
+    }
   | { readonly kind: "compaction"; readonly id: string; readonly notice: string }
   | { readonly kind: "notice"; readonly id: string; readonly text: string }
   | { readonly kind: "error"; readonly id: string; readonly message: string };
@@ -25,6 +32,7 @@ export type HistoryItem =
 export interface LiveState {
   readonly streamingText: string;
   readonly thinking: boolean;
+  readonly thinkTagOpen: boolean;
   readonly activeTools: readonly ToolRowState[];
   readonly compacting: boolean;
   readonly producedOutput: boolean;
@@ -36,6 +44,7 @@ export interface StatusState {
   readonly turnUsage: SessionTokenUsage | undefined;
   readonly sessionUsage: SessionTokenUsage | undefined;
   readonly contextInputTokens: number | undefined;
+  readonly outputTokensPerSecond: number | undefined;
   readonly thinkingLevel: ThinkingLevel;
 }
 
@@ -73,10 +82,15 @@ export interface InitialStateOptions {
 const EMPTY_LIVE: LiveState = {
   streamingText: "",
   thinking: false,
+  thinkTagOpen: false,
   activeTools: [],
   compacting: false,
   producedOutput: false,
 };
+
+function withThinkCarry(text: string, thinkTagOpen: boolean): string {
+  return thinkTagOpen ? `<think>${text}` : text;
+}
 
 export function createInitialState(
   model: string,
@@ -93,6 +107,7 @@ export function createInitialState(
       turnUsage: undefined,
       sessionUsage: undefined,
       contextInputTokens: undefined,
+      outputTokensPerSecond: undefined,
       thinkingLevel: options?.thinkingLevel ?? "medium",
     },
     phase: "idle",
@@ -118,6 +133,29 @@ function buildCompactionNotice(
   return `🗜 ${label}(${event.strategy})：移除 ${String(event.removed)} 条 → 保留 ${String(event.kept)} 条${tools}`;
 }
 
+const DENIAL_LABELS: ReadonlyArray<readonly [string, string]> = [
+  ["已取消执行", "已取消"],
+  ["策略拒绝执行", "策略拒绝"],
+];
+
+function toolOutputText(value: unknown): string | undefined {
+  if (typeof value === "string") {
+    return value;
+  }
+  if (typeof value === "object" && value !== null && "output" in value) {
+    return typeof value.output === "string" ? value.output : undefined;
+  }
+  return undefined;
+}
+
+export function denialLabel(output: unknown): string | undefined {
+  const text = toolOutputText(output);
+  if (text === undefined) {
+    return undefined;
+  }
+  return DENIAL_LABELS.find(([prefix]) => text.startsWith(prefix))?.[1];
+}
+
 function commitTool(
   state: ChatUiState,
   id: string,
@@ -126,9 +164,14 @@ function commitTool(
   const active = state.live.activeTools.find((tool) => tool.toolCallId === event.toolCallId);
   const name = active?.name ?? `${event.agentName}.${event.toolName}`;
   const args = active?.args ?? "";
+  const denial = event.isError ? denialLabel(event.output) : undefined;
+  const item: HistoryItem =
+    denial !== undefined
+      ? { kind: "denied", id, name, label: denial }
+      : { kind: "tool", id, name, args, ok: !event.isError };
   return {
     ...state,
-    history: [...state.history, { kind: "tool", id, name, args, ok: !event.isError }],
+    history: [...state.history, item],
     live: {
       ...state.live,
       activeTools: state.live.activeTools.filter((tool) => tool.toolCallId !== event.toolCallId),
@@ -153,7 +196,13 @@ function applySessionEvent(state: ChatUiState, id: string, event: SessionEvent):
     case "tool-call": {
       const narration: HistoryItem[] =
         state.live.streamingText.length > 0
-          ? [{ kind: "assistant", id, text: state.live.streamingText }]
+          ? [
+              {
+                kind: "assistant",
+                id,
+                text: withThinkCarry(state.live.streamingText, state.live.thinkTagOpen),
+              },
+            ]
           : [];
       return {
         ...state,
@@ -163,6 +212,7 @@ function applySessionEvent(state: ChatUiState, id: string, event: SessionEvent):
           thinking: false,
           producedOutput: true,
           streamingText: "",
+          thinkTagOpen: endsInsideThink(state.live.streamingText, state.live.thinkTagOpen),
           activeTools: [
             ...state.live.activeTools,
             {
@@ -196,7 +246,11 @@ function applySessionEvent(state: ChatUiState, id: string, event: SessionEvent):
     case "message-finish": {
       const committed: HistoryItem[] = [];
       if (state.live.streamingText.length > 0) {
-        committed.push({ kind: "assistant", id, text: state.live.streamingText });
+        committed.push({
+          kind: "assistant",
+          id,
+          text: withThinkCarry(state.live.streamingText, state.live.thinkTagOpen),
+        });
       } else if (!state.live.producedOutput && (event.totalUsage?.outputTokens ?? 0) > 0) {
         committed.push({
           kind: "notice",
@@ -220,6 +274,7 @@ function applySessionEvent(state: ChatUiState, id: string, event: SessionEvent):
           turnUsage: event.totalUsage,
           sessionUsage: event.sessionUsage,
           contextInputTokens: event.contextInputTokens,
+          outputTokensPerSecond: event.outputTokensPerSecond,
         },
       };
     }

@@ -3,6 +3,7 @@ export interface SessionTokenUsage {
   readonly outputTokens?: number;
   readonly totalTokens?: number;
   readonly cachedInputTokens?: number;
+  readonly cacheWriteTokens?: number;
   readonly reasoningTokens?: number;
 }
 
@@ -54,6 +55,7 @@ export type SessionEvent =
       readonly totalUsage?: SessionTokenUsage;
       readonly sessionUsage?: SessionTokenUsage;
       readonly contextInputTokens?: number;
+      readonly outputTokensPerSecond?: number;
       readonly stoppedAtStepLimit?: boolean;
     }
   | {

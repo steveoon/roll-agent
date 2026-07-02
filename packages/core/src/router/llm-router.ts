@@ -1,6 +1,6 @@
 import { generateText, NoObjectGeneratedError, Output } from "ai";
 import { z } from "zod";
-import type { LanguageModelV3, SharedV3ProviderOptions } from "@ai-sdk/provider";
+import type { LanguageModelV4, SharedV4ProviderOptions } from "@ai-sdk/provider";
 import type { RegisteredAgent } from "../types/agent.ts";
 import type { RouteSelection } from "../types/router.ts";
 import { asConfidence } from "../types/router.ts";
@@ -79,8 +79,8 @@ function getErrorMessage(error: unknown): string {
 export async function routeWithLLM(
   message: string,
   agents: ReadonlyArray<RegisteredAgent>,
-  model: LanguageModelV3,
-  structuredOutputProviderOptions?: SharedV3ProviderOptions,
+  model: LanguageModelV4,
+  structuredOutputProviderOptions?: SharedV4ProviderOptions,
 ): Promise<RouteSelection> {
   const catalog = buildAgentCatalog(agents);
 

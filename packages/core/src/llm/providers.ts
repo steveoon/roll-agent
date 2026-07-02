@@ -1,4 +1,4 @@
-import type { LanguageModelV3, SharedV3ProviderOptions } from "@ai-sdk/provider";
+import type { LanguageModelV4, SharedV4ProviderOptions } from "@ai-sdk/provider";
 import { createAlibaba } from "@ai-sdk/alibaba";
 import { createAnthropic } from "@ai-sdk/anthropic";
 import { createOpenAI } from "@ai-sdk/openai";
@@ -15,15 +15,15 @@ function supportsOpenAINoneReasoningEffort(modelName: string): boolean {
 }
 
 function supportsAnthropicAdaptiveThinking(modelName: string): boolean {
-  const match = /^claude-(?:sonnet|opus)-(\d+)-(\d+)(?:\b|-)/.exec(modelName);
+  const match = /^claude-[a-z]+-(\d+)(?:-(\d+))?(?:\b|-)/.exec(modelName);
   const majorText = match?.[1];
-  const minorText = match?.[2];
-  if (!majorText || !minorText) {
+  if (!majorText) {
     return false;
   }
 
   const major = Number(majorText);
-  const minor = Number(minorText);
+  const minorText = match?.[2];
+  const minor = minorText !== undefined && minorText.length <= 2 ? Number(minorText) : 0;
   return major > 4 || (major === 4 && minor >= 6);
 }
 
@@ -31,7 +31,7 @@ export function thinkingProviderOptions(
   providerName: string,
   modelName: string,
   level: ThinkingLevel,
-): SharedV3ProviderOptions | undefined {
+): SharedV4ProviderOptions | undefined {
   if (providerName === "openai") {
     if (level === "off") {
       return supportsOpenAINoneReasoningEffort(modelName)
@@ -68,10 +68,10 @@ interface ProviderOptions {
 
 /**
  * Provider 工厂函数类型。
- * AI SDK v6 中所有 v3 provider 统一返回 LanguageModelV3，
+ * AI SDK v7 中所有 v4 provider 统一返回 LanguageModelV4，
  * 它是 LanguageModel union 的成员，可直接传给 generateText。
  */
-type ProviderFactory = (modelName: string, options: ProviderOptions) => LanguageModelV3;
+type ProviderFactory = (modelName: string, options: ProviderOptions) => LanguageModelV4;
 
 /** Qwen（通义千问）DashScope 兼容 API 地址 */
 const QWEN_BASE_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1";
@@ -106,7 +106,7 @@ export function createProviderModel(
   modelName: string,
   apiKey: string,
   baseURL?: string,
-): LanguageModelV3 {
+): LanguageModelV4 {
   const factory = PROVIDER_FACTORIES[providerName];
 
   if (!factory) {
@@ -122,8 +122,8 @@ export type LLMCallPurpose = "structured-output" | "text" | "sampling" | "chat";
 
 /** resolveLLMCall 的返回值 */
 export interface ResolvedLLMCall {
-  readonly model: LanguageModelV3;
-  readonly providerOptions?: SharedV3ProviderOptions;
+  readonly model: LanguageModelV4;
+  readonly providerOptions?: SharedV4ProviderOptions;
 }
 
 /**

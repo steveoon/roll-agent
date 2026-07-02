@@ -60,6 +60,91 @@ test("tool-call adds a live row; tool-result commits it to history", () => {
   ]);
 });
 
+test("tool-result with denial output commits a denied row instead of a red failure", () => {
+  let state = createInitialState("qwen", undefined);
+  state = event(state, "x", {
+    type: "tool-call",
+    toolCallId: "c1",
+    agentName: "browser-use-agent",
+    toolName: "click_ref",
+    input: {},
+  });
+  state = event(state, "d1", {
+    type: "tool-result",
+    toolCallId: "c1",
+    agentName: "browser-use-agent",
+    toolName: "click_ref",
+    output: { output: "已取消执行: 用户取消", isError: true },
+    isError: true,
+  });
+  assert.equal(state.live.activeTools.length, 0);
+  assert.deepEqual(state.history, [
+    { kind: "denied", id: "d1", name: "browser-use-agent.click_ref", label: "已取消" },
+  ]);
+});
+
+test("tool-result with policy denial output commits a denied row", () => {
+  let state = createInitialState("qwen", undefined);
+  state = event(state, "d1", {
+    type: "tool-result",
+    toolCallId: "c1",
+    agentName: "browser-use-agent",
+    toolName: "click_ref",
+    output: "策略拒绝执行: 只读模式",
+    isError: true,
+  });
+  assert.deepEqual(state.history, [
+    { kind: "denied", id: "d1", name: "browser-use-agent.click_ref", label: "策略拒绝" },
+  ]);
+});
+
+test("tool-result with ordinary error output keeps the red failure row", () => {
+  let state = createInitialState("qwen", undefined);
+  state = event(state, "t1", {
+    type: "tool-result",
+    toolCallId: "c1",
+    agentName: "browser-use-agent",
+    toolName: "click_ref",
+    output: { output: "element not found", isError: true },
+    isError: true,
+  });
+  assert.deepEqual(state.history, [
+    { kind: "tool", id: "t1", name: "browser-use-agent.click_ref", args: "", ok: false },
+  ]);
+});
+
+test("think tag spanning a tool call carries into the next segment", () => {
+  let state = createInitialState("qwen", undefined);
+  state = event(state, "x", { type: "text-delta", delta: "先看页面<think>用户想登录" });
+  state = event(state, "n1", {
+    type: "tool-call",
+    toolCallId: "c1",
+    agentName: "browser-use-agent",
+    toolName: "browser_snapshot",
+    input: {},
+  });
+  assert.equal(state.live.thinkTagOpen, true);
+  state = event(state, "t1", {
+    type: "tool-result",
+    toolCallId: "c1",
+    agentName: "browser-use-agent",
+    toolName: "browser_snapshot",
+    output: "ok",
+    isError: false,
+  });
+  state = event(state, "x", { type: "text-delta", delta: "快照拿到了</think>页面已打开" });
+  state = event(state, "m1", {
+    type: "message-finish",
+    text: "页面已打开",
+  });
+  const assistants = state.history.filter((item) => item.kind === "assistant");
+  assert.deepEqual(assistants, [
+    { kind: "assistant", id: "n1", text: "先看页面<think>用户想登录" },
+    { kind: "assistant", id: "m1", text: "<think>快照拿到了</think>页面已打开" },
+  ]);
+  assert.equal(state.live.thinkTagOpen, false);
+});
+
 test("narration commits ahead of the tool it triggers (correct order)", () => {
   let state = createInitialState("qwen", undefined);
   state = event(state, "x", { type: "text-delta", delta: "我来点击按钮" });

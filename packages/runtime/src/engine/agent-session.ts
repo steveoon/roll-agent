@@ -6,7 +6,7 @@ import {
   type ModelMessage,
   type ToolSet,
 } from "ai";
-import type { LanguageModelV3, SharedV3ProviderOptions } from "@ai-sdk/provider";
+import type { LanguageModelV4, SharedV4ProviderOptions } from "@ai-sdk/provider";
 import type {
   ContextCompactionReason,
   ContextCompactionStrategy,
@@ -37,7 +37,7 @@ export interface SessionCompactionSettings {
 
 export interface AgentSessionOptions {
   readonly id: string;
-  readonly model: LanguageModelV3;
+  readonly model: LanguageModelV4;
   readonly sources: readonly AgentToolSource[];
   readonly maxSteps: number;
   readonly policy?: ToolPolicy;
@@ -47,7 +47,7 @@ export interface AgentSessionOptions {
   readonly contextWindow?: number;
   readonly compaction?: SessionCompactionSettings;
   readonly turnTimeoutMs?: number;
-  readonly providerOptions?: SharedV3ProviderOptions;
+  readonly providerOptions?: SharedV4ProviderOptions;
   readonly debugEvents?: boolean;
 }
 
@@ -89,12 +89,14 @@ function isContextWindowError(error: unknown): boolean {
 
 function toSessionUsage(usage: LanguageModelUsage): SessionTokenUsage {
   const cachedInputTokens = usage.inputTokenDetails?.cacheReadTokens;
+  const cacheWriteTokens = usage.inputTokenDetails?.cacheWriteTokens;
   const reasoningTokens = usage.outputTokenDetails?.reasoningTokens;
   return {
     ...(usage.inputTokens !== undefined ? { inputTokens: usage.inputTokens } : {}),
     ...(usage.outputTokens !== undefined ? { outputTokens: usage.outputTokens } : {}),
     ...(usage.totalTokens !== undefined ? { totalTokens: usage.totalTokens } : {}),
     ...(cachedInputTokens !== undefined ? { cachedInputTokens } : {}),
+    ...(cacheWriteTokens !== undefined ? { cacheWriteTokens } : {}),
     ...(reasoningTokens !== undefined ? { reasoningTokens } : {}),
   };
 }
@@ -105,12 +107,14 @@ function addOptionalTokens(a: number | undefined, b: number | undefined): number
 
 function addUsage(acc: SessionTokenUsage, next: SessionTokenUsage): SessionTokenUsage {
   const cachedInputTokens = addOptionalTokens(acc.cachedInputTokens, next.cachedInputTokens);
+  const cacheWriteTokens = addOptionalTokens(acc.cacheWriteTokens, next.cacheWriteTokens);
   const reasoningTokens = addOptionalTokens(acc.reasoningTokens, next.reasoningTokens);
   return {
     inputTokens: (acc.inputTokens ?? 0) + (next.inputTokens ?? 0),
     outputTokens: (acc.outputTokens ?? 0) + (next.outputTokens ?? 0),
     totalTokens: (acc.totalTokens ?? 0) + (next.totalTokens ?? 0),
     ...(cachedInputTokens !== undefined ? { cachedInputTokens } : {}),
+    ...(cacheWriteTokens !== undefined ? { cacheWriteTokens } : {}),
     ...(reasoningTokens !== undefined ? { reasoningTokens } : {}),
   };
 }
@@ -151,7 +155,7 @@ function stripReasoningMessages(messages: readonly ModelMessage[]): ModelMessage
 
 export class AgentSession {
   readonly id: string;
-  private readonly model: LanguageModelV3;
+  private readonly model: LanguageModelV4;
   private readonly maxSteps: number;
   private readonly messages: ModelMessage[];
   private readonly onPersist: ((messages: readonly ModelMessage[]) => void) | undefined;
@@ -159,7 +163,7 @@ export class AgentSession {
   private readonly contextWindow: number | undefined;
   private readonly compaction: SessionCompactionSettings | undefined;
   private readonly turnTimeoutMs: number | undefined;
-  private providerOptions: SharedV3ProviderOptions | undefined;
+  private providerOptions: SharedV4ProviderOptions | undefined;
   private readonly debugEvents: boolean;
   private readonly gate = new ApprovalGate();
   private readonly tools: ToolSet;
@@ -307,6 +311,7 @@ export class AgentSession {
       let sawToolCall = false;
       let totalUsage: SessionTokenUsage | undefined;
       let contextInputTokens: number | undefined;
+      let outputTokensPerSecond: number | undefined;
       let stepCount = 0;
       let lastStepFinishReason: string | undefined;
       let streamError: string | undefined;
@@ -396,6 +401,12 @@ export class AgentSession {
               contextInputTokens = maxTokenCount(contextInputTokens, stepUsage.inputTokens);
               stepCount += 1;
               lastStepFinishReason = part.finishReason;
+              const stepThroughput =
+                part.performance.outputTokensPerSecond ??
+                part.performance.effectiveOutputTokensPerSecond;
+              if (stepThroughput !== undefined && Number.isFinite(stepThroughput)) {
+                outputTokensPerSecond = stepThroughput;
+              }
               queue.push({
                 type: "step-finish",
                 finishReason: part.finishReason,
@@ -474,6 +485,7 @@ export class AgentSession {
           ...(totalUsage ? { totalUsage } : {}),
           sessionUsage: { ...this.sessionUsage },
           ...(contextInputTokens !== undefined ? { contextInputTokens } : {}),
+          ...(outputTokensPerSecond !== undefined ? { outputTokensPerSecond } : {}),
         });
         return;
       }
@@ -530,6 +542,7 @@ export class AgentSession {
         ...(totalUsage ? { totalUsage } : {}),
         sessionUsage: { ...this.sessionUsage },
         ...(contextInputTokens !== undefined ? { contextInputTokens } : {}),
+        ...(outputTokensPerSecond !== undefined ? { outputTokensPerSecond } : {}),
         ...(stoppedAtStepLimit ? { stoppedAtStepLimit: true } : {}),
       });
     } catch (error) {
@@ -594,7 +607,7 @@ export class AgentSession {
     return { ...this.sessionUsage };
   }
 
-  setProviderOptions(providerOptions: SharedV3ProviderOptions | undefined): void {
+  setProviderOptions(providerOptions: SharedV4ProviderOptions | undefined): void {
     this.providerOptions = providerOptions;
   }
 

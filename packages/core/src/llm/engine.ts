@@ -1,5 +1,5 @@
 import { generateText } from "ai";
-import type { LanguageModelV3 } from "@ai-sdk/provider";
+import type { LanguageModelV4 } from "@ai-sdk/provider";
 import { createProviderModel } from "./providers.ts";
 import type { RollConfig } from "../config/schema.ts";
 
@@ -22,7 +22,7 @@ export class LLMEngine {
   /**
    * 生成文本（非流式）。
    *
-   * 使用 AI SDK v6 的 generateText，支持 Anthropic provider。
+   * 使用 AI SDK v7 的 generateText，支持 Anthropic provider。
    */
   async generateText(prompt: string, options: LLMEngineOptions = {}): Promise<string> {
     const model = this.resolveModel(options);
@@ -31,7 +31,7 @@ export class LLMEngine {
   }
 
   /** 解析 provider + model，创建 AI SDK LanguageModel 实例 */
-  private resolveModel(options: LLMEngineOptions): LanguageModelV3 {
+  private resolveModel(options: LLMEngineOptions): LanguageModelV4 {
     const providerName = options.provider ?? this.config.llm.defaultProvider;
     const modelName = options.model ?? this.config.llm.defaultModel;
     const providerConfig = this.config.llm.providers[providerName];

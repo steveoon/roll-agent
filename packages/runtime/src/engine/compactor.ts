@@ -1,5 +1,5 @@
 import { generateText, type ModelMessage } from "ai";
-import type { LanguageModelV3 } from "@ai-sdk/provider";
+import type { LanguageModelV4 } from "@ai-sdk/provider";
 import type { ContextCompactionStrategy } from "../types/events.ts";
 
 export interface CompactionInput {
@@ -7,7 +7,7 @@ export interface CompactionInput {
   readonly strategy: ContextCompactionStrategy;
   readonly keepRecentTurns: number;
   readonly keepRecentTokens: number;
-  readonly model: LanguageModelV3;
+  readonly model: LanguageModelV4;
   readonly abortSignal?: AbortSignal;
 }
 
@@ -128,7 +128,7 @@ function throwIfAborted(abortSignal: AbortSignal | undefined): void {
 
 async function summarizePrefix(
   prefix: readonly ModelMessage[],
-  model: LanguageModelV3,
+  model: LanguageModelV4,
   abortSignal: AbortSignal | undefined,
 ): Promise<ModelMessage[]> {
   const transcript = prefix.map(renderMessage).join("\n\n");

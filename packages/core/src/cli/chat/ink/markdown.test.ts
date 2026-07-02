@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createElement as h } from "react";
 import { render } from "ink-testing-library";
-import { Markdown } from "./markdown.ts";
+import { displayWidth, Markdown } from "./markdown.ts";
 
 test("Markdown renders headings/bold/code/list/quote without literal syntax", () => {
   const { lastFrame, unmount } = render(
@@ -48,6 +48,29 @@ test("Markdown renders a GFM table aligned, not as raw pipes", () => {
   assert.doesNotMatch(frame, /\|---/);
   assert.doesNotMatch(frame, /\| 招聘类型 \|/);
   unmount();
+});
+
+test("Markdown table aligns CJK/codespan/emphasis cells by display width", () => {
+  const { lastFrame, unmount } = render(
+    h(Markdown, {
+      text: "| 项目 | 值 |\n|---|---|\n| 短 | a |\n| 很长很长的项目·条目 | b |\n| `code` | c |\n| **强调** | d |",
+    }),
+  );
+  const frame = lastFrame() ?? "";
+  const lines = frame.split("\n");
+  const offsets = ["a", "b", "c", "d"].map((mark) => {
+    const line = lines.find((candidate) => candidate.trimEnd().endsWith(mark)) ?? "";
+    return displayWidth(line.slice(0, line.lastIndexOf(mark)));
+  });
+  assert.equal(new Set(offsets).size, 1, `column offsets diverge: ${offsets.join(",")}`);
+  unmount();
+});
+
+test("displayWidth treats CJK as 2 and middle dot as 1", () => {
+  assert.equal(displayWidth("abc"), 3);
+  assert.equal(displayWidth("中文"), 4);
+  assert.equal(displayWidth("·"), 1);
+  assert.equal(displayWidth("中·文"), 5);
 });
 
 test("Markdown falls back to plain text on weird input", () => {

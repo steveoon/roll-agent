@@ -10,7 +10,11 @@ export function LiveRegion({ live }: { live: LiveState }): ReactElement {
   return h(
     Box,
     { flexDirection: "column" },
-    live.streamingText.length > 0 ? h(ThinkingText, { text: live.streamingText }) : null,
+    live.streamingText.length > 0
+      ? h(ThinkingText, {
+          text: live.thinkTagOpen ? `<think>${live.streamingText}` : live.streamingText,
+        })
+      : null,
     live.thinking
       ? h(Box, { marginTop: 1 }, h(Spinner, null), h(Text, { dimColor: true }, " 思考中…"))
       : null,

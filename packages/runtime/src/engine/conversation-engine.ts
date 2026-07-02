@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type { ModelMessage } from "ai";
-import type { LanguageModelV3, SharedV3ProviderOptions } from "@ai-sdk/provider";
+import type { LanguageModelV4, SharedV4ProviderOptions } from "@ai-sdk/provider";
 import { McpClientManager } from "@roll-agent/core/mcp/client-manager";
 import { createProviderModel } from "@roll-agent/core/llm/providers";
 import { AgentStore } from "@roll-agent/core/registry/store";
@@ -30,13 +30,13 @@ export type EnsureAgentReady = (
 export interface ConversationEngineOptions {
   readonly config: RollConfig;
   readonly agents?: readonly RegisteredAgent[];
-  readonly model?: LanguageModelV3;
+  readonly model?: LanguageModelV4;
   readonly sources?: readonly AgentToolSource[];
   readonly clientManager?: McpClientManager;
   readonly store?: ThreadStore;
   readonly policy?: ToolPolicy;
   readonly maxSteps?: number;
-  readonly providerOptions?: SharedV3ProviderOptions;
+  readonly providerOptions?: SharedV4ProviderOptions;
   readonly ensureAgentReady?: EnsureAgentReady;
   readonly debugEvents?: boolean;
   readonly onAgentBootstrapIssue?: (issue: AgentBootstrapIssue) => void;
@@ -52,7 +52,7 @@ export interface AgentBootstrapIssue {
 }
 
 interface EngineContext {
-  readonly model: LanguageModelV3;
+  readonly model: LanguageModelV4;
   readonly sources: readonly AgentToolSource[];
 }
 
@@ -103,11 +103,11 @@ export class ConversationEngine {
   private readonly store: ThreadStore | undefined;
   private readonly policy: ToolPolicy | undefined;
   private readonly maxSteps: number;
-  private readonly providerOptions: SharedV3ProviderOptions | undefined;
+  private readonly providerOptions: SharedV4ProviderOptions | undefined;
   private readonly ensureAgentReady: EnsureAgentReady;
   private readonly debugEvents: boolean;
   private readonly explicitAgents: readonly RegisteredAgent[] | undefined;
-  private readonly explicitModel: LanguageModelV3 | undefined;
+  private readonly explicitModel: LanguageModelV4 | undefined;
   private readonly explicitSources: readonly AgentToolSource[] | undefined;
   private readonly onAgentBootstrapIssue: ((issue: AgentBootstrapIssue) => void) | undefined;
   private ready: Promise<EngineContext> | undefined;
@@ -226,7 +226,7 @@ export class ConversationEngine {
     return { model, sources };
   }
 
-  private resolveModel(): LanguageModelV3 {
+  private resolveModel(): LanguageModelV4 {
     const provider = this.resolveProviderName();
     const modelName = this.resolveModelName();
     const providerConfig = this.config.llm.providers[provider];

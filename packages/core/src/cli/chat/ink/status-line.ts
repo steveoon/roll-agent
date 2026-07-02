@@ -2,72 +2,144 @@ import { createElement as h } from "react";
 import type { ReactElement } from "react";
 import { Box, Text, useStdout } from "ink";
 import type { StatusState } from "./state.ts";
-import { computeUsageParts, formatTokens } from "../../utils/token-format.ts";
+import type { ThinkingLevel } from "../../../llm/providers.ts";
+import {
+  computeUsageParts,
+  contextPressure,
+  formatContextUsage,
+  formatThroughput,
+  formatTokens,
+  formatTurnUsage,
+} from "../../utils/token-format.ts";
+import { displayWidth } from "./markdown.ts";
 import { thinkingLabel } from "./thinking.ts";
 
-export function StatusLine({ status }: { status: StatusState }): ReactElement {
-  const { stdout } = useStdout();
-  const width = stdout.columns ?? 80;
+const PRESSURE_STYLES = {
+  ok: { dimColor: true },
+  warn: { color: "yellow" },
+  critical: { color: "red" },
+} as const;
+
+const COMPACT_THINKING: Record<ThinkingLevel, string> = {
+  off: "off",
+  low: "low",
+  medium: "med",
+  high: "high",
+};
+
+const DROP_ORDER = ["tps", "session", "turn", "think"] as const;
+
+const SEPARATOR = " · ";
+
+interface SegmentProps {
+  readonly color?: string;
+  readonly dimColor?: boolean;
+}
+
+interface SegmentSpec {
+  readonly key: string;
+  readonly full: string;
+  readonly compact: string;
+  readonly props: SegmentProps;
+}
+
+export interface StatusSegmentView {
+  readonly key: string;
+  readonly text: string;
+  readonly props: SegmentProps;
+}
+
+export function composeStatusSegments(status: StatusState, width: number): StatusSegmentView[] {
   const parts = computeUsageParts(
     status.turnUsage,
     status.sessionUsage,
     status.contextWindow,
     status.contextInputTokens,
   );
-  const thinkSegment = h(
-    Text,
-    status.thinkingLevel === "off"
-      ? { key: "think", color: "yellow" }
-      : { key: "think", dimColor: true },
-    ` · ${thinkingLabel(status.thinkingLevel)}`,
-  );
-  const segments: ReactElement[] = [
-    h(Text, { key: "model", color: "magenta" }, status.model),
-    thinkSegment,
+  const specs: SegmentSpec[] = [
+    { key: "model", full: status.model, compact: status.model, props: { color: "magenta" } },
+    {
+      key: "think",
+      full: thinkingLabel(status.thinkingLevel),
+      compact: `🧠 ${COMPACT_THINKING[status.thinkingLevel]}`,
+      props: status.thinkingLevel === "off" ? { color: "yellow" } : { dimColor: true },
+    },
   ];
-  if (
-    parts.percentLeft !== undefined &&
-    parts.usedTokens !== undefined &&
-    parts.contextWindow !== undefined
-  ) {
-    segments.push(
-      h(
-        Text,
-        { key: "ctx", dimColor: true },
-        ` · ${String(parts.percentLeft)}% left (${formatTokens(parts.usedTokens)}/${formatTokens(parts.contextWindow)})`,
-      ),
-    );
+  const context = formatContextUsage(parts);
+  if (context !== undefined && parts.usedTokens !== undefined && parts.contextWindow !== undefined) {
+    specs.push({
+      key: "ctx",
+      full: context,
+      compact: `ctx ${formatTokens(parts.usedTokens)}/${formatTokens(parts.contextWindow)}`,
+      props: PRESSURE_STYLES[contextPressure(parts.percentLeft)],
+    });
   }
-  if (parts.inputTokens !== undefined) {
-    const cached =
-      parts.cachedInputTokens !== undefined
-        ? ` (+${formatTokens(parts.cachedInputTokens)} cached)`
-        : "";
-    segments.push(
-      h(Text, { key: "in", dimColor: true }, ` · in ${formatTokens(parts.inputTokens)}${cached}`),
-    );
+  const turn = formatTurnUsage(parts);
+  if (turn !== undefined) {
+    const bits: string[] = [];
+    if (parts.inputTokens !== undefined) {
+      bits.push(`↑${formatTokens(parts.inputTokens)}`);
+    }
+    if (parts.outputTokens !== undefined) {
+      bits.push(`↓${formatTokens(parts.outputTokens)}`);
+    }
+    specs.push({ key: "turn", full: turn, compact: bits.join(" "), props: { dimColor: true } });
   }
-  if (parts.outputTokens !== undefined) {
-    const reasoning =
-      parts.reasoningTokens !== undefined
-        ? ` (+${formatTokens(parts.reasoningTokens)} reasoning)`
-        : "";
-    segments.push(
-      h(
-        Text,
-        { key: "out", dimColor: true },
-        ` · out ${formatTokens(parts.outputTokens)}${reasoning}`,
-      ),
-    );
+  const throughput = formatThroughput(status.outputTokensPerSecond);
+  if (throughput !== undefined) {
+    specs.push({
+      key: "tps",
+      full: throughput,
+      compact: throughput.replace(" tok/s", "t/s"),
+      props: { dimColor: true },
+    });
   }
   if (parts.sessionTokens !== undefined) {
-    segments.push(
-      h(
-        Text,
-        { key: "session", dimColor: true },
-        ` · session ${formatTokens(parts.sessionTokens)}`,
-      ),
-    );
+    specs.push({
+      key: "session",
+      full: `session ${formatTokens(parts.sessionTokens)}`,
+      compact: `Σ${formatTokens(parts.sessionTokens)}`,
+      props: { dimColor: true },
+    });
   }
-  return h(Box, { width }, h(Text, { wrap: "truncate-end" }, ...segments));
+
+  const render = (list: readonly SegmentSpec[], mode: "full" | "compact"): StatusSegmentView[] =>
+    list.map((spec) => ({ key: spec.key, text: spec[mode], props: spec.props }));
+  const fits = (views: readonly StatusSegmentView[]): boolean =>
+    displayWidth(views.map((view) => view.text).join(SEPARATOR)) <= width;
+
+  const fullViews = render(specs, "full");
+  if (fits(fullViews)) {
+    return fullViews;
+  }
+  let list: readonly SegmentSpec[] = specs;
+  let views = render(list, "compact");
+  for (const dropKey of DROP_ORDER) {
+    if (fits(views)) {
+      break;
+    }
+    list = list.filter((spec) => spec.key !== dropKey);
+    views = render(list, "compact");
+  }
+  return views;
+}
+
+export function StatusLine({ status }: { status: StatusState }): ReactElement {
+  const { stdout } = useStdout();
+  const width = stdout.columns ?? 80;
+  const segments = composeStatusSegments(status, width);
+  return h(
+    Box,
+    { width },
+    h(
+      Text,
+      { wrap: "truncate-end" },
+      ...segments.flatMap((segment, index) => [
+        ...(index > 0
+          ? [h(Text, { key: `${segment.key}-sep`, dimColor: true }, SEPARATOR)]
+          : []),
+        h(Text, { key: segment.key, ...segment.props }, segment.text),
+      ]),
+    ),
+  );
 }

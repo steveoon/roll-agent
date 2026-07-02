@@ -1,12 +1,12 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { MockLanguageModelV3 } from "ai/test";
+import { MockLanguageModelV4 } from "ai/test";
 import type { AgentTool } from "../types/agent.ts";
 import { extractToolInput } from "./argument-extractor.ts";
 import { createExtractionSchema } from "./extraction-schema.ts";
 
-function makeMockModel(jsonText: string): MockLanguageModelV3 {
-  return new MockLanguageModelV3({
+function makeMockModel(jsonText: string): MockLanguageModelV4 {
+  return new MockLanguageModelV4({
     doGenerate: async () => ({
       content: [{ type: "text", text: jsonText }],
       finishReason: { unified: "stop", raw: undefined },
@@ -19,10 +19,10 @@ function makeMockModel(jsonText: string): MockLanguageModelV3 {
   });
 }
 
-function makeStructuredOutputFallbackModel(fallbackText: string): MockLanguageModelV3 {
+function makeStructuredOutputFallbackModel(fallbackText: string): MockLanguageModelV4 {
   let callCount = 0;
 
-  return new MockLanguageModelV3({
+  return new MockLanguageModelV4({
     doGenerate: async () => {
       callCount += 1;
 
