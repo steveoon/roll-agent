@@ -1,5 +1,12 @@
 # smart-reply-agent
 
+## 1.3.4
+
+### Patch Changes
+
+- Updated dependencies []:
+  - @roll-agent/sdk@0.2.1
+
 ## 1.3.3
 
 ### Patch Changes
