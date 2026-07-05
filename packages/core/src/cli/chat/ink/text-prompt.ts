@@ -6,6 +6,7 @@ export interface TextPromptProps {
   readonly value: string;
   readonly disabled: boolean;
   readonly slashActive: boolean;
+  readonly autoApprove: boolean;
   readonly onChange: (value: string) => void;
   readonly onSubmit: (value: string) => void;
   readonly onSlashMove: (direction: 1 | -1) => void;
@@ -18,7 +19,7 @@ function isKeyboardProtocolResidue(input: string): boolean {
 }
 
 export function TextPrompt(props: TextPromptProps): ReactElement {
-  const { value, disabled, slashActive, onChange, onSubmit } = props;
+  const { value, disabled, slashActive, autoApprove, onChange, onSubmit } = props;
   const { stdout } = useStdout();
   const width = stdout.columns ?? 80;
   const valueRef = useRef(value);
@@ -65,7 +66,7 @@ export function TextPrompt(props: TextPromptProps): ReactElement {
           props.onSlashMove(1);
           return;
         }
-        if (key.tab) {
+        if (key.tab && !key.shift) {
           props.onSlashComplete();
           return;
         }
@@ -108,13 +109,23 @@ export function TextPrompt(props: TextPromptProps): ReactElement {
       );
     }),
   );
-  const hint = slashActive
+  const hintText = slashActive
     ? "↑↓ 选择 · Tab 补全 · Enter 执行 · Esc 取消"
-    : "Enter 发送 · Shift+Enter/Ctrl+J 换行 · / 命令";
+    : autoApprove
+      ? "Shift+Tab 关闭 · Enter 发送 · Shift+Enter/Ctrl+J 换行 · / 命令"
+      : "Enter 发送 · Shift+Enter/Ctrl+J 换行 · / 命令 · Shift+Tab 自动批准";
+  const hint = autoApprove
+    ? h(
+        Box,
+        null,
+        h(Text, { color: "yellow" }, "⏵⏵ auto"),
+        h(Text, { dimColor: true }, ` · ${hintText}`),
+      )
+    : h(Text, { dimColor: true }, hintText);
   return h(
     Box,
     { flexDirection: "column", width },
     h(Box, { borderStyle: "round", borderColor: disabled ? "gray" : "cyan", paddingX: 1 }, body),
-    h(Text, { dimColor: true }, hint),
+    hint,
   );
 }

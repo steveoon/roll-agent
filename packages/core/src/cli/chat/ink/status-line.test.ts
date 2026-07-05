@@ -16,6 +16,7 @@ const BUSY_STATUS: StatusState = {
   contextInputTokens: 107_700,
   outputTokensPerSecond: 43.2,
   thinkingLevel: "medium",
+  autoApprove: false,
 };
 
 function joined(status: StatusState, width: number): string {
@@ -63,6 +64,17 @@ test("composeStatusSegments colors context by pressure", () => {
   assert.equal(ctx?.props.color, "red");
 });
 
+test("composeStatusSegments shows the auto badge only when enabled and never drops it", () => {
+  const enabled: StatusState = { ...BUSY_STATUS, autoApprove: true };
+  const wide = composeStatusSegments(enabled, 200).find((segment) => segment.key === "auto");
+  assert.equal(wide?.text, "⏵⏵ auto-approve");
+  assert.equal(wide?.props.color, "yellow");
+  const narrow = composeStatusSegments(enabled, 40).find((segment) => segment.key === "auto");
+  assert.equal(narrow?.text, "⏵⏵ auto");
+  const disabled = composeStatusSegments(BUSY_STATUS, 200);
+  assert.ok(!disabled.some((segment) => segment.key === "auto"));
+});
+
 test("composeStatusSegments omits usage segments before the first turn", () => {
   const idle: StatusState = {
     model: "qwen3.7-plus",
@@ -72,6 +84,7 @@ test("composeStatusSegments omits usage segments before the first turn", () => {
     contextInputTokens: undefined,
     outputTokensPerSecond: undefined,
     thinkingLevel: "medium",
+    autoApprove: false,
   };
   const keys = composeStatusSegments(idle, 200).map((segment) => segment.key);
   assert.deepEqual(keys, ["model", "think"]);

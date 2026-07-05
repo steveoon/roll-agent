@@ -65,6 +65,14 @@ export function composeStatusSegments(status: StatusState, width: number): Statu
       props: status.thinkingLevel === "off" ? { color: "yellow" } : { dimColor: true },
     },
   ];
+  if (status.autoApprove) {
+    specs.push({
+      key: "auto",
+      full: "⏵⏵ auto-approve",
+      compact: "⏵⏵ auto",
+      props: { color: "yellow" },
+    });
+  }
   const context = formatContextUsage(parts);
   if (context !== undefined && parts.usedTokens !== undefined && parts.contextWindow !== undefined) {
     specs.push({

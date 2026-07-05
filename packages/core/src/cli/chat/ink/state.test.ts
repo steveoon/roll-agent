@@ -198,6 +198,7 @@ test("confirmation-required enters confirm phase; confirm-resolved returns to bu
   assert.deepEqual(state.pendingConfirm, {
     approvalId: "a1",
     prompt: "执行 browser-use-agent.click_ref（高风险）?",
+    args: "{}",
   });
   state = chatReducer(state, { type: "confirm-resolved" });
   assert.equal(state.phase, "busy");
@@ -296,4 +297,15 @@ test("set-draft / set-thinking / commit-history actions", () => {
   });
   assert.equal(state.history.at(-1)?.kind, "notice");
   assert.equal(state.draft, "");
+});
+
+test("set-auto toggles status.autoApprove without touching confirm state", () => {
+  let state = createInitialState("qwen", undefined);
+  assert.equal(state.status.autoApprove, false);
+  state = chatReducer(state, { type: "set-auto", value: true });
+  assert.equal(state.status.autoApprove, true);
+  assert.equal(state.phase, "idle");
+  assert.equal(state.pendingConfirm, undefined);
+  state = chatReducer(state, { type: "set-auto", value: false });
+  assert.equal(state.status.autoApprove, false);
 });
