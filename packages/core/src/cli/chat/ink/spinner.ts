@@ -1,8 +1,11 @@
 import { createElement as h, useEffect, useState } from "react";
 import type { ReactElement } from "react";
 import { Text } from "ink";
+import isUnicodeSupported from "is-unicode-supported";
 
-const FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"] as const;
+const FRAMES: readonly string[] = isUnicodeSupported()
+  ? ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
+  : ["-", "\\", "|", "/"];
 const FRAME_INTERVAL_MS = 80;
 
 export function Spinner(): ReactElement {
@@ -15,5 +18,5 @@ export function Spinner(): ReactElement {
       clearInterval(timer);
     };
   }, []);
-  return h(Text, { color: "cyan" }, FRAMES[frame] ?? FRAMES[0]);
+  return h(Text, { color: "cyan" }, FRAMES[frame] ?? FRAMES[0] ?? "-");
 }

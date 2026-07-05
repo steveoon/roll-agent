@@ -33,6 +33,12 @@ function makeSession(
   } as unknown as AgentSession;
 }
 
+const ANSI_STYLE_PATTERN = new RegExp(`${String.fromCharCode(27)}\\[[0-9;]*m`, "g");
+
+function plain(frame: string): string {
+  return frame.replace(ANSI_STYLE_PATTERN, "");
+}
+
 async function waitFor(assertion: () => void, timeoutMs = 1000): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   let lastError: unknown;
@@ -112,7 +118,73 @@ test("ChatApp separates the thinking indicator from the submitted user message",
   unmount();
 });
 
-test("ChatApp confirm flow approves on y and resumes the turn", async () => {
+test("ChatApp confirm flow shows tool args and approves on y", async () => {
+  const sink: Sink = { approved: [], rejected: [] };
+  async function* send(): AsyncIterable<SessionEvent> {
+    yield {
+      type: "confirmation-required",
+      approvalId: "a1",
+      agentName: "browser-use-agent",
+      toolName: "click_ref",
+      input: { ref: "node-42" },
+    };
+    yield { type: "message-finish", text: "done" };
+  }
+  const { stdin, lastFrame, unmount } = render(
+    h(ChatApp, {
+      session: makeSession(send, sink),
+      model: "qwen",
+      contextWindow: undefined,
+      onUserSubmit: () => {},
+      onExit: () => {},
+    }),
+  );
+  await delay(10);
+  stdin.write("go");
+  await delay(10);
+  stdin.write("\r");
+  await waitFor(() => assert.match(lastFrame() ?? "", /执行 browser-use-agent\.click_ref/));
+  assert.match(lastFrame() ?? "", /"ref":"node-42"/);
+  await delay(100);
+
+  stdin.write("y");
+  await waitFor(() => assert.deepEqual(sink.approved, ["a1"]));
+  unmount();
+});
+
+test("Shift+Tab enables auto mode and confirmations are approved silently", async () => {
+  const sink: Sink = { approved: [], rejected: [] };
+  async function* send(): AsyncIterable<SessionEvent> {
+    yield {
+      type: "confirmation-required",
+      approvalId: "a1",
+      agentName: "browser-use-agent",
+      toolName: "click_ref",
+      input: {},
+    };
+    yield { type: "message-finish", text: "done" };
+  }
+  const { stdin, lastFrame, frames, unmount } = render(
+    h(ChatApp, {
+      session: makeSession(send, sink),
+      model: "qwen",
+      contextWindow: undefined,
+      onUserSubmit: () => {},
+      onExit: () => {},
+    }),
+  );
+  await delay(10);
+  stdin.write("\x1b[Z");
+  await waitFor(() => assert.match(lastFrame() ?? "", /⏵⏵ auto/));
+  stdin.write("go");
+  await delay(10);
+  stdin.write("\r");
+  await waitFor(() => assert.deepEqual(sink.approved, ["a1"]));
+  assert.ok(frames.every((frame) => !frame.includes("执行 browser-use-agent")));
+  unmount();
+});
+
+test("Shift+Tab during a pending confirmation approves it immediately", async () => {
   const sink: Sink = { approved: [], rejected: [] };
   async function* send(): AsyncIterable<SessionEvent> {
     yield {
@@ -140,8 +212,119 @@ test("ChatApp confirm flow approves on y and resumes the turn", async () => {
   await waitFor(() => assert.match(lastFrame() ?? "", /执行 browser-use-agent\.click_ref/));
   await delay(100);
 
+  stdin.write("\x1b[Z");
+  await waitFor(() => assert.deepEqual(sink.approved, ["a1"]));
+  assert.match(lastFrame() ?? "", /⏵⏵ auto/);
+  unmount();
+});
+
+test("Shift+Tab twice turns auto mode back off and manual confirm returns", async () => {
+  const sink: Sink = { approved: [], rejected: [] };
+  async function* send(): AsyncIterable<SessionEvent> {
+    yield {
+      type: "confirmation-required",
+      approvalId: "a1",
+      agentName: "browser-use-agent",
+      toolName: "click_ref",
+      input: {},
+    };
+    yield { type: "message-finish", text: "done" };
+  }
+  const { stdin, lastFrame, unmount } = render(
+    h(ChatApp, {
+      session: makeSession(send, sink),
+      model: "qwen",
+      contextWindow: undefined,
+      onUserSubmit: () => {},
+      onExit: () => {},
+    }),
+  );
+  await delay(10);
+  stdin.write("\x1b[Z");
+  await waitFor(() => assert.match(lastFrame() ?? "", /⏵⏵ auto/));
+  stdin.write("\x1b[Z");
+  await waitFor(() => assert.doesNotMatch(lastFrame() ?? "", /⏵⏵ auto/));
+  stdin.write("go");
+  await delay(10);
+  stdin.write("\r");
+  await waitFor(() => assert.match(lastFrame() ?? "", /执行 browser-use-agent\.click_ref/));
+  await delay(100);
+
   stdin.write("y");
   await waitFor(() => assert.deepEqual(sink.approved, ["a1"]));
+  unmount();
+});
+
+test("kitty-encoded Shift+Tab toggles auto mode", async () => {
+  const sink: Sink = { approved: [], rejected: [] };
+  async function* send(): AsyncIterable<SessionEvent> {
+    yield { type: "message-finish", text: "" };
+  }
+  const { stdin, lastFrame, unmount } = render(
+    h(ChatApp, {
+      session: makeSession(send, sink),
+      model: "qwen",
+      contextWindow: undefined,
+      onUserSubmit: () => {},
+      onExit: () => {},
+    }),
+  );
+  await delay(10);
+  stdin.write("\x1b[9;2u");
+  await waitFor(() => assert.match(lastFrame() ?? "", /⏵⏵ auto/));
+  unmount();
+});
+
+test("Shift+Tab in the slash popup toggles auto without completing", async () => {
+  const sink: Sink = { approved: [], rejected: [] };
+  async function* send(): AsyncIterable<SessionEvent> {
+    yield { type: "message-finish", text: "" };
+  }
+  const { stdin, lastFrame, unmount } = render(
+    h(ChatApp, {
+      session: makeSession(send, sink),
+      model: "qwen",
+      contextWindow: undefined,
+      onUserSubmit: () => {},
+      onExit: () => {},
+    }),
+  );
+  await delay(10);
+  stdin.write("/th");
+  await delay(20);
+  stdin.write("\x1b[Z");
+  await delay(20);
+  let frame = plain(lastFrame() ?? "");
+  assert.match(frame, /⏵⏵ auto/);
+  assert.doesNotMatch(frame, /› \/think/);
+  stdin.write("\t");
+  await delay(20);
+  frame = plain(lastFrame() ?? "");
+  assert.match(frame, /› \/think/);
+  unmount();
+});
+
+test("/auto slash command toggles auto mode", async () => {
+  const sink: Sink = { approved: [], rejected: [] };
+  async function* send(): AsyncIterable<SessionEvent> {
+    yield { type: "message-finish", text: "" };
+  }
+  const { stdin, lastFrame, unmount } = render(
+    h(ChatApp, {
+      session: makeSession(send, sink),
+      model: "qwen",
+      contextWindow: undefined,
+      onUserSubmit: () => {},
+      onExit: () => {},
+    }),
+  );
+  await delay(10);
+  for (const ch of "/auto") {
+    stdin.write(ch);
+  }
+  await delay(20);
+  stdin.write("\r");
+  await waitFor(() => assert.match(lastFrame() ?? "", /⏵⏵ auto/));
   unmount();
 });
 

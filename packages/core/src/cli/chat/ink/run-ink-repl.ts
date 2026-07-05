@@ -36,7 +36,9 @@ export async function runInkRepl(
     }
   };
 
-  log.info("多轮对话已就绪（/exit 退出 · / 命令 · Shift+Enter/Ctrl+J 换行 · Alt+./Alt+, 调推理）");
+  log.info(
+    "多轮对话已就绪（/exit 退出 · / 命令 · Shift+Enter/Ctrl+J 换行 · Alt+./Alt+, 调推理 · Shift+Tab 自动批准）",
+  );
 
   const instance = render(
     h(ChatApp, {

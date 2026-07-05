@@ -1,4 +1,5 @@
 import { existsSync, readFileSync, readdirSync } from "node:fs";
+import { readJsonFile } from "./json-file.ts";
 import { resolve } from "node:path";
 import type { AgentSource, AgentSourceType, RegisteredAgent } from "../types/agent.ts";
 
@@ -133,11 +134,12 @@ export function readInstalledPackageManifest(
   }
 
   try {
-    const parsed = JSON.parse(readFileSync(packageJsonPath, "utf-8")) as {
+    const parsed = readJsonFile(packageJsonPath) as {
       readonly name?: unknown;
       readonly version?: unknown;
     };
-    const name = typeof parsed.name === "string" && parsed.name.length > 0 ? parsed.name : undefined;
+    const name =
+      typeof parsed.name === "string" && parsed.name.length > 0 ? parsed.name : undefined;
     const version =
       typeof parsed.version === "string" && parsed.version.length > 0 ? parsed.version : undefined;
     if (!name && !version) {
@@ -159,7 +161,7 @@ function readInstalledDependencyName(installDir: string): string | undefined {
   }
 
   try {
-    const parsed = JSON.parse(readFileSync(packageJsonPath, "utf-8")) as {
+    const parsed = readJsonFile(packageJsonPath) as {
       dependencies?: Record<string, unknown>;
     };
     const dependencyNames = Object.keys(parsed.dependencies ?? {});

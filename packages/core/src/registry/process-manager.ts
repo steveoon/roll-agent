@@ -1,4 +1,4 @@
-import { spawn } from "node:child_process";
+import spawn from "cross-spawn";
 import {
   closeSync,
   existsSync,
@@ -10,6 +10,7 @@ import {
 } from "node:fs";
 import { resolve, dirname } from "node:path";
 import { McpClientManager } from "../mcp/client-manager.ts";
+import { readJsonFile } from "./json-file.ts";
 import { resolveDevSpawnSpec } from "./dev-spawn.ts";
 import { inferAgentSourceType } from "./source.ts";
 import type { RegisteredAgent } from "../types/agent.ts";
@@ -113,7 +114,7 @@ export function getAgentPid(dataDir: string, agentName: string): number | undefi
 export function getRollCoreVersion(): string {
   try {
     const packageJsonPath = resolve(import.meta.dirname, "../../package.json");
-    const packageJson = JSON.parse(readFileSync(packageJsonPath, "utf-8")) as unknown;
+    const packageJson = readJsonFile(packageJsonPath);
     return isRecordObject(packageJson) && typeof packageJson.version === "string"
       ? packageJson.version
       : UNKNOWN_CORE_VERSION;
@@ -350,6 +351,7 @@ export function startAgent(
   const child = spawn(spawnSpec.command, [...(spawnSpec.args ?? [])], {
     cwd: agent.installPath,
     detached: true,
+    windowsHide: true,
     stdio: ["ignore", logFd, logFd],
     ...(env ? { env: { ...process.env, ...env } } : {}),
   });
@@ -493,7 +495,7 @@ function readAgentRuntimeSidecar(
 
   let parsed: unknown;
   try {
-    parsed = JSON.parse(readFileSync(sidecarPath, "utf-8")) as unknown;
+    parsed = readJsonFile(sidecarPath);
   } catch {
     return "invalid";
   }

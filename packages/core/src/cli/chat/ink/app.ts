@@ -32,8 +32,17 @@ function helpText(): string {
 
 export function ChatApp(props: ChatAppProps): ReactElement {
   const { session, model, contextWindow, onUserSubmit, onExit } = props;
-  const { state, submit, compact, resolveConfirm, setDraft, setThinking, commitHistory } =
-    useSession(session, {
+  const {
+    state,
+    submit,
+    compact,
+    resolveConfirm,
+    setDraft,
+    setThinking,
+    setAutoMode,
+    toggleAutoMode,
+    commitHistory,
+  } = useSession(session, {
       model,
       contextWindow,
       ...(props.initialHistory ? { initialHistory: props.initialHistory } : {}),
@@ -48,7 +57,9 @@ export function ChatApp(props: ChatAppProps): ReactElement {
   const selectedIndex = Math.min(selected, maxIndex);
 
   useInput((input, key) => {
-    if (key.meta && input === ".") {
+    if (key.tab && key.shift) {
+      toggleAutoMode();
+    } else if (key.meta && input === ".") {
       setThinking(cycleThinking(state.status.thinkingLevel, 1));
     } else if (key.meta && input === ",") {
       setThinking(cycleThinking(state.status.thinkingLevel, -1));
@@ -97,6 +108,16 @@ export function ChatApp(props: ChatAppProps): ReactElement {
       }
       return;
     }
+    if (name === "/auto") {
+      if (arg === "on") {
+        setAutoMode(true);
+      } else if (arg === "off") {
+        setAutoMode(false);
+      } else {
+        toggleAutoMode();
+      }
+      return;
+    }
     if (name === "/help") {
       commitHistory({ kind: "notice", id: randomUUID(), text: helpText() });
       return;
@@ -128,11 +149,16 @@ export function ChatApp(props: ChatAppProps): ReactElement {
 
   const footer =
     state.phase === "confirm" && state.pendingConfirm !== undefined
-      ? h(ConfirmSelect, { prompt: state.pendingConfirm.prompt, onDecide: resolveConfirm })
+      ? h(ConfirmSelect, {
+          prompt: state.pendingConfirm.prompt,
+          args: state.pendingConfirm.args,
+          onDecide: resolveConfirm,
+        })
       : h(TextPrompt, {
           value: state.draft,
           disabled: state.phase !== "idle",
           slashActive,
+          autoApprove: state.status.autoApprove,
           onChange: setDraft,
           onSubmit: handleSubmit,
           onSlashMove,

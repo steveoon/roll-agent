@@ -20,6 +20,8 @@ export interface UseSessionResult {
   readonly resolveConfirm: (approved: boolean) => void;
   readonly setDraft: (value: string) => void;
   readonly setThinking: (level: ThinkingLevel) => void;
+  readonly setAutoMode: (value: boolean) => void;
+  readonly toggleAutoMode: () => void;
   readonly commitHistory: (item: HistoryItem) => void;
 }
 
@@ -39,6 +41,7 @@ export function useSession(session: AgentSession, options: UseSessionOptions): U
   );
   const onThinkingChange = options.onThinkingChange;
   const decisionRef = useRef<((approved: boolean) => void) | null>(null);
+  const autoModeRef = useRef(false);
   const busyRef = useRef(false);
 
   const drive = useCallback(
@@ -75,6 +78,10 @@ export function useSession(session: AgentSession, options: UseSessionOptions): U
           }
           flushPending();
           if (event.type === "confirmation-required") {
+            if (autoModeRef.current) {
+              session.approve(event.approvalId);
+              continue;
+            }
             const approvedPromise = new Promise<boolean>((resolve) => {
               decisionRef.current = resolve;
             });
@@ -144,9 +151,31 @@ export function useSession(session: AgentSession, options: UseSessionOptions): U
     [onThinkingChange],
   );
 
+  const setAutoMode = useCallback((value: boolean) => {
+    autoModeRef.current = value;
+    dispatch({ type: "set-auto", value });
+    if (value) {
+      decisionRef.current?.(true);
+    }
+  }, []);
+
+  const toggleAutoMode = useCallback(() => {
+    setAutoMode(!autoModeRef.current);
+  }, [setAutoMode]);
+
   const commitHistory = useCallback((item: HistoryItem) => {
     dispatch({ type: "commit-history", item });
   }, []);
 
-  return { state, submit, compact, resolveConfirm, setDraft, setThinking, commitHistory };
+  return {
+    state,
+    submit,
+    compact,
+    resolveConfirm,
+    setDraft,
+    setThinking,
+    setAutoMode,
+    toggleAutoMode,
+    commitHistory,
+  };
 }

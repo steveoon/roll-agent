@@ -112,8 +112,10 @@
     "chalk": "^5.4.0",
     "citty": "^0.1.6",
     "cli-table3": "^0.6.5",
+    "cross-spawn": "7.0.6",
     "gray-matter": "^4.0.3",
     "ink": "7.0.1",
+    "is-unicode-supported": "2.1.0",
     "marked": "18.0.5",
     "ora": "^8.1.0",
     "react": "19.2.7",
@@ -121,6 +123,7 @@
     "zod": "^3.25.76"
   },
   "devDependencies": {
+    "@types/cross-spawn": "6.0.6",
     "@types/node": "^22.0.0",
     "@types/react": "19.2.16",
     "ink-testing-library": "4.0.0"

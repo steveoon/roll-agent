@@ -46,6 +46,7 @@ export interface StatusState {
   readonly contextInputTokens: number | undefined;
   readonly outputTokensPerSecond: number | undefined;
   readonly thinkingLevel: ThinkingLevel;
+  readonly autoApprove: boolean;
 }
 
 export type ChatPhase = "idle" | "busy" | "confirm";
@@ -53,6 +54,7 @@ export type ChatPhase = "idle" | "busy" | "confirm";
 export interface PendingConfirm {
   readonly approvalId: string;
   readonly prompt: string;
+  readonly args: string;
 }
 
 export interface ChatUiState {
@@ -68,6 +70,7 @@ export type ChatUiAction =
   | { readonly type: "submit-user"; readonly id: string; readonly text: string }
   | { readonly type: "set-draft"; readonly value: string }
   | { readonly type: "set-thinking"; readonly level: ThinkingLevel }
+  | { readonly type: "set-auto"; readonly value: boolean }
   | { readonly type: "commit-history"; readonly item: HistoryItem }
   | { readonly type: "start-compaction" }
   | { readonly type: "session-event"; readonly id: string; readonly event: SessionEvent }
@@ -109,6 +112,7 @@ export function createInitialState(
       contextInputTokens: undefined,
       outputTokensPerSecond: undefined,
       thinkingLevel: options?.thinkingLevel ?? "medium",
+      autoApprove: false,
     },
     phase: "idle",
     pendingConfirm: undefined,
@@ -230,7 +234,11 @@ function applySessionEvent(state: ChatUiState, id: string, event: SessionEvent):
       return {
         ...state,
         phase: "confirm",
-        pendingConfirm: { approvalId: event.approvalId, prompt: buildConfirmPrompt(event) },
+        pendingConfirm: {
+          approvalId: event.approvalId,
+          prompt: buildConfirmPrompt(event),
+          args: formatToolInput(event.input),
+        },
       };
     case "compaction-start":
       return { ...state, live: { ...state.live, compacting: true } };
@@ -304,6 +312,8 @@ export function chatReducer(state: ChatUiState, action: ChatUiAction): ChatUiSta
       return { ...state, draft: action.value };
     case "set-thinking":
       return { ...state, status: { ...state.status, thinkingLevel: action.level } };
+    case "set-auto":
+      return { ...state, status: { ...state.status, autoApprove: action.value } };
     case "commit-history":
       return { ...state, history: [...state.history, action.item], draft: "" };
     case "start-compaction":
