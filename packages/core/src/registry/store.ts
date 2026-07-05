@@ -1,5 +1,6 @@
-import { readFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
+import { writeFileSync, existsSync, mkdirSync, renameSync } from "node:fs";
 import { resolve, dirname } from "node:path";
+import { readJsonFile } from "./json-file.ts";
 import { inferAgentSourceFromInstallPath } from "./source.ts";
 import {
   AGENT_STATUSES,
@@ -102,7 +103,9 @@ export class AgentStore {
       schemaVersion: AGENT_STORE_SCHEMA_VERSION,
       agents,
     };
-    writeFileSync(this.storePath, JSON.stringify(next, null, 2), "utf-8");
+    const tempPath = `${this.storePath}.tmp`;
+    writeFileSync(tempPath, JSON.stringify(next, null, 2), "utf-8");
+    renameSync(tempPath, this.storePath);
   }
 
   private load(): AgentStoreFile {
@@ -112,8 +115,7 @@ export class AgentStore {
 
     let parsed: unknown;
     try {
-      const raw = readFileSync(this.storePath, "utf-8");
-      parsed = JSON.parse(raw);
+      parsed = readJsonFile(this.storePath);
     } catch {
       return emptyStoreFile();
     }
@@ -343,10 +345,9 @@ function normalizeStartCommand(value: unknown): AgentStartCommand | undefined {
   return args ? { command, args } : { command };
 }
 
-function normalizeRuntimeEndpoint(value: unknown): Extract<
-  AgentRuntime,
-  { ownership: "core-managed" }
->["endpoint"] | undefined {
+function normalizeRuntimeEndpoint(
+  value: unknown,
+): Extract<AgentRuntime, { ownership: "core-managed" }>["endpoint"] | undefined {
   if (!isJsonRecord(value)) {
     return undefined;
   }
@@ -360,10 +361,9 @@ function normalizeRuntimeEndpoint(value: unknown): Extract<
   return { path, port };
 }
 
-function normalizeRuntimeSetup(value: unknown): Extract<
-  AgentRuntime,
-  { ownership: "core-managed" }
->["setup"] | undefined {
+function normalizeRuntimeSetup(
+  value: unknown,
+): Extract<AgentRuntime, { ownership: "core-managed" }>["setup"] | undefined {
   if (!isJsonRecord(value)) {
     return undefined;
   }

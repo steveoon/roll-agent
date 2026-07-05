@@ -33,6 +33,8 @@ export function buildStdioChildEnv(env?: Readonly<Record<string, string>>): Reco
     ...baseEnv,
     NODE_OPTIONS: appendNodeOption(baseEnv["NODE_OPTIONS"], EXPERIMENTAL_WARNING_SUPPRESSION_FLAG),
     ROLL_AGENT_LOG_LEVEL: baseEnv["ROLL_AGENT_LOG_LEVEL"] ?? "warn",
+    PYTHONUTF8: baseEnv["PYTHONUTF8"] ?? "1",
+    PYTHONIOENCODING: baseEnv["PYTHONIOENCODING"] ?? "utf-8",
   };
 }
 

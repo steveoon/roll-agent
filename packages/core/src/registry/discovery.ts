@@ -1,4 +1,5 @@
 import { readFileSync, existsSync, realpathSync } from "node:fs";
+import { readJsonFile } from "./json-file.ts";
 import { resolve, sep } from "node:path";
 import matter from "gray-matter";
 import { z } from "zod";
@@ -242,7 +243,7 @@ function readRollAgentManifest(agentDir: string): RollAgentManifest | undefined 
 
   let parsed: unknown;
   try {
-    parsed = JSON.parse(readFileSync(packageJsonPath, "utf-8"));
+    parsed = readJsonFile(packageJsonPath);
   } catch {
     throw new Error(`Invalid package.json in ${agentDir}`);
   }

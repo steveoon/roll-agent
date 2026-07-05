@@ -28,6 +28,12 @@
 - `stdout` 只输出 MCP 协议数据
 - 日志一律写到 `stderr`
 - tool 名称、参数名、描述尽量稳定；更新后 `stdio` Agent 直接重跑，HTTP Agent 需要重启服务
+- **`stdout` 必须是 UTF-8 字节流**。Roll 按 UTF-8 解码子进程的 stdio；Windows 上非 Node
+  运行时默认使用系统 locale 编码（中文系统为 CP936/GBK），中文 tool 结果会变成乱码。
+  - Python：Roll 启动 `stdio` 子进程时会自动注入 `PYTHONUTF8=1` 与 `PYTHONIOENCODING=utf-8`
+    （可在 agent env 里显式覆盖），通常无需额外处理；自行托管的 HTTP 服务进程需要自己保证
+  - 其他运行时（Java/Go/Rust/.NET）：请在程序内显式以 UTF-8 写 stdout/stderr
+    （如 Java 加 `-Dfile.encoding=UTF-8 -Dstdout.encoding=UTF-8`），不要依赖系统默认编码
 
 ## 方案 A：本地 `stdio` Agent
 

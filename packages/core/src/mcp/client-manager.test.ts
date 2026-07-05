@@ -29,7 +29,19 @@ describe("buildStdioChildEnv", () => {
 
     assert.equal(env["NODE_OPTIONS"], "--disable-warning=ExperimentalWarning");
     assert.equal(env["ROLL_AGENT_LOG_LEVEL"], "warn");
+    assert.equal(env["PYTHONUTF8"], "1");
+    assert.equal(env["PYTHONIOENCODING"], "utf-8");
     assert.equal(env["ROLL_TEST_INHERITED"], undefined);
+  });
+
+  it("respects explicit python encoding overrides", () => {
+    const env = buildStdioChildEnv({
+      PYTHONUTF8: "0",
+      PYTHONIOENCODING: "gbk",
+    });
+
+    assert.equal(env["PYTHONUTF8"], "0");
+    assert.equal(env["PYTHONIOENCODING"], "gbk");
   });
 
   it("preserves explicit agent env and appends experimental warning suppression", () => {

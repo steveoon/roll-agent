@@ -36,6 +36,9 @@ export default defineCommand({
 
     let stopped = false;
     try {
+      if (process.platform === "win32") {
+        log.info("Windows 下停止为强制终止（无优雅退出信号），Agent 不会执行清理逻辑");
+      }
       stopped = await stopAgentGracefully(agentsConfig.dataDir, agent.skill.name);
     } catch (err) {
       log.error(

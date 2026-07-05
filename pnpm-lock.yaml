@@ -138,12 +138,18 @@ importers:
       cli-table3:
         specifier: ^0.6.5
         version: 0.6.5
+      cross-spawn:
+        specifier: 7.0.6
+        version: 7.0.6
       gray-matter:
         specifier: ^4.0.3
         version: 4.0.3
       ink:
         specifier: 7.0.1
         version: 7.0.1(@types/react@19.2.16)(react@19.2.7)
+      is-unicode-supported:
+        specifier: 2.1.0
+        version: 2.1.0
       marked:
         specifier: 18.0.5
         version: 18.0.5
@@ -160,6 +166,9 @@ importers:
         specifier: ^3.25.76
         version: 3.25.76
     devDependencies:
+      '@types/cross-spawn':
+        specifier: 6.0.6
+        version: 6.0.6
       '@types/node':
         specifier: ^22.0.0
         version: 22.19.15
@@ -646,6 +655,9 @@ packages:
 
   '@tybys/wasm-util@0.10.1':
     resolution: {integrity: sha512-9tTaPJLSiejZKx+Bmog4uSubteqTvFrVrURwkmHixBo0G4seD0zUxp98E1DzUBJxLQ3NPwXrGKDiVjwx/DpPsg==}
+
+  '@types/cross-spawn@6.0.6':
+    resolution: {integrity: sha512-fXRhhUkG4H3TQk5dBhQ7m/JDdSNHKwR2BBia62lhwEIq9xGiQKLxd6LymNhn47SjXhsUEPmxi+PKw2OkW4LLjA==}
 
   '@types/estree@1.0.8':
     resolution: {integrity: sha512-dWHzHa2WqEXI/O1E9OjrocMTKJl2mSrEolh1Iomrv6U+JuNwaHXsXx9bLu5gG7BUWFIN0skIQJQ/L1rIex4X6w==}
@@ -3065,6 +3077,10 @@ snapshots:
     dependencies:
       tslib: 2.8.1
     optional: true
+
+  '@types/cross-spawn@6.0.6':
+    dependencies:
+      '@types/node': 22.19.15
 
   '@types/estree@1.0.8': {}
 

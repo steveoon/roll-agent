@@ -119,6 +119,12 @@ Boundary rules:
 - When a tool call fails with symptoms like a missing required field even though the command visibly contains JSON, retry with `--input-json` before debugging the target subagent.
 - Keep `--json` for output format separate from `--input-json`; `--json` does not provide tool input.
 
+Windows shell quoting:
+
+- The single-quoted `--input-json '{...}'` form assumes a POSIX shell. In `cmd.exe` single quotes are not quoting characters, and Windows PowerShell 5.1 re-quotes arguments before passing them to native executables — both mangle inline JSON.
+- On Windows (or in cross-platform orchestration code), prefer `--input-file ./payload.json`; it avoids shell quoting entirely and is the most portable form.
+- If inline JSON is unavoidable: PowerShell 7.3+ passes single-quoted JSON correctly; in `cmd.exe` wrap with double quotes and escape inner quotes as `\"`.
+
 State-setting inputs:
 
 - Some tools model filters, labels, membership, selections, or other target state. Do not assume an array field means "append".

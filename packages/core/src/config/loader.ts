@@ -1,4 +1,5 @@
 import { readFileSync, existsSync } from "node:fs";
+import { homedir } from "node:os";
 import { resolve } from "node:path";
 import { parse as parseYaml } from "yaml";
 import { agentsConfigSchema, installConfigSchema, rollConfigSchema } from "./schema.ts";
@@ -99,9 +100,11 @@ function findConfigFile(startDir: string): string | undefined {
 
 /** 展开 `~` 为用户 home 目录 */
 function expandTilde(filePath: string): string {
-  if (filePath.startsWith("~/")) {
-    const home = process.env["HOME"] ?? process.env["USERPROFILE"] ?? "";
-    return resolve(home, filePath.slice(2));
+  if (filePath === "~") {
+    return homedir();
+  }
+  if (filePath.startsWith("~/") || filePath.startsWith("~\\")) {
+    return resolve(homedir(), filePath.slice(2));
   }
   return filePath;
 }
