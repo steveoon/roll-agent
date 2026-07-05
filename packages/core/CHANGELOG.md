@@ -1,5 +1,27 @@
 # @roll-agent/core
 
+## 0.14.0
+
+### Minor Changes
+
+- [#130](https://github.com/steveoon/roll-agent/pull/130) [`4025eb2`](https://github.com/steveoon/roll-agent/commit/4025eb23fa98ef5b9d5d8fee031c65598c656de9) Thanks [@steveoon](https://github.com/steveoon)! - chat 模式新增 Auto Mode，并重设计工具确认框。
+  - **Auto Mode**：Shift+Tab 随时开关自动批准工具调用（backtab 与 kitty 协议编码均支持）。开启后确认（Yes/No）被自动批准不再打断执行；正在等待确认时按 Shift+Tab 会立即批准当前待决项并对后续生效（对齐 Claude Code 交互）。新增 `/auto` 命令（`on` / `off` / 无参切换）兜底部分终端拦截 backtab 的场景。开启时输入框 hint 与状态栏显示黄色 `⏵⏵ auto` 徽标（状态栏窄屏不丢弃该段）；每会话默认关闭，不持久化
+  - **确认框重设计**：黄色圆角边框（延续输入框形状语言，避免确认时 footer 布局塌陷）；显示工具入参（经脱敏与 80 字符截断），不再盲批；新增快捷键提示行（含 Esc 取消与 Shift+Tab 说明）；`Y`/`N` 大写输入同样生效
+  - 纯 UI 层实现：runtime 的 ToolPolicy 与 approve/reject 协议不变，policy `deny` 仍然直接拒绝
+
+### Patch Changes
+
+- [#130](https://github.com/steveoon/roll-agent/pull/130) [`ae1f7d5`](https://github.com/steveoon/roll-agent/commit/ae1f7d5f6f44db8b02a831e77f6e3a319e8fc838) Thanks [@steveoon](https://github.com/steveoon)! - Windows 兼容性加固（基于全库静态审计，报告见 docs/windows-compatibility.md）。
+  - **stdio 子进程编码**：`buildStdioChildEnv` 注入 `PYTHONUTF8=1` / `PYTHONIOENCODING=utf-8`（可被 agent env 显式覆盖），消除 Windows 上 Python 子 Agent 按 locale 编码写 stdout 导致的中文乱码；非 Node Agent 接入文档补充 UTF-8 编码要求
+  - **BOM 容忍**：registry 层读取 `package.json` / sidecar / agents.json 统一经 `readJsonFile`（strip UTF-8 BOM），修复 Windows 工具写入 BOM 后 `roll agent add` 报 `Invalid package.json` 的问题
+  - **托管进程 spawn**：`process-manager` 切换 cross-spawn（Windows 上可解析 `.cmd`/`.bat` 启动命令，与 MCP SDK 行为对齐）并设置 `windowsHide`；`roll agent stop` 在 Windows 提示强制终止语义
+  - **home 解析统一**：config 的 `~` 展开改用 `os.homedir()`（与 ThreadStore 一致，避免 Git Bash 下 `HOME`/`USERPROFILE` 不一致导致数据目录分裂），并支持 `~\` 前缀
+  - **agents.json 原子写**：临时文件 + rename，避免崩溃时半截写入被静默清空
+  - **chat spinner 降级**：不支持 Unicode 的终端（legacy conhost 等）自动从 braille 降级为 ASCII 帧
+
+- Updated dependencies []:
+  - @roll-agent/runtime@0.3.0
+
 ## 0.13.0
 
 ### Minor Changes
