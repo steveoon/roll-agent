@@ -11,7 +11,7 @@ export interface ConfirmSelectProps {
 export function ConfirmSelect({ prompt, args, onDecide }: ConfirmSelectProps): ReactElement {
   const [selected, setSelected] = useState<"yes" | "no">("no");
   const { stdout } = useStdout();
-  const width = stdout.columns ?? 80;
+  const width = stdout.columns || 80;
   useInput((input, key) => {
     if (key.leftArrow || key.rightArrow || key.upArrow || key.downArrow) {
       setSelected((current) => (current === "yes" ? "no" : "yes"));
@@ -36,7 +36,7 @@ export function ConfirmSelect({ prompt, args, onDecide }: ConfirmSelectProps): R
     { flexDirection: "column", width },
     h(
       Box,
-      { flexDirection: "column", borderStyle: "round", borderColor: "yellow", paddingX: 1 },
+      { flexDirection: "column", borderStyle: "round", borderColor: "yellow", paddingX: 2 },
       h(Text, null, prompt),
       showArgs ? h(Text, { dimColor: true }, args) : null,
       h(
@@ -54,6 +54,14 @@ export function ConfirmSelect({ prompt, args, onDecide }: ConfirmSelectProps): R
         ),
       ),
     ),
-    h(Text, { dimColor: true }, "←→/y/n 选择 · Enter 确认 · Esc 取消 · Shift+Tab 自动批准本次及后续"),
+    h(
+      Box,
+      { marginLeft: 1 },
+      h(
+        Text,
+        { dimColor: true },
+        "←→/y/n 选择 · Enter 确认 · Esc 取消 · Shift+Tab 自动批准本次及后续",
+      ),
+    ),
   );
 }

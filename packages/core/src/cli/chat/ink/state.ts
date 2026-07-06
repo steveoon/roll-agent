@@ -1,5 +1,6 @@
 import type { SessionEvent, SessionTokenUsage } from "@roll-agent/runtime";
 import { formatToolInput } from "../../utils/tool-format.ts";
+import { GLYPHS } from "../../utils/glyphs.ts";
 import { endsInsideThink } from "./thinking-text.ts";
 import type { ThinkingLevel } from "../../../llm/providers.ts";
 
@@ -132,9 +133,9 @@ function buildCompactionNotice(
   const label = event.reason === "auto" ? "自动压缩" : "手动压缩";
   const tools = event.truncatedTools ? `，精简 ${String(event.truncatedTools)} 个工具结果` : "";
   if (event.removed === 0 && !event.truncatedTools) {
-    return `🗜 ${label}：无需压缩`;
+    return `${GLYPHS.compact} ${label}：无需压缩`;
   }
-  return `🗜 ${label}(${event.strategy})：移除 ${String(event.removed)} 条 → 保留 ${String(event.kept)} 条${tools}`;
+  return `${GLYPHS.compact} ${label}(${event.strategy})：移除 ${String(event.removed)} 条 → 保留 ${String(event.kept)} 条${tools}`;
 }
 
 const DENIAL_LABELS: ReadonlyArray<readonly [string, string]> = [

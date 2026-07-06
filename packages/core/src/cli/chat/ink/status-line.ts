@@ -12,6 +12,7 @@ import {
   formatTurnUsage,
 } from "../../utils/token-format.ts";
 import { displayWidth } from "./markdown.ts";
+import { GLYPHS } from "../../utils/glyphs.ts";
 import { thinkingLabel } from "./thinking.ts";
 
 const PRESSURE_STYLES = {
@@ -61,20 +62,24 @@ export function composeStatusSegments(status: StatusState, width: number): Statu
     {
       key: "think",
       full: thinkingLabel(status.thinkingLevel),
-      compact: `🧠 ${COMPACT_THINKING[status.thinkingLevel]}`,
+      compact: `${GLYPHS.think} ${COMPACT_THINKING[status.thinkingLevel]}`,
       props: status.thinkingLevel === "off" ? { color: "yellow" } : { dimColor: true },
     },
   ];
   if (status.autoApprove) {
     specs.push({
       key: "auto",
-      full: "⏵⏵ auto-approve",
-      compact: "⏵⏵ auto",
+      full: `${GLYPHS.auto} auto-approve`,
+      compact: `${GLYPHS.auto} auto`,
       props: { color: "yellow" },
     });
   }
   const context = formatContextUsage(parts);
-  if (context !== undefined && parts.usedTokens !== undefined && parts.contextWindow !== undefined) {
+  if (
+    context !== undefined &&
+    parts.usedTokens !== undefined &&
+    parts.contextWindow !== undefined
+  ) {
     specs.push({
       key: "ctx",
       full: context,
@@ -134,7 +139,7 @@ export function composeStatusSegments(status: StatusState, width: number): Statu
 
 export function StatusLine({ status }: { status: StatusState }): ReactElement {
   const { stdout } = useStdout();
-  const width = stdout.columns ?? 80;
+  const width = stdout.columns || 80;
   const segments = composeStatusSegments(status, width);
   return h(
     Box,
@@ -143,9 +148,7 @@ export function StatusLine({ status }: { status: StatusState }): ReactElement {
       Text,
       { wrap: "truncate-end" },
       ...segments.flatMap((segment, index) => [
-        ...(index > 0
-          ? [h(Text, { key: `${segment.key}-sep`, dimColor: true }, SEPARATOR)]
-          : []),
+        ...(index > 0 ? [h(Text, { key: `${segment.key}-sep`, dimColor: true }, SEPARATOR)] : []),
         h(Text, { key: segment.key, ...segment.props }, segment.text),
       ]),
     ),

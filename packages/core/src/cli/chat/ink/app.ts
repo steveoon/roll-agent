@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
-import { createElement as h, useState } from "react";
+import { createElement as h, useMemo, useState } from "react";
 import type { ReactElement } from "react";
-import { Box, useInput } from "ink";
+import { Box, Static, useInput } from "ink";
 import type { AgentSession } from "@roll-agent/runtime";
 import type { ThinkingLevel } from "../../../llm/providers.ts";
 import { useSession } from "./use-session.ts";
@@ -43,13 +43,14 @@ export function ChatApp(props: ChatAppProps): ReactElement {
     toggleAutoMode,
     commitHistory,
   } = useSession(session, {
-      model,
-      contextWindow,
-      ...(props.initialHistory ? { initialHistory: props.initialHistory } : {}),
-      ...(props.initialThinkingLevel ? { initialThinkingLevel: props.initialThinkingLevel } : {}),
-      ...(props.onThinkingChange ? { onThinkingChange: props.onThinkingChange } : {}),
-    });
+    model,
+    contextWindow,
+    ...(props.initialHistory ? { initialHistory: props.initialHistory } : {}),
+    ...(props.initialThinkingLevel ? { initialThinkingLevel: props.initialThinkingLevel } : {}),
+    ...(props.onThinkingChange ? { onThinkingChange: props.onThinkingChange } : {}),
+  });
 
+  const staticItems = useMemo(() => [...state.history], [state.history]);
   const [selected, setSelected] = useState(0);
   const slashActive = state.phase === "idle" && state.draft.startsWith("/");
   const matches = slashActive ? filterCommands(state.draft) : [];
@@ -169,20 +170,19 @@ export function ChatApp(props: ChatAppProps): ReactElement {
   return h(
     Box,
     { flexDirection: "column" },
-    h(
-      Box,
-      { flexDirection: "column" },
-      ...state.history.map((historyItem) => {
+    h(Static<HistoryItem>, {
+      items: staticItems,
+      children: (historyItem) => {
         const spaced = historyItem.kind === "user" || historyItem.kind === "assistant";
         const indented = historyItem.kind === "tool" || historyItem.kind === "denied";
         return h(
           Box,
-          { key: historyItem.id, marginTop: spaced ? 1 : 0, marginLeft: indented ? 2 : 0 },
+          { key: historyItem.id, marginTop: spaced ? 1 : 0, marginLeft: indented ? 3 : 1 },
           h(HistoryItemView, { item: historyItem }),
         );
-      }),
-    ),
-    h(LiveRegion, { live: state.live }),
+      },
+    }),
+    h(Box, { marginLeft: 1 }, h(LiveRegion, { live: state.live })),
     h(StatusLine, { status: state.status }),
     slashActive ? h(SlashPopup, { matches, selected: selectedIndex }) : null,
     footer,

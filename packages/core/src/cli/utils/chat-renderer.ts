@@ -3,6 +3,7 @@ import chalk from "chalk";
 import { isCancel, select } from "@clack/prompts";
 import type { SessionEvent } from "@roll-agent/runtime";
 import { createSpinner, log } from "./output.ts";
+import { GLYPHS } from "./glyphs.ts";
 import { computeUsageParts, formatUsageLine } from "./token-format.ts";
 import { formatToolInput } from "./tool-format.ts";
 
@@ -112,8 +113,8 @@ export class ChatRenderer {
           : "";
         const text =
           event.removed === 0 && !event.truncatedTools
-            ? `🗜 ${label}：无需压缩`
-            : `🗜 ${label}(${event.strategy})：移除 ${String(event.removed)} 条 → 保留 ${String(event.kept)} 条${tools}`;
+            ? `${GLYPHS.compact} ${label}：无需压缩`
+            : `${GLYPHS.compact} ${label}(${event.strategy})：移除 ${String(event.removed)} 条 → 保留 ${String(event.kept)} 条${tools}`;
         process.stderr.write(`${chalk.gray(text)}\n`);
         break;
       }
