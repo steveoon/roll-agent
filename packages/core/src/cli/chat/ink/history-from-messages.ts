@@ -1,6 +1,7 @@
 import type { ModelMessage } from "ai";
 import { SUMMARY_ACK, SUMMARY_PREFIX } from "@roll-agent/runtime";
 import { formatToolInput } from "../../utils/tool-format.ts";
+import { GLYPHS } from "../../utils/glyphs.ts";
 import type { HistoryItem } from "./state.ts";
 
 const ERROR_OUTPUT_TYPES = new Set(["error-text", "error-json", "execution-denied"]);
@@ -40,7 +41,7 @@ export function messagesToHistory(
     if (message.role === "user") {
       const text = textFromContent(message.content);
       if (text.startsWith(SUMMARY_PREFIX)) {
-        items.push({ kind: "compaction", id, notice: "🗜 已恢复的上下文摘要" });
+        items.push({ kind: "compaction", id, notice: `${GLYPHS.compact} 已恢复的上下文摘要` });
         return;
       }
       if (text.length > 0) {

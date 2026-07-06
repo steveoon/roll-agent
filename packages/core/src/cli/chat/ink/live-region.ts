@@ -11,9 +11,13 @@ export function LiveRegion({ live }: { live: LiveState }): ReactElement {
     Box,
     { flexDirection: "column" },
     live.streamingText.length > 0
-      ? h(ThinkingText, {
-          text: live.thinkTagOpen ? `<think>${live.streamingText}` : live.streamingText,
-        })
+      ? h(
+          Box,
+          { marginTop: 1 },
+          h(ThinkingText, {
+            text: live.thinkTagOpen ? `<think>${live.streamingText}` : live.streamingText,
+          }),
+        )
       : null,
     live.thinking
       ? h(Box, { marginTop: 1 }, h(Spinner, null), h(Text, { dimColor: true }, " 思考中…"))
@@ -21,7 +25,7 @@ export function LiveRegion({ live }: { live: LiveState }): ReactElement {
     ...live.activeTools.map((tool) =>
       h(
         Box,
-        { key: tool.toolCallId },
+        { key: tool.toolCallId, marginLeft: 2 },
         h(Spinner, null),
         h(Text, null, " "),
         h(ToolLabel, { name: tool.name }),
