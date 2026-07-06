@@ -17,6 +17,13 @@ import type {
 } from "../../types/chat.ts";
 import type { RollConfig } from "../../config/schema.ts";
 import { titleFromMessage } from "../chat/title.ts";
+import { buildBannerLines, renderBannerText, type BannerInfo } from "../chat/banner.ts";
+import { getCurrentVersion } from "../utils/update-checker.ts";
+import {
+  buildSkillInvocationPrompt,
+  formatSkillList,
+  parseSkillInvocation,
+} from "../chat/ink/commands.ts";
 
 type RuntimeModule = typeof import("@roll-agent/runtime");
 
@@ -46,6 +53,17 @@ function reportAgentBootstrapIssue(issue: {
   readonly message: string;
 }): void {
   log.warn(`Agent "${issue.agentName}" 启动失败：${issue.message}`);
+}
+
+function reportSkillLibraryIssue(message: string): void {
+  log.warn(`skill 目录加载警告：${message}`);
+}
+
+function resolveSkillSendText(session: AgentSession, message: string): string {
+  const invocation = parseSkillInvocation(message, session.getSkillSummaries());
+  return invocation && invocation.prompt.length > 0
+    ? buildSkillInvocationPrompt(invocation)
+    : message;
 }
 
 async function readReplLine(
@@ -102,6 +120,7 @@ async function runServer(config: RollConfig): Promise<void> {
     ...(providerOptions ? { providerOptions } : {}),
     debugEvents: isDebugLogEnabled(),
     onAgentBootstrapIssue: reportAgentBootstrapIssue,
+    onSkillLibraryIssue: reportSkillLibraryIssue,
   });
   const connection = createStdioConnection(process.stdin, process.stdout);
   const server = new RuntimeServer(engine, connection);
@@ -265,6 +284,7 @@ export async function runRepl(
       return approved;
     });
   const renderer = new ChatRenderer(confirmFn, session.getContextWindow());
+  const availableSkills = session.getSkillSummaries();
   log.info("进入多轮对话（输入 exit / quit 或 Ctrl-C 退出，/compact 手动压缩上下文）");
 
   let titled = !isNewSession;
@@ -290,13 +310,23 @@ export async function runRepl(
         log.debug("chat.repl manual compact completed");
         continue;
       }
+      if (input === "/skills") {
+        log.info(formatSkillList(availableSkills, (process.stdout.columns || 96) - 2));
+        continue;
+      }
+      const skillInvocation = parseSkillInvocation(input, availableSkills);
+      if (skillInvocation && skillInvocation.prompt.length === 0) {
+        log.info("用法: /<skill-name> [/<skill-name> ...] 你的请求");
+        continue;
+      }
+      const sendInput = skillInvocation ? buildSkillInvocationPrompt(skillInvocation) : input;
       if (!titled) {
         store.updateTitle(session.id, titleFromMessage(input));
         titled = true;
       }
       submitted = true;
       log.debug(`chat.repl send start · chars=${String(input.length)}`);
-      for await (const event of session.send(input)) {
+      for await (const event of session.send(sendInput)) {
         await renderer.handle(event, session);
       }
       log.debug("chat.repl send completed");
@@ -373,6 +403,7 @@ export default defineCommand({
       ...(providerOptions ? { providerOptions } : {}),
       debugEvents: isDebugLogEnabled(),
       onAgentBootstrapIssue: reportAgentBootstrapIssue,
+      onSkillLibraryIssue: reportSkillLibraryIssue,
     });
 
     try {
@@ -394,7 +425,7 @@ export default defineCommand({
       }
 
       if (args.json && args.message) {
-        const result = await runJsonTurn(session, args.message);
+        const result = await runJsonTurn(session, resolveSkillSendText(session, args.message));
         printChatJson(result);
         if (result.status !== "completed") {
           process.exitCode = 1;
@@ -410,7 +441,7 @@ export default defineCommand({
       }
       if (args.message) {
         const renderer = new ChatRenderer(clackConfirm, session.getContextWindow());
-        for await (const event of session.send(args.message)) {
+        for await (const event of session.send(resolveSkillSendText(session, args.message))) {
           await renderer.handle(event, session);
         }
       } else {
@@ -420,6 +451,13 @@ export default defineCommand({
           process.stdin.isTTY &&
           typeof process.stdin.setRawMode === "function",
         );
+        const summary = await engine.getContextSummary();
+        const banner: BannerInfo = {
+          version: getCurrentVersion(),
+          model: modelName,
+          agentCount: summary.agentCount,
+          skillCount: summary.skillCount,
+        };
         let usedInk = false;
         if (interactive) {
           try {
@@ -432,6 +470,7 @@ export default defineCommand({
             )) as typeof import("../chat/ink/run-ink-repl.ts");
             await runInkRepl(session, store, isNewSession, {
               model: modelName,
+              banner,
               initialThinkingLevel: config.runtime.thinkingLevel,
               onThinkingChange: (level) =>
                 session.setProviderOptions(thinkingProviderOptions(provider, modelName, level)),
@@ -444,6 +483,9 @@ export default defineCommand({
           }
         }
         if (!usedInk) {
+          process.stderr.write(
+            `${renderBannerText(buildBannerLines(banner, process.stdout.columns || 80))}\n`,
+          );
           await runRepl(session, store, isNewSession);
         }
       }

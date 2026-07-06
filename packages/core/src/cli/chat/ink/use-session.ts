@@ -15,7 +15,7 @@ export interface UseSessionOptions {
 
 export interface UseSessionResult {
   readonly state: ChatUiState;
-  readonly submit: (text: string) => void;
+  readonly submit: (text: string, sendText?: string) => void;
   readonly compact: () => void;
   readonly resolveConfirm: (approved: boolean) => void;
   readonly setDraft: (value: string) => void;
@@ -115,13 +115,13 @@ export function useSession(session: AgentSession, options: UseSessionOptions): U
   );
 
   const submit = useCallback(
-    (text: string) => {
+    (text: string, sendText?: string) => {
       if (busyRef.current) {
         return;
       }
       busyRef.current = true;
       dispatch({ type: "submit-user", id: randomUUID(), text });
-      drive(session.send(text)).catch(() => undefined);
+      drive(session.send(sendText ?? text)).catch(() => undefined);
     },
     [drive, session],
   );

@@ -14,11 +14,13 @@ import { normalizeListedTools } from "@roll-agent/core/cli/utils/agent-tools";
 import { getAgentEnv } from "@roll-agent/core/config/helpers";
 import type { RollConfig } from "@roll-agent/core/config/schema";
 import type { RegisteredAgent } from "@roll-agent/core/types/agent";
+import { createSkillLibrary, type SkillLibrary } from "@roll-agent/core/skills/library";
 import type { AgentToolSource, SourceTool } from "../tool-bridge/build-tools.ts";
 import type { ToolAnnotations, ToolPolicy } from "../types/policy.ts";
 import type { ThreadStore } from "../store/thread-store.ts";
 import { AgentSession } from "./agent-session.ts";
 import { resolveContextWindow } from "./context-window.ts";
+import { buildChatSystemPrompt } from "./system-prompt.ts";
 
 const DEFAULT_MAX_STEPS = 80;
 
@@ -40,6 +42,8 @@ export interface ConversationEngineOptions {
   readonly ensureAgentReady?: EnsureAgentReady;
   readonly debugEvents?: boolean;
   readonly onAgentBootstrapIssue?: (issue: AgentBootstrapIssue) => void;
+  readonly skillLibrary?: SkillLibrary | null;
+  readonly onSkillLibraryIssue?: (message: string) => void;
 }
 
 export interface CreateSessionInput {
@@ -51,9 +55,16 @@ export interface AgentBootstrapIssue {
   readonly message: string;
 }
 
+export interface EngineContextSummary {
+  readonly agentCount: number;
+  readonly toolCount: number;
+  readonly skillCount: number;
+}
+
 interface EngineContext {
   readonly model: LanguageModelV4;
   readonly sources: readonly AgentToolSource[];
+  readonly skillLibrary?: SkillLibrary;
 }
 
 function extractAnnotations(listed: unknown): ToolAnnotations | undefined {
@@ -109,6 +120,8 @@ export class ConversationEngine {
   private readonly explicitAgents: readonly RegisteredAgent[] | undefined;
   private readonly explicitModel: LanguageModelV4 | undefined;
   private readonly explicitSources: readonly AgentToolSource[] | undefined;
+  private readonly explicitSkillLibrary: SkillLibrary | null | undefined;
+  private readonly onSkillLibraryIssue: ((message: string) => void) | undefined;
   private readonly onAgentBootstrapIssue: ((issue: AgentBootstrapIssue) => void) | undefined;
   private ready: Promise<EngineContext> | undefined;
 
@@ -126,6 +139,8 @@ export class ConversationEngine {
     this.explicitAgents = options.agents;
     this.explicitModel = options.model;
     this.explicitSources = options.sources;
+    this.explicitSkillLibrary = options.skillLibrary;
+    this.onSkillLibraryIssue = options.onSkillLibraryIssue;
     this.onAgentBootstrapIssue = options.onAgentBootstrapIssue;
   }
 
@@ -161,10 +176,15 @@ export class ConversationEngine {
       this.resolveModelName(),
       this.config.runtime.contextWindow,
     );
+    const skills = context.skillLibrary?.list() ?? [];
+    const skillLibrary = skills.length > 0 ? context.skillLibrary : undefined;
+    const systemPrompt = buildChatSystemPrompt({ skills });
     return new AgentSession({
       id,
       model: context.model,
       sources: context.sources,
+      systemPrompt,
+      ...(skillLibrary ? { skillLibrary } : {}),
       maxSteps: this.maxSteps,
       compaction: this.config.runtime.compaction,
       turnTimeoutMs: this.config.runtime.turnTimeoutMs,
@@ -192,7 +212,11 @@ export class ConversationEngine {
   private async bootstrap(): Promise<EngineContext> {
     const model = this.explicitModel ?? this.resolveModel();
     if (this.explicitSources) {
-      return { model, sources: this.explicitSources };
+      return {
+        model,
+        sources: this.explicitSources,
+        ...(this.explicitSkillLibrary ? { skillLibrary: this.explicitSkillLibrary } : {}),
+      };
     }
     const agents = this.explicitAgents ?? new AgentStore(this.config.agents.dataDir).list();
     const sources: AgentToolSource[] = [];
@@ -223,7 +247,22 @@ export class ConversationEngine {
       }
     }
 
-    return { model, sources };
+    const skillLibrary = this.resolveSkillLibrary(agents);
+    return { model, sources, ...(skillLibrary ? { skillLibrary } : {}) };
+  }
+
+  private resolveSkillLibrary(agents: readonly RegisteredAgent[]): SkillLibrary | undefined {
+    if (this.explicitSkillLibrary === null) {
+      return undefined;
+    }
+    if (this.explicitSkillLibrary !== undefined) {
+      return this.explicitSkillLibrary;
+    }
+    return createSkillLibrary({
+      agents,
+      extraDirs: this.config.skills.dirs,
+      ...(this.onSkillLibraryIssue ? { onIssue: this.onSkillLibraryIssue } : {}),
+    });
   }
 
   private resolveModel(): LanguageModelV4 {
@@ -242,6 +281,15 @@ export class ConversationEngine {
 
   private resolveModelName(): string {
     return this.config.runtime.model ?? this.config.llm.defaultModel;
+  }
+
+  async getContextSummary(): Promise<EngineContextSummary> {
+    const context = await this.ensureReady();
+    return {
+      agentCount: context.sources.length,
+      toolCount: context.sources.reduce((total, source) => total + source.tools.length, 0),
+      skillCount: context.skillLibrary?.list().length ?? 0,
+    };
   }
 
   async dispose(): Promise<void> {

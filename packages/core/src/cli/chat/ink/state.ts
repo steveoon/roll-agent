@@ -3,6 +3,7 @@ import { formatToolInput } from "../../utils/tool-format.ts";
 import { GLYPHS } from "../../utils/glyphs.ts";
 import { endsInsideThink } from "./thinking-text.ts";
 import type { ThinkingLevel } from "../../../llm/providers.ts";
+import type { BannerLine } from "../banner.ts";
 
 export interface ToolRowState {
   readonly toolCallId: string;
@@ -11,6 +12,7 @@ export interface ToolRowState {
 }
 
 export type HistoryItem =
+  | { readonly kind: "banner"; readonly id: string; readonly lines: readonly BannerLine[] }
   | { readonly kind: "user"; readonly id: string; readonly text: string }
   | { readonly kind: "assistant"; readonly id: string; readonly text: string }
   | {

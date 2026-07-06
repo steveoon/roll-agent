@@ -121,6 +121,10 @@ function expandPaths(config: RollConfig): RollConfig {
       ...config.runtime,
       threadsDir: expandTilde(config.runtime.threadsDir),
     },
+    skills: {
+      ...config.skills,
+      dirs: config.skills.dirs.map(expandTilde),
+    },
     browser: {
       ...config.browser,
       instances: Object.fromEntries(

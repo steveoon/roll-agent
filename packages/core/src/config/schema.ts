@@ -63,6 +63,11 @@ export const runtimeConfigSchema = z.object({
   compaction: runtimeCompactionConfigSchema.default({}),
 });
 
+export const skillsConfigSchema = z.object({
+  /** 额外的 skill 目录（canonical `.agents/skills` 之外的补充来源）。 */
+  dirs: z.array(z.string().trim().min(1)).default([]),
+});
+
 export const agentsConfigSchema = z.object({
   dataDir: z.string(),
   /** per-agent 环境变量：键为 agent name，值为 key-value 对 */
@@ -175,6 +180,7 @@ export const rollConfigSchema = z.object({
   llm: llmConfigSchema,
   ask: askConfigSchema,
   runtime: runtimeConfigSchema.default({}),
+  skills: skillsConfigSchema.default({}),
   agents: agentsConfigSchema,
   install: installConfigSchema.default({}),
   browser: browserConfigSchema.default({}),
@@ -182,6 +188,7 @@ export const rollConfigSchema = z.object({
 
 export type RollConfig = z.infer<typeof rollConfigSchema>;
 export type RuntimeConfig = z.infer<typeof runtimeConfigSchema>;
+export type SkillsConfig = z.infer<typeof skillsConfigSchema>;
 export type RuntimeApprovalConfig = z.infer<typeof runtimeApprovalConfigSchema>;
 export type BrowserConfig = z.infer<typeof browserConfigSchema>;
 export type InstallConfig = z.infer<typeof installConfigSchema>;

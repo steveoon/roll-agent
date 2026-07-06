@@ -90,8 +90,8 @@ async function gateToolCall(
 export function buildAgentToolset(
   sources: readonly AgentToolSource[],
   ctx: ToolBridgeContext,
+  registry: ToolRegistry = new ToolRegistry(),
 ): BuiltToolset {
-  const registry = new ToolRegistry();
   const tools: ToolSet = {};
 
   for (const source of sources) {

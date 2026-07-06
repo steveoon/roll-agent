@@ -35,6 +35,12 @@ function makeSession(
 
 const ANSI_STYLE_PATTERN = new RegExp(`${String.fromCharCode(27)}\\[[0-9;]*m`, "g");
 
+const TYPE_SKILL = {
+  name: "typescript-magician",
+  description: "严格处理 TypeScript 类型",
+  source: "user",
+} as const;
+
 function plain(frame: string): string {
   return frame.replace(ANSI_STYLE_PATTERN, "");
 }
@@ -425,6 +431,91 @@ test("ChatApp shows a slash popup that filters as you type", async () => {
   frame = lastFrame() ?? "";
   assert.match(frame, /\/think/);
   assert.doesNotMatch(frame, /\/compact/);
+  unmount();
+});
+
+test("ChatApp /skills lists loadable skills", async () => {
+  const sink: Sink = { approved: [], rejected: [] };
+  async function* send(): AsyncIterable<SessionEvent> {
+    yield { type: "message-finish", text: "" };
+  }
+  const { stdin, lastFrame, unmount } = render(
+    h(ChatApp, {
+      session: makeSession(send, sink),
+      model: "qwen",
+      contextWindow: undefined,
+      availableSkills: [TYPE_SKILL],
+      onUserSubmit: () => {},
+      onExit: () => {},
+    }),
+  );
+  await delay(10);
+  stdin.write("/skills");
+  await delay(20);
+  stdin.write("\r");
+  await delay(20);
+
+  const frame = plain(lastFrame() ?? "");
+  assert.match(frame, /可加载 SKILL/);
+  assert.match(frame, /\/typescript-magician/);
+  assert.match(frame, /严格处理 TypeScript 类型/);
+  unmount();
+});
+
+test("ChatApp completes skill names from the slash popup", async () => {
+  const sink: Sink = { approved: [], rejected: [] };
+  async function* send(): AsyncIterable<SessionEvent> {
+    yield { type: "message-finish", text: "" };
+  }
+  const { stdin, lastFrame, unmount } = render(
+    h(ChatApp, {
+      session: makeSession(send, sink),
+      model: "qwen",
+      contextWindow: undefined,
+      availableSkills: [TYPE_SKILL],
+      onUserSubmit: () => {},
+      onExit: () => {},
+    }),
+  );
+  await delay(10);
+  stdin.write("/typ");
+  await delay(20);
+  stdin.write("\t");
+  await delay(20);
+
+  assert.match(plain(lastFrame() ?? ""), /› \/typescript-magician/);
+  unmount();
+});
+
+test("ChatApp sends skill-prefixed prompts as grounded skill instructions", async () => {
+  const sink: Sink = { approved: [], rejected: [] };
+  const sent: string[] = [];
+  const submitted: string[] = [];
+  async function* send(input: string): AsyncIterable<SessionEvent> {
+    sent.push(input);
+    yield { type: "message-finish", text: "" };
+  }
+  const { stdin, lastFrame, unmount } = render(
+    h(ChatApp, {
+      session: makeSession(send, sink),
+      model: "qwen",
+      contextWindow: undefined,
+      availableSkills: [TYPE_SKILL],
+      onUserSubmit: (text: string) => submitted.push(text),
+      onExit: () => {},
+    }),
+  );
+  await delay(10);
+  stdin.write("/typescript-magician 修一下类型");
+  await delay(20);
+  stdin.write("\r");
+  await waitFor(() => assert.equal(sent.length, 1));
+
+  assert.deepEqual(submitted, ["/typescript-magician 修一下类型"]);
+  assert.match(sent[0] ?? "", /roll__skill/);
+  assert.match(sent[0] ?? "", /typescript-magician/);
+  assert.match(sent[0] ?? "", /修一下类型/);
+  assert.match(plain(lastFrame() ?? ""), /\/typescript-magician 修一下类型/);
   unmount();
 });
 

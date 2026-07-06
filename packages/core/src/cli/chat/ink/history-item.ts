@@ -15,6 +15,28 @@ function isDenialText(text: string): boolean {
 
 export function HistoryItemView({ item }: { item: HistoryItem }): ReactElement {
   switch (item.kind) {
+    case "banner":
+      return h(
+        Box,
+        { flexDirection: "column" },
+        ...item.lines.map((line, index) =>
+          h(
+            Text,
+            { key: String(index) },
+            ...line.spans.map((span, spanIndex) =>
+              h(
+                Text,
+                {
+                  key: String(spanIndex),
+                  ...(span.color !== undefined ? { color: span.color } : {}),
+                  ...(span.dim === true ? { dimColor: true } : {}),
+                },
+                span.text,
+              ),
+            ),
+          ),
+        ),
+      );
     case "user":
       return h(
         Box,
@@ -62,12 +84,7 @@ export function HistoryItemView({ item }: { item: HistoryItem }): ReactElement {
         h(Text, { color: "yellow" }, item.text),
       );
     case "error":
-      return h(
-        Box,
-        null,
-        h(Text, { color: "red" }, "✗ "),
-        h(Text, { color: "red" }, item.message),
-      );
+      return h(Box, null, h(Text, { color: "red" }, "✗ "), h(Text, { color: "red" }, item.message));
     default:
       return h(Text, null, "");
   }

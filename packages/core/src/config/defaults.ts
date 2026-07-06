@@ -37,6 +37,9 @@ export const DEFAULT_CONFIG: RollConfig = {
       keepRecentTokens: 32_000,
     },
   },
+  skills: {
+    dirs: [],
+  },
   agents: {
     dataDir: "~/.roll-agent/agents",
   },

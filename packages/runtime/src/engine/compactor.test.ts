@@ -192,3 +192,55 @@ test("cut=0 时仍截断超大工具结果以保证收敛", async () => {
   assert.equal(result.truncatedTools, 1);
   assert.match(toolOutputValue(result.messages.find((m) => m.role === "tool")), /已省略/);
 });
+
+test("summarize 转写将 isError 工具结果标为失败并携带摘录", async () => {
+  let transcript = "";
+  const model = new MockLanguageModelV4({
+    doGenerate: async (options) => {
+      const userMessage = options.prompt.find((message) => message.role === "user");
+      transcript = JSON.stringify(userMessage?.content ?? "");
+      return {
+        content: [{ type: "text", text: "摘要" }],
+        finishReason: STOP,
+        usage: {
+          inputTokens: { total: 5, noCache: 5, cacheRead: 0, cacheWrite: 0 },
+          outputTokens: { total: 3, text: 3, reasoning: 0 },
+        },
+        warnings: [],
+      };
+    },
+  });
+  const messages: ModelMessage[] = [
+    { role: "user", content: "回复候选人" },
+    {
+      role: "assistant",
+      content: [{ type: "tool-call", toolCallId: "x", toolName: "send", input: {} }],
+    },
+    {
+      role: "tool",
+      content: [
+        {
+          type: "tool-result",
+          toolCallId: "x",
+          toolName: "send",
+          output: { type: "json", value: { output: "已取消执行: 用户取消", isError: true } },
+        },
+      ],
+    },
+    { role: "assistant", content: "done" },
+    { role: "user", content: "下一位" },
+    { role: "assistant", content: "ok" },
+  ];
+
+  const result = await compactMessages({
+    messages,
+    strategy: "summarize",
+    keepRecentTurns: 1,
+    keepRecentTokens: 1,
+    model,
+  });
+
+  assert.ok(result.removed > 0);
+  assert.ok(transcript.includes("工具结果·失败"));
+  assert.ok(transcript.includes("已取消执行"));
+});

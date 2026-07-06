@@ -19,6 +19,9 @@ function fakeSession(events: readonly SessionEvent[], contextWindow?: number): A
     getContextWindow() {
       return contextWindow;
     },
+    getSkillSummaries() {
+      return [];
+    },
   } as unknown as AgentSession;
 }
 
@@ -149,6 +152,9 @@ test("runRepl keeps the prompt stream available around confirmation prompts", as
     },
     getContextWindow() {
       return undefined;
+    },
+    getSkillSummaries() {
+      return [];
     },
   } as unknown as AgentSession;
   const store = {
