@@ -12,6 +12,7 @@ import {
 import { runBashCommand } from "../bash/exec.ts";
 import { formatBashResult } from "../bash/format-result.ts";
 import { resolveUserShell } from "../bash/shell.ts";
+import { isWithinWorkdirRoot } from "../bash/workdir.ts";
 import { gateToolCall, type ToolBridgeContext } from "./build-tools.ts";
 import { ToolRegistry } from "./naming.ts";
 import type { NormalizedToolResult } from "./normalize-result.ts";
@@ -140,7 +141,9 @@ export function buildBashToolset(
           settings.turnTimeoutMs,
         );
 
-        const classification = classifier.classify(input.command, workdir);
+        const classification = isWithinWorkdirRoot(settings.workdir, workdir)
+          ? classifier.classify(input.command, workdir)
+          : "unknown";
         const annotations = CLASSIFICATION_ANNOTATIONS[classification];
         const approvalInput = { command: input.command, workdir, timeout_ms: timeoutMs };
 

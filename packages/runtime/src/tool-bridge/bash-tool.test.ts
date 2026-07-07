@@ -375,3 +375,49 @@ test("流式输出发 tool-output-delta，超 256 条后停发", async () => {
   assert.equal(deltas[0]?.type === "tool-output-delta" && deltas[0].toolCallId, "c9");
   assert.equal(deltas[0]?.type === "tool-output-delta" && deltas[0].stream, "stdout");
 });
+
+test("P1：workdir 逃出会话根目录时强制 unknown，known-safe 命令也要确认", async () => {
+  let confirmed = false;
+  let executed = false;
+  const execute = getExecute(
+    settings({ workdir: "/tmp/roll-root" }),
+    {
+      policy: new DefaultToolPolicy(),
+      requestApproval: async () => {
+        confirmed = true;
+        return { approved: false };
+      },
+    },
+    async () => {
+      executed = true;
+      return okResult;
+    },
+    ruleBasedClassifier,
+  );
+  await execute({ command: "ls -la", workdir: "/etc" }, options());
+  assert.equal(confirmed, true);
+  assert.equal(executed, false);
+});
+
+test("P1：workdir 在根目录内的子目录不受影响，known-safe 仍免确认", async () => {
+  let confirmed = false;
+  let executed = false;
+  const execute = getExecute(
+    settings({ workdir: "/tmp/roll-root" }),
+    {
+      policy: new DefaultToolPolicy(),
+      requestApproval: async () => {
+        confirmed = true;
+        return { approved: false };
+      },
+    },
+    async () => {
+      executed = true;
+      return okResult;
+    },
+    ruleBasedClassifier,
+  );
+  await execute({ command: "ls -la", workdir: "/tmp/roll-root/sub" }, options());
+  assert.equal(confirmed, false);
+  assert.equal(executed, true);
+});

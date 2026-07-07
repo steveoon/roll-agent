@@ -38,6 +38,24 @@ test("复合命令任一段非安全则整体降级", () => {
   assert.equal(classifyScript("git status && git commit -m x", "linux"), "unknown");
 });
 
+test("路径逃逸的只读命令降级 unknown（P1：不免确认读工作区外文件）", () => {
+  assert.equal(ruleBasedClassifier.classify("cat ~/.ssh/id_rsa", ""), "unknown");
+  assert.equal(ruleBasedClassifier.classify("cat /etc/passwd", ""), "unknown");
+  assert.equal(ruleBasedClassifier.classify("find / -name x", ""), "unknown");
+  assert.equal(ruleBasedClassifier.classify("tail -f /var/log/system.log", ""), "unknown");
+  assert.equal(ruleBasedClassifier.classify("rg secret /Users/rensiwen", ""), "unknown");
+  assert.equal(ruleBasedClassifier.classify("cd /etc && cat passwd", ""), "unknown");
+  assert.equal(ruleBasedClassifier.classify("ls && cat ../outside.txt", ""), "unknown");
+});
+
+test("工作区内只读命令仍 known-safe（路径审计不产生噪声）", () => {
+  assert.equal(ruleBasedClassifier.classify("cat README.md", ""), "known-safe");
+  assert.equal(ruleBasedClassifier.classify("grep -r TODO src", ""), "known-safe");
+  assert.equal(ruleBasedClassifier.classify("find . -name *.ts", ""), "known-safe");
+  assert.equal(ruleBasedClassifier.classify("git log main..dev", ""), "known-safe");
+  assert.equal(ruleBasedClassifier.classify("echo /etc/passwd", ""), "known-safe");
+});
+
 test("换行分隔的多命令逐段分类，不被首命令洗白", () => {
   assert.equal(classifyScript("ls\nrm -rf /tmp/x", "linux"), "dangerous");
   assert.equal(classifyScript("ls\ncurl http://x", "linux"), "unknown");

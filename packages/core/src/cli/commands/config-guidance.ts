@@ -145,7 +145,7 @@ export const CONFIG_GUIDANCE_ENTRIES = [
     path: "runtime.bash.session.enabled",
     title: "Chat 会话式长命令执行",
     purpose:
-      "开启后注册 `roll__exec_command` + `roll__exec_poll` 工具：命令在后台会话执行、跨轮存活，模型轮询进度并读取退出码，适合超过单轮超时的长脚本。headless（--json/--server）下 `exec_command` 需 `runtime.approval.overrides` 里 `roll.exec_command: auto` 显式授权。",
+      "开启后注册 `roll__exec_command` + `roll__exec_poll` 工具：命令在后台会话执行、跨轮存活，模型轮询进度并读取退出码，适合超过单轮超时的长脚本。仅交互 REPL 与 `--server` 长驻模式注册（单条消息 / `--json` 单轮会话随进程结束，不提供该工具）；`--server` 下 `exec_command` 需 `runtime.approval.overrides` 里 `roll.exec_command: auto` 显式授权。",
     defaultBehavior: `默认值为 \`${String(DEFAULT_CONFIG.runtime.bash.session.enabled)}\`（关闭）。需同时开启 runtime.bash.enabled；背景会话随 roll chat 进程退出而终止。`,
     example:
       "runtime:\n  bash:\n    enabled: true\n    session:\n      enabled: true\n  approval:\n    overrides:\n      roll.exec_command: auto",

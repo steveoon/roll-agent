@@ -1,6 +1,7 @@
 import type { CommandClassification } from "../../types/command-classification.ts";
 import { auditFlags, FLAG_AUDITORS } from "./flag-audit.ts";
 import { auditGit } from "./git-audit.ts";
+import { auditPathArgs } from "./path-audit.ts";
 import { isDangerous } from "./dangerous.ts";
 import { executableLookupKey } from "./lookup-key.ts";
 import { isSafeExecutable } from "./safe-list.ts";
@@ -29,6 +30,9 @@ function classifySegment(
     return "dangerous";
   }
   const key = executableLookupKey(argv0, platform);
+  if (auditPathArgs(key, argv) !== "safe") {
+    return "unknown";
+  }
   if (key === "git") {
     return auditGit(argv) === "safe" ? "known-safe" : "unknown";
   }

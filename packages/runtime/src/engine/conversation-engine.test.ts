@@ -371,3 +371,101 @@ test(
     }
   },
 );
+
+function toolCapturingModel(capture: (names: string) => void): MockLanguageModelV4 {
+  return new MockLanguageModelV4({
+    doStream: async (opts) => {
+      capture(JSON.stringify(opts.tools ?? []));
+      return {
+        stream: simulateReadableStream<LanguageModelV4StreamPart>({
+          chunks: [
+            { type: "stream-start", warnings: [] },
+            { type: "text-start", id: "t" },
+            { type: "text-delta", id: "t", delta: "ok" },
+            { type: "text-end", id: "t" },
+            { type: "finish", usage: mockUsage(), finishReason: STOP_REASON },
+          ],
+          initialDelayInMs: null,
+          chunkDelayInMs: null,
+        }),
+      };
+    },
+  });
+}
+
+function sessionExecConfig(dataDir: string) {
+  return rollConfigSchema.parse({
+    llm: {
+      defaultProvider: "mock",
+      defaultModel: "default-model",
+      providers: { mock: { apiKey: "test" } },
+    },
+    ask: {},
+    runtime: { bash: { enabled: true, session: { enabled: true } } },
+    agents: { dataDir },
+  });
+}
+
+test(
+  "sessionExecEnabled=false（单轮模式）不注册 exec 工具，bash 仍在（P2）",
+  { skip: process.platform === "win32" },
+  async () => {
+    const dir = tempDir();
+    try {
+      let tools = "";
+      const engine = new ConversationEngine({
+        config: sessionExecConfig(dir),
+        model: toolCapturingModel((names) => {
+          tools = names;
+        }),
+        sources: [],
+        skillLibrary: null,
+        sessionExecEnabled: false,
+      });
+      const session = await engine.createSession();
+      const events = [];
+      for await (const event of session.send("hi")) {
+        events.push(event);
+      }
+      assert.ok(events.length > 0);
+      assert.ok(tools.includes("roll__bash"));
+      assert.ok(!tools.includes("roll__exec_command"));
+      assert.ok(!tools.includes("roll__exec_poll"));
+      session.abort();
+      await engine.dispose();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  },
+);
+
+test(
+  "默认（长驻模式）session.enabled 时注册 exec 工具（P2 对照）",
+  { skip: process.platform === "win32" },
+  async () => {
+    const dir = tempDir();
+    try {
+      let tools = "";
+      const engine = new ConversationEngine({
+        config: sessionExecConfig(dir),
+        model: toolCapturingModel((names) => {
+          tools = names;
+        }),
+        sources: [],
+        skillLibrary: null,
+      });
+      const session = await engine.createSession();
+      const events = [];
+      for await (const event of session.send("hi")) {
+        events.push(event);
+      }
+      assert.ok(events.length > 0);
+      assert.ok(tools.includes("roll__exec_command"));
+      assert.ok(tools.includes("roll__exec_poll"));
+      session.abort();
+      await engine.dispose();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  },
+);

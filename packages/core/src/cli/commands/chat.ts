@@ -404,6 +404,7 @@ export default defineCommand({
       debugEvents: isDebugLogEnabled(),
       onAgentBootstrapIssue: reportAgentBootstrapIssue,
       onSkillLibraryIssue: reportSkillLibraryIssue,
+      sessionExecEnabled: args.message === undefined,
     });
 
     let sessionForCleanup: AgentSession | undefined;

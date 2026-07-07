@@ -225,3 +225,39 @@ test("exec_poll 把流式 delta 重绑到自己的 toolCallId", { skip }, async 
     manager.terminateAll();
   }
 });
+
+test("P1：workdir 逃出会话根目录时 exec_command 强制 unknown 走确认", { skip }, async () => {
+  const { DefaultToolPolicy } = await import("../policy/default-policy.ts");
+  const { ruleBasedClassifier } = await import("../bash/classifier/index.ts");
+  let confirmed = false;
+  const manager = new SessionManager({
+    maxSessions: 2,
+    shell: "/bin/sh",
+    env: process.env,
+    bufferCapacity: 10_000,
+  });
+  const registry = new ToolRegistry();
+  const toolset = buildSessionExecToolset(
+    settings(),
+    manager,
+    registry,
+    {
+      policy: new DefaultToolPolicy(),
+      requestApproval: async () => {
+        confirmed = true;
+        return { approved: false };
+      },
+    },
+    { classifier: ruleBasedClassifier },
+  );
+  const cmd = toolset[EXEC_COMMAND_ID];
+  assert.ok(cmd?.execute);
+  const result = (await cmd.execute(
+    { command: "ls", workdir: "/", chars: "" } as ExecCommandInput,
+    { toolCallId: "c1", messages: [], context: undefined },
+  )) as NormalizedToolResult;
+  assert.equal(confirmed, true);
+  assert.equal(manager.size(), 0);
+  assert.equal(result.isError, true);
+  manager.terminateAll();
+});

@@ -11,6 +11,7 @@ import {
   type CommandClassifier,
 } from "../types/command-classification.ts";
 import { killProcessGroup } from "../bash/kill.ts";
+import { isWithinWorkdirRoot } from "../bash/workdir.ts";
 import { SessionCapError, type SessionManager } from "../bash/session/session-manager.ts";
 import { pollUntilDeadline } from "../bash/session/yield-loop.ts";
 import type { ManagedSession, SessionPollResult } from "../bash/session/types.ts";
@@ -185,7 +186,9 @@ export function buildSessionExecToolset(
           MIN_EXEC_YIELD_MS,
           MAX_EXEC_YIELD_MS,
         );
-        const classification = classifier.classify(input.command, workdir);
+        const classification = isWithinWorkdirRoot(settings.workdir, workdir)
+          ? classifier.classify(input.command, workdir)
+          : "unknown";
         const annotations = CLASSIFICATION_ANNOTATIONS[classification];
         const approvalInput = { command: input.command, workdir, yield_time_ms: yieldMs };
         const blocked = await gateExecCommand(ctx, approvalInput, annotations);

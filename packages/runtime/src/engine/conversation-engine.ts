@@ -52,6 +52,7 @@ export interface ConversationEngineOptions {
   readonly onAgentBootstrapIssue?: (issue: AgentBootstrapIssue) => void;
   readonly skillLibrary?: SkillLibrary | null;
   readonly onSkillLibraryIssue?: (message: string) => void;
+  readonly sessionExecEnabled?: boolean;
 }
 
 export interface CreateSessionInput {
@@ -131,6 +132,7 @@ export class ConversationEngine {
   private readonly explicitSkillLibrary: SkillLibrary | null | undefined;
   private readonly onSkillLibraryIssue: ((message: string) => void) | undefined;
   private readonly onAgentBootstrapIssue: ((issue: AgentBootstrapIssue) => void) | undefined;
+  private readonly sessionExecEnabled: boolean;
   private ready: Promise<EngineContext> | undefined;
   private bashUnsupportedWarned = false;
 
@@ -145,6 +147,7 @@ export class ConversationEngine {
       options.ensureAgentReady ??
       ((agent, env) => ensureCoreManagedAgentReady(agent, this.config.agents.dataDir, env));
     this.debugEvents = options.debugEvents ?? false;
+    this.sessionExecEnabled = options.sessionExecEnabled ?? true;
     this.explicitAgents = options.agents;
     this.explicitModel = options.model;
     this.explicitSources = options.sources;
@@ -198,6 +201,9 @@ export class ConversationEngine {
   }
 
   private resolveSessionExecSettings(): AgentSessionBashSession | undefined {
+    if (!this.sessionExecEnabled) {
+      return undefined;
+    }
     const bash = this.config.runtime.bash;
     if (!bash.enabled || !bash.session.enabled) {
       return undefined;
