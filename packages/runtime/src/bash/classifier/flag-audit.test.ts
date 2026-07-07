@@ -9,12 +9,26 @@ test("find 拒绝执行/删除/写文件类 flag", () => {
   assert.equal(auditFlags("find", ["find", ".", "-fprintf", "out", "%p"]), "reject");
 });
 
-test("rg 拒绝 --search-zip/-z 与带参 --pre/--hostname-bin", () => {
+test("grep 拒绝读取工作区外 pattern/exclude 文件", () => {
+  assert.equal(auditFlags("grep", ["grep", "-r", "TODO", "src"]), "safe");
+  assert.equal(auditFlags("grep", ["grep", "-f", "patterns.txt", "package.json"]), "safe");
+  assert.equal(auditFlags("grep", ["grep", "-f", "~/.ssh/id_rsa", "package.json"]), "reject");
+  assert.equal(auditFlags("grep", ["grep", "-f../secret", "package.json"]), "reject");
+  assert.equal(auditFlags("grep", ["grep", "--file=~/.ssh/id_rsa", "package.json"]), "reject");
+  assert.equal(auditFlags("grep", ["grep", "--exclude-from", "/etc/passwd", "src"]), "reject");
+});
+
+test("rg 拒绝 --search-zip/-z、执行类 flag 与工作区外路径型 flag", () => {
   assert.equal(auditFlags("rg", ["rg", "foo", "-n"]), "safe");
+  assert.equal(auditFlags("rg", ["rg", "-f", "patterns.txt", "package.json"]), "safe");
+  assert.equal(auditFlags("rg", ["rg", "--ignore-file", ".ignore", "TODO", "src"]), "safe");
   assert.equal(auditFlags("rg", ["rg", "-z", "foo"]), "reject");
   assert.equal(auditFlags("rg", ["rg", "--search-zip", "foo"]), "reject");
   assert.equal(auditFlags("rg", ["rg", "--pre", "cmd", "foo"]), "reject");
   assert.equal(auditFlags("rg", ["rg", "--pre=cmd", "foo"]), "reject");
+  assert.equal(auditFlags("rg", ["rg", "-f", "~/.ssh/id_rsa", "package.json"]), "reject");
+  assert.equal(auditFlags("rg", ["rg", "--file=~/.ssh/id_rsa", "package.json"]), "reject");
+  assert.equal(auditFlags("rg", ["rg", "--ignore-file", "/tmp/ignore", "TODO", "src"]), "reject");
 });
 
 test("base64 拒绝写文件（含贴值/前缀三种写法）", () => {

@@ -1,5 +1,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { simulateReadableStream } from "ai";
 import { MockLanguageModelV4 } from "ai/test";
 import type {
@@ -14,6 +17,7 @@ import { DefaultToolPolicy } from "../policy/default-policy.ts";
 import { ConfigurableToolPolicy } from "../policy/configurable-policy.ts";
 import type { PolicyDecision, ToolPolicy } from "../types/policy.ts";
 import type { SessionEvent } from "../types/events.ts";
+import { ruleBasedClassifier } from "../bash/classifier/index.ts";
 
 const STOP: LanguageModelV4FinishReason = { unified: "stop", raw: "stop" };
 const TOOL_CALLS: LanguageModelV4FinishReason = { unified: "tool-calls", raw: "tool-calls" };
@@ -135,6 +139,17 @@ async function collect(events: AsyncIterable<SessionEvent>): Promise<SessionEven
     out.push(event);
   }
   return out;
+}
+
+function testBashSettings(workdir: string) {
+  return {
+    workdir,
+    defaultTimeoutMs: 10_000,
+    maxTimeoutMs: 600_000,
+    turnTimeoutMs: 600_000,
+    maxCaptureBytes: 1_048_576,
+    maxModelOutputChars: 16_000,
+  };
 }
 
 test("AgentSession 流式输出纯文本并累积历史", async () => {
@@ -925,6 +940,73 @@ test(
     assert.equal(toolResult?.type, "tool-result");
     assert.equal(toolResult.isError, false);
     assert.ok(JSON.stringify(toolResult.output).includes("Exit code: 0"));
+  },
+);
+
+test(
+  "bash 工具 E2E：工作区外 pattern 文件触发确认，工作区内 pattern 文件自动执行",
+  { skip: process.platform === "win32" },
+  async () => {
+    const workdir = mkdtempSync(join(tmpdir(), "roll-bash-e2e-work-"));
+    const outsideDir = mkdtempSync(join(tmpdir(), "roll-bash-e2e-outside-"));
+    try {
+      writeFileSync(join(workdir, "haystack.txt"), "needle\nother\n");
+      writeFileSync(join(workdir, "patterns.txt"), "needle\n");
+      const outsidePattern = join(outsideDir, "patterns.txt");
+      writeFileSync(outsidePattern, "needle\n");
+
+      const unsafeSession = new AgentSession({
+        id: "bash-e2e-unsafe",
+        model: sequencedModel([
+          toolCallStep("roll__bash", {
+            command: `grep -f ${outsidePattern} haystack.txt`,
+          }),
+          textStep("不应继续执行"),
+        ]),
+        sources: [],
+        maxSteps: 5,
+        policy: new DefaultToolPolicy(),
+        bashClassifier: ruleBasedClassifier,
+        bash: testBashSettings(workdir),
+      });
+      const unsafeEvents: SessionEvent[] = [];
+      for await (const event of unsafeSession.send("用工作区外 pattern 文件 grep")) {
+        unsafeEvents.push(event);
+        if (event.type === "confirmation-required") {
+          unsafeSession.reject(event.approvalId);
+        }
+      }
+      assert.ok(unsafeEvents.some((event) => event.type === "confirmation-required"));
+      const denied = unsafeEvents.find((event) => event.type === "tool-result");
+      assert.equal(denied?.type, "tool-result");
+      assert.equal(denied.isError, true);
+      assert.ok(JSON.stringify(denied.output).includes("已取消执行"));
+      unsafeSession.abort();
+
+      const safeSession = new AgentSession({
+        id: "bash-e2e-safe",
+        model: sequencedModel([
+          toolCallStep("roll__bash", { command: "grep -f patterns.txt haystack.txt" }),
+          textStep("完成"),
+        ]),
+        sources: [],
+        maxSteps: 5,
+        policy: new DefaultToolPolicy(),
+        bashClassifier: ruleBasedClassifier,
+        bash: testBashSettings(workdir),
+      });
+      const safeEvents = await collect(safeSession.send("用工作区内 pattern 文件 grep"));
+      assert.ok(!safeEvents.some((event) => event.type === "confirmation-required"));
+      const result = safeEvents.find((event) => event.type === "tool-result");
+      assert.equal(result?.type, "tool-result");
+      assert.equal(result.isError, false);
+      assert.ok(JSON.stringify(result.output).includes("needle"));
+      assert.ok(JSON.stringify(result.output).includes("Exit code: 0"));
+      safeSession.abort();
+    } finally {
+      rmSync(workdir, { recursive: true, force: true });
+      rmSync(outsideDir, { recursive: true, force: true });
+    }
   },
 );
 

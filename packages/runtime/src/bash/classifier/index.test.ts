@@ -44,6 +44,16 @@ test("路径逃逸的只读命令降级 unknown（P1：不免确认读工作区�
   assert.equal(ruleBasedClassifier.classify("find / -name x", ""), "unknown");
   assert.equal(ruleBasedClassifier.classify("tail -f /var/log/system.log", ""), "unknown");
   assert.equal(ruleBasedClassifier.classify("rg secret /Users/rensiwen", ""), "unknown");
+  assert.equal(ruleBasedClassifier.classify("grep -f ~/.ssh/id_rsa package.json", ""), "unknown");
+  assert.equal(
+    ruleBasedClassifier.classify("grep --file=~/.ssh/id_rsa package.json", ""),
+    "unknown",
+  );
+  assert.equal(ruleBasedClassifier.classify("rg -f ~/.ssh/id_rsa package.json", ""), "unknown");
+  assert.equal(
+    ruleBasedClassifier.classify("rg --ignore-file ~/.gitignore TODO src", ""),
+    "unknown",
+  );
   assert.equal(ruleBasedClassifier.classify("cd /etc && cat passwd", ""), "unknown");
   assert.equal(ruleBasedClassifier.classify("ls && cat ../outside.txt", ""), "unknown");
 });
@@ -51,6 +61,8 @@ test("路径逃逸的只读命令降级 unknown（P1：不免确认读工作区�
 test("工作区内只读命令仍 known-safe（路径审计不产生噪声）", () => {
   assert.equal(ruleBasedClassifier.classify("cat README.md", ""), "known-safe");
   assert.equal(ruleBasedClassifier.classify("grep -r TODO src", ""), "known-safe");
+  assert.equal(ruleBasedClassifier.classify("grep -f patterns.txt package.json", ""), "known-safe");
+  assert.equal(ruleBasedClassifier.classify("rg --ignore-file .ignore TODO src", ""), "known-safe");
   assert.equal(ruleBasedClassifier.classify("find . -name *.ts", ""), "known-safe");
   assert.equal(ruleBasedClassifier.classify("git log main..dev", ""), "known-safe");
   assert.equal(ruleBasedClassifier.classify("echo /etc/passwd", ""), "known-safe");
