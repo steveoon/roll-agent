@@ -14,6 +14,7 @@ const baseConfig: RollConfig = {
   },
   ask: {},
   runtime: DEFAULT_CONFIG.runtime,
+  skills: DEFAULT_CONFIG.skills,
   agents: { dataDir: "/tmp/agents" },
   install: DEFAULT_CONFIG.install,
   browser: DEFAULT_CONFIG.browser,

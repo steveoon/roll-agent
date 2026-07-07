@@ -126,6 +126,15 @@ export const CONFIG_GUIDANCE_ENTRIES = [
       "runtime:\n  approval:\n    overrides:\n      browser-use-agent.zhipin_send_prepared_reply: confirm\n      browser-use-agent.browser_status: auto",
   },
   {
+    path: "skills.dirs",
+    title: "Chat 额外 skill 目录",
+    purpose:
+      "`roll chat` 除自动发现项目与用户级 `.agents/skills`（`npx skills add` 的标准安装位置）及已注册 Agent 的 SKILL.md 外，额外加载的 skill 目录。目录可以直接包含 SKILL.md，也可以是多个 skill 子目录的集合。",
+    defaultBehavior:
+      "默认为空。标准路径 `<项目>/.agents/skills` 与 `~/.agents/skills` 始终自动发现。",
+    example: "skills:\n  dirs:\n    - ./openclaw-roll-core-skill-template",
+  },
+  {
     path: "browser.default-instance",
     title: "默认浏览器实例",
     purpose: "多浏览器实例配置下，未显式指定 browserInstance 时使用的默认实例。",

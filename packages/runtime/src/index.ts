@@ -5,7 +5,11 @@ export type {
   CreateSessionInput,
 } from "./engine/conversation-engine.ts";
 export { AgentSession } from "./engine/agent-session.ts";
-export type { AgentSessionOptions, SessionCompactionSettings } from "./engine/agent-session.ts";
+export type {
+  AgentSessionOptions,
+  SessionCompactionSettings,
+  SessionSkillSummary,
+} from "./engine/agent-session.ts";
 export { resolveContextWindow, lookupContextWindow } from "./engine/context-window.ts";
 export {
   compactMessages,

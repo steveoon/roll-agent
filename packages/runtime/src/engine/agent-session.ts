@@ -7,6 +7,7 @@ import {
   type ToolSet,
 } from "ai";
 import type { LanguageModelV4, SharedV4ProviderOptions } from "@ai-sdk/provider";
+import type { SkillLibrary, SkillSummary } from "@roll-agent/core/skills/library";
 import type {
   ContextCompactionReason,
   ContextCompactionStrategy,
@@ -21,7 +22,9 @@ import {
   type AgentToolSource,
   type ApprovalRequest,
 } from "../tool-bridge/build-tools.ts";
-import type { ToolRegistry } from "../tool-bridge/naming.ts";
+import { buildSkillToolset } from "../tool-bridge/skill-tool.ts";
+import { ToolRegistry } from "../tool-bridge/naming.ts";
+import { buildChatSystemPrompt } from "./system-prompt.ts";
 import { readIsError } from "../tool-bridge/normalize-result.ts";
 import { ApprovalGate, type ApprovalDecision } from "../approval/approval-gate.ts";
 import { compactMessages } from "./compactor.ts";
@@ -49,13 +52,11 @@ export interface AgentSessionOptions {
   readonly turnTimeoutMs?: number;
   readonly providerOptions?: SharedV4ProviderOptions;
   readonly debugEvents?: boolean;
+  readonly systemPrompt?: string;
+  readonly skillLibrary?: SkillLibrary;
 }
 
-const CHAT_SYSTEM_PROMPT =
-  "你是 Roll chat 的运行时助手。你可以使用模型的 thinking/reasoning 能力完成内部推理，" +
-  "但必须把给用户看的最终回复写入普通 text 输出通道；不要只在 reasoning 中写最终答案。 " +
-  "工具调用完成后，也要在普通 text 输出通道给出简洁结论。最终回复不要重复。 " +
-  "不要复述用户输入；如果需要调用工具，直接调用工具，不要先输出用户原文或无意义前置文本。";
+export type SessionSkillSummary = SkillSummary;
 
 interface ActiveTurn {
   readonly abortController: AbortController;
@@ -165,6 +166,8 @@ export class AgentSession {
   private readonly turnTimeoutMs: number | undefined;
   private providerOptions: SharedV4ProviderOptions | undefined;
   private readonly debugEvents: boolean;
+  private readonly systemPrompt: string;
+  private readonly skillSummaries: readonly SessionSkillSummary[];
   private readonly gate = new ApprovalGate();
   private readonly tools: ToolSet;
   private readonly registry: ToolRegistry;
@@ -186,11 +189,21 @@ export class AgentSession {
     this.turnTimeoutMs = options.turnTimeoutMs;
     this.providerOptions = options.providerOptions;
     this.debugEvents = options.debugEvents ?? false;
-    const built = buildAgentToolset(options.sources, {
-      ...(options.policy ? { policy: options.policy } : {}),
-      requestApproval: (request) => this.requestApproval(request),
-    });
-    this.tools = built.tools;
+    this.systemPrompt = options.systemPrompt ?? buildChatSystemPrompt();
+    this.skillSummaries = options.skillLibrary?.list() ?? [];
+    const registry = new ToolRegistry();
+    const skillTools = options.skillLibrary
+      ? buildSkillToolset(options.skillLibrary, registry)
+      : {};
+    const built = buildAgentToolset(
+      options.sources,
+      {
+        ...(options.policy ? { policy: options.policy } : {}),
+        requestApproval: (request) => this.requestApproval(request),
+      },
+      registry,
+    );
+    this.tools = { ...skillTools, ...built.tools };
     this.registry = built.registry;
   }
 
@@ -296,7 +309,7 @@ export class AgentSession {
       });
       const result = streamText({
         model: this.model,
-        system: CHAT_SYSTEM_PROMPT,
+        system: this.systemPrompt,
         messages: this.messages,
         tools: this.tools,
         stopWhen: stepCountIs(this.maxSteps),
@@ -535,7 +548,8 @@ export class AgentSession {
       if (pressureInputTokens !== undefined) {
         this.lastInputTokens = pressureInputTokens;
       }
-      const stoppedAtStepLimit = stepCount >= this.maxSteps && lastStepFinishReason === "tool-calls";
+      const stoppedAtStepLimit =
+        stepCount >= this.maxSteps && lastStepFinishReason === "tool-calls";
       queue.push({
         type: "message-finish",
         text,
@@ -605,6 +619,10 @@ export class AgentSession {
 
   getSessionUsage(): SessionTokenUsage {
     return { ...this.sessionUsage };
+  }
+
+  getSkillSummaries(): readonly SessionSkillSummary[] {
+    return this.skillSummaries;
   }
 
   setProviderOptions(providerOptions: SharedV4ProviderOptions | undefined): void {

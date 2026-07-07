@@ -1,5 +1,6 @@
 import { generateText, type ModelMessage } from "ai";
 import type { LanguageModelV4 } from "@ai-sdk/provider";
+import { readIsError } from "../tool-bridge/normalize-result.ts";
 import type { ContextCompactionStrategy } from "../types/events.ts";
 
 export interface CompactionInput {
@@ -23,7 +24,9 @@ const SUMMARY_TIMEOUT_MS = 15_000;
 const TOKEN_ESTIMATE_DIVISOR = 3.5;
 
 const SUMMARY_SYSTEM =
-  "你在执行上下文 checkpoint 压缩,为另一个将接手这项任务的语言模型撰写交接摘要。请包含:当前进度与已做的关键决定;重要约束、上下文与用户偏好;尚未完成的事项与明确的下一步;继续工作所需的关键数据、示例或引用。简洁、结构化,聚焦于让下一个模型无缝接续,不要寒暄,直接输出摘要正文。";
+  "你在执行上下文 checkpoint 压缩,为另一个将接手这项任务的语言模型撰写交接摘要。请包含:当前进度与已做的关键决定;重要约束、上下文与用户偏好;尚未完成的事项与明确的下一步;继续工作所需的关键数据、示例或引用。" +
+  "判断进度时以工具调用记录为准:只把有成功工具结果佐证的操作记为已完成;工具结果失败、被取消或没有对应工具调用的事项,一律列为未完成,即使对话文本中声称已完成。" +
+  "简洁、结构化,聚焦于让下一个模型无缝接续,不要寒暄,直接输出摘要正文。";
 export const SUMMARY_PREFIX =
   "以下摘要由另一个语言模型在压缩早前对话后产出。请据此继续推进、避免重复已完成的工作:";
 export const SUMMARY_ACK = "好的,我已读取之前工作的交接摘要,继续推进。";
@@ -91,6 +94,29 @@ function cutIndex(
   );
 }
 
+const TOOL_RESULT_EXCERPT_CHARS = 200;
+
+function renderToolResult(record: Record<string, unknown>): string {
+  const output =
+    typeof record.output === "object" && record.output !== null
+      ? (record.output as Record<string, unknown>)
+      : undefined;
+  const outputType = typeof output?.type === "string" ? output.type : "";
+  const value = output !== undefined && "value" in output ? output.value : undefined;
+  const failed = outputType.startsWith("error") || readIsError(value);
+  const payload =
+    typeof value === "object" && value !== null && "output" in value
+      ? (value as { readonly output: unknown }).output
+      : value;
+  const serialized = typeof payload === "string" ? payload : (JSON.stringify(payload) ?? "");
+  const excerpt =
+    serialized.length > TOOL_RESULT_EXCERPT_CHARS
+      ? `${serialized.slice(0, TOOL_RESULT_EXCERPT_CHARS)}…`
+      : serialized;
+  const status = failed ? "失败" : "成功";
+  return excerpt.length > 0 ? `[工具结果·${status}: ${excerpt}]` : `[工具结果·${status}]`;
+}
+
 function renderPart(part: unknown): string {
   if (typeof part !== "object" || part === null) {
     return "";
@@ -103,7 +129,7 @@ function renderPart(part: unknown): string {
     return `[调用 ${record.toolName}]`;
   }
   if (record.type === "tool-result") {
-    return "[工具结果]";
+    return renderToolResult(record);
   }
   return "";
 }

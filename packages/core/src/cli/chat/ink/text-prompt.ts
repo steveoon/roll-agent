@@ -7,6 +7,7 @@ export interface TextPromptProps {
   readonly value: string;
   readonly disabled: boolean;
   readonly slashActive: boolean;
+  readonly slashPopupActive: boolean;
   readonly autoApprove: boolean;
   readonly onChange: (value: string) => void;
   readonly onSubmit: (value: string) => void;
@@ -20,7 +21,7 @@ function isKeyboardProtocolResidue(input: string): boolean {
 }
 
 export function TextPrompt(props: TextPromptProps): ReactElement {
-  const { value, disabled, slashActive, autoApprove, onChange, onSubmit } = props;
+  const { value, disabled, slashActive, slashPopupActive, autoApprove, onChange, onSubmit } = props;
   const { stdout } = useStdout();
   const width = stdout.columns || 80;
   const valueRef = useRef(value);
@@ -58,7 +59,7 @@ export function TextPrompt(props: TextPromptProps): ReactElement {
         onSubmit(valueRef.current + before);
         return;
       }
-      if (slashActive) {
+      if (slashPopupActive) {
         if (key.upArrow) {
           props.onSlashMove(-1);
           return;
@@ -71,10 +72,10 @@ export function TextPrompt(props: TextPromptProps): ReactElement {
           props.onSlashComplete();
           return;
         }
-        if (key.escape) {
-          commit("");
-          return;
-        }
+      }
+      if (slashActive && key.escape) {
+        commit("");
+        return;
       }
       if (
         key.ctrl ||

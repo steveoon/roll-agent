@@ -12,7 +12,15 @@ import { StatusLine } from "./status-line.ts";
 import { TextPrompt } from "./text-prompt.ts";
 import { ConfirmSelect } from "./confirm-select.ts";
 import { SlashPopup } from "./slash-popup.ts";
-import { filterCommands, SLASH_COMMANDS } from "./commands.ts";
+import {
+  buildSkillInvocationPrompt,
+  buildSkillListLines,
+  filterSlashEntries,
+  parseSkillInvocation,
+  SLASH_COMMANDS,
+  type SlashSkillSummary,
+} from "./commands.ts";
+import { bannerTextLine } from "../banner.ts";
 import { cycleThinking } from "./thinking.ts";
 
 export interface ChatAppProps {
@@ -21,6 +29,7 @@ export interface ChatAppProps {
   readonly contextWindow: number | undefined;
   readonly initialHistory?: readonly HistoryItem[];
   readonly initialThinkingLevel?: ThinkingLevel;
+  readonly availableSkills?: readonly SlashSkillSummary[];
   readonly onThinkingChange?: (level: ThinkingLevel) => void;
   readonly onUserSubmit: (text: string) => void;
   readonly onExit: () => void;
@@ -32,6 +41,7 @@ function helpText(): string {
 
 export function ChatApp(props: ChatAppProps): ReactElement {
   const { session, model, contextWindow, onUserSubmit, onExit } = props;
+  const availableSkills = props.availableSkills ?? [];
   const {
     state,
     submit,
@@ -53,7 +63,8 @@ export function ChatApp(props: ChatAppProps): ReactElement {
   const staticItems = useMemo(() => [...state.history], [state.history]);
   const [selected, setSelected] = useState(0);
   const slashActive = state.phase === "idle" && state.draft.startsWith("/");
-  const matches = slashActive ? filterCommands(state.draft) : [];
+  const slashPopupActive = slashActive && state.draft.split(/\s+/).at(-1)?.startsWith("/") === true;
+  const matches = slashPopupActive ? filterSlashEntries(state.draft, availableSkills) : [];
   const maxIndex = Math.max(matches.length - 1, 0);
   const selectedIndex = Math.min(selected, maxIndex);
 
@@ -67,19 +78,20 @@ export function ChatApp(props: ChatAppProps): ReactElement {
     }
   });
 
-  const handleSubmit = (raw: string): void => {
+  const handleSubmit = (raw: string, sendText?: string): void => {
     const text = raw.trim();
     if (text.length === 0) {
       setDraft("");
       return;
     }
     onUserSubmit(text);
-    submit(text);
+    submit(text, sendText);
   };
 
   const runSlash = (raw: string): void => {
     setDraft("");
-    const parts = raw.trim().split(/\s+/);
+    const text = raw.trim();
+    const parts = text.split(/\s+/);
     const name = parts[0] ?? "";
     const arg = (parts[1] ?? "").toLowerCase();
     const level = state.status.thinkingLevel;
@@ -119,12 +131,34 @@ export function ChatApp(props: ChatAppProps): ReactElement {
       }
       return;
     }
+    if (name === "/skills") {
+      const width = (process.stdout.columns || 80) - 2;
+      const [header, ...rows] = buildSkillListLines(availableSkills, width);
+      commitHistory({
+        kind: "banner",
+        id: randomUUID(),
+        lines: [
+          bannerTextLine(header ?? ""),
+          ...rows.map((row) => bannerTextLine(row, { dim: true })),
+        ],
+      });
+      return;
+    }
     if (name === "/help") {
       commitHistory({ kind: "notice", id: randomUUID(), text: helpText() });
       return;
     }
     if (name === "/exit") {
       onExit();
+      return;
+    }
+    const invocation = parseSkillInvocation(text, availableSkills);
+    if (invocation) {
+      if (invocation.prompt.length === 0) {
+        setDraft(`${invocation.skills.map((skill) => `/${skill.name}`).join(" ")} `);
+        return;
+      }
+      handleSubmit(text, buildSkillInvocationPrompt(invocation));
       return;
     }
     commitHistory({ kind: "notice", id: randomUUID(), text: `未知命令 ${name}` });
@@ -136,16 +170,26 @@ export function ChatApp(props: ChatAppProps): ReactElement {
     );
   };
   const onSlashComplete = (): void => {
-    const command = matches[selectedIndex];
-    if (command) {
-      setDraft(`${command.name} `);
+    const entry = matches[selectedIndex];
+    if (entry) {
+      const tokens = state.draft.split(/\s+/);
+      tokens[tokens.length - 1] = entry.name;
+      setDraft(`${tokens.join(" ")} `);
       setSelected(0);
     }
   };
   const onSlashRun = (): void => {
     const token = state.draft.trim().split(/\s+/, 1)[0] ?? "";
     const exact = SLASH_COMMANDS.some((command) => command.name === token);
-    runSlash(exact ? state.draft : (matches[selectedIndex]?.name ?? state.draft));
+    const selectedEntry = matches[selectedIndex];
+    if (!exact && selectedEntry?.kind === "skill") {
+      const tokens = state.draft.split(/\s+/);
+      tokens[tokens.length - 1] = selectedEntry.name;
+      setDraft(`${tokens.join(" ")} `);
+      setSelected(0);
+      return;
+    }
+    runSlash(exact ? state.draft : (selectedEntry?.name ?? state.draft));
   };
 
   const footer =
@@ -159,6 +203,7 @@ export function ChatApp(props: ChatAppProps): ReactElement {
           value: state.draft,
           disabled: state.phase !== "idle",
           slashActive,
+          slashPopupActive,
           autoApprove: state.status.autoApprove,
           onChange: setDraft,
           onSubmit: handleSubmit,

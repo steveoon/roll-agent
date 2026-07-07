@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { simulateReadableStream } from "ai";
 import { MockLanguageModelV4 } from "ai/test";
 import { rollConfigSchema } from "@roll-agent/core/config/schema";
 import type { McpClientManager } from "@roll-agent/core/mcp/client-manager";
@@ -75,6 +76,7 @@ test("ConversationEngine reports agent bootstrap failures instead of swallowing 
     config,
     model: new MockLanguageModelV4({}),
     agents: [agent],
+    skillLibrary: null,
     clientManager,
     onAgentBootstrapIssue: (issue) => issues.push(issue),
   });
@@ -130,6 +132,7 @@ test("ConversationEngine ensures core-managed agents before connecting", async (
     config,
     model: new MockLanguageModelV4({}),
     agents: [agent],
+    skillLibrary: null,
     clientManager,
     ensureAgentReady: async (agent, env) => {
       ensured.push({ agentName: agent.skill.name, env });
@@ -140,5 +143,110 @@ test("ConversationEngine ensures core-managed agents before connecting", async (
 
   assert.deepEqual(ensured, [{ agentName: "browser-use-agent", env: { TEST_ENV: "1" } }]);
   assert.deepEqual(connected, ["browser-use-agent"]);
+  await engine.dispose();
+});
+
+test("ConversationEngine 将 skillLibrary 目录注入 system prompt 并注册 skill 工具", async () => {
+  const config = rollConfigSchema.parse({
+    llm: {
+      defaultProvider: "mock",
+      defaultModel: "default-model",
+      providers: { mock: { apiKey: "test" } },
+    },
+    ask: {},
+    agents: { dataDir: "/tmp/roll-engine-test" },
+  });
+  const captured: Array<{ readonly role: string; readonly content: unknown }> = [];
+  const model = new MockLanguageModelV4({
+    doStream: async (options) => {
+      captured.push(...options.prompt);
+      return {
+        stream: simulateReadableStream({
+          chunks: [
+            { type: "stream-start", warnings: [] } as const,
+            { type: "text-start", id: "t" } as const,
+            { type: "text-delta", id: "t", delta: "ok" } as const,
+            { type: "text-end", id: "t" } as const,
+            {
+              type: "finish",
+              usage: {
+                inputTokens: { total: 1, noCache: 1, cacheRead: 0, cacheWrite: 0 },
+                outputTokens: { total: 1, text: 1, reasoning: 0 },
+              },
+              finishReason: { unified: "stop", raw: "stop" },
+            } as const,
+          ],
+          initialDelayInMs: null,
+          chunkDelayInMs: null,
+        }),
+      };
+    },
+  });
+  const engine = new ConversationEngine({
+    config,
+    model,
+    sources: [],
+    skillLibrary: {
+      list: () => [{ name: "demo-skill", description: "演示", source: "user" }],
+      load: () => undefined,
+      loadReference: () => undefined,
+    },
+  });
+
+  const session = await engine.createSession();
+  const consumed: unknown[] = [];
+  for await (const event of session.send("hi")) {
+    consumed.push(event);
+  }
+  assert.ok(consumed.length > 0);
+
+  const system = captured.find((message) => message.role === "system");
+  assert.ok(system);
+  const content = String(system.content);
+  assert.ok(content.includes("# Skills"));
+  assert.ok(content.includes("demo-skill"));
+  assert.ok(content.includes("roll__skill"));
+  await engine.dispose();
+});
+
+test("ConversationEngine.getContextSummary 汇总 agent/tool/skill 数量", async () => {
+  const config = rollConfigSchema.parse({
+    llm: {
+      defaultProvider: "mock",
+      defaultModel: "default-model",
+      providers: { mock: { apiKey: "test" } },
+    },
+    ask: {},
+    agents: { dataDir: "/tmp/roll-engine-test" },
+  });
+  const client = {} as never;
+  const engine = new ConversationEngine({
+    config,
+    model: new MockLanguageModelV4({}),
+    sources: [
+      {
+        agentName: "a",
+        client,
+        tools: [
+          {
+            tool: { name: "t1", inputSchema: { type: "object" as const } },
+            annotations: undefined,
+          },
+          {
+            tool: { name: "t2", inputSchema: { type: "object" as const } },
+            annotations: undefined,
+          },
+        ],
+      },
+    ],
+    skillLibrary: {
+      list: () => [{ name: "s1", description: "d", source: "user" }],
+      load: () => undefined,
+      loadReference: () => undefined,
+    },
+  });
+
+  const summary = await engine.getContextSummary();
+  assert.deepEqual(summary, { agentCount: 1, toolCount: 2, skillCount: 1 });
   await engine.dispose();
 });
