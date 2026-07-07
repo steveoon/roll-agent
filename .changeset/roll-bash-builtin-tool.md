@@ -14,4 +14,4 @@
 - 命令继承 roll 进程的全部环境变量（含 API key），等同于用户本人开 shell；风险由审批门控制，工具描述已注明。
 - 单条命令有效超时取 `min(timeout_ms, maxTimeoutMs, turnTimeoutMs)`，保证不会因超过整轮预算被 turn abort 突兀杀掉。
 
-Windows 暂不支持（不注册并告警）。命令分类器（known-safe/dangerous 自动放行）与审批记忆留作后续版本，本期仅内部保留分类器注入缝、不导出公共类型。
+Windows 暂不支持（不注册并告警）。审批记忆、沙箱、跨会话持久化审批规则留作后续版本。
