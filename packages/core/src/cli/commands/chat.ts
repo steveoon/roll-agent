@@ -406,6 +406,7 @@ export default defineCommand({
       onSkillLibraryIssue: reportSkillLibraryIssue,
     });
 
+    let sessionForCleanup: AgentSession | undefined;
     try {
       let session: AgentSession;
       if (args.session) {
@@ -423,6 +424,7 @@ export default defineCommand({
           args.message ? { title: titleFromMessage(args.message) } : {},
         );
       }
+      sessionForCleanup = session;
 
       if (args.json && args.message) {
         const result = await runJsonTurn(session, resolveSkillSendText(session, args.message));
@@ -493,6 +495,7 @@ export default defineCommand({
       log.error(error instanceof Error ? error.message : String(error));
       process.exitCode = 1;
     } finally {
+      sessionForCleanup?.abort();
       await engine.dispose();
       store.close();
     }

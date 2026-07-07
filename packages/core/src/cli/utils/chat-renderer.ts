@@ -5,7 +5,7 @@ import type { SessionEvent } from "@roll-agent/runtime";
 import { createSpinner, log } from "./output.ts";
 import { GLYPHS } from "./glyphs.ts";
 import { computeUsageParts, formatUsageLine } from "./token-format.ts";
-import { formatToolInput } from "./tool-format.ts";
+import { formatToolInput, formatApprovalDetails } from "./tool-format.ts";
 
 export interface ChatApprover {
   approve(approvalId: string): void;
@@ -41,6 +41,7 @@ export class ChatRenderer {
   private readonly confirm: ChatConfirm;
   private readonly contextWindow: number | undefined;
   private readonly spinners = new Map<string, Ora>();
+  private readonly toolLabels = new Map<string, string>();
   private compactionSpinner: Ora | undefined;
   private messageSpinner: Ora | undefined;
   private streaming = false;
@@ -66,11 +67,29 @@ export class ChatRenderer {
       case "tool-call": {
         this.stopMessageSpinner();
         this.flushLine();
+        const label = `${event.agentName}.${event.toolName}`;
         const spinner = createSpinner(
-          `${chalk.cyan(`${event.agentName}.${event.toolName}`)} ${chalk.gray(formatToolInput(event.input))}`,
+          `${chalk.cyan(label)} ${chalk.gray(formatToolInput(event.input))}`,
         );
         spinner.start();
         this.spinners.set(event.toolCallId, spinner);
+        this.toolLabels.set(event.toolCallId, label);
+        break;
+      }
+      case "tool-output-delta": {
+        const spinner = this.spinners.get(event.toolCallId);
+        const label = this.toolLabels.get(event.toolCallId);
+        if (spinner && label) {
+          const tail = event.delta
+            .split("\n")
+            .map((line) => line.trim())
+            .filter((line) => line.length > 0)
+            .at(-1);
+          if (tail) {
+            const clipped = tail.length > 80 ? `${tail.slice(0, 79)}…` : tail;
+            spinner.text = `${chalk.cyan(label)} ${chalk.gray(clipped)}`;
+          }
+        }
         break;
       }
       case "tool-result": {
@@ -83,13 +102,16 @@ export class ChatRenderer {
           }
           this.spinners.delete(event.toolCallId);
         }
+        this.toolLabels.delete(event.toolCallId);
         break;
       }
       case "confirmation-required": {
         this.stopMessageSpinner();
         this.flushLine();
         const reason = event.reason ? `（${event.reason}）` : "";
-        const approved = await this.confirm(`执行 ${event.agentName}.${event.toolName}${reason}?`);
+        const details = formatApprovalDetails(event.input);
+        const header = `执行 ${event.agentName}.${event.toolName}${reason}?`;
+        const approved = await this.confirm(details ? `${header}\n${details}` : header);
         if (approved) {
           approver.approve(event.approvalId);
         } else {

@@ -23,6 +23,17 @@ import {
   type ApprovalRequest,
 } from "../tool-bridge/build-tools.ts";
 import { buildSkillToolset } from "../tool-bridge/skill-tool.ts";
+import { existsSync } from "node:fs";
+import {
+  buildBashToolset,
+  type BashToolContext,
+  type SessionBashSettings,
+} from "../tool-bridge/bash-tool.ts";
+import { buildSessionExecToolset } from "../tool-bridge/session-exec-tool.ts";
+import { SessionManager } from "../bash/session/session-manager.ts";
+import { resolveUserShell } from "../bash/shell.ts";
+import { withCleanEnv } from "../bash/clean-env.ts";
+import type { CommandClassifier } from "../types/command-classification.ts";
 import { ToolRegistry } from "../tool-bridge/naming.ts";
 import { buildChatSystemPrompt } from "./system-prompt.ts";
 import { readIsError } from "../tool-bridge/normalize-result.ts";
@@ -54,6 +65,17 @@ export interface AgentSessionOptions {
   readonly debugEvents?: boolean;
   readonly systemPrompt?: string;
   readonly skillLibrary?: SkillLibrary;
+  readonly bash?: SessionBashSettings;
+  readonly bashClassifier?: CommandClassifier;
+  readonly bashSession?: AgentSessionBashSession;
+}
+
+export interface AgentSessionBashSession {
+  readonly workdir: string;
+  readonly maxSessions: number;
+  readonly defaultYieldMs: number;
+  readonly maxOutputTokens: number;
+  readonly bufferCapacity: number;
 }
 
 export type SessionSkillSummary = SkillSummary;
@@ -171,6 +193,7 @@ export class AgentSession {
   private readonly gate = new ApprovalGate();
   private readonly tools: ToolSet;
   private readonly registry: ToolRegistry;
+  private readonly sessionManager: SessionManager | undefined;
   private emit: ((event: SessionEvent) => void) | undefined;
   private activeTurn: ActiveTurn | undefined;
   private sessionUsage: SessionTokenUsage = { inputTokens: 0, outputTokens: 0, totalTokens: 0 };
@@ -195,6 +218,41 @@ export class AgentSession {
     const skillTools = options.skillLibrary
       ? buildSkillToolset(options.skillLibrary, registry)
       : {};
+    const bashCtx: BashToolContext = {
+      ...(options.policy ? { policy: options.policy } : {}),
+      requestApproval: (request) => this.requestApproval(request),
+      emitEvent: (event) => this.emit?.(event),
+    };
+    const bashClassifierDep = options.bashClassifier ? { classifier: options.bashClassifier } : {};
+    const bashTools = options.bash
+      ? buildBashToolset(options.bash, registry, bashCtx, bashClassifierDep)
+      : {};
+    if (options.bashSession) {
+      this.sessionManager = new SessionManager({
+        maxSessions: options.bashSession.maxSessions,
+        shell: resolveUserShell({
+          platform: process.platform,
+          env: process.env,
+          fileExists: existsSync,
+        }),
+        env: withCleanEnv(process.env),
+        bufferCapacity: options.bashSession.bufferCapacity,
+      });
+    }
+    const sessionExecTools =
+      options.bashSession && this.sessionManager
+        ? buildSessionExecToolset(
+            {
+              workdir: options.bashSession.workdir,
+              defaultYieldMs: options.bashSession.defaultYieldMs,
+              maxOutputTokens: options.bashSession.maxOutputTokens,
+            },
+            this.sessionManager,
+            registry,
+            bashCtx,
+            bashClassifierDep,
+          )
+        : {};
     const built = buildAgentToolset(
       options.sources,
       {
@@ -203,7 +261,7 @@ export class AgentSession {
       },
       registry,
     );
-    this.tools = { ...skillTools, ...built.tools };
+    this.tools = { ...skillTools, ...bashTools, ...sessionExecTools, ...built.tools };
     this.registry = built.registry;
   }
 
@@ -777,6 +835,7 @@ export class AgentSession {
     }
     this.gate.abortAll();
     this.activeTurn?.abortController.abort();
+    this.sessionManager?.terminateAll();
   }
 
   private debug(

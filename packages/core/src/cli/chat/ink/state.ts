@@ -1,5 +1,5 @@
 import type { SessionEvent, SessionTokenUsage } from "@roll-agent/runtime";
-import { formatToolInput } from "../../utils/tool-format.ts";
+import { formatToolInput, formatApprovalDetails } from "../../utils/tool-format.ts";
 import { GLYPHS } from "../../utils/glyphs.ts";
 import { endsInsideThink } from "./thinking-text.ts";
 import type { ThinkingLevel } from "../../../llm/providers.ts";
@@ -9,7 +9,10 @@ export interface ToolRowState {
   readonly toolCallId: string;
   readonly name: string;
   readonly args: string;
+  readonly outputTail?: string;
 }
+
+const MAX_TOOL_OUTPUT_TAIL_CHARS = 2_000;
 
 export type HistoryItem =
   | { readonly kind: "banner"; readonly id: string; readonly lines: readonly BannerLine[] }
@@ -231,6 +234,20 @@ function applySessionEvent(state: ChatUiState, id: string, event: SessionEvent):
         },
       };
     }
+    case "tool-output-delta": {
+      const activeTools = state.live.activeTools.map((tool) => {
+        if (tool.toolCallId !== event.toolCallId) {
+          return tool;
+        }
+        const combined = `${tool.outputTail ?? ""}${event.delta}`;
+        const outputTail =
+          combined.length > MAX_TOOL_OUTPUT_TAIL_CHARS
+            ? combined.slice(combined.length - MAX_TOOL_OUTPUT_TAIL_CHARS)
+            : combined;
+        return { ...tool, outputTail };
+      });
+      return { ...state, live: { ...state.live, activeTools } };
+    }
     case "tool-result":
       return commitTool(state, id, event);
     case "confirmation-required":
@@ -240,7 +257,7 @@ function applySessionEvent(state: ChatUiState, id: string, event: SessionEvent):
         pendingConfirm: {
           approvalId: event.approvalId,
           prompt: buildConfirmPrompt(event),
-          args: formatToolInput(event.input),
+          args: formatApprovalDetails(event.input),
         },
       };
     case "compaction-start":

@@ -8,7 +8,9 @@ import { MockLanguageModelV4 } from "ai/test";
 import { rollConfigSchema } from "@roll-agent/core/config/schema";
 import type { McpClientManager } from "@roll-agent/core/mcp/client-manager";
 import type { RegisteredAgent } from "@roll-agent/core/types/agent";
+import type { LanguageModelV4StreamPart } from "@ai-sdk/provider";
 import { ThreadStore } from "../store/thread-store.ts";
+import { DefaultToolPolicy } from "../policy/default-policy.ts";
 import { ConversationEngine, type AgentBootstrapIssue } from "./conversation-engine.ts";
 
 function tempDir(): string {
@@ -250,3 +252,122 @@ test("ConversationEngine.getContextSummary 汇总 agent/tool/skill 数量", asyn
   assert.deepEqual(summary, { agentCount: 1, toolCount: 2, skillCount: 1 });
   await engine.dispose();
 });
+
+const STOP_REASON = { unified: "stop", raw: "stop" } as const;
+const TOOL_CALLS_REASON = { unified: "tool-calls", raw: "tool-calls" } as const;
+
+function mockUsage() {
+  return {
+    inputTokens: { total: 1, noCache: 1, cacheRead: 0, cacheWrite: 0 },
+    outputTokens: { total: 1, text: 1, reasoning: 0 },
+  };
+}
+
+function bashThenDoneModel(command: string): MockLanguageModelV4 {
+  const steps: LanguageModelV4StreamPart[][] = [
+    [
+      { type: "stream-start", warnings: [] },
+      {
+        type: "tool-call",
+        toolCallId: "c1",
+        toolName: "roll__bash",
+        input: JSON.stringify({ command }),
+      },
+      { type: "finish", usage: mockUsage(), finishReason: TOOL_CALLS_REASON },
+    ],
+    [
+      { type: "stream-start", warnings: [] },
+      { type: "text-start", id: "t" },
+      { type: "text-delta", id: "t", delta: "done" },
+      { type: "text-end", id: "t" },
+      { type: "finish", usage: mockUsage(), finishReason: STOP_REASON },
+    ],
+  ];
+  let index = 0;
+  return new MockLanguageModelV4({
+    doStream: async () => {
+      const chunks = steps[index] ?? steps[steps.length - 1] ?? [];
+      index += 1;
+      return {
+        stream: simulateReadableStream<LanguageModelV4StreamPart>({
+          chunks,
+          initialDelayInMs: null,
+          chunkDelayInMs: null,
+        }),
+      };
+    },
+  });
+}
+
+function bashEngineConfig(dataDir: string, autoApproveSafe: boolean) {
+  return rollConfigSchema.parse({
+    llm: {
+      defaultProvider: "mock",
+      defaultModel: "default-model",
+      providers: { mock: { apiKey: "test" } },
+    },
+    ask: {},
+    runtime: { bash: { enabled: true, autoApproveSafe } },
+    agents: { dataDir },
+  });
+}
+
+test(
+  "autoApproveSafe=true 注入 ruleBasedClassifier：known-safe 命令免确认执行",
+  { skip: process.platform === "win32" },
+  async () => {
+    const dir = tempDir();
+    try {
+      const engine = new ConversationEngine({
+        config: bashEngineConfig(dir, true),
+        model: bashThenDoneModel("pwd"),
+        sources: [],
+        skillLibrary: null,
+        policy: new DefaultToolPolicy(),
+      });
+      const session = await engine.createSession();
+      const events = [];
+      for await (const event of session.send("看下当前目录")) {
+        events.push(event);
+      }
+      assert.ok(!events.some((event) => event.type === "confirmation-required"));
+      const result = events.find((event) => event.type === "tool-result");
+      assert.ok(result && result.type === "tool-result");
+      assert.equal(result.isError, false);
+      session.abort();
+      await engine.dispose();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  },
+);
+
+test(
+  "autoApproveSafe=false 回归 unknownCommandClassifier：同一命令仍需确认",
+  { skip: process.platform === "win32" },
+  async () => {
+    const dir = tempDir();
+    try {
+      const engine = new ConversationEngine({
+        config: bashEngineConfig(dir, false),
+        model: bashThenDoneModel("pwd"),
+        sources: [],
+        skillLibrary: null,
+        policy: new DefaultToolPolicy(),
+      });
+      const session = await engine.createSession();
+      const events = [];
+      for await (const event of session.send("看下当前目录")) {
+        events.push(event);
+        if (event.type === "confirmation-required") {
+          session.reject(event.approvalId);
+        }
+      }
+      assert.ok(events.some((event) => event.type === "confirmation-required"));
+      session.abort();
+      await engine.dispose();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  },
+);

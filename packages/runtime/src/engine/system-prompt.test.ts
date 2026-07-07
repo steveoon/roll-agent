@@ -32,3 +32,30 @@ test("buildChatSystemPrompt 支持自定义 skill 工具 id", () => {
   assert.ok(prompt.includes("custom__id"));
   assert.ok(!prompt.includes("roll__skill"));
 });
+
+test("无 bashToolId 时身份声明没有 shell，也不含 Shell 段", () => {
+  const prompt = buildChatSystemPrompt();
+  assert.ok(prompt.includes("没有独立的文件系统或 shell"));
+  assert.ok(!prompt.includes("# Shell 工具"));
+});
+
+test("有 bashToolId 时身份改写并注入 Shell 段", () => {
+  const prompt = buildChatSystemPrompt({ bashToolId: "roll__bash" });
+  assert.ok(!prompt.includes("没有独立的文件系统或 shell"));
+  assert.ok(prompt.includes("内建 shell 工具"));
+  assert.ok(prompt.includes("# Shell 工具"));
+  assert.ok(prompt.includes("roll__bash"));
+  assert.ok(prompt.includes("timeout_ms"));
+  assert.ok(!prompt.includes("roll__exec_command"));
+});
+
+test("有 sessionExecToolIds 时改教模型用 exec_command 跑长任务", () => {
+  const prompt = buildChatSystemPrompt({
+    bashToolId: "roll__bash",
+    sessionExecToolIds: { command: "roll__exec_command", poll: "roll__exec_poll" },
+  });
+  assert.ok(prompt.includes("roll__exec_command"));
+  assert.ok(prompt.includes("roll__exec_poll"));
+  assert.ok(prompt.includes("session_id"));
+  assert.ok(!prompt.includes("调大 timeout_ms"));
+});

@@ -18,9 +18,17 @@ import { createSkillLibrary, type SkillLibrary } from "@roll-agent/core/skills/l
 import type { AgentToolSource, SourceTool } from "../tool-bridge/build-tools.ts";
 import type { ToolAnnotations, ToolPolicy } from "../types/policy.ts";
 import type { ThreadStore } from "../store/thread-store.ts";
-import { AgentSession } from "./agent-session.ts";
+import { AgentSession, type AgentSessionBashSession } from "./agent-session.ts";
 import { resolveContextWindow } from "./context-window.ts";
 import { buildChatSystemPrompt } from "./system-prompt.ts";
+import { BASH_TOOL_ID, type SessionBashSettings } from "../tool-bridge/bash-tool.ts";
+import { EXEC_COMMAND_ID, EXEC_POLL_ID } from "../tool-bridge/session-exec-tool.ts";
+import {
+  type CommandClassifier,
+  unknownCommandClassifier,
+} from "../types/command-classification.ts";
+import { ruleBasedClassifier } from "../bash/classifier/index.ts";
+import { isBashToolSupported } from "../bash/shell.ts";
 
 const DEFAULT_MAX_STEPS = 80;
 
@@ -124,6 +132,7 @@ export class ConversationEngine {
   private readonly onSkillLibraryIssue: ((message: string) => void) | undefined;
   private readonly onAgentBootstrapIssue: ((issue: AgentBootstrapIssue) => void) | undefined;
   private ready: Promise<EngineContext> | undefined;
+  private bashUnsupportedWarned = false;
 
   constructor(options: ConversationEngineOptions) {
     this.config = options.config;
@@ -166,6 +175,45 @@ export class ConversationEngine {
     return this.buildSession(context, threadId, this.store.getMessages(threadId));
   }
 
+  private resolveBashSettings(): SessionBashSettings | undefined {
+    const bash = this.config.runtime.bash;
+    if (!bash.enabled) {
+      return undefined;
+    }
+    if (!isBashToolSupported(process.platform)) {
+      if (!this.bashUnsupportedWarned) {
+        this.bashUnsupportedWarned = true;
+        process.stderr.write("roll chat: bash 工具暂不支持 Windows，已跳过注册\n");
+      }
+      return undefined;
+    }
+    return {
+      workdir: process.cwd(),
+      defaultTimeoutMs: bash.defaultTimeoutMs,
+      maxTimeoutMs: bash.maxTimeoutMs,
+      turnTimeoutMs: this.config.runtime.turnTimeoutMs,
+      maxCaptureBytes: bash.maxCaptureBytes,
+      maxModelOutputChars: bash.maxModelOutputChars,
+    };
+  }
+
+  private resolveSessionExecSettings(): AgentSessionBashSession | undefined {
+    const bash = this.config.runtime.bash;
+    if (!bash.enabled || !bash.session.enabled) {
+      return undefined;
+    }
+    if (!isBashToolSupported(process.platform)) {
+      return undefined;
+    }
+    return {
+      workdir: process.cwd(),
+      maxSessions: bash.session.maxSessions,
+      defaultYieldMs: bash.session.defaultYieldMs,
+      maxOutputTokens: bash.session.maxOutputTokens,
+      bufferCapacity: bash.maxCaptureBytes,
+    };
+  }
+
   private buildSession(
     context: EngineContext,
     id: string,
@@ -178,13 +226,29 @@ export class ConversationEngine {
     );
     const skills = context.skillLibrary?.list() ?? [];
     const skillLibrary = skills.length > 0 ? context.skillLibrary : undefined;
-    const systemPrompt = buildChatSystemPrompt({ skills });
+    const bash = this.resolveBashSettings();
+    const bashSession = this.resolveSessionExecSettings();
+    const bashClassifier: CommandClassifier | undefined = bash
+      ? this.config.runtime.bash.autoApproveSafe
+        ? ruleBasedClassifier
+        : unknownCommandClassifier
+      : undefined;
+    const systemPrompt = buildChatSystemPrompt({
+      skills,
+      ...(bash ? { bashToolId: BASH_TOOL_ID } : {}),
+      ...(bashSession
+        ? { sessionExecToolIds: { command: EXEC_COMMAND_ID, poll: EXEC_POLL_ID } }
+        : {}),
+    });
     return new AgentSession({
       id,
       model: context.model,
       sources: context.sources,
       systemPrompt,
       ...(skillLibrary ? { skillLibrary } : {}),
+      ...(bash ? { bash } : {}),
+      ...(bashClassifier ? { bashClassifier } : {}),
+      ...(bashSession ? { bashSession } : {}),
       maxSteps: this.maxSteps,
       compaction: this.config.runtime.compaction,
       turnTimeoutMs: this.config.runtime.turnTimeoutMs,

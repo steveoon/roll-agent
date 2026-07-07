@@ -11,6 +11,7 @@ import type { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { AgentSession } from "./agent-session.ts";
 import type { AgentToolSource } from "../tool-bridge/build-tools.ts";
 import { DefaultToolPolicy } from "../policy/default-policy.ts";
+import { ConfigurableToolPolicy } from "../policy/configurable-policy.ts";
 import type { PolicyDecision, ToolPolicy } from "../types/policy.ts";
 import type { SessionEvent } from "../types/events.ts";
 
@@ -872,4 +873,71 @@ test("AgentSession 拒绝同一 session 并发 send，避免 emit/gate 状态串
     const next = await iterator.next();
     drained = next.done === true;
   }
+});
+
+test(
+  "bash 工具：模型调用 roll__bash 产出 delta 与 tool-result 事件",
+  { skip: process.platform === "win32" },
+  async () => {
+    const { tmpdir } = await import("node:os");
+    const model = sequencedModel([
+      toolCallStep("roll__bash", { command: "echo session-bash" }),
+      textStep("完成"),
+    ]);
+    const session = new AgentSession({
+      id: "bash-1",
+      model,
+      sources: [],
+      maxSteps: 5,
+      policy: new ConfigurableToolPolicy({
+        defaultMode: "auto",
+        overrides: { "roll.bash": "auto" },
+      }),
+      bash: {
+        workdir: tmpdir(),
+        defaultTimeoutMs: 10_000,
+        maxTimeoutMs: 600_000,
+        turnTimeoutMs: 600_000,
+        maxCaptureBytes: 1_048_576,
+        maxModelOutputChars: 16_000,
+      },
+    });
+
+    const events: SessionEvent[] = [];
+    for await (const event of session.send("跑一下 echo")) {
+      events.push(event);
+    }
+
+    const toolCall = events.find((event) => event.type === "tool-call");
+    assert.equal(toolCall?.type, "tool-call");
+    assert.equal(toolCall.agentName, "roll");
+    assert.equal(toolCall.toolName, "bash");
+
+    const deltas = events.filter((event) => event.type === "tool-output-delta");
+    assert.ok(deltas.length >= 1);
+    assert.ok(
+      deltas.some(
+        (event) => event.type === "tool-output-delta" && event.delta.includes("session-bash"),
+      ),
+    );
+
+    const toolResult = events.find((event) => event.type === "tool-result");
+    assert.equal(toolResult?.type, "tool-result");
+    assert.equal(toolResult.isError, false);
+    assert.ok(JSON.stringify(toolResult.output).includes("Exit code: 0"));
+  },
+);
+
+test("未配置 bash 时工具不存在", async () => {
+  const session = new AgentSession({
+    id: "no-bash",
+    model: sequencedModel([textStep("hi")]),
+    sources: [],
+    maxSteps: 3,
+  });
+  const events: SessionEvent[] = [];
+  for await (const event of session.send("hi")) {
+    events.push(event);
+  }
+  assert.ok(!events.some((event) => event.type === "tool-call"));
 });
