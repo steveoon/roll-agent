@@ -18,6 +18,13 @@ export interface AgentLLM {
 export interface AgentContext {
   readonly llm: AgentLLM;
   readonly logger: AgentLogger;
+  /**
+   * 当前 MCP 请求的取消信号（per-request）。
+   *
+   * 客户端超时或主动取消时触发。工具（尤其是排队等待共享资源的工具）
+   * 应在开始不可逆操作前检查该信号，避免执行已被客户端放弃的"幽灵操作"。
+   */
+  readonly signal?: AbortSignal;
 }
 
 /** 日志级别优先级 */

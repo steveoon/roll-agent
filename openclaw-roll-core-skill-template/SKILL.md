@@ -172,6 +172,13 @@ worker A -> browserInstance=boss-a -> all browser-runtime browser-use calls incl
 worker B -> browserInstance=boss-b -> all browser-runtime browser-use calls include boss-b
 ```
 
+Same-routing-key calls are serialized server-side by browser agents: parallel tool calls against one
+`browserInstance` queue up and do not speed anything up, while queue time still counts against each
+call's request timeout. Different routing keys run in parallel. If a call times out, do not blindly
+retry a side-effect tool; first verify with a read-only tool (for example `browser_status` or the
+agent's documented read tools) whether the original operation already landed. A request cancelled
+while queued returns `cancelled_while_queued` and is guaranteed not to have executed.
+
 ## Prepared Artifacts And Variant Decisions
 
 Some agents hide sensitive send authorization inside an opaque prepared artifact and may return

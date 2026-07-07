@@ -17,6 +17,7 @@ metadata:
 - 多账号/多 profile 场景下，Roll 会从 `browser.instances` 注入 `BROWSER_INSTANCES_JSON`；所有 browser-use tool 都支持可选 `browserInstance` 输入，用于选择目标 `profile/userDataDir + cdpPort + sessionsDir`。未传时按 `browser.defaultInstance`，再按单实例自动选择；多实例且无默认值时会返回 `needs_input`。
 - 多个 `managed-cdp` 实例首次启动时会自动把 Chrome profile 展示名设为实例 ID，并按声明顺序分配 profile 颜色和自适应平铺窗口：2–3 个实例横向并列并撑满桌面可用高度；4 个实例 2×2 铺满屏幕；5 个及以上按「最多 4 列、每行撑满宽度」均衡排列（5→3+2、6→3+3、8→4+4、10→4+3+3）。macOS 使用只读 `system_profiler SPDisplaysDataType` 探测逻辑分辨率；Windows 使用只读 PowerShell/.NET `PrimaryScreen.WorkingArea` 探测扣除任务栏后的工作区；探测不到时回退默认工作区；也可通过 `ROLL_BROWSER_WORK_AREA=x,y,width,height` 覆盖。需要固定展示时在实例上配置 `profile-name` / `profile-color` / `window-bounds`。
 - 浏览器实例采用 **lazy start**：agent 启动不会立刻拉起全部 Chrome，首次访问某个 `browserInstance` 时才启动对应 profile/CDP runtime。
+- 同一 `browserInstance` 的页面操作工具在服务端**互斥串行**：并发调用会排队依次执行，并行不提速，还会挤占每次调用的超时预算（默认 60s，含排队时间）；不同实例互不影响。`browser_status`、`list_pages`、`zhipin_diagnose_browser_state`、`attach_browser_session` 是 page-free/只读诊断工具，不排队，实例被长操作占用时仍可用于排障。排队期间客户端已取消/超时的请求出队时会被直接丢弃并返回 `cancelled_while_queued`，不会落地执行；因超时而重试前，先用读工具（如 `zhipin_read_messages`、`browser_status`）验证原操作是否已生效。
 - 实例级关闭使用 `roll browser stop <browserInstance...>` 或 `roll browser stop --all`；它只关闭当前 `browser-use-agent` 托管的浏览器 runtime，不停止 agent 服务进程，也不删除 `userDataDir` / `sessionsDir` 数据。停止整个服务仍使用 `roll agent stop browser-use-agent`。
 - `browser_status` 是无副作用诊断工具；它不会为了查询状态而启动尚未启动的 Chrome。需要启动某个实例时，调用带 `browserInstance` 的业务工具，例如 `open_platform({ browserInstance, platform:"zhipin" })`。
 - `browser_status.primaryInstanceId` 表示顶层 `running/headless/mode/security` 所采用的 primary bundle；多实例详情请看 `instances[]`。
@@ -78,6 +79,7 @@ orchestrator 规则：
 6. `browser_status()` 可先用于读取声明态/运行态；真正启动某个账号 profile 使用 `open_platform({ browserInstance, platform:"zhipin" })`。
 7. 每个账号首次托管时，需要人工在对应 Chrome 窗口完成 BOSS 登录；之后 session 跟随对应 `userDataDir` 和 `sessionsDir`。
 8. Chrome 原生 tab group 只通过扩展 API 暴露，browser-use 不注入扩展；用 profile 名称和窗口并排布局作为稳定识别方式。
+9. 不要对同一 `browserInstance` 并行发起多个页面操作：服务端会互斥排队，总耗时累加且可能触发客户端超时。保持 observe → action → verify 顺序循环；需要并行时给每个 worker 分配不同的 `browserInstance`。
 
 浏览器生命周期命令：
 

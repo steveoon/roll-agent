@@ -331,7 +331,8 @@ function registerTool(server: McpServer, tool: AnyToolDefinition, ctx: AgentCont
       description: tool.description,
       inputSchema: getMcpCompatibleInputSchema(tool.input),
     },
-    async (params: Record<string, unknown>) => await executeToolForMcp(tool, ctx, params),
+    async (params: Record<string, unknown>, extra: { signal: AbortSignal }) =>
+      await executeToolForMcp(tool, ctx, params, extra.signal),
   );
 }
 
@@ -349,12 +350,14 @@ export async function executeToolForMcp(
   tool: AnyToolDefinition,
   ctx: AgentContext,
   params: Record<string, unknown>,
+  signal?: AbortSignal,
 ): Promise<McpTextToolResult> {
   const parsedInput = await parseToolInput(tool.input, params);
+  const callCtx: AgentContext = signal === undefined ? ctx : { ...ctx, signal };
   try {
     const result = await (tool.execute as (input: unknown, ctx: AgentContext) => Promise<unknown>)(
       parsedInput,
-      ctx,
+      callCtx,
     );
     return {
       content: [{ type: "text", text: JSON.stringify(result) }],

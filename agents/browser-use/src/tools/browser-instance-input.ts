@@ -2,6 +2,7 @@ import { z } from "zod";
 import type { AgentContext, AnyToolDefinition } from "@roll-agent/sdk";
 import type { Platform } from "@roll-agent/browser";
 import { runWithBrowserInstance } from "../browser-instance-pool.ts";
+import { withBrowserInstanceLock } from "../browser-instance-lock.ts";
 import { ensureCurrentBundleStarted, getBrowserInstancePool } from "../runtime-holder.ts";
 import {
   assertBrowserInstancePlatform,
@@ -24,6 +25,14 @@ type BrowserInstanceInput = {
 export interface BrowserInstanceToolOptions {
   readonly startRuntime?: boolean;
   readonly expectedPlatform?: Platform;
+  /**
+   * 是否对同一 browserInstance 的执行做互斥串行（默认 true）。
+   *
+   * 页面操作工具共享同一实例的页面状态，并行调用会互相踩踏，必须排队；
+   * page-free / 只读诊断工具（browser_status、list_pages 等）应显式传 false，
+   * 保证"检查实例是否卡死"这类排障出口不被锁挡住。
+   */
+  readonly serializePageOps?: boolean;
 }
 
 export function inferExpectedPlatformFromToolName(toolName: string): Platform | undefined {
@@ -46,6 +55,7 @@ export function withBrowserInstanceInput(
   }
 
   const shouldStartRuntime = options.startRuntime ?? true;
+  const shouldSerializePageOps = options.serializePageOps ?? true;
   const expectedPlatform = options.expectedPlatform ?? inferExpectedPlatformFromToolName(tool.name);
 
   return {
@@ -58,10 +68,28 @@ export function withBrowserInstanceInput(
           getBrowserInstancePool().getBundle();
         }
         assertBrowserInstancePlatform(resolvePlatformConstraint(input, expectedPlatform));
-        if (shouldStartRuntime) {
-          await ensureCurrentBundleStarted();
+
+        const runTool = async (): Promise<unknown> => {
+          if (shouldStartRuntime) {
+            await ensureCurrentBundleStarted();
+          }
+          return await tool.execute(input, ctx);
+        };
+
+        if (!shouldSerializePageOps) {
+          return await runTool();
         }
-        return await tool.execute(input, ctx);
+
+        const instanceId = getBrowserInstancePool().getBundle().id;
+        return await withBrowserInstanceLock(instanceId, runTool, {
+          ...(ctx.signal !== undefined ? { signal: ctx.signal } : {}),
+          onWait: (waitedMs) => {
+            ctx.logger.info(
+              `${tool.name} waited ${Math.round(waitedMs)}ms for an in-flight operation on ` +
+                `browser instance "${instanceId}" (same-instance page operations are serialized)`,
+            );
+          },
+        });
       });
     },
   };

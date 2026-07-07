@@ -91,6 +91,44 @@ describe("defineAgent tool execution", () => {
       },
     });
   });
+
+  it("passes the MCP request signal through to the tool context", async () => {
+    const controller = new AbortController();
+    let receivedSignal: AbortSignal | undefined;
+    const tool = defineTool({
+      name: "signal_probe",
+      description: "signal probe",
+      input: z.object({}),
+      output: z.object({}),
+      execute: async (_input, ctx) => {
+        receivedSignal = ctx.signal;
+        return {};
+      },
+    });
+
+    await executeToolForMcp(tool, TEST_CONTEXT, {}, controller.signal);
+
+    assert.equal(receivedSignal, controller.signal);
+  });
+
+  it("keeps the tool context signal-free when no signal is provided", async () => {
+    let receivedContext: AgentContext | undefined;
+    const tool = defineTool({
+      name: "signal_free_probe",
+      description: "signal free probe",
+      input: z.object({}),
+      output: z.object({}),
+      execute: async (_input, ctx) => {
+        receivedContext = ctx;
+        return {};
+      },
+    });
+
+    await executeToolForMcp(tool, TEST_CONTEXT, {});
+
+    assert.equal(receivedContext?.signal, undefined);
+    assert.equal(receivedContext, TEST_CONTEXT);
+  });
 });
 
 describe("resolveAgentLogLevel", () => {
