@@ -7,7 +7,7 @@ import { installAgent } from "../../registry/install.ts";
 import { AgentStore } from "../../registry/store.ts";
 import { inspectCatalogAvailability } from "../utils/catalog-status.ts";
 import { log } from "../utils/output.ts";
-import { setupAgentEnv, setupInstall, setupLlm } from "./config-setup.ts";
+import { setupAgentEnv, setupBash, setupInstall, setupLlm } from "./config-setup.ts";
 import { ConfigSetupCancelledError, clackPromptAdapter } from "./config-prompts.ts";
 import type { CatalogAvailabilityItem, CatalogInstallState } from "../utils/catalog-status.ts";
 import type { ConfigPromptAdapter } from "./config-prompts.ts";
@@ -38,6 +38,7 @@ export interface RunSetupDeps {
   readonly detectLlm?: () => LlmConfigStatus;
   readonly setupLlmFn?: typeof setupLlm;
   readonly setupInstallFn?: typeof setupInstall;
+  readonly setupBashFn?: typeof setupBash;
   readonly setupAgentEnvFn?: typeof setupAgentEnv;
   readonly loadAgentContext?: () => SetupAgentContext;
   readonly resolveCatalog?: typeof resolveAgentCatalog;
@@ -51,6 +52,7 @@ export async function runSetup(deps: RunSetupDeps = {}): Promise<void> {
   const detectLlm = deps.detectLlm ?? detectLlmConfigStatus;
   const setupLlmFn = deps.setupLlmFn ?? setupLlm;
   const setupInstallFn = deps.setupInstallFn ?? setupInstall;
+  const setupBashFn = deps.setupBashFn ?? setupBash;
   const setupAgentEnvFn = deps.setupAgentEnvFn ?? setupAgentEnv;
   const runDoctor = deps.runDoctor ?? runDoctorCommand;
 
@@ -76,6 +78,14 @@ export async function runSetup(deps: RunSetupDeps = {}): Promise<void> {
     });
     if (configureInstall) {
       prompts.info(await setupInstallFn(prompts));
+    }
+
+    const configureBash = await prompts.confirm({
+      message: "是否配置 chat 内建 bash 工具（默认关闭）？",
+      initialValue: false,
+    });
+    if (configureBash) {
+      prompts.info(await setupBashFn(prompts));
     }
 
     const installed = await installOfficialAgents(prompts, deps);

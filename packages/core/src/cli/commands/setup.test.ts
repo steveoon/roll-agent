@@ -129,6 +129,10 @@ function makeDeps(overrides: Partial<RunSetupDeps> & { prompts: ScriptedPrompts 
       tracker.push("setupInstall");
       return "已配置 install 网络参数";
     },
+    setupBashFn: async () => {
+      tracker.push("setupBash");
+      return "已启用 chat bash 工具";
+    },
     setupAgentEnvFn: async (agentName) => {
       tracker.push(`setupAgentEnv:${agentName}`);
       return `已配置 Agent 环境变量: ${agentName}`;
@@ -164,9 +168,9 @@ afterEach(() => {
 });
 
 describe("runSetup", () => {
-  it("完整编排顺序：LLM → 跳过网络 → 安装 agent → env 配置 → doctor", async () => {
+  it("完整编排顺序：LLM → 跳过网络 → 跳过 bash → 安装 agent → env 配置 → doctor", async () => {
     const prompts = new ScriptedPrompts({
-      confirm: [false, true],
+      confirm: [false, false, true],
       multiselect: [["smart-reply"]],
     });
     const { deps, tracker } = makeDeps({ prompts });
@@ -211,6 +215,28 @@ describe("runSetup", () => {
     assert.ok(tracker.includes("setupInstall"));
     assert.ok(!tracker.some((item) => item.startsWith("install:")));
     assert.ok(!tracker.some((item) => item.startsWith("setupAgentEnv:")));
+  });
+
+  it("确认配置 bash 工具时调用 setupBash，默认跳过", async () => {
+    const confirmedPrompts = new ScriptedPrompts({
+      confirm: [false, true],
+      multiselect: [[]],
+    });
+    const confirmed = makeDeps({ prompts: confirmedPrompts });
+
+    await runSetup(confirmed.deps);
+
+    assert.ok(confirmed.tracker.includes("setupBash"));
+
+    const skippedPrompts = new ScriptedPrompts({
+      confirm: [false, false],
+      multiselect: [[]],
+    });
+    const skipped = makeDeps({ prompts: skippedPrompts });
+
+    await runSetup(skipped.deps);
+
+    assert.ok(!skipped.tracker.includes("setupBash"));
   });
 
   it("install 配置无效时警告并跳过 agent 安装", async () => {
@@ -268,7 +294,7 @@ describe("runSetup", () => {
 
   it("core-managed Agent 未启动时提示 roll agent start", async () => {
     const prompts = new ScriptedPrompts({
-      confirm: [false, true],
+      confirm: [false, false, true],
       multiselect: [["smart-reply"]],
     });
     const coreManagedAgent: RegisteredAgent = {

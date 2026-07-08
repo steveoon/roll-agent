@@ -258,6 +258,26 @@ describe("config setup", () => {
     );
   });
 
+  it("writes chat bash runtime config when enabled", async () => {
+    await runConfigSetup("bash", undefined, new FakePrompts({ confirm: [true, true, false] }));
+
+    const config = readConfig(homeDir);
+    assert.deepEqual(config["runtime"], {
+      bash: {
+        enabled: true,
+        "auto-approve-safe": true,
+        session: { enabled: false },
+      },
+    });
+  });
+
+  it("writes only the disable flag when bash tool is declined", async () => {
+    await runConfigSetup("bash", undefined, new FakePrompts({ confirm: [false] }));
+
+    const config = readConfig(homeDir);
+    assert.deepEqual(config["runtime"], { bash: { enabled: false } });
+  });
+
   it("updates a discovered parent config instead of creating a nested config", async () => {
     const childDir = resolve(cwd, "nested", "workspace");
     mkdirSync(childDir, { recursive: true });

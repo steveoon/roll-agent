@@ -31,7 +31,7 @@ import {
   type PromptOption,
 } from "./config-prompts.ts";
 
-export type ConfigSetupModule = "llm" | "install" | "agent";
+export type ConfigSetupModule = "llm" | "install" | "agent" | "bash";
 
 const ENV_PLACEHOLDER_PATTERN = /\$\{[^}]+\}/u;
 
@@ -60,6 +60,9 @@ export async function runConfigSetup(
       case "agent":
         prompts.outro(await setupAgentEnv(valueArg, prompts));
         break;
+      case "bash":
+        prompts.outro(await setupBash(prompts));
+        break;
     }
   } catch (err) {
     if (err instanceof ConfigSetupCancelledError) {
@@ -81,15 +84,21 @@ async function resolveSetupModule(
         { value: "llm", label: "LLM", hint: "默认模型和 provider key" },
         { value: "install", label: "Install network", hint: "npm registry、重试和超时" },
         { value: "agent", label: "Agent env", hint: "配置某个 Agent 需要的环境变量" },
+        { value: "bash", label: "Chat bash 工具", hint: "roll chat 内建 shell 执行能力（默认关闭）" },
       ],
     });
   }
 
-  if (moduleArg === "llm" || moduleArg === "install" || moduleArg === "agent") {
+  if (
+    moduleArg === "llm" ||
+    moduleArg === "install" ||
+    moduleArg === "agent" ||
+    moduleArg === "bash"
+  ) {
     return moduleArg;
   }
 
-  throw new Error(`未知 setup 模块: ${moduleArg}。可用: llm, install, agent`);
+  throw new Error(`未知 setup 模块: ${moduleArg}。可用: llm, install, agent, bash`);
 }
 
 export async function setupLlm(prompts: ConfigPromptAdapter): Promise<string> {
@@ -172,6 +181,35 @@ export async function setupInstall(prompts: ConfigPromptAdapter): Promise<string
 
   writeConfigDocument(context);
   return `已配置 install 网络参数（写入 ${context.configPath}）`;
+}
+
+export async function setupBash(prompts: ConfigPromptAdapter): Promise<string> {
+  const enabled = await prompts.confirm({
+    message:
+      "启用 roll chat 内建 bash 工具（允许模型在本机执行 shell 命令，破坏性命令仍需逐条确认）？",
+    initialValue: false,
+  });
+  let autoApproveSafe = true;
+  let sessionEnabled = false;
+  if (enabled) {
+    autoApproveSafe = await prompts.confirm({
+      message: "安全只读命令（ls/grep 等）自动放行，无需逐条确认？",
+      initialValue: true,
+    });
+    sessionEnabled = await prompts.confirm({
+      message: "启用长跑命令会话（session exec，供 dev server 等常驻进程使用）？",
+      initialValue: false,
+    });
+  }
+
+  const context = readConfigDocumentContext();
+  setYamlValue(context.document, ["runtime", "bash", "enabled"], enabled);
+  if (enabled) {
+    setYamlValue(context.document, ["runtime", "bash", "autoApproveSafe"], autoApproveSafe);
+    setYamlValue(context.document, ["runtime", "bash", "session", "enabled"], sessionEnabled);
+  }
+  writeConfigDocument(context);
+  return `已${enabled ? "启用" : "禁用"} chat bash 工具（写入 ${context.configPath}）`;
 }
 
 async function setupInstallAdvanced(
