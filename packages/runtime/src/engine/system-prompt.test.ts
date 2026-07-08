@@ -59,3 +59,41 @@ test("有 sessionExecToolIds 时改教模型用 exec_command 跑长任务", () =
   assert.ok(prompt.includes("session_id"));
   assert.ok(!prompt.includes("调大 timeout_ms"));
 });
+
+test("agentCount 为 0 且提供 onboarding 信息时注入 Agent 安装段", () => {
+  const prompt = buildChatSystemPrompt({
+    agentCount: 0,
+    agentOnboarding: {
+      installToolId: "roll__agent_install",
+      catalog: [
+        { name: "browser-use", description: "浏览器操控 Agent" },
+        { name: "smart-reply", description: "智能回复 Agent" },
+      ].map((entry) => ({ shortName: entry.name, description: entry.description })),
+    },
+  });
+  assert.ok(prompt.includes("# Agent 安装"));
+  assert.ok(prompt.includes("roll__agent_install"));
+  assert.ok(prompt.includes("- browser-use: 浏览器操控 Agent"));
+  assert.ok(prompt.includes("绝不在用户未明确同意的情况下自行安装"));
+});
+
+test("agentCount 大于 0 时不注入 Agent 安装段", () => {
+  const prompt = buildChatSystemPrompt({
+    agentCount: 2,
+    agentOnboarding: {
+      installToolId: "roll__agent_install",
+      catalog: [{ shortName: "browser-use", description: "浏览器操控 Agent" }],
+    },
+  });
+  assert.ok(!prompt.includes("# Agent 安装"));
+});
+
+test("缺少 onboarding 信息或 catalog 为空时不注入 Agent 安装段", () => {
+  assert.ok(!buildChatSystemPrompt({ agentCount: 0 }).includes("# Agent 安装"));
+  assert.ok(
+    !buildChatSystemPrompt({
+      agentCount: 0,
+      agentOnboarding: { installToolId: "roll__agent_install", catalog: [] },
+    }).includes("# Agent 安装"),
+  );
+});

@@ -90,6 +90,12 @@ async function loadRuntime(): Promise<RuntimeModule> {
   return import("@roll-agent/runtime");
 }
 
+async function runChatOnboardingFlow(): Promise<boolean> {
+  const specifier = new URL(`./setup.${moduleExtension}`, import.meta.url).href;
+  const setupModule = (await import(specifier)) as typeof import("./setup.ts");
+  return setupModule.runChatOnboarding();
+}
+
 async function runServer(config: RollConfig): Promise<void> {
   const provider = config.runtime.provider ?? config.llm.defaultProvider;
   const modelName = config.runtime.model ?? config.llm.defaultModel;
@@ -356,7 +362,7 @@ export default defineCommand({
     },
   },
   async run({ args }) {
-    const { config } = loadConfig();
+    let { config } = loadConfig();
 
     if (args.server) {
       await runServer(config);
@@ -368,9 +374,19 @@ export default defineCommand({
       return;
     }
 
-    const provider = config.runtime.provider ?? config.llm.defaultProvider;
-    const modelName = config.runtime.model ?? config.llm.defaultModel;
-    const providerConfig = config.llm.providers[provider];
+    let provider = config.runtime.provider ?? config.llm.defaultProvider;
+    let modelName = config.runtime.model ?? config.llm.defaultModel;
+    let providerConfig = config.llm.providers[provider];
+    if (!providerConfig) {
+      const canPrompt =
+        process.stdin.isTTY === true && process.stderr.isTTY === true && !args.json;
+      if (canPrompt && (await runChatOnboardingFlow())) {
+        config = loadConfig().config;
+        provider = config.runtime.provider ?? config.llm.defaultProvider;
+        modelName = config.runtime.model ?? config.llm.defaultModel;
+        providerConfig = config.llm.providers[provider];
+      }
+    }
     if (!providerConfig) {
       log.error(`LLM provider "${provider}" 未配置。请检查 roll.config.yaml`);
       process.exitCode = 1;

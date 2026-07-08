@@ -1023,3 +1023,170 @@ test("未配置 bash 时工具不存在", async () => {
   }
   assert.ok(!events.some((event) => event.type === "tool-call"));
 });
+
+function fakeSkillLibrary(name: string, content: string): import("@roll-agent/core/skills/library").SkillLibrary {
+  const summary = { name, description: "测试 skill", source: "user" } as const;
+  return {
+    list: () => [summary],
+    load: (requested) => (requested === name ? { summary, content, referencePaths: [] } : undefined),
+    loadReference: () => undefined,
+  };
+}
+
+test("applyAgentRefresh 后新 agent 工具与新 system prompt 从下一轮生效", async () => {
+  let capturedSystem: string | undefined;
+  let index = 0;
+  const steps = [toolCallStep("new-agent__probe", { q: "x" }), textStep("完成")];
+  const model = new MockLanguageModelV4({
+    doStream: async (options) => {
+      const first = options.prompt[0];
+      if (first && first.role === "system") {
+        capturedSystem = first.content;
+      }
+      const chunks = steps[index] ?? steps[steps.length - 1] ?? [];
+      index += 1;
+      return streamChunks(chunks);
+    },
+  });
+  let calls = 0;
+  const session = new AgentSession({
+    id: "refresh-1",
+    model,
+    sources: [source("old-agent", "noop")],
+    maxSteps: 8,
+    systemPrompt: "OLD_PROMPT",
+  });
+
+  session.applyAgentRefresh({
+    source: source("new-agent", "probe", () => (calls += 1)),
+    systemPrompt: "NEW_PROMPT",
+  });
+
+  const events = await collect(session.send("call new agent"));
+  assert.equal(capturedSystem, "NEW_PROMPT");
+  assert.equal(calls, 1);
+  const toolResult = events.find((event) => event.type === "tool-result");
+  assert.ok(toolResult && toolResult.type === "tool-result" && toolResult.isError === false);
+});
+
+test("applyAgentRefresh 注入 skill library 后 roll__skill 可用", async () => {
+  const model = sequencedModel([toolCallStep("roll__skill", { name: "new-skill" }), textStep("ok")]);
+  const session = new AgentSession({ id: "refresh-2", model, sources: [], maxSteps: 8 });
+
+  session.applyAgentRefresh({
+    source: source("new-agent", "probe"),
+    skillLibrary: fakeSkillLibrary("new-skill", "SKILL BODY 内容"),
+    systemPrompt: "NEW_PROMPT",
+  });
+
+  const events = await collect(session.send("load skill"));
+  const toolResult = events.find((event) => event.type === "tool-result");
+  assert.ok(toolResult && toolResult.type === "tool-result" && toolResult.isError === false);
+  assert.deepEqual(
+    session.getSkillSummaries().map((skill) => skill.name),
+    ["new-skill"],
+  );
+});
+
+test("applyAgentRefresh 对同名 agent 幂等，不产生带后缀的重复工具", async () => {
+  const model = sequencedModel([textStep("noop")]);
+  const session = new AgentSession({
+    id: "refresh-3",
+    model,
+    sources: [source("echo-agent", "echo")],
+    maxSteps: 4,
+  });
+
+  session.applyAgentRefresh({
+    source: source("echo-agent", "echo"),
+    systemPrompt: "NEW_PROMPT",
+  });
+
+  const events = await collect(session.send("hi"));
+  assert.ok(events.some((event) => event.type === "message-finish"));
+});
+
+test("agent_install 工具无 policy 也强制确认，批准后热刷新生效", async () => {
+  const model = sequencedModel([
+    toolCallStep("roll__agent_install", { agent: "probe" }),
+    textStep("装好了"),
+  ]);
+  let installed = 0;
+  const session = new AgentSession({
+    id: "install-1",
+    model,
+    sources: [],
+    maxSteps: 8,
+    agentInstall: {
+      catalog: [{ shortName: "probe", description: "测试 agent" }],
+      install: async (shortName, report) => {
+        installed += 1;
+        report(`安装 ${shortName}...`);
+        return {
+          outcome: {
+            ok: true,
+            agentName: "probe-agent",
+            missingEnv: [],
+            refreshApplied: false,
+          },
+          refresh: {
+            source: source("probe-agent", "run"),
+            systemPrompt: "REFRESHED_PROMPT",
+          },
+        };
+      },
+    },
+  });
+
+  const events: SessionEvent[] = [];
+  for await (const event of session.send("install probe")) {
+    events.push(event);
+    if (event.type === "confirmation-required") {
+      session.approve(event.approvalId);
+    }
+  }
+
+  const confirmation = events.find((event) => event.type === "confirmation-required");
+  assert.ok(confirmation && confirmation.type === "confirmation-required");
+  assert.equal(confirmation.toolName, "agent_install");
+  assert.equal(installed, 1);
+  const toolResult = events.find((event) => event.type === "tool-result");
+  assert.ok(toolResult && toolResult.type === "tool-result" && toolResult.isError === false);
+  assert.match(JSON.stringify(toolResult.output), /下一轮对话开始可用/);
+});
+
+test("agent_install 被拒绝时不执行安装", async () => {
+  const model = sequencedModel([
+    toolCallStep("roll__agent_install", { agent: "probe" }),
+    textStep("好的"),
+  ]);
+  let installed = 0;
+  const session = new AgentSession({
+    id: "install-2",
+    model,
+    sources: [],
+    maxSteps: 8,
+    agentInstall: {
+      catalog: [{ shortName: "probe", description: "测试 agent" }],
+      install: async () => {
+        installed += 1;
+        return {
+          outcome: { ok: true, agentName: "probe-agent", missingEnv: [], refreshApplied: false },
+        };
+      },
+    },
+  });
+
+  const events: SessionEvent[] = [];
+  for await (const event of session.send("install probe")) {
+    events.push(event);
+    if (event.type === "confirmation-required") {
+      session.reject(event.approvalId, "不装了");
+    }
+  }
+
+  assert.equal(installed, 0);
+  const toolResult = events.find((event) => event.type === "tool-result");
+  assert.ok(toolResult && toolResult.type === "tool-result" && toolResult.isError === true);
+  assert.match(JSON.stringify(toolResult.output), /已取消执行/);
+});

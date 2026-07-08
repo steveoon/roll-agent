@@ -22,6 +22,11 @@ import {
   type AgentToolSource,
   type ApprovalRequest,
 } from "../tool-bridge/build-tools.ts";
+import {
+  buildAgentInstallToolset,
+  type AgentInstallToolCatalogEntry,
+  type AgentInstallToolOutcome,
+} from "../tool-bridge/agent-install-tool.ts";
 import { buildSkillToolset } from "../tool-bridge/skill-tool.ts";
 import { existsSync } from "node:fs";
 import {
@@ -68,6 +73,26 @@ export interface AgentSessionOptions {
   readonly bash?: SessionBashSettings;
   readonly bashClassifier?: CommandClassifier;
   readonly bashSession?: AgentSessionBashSession;
+  readonly agentInstall?: AgentSessionAgentInstall;
+}
+
+export interface SessionAgentRefresh {
+  readonly source: AgentToolSource;
+  readonly skillLibrary?: SkillLibrary;
+  readonly systemPrompt: string;
+}
+
+export interface AgentInstallSessionResult {
+  readonly outcome: AgentInstallToolOutcome;
+  readonly refresh?: SessionAgentRefresh;
+}
+
+export interface AgentSessionAgentInstall {
+  readonly catalog: readonly AgentInstallToolCatalogEntry[];
+  readonly install: (
+    shortName: string,
+    report: (line: string) => void,
+  ) => Promise<AgentInstallSessionResult>;
 }
 
 export interface AgentSessionBashSession {
@@ -188,10 +213,14 @@ export class AgentSession {
   private readonly turnTimeoutMs: number | undefined;
   private providerOptions: SharedV4ProviderOptions | undefined;
   private readonly debugEvents: boolean;
-  private readonly systemPrompt: string;
-  private readonly skillSummaries: readonly SessionSkillSummary[];
+  private readonly policy: ToolPolicy | undefined;
+  private systemPrompt: string;
+  private skillSummaries: readonly SessionSkillSummary[];
+  private skillLibrary: SkillLibrary | undefined;
+  private skillToolBuilt = false;
+  private readonly toolSourceAgentNames: Set<string>;
   private readonly gate = new ApprovalGate();
-  private readonly tools: ToolSet;
+  private tools: ToolSet;
   private readonly registry: ToolRegistry;
   private readonly sessionManager: SessionManager | undefined;
   private emit: ((event: SessionEvent) => void) | undefined;
@@ -212,12 +241,13 @@ export class AgentSession {
     this.turnTimeoutMs = options.turnTimeoutMs;
     this.providerOptions = options.providerOptions;
     this.debugEvents = options.debugEvents ?? false;
+    this.policy = options.policy;
     this.systemPrompt = options.systemPrompt ?? buildChatSystemPrompt();
+    this.skillLibrary = options.skillLibrary;
     this.skillSummaries = options.skillLibrary?.list() ?? [];
+    this.toolSourceAgentNames = new Set(options.sources.map((source) => source.agentName));
     const registry = new ToolRegistry();
-    const skillTools = options.skillLibrary
-      ? buildSkillToolset(options.skillLibrary, registry)
-      : {};
+    const skillTools = options.skillLibrary ? this.buildSkillTools(registry) : {};
     const bashCtx: BashToolContext = {
       ...(options.policy ? { policy: options.policy } : {}),
       requestApproval: (request) => this.requestApproval(request),
@@ -253,6 +283,27 @@ export class AgentSession {
             bashClassifierDep,
           )
         : {};
+    const agentInstall = options.agentInstall;
+    const agentInstallTools = agentInstall
+      ? buildAgentInstallToolset(
+          {
+            catalog: agentInstall.catalog,
+            install: async (shortName, report) => {
+              const result = await agentInstall.install(shortName, report);
+              if (result.outcome.ok && result.refresh) {
+                this.applyAgentRefresh(result.refresh);
+                return { ...result.outcome, refreshApplied: true };
+              }
+              return result.outcome;
+            },
+          },
+          registry,
+          {
+            ...(options.policy ? { policy: options.policy } : {}),
+            requestApproval: (request) => this.requestApproval(request),
+          },
+        )
+      : {};
     const built = buildAgentToolset(
       options.sources,
       {
@@ -261,8 +312,47 @@ export class AgentSession {
       },
       registry,
     );
-    this.tools = { ...skillTools, ...bashTools, ...sessionExecTools, ...built.tools };
+    this.tools = {
+      ...skillTools,
+      ...bashTools,
+      ...sessionExecTools,
+      ...agentInstallTools,
+      ...built.tools,
+    };
     this.registry = built.registry;
+  }
+
+  private buildSkillTools(registry: ToolRegistry): ToolSet {
+    this.skillToolBuilt = true;
+    return buildSkillToolset(() => {
+      if (!this.skillLibrary) {
+        throw new Error("skill library 不可用");
+      }
+      return this.skillLibrary;
+    }, registry);
+  }
+
+  applyAgentRefresh(refresh: SessionAgentRefresh): void {
+    if (!this.toolSourceAgentNames.has(refresh.source.agentName)) {
+      const built = buildAgentToolset(
+        [refresh.source],
+        {
+          ...(this.policy ? { policy: this.policy } : {}),
+          requestApproval: (request) => this.requestApproval(request),
+        },
+        this.registry,
+      );
+      this.tools = { ...this.tools, ...built.tools };
+      this.toolSourceAgentNames.add(refresh.source.agentName);
+    }
+    if (refresh.skillLibrary) {
+      this.skillLibrary = refresh.skillLibrary;
+      this.skillSummaries = refresh.skillLibrary.list();
+      if (!this.skillToolBuilt) {
+        this.tools = { ...this.tools, ...this.buildSkillTools(this.registry) };
+      }
+    }
+    this.systemPrompt = refresh.systemPrompt;
   }
 
   async *send(input: string): AsyncIterable<SessionEvent> {

@@ -27,7 +27,7 @@ export interface ConnectOptions {
 }
 
 export function buildStdioChildEnv(env?: Readonly<Record<string, string>>): Record<string, string> {
-  const baseEnv = env ? ({ ...process.env, ...env } as Record<string, string>) : {};
+  const baseEnv = { ...process.env, ...(env ?? {}) } as Record<string, string>;
 
   return {
     ...baseEnv,

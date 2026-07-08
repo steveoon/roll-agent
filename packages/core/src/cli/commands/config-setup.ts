@@ -1,4 +1,5 @@
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { homedir } from "node:os";
 import { resolve } from "node:path";
 import { stringify as stringifyYaml } from "yaml";
 import {
@@ -51,13 +52,13 @@ export async function runConfigSetup(
     const moduleName = await resolveSetupModule(moduleArg, prompts);
     switch (moduleName) {
       case "llm":
-        await setupLlm(prompts);
+        prompts.outro(await setupLlm(prompts));
         break;
       case "install":
-        await setupInstall(prompts);
+        prompts.outro(await setupInstall(prompts));
         break;
       case "agent":
-        await setupAgentEnv(valueArg, prompts);
+        prompts.outro(await setupAgentEnv(valueArg, prompts));
         break;
     }
   } catch (err) {
@@ -91,7 +92,7 @@ async function resolveSetupModule(
   throw new Error(`未知 setup 模块: ${moduleArg}。可用: llm, install, agent`);
 }
 
-async function setupLlm(prompts: ConfigPromptAdapter): Promise<void> {
+export async function setupLlm(prompts: ConfigPromptAdapter): Promise<string> {
   const provider = await prompts.select<LlmProviderOption>({
     message: "选择默认 LLM provider",
     options: LLM_PROVIDER_OPTIONS.map((value) => ({
@@ -126,10 +127,10 @@ async function setupLlm(prompts: ConfigPromptAdapter): Promise<void> {
   }
   writeConfigDocument(context);
   warnIfPlaintextSecret(prompts, `${provider} API key`, apiKey);
-  prompts.outro(`已配置 LLM: ${provider}/${model}`);
+  return `已配置 LLM: ${provider}/${model}（写入 ${context.configPath}）`;
 }
 
-async function setupInstall(prompts: ConfigPromptAdapter): Promise<void> {
+export async function setupInstall(prompts: ConfigPromptAdapter): Promise<string> {
   const scenario = await prompts.select<InstallScenario>({
     message: "当前安装/更新网络更接近哪种场景？",
     options: [
@@ -170,7 +171,7 @@ async function setupInstall(prompts: ConfigPromptAdapter): Promise<void> {
   }
 
   writeConfigDocument(context);
-  prompts.outro("已配置 install 网络参数");
+  return `已配置 install 网络参数（写入 ${context.configPath}）`;
 }
 
 async function setupInstallAdvanced(
@@ -208,10 +209,10 @@ async function setupInstallAdvanced(
   }
 }
 
-async function setupAgentEnv(
+export async function setupAgentEnv(
   agentNameArg: string | undefined,
   prompts: ConfigPromptAdapter,
-): Promise<void> {
+): Promise<string> {
   const { agentsConfig } = loadAgentsConfig();
   const store = new AgentStore(agentsConfig.dataDir);
   const agent = await resolveAgentWithEnv(store.list(), agentNameArg, prompts);
@@ -272,7 +273,7 @@ async function setupAgentEnv(
     }
   }
   reportEnvActivation(prompts, agent);
-  prompts.outro(`已配置 Agent 环境变量: ${agent.skill.name}`);
+  return `已配置 Agent 环境变量: ${agent.skill.name}（写入 ${context.configPath}）`;
 }
 
 async function resolveAgentWithEnv(
@@ -396,7 +397,7 @@ function setInstallDefaults(document: Record<string, unknown>): void {
 
 function readConfigDocumentContext(): ConfigDocumentContext {
   const existingConfigPath = resolveConfigPath();
-  const configPath = existingConfigPath ?? resolve(process.cwd(), "roll.config.yaml");
+  const configPath = existingConfigPath ?? resolve(homedir(), "roll.config.yaml");
   if (existingConfigPath === undefined || !existsSync(configPath)) {
     return {
       configPath,

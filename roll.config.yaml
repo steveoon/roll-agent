@@ -38,6 +38,12 @@ browser:
       user-data-dir: ~/.roll-agent/browser/profiles/boss-c
       sessions-dir: ~/.roll-agent/browser/sessions/boss-c
       tracking-agent-id: zhipin-boss-c
+runtime:
+  bash:
+    enabled: true
+    auto-approve-safe: true
+    session:
+      enabled: true
 agents:
   data-dir: ~/.roll-agent/agents
   env:

@@ -1,14 +1,14 @@
 import { defineCommand } from "citty";
 import { resolve } from "node:path";
-import { existsSync, mkdirSync } from "node:fs";
-import { execFile } from "node:child_process";
-import { promisify } from "node:util";
+import { existsSync } from "node:fs";
 import { inspectAgentEnvRequirements } from "../../config/helpers.ts";
 import { loadAgentsConfig } from "../../config/loader.ts";
 import { discoverAgent } from "../../registry/discovery.ts";
 import { writeRemoteSkillManifest } from "../../registry/manifest.ts";
 import { AgentStore } from "../../registry/store.ts";
+import { cloneOrPullRepo, isGitUrl, repoNameFromUrl } from "../utils/git-source.ts";
 import { log } from "../utils/output.ts";
+import { reportAgentEnvGuidance } from "./agent-env-guidance.ts";
 import {
   createInstallCommand,
   detectInstallCommand,
@@ -17,24 +17,6 @@ import {
   runPackageManager,
 } from "../utils/package-manager.ts";
 import type { AgentSource, RegisteredAgent } from "../../types/agent.ts";
-
-const execFileAsync = promisify(execFile);
-
-/** 判断输入是否为 Git URL */
-function isGitUrl(input: string): boolean {
-  return (
-    input.startsWith("https://") ||
-    input.startsWith("http://") ||
-    input.startsWith("git@") ||
-    input.endsWith(".git")
-  );
-}
-
-/** 从 Git URL 中提取仓库名作为目录名 */
-function repoNameFromUrl(url: string): string {
-  const last = url.split("/").pop() ?? url;
-  return last.replace(/\.git$/, "");
-}
 
 export default defineCommand({
   meta: { description: "注册本地目录、Git 仓库或远程 MCP endpoint" },
@@ -76,30 +58,24 @@ export default defineCommand({
       // Git URL 模式：克隆到 dataDir 下
       const repoName = repoNameFromUrl(args.path);
       const cloneTarget = resolve(agentsConfig.dataDir, "repos", repoName);
+      const existed = existsSync(cloneTarget);
 
-      if (existsSync(cloneTarget)) {
+      if (existed) {
         log.info(`仓库目录已存在，拉取最新代码: ${cloneTarget}`);
-        try {
-          await execFileAsync("git", ["pull"], { cwd: cloneTarget });
-        } catch (err) {
-          log.error(`git pull 失败: ${err instanceof Error ? err.message : String(err)}`);
-          process.exitCode = 1;
-          return;
-        }
       } else {
         log.info(`克隆 ${args.path}...`);
-        const parentDir = resolve(agentsConfig.dataDir, "repos");
-        if (!existsSync(parentDir)) {
-          mkdirSync(parentDir, { recursive: true });
-        }
-        try {
-          await execFileAsync("git", ["clone", args.path, cloneTarget]);
+      }
+      try {
+        const { action } = await cloneOrPullRepo(args.path, cloneTarget);
+        if (action === "cloned") {
           log.success("克隆完成");
-        } catch (err) {
-          log.error(`git clone 失败: ${err instanceof Error ? err.message : String(err)}`);
-          process.exitCode = 1;
-          return;
         }
+      } catch (err) {
+        log.error(
+          `${existed ? "git pull" : "git clone"} 失败: ${err instanceof Error ? err.message : String(err)}`,
+        );
+        process.exitCode = 1;
+        return;
       }
       agentDir = cloneTarget;
     } else {
@@ -162,37 +138,13 @@ export default defineCommand({
     try {
       store.add(agent);
       log.success(`Agent "${discovered.skill.name}" 注册成功`);
-      reportAgentEnvGuidance(discovered.skill.name, discovered.skill.env, agentsConfig.env);
+      reportAgentEnvGuidance(
+        discovered.skill.name,
+        inspectAgentEnvRequirements(discovered.skill.name, discovered.skill.env, agentsConfig.env),
+      );
     } catch (err) {
       log.error(err instanceof Error ? err.message : String(err));
       process.exitCode = 1;
     }
   },
 });
-
-function reportAgentEnvGuidance(
-  agentName: string,
-  envDeclarations: RegisteredAgent["skill"]["env"],
-  envMap: ReturnType<typeof loadAgentsConfig>["agentsConfig"]["env"],
-): void {
-  const envReport = inspectAgentEnvRequirements(agentName, envDeclarations, envMap);
-  if (!envReport) {
-    return;
-  }
-
-  if (envReport.missingRequired.length > 0) {
-    log.warn(
-      `Agent "${agentName}" 仍缺少必填环境变量: ${envReport.missingRequired.map((item) => item.name).join(", ")}`,
-    );
-    log.info(`运行 \`roll config setup agent ${agentName}\` 交互式配置。`);
-    log.info(`运行 \`roll config explain agents.env.${agentName}\` 查看配置说明。`);
-    return;
-  }
-
-  if (envReport.processEnvOnlyRequired.length > 0) {
-    log.warn(
-      `Agent "${agentName}" 当前依赖 shell 环境变量: ${envReport.processEnvOnlyRequired.map((item) => item.name).join(", ")}`,
-    );
-    log.info(`建议运行 \`roll config setup agent ${agentName}\` 持久写入 roll.config.yaml。`);
-  }
-}

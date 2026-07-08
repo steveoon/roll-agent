@@ -109,6 +109,16 @@ class FakePrompts implements ConfigPromptAdapter {
     this.messages.push(options.message);
     return this.confirmValues.shift() ?? options.initialValue ?? false;
   }
+
+  async multiselect<Value extends string>(options: {
+    readonly message: string;
+    readonly options: readonly PromptOption<Value>[];
+    readonly initialValues?: readonly Value[];
+    readonly required?: boolean;
+  }): Promise<readonly Value[]> {
+    this.messages.push(options.message);
+    return options.initialValues ?? [];
+  }
 }
 
 class CancelPrompts extends FakePrompts {
@@ -164,16 +174,35 @@ function makeAgent(name: string): RegisteredAgent {
 describe("config setup", () => {
   let cwd: string;
   let previousCwd: string;
+  let homeDir: string;
+  let previousHome: string | undefined;
+  let previousUserProfile: string | undefined;
+
+  const restoreEnv = (name: string, value: string | undefined): void => {
+    if (value === undefined) {
+      delete process.env[name];
+    } else {
+      process.env[name] = value;
+    }
+  };
 
   beforeEach(() => {
     previousCwd = process.cwd();
+    previousHome = process.env["HOME"];
+    previousUserProfile = process.env["USERPROFILE"];
     cwd = makeTmpDir();
+    homeDir = makeTmpDir();
     process.chdir(cwd);
+    process.env["HOME"] = homeDir;
+    process.env["USERPROFILE"] = homeDir;
   });
 
   afterEach(() => {
     process.chdir(previousCwd);
+    restoreEnv("HOME", previousHome);
+    restoreEnv("USERPROFILE", previousUserProfile);
     rmSync(cwd, { recursive: true, force: true });
+    rmSync(homeDir, { recursive: true, force: true });
   });
 
   it("writes LLM provider config from prompts", async () => {
@@ -187,7 +216,7 @@ describe("config setup", () => {
       }),
     );
 
-    const config = readConfig(cwd);
+    const config = readConfig(homeDir);
     assert.deepEqual(config["llm"], {
       "default-provider": "openai",
       "default-model": "gpt-4.1",
@@ -203,7 +232,7 @@ describe("config setup", () => {
   it("writes install config for the China development scenario", async () => {
     await runConfigSetup("install", undefined, new FakePrompts({ select: ["china-dev"] }));
 
-    const config = readConfig(cwd);
+    const config = readConfig(homeDir);
     assert.deepEqual(config["install"], {
       registry: "https://registry.npmmirror.com",
       "fetch-retries": 3,
@@ -222,7 +251,7 @@ describe("config setup", () => {
       }),
     );
 
-    const config = readConfig(cwd);
+    const config = readConfig(homeDir);
     assert.equal(
       (config["install"] as Record<string, unknown>)["registry"],
       "https://registry.internal.example.com",

@@ -469,3 +469,244 @@ test(
     }
   },
 );
+
+function installEngineConfig(dataDir: string) {
+  return rollConfigSchema.parse({
+    llm: {
+      defaultProvider: "mock",
+      defaultModel: "default-model",
+      providers: { mock: { apiKey: "test" } },
+    },
+    ask: {},
+    agents: { dataDir },
+  });
+}
+
+const INSTALL_TEST_CATALOG = [
+  {
+    shortName: "probe",
+    packageName: "@roll-agent/probe-agent",
+    skillName: "probe-agent",
+    description: "测试探针 Agent",
+    requiredEnv: [],
+  },
+];
+
+function makeProbeAgent(installPath: string): RegisteredAgent {
+  return {
+    skill: { name: "probe-agent", description: "测试探针", metadata: {} },
+    transport: { type: "stdio", command: "node", args: ["dist/index.js"] },
+    runtime: { ownership: "on-demand" },
+    installPath,
+    registeredAt: "2026-07-01T00:00:00.000Z",
+    status: "idle",
+    source: {
+      type: "installed-package",
+      packageName: "@roll-agent/probe-agent",
+      packageSpec: "@roll-agent/probe-agent",
+      installDir: installPath,
+      installedVersion: "1.0.0",
+    },
+  };
+}
+
+function installToolStream(): LanguageModelV4StreamPart[][] {
+  const usage = {
+    inputTokens: { total: 1, noCache: 1, cacheRead: 0, cacheWrite: 0 },
+    outputTokens: { total: 1, text: 1, reasoning: 0 },
+  };
+  return [
+    [
+      { type: "stream-start", warnings: [] },
+      {
+        type: "tool-call",
+        toolCallId: "c1",
+        toolName: "roll__agent_install",
+        input: JSON.stringify({ agent: "probe" }),
+      },
+      { type: "finish", usage, finishReason: { unified: "tool-calls", raw: "tool-calls" } },
+    ],
+    [
+      { type: "stream-start", warnings: [] },
+      { type: "text-start", id: "t" },
+      { type: "text-delta", id: "t", delta: "完成" },
+      { type: "text-end", id: "t" },
+      { type: "finish", usage, finishReason: { unified: "stop", raw: "stop" } },
+    ],
+  ];
+}
+
+function installSequencedModel(): MockLanguageModelV4 {
+  const steps = installToolStream();
+  let index = 0;
+  return new MockLanguageModelV4({
+    doStream: async () => {
+      const chunks = steps[Math.min(index, steps.length - 1)] ?? [];
+      index += 1;
+      return {
+        stream: simulateReadableStream<LanguageModelV4StreamPart>({
+          chunks,
+          initialDelayInMs: null,
+          chunkDelayInMs: null,
+        }),
+      };
+    },
+  });
+}
+
+function fakeProbeClientManager(connectCalls: string[]): McpClientManager {
+  return {
+    connect: async (agentName: string) => {
+      connectCalls.push(agentName);
+      return {
+        listTools: async () => ({
+          tools: [
+            {
+              name: "probe_tool",
+              description: "探针工具",
+              inputSchema: { type: "object", properties: {} },
+            },
+          ],
+        }),
+      };
+    },
+    disconnectAll: async () => {},
+  } as unknown as McpClientManager;
+}
+
+test("chat 内安装走统一启动状态机（autoStart）并完成热刷新接线", async () => {
+  const dataDir = tempDir();
+  try {
+    const connectCalls: string[] = [];
+    const ensureReadyCalls: string[] = [];
+    const installInputs: unknown[] = [];
+    const engine = new ConversationEngine({
+      config: installEngineConfig(dataDir),
+      model: installSequencedModel(),
+      skillLibrary: null,
+      clientManager: fakeProbeClientManager(connectCalls),
+      ensureAgentReady: async (agent) => {
+        ensureReadyCalls.push(agent.skill.name);
+      },
+      resolveCatalogFn: async () => INSTALL_TEST_CATALOG,
+      installAgentFn: async (input) => {
+        installInputs.push(input);
+        return {
+          ok: true,
+          agent: makeProbeAgent(dataDir),
+          envReport: undefined,
+          started: true,
+        };
+      },
+    });
+
+    const session = await engine.createSession();
+    const outputs: string[] = [];
+    for await (const event of session.send("装 probe")) {
+      if (event.type === "confirmation-required") {
+        session.approve(event.approvalId);
+      }
+      if (event.type === "tool-result") {
+        assert.equal(event.isError, false);
+        outputs.push(JSON.stringify(event.output));
+      }
+    }
+
+    assert.equal(installInputs.length, 1);
+    const input = installInputs[0] as { autoStart?: boolean; skipBrowserSetup?: boolean; packageSpec?: string };
+    assert.equal(input.autoStart, true);
+    assert.equal(input.skipBrowserSetup, true);
+    assert.equal(input.packageSpec, "@roll-agent/probe-agent");
+    assert.deepEqual(ensureReadyCalls, ["probe-agent"]);
+    assert.deepEqual(connectCalls, ["probe-agent"]);
+    assert.match(outputs[0] ?? "", /下一轮对话开始可用/);
+    await engine.dispose();
+  } finally {
+    rmSync(dataDir, { recursive: true, force: true });
+  }
+});
+
+test("chat 内安装失败时不连接不刷新，错误如实透出", async () => {
+  const dataDir = tempDir();
+  try {
+    const connectCalls: string[] = [];
+    const engine = new ConversationEngine({
+      config: installEngineConfig(dataDir),
+      model: installSequencedModel(),
+      skillLibrary: null,
+      clientManager: fakeProbeClientManager(connectCalls),
+      ensureAgentReady: async () => {},
+      resolveCatalogFn: async () => INSTALL_TEST_CATALOG,
+      installAgentFn: async () => ({
+        ok: false,
+        step: "start",
+        message: 'Agent "probe-agent" 已安装，但自动启动失败：boom',
+      }),
+    });
+
+    const session = await engine.createSession();
+    let failureOutput = "";
+    for await (const event of session.send("装 probe")) {
+      if (event.type === "confirmation-required") {
+        session.approve(event.approvalId);
+      }
+      if (event.type === "tool-result") {
+        assert.equal(event.isError, true);
+        failureOutput = JSON.stringify(event.output);
+      }
+    }
+
+    assert.deepEqual(connectCalls, []);
+    assert.match(failureOutput, /自动启动失败/);
+    await engine.dispose();
+  } finally {
+    rmSync(dataDir, { recursive: true, force: true });
+  }
+});
+
+test("chat 内重装已接入的同名 agent 时不重复连接并提示重启", async () => {
+  const dataDir = tempDir();
+  try {
+    const { AgentStore } = await import("@roll-agent/core/registry/store");
+    new AgentStore(dataDir).add(makeProbeAgent(dataDir));
+
+    const connectCalls: string[] = [];
+    const reportLines: string[] = [];
+    const engine = new ConversationEngine({
+      config: installEngineConfig(dataDir),
+      model: installSequencedModel(),
+      skillLibrary: null,
+      clientManager: fakeProbeClientManager(connectCalls),
+      ensureAgentReady: async () => {},
+      resolveCatalogFn: async () => INSTALL_TEST_CATALOG,
+      installAgentFn: async (_input, deps) => {
+        deps.report?.({ type: "info", message: "重装 probe" });
+        return {
+          ok: true,
+          agent: makeProbeAgent(dataDir),
+          envReport: undefined,
+          started: true,
+        };
+      },
+    });
+
+    const session = await engine.createSession();
+    let output = "";
+    for await (const event of session.send("再装一次 probe")) {
+      if (event.type === "confirmation-required") {
+        session.approve(event.approvalId);
+      }
+      if (event.type === "tool-result") {
+        output = JSON.stringify(event.output);
+      }
+    }
+
+    assert.deepEqual(connectCalls, ["probe-agent"]);
+    assert.match(output, /重新运行 roll chat/);
+    assert.match(output, /已接入旧版本连接/);
+    reportLines.push(output);
+    await engine.dispose();
+  } finally {
+    rmSync(dataDir, { recursive: true, force: true });
+  }
+});

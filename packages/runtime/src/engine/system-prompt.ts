@@ -10,11 +10,23 @@ export interface SessionExecToolIds {
   readonly poll: string;
 }
 
+export interface AgentOnboardingCatalogEntry {
+  readonly shortName: string;
+  readonly description: string;
+}
+
+export interface AgentOnboardingPromptInfo {
+  readonly installToolId: string;
+  readonly catalog: readonly AgentOnboardingCatalogEntry[];
+}
+
 export interface BuildChatSystemPromptOptions {
   readonly skills?: readonly SkillPromptSummary[];
   readonly skillToolId?: string;
   readonly bashToolId?: string;
   readonly sessionExecToolIds?: SessionExecToolIds;
+  readonly agentCount?: number;
+  readonly agentOnboarding?: AgentOnboardingPromptInfo;
 }
 
 const MAX_SKILL_DESCRIPTION_CHARS = 240;
@@ -70,6 +82,22 @@ function buildSkillsSection(skills: readonly SkillPromptSummary[], skillToolId: 
   ].join("\n");
 }
 
+function buildAgentOnboardingSection(info: AgentOnboardingPromptInfo): string {
+  const catalog = info.catalog
+    .map(
+      (entry) =>
+        `- ${entry.shortName}: ${truncate(entry.description.replace(/\s+/g, " ").trim(), MAX_SKILL_DESCRIPTION_CHARS)}`,
+    )
+    .join("\n");
+  return [
+    "# Agent 安装",
+    "当前没有任何已注册的子 Agent，对外部系统的操作能力受限。可安装的官方 Agent：",
+    catalog,
+    `当用户的需求涉及上述 Agent 的能力时，先说明它的用途并征得用户同意，再调用 ${info.installToolId} 安装（安装会执行 npm install，用户还需在界面上二次确认）。新 Agent 的工具从下一轮对话开始可用。`,
+    "绝不在用户未明确同意的情况下自行安装。",
+  ].join("\n");
+}
+
 function buildBashSection(bashToolId: string, sessionExec: SessionExecToolIds | undefined): string {
   const longRunningLines = sessionExec
     ? [
@@ -92,6 +120,13 @@ export function buildChatSystemPrompt(options: BuildChatSystemPromptOptions = {}
     GROUNDING_SECTION,
     PERSISTENCE_SECTION,
   ];
+  if (
+    options.agentCount === 0 &&
+    options.agentOnboarding !== undefined &&
+    options.agentOnboarding.catalog.length > 0
+  ) {
+    sections.push(buildAgentOnboardingSection(options.agentOnboarding));
+  }
   const skills = options.skills ?? [];
   if (skills.length > 0) {
     sections.push(buildSkillsSection(skills, options.skillToolId ?? SKILL_TOOL_ID));

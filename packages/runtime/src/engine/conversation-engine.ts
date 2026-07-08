@@ -12,15 +12,31 @@ import {
 } from "@roll-agent/core/registry/process-manager";
 import { normalizeListedTools } from "@roll-agent/core/cli/utils/agent-tools";
 import { getAgentEnv } from "@roll-agent/core/config/helpers";
+import { catalogPackageSpec, getAgentCatalog } from "@roll-agent/core/registry/catalog";
+import { resolveAgentCatalog } from "@roll-agent/core/registry/catalog-discovery";
+import { installAgent } from "@roll-agent/core/registry/install";
+import type { AgentCatalogEntry } from "@roll-agent/core/registry/catalog";
+import type { InstallAgentEvent } from "@roll-agent/core/registry/install";
 import type { RollConfig } from "@roll-agent/core/config/schema";
 import type { RegisteredAgent } from "@roll-agent/core/types/agent";
-import { createSkillLibrary, type SkillLibrary } from "@roll-agent/core/skills/library";
+import {
+  createSkillLibrary,
+  type SkillLibrary,
+  type SkillSummary,
+} from "@roll-agent/core/skills/library";
 import type { AgentToolSource, SourceTool } from "../tool-bridge/build-tools.ts";
+import { AGENT_INSTALL_TOOL_ID } from "../tool-bridge/agent-install-tool.ts";
 import type { ToolAnnotations, ToolPolicy } from "../types/policy.ts";
 import type { ThreadStore } from "../store/thread-store.ts";
-import { AgentSession, type AgentSessionBashSession } from "./agent-session.ts";
+import {
+  AgentSession,
+  type AgentInstallSessionResult,
+  type AgentSessionAgentInstall,
+  type AgentSessionBashSession,
+  type SessionAgentRefresh,
+} from "./agent-session.ts";
 import { resolveContextWindow } from "./context-window.ts";
-import { buildChatSystemPrompt } from "./system-prompt.ts";
+import { buildChatSystemPrompt, type AgentOnboardingPromptInfo } from "./system-prompt.ts";
 import { BASH_TOOL_ID, type SessionBashSettings } from "../tool-bridge/bash-tool.ts";
 import { EXEC_COMMAND_ID, EXEC_POLL_ID } from "../tool-bridge/session-exec-tool.ts";
 import {
@@ -53,6 +69,8 @@ export interface ConversationEngineOptions {
   readonly skillLibrary?: SkillLibrary | null;
   readonly onSkillLibraryIssue?: (message: string) => void;
   readonly sessionExecEnabled?: boolean;
+  readonly installAgentFn?: typeof installAgent;
+  readonly resolveCatalogFn?: typeof resolveAgentCatalog;
 }
 
 export interface CreateSessionInput {
@@ -102,6 +120,13 @@ function extractAnnotations(listed: unknown): ToolAnnotations | undefined {
     : result;
 }
 
+function formatInstallEventLine(event: InstallAgentEvent): string {
+  if (event.type === "retry") {
+    return `安装遇到网络问题，${Math.round(event.delayMs / 1000)}s 后重试（第 ${event.attempt + 1} 次）...`;
+  }
+  return event.type === "warn" ? `警告：${event.message}` : event.message;
+}
+
 async function ensureCoreManagedAgentReady(
   agent: RegisteredAgent,
   dataDir: string,
@@ -133,7 +158,11 @@ export class ConversationEngine {
   private readonly onSkillLibraryIssue: ((message: string) => void) | undefined;
   private readonly onAgentBootstrapIssue: ((issue: AgentBootstrapIssue) => void) | undefined;
   private readonly sessionExecEnabled: boolean;
+  private readonly installAgentFn: typeof installAgent;
+  private readonly resolveCatalogFn: typeof resolveAgentCatalog;
   private ready: Promise<EngineContext> | undefined;
+  private refreshChain: Promise<void> = Promise.resolve();
+  private resolvedCatalog: readonly AgentCatalogEntry[] | undefined;
   private bashUnsupportedWarned = false;
 
   constructor(options: ConversationEngineOptions) {
@@ -154,6 +183,8 @@ export class ConversationEngine {
     this.explicitSkillLibrary = options.skillLibrary;
     this.onSkillLibraryIssue = options.onSkillLibraryIssue;
     this.onAgentBootstrapIssue = options.onAgentBootstrapIssue;
+    this.installAgentFn = options.installAgentFn ?? installAgent;
+    this.resolveCatalogFn = options.resolveCatalogFn ?? resolveAgentCatalog;
   }
 
   async createSession(input: CreateSessionInput = {}): Promise<AgentSession> {
@@ -239,13 +270,8 @@ export class ConversationEngine {
         ? ruleBasedClassifier
         : unknownCommandClassifier
       : undefined;
-    const systemPrompt = buildChatSystemPrompt({
-      skills,
-      ...(bash ? { bashToolId: BASH_TOOL_ID } : {}),
-      ...(bashSession
-        ? { sessionExecToolIds: { command: EXEC_COMMAND_ID, poll: EXEC_POLL_ID } }
-        : {}),
-    });
+    const systemPrompt = this.composeSystemPrompt(skills, context.sources.length);
+    const agentInstall = this.resolveAgentInstallBinding();
     return new AgentSession({
       id,
       model: context.model,
@@ -255,6 +281,7 @@ export class ConversationEngine {
       ...(bash ? { bash } : {}),
       ...(bashClassifier ? { bashClassifier } : {}),
       ...(bashSession ? { bashSession } : {}),
+      ...(agentInstall ? { agentInstall } : {}),
       maxSteps: this.maxSteps,
       compaction: this.config.runtime.compaction,
       turnTimeoutMs: this.config.runtime.turnTimeoutMs,
@@ -289,26 +316,17 @@ export class ConversationEngine {
       };
     }
     const agents = this.explicitAgents ?? new AgentStore(this.config.agents.dataDir).list();
+    if (this.agentInstallEnabled()) {
+      this.resolvedCatalog = await this.resolveCatalogFn(this.config, {
+        allowNetwork: false,
+        ...(this.config.install.registry ? { registry: this.config.install.registry } : {}),
+      });
+    }
     const sources: AgentToolSource[] = [];
 
     for (const agent of agents) {
       try {
-        const transport = resolveTransportWithDevSpawnSpec(agent);
-        const env = getAgentEnv(this.config, agent.skill.name);
-        await this.ensureAgentReady(agent, env);
-        const client = await this.clientManager.connect(
-          agent.skill.name,
-          transport,
-          agent.installPath,
-          { samplingModel: model, ...(env ? { env } : {}) },
-        );
-        const listed = (await client.listTools()).tools;
-        const normalized = normalizeListedTools(listed);
-        const sourceTools: SourceTool[] = normalized.map((agentTool, index) => ({
-          tool: agentTool,
-          annotations: extractAnnotations(listed[index]),
-        }));
-        sources.push({ agentName: agent.skill.name, client, tools: sourceTools });
+        sources.push(await this.connectAgentSource(agent, model));
       } catch (error) {
         this.onAgentBootstrapIssue?.({
           agentName: agent.skill.name,
@@ -319,6 +337,172 @@ export class ConversationEngine {
 
     const skillLibrary = this.resolveSkillLibrary(agents);
     return { model, sources, ...(skillLibrary ? { skillLibrary } : {}) };
+  }
+
+  private async connectAgentSource(
+    agent: RegisteredAgent,
+    model: LanguageModelV4,
+  ): Promise<AgentToolSource> {
+    const transport = resolveTransportWithDevSpawnSpec(agent);
+    const env = getAgentEnv(this.config, agent.skill.name);
+    await this.ensureAgentReady(agent, env);
+    const client = await this.clientManager.connect(agent.skill.name, transport, agent.installPath, {
+      samplingModel: model,
+      ...(env ? { env } : {}),
+    });
+    const listed = (await client.listTools()).tools;
+    const normalized = normalizeListedTools(listed);
+    const sourceTools: SourceTool[] = normalized.map((agentTool, index) => ({
+      tool: agentTool,
+      annotations: extractAnnotations(listed[index]),
+    }));
+    return { agentName: agent.skill.name, client, tools: sourceTools };
+  }
+
+  async prepareAgentRefresh(agent: RegisteredAgent): Promise<SessionAgentRefresh> {
+    const result = this.refreshChain.then(() => this.runAgentRefresh(agent));
+    this.refreshChain = result.then(
+      () => undefined,
+      () => undefined,
+    );
+    return result;
+  }
+
+  private async runAgentRefresh(agent: RegisteredAgent): Promise<SessionAgentRefresh> {
+    const context = await this.ensureReady();
+    const source = await this.connectAgentSource(agent, context.model);
+    const sources = [
+      ...context.sources.filter((item) => item.agentName !== source.agentName),
+      source,
+    ];
+    const agents = this.explicitAgents ?? new AgentStore(this.config.agents.dataDir).list();
+    const skillLibrary = this.resolveSkillLibrary(agents);
+    this.ready = Promise.resolve({
+      model: context.model,
+      sources,
+      ...(skillLibrary ? { skillLibrary } : {}),
+    });
+    const skills = skillLibrary?.list() ?? [];
+    const effectiveLibrary = skillLibrary && skills.length > 0 ? skillLibrary : undefined;
+    return {
+      source,
+      ...(effectiveLibrary ? { skillLibrary: effectiveLibrary } : {}),
+      systemPrompt: this.composeSystemPrompt(skills, sources.length),
+    };
+  }
+
+  private composeSystemPrompt(skills: readonly SkillSummary[], agentCount: number): string {
+    const bash = this.resolveBashSettings();
+    const bashSession = this.resolveSessionExecSettings();
+    const onboarding = this.resolveAgentOnboardingInfo();
+    return buildChatSystemPrompt({
+      skills,
+      ...(bash ? { bashToolId: BASH_TOOL_ID } : {}),
+      ...(bashSession
+        ? { sessionExecToolIds: { command: EXEC_COMMAND_ID, poll: EXEC_POLL_ID } }
+        : {}),
+      agentCount,
+      ...(onboarding ? { agentOnboarding: onboarding } : {}),
+    });
+  }
+
+  private agentInstallEnabled(): boolean {
+    return this.explicitSources === undefined && this.explicitAgents === undefined;
+  }
+
+  private currentCatalog(): readonly AgentCatalogEntry[] {
+    return this.resolvedCatalog ?? getAgentCatalog(this.config);
+  }
+
+  private resolveAgentOnboardingInfo(): AgentOnboardingPromptInfo | undefined {
+    if (!this.agentInstallEnabled()) {
+      return undefined;
+    }
+    const catalog = this.currentCatalog();
+    if (catalog.length === 0) {
+      return undefined;
+    }
+    return {
+      installToolId: AGENT_INSTALL_TOOL_ID,
+      catalog: catalog.map((entry) => ({
+        shortName: entry.shortName,
+        description: entry.description,
+      })),
+    };
+  }
+
+  private resolveAgentInstallBinding(): AgentSessionAgentInstall | undefined {
+    if (!this.agentInstallEnabled()) {
+      return undefined;
+    }
+    const catalog = this.currentCatalog();
+    if (catalog.length === 0) {
+      return undefined;
+    }
+    return {
+      catalog: catalog.map((entry) => ({
+        shortName: entry.shortName,
+        description: entry.description,
+      })),
+      install: (shortName, report) => this.installCatalogAgent(shortName, report),
+    };
+  }
+
+  private async installCatalogAgent(
+    shortName: string,
+    report: (line: string) => void,
+  ): Promise<AgentInstallSessionResult> {
+    const entry = this.currentCatalog().find((item) => item.shortName === shortName);
+    if (!entry) {
+      return { outcome: { ok: false, message: `未知的官方 Agent 短名: ${shortName}` } };
+    }
+
+    const result = await this.installAgentFn(
+      { packageSpec: catalogPackageSpec(entry), skipBrowserSetup: true, autoStart: true },
+      {
+        agentsConfig: this.config.agents,
+        installConfig: this.config.install,
+        getStartEnv: (agentName) => getAgentEnv(this.config, agentName),
+        report: (event) => report(formatInstallEventLine(event)),
+      },
+    );
+    if (!result.ok) {
+      return {
+        outcome: {
+          ok: false,
+          message: result.message,
+          ...(result.retryCommand ? { retryCommand: result.retryCommand } : {}),
+        },
+      };
+    }
+
+    const agent = result.agent;
+    const version =
+      agent.source?.type === "installed-package" ? agent.source.installedVersion : undefined;
+    const browserSetupSkipped =
+      agent.runtime.ownership === "core-managed" && agent.runtime.setup?.playwright !== undefined;
+    const outcome = {
+      ok: true as const,
+      agentName: agent.skill.name,
+      ...(version ? { version } : {}),
+      missingEnv: (result.envReport?.missingRequired ?? []).map((item) => item.name),
+      ...(browserSetupSkipped ? { retryCommand: `roll agent install ${entry.shortName}` } : {}),
+      refreshApplied: false,
+    };
+
+    const context = await this.ensureReady();
+    if (context.sources.some((item) => item.agentName === agent.skill.name)) {
+      report(`Agent "${agent.skill.name}" 本会话已接入旧版本连接，更新需重启 roll chat 生效。`);
+      return { outcome };
+    }
+
+    try {
+      const refresh = await this.prepareAgentRefresh(agent);
+      return { outcome, refresh };
+    } catch (error) {
+      report(`接入新 Agent 失败：${error instanceof Error ? error.message : String(error)}`);
+      return { outcome };
+    }
   }
 
   private resolveSkillLibrary(agents: readonly RegisteredAgent[]): SkillLibrary | undefined {
