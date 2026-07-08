@@ -1101,7 +1101,7 @@ test("e2e smoke: roll chat without provider config exits with guidance", () => {
   const workspace = mkdtempSync(resolve(tmpdir(), `roll-chat-json-${randomUUID()}-`));
 
   try {
-    const result = runRoll(["chat", "--json"], workspace);
+    const result = runRoll(["chat", "--json"], workspace, { env: { HOME: workspace } });
     assert.equal(
       result.status,
       1,
@@ -1232,9 +1232,10 @@ test("e2e smoke: config setup fails clearly without a TTY", () => {
 
 test("e2e smoke: config init writes ask section and ask config can be set/get", () => {
   const workspace = mkdtempSync(resolve(tmpdir(), `roll-config-${randomUUID()}-`));
+  const homeEnv = { HOME: workspace };
 
   try {
-    const initResult = runRoll(["config", "init"], workspace, { input: "\n\n\n" });
+    const initResult = runRoll(["config", "init"], workspace, { input: "\n\n\n", env: homeEnv });
     assert.equal(
       initResult.status,
       0,
@@ -1246,21 +1247,29 @@ test("e2e smoke: config init writes ask section and ask config can be set/get", 
     assert.match(configText, /^ask:/m);
     assert.ok(!configText.includes("router:"));
 
-    const setModelResult = runRoll(["config", "set", "ask.llmModel", "gpt-4.1-mini"], workspace);
+    const setModelResult = runRoll(["config", "set", "ask.llmModel", "gpt-4.1-mini"], workspace, {
+      env: homeEnv,
+    });
     assert.equal(
       setModelResult.status,
       0,
       `config set ask.llmModel failed\nstdout:\n${setModelResult.stdout}\nstderr:\n${setModelResult.stderr}`,
     );
 
-    const getModelResult = runRoll(["config", "get", "ask.llmModel"], workspace);
+    const getModelResult = runRoll(["config", "get", "ask.llmModel"], workspace, { env: homeEnv });
     assert.equal(getModelResult.status, 0, getModelResult.stderr);
     assert.equal(getModelResult.stdout.trim(), "gpt-4.1-mini");
 
-    const setThresholdResult = runRoll(["config", "set", "ask.confirmThreshold", "0.7"], workspace);
+    const setThresholdResult = runRoll(
+      ["config", "set", "ask.confirmThreshold", "0.7"],
+      workspace,
+      { env: homeEnv },
+    );
     assert.equal(setThresholdResult.status, 0, setThresholdResult.stderr);
 
-    const getThresholdResult = runRoll(["config", "get", "ask.confirmThreshold"], workspace);
+    const getThresholdResult = runRoll(["config", "get", "ask.confirmThreshold"], workspace, {
+      env: homeEnv,
+    });
     assert.equal(getThresholdResult.status, 0, getThresholdResult.stderr);
     assert.equal(getThresholdResult.stdout.trim(), "0.7");
   } finally {
