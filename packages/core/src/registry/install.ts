@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, statSync } from "node:fs";
+import { existsSync, mkdirSync, rmSync, statSync } from "node:fs";
 import { resolve } from "node:path";
 import {
   buildNpmRetryPolicy,
@@ -46,6 +46,8 @@ export interface InstallAgentInput {
   readonly packageSpec: string;
   readonly skipBrowserSetup?: boolean;
   readonly autoStart?: boolean;
+  readonly replaceExisting?: boolean;
+  readonly expectedSkillName?: string;
 }
 
 export interface InstallAgentCollaborators {
@@ -112,6 +114,35 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+function sourceTypeLabel(agent: RegisteredAgent): string {
+  return agent.source?.type ?? "unknown";
+}
+
+function buildReplaceConflictFailure(
+  agentName: string,
+  sourceType: string,
+  packageSpec: string,
+): InstallAgentFailure {
+  return {
+    ok: false,
+    step: "register",
+    message:
+      `Agent "${agentName}" 已通过 ${sourceType} 来源注册。为避免覆盖本地/Git Agent，` +
+      `默认不会替换为 npm 安装。请先运行 \`roll agent remove ${agentName}\`，` +
+      `或确认风险后使用 \`roll agent install ${packageSpec} --force\`。`,
+    retryCommand: `roll agent install ${packageSpec} --force`,
+  };
+}
+
+function needsReplaceAuthorization(
+  existing: RegisteredAgent | undefined,
+  replaceExisting: boolean,
+): boolean {
+  return (
+    existing !== undefined && existing.source?.type !== "installed-package" && !replaceExisting
+  );
+}
+
 export async function installAgent(
   input: InstallAgentInput,
   deps: InstallAgentDeps,
@@ -129,6 +160,7 @@ export async function installAgent(
 
   const { packageSpec } = input;
   const autoStart = input.autoStart ?? true;
+  const replaceExisting = input.replaceExisting ?? false;
 
   if (isGitUrlSpec(packageSpec)) {
     return {
@@ -152,7 +184,19 @@ export async function installAgent(
     "installed",
     sanitizeInstallId(packageName),
   );
-  if (!existsSync(installDir)) {
+  const store = deps.store ?? new AgentStore(deps.agentsConfig.dataDir);
+  const expectedSkillName = input.expectedSkillName;
+  const expectedExisting = expectedSkillName ? store.findByName(expectedSkillName) : undefined;
+  if (expectedExisting && needsReplaceAuthorization(expectedExisting, replaceExisting)) {
+    return buildReplaceConflictFailure(
+      expectedExisting.skill.name,
+      sourceTypeLabel(expectedExisting),
+      packageSpec,
+    );
+  }
+
+  const installDirExisted = existsSync(installDir);
+  if (!installDirExisted) {
     mkdirSync(installDir, { recursive: true });
   }
 
@@ -207,7 +251,6 @@ export async function installAgent(
     return { ok: false, step: "discover", message: errorMessage(err) };
   }
 
-  const store = deps.store ?? new AgentStore(deps.agentsConfig.dataDir);
   const agent: RegisteredAgent = {
     skill: discovered.skill,
     transport: discovered.transport,
@@ -224,6 +267,18 @@ export async function installAgent(
     },
     ...(discovered.skillBody.length > 0 ? { skillBody: discovered.skillBody } : {}),
   };
+
+  const existing = store.findByName(discovered.skill.name);
+  if (existing && needsReplaceAuthorization(existing, replaceExisting)) {
+    if (!installDirExisted) {
+      rmSync(installDir, { recursive: true, force: true });
+    }
+    return buildReplaceConflictFailure(
+      discovered.skill.name,
+      sourceTypeLabel(existing),
+      packageSpec,
+    );
+  }
 
   if (
     agent.runtime.ownership === "core-managed" &&
@@ -245,10 +300,16 @@ export async function installAgent(
     report({ type: "info", message: setupResult.message });
   }
 
-  const existing = store.findByName(discovered.skill.name);
   const wasRunning = existing?.runtime.ownership === "core-managed" && existing.status === "online";
   try {
-    if (existing?.source?.type === "installed-package") {
+    if (existing?.source?.type === "installed-package" || (existing && replaceExisting)) {
+      if (existing.source?.type !== "installed-package") {
+        const sourceType = existing.source?.type ?? "unknown";
+        report({
+          type: "info",
+          message: `Agent "${discovered.skill.name}" 已通过 ${sourceType} 来源注册，将替换为 npm 安装`,
+        });
+      }
       store.replace(existing.skill.name, agent);
     } else {
       store.add(agent);
@@ -258,6 +319,9 @@ export async function installAgent(
   }
 
   if (!setupResult.ok) {
+    if (wasRunning) {
+      await stopGracefully(deps.agentsConfig.dataDir, agent.skill.name).catch(() => {});
+    }
     store.updateStatus(discovered.skill.name, "error");
     return {
       ok: false,
@@ -275,7 +339,14 @@ export async function installAgent(
   const missingRequired = envReport?.missingRequired ?? [];
 
   let started = false;
-  if (agent.runtime.ownership === "core-managed" && autoStart) {
+  const shouldAttemptStart = agent.runtime.ownership === "core-managed" && autoStart;
+  const canAttemptStart = shouldAttemptStart && missingRequired.length === 0;
+  if (wasRunning && !canAttemptStart) {
+    await stopGracefully(deps.agentsConfig.dataDir, agent.skill.name).catch(() => {});
+    store.updateStatus(agent.skill.name, "idle");
+  }
+
+  if (shouldAttemptStart) {
     if (missingRequired.length > 0) {
       report({
         type: "warn",

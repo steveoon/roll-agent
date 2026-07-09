@@ -4,11 +4,62 @@ import {
   getAgentEnv,
   getAgentEnvFromAgentsConfig,
   getMissingAgentEnvRuntimeIssues,
+  inspectLlmConfigReadiness,
   inspectAgentEnvRequirements,
 } from "./helpers.ts";
 import { validateConfigText } from "./loader.ts";
 
 describe("config/helpers", () => {
+  it("should classify LLM readiness with provider, apiKey, and placeholder checks", () => {
+    delete process.env.ROLL_TEST_MISSING_LLM_API_KEY;
+
+    const ready = validateConfigText(
+      `llm:
+  default-provider: anthropic
+  default-model: test
+  providers:
+    anthropic:
+      api-key: live-key
+agents:
+  data-dir: /tmp/test
+`,
+      "/tmp/roll.config.yaml",
+    );
+    assert.equal(inspectLlmConfigReadiness(ready).status, "ready");
+
+    const emptyKey = validateConfigText(
+      `llm:
+  default-provider: anthropic
+  default-model: test
+  providers:
+    anthropic:
+      api-key: "  "
+agents:
+  data-dir: /tmp/test
+`,
+      "/tmp/roll.config.yaml",
+    );
+    assert.equal(inspectLlmConfigReadiness(emptyKey).status, "missing-api-key");
+
+    const placeholder = validateConfigText(
+      `llm:
+  default-provider: anthropic
+  default-model: test
+  providers:
+    anthropic:
+      api-key: \${ROLL_TEST_MISSING_LLM_API_KEY}
+agents:
+  data-dir: /tmp/test
+`,
+      "/tmp/roll.config.yaml",
+    );
+    assert.equal(inspectLlmConfigReadiness(placeholder).status, "unresolved-api-key");
+    assert.equal(
+      inspectLlmConfigReadiness(placeholder, { provider: "openai" }).status,
+      "missing-provider",
+    );
+  });
+
   it("should ignore unresolved agents.env placeholders during readiness inspection", () => {
     const report = inspectAgentEnvRequirements(
       "placeholder-agent",

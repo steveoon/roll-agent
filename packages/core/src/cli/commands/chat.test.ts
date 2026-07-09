@@ -3,7 +3,23 @@ import assert from "node:assert/strict";
 import { PassThrough, Writable } from "node:stream";
 import { setTimeout as delay } from "node:timers/promises";
 import type { AgentSession, SessionEvent } from "@roll-agent/runtime";
-import { runJsonTurn, runRepl } from "./chat.ts";
+import { rollConfigSchema } from "../../config/schema.ts";
+import { resolveChatLlmReadiness, runJsonTurn, runRepl } from "./chat.ts";
+
+function parseChatConfig(input: Record<string, unknown> = {}) {
+  return rollConfigSchema.parse({
+    llm: {
+      defaultProvider: "anthropic",
+      defaultModel: "claude-test",
+      providers: {
+        anthropic: { apiKey: "anthropic-key" },
+      },
+    },
+    ask: {},
+    agents: { dataDir: "/tmp/roll-chat-test" },
+    ...input,
+  });
+}
 
 function fakeSession(events: readonly SessionEvent[], contextWindow?: number): AgentSession {
   return {
@@ -32,6 +48,60 @@ function sink(): Writable {
     },
   });
 }
+
+test("resolveChatLlmReadiness uses default provider when runtime provider is unset", () => {
+  const status = resolveChatLlmReadiness(parseChatConfig({}));
+
+  assert.equal(status.configured, true);
+  assert.equal(status.status, "ready");
+  assert.equal(status.provider, "anthropic");
+  assert.equal(status.model, "claude-test");
+});
+
+test("resolveChatLlmReadiness rejects missing runtime provider even when default provider is ready", () => {
+  const status = resolveChatLlmReadiness(
+    parseChatConfig({
+      runtime: { provider: "openai", model: "gpt-test" },
+    }),
+  );
+
+  assert.equal(status.configured, false);
+  assert.equal(status.status, "missing-provider");
+  assert.equal(status.provider, "openai");
+  assert.match(status.message, /provider "openai" 未配置/);
+});
+
+test("resolveChatLlmReadiness rejects empty apiKey", () => {
+  const status = resolveChatLlmReadiness(
+    parseChatConfig({
+      llm: {
+        defaultProvider: "anthropic",
+        defaultModel: "claude-test",
+        providers: { anthropic: { apiKey: "   " } },
+      },
+    }),
+  );
+
+  assert.equal(status.configured, false);
+  assert.equal(status.status, "missing-api-key");
+  assert.match(status.message, /apiKey 未配置/);
+});
+
+test("resolveChatLlmReadiness rejects unresolved apiKey placeholder", () => {
+  const status = resolveChatLlmReadiness(
+    parseChatConfig({
+      llm: {
+        defaultProvider: "anthropic",
+        defaultModel: "claude-test",
+        providers: { anthropic: { apiKey: String.raw`\${ANTHROPIC_API_KEY}` } },
+      },
+    }),
+  );
+
+  assert.equal(status.configured, false);
+  assert.equal(status.status, "unresolved-api-key");
+  assert.match(status.message, /未解析的环境变量占位符/);
+});
 
 test("runJsonTurn exposes step and total token usage", async () => {
   const result = await runJsonTurn(

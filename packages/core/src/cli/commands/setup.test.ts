@@ -51,7 +51,10 @@ class ScriptedPrompts implements ConfigPromptAdapter {
     return value;
   }
 
-  async text(options: { readonly message: string; readonly defaultValue?: string }): Promise<string> {
+  async text(options: {
+    readonly message: string;
+    readonly defaultValue?: string;
+  }): Promise<string> {
     this.calls.push(`text:${options.message}`);
     return options.defaultValue ?? "";
   }
@@ -61,7 +64,10 @@ class ScriptedPrompts implements ConfigPromptAdapter {
     return "fake-key";
   }
 
-  async confirm(options: { readonly message: string; readonly initialValue?: boolean }): Promise<boolean> {
+  async confirm(options: {
+    readonly message: string;
+    readonly initialValue?: boolean;
+  }): Promise<boolean> {
     this.calls.push(`confirm:${options.message}`);
     return this.confirmValues.shift() ?? options.initialValue ?? false;
   }
@@ -147,9 +153,7 @@ function makeDeps(overrides: Partial<RunSetupDeps> & { prompts: ScriptedPrompts 
         agent: makeAgent("smart-reply-agent"),
         envReport: {
           items: [],
-          missingRequired: [
-            { name: "REPLY_AUTHORITY_URL", required: true, source: "missing" },
-          ],
+          missingRequired: [{ name: "REPLY_AUTHORITY_URL", required: true, source: "missing" }],
           processEnvOnlyRequired: [],
         },
         started: false,
@@ -278,6 +282,43 @@ describe("runSetup", () => {
     assert.ok(prompts.calls.some((call) => call.includes("安装失败")));
   });
 
+  it("选择 installed-other-source 官方 Agent 时显式授权 npm 替换", async () => {
+    const prompts = new ScriptedPrompts({
+      confirm: [false, false, false],
+      multiselect: [["smart-reply"]],
+    });
+    const captured: unknown[] = [];
+    const { deps } = makeDeps({
+      prompts,
+      detectLlm: () => ({ configured: true, summary: "openai/gpt-fake" }),
+      inspectAvailability: async () => [
+        {
+          ...CATALOG_ITEM,
+          state: "installed-other-source",
+          installedAgent: makeAgent("smart-reply-agent"),
+        },
+      ],
+      install: async (input) => {
+        captured.push(input);
+        return {
+          ok: true,
+          agent: makeAgent("smart-reply-agent"),
+          envReport: undefined,
+          started: false,
+        };
+      },
+    });
+
+    await runSetup(deps);
+
+    assert.equal(captured.length, 1);
+    assert.deepEqual(captured[0], {
+      packageSpec: "@roll-agent/smart-reply-agent",
+      expectedSkillName: "smart-reply-agent",
+      replaceExisting: true,
+    });
+  });
+
   it("用户取消时 exitCode 为 1", async () => {
     const prompts = new ScriptedPrompts({});
     const { deps } = makeDeps({
@@ -312,9 +353,7 @@ describe("runSetup", () => {
         agent: coreManagedAgent,
         envReport: {
           items: [],
-          missingRequired: [
-            { name: "REPLY_AUTHORITY_URL", required: true, source: "missing" },
-          ],
+          missingRequired: [{ name: "REPLY_AUTHORITY_URL", required: true, source: "missing" }],
           processEnvOnlyRequired: [],
         },
         started: false,
@@ -324,9 +363,7 @@ describe("runSetup", () => {
     await runSetup(deps);
 
     assert.ok(
-      prompts.calls.some((call) =>
-        call.startsWith("info:运行 roll agent start smart-reply-agent"),
-      ),
+      prompts.calls.some((call) => call.startsWith("info:运行 roll agent start smart-reply-agent")),
     );
   });
 });
@@ -346,9 +383,7 @@ describe("runChatOnboarding", () => {
     assert.ok(tracker.includes("install:@roll-agent/smart-reply-agent"));
     assert.ok(!tracker.some((item) => item.startsWith("setupAgentEnv:")));
     assert.ok(
-      prompts.calls.some(
-        (call) => call.startsWith("warn:") && call.includes("缺少必填环境变量"),
-      ),
+      prompts.calls.some((call) => call.startsWith("warn:") && call.includes("缺少必填环境变量")),
     );
     assert.ok(
       prompts.calls.some((call) => call.startsWith("outro:") && call.includes("roll setup")),

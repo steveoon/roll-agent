@@ -52,8 +52,13 @@ export default defineCommand({
     },
     start: {
       type: "boolean",
-      description: "安装后不自动启动 core-managed Agent",
+      description: "安装后自动启动 core-managed Agent（可用 --no-start 跳过）",
       default: true,
+    },
+    force: {
+      type: "boolean",
+      description: "确认风险并替换同名的非 npm 来源 Agent",
+      default: false,
     },
   },
   async run({ args }) {
@@ -85,6 +90,8 @@ export default defineCommand({
         packageSpec,
         skipBrowserSetup: args["skip-browser-setup"],
         autoStart: args.start,
+        replaceExisting: args.force,
+        ...(catalogMatch ? { expectedSkillName: catalogMatch.entry.skillName } : {}),
       },
       {
         agentsConfig,

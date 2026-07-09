@@ -5,7 +5,7 @@
 
 roll chat 支持新设备 onboarding：启动引导 + 会话内安装官方 Agent。
 
-**启动引导（core）**：TTY 下 `roll chat` 检测到 LLM provider 未配置时，询问是否进入初始化向导（配置 LLM + 可选多选安装官方 Agent），完成后重新加载配置直接进入对话；拒绝、非 TTY、`--json`、`--server` 维持原报错行为。
+**启动引导（core）**：TTY 下 `roll chat` 检测到 LLM 未配置完成（provider 缺失、apiKey 为空或仍是未解析的 `${ENV_VAR}` 占位符）时，询问是否进入初始化向导（配置 LLM + 可选多选安装官方 Agent），完成后重新加载配置直接进入对话；拒绝、非 TTY、`--json`、`--server` 不进向导，直接报错并区分「provider 未配置」「apiKey 未配置」「apiKey 占位符未解析」三类原因（`--server` 与交互模式共用同一就绪判定）。
 
 **会话内安装（runtime + core）**：
 

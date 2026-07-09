@@ -1,5 +1,5 @@
 import { defineCommand } from "citty";
-import { getAgentEnv } from "../../config/helpers.ts";
+import { getAgentEnv, inspectLlmConfigReadiness } from "../../config/helpers.ts";
 import { loadAgentsConfig, loadConfig, loadInstallConfig } from "../../config/loader.ts";
 import { catalogPackageSpec } from "../../registry/catalog.ts";
 import { resolveAgentCatalog } from "../../registry/catalog-discovery.ts";
@@ -24,6 +24,11 @@ const commandExtension = import.meta.url.endsWith(".ts") ? "ts" : "js";
 export interface LlmConfigStatus {
   readonly configured: boolean;
   readonly summary: string;
+}
+
+export interface RunChatOnboardingOptions {
+  readonly provider?: string;
+  readonly model?: string;
 }
 
 export interface SetupAgentContext {
@@ -109,7 +114,9 @@ export async function runSetup(deps: RunSetupDeps = {}): Promise<void> {
     prompts.info("运行 roll doctor 检查...");
     await runDoctor();
 
-    prompts.outro("初始化完成。下一步：`roll chat` 开始对话，或 `roll agent list` 查看已注册 Agent。");
+    prompts.outro(
+      "初始化完成。下一步：`roll chat` 开始对话，或 `roll agent list` 查看已注册 Agent。",
+    );
   } catch (err) {
     if (err instanceof ConfigSetupCancelledError) {
       process.exitCode = 1;
@@ -119,15 +126,18 @@ export async function runSetup(deps: RunSetupDeps = {}): Promise<void> {
   }
 }
 
-export async function runChatOnboarding(deps: RunSetupDeps = {}): Promise<boolean> {
+export async function runChatOnboarding(
+  deps: RunSetupDeps = {},
+  options: RunChatOnboardingOptions = {},
+): Promise<boolean> {
   const prompts = deps.prompts ?? clackPromptAdapter;
-  const detectLlm = deps.detectLlm ?? detectLlmConfigStatus;
+  const detectLlm = deps.detectLlm ?? (() => detectLlmConfigStatus(options));
   const setupLlmFn = deps.setupLlmFn ?? setupLlm;
 
   try {
     prompts.intro("Roll chat 初始化");
     const proceed = await prompts.confirm({
-      message: "LLM provider 尚未配置，现在进入初始化向导吗？",
+      message: "LLM 尚未配置完成（缺少 provider 或 apiKey），现在进入初始化向导吗？",
       initialValue: true,
     });
     if (!proceed) {
@@ -147,7 +157,9 @@ export async function runChatOnboarding(deps: RunSetupDeps = {}): Promise<boolea
         `Agent "${result.agent.skill.name}" 缺少必填环境变量，可运行 roll config setup agent ${result.agent.skill.name} 配置。`,
       );
     }
-    prompts.outro("初始化完成，继续进入对话。完整初始化可运行 roll setup，环境检查可运行 roll doctor。");
+    prompts.outro(
+      "初始化完成，继续进入对话。完整初始化可运行 roll setup，环境检查可运行 roll doctor。",
+    );
     return true;
   } catch (err) {
     if (err instanceof ConfigSetupCancelledError) {
@@ -168,7 +180,9 @@ async function installOfficialAgents(
 
   const context = loadAgentContext();
   if (!context.installConfig) {
-    prompts.warn(`install 配置无效，跳过官方 Agent 安装：${context.installConfigError ?? "未知原因"}`);
+    prompts.warn(
+      `install 配置无效，跳过官方 Agent 安装：${context.installConfigError ?? "未知原因"}`,
+    );
     return [];
   }
   const installConfig = context.installConfig;
@@ -203,7 +217,11 @@ async function installOfficialAgents(
       continue;
     }
     const result = await install(
-      { packageSpec: catalogPackageSpec(item.entry) },
+      {
+        packageSpec: catalogPackageSpec(item.entry),
+        expectedSkillName: item.entry.skillName,
+        replaceExisting: item.state === "installed-other-source",
+      },
       {
         agentsConfig: context.agentsConfig,
         installConfig,
@@ -221,18 +239,14 @@ async function installOfficialAgents(
   return results;
 }
 
-function detectLlmConfigStatus(): LlmConfigStatus {
+function detectLlmConfigStatus(options: RunChatOnboardingOptions = {}): LlmConfigStatus {
   try {
     const { config } = loadConfig();
-    const provider = config.llm.defaultProvider;
-    const apiKey = config.llm.providers[provider]?.apiKey;
-    if (typeof apiKey === "string" && apiKey.trim().length > 0) {
-      return { configured: true, summary: `${provider}/${config.llm.defaultModel}` };
-    }
+    const status = inspectLlmConfigReadiness(config, options);
+    return { configured: status.configured, summary: status.summary };
   } catch {
     return { configured: false, summary: "" };
   }
-  return { configured: false, summary: "" };
 }
 
 function loadSetupAgentContext(): SetupAgentContext {
@@ -283,7 +297,10 @@ function renderSetupInstallEvent(prompts: ConfigPromptAdapter, event: InstallAge
   prompts.info(event.message);
 }
 
-function renderSetupInstallFailure(prompts: ConfigPromptAdapter, failure: InstallAgentFailure): void {
+function renderSetupInstallFailure(
+  prompts: ConfigPromptAdapter,
+  failure: InstallAgentFailure,
+): void {
   if (failure.step === "setup") {
     prompts.warn(`Agent setup 失败：${failure.message}`);
     if (failure.retryCommand) {
@@ -306,7 +323,9 @@ export default defineCommand({
   args: {},
   async run() {
     if (!process.stdin.isTTY || !process.stderr.isTTY) {
-      log.error("roll setup 需要交互式终端。非交互环境请使用 roll config set 与 roll agent install。");
+      log.error(
+        "roll setup 需要交互式终端。非交互环境请使用 roll config set 与 roll agent install。",
+      );
       process.exitCode = 1;
       return;
     }

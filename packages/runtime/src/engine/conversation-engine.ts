@@ -458,7 +458,12 @@ export class ConversationEngine {
     }
 
     const result = await this.installAgentFn(
-      { packageSpec: catalogPackageSpec(entry), skipBrowserSetup: true, autoStart: true },
+      {
+        packageSpec: catalogPackageSpec(entry),
+        skipBrowserSetup: true,
+        autoStart: true,
+        expectedSkillName: entry.skillName,
+      },
       {
         agentsConfig: this.config.agents,
         installConfig: this.config.install,

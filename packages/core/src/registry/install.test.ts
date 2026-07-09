@@ -1,6 +1,6 @@
 import { describe, it, after } from "node:test";
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DEFAULT_CONFIG } from "../config/defaults.ts";
@@ -212,9 +212,9 @@ describe("installAgent", () => {
     assert.equal(store.findByName("fake-agent")?.status, "error");
   });
 
-  it("同名 installed-package 走 replace，其他来源同名走 add 并因重名失败", async () => {
+  it("同名 installed-package 走升级替换且不输出其他来源替换提示", async () => {
     const dataDir = makeDataDir();
-    const { deps, store } = makeDeps({ dataDir });
+    const { deps, store, events } = makeDeps({ dataDir });
 
     const preRegistered: RegisteredAgent = {
       skill: { name: "fake-agent", description: "旧版", metadata: {} },
@@ -240,17 +240,101 @@ describe("installAgent", () => {
     if (replaced?.source?.type === "installed-package") {
       assert.equal(replaced.source.installedVersion, "1.2.3");
     }
+    assert.equal(
+      events.some(
+        (event) =>
+          event.type === "info" &&
+          event.message.includes("已通过") &&
+          event.message.includes("替换"),
+      ),
+      false,
+      "同名 installed-package 升级不应提示「其他来源替换」",
+    );
+  });
 
-    store.remove("fake-agent");
+  it("expectedSkillName 命中非 npm 来源时默认在 download 前失败", async () => {
+    const dataDir = makeDataDir();
+    const { deps, store, calls } = makeDeps({ dataDir });
     store.add({
-      ...preRegistered,
+      skill: { name: "fake-agent", description: "本地开发版", metadata: {} },
+      transport: { type: "stdio", command: "node" },
+      runtime: { ownership: "on-demand" },
+      installPath: "/repo/fake-agent",
+      registeredAt: "2026-01-01T00:00:00.000Z",
+      status: "idle",
       source: { type: "local-path", path: "/repo/fake-agent" },
     });
-    const addResult = await installAgent(BASE_INPUT, deps);
-    assert.equal(addResult.ok, false);
-    if (!addResult.ok) {
-      assert.equal(addResult.step, "register");
+
+    const result = await installAgent({ ...BASE_INPUT, expectedSkillName: "fake-agent" }, deps);
+
+    assert.equal(result.ok, false);
+    if (!result.ok) {
+      assert.equal(result.step, "register");
+      assert.match(result.message, /默认不会替换为 npm 安装/);
+      assert.match(result.retryCommand ?? "", /--force/);
     }
+    assert.deepEqual(calls, []);
+    assert.equal(store.findByName("fake-agent")?.source?.type, "local-path");
+  });
+
+  it("replaceExisting=true 时允许非 npm 来源替换并输出明确 info", async () => {
+    const dataDir = makeDataDir();
+    const { deps, store, events } = makeDeps({ dataDir });
+    store.add({
+      skill: { name: "fake-agent", description: "本地开发版", metadata: {} },
+      transport: { type: "stdio", command: "node" },
+      runtime: { ownership: "on-demand" },
+      installPath: "/repo/fake-agent",
+      registeredAt: "2026-01-01T00:00:00.000Z",
+      status: "idle",
+      source: { type: "local-path", path: "/repo/fake-agent" },
+    });
+
+    const otherSourceResult = await installAgent(
+      { ...BASE_INPUT, expectedSkillName: "fake-agent", replaceExisting: true },
+      deps,
+    );
+    assert.equal(otherSourceResult.ok, true);
+    assert.equal(store.list().length, 1);
+    const npmReplaced = store.findByName("fake-agent");
+    assert.equal(npmReplaced?.source?.type, "installed-package");
+    if (npmReplaced?.source?.type === "installed-package") {
+      assert.equal(npmReplaced.source.installedVersion, "1.2.3");
+    }
+    assert.ok(
+      events.some(
+        (event) =>
+          event.type === "info" &&
+          event.message.includes("local-path") &&
+          event.message.includes("替换为 npm 安装"),
+      ),
+      "其他来源替换应输出明确 info",
+    );
+  });
+
+  it("discover 后才发现非 npm 同名冲突时失败并清理新建 installDir", async () => {
+    const dataDir = makeDataDir();
+    const { deps, store, calls } = makeDeps({ dataDir });
+    store.add({
+      skill: { name: "fake-agent", description: "Git 注册版", metadata: {} },
+      transport: { type: "stdio", command: "node" },
+      runtime: { ownership: "on-demand" },
+      installPath: "/repo/fake-agent",
+      registeredAt: "2026-01-01T00:00:00.000Z",
+      status: "idle",
+      source: { type: "git", url: "https://example.com/fake-agent.git" },
+    });
+
+    const result = await installAgent(BASE_INPUT, deps);
+
+    assert.equal(result.ok, false);
+    if (!result.ok) {
+      assert.equal(result.step, "register");
+      assert.match(result.message, /默认不会替换为 npm 安装/);
+    }
+    assert.deepEqual(calls, ["runInstall", "discover"]);
+    assert.equal(store.findByName("fake-agent")?.source?.type, "git");
+    assert.equal(existsSync(join(dataDir, "installed", "fake-agent-package")), false);
   });
 
   it("core-managed 自动启动成功：状态 online、started true", async () => {
@@ -326,6 +410,35 @@ describe("installAgent", () => {
     }
     assert.equal(store.findByName("fake-agent")?.status, "idle");
     assert.ok(!calls.includes("start"));
+  });
+
+  it("替换在线 core-managed 旧 Agent 且新 Agent 不启动时停止旧进程并保持 idle", async () => {
+    const dataDir = makeDataDir();
+    const { deps, store, calls } = makeDeps({ dataDir });
+    store.add({
+      skill: { name: "fake-agent", description: "旧常驻版", metadata: {} },
+      transport: { type: "streamable-http", endpoint: "http://127.0.0.1:4313/mcp" },
+      runtime: {
+        ownership: "core-managed",
+        start: { command: "node", args: ["dist/index.js"] },
+        endpoint: { path: "/mcp", port: 4313 },
+      },
+      installPath: "/repo/fake-agent",
+      registeredAt: "2026-01-01T00:00:00.000Z",
+      status: "online",
+      source: { type: "local-path", path: "/repo/fake-agent" },
+    });
+
+    const result = await installAgent(
+      { ...BASE_INPUT, expectedSkillName: "fake-agent", replaceExisting: true },
+      deps,
+    );
+
+    assert.equal(result.ok, true);
+    assert.ok(calls.includes("stopGracefully"));
+    assert.ok(!calls.includes("start"));
+    assert.equal(store.findByName("fake-agent")?.status, "idle");
+    assert.equal(store.findByName("fake-agent")?.source?.type, "installed-package");
   });
 
   it("core-managed 缺必填 env 时跳过启动并返回 envReport", async () => {

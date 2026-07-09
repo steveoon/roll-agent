@@ -21,3 +21,6 @@ coverage/
 # Smart Reply Agent 业务数据（含敏感信息）
 agents/smart-reply/data/brand-config.json
 agents/smart-reply/data/reply-policy.json
+
+# roll config setup/migrate 自动备份（本地产物，可能含敏感配置）
+roll.config.yaml.bak.*

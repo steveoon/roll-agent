@@ -613,10 +613,18 @@ test("chat 内安装走统一启动状态机（autoStart）并完成热刷新接
     }
 
     assert.equal(installInputs.length, 1);
-    const input = installInputs[0] as { autoStart?: boolean; skipBrowserSetup?: boolean; packageSpec?: string };
+    const input = installInputs[0] as {
+      autoStart?: boolean;
+      skipBrowserSetup?: boolean;
+      packageSpec?: string;
+      expectedSkillName?: string;
+      replaceExisting?: boolean;
+    };
     assert.equal(input.autoStart, true);
     assert.equal(input.skipBrowserSetup, true);
     assert.equal(input.packageSpec, "@roll-agent/probe-agent");
+    assert.equal(input.expectedSkillName, "probe-agent");
+    assert.equal(input.replaceExisting, undefined);
     assert.deepEqual(ensureReadyCalls, ["probe-agent"]);
     assert.deepEqual(connectCalls, ["probe-agent"]);
     assert.match(outputs[0] ?? "", /下一轮对话开始可用/);
