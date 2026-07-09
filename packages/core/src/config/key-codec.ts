@@ -93,7 +93,7 @@ export const CONFIG_KEY_CODEC: KeyCodecNode = {
             keepRecentTokens: LEAF,
           },
         },
-        bash: {
+        shell: {
           kind: "object",
           fields: {
             enabled: LEAF,

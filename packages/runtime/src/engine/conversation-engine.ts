@@ -37,14 +37,21 @@ import {
 } from "./agent-session.ts";
 import { resolveContextWindow } from "./context-window.ts";
 import { buildChatSystemPrompt, type AgentOnboardingPromptInfo } from "./system-prompt.ts";
-import { BASH_TOOL_ID, type SessionBashSettings } from "../tool-bridge/bash-tool.ts";
+import {
+  BASH_TOOL_ID,
+  POWERSHELL_TOOL_ID,
+  type SessionBashSettings,
+} from "../tool-bridge/bash-tool.ts";
 import { EXEC_COMMAND_ID, EXEC_POLL_ID } from "../tool-bridge/session-exec-tool.ts";
 import {
   type CommandClassifier,
   unknownCommandClassifier,
 } from "../types/command-classification.ts";
-import { ruleBasedClassifier } from "../bash/classifier/index.ts";
-import { isBashToolSupported } from "../bash/shell.ts";
+import {
+  resolveShellProfile,
+  type ShellProfile,
+  type ShellProfileResolutionResult,
+} from "../bash/profile.ts";
 
 const DEFAULT_MAX_STEPS = 80;
 
@@ -69,6 +76,8 @@ export interface ConversationEngineOptions {
   readonly skillLibrary?: SkillLibrary | null;
   readonly onSkillLibraryIssue?: (message: string) => void;
   readonly sessionExecEnabled?: boolean;
+  readonly shellProfile?: ShellProfile | null;
+  readonly resolveShellProfileFn?: typeof resolveShellProfile;
   readonly installAgentFn?: typeof installAgent;
   readonly resolveCatalogFn?: typeof resolveAgentCatalog;
 }
@@ -158,12 +167,16 @@ export class ConversationEngine {
   private readonly onSkillLibraryIssue: ((message: string) => void) | undefined;
   private readonly onAgentBootstrapIssue: ((issue: AgentBootstrapIssue) => void) | undefined;
   private readonly sessionExecEnabled: boolean;
+  private readonly explicitShellProfile: ShellProfile | null | undefined;
+  private readonly resolveShellProfileFn: typeof resolveShellProfile;
   private readonly installAgentFn: typeof installAgent;
   private readonly resolveCatalogFn: typeof resolveAgentCatalog;
   private ready: Promise<EngineContext> | undefined;
   private refreshChain: Promise<void> = Promise.resolve();
   private resolvedCatalog: readonly AgentCatalogEntry[] | undefined;
-  private bashUnsupportedWarned = false;
+  private shellProfileResolution: ShellProfileResolutionResult | undefined;
+  private shellUnsupportedWarned = false;
+  private shellSessionUnsupportedWarned = false;
 
   constructor(options: ConversationEngineOptions) {
     this.config = options.config;
@@ -177,6 +190,8 @@ export class ConversationEngine {
       ((agent, env) => ensureCoreManagedAgentReady(agent, this.config.agents.dataDir, env));
     this.debugEvents = options.debugEvents ?? false;
     this.sessionExecEnabled = options.sessionExecEnabled ?? true;
+    this.explicitShellProfile = options.shellProfile;
+    this.resolveShellProfileFn = options.resolveShellProfileFn ?? resolveShellProfile;
     this.explicitAgents = options.agents;
     this.explicitModel = options.model;
     this.explicitSources = options.sources;
@@ -209,45 +224,74 @@ export class ConversationEngine {
     return this.buildSession(context, threadId, this.store.getMessages(threadId));
   }
 
-  private resolveBashSettings(): SessionBashSettings | undefined {
-    const bash = this.config.runtime.bash;
-    if (!bash.enabled) {
+  private resolveRuntimeShellProfile(): ShellProfile | undefined {
+    const shell = this.config.runtime.shell;
+    if (!shell.enabled) {
       return undefined;
     }
-    if (!isBashToolSupported(process.platform)) {
-      if (!this.bashUnsupportedWarned) {
-        this.bashUnsupportedWarned = true;
-        process.stderr.write("roll chat: bash 工具暂不支持 Windows，已跳过注册\n");
+    if (this.explicitShellProfile !== undefined) {
+      return this.explicitShellProfile ?? undefined;
+    }
+    if (this.shellProfileResolution === undefined) {
+      this.shellProfileResolution = this.resolveShellProfileFn({
+        platform: process.platform,
+        env: process.env,
+      });
+    }
+    const result = this.shellProfileResolution;
+    if (!result.supported) {
+      if (!this.shellUnsupportedWarned) {
+        this.shellUnsupportedWarned = true;
+        const reason =
+          result.reason === "pwsh-version-unsupported"
+            ? "检测到的 pwsh 版本低于 7"
+            : "未检测到 PowerShell 7 (pwsh)";
+        process.stderr.write(
+          `roll chat: ${reason}，Windows 原生 shell 工具已跳过注册；可运行 winget install Microsoft.PowerShell\n`,
+        );
+      }
+      return undefined;
+    }
+    return result.profile;
+  }
+
+  private resolveShellSettings(profile: ShellProfile): SessionBashSettings {
+    const shell = this.config.runtime.shell;
+    return {
+      workdir: process.cwd(),
+      defaultTimeoutMs: shell.defaultTimeoutMs,
+      maxTimeoutMs: shell.maxTimeoutMs,
+      turnTimeoutMs: this.config.runtime.turnTimeoutMs,
+      maxCaptureBytes: shell.maxCaptureBytes,
+      maxModelOutputChars: shell.maxModelOutputChars,
+      profile,
+    };
+  }
+
+  private resolveSessionExecSettings(profile: ShellProfile): AgentSessionBashSession | undefined {
+    if (!this.sessionExecEnabled) {
+      return undefined;
+    }
+    const shell = this.config.runtime.shell;
+    if (!shell.enabled || !shell.session.enabled) {
+      return undefined;
+    }
+    if (!profile.supportsSessionExec) {
+      if (!this.shellSessionUnsupportedWarned) {
+        this.shellSessionUnsupportedWarned = true;
+        process.stderr.write(
+          "roll chat: Windows 原生 session exec 暂未支持，已跳过 roll__exec_command / roll__exec_poll\n",
+        );
       }
       return undefined;
     }
     return {
       workdir: process.cwd(),
-      defaultTimeoutMs: bash.defaultTimeoutMs,
-      maxTimeoutMs: bash.maxTimeoutMs,
-      turnTimeoutMs: this.config.runtime.turnTimeoutMs,
-      maxCaptureBytes: bash.maxCaptureBytes,
-      maxModelOutputChars: bash.maxModelOutputChars,
-    };
-  }
-
-  private resolveSessionExecSettings(): AgentSessionBashSession | undefined {
-    if (!this.sessionExecEnabled) {
-      return undefined;
-    }
-    const bash = this.config.runtime.bash;
-    if (!bash.enabled || !bash.session.enabled) {
-      return undefined;
-    }
-    if (!isBashToolSupported(process.platform)) {
-      return undefined;
-    }
-    return {
-      workdir: process.cwd(),
-      maxSessions: bash.session.maxSessions,
-      defaultYieldMs: bash.session.defaultYieldMs,
-      maxOutputTokens: bash.session.maxOutputTokens,
-      bufferCapacity: bash.maxCaptureBytes,
+      profile,
+      maxSessions: shell.session.maxSessions,
+      defaultYieldMs: shell.session.defaultYieldMs,
+      maxOutputTokens: shell.session.maxOutputTokens,
+      bufferCapacity: shell.maxCaptureBytes,
     };
   }
 
@@ -263,14 +307,20 @@ export class ConversationEngine {
     );
     const skills = context.skillLibrary?.list() ?? [];
     const skillLibrary = skills.length > 0 ? context.skillLibrary : undefined;
-    const bash = this.resolveBashSettings();
-    const bashSession = this.resolveSessionExecSettings();
-    const bashClassifier: CommandClassifier | undefined = bash
-      ? this.config.runtime.bash.autoApproveSafe
-        ? ruleBasedClassifier
-        : unknownCommandClassifier
-      : undefined;
-    const systemPrompt = this.composeSystemPrompt(skills, context.sources.length);
+    const shellProfile = this.resolveRuntimeShellProfile();
+    const bash = shellProfile ? this.resolveShellSettings(shellProfile) : undefined;
+    const bashSession = shellProfile ? this.resolveSessionExecSettings(shellProfile) : undefined;
+    const bashClassifier: CommandClassifier | undefined =
+      shellProfile?.supportsSafeCommandClassification === true &&
+      !this.config.runtime.shell.autoApproveSafe
+        ? unknownCommandClassifier
+        : undefined;
+    const systemPrompt = this.composeSystemPrompt(
+      skills,
+      context.sources.length,
+      shellProfile,
+      bashSession,
+    );
     const agentInstall = this.resolveAgentInstallBinding();
     return new AgentSession({
       id,
@@ -346,10 +396,15 @@ export class ConversationEngine {
     const transport = resolveTransportWithDevSpawnSpec(agent);
     const env = getAgentEnv(this.config, agent.skill.name);
     await this.ensureAgentReady(agent, env);
-    const client = await this.clientManager.connect(agent.skill.name, transport, agent.installPath, {
-      samplingModel: model,
-      ...(env ? { env } : {}),
-    });
+    const client = await this.clientManager.connect(
+      agent.skill.name,
+      transport,
+      agent.installPath,
+      {
+        samplingModel: model,
+        ...(env ? { env } : {}),
+      },
+    );
     const listed = (await client.listTools()).tools;
     const normalized = normalizeListedTools(listed);
     const sourceTools: SourceTool[] = normalized.map((agentTool, index) => ({
@@ -384,20 +439,30 @@ export class ConversationEngine {
     });
     const skills = skillLibrary?.list() ?? [];
     const effectiveLibrary = skillLibrary && skills.length > 0 ? skillLibrary : undefined;
+    const shellProfile = this.resolveRuntimeShellProfile();
+    const bashSession = shellProfile ? this.resolveSessionExecSettings(shellProfile) : undefined;
     return {
       source,
       ...(effectiveLibrary ? { skillLibrary: effectiveLibrary } : {}),
-      systemPrompt: this.composeSystemPrompt(skills, sources.length),
+      systemPrompt: this.composeSystemPrompt(skills, sources.length, shellProfile, bashSession),
     };
   }
 
-  private composeSystemPrompt(skills: readonly SkillSummary[], agentCount: number): string {
-    const bash = this.resolveBashSettings();
-    const bashSession = this.resolveSessionExecSettings();
+  private composeSystemPrompt(
+    skills: readonly SkillSummary[],
+    agentCount: number,
+    shellProfile: ShellProfile | undefined,
+    bashSession: AgentSessionBashSession | undefined,
+  ): string {
     const onboarding = this.resolveAgentOnboardingInfo();
     return buildChatSystemPrompt({
       skills,
-      ...(bash ? { bashToolId: BASH_TOOL_ID } : {}),
+      ...(shellProfile
+        ? {
+            shellToolId: shellProfile.toolName === "powershell" ? POWERSHELL_TOOL_ID : BASH_TOOL_ID,
+            shellHints: shellProfile.systemPromptHints(),
+          }
+        : {}),
       ...(bashSession
         ? { sessionExecToolIds: { command: EXEC_COMMAND_ID, poll: EXEC_POLL_ID } }
         : {}),

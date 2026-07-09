@@ -203,4 +203,58 @@ describe("config migration", () => {
     });
     assert.equal(result.document["router"], undefined);
   });
+
+  it("auto-migrates runtime.bash to runtime.shell", () => {
+    const result = applyKnownConfigMigrations({
+      runtime: {
+        bash: {
+          enabled: true,
+          "auto-approve-safe": false,
+          session: { enabled: true },
+        },
+      },
+    });
+
+    assert.equal(result.ok, true);
+    if (!result.ok) {
+      return;
+    }
+    assert.deepEqual(result.document["runtime"], {
+      shell: {
+        enabled: true,
+        "auto-approve-safe": false,
+        session: { enabled: true },
+      },
+    });
+    assert.match(result.summary.join("\n"), /runtime\.bash.*runtime\.shell/);
+  });
+
+  it("removes runtime.bash when runtime.shell has the same value", () => {
+    const shell = { enabled: true, session: { enabled: false } };
+    const result = applyKnownConfigMigrations({
+      runtime: {
+        bash: shell,
+        shell,
+      },
+    });
+
+    assert.equal(result.ok, true);
+    if (!result.ok) {
+      return;
+    }
+    assert.deepEqual(result.document["runtime"], { shell });
+    assert.match(result.summary.join("\n"), /删除已废弃的 `runtime\.bash`/);
+  });
+
+  it("blocks runtime.bash migration when runtime.shell conflicts", () => {
+    const result = applyKnownConfigMigrations({
+      runtime: {
+        bash: { enabled: true },
+        shell: { enabled: false },
+      },
+    });
+
+    assert.equal(result.ok, false);
+    assert.match(result.issues.map((issue) => issue.message).join("\n"), /值冲突/);
+  });
 });

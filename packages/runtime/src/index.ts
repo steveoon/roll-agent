@@ -35,6 +35,21 @@ export {
 } from "./types/command-classification.ts";
 export { ruleBasedClassifier } from "./bash/classifier/index.ts";
 export {
+  buildPowerShellEncodedCommand,
+  resolveShellProfile,
+  SHELL_PROFILE_IDS,
+  SHELL_TOOL_NAMES,
+} from "./bash/profile.ts";
+export type {
+  ShellProfile,
+  ShellProfileId,
+  ShellKillOptions,
+  ShellProfileResolutionDeps,
+  ShellProfileResolutionResult,
+  ShellSpawnSpec,
+  ShellToolName,
+} from "./bash/profile.ts";
+export {
   buildSessionExecToolset,
   EXEC_COMMAND_ID,
   EXEC_POLL_ID,

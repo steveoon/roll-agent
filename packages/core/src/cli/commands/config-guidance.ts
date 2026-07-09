@@ -126,29 +126,32 @@ export const CONFIG_GUIDANCE_ENTRIES = [
       "runtime:\n  approval:\n    overrides:\n      browser-use-agent.zhipin_send_prepared_reply: confirm\n      browser-use-agent.browser_status: auto",
   },
   {
-    path: "runtime.bash.enabled",
-    title: "Chat 内建 bash 工具",
+    path: "runtime.shell.enabled",
+    title: "Chat 内建 shell 工具",
     purpose:
-      "开启后 `roll chat` 注册内建 `roll__bash` 工具，模型可以在本机 shell 执行命令。命令继承 roll 进程环境变量，默认每条需人工确认。",
-    defaultBehavior: `默认值为 \`${String(DEFAULT_CONFIG.runtime.bash.enabled)}\`（关闭）。Windows 暂不支持，开启也会跳过注册。`,
-    example: "runtime:\n  bash:\n    enabled: true",
+      "开启后 `roll chat` 注册内建 shell 工具：macOS/Linux 为 `roll__bash`，Windows 原生为 `roll__powershell`（需 PowerShell 7+）。命令继承 roll 进程环境变量，默认每条需人工确认。",
+    defaultBehavior: `默认值为 \`${String(DEFAULT_CONFIG.runtime.shell.enabled)}\`（关闭）。Windows 未检测到 pwsh 7+ 时会跳过注册。`,
+    example: "runtime:\n  shell:\n    enabled: true",
+    setupCommand: "roll config setup shell",
   },
   {
-    path: "runtime.bash.auto-approve-safe",
+    path: "runtime.shell.auto-approve-safe",
     title: "只读命令免确认",
     purpose:
-      "开启后用内建规则分类器识别 known-safe 只读命令（如 `ls`、`cat`、`git status`），在 `guarded`/`auto` 策略下免确认执行；dangerous（`rm -rf`、`sudo`）与无法识别的命令仍需确认。",
-    defaultBehavior: `默认值为 \`${String(DEFAULT_CONFIG.runtime.bash.autoApproveSafe)}\`。关闭后回归每条命令都确认。`,
-    example: "runtime:\n  bash:\n    enabled: true\n    auto-approve-safe: false",
+      "开启后用内建规则分类器识别 POSIX known-safe 只读命令（如 `ls`、`cat`、`git status`），在 `guarded`/`auto` 策略下免确认执行；dangerous（`rm -rf`、`sudo`）与无法识别的命令仍需确认。Windows PowerShell 当前全部按 unknown 处理，仍需确认。",
+    defaultBehavior: `默认值为 \`${String(DEFAULT_CONFIG.runtime.shell.autoApproveSafe)}\`。关闭后 POSIX 回归每条命令都确认；Windows PowerShell 当前始终确认。`,
+    example: "runtime:\n  shell:\n    enabled: true\n    auto-approve-safe: false",
+    setupCommand: "roll config setup shell",
   },
   {
-    path: "runtime.bash.session.enabled",
+    path: "runtime.shell.session.enabled",
     title: "Chat 会话式长命令执行",
     purpose:
-      "开启后注册 `roll__exec_command` + `roll__exec_poll` 工具：命令在后台会话执行、跨轮存活，模型轮询进度并读取退出码，适合超过单轮超时的长脚本。仅交互 REPL 与 `--server` 长驻模式注册（单条消息 / `--json` 单轮会话随进程结束，不提供该工具）；`--server` 下 `exec_command` 需 `runtime.approval.overrides` 里 `roll.exec_command: auto` 显式授权。",
-    defaultBehavior: `默认值为 \`${String(DEFAULT_CONFIG.runtime.bash.session.enabled)}\`（关闭）。需同时开启 runtime.bash.enabled；背景会话随 roll chat 进程退出而终止。`,
+      "开启后在 POSIX shell 后端注册 `roll__exec_command` + `roll__exec_poll` 工具：命令在后台会话执行、跨轮存活，模型轮询进度并读取退出码，适合超过单轮超时的长脚本。Windows 原生 session exec 暂未支持。仅交互 REPL 与 `--server` 长驻模式注册（单条消息 / `--json` 单轮会话随进程结束，不提供该工具）；`--server` 下 `exec_command` 需 `runtime.approval.overrides` 里 `roll.exec_command: auto` 显式授权。",
+    defaultBehavior: `默认值为 \`${String(DEFAULT_CONFIG.runtime.shell.session.enabled)}\`（关闭）。需同时开启 runtime.shell.enabled；背景会话随 roll chat 进程退出而终止。`,
     example:
-      "runtime:\n  bash:\n    enabled: true\n    session:\n      enabled: true\n  approval:\n    overrides:\n      roll.exec_command: auto",
+      "runtime:\n  shell:\n    enabled: true\n    session:\n      enabled: true\n  approval:\n    overrides:\n      roll.exec_command: auto",
+    setupCommand: "roll config setup shell",
   },
   {
     path: "skills.dirs",

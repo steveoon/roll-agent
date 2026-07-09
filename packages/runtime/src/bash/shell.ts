@@ -7,10 +7,6 @@ export interface ShellResolutionDeps {
 const FALLBACK_SHELLS = ["/bin/zsh", "/bin/bash", "/bin/sh"] as const;
 const ULTIMATE_FALLBACK_SHELL = "/bin/sh";
 
-export function isBashToolSupported(platform: NodeJS.Platform): boolean {
-  return platform !== "win32";
-}
-
 export function resolveUserShell(deps: ShellResolutionDeps): string {
   const configured = deps.env["SHELL"];
   if (configured !== undefined && configured.length > 0 && deps.fileExists(configured)) {

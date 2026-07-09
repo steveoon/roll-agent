@@ -24,6 +24,8 @@ export interface BuildChatSystemPromptOptions {
   readonly skills?: readonly SkillPromptSummary[];
   readonly skillToolId?: string;
   readonly bashToolId?: string;
+  readonly shellToolId?: string;
+  readonly shellHints?: readonly string[];
   readonly sessionExecToolIds?: SessionExecToolIds;
   readonly agentCount?: number;
   readonly agentOnboarding?: AgentOnboardingPromptInfo;
@@ -33,8 +35,8 @@ const MAX_SKILL_DESCRIPTION_CHARS = 240;
 
 const IDENTITY_PREFIX = "你是花卷 Roll 的会话助手，运行在 roll chat 里。";
 
-function identitySection(hasBash: boolean): string {
-  const tail = hasBash
+function identitySection(hasShell: boolean): string {
+  const tail = hasShell
     ? "你通过已注册 Agent 提供的工具（MCP）观察和操作外部世界，并有一个内建 shell 工具可以在本机执行命令。"
     : "你通过已注册 Agent 提供的工具（MCP）观察和操作外部世界；你没有独立的文件系统或 shell，工具就是你的全部执行手段。";
   return IDENTITY_PREFIX + tail;
@@ -98,25 +100,31 @@ function buildAgentOnboardingSection(info: AgentOnboardingPromptInfo): string {
   ].join("\n");
 }
 
-function buildBashSection(bashToolId: string, sessionExec: SessionExecToolIds | undefined): string {
+function buildShellSection(
+  shellToolId: string,
+  sessionExec: SessionExecToolIds | undefined,
+  shellHints: readonly string[],
+): string {
   const longRunningLines = sessionExec
     ? [
-        `- 预计跑几十秒以上的命令（构建、批处理脚本）不要用 ${bashToolId}（会被单轮超时杀掉），改用 ${sessionExec.command} 后台执行。`,
+        `- 预计跑几十秒以上的命令（构建、批处理脚本）不要用 ${shellToolId}（会被单轮超时杀掉），改用 ${sessionExec.command} 后台执行。`,
         `- ${sessionExec.command} 未结束时会返回 session_id；用 ${sessionExec.poll}（chars 留空）轮询进度直到拿到退出码，需要中断时 chars 传 "\\u0003"。`,
       ]
     : ["- 预计耗时较长的命令（如构建、脚本）要显式调大 timeout_ms。"];
   return [
     "# Shell 工具",
-    `- 需要在本机执行命令时调用 ${bashToolId}；用 workdir 参数指定工作目录，不要在 command 里用 cd。`,
-    "- 输出会被截断，优先用精确过滤的命令（如 grep/head）而不是全量 dump 大文件。",
+    `- 需要在本机执行命令时调用 ${shellToolId}；用 workdir 参数指定工作目录，不要在 command 里用 cd。`,
+    ...shellHints.map((hint) => `- ${hint}`),
+    "- 输出会被截断，优先用精确过滤或预览命令，而不是全量 dump 大文件。",
     "- 优先使用只读命令；有副作用或破坏性的命令可能需要用户确认，被拒绝时不要绕过。",
     ...longRunningLines,
   ].join("\n");
 }
 
 export function buildChatSystemPrompt(options: BuildChatSystemPromptOptions = {}): string {
+  const shellToolId = options.shellToolId ?? options.bashToolId;
   const sections = [
-    identitySection(options.bashToolId !== undefined),
+    identitySection(shellToolId !== undefined),
     GROUNDING_SECTION,
     PERSISTENCE_SECTION,
   ];
@@ -131,8 +139,10 @@ export function buildChatSystemPrompt(options: BuildChatSystemPromptOptions = {}
   if (skills.length > 0) {
     sections.push(buildSkillsSection(skills, options.skillToolId ?? SKILL_TOOL_ID));
   }
-  if (options.bashToolId !== undefined) {
-    sections.push(buildBashSection(options.bashToolId, options.sessionExecToolIds));
+  if (shellToolId !== undefined) {
+    sections.push(
+      buildShellSection(shellToolId, options.sessionExecToolIds, options.shellHints ?? []),
+    );
   }
   sections.push(OUTPUT_SECTION);
   return sections.join("\n\n");

@@ -28,7 +28,6 @@ import {
   type AgentInstallToolOutcome,
 } from "../tool-bridge/agent-install-tool.ts";
 import { buildSkillToolset } from "../tool-bridge/skill-tool.ts";
-import { existsSync } from "node:fs";
 import {
   buildBashToolset,
   type BashToolContext,
@@ -36,8 +35,8 @@ import {
 } from "../tool-bridge/bash-tool.ts";
 import { buildSessionExecToolset } from "../tool-bridge/session-exec-tool.ts";
 import { SessionManager } from "../bash/session/session-manager.ts";
-import { resolveUserShell } from "../bash/shell.ts";
 import { withCleanEnv } from "../bash/clean-env.ts";
+import type { ShellProfile } from "../bash/profile.ts";
 import type { CommandClassifier } from "../types/command-classification.ts";
 import { ToolRegistry } from "../tool-bridge/naming.ts";
 import { buildChatSystemPrompt } from "./system-prompt.ts";
@@ -97,6 +96,7 @@ export interface AgentSessionAgentInstall {
 
 export interface AgentSessionBashSession {
   readonly workdir: string;
+  readonly profile: ShellProfile;
   readonly maxSessions: number;
   readonly defaultYieldMs: number;
   readonly maxOutputTokens: number;
@@ -260,11 +260,7 @@ export class AgentSession {
     if (options.bashSession) {
       this.sessionManager = new SessionManager({
         maxSessions: options.bashSession.maxSessions,
-        shell: resolveUserShell({
-          platform: process.platform,
-          env: process.env,
-          fileExists: existsSync,
-        }),
+        profile: options.bashSession.profile,
         env: withCleanEnv(process.env),
         bufferCapacity: options.bashSession.bufferCapacity,
       });

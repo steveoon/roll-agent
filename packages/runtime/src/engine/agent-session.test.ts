@@ -18,9 +18,25 @@ import { ConfigurableToolPolicy } from "../policy/configurable-policy.ts";
 import type { PolicyDecision, ToolPolicy } from "../types/policy.ts";
 import type { SessionEvent } from "../types/events.ts";
 import { ruleBasedClassifier } from "../bash/classifier/index.ts";
+import type { ShellProfile } from "../bash/profile.ts";
 
 const STOP: LanguageModelV4FinishReason = { unified: "stop", raw: "stop" };
 const TOOL_CALLS: LanguageModelV4FinishReason = { unified: "tool-calls", raw: "tool-calls" };
+
+const posixProfile: ShellProfile = {
+  id: "posix",
+  toolName: "bash",
+  supportsSessionExec: true,
+  supportsSafeCommandClassification: true,
+  buildSpawn: (command, workdir, env) => ({
+    file: "/bin/sh",
+    args: ["-c", command],
+    options: { cwd: workdir, detached: true, stdio: ["ignore", "pipe", "pipe"], env },
+  }),
+  classify: (command, workdir) => ruleBasedClassifier.classify(command, workdir),
+  killTree: async () => {},
+  systemPromptHints: () => [],
+};
 
 function usage(inputTokens = 1, outputTokens = 1) {
   return {
@@ -149,6 +165,7 @@ function testBashSettings(workdir: string) {
     turnTimeoutMs: 600_000,
     maxCaptureBytes: 1_048_576,
     maxModelOutputChars: 16_000,
+    profile: posixProfile,
   };
 }
 
@@ -909,6 +926,7 @@ test(
         overrides: { "roll.bash": "auto" },
       }),
       bash: {
+        profile: posixProfile,
         workdir: tmpdir(),
         defaultTimeoutMs: 10_000,
         maxTimeoutMs: 600_000,
@@ -1024,11 +1042,15 @@ test("未配置 bash 时工具不存在", async () => {
   assert.ok(!events.some((event) => event.type === "tool-call"));
 });
 
-function fakeSkillLibrary(name: string, content: string): import("@roll-agent/core/skills/library").SkillLibrary {
+function fakeSkillLibrary(
+  name: string,
+  content: string,
+): import("@roll-agent/core/skills/library").SkillLibrary {
   const summary = { name, description: "测试 skill", source: "user" } as const;
   return {
     list: () => [summary],
-    load: (requested) => (requested === name ? { summary, content, referencePaths: [] } : undefined),
+    load: (requested) =>
+      requested === name ? { summary, content, referencePaths: [] } : undefined,
     loadReference: () => undefined,
   };
 }
@@ -1070,7 +1092,10 @@ test("applyAgentRefresh 后新 agent 工具与新 system prompt 从下一轮生�
 });
 
 test("applyAgentRefresh 注入 skill library 后 roll__skill 可用", async () => {
-  const model = sequencedModel([toolCallStep("roll__skill", { name: "new-skill" }), textStep("ok")]);
+  const model = sequencedModel([
+    toolCallStep("roll__skill", { name: "new-skill" }),
+    textStep("ok"),
+  ]);
   const session = new AgentSession({ id: "refresh-2", model, sources: [], maxSteps: 8 });
 
   session.applyAgentRefresh({

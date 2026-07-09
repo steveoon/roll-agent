@@ -1,7 +1,7 @@
 # Windows 兼容性评估与现状
 
 > 基于 2026-07 的全库静态审计（chat 终端层 / 进程与路径层 / 编码与协议层三路并行核查）。
-> CI 目前仅覆盖 ubuntu-latest，本文所有「需实测」项均未在真实 Windows 环境验证过。
+> CI 已新增 `windows-latest` shell smoke；终端键盘矩阵和托管 agent 生命周期仍需人工实测。
 
 ## 总体结论
 
@@ -39,6 +39,11 @@ stdio 分帧两端剥 `\r`、包管理器调用已有完整 cmd.exe 适配（`pa
   `roll agent stop` 只能杀包装进程，真正的 agent 可能残留
 - PowerShell 5.1 / cmd 里给 `roll run` 传 JSON 用 `--input-file`，不要用单引号
   `--input-json '{...}'`（cmd 不认单引号、PS 5.1 会剥引号）；PowerShell 7.3+ 单引号可用
+- `roll chat` 内建 shell 工具使用 `runtime.shell` 配置：macOS/Linux 注册 `roll__bash`，
+  Windows 原生只在检测到 PowerShell 7+ (`pwsh`) 时注册 `roll__powershell`；探测会覆盖 PATH 与
+  标准 Program Files 安装路径，未安装时可运行 `winget install Microsoft.PowerShell`。Windows 当前
+  仅支持 one-shot，命令逐条确认，session exec 与安全命令自动放行暂不生效。PowerShell wrapper
+  会把 cmdlet 错误和 native `$LASTEXITCODE` 传播为进程退出码，避免明显失败被展示为成功
 - pnpm 安装依赖遇路径过长报错时，开启系统长路径支持（`LongPathsEnabled=1`）
 
 ### 不需要做的事
@@ -57,6 +62,7 @@ stdio 分帧两端剥 `\r`、包管理器调用已有完整 cmd.exe 适配（`pa
 | Alt+. / Alt+, 调推理档 | 依赖 kitty 协议，Windows Terminal 不支持 | `/think`、`/effort` 命令 |
 | Shift+Enter 换行 | 无 kitty 时与 Enter 不可区分（会直接发送） | 用 Ctrl+J 换行 |
 | `roll agent stop` 优雅关闭 | Windows 无 SIGTERM，等于强杀（stop 时有提示） | 先 `roll browser stop` 关浏览器再停 agent |
+| `roll__exec_command` / `roll__exec_poll` | Windows 原生 session exec 尚未支持 | 使用 `roll__powershell` one-shot 并调大 `timeout_ms` |
 
 ## 编码问题的成因模型
 
@@ -122,6 +128,7 @@ Chat 模式要点：
 | 🟠 | `agents.json` 非原子直写 + 解析失败静默清空 | `registry/store.ts` | ✅ 已修复：临时文件 + rename 原子写 |
 | 🟠 | ink spinner 硬编码 braille 无降级 | `cli/chat/ink/spinner.ts` | ✅ 已修复：`is-unicode-supported` 降级 ASCII |
 | 🟠 | 文档/skill 单引号 JSON 示例在 cmd/PowerShell 5.1 失败 | roll-core skill | ✅ 已修复：补 Windows 引用规范（推荐 `--input-file`） |
+| 🟠 | `roll chat` 内建 shell 仅支持 POSIX，Windows 无原生命令执行 | runtime shell tool | ✅ 已修复：PowerShell 7+ 注册 `roll__powershell` one-shot；不启用 detached；timeout/abort 走 `taskkill /T /F`；session exec 仍暂不支持 |
 | 🟠 | Shift+Tab / Alt+. / Shift+Enter 键盘链路 | chat TUI | 🔬 需实测（终端 × Node 版本矩阵） |
 | 🟡 | `${env}` 替换大小写敏感（`Path` vs `PATH`） | `loader.ts` | 📋 待办（低优先级） |
 | 🟡 | `unlinkSync` 删被占用 PID/日志文件抛 EPERM 无兜底 | `process-manager.ts` | 📋 待办 |
@@ -139,4 +146,4 @@ LLM HTTP 与 MCP JSON 全程 UTF-8；`--json` stdout 无 ANSI 混入；npm bin s
 2. Python stdio agent 中文往返（验证 `PYTHONUTF8` 注入效果）
 3. 托管生命周期：start 黑框、日志句柄占用、stop 后资源残留
 4. TUI 渲染：三种终端下边框/emoji/spinner 与 `displayWidth` 计算宽度的偏差
-5. CI 增加 `windows-latest` job（先只跑 unit + config/SKILL 解析）
+5. 扩展 `windows-latest` job：当前已覆盖 PowerShell one-shot；下一步补终端 TUI 与托管 agent 生命周期 smoke

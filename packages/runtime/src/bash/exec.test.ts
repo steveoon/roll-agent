@@ -3,16 +3,35 @@ import assert from "node:assert/strict";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { runBashCommand, type RunBashOptions } from "./exec.ts";
+import { escalateKillGroup, killProcessGroup } from "./kill.ts";
+import type { ShellProfile } from "./profile.ts";
 
 const skip = process.platform === "win32";
 const MB = 1_048_576;
+
+const profile: ShellProfile = {
+  id: "posix",
+  toolName: "bash",
+  supportsSessionExec: true,
+  supportsSafeCommandClassification: true,
+  buildSpawn: (command, workdir, env) => ({
+    file: "/bin/sh",
+    args: ["-c", command],
+    options: { cwd: workdir, detached: true, stdio: ["ignore", "pipe", "pipe"], env },
+  }),
+  classify: () => "unknown",
+  killTree: async (pid) => {
+    escalateKillGroup(pid);
+  },
+  systemPromptHints: () => [],
+};
 
 function opts(overrides: Partial<RunBashOptions> & { command: string }): RunBashOptions {
   return {
     workdir: tmpdir(),
     timeoutMs: 15_000,
     maxCaptureBytes: MB,
-    shell: "/bin/sh",
+    profile,
     ...overrides,
   };
 }
@@ -62,6 +81,35 @@ test("AbortSignal 中止杀组并快速返回", { skip }, async () => {
   );
   assert.equal(result.timedOut, false);
   assert.ok(result.wallTimeMs < 3_000, `wallTime=${String(result.wallTimeMs)}`);
+});
+
+test("进程退出时取消 profile 的延迟补刀", { skip }, async () => {
+  let killSignalAborted = false;
+  const cancellableProfile: ShellProfile = {
+    ...profile,
+    killTree: async (pid, intent, options) => {
+      if (intent === "interrupt") {
+        killProcessGroup(pid, "SIGINT");
+        return;
+      }
+      killProcessGroup(pid, "SIGTERM");
+      await new Promise<void>((resolve) => {
+        options?.signal?.addEventListener(
+          "abort",
+          () => {
+            killSignalAborted = true;
+            resolve();
+          },
+          { once: true },
+        );
+      });
+    },
+  };
+  const result = await runBashCommand(
+    opts({ command: "sleep 30", timeoutMs: 200, profile: cancellableProfile }),
+  );
+  assert.equal(result.timedOut, true);
+  assert.equal(killSignalAborted, true);
 });
 
 test("流式 onDelta 收到 stdout 文本", { skip }, async () => {

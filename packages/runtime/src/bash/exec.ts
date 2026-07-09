@@ -5,7 +5,7 @@ import { performance } from "node:perf_hooks";
 import type { Readable } from "node:stream";
 import { OutputSink } from "./output-buffer.ts";
 import { normalizeExitCode, type BashExecResult } from "./format-result.ts";
-import { escalateKillGroup } from "./kill.ts";
+import type { ShellProfile } from "./profile.ts";
 
 const IO_DRAIN_TIMEOUT_MS = 2_000;
 
@@ -16,7 +16,7 @@ export interface RunBashOptions {
   readonly workdir: string;
   readonly timeoutMs: number;
   readonly maxCaptureBytes: number;
-  readonly shell: string;
+  readonly profile: ShellProfile;
   readonly env?: NodeJS.ProcessEnv;
   readonly abortSignal?: AbortSignal;
   readonly onDelta?: (stream: BashStreamName, delta: string) => void;
@@ -45,7 +45,7 @@ interface WiredStream {
 }
 
 export function runBashCommand(options: RunBashOptions): Promise<BashExecResult> {
-  const { command, workdir, timeoutMs, maxCaptureBytes, shell, env, abortSignal, onDelta } =
+  const { command, workdir, timeoutMs, maxCaptureBytes, profile, env, abortSignal, onDelta } =
     options;
 
   return new Promise<BashExecResult>((resolve) => {
@@ -56,12 +56,8 @@ export function runBashCommand(options: RunBashOptions): Promise<BashExecResult>
 
     let child: ChildProcess;
     try {
-      child = spawn(shell, ["-c", command], {
-        cwd: workdir,
-        detached: true,
-        stdio: ["ignore", "pipe", "pipe"],
-        ...(env ? { env } : {}),
-      });
+      const spec = profile.buildSpawn(command, workdir, env ?? process.env);
+      child = spawn(spec.file, spec.args, spec.options);
     } catch (error) {
       resolve(spawnErrorResult(errorMessage(error), timeoutMs));
       return;
@@ -73,27 +69,27 @@ export function runBashCommand(options: RunBashOptions): Promise<BashExecResult>
     let timedOut = false;
     let killed = false;
     let settled = false;
-    let graceTimer: NodeJS.Timeout | undefined;
     let drainTimer: NodeJS.Timeout | undefined;
+    let killController: AbortController | undefined;
 
     const escalateKill = (): void => {
       if (killed) {
         return;
       }
       killed = true;
-      graceTimer = escalateKillGroup(child.pid);
+      killController = new AbortController();
+      profile.killTree(child.pid, "terminate", { signal: killController.signal }).catch(() => {});
     };
 
     const onAbort = (): void => escalateKill();
 
     const cleanup = (): void => {
       clearTimeout(timeoutTimer);
-      if (graceTimer) {
-        clearTimeout(graceTimer);
-      }
       if (drainTimer) {
         clearTimeout(drainTimer);
       }
+      killController?.abort();
+      killController = undefined;
       abortSignal?.removeEventListener("abort", onAbort);
     };
 

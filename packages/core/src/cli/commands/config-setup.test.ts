@@ -5,7 +5,7 @@ import { resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { randomUUID } from "node:crypto";
 import { parse as parseYaml } from "yaml";
-import { runConfigSetup } from "./config-setup.ts";
+import { runConfigSetup, setupShell } from "./config-setup.ts";
 import { explainConfig } from "./config-explain.ts";
 import { findConfigGuidance } from "./config-guidance.ts";
 import { DEFAULT_CONFIG } from "../../config/defaults.ts";
@@ -258,12 +258,12 @@ describe("config setup", () => {
     );
   });
 
-  it("writes chat bash runtime config when enabled", async () => {
-    await runConfigSetup("bash", undefined, new FakePrompts({ confirm: [true, true, false] }));
+  it("writes chat shell runtime config when enabled", async () => {
+    await runConfigSetup("shell", undefined, new FakePrompts({ confirm: [true, true, false] }));
 
     const config = readConfig(homeDir);
     assert.deepEqual(config["runtime"], {
-      bash: {
+      shell: {
         enabled: true,
         "auto-approve-safe": true,
         session: { enabled: false },
@@ -271,11 +271,25 @@ describe("config setup", () => {
     });
   });
 
-  it("writes only the disable flag when bash tool is declined", async () => {
+  it("Windows shell setup skips POSIX-only auto approve and session prompts", async () => {
+    const prompts = new FakePrompts({ confirm: [true] });
+    await setupShell(prompts, "win32");
+
+    const config = readConfig(homeDir);
+    assert.deepEqual(config["runtime"], { shell: { enabled: true } });
+    assert.ok(!prompts.messages.some((message) => message.includes("安全只读命令")));
+    assert.ok(!prompts.messages.some((message) => message.includes("长跑命令会话")));
+    assert.match(
+      prompts.messages.join("\n"),
+      /Windows 原生 shell 当前仅支持 PowerShell 7 one-shot/u,
+    );
+  });
+
+  it("bash setup alias writes only the shell disable flag when declined", async () => {
     await runConfigSetup("bash", undefined, new FakePrompts({ confirm: [false] }));
 
     const config = readConfig(homeDir);
-    assert.deepEqual(config["runtime"], { bash: { enabled: false } });
+    assert.deepEqual(config["runtime"], { shell: { enabled: false } });
   });
 
   it("updates a discovered parent config instead of creating a nested config", async () => {

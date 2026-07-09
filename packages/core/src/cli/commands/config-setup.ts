@@ -31,7 +31,7 @@ import {
   type PromptOption,
 } from "./config-prompts.ts";
 
-export type ConfigSetupModule = "llm" | "install" | "agent" | "bash";
+export type ConfigSetupModule = "llm" | "install" | "agent" | "shell";
 
 const ENV_PLACEHOLDER_PATTERN = /\$\{[^}]+\}/u;
 
@@ -60,8 +60,8 @@ export async function runConfigSetup(
       case "agent":
         prompts.outro(await setupAgentEnv(valueArg, prompts));
         break;
-      case "bash":
-        prompts.outro(await setupBash(prompts));
+      case "shell":
+        prompts.outro(await setupShell(prompts));
         break;
     }
   } catch (err) {
@@ -84,7 +84,11 @@ async function resolveSetupModule(
         { value: "llm", label: "LLM", hint: "默认模型和 provider key" },
         { value: "install", label: "Install network", hint: "npm registry、重试和超时" },
         { value: "agent", label: "Agent env", hint: "配置某个 Agent 需要的环境变量" },
-        { value: "bash", label: "Chat bash 工具", hint: "roll chat 内建 shell 执行能力（默认关闭）" },
+        {
+          value: "shell",
+          label: "Chat shell 工具",
+          hint: "roll chat 内建本机命令执行能力（默认关闭）",
+        },
       ],
     });
   }
@@ -93,12 +97,15 @@ async function resolveSetupModule(
     moduleArg === "llm" ||
     moduleArg === "install" ||
     moduleArg === "agent" ||
-    moduleArg === "bash"
+    moduleArg === "shell"
   ) {
     return moduleArg;
   }
+  if (moduleArg === "bash") {
+    return "shell";
+  }
 
-  throw new Error(`未知 setup 模块: ${moduleArg}。可用: llm, install, agent, bash`);
+  throw new Error(`未知 setup 模块: ${moduleArg}。可用: llm, install, agent, shell`);
 }
 
 export async function setupLlm(prompts: ConfigPromptAdapter): Promise<string> {
@@ -183,15 +190,23 @@ export async function setupInstall(prompts: ConfigPromptAdapter): Promise<string
   return `已配置 install 网络参数（写入 ${context.configPath}）`;
 }
 
-export async function setupBash(prompts: ConfigPromptAdapter): Promise<string> {
+export async function setupShell(
+  prompts: ConfigPromptAdapter,
+  platform: NodeJS.Platform = process.platform,
+): Promise<string> {
   const enabled = await prompts.confirm({
-    message:
-      "启用 roll chat 内建 bash 工具（允许模型在本机执行 shell 命令，破坏性命令仍需逐条确认）？",
+    message: "启用 roll chat 内建 shell 工具（允许模型在本机执行命令，破坏性命令仍需逐条确认）？",
     initialValue: false,
   });
   let autoApproveSafe = true;
   let sessionEnabled = false;
-  if (enabled) {
+  const isWindows = platform === "win32";
+  if (enabled && isWindows) {
+    prompts.warn(
+      "Windows 原生 shell 当前仅支持 PowerShell 7 one-shot；安全命令自动放行和 session exec 暂不生效，命令仍会逐条确认。",
+    );
+  }
+  if (enabled && !isWindows) {
     autoApproveSafe = await prompts.confirm({
       message: "安全只读命令（ls/grep 等）自动放行，无需逐条确认？",
       initialValue: true,
@@ -203,13 +218,19 @@ export async function setupBash(prompts: ConfigPromptAdapter): Promise<string> {
   }
 
   const context = readConfigDocumentContext();
-  setYamlValue(context.document, ["runtime", "bash", "enabled"], enabled);
-  if (enabled) {
-    setYamlValue(context.document, ["runtime", "bash", "autoApproveSafe"], autoApproveSafe);
-    setYamlValue(context.document, ["runtime", "bash", "session", "enabled"], sessionEnabled);
+  setYamlValue(context.document, ["runtime", "shell", "enabled"], enabled);
+  if (enabled && !isWindows) {
+    setYamlValue(context.document, ["runtime", "shell", "autoApproveSafe"], autoApproveSafe);
+    setYamlValue(context.document, ["runtime", "shell", "session", "enabled"], sessionEnabled);
   }
   writeConfigDocument(context);
-  return `已${enabled ? "启用" : "禁用"} chat bash 工具（写入 ${context.configPath}）`;
+  const windowsNote =
+    enabled && isWindows ? "；Windows 当前仅启用 PowerShell one-shot，命令逐条确认" : "";
+  return `已${enabled ? "启用" : "禁用"} chat shell 工具${windowsNote}（写入 ${context.configPath}）`;
+}
+
+export async function setupBash(prompts: ConfigPromptAdapter): Promise<string> {
+  return setupShell(prompts);
 }
 
 async function setupInstallAdvanced(

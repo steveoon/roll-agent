@@ -36,7 +36,7 @@ export const DEFAULT_CONFIG: RollConfig = {
       keepRecentTurns: 4,
       keepRecentTokens: 32_000,
     },
-    bash: {
+    shell: {
       enabled: false,
       autoApproveSafe: true,
       defaultTimeoutMs: 10_000,

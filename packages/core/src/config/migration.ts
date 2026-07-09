@@ -9,6 +9,10 @@ const CONFIG_MIGRATION_ISSUE_CODES = {
   unknownRouterKeys: "unknown-router-keys",
   legacyCamelCaseAgentEnvKey: "legacy-camelcase-agent-env-key",
   legacyAgentEnvKeyConflict: "legacy-agent-env-key-conflict",
+  deprecatedRuntimeBashSection: "deprecated-runtime-bash-section",
+  invalidRuntimeBashSection: "invalid-runtime-bash-section",
+  invalidRuntimeShellSection: "invalid-runtime-shell-section",
+  runtimeShellConflict: "runtime-shell-conflict",
 } as const;
 
 type ConfigMigrationIssueCode =
@@ -39,6 +43,9 @@ const BLOCKING_MIGRATION_ISSUE_CODES = new Set<ConfigMigrationIssueCode>([
   CONFIG_MIGRATION_ISSUE_CODES.routerAskConflict,
   CONFIG_MIGRATION_ISSUE_CODES.unknownRouterKeys,
   CONFIG_MIGRATION_ISSUE_CODES.legacyAgentEnvKeyConflict,
+  CONFIG_MIGRATION_ISSUE_CODES.invalidRuntimeBashSection,
+  CONFIG_MIGRATION_ISSUE_CODES.invalidRuntimeShellSection,
+  CONFIG_MIGRATION_ISSUE_CODES.runtimeShellConflict,
 ]);
 
 export interface ConfigMigrationIssue {
@@ -72,7 +79,7 @@ interface ConfigMigrationRuleInspection {
   readonly issues: readonly ConfigMigrationIssue[];
 }
 
-export type ConfigMigrationScope = "llm" | "ask" | "agents";
+export type ConfigMigrationScope = "llm" | "ask" | "agents" | "runtime";
 
 interface ConfigMigrationRule {
   readonly id: string;
@@ -94,6 +101,21 @@ function hasOwnStringKey(
 
 function createIssue(code: ConfigMigrationIssueCode, message: string): ConfigMigrationIssue {
   return { code, message };
+}
+
+function deepEqual(a: unknown, b: unknown): boolean {
+  if (Object.is(a, b)) {
+    return true;
+  }
+  if (!isRecord(a) || !isRecord(b)) {
+    return false;
+  }
+  const aKeys = Object.keys(a).sort();
+  const bKeys = Object.keys(b).sort();
+  if (aKeys.length !== bKeys.length) {
+    return false;
+  }
+  return aKeys.every((key, index) => key === bKeys[index] && deepEqual(a[key], b[key]));
 }
 
 function findPresentKeys(
@@ -452,6 +474,104 @@ function applyLegacyAgentEnvKeys(
   };
 }
 
+function inspectRuntimeShellMigration(
+  document: Record<string, unknown>,
+): ConfigMigrationRuleInspection {
+  const runtime = document["runtime"];
+  if (!isRecord(runtime)) {
+    return { matches: false, canAutoMigrate: false, issues: [] };
+  }
+  if (!hasOwnStringKey(runtime, "bash")) {
+    return { matches: false, canAutoMigrate: false, issues: [] };
+  }
+
+  const issues: ConfigMigrationIssue[] = [
+    createIssue(
+      CONFIG_MIGRATION_ISSUE_CODES.deprecatedRuntimeBashSection,
+      "`runtime.bash` 配置段已废弃，请改用 `runtime.shell`。",
+    ),
+  ];
+  const bash = runtime["bash"];
+  if (!isRecord(bash)) {
+    issues.push(
+      createIssue(
+        CONFIG_MIGRATION_ISSUE_CODES.invalidRuntimeBashSection,
+        "`runtime.bash` 配置段不是对象，无法自动迁移，请手动修复。",
+      ),
+    );
+  }
+
+  const shell = runtime["shell"];
+  if (shell !== undefined && !isRecord(shell)) {
+    issues.push(
+      createIssue(
+        CONFIG_MIGRATION_ISSUE_CODES.invalidRuntimeShellSection,
+        "`runtime.shell` 配置段不是对象，无法自动迁移，请手动修复。",
+      ),
+    );
+  }
+
+  if (isRecord(bash) && isRecord(shell) && !deepEqual(bash, shell)) {
+    issues.push(
+      createIssue(
+        CONFIG_MIGRATION_ISSUE_CODES.runtimeShellConflict,
+        "`runtime.bash` 与 `runtime.shell` 同时存在且值冲突，请手动处理。",
+      ),
+    );
+  }
+
+  const canAutoMigrate = !issues.some((issue) => BLOCKING_MIGRATION_ISSUE_CODES.has(issue.code));
+  return { matches: true, canAutoMigrate, issues };
+}
+
+function applyRuntimeShellMigration(
+  document: Record<string, unknown>,
+): ApplyKnownConfigMigrationsResult {
+  const inspection = inspectRuntimeShellMigration(document);
+  if (!inspection.matches) {
+    return {
+      ok: true,
+      changed: false,
+      document: structuredClone(document) as Record<string, unknown>,
+      issues: [],
+      summary: [],
+    };
+  }
+  if (!inspection.canAutoMigrate) {
+    return {
+      ok: false,
+      changed: false,
+      issues: inspection.issues,
+    };
+  }
+
+  const next = structuredClone(document) as Record<string, unknown>;
+  const runtime = next["runtime"];
+  if (!isRecord(runtime)) {
+    return { ok: false, changed: false, issues: inspection.issues };
+  }
+  const bash = runtime["bash"];
+  if (!isRecord(bash)) {
+    return { ok: false, changed: false, issues: inspection.issues };
+  }
+  const summary: string[] = [];
+  if (!hasOwnStringKey(runtime, "shell")) {
+    runtime["shell"] = bash;
+    summary.push("将 `runtime.bash` 迁移为 `runtime.shell`");
+  } else {
+    summary.push("删除已废弃的 `runtime.bash`");
+  }
+  delete runtime["bash"];
+
+  return {
+    ok: true,
+    changed: true,
+    document: next,
+    issues: inspection.issues,
+    summary,
+  };
+}
+
 const CONFIG_MIGRATION_RULES: readonly ConfigMigrationRule[] = [
   {
     id: "router-to-ask",
@@ -464,6 +584,12 @@ const CONFIG_MIGRATION_RULES: readonly ConfigMigrationRule[] = [
     scopes: new Set<ConfigMigrationScope>(["agents"]),
     inspect: inspectLegacyAgentEnvKeys,
     apply: applyLegacyAgentEnvKeys,
+  },
+  {
+    id: "runtime-bash-to-shell",
+    scopes: new Set<ConfigMigrationScope>(["runtime"]),
+    inspect: inspectRuntimeShellMigration,
+    apply: applyRuntimeShellMigration,
   },
 ];
 

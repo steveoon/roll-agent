@@ -4,6 +4,8 @@ import type { ToolExecutionOptions } from "ai";
 import type { SessionEvent } from "../types/events.ts";
 import type { PolicyDecision, ToolPolicy } from "../types/policy.ts";
 import { SessionManager } from "../bash/session/session-manager.ts";
+import { killProcessGroup } from "../bash/kill.ts";
+import type { ShellProfile } from "../bash/profile.ts";
 import { ToolRegistry } from "./naming.ts";
 import type { NormalizedToolResult } from "./normalize-result.ts";
 import type { BashToolContext } from "./bash-tool.ts";
@@ -17,6 +19,23 @@ import {
 } from "./session-exec-tool.ts";
 
 const skip = process.platform === "win32";
+
+const profile: ShellProfile = {
+  id: "posix",
+  toolName: "bash",
+  supportsSessionExec: true,
+  supportsSafeCommandClassification: true,
+  buildSpawn: (command, workdir, env) => ({
+    file: "/bin/sh",
+    args: ["-c", command],
+    options: { cwd: workdir, detached: true, stdio: ["ignore", "pipe", "pipe"], env },
+  }),
+  classify: () => "unknown",
+  killTree: async (pid, intent) => {
+    killProcessGroup(pid, intent === "interrupt" ? "SIGINT" : "SIGKILL");
+  },
+  systemPromptHints: () => [],
+};
 
 const allowPolicy: ToolPolicy = { check: (): PolicyDecision => ({ action: "allow" }) };
 const denyPolicy: ToolPolicy = {
@@ -38,7 +57,7 @@ function build(ctx: BashToolContext): {
 } {
   const manager = new SessionManager({
     maxSessions: 8,
-    shell: "/bin/sh",
+    profile,
     env: process.env,
     bufferCapacity: 100_000,
   });
@@ -69,7 +88,7 @@ test("注册为 roll__exec_command 与 roll__exec_poll", () => {
   const registry = new ToolRegistry();
   const manager = new SessionManager({
     maxSessions: 1,
-    shell: "/bin/sh",
+    profile,
     env: process.env,
     bufferCapacity: 1_000,
   });
@@ -232,7 +251,7 @@ test("P1：workdir 逃出会话根目录时 exec_command 强制 unknown 走确�
   let confirmed = false;
   const manager = new SessionManager({
     maxSessions: 2,
-    shell: "/bin/sh",
+    profile,
     env: process.env,
     bufferCapacity: 10_000,
   });

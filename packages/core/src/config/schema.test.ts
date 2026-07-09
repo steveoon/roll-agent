@@ -72,7 +72,7 @@ describe("rollConfigSchema", () => {
     );
   });
 
-  it("should default runtime bash to disabled with sane limits", () => {
+  it("should default runtime shell to disabled with sane limits", () => {
     const result = rollConfigSchema.safeParse({
       llm: { defaultProvider: "x", defaultModel: "y", providers: {} },
       ask: {},
@@ -80,17 +80,17 @@ describe("rollConfigSchema", () => {
       agents: { dataDir: "/tmp" },
     });
     assert.equal(result.success, true);
-    assert.equal(result.success ? result.data.runtime.bash.enabled : undefined, false);
-    assert.equal(result.success ? result.data.runtime.bash.autoApproveSafe : undefined, true);
-    assert.equal(result.success ? result.data.runtime.bash.defaultTimeoutMs : undefined, 10_000);
-    assert.equal(result.success ? result.data.runtime.bash.maxCaptureBytes : undefined, 1_048_576);
+    assert.equal(result.success ? result.data.runtime.shell.enabled : undefined, false);
+    assert.equal(result.success ? result.data.runtime.shell.autoApproveSafe : undefined, true);
+    assert.equal(result.success ? result.data.runtime.shell.defaultTimeoutMs : undefined, 10_000);
+    assert.equal(result.success ? result.data.runtime.shell.maxCaptureBytes : undefined, 1_048_576);
   });
 
-  it("should reject runtime bash timeout above the ceiling", () => {
+  it("should reject runtime shell timeout above the ceiling", () => {
     const result = rollConfigSchema.safeParse({
       llm: { defaultProvider: "x", defaultModel: "y", providers: {} },
       ask: {},
-      runtime: { bash: { maxTimeoutMs: 900_000 } },
+      runtime: { shell: { maxTimeoutMs: 900_000 } },
       agents: { dataDir: "/tmp" },
     });
     assert.equal(result.success, false);

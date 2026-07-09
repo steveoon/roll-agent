@@ -34,12 +34,8 @@ class Gate {
 }
 
 export function spawnSession(input: SpawnSessionInput): ManagedSession {
-  const child: ChildProcess = spawn(input.shell, ["-c", input.command], {
-    cwd: input.workdir,
-    detached: true,
-    stdio: ["ignore", "pipe", "pipe"],
-    env: input.env,
-  });
+  const spec = input.profile.buildSpawn(input.command, input.workdir, input.env);
+  const child: ChildProcess = spawn(spec.file, spec.args, spec.options);
 
   const buffer = new HeadTailBuffer(input.bufferCapacity);
   const startedAt = performance.now();
@@ -48,6 +44,7 @@ export function spawnSession(input: SpawnSessionInput): ManagedSession {
 
   const session: ManagedSession = {
     id: input.id,
+    profile: input.profile,
     child,
     buffer,
     startedAt,

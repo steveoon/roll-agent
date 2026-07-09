@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { isBashToolSupported, resolveUserShell, type ShellResolutionDeps } from "./shell.ts";
+import { resolveUserShell, type ShellResolutionDeps } from "./shell.ts";
 
 function deps(overrides: Partial<ShellResolutionDeps>): ShellResolutionDeps {
   return {
@@ -10,12 +10,6 @@ function deps(overrides: Partial<ShellResolutionDeps>): ShellResolutionDeps {
     ...overrides,
   };
 }
-
-test("isBashToolSupported 在 win32 返回 false，其余平台 true", () => {
-  assert.equal(isBashToolSupported("win32"), false);
-  assert.equal(isBashToolSupported("darwin"), true);
-  assert.equal(isBashToolSupported("linux"), true);
-});
 
 test("优先返回存在的 $SHELL", () => {
   const shell = resolveUserShell(

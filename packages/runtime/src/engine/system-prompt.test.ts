@@ -49,6 +49,21 @@ test("有 bashToolId 时身份改写并注入 Shell 段", () => {
   assert.ok(!prompt.includes("roll__exec_command"));
 });
 
+test("有 shellToolId 时注入 profile-specific shell hints", () => {
+  const prompt = buildChatSystemPrompt({
+    shellToolId: "roll__powershell",
+    shellHints: [
+      "当前 shell 后端是 PowerShell 7；请使用 PowerShell 语法。",
+      "过滤和预览输出时优先使用 Select-String、Select-Object -First、Get-Content -TotalCount。",
+    ],
+  });
+  assert.ok(prompt.includes("roll__powershell"));
+  assert.ok(prompt.includes("PowerShell 7"));
+  assert.ok(prompt.includes("PowerShell 语法"));
+  assert.ok(prompt.includes("Select-String"));
+  assert.ok(!prompt.includes("grep/head"));
+});
+
 test("有 sessionExecToolIds 时改教模型用 exec_command 跑长任务", () => {
   const prompt = buildChatSystemPrompt({
     bashToolId: "roll__bash",

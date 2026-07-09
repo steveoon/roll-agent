@@ -10,7 +10,6 @@ import {
   unknownCommandClassifier,
   type CommandClassifier,
 } from "../types/command-classification.ts";
-import { killProcessGroup } from "../bash/kill.ts";
 import { isWithinWorkdirRoot } from "../bash/workdir.ts";
 import { SessionCapError, type SessionManager } from "../bash/session/session-manager.ts";
 import { pollUntilDeadline } from "../bash/session/yield-loop.ts";
@@ -231,7 +230,7 @@ export function buildSessionExecToolset(
           return { output: `会话 ${String(input.session_id)} 不存在或已结束`, isError: true };
         }
         if (input.chars === INTERRUPT) {
-          killProcessGroup(session.child.pid, "SIGINT");
+          session.profile.killTree(session.child.pid, "interrupt").catch(() => {});
         } else if (input.chars !== "") {
           return {
             output: "pipe 会话不支持交互输入（仅支持空 chars 轮询或 Ctrl-C \\u0003 中断）",

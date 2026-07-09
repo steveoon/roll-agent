@@ -1,5 +1,5 @@
 import type { BashStreamName } from "../exec.ts";
-import { escalateKillGroup } from "../kill.ts";
+import type { ShellProfile } from "../profile.ts";
 import { spawnSession } from "./session-exec.ts";
 import type { ManagedSession } from "./types.ts";
 
@@ -12,7 +12,7 @@ export class SessionCapError extends Error {
 
 export interface SessionManagerOptions {
   readonly maxSessions: number;
-  readonly shell: string;
+  readonly profile: ShellProfile;
   readonly env: NodeJS.ProcessEnv;
   readonly bufferCapacity: number;
   readonly generateId?: () => number;
@@ -46,7 +46,7 @@ export class SessionManager {
       id,
       command: request.command,
       workdir: request.workdir,
-      shell: this.options.shell,
+      profile: this.options.profile,
       env: this.options.env,
       bufferCapacity: this.options.bufferCapacity,
       ...(request.onDelta ? { onDelta: request.onDelta } : {}),
@@ -69,7 +69,7 @@ export class SessionManager {
 
   terminateAll(): void {
     for (const session of this.sessions.values()) {
-      escalateKillGroup(session.child.pid);
+      session.profile.killTree(session.child.pid, "terminate").catch(() => {});
     }
     this.sessions.clear();
   }

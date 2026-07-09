@@ -1,4 +1,3 @@
-import { existsSync } from "node:fs";
 import { resolve } from "node:path";
 import { tool, type ToolExecutionOptions, type ToolSet } from "ai";
 import { z } from "zod";
@@ -6,12 +5,11 @@ import type { SessionEvent } from "../types/events.ts";
 import type { ToolAnnotations } from "../types/policy.ts";
 import {
   CLASSIFICATION_ANNOTATIONS,
-  unknownCommandClassifier,
   type CommandClassifier,
 } from "../types/command-classification.ts";
 import { runBashCommand } from "../bash/exec.ts";
 import { formatBashResult } from "../bash/format-result.ts";
-import { resolveUserShell } from "../bash/shell.ts";
+import type { ShellProfile, ShellToolName } from "../bash/profile.ts";
 import { isWithinWorkdirRoot } from "../bash/workdir.ts";
 import { gateToolCall, type ToolBridgeContext } from "./build-tools.ts";
 import { ToolRegistry } from "./naming.ts";
@@ -20,6 +18,8 @@ import type { NormalizedToolResult } from "./normalize-result.ts";
 export const BASH_TOOL_AGENT_NAME = "roll";
 export const BASH_TOOL_NAME = "bash";
 export const BASH_TOOL_ID = `${BASH_TOOL_AGENT_NAME}__${BASH_TOOL_NAME}`;
+export const POWERSHELL_TOOL_NAME = "powershell";
+export const POWERSHELL_TOOL_ID = `${BASH_TOOL_AGENT_NAME}__${POWERSHELL_TOOL_NAME}`;
 
 const MAX_DELTA_EVENTS_PER_CALL = 256;
 const MAX_DELTA_CHARS_PER_EVENT = 4_096;
@@ -31,6 +31,7 @@ export interface SessionBashSettings {
   readonly turnTimeoutMs: number;
   readonly maxCaptureBytes: number;
   readonly maxModelOutputChars: number;
+  readonly profile: ShellProfile;
 }
 
 export interface BashToolContext extends ToolBridgeContext {
@@ -40,11 +41,10 @@ export interface BashToolContext extends ToolBridgeContext {
 export interface BashToolDeps {
   readonly classifier?: CommandClassifier;
   readonly exec?: typeof runBashCommand;
-  readonly resolveShell?: () => string;
 }
 
 const bashToolInputSchema = z.object({
-  command: z.string().min(1).describe("要执行的 shell 命令（单字符串，由用户 shell 的 -c 执行）"),
+  command: z.string().min(1).describe("要执行的 shell 命令（单字符串，由当前 shell 后端执行）"),
   workdir: z
     .string()
     .min(1)
@@ -63,13 +63,10 @@ const bashToolInputSchema = z.object({
 
 export type BashToolInput = z.infer<typeof bashToolInputSchema>;
 
-function defaultResolveShell(): string {
-  return resolveUserShell({ platform: process.platform, env: process.env, fileExists: existsSync });
-}
-
 function makeDeltaHandler(
   ctx: BashToolContext,
   toolCallId: string,
+  toolName: ShellToolName,
 ): ((stream: "stdout" | "stderr", delta: string) => void) | undefined {
   const emit = ctx.emitEvent;
   if (!emit) {
@@ -87,7 +84,7 @@ function makeDeltaHandler(
       type: "tool-output-delta",
       toolCallId,
       agentName: BASH_TOOL_AGENT_NAME,
-      toolName: BASH_TOOL_NAME,
+      toolName,
       stream,
       delta: clipped,
     });
@@ -96,15 +93,16 @@ function makeDeltaHandler(
 
 async function gateBashCall(
   ctx: BashToolContext,
+  toolName: ShellToolName,
   input: Record<string, unknown>,
   annotations: ToolAnnotations,
 ): Promise<NormalizedToolResult | undefined> {
   if (ctx.policy) {
-    return gateToolCall(ctx, BASH_TOOL_AGENT_NAME, BASH_TOOL_NAME, input, annotations);
+    return gateToolCall(ctx, BASH_TOOL_AGENT_NAME, toolName, input, annotations);
   }
   const approval = await ctx.requestApproval({
     agentName: BASH_TOOL_AGENT_NAME,
-    toolName: BASH_TOOL_NAME,
+    toolName,
     input,
     reason: "shell 命令需确认",
   });
@@ -120,15 +118,15 @@ export function buildBashToolset(
   ctx: BashToolContext,
   deps: BashToolDeps = {},
 ): ToolSet {
-  const id = registry.register(BASH_TOOL_AGENT_NAME, BASH_TOOL_NAME);
-  const classifier = deps.classifier ?? unknownCommandClassifier;
+  const toolName = settings.profile.toolName;
+  const id = registry.register(BASH_TOOL_AGENT_NAME, toolName);
+  const classifier = deps.classifier ?? settings.profile;
   const exec = deps.exec ?? runBashCommand;
-  const resolveShell = deps.resolveShell ?? defaultResolveShell;
 
   return {
     [id]: tool({
       description:
-        "在用户 shell 中执行一条命令并返回输出。命令继承 roll 进程的全部环境变量。总是用 workdir 参数设置工作目录，不要用 cd。",
+        "在当前 shell 后端中执行一条命令并返回输出。命令继承 roll 进程的全部环境变量。总是用 workdir 参数设置工作目录，不要用 cd。",
       inputSchema: bashToolInputSchema,
       execute: async (
         input: BashToolInput,
@@ -147,18 +145,18 @@ export function buildBashToolset(
         const annotations = CLASSIFICATION_ANNOTATIONS[classification];
         const approvalInput = { command: input.command, workdir, timeout_ms: timeoutMs };
 
-        const blocked = await gateBashCall(ctx, approvalInput, annotations);
+        const blocked = await gateBashCall(ctx, toolName, approvalInput, annotations);
         if (blocked) {
           return blocked;
         }
 
-        const onDelta = makeDeltaHandler(ctx, options.toolCallId);
+        const onDelta = makeDeltaHandler(ctx, options.toolCallId, toolName);
         const result = await exec({
           command: input.command,
           workdir,
           timeoutMs,
           maxCaptureBytes: settings.maxCaptureBytes,
-          shell: resolveShell(),
+          profile: settings.profile,
           env: process.env,
           ...(options.abortSignal ? { abortSignal: options.abortSignal } : {}),
           ...(onDelta ? { onDelta } : {}),

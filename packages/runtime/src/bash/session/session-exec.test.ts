@@ -5,15 +5,35 @@ import { spawnSession } from "./session-exec.ts";
 import { pollUntilDeadline } from "./yield-loop.ts";
 import { killProcessGroup } from "../kill.ts";
 import type { ManagedSession } from "./types.ts";
+import type { ShellProfile } from "../profile.ts";
 
 const skip = process.platform === "win32";
+
+function profile(file: string): ShellProfile {
+  return {
+    id: "posix",
+    toolName: "bash",
+    supportsSessionExec: true,
+    supportsSafeCommandClassification: true,
+    buildSpawn: (command, workdir, env) => ({
+      file,
+      args: ["-c", command],
+      options: { cwd: workdir, detached: true, stdio: ["ignore", "pipe", "pipe"], env },
+    }),
+    classify: () => "unknown",
+    killTree: async (pid, intent) => {
+      killProcessGroup(pid, intent === "interrupt" ? "SIGINT" : "SIGKILL");
+    },
+    systemPromptHints: () => [],
+  };
+}
 
 function make(command: string): ManagedSession {
   return spawnSession({
     id: 4_242,
     command,
     workdir: process.cwd(),
-    shell: "/bin/sh",
+    profile: profile("/bin/sh"),
     env: process.env,
     bufferCapacity: 100_000,
   });
@@ -67,7 +87,7 @@ test("spawn 失败时错误信息进 buffer，poll 返回 exited", { skip }, asy
     id: 1,
     command: "true",
     workdir: process.cwd(),
-    shell: "/nonexistent-shell-roll-test",
+    profile: profile("/nonexistent-shell-roll-test"),
     env: process.env,
     bufferCapacity: 10_000,
   });

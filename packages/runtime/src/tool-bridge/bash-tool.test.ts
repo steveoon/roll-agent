@@ -8,12 +8,15 @@ import type { SessionEvent } from "../types/events.ts";
 import type { BashExecResult } from "../bash/format-result.ts";
 import type { RunBashOptions } from "../bash/exec.ts";
 import type { CommandClassifier } from "../types/command-classification.ts";
+import { unknownCommandClassifier } from "../types/command-classification.ts";
 import { ruleBasedClassifier } from "../bash/classifier/index.ts";
+import type { ShellProfile } from "../bash/profile.ts";
 import { ToolRegistry } from "./naming.ts";
 import type { NormalizedToolResult } from "./normalize-result.ts";
 import type { ApprovalRequest } from "./build-tools.ts";
 import {
   BASH_TOOL_ID,
+  POWERSHELL_TOOL_ID,
   buildBashToolset,
   type BashToolContext,
   type BashToolInput,
@@ -25,6 +28,36 @@ type ExecuteFn = (
   options: ToolExecutionOptions<unknown>,
 ) => Promise<NormalizedToolResult>;
 
+const posixProfile: ShellProfile = {
+  id: "posix",
+  toolName: "bash",
+  supportsSessionExec: true,
+  supportsSafeCommandClassification: true,
+  buildSpawn: (command, workdir, env) => ({
+    file: "/bin/sh",
+    args: ["-c", command],
+    options: { cwd: workdir, detached: true, stdio: ["ignore", "pipe", "pipe"], env },
+  }),
+  classify: (command, workdir) => ruleBasedClassifier.classify(command, workdir),
+  killTree: async () => {},
+  systemPromptHints: () => [],
+};
+
+const powershellProfile: ShellProfile = {
+  id: "powershell",
+  toolName: "powershell",
+  supportsSessionExec: false,
+  supportsSafeCommandClassification: false,
+  buildSpawn: (command, workdir, env) => ({
+    file: "pwsh",
+    args: ["-EncodedCommand", command],
+    options: { cwd: workdir, detached: false, stdio: ["ignore", "pipe", "pipe"], env },
+  }),
+  classify: () => "unknown",
+  killTree: async () => {},
+  systemPromptHints: () => [],
+};
+
 function settings(overrides: Partial<SessionBashSettings> = {}): SessionBashSettings {
   return {
     workdir: "/tmp",
@@ -33,6 +66,7 @@ function settings(overrides: Partial<SessionBashSettings> = {}): SessionBashSett
     turnTimeoutMs: 600_000,
     maxCaptureBytes: 1_048_576,
     maxModelOutputChars: 16_000,
+    profile: posixProfile,
     ...overrides,
   };
 }
@@ -61,10 +95,10 @@ function getExecute(
   const registry = new ToolRegistry();
   const toolset = buildBashToolset(settingsArg, registry, ctx, {
     exec,
-    resolveShell: () => "/bin/sh",
-    ...(classifier ? { classifier } : {}),
+    classifier: classifier ?? unknownCommandClassifier,
   });
-  const entry = toolset[BASH_TOOL_ID];
+  const id = settingsArg.profile.toolName === "powershell" ? POWERSHELL_TOOL_ID : BASH_TOOL_ID;
+  const entry = toolset[id];
   assert.ok(entry?.execute);
   const execute = entry.execute;
   return (input, opts) => Promise.resolve(execute(input, opts) as Promise<NormalizedToolResult>);
@@ -82,6 +116,70 @@ test("注册为 roll__bash 且路由到 roll.bash", () => {
   const registry = new ToolRegistry();
   buildBashToolset(settings(), registry, { requestApproval: async () => ({ approved: true }) });
   assert.deepEqual(registry.resolve(BASH_TOOL_ID), { agentName: "roll", toolName: "bash" });
+});
+
+test("PowerShell profile 注册为 roll__powershell 且路由到 roll.powershell", () => {
+  const registry = new ToolRegistry();
+  buildBashToolset(settings({ profile: powershellProfile }), registry, {
+    requestApproval: async () => ({ approved: true }),
+  });
+  assert.deepEqual(registry.resolve(POWERSHELL_TOOL_ID), {
+    agentName: "roll",
+    toolName: "powershell",
+  });
+});
+
+test("PowerShell 审批输入保留明文命令且使用 roll.powershell key", async () => {
+  const requests: ApprovalRequest[] = [];
+  const calls: RunBashOptions[] = [];
+  const execute = getExecute(
+    settings({ profile: powershellProfile }),
+    {
+      policy: new ConfigurableToolPolicy({ defaultMode: "auto" }),
+      requestApproval: async (req) => {
+        requests.push(req);
+        return { approved: true };
+      },
+    },
+    async (o) => {
+      calls.push(o);
+      return okResult;
+    },
+  );
+
+  await execute({ command: "Write-Output 'hello'" }, options());
+
+  assert.equal(requests[0]?.agentName, "roll");
+  assert.equal(requests[0]?.toolName, "powershell");
+  assert.equal(requests[0]?.input.command, "Write-Output 'hello'");
+  assert.equal(calls[0]?.command, "Write-Output 'hello'");
+});
+
+test("显式 override roll.powershell=auto 时无需确认直接执行", async () => {
+  let confirmed = false;
+  let executed = false;
+  const execute = getExecute(
+    settings({ profile: powershellProfile }),
+    {
+      policy: new ConfigurableToolPolicy({
+        defaultMode: "guarded",
+        overrides: { "roll.powershell": "auto" },
+      }),
+      requestApproval: async () => {
+        confirmed = true;
+        return { approved: true };
+      },
+    },
+    async () => {
+      executed = true;
+      return okResult;
+    },
+  );
+
+  await execute({ command: "Write-Output 'hello'" }, options());
+
+  assert.equal(confirmed, false);
+  assert.equal(executed, true);
 });
 
 test("policy allow 时执行命令并返回格式化结果", async () => {

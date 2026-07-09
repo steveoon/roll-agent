@@ -1,11 +1,13 @@
 import type { ChildProcess } from "node:child_process";
 import type { BashStreamName } from "../exec.ts";
+import type { ShellProfile } from "../profile.ts";
 import type { HeadTailBuffer } from "./head-tail-buffer.ts";
 
 export type SessionDeltaHandler = (stream: BashStreamName, delta: string) => void;
 
 export interface ManagedSession {
   readonly id: number;
+  readonly profile: ShellProfile;
   readonly child: ChildProcess;
   readonly buffer: HeadTailBuffer;
   readonly startedAt: number;
@@ -36,7 +38,7 @@ export interface SpawnSessionInput {
   readonly id: number;
   readonly command: string;
   readonly workdir: string;
-  readonly shell: string;
+  readonly profile: ShellProfile;
   readonly env: NodeJS.ProcessEnv;
   readonly bufferCapacity: number;
   readonly onDelta?: SessionDeltaHandler;

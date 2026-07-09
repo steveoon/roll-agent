@@ -12,10 +12,26 @@ import type { LanguageModelV4StreamPart } from "@ai-sdk/provider";
 import { ThreadStore } from "../store/thread-store.ts";
 import { DefaultToolPolicy } from "../policy/default-policy.ts";
 import { ConversationEngine, type AgentBootstrapIssue } from "./conversation-engine.ts";
+import type { ShellProfile } from "../bash/profile.ts";
 
 function tempDir(): string {
   return mkdtempSync(join(tmpdir(), "roll-engine-"));
 }
+
+const powershellProfile: ShellProfile = {
+  id: "powershell",
+  toolName: "powershell",
+  supportsSessionExec: false,
+  supportsSafeCommandClassification: false,
+  buildSpawn: (command, workdir, env) => ({
+    file: "pwsh",
+    args: ["-EncodedCommand", command],
+    options: { cwd: workdir, detached: false, stdio: ["ignore", "pipe", "pipe"], env },
+  }),
+  classify: () => "unknown",
+  killTree: async () => {},
+  systemPromptHints: () => ["当前 shell 后端是 PowerShell 7。"],
+};
 
 test("ConversationEngine records runtime model override on created threads", async () => {
   const dir = tempDir();
@@ -307,7 +323,7 @@ function bashEngineConfig(dataDir: string, autoApproveSafe: boolean) {
       providers: { mock: { apiKey: "test" } },
     },
     ask: {},
-    runtime: { bash: { enabled: true, autoApproveSafe } },
+    runtime: { shell: { enabled: true, autoApproveSafe } },
     agents: { dataDir },
   });
 }
@@ -401,7 +417,7 @@ function sessionExecConfig(dataDir: string) {
       providers: { mock: { apiKey: "test" } },
     },
     ask: {},
-    runtime: { bash: { enabled: true, session: { enabled: true } } },
+    runtime: { shell: { enabled: true, session: { enabled: true } } },
     agents: { dataDir },
   });
 }
@@ -469,6 +485,62 @@ test(
     }
   },
 );
+
+test("PowerShell profile 注册 roll__powershell 且不注册 session exec", async () => {
+  const dir = tempDir();
+  try {
+    let tools = "";
+    const engine = new ConversationEngine({
+      config: sessionExecConfig(dir),
+      model: toolCapturingModel((names) => {
+        tools = names;
+      }),
+      sources: [],
+      skillLibrary: null,
+      shellProfile: powershellProfile,
+    });
+    const session = await engine.createSession();
+    const events = [];
+    for await (const event of session.send("hi")) {
+      events.push(event);
+    }
+    assert.ok(events.length > 0);
+    assert.ok(tools.includes("roll__powershell"));
+    assert.ok(!tools.includes("roll__bash"));
+    assert.ok(!tools.includes("roll__exec_command"));
+    assert.ok(!tools.includes("roll__exec_poll"));
+    session.abort();
+    await engine.dispose();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("运行期 shell profile 探测在 engine 实例内缓存", async () => {
+  const dir = tempDir();
+  try {
+    let calls = 0;
+    const engine = new ConversationEngine({
+      config: sessionExecConfig(dir),
+      model: toolCapturingModel(() => {}),
+      sources: [],
+      skillLibrary: null,
+      resolveShellProfileFn: () => {
+        calls += 1;
+        return { supported: true, profile: powershellProfile };
+      },
+    });
+    const first = await engine.createSession();
+    const second = await engine.createSession();
+    assert.ok(first.id !== second.id);
+    assert.equal(calls, 1);
+    first.abort();
+    second.abort();
+    await engine.dispose();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
 
 function installEngineConfig(dataDir: string) {
   return rollConfigSchema.parse({

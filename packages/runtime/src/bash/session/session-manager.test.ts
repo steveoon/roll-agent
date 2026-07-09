@@ -3,14 +3,33 @@ import assert from "node:assert/strict";
 import { performance } from "node:perf_hooks";
 import { SessionManager, SessionCapError } from "./session-manager.ts";
 import { pollUntilDeadline } from "./yield-loop.ts";
+import { killProcessGroup } from "../kill.ts";
+import type { ShellProfile } from "../profile.ts";
 
 const skip = process.platform === "win32";
+
+const profile: ShellProfile = {
+  id: "posix",
+  toolName: "bash",
+  supportsSessionExec: true,
+  supportsSafeCommandClassification: true,
+  buildSpawn: (command, workdir, env) => ({
+    file: "/bin/sh",
+    args: ["-c", command],
+    options: { cwd: workdir, detached: true, stdio: ["ignore", "pipe", "pipe"], env },
+  }),
+  classify: () => "unknown",
+  killTree: async (pid, intent) => {
+    killProcessGroup(pid, intent === "interrupt" ? "SIGINT" : "SIGKILL");
+  },
+  systemPromptHints: () => [],
+};
 
 function manager(maxSessions: number, ids?: number[]): SessionManager {
   let cursor = 0;
   return new SessionManager({
     maxSessions,
-    shell: "/bin/sh",
+    profile,
     env: process.env,
     bufferCapacity: 100_000,
     ...(ids ? { generateId: () => ids[cursor++ % ids.length] ?? 1 } : {}),

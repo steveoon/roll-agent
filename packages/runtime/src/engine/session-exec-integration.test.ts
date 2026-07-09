@@ -8,12 +8,31 @@ import type { LanguageModelV4FinishReason, LanguageModelV4StreamPart } from "@ai
 import { AgentSession, type AgentSessionBashSession } from "./agent-session.ts";
 import { ConfigurableToolPolicy } from "../policy/configurable-policy.ts";
 import type { SessionEvent } from "../types/events.ts";
+import { killProcessGroup } from "../bash/kill.ts";
+import type { ShellProfile } from "../bash/profile.ts";
 
 const skip = process.platform === "win32";
 const MARKER = "ROLL_EXEC_E2E_MARKER";
 
 const STOP: LanguageModelV4FinishReason = { unified: "stop", raw: "stop" };
 const TOOL_CALLS: LanguageModelV4FinishReason = { unified: "tool-calls", raw: "tool-calls" };
+
+const profile: ShellProfile = {
+  id: "posix",
+  toolName: "bash",
+  supportsSessionExec: true,
+  supportsSafeCommandClassification: true,
+  buildSpawn: (command, workdir, env) => ({
+    file: "/bin/sh",
+    args: ["-c", command],
+    options: { cwd: workdir, detached: true, stdio: ["ignore", "pipe", "pipe"], env },
+  }),
+  classify: () => "unknown",
+  killTree: async (pid, intent) => {
+    killProcessGroup(pid, intent === "interrupt" ? "SIGINT" : "SIGKILL");
+  },
+  systemPromptHints: () => [],
+};
 
 function usage() {
   return {
@@ -60,6 +79,7 @@ function textStep(text: string): LanguageModelV4StreamPart[] {
 function bashSession(): AgentSessionBashSession {
   return {
     workdir: process.cwd(),
+    profile,
     maxSessions: 4,
     defaultYieldMs: 250,
     maxOutputTokens: 1_000,
