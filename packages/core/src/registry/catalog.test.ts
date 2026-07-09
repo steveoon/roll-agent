@@ -29,10 +29,22 @@ describe("findCatalogEntry", () => {
     assert.equal(match?.versionSpec, undefined);
   });
 
+  it("skillName 命中官方条目", () => {
+    const match = findCatalogEntry(OFFICIAL_AGENT_CATALOG, "octopus-agent");
+    assert.equal(match?.entry.packageName, "@roll-agent/octopus-agent");
+    assert.equal(match?.versionSpec, undefined);
+  });
+
   it("scoped 包名带版本范围时保留版本", () => {
     const match = findCatalogEntry(OFFICIAL_AGENT_CATALOG, "@roll-agent/smart-reply-agent@^1.3.0");
     assert.equal(match?.entry.shortName, "smart-reply");
     assert.equal(match?.versionSpec, "^1.3.0");
+  });
+
+  it("skillName 带版本时保留版本", () => {
+    const match = findCatalogEntry(OFFICIAL_AGENT_CATALOG, "octopus-agent@0.1.2");
+    assert.equal(match?.entry.packageName, "@roll-agent/octopus-agent");
+    assert.equal(match?.versionSpec, "0.1.2");
   });
 
   it("非 catalog 包名不命中", () => {

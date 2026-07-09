@@ -39,7 +39,7 @@ browser:
       sessions-dir: ~/.roll-agent/browser/sessions/boss-c
       tracking-agent-id: zhipin-boss-c
 runtime:
-  bash:
+  shell:
     enabled: true
     auto-approve-safe: true
     session:
@@ -65,3 +65,6 @@ agents:
     reply-policy-tuner-agent:
       REPLY_AUTHORITY_URL: ${REPLY_AUTHORITY_URL}
       REPLY_AUTHORITY_BEARER_TOKEN: ${REPLY_AUTHORITY_BEARER_TOKEN}
+    octopus-agent:
+      SPONGE_MCP_BASE_URL: https://sponge-mcp.duliday.com
+      SPONGE_MCP_ACCESS_TOKEN: ${SPONGE_MCP_ACCESS_TOKEN}

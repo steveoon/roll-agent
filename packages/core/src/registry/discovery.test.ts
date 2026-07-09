@@ -190,6 +190,65 @@ optional:
     });
   });
 
+  it("should parse legacy mapped env declarations from roll-env-file", () => {
+    const skillMd = `---
+name: legacy-env-agent
+description: Agent with legacy env requirements
+metadata:
+  roll-env-file: references/env.yaml
+---
+`;
+    writeFileSync(resolve(tmpDir, "SKILL.md"), skillMd);
+    mkdirSync(resolve(tmpDir, "references"), { recursive: true });
+    writeFileSync(
+      resolve(tmpDir, "references/env.yaml"),
+      `env:
+  SPONGE_MCP_BASE_URL:
+    required: true
+    purpose: Sponge MCP Server address
+    example: https://sponge-mcp.example.com
+  SPONGE_MCP_ACCESS_TOKEN:
+    required: true
+    purpose: Sponge MCP Server access token
+  OCTOPUS_BINDING_SHADOW:
+    required: false
+    purpose: Keep entity binding results out of SQL generation
+    example: "false"
+  OCTOPUS_SAMPLING_MAX_TOKENS:
+    required: false
+    purpose: Max tokens for MCP sampling
+    default: "4096"
+`,
+    );
+
+    const result = discoverAgent(tmpDir);
+    assert.deepEqual(result.skill.env, {
+      required: [
+        {
+          name: "SPONGE_MCP_BASE_URL",
+          purpose: "Sponge MCP Server address",
+          example: "https://sponge-mcp.example.com",
+        },
+        {
+          name: "SPONGE_MCP_ACCESS_TOKEN",
+          purpose: "Sponge MCP Server access token",
+        },
+      ],
+      optional: [
+        {
+          name: "OCTOPUS_BINDING_SHADOW",
+          purpose: "Keep entity binding results out of SQL generation",
+          example: "false",
+        },
+        {
+          name: "OCTOPUS_SAMPLING_MAX_TOKENS",
+          purpose: "Max tokens for MCP sampling",
+          default: "4096",
+        },
+      ],
+    });
+  });
+
   it("should throw when roll-env-file is missing", () => {
     const skillMd = `---
 name: missing-env-agent

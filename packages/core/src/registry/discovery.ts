@@ -40,6 +40,17 @@ const skillEnvDeclarationsSchema = z.object({
   optional: z.array(skillEnvDeclarationSchema).optional(),
 });
 
+const legacySkillEnvDeclarationSchema = z.object({
+  required: z.boolean().optional(),
+  purpose: z.string().optional(),
+  example: z.string().optional(),
+  default: z.string().optional(),
+});
+
+const legacySkillEnvDeclarationsSchema = z.object({
+  env: z.record(legacySkillEnvDeclarationSchema).optional(),
+});
+
 interface RollAgentManifest {
   runtime: {
     ownership: string;
@@ -133,6 +144,10 @@ function normalizeSkillEnv(value: unknown, skillPath: string): AgentSkill["env"]
     return undefined;
   }
 
+  if (isJsonRecord(value) && "env" in value) {
+    return normalizeLegacySkillEnv(value, skillPath);
+  }
+
   const parsed = skillEnvDeclarationsSchema.safeParse(value);
   if (!parsed.success) {
     const issues = parsed.error.issues
@@ -152,6 +167,48 @@ function normalizeSkillEnv(value: unknown, skillPath: string): AgentSkill["env"]
   return {
     ...(env.required ? { required: env.required.map(normalizeParsedSkillEnvDeclaration) } : {}),
     ...(env.optional ? { optional: env.optional.map(normalizeParsedSkillEnvDeclaration) } : {}),
+  };
+}
+
+function normalizeLegacySkillEnv(value: unknown, skillPath: string): AgentSkill["env"] | undefined {
+  const parsed = legacySkillEnvDeclarationsSchema.safeParse(value);
+  if (!parsed.success) {
+    const issues = parsed.error.issues
+      .map((issue) => {
+        const path = issue.path.length > 0 ? issue.path.join(".") : "env";
+        return `${path}: ${issue.message}`;
+      })
+      .join("; ");
+    throw new Error(`SKILL.md has invalid "env" declaration in ${skillPath}: ${issues}`);
+  }
+
+  const env = parsed.data.env;
+  if (!env) {
+    return undefined;
+  }
+
+  const required: AgentEnvDeclaration[] = [];
+  const optional: AgentEnvDeclaration[] = [];
+  for (const [name, declaration] of Object.entries(env)) {
+    if (name.length === 0) {
+      throw new Error(`SKILL.md has invalid "env" declaration in ${skillPath}: env key is empty`);
+    }
+
+    const normalized = normalizeLegacySkillEnvDeclaration(name, declaration);
+    if (declaration.required === true) {
+      required.push(normalized);
+    } else {
+      optional.push(normalized);
+    }
+  }
+
+  if (required.length === 0 && optional.length === 0) {
+    return undefined;
+  }
+
+  return {
+    ...(required.length > 0 ? { required } : {}),
+    ...(optional.length > 0 ? { optional } : {}),
   };
 }
 
@@ -200,6 +257,18 @@ function normalizeParsedSkillEnvDeclaration(
 ): AgentEnvDeclaration {
   return {
     name: value.name,
+    ...(value.purpose ? { purpose: value.purpose } : {}),
+    ...(value.example ? { example: value.example } : {}),
+    ...(value.default ? { default: value.default } : {}),
+  };
+}
+
+function normalizeLegacySkillEnvDeclaration(
+  name: string,
+  value: z.infer<typeof legacySkillEnvDeclarationSchema>,
+): AgentEnvDeclaration {
+  return {
+    name,
     ...(value.purpose ? { purpose: value.purpose } : {}),
     ...(value.example ? { example: value.example } : {}),
     ...(value.default ? { default: value.default } : {}),

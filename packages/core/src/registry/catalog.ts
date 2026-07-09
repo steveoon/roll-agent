@@ -74,7 +74,9 @@ export function findCatalogEntry(
   const rawVersionSpec = trimmed.length > name.length ? trimmed.slice(name.length + 1) : undefined;
   const versionSpec = rawVersionSpec && rawVersionSpec.length > 0 ? rawVersionSpec : undefined;
 
-  const entry = catalog.find((item) => item.shortName === name || item.packageName === name);
+  const entry = catalog.find(
+    (item) => item.shortName === name || item.packageName === name || item.skillName === name,
+  );
   if (!entry) {
     return undefined;
   }
