@@ -1,5 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { resolve } from "node:path";
 import type { ToolExecutionOptions } from "ai";
 import type { PolicyDecision, ToolPolicy } from "../types/policy.ts";
 import { DefaultToolPolicy } from "../policy/default-policy.ts";
@@ -232,7 +233,7 @@ test("confirm 走 requestApproval 并透传 command/workdir/timeout", async () =
   assert.equal(requests.length, 1);
   assert.deepEqual(requests[0]?.input, {
     command: "make build",
-    workdir: "/work",
+    workdir: resolve("/work"),
     timeout_ms: 10_000,
   });
 });

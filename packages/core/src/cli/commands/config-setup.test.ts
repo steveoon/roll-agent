@@ -259,7 +259,7 @@ describe("config setup", () => {
   });
 
   it("writes chat shell runtime config when enabled", async () => {
-    await runConfigSetup("shell", undefined, new FakePrompts({ confirm: [true, true, false] }));
+    await setupShell(new FakePrompts({ confirm: [true, true, false] }), "linux");
 
     const config = readConfig(homeDir);
     assert.deepEqual(config["runtime"], {
