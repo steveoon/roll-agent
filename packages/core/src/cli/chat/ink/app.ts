@@ -46,6 +46,7 @@ export function ChatApp(props: ChatAppProps): ReactElement {
     state,
     submit,
     compact,
+    cancel,
     resolveConfirm,
     setDraft,
     setThinking,
@@ -69,7 +70,9 @@ export function ChatApp(props: ChatAppProps): ReactElement {
   const selectedIndex = Math.min(selected, maxIndex);
 
   useInput((input, key) => {
-    if (key.tab && key.shift) {
+    if (state.phase === "busy" && key.escape && !key.meta) {
+      cancel();
+    } else if (key.tab && key.shift) {
       toggleAutoMode();
     } else if (key.meta && input === ".") {
       setThinking(cycleThinking(state.status.thinkingLevel, 1));
@@ -219,7 +222,10 @@ export function ChatApp(props: ChatAppProps): ReactElement {
       items: staticItems,
       children: (historyItem) => {
         const spaced = historyItem.kind === "user" || historyItem.kind === "assistant";
-        const indented = historyItem.kind === "tool" || historyItem.kind === "denied";
+        const indented =
+          historyItem.kind === "tool" ||
+          historyItem.kind === "denied" ||
+          historyItem.kind === "cancelled";
         return h(
           Box,
           { key: historyItem.id, marginTop: spaced ? 1 : 0, marginLeft: indented ? 3 : 1 },

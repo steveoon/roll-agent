@@ -113,6 +113,33 @@ test("tool-result with ordinary error output keeps the red failure row", () => {
   ]);
 });
 
+test("turn-cancelled marks active tools as interrupted and records the reason", () => {
+  let state = createInitialState("qwen", undefined);
+  state = event(state, "x", {
+    type: "tool-call",
+    toolCallId: "c1",
+    agentName: "roll",
+    toolName: "powershell",
+    input: { command: "Start-Sleep -Seconds 30" },
+  });
+  state = event(state, "cancel-1", {
+    type: "turn-cancelled",
+    reason: "user",
+    message: "已取消本轮；工具已收到中断请求。",
+  });
+
+  assert.equal(state.live.activeTools.length, 0);
+  assert.deepEqual(state.history, [
+    {
+      kind: "cancelled",
+      id: "cancel-1-tool-0",
+      name: "roll.powershell",
+      args: '{"command":"Start-Sleep -Seconds 30"}',
+    },
+    { kind: "notice", id: "cancel-1", text: "已取消本轮；工具已收到中断请求。" },
+  ]);
+});
+
 test("think tag spanning a tool call carries into the next segment", () => {
   let state = createInitialState("qwen", undefined);
   state = event(state, "x", { type: "text-delta", delta: "先看页面<think>用户想登录" });

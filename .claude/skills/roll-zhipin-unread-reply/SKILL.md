@@ -17,6 +17,22 @@ description: >-
   - Windows PowerShell: `scripts/reply-unread-safely.ps1`
 - **NEVER** reuse `c.json` / `gp.json` / `sp.json` across candidates (script uses a fresh temp dir per run).
 
+## Skill root and Roll chat execution
+
+- `roll__skill` returns `SKILL_ROOT=<absolute-path>`. Treat it as authoritative; never search
+  `.roll/skills`, `.claude/skills`, editor-specific directories, or the whole drive for this skill.
+- Resolve every path below relative to `SKILL_ROOT`, and execute with `workdir=SKILL_ROOT`.
+- The batch can run for several minutes. If `roll.exec_command` / `roll__exec_command` is present in
+  the current tool catalog, use it and poll with `roll.exec_poll` / `roll__exec_poll` instead of a
+  one-shot shell call.
+- Native Windows PowerShell currently does not expose session exec. When those tools are absent,
+  never invent or search for them: explain that the batch must use one-shot `roll.powershell`, ask
+  the user to raise `runtime.turn-timeout-ms` in `roll.config.yaml` for the intended batch duration,
+  or have the user run the script outside `roll chat`.
+- Report normal completion only after a tool result explicitly returns `Exit code: 0`. A cancelled,
+  timed-out, or missing result means the current operation is interrupted or unknown, even if an
+  earlier output line looked successful.
+
 Team business rules: [references/business-rules.md](references/business-rules.md)
 
 ## Run the script (default path)
@@ -24,16 +40,16 @@ Team business rules: [references/business-rules.md](references/business-rules.md
 **macOS / Linux / WSL / Git Bash**
 
 ```bash
-.claude/skills/roll-zhipin-unread-reply/scripts/reply-unread-safely.sh --dry-run
-.claude/skills/roll-zhipin-unread-reply/scripts/reply-unread-safely.sh --limit 3
-.claude/skills/roll-zhipin-unread-reply/scripts/reply-unread-safely.sh --browser-instance boss-a --limit 3
+./scripts/reply-unread-safely.sh --dry-run
+./scripts/reply-unread-safely.sh --limit 3
+./scripts/reply-unread-safely.sh --browser-instance boss-a --limit 3
 ```
 
 **Windows (pure PowerShell — no bash)**
 
 ```powershell
-.\.claude\skills\roll-zhipin-unread-reply\scripts\reply-unread-safely.ps1 -DryRun -Limit 3
-.\.claude\skills\roll-zhipin-unread-reply\scripts\reply-unread-safely.ps1 -BrowserInstance boss-a -Limit 3
+.\scripts\reply-unread-safely.ps1 -DryRun -Limit 3
+.\scripts\reply-unread-safely.ps1 -BrowserInstance boss-a -Limit 3
 # bash-style flags also work: --dry-run --limit 3
 ```
 

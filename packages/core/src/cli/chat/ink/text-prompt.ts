@@ -1,7 +1,10 @@
-import { createElement as h, useRef } from "react";
+import { createElement as h, useLayoutEffect, useRef, useState } from "react";
 import type { ReactElement } from "react";
-import { Box, Text, useInput, useStdout } from "ink";
+import { Box, Text, useInput, usePaste, useStdout } from "ink";
 import { GLYPHS } from "../../utils/glyphs.ts";
+import { applyEditorCommand, resolveEditorCommand } from "./editor-keymap.ts";
+import { createLineBuffer, graphemeAt, insertText } from "./line-buffer.ts";
+import type { LineBufferState } from "./line-buffer.ts";
 
 export interface TextPromptProps {
   readonly value: string;
@@ -20,15 +23,41 @@ function isKeyboardProtocolResidue(input: string): boolean {
   return /^\[\?\d+u$/.test(input) || /^\x9b\?\d+u$/.test(input);
 }
 
+export function cursorPositionOf(
+  lines: readonly string[],
+  cursor: number,
+): { row: number; col: number } {
+  let remaining = cursor;
+  for (const [row, line] of lines.entries()) {
+    if (remaining <= line.length) {
+      return { row, col: remaining };
+    }
+    remaining -= line.length + 1;
+  }
+  const lastRow = lines.length - 1;
+  return { row: lastRow, col: lines[lastRow]?.length ?? 0 };
+}
+
 export function TextPrompt(props: TextPromptProps): ReactElement {
   const { value, disabled, slashActive, slashPopupActive, autoApprove, onChange, onSubmit } = props;
   const { stdout } = useStdout();
   const width = stdout.columns || 80;
-  const valueRef = useRef(value);
-  valueRef.current = value;
-  const commit = (next: string): void => {
-    valueRef.current = next;
-    onChange(next);
+  const [initialEditor] = useState(() => createLineBuffer(value));
+  const editorRef = useRef<LineBufferState>(initialEditor);
+  const [, setEditorRevision] = useState(0);
+  useLayoutEffect(() => {
+    if (editorRef.current.value !== value) {
+      editorRef.current = createLineBuffer(value);
+      setEditorRevision((revision) => revision + 1);
+    }
+  }, [value]);
+  const commit = (next: LineBufferState): void => {
+    const changed = editorRef.current.value !== next.value;
+    editorRef.current = next;
+    setEditorRevision((revision) => revision + 1);
+    if (changed) {
+      onChange(next.value);
+    }
   };
 
   useInput(
@@ -39,14 +68,10 @@ export function TextPrompt(props: TextPromptProps): ReactElement {
       if (isKeyboardProtocolResidue(input)) {
         return;
       }
-      if (key.backspace || key.delete) {
-        commit(valueRef.current.slice(0, -1));
-        return;
-      }
       const newlineKey =
         input === "\n" || (key.ctrl && input === "j") || (key.return && (key.shift || key.meta));
       if (newlineKey) {
-        commit(`${valueRef.current}\n`);
+        commit(insertText(editorRef.current, "\n"));
         return;
       }
       const hasEnter = key.return || input.includes("\r");
@@ -56,7 +81,9 @@ export function TextPrompt(props: TextPromptProps): ReactElement {
           return;
         }
         const before = input.split("\r", 1)[0] ?? "";
-        onSubmit(valueRef.current + before);
+        const submitted =
+          before.length > 0 ? insertText(editorRef.current, before) : editorRef.current;
+        onSubmit(submitted.value);
         return;
       }
       if (slashPopupActive) {
@@ -74,7 +101,12 @@ export function TextPrompt(props: TextPromptProps): ReactElement {
         }
       }
       if (slashActive && key.escape) {
-        commit("");
+        commit(createLineBuffer(""));
+        return;
+      }
+      const command = resolveEditorCommand(input, key);
+      if (command !== undefined) {
+        commit(applyEditorCommand(command, editorRef.current));
         return;
       }
       if (
@@ -89,33 +121,53 @@ export function TextPrompt(props: TextPromptProps): ReactElement {
         return;
       }
       if (input.length > 0) {
-        commit(valueRef.current + input);
+        commit(insertText(editorRef.current, input));
       }
     },
     { isActive: !disabled },
   );
 
-  const lines = value.split("\n");
+  usePaste(
+    (text) => {
+      commit(insertText(editorRef.current, text.replace(/\r\n?/g, "\n")));
+    },
+    { isActive: !disabled },
+  );
+
+  const editor = editorRef.current;
+  const lines = editor.value.split("\n");
+  const cursorPosition = cursorPositionOf(lines, editor.cursor);
   const body = h(
     Box,
     { flexDirection: "column" },
     ...lines.map((line, index) => {
-      const isLast = index === lines.length - 1;
       const prefix = index === 0 ? h(Text, { color: "green" }, "› ") : h(Text, null, "  ");
+      if (disabled) {
+        return h(Box, { key: String(index) }, prefix, h(Text, { dimColor: true }, line));
+      }
+      if (index !== cursorPosition.row) {
+        return h(Box, { key: String(index) }, prefix, h(Text, null, line));
+      }
+      const cluster = graphemeAt(line, cursorPosition.col);
+      const before = line.slice(0, cursorPosition.col);
+      const after = line.slice(cursorPosition.col + cluster.length);
       return h(
         Box,
         { key: String(index) },
         prefix,
-        h(Text, disabled ? { dimColor: true } : {}, line),
-        isLast && !disabled ? h(Text, null, "▏") : null,
+        before.length > 0 ? h(Text, null, before) : null,
+        h(Text, { inverse: true }, cluster === "" ? " " : cluster),
+        after.length > 0 ? h(Text, null, after) : null,
       );
     }),
   );
-  const hintText = slashActive
-    ? "↑↓ 选择 · Tab 补全 · Enter 执行 · Esc 取消"
-    : autoApprove
-      ? "Shift+Tab 关闭 · Enter 发送 · Shift+Enter/Ctrl+J 换行 · / 命令"
-      : "Enter 发送 · Shift+Enter/Ctrl+J 换行 · / 命令 · Shift+Tab 自动批准";
+  const hintText = disabled
+    ? "Esc 中断本轮"
+    : slashActive
+      ? "↑↓ 选择 · Tab 补全 · Enter 执行 · Esc 取消"
+      : autoApprove
+        ? "Shift+Tab 关闭 · Enter 发送 · Shift+Enter/Ctrl+J 换行 · / 命令"
+        : "Enter 发送 · Shift+Enter/Ctrl+J 换行 · / 命令 · Shift+Tab 自动批准";
   const hint = h(
     Box,
     { marginLeft: 1 },
@@ -129,7 +181,7 @@ export function TextPrompt(props: TextPromptProps): ReactElement {
   return h(
     Box,
     { flexDirection: "column", width },
-    h(Box, { borderStyle: "round", borderColor: disabled ? "gray" : "cyan", paddingX: 2 }, body),
+    h(Box, { borderStyle: "round", borderColor: disabled ? "yellow" : "cyan", paddingX: 2 }, body),
     hint,
   );
 }

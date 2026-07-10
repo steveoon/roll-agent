@@ -80,6 +80,7 @@ function buildSkillsSection(skills: readonly SkillPromptSummary[], skillToolId: 
     "# Skills",
     `以下是可用的技能说明书（skill）。当任务涉及某个 skill 的领域时，先调用 ${skillToolId} 工具（传 name）加载它的完整内容，按其中的流程和约束行事；skill 中的指导优先于你的默认做法。`,
     catalog,
+    `加载结果中的 SKILL_ROOT 是该 skill 的 canonical absolute root。正文里的 scripts/、references/ 等相对路径一律相对 SKILL_ROOT 解析；执行脚本时把 workdir 设为 SKILL_ROOT，不要再搜索 .roll、.claude、.agents 或其它目录猜路径。`,
     `skill 正文提到 references/ 下的文件时，可再次调用 ${skillToolId} 并传 reference 参数读取对应文件。`,
   ].join("\n");
 }

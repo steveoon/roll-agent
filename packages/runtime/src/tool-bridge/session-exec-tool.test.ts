@@ -9,6 +9,7 @@ import type { ShellProfile } from "../bash/profile.ts";
 import { ToolRegistry } from "./naming.ts";
 import type { NormalizedToolResult } from "./normalize-result.ts";
 import type { BashToolContext } from "./bash-tool.ts";
+import { USER_CANCELLATION_ABORT_REASON } from "../types/cancellation.ts";
 import {
   buildSessionExecToolset,
   EXEC_COMMAND_ID,
@@ -46,14 +47,27 @@ function settings(): SessionExecSettings {
   return { workdir: process.cwd(), defaultYieldMs: 300, maxOutputTokens: 10_000 };
 }
 
-function options(id: string): ToolExecutionOptions<unknown> {
-  return { toolCallId: id, messages: [], context: undefined };
+function options(id: string, abortSignal?: AbortSignal): ToolExecutionOptions<unknown> {
+  return {
+    toolCallId: id,
+    messages: [],
+    context: undefined,
+    ...(abortSignal ? { abortSignal } : {}),
+  };
 }
 
 function build(ctx: BashToolContext): {
   manager: SessionManager;
-  execCommand: (input: ExecCommandInput, id: string) => Promise<NormalizedToolResult>;
-  execPoll: (input: ExecPollInput, id: string) => Promise<NormalizedToolResult>;
+  execCommand: (
+    input: ExecCommandInput,
+    id: string,
+    abortSignal?: AbortSignal,
+  ) => Promise<NormalizedToolResult>;
+  execPoll: (
+    input: ExecPollInput,
+    id: string,
+    abortSignal?: AbortSignal,
+  ) => Promise<NormalizedToolResult>;
 } {
   const manager = new SessionManager({
     maxSessions: 8,
@@ -71,10 +85,12 @@ function build(ctx: BashToolContext): {
   const pollExecute = poll.execute;
   return {
     manager,
-    execCommand: (input, id) =>
-      Promise.resolve(cmdExecute(input, options(id)) as Promise<NormalizedToolResult>),
-    execPoll: (input, id) =>
-      Promise.resolve(pollExecute(input, options(id)) as Promise<NormalizedToolResult>),
+    execCommand: (input, id, abortSignal) =>
+      Promise.resolve(cmdExecute(input, options(id, abortSignal)) as Promise<NormalizedToolResult>),
+    execPoll: (input, id, abortSignal) =>
+      Promise.resolve(
+        pollExecute(input, options(id, abortSignal)) as Promise<NormalizedToolResult>,
+      ),
   };
 }
 
@@ -150,6 +166,52 @@ test("exec_poll Ctrl-C 中断会话", { skip }, async () => {
     );
     assert.ok(String(interrupted.output).includes("Exit code"));
     assert.equal(manager.get(id), undefined);
+  } finally {
+    manager.terminateAll();
+  }
+});
+
+test("用户取消 signal 只中断当前 exec_command 会话", { skip }, async () => {
+  const { manager, execCommand } = build({
+    policy: allowPolicy,
+    requestApproval: async () => ({ approved: true }),
+  });
+  const controller = new AbortController();
+  try {
+    const pending = execCommand(
+      { command: "sleep 30", yield_time_ms: 30_000 },
+      "c1",
+      controller.signal,
+    );
+    setTimeout(() => controller.abort(USER_CANCELLATION_ABORT_REASON), 100);
+    const result = await pending;
+    assert.equal(result.isError, true);
+    assert.doesNotMatch(String(result.output), /Exit code: 0/);
+    assert.equal(manager.size(), 0);
+  } finally {
+    manager.terminateAll();
+  }
+});
+
+test("运行时 timeout signal 不误杀已后台化的 exec_command", { skip }, async () => {
+  const { manager, execCommand } = build({
+    policy: allowPolicy,
+    requestApproval: async () => ({ approved: true }),
+  });
+  const controller = new AbortController();
+  try {
+    const pending = execCommand(
+      { command: "sleep 2", yield_time_ms: 250 },
+      "c1",
+      controller.signal,
+    );
+    setTimeout(
+      () => controller.abort(new DOMException("The operation timed out", "TimeoutError")),
+      50,
+    );
+    const result = await pending;
+    const id = sessionIdFrom(String(result.output));
+    assert.ok(manager.get(id));
   } finally {
     manager.terminateAll();
   }

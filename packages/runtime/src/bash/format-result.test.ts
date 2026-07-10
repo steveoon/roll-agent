@@ -2,6 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import type { CapturedStream } from "./output-buffer.ts";
 import {
+  BASH_TERMINATION_CAUSES,
   EXEC_TIMEOUT_EXIT_CODE,
   formatBashResult,
   normalizeExitCode,
@@ -67,6 +68,20 @@ test("非零退出码标记 isError", () => {
     maxModelOutputChars: 1000,
   });
   assert.equal(formatted.isError, true);
+});
+
+test("用户取消明确标记 aborted，不与正常 exit 0 混淆", () => {
+  const formatted = formatBashResult({
+    result: result({
+      exitCode: 130,
+      terminationCause: BASH_TERMINATION_CAUSES.abort,
+    }),
+    maxModelOutputChars: 1000,
+  });
+  assert.equal(formatted.isError, true);
+  assert.match(String(formatted.output), /命令已中断/);
+  assert.match(String(formatted.output), /不能视为正常完成/);
+  assert.match(String(formatted.output), /Exit code: 130/);
 });
 
 test("超时输出带说明行且 exit 124", () => {

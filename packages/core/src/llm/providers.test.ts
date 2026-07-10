@@ -95,6 +95,38 @@ describe("resolveLLMCall", () => {
     assert.equal(resolved.model.modelId, "gpt-5.5");
     assert.equal(resolved.providerOptions, undefined);
   });
+
+  it("applies the same thinking mapping to sampling calls as chat calls", () => {
+    const chatOff = resolveLLMCall("qwen", "qwen3.7-plus", "k", "chat", undefined, "off");
+    const samplingOff = resolveLLMCall("qwen", "qwen3.7-plus", "k", "sampling", undefined, "off");
+    assert.deepEqual(samplingOff.providerOptions, chatOff.providerOptions);
+
+    const chatHigh = resolveLLMCall(
+      "anthropic",
+      "claude-sonnet-4-6",
+      "k",
+      "chat",
+      undefined,
+      "high",
+    );
+    const samplingHigh = resolveLLMCall(
+      "anthropic",
+      "claude-sonnet-4-6",
+      "k",
+      "sampling",
+      undefined,
+      "high",
+    );
+    assert.deepEqual(samplingHigh.providerOptions, chatHigh.providerOptions);
+  });
+
+  it("applies medium thinking by default for sampling calls", () => {
+    const resolved = resolveLLMCall("qwen", "qwen3.7-plus", "test-key", "sampling");
+
+    assert.deepEqual(resolved.providerOptions, {
+      alibaba: { enableThinking: true, thinkingBudget: 8192 },
+    });
+  });
 });
 
 describe("thinkingProviderOptions", () => {

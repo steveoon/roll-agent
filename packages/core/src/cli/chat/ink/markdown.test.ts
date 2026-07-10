@@ -2,7 +2,8 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createElement as h } from "react";
 import { render } from "ink-testing-library";
-import { displayWidth, Markdown } from "./markdown.ts";
+import { Markdown } from "./markdown.ts";
+import { displayWidth } from "./display-width.ts";
 
 test("Markdown renders headings/bold/code/list/quote without literal syntax", () => {
   const { lastFrame, unmount } = render(
@@ -64,13 +65,6 @@ test("Markdown table aligns CJK/codespan/emphasis cells by display width", () =>
   });
   assert.equal(new Set(offsets).size, 1, `column offsets diverge: ${offsets.join(",")}`);
   unmount();
-});
-
-test("displayWidth treats CJK as 2 and middle dot as 1", () => {
-  assert.equal(displayWidth("abc"), 3);
-  assert.equal(displayWidth("中文"), 4);
-  assert.equal(displayWidth("·"), 1);
-  assert.equal(displayWidth("中·文"), 5);
 });
 
 test("Markdown falls back to plain text on weird input", () => {

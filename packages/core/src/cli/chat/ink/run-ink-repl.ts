@@ -10,7 +10,7 @@ import type { HistoryItem } from "./state.ts";
 import { log } from "../../utils/output.ts";
 
 export const INK_HINTS =
-  "/exit 退出 · / 命令 · Shift+Enter/Ctrl+J 换行 · Alt+./Alt+, 调推理 · Shift+Tab 自动批准";
+  "/exit 退出 · Esc 中断 · / 命令 · Shift+Enter/Ctrl+J 换行 · Alt+./Alt+, 调推理 · Shift+Tab 自动批准";
 
 export interface InkReplStore {
   updateTitle(threadId: string, title: string): void;

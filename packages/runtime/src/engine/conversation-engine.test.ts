@@ -164,6 +164,68 @@ test("ConversationEngine ensures core-managed agents before connecting", async (
   await engine.dispose();
 });
 
+test("ConversationEngine threads its providerOptions into sub-agent sampling connect calls", async () => {
+  const config = rollConfigSchema.parse({
+    llm: {
+      defaultProvider: "mock",
+      defaultModel: "default-model",
+      providers: { mock: { apiKey: "test" } },
+    },
+    ask: {},
+    agents: { dataDir: "/tmp/roll-engine-test" },
+  });
+  const agent: RegisteredAgent = {
+    skill: { name: "sampling-agent", description: "sampling", metadata: {} },
+    transport: { type: "stdio", command: "node", args: ["dist/index.js"] },
+    runtime: { ownership: "on-demand" },
+    installPath: "/tmp/sampling-agent",
+    registeredAt: "2026-06-17T00:00:00.000Z",
+    status: "idle",
+  };
+  const connectOptionsCalls: Array<{
+    readonly samplingModel?: unknown;
+    readonly samplingProviderOptions?: unknown;
+  }> = [];
+  const updatedProviderOptions: unknown[] = [];
+  const clientManager = {
+    connect: async (
+      _agentName: string,
+      _transport: unknown,
+      _cwd: string,
+      options: { readonly samplingModel?: unknown; readonly samplingProviderOptions?: unknown },
+    ) => {
+      connectOptionsCalls.push(options);
+      return { listTools: async () => ({ tools: [] }) };
+    },
+    setSamplingProviderOptions: (providerOptions: unknown) => {
+      updatedProviderOptions.push(providerOptions);
+    },
+    disconnectAll: async () => {},
+  } as unknown as McpClientManager;
+  const providerOptions = { anthropic: { thinking: { type: "adaptive" }, effort: "high" } };
+  const engine = new ConversationEngine({
+    config,
+    model: new MockLanguageModelV4({}),
+    agents: [agent],
+    skillLibrary: null,
+    clientManager,
+    providerOptions,
+  });
+
+  const session = await engine.createSession();
+
+  assert.equal(connectOptionsCalls.length, 1);
+  assert.ok(connectOptionsCalls[0]?.samplingModel);
+  assert.deepEqual(connectOptionsCalls[0]?.samplingProviderOptions, providerOptions);
+  const nextProviderOptions = { anthropic: { thinking: { type: "adaptive" }, effort: "low" } };
+  session.setProviderOptions(nextProviderOptions);
+  assert.deepEqual(updatedProviderOptions, [nextProviderOptions]);
+
+  await engine.prepareAgentRefresh(agent);
+  assert.deepEqual(connectOptionsCalls[1]?.samplingProviderOptions, nextProviderOptions);
+  await engine.dispose();
+});
+
 test("ConversationEngine 将 skillLibrary 目录注入 system prompt 并注册 skill 工具", async () => {
   const config = rollConfigSchema.parse({
     llm: {

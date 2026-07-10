@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { simulateReadableStream } from "ai";
+import { simulateReadableStream, type ModelMessage } from "ai";
 import { MockLanguageModelV4 } from "ai/test";
 import type {
   LanguageModelV4CallOptions,
@@ -261,6 +261,7 @@ test("AgentSession 透出 cached 与 reasoning token", async () => {
 
 test("setProviderOptions only affects the next turn's streamText", async () => {
   const seen: Array<unknown> = [];
+  const changes: Array<unknown> = [];
   const model = new MockLanguageModelV4({
     doStream: async (options: LanguageModelV4CallOptions) => {
       seen.push(options.providerOptions);
@@ -273,6 +274,7 @@ test("setProviderOptions only affects the next turn's streamText", async () => {
     sources: [],
     maxSteps: 2,
     providerOptions: { alibaba: { enableThinking: false } },
+    onProviderOptionsChange: (providerOptions) => changes.push(providerOptions),
   });
   await collect(session.send("a"));
   session.setProviderOptions({ alibaba: { enableThinking: true, thinkingBudget: 8192 } });
@@ -280,6 +282,7 @@ test("setProviderOptions only affects the next turn's streamText", async () => {
 
   assert.deepEqual(seen[0], { alibaba: { enableThinking: false } });
   assert.deepEqual(seen[1], { alibaba: { enableThinking: true, thinkingBudget: 8192 } });
+  assert.deepEqual(changes, [{ alibaba: { enableThinking: true, thinkingBudget: 8192 } }]);
 });
 
 test("AgentSession 达到 maxSteps 上限且仍在调工具时标记 stoppedAtStepLimit", async () => {
@@ -472,7 +475,7 @@ test("AgentSession policy deny 直接拒绝并终止当前 turn", async () => {
   assert.equal(session.getMessages().at(-1)?.content, "策略拒绝执行: 禁止");
 });
 
-test("AgentSession abort 中途确认不悬挂且回滚当前 turn", async () => {
+test("AgentSession cancel 中途确认不悬挂且持久化取消标记", async () => {
   const model = sequencedModel([
     toolCallStep("msg-agent__send_message", { q: "hi" }),
     textStep("done"),
@@ -489,17 +492,120 @@ test("AgentSession abort 中途确认不悬挂且回滚当前 turn", async () =>
   for await (const event of session.send("send hi")) {
     events.push(event);
     if (event.type === "confirmation-required") {
-      session.abort();
+      session.cancel();
     }
   }
 
   assert.ok(events.some((event) => event.type === "confirmation-required"));
-  assert.ok(events.some((event) => event.type === "error"));
+  const cancelled = events.find((event) => event.type === "turn-cancelled");
+  assert.ok(cancelled && cancelled.type === "turn-cancelled");
+  assert.equal(cancelled.reason, "user");
+  assert.equal(
+    events.some((event) => event.type === "error"),
+    false,
+  );
   assert.equal(
     events.some((event) => event.type === "message-finish"),
     false,
   );
-  assert.equal(session.getMessages().length, 0);
+  assert.equal(session.getMessages().length, 2);
+  assert.match(String(session.getMessages().at(-1)?.content), /已取消本轮/);
+});
+
+test("AgentSession cancel 保留已完成工具步骤，丢弃未完成的后续输出", async () => {
+  let call = 0;
+  const model = new MockLanguageModelV4({
+    doStream: async () => {
+      call += 1;
+      if (call === 1) {
+        return streamChunks(toolCallStep("echo-agent__echo", { q: "x" }));
+      }
+      return {
+        stream: simulateReadableStream<LanguageModelV4StreamPart>({
+          chunks: textStep("不应持久化"),
+          initialDelayInMs: 500,
+          chunkDelayInMs: null,
+        }),
+      };
+    },
+  });
+  const persisted: ModelMessage[][] = [];
+  const session = new AgentSession({
+    id: "s6-completed-step",
+    model,
+    sources: [source("echo-agent", "echo")],
+    maxSteps: 8,
+    onPersist: (messages) => persisted.push([...messages]),
+  });
+
+  const events: SessionEvent[] = [];
+  for await (const event of session.send("run echo")) {
+    events.push(event);
+    if (event.type === "step-finish" && event.finishReason === "tool-calls") {
+      session.cancel();
+    }
+  }
+
+  const messages = JSON.stringify(session.getMessages());
+  assert.match(messages, /result-ok/);
+  assert.match(messages, /已取消本轮/);
+  assert.doesNotMatch(messages, /不应持久化/);
+  assert.equal(persisted.length, 1);
+  assert.equal(events.filter((event) => event.type === "turn-cancelled").length, 1);
+});
+
+test("AgentSession turnTimeout 显式上报 timeout，不再退化为 aborted", async () => {
+  const model = new MockLanguageModelV4({
+    doStream: async () => ({
+      stream: simulateReadableStream<LanguageModelV4StreamPart>({
+        chunks: textStep("too late"),
+        initialDelayInMs: 200,
+        chunkDelayInMs: null,
+      }),
+    }),
+  });
+  const session = new AgentSession({
+    id: "s6-timeout",
+    model,
+    sources: [],
+    maxSteps: 2,
+    turnTimeoutMs: 30,
+  });
+
+  const events = await collect(session.send("slow"));
+  const cancelled = events.find((event) => event.type === "turn-cancelled");
+  assert.ok(cancelled && cancelled.type === "turn-cancelled");
+  assert.equal(cancelled.reason, "timeout");
+  assert.match(cancelled.message, /30ms/);
+  assert.equal(
+    events.some((event) => event.type === "error"),
+    false,
+  );
+  assert.match(String(session.getMessages().at(-1)?.content), /运行超时/);
+});
+
+test("provider 网络超时保持 error，不冒充 turnTimeout", async () => {
+  const model = new MockLanguageModelV4({
+    doStream: async () => {
+      throw new Error("provider request timed out");
+    },
+  });
+  const session = new AgentSession({
+    id: "s6-provider-timeout",
+    model,
+    sources: [],
+    maxSteps: 2,
+    turnTimeoutMs: 5_000,
+  });
+
+  const events = await collect(session.send("provider timeout"));
+  assert.equal(
+    events.some((event) => event.type === "turn-cancelled"),
+    false,
+  );
+  const error = events.find((event) => event.type === "error");
+  assert.ok(error && error.type === "error");
+  assert.match(error.message, /provider request timed out/);
 });
 
 test("AgentSession 超阈值自动压缩(reactive,truncate)并回调 onReplace", async () => {

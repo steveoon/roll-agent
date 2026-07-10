@@ -38,6 +38,14 @@ import { SessionManager } from "../bash/session/session-manager.ts";
 import { withCleanEnv } from "../bash/clean-env.ts";
 import type { ShellProfile } from "../bash/profile.ts";
 import type { CommandClassifier } from "../types/command-classification.ts";
+import {
+  RUNTIME_CANCELLATION_ABORT_REASON,
+  SESSION_CANCELLATION_REASONS,
+  TURN_TIMEOUT_ABORT_REASON,
+  USER_CANCELLATION_ABORT_REASON,
+  isTurnTimeoutAbortReason,
+  type SessionCancellationReason,
+} from "../types/cancellation.ts";
 import { ToolRegistry } from "../tool-bridge/naming.ts";
 import { buildChatSystemPrompt } from "./system-prompt.ts";
 import { readIsError } from "../tool-bridge/normalize-result.ts";
@@ -66,6 +74,8 @@ export interface AgentSessionOptions {
   readonly compaction?: SessionCompactionSettings;
   readonly turnTimeoutMs?: number;
   readonly providerOptions?: SharedV4ProviderOptions;
+  /** `setProviderOptions()` 生效后触发；ConversationEngine 用它同步子 Agent Sampling。 */
+  readonly onProviderOptionsChange?: (providerOptions: SharedV4ProviderOptions | undefined) => void;
   readonly debugEvents?: boolean;
   readonly systemPrompt?: string;
   readonly skillLibrary?: SkillLibrary;
@@ -108,6 +118,9 @@ export type SessionSkillSummary = SkillSummary;
 interface ActiveTurn {
   readonly abortController: AbortController;
   aborted: boolean;
+  cancellationEventEmitted: boolean;
+  cancellationPersisted: boolean;
+  cancellationReason?: SessionCancellationReason;
 }
 
 function errorMessage(error: unknown): string {
@@ -184,6 +197,18 @@ function isPotentialInputEcho(candidate: string, input: string): boolean {
   );
 }
 
+function resolveCancellationReason(
+  current: SessionCancellationReason | undefined,
+  abortReason: unknown,
+): SessionCancellationReason {
+  if (current !== undefined) {
+    return current;
+  }
+  return isTurnTimeoutAbortReason(abortReason)
+    ? SESSION_CANCELLATION_REASONS.timeout
+    : SESSION_CANCELLATION_REASONS.runtime;
+}
+
 function stripReasoningMessages(messages: readonly ModelMessage[]): ModelMessage[] {
   return messages.flatMap((message) => {
     if (message.role !== "assistant" || !Array.isArray(message.content)) {
@@ -212,6 +237,9 @@ export class AgentSession {
   private readonly compaction: SessionCompactionSettings | undefined;
   private readonly turnTimeoutMs: number | undefined;
   private providerOptions: SharedV4ProviderOptions | undefined;
+  private readonly onProviderOptionsChange:
+    | ((providerOptions: SharedV4ProviderOptions | undefined) => void)
+    | undefined;
   private readonly debugEvents: boolean;
   private readonly policy: ToolPolicy | undefined;
   private systemPrompt: string;
@@ -240,6 +268,7 @@ export class AgentSession {
     this.compaction = options.compaction;
     this.turnTimeoutMs = options.turnTimeoutMs;
     this.providerOptions = options.providerOptions;
+    this.onProviderOptionsChange = options.onProviderOptionsChange;
     this.debugEvents = options.debugEvents ?? false;
     this.policy = options.policy;
     this.systemPrompt = options.systemPrompt ?? buildChatSystemPrompt();
@@ -359,7 +388,12 @@ export class AgentSession {
     const queue = new AsyncEventQueue<SessionEvent>();
     this.emit = (event) => queue.push(event);
     const abortController = new AbortController();
-    const activeTurn: ActiveTurn = { abortController, aborted: false };
+    const activeTurn: ActiveTurn = {
+      abortController,
+      aborted: false,
+      cancellationEventEmitted: false,
+      cancellationPersisted: false,
+    };
     this.activeTurn = activeTurn;
 
     this.runTurn(queue, activeTurn, input).catch((error: unknown) => {
@@ -389,7 +423,12 @@ export class AgentSession {
     const queue = new AsyncEventQueue<SessionEvent>();
     this.emit = (event) => queue.push(event);
     const abortController = new AbortController();
-    const activeTurn: ActiveTurn = { abortController, aborted: false };
+    const activeTurn: ActiveTurn = {
+      abortController,
+      aborted: false,
+      cancellationEventEmitted: false,
+      cancellationPersisted: false,
+    };
     this.activeTurn = activeTurn;
 
     this.runCompactionTurn(queue, activeTurn, reason).catch((error: unknown) => {
@@ -418,6 +457,7 @@ export class AgentSession {
   ): Promise<void> {
     const turnStartedAt = Date.now();
     let turnStart: number | undefined;
+    let turnTimeout: ReturnType<typeof setTimeout> | undefined;
     try {
       this.debug(queue, "turn", "start", turnStartedAt, {
         messages: this.messages.length,
@@ -439,7 +479,9 @@ export class AgentSession {
         }
       }
       if (activeTurn.aborted || activeTurn.abortController.signal.aborted) {
-        queue.push({ type: "error", stage: "execute", message: "aborted" });
+        turnStart = this.messages.length;
+        this.messages.push({ role: "user", content: input });
+        this.persistCancelledTurn(queue, activeTurn, turnStart, [], turnStartedAt);
         return;
       }
 
@@ -451,6 +493,18 @@ export class AgentSession {
         tools: Object.keys(this.tools).length,
         ...(this.turnTimeoutMs !== undefined ? { timeoutMs: this.turnTimeoutMs } : {}),
       });
+      if (this.turnTimeoutMs !== undefined) {
+        turnTimeout = setTimeout(() => {
+          if (activeTurn.abortController.signal.aborted) {
+            return;
+          }
+          activeTurn.aborted = true;
+          activeTurn.cancellationReason = SESSION_CANCELLATION_REASONS.timeout;
+          this.gate.abortAll("本轮运行超时");
+          activeTurn.abortController.abort(TURN_TIMEOUT_ABORT_REASON);
+        }, this.turnTimeoutMs);
+      }
+      let abortedResponseMessages: ModelMessage[] = [];
       const result = streamText({
         model: this.model,
         system: this.systemPrompt,
@@ -459,7 +513,9 @@ export class AgentSession {
         stopWhen: stepCountIs(this.maxSteps),
         abortSignal: activeTurn.abortController.signal,
         ...(this.providerOptions ? { providerOptions: this.providerOptions } : {}),
-        ...(this.turnTimeoutMs !== undefined ? { timeout: { totalMs: this.turnTimeoutMs } } : {}),
+        onAbort: ({ steps }) => {
+          abortedResponseMessages = steps.flatMap((step) => step.response.messages);
+        },
       });
       this.debug(queue, "model", "streamText returned", turnStartedAt);
 
@@ -580,6 +636,14 @@ export class AgentSession {
               totalUsage = toSessionUsage(part.totalUsage);
               break;
             case "error":
+              if (this.isTurnAborted(activeTurn) || isTurnTimeoutAbortReason(part.error)) {
+                activeTurn.aborted = true;
+                activeTurn.cancellationReason = resolveCancellationReason(
+                  activeTurn.cancellationReason,
+                  part.error,
+                );
+                break;
+              }
               if (isContextWindowError(part.error)) {
                 this.needsCompaction = true;
               }
@@ -588,6 +652,10 @@ export class AgentSession {
               break;
             case "abort":
               activeTurn.aborted = true;
+              activeTurn.cancellationReason = resolveCancellationReason(
+                activeTurn.cancellationReason,
+                part.reason,
+              );
               break;
             default:
               break;
@@ -612,8 +680,17 @@ export class AgentSession {
       }
 
       if (activeTurn.aborted || activeTurn.abortController.signal.aborted) {
-        this.messages.splice(turnStart);
-        queue.push({ type: "error", stage: "execute", message: "aborted" });
+        activeTurn.cancellationReason = resolveCancellationReason(
+          activeTurn.cancellationReason,
+          activeTurn.abortController.signal.reason,
+        );
+        this.persistCancelledTurn(
+          queue,
+          activeTurn,
+          turnStart,
+          abortedResponseMessages,
+          turnStartedAt,
+        );
         return;
       }
 
@@ -660,6 +737,21 @@ export class AgentSession {
         responseMessages = response.messages;
       } catch (error) {
         this.clearDebugTimer(responseTimer);
+        if (this.isTurnAborted(activeTurn) || isTurnTimeoutAbortReason(error)) {
+          activeTurn.aborted = true;
+          activeTurn.cancellationReason = resolveCancellationReason(
+            activeTurn.cancellationReason,
+            error,
+          );
+          this.persistCancelledTurn(
+            queue,
+            activeTurn,
+            turnStart,
+            abortedResponseMessages,
+            turnStartedAt,
+          );
+          return;
+        }
         if (isContextWindowError(error)) {
           this.needsCompaction = true;
         }
@@ -704,6 +796,19 @@ export class AgentSession {
         ...(stoppedAtStepLimit ? { stoppedAtStepLimit: true } : {}),
       });
     } catch (error) {
+      if (this.isTurnAborted(activeTurn) || isTurnTimeoutAbortReason(error)) {
+        activeTurn.aborted = true;
+        activeTurn.cancellationReason = resolveCancellationReason(
+          activeTurn.cancellationReason,
+          activeTurn.abortController.signal.reason ?? error,
+        );
+        if (turnStart !== undefined) {
+          this.persistCancelledTurn(queue, activeTurn, turnStart, [], turnStartedAt);
+        } else {
+          this.emitCancellation(queue, activeTurn);
+        }
+        return;
+      }
       if (turnStart !== undefined) {
         this.messages.splice(turnStart);
       }
@@ -716,6 +821,9 @@ export class AgentSession {
         await this.recoverFromContextError(queue, activeTurn);
       }
     } finally {
+      if (turnTimeout !== undefined) {
+        clearTimeout(turnTimeout);
+      }
       if (this.activeTurn === activeTurn) {
         this.activeTurn = undefined;
       }
@@ -771,6 +879,7 @@ export class AgentSession {
 
   setProviderOptions(providerOptions: SharedV4ProviderOptions | undefined): void {
     this.providerOptions = providerOptions;
+    this.onProviderOptionsChange?.(providerOptions);
   }
 
   private shouldAutoCompact(): boolean {
@@ -816,7 +925,9 @@ export class AgentSession {
     });
     queue.push({ type: "compaction-start", reason });
     if (this.isTurnAborted(activeTurn)) {
-      queue.push({ type: "error", stage: "plan", message: "aborted" });
+      if (activeTurn !== undefined) {
+        this.emitCancellation(queue, activeTurn);
+      }
       return;
     }
     if (!settings) {
@@ -845,7 +956,9 @@ export class AgentSession {
       });
     } catch (error) {
       if (this.isTurnAborted(activeTurn)) {
-        queue.push({ type: "error", stage: "plan", message: "aborted" });
+        if (activeTurn !== undefined) {
+          this.emitCancellation(queue, activeTurn);
+        }
         return;
       }
       if (strategy !== "summarize") {
@@ -866,7 +979,9 @@ export class AgentSession {
     }
 
     if (this.isTurnAborted(activeTurn)) {
-      queue.push({ type: "error", stage: "plan", message: "aborted" });
+      if (activeTurn !== undefined) {
+        this.emitCancellation(queue, activeTurn);
+      }
       return;
     }
 
@@ -915,12 +1030,70 @@ export class AgentSession {
     return activeTurn?.aborted === true || activeTurn?.abortController.signal.aborted === true;
   }
 
+  private cancellationMessage(activeTurn: ActiveTurn): string {
+    const reason = activeTurn.cancellationReason ?? SESSION_CANCELLATION_REASONS.runtime;
+    switch (reason) {
+      case SESSION_CANCELLATION_REASONS.user:
+        return "已取消本轮；正在运行的模型或工具已收到中断请求，已发生的外部副作用不会自动回滚。";
+      case SESSION_CANCELLATION_REASONS.timeout:
+        return `本轮因运行超时${this.turnTimeoutMs !== undefined ? `（${String(this.turnTimeoutMs)}ms）` : ""}而中断；未返回成功 tool result 或 Exit code: 0 的操作不能视为正常完成。`;
+      case SESSION_CANCELLATION_REASONS.runtime:
+        return "本轮被运行时中断；未返回成功 tool result 或 Exit code: 0 的操作状态未知。";
+    }
+  }
+
+  private emitCancellation(queue: AsyncEventQueue<SessionEvent>, activeTurn: ActiveTurn): void {
+    if (activeTurn.cancellationEventEmitted) {
+      return;
+    }
+    activeTurn.cancellationReason ??= SESSION_CANCELLATION_REASONS.runtime;
+    activeTurn.cancellationEventEmitted = true;
+    queue.push({
+      type: "turn-cancelled",
+      reason: activeTurn.cancellationReason,
+      message: this.cancellationMessage(activeTurn),
+    });
+  }
+
+  private persistCancelledTurn(
+    queue: AsyncEventQueue<SessionEvent>,
+    activeTurn: ActiveTurn,
+    turnStart: number,
+    completedResponseMessages: readonly ModelMessage[],
+    turnStartedAt: number,
+  ): void {
+    if (!activeTurn.cancellationPersisted) {
+      this.messages.splice(turnStart + 1);
+      this.messages.push(...stripReasoningMessages(completedResponseMessages));
+      this.messages.push({ role: "assistant", content: this.cancellationMessage(activeTurn) });
+      activeTurn.cancellationPersisted = true;
+      this.debug(queue, "persist", "persisting cancelled turn", turnStartedAt, {
+        appendedMessages: this.messages.length - turnStart,
+      });
+      this.onPersist?.(this.messages.slice(turnStart));
+    }
+    this.emitCancellation(queue, activeTurn);
+  }
+
+  cancel(): boolean {
+    if (!this.activeTurn) {
+      return false;
+    }
+    this.activeTurn.aborted = true;
+    this.activeTurn.cancellationReason = SESSION_CANCELLATION_REASONS.user;
+    this.gate.abortAll("用户取消本轮");
+    this.sessionManager?.interruptAll();
+    this.activeTurn.abortController.abort(USER_CANCELLATION_ABORT_REASON);
+    return true;
+  }
+
   abort(): void {
     if (this.activeTurn) {
       this.activeTurn.aborted = true;
+      this.activeTurn.cancellationReason ??= SESSION_CANCELLATION_REASONS.runtime;
+      this.gate.abortAll();
+      this.activeTurn.abortController.abort(RUNTIME_CANCELLATION_ABORT_REASON);
     }
-    this.gate.abortAll();
-    this.activeTurn?.abortController.abort();
     this.sessionManager?.terminateAll();
   }
 

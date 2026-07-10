@@ -1,3 +1,5 @@
+import type { SessionCancellationReason } from "./cancellation.ts";
+
 export interface SessionTokenUsage {
   readonly inputTokens?: number;
   readonly outputTokens?: number;
@@ -78,6 +80,11 @@ export type SessionEvent =
       readonly kept: number;
       readonly truncatedTools?: number;
       readonly beforeInputTokens?: number;
+    }
+  | {
+      readonly type: "turn-cancelled";
+      readonly reason: SessionCancellationReason;
+      readonly message: string;
     }
   | { readonly type: "error"; readonly stage: SessionEventStage; readonly message: string };
 

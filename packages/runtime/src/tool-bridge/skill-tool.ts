@@ -30,20 +30,39 @@ function clip(content: string): string {
   return `${content.slice(0, MAX_SKILL_CONTENT_CHARS)}\n\n[内容过长已截断，共 ${String(content.length)} 字符]`;
 }
 
+function withSkillLocation(skillRoot: string | undefined, content: string): string {
+  if (skillRoot === undefined) {
+    return content;
+  }
+  return [
+    `SKILL_ROOT=${skillRoot}`,
+    "这是该 skill 的 canonical absolute root。所有 scripts/、references/ 和其它相对路径必须相对 SKILL_ROOT 解析；执行脚本时将 workdir 设为 SKILL_ROOT，不要搜索其它 skill 目录。",
+    "",
+    content,
+  ].join("\n");
+}
+
+function skillNotFoundResult(library: SkillLibrary, name: string): NormalizedToolResult {
+  const available = library
+    .list()
+    .map((skill) => skill.name)
+    .join(", ");
+  return { output: `skill "${name}" 不存在。可用 skill: ${available}`, isError: true };
+}
+
 function loadSkill(library: SkillLibrary, name: string): NormalizedToolResult {
   const loaded = library.load(name);
   if (!loaded) {
-    const available = library
-      .list()
-      .map((skill) => skill.name)
-      .join(", ");
-    return { output: `skill "${name}" 不存在。可用 skill: ${available}`, isError: true };
+    return skillNotFoundResult(library, name);
   }
   const referencesSection =
     loaded.referencePaths.length > 0
       ? `\n\n可用 references（传 reference 参数加载）:\n${loaded.referencePaths.map((path) => `- ${path}`).join("\n")}`
       : "";
-  return { output: `${clip(loaded.content)}${referencesSection}`, isError: false };
+  return {
+    output: withSkillLocation(loaded.skillRoot, `${clip(loaded.content)}${referencesSection}`),
+    isError: false,
+  };
 }
 
 function loadSkillReference(
@@ -51,14 +70,27 @@ function loadSkillReference(
   name: string,
   referencePath: string,
 ): NormalizedToolResult {
-  const content = library.loadReference(name, referencePath);
+  if (!library.list().some((skill) => skill.name === name)) {
+    return skillNotFoundResult(library, name);
+  }
+  const referenceDocument =
+    library.loadReferenceDocument === undefined
+      ? undefined
+      : library.loadReferenceDocument(name, referencePath);
+  const content =
+    library.loadReferenceDocument === undefined
+      ? library.loadReference(name, referencePath)
+      : referenceDocument?.content;
   if (content === undefined) {
     return {
       output: `skill "${name}" 中不存在 reference "${referencePath}"（仅支持 skill 目录内 references/ 下的文件）`,
       isError: true,
     };
   }
-  return { output: clip(content), isError: false };
+  return {
+    output: withSkillLocation(referenceDocument?.skillRoot, clip(content)),
+    isError: false,
+  };
 }
 
 export function executeSkillTool(

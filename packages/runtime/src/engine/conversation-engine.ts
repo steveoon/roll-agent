@@ -157,7 +157,7 @@ export class ConversationEngine {
   private readonly store: ThreadStore | undefined;
   private readonly policy: ToolPolicy | undefined;
   private readonly maxSteps: number;
-  private readonly providerOptions: SharedV4ProviderOptions | undefined;
+  private providerOptions: SharedV4ProviderOptions | undefined;
   private readonly ensureAgentReady: EnsureAgentReady;
   private readonly debugEvents: boolean;
   private readonly explicitAgents: readonly RegisteredAgent[] | undefined;
@@ -337,6 +337,7 @@ export class ConversationEngine {
       turnTimeoutMs: this.config.runtime.turnTimeoutMs,
       debugEvents: this.debugEvents,
       ...(this.providerOptions ? { providerOptions: this.providerOptions } : {}),
+      onProviderOptionsChange: (providerOptions) => this.syncProviderOptions(providerOptions),
       ...(contextWindow !== undefined ? { contextWindow } : {}),
       ...(this.policy ? { policy: this.policy } : {}),
       initialMessages,
@@ -347,6 +348,11 @@ export class ConversationEngine {
           }
         : {}),
     });
+  }
+
+  private syncProviderOptions(providerOptions: SharedV4ProviderOptions | undefined): void {
+    this.providerOptions = providerOptions;
+    this.clientManager.setSamplingProviderOptions(providerOptions);
   }
 
   private ensureReady(): Promise<EngineContext> {
@@ -402,6 +408,7 @@ export class ConversationEngine {
       agent.installPath,
       {
         samplingModel: model,
+        ...(this.providerOptions ? { samplingProviderOptions: this.providerOptions } : {}),
         ...(env ? { env } : {}),
       },
     );
