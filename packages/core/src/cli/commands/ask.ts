@@ -6,7 +6,7 @@ import {
   inspectAgentEnvRequirements,
 } from "../../config/helpers.ts";
 import { shouldSkipRuntimeReadinessForTool } from "../../config/runtime-env.ts";
-import { resolveLLMCall } from "../../llm/providers.ts";
+import { resolveLLMCall, toSamplingConnectOptions } from "../../llm/providers.ts";
 import { McpClientManager } from "../../mcp/client-manager.ts";
 import { AgentStore } from "../../registry/store.ts";
 import { resolveTransportWithDevSpawnSpec } from "../../registry/dev-spawn.ts";
@@ -147,7 +147,7 @@ export default defineCommand({
       return;
     }
 
-    const { model: samplingModel, providerOptions: samplingProviderOptions } = resolveLLMCall(
+    const samplingCall = resolveLLMCall(
       routerProvider,
       config.llm.defaultModel,
       providerConfig.apiKey,
@@ -163,8 +163,7 @@ export default defineCommand({
       const agentEnv = getAgentEnv(config, agent.skill.name);
       const transport = resolveTransportWithDevSpawnSpec(agent);
       const client = await clientManager.connect(agent.skill.name, transport, agent.installPath, {
-        samplingModel,
-        ...(samplingProviderOptions ? { samplingProviderOptions } : {}),
+        ...toSamplingConnectOptions(samplingCall),
         ...(agentEnv ? { env: agentEnv } : {}),
       });
       const tools = normalizeListedTools((await client.listTools()).tools);

@@ -1,9 +1,11 @@
 ---
 "@roll-agent/core": minor
+"@roll-agent/runtime": minor
 ---
 
-MCP Sampling 复用 `runtime.thinking-level` 全局配置：子 Agent 借用指挥官 LLM 推理时（`roll ask` / `roll run`），reasoning/thinking effort 跟随 `roll chat` 的同一档位映射。
+MCP Sampling 复用 `runtime.thinking-level` 全局配置：子 Agent 借用指挥官 LLM 推理时（`roll ask` / `roll run` / `roll chat`），reasoning/thinking effort 使用同一档位映射。
 
-- `resolveLLMCall` 对 `sampling` purpose 注入与 `chat` 相同的 thinkingProviderOptions；`ask`/`run` 构造 sampling model 改走 `resolveLLMCall`。
-- `registerSamplingHandler` 新增可选 `providerOptions` 参数（未传时行为与现状一致，对既有调用点零影响）；`generateText` 参数组装抽为纯函数 `buildSamplingGenerateTextParams` 并补单测。
-- 行为变化：sampling 此前不带任何 thinking 配置（走 provider 默认），现在默认跟随配置档位（默认 `medium`，qwen 上即 enableThinking + 8192 thinking budget）。如需关闭，设 `runtime.thinking-level: off`。
+- `resolveLLMCall` 对 `sampling` purpose 注入与 `chat` 相同的 `thinkingProviderOptions`；`ask` / `run` 构造 sampling model 改走统一解析入口。
+- `ConversationEngine` 把初始档位传给子 Agent Sampling；Ink TUI 的 `/think`、`/effort` 与快捷键切档后，主会话和已缓存 MCP 连接的后续 Sampling 请求同步更新，新接入 Agent 也使用最新档位。
+- Sampling 严格保留子 Agent 请求的 MCP `maxTokens` 上限，不会为了 provider thinking budget 静默扩大答案长度。
+- 行为变化：Sampling 此前不带 thinking 配置（走 provider 默认），现在默认跟随配置档位（默认 `medium`；Qwen 为 `enableThinking + 8192 thinkingBudget`）。如需关闭，设 `runtime.thinking-level: off` 或在交互会话中执行 `/think off`。

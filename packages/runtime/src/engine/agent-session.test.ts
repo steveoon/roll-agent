@@ -261,6 +261,7 @@ test("AgentSession 透出 cached 与 reasoning token", async () => {
 
 test("setProviderOptions only affects the next turn's streamText", async () => {
   const seen: Array<unknown> = [];
+  const changes: Array<unknown> = [];
   const model = new MockLanguageModelV4({
     doStream: async (options: LanguageModelV4CallOptions) => {
       seen.push(options.providerOptions);
@@ -273,6 +274,7 @@ test("setProviderOptions only affects the next turn's streamText", async () => {
     sources: [],
     maxSteps: 2,
     providerOptions: { alibaba: { enableThinking: false } },
+    onProviderOptionsChange: (providerOptions) => changes.push(providerOptions),
   });
   await collect(session.send("a"));
   session.setProviderOptions({ alibaba: { enableThinking: true, thinkingBudget: 8192 } });
@@ -280,6 +282,7 @@ test("setProviderOptions only affects the next turn's streamText", async () => {
 
   assert.deepEqual(seen[0], { alibaba: { enableThinking: false } });
   assert.deepEqual(seen[1], { alibaba: { enableThinking: true, thinkingBudget: 8192 } });
+  assert.deepEqual(changes, [{ alibaba: { enableThinking: true, thinkingBudget: 8192 } }]);
 });
 
 test("AgentSession 达到 maxSteps 上限且仍在调工具时标记 stoppedAtStepLimit", async () => {

@@ -74,6 +74,8 @@ export interface AgentSessionOptions {
   readonly compaction?: SessionCompactionSettings;
   readonly turnTimeoutMs?: number;
   readonly providerOptions?: SharedV4ProviderOptions;
+  /** `setProviderOptions()` 生效后触发；ConversationEngine 用它同步子 Agent Sampling。 */
+  readonly onProviderOptionsChange?: (providerOptions: SharedV4ProviderOptions | undefined) => void;
   readonly debugEvents?: boolean;
   readonly systemPrompt?: string;
   readonly skillLibrary?: SkillLibrary;
@@ -235,6 +237,9 @@ export class AgentSession {
   private readonly compaction: SessionCompactionSettings | undefined;
   private readonly turnTimeoutMs: number | undefined;
   private providerOptions: SharedV4ProviderOptions | undefined;
+  private readonly onProviderOptionsChange:
+    | ((providerOptions: SharedV4ProviderOptions | undefined) => void)
+    | undefined;
   private readonly debugEvents: boolean;
   private readonly policy: ToolPolicy | undefined;
   private systemPrompt: string;
@@ -263,6 +268,7 @@ export class AgentSession {
     this.compaction = options.compaction;
     this.turnTimeoutMs = options.turnTimeoutMs;
     this.providerOptions = options.providerOptions;
+    this.onProviderOptionsChange = options.onProviderOptionsChange;
     this.debugEvents = options.debugEvents ?? false;
     this.policy = options.policy;
     this.systemPrompt = options.systemPrompt ?? buildChatSystemPrompt();
@@ -873,6 +879,7 @@ export class AgentSession {
 
   setProviderOptions(providerOptions: SharedV4ProviderOptions | undefined): void {
     this.providerOptions = providerOptions;
+    this.onProviderOptionsChange?.(providerOptions);
   }
 
   private shouldAutoCompact(): boolean {

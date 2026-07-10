@@ -1,6 +1,5 @@
 import { readFileSync } from "node:fs";
 import type { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import type { LanguageModelV4, SharedV4ProviderOptions } from "@ai-sdk/provider";
 import { defineCommand } from "citty";
 import { loadConfig } from "../../config/loader.ts";
 import {
@@ -12,7 +11,11 @@ import {
 import { AgentStore } from "../../registry/store.ts";
 import { McpClientManager } from "../../mcp/client-manager.ts";
 import { resolveTransportWithDevSpawnSpec } from "../../registry/dev-spawn.ts";
-import { resolveLLMCall, type ResolvedLLMCall } from "../../llm/providers.ts";
+import {
+  resolveLLMCall,
+  toSamplingConnectOptions,
+  type ResolvedLLMCall,
+} from "../../llm/providers.ts";
 import { formatValidationIssuesMessage } from "../../tool-runtime/messages.ts";
 import { preflightToolCall } from "../../tool-runtime/preflight.ts";
 import { formatMissingToolMessage, normalizeListedTools } from "../utils/agent-tools.ts";
@@ -73,10 +76,7 @@ export default defineCommand({
         config,
         clientManager,
         agentConnections,
-        ...(samplingCall ? { samplingModel: samplingCall.model } : {}),
-        ...(samplingCall?.providerOptions
-          ? { samplingProviderOptions: samplingCall.providerOptions }
-          : {}),
+        ...(samplingCall ? { samplingCall } : {}),
       };
       if (hasBatchInput(rawArgs) && getLeadingPositionalCount(rawArgs) > 0) {
         log.error("batch 模式不接受 agent/tool 位置参数；请在每个 batch item 中声明 agent 和 tool");
@@ -190,8 +190,7 @@ interface RunToolCallOptions {
   readonly config: RollConfig;
   readonly clientManager: McpClientManager;
   readonly agentConnections: Map<string, ConnectedAgent>;
-  readonly samplingModel?: LanguageModelV4;
-  readonly samplingProviderOptions?: SharedV4ProviderOptions;
+  readonly samplingCall?: ResolvedLLMCall;
 }
 
 interface RunBatchToolCallsOptions extends Omit<RunToolCallOptions, "item" | "index"> {
@@ -580,10 +579,7 @@ async function getConnectedAgent(options: RunToolCallOptions): Promise<Connected
     transport,
     agent.installPath,
     {
-      ...(options.samplingModel ? { samplingModel: options.samplingModel } : {}),
-      ...(options.samplingProviderOptions
-        ? { samplingProviderOptions: options.samplingProviderOptions }
-        : {}),
+      ...toSamplingConnectOptions(options.samplingCall),
       ...(agentEnv ? { env: agentEnv } : {}),
     },
   );

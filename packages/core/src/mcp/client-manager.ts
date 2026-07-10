@@ -5,6 +5,7 @@ import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import type { LanguageModelV4, SharedV4ProviderOptions } from "@ai-sdk/provider";
 import type { AgentTransport } from "../types/agent.ts";
 import { registerSamplingHandler } from "./sampling-handler.ts";
+import type { SamplingHandlerController } from "./sampling-handler.ts";
 
 /** 默认连接超时（毫秒） */
 const DEFAULT_CONNECT_TIMEOUT_MS = 30_000;
@@ -15,6 +16,7 @@ type StdioAgentTransport = Extract<AgentTransport, { readonly type: "stdio" }>;
 interface ManagedConnection {
   readonly client: Client;
   readonly transportType: "stdio" | "streamable-http";
+  readonly samplingController?: SamplingHandlerController;
 }
 
 export interface ConnectOptions {
@@ -144,9 +146,9 @@ export class McpClientManager {
     );
 
     // 注册 Sampling Handler（子 Agent 可通过 createMessage 使用指挥官 LLM）
-    if (options.samplingModel) {
-      registerSamplingHandler(client, options.samplingModel, options.samplingProviderOptions);
-    }
+    const samplingController = options.samplingModel
+      ? registerSamplingHandler(client, options.samplingModel, options.samplingProviderOptions)
+      : undefined;
 
     // 创建 MCP 传输（强制转换为 Transport 以绕过 exactOptionalPropertyTypes 与库类型的不兼容）
     const mcpTransport: Transport =
@@ -172,8 +174,19 @@ export class McpClientManager {
       clearTimeout(timeoutId);
     }
 
-    this.connections.set(agentName, { client, transportType: transport.type });
+    this.connections.set(agentName, {
+      client,
+      transportType: transport.type,
+      ...(samplingController ? { samplingController } : {}),
+    });
     return client;
+  }
+
+  /** 更新全部已连接 Agent 后续 Sampling 请求使用的 provider 参数。 */
+  setSamplingProviderOptions(providerOptions: SharedV4ProviderOptions | undefined): void {
+    for (const connection of this.connections.values()) {
+      connection.samplingController?.setProviderOptions(providerOptions);
+    }
   }
 
   /** 断开指定 Agent 的连接 */
