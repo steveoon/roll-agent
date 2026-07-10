@@ -1,5 +1,70 @@
 # @roll-agent/runtime
 
+## 0.5.0
+
+### Minor Changes
+
+- [#136](https://github.com/steveoon/roll-agent/pull/136) [`cf271e4`](https://github.com/steveoon/roll-agent/commit/cf271e45b7cb6a57c2ee66e97f73600440835491) Thanks [@steveoon](https://github.com/steveoon)! - roll chat 支持新设备 onboarding：启动引导 + 会话内安装官方 Agent。
+
+  **启动引导（core）**：TTY 下 `roll chat` 检测到 LLM 未配置完成（provider 缺失、apiKey 为空或仍是未解析的 `${ENV_VAR}` 占位符）时，询问是否进入初始化向导（配置 LLM + 可选多选安装官方 Agent），完成后重新加载配置直接进入对话；拒绝、非 TTY、`--json`、`--server` 不进向导，直接报错并区分「provider 未配置」「apiKey 未配置」「apiKey 占位符未解析」三类原因（`--server` 与交互模式共用同一就绪判定）。
+
+  **会话内安装（runtime + core）**：
+  - 新增内建 `roll__agent_install` 工具，输入 schema 从官方 catalog 短名派生（`z.enum`，不接受任意 npm 包名）；catalog 为空时不注册
+  - **强制确认门**：policy `deny` 可拒绝，但任何放行配置（含 `auto`）都仍需用户界面确认——安装会执行 npm install，policy 只能收紧不能绕过；确认 UI 复用现有 confirmation-required 事件链，`--json` 模式自动拒绝
+  - chat 内安装固定 `skipBrowserSetup`（规避 turn 超时），结果附终端补装命令与缺失 env 清单；启动走与 CLI 安装同一状态机（`installAgent` autoStart：starting → online/error + 失败清理），不经引擎隐式保活路径
+  - **会话内热刷新**（仅限新安装的 Agent）：安装成功后引擎连接新 Agent（`prepareAgentRefresh`）、会话合并新工具集 + 重建 skill library + 更新 system prompt（`applyAgentRefresh`），新工具从下一轮对话可用，无需重启会话
+  - system prompt 新增条件段：无已注册 Agent 时向模型注入官方可装清单与"须经用户同意才安装"的纪律；有 Agent 后该段自动消失
+  - 已知限制：会话内重装**已接入**的同名 Agent 时不热替换旧连接（MCP client 按名缓存），注册层仍幂等（store replace），工具结果如实提示"更新需重启 roll chat 生效"；Ink banner 的 agent 计数与 slash 补全列表为会话挂载时快照，重开会话后一致
+
+  引擎测试封闭性不变：`explicitSources` / `explicitAgents` 路径不启用安装工具，现有测试行为零变化。
+
+- [#136](https://github.com/steveoon/roll-agent/pull/136) [`3044cab`](https://github.com/steveoon/roll-agent/commit/3044cabc6d35729d06ef434724a34121fc139d01) Thanks [@steveoon](https://github.com/steveoon)! - 新增内建 shell 工具，让 roll chat 能在本机执行 shell 命令，解锁"脚本编排型 skill"（如 roll-zhipin-unread-reply）在会话中的执行。macOS/Linux 注册 `roll__bash`，Windows 原生在检测到 PowerShell 7+ 时注册 `roll__powershell`。
+
+  设计借鉴 codex 的 shell 工具：单字符串 `command` + `workdir`（禁 cd）+ `timeout_ms` 参数；两阶段输出截断（捕获期硬字节帽 + 排干防死锁，模型侧保头尾中间截断）；超时/中止杀整个进程组并归一 exit 124；`tool-output-delta` 流式事件（限流）在 Ink TUI 与基础 REPL 实时渲染输出尾行。
+
+  **安全姿态（默认关闭，`runtime.shell.enabled`）**：
+  - shell 命令一律标记 `destructiveHint`，因此无论 `runtime.approval.default` 是 `guarded` 还是 `auto` 都需人工确认；只有显式配置 `runtime.approval.overrides: { "roll.bash": "auto" }` 或 `{ "roll.powershell": "auto" }` 才允许无确认执行。无策略时 fail-closed 强制确认。
+  - 审批 UI（Ink + 基础 REPL）完整展示 `command`（不截断）/ `workdir`（解析为绝对路径）/ `timeout_ms`，用户能看清将要执行的完整命令再决定。
+  - 命令继承 roll 进程的全部环境变量（含 API key），等同于用户本人开 shell；风险由审批门控制，工具描述已注明。
+  - 单条命令有效超时取 `min(timeout_ms, maxTimeoutMs, turnTimeoutMs)`，保证不会因超过整轮预算被 turn abort 突兀杀掉。
+
+  Windows session exec 暂不支持；审批记忆、沙箱、跨会话持久化审批规则留作后续版本。
+
+- [#136](https://github.com/steveoon/roll-agent/pull/136) [`3044cab`](https://github.com/steveoon/roll-agent/commit/3044cabc6d35729d06ef434724a34121fc139d01) Thanks [@steveoon](https://github.com/steveoon)! - roll chat 的内建 POSIX shell 能力新增两项（在 T0 `roll__bash` 基础上）：
+
+  **T1a — 命令分类器（`runtime.shell.auto-approve-safe`，默认开启）**
+
+  纯 JS 规则分类器把 POSIX 命令分为 known-safe / dangerous / unknown。known-safe 只读命令（`ls`/`cat README.md`/`git status`/`grep -r TODO src` 等）自动免确认执行，dangerous（`rm -rf`、`sudo`）与 unknown 仍需人工确认。设计借鉴 codex 的白名单 + 逐命令 flag 审计（`find` 拒 `-exec`/`-delete`、`git` 只放行只读子命令并拦全局 `-c`/`--git-dir`、`sed` 仅 `-n Np`、`base64` 拒写文件等），复合命令用保守词法方案（含 `$`/反引号/重定向/子 shell 等危险元字符即降级为 unknown）替代 tree-sitter，误判方向永远偏向"更保守 → 走确认"。Windows PowerShell 本批不启用安全白名单，命令全部按 unknown 走确认门。
+
+  免确认有**工作区边界**：吃路径的命令出现绝对路径、`~` 或 `..` 参数（如 `cat ~/.ssh/id_rsa`、`find / -name x`、`rg secret /Users/x`）即降级 unknown 走确认，`grep`/`rg` 的 pattern 参数与 `echo` 等非文件命令豁免以避免误报；`workdir` 参数逃出会话根目录同样强制确认。分类器经 config→engine→session 注入，one-shot 与 session exec 显式共用同一个 effective classifier，避免两处 toolset 的兜底差异改变审批行为；gate/policy 零改动。关掉 `auto-approve-safe` 回归 T0 的默认逐条确认，显式 approval override 仍优先。
+
+  **T2 — 会话式执行（`runtime.shell.session`，默认关闭）**
+
+  新增两个 POSIX 内建工具 `roll__exec_command` + `roll__exec_poll`，解决长脚本（如 zhipin `reply-unread-safely.sh`，几十秒到几十分钟）被单轮 `turnTimeout` 杀掉的问题。`exec_command` 后台启动命令、等待一个 yield 窗口后返回：进程结束则给退出码，未结束则返回 `session_id`；`exec_poll` 用该 id 空轮询续查进度、读退出码，或发送 Ctrl-C 哨兵（U+0003）中断。借鉴 codex `unified_exec` 的 yield-then-return-partial 与后台隐式化，采精简版：pipe 会话（不引 node-pty native 依赖）、会话池只回收已退出槽（满则拒绝，不杀活进程）、head+tail 缓冲、机器可读干净环境（`NO_COLOR`/`TERM=dumb`/`PAGER=cat`）。
+
+  **关键安全与生命周期**：会话进程绝不绑 turn 的 abortSignal，得以跨轮存活突破 `turnTimeout`；`exec_command` 走与 bash 同一套 gate（`--server` 下需 `runtime.approval.overrides: { "roll.exec_command": "auto" }` 显式授权），`exec_poll` 只轮询/中断不过 gate；session exec 只在交互 REPL 与 `--server` 长驻模式注册——单条消息 / `--json` 单轮的会话随进程结束，不提供该工具，避免返回一个立即失效的 running session id；`AgentSession.abort()` 与 `roll chat` 退出的 finally 都会 `terminateAll()`（SIGTERM→SIGKILL 升级）杀掉背景进程组，杜绝 detached 进程残留。Windows 原生暂不注册 session exec，避免给出当前无法可靠维护的后台 PowerShell 会话语义。
+
+  审批记忆（本会话记住此命令）、沙箱、跨会话持久化审批规则列为后续阶段。
+
+- [#136](https://github.com/steveoon/roll-agent/pull/136) [`cd499cd`](https://github.com/steveoon/roll-agent/commit/cd499cdbf88124b6a7460ab1ff93e7805ddd6b7c) Thanks [@steveoon](https://github.com/steveoon)! - 新增 `ShellProfile` 抽象并落地 Windows 原生 PowerShell 7 one-shot 支持。
+  - macOS/Linux 继续使用 POSIX profile，工具名保持 `roll__bash`，审批 key 保持 `roll.bash`，session exec 继续只在 POSIX 注册。
+  - Windows 只在检测到 `pwsh` 主版本 >= 7 时注册 `roll__powershell`，审批 key 为 `roll.powershell`；探测会把 PATH 与标准 Program Files 中完整限定的候选解析并缓存为绝对 `pwsh.exe`，拒绝 cwd/相对 PATH 候选。候选按顺序惰性检查，首个通过即停止，版本探测共享 5 秒总预算。未检测到或版本过低时跳过注册并提示安装 `Microsoft.PowerShell`。
+  - PowerShell 命令通过 `-NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand` 执行，`EncodedCommand` 使用 UTF-16LE base64，审批 UI、分类器和日志仍展示编码前明文命令；wrapper 显式设置 UTF-8 输出，并把 cmdlet 错误与 native `$LASTEXITCODE` 传播为真实退出码。
+  - Windows one-shot 不启用 detached 进程组，超时/中止使用 `SystemRoot\\System32\\taskkill.exe /PID <pid> /T /F` 清理进程树；`taskkill` 启动失败、非预期退出或超时会触发根进程强制终止兜底（退出码 128 视为目标进程已退出的正常竞速，不触发兜底），清理仍无法确认时会返回明确错误且不无限等待。PowerShell 命令本批全部分类为 `unknown`，默认过确认门；显式 `roll.powershell` approval override 仍优先。
+  - 过长的 PowerShell `EncodedCommand` 会在 spawn 前返回清晰错误，避免落到含糊的 Windows 命令行长度失败。
+  - 配置 canonical 字段从 `runtime.bash` 迁移为 `runtime.shell`，迁移器支持自动改名、camelCase/kebab-case 语义等值双写删除 legacy、冲突双写阻塞，段内等值别名会在迁移时去重为单一键；`roll config setup shell` 成为新命令，`roll config setup bash` 保留兼容 alias。所有 setup 入口会在读取业务输入前提示先完成已知 breaking migration，避免输入到最后一步才被丢弃。
+  - Windows 下 `roll config setup shell` 只引导 one-shot 开关，不再询问当前不会生效的安全命令自动放行和 session exec 选项。
+  - CI 新增 `windows-latest` shell smoke，覆盖 profile 选择、PowerShell one-shot、配置迁移和 engine 注册。
+
+### Patch Changes
+
+- [#136](https://github.com/steveoon/roll-agent/pull/136) [`ea76679`](https://github.com/steveoon/roll-agent/commit/ea76679d8c390570b7baffef507579bda2058eb5) Thanks [@steveoon](https://github.com/steveoon)! - `roll agent install` 同名冲突改为显式授权替换，防止静默覆盖本地/Git 来源的 Agent 注册。
+  - 同名 Agent 已通过 `local-path` / `git` 等非 npm 来源注册时，安装默认失败并给出两条出路：`roll agent remove <name>` 或新增的 `--force` 标志（确认风险后替换为 npm 安装）
+  - catalog 短名安装在 npm download 前预检冲突，零副作用提前失败；非 catalog 包在 discover 后拦截，并清理本次新建的安装目录，不留孤儿目录（既有目录如 npm 升级场景不受影响）
+  - `roll setup` 向导对「已通过其他来源注册」的官方 Agent 维持替换语义（选项文案已明示），自动授权替换；chat 会话内 `roll__agent_install` 不授权替换，冲突时如实返回失败原因与终端处理指引
+  - 替换在线 core-managed 旧 Agent 且新版本未随即启动（缺必填 env 或 `--no-start`）时，优雅停止旧进程并将注册状态归位 idle，不再遗留运行旧代码的孤儿进程；setup 阶段失败同样停止旧进程
+  - 修正 `roll agent install --start` 帮助文案与默认语义相反的问题（默认自动启动，`--no-start` 跳过）
+
 ## 0.4.0
 
 ### Minor Changes
