@@ -48,6 +48,18 @@ function isGlobalBrowserRuntimeTool(toolName: string): boolean {
   return toolName === "browser_stop" || toolName === "zhipin_judge_prepared_reply";
 }
 
+/**
+ * page-free / 只读诊断工具：不操作共享页面状态，无需进 per-instance 互斥队列。
+ * 尤其 browser_status / list_pages 是编排器的"排障出口"，
+ * 必须保证在实例被长操作占用时依然可用。
+ */
+const PAGE_FREE_TOOL_NAMES = new Set<string>([
+  "browser_status",
+  "list_pages",
+  "attach_browser_session",
+  "zhipin_diagnose_browser_state",
+]);
+
 function withBrowserInstanceRuntimeSelection(tool: AnyToolDefinition): AnyToolDefinition {
   if (isGlobalBrowserRuntimeTool(tool.name)) {
     return tool;
@@ -55,6 +67,7 @@ function withBrowserInstanceRuntimeSelection(tool: AnyToolDefinition): AnyToolDe
 
   return withBrowserInstanceInput(tool, {
     startRuntime: tool.name !== "browser_status",
+    serializePageOps: !PAGE_FREE_TOOL_NAMES.has(tool.name),
   });
 }
 

@@ -26,6 +26,35 @@ export type {
   ToolBridgeContext,
   BuiltToolset,
 } from "./tool-bridge/build-tools.ts";
+export type { SessionBashSettings } from "./tool-bridge/bash-tool.ts";
+export {
+  type CommandClassifier,
+  type CommandClassification,
+  COMMAND_CLASSIFICATIONS,
+  unknownCommandClassifier,
+} from "./types/command-classification.ts";
+export { ruleBasedClassifier } from "./bash/classifier/index.ts";
+export {
+  buildPowerShellEncodedCommand,
+  resolveShellProfile,
+  SHELL_PROFILE_IDS,
+  SHELL_TOOL_NAMES,
+} from "./bash/profile.ts";
+export type {
+  ShellProfile,
+  ShellProfileId,
+  ShellKillOptions,
+  ShellProfileResolutionDeps,
+  ShellProfileResolutionResult,
+  ShellSpawnSpec,
+  ShellToolName,
+} from "./bash/profile.ts";
+export {
+  buildSessionExecToolset,
+  EXEC_COMMAND_ID,
+  EXEC_POLL_ID,
+  type SessionExecSettings,
+} from "./tool-bridge/session-exec-tool.ts";
 export { ToolRegistry } from "./tool-bridge/naming.ts";
 export type { ToolRoute } from "./tool-bridge/naming.ts";
 export { normalizeToolResult } from "./tool-bridge/normalize-result.ts";

@@ -182,7 +182,8 @@ chat 走独立的 skill 通道（对齐 `npx skills add` 标准生态，非 roll
 `loadConfig()` 按以下优先级查找配置：
 1. `--config` 显式路径
 2. 从 `cwd` 向上逐级查找 `roll.config.yaml` / `roll.config.yml`
-3. 回退到内置默认配置
+3. 兜底 `~/roll.config.yaml`（全局配置，`roll setup` / `roll config init` / `config setup` 在未发现任何配置时也写到这里）
+4. 回退到内置默认配置
 
 加载管线：YAML 解析 → kebab-case→camelCase → `${ENV_VAR}` 替换 → **迁移检测**（命中则抛错提示 `roll config migrate`）→ 深度合并默认值 → Zod 校验 → `~/` 路径展开。
 
@@ -279,7 +280,7 @@ pnpm release-packages             # 构建 + 发布到 npm
 <!-- gitnexus:start -->
 # GitNexus — Code Intelligence
 
-This project is indexed by GitNexus as **roll-agent** (6151 symbols, 15439 relationships, 300 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
+This project is indexed by GitNexus as **roll-agent** (7191 symbols, 18179 relationships, 300 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
 
 > Index stale? Run `node .gitnexus/run.cjs analyze` from the project root — it auto-selects an available runner. No `.gitnexus/run.cjs` yet? `npx gitnexus analyze` (npm 11 crash → `npm i -g gitnexus`; #1939).
 

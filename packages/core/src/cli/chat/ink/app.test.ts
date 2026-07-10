@@ -150,7 +150,7 @@ test("ChatApp confirm flow shows tool args and approves on y", async () => {
   await delay(10);
   stdin.write("\r");
   await waitFor(() => assert.match(lastFrame() ?? "", /执行 browser-use-agent\.click_ref/));
-  assert.match(lastFrame() ?? "", /"ref":"node-42"/);
+  assert.match(lastFrame() ?? "", /ref: node-42/);
   await delay(100);
 
   stdin.write("y");

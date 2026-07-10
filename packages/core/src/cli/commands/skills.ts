@@ -8,10 +8,14 @@ function loadSkillsCommand(fileName: string) {
 }
 
 export default defineCommand({
-  meta: { description: "读取已注册 Agent 的 SKILL.md（list/get/path）" },
+  meta: {
+    description:
+      "读取已注册 Agent 的 SKILL.md（list/get/path），或安装 skill 到 orchestrator 目录（install）",
+  },
   subCommands: {
     list: () => loadSkillsCommand("skills-list"),
     get: () => loadSkillsCommand("skills-get"),
     path: () => loadSkillsCommand("skills-path"),
+    install: () => loadSkillsCommand("skills-install"),
   },
 });

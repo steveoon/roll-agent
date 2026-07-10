@@ -4,6 +4,7 @@ import {
   intro,
   isCancel,
   log as clackLog,
+  multiselect,
   outro,
   password,
   select,
@@ -48,6 +49,12 @@ export interface ConfigPromptAdapter {
     readonly validate?: (value: string) => string | undefined;
   }): Promise<string>;
   confirm(options: { readonly message: string; readonly initialValue?: boolean }): Promise<boolean>;
+  multiselect<Value extends string>(options: {
+    readonly message: string;
+    readonly options: readonly PromptOption<Value>[];
+    readonly initialValues?: readonly Value[];
+    readonly required?: boolean;
+  }): Promise<readonly Value[]>;
 }
 
 export const clackPromptAdapter: ConfigPromptAdapter = {
@@ -78,14 +85,18 @@ export const clackPromptAdapter: ConfigPromptAdapter = {
     return unwrapPromptResult(result) as (typeof options.options)[number]["value"];
   },
   async text(options) {
+    const placeholder = options.placeholder ?? options.defaultValue;
     const result = await text({
       message: options.message,
       output: PROMPT_OUTPUT,
-      ...(options.placeholder ? { placeholder: options.placeholder } : {}),
+      ...(placeholder ? { placeholder } : {}),
       ...(options.defaultValue !== undefined ? { defaultValue: options.defaultValue } : {}),
       ...(options.initialValue !== undefined ? { initialValue: options.initialValue } : {}),
       validate(value) {
         const normalized = value ?? "";
+        if (normalized.trim().length === 0 && options.defaultValue !== undefined) {
+          return undefined;
+        }
         if (options.required && normalized.trim().length === 0) {
           return "此项不能为空";
         }
@@ -115,6 +126,23 @@ export const clackPromptAdapter: ConfigPromptAdapter = {
       ...(options.initialValue !== undefined ? { initialValue: options.initialValue } : {}),
     });
     return unwrapPromptResult(result);
+  },
+  async multiselect(options) {
+    const clackOptions = options.options.map((option) =>
+      option.hint
+        ? { value: option.value as string, label: option.label, hint: option.hint }
+        : { value: option.value as string, label: option.label },
+    );
+    const result = await multiselect<string>({
+      message: options.message,
+      options: clackOptions,
+      output: PROMPT_OUTPUT,
+      required: options.required ?? false,
+      ...(options.initialValues ? { initialValues: [...options.initialValues] } : {}),
+    });
+    return unwrapPromptResult(result).map(
+      (value) => value as (typeof options.options)[number]["value"],
+    );
   },
 };
 

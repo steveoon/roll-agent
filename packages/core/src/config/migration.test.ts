@@ -203,4 +203,175 @@ describe("config migration", () => {
     });
     assert.equal(result.document["router"], undefined);
   });
+
+  it("auto-migrates runtime.bash to runtime.shell", () => {
+    const result = applyKnownConfigMigrations({
+      runtime: {
+        bash: {
+          enabled: true,
+          "auto-approve-safe": false,
+          session: { enabled: true },
+        },
+      },
+    });
+
+    assert.equal(result.ok, true);
+    if (!result.ok) {
+      return;
+    }
+    assert.deepEqual(result.document["runtime"], {
+      shell: {
+        enabled: true,
+        "auto-approve-safe": false,
+        session: { enabled: true },
+      },
+    });
+    assert.match(result.summary.join("\n"), /runtime\.bash.*runtime\.shell/);
+  });
+
+  it("removes runtime.bash when runtime.shell has the same value", () => {
+    const shell = { enabled: true, session: { enabled: false } };
+    const result = applyKnownConfigMigrations({
+      runtime: {
+        bash: shell,
+        shell,
+      },
+    });
+
+    assert.equal(result.ok, true);
+    if (!result.ok) {
+      return;
+    }
+    assert.deepEqual(result.document["runtime"], { shell });
+    assert.match(result.summary.join("\n"), /删除已废弃的 `runtime\.bash`/);
+  });
+
+  it("treats kebab-case and camelCase runtime shell keys as semantically equal", () => {
+    const shell = {
+      enabled: true,
+      "auto-approve-safe": true,
+      "default-timeout-ms": 12_000,
+      session: { "max-output-tokens": 2_000 },
+    };
+    const result = applyKnownConfigMigrations({
+      runtime: {
+        bash: {
+          enabled: true,
+          autoApproveSafe: true,
+          defaultTimeoutMs: 12_000,
+          session: { maxOutputTokens: 2_000 },
+        },
+        shell,
+      },
+    });
+
+    assert.equal(result.ok, true);
+    if (!result.ok) {
+      return;
+    }
+    assert.deepEqual(result.document["runtime"], { shell });
+  });
+
+  it("still blocks runtime shell aliases when their values differ", () => {
+    const result = applyKnownConfigMigrations({
+      runtime: {
+        bash: { autoApproveSafe: true },
+        shell: { "auto-approve-safe": false },
+      },
+    });
+
+    assert.equal(result.ok, false);
+    assert.match(result.issues.map((issue) => issue.message).join("\n"), /值冲突/);
+  });
+
+  it("blocks conflicting aliases within one runtime shell section", () => {
+    const result = applyKnownConfigMigrations({
+      runtime: {
+        bash: {
+          autoApproveSafe: true,
+          "auto-approve-safe": false,
+        },
+        shell: { "auto-approve-safe": false },
+      },
+    });
+
+    assert.equal(result.ok, false);
+    assert.match(
+      result.issues.map((issue) => issue.message).join("\n"),
+      /runtime\.bash\.autoApproveSafe.*等价键.*值冲突/u,
+    );
+  });
+
+  it("blocks conflicting nested session aliases", () => {
+    const result = applyKnownConfigMigrations({
+      runtime: {
+        bash: {
+          session: {
+            maxOutputTokens: 1_000,
+            "max-output-tokens": 2_000,
+          },
+        },
+      },
+    });
+
+    assert.equal(result.ok, false);
+    assert.match(
+      result.issues.map((issue) => issue.message).join("\n"),
+      /runtime\.bash\.session\.maxOutputTokens.*等价键.*值冲突/u,
+    );
+  });
+
+  it("dedupes equal-value aliases when migrating bash into shell", () => {
+    const bash = {
+      autoApproveSafe: true,
+      "auto-approve-safe": true,
+      session: {
+        maxOutputTokens: 1_000,
+        "max-output-tokens": 1_000,
+      },
+    };
+    const result = applyKnownConfigMigrations({ runtime: { bash } });
+
+    assert.equal(result.ok, true);
+    if (!result.ok) {
+      return;
+    }
+    assert.deepEqual(result.document["runtime"], {
+      shell: {
+        autoApproveSafe: true,
+        session: { maxOutputTokens: 1_000 },
+      },
+    });
+  });
+
+  it("keeps the first spelling when deduping equal aliases", () => {
+    const result = applyKnownConfigMigrations({
+      runtime: {
+        bash: {
+          "auto-approve-safe": true,
+          autoApproveSafe: true,
+        },
+      },
+    });
+
+    assert.equal(result.ok, true);
+    if (!result.ok) {
+      return;
+    }
+    assert.deepEqual(result.document["runtime"], {
+      shell: { "auto-approve-safe": true },
+    });
+  });
+
+  it("blocks runtime.bash migration when runtime.shell conflicts", () => {
+    const result = applyKnownConfigMigrations({
+      runtime: {
+        bash: { enabled: true },
+        shell: { enabled: false },
+      },
+    });
+
+    assert.equal(result.ok, false);
+    assert.match(result.issues.map((issue) => issue.message).join("\n"), /值冲突/);
+  });
 });

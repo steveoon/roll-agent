@@ -72,6 +72,30 @@ describe("rollConfigSchema", () => {
     );
   });
 
+  it("should default runtime shell to disabled with sane limits", () => {
+    const result = rollConfigSchema.safeParse({
+      llm: { defaultProvider: "x", defaultModel: "y", providers: {} },
+      ask: {},
+      runtime: {},
+      agents: { dataDir: "/tmp" },
+    });
+    assert.equal(result.success, true);
+    assert.equal(result.success ? result.data.runtime.shell.enabled : undefined, false);
+    assert.equal(result.success ? result.data.runtime.shell.autoApproveSafe : undefined, true);
+    assert.equal(result.success ? result.data.runtime.shell.defaultTimeoutMs : undefined, 10_000);
+    assert.equal(result.success ? result.data.runtime.shell.maxCaptureBytes : undefined, 1_048_576);
+  });
+
+  it("should reject runtime shell timeout above the ceiling", () => {
+    const result = rollConfigSchema.safeParse({
+      llm: { defaultProvider: "x", defaultModel: "y", providers: {} },
+      ask: {},
+      runtime: { shell: { maxTimeoutMs: 900_000 } },
+      agents: { dataDir: "/tmp" },
+    });
+    assert.equal(result.success, false);
+  });
+
   it("should reject invalid runtime compaction config", () => {
     const invalidStrategy = rollConfigSchema.safeParse({
       llm: { defaultProvider: "x", defaultModel: "y", providers: {} },

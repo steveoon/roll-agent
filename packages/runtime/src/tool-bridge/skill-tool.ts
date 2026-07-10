@@ -70,14 +70,18 @@ export function executeSkillTool(
     : loadSkill(library, input.name);
 }
 
-export function buildSkillToolset(library: SkillLibrary, registry: ToolRegistry): ToolSet {
+export function buildSkillToolset(
+  library: SkillLibrary | (() => SkillLibrary),
+  registry: ToolRegistry,
+): ToolSet {
+  const resolveLibrary = typeof library === "function" ? library : (): SkillLibrary => library;
   const id = registry.register(SKILL_TOOL_AGENT_NAME, SKILL_TOOL_NAME);
   return {
     [id]: tool({
       description:
         "加载一个 skill（技能说明书）的完整内容，或其 references/ 下的文件。执行涉及某个 skill 领域的任务前，先用它读取流程与约束。",
       inputSchema: skillToolInputSchema,
-      execute: (input): NormalizedToolResult => executeSkillTool(library, input),
+      execute: (input): NormalizedToolResult => executeSkillTool(resolveLibrary(), input),
     }),
   };
 }

@@ -51,6 +51,23 @@ export const runtimeCompactionConfigSchema = z.object({
 
 export const runtimeThinkingLevels = ["off", "low", "medium", "high"] as const;
 
+export const runtimeShellSessionConfigSchema = z.object({
+  enabled: z.boolean().default(false),
+  maxSessions: z.number().int().min(1).max(64).default(8),
+  defaultYieldMs: z.number().int().min(250).max(30_000).default(10_000),
+  maxOutputTokens: z.number().int().min(256).default(10_000),
+});
+
+export const runtimeShellConfigSchema = z.object({
+  enabled: z.boolean().default(false),
+  autoApproveSafe: z.boolean().default(true),
+  defaultTimeoutMs: z.number().int().min(1_000).max(600_000).default(10_000),
+  maxTimeoutMs: z.number().int().min(1_000).max(600_000).default(600_000),
+  maxCaptureBytes: z.number().int().min(16_384).default(1_048_576),
+  maxModelOutputChars: z.number().int().min(1_000).default(16_000),
+  session: runtimeShellSessionConfigSchema.default({}),
+});
+
 export const runtimeConfigSchema = z.object({
   provider: z.string().optional(),
   model: z.string().optional(),
@@ -61,6 +78,7 @@ export const runtimeConfigSchema = z.object({
   thinkingLevel: z.enum(runtimeThinkingLevels).default("medium"),
   approval: runtimeApprovalConfigSchema.default({}),
   compaction: runtimeCompactionConfigSchema.default({}),
+  shell: runtimeShellConfigSchema.default({}),
 });
 
 export const skillsConfigSchema = z.object({

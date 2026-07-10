@@ -36,6 +36,20 @@ export const DEFAULT_CONFIG: RollConfig = {
       keepRecentTurns: 4,
       keepRecentTokens: 32_000,
     },
+    shell: {
+      enabled: false,
+      autoApproveSafe: true,
+      defaultTimeoutMs: 10_000,
+      maxTimeoutMs: 600_000,
+      maxCaptureBytes: 1_048_576,
+      maxModelOutputChars: 16_000,
+      session: {
+        enabled: false,
+        maxSessions: 8,
+        defaultYieldMs: 10_000,
+        maxOutputTokens: 10_000,
+      },
+    },
   },
   skills: {
     dirs: [],

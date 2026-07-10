@@ -6,6 +6,19 @@ import { Spinner } from "./spinner.ts";
 import { ThinkingText } from "./thinking-text.ts";
 import { ToolLabel } from "./tool-label.ts";
 
+const MAX_TAIL_LINES = 3;
+
+function tailLines(outputTail: string | undefined): string[] {
+  if (outputTail === undefined) {
+    return [];
+  }
+  return outputTail
+    .split("\n")
+    .map((line) => line.trimEnd())
+    .filter((line) => line.length > 0)
+    .slice(-MAX_TAIL_LINES);
+}
+
 export function LiveRegion({ live }: { live: LiveState }): ReactElement {
   return h(
     Box,
@@ -25,11 +38,22 @@ export function LiveRegion({ live }: { live: LiveState }): ReactElement {
     ...live.activeTools.map((tool) =>
       h(
         Box,
-        { key: tool.toolCallId, marginLeft: 2 },
-        h(Spinner, null),
-        h(Text, null, " "),
-        h(ToolLabel, { name: tool.name }),
-        tool.args.length > 0 ? h(Text, { dimColor: true }, ` ${tool.args}`) : null,
+        { key: tool.toolCallId, marginLeft: 2, flexDirection: "column" },
+        h(
+          Box,
+          null,
+          h(Spinner, null),
+          h(Text, null, " "),
+          h(ToolLabel, { name: tool.name }),
+          tool.args.length > 0 ? h(Text, { dimColor: true }, ` ${tool.args}`) : null,
+        ),
+        ...tailLines(tool.outputTail).map((line, index) =>
+          h(
+            Text,
+            { key: `${tool.toolCallId}-tail-${String(index)}`, dimColor: true },
+            `    ${line}`,
+          ),
+        ),
       ),
     ),
     live.compacting

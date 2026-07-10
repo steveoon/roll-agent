@@ -79,7 +79,7 @@ function formatYamlSyntaxError(configPath: string, error: unknown): string {
   return `${baseMessage}\n${error.message}`;
 }
 
-/** 在指定目录及其父目录中查找配置文件 */
+/** 在指定目录及其父目录中查找配置文件，最后兜底用户 home 目录 */
 function findConfigFile(startDir: string): string | undefined {
   let dir = resolve(startDir);
   const root = resolve("/");
@@ -95,11 +95,18 @@ function findConfigFile(startDir: string): string | undefined {
     if (parent === dir) break;
     dir = parent;
   }
+
+  for (const name of CONFIG_FILE_NAMES) {
+    const candidate = resolve(homedir(), name);
+    if (existsSync(candidate)) {
+      return candidate;
+    }
+  }
   return undefined;
 }
 
 /** 展开 `~` 为用户 home 目录 */
-function expandTilde(filePath: string): string {
+export function expandTilde(filePath: string): string {
   if (filePath === "~") {
     return homedir();
   }

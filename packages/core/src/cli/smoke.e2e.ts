@@ -1101,7 +1101,7 @@ test("e2e smoke: roll chat without provider config exits with guidance", () => {
   const workspace = mkdtempSync(resolve(tmpdir(), `roll-chat-json-${randomUUID()}-`));
 
   try {
-    const result = runRoll(["chat", "--json"], workspace);
+    const result = runRoll(["chat", "--json"], workspace, { env: { HOME: workspace } });
     assert.equal(
       result.status,
       1,
@@ -1232,9 +1232,10 @@ test("e2e smoke: config setup fails clearly without a TTY", () => {
 
 test("e2e smoke: config init writes ask section and ask config can be set/get", () => {
   const workspace = mkdtempSync(resolve(tmpdir(), `roll-config-${randomUUID()}-`));
+  const homeEnv = { HOME: workspace };
 
   try {
-    const initResult = runRoll(["config", "init"], workspace, { input: "\n\n\n" });
+    const initResult = runRoll(["config", "init"], workspace, { input: "\n\n\n", env: homeEnv });
     assert.equal(
       initResult.status,
       0,
@@ -1246,21 +1247,29 @@ test("e2e smoke: config init writes ask section and ask config can be set/get", 
     assert.match(configText, /^ask:/m);
     assert.ok(!configText.includes("router:"));
 
-    const setModelResult = runRoll(["config", "set", "ask.llmModel", "gpt-4.1-mini"], workspace);
+    const setModelResult = runRoll(["config", "set", "ask.llmModel", "gpt-4.1-mini"], workspace, {
+      env: homeEnv,
+    });
     assert.equal(
       setModelResult.status,
       0,
       `config set ask.llmModel failed\nstdout:\n${setModelResult.stdout}\nstderr:\n${setModelResult.stderr}`,
     );
 
-    const getModelResult = runRoll(["config", "get", "ask.llmModel"], workspace);
+    const getModelResult = runRoll(["config", "get", "ask.llmModel"], workspace, { env: homeEnv });
     assert.equal(getModelResult.status, 0, getModelResult.stderr);
     assert.equal(getModelResult.stdout.trim(), "gpt-4.1-mini");
 
-    const setThresholdResult = runRoll(["config", "set", "ask.confirmThreshold", "0.7"], workspace);
+    const setThresholdResult = runRoll(
+      ["config", "set", "ask.confirmThreshold", "0.7"],
+      workspace,
+      { env: homeEnv },
+    );
     assert.equal(setThresholdResult.status, 0, setThresholdResult.stderr);
 
-    const getThresholdResult = runRoll(["config", "get", "ask.confirmThreshold"], workspace);
+    const getThresholdResult = runRoll(["config", "get", "ask.confirmThreshold"], workspace, {
+      env: homeEnv,
+    });
     assert.equal(getThresholdResult.status, 0, getThresholdResult.stderr);
     assert.equal(getThresholdResult.stdout.trim(), "0.7");
   } finally {
@@ -1361,6 +1370,38 @@ test("e2e smoke: deprecated router config fails with migration guidance", () => 
   }
 });
 
+test("e2e smoke: deprecated runtime.bash config fails with migration guidance", () => {
+  const workspace = mkdtempSync(resolve(tmpdir(), `roll-runtime-shell-migration-${randomUUID()}-`));
+
+  try {
+    writeFileSync(
+      resolve(workspace, "roll.config.yaml"),
+      `llm:
+  default-provider: anthropic
+  default-model: claude-sonnet-4-6
+  providers: {}
+
+runtime:
+  bash:
+    enabled: true
+    auto-approve-safe: false
+
+agents:
+  data-dir: ${resolve(workspace, "agents-data")}
+`,
+      "utf-8",
+    );
+
+    const result = runRoll(["config", "get"], workspace);
+    assert.equal(result.status, 1, `config get should fail\nstdout:\n${result.stdout}`);
+    assert.match(result.stderr, /`runtime\.bash` 配置段已废弃/);
+    assert.match(result.stderr, /runtime\.shell/);
+    assert.match(result.stderr, /roll config migrate/);
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
 test("e2e smoke: config migrate rewrites router config and creates backup", () => {
   const workspace = mkdtempSync(resolve(tmpdir(), `roll-config-migrate-${randomUUID()}-`));
 
@@ -1392,6 +1433,55 @@ test("e2e smoke: config migrate rewrites router config and creates backup", () =
       ?.trim();
     assert.ok(backupPath);
     assert.equal(existsSync(backupPath), true);
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("e2e smoke: config migrate rewrites runtime.bash to runtime.shell", () => {
+  const workspace = mkdtempSync(resolve(tmpdir(), `roll-runtime-shell-migrate-${randomUUID()}-`));
+
+  try {
+    const configPath = resolve(workspace, "roll.config.yaml");
+    writeFileSync(
+      configPath,
+      `llm:
+  default-provider: anthropic
+  default-model: claude-sonnet-4-6
+  providers: {}
+
+runtime:
+  bash:
+    enabled: true
+    auto-approve-safe: false
+    session:
+      enabled: true
+
+agents:
+  data-dir: ${resolve(workspace, "agents-data")}
+`,
+      "utf-8",
+    );
+
+    const migrateResult = runRoll(["config", "migrate"], workspace);
+    assert.equal(
+      migrateResult.status,
+      0,
+      `config migrate failed\nstdout:\n${migrateResult.stdout}\nstderr:\n${migrateResult.stderr}`,
+    );
+    assert.match(migrateResult.stdout, /runtime\.bash/);
+    assert.match(migrateResult.stdout, /runtime\.shell/);
+
+    const migratedConfig = readFileSync(configPath, "utf-8");
+    assert.match(migratedConfig, /^runtime:/m);
+    assert.match(migratedConfig, /shell:/);
+    assert.match(migratedConfig, /auto-approve-safe: false/);
+    assert.match(migratedConfig, /session:\n\s+enabled: true/);
+    assert.ok(!migratedConfig.includes("bash:"));
+
+    const getResult = runRoll(["config", "get", "runtime.shell.enabled"], workspace);
+    assert.equal(getResult.status, 0, getResult.stderr);
+    assert.match(getResult.stdout, /true/);
   } finally {
     rmSync(workspace, { recursive: true, force: true });
   }

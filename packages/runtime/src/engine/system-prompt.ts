@@ -5,16 +5,42 @@ export interface SkillPromptSummary {
   readonly description: string;
 }
 
+export interface SessionExecToolIds {
+  readonly command: string;
+  readonly poll: string;
+}
+
+export interface AgentOnboardingCatalogEntry {
+  readonly shortName: string;
+  readonly description: string;
+}
+
+export interface AgentOnboardingPromptInfo {
+  readonly installToolId: string;
+  readonly catalog: readonly AgentOnboardingCatalogEntry[];
+}
+
 export interface BuildChatSystemPromptOptions {
   readonly skills?: readonly SkillPromptSummary[];
   readonly skillToolId?: string;
+  readonly bashToolId?: string;
+  readonly shellToolId?: string;
+  readonly shellHints?: readonly string[];
+  readonly sessionExecToolIds?: SessionExecToolIds;
+  readonly agentCount?: number;
+  readonly agentOnboarding?: AgentOnboardingPromptInfo;
 }
 
 const MAX_SKILL_DESCRIPTION_CHARS = 240;
 
-const IDENTITY_SECTION =
-  "你是花卷 Roll 的会话助手，运行在 roll chat 里。" +
-  "你通过已注册 Agent 提供的工具（MCP）观察和操作外部世界；你没有独立的文件系统或 shell，工具就是你的全部执行手段。";
+const IDENTITY_PREFIX = "你是花卷 Roll 的会话助手，运行在 roll chat 里。";
+
+function identitySection(hasShell: boolean): string {
+  const tail = hasShell
+    ? "你通过已注册 Agent 提供的工具（MCP）观察和操作外部世界，并有一个内建 shell 工具可以在本机执行命令。"
+    : "你通过已注册 Agent 提供的工具（MCP）观察和操作外部世界；你没有独立的文件系统或 shell，工具就是你的全部执行手段。";
+  return IDENTITY_PREFIX + tail;
+}
 
 const GROUNDING_SECTION = [
   "# 工具使用纪律",
@@ -58,11 +84,65 @@ function buildSkillsSection(skills: readonly SkillPromptSummary[], skillToolId: 
   ].join("\n");
 }
 
+function buildAgentOnboardingSection(info: AgentOnboardingPromptInfo): string {
+  const catalog = info.catalog
+    .map(
+      (entry) =>
+        `- ${entry.shortName}: ${truncate(entry.description.replace(/\s+/g, " ").trim(), MAX_SKILL_DESCRIPTION_CHARS)}`,
+    )
+    .join("\n");
+  return [
+    "# Agent 安装",
+    "当前没有任何已注册的子 Agent，对外部系统的操作能力受限。可安装的官方 Agent：",
+    catalog,
+    `当用户的需求涉及上述 Agent 的能力时，先说明它的用途并征得用户同意，再调用 ${info.installToolId} 安装（安装会执行 npm install，用户还需在界面上二次确认）。新 Agent 的工具从下一轮对话开始可用。`,
+    "绝不在用户未明确同意的情况下自行安装。",
+  ].join("\n");
+}
+
+function buildShellSection(
+  shellToolId: string,
+  sessionExec: SessionExecToolIds | undefined,
+  shellHints: readonly string[],
+): string {
+  const longRunningLines = sessionExec
+    ? [
+        `- 预计跑几十秒以上的命令（构建、批处理脚本）不要用 ${shellToolId}（会被单轮超时杀掉），改用 ${sessionExec.command} 后台执行。`,
+        `- ${sessionExec.command} 未结束时会返回 session_id；用 ${sessionExec.poll}（chars 留空）轮询进度直到拿到退出码，需要中断时 chars 传 "\\u0003"。`,
+      ]
+    : ["- 预计耗时较长的命令（如构建、脚本）要显式调大 timeout_ms。"];
+  return [
+    "# Shell 工具",
+    `- 需要在本机执行命令时调用 ${shellToolId}；用 workdir 参数指定工作目录，不要在 command 里用 cd。`,
+    ...shellHints.map((hint) => `- ${hint}`),
+    "- 输出会被截断，优先用精确过滤或预览命令，而不是全量 dump 大文件。",
+    "- 优先使用只读命令；有副作用或破坏性的命令可能需要用户确认，被拒绝时不要绕过。",
+    ...longRunningLines,
+  ].join("\n");
+}
+
 export function buildChatSystemPrompt(options: BuildChatSystemPromptOptions = {}): string {
-  const sections = [IDENTITY_SECTION, GROUNDING_SECTION, PERSISTENCE_SECTION];
+  const shellToolId = options.shellToolId ?? options.bashToolId;
+  const sections = [
+    identitySection(shellToolId !== undefined),
+    GROUNDING_SECTION,
+    PERSISTENCE_SECTION,
+  ];
+  if (
+    options.agentCount === 0 &&
+    options.agentOnboarding !== undefined &&
+    options.agentOnboarding.catalog.length > 0
+  ) {
+    sections.push(buildAgentOnboardingSection(options.agentOnboarding));
+  }
   const skills = options.skills ?? [];
   if (skills.length > 0) {
     sections.push(buildSkillsSection(skills, options.skillToolId ?? SKILL_TOOL_ID));
+  }
+  if (shellToolId !== undefined) {
+    sections.push(
+      buildShellSection(shellToolId, options.sessionExecToolIds, options.shellHints ?? []),
+    );
   }
   sections.push(OUTPUT_SECTION);
   return sections.join("\n\n");

@@ -12,15 +12,46 @@ import {
 } from "@roll-agent/core/registry/process-manager";
 import { normalizeListedTools } from "@roll-agent/core/cli/utils/agent-tools";
 import { getAgentEnv } from "@roll-agent/core/config/helpers";
+import { catalogPackageSpec, getAgentCatalog } from "@roll-agent/core/registry/catalog";
+import { resolveAgentCatalog } from "@roll-agent/core/registry/catalog-discovery";
+import { installAgent } from "@roll-agent/core/registry/install";
+import type { AgentCatalogEntry } from "@roll-agent/core/registry/catalog";
+import type { InstallAgentEvent } from "@roll-agent/core/registry/install";
 import type { RollConfig } from "@roll-agent/core/config/schema";
 import type { RegisteredAgent } from "@roll-agent/core/types/agent";
-import { createSkillLibrary, type SkillLibrary } from "@roll-agent/core/skills/library";
+import {
+  createSkillLibrary,
+  type SkillLibrary,
+  type SkillSummary,
+} from "@roll-agent/core/skills/library";
 import type { AgentToolSource, SourceTool } from "../tool-bridge/build-tools.ts";
+import { AGENT_INSTALL_TOOL_ID } from "../tool-bridge/agent-install-tool.ts";
 import type { ToolAnnotations, ToolPolicy } from "../types/policy.ts";
 import type { ThreadStore } from "../store/thread-store.ts";
-import { AgentSession } from "./agent-session.ts";
+import {
+  AgentSession,
+  type AgentInstallSessionResult,
+  type AgentSessionAgentInstall,
+  type AgentSessionBashSession,
+  type SessionAgentRefresh,
+} from "./agent-session.ts";
 import { resolveContextWindow } from "./context-window.ts";
-import { buildChatSystemPrompt } from "./system-prompt.ts";
+import { buildChatSystemPrompt, type AgentOnboardingPromptInfo } from "./system-prompt.ts";
+import {
+  BASH_TOOL_ID,
+  POWERSHELL_TOOL_ID,
+  type SessionBashSettings,
+} from "../tool-bridge/bash-tool.ts";
+import { EXEC_COMMAND_ID, EXEC_POLL_ID } from "../tool-bridge/session-exec-tool.ts";
+import {
+  type CommandClassifier,
+  unknownCommandClassifier,
+} from "../types/command-classification.ts";
+import {
+  resolveShellProfile,
+  type ShellProfile,
+  type ShellProfileResolutionResult,
+} from "../bash/profile.ts";
 
 const DEFAULT_MAX_STEPS = 80;
 
@@ -44,6 +75,11 @@ export interface ConversationEngineOptions {
   readonly onAgentBootstrapIssue?: (issue: AgentBootstrapIssue) => void;
   readonly skillLibrary?: SkillLibrary | null;
   readonly onSkillLibraryIssue?: (message: string) => void;
+  readonly sessionExecEnabled?: boolean;
+  readonly shellProfile?: ShellProfile | null;
+  readonly resolveShellProfileFn?: typeof resolveShellProfile;
+  readonly installAgentFn?: typeof installAgent;
+  readonly resolveCatalogFn?: typeof resolveAgentCatalog;
 }
 
 export interface CreateSessionInput {
@@ -93,6 +129,13 @@ function extractAnnotations(listed: unknown): ToolAnnotations | undefined {
     : result;
 }
 
+function formatInstallEventLine(event: InstallAgentEvent): string {
+  if (event.type === "retry") {
+    return `安装遇到网络问题，${Math.round(event.delayMs / 1000)}s 后重试（第 ${event.attempt + 1} 次）...`;
+  }
+  return event.type === "warn" ? `警告：${event.message}` : event.message;
+}
+
 async function ensureCoreManagedAgentReady(
   agent: RegisteredAgent,
   dataDir: string,
@@ -123,7 +166,17 @@ export class ConversationEngine {
   private readonly explicitSkillLibrary: SkillLibrary | null | undefined;
   private readonly onSkillLibraryIssue: ((message: string) => void) | undefined;
   private readonly onAgentBootstrapIssue: ((issue: AgentBootstrapIssue) => void) | undefined;
+  private readonly sessionExecEnabled: boolean;
+  private readonly explicitShellProfile: ShellProfile | null | undefined;
+  private readonly resolveShellProfileFn: typeof resolveShellProfile;
+  private readonly installAgentFn: typeof installAgent;
+  private readonly resolveCatalogFn: typeof resolveAgentCatalog;
   private ready: Promise<EngineContext> | undefined;
+  private refreshChain: Promise<void> = Promise.resolve();
+  private resolvedCatalog: readonly AgentCatalogEntry[] | undefined;
+  private shellProfileResolution: ShellProfileResolutionResult | undefined;
+  private shellUnsupportedWarned = false;
+  private shellSessionUnsupportedWarned = false;
 
   constructor(options: ConversationEngineOptions) {
     this.config = options.config;
@@ -136,12 +189,17 @@ export class ConversationEngine {
       options.ensureAgentReady ??
       ((agent, env) => ensureCoreManagedAgentReady(agent, this.config.agents.dataDir, env));
     this.debugEvents = options.debugEvents ?? false;
+    this.sessionExecEnabled = options.sessionExecEnabled ?? true;
+    this.explicitShellProfile = options.shellProfile;
+    this.resolveShellProfileFn = options.resolveShellProfileFn ?? resolveShellProfile;
     this.explicitAgents = options.agents;
     this.explicitModel = options.model;
     this.explicitSources = options.sources;
     this.explicitSkillLibrary = options.skillLibrary;
     this.onSkillLibraryIssue = options.onSkillLibraryIssue;
     this.onAgentBootstrapIssue = options.onAgentBootstrapIssue;
+    this.installAgentFn = options.installAgentFn ?? installAgent;
+    this.resolveCatalogFn = options.resolveCatalogFn ?? resolveAgentCatalog;
   }
 
   async createSession(input: CreateSessionInput = {}): Promise<AgentSession> {
@@ -166,6 +224,77 @@ export class ConversationEngine {
     return this.buildSession(context, threadId, this.store.getMessages(threadId));
   }
 
+  private resolveRuntimeShellProfile(): ShellProfile | undefined {
+    const shell = this.config.runtime.shell;
+    if (!shell.enabled) {
+      return undefined;
+    }
+    if (this.explicitShellProfile !== undefined) {
+      return this.explicitShellProfile ?? undefined;
+    }
+    if (this.shellProfileResolution === undefined) {
+      this.shellProfileResolution = this.resolveShellProfileFn({
+        platform: process.platform,
+        env: process.env,
+      });
+    }
+    const result = this.shellProfileResolution;
+    if (!result.supported) {
+      if (!this.shellUnsupportedWarned) {
+        this.shellUnsupportedWarned = true;
+        const reason =
+          result.reason === "pwsh-version-unsupported"
+            ? "检测到的 pwsh 版本低于 7"
+            : "未检测到 PowerShell 7 (pwsh)";
+        process.stderr.write(
+          `roll chat: ${reason}，Windows 原生 shell 工具已跳过注册；可运行 winget install Microsoft.PowerShell\n`,
+        );
+      }
+      return undefined;
+    }
+    return result.profile;
+  }
+
+  private resolveShellSettings(profile: ShellProfile): SessionBashSettings {
+    const shell = this.config.runtime.shell;
+    return {
+      workdir: process.cwd(),
+      defaultTimeoutMs: shell.defaultTimeoutMs,
+      maxTimeoutMs: shell.maxTimeoutMs,
+      turnTimeoutMs: this.config.runtime.turnTimeoutMs,
+      maxCaptureBytes: shell.maxCaptureBytes,
+      maxModelOutputChars: shell.maxModelOutputChars,
+      profile,
+    };
+  }
+
+  private resolveSessionExecSettings(profile: ShellProfile): AgentSessionBashSession | undefined {
+    if (!this.sessionExecEnabled) {
+      return undefined;
+    }
+    const shell = this.config.runtime.shell;
+    if (!shell.enabled || !shell.session.enabled) {
+      return undefined;
+    }
+    if (!profile.supportsSessionExec) {
+      if (!this.shellSessionUnsupportedWarned) {
+        this.shellSessionUnsupportedWarned = true;
+        process.stderr.write(
+          "roll chat: Windows 原生 session exec 暂未支持，已跳过 roll__exec_command / roll__exec_poll\n",
+        );
+      }
+      return undefined;
+    }
+    return {
+      workdir: process.cwd(),
+      profile,
+      maxSessions: shell.session.maxSessions,
+      defaultYieldMs: shell.session.defaultYieldMs,
+      maxOutputTokens: shell.session.maxOutputTokens,
+      bufferCapacity: shell.maxCaptureBytes,
+    };
+  }
+
   private buildSession(
     context: EngineContext,
     id: string,
@@ -178,13 +307,31 @@ export class ConversationEngine {
     );
     const skills = context.skillLibrary?.list() ?? [];
     const skillLibrary = skills.length > 0 ? context.skillLibrary : undefined;
-    const systemPrompt = buildChatSystemPrompt({ skills });
+    const shellProfile = this.resolveRuntimeShellProfile();
+    const bash = shellProfile ? this.resolveShellSettings(shellProfile) : undefined;
+    const bashSession = shellProfile ? this.resolveSessionExecSettings(shellProfile) : undefined;
+    const bashClassifier: CommandClassifier | undefined = shellProfile
+      ? shellProfile.supportsSafeCommandClassification && this.config.runtime.shell.autoApproveSafe
+        ? shellProfile
+        : unknownCommandClassifier
+      : undefined;
+    const systemPrompt = this.composeSystemPrompt(
+      skills,
+      context.sources.length,
+      shellProfile,
+      bashSession,
+    );
+    const agentInstall = this.resolveAgentInstallBinding();
     return new AgentSession({
       id,
       model: context.model,
       sources: context.sources,
       systemPrompt,
       ...(skillLibrary ? { skillLibrary } : {}),
+      ...(bash ? { bash } : {}),
+      ...(bashClassifier ? { bashClassifier } : {}),
+      ...(bashSession ? { bashSession } : {}),
+      ...(agentInstall ? { agentInstall } : {}),
       maxSteps: this.maxSteps,
       compaction: this.config.runtime.compaction,
       turnTimeoutMs: this.config.runtime.turnTimeoutMs,
@@ -219,26 +366,17 @@ export class ConversationEngine {
       };
     }
     const agents = this.explicitAgents ?? new AgentStore(this.config.agents.dataDir).list();
+    if (this.agentInstallEnabled()) {
+      this.resolvedCatalog = await this.resolveCatalogFn(this.config, {
+        allowNetwork: false,
+        ...(this.config.install.registry ? { registry: this.config.install.registry } : {}),
+      });
+    }
     const sources: AgentToolSource[] = [];
 
     for (const agent of agents) {
       try {
-        const transport = resolveTransportWithDevSpawnSpec(agent);
-        const env = getAgentEnv(this.config, agent.skill.name);
-        await this.ensureAgentReady(agent, env);
-        const client = await this.clientManager.connect(
-          agent.skill.name,
-          transport,
-          agent.installPath,
-          { samplingModel: model, ...(env ? { env } : {}) },
-        );
-        const listed = (await client.listTools()).tools;
-        const normalized = normalizeListedTools(listed);
-        const sourceTools: SourceTool[] = normalized.map((agentTool, index) => ({
-          tool: agentTool,
-          annotations: extractAnnotations(listed[index]),
-        }));
-        sources.push({ agentName: agent.skill.name, client, tools: sourceTools });
+        sources.push(await this.connectAgentSource(agent, model));
       } catch (error) {
         this.onAgentBootstrapIssue?.({
           agentName: agent.skill.name,
@@ -249,6 +387,192 @@ export class ConversationEngine {
 
     const skillLibrary = this.resolveSkillLibrary(agents);
     return { model, sources, ...(skillLibrary ? { skillLibrary } : {}) };
+  }
+
+  private async connectAgentSource(
+    agent: RegisteredAgent,
+    model: LanguageModelV4,
+  ): Promise<AgentToolSource> {
+    const transport = resolveTransportWithDevSpawnSpec(agent);
+    const env = getAgentEnv(this.config, agent.skill.name);
+    await this.ensureAgentReady(agent, env);
+    const client = await this.clientManager.connect(
+      agent.skill.name,
+      transport,
+      agent.installPath,
+      {
+        samplingModel: model,
+        ...(env ? { env } : {}),
+      },
+    );
+    const listed = (await client.listTools()).tools;
+    const normalized = normalizeListedTools(listed);
+    const sourceTools: SourceTool[] = normalized.map((agentTool, index) => ({
+      tool: agentTool,
+      annotations: extractAnnotations(listed[index]),
+    }));
+    return { agentName: agent.skill.name, client, tools: sourceTools };
+  }
+
+  async prepareAgentRefresh(agent: RegisteredAgent): Promise<SessionAgentRefresh> {
+    const result = this.refreshChain.then(() => this.runAgentRefresh(agent));
+    this.refreshChain = result.then(
+      () => undefined,
+      () => undefined,
+    );
+    return result;
+  }
+
+  private async runAgentRefresh(agent: RegisteredAgent): Promise<SessionAgentRefresh> {
+    const context = await this.ensureReady();
+    const source = await this.connectAgentSource(agent, context.model);
+    const sources = [
+      ...context.sources.filter((item) => item.agentName !== source.agentName),
+      source,
+    ];
+    const agents = this.explicitAgents ?? new AgentStore(this.config.agents.dataDir).list();
+    const skillLibrary = this.resolveSkillLibrary(agents);
+    this.ready = Promise.resolve({
+      model: context.model,
+      sources,
+      ...(skillLibrary ? { skillLibrary } : {}),
+    });
+    const skills = skillLibrary?.list() ?? [];
+    const effectiveLibrary = skillLibrary && skills.length > 0 ? skillLibrary : undefined;
+    const shellProfile = this.resolveRuntimeShellProfile();
+    const bashSession = shellProfile ? this.resolveSessionExecSettings(shellProfile) : undefined;
+    return {
+      source,
+      ...(effectiveLibrary ? { skillLibrary: effectiveLibrary } : {}),
+      systemPrompt: this.composeSystemPrompt(skills, sources.length, shellProfile, bashSession),
+    };
+  }
+
+  private composeSystemPrompt(
+    skills: readonly SkillSummary[],
+    agentCount: number,
+    shellProfile: ShellProfile | undefined,
+    bashSession: AgentSessionBashSession | undefined,
+  ): string {
+    const onboarding = this.resolveAgentOnboardingInfo();
+    return buildChatSystemPrompt({
+      skills,
+      ...(shellProfile
+        ? {
+            shellToolId: shellProfile.toolName === "powershell" ? POWERSHELL_TOOL_ID : BASH_TOOL_ID,
+            shellHints: shellProfile.systemPromptHints(),
+          }
+        : {}),
+      ...(bashSession
+        ? { sessionExecToolIds: { command: EXEC_COMMAND_ID, poll: EXEC_POLL_ID } }
+        : {}),
+      agentCount,
+      ...(onboarding ? { agentOnboarding: onboarding } : {}),
+    });
+  }
+
+  private agentInstallEnabled(): boolean {
+    return this.explicitSources === undefined && this.explicitAgents === undefined;
+  }
+
+  private currentCatalog(): readonly AgentCatalogEntry[] {
+    return this.resolvedCatalog ?? getAgentCatalog(this.config);
+  }
+
+  private resolveAgentOnboardingInfo(): AgentOnboardingPromptInfo | undefined {
+    if (!this.agentInstallEnabled()) {
+      return undefined;
+    }
+    const catalog = this.currentCatalog();
+    if (catalog.length === 0) {
+      return undefined;
+    }
+    return {
+      installToolId: AGENT_INSTALL_TOOL_ID,
+      catalog: catalog.map((entry) => ({
+        shortName: entry.shortName,
+        description: entry.description,
+      })),
+    };
+  }
+
+  private resolveAgentInstallBinding(): AgentSessionAgentInstall | undefined {
+    if (!this.agentInstallEnabled()) {
+      return undefined;
+    }
+    const catalog = this.currentCatalog();
+    if (catalog.length === 0) {
+      return undefined;
+    }
+    return {
+      catalog: catalog.map((entry) => ({
+        shortName: entry.shortName,
+        description: entry.description,
+      })),
+      install: (shortName, report) => this.installCatalogAgent(shortName, report),
+    };
+  }
+
+  private async installCatalogAgent(
+    shortName: string,
+    report: (line: string) => void,
+  ): Promise<AgentInstallSessionResult> {
+    const entry = this.currentCatalog().find((item) => item.shortName === shortName);
+    if (!entry) {
+      return { outcome: { ok: false, message: `未知的官方 Agent 短名: ${shortName}` } };
+    }
+
+    const result = await this.installAgentFn(
+      {
+        packageSpec: catalogPackageSpec(entry),
+        skipBrowserSetup: true,
+        autoStart: true,
+        expectedSkillName: entry.skillName,
+      },
+      {
+        agentsConfig: this.config.agents,
+        installConfig: this.config.install,
+        getStartEnv: (agentName) => getAgentEnv(this.config, agentName),
+        report: (event) => report(formatInstallEventLine(event)),
+      },
+    );
+    if (!result.ok) {
+      return {
+        outcome: {
+          ok: false,
+          message: result.message,
+          ...(result.retryCommand ? { retryCommand: result.retryCommand } : {}),
+        },
+      };
+    }
+
+    const agent = result.agent;
+    const version =
+      agent.source?.type === "installed-package" ? agent.source.installedVersion : undefined;
+    const browserSetupSkipped =
+      agent.runtime.ownership === "core-managed" && agent.runtime.setup?.playwright !== undefined;
+    const outcome = {
+      ok: true as const,
+      agentName: agent.skill.name,
+      ...(version ? { version } : {}),
+      missingEnv: (result.envReport?.missingRequired ?? []).map((item) => item.name),
+      ...(browserSetupSkipped ? { retryCommand: `roll agent install ${entry.shortName}` } : {}),
+      refreshApplied: false,
+    };
+
+    const context = await this.ensureReady();
+    if (context.sources.some((item) => item.agentName === agent.skill.name)) {
+      report(`Agent "${agent.skill.name}" 本会话已接入旧版本连接，更新需重启 roll chat 生效。`);
+      return { outcome };
+    }
+
+    try {
+      const refresh = await this.prepareAgentRefresh(agent);
+      return { outcome, refresh };
+    } catch (error) {
+      report(`接入新 Agent 失败：${error instanceof Error ? error.message : String(error)}`);
+      return { outcome };
+    }
   }
 
   private resolveSkillLibrary(agents: readonly RegisteredAgent[]): SkillLibrary | undefined {

@@ -1,5 +1,6 @@
 import { defineCommand } from "citty";
 import type { AgentSession } from "@roll-agent/runtime";
+import { inspectLlmConfigReadiness } from "../../config/helpers.ts";
 import { loadConfig } from "../../config/loader.ts";
 import { resolveLLMCall, thinkingProviderOptions } from "../../llm/providers.ts";
 import { createInterface, type Interface as ReadlineInterface } from "node:readline/promises";
@@ -16,6 +17,7 @@ import type {
   ChatTokenUsage,
 } from "../../types/chat.ts";
 import type { RollConfig } from "../../config/schema.ts";
+import type { LlmConfigReadiness } from "../../config/helpers.ts";
 import { titleFromMessage } from "../chat/title.ts";
 import { buildBannerLines, renderBannerText, type BannerInfo } from "../chat/banner.ts";
 import { getCurrentVersion } from "../utils/update-checker.ts";
@@ -90,15 +92,29 @@ async function loadRuntime(): Promise<RuntimeModule> {
   return import("@roll-agent/runtime");
 }
 
+async function runChatOnboardingFlow(provider: string, model: string): Promise<boolean> {
+  const specifier = new URL(`./setup.${moduleExtension}`, import.meta.url).href;
+  const setupModule = (await import(specifier)) as typeof import("./setup.ts");
+  return setupModule.runChatOnboarding({}, { provider, model });
+}
+
+export function resolveChatLlmReadiness(config: RollConfig): LlmConfigReadiness {
+  return inspectLlmConfigReadiness(config, {
+    provider: config.runtime.provider ?? config.llm.defaultProvider,
+    model: config.runtime.model ?? config.llm.defaultModel,
+  });
+}
+
 async function runServer(config: RollConfig): Promise<void> {
-  const provider = config.runtime.provider ?? config.llm.defaultProvider;
-  const modelName = config.runtime.model ?? config.llm.defaultModel;
-  const providerConfig = config.llm.providers[provider];
-  if (!providerConfig) {
-    log.error(`LLM provider "${provider}" 未配置。请检查 roll.config.yaml`);
+  const llmStatus = resolveChatLlmReadiness(config);
+  if (!llmStatus.configured || !llmStatus.providerConfig) {
+    log.error(llmStatus.message);
     process.exitCode = 1;
     return;
   }
+  const providerConfig = llmStatus.providerConfig;
+  const provider = llmStatus.provider;
+  const modelName = llmStatus.model;
 
   const runtime = await loadRuntime();
   const { ConversationEngine, ThreadStore, RuntimeServer, createStdioConnection } = runtime;
@@ -356,7 +372,7 @@ export default defineCommand({
     },
   },
   async run({ args }) {
-    const { config } = loadConfig();
+    let { config } = loadConfig();
 
     if (args.server) {
       await runServer(config);
@@ -368,14 +384,22 @@ export default defineCommand({
       return;
     }
 
-    const provider = config.runtime.provider ?? config.llm.defaultProvider;
-    const modelName = config.runtime.model ?? config.llm.defaultModel;
-    const providerConfig = config.llm.providers[provider];
-    if (!providerConfig) {
-      log.error(`LLM provider "${provider}" 未配置。请检查 roll.config.yaml`);
+    let llmStatus = resolveChatLlmReadiness(config);
+    if (!llmStatus.configured) {
+      const canPrompt = process.stdin.isTTY === true && process.stderr.isTTY === true && !args.json;
+      if (canPrompt && (await runChatOnboardingFlow(llmStatus.provider, llmStatus.model))) {
+        config = loadConfig().config;
+        llmStatus = resolveChatLlmReadiness(config);
+      }
+    }
+    if (!llmStatus.configured || !llmStatus.providerConfig) {
+      log.error(llmStatus.message);
       process.exitCode = 1;
       return;
     }
+    const providerConfig = llmStatus.providerConfig;
+    const provider = llmStatus.provider;
+    const modelName = llmStatus.model;
 
     if (args.json && !args.message) {
       log.error('--json 模式需要消息：roll chat "<message>" --json');
@@ -404,8 +428,10 @@ export default defineCommand({
       debugEvents: isDebugLogEnabled(),
       onAgentBootstrapIssue: reportAgentBootstrapIssue,
       onSkillLibraryIssue: reportSkillLibraryIssue,
+      sessionExecEnabled: args.message === undefined,
     });
 
+    let sessionForCleanup: AgentSession | undefined;
     try {
       let session: AgentSession;
       if (args.session) {
@@ -423,6 +449,7 @@ export default defineCommand({
           args.message ? { title: titleFromMessage(args.message) } : {},
         );
       }
+      sessionForCleanup = session;
 
       if (args.json && args.message) {
         const result = await runJsonTurn(session, resolveSkillSendText(session, args.message));
@@ -493,6 +520,7 @@ export default defineCommand({
       log.error(error instanceof Error ? error.message : String(error));
       process.exitCode = 1;
     } finally {
+      sessionForCleanup?.abort();
       await engine.dispose();
       store.close();
     }

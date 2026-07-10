@@ -5,6 +5,25 @@ import type { RollConfig } from "./schema.ts";
 const ENV_PLACEHOLDER_PATTERN = /\$\{[^}]+\}/;
 
 type AgentEnvMap = RollConfig["agents"]["env"];
+type LlmProviderConfig = RollConfig["llm"]["providers"][string];
+
+export const LLM_CONFIG_STATUS_CODES = [
+  "ready",
+  "missing-provider",
+  "missing-api-key",
+  "unresolved-api-key",
+] as const;
+export type LlmConfigStatusCode = (typeof LLM_CONFIG_STATUS_CODES)[number];
+
+export interface LlmConfigReadiness {
+  readonly configured: boolean;
+  readonly status: LlmConfigStatusCode;
+  readonly provider: string;
+  readonly model: string;
+  readonly summary: string;
+  readonly message: string;
+  readonly providerConfig?: LlmProviderConfig;
+}
 
 export interface AgentEnvCheckItem {
   readonly name: string;
@@ -19,6 +38,66 @@ export interface AgentEnvCheckReport {
   readonly items: readonly AgentEnvCheckItem[];
   readonly missingRequired: readonly AgentEnvCheckItem[];
   readonly processEnvOnlyRequired: readonly AgentEnvCheckItem[];
+}
+
+export function hasUnresolvedEnvPlaceholder(value: string): boolean {
+  return ENV_PLACEHOLDER_PATTERN.test(value);
+}
+
+export function inspectLlmConfigReadiness(
+  config: RollConfig,
+  options: { readonly provider?: string; readonly model?: string } = {},
+): LlmConfigReadiness {
+  const provider = options.provider ?? config.llm.defaultProvider;
+  const model = options.model ?? config.llm.defaultModel;
+  const providerConfig = config.llm.providers[provider];
+  const summary = `${provider}/${model}`;
+
+  if (!providerConfig) {
+    return {
+      configured: false,
+      status: "missing-provider",
+      provider,
+      model,
+      summary,
+      message: `LLM provider "${provider}" 未配置。请运行 roll setup 或 roll config setup llm`,
+    };
+  }
+
+  const apiKey = providerConfig.apiKey.trim();
+  if (apiKey.length === 0) {
+    return {
+      configured: false,
+      status: "missing-api-key",
+      provider,
+      model,
+      summary,
+      message: `LLM provider "${provider}" 的 apiKey 未配置。请运行 roll setup 或 roll config setup llm`,
+      providerConfig,
+    };
+  }
+
+  if (hasUnresolvedEnvPlaceholder(apiKey)) {
+    return {
+      configured: false,
+      status: "unresolved-api-key",
+      provider,
+      model,
+      summary,
+      message: `LLM provider "${provider}" 的 apiKey 仍是未解析的环境变量占位符。请设置对应环境变量，或运行 roll setup / roll config setup llm`,
+      providerConfig,
+    };
+  }
+
+  return {
+    configured: true,
+    status: "ready",
+    provider,
+    model,
+    summary,
+    message: `LLM provider "${provider}" 已配置`,
+    providerConfig,
+  };
 }
 
 function getAgentEnvFromMap(

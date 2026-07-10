@@ -48,7 +48,7 @@ function formatPreflightFailure(
   return `参数校验失败: ${issues.map((issue) => issue.message).join("; ")}`;
 }
 
-async function gateToolCall(
+export async function gateToolCall(
   ctx: ToolBridgeContext,
   agentName: string,
   toolName: string,

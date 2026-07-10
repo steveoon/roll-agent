@@ -20,7 +20,7 @@ describe("buildStdioChildEnv", () => {
     restoreEnv("ROLL_TEST_INHERITED", ORIGINAL_ROLL_TEST_INHERITED);
   });
 
-  it("sets quiet defaults without inheriting arbitrary parent env when agent env is absent", () => {
+  it("sets quiet defaults and inherits parent env when agent env is absent", () => {
     process.env["ROLL_TEST_INHERITED"] = "secret";
     delete process.env["NODE_OPTIONS"];
     delete process.env["ROLL_AGENT_LOG_LEVEL"];
@@ -31,7 +31,15 @@ describe("buildStdioChildEnv", () => {
     assert.equal(env["ROLL_AGENT_LOG_LEVEL"], "warn");
     assert.equal(env["PYTHONUTF8"], "1");
     assert.equal(env["PYTHONIOENCODING"], "utf-8");
-    assert.equal(env["ROLL_TEST_INHERITED"], undefined);
+    assert.equal(env["ROLL_TEST_INHERITED"], "secret");
+  });
+
+  it("agent env overrides inherited parent env of the same name", () => {
+    process.env["ROLL_TEST_INHERITED"] = "from-parent";
+
+    const env = buildStdioChildEnv({ ROLL_TEST_INHERITED: "configured" });
+
+    assert.equal(env["ROLL_TEST_INHERITED"], "configured");
   });
 
   it("respects explicit python encoding overrides", () => {

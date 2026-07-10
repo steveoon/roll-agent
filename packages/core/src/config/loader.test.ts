@@ -20,15 +20,34 @@ function makeTmpDir(): string {
   return dir;
 }
 
+function restoreEnv(name: string, value: string | undefined): void {
+  if (value === undefined) {
+    delete process.env[name];
+  } else {
+    process.env[name] = value;
+  }
+}
+
 describe("loadConfig", () => {
   let tmpDir: string;
+  let homeDir: string;
+  let previousHome: string | undefined;
+  let previousUserProfile: string | undefined;
 
   beforeEach(() => {
     tmpDir = makeTmpDir();
+    homeDir = makeTmpDir();
+    previousHome = process.env["HOME"];
+    previousUserProfile = process.env["USERPROFILE"];
+    process.env["HOME"] = homeDir;
+    process.env["USERPROFILE"] = homeDir;
   });
 
   afterEach(() => {
+    restoreEnv("HOME", previousHome);
+    restoreEnv("USERPROFILE", previousUserProfile);
     rmSync(tmpDir, { recursive: true, force: true });
+    rmSync(homeDir, { recursive: true, force: true });
   });
 
   it("should return default config when no config file exists", () => {
@@ -38,6 +57,50 @@ describe("loadConfig", () => {
     assert.deepEqual(config.ask, {});
     assert.deepEqual(config.runtime.approval, { default: "guarded", overrides: {} });
     assert.deepEqual(config.browser.instances, {});
+  });
+
+  it("falls back to the home-directory config when the cwd chain has none", () => {
+    writeFileSync(
+      resolve(homeDir, "roll.config.yaml"),
+      `llm:
+  default-provider: openai
+  default-model: gpt-test
+  providers: {}
+ask: {}
+`,
+      "utf-8",
+    );
+
+    const { config, configPath } = loadConfig({ cwd: tmpDir });
+    assert.equal(configPath, resolve(homeDir, "roll.config.yaml"));
+    assert.equal(config.llm.defaultProvider, "openai");
+  });
+
+  it("prefers a cwd-chain config over the home-directory fallback", () => {
+    writeFileSync(
+      resolve(homeDir, "roll.config.yaml"),
+      `llm:
+  default-provider: openai
+  default-model: home-model
+  providers: {}
+ask: {}
+`,
+      "utf-8",
+    );
+    writeFileSync(
+      resolve(tmpDir, "roll.config.yaml"),
+      `llm:
+  default-provider: anthropic
+  default-model: project-model
+  providers: {}
+ask: {}
+`,
+      "utf-8",
+    );
+
+    const { config, configPath } = loadConfig({ cwd: tmpDir });
+    assert.equal(configPath, resolve(tmpDir, "roll.config.yaml"));
+    assert.equal(config.llm.defaultModel, "project-model");
   });
 
   it("should load and parse a valid YAML config", () => {

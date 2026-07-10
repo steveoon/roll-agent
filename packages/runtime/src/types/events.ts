@@ -37,6 +37,14 @@ export type SessionEvent =
       readonly isError: boolean;
     }
   | {
+      readonly type: "tool-output-delta";
+      readonly toolCallId: string;
+      readonly agentName: string;
+      readonly toolName: string;
+      readonly stream: "stdout" | "stderr";
+      readonly delta: string;
+    }
+  | {
       readonly type: "confirmation-required";
       readonly approvalId: string;
       readonly agentName: string;

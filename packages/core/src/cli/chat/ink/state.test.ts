@@ -198,7 +198,7 @@ test("confirmation-required enters confirm phase; confirm-resolved returns to bu
   assert.deepEqual(state.pendingConfirm, {
     approvalId: "a1",
     prompt: "执行 browser-use-agent.click_ref（高风险）?",
-    args: "{}",
+    args: "",
   });
   state = chatReducer(state, { type: "confirm-resolved" });
   assert.equal(state.phase, "busy");

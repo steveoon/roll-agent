@@ -93,6 +93,26 @@ export const CONFIG_KEY_CODEC: KeyCodecNode = {
             keepRecentTokens: LEAF,
           },
         },
+        shell: {
+          kind: "object",
+          fields: {
+            enabled: LEAF,
+            autoApproveSafe: LEAF,
+            defaultTimeoutMs: LEAF,
+            maxTimeoutMs: LEAF,
+            maxCaptureBytes: LEAF,
+            maxModelOutputChars: LEAF,
+            session: {
+              kind: "object",
+              fields: {
+                enabled: LEAF,
+                maxSessions: LEAF,
+                defaultYieldMs: LEAF,
+                maxOutputTokens: LEAF,
+              },
+            },
+          },
+        },
       },
     },
     agents: {

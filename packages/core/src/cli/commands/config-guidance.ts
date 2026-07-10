@@ -126,6 +126,34 @@ export const CONFIG_GUIDANCE_ENTRIES = [
       "runtime:\n  approval:\n    overrides:\n      browser-use-agent.zhipin_send_prepared_reply: confirm\n      browser-use-agent.browser_status: auto",
   },
   {
+    path: "runtime.shell.enabled",
+    title: "Chat 内建 shell 工具",
+    purpose:
+      "开启后 `roll chat` 注册内建 shell 工具：macOS/Linux 为 `roll__bash`，Windows 原生为 `roll__powershell`（需 PowerShell 7+）。命令继承 roll 进程环境变量；默认确认策略可由 `runtime.approval` 及精确 override 覆盖。",
+    defaultBehavior: `默认值为 \`${String(DEFAULT_CONFIG.runtime.shell.enabled)}\`（关闭）。Windows 未检测到 pwsh 7+ 时会跳过注册。`,
+    example: "runtime:\n  shell:\n    enabled: true",
+    setupCommand: "roll config setup shell",
+  },
+  {
+    path: "runtime.shell.auto-approve-safe",
+    title: "只读命令免确认",
+    purpose:
+      "开启后用内建规则分类器识别 POSIX known-safe 只读命令（如 `ls`、`cat`、`git status`），在 `guarded`/`auto` 策略下免确认执行；dangerous（`rm -rf`、`sudo`）与无法识别的命令默认仍需确认。工具级显式 approval override 优先；Windows PowerShell 当前全部按 unknown 处理。",
+    defaultBehavior: `默认值为 \`${String(DEFAULT_CONFIG.runtime.shell.autoApproveSafe)}\`。关闭后 POSIX 回归默认逐条确认；Windows PowerShell 默认逐条确认，显式 approval override 可覆盖。`,
+    example: "runtime:\n  shell:\n    enabled: true\n    auto-approve-safe: false",
+    setupCommand: "roll config setup shell",
+  },
+  {
+    path: "runtime.shell.session.enabled",
+    title: "Chat 会话式长命令执行",
+    purpose:
+      "开启后在 POSIX shell 后端注册 `roll__exec_command` + `roll__exec_poll` 工具：命令在后台会话执行、跨轮存活，模型轮询进度并读取退出码，适合超过单轮超时的长脚本。Windows 原生 session exec 暂未支持。仅交互 REPL 与 `--server` 长驻模式注册（单条消息 / `--json` 单轮会话随进程结束，不提供该工具）；`--server` 下 `exec_command` 需 `runtime.approval.overrides` 里 `roll.exec_command: auto` 显式授权。",
+    defaultBehavior: `默认值为 \`${String(DEFAULT_CONFIG.runtime.shell.session.enabled)}\`（关闭）。需同时开启 runtime.shell.enabled；背景会话随 roll chat 进程退出而终止。`,
+    example:
+      "runtime:\n  shell:\n    enabled: true\n    session:\n      enabled: true\n  approval:\n    overrides:\n      roll.exec_command: auto",
+    setupCommand: "roll config setup shell",
+  },
+  {
     path: "skills.dirs",
     title: "Chat 额外 skill 目录",
     purpose:

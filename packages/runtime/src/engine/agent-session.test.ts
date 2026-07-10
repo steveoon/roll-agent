@@ -1,5 +1,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { simulateReadableStream } from "ai";
 import { MockLanguageModelV4 } from "ai/test";
 import type {
@@ -11,11 +14,29 @@ import type { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { AgentSession } from "./agent-session.ts";
 import type { AgentToolSource } from "../tool-bridge/build-tools.ts";
 import { DefaultToolPolicy } from "../policy/default-policy.ts";
+import { ConfigurableToolPolicy } from "../policy/configurable-policy.ts";
 import type { PolicyDecision, ToolPolicy } from "../types/policy.ts";
 import type { SessionEvent } from "../types/events.ts";
+import { ruleBasedClassifier } from "../bash/classifier/index.ts";
+import type { ShellProfile } from "../bash/profile.ts";
 
 const STOP: LanguageModelV4FinishReason = { unified: "stop", raw: "stop" };
 const TOOL_CALLS: LanguageModelV4FinishReason = { unified: "tool-calls", raw: "tool-calls" };
+
+const posixProfile: ShellProfile = {
+  id: "posix",
+  toolName: "bash",
+  supportsSessionExec: true,
+  supportsSafeCommandClassification: true,
+  buildSpawn: (command, workdir, env) => ({
+    file: "/bin/sh",
+    args: ["-c", command],
+    options: { cwd: workdir, detached: true, stdio: ["ignore", "pipe", "pipe"], env },
+  }),
+  classify: (command, workdir) => ruleBasedClassifier.classify(command, workdir),
+  killTree: async () => {},
+  systemPromptHints: () => [],
+};
 
 function usage(inputTokens = 1, outputTokens = 1) {
   return {
@@ -134,6 +155,18 @@ async function collect(events: AsyncIterable<SessionEvent>): Promise<SessionEven
     out.push(event);
   }
   return out;
+}
+
+function testBashSettings(workdir: string) {
+  return {
+    workdir,
+    defaultTimeoutMs: 10_000,
+    maxTimeoutMs: 600_000,
+    turnTimeoutMs: 600_000,
+    maxCaptureBytes: 1_048_576,
+    maxModelOutputChars: 16_000,
+    profile: posixProfile,
+  };
 }
 
 test("AgentSession 流式输出纯文本并累积历史", async () => {
@@ -872,4 +905,313 @@ test("AgentSession 拒绝同一 session 并发 send，避免 emit/gate 状态串
     const next = await iterator.next();
     drained = next.done === true;
   }
+});
+
+test(
+  "bash 工具：模型调用 roll__bash 产出 delta 与 tool-result 事件",
+  { skip: process.platform === "win32" },
+  async () => {
+    const { tmpdir } = await import("node:os");
+    const model = sequencedModel([
+      toolCallStep("roll__bash", { command: "echo session-bash" }),
+      textStep("完成"),
+    ]);
+    const session = new AgentSession({
+      id: "bash-1",
+      model,
+      sources: [],
+      maxSteps: 5,
+      policy: new ConfigurableToolPolicy({
+        defaultMode: "auto",
+        overrides: { "roll.bash": "auto" },
+      }),
+      bash: {
+        profile: posixProfile,
+        workdir: tmpdir(),
+        defaultTimeoutMs: 10_000,
+        maxTimeoutMs: 600_000,
+        turnTimeoutMs: 600_000,
+        maxCaptureBytes: 1_048_576,
+        maxModelOutputChars: 16_000,
+      },
+    });
+
+    const events: SessionEvent[] = [];
+    for await (const event of session.send("跑一下 echo")) {
+      events.push(event);
+    }
+
+    const toolCall = events.find((event) => event.type === "tool-call");
+    assert.equal(toolCall?.type, "tool-call");
+    assert.equal(toolCall.agentName, "roll");
+    assert.equal(toolCall.toolName, "bash");
+
+    const deltas = events.filter((event) => event.type === "tool-output-delta");
+    assert.ok(deltas.length >= 1);
+    assert.ok(
+      deltas.some(
+        (event) => event.type === "tool-output-delta" && event.delta.includes("session-bash"),
+      ),
+    );
+
+    const toolResult = events.find((event) => event.type === "tool-result");
+    assert.equal(toolResult?.type, "tool-result");
+    assert.equal(toolResult.isError, false);
+    assert.ok(JSON.stringify(toolResult.output).includes("Exit code: 0"));
+  },
+);
+
+test(
+  "bash 工具 E2E：工作区外 pattern 文件触发确认，工作区内 pattern 文件自动执行",
+  { skip: process.platform === "win32" },
+  async () => {
+    const workdir = mkdtempSync(join(tmpdir(), "roll-bash-e2e-work-"));
+    const outsideDir = mkdtempSync(join(tmpdir(), "roll-bash-e2e-outside-"));
+    try {
+      writeFileSync(join(workdir, "haystack.txt"), "needle\nother\n");
+      writeFileSync(join(workdir, "patterns.txt"), "needle\n");
+      const outsidePattern = join(outsideDir, "patterns.txt");
+      writeFileSync(outsidePattern, "needle\n");
+
+      const unsafeSession = new AgentSession({
+        id: "bash-e2e-unsafe",
+        model: sequencedModel([
+          toolCallStep("roll__bash", {
+            command: `grep -f ${outsidePattern} haystack.txt`,
+          }),
+          textStep("不应继续执行"),
+        ]),
+        sources: [],
+        maxSteps: 5,
+        policy: new DefaultToolPolicy(),
+        bashClassifier: ruleBasedClassifier,
+        bash: testBashSettings(workdir),
+      });
+      const unsafeEvents: SessionEvent[] = [];
+      for await (const event of unsafeSession.send("用工作区外 pattern 文件 grep")) {
+        unsafeEvents.push(event);
+        if (event.type === "confirmation-required") {
+          unsafeSession.reject(event.approvalId);
+        }
+      }
+      assert.ok(unsafeEvents.some((event) => event.type === "confirmation-required"));
+      const denied = unsafeEvents.find((event) => event.type === "tool-result");
+      assert.equal(denied?.type, "tool-result");
+      assert.equal(denied.isError, true);
+      assert.ok(JSON.stringify(denied.output).includes("已取消执行"));
+      unsafeSession.abort();
+
+      const safeSession = new AgentSession({
+        id: "bash-e2e-safe",
+        model: sequencedModel([
+          toolCallStep("roll__bash", { command: "grep -f patterns.txt haystack.txt" }),
+          textStep("完成"),
+        ]),
+        sources: [],
+        maxSteps: 5,
+        policy: new DefaultToolPolicy(),
+        bashClassifier: ruleBasedClassifier,
+        bash: testBashSettings(workdir),
+      });
+      const safeEvents = await collect(safeSession.send("用工作区内 pattern 文件 grep"));
+      assert.ok(!safeEvents.some((event) => event.type === "confirmation-required"));
+      const result = safeEvents.find((event) => event.type === "tool-result");
+      assert.equal(result?.type, "tool-result");
+      assert.equal(result.isError, false);
+      assert.ok(JSON.stringify(result.output).includes("needle"));
+      assert.ok(JSON.stringify(result.output).includes("Exit code: 0"));
+      safeSession.abort();
+    } finally {
+      rmSync(workdir, { recursive: true, force: true });
+      rmSync(outsideDir, { recursive: true, force: true });
+    }
+  },
+);
+
+test("未配置 bash 时工具不存在", async () => {
+  const session = new AgentSession({
+    id: "no-bash",
+    model: sequencedModel([textStep("hi")]),
+    sources: [],
+    maxSteps: 3,
+  });
+  const events: SessionEvent[] = [];
+  for await (const event of session.send("hi")) {
+    events.push(event);
+  }
+  assert.ok(!events.some((event) => event.type === "tool-call"));
+});
+
+function fakeSkillLibrary(
+  name: string,
+  content: string,
+): import("@roll-agent/core/skills/library").SkillLibrary {
+  const summary = { name, description: "测试 skill", source: "user" } as const;
+  return {
+    list: () => [summary],
+    load: (requested) =>
+      requested === name ? { summary, content, referencePaths: [] } : undefined,
+    loadReference: () => undefined,
+  };
+}
+
+test("applyAgentRefresh 后新 agent 工具与新 system prompt 从下一轮生效", async () => {
+  let capturedSystem: string | undefined;
+  let index = 0;
+  const steps = [toolCallStep("new-agent__probe", { q: "x" }), textStep("完成")];
+  const model = new MockLanguageModelV4({
+    doStream: async (options) => {
+      const first = options.prompt[0];
+      if (first && first.role === "system") {
+        capturedSystem = first.content;
+      }
+      const chunks = steps[index] ?? steps[steps.length - 1] ?? [];
+      index += 1;
+      return streamChunks(chunks);
+    },
+  });
+  let calls = 0;
+  const session = new AgentSession({
+    id: "refresh-1",
+    model,
+    sources: [source("old-agent", "noop")],
+    maxSteps: 8,
+    systemPrompt: "OLD_PROMPT",
+  });
+
+  session.applyAgentRefresh({
+    source: source("new-agent", "probe", () => (calls += 1)),
+    systemPrompt: "NEW_PROMPT",
+  });
+
+  const events = await collect(session.send("call new agent"));
+  assert.equal(capturedSystem, "NEW_PROMPT");
+  assert.equal(calls, 1);
+  const toolResult = events.find((event) => event.type === "tool-result");
+  assert.ok(toolResult && toolResult.type === "tool-result" && toolResult.isError === false);
+});
+
+test("applyAgentRefresh 注入 skill library 后 roll__skill 可用", async () => {
+  const model = sequencedModel([
+    toolCallStep("roll__skill", { name: "new-skill" }),
+    textStep("ok"),
+  ]);
+  const session = new AgentSession({ id: "refresh-2", model, sources: [], maxSteps: 8 });
+
+  session.applyAgentRefresh({
+    source: source("new-agent", "probe"),
+    skillLibrary: fakeSkillLibrary("new-skill", "SKILL BODY 内容"),
+    systemPrompt: "NEW_PROMPT",
+  });
+
+  const events = await collect(session.send("load skill"));
+  const toolResult = events.find((event) => event.type === "tool-result");
+  assert.ok(toolResult && toolResult.type === "tool-result" && toolResult.isError === false);
+  assert.deepEqual(
+    session.getSkillSummaries().map((skill) => skill.name),
+    ["new-skill"],
+  );
+});
+
+test("applyAgentRefresh 对同名 agent 幂等，不产生带后缀的重复工具", async () => {
+  const model = sequencedModel([textStep("noop")]);
+  const session = new AgentSession({
+    id: "refresh-3",
+    model,
+    sources: [source("echo-agent", "echo")],
+    maxSteps: 4,
+  });
+
+  session.applyAgentRefresh({
+    source: source("echo-agent", "echo"),
+    systemPrompt: "NEW_PROMPT",
+  });
+
+  const events = await collect(session.send("hi"));
+  assert.ok(events.some((event) => event.type === "message-finish"));
+});
+
+test("agent_install 工具无 policy 也强制确认，批准后热刷新生效", async () => {
+  const model = sequencedModel([
+    toolCallStep("roll__agent_install", { agent: "probe" }),
+    textStep("装好了"),
+  ]);
+  let installed = 0;
+  const session = new AgentSession({
+    id: "install-1",
+    model,
+    sources: [],
+    maxSteps: 8,
+    agentInstall: {
+      catalog: [{ shortName: "probe", description: "测试 agent" }],
+      install: async (shortName, report) => {
+        installed += 1;
+        report(`安装 ${shortName}...`);
+        return {
+          outcome: {
+            ok: true,
+            agentName: "probe-agent",
+            missingEnv: [],
+            refreshApplied: false,
+          },
+          refresh: {
+            source: source("probe-agent", "run"),
+            systemPrompt: "REFRESHED_PROMPT",
+          },
+        };
+      },
+    },
+  });
+
+  const events: SessionEvent[] = [];
+  for await (const event of session.send("install probe")) {
+    events.push(event);
+    if (event.type === "confirmation-required") {
+      session.approve(event.approvalId);
+    }
+  }
+
+  const confirmation = events.find((event) => event.type === "confirmation-required");
+  assert.ok(confirmation && confirmation.type === "confirmation-required");
+  assert.equal(confirmation.toolName, "agent_install");
+  assert.equal(installed, 1);
+  const toolResult = events.find((event) => event.type === "tool-result");
+  assert.ok(toolResult && toolResult.type === "tool-result" && toolResult.isError === false);
+  assert.match(JSON.stringify(toolResult.output), /下一轮对话开始可用/);
+});
+
+test("agent_install 被拒绝时不执行安装", async () => {
+  const model = sequencedModel([
+    toolCallStep("roll__agent_install", { agent: "probe" }),
+    textStep("好的"),
+  ]);
+  let installed = 0;
+  const session = new AgentSession({
+    id: "install-2",
+    model,
+    sources: [],
+    maxSteps: 8,
+    agentInstall: {
+      catalog: [{ shortName: "probe", description: "测试 agent" }],
+      install: async () => {
+        installed += 1;
+        return {
+          outcome: { ok: true, agentName: "probe-agent", missingEnv: [], refreshApplied: false },
+        };
+      },
+    },
+  });
+
+  const events: SessionEvent[] = [];
+  for await (const event of session.send("install probe")) {
+    events.push(event);
+    if (event.type === "confirmation-required") {
+      session.reject(event.approvalId, "不装了");
+    }
+  }
+
+  assert.equal(installed, 0);
+  const toolResult = events.find((event) => event.type === "tool-result");
+  assert.ok(toolResult && toolResult.type === "tool-result" && toolResult.isError === true);
+  assert.match(JSON.stringify(toolResult.output), /已取消执行/);
 });

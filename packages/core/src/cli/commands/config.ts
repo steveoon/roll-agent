@@ -1,5 +1,6 @@
 import { defineCommand } from "citty";
 import { readFileSync, writeFileSync, existsSync } from "node:fs";
+import { homedir } from "node:os";
 import { resolve } from "node:path";
 import { createInterface } from "node:readline/promises";
 import { stringify as stringifyYaml } from "yaml";
@@ -13,6 +14,7 @@ import {
   inspectConfigFile,
   loadConfig,
   parseConfigDocument,
+  resolveConfigPath,
   validateConfigText,
 } from "../../config/loader.ts";
 import { encodePathToYaml, normalizeUserPath } from "../../config/key-codec.ts";
@@ -169,7 +171,7 @@ async function readInitConfigAnswers(): Promise<InitConfigAnswers> {
 
 /** 交互式初始化配置文件 */
 async function initConfig(): Promise<void> {
-  const configPath = resolve(process.cwd(), "roll.config.yaml");
+  const configPath = resolveConfigPath() ?? resolve(homedir(), "roll.config.yaml");
 
   if (existsSync(configPath)) {
     const inspection = inspectConfigFile({ configPath });
@@ -217,7 +219,7 @@ function buildBackupPath(configPath: string): string {
   return `${configPath}.bak.${timestamp}`;
 }
 
-function migrateConfig(): void {
+export function migrateConfig(): void {
   const inspection = inspectConfigFile();
 
   if (inspection.status === "not-found") {
@@ -245,11 +247,11 @@ function migrateConfig(): void {
     return;
   }
 
-  const backupPath = buildBackupPath(inspection.configPath);
-  writeFileSync(backupPath, inspection.raw, "utf-8");
-
   const nextYaml = stringifyYaml(migrationResult.document, { lineWidth: 0 });
   validateConfigText(nextYaml, inspection.configPath);
+
+  const backupPath = buildBackupPath(inspection.configPath);
+  writeFileSync(backupPath, inspection.raw, "utf-8");
   writeFileSync(inspection.configPath, nextYaml, "utf-8");
 
   console.log(`✓ 配置文件已迁移: ${inspection.configPath}`);
