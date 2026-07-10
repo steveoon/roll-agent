@@ -67,6 +67,13 @@ export class SessionManager {
     return this.sessions.size;
   }
 
+  interruptAll(): void {
+    for (const session of this.sessions.values()) {
+      session.profile.killTree(session.child.pid, "interrupt").catch(() => {});
+    }
+    this.sessions.clear();
+  }
+
   terminateAll(): void {
     for (const session of this.sessions.values()) {
       session.profile.killTree(session.child.pid, "terminate").catch(() => {});

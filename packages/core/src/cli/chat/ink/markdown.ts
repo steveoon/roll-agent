@@ -2,6 +2,7 @@ import { createElement as h } from "react";
 import type { ReactElement } from "react";
 import { Box, Text } from "ink";
 import { marked, type Token, type Tokens } from "marked";
+import { displayWidth } from "./display-width.ts";
 
 const ENTITIES: Record<string, string> = {
   "&amp;": "&",
@@ -51,50 +52,6 @@ function renderInline(
         return decodeEntities(token.raw);
     }
   });
-}
-
-const WIDE_RANGES: ReadonlyArray<readonly [number, number]> = [
-  [0x1100, 0x115f],
-  [0x2329, 0x232a],
-  [0x2705, 0x2705],
-  [0x274c, 0x274e],
-  [0x2b1b, 0x2b55],
-  [0x2e80, 0x303e],
-  [0x3041, 0x33ff],
-  [0x3400, 0x4dbf],
-  [0x4e00, 0x9fff],
-  [0xa000, 0xa4cf],
-  [0xac00, 0xd7a3],
-  [0xf900, 0xfaff],
-  [0xfe10, 0xfe19],
-  [0xfe30, 0xfe6f],
-  [0xff00, 0xff60],
-  [0xffe0, 0xffe6],
-  [0x1f000, 0x1faff],
-  [0x20000, 0x2fffd],
-  [0x30000, 0x3fffd],
-];
-
-const ZERO_WIDTH_RANGES: ReadonlyArray<readonly [number, number]> = [
-  [0x0300, 0x036f],
-  [0x200b, 0x200f],
-  [0xfe00, 0xfe0f],
-];
-
-function inRanges(codePoint: number, ranges: ReadonlyArray<readonly [number, number]>): boolean {
-  return ranges.some(([start, end]) => codePoint >= start && codePoint <= end);
-}
-
-export function displayWidth(text: string): number {
-  let width = 0;
-  for (const ch of text) {
-    const codePoint = ch.codePointAt(0) ?? 0;
-    if (inRanges(codePoint, ZERO_WIDTH_RANGES)) {
-      continue;
-    }
-    width += inRanges(codePoint, WIDE_RANGES) ? 2 : 1;
-  }
-  return width;
 }
 
 function inlineText(tokens: Token[] | undefined): string {

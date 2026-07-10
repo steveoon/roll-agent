@@ -70,6 +70,16 @@ test("terminateAll 杀掉活进程并清空", { skip }, async () => {
   assert.equal(result.kind, "exited");
 });
 
+test("interruptAll 中断活进程并清空", { skip }, async () => {
+  const mgr = manager(4);
+  const session = mgr.spawn({ command: "sleep 30", workdir: process.cwd() });
+  assert.equal(mgr.size(), 1);
+  mgr.interruptAll();
+  assert.equal(mgr.size(), 0);
+  const result = await pollUntilDeadline(session, performance.now() + 3_000, 100);
+  assert.equal(result.kind, "exited");
+});
+
 test("get 命中已注册会话", { skip }, async () => {
   const mgr = manager(4, [777]);
   const session = mgr.spawn({ command: "sleep 5", workdir: process.cwd() });

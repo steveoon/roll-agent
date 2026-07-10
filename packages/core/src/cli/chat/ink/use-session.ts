@@ -17,6 +17,7 @@ export interface UseSessionResult {
   readonly state: ChatUiState;
   readonly submit: (text: string, sendText?: string) => void;
   readonly compact: () => void;
+  readonly cancel: () => void;
   readonly resolveConfirm: (approved: boolean) => void;
   readonly setDraft: (value: string) => void;
   readonly setThinking: (level: ThinkingLevel) => void;
@@ -135,6 +136,13 @@ export function useSession(session: AgentSession, options: UseSessionOptions): U
     drive(session.compact("manual")).catch(() => undefined);
   }, [drive, session]);
 
+  const cancel = useCallback(() => {
+    if (!busyRef.current) {
+      return;
+    }
+    session.cancel();
+  }, [session]);
+
   const resolveConfirm = useCallback((approved: boolean) => {
     decisionRef.current?.(approved);
   }, []);
@@ -171,6 +179,7 @@ export function useSession(session: AgentSession, options: UseSessionOptions): U
     state,
     submit,
     compact,
+    cancel,
     resolveConfirm,
     setDraft,
     setThinking,

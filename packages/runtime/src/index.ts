@@ -94,3 +94,8 @@ export type {
   ContextCompactionReason,
   ContextCompactionStrategy,
 } from "./types/events.ts";
+export {
+  SESSION_CANCELLATION_REASONS,
+  USER_CANCELLATION_ABORT_REASON,
+} from "./types/cancellation.ts";
+export type { SessionCancellationReason } from "./types/cancellation.ts";

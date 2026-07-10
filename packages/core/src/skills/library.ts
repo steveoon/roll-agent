@@ -18,12 +18,19 @@ export interface LoadedSkill {
   readonly summary: SkillSummary;
   readonly content: string;
   readonly referencePaths: readonly string[];
+  readonly skillRoot?: string;
+}
+
+export interface LoadedSkillReference {
+  readonly content: string;
+  readonly skillRoot?: string;
 }
 
 export interface SkillLibrary {
   list(): readonly SkillSummary[];
   load(name: string): LoadedSkill | undefined;
   loadReference(name: string, referencePath: string): string | undefined;
+  loadReferenceDocument?(name: string, referencePath: string): LoadedSkillReference | undefined;
 }
 
 export interface CreateSkillLibraryOptions {
@@ -220,6 +227,7 @@ export function createSkillLibrary(options: CreateSkillLibraryOptions = {}): Ski
         summary: entry.summary,
         content,
         referencePaths: collectReferencedSkillPaths(content),
+        skillRoot: dirname(safeRealpath(entry.skillPath) ?? resolve(entry.skillPath)),
       };
     }
     if (entry.fallbackContent !== undefined) {
@@ -228,15 +236,28 @@ export function createSkillLibrary(options: CreateSkillLibraryOptions = {}): Ski
     return { summary: entry.summary, content: entry.summary.description, referencePaths: [] };
   };
 
+  const loadReferenceDocument = (
+    name: string,
+    referencePath: string,
+  ): LoadedSkillReference | undefined => {
+    const entry = byName.get(name);
+    if (!entry || entry.skillPath === undefined) {
+      return undefined;
+    }
+    const reference = readReferencedSkillDocument(entry.skillPath, referencePath);
+    if (reference === undefined) {
+      return undefined;
+    }
+    return {
+      content: reference.content,
+      skillRoot: dirname(safeRealpath(entry.skillPath) ?? resolve(entry.skillPath)),
+    };
+  };
+
   return {
     list: () => [...byName.values()].map((entry) => entry.summary),
     load: loadEntry,
-    loadReference: (name, referencePath) => {
-      const entry = byName.get(name);
-      if (!entry || entry.skillPath === undefined) {
-        return undefined;
-      }
-      return readReferencedSkillDocument(entry.skillPath, referencePath)?.content;
-    },
+    loadReference: (name, referencePath) => loadReferenceDocument(name, referencePath)?.content,
+    loadReferenceDocument,
   };
 }

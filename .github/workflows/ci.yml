@@ -89,8 +89,21 @@ jobs:
           node --experimental-strip-types --experimental-sqlite --test
           packages/runtime/src/bash/profile.test.ts
           packages/runtime/src/bash/powershell-smoke.test.ts
+          packages/runtime/src/bash/format-result.test.ts
           packages/runtime/src/tool-bridge/bash-tool.test.ts
+          packages/runtime/src/tool-bridge/session-exec-tool.test.ts
+          packages/runtime/src/tool-bridge/skill-tool.test.ts
+          packages/runtime/src/engine/agent-session.test.ts
+          packages/runtime/src/engine/system-prompt.test.ts
           packages/runtime/src/engine/conversation-engine.test.ts
+          packages/runtime/src/server/runtime-server.test.ts
           packages/core/src/config/migration.test.ts
           packages/core/src/config/schema.test.ts
           packages/core/src/cli/commands/config-setup.test.ts
+          packages/core/src/cli/chat/ink/display-width.test.ts
+          packages/core/src/cli/chat/ink/line-buffer.test.ts
+          packages/core/src/cli/chat/ink/editor-keymap.test.ts
+          packages/core/src/cli/chat/ink/text-prompt.test.ts
+          packages/core/src/cli/chat/ink/state.test.ts
+          packages/core/src/cli/chat/ink/app.test.ts
+          packages/core/src/skills/library.test.ts

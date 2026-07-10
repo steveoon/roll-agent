@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { runBashCommand, type RunBashOptions } from "./exec.ts";
+import { BASH_TERMINATION_CAUSES } from "./format-result.ts";
 import { resolveShellProfile, type ShellProfile } from "./profile.ts";
 
 const skip = process.platform !== "win32";
@@ -81,6 +82,8 @@ test("PowerShell one-shot: AbortSignal 可快速终止长任务", { skip }, asyn
       opts({ command: "Start-Sleep -Seconds 30", abortSignal: controller.signal }),
     );
     assert.equal(result.timedOut, false);
+    assert.equal(result.exitCode, 130);
+    assert.equal(result.terminationCause, BASH_TERMINATION_CAUSES.abort);
     assert.ok(result.wallTimeMs < 5_000, `wallTime=${String(result.wallTimeMs)}`);
   } finally {
     clearTimeout(timer);

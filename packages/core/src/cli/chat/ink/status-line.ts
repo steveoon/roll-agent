@@ -11,7 +11,7 @@ import {
   formatTokens,
   formatTurnUsage,
 } from "../../utils/token-format.ts";
-import { displayWidth } from "./markdown.ts";
+import { displayWidth } from "./display-width.ts";
 import { GLYPHS } from "../../utils/glyphs.ts";
 import { thinkingLabel } from "./thinking.ts";
 

@@ -4,15 +4,20 @@ import { constants } from "node:os";
 import { performance } from "node:perf_hooks";
 import type { Readable } from "node:stream";
 import { OutputSink } from "./output-buffer.ts";
-import { EXEC_TIMEOUT_EXIT_CODE, normalizeExitCode, type BashExecResult } from "./format-result.ts";
+import {
+  BASH_TERMINATION_CAUSES,
+  EXEC_TIMEOUT_EXIT_CODE,
+  normalizeExitCode,
+  type BashExecResult,
+  type BashTerminationCause,
+} from "./format-result.ts";
 import type { ShellProfile } from "./profile.ts";
+import { isTimeoutAbortReason } from "../types/cancellation.ts";
 
 const IO_DRAIN_TIMEOUT_MS = 2_000;
 const KILL_TREE_DEADLINE_MS = 2_500;
 const ROOT_KILL_SETTLE_TIMEOUT_MS = 1_000;
 const ABORTED_EXIT_CODE = 130;
-const TERMINATION_CAUSES = { timeout: "timeout", abort: "abort" } as const;
-type TerminationCause = (typeof TERMINATION_CAUSES)[keyof typeof TERMINATION_CAUSES];
 
 interface RunBashCommandDeps {
   readonly spawn: typeof spawn;
@@ -57,15 +62,17 @@ function spawnErrorResult(message: string, timeoutMs: number): BashExecResult {
   };
 }
 
-function abortedResult(timeoutMs: number): BashExecResult {
+function abortedResult(timeoutMs: number, reason: unknown): BashExecResult {
   const empty = new OutputSink(0).collect();
+  const timedOut = isTimeoutAbortReason(reason);
   return {
-    exitCode: ABORTED_EXIT_CODE,
-    timedOut: false,
+    exitCode: timedOut ? EXEC_TIMEOUT_EXIT_CODE : ABORTED_EXIT_CODE,
+    timedOut,
     timeoutMs,
     wallTimeMs: 0,
     stdout: empty,
     stderr: empty,
+    terminationCause: timedOut ? BASH_TERMINATION_CAUSES.timeout : BASH_TERMINATION_CAUSES.abort,
   };
 }
 
@@ -83,7 +90,7 @@ export function runBashCommand(
 
   return new Promise<BashExecResult>((resolve) => {
     if (abortSignal?.aborted) {
-      resolve(abortedResult(timeoutMs));
+      resolve(abortedResult(timeoutMs, abortSignal.reason));
       return;
     }
     if (!existsSync(workdir)) {
@@ -105,7 +112,7 @@ export function runBashCommand(
     const stderrSink = new OutputSink(maxCaptureBytes);
     let timedOut = false;
     let aborted = false;
-    let terminationCause: TerminationCause | undefined;
+    let terminationCause: BashTerminationCause | undefined;
     let killed = false;
     let settled = false;
     let exitObserved = false;
@@ -155,6 +162,7 @@ export function runBashCommand(
         wallTimeMs: performance.now() - start,
         stdout: stdoutSink.collect(),
         stderr: stderrSink.collect(),
+        ...(terminationCause ? { terminationCause } : {}),
         ...(terminationError ? { terminationError } : {}),
       });
     };
@@ -174,6 +182,7 @@ export function runBashCommand(
         wallTimeMs: performance.now() - start,
         stdout: stdoutSink.collect(),
         stderr: stderrSink.collect(),
+        ...(terminationCause ? { terminationCause } : {}),
         terminationError: `${terminationError ?? "进程树清理未完成"}；根进程在强制终止请求后仍未确认退出`,
       });
     };
@@ -241,8 +250,12 @@ export function runBashCommand(
       if (terminationCause !== undefined) {
         return;
       }
-      terminationCause = TERMINATION_CAUSES.abort;
-      aborted = true;
+      const timeoutAbort = isTimeoutAbortReason(abortSignal?.reason);
+      terminationCause = timeoutAbort
+        ? BASH_TERMINATION_CAUSES.timeout
+        : BASH_TERMINATION_CAUSES.abort;
+      timedOut = timeoutAbort;
+      aborted = !timeoutAbort;
       clearTimeout(timeoutTimer);
       escalateKill();
     };
@@ -356,7 +369,7 @@ export function runBashCommand(
       if (terminationCause !== undefined) {
         return;
       }
-      terminationCause = TERMINATION_CAUSES.timeout;
+      terminationCause = BASH_TERMINATION_CAUSES.timeout;
       timedOut = true;
       escalateKill();
     }, timeoutMs);

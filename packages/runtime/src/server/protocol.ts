@@ -47,6 +47,7 @@ export const RpcMethod = {
   Approve: "session.approve",
   Reject: "session.reject",
   Abort: "session.abort",
+  Close: "session.close",
   Messages: "session.messages",
   Compact: "session.compact",
 } as const;
@@ -63,6 +64,7 @@ export const rejectParamsSchema = z.object({
   reason: z.string().optional(),
 });
 export const abortParamsSchema = z.object({ sessionId: z.string() });
+export const closeParamsSchema = z.object({ sessionId: z.string() });
 export const messagesParamsSchema = z.object({ sessionId: z.string() });
 export const compactParamsSchema = z.object({ sessionId: z.string() });
 

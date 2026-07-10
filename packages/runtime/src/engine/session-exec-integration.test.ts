@@ -146,3 +146,39 @@ test(
     assert.equal(markerProcessCount(), 0, "abort 后不应残留进程");
   },
 );
+
+test("cancel() 在两次 poll 之间也会中断后台进程", { skip }, async () => {
+  const command = `sleep 37; : ${MARKER}`;
+  const model = sequencedModel([
+    toolCallStep("roll__exec_command", { command, yield_time_ms: 250 }),
+    textStep("准备稍后继续轮询"),
+  ]);
+  const session = new AgentSession({
+    id: "e2e-exec-cancel",
+    model,
+    sources: [],
+    maxSteps: 6,
+    bashSession: bashSession(),
+    policy: new ConfigurableToolPolicy({
+      defaultMode: "auto",
+      overrides: { "roll.exec_command": "auto" },
+    }),
+  });
+
+  const events: SessionEvent[] = [];
+  try {
+    for await (const event of session.send("启动后台任务后继续思考")) {
+      events.push(event);
+      if (event.type === "step-finish" && event.finishReason === "tool-calls") {
+        assert.equal(markerProcessCount(), 1, "取消前后台进程应仍在运行");
+        assert.equal(session.cancel(), true);
+      }
+    }
+    await delay(600);
+    assert.ok(events.some((event) => event.type === "turn-cancelled"));
+    assert.equal(markerProcessCount(), 0, "cancel 后不应残留后台进程");
+  } finally {
+    session.abort();
+    await delay(200);
+  }
+});

@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { RegisteredAgent } from "../types/agent.ts";
@@ -49,6 +49,7 @@ test("createSkillLibrary 发现 canonical 目录中的 skill 并读取 frontmatt
 
     const loaded = library.load("web-design");
     assert.ok(loaded?.content.includes("设计正文"));
+    assert.equal(loaded?.skillRoot, realpathSync(join(skillsDir, "web-design")));
   } finally {
     rmSync(home, { recursive: true, force: true });
     rmSync(project, { recursive: true, force: true });
@@ -116,7 +117,11 @@ test("extraDirs 支持目录即 skill 与 skill 集合目录两种布局", () =>
 
     const loaded = library.load("single-skill");
     assert.deepEqual(loaded?.referencePaths, ["references/guide.md"]);
+    assert.equal(loaded?.skillRoot, realpathSync(single));
     assert.equal(library.loadReference("single-skill", "references/guide.md"), "指南内容");
+    const reference = library.loadReferenceDocument?.("single-skill", "references/guide.md");
+    assert.equal(reference?.content, "指南内容");
+    assert.equal(reference?.skillRoot, realpathSync(single));
     assert.equal(library.loadReference("single-skill", "references/../SKILL.md"), undefined);
     assert.equal(library.loadReference("single-skill", "../outside.md"), undefined);
   } finally {

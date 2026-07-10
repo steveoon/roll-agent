@@ -20,6 +20,8 @@ test("buildChatSystemPrompt 包含 skill 目录与工具指引", () => {
   assert.ok(prompt.includes("# Skills"));
   assert.ok(prompt.includes("- web-design: 网页设计指南"));
   assert.ok(prompt.includes("roll__skill"));
+  assert.ok(prompt.includes("SKILL_ROOT"));
+  assert.ok(prompt.includes("不要再搜索"));
   assert.ok(prompt.includes("…"));
   assert.ok(!prompt.includes("长".repeat(300)));
 });

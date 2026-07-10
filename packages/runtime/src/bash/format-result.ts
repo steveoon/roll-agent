@@ -5,6 +5,12 @@ import { truncateMiddle } from "./truncate.ts";
 
 export const EXEC_TIMEOUT_EXIT_CODE = 124;
 export const EXIT_CODE_SIGNAL_BASE = 128;
+export const BASH_TERMINATION_CAUSES = {
+  timeout: "timeout",
+  abort: "abort",
+} as const;
+export type BashTerminationCause =
+  (typeof BASH_TERMINATION_CAUSES)[keyof typeof BASH_TERMINATION_CAUSES];
 const DEFAULT_FAILURE_EXIT_CODE = 1;
 
 export interface BashExecResult {
@@ -14,6 +20,7 @@ export interface BashExecResult {
   readonly wallTimeMs: number;
   readonly stdout: CapturedStream;
   readonly stderr: CapturedStream;
+  readonly terminationCause?: BashTerminationCause;
   readonly spawnError?: string;
   readonly terminationError?: string;
 }
@@ -65,6 +72,9 @@ export function formatBashResult(input: FormatBashResultInput): NormalizedToolRe
   const stderr = truncateMiddle(result.stderr.text, budget.stderr);
 
   const lines: string[] = [];
+  if (result.terminationCause === BASH_TERMINATION_CAUSES.abort) {
+    lines.push("命令已中断（收到取消请求），不能视为正常完成");
+  }
   if (result.timedOut) {
     lines.push(
       result.terminationError

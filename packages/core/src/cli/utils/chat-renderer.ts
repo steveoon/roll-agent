@@ -140,6 +140,17 @@ export class ChatRenderer {
         process.stderr.write(`${chalk.gray(text)}\n`);
         break;
       }
+      case "turn-cancelled":
+        this.stopMessageSpinner();
+        this.stopCompactionSpinner();
+        this.flushLine();
+        for (const spinner of this.spinners.values()) {
+          spinner.warn(`${spinner.text} ${chalk.yellow("已中断")}`);
+        }
+        this.spinners.clear();
+        this.toolLabels.clear();
+        log.warn(event.message);
+        break;
       case "error":
         this.stopMessageSpinner();
         this.stopCompactionSpinner();

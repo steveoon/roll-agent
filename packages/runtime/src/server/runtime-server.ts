@@ -5,6 +5,7 @@ import {
   RpcMethod,
   abortParamsSchema,
   approveParamsSchema,
+  closeParamsSchema,
   compactParamsSchema,
   createParamsSchema,
   isRequest,
@@ -104,8 +105,14 @@ export class RuntimeServer {
       }
       case RpcMethod.Abort: {
         const params = abortParamsSchema.parse(request.params);
-        this.requireSession(params.sessionId).abort();
-        return { ok: true };
+        return { ok: true, cancelled: this.requireSession(params.sessionId).cancel() };
+      }
+      case RpcMethod.Close: {
+        const params = closeParamsSchema.parse(request.params);
+        const session = this.requireSession(params.sessionId);
+        session.abort();
+        this.sessions.delete(params.sessionId);
+        return { closed: true };
       }
       case RpcMethod.Messages: {
         const params = messagesParamsSchema.parse(request.params);

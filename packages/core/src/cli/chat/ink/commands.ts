@@ -1,5 +1,8 @@
 import { SKILL_TOOL_ID } from "../../../skills/library.ts";
-import { displayWidth } from "./markdown.ts";
+import { displayWidth } from "./display-width.ts";
+
+const graphemeSegmenter = new Intl.Segmenter(undefined, { granularity: "grapheme" });
+const ELLIPSIS = "…";
 
 export interface SlashCommand {
   readonly kind: "command";
@@ -42,20 +45,24 @@ function collapse(text: string): string {
 }
 
 export function truncateDisplay(text: string, maxWidth: number): string {
+  if (maxWidth <= 0) {
+    return "";
+  }
   if (displayWidth(text) <= maxWidth) {
     return text;
   }
+  const contentWidth = maxWidth - displayWidth(ELLIPSIS);
   let out = "";
   let width = 0;
-  for (const ch of text) {
-    const chWidth = displayWidth(ch);
-    if (width + chWidth > maxWidth - 1) {
+  for (const { segment } of graphemeSegmenter.segment(text)) {
+    const segmentWidth = displayWidth(segment);
+    if (width + segmentWidth > contentWidth) {
       break;
     }
-    out += ch;
-    width += chWidth;
+    out += segment;
+    width += segmentWidth;
   }
-  return `${out}…`;
+  return `${out}${ELLIPSIS}`;
 }
 
 export function skillSlashName(skillName: string): string {

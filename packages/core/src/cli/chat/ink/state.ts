@@ -31,6 +31,12 @@ export type HistoryItem =
       readonly name: string;
       readonly label: string;
     }
+  | {
+      readonly kind: "cancelled";
+      readonly id: string;
+      readonly name: string;
+      readonly args: string;
+    }
   | { readonly kind: "compaction"; readonly id: string; readonly notice: string }
   | { readonly kind: "notice"; readonly id: string; readonly text: string }
   | { readonly kind: "error"; readonly id: string; readonly message: string };
@@ -304,6 +310,19 @@ function applySessionEvent(state: ChatUiState, id: string, event: SessionEvent):
           contextInputTokens: event.contextInputTokens,
           outputTokensPerSecond: event.outputTokensPerSecond,
         },
+      };
+    }
+    case "turn-cancelled": {
+      const cancelledTools: HistoryItem[] = state.live.activeTools.map((tool, index) => ({
+        kind: "cancelled",
+        id: `${id}-tool-${String(index)}`,
+        name: tool.name,
+        args: tool.args,
+      }));
+      return {
+        ...state,
+        history: [...state.history, ...cancelledTools, { kind: "notice", id, text: event.message }],
+        live: { ...EMPTY_LIVE },
       };
     }
     case "error":

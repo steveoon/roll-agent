@@ -9,11 +9,13 @@ import { ChatApp } from "./app.ts";
 interface Sink {
   approved: string[];
   rejected: string[];
+  cancelled?: number;
 }
 
 function makeSession(
   send: (input: string) => AsyncIterable<SessionEvent>,
   sink: Sink,
+  onCancel?: () => void,
 ): AgentSession {
   return {
     id: "s1",
@@ -27,6 +29,11 @@ function makeSession(
     },
     reject(id: string) {
       sink.rejected.push(id);
+      return true;
+    },
+    cancel() {
+      sink.cancelled = (sink.cancelled ?? 0) + 1;
+      onCancel?.();
       return true;
     },
     abort() {},
@@ -121,6 +128,89 @@ test("ChatApp separates the thinking indicator from the submitted user message",
   await delay(20);
 
   assert.match(lastFrame() ?? "", /刚才我不小心取消了，你重来一下\n\n.*思考中…/s);
+  unmount();
+});
+
+for (const [label, escapeSequence] of [
+  ["legacy VT", "\x1b"],
+  ["kitty keyboard", "\x1b[27u"],
+] as const) {
+  test(`ChatApp ${label} Esc 中断执行中的工具`, async () => {
+    const sink: Sink = { approved: [], rejected: [], cancelled: 0 };
+    let releaseCancellation: (() => void) | undefined;
+    const cancellation = new Promise<void>((resolve) => {
+      releaseCancellation = resolve;
+    });
+    async function* send(): AsyncIterable<SessionEvent> {
+      yield { type: "message-start", messageId: "m" };
+      yield {
+        type: "tool-call",
+        toolCallId: "c1",
+        agentName: "roll",
+        toolName: "powershell",
+        input: { command: "Start-Sleep -Seconds 30" },
+      };
+      await cancellation;
+      yield {
+        type: "turn-cancelled",
+        reason: "user",
+        message: "已取消本轮；正在运行的工具已收到中断请求。",
+      };
+    }
+    const { stdin, lastFrame, unmount } = render(
+      h(ChatApp, {
+        session: makeSession(send, sink, () => releaseCancellation?.()),
+        model: "qwen",
+        contextWindow: undefined,
+        onUserSubmit: () => {},
+        onExit: () => {},
+      }),
+    );
+    await delay(10);
+    stdin.write("run");
+    await delay(10);
+    stdin.write("\r");
+    await waitFor(() => assert.match(plain(lastFrame() ?? ""), /Esc 中断本轮/));
+
+    stdin.write(escapeSequence);
+    await waitFor(() => assert.equal(sink.cancelled, 1));
+    await waitFor(() => assert.match(plain(lastFrame() ?? ""), /roll\.powershell.*已中断/s));
+    assert.match(plain(lastFrame() ?? ""), /已取消本轮/);
+    unmount();
+  });
+}
+
+test("ChatApp Esc 中断 token streaming", async () => {
+  const sink: Sink = { approved: [], rejected: [], cancelled: 0 };
+  let releaseCancellation: (() => void) | undefined;
+  const cancellation = new Promise<void>((resolve) => {
+    releaseCancellation = resolve;
+  });
+  async function* send(): AsyncIterable<SessionEvent> {
+    yield { type: "message-start", messageId: "m" };
+    yield { type: "text-delta", delta: "尚未完成的输出" };
+    await cancellation;
+    yield { type: "turn-cancelled", reason: "user", message: "已取消本轮。" };
+  }
+  const { stdin, lastFrame, unmount } = render(
+    h(ChatApp, {
+      session: makeSession(send, sink, () => releaseCancellation?.()),
+      model: "qwen",
+      contextWindow: undefined,
+      onUserSubmit: () => {},
+      onExit: () => {},
+    }),
+  );
+  await delay(10);
+  stdin.write("stream");
+  await delay(10);
+  stdin.write("\r");
+  await waitFor(() => assert.match(plain(lastFrame() ?? ""), /尚未完成的输出/));
+
+  stdin.write("\x1b");
+  await waitFor(() => assert.equal(sink.cancelled, 1));
+  await waitFor(() => assert.match(plain(lastFrame() ?? ""), /已取消本轮/));
+  assert.doesNotMatch(plain(lastFrame() ?? ""), /尚未完成的输出/);
   unmount();
 });
 
@@ -692,4 +782,88 @@ test("plain 'exit' is sent as a message; only /exit quits", async () => {
   second.stdin.write("\r");
   await waitFor(() => assert.equal(exited, true));
   second.unmount();
+});
+
+test("ChatApp submits text corrected with arrow-key cursor editing", async () => {
+  const sink: Sink = { approved: [], rejected: [] };
+  const submitted: string[] = [];
+  async function* send(): AsyncIterable<SessionEvent> {
+    yield { type: "message-finish", text: "" };
+  }
+  const { stdin, unmount } = render(
+    h(ChatApp, {
+      session: makeSession(send, sink),
+      model: "qwen",
+      contextWindow: undefined,
+      onUserSubmit: (text: string) => submitted.push(text),
+      onExit: () => {},
+    }),
+  );
+  await delay(10);
+  stdin.write("helo");
+  await delay(10);
+  stdin.write("\x1b[D");
+  await delay(10);
+  stdin.write("l");
+  await delay(10);
+  stdin.write("\r");
+  await waitFor(() => assert.deepEqual(submitted, ["hello"]));
+  unmount();
+});
+
+test("ChatApp slash popup arrows keep selecting candidates instead of moving the cursor", async () => {
+  const sink: Sink = { approved: [], rejected: [] };
+  async function* send(): AsyncIterable<SessionEvent> {
+    yield { type: "message-finish", text: "" };
+  }
+  const { stdin, lastFrame, unmount } = render(
+    h(ChatApp, {
+      session: makeSession(send, sink),
+      model: "qwen",
+      contextWindow: undefined,
+      onUserSubmit: () => {},
+      onExit: () => {},
+    }),
+  );
+  await delay(10);
+  stdin.write("/");
+  await delay(20);
+  const before = plain(lastFrame() ?? "").match(/❯ (\/\S+)/)?.[1];
+  stdin.write("\x1b[B");
+  await delay(20);
+  const frame = plain(lastFrame() ?? "");
+  const after = frame.match(/❯ (\/\S+)/)?.[1];
+  assert.ok(before !== undefined && after !== undefined);
+  assert.notEqual(after, before);
+  assert.match(frame, /› \//);
+  unmount();
+});
+
+test("ChatApp enter submits the whole multiline draft with cursor on an upper line", async () => {
+  const sink: Sink = { approved: [], rejected: [] };
+  const submitted: string[] = [];
+  async function* send(): AsyncIterable<SessionEvent> {
+    yield { type: "message-finish", text: "" };
+  }
+  const { stdin, unmount } = render(
+    h(ChatApp, {
+      session: makeSession(send, sink),
+      model: "qwen",
+      contextWindow: undefined,
+      onUserSubmit: (text: string) => submitted.push(text),
+      onExit: () => {},
+    }),
+  );
+  await delay(10);
+  stdin.write("ab");
+  await delay(10);
+  stdin.write("\n");
+  await delay(10);
+  stdin.write("cd");
+  await delay(10);
+  stdin.write("\x1b[A");
+  await delay(10);
+  stdin.write("\r");
+  await waitFor(() => assert.deepEqual(submitted, ["ab\ncd"]));
+  unmount();
 });

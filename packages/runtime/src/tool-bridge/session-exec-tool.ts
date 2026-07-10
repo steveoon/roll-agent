@@ -18,6 +18,7 @@ import { gateToolCall } from "./build-tools.ts";
 import type { BashToolContext } from "./bash-tool.ts";
 import { ToolRegistry } from "./naming.ts";
 import type { NormalizedToolResult } from "./normalize-result.ts";
+import { isUserCancellationSignal } from "../types/cancellation.ts";
 
 export const EXEC_AGENT_NAME = "roll";
 export const EXEC_COMMAND_NAME = "exec_command";
@@ -156,6 +157,31 @@ function formatPollResult(result: SessionPollResult): NormalizedToolResult {
   };
 }
 
+function bindUserCancellation(
+  signal: AbortSignal | undefined,
+  session: ManagedSession,
+  manager: SessionManager,
+): () => void {
+  if (signal === undefined) {
+    return () => {};
+  }
+  const onAbort = (): void => {
+    if (!isUserCancellationSignal(signal) || manager.get(session.id) !== session) {
+      return;
+    }
+    session.profile
+      .killTree(session.child.pid, "interrupt")
+      .then(() => session.waitExit())
+      .then(() => manager.delete(session.id))
+      .catch(() => {});
+  };
+  signal.addEventListener("abort", onAbort, { once: true });
+  if (signal.aborted) {
+    onAbort();
+  }
+  return () => signal.removeEventListener("abort", onAbort);
+}
+
 export function buildSessionExecToolset(
   settings: SessionExecSettings,
   manager: SessionManager,
@@ -210,7 +236,12 @@ export function buildSessionExecToolset(
             isError: true,
           };
         }
-        const result = await pollUntilDeadline(session, performance.now() + yieldMs, maxChars);
+        const unbindCancellation = bindUserCancellation(options.abortSignal, session, manager);
+        const result = await pollUntilDeadline(
+          session,
+          performance.now() + yieldMs,
+          maxChars,
+        ).finally(unbindCancellation);
         if (result.kind === "exited") {
           manager.delete(session.id);
         }
@@ -247,7 +278,12 @@ export function buildSessionExecToolset(
           MAX_POLL_YIELD_MS,
         );
         const maxChars = settings.maxOutputTokens * CHARS_PER_TOKEN;
-        const result = await pollUntilDeadline(session, performance.now() + yieldMs, maxChars);
+        const unbindCancellation = bindUserCancellation(options.abortSignal, session, manager);
+        const result = await pollUntilDeadline(
+          session,
+          performance.now() + yieldMs,
+          maxChars,
+        ).finally(unbindCancellation);
         if (result.kind === "exited") {
           manager.delete(input.session_id);
         }

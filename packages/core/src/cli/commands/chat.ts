@@ -247,6 +247,9 @@ export async function runJsonTurn(
             : {}),
         });
         break;
+      case "turn-cancelled":
+        failure = event.message;
+        break;
       case "error":
         failure = event.message;
         break;

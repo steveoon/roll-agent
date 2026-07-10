@@ -97,8 +97,11 @@ test("buildSkillListLines 单行截断且首行带用法", async () => {
 
 test("truncateDisplay 对 CJK 宽字符按显示宽度截断", async () => {
   const { truncateDisplay } = await import("./commands.ts");
+  assert.equal(truncateDisplay("abc", 0), "");
+  assert.equal(truncateDisplay("abc", 1), "…");
   assert.equal(truncateDisplay("abc", 10), "abc");
   const truncated = truncateDisplay("中文中文中文中文", 9);
   assert.ok(truncated.endsWith("…"));
   assert.ok(truncated.length < 8);
+  assert.equal(truncateDisplay("👩‍👩‍👧‍👦abc", 3), "👩‍👩‍👧‍👦…");
 });

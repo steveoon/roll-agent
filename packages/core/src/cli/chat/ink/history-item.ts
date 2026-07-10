@@ -74,6 +74,17 @@ export function HistoryItemView({ item }: { item: HistoryItem }): ReactElement {
     }
     case "denied":
       return h(Text, { dimColor: true }, `⊘ ${item.name} ${item.label}`);
+    case "cancelled": {
+      const args = item.args.length > 0 && item.args !== "{}" ? ` ${item.args}` : "";
+      return h(
+        Text,
+        { color: "yellow" },
+        "■ ",
+        h(ToolLabel, { name: item.name }),
+        args.length > 0 ? h(Text, { dimColor: true }, args) : null,
+        h(Text, { dimColor: true }, " 已中断"),
+      );
+    }
     case "compaction":
       return h(Text, { dimColor: true }, item.notice);
     case "notice":

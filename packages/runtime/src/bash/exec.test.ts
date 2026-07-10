@@ -6,8 +6,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
 import { runBashCommand, type RunBashOptions } from "./exec.ts";
+import { BASH_TERMINATION_CAUSES } from "./format-result.ts";
 import { escalateKillGroup, killProcessGroup } from "./kill.ts";
 import type { ShellProfile } from "./profile.ts";
+import { TURN_TIMEOUT_ABORT_REASON } from "../types/cancellation.ts";
 
 const skip = process.platform === "win32";
 const MB = 1_048_576;
@@ -97,6 +99,7 @@ test("超时杀进程组并归一 124，快速返回", { skip }, async () => {
   const result = await runBashCommand(opts({ command: "sleep 30", timeoutMs: 200 }));
   assert.equal(result.timedOut, true);
   assert.equal(result.exitCode, 124);
+  assert.equal(result.terminationCause, BASH_TERMINATION_CAUSES.timeout);
   assert.ok(result.wallTimeMs < 3_000, `wallTime=${String(result.wallTimeMs)}`);
 });
 
@@ -125,6 +128,7 @@ test("AbortSignal 中止杀组并快速返回", { skip }, async () => {
   );
   assert.equal(result.timedOut, false);
   assert.equal(result.exitCode, 130);
+  assert.equal(result.terminationCause, BASH_TERMINATION_CAUSES.abort);
   assert.ok(result.wallTimeMs < 3_000, `wallTime=${String(result.wallTimeMs)}`);
 });
 
@@ -158,6 +162,7 @@ test("after-spawn abort 即使命令退出 0 也固定返回 130", async () => {
 
   assert.equal(result.exitCode, 130);
   assert.equal(result.timedOut, false);
+  assert.equal(result.terminationCause, BASH_TERMINATION_CAUSES.abort);
   assert.equal(result.spawnError, undefined);
 });
 
@@ -273,6 +278,7 @@ test("timeout 先于 abort 时 first-cause 保持 124", async () => {
 
   assert.equal(result.exitCode, 124);
   assert.equal(result.timedOut, true);
+  assert.equal(result.terminationCause, BASH_TERMINATION_CAUSES.timeout);
 });
 
 test("root 先退出时等待 killTree 完成，且不提前 abort 清理", async () => {
@@ -382,10 +388,44 @@ test("预先 aborted 时不调用 profile.buildSpawn 或 spawn", async () => {
   assert.equal(spawnCalls, 0);
   assert.equal(result.exitCode, 130);
   assert.equal(result.timedOut, false);
+  assert.equal(result.terminationCause, BASH_TERMINATION_CAUSES.abort);
   assert.equal(result.wallTimeMs, 0);
   assert.equal(result.spawnError, undefined);
   assert.equal(result.stdout.totalBytes, 0);
   assert.equal(result.stderr.totalBytes, 0);
+});
+
+test("预先 timeout abort 归一为 exit 124", async () => {
+  const controller = new AbortController();
+  controller.abort(new DOMException("The operation timed out", "TimeoutError"));
+  const result = await runBashCommand(
+    opts({ command: "never-run", abortSignal: controller.signal }),
+  );
+  assert.equal(result.exitCode, 124);
+  assert.equal(result.timedOut, true);
+  assert.equal(result.terminationCause, BASH_TERMINATION_CAUSES.timeout);
+});
+
+test("仅含 timed out 文案的普通 Error 不冒充 Roll timeout", async () => {
+  const controller = new AbortController();
+  controller.abort(new Error("provider request timed out"));
+  const result = await runBashCommand(
+    opts({ command: "never-run", abortSignal: controller.signal }),
+  );
+  assert.equal(result.exitCode, 130);
+  assert.equal(result.timedOut, false);
+  assert.equal(result.terminationCause, BASH_TERMINATION_CAUSES.abort);
+});
+
+test("Roll turn timeout sentinel 归一为 exit 124", async () => {
+  const controller = new AbortController();
+  controller.abort(TURN_TIMEOUT_ABORT_REASON);
+  const result = await runBashCommand(
+    opts({ command: "never-run", abortSignal: controller.signal }),
+  );
+  assert.equal(result.exitCode, 124);
+  assert.equal(result.timedOut, true);
+  assert.equal(result.terminationCause, BASH_TERMINATION_CAUSES.timeout);
 });
 
 test("killTree 永不 settle 时，独立 deadline 回退终止根进程", async () => {

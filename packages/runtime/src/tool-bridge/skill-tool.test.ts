@@ -19,10 +19,15 @@ function stubLibrary(): SkillLibrary {
             summary: { name: "demo", description: "演示 skill", source: "user" },
             content: "# Demo\n\n按流程操作。",
             referencePaths: ["references/guide.md"],
+            skillRoot: "/skills/demo",
           }
         : undefined,
     loadReference: (name, referencePath) =>
       name === "demo" && referencePath === "references/guide.md" ? "指南正文" : undefined,
+    loadReferenceDocument: (name, referencePath) =>
+      name === "demo" && referencePath === "references/guide.md"
+        ? { content: "指南正文", skillRoot: "/skills/demo" }
+        : undefined,
   };
 }
 
@@ -41,21 +46,74 @@ test("加载 skill 返回正文与 references 列表", () => {
   assert.equal(result.isError, false);
   assert.ok(String(result.output).includes("按流程操作"));
   assert.ok(String(result.output).includes("references/guide.md"));
+  assert.ok(String(result.output).includes("SKILL_ROOT=/skills/demo"));
+  assert.ok(String(result.output).includes("workdir"));
 });
 
 test("加载 reference 返回文件内容", () => {
   const result = runSkillTool({ name: "demo", reference: "references/guide.md" });
   assert.equal(result.isError, false);
+  assert.ok(String(result.output).includes("SKILL_ROOT=/skills/demo"));
+  assert.ok(String(result.output).endsWith("指南正文"));
+});
+
+test("加载 reference 不重复加载 SKILL.md 正文", () => {
+  const library: SkillLibrary = {
+    ...stubLibrary(),
+    load: () => {
+      throw new Error("reference 加载不应读取 SKILL.md");
+    },
+  };
+  const result = executeSkillTool(library, {
+    name: "demo",
+    reference: "references/guide.md",
+  });
+  assert.equal(result.isError, false);
+  assert.ok(String(result.output).endsWith("指南正文"));
+});
+
+test("带位置接口未命中时不回退重复读取 reference", () => {
+  let legacyLoads = 0;
+  const library: SkillLibrary = {
+    ...stubLibrary(),
+    loadReference: () => {
+      legacyLoads += 1;
+      return undefined;
+    },
+    loadReferenceDocument: () => undefined,
+  };
+  const result = executeSkillTool(library, {
+    name: "demo",
+    reference: "references/nope.md",
+  });
+  assert.equal(result.isError, true);
+  assert.equal(legacyLoads, 0);
+});
+
+test("旧 SkillLibrary 仅实现 loadReference 时保持兼容", () => {
+  const source = stubLibrary();
+  const library: SkillLibrary = {
+    list: source.list,
+    load: source.load,
+    loadReference: source.loadReference,
+  };
+  const result = executeSkillTool(library, {
+    name: "demo",
+    reference: "references/guide.md",
+  });
+  assert.equal(result.isError, false);
   assert.equal(result.output, "指南正文");
 });
 
 test("未知 skill 与未知 reference 返回错误并列出可用项", () => {
-  const missing = runSkillTool({ name: "nope" });
+  const missing = runSkillTool({ name: "nope", reference: "references/guide.md" });
   assert.equal(missing.isError, true);
   assert.ok(String(missing.output).includes("demo"));
+  assert.match(String(missing.output), /skill "nope" 不存在/);
 
   const missingRef = runSkillTool({ name: "demo", reference: "references/nope.md" });
   assert.equal(missingRef.isError, true);
+  assert.match(String(missingRef.output), /不存在 reference/);
 });
 
 test("AgentSession 集成：模型调用 roll__skill 并收到 skill 内容", async () => {
