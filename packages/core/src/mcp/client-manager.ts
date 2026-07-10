@@ -2,7 +2,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
-import type { LanguageModelV4 } from "@ai-sdk/provider";
+import type { LanguageModelV4, SharedV4ProviderOptions } from "@ai-sdk/provider";
 import type { AgentTransport } from "../types/agent.ts";
 import { registerSamplingHandler } from "./sampling-handler.ts";
 
@@ -22,6 +22,8 @@ export interface ConnectOptions {
   readonly timeoutMs?: number;
   /** 为子 Agent 提供的 LLM model（启用 Sampling 支持） */
   readonly samplingModel?: LanguageModelV4;
+  /** Sampling 调用的 provider 级参数（如 reasoning/thinking effort） */
+  readonly samplingProviderOptions?: SharedV4ProviderOptions;
   /** 注入到 stdio 子进程的环境变量（与 process.env 合并） */
   readonly env?: Readonly<Record<string, string>>;
 }
@@ -143,7 +145,7 @@ export class McpClientManager {
 
     // 注册 Sampling Handler（子 Agent 可通过 createMessage 使用指挥官 LLM）
     if (options.samplingModel) {
-      registerSamplingHandler(client, options.samplingModel);
+      registerSamplingHandler(client, options.samplingModel, options.samplingProviderOptions);
     }
 
     // 创建 MCP 传输（强制转换为 Transport 以绕过 exactOptionalPropertyTypes 与库类型的不兼容）

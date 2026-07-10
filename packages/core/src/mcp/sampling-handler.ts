@@ -3,7 +3,22 @@ import { CreateMessageRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 import type { CreateMessageResult } from "@modelcontextprotocol/sdk/types.js";
 import { generateText } from "ai";
 import type { ModelMessage } from "ai";
-import type { LanguageModelV4 } from "@ai-sdk/provider";
+import type { LanguageModelV4, SharedV4ProviderOptions } from "@ai-sdk/provider";
+
+/** 组装传给 AI SDK generateText() 的调用参数（供单测复用，不依赖真实网络请求） */
+export function buildSamplingGenerateTextParams(
+  model: LanguageModelV4,
+  messages: ModelMessage[],
+  maxTokens: number,
+  providerOptions?: SharedV4ProviderOptions,
+) {
+  return {
+    model,
+    messages,
+    ...(maxTokens > 0 ? { maxOutputTokens: maxTokens } : {}),
+    ...(providerOptions ? { providerOptions } : {}),
+  };
+}
 
 /**
  * 在 MCP Client 上注册 Sampling Handler。
@@ -13,7 +28,11 @@ import type { LanguageModelV4 } from "@ai-sdk/provider";
  *
  * @see https://spec.modelcontextprotocol.io/specification/client/sampling/
  */
-export function registerSamplingHandler(client: Client, model: LanguageModelV4): void {
+export function registerSamplingHandler(
+  client: Client,
+  model: LanguageModelV4,
+  providerOptions?: SharedV4ProviderOptions,
+): void {
   client.setRequestHandler(
     CreateMessageRequestSchema,
     async (request): Promise<CreateMessageResult> => {
@@ -22,11 +41,9 @@ export function registerSamplingHandler(client: Client, model: LanguageModelV4):
 
       let result;
       try {
-        result = await generateText({
-          model,
-          messages,
-          ...(maxTokens > 0 ? { maxOutputTokens: maxTokens } : {}),
-        });
+        result = await generateText(
+          buildSamplingGenerateTextParams(model, messages, maxTokens, providerOptions),
+        );
       } catch (error) {
         throw new Error("Sampling handler: LLM generation failed", { cause: error });
       }

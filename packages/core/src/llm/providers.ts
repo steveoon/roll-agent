@@ -131,6 +131,9 @@ export interface ResolvedLLMCall {
  *
  * structured-output 场景下，对 qwen provider 自动注入 enableThinking: false，
  * 因为阿里云 thinking mode 不支持 structured output。
+ *
+ * chat 与 sampling 场景下都是纯文本 generateText 调用，复用同一套
+ * thinkingProviderOptions 映射注入 reasoning/thinking effort。
  */
 export function resolveLLMCall(
   providerName: string,
@@ -149,7 +152,7 @@ export function resolveLLMCall(
     };
   }
 
-  if (purpose === "chat") {
+  if (purpose === "chat" || purpose === "sampling") {
     const providerOptions = thinkingProviderOptions(providerName, modelName, thinkingLevel);
     return providerOptions ? { model, providerOptions } : { model };
   }

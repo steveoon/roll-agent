@@ -5,6 +5,13 @@ import { createElement as h } from "react";
 import { render } from "ink-testing-library";
 import type { AgentSession, SessionEvent } from "@roll-agent/runtime";
 import { ChatApp } from "./app.ts";
+import { GLYPHS } from "../../utils/glyphs.ts";
+
+function literalPattern(text: string): RegExp {
+  return new RegExp(text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
+}
+
+const AUTO_BADGE_PATTERN = literalPattern(`${GLYPHS.auto} auto`);
 
 interface Sink {
   approved: string[];
@@ -271,7 +278,7 @@ test("Shift+Tab enables auto mode and confirmations are approved silently", asyn
   );
   await delay(10);
   stdin.write("\x1b[Z");
-  await waitFor(() => assert.match(lastFrame() ?? "", /⏵⏵ auto/));
+  await waitFor(() => assert.match(lastFrame() ?? "", AUTO_BADGE_PATTERN));
   stdin.write("go");
   await delay(10);
   stdin.write("\r");
@@ -310,7 +317,7 @@ test("Shift+Tab during a pending confirmation approves it immediately", async ()
 
   stdin.write("\x1b[Z");
   await waitFor(() => assert.deepEqual(sink.approved, ["a1"]));
-  assert.match(lastFrame() ?? "", /⏵⏵ auto/);
+  assert.match(lastFrame() ?? "", AUTO_BADGE_PATTERN);
   unmount();
 });
 
@@ -337,9 +344,9 @@ test("Shift+Tab twice turns auto mode back off and manual confirm returns", asyn
   );
   await delay(10);
   stdin.write("\x1b[Z");
-  await waitFor(() => assert.match(lastFrame() ?? "", /⏵⏵ auto/));
+  await waitFor(() => assert.match(lastFrame() ?? "", AUTO_BADGE_PATTERN));
   stdin.write("\x1b[Z");
-  await waitFor(() => assert.doesNotMatch(lastFrame() ?? "", /⏵⏵ auto/));
+  await waitFor(() => assert.doesNotMatch(lastFrame() ?? "", AUTO_BADGE_PATTERN));
   stdin.write("go");
   await delay(10);
   stdin.write("\r");
@@ -367,7 +374,7 @@ test("kitty-encoded Shift+Tab toggles auto mode", async () => {
   );
   await delay(10);
   stdin.write("\x1b[9;2u");
-  await waitFor(() => assert.match(lastFrame() ?? "", /⏵⏵ auto/));
+  await waitFor(() => assert.match(lastFrame() ?? "", AUTO_BADGE_PATTERN));
   unmount();
 });
 
@@ -391,7 +398,7 @@ test("Shift+Tab in the slash popup toggles auto without completing", async () =>
   stdin.write("\x1b[Z");
   await delay(20);
   let frame = plain(lastFrame() ?? "");
-  assert.match(frame, /⏵⏵ auto/);
+  assert.match(frame, AUTO_BADGE_PATTERN);
   assert.doesNotMatch(frame, /› \/think/);
   stdin.write("\t");
   await delay(20);
@@ -420,7 +427,7 @@ test("/auto slash command toggles auto mode", async () => {
   }
   await delay(20);
   stdin.write("\r");
-  await waitFor(() => assert.match(lastFrame() ?? "", /⏵⏵ auto/));
+  await waitFor(() => assert.match(lastFrame() ?? "", AUTO_BADGE_PATTERN));
   unmount();
 });
 
@@ -677,10 +684,10 @@ test("Alt+. raises the thinking level in the status line", async () => {
     }),
   );
   await delay(10);
-  assert.match(lastFrame() ?? "", /🧠 medium/);
+  assert.match(lastFrame() ?? "", literalPattern(`${GLYPHS.think} medium`));
   stdin.write("\x1b[46;3u");
   await delay(20);
-  assert.match(lastFrame() ?? "", /🧠 high/);
+  assert.match(lastFrame() ?? "", literalPattern(`${GLYPHS.think} high`));
   unmount();
 });
 

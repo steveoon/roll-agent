@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 import type { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import type { LanguageModelV4 } from "@ai-sdk/provider";
+import type { LanguageModelV4, SharedV4ProviderOptions } from "@ai-sdk/provider";
 import { defineCommand } from "citty";
 import { loadConfig } from "../../config/loader.ts";
 import {
@@ -12,7 +12,7 @@ import {
 import { AgentStore } from "../../registry/store.ts";
 import { McpClientManager } from "../../mcp/client-manager.ts";
 import { resolveTransportWithDevSpawnSpec } from "../../registry/dev-spawn.ts";
-import { createProviderModel } from "../../llm/providers.ts";
+import { resolveLLMCall, type ResolvedLLMCall } from "../../llm/providers.ts";
 import { formatValidationIssuesMessage } from "../../tool-runtime/messages.ts";
 import { preflightToolCall } from "../../tool-runtime/preflight.ts";
 import { formatMissingToolMessage, normalizeListedTools } from "../utils/agent-tools.ts";
@@ -67,13 +67,16 @@ export default defineCommand({
     const agentConnections = new Map<string, ConnectedAgent>();
 
     try {
-      const samplingModel = createSamplingModel(config);
+      const samplingCall = createSamplingLLMCall(config);
       const sharedRunOptions = {
         store,
         config,
         clientManager,
         agentConnections,
-        ...(samplingModel ? { samplingModel } : {}),
+        ...(samplingCall ? { samplingModel: samplingCall.model } : {}),
+        ...(samplingCall?.providerOptions
+          ? { samplingProviderOptions: samplingCall.providerOptions }
+          : {}),
       };
       if (hasBatchInput(rawArgs) && getLeadingPositionalCount(rawArgs) > 0) {
         log.error("batch 模式不接受 agent/tool 位置参数；请在每个 batch item 中声明 agent 和 tool");
@@ -188,6 +191,7 @@ interface RunToolCallOptions {
   readonly clientManager: McpClientManager;
   readonly agentConnections: Map<string, ConnectedAgent>;
   readonly samplingModel?: LanguageModelV4;
+  readonly samplingProviderOptions?: SharedV4ProviderOptions;
 }
 
 interface RunBatchToolCallsOptions extends Omit<RunToolCallOptions, "item" | "index"> {
@@ -542,15 +546,17 @@ function parseRequiredStringArgument(value: unknown, name: string): string | und
   return value;
 }
 
-function createSamplingModel(config: RollConfig): LanguageModelV4 | undefined {
+function createSamplingLLMCall(config: RollConfig): ResolvedLLMCall | undefined {
   const providerName = config.llm.defaultProvider;
   const providerConfig = config.llm.providers[providerName];
   return providerConfig
-    ? createProviderModel(
+    ? resolveLLMCall(
         providerName,
         config.llm.defaultModel,
         providerConfig.apiKey,
+        "sampling",
         providerConfig.baseUrl,
+        config.runtime.thinkingLevel,
       )
     : undefined;
 }
@@ -575,6 +581,9 @@ async function getConnectedAgent(options: RunToolCallOptions): Promise<Connected
     agent.installPath,
     {
       ...(options.samplingModel ? { samplingModel: options.samplingModel } : {}),
+      ...(options.samplingProviderOptions
+        ? { samplingProviderOptions: options.samplingProviderOptions }
+        : {}),
       ...(agentEnv ? { env: agentEnv } : {}),
     },
   );

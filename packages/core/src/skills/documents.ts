@@ -15,7 +15,7 @@ export function collectReferencedSkillPaths(content: string): readonly string[] 
   for (const match of content.matchAll(REFERENCE_PATH_PATTERN)) {
     const normalized = normalizeReferencePath(match[0]);
     if (normalized) {
-      references.add(normalized);
+      references.add(normalized.split(sep).join("/"));
     }
   }
 
