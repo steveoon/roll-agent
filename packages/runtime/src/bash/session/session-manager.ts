@@ -3,6 +3,8 @@ import type { ShellProfile } from "../profile.ts";
 import { spawnSession } from "./session-exec.ts";
 import type { ManagedSession } from "./types.ts";
 
+const DEFAULT_INTERRUPT_GRACE_MS = 150;
+
 export class SessionCapError extends Error {
   constructor(maxSessions: number) {
     super(`会话数已达上限 ${String(maxSessions)}，且无空闲会话可回收`);
@@ -16,6 +18,7 @@ export interface SessionManagerOptions {
   readonly env: NodeJS.ProcessEnv;
   readonly bufferCapacity: number;
   readonly generateId?: () => number;
+  readonly interruptGraceMs?: number;
 }
 
 export interface SpawnRequest {
@@ -68,10 +71,11 @@ export class SessionManager {
   }
 
   interruptAll(): void {
-    for (const session of this.sessions.values()) {
-      session.profile.killTree(session.child.pid, "interrupt").catch(() => {});
-    }
+    const sessions = [...this.sessions.values()];
     this.sessions.clear();
+    for (const session of sessions) {
+      this.interruptThenTerminate(session).catch(() => {});
+    }
   }
 
   terminateAll(): void {
@@ -89,6 +93,21 @@ export class SessionManager {
     }
   }
 
+  private async interruptThenTerminate(session: ManagedSession): Promise<void> {
+    session.profile.killTree(session.child.pid, "interrupt").catch(() => {});
+    if (session.exitCode !== undefined) {
+      return;
+    }
+
+    const exitedDuringGrace = await waitForSessionExit(
+      session,
+      this.options.interruptGraceMs ?? DEFAULT_INTERRUPT_GRACE_MS,
+    );
+    if (!exitedDuringGrace && session.exitCode === undefined) {
+      await session.profile.killTree(session.child.pid, "terminate").catch(() => {});
+    }
+  }
+
   private allocateId(): number {
     const generate = this.options.generateId ?? defaultGenerateId;
     for (let attempt = 0; attempt < 1_000; attempt += 1) {
@@ -99,4 +118,15 @@ export class SessionManager {
     }
     throw new Error("无法分配唯一会话 id");
   }
+}
+
+function waitForSessionExit(session: ManagedSession, graceMs: number): Promise<boolean> {
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => resolve(false), graceMs);
+    timer.unref();
+    session.waitExit().then(() => {
+      clearTimeout(timer);
+      resolve(true);
+    });
+  });
 }

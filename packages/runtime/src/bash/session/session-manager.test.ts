@@ -72,12 +72,39 @@ test("terminateAll 杀掉活进程并清空", { skip }, async () => {
 
 test("interruptAll 中断活进程并清空", { skip }, async () => {
   const mgr = manager(4);
-  const session = mgr.spawn({ command: "sleep 30", workdir: process.cwd() });
+  const session = await spawnReadySession(mgr);
   assert.equal(mgr.size(), 1);
   mgr.interruptAll();
   assert.equal(mgr.size(), 0);
   const result = await pollUntilDeadline(session, performance.now() + 3_000, 100);
   assert.equal(result.kind, "exited");
+});
+
+test("interruptAll 在 grace 后升级 terminate，避免遗留失联进程", { skip }, async () => {
+  const intents: Array<"interrupt" | "terminate"> = [];
+  const escalationProfile: ShellProfile = {
+    ...profile,
+    killTree: async (pid, intent) => {
+      intents.push(intent);
+      if (intent === "terminate") {
+        killProcessGroup(pid, "SIGKILL");
+      }
+    },
+  };
+  const mgr = new SessionManager({
+    maxSessions: 4,
+    profile: escalationProfile,
+    env: process.env,
+    bufferCapacity: 100_000,
+    interruptGraceMs: 10,
+  });
+  const session = await spawnReadySession(mgr);
+
+  mgr.interruptAll();
+
+  const result = await pollUntilDeadline(session, performance.now() + 3_000, 100);
+  assert.equal(result.kind, "exited");
+  assert.deepEqual(intents, ["interrupt", "terminate"]);
 });
 
 test("get 命中已注册会话", { skip }, async () => {
@@ -88,3 +115,21 @@ test("get 命中已注册会话", { skip }, async () => {
   mgr.terminateAll();
   await pollUntilDeadline(session, performance.now() + 500, 100);
 });
+
+async function spawnReadySession(mgr: SessionManager) {
+  let markReady: (() => void) | undefined;
+  const ready = new Promise<void>((resolve) => {
+    markReady = resolve;
+  });
+  const session = mgr.spawn({
+    command: "printf 'ready\\n'; exec sleep 30",
+    workdir: process.cwd(),
+    onDelta: (_stream, delta) => {
+      if (delta.includes("ready")) {
+        markReady?.();
+      }
+    },
+  });
+  await ready;
+  return session;
+}
