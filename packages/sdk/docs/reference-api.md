@@ -105,7 +105,9 @@ SDK 负责定义和运行 stdio Agent，本身不负责注册到 `roll-core`。�
 `execute(input, ctx)` 的 `ctx` 提供：
 
 - `ctx.logger`：结构化日志（stderr）
-- `ctx.llm.generateText(prompt)`：通过 MCP Sampling 调用指挥官 LLM
+- `ctx.llm.generateText(prompt)`：通过 MCP Sampling 调用指挥官 LLM；当前 SDK 为单次请求声明 `maxTokens: 1024`
+
+`ctx.llm` 的 provider、model 与 reasoning/thinking 档位由指挥官控制。`runtime.thinking-level` 会作用于 `roll ask`、`roll run` 和 `roll chat` 发起的 Sampling；交互式 `roll chat` 使用 `/think`、`/effort` 或对应快捷键切档后，后续 Sampling 请求也使用新档位。SDK 自身不读取 Roll 配置，且指挥官不会为了 thinking budget 主动调大 SDK 请求对应的 `maxOutputTokens`。
 
 注意：这里的 `ctx.llm` 只覆盖“通过 Sampling 借用 roll-core LLM”的场景。如果你的 Agent 自己内嵌了 provider 调用逻辑，那么它的模型、API key、代理地址等配置应由该 Agent 自己显式声明和读取。
 

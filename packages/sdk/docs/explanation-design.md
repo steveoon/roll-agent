@@ -69,6 +69,20 @@ MCP stdio 场景中 stdout 用于协议数据传输。
 
 代价是：调用方（roll-core）必须在连接时声明 sampling capability。
 
+参数职责按以下边界处理：
+
+```text
+Agent SDK
+  prompt + maxTokens=1024
+        ↓ MCP Sampling
+roll-core / runtime
+  model + provider + runtime.thinking-level
+        ↓
+provider response（指挥官不主动调大对应的 maxOutputTokens）
+```
+
+`runtime.thinking-level` 同时作用于 `roll ask`、`roll run` 与 `roll chat` 的 Sampling。交互式 `roll chat` 通过 `/think`、`/effort` 或快捷键切换档位后，主会话与子 Agent 后续 Sampling 会同步更新；已发出的请求不受影响。
+
 ## 为什么业务 Agent 的 env 配置要保持显式
 
 并不是所有 Agent 都只通过 `ctx.llm.generateText()` 借用指挥官的 LLM。有些业务 Agent 会在内部直接访问自己的 provider、模型或后端 API。

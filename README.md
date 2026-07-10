@@ -74,7 +74,7 @@ roll --help
 - `roll-core` 新增了 `tool-runtime` 适配层：统一做参数提取、preflight 校验、错误分类和用户提示。
 - 路由结果已拆成 `RouteSelection` 与 `RouteDecision`：先选 tool，再补参数，CLI 和上层编排器都更容易复用这套状态机。
 - `roll run` 已支持 `--input-json` / `--input-file`：适合显式传递复杂对象、开放对象和批量 payload。
-- `roll chat` 是 experimental 会话式入口骨架，当前只返回 unavailable，不做多步编排。
+- `roll chat` 已提供 experimental 多轮会话：支持 Agent tool 编排、session 持久化/恢复、Skills、thinking 档位切换与执行中 Esc 中断。
 - `smart-reply-agent` 的品牌数据同步已从“手工 push 数据”改成“从 Duliday pull 数据”，并升级为新的品牌数据模型：`meta + brands[] + stores[] + positions[]`。
 
 ### 1. 初始化配置
@@ -175,7 +175,7 @@ pnpm dev -- run some-agent sync_config --input-file ./payload.json
 # LLM 智能路由（自然语言，自动选择 Agent + Tool）
 pnpm dev -- ask "帮我查看未读消息"
 
-# 会话式入口骨架（experimental，当前只返回 unavailable）
+# 会话式入口（experimental；无 message 时进入交互 TUI）
 pnpm dev -- chat "帮我把这批候选人处理掉"
 ```
 
@@ -185,7 +185,7 @@ pnpm dev -- chat "帮我把这批候选人处理掉"
 - `--input-json` / `--input-file` 适合传递复杂对象参数；命令行 `--key value` 更适合简单标量参数
 - `roll ask` 适合“自然语言可以可靠映射到 tool 参数”的场景；如果某个必填字段是开放对象（如 `z.record()` / 任意 JSON payload），`ask` 会返回 `needs_input`，提示改用 `roll run --input-json` 或上层编排器显式提供
 - `roll ask` 不会篡改原始 tool schema 的类型语义；对于无法可靠从自然语言提取的字段，会显式降级为“需要显式输入”，而不是伪造错误类型的参数
-- `roll chat` 当前是 experimental 骨架，不会执行会话编排、不会恢复 session，也不会隐式降级到 `roll ask`
+- `roll chat` 支持交互式多轮编排与 session 恢复；仍为 experimental，且不会隐式降级到 `roll ask`
 
 ## CLI 命令参考
 
@@ -203,7 +203,7 @@ roll agent health               健康检查（兼容 on-demand / core-managed /
 
 roll run <agent> <tool> [args]  直接调用 MCP tool（支持 --key value / --input-json / --input-file）
 roll ask "<message>"            用 LLM 从自然语言中选择 Agent 和 MCP tool
-roll chat [message]             Experimental：会话式入口骨架（当前不可用）
+roll chat [message]             Experimental：多轮会话、Agent tools、Skills 与 session 恢复
 roll update                     检查并更新 roll 及已注册 Agent（对不同来源行为不同）
 roll update --check             仅检查 roll/Agent 更新，不执行安装或刷新
 
@@ -237,7 +237,7 @@ roll doctor --json              JSON 诊断结果（配置损坏时返回非零�
 
 - 已知 `agent + tool` 时优先 `roll run --json`
 - 只知道自然语言意图时使用 `roll ask --json`
-- 不要默认使用 `roll chat`，它当前仍是 experimental
+- 需要人工交互、多轮工具编排或 session 恢复时使用 `roll chat`；自动化与结构化管道仍优先 `roll run --json` / `roll ask --json`
 
 ### 招聘回复编排约定
 
