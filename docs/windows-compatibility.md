@@ -42,7 +42,8 @@ stdio 分帧两端剥 `\r`、包管理器调用已有完整 cmd.exe 适配（`pa
 - `roll chat` 内建 shell 工具使用 `runtime.shell` 配置：macOS/Linux 注册 `roll__bash`，
   Windows 原生只在检测到 PowerShell 7+ (`pwsh`) 时注册 `roll__powershell`；探测会覆盖 PATH 与
   标准 Program Files 安装路径，未安装时可运行 `winget install Microsoft.PowerShell`。Windows 当前
-  仅支持 one-shot，命令逐条确认，session exec 与安全命令自动放行暂不生效。PowerShell wrapper
+  仅支持 one-shot，命令默认逐条确认（显式 `runtime.approval.overrides` 中的
+  `roll.powershell: auto` 可覆盖），session exec 与安全命令自动放行暂不生效。PowerShell wrapper
   会把 cmdlet 错误和 native `$LASTEXITCODE` 传播为进程退出码，避免明显失败被展示为成功
 - pnpm 安装依赖遇路径过长报错时，开启系统长路径支持（`LongPathsEnabled=1`）
 

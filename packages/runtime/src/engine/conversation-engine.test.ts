@@ -279,15 +279,15 @@ function mockUsage() {
   };
 }
 
-function bashThenDoneModel(command: string): MockLanguageModelV4 {
+function toolThenDoneModel(toolName: string, input: unknown): MockLanguageModelV4 {
   const steps: LanguageModelV4StreamPart[][] = [
     [
       { type: "stream-start", warnings: [] },
       {
         type: "tool-call",
         toolCallId: "c1",
-        toolName: "roll__bash",
-        input: JSON.stringify({ command }),
+        toolName,
+        input: JSON.stringify(input),
       },
       { type: "finish", usage: mockUsage(), finishReason: TOOL_CALLS_REASON },
     ],
@@ -336,7 +336,7 @@ test(
     try {
       const engine = new ConversationEngine({
         config: bashEngineConfig(dir, true),
-        model: bashThenDoneModel("pwd"),
+        model: toolThenDoneModel("roll__bash", { command: "pwd" }),
         sources: [],
         skillLibrary: null,
         policy: new DefaultToolPolicy(),
@@ -366,7 +366,7 @@ test(
     try {
       const engine = new ConversationEngine({
         config: bashEngineConfig(dir, false),
-        model: bashThenDoneModel("pwd"),
+        model: toolThenDoneModel("roll__bash", { command: "pwd" }),
         sources: [],
         skillLibrary: null,
         policy: new DefaultToolPolicy(),
@@ -387,6 +387,33 @@ test(
     }
   },
 );
+
+test("supportsSafeCommandClassification=false 的 profile 谎报 known-safe 也仍逐条确认", async () => {
+  const dir = tempDir();
+  try {
+    const engine = new ConversationEngine({
+      config: bashEngineConfig(dir, true),
+      model: toolThenDoneModel("roll__powershell", { command: "Get-Location" }),
+      sources: [],
+      skillLibrary: null,
+      policy: new DefaultToolPolicy(),
+      shellProfile: { ...powershellProfile, classify: () => "known-safe" },
+    });
+    const session = await engine.createSession();
+    const events = [];
+    for await (const event of session.send("看下当前目录")) {
+      events.push(event);
+      if (event.type === "confirmation-required") {
+        session.reject(event.approvalId);
+      }
+    }
+    assert.ok(events.some((event) => event.type === "confirmation-required"));
+    session.abort();
+    await engine.dispose();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
 
 function toolCapturingModel(capture: (names: string) => void): MockLanguageModelV4 {
   return new MockLanguageModelV4({
@@ -409,7 +436,7 @@ function toolCapturingModel(capture: (names: string) => void): MockLanguageModel
   });
 }
 
-function sessionExecConfig(dataDir: string) {
+function sessionExecConfig(dataDir: string, autoApproveSafe = true) {
   return rollConfigSchema.parse({
     llm: {
       defaultProvider: "mock",
@@ -417,10 +444,92 @@ function sessionExecConfig(dataDir: string) {
       providers: { mock: { apiKey: "test" } },
     },
     ask: {},
-    runtime: { shell: { enabled: true, session: { enabled: true } } },
+    runtime: {
+      shell: { enabled: true, autoApproveSafe, session: { enabled: true } },
+    },
     agents: { dataDir },
   });
 }
+
+test(
+  "session exec 默认沿用 profile classifier：create/resume 的 known-safe 命令均免确认",
+  { skip: process.platform === "win32" },
+  async () => {
+    for (const lifecycle of ["create", "resume"] as const) {
+      const dir = tempDir();
+      const store = lifecycle === "resume" ? new ThreadStore(join(dir, "threads")) : undefined;
+      const engine = new ConversationEngine({
+        config: sessionExecConfig(dir),
+        model: toolThenDoneModel("roll__exec_command", {
+          command: "pwd",
+          yield_time_ms: 250,
+        }),
+        sources: [],
+        skillLibrary: null,
+        policy: new DefaultToolPolicy(),
+        ...(store ? { store } : {}),
+      });
+      try {
+        let session;
+        if (lifecycle === "create") {
+          session = await engine.createSession();
+        } else {
+          assert.ok(store);
+          session = await engine.resumeSession(store.createThread({ model: "default-model" }));
+        }
+        const events = [];
+        for await (const event of session.send("看下当前目录")) {
+          events.push(event);
+        }
+        assert.ok(
+          !events.some((event) => event.type === "confirmation-required"),
+          `${lifecycle} 不应要求确认`,
+        );
+        const result = events.find((event) => event.type === "tool-result");
+        assert.ok(result && result.type === "tool-result");
+        assert.equal(result.isError, false);
+        session.abort();
+      } finally {
+        await engine.dispose();
+        store?.close();
+        rmSync(dir, { recursive: true, force: true });
+      }
+    }
+  },
+);
+
+test(
+  "session exec 关闭 autoApproveSafe 后 known-safe 命令仍需确认",
+  { skip: process.platform === "win32" },
+  async () => {
+    const dir = tempDir();
+    const engine = new ConversationEngine({
+      config: sessionExecConfig(dir, false),
+      model: toolThenDoneModel("roll__exec_command", {
+        command: "pwd",
+        yield_time_ms: 250,
+      }),
+      sources: [],
+      skillLibrary: null,
+      policy: new DefaultToolPolicy(),
+    });
+    try {
+      const session = await engine.createSession();
+      const events = [];
+      for await (const event of session.send("看下当前目录")) {
+        events.push(event);
+        if (event.type === "confirmation-required") {
+          session.reject(event.approvalId);
+        }
+      }
+      assert.ok(events.some((event) => event.type === "confirmation-required"));
+      session.abort();
+    } finally {
+      await engine.dispose();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  },
+);
 
 test(
   "sessionExecEnabled=false（单轮模式）不注册 exec 工具，bash 仍在（P2）",
@@ -541,6 +650,62 @@ test("运行期 shell profile 探测在 engine 实例内缓存", async () => {
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test(
+  "不支持的 PowerShell profile 只告警一次且不注册 shell 工具",
+  { concurrency: false },
+  async () => {
+    const dir = tempDir();
+    const writes: string[] = [];
+    const originalWrite = process.stderr.write;
+    process.stderr.write = ((chunk: string | Uint8Array): boolean => {
+      writes.push(String(chunk));
+      return true;
+    }) as typeof process.stderr.write;
+    let engine: ConversationEngine | undefined;
+    try {
+      let calls = 0;
+      const toolSnapshots: string[] = [];
+      engine = new ConversationEngine({
+        config: sessionExecConfig(dir),
+        model: toolCapturingModel((names) => {
+          toolSnapshots.push(names);
+        }),
+        sources: [],
+        skillLibrary: null,
+        resolveShellProfileFn: () => {
+          calls += 1;
+          return { supported: false, reason: "pwsh-not-found" };
+        },
+      });
+      const first = await engine.createSession();
+      const second = await engine.createSession();
+      const events = [];
+      for (const session of [first, second]) {
+        for await (const event of session.send("hi")) {
+          events.push(event);
+        }
+      }
+
+      assert.equal(calls, 1);
+      assert.ok(events.length > 0);
+      assert.equal(writes.filter((line) => line.includes("未检测到 PowerShell 7")).length, 1);
+      assert.equal(toolSnapshots.length, 2);
+      for (const tools of toolSnapshots) {
+        assert.ok(!tools.includes("roll__bash"));
+        assert.ok(!tools.includes("roll__powershell"));
+        assert.ok(!tools.includes("roll__exec_command"));
+        assert.ok(!tools.includes("roll__exec_poll"));
+      }
+      first.abort();
+      second.abort();
+    } finally {
+      await engine?.dispose();
+      process.stderr.write = originalWrite;
+      rmSync(dir, { recursive: true, force: true });
+    }
+  },
+);
 
 function installEngineConfig(dataDir: string) {
   return rollConfigSchema.parse({

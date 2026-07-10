@@ -310,11 +310,11 @@ export class ConversationEngine {
     const shellProfile = this.resolveRuntimeShellProfile();
     const bash = shellProfile ? this.resolveShellSettings(shellProfile) : undefined;
     const bashSession = shellProfile ? this.resolveSessionExecSettings(shellProfile) : undefined;
-    const bashClassifier: CommandClassifier | undefined =
-      shellProfile?.supportsSafeCommandClassification === true &&
-      !this.config.runtime.shell.autoApproveSafe
-        ? unknownCommandClassifier
-        : undefined;
+    const bashClassifier: CommandClassifier | undefined = shellProfile
+      ? shellProfile.supportsSafeCommandClassification && this.config.runtime.shell.autoApproveSafe
+        ? shellProfile
+        : unknownCommandClassifier
+      : undefined;
     const systemPrompt = this.composeSystemPrompt(
       skills,
       context.sources.length,

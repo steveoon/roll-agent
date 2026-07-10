@@ -78,6 +78,48 @@ test("超时输出带说明行且 exit 124", () => {
   assert.ok(String(formatted.output).includes("Exit code: 124"));
 });
 
+test("tree fallback 后 root 已退出也不伪报全部已终止", () => {
+  const formatted = formatBashResult({
+    result: result({
+      timedOut: true,
+      exitCode: 124,
+      timeoutMs: 500,
+      terminationError: "taskkill 失败；根进程已退出，但无法确认后代进程是否已清理",
+    }),
+    maxModelOutputChars: 1000,
+  });
+  const output = String(formatted.output);
+  assert.ok(output.includes("命令超时（超过 500ms），终止状态未确认"));
+  assert.ok(output.includes("终止失败: taskkill 失败"));
+  assert.ok(output.includes("无法确认后代进程是否已清理"));
+  assert.ok(!output.includes("已终止"));
+  assert.equal(formatted.isError, true);
+});
+
+test("forced-settle 同时显示根进程与后代进程均未确认", () => {
+  const formatted = formatBashResult({
+    result: result({
+      exitCode: 130,
+      terminationError:
+        "taskkill 失败；无法确认后代进程是否已清理；根进程在强制终止请求后仍未确认退出",
+    }),
+    maxModelOutputChars: 1000,
+  });
+  const output = String(formatted.output);
+  assert.ok(output.includes("无法确认后代进程是否已清理"));
+  assert.ok(output.includes("根进程在强制终止请求后仍未确认退出"));
+  assert.ok(!output.includes("命令超时"));
+  assert.equal(formatted.isError, true);
+});
+
+test("terminationError 在退出码为 0 时也标记 isError", () => {
+  const formatted = formatBashResult({
+    result: result({ exitCode: 0, terminationError: "进程树清理未完成" }),
+    maxModelOutputChars: 1000,
+  });
+  assert.equal(formatted.isError, true);
+});
+
 test("捕获截断时输出警告头含原始行数", () => {
   const formatted = formatBashResult({
     result: result({

@@ -219,7 +219,7 @@ function buildBackupPath(configPath: string): string {
   return `${configPath}.bak.${timestamp}`;
 }
 
-function migrateConfig(): void {
+export function migrateConfig(): void {
   const inspection = inspectConfigFile();
 
   if (inspection.status === "not-found") {
@@ -247,11 +247,11 @@ function migrateConfig(): void {
     return;
   }
 
-  const backupPath = buildBackupPath(inspection.configPath);
-  writeFileSync(backupPath, inspection.raw, "utf-8");
-
   const nextYaml = stringifyYaml(migrationResult.document, { lineWidth: 0 });
   validateConfigText(nextYaml, inspection.configPath);
+
+  const backupPath = buildBackupPath(inspection.configPath);
+  writeFileSync(backupPath, inspection.raw, "utf-8");
   writeFileSync(inspection.configPath, nextYaml, "utf-8");
 
   console.log(`✓ 配置文件已迁移: ${inspection.configPath}`);

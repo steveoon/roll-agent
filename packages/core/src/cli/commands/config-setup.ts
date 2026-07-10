@@ -17,6 +17,7 @@ import {
   validateConfigText,
 } from "../../config/loader.ts";
 import { encodePathToYaml } from "../../config/key-codec.ts";
+import { detectKnownConfigMigrations, formatConfigMigrationError } from "../../config/migration.ts";
 import { AgentStore } from "../../registry/store.ts";
 import type { RegisteredAgent } from "../../types/agent.ts";
 import {
@@ -42,6 +43,26 @@ interface ConfigDocumentContext {
   readonly raw?: string;
 }
 
+interface AdvancedInstallSetupValues {
+  readonly registry: string;
+  readonly fetchRetries: number;
+  readonly preferOffline: boolean;
+  readonly networkTimeoutMs: number;
+}
+
+type InstallSetupValues =
+  | {
+      readonly scenario: Exclude<InstallScenario, "private-registry" | "advanced">;
+    }
+  | {
+      readonly scenario: Extract<InstallScenario, "private-registry">;
+      readonly registry: string;
+    }
+  | {
+      readonly scenario: Extract<InstallScenario, "advanced">;
+      readonly values: AdvancedInstallSetupValues;
+    };
+
 export async function runConfigSetup(
   moduleArg: string | undefined,
   valueArg: string | undefined,
@@ -49,6 +70,7 @@ export async function runConfigSetup(
 ): Promise<void> {
   try {
     prompts.intro("Roll 配置向导");
+    readConfigDocumentContext();
     const moduleName = await resolveSetupModule(moduleArg, prompts);
     switch (moduleName) {
       case "llm":
@@ -109,6 +131,7 @@ async function resolveSetupModule(
 }
 
 export async function setupLlm(prompts: ConfigPromptAdapter): Promise<string> {
+  readConfigDocumentContext();
   const provider = await prompts.select<LlmProviderOption>({
     message: "选择默认 LLM provider",
     options: LLM_PROVIDER_OPTIONS.map((value) => ({
@@ -147,6 +170,7 @@ export async function setupLlm(prompts: ConfigPromptAdapter): Promise<string> {
 }
 
 export async function setupInstall(prompts: ConfigPromptAdapter): Promise<string> {
+  readConfigDocumentContext();
   const scenario = await prompts.select<InstallScenario>({
     message: "当前安装/更新网络更接近哪种场景？",
     options: [
@@ -161,8 +185,9 @@ export async function setupInstall(prompts: ConfigPromptAdapter): Promise<string
     ],
   });
 
+  const setupValues = await collectInstallSetupValues(scenario, prompts);
   const context = readConfigDocumentContext();
-  switch (scenario) {
+  switch (setupValues.scenario) {
     case "default-network":
       setInstallDefaults(context.document);
       deleteYamlValue(context.document, ["install", "registry"]);
@@ -171,19 +196,22 @@ export async function setupInstall(prompts: ConfigPromptAdapter): Promise<string
       setInstallDefaults(context.document);
       setYamlValue(context.document, ["install", "registry"], "https://registry.npmmirror.com");
       break;
-    case "private-registry": {
-      const registry = await prompts.text({
-        message: "私有 registry URL",
-        placeholder: "https://registry.example.com",
-        required: true,
-      });
+    case "private-registry":
       setInstallDefaults(context.document);
-      setYamlValue(context.document, ["install", "registry"], registry.trim());
+      setYamlValue(context.document, ["install", "registry"], setupValues.registry);
+      break;
+    case "advanced": {
+      const { registry, fetchRetries, preferOffline, networkTimeoutMs } = setupValues.values;
+      setYamlValue(context.document, ["install", "fetchRetries"], fetchRetries);
+      setYamlValue(context.document, ["install", "preferOffline"], preferOffline);
+      setYamlValue(context.document, ["install", "networkTimeoutMs"], networkTimeoutMs);
+      if (registry.length > 0) {
+        setYamlValue(context.document, ["install", "registry"], registry);
+      } else {
+        deleteYamlValue(context.document, ["install", "registry"]);
+      }
       break;
     }
-    case "advanced":
-      await setupInstallAdvanced(context.document, prompts);
-      break;
   }
 
   writeConfigDocument(context);
@@ -194,8 +222,10 @@ export async function setupShell(
   prompts: ConfigPromptAdapter,
   platform: NodeJS.Platform = process.platform,
 ): Promise<string> {
+  readConfigDocumentContext();
   const enabled = await prompts.confirm({
-    message: "启用 roll chat 内建 shell 工具（允许模型在本机执行命令，破坏性命令仍需逐条确认）？",
+    message:
+      "启用 roll chat 内建 shell 工具（允许模型在本机执行命令；默认确认策略受 runtime.approval 及显式 override 控制）？",
     initialValue: false,
   });
   let autoApproveSafe = true;
@@ -203,7 +233,7 @@ export async function setupShell(
   const isWindows = platform === "win32";
   if (enabled && isWindows) {
     prompts.warn(
-      "Windows 原生 shell 当前仅支持 PowerShell 7 one-shot；安全命令自动放行和 session exec 暂不生效，命令仍会逐条确认。",
+      "Windows 原生 shell 当前仅支持 PowerShell 7 one-shot；安全命令自动放行和 session exec 暂不生效。默认每条命令都需确认；显式 approval override（roll.powershell: auto）可覆盖此默认策略。",
     );
   }
   if (enabled && !isWindows) {
@@ -225,7 +255,9 @@ export async function setupShell(
   }
   writeConfigDocument(context);
   const windowsNote =
-    enabled && isWindows ? "；Windows 当前仅启用 PowerShell one-shot，命令逐条确认" : "";
+    enabled && isWindows
+      ? "；Windows 当前仅启用 PowerShell one-shot，默认逐条确认（显式 approval override 可覆盖）"
+      : "";
   return `已${enabled ? "启用" : "禁用"} chat shell 工具${windowsNote}（写入 ${context.configPath}）`;
 }
 
@@ -233,10 +265,30 @@ export async function setupBash(prompts: ConfigPromptAdapter): Promise<string> {
   return setupShell(prompts);
 }
 
-async function setupInstallAdvanced(
-  document: Record<string, unknown>,
+async function collectInstallSetupValues(
+  scenario: InstallScenario,
   prompts: ConfigPromptAdapter,
-): Promise<void> {
+): Promise<InstallSetupValues> {
+  switch (scenario) {
+    case "default-network":
+    case "china-dev":
+      return { scenario };
+    case "private-registry": {
+      const registry = await prompts.text({
+        message: "私有 registry URL",
+        placeholder: "https://registry.example.com",
+        required: true,
+      });
+      return { scenario, registry: registry.trim() };
+    }
+    case "advanced":
+      return { scenario, values: await setupInstallAdvanced(prompts) };
+  }
+}
+
+async function setupInstallAdvanced(
+  prompts: ConfigPromptAdapter,
+): Promise<AdvancedInstallSetupValues> {
   const registry = await prompts.text({
     message: "npm registry（留空则不写）",
     placeholder: "https://registry.npmmirror.com",
@@ -258,20 +310,19 @@ async function setupInstallAdvanced(
     validate: validateIntegerInRange(10_000, Number.MAX_SAFE_INTEGER),
   });
 
-  setYamlValue(document, ["install", "fetchRetries"], Number.parseInt(fetchRetries, 10));
-  setYamlValue(document, ["install", "preferOffline"], preferOffline);
-  setYamlValue(document, ["install", "networkTimeoutMs"], Number.parseInt(networkTimeoutMs, 10));
-  if (registry.trim().length > 0) {
-    setYamlValue(document, ["install", "registry"], registry.trim());
-  } else {
-    deleteYamlValue(document, ["install", "registry"]);
-  }
+  return {
+    registry: registry.trim(),
+    fetchRetries: Number.parseInt(fetchRetries, 10),
+    preferOffline,
+    networkTimeoutMs: Number.parseInt(networkTimeoutMs, 10),
+  };
 }
 
 export async function setupAgentEnv(
   agentNameArg: string | undefined,
   prompts: ConfigPromptAdapter,
 ): Promise<string> {
+  readConfigDocumentContext();
   const { agentsConfig } = loadAgentsConfig();
   const store = new AgentStore(agentsConfig.dataDir);
   const agent = await resolveAgentWithEnv(store.list(), agentNameArg, prompts);
@@ -280,7 +331,6 @@ export async function setupAgentEnv(
     throw new Error(`Agent "${agent.skill.name}" 未声明环境变量需求。`);
   }
 
-  const context = readConfigDocumentContext();
   const configuredEnv = agentsConfig.env?.[agent.skill.name] ?? {};
   const nextEnv: Record<string, string> = { ...configuredEnv };
   const declarations = flattenAgentEnvDeclarations(agent.skill.env);
@@ -324,6 +374,7 @@ export async function setupAgentEnv(
     }
   }
 
+  const context = readConfigDocumentContext();
   setYamlValue(context.document, ["agents", "env", agent.skill.name], nextEnv);
   writeConfigDocument(context);
   for (const [name, value] of Object.entries(nextEnv)) {
@@ -466,11 +517,16 @@ function readConfigDocumentContext(): ConfigDocumentContext {
   }
 
   const raw = readFileSync(configPath, "utf-8");
+  const document = parseConfigDocument(raw, configPath);
+  const migrationReport = detectKnownConfigMigrations(document);
+  if (migrationReport.needsMigration) {
+    throw new Error(formatConfigMigrationError(configPath, migrationReport));
+  }
   return {
     configPath,
     existed: true,
     raw,
-    document: parseConfigDocument(raw, configPath),
+    document,
   };
 }
 

@@ -9,7 +9,7 @@ roll chat 的内建 POSIX shell 能力新增两项（在 T0 `roll__bash` 基础�
 
 纯 JS 规则分类器把 POSIX 命令分为 known-safe / dangerous / unknown。known-safe 只读命令（`ls`/`cat README.md`/`git status`/`grep -r TODO src` 等）自动免确认执行，dangerous（`rm -rf`、`sudo`）与 unknown 仍需人工确认。设计借鉴 codex 的白名单 + 逐命令 flag 审计（`find` 拒 `-exec`/`-delete`、`git` 只放行只读子命令并拦全局 `-c`/`--git-dir`、`sed` 仅 `-n Np`、`base64` 拒写文件等），复合命令用保守词法方案（含 `$`/反引号/重定向/子 shell 等危险元字符即降级为 unknown）替代 tree-sitter，误判方向永远偏向"更保守 → 走确认"。Windows PowerShell 本批不启用安全白名单，命令全部按 unknown 走确认门。
 
-免确认有**工作区边界**：吃路径的命令出现绝对路径、`~` 或 `..` 参数（如 `cat ~/.ssh/id_rsa`、`find / -name x`、`rg secret /Users/x`）即降级 unknown 走确认，`grep`/`rg` 的 pattern 参数与 `echo` 等非文件命令豁免以避免误报；`workdir` 参数逃出会话根目录同样强制确认。分类器经 config→engine→session 注入，gate/policy 零改动。关掉 `auto-approve-safe` 回归 T0 的每条确认。
+免确认有**工作区边界**：吃路径的命令出现绝对路径、`~` 或 `..` 参数（如 `cat ~/.ssh/id_rsa`、`find / -name x`、`rg secret /Users/x`）即降级 unknown 走确认，`grep`/`rg` 的 pattern 参数与 `echo` 等非文件命令豁免以避免误报；`workdir` 参数逃出会话根目录同样强制确认。分类器经 config→engine→session 注入，one-shot 与 session exec 显式共用同一个 effective classifier，避免两处 toolset 的兜底差异改变审批行为；gate/policy 零改动。关掉 `auto-approve-safe` 回归 T0 的默认逐条确认，显式 approval override 仍优先。
 
 **T2 — 会话式执行（`runtime.shell.session`，默认关闭）**
 

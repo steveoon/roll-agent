@@ -129,7 +129,7 @@ export const CONFIG_GUIDANCE_ENTRIES = [
     path: "runtime.shell.enabled",
     title: "Chat 内建 shell 工具",
     purpose:
-      "开启后 `roll chat` 注册内建 shell 工具：macOS/Linux 为 `roll__bash`，Windows 原生为 `roll__powershell`（需 PowerShell 7+）。命令继承 roll 进程环境变量，默认每条需人工确认。",
+      "开启后 `roll chat` 注册内建 shell 工具：macOS/Linux 为 `roll__bash`，Windows 原生为 `roll__powershell`（需 PowerShell 7+）。命令继承 roll 进程环境变量；默认确认策略可由 `runtime.approval` 及精确 override 覆盖。",
     defaultBehavior: `默认值为 \`${String(DEFAULT_CONFIG.runtime.shell.enabled)}\`（关闭）。Windows 未检测到 pwsh 7+ 时会跳过注册。`,
     example: "runtime:\n  shell:\n    enabled: true",
     setupCommand: "roll config setup shell",
@@ -138,8 +138,8 @@ export const CONFIG_GUIDANCE_ENTRIES = [
     path: "runtime.shell.auto-approve-safe",
     title: "只读命令免确认",
     purpose:
-      "开启后用内建规则分类器识别 POSIX known-safe 只读命令（如 `ls`、`cat`、`git status`），在 `guarded`/`auto` 策略下免确认执行；dangerous（`rm -rf`、`sudo`）与无法识别的命令仍需确认。Windows PowerShell 当前全部按 unknown 处理，仍需确认。",
-    defaultBehavior: `默认值为 \`${String(DEFAULT_CONFIG.runtime.shell.autoApproveSafe)}\`。关闭后 POSIX 回归每条命令都确认；Windows PowerShell 当前始终确认。`,
+      "开启后用内建规则分类器识别 POSIX known-safe 只读命令（如 `ls`、`cat`、`git status`），在 `guarded`/`auto` 策略下免确认执行；dangerous（`rm -rf`、`sudo`）与无法识别的命令默认仍需确认。工具级显式 approval override 优先；Windows PowerShell 当前全部按 unknown 处理。",
+    defaultBehavior: `默认值为 \`${String(DEFAULT_CONFIG.runtime.shell.autoApproveSafe)}\`。关闭后 POSIX 回归默认逐条确认；Windows PowerShell 默认逐条确认，显式 approval override 可覆盖。`,
     example: "runtime:\n  shell:\n    enabled: true\n    auto-approve-safe: false",
     setupCommand: "roll config setup shell",
   },

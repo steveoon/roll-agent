@@ -1,4 +1,4 @@
-import { camelToKebab } from "./key-codec.ts";
+import { camelToKebab, CONFIG_KEY_CODEC, kebabToCamel, type KeyCodecNode } from "./key-codec.ts";
 
 const CONFIG_MIGRATION_ISSUE_CODES = {
   deprecatedRouterSection: "deprecated-router-section",
@@ -116,6 +116,93 @@ function deepEqual(a: unknown, b: unknown): boolean {
     return false;
   }
   return aKeys.every((key, index) => key === bKeys[index] && deepEqual(a[key], b[key]));
+}
+
+type RuntimeShellNormalizationResult =
+  | { readonly ok: true; readonly value: Record<string, unknown> }
+  | { readonly ok: false; readonly conflictPath: string };
+
+type KeyCodecNormalizationResult =
+  | { readonly ok: true; readonly value: unknown }
+  | { readonly ok: false; readonly conflictPath: string };
+
+function getRuntimeShellKeyCodec(): KeyCodecNode {
+  if (CONFIG_KEY_CODEC.kind !== "object") {
+    throw new Error("runtime shell key codec is unavailable");
+  }
+  const runtime = CONFIG_KEY_CODEC.fields["runtime"];
+  if (runtime?.kind !== "object") {
+    throw new Error("runtime shell key codec is unavailable");
+  }
+  const shell = runtime.fields["shell"];
+  if (shell?.kind !== "object") {
+    throw new Error("runtime shell key codec is unavailable");
+  }
+  return shell;
+}
+
+function normalizeWithKeyCodec(
+  value: unknown,
+  node: KeyCodecNode,
+  path: readonly string[],
+): KeyCodecNormalizationResult {
+  if (!isRecord(value) || node.kind === "leaf") {
+    return { ok: true, value };
+  }
+
+  const normalized: Record<string, unknown> = {};
+  for (const [key, child] of Object.entries(value)) {
+    const canonicalKey = node.kind === "object" ? kebabToCamel(key) : key;
+    const childNode = node.kind === "object" ? node.fields[canonicalKey] : node.value;
+    const normalizedChild =
+      childNode === undefined
+        ? { ok: true as const, value: child }
+        : normalizeWithKeyCodec(child, childNode, [...path, canonicalKey]);
+    if (!normalizedChild.ok) {
+      return normalizedChild;
+    }
+
+    if (hasOwnStringKey(normalized, canonicalKey)) {
+      if (!deepEqual(normalized[canonicalKey], normalizedChild.value)) {
+        return {
+          ok: false,
+          conflictPath: [...path, canonicalKey].join("."),
+        };
+      }
+      continue;
+    }
+    normalized[canonicalKey] = normalizedChild.value;
+  }
+  return { ok: true, value: normalized };
+}
+
+function normalizeRuntimeShellSection(
+  section: Record<string, unknown>,
+  sectionPath: string,
+): RuntimeShellNormalizationResult {
+  const result = normalizeWithKeyCodec(section, getRuntimeShellKeyCodec(), [sectionPath]);
+  if (!result.ok) {
+    return result;
+  }
+  return isRecord(result.value) ? { ok: true, value: result.value } : { ok: true, value: section };
+}
+
+function dedupeEquivalentAliasKeys(value: unknown, node: KeyCodecNode): unknown {
+  if (!isRecord(value) || node.kind === "leaf") {
+    return value;
+  }
+  const deduped: Record<string, unknown> = {};
+  const seenCanonicalKeys = new Set<string>();
+  for (const [key, child] of Object.entries(value)) {
+    const canonicalKey = node.kind === "object" ? kebabToCamel(key) : key;
+    if (seenCanonicalKeys.has(canonicalKey)) {
+      continue;
+    }
+    seenCanonicalKeys.add(canonicalKey);
+    const childNode = node.kind === "object" ? node.fields[canonicalKey] : node.value;
+    deduped[key] = childNode === undefined ? child : dedupeEquivalentAliasKeys(child, childNode);
+  }
+  return deduped;
 }
 
 function findPresentKeys(
@@ -511,7 +598,29 @@ function inspectRuntimeShellMigration(
     );
   }
 
-  if (isRecord(bash) && isRecord(shell) && !deepEqual(bash, shell)) {
+  const normalizedBash = isRecord(bash)
+    ? normalizeRuntimeShellSection(bash, "runtime.bash")
+    : undefined;
+  const normalizedShell = isRecord(shell)
+    ? normalizeRuntimeShellSection(shell, "runtime.shell")
+    : undefined;
+
+  for (const normalization of [normalizedBash, normalizedShell]) {
+    if (normalization !== undefined && !normalization.ok) {
+      issues.push(
+        createIssue(
+          CONFIG_MIGRATION_ISSUE_CODES.runtimeShellConflict,
+          `\`${normalization.conflictPath}\` 同时包含等价键且值冲突，请手动处理。`,
+        ),
+      );
+    }
+  }
+
+  if (
+    normalizedBash?.ok === true &&
+    normalizedShell?.ok === true &&
+    !deepEqual(normalizedBash.value, normalizedShell.value)
+  ) {
     issues.push(
       createIssue(
         CONFIG_MIGRATION_ISSUE_CODES.runtimeShellConflict,
@@ -556,7 +665,7 @@ function applyRuntimeShellMigration(
   }
   const summary: string[] = [];
   if (!hasOwnStringKey(runtime, "shell")) {
-    runtime["shell"] = bash;
+    runtime["shell"] = dedupeEquivalentAliasKeys(bash, getRuntimeShellKeyCodec());
     summary.push("将 `runtime.bash` 迁移为 `runtime.shell`");
   } else {
     summary.push("删除已废弃的 `runtime.bash`");

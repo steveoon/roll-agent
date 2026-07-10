@@ -15,6 +15,7 @@ export interface BashExecResult {
   readonly stdout: CapturedStream;
   readonly stderr: CapturedStream;
   readonly spawnError?: string;
+  readonly terminationError?: string;
 }
 
 export interface NormalizeExitCodeParams {
@@ -65,7 +66,14 @@ export function formatBashResult(input: FormatBashResultInput): NormalizedToolRe
 
   const lines: string[] = [];
   if (result.timedOut) {
-    lines.push(`命令超时（超过 ${String(result.timeoutMs)}ms），已终止`);
+    lines.push(
+      result.terminationError
+        ? `命令超时（超过 ${String(result.timeoutMs)}ms），终止状态未确认`
+        : `命令超时（超过 ${String(result.timeoutMs)}ms），已终止`,
+    );
+  }
+  if (result.terminationError) {
+    lines.push(`终止失败: ${result.terminationError}`);
   }
   lines.push(`Exit code: ${String(result.exitCode)}`);
   lines.push(`Wall time: ${(result.wallTimeMs / 1000).toFixed(1)} s`);
@@ -86,5 +94,5 @@ export function formatBashResult(input: FormatBashResultInput): NormalizedToolRe
   ].filter((section): section is string => section !== undefined);
 
   const output = [lines.join("\n"), ...sections].join("\n\n");
-  return { output, isError: result.exitCode !== 0 };
+  return { output, isError: result.exitCode !== 0 || result.terminationError !== undefined };
 }

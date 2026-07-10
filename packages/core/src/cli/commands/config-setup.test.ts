@@ -5,7 +5,14 @@ import { resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { randomUUID } from "node:crypto";
 import { parse as parseYaml } from "yaml";
-import { runConfigSetup, setupShell } from "./config-setup.ts";
+import {
+  runConfigSetup,
+  setupAgentEnv,
+  setupBash,
+  setupInstall,
+  setupLlm,
+  setupShell,
+} from "./config-setup.ts";
 import { explainConfig } from "./config-explain.ts";
 import { findConfigGuidance } from "./config-guidance.ts";
 import { DEFAULT_CONFIG } from "../../config/defaults.ts";
@@ -127,6 +134,25 @@ class CancelPrompts extends FakePrompts {
   }
 }
 
+class TextCallbackPrompts extends FakePrompts {
+  private callbackPending = true;
+  private readonly onText: () => void;
+
+  constructor(options: ConstructorParameters<typeof FakePrompts>[0], onText: () => void) {
+    super(options);
+    this.onText = onText;
+  }
+
+  override async text(options: Parameters<ConfigPromptAdapter["text"]>[0]): Promise<string> {
+    const value = await super.text(options);
+    if (this.callbackPending) {
+      this.callbackPending = false;
+      this.onText();
+    }
+    return value;
+  }
+}
+
 function makeTmpDir(): string {
   const dir = resolve(tmpdir(), `roll-config-setup-${randomUUID()}`);
   mkdirSync(dir, { recursive: true });
@@ -229,6 +255,60 @@ describe("config setup", () => {
     });
   });
 
+  it("allows setup to repair an invalid target section when no migration is pending", async () => {
+    writeFileSync(resolve(cwd, "roll.config.yaml"), "llm: null\n", "utf-8");
+
+    await setupLlm(
+      new FakePrompts({
+        select: ["openai"],
+        text: ["gpt-4.1", ""],
+        password: ["$" + "{OPENAI_API_KEY}"],
+      }),
+    );
+
+    assert.deepEqual(readConfig(cwd)["llm"], {
+      "default-provider": "openai",
+      "default-model": "gpt-4.1",
+      providers: { openai: { "api-key": "$" + "{OPENAI_API_KEY}" } },
+    });
+  });
+
+  it("fails before business prompts when a known config migration is pending", async () => {
+    const configPath = resolve(cwd, "roll.config.yaml");
+    const raw = `runtime:
+  bash:
+    enabled: true
+    autoApproveSafe: true
+  shell:
+    enabled: true
+    auto-approve-safe: true
+`;
+    writeFileSync(configPath, raw, "utf-8");
+
+    const directSetups: ReadonlyArray<{
+      readonly name: string;
+      readonly run: (prompts: ConfigPromptAdapter) => Promise<string>;
+    }> = [
+      { name: "llm", run: setupLlm },
+      { name: "install", run: setupInstall },
+      { name: "agent", run: (prompts) => setupAgentEnv(undefined, prompts) },
+      { name: "shell", run: (prompts) => setupShell(prompts, "linux") },
+      { name: "bash alias", run: setupBash },
+    ];
+
+    for (const setup of directSetups) {
+      const prompts = new FakePrompts({});
+      await assert.rejects(setup.run(prompts), /roll config migrate/u, setup.name);
+      assert.deepEqual(prompts.messages, [], setup.name);
+      assert.equal(readFileSync(configPath, "utf-8"), raw, setup.name);
+    }
+
+    const prompts = new FakePrompts({});
+    await assert.rejects(runConfigSetup(undefined, undefined, prompts), /roll config migrate/u);
+    assert.deepEqual(prompts.messages, ["Roll 配置向导"]);
+    assert.equal(readFileSync(configPath, "utf-8"), raw);
+  });
+
   it("writes install config for the China development scenario", async () => {
     await runConfigSetup("install", undefined, new FakePrompts({ select: ["china-dev"] }));
 
@@ -258,6 +338,49 @@ describe("config setup", () => {
     );
   });
 
+  it("preserves legal config changes made while install prompts are open", async () => {
+    const configPath = resolve(cwd, "roll.config.yaml");
+    writeFileSync(configPath, "ask: {}\n", "utf-8");
+    const externallyUpdated = "ask:\n  confirm-threshold: 0.75\n";
+    const prompts = new TextCallbackPrompts(
+      {
+        select: ["private-registry"],
+        text: ["https://registry.internal.example.com"],
+      },
+      () => writeFileSync(configPath, externallyUpdated, "utf-8"),
+    );
+
+    await setupInstall(prompts);
+
+    const config = readConfig(cwd);
+    assert.deepEqual(config["ask"], { "confirm-threshold": 0.75 });
+    assert.equal(
+      (config["install"] as Record<string, unknown>)["registry"],
+      "https://registry.internal.example.com",
+    );
+  });
+
+  it("rejects a migration introduced while install prompts are open", async () => {
+    const configPath = resolve(cwd, "roll.config.yaml");
+    writeFileSync(configPath, "ask: {}\n", "utf-8");
+    const externallyUpdated = "runtime:\n  bash:\n    enabled: true\n";
+    const prompts = new TextCallbackPrompts(
+      {
+        select: ["private-registry"],
+        text: ["https://registry.internal.example.com"],
+      },
+      () => writeFileSync(configPath, externallyUpdated, "utf-8"),
+    );
+
+    await assert.rejects(setupInstall(prompts), /roll config migrate/u);
+
+    assert.equal(readFileSync(configPath, "utf-8"), externallyUpdated);
+    assert.equal(
+      readdirSync(cwd).filter((entry) => entry.startsWith("roll.config.yaml.bak.")).length,
+      0,
+    );
+  });
+
   it("writes chat shell runtime config when enabled", async () => {
     await setupShell(new FakePrompts({ confirm: [true, true, false] }), "linux");
 
@@ -283,6 +406,7 @@ describe("config setup", () => {
       prompts.messages.join("\n"),
       /Windows 原生 shell 当前仅支持 PowerShell 7 one-shot/u,
     );
+    assert.match(prompts.messages.join("\n"), /roll\.powershell: auto/u);
   });
 
   it("bash setup alias writes only the shell disable flag when declined", async () => {
