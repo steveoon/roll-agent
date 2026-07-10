@@ -1,5 +1,25 @@
 # @roll-agent/runtime
 
+## 0.6.0
+
+### Minor Changes
+
+- [#140](https://github.com/steveoon/roll-agent/pull/140) [`103ab9d`](https://github.com/steveoon/roll-agent/commit/103ab9d8aa76954fc23727fb8fea67dd013b5970) Thanks [@steveoon](https://github.com/steveoon)! - `roll chat` 新增可恢复上下文的 Esc 中断协议，并让已安装 skill 的脚本路径与进程退出状态可判定。
+  - Ink 执行态支持 legacy VT 与 kitty keyboard 编码的 Esc 中断；工具确认框中的 Esc 仍只拒绝当前工具。
+  - 取消事件区分 user / timeout / runtime，保留已经完成的 AI SDK steps 与取消标记，避免 UI 历史存在但下一轮模型上下文丢失。
+  - 用户取消会在模型两次后台任务轮询之间 interrupt 当前会话的 exec 进程；若进程在 grace window 内未退出，会升级为 terminate，避免管理器清空后遗留失联进程；服务端另提供 `session.close` 做完整资源释放。
+  - turn timeout 使用 Roll 自有 abort reason，provider 网络超时仍按真实错误上报，不再被误判成整轮 300000ms 超时。
+  - `roll__skill` 返回 canonical `SKILL_ROOT`，相对脚本与 reference 统一从该目录解析，不再猜测 `.roll`、`.claude` 或其它安装位置。
+  - reference 加载不再为取得根路径重复读取 `SKILL.md`，并区分“skill 不存在”和“reference 不存在”。
+  - `roll__skill` 列出的 references 相对路径在 Windows 上也统一为正斜杠 canonical 形式，模型回传两种分隔符均可解析。
+  - shell 结果显式标记 abort / timeout；后台 exec 仅在用户主动取消时中断当前会话，运行时总超时不会误杀已后台化任务。
+
+- [#140](https://github.com/steveoon/roll-agent/pull/140) [`62ff3f9`](https://github.com/steveoon/roll-agent/commit/62ff3f9e00115f93bb0a2becf0f214636932decb) Thanks [@steveoon](https://github.com/steveoon)! - MCP Sampling 复用 `runtime.thinking-level` 全局配置：子 Agent 借用指挥官 LLM 推理时（`roll ask` / `roll run` / `roll chat`），reasoning/thinking effort 使用同一档位映射。
+  - `resolveLLMCall` 对 `sampling` purpose 注入与 `chat` 相同的 `thinkingProviderOptions`；`ask` / `run` 构造 sampling model 改走统一解析入口。
+  - `ConversationEngine` 把初始档位传给子 Agent Sampling；Ink TUI 的 `/think`、`/effort` 与快捷键切档后，主会话和已缓存 MCP 连接的后续 Sampling 请求同步更新，新接入 Agent 也使用最新档位。
+  - Sampling 严格保留子 Agent 请求的 MCP `maxTokens` 上限，不会为了 provider thinking budget 静默扩大答案长度。
+  - 行为变化：Sampling 此前不带 thinking 配置（走 provider 默认），现在默认跟随配置档位（默认 `medium`；Qwen 为 `enableThinking + 8192 thinkingBudget`）。如需关闭，设 `runtime.thinking-level: off` 或在交互会话中执行 `/think off`。
+
 ## 0.5.0
 
 ### Minor Changes
