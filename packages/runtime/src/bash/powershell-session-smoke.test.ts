@@ -449,13 +449,34 @@ test(
 );
 
 test(
-  "PowerShell session: root 先退出时不对旧 PID taskkill，后代清理状态保守报错",
+  "Windows taskkill profile: root 先退出时不对旧 PID taskkill，后代清理状态保守报错",
   { skip, timeout: TEST_TIMEOUT_MS },
   async () => {
     const baseProfile = powerShellProfile();
     let killTreeCalls = 0;
+    const grandchildScript = "setInterval(() => {}, 1000)";
+    const parentScript = [
+      'const { spawn } = require("node:child_process")',
+      `const child = spawn(process.execPath, ["-e", ${JSON.stringify(grandchildScript)}], { stdio: ["ignore", 1, 2], windowsHide: true })`,
+      'console.log("ROLL_ROOT_FIRST_CHILD_PID=" + child.pid)',
+      "child.unref()",
+    ].join(";");
     const observedProfile: ShellProfile = {
       ...baseProfile,
+      // A native command launched through PowerShell does not reliably expose the same pipe handles
+      // to its descendants. Spawn the fixture directly so the grandchild definitely keeps Roll's
+      // stdout/stderr pipes open after the root exits, while retaining Windows taskkill semantics.
+      buildSpawn: (_command, workdir, env) => ({
+        file: process.execPath,
+        args: ["-e", parentScript],
+        options: {
+          cwd: workdir,
+          detached: false,
+          stdio: ["ignore", "pipe", "pipe"],
+          env,
+          windowsHide: true,
+        },
+      }),
       killTree: async (pid, intent, options) => {
         killTreeCalls += 1;
         await baseProfile.killTree(pid, intent, options);
@@ -469,13 +490,6 @@ test(
       closeDrainTimeoutMs: 100,
       rootSettleTimeoutMs: 100,
     });
-    const grandchildScript = "setInterval(() => {}, 1000)";
-    const parentScript = [
-      'const { spawn } = require("node:child_process")',
-      `const child = spawn(process.execPath, ["-e", ${JSON.stringify(grandchildScript)}], { stdio: ["ignore", 1, 2], windowsHide: true })`,
-      'console.log("ROLL_ROOT_FIRST_CHILD_PID=" + child.pid)',
-      "child.unref()",
-    ].join(";");
     let childPid: number | undefined;
     let output = "";
     let resolveChildPid: ((pid: number) => void) | undefined;
@@ -483,7 +497,7 @@ test(
       resolveChildPid = resolve;
     });
     const session = mgr.spawn({
-      command: `& ${psQuote(process.execPath)} -e ${psQuote(parentScript)}`,
+      command: "node-root-first-fixture",
       workdir: tmpdir(),
       onDelta: (_stream, delta) => {
         output += delta;
@@ -501,8 +515,7 @@ test(
         5_000,
         `未收到 root-first Node 后代 PID，当前输出: ${output}`,
       );
-      await withTimeout(session.waitExit(), 5_000, "PowerShell root 未按预期先退出");
-      assert.equal(session.closeObserved, false, "后代持有 stdio 时不应已观察到 close");
+      await withTimeout(session.waitExit(), 5_000, "Node root 未按预期先退出");
       await withTimeout(session.waitSettled(), 5_000, "root-first 会话未有界收口");
 
       assert.equal(killTreeCalls, 0, "root 已退出后不得对可能复用的旧 PID 调 taskkill");

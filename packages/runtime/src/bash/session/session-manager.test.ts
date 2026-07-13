@@ -272,6 +272,7 @@ test("killTree 卡住时有界收口并标记 cleanup-failed", { skip }, async (
     env: process.env,
     bufferCapacity: 1_000,
     killTreeTimeoutMs: 20,
+    closeDrainTimeoutMs: 20,
     rootSettleTimeoutMs: 20,
   });
   const session = mgr.spawn({ command: "sleep 30", workdir: process.cwd() });
