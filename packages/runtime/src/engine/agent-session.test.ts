@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { performance } from "node:perf_hooks";
 import { simulateReadableStream, type ModelMessage } from "ai";
 import { MockLanguageModelV4 } from "ai/test";
 import type {
@@ -19,6 +20,7 @@ import type { PolicyDecision, ToolPolicy } from "../types/policy.ts";
 import type { SessionEvent } from "../types/events.ts";
 import { ruleBasedClassifier } from "../bash/classifier/index.ts";
 import type { ShellProfile } from "../bash/profile.ts";
+import { killProcessGroup } from "../bash/kill.ts";
 
 const STOP: LanguageModelV4FinishReason = { unified: "stop", raw: "stop" };
 const TOOL_CALLS: LanguageModelV4FinishReason = { unified: "tool-calls", raw: "tool-calls" };
@@ -36,6 +38,10 @@ const posixProfile: ShellProfile = {
   classify: (command, workdir) => ruleBasedClassifier.classify(command, workdir),
   killTree: async () => {},
   systemPromptHints: () => [],
+};
+
+const allowToolPolicy: ToolPolicy = {
+  check: (): PolicyDecision => ({ action: "allow" }),
 };
 
 function usage(inputTokens = 1, outputTokens = 1) {
@@ -167,6 +173,49 @@ function testBashSettings(workdir: string) {
     maxModelOutputChars: 16_000,
     profile: posixProfile,
   };
+}
+
+function sessionExecSettings(profile: ShellProfile = posixProfile) {
+  return {
+    workdir: process.cwd(),
+    profile,
+    maxSessions: 8,
+    defaultYieldMs: 250,
+    maxOutputTokens: 10_000,
+    bufferCapacity: 100_000,
+  };
+}
+
+function sessionIdFromToolResult(
+  events: readonly SessionEvent[],
+  toolName = "exec_command",
+): number {
+  const result = events.find(
+    (event) => event.type === "tool-result" && event.toolName === toolName,
+  );
+  assert.ok(result && result.type === "tool-result");
+  const output = JSON.stringify(result.output);
+  const match = /Session: (\d+)/u.exec(output);
+  assert.ok(match, `期望 ${toolName} 返回 running session id，实际: ${output}`);
+  return Number(match[1]);
+}
+
+interface ListedExecSession {
+  readonly session_id: number;
+  readonly state: string;
+  readonly termination_cause?: string;
+}
+
+function listedExecSessions(events: readonly SessionEvent[]): readonly ListedExecSession[] {
+  const result = events.find(
+    (event) => event.type === "tool-result" && event.toolName === "exec_list",
+  );
+  assert.ok(result && result.type === "tool-result");
+  const normalized = result.output as { readonly output?: unknown };
+  const payload = JSON.parse(String(normalized.output)) as {
+    readonly sessions: readonly ListedExecSession[];
+  };
+  return payload.sessions;
 }
 
 test("AgentSession 流式输出纯文本并累积历史", async () => {
@@ -577,11 +626,15 @@ test("AgentSession turnTimeout 显式上报 timeout，不再退化为 aborted", 
   assert.ok(cancelled && cancelled.type === "turn-cancelled");
   assert.equal(cancelled.reason, "timeout");
   assert.match(cancelled.message, /30ms/);
+  assert.equal(cancelled.execSessionIds, undefined);
+  assert.doesNotMatch(cancelled.message, /roll__exec_list/u);
   assert.equal(
     events.some((event) => event.type === "error"),
     false,
   );
-  assert.match(String(session.getMessages().at(-1)?.content), /运行超时/);
+  const persistedMessage = String(session.getMessages().at(-1)?.content);
+  assert.match(persistedMessage, /运行超时/);
+  assert.doesNotMatch(persistedMessage, /roll__exec_list/u);
 });
 
 test("provider 网络超时保持 error，不冒充 turnTimeout", async () => {
@@ -606,6 +659,385 @@ test("provider 网络超时保持 error，不冒充 turnTimeout", async () => {
   const error = events.find((event) => event.type === "error");
   assert.ok(error && error.type === "error");
   assert.match(error.message, /provider request timed out/);
+});
+
+test(
+  "AgentSession cancel 只中断当前 turn 通过 exec_command 触达的 session",
+  { skip: process.platform === "win32" },
+  async () => {
+    const steps: LanguageModelV4StreamPart[][] = [
+      toolCallStep("roll__exec_command", { command: "sleep 30", yield_time_ms: 250 }),
+      textStep("untouched started"),
+    ];
+    const session = new AgentSession({
+      id: "session-exec-cancel-command",
+      model: sequencedModel(steps),
+      sources: [],
+      maxSteps: 8,
+      policy: allowToolPolicy,
+      bashSession: sessionExecSettings({
+        ...posixProfile,
+        killTree: async (pid, intent) => {
+          killProcessGroup(pid, intent === "interrupt" ? "SIGINT" : "SIGKILL");
+        },
+      }),
+    });
+
+    try {
+      const untouchedEvents = await collect(session.send("start untouched"));
+      const untouchedId = sessionIdFromToolResult(untouchedEvents);
+      steps.push(
+        toolCallStep("roll__exec_command", {
+          command: "printf cancel-current; sleep 30",
+          yield_time_ms: 30_000,
+        }),
+        toolCallStep("roll__exec_list", {}),
+        textStep("listed"),
+      );
+
+      const cancelledEvents: SessionEvent[] = [];
+      let cancelRequested = false;
+      for await (const event of session.send("start and cancel current")) {
+        cancelledEvents.push(event);
+        if (
+          !cancelRequested &&
+          event.type === "tool-output-delta" &&
+          event.delta.includes("cancel-current")
+        ) {
+          cancelRequested = session.cancel();
+        }
+      }
+
+      assert.equal(cancelRequested, true);
+      const cancelled = cancelledEvents.find((event) => event.type === "turn-cancelled");
+      assert.ok(cancelled && cancelled.type === "turn-cancelled");
+      assert.equal(cancelled.reason, "user");
+      assert.equal(cancelled.execSessionIds?.length, 1);
+      const cancelledId = cancelled.execSessionIds?.[0];
+      assert.ok(cancelledId);
+      assert.notEqual(cancelledId, untouchedId);
+      assert.match(cancelled.message, new RegExp(String(cancelledId), "u"));
+      assert.match(
+        String(session.getMessages().at(-1)?.content),
+        new RegExp(String(cancelledId), "u"),
+      );
+
+      const listed = listedExecSessions(await collect(session.send("list sessions")));
+      assert.ok(listed.some((item) => item.session_id === untouchedId && item.state === "running"));
+      assert.ok(
+        listed.some(
+          (item) => item.session_id === cancelledId && item.termination_cause === "interrupt",
+        ),
+      );
+    } finally {
+      await session.close();
+    }
+  },
+);
+
+test(
+  "AgentSession cancel 只中断当前 turn 通过 exec_poll 触达的 session",
+  { skip: process.platform === "win32" },
+  async () => {
+    const steps: LanguageModelV4StreamPart[][] = [
+      toolCallStep("roll__exec_command", { command: "sleep 30", yield_time_ms: 250 }),
+      textStep("first started"),
+      toolCallStep("roll__exec_command", {
+        command: "while true; do printf poll-current; sleep 0.1; done",
+        yield_time_ms: 250,
+      }),
+      textStep("second started"),
+    ];
+    const session = new AgentSession({
+      id: "session-exec-cancel-poll",
+      model: sequencedModel(steps),
+      sources: [],
+      maxSteps: 8,
+      policy: allowToolPolicy,
+      bashSession: sessionExecSettings({
+        ...posixProfile,
+        killTree: async (pid, intent) => {
+          killProcessGroup(pid, intent === "interrupt" ? "SIGINT" : "SIGKILL");
+        },
+      }),
+    });
+
+    try {
+      const untouchedId = sessionIdFromToolResult(await collect(session.send("start first")));
+      const polledId = sessionIdFromToolResult(await collect(session.send("start second")));
+      steps.push(
+        toolCallStep("roll__exec_poll", {
+          session_id: polledId,
+          chars: "",
+          yield_time_ms: 5_000,
+        }),
+        toolCallStep("roll__exec_list", {}),
+        textStep("listed"),
+      );
+
+      const cancelledEvents: SessionEvent[] = [];
+      let cancelRequested = false;
+      for await (const event of session.send("poll and cancel second")) {
+        cancelledEvents.push(event);
+        if (
+          !cancelRequested &&
+          event.type === "tool-output-delta" &&
+          event.delta.includes("poll-current")
+        ) {
+          cancelRequested = session.cancel();
+        }
+      }
+
+      assert.equal(cancelRequested, true);
+      const cancelled = cancelledEvents.find((event) => event.type === "turn-cancelled");
+      assert.ok(cancelled && cancelled.type === "turn-cancelled");
+      assert.deepEqual(cancelled.execSessionIds, [polledId]);
+      const listed = listedExecSessions(await collect(session.send("list sessions")));
+      assert.ok(listed.some((item) => item.session_id === untouchedId && item.state === "running"));
+      assert.ok(
+        listed.some(
+          (item) => item.session_id === polledId && item.termination_cause === "interrupt",
+        ),
+      );
+    } finally {
+      await session.close();
+    }
+  },
+);
+
+test("AgentSession cancel 在两次 poll 之间仍中断本轮后台 session", async () => {
+  const killIntents: Array<"interrupt" | "terminate"> = [];
+  const portableProfile: ShellProfile = {
+    id: process.platform === "win32" ? "powershell" : "posix",
+    toolName: process.platform === "win32" ? "powershell" : "bash",
+    supportsSessionExec: true,
+    supportsSafeCommandClassification: false,
+    waitForTreeKillAfterRootExit: false,
+    buildSpawn: (_command, workdir, env) => ({
+      file: process.execPath,
+      args: ["-e", "setInterval(() => {}, 1000)"],
+      options: {
+        cwd: workdir,
+        detached: false,
+        stdio: ["ignore", "pipe", "pipe"],
+        env,
+        windowsHide: true,
+      },
+    }),
+    classify: () => "unknown",
+    killTree: async (pid, intent) => {
+      killIntents.push(intent);
+      if (pid === undefined) {
+        throw new Error("portable session fixture did not expose a PID");
+      }
+      process.kill(pid, "SIGKILL");
+    },
+    systemPromptHints: () => [],
+  };
+  let modelCall = 0;
+  const model = new MockLanguageModelV4({
+    doStream: async () => {
+      modelCall += 1;
+      if (modelCall === 1) {
+        return streamChunks(
+          toolCallStep("roll__exec_command", {
+            command: "portable-long-running-fixture",
+            yield_time_ms: 250,
+          }),
+        );
+      }
+      return {
+        stream: simulateReadableStream<LanguageModelV4StreamPart>({
+          chunks: textStep("between-polls"),
+          initialDelayInMs: null,
+          chunkDelayInMs: 100,
+        }),
+      };
+    },
+  });
+  const session = new AgentSession({
+    id: "session-exec-cancel-between-polls",
+    model,
+    sources: [],
+    maxSteps: 8,
+    policy: allowToolPolicy,
+    bashSession: sessionExecSettings(portableProfile),
+  });
+
+  try {
+    const events: SessionEvent[] = [];
+    let runningSessionId: number | undefined;
+    let cancelRequested = false;
+    for await (const event of session.send("start and cancel between polls")) {
+      events.push(event);
+      if (event.type === "tool-result" && event.toolName === "exec_command") {
+        const match = /Session: (\d+) \(running\)/u.exec(JSON.stringify(event.output));
+        assert.ok(match?.[1], "exec_command 应先返回 running session id");
+        runningSessionId = Number.parseInt(match[1], 10);
+      }
+      if (
+        !cancelRequested &&
+        event.type === "text-delta" &&
+        event.delta.includes("between-polls")
+      ) {
+        assert.ok(runningSessionId, "取消前 exec_command 应已完成并返回 running");
+        cancelRequested = session.cancel();
+      }
+    }
+
+    assert.equal(cancelRequested, true);
+    assert.ok(runningSessionId);
+    const cancelled = events.find((event) => event.type === "turn-cancelled");
+    assert.ok(cancelled && cancelled.type === "turn-cancelled");
+    assert.equal(cancelled.reason, "user");
+    assert.deepEqual(cancelled.execSessionIds, [runningSessionId]);
+    assert.deepEqual(killIntents, ["interrupt"]);
+    assert.equal(
+      events.some(
+        (event) =>
+          (event.type === "tool-call" || event.type === "tool-result") &&
+          event.toolName === "exec_poll",
+      ),
+      false,
+    );
+  } finally {
+    await session.close();
+  }
+});
+
+test(
+  "AgentSession timeout 保留后台 session，并在取消事件与持久消息中暴露恢复 id",
+  { skip: process.platform === "win32" },
+  async () => {
+    const steps: LanguageModelV4StreamPart[][] = [
+      toolCallStep("roll__exec_command", { command: "sleep 30", yield_time_ms: 30_000 }),
+      toolCallStep("roll__exec_list", {}),
+      textStep("listed"),
+    ];
+    const session = new AgentSession({
+      id: "session-exec-timeout",
+      model: sequencedModel(steps),
+      sources: [],
+      maxSteps: 8,
+      turnTimeoutMs: 500,
+      policy: allowToolPolicy,
+      bashSession: sessionExecSettings({
+        ...posixProfile,
+        killTree: async (pid, intent) => {
+          killProcessGroup(pid, intent === "interrupt" ? "SIGINT" : "SIGKILL");
+        },
+      }),
+    });
+
+    try {
+      const timeoutEvents = await collect(session.send("start beyond turn timeout"));
+      const cancelled = timeoutEvents.find((event) => event.type === "turn-cancelled");
+      assert.ok(cancelled && cancelled.type === "turn-cancelled");
+      assert.equal(cancelled.reason, "timeout");
+      assert.equal(cancelled.execSessionIds?.length, 1);
+      const sessionId = cancelled.execSessionIds?.[0];
+      assert.ok(sessionId);
+      assert.match(cancelled.message, new RegExp(String(sessionId), "u"));
+      assert.match(
+        String(session.getMessages().at(-1)?.content),
+        new RegExp(String(sessionId), "u"),
+      );
+
+      const listed = listedExecSessions(await collect(session.send("recover session")));
+      assert.ok(listed.some((item) => item.session_id === sessionId && item.state === "running"));
+    } finally {
+      await session.close();
+    }
+  },
+);
+
+test(
+  "AgentSession.close 幂等且等待后台 session cleanup 完成",
+  { skip: process.platform === "win32" },
+  async () => {
+    const killStarted = Promise.withResolvers<void>();
+    const releaseKill = Promise.withResolvers<void>();
+    let killCalls = 0;
+    const profile: ShellProfile = {
+      ...posixProfile,
+      killTree: async (pid) => {
+        killCalls += 1;
+        killStarted.resolve();
+        await releaseKill.promise;
+        killProcessGroup(pid, "SIGKILL");
+      },
+    };
+    const session = new AgentSession({
+      id: "session-close-idempotent",
+      model: sequencedModel([
+        toolCallStep("roll__exec_command", { command: "sleep 30", yield_time_ms: 250 }),
+        textStep("started"),
+      ]),
+      sources: [],
+      maxSteps: 8,
+      policy: allowToolPolicy,
+      bashSession: sessionExecSettings(profile),
+    });
+
+    try {
+      await collect(session.send("start background"));
+      let firstSettled = false;
+      const firstClose = session.close();
+      firstClose.then(
+        () => {
+          firstSettled = true;
+        },
+        () => {
+          firstSettled = true;
+        },
+      );
+      const secondClose = session.close();
+
+      await killStarted.promise;
+      await Promise.resolve();
+      assert.equal(firstSettled, false);
+      assert.equal(killCalls, 1);
+
+      releaseKill.resolve();
+      await Promise.all([firstClose, secondClose]);
+      await session.close();
+      assert.equal(killCalls, 1);
+    } finally {
+      releaseKill.resolve();
+      await session.close();
+    }
+  },
+);
+
+test("AgentSession.close 不被忽略 abort 的 provider 阻塞，迟到轮不再持久化", async () => {
+  const streamStarted = Promise.withResolvers<void>();
+  const releaseStream = Promise.withResolvers<void>();
+  const persisted: ModelMessage[][] = [];
+  const model = new MockLanguageModelV4({
+    doStream: async () => {
+      streamStarted.resolve();
+      await releaseStream.promise;
+      return streamChunks(textStep("迟到回复"));
+    },
+  });
+  const session = new AgentSession({
+    id: "session-close-ignored-abort",
+    model,
+    sources: [],
+    maxSteps: 2,
+    onPersist: (messages) => persisted.push([...messages]),
+  });
+  const collecting = collect(session.send("启动迟到请求"));
+
+  await streamStarted.promise;
+  const startedAt = performance.now();
+  await session.close();
+  assert.ok(performance.now() - startedAt < 1_000, "close 不应等待忽略 abort 的 provider");
+
+  releaseStream.resolve();
+  await collecting;
+  assert.deepEqual(persisted, []);
+  assert.deepEqual(session.getMessages(), []);
 });
 
 test("AgentSession 超阈值自动压缩(reactive,truncate)并回调 onReplace", async () => {

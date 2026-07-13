@@ -83,6 +83,7 @@ export interface AgentSessionOptions {
   readonly bashClassifier?: CommandClassifier;
   readonly bashSession?: AgentSessionBashSession;
   readonly agentInstall?: AgentSessionAgentInstall;
+  readonly onClose?: () => void;
 }
 
 export interface SessionAgentRefresh {
@@ -117,10 +118,39 @@ export type SessionSkillSummary = SkillSummary;
 
 interface ActiveTurn {
   readonly abortController: AbortController;
+  readonly execSessionIds: Set<number>;
   aborted: boolean;
   cancellationEventEmitted: boolean;
   cancellationPersisted: boolean;
   cancellationReason?: SessionCancellationReason;
+}
+
+const SESSION_CLOSE_TIMEOUT_MS = 6_000;
+
+function createActiveTurn(): ActiveTurn {
+  return {
+    abortController: new AbortController(),
+    execSessionIds: new Set<number>(),
+    aborted: false,
+    cancellationEventEmitted: false,
+    cancellationPersisted: false,
+  };
+}
+
+function waitForBoundedClose(promise: Promise<void>, timeoutMs: number): Promise<boolean> {
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = (completed: boolean): void => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      clearTimeout(timer);
+      resolve(completed);
+    };
+    const timer = setTimeout(() => finish(false), timeoutMs);
+    promise.then(() => finish(true));
+  });
 }
 
 function errorMessage(error: unknown): string {
@@ -236,6 +266,7 @@ export class AgentSession {
   private readonly contextWindow: number | undefined;
   private readonly compaction: SessionCompactionSettings | undefined;
   private readonly turnTimeoutMs: number | undefined;
+  private readonly onClose: (() => void) | undefined;
   private providerOptions: SharedV4ProviderOptions | undefined;
   private readonly onProviderOptionsChange:
     | ((providerOptions: SharedV4ProviderOptions | undefined) => void)
@@ -253,6 +284,8 @@ export class AgentSession {
   private readonly sessionManager: SessionManager | undefined;
   private emit: ((event: SessionEvent) => void) | undefined;
   private activeTurn: ActiveTurn | undefined;
+  private closePromise: Promise<void> | undefined;
+  private closed = false;
   private sessionUsage: SessionTokenUsage = { inputTokens: 0, outputTokens: 0, totalTokens: 0 };
   private lastInputTokens: number | undefined;
   private needsCompaction = false;
@@ -267,6 +300,7 @@ export class AgentSession {
     this.contextWindow = options.contextWindow;
     this.compaction = options.compaction;
     this.turnTimeoutMs = options.turnTimeoutMs;
+    this.onClose = options.onClose;
     this.providerOptions = options.providerOptions;
     this.onProviderOptionsChange = options.onProviderOptionsChange;
     this.debugEvents = options.debugEvents ?? false;
@@ -305,7 +339,10 @@ export class AgentSession {
             this.sessionManager,
             registry,
             bashCtx,
-            bashClassifierDep,
+            {
+              ...bashClassifierDep,
+              onSessionTouched: (sessionId) => this.activeTurn?.execSessionIds.add(sessionId),
+            },
           )
         : {};
     const agentInstall = options.agentInstall;
@@ -381,19 +418,16 @@ export class AgentSession {
   }
 
   async *send(input: string): AsyncIterable<SessionEvent> {
+    if (this.closed) {
+      throw new Error("session is closed");
+    }
     if (this.activeTurn) {
       throw new Error("session already has an active turn");
     }
 
     const queue = new AsyncEventQueue<SessionEvent>();
     this.emit = (event) => queue.push(event);
-    const abortController = new AbortController();
-    const activeTurn: ActiveTurn = {
-      abortController,
-      aborted: false,
-      cancellationEventEmitted: false,
-      cancellationPersisted: false,
-    };
+    const activeTurn = createActiveTurn();
     this.activeTurn = activeTurn;
 
     this.runTurn(queue, activeTurn, input).catch((error: unknown) => {
@@ -416,19 +450,16 @@ export class AgentSession {
   }
 
   async *compact(reason: ContextCompactionReason = "manual"): AsyncIterable<SessionEvent> {
+    if (this.closed) {
+      throw new Error("session is closed");
+    }
     if (this.activeTurn) {
       throw new Error("session already has an active turn");
     }
 
     const queue = new AsyncEventQueue<SessionEvent>();
     this.emit = (event) => queue.push(event);
-    const abortController = new AbortController();
-    const activeTurn: ActiveTurn = {
-      abortController,
-      aborted: false,
-      cancellationEventEmitted: false,
-      cancellationPersisted: false,
-    };
+    const activeTurn = createActiveTurn();
     this.activeTurn = activeTurn;
 
     this.runCompactionTurn(queue, activeTurn, reason).catch((error: unknown) => {
@@ -539,6 +570,11 @@ export class AgentSession {
       );
       try {
         for await (const part of result.fullStream) {
+          if (this.closed) {
+            activeTurn.aborted = true;
+            activeTurn.cancellationReason ??= SESSION_CANCELLATION_REASONS.runtime;
+            break;
+          }
           if (!firstPartSeen) {
             firstPartSeen = true;
             this.clearDebugTimer(firstPartTimer);
@@ -767,6 +803,21 @@ export class AgentSession {
       this.debug(queue, "model", "response messages ready", turnStartedAt, {
         responseMessages: responseMessages.length,
       });
+
+      if (this.isTurnAborted(activeTurn)) {
+        activeTurn.cancellationReason = resolveCancellationReason(
+          activeTurn.cancellationReason,
+          activeTurn.abortController.signal.reason,
+        );
+        this.persistCancelledTurn(
+          queue,
+          activeTurn,
+          turnStart,
+          abortedResponseMessages,
+          turnStartedAt,
+        );
+        return;
+      }
 
       const visibleResponseMessages = stripReasoningMessages(responseMessages);
       this.messages.push(...visibleResponseMessages);
@@ -1030,15 +1081,24 @@ export class AgentSession {
     return activeTurn?.aborted === true || activeTurn?.abortController.signal.aborted === true;
   }
 
+  private execSessionIds(activeTurn: ActiveTurn): readonly number[] {
+    return [...activeTurn.execSessionIds].sort((left, right) => left - right);
+  }
+
   private cancellationMessage(activeTurn: ActiveTurn): string {
     const reason = activeTurn.cancellationReason ?? SESSION_CANCELLATION_REASONS.runtime;
+    const execSessionIds = this.execSessionIds(activeTurn);
+    const sessionSuffix =
+      execSessionIds.length > 0
+        ? `本轮触达的后台会话 session_id: ${execSessionIds.join(", ")}。`
+        : "";
     switch (reason) {
       case SESSION_CANCELLATION_REASONS.user:
-        return "已取消本轮；正在运行的模型或工具已收到中断请求，已发生的外部副作用不会自动回滚。";
+        return `已取消本轮；正在运行的模型或工具已收到中断请求。${sessionSuffix}已发生的外部副作用不会自动回滚。`;
       case SESSION_CANCELLATION_REASONS.timeout:
-        return `本轮因运行超时${this.turnTimeoutMs !== undefined ? `（${String(this.turnTimeoutMs)}ms）` : ""}而中断；未返回成功 tool result 或 Exit code: 0 的操作不能视为正常完成。`;
+        return `本轮因运行超时${this.turnTimeoutMs !== undefined ? `（${String(this.turnTimeoutMs)}ms）` : ""}而中断；${execSessionIds.length > 0 ? `后台会话不会因轮超时被终止。${sessionSuffix}可在下一轮用 roll__exec_list 找回后继续轮询；` : ""}未返回成功 tool result 或 Exit code: 0 的操作不能视为正常完成。`;
       case SESSION_CANCELLATION_REASONS.runtime:
-        return "本轮被运行时中断；未返回成功 tool result 或 Exit code: 0 的操作状态未知。";
+        return `本轮被运行时中断；${sessionSuffix}未返回成功 tool result 或 Exit code: 0 的操作状态未知。`;
     }
   }
 
@@ -1048,10 +1108,12 @@ export class AgentSession {
     }
     activeTurn.cancellationReason ??= SESSION_CANCELLATION_REASONS.runtime;
     activeTurn.cancellationEventEmitted = true;
+    const execSessionIds = this.execSessionIds(activeTurn);
     queue.push({
       type: "turn-cancelled",
       reason: activeTurn.cancellationReason,
       message: this.cancellationMessage(activeTurn),
+      ...(execSessionIds.length > 0 ? { execSessionIds } : {}),
     });
   }
 
@@ -1062,6 +1124,12 @@ export class AgentSession {
     completedResponseMessages: readonly ModelMessage[],
     turnStartedAt: number,
   ): void {
+    if (this.closed) {
+      this.messages.splice(turnStart);
+      activeTurn.cancellationPersisted = true;
+      this.emitCancellation(queue, activeTurn);
+      return;
+    }
     if (!activeTurn.cancellationPersisted) {
       this.messages.splice(turnStart + 1);
       this.messages.push(...stripReasoningMessages(completedResponseMessages));
@@ -1076,25 +1144,70 @@ export class AgentSession {
   }
 
   cancel(): boolean {
-    if (!this.activeTurn) {
+    const activeTurn = this.activeTurn;
+    if (!activeTurn) {
       return false;
     }
-    this.activeTurn.aborted = true;
-    this.activeTurn.cancellationReason = SESSION_CANCELLATION_REASONS.user;
+    activeTurn.aborted = true;
+    activeTurn.cancellationReason = SESSION_CANCELLATION_REASONS.user;
     this.gate.abortAll("用户取消本轮");
-    this.sessionManager?.interruptAll();
-    this.activeTurn.abortController.abort(USER_CANCELLATION_ABORT_REASON);
+    const execSessionIds = this.execSessionIds(activeTurn);
+    if (execSessionIds.length > 0) {
+      this.sessionManager?.interrupt(execSessionIds).catch((error: unknown) => {
+        process.stderr.write(`roll chat: 中断后台会话失败: ${errorMessage(error)}\n`);
+      });
+    }
+    activeTurn.abortController.abort(USER_CANCELLATION_ABORT_REASON);
     return true;
   }
 
-  abort(): void {
-    if (this.activeTurn) {
-      this.activeTurn.aborted = true;
-      this.activeTurn.cancellationReason ??= SESSION_CANCELLATION_REASONS.runtime;
-      this.gate.abortAll();
-      this.activeTurn.abortController.abort(RUNTIME_CANCELLATION_ABORT_REASON);
+  close(): Promise<void> {
+    if (this.closePromise !== undefined) {
+      return this.closePromise;
     }
-    this.sessionManager?.terminateAll();
+    this.closed = true;
+    const activeTurn = this.activeTurn;
+    if (activeTurn) {
+      activeTurn.aborted = true;
+      activeTurn.cancellationReason ??= SESSION_CANCELLATION_REASONS.runtime;
+      this.gate.abortAll();
+      activeTurn.abortController.abort(RUNTIME_CANCELLATION_ABORT_REASON);
+    }
+
+    this.closePromise = (async () => {
+      const managerCleanup = (this.sessionManager?.close() ?? Promise.resolve([])).then(
+        (results) => {
+          for (const result of results) {
+            if (result.cleanupError !== undefined) {
+              process.stderr.write(
+                `roll chat: 后台会话 ${String(result.sessionId)} 清理失败: ${result.cleanupError}\n`,
+              );
+            }
+          }
+        },
+        (error: unknown) => {
+          process.stderr.write(`roll chat: 会话 ${this.id} 后台清理失败: ${errorMessage(error)}\n`);
+        },
+      );
+      const completed = await waitForBoundedClose(managerCleanup, SESSION_CLOSE_TIMEOUT_MS);
+      if (!completed) {
+        process.stderr.write(
+          `roll chat: 会话 ${this.id} 在 ${String(SESSION_CLOSE_TIMEOUT_MS)}ms 内未完成全部关闭步骤\n`,
+        );
+      }
+      try {
+        this.onClose?.();
+      } catch (error) {
+        process.stderr.write(`roll chat: 会话 ${this.id} 关闭回调失败: ${errorMessage(error)}\n`);
+      }
+    })();
+    return this.closePromise;
+  }
+
+  abort(): void {
+    this.close().catch((error: unknown) => {
+      process.stderr.write(`roll chat: 会话 ${this.id} 关闭失败: ${errorMessage(error)}\n`);
+    });
   }
 
   private debug(

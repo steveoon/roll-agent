@@ -281,6 +281,19 @@ test("RuntimeServer session.close 完整释放并移除 session", async () => {
     model: sequencedModel([[]]),
     sources: [],
   });
+  const closeStarted = Promise.withResolvers<void>();
+  const releaseClose = Promise.withResolvers<void>();
+  const createSession = engine.createSession.bind(engine);
+  engine.createSession = async (input) => {
+    const session = await createSession(input);
+    const close = session.close.bind(session);
+    session.close = async () => {
+      closeStarted.resolve();
+      await releaseClose.promise;
+      await close();
+    };
+    return session;
+  };
   const server = new RuntimeServer(engine, serverConn);
   assert.ok(server);
 
@@ -300,9 +313,24 @@ test("RuntimeServer session.close 完整释放并移除 session", async () => {
     });
 
   const created = (await request(1, RpcMethod.Create, {})) as { sessionId: string };
-  const closed = (await request(2, RpcMethod.Close, {
+  let closeResponseSettled = false;
+  const closing = request(2, RpcMethod.Close, {
     sessionId: created.sessionId,
-  })) as { closed: boolean };
+  });
+  closing.then(
+    () => {
+      closeResponseSettled = true;
+    },
+    () => {
+      closeResponseSettled = true;
+    },
+  );
+  await closeStarted.promise;
+  await Promise.resolve();
+  assert.equal(closeResponseSettled, false);
+
+  releaseClose.resolve();
+  const closed = (await closing) as { closed: boolean };
   assert.equal(closed.closed, true);
 
   const error = await new Promise<unknown>((resolve) => {
@@ -315,6 +343,67 @@ test("RuntimeServer session.close 完整释放并移除 session", async () => {
     });
   });
   assert.ok(error && typeof error === "object" && "message" in error);
+  await engine.dispose();
+});
+
+test("RuntimeServer.abortAll 等待所有 session close 完成", async () => {
+  const { serverConn, clientConn } = memoryPair();
+  const engine = new ConversationEngine({
+    config,
+    model: sequencedModel([[]]),
+    sources: [],
+  });
+  const closeStarted = Promise.withResolvers<void>();
+  const releaseClose = Promise.withResolvers<void>();
+  let closeStartedCount = 0;
+  const createSession = engine.createSession.bind(engine);
+  engine.createSession = async (input) => {
+    const session = await createSession(input);
+    const close = session.close.bind(session);
+    session.close = async () => {
+      closeStartedCount += 1;
+      if (closeStartedCount === 2) {
+        closeStarted.resolve();
+      }
+      await releaseClose.promise;
+      await close();
+    };
+    return session;
+  };
+  const server = new RuntimeServer(engine, serverConn);
+
+  const responses = new Map<number, (result: unknown) => void>();
+  clientConn.onMessage((message) => {
+    if ("id" in message && "result" in message && typeof message.id === "number") {
+      responses.get(message.id)?.(message.result);
+    }
+  });
+  const request = (id: number, method: string, params: unknown): Promise<unknown> =>
+    new Promise((resolve) => {
+      responses.set(id, resolve);
+      clientConn.send({ jsonrpc: "2.0", id, method, params });
+    });
+
+  await request(1, RpcMethod.Create, {});
+  await request(2, RpcMethod.Create, {});
+  let abortAllSettled = false;
+  const aborting = server.abortAll();
+  aborting.then(
+    () => {
+      abortAllSettled = true;
+    },
+    () => {
+      abortAllSettled = true;
+    },
+  );
+  await closeStarted.promise;
+  await Promise.resolve();
+  assert.equal(abortAllSettled, false);
+  assert.equal(closeStartedCount, 2);
+
+  releaseClose.resolve();
+  await aborting;
+  assert.equal(abortAllSettled, true);
   await engine.dispose();
 });
 

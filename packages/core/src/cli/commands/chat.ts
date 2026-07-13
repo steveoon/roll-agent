@@ -142,9 +142,9 @@ async function runServer(config: RollConfig): Promise<void> {
   const server = new RuntimeServer(engine, connection);
 
   connection.onClose(() => {
-    server.abortAll();
-    engine
-      .dispose()
+    server
+      .abortAll()
+      .then(() => engine.dispose())
       .catch(() => {})
       .finally(() => {
         store.close();
@@ -523,7 +523,7 @@ export default defineCommand({
       log.error(error instanceof Error ? error.message : String(error));
       process.exitCode = 1;
     } finally {
-      sessionForCleanup?.abort();
+      await sessionForCleanup?.close();
       await engine.dispose();
       store.close();
     }

@@ -25,10 +25,12 @@ description: >-
 - The batch can run for several minutes. If `roll.exec_command` / `roll__exec_command` is present in
   the current tool catalog, use it and poll with `roll.exec_poll` / `roll__exec_poll` instead of a
   one-shot shell call.
-- Native Windows PowerShell currently does not expose session exec. When those tools are absent,
-  never invent or search for them: explain that the batch must use one-shot `roll.powershell`, ask
-  the user to raise `runtime.turn-timeout-ms` in `roll.config.yaml` for the intended batch duration,
-  or have the user run the script outside `roll chat`.
+- Native Windows session exec requires PowerShell 7+ and both `runtime.shell.enabled` and
+  `runtime.shell.session.enabled`. When the exec tools are absent, never invent or search for them:
+  ask the user to enable those settings and restart `roll chat`. Do not fall back to a long-running
+  one-shot call unless the user explicitly chooses it and the turn timeout covers the full run.
+- If a turn timeout hides the session id or final result, call `roll.exec_list` / `roll__exec_list`
+  in the next turn and resume with `exec_poll`; listing does not consume buffered output.
 - Report normal completion only after a tool result explicitly returns `Exit code: 0`. A cancelled,
   timed-out, or missing result means the current operation is interrupted or unknown, even if an
   earlier output line looked successful.
@@ -120,6 +122,7 @@ When parallel full-reply runs misbehave but sequential runs on the same instance
 | `roll-json-extract.mjs` | Shared last-JSON extractor |
 | `find-unread-ref.mjs` | Locate 未读 tab ref (regex fallback) |
 | `parse-read-candidate.mjs` | Parse `zhipin_read_messages` output |
+| `format-open-chat-failure.mjs` | Preserve initial/reload/retry errors after open-chat recovery fails |
 | `parse-generate-preview.mjs` | Parse preview output (`preparedReplyId`, `hasDualDraft`) |
 | `build-send-payload.mjs` | Build send bundle with optional `variantDecision` from judge |
 | `apply-send-bundle.mjs` | Write validated `sp.json` from send bundle |
@@ -157,6 +160,8 @@ node scripts/pipeline-judge-send.test.mjs
 ```text
 read_messages(limit=1, onlyUnread) → one candidate (read-only, no list click)
 → c.json + zhipin_open_chat(conversationId)     ← only list-row click
+  ↳ 若首次失败：open_chat_page(forceReload=true, expectedConversationId) → 等目标会话行恢复 → 同一 conversationId 重试一次
+    ↳ reload 会使“未读 filter 已应用”状态失效；本候选人重试后、下一次读取前恢复 filter
 → info.json {maxMessages} + get_candidate_info  ← current chat
 → evaluate-skip-rules.mjs → skip? → back to list
 → gp.json {maxMessages} + generate_reply_preview → preparedReplyId
@@ -167,11 +172,13 @@ read_messages(limit=1, onlyUnread) → one candidate (read-only, no list click)
 → back to list → repeat
 ```
 
-**未读 tab:** clicked **once** at run start (`apply_unread_filter_if_needed`). Loop and `back_to_list` only call `zhipin_open_chat_page` — they do **not** click 未读 again.
+**未读 tab:** 正常路径只在 run start 点击一次。若 `forceReload=true` 重建 SPA，脚本会把已应用状态标记为失效，但不会在重试当前候选人前立刻点击；等当前重试完成并回到列表，或进入下一轮读取前，再重新 snapshot 并恢复「未读」filter。`--no-unread-filter` 始终不点击。
 
-**List row (候选人):** clicked **once per candidate** via `zhipin_open_chat` only. `zhipin_get_candidate_info`, `zhipin_generate_reply_preview`, and `zhipin_exchange_wechat` run on the **current chat** (no `conversationId` in input) so they do not call `openChat` again. `zhipin_read_messages` only reads DOM; it does not click rows.
+**List row (候选人):** normally clicked **once per candidate** via `zhipin_open_chat`. If that call fails, the script force-reloads the current chat page, waits for the actual chat-list DOM, and retries the same `conversationId` once; only a failed retry counts as one candidate failure. `zhipin_get_candidate_info`, `zhipin_generate_reply_preview`, and `zhipin_exchange_wechat` run on the **current chat** (no `conversationId` in input) so they do not call `openChat` again. `zhipin_read_messages` only reads DOM; it does not click rows.
 
 Note: `zhipin_open_chat` may still **retry one list click** internally if the right panel does not sync (browser-use-agent behavior).
+
+If both attempts fail, the JSONL row keeps `initialError`, optional `reloadError`, and `retryError`; the existing exit-code `3` guard still stops after two consecutive candidate failures.
 
 All `roll run` inputs use **`--input-file`** (PowerShell-safe; macOS/Linux compatible).
 

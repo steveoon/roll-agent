@@ -1,59 +1,112 @@
 import { performance } from "node:perf_hooks";
-import type { ManagedSession, SessionPollResult } from "./types.ts";
+import {
+  isTerminalSessionState,
+  type ManagedSession,
+  type SessionPollOptions,
+  type SessionPollResult,
+} from "./types.ts";
 
-const POST_EXIT_FLUSH_MAX_MS = 250;
+export class SessionPollInProgressError extends Error {
+  constructor(sessionId: number) {
+    super(`会话 ${String(sessionId)} 已有一个轮询窗口在运行`);
+    this.name = "SessionPollInProgressError";
+  }
+}
 
-function sleep(ms: number): { promise: Promise<void>; cancel: () => void } {
-  let timer: NodeJS.Timeout | undefined;
-  const promise = new Promise<void>((resolve) => {
-    timer = setTimeout(resolve, ms);
-  });
-  return {
-    promise,
-    cancel: () => {
-      if (timer) {
-        clearTimeout(timer);
+function abortError(signal: AbortSignal | undefined): Error {
+  const reason = signal?.reason;
+  if (reason instanceof Error) {
+    return reason;
+  }
+  return new DOMException(
+    typeof reason === "string" && reason.length > 0 ? reason : "The operation was aborted",
+    "AbortError",
+  );
+}
+
+export function throwIfSessionExecAborted(signal: AbortSignal | undefined): void {
+  if (signal?.aborted === true) {
+    throw abortError(signal);
+  }
+}
+
+function waitForSettlementOrDeadline(
+  session: ManagedSession,
+  remainingMs: number,
+  abortSignal: AbortSignal | undefined,
+): Promise<void> {
+  if (remainingMs <= 0 || isTerminalSessionState(session.state)) {
+    return Promise.resolve();
+  }
+  return new Promise<void>((resolve, reject) => {
+    let settled = false;
+    const finish = (error?: unknown): void => {
+      if (settled) {
+        return;
       }
-    },
-  };
+      settled = true;
+      clearTimeout(timer);
+      abortSignal?.removeEventListener("abort", onAbort);
+      if (error !== undefined) {
+        reject(error);
+      } else {
+        resolve();
+      }
+    };
+    const onAbort = (): void => finish(abortError(abortSignal));
+    const timer = setTimeout(() => finish(), remainingMs);
+    session.waitSettled().then(() => finish());
+    abortSignal?.addEventListener("abort", onAbort, { once: true });
+    if (abortSignal?.aborted === true) {
+      onAbort();
+    }
+  });
 }
 
 export async function pollUntilDeadline(
   session: ManagedSession,
   deadlineMs: number,
   maxChars: number,
+  options: SessionPollOptions = {},
 ): Promise<SessionPollResult> {
-  const remaining = deadlineMs - performance.now();
-  if (session.exitCode === undefined && remaining > 0) {
-    const deadline = sleep(remaining);
-    await Promise.race([session.waitExit(), deadline.promise]);
-    deadline.cancel();
+  if (!session.beginPoll(options.onDelta)) {
+    throw new SessionPollInProgressError(session.id);
   }
 
-  if (session.exitCode !== undefined) {
-    const flushCap = sleep(POST_EXIT_FLUSH_MAX_MS);
-    await Promise.race([session.waitClose(), flushCap.promise]);
-    flushCap.cancel();
-  }
+  try {
+    throwIfSessionExecAborted(options.abortSignal);
+    await waitForSettlementOrDeadline(session, deadlineMs - performance.now(), options.abortSignal);
+    // Abort wins a completion race: do not consume output from a result the model will not receive.
+    throwIfSessionExecAborted(options.abortSignal);
 
-  session.lastUsedAt = performance.now();
-  const drained = session.buffer.drain(maxChars);
-  const wallTimeMs = performance.now() - session.startedAt;
+    const now = performance.now();
+    session.lastUsedAt = now;
+    const state = session.state;
+    const terminal = isTerminalSessionState(state);
+    const output = terminal ? session.buffer.snapshot(maxChars) : session.buffer.drain(maxChars);
+    const wallTimeMs = (terminal ? (session.completedAt ?? now) : now) - session.startedAt;
 
-  if (session.exitCode !== undefined) {
+    if (terminal) {
+      return {
+        kind: "exited",
+        output: output.text,
+        omitted: output.omitted,
+        wallTimeMs,
+        exitCode: session.exitCode ?? 1,
+        state,
+        ...(session.terminationCause ? { terminationCause: session.terminationCause } : {}),
+        ...(session.cleanupError ? { cleanupError: session.cleanupError } : {}),
+      };
+    }
     return {
-      kind: "exited",
-      output: drained.text,
-      omitted: drained.omitted,
+      kind: "running",
+      output: output.text,
+      omitted: output.omitted,
       wallTimeMs,
-      exitCode: session.exitCode,
+      sessionId: session.id,
     };
+  } finally {
+    session.lastUsedAt = performance.now();
+    session.endPoll();
   }
-  return {
-    kind: "running",
-    output: drained.text,
-    omitted: drained.omitted,
-    wallTimeMs,
-    sessionId: session.id,
-  };
 }

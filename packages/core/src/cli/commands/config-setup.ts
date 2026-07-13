@@ -233,7 +233,7 @@ export async function setupShell(
   const isWindows = platform === "win32";
   if (enabled && isWindows) {
     prompts.warn(
-      "Windows 原生 shell 当前仅支持 PowerShell 7 one-shot；安全命令自动放行和 session exec 暂不生效。默认每条命令都需确认；显式 approval override（roll.powershell: auto）可覆盖此默认策略。",
+      "Windows PowerShell 命令当前全部按 unknown 处理，默认每条命令都需确认；显式 approval override（roll.powershell: auto、roll.exec_command: auto）可覆盖对应工具的默认策略。",
     );
   }
   if (enabled && !isWindows) {
@@ -241,6 +241,8 @@ export async function setupShell(
       message: "安全只读命令（ls/grep 等）自动放行，无需逐条确认？",
       initialValue: true,
     });
+  }
+  if (enabled) {
     sessionEnabled = await prompts.confirm({
       message: "启用长跑命令会话（session exec，供 dev server 等常驻进程使用）？",
       initialValue: false,
@@ -251,12 +253,14 @@ export async function setupShell(
   setYamlValue(context.document, ["runtime", "shell", "enabled"], enabled);
   if (enabled && !isWindows) {
     setYamlValue(context.document, ["runtime", "shell", "autoApproveSafe"], autoApproveSafe);
+  }
+  if (enabled) {
     setYamlValue(context.document, ["runtime", "shell", "session", "enabled"], sessionEnabled);
   }
   writeConfigDocument(context);
   const windowsNote =
     enabled && isWindows
-      ? "；Windows 当前仅启用 PowerShell one-shot，默认逐条确认（显式 approval override 可覆盖）"
+      ? "；Windows PowerShell 默认逐条确认（显式 approval override 可覆盖）"
       : "";
   return `已${enabled ? "启用" : "禁用"} chat shell 工具${windowsNote}（写入 ${context.configPath}）`;
 }

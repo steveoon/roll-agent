@@ -19,8 +19,13 @@ const InputSchema = z.object({
     .boolean()
     .optional()
     .describe(
-      "为 true 时先对当前沟通页执行 native CDP Page.reload，清空长跑累积的 DOM/SPA 状态后再确认沟通页就绪；用于长跑 tab 的周期性恢复。",
+      "为 true 时对当前沟通页执行 native CDP Page.reload，清空长跑累积的 DOM/SPA 状态，并在 document swap 后继续等待实际聊天列表 DOM；用于长跑 tab 的周期性恢复。",
     ),
+  expectedConversationId: z
+    .string()
+    .min(1)
+    .optional()
+    .describe("forceReload=true 时可传入；必要时滚动列表，等待该会话重新出现后才返回成功。"),
   browserActionApproval: BrowserActionApprovalSchema.optional().describe(
     "当 actionPolicy=confirm 返回 needs_confirmation 后，由 orchestrator 原样带回的批准 ID（仅 forceReload 时需要）。",
   ),
@@ -79,7 +84,7 @@ async function buildPageInfo(
 export const zhipinOpenChatPage = defineTool({
   name: "zhipin_open_chat_page",
   description:
-    "通过点击 Boss 左侧导航切换回「沟通」页，避免让编排器依赖站内 URL 猜测；forceReload=true 时改为对当前沟通页执行 native reload 做恢复。",
+    "通过点击 Boss 左侧导航切换回「沟通」页，避免让编排器依赖站内 URL 猜测；forceReload=true 时对当前沟通页执行 native reload，并等待实际聊天列表 DOM 就绪。",
   input: InputSchema,
   output: OutputSchema,
   execute: async (input, ctx) => {
@@ -129,6 +134,33 @@ export const zhipinOpenChatPage = defineTool({
             usedReload = true;
           },
         });
+        const chatListReady = await nativePage.waitForChatListReady({
+          ...(input.expectedConversationId !== undefined
+            ? { expectedConversationId: input.expectedConversationId }
+            : {}),
+        });
+        if (!chatListReady) {
+          await session.fail("刷新后沟通列表未就绪");
+          return {
+            success: false,
+            alreadyOnChat: false,
+            usedSidebarClick: false,
+            usedReload,
+            chatReady: false,
+            page: await buildPageInfo(ctxManager, nativePage),
+            error: "刷新后沟通列表未就绪",
+          };
+        }
+
+        await session.succeed("已刷新沟通页");
+        return {
+          success: true,
+          alreadyOnChat: false,
+          usedSidebarClick: false,
+          usedReload,
+          chatReady: true,
+          page: await buildPageInfo(ctxManager, nativePage),
+        };
       } else {
         const beginLabel = "正在切换到沟通页";
         await session.begin(beginLabel);
@@ -139,10 +171,10 @@ export const zhipinOpenChatPage = defineTool({
       }
 
       if (await nativePage.isChatSurfaceOpen()) {
-        await session.succeed(usedReload ? "已刷新沟通页" : "已在沟通页");
+        await session.succeed("已在沟通页");
         return {
           success: true,
-          alreadyOnChat: !usedReload,
+          alreadyOnChat: true,
           usedSidebarClick: false,
           usedReload,
           chatReady: true,

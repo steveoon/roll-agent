@@ -405,7 +405,7 @@ function createPowerShellProfile(deps: ShellProfileResolutionDeps): ShellProfile
     profile: {
       id: "powershell",
       toolName: "powershell",
-      supportsSessionExec: false,
+      supportsSessionExec: true,
       supportsSafeCommandClassification: false,
       waitForTreeKillAfterRootExit: true,
       buildSpawn(command, workdir, env) {

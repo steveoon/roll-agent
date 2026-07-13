@@ -42,7 +42,7 @@ import {
   POWERSHELL_TOOL_ID,
   type SessionBashSettings,
 } from "../tool-bridge/bash-tool.ts";
-import { EXEC_COMMAND_ID, EXEC_POLL_ID } from "../tool-bridge/session-exec-tool.ts";
+import { EXEC_COMMAND_ID, EXEC_LIST_ID, EXEC_POLL_ID } from "../tool-bridge/session-exec-tool.ts";
 import {
   type CommandClassifier,
   unknownCommandClassifier,
@@ -54,6 +54,7 @@ import {
 } from "../bash/profile.ts";
 
 const DEFAULT_MAX_STEPS = 80;
+const ENGINE_WORK_DRAIN_TIMEOUT_MS = 6_000;
 
 export type EnsureAgentReady = (
   agent: RegisteredAgent,
@@ -136,6 +137,25 @@ function formatInstallEventLine(event: InstallAgentEvent): string {
   return event.type === "warn" ? `警告：${event.message}` : event.message;
 }
 
+function waitForEngineWork(promise: Promise<void>, timeoutMs: number): Promise<boolean> {
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = (completed: boolean): void => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      clearTimeout(timer);
+      resolve(completed);
+    };
+    const timer = setTimeout(() => finish(false), timeoutMs);
+    promise.then(
+      () => finish(true),
+      () => finish(true),
+    );
+  });
+}
+
 async function ensureCoreManagedAgentReady(
   agent: RegisteredAgent,
   dataDir: string,
@@ -176,7 +196,9 @@ export class ConversationEngine {
   private resolvedCatalog: readonly AgentCatalogEntry[] | undefined;
   private shellProfileResolution: ShellProfileResolutionResult | undefined;
   private shellUnsupportedWarned = false;
-  private shellSessionUnsupportedWarned = false;
+  private readonly liveSessions = new Map<string, AgentSession>();
+  private disposePromise: Promise<void> | undefined;
+  private closing = false;
 
   constructor(options: ConversationEngineOptions) {
     this.config = options.config;
@@ -203,7 +225,9 @@ export class ConversationEngine {
   }
 
   async createSession(input: CreateSessionInput = {}): Promise<AgentSession> {
+    this.assertAcceptingSessions();
     const context = await this.ensureReady();
+    this.assertAcceptingSessions();
     const id = this.store
       ? this.store.createThread({
           ...(input.title ? { title: input.title } : {}),
@@ -214,14 +238,30 @@ export class ConversationEngine {
   }
 
   async resumeSession(threadId: string): Promise<AgentSession> {
+    this.assertAcceptingSessions();
     if (!this.store) {
       throw new Error("resumeSession requires a ThreadStore");
+    }
+    const liveSession = this.liveSessions.get(threadId);
+    if (liveSession !== undefined) {
+      return liveSession;
     }
     if (!this.store.hasThread(threadId)) {
       throw new Error(`Thread "${threadId}" 不存在`);
     }
     const context = await this.ensureReady();
+    this.assertAcceptingSessions();
+    const concurrentlyResumedSession = this.liveSessions.get(threadId);
+    if (concurrentlyResumedSession !== undefined) {
+      return concurrentlyResumedSession;
+    }
     return this.buildSession(context, threadId, this.store.getMessages(threadId));
+  }
+
+  private assertAcceptingSessions(): void {
+    if (this.closing) {
+      throw new Error("ConversationEngine is closing");
+    }
   }
 
   private resolveRuntimeShellProfile(): ShellProfile | undefined {
@@ -277,12 +317,6 @@ export class ConversationEngine {
       return undefined;
     }
     if (!profile.supportsSessionExec) {
-      if (!this.shellSessionUnsupportedWarned) {
-        this.shellSessionUnsupportedWarned = true;
-        process.stderr.write(
-          "roll chat: Windows 原生 session exec 暂未支持，已跳过 roll__exec_command / roll__exec_poll\n",
-        );
-      }
       return undefined;
     }
     return {
@@ -322,7 +356,7 @@ export class ConversationEngine {
       bashSession,
     );
     const agentInstall = this.resolveAgentInstallBinding();
-    return new AgentSession({
+    const session = new AgentSession({
       id,
       model: context.model,
       sources: context.sources,
@@ -347,7 +381,14 @@ export class ConversationEngine {
             onReplace: (messages) => store.replaceMessages(id, messages),
           }
         : {}),
+      onClose: () => {
+        if (this.liveSessions.get(id) === session) {
+          this.liveSessions.delete(id);
+        }
+      },
     });
+    this.liveSessions.set(id, session);
+    return session;
   }
 
   private syncProviderOptions(providerOptions: SharedV4ProviderOptions | undefined): void {
@@ -356,6 +397,7 @@ export class ConversationEngine {
   }
 
   private ensureReady(): Promise<EngineContext> {
+    this.assertAcceptingSessions();
     if (!this.ready) {
       this.ready = this.bootstrap();
     }
@@ -399,9 +441,11 @@ export class ConversationEngine {
     agent: RegisteredAgent,
     model: LanguageModelV4,
   ): Promise<AgentToolSource> {
+    this.assertAcceptingSessions();
     const transport = resolveTransportWithDevSpawnSpec(agent);
     const env = getAgentEnv(this.config, agent.skill.name);
     await this.ensureAgentReady(agent, env);
+    this.assertAcceptingSessions();
     const client = await this.clientManager.connect(
       agent.skill.name,
       transport,
@@ -412,7 +456,9 @@ export class ConversationEngine {
         ...(env ? { env } : {}),
       },
     );
+    this.assertAcceptingSessions();
     const listed = (await client.listTools()).tools;
+    this.assertAcceptingSessions();
     const normalized = normalizeListedTools(listed);
     const sourceTools: SourceTool[] = normalized.map((agentTool, index) => ({
       tool: agentTool,
@@ -422,6 +468,7 @@ export class ConversationEngine {
   }
 
   async prepareAgentRefresh(agent: RegisteredAgent): Promise<SessionAgentRefresh> {
+    this.assertAcceptingSessions();
     const result = this.refreshChain.then(() => this.runAgentRefresh(agent));
     this.refreshChain = result.then(
       () => undefined,
@@ -471,7 +518,13 @@ export class ConversationEngine {
           }
         : {}),
       ...(bashSession
-        ? { sessionExecToolIds: { command: EXEC_COMMAND_ID, poll: EXEC_POLL_ID } }
+        ? {
+            sessionExecToolIds: {
+              command: EXEC_COMMAND_ID,
+              poll: EXEC_POLL_ID,
+              list: EXEC_LIST_ID,
+            },
+          }
         : {}),
       agentCount,
       ...(onboarding ? { agentOnboarding: onboarding } : {}),
@@ -616,6 +669,7 @@ export class ConversationEngine {
 
   async getContextSummary(): Promise<EngineContextSummary> {
     const context = await this.ensureReady();
+    this.assertAcceptingSessions();
     return {
       agentCount: context.sources.length,
       toolCount: context.sources.reduce((total, source) => total + source.tools.length, 0),
@@ -624,6 +678,37 @@ export class ConversationEngine {
   }
 
   async dispose(): Promise<void> {
-    await this.clientManager.disconnectAll();
+    if (this.disposePromise !== undefined) {
+      return this.disposePromise;
+    }
+    this.closing = true;
+    const pendingEngineWork = Promise.allSettled([
+      ...(this.ready ? [this.ready] : []),
+      this.refreshChain,
+    ]).then(() => undefined);
+    this.disposePromise = (async () => {
+      try {
+        await Promise.all([...this.liveSessions.values()].map((session) => session.close()));
+      } finally {
+        this.liveSessions.clear();
+        const drained = await waitForEngineWork(pendingEngineWork, ENGINE_WORK_DRAIN_TIMEOUT_MS);
+        if (!drained) {
+          process.stderr.write(
+            `roll chat: Engine 在 ${String(ENGINE_WORK_DRAIN_TIMEOUT_MS)}ms 内未完成在飞初始化，将在其结束后再清理迟到连接\n`,
+          );
+        }
+        await this.clientManager.disconnectAll();
+        if (!drained) {
+          pendingEngineWork
+            .then(() => this.clientManager.disconnectAll())
+            .catch((error: unknown) => {
+              process.stderr.write(
+                `roll chat: 迟到 MCP 连接清理失败: ${error instanceof Error ? error.message : String(error)}\n`,
+              );
+            });
+        }
+      }
+    })();
+    return this.disposePromise;
   }
 }

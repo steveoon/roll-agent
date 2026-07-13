@@ -44,3 +44,16 @@ test("drain 后清空，再次 drain 为空，head 在新窗口重新累积", ()
   const next = buffer.drain(1_000);
   assert.equal(next.text, "fresh");
 });
+
+test("snapshot 可重复读取且不消费内容", () => {
+  const buffer = new HeadTailBuffer(10);
+  buffer.append("1234567890ABCDE");
+
+  const first = buffer.snapshot(100);
+  const second = buffer.snapshot(100);
+
+  assert.deepEqual(second, first);
+  assert.equal(buffer.hasPending(), true);
+  assert.deepEqual(buffer.drain(100), first);
+  assert.equal(buffer.hasPending(), false);
+});

@@ -52,6 +52,7 @@ export type {
 export {
   buildSessionExecToolset,
   EXEC_COMMAND_ID,
+  EXEC_LIST_ID,
   EXEC_POLL_ID,
   type SessionExecSettings,
 } from "./tool-bridge/session-exec-tool.ts";
