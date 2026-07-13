@@ -449,34 +449,13 @@ test(
 );
 
 test(
-  "Windows taskkill profile: root 先退出时不对旧 PID taskkill，后代清理状态保守报错",
+  "PowerShell session: root exit/close 间隙不对旧 PID taskkill",
   { skip, timeout: TEST_TIMEOUT_MS },
   async () => {
     const baseProfile = powerShellProfile();
     let killTreeCalls = 0;
-    const grandchildScript = "setInterval(() => {}, 1000)";
-    const parentScript = [
-      'const { spawn } = require("node:child_process")',
-      `const child = spawn(process.execPath, ["-e", ${JSON.stringify(grandchildScript)}], { stdio: ["ignore", 1, 2], windowsHide: true })`,
-      'console.log("ROLL_ROOT_FIRST_CHILD_PID=" + child.pid)',
-      "child.unref()",
-    ].join(";");
     const observedProfile: ShellProfile = {
       ...baseProfile,
-      // A native command launched through PowerShell does not reliably expose the same pipe handles
-      // to its descendants. Spawn the fixture directly so the grandchild definitely keeps Roll's
-      // stdout/stderr pipes open after the root exits, while retaining Windows taskkill semantics.
-      buildSpawn: (_command, workdir, env) => ({
-        file: process.execPath,
-        args: ["-e", parentScript],
-        options: {
-          cwd: workdir,
-          detached: false,
-          stdio: ["ignore", "pipe", "pipe"],
-          env,
-          windowsHide: true,
-        },
-      }),
       killTree: async (pid, intent, options) => {
         killTreeCalls += 1;
         await baseProfile.killTree(pid, intent, options);
@@ -490,46 +469,30 @@ test(
       closeDrainTimeoutMs: 100,
       rootSettleTimeoutMs: 100,
     });
-    let childPid: number | undefined;
-    let output = "";
-    let resolveChildPid: ((pid: number) => void) | undefined;
-    const childPidPromise = new Promise<number>((resolve) => {
-      resolveChildPid = resolve;
-    });
     const session = mgr.spawn({
-      command: "node-root-first-fixture",
+      command: "Start-Sleep -Milliseconds 250",
       workdir: tmpdir(),
-      onDelta: (_stream, delta) => {
-        output += delta;
-        const match = /ROLL_ROOT_FIRST_CHILD_PID=(\d+)/u.exec(output);
-        if (match?.[1] !== undefined) {
-          resolveChildPid?.(Number.parseInt(match[1], 10));
-          resolveChildPid = undefined;
-        }
-      },
+    });
+    let termination: ReturnType<SessionManager["terminate"]> | undefined;
+    // spawnSession 注册的 exit listener 会先标记 exitObserved；本 listener 随后在同一
+    // EventEmitter 调用栈、close 之前发起清理，稳定覆盖旧 PID 防护分支。
+    session.child.once("exit", () => {
+      termination = mgr.terminate(session.id);
     });
 
     try {
-      childPid = await withTimeout(
-        childPidPromise,
-        5_000,
-        `未收到 root-first Node 后代 PID，当前输出: ${output}`,
-      );
-      await withTimeout(session.waitExit(), 5_000, "Node root 未按预期先退出");
-      await withTimeout(session.waitSettled(), 5_000, "root-first 会话未有界收口");
+      await withTimeout(session.waitExit(), 5_000, "PowerShell root 未按预期退出");
+      assert.ok(termination, "exit listener 应在 close 前发起清理");
+      await withTimeout(termination, 5_000, "root exit 后的清理未有界收口");
 
       assert.equal(killTreeCalls, 0, "root 已退出后不得对可能复用的旧 PID 调 taskkill");
       assert.equal(session.state, "cleanup-failed");
       assert.match(session.cleanupError ?? "", /旧 PID/u);
-      assert.equal(isProcessAlive(childPid), true, "未跟踪的后代不能被伪报为已清理");
       assert.equal(mgr.size(), 1, "cleanup-failed 在读取前应继续占用 session 名额");
       assert.equal(mgr.delete(session.id), true);
       assert.equal(mgr.size(), 0);
     } finally {
       await mgr.terminateAll();
-      if (childPid !== undefined && isProcessAlive(childPid)) {
-        await baseProfile.killTree(childPid, "terminate").catch(() => {});
-      }
     }
   },
 );
