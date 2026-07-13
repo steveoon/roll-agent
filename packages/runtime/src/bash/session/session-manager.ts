@@ -1,4 +1,5 @@
 import { performance } from "node:perf_hooks";
+import { waitForPromiseSettlement } from "../../bounded-wait.ts";
 import type { BashStreamName } from "../exec.ts";
 import type { ShellProfile } from "../profile.ts";
 import { spawnSession } from "./session-exec.ts";
@@ -78,22 +79,6 @@ function commandPreview(command: string): string {
   return characters.length <= COMMAND_PREVIEW_MAX_CHARS
     ? singleLine
     : `${characters.slice(0, COMMAND_PREVIEW_MAX_CHARS - 1).join("")}…`;
-}
-
-function waitForPromise(promise: Promise<void>, timeoutMs: number): Promise<boolean> {
-  return new Promise((resolve) => {
-    let settled = false;
-    const finish = (completed: boolean): void => {
-      if (settled) {
-        return;
-      }
-      settled = true;
-      clearTimeout(timer);
-      resolve(completed);
-    };
-    const timer = setTimeout(() => finish(false), timeoutMs);
-    promise.then(() => finish(true));
-  });
 }
 
 export class SessionManager {
@@ -259,7 +244,7 @@ export class SessionManager {
 
     if (firstIntent === SESSION_TERMINATION_CAUSES.interrupt && !session.closeObserved) {
       if (control.intent !== SESSION_TERMINATION_CAUSES.terminate) {
-        await waitForPromise(
+        await waitForPromiseSettlement(
           session.waitClose(),
           this.options.interruptGraceMs ?? DEFAULT_INTERRUPT_GRACE_MS,
         );
@@ -277,28 +262,28 @@ export class SessionManager {
 
     const rootSettleTimeoutMs = this.options.rootSettleTimeoutMs ?? DEFAULT_ROOT_SETTLE_TIMEOUT_MS;
     if (!session.exitObserved && !treeKillFailed) {
-      await waitForPromise(session.waitExit(), rootSettleTimeoutMs);
+      await waitForPromiseSettlement(session.waitExit(), rootSettleTimeoutMs);
     }
     if (!session.exitObserved) {
       const rootKillError = this.forceKillRoot(session);
       if (rootKillError !== undefined) {
         control.errors.push(rootKillError);
       }
-      await waitForPromise(session.waitExit(), rootSettleTimeoutMs);
+      await waitForPromiseSettlement(session.waitExit(), rootSettleTimeoutMs);
     }
     if (!session.exitObserved) {
       control.errors.push("根进程在强制终止请求后仍未确认退出");
     }
 
     if (!session.closeObserved) {
-      await waitForPromise(
+      await waitForPromiseSettlement(
         session.waitClose(),
         this.options.closeDrainTimeoutMs ?? DEFAULT_CLOSE_DRAIN_TIMEOUT_MS,
       );
     }
     if (!session.closeObserved) {
       this.destroyStreams(session);
-      await waitForPromise(session.waitClose(), STREAM_DESTROY_SETTLE_MS);
+      await waitForPromiseSettlement(session.waitClose(), STREAM_DESTROY_SETTLE_MS);
     }
     if (!session.closeObserved) {
       control.errors.push("进程树终止后仍未观察到根进程退出与 stdio close");
@@ -383,7 +368,7 @@ export class SessionManager {
         return;
       }
       const timeoutMs = this.options.closeDrainTimeoutMs ?? DEFAULT_CLOSE_DRAIN_TIMEOUT_MS;
-      waitForPromise(session.waitSettled(), timeoutMs).then((settled) => {
+      waitForPromiseSettlement(session.waitSettled(), timeoutMs).then((settled) => {
         if (settled || isTerminalSessionState(session.state)) {
           return;
         }

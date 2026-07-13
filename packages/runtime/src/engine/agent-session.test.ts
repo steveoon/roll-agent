@@ -1310,7 +1310,9 @@ test("AgentSession compact iterator 提前关闭时取消 summary 且不替换�
   });
   let abortObserved = false;
   let replaceCalls = 0;
+  let closeCalls = 0;
   const model = new MockLanguageModelV4({
+    doStream: async () => streamChunks(textStep("session-reused")),
     doGenerate: async (options: LanguageModelV4CallOptions) => {
       options.abortSignal?.addEventListener(
         "abort",
@@ -1351,6 +1353,9 @@ test("AgentSession compact iterator 提前关闭时取消 summary 且不替换�
     onReplace: () => {
       replaceCalls += 1;
     },
+    onClose: () => {
+      closeCalls += 1;
+    },
   });
 
   const iterator = session.compact("manual")[Symbol.asyncIterator]();
@@ -1361,10 +1366,66 @@ test("AgentSession compact iterator 提前关闭时取消 summary 且不替换�
 
   await iterator.return?.();
   await generateSettled;
+  await new Promise<void>((resolve) => setImmediate(resolve));
 
   assert.equal(abortObserved, true);
   assert.equal(replaceCalls, 0);
+  assert.equal(closeCalls, 0);
   assert.deepEqual([...session.getMessages()], original);
+
+  const reused = await collect(session.send("after abandoned compaction"));
+  assert.ok(reused.some((event) => event.type === "message-finish"));
+  await session.close();
+  assert.equal(closeCalls, 1);
+});
+
+test("AgentSession send iterator 提前关闭时只取消本轮且 session 可复用", async () => {
+  const streamStarted = Promise.withResolvers<void>();
+  const streamAborted = Promise.withResolvers<void>();
+  const cancelledTurnPersisted = Promise.withResolvers<void>();
+  let streamCalls = 0;
+  let closeCalls = 0;
+  const model = new MockLanguageModelV4({
+    doStream: async (options) => {
+      streamCalls += 1;
+      if (streamCalls === 1) {
+        options.abortSignal?.addEventListener("abort", () => streamAborted.resolve(), {
+          once: true,
+        });
+        streamStarted.resolve();
+        await streamAborted.promise;
+        return streamChunks(textStep("discarded"));
+      }
+      return streamChunks(textStep("session-reused"));
+    },
+  });
+  const session = new AgentSession({
+    id: "send-iterator-abandoned",
+    model,
+    sources: [],
+    maxSteps: 2,
+    onPersist: () => cancelledTurnPersisted.resolve(),
+    onClose: () => {
+      closeCalls += 1;
+    },
+  });
+
+  const iterator = session.send("first")[Symbol.asyncIterator]();
+  const first = await iterator.next();
+  assert.equal(first.done, false);
+  assert.equal(first.value.type, "message-start");
+  await streamStarted.promise;
+
+  await iterator.return?.();
+  await streamAborted.promise;
+  await cancelledTurnPersisted.promise;
+
+  assert.equal(closeCalls, 0);
+  const reused = await collect(session.send("second"));
+  assert.ok(reused.some((event) => event.type === "message-finish"));
+
+  await session.close();
+  assert.equal(closeCalls, 1);
 });
 
 test("AgentSession 手动 /compact 即使 enabled=false 也生效", async () => {

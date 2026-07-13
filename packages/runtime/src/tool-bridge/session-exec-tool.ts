@@ -278,7 +278,9 @@ export function buildSessionExecToolset(
         } catch (error) {
           return {
             output:
-              error instanceof SessionCapError ? error.message : `无法启动会话: ${String(error)}`,
+              error instanceof SessionCapError
+                ? `${error.message}；先调用 ${execListId} 查看会话，再对 cleanup-failed 终态调用 ${execPollId} 领取结果并释放名额，或等待/中断仍在运行的会话后重试`
+                : `无法启动会话: ${String(error)}`,
             isError: true,
           };
         }

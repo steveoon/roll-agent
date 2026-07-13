@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { waitForPromiseSettlement } from "../bounded-wait.ts";
 import {
   stepCountIs,
   streamText,
@@ -135,22 +136,6 @@ function createActiveTurn(): ActiveTurn {
     cancellationEventEmitted: false,
     cancellationPersisted: false,
   };
-}
-
-function waitForBoundedClose(promise: Promise<void>, timeoutMs: number): Promise<boolean> {
-  return new Promise((resolve) => {
-    let settled = false;
-    const finish = (completed: boolean): void => {
-      if (settled) {
-        return;
-      }
-      settled = true;
-      clearTimeout(timer);
-      resolve(completed);
-    };
-    const timer = setTimeout(() => finish(false), timeoutMs);
-    promise.then(() => finish(true));
-  });
 }
 
 function errorMessage(error: unknown): string {
@@ -441,7 +426,7 @@ export class AgentSession {
       }
     } finally {
       if (this.activeTurn === activeTurn) {
-        this.abort();
+        this.abandonTurn(activeTurn);
       }
       if (this.emit !== undefined) {
         this.emit = undefined;
@@ -473,7 +458,7 @@ export class AgentSession {
       }
     } finally {
       if (this.activeTurn === activeTurn) {
-        this.abort();
+        this.abandonTurn(activeTurn);
       }
       if (this.emit !== undefined) {
         this.emit = undefined;
@@ -1085,6 +1070,31 @@ export class AgentSession {
     return [...activeTurn.execSessionIds].sort((left, right) => left - right);
   }
 
+  private interruptExecSessions(activeTurn: ActiveTurn): void {
+    const execSessionIds = this.execSessionIds(activeTurn);
+    if (execSessionIds.length === 0) {
+      return;
+    }
+    this.sessionManager?.interrupt(execSessionIds).catch((error: unknown) => {
+      process.stderr.write(`roll chat: 中断后台会话失败: ${errorMessage(error)}\n`);
+    });
+  }
+
+  private abandonTurn(activeTurn: ActiveTurn): void {
+    if (
+      this.closed ||
+      this.activeTurn !== activeTurn ||
+      activeTurn.abortController.signal.aborted
+    ) {
+      return;
+    }
+    activeTurn.aborted = true;
+    activeTurn.cancellationReason ??= SESSION_CANCELLATION_REASONS.runtime;
+    this.gate.abortAll("本轮事件流已停止");
+    this.interruptExecSessions(activeTurn);
+    activeTurn.abortController.abort(RUNTIME_CANCELLATION_ABORT_REASON);
+  }
+
   private cancellationMessage(activeTurn: ActiveTurn): string {
     const reason = activeTurn.cancellationReason ?? SESSION_CANCELLATION_REASONS.runtime;
     const execSessionIds = this.execSessionIds(activeTurn);
@@ -1151,12 +1161,7 @@ export class AgentSession {
     activeTurn.aborted = true;
     activeTurn.cancellationReason = SESSION_CANCELLATION_REASONS.user;
     this.gate.abortAll("用户取消本轮");
-    const execSessionIds = this.execSessionIds(activeTurn);
-    if (execSessionIds.length > 0) {
-      this.sessionManager?.interrupt(execSessionIds).catch((error: unknown) => {
-        process.stderr.write(`roll chat: 中断后台会话失败: ${errorMessage(error)}\n`);
-      });
-    }
+    this.interruptExecSessions(activeTurn);
     activeTurn.abortController.abort(USER_CANCELLATION_ABORT_REASON);
     return true;
   }
@@ -1189,7 +1194,7 @@ export class AgentSession {
           process.stderr.write(`roll chat: 会话 ${this.id} 后台清理失败: ${errorMessage(error)}\n`);
         },
       );
-      const completed = await waitForBoundedClose(managerCleanup, SESSION_CLOSE_TIMEOUT_MS);
+      const completed = await waitForPromiseSettlement(managerCleanup, SESSION_CLOSE_TIMEOUT_MS);
       if (!completed) {
         process.stderr.write(
           `roll chat: 会话 ${this.id} 在 ${String(SESSION_CLOSE_TIMEOUT_MS)}ms 内未完成全部关闭步骤\n`,
@@ -1205,6 +1210,8 @@ export class AgentSession {
   }
 
   abort(): void {
+    // Backward-compatible fire-and-forget teardown. Turn abandonment uses abandonTurn() so the
+    // owning ConversationEngine can keep this session alive for the next user request.
     this.close().catch((error: unknown) => {
       process.stderr.write(`roll chat: 会话 ${this.id} 关闭失败: ${errorMessage(error)}\n`);
     });

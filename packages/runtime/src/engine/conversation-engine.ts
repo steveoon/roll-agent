@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { waitForPromiseSettlement } from "../bounded-wait.ts";
 import type { ModelMessage } from "ai";
 import type { LanguageModelV4, SharedV4ProviderOptions } from "@ai-sdk/provider";
 import { McpClientManager } from "@roll-agent/core/mcp/client-manager";
@@ -135,25 +136,6 @@ function formatInstallEventLine(event: InstallAgentEvent): string {
     return `安装遇到网络问题，${Math.round(event.delayMs / 1000)}s 后重试（第 ${event.attempt + 1} 次）...`;
   }
   return event.type === "warn" ? `警告：${event.message}` : event.message;
-}
-
-function waitForEngineWork(promise: Promise<void>, timeoutMs: number): Promise<boolean> {
-  return new Promise((resolve) => {
-    let settled = false;
-    const finish = (completed: boolean): void => {
-      if (settled) {
-        return;
-      }
-      settled = true;
-      clearTimeout(timer);
-      resolve(completed);
-    };
-    const timer = setTimeout(() => finish(false), timeoutMs);
-    promise.then(
-      () => finish(true),
-      () => finish(true),
-    );
-  });
 }
 
 async function ensureCoreManagedAgentReady(
@@ -691,7 +673,10 @@ export class ConversationEngine {
         await Promise.all([...this.liveSessions.values()].map((session) => session.close()));
       } finally {
         this.liveSessions.clear();
-        const drained = await waitForEngineWork(pendingEngineWork, ENGINE_WORK_DRAIN_TIMEOUT_MS);
+        const drained = await waitForPromiseSettlement(
+          pendingEngineWork,
+          ENGINE_WORK_DRAIN_TIMEOUT_MS,
+        );
         if (!drained) {
           process.stderr.write(
             `roll chat: Engine 在 ${String(ENGINE_WORK_DRAIN_TIMEOUT_MS)}ms 内未完成在飞初始化，将在其结束后再清理迟到连接\n`,

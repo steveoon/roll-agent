@@ -62,7 +62,10 @@ function options(id: string, abortSignal?: AbortSignal): ToolExecutionOptions<un
   };
 }
 
-function build(ctx: BashToolContext): {
+function build(
+  ctx: BashToolContext,
+  maxSessions = 8,
+): {
   manager: SessionManager;
   execCommand: (
     input: ExecCommandInput,
@@ -77,7 +80,7 @@ function build(ctx: BashToolContext): {
   execList: (input?: ExecListInput) => Promise<NormalizedToolResult>;
 } {
   const manager = new SessionManager({
-    maxSessions: 8,
+    maxSessions,
     profile,
     env: process.env,
     bufferCapacity: 100_000,
@@ -139,6 +142,33 @@ test("注册为 roll__exec_command、roll__exec_poll 与 roll__exec_list", () =>
   });
   assert.deepEqual(registry.resolve(EXEC_POLL_ID), { agentName: "roll", toolName: "exec_poll" });
   assert.deepEqual(registry.resolve(EXEC_LIST_ID), { agentName: "roll", toolName: "exec_list" });
+});
+
+test("会话达上限时返回 exec_list / exec_poll 自恢复指引", { skip }, async () => {
+  const { manager, execCommand } = build(
+    {
+      policy: allowPolicy,
+      requestApproval: async () => ({ approved: true }),
+    },
+    1,
+  );
+
+  try {
+    const first = await execCommand({ command: "sleep 30", yield_time_ms: 250 }, "cap-first");
+    assert.equal(first.isError, false);
+
+    const blocked = await execCommand(
+      { command: "printf should-not-start", yield_time_ms: 250 },
+      "cap-blocked",
+    );
+    assert.equal(blocked.isError, true);
+    assert.match(String(blocked.output), /roll__exec_list/u);
+    assert.match(String(blocked.output), /cleanup-failed/u);
+    assert.match(String(blocked.output), /roll__exec_poll/u);
+    assert.equal(manager.size(), 1);
+  } finally {
+    await manager.close();
+  }
 });
 
 test("长跑命令首窗 running，exec_poll 续查至 exited + 退出码", { skip }, async () => {
