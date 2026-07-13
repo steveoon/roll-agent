@@ -1,5 +1,11 @@
 # @roll-agent/browser
 
+## 0.9.1
+
+### Patch Changes
+
+- [#142](https://github.com/steveoon/roll-agent/pull/142) [`308af83`](https://github.com/steveoon/roll-agent/commit/308af83f74274598d527959a3cdea728b9b75892) Thanks [@steveoon](https://github.com/steveoon)! - Keep managed CDP pages active when browser windows are occluded. Wait for the BOSS chat list after force reloads, restore the unread filter before subsequent batch reads, and include page visibility plus selected-chat diagnostics when synchronization times out.
+
 ## 0.9.0
 
 ### Minor Changes
