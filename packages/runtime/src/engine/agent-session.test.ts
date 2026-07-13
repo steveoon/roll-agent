@@ -805,6 +805,106 @@ test(
   },
 );
 
+test("AgentSession cancel 在两次 poll 之间仍中断本轮后台 session", async () => {
+  const killIntents: Array<"interrupt" | "terminate"> = [];
+  const portableProfile: ShellProfile = {
+    id: process.platform === "win32" ? "powershell" : "posix",
+    toolName: process.platform === "win32" ? "powershell" : "bash",
+    supportsSessionExec: true,
+    supportsSafeCommandClassification: false,
+    waitForTreeKillAfterRootExit: false,
+    buildSpawn: (_command, workdir, env) => ({
+      file: process.execPath,
+      args: ["-e", "setInterval(() => {}, 1000)"],
+      options: {
+        cwd: workdir,
+        detached: false,
+        stdio: ["ignore", "pipe", "pipe"],
+        env,
+        windowsHide: true,
+      },
+    }),
+    classify: () => "unknown",
+    killTree: async (pid, intent) => {
+      killIntents.push(intent);
+      if (pid === undefined) {
+        throw new Error("portable session fixture did not expose a PID");
+      }
+      process.kill(pid, "SIGKILL");
+    },
+    systemPromptHints: () => [],
+  };
+  let modelCall = 0;
+  const model = new MockLanguageModelV4({
+    doStream: async () => {
+      modelCall += 1;
+      if (modelCall === 1) {
+        return streamChunks(
+          toolCallStep("roll__exec_command", {
+            command: "portable-long-running-fixture",
+            yield_time_ms: 250,
+          }),
+        );
+      }
+      return {
+        stream: simulateReadableStream<LanguageModelV4StreamPart>({
+          chunks: textStep("between-polls"),
+          initialDelayInMs: null,
+          chunkDelayInMs: 100,
+        }),
+      };
+    },
+  });
+  const session = new AgentSession({
+    id: "session-exec-cancel-between-polls",
+    model,
+    sources: [],
+    maxSteps: 8,
+    policy: allowToolPolicy,
+    bashSession: sessionExecSettings(portableProfile),
+  });
+
+  try {
+    const events: SessionEvent[] = [];
+    let runningSessionId: number | undefined;
+    let cancelRequested = false;
+    for await (const event of session.send("start and cancel between polls")) {
+      events.push(event);
+      if (event.type === "tool-result" && event.toolName === "exec_command") {
+        const match = /Session: (\d+) \(running\)/u.exec(JSON.stringify(event.output));
+        assert.ok(match?.[1], "exec_command 应先返回 running session id");
+        runningSessionId = Number.parseInt(match[1], 10);
+      }
+      if (
+        !cancelRequested &&
+        event.type === "text-delta" &&
+        event.delta.includes("between-polls")
+      ) {
+        assert.ok(runningSessionId, "取消前 exec_command 应已完成并返回 running");
+        cancelRequested = session.cancel();
+      }
+    }
+
+    assert.equal(cancelRequested, true);
+    assert.ok(runningSessionId);
+    const cancelled = events.find((event) => event.type === "turn-cancelled");
+    assert.ok(cancelled && cancelled.type === "turn-cancelled");
+    assert.equal(cancelled.reason, "user");
+    assert.deepEqual(cancelled.execSessionIds, [runningSessionId]);
+    assert.deepEqual(killIntents, ["interrupt"]);
+    assert.equal(
+      events.some(
+        (event) =>
+          (event.type === "tool-call" || event.type === "tool-result") &&
+          event.toolName === "exec_poll",
+      ),
+      false,
+    );
+  } finally {
+    await session.close();
+  }
+});
+
 test(
   "AgentSession timeout 保留后台 session，并在取消事件与持久消息中暴露恢复 id",
   { skip: process.platform === "win32" },
