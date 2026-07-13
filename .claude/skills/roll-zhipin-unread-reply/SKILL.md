@@ -25,10 +25,12 @@ description: >-
 - The batch can run for several minutes. If `roll.exec_command` / `roll__exec_command` is present in
   the current tool catalog, use it and poll with `roll.exec_poll` / `roll__exec_poll` instead of a
   one-shot shell call.
-- Native Windows PowerShell currently does not expose session exec. When those tools are absent,
-  never invent or search for them: explain that the batch must use one-shot `roll.powershell`, ask
-  the user to raise `runtime.turn-timeout-ms` in `roll.config.yaml` for the intended batch duration,
-  or have the user run the script outside `roll chat`.
+- Native Windows session exec requires PowerShell 7+ and both `runtime.shell.enabled` and
+  `runtime.shell.session.enabled`. When the exec tools are absent, never invent or search for them:
+  ask the user to enable those settings and restart `roll chat`. Do not fall back to a long-running
+  one-shot call unless the user explicitly chooses it and the turn timeout covers the full run.
+- If a turn timeout hides the session id or final result, call `roll.exec_list` / `roll__exec_list`
+  in the next turn and resume with `exec_poll`; listing does not consume buffered output.
 - Report normal completion only after a tool result explicitly returns `Exit code: 0`. A cancelled,
   timed-out, or missing result means the current operation is interrupted or unknown, even if an
   earlier output line looked successful.

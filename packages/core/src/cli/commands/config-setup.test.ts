@@ -394,19 +394,19 @@ describe("config setup", () => {
     });
   });
 
-  it("Windows shell setup skips POSIX-only auto approve and session prompts", async () => {
-    const prompts = new FakePrompts({ confirm: [true] });
+  it("Windows shell setup skips POSIX-only auto approve but configures session exec", async () => {
+    const prompts = new FakePrompts({ confirm: [true, true] });
     await setupShell(prompts, "win32");
 
     const config = readConfig(homeDir);
-    assert.deepEqual(config["runtime"], { shell: { enabled: true } });
+    assert.deepEqual(config["runtime"], {
+      shell: { enabled: true, session: { enabled: true } },
+    });
     assert.ok(!prompts.messages.some((message) => message.includes("安全只读命令")));
-    assert.ok(!prompts.messages.some((message) => message.includes("长跑命令会话")));
-    assert.match(
-      prompts.messages.join("\n"),
-      /Windows 原生 shell 当前仅支持 PowerShell 7 one-shot/u,
-    );
+    assert.ok(prompts.messages.some((message) => message.includes("长跑命令会话")));
+    assert.doesNotMatch(prompts.messages.join("\n"), /one-shot/u);
     assert.match(prompts.messages.join("\n"), /roll\.powershell: auto/u);
+    assert.match(prompts.messages.join("\n"), /roll\.exec_command: auto/u);
   });
 
   it("bash setup alias writes only the shell disable flag when declined", async () => {
@@ -687,6 +687,15 @@ describe("config explain", () => {
       assert.ok(guidance, `missing guidance for ${path}`);
       assert.equal(guidance.defaultBehavior?.includes(`\`${String(expectedDefault)}\``), true);
     }
+  });
+
+  it("documents session exec for POSIX and Windows PowerShell backends", () => {
+    const guidance = findConfigGuidance("runtime.shell.session.enabled");
+    assert.ok(guidance);
+    assert.match(guidance.purpose, /macOS\/Linux/u);
+    assert.match(guidance.purpose, /Windows PowerShell 7\+/u);
+    assert.match(guidance.purpose, /roll__exec_list/u);
+    assert.doesNotMatch(guidance.purpose, /暂未支持/u);
   });
 
   it("explains a registered agent env path from env declarations", () => {

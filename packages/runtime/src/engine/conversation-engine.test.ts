@@ -21,7 +21,7 @@ function tempDir(): string {
 const powershellProfile: ShellProfile = {
   id: "powershell",
   toolName: "powershell",
-  supportsSessionExec: false,
+  supportsSessionExec: true,
   supportsSafeCommandClassification: false,
   buildSpawn: (command, workdir, env) => ({
     file: "pwsh",
@@ -63,6 +63,221 @@ test("ConversationEngine records runtime model override on created threads", asy
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test("ConversationEngine 同一 thread 复用 live session，显式 close 后允许重建", async () => {
+  const dir = tempDir();
+  try {
+    const config = rollConfigSchema.parse({
+      llm: {
+        defaultProvider: "mock",
+        defaultModel: "default-model",
+        providers: { mock: { apiKey: "test" } },
+      },
+      ask: {},
+      agents: { dataDir: "/tmp/roll-engine-test" },
+    });
+    const store = new ThreadStore(dir);
+    const engine = new ConversationEngine({
+      config,
+      model: new MockLanguageModelV4({}),
+      store,
+      sources: [],
+    });
+
+    const created = await engine.createSession();
+    const firstResume = await engine.resumeSession(created.id);
+    const secondResume = await engine.resumeSession(created.id);
+    assert.equal(firstResume, created);
+    assert.equal(secondResume, created);
+
+    await created.close();
+    const [rebuilt, concurrentlyResumed] = await Promise.all([
+      engine.resumeSession(created.id),
+      engine.resumeSession(created.id),
+    ]);
+    assert.notEqual(rebuilt, created);
+    assert.equal(concurrentlyResumed, rebuilt);
+    assert.equal(await engine.resumeSession(created.id), rebuilt);
+
+    await engine.dispose();
+    store.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("ConversationEngine dispose 开始后拒绝新的 create 与 resume", async () => {
+  const dir = tempDir();
+  try {
+    const config = rollConfigSchema.parse({
+      llm: {
+        defaultProvider: "mock",
+        defaultModel: "default-model",
+        providers: { mock: { apiKey: "test" } },
+      },
+      ask: {},
+      agents: { dataDir: "/tmp/roll-engine-test" },
+    });
+    const store = new ThreadStore(dir);
+    const engine = new ConversationEngine({
+      config,
+      model: new MockLanguageModelV4({}),
+      store,
+      sources: [],
+    });
+    const session = await engine.createSession();
+
+    const disposing = engine.dispose();
+    await assert.rejects(engine.createSession(), /ConversationEngine is closing/u);
+    await assert.rejects(engine.resumeSession(session.id), /ConversationEngine is closing/u);
+    await assert.rejects(engine.getContextSummary(), /ConversationEngine is closing/u);
+    await disposing;
+    store.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("ConversationEngine dispose 与 in-flight bootstrap 竞态不注册迟到 session", async () => {
+  const dir = tempDir();
+  try {
+    const bootstrapStarted = Promise.withResolvers<void>();
+    const releaseBootstrap = Promise.withResolvers<void>();
+    const config = rollConfigSchema.parse({
+      llm: {
+        defaultProvider: "mock",
+        defaultModel: "default-model",
+        providers: { mock: { apiKey: "test" } },
+      },
+      ask: {},
+      agents: { dataDir: "/tmp/roll-engine-test" },
+    });
+    const agent: RegisteredAgent = {
+      skill: { name: "slow-agent", description: "slow", metadata: {} },
+      transport: { type: "streamable-http", endpoint: "http://127.0.0.1:3199/mcp" },
+      runtime: {
+        ownership: "core-managed",
+        start: { command: "node", args: ["dist/index.js"] },
+        endpoint: { path: "/mcp", port: 3199 },
+      },
+      installPath: "/tmp/slow-agent",
+      registeredAt: "2026-07-13T00:00:00.000Z",
+      status: "stopped",
+    };
+    let connectCalls = 0;
+    const clientManager = {
+      connect: async () => {
+        connectCalls += 1;
+        return { listTools: async () => ({ tools: [] }) };
+      },
+      disconnectAll: async () => {},
+    } as unknown as McpClientManager;
+    const store = new ThreadStore(dir);
+    const engine = new ConversationEngine({
+      config,
+      model: new MockLanguageModelV4({}),
+      store,
+      agents: [agent],
+      skillLibrary: null,
+      clientManager,
+      ensureAgentReady: async () => {
+        bootstrapStarted.resolve();
+        await releaseBootstrap.promise;
+      },
+    });
+
+    const creating = engine.createSession();
+    const rejectedCreate = assert.rejects(creating, /ConversationEngine is closing/u);
+    await bootstrapStarted.promise;
+    const disposing = engine.dispose();
+    releaseBootstrap.resolve();
+    await Promise.all([disposing, rejectedCreate]);
+    assert.equal(connectCalls, 0);
+    assert.deepEqual(store.listThreads(), []);
+    store.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("ConversationEngine.dispose 等待 live session close 后才断开 MCP", async () => {
+  const order: string[] = [];
+  const closeStarted = Promise.withResolvers<void>();
+  const releaseClose = Promise.withResolvers<void>();
+  const clientManager = {
+    disconnectAll: async () => {
+      order.push("disconnect");
+    },
+  } as unknown as McpClientManager;
+  const config = rollConfigSchema.parse({
+    llm: {
+      defaultProvider: "mock",
+      defaultModel: "default-model",
+      providers: { mock: { apiKey: "test" } },
+    },
+    ask: {},
+    agents: { dataDir: "/tmp/roll-engine-test" },
+  });
+  const engine = new ConversationEngine({
+    config,
+    model: new MockLanguageModelV4({}),
+    sources: [],
+    clientManager,
+  });
+  const session = await engine.createSession();
+  const originalClose = session.close.bind(session);
+  session.close = async () => {
+    order.push("close-start");
+    closeStarted.resolve();
+    await releaseClose.promise;
+    await originalClose();
+    order.push("close-end");
+  };
+
+  const disposing = engine.dispose();
+  try {
+    await closeStarted.promise;
+    assert.deepEqual(order, ["close-start"]);
+    releaseClose.resolve();
+    await disposing;
+    assert.deepEqual(order, ["close-start", "close-end", "disconnect"]);
+  } finally {
+    releaseClose.resolve();
+    await disposing;
+  }
+});
+
+test("ConversationEngine.dispose 在 session close 失败时仍通过 finally 断开 MCP", async () => {
+  const order: string[] = [];
+  const clientManager = {
+    disconnectAll: async () => {
+      order.push("disconnect");
+    },
+  } as unknown as McpClientManager;
+  const config = rollConfigSchema.parse({
+    llm: {
+      defaultProvider: "mock",
+      defaultModel: "default-model",
+      providers: { mock: { apiKey: "test" } },
+    },
+    ask: {},
+    agents: { dataDir: "/tmp/roll-engine-test" },
+  });
+  const engine = new ConversationEngine({
+    config,
+    model: new MockLanguageModelV4({}),
+    sources: [],
+    clientManager,
+  });
+  const session = await engine.createSession();
+  session.close = async () => {
+    order.push("close");
+    throw new Error("close failed");
+  };
+
+  await assert.rejects(engine.dispose(), /close failed/u);
+  assert.deepEqual(order, ["close", "disconnect"]);
 });
 
 test("ConversationEngine reports agent bootstrap failures instead of swallowing them", async () => {
@@ -618,6 +833,7 @@ test(
       assert.ok(tools.includes("roll__bash"));
       assert.ok(!tools.includes("roll__exec_command"));
       assert.ok(!tools.includes("roll__exec_poll"));
+      assert.ok(!tools.includes("roll__exec_list"));
       session.abort();
       await engine.dispose();
     } finally {
@@ -649,6 +865,7 @@ test(
       assert.ok(events.length > 0);
       assert.ok(tools.includes("roll__exec_command"));
       assert.ok(tools.includes("roll__exec_poll"));
+      assert.ok(tools.includes("roll__exec_list"));
       session.abort();
       await engine.dispose();
     } finally {
@@ -657,7 +874,7 @@ test(
   },
 );
 
-test("PowerShell profile 注册 roll__powershell 且不注册 session exec", async () => {
+test("PowerShell profile 注册 roll__powershell 与 session exec", async () => {
   const dir = tempDir();
   try {
     let tools = "";
@@ -678,8 +895,9 @@ test("PowerShell profile 注册 roll__powershell 且不注册 session exec", asy
     assert.ok(events.length > 0);
     assert.ok(tools.includes("roll__powershell"));
     assert.ok(!tools.includes("roll__bash"));
-    assert.ok(!tools.includes("roll__exec_command"));
-    assert.ok(!tools.includes("roll__exec_poll"));
+    assert.ok(tools.includes("roll__exec_command"));
+    assert.ok(tools.includes("roll__exec_poll"));
+    assert.ok(tools.includes("roll__exec_list"));
     session.abort();
     await engine.dispose();
   } finally {
@@ -758,6 +976,7 @@ test(
         assert.ok(!tools.includes("roll__powershell"));
         assert.ok(!tools.includes("roll__exec_command"));
         assert.ok(!tools.includes("roll__exec_poll"));
+        assert.ok(!tools.includes("roll__exec_list"));
       }
       first.abort();
       second.abort();

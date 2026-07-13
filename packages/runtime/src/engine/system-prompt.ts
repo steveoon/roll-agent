@@ -8,6 +8,7 @@ export interface SkillPromptSummary {
 export interface SessionExecToolIds {
   readonly command: string;
   readonly poll: string;
+  readonly list: string;
 }
 
 export interface AgentOnboardingCatalogEntry {
@@ -110,6 +111,7 @@ function buildShellSection(
     ? [
         `- 预计跑几十秒以上的命令（构建、批处理脚本）不要用 ${shellToolId}（会被单轮超时杀掉），改用 ${sessionExec.command} 后台执行。`,
         `- ${sessionExec.command} 未结束时会返回 session_id；用 ${sessionExec.poll}（chars 留空）轮询进度直到拿到退出码，需要中断时 chars 传 "\\u0003"。`,
+        `- 如果一轮因超时或上下文丢失而没有拿到 session_id，下一轮先用 ${sessionExec.list} 找回会话，再用 ${sessionExec.poll} 继续；用户取消会中断本轮触达的会话，只能查看终态结果，不应宣称仍在运行。`,
       ]
     : ["- 预计耗时较长的命令（如构建、脚本）要显式调大 timeout_ms。"];
   return [

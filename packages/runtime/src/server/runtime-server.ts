@@ -33,11 +33,10 @@ export class RuntimeServer {
     this.connection.onMessage((message) => this.handleMessage(message));
   }
 
-  abortAll(): void {
-    for (const session of this.sessions.values()) {
-      session.abort();
-    }
+  async abortAll(): Promise<void> {
+    const sessions = [...this.sessions.values()];
     this.sessions.clear();
+    await Promise.all(sessions.map((session) => session.close()));
   }
 
   private handleMessage(message: JsonRpcMessage): void {
@@ -110,7 +109,7 @@ export class RuntimeServer {
       case RpcMethod.Close: {
         const params = closeParamsSchema.parse(request.params);
         const session = this.requireSession(params.sessionId);
-        session.abort();
+        await session.close();
         this.sessions.delete(params.sessionId);
         return { closed: true };
       }
