@@ -27,6 +27,11 @@ import type { BrowserActionPolicyOptions } from "./security.ts";
 const MANAGED_CDP_READY_TIMEOUT_MS = 15_000;
 const MANAGED_CDP_READY_POLL_MS = 250;
 const MANAGED_SHUTDOWN_TIMEOUT_MS = 5_000;
+const MANAGED_CDP_AUTOMATION_ARGS = [
+  "--disable-background-timer-throttling",
+  "--disable-backgrounding-occluded-windows",
+  "--disable-renderer-backgrounding",
+] as const;
 
 const DEFAULT_MANAGED_PROFILE_DIR = join(
   homedir(),
@@ -390,6 +395,7 @@ export class BrowserRuntime {
       "--no-default-browser-check",
       "--disable-sync",
       "--disable-background-networking",
+      ...MANAGED_CDP_AUTOMATION_ARGS,
       "--disable-component-update",
       "--disable-features=Translate,MediaRouter",
       "--disable-session-crashed-bubble",

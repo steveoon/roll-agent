@@ -229,6 +229,9 @@ test("managed-cdp start applies instance profile label and window bounds", async
     assert.ok(spawnedArgs.includes("--window-name=boss-a"));
     assert.ok(spawnedArgs.includes("--window-position=0,24"));
     assert.ok(spawnedArgs.includes("--window-size=680,1000"));
+    assert.ok(spawnedArgs.includes("--disable-background-timer-throttling"));
+    assert.ok(spawnedArgs.includes("--disable-backgrounding-occluded-windows"));
+    assert.ok(spawnedArgs.includes("--disable-renderer-backgrounding"));
     assert.equal(connectedNativeBrowserWs, "ws://127.0.0.1:9888/devtools/browser/root");
     assert.equal(requestedWindowTargetId, "target-boss");
     assert.deepEqual(appliedWindowBounds, {

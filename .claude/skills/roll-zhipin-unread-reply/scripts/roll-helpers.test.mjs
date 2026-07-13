@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { extractLastJson } from "./roll-json-extract.mjs";
@@ -105,7 +107,10 @@ assert.deepEqual(JSON.parse(previewSingleOption.stdout), {
 const applyBundle = runHelper(
   "apply-send-bundle.mjs",
   JSON.stringify({
-    sendInput: { preparedReplyId: "prep_3", variantDecision: { chosenOption: "option_1", reason: "ok" } },
+    sendInput: {
+      preparedReplyId: "prep_3",
+      variantDecision: { chosenOption: "option_1", reason: "ok" },
+    },
     meta: { hasDualDraft: true },
   }),
   ["/tmp/roll-zhipin-sp-test.json"],
@@ -186,5 +191,135 @@ const failedStatusShape = runHelper(
 );
 assert.equal(failedStatusShape.status, 1);
 assert.match(failedStatusShape.stderr, /instances array/);
+
+const openChatDir = mkdtempSync(path.join(tmpdir(), "roll-open-chat-test-"));
+try {
+  const initialPath = path.join(openChatDir, "initial.out");
+  const reloadPath = path.join(openChatDir, "reload.out");
+  const retryPath = path.join(openChatDir, "retry.out");
+  writeFileSync(initialPath, 'roll log\n{"success":false,"error":"右侧会话未同步"}', "utf8");
+  writeFileSync(reloadPath, '{"success":true,"usedReload":true}', "utf8");
+  writeFileSync(
+    retryPath,
+    '{"success":false,"error":{"message":"消息列表未加载，请稍后重试"}}',
+    "utf8",
+  );
+  const openChatFailure = spawnSync(
+    "node",
+    [
+      path.join(dir, "format-open-chat-failure.mjs"),
+      "ts-open",
+      "候选人 A",
+      "cid-open",
+      initialPath,
+      reloadPath,
+      retryPath,
+    ],
+    { encoding: "utf8" },
+  );
+  assert.equal(openChatFailure.status, 0, openChatFailure.stderr);
+  assert.deepEqual(JSON.parse(openChatFailure.stdout), {
+    ts: "ts-open",
+    name: "候选人 A",
+    conversationId: "cid-open",
+    ok: false,
+    stage: "open_chat",
+    recoveryAttempted: true,
+    recoveryAction: "zhipin_open_chat_page(forceReload=true)",
+    initialError: "右侧会话未同步",
+    retryError: "消息列表未加载，请稍后重试",
+  });
+
+  writeFileSync(initialPath, '{"ok":true}', "utf8");
+  writeFileSync(retryPath, '{"success":true}', "utf8");
+  const validationRejectedSuccess = spawnSync(
+    "node",
+    [
+      path.join(dir, "format-open-chat-failure.mjs"),
+      "ts-validation",
+      "候选人 B",
+      "cid-validation",
+      initialPath,
+      reloadPath,
+      retryPath,
+    ],
+    { encoding: "utf8" },
+  );
+  assert.equal(validationRejectedSuccess.status, 0, validationRejectedSuccess.stderr);
+  const validationRejectedRow = JSON.parse(validationRejectedSuccess.stdout);
+  assert.equal(
+    validationRejectedRow.initialError,
+    "zhipin_open_chat output was rejected by validate-open-chat",
+  );
+  assert.equal(
+    validationRejectedRow.retryError,
+    "zhipin_open_chat output was rejected by validate-open-chat",
+  );
+} finally {
+  rmSync(openChatDir, { recursive: true, force: true });
+}
+
+const recoveryContracts = [
+  {
+    script: "reply-unread-safely.sh",
+    conversationAnchor: 'expectedConversationId\\":\\"$cid',
+    invalidateCall: "invalidate_unread_filter_after_reload",
+    ensureCall: "ensure_unread_list_ready",
+    retryCall: 'open_out=$(roll_json_file zhipin_open_chat "$WORK_DIR/c.json")',
+    ensureBeforeRead: "ensure_unread_list_ready\n    local next\n    next=$(fetch_next_unread)",
+    backToList: "back_to_list() {\n  ensure_unread_list_ready\n}",
+    steadyStateGuard:
+      "ensure_unread_list_ready() {\n  # Preserve the steady-state page-drift guard even when the unread filter is already active.\n  ensure_chat_list",
+    rawOutputWriter: 'write_text "$initial_open_path" "$open_out"',
+  },
+  {
+    script: "reply-unread-safely.ps1",
+    conversationAnchor: "expectedConversationId = $Cid",
+    invalidateCall: "Invalidate-UnreadFilterAfterReload",
+    ensureCall: "Ensure-UnreadListReady",
+    retryCall: '$openOut = Invoke-RollJsonFile "zhipin_open_chat" $cFile',
+    ensureBeforeRead: "Ensure-UnreadListReady\n    $next = Get-NextUnread",
+    backToList: "function Back-ToList {\n  Ensure-UnreadListReady\n}",
+    steadyStateGuard:
+      "function Ensure-UnreadListReady {\n  # Preserve the steady-state page-drift guard even when the unread filter is already active.\n  Ensure-ChatList",
+    rawOutputWriter: "Write-TextFile $initialOpenPath $openOut",
+  },
+];
+
+for (const contract of recoveryContracts) {
+  const source = readFileSync(path.join(dir, contract.script), "utf8");
+  const reloadIndex = source.indexOf("forceReload");
+  const invalidateIndex = source.indexOf(contract.invalidateCall, reloadIndex);
+  const retryIndex = source.indexOf(contract.retryCall, invalidateIndex);
+
+  assert.ok(reloadIndex >= 0, `${contract.script}: missing force reload input`);
+  assert.ok(
+    source.includes(contract.conversationAnchor),
+    `${contract.script}: force reload is not anchored to the current conversation`,
+  );
+  assert.ok(invalidateIndex > reloadIndex, `${contract.script}: unread state is not invalidated`);
+  assert.ok(retryIndex > invalidateIndex, `${contract.script}: invalidation must precede retry`);
+  assert.ok(
+    !source.slice(invalidateIndex, retryIndex).includes(contract.ensureCall),
+    `${contract.script}: current candidate retry must happen before unread filter restoration`,
+  );
+  assert.ok(
+    source.includes(contract.ensureBeforeRead),
+    `${contract.script}: unread filter is not restored before the next read`,
+  );
+  assert.ok(
+    source.includes(contract.backToList),
+    `${contract.script}: back-to-list does not restore unread state`,
+  );
+  assert.ok(
+    source.includes(contract.steadyStateGuard),
+    `${contract.script}: steady-state page-drift guard is missing`,
+  );
+  assert.ok(
+    source.includes(contract.rawOutputWriter),
+    `${contract.script}: raw roll output is not written as text`,
+  );
+  assert.match(source, /format-open-chat-failure\.mjs/);
+}
 
 console.log("roll-helpers.test.mjs: ok");

@@ -9,6 +9,7 @@ $AppendJsonl = Join-Path $ScriptDir "append-jsonl.mjs"
 $FindUnreadRef = Join-Path $ScriptDir "find-unread-ref.mjs"
 $ParseReadCandidate = Join-Path $ScriptDir "parse-read-candidate.mjs"
 $ValidateOpenChat = Join-Path $ScriptDir "validate-open-chat.mjs"
+$FormatOpenChatFailure = Join-Path $ScriptDir "format-open-chat-failure.mjs"
 $ValidateGenerate = Join-Path $ScriptDir "validate-generate.mjs"
 $ParseGeneratePreview = Join-Path $ScriptDir "parse-generate-preview.mjs"
 $BuildSendPayload = Join-Path $ScriptDir "build-send-payload.mjs"
@@ -356,7 +357,7 @@ function Apply-UnreadFilterIfNeeded {
   }
 
   if ($ref) {
-    Write-Log "click unread filter $ref (once per run)"
+    Write-Log "click unread filter $ref (current SPA document)"
     $clickFile = Join-Path $script:WorkDir "click-unread.json"
     Write-JsonFile $clickFile (@{ ref = $ref } | ConvertTo-Json -Compress)
     [void](Extract-RollJson (Invoke-RollJsonFile "click_ref" $clickFile))
@@ -365,6 +366,21 @@ function Apply-UnreadFilterIfNeeded {
   }
   else {
     Write-Log "warn: unread ref not found; relying on onlyUnread read_messages"
+  }
+}
+
+function Invalidate-UnreadFilterAfterReload {
+  if ($script:ClickUnreadFilter) {
+    $script:UnreadFilterApplied = $false
+    Write-Log "unread filter state invalidated after force reload"
+  }
+}
+
+function Ensure-UnreadListReady {
+  # Preserve the steady-state page-drift guard even when the unread filter is already active.
+  Ensure-ChatList
+  if ($script:ClickUnreadFilter) {
+    Apply-UnreadFilterIfNeeded
   }
 }
 
@@ -384,7 +400,7 @@ function Test-PageBlockers([string]$SnapText) {
 }
 
 function Back-ToList {
-  Ensure-ChatList
+  Ensure-UnreadListReady
 }
 
 function Process-One([string]$Cid, [string]$Name, [string]$Preview) {
@@ -397,8 +413,38 @@ function Process-One([string]$Cid, [string]$Name, [string]$Preview) {
 
   $openCode = Invoke-NodeStdinExit $script:ValidateOpenChat $openOut @($Cid)
   if ($openCode -ne 0) {
-    Append-ResultObject @{ ts = $ts; name = $Name; conversationId = $Cid; ok = $false; stage = "open_chat" }
-    return 1
+    $initialOpenPath = Join-Path $script:WorkDir "open-chat-initial.out"
+    $reloadPath = Join-Path $script:WorkDir "open-chat-reload.out"
+    $retryOpenPath = Join-Path $script:WorkDir "open-chat-retry.out"
+    Write-TextFile $initialOpenPath $openOut
+
+    Write-Log "warn: open_chat failed for $Name; force-reloading chat page and retrying once"
+    $reloadFile = Join-Path $script:WorkDir "reload-chat.json"
+    Write-JsonFile $reloadFile (@{ forceReload = $true; expectedConversationId = $Cid } | ConvertTo-Json -Compress)
+    $reloadOut = Invoke-RollJsonFile "zhipin_open_chat_page" $reloadFile
+    Write-TextFile $reloadPath $reloadOut
+    Invalidate-UnreadFilterAfterReload
+
+    Write-Log "retry zhipin_open_chat $Name after force reload"
+    $openOut = Invoke-RollJsonFile "zhipin_open_chat" $cFile
+    Write-TextFile $retryOpenPath $openOut
+    $openCode = Invoke-NodeStdinExit $script:ValidateOpenChat $openOut @($Cid)
+    if ($openCode -ne 0) {
+      $failureLine = [string](& node $script:FormatOpenChatFailure `
+          $ts $Name $Cid $initialOpenPath $reloadPath $retryOpenPath 2>$null)
+      $failureLine = $failureLine.Trim()
+      if ($LASTEXITCODE -eq 0 -and $failureLine) {
+        Append-ResultObject ($failureLine | ConvertFrom-Json)
+      }
+      else {
+        Append-ResultObject @{
+          ts = $ts; name = $Name; conversationId = $Cid; ok = $false
+          stage = "open_chat"; recoveryAttempted = $true
+        }
+      }
+      return 1
+    }
+    Write-Log "open_chat recovered after force reload: $Name"
   }
 
   $snapFile = Join-Path $script:WorkDir "snap-preflight.json"
@@ -586,7 +632,7 @@ if (-not (Get-Command node -ErrorAction SilentlyContinue)) {
 
 $helpers = @(
   $ExtractRollJson, $BuildSkipInput, $AppendJsonl, $SkipRulesJs,
-  $FindUnreadRef, $ParseReadCandidate, $ValidateOpenChat,
+  $FindUnreadRef, $ParseReadCandidate, $ValidateOpenChat, $FormatOpenChatFailure,
   $ParseGeneratePreview, $BuildSendPayload, $ApplySendBundle, $WriteJudgeInput, $ComposeResultInput,
   $FormatCandidateResult,
   $ParseSendResult,
@@ -610,7 +656,7 @@ try {
 
   Ensure-AgentHealthy
   Ensure-BrowserInstanceSelection
-  Apply-UnreadFilterIfNeeded
+  Ensure-UnreadListReady
 
   $processed = 0
   $consecutiveFail = 0
@@ -623,7 +669,8 @@ try {
       break
     }
 
-    Ensure-ChatList
+    # A force reload rebuilds the SPA and invalidates the previously clicked unread filter.
+    Ensure-UnreadListReady
     $next = Get-NextUnread
     if (-not $next) {
       $emptyReads++
