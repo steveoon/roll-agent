@@ -96,7 +96,7 @@ export async function runInkRepl(
   }
 
   await instance.waitUntilExit();
-  session.abort();
+  await session.close();
 
   if (isNewSession && !submitted && store.countMessages(session.id) === 0) {
     store.deleteThread(session.id);

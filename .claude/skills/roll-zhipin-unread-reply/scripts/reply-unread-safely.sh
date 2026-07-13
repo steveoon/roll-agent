@@ -11,6 +11,7 @@ APPEND_JSONL="$SCRIPT_DIR/append-jsonl.mjs"
 FIND_UNREAD_REF="$SCRIPT_DIR/find-unread-ref.mjs"
 PARSE_READ_CANDIDATE="$SCRIPT_DIR/parse-read-candidate.mjs"
 VALIDATE_OPEN_CHAT="$SCRIPT_DIR/validate-open-chat.mjs"
+FORMAT_OPEN_CHAT_FAILURE="$SCRIPT_DIR/format-open-chat-failure.mjs"
 VALIDATE_GENERATE="$SCRIPT_DIR/validate-generate.mjs"
 PARSE_GENERATE_PREVIEW="$SCRIPT_DIR/parse-generate-preview.mjs"
 BUILD_SEND_PAYLOAD="$SCRIPT_DIR/build-send-payload.mjs"
@@ -107,7 +108,7 @@ fi
 
 for helper in \
   "$SKIP_RULES_JS" "$EXTRACT_ROLL_JSON" "$BUILD_SKIP_INPUT" "$APPEND_JSONL" \
-  "$FIND_UNREAD_REF" "$PARSE_READ_CANDIDATE" "$VALIDATE_OPEN_CHAT" \
+  "$FIND_UNREAD_REF" "$PARSE_READ_CANDIDATE" "$VALIDATE_OPEN_CHAT" "$FORMAT_OPEN_CHAT_FAILURE" \
   "$PARSE_GENERATE_PREVIEW" "$BUILD_SEND_PAYLOAD" "$APPLY_SEND_BUNDLE" \
   "$WRITE_JUDGE_INPUT" "$COMPOSE_RESULT_INPUT" "$FORMAT_CANDIDATE_RESULT" "$PARSE_SEND_RESULT" "$VALIDATE_SEND" \
   "$CHECK_AGENT_HEALTH" "$VALIDATE_BROWSER_SELECTION" "$DETECT_EXPIRED" "$PARSE_PAGE_META"; do
@@ -161,6 +162,12 @@ append_result_json() {
 }
 
 write_json() {
+  local path="$1"
+  local content="$2"
+  printf '%s' "$content" >"$path"
+}
+
+write_text() {
   local path="$1"
   local content="$2"
   printf '%s' "$content" >"$path"
@@ -220,7 +227,7 @@ ensure_chat_list() {
   roll_no_input zhipin_open_chat_page | extract_json_object >/dev/null || true
 }
 
-# Click 「未读」 at most once per script run while on the list view.
+# Apply 「未读」 once per current SPA document; force reload invalidates this state.
 apply_unread_filter_if_needed() {
   if [[ "$CLICK_UNREAD_FILTER" -ne 1 ]]; then
     return 0
@@ -235,13 +242,28 @@ apply_unread_filter_if_needed() {
   snap=$(roll_json_file browser_snapshot "$WORK_DIR/snapshot.json")
   ref=$(printf '%s' "$snap" | node "$FIND_UNREAD_REF" 2>/dev/null) || ref=""
   if [[ -n "$ref" ]]; then
-    log "click 未读 filter $ref (once per run)"
+    log "click 未读 filter $ref (current SPA document)"
     write_json "$WORK_DIR/click-unread.json" "{\"ref\":\"$ref\"}"
     roll_json_file click_ref "$WORK_DIR/click-unread.json" | extract_json_object >/dev/null || true
     UNREAD_FILTER_APPLIED=1
     sleep 1
   else
     log "warn: 未读 ref not found; relying on onlyUnread read_messages"
+  fi
+}
+
+invalidate_unread_filter_after_reload() {
+  if [[ "$CLICK_UNREAD_FILTER" -eq 1 ]]; then
+    UNREAD_FILTER_APPLIED=0
+    log "unread filter state invalidated after force reload"
+  fi
+}
+
+ensure_unread_list_ready() {
+  # Preserve the steady-state page-drift guard even when the unread filter is already active.
+  ensure_chat_list
+  if [[ "$CLICK_UNREAD_FILTER" -eq 1 ]]; then
+    apply_unread_filter_if_needed
   fi
 }
 
@@ -275,8 +297,33 @@ process_one() {
   local open_out
   open_out=$(roll_json_file zhipin_open_chat "$WORK_DIR/c.json")
   if ! printf '%s' "$open_out" | node "$VALIDATE_OPEN_CHAT" "$cid" 2>/dev/null; then
-    append_result "{\"ts\":\"$ts\",\"name\":\"$name\",\"conversationId\":\"$cid\",\"ok\":false,\"stage\":\"open_chat\"}"
-    return 1
+    local initial_open_path reload_path retry_open_path reload_out failure_line
+    initial_open_path="$WORK_DIR/open-chat-initial.out"
+    reload_path="$WORK_DIR/open-chat-reload.out"
+    retry_open_path="$WORK_DIR/open-chat-retry.out"
+    write_text "$initial_open_path" "$open_out"
+
+    log "warn: open_chat failed for $name; force-reloading chat page and retrying once"
+    write_json "$WORK_DIR/reload-chat.json" "{\"forceReload\":true,\"expectedConversationId\":\"$cid\"}"
+    reload_out=$(roll_json_file zhipin_open_chat_page "$WORK_DIR/reload-chat.json")
+    write_text "$reload_path" "$reload_out"
+    invalidate_unread_filter_after_reload
+
+    log "retry zhipin_open_chat $name after force reload"
+    open_out=$(roll_json_file zhipin_open_chat "$WORK_DIR/c.json")
+    write_text "$retry_open_path" "$open_out"
+    if ! printf '%s' "$open_out" | node "$VALIDATE_OPEN_CHAT" "$cid" 2>/dev/null; then
+      failure_line=$(node "$FORMAT_OPEN_CHAT_FAILURE" \
+        "$ts" "$name" "$cid" "$initial_open_path" "$reload_path" "$retry_open_path" 2>/dev/null) \
+        || failure_line=""
+      if [[ -n "$failure_line" ]]; then
+        append_result "$failure_line"
+      else
+        append_result "{\"ts\":\"$ts\",\"name\":\"$name\",\"conversationId\":\"$cid\",\"ok\":false,\"stage\":\"open_chat\",\"recoveryAttempted\":true}"
+      fi
+      return 1
+    fi
+    log "open_chat recovered after force reload: $name"
   fi
 
   # Snapshot + page URL for captcha / expired
@@ -423,8 +470,7 @@ process_one() {
 }
 
 back_to_list() {
-  # Back to list only; do not re-click 未读 (avoids toggle/double-click; read uses onlyUnread).
-  ensure_chat_list
+  ensure_unread_list_ready
 }
 
 main() {
@@ -433,7 +479,7 @@ main() {
   log "workdir -> $WORK_DIR"
   ensure_agent_healthy
   ensure_browser_instance_selection
-  apply_unread_filter_if_needed
+  ensure_unread_list_ready
 
   local processed=0
   local consecutive_fail=0
@@ -446,8 +492,8 @@ main() {
       break
     fi
 
-    # Stay on list; zhipin_read_messages uses onlyUnread — no repeat 未读 click.
-    ensure_chat_list
+    # A force reload rebuilds the SPA and invalidates the previously clicked 未读 filter.
+    ensure_unread_list_ready
     local next
     next=$(fetch_next_unread)
     if [[ -z "$next" ]]; then

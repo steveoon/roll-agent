@@ -9,12 +9,18 @@ import type { ShellProfile } from "../bash/profile.ts";
 import { ToolRegistry } from "./naming.ts";
 import type { NormalizedToolResult } from "./normalize-result.ts";
 import type { BashToolContext } from "./bash-tool.ts";
-import { USER_CANCELLATION_ABORT_REASON } from "../types/cancellation.ts";
+import {
+  RUNTIME_CANCELLATION_ABORT_REASON,
+  TURN_TIMEOUT_ABORT_REASON,
+  USER_CANCELLATION_ABORT_REASON,
+} from "../types/cancellation.ts";
 import {
   buildSessionExecToolset,
   EXEC_COMMAND_ID,
+  EXEC_LIST_ID,
   EXEC_POLL_ID,
   type ExecCommandInput,
+  type ExecListInput,
   type ExecPollInput,
   type SessionExecSettings,
 } from "./session-exec-tool.ts";
@@ -56,7 +62,10 @@ function options(id: string, abortSignal?: AbortSignal): ToolExecutionOptions<un
   };
 }
 
-function build(ctx: BashToolContext): {
+function build(
+  ctx: BashToolContext,
+  maxSessions = 8,
+): {
   manager: SessionManager;
   execCommand: (
     input: ExecCommandInput,
@@ -68,9 +77,10 @@ function build(ctx: BashToolContext): {
     id: string,
     abortSignal?: AbortSignal,
   ) => Promise<NormalizedToolResult>;
+  execList: (input?: ExecListInput) => Promise<NormalizedToolResult>;
 } {
   const manager = new SessionManager({
-    maxSessions: 8,
+    maxSessions,
     profile,
     env: process.env,
     bufferCapacity: 100_000,
@@ -79,10 +89,13 @@ function build(ctx: BashToolContext): {
   const toolset = buildSessionExecToolset(settings(), manager, registry, ctx);
   const cmd = toolset[EXEC_COMMAND_ID];
   const poll = toolset[EXEC_POLL_ID];
+  const list = toolset[EXEC_LIST_ID];
   assert.ok(cmd?.execute);
   assert.ok(poll?.execute);
+  assert.ok(list?.execute);
   const cmdExecute = cmd.execute;
   const pollExecute = poll.execute;
+  const listExecute = list.execute;
   return {
     manager,
     execCommand: (input, id, abortSignal) =>
@@ -91,6 +104,8 @@ function build(ctx: BashToolContext): {
       Promise.resolve(
         pollExecute(input, options(id, abortSignal)) as Promise<NormalizedToolResult>,
       ),
+    execList: (input = {}) =>
+      Promise.resolve(listExecute(input, options("list")) as Promise<NormalizedToolResult>),
   };
 }
 
@@ -100,7 +115,17 @@ function sessionIdFrom(output: string): number {
   return Number(match[1]);
 }
 
-test("注册为 roll__exec_command 与 roll__exec_poll", () => {
+async function waitFor(predicate: () => boolean, timeoutMs = 2_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!predicate()) {
+    if (Date.now() >= deadline) {
+      throw new Error(`Condition was not met within ${timeoutMs}ms`);
+    }
+    await new Promise<void>((resolve) => setTimeout(resolve, 10));
+  }
+}
+
+test("注册为 roll__exec_command、roll__exec_poll 与 roll__exec_list", () => {
   const registry = new ToolRegistry();
   const manager = new SessionManager({
     maxSessions: 1,
@@ -116,6 +141,34 @@ test("注册为 roll__exec_command 与 roll__exec_poll", () => {
     toolName: "exec_command",
   });
   assert.deepEqual(registry.resolve(EXEC_POLL_ID), { agentName: "roll", toolName: "exec_poll" });
+  assert.deepEqual(registry.resolve(EXEC_LIST_ID), { agentName: "roll", toolName: "exec_list" });
+});
+
+test("会话达上限时返回 exec_list / exec_poll 自恢复指引", { skip }, async () => {
+  const { manager, execCommand } = build(
+    {
+      policy: allowPolicy,
+      requestApproval: async () => ({ approved: true }),
+    },
+    1,
+  );
+
+  try {
+    const first = await execCommand({ command: "sleep 30", yield_time_ms: 250 }, "cap-first");
+    assert.equal(first.isError, false);
+
+    const blocked = await execCommand(
+      { command: "printf should-not-start", yield_time_ms: 250 },
+      "cap-blocked",
+    );
+    assert.equal(blocked.isError, true);
+    assert.match(String(blocked.output), /roll__exec_list/u);
+    assert.match(String(blocked.output), /cleanup-failed/u);
+    assert.match(String(blocked.output), /roll__exec_poll/u);
+    assert.equal(manager.size(), 1);
+  } finally {
+    await manager.close();
+  }
 });
 
 test("长跑命令首窗 running，exec_poll 续查至 exited + 退出码", { skip }, async () => {
@@ -137,7 +190,7 @@ test("长跑命令首窗 running，exec_poll 续查至 exited + 退出码", { sk
     assert.ok(String(second.output).includes("end"));
     assert.equal(manager.get(id), undefined);
   } finally {
-    manager.terminateAll();
+    await manager.terminateAll();
   }
 });
 
@@ -149,7 +202,7 @@ test("短跑命令首窗即 exited 且非零码标记 isError", { skip }, async 
   const result = await execCommand({ command: "exit 3", yield_time_ms: 3_000 }, "c1");
   assert.ok(String(result.output).includes("Exit code: 3"));
   assert.equal(result.isError, true);
-  manager.terminateAll();
+  await manager.terminateAll();
 });
 
 test("exec_poll Ctrl-C 中断会话", { skip }, async () => {
@@ -167,12 +220,12 @@ test("exec_poll Ctrl-C 中断会话", { skip }, async () => {
     assert.ok(String(interrupted.output).includes("Exit code"));
     assert.equal(manager.get(id), undefined);
   } finally {
-    manager.terminateAll();
+    await manager.terminateAll();
   }
 });
 
 test("用户取消 signal 只中断当前 exec_command 会话", { skip }, async () => {
-  const { manager, execCommand } = build({
+  const { manager, execCommand, execList } = build({
     policy: allowPolicy,
     requestApproval: async () => ({ approved: true }),
   });
@@ -184,17 +237,115 @@ test("用户取消 signal 只中断当前 exec_command 会话", { skip }, async 
       controller.signal,
     );
     setTimeout(() => controller.abort(USER_CANCELLATION_ABORT_REASON), 100);
-    const result = await pending;
-    assert.equal(result.isError, true);
-    assert.doesNotMatch(String(result.output), /Exit code: 0/);
+    await assert.rejects(pending, /roll:user-cancelled/u);
+    await waitFor(() => manager.size() === 0);
     assert.equal(manager.size(), 0);
+    const listed = await execList();
+    assert.match(String(listed.output), /"termination_cause": "interrupt"/u);
   } finally {
-    manager.terminateAll();
+    await manager.terminateAll();
+  }
+});
+
+test("预先取消的 exec_command 不启动隐形后台会话", { skip }, async () => {
+  for (const reason of [
+    USER_CANCELLATION_ABORT_REASON,
+    TURN_TIMEOUT_ABORT_REASON,
+    RUNTIME_CANCELLATION_ABORT_REASON,
+  ]) {
+    let approvals = 0;
+    const { manager, execCommand } = build({
+      requestApproval: async () => {
+        approvals += 1;
+        return { approved: true };
+      },
+    });
+    const controller = new AbortController();
+    controller.abort(reason);
+
+    await assert.rejects(
+      execCommand({ command: "sleep 30", yield_time_ms: 30_000 }, "c1", controller.signal),
+      new RegExp(reason, "u"),
+    );
+    assert.equal(manager.size(), 0);
+    assert.deepEqual(manager.list(), []);
+    assert.equal(approvals, 0);
+  }
+});
+
+test("exec_command 等待确认期间取消，确认返回后仍不 spawn", { skip }, async () => {
+  const approvalStarted = Promise.withResolvers<void>();
+  const releaseApproval = Promise.withResolvers<void>();
+  const { manager, execCommand } = build({
+    requestApproval: async () => {
+      approvalStarted.resolve();
+      await releaseApproval.promise;
+      return { approved: true };
+    },
+  });
+  const controller = new AbortController();
+  const pending = execCommand(
+    { command: "sleep 30", yield_time_ms: 30_000 },
+    "c1",
+    controller.signal,
+  );
+
+  await approvalStarted.promise;
+  controller.abort(TURN_TIMEOUT_ABORT_REASON);
+  releaseApproval.resolve();
+
+  await assert.rejects(pending, /roll:turn-timeout/u);
+  assert.equal(manager.size(), 0);
+  assert.deepEqual(manager.list(), []);
+});
+
+test(
+  "会话管理器 close 后，迟到 exec_command 即使无 abort signal 也不 spawn",
+  { skip },
+  async () => {
+    const { manager, execCommand } = build({
+      policy: allowPolicy,
+      requestApproval: async () => ({ approved: true }),
+    });
+    await manager.close();
+
+    const result = await execCommand({ command: "sleep 30", yield_time_ms: 30_000 }, "late");
+
+    assert.equal(result.isError, true);
+    assert.match(String(result.output), /会话管理器已关闭/u);
+    assert.equal(manager.size(), 0);
+    assert.deepEqual(manager.list(), []);
+  },
+);
+
+test("预先 timeout 的 exec_poll Ctrl-C 不中断后台会话", { skip }, async () => {
+  const { manager, execCommand, execPoll } = build({
+    policy: allowPolicy,
+    requestApproval: async () => ({ approved: true }),
+  });
+  try {
+    const first = await execCommand({ command: "sleep 30", yield_time_ms: 250 }, "c1");
+    const id = sessionIdFrom(String(first.output));
+    const controller = new AbortController();
+    controller.abort(TURN_TIMEOUT_ABORT_REASON);
+
+    await assert.rejects(
+      execPoll(
+        { session_id: id, chars: String.fromCharCode(3), yield_time_ms: 5_000 },
+        "c2",
+        controller.signal,
+      ),
+      /roll:turn-timeout/u,
+    );
+    assert.equal(manager.get(id)?.state, "running");
+    assert.equal(manager.size(), 1);
+  } finally {
+    await manager.terminateAll();
   }
 });
 
 test("运行时 timeout signal 不误杀已后台化的 exec_command", { skip }, async () => {
-  const { manager, execCommand } = build({
+  const { manager, execCommand, execList, execPoll } = build({
     policy: allowPolicy,
     requestApproval: async () => ({ approved: true }),
   });
@@ -209,11 +360,52 @@ test("运行时 timeout signal 不误杀已后台化的 exec_command", { skip },
       () => controller.abort(new DOMException("The operation timed out", "TimeoutError")),
       50,
     );
-    const result = await pending;
-    const id = sessionIdFrom(String(result.output));
+    await assert.rejects(pending, /timed out/u);
+    const listed = await execList();
+    const listPayload = JSON.parse(String(listed.output)) as {
+      sessions: Array<{ session_id: number; state: string }>;
+    };
+    const recovered = listPayload.sessions.find((session) => session.state === "running");
+    assert.ok(recovered);
+    const id = recovered.session_id;
     assert.ok(manager.get(id));
+    const result = await execPoll({ session_id: id, chars: "", yield_time_ms: 5_000 }, "c2");
+    assert.match(String(result.output), /Exit code: 0/u);
   } finally {
-    manager.terminateAll();
+    await manager.terminateAll();
+  }
+});
+
+test("exec_list 可恢复 running 与未领取的 terminal 会话", { skip }, async () => {
+  const { manager, execCommand, execList } = build({
+    policy: allowPolicy,
+    requestApproval: async () => ({ approved: true }),
+  });
+  try {
+    const running = await execCommand(
+      { command: "printf active; sleep 5", yield_time_ms: 250 },
+      "c1",
+    );
+    const runningId = sessionIdFrom(String(running.output));
+    const terminal = manager.spawn({ command: "printf finished", workdir: process.cwd() });
+    await terminal.waitSettled();
+
+    const listed = await execList();
+    const payload = JSON.parse(String(listed.output)) as {
+      sessions: Array<{ session_id: number; state: string; command: string }>;
+    };
+    assert.ok(
+      payload.sessions.some(
+        (session) => session.session_id === runningId && session.state === "running",
+      ),
+    );
+    assert.ok(
+      payload.sessions.some(
+        (session) => session.session_id === terminal.id && session.state === "completed",
+      ),
+    );
+  } finally {
+    await manager.terminateAll();
   }
 });
 
@@ -229,7 +421,7 @@ test("exec_poll 非空非哨兵 chars 报错，不写入", { skip }, async () =>
     assert.equal(result.isError, true);
     assert.ok(String(result.output).includes("不支持交互输入"));
   } finally {
-    manager.terminateAll();
+    await manager.terminateAll();
   }
 });
 
@@ -241,7 +433,7 @@ test("exec_poll 未知 session 返回错误", { skip }, async () => {
   const result = await execPoll({ session_id: 999_999, chars: "" }, "c1");
   assert.equal(result.isError, true);
   assert.ok(String(result.output).includes("不存在或已结束"));
-  manager.terminateAll();
+  await manager.terminateAll();
 });
 
 test("policy deny 时不启动会话", { skip }, async () => {
@@ -253,7 +445,7 @@ test("policy deny 时不启动会话", { skip }, async () => {
   assert.equal(result.isError, true);
   assert.ok(String(result.output).includes("策略拒绝执行"));
   assert.equal(manager.size(), 0);
-  manager.terminateAll();
+  await manager.terminateAll();
 });
 
 test("无 policy 时 fail-closed：确认被拒则不启动会话", { skip }, async () => {
@@ -263,7 +455,7 @@ test("无 policy 时 fail-closed：确认被拒则不启动会话", { skip }, as
   const result = await execCommand({ command: "sleep 5" }, "c1");
   assert.ok(String(result.output).includes("已取消执行"));
   assert.equal(manager.size(), 0);
-  manager.terminateAll();
+  await manager.terminateAll();
 });
 
 test("exec_poll 把流式 delta 重绑到自己的 toolCallId", { skip }, async () => {
@@ -303,7 +495,7 @@ test("exec_poll 把流式 delta 重绑到自己的 toolCallId", { skip }, async 
       "poll 窗口 delta 应重绑到 exec_poll 调用上",
     );
   } finally {
-    manager.terminateAll();
+    await manager.terminateAll();
   }
 });
 
@@ -340,5 +532,5 @@ test("P1：workdir 逃出会话根目录时 exec_command 强制 unknown 走确�
   assert.equal(confirmed, true);
   assert.equal(manager.size(), 0);
   assert.equal(result.isError, true);
-  manager.terminateAll();
+  await manager.terminateAll();
 });

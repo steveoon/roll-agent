@@ -60,6 +60,7 @@ function createNativePage(options: {
   readonly alreadyOnChat?: boolean;
   readonly clickResult?: boolean;
   readonly chatReady?: boolean;
+  readonly chatListReady?: boolean;
   readonly reloadError?: Error;
   readonly calls: string[];
 }): ZhipinNativePagePort {
@@ -107,6 +108,14 @@ function createNativePage(options: {
     },
     async waitForChatSurface() {
       return options.chatReady ?? true;
+    },
+    async waitForChatListReady(
+      readinessOptions: { readonly expectedConversationId?: string } = {},
+    ) {
+      options.calls.push(
+        `wait-for-chat-list:${readinessOptions.expectedConversationId ?? "<any>"}`,
+      );
+      return options.chatListReady ?? true;
     },
     async inspectPage() {
       return {
@@ -224,7 +233,10 @@ describe("zhipin_open_chat_page", () => {
       createNativeVisualActivitySession: () => createNoopSession(calls),
     });
 
-    const result = await zhipinOpenChatPage.execute({ forceReload: true }, createTestContext());
+    const result = await zhipinOpenChatPage.execute(
+      { forceReload: true, expectedConversationId: "conversation-1" },
+      createTestContext(),
+    );
 
     assert.equal(result.success, true);
     assert.equal(result.usedReload, true);
@@ -236,7 +248,35 @@ describe("zhipin_open_chat_page", () => {
       "begin:正在刷新沟通页",
       "reload",
       "reload-url:https://www.zhipin.com/web/chat/index",
+      "wait-for-chat-list:conversation-1",
       "succeed:已刷新沟通页",
+      "close",
+    ]);
+  });
+
+  it("fails reload recovery when the document swaps before the chat list is ready", async () => {
+    const calls: string[] = [];
+
+    setZhipinOpenChatPageDepsForTests({
+      getContextManager: () => createContextManager() as never,
+      getRuntime: () => createRuntime(),
+      openNativePagePort: async () =>
+        createNativePage({ alreadyOnChat: true, chatListReady: false, calls }),
+      createNativeVisualActivitySession: () => createNoopSession(calls),
+    });
+
+    const result = await zhipinOpenChatPage.execute({ forceReload: true }, createTestContext());
+
+    assert.equal(result.success, false);
+    assert.equal(result.usedReload, true);
+    assert.equal(result.chatReady, false);
+    assert.match(result.error ?? "", /刷新后沟通列表未就绪/);
+    assert.deepEqual(calls, [
+      "begin:正在刷新沟通页",
+      "reload",
+      "reload-url:https://www.zhipin.com/web/chat/index",
+      "wait-for-chat-list:<any>",
+      "fail:刷新后沟通列表未就绪",
       "close",
     ]);
   });

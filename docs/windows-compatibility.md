@@ -1,7 +1,8 @@
 # Windows 兼容性评估与现状
 
 > 基于 2026-07 的全库静态审计（chat 终端层 / 进程与路径层 / 编码与协议层三路并行核查）。
-> CI 已新增 `windows-latest` shell smoke；终端键盘矩阵和托管 agent 生命周期仍需人工实测。
+> CI 已覆盖 `windows-latest` PowerShell one-shot 与 session exec smoke；终端键盘矩阵和托管
+> agent 生命周期仍需人工实测。
 
 ## 总体结论
 
@@ -41,10 +42,18 @@ stdio 分帧两端剥 `\r`、包管理器调用已有完整 cmd.exe 适配（`pa
   `--input-json '{...}'`（cmd 不认单引号、PS 5.1 会剥引号）；PowerShell 7.3+ 单引号可用
 - `roll chat` 内建 shell 工具使用 `runtime.shell` 配置：macOS/Linux 注册 `roll__bash`，
   Windows 原生只在检测到 PowerShell 7+ (`pwsh`) 时注册 `roll__powershell`；探测会覆盖 PATH 与
-  标准 Program Files 安装路径，未安装时可运行 `winget install Microsoft.PowerShell`。Windows 当前
-  仅支持 one-shot，命令默认逐条确认（显式 `runtime.approval.overrides` 中的
-  `roll.powershell: auto` 可覆盖），session exec 与安全命令自动放行暂不生效。PowerShell wrapper
-  会把 cmdlet 错误和 native `$LASTEXITCODE` 传播为进程退出码，避免明显失败被展示为成功
+  标准 Program Files 安装路径，未安装时可运行 `winget install Microsoft.PowerShell`。设置
+  `runtime.shell.session.enabled: true` 后，交互 REPL 与 `--server` 长驻模式还会注册
+  `roll__exec_command`、`roll__exec_poll`、`roll__exec_list`；后台命令可跨聊天轮次继续运行。
+  PowerShell 命令当前全部按 unknown 处理，默认逐条确认；显式
+  `runtime.approval.overrides` 中的 `roll.powershell: auto` 或 `roll.exec_command: auto` 可覆盖对应
+  工具。PowerShell wrapper 会把 cmdlet 错误和 native `$LASTEXITCODE` 传播为进程退出码，避免
+  明显失败被展示为成功
+- session exec 的用户 Esc 只中断当前轮创建或轮询过的会话；整轮 timeout 不终止后台进程，
+  下一轮可先用 `roll__exec_list` 找回 session id，再用 `roll__exec_poll` 继续读取。显式取消、
+  timeout 与正常退出会分别展示，不能只凭脚本最后一行判断成功。`exec_list` 是当前
+  chat 进程内的有界近期集合，不是永久历史；`cleanup-failed` 会持续占用一个 session 名额，
+  直到用 `roll__exec_poll` 读取并确认该终态结果
 - pnpm 安装依赖遇路径过长报错时，开启系统长路径支持（`LongPathsEnabled=1`）
 
 ### 不需要做的事
@@ -63,7 +72,8 @@ stdio 分帧两端剥 `\r`、包管理器调用已有完整 cmd.exe 适配（`pa
 | Alt+. / Alt+, 调推理档 | 依赖 kitty 协议，Windows Terminal 不支持 | `/think`、`/effort` 命令 |
 | Shift+Enter 换行 | 无 kitty 时与 Enter 不可区分（会直接发送） | 用 Ctrl+J 换行 |
 | `roll agent stop` 优雅关闭 | Windows 无 SIGTERM，等于强杀（stop 时有提示） | 先 `roll browser stop` 关浏览器再停 agent |
-| `roll__exec_command` / `roll__exec_poll` | Windows 原生 session exec 尚未支持 | 使用 `roll__powershell` one-shot 并调大 `timeout_ms` |
+| session exec 的 root 先退出、后代继续持有 stdio | root PID 已可能被系统复用，Roll 不会再用旧 PID 调 `taskkill /T`；会话保守标为 `cleanup-failed`，不伪报后代已清理 | 让脚本 root 等待自己启动的子进程结束；需保证这类后代必杀时需未来引入 Windows Job Object |
+| session exec 跨 `roll chat` 进程重启恢复 | 会话仅存在于当前长驻进程，重启后不能重新附着旧 OS 进程 | 保持同一 chat 进程运行，或重新执行脚本 |
 
 ## 编码问题的成因模型
 
@@ -129,7 +139,7 @@ Chat 模式要点：
 | 🟠 | `agents.json` 非原子直写 + 解析失败静默清空 | `registry/store.ts` | ✅ 已修复：临时文件 + rename 原子写 |
 | 🟠 | ink spinner 硬编码 braille 无降级 | `cli/chat/ink/spinner.ts` | ✅ 已修复：`is-unicode-supported` 降级 ASCII |
 | 🟠 | 文档/skill 单引号 JSON 示例在 cmd/PowerShell 5.1 失败 | roll-core skill | ✅ 已修复：补 Windows 引用规范（推荐 `--input-file`） |
-| 🟠 | `roll chat` 内建 shell 仅支持 POSIX，Windows 无原生命令执行 | runtime shell tool | ✅ 已修复：PowerShell 7+ 注册 `roll__powershell` one-shot；不启用 detached；timeout/abort 走 `taskkill /T /F`；session exec 仍暂不支持 |
+| 🟠 | `roll chat` 内建 shell 仅支持 POSIX，Windows 无原生命令执行 | runtime shell tool | ✅ 已修复：PowerShell 7+ 注册 one-shot 与 session exec；取消和清理走 `taskkill /T /F`；命令分类仍保守为 unknown |
 | 🟠 | Shift+Tab / Alt+. / Shift+Enter 键盘链路 | chat TUI | 🔬 需实测（终端 × Node 版本矩阵） |
 | 🟡 | `${env}` 替换大小写敏感（`Path` vs `PATH`） | `loader.ts` | 📋 待办（低优先级） |
 | 🟡 | `unlinkSync` 删被占用 PID/日志文件抛 EPERM 无兜底 | `process-manager.ts` | 📋 待办 |
@@ -147,4 +157,5 @@ LLM HTTP 与 MCP JSON 全程 UTF-8；`--json` stdout 无 ANSI 混入；npm bin s
 2. Python stdio agent 中文往返（验证 `PYTHONUTF8` 注入效果）
 3. 托管生命周期：start 黑框、日志句柄占用、stop 后资源残留
 4. TUI 渲染：三种终端下边框/emoji/spinner 与 `displayWidth` 计算宽度的偏差
-5. 扩展 `windows-latest` job：当前已覆盖 PowerShell one-shot；下一步补终端 TUI 与托管 agent 生命周期 smoke
+5. `windows-latest` 已覆盖 PowerShell one-shot、中文增量输出、session poll/退出、进程树取消、
+   turn timeout 恢复与容量回收；下一步补终端 TUI 与托管 agent 生命周期 smoke

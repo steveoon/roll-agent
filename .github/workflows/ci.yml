@@ -54,6 +54,7 @@ jobs:
 
   windows-shell-smoke:
     runs-on: windows-latest
+    timeout-minutes: 15
     permissions:
       contents: read
 
@@ -89,6 +90,7 @@ jobs:
           node --experimental-strip-types --experimental-sqlite --test
           packages/runtime/src/bash/profile.test.ts
           packages/runtime/src/bash/powershell-smoke.test.ts
+          packages/runtime/src/bash/powershell-session-smoke.test.ts
           packages/runtime/src/bash/format-result.test.ts
           packages/runtime/src/tool-bridge/bash-tool.test.ts
           packages/runtime/src/tool-bridge/session-exec-tool.test.ts

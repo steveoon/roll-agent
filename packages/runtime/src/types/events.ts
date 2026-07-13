@@ -85,6 +85,7 @@ export type SessionEvent =
       readonly type: "turn-cancelled";
       readonly reason: SessionCancellationReason;
       readonly message: string;
+      readonly execSessionIds?: readonly number[];
     }
   | { readonly type: "error"; readonly stage: SessionEventStage; readonly message: string };
 

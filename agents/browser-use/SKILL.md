@@ -17,6 +17,7 @@ metadata:
 - 多账号/多 profile 场景下，Roll 会从 `browser.instances` 注入 `BROWSER_INSTANCES_JSON`；所有 browser-use tool 都支持可选 `browserInstance` 输入，用于选择目标 `profile/userDataDir + cdpPort + sessionsDir`。未传时按 `browser.defaultInstance`，再按单实例自动选择；多实例且无默认值时会返回 `needs_input`。
 - 多个 `managed-cdp` 实例首次启动时会自动把 Chrome profile 展示名设为实例 ID，并按声明顺序分配 profile 颜色和自适应平铺窗口：2–3 个实例横向并列并撑满桌面可用高度；4 个实例 2×2 铺满屏幕；5 个及以上按「最多 4 列、每行撑满宽度」均衡排列（5→3+2、6→3+3、8→4+4、10→4+3+3）。macOS 使用只读 `system_profiler SPDisplaysDataType` 探测逻辑分辨率；Windows 使用只读 PowerShell/.NET `PrimaryScreen.WorkingArea` 探测扣除任务栏后的工作区；探测不到时回退默认工作区；也可通过 `ROLL_BROWSER_WORK_AREA=x,y,width,height` 覆盖。需要固定展示时在实例上配置 `profile-name` / `profile-color` / `window-bounds`。
 - 浏览器实例采用 **lazy start**：agent 启动不会立刻拉起全部 Chrome，首次访问某个 `browserInstance` 时才启动对应 profile/CDP runtime。
+- Roll 启动的 `managed-cdp` Chrome 默认关闭后台定时器节流、occluded-window backgrounding 和 renderer backgrounding，避免窗口被完全遮挡或切换到其他 macOS Space 时触发 Chromium 后台降级；该行为需重启对应 browser instance 后生效，不影响 `remote-cdp`、`existing-session` 或其他手动启动的 Chrome。
 - 同一 `browserInstance` 的页面操作工具在服务端**互斥串行**：并发调用会排队依次执行，并行不提速，还会挤占每次调用的超时预算（默认 60s，含排队时间）；不同实例互不影响。`browser_status`、`list_pages`、`zhipin_diagnose_browser_state`、`attach_browser_session` 是 page-free/只读诊断工具，不排队，实例被长操作占用时仍可用于排障。排队期间客户端已取消/超时的请求出队时会被直接丢弃并返回 `cancelled_while_queued`，不会落地执行；因超时而重试前，先用读工具（如 `zhipin_read_messages`、`browser_status`）验证原操作是否已生效。
 - 实例级关闭使用 `roll browser stop <browserInstance...>` 或 `roll browser stop --all`；它只关闭当前 `browser-use-agent` 托管的浏览器 runtime，不停止 agent 服务进程，也不删除 `userDataDir` / `sessionsDir` 数据。停止整个服务仍使用 `roll agent stop browser-use-agent`。
 - `browser_status` 是无副作用诊断工具；它不会为了查询状态而启动尚未启动的 Chrome。需要启动某个实例时，调用带 `browserInstance` 的业务工具，例如 `open_platform({ browserInstance, platform:"zhipin" })`。
@@ -212,7 +213,7 @@ click_ref(@eN) 或 type_ref(@eN, text, clear?)
 | Tool | Backend | 说明 |
 | --- | --- | --- |
 | `zhipin_read_messages(limit?, onlyUnread?, sortBy?, autoScroll?, maxScrolls?)` | native CDP | 读取消息列表；默认 `autoScroll=true`，按 `conversationId` 去重。 |
-| `zhipin_open_chat_page(forceReload?, browserActionApproval?)` | native CDP | 点击左侧导航切回「沟通」；`forceReload:true` 时只对当前沟通页执行 `Page.reload` 做长跑恢复，返回 `usedReload`；若实时页面已不是沟通页，会跳过 reload 并返回 `reloadSkippedReason`。 |
+| `zhipin_open_chat_page(forceReload?, expectedConversationId?, browserActionApproval?)` | native CDP | 点击左侧导航切回「沟通」；`forceReload:true` 时只对当前沟通页执行 `Page.reload`，先等待 document swap，再等待实际聊天列表 DOM 就绪；传 `expectedConversationId` 时会按需滚动列表并等待该会话行恢复。若实时页面已不是沟通页，会跳过 reload 并返回 `reloadSkippedReason`。 |
 | `zhipin_open_chat(conversationId?, candidateName?, index?, preferUnread?)` | native CDP | 打开目标聊天；匹配优先级为 `conversationId` > `candidateName` > `index`。 |
 | `zhipin_get_candidate_info(conversationId?, candidateName?, index?, maxMessages?)` | native CDP | 提取候选人资料、聊天记录、`conversationId`、`candidateId` 和页面职位信号；候选人顶部资料会把 `25年应届生` / `28年应届生` 归一为 `应届生`，避免误当工作年限；成功后自动触发 Reply Authority 回复上下文预热（fire-and-forget，失败静默）。输出中的 `locationSignals` 已废弃，恒为空数组。 |
 | `zhipin_generate_reply_preview(conversationId?, candidateName?, index?, maxMessages?, reasoning?)` | native CDP | 读取聊天上下文并透传给 Reply Authority SSE 流式生成回复；地点证据由服务端 turn_planning 合并提取并经 `location.resolved` 事件回显；浏览器内展示阶段、临时草稿与时延摘要（含预热命中标记）；若服务端返回双稿且 rubric hash 匹配，会额外返回中性的 `replyVariantSelection.options[].option`（`option_1`/`option_2`）和文本，不返回 `signedEnvelope` / `draft` / `revised`；若 Reply Authority 拒签/超时/服务端异常，失败输出带 `errorKind:"rejected"|"timeout"|"server_error"`。 |
@@ -304,7 +305,7 @@ click_ref(@eN) 或 type_ref(@eN, text, clear?)
 33. BOSS 已有专用工具能表达业务意图时，不要为了“看见按钮”而绕开专用工具改用 `click_ref` / `type_ref`。
 34. 对 BOSS 未建模按钮，例如新出现的“交换电话”，可以先用 `browser_snapshot` 找到对应 `@eN`，再 `click_ref`；弹窗确认类二次动作必须重新 snapshot 后再点击。
 35. 长跑同一 BOSS tab 出现「选中态丢失 / 列表错乱 / 依赖当前选中聊天的工具失败」时，做 periodic recovery 的边界：
-    - 优先 `zhipin_open_chat_page({ forceReload: true })`（或通用 `browser_reload_active_tab`）：等价手动 F5，清空当前 document 的 DOM 与页面内 SPA 状态，保留 Chrome 窗口与 profile 登录态；reload 后所有 `@eN` / `candidateRef` 失效，必须重新 snapshot / 读列表。
+    - 优先 `zhipin_open_chat_page({ forceReload: true })`（或通用 `browser_reload_active_tab`）：等价手动 F5，清空当前 document 的 DOM 与页面内 SPA 状态，保留 Chrome 窗口与 profile 登录态；BOSS 专用工具会在 document swap 后继续等待实际聊天列表 DOM。reload 后所有 `@eN` / `candidateRef` 失效，必须重新 snapshot / 读列表，并由编排器恢复页面筛选状态。
     - 普通 `zhipin_open_chat_page()`（不带 forceReload）在已处于沟通页时只返回 `alreadyOnChat`，**不会**卸载 document，无法清状态。
     - `roll browser stop` 才能回收 renderer 进程内存，但会关闭浏览器窗口；reload 只清 document 级状态，**不保证** renderer 100% 把内存归还 OS，杀进程仍由 `roll browser stop` 负责。
 

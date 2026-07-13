@@ -55,19 +55,24 @@ export class HeadTailBuffer {
     return this.head.length > 0 || this.tailChunks.length > 0;
   }
 
-  drain(maxChars: number): DrainResult {
+  snapshot(maxChars: number): DrainResult {
     const tail = this.tailChunks.join("");
     const carriedOmitted = this.omittedMiddle;
     const raw =
       carriedOmitted > 0
         ? `${this.head}\n…${String(carriedOmitted)} chars truncated…\n${tail}`
         : this.head + tail;
+
+    const cut = truncateMiddle(raw, maxChars);
+    return { text: cut.text, omitted: carriedOmitted + cut.removed };
+  }
+
+  drain(maxChars: number): DrainResult {
+    const result = this.snapshot(maxChars);
     this.head = "";
     this.tailChunks = [];
     this.tailLength = 0;
     this.omittedMiddle = 0;
-
-    const cut = truncateMiddle(raw, maxChars);
-    return { text: cut.text, omitted: carriedOmitted + cut.removed };
+    return result;
   }
 }

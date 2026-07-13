@@ -69,11 +69,18 @@ test("有 shellToolId 时注入 profile-specific shell hints", () => {
 test("有 sessionExecToolIds 时改教模型用 exec_command 跑长任务", () => {
   const prompt = buildChatSystemPrompt({
     bashToolId: "roll__bash",
-    sessionExecToolIds: { command: "roll__exec_command", poll: "roll__exec_poll" },
+    sessionExecToolIds: {
+      command: "roll__exec_command",
+      poll: "roll__exec_poll",
+      list: "roll__exec_list",
+    },
   });
   assert.ok(prompt.includes("roll__exec_command"));
   assert.ok(prompt.includes("roll__exec_poll"));
+  assert.ok(prompt.includes("roll__exec_list"));
   assert.ok(prompt.includes("session_id"));
+  assert.ok(prompt.includes("一轮因超时"));
+  assert.ok(prompt.includes("用户取消会中断本轮触达的会话"));
   assert.ok(!prompt.includes("调大 timeout_ms"));
 });
 

@@ -51,6 +51,7 @@ const RECOMMEND_LIST_SELECTOR = `${RECOMMEND_CARD_SELECTOR}, ${RECOMMEND_FALLBAC
 const ZHIPIN_RECOMMEND_URL_MARKERS = ["/web/chat/recommend"] as const;
 const NATIVE_SELECTOR_POLL_MS = 250;
 const NATIVE_SCROLL_PAUSE_MS = 300;
+const NATIVE_EXPLICIT_CHAT_MAX_SCROLLS = 12;
 const NATIVE_RECOMMEND_SCROLL_SETTLE_MS = 900;
 const NATIVE_RECOMMEND_BOUNDARY_SETTLE_MS = 1_200;
 const NATIVE_RECOMMEND_BOUNDARY_LOAD_RETRIES = 4;
@@ -65,6 +66,19 @@ const NATIVE_AGE_DRAG_ATTEMPTS = 10;
 const NATIVE_AGE_HANDLE_MIN_GAP_RATIO = 0.015;
 const NATIVE_CLICKABLE_OPTION_SELECTOR =
   "button, a, label, li, span, div, [role='button'], [role='radio']";
+const NATIVE_PAGE_VISIBILITY_STATES = ["visible", "hidden", "prerender", "unloaded"] as const;
+
+type KnownNativePageVisibilityState = (typeof NATIVE_PAGE_VISIBILITY_STATES)[number];
+type NativePageVisibilityState = KnownNativePageVisibilityState | "unknown";
+
+type NativeChatReadinessFailure = {
+  readonly ready: false;
+  readonly visibilityState: NativePageVisibilityState;
+  readonly selectedConversationId: string;
+  readonly activePanelCandidateName: string;
+};
+
+type NativeChatReadiness = { readonly ready: true } | NativeChatReadinessFailure;
 
 type NativeScrollResult = {
   readonly ok: boolean;
@@ -925,6 +939,29 @@ function getRecommendCandidateKey(candidate: NativeRecommendCandidateCard): stri
   ].join("|");
 }
 
+function isKnownNativePageVisibilityState(value: unknown): value is KnownNativePageVisibilityState {
+  return NATIVE_PAGE_VISIBILITY_STATES.some((state) => state === value);
+}
+
+function formatNativeChatSyncError(
+  selected: ChatListItem,
+  readiness: NativeChatReadinessFailure,
+): string {
+  const expectedTarget = selected.name || selected.conversationId;
+  const diagnostics = [
+    `document.visibilityState=${readiness.visibilityState}`,
+    `expectedConversationId=${selected.conversationId || "<empty>"}`,
+    `selectedConversationId=${readiness.selectedConversationId || "<none>"}`,
+    `activePanelCandidateName=${readiness.activePanelCandidateName || "<none>"}`,
+  ].join(", ");
+  const hiddenHint =
+    readiness.visibilityState === "hidden"
+      ? "；页面当前不可见，可能已最小化、被完全遮挡或位于其他 macOS Space"
+      : "";
+
+  return `打开候选人聊天后，右侧会话未同步切换到 ${expectedTarget}；${diagnostics}${hiddenHint}`;
+}
+
 function resolveSelectedNativePage(
   ctxManager: BrowserContextManager,
   pages: ReadonlyArray<BrowserInspectablePage>,
@@ -1080,6 +1117,91 @@ export class ZhipinNativePagePort {
       await delay(NATIVE_SELECTOR_POLL_MS);
     }
     return false;
+  }
+
+  async waitForChatListReady(
+    options: { readonly expectedConversationId?: string } = {},
+    timeoutMs = 10_000,
+  ): Promise<boolean> {
+    const startedAt = Date.now();
+    const expectedConversationId = options.expectedConversationId;
+    const isExpectedConversationVisible = async (): Promise<boolean> => {
+      if (expectedConversationId === undefined) {
+        return false;
+      }
+      const candidates = await this.readVisibleChatCandidates().catch(() => []);
+      return candidates.some((candidate) => candidate.conversationId === expectedConversationId);
+    };
+
+    if (!(await this.waitForSelector(CHAT_LIST_SELECTOR, timeoutMs))) {
+      return await isExpectedConversationVisible();
+    }
+
+    if (expectedConversationId === undefined) {
+      return true;
+    }
+
+    // The list container can appear before the virtualized rows/data have hydrated.
+    while (Date.now() - startedAt < timeoutMs) {
+      const candidates = await this.readVisibleChatCandidates().catch(() => []);
+      if (candidates.some((candidate) => candidate.conversationId === expectedConversationId)) {
+        return true;
+      }
+      if (candidates.length > 0) {
+        break;
+      }
+      await delay(NATIVE_SELECTOR_POLL_MS);
+    }
+
+    // A reload may preserve a virtual-list offset. Reset toward the top, then scan downward so an
+    // expected conversation outside the initial viewport is still treated as ready.
+    for (
+      let attempt = 0;
+      attempt < NATIVE_EXPLICIT_CHAT_MAX_SCROLLS && Date.now() - startedAt < timeoutMs;
+      attempt += 1
+    ) {
+      const scrollResult = await this.scrollChatList("up").catch(() => undefined);
+      if (
+        scrollResult === undefined ||
+        !scrollResult.ok ||
+        scrollResult.after >= scrollResult.before
+      ) {
+        break;
+      }
+      await delay(NATIVE_SCROLL_PAUSE_MS);
+      if (await isExpectedConversationVisible()) {
+        return true;
+      }
+      if (scrollResult.after <= 1) {
+        break;
+      }
+    }
+
+    for (
+      let attempt = 0;
+      attempt <= NATIVE_EXPLICIT_CHAT_MAX_SCROLLS && Date.now() - startedAt < timeoutMs;
+      attempt += 1
+    ) {
+      if (await isExpectedConversationVisible()) {
+        return true;
+      }
+      if (attempt >= NATIVE_EXPLICIT_CHAT_MAX_SCROLLS) {
+        break;
+      }
+      const scrollResult = await this.scrollChatList("down").catch(() => undefined);
+      if (
+        scrollResult === undefined ||
+        !scrollResult.ok ||
+        scrollResult.after <= scrollResult.before
+      ) {
+        break;
+      }
+      await delay(NATIVE_SCROLL_PAUSE_MS);
+    }
+    // The target can hydrate exactly as the shared deadline expires. Take one final snapshot so a
+    // visible conversation is not reported as a reload failure merely because no phase had budget
+    // left for another loop iteration.
+    return await isExpectedConversationVisible();
   }
 
   async isRecommendSurfaceOpen(): Promise<boolean> {
@@ -1904,7 +2026,10 @@ export class ZhipinNativePagePort {
       options.conversationId !== undefined ||
       options.candidateName !== undefined ||
       options.index !== undefined;
-    const maxScrolls = Math.max(0, Math.floor(options.maxScrolls ?? (hasExplicitTarget ? 12 : 4)));
+    const maxScrolls = Math.max(
+      0,
+      Math.floor(options.maxScrolls ?? (hasExplicitTarget ? NATIVE_EXPLICIT_CHAT_MAX_SCROLLS : 4)),
+    );
 
     const openSelected = async (selected: ChatListItem): Promise<OpenChatResult> => {
       const clicked = await this.clickChatCandidate(selected, {
@@ -1918,8 +2043,8 @@ export class ZhipinNativePagePort {
         };
       }
       await delay(NATIVE_CLICK_SETTLE_MS);
-      let ready = await this.waitForNativeChatReady(selected);
-      if (!ready) {
+      let readiness = await this.waitForNativeChatReady(selected);
+      if (!readiness.ready) {
         const retried = await this.clickChatCandidate(selected, {
           ...(options.motionObserver !== undefined
             ? { motionObserver: options.motionObserver }
@@ -1927,14 +2052,14 @@ export class ZhipinNativePagePort {
         });
         if (retried) {
           await delay(NATIVE_CLICK_SETTLE_MS);
-          ready = await this.waitForNativeChatReady(selected);
+          readiness = await this.waitForNativeChatReady(selected);
         }
       }
-      if (!ready) {
+      if (!readiness.ready) {
         return {
           ...selected,
           found: false,
-          error: `打开候选人聊天后，右侧会话未同步切换到 ${selected.name || selected.conversationId}`,
+          error: formatNativeChatSyncError(selected, readiness),
         };
       }
       return { ...selected, found: true };
@@ -4329,7 +4454,7 @@ export class ZhipinNativePagePort {
   private async waitForNativeChatReady(
     selected: ChatListItem,
     timeoutMs = 6_000,
-  ): Promise<boolean> {
+  ): Promise<NativeChatReadiness> {
     const startedAt = Date.now();
     while (Date.now() - startedAt < timeoutMs) {
       const selectedTarget = await this.readSelectedChatTarget().catch(() => null);
@@ -4346,12 +4471,24 @@ export class ZhipinNativePagePort {
         (activePanel !== null && namesCompatible(selected.name, activePanel.candidateName));
 
       if (selectedMatches && panelMatches) {
-        return true;
+        return { ready: true };
       }
       await delay(NATIVE_SELECTOR_POLL_MS);
     }
 
-    return false;
+    const [visibilityStateValue, selectedTarget, activePanel] = await Promise.all([
+      this.evaluateJson<unknown>("document.visibilityState").catch(() => undefined),
+      this.readSelectedChatTarget().catch(() => null),
+      this.readActiveChatPanel().catch(() => null),
+    ]);
+    return {
+      ready: false,
+      visibilityState: isKnownNativePageVisibilityState(visibilityStateValue)
+        ? visibilityStateValue
+        : "unknown",
+      selectedConversationId: selectedTarget?.conversationId ?? "",
+      activePanelCandidateName: activePanel?.candidateName ?? "",
+    };
   }
 
   private async clickChatCandidate(

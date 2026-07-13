@@ -139,6 +139,188 @@ describe("ZhipinNativePagePort", () => {
     }
   });
 
+  it("waits for delayed native chat-list DOM readiness", async (t) => {
+    t.mock.timers.enable({ apis: ["Date", "setTimeout"], now: 0 });
+    let readinessChecks = 0;
+    const port = createPort(async (expression) => {
+      if (expression.startsWith("document.querySelector(")) {
+        return true;
+      }
+      if (expression.includes("items.map((item, idx)")) {
+        readinessChecks += 1;
+        return readinessChecks >= 3
+          ? [
+              {
+                conversationId: "conversation-1",
+                candidateId: "geek-1",
+                name: "李四",
+                index: 0,
+                position: "后端工程师",
+                hasUnread: true,
+                unreadCount: 1,
+                lastMessageTime: "刚刚",
+                messagePreview: "方便聊聊吗",
+              },
+            ]
+          : [];
+      }
+      return false;
+    });
+
+    const readyPromise = port.waitForChatListReady(
+      { expectedConversationId: "conversation-1" },
+      1_000,
+    );
+    for (let step = 0; step < 4; step += 1) {
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      t.mock.timers.tick(250);
+    }
+
+    assert.equal(await readyPromise, true);
+    assert.equal(readinessChecks, 3);
+  });
+
+  it("takes a final chat-list snapshot when hydration reaches the timeout boundary", async (t) => {
+    t.mock.timers.enable({ apis: ["Date", "setTimeout"], now: 0 });
+    let readinessChecks = 0;
+    const port = createPort(async (expression) => {
+      if (expression.startsWith("document.querySelector(")) {
+        return true;
+      }
+      if (expression.includes("items.map((item, idx)")) {
+        readinessChecks += 1;
+        return readinessChecks >= 2
+          ? [
+              {
+                conversationId: "conversation-at-deadline",
+                candidateId: "geek-at-deadline",
+                name: "边界候选人",
+                index: 0,
+                position: "后端工程师",
+                hasUnread: true,
+                unreadCount: 1,
+                lastMessageTime: "刚刚",
+                messagePreview: "方便聊聊吗",
+              },
+            ]
+          : [];
+      }
+      return false;
+    });
+
+    const readyPromise = port.waitForChatListReady(
+      { expectedConversationId: "conversation-at-deadline" },
+      250,
+    );
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    t.mock.timers.tick(250);
+
+    assert.equal(await readyPromise, true);
+    assert.equal(readinessChecks, 2);
+  });
+
+  it("accepts a visible target after the chat-list selector wait reaches its deadline", async (t) => {
+    t.mock.timers.enable({ apis: ["Date", "setTimeout"], now: 0 });
+    let candidateReads = 0;
+    const port = createPort(async (expression) => {
+      if (expression.startsWith("document.querySelector(")) {
+        return false;
+      }
+      if (expression.includes("items.map((item, idx)")) {
+        candidateReads += 1;
+        return [
+          {
+            conversationId: "conversation-after-selector-timeout",
+            candidateId: "geek-after-selector-timeout",
+            name: "边界候选人",
+            index: 0,
+            position: "后端工程师",
+            hasUnread: true,
+            unreadCount: 1,
+            lastMessageTime: "刚刚",
+            messagePreview: "方便聊聊吗",
+          },
+        ];
+      }
+      return false;
+    });
+
+    const readyPromise = port.waitForChatListReady(
+      { expectedConversationId: "conversation-after-selector-timeout" },
+      250,
+    );
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    t.mock.timers.tick(250);
+
+    assert.equal(await readyPromise, true);
+    assert.equal(candidateReads, 1);
+  });
+
+  it("scrolls the native chat list while waiting for an offscreen conversation", async () => {
+    let scrollTop = 0;
+    const maxScrollTop = 520;
+    const mouseInputs: NativeCdpMouseEventInput[] = [];
+    const port = createPort(
+      async (expression) => {
+        if (expression.startsWith("document.querySelector(")) {
+          return true;
+        }
+        if (
+          expression.includes('.user-list.b-scroll-stable [role=\\"listitem\\"]') &&
+          !expression.includes('const surface = "chat-list"')
+        ) {
+          return [
+            {
+              conversationId: scrollTop > 0 ? "conversation-target" : "conversation-top",
+              candidateId: scrollTop > 0 ? "geek-target" : "geek-top",
+              name: scrollTop > 0 ? "目标候选人" : "首屏候选人",
+              index: 0,
+              position: "后端工程师",
+              hasUnread: true,
+              unreadCount: 1,
+              lastMessageTime: "刚刚",
+              messagePreview: "方便聊聊吗",
+            },
+          ];
+        }
+        if (expression.includes("nativeWheelTarget")) {
+          return { found: true, x: 96, y: 240 };
+        }
+        if (expression.includes('const surface = "chat-list"')) {
+          return {
+            containerFound: true,
+            containerLabel: "user-list.b-scroll-stable",
+            scrollTop,
+            scrollHeight: 1_040,
+            clientHeight: 520,
+            itemCount: 20,
+            atStart: scrollTop <= 0,
+            atEnd: scrollTop >= maxScrollTop,
+          };
+        }
+        return false;
+      },
+      {
+        async dispatchMouseEvent(input) {
+          mouseInputs.push(input);
+          if (input.type !== "mouseWheel") return;
+          scrollTop = Math.max(0, Math.min(maxScrollTop, scrollTop + (input.deltaY ?? 0)));
+        },
+      },
+    );
+
+    const ready = await port.waitForChatListReady(
+      { expectedConversationId: "conversation-target" },
+      2_000,
+    );
+
+    assert.equal(ready, true);
+    assert.equal(
+      mouseInputs.some((input) => input.type === "mouseWheel" && (input.deltaY ?? 0) > 0),
+      true,
+    );
+  });
+
   it("reads chat candidates from the native chat item DOM expression", async () => {
     const port = createPort(async (expression) => {
       assert.match(expression, /\.user-list\.b-scroll-stable \[role=\\"listitem\\"\], \.geek-item/);
@@ -232,6 +414,68 @@ describe("ZhipinNativePagePort", () => {
     assert.equal(mouseInputs.at(-1)?.type, "mouseReleased");
     assert.equal(mouseInputs.at(-1)?.x, 88);
     assert.equal(mouseInputs.at(-1)?.y, 216);
+  });
+
+  it("diagnoses hidden-page state when the native chat panel does not synchronize", async (t) => {
+    t.mock.timers.enable({ apis: ["Date", "setTimeout"], now: 0 });
+    let clickCount = 0;
+    const port = createPort(async (expression) => {
+      if (expression.includes("location.href.includes")) {
+        return true;
+      }
+      if (expression.includes("items.map((item, idx)")) {
+        return [
+          {
+            conversationId: "conversation-1",
+            candidateId: "geek-1",
+            name: "李四",
+            index: 0,
+            position: "后端工程师",
+            hasUnread: true,
+            unreadCount: 1,
+            lastMessageTime: "刚刚",
+            messagePreview: "方便聊聊吗",
+          },
+        ];
+      }
+      if (expression.includes("const expected =")) {
+        clickCount += 1;
+        return { found: true, x: 88, y: 216 };
+      }
+      if (expression.includes('const selected = document.querySelector(".geek-item.selected")')) {
+        return {
+          conversationId: "conversation-stale",
+          candidateId: "geek-stale",
+          candidateName: "王五",
+        };
+      }
+      if (expression.includes('const rootSelectors = [".chat-conversation"')) {
+        return { candidateName: "王五" };
+      }
+      if (expression === "document.visibilityState") {
+        return "hidden";
+      }
+      return false;
+    });
+
+    const resultPromise = port.openChat({
+      conversationId: "conversation-1",
+      candidateName: undefined,
+      index: undefined,
+    });
+    for (let step = 0; step < 80; step += 1) {
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      t.mock.timers.tick(250);
+    }
+    const result = await resultPromise;
+
+    assert.equal(result.found, false);
+    assert.equal(clickCount, 2);
+    assert.match(result.error ?? "", /document\.visibilityState=hidden/);
+    assert.match(result.error ?? "", /expectedConversationId=conversation-1/);
+    assert.match(result.error ?? "", /selectedConversationId=conversation-stale/);
+    assert.match(result.error ?? "", /activePanelCandidateName=王五/);
+    assert.match(result.error ?? "", /其他 macOS Space/);
   });
 
   it("resets to the chat-list top before scanning for an explicit chat target", async () => {

@@ -99,7 +99,7 @@ test("resolveShellProfile 在 win32 + pwsh 7 返回 PowerShell profile", () => {
   }
   assert.equal(result.profile.id, "powershell");
   assert.equal(result.profile.toolName, "powershell");
-  assert.equal(result.profile.supportsSessionExec, false);
+  assert.equal(result.profile.supportsSessionExec, true);
   assert.equal(result.profile.supportsSafeCommandClassification, false);
   assert.equal(result.profile.waitForTreeKillAfterRootExit, true);
   assert.equal(result.profile.classify("Get-ChildItem", "/repo"), "unknown");
