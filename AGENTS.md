@@ -258,7 +258,7 @@ pnpm release-github-releases
 
 | 层级 | 必查点 | 代码/配置位置 | 失败处理 |
 |------|------|------|------|
-| 声明层 | 发布包必须属于当前 npm scope，且只覆盖 `@roll-agent/core`、`@roll-agent/sdk`、`@roll-agent/browser`、`@roll-agent/reply-authority-client`、`@roll-agent/browser-use-agent`、`@roll-agent/smart-reply-agent` | `scripts/verify-published-packages.mjs` | 不把未知包加入发布清单；先明确包边界 |
+| 声明层 | 发布包必须属于当前 npm scope，且只覆盖 `@roll-agent/core`、`@roll-agent/sdk`、`@roll-agent/runtime`、`@roll-agent/browser`、`@roll-agent/reply-authority-client`、`@roll-agent/browser-use-agent`、`@roll-agent/smart-reply-agent` | `scripts/verify-published-packages.mjs` | 不把未知包加入发布清单；先明确包边界 |
 | CI 权限层 | GitHub Actions 必须使用 full SHA pin，不能使用 tag；PR CI 和 release workflow 都要满足仓库级 SHA pin 规则 | `.github/workflows/ci.yml`、`.github/workflows/release.yml` | CI 会在下载 action 前失败；先 pin SHA 再重跑 |
 | CI 权限层 | workflow 顶层保持 `permissions: {}`；`quality` 只给 `contents: read`；`release` 只给 `contents: write` 和 `pull-requests: write` | `.github/workflows/release.yml` | 不扩大默认 `GITHUB_TOKEN` 权限 |
 | CI 权限层 | 本轮发布继续使用 `NPM_TOKEN`；除非正式迁移 Trusted Publishing，否则不能加回 `id-token: write` | `.github/workflows/release.yml` | 需要 Trusted Publishing 时单独设计迁移方案 |

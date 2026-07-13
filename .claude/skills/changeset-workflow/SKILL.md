@@ -9,6 +9,7 @@ description: Guide through the Changesets release workflow for this monorepo. Co
 |---|---|
 | `@roll-agent/core` | `packages/core` |
 | `@roll-agent/sdk` | `packages/sdk` |
+| `@roll-agent/runtime` | `packages/runtime` |
 | `@roll-agent/browser` | `packages/browser` |
 | `@roll-agent/reply-authority-client` | `packages/reply-authority-client` |
 | `@roll-agent/browser-use-agent` | `agents/browser-use` |
