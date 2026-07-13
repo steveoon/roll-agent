@@ -180,6 +180,82 @@ describe("ZhipinNativePagePort", () => {
     assert.equal(readinessChecks, 3);
   });
 
+  it("takes a final chat-list snapshot when hydration reaches the timeout boundary", async (t) => {
+    t.mock.timers.enable({ apis: ["Date", "setTimeout"], now: 0 });
+    let readinessChecks = 0;
+    const port = createPort(async (expression) => {
+      if (expression.startsWith("document.querySelector(")) {
+        return true;
+      }
+      if (expression.includes("items.map((item, idx)")) {
+        readinessChecks += 1;
+        return readinessChecks >= 2
+          ? [
+              {
+                conversationId: "conversation-at-deadline",
+                candidateId: "geek-at-deadline",
+                name: "边界候选人",
+                index: 0,
+                position: "后端工程师",
+                hasUnread: true,
+                unreadCount: 1,
+                lastMessageTime: "刚刚",
+                messagePreview: "方便聊聊吗",
+              },
+            ]
+          : [];
+      }
+      return false;
+    });
+
+    const readyPromise = port.waitForChatListReady(
+      { expectedConversationId: "conversation-at-deadline" },
+      250,
+    );
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    t.mock.timers.tick(250);
+
+    assert.equal(await readyPromise, true);
+    assert.equal(readinessChecks, 2);
+  });
+
+  it("accepts a visible target after the chat-list selector wait reaches its deadline", async (t) => {
+    t.mock.timers.enable({ apis: ["Date", "setTimeout"], now: 0 });
+    let candidateReads = 0;
+    const port = createPort(async (expression) => {
+      if (expression.startsWith("document.querySelector(")) {
+        return false;
+      }
+      if (expression.includes("items.map((item, idx)")) {
+        candidateReads += 1;
+        return [
+          {
+            conversationId: "conversation-after-selector-timeout",
+            candidateId: "geek-after-selector-timeout",
+            name: "边界候选人",
+            index: 0,
+            position: "后端工程师",
+            hasUnread: true,
+            unreadCount: 1,
+            lastMessageTime: "刚刚",
+            messagePreview: "方便聊聊吗",
+          },
+        ];
+      }
+      return false;
+    });
+
+    const readyPromise = port.waitForChatListReady(
+      { expectedConversationId: "conversation-after-selector-timeout" },
+      250,
+    );
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    t.mock.timers.tick(250);
+
+    assert.equal(await readyPromise, true);
+    assert.equal(candidateReads, 1);
+  });
+
   it("scrolls the native chat list while waiting for an offscreen conversation", async () => {
     let scrollTop = 0;
     const maxScrollTop = 520;

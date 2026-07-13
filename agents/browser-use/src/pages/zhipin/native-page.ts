@@ -1124,19 +1124,22 @@ export class ZhipinNativePagePort {
     timeoutMs = 10_000,
   ): Promise<boolean> {
     const startedAt = Date.now();
-    if (!(await this.waitForSelector(CHAT_LIST_SELECTOR, timeoutMs))) {
-      return false;
-    }
-
     const expectedConversationId = options.expectedConversationId;
-    if (expectedConversationId === undefined) {
-      return true;
-    }
-
     const isExpectedConversationVisible = async (): Promise<boolean> => {
+      if (expectedConversationId === undefined) {
+        return false;
+      }
       const candidates = await this.readVisibleChatCandidates().catch(() => []);
       return candidates.some((candidate) => candidate.conversationId === expectedConversationId);
     };
+
+    if (!(await this.waitForSelector(CHAT_LIST_SELECTOR, timeoutMs))) {
+      return await isExpectedConversationVisible();
+    }
+
+    if (expectedConversationId === undefined) {
+      return true;
+    }
 
     // The list container can appear before the virtualized rows/data have hydrated.
     while (Date.now() - startedAt < timeoutMs) {
@@ -1195,7 +1198,10 @@ export class ZhipinNativePagePort {
       }
       await delay(NATIVE_SCROLL_PAUSE_MS);
     }
-    return false;
+    // The target can hydrate exactly as the shared deadline expires. Take one final snapshot so a
+    // visible conversation is not reported as a reload failure merely because no phase had budget
+    // left for another loop iteration.
+    return await isExpectedConversationVisible();
   }
 
   async isRecommendSurfaceOpen(): Promise<boolean> {
