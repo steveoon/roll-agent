@@ -1,12 +1,67 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
+import { z } from "zod";
 import {
+  CONFIG_KEY_CODEC,
+  buildKeyCodecNode,
   camelToKebab,
   decodeFromYaml,
   encodePathToYaml,
+  encodeToYaml,
   kebabToCamel,
   normalizeUserPath,
 } from "./key-codec.ts";
+import { rollConfigSchema } from "./schema.ts";
+
+describe("key-codec: schema derivation", () => {
+  it("derives every root configuration field from rollConfigSchema", () => {
+    assert.equal(CONFIG_KEY_CODEC.kind, "object");
+    assert.deepEqual(Object.keys(CONFIG_KEY_CODEC.fields), Object.keys(rollConfigSchema.shape));
+  });
+
+  it("supports wrapped records and array item object paths without another field list", () => {
+    const schema = z.object({
+      futureSection: z
+        .object({
+          items: z.array(z.object({ someField: z.string() })).default([]),
+          entries: z.record(z.string(), z.object({ nestedValue: z.number() })),
+        })
+        .optional(),
+    });
+    const codec = buildKeyCodecNode(schema);
+    const yamlValue = {
+      "future-section": {
+        items: [{ "some-field": "value" }],
+        entries: { "dynamic-key": { "nested-value": 1 } },
+      },
+    };
+    const canonicalValue = {
+      futureSection: {
+        items: [{ someField: "value" }],
+        entries: { "dynamic-key": { nestedValue: 1 } },
+      },
+    };
+
+    assert.deepEqual(decodeFromYaml(yamlValue, codec), canonicalValue);
+    assert.deepEqual(encodeToYaml(canonicalValue, codec), yamlValue);
+    assert.deepEqual(encodePathToYaml(["futureSection", "items", "0", "someField"], codec), [
+      "future-section",
+      "items",
+      "0",
+      "some-field",
+    ]);
+    assert.deepEqual(normalizeUserPath(["future-section", "items", "0", "some-field"], codec), [
+      "futureSection",
+      "items",
+      "0",
+      "someField",
+    ]);
+    assert.deepEqual(
+      encodePathToYaml(["futureSection", "entries", "dynamic-key", "nestedValue"], codec),
+      ["future-section", "entries", "dynamic-key", "nested-value"],
+    );
+  });
+});
 
 describe("key-codec: decodeFromYaml", () => {
   it("should convert kebab-case schema fields to camelCase", () => {
@@ -170,6 +225,84 @@ describe("key-codec: decodeFromYaml", () => {
   });
 });
 
+describe("key-codec: encodeToYaml", () => {
+  it("should encode schema keys and preserve every dynamic record key", () => {
+    const input = {
+      skills: { dirs: ["./skills"] },
+      runtime: {
+        turnTimeoutMs: 60_000,
+        approval: {
+          overrides: {
+            "roll.exec_command": "auto",
+          },
+        },
+      },
+      agents: {
+        env: {
+          "browser-use-agent": {
+            REPLY_AUTHORITY_BEARER_TOKEN: `\${REPLY_AUTHORITY_BEARER_TOKEN}`,
+          },
+        },
+      },
+      browser: {
+        instances: {
+          "boss-a": {
+            cdpPort: 9222,
+            userDataDir: "~/.roll-agent/browser/boss-a",
+            windowBounds: { width: 680, height: 1000 },
+          },
+        },
+      },
+    };
+
+    assert.deepEqual(encodeToYaml(input), {
+      skills: { dirs: ["./skills"] },
+      runtime: {
+        "turn-timeout-ms": 60_000,
+        approval: {
+          overrides: {
+            "roll.exec_command": "auto",
+          },
+        },
+      },
+      agents: {
+        env: {
+          "browser-use-agent": {
+            REPLY_AUTHORITY_BEARER_TOKEN: `\${REPLY_AUTHORITY_BEARER_TOKEN}`,
+          },
+        },
+      },
+      browser: {
+        instances: {
+          "boss-a": {
+            "cdp-port": 9222,
+            "user-data-dir": "~/.roll-agent/browser/boss-a",
+            "window-bounds": { width: 680, height: 1000 },
+          },
+        },
+      },
+    });
+  });
+
+  it("should round-trip supported configuration structures", () => {
+    const input = {
+      llm: {
+        defaultProvider: "openai",
+        defaultModel: "gpt-5.5",
+        providers: {
+          "custom-provider": {
+            apiKey: `\${CUSTOM_API_KEY}`,
+            baseUrl: "https://example.com/v1",
+          },
+        },
+      },
+      ask: { confirmThreshold: 0.6 },
+    };
+
+    assert.deepEqual(decodeFromYaml(encodeToYaml(input)), input);
+  });
+});
+
 describe("key-codec: encodePathToYaml", () => {
   it("should normalize schema object fields to kebab-case (kebab input)", () => {
     assert.deepEqual(encodePathToYaml(["llm", "default-provider"]), ["llm", "default-provider"]);
@@ -177,6 +310,19 @@ describe("key-codec: encodePathToYaml", () => {
 
   it("should normalize schema object fields to kebab-case (camel input)", () => {
     assert.deepEqual(encodePathToYaml(["llm", "defaultProvider"]), ["llm", "default-provider"]);
+  });
+
+  it("should retain dotted record keys instead of treating them as nested config fields", () => {
+    assert.deepEqual(
+      normalizeUserPath(["runtime", "approval", "overrides", "roll", "exec_command"]),
+      ["runtime", "approval", "overrides", "roll.exec_command"],
+    );
+    assert.deepEqual(encodePathToYaml(["llm", "providers", "gateway", "v1", "api-key"]), [
+      "llm",
+      "providers",
+      "gateway.v1",
+      "api-key",
+    ]);
   });
 
   it("should normalize runtime config fields to kebab-case", () => {

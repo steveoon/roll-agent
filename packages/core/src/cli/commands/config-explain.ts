@@ -6,7 +6,7 @@ import {
   findConfigGuidance,
   flattenAgentEnvDeclarations,
   listConfigGuidanceEntries,
-} from "./config-guidance.ts";
+} from "../../config/guidance.ts";
 
 export function explainConfig(path: string | undefined): void {
   if (path === undefined) {

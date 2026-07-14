@@ -34,6 +34,7 @@ const main = defineCommand({
     setup: () => loadMainCommand("setup"),
     skills: () => loadMainCommand("skills"),
     browser: () => loadMainCommand("browser"),
+    ui: () => loadMainCommand("ui"),
     doctor: () => loadMainCommand("doctor"),
     update: () => loadMainCommand("update"),
   },

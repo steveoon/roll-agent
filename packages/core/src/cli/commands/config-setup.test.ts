@@ -14,8 +14,9 @@ import {
   setupShell,
 } from "./config-setup.ts";
 import { explainConfig } from "./config-explain.ts";
-import { findConfigGuidance } from "./config-guidance.ts";
+import { findConfigGuidance } from "../../config/guidance.ts";
 import { DEFAULT_CONFIG } from "../../config/defaults.ts";
+import { ConfigRevisionConflictError } from "../../config/document-store.ts";
 import { AgentStore } from "../../registry/store.ts";
 import { createDefaultRuntimeForTransport, type RegisteredAgent } from "../../types/agent.ts";
 import {
@@ -179,14 +180,16 @@ function makeAgent(name: string): RegisteredAgent {
             name: "API_URL",
             purpose: "Upstream API base URL",
             example: "https://api.example.com",
+            secret: false,
           },
           {
             name: "API_TOKEN",
             purpose: "Secret API token",
             example: "token_xxx",
+            secret: true,
           },
         ],
-        optional: [{ name: "TIMEOUT_MS", default: "30000", example: "30000" }],
+        optional: [{ name: "TIMEOUT_MS", default: "30000", example: "30000", secret: false }],
       },
     },
     transport,
@@ -271,6 +274,35 @@ describe("config setup", () => {
       "default-model": "gpt-4.1",
       providers: { openai: { "api-key": "$" + "{OPENAI_API_KEY}" } },
     });
+  });
+
+  it("rejects a concurrent change to a touched secret path without exposing or overwriting it", async () => {
+    const configPath = resolve(cwd, "roll.config.yaml");
+    const initial = `llm:
+  default-provider: openai
+  default-model: gpt-initial
+  providers:
+    openai:
+      api-key: initial-secret
+`;
+    const externallyUpdated = initial.replace("initial-secret", "external-secret");
+    writeFileSync(configPath, initial, "utf-8");
+    const prompts = new TextCallbackPrompts(
+      {
+        select: ["openai"],
+        text: ["gpt-wizard", ""],
+        password: ["wizard-secret"],
+      },
+      () => writeFileSync(configPath, externallyUpdated, "utf-8"),
+    );
+
+    await assert.rejects(setupLlm(prompts), ConfigRevisionConflictError);
+
+    assert.equal(readFileSync(configPath, "utf-8"), externallyUpdated);
+    assert.equal(
+      readdirSync(cwd).filter((entry) => entry.startsWith("roll.config.yaml.bak.")).length,
+      0,
+    );
   });
 
   it("fails before business prompts when a known config migration is pending", async () => {
@@ -558,6 +590,42 @@ agents:
       API_TOKEN: "existing-token",
     });
     assert.match(prompts.messages.join("\n"), /API_TOKEN（必填，回车保留当前值）/);
+  });
+
+  it("keeps an agent env placeholder instead of materializing its resolved secret", async () => {
+    const dataDir = resolve(cwd, "agents-data");
+    const configPath = resolve(cwd, "roll.config.yaml");
+    writeFileSync(
+      configPath,
+      `llm:
+  default-provider: anthropic
+  default-model: test
+  providers: {}
+ask: {}
+agents:
+  data-dir: ${dataDir}
+  env:
+    fixture-agent:
+      API_URL: https://existing.example.com
+      API_TOKEN: \${FIXTURE_API_TOKEN}
+`,
+      "utf-8",
+    );
+    new AgentStore(dataDir).add(makeAgent("fixture-agent"));
+    const previousToken = process.env["FIXTURE_API_TOKEN"];
+    process.env["FIXTURE_API_TOKEN"] = "resolved-secret-must-not-be-written";
+
+    try {
+      const prompts = new FakePrompts({ password: [""], confirm: [false] });
+      await runConfigSetup("agent", "fixture-agent", prompts);
+
+      const raw = readFileSync(configPath, "utf-8");
+      assert.match(raw, /API_TOKEN: \$\{FIXTURE_API_TOKEN\}/u);
+      assert.doesNotMatch(raw, /resolved-secret-must-not-be-written/u);
+      assert.match(prompts.messages.join("\n"), /环境变量占位符/u);
+    } finally {
+      restoreEnv("FIXTURE_API_TOKEN", previousToken);
+    }
   });
 
   it("marks cancelled setup as a non-zero exit", async () => {

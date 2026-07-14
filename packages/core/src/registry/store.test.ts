@@ -146,16 +146,32 @@ describe("AgentStore", () => {
       skill: {
         ...agent.skill,
         env: {
-          required: [{ name: "API_TOKEN", purpose: "Access upstream API" }],
-          optional: [{ name: "MODEL_ID", default: "provider/default-model" }],
+          required: [{ name: "API_TOKEN", purpose: "Access upstream API", secret: true }],
+          optional: [
+            {
+              name: "MODEL_ID",
+              default: "provider/default-model",
+              type: "string",
+              configurable: false,
+              sourcePath: ["runtime", "model"],
+            },
+          ],
         },
       },
     });
 
     const reloaded = new AgentStore(tmpDir).findByName("env-agent");
     assert.deepEqual(reloaded?.skill.env, {
-      required: [{ name: "API_TOKEN", purpose: "Access upstream API" }],
-      optional: [{ name: "MODEL_ID", default: "provider/default-model" }],
+      required: [{ name: "API_TOKEN", purpose: "Access upstream API", secret: true }],
+      optional: [
+        {
+          name: "MODEL_ID",
+          default: "provider/default-model",
+          type: "string",
+          configurable: false,
+          sourcePath: ["runtime", "model"],
+        },
+      ],
     });
   });
 

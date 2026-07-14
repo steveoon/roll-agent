@@ -94,16 +94,17 @@
   },
   "files": [
     "dist",
-    "bin"
+    "bin",
+    "THIRD_PARTY_NOTICES.txt"
   ],
   "engines": {
     "node": ">=22.6.0"
   },
   "scripts": {
     "dev": "node --disable-warning=ExperimentalWarning --experimental-strip-types --experimental-sqlite src/cli/index.ts",
-    "build": "rm -rf dist && tsc -p tsconfig.build.json && node ../../scripts/obfuscate.mjs",
-    "typecheck": "tsc --noEmit",
-    "test": "node --experimental-strip-types --experimental-sqlite --test \"src/**/*.test.ts\"",
+    "build": "rm -rf dist && tsc -p tsconfig.build.json && node ../../scripts/obfuscate.mjs && vite build --config vite.config.ts",
+    "typecheck": "tsc --noEmit && tsc -p tsconfig.ui.json",
+    "test": "node --experimental-strip-types --experimental-sqlite --test \"src/**/*.test.ts\" \"ui/**/*.test.ts\"",
     "test:e2e": "node --experimental-strip-types --experimental-sqlite --test \"src/**/*.e2e.ts\"",
     "clean": "rm -rf dist"
   },
@@ -132,9 +133,15 @@
     "zod": "^3.25.76"
   },
   "devDependencies": {
+    "@tailwindcss/vite": "4.3.2",
     "@types/cross-spawn": "6.0.6",
     "@types/node": "^22.0.0",
-    "@types/react": "19.2.16",
-    "ink-testing-library": "4.0.0"
+    "@types/react": "19.2.17",
+    "@types/react-dom": "19.2.3",
+    "@vitejs/plugin-react": "4.7.0",
+    "ink-testing-library": "4.0.0",
+    "react-dom": "19.2.7",
+    "tailwindcss": "4.3.2",
+    "vite": "6.4.3"
   }
 }

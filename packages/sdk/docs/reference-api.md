@@ -76,6 +76,53 @@ SDK 负责定义和运行 stdio Agent，本身不负责注册到 `roll-core`。�
 - 已发布的已编译 npm 包或 `.tgz` 安装包通常使用 `roll agent install`
 - 业务 Agent 自己的运行配置应显式放在 `roll.config.yaml` 的 `agents.env.<agent-name>`，而不是依赖 `roll-core` 的全局 `llm.*`
 
+### `references/env.yaml` 契约
+
+`metadata.roll-env-file` 指向的文件使用以下结构；顶层 `required` 与 `optional` 均可省略，
+分别声明必填与非必填字段：
+
+```yaml
+required:
+  - name: SERVICE_BASE_URL
+    purpose: 上游服务地址
+    type: url
+    example: https://api.example.com
+    secret: false
+  - name: SERVICE_TOKEN
+    purpose: 服务访问令牌
+    type: string
+    example: token_xxx
+    secret: true
+optional:
+  - name: REQUEST_TIMEOUT_MS
+    purpose: 请求超时时间
+    type: number
+    default: "30000"
+    example: "30000"
+    secret: false
+  - name: BROWSER_INSTANCES_JSON
+    purpose: 由浏览器实例配置派生
+    type: json
+    configurable: false
+    sourcePath:
+      - browser
+      - instances
+```
+
+| 字段 | 必填 | 说明 |
+| --- | --- | --- |
+| `name` | 是 | 环境变量名。 |
+| `purpose` | 否 | 展示给配置 UI / CLI 的用途说明。 |
+| `type` | 否 | 可选值为 `string`、`boolean`、`number`、`json`、`url`；省略时按变量名后缀推断。 |
+| `example` | 否 | 示例值；环境变量最终仍以字符串持久化。 |
+| `default` | 否 | 可选变量的默认值；环境变量最终仍以字符串持久化。 |
+| `secret` | 否 | **缺省等同于 `true`（fail-closed）**；非敏感字段必须显式写 `secret: false`。 |
+| `configurable` | 否 | 是否允许用户直接配置，通常缺省为 `true`。派生字段应写 `false`；`BROWSER_INSTANCES_JSON` 缺省时由 core 特判为 `false`。 |
+| `sourcePath` | 否 | `configurable: false` 时可声明其来源配置路径，使用字符串数组；`BROWSER_INSTANCES_JSON` 缺省时由 core 设为 `browser.instances`。 |
+
+`required` / `optional` 只决定字段是否必须提供，不改变 `secret` 的缺省行为；两类字段省略
+`secret` 时都会被当作敏感字段处理。
+
 ## `createAgentLogger(agentName, minLevel?)`
 
 创建 Agent 日志器（stderr 输出）。
