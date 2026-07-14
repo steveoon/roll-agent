@@ -45,17 +45,16 @@ export async function runInkRepl(
   if (!options.banner) {
     log.info(`多轮对话已就绪（${INK_HINTS}）`);
   }
-  const bannerItems: HistoryItem[] = options.banner
-    ? [
-        {
-          kind: "banner",
-          id: "banner",
-          lines: buildBannerLines(options.banner, process.stdout.columns || 80, {
-            hints: INK_HINTS,
-          }),
-        },
-      ]
-    : [];
+  const priorHistory = messagesToHistory(session.getMessages());
+  const bannerLines = options.banner
+    ? buildBannerLines(options.banner, process.stdout.columns || 80, { hints: INK_HINTS })
+    : undefined;
+  // 恢复会话时历史消息已在 Static 区，动画 banner 会排到消息之后，只对全新会话做入场动画。
+  const animateBanner = bannerLines !== undefined && priorHistory.length === 0;
+  const bannerItems: HistoryItem[] =
+    bannerLines !== undefined && !animateBanner
+      ? [{ kind: "banner", id: "banner", lines: bannerLines }]
+      : [];
 
   const rawModeAvailable =
     process.stdin.isTTY === true && typeof process.stdin.setRawMode === "function";
@@ -75,7 +74,8 @@ export async function runInkRepl(
         onExit: () => {
           instance.unmount();
         },
-        initialHistory: [...bannerItems, ...messagesToHistory(session.getMessages())],
+        initialHistory: [...bannerItems, ...priorHistory],
+        ...(animateBanner && bannerLines !== undefined ? { animatedBanner: bannerLines } : {}),
         ...(options.initialThinkingLevel
           ? { initialThinkingLevel: options.initialThinkingLevel }
           : {}),

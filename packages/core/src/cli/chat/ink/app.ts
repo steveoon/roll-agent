@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { createElement as h, useMemo, useState } from "react";
+import { createElement as h, useCallback, useMemo, useRef, useState } from "react";
 import type { ReactElement } from "react";
 import { Box, Static, useInput } from "ink";
 import type { AgentSession } from "@roll-agent/runtime";
@@ -20,7 +20,8 @@ import {
   SLASH_COMMANDS,
   type SlashSkillSummary,
 } from "./commands.ts";
-import { bannerTextLine } from "../banner.ts";
+import { bannerTextLine, type BannerLine } from "../banner.ts";
+import { BannerHistoryView } from "./banner-view.ts";
 import { cycleThinking } from "./thinking.ts";
 
 export interface ChatAppProps {
@@ -28,6 +29,8 @@ export interface ChatAppProps {
   readonly model: string;
   readonly contextWindow: number | undefined;
   readonly initialHistory?: readonly HistoryItem[];
+  /** Banner played as an entrance animation in the dynamic region, then committed to Static. */
+  readonly animatedBanner?: readonly BannerLine[];
   readonly initialThinkingLevel?: ThinkingLevel;
   readonly availableSkills?: readonly SlashSkillSummary[];
   readonly onThinkingChange?: (level: ThinkingLevel) => void;
@@ -62,6 +65,17 @@ export function ChatApp(props: ChatAppProps): ReactElement {
   });
 
   const staticItems = useMemo(() => [...state.history], [state.history]);
+  const [bannerSettled, setBannerSettled] = useState(false);
+  const animatedBannerRef = useRef(props.animatedBanner);
+  const handleBannerSettled = useCallback(() => {
+    const bannerLines = animatedBannerRef.current;
+    if (bannerLines !== undefined) {
+      animatedBannerRef.current = undefined;
+      commitHistory({ kind: "banner", id: "banner", lines: bannerLines });
+    }
+    setBannerSettled(true);
+  }, [commitHistory]);
+  const animatedBanner = bannerSettled ? undefined : props.animatedBanner;
   const [selected, setSelected] = useState(0);
   const slashActive = state.phase === "idle" && state.draft.startsWith("/");
   const slashPopupActive = slashActive && state.draft.split(/\s+/).at(-1)?.startsWith("/") === true;
@@ -87,11 +101,14 @@ export function ChatApp(props: ChatAppProps): ReactElement {
       setDraft("");
       return;
     }
+    // banner 需先于首条消息落入 Static，否则顺序颠倒
+    handleBannerSettled();
     onUserSubmit(text);
     submit(text, sendText);
   };
 
   const runSlash = (raw: string): void => {
+    handleBannerSettled();
     setDraft("");
     const text = raw.trim();
     const parts = text.split(/\s+/);
@@ -233,6 +250,13 @@ export function ChatApp(props: ChatAppProps): ReactElement {
         );
       },
     }),
+    animatedBanner !== undefined
+      ? h(
+          Box,
+          { marginLeft: 1 },
+          h(BannerHistoryView, { lines: animatedBanner, onSettled: handleBannerSettled }),
+        )
+      : null,
     h(Box, { marginLeft: 1 }, h(LiveRegion, { live: state.live })),
     h(StatusLine, { status: state.status }),
     slashActive ? h(SlashPopup, { matches, selected: selectedIndex }) : null,
