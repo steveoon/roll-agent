@@ -1,6 +1,7 @@
 import { defineCommand } from "citty";
-import { existsSync, mkdirSync, writeFileSync } from "node:fs";
-import { stringify as stringifyYaml } from "yaml";
+import { existsSync, mkdirSync } from "node:fs";
+import { ConfigApplicationService } from "../../config/application-service.ts";
+import { createConfigRevision } from "../../config/document-store.ts";
 import {
   getAgentEnv,
   getAgentEnvFromAgentsConfig,
@@ -12,9 +13,9 @@ import {
   loadAgentsConfig,
   loadConfig,
   parseConfigDocument,
-  validateConfigText,
   type ConfigInspectionNeedsMigration,
 } from "../../config/loader.ts";
+import { decodeFromYaml } from "../../config/key-codec.ts";
 import { applyKnownConfigMigrations } from "../../config/migration.ts";
 import {
   inspectAgentRuntimeEnvRequirements,
@@ -664,17 +665,20 @@ function applyConfigMigrationFix(inspection: ConfigInspectionNeedsMigration): Do
       };
     }
 
-    const nextYaml = stringifyYaml(migrationResult.document, { lineWidth: 0 });
-    validateConfigText(nextYaml, inspection.configPath);
-
-    const backupPath = buildBackupPath(inspection.configPath);
-    writeFileSync(backupPath, inspection.raw, "utf-8");
-    writeFileSync(inspection.configPath, nextYaml, "utf-8");
+    const saveResult = new ConfigApplicationService({
+      configPath: inspection.configPath,
+    }).saveStructured(
+      decodeFromYaml(migrationResult.document),
+      createConfigRevision(inspection.raw),
+    );
 
     return {
       name: "配置迁移",
       status: "applied",
-      message: `已迁移 ${inspection.configPath}，备份 ${backupPath}`,
+      message:
+        saveResult.backupPath === undefined
+          ? `已迁移 ${inspection.configPath}`
+          : `已迁移 ${inspection.configPath}，备份 ${saveResult.backupPath}`,
     };
   } catch (err) {
     return {
@@ -725,20 +729,6 @@ function cleanupOrphanRuntimeMetadataFix(dataDir: string, agentName: string): Do
       message: err instanceof Error ? err.message : String(err),
     };
   }
-}
-
-function buildBackupPath(configPath: string): string {
-  const now = new Date();
-  const timestamp = [
-    now.getFullYear().toString().padStart(4, "0"),
-    (now.getMonth() + 1).toString().padStart(2, "0"),
-    now.getDate().toString().padStart(2, "0"),
-    "-",
-    now.getHours().toString().padStart(2, "0"),
-    now.getMinutes().toString().padStart(2, "0"),
-    now.getSeconds().toString().padStart(2, "0"),
-  ].join("");
-  return `${configPath}.bak.${timestamp}`;
 }
 
 function formatMigrationIssues(issues: readonly { readonly message: string }[]): string {

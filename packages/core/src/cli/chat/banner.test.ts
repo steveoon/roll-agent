@@ -1,6 +1,14 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { buildBannerLines, renderBannerText, type BannerInfo } from "./banner.ts";
+import {
+  buildBannerLines,
+  revealLogoLines,
+  splitBannerLogoLines,
+  renderBannerText,
+  REVEAL_EDGE_COLOR,
+  type BannerInfo,
+  type BannerLine,
+} from "./banner.ts";
 
 const INFO: BannerInfo = {
   version: "0.14.1",
@@ -66,4 +74,54 @@ test("renderBannerText 输出包含全部文本内容", () => {
   const rendered = renderBannerText(buildBannerLines(INFO, 120, { unicode: true }));
   assert.ok(rendered.includes("Roll Agent"));
   assert.ok(rendered.includes("claude-sonnet-5"));
+});
+
+test("splitBannerLogoLines 拆出 logo 与其余行", () => {
+  const lines = buildBannerLines(INFO, 120, { unicode: true, hints: "/exit" });
+  const { logo, rest } = splitBannerLogoLines(lines);
+  assert.equal(logo.length, 6);
+  assert.ok(logo.every((line) => line.spans[0]?.color !== undefined));
+  assert.ok(texts(rest).includes("Roll Agent"));
+  assert.ok(texts(rest).includes("/exit"));
+});
+
+test("revealLogoLines progress=0 为等宽空格", () => {
+  const { logo } = splitBannerLogoLines(buildBannerLines(INFO, 120, { unicode: true }));
+  const revealed = revealLogoLines(logo, 0);
+  assert.equal(revealed.length, logo.length);
+  for (let i = 0; i < logo.length; i++) {
+    const original = logo[i]!.spans.map((s) => s.text).join("");
+    const next = revealed[i]!.spans.map((s) => s.text).join("");
+    assert.equal(Array.from(next).length, Array.from(original).length);
+    assert.ok([...next].every((ch) => ch === " "));
+  }
+});
+
+test("revealLogoLines progress=0.5 左半有字右半空格，前沿两列高亮", () => {
+  const logo: readonly BannerLine[] = [
+    { spans: [{ text: "ABCDEFGH", color: "#22d3ee" }] },
+    { spans: [{ text: "12345678", color: "#e879f9" }] },
+  ];
+  const revealed = revealLogoLines(logo, 0.5);
+  const flat = (line: BannerLine): string => line.spans.map((s) => s.text).join("");
+  assert.equal(flat(revealed[0]!), "ABCD    ");
+  assert.equal(flat(revealed[1]!), "1234    ");
+  assert.equal(revealed[0]!.spans[0]?.text, "AB");
+  assert.equal(revealed[0]!.spans[0]?.color, "#22d3ee");
+  assert.equal(revealed[0]!.spans[1]?.text, "CD");
+  assert.equal(revealed[0]!.spans[1]?.color, REVEAL_EDGE_COLOR);
+  assert.equal(revealed[1]!.spans[1]?.color, REVEAL_EDGE_COLOR);
+});
+
+test("revealLogoLines progress=1 无前沿高亮色", () => {
+  const { logo } = splitBannerLogoLines(buildBannerLines(INFO, 120, { unicode: true }));
+  const settled = revealLogoLines(logo, 1);
+  const colors = settled.flatMap((line) => line.spans.map((s) => s.color));
+  assert.ok(!colors.includes(REVEAL_EDGE_COLOR));
+});
+
+test("revealLogoLines progress=1 等于输入", () => {
+  const { logo } = splitBannerLogoLines(buildBannerLines(INFO, 120, { unicode: false }));
+  assert.deepEqual(revealLogoLines(logo, 1), logo);
+  assert.deepEqual(revealLogoLines(logo, 1.5), logo);
 });

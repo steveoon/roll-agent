@@ -159,7 +159,22 @@ agents:
 
 这样 `roll-core` 在启动 `smart-reply-agent` 的 stdio 子进程时会自动注入这些变量，不需要用户手工在 shell 里 `export` 一大串值。
 
-### 3. 调用 Agent
+### 3. 使用 Web 配置台
+
+```bash
+roll ui
+```
+
+`roll ui` 会按配置发现链读取 `roll.config.yaml`，在随机的 `127.0.0.1` 端口启动一次性本地配置台，并自动打开默认浏览器。配置台同时支持结构化表单和 YAML 编辑，保存前会展示校验结果、差异以及生效方式；退出终端进程后服务随即关闭。
+
+```bash
+roll ui --no-open                 # 不自动打开浏览器，改为打印一次性链接
+roll ui --config ./roll.config.yaml
+```
+
+配置字段由 `rollConfigSchema` 自动生成，Agent 环境变量由各 Agent 的 `references/env.yaml` 自动生成；CLI 与 Web UI 共用 key 编码、Zod 校验和安全写回链路，但读取视图按用途区分。详细机制、维护边界与生效规则见 [`docs/how-to-use-roll-ui.md`](docs/how-to-use-roll-ui.md)。
+
+### 4. 调用 Agent
 
 ```bash
 # 直接调用（明确指定 Agent + MCP tool）
@@ -211,6 +226,7 @@ roll config init                交互式初始化配置
 roll config get [key]           查看配置（支持英文句点路径，如 llm.default-model）
 roll config set <key> <value>   修改配置（key 用英文句点分隔，如 ask.confirm-threshold）
 roll config migrate             自动迁移旧版配置（备份原文件 + 写回新格式）
+roll ui                         启动按需本地 Web 配置台（127.0.0.1 随机端口）
 
 roll doctor                     诊断 Roll 配置、Agent 注册表和运行时状态
 roll doctor --json              JSON 诊断结果（配置损坏时返回非零退出码）
@@ -226,10 +242,12 @@ roll doctor --json              JSON 诊断结果（配置损坏时返回非零�
 | `roll update` | `--skip-browser-setup` | 更新 Agent 后跳过 Playwright 浏览器运行时安装/校验 |
 | `roll run` | `--input-json <json>` | 以 JSON 字符串提供完整 tool 输入对象 |
 | `roll run` | `--input-file <path>` | 从 JSON 文件读取完整 tool 输入对象 |
+| `roll ui` | `--no-open` | 不自动打开浏览器，打印一次性认证链接 |
+| `roll ui` | `--config <path>` | 显式指定要编辑的配置文件 |
 | 支持 JSON 输出的命令 | `--json` | 输出结构化 JSON |
 
 说明：`--verbose` 可用于全局或 `roll run` / `roll ask` 输出调试日志；`--config <path>`
-尚未作为稳定 CLI help 入口暴露，不建议在用户文档中依赖。
+目前是 `roll ui` 的稳定命令选项，并不是其他命令通用的全局选项。
 
 ## Skill Agent 接入
 
@@ -371,7 +389,7 @@ agents/
 
 ```bash
 pnpm dev                          # 运行 CLI
-pnpm build                        # tsc 构建所有包
+pnpm build                        # tsc 构建所有包，并由 Vite 打包 core 的 React 配置台
 pnpm typecheck                    # 类型检查
 pnpm test                         # 运行测试
 pnpm lint                         # ESLint
@@ -441,7 +459,8 @@ roll --help
 | LLM | AI SDK v6 + Anthropic/OpenAI/DeepSeek/Qwen |
 | 配置 | YAML + Zod 校验 |
 | 测试 | node:test + node:assert（零外部依赖） |
-| 构建 | tsc（输出 .js + .d.ts） |
+| Web 配置台 | React + Tailwind CSS |
+| 构建 | tsc（输出 .js + .d.ts）+ Vite（打包配置台静态资源） |
 | 包管理 | pnpm workspace |
 | 版本管理 | Changesets（自动版本号 + CHANGELOG + npm publish） |
 

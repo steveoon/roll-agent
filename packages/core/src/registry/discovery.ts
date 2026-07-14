@@ -4,7 +4,7 @@ import { resolve, sep } from "node:path";
 import matter from "gray-matter";
 import { z } from "zod";
 import { parse as parseYaml } from "yaml";
-import { createDefaultRuntimeForTransport } from "../types/agent.ts";
+import { AGENT_ENV_VALUE_TYPES, createDefaultRuntimeForTransport } from "../types/agent.ts";
 import type {
   AgentEnvDeclaration,
   AgentRuntime,
@@ -33,6 +33,10 @@ const skillEnvDeclarationSchema = z.object({
   purpose: z.string().optional(),
   example: z.string().optional(),
   default: z.string().optional(),
+  type: z.enum(AGENT_ENV_VALUE_TYPES).optional(),
+  secret: z.boolean().optional(),
+  configurable: z.boolean().optional(),
+  sourcePath: z.array(z.string().min(1)).min(1).optional(),
 });
 
 const skillEnvDeclarationsSchema = z.object({
@@ -45,6 +49,10 @@ const legacySkillEnvDeclarationSchema = z.object({
   purpose: z.string().optional(),
   example: z.string().optional(),
   default: z.string().optional(),
+  type: z.enum(AGENT_ENV_VALUE_TYPES).optional(),
+  secret: z.boolean().optional(),
+  configurable: z.boolean().optional(),
+  sourcePath: z.array(z.string().min(1)).min(1).optional(),
 });
 
 const legacySkillEnvDeclarationsSchema = z.object({
@@ -260,6 +268,10 @@ function normalizeParsedSkillEnvDeclaration(
     ...(value.purpose ? { purpose: value.purpose } : {}),
     ...(value.example ? { example: value.example } : {}),
     ...(value.default ? { default: value.default } : {}),
+    ...(value.type !== undefined ? { type: value.type } : {}),
+    ...(value.secret !== undefined ? { secret: value.secret } : {}),
+    ...(value.configurable !== undefined ? { configurable: value.configurable } : {}),
+    ...(value.sourcePath !== undefined ? { sourcePath: value.sourcePath } : {}),
   };
 }
 
@@ -272,6 +284,10 @@ function normalizeLegacySkillEnvDeclaration(
     ...(value.purpose ? { purpose: value.purpose } : {}),
     ...(value.example ? { example: value.example } : {}),
     ...(value.default ? { default: value.default } : {}),
+    ...(value.type !== undefined ? { type: value.type } : {}),
+    ...(value.secret !== undefined ? { secret: value.secret } : {}),
+    ...(value.configurable !== undefined ? { configurable: value.configurable } : {}),
+    ...(value.sourcePath !== undefined ? { sourcePath: value.sourcePath } : {}),
   };
 }
 

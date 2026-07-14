@@ -1,9 +1,9 @@
 import { defineCommand } from "citty";
-import { readFileSync, writeFileSync, existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { resolve } from "node:path";
 import { createInterface } from "node:readline/promises";
-import { stringify as stringifyYaml } from "yaml";
+import { ConfigApplicationService } from "../../config/application-service.ts";
 import {
   DEFAULT_CONFIG,
   DEFAULT_LLM_MODELS,
@@ -15,9 +15,9 @@ import {
   loadConfig,
   parseConfigDocument,
   resolveConfigPath,
-  validateConfigText,
 } from "../../config/loader.ts";
-import { encodePathToYaml, normalizeUserPath } from "../../config/key-codec.ts";
+import { createConfigRevision, type ConfigRevision } from "../../config/document-store.ts";
+import { decodeFromYaml, normalizeUserPath } from "../../config/key-codec.ts";
 import { applyKnownConfigMigrations } from "../../config/migration.ts";
 import { explainConfig } from "./config-explain.ts";
 import { runConfigSetup } from "./config-setup.ts";
@@ -172,8 +172,11 @@ async function readInitConfigAnswers(): Promise<InitConfigAnswers> {
 /** 交互式初始化配置文件 */
 async function initConfig(): Promise<void> {
   const configPath = resolveConfigPath() ?? resolve(homedir(), "roll.config.yaml");
+  let existingRevision: ConfigRevision | undefined;
+  let requiresRawRecovery = false;
 
   if (existsSync(configPath)) {
+    existingRevision = createConfigRevision(readFileSync(configPath, "utf-8"));
     const inspection = inspectConfigFile({ configPath });
     switch (inspection.status) {
       case "needs-migration":
@@ -181,6 +184,7 @@ async function initConfig(): Promise<void> {
         console.error("  建议先运行 `roll config migrate`，再决定是否重新初始化。");
         break;
       case "invalid":
+        requiresRawRecovery = true;
         console.error(`⚠ 现有配置文件存在问题:\n${inspection.error.message}`);
         break;
     }
@@ -200,23 +204,17 @@ async function initConfig(): Promise<void> {
 
   const yaml = buildInitialConfigYaml(await readInitConfigAnswers());
 
-  validateConfigText(yaml, configPath);
-  writeFileSync(configPath, yaml, "utf-8");
+  const service = new ConfigApplicationService({ configPath });
+  const saveResult =
+    existingRevision === undefined
+      ? service.saveYaml(yaml)
+      : requiresRawRecovery
+        ? service.replaceYamlForInit(yaml, existingRevision)
+        : service.saveYaml(yaml, existingRevision);
   console.log(`✓ 配置文件已创建: ${configPath}`);
-}
-
-function buildBackupPath(configPath: string): string {
-  const now = new Date();
-  const timestamp = [
-    now.getFullYear().toString().padStart(4, "0"),
-    (now.getMonth() + 1).toString().padStart(2, "0"),
-    now.getDate().toString().padStart(2, "0"),
-    "-",
-    now.getHours().toString().padStart(2, "0"),
-    now.getMinutes().toString().padStart(2, "0"),
-    now.getSeconds().toString().padStart(2, "0"),
-  ].join("");
-  return `${configPath}.bak.${timestamp}`;
+  if (saveResult.backupPath !== undefined) {
+    console.log(`✓ 已备份原文件: ${saveResult.backupPath}`);
+  }
 }
 
 export function migrateConfig(): void {
@@ -247,15 +245,14 @@ export function migrateConfig(): void {
     return;
   }
 
-  const nextYaml = stringifyYaml(migrationResult.document, { lineWidth: 0 });
-  validateConfigText(nextYaml, inspection.configPath);
-
-  const backupPath = buildBackupPath(inspection.configPath);
-  writeFileSync(backupPath, inspection.raw, "utf-8");
-  writeFileSync(inspection.configPath, nextYaml, "utf-8");
+  const saveResult = new ConfigApplicationService({
+    configPath: inspection.configPath,
+  }).saveStructured(decodeFromYaml(migrationResult.document), createConfigRevision(inspection.raw));
 
   console.log(`✓ 配置文件已迁移: ${inspection.configPath}`);
-  console.log(`✓ 已备份原文件: ${backupPath}`);
+  if (saveResult.backupPath !== undefined) {
+    console.log(`✓ 已备份原文件: ${saveResult.backupPath}`);
+  }
   for (const step of migrationResult.summary) {
     console.log(`  - ${step}`);
   }
@@ -310,25 +307,11 @@ function setConfig(key: string | undefined, value: string | undefined): void {
     return;
   }
 
-  const raw = readFileSync(configPath, "utf-8");
-  const doc = parseConfigDocument(raw, configPath);
-
-  const yamlParts = encodePathToYaml(key.split("."));
-  const lastKey = yamlParts[yamlParts.length - 1];
-  if (lastKey === undefined) {
+  const path = normalizeUserPath(key.split("."));
+  if (path.length === 0) {
     console.error("✗ 配置键不能为空");
     process.exitCode = 1;
     return;
-  }
-
-  let current: Record<string, unknown> = doc;
-  for (let i = 0; i < yamlParts.length - 1; i++) {
-    const segment = yamlParts[i] as string;
-    const next = current[segment];
-    if (typeof next !== "object" || next === null || Array.isArray(next)) {
-      current[segment] = {};
-    }
-    current = current[segment] as Record<string, unknown>;
   }
 
   // 尝试解析为数字/布尔值，否则保持字符串
@@ -337,11 +320,9 @@ function setConfig(key: string | undefined, value: string | undefined): void {
   else if (value === "false") parsed = false;
   else if (/^\d+(\.\d+)?$/.test(value)) parsed = Number(value);
 
-  current[lastKey] = parsed;
-
-  const nextYaml = stringifyYaml(doc, { lineWidth: 0 });
-  validateConfigText(nextYaml, configPath);
-  writeFileSync(configPath, nextYaml, "utf-8");
+  const service = new ConfigApplicationService({ configPath });
+  const snapshot = service.read();
+  service.savePatches([{ op: "set", path, value: parsed }], snapshot.revision);
   console.log(`✓ ${key} = ${String(parsed)}`);
   console.error(`  (已写入: ${configPath})`);
 }

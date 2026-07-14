@@ -4,6 +4,24 @@ import { DEFAULT_CONFIG } from "./defaults.ts";
 import { rollConfigSchema } from "./schema.ts";
 
 describe("rollConfigSchema", () => {
+  it("builds DEFAULT_CONFIG from schema defaults plus the required seed", () => {
+    assert.deepEqual(
+      DEFAULT_CONFIG,
+      rollConfigSchema.parse({
+        llm: {
+          defaultProvider: "anthropic",
+          defaultModel: "claude-sonnet-4-6",
+          providers: {},
+        },
+        ask: {},
+        agents: { dataDir: "~/.roll-agent/agents" },
+      }),
+    );
+    assert.equal(DEFAULT_CONFIG.runtime.turnTimeoutMs, 300_000);
+    assert.equal(DEFAULT_CONFIG.install.networkTimeoutMs, 120_000);
+    assert.deepEqual(DEFAULT_CONFIG.browser.instances, {});
+  });
+
   it("should validate a valid config", () => {
     const result = rollConfigSchema.safeParse({
       llm: {

@@ -97,7 +97,8 @@ metadata:
 说明：
 
 - 本地源码目录通过 `roll agent add` 注册时，`roll-core` 会读取 `SKILL.md`
-- 如果你的 Agent 需要业务侧环境变量或私有 LLM 配置，建议在 `SKILL.md` 的 `metadata` 中增加 `roll-env-file`，并在 `references/env.yaml` 里声明机器可读的 env 契约
+- 如果你的 Agent 需要业务侧环境变量或私有 LLM 配置，建议在 `SKILL.md` 的 `metadata` 中增加 `roll-env-file`，并按照 [`references/env.yaml` 契约](reference-api.md#referencesenvyaml-契约)声明机器可读的 env 字段
+- `secret` 缺省时按 `true` 处理；所有非敏感字段都必须显式声明 `secret: false`
 - 这类 Agent 配置应显式写入 `roll.config.yaml` 的 `agents.env.<agent-name>`，不要依赖 `roll-core` 的全局 `llm.*` 自动继承
 
 ## 步骤 5：注册并调用

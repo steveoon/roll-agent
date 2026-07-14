@@ -5,6 +5,7 @@ import { inferAgentSourceFromInstallPath } from "./source.ts";
 import {
   AGENT_STATUSES,
   AGENT_STORE_SCHEMA_VERSION,
+  AGENT_ENV_VALUE_TYPES,
   createDefaultRuntimeForTransport,
 } from "../types/agent.ts";
 import type {
@@ -263,6 +264,11 @@ function normalizeEnvDeclarations(value: unknown): readonly AgentEnvDeclaration[
     const purpose = readString(entry["purpose"]);
     const example = readString(entry["example"]);
     const defaultValue = readString(entry["default"]);
+    const valueType = readString(entry["type"]);
+    const type = AGENT_ENV_VALUE_TYPES.find((candidate) => candidate === valueType);
+    const secret = readBoolean(entry["secret"]);
+    const configurable = readBoolean(entry["configurable"]);
+    const sourcePath = normalizeStringArray(entry["sourcePath"]);
 
     return [
       {
@@ -270,6 +276,10 @@ function normalizeEnvDeclarations(value: unknown): readonly AgentEnvDeclaration[
         ...(purpose ? { purpose } : {}),
         ...(example ? { example } : {}),
         ...(defaultValue ? { default: defaultValue } : {}),
+        ...(type !== undefined ? { type } : {}),
+        ...(secret !== undefined ? { secret } : {}),
+        ...(configurable !== undefined ? { configurable } : {}),
+        ...(sourcePath !== undefined && sourcePath.length > 0 ? { sourcePath } : {}),
       },
     ];
   });
@@ -487,6 +497,10 @@ function normalizeStringArray(value: unknown): readonly string[] | undefined {
 
 function readString(value: unknown): string | undefined {
   return typeof value === "string" && value.length > 0 ? value : undefined;
+}
+
+function readBoolean(value: unknown): boolean | undefined {
+  return typeof value === "boolean" ? value : undefined;
 }
 
 function isJsonRecord(value: unknown): value is JsonRecord {

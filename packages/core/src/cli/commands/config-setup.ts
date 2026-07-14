@@ -1,7 +1,14 @@
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
-import { homedir } from "node:os";
-import { resolve } from "node:path";
-import { stringify as stringifyYaml } from "yaml";
+import { isDeepStrictEqual } from "node:util";
+import {
+  ConfigApplicationService,
+  createConfigPatches,
+  type ConfigApplicationSnapshot,
+} from "../../config/application-service.ts";
+import {
+  ConfigRevisionConflictError,
+  type ConfigPatch,
+  type ConfigPath,
+} from "../../config/document-store.ts";
 import {
   DEFAULT_CONFIG,
   DEFAULT_LLM_MODELS,
@@ -10,21 +17,15 @@ import {
   type LlmProviderOption,
 } from "../../config/defaults.ts";
 import { inspectAgentEnvRequirements, type AgentEnvCheckItem } from "../../config/helpers.ts";
-import {
-  loadAgentsConfig,
-  parseConfigDocument,
-  resolveConfigPath,
-  validateConfigText,
-} from "../../config/loader.ts";
-import { encodePathToYaml } from "../../config/key-codec.ts";
-import { detectKnownConfigMigrations, formatConfigMigrationError } from "../../config/migration.ts";
+import { decodeFromYaml } from "../../config/key-codec.ts";
+import { loadAgentsConfig } from "../../config/loader.ts";
 import { AgentStore } from "../../registry/store.ts";
 import type { RegisteredAgent } from "../../types/agent.ts";
 import {
   flattenAgentEnvDeclarations,
-  isSecretEnvName,
+  isSecretEnvDeclaration,
   type InstallScenario,
-} from "./config-guidance.ts";
+} from "../../config/guidance.ts";
 import {
   ConfigSetupCancelledError,
   clackPromptAdapter,
@@ -40,7 +41,9 @@ interface ConfigDocumentContext {
   readonly configPath: string;
   readonly existed: boolean;
   readonly document: Record<string, unknown>;
-  readonly raw?: string;
+  readonly basePersisted: Readonly<Record<string, unknown>>;
+  readonly snapshot: ConfigApplicationSnapshot;
+  readonly service: ConfigApplicationService;
 }
 
 interface AdvancedInstallSetupValues {
@@ -131,7 +134,7 @@ async function resolveSetupModule(
 }
 
 export async function setupLlm(prompts: ConfigPromptAdapter): Promise<string> {
-  readConfigDocumentContext();
+  const context = readConfigDocumentContext();
   const provider = await prompts.select<LlmProviderOption>({
     message: "选择默认 LLM provider",
     options: LLM_PROVIDER_OPTIONS.map((value) => ({
@@ -155,7 +158,6 @@ export async function setupLlm(prompts: ConfigPromptAdapter): Promise<string> {
     required: false,
   });
 
-  const context = readConfigDocumentContext();
   setYamlValue(context.document, ["llm", "defaultProvider"], provider);
   setYamlValue(context.document, ["llm", "defaultModel"], model);
   setYamlValue(context.document, ["llm", "providers", provider, "apiKey"], apiKey);
@@ -170,7 +172,7 @@ export async function setupLlm(prompts: ConfigPromptAdapter): Promise<string> {
 }
 
 export async function setupInstall(prompts: ConfigPromptAdapter): Promise<string> {
-  readConfigDocumentContext();
+  const context = readConfigDocumentContext();
   const scenario = await prompts.select<InstallScenario>({
     message: "当前安装/更新网络更接近哪种场景？",
     options: [
@@ -186,7 +188,6 @@ export async function setupInstall(prompts: ConfigPromptAdapter): Promise<string
   });
 
   const setupValues = await collectInstallSetupValues(scenario, prompts);
-  const context = readConfigDocumentContext();
   switch (setupValues.scenario) {
     case "default-network":
       setInstallDefaults(context.document);
@@ -222,7 +223,7 @@ export async function setupShell(
   prompts: ConfigPromptAdapter,
   platform: NodeJS.Platform = process.platform,
 ): Promise<string> {
-  readConfigDocumentContext();
+  const context = readConfigDocumentContext();
   const enabled = await prompts.confirm({
     message:
       "启用 roll chat 内建 shell 工具（允许模型在本机执行命令；默认确认策略受 runtime.approval 及显式 override 控制）？",
@@ -249,7 +250,6 @@ export async function setupShell(
     });
   }
 
-  const context = readConfigDocumentContext();
   setYamlValue(context.document, ["runtime", "shell", "enabled"], enabled);
   if (enabled && !isWindows) {
     setYamlValue(context.document, ["runtime", "shell", "autoApproveSafe"], autoApproveSafe);
@@ -326,7 +326,7 @@ export async function setupAgentEnv(
   agentNameArg: string | undefined,
   prompts: ConfigPromptAdapter,
 ): Promise<string> {
-  readConfigDocumentContext();
+  const context = readConfigDocumentContext();
   const { agentsConfig } = loadAgentsConfig();
   const store = new AgentStore(agentsConfig.dataDir);
   const agent = await resolveAgentWithEnv(store.list(), agentNameArg, prompts);
@@ -335,7 +335,7 @@ export async function setupAgentEnv(
     throw new Error(`Agent "${agent.skill.name}" 未声明环境变量需求。`);
   }
 
-  const configuredEnv = agentsConfig.env?.[agent.skill.name] ?? {};
+  const configuredEnv = getPersistedAgentEnv(context.document, agent.skill.name);
   const nextEnv: Record<string, string> = { ...configuredEnv };
   const declarations = flattenAgentEnvDeclarations(agent.skill.env);
   const reportItems = new Map(report.items.map((item) => [item.name, item]));
@@ -378,11 +378,11 @@ export async function setupAgentEnv(
     }
   }
 
-  const context = readConfigDocumentContext();
   setYamlValue(context.document, ["agents", "env", agent.skill.name], nextEnv);
   writeConfigDocument(context);
   for (const [name, value] of Object.entries(nextEnv)) {
-    if (isSecretEnvName(name)) {
+    const declaration = declarations.find((item) => item.name === name);
+    if (declaration !== undefined && isSecretEnvDeclaration(declaration)) {
       warnIfPlaintextSecret(prompts, name, value);
     }
   }
@@ -444,7 +444,8 @@ async function promptAgentEnvValue(
   prompts: ConfigPromptAdapter,
 ): Promise<string | undefined> {
   const { declaration, processEnvValue, source, yamlValue } = input;
-  const hasPersistedValue = source === "agents.env" && isResolvedEnvValue(yamlValue);
+  const hasPersistedValue = isPersistedEnvValue(yamlValue);
+  const hasUnresolvedPlaceholder = hasPersistedValue && ENV_PLACEHOLDER_PATTERN.test(yamlValue);
   const labelDetails = [
     declaration.required ? "必填" : "可选",
     hasPersistedValue ? "回车保留当前值" : undefined,
@@ -456,9 +457,13 @@ async function promptAgentEnvValue(
     declaration.purpose ? `用途: ${declaration.purpose}` : undefined,
     declaration.example ? `示例: ${declaration.example}` : undefined,
     declaration.default ? `默认: ${declaration.default}` : undefined,
-    hasPersistedValue ? "当前 YAML 已配置，回车保留当前值。" : undefined,
-    yamlValue !== undefined && !hasPersistedValue
-      ? "当前 YAML 值为空或占位符未解析，会被视为缺失。"
+    hasPersistedValue
+      ? hasUnresolvedPlaceholder
+        ? "当前 YAML 使用环境变量占位符，回车会原样保留。"
+        : "当前 YAML 已配置，回车保留当前值。"
+      : undefined,
+    hasUnresolvedPlaceholder && source !== "agents.env"
+      ? "当前占位符未解析，运行时仍会把该值视为缺失。"
       : undefined,
     source === "process.env" ? "当前来源: 当前 shell 临时环境变量，尚未持久写入 YAML。" : undefined,
   ]
@@ -493,7 +498,7 @@ async function promptAgentEnvValue(
     ...(declaration.example !== undefined ? { placeholder: declaration.example } : {}),
     required,
   };
-  const value = isSecretEnvName(declaration.name)
+  const value = isSecretEnvDeclaration(declaration)
     ? await prompts.password({ message: label, required })
     : await prompts.text(promptOptions);
 
@@ -510,65 +515,85 @@ function setInstallDefaults(document: Record<string, unknown>): void {
 }
 
 function readConfigDocumentContext(): ConfigDocumentContext {
-  const existingConfigPath = resolveConfigPath();
-  const configPath = existingConfigPath ?? resolve(homedir(), "roll.config.yaml");
-  if (existingConfigPath === undefined || !existsSync(configPath)) {
-    return {
-      configPath,
-      existed: false,
-      document: buildBaseConfigDocument(),
-    };
-  }
-
-  const raw = readFileSync(configPath, "utf-8");
-  const document = parseConfigDocument(raw, configPath);
-  const migrationReport = detectKnownConfigMigrations(document);
-  if (migrationReport.needsMigration) {
-    throw new Error(formatConfigMigrationError(configPath, migrationReport));
+  const service = new ConfigApplicationService();
+  const snapshot = service.readForRepair();
+  const internalSnapshot = readInternalConfigSnapshot(service);
+  if (snapshot.revision !== internalSnapshot.revision) {
+    throw new ConfigRevisionConflictError(snapshot.revision, internalSnapshot.revision);
   }
   return {
-    configPath,
-    existed: true,
-    raw,
-    document,
-  };
-}
-
-function buildBaseConfigDocument(): Record<string, unknown> {
-  return {
-    llm: {
-      "default-provider": DEFAULT_CONFIG.llm.defaultProvider,
-      "default-model": DEFAULT_CONFIG.llm.defaultModel,
-      providers: {},
-    },
-    ask: {},
-    agents: {
-      "data-dir": DEFAULT_CONFIG.agents.dataDir,
-    },
+    configPath: snapshot.configPath,
+    existed: snapshot.existed,
+    document: cloneConfigRecord(snapshot.persisted),
+    basePersisted: internalSnapshot.persisted,
+    snapshot,
+    service,
   };
 }
 
 function writeConfigDocument(context: ConfigDocumentContext): void {
-  const nextYaml = stringifyYaml(context.document, { lineWidth: 0 });
-  validateConfigText(nextYaml, context.configPath);
-  if (context.existed && context.raw !== undefined) {
-    writeFileSync(buildBackupPath(context.configPath), context.raw, "utf-8");
-  }
-  writeFileSync(context.configPath, nextYaml, "utf-8");
+  const patches = createConfigPatches(context.snapshot.persisted, context.document);
+  const latest = readInternalConfigSnapshot(context.service);
+  assertTouchedPathsUnchanged(
+    context.basePersisted,
+    latest.persisted,
+    patches,
+    context.snapshot.revision,
+    latest.revision,
+  );
+  context.service.savePatches(patches, latest.revision);
 }
 
-function buildBackupPath(configPath: string): string {
-  const now = new Date();
-  const timestamp = [
-    now.getFullYear().toString().padStart(4, "0"),
-    (now.getMonth() + 1).toString().padStart(2, "0"),
-    now.getDate().toString().padStart(2, "0"),
-    "-",
-    now.getHours().toString().padStart(2, "0"),
-    now.getMinutes().toString().padStart(2, "0"),
-    now.getSeconds().toString().padStart(2, "0"),
-  ].join("");
-  return `${configPath}.bak.${timestamp}`;
+function readInternalConfigSnapshot(service: ConfigApplicationService): {
+  readonly revision: ConfigApplicationSnapshot["revision"];
+  readonly persisted: Readonly<Record<string, unknown>>;
+} {
+  const snapshot = service.store.read();
+  const persisted = decodeFromYaml(snapshot.persisted);
+  if (!isRecord(persisted)) {
+    throw new Error(`配置内容必须是 object: ${snapshot.configPath}`);
+  }
+  return { revision: snapshot.revision, persisted };
+}
+
+function assertTouchedPathsUnchanged(
+  base: Readonly<Record<string, unknown>>,
+  latest: Readonly<Record<string, unknown>>,
+  patches: readonly ConfigPatch[],
+  expectedRevision: ConfigApplicationSnapshot["revision"],
+  actualRevision: ConfigApplicationSnapshot["revision"],
+): void {
+  for (const patch of patches) {
+    const baseValue = readConfigPath(base, patch.path);
+    const latestValue = readConfigPath(latest, patch.path);
+    if (
+      baseValue.exists !== latestValue.exists ||
+      !isDeepStrictEqual(baseValue.value, latestValue.value)
+    ) {
+      throw new ConfigRevisionConflictError(expectedRevision, actualRevision);
+    }
+  }
+}
+
+function readConfigPath(
+  root: Readonly<Record<string, unknown>>,
+  path: ConfigPath,
+): { readonly exists: boolean; readonly value: unknown } {
+  let current: unknown = root;
+  for (const segment of path) {
+    if (typeof segment === "number") {
+      if (!Array.isArray(current) || !(segment in current)) {
+        return { exists: false, value: undefined };
+      }
+      current = current[segment];
+      continue;
+    }
+    if (!isRecord(current) || !(segment in current)) {
+      return { exists: false, value: undefined };
+    }
+    current = current[segment];
+  }
+  return { exists: true, value: current };
 }
 
 function setYamlValue(
@@ -576,14 +601,13 @@ function setYamlValue(
   path: readonly string[],
   value: unknown,
 ): void {
-  const yamlPath = encodePathToYaml(path);
-  const leaf = yamlPath[yamlPath.length - 1];
+  const leaf = path[path.length - 1];
   if (leaf === undefined) {
     throw new Error("配置路径不能为空");
   }
 
   let current = document;
-  for (const segment of yamlPath.slice(0, -1)) {
+  for (const segment of path.slice(0, -1)) {
     const next = current[segment];
     if (typeof next !== "object" || next === null || Array.isArray(next)) {
       current[segment] = {};
@@ -594,14 +618,13 @@ function setYamlValue(
 }
 
 function deleteYamlValue(document: Record<string, unknown>, path: readonly string[]): void {
-  const yamlPath = encodePathToYaml(path);
-  const leaf = yamlPath[yamlPath.length - 1];
+  const leaf = path[path.length - 1];
   if (leaf === undefined) {
     return;
   }
 
   let current: unknown = document;
-  for (const segment of yamlPath.slice(0, -1)) {
+  for (const segment of path.slice(0, -1)) {
     if (typeof current !== "object" || current === null || Array.isArray(current)) {
       return;
     }
@@ -610,6 +633,40 @@ function deleteYamlValue(document: Record<string, unknown>, path: readonly strin
   if (typeof current === "object" && current !== null && !Array.isArray(current)) {
     delete (current as Record<string, unknown>)[leaf];
   }
+}
+
+function getPersistedAgentEnv(
+  document: Readonly<Record<string, unknown>>,
+  agentName: string,
+): Record<string, string> {
+  const agents = document["agents"];
+  const env = isRecord(agents) ? agents["env"] : undefined;
+  const configured = isRecord(env) ? env[agentName] : undefined;
+  if (!isRecord(configured)) {
+    return {};
+  }
+  return Object.fromEntries(
+    Object.entries(configured).filter(
+      (entry): entry is [string, string] => typeof entry[1] === "string",
+    ),
+  );
+}
+
+function cloneConfigRecord(value: Readonly<Record<string, unknown>>): Record<string, unknown> {
+  return Object.fromEntries(
+    Object.entries(value).map(([key, child]) => [key, cloneConfigValue(child)]),
+  );
+}
+
+function cloneConfigValue(value: unknown): unknown {
+  if (Array.isArray(value)) {
+    return value.map(cloneConfigValue);
+  }
+  return isRecord(value) ? cloneConfigRecord(value) : value;
+}
+
+function isRecord(value: unknown): value is Readonly<Record<string, unknown>> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function validateIntegerInRange(min: number, max: number): (value: string) => string | undefined {
@@ -625,8 +682,8 @@ function validateIntegerInRange(min: number, max: number): (value: string) => st
   };
 }
 
-function isResolvedEnvValue(value: string | undefined): value is string {
-  return typeof value === "string" && value.length > 0 && !ENV_PLACEHOLDER_PATTERN.test(value);
+function isPersistedEnvValue(value: string | undefined): value is string {
+  return typeof value === "string" && value.length > 0;
 }
 
 function warnIfPlaintextSecret(prompts: ConfigPromptAdapter, label: string, value: string): void {

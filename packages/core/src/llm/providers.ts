@@ -152,6 +152,8 @@ export function toSamplingConnectOptions(call: ResolvedLLMCall | undefined): {
  *
  * chat 与 sampling 场景下都是纯文本 generateText 调用，复用同一套
  * thinkingProviderOptions 映射注入 reasoning/thinking effort。
+ * 显式 baseURL 的 OpenAI Responses 调用使用无服务端状态的历史重放，
+ * 避免兼容端点返回 item ID 却未持久化 item 时导致后续轮次失败。
  */
 export function resolveLLMCall(
   providerName: string,
@@ -172,6 +174,20 @@ export function resolveLLMCall(
 
   if (purpose === "chat" || purpose === "sampling") {
     const providerOptions = thinkingProviderOptions(providerName, modelName, thinkingLevel);
+    if (providerName === "openai" && baseURL) {
+      return {
+        model,
+        providerOptions: {
+          ...(providerOptions ?? {}),
+          openai: {
+            ...(providerOptions?.openai ?? {}),
+            // OpenAI-compatible endpoints do not always persist Responses output items.
+            // Replay full history instead of sending item_reference IDs on later turns.
+            store: false,
+          },
+        },
+      };
+    }
     return providerOptions ? { model, providerOptions } : { model };
   }
 

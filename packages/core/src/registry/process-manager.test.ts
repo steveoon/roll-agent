@@ -1,14 +1,24 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { spawn } from "node:child_process";
+import { createHash } from "node:crypto";
+import { once } from "node:events";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
 import type { RegisteredAgent } from "../types/agent.ts";
 import {
+  AgentLifecycleBusyError,
+  AgentRuntimeIdentityError,
+  acquireAgentLifecycleLock,
   cleanupOrphanAgentRuntimeMetadata,
+  getAgentPid,
   getRollCoreVersion,
   inspectManagedAgentRuntime,
+  stopAgent,
+  stopAgentGracefully,
   writeAgentRuntimeSidecar,
+  type ManagedAgentRuntimeIdentity,
 } from "./process-manager.ts";
 
 describe("managed agent runtime sidecar", () => {
@@ -35,9 +45,10 @@ describe("managed agent runtime sidecar", () => {
     writeFileSync(
       join(dataDir, "pids", `${agent.skill.name}.runtime.json`),
       JSON.stringify({
-        schemaVersion: 1,
-        agentName: agent.skill.name,
+        schemaVersion: 2,
+        agentName: "unrelated-agent",
         pid: process.pid + 1,
+        processStartToken: staleProcessStartToken(),
         coreVersion: "0.0.0-old",
         startedAt: new Date().toISOString(),
         endpoint: "http://127.0.0.1:9999/mcp",
@@ -49,7 +60,7 @@ describe("managed agent runtime sidecar", () => {
 
     assert.deepEqual(
       inspection.issues.map((issue) => issue.code),
-      ["pid-mismatch", "version-mismatch", "endpoint-mismatch"],
+      ["agent-name-mismatch", "pid-mismatch", "version-mismatch", "endpoint-mismatch"],
     );
   });
 
@@ -78,6 +89,236 @@ describe("managed agent runtime sidecar", () => {
     assert.equal(cleanupOrphanAgentRuntimeMetadata(dataDir, agent.skill.name), false);
     assert.equal(existsSync(join(dataDir, "pids", `${agent.skill.name}.runtime.json`)), true);
   });
+
+  it("keeps stale metadata intact during a read-only pid status check", () => {
+    const dataDir = mkdtempSync(join(tmpdir(), "roll-process-manager-stale-read-"));
+    const agent = createCoreManagedAgent("http://127.0.0.1:4321/mcp");
+    try {
+      writePid(dataDir, agent.skill.name, 2_147_483_647);
+      writeRuntimeSidecarFixture(agent, dataDir, 2_147_483_647);
+
+      assert.equal(getAgentPid(dataDir, agent.skill.name), undefined);
+      assert.equal(existsSync(join(dataDir, "pids", `${agent.skill.name}.pid`)), true);
+      assert.equal(existsSync(join(dataDir, "pids", `${agent.skill.name}.runtime.json`)), true);
+    } finally {
+      rmSync(dataDir, { recursive: true, force: true });
+    }
+  });
+
+  it("does not clean replacement metadata while another lifecycle writer owns the lock", () => {
+    const dataDir = mkdtempSync(join(tmpdir(), "roll-process-manager-cleanup-race-"));
+    const agent = createCoreManagedAgent("http://127.0.0.1:4321/mcp");
+    const writerLock = acquireAgentLifecycleLock(dataDir, agent.skill.name);
+    try {
+      writePid(dataDir, agent.skill.name, process.pid);
+      writeAgentRuntimeSidecar(agent, dataDir, process.pid);
+
+      assert.throws(
+        () => cleanupOrphanAgentRuntimeMetadata(dataDir, agent.skill.name),
+        AgentLifecycleBusyError,
+      );
+      assert.equal(getAgentPid(dataDir, agent.skill.name), process.pid);
+      assert.equal(
+        readFileSync(join(dataDir, "pids", `${agent.skill.name}.pid`), "utf-8"),
+        String(process.pid),
+      );
+      assert.equal(inspectManagedAgentRuntime(agent, dataDir).sidecar?.pid, process.pid);
+    } finally {
+      writerLock.release();
+      rmSync(dataDir, { recursive: true, force: true });
+    }
+  });
+
+  it("reclaims a stale lifecycle lock when its owner pid belongs to a new process instance", () => {
+    const dataDir = mkdtempSync(join(tmpdir(), "roll-process-manager-stale-lock-"));
+    const agent = createCoreManagedAgent("http://127.0.0.1:4321/mcp");
+    const pidDir = join(dataDir, "pids");
+    mkdirSync(pidDir, { recursive: true });
+    const digest = createHash("sha256").update(agent.skill.name).digest("hex");
+    const lockPath = join(pidDir, `.${digest}.lifecycle.lock`);
+    writeFileSync(
+      lockPath,
+      `${JSON.stringify({
+        pid: process.pid,
+        processStartToken: staleProcessStartToken(),
+        token: "stale-owner",
+        createdAtMs: Date.now(),
+      })}\n`,
+      "utf-8",
+    );
+
+    const lock = acquireAgentLifecycleLock(dataDir, agent.skill.name);
+    try {
+      assert.equal(existsSync(lockPath), true);
+    } finally {
+      lock.release();
+      assert.equal(existsSync(lockPath), false);
+      rmSync(dataDir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("stopAgentGracefully", () => {
+  it("blocks a second cooperative lifecycle operation while the Agent lock is held", async () => {
+    const dataDir = mkdtempSync(join(tmpdir(), "roll-process-manager-lock-"));
+    const agent = createCoreManagedAgent("http://127.0.0.1:4321/mcp");
+    writePid(dataDir, agent.skill.name, 2_147_483_647);
+    const lock = acquireAgentLifecycleLock(dataDir, agent.skill.name);
+    try {
+      await assert.rejects(stopAgentGracefully(dataDir, agent.skill.name), AgentLifecycleBusyError);
+    } finally {
+      lock.release();
+      rmSync(dataDir, { recursive: true, force: true });
+    }
+  });
+
+  it("does not signal or clean metadata when the recorded identity differs from expectedIdentity", async () => {
+    const dataDir = mkdtempSync(join(tmpdir(), "roll-process-manager-stop-"));
+    const agent = createCoreManagedAgent("http://127.0.0.1:4321/mcp");
+    try {
+      writePid(dataDir, agent.skill.name, process.pid);
+      writeAgentRuntimeSidecar(agent, dataDir, process.pid);
+      const currentIdentity = readRuntimeIdentity(agent, dataDir);
+
+      const stopped = await stopAgentGracefully(dataDir, agent.skill.name, {
+        expectedIdentity: { ...currentIdentity, pid: process.pid + 1 },
+      });
+
+      assert.equal(stopped, false);
+      assert.equal(
+        readFileSync(join(dataDir, "pids", `${agent.skill.name}.pid`), "utf-8"),
+        String(process.pid),
+      );
+      assert.equal(existsSync(join(dataDir, "pids", `${agent.skill.name}.runtime.json`)), true);
+    } finally {
+      rmSync(dataDir, { recursive: true, force: true });
+    }
+  });
+
+  it("cleans dead process metadata under the lifecycle lock in both stop paths", async () => {
+    for (const [name, stop] of [
+      ["immediate", (dataDir: string, agentName: string) => stopAgent(dataDir, agentName)],
+      ["graceful", (dataDir: string, agentName: string) => stopAgentGracefully(dataDir, agentName)],
+    ] as const) {
+      const dataDir = mkdtempSync(join(tmpdir(), `roll-process-manager-${name}-stale-`));
+      const agent = createCoreManagedAgent("http://127.0.0.1:4321/mcp");
+      try {
+        writePid(dataDir, agent.skill.name, 2_147_483_647);
+        writeRuntimeSidecarFixture(agent, dataDir, 2_147_483_647);
+
+        assert.equal(await stop(dataDir, agent.skill.name), false);
+        assert.equal(existsSync(join(dataDir, "pids", `${agent.skill.name}.pid`)), false);
+        assert.equal(existsSync(join(dataDir, "pids", `${agent.skill.name}.runtime.json`)), false);
+      } finally {
+        rmSync(dataDir, { recursive: true, force: true });
+      }
+    }
+  });
+
+  it("preserves replacement pid and sidecar metadata while the expected process exits", async () => {
+    const dataDir = mkdtempSync(join(tmpdir(), "roll-process-manager-replacement-"));
+    const agent = createCoreManagedAgent("http://127.0.0.1:4321/mcp");
+    const child = spawn(
+      process.execPath,
+      [
+        "-e",
+        "process.on('SIGTERM',()=>setTimeout(()=>process.exit(0),100));process.send('ready');setInterval(()=>{},1000)",
+      ],
+      { stdio: ["ignore", "ignore", "ignore", "ipc"] },
+    );
+    try {
+      await once(child, "message");
+      assert.ok(child.pid);
+      writePid(dataDir, agent.skill.name, child.pid);
+      writeAgentRuntimeSidecar(agent, dataDir, child.pid);
+      const expectedIdentity = readRuntimeIdentity(agent, dataDir);
+
+      const stopping = stopAgentGracefully(dataDir, agent.skill.name, {
+        expectedIdentity,
+        timeoutMs: 2_000,
+        intervalMs: 10,
+      });
+      writePid(dataDir, agent.skill.name, process.pid);
+      writeAgentRuntimeSidecar(agent, dataDir, process.pid);
+
+      assert.equal(await stopping, true);
+      assert.equal(
+        readFileSync(join(dataDir, "pids", `${agent.skill.name}.pid`), "utf-8"),
+        String(process.pid),
+      );
+      assert.equal(inspectManagedAgentRuntime(agent, dataDir).sidecar?.pid, process.pid);
+    } finally {
+      if (child.exitCode === null) child.kill("SIGKILL");
+      rmSync(dataDir, { recursive: true, force: true });
+    }
+  });
+
+  it("fails closed for a self-consistent stale sidecar whose live pid belongs to another process", async () => {
+    const dataDir = mkdtempSync(join(tmpdir(), "roll-process-manager-pid-reuse-"));
+    const agent = createCoreManagedAgent("http://127.0.0.1:4321/mcp");
+    const child = spawn(
+      process.execPath,
+      ["-e", "process.send?.('ready');setInterval(()=>{},1000)"],
+      { stdio: ["ignore", "ignore", "ignore", "ipc"] },
+    );
+    try {
+      await once(child, "message");
+      assert.ok(child.pid);
+      writePid(dataDir, agent.skill.name, child.pid);
+      writeRuntimeSidecarFixture(agent, dataDir, child.pid);
+
+      for (const stop of [
+        () => stopAgent(dataDir, agent.skill.name),
+        () => stopAgentGracefully(dataDir, agent.skill.name),
+      ]) {
+        await assert.rejects(async () => stop(), AgentRuntimeIdentityError);
+        assert.doesNotThrow(() => process.kill(child.pid ?? 0, 0));
+        assert.equal(existsSync(join(dataDir, "pids", `${agent.skill.name}.pid`)), true);
+        assert.equal(existsSync(join(dataDir, "pids", `${agent.skill.name}.runtime.json`)), true);
+      }
+    } finally {
+      if (child.exitCode === null) child.kill("SIGKILL");
+      rmSync(dataDir, { recursive: true, force: true });
+    }
+  });
+
+  it("fails closed for a live pid with a legacy sidecar that has no process identity", async () => {
+    const dataDir = mkdtempSync(join(tmpdir(), "roll-process-manager-legacy-sidecar-"));
+    const agent = createCoreManagedAgent("http://127.0.0.1:4321/mcp");
+    const child = spawn(
+      process.execPath,
+      ["-e", "process.send?.('ready');setInterval(()=>{},1000)"],
+      { stdio: ["ignore", "ignore", "ignore", "ipc"] },
+    );
+    try {
+      await once(child, "message");
+      assert.ok(child.pid);
+      writePid(dataDir, agent.skill.name, child.pid);
+      writeFileSync(
+        join(dataDir, "pids", `${agent.skill.name}.runtime.json`),
+        `${JSON.stringify({
+          schemaVersion: 1,
+          agentName: agent.skill.name,
+          pid: child.pid,
+          coreVersion: getRollCoreVersion(),
+          startedAt: new Date(0).toISOString(),
+          endpoint:
+            agent.transport.type === "streamable-http" ? agent.transport.endpoint : undefined,
+        })}\n`,
+        "utf-8",
+      );
+
+      await assert.rejects(
+        stopAgentGracefully(dataDir, agent.skill.name),
+        AgentRuntimeIdentityError,
+      );
+      assert.doesNotThrow(() => process.kill(child.pid ?? 0, 0));
+      assert.equal(existsSync(join(dataDir, "pids", `${agent.skill.name}.runtime.json`)), true);
+    } finally {
+      if (child.exitCode === null) child.kill("SIGKILL");
+      rmSync(dataDir, { recursive: true, force: true });
+    }
+  });
 });
 
 function createCoreManagedAgent(endpoint: string): RegisteredAgent {
@@ -103,4 +344,37 @@ function writePid(dataDir: string, agentName: string, pid: number): void {
   const pidDir = join(dataDir, "pids");
   mkdirSync(pidDir, { recursive: true });
   writeFileSync(join(pidDir, `${agentName}.pid`), String(pid), "utf-8");
+}
+
+function writeRuntimeSidecarFixture(agent: RegisteredAgent, dataDir: string, pid: number): void {
+  const pidDir = join(dataDir, "pids");
+  mkdirSync(pidDir, { recursive: true });
+  writeFileSync(
+    join(pidDir, `${agent.skill.name}.runtime.json`),
+    `${JSON.stringify({
+      schemaVersion: 2,
+      agentName: agent.skill.name,
+      pid,
+      processStartToken: staleProcessStartToken(),
+      coreVersion: getRollCoreVersion(),
+      startedAt: new Date(0).toISOString(),
+      endpoint: agent.transport.type === "streamable-http" ? agent.transport.endpoint : undefined,
+    })}\n`,
+    "utf-8",
+  );
+}
+
+function readRuntimeIdentity(agent: RegisteredAgent, dataDir: string): ManagedAgentRuntimeIdentity {
+  const inspection = inspectManagedAgentRuntime(agent, dataDir);
+  assert.ok(inspection.sidecar);
+  assert.deepEqual(inspection.issues, []);
+  return {
+    pid: inspection.sidecar.pid,
+    processStartToken: inspection.sidecar.processStartToken,
+    startedAt: inspection.sidecar.startedAt,
+  };
+}
+
+function staleProcessStartToken(): string {
+  return `pst-v1:${"0".repeat(64)}`;
 }

@@ -4,11 +4,18 @@ export type AgentTransport =
   | { readonly type: "streamable-http"; readonly endpoint: string };
 
 /** SKILL.md frontmatter 解析结果 */
+export const AGENT_ENV_VALUE_TYPES = ["string", "boolean", "number", "json", "url"] as const;
+export type AgentEnvValueType = (typeof AGENT_ENV_VALUE_TYPES)[number];
+
 export interface AgentEnvDeclaration {
   readonly name: string;
   readonly purpose?: string;
   readonly example?: string;
   readonly default?: string;
+  readonly type?: AgentEnvValueType;
+  readonly secret?: boolean;
+  readonly configurable?: boolean;
+  readonly sourcePath?: readonly string[];
 }
 
 export interface AgentSkillEnvDeclarations {
@@ -39,11 +46,7 @@ export const AGENT_SOURCE_TYPES = [
 export type AgentSourceType = (typeof AGENT_SOURCE_TYPES)[number];
 
 /** Agent 运行时 ownership */
-export const AGENT_RUNTIME_OWNERSHIPS = [
-  "on-demand",
-  "core-managed",
-  "external-managed",
-] as const;
+export const AGENT_RUNTIME_OWNERSHIPS = ["on-demand", "core-managed", "external-managed"] as const;
 export type AgentRuntimeOwnership = (typeof AGENT_RUNTIME_OWNERSHIPS)[number];
 
 /** Agent 来源（用于 update 策略判断） */

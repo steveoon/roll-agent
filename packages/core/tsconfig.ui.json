@@ -1,0 +1,12 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "rootDir": ".",
+    "lib": ["ES2024", "DOM", "DOM.Iterable"],
+    "types": ["node", "vite/client", "react", "react-dom"],
+    "jsx": "react-jsx",
+    "module": "ESNext",
+    "moduleResolution": "Bundler"
+  },
+  "include": ["ui/**/*.ts", "ui/**/*.tsx", "vite.config.ts"]
+}

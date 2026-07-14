@@ -60,7 +60,11 @@ const PACKAGE_CHECKS = [
     expectedFiles: [
       "package/dist/cli/index.js",
       "package/dist/cli/index.d.ts",
+      "package/dist/ui-assets/index.html",
+      "package/dist/ui-assets/assets/app.js",
+      "package/dist/ui-assets/assets/app.css",
       "package/bin/roll.js",
+      "package/THIRD_PARTY_NOTICES.txt",
     ],
     verifyManifest(manifest) {
       assert.equal(manifest.exports?.["."].default, "./dist/cli/index.js");
@@ -110,7 +114,12 @@ const PACKAGE_CHECKS = [
   {
     name: "@roll-agent/browser-use-agent",
     cwd: resolve(repoRoot, "agents/browser-use"),
-    expectedFiles: ["package/dist/index.js", "package/dist/index.d.ts", "package/SKILL.md"],
+    expectedFiles: [
+      "package/dist/index.js",
+      "package/dist/index.d.ts",
+      "package/SKILL.md",
+      "package/references/env.yaml",
+    ],
     expectedJavaScriptFiles: ["package/dist/index.js"],
     verifyManifest(manifest) {
       assert.equal(manifest.exports?.["."].default, "./dist/index.js");

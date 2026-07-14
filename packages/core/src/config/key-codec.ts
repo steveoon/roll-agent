@@ -1,154 +1,74 @@
+import { z } from "zod";
+import { rollConfigSchema } from "./schema.ts";
+
 export type KeyCodecNode =
   | { readonly kind: "object"; readonly fields: Readonly<Record<string, KeyCodecNode>> }
   | { readonly kind: "record"; readonly value: KeyCodecNode }
+  | { readonly kind: "array"; readonly item: KeyCodecNode }
   | { readonly kind: "leaf" };
 
 const LEAF: KeyCodecNode = { kind: "leaf" };
 
-const PROVIDER_NODE: KeyCodecNode = {
-  kind: "object",
-  fields: {
-    apiKey: LEAF,
-    baseUrl: LEAF,
-  },
-};
+/**
+ * 从 Zod schema 派生 YAML key 编码树。
+ *
+ * object 字段使用 kebab-case；record 的动态 key 和 array 的索引保持原样。
+ * 这让新增普通 Roll 配置字段无需再维护第二份 key 清单。
+ */
+export function buildKeyCodecNode(schema: z.ZodTypeAny): KeyCodecNode {
+  const unwrapped = unwrapSchema(schema);
 
-const BROWSER_INSTANCE_NODE: KeyCodecNode = {
-  kind: "object",
-  fields: {
-    platform: LEAF,
-    mode: LEAF,
-    headless: LEAF,
-    cdpUrl: LEAF,
-    cdpHost: LEAF,
-    cdpPort: LEAF,
-    channel: LEAF,
-    executablePath: LEAF,
-    userDataDir: LEAF,
-    sessionsDir: LEAF,
-    args: LEAF,
-    profileName: LEAF,
-    profileColor: LEAF,
-    windowBounds: {
-      kind: "object",
-      fields: {
-        x: LEAF,
-        y: LEAF,
-        width: LEAF,
-        height: LEAF,
-      },
-    },
-    trackingAgentId: LEAF,
-  },
-};
+  if (unwrapped instanceof z.ZodObject) {
+    const fields = Object.fromEntries(
+      Object.entries(unwrapped.shape).map(([key, child]) => {
+        if (!(child instanceof z.ZodType)) {
+          throw new Error(`Unsupported Zod object field: ${key}`);
+        }
+        return [key, buildKeyCodecNode(child)];
+      }),
+    );
+    return { kind: "object", fields };
+  }
 
-export const CONFIG_KEY_CODEC: KeyCodecNode = {
-  kind: "object",
-  fields: {
-    llm: {
-      kind: "object",
-      fields: {
-        defaultProvider: LEAF,
-        defaultModel: LEAF,
-        providers: {
-          kind: "record",
-          value: PROVIDER_NODE,
-        },
-      },
-    },
-    ask: {
-      kind: "object",
-      fields: {
-        llmModel: LEAF,
-        confirmThreshold: LEAF,
-      },
-    },
-    runtime: {
-      kind: "object",
-      fields: {
-        provider: LEAF,
-        model: LEAF,
-        maxSteps: LEAF,
-        turnTimeoutMs: LEAF,
-        threadsDir: LEAF,
-        contextWindow: LEAF,
-        thinkingLevel: LEAF,
-        approval: {
-          kind: "object",
-          fields: {
-            default: LEAF,
-            overrides: {
-              kind: "record",
-              value: LEAF,
-            },
-          },
-        },
-        compaction: {
-          kind: "object",
-          fields: {
-            enabled: LEAF,
-            strategy: LEAF,
-            threshold: LEAF,
-            keepRecentTurns: LEAF,
-            keepRecentTokens: LEAF,
-          },
-        },
-        shell: {
-          kind: "object",
-          fields: {
-            enabled: LEAF,
-            autoApproveSafe: LEAF,
-            defaultTimeoutMs: LEAF,
-            maxTimeoutMs: LEAF,
-            maxCaptureBytes: LEAF,
-            maxModelOutputChars: LEAF,
-            session: {
-              kind: "object",
-              fields: {
-                enabled: LEAF,
-                maxSessions: LEAF,
-                defaultYieldMs: LEAF,
-                maxOutputTokens: LEAF,
-              },
-            },
-          },
-        },
-      },
-    },
-    agents: {
-      kind: "object",
-      fields: {
-        dataDir: LEAF,
-        env: {
-          kind: "record",
-          value: {
-            kind: "record",
-            value: LEAF,
-          },
-        },
-      },
-    },
-    install: {
-      kind: "object",
-      fields: {
-        registry: LEAF,
-        fetchRetries: LEAF,
-        preferOffline: LEAF,
-        networkTimeoutMs: LEAF,
-      },
-    },
-    browser: {
-      kind: "object",
-      fields: {
-        defaultInstance: LEAF,
-        instances: {
-          kind: "record",
-          value: BROWSER_INSTANCE_NODE,
-        },
-      },
-    },
-  },
-};
+  if (unwrapped instanceof z.ZodRecord) {
+    return { kind: "record", value: buildKeyCodecNode(unwrapped.valueSchema) };
+  }
+
+  if (unwrapped instanceof z.ZodArray) {
+    return { kind: "array", item: buildKeyCodecNode(unwrapped.element) };
+  }
+
+  return LEAF;
+}
+
+function unwrapSchema(schema: z.ZodTypeAny): z.ZodTypeAny {
+  if (schema instanceof z.ZodOptional || schema instanceof z.ZodNullable) {
+    return unwrapSchema(schema.unwrap());
+  }
+  if (schema instanceof z.ZodDefault) {
+    return unwrapSchema(schema.removeDefault());
+  }
+  if (schema instanceof z.ZodEffects) {
+    return unwrapSchema(schema.innerType());
+  }
+  if (schema instanceof z.ZodCatch) {
+    return unwrapSchema(schema.removeCatch());
+  }
+  if (schema instanceof z.ZodBranded) {
+    return unwrapSchema(schema.unwrap());
+  }
+  return schema;
+}
+
+function buildConfigKeyCodec(): Extract<KeyCodecNode, { readonly kind: "object" }> {
+  const codec = buildKeyCodecNode(rollConfigSchema);
+  if (codec.kind !== "object") {
+    throw new Error("rollConfigSchema root must be an object");
+  }
+  return codec;
+}
+
+export const CONFIG_KEY_CODEC = buildConfigKeyCodec();
 
 export function kebabToCamel(key: string): string {
   return key.replace(/-([a-z])/g, (_, ch: string) => ch.toUpperCase());
@@ -164,7 +84,8 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 export function decodeFromYaml(value: unknown, node: KeyCodecNode = CONFIG_KEY_CODEC): unknown {
   if (Array.isArray(value)) {
-    return value.map((item) => decodeFromYaml(item, node));
+    const itemNode = node.kind === "array" ? node.item : node;
+    return value.map((item) => decodeFromYaml(item, itemNode));
   }
   if (!isRecord(value)) {
     return value;
@@ -191,11 +112,51 @@ export function decodeFromYaml(value: unknown, node: KeyCodecNode = CONFIG_KEY_C
   return value;
 }
 
-function walkUserPath(parts: readonly string[], objectKeyOutput: "camel" | "kebab"): string[] {
-  const result: string[] = [];
-  let current: KeyCodecNode = CONFIG_KEY_CODEC;
+/**
+ * 将运行时使用的 camelCase 配置对象编码为持久化 YAML 使用的 kebab-case 结构。
+ *
+ * `record` 节点的用户键必须原样保留，例如 provider 名、Agent 名以及
+ * `runtime.approval.overrides` 中可能包含英文句点的完整 tool name。
+ */
+export function encodeToYaml(value: unknown, node: KeyCodecNode = CONFIG_KEY_CODEC): unknown {
+  if (Array.isArray(value)) {
+    const itemNode = node.kind === "array" ? node.item : node;
+    return value.map((item) => encodeToYaml(item, itemNode));
+  }
+  if (!isRecord(value)) {
+    return value;
+  }
 
-  for (const part of parts) {
+  if (node.kind === "object") {
+    const result: Record<string, unknown> = {};
+    for (const [key, child] of Object.entries(value)) {
+      const childNode = node.fields[key] ?? LEAF;
+      result[camelToKebab(key)] = encodeToYaml(child, childNode);
+    }
+    return result;
+  }
+
+  if (node.kind === "record") {
+    const result: Record<string, unknown> = {};
+    for (const [key, child] of Object.entries(value)) {
+      result[key] = encodeToYaml(child, node.value);
+    }
+    return result;
+  }
+
+  return value;
+}
+
+function walkUserPath(
+  parts: readonly string[],
+  objectKeyOutput: "camel" | "kebab",
+  root: KeyCodecNode,
+): string[] {
+  const result: string[] = [];
+  let current = root;
+
+  for (let index = 0; index < parts.length; index += 1) {
+    const part = parts[index] as string;
     if (current.kind === "object") {
       const camelKey = kebabToCamel(part);
       const childNode = current.fields[camelKey];
@@ -207,8 +168,30 @@ function walkUserPath(parts: readonly string[], objectKeyOutput: "camel" | "keba
         current = LEAF;
       }
     } else if (current.kind === "record") {
+      const recordValue = current.value;
+      if (recordValue.kind === "leaf") {
+        result.push(parts.slice(index).join("."));
+        break;
+      }
+
+      if (recordValue.kind === "object") {
+        const fieldIndex = parts.findIndex(
+          (candidate, candidateIndex) =>
+            candidateIndex > index && recordValue.fields[kebabToCamel(candidate)] !== undefined,
+        );
+        if (fieldIndex > index) {
+          result.push(parts.slice(index, fieldIndex).join("."));
+          current = recordValue;
+          index = fieldIndex - 1;
+          continue;
+        }
+      }
+
       result.push(part);
-      current = current.value;
+      current = recordValue;
+    } else if (current.kind === "array") {
+      result.push(part);
+      current = current.item;
     } else {
       result.push(part);
     }
@@ -217,10 +200,16 @@ function walkUserPath(parts: readonly string[], objectKeyOutput: "camel" | "keba
   return result;
 }
 
-export function encodePathToYaml(parts: readonly string[]): string[] {
-  return walkUserPath(parts, "kebab");
+export function encodePathToYaml(
+  parts: readonly string[],
+  node: KeyCodecNode = CONFIG_KEY_CODEC,
+): string[] {
+  return walkUserPath(parts, "kebab", node);
 }
 
-export function normalizeUserPath(parts: readonly string[]): string[] {
-  return walkUserPath(parts, "camel");
+export function normalizeUserPath(
+  parts: readonly string[],
+  node: KeyCodecNode = CONFIG_KEY_CODEC,
+): string[] {
+  return walkUserPath(parts, "camel", node);
 }

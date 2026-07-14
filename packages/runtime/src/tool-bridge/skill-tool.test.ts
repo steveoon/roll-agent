@@ -50,6 +50,14 @@ test("加载 skill 返回正文与 references 列表", () => {
   assert.ok(String(result.output).includes("workdir"));
 });
 
+test("空 reference 与主 SKILL.md 别名都加载正文", () => {
+  for (const reference of ["", "   ", ".", "./", "/", "SKILL.md", "./SKILL.md"]) {
+    const result = runSkillTool({ name: "demo", reference });
+    assert.equal(result.isError, false, `reference=${JSON.stringify(reference)}`);
+    assert.ok(String(result.output).includes("按流程操作"));
+  }
+});
+
 test("加载 reference 返回文件内容", () => {
   const result = runSkillTool({ name: "demo", reference: "references/guide.md" });
   assert.equal(result.isError, false);
@@ -114,6 +122,7 @@ test("未知 skill 与未知 reference 返回错误并列出可用项", () => {
   const missingRef = runSkillTool({ name: "demo", reference: "references/nope.md" });
   assert.equal(missingRef.isError, true);
   assert.match(String(missingRef.output), /不存在 reference/);
+  assert.match(String(missingRef.output), /加载主 SKILL\.md 时请省略 reference/);
 });
 
 test("AgentSession 集成：模型调用 roll__skill 并收到 skill 内容", async () => {
@@ -126,7 +135,7 @@ test("AgentSession 集成：模型调用 roll__skill 并收到 skill 内容", as
         type: "tool-call",
         toolCallId: "c1",
         toolName: "roll__skill",
-        input: JSON.stringify({ name: "demo" }),
+        input: JSON.stringify({ name: "demo", reference: "" }),
       },
       {
         type: "finish",

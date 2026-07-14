@@ -164,10 +164,14 @@ metadata:
   - name: API_TOKEN
     purpose: Access upstream API
     example: \${API_TOKEN}
+    secret: true
 optional:
   - name: MODEL_ID
     purpose: Override model selection
     default: provider/default-model
+    type: string
+    configurable: false
+    sourcePath: [runtime, model]
 `,
     );
 
@@ -178,6 +182,7 @@ optional:
           name: "API_TOKEN",
           purpose: "Access upstream API",
           example: "$" + "{API_TOKEN}",
+          secret: true,
         },
       ],
       optional: [
@@ -185,6 +190,9 @@ optional:
           name: "MODEL_ID",
           purpose: "Override model selection",
           default: "provider/default-model",
+          type: "string",
+          configurable: false,
+          sourcePath: ["runtime", "model"],
         },
       ],
     });

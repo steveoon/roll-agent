@@ -146,7 +146,19 @@ function normalizeWithKeyCodec(
   node: KeyCodecNode,
   path: readonly string[],
 ): KeyCodecNormalizationResult {
-  if (!isRecord(value) || node.kind === "leaf") {
+  if (Array.isArray(value) && node.kind === "array") {
+    const normalized: unknown[] = [];
+    for (const [index, child] of value.entries()) {
+      const normalizedChild = normalizeWithKeyCodec(child, node.item, [...path, String(index)]);
+      if (!normalizedChild.ok) {
+        return normalizedChild;
+      }
+      normalized.push(normalizedChild.value);
+    }
+    return { ok: true, value: normalized };
+  }
+
+  if (!isRecord(value) || node.kind === "leaf" || node.kind === "array") {
     return { ok: true, value };
   }
 
@@ -188,7 +200,10 @@ function normalizeRuntimeShellSection(
 }
 
 function dedupeEquivalentAliasKeys(value: unknown, node: KeyCodecNode): unknown {
-  if (!isRecord(value) || node.kind === "leaf") {
+  if (Array.isArray(value) && node.kind === "array") {
+    return value.map((child) => dedupeEquivalentAliasKeys(child, node.item));
+  }
+  if (!isRecord(value) || node.kind === "leaf" || node.kind === "array") {
     return value;
   }
   const deduped: Record<string, unknown> = {};

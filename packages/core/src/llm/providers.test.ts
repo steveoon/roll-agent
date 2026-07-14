@@ -2,6 +2,10 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { createProviderModel, resolveLLMCall, thinkingProviderOptions } from "./providers.ts";
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
 describe("createProviderModel", () => {
   it("should create an anthropic model", () => {
     const model = createProviderModel("anthropic", "claude-sonnet-4-6", "test-key");
@@ -94,6 +98,122 @@ describe("resolveLLMCall", () => {
 
     assert.equal(resolved.model.modelId, "gpt-5.5");
     assert.equal(resolved.providerOptions, undefined);
+  });
+
+  it("keeps the exact OpenAI model and replays history for custom Responses endpoints", () => {
+    const chat = resolveLLMCall(
+      "openai",
+      "gpt-5.4",
+      "test-key",
+      "chat",
+      "https://custom-api.example.com/v1",
+    );
+    const sampling = resolveLLMCall(
+      "openai",
+      "gpt-5.4",
+      "test-key",
+      "sampling",
+      "https://custom-api.example.com/v1",
+      "high",
+    );
+    const withoutReasoning = resolveLLMCall(
+      "openai",
+      "gpt-4.1",
+      "test-key",
+      "chat",
+      "https://custom-api.example.com/v1",
+      "off",
+    );
+
+    assert.equal(chat.model.modelId, "gpt-5.4");
+    assert.deepEqual(chat.providerOptions, {
+      openai: { reasoningEffort: "medium", store: false },
+    });
+    assert.deepEqual(sampling.providerOptions, {
+      openai: { reasoningEffort: "high", store: false },
+    });
+    assert.deepEqual(withoutReasoning.providerOptions, {
+      openai: { store: false },
+    });
+  });
+
+  it("keeps the OpenAI Responses storage default without an explicit base URL", () => {
+    const resolved = resolveLLMCall("openai", "gpt-5.4", "test-key", "chat");
+
+    assert.deepEqual(resolved.providerOptions, {
+      openai: { reasoningEffort: "medium" },
+    });
+  });
+
+  it("serializes custom OpenAI-compatible history without item references", async () => {
+    const originalFetch = globalThis.fetch;
+    let capturedUrl: string | undefined;
+    let capturedBody: unknown;
+
+    try {
+      globalThis.fetch = async (input: string | URL | Request, init?: RequestInit) => {
+        capturedUrl = input instanceof Request ? input.url : String(input);
+        if (typeof init?.body !== "string") {
+          throw new Error("Expected a JSON request body");
+        }
+        capturedBody = JSON.parse(init.body);
+
+        return new Response("", {
+          status: 200,
+          headers: { "content-type": "text/event-stream" },
+        });
+      };
+
+      const resolved = resolveLLMCall(
+        "openai",
+        "gpt-5.4",
+        "test-key",
+        "chat",
+        "https://custom-api.example.com/v1",
+      );
+      const result = await resolved.model.doStream({
+        prompt: [
+          {
+            role: "user",
+            content: [{ type: "text", text: "first" }],
+          },
+          {
+            role: "assistant",
+            content: [
+              {
+                type: "text",
+                text: "first answer",
+                providerOptions: { openai: { itemId: "msg_123" } },
+              },
+            ],
+          },
+          {
+            role: "user",
+            content: [{ type: "text", text: "second" }],
+          },
+        ],
+        ...(resolved.providerOptions ? { providerOptions: resolved.providerOptions } : {}),
+      });
+      await result.stream.cancel();
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+
+    assert.equal(capturedUrl, "https://custom-api.example.com/v1/responses");
+    assert.ok(isRecord(capturedBody));
+    assert.equal(capturedBody.store, false);
+
+    const rawInput = capturedBody.input;
+    assert.ok(Array.isArray(rawInput));
+    const input: readonly unknown[] = rawInput;
+    assert.equal(
+      input.some((item) => isRecord(item) && item.type === "item_reference"),
+      false,
+    );
+    assert.equal(
+      input.some((item) => isRecord(item) && item.role === "assistant"),
+      true,
+    );
   });
 
   it("applies the same thinking mapping to sampling calls as chat calls", () => {
