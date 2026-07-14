@@ -499,6 +499,10 @@ export function App() {
 
   return (
     <div className="app-shell">
+      <a className="skip-link" href="#config-editor-main">
+        跳到配置编辑区
+      </a>
+      <h1 className="sr-only">Roll 本地配置控制台</h1>
       <header className="top-bar">
         <div className="brand-block">
           <div className="roll-mark" aria-hidden="true">
@@ -575,7 +579,7 @@ export function App() {
         onNavigate={navigateTo}
       />
 
-      <main className="editor-main">
+      <main id="config-editor-main" className="editor-main" tabIndex={-1}>
         <div className="editor-scroll-region">
           {currentSnapshot.repairMode === true && (
             <div className="repair-banner" role="alert">

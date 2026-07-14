@@ -320,31 +320,59 @@ function AgentFieldControl({
   }
   if (field.widget === "textarea") {
     const errorId = `${id}-error`;
+    const noteId = `${id}-note`;
     return (
       <div className="json-control">
-        <textarea
-          id={id}
-          name={pathName}
-          rows={5}
-          value={value}
-          placeholder={placeholder}
-          spellCheck={false}
-          autoComplete={effectiveSecret ? "new-password" : "off"}
-          aria-invalid={jsonError !== undefined}
-          aria-describedby={jsonError === undefined ? undefined : errorId}
-          onChange={(event) => {
-            const next = event.target.value;
-            const nextValue = effectiveSecret ? resolveSecretInput(next) : next;
-            onValidityChange(
-              path,
-              field.type === "json" ? validateJsonText(next, next.length > 0) : undefined,
-            );
-            onSet(nextValue);
-          }}
-        />
+        <div className="config-value-control json-env-control">
+          <textarea
+            id={id}
+            name={pathName}
+            rows={5}
+            value={value}
+            placeholder={placeholder}
+            spellCheck={false}
+            autoComplete={effectiveSecret ? "new-password" : "off"}
+            aria-invalid={jsonError !== undefined}
+            aria-describedby={
+              field.type !== "json"
+                ? undefined
+                : jsonError === undefined
+                  ? noteId
+                  : `${noteId} ${errorId}`
+            }
+            onChange={(event) => {
+              const next = event.target.value;
+              const nextValue = effectiveSecret ? resolveSecretInput(next) : next;
+              onValidityChange(
+                path,
+                field.type === "json" ? validateJsonText(next, next.length > 0) : undefined,
+              );
+              onSet(nextValue);
+            }}
+          />
+          {field.type === "json" && (
+            <button
+              type="button"
+              className="env-reference-button"
+              title="使用环境变量引用"
+              aria-label={`为${field.title}使用环境变量引用`}
+              onClick={() => {
+                onValidityChange(path, undefined);
+                onSet(ENV_REFERENCE_TEMPLATE);
+              }}
+            >
+              ENV
+            </button>
+          )}
+        </div>
         {jsonError !== undefined && (
           <small className="input-error" id={errorId}>
             {jsonError}
+          </small>
+        )}
+        {field.type === "json" && (
+          <small className="field-input-note" id={noteId}>
+            固定 JSON 或完整的 <code>&#36;&#123;ENV_VAR&#125;</code> 引用
           </small>
         )}
       </div>

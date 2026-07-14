@@ -3,6 +3,7 @@ import { spawn } from "node:child_process";
 import { once } from "node:events";
 import {
   chmodSync,
+  existsSync,
   lstatSync,
   mkdtempSync,
   readFileSync,
@@ -11,8 +12,9 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { delimiter, join } from "node:path";
 import { describe, it } from "node:test";
+import { readProcessStartToken } from "../registry/process-identity.ts";
 import {
   ConfigRevisionConflictError,
   ConfigWriteLockError,
@@ -108,6 +110,8 @@ agents:
 
   it("serializes cooperative Roll writers with a process-owned lock", () => {
     withTemporaryConfig(FALLBACK_CONFIG, ({ configPath, store }) => {
+      const processStartToken = readProcessStartToken(process.pid);
+      assert.ok(processStartToken);
       const snapshot = store.read();
       const preview = store.previewPatches(
         [{ op: "set", path: ["ask", "confirm-threshold"], value: 0.6 }],
@@ -115,12 +119,47 @@ agents:
       );
       writeFileSync(
         `${configPath}.roll-write.lock`,
-        `${JSON.stringify({ pid: process.pid, token: "other-writer", createdAtMs: Date.now() })}\n`,
+        `${JSON.stringify({
+          pid: process.pid,
+          processStartToken,
+          token: "other-writer",
+          createdAtMs: Date.now(),
+        })}\n`,
         "utf-8",
       );
 
       assert.throws(() => store.commit(preview), ConfigWriteLockError);
       assert.equal(readFileSync(configPath, "utf-8"), FALLBACK_CONFIG);
+    });
+  });
+
+  it("reclaims a write lock when its live PID belongs to another process instance", () => {
+    withTemporaryConfig(FALLBACK_CONFIG, ({ configPath, store }) => {
+      const processStartToken = readProcessStartToken(process.pid);
+      assert.ok(processStartToken);
+      const replacement = processStartToken.endsWith("0") ? "1" : "0";
+      const reusedPidToken = `${processStartToken.slice(0, -1)}${replacement}`;
+      const snapshot = store.read();
+      const preview = store.previewPatches(
+        [{ op: "set", path: ["ask", "confirm-threshold"], value: 0.6 }],
+        snapshot.revision,
+      );
+      const lockPath = `${configPath}.roll-write.lock`;
+      writeFileSync(
+        lockPath,
+        `${JSON.stringify({
+          pid: process.pid,
+          processStartToken: reusedPidToken,
+          token: "stale-writer",
+          createdAtMs: Date.now(),
+        })}\n`,
+        "utf-8",
+      );
+
+      store.commit(preview);
+
+      assert.match(readFileSync(configPath, "utf-8"), /confirm-threshold: 0\.6/u);
+      assert.equal(existsSync(lockPath), false);
     });
   });
 
@@ -273,9 +312,17 @@ const timer = setInterval(() => {
     const directory = mkdtempSync(join(tmpdir(), "roll-config-store-windows-"));
     const configPath = join(directory, "roll.config.yaml");
     const platformDescriptor = Object.getOwnPropertyDescriptor(process, "platform");
+    const originalPath = process.env["PATH"];
     writeFileSync(configPath, "ask:\n  confirm-threshold: 0.5\n", "utf-8");
 
     try {
+      if (process.platform !== "win32") {
+        const powershellPath = join(directory, "powershell.exe");
+        writeFileSync(powershellPath, "#!/bin/sh\nprintf '638000000000000000\\n'\n", {
+          mode: 0o700,
+        });
+        process.env["PATH"] = [directory, originalPath].filter(Boolean).join(delimiter);
+      }
       const store = new YamlConfigDocumentStore(configPath, "ask: {}\n");
       const preview = store.previewPatches([
         { op: "set", path: ["ask", "confirm-threshold"], value: 0.75 },
@@ -293,6 +340,8 @@ const timer = setInterval(() => {
       if (platformDescriptor !== undefined) {
         Object.defineProperty(process, "platform", platformDescriptor);
       }
+      if (originalPath === undefined) delete process.env["PATH"];
+      else process.env["PATH"] = originalPath;
       chmodSync(directory, 0o700);
       rmSync(directory, { recursive: true, force: true });
     }

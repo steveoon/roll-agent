@@ -55,11 +55,11 @@ export function validateNumberInput(
 }
 
 export function validateJsonText(value: string, present: boolean): string | undefined {
-  if (!present) return undefined;
+  if (!present || isCompleteEnvReference(value)) return undefined;
   try {
     JSON.parse(value);
     return undefined;
   } catch {
-    return "请输入有效 JSON";
+    return `请输入有效 JSON 或完整的 ${ENV_REFERENCE_TEMPLATE} 引用`;
   }
 }

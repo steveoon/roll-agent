@@ -15,6 +15,8 @@ import {
 } from "node:fs";
 import { basename, dirname, resolve } from "node:path";
 import { parseDocument } from "yaml";
+import { isProcessStartToken, readProcessStartToken } from "../registry/process-identity.ts";
+import type { ProcessStartToken } from "../registry/process-identity.ts";
 
 const CONFIG_REVISION_BRAND: unique symbol = Symbol("ConfigRevision");
 const CONFIG_WRITE_LOCK_STALE_MS = 5 * 60_000;
@@ -430,6 +432,7 @@ function writeTextAtomic(
 
 interface ConfigWriteLockFile {
   readonly pid: number;
+  readonly processStartToken: ProcessStartToken;
   readonly token: string;
   readonly createdAtMs: number;
 }
@@ -441,8 +444,15 @@ interface ConfigWriteLock {
 function acquireConfigWriteLock(configPath: string): ConfigWriteLock {
   mkdirSync(dirname(configPath), { recursive: true });
   const lockPath = `${configPath}.roll-write.lock`;
+  const processStartToken = readProcessStartToken(process.pid);
+  if (processStartToken === undefined) {
+    throw new Error(
+      `无法验证当前 Roll 进程 (PID: ${String(process.pid)}) 的 OS 启动身份，拒绝获取配置写锁。`,
+    );
+  }
   const record: ConfigWriteLockFile = {
     pid: process.pid,
+    processStartToken,
     token: randomUUID(),
     createdAtMs: Date.now(),
   };
@@ -489,7 +499,8 @@ function removeStaleConfigWriteLock(lockPath: string): boolean {
   }
   const record = parseConfigWriteLockFile(raw);
   const ageMs = Date.now() - (record?.createdAtMs ?? modifiedAtMs);
-  const stale = record === undefined ? ageMs > CONFIG_WRITE_LOCK_STALE_MS : !isPidAlive(record.pid);
+  const stale =
+    record === undefined ? ageMs > CONFIG_WRITE_LOCK_STALE_MS : isConfigWriteLockStale(record);
   if (!stale) return false;
 
   try {
@@ -518,13 +529,27 @@ function parseConfigWriteLockFile(raw: string): ConfigWriteLockFile | undefined 
     typeof value.pid !== "number" ||
     !Number.isInteger(value.pid) ||
     value.pid <= 0 ||
+    !isProcessStartToken(value.processStartToken) ||
     typeof value.token !== "string" ||
     typeof value.createdAtMs !== "number" ||
     !Number.isFinite(value.createdAtMs)
   ) {
     return undefined;
   }
-  return { pid: value.pid, token: value.token, createdAtMs: value.createdAtMs };
+  return {
+    pid: value.pid,
+    processStartToken: value.processStartToken,
+    token: value.token,
+    createdAtMs: value.createdAtMs,
+  };
+}
+
+function isConfigWriteLockStale(record: ConfigWriteLockFile): boolean {
+  if (!isPidAlive(record.pid)) return true;
+  const currentProcessStartToken = readProcessStartToken(record.pid);
+  return (
+    currentProcessStartToken !== undefined && currentProcessStartToken !== record.processStartToken
+  );
 }
 
 function isPidAlive(pid: number): boolean {

@@ -49,9 +49,14 @@ describe("Roll UI input validation", () => {
     );
   });
 
-  it("validates JSON while allowing an unset field", () => {
+  it("accepts JSON, an unset field or a complete environment reference", () => {
     assert.equal(validateJsonText("", false), undefined);
     assert.equal(validateJsonText('{"enabled":true}', true), undefined);
-    assert.equal(validateJsonText('{"enabled":', true), "请输入有效 JSON");
+    assert.equal(validateJsonText(envReference("BROWSER_SECURITY_JSON"), true), undefined);
+    assert.match(validateJsonText('{"enabled":', true) ?? "", /有效 JSON/u);
+    assert.match(
+      validateJsonText(envReference("BROWSER_SECURITY_JSON").slice(0, -1), true) ?? "",
+      /完整/u,
+    );
   });
 });
