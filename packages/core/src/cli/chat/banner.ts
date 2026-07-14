@@ -103,6 +103,80 @@ export function buildBannerLines(
   return lines;
 }
 
+/** Leading logo rows: single colored span, not dim (excludes blank / info / hints). */
+export function isLogoBannerLine(line: BannerLine): boolean {
+  if (line.spans.length !== 1) {
+    return false;
+  }
+  const span = line.spans[0];
+  return span !== undefined && span.color !== undefined && span.dim !== true;
+}
+
+export function splitBannerLogoLines(lines: readonly BannerLine[]): {
+  readonly logo: readonly BannerLine[];
+  readonly rest: readonly BannerLine[];
+} {
+  let count = 0;
+  while (count < lines.length && lines[count] !== undefined && isLogoBannerLine(lines[count]!)) {
+    count += 1;
+  }
+  return { logo: lines.slice(0, count), rest: lines.slice(count) };
+}
+
+function linePlainText(line: BannerLine): string {
+  return line.spans.map((span) => span.text).join("");
+}
+
+export const REVEAL_EDGE_COLOR = "#f0f9ff";
+const REVEAL_EDGE_WIDTH = 2;
+
+/** Logo lines are single-span (enforced by isLogoBannerLine). */
+function revealLine(line: BannerLine, visibleCols: number): BannerLine {
+  const span = line.spans[0];
+  if (span === undefined) {
+    return line;
+  }
+  const chars = Array.from(span.text);
+  const visibleEnd = Math.min(visibleCols, chars.length);
+  const settledEnd = Math.min(Math.max(0, visibleCols - REVEAL_EDGE_WIDTH), chars.length);
+  const spans: BannerSpan[] = [];
+  if (settledEnd > 0) {
+    spans.push({ ...span, text: chars.slice(0, settledEnd).join("") });
+  }
+  if (visibleEnd > settledEnd) {
+    spans.push({
+      ...span,
+      text: chars.slice(settledEnd, visibleEnd).join(""),
+      color: REVEAL_EDGE_COLOR,
+    });
+  }
+  if (chars.length > visibleEnd) {
+    spans.push({ text: " ".repeat(chars.length - visibleEnd) });
+  }
+  return { spans: spans.length > 0 ? spans : [{ text: "" }] };
+}
+
+/**
+ * Left-to-right reveal for logo rows. `progress` in [0, 1]; layout width preserved via
+ * spaces. The 1–2 columns at the reveal frontier render in a bright edge color and settle
+ * to the row's palette color behind it; at progress >= 1 the edge is gone.
+ */
+export function revealLogoLines(
+  logoLines: readonly BannerLine[],
+  progress: number,
+): readonly BannerLine[] {
+  if (logoLines.length === 0) {
+    return logoLines;
+  }
+  const clamped = progress <= 0 ? 0 : progress >= 1 ? 1 : progress;
+  if (clamped >= 1) {
+    return logoLines;
+  }
+  const maxWidth = Math.max(0, ...logoLines.map((line) => Array.from(linePlainText(line)).length));
+  const visibleCols = Math.floor(clamped * maxWidth);
+  return logoLines.map((line) => revealLine(line, visibleCols));
+}
+
 function renderSpan(span: BannerSpan): string {
   let styler = chalk;
   if (span.color !== undefined) {
