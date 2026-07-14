@@ -1,5 +1,12 @@
 # @roll-agent/runtime
 
+## 0.7.1
+
+### Patch Changes
+
+- [#146](https://github.com/steveoon/roll-agent/pull/146) [`d5cfdd0`](https://github.com/steveoon/roll-agent/commit/d5cfdd051110b58d4ab46ea0656ceb6316f9b3bf) Thanks [@steveoon](https://github.com/steveoon)! - Make `roll__skill` tolerate empty and main-document reference aliases so models can reliably load
+  the primary `SKILL.md`, while preserving the existing references directory sandbox.
+
 ## 0.7.0
 
 ### Minor Changes

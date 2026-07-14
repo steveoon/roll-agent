@@ -1,5 +1,17 @@
 # smart-reply-agent
 
+## 1.3.6
+
+### Patch Changes
+
+- [#146](https://github.com/steveoon/roll-agent/pull/146) [`d5cfdd0`](https://github.com/steveoon/roll-agent/commit/d5cfdd051110b58d4ab46ea0656ceb6316f9b3bf) Thanks [@steveoon](https://github.com/steveoon)! - Add the on-demand `roll ui` local configuration console with schema-derived forms, safe YAML editing, secret redaction, revision checks, and runtime activation planning.
+
+  Expose typed Agent environment metadata so both the CLI and configuration UI can reuse the same declarations.
+
+  Agent env declarations now fail closed: omitting `secret` is equivalent to `secret: true`, so authors must mark non-sensitive fields explicitly with `secret: false`.
+
+  Harden managed Agent activation with OS process-start identities so stale or legacy PID metadata fails closed instead of signaling a reused PID.
+
 ## 1.3.5
 
 ### Patch Changes

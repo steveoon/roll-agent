@@ -1,5 +1,26 @@
 # @roll-agent/core
 
+## 0.19.0
+
+### Minor Changes
+
+- [#146](https://github.com/steveoon/roll-agent/pull/146) [`d5cfdd0`](https://github.com/steveoon/roll-agent/commit/d5cfdd051110b58d4ab46ea0656ceb6316f9b3bf) Thanks [@steveoon](https://github.com/steveoon)! - Add the on-demand `roll ui` local configuration console with schema-derived forms, safe YAML editing, secret redaction, revision checks, and runtime activation planning.
+
+  Expose typed Agent environment metadata so both the CLI and configuration UI can reuse the same declarations.
+
+  Agent env declarations now fail closed: omitting `secret` is equivalent to `secret: true`, so authors must mark non-sensitive fields explicitly with `secret: false`.
+
+  Harden managed Agent activation with OS process-start identities so stale or legacy PID metadata fails closed instead of signaling a reused PID.
+
+### Patch Changes
+
+- [#145](https://github.com/steveoon/roll-agent/pull/145) [`66dec47`](https://github.com/steveoon/roll-agent/commit/66dec47b70c6576877352bc6b498851863913e04) Thanks [@steveoon](https://github.com/steveoon)! - `roll chat` Ink 欢迎 banner 增加一次性 logo 入场揭示动画（缓动 + 光刃前沿），播完定格进 Static，不影响长会话流式输出重绘。
+
+- [#146](https://github.com/steveoon/roll-agent/pull/146) [`a8f68d2`](https://github.com/steveoon/roll-agent/commit/a8f68d2f9ca2d51a9aa417752982d0e2d9621fc3) Thanks [@steveoon](https://github.com/steveoon)! - Fix multi-turn `roll chat` failures against OpenAI-compatible Responses endpoints by replaying
+  conversation history instead of relying on server-stored response item IDs.
+- Updated dependencies [[`d5cfdd0`](https://github.com/steveoon/roll-agent/commit/d5cfdd051110b58d4ab46ea0656ceb6316f9b3bf)]:
+  - @roll-agent/runtime@0.7.1
+
 ## 0.18.0
 
 ### Minor Changes
