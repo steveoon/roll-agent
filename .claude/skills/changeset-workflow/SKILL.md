@@ -62,10 +62,12 @@ pnpm --filter @roll-agent/core build && node packages/core/dist/cli/index.js age
 
 PR 合入 main 后，GitHub Actions `release.yml` 自动执行：
 
-1. **quality job** — 依次运行 dependency-denylist、security audit、typecheck、lint、test、e2e、build
-2. **release job**（依赖 quality）— install dependencies、build packages，然后调用 `changesets/action`：
-   - 若存在 changeset 文件 → 创建或更新标题为 **`chore: version packages`** 的 release PR（执行 `pnpm version-packages` 更新版本号和 CHANGELOG）
-   - 若不存在 changeset 文件 → 执行 `node scripts/release-packages.mjs`；常见场景是 release PR 刚合并并触发 npm 发布。若只是无 changeset 的普通 `main` push，脚本完成校验后 `changeset publish` 应没有可发布包。
+1. **quality** — dependency-denylist、security audit、typecheck、lint、test、e2e、build
+2. **release_pr**（依赖 quality）— 调用 `changesets/action`：
+   - 若存在 changeset 文件 → 创建或更新标题为 **`chore: version packages`** 的 release PR（执行 `pnpm version-packages`）
+   - 若不存在 changeset 文件 → 输出 `hasChangesets=false`，进入发布链路
+3. **npm_publish**（仅当无 changeset）— `node scripts/release-packages.mjs`，用 Trusted Publishing（OIDC）发布；不注入 `NPM_TOKEN`
+4. **github_releases**（仅当 npm_publish 成功）— `node scripts/create-github-releases.mjs`，只注入 GitHub token
 
 ## Step 4: 发布流程（自动）
 
@@ -74,9 +76,14 @@ PR 合入 main 后，GitHub Actions `release.yml` 自动执行：
 2. `pnpm build`
 3. `pnpm verify:published-packages`（校验 `package.json` 中 name / lifecycle scripts 以及 tarball 发布内容合规）
 4. 校验发布面：`require-pnpm-publish` guard hash、允许的 `prepublishOnly`、禁止的 publish-time lifecycle scripts
-5. 通过临时 `.npmrc` 注入 `secrets.NPM_TOKEN`
-6. `pnpm exec changeset publish`
-7. 清理临时 `.npmrc`
+5. 断言 GitHub Actions OIDC 环境（`GITHUB_ACTIONS` + `ACTIONS_ID_TOKEN_*`）
+6. `pnpm exec changeset publish`（pnpm 原生 OIDC，无临时 `.npmrc` / `NPM_TOKEN`）
+
+`scripts/create-github-releases.mjs` 在 npm publish 成功后自动完成：
+1. 读取当前允许发布包的 `package.json` 与 `CHANGELOG.md`
+2. 用 `${packageName}@${version}` 作为 GitHub Release tag / title
+3. 已存在的 release 直接跳过
+4. 缺失的 release 用 GitHub token 创建；该步骤不注入 npm 凭证
 
 **不需要也不应该手动执行发布命令。**
 
@@ -84,6 +91,7 @@ PR 合入 main 后，GitHub Actions `release.yml` 自动执行：
 
 ```bash
 node scripts/release-packages.mjs --dry-run
+node scripts/create-github-releases.mjs --dry-run
 ```
 
 仅用于本地诊断，不会发布到 npm。`pnpm release:legacy:dry-run` 是旧发布脚本的诊断入口，不代表当前 release workflow。

@@ -59,14 +59,16 @@ pnpm --filter @roll-agent/core build && node packages/core/dist/cli/index.js age
 
 最后一条命令无已注册 Agent 时输出“暂无已注册 Agent”即通过。失败说明 `dist/` 中存在残留 `.ts` specifier，需在合并前修复。
 
-## Step 3: PR 合入 main 后的自动化流程
+## Step 3: PR 合入 `main` 后的自动化流程
 
 PR 合入 `main` 后，GitHub Actions `release.yml` 自动执行：
 
-1. **quality job** — 依次运行 dependency-denylist、security audit、typecheck、lint、workspace test、script test、e2e、build
-2. **release job**（依赖 quality）— install dependencies、build packages，然后调用 `changesets/action`：
-   - 若存在 changeset 文件 -> 创建或更新标题为 **`chore: version packages`** 的 release PR（执行 `pnpm version-packages` 更新版本号和 CHANGELOG）
-   - 若不存在 changeset 文件 -> 执行 `node scripts/release-packages.mjs` 发布 npm，再执行 `node scripts/create-github-releases.mjs` 补齐 GitHub Releases。若只是无 changeset 的普通 `main` push，脚本完成校验后 `changeset publish` 应没有可发布包，GitHub Release 步骤会跳过已存在的 release。
+1. **quality** — dependency-denylist、security audit、typecheck、lint、workspace test、script test、e2e、build
+2. **release_pr**（依赖 quality）— 调用 `changesets/action`：
+   - 若存在 changeset 文件 -> 创建或更新标题为 **`chore: version packages`** 的 release PR（执行 `pnpm version-packages`）
+   - 若不存在 changeset 文件 -> 输出 `hasChangesets=false`，进入发布链路
+3. **npm_publish**（仅当无 changeset）— `node scripts/release-packages.mjs`，用 Trusted Publishing（OIDC）发布；不注入 `NPM_TOKEN`
+4. **github_releases**（仅当 npm_publish 成功）— `node scripts/create-github-releases.mjs`，只注入 GitHub token
 
 ## Step 4: 发布流程（自动）
 
@@ -76,16 +78,15 @@ PR 合入 `main` 后，GitHub Actions `release.yml` 自动执行：
 2. `pnpm build`
 3. `pnpm verify:published-packages`（校验 `package.json` 中 name / lifecycle scripts 以及 tarball 发布内容合规）
 4. 校验发布面：`require-pnpm-publish` guard hash、允许的 `prepublishOnly`、禁止的 publish-time lifecycle scripts
-5. 通过临时 `.npmrc` 注入 `secrets.NPM_TOKEN`
-6. `pnpm exec changeset publish`
-7. 清理临时 `.npmrc`
+5. 断言 GitHub Actions OIDC 环境（`GITHUB_ACTIONS` + `ACTIONS_ID_TOKEN_*`）
+6. `pnpm exec changeset publish`（pnpm 原生 OIDC，无临时 `.npmrc` / `NPM_TOKEN`）
 
 `scripts/create-github-releases.mjs` 在 npm publish 成功后自动完成：
 
 1. 读取当前允许发布包的 `package.json` 与 `CHANGELOG.md`
 2. 用 `${packageName}@${version}` 作为 GitHub Release tag / title
 3. 已存在的 release 直接跳过
-4. 缺失的 release 用 GitHub token 创建；该步骤不注入 `NPM_TOKEN`
+4. 缺失的 release 用 GitHub token 创建；该步骤不注入 npm 凭证
 
 **不需要也不应该手动执行发布命令。**
 
