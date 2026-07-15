@@ -2,6 +2,12 @@ packages:
   - "packages/*"
   - "agents/*"
 
+overrides:
+  hono: 4.12.25
+
+shamefullyHoist: false
+strictPeerDependencies: false
+
 minimumReleaseAge: 10080
 minimumReleaseAgeExclude:
   - esbuild

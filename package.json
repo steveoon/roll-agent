@@ -3,9 +3,9 @@
   "private": true,
   "type": "module",
   "engines": {
-    "node": ">=22.6.0"
+    "node": ">=22.13.0"
   },
-  "packageManager": "pnpm@10.31.0",
+  "packageManager": "pnpm@11.13.0",
   "scripts": {
     "dev": "node --disable-warning=ExperimentalWarning --experimental-strip-types --experimental-sqlite packages/core/src/cli/index.ts",
     "build": "pnpm -r run build",
@@ -26,11 +26,6 @@
     "lint:fix": "eslint . --fix",
     "format": "prettier --write .",
     "format:check": "prettier --check ."
-  },
-  "pnpm": {
-    "overrides": {
-      "hono": "4.12.25"
-    }
   },
   "devDependencies": {
     "@changesets/changelog-github": "^0.6.0",

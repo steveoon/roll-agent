@@ -2,13 +2,11 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { readFile } from "node:fs/promises";
+import { resolve } from "node:path";
 import { PUBLISHED_PACKAGES } from "./published-packages.mjs";
 
 const repoRoot = resolve(import.meta.dirname, "..");
-const publishToken = process.env["NPM_TOKEN"] ?? process.env["NODE_AUTH_TOKEN"];
 const dryRun =
   process.argv.includes("--dry-run") || process.env["ROLL_AGENT_RELEASE_DRY_RUN"] === "1";
 const PUBLISH_GUARD_HASH = "f48e27617b0e572bfed877cda9a59845eb354fe4e49ba2b00f07d1733e08d574";
@@ -33,26 +31,30 @@ async function main() {
     console.log("Dry run complete; skipping changeset publish.");
     return;
   }
-  await publishWithScopedToken();
+  await publishWithTrustedPublisher();
 }
 
-async function publishWithScopedToken() {
-  const tempRoot = await mkdtemp(join(tmpdir(), "roll-agent-publish-"));
+async function publishWithTrustedPublisher() {
+  assertTrustedPublisherEnvironment();
+  await run("pnpm", ["exec", "changeset", "publish"], {
+    env: withoutPublishSecrets(process.env),
+  });
+}
 
-  try {
-    const publishEnv = withoutPublishSecrets(process.env);
-    if (publishToken !== undefined && publishToken.length > 0) {
-      const npmrcPath = join(tempRoot, ".npmrc");
-      await writeFile(npmrcPath, `//registry.npmjs.org/:_authToken=${publishToken}\n`, {
-        mode: 0o600,
-      });
-      publishEnv["NPM_CONFIG_USERCONFIG"] = npmrcPath;
-    }
-
-    await run("pnpm", ["exec", "changeset", "publish"], { env: publishEnv });
-  } finally {
-    await rm(tempRoot, { recursive: true, force: true });
-  }
+function assertTrustedPublisherEnvironment() {
+  assert.equal(
+    process.env["GITHUB_ACTIONS"],
+    "true",
+    "npm publishing is restricted to the GitHub Actions Trusted Publisher workflow",
+  );
+  assert.ok(
+    process.env["ACTIONS_ID_TOKEN_REQUEST_URL"],
+    "GitHub Actions OIDC permission id-token: write is required for npm publishing",
+  );
+  assert.ok(
+    process.env["ACTIONS_ID_TOKEN_REQUEST_TOKEN"],
+    "GitHub Actions OIDC request token is required for npm publishing",
+  );
 }
 
 async function assertPublishSurface() {
