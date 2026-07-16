@@ -1,5 +1,14 @@
 # smart-reply-agent
 
+## 1.3.7
+
+### Patch Changes
+
+- [#150](https://github.com/steveoon/roll-agent/pull/150) [`6515fc2`](https://github.com/steveoon/roll-agent/commit/6515fc24aaddfb866a60b0ed3275d814467cc989) Thanks [@steveoon](https://github.com/steveoon)! - Clarify that smart-reply only relays Reply Authority protocol data (including optional replyVariants) and does not own dual-draft Judge, `/reply-feedback`, or BOSS send; point Roll BOSS closed-loop callers to browser-use prepared-reply tools.
+
+- Updated dependencies [[`6515fc2`](https://github.com/steveoon/roll-agent/commit/6515fc24aaddfb866a60b0ed3275d814467cc989)]:
+  - @roll-agent/reply-authority-client@0.6.0
+
 ## 1.3.6
 
 ### Patch Changes
