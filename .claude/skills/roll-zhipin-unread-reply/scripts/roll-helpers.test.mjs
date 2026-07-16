@@ -107,10 +107,7 @@ assert.deepEqual(JSON.parse(previewSingleOption.stdout), {
 const applyBundle = runHelper(
   "apply-send-bundle.mjs",
   JSON.stringify({
-    sendInput: {
-      preparedReplyId: "prep_3",
-      variantDecision: { chosenOption: "option_1", reason: "ok" },
-    },
+    sendInput: { preparedReplyId: "prep_3" },
     meta: { hasDualDraft: true },
   }),
   ["/tmp/roll-zhipin-sp-test.json"],
@@ -123,11 +120,17 @@ const formatSent = runHelper(
     bundle: {
       meta: {
         hasDualDraft: true,
-        judgeAttempted: true,
-        chosenOption: "option_2",
+        feedbackExpected: true,
       },
     },
-    send: { ok: true, feedbackStatus: "accepted" },
+    send: {
+      ok: true,
+      chosenOption: "option_2",
+      decisionSource: "judge",
+      decisionReason: "更简洁且回答了排班问题",
+      feedbackExpected: true,
+      feedbackStatus: "accepted",
+    },
   }),
   ["sent", "ts1", "Alice", "cid1", "prep_4", "1"],
 );
@@ -136,43 +139,53 @@ const sentLine = JSON.parse(formatSent.stdout);
 assert.equal(sentLine.ok, true);
 assert.equal(sentLine.chosenOption, "option_2");
 assert.equal(sentLine.feedbackStatus, "accepted");
+assert.equal(sentLine.feedbackClosed, true);
+assert.equal(sentLine.feedbackQueued, false);
+assert.equal(sentLine.feedbackGap, false);
+assert.equal(sentLine.learningSkipped, false);
+assert.equal(sentLine.decisionSource, "judge");
+assert.equal(sentLine.decisionReason, "更简洁且回答了排班问题");
 assert.equal(sentLine.exchangedWechat, true);
 
-const sendPayload = runHelper(
-  "build-send-payload.mjs",
-  JSON.stringify({
-    success: true,
-    variantDecision: {
-      chosenOption: "option_2",
-      reason: "更简洁且回答了排班问题",
-      confirmedFindingCodes: [],
-    },
-  }),
-  ["prep_1", "1", "0"],
-);
+const sendPayload = runHelper("build-send-payload.mjs", "", ["prep_1", "1", "0"]);
 assert.equal(sendPayload.status, 0);
 const bundle = JSON.parse(sendPayload.stdout);
-assert.deepEqual(bundle.sendInput, {
-  preparedReplyId: "prep_1",
-  variantDecision: {
-    chosenOption: "option_2",
-    reason: "更简洁且回答了排班问题",
-    confirmedFindingCodes: [],
-  },
-});
-assert.equal(bundle.meta.chosenOption, "option_2");
+assert.deepEqual(bundle.sendInput, { preparedReplyId: "prep_1" });
+assert.equal(bundle.meta.chosenOption, null);
+assert.equal(bundle.meta.decisionSource, null);
+assert.equal(bundle.meta.feedbackExpected, true);
 
 const sendPayloadNoJudge = runHelper("build-send-payload.mjs", "", ["prep_2", "1", "1"]);
 assert.equal(sendPayloadNoJudge.status, 0);
-assert.deepEqual(JSON.parse(sendPayloadNoJudge.stdout).sendInput, { preparedReplyId: "prep_2" });
+assert.deepEqual(JSON.parse(sendPayloadNoJudge.stdout).sendInput, {
+  preparedReplyId: "prep_2",
+  skipVariantJudge: true,
+});
 assert.equal(JSON.parse(sendPayloadNoJudge.stdout).meta.judgeSkipped, true);
+assert.equal(JSON.parse(sendPayloadNoJudge.stdout).meta.decisionSource, "explicit_no_judge");
 
 const sendResult = runHelper(
   "parse-send-result.mjs",
-  JSON.stringify({ success: true, feedbackStatus: "accepted" }),
+  JSON.stringify({
+    success: true,
+    chosenOption: "option_2",
+    decisionSource: "judge",
+    decisionReason: "更简洁且回答了排班问题",
+    judgeModel: "mcp-sampling",
+    feedbackExpected: true,
+    feedbackStatus: "accepted",
+  }),
 );
 assert.equal(sendResult.status, 0);
-assert.deepEqual(JSON.parse(sendResult.stdout), { ok: true, feedbackStatus: "accepted" });
+assert.deepEqual(JSON.parse(sendResult.stdout), {
+  ok: true,
+  feedbackStatus: "accepted",
+  chosenOption: "option_2",
+  decisionSource: "judge",
+  decisionReason: "更简洁且回答了排班问题",
+  judgeModel: "mcp-sampling",
+  feedbackExpected: true,
+});
 
 const missingSelection = spawnSync("node", [path.join(dir, "validate-browser-selection.mjs")], {
   input: JSON.stringify({

@@ -12,7 +12,7 @@ When multiple agents cooperate:
 3. Pass only the minimum validated output from one agent into the next.
 4. Add an external verification step after side effects (send, write, create, update, click, type).
 
-## Pattern 1: Read -> Generate/Preview -> Decide -> Send -> Verify
+## Pattern 1: Read -> Generate/Preview -> Resolve -> Send -> Verify
 
 Use this pattern when one agent reads state, a generator or preview tool prepares content, and a
 sender performs the external side effect.
@@ -26,7 +26,8 @@ roll run <reader-agent> <read-tool> --input-json '{...}' --json
 # 2. Generate or preview response from validated input
 roll run <generator-agent> <generate-or-preview-tool> --input-json '{...}' --json
 
-# 3. If the output contains neutral alternatives, run the documented judge/decision helper
+# 3. Optional: resolve alternatives only when the target contract requires or exposes this step.
+#    The decision may instead be sender-owned.
 roll run <decision-agent> <judge-or-decision-tool> --input-json '{...}' --json
 
 # 4. Prepare or verify the exact target context before sending when the target skill requires it
@@ -50,9 +51,9 @@ For generated side effects:
 - Pass only the minimum opaque artifact required by the sender tool, such as `preparedReplyId`,
   instead of exposing or storing lower-level authorization envelopes in the orchestrator.
 - If the generation/preview output includes neutral alternatives such as `replyVariantSelection`,
-  run the target agent's documented judge tool or make an explicit orchestrator choice, then pass
-  only the documented decision object to the sender. Do not infer hidden labels behind `option_1` /
-  `option_2` style choices.
+  follow the target agent's decision ownership. The sender may own the required Judge internally; a
+  separate Judge may be optional preview only; or the orchestrator may provide an explicit choice.
+  Do not infer hidden labels behind `option_1` / `option_2` style choices.
 - Filter out low-confidence, policy-risk, validation-risk, stale-target, or otherwise unsafe results
   before constructing the send batch.
 - Do not send provisional draft text or model output directly unless the sender tool explicitly
@@ -89,13 +90,13 @@ roll run browser-use-agent zhipin_read_messages \
 roll run browser-use-agent zhipin_generate_reply_preview \
   --input-json '{"browserInstance":"boss-a","conversationId":"..."}' --json
 
-# only when preview returns replyVariantSelection
+# optional preview only; the default send path does not require this call
 roll run browser-use-agent zhipin_judge_prepared_reply \
   --input-json '{"preparedReplyId":"..."}' --json
 
-# resume browser-runtime with the same routing key
+# default path: resume browser-runtime with the same routing key; send owns Judge + feedback closure
 roll run browser-use-agent zhipin_send_prepared_reply \
-  --input-json '{"browserInstance":"boss-a","preparedReplyId":"...","variantDecision":{...}}' --json
+  --input-json '{"browserInstance":"boss-a","preparedReplyId":"..."}' --json
 
 roll run browser-use-agent zhipin_read_messages \
   --input-json '{"browserInstance":"boss-a","onlyUnread":true,"limit":5}' --json
@@ -105,9 +106,12 @@ Variant-specific rules:
 
 - `zhipin_judge_prepared_reply` is a global/no-runtime helper. Do not add `browserInstance` to its input.
 - Keep `preparedReplyId` scoped to the workflow that created it; resume browser-runtime calls with the original `browserInstance`.
-- If judge returns `fallback:true`, omit `variantDecision` and call `zhipin_send_prepared_reply` with only `preparedReplyId`; the sender falls back to the recommended draft and skips feedback.
-- If orchestrator chooses manually, pass only `variantDecision.chosenOption` as `option_1` or `option_2`; do not infer hidden draft labels from preview text.
+- If judge returns `fallback:true`, omit `variantDecision`; the sender uses the recommended draft and submits `not_learned`, closing Pending without adding Beta evidence.
+- If orchestrator chooses manually, `variantDecision` must include `chosenOption` (`option_1` or `option_2`) and a concrete audit `reason`; `confirmedFindingCodes` / `judgeModel` remain optional. “Only neutral options” means do not infer hidden draft labels from preview text.
 - If send returns `needs_confirmation`, retry the same send with the same `browserInstance`, `preparedReplyId`, `variantDecision`, reason, and approval object returned by the tool.
+- Treat `feedbackStatus:"accepted"|"duplicate"` as closed, `queued` as outbox-owned retry, and `failed` as a feedback gap after the candidate message was already sent. Never rerun send to repair feedback.
+- `feedbackExpected:false` means no Beta learning; it does not mean the feedback terminal callback is optional.
+- The browser-use outbox caps retries at Reply Authority `feedbackExpiresAt`; the orchestrator must not extend the deadline or POST feedback independently.
 
 ## Pattern 2: Brand / Tenant / Workspace Switch Before Generation
 

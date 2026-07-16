@@ -49,6 +49,18 @@ roll agent start <agent-name>
 roll agent health --json
 ```
 
+## Reply Authority V3 Compatibility
+
+When deploying the current `browser-use-agent` dual-draft workflow:
+
+```text
+1. Deploy Reply Authority RFC V3
+2. Verify the service accepts feedbackOutcome / decisionSource and returns feedbackExpiresAt
+3. Deploy or update browser-use-agent
+```
+
+Do not deploy the new browser-use agent against an older Reply Authority feedback schema. Older Roll callers remain compatible with RFC V3, so the safe mixed-version window is **new service + old caller**, not the reverse.
+
 ## Config setup / explain
 
 Use these when you need field documentation or guided edits without hand-writing YAML keys:

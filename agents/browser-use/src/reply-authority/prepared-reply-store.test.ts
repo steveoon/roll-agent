@@ -6,6 +6,7 @@ import {
   resetPreparedReplyStoreForTests,
   savePreparedReply,
 } from "./prepared-reply-store.ts";
+import { PreparedReplyFallbackReasons } from "./prepared-reply-decision.ts";
 
 afterEach(() => {
   resetPreparedReplyStoreForTests();
@@ -94,6 +95,7 @@ describe("prepared reply store", () => {
         confidence: 0.9,
         expiresAt: 200,
         variantGroup: {
+          state: "judge_ready",
           groupId: "rvg_abc123",
           options: [
             {
@@ -125,6 +127,10 @@ describe("prepared reply store", () => {
             conversationId: "conv-1",
           },
           recommendedOption: "option_2",
+          judgeContext: {
+            candidateMessage: "薪资多少？",
+            recentConversation: [],
+          },
         },
       },
       100,
@@ -133,20 +139,68 @@ describe("prepared reply store", () => {
     const inspected = inspectPreparedReply(saved.preparedReplyId, 120);
     assert.equal(inspected.ok, true);
     if (inspected.ok) {
-      assert.equal(inspected.record.variantGroup?.groupId, "rvg_abc123");
-      assert.equal(inspected.record.variantGroup?.options[0]?.variant, "revised");
+      const variantGroup = inspected.record.variantGroup;
+      assert.equal(variantGroup?.groupId, "rvg_abc123");
+      assert.equal(variantGroup?.state, "judge_ready");
+      if (variantGroup?.state === "judge_ready") {
+        assert.equal(variantGroup.options[0]?.variant, "revised");
+      }
     }
 
     const first = consumePreparedReply(saved.preparedReplyId, 121);
     assert.equal(first.ok, true);
     if (first.ok) {
-      assert.equal(first.record.variantGroup?.recommendedOption, "option_2");
+      const variantGroup = first.record.variantGroup;
+      assert.equal(variantGroup?.state, "judge_ready");
+      if (variantGroup?.state === "judge_ready") {
+        assert.equal(variantGroup.recommendedOption, "option_2");
+      }
     }
 
     assert.deepEqual(consumePreparedReply(saved.preparedReplyId, 122), {
       ok: false,
       reason: "consumed",
     });
+  });
+
+  it("preserves non-learning feedback groups without judge-ready options", () => {
+    const saved = savePreparedReply(
+      {
+        signedEnvelope: "payload.draft.signature",
+        suggestedReply: "你好，薪资可以详聊。",
+        stage: "job_consultation",
+        confidence: 0.9,
+        expiresAt: 200,
+        variantGroup: {
+          state: "not_learned",
+          groupId: "rvg_fallback",
+          rubricVersion: "reply-quality-v1",
+          rubricHash: "sha256:test",
+          feedbackExpiresAt: 300,
+          target: {
+            platform: "zhipin",
+            tenantId: "tenant-001",
+            conversationId: "conv-1",
+          },
+          chosenVariant: "draft",
+          reason: PreparedReplyFallbackReasons.RUBRIC_FETCH_FAILED,
+        },
+      },
+      100,
+    );
+
+    const inspected = inspectPreparedReply(saved.preparedReplyId, 120);
+    assert.equal(inspected.ok, true);
+    if (inspected.ok) {
+      assert.equal(inspected.record.variantGroup?.state, "not_learned");
+      if (inspected.record.variantGroup?.state === "not_learned") {
+        assert.equal(inspected.record.variantGroup.groupId, "rvg_fallback");
+        assert.equal(
+          inspected.record.variantGroup.reason,
+          PreparedReplyFallbackReasons.RUBRIC_FETCH_FAILED,
+        );
+      }
+    }
   });
 
   it("expires stale prepared replies", () => {

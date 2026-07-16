@@ -188,13 +188,17 @@ Rules:
 
 - Prefer the opaque sender contract documented by the target agent, such as `preparedReplyId`, over
   passing low-level envelopes or raw generated text through the orchestrator.
-- If a tool returns neutral alternatives such as `replyVariantSelection`, do not send immediately
-  unless the target agent documents a compatible default. Run the documented judge/decision helper or
-  choose an option explicitly, then pass the resulting decision object to the sender tool.
+- If a tool returns neutral alternatives such as `replyVariantSelection`, follow the target agent's
+  documented decision ownership. Some sender tools own the required Judge internally and should be
+  called with only the opaque artifact; other agents may require a separate decision helper or an
+  explicit orchestrator choice.
 - Do not infer hidden labels behind neutral options. Treat `option_1` / `option_2` style labels as the
   only orchestrator-visible choices.
-- Retry confirmation-gated sends with the same routing key, prepared artifact, chosen option, reason,
-  and approval object. Do not reuse an approval after changing the prepared artifact or decision.
+- Retry confirmation-gated sends with the same routing key, prepared artifact, explicit decision
+  inputs (if any), and approval object. Do not reuse an approval after changing the prepared artifact
+  or decision.
+- After a side-effecting sender reports that the external message was sent, do not repeat the send to
+  repair an audit/feedback callback. Follow the target agent's outbox or terminal-status contract.
 - If a generator agent still returns a lower-level envelope, use it only when the target agent's own
   `SKILL.md` says that is the intended sender contract. For browser-mediated sends, prefer the
   browser agent's prepared-send flow so sensitive envelopes stay inside that agent.

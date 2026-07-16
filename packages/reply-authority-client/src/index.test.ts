@@ -10,6 +10,8 @@ import {
   prepareReplyContext,
   PrepareReplyContextResponseSchema,
   ReplyAuthorityRequestError,
+  ReplyFeedbackBodySchema,
+  ReplyVariantsSchema,
   ReplyStreamLocationResolvedEventSchema,
   streamGenerateSignedReply,
 } from "./index.ts";
@@ -73,6 +75,7 @@ const REPLY_VARIANTS = {
   ],
   rubricVersion: "reply-quality-v1",
   rubricHash: "sha256:test",
+  feedbackExpiresAt: 4_102_445_000,
 } as const;
 
 function sseFrame(event: unknown): string {
@@ -377,6 +380,15 @@ describe("@roll-agent/reply-authority-client", () => {
     assert.equal(final.replyVariants?.groupId, "rvg_abc123");
     assert.equal(final.replyVariants?.items[1]?.variant, "revised");
     assert.equal(final.replyVariants?.items[1]?.signedEnvelope, "payload.revised.signature");
+    assert.equal(final.replyVariants?.feedbackExpiresAt, 4_102_445_000);
+  });
+
+  it("accepts legacy replyVariants without a server feedback deadline", () => {
+    const { feedbackExpiresAt: _feedbackExpiresAt, ...legacyVariants } = REPLY_VARIANTS;
+    const parsed = ReplyVariantsSchema.parse(legacyVariants);
+
+    assert.equal(parsed.groupId, "rvg_abc123");
+    assert.equal(parsed.feedbackExpiresAt, undefined);
   });
 
   it("preserves replyVariants in SSE final events", async () => {
@@ -460,6 +472,8 @@ describe("@roll-agent/reply-authority-client", () => {
         conversationId: "conv-1",
       },
       chosenVariant: "revised",
+      feedbackOutcome: "selected",
+      decisionSource: "judge",
       confirmedFindingCodes: ["off_axis_fact_disclosure"],
       reason: "revised 更贴合候选人的问题",
       rubricVersion: "reply-quality-v1",
@@ -473,6 +487,39 @@ describe("@roll-agent/reply-authority-client", () => {
       (captured[0]?.body as { readonly chosenVariant?: string } | undefined)?.chosenVariant,
       "revised",
     );
+    assert.equal(
+      (captured[0]?.body as { readonly decisionSource?: string } | undefined)?.decisionSource,
+      "judge",
+    );
+
+    await postReplyFeedback({
+      groupId: "rvg_fallback",
+      target: {
+        platform: "zhipin",
+        tenantId: "tenant-001",
+        conversationId: "conv-2",
+      },
+      chosenVariant: "draft",
+      feedbackOutcome: "not_learned",
+      decisionSource: "service_recommended_fallback",
+      reason: "judge unavailable",
+      rubricVersion: "reply-quality-v1",
+      rubricHash: "sha256:test",
+    });
+    assert.deepEqual(captured[1]?.body, {
+      groupId: "rvg_fallback",
+      target: {
+        platform: "zhipin",
+        tenantId: "tenant-001",
+        conversationId: "conv-2",
+      },
+      chosenVariant: "draft",
+      feedbackOutcome: "not_learned",
+      decisionSource: "service_recommended_fallback",
+      reason: "judge unavailable",
+      rubricVersion: "reply-quality-v1",
+      rubricHash: "sha256:test",
+    });
 
     globalThis.fetch = async () =>
       new Response(
@@ -505,6 +552,48 @@ describe("@roll-agent/reply-authority-client", () => {
         error.statusCode === 409 &&
         error.message.includes("rubric mismatch"),
     );
+  });
+
+  it("rejects feedback outcome and decision source combinations that could pollute learning", () => {
+    const base = {
+      groupId: "rvg_abc123",
+      target: {
+        platform: "zhipin" as const,
+        tenantId: "tenant-001",
+        conversationId: "conv-1",
+      },
+      chosenVariant: "draft" as const,
+      reason: "audit reason",
+      rubricVersion: "reply-quality-v1",
+      rubricHash: "sha256:test",
+    };
+
+    assert.equal(
+      ReplyFeedbackBodySchema.safeParse({
+        ...base,
+        feedbackOutcome: "selected",
+        decisionSource: "explicit_no_judge",
+      }).success,
+      false,
+    );
+    assert.equal(
+      ReplyFeedbackBodySchema.safeParse({
+        ...base,
+        feedbackOutcome: "not_learned",
+        decisionSource: "judge",
+      }).success,
+      false,
+    );
+    assert.equal(
+      ReplyFeedbackBodySchema.safeParse({
+        ...base,
+        feedbackOutcome: "not_learned",
+        decisionSource: "explicit_no_judge",
+        confirmedFindingCodes: [],
+      }).success,
+      false,
+    );
+    assert.equal(ReplyFeedbackBodySchema.safeParse(base).success, true);
   });
 
   it("parses prepare reply context responses", () => {

@@ -105,15 +105,16 @@ Decision branch:
 
 | Preview output | Next step |
 |----------------|-----------|
-| `preparedReplyId` only | `zhipin_send_prepared_reply({ browserInstance, preparedReplyId })` |
-| `preparedReplyId` + `replyVariantSelection` | Default: `zhipin_judge_prepared_reply({ preparedReplyId })`, then send with returned `variantDecision` |
-| Orchestrator chooses manually | Build `variantDecision` with `chosenOption: "option_1"` or `"option_2"` only; do not infer hidden draft labels |
+| `preparedReplyId` only | Call send. It may be a single draft or a preview-degraded dual group that send will close as `not_learned`. |
+| `preparedReplyId` + `replyVariantSelection` | Default: call send with only `preparedReplyId`; send internally runs and caches the required Judge. |
+| Optional decision preview | Call `zhipin_judge_prepared_reply({ preparedReplyId })`; it does not take `browserInstance`. |
+| Orchestrator chooses manually | Build `variantDecision` with `chosenOption: "option_1"|"option_2"` plus a concrete audit `reason`; optional fields follow the target schema. Do not infer hidden draft labels. |
 
 Send and verify:
 
 ```bash
 roll run browser-use-agent zhipin_send_prepared_reply \
-  --input-json '{"browserInstance":"boss-a","preparedReplyId":"...","variantDecision":{...}}' --json
+  --input-json '{"browserInstance":"boss-a","preparedReplyId":"..."}' --json
 
 roll run browser-use-agent zhipin_read_messages \
   --input-json '{"browserInstance":"boss-a","onlyUnread":true,"limit":5}' --json
@@ -121,9 +122,13 @@ roll run browser-use-agent zhipin_read_messages \
 
 Rules:
 
-- `zhipin_judge_prepared_reply` does not take `browserInstance`; keep the prepared artifact tied to the workflow that created it.
-- If judge returns `fallback:true`, omit `variantDecision` and send with `preparedReplyId` only.
-- If send returns `needs_confirmation`, retry with the same routing key, prepared artifact, decision, reason, and approval object.
+- Keep `preparedReplyId` tied to the workflow and `browserInstance` that created it.
+- If the optional Judge returns `fallback:true`, omit `variantDecision`; send uses the recommended draft and submits a non-learning terminal outcome.
+- If send returns `needs_confirmation`, retry with the same routing key, prepared artifact, decision inputs, reason, and approval object.
+- `feedbackStatus:"accepted"|"duplicate"` means the terminal outcome is closed.
+- `feedbackStatus:"queued"` means the candidate message was sent and the outbox will retry only the feedback POST.
+- `feedbackStatus:"failed"` means the candidate message was sent but feedback has a gap. Never rerun send to repair `queued` or `failed`.
+- `feedbackExpected:false` means the outcome is excluded from Beta learning; it still requires a `not_learned` terminal callback.
 - Do not pass `signedEnvelope`, raw draft text, or preview-only strings through the orchestrator unless the target agent explicitly documents that contract.
 
 ## Batch Tool Calls

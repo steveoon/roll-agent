@@ -203,6 +203,15 @@ export const ReplyGateAdvisoryCodeValues = [
 
 export const ReplyVariantKindValues = ["draft", "revised"] as const;
 
+export const ReplyFeedbackOutcomeValues = ["selected", "not_learned"] as const;
+
+export const ReplyFeedbackDecisionSourceValues = [
+  "judge",
+  "orchestrator",
+  "service_recommended_fallback",
+  "explicit_no_judge",
+] as const;
+
 export const ReplyFeedbackStatusValues = ["accepted", "duplicate"] as const;
 
 export const ReplyGateAdvisoryCodeSchema = z.enum(ReplyGateAdvisoryCodeValues);
@@ -231,6 +240,7 @@ export const ReplyVariantsSchema = z.object({
     .string()
     .min(1)
     .regex(/^sha256:/),
+  feedbackExpiresAt: z.number().int().min(0).optional(),
 });
 
 const ReplyFeedbackTargetSchema = z.object({
@@ -239,19 +249,57 @@ const ReplyFeedbackTargetSchema = z.object({
   conversationId: z.string().min(1),
 });
 
-export const ReplyFeedbackBodySchema = z.object({
-  groupId: z.string().min(1),
-  target: ReplyFeedbackTargetSchema,
-  chosenVariant: ReplyVariantKindSchema,
-  confirmedFindingCodes: z.array(ReplyGateAdvisoryCodeSchema).optional(),
-  reason: z.string().min(1).max(500),
-  rubricVersion: z.string().min(1),
-  rubricHash: z
-    .string()
-    .min(1)
-    .regex(/^sha256:/),
-  judgeModel: z.string().min(1).optional(),
-});
+export const ReplyFeedbackBodySchema = z
+  .object({
+    groupId: z.string().min(1),
+    target: ReplyFeedbackTargetSchema,
+    chosenVariant: ReplyVariantKindSchema,
+    feedbackOutcome: z.enum(ReplyFeedbackOutcomeValues).optional(),
+    decisionSource: z.enum(ReplyFeedbackDecisionSourceValues).optional(),
+    confirmedFindingCodes: z.array(ReplyGateAdvisoryCodeSchema).optional(),
+    reason: z.string().min(1).max(500),
+    rubricVersion: z.string().min(1),
+    rubricHash: z
+      .string()
+      .min(1)
+      .regex(/^sha256:/),
+    judgeModel: z.string().min(1).optional(),
+  })
+  .superRefine((body, ctx) => {
+    const feedbackOutcome = body.feedbackOutcome ?? "selected";
+    if (
+      feedbackOutcome === "selected" &&
+      (body.decisionSource === "service_recommended_fallback" ||
+        body.decisionSource === "explicit_no_judge")
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "selected feedback requires judge or orchestrator source",
+        path: ["decisionSource"],
+      });
+    }
+    if (feedbackOutcome !== "not_learned") {
+      return;
+    }
+    if (
+      body.decisionSource !== "service_recommended_fallback" &&
+      body.decisionSource !== "explicit_no_judge"
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message:
+          "not_learned feedback requires service_recommended_fallback or explicit_no_judge source",
+        path: ["decisionSource"],
+      });
+    }
+    if (body.confirmedFindingCodes !== undefined) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "not_learned feedback must not include confirmedFindingCodes",
+        path: ["confirmedFindingCodes"],
+      });
+    }
+  });
 
 export const ReplyFeedbackResponseSchema = z.object({
   status: z.enum(ReplyFeedbackStatusValues),
@@ -407,6 +455,8 @@ export type PrepareReplyContextStatus = (typeof PrepareReplyContextStatusValues)
 export type PrepareReplyContextResponse = z.infer<typeof PrepareReplyContextResponseSchema>;
 export type ReplyGateAdvisoryCode = z.infer<typeof ReplyGateAdvisoryCodeSchema>;
 export type ReplyVariantKind = z.infer<typeof ReplyVariantKindSchema>;
+export type ReplyFeedbackOutcome = (typeof ReplyFeedbackOutcomeValues)[number];
+export type ReplyFeedbackDecisionSource = (typeof ReplyFeedbackDecisionSourceValues)[number];
 export type ReplyVariantItem = z.infer<typeof ReplyVariantItemSchema>;
 export type ReplyVariantFinding = z.infer<typeof ReplyVariantFindingSchema>;
 export type ReplyVariants = z.infer<typeof ReplyVariantsSchema>;

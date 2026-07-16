@@ -96,17 +96,50 @@ requires approval, `zhipin_send_prepared_reply` may return `needs_confirmation`.
 
 When `zhipin_generate_reply_preview` returns `replyVariantSelection`, the script:
 
-1. Calls `zhipin_judge_prepared_reply` (no `browserInstance` on this global tool).
-2. Passes returned `variantDecision` (includes `reason`) into `zhipin_send_prepared_reply`.
-3. Logs `hasDualDraft`, `chosenOption`, `judgeFallback`, and `feedbackStatus` in JSONL.
+1. Builds `sp.json` with only `preparedReplyId` on the default path.
+2. Calls `zhipin_send_prepared_reply`, which internally performs and caches the required Judge before
+   sending, then queues/posts feedback after a successful send.
+3. Logs the decision source/reason and feedback closure state returned by send in JSONL.
 
-If judge fails (`fallback: true`), the script sends the recommended option without `variantDecision`
-(same as legacy behavior; `feedbackStatus` is `skipped`).
+This makes Judge a code-level invariant at the send boundary. The batch script cannot silently omit a
+separate Judge call, and a standalone Judge transport failure no longer blocks a valid prepared reply.
+`zhipin_judge_prepared_reply` remains available for optional preview outside the batch script.
 
-Hard judge failures (`success: false`, e.g. expired/consumed `preparedReplyId`) abort at `send_build`
-without calling `zhipin_send_prepared_reply`.
+Decision outcomes:
 
-Pass `--no-judge` to skip the judge step and always send the recommended option.
+- A normal decision is tagged `decisionSource:"judge"`, includes a concrete `decisionReason`, and sets
+  `feedbackExpected:true`.
+- An internal Judge fallback sends the service recommendation, returns
+  `decisionSource:"service_recommended_fallback"`, and sets `feedbackExpected:false`; it submits a
+  terminal `not_learned` outcome so the service can close Pending, but not fallback preference as
+  learning evidence.
+- Preview-time rubric fetch/hash or dual-draft shape failures preserve the same terminal group and
+  send the top-level recommendation without invoking Judge, so these groups do not silently expire.
+- Cross-service fallback reasons are fixed safe codes. Raw provider, HTTP, or parser errors stay in
+  local browser-use-agent logs and must not be written into feedback, JSONL, or Reply Authority
+  storage.
+- `--no-judge` / `-NoJudge` is break-glass only. It explicitly sends `skipVariantJudge:true`, returns
+  `decisionSource:"explicit_no_judge"`, sets `feedbackExpected:false`, and submits the same
+  non-learning terminal outcome.
+- Expired, consumed, invalid, or policy-blocked prepared replies fail inside send and are never reported
+  as successful learning decisions.
+
+Feedback states in each sent JSONL row:
+
+| Outcome | `feedbackExpected` | `feedbackClosed` | `feedbackQueued` | `feedbackGap` | `learningSkipped` |
+| --- | --- | --- | --- | --- | --- |
+| `accepted` / `duplicate` | `true` | `true` | `false` | `false` | `false` |
+| `queued` | `true` | `false` | `true` | `false` | `false` |
+| `failed` / missing | `true` | `false` | `false` | `true` | `false` |
+| Judge fallback / explicit no-Judge, outcome closed | `false` | `true` | `false` | `false` | `true` |
+| Judge fallback / explicit no-Judge, outcome queued | `false` | `false` | `true` | `false` | `true` |
+| Judge fallback / explicit no-Judge, outcome failed | `false` | `false` | `false` | `true` | `true` |
+
+`feedbackExpected` denotes whether the outcome is eligible for learning;
+`feedbackGap` independently denotes whether any sent dual-draft terminal outcome failed to close or
+queue. The script logs queued/gap/skipped-learning states but never retries the send. The browser-use agent
+outbox may retry either a selected or `not_learned` feedback POST only; this avoids sending a
+duplicate message to the candidate.
 
 ## Not covered yet
 

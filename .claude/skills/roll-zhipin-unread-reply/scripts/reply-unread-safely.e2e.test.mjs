@@ -1,0 +1,155 @@
+#!/usr/bin/env node
+/** PATH-shim trace for the real Bash batch entrypoint (one candidate, no browser). */
+import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
+import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+
+const dir = path.dirname(fileURLToPath(import.meta.url));
+const scriptPath = path.join(dir, "reply-unread-safely.sh");
+const powershellScriptPath = path.join(dir, "reply-unread-safely.ps1");
+const testDir = mkdtempSync(path.join(tmpdir(), "roll-zhipin-bash-e2e-"));
+const shimDir = path.join(testDir, "bin");
+
+const makeShim = spawnSync("mkdir", ["-p", shimDir], { encoding: "utf8" });
+assert.equal(makeShim.status, 0, makeShim.stderr);
+
+const rollShimPath = path.join(shimDir, "roll");
+writeFileSync(
+  rollShimPath,
+  String.raw`#!/usr/bin/env bash
+set -euo pipefail
+
+if [[ "$1" == "agent" && "$2" == "health" ]]; then
+  echo '[{"agentName":"browser-use-agent","healthy":true}]'
+  exit 0
+fi
+
+if [[ "$1" != "run" ]]; then
+  echo '{"success":false,"error":"unexpected roll command"}'
+  exit 0
+fi
+
+tool="$3"
+input='{}'
+if [[ "$4" == "--input-file" && -f "$5" ]]; then
+  input="$(cat "$5")"
+fi
+printf '%s\t%s\n' "$tool" "$input" >>"$ROLL_SHIM_TRACE"
+
+case "$tool" in
+  browser_status)
+    echo '{"instances":[],"defaultInstanceId":null}'
+    ;;
+  zhipin_open_chat_page)
+    echo '{"success":true,"chatReady":true}'
+    ;;
+  zhipin_read_messages)
+    echo '{"candidates":[{"conversationId":"cid-e2e","name":"Alice","preview":"请问排班时间？"}],"page":{"url":"https://www.zhipin.com/web/chat/index","title":"BOSS直聘"}}'
+    ;;
+  zhipin_open_chat)
+    echo '{"success":true,"conversationId":"cid-e2e"}'
+    ;;
+  browser_snapshot)
+    echo '{"page":{"url":"https://www.zhipin.com/web/chat/index","title":"BOSS直聘"},"snapshot":{"text":"正常会话"}}'
+    ;;
+  zhipin_get_candidate_info)
+    echo '{"candidateInfo":{"age":"30岁","experience":"5年"},"preferredBrand":"测试品牌","chatMessages":[]}'
+    ;;
+  zhipin_generate_reply_preview)
+    echo '{"success":true,"preparedReplyId":"prep-e2e","replyVariantSelection":{"options":[{"option":"option_1","suggestedReply":"A"},{"option":"option_2","suggestedReply":"B"}]}}'
+    ;;
+  zhipin_send_prepared_reply)
+    if [[ "$ROLL_SHIM_NO_JUDGE" == "1" ]]; then
+      echo '{"success":true,"sentMessage":"A","chosenOption":"option_1","decisionSource":"explicit_no_judge","decisionReason":"operator_requested_no_judge","feedbackExpected":false,"feedbackStatus":"accepted"}'
+    else
+      echo '{"success":true,"sentMessage":"B","chosenOption":"option_2","decisionSource":"judge","decisionReason":"B 更直接回答排班问题","judgeModel":"mcp-sampling","feedbackExpected":true,"feedbackStatus":"accepted"}'
+    fi
+    ;;
+  *)
+    echo '{"success":false,"error":"unexpected tool"}'
+    ;;
+esac
+`,
+  "utf8",
+);
+chmodSync(rollShimPath, 0o755);
+
+function runScenario(name, noJudge) {
+  const tracePath = path.join(testDir, `${name}.trace`);
+  const resultsPath = path.join(testDir, `${name}.jsonl`);
+  const args = [
+    scriptPath,
+    "--limit",
+    "1",
+    "--no-unread-filter",
+    "--no-exchange-wechat",
+    "--results-file",
+    resultsPath,
+  ];
+  if (noJudge) {
+    args.push("--no-judge");
+  }
+
+  const result = spawnSync("bash", args, {
+    encoding: "utf8",
+    timeout: 15_000,
+    env: {
+      ...process.env,
+      PATH: `${shimDir}:${process.env.PATH ?? ""}`,
+      ROLL_SHIM_TRACE: tracePath,
+      ROLL_SHIM_NO_JUDGE: noJudge ? "1" : "0",
+    },
+  });
+  assert.equal(result.status, 0, `${name} failed:\n${result.stderr}\n${result.stdout}`);
+
+  const calls = readFileSync(tracePath, "utf8")
+    .trim()
+    .split("\n")
+    .map((line) => {
+      const separator = line.indexOf("\t");
+      return {
+        tool: line.slice(0, separator),
+        input: JSON.parse(line.slice(separator + 1)),
+      };
+    });
+  const tools = calls.map((call) => call.tool);
+  assert.equal(tools.includes("zhipin_judge_prepared_reply"), false);
+  assert.ok(
+    tools.indexOf("zhipin_generate_reply_preview") < tools.indexOf("zhipin_send_prepared_reply"),
+  );
+
+  const sendCall = calls.find((call) => call.tool === "zhipin_send_prepared_reply");
+  assert.ok(sendCall);
+  const resultRow = JSON.parse(readFileSync(resultsPath, "utf8").trim());
+  return { sendInput: sendCall.input, resultRow };
+}
+
+try {
+  const powershellSource = readFileSync(powershellScriptPath, "utf8");
+  assert.doesNotMatch(powershellSource, /zhipin_judge_prepared_reply/);
+  assert.match(powershellSource, /BuildSendPayload/);
+
+  const normal = runScenario("normal", false);
+  assert.deepEqual(normal.sendInput, { preparedReplyId: "prep-e2e" });
+  assert.equal(normal.resultRow.decisionSource, "judge");
+  assert.equal(normal.resultRow.feedbackClosed, true);
+  assert.equal(normal.resultRow.feedbackGap, false);
+  assert.equal(normal.resultRow.learningSkipped, false);
+
+  const noJudge = runScenario("no-judge", true);
+  assert.deepEqual(noJudge.sendInput, {
+    preparedReplyId: "prep-e2e",
+    skipVariantJudge: true,
+  });
+  assert.equal(noJudge.resultRow.decisionSource, "explicit_no_judge");
+  assert.equal(noJudge.resultRow.feedbackGap, false);
+  assert.equal(noJudge.resultRow.feedbackClosed, true);
+  assert.equal(noJudge.resultRow.learningSkipped, true);
+
+  console.log("reply-unread-safely.e2e.test.mjs: ok");
+} finally {
+  rmSync(testDir, { recursive: true, force: true });
+}

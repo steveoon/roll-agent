@@ -36,6 +36,10 @@ import { zhipinCloseResume } from "./tools/zhipin-close-resume.ts";
 import { yupaoReadMessages } from "./tools/yupao-read-messages.ts";
 import { yupaoSendReply } from "./tools/yupao-send-reply.ts";
 import { preloadReplyAuthorityKeys } from "./reply-authority/key-store.ts";
+import {
+  initializeReplyFeedbackOutbox,
+  shutdownReplyFeedbackOutbox,
+} from "./reply-authority/reply-feedback-outbox.ts";
 import { initRuntime, setReplyAuthorityKeysLoaded, shutdownRuntime } from "./runtime-holder.ts";
 import { loadBrowserInstancesConfigFromEnv, loadRuntimeConfigFromEnv } from "./runtime-config.ts";
 import { loadBrowserUsePolicyFromEnv, setBrowserUsePolicy } from "./browser-use-policy.ts";
@@ -43,6 +47,16 @@ import { withBrowserInstanceInput } from "./tools/browser-instance-input.ts";
 import type { AnyToolDefinition } from "@roll-agent/sdk";
 
 const logger = createAgentLogger("browser-use-agent");
+
+async function shutdownAgent(): Promise<void> {
+  const results = await Promise.allSettled([shutdownReplyFeedbackOutbox(), shutdownRuntime()]);
+  const errors = results
+    .filter((result): result is PromiseRejectedResult => result.status === "rejected")
+    .map((result) => result.reason);
+  if (errors.length > 0) {
+    throw new AggregateError(errors, "Failed to fully shut down browser-use-agent");
+  }
+}
 
 function isGlobalBrowserRuntimeTool(toolName: string): boolean {
   return toolName === "browser_stop" || toolName === "zhipin_judge_prepared_reply";
@@ -116,12 +130,13 @@ const agent = defineAgent(
     ].map(withBrowserInstanceRuntimeSelection),
   },
   {
-    onShutdown: shutdownRuntime,
+    onShutdown: shutdownAgent,
   },
 );
 
 async function main(): Promise<void> {
   setBrowserUsePolicy(loadBrowserUsePolicyFromEnv());
+  initializeReplyFeedbackOutbox({ logger });
   await initRuntime(loadRuntimeConfigFromEnv(), loadBrowserInstancesConfigFromEnv());
 
   try {
@@ -148,6 +163,6 @@ async function main(): Promise<void> {
 
 main().catch(async (err: unknown) => {
   logger.error(`Fatal error: ${err instanceof Error ? (err.stack ?? err.message) : String(err)}`);
-  await shutdownRuntime().catch(() => {});
+  await shutdownAgent().catch(() => {});
   process.exit(1);
 });
