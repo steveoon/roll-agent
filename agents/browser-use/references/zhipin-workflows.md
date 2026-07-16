@@ -185,7 +185,7 @@ recommend-list  -> 推荐牛人列表，默认向下滚动，去重主键 candid
 
 ## Reply Authority
 
-`zhipin_send_prepared_reply` 只接受 `zhipin_generate_reply_preview` 生成的 `preparedReplyId`，内部再取回 Reply Authority Service 签发的 envelope 并完成验签。
+`zhipin_send_prepared_reply` 只接受 `zhipin_generate_reply_preview` 生成的 `preparedReplyId`，从 prepared store 读取预览阶段保存的 Reply Authority 签名 envelope 并完成验签。
 
 发送前校验：
 
@@ -218,7 +218,46 @@ recommend-list  -> 推荐牛人列表，默认向下滚动，去重主键 candid
 }
 ```
 
-第二种代理模式由 `smart-reply-agent` 调用 Reply Authority resolver 解析 `tenantId + recruiterBinding`。
+第二种代理模式由当前 Agent 使用的共享 `reply-authority-client` 先调用 Reply Authority resolver，解析出 `tenantId + recruiterBinding`；`browser-use-agent` 与 `smart-reply-agent` 都能独立完成该解析，不需要为了 resolver 在两者之间跳转。
+
+### RFC V3 双稿反馈闭环
+
+当前 browser-use 双稿链路要求 Reply Authority RFC V3；部署顺序必须是 **Reply Authority V3 → 新版 browser-use-agent**。调用方 token 必须能访问目标租户并具备 `reply-feedback:write`。
+
+```text
+preview 保存 group / rubric / feedbackExpiresAt
+  -> send 内部 Judge，或复用独立 Judge / orchestrator 显式选择
+  -> 发送一份签名 option
+  -> 将 selected 或 not_learned 终态写入 SQLite outbox
+  -> POST /reply-feedback
+```
+
+| `feedbackOutcome` | `decisionSource` | Beta 学习 | Pending |
+| --- | --- | --- | --- |
+| `selected` | `judge` / `orchestrator` | 更新 | 闭合 |
+| `not_learned` | `service_recommended_fallback` / `explicit_no_judge` | 不更新 | 闭合 |
+
+`zhipin_judge_prepared_reply` 只是可选预览工具；默认直接调用 send 即可，send 会在双稿缺少 `variantDecision` 时确定性执行并缓存 Judge。若 preview 阶段 rubric 拉取、hash 或双稿结构异常，prepared store 会保留 group 生命周期元数据；send 发送顶层推荐稿成功后提交 `not_learned`，不会让服务端 Pending 静默过期。
+
+发送后的 feedback 状态：
+
+| `feedbackStatus` | 用户消息 | feedback 闭环 | 后续动作 |
+| --- | --- | --- | --- |
+| `accepted` / `duplicate` | 已发送 | 已闭合 | 无需处理 |
+| `queued` | 已发送 | 等待 outbox 重试 | 不重调 send；等待 outbox 仅重试 POST |
+| `failed` | 已发送 | 有缺口 | 不重调 send；修复 token、服务或 outbox 后单独排查 |
+
+`feedbackExpected:false` 只表示 fallback/no-Judge 不进入 Beta 学习，不表示无需终态。outbox 的实际重试截止时间取服务端 `feedbackExpiresAt` 与本地 retention 的较早值。
+
+跨服务 fallback 只使用稳定安全码，原始 provider / HTTP / parser 错误只留在 browser-use-agent 本地日志：
+
+| Code | 含义 |
+| --- | --- |
+| `rubric_fetch_failed` | rubric 获取失败 |
+| `rubric_mismatch` | rubric version/hash 不一致 |
+| `invalid_variant_shape` | 服务端双稿结构无法安全判定 |
+| `judge_sampling_failed` | MCP Sampling 调用失败 |
+| `judge_output_invalid` | Judge 输出无法验证 |
 
 ## 推荐候选人链路
 
