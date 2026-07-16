@@ -32,20 +32,56 @@ try {
 const bundle = input.bundle ?? {};
 const send = input.send ?? {};
 const meta = bundle.meta ?? {};
+const hasDualDraft = meta.hasDualDraft === true;
+const chosenOption = typeof send.chosenOption === "string" ? send.chosenOption : meta.chosenOption;
+const decisionSource =
+  typeof send.decisionSource === "string" ? send.decisionSource : meta.decisionSource;
+const decisionReason =
+  typeof send.decisionReason === "string" ? send.decisionReason : meta.decisionReason;
+const judgeModel = typeof send.judgeModel === "string" ? send.judgeModel : meta.judgeModel;
+const feedbackExpected =
+  typeof send.feedbackExpected === "boolean"
+    ? send.feedbackExpected
+    : meta.feedbackExpected === true;
+const judgeAttempted =
+  decisionSource === "judge" ||
+  decisionSource === "service_recommended_fallback" ||
+  meta.judgeAttempted === true;
+const judgeSkipped = decisionSource === "explicit_no_judge" || meta.judgeSkipped === true;
+const judgeFallback =
+  decisionSource === "service_recommended_fallback" || meta.judgeFallback === true;
+const recommendedOption = judgeFallback || judgeSkipped ? chosenOption : meta.recommendedOption;
+const fallbackReason =
+  judgeFallback || judgeSkipped ? (decisionReason ?? meta.fallbackReason) : meta.fallbackReason;
+const feedbackStatus =
+  typeof send.feedbackStatus === "string" ? send.feedbackStatus : hasDualDraft ? "missing" : null;
+const feedbackClosed = feedbackStatus === "accepted" || feedbackStatus === "duplicate";
+const feedbackQueued = feedbackStatus === "queued";
+const feedbackGap = mode === "sent" && hasDualDraft && !feedbackClosed && !feedbackQueued;
+const learningSkipped = mode === "sent" && hasDualDraft && !feedbackExpected;
 
 const base = {
   ts,
   name,
   conversationId,
   preparedReplyId,
-  hasDualDraft: meta.hasDualDraft === true,
-  judgeAttempted: meta.judgeAttempted === true,
-  judgeSkipped: meta.judgeSkipped === true,
-  judgeFallback: meta.judgeFallback === true,
-  chosenOption: meta.chosenOption,
-  recommendedOption: meta.recommendedOption,
+  hasDualDraft,
+  judgeAttempted,
+  judgeSkipped,
+  judgeFallback,
+  chosenOption,
+  recommendedOption,
   judgeError: meta.judgeError,
-  feedbackStatus: send.feedbackStatus,
+  decisionSource,
+  decisionReason,
+  judgeModel,
+  fallbackReason,
+  feedbackExpected,
+  feedbackStatus,
+  feedbackClosed,
+  feedbackQueued,
+  feedbackGap,
+  learningSkipped,
 };
 
 if (mode === "sent") {

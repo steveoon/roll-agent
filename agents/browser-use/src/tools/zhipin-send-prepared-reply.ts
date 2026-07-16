@@ -1,58 +1,78 @@
 import { createHash } from "node:crypto";
-import { defineTool } from "@roll-agent/sdk";
 import { BrowserActionApprovalSchema } from "@roll-agent/browser";
-import { postReplyFeedback, ReplyGateAdvisoryCodeSchema } from "@roll-agent/reply-authority-client";
+import { postReplyFeedback, type ReplyFeedbackBody } from "@roll-agent/reply-authority-client";
+import { defineTool, type AgentContext } from "@roll-agent/sdk";
 import { z } from "zod";
+import { assertBrowserActionAllowed } from "../browser-security.ts";
+import { assertBrowserUseToolAllowed } from "../browser-use-policy.ts";
+import {
+  PreparedReplyOptionValues,
+  PreparedReplySendDecisionSourceValues,
+  PreparedReplyVariantDecisionSchema,
+  type PreparedReplyFallbackReason,
+  type PreparedReplyJudgement,
+  type PreparedReplySendDecisionSource,
+  type PreparedReplyVariantDecision,
+} from "../reply-authority/prepared-reply-decision.ts";
+import { submitReplyFeedback } from "../reply-authority/reply-feedback-outbox.ts";
 import {
   consumePreparedReply,
   inspectPreparedReply,
-  PreparedReplyOptionValues,
   type PreparedReplyRecord,
   type PreparedReplyVariantOption,
 } from "../reply-authority/prepared-reply-store.ts";
-import { sendSignedZhipinReply, type ZhipinSendReplyResult } from "./zhipin-send-reply.ts";
-import { assertBrowserUseToolAllowed } from "../browser-use-policy.ts";
-import { ToolActionApprovalSchema } from "../tool-action-approval.ts";
-import { assertBrowserActionAllowed } from "../browser-security.ts";
 import { getRuntime } from "../runtime-holder.ts";
+import { ToolActionApprovalSchema } from "../tool-action-approval.ts";
+import { ensurePreparedReplyJudgement } from "./zhipin-judge-prepared-reply.ts";
+import { sendSignedZhipinReply, type ZhipinSendReplyResult } from "./zhipin-send-reply.ts";
 
 const TOOL_NAME = "zhipin_send_prepared_reply";
 const SUMMARY_MAX_LENGTH = 80;
 
-const VariantDecisionSchema = z.object({
-  chosenOption: z
-    .enum(PreparedReplyOptionValues)
-    .describe("从 replyVariantSelection.options 中选择的中性选项"),
-  reason: z.string().min(1).max(500).describe("judge 选择该选项的简短理由"),
-  confirmedFindingCodes: z
-    .array(ReplyGateAdvisoryCodeSchema)
-    .optional()
-    .describe("确认属实的 replyVariantSelection.findings code；空数组表示 findings 是误报"),
-  judgeModel: z.string().min(1).optional().describe("执行 judge 的模型 ID，写入服务端审计"),
-});
-
-type VariantDecision = z.infer<typeof VariantDecisionSchema>;
-
 const OutputSchema = z.object({
   success: z.boolean(),
   sentMessage: z.string(),
-  feedbackStatus: z.enum(["accepted", "duplicate", "skipped", "failed"]).optional(),
+  chosenOption: z.enum(PreparedReplyOptionValues).optional(),
+  decisionSource: z.enum(PreparedReplySendDecisionSourceValues).optional(),
+  decisionReason: z.string().optional(),
+  judgeModel: z.string().optional(),
+  feedbackExpected: z.boolean().optional(),
+  feedbackStatus: z.enum(["accepted", "duplicate", "queued", "skipped", "failed"]).optional(),
   feedbackError: z.string().optional(),
   error: z.string().optional(),
 });
 
-const InputSchema = z.object({
-  preparedReplyId: z.string().min(1).describe("预备回复 ID，由 zhipin_generate_reply_preview 返回"),
-  toolActionApproval: ToolActionApprovalSchema.optional().describe(
-    "当 browser-use tool policy 返回 needs_confirmation 后，由 orchestrator 原样带回的批准 ID。",
-  ),
-  browserActionApproval: BrowserActionApprovalSchema.optional().describe(
-    "当 BROWSER_SECURITY_JSON.actionPolicy=confirm 返回 needs_confirmation 后，由 orchestrator 原样带回的批准 ID。",
-  ),
-  variantDecision: VariantDecisionSchema.optional().describe(
-    "双稿 preparedReplyId 的选择结果；不传时保持旧单稿/推荐稿发送行为，但不会回传 feedback。",
-  ),
-});
+const InputSchema = z
+  .object({
+    preparedReplyId: z
+      .string()
+      .min(1)
+      .describe("预备回复 ID，由 zhipin_generate_reply_preview 返回"),
+    toolActionApproval: ToolActionApprovalSchema.optional().describe(
+      "当 browser-use tool policy 返回 needs_confirmation 后，由 orchestrator 原样带回的批准 ID。",
+    ),
+    browserActionApproval: BrowserActionApprovalSchema.optional().describe(
+      "当 BROWSER_SECURITY_JSON.actionPolicy=confirm 返回 needs_confirmation 后，由 orchestrator 原样带回的批准 ID。",
+    ),
+    variantDecision: PreparedReplyVariantDecisionSchema.optional().describe(
+      "可选的显式双稿选择；缺省时发送工具会自动执行并缓存默认 Judge。",
+    ),
+    skipVariantJudge: z
+      .boolean()
+      .optional()
+      .describe(
+        "仅用于明确的应急降级：跳过双稿 Judge、发送服务端推荐稿并回传 not_learned 终态，但不产生学习样本。",
+      ),
+  })
+  .superRefine((input, ctx) => {
+    if (input.variantDecision !== undefined && input.skipVariantJudge === true) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "variantDecision 与 skipVariantJudge 不能同时传入",
+        path: ["skipVariantJudge"],
+      });
+    }
+  });
 
 type ZhipinSendPreparedReplyInput = z.infer<typeof InputSchema>;
 type ZhipinSendPreparedReplyOutput = z.infer<typeof OutputSchema>;
@@ -60,6 +80,7 @@ type ZhipinSendPreparedReplyOutput = z.infer<typeof OutputSchema>;
 type ZhipinSendPreparedReplyDeps = {
   readonly sendSignedZhipinReply: typeof sendSignedZhipinReply;
   readonly postReplyFeedback: typeof postReplyFeedback;
+  readonly submitReplyFeedback: typeof submitReplyFeedback;
 };
 
 let zhipinSendPreparedReplyDepsOverride: Partial<ZhipinSendPreparedReplyDeps> | undefined;
@@ -68,6 +89,7 @@ function getZhipinSendPreparedReplyDeps(): ZhipinSendPreparedReplyDeps {
   return {
     sendSignedZhipinReply,
     postReplyFeedback,
+    submitReplyFeedback,
     ...zhipinSendPreparedReplyDepsOverride,
   };
 }
@@ -88,6 +110,32 @@ function formatPreparedReplyError(reason: "not_found" | "expired" | "consumed"):
   return "preparedReplyId 不存在，请重新生成回复";
 }
 
+type PreparedReplyDecisionResolution =
+  | { readonly kind: "single" }
+  | {
+      readonly kind: "decision";
+      readonly source: "judge" | "orchestrator";
+      readonly decision: PreparedReplyVariantDecision;
+    }
+  | {
+      readonly kind: "fallback";
+      readonly source: "service_recommended_fallback";
+      readonly recommendedOption: PreparedReplyVariantOption["option"];
+      readonly reason: PreparedReplyFallbackReason;
+    }
+  | {
+      readonly kind: "terminal_fallback";
+      readonly source: "service_recommended_fallback";
+      readonly chosenVariant: "draft";
+      readonly reason: PreparedReplyFallbackReason;
+    }
+  | {
+      readonly kind: "explicit_no_judge";
+      readonly source: "explicit_no_judge";
+      readonly recommendedOption: PreparedReplyVariantOption["option"];
+      readonly reason: string;
+    };
+
 type PreparedReplySelection =
   | {
       readonly ok: true;
@@ -96,7 +144,9 @@ type PreparedReplySelection =
       readonly unreadCountBeforeReply?: number;
       readonly chosenOption?: PreparedReplyVariantOption["option"];
       readonly chosenVariant?: PreparedReplyVariantOption["variant"];
-      readonly variantDecision?: VariantDecision;
+      readonly variantDecision?: PreparedReplyVariantDecision;
+      readonly decisionSource?: PreparedReplySendDecisionSource;
+      readonly decisionReason?: string;
       readonly record: PreparedReplyRecord;
     }
   | {
@@ -104,31 +154,140 @@ type PreparedReplySelection =
       readonly error: string;
     };
 
+function sameVariantDecision(
+  left: PreparedReplyVariantDecision,
+  right: PreparedReplyVariantDecision,
+): boolean {
+  // judgeModel is cached Judge provenance, not caller-controlled decision content.
+  const normalizeCodes = (codes: readonly string[] | undefined) =>
+    codes === undefined ? undefined : [...codes].sort();
+  return (
+    left.chosenOption === right.chosenOption &&
+    left.reason === right.reason &&
+    JSON.stringify(normalizeCodes(left.confirmedFindingCodes)) ===
+      JSON.stringify(normalizeCodes(right.confirmedFindingCodes))
+  );
+}
+
+function judgementToResolution(judgement: PreparedReplyJudgement): PreparedReplyDecisionResolution {
+  if (judgement.kind === "decision") {
+    return {
+      kind: "decision",
+      source: judgement.source,
+      decision: judgement.decision,
+    };
+  }
+  return {
+    kind: "fallback",
+    source: judgement.source,
+    recommendedOption: judgement.recommendedOption,
+    reason: judgement.reason,
+  };
+}
+
+async function resolvePreparedReplyDecision(
+  record: PreparedReplyRecord,
+  input: Pick<ZhipinSendPreparedReplyInput, "variantDecision" | "skipVariantJudge">,
+  ctx: AgentContext,
+): Promise<PreparedReplyDecisionResolution | { readonly kind: "error"; readonly error: string }> {
+  const variantGroup = record.variantGroup;
+  if (variantGroup === undefined) {
+    if (input.variantDecision !== undefined || input.skipVariantJudge === true) {
+      return {
+        kind: "error",
+        error: "当前 preparedReplyId 没有双稿选项，不能提交双稿选择或跳过 Judge",
+      };
+    }
+    return { kind: "single" };
+  }
+  if (variantGroup.state === "not_learned") {
+    if (input.variantDecision !== undefined) {
+      return {
+        kind: "error",
+        error: "当前 preparedReplyId 已降级为非学习终态，禁止提交学习 decision",
+      };
+    }
+    return {
+      kind: "terminal_fallback",
+      source: "service_recommended_fallback",
+      chosenVariant: variantGroup.chosenVariant,
+      reason: variantGroup.reason,
+    };
+  }
+
+  if (input.variantDecision !== undefined) {
+    if (record.judgement !== undefined) {
+      if (record.judgement.kind === "fallback") {
+        return {
+          kind: "error",
+          error: "当前 preparedReplyId 的默认 Judge 已降级，禁止事后伪造学习 decision",
+        };
+      }
+      if (!sameVariantDecision(record.judgement.decision, input.variantDecision)) {
+        return {
+          kind: "error",
+          error: "variantDecision 与已缓存的 Judge 结果不一致，请重新生成回复",
+        };
+      }
+      return judgementToResolution(record.judgement);
+    }
+    return {
+      kind: "decision",
+      source: "orchestrator",
+      decision: input.variantDecision,
+    };
+  }
+
+  if (input.skipVariantJudge === true) {
+    if (record.judgement !== undefined) {
+      return judgementToResolution(record.judgement);
+    }
+    return {
+      kind: "explicit_no_judge",
+      source: "explicit_no_judge",
+      recommendedOption: variantGroup.recommendedOption,
+      reason: "调用方显式跳过双稿 Judge",
+    };
+  }
+
+  return judgementToResolution(await ensurePreparedReplyJudgement(record, ctx));
+}
+
 function findVariantOption(
   record: PreparedReplyRecord,
   chosenOption: PreparedReplyVariantOption["option"],
 ): PreparedReplyVariantOption | undefined {
-  return record.variantGroup?.options.find((option) => option.option === chosenOption);
+  return record.variantGroup?.state === "judge_ready"
+    ? record.variantGroup.options.find((option) => option.option === chosenOption)
+    : undefined;
 }
 
-function hasUnknownConfirmedFindingCode(record: PreparedReplyRecord, decision: VariantDecision) {
+function hasUnknownConfirmedFindingCode(
+  record: PreparedReplyRecord,
+  decision: PreparedReplyVariantDecision,
+): boolean {
   if (decision.confirmedFindingCodes === undefined) {
     return false;
   }
 
-  const knownCodes = new Set(record.variantGroup?.findings.map((finding) => finding.code) ?? []);
+  const variantGroup = record.variantGroup;
+  if (variantGroup?.state !== "judge_ready") {
+    return true;
+  }
+  const knownCodes = new Set(variantGroup.findings.map((finding) => finding.code));
   return decision.confirmedFindingCodes.some((code) => !knownCodes.has(code));
 }
 
 function resolvePreparedReplySelection(
   record: PreparedReplyRecord,
-  decision: VariantDecision | undefined,
+  resolution: PreparedReplyDecisionResolution,
 ): PreparedReplySelection {
-  if (record.variantGroup === undefined) {
-    if (decision !== undefined) {
+  const variantGroup = record.variantGroup;
+  if (variantGroup === undefined) {
+    if (resolution.kind !== "single") {
       return {
         ok: false,
-        error: "当前 preparedReplyId 没有双稿选项，不能提交 variantDecision",
+        error: "当前 preparedReplyId 没有双稿选项",
       };
     }
     return {
@@ -141,7 +300,31 @@ function resolvePreparedReplySelection(
       record,
     };
   }
+  if (variantGroup.state === "not_learned") {
+    if (resolution.kind !== "terminal_fallback") {
+      return {
+        ok: false,
+        error: "非学习双稿 preparedReplyId 缺少降级终态",
+      };
+    }
+    return {
+      ok: true,
+      signedEnvelope: record.signedEnvelope,
+      suggestedReply: record.suggestedReply,
+      ...(record.unreadCountBeforeReply !== undefined
+        ? { unreadCountBeforeReply: record.unreadCountBeforeReply }
+        : {}),
+      chosenVariant: resolution.chosenVariant,
+      decisionSource: resolution.source,
+      decisionReason: resolution.reason,
+      record,
+    };
+  }
 
+  if (resolution.kind === "single" || resolution.kind === "terminal_fallback") {
+    return { ok: false, error: "双稿 preparedReplyId 缺少选择状态" };
+  }
+  const decision = resolution.kind === "decision" ? resolution.decision : undefined;
   if (decision !== undefined && hasUnknownConfirmedFindingCode(record, decision)) {
     return {
       ok: false,
@@ -149,7 +332,10 @@ function resolvePreparedReplySelection(
     };
   }
 
-  const chosenOption = decision?.chosenOption ?? record.variantGroup.recommendedOption;
+  const chosenOption =
+    resolution.kind === "decision"
+      ? resolution.decision.chosenOption
+      : resolution.recommendedOption;
   const option = findVariantOption(record, chosenOption);
   if (option === undefined) {
     return {
@@ -158,6 +344,8 @@ function resolvePreparedReplySelection(
     };
   }
 
+  const decisionReason =
+    resolution.kind === "decision" ? resolution.decision.reason : resolution.reason;
   return {
     ok: true,
     signedEnvelope: option.signedEnvelope,
@@ -168,6 +356,8 @@ function resolvePreparedReplySelection(
     chosenOption: option.option,
     chosenVariant: option.variant,
     ...(decision !== undefined ? { variantDecision: decision } : {}),
+    decisionSource: resolution.source,
+    decisionReason,
     record,
   };
 }
@@ -185,7 +375,8 @@ function createPreparedReplyDigest(
         selection.unreadCountBeforeReply,
         selection.record.variantGroup?.groupId,
         selection.chosenOption,
-        selection.variantDecision?.reason,
+        selection.decisionSource,
+        selection.decisionReason,
         selection.variantDecision?.confirmedFindingCodes,
         selection.variantDecision?.judgeModel,
       ]),
@@ -210,40 +401,101 @@ function createPreparedReplySummary(
 async function postFeedbackAfterSend(
   deps: ZhipinSendPreparedReplyDeps,
   selection: Extract<PreparedReplySelection, { ok: true }>,
-  ctx: Parameters<typeof sendSignedZhipinReply>[1],
+  ctx: AgentContext,
 ): Promise<Pick<ZhipinSendPreparedReplyOutput, "feedbackStatus" | "feedbackError">> {
+  const variantGroup = selection.record.variantGroup;
+  if (variantGroup === undefined) {
+    return {};
+  }
   if (
-    selection.record.variantGroup === undefined ||
-    selection.variantDecision === undefined ||
-    selection.chosenVariant === undefined
+    selection.chosenVariant === undefined ||
+    selection.decisionSource === undefined ||
+    selection.decisionReason === undefined
   ) {
-    return selection.record.variantGroup !== undefined ? { feedbackStatus: "skipped" } : {};
+    return {
+      feedbackStatus: "failed",
+      feedbackError: "Dual-draft send completed without terminal feedback metadata.",
+    };
   }
 
   try {
-    const response = await deps.postReplyFeedback({
-      groupId: selection.record.variantGroup.groupId,
-      target: selection.record.variantGroup.target,
-      chosenVariant: selection.chosenVariant,
-      ...(selection.variantDecision.confirmedFindingCodes !== undefined
-        ? { confirmedFindingCodes: selection.variantDecision.confirmedFindingCodes }
-        : {}),
-      reason: selection.variantDecision.reason,
-      rubricVersion: selection.record.variantGroup.rubricVersion,
-      rubricHash: selection.record.variantGroup.rubricHash,
-      ...(selection.variantDecision.judgeModel !== undefined
-        ? { judgeModel: selection.variantDecision.judgeModel }
-        : {}),
-    });
-    return { feedbackStatus: response.status };
+    let body: ReplyFeedbackBody;
+    if (selection.variantDecision !== undefined) {
+      if (selection.decisionSource !== "judge" && selection.decisionSource !== "orchestrator") {
+        throw new Error("Learning feedback has an invalid decision source.");
+      }
+      body = {
+        groupId: variantGroup.groupId,
+        target: variantGroup.target,
+        chosenVariant: selection.chosenVariant,
+        feedbackOutcome: "selected",
+        decisionSource: selection.decisionSource,
+        ...(selection.variantDecision.confirmedFindingCodes !== undefined
+          ? { confirmedFindingCodes: selection.variantDecision.confirmedFindingCodes }
+          : {}),
+        reason: selection.variantDecision.reason,
+        rubricVersion: variantGroup.rubricVersion,
+        rubricHash: variantGroup.rubricHash,
+        ...(selection.variantDecision.judgeModel !== undefined
+          ? { judgeModel: selection.variantDecision.judgeModel }
+          : {}),
+      };
+    } else {
+      if (
+        selection.decisionSource !== "service_recommended_fallback" &&
+        selection.decisionSource !== "explicit_no_judge"
+      ) {
+        throw new Error("Non-learning feedback has an invalid decision source.");
+      }
+      const reason = selection.decisionReason.trim().slice(0, 500);
+      body = {
+        groupId: variantGroup.groupId,
+        target: variantGroup.target,
+        chosenVariant: selection.chosenVariant,
+        feedbackOutcome: "not_learned",
+        decisionSource: selection.decisionSource,
+        reason: reason || "Dual-draft learning was intentionally skipped.",
+        rubricVersion: variantGroup.rubricVersion,
+        rubricHash: variantGroup.rubricHash,
+      };
+    }
+    const result = await deps.submitReplyFeedback(
+      body,
+      deps.postReplyFeedback,
+      ctx.logger,
+      variantGroup.feedbackExpiresAt !== undefined
+        ? { feedbackExpiresAt: variantGroup.feedbackExpiresAt }
+        : {},
+    );
+    return {
+      feedbackStatus: result.status,
+      ...(result.error !== undefined ? { feedbackError: result.error } : {}),
+    };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    ctx.logger.warn(`Reply feedback failed after sending prepared reply: ${message}`);
-    return {
-      feedbackStatus: "failed",
-      feedbackError: message,
-    };
+    ctx.logger.error(`Reply feedback outbox failed after sending prepared reply: ${message}`);
+    return { feedbackStatus: "failed", feedbackError: message };
   }
+}
+
+function decisionOutput(
+  selection: Extract<PreparedReplySelection, { ok: true }>,
+): Pick<
+  ZhipinSendPreparedReplyOutput,
+  "chosenOption" | "decisionSource" | "decisionReason" | "judgeModel" | "feedbackExpected"
+> {
+  if (selection.decisionSource === undefined) {
+    return {};
+  }
+  return {
+    ...(selection.chosenOption !== undefined ? { chosenOption: selection.chosenOption } : {}),
+    decisionSource: selection.decisionSource,
+    ...(selection.decisionReason !== undefined ? { decisionReason: selection.decisionReason } : {}),
+    ...(selection.variantDecision?.judgeModel !== undefined
+      ? { judgeModel: selection.variantDecision.judgeModel }
+      : {}),
+    feedbackExpected: selection.variantDecision !== undefined,
+  };
 }
 
 export const zhipinSendPreparedReply = defineTool<
@@ -252,7 +504,7 @@ export const zhipinSendPreparedReply = defineTool<
 >({
   name: TOOL_NAME,
   description:
-    "发送由 zhipin_generate_reply_preview 生成的预备回复；只接收 preparedReplyId，不接收 signedEnvelope。",
+    "发送由 zhipin_generate_reply_preview 生成的预备回复；双稿缺少 variantDecision 时会在工具内部自动 Judge，并在发送成功后持久化回传 feedback。",
   input: InputSchema,
   output: OutputSchema,
   execute: async (input, ctx) => {
@@ -265,10 +517,11 @@ export const zhipinSendPreparedReply = defineTool<
         error: formatPreparedReplyError(inspected.reason),
       };
     }
-    const inspectedSelection = resolvePreparedReplySelection(
-      inspected.record,
-      input.variantDecision,
-    );
+    const resolution = await resolvePreparedReplyDecision(inspected.record, input, ctx);
+    if (resolution.kind === "error") {
+      return { success: false, sentMessage: "", error: resolution.error };
+    }
+    const inspectedSelection = resolvePreparedReplySelection(inspected.record, resolution);
     if (!inspectedSelection.ok) {
       return {
         success: false,
@@ -308,7 +561,7 @@ export const zhipinSendPreparedReply = defineTool<
         error: formatPreparedReplyError(consumed.reason),
       };
     }
-    const consumedSelection = resolvePreparedReplySelection(consumed.record, input.variantDecision);
+    const consumedSelection = resolvePreparedReplySelection(consumed.record, resolution);
     if (!consumedSelection.ok) {
       return {
         success: false,
@@ -333,6 +586,7 @@ export const zhipinSendPreparedReply = defineTool<
     const feedbackResult = await postFeedbackAfterSend(deps, consumedSelection, ctx);
     return {
       ...sendResult,
+      ...decisionOutput(consumedSelection),
       ...feedbackResult,
     };
   },

@@ -14,7 +14,6 @@ $ValidateGenerate = Join-Path $ScriptDir "validate-generate.mjs"
 $ParseGeneratePreview = Join-Path $ScriptDir "parse-generate-preview.mjs"
 $BuildSendPayload = Join-Path $ScriptDir "build-send-payload.mjs"
 $ApplySendBundle = Join-Path $ScriptDir "apply-send-bundle.mjs"
-$WriteJudgeInput = Join-Path $ScriptDir "write-judge-input.mjs"
 $ComposeResultInput = Join-Path $ScriptDir "compose-result-input.mjs"
 $FormatCandidateResult = Join-Path $ScriptDir "format-candidate-result.mjs"
 $ParseSendResult = Join-Path $ScriptDir "parse-send-result.mjs"
@@ -65,7 +64,7 @@ Requires: roll and node on PATH.
                             Target browser.instances id for every browser-use tool call
   -NoUnreadFilter           Skip clicking unread tab
   -NoExchangeWechat         Skip exchange-wechat after send
-  -NoJudge / --no-judge     Skip zhipin_judge_prepared_reply on dual-draft previews
+  -NoJudge / --no-judge     BREAK-GLASS: send recommended dual draft without learning feedback
   -KeepWorkDir              Do not delete temp workdir (debug)
   -Help
 
@@ -538,28 +537,15 @@ function Process-One([string]$Cid, [string]$Name, [string]$Preview) {
     return 1
   }
 
-  $judgeOut = ""
-  if ($hasDual -and -not $script:NoJudge) {
-    $judgeFile = Join-Path $script:WorkDir "judge.json"
-    $null = & node $script:WriteJudgeInput $judgeFile $preparedId 2>$null
-    if ($LASTEXITCODE -ne 0) {
-      Append-ResultObject @{
-        ts = $ts; name = $Name; conversationId = $Cid; ok = $false; stage = "send_build"; preparedReplyId = $preparedId; hasDualDraft = $hasDual
-      }
-      Back-ToList
-      return 1
-    }
-    Write-Log "zhipin_judge_prepared_reply (dual draft)"
-    $judgeOut = Invoke-RollJsonFile "zhipin_judge_prepared_reply" $judgeFile -SkipBrowserInstance
-  }
-  elseif ($hasDual) {
-    Write-Log "dual draft detected; --no-judge -> send recommended option only"
+  if ($hasDual -and $script:NoJudge) {
+    Write-Log "BREAK-GLASS: --no-judge -> send recommended option; learning is skipped but a terminal outcome is recorded"
   }
 
   $hasDualFlag = if ($hasDual) { "1" } else { "0" }
   $noJudgeFlag = if ($script:NoJudge) { "1" } else { "0" }
-  $sendBundleRaw = (Invoke-NodeStdin $script:BuildSendPayload $judgeOut @($preparedId, $hasDualFlag, $noJudgeFlag)).Trim()
+  $sendBundleRaw = (Invoke-NodeStdin $script:BuildSendPayload "" @($preparedId, $hasDualFlag, $noJudgeFlag)).Trim()
   if (-not $sendBundleRaw -or -not $sendBundleRaw.StartsWith("{")) {
+    Write-Log "send payload validation failed; message was not sent: $sendBundleRaw"
     Append-ResultObject @{
       ts = $ts; name = $Name; conversationId = $Cid; ok = $false; stage = "send_build"; preparedReplyId = $preparedId; hasDualDraft = $hasDual
     }
@@ -607,7 +593,38 @@ function Process-One([string]$Cid, [string]$Name, [string]$Preview) {
 
   $successLine = Format-SendResultLine "sent" $ts $Name $Cid $preparedId $sendResultRaw $(if ($script:ExchangeWechat) { 1 } else { 0 })
   if ($successLine) {
-    Append-ResultObject ($successLine | ConvertFrom-Json)
+    $successResult = $successLine | ConvertFrom-Json
+    if ($successResult.feedbackQueued -eq $true) {
+      Write-Log "feedback queued for retry: $Name ($($successResult.feedbackStatus))"
+    }
+    elseif ($successResult.feedbackGap -eq $true) {
+      $source = if ($successResult.decisionSource) { $successResult.decisionSource } else { "unknown" }
+      $status = if ($successResult.feedbackStatus) { $successResult.feedbackStatus } else { "missing" }
+      $reason = if ($successResult.fallbackReason) {
+        $successResult.fallbackReason
+      }
+      elseif ($successResult.feedbackError) {
+        $successResult.feedbackError
+      }
+      else {
+        "feedback_not_closed"
+      }
+      Write-Log "WARN: feedback gap: ${Name}; source=${source}; status=${status}; reason=${reason}"
+    }
+    elseif ($successResult.learningSkipped -eq $true) {
+      $source = if ($successResult.decisionSource) { $successResult.decisionSource } else { "unknown" }
+      $reason = if ($successResult.fallbackReason) {
+        $successResult.fallbackReason
+      }
+      elseif ($successResult.decisionReason) {
+        $successResult.decisionReason
+      }
+      else {
+        "learning_not_expected"
+      }
+      Write-Log "learning feedback skipped: ${Name}; source=${source}; reason=${reason}"
+    }
+    Append-ResultObject $successResult
   }
   else {
     Append-ResultObject @{
@@ -633,7 +650,7 @@ if (-not (Get-Command node -ErrorAction SilentlyContinue)) {
 $helpers = @(
   $ExtractRollJson, $BuildSkipInput, $AppendJsonl, $SkipRulesJs,
   $FindUnreadRef, $ParseReadCandidate, $ValidateOpenChat, $FormatOpenChatFailure,
-  $ParseGeneratePreview, $BuildSendPayload, $ApplySendBundle, $WriteJudgeInput, $ComposeResultInput,
+  $ParseGeneratePreview, $BuildSendPayload, $ApplySendBundle, $ComposeResultInput,
   $FormatCandidateResult,
   $ParseSendResult,
   $ValidateSend, $CheckAgentHealth, $ValidateBrowserSelection, $DetectExpiredBanner, $ParsePageMeta

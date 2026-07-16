@@ -1,9 +1,15 @@
 import { randomUUID } from "node:crypto";
 import type { ReplyGateAdvisoryCode, ReplyVariantKind } from "@roll-agent/reply-authority-client";
+import {
+  PreparedReplyOptionValues,
+  type PreparedReplyFallbackReason,
+  type PreparedReplyJudgement,
+  type PreparedReplyOption,
+} from "./prepared-reply-decision.ts";
+import type { PreparedReplyJudgeContext } from "./prepared-reply-judge-context.ts";
 
-export const PreparedReplyOptionValues = ["option_1", "option_2"] as const;
-
-export type PreparedReplyOption = (typeof PreparedReplyOptionValues)[number];
+export { PreparedReplyOptionValues };
+export type { PreparedReplyOption };
 
 export type PreparedReplyVariantOption = {
   readonly option: PreparedReplyOption;
@@ -18,19 +24,31 @@ export type PreparedReplyVariantFinding = {
   readonly description: string;
 };
 
-export type PreparedReplyVariantGroup = {
+type PreparedReplyVariantGroupBase = {
   readonly groupId: string;
-  readonly options: readonly PreparedReplyVariantOption[];
-  readonly findings: readonly PreparedReplyVariantFinding[];
   readonly rubricVersion: string;
   readonly rubricHash: string;
+  readonly feedbackExpiresAt?: number;
   readonly target: {
     readonly platform: "zhipin";
     readonly tenantId: string;
     readonly conversationId: string;
   };
-  readonly recommendedOption: PreparedReplyOption;
 };
+
+export type PreparedReplyVariantGroup =
+  | (PreparedReplyVariantGroupBase & {
+      readonly state: "judge_ready";
+      readonly options: readonly PreparedReplyVariantOption[];
+      readonly findings: readonly PreparedReplyVariantFinding[];
+      readonly recommendedOption: PreparedReplyOption;
+      readonly judgeContext: PreparedReplyJudgeContext;
+    })
+  | (PreparedReplyVariantGroupBase & {
+      readonly state: "not_learned";
+      readonly chosenVariant: "draft";
+      readonly reason: PreparedReplyFallbackReason;
+    });
 
 export type PreparedReplyRecord = {
   readonly preparedReplyId: string;
@@ -42,6 +60,7 @@ export type PreparedReplyRecord = {
   readonly requestId?: string;
   readonly unreadCountBeforeReply?: number;
   readonly variantGroup?: PreparedReplyVariantGroup;
+  readonly judgement?: PreparedReplyJudgement;
 };
 
 type StoredPreparedReply = PreparedReplyRecord & {
@@ -53,6 +72,8 @@ export type PreparedReplyConsumeResult =
   | { readonly ok: false; readonly reason: "not_found" | "expired" | "consumed" };
 
 export type PreparedReplyInspectResult = PreparedReplyConsumeResult;
+
+export type PreparedReplyJudgementUpdateResult = PreparedReplyConsumeResult;
 
 let preparedReplies = new Map<string, StoredPreparedReply>();
 
@@ -135,6 +156,27 @@ export function inspectPreparedReply(
   };
 }
 
+export function setPreparedReplyJudgement(
+  preparedReplyId: string,
+  judgement: PreparedReplyJudgement,
+  nowSeconds = Math.floor(Date.now() / 1000),
+): PreparedReplyJudgementUpdateResult {
+  const inspected = inspectPreparedReply(preparedReplyId, nowSeconds);
+  if (!inspected.ok) {
+    return inspected;
+  }
+
+  const stored = preparedReplies.get(preparedReplyId);
+  if (stored === undefined) {
+    return { ok: false, reason: "not_found" };
+  }
+  preparedReplies.set(preparedReplyId, { ...stored, judgement });
+  return {
+    ok: true,
+    record: toPreparedReplyRecord({ ...stored, judgement }),
+  };
+}
+
 function toPreparedReplyRecord(record: StoredPreparedReply): PreparedReplyRecord {
   return {
     preparedReplyId: record.preparedReplyId,
@@ -148,6 +190,7 @@ function toPreparedReplyRecord(record: StoredPreparedReply): PreparedReplyRecord
       ? { unreadCountBeforeReply: record.unreadCountBeforeReply }
       : {}),
     ...(record.variantGroup !== undefined ? { variantGroup: record.variantGroup } : {}),
+    ...(record.judgement !== undefined ? { judgement: record.judgement } : {}),
   };
 }
 

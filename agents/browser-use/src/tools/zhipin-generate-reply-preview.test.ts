@@ -13,12 +13,17 @@ import {
   consumePreparedReply,
   resetPreparedReplyStoreForTests,
 } from "../reply-authority/prepared-reply-store.ts";
+import { PreparedReplyFallbackReasons } from "../reply-authority/prepared-reply-decision.ts";
 import {
   setZhipinGenerateReplyPreviewDepsForTests,
   zhipinGenerateReplyPreview,
 } from "./zhipin-generate-reply-preview.ts";
 
-function createTestContext(llmText = "", onGenerateText?: () => void): AgentContext {
+function createTestContext(
+  llmText = "",
+  onGenerateText?: () => void,
+  onWarn?: (message: string) => void,
+): AgentContext {
   return {
     llm: {
       generateText: async () => {
@@ -29,7 +34,9 @@ function createTestContext(llmText = "", onGenerateText?: () => void): AgentCont
     logger: {
       debug: () => {},
       info: () => {},
-      warn: () => {},
+      warn: (message) => {
+        onWarn?.(message);
+      },
       error: () => {},
     },
   };
@@ -322,8 +329,17 @@ async function* createDualDraftMockStream(): AsyncGenerator<ReplyStreamEvent> {
       ],
       rubricVersion: "reply-quality-v1",
       rubricHash: "sha256:test",
+      feedbackExpiresAt: 4_102_445_000,
     },
   };
+}
+
+async function* createDualDraftWithoutTenantStream(): AsyncGenerator<ReplyStreamEvent> {
+  for await (const event of createDualDraftMockStream()) {
+    if (event.type !== "stream.started") {
+      yield event;
+    }
+  }
 }
 
 async function* createDuplicateVariantMockStream(): AsyncGenerator<ReplyStreamEvent> {
@@ -491,17 +507,51 @@ describe("zhipin_generate_reply_preview", () => {
     assert.equal(consumed.ok, true);
     if (consumed.ok) {
       assert.equal(consumed.record.variantGroup?.groupId, "rvg_abc123");
-      assert.deepEqual(
-        consumed.record.variantGroup?.options.map((option) => option.variant).sort(),
-        ["draft", "revised"],
-      );
-      assert.equal(
-        consumed.record.variantGroup?.options.some(
-          (option) => option.signedEnvelope === "payload.revised.signature",
-        ),
-        true,
-      );
+      assert.equal(consumed.record.variantGroup?.feedbackExpiresAt, 4_102_445_000);
+      assert.equal(consumed.record.variantGroup?.state, "judge_ready");
+      if (consumed.record.variantGroup?.state === "judge_ready") {
+        assert.deepEqual(
+          consumed.record.variantGroup.options.map((option) => option.variant).sort(),
+          ["draft", "revised"],
+        );
+        assert.equal(
+          consumed.record.variantGroup.options.some(
+            (option) => option.signedEnvelope === "payload.revised.signature",
+          ),
+          true,
+        );
+        assert.equal(consumed.record.variantGroup.judgeContext.candidateMessage, "薪资多少？");
+        assert.equal(consumed.record.variantGroup.judgeContext.recentConversation.length > 0, true);
+      }
+      assert.equal(JSON.stringify(result).includes("candidateMessage"), false);
     }
+  });
+
+  it("refuses to create a sendable dual draft when feedback tenant identity is missing", async () => {
+    const calls: string[] = [];
+    let rubricCalls = 0;
+
+    setZhipinGenerateReplyPreviewDepsForTests({
+      openNativePagePort: async () => createNativePage(calls),
+      createNativeVisualActivitySession: () => createNoopSession(calls),
+      createReplyPreviewVisualSession: () => createPreviewSession(calls),
+      streamGenerateSignedReply: () => createDualDraftWithoutTenantStream(),
+      fetchReplyFeedbackRubric: async () => {
+        rubricCalls += 1;
+        throw new Error("must not be called");
+      },
+    });
+
+    const result = await zhipinGenerateReplyPreview.execute(
+      { conversationId: "conv-1", maxMessages: 20 },
+      createTestContext(),
+    );
+
+    assert.equal(result.success, false);
+    assert.equal(result.preparedReplyId, undefined);
+    assert.match(result.error ?? "", /feedback identity/);
+    assert.equal(rubricCalls, 0);
+    assert.equal(calls.includes("preview:fail:双稿反馈身份缺失"), true);
   });
 
   it("uses the injected random source to assign neutral option order", async () => {
@@ -558,15 +608,18 @@ describe("zhipin_generate_reply_preview", () => {
       const consumed = consumePreparedReply(result.preparedReplyId ?? "", 1_800_000_000);
       assert.equal(consumed.ok, true);
       if (consumed.ok) {
-        assert.equal(
-          consumed.record.variantGroup?.options[0]?.variant,
-          scenario.expectedFirstVariant,
-        );
+        assert.equal(consumed.record.variantGroup?.state, "judge_ready");
+        if (consumed.record.variantGroup?.state === "judge_ready") {
+          assert.equal(
+            consumed.record.variantGroup.options[0]?.variant,
+            scenario.expectedFirstVariant,
+          );
+        }
       }
     }
   });
 
-  it("falls back to the top-level draft when dual-draft items do not contain draft and revised", async () => {
+  it("preserves a non-learning terminal group when dual-draft items are invalid", async () => {
     const calls: string[] = [];
 
     setZhipinGenerateReplyPreviewDepsForTests({
@@ -600,12 +653,19 @@ describe("zhipin_generate_reply_preview", () => {
     const consumed = consumePreparedReply(result.preparedReplyId ?? "", 1_800_000_000);
     assert.equal(consumed.ok, true);
     if (consumed.ok) {
-      assert.equal(consumed.record.variantGroup, undefined);
+      assert.equal(consumed.record.variantGroup?.state, "not_learned");
+      if (consumed.record.variantGroup?.state === "not_learned") {
+        assert.equal(
+          consumed.record.variantGroup.reason,
+          PreparedReplyFallbackReasons.INVALID_VARIANT_SHAPE,
+        );
+        assert.equal(consumed.record.variantGroup.chosenVariant, "draft");
+      }
       assert.equal(consumed.record.signedEnvelope, "payload.draft.signature");
     }
   });
 
-  it("falls back to the top-level draft when the feedback rubric hash mismatches", async () => {
+  it("preserves a non-learning terminal group when the feedback rubric hash mismatches", async () => {
     const calls: string[] = [];
 
     setZhipinGenerateReplyPreviewDepsForTests({
@@ -640,9 +700,55 @@ describe("zhipin_generate_reply_preview", () => {
     const consumed = consumePreparedReply(result.preparedReplyId ?? "", 1_800_000_000);
     assert.equal(consumed.ok, true);
     if (consumed.ok) {
-      assert.equal(consumed.record.variantGroup, undefined);
+      assert.equal(consumed.record.variantGroup?.state, "not_learned");
+      if (consumed.record.variantGroup?.state === "not_learned") {
+        assert.equal(
+          consumed.record.variantGroup.reason,
+          PreparedReplyFallbackReasons.RUBRIC_MISMATCH,
+        );
+        assert.equal(consumed.record.variantGroup.feedbackExpiresAt, 4_102_445_000);
+      }
       assert.equal(consumed.record.signedEnvelope, "payload.draft.signature");
     }
+  });
+
+  it("keeps raw rubric errors local while preserving a safe non-learning terminal group", async () => {
+    const calls: string[] = [];
+    const warnings: string[] = [];
+
+    setZhipinGenerateReplyPreviewDepsForTests({
+      openNativePagePort: async () => createNativePage(calls),
+      createNativeVisualActivitySession: () => createNoopSession(calls),
+      createReplyPreviewVisualSession: () => createPreviewSession(calls),
+      streamGenerateSignedReply: () => createDualDraftMockStream(),
+      fetchReplyFeedbackRubric: async () => {
+        throw new Error("rubric provider echoed candidate phone 13800138000");
+      },
+    });
+
+    const result = await zhipinGenerateReplyPreview.execute(
+      { conversationId: "conv-1", maxMessages: 20 },
+      createTestContext("", undefined, (message) => warnings.push(message)),
+    );
+
+    assert.equal(result.success, true);
+    assert.equal(result.replyVariantSelection, undefined);
+    const consumed = consumePreparedReply(result.preparedReplyId ?? "", 1_800_000_000);
+    assert.equal(consumed.ok, true);
+    if (consumed.ok) {
+      assert.equal(consumed.record.variantGroup?.state, "not_learned");
+      if (consumed.record.variantGroup?.state === "not_learned") {
+        assert.equal(
+          consumed.record.variantGroup.reason,
+          PreparedReplyFallbackReasons.RUBRIC_FETCH_FAILED,
+        );
+      }
+      assert.equal(JSON.stringify(consumed.record).includes("13800138000"), false);
+    }
+    assert.equal(
+      warnings.some((message) => message.includes("13800138000")),
+      true,
+    );
   });
 
   it("infers unread context when the latest human message is from the candidate", async () => {

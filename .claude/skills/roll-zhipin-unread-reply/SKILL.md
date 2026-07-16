@@ -68,7 +68,7 @@ Set-ExecutionPolicy -Scope Process Bypass -Force
 | `--limit N` | `-Limit N` | Cap candidates this run |
 | `--no-unread-filter` | `-NoUnreadFilter` | Skip clicking 「未读」 |
 | `--no-exchange-wechat` | `-NoExchangeWechat` | Skip exchange-wechat |
-| `--no-judge` | `-NoJudge` | Skip `zhipin_judge_prepared_reply`; dual-draft sends recommended option only |
+| `--no-judge` | `-NoJudge` | **Break-glass only:** bypass Judge, send the recommended option, and record `learningSkipped:true` |
 | `--min-gap` / `--max-gap` | `-MinGap` / `-MaxGap` | Delay between sends (default **0** = immediate next) |
 | `--batch-size` / `--batch-pause` | `-BatchSize` / `-BatchPause` | Burst control (default pause **0** = off) |
 | `--keep-workdir` | `-KeepWorkDir` | Keep temp JSON files after run |
@@ -124,12 +124,11 @@ When parallel full-reply runs misbehave but sequential runs on the same instance
 | `parse-read-candidate.mjs` | Parse `zhipin_read_messages` output |
 | `format-open-chat-failure.mjs` | Preserve initial/reload/retry errors after open-chat recovery fails |
 | `parse-generate-preview.mjs` | Parse preview output (`preparedReplyId`, `hasDualDraft`) |
-| `build-send-payload.mjs` | Build send bundle with optional `variantDecision` from judge |
+| `build-send-payload.mjs` | Build the send input; default only passes `preparedReplyId`, break-glass adds `skipVariantJudge:true` |
 | `apply-send-bundle.mjs` | Write validated `sp.json` from send bundle |
-| `write-judge-input.mjs` | Safely write `judge.json` with `preparedReplyId` |
 | `compose-result-input.mjs` | Merge bundle + send result for JSONL formatting |
-| `format-candidate-result.mjs` | Build JSONL result line for sent / send_failed |
-| `parse-send-result.mjs` | Parse send output (`ok`, `feedbackStatus`) |
+| `format-candidate-result.mjs` | Build JSONL from the decision metadata returned by send |
+| `parse-send-result.mjs` | Validate and preserve send decision/feedback metadata |
 | `validate-*.mjs` / `check-agent-health.mjs` | Roll output validators |
 | `validate-browser-selection.mjs` | Fail fast when multi-instance config needs explicit `browserInstance` |
 | `detect-expired-banner.mjs` / `parse-page-meta.mjs` | Page guards |
@@ -140,6 +139,7 @@ Quick test (no roll):
 node scripts/evaluate-skip-rules.test.mjs
 node scripts/roll-helpers.test.mjs
 node scripts/pipeline-judge-send.test.mjs
+node scripts/reply-unread-safely.e2e.test.mjs
 ```
 
 ### Windows PowerShell pitfalls (addressed in repo)
@@ -165,9 +165,11 @@ read_messages(limit=1, onlyUnread) → one candidate (read-only, no list click)
 → info.json {maxMessages} + get_candidate_info  ← current chat
 → evaluate-skip-rules.mjs → skip? → back to list
 → gp.json {maxMessages} + generate_reply_preview → preparedReplyId
-→ [若 hasDualDraft 且未 --no-judge] judge.json + zhipin_judge_prepared_reply → variantDecision
 → build-send-payload.mjs → apply-send-bundle.mjs → sp.json
 → sp.json + send_prepared_reply
+  ↳ hasDualDraft + 默认路径：send 内嵌 Judge，选择 A/B 后自动 feedback
+  ↳ Judge fallback：send 推荐稿并回传 not_learned 终态，JSONL 记录 feedbackExpected=false、learningSkipped=true
+  ↳ --no-judge：sp.json 显式携带 skipVariantJudge:true
 → wx.json {} + exchange_wechat (current chat)
 → back to list → repeat
 ```
@@ -185,7 +187,13 @@ All `roll run` inputs use **`--input-file`** (PowerShell-safe; macOS/Linux compa
 ### Operational guardrails
 
 - `needs_confirmation`: scripts do **not** auto-retry with approval payloads today; see [references/safety.md](references/safety.md).
-- Dual-draft previews default to `zhipin_judge_prepared_reply` before send so `variantDecision.reason` flows into `/reply-feedback`. Use `--no-judge` only when you explicitly want the recommended option without judge latency.
+- The batch script does not call `zhipin_judge_prepared_reply`. It passes only `preparedReplyId`; `zhipin_send_prepared_reply` owns the required Judge, selection, send, and feedback sequence. The standalone Judge tool remains available for optional preview outside this script.
+- `--no-judge` is an explicit break-glass path. It adds `skipVariantJudge:true`, selects the service recommendation, submits a terminal `not_learned` outcome, and records `decisionSource:"explicit_no_judge"` plus `learningSkipped:true` in JSONL.
+- A Judge fallback similarly sends the recommendation, submits `not_learned`, and records `decisionSource:"service_recommended_fallback"` plus `learningSkipped:true`; it closes service Pending but must not be counted as A/B learning evidence.
+- If preview cannot validate the rubric or dual-draft shape, it keeps the server group as a non-learning terminal state instead of discarding it. Send then uses the top-level recommendation and closes that group without invoking Judge.
+- Fallback reasons crossing the feedback boundary are stable safe codes such as `rubric_fetch_failed`, `rubric_mismatch`, `invalid_variant_shape`, `judge_sampling_failed`, and `judge_output_invalid`; raw provider or parser errors stay only in local agent logs.
+- JSONL rows use the decision metadata returned by send and expose `decisionSource`, `decisionReason`, `judgeModel`, `fallbackReason`, `feedbackExpected`, `feedbackClosed`, `feedbackQueued`, `feedbackGap`, and `learningSkipped`. `feedbackExpected` means the outcome is eligible for learning; `feedbackGap` applies to every sent dual draft whose selected or `not_learned` terminal outcome is neither closed nor queued.
+- The script never retries `zhipin_send_prepared_reply` to repair feedback. When selected or `not_learned` feedback is `queued`, the browser-use agent outbox retries only the feedback POST, avoiding duplicate BOSS messages.
 - Multi-instance selection is validated at startup through `browser_status`; when multiple instances exist without a configured default, the script exits before touching BOSS unless `--browser-instance` / `-BrowserInstance` is provided.
 - Pre-flight is per `browserInstance`: check `browser_status`, `zhipin_get_username`, `zhipin_open_chat_page`, then one `zhipin_read_messages`.
 - Recovery is per `browserInstance`: if the tab is logged out, on marketing home, or returns empty reads unexpectedly, recover that profile before running the script. If only one browser runtime is stale, prefer `roll browser stop <browserInstance>` then reopen that same instance; do not restart the whole agent.

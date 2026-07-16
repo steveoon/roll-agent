@@ -16,7 +16,7 @@
     "references"
   ],
   "engines": {
-    "node": ">=22.6.0"
+    "node": ">=22.13.0"
   },
   "exports": {
     ".": {

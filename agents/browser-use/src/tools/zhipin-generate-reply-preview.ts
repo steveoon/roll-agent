@@ -26,11 +26,19 @@ import type {
 } from "../pages/zhipin/native-page.ts";
 import { pickBestUsername } from "../pages/zhipin/username.ts";
 import {
+  PreparedReplyFallbackReasons,
+  type PreparedReplyFallbackReason,
+} from "../reply-authority/prepared-reply-decision.ts";
+import {
   PreparedReplyOptionValues,
   savePreparedReply,
   type PreparedReplyRecord,
   type PreparedReplyVariantGroup,
 } from "../reply-authority/prepared-reply-store.ts";
+import {
+  buildPreparedReplyJudgeContext,
+  type PreparedReplyJudgeContext,
+} from "../reply-authority/prepared-reply-judge-context.ts";
 import { NativeReplyPreviewVisualSession } from "../reply-authority/reply-preview-visual.ts";
 import { maybeBringToFront } from "../browser-foreground.ts";
 
@@ -408,7 +416,7 @@ function toOutput(
     ...(record.requestId !== undefined ? { requestId: record.requestId } : {}),
     ...(timing !== undefined ? { timing } : {}),
     ...(gateRewritten ? { gateRewritten } : {}),
-    ...(record.variantGroup !== undefined
+    ...(record.variantGroup?.state === "judge_ready"
       ? {
           replyVariantSelection: {
             groupId: record.variantGroup.groupId,
@@ -441,27 +449,61 @@ function reorderReplyVariants(
   return random() < 0.5 ? [second, first] : [first, second];
 }
 
+function buildNotLearnedVariantGroup(input: {
+  readonly replyVariants: ReplyVariants;
+  readonly tenantId: string;
+  readonly conversationId: string;
+  readonly reason: PreparedReplyFallbackReason;
+}): PreparedReplyVariantGroup {
+  return {
+    state: "not_learned",
+    groupId: input.replyVariants.groupId,
+    rubricVersion: input.replyVariants.rubricVersion,
+    rubricHash: input.replyVariants.rubricHash,
+    ...(input.replyVariants.feedbackExpiresAt !== undefined
+      ? { feedbackExpiresAt: input.replyVariants.feedbackExpiresAt }
+      : {}),
+    target: {
+      platform: "zhipin",
+      tenantId: input.tenantId,
+      conversationId: input.conversationId,
+    },
+    chosenVariant: "draft",
+    reason: input.reason,
+  };
+}
+
 function buildVariantGroup(input: {
   readonly replyVariants: ReplyVariants;
   readonly rubric: ReplyFeedbackRubricResponse;
   readonly tenantId: string;
   readonly conversationId: string;
+  readonly judgeContext: PreparedReplyJudgeContext;
   readonly random: () => number;
-}): PreparedReplyVariantGroup | undefined {
+}): PreparedReplyVariantGroup {
   if (
     input.rubric.rubricVersion !== input.replyVariants.rubricVersion ||
     input.rubric.rubricHash !== input.replyVariants.rubricHash
   ) {
-    return undefined;
+    return buildNotLearnedVariantGroup({
+      ...input,
+      reason: PreparedReplyFallbackReasons.RUBRIC_MISMATCH,
+    });
   }
 
   const orderedItems = reorderReplyVariants(input.replyVariants, input.random);
   if (orderedItems.length !== 2) {
-    return undefined;
+    return buildNotLearnedVariantGroup({
+      ...input,
+      reason: PreparedReplyFallbackReasons.INVALID_VARIANT_SHAPE,
+    });
   }
   const variantKinds = new Set(orderedItems.map((item) => item.variant));
   if (!variantKinds.has("draft") || !variantKinds.has("revised")) {
-    return undefined;
+    return buildNotLearnedVariantGroup({
+      ...input,
+      reason: PreparedReplyFallbackReasons.INVALID_VARIANT_SHAPE,
+    });
   }
 
   const options = orderedItems.map((item, index) => ({
@@ -476,17 +518,22 @@ function buildVariantGroup(input: {
     "option_1";
 
   return {
+    state: "judge_ready",
     groupId: input.replyVariants.groupId,
     options,
     findings: input.replyVariants.findings,
     rubricVersion: input.replyVariants.rubricVersion,
     rubricHash: input.replyVariants.rubricHash,
+    ...(input.replyVariants.feedbackExpiresAt !== undefined
+      ? { feedbackExpiresAt: input.replyVariants.feedbackExpiresAt }
+      : {}),
     target: {
       platform: "zhipin",
       tenantId: input.tenantId,
       conversationId: input.conversationId,
     },
     recommendedOption,
+    judgeContext: input.judgeContext,
   };
 }
 
@@ -717,10 +764,12 @@ export const zhipinGenerateReplyPreview = defineTool({
           let variantGroup: PreparedReplyVariantGroup | undefined;
           if (finalReply.replyVariants !== undefined) {
             if (tenantId === undefined) {
-              ctx.logger.warn(
+              const error =
                 "Reply Authority returned replyVariants without stream.started.tenantId; " +
-                  "falling back to single-draft prepared reply.",
-              );
+                "refusing to create a sendable prepared reply without feedback identity.";
+              ctx.logger.error(error);
+              await preview.fail("双稿反馈身份缺失");
+              return createFailure(error);
             } else {
               try {
                 const rubric = await deps.fetchReplyFeedbackRubric({
@@ -732,20 +781,27 @@ export const zhipinGenerateReplyPreview = defineTool({
                   rubric,
                   tenantId,
                   conversationId: selectedTarget.conversationId,
+                  judgeContext: buildPreparedReplyJudgeContext(replyInput),
                   random: deps.random,
                 });
-                if (variantGroup === undefined) {
+                if (variantGroup.state === "not_learned") {
                   ctx.logger.warn(
-                    "Reply feedback rubric mismatch or invalid variant shape; " +
-                      "falling back to single-draft prepared reply.",
+                    `Reply variants will use a non-learning terminal outcome: ` +
+                      `reason=${variantGroup.reason}`,
                   );
                 }
               } catch (error) {
+                const detail = error instanceof Error ? error.message : String(error);
                 ctx.logger.warn(
-                  `Failed to fetch reply feedback rubric; falling back to single draft. ${
-                    error instanceof Error ? error.message : String(error)
-                  }`,
+                  `Failed to fetch reply feedback rubric; using a non-learning terminal outcome. ` +
+                    `reason=${PreparedReplyFallbackReasons.RUBRIC_FETCH_FAILED} detail=${detail}`,
                 );
+                variantGroup = buildNotLearnedVariantGroup({
+                  replyVariants: finalReply.replyVariants,
+                  tenantId,
+                  conversationId: selectedTarget.conversationId,
+                  reason: PreparedReplyFallbackReasons.RUBRIC_FETCH_FAILED,
+                });
               }
             }
           }
@@ -762,7 +818,7 @@ export const zhipinGenerateReplyPreview = defineTool({
           await preview.complete(
             buildCompletionLabel({ ...timingSummary, gateRewritten }),
             finalReply.suggestedReply,
-            variantGroup !== undefined
+            variantGroup?.state === "judge_ready"
               ? {
                   options: variantGroup.options.map((option) => ({
                     option: option.option,

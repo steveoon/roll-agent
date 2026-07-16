@@ -1,4 +1,7 @@
 import assert from "node:assert/strict";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { afterEach, beforeEach, describe, it } from "node:test";
 import { StructuredToolError, type AgentContext } from "@roll-agent/sdk";
 import { BrowserRuntimeConfigSchema, type BrowserRuntime } from "@roll-agent/browser";
@@ -7,20 +10,30 @@ import { resetBrowserActionApprovalsForTests } from "../browser-action-approval.
 import { resetToolActionApprovalsForTests } from "../tool-action-approval.ts";
 import { setRuntimeStateForTests } from "../runtime-holder.ts";
 import {
+  PreparedReplyFallbackReasons,
+  type PreparedReplyFallbackReason,
+  type PreparedReplyVariantDecision,
+} from "../reply-authority/prepared-reply-decision.ts";
+import {
   consumePreparedReply,
   inspectPreparedReply,
   resetPreparedReplyStoreForTests,
   savePreparedReply,
 } from "../reply-authority/prepared-reply-store.ts";
 import {
+  initializeReplyFeedbackOutbox,
+  shutdownReplyFeedbackOutbox,
+} from "../reply-authority/reply-feedback-outbox.ts";
+import { setZhipinJudgePreparedReplyDepsForTests } from "./zhipin-judge-prepared-reply.ts";
+import {
   setZhipinSendPreparedReplyDepsForTests,
   zhipinSendPreparedReply,
 } from "./zhipin-send-prepared-reply.ts";
 
-function createTestContext(): AgentContext {
+function createTestContext(llmText = ""): AgentContext {
   return {
     llm: {
-      generateText: async () => "",
+      generateText: async () => llmText,
     },
     logger: {
       debug: () => {},
@@ -30,6 +43,8 @@ function createTestContext(): AgentContext {
     },
   };
 }
+
+let outboxDirectory = "";
 
 function createRuntime(actionPolicy: "log" | "deny" | "confirm" = "log"): BrowserRuntime {
   return {
@@ -44,15 +59,23 @@ function createRuntime(actionPolicy: "log" | "deny" | "confirm" = "log"): Browse
 }
 
 beforeEach(() => {
+  outboxDirectory = mkdtempSync(join(tmpdir(), "roll-feedback-outbox-"));
+  initializeReplyFeedbackOutbox({
+    dbPath: join(outboxDirectory, "outbox.sqlite"),
+    flushIntervalMs: 60_000,
+  });
   setRuntimeStateForTests({ runtime: createRuntime() });
 });
 
-afterEach(() => {
+afterEach(async () => {
+  await shutdownReplyFeedbackOutbox();
+  rmSync(outboxDirectory, { recursive: true, force: true });
   resetPreparedReplyStoreForTests();
   resetBrowserUsePolicyForTests();
   resetBrowserActionApprovalsForTests();
   resetToolActionApprovalsForTests();
   setZhipinSendPreparedReplyDepsForTests(undefined);
+  setZhipinJudgePreparedReplyDepsForTests(undefined);
   setRuntimeStateForTests({});
 });
 
@@ -71,7 +94,7 @@ describe("zhipin_send_prepared_reply", () => {
     );
   }
 
-  function saveDualPreparedReply() {
+  function saveDualPreparedReply(groupId = "rvg_abc123") {
     return savePreparedReply(
       {
         signedEnvelope: "payload.draft.signature",
@@ -81,7 +104,8 @@ describe("zhipin_send_prepared_reply", () => {
         expiresAt: 4_102_444_800,
         unreadCountBeforeReply: 2,
         variantGroup: {
-          groupId: "rvg_abc123",
+          state: "judge_ready",
+          groupId,
           options: [
             {
               option: "option_1",
@@ -106,12 +130,47 @@ describe("zhipin_send_prepared_reply", () => {
           ],
           rubricVersion: "reply-quality-v1",
           rubricHash: "sha256:test",
+          feedbackExpiresAt: 4_102_444_900,
           target: {
             platform: "zhipin",
             tenantId: "tenant-001",
             conversationId: "conv-1",
           },
           recommendedOption: "option_1",
+          judgeContext: {
+            candidateMessage: "薪资多少？",
+            recentConversation: [],
+          },
+        },
+      },
+      1_800_000_000,
+    );
+  }
+
+  function saveNotLearnedPreparedReply(
+    reason: PreparedReplyFallbackReason = PreparedReplyFallbackReasons.INVALID_VARIANT_SHAPE,
+  ) {
+    return savePreparedReply(
+      {
+        signedEnvelope: "payload.draft.signature",
+        suggestedReply: "你好，薪资可以详聊。",
+        stage: "job_consultation",
+        confidence: 0.9,
+        expiresAt: 4_102_444_800,
+        unreadCountBeforeReply: 2,
+        variantGroup: {
+          state: "not_learned",
+          groupId: "rvg_preview_fallback",
+          rubricVersion: "reply-quality-v1",
+          rubricHash: "sha256:test",
+          feedbackExpiresAt: 4_102_444_900,
+          target: {
+            platform: "zhipin",
+            tenantId: "tenant-001",
+            conversationId: "conv-1",
+          },
+          chosenVariant: "draft",
+          reason,
         },
       },
       1_800_000_000,
@@ -206,6 +265,7 @@ describe("zhipin_send_prepared_reply", () => {
   it("sends the selected dual-draft envelope and posts feedback", async () => {
     const sent: Array<{ readonly envelope: string; readonly unread?: number }> = [];
     const feedbackBodies: unknown[] = [];
+    const feedbackDeadlines: Array<number | undefined> = [];
     const saved = saveDualPreparedReply();
     setZhipinSendPreparedReplyDepsForTests({
       sendSignedZhipinReply: async (input) => {
@@ -217,9 +277,10 @@ describe("zhipin_send_prepared_reply", () => {
         });
         return { success: true, sentMessage: "你好，我可以帮你确认薪资范围。" };
       },
-      postReplyFeedback: async (body) => {
+      submitReplyFeedback: async (body, _deliver, _logger, options) => {
         feedbackBodies.push(body);
-        return { status: "accepted", groupId: body.groupId };
+        feedbackDeadlines.push(options?.feedbackExpiresAt);
+        return { status: "accepted" };
       },
     });
 
@@ -248,12 +309,81 @@ describe("zhipin_send_prepared_reply", () => {
         ?.confirmedFindingCodes,
       ["off_axis_fact_disclosure"],
     );
+    assert.deepEqual(feedbackBodies[0], {
+      groupId: "rvg_abc123",
+      target: {
+        platform: "zhipin",
+        tenantId: "tenant-001",
+        conversationId: "conv-1",
+      },
+      chosenVariant: "revised",
+      feedbackOutcome: "selected",
+      decisionSource: "orchestrator",
+      confirmedFindingCodes: ["off_axis_fact_disclosure"],
+      reason: "option_2 更直接回应薪资问题",
+      rubricVersion: "reply-quality-v1",
+      rubricHash: "sha256:test",
+      judgeModel: "test-judge",
+    });
+    assert.deepEqual(feedbackDeadlines, [4_102_444_900]);
   });
 
-  it("keeps old preparedReplyId-only sending usable for dual-draft records", async () => {
+  it("automatically judges dual drafts and posts feedback when variantDecision is omitted", async () => {
     const sentEnvelopes: string[] = [];
     const feedbackBodies: unknown[] = [];
     const saved = saveDualPreparedReply();
+    setZhipinJudgePreparedReplyDepsForTests({
+      fetchReplyFeedbackRubric: async () => ({
+        rubricVersion: "reply-quality-v1",
+        rubricHash: "sha256:test",
+        rubric: {},
+        advisoryFindings: [],
+      }),
+    });
+    setZhipinSendPreparedReplyDepsForTests({
+      sendSignedZhipinReply: async (input) => {
+        sentEnvelopes.push(input.signedEnvelope);
+        return { success: true, sentMessage: "你好，薪资可以详聊。" };
+      },
+      postReplyFeedback: async (body) => {
+        feedbackBodies.push(body);
+        return { status: "accepted", groupId: body.groupId };
+      },
+    });
+
+    const result = await zhipinSendPreparedReply.execute(
+      { preparedReplyId: saved.preparedReplyId },
+      createTestContext(
+        JSON.stringify({
+          chosenOption: "option_2",
+          reason: "option_2 更直接回应候选人的薪资问题，且没有额外承诺",
+          confirmedFindingCodes: ["off_axis_fact_disclosure"],
+        }),
+      ),
+    );
+
+    assert.equal(result.success, true);
+    assert.equal(result.feedbackStatus, "accepted");
+    assert.equal(result.decisionSource, "judge");
+    assert.equal(result.chosenOption, "option_2");
+    assert.equal(result.feedbackExpected, true);
+    assert.match(result.decisionReason ?? "", /更直接回应候选人的薪资问题/);
+    assert.deepEqual(sentEnvelopes, ["payload.revised.signature"]);
+    assert.equal(feedbackBodies.length, 1);
+  });
+
+  it("sends the recommended option without learning when the default judge falls back", async () => {
+    const sentEnvelopes: string[] = [];
+    const feedbackBodies: unknown[] = [];
+    const saved = saveDualPreparedReply();
+    setZhipinJudgePreparedReplyDepsForTests({
+      fetchReplyFeedbackRubric: async () => ({
+        rubricVersion: "reply-quality-v1",
+        rubricHash: "sha256:mismatch",
+        rubric: {},
+        advisoryFindings: [],
+      }),
+    });
     setZhipinSendPreparedReplyDepsForTests({
       sendSignedZhipinReply: async (input) => {
         sentEnvelopes.push(input.signedEnvelope);
@@ -271,9 +401,224 @@ describe("zhipin_send_prepared_reply", () => {
     );
 
     assert.equal(result.success, true);
-    assert.equal(result.feedbackStatus, "skipped");
+    assert.equal(result.decisionSource, "service_recommended_fallback");
+    assert.equal(result.feedbackExpected, false);
+    assert.equal(result.feedbackStatus, "accepted");
     assert.deepEqual(sentEnvelopes, ["payload.draft.signature"]);
+    assert.deepEqual(feedbackBodies, [
+      {
+        groupId: "rvg_abc123",
+        target: {
+          platform: "zhipin",
+          tenantId: "tenant-001",
+          conversationId: "conv-1",
+        },
+        chosenVariant: "draft",
+        feedbackOutcome: "not_learned",
+        decisionSource: "service_recommended_fallback",
+        reason: PreparedReplyFallbackReasons.RUBRIC_MISMATCH,
+        rubricVersion: "reply-quality-v1",
+        rubricHash: "sha256:test",
+      },
+    ]);
+  });
+
+  it("sends a preview-degraded draft and closes its non-learning feedback outcome", async () => {
+    const sentEnvelopes: string[] = [];
+    const feedbackBodies: unknown[] = [];
+    const feedbackDeadlines: Array<number | undefined> = [];
+    const saved = saveNotLearnedPreparedReply(PreparedReplyFallbackReasons.RUBRIC_FETCH_FAILED);
+    let rubricCalls = 0;
+    let llmCalls = 0;
+    setZhipinJudgePreparedReplyDepsForTests({
+      fetchReplyFeedbackRubric: async () => {
+        rubricCalls += 1;
+        throw new Error("must not be called");
+      },
+    });
+    setZhipinSendPreparedReplyDepsForTests({
+      sendSignedZhipinReply: async (input) => {
+        sentEnvelopes.push(input.signedEnvelope);
+        return { success: true, sentMessage: "你好，薪资可以详聊。" };
+      },
+      submitReplyFeedback: async (body, _deliver, _logger, options) => {
+        feedbackBodies.push(body);
+        feedbackDeadlines.push(options?.feedbackExpiresAt);
+        return { status: "accepted" };
+      },
+    });
+    const context: AgentContext = {
+      ...createTestContext(),
+      llm: {
+        generateText: async () => {
+          llmCalls += 1;
+          throw new Error("must not be called");
+        },
+      },
+    };
+
+    const result = await zhipinSendPreparedReply.execute(
+      { preparedReplyId: saved.preparedReplyId },
+      context,
+    );
+
+    assert.equal(result.success, true);
+    assert.equal(result.chosenOption, undefined);
+    assert.equal(result.decisionSource, "service_recommended_fallback");
+    assert.equal(result.decisionReason, PreparedReplyFallbackReasons.RUBRIC_FETCH_FAILED);
+    assert.equal(result.feedbackExpected, false);
+    assert.equal(result.feedbackStatus, "accepted");
+    assert.equal(rubricCalls, 0);
+    assert.equal(llmCalls, 0);
+    assert.deepEqual(sentEnvelopes, ["payload.draft.signature"]);
+    assert.deepEqual(feedbackBodies, [
+      {
+        groupId: "rvg_preview_fallback",
+        target: {
+          platform: "zhipin",
+          tenantId: "tenant-001",
+          conversationId: "conv-1",
+        },
+        chosenVariant: "draft",
+        feedbackOutcome: "not_learned",
+        decisionSource: "service_recommended_fallback",
+        reason: PreparedReplyFallbackReasons.RUBRIC_FETCH_FAILED,
+        rubricVersion: "reply-quality-v1",
+        rubricHash: "sha256:test",
+      },
+    ]);
+    assert.deepEqual(feedbackDeadlines, [4_102_444_900]);
+  });
+
+  it("rejects a forged learning decision for a preview-degraded reply", async () => {
+    const sentEnvelopes: string[] = [];
+    const feedbackBodies: unknown[] = [];
+    const saved = saveNotLearnedPreparedReply();
+    setZhipinSendPreparedReplyDepsForTests({
+      sendSignedZhipinReply: async (input) => {
+        sentEnvelopes.push(input.signedEnvelope);
+        return { success: true, sentMessage: "sent" };
+      },
+      postReplyFeedback: async (body) => {
+        feedbackBodies.push(body);
+        return { status: "accepted", groupId: body.groupId };
+      },
+    });
+
+    const result = await zhipinSendPreparedReply.execute(
+      {
+        preparedReplyId: saved.preparedReplyId,
+        variantDecision: {
+          chosenOption: "option_2",
+          reason: "伪造一个学习选择",
+          confirmedFindingCodes: [],
+        },
+      },
+      createTestContext(),
+    );
+
+    assert.equal(result.success, false);
+    assert.match(result.error ?? "", /已降级为非学习终态，禁止提交学习 decision/);
+    assert.deepEqual(sentEnvelopes, []);
     assert.deepEqual(feedbackBodies, []);
+    assert.equal(inspectPreparedReply(saved.preparedReplyId).ok, true);
+  });
+
+  it("rejects a forged variantDecision after the cached default judge falls back", async () => {
+    const sentEnvelopes: string[] = [];
+    const saved = saveDualPreparedReply();
+    setBrowserUsePolicy({
+      approvalTtlMs: 300_000,
+      tools: {
+        zhipin_send_prepared_reply: { policy: "confirm" },
+      },
+    });
+    setZhipinJudgePreparedReplyDepsForTests({
+      fetchReplyFeedbackRubric: async () => ({
+        rubricVersion: "reply-quality-v1",
+        rubricHash: "sha256:mismatch",
+        rubric: {},
+        advisoryFindings: [],
+      }),
+    });
+    setZhipinSendPreparedReplyDepsForTests({
+      sendSignedZhipinReply: async (input) => {
+        sentEnvelopes.push(input.signedEnvelope);
+        return { success: true, sentMessage: "sent" };
+      },
+    });
+
+    await assert.rejects(
+      zhipinSendPreparedReply.execute(
+        { preparedReplyId: saved.preparedReplyId },
+        createTestContext(),
+      ),
+      (error) => {
+        assert.ok(error instanceof StructuredToolError);
+        assert.equal(error.payload.code, "needs_confirmation");
+        return true;
+      },
+    );
+
+    const result = await zhipinSendPreparedReply.execute(
+      {
+        preparedReplyId: saved.preparedReplyId,
+        variantDecision: {
+          chosenOption: "option_2",
+          reason: "伪造一个可学习选择",
+          confirmedFindingCodes: ["off_axis_fact_disclosure"],
+        },
+      },
+      createTestContext(),
+    );
+
+    assert.equal(result.success, false);
+    assert.match(result.error ?? "", /默认 Judge 已降级，禁止事后伪造学习 decision/);
+    assert.deepEqual(sentEnvelopes, []);
+    assert.equal(inspectPreparedReply(saved.preparedReplyId).ok, true);
+  });
+
+  it("records an explicit no-judge break-glass send without learning feedback", async () => {
+    const sentEnvelopes: string[] = [];
+    const feedbackBodies: unknown[] = [];
+    const saved = saveDualPreparedReply();
+    setZhipinSendPreparedReplyDepsForTests({
+      sendSignedZhipinReply: async (input) => {
+        sentEnvelopes.push(input.signedEnvelope);
+        return { success: true, sentMessage: "你好，薪资可以详聊。" };
+      },
+      postReplyFeedback: async (body) => {
+        feedbackBodies.push(body);
+        return { status: "accepted", groupId: body.groupId };
+      },
+    });
+
+    const result = await zhipinSendPreparedReply.execute(
+      { preparedReplyId: saved.preparedReplyId, skipVariantJudge: true },
+      createTestContext(),
+    );
+
+    assert.equal(result.success, true);
+    assert.equal(result.decisionSource, "explicit_no_judge");
+    assert.equal(result.feedbackExpected, false);
+    assert.equal(result.feedbackStatus, "accepted");
+    assert.deepEqual(sentEnvelopes, ["payload.draft.signature"]);
+    assert.deepEqual(feedbackBodies, [
+      {
+        groupId: "rvg_abc123",
+        target: {
+          platform: "zhipin",
+          tenantId: "tenant-001",
+          conversationId: "conv-1",
+        },
+        chosenVariant: "draft",
+        feedbackOutcome: "not_learned",
+        decisionSource: "explicit_no_judge",
+        reason: "调用方显式跳过双稿 Judge",
+        rubricVersion: "reply-quality-v1",
+        rubricHash: "sha256:test",
+      },
+    ]);
   });
 
   it("consumes a dual-draft group after sending one option", async () => {
@@ -314,18 +659,24 @@ describe("zhipin_send_prepared_reply", () => {
     assert.deepEqual(sentEnvelopes, ["payload.draft.signature"]);
   });
 
-  it("marks 404/409/500 feedback failures without rolling back the sent dual-draft reply", async () => {
-    for (const statusCode of [404, 409, 500] as const) {
+  it("queues transient feedback failures but marks permanent failures without resending", async () => {
+    for (const scenario of [
+      { statusCode: 404, expectedStatus: "failed" },
+      { statusCode: 409, expectedStatus: "failed" },
+      { statusCode: 500, expectedStatus: "queued" },
+    ] as const) {
       resetPreparedReplyStoreForTests();
       const sentEnvelopes: string[] = [];
-      const saved = saveDualPreparedReply();
+      const saved = saveDualPreparedReply(`rvg_${String(scenario.statusCode)}`);
       setZhipinSendPreparedReplyDepsForTests({
         sendSignedZhipinReply: async (input) => {
           sentEnvelopes.push(input.signedEnvelope);
           return { success: true, sentMessage: "sent" };
         },
         postReplyFeedback: async () => {
-          throw new Error(`reply feedback ${String(statusCode)}`);
+          throw Object.assign(new Error(`reply feedback ${String(scenario.statusCode)}`), {
+            statusCode: scenario.statusCode,
+          });
         },
       });
 
@@ -341,10 +692,44 @@ describe("zhipin_send_prepared_reply", () => {
       );
 
       assert.equal(result.success, true);
-      assert.equal(result.feedbackStatus, "failed");
-      assert.match(result.feedbackError ?? "", new RegExp(`reply feedback ${String(statusCode)}`));
+      assert.equal(result.feedbackStatus, scenario.expectedStatus);
+      assert.match(
+        result.feedbackError ?? "",
+        new RegExp(`reply feedback ${String(scenario.statusCode)}`),
+      );
       assert.deepEqual(sentEnvelopes, ["payload.revised.signature"]);
     }
+  });
+
+  it("reports a durable outbox failure without rolling back or repeating the sent message", async () => {
+    const sentEnvelopes: string[] = [];
+    const saved = saveDualPreparedReply();
+    setZhipinSendPreparedReplyDepsForTests({
+      sendSignedZhipinReply: async (input) => {
+        sentEnvelopes.push(input.signedEnvelope);
+        return { success: true, sentMessage: "sent" };
+      },
+      submitReplyFeedback: async () => {
+        throw new Error("sqlite disk full");
+      },
+    });
+
+    const result = await zhipinSendPreparedReply.execute(
+      {
+        preparedReplyId: saved.preparedReplyId,
+        variantDecision: {
+          chosenOption: "option_2",
+          reason: "option_2 更聚焦",
+          confirmedFindingCodes: [],
+        },
+      },
+      createTestContext(),
+    );
+
+    assert.equal(result.success, true);
+    assert.equal(result.feedbackStatus, "failed");
+    assert.match(result.feedbackError ?? "", /sqlite disk full/);
+    assert.deepEqual(sentEnvelopes, ["payload.revised.signature"]);
   });
 
   it("returns needs_confirmation without consuming the prepared reply when policy is confirm", async () => {
@@ -423,6 +808,163 @@ describe("zhipin_send_prepared_reply", () => {
       ok: false,
       reason: "consumed",
     });
+  });
+
+  it("reuses the cached Judge and model when a matching replay omits judgeModel", async () => {
+    const sentEnvelopes: string[] = [];
+    const feedbackBodies: unknown[] = [];
+    const saved = saveDualPreparedReply();
+    let llmCalls = 0;
+    setBrowserUsePolicy({
+      approvalTtlMs: 300_000,
+      tools: {
+        zhipin_send_prepared_reply: { policy: "confirm" },
+      },
+    });
+    setZhipinJudgePreparedReplyDepsForTests({
+      fetchReplyFeedbackRubric: async () => ({
+        rubricVersion: "reply-quality-v1",
+        rubricHash: "sha256:test",
+        rubric: {},
+        advisoryFindings: [],
+      }),
+    });
+    setZhipinSendPreparedReplyDepsForTests({
+      sendSignedZhipinReply: async (input) => {
+        sentEnvelopes.push(input.signedEnvelope);
+        return { success: true, sentMessage: "sent" };
+      },
+      postReplyFeedback: async (body) => {
+        feedbackBodies.push(body);
+        return { status: "accepted", groupId: body.groupId };
+      },
+    });
+    const context: AgentContext = {
+      ...createTestContext(),
+      llm: {
+        generateText: async () => {
+          llmCalls += 1;
+          return JSON.stringify({
+            chosenOption: "option_2",
+            reason: "option_2 更直接回应候选人的薪资问题",
+            confirmedFindingCodes: ["off_axis_fact_disclosure"],
+          });
+        },
+      },
+    };
+
+    let approvalId = "";
+    await assert.rejects(
+      zhipinSendPreparedReply.execute({ preparedReplyId: saved.preparedReplyId }, context),
+      (error) => {
+        approvalId = readApprovalIdFromError(error);
+        return true;
+      },
+    );
+    const result = await zhipinSendPreparedReply.execute(
+      {
+        preparedReplyId: saved.preparedReplyId,
+        toolActionApproval: { id: approvalId },
+        variantDecision: {
+          chosenOption: "option_2",
+          reason: "option_2 更直接回应候选人的薪资问题",
+          confirmedFindingCodes: ["off_axis_fact_disclosure"],
+        },
+      },
+      context,
+    );
+
+    assert.equal(result.success, true);
+    assert.equal(result.decisionSource, "judge");
+    assert.equal(result.chosenOption, "option_2");
+    assert.equal(result.judgeModel, "mcp-sampling");
+    assert.equal(llmCalls, 1);
+    assert.deepEqual(sentEnvelopes, ["payload.revised.signature"]);
+    assert.equal(
+      (feedbackBodies[0] as { readonly judgeModel?: string } | undefined)?.judgeModel,
+      "mcp-sampling",
+    );
+  });
+
+  it("rejects a variantDecision that differs from the cached default judge decision", async () => {
+    const sentEnvelopes: string[] = [];
+    const saved = saveDualPreparedReply();
+    let llmCalls = 0;
+    setBrowserUsePolicy({
+      approvalTtlMs: 300_000,
+      tools: {
+        zhipin_send_prepared_reply: { policy: "confirm" },
+      },
+    });
+    setZhipinJudgePreparedReplyDepsForTests({
+      fetchReplyFeedbackRubric: async () => ({
+        rubricVersion: "reply-quality-v1",
+        rubricHash: "sha256:test",
+        rubric: {},
+        advisoryFindings: [],
+      }),
+    });
+    setZhipinSendPreparedReplyDepsForTests({
+      sendSignedZhipinReply: async (input) => {
+        sentEnvelopes.push(input.signedEnvelope);
+        return { success: true, sentMessage: "sent" };
+      },
+    });
+    const context: AgentContext = {
+      ...createTestContext(),
+      llm: {
+        generateText: async () => {
+          llmCalls += 1;
+          return JSON.stringify({
+            chosenOption: "option_2",
+            reason: "option_2 更直接回应候选人的薪资问题",
+            confirmedFindingCodes: ["off_axis_fact_disclosure"],
+          });
+        },
+      },
+    };
+
+    await assert.rejects(
+      zhipinSendPreparedReply.execute({ preparedReplyId: saved.preparedReplyId }, context),
+      (error) => {
+        assert.ok(error instanceof StructuredToolError);
+        assert.equal(error.payload.code, "needs_confirmation");
+        return true;
+      },
+    );
+
+    const mismatchedDecisions: PreparedReplyVariantDecision[] = [
+      {
+        chosenOption: "option_1",
+        reason: "option_2 更直接回应候选人的薪资问题",
+        confirmedFindingCodes: ["off_axis_fact_disclosure"],
+      },
+      {
+        chosenOption: "option_2",
+        reason: "改写后的理由不应覆盖缓存 Judge",
+        confirmedFindingCodes: ["off_axis_fact_disclosure"],
+      },
+      {
+        chosenOption: "option_2",
+        reason: "option_2 更直接回应候选人的薪资问题",
+        confirmedFindingCodes: [],
+      },
+    ];
+    for (const variantDecision of mismatchedDecisions) {
+      const result = await zhipinSendPreparedReply.execute(
+        {
+          preparedReplyId: saved.preparedReplyId,
+          variantDecision,
+        },
+        context,
+      );
+
+      assert.equal(result.success, false);
+      assert.match(result.error ?? "", /variantDecision 与已缓存的 Judge 结果不一致/);
+    }
+    assert.equal(llmCalls, 1);
+    assert.deepEqual(sentEnvelopes, []);
+    assert.equal(inspectPreparedReply(saved.preparedReplyId).ok, true);
   });
 
   it("does not allow a dual-draft tool approval for a different chosen option", async () => {

@@ -23,6 +23,7 @@ metadata:
 - `browser_status` 是无副作用诊断工具；它不会为了查询状态而启动尚未启动的 Chrome。需要启动某个实例时，调用带 `browserInstance` 的业务工具，例如 `open_platform({ browserInstance, platform:"zhipin" })`。
 - `browser_status.primaryInstanceId` 表示顶层 `running/headless/mode/security` 所采用的 primary bundle；多实例详情请看 `instances[]`。
 - `REPLY_AUTHORITY_URL` / `REPLY_AUTHORITY_BEARER_TOKEN` 是生成智能回复预览的必填环境变量；`REPLY_AUTHORITY_KEYS_URL` 是发送预备回复前验签的必填环境变量。`roll doctor` 会通过 `references/env.yaml` 和 `browser_status.effectiveEnvSources` 检查它们是否声明并在运行态生效。
+- 双稿 feedback outbox 默认写入 `~/.roll-agent/browser/reply-feedback-outbox.sqlite`，默认保留 7 天、每 30 秒刷新；可用 `REPLY_FEEDBACK_OUTBOX_DB_PATH`、`REPLY_FEEDBACK_OUTBOX_RETENTION_SECONDS`、`REPLY_FEEDBACK_OUTBOX_FLUSH_INTERVAL_MS` 覆盖。新版 Reply Authority 返回 `feedbackExpiresAt` 时，实际重试截止时间取服务端 deadline 与本地 retention 的较早值；连接旧服务时仍应保证本地保留时长不超过服务端 TTL。
 - `BROWSER_SECURITY_JSON` 可选配置浏览器硬安全策略；`browser_status.security` 会返回实际加载后的 `domainAllowlist`、`maxPageContentBytes`、`maxSnapshotNodes`、`actionPolicy` 和 `foregroundPolicy`。`foregroundPolicy` 默认 `when-minimized`，普通后台窗口不抢桌面焦点；仅需要旧行为时才显式设为 `always`。
 - `BROWSER_USE_POLICY_JSON` 可选配置 browser-use 工具级业务策略；日常推荐只把 `zhipin_send_prepared_reply` 配为 `confirm`。
 - 长任务前或状态异常时先跑 `roll doctor --fix-plan --json`；仅对配置迁移、`agents.dataDir`、孤儿 runtime 元数据这类安全项才使用 `roll doctor --fix --json`。
@@ -135,8 +136,8 @@ Boss 聊天托管模板：
 对每个 browserInstance 独立执行:
 zhipin_read_messages({ browserInstance, onlyUnread:true, limit:N })
   -> zhipin_generate_reply_preview({ browserInstance, conversationId })
-  -> [若返回 replyVariantSelection] zhipin_judge_prepared_reply({ preparedReplyId })
-  -> zhipin_send_prepared_reply({ browserInstance, preparedReplyId, variantDecision? })
+  -> [可选预览判断] zhipin_judge_prepared_reply({ preparedReplyId })
+  -> zhipin_send_prepared_reply({ browserInstance, preparedReplyId, variantDecision? }) # 缺省时内部自动 Judge
   -> zhipin_read_messages({ browserInstance, onlyUnread:true, limit:N })  # 验证
 ```
 
@@ -216,9 +217,9 @@ click_ref(@eN) 或 type_ref(@eN, text, clear?)
 | `zhipin_open_chat_page(forceReload?, expectedConversationId?, browserActionApproval?)` | native CDP | 点击左侧导航切回「沟通」；`forceReload:true` 时只对当前沟通页执行 `Page.reload`，先等待 document swap，再等待实际聊天列表 DOM 就绪；传 `expectedConversationId` 时会按需滚动列表并等待该会话行恢复。若实时页面已不是沟通页，会跳过 reload 并返回 `reloadSkippedReason`。 |
 | `zhipin_open_chat(conversationId?, candidateName?, index?, preferUnread?)` | native CDP | 打开目标聊天；匹配优先级为 `conversationId` > `candidateName` > `index`。 |
 | `zhipin_get_candidate_info(conversationId?, candidateName?, index?, maxMessages?)` | native CDP | 提取候选人资料、聊天记录、`conversationId`、`candidateId` 和页面职位信号；候选人顶部资料会把 `25年应届生` / `28年应届生` 归一为 `应届生`，避免误当工作年限；成功后自动触发 Reply Authority 回复上下文预热（fire-and-forget，失败静默）。输出中的 `locationSignals` 已废弃，恒为空数组。 |
-| `zhipin_generate_reply_preview(conversationId?, candidateName?, index?, maxMessages?, reasoning?)` | native CDP | 读取聊天上下文并透传给 Reply Authority SSE 流式生成回复；地点证据由服务端 turn_planning 合并提取并经 `location.resolved` 事件回显；浏览器内展示阶段、临时草稿与时延摘要（含预热命中标记）；若服务端返回双稿且 rubric hash 匹配，会额外返回中性的 `replyVariantSelection.options[].option`（`option_1`/`option_2`）和文本，不返回 `signedEnvelope` / `draft` / `revised`；若 Reply Authority 拒签/超时/服务端异常，失败输出带 `errorKind:"rejected"|"timeout"|"server_error"`。 |
-| `zhipin_judge_prepared_reply(preparedReplyId, judgeModel?)` | MCP Sampling | 对双稿 `preparedReplyId` 执行默认 judge；内部拉取服务端 frozen rubric 并校验 `rubricHash`，成功返回可传给 `zhipin_send_prepared_reply` 的 `variantDecision`；失败时返回 `fallback:true`，调用方应不传 `variantDecision`，让发送工具发送推荐稿且跳过 feedback。 |
-| `zhipin_send_prepared_reply(preparedReplyId, variantDecision?, toolActionApproval?, browserActionApproval?)` | native CDP | 发送 `zhipin_generate_reply_preview` 生成的预备回复；单稿保持旧行为；双稿时可用 `variantDecision.chosenOption` 选择 `option_1`/`option_2`，工具内部还原对应 envelope，发送成功后调用 `/reply-feedback`，feedback 失败只在输出中标记 `feedbackStatus:"failed"`。若 `BROWSER_USE_POLICY_JSON.tools.zhipin_send_prepared_reply.policy="confirm"`，首次调用返回 `needs_confirmation`，确认后带 `toolActionApproval` 重试；若同时启用 `BROWSER_SECURITY_JSON.actionPolicy="confirm"`，还需按返回的 `browserActionApproval` 再次重试。 |
+| `zhipin_generate_reply_preview(conversationId?, candidateName?, index?, maxMessages?, reasoning?)` | native CDP | 读取聊天上下文并透传给 Reply Authority SSE 流式生成回复；地点证据由服务端 turn_planning 合并提取并经 `location.resolved` 事件回显；浏览器内展示阶段、临时草稿与时延摘要（含预热命中标记）。服务端双稿且 rubric 可用时额外返回中性的 `replyVariantSelection.options[].option`（`option_1`/`option_2`）和文本，不暴露 `signedEnvelope` / `draft` / `revised`；rubric 拉取、hash 或双稿结构异常时不展示 A/B，但会保留 group 为 `not_learned` 终态，供发送推荐稿后关闭 feedback。若 Reply Authority 拒签/超时/服务端异常，失败输出带 `errorKind:"rejected"|"timeout"|"server_error"`。 |
+| `zhipin_judge_prepared_reply(preparedReplyId, judgeModel?)` | MCP Sampling | 独立预览双稿判断；Judge 会结合候选人当前问题、最近对话、脱敏资料和 frozen rubric，返回带具体 `reason` 的 `variantDecision`，并缓存供发送复用。失败时返回 `fallback:true`、`decisionSource:"service_recommended_fallback"` 和稳定安全原因码；原始 provider/解析错误只写本地日志。发送阶段会回传 `not_learned` 终态，但不产生学习样本。 |
+| `zhipin_send_prepared_reply(preparedReplyId, variantDecision?, skipVariantJudge?, toolActionApproval?, browserActionApproval?)` | native CDP | 发送预备回复。双稿缺少 `variantDecision` 时工具内部必定执行并缓存默认 Judge，避免 `roll chat` 编排遗漏；预览阶段已降级的 group 则直接发送顶层推荐稿，不再调用 Judge。成功发送后先将 selected 或 `not_learned` 终态落到 agent-global SQLite outbox，再 POST `/reply-feedback`。`accepted/duplicate` 表示闭环完成，临时失败返回 `queued` 并后台重试，永久失败才返回 `failed`。Judge fallback 和 `skipVariantJudge:true` 都发送推荐稿、回传来源并关闭服务端 Pending，但不进入 Beta 学习。重试截止时间不会晚于服务端 `feedbackExpiresAt`；确认策略与原 approval 重试流程保持不变。 |
 | `zhipin_exchange_wechat(conversationId?, candidateName?, index?)` | native CDP | 点击「换微信」和确认弹窗，优先按 `conversationId` 定位聊天。 |
 | `zhipin_get_username()` | native CDP | 读取当前登录招聘者用户名；用于 `recruiterUsername` / `recruiterBinding` 链路。 |
 
@@ -276,8 +277,8 @@ click_ref(@eN) 或 type_ref(@eN, text, clear?)
 4. 生成聊天回复优先调用 `zhipin_generate_reply_preview(conversationId)`；它会打开目标聊天、在浏览器内展示 Reply Authority SSE 的阶段、工具执行状态和临时草稿，不需要先额外调用 `zhipin_open_chat`。
 5. `draft.delta` 只能展示，不能发送；真正可发送内容只来自 Reply Authority `final` 事件生成的内部签名结果。
 6. 若 `zhipin_generate_reply_preview` 失败且 `errorKind="rejected"`，这是服务端事实核验/业务拒签，不要当成系统崩溃；`errorKind="timeout"` 才提示重试或降低推理预算；`errorKind="server_error"` 作为服务端异常处理。
-7. 若 `zhipin_generate_reply_preview` 返回 `replyVariantSelection`，默认调用 `zhipin_judge_prepared_reply(preparedReplyId)` 获取 `variantDecision`；上层 orchestrator 也可以自行选择 `chosenOption` 并直接传给 `zhipin_send_prepared_reply`。
-8. 发送回复只能调用 `zhipin_send_prepared_reply(preparedReplyId, variantDecision?, toolActionApproval?, browserActionApproval?)`；主输入只能使用 `preparedReplyId`，确认重试时可原样带回 `needs_confirmation` 返回的 approval；不要构造裸文本发送路径，也不要保存或传递 `signedEnvelope`。
+7. `zhipin_judge_prepared_reply(preparedReplyId)` 只用于提前查看/展示判断；即使 orchestrator 遗漏这一步，`zhipin_send_prepared_reply` 也会对双稿自动 Judge。不要仅凭文本长短自行选择 option。
+8. 发送回复只能调用 `zhipin_send_prepared_reply(preparedReplyId, variantDecision?, skipVariantJudge?, toolActionApproval?, browserActionApproval?)`；主输入只能使用 `preparedReplyId`，确认重试时可原样带回 `needs_confirmation` 返回的 approval；不要构造裸文本发送路径，也不要保存或传递 `signedEnvelope`。不得为了节省延迟自行设置 `skipVariantJudge:true`。
 9. 双稿输出只认 `option_1` / `option_2`；orchestrator 不会看到也不应猜测 `draft` / `revised`。同一 `groupId` 任一 option 发送后，另一 option 不能再发送。
 10. `zhipin_send_prepared_reply` 会校验 envelope 的 `conversationId + candidateId + recruiterBinding`，当前页面目标或招聘者不一致时拒绝。
 11. 需要更强推理时，可给 `zhipin_generate_reply_preview` 传 `reasoning:{enabled:true, effort:"low"|"medium"|"high", scope:"reply"|"all"}`；不传则沿用 Reply Authority Service 默认策略。
@@ -315,8 +316,8 @@ click_ref(@eN) 或 type_ref(@eN, text, clear?)
 聊天回复:
 zhipin_read_messages
   -> zhipin_generate_reply_preview(conversationId)
-  -> [若返回 replyVariantSelection] zhipin_judge_prepared_reply(preparedReplyId)
-  -> zhipin_send_prepared_reply(preparedReplyId, variantDecision?)
+  -> [可选预览判断] zhipin_judge_prepared_reply(preparedReplyId)
+  -> zhipin_send_prepared_reply(preparedReplyId, variantDecision?) # 双稿缺省时自动 Judge + feedback outbox
 
 推荐候选人:
 zhipin_open_recommend_page
