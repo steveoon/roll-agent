@@ -1,5 +1,16 @@
 # @roll-agent/browser-use-agent
 
+## 0.24.0
+
+### Minor Changes
+
+- [#152](https://github.com/steveoon/roll-agent/pull/152) [`63cba26`](https://github.com/steveoon/roll-agent/commit/63cba264d29978662461cd6c3be3dec7af333318) Thanks [@steveoon](https://github.com/steveoon)! - Preserve redacted request/phase/latency diagnostics when `zhipin_generate_reply_preview` fails (including `clientTimeoutMs` for the Roll transport budget), raise the shared Reply Authority client timeout default from 30s to 60s so it stays above the RFC complete-request deadline, and declare `REPLY_AUTHORITY_TIMEOUT_MS` in browser-use env diagnostics.
+
+### Patch Changes
+
+- Updated dependencies [[`63cba26`](https://github.com/steveoon/roll-agent/commit/63cba264d29978662461cd6c3be3dec7af333318)]:
+  - @roll-agent/reply-authority-client@0.7.0
+
 ## 0.23.0
 
 ### Minor Changes
