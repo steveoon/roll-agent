@@ -1,23 +1,5 @@
 # BOSS Zhipin unread reply - PowerShell 5.1+ (Windows). Same behavior as reply-unread-safely.sh
 #Requires -Version 5.1
-[CmdletBinding()]
-param(
-  [string]$Agent = "",
-  [string]$BrowserInstance = "",
-  [int]$Limit = 0,
-  [switch]$DryRun,
-  [switch]$NoUnreadFilter,
-  [switch]$NoExchangeWechat,
-  [switch]$NoJudge,
-  [switch]$KeepWorkDir,
-  [int]$MinGap = 0,
-  [int]$MaxGap = 0,
-  [int]$BatchSize = 4,
-  [int]$BatchPause = 0,
-  [string]$ResultsFile = "",
-  [Alias("h")]
-  [switch]$Help
-)
 
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $SkipRulesJs = Join-Path $ScriptDir "evaluate-skip-rules.mjs"
@@ -44,28 +26,31 @@ $ParsePageMeta = Join-Path $ScriptDir "parse-page-meta.mjs"
 
 # UTF-8 for child processes (roll/node) and PowerShell 5.1 native-command pipes.
 try {
-  [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
-  [Console]::InputEncoding = [System.Text.Encoding]::UTF8
-  $OutputEncoding = [System.Text.Encoding]::UTF8
+  # Encoding.UTF8 emits a BOM on native-command stdin, which makes JSON.parse fail.
+  $utf8NoBom = [System.Text.UTF8Encoding]::new($false)
+  [Console]::OutputEncoding = $utf8NoBom
+  [Console]::InputEncoding = $utf8NoBom
+  $OutputEncoding = $utf8NoBom
 }
 catch {
   # ignore on hosts that disallow changing console encoding
 }
 
-if ([string]::IsNullOrWhiteSpace($Agent)) {
-  $Agent = if ($env:ROLL_AGENT) { $env:ROLL_AGENT } else { "browser-use-agent" }
-}
-if ([string]::IsNullOrWhiteSpace($BrowserInstance)) {
-  $BrowserInstance = if ($env:ROLL_BROWSER_INSTANCE) { $env:ROLL_BROWSER_INSTANCE } else { "" }
-}
-if ([string]::IsNullOrWhiteSpace($ResultsFile)) {
-  $ResultsFile = Join-Path ([System.IO.Path]::GetTempPath()) ("roll-zhipin-unread-reply-{0:yyyyMMdd-HHmmss}.jsonl" -f (Get-Date))
-}
-
-$ClickUnreadFilter = -not $NoUnreadFilter.IsPresent
-$ExchangeWechat = -not $NoExchangeWechat.IsPresent
+$Agent = if ($env:ROLL_AGENT) { $env:ROLL_AGENT } else { "browser-use-agent" }
+$BrowserInstance = if ($env:ROLL_BROWSER_INSTANCE) { $env:ROLL_BROWSER_INSTANCE } else { "" }
+$Limit = 0
+$DryRun = $false
+$ClickUnreadFilter = $true
+$ExchangeWechat = $true
+$MinGap = 0
+$MaxGap = 0
+$BatchSize = 4
+$BatchPause = 0
 $MaxConsecutiveFailures = 2
 $MaxEmptyReads = 2
+$KeepWorkDir = $false
+$NoJudge = $false
+$ResultsFile = Join-Path ([System.IO.Path]::GetTempPath()) ("roll-zhipin-unread-reply-{0:yyyyMMdd-HHmmss}.jsonl" -f (Get-Date))
 $UnreadFilterApplied = $false
 $WorkDir = $null
 
@@ -203,12 +188,11 @@ function Convert-NativeCommandOutput {
   }
 }
 
-function Invoke-NodeStdin([string]$MjsPath, [string]$StdinText, [string[]]$NodeArgs = @()) {
+function Invoke-NodeStdinResult([string]$MjsPath, [string]$StdinText, [string[]]$NodeArgs = @()) {
   if ($null -eq $StdinText) { $StdinText = "" }
   $prev = $ErrorActionPreference
   $ErrorActionPreference = "Continue"
   try {
-    # Capture native output first so ForEach/join cannot clobber $LASTEXITCODE that callers check.
     $raw =
       if ($NodeArgs.Count -gt 0) {
         $StdinText | & node $MjsPath @NodeArgs 2>&1
@@ -216,43 +200,31 @@ function Invoke-NodeStdin([string]$MjsPath, [string]$StdinText, [string[]]$NodeA
       else {
         $StdinText | & node $MjsPath 2>&1
       }
-    $nodeExit = $LASTEXITCODE
+    $nodeExit = if ($null -ne $LASTEXITCODE) { [int]$LASTEXITCODE } else { 0 }
 
     # Node helpers often exit 0 with empty stdout (exit-code-only validators). Normalize so
     # callers can always call string methods like .Trim() on Windows PS.
     $chunks = @($raw | Convert-NativeCommandOutput)
     $text = (($chunks | Where-Object { $null -ne $_ }) -join [Environment]::NewLine)
 
-    if ($null -ne $nodeExit) {
-      $global:LASTEXITCODE = [int]$nodeExit
+    return [pscustomobject]@{
+      Text = $text
+      ExitCode = $nodeExit
     }
-    return $text
   }
   finally {
     $ErrorActionPreference = $prev
   }
 }
 
+function Invoke-NodeStdin([string]$MjsPath, [string]$StdinText, [string[]]$NodeArgs = @()) {
+  $result = Invoke-NodeStdinResult -MjsPath $MjsPath -StdinText $StdinText -NodeArgs $NodeArgs
+  return [string]$result.Text
+}
+
 function Invoke-NodeStdinExit([string]$MjsPath, [string]$StdinText, [string[]]$NodeArgs = @()) {
-  if ($null -eq $StdinText) { $StdinText = "" }
-  $prev = $ErrorActionPreference
-  $ErrorActionPreference = "Continue"
-  try {
-    if ($NodeArgs.Count -gt 0) {
-      $null = $StdinText | & node $MjsPath @NodeArgs 2>&1
-    }
-    else {
-      $null = $StdinText | & node $MjsPath 2>&1
-    }
-    $nodeExit = $LASTEXITCODE
-    if ($null -ne $nodeExit) {
-      $global:LASTEXITCODE = [int]$nodeExit
-    }
-    return [int]$(if ($null -ne $nodeExit) { $nodeExit } else { 0 })
-  }
-  finally {
-    $ErrorActionPreference = $prev
-  }
+  $result = Invoke-NodeStdinResult -MjsPath $MjsPath -StdinText $StdinText -NodeArgs $NodeArgs
+  return [int]$result.ExitCode
 }
 
 function Format-SendResultLine(
@@ -358,10 +330,9 @@ function Ensure-BrowserInstanceSelection {
   $previous = $env:ROLL_BROWSER_INSTANCE
   $env:ROLL_BROWSER_INSTANCE = $script:BrowserInstance
   try {
-    $message = [string](Invoke-NodeStdin $script:ValidateBrowserSelection $status)
-    if ($null -eq $message) { $message = "" }
-    $message = $message.Trim()
-    $code = $LASTEXITCODE
+    $validation = Invoke-NodeStdinResult $script:ValidateBrowserSelection $status
+    $message = ([string]$validation.Text).Trim()
+    $code = [int]$validation.ExitCode
   }
   finally {
     $env:ROLL_BROWSER_INSTANCE = $previous
@@ -548,8 +519,9 @@ function Process-One([string]$Cid, [string]$Name, [string]$Preview) {
   }
 
   $skipInputRaw = [System.IO.File]::ReadAllText($skipInputPath, [System.Text.UTF8Encoding]::new($false))
-  $skipResult = Invoke-NodeStdin $SkipRulesJs $skipInputRaw
-  if ($LASTEXITCODE -ne 0 -or -not $skipResult) {
+  $skipEvaluation = Invoke-NodeStdinResult $SkipRulesJs $skipInputRaw
+  $skipResult = [string]$skipEvaluation.Text
+  if ($skipEvaluation.ExitCode -ne 0 -or -not $skipResult) {
     Append-ResultObject @{ ts = $ts; name = $Name; conversationId = $Cid; ok = $false; stage = "skip_eval" }
     return 1
   }
@@ -696,14 +668,7 @@ function Process-One([string]$Cid, [string]$Name, [string]$Preview) {
   return 10
 }
 
-if ($Help) {
-  Show-Usage
-  exit 0
-}
-
-# Support kebab-case flags for bash parity (--limit, --no-unread-filter, ...).
-# Native -Limit / -NoUnreadFilter already bind through param().
-Parse-Args @args
+Parse-Args -Argv $args
 
 if (-not (Get-Command roll -ErrorAction SilentlyContinue)) {
   Write-Error "roll CLI not found in PATH"

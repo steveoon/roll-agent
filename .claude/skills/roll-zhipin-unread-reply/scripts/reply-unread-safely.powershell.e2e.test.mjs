@@ -123,7 +123,7 @@ console.log(JSON.stringify(responses[tool] ?? { success: false, error: "unexpect
     );
 
     try {
-      // Script now has a real param() block, so -File named args bind reliably.
+      // Exercise both native PowerShell and bash-parity option spellings through Parse-Args.
       const result = spawnSync(
         "pwsh",
         [
@@ -135,9 +135,9 @@ console.log(JSON.stringify(responses[tool] ?? { success: false, error: "unexpect
           scriptPath,
           "-Limit",
           "1",
-          "-NoUnreadFilter",
+          "--no-unread-filter",
           "-NoExchangeWechat",
-          "-ResultsFile",
+          "--results-file",
           resultsPath,
         ],
         {
