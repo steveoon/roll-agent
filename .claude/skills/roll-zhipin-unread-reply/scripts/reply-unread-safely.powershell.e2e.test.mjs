@@ -38,6 +38,7 @@ test(
 
     const tracePath = path.join(testDir, "roll.trace.jsonl");
     const resultsPath = path.join(testDir, "results.jsonl");
+    const launcherPath = path.join(testDir, "run-preview-failure.ps1");
     const shimScriptPath = path.join(shimDir, "roll-shim.mjs");
     const shimCommandPath = path.join(shimDir, "roll.cmd");
 
@@ -48,7 +49,6 @@ test(
       [
         "@echo off",
         "setlocal",
-        // Quote node + script; leave %* unquoted so PowerShell-splatted args pass through.
         `"${nodePath}" "%~dp0roll-shim.mjs" %*`,
         "exit /b %ERRORLEVEL%",
         "",
@@ -127,22 +127,32 @@ console.log(JSON.stringify(responses[tool] ?? { success: false, error: "unexpect
       "utf8",
     );
 
-    // -Command ensures script args bind into $args (more reliable than -File for this entrypoint).
-    const command = [
-      `$ErrorActionPreference = 'Continue'`,
-      `& ${psSingleQuote(scriptPath)} -Limit 1 -NoUnreadFilter -NoExchangeWechat -ResultsFile ${psSingleQuote(resultsPath)}`,
-      `exit $LASTEXITCODE`,
-    ].join("; ");
+    // Explicit splat inside a launcher avoids pwsh -File/-Command $args binding quirks.
+    writeFileSync(
+      launcherPath,
+      [
+        "$ErrorActionPreference = 'Continue'",
+        `$argv = @('-Limit', '1', '-NoUnreadFilter', '-NoExchangeWechat', '-ResultsFile', ${psSingleQuote(resultsPath)})`,
+        `& ${psSingleQuote(scriptPath)} @argv`,
+        "exit $LASTEXITCODE",
+        "",
+      ].join("\r\n"),
+      "utf8",
+    );
 
     try {
-      const result = spawnSync("pwsh", ["-NoLogo", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", command], {
-        encoding: "utf8",
-        timeout: 30_000,
-        env: {
-          ...envWithPrependedPath(process.env, shimDir),
-          ROLL_SHIM_TRACE: tracePath,
+      const result = spawnSync(
+        "pwsh",
+        ["-NoLogo", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", launcherPath],
+        {
+          encoding: "utf8",
+          timeout: 30_000,
+          env: {
+            ...envWithPrependedPath(process.env, shimDir),
+            ROLL_SHIM_TRACE: tracePath,
+          },
         },
-      });
+      );
 
       const traceText = (() => {
         try {

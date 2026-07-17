@@ -171,34 +171,45 @@ function Append-ResultObject($Row) {
   }
 }
 
+function Convert-NativeCommandOutput {
+  param([Parameter(ValueFromPipeline = $true)]$Item)
+  process {
+    if ($Item -is [System.Management.Automation.ErrorRecord]) {
+      if ($null -ne $Item.Exception -and $null -ne $Item.Exception.Message) {
+        return [string]$Item.Exception.Message
+      }
+      return [string]$Item.ToString()
+    }
+    if ($null -ne $Item) {
+      return [string]$Item
+    }
+  }
+}
+
 function Invoke-NodeStdin([string]$MjsPath, [string]$StdinText, [string[]]$NodeArgs = @()) {
   if ($null -eq $StdinText) { $StdinText = "" }
   $prev = $ErrorActionPreference
   $ErrorActionPreference = "Continue"
   try {
-    # Node helpers often exit 0 with empty stdout (exit-code-only validators). Normalize the
-    # pipeline result so callers can always call string methods like .Trim() on Windows PS.
-    $chunks = @(
+    # Capture native output first so ForEach/join cannot clobber $LASTEXITCODE that callers check.
+    $raw =
       if ($NodeArgs.Count -gt 0) {
         $StdinText | & node $MjsPath @NodeArgs 2>&1
       }
       else {
         $StdinText | & node $MjsPath 2>&1
       }
-    ) | ForEach-Object {
-      if ($_ -is [System.Management.Automation.ErrorRecord]) {
-        if ($null -ne $_.Exception -and $null -ne $_.Exception.Message) {
-          $_.Exception.Message
-        }
-        else {
-          $_.ToString()
-        }
-      }
-      elseif ($null -ne $_) {
-        [string]$_
-      }
+    $nodeExit = $LASTEXITCODE
+
+    # Node helpers often exit 0 with empty stdout (exit-code-only validators). Normalize so
+    # callers can always call string methods like .Trim() on Windows PS.
+    $chunks = @($raw | Convert-NativeCommandOutput)
+    $text = (($chunks | Where-Object { $null -ne $_ }) -join [Environment]::NewLine)
+
+    if ($null -ne $nodeExit) {
+      $global:LASTEXITCODE = [int]$nodeExit
     }
-    return (($chunks | Where-Object { $null -ne $_ }) -join [Environment]::NewLine)
+    return $text
   }
   finally {
     $ErrorActionPreference = $prev
@@ -216,7 +227,11 @@ function Invoke-NodeStdinExit([string]$MjsPath, [string]$StdinText, [string[]]$N
     else {
       $null = $StdinText | & node $MjsPath 2>&1
     }
-    return $LASTEXITCODE
+    $nodeExit = $LASTEXITCODE
+    if ($null -ne $nodeExit) {
+      $global:LASTEXITCODE = [int]$nodeExit
+    }
+    return [int]$(if ($null -ne $nodeExit) { $nodeExit } else { 0 })
   }
   finally {
     $ErrorActionPreference = $prev
