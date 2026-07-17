@@ -1,5 +1,23 @@
 # BOSS Zhipin unread reply - PowerShell 5.1+ (Windows). Same behavior as reply-unread-safely.sh
 #Requires -Version 5.1
+[CmdletBinding()]
+param(
+  [string]$Agent = "",
+  [string]$BrowserInstance = "",
+  [int]$Limit = 0,
+  [switch]$DryRun,
+  [switch]$NoUnreadFilter,
+  [switch]$NoExchangeWechat,
+  [switch]$NoJudge,
+  [switch]$KeepWorkDir,
+  [int]$MinGap = 0,
+  [int]$MaxGap = 0,
+  [int]$BatchSize = 4,
+  [int]$BatchPause = 0,
+  [string]$ResultsFile = "",
+  [Alias("h")]
+  [switch]$Help
+)
 
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $SkipRulesJs = Join-Path $ScriptDir "evaluate-skip-rules.mjs"
@@ -34,21 +52,20 @@ catch {
   # ignore on hosts that disallow changing console encoding
 }
 
-$Agent = if ($env:ROLL_AGENT) { $env:ROLL_AGENT } else { "browser-use-agent" }
-$BrowserInstance = if ($env:ROLL_BROWSER_INSTANCE) { $env:ROLL_BROWSER_INSTANCE } else { "" }
-$Limit = 0
-$DryRun = $false
-$ClickUnreadFilter = $true
-$ExchangeWechat = $true
-$MinGap = 0
-$MaxGap = 0
-$BatchSize = 4
-$BatchPause = 0
+if ([string]::IsNullOrWhiteSpace($Agent)) {
+  $Agent = if ($env:ROLL_AGENT) { $env:ROLL_AGENT } else { "browser-use-agent" }
+}
+if ([string]::IsNullOrWhiteSpace($BrowserInstance)) {
+  $BrowserInstance = if ($env:ROLL_BROWSER_INSTANCE) { $env:ROLL_BROWSER_INSTANCE } else { "" }
+}
+if ([string]::IsNullOrWhiteSpace($ResultsFile)) {
+  $ResultsFile = Join-Path ([System.IO.Path]::GetTempPath()) ("roll-zhipin-unread-reply-{0:yyyyMMdd-HHmmss}.jsonl" -f (Get-Date))
+}
+
+$ClickUnreadFilter = -not $NoUnreadFilter.IsPresent
+$ExchangeWechat = -not $NoExchangeWechat.IsPresent
 $MaxConsecutiveFailures = 2
 $MaxEmptyReads = 2
-$KeepWorkDir = $false
-$NoJudge = $false
-$ResultsFile = Join-Path ([System.IO.Path]::GetTempPath()) ("roll-zhipin-unread-reply-{0:yyyyMMdd-HHmmss}.jsonl" -f (Get-Date))
 $UnreadFilterApplied = $false
 $WorkDir = $null
 
@@ -679,6 +696,13 @@ function Process-One([string]$Cid, [string]$Name, [string]$Preview) {
   return 10
 }
 
+if ($Help) {
+  Show-Usage
+  exit 0
+}
+
+# Support kebab-case flags for bash parity (--limit, --no-unread-filter, ...).
+# Native -Limit / -NoUnreadFilter already bind through param().
 Parse-Args @args
 
 if (-not (Get-Command roll -ErrorAction SilentlyContinue)) {

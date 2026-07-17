@@ -24,10 +24,6 @@ function envWithPrependedPath(baseEnv, shimDir) {
   return env;
 }
 
-function psSingleQuote(value) {
-  return `'${String(value).replaceAll("'", "''")}'`;
-}
-
 test(
   "PowerShell preview failure preserves safe diagnostics and never sends",
   { skip: process.platform !== "win32" },
@@ -38,7 +34,6 @@ test(
 
     const tracePath = path.join(testDir, "roll.trace.jsonl");
     const resultsPath = path.join(testDir, "results.jsonl");
-    const launcherPath = path.join(testDir, "run-preview-failure.ps1");
     const shimScriptPath = path.join(shimDir, "roll-shim.mjs");
     const shimCommandPath = path.join(shimDir, "roll.cmd");
 
@@ -127,23 +122,24 @@ console.log(JSON.stringify(responses[tool] ?? { success: false, error: "unexpect
       "utf8",
     );
 
-    // Explicit splat inside a launcher avoids pwsh -File/-Command $args binding quirks.
-    writeFileSync(
-      launcherPath,
-      [
-        "$ErrorActionPreference = 'Continue'",
-        `$argv = @('-Limit', '1', '-NoUnreadFilter', '-NoExchangeWechat', '-ResultsFile', ${psSingleQuote(resultsPath)})`,
-        `& ${psSingleQuote(scriptPath)} @argv`,
-        "exit $LASTEXITCODE",
-        "",
-      ].join("\r\n"),
-      "utf8",
-    );
-
     try {
+      // Script now has a real param() block, so -File named args bind reliably.
       const result = spawnSync(
         "pwsh",
-        ["-NoLogo", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", launcherPath],
+        [
+          "-NoLogo",
+          "-NoProfile",
+          "-ExecutionPolicy",
+          "Bypass",
+          "-File",
+          scriptPath,
+          "-Limit",
+          "1",
+          "-NoUnreadFilter",
+          "-NoExchangeWechat",
+          "-ResultsFile",
+          resultsPath,
+        ],
         {
           encoding: "utf8",
           timeout: 30_000,
