@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import type { SessionEvent } from "@roll-agent/runtime";
+import { TOOL_OUTCOME_KINDS, type SessionEvent } from "@roll-agent/runtime";
 import { chatReducer, createInitialState, type ChatUiState } from "./state.ts";
 
 function event(state: ChatUiState, id: string, e: SessionEvent): ChatUiState {
@@ -98,6 +98,23 @@ test("tool-result with policy denial output commits a denied row", () => {
   ]);
 });
 
+test("tool-result uses typed outcome instead of localized display text", () => {
+  let state = createInitialState("qwen", undefined);
+  state = event(state, "d1", {
+    type: "tool-result",
+    toolCallId: "c1",
+    agentName: "browser-use-agent",
+    toolName: "click_ref",
+    outcome: { kind: TOOL_OUTCOME_KINDS.userRejected, reason: "declined" },
+    display: "arbitrary localized message",
+    output: "arbitrary localized message",
+    isError: true,
+  });
+  assert.deepEqual(state.history, [
+    { kind: "denied", id: "d1", name: "browser-use-agent.click_ref", label: "已取消" },
+  ]);
+});
+
 test("tool-result with ordinary error output keeps the red failure row", () => {
   let state = createInitialState("qwen", undefined);
   state = event(state, "t1", {
@@ -137,6 +154,67 @@ test("turn-cancelled marks active tools as interrupted and records the reason", 
       args: '{"command":"Start-Sleep -Seconds 30"}',
     },
     { kind: "notice", id: "cancel-1", text: "已取消本轮；工具已收到中断请求。" },
+  ]);
+});
+
+test("Ink reducer 保留 batch success/tool_failed/cancelled 的类型化事件语义", () => {
+  let state = createInitialState("qwen", undefined);
+  for (const [toolCallId, toolName] of [
+    ["batch-ok", "read_ok"],
+    ["batch-fail", "read_fail"],
+    ["batch-running", "wait"],
+  ] as const) {
+    state = event(state, `call-${toolCallId}`, {
+      type: "tool-call",
+      toolCallId,
+      agentName: "batch-agent",
+      toolName,
+      input: {},
+    });
+  }
+  state = event(state, "result-ok", {
+    type: "tool-result",
+    toolCallId: "batch-ok",
+    agentName: "batch-agent",
+    toolName: "read_ok",
+    outcome: { kind: TOOL_OUTCOME_KINDS.success },
+    display: "ok",
+    output: "ok",
+    isError: false,
+  });
+  state = event(state, "result-fail", {
+    type: "tool-result",
+    toolCallId: "batch-fail",
+    agentName: "batch-agent",
+    toolName: "read_fail",
+    outcome: { kind: TOOL_OUTCOME_KINDS.toolFailed, reason: "boom" },
+    display: "boom",
+    output: "boom",
+    isError: true,
+  });
+  state = event(state, "batch-cancel", {
+    type: "turn-cancelled",
+    reason: "user",
+    message: "已取消本轮。",
+  });
+
+  assert.equal(state.live.activeTools.length, 0);
+  assert.deepEqual(state.history, [
+    { kind: "tool", id: "result-ok", name: "batch-agent.read_ok", args: "{}", ok: true },
+    {
+      kind: "tool",
+      id: "result-fail",
+      name: "batch-agent.read_fail",
+      args: "{}",
+      ok: false,
+    },
+    {
+      kind: "cancelled",
+      id: "batch-cancel-tool-0",
+      name: "batch-agent.wait",
+      args: "{}",
+    },
+    { kind: "notice", id: "batch-cancel", text: "已取消本轮。" },
   ]);
 });
 
@@ -243,12 +321,15 @@ test("compaction events toggle spinner and commit a notice", () => {
     removed: 58,
     kept: 14,
     truncatedTools: 3,
+    checkpointId: "8ba32466-1cb6-4166-a496-fdd8ff048891",
+    checkpointGeneration: 2,
+    checkpointSummaryStatus: "fallback",
   });
   assert.equal(state.live.compacting, false);
   const notice = state.history.at(-1);
   assert.match(
     notice?.kind === "compaction" ? notice.notice : "",
-    /移除 58 条 → 保留 14 条，精简 3 个工具结果/,
+    /移除 58 条 → 保留 14 条，精简 3 个工具结果，checkpoint #2\(fallback\)/,
   );
 });
 

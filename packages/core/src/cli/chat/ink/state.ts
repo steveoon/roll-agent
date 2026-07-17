@@ -1,4 +1,4 @@
-import type { SessionEvent, SessionTokenUsage } from "@roll-agent/runtime";
+import { TOOL_OUTCOME_KINDS, type SessionEvent, type SessionTokenUsage } from "@roll-agent/runtime";
 import { formatToolInput, formatApprovalDetails } from "../../utils/tool-format.ts";
 import { GLYPHS } from "../../utils/glyphs.ts";
 import { endsInsideThink } from "./thinking-text.ts";
@@ -143,10 +143,13 @@ function buildCompactionNotice(
 ): string {
   const label = event.reason === "auto" ? "自动压缩" : "手动压缩";
   const tools = event.truncatedTools ? `，精简 ${String(event.truncatedTools)} 个工具结果` : "";
+  const checkpoint = event.checkpointGeneration
+    ? `，checkpoint #${String(event.checkpointGeneration)}${event.checkpointSummaryStatus && event.checkpointSummaryStatus !== "valid" ? `(${event.checkpointSummaryStatus})` : ""}`
+    : "";
   if (event.removed === 0 && !event.truncatedTools) {
     return `${GLYPHS.compact} ${label}：无需压缩`;
   }
-  return `${GLYPHS.compact} ${label}(${event.strategy})：移除 ${String(event.removed)} 条 → 保留 ${String(event.kept)} 条${tools}`;
+  return `${GLYPHS.compact} ${label}(${event.strategy})：移除 ${String(event.removed)} 条 → 保留 ${String(event.kept)} 条${tools}${checkpoint}`;
 }
 
 const DENIAL_LABELS: ReadonlyArray<readonly [string, string]> = [
@@ -180,7 +183,14 @@ function commitTool(
   const active = state.live.activeTools.find((tool) => tool.toolCallId === event.toolCallId);
   const name = active?.name ?? `${event.agentName}.${event.toolName}`;
   const args = active?.args ?? "";
-  const denial = event.isError ? denialLabel(event.output) : undefined;
+  const denial =
+    event.outcome?.kind === TOOL_OUTCOME_KINDS.userRejected
+      ? "已取消"
+      : event.outcome?.kind === TOOL_OUTCOME_KINDS.policyDenied
+        ? "策略拒绝"
+        : event.outcome === undefined && event.isError
+          ? denialLabel(event.output)
+          : undefined;
   const item: HistoryItem =
     denial !== undefined
       ? { kind: "denied", id, name, label: denial }

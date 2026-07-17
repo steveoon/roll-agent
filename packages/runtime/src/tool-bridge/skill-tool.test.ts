@@ -202,5 +202,8 @@ test("AgentSession 集成：模型调用 roll__skill 并收到 skill 内容", as
 
   const system = captured[0]?.prompt.find((message) => message.role === "system");
   assert.ok(system);
-  assert.equal(system.content, "PROMPT-WITH-SKILLS");
+  assert.match(system.content, /# 工具使用纪律/u);
+  assert.match(system.content, /# Skills/u);
+  assert.match(system.content, /# 附加会话指令/u);
+  assert.match(system.content, /PROMPT-WITH-SKILLS/u);
 });

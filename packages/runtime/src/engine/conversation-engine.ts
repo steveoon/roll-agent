@@ -20,13 +20,17 @@ import type { AgentCatalogEntry } from "@roll-agent/core/registry/catalog";
 import type { InstallAgentEvent } from "@roll-agent/core/registry/install";
 import type { RollConfig } from "@roll-agent/core/config/schema";
 import type { RegisteredAgent } from "@roll-agent/core/types/agent";
+import { createSkillLibrary, type SkillLibrary } from "@roll-agent/core/skills/library";
 import {
-  createSkillLibrary,
-  type SkillLibrary,
-  type SkillSummary,
-} from "@roll-agent/core/skills/library";
-import type { AgentToolSource, SourceTool } from "../tool-bridge/build-tools.ts";
-import { AGENT_INSTALL_TOOL_ID } from "../tool-bridge/agent-install-tool.ts";
+  ROLL_RESOURCE_HINTS_META_KEY,
+  type AgentToolSource,
+  type SourceTool,
+} from "../tool-bridge/build-tools.ts";
+import {
+  TOOL_RESOURCE_ACCESS_MODES,
+  TOOL_RESOURCE_HINT_KINDS,
+  type ToolResourceHint,
+} from "../tool-bridge/tool-execution-coordinator.ts";
 import type { ToolAnnotations, ToolPolicy } from "../types/policy.ts";
 import type { ThreadStore } from "../store/thread-store.ts";
 import {
@@ -34,16 +38,18 @@ import {
   type AgentInstallSessionResult,
   type AgentSessionAgentInstall,
   type AgentSessionBashSession,
+  type AgentSessionCapabilityContext,
   type SessionAgentRefresh,
 } from "./agent-session.ts";
 import { resolveContextWindow } from "./context-window.ts";
-import { buildChatSystemPrompt, type AgentOnboardingPromptInfo } from "./system-prompt.ts";
 import {
-  BASH_TOOL_ID,
-  POWERSHELL_TOOL_ID,
-  type SessionBashSettings,
-} from "../tool-bridge/bash-tool.ts";
-import { EXEC_COMMAND_ID, EXEC_LIST_ID, EXEC_POLL_ID } from "../tool-bridge/session-exec-tool.ts";
+  CAPABILITY_HOST_MODES,
+  type CapabilityExternalDynamicContext,
+  type CapabilityAgentOnboardingCatalogEntry,
+  type CapabilityHostMode,
+  type CapabilityVcsSnapshot,
+} from "./capability-manifest.ts";
+import { type SessionBashSettings } from "../tool-bridge/bash-tool.ts";
 import {
   type CommandClassifier,
   unknownCommandClassifier,
@@ -53,6 +59,7 @@ import {
   type ShellProfile,
   type ShellProfileResolutionResult,
 } from "../bash/profile.ts";
+import { inspectGitVcsContext } from "./vcs-context.ts";
 
 const DEFAULT_MAX_STEPS = 80;
 const ENGINE_WORK_DRAIN_TIMEOUT_MS = 6_000;
@@ -77,11 +84,18 @@ export interface ConversationEngineOptions {
   readonly onAgentBootstrapIssue?: (issue: AgentBootstrapIssue) => void;
   readonly skillLibrary?: SkillLibrary | null;
   readonly onSkillLibraryIssue?: (message: string) => void;
+  readonly hostMode?: CapabilityHostMode;
+  readonly resolveDynamicCapabilityContext?: () =>
+    | CapabilityExternalDynamicContext
+    | Promise<CapabilityExternalDynamicContext>;
   readonly sessionExecEnabled?: boolean;
   readonly shellProfile?: ShellProfile | null;
   readonly resolveShellProfileFn?: typeof resolveShellProfile;
   readonly installAgentFn?: typeof installAgent;
   readonly resolveCatalogFn?: typeof resolveAgentCatalog;
+  readonly inspectVcsContext?: (
+    cwd: string,
+  ) => CapabilityVcsSnapshot | undefined | Promise<CapabilityVcsSnapshot | undefined>;
 }
 
 export interface CreateSessionInput {
@@ -131,6 +145,68 @@ function extractAnnotations(listed: unknown): ToolAnnotations | undefined {
     : result;
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isResourceHintKind(value: string): value is ToolResourceHint["kind"] {
+  return Object.values(TOOL_RESOURCE_HINT_KINDS).some((kind) => kind === value);
+}
+
+function isResourceAccessMode(value: string): value is NonNullable<ToolResourceHint["mode"]> {
+  return Object.values(TOOL_RESOURCE_ACCESS_MODES).some((mode) => mode === value);
+}
+
+interface ResourceHintExtraction {
+  readonly hints: readonly ToolResourceHint[] | undefined;
+  readonly issue: string | undefined;
+}
+
+function invalidResourceHints(issue: string): ResourceHintExtraction {
+  return { hints: undefined, issue };
+}
+
+function extractResourceHints(listed: unknown): ResourceHintExtraction {
+  if (!isRecord(listed) || !isRecord(listed._meta)) {
+    return { hints: undefined, issue: undefined };
+  }
+  if (!Object.hasOwn(listed._meta, ROLL_RESOURCE_HINTS_META_KEY)) {
+    return { hints: undefined, issue: undefined };
+  }
+  const rawHints = listed._meta[ROLL_RESOURCE_HINTS_META_KEY];
+  if (!Array.isArray(rawHints)) {
+    return invalidResourceHints("必须是数组");
+  }
+  const hints: ToolResourceHint[] = [];
+  for (const [index, value] of rawHints.entries()) {
+    if (
+      !isRecord(value) ||
+      typeof value.field !== "string" ||
+      value.field.trim().length === 0 ||
+      typeof value.kind !== "string" ||
+      !isResourceHintKind(value.kind) ||
+      (value.mode !== undefined &&
+        (typeof value.mode !== "string" || !isResourceAccessMode(value.mode))) ||
+      (value.namespace !== undefined && typeof value.namespace !== "string") ||
+      (value.kind === TOOL_RESOURCE_HINT_KINDS.custom &&
+        (typeof value.namespace !== "string" || value.namespace.trim().length === 0))
+    ) {
+      return invalidResourceHints(`第 ${String(index + 1)} 项字段无效`);
+    }
+    const namespace =
+      value.kind === TOOL_RESOURCE_HINT_KINDS.custom && typeof value.namespace === "string"
+        ? value.namespace.trim()
+        : undefined;
+    hints.push({
+      field: value.field.trim(),
+      kind: value.kind,
+      ...(value.mode !== undefined ? { mode: value.mode } : {}),
+      ...(namespace !== undefined ? { namespace } : {}),
+    });
+  }
+  return { hints: hints.length > 0 ? hints : undefined, issue: undefined };
+}
+
 function formatInstallEventLine(event: InstallAgentEvent): string {
   if (event.type === "retry") {
     return `安装遇到网络问题，${Math.round(event.delayMs / 1000)}s 后重试（第 ${event.attempt + 1} 次）...`;
@@ -168,11 +244,16 @@ export class ConversationEngine {
   private readonly explicitSkillLibrary: SkillLibrary | null | undefined;
   private readonly onSkillLibraryIssue: ((message: string) => void) | undefined;
   private readonly onAgentBootstrapIssue: ((issue: AgentBootstrapIssue) => void) | undefined;
+  private readonly hostMode: CapabilityHostMode;
+  private readonly resolveDynamicCapabilityContext:
+    | (() => CapabilityExternalDynamicContext | Promise<CapabilityExternalDynamicContext>)
+    | undefined;
   private readonly sessionExecEnabled: boolean;
   private readonly explicitShellProfile: ShellProfile | null | undefined;
   private readonly resolveShellProfileFn: typeof resolveShellProfile;
   private readonly installAgentFn: typeof installAgent;
   private readonly resolveCatalogFn: typeof resolveAgentCatalog;
+  private readonly inspectVcsContext: NonNullable<ConversationEngineOptions["inspectVcsContext"]>;
   private ready: Promise<EngineContext> | undefined;
   private refreshChain: Promise<void> = Promise.resolve();
   private resolvedCatalog: readonly AgentCatalogEntry[] | undefined;
@@ -193,6 +274,8 @@ export class ConversationEngine {
       options.ensureAgentReady ??
       ((agent, env) => ensureCoreManagedAgentReady(agent, this.config.agents.dataDir, env));
     this.debugEvents = options.debugEvents ?? false;
+    this.hostMode = options.hostMode ?? CAPABILITY_HOST_MODES.embedded;
+    this.resolveDynamicCapabilityContext = options.resolveDynamicCapabilityContext;
     this.sessionExecEnabled = options.sessionExecEnabled ?? true;
     this.explicitShellProfile = options.shellProfile;
     this.resolveShellProfileFn = options.resolveShellProfileFn ?? resolveShellProfile;
@@ -204,6 +287,7 @@ export class ConversationEngine {
     this.onAgentBootstrapIssue = options.onAgentBootstrapIssue;
     this.installAgentFn = options.installAgentFn ?? installAgent;
     this.resolveCatalogFn = options.resolveCatalogFn ?? resolveAgentCatalog;
+    this.inspectVcsContext = options.inspectVcsContext ?? inspectGitVcsContext;
   }
 
   async createSession(input: CreateSessionInput = {}): Promise<AgentSession> {
@@ -237,7 +321,8 @@ export class ConversationEngine {
     if (concurrentlyResumedSession !== undefined) {
       return concurrentlyResumedSession;
     }
-    return this.buildSession(context, threadId, this.store.getMessages(threadId));
+    const state = this.store.loadSessionState(threadId);
+    return this.buildSession(context, threadId, state.messages, state.checkpoint);
   }
 
   private assertAcceptingSessions(): void {
@@ -315,6 +400,7 @@ export class ConversationEngine {
     context: EngineContext,
     id: string,
     initialMessages: readonly ModelMessage[],
+    initialCheckpoint?: ReturnType<ThreadStore["getLatestCheckpoint"]>,
   ): AgentSession {
     const store = this.store;
     const contextWindow = resolveContextWindow(
@@ -331,18 +417,24 @@ export class ConversationEngine {
         ? shellProfile
         : unknownCommandClassifier
       : undefined;
-    const systemPrompt = this.composeSystemPrompt(
-      skills,
-      context.sources.length,
-      shellProfile,
-      bashSession,
-    );
     const agentInstall = this.resolveAgentInstallBinding();
+    const capabilityContext = this.composeCapabilityContext(context.sources.length, shellProfile);
     const session = new AgentSession({
       id,
       model: context.model,
       sources: context.sources,
-      systemPrompt,
+      capabilityContext,
+      resolveDynamicCapabilityContext: async () => {
+        const [vcs, dynamic] = await Promise.all([
+          this.inspectVcsContext(capabilityContext.cwd),
+          this.resolveDynamicCapabilityContext?.() ?? {},
+        ]);
+        const effectiveVcs = dynamic.vcs ?? vcs;
+        return {
+          ...(dynamic.ruleIds ? { ruleIds: dynamic.ruleIds } : {}),
+          ...(effectiveVcs ? { vcs: effectiveVcs } : {}),
+        };
+      },
       ...(skillLibrary ? { skillLibrary } : {}),
       ...(bash ? { bash } : {}),
       ...(bashClassifier ? { bashClassifier } : {}),
@@ -357,10 +449,17 @@ export class ConversationEngine {
       ...(contextWindow !== undefined ? { contextWindow } : {}),
       ...(this.policy ? { policy: this.policy } : {}),
       initialMessages,
+      ...(initialCheckpoint ? { initialCheckpoint } : {}),
       ...(store
         ? {
             onPersist: (messages) => store.appendMessages(id, messages),
             onReplace: (messages) => store.replaceMessages(id, messages),
+            onToolExecution: (record) => store.appendToolExecution(id, record),
+            listToolExecutions: (options) => store.listToolExecutions(id, options),
+            getToolExecution: (executionId) => store.getToolExecution(id, executionId),
+            listTranscriptMessages: (options) => store.listTranscriptMessages(id, options),
+            commitCompaction: (input) => store.commitCompaction(id, input),
+            readCheckpointTranscript: (options) => store.readCheckpointTranscript(id, options),
           }
         : {}),
       onClose: () => {
@@ -442,11 +541,29 @@ export class ConversationEngine {
     const listed = (await client.listTools()).tools;
     this.assertAcceptingSessions();
     const normalized = normalizeListedTools(listed);
-    const sourceTools: SourceTool[] = normalized.map((agentTool, index) => ({
-      tool: agentTool,
-      annotations: extractAnnotations(listed[index]),
-    }));
-    return { agentName: agent.skill.name, client, tools: sourceTools };
+    const sourceTools: SourceTool[] = normalized.map((agentTool, index) => {
+      const resourceHintExtraction = extractResourceHints(listed[index]);
+      if (resourceHintExtraction.issue !== undefined) {
+        this.onAgentBootstrapIssue?.({
+          agentName: agent.skill.name,
+          message: `Tool "${agentTool.name}" 的 ${ROLL_RESOURCE_HINTS_META_KEY} 无效（${resourceHintExtraction.issue}），已回退 Agent 级资源锁`,
+        });
+      }
+      return {
+        tool: agentTool,
+        annotations: extractAnnotations(listed[index]),
+        ...(resourceHintExtraction.hints ? { resourceHints: resourceHintExtraction.hints } : {}),
+      };
+    });
+    return {
+      agentName: agent.skill.name,
+      client,
+      tools: sourceTools,
+      ...(agent.source ? { agentSource: agent.source.type } : {}),
+      transport: transport.type,
+      runtimeOwnership: agent.runtime.ownership,
+      ...(transport.type === "stdio" ? { resourceBaseDir: agent.installPath } : {}),
+    };
   }
 
   async prepareAgentRefresh(agent: RegisteredAgent): Promise<SessionAgentRefresh> {
@@ -476,41 +593,31 @@ export class ConversationEngine {
     const skills = skillLibrary?.list() ?? [];
     const effectiveLibrary = skillLibrary && skills.length > 0 ? skillLibrary : undefined;
     const shellProfile = this.resolveRuntimeShellProfile();
-    const bashSession = shellProfile ? this.resolveSessionExecSettings(shellProfile) : undefined;
     return {
       source,
       ...(effectiveLibrary ? { skillLibrary: effectiveLibrary } : {}),
-      systemPrompt: this.composeSystemPrompt(skills, sources.length, shellProfile, bashSession),
+      capabilityContext: this.composeCapabilityContext(sources.length, shellProfile),
     };
   }
 
-  private composeSystemPrompt(
-    skills: readonly SkillSummary[],
+  private composeCapabilityContext(
     agentCount: number,
     shellProfile: ShellProfile | undefined,
-    bashSession: AgentSessionBashSession | undefined,
-  ): string {
+  ): AgentSessionCapabilityContext {
     const onboarding = this.resolveAgentOnboardingInfo();
-    return buildChatSystemPrompt({
-      skills,
+    return {
+      profile: shellProfile?.toolName ?? "no-shell",
+      hostMode: this.hostMode,
+      cwd: process.cwd(),
+      platform: process.platform,
       ...(shellProfile
         ? {
-            shellToolId: shellProfile.toolName === "powershell" ? POWERSHELL_TOOL_ID : BASH_TOOL_ID,
             shellHints: shellProfile.systemPromptHints(),
           }
         : {}),
-      ...(bashSession
-        ? {
-            sessionExecToolIds: {
-              command: EXEC_COMMAND_ID,
-              poll: EXEC_POLL_ID,
-              list: EXEC_LIST_ID,
-            },
-          }
-        : {}),
       agentCount,
-      ...(onboarding ? { agentOnboarding: onboarding } : {}),
-    });
+      ...(onboarding ? { agentOnboardingCatalog: onboarding } : {}),
+    };
   }
 
   private agentInstallEnabled(): boolean {
@@ -521,7 +628,9 @@ export class ConversationEngine {
     return this.resolvedCatalog ?? getAgentCatalog(this.config);
   }
 
-  private resolveAgentOnboardingInfo(): AgentOnboardingPromptInfo | undefined {
+  private resolveAgentOnboardingInfo():
+    | readonly CapabilityAgentOnboardingCatalogEntry[]
+    | undefined {
     if (!this.agentInstallEnabled()) {
       return undefined;
     }
@@ -529,13 +638,10 @@ export class ConversationEngine {
     if (catalog.length === 0) {
       return undefined;
     }
-    return {
-      installToolId: AGENT_INSTALL_TOOL_ID,
-      catalog: catalog.map((entry) => ({
-        shortName: entry.shortName,
-        description: entry.description,
-      })),
-    };
+    return catalog.map((entry) => ({
+      shortName: entry.shortName,
+      description: entry.description,
+    }));
   }
 
   private resolveAgentInstallBinding(): AgentSessionAgentInstall | undefined {

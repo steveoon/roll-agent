@@ -1,8 +1,16 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  linkSync,
+  mkdirSync,
+  mkdtempSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { performance } from "node:perf_hooks";
 import { simulateReadableStream, type ModelMessage } from "ai";
 import { MockLanguageModelV4 } from "ai/test";
@@ -12,8 +20,10 @@ import type {
   LanguageModelV4StreamPart,
 } from "@ai-sdk/provider";
 import type { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { SKILL_TOOL_ID, type SkillLibrary } from "@roll-agent/core/skills/library";
 import { AgentSession } from "./agent-session.ts";
 import type { AgentToolSource } from "../tool-bridge/build-tools.ts";
+import type { ToolResourceHint } from "../tool-bridge/tool-execution-coordinator.ts";
 import { DefaultToolPolicy } from "../policy/default-policy.ts";
 import { ConfigurableToolPolicy } from "../policy/configurable-policy.ts";
 import type { PolicyDecision, ToolPolicy } from "../types/policy.ts";
@@ -99,6 +109,27 @@ function streamErrorStep(message: string): LanguageModelV4StreamPart[] {
   ];
 }
 
+function throwingStream(message: string) {
+  return {
+    stream: new ReadableStream<LanguageModelV4StreamPart>({
+      start(controller) {
+        controller.enqueue({ type: "stream-start", warnings: [] });
+        controller.error(new Error(message));
+      },
+    }),
+  };
+}
+
+function textThenStreamErrorStep(text: string, message: string): LanguageModelV4StreamPart[] {
+  return [
+    { type: "stream-start", warnings: [] },
+    { type: "text-start", id: "t" },
+    { type: "text-delta", id: "t", delta: text },
+    { type: "text-end", id: "t" },
+    { type: "error", error: message },
+  ];
+}
+
 function toolCallStep(
   toolName: string,
   input: unknown,
@@ -109,6 +140,27 @@ function toolCallStep(
     { type: "stream-start", warnings: [] },
     { type: "tool-call", toolCallId: "c1", toolName, input: JSON.stringify(input) },
     { type: "finish", usage: usage(inputTokens, outputTokens), finishReason: TOOL_CALLS },
+  ];
+}
+
+function multiToolCallStep(
+  calls: ReadonlyArray<{
+    readonly toolCallId: string;
+    readonly toolName: string;
+    readonly input: unknown;
+  }>,
+): LanguageModelV4StreamPart[] {
+  return [
+    { type: "stream-start", warnings: [] },
+    ...calls.map(
+      (call): LanguageModelV4StreamPart => ({
+        type: "tool-call",
+        toolCallId: call.toolCallId,
+        toolName: call.toolName,
+        input: JSON.stringify(call.input),
+      }),
+    ),
+    { type: "finish", usage: usage(), finishReason: TOOL_CALLS },
   ];
 }
 
@@ -134,6 +186,47 @@ function source(agentName: string, toolName: string, onCall?: () => void): Agent
     callTool: async () => {
       onCall?.();
       return { content: [{ type: "text", text: "result-ok" }] };
+    },
+  } as unknown as Client;
+  return {
+    agentName,
+    client,
+    tools: [
+      {
+        tool: {
+          name: toolName,
+          inputSchema: {
+            type: "object" as const,
+            properties: { q: { type: "string" } },
+            required: ["q"],
+          },
+        },
+        annotations: undefined,
+      },
+    ],
+  };
+}
+
+function abortableSource(
+  agentName: string,
+  toolName: string,
+  onCall?: () => void,
+): AgentToolSource {
+  const client = {
+    callTool: async (
+      _request: unknown,
+      _resultSchema: unknown,
+      options: { readonly signal?: AbortSignal } | undefined,
+    ) => {
+      onCall?.();
+      await new Promise<never>((_resolve, reject) => {
+        const signal = options?.signal;
+        if (signal?.aborted) {
+          reject(signal.reason);
+          return;
+        }
+        signal?.addEventListener("abort", () => reject(signal.reason), { once: true });
+      });
     },
   } as unknown as Client;
   return {
@@ -211,8 +304,7 @@ function listedExecSessions(events: readonly SessionEvent[]): readonly ListedExe
     (event) => event.type === "tool-result" && event.toolName === "exec_list",
   );
   assert.ok(result && result.type === "tool-result");
-  const normalized = result.output as { readonly output?: unknown };
-  const payload = JSON.parse(String(normalized.output)) as {
+  const payload = JSON.parse(String(result.output)) as {
     readonly sessions: readonly ListedExecSession[];
   };
   return payload.sessions;
@@ -416,6 +508,266 @@ test("AgentSession chat 调用注入最终回复必须走 text 通道的系统�
   assert.match(serializedPrompt, /不要复述用户输入/);
 });
 
+test("AgentSession 在首次推理前直接预加载显式 skill，持久化仍保留原始输入", async () => {
+  const summary = { name: "demo", description: "demo skill", source: "project" as const };
+  const library: SkillLibrary = {
+    list: () => [summary],
+    load: () => ({
+      summary,
+      content: "DEMO_SKILL_BODY",
+      referencePaths: ["references/extra.md"],
+      skillRoot: "/tmp/demo-skill",
+    }),
+    loadReference: () => undefined,
+  };
+  let serializedSystem = "";
+  let serializedUser = "";
+  let modelCalls = 0;
+  let persisted: readonly ModelMessage[] = [];
+  const model = new MockLanguageModelV4({
+    doStream: async (options) => {
+      modelCalls += 1;
+      serializedSystem = JSON.stringify(
+        options.prompt.find((message) => message.role === "system"),
+      );
+      serializedUser = JSON.stringify(options.prompt.find((message) => message.role === "user"));
+      return streamChunks(textStep("done"));
+    },
+  });
+  const session = new AgentSession({
+    id: "explicit-skill",
+    model,
+    sources: [],
+    maxSteps: 2,
+    skillLibrary: library,
+    onPersist: (messages) => {
+      persisted = messages;
+    },
+  });
+
+  const events = await collect(session.send("/demo 修一下类型"));
+
+  assert.equal(modelCalls, 1);
+  assert.doesNotMatch(serializedSystem, /DEMO_SKILL_BODY/u);
+  assert.match(serializedUser, /DEMO_SKILL_BODY/u);
+  assert.match(serializedUser, /SKILL_ROOT=\/tmp\/demo-skill/u);
+  assert.match(serializedUser, /Harness-loaded explicit Skill context/u);
+  assert.match(serializedUser, /修一下类型/u);
+  assert.doesNotMatch(serializedUser, /\/demo 修一下类型/u);
+  assert.equal(session.getMessages()[0]?.content, "/demo 修一下类型");
+  assert.equal(persisted[0]?.content, "/demo 修一下类型");
+  assert.equal(
+    events.some((event) => event.type === "tool-call"),
+    false,
+  );
+});
+
+test("AgentSession 对未知或部分拼错的显式 skill 在模型调用前失败", async () => {
+  const summary = { name: "demo", description: "demo skill", source: "project" as const };
+  const library: SkillLibrary = {
+    list: () => [summary],
+    load: () => ({ summary, content: "body", referencePaths: [] }),
+    loadReference: () => undefined,
+  };
+  let modelCalls = 0;
+  const model = new MockLanguageModelV4({
+    doStream: async () => {
+      modelCalls += 1;
+      return streamChunks(textStep("unexpected"));
+    },
+  });
+  const session = new AgentSession({
+    id: "explicit-skill-unknown",
+    model,
+    sources: [],
+    maxSteps: 2,
+    skillLibrary: library,
+  });
+
+  const events = await collect(session.send("/demo /typo 修一下"));
+
+  assert.equal(modelCalls, 0);
+  const error = events.find((event) => event.type === "error");
+  assert.ok(error && error.type === "error");
+  assert.match(error.message, /未知 skill \/typo/u);
+
+  const emptyEvents = await collect(session.send("/demo"));
+  assert.equal(modelCalls, 0);
+  const emptyError = emptyEvents.find((event) => event.type === "error");
+  assert.ok(emptyError && emptyError.type === "error");
+  assert.match(emptyError.message, /用法/u);
+});
+
+test("AgentSession 非 Provider 错误即使包含 context 文案也不压缩历史", async () => {
+  const summary = { name: "demo", description: "demo skill", source: "project" as const };
+  const original: readonly ModelMessage[] = [
+    { role: "user", content: "old-1" },
+    { role: "assistant", content: "answer-1" },
+    { role: "user", content: "old-2" },
+    { role: "assistant", content: "answer-2" },
+  ];
+  let modelCalls = 0;
+  let replaceCalls = 0;
+  const session = new AgentSession({
+    id: "explicit-skill-context-like-error",
+    model: new MockLanguageModelV4({
+      doStream: async () => {
+        modelCalls += 1;
+        return streamChunks(textStep("unexpected"));
+      },
+    }),
+    sources: [],
+    maxSteps: 2,
+    initialMessages: original,
+    compaction: {
+      enabled: true,
+      strategy: "truncate",
+      threshold: 0.75,
+      keepRecentTurns: 1,
+      keepRecentTokens: 1,
+    },
+    skillLibrary: {
+      list: () => [summary],
+      load: () => {
+        throw new Error("input is too long");
+      },
+      loadReference: () => undefined,
+    },
+    onReplace: () => {
+      replaceCalls += 1;
+    },
+  });
+
+  const events = await collect(session.send("/demo execute"));
+
+  assert.equal(modelCalls, 0);
+  assert.equal(replaceCalls, 0);
+  assert.deepEqual(session.getMessages(), original);
+  assert.equal(
+    events.some((event) => event.type === "compaction-start" || event.type === "context-compacted"),
+    false,
+  );
+  const error = events.find((event) => event.type === "error");
+  assert.ok(error && error.type === "error");
+  assert.equal(error.message, "input is too long");
+});
+
+test("AgentSession context overflow 重放复用同一份显式 skill 快照", async () => {
+  const summary = { name: "demo", description: "demo skill", source: "project" as const };
+  let loads = 0;
+  const library: SkillLibrary = {
+    list: () => [summary],
+    load: () => {
+      loads += 1;
+      return { summary, content: `BODY_VERSION_${String(loads)}`, referencePaths: [] };
+    },
+    loadReference: () => undefined,
+  };
+  const prompts: string[] = [];
+  let modelCalls = 0;
+  const model = new MockLanguageModelV4({
+    doStream: async (options) => {
+      prompts.push(JSON.stringify(options.prompt));
+      modelCalls += 1;
+      return streamChunks(
+        modelCalls === 1 ? streamErrorStep("context_length_exceeded") : textStep("done"),
+      );
+    },
+  });
+  const session = new AgentSession({
+    id: "explicit-skill-replay-snapshot",
+    model,
+    sources: [],
+    maxSteps: 2,
+    skillLibrary: library,
+    initialMessages: [
+      { role: "user", content: "old-1" },
+      { role: "assistant", content: "answer-1" },
+      { role: "user", content: "old-2" },
+      { role: "assistant", content: "answer-2" },
+    ],
+    compaction: {
+      enabled: true,
+      strategy: "truncate",
+      threshold: 0.75,
+      keepRecentTurns: 1,
+      keepRecentTokens: 1,
+    },
+  });
+
+  await collect(session.send("/demo retry"));
+
+  assert.equal(loads, 1);
+  assert.equal(prompts.length, 2);
+  assert.ok(prompts.every((prompt) => prompt.includes("BODY_VERSION_1")));
+  assert.ok(prompts.every((prompt) => !prompt.includes("BODY_VERSION_2")));
+});
+
+test("AgentSession 将 AI SDK 的内建 Tool schema 错误分类为 invalid_input", async () => {
+  const summary = { name: "demo", description: "demo skill", source: "project" as const };
+  const library: SkillLibrary = {
+    list: () => [summary],
+    load: () => ({ summary, content: "body", referencePaths: [] }),
+    loadReference: () => undefined,
+  };
+  const model = sequencedModel([toolCallStep(SKILL_TOOL_ID, { name: 1 }), textStep("recovered")]);
+  const session = new AgentSession({
+    id: "invalid-built-in-input",
+    model,
+    sources: [],
+    maxSteps: 4,
+    skillLibrary: library,
+  });
+
+  const events = await collect(session.send("load skill"));
+  const result = events.find((event) => event.type === "tool-result");
+
+  assert.ok(result && result.type === "tool-result");
+  assert.equal(result.outcome?.kind, "invalid_input", JSON.stringify(result));
+});
+
+test("AgentSession 不用英文错误文案猜测 invalid_input", async () => {
+  const client = {
+    callTool: async () => {
+      throw new Error("Invalid input for tool plain-error");
+    },
+  } as unknown as Client;
+  const failingSource: AgentToolSource = {
+    agentName: "plain-error",
+    client,
+    tools: [
+      {
+        tool: {
+          name: "read",
+          inputSchema: {
+            type: "object" as const,
+            properties: { q: { type: "string" } },
+            required: ["q"],
+          },
+        },
+        annotations: undefined,
+      },
+    ],
+  };
+  const model = sequencedModel([
+    toolCallStep("plain-error__read", { q: "valid" }),
+    textStep("recovered"),
+  ]);
+  const session = new AgentSession({
+    id: "plain-error-message-is-not-schema-error",
+    model,
+    sources: [failingSource],
+    maxSteps: 4,
+    policy: allowToolPolicy,
+  });
+
+  const events = await collect(session.send("read"));
+  const result = events.find((event) => event.type === "tool-result");
+
+  assert.ok(result && result.type === "tool-result");
+  assert.equal(result.outcome?.kind, "tool_failed", JSON.stringify(result));
+});
+
 test("AgentSession 写类动作触发 confirmation，approve 后执行", async () => {
   let calls = 0;
   const model = sequencedModel([
@@ -444,6 +796,398 @@ test("AgentSession 写类动作触发 confirmation，approve 后执行", async (
   assert.equal(calls, 1);
   const toolResult = events.find((event) => event.type === "tool-result");
   assert.ok(toolResult && toolResult.type === "tool-result" && toolResult.isError === false);
+});
+
+test("AgentSession 同批 Tool 先顺序完成全部准入，任一拒绝则整批零副作用", async () => {
+  let calls = 0;
+  const model = sequencedModel([
+    multiToolCallStep([
+      { toolCallId: "batch-1", toolName: "batch__first", input: { q: "one" } },
+      { toolCallId: "batch-2", toolName: "batch__second", input: { q: "two" } },
+    ]),
+  ]);
+  const session = new AgentSession({
+    id: "batch-admission",
+    model,
+    sources: [
+      source("batch", "first", () => (calls += 1)),
+      source("batch", "second", () => (calls += 1)),
+    ],
+    maxSteps: 8,
+    policy: new DefaultToolPolicy(),
+  });
+
+  const events: SessionEvent[] = [];
+  const confirmations: string[] = [];
+  for await (const event of session.send("连续执行两个动作")) {
+    events.push(event);
+    if (event.type !== "confirmation-required") {
+      continue;
+    }
+    confirmations.push(event.toolName);
+    if (event.toolName === "first") {
+      session.approve(event.approvalId);
+    } else {
+      assert.equal(calls, 0, "第二个准入完成前不应执行第一个工具");
+      session.reject(event.approvalId, "拒绝第二个动作");
+    }
+  }
+
+  assert.deepEqual(confirmations, ["first", "second"]);
+  assert.equal(calls, 0);
+  const outcomes = events
+    .filter(
+      (event): event is Extract<SessionEvent, { type: "tool-result" }> =>
+        event.type === "tool-result",
+    )
+    .map((event) => [event.toolCallId, event.outcome?.kind]);
+  assert.deepEqual(outcomes, [
+    ["batch-1", "cancelled"],
+    ["batch-2", "user_rejected"],
+  ]);
+});
+
+test("AgentSession 用 MCP resourceHints 归一化跨 Agent 文件锁，同时并行无冲突文件", async () => {
+  const runBatch = async (
+    leftPath: string,
+    rightPath: string,
+    leftBaseDir = process.cwd(),
+    rightBaseDir = process.cwd(),
+  ): Promise<number> => {
+    let active = 0;
+    let maxActive = 0;
+    const makeSource = (agentName: string, toolName: string): AgentToolSource => {
+      const client = {
+        callTool: async () => {
+          active += 1;
+          maxActive = Math.max(maxActive, active);
+          await new Promise<void>((resolve) => setTimeout(resolve, 20));
+          active -= 1;
+          return { content: [{ type: "text", text: "ok" }] };
+        },
+      } as unknown as Client;
+      return {
+        agentName,
+        client,
+        resourceBaseDir: agentName === "left" ? leftBaseDir : rightBaseDir,
+        tools: [
+          {
+            tool: {
+              name: toolName,
+              inputSchema: {
+                type: "object",
+                properties: { path: { type: "string" } },
+                required: ["path"],
+              },
+            },
+            annotations: { destructiveHint: true },
+            resourceHints: [{ field: "path", kind: "file" }],
+          },
+        ],
+      };
+    };
+    const model = sequencedModel([
+      multiToolCallStep([
+        { toolCallId: "file-1", toolName: "left__write", input: { path: leftPath } },
+        { toolCallId: "file-2", toolName: "right__write", input: { path: rightPath } },
+      ]),
+      textStep("done"),
+    ]);
+    const session = new AgentSession({
+      id: `resource-${leftPath}-${rightPath}`,
+      model,
+      sources: [makeSource("left", "write"), makeSource("right", "write")],
+      maxSteps: 4,
+    });
+
+    await collect(session.send("write files"));
+    return maxActive;
+  };
+
+  const relative = "tmp/resource-lock.txt";
+  assert.equal(await runBatch(relative, resolve(relative)), 1);
+  assert.equal(
+    await runBatch("out.txt", "/tmp/agent-root/out.txt", "/tmp/agent-root", "/tmp/other-agent"),
+    1,
+  );
+  if (process.platform !== "win32") {
+    const root = mkdtempSync(join(tmpdir(), "roll-resource-lock-"));
+    const realBase = join(root, "real");
+    const aliasBase = join(root, "alias");
+    try {
+      mkdirSync(realBase);
+      symlinkSync(realBase, aliasBase, "dir");
+      assert.equal(await runBatch("out.txt", join(realBase, "out.txt"), aliasBase, root), 1);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  }
+  const caseRoot = mkdtempSync(join(tmpdir(), "roll-resource-case-lock-"));
+  try {
+    const probe = join(caseRoot, "CaseSensitivityProbe");
+    writeFileSync(probe, "probe");
+    const caseInsensitive = existsSync(join(caseRoot, "casesensitivityprobe"));
+    const numericBase = join(caseRoot, "123");
+    const cjkBase = join(caseRoot, "目录");
+    mkdirSync(numericBase);
+    mkdirSync(cjkBase);
+    for (const baseDir of [numericBase, cjkBase, caseRoot]) {
+      assert.equal(
+        await runBatch("CaseTarget.txt", "casetarget.txt", baseDir, baseDir),
+        caseInsensitive ? 1 : 2,
+      );
+    }
+  } finally {
+    rmSync(caseRoot, { recursive: true, force: true });
+  }
+  const identityRoot = mkdtempSync(join(tmpdir(), "roll-resource-identity-lock-"));
+  try {
+    const target = join(identityRoot, "target.txt");
+    const hardlinkAlias = join(identityRoot, "hardlink-alias.txt");
+    writeFileSync(target, "target");
+    linkSync(target, hardlinkAlias);
+    assert.equal(await runBatch(target, hardlinkAlias), 1);
+
+    const nfcFuturePath = join(identityRoot, "caf\u00e9.txt");
+    const nfdFuturePath = join(identityRoot, "cafe\u0301.txt");
+    assert.equal(await runBatch(nfcFuturePath, nfdFuturePath), 1);
+  } finally {
+    rmSync(identityRoot, { recursive: true, force: true });
+  }
+  assert.equal(await runBatch("tmp/left.txt", "tmp/right.txt"), 2);
+});
+
+test("AgentSession resourceHints value 解析 all-or-nothing，缺失 field 才允许跳过", async () => {
+  let runIndex = 0;
+  const runBatch = async (options: {
+    readonly leftInput: Record<string, unknown>;
+    readonly rightInput: Record<string, unknown>;
+    readonly hints: readonly ToolResourceHint[];
+    readonly resourceBaseDir?: string;
+  }): Promise<number> => {
+    let active = 0;
+    let maxActive = 0;
+    const client = {
+      callTool: async () => {
+        active += 1;
+        maxActive = Math.max(maxActive, active);
+        await new Promise<void>((resolve) => setTimeout(resolve, 20));
+        active -= 1;
+        return { content: [{ type: "text", text: "ok" }] };
+      },
+    } as unknown as Client;
+    const makeTool = (name: string): AgentToolSource["tools"][number] => ({
+      tool: { name, inputSchema: { type: "object" } },
+      annotations: { destructiveHint: true },
+      resourceHints: options.hints,
+    });
+    const source: AgentToolSource = {
+      agentName: "resource-agent",
+      client,
+      tools: [makeTool("left"), makeTool("right")],
+      ...(options.resourceBaseDir !== undefined
+        ? { resourceBaseDir: options.resourceBaseDir }
+        : {}),
+    };
+    const model = sequencedModel([
+      multiToolCallStep([
+        {
+          toolCallId: "resource-left",
+          toolName: "resource-agent__left",
+          input: options.leftInput,
+        },
+        {
+          toolCallId: "resource-right",
+          toolName: "resource-agent__right",
+          input: options.rightInput,
+        },
+      ]),
+      textStep("done"),
+    ]);
+    runIndex += 1;
+    const session = new AgentSession({
+      id: `resource-value-${String(runIndex)}`,
+      model,
+      sources: [source],
+      maxSteps: 4,
+    });
+
+    await collect(session.send("resolve resource values"));
+    return maxActive;
+  };
+  const hints: readonly ToolResourceHint[] = [
+    { field: "path", kind: "file", mode: "write" },
+    { field: "conversationId", kind: "conversation", mode: "write" },
+  ];
+
+  assert.equal(
+    await runBatch({
+      leftInput: { path: ["left.txt", { invalid: true }], conversationId: "left" },
+      rightInput: { path: ["right.txt", false], conversationId: "right" },
+      hints,
+      resourceBaseDir: process.cwd(),
+    }),
+    1,
+  );
+  assert.equal(
+    await runBatch({
+      leftInput: { path: { invalid: true }, conversationId: "left" },
+      rightInput: { path: false, conversationId: "right" },
+      hints,
+      resourceBaseDir: process.cwd(),
+    }),
+    1,
+  );
+  assert.equal(
+    await runBatch({
+      leftInput: { path: "left.txt", conversationId: "left" },
+      rightInput: { path: "right.txt", conversationId: "right" },
+      hints,
+    }),
+    1,
+  );
+  assert.equal(
+    await runBatch({
+      leftInput: { conversationId: "left" },
+      rightInput: { conversationId: "right" },
+      hints,
+    }),
+    2,
+  );
+});
+
+test("AgentSession 同批一成功一失败仍把两个结果交给下一次推理恢复", async () => {
+  let modelCalls = 0;
+  let recoveryPrompt = "";
+  const model = new MockLanguageModelV4({
+    doStream: async (options) => {
+      modelCalls += 1;
+      if (modelCalls === 1) {
+        return streamChunks(
+          multiToolCallStep([
+            { toolCallId: "batch-ok", toolName: "ok-agent__read", input: { q: "one" } },
+            { toolCallId: "batch-fail", toolName: "fail-agent__read", input: { q: "two" } },
+          ]),
+        );
+      }
+      recoveryPrompt = JSON.stringify(options.prompt);
+      return streamChunks(textStep("recovered from mixed batch"));
+    },
+  });
+  const failingClient = {
+    callTool: async () => {
+      throw new Error("mixed batch failure");
+    },
+  } as unknown as Client;
+  const failingSource: AgentToolSource = {
+    agentName: "fail-agent",
+    client: failingClient,
+    tools: [
+      {
+        tool: {
+          name: "read",
+          inputSchema: {
+            type: "object" as const,
+            properties: { q: { type: "string" } },
+            required: ["q"],
+          },
+        },
+        annotations: undefined,
+      },
+    ],
+  };
+  const session = new AgentSession({
+    id: "batch-mixed-outcomes",
+    model,
+    sources: [source("ok-agent", "read"), failingSource],
+    maxSteps: 4,
+  });
+
+  const events = await collect(session.send("run mixed batch"));
+  const outcomes = new Map(
+    events
+      .filter(
+        (event): event is Extract<SessionEvent, { type: "tool-result" }> =>
+          event.type === "tool-result",
+      )
+      .map((event) => [event.toolCallId, event.outcome?.kind]),
+  );
+
+  assert.equal(modelCalls, 2);
+  assert.equal(outcomes.get("batch-ok"), "success");
+  assert.equal(outcomes.get("batch-fail"), "tool_failed");
+  assert.match(recoveryPrompt, /result-ok/u);
+  assert.match(recoveryPrompt, /mixed batch failure/u);
+  const finish = events.find(
+    (event): event is Extract<SessionEvent, { type: "message-finish" }> =>
+      event.type === "message-finish",
+  );
+  assert.equal(finish?.text, "recovered from mixed batch");
+});
+
+test("AgentSession cancel 同批执行中 Tool exactly-once，并允许下一轮恢复", async () => {
+  const allToolsStarted = Promise.withResolvers<void>();
+  let startedTools = 0;
+  let modelCalls = 0;
+  const onToolStart = (): void => {
+    startedTools += 1;
+    if (startedTools === 2) {
+      allToolsStarted.resolve();
+    }
+  };
+  const model = new MockLanguageModelV4({
+    doStream: async () => {
+      modelCalls += 1;
+      return streamChunks(
+        modelCalls === 1
+          ? multiToolCallStep([
+              { toolCallId: "slow-a", toolName: "slow-a__wait", input: { q: "one" } },
+              { toolCallId: "slow-b", toolName: "slow-b__wait", input: { q: "two" } },
+            ])
+          : textStep("recovered after batch cancellation"),
+      );
+    },
+  });
+  const session = new AgentSession({
+    id: "batch-running-cancel",
+    model,
+    sources: [
+      abortableSource("slow-a", "wait", onToolStart),
+      abortableSource("slow-b", "wait", onToolStart),
+    ],
+    maxSteps: 4,
+  });
+
+  const firstTurn = collect(session.send("run cancellable batch"));
+  await allToolsStarted.promise;
+  assert.equal(session.cancel(), true);
+  const cancelledEvents = await firstTurn;
+
+  assert.equal(startedTools, 2);
+  assert.equal(cancelledEvents.filter((event) => event.type === "turn-cancelled").length, 1);
+  assert.equal(
+    cancelledEvents.some((event) => event.type === "message-finish"),
+    false,
+  );
+  const records = session.getToolExecutions({}, true);
+  assert.equal(records.length, 2);
+  assert.deepEqual(records.map((record) => [record.toolCallId, record.outcome.kind]).sort(), [
+    ["slow-a", "cancelled"],
+    ["slow-b", "cancelled"],
+  ]);
+  assert.ok(
+    records.every(
+      (record) => record.outcome.kind === "cancelled" && record.outcome.reason === "user",
+    ),
+  );
+
+  const recoveredEvents = await collect(session.send("continue after cancellation"));
+  const finish = recoveredEvents.find(
+    (event): event is Extract<SessionEvent, { type: "message-finish" }> =>
+      event.type === "message-finish",
+  );
+  assert.equal(finish?.text, "recovered after batch cancellation");
+  assert.equal(modelCalls, 2);
 });
 
 test("AgentSession reject 后终止当前 turn，不让模型重复调用工具", async () => {
@@ -491,7 +1235,7 @@ test("AgentSession reject 后终止当前 turn，不让模型重复调用工具"
   assert.equal(session.getMessages().at(-1)?.content, "已取消执行: 用户取消");
 });
 
-test("AgentSession policy deny 直接拒绝并终止当前 turn", async () => {
+test("AgentSession policy deny 返回类型化错误并允许模型恢复", async () => {
   let calls = 0;
   const denyPolicy: ToolPolicy = {
     check(): PolicyDecision {
@@ -515,13 +1259,14 @@ test("AgentSession policy deny 直接拒绝并终止当前 turn", async () => {
   );
   const toolResult = events.find((event) => event.type === "tool-result");
   assert.ok(toolResult && toolResult.type === "tool-result" && toolResult.isError === true);
+  assert.equal(toolResult.outcome?.kind, "policy_denied");
   const finish = events.find(
     (event): event is Extract<SessionEvent, { type: "message-finish" }> =>
       event.type === "message-finish",
   );
   assert.ok(finish);
-  assert.equal(finish.text, "策略拒绝执行: 禁止");
-  assert.equal(session.getMessages().at(-1)?.content, "策略拒绝执行: 禁止");
+  assert.equal(finish.text, "收到");
+  assert.match(JSON.stringify(session.getMessages().at(-1)?.content), /收到/u);
 });
 
 test("AgentSession cancel 中途确认不悬挂且持久化取消标记", async () => {
@@ -601,6 +1346,75 @@ test("AgentSession cancel 保留已完成工具步骤，丢弃未完成的后续
   assert.doesNotMatch(messages, /不应持久化/);
   assert.equal(persisted.length, 1);
   assert.equal(events.filter((event) => event.type === "turn-cancelled").length, 1);
+});
+
+test("AgentSession cancel 为执行中的 Tool exactly-once 记录 cancelled outcome", async () => {
+  let started = false;
+  let cancelledByTest = false;
+  const session = new AgentSession({
+    id: "s6-tool-cancel-ledger",
+    model: sequencedModel([
+      toolCallStep("slow-agent__slow", { q: "cancel-me" }),
+      textStep("不应到达"),
+    ]),
+    sources: [
+      abortableSource("slow-agent", "slow", () => {
+        started = true;
+        cancelledByTest = session.cancel();
+      }),
+    ],
+    maxSteps: 4,
+  });
+
+  const events: SessionEvent[] = [];
+  for await (const event of session.send("run slow")) {
+    events.push(event);
+  }
+
+  assert.equal(started, true);
+  assert.equal(cancelledByTest, true);
+  assert.equal(events.filter((event) => event.type === "turn-cancelled").length, 1);
+  const records = session.getToolExecutions({}, true);
+  assert.equal(records.length, 1);
+  const record = records[0];
+  assert.ok(record && "input" in record);
+  assert.equal(record.toolCallId, "c1");
+  assert.equal(record.outcome.kind, "cancelled");
+  assert.equal(record.outcome.reason, "user");
+  assert.equal(record.input.encoding, "json");
+  if (record.input.encoding === "json") {
+    assert.deepEqual(record.input.value, { q: "cancel-me" });
+  }
+});
+
+test("AgentSession turnTimeout 为执行中的 Tool exactly-once 记录 cancelled outcome", async () => {
+  const session = new AgentSession({
+    id: "s6-tool-timeout-ledger",
+    model: sequencedModel([
+      toolCallStep("slow-agent__slow", { q: "timeout-me" }),
+      textStep("不应到达"),
+    ]),
+    sources: [abortableSource("slow-agent", "slow")],
+    maxSteps: 4,
+    turnTimeoutMs: 30,
+  });
+
+  const events = await collect(session.send("run slow"));
+
+  const cancelled = events.find((event) => event.type === "turn-cancelled");
+  assert.ok(cancelled && cancelled.type === "turn-cancelled");
+  assert.equal(cancelled.reason, "timeout");
+  const records = session.getToolExecutions({}, true);
+  assert.equal(records.length, 1);
+  const record = records[0];
+  assert.ok(record && "input" in record);
+  assert.equal(record.toolCallId, "c1");
+  assert.equal(record.outcome.kind, "cancelled");
+  assert.equal(record.outcome.reason, "timeout");
+  assert.equal(record.input.encoding, "json");
+  if (record.input.encoding === "json") {
+    assert.deepEqual(record.input.value, { q: "timeout-me" });
+  }
 });
 
 test("AgentSession turnTimeout 显式上报 timeout，不再退化为 aborted", async () => {
@@ -909,6 +1723,7 @@ test(
   "AgentSession timeout 保留后台 session，并在取消事件与持久消息中暴露恢复 id",
   { skip: process.platform === "win32" },
   async () => {
+    let dynamicResolution = 0;
     const steps: LanguageModelV4StreamPart[][] = [
       toolCallStep("roll__exec_command", { command: "sleep 30", yield_time_ms: 30_000 }),
       toolCallStep("roll__exec_list", {}),
@@ -920,6 +1735,85 @@ test(
       sources: [],
       maxSteps: 8,
       turnTimeoutMs: 500,
+      capabilityContext: {
+        profile: "bash",
+        hostMode: "interactive",
+        cwd: process.cwd(),
+        platform: process.platform,
+        agentCount: 0,
+      },
+      resolveDynamicCapabilityContext: () => {
+        dynamicResolution += 1;
+        return { ruleIds: [`tenant/rules-v${String(dynamicResolution)}`] };
+      },
+      policy: allowToolPolicy,
+      bashSession: sessionExecSettings({
+        ...posixProfile,
+        killTree: async (pid, intent) => {
+          killProcessGroup(pid, intent === "interrupt" ? "SIGINT" : "SIGKILL");
+        },
+      }),
+    });
+    const stableManifest = JSON.stringify(session.getCapabilityManifest());
+
+    try {
+      const timeoutEvents = await collect(session.send("start beyond turn timeout"));
+      const firstContext = session.getCapabilityTurnContext();
+      const cancelled = timeoutEvents.find((event) => event.type === "turn-cancelled");
+      assert.ok(cancelled && cancelled.type === "turn-cancelled");
+      assert.equal(cancelled.reason, "timeout");
+      assert.equal(cancelled.execSessionIds?.length, 1);
+      const sessionId = cancelled.execSessionIds?.[0];
+      assert.ok(sessionId);
+      const sessionListToolId = session
+        .getCapabilityManifest()
+        .tools.find((tool) => tool.role === "session-list")?.id;
+      assert.ok(sessionListToolId);
+      assert.match(cancelled.message, new RegExp(String(sessionId), "u"));
+      assert.match(cancelled.message, new RegExp(sessionListToolId, "u"));
+      assert.match(cancelled.message, /当前进程的下一轮/u);
+      assert.match(
+        String(session.getMessages().at(-1)?.content),
+        new RegExp(String(sessionId), "u"),
+      );
+      assert.deepEqual(firstContext?.dynamic.ruleIds, ["tenant/rules-v1"]);
+      assert.deepEqual(firstContext?.dynamic.sessions, []);
+
+      const listed = listedExecSessions(await collect(session.send("recover session")));
+      const secondContext = session.getCapabilityTurnContext();
+      assert.ok(listed.some((item) => item.session_id === sessionId && item.state === "running"));
+      assert.deepEqual(secondContext?.dynamic.ruleIds, ["tenant/rules-v2"]);
+      assert.ok(
+        secondContext?.dynamic.sessions.some(
+          (item) => item.sessionId === sessionId && item.state === "running",
+        ),
+      );
+      assert.equal(JSON.stringify(session.getCapabilityManifest()), stableManifest);
+    } finally {
+      await session.close();
+    }
+  },
+);
+
+test(
+  "AgentSession one-shot timeout 不宣称后台 session 可跨进程恢复",
+  { skip: process.platform === "win32" },
+  async () => {
+    const session = new AgentSession({
+      id: "session-exec-timeout-one-shot",
+      model: sequencedModel([
+        toolCallStep("roll__exec_command", { command: "sleep 30", yield_time_ms: 30_000 }),
+      ]),
+      sources: [],
+      maxSteps: 4,
+      turnTimeoutMs: 500,
+      capabilityContext: {
+        profile: "bash",
+        hostMode: "one-shot",
+        cwd: process.cwd(),
+        platform: process.platform,
+        agentCount: 0,
+      },
       policy: allowToolPolicy,
       bashSession: sessionExecSettings({
         ...posixProfile,
@@ -930,21 +1824,15 @@ test(
     });
 
     try {
-      const timeoutEvents = await collect(session.send("start beyond turn timeout"));
-      const cancelled = timeoutEvents.find((event) => event.type === "turn-cancelled");
+      const manifest = session.getCapabilityManifest();
+      assert.equal(manifest.lifecycle.hostMode, "one-shot");
+      assert.equal(manifest.lifecycle.sessionDurability, "process-local");
+      const events = await collect(session.send("start in one shot"));
+      const cancelled = events.find((event) => event.type === "turn-cancelled");
       assert.ok(cancelled && cancelled.type === "turn-cancelled");
-      assert.equal(cancelled.reason, "timeout");
-      assert.equal(cancelled.execSessionIds?.length, 1);
-      const sessionId = cancelled.execSessionIds?.[0];
-      assert.ok(sessionId);
-      assert.match(cancelled.message, new RegExp(String(sessionId), "u"));
-      assert.match(
-        String(session.getMessages().at(-1)?.content),
-        new RegExp(String(sessionId), "u"),
-      );
-
-      const listed = listedExecSessions(await collect(session.send("recover session")));
-      assert.ok(listed.some((item) => item.session_id === sessionId && item.state === "running"));
+      assert.match(cancelled.message, /本次 one-shot 结束时会清理/u);
+      assert.match(cancelled.message, /不能从后续 CLI 进程找回/u);
+      assert.doesNotMatch(cancelled.message, /当前进程的下一轮|roll__exec_list/u);
     } finally {
       await session.close();
     }
@@ -1160,7 +2048,7 @@ test("AgentSession 上下文输入超阈值时下轮自动压缩", async () => {
   assert.equal(second.at(-1)?.type, "message-finish");
 });
 
-test("AgentSession context 长度错误后立即压缩历史,下一轮可恢复", async () => {
+test("AgentSession context 长度错误后压缩并在同一个 send 内自动重放", async () => {
   const model = sequencedModel([
     streamErrorStep("context_length_exceeded: prompt is too long"),
     textStep("recovered"),
@@ -1189,25 +2077,431 @@ test("AgentSession context 长度错误后立即压缩历史,下一轮可恢复"
     },
   });
 
-  const failed = await collect(session.send("too much"));
-  assert.ok(failed.some((event) => event.type === "error"));
+  const recovered = await collect(session.send("too much"));
   assert.equal(
-    failed.some((event) => event.type === "message-finish"),
+    recovered.some((event) => event.type === "error"),
     false,
   );
-  const compacted = failed.find((event) => event.type === "context-compacted");
+  assert.equal(recovered.filter((event) => event.type === "message-start").length, 1);
+  assert.equal(recovered.at(-1)?.type, "message-finish");
+  const compacted = recovered.find((event) => event.type === "context-compacted");
   assert.ok(compacted && compacted.type === "context-compacted");
   assert.equal(compacted.reason, "auto");
   assert.equal(compacted.removed, 2);
   assert.equal(replaced?.length, 2);
-  assert.equal(session.getMessages().length, 2);
+  assert.equal(session.getMessages().length, 4);
+  assert.equal(session.getMessages().at(-2)?.content, "too much");
+  assert.match(JSON.stringify(session.getMessages().at(-1)?.content), /recovered/u);
+});
 
-  const recovered = await collect(session.send("retry"));
+test("AgentSession Provider stream throw context 错误也压缩并重放当前 send", async () => {
+  let modelCalls = 0;
+  let persisted: readonly ModelMessage[] = [];
+  const model = new MockLanguageModelV4({
+    doStream: async () => {
+      modelCalls += 1;
+      return modelCalls === 1
+        ? throwingStream("context window exceeded")
+        : streamChunks(textStep("recovered after stream throw"));
+    },
+  });
+  const session = new AgentSession({
+    id: "overflow-stream-throw",
+    model,
+    sources: [],
+    maxSteps: 2,
+    initialMessages: [
+      { role: "user", content: "old-1" },
+      { role: "assistant", content: "answer-1" },
+      { role: "user", content: "old-2" },
+      { role: "assistant", content: "answer-2" },
+    ],
+    compaction: {
+      enabled: true,
+      strategy: "truncate",
+      threshold: 0.75,
+      keepRecentTurns: 1,
+      keepRecentTokens: 1,
+    },
+    onPersist: (messages) => {
+      persisted = messages;
+    },
+  });
+
+  const events = await collect(session.send("retry thrown stream"));
+
+  assert.equal(modelCalls, 2);
+  assert.equal(events.filter((event) => event.type === "message-start").length, 1);
+  assert.equal(events.filter((event) => event.type === "context-compacted").length, 1);
   assert.equal(
-    recovered.some((event) => event.type === "context-compacted"),
+    events.some((event) => event.type === "error"),
     false,
   );
-  assert.equal(recovered.at(-1)?.type, "message-finish");
+  assert.equal(events.at(-1)?.type, "message-finish");
+  assert.equal(persisted[0]?.content, "retry thrown stream");
+  assert.match(JSON.stringify(persisted[1]?.content), /recovered after stream throw/u);
+});
+
+test("AgentSession overflow checkpoint 持久化失败时不发起第二次 Turn 推理", async () => {
+  let modelCalls = 0;
+  let commitCalls = 0;
+  const model = new MockLanguageModelV4({
+    doStream: async () => {
+      modelCalls += 1;
+      return streamChunks(streamErrorStep("context_length_exceeded"));
+    },
+  });
+  const session = new AgentSession({
+    id: "overflow-checkpoint-persist-failure",
+    model,
+    sources: [],
+    maxSteps: 2,
+    initialMessages: [
+      { role: "user", content: "old-1" },
+      { role: "assistant", content: "answer-1" },
+      { role: "user", content: "old-2" },
+      { role: "assistant", content: "answer-2" },
+    ],
+    compaction: {
+      enabled: true,
+      strategy: "truncate",
+      threshold: 0.75,
+      keepRecentTurns: 1,
+      keepRecentTokens: 1,
+    },
+    commitCompaction: () => {
+      commitCalls += 1;
+      throw new Error("checkpoint persist failed");
+    },
+  });
+
+  const events = await collect(session.send("persist once"));
+
+  assert.equal(modelCalls, 1);
+  assert.equal(commitCalls, 1);
+  assert.equal(events.filter((event) => event.type === "compaction-start").length, 1);
+  assert.equal(events.filter((event) => event.type === "context-compacted").length, 0);
+  assert.equal(events.filter((event) => event.type === "message-finish").length, 0);
+  assert.ok(
+    events.some(
+      (event) => event.type === "error" && /checkpoint persist failed/u.test(event.message),
+    ),
+  );
+  assert.equal(
+    session
+      .getMessages()
+      .filter((message) => message.role === "user" && message.content === "persist once").length,
+    1,
+  );
+});
+
+test("AgentSession overflow compaction 被取消时不发起第二次 Turn 推理", async () => {
+  const compactionStarted = Promise.withResolvers<void>();
+  const compactionAborted = Promise.withResolvers<void>();
+  let modelCalls = 0;
+  const model = new MockLanguageModelV4({
+    doStream: async () => {
+      modelCalls += 1;
+      return streamChunks(streamErrorStep("context window exceeded"));
+    },
+    doGenerate: async (options) => {
+      compactionStarted.resolve();
+      return new Promise<never>((_resolve, reject) => {
+        const onAbort = (): void => {
+          compactionAborted.resolve();
+          reject(options.abortSignal?.reason ?? new Error("compaction cancelled"));
+        };
+        if (options.abortSignal?.aborted) {
+          onAbort();
+          return;
+        }
+        options.abortSignal?.addEventListener("abort", onAbort, { once: true });
+      });
+    },
+  });
+  const session = new AgentSession({
+    id: "overflow-compaction-cancelled",
+    model,
+    sources: [],
+    maxSteps: 2,
+    initialMessages: [
+      { role: "user", content: "old-1" },
+      { role: "assistant", content: "answer-1" },
+      { role: "user", content: "old-2" },
+      { role: "assistant", content: "answer-2" },
+    ],
+    compaction: {
+      enabled: true,
+      strategy: "summarize",
+      threshold: 0.75,
+      keepRecentTurns: 1,
+      keepRecentTokens: 1,
+    },
+  });
+
+  const pending = collect(session.send("cancel recovery"));
+  await compactionStarted.promise;
+  assert.equal(session.cancel(), true);
+  await compactionAborted.promise;
+  const events = await pending;
+
+  assert.equal(modelCalls, 1);
+  assert.equal(events.filter((event) => event.type === "compaction-start").length, 1);
+  assert.equal(events.filter((event) => event.type === "context-compacted").length, 0);
+  assert.equal(
+    events.some((event) => event.type === "text-delta" && event.delta.includes("recovered")),
+    false,
+  );
+});
+
+test("AgentSession overflow compaction 达到 Turn 超时时不发起第二次 Turn 推理", async () => {
+  const compactionStarted = Promise.withResolvers<void>();
+  const compactionAborted = Promise.withResolvers<void>();
+  let modelCalls = 0;
+  const model = new MockLanguageModelV4({
+    doStream: async () => {
+      modelCalls += 1;
+      return streamChunks(streamErrorStep("maximum context reached"));
+    },
+    doGenerate: async (options) => {
+      compactionStarted.resolve();
+      return new Promise<never>((_resolve, reject) => {
+        const onAbort = (): void => {
+          compactionAborted.resolve();
+          reject(options.abortSignal?.reason ?? new Error("compaction timed out"));
+        };
+        if (options.abortSignal?.aborted) {
+          onAbort();
+          return;
+        }
+        options.abortSignal?.addEventListener("abort", onAbort, { once: true });
+      });
+    },
+  });
+  const session = new AgentSession({
+    id: "overflow-compaction-timeout",
+    model,
+    sources: [],
+    maxSteps: 2,
+    turnTimeoutMs: 100,
+    initialMessages: [
+      { role: "user", content: "old-1" },
+      { role: "assistant", content: "answer-1" },
+      { role: "user", content: "old-2" },
+      { role: "assistant", content: "answer-2" },
+    ],
+    compaction: {
+      enabled: true,
+      strategy: "summarize",
+      threshold: 0.75,
+      keepRecentTurns: 1,
+      keepRecentTokens: 1,
+    },
+  });
+
+  const pending = collect(session.send("timeout recovery"));
+  await compactionStarted.promise;
+  await compactionAborted.promise;
+  const events = await pending;
+
+  assert.equal(modelCalls, 1);
+  assert.equal(events.filter((event) => event.type === "compaction-start").length, 1);
+  assert.equal(events.filter((event) => event.type === "context-compacted").length, 0);
+  assert.equal(
+    events.some((event) => event.type === "text-delta" && event.delta.includes("recovered")),
+    false,
+  );
+});
+
+test("AgentSession context 自动重放最多一次，连续 overflow 有界失败", async () => {
+  let modelCalls = 0;
+  const model = new MockLanguageModelV4({
+    doStream: async () => {
+      modelCalls += 1;
+      return streamChunks(streamErrorStep("context_length_exceeded"));
+    },
+  });
+  const session = new AgentSession({
+    id: "overflow-bounded",
+    model,
+    sources: [],
+    maxSteps: 2,
+    initialMessages: [
+      { role: "user", content: "old-1" },
+      { role: "assistant", content: "answer-1" },
+      { role: "user", content: "old-2" },
+      { role: "assistant", content: "answer-2" },
+    ],
+    compaction: {
+      enabled: true,
+      strategy: "truncate",
+      threshold: 0.75,
+      keepRecentTurns: 1,
+      keepRecentTokens: 1,
+    },
+  });
+
+  const events = await collect(session.send("retry once"));
+
+  assert.equal(modelCalls, 2);
+  assert.equal(events.filter((event) => event.type === "message-start").length, 1);
+  assert.equal(events.filter((event) => event.type === "error").length, 1);
+  assert.equal(events.filter((event) => event.type === "context-compacted").length, 1);
+  assert.equal(
+    events.some((event) => event.type === "message-finish"),
+    false,
+  );
+});
+
+test("AgentSession context 压缩无进展时不自动重放", async () => {
+  let modelCalls = 0;
+  const model = new MockLanguageModelV4({
+    doStream: async () => {
+      modelCalls += 1;
+      return streamChunks(streamErrorStep("context window exceeded"));
+    },
+  });
+  const session = new AgentSession({
+    id: "overflow-no-progress",
+    model,
+    sources: [],
+    maxSteps: 2,
+    initialMessages: [
+      { role: "user", content: "only" },
+      { role: "assistant", content: "turn" },
+    ],
+    compaction: {
+      enabled: true,
+      strategy: "truncate",
+      threshold: 0.75,
+      keepRecentTurns: 1,
+      keepRecentTokens: 1000,
+    },
+  });
+
+  const events = await collect(session.send("cannot shrink"));
+
+  assert.equal(modelCalls, 1);
+  assert.ok(events.some((event) => event.type === "error"));
+});
+
+test("AgentSession context failure marker 持久化失败时回滚内存 Turn", async () => {
+  const session = new AgentSession({
+    id: "overflow-marker-persist-failure",
+    model: sequencedModel([streamErrorStep("context_length_exceeded")]),
+    sources: [],
+    maxSteps: 2,
+    onPersist: () => {
+      throw new Error("db write failed");
+    },
+  });
+
+  const events = await collect(session.send("must remain durable"));
+
+  assert.deepEqual(session.getMessages(), []);
+  assert.ok(
+    events.some(
+      (event) =>
+        event.type === "error" && /上下文溢出记录持久化失败: db write failed/u.test(event.message),
+    ),
+  );
+  assert.ok(
+    events.some(
+      (event) => event.type === "error" && /context_length_exceeded/u.test(event.message),
+    ),
+  );
+});
+
+test("AgentSession 已输出文本后 context overflow 不重放", async () => {
+  let modelCalls = 0;
+  let persisted: readonly ModelMessage[] = [];
+  const model = new MockLanguageModelV4({
+    doStream: async () => {
+      modelCalls += 1;
+      return streamChunks(textThenStreamErrorStep("partial", "prompt is too long"));
+    },
+  });
+  const session = new AgentSession({
+    id: "overflow-partial-text",
+    model,
+    sources: [],
+    maxSteps: 2,
+    initialMessages: [
+      { role: "user", content: "old-1" },
+      { role: "assistant", content: "answer-1" },
+      { role: "user", content: "old-2" },
+      { role: "assistant", content: "answer-2" },
+    ],
+    compaction: {
+      enabled: true,
+      strategy: "truncate",
+      threshold: 0.75,
+      keepRecentTurns: 1,
+      keepRecentTokens: 1,
+    },
+    onPersist: (messages) => {
+      persisted = messages;
+    },
+  });
+
+  const events = await collect(session.send("partial"));
+
+  assert.equal(modelCalls, 1);
+  assert.ok(events.some((event) => event.type === "text-delta"));
+  const error = events.find((event) => event.type === "error");
+  assert.ok(error && error.type === "error");
+  assert.match(error.message, /避免重复副作用/u);
+  assert.equal(persisted[0]?.content, "partial");
+  assert.match(String(persisted[1]?.content), /部分文本/u);
+});
+
+test("AgentSession Tool 已执行后下一 Step overflow 不重放副作用", async () => {
+  let modelCalls = 0;
+  let toolCalls = 0;
+  let persisted: readonly ModelMessage[] = [];
+  const steps = [
+    toolCallStep("side-effect__write", { q: "x" }),
+    streamErrorStep("maximum context reached"),
+  ];
+  const model = new MockLanguageModelV4({
+    doStream: async () => {
+      const chunks = steps[modelCalls] ?? streamErrorStep("maximum context reached");
+      modelCalls += 1;
+      return streamChunks(chunks);
+    },
+  });
+  const session = new AgentSession({
+    id: "overflow-after-tool",
+    model,
+    sources: [source("side-effect", "write", () => (toolCalls += 1))],
+    maxSteps: 4,
+    initialMessages: [
+      { role: "user", content: "old-1" },
+      { role: "assistant", content: "answer-1" },
+      { role: "user", content: "old-2" },
+      { role: "assistant", content: "answer-2" },
+    ],
+    compaction: {
+      enabled: true,
+      strategy: "truncate",
+      threshold: 0.75,
+      keepRecentTurns: 1,
+      keepRecentTokens: 1,
+    },
+    onPersist: (messages) => {
+      persisted = messages;
+    },
+  });
+
+  const events = await collect(session.send("write once"));
+
+  assert.equal(modelCalls, 2);
+  assert.equal(toolCalls, 1);
+  const error = events.find((event) => event.type === "error");
+  assert.ok(error && error.type === "error");
+  assert.match(error.message, /避免重复副作用/u);
+  assert.equal(persisted[0]?.content, "write once");
+  assert.match(String(persisted[1]?.content), /外部副作用可能已发生/u);
 });
 
 test("AgentSession summarize 自动压缩失败时降级 truncate 且不继续原始历史", async () => {
@@ -1654,6 +2948,31 @@ function fakeSkillLibrary(
   };
 }
 
+test("systemPrompt compatibility field appends without replacing capability grounding", async () => {
+  let capturedSystem = "";
+  const model = new MockLanguageModelV4({
+    doStream: async (options) => {
+      const system = options.prompt[0];
+      capturedSystem = system?.role === "system" ? system.content : "";
+      return streamChunks(textStep("done"));
+    },
+  });
+  const session = new AgentSession({
+    id: "extra-system-prompt",
+    model,
+    sources: [],
+    maxSteps: 2,
+    systemPrompt: "CUSTOM_ONLY",
+  });
+
+  await collect(session.send("hello"));
+
+  assert.match(capturedSystem, /# 工具使用纪律/u);
+  assert.match(capturedSystem, /没有调用过工具，就如实说明尚未执行/u);
+  assert.match(capturedSystem, /# 附加会话指令/u);
+  assert.match(capturedSystem, /CUSTOM_ONLY/u);
+});
+
 test("applyAgentRefresh 后新 agent 工具与新 system prompt 从下一轮生效", async () => {
   let capturedSystem: string | undefined;
   let index = 0;
@@ -1684,7 +3003,10 @@ test("applyAgentRefresh 后新 agent 工具与新 system prompt 从下一轮生�
   });
 
   const events = await collect(session.send("call new agent"));
-  assert.equal(capturedSystem, "NEW_PROMPT");
+  assert.match(capturedSystem ?? "", /# 工具使用纪律/u);
+  assert.match(capturedSystem ?? "", /# 附加会话指令/u);
+  assert.match(capturedSystem ?? "", /NEW_PROMPT/u);
+  assert.doesNotMatch(capturedSystem ?? "", /OLD_PROMPT/u);
   assert.equal(calls, 1);
   const toolResult = events.find((event) => event.type === "tool-result");
   assert.ok(toolResult && toolResult.type === "tool-result" && toolResult.isError === false);

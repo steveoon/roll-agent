@@ -21,11 +21,7 @@ import type { LlmConfigReadiness } from "../../config/helpers.ts";
 import { titleFromMessage } from "../chat/title.ts";
 import { buildBannerLines, renderBannerText, type BannerInfo } from "../chat/banner.ts";
 import { getCurrentVersion } from "../utils/update-checker.ts";
-import {
-  buildSkillInvocationPrompt,
-  formatSkillList,
-  parseSkillInvocation,
-} from "../chat/ink/commands.ts";
+import { formatSkillList, parseSkillInvocation } from "../chat/ink/commands.ts";
 
 type RuntimeModule = typeof import("@roll-agent/runtime");
 
@@ -39,6 +35,40 @@ function createToolPolicy(runtime: RuntimeModule, config: RollConfig) {
 }
 
 type ThreadStoreInstance = InstanceType<RuntimeModule["ThreadStore"]>;
+type ChatEngineOptions = ConstructorParameters<RuntimeModule["ConversationEngine"]>[0];
+
+export const CHAT_ENGINE_SURFACES = {
+  ink: "ink",
+  basicRepl: "basic-repl",
+  oneShot: "one-shot",
+  json: "json",
+  server: "server",
+} as const;
+
+export type ChatEngineSurface = (typeof CHAT_ENGINE_SURFACES)[keyof typeof CHAT_ENGINE_SURFACES];
+
+const CHAT_HOST_MODE_BY_SURFACE = {
+  [CHAT_ENGINE_SURFACES.ink]: "interactive",
+  [CHAT_ENGINE_SURFACES.basicRepl]: "interactive",
+  [CHAT_ENGINE_SURFACES.oneShot]: "one-shot",
+  [CHAT_ENGINE_SURFACES.json]: "one-shot",
+  [CHAT_ENGINE_SURFACES.server]: "server",
+} as const satisfies Record<ChatEngineSurface, NonNullable<ChatEngineOptions["hostMode"]>>;
+
+export function chatHostModeForSurface(
+  surface: ChatEngineSurface,
+): NonNullable<ChatEngineOptions["hostMode"]> {
+  return CHAT_HOST_MODE_BY_SURFACE[surface];
+}
+
+interface CreateChatEngineInput {
+  readonly runtime: RuntimeModule;
+  readonly config: RollConfig;
+  readonly model: NonNullable<ChatEngineOptions["model"]>;
+  readonly store: ThreadStoreInstance;
+  readonly surface: ChatEngineSurface;
+  readonly providerOptions?: NonNullable<ChatEngineOptions["providerOptions"]>;
+}
 
 interface ReplIo {
   readonly input: NodeJS.ReadableStream;
@@ -61,11 +91,19 @@ function reportSkillLibraryIssue(message: string): void {
   log.warn(`skill 目录加载警告：${message}`);
 }
 
-function resolveSkillSendText(session: AgentSession, message: string): string {
-  const invocation = parseSkillInvocation(message, session.getSkillSummaries());
-  return invocation && invocation.prompt.length > 0
-    ? buildSkillInvocationPrompt(invocation)
-    : message;
+export function createChatEngine(input: CreateChatEngineInput) {
+  return new input.runtime.ConversationEngine({
+    config: input.config,
+    model: input.model,
+    store: input.store,
+    hostMode: chatHostModeForSurface(input.surface),
+    policy: createToolPolicy(input.runtime, input.config),
+    maxSteps: input.config.runtime.maxSteps,
+    ...(input.providerOptions ? { providerOptions: input.providerOptions } : {}),
+    debugEvents: isDebugLogEnabled(),
+    onAgentBootstrapIssue: reportAgentBootstrapIssue,
+    onSkillLibraryIssue: reportSkillLibraryIssue,
+  });
 }
 
 async function readReplLine(
@@ -117,7 +155,7 @@ async function runServer(config: RollConfig): Promise<void> {
   const modelName = llmStatus.model;
 
   const runtime = await loadRuntime();
-  const { ConversationEngine, ThreadStore, RuntimeServer, createStdioConnection } = runtime;
+  const { ThreadStore, RuntimeServer, createStdioConnection } = runtime;
   const { model, providerOptions } = resolveLLMCall(
     provider,
     modelName,
@@ -127,16 +165,13 @@ async function runServer(config: RollConfig): Promise<void> {
     config.runtime.thinkingLevel,
   );
   const store = new ThreadStore(config.runtime.threadsDir);
-  const engine = new ConversationEngine({
+  const engine = createChatEngine({
+    runtime,
     config,
     model,
     store,
-    policy: createToolPolicy(runtime, config),
-    maxSteps: config.runtime.maxSteps,
+    surface: CHAT_ENGINE_SURFACES.server,
     ...(providerOptions ? { providerOptions } : {}),
-    debugEvents: isDebugLogEnabled(),
-    onAgentBootstrapIssue: reportAgentBootstrapIssue,
-    onSkillLibraryIssue: reportSkillLibraryIssue,
   });
   const connection = createStdioConnection(process.stdin, process.stdout);
   const server = new RuntimeServer(engine, connection);
@@ -245,6 +280,13 @@ export async function runJsonTurn(
           ...(event.beforeInputTokens !== undefined
             ? { beforeInputTokens: event.beforeInputTokens }
             : {}),
+          ...(event.checkpointId !== undefined ? { checkpointId: event.checkpointId } : {}),
+          ...(event.checkpointGeneration !== undefined
+            ? { checkpointGeneration: event.checkpointGeneration }
+            : {}),
+          ...(event.checkpointSummaryStatus !== undefined
+            ? { checkpointSummaryStatus: event.checkpointSummaryStatus }
+            : {}),
         });
         break;
       case "turn-cancelled":
@@ -338,14 +380,13 @@ export async function runRepl(
         log.info("用法: /<skill-name> [/<skill-name> ...] 你的请求");
         continue;
       }
-      const sendInput = skillInvocation ? buildSkillInvocationPrompt(skillInvocation) : input;
       if (!titled) {
         store.updateTitle(session.id, titleFromMessage(input));
         titled = true;
       }
       submitted = true;
       log.debug(`chat.repl send start · chars=${String(input.length)}`);
-      for await (const event of session.send(sendInput)) {
+      for await (const event of session.send(input)) {
         await renderer.handle(event, session);
       }
       log.debug("chat.repl send completed");
@@ -411,7 +452,7 @@ export default defineCommand({
     }
 
     const runtime = await loadRuntime();
-    const { ConversationEngine, ThreadStore } = runtime;
+    const { ThreadStore } = runtime;
     const { model, providerOptions } = resolveLLMCall(
       provider,
       modelName,
@@ -421,17 +462,23 @@ export default defineCommand({
       config.runtime.thinkingLevel,
     );
     const store = new ThreadStore(config.runtime.threadsDir);
-    const engine = new ConversationEngine({
+    const interactive = Boolean(
+      process.stdout.isTTY && process.stdin.isTTY && typeof process.stdin.setRawMode === "function",
+    );
+    const surface = args.message
+      ? args.json
+        ? CHAT_ENGINE_SURFACES.json
+        : CHAT_ENGINE_SURFACES.oneShot
+      : interactive
+        ? CHAT_ENGINE_SURFACES.ink
+        : CHAT_ENGINE_SURFACES.basicRepl;
+    const engine = createChatEngine({
+      runtime,
       config,
       model,
       store,
-      policy: createToolPolicy(runtime, config),
-      maxSteps: config.runtime.maxSteps,
+      surface,
       ...(providerOptions ? { providerOptions } : {}),
-      debugEvents: isDebugLogEnabled(),
-      onAgentBootstrapIssue: reportAgentBootstrapIssue,
-      onSkillLibraryIssue: reportSkillLibraryIssue,
-      sessionExecEnabled: args.message === undefined,
     });
 
     let sessionForCleanup: AgentSession | undefined;
@@ -455,7 +502,7 @@ export default defineCommand({
       sessionForCleanup = session;
 
       if (args.json && args.message) {
-        const result = await runJsonTurn(session, resolveSkillSendText(session, args.message));
+        const result = await runJsonTurn(session, args.message);
         printChatJson(result);
         if (result.status !== "completed") {
           process.exitCode = 1;
@@ -471,16 +518,11 @@ export default defineCommand({
       }
       if (args.message) {
         const renderer = new ChatRenderer(clackConfirm, session.getContextWindow());
-        for await (const event of session.send(resolveSkillSendText(session, args.message))) {
+        for await (const event of session.send(args.message)) {
           await renderer.handle(event, session);
         }
       } else {
         const isNewSession = !args.session && !args.last;
-        const interactive = Boolean(
-          process.stdout.isTTY &&
-          process.stdin.isTTY &&
-          typeof process.stdin.setRawMode === "function",
-        );
         const summary = await engine.getContextSummary();
         const banner: BannerInfo = {
           version: getCurrentVersion(),

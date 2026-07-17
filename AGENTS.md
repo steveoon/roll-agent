@@ -168,6 +168,40 @@ chat 走独立的 skill 通道（对齐 `npx skills add` 标准生态，非 roll
 
 这是为了避免 stdio 模式下日志干扰 MCP 协议通信。SDK 的 `AgentLogger` 也遵循此规则。
 
+### `roll chat` Tool Batch 资源提示
+
+`AgentSession` 会先按模型返回顺序完成整批 Tool 的参数校验、policy 与用户确认，再并行执行无资源冲突的调用。MCP Tool 可通过 `_meta["roll/resourceHints"]` 显式声明输入字段对应的资源：
+
+```json
+{
+  "_meta": {
+    "roll/resourceHints": [
+      { "field": "path", "kind": "file" },
+      { "field": "sessionId", "kind": "browser-session" },
+      { "field": "conversationId", "kind": "conversation" }
+    ]
+  }
+}
+```
+
+使用 `@roll-agent/sdk` 时优先直接在 `defineTool()` 中声明等价的 `resourceHints`；SDK 会把它透传为上述 MCP `_meta`：
+
+```ts
+defineTool({
+  // ...
+  annotations: { destructiveHint: true },
+  resourceHints: [{ field: "path", kind: "file", mode: "write" }],
+});
+```
+
+- `field` 只读取 tool input 的顶层字段，值可为单个字符串/数字或数组
+- `file` 会先转为规范化绝对路径；stdio Agent 的相对路径以其 `installPath` 为基准，无法确定远端基准时回退 Agent 级锁
+- `browser-session`、`conversation` 按稳定 ID 建锁；`custom` 还需提供 `namespace`
+- `mode` 可显式设为 `read` / `write`；省略时按 MCP `readOnlyHint` / `destructiveHint` 推导
+- 未声明提示或运行时没有解析出资源值时，保守回退为 `agent:<name>` 级锁；不会猜测任意业务字段
+
+后台 `exec_command` 的进程在 Tool 返回后仍可能继续运行，P0 锁只覆盖 Tool 调用生命周期，不承诺跨后台进程生命周期的文件隔离；长生命周期副作用恢复属于 Semantic WAL 范围。
+
 ### CLI 交互约定
 
 - 不要随意改变已有 CLI 交互方式；交互形态也是产品契约的一部分。

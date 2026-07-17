@@ -2,7 +2,19 @@ import { tool, type ToolSet } from "ai";
 import { z } from "zod";
 import { SKILL_TOOL_ID, type SkillLibrary } from "@roll-agent/core/skills/library";
 import type { ToolRegistry } from "./naming.ts";
-import type { NormalizedToolResult } from "./normalize-result.ts";
+import {
+  TOOL_OUTCOME_KINDS,
+  failedToolResult,
+  successfulToolResult,
+  toolResultToModelOutput,
+  type NormalizedToolResult,
+} from "./normalize-result.ts";
+import {
+  TOOL_RESOURCE_ACCESS_MODES,
+  executeCoordinatedTool,
+  type ToolExecutionCoordinator,
+  type ToolExecutionPlan,
+} from "./tool-execution-coordinator.ts";
 
 export const SKILL_TOOL_AGENT_NAME = "roll";
 export const SKILL_TOOL_NAME = "skill";
@@ -67,22 +79,29 @@ function skillNotFoundResult(library: SkillLibrary, name: string): NormalizedToo
     .list()
     .map((skill) => skill.name)
     .join(", ");
-  return { output: `skill "${name}" 不存在。可用 skill: ${available}`, isError: true };
+  return failedToolResult(
+    TOOL_OUTCOME_KINDS.invalidInput,
+    `skill "${name}" 不存在。可用 skill: ${available}`,
+  );
 }
 
 function loadSkill(library: SkillLibrary, name: string): NormalizedToolResult {
   const loaded = library.load(name);
   if (!loaded) {
-    return skillNotFoundResult(library, name);
+    return library.list().some((skill) => skill.name === name)
+      ? failedToolResult(
+          TOOL_OUTCOME_KINDS.toolFailed,
+          `skill "${name}" 已发现，但主文档加载失败；请检查 SKILL.md 是否可读及格式是否有效`,
+        )
+      : skillNotFoundResult(library, name);
   }
   const referencesSection =
     loaded.referencePaths.length > 0
       ? `\n\n可用 references（传 reference 参数加载）:\n${loaded.referencePaths.map((path) => `- ${path}`).join("\n")}`
       : "";
-  return {
-    output: withSkillLocation(loaded.skillRoot, `${clip(loaded.content)}${referencesSection}`),
-    isError: false,
-  };
+  return successfulToolResult(
+    withSkillLocation(loaded.skillRoot, `${clip(loaded.content)}${referencesSection}`),
+  );
 }
 
 function loadSkillReference(
@@ -102,15 +121,12 @@ function loadSkillReference(
       ? library.loadReference(name, referencePath)
       : referenceDocument?.content;
   if (content === undefined) {
-    return {
-      output: `skill "${name}" 中不存在 reference "${referencePath}"。加载主 SKILL.md 时请省略 reference；加载附加文档时仅支持 skill 目录内 references/ 下的文件。`,
-      isError: true,
-    };
+    return failedToolResult(
+      TOOL_OUTCOME_KINDS.invalidInput,
+      `skill "${name}" 中不存在 reference "${referencePath}"。加载主 SKILL.md 时请省略 reference；加载附加文档时仅支持 skill 目录内 references/ 下的文件。`,
+    );
   }
-  return {
-    output: withSkillLocation(referenceDocument?.skillRoot, clip(content)),
-    isError: false,
-  };
+  return successfulToolResult(withSkillLocation(referenceDocument?.skillRoot, clip(content)));
 }
 
 export function executeSkillTool(
@@ -126,15 +142,30 @@ export function executeSkillTool(
 export function buildSkillToolset(
   library: SkillLibrary | (() => SkillLibrary),
   registry: ToolRegistry,
+  coordinator?: ToolExecutionCoordinator,
 ): ToolSet {
   const resolveLibrary = typeof library === "function" ? library : (): SkillLibrary => library;
   const id = registry.register(SKILL_TOOL_AGENT_NAME, SKILL_TOOL_NAME);
+  const plan: ToolExecutionPlan = {
+    resources: () => [{ key: "skill-library", mode: TOOL_RESOURCE_ACCESS_MODES.read }],
+  };
+  coordinator?.register(id, plan);
   return {
     [id]: tool({
       description:
         "加载 skill 主说明书时只传 name，不要传 reference；仅加载其 references/ 下的文件时才传 reference。执行涉及某个 skill 领域的任务前，先用它读取流程与约束。",
       inputSchema: skillToolInputSchema,
-      execute: (input): NormalizedToolResult => executeSkillTool(resolveLibrary(), input),
+      toModelOutput: ({ output }) => toolResultToModelOutput(output),
+      execute: (input, options): Promise<NormalizedToolResult> =>
+        executeCoordinatedTool(
+          coordinator,
+          plan,
+          id,
+          options.toolCallId,
+          input,
+          options.abortSignal,
+          () => Promise.resolve(executeSkillTool(resolveLibrary(), input)),
+        ),
     }),
   };
 }
