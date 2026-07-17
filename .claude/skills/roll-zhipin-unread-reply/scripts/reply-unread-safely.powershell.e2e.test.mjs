@@ -24,6 +24,10 @@ function envWithPrependedPath(baseEnv, shimDir) {
   return env;
 }
 
+function psSingleQuote(value) {
+  return `'${String(value).replaceAll("'", "''")}'`;
+}
+
 test(
   "PowerShell preview failure preserves safe diagnostics and never sends",
   { skip: process.platform !== "win32" },
@@ -123,32 +127,22 @@ console.log(JSON.stringify(responses[tool] ?? { success: false, error: "unexpect
       "utf8",
     );
 
+    // -Command ensures script args bind into $args (more reliable than -File for this entrypoint).
+    const command = [
+      `$ErrorActionPreference = 'Continue'`,
+      `& ${psSingleQuote(scriptPath)} -Limit 1 -NoUnreadFilter -NoExchangeWechat -ResultsFile ${psSingleQuote(resultsPath)}`,
+      `exit $LASTEXITCODE`,
+    ].join("; ");
+
     try {
-      const result = spawnSync(
-        "pwsh",
-        [
-          "-NoLogo",
-          "-NoProfile",
-          "-ExecutionPolicy",
-          "Bypass",
-          "-File",
-          scriptPath,
-          "-Limit",
-          "1",
-          "-NoUnreadFilter",
-          "-NoExchangeWechat",
-          "-ResultsFile",
-          resultsPath,
-        ],
-        {
-          encoding: "utf8",
-          timeout: 30_000,
-          env: {
-            ...envWithPrependedPath(process.env, shimDir),
-            ROLL_SHIM_TRACE: tracePath,
-          },
+      const result = spawnSync("pwsh", ["-NoLogo", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", command], {
+        encoding: "utf8",
+        timeout: 30_000,
+        env: {
+          ...envWithPrependedPath(process.env, shimDir),
+          ROLL_SHIM_TRACE: tracePath,
         },
-      );
+      });
 
       const traceText = (() => {
         try {

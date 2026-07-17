@@ -176,10 +176,29 @@ function Invoke-NodeStdin([string]$MjsPath, [string]$StdinText, [string[]]$NodeA
   $prev = $ErrorActionPreference
   $ErrorActionPreference = "Continue"
   try {
-    if ($NodeArgs.Count -gt 0) {
-      return [string]($StdinText | & node $MjsPath @NodeArgs 2>&1)
+    # Node helpers often exit 0 with empty stdout (exit-code-only validators). Normalize the
+    # pipeline result so callers can always call string methods like .Trim() on Windows PS.
+    $chunks = @(
+      if ($NodeArgs.Count -gt 0) {
+        $StdinText | & node $MjsPath @NodeArgs 2>&1
+      }
+      else {
+        $StdinText | & node $MjsPath 2>&1
+      }
+    ) | ForEach-Object {
+      if ($_ -is [System.Management.Automation.ErrorRecord]) {
+        if ($null -ne $_.Exception -and $null -ne $_.Exception.Message) {
+          $_.Exception.Message
+        }
+        else {
+          $_.ToString()
+        }
+      }
+      elseif ($null -ne $_) {
+        [string]$_
+      }
     }
-    return [string]($StdinText | & node $MjsPath 2>&1)
+    return (($chunks | Where-Object { $null -ne $_ }) -join [Environment]::NewLine)
   }
   finally {
     $ErrorActionPreference = $prev
@@ -307,7 +326,9 @@ function Ensure-BrowserInstanceSelection {
   $previous = $env:ROLL_BROWSER_INSTANCE
   $env:ROLL_BROWSER_INSTANCE = $script:BrowserInstance
   try {
-    $message = (Invoke-NodeStdin $script:ValidateBrowserSelection $status).Trim()
+    $message = [string](Invoke-NodeStdin $script:ValidateBrowserSelection $status)
+    if ($null -eq $message) { $message = "" }
+    $message = $message.Trim()
     $code = $LASTEXITCODE
   }
   finally {
@@ -315,7 +336,7 @@ function Ensure-BrowserInstanceSelection {
   }
 
   if ($code -ne 0) {
-    if ($message) {
+    if (-not [string]::IsNullOrWhiteSpace($message)) {
       Write-Error $message
     }
     else {
