@@ -104,6 +104,80 @@ assert.deepEqual(JSON.parse(previewSingleOption.stdout), {
   hasDualDraft: false,
 });
 
+const previewFailure = runHelper(
+  "parse-generate-preview.mjs",
+  JSON.stringify({
+    success: false,
+    error:
+      "AI 响应超时：回复生成超过服务端截止时间 (50000ms) " +
+      "(url=https://reply-authority.example/generate-signed-reply, timeoutMs=60000)",
+    errorKind: "timeout",
+    requestId: "req-timeout-planning",
+    elapsedMs: 50_031,
+    clientTimeoutMs: 60_000,
+    lastStartedPhase: "turn_planning",
+    activePhase: "turn_planning",
+    phaseLatencies: { tenant_context: 7, binding_check: 4 },
+    signedEnvelope: "must-not-leak",
+    internalUrl: "https://reply-authority.example/secret",
+  }),
+);
+assert.equal(previewFailure.status, 0);
+assert.deepEqual(JSON.parse(previewFailure.stdout), {
+  ok: false,
+  error: "AI 响应超时：回复生成超过服务端截止时间 (50000ms)",
+  errorKind: "timeout",
+  requestId: "req-timeout-planning",
+  elapsedMs: 50_031,
+  clientTimeoutMs: 60_000,
+  lastStartedPhase: "turn_planning",
+  activePhase: "turn_planning",
+  phaseLatencies: { tenant_context: 7, binding_check: 4 },
+});
+
+const redactedPreviewFailure = runHelper(
+  "parse-generate-preview.mjs",
+  JSON.stringify({
+    success: false,
+    error: "上游失败 bEaReR secret-token\n详情 https://example.com/private?q=1",
+    errorKind: "unexpected_kind",
+    clientTimeoutMs: "60000",
+    phaseLatencies: {
+      valid_phase: 12,
+      negative_phase: -1,
+      string_phase: "14",
+    },
+  }),
+);
+assert.equal(redactedPreviewFailure.status, 0);
+assert.deepEqual(JSON.parse(redactedPreviewFailure.stdout), {
+  ok: false,
+  error: "上游失败 Bearer [REDACTED]\n详情 [REDACTED_URL]",
+  phaseLatencies: { valid_phase: 12 },
+});
+
+const previewFailureRow = runHelper("format-preview-failure.mjs", previewFailure.stdout, [
+  "2026-07-16T09:26:02.294Z",
+  "刘芳",
+  "762071929-0",
+]);
+assert.equal(previewFailureRow.status, 0);
+assert.deepEqual(JSON.parse(previewFailureRow.stdout), {
+  ts: "2026-07-16T09:26:02.294Z",
+  name: "刘芳",
+  conversationId: "762071929-0",
+  ok: false,
+  stage: "preview",
+  error: "AI 响应超时：回复生成超过服务端截止时间 (50000ms)",
+  errorKind: "timeout",
+  requestId: "req-timeout-planning",
+  elapsedMs: 50_031,
+  clientTimeoutMs: 60_000,
+  lastStartedPhase: "turn_planning",
+  activePhase: "turn_planning",
+  phaseLatencies: { tenant_context: 7, binding_check: 4 },
+});
+
 const applyBundle = runHelper(
   "apply-send-bundle.mjs",
   JSON.stringify({

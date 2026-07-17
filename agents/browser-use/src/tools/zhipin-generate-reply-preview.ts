@@ -61,56 +61,76 @@ const InputSchema = z.object({
 const ReplyPreviewErrorKindValues = ["rejected", "timeout", "server_error"] as const;
 type ReplyPreviewErrorKind = (typeof ReplyPreviewErrorKindValues)[number];
 
-const OutputSchema = z.object({
-  success: z.boolean(),
-  preparedReplyId: z.string().optional(),
-  suggestedReply: z.string().optional(),
-  stage: z.string().optional(),
-  confidence: z.number().optional(),
-  expiresAt: z.number().optional(),
+const ReplyPreviewDiagnosticsSchema = z.object({
   requestId: z.string().optional(),
-  timing: z
-    .object({
-      totalLatencyMs: z.number().int().min(0),
-      replyLatencyMs: z.number().int().min(0).optional(),
-      turnPlanningLatencyMs: z.number().int().min(0).optional(),
-      contextBuildingLatencyMs: z.number().int().min(0).optional(),
-      preparedContextHit: z.boolean(),
-    })
-    .optional(),
-  gateRewritten: z
-    .boolean()
-    .optional()
-    .describe("服务端事实/质量门调整过终稿时为 true，此时最终回复可能与流式草稿不一致"),
-  replyVariantSelection: z
-    .object({
-      groupId: z.string().min(1),
-      options: z
-        .array(
-          z.object({
-            option: z.enum(PreparedReplyOptionValues),
-            suggestedReply: z.string(),
-            expiresAt: z.number().int().min(0),
-          }),
-        )
-        .min(2)
-        .max(2),
-      findings: z.array(
-        z.object({
-          code: z.string().min(1),
-          description: z.string().min(1),
-        }),
-      ),
-      rubricVersion: z.string().min(1),
-      rubricHash: z.string().min(1),
-    })
-    .optional()
-    .describe(
-      "双稿选择信息；仅暴露中性 option_1/option_2、文本与 rubric 元数据，不暴露 draft/revised 或 signedEnvelope。",
-    ),
-  error: z.string().optional(),
-  errorKind: z.enum(ReplyPreviewErrorKindValues).optional(),
+  elapsedMs: z.number().int().min(0).optional(),
+  clientTimeoutMs: z.number().int().positive().optional(),
+  lastStartedPhase: z.string().min(1).optional(),
+  activePhase: z.string().min(1).optional(),
+  phaseLatencies: z.record(z.number().int().min(0)).optional(),
 });
+
+const OutputSchema = z
+  .object({
+    success: z.boolean(),
+    preparedReplyId: z.string().optional(),
+    suggestedReply: z.string().optional(),
+    stage: z.string().optional(),
+    confidence: z.number().optional(),
+    expiresAt: z.number().optional(),
+    timing: z
+      .object({
+        totalLatencyMs: z.number().int().min(0),
+        replyLatencyMs: z.number().int().min(0).optional(),
+        turnPlanningLatencyMs: z.number().int().min(0).optional(),
+        contextBuildingLatencyMs: z.number().int().min(0).optional(),
+        preparedContextHit: z.boolean(),
+      })
+      .optional(),
+    gateRewritten: z
+      .boolean()
+      .optional()
+      .describe("服务端事实/质量门调整过终稿时为 true，此时最终回复可能与流式草稿不一致"),
+    replyVariantSelection: z
+      .object({
+        groupId: z.string().min(1),
+        options: z
+          .array(
+            z.object({
+              option: z.enum(PreparedReplyOptionValues),
+              suggestedReply: z.string(),
+              expiresAt: z.number().int().min(0),
+            }),
+          )
+          .min(2)
+          .max(2),
+        findings: z.array(
+          z.object({
+            code: z.string().min(1),
+            description: z.string().min(1),
+          }),
+        ),
+        rubricVersion: z.string().min(1),
+        rubricHash: z.string().min(1),
+      })
+      .optional()
+      .describe(
+        "双稿选择信息；仅暴露中性 option_1/option_2、文本与 rubric 元数据，不暴露 draft/revised 或 signedEnvelope。",
+      ),
+    error: z.string().optional(),
+    errorKind: z.enum(ReplyPreviewErrorKindValues).optional(),
+  })
+  .extend(ReplyPreviewDiagnosticsSchema.shape);
+
+type ReplyPreviewDiagnostics = z.infer<typeof ReplyPreviewDiagnosticsSchema>;
+
+type ReplyPreviewDiagnosticsState = {
+  startedAtMs: number | undefined;
+  requestId: string | undefined;
+  lastStartedPhase: string | undefined;
+  activePhase: string | undefined;
+  readonly phaseLatencies: Map<string, number>;
+};
 
 const PHASE_LABELS: Readonly<Record<string, string>> = {
   tenant_context: "加载租户上下文",
@@ -310,11 +330,36 @@ function resolveProgressLabel(event: ReplyStreamEvent): string | undefined {
   return undefined;
 }
 
-function createFailure(error: string, errorKind?: ReplyPreviewErrorKind) {
+function createFailure(
+  error: string,
+  errorKind?: ReplyPreviewErrorKind,
+  diagnostics: ReplyPreviewDiagnostics = {},
+) {
   return {
     success: false,
     error,
     ...(errorKind !== undefined ? { errorKind } : {}),
+    ...diagnostics,
+  };
+}
+
+function buildFailureDiagnostics(
+  state: ReplyPreviewDiagnosticsState,
+  error?: unknown,
+): ReplyPreviewDiagnostics {
+  const requestError = error instanceof ReplyAuthorityRequestError ? error : undefined;
+  const requestId = state.requestId ?? requestError?.meta.requestId;
+  const phaseLatencies = Object.fromEntries(state.phaseLatencies);
+
+  return {
+    ...(requestId !== undefined ? { requestId } : {}),
+    ...(state.startedAtMs !== undefined
+      ? { elapsedMs: Math.max(0, Math.round(Date.now() - state.startedAtMs)) }
+      : {}),
+    ...(requestError !== undefined ? { clientTimeoutMs: requestError.meta.timeoutMs } : {}),
+    ...(state.lastStartedPhase !== undefined ? { lastStartedPhase: state.lastStartedPhase } : {}),
+    ...(state.activePhase !== undefined ? { activePhase: state.activePhase } : {}),
+    ...(Object.keys(phaseLatencies).length > 0 ? { phaseLatencies } : {}),
   };
 }
 
@@ -553,6 +598,13 @@ export const zhipinGenerateReplyPreview = defineTool({
     let nativePage: ZhipinNativePagePort | undefined;
     let session: NativeVisualActivitySessionLike | undefined;
     let preview: ReplyPreviewVisualSessionLike | undefined;
+    const diagnosticsState: ReplyPreviewDiagnosticsState = {
+      startedAtMs: undefined,
+      requestId: undefined,
+      lastStartedPhase: undefined,
+      activePhase: undefined,
+      phaseLatencies: new Map<string, number>(),
+    };
 
     try {
       nativePage = await deps.openNativePagePort();
@@ -671,10 +723,10 @@ export const zhipinGenerateReplyPreview = defineTool({
         }`,
       );
       const previewStartedAtMs = Date.now();
+      diagnosticsState.startedAtMs = previewStartedAtMs;
       await preview.begin("正在生成回复");
 
       let draftText = "";
-      let requestId: string | undefined;
       let tenantId: string | undefined;
       let preparedRecord: PreparedReplyRecord | undefined;
       let timingSummary:
@@ -686,20 +738,30 @@ export const zhipinGenerateReplyPreview = defineTool({
             readonly preparedContextHit: boolean;
           }
         | undefined;
-      const phaseLatencies = new Map<string, number>();
       let gateRewritten = false;
 
       for await (const event of deps.streamGenerateSignedReply(replyInput)) {
         if (event.type === "stream.started") {
-          requestId = readEventString(event, "requestId");
+          diagnosticsState.requestId = readEventString(event, "requestId");
           tenantId = readEventString(event, "tenantId");
+        }
+
+        if (event.type === "phase.started") {
+          const phase = readEventString(event, "phase");
+          if (phase !== undefined) {
+            diagnosticsState.lastStartedPhase = phase;
+            diagnosticsState.activePhase = phase;
+          }
         }
 
         if (event.type === "phase.completed") {
           const phase = readEventString(event, "phase");
           const latencyMs = readEventNumber(event, "latencyMs");
           if (phase !== undefined && latencyMs !== undefined) {
-            phaseLatencies.set(phase, Math.round(latencyMs));
+            diagnosticsState.phaseLatencies.set(phase, Math.round(latencyMs));
+            if (diagnosticsState.activePhase === phase) {
+              diagnosticsState.activePhase = undefined;
+            }
           }
         }
 
@@ -740,8 +802,8 @@ export const zhipinGenerateReplyPreview = defineTool({
         if (event.type === "final") {
           const finalEvent = ReplyStreamFinalEventSchema.parse(event);
           const finalReply = GenerateSignedReplyResponseSchema.parse(finalEvent);
-          const turnPlanningLatencyMs = phaseLatencies.get("turn_planning");
-          const contextBuildingLatencyMs = phaseLatencies.get("context_building");
+          const turnPlanningLatencyMs = diagnosticsState.phaseLatencies.get("turn_planning");
+          const contextBuildingLatencyMs = diagnosticsState.phaseLatencies.get("context_building");
           const totalLatencyMs = Math.max(0, Math.round(Date.now() - previewStartedAtMs));
           const replyLatencyMs =
             finalReply.latencyMs !== undefined ? Math.round(finalReply.latencyMs) : undefined;
@@ -769,7 +831,7 @@ export const zhipinGenerateReplyPreview = defineTool({
                 "refusing to create a sendable prepared reply without feedback identity.";
               ctx.logger.error(error);
               await preview.fail("双稿反馈身份缺失");
-              return createFailure(error);
+              return createFailure(error, undefined, buildFailureDiagnostics(diagnosticsState));
             } else {
               try {
                 const rubric = await deps.fetchReplyFeedbackRubric({
@@ -812,7 +874,9 @@ export const zhipinGenerateReplyPreview = defineTool({
             confidence: finalReply.confidence,
             expiresAt,
             unreadCountBeforeReply,
-            ...(requestId !== undefined ? { requestId } : {}),
+            ...(diagnosticsState.requestId !== undefined
+              ? { requestId: diagnosticsState.requestId }
+              : {}),
             ...(variantGroup !== undefined ? { variantGroup } : {}),
           });
           await preview.complete(
@@ -834,15 +898,16 @@ export const zhipinGenerateReplyPreview = defineTool({
       if (preparedRecord === undefined) {
         const error = "Reply Authority stream 未返回 final";
         await preview.fail(error);
-        return createFailure(error);
+        return createFailure(error, undefined, buildFailureDiagnostics(diagnosticsState));
       }
 
       return toOutput(preparedRecord, timingSummary, gateRewritten);
     } catch (error) {
       const failure = classifyReplyPreviewError(error);
+      const diagnostics = buildFailureDiagnostics(diagnosticsState, error);
       await preview?.fail(failure.message);
       await session?.fail(failure.message);
-      return createFailure(failure.message, failure.errorKind);
+      return createFailure(failure.message, failure.errorKind, diagnostics);
     } finally {
       nativePage?.close();
     }

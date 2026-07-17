@@ -1,5 +1,17 @@
 # @roll-agent/reply-authority-client
 
+## 0.7.0
+
+### Minor Changes
+
+- [#152](https://github.com/steveoon/roll-agent/pull/152) [`63cba26`](https://github.com/steveoon/roll-agent/commit/63cba264d29978662461cd6c3be3dec7af333318) Thanks [@steveoon](https://github.com/steveoon)! - Preserve redacted request/phase/latency diagnostics when `zhipin_generate_reply_preview` fails (including `clientTimeoutMs` for the Roll transport budget), raise the shared Reply Authority client timeout default from 30s to 60s so it stays above the RFC complete-request deadline, and declare `REPLY_AUTHORITY_TIMEOUT_MS` in browser-use env diagnostics.
+
+## 0.6.0
+
+### Minor Changes
+
+- [#150](https://github.com/steveoon/roll-agent/pull/150) [`6515fc2`](https://github.com/steveoon/roll-agent/commit/6515fc24aaddfb866a60b0ed3275d814467cc989) Thanks [@steveoon](https://github.com/steveoon)! - Enforce dual-draft judging at the prepared-reply send boundary for both roll chat and the unread-reply skill, enrich Judge decisions with bounded redacted context and concrete reasons, preserve preview-degraded groups as non-learning terminal outcomes, replace cross-service raw errors with stable safe reason codes, honor the service feedback deadline, persist feedback in a retryable SQLite outbox before posting it to Reply Authority, and sync browser-use SKILL/workflow docs for the new send-owned Judge and not_learned feedback path.
+
 ## 0.5.0
 
 ### Minor Changes

@@ -127,7 +127,7 @@ npm 包名：`@roll-agent/smart-reply-agent`
 
 - `REPLY_AUTHORITY_URL` — Reply Authority Service 基础地址（必填）
 - `REPLY_AUTHORITY_BEARER_TOKEN` — 调用 `POST /generate-signed-reply`，以及代理模式下 `POST /resolve-recruiter-binding` 的 Bearer token（必填）；必须能访问目标 tenant。本 Agent 不使用它调用 rubric 或 `/reply-feedback`，因此自身不要求 `reply-feedback:write`；外部调用方若自行完成双稿 rubric/feedback，则须另行保证对应客户端/token 具备该 scope
-- `REPLY_AUTHORITY_TIMEOUT_MS` — Reply Authority Service HTTP 请求超时毫秒数（可选，默认 `30000`）。非正整数或非法值会被静默忽略并回落到默认值
+- `REPLY_AUTHORITY_TIMEOUT_MS` — Reply Authority Service HTTP 请求超时毫秒数（可选，客户端默认 `60000`）。非正整数或非法值会被静默忽略并回落到默认值；该默认值高于 RFC 当前 `50000ms` 的完整请求截止时间，让服务端能先返回带 phase 证据的 `504`。生产仍建议显式声明以便 `roll doctor` 核验
 
 ## 典型跨 Agent 工作流
 
@@ -171,6 +171,6 @@ agents:
     smart-reply-agent:
       REPLY_AUTHORITY_URL: https://reply-authority.duliday.com
       REPLY_AUTHORITY_BEARER_TOKEN: ${REPLY_AUTHORITY_BEARER_TOKEN}
-      # 可选：自定义 HTTP 超时（毫秒，默认 30000）
-      # REPLY_AUTHORITY_TIMEOUT_MS: "45000"
+      # RFC 完整请求截止时间为 50000ms 时，调用方需保留响应缓冲
+      REPLY_AUTHORITY_TIMEOUT_MS: "60000"
 ```
