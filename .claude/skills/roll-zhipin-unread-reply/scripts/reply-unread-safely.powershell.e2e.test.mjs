@@ -11,6 +11,19 @@ import { fileURLToPath } from "node:url";
 const dir = path.dirname(fileURLToPath(import.meta.url));
 const scriptPath = path.join(dir, "reply-unread-safely.ps1");
 
+/**
+ * Windows env keys are case-insensitive; spreading process.env and then setting only
+ * `PATH` can leave the original `Path` entry winning for child resolution.
+ */
+function envWithPrependedPath(baseEnv, shimDir) {
+  const env = { ...baseEnv };
+  const current = env.Path ?? env.PATH ?? "";
+  delete env.Path;
+  delete env.PATH;
+  env.Path = `${shimDir}${path.delimiter}${current}`;
+  return env;
+}
+
 test(
   "PowerShell preview failure preserves safe diagnostics and never sends",
   { skip: process.platform !== "win32" },
@@ -24,17 +37,38 @@ test(
     const shimScriptPath = path.join(shimDir, "roll-shim.mjs");
     const shimCommandPath = path.join(shimDir, "roll.cmd");
 
-    writeFileSync(shimCommandPath, '@echo off\r\nnode "%~dp0roll-shim.mjs" %*\r\n', "utf8");
+    // Prefer an absolute node path so the cmd shim does not depend on PATH lookup.
+    const nodePath = process.execPath;
+    writeFileSync(
+      shimCommandPath,
+      [
+        "@echo off",
+        "setlocal",
+        // Quote node + script; leave %* unquoted so PowerShell-splatted args pass through.
+        `"${nodePath}" "%~dp0roll-shim.mjs" %*`,
+        "exit /b %ERRORLEVEL%",
+        "",
+      ].join("\r\n"),
+      "utf8",
+    );
     writeFileSync(
       shimScriptPath,
       String.raw`import { appendFileSync, readFileSync } from "node:fs";
 
 const args = process.argv.slice(2);
+const tracePath = process.env.ROLL_SHIM_TRACE;
+function trace(entry) {
+  if (!tracePath) return;
+  appendFileSync(tracePath, JSON.stringify(entry) + "\n");
+}
+
 if (args[0] === "agent" && args[1] === "health") {
+  trace({ kind: "health", args });
   console.log('[{"agentName":"browser-use-agent","healthy":true}]');
   process.exit(0);
 }
 if (args[0] !== "run") {
+  trace({ kind: "other", args });
   console.log('{"success":false,"error":"unexpected roll command"}');
   process.exit(0);
 }
@@ -42,10 +76,15 @@ if (args[0] !== "run") {
 const tool = args[2];
 const inputFileIndex = args.indexOf("--input-file");
 let input = {};
+let inputError;
 if (inputFileIndex >= 0 && args[inputFileIndex + 1]) {
-  input = JSON.parse(readFileSync(args[inputFileIndex + 1], "utf8"));
+  try {
+    input = JSON.parse(readFileSync(args[inputFileIndex + 1], "utf8"));
+  } catch (error) {
+    inputError = error instanceof Error ? error.message : String(error);
+  }
 }
-appendFileSync(process.env.ROLL_SHIM_TRACE, JSON.stringify({ tool, input }) + "\n");
+trace({ kind: "run", tool, args, input, inputError });
 
 const responses = {
   browser_status: { instances: [], defaultInstanceId: null },
@@ -79,7 +118,7 @@ const responses = {
     signedEnvelope: "must-not-leak",
   },
 };
-console.log(JSON.stringify(responses[tool] ?? { success: false, error: "unexpected tool" }));
+console.log(JSON.stringify(responses[tool] ?? { success: false, error: "unexpected tool", tool }));
 `,
       "utf8",
     );
@@ -105,39 +144,66 @@ console.log(JSON.stringify(responses[tool] ?? { success: false, error: "unexpect
           encoding: "utf8",
           timeout: 30_000,
           env: {
-            ...process.env,
-            PATH: `${shimDir}${path.delimiter}${process.env.PATH ?? ""}`,
+            ...envWithPrependedPath(process.env, shimDir),
             ROLL_SHIM_TRACE: tracePath,
           },
         },
       );
-      assert.equal(result.status, 0, `${result.stderr}\n${result.stdout}`);
 
-      const calls = readFileSync(tracePath, "utf8")
+      const traceText = (() => {
+        try {
+          return readFileSync(tracePath, "utf8");
+        } catch {
+          return "<missing trace>";
+        }
+      })();
+      const resultsText = (() => {
+        try {
+          return readFileSync(resultsPath, "utf8");
+        } catch {
+          return "<missing results>";
+        }
+      })();
+      const debug = [
+        `status=${String(result.status)}`,
+        `stdout:\n${result.stdout ?? ""}`,
+        `stderr:\n${result.stderr ?? ""}`,
+        `trace:\n${traceText}`,
+        `results:\n${resultsText}`,
+      ].join("\n");
+
+      assert.equal(result.status, 0, debug);
+
+      const calls = traceText
         .trim()
         .split(/\r?\n/)
+        .filter(Boolean)
         .map((line) => JSON.parse(line));
-      const tools = calls.map((call) => call.tool);
-      assert.equal(tools.includes("zhipin_generate_reply_preview"), true);
-      assert.equal(tools.includes("zhipin_send_prepared_reply"), false);
+      const tools = calls.filter((call) => call.kind === "run").map((call) => call.tool);
+      assert.equal(tools.includes("zhipin_generate_reply_preview"), true, debug);
+      assert.equal(tools.includes("zhipin_send_prepared_reply"), false, debug);
 
-      const row = JSON.parse(readFileSync(resultsPath, "utf8").trim());
-      assert.deepEqual(row, {
-        ts: row.ts,
-        name: "Alice",
-        conversationId: "cid-pwsh-e2e",
-        ok: false,
-        stage: "preview",
-        error: "RFC request deadline exceeded",
-        errorKind: "timeout",
-        requestId: "req-pwsh-timeout",
-        elapsedMs: 50_031,
-        clientTimeoutMs: 60_000,
-        lastStartedPhase: "turn_planning",
-        activePhase: "turn_planning",
-        phaseLatencies: { tenant_context: 7, binding_check: 4 },
-      });
-      assert.doesNotMatch(readFileSync(resultsPath, "utf8"), /signedEnvelope|must-not-leak|https:/);
+      const row = JSON.parse(resultsText.trim());
+      assert.deepEqual(
+        row,
+        {
+          ts: row.ts,
+          name: "Alice",
+          conversationId: "cid-pwsh-e2e",
+          ok: false,
+          stage: "preview",
+          error: "RFC request deadline exceeded",
+          errorKind: "timeout",
+          requestId: "req-pwsh-timeout",
+          elapsedMs: 50_031,
+          clientTimeoutMs: 60_000,
+          lastStartedPhase: "turn_planning",
+          activePhase: "turn_planning",
+          phaseLatencies: { tenant_context: 7, binding_check: 4 },
+        },
+        debug,
+      );
+      assert.doesNotMatch(resultsText, /signedEnvelope|must-not-leak|https:/);
     } finally {
       rmSync(testDir, { recursive: true, force: true });
     }
