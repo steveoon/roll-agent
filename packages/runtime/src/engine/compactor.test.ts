@@ -244,3 +244,66 @@ test("summarize 转写将 isError 工具结果标为失败并携带摘录", asyn
   assert.ok(transcript.includes("工具结果·失败"));
   assert.ok(transcript.includes("已取消执行"));
 });
+
+test("summarize 转写将 typed denied/error 结果标为失败并携带 reason", async () => {
+  let transcript = "";
+  const model = new MockLanguageModelV4({
+    doGenerate: async (options) => {
+      const userMessage = options.prompt.find((message) => message.role === "user");
+      transcript = JSON.stringify(userMessage?.content ?? "");
+      return {
+        content: [{ type: "text", text: "摘要" }],
+        finishReason: STOP,
+        usage: {
+          inputTokens: { total: 5, noCache: 5, cacheRead: 0, cacheWrite: 0 },
+          outputTokens: { total: 3, text: 3, reasoning: 0 },
+        },
+        warnings: [],
+      };
+    },
+  });
+  const messages: ModelMessage[] = [
+    { role: "user", content: "执行变更" },
+    {
+      role: "assistant",
+      content: [
+        { type: "tool-call", toolCallId: "denied", toolName: "write", input: {} },
+        { type: "tool-call", toolCallId: "failed", toolName: "build", input: {} },
+      ],
+    },
+    {
+      role: "tool",
+      content: [
+        {
+          type: "tool-result",
+          toolCallId: "denied",
+          toolName: "write",
+          output: { type: "execution-denied", reason: "用户拒绝写入" },
+        },
+        {
+          type: "tool-result",
+          toolCallId: "failed",
+          toolName: "build",
+          output: { type: "error-text", value: "构建失败: exit 1" },
+        },
+      ],
+    },
+    { role: "assistant", content: "done" },
+    { role: "user", content: "下一步" },
+    { role: "assistant", content: "ok" },
+  ];
+
+  const result = await compactMessages({
+    messages,
+    strategy: "summarize",
+    keepRecentTurns: 1,
+    keepRecentTokens: 1,
+    model,
+  });
+
+  assert.ok(result.removed > 0);
+  assert.equal(transcript.match(/工具结果·失败/gu)?.length, 2);
+  assert.match(transcript, /用户拒绝写入/u);
+  assert.match(transcript, /构建失败: exit 1/u);
+  assert.doesNotMatch(transcript, /工具结果·成功/u);
+});

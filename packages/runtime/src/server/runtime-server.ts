@@ -1,10 +1,12 @@
 import type { ConversationEngine } from "../engine/conversation-engine.ts";
 import type { AgentSession } from "../engine/agent-session.ts";
+import { createSafeCapabilitySnapshot } from "../engine/capability-manifest.ts";
 import {
   EVENT_NOTIFICATION,
   RpcMethod,
   abortParamsSchema,
   approveParamsSchema,
+  capabilitiesParamsSchema,
   closeParamsSchema,
   compactParamsSchema,
   createParamsSchema,
@@ -13,6 +15,7 @@ import {
   rejectParamsSchema,
   resumeParamsSchema,
   sendParamsSchema,
+  toolExecutionsParamsSchema,
   type JsonRpcConnection,
   type JsonRpcMessage,
   type JsonRpcRequest,
@@ -116,6 +119,35 @@ export class RuntimeServer {
       case RpcMethod.Messages: {
         const params = messagesParamsSchema.parse(request.params);
         return { messages: this.requireSession(params.sessionId).getMessages() };
+      }
+      case RpcMethod.ToolExecutions: {
+        const params = toolExecutionsParamsSchema.parse(request.params);
+        const session = this.requireSession(params.sessionId);
+        if (params.executionId !== undefined) {
+          return {
+            record: session.getToolExecution(params.executionId, params.includeRaw),
+          };
+        }
+        return {
+          records: session.getToolExecutions(
+            {
+              ...(params.afterSequence !== undefined
+                ? { afterSequence: params.afterSequence }
+                : {}),
+              ...(params.limit !== undefined ? { limit: params.limit } : {}),
+              ...(params.toolCallId !== undefined ? { toolCallId: params.toolCallId } : {}),
+            },
+            params.includeRaw,
+          ),
+        };
+      }
+      case RpcMethod.Capabilities: {
+        const params = capabilitiesParamsSchema.parse(request.params);
+        const session = this.requireSession(params.sessionId);
+        return createSafeCapabilitySnapshot(
+          session.getCapabilityManifest(),
+          session.getCapabilityTurnContext(),
+        );
       }
       case RpcMethod.Compact: {
         const params = compactParamsSchema.parse(request.params);

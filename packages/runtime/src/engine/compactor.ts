@@ -95,6 +95,7 @@ function cutIndex(
 }
 
 const TOOL_RESULT_EXCERPT_CHARS = 200;
+const FAILED_TOOL_MODEL_OUTPUT_TYPES = new Set(["execution-denied", "error-text", "error-json"]);
 
 function renderToolResult(record: Record<string, unknown>): string {
   const output =
@@ -103,11 +104,13 @@ function renderToolResult(record: Record<string, unknown>): string {
       : undefined;
   const outputType = typeof output?.type === "string" ? output.type : "";
   const value = output !== undefined && "value" in output ? output.value : undefined;
-  const failed = outputType.startsWith("error") || readIsError(value);
+  const failed = FAILED_TOOL_MODEL_OUTPUT_TYPES.has(outputType) || readIsError(value);
   const payload =
-    typeof value === "object" && value !== null && "output" in value
-      ? (value as { readonly output: unknown }).output
-      : value;
+    outputType === "execution-denied"
+      ? output?.reason
+      : typeof value === "object" && value !== null && "output" in value
+        ? (value as { readonly output: unknown }).output
+        : value;
   const serialized = typeof payload === "string" ? payload : (JSON.stringify(payload) ?? "");
   const excerpt =
     serialized.length > TOOL_RESULT_EXCERPT_CHARS

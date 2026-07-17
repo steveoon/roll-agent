@@ -1,4 +1,11 @@
-import { SKILL_TOOL_ID } from "../tool-bridge/skill-tool.ts";
+import {
+  CAPABILITY_HOST_MODES,
+  CAPABILITY_TOOL_ROLES,
+  findCapabilityToolId,
+  type CapabilityHostMode,
+  type EffectiveCapabilityTurnContext,
+  type EffectiveCapabilityManifest,
+} from "./capability-manifest.ts";
 
 export interface SkillPromptSummary {
   readonly name: string;
@@ -28,6 +35,7 @@ export interface BuildChatSystemPromptOptions {
   readonly shellToolId?: string;
   readonly shellHints?: readonly string[];
   readonly sessionExecToolIds?: SessionExecToolIds;
+  readonly sessionHostMode?: CapabilityHostMode;
   readonly agentCount?: number;
   readonly agentOnboarding?: AgentOnboardingPromptInfo;
 }
@@ -47,7 +55,7 @@ const GROUNDING_SECTION = [
   "# 工具使用纪律",
   "- 一切对外部世界的读取和操作都必须通过真实的工具调用完成。绝不虚构工具调用或其结果，也不要用文本描述来代替真正的调用。",
   "- 只有当本会话中出现了对应的成功工具结果，才能说某个操作已完成。没有调用过工具，就如实说明尚未执行。",
-  "- 批量任务（例如给多个人回复）必须逐项执行：每一项都真实调用工具、等到结果后再处理下一项；最后按真实结果逐项汇报成功、失败或未执行，不要掩盖失败。",
+  "- 批量任务中，彼此独立的工具调用可以在同一步批量提交；运行时会按资源冲突安全调度。每一项仍必须基于真实工具结果逐项汇报成功、失败或未执行，不要掩盖失败。",
   "- 工具返回错误时，如实报告错误内容，再决定重试、换方案或向用户求助。不要把失败说成成功，也不要凭空猜测答案。",
   "- 需要确认的工具调用被用户拒绝时，尊重用户的决定，不要换个方式绕过。",
 ].join("\n");
@@ -64,6 +72,11 @@ const OUTPUT_SECTION = [
   "- 你可以用 thinking/reasoning 做内部推理，但给用户看的最终回复必须写入普通 text 输出通道，不要只写在 reasoning 里。",
   "- 工具调用完成后，在 text 通道给出简洁结论；最终回复不要重复，也不要复述用户输入。",
   "- 像可靠的同事一样汇报：先结论，后必要细节，保持简洁。",
+].join("\n");
+
+const TRANSCRIPT_SECTION_PREFIX = [
+  "# 压缩历史回查",
+  "- 早期对话被压缩后，结构化 checkpoint 是任务状态事实源；摘要只用于快速理解，不能覆盖 checkpoint。",
 ].join("\n");
 
 function truncate(text: string, maxChars: number): string {
@@ -105,13 +118,20 @@ function buildAgentOnboardingSection(info: AgentOnboardingPromptInfo): string {
 function buildShellSection(
   shellToolId: string,
   sessionExec: SessionExecToolIds | undefined,
+  sessionHostMode: CapabilityHostMode | undefined,
   shellHints: readonly string[],
 ): string {
   const longRunningLines = sessionExec
     ? [
         `- 预计跑几十秒以上的命令（构建、批处理脚本）不要用 ${shellToolId}（会被单轮超时杀掉），改用 ${sessionExec.command} 后台执行。`,
         `- ${sessionExec.command} 未结束时会返回 session_id；用 ${sessionExec.poll}（chars 留空）轮询进度直到拿到退出码，需要中断时 chars 传 "\\u0003"。`,
-        `- 如果一轮因超时或上下文丢失而没有拿到 session_id，下一轮先用 ${sessionExec.list} 找回会话，再用 ${sessionExec.poll} 继续；用户取消会中断本轮触达的会话，只能查看终态结果，不应宣称仍在运行。`,
+        ...(sessionHostMode === CAPABILITY_HOST_MODES.oneShot
+          ? [
+              `- 后台会话只在本次 one-shot 进程内存在；启动后必须在本次调用内持续用 ${sessionExec.poll} 等到退出码。${sessionExec.list} 只能找回当前进程内的会话，后续 CLI 调用不能跨进程恢复。`,
+            ]
+          : [
+              `- 后台会话只在当前 roll chat 进程内存在。如果一轮因超时或上下文丢失而没有拿到 session_id，当前进程的下一轮先用 ${sessionExec.list} 找回，再用 ${sessionExec.poll} 继续；新的 CLI 进程不能恢复。用户取消会中断本轮触达的会话，只能查看终态结果，不应宣称仍在运行。`,
+            ]),
       ]
     : ["- 预计耗时较长的命令（如构建、脚本）要显式调大 timeout_ms。"];
   return [
@@ -121,6 +141,13 @@ function buildShellSection(
     "- 输出会被截断，优先用精确过滤或预览命令，而不是全量 dump 大文件。",
     "- 优先使用只读命令；有副作用或破坏性的命令可能需要用户确认，被拒绝时不要绕过。",
     ...longRunningLines,
+  ].join("\n");
+}
+
+function buildTranscriptSection(transcriptToolId: string): string {
+  return [
+    TRANSCRIPT_SECTION_PREFIX,
+    `- checkpoint 给出 transcript segment 时，可调用 ${transcriptToolId} 只读回查被省略的原始消息；只读取解决当前问题所需的最小范围，不要把整个历史重新塞回上下文。`,
   ].join("\n");
 }
 
@@ -139,14 +166,85 @@ export function buildChatSystemPrompt(options: BuildChatSystemPromptOptions = {}
     sections.push(buildAgentOnboardingSection(options.agentOnboarding));
   }
   const skills = options.skills ?? [];
-  if (skills.length > 0) {
-    sections.push(buildSkillsSection(skills, options.skillToolId ?? SKILL_TOOL_ID));
+  if (skills.length > 0 && options.skillToolId !== undefined) {
+    sections.push(buildSkillsSection(skills, options.skillToolId));
   }
   if (shellToolId !== undefined) {
     sections.push(
-      buildShellSection(shellToolId, options.sessionExecToolIds, options.shellHints ?? []),
+      buildShellSection(
+        shellToolId,
+        options.sessionExecToolIds,
+        options.sessionHostMode,
+        options.shellHints ?? [],
+      ),
     );
   }
   sections.push(OUTPUT_SECTION);
   return sections.join("\n\n");
+}
+
+export function buildChatSystemPromptFromManifest(manifest: EffectiveCapabilityManifest): string {
+  const skillToolId = findCapabilityToolId(manifest, CAPABILITY_TOOL_ROLES.skill);
+  const shellToolId = findCapabilityToolId(manifest, CAPABILITY_TOOL_ROLES.shell);
+  const sessionCommand = findCapabilityToolId(manifest, CAPABILITY_TOOL_ROLES.sessionCommand);
+  const sessionPoll = findCapabilityToolId(manifest, CAPABILITY_TOOL_ROLES.sessionPoll);
+  const sessionList = findCapabilityToolId(manifest, CAPABILITY_TOOL_ROLES.sessionList);
+  const installToolId = findCapabilityToolId(manifest, CAPABILITY_TOOL_ROLES.agentInstall);
+  const transcriptToolId = findCapabilityToolId(manifest, CAPABILITY_TOOL_ROLES.transcriptRead);
+  const prompt = buildChatSystemPrompt({
+    ...(skillToolId ? { skills: manifest.skills, skillToolId } : {}),
+    ...(shellToolId
+      ? {
+          shellToolId,
+          shellHints: manifest.stableContext.shellHints,
+        }
+      : {}),
+    ...(sessionCommand && sessionPoll && sessionList
+      ? {
+          sessionExecToolIds: {
+            command: sessionCommand,
+            poll: sessionPoll,
+            list: sessionList,
+          },
+          sessionHostMode: manifest.lifecycle.hostMode,
+        }
+      : {}),
+    agentCount: manifest.agentCount,
+    ...(installToolId && manifest.agentOnboardingCatalog.length > 0
+      ? {
+          agentOnboarding: {
+            installToolId,
+            catalog: manifest.agentOnboardingCatalog,
+          },
+        }
+      : {}),
+  });
+  return transcriptToolId ? `${prompt}\n\n${buildTranscriptSection(transcriptToolId)}` : prompt;
+}
+
+export function buildCapabilityTurnReminder(context: EffectiveCapabilityTurnContext): string {
+  return [
+    "[Harness runtime context]",
+    `audience=${context.audience}`,
+    `profile=${context.profile}`,
+    `manifestLifecycle=${context.lifecycle.manifest}`,
+    `turnContextLifecycle=${context.lifecycle.turnContext}`,
+    `hostMode=${context.lifecycle.hostMode}`,
+    `sessionExecLifecycle=${context.lifecycle.sessionExec}`,
+    `sessionDurability=${context.lifecycle.sessionDurability}`,
+    `cwd=${context.cwd}`,
+    `platform=${context.platform}`,
+    `date=${context.date}`,
+    `ruleIds=${context.dynamic.ruleIds.join(",") || "none"}`,
+    ...(context.dynamic.vcs
+      ? [
+          `vcs=${context.dynamic.vcs.branch ?? "detached"};dirty=${String(context.dynamic.vcs.dirty)};ahead=${String(context.dynamic.vcs.ahead ?? 0)};behind=${String(context.dynamic.vcs.behind ?? 0)}`,
+        ]
+      : ["vcs=unavailable"]),
+    `sessions=${context.dynamic.sessions.map((session) => `${String(session.sessionId)}:${session.state}`).join(",") || "none"}`,
+    `effectiveToolIds=${context.effectiveToolIds.join(",") || "none"}`,
+    `explicitSkills=${context.explicitSkillNames.join(",") || "none"}`,
+    ...(context.sessionListToolId ? [`sessionListTool=${context.sessionListToolId}`] : []),
+    ...(context.transcriptReadToolId ? [`transcriptReadTool=${context.transcriptReadToolId}`] : []),
+  ].join("\n");
 }

@@ -49,6 +49,8 @@ export const RpcMethod = {
   Abort: "session.abort",
   Close: "session.close",
   Messages: "session.messages",
+  ToolExecutions: "session.toolExecutions",
+  Capabilities: "session.capabilities",
   Compact: "session.compact",
 } as const;
 
@@ -66,6 +68,15 @@ export const rejectParamsSchema = z.object({
 export const abortParamsSchema = z.object({ sessionId: z.string() });
 export const closeParamsSchema = z.object({ sessionId: z.string() });
 export const messagesParamsSchema = z.object({ sessionId: z.string() });
+export const toolExecutionsParamsSchema = z.object({
+  sessionId: z.string(),
+  executionId: z.string().uuid().optional(),
+  includeRaw: z.boolean().default(false),
+  afterSequence: z.number().int().min(-1).optional(),
+  limit: z.number().int().min(1).max(500).optional(),
+  toolCallId: z.string().min(1).optional(),
+});
+export const capabilitiesParamsSchema = z.object({ sessionId: z.string() });
 export const compactParamsSchema = z.object({ sessionId: z.string() });
 
 export function isRequest(message: JsonRpcMessage): message is JsonRpcRequest {
