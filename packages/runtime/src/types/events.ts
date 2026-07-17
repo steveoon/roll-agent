@@ -1,4 +1,5 @@
 import type { SessionCancellationReason } from "./cancellation.ts";
+import type { ToolOutcome } from "../tool-bridge/normalize-result.ts";
 
 export interface SessionTokenUsage {
   readonly inputTokens?: number;
@@ -35,7 +36,13 @@ export type SessionEvent =
       readonly toolCallId: string;
       readonly agentName: string;
       readonly toolName: string;
+      /** Stable key for querying the typed, append-only execution record. */
+      readonly executionId?: string;
+      readonly outcome?: ToolOutcome;
+      readonly display?: unknown;
+      /** @deprecated Use `display`. */
       readonly output: unknown;
+      /** @deprecated Derive control flow from `outcome`. */
       readonly isError: boolean;
     }
   | {
@@ -80,6 +87,9 @@ export type SessionEvent =
       readonly kept: number;
       readonly truncatedTools?: number;
       readonly beforeInputTokens?: number;
+      readonly checkpointId?: string;
+      readonly checkpointGeneration?: number;
+      readonly checkpointSummaryStatus?: "valid" | "fallback" | "skipped";
     }
   | {
       readonly type: "turn-cancelled";

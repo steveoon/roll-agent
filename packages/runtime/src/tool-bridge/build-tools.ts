@@ -1,3 +1,5 @@
+import { lstatSync, readdirSync, realpathSync, statSync } from "node:fs";
+import { basename, dirname, isAbsolute, resolve } from "node:path";
 import { jsonSchema, tool, type ToolExecutionOptions, type ToolSet } from "ai";
 import type { JSONSchema7 } from "@ai-sdk/provider";
 import type { Client } from "@modelcontextprotocol/sdk/client/index.js";
@@ -5,18 +7,42 @@ import { preflightToolCall } from "@roll-agent/core/tool-runtime/preflight";
 import type { AgentTool } from "@roll-agent/core/types/agent";
 import type { ApprovalDecision } from "../approval/approval-gate.ts";
 import type { ToolAnnotations, ToolPolicy } from "../types/policy.ts";
-import { ToolRegistry } from "./naming.ts";
-import { normalizeToolResult, type NormalizedToolResult } from "./normalize-result.ts";
+import { ToolRegistry, type ToolRouteMetadata } from "./naming.ts";
+import {
+  TOOL_OUTCOME_KINDS,
+  failedToolResult,
+  normalizeToolResult,
+  toolResultToModelOutput,
+  type NormalizedToolResult,
+} from "./normalize-result.ts";
+import {
+  TOOL_RESOURCE_ACCESS_MODES,
+  TOOL_RESOURCE_HINT_KINDS,
+  executeCoordinatedTool,
+  type ToolExecutionCoordinator,
+  type ToolExecutionPlan,
+  type ToolResourceAccess,
+  type ToolResourceAccessMode,
+  type ToolResourceHint,
+} from "./tool-execution-coordinator.ts";
+
+export const ROLL_RESOURCE_HINTS_META_KEY = "roll/resourceHints";
 
 export interface SourceTool {
   readonly tool: AgentTool;
   readonly annotations: ToolAnnotations | undefined;
+  readonly resourceHints?: readonly ToolResourceHint[];
 }
 
 export interface AgentToolSource {
   readonly agentName: string;
   readonly client: Client;
   readonly tools: readonly SourceTool[];
+  readonly agentSource?: ToolRouteMetadata["agentSource"];
+  readonly transport?: ToolRouteMetadata["transport"];
+  readonly runtimeOwnership?: ToolRouteMetadata["runtimeOwnership"];
+  /** Base directory used by a local stdio Agent to resolve relative file resource hints. */
+  readonly resourceBaseDir?: string;
 }
 
 export interface ApprovalRequest {
@@ -29,6 +55,7 @@ export interface ApprovalRequest {
 export interface ToolBridgeContext {
   readonly policy?: ToolPolicy;
   readonly requestApproval: (request: ApprovalRequest) => Promise<ApprovalDecision>;
+  readonly coordinator?: ToolExecutionCoordinator;
 }
 
 export interface BuiltToolset {
@@ -48,6 +75,232 @@ function formatPreflightFailure(
   return `参数校验失败: ${issues.map((issue) => issue.message).join("; ")}`;
 }
 
+function defaultResourceMode(annotations: ToolAnnotations | undefined): ToolResourceAccessMode {
+  return annotations?.readOnlyHint === true && annotations.destructiveHint !== true
+    ? TOOL_RESOURCE_ACCESS_MODES.read
+    : TOOL_RESOURCE_ACCESS_MODES.write;
+}
+
+function resourceValues(value: unknown): Array<string | number> | undefined {
+  if (typeof value === "string" || typeof value === "number") {
+    return [value];
+  }
+  if (
+    !Array.isArray(value) ||
+    value.length === 0 ||
+    !value.every(
+      (item): item is string | number => typeof item === "string" || typeof item === "number",
+    )
+  ) {
+    return undefined;
+  }
+  return value;
+}
+
+const MAX_CASE_SENSITIVITY_CACHE_ENTRIES = 256;
+const caseInsensitiveDirectoryCache = new Map<string, boolean>();
+
+function alternateAsciiCase(name: string, existingNames: ReadonlySet<string>): string | undefined {
+  for (let index = 0; index < name.length; index += 1) {
+    const code = name.charCodeAt(index);
+    const replacement =
+      code >= 65 && code <= 90
+        ? String.fromCharCode(code + 32)
+        : code >= 97 && code <= 122
+          ? String.fromCharCode(code - 32)
+          : undefined;
+    if (replacement === undefined) {
+      continue;
+    }
+    const candidate = `${name.slice(0, index)}${replacement}${name.slice(index + 1)}`;
+    if (!existingNames.has(candidate)) {
+      return candidate;
+    }
+  }
+  return undefined;
+}
+
+function errorCode(error: unknown): unknown {
+  return typeof error === "object" && error !== null && "code" in error ? error.code : undefined;
+}
+
+function probeEntryCaseInsensitivity(
+  directory: string,
+  name: string,
+  existingNames: ReadonlySet<string>,
+): boolean | undefined {
+  const alias = alternateAsciiCase(name, existingNames);
+  if (alias === undefined) {
+    return undefined;
+  }
+  try {
+    const exact = lstatSync(resolve(directory, name));
+    const alternate = lstatSync(resolve(directory, alias));
+    return exact.dev === alternate.dev && exact.ino === alternate.ino;
+  } catch (error) {
+    const code = errorCode(error);
+    return code === "ENOENT" || code === "ENOTDIR" ? false : undefined;
+  }
+}
+
+function rememberDirectoryCaseSensitivity(directory: string, caseInsensitive: boolean): boolean {
+  if (caseInsensitiveDirectoryCache.size >= MAX_CASE_SENSITIVITY_CACHE_ENTRIES) {
+    const oldest = caseInsensitiveDirectoryCache.keys().next().value;
+    if (oldest !== undefined) {
+      caseInsensitiveDirectoryCache.delete(oldest);
+    }
+  }
+  caseInsensitiveDirectoryCache.set(directory, caseInsensitive);
+  return caseInsensitive;
+}
+
+function hasCaseInsensitiveLookups(directory: string): boolean {
+  const cached = caseInsensitiveDirectoryCache.get(directory);
+  if (cached !== undefined) {
+    return cached;
+  }
+
+  let device: number;
+  try {
+    device = lstatSync(directory).dev;
+  } catch {
+    return rememberDirectoryCaseSensitivity(directory, false);
+  }
+
+  let candidateDirectory = directory;
+  while (true) {
+    const candidateCached = caseInsensitiveDirectoryCache.get(candidateDirectory);
+    if (candidateCached !== undefined) {
+      return rememberDirectoryCaseSensitivity(directory, candidateCached);
+    }
+    try {
+      const names = readdirSync(candidateDirectory);
+      const existingNames = new Set(names);
+      for (const name of names) {
+        const result = probeEntryCaseInsensitivity(candidateDirectory, name, existingNames);
+        if (result !== undefined) {
+          rememberDirectoryCaseSensitivity(candidateDirectory, result);
+          return rememberDirectoryCaseSensitivity(directory, result);
+        }
+      }
+    } catch {
+      // Continue toward the root while staying on the same filesystem device.
+    }
+
+    const parent = dirname(candidateDirectory);
+    if (parent === candidateDirectory) {
+      break;
+    }
+    try {
+      if (lstatSync(parent).dev !== device) {
+        break;
+      }
+    } catch {
+      break;
+    }
+    candidateDirectory = parent;
+  }
+  return rememberDirectoryCaseSensitivity(directory, false);
+}
+
+function canonicalFileResourcePath(path: string): string {
+  let ancestor = path;
+  const suffix: string[] = [];
+  while (true) {
+    try {
+      const canonicalAncestor = realpathSync.native(ancestor);
+      const canonicalSuffix = suffix.reverse().map((segment) => segment.normalize("NFC"));
+      if (canonicalSuffix.length === 0) {
+        return canonicalAncestor;
+      }
+      return resolve(
+        canonicalAncestor,
+        ...(hasCaseInsensitiveLookups(canonicalAncestor)
+          ? canonicalSuffix.map((segment) => segment.toLowerCase())
+          : canonicalSuffix),
+      );
+    } catch {
+      const parent = dirname(ancestor);
+      if (parent === ancestor) {
+        return path;
+      }
+      suffix.push(basename(ancestor));
+      ancestor = parent;
+    }
+  }
+}
+
+function existingFileIdentityKey(path: string): string | undefined {
+  try {
+    const identity = statSync(path, { bigint: true });
+    return `file-inode:${identity.dev.toString()}:${identity.ino.toString()}`;
+  } catch {
+    return undefined;
+  }
+}
+
+function hintedResourceKey(
+  hint: ToolResourceHint,
+  value: string | number,
+  resourceBaseDir: string | undefined,
+): readonly string[] | undefined {
+  const normalized = String(value).trim();
+  if (normalized.length === 0) {
+    return undefined;
+  }
+  switch (hint.kind) {
+    case TOOL_RESOURCE_HINT_KINDS.file: {
+      if (!isAbsolute(normalized) && resourceBaseDir === undefined) {
+        return undefined;
+      }
+      const path = canonicalFileResourcePath(resolve(resourceBaseDir ?? "/", normalized));
+      const identityKey = existingFileIdentityKey(path);
+      return [`file:${path}`, ...(identityKey === undefined ? [] : [identityKey])];
+    }
+    case TOOL_RESOURCE_HINT_KINDS.browserSession:
+      return [`browser-session:${normalized}`];
+    case TOOL_RESOURCE_HINT_KINDS.conversation:
+      return [`conversation:${normalized}`];
+    case TOOL_RESOURCE_HINT_KINDS.custom: {
+      const namespace = hint.namespace?.trim();
+      return namespace ? [`${namespace}:${normalized}`] : undefined;
+    }
+  }
+}
+
+function resolveAgentToolResources(
+  agentName: string,
+  resourceBaseDir: string | undefined,
+  input: unknown,
+  annotations: ToolAnnotations | undefined,
+  hints: readonly ToolResourceHint[] | undefined,
+): ToolResourceAccess[] {
+  const mode = defaultResourceMode(annotations);
+  const record = asRecord(input);
+  const fallback = [{ key: `agent:${agentName}`, mode }];
+  const hinted: ToolResourceAccess[] = [];
+  for (const hint of hints ?? []) {
+    if (!Object.hasOwn(record, hint.field)) {
+      continue;
+    }
+    const values = resourceValues(record[hint.field]);
+    if (values === undefined) {
+      return fallback;
+    }
+    for (const value of values) {
+      const keys = hintedResourceKey(hint, value, resourceBaseDir);
+      if (keys === undefined || keys.length === 0) {
+        return fallback;
+      }
+      hinted.push(...keys.map((key) => ({ key, mode: hint.mode ?? mode })));
+    }
+  }
+  if (hinted.length === 0) {
+    return fallback;
+  }
+  return [{ key: `agent:${agentName}`, mode: TOOL_RESOURCE_ACCESS_MODES.read }, ...hinted];
+}
+
 export async function gateToolCall(
   ctx: ToolBridgeContext,
   agentName: string,
@@ -65,10 +318,11 @@ export async function gateToolCall(
     ...(annotations ? { annotations } : {}),
   });
   if (decision.action === "deny") {
-    return {
-      output: `策略拒绝执行${decision.reason ? `: ${decision.reason}` : ""}`,
-      isError: true,
-    };
+    return failedToolResult(
+      TOOL_OUTCOME_KINDS.policyDenied,
+      `策略拒绝执行${decision.reason ? `: ${decision.reason}` : ""}`,
+      decision.reason ? { reason: decision.reason } : {},
+    );
   }
   if (decision.action === "confirm") {
     const approval = await ctx.requestApproval({
@@ -78,10 +332,11 @@ export async function gateToolCall(
       reason: decision.reason,
     });
     if (!approval.approved) {
-      return {
-        output: `已取消执行${approval.reason ? `: ${approval.reason}` : ""}`,
-        isError: true,
-      };
+      return failedToolResult(
+        TOOL_OUTCOME_KINDS.userRejected,
+        `已取消执行${approval.reason ? `: ${approval.reason}` : ""}`,
+        approval.reason ? { reason: approval.reason } : {},
+      );
     }
   }
   return undefined;
@@ -95,32 +350,59 @@ export function buildAgentToolset(
   const tools: ToolSet = {};
 
   for (const source of sources) {
-    const { client, agentName } = source;
-    for (const { tool: agentTool, annotations } of source.tools) {
-      const id = registry.register(agentName, agentTool.name);
+    const { client, agentName, agentSource, transport, runtimeOwnership, resourceBaseDir } = source;
+    for (const { tool: agentTool, annotations, resourceHints } of source.tools) {
+      const id = registry.register(agentName, agentTool.name, {
+        ...(agentSource ? { agentSource } : {}),
+        ...(transport ? { transport } : {}),
+        ...(runtimeOwnership ? { runtimeOwnership } : {}),
+        ...(annotations ? { annotations } : {}),
+      });
+      const plan: ToolExecutionPlan = {
+        prepare: async (input) => {
+          const args = asRecord(input);
+          const preflight = preflightToolCall(agentTool, args);
+          if (!preflight.ok) {
+            return failedToolResult(
+              TOOL_OUTCOME_KINDS.invalidInput,
+              formatPreflightFailure(preflight.issues),
+              { raw: preflight.issues },
+            );
+          }
+          return gateToolCall(ctx, agentName, agentTool.name, args, annotations);
+        },
+        resources: (input) =>
+          resolveAgentToolResources(agentName, resourceBaseDir, input, annotations, resourceHints),
+      };
+      ctx.coordinator?.register(id, plan);
       tools[id] = tool({
         description: agentTool.description ?? `${agentTool.name} (via ${agentName})`,
         inputSchema: jsonSchema(agentTool.inputSchema as unknown as JSONSchema7),
+        toModelOutput: ({ output }) => toolResultToModelOutput(output),
         execute: async (
           input: unknown,
           options: ToolExecutionOptions<unknown>,
         ): Promise<NormalizedToolResult> => {
           const args = asRecord(input);
-          const preflight = preflightToolCall(agentTool, args);
-          if (!preflight.ok) {
-            return { output: formatPreflightFailure(preflight.issues), isError: true };
-          }
-          const blocked = await gateToolCall(ctx, agentName, agentTool.name, args, annotations);
-          if (blocked) {
-            return blocked;
-          }
-          const requestOptions = options.abortSignal ? { signal: options.abortSignal } : undefined;
-          const result = await client.callTool(
-            { name: agentTool.name, arguments: args },
-            undefined,
-            requestOptions,
+          return executeCoordinatedTool(
+            ctx.coordinator,
+            plan,
+            id,
+            options.toolCallId,
+            args,
+            options.abortSignal,
+            async () => {
+              const requestOptions = options.abortSignal
+                ? { signal: options.abortSignal }
+                : undefined;
+              const result = await client.callTool(
+                { name: agentTool.name, arguments: args },
+                undefined,
+                requestOptions,
+              );
+              return normalizeToolResult(result);
+            },
           );
-          return normalizeToolResult(result);
         },
       });
     }

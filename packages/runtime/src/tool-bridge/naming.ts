@@ -1,4 +1,18 @@
-export interface ToolRoute {
+import type {
+  AgentRuntimeOwnership,
+  AgentSourceType,
+  AgentTransport,
+} from "@roll-agent/core/types/agent";
+import type { ToolAnnotations } from "../types/policy.ts";
+
+export interface ToolRouteMetadata {
+  readonly agentSource?: AgentSourceType;
+  readonly transport?: AgentTransport["type"];
+  readonly runtimeOwnership?: AgentRuntimeOwnership;
+  readonly annotations?: ToolAnnotations;
+}
+
+export interface ToolRoute extends ToolRouteMetadata {
   readonly agentName: string;
   readonly toolName: string;
 }
@@ -12,7 +26,7 @@ function sanitize(name: string): string {
 export class ToolRegistry {
   private readonly routes = new Map<string, ToolRoute>();
 
-  register(agentName: string, toolName: string): string {
+  register(agentName: string, toolName: string, metadata: ToolRouteMetadata = {}): string {
     const base = `${sanitize(agentName)}__${sanitize(toolName)}`;
     let id = base;
     let suffix = 1;
@@ -20,7 +34,14 @@ export class ToolRegistry {
       id = `${base}_${String(suffix)}`;
       suffix += 1;
     }
-    this.routes.set(id, { agentName, toolName });
+    this.routes.set(id, {
+      agentName,
+      toolName,
+      ...(metadata.agentSource ? { agentSource: metadata.agentSource } : {}),
+      ...(metadata.transport ? { transport: metadata.transport } : {}),
+      ...(metadata.runtimeOwnership ? { runtimeOwnership: metadata.runtimeOwnership } : {}),
+      ...(metadata.annotations ? { annotations: { ...metadata.annotations } } : {}),
+    });
     return id;
   }
 

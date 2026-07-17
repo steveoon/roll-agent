@@ -33,3 +33,24 @@ test("ToolRegistry resolve 未注册返回 undefined", () => {
   const registry = new ToolRegistry();
   assert.equal(registry.resolve("nope"), undefined);
 });
+
+test("ToolRegistry 保留 Agent 来源、transport、runtime lifecycle 与 annotations", () => {
+  const registry = new ToolRegistry();
+  const annotations = { readOnlyHint: true, destructiveHint: false };
+  const id = registry.register("browser", "inspect", {
+    agentSource: "installed-package",
+    transport: "streamable-http",
+    runtimeOwnership: "external-managed",
+    annotations,
+  });
+
+  assert.deepEqual(registry.resolve(id), {
+    agentName: "browser",
+    toolName: "inspect",
+    agentSource: "installed-package",
+    transport: "streamable-http",
+    runtimeOwnership: "external-managed",
+    annotations,
+  });
+  assert.notEqual(registry.resolve(id)?.annotations, annotations);
+});

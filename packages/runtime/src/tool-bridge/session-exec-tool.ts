@@ -22,7 +22,18 @@ import {
 import { gateToolCall } from "./build-tools.ts";
 import type { BashToolContext } from "./bash-tool.ts";
 import { ToolRegistry } from "./naming.ts";
-import type { NormalizedToolResult } from "./normalize-result.ts";
+import {
+  TOOL_OUTCOME_KINDS,
+  failedToolResult,
+  successfulToolResult,
+  toolResultToModelOutput,
+  type NormalizedToolResult,
+} from "./normalize-result.ts";
+import {
+  TOOL_RESOURCE_ACCESS_MODES,
+  executeCoordinatedTool,
+  type ToolExecutionPlan,
+} from "./tool-execution-coordinator.ts";
 import { isUserCancellationSignal } from "../types/cancellation.ts";
 
 export const EXEC_AGENT_NAME = "roll";
@@ -147,7 +158,11 @@ async function gateExecCommand(
     reason: "shell 命令需确认",
   });
   if (!approval.approved) {
-    return { output: `已取消执行${approval.reason ? `: ${approval.reason}` : ""}`, isError: true };
+    return failedToolResult(
+      TOOL_OUTCOME_KINDS.userRejected,
+      `已取消执行${approval.reason ? `: ${approval.reason}` : ""}`,
+      approval.reason ? { reason: approval.reason } : {},
+    );
   }
   return undefined;
 }
@@ -168,22 +183,23 @@ function formatPollResult(result: SessionPollResult): NormalizedToolResult {
     lines.push(`Cleanup error: ${result.cleanupError}`);
   }
   const body = result.output.length > 0 ? `\n\n${result.output}` : "";
-  return {
-    output: lines.join("\n") + body,
-    isError:
-      result.kind === "exited" &&
-      (result.exitCode !== 0 ||
-        result.state === SESSION_STATES.cleanupFailed ||
-        result.terminationCause !== undefined),
-  };
+  const output = lines.join("\n") + body;
+  const failed =
+    result.kind === "exited" &&
+    (result.exitCode !== 0 ||
+      result.state === SESSION_STATES.cleanupFailed ||
+      result.terminationCause !== undefined);
+  return failed
+    ? failedToolResult(TOOL_OUTCOME_KINDS.toolFailed, output, { raw: result })
+    : successfulToolResult(output, { raw: result });
 }
 
 function formatSessionList(sessions: readonly SessionSummary[]): NormalizedToolResult {
   if (sessions.length === 0) {
-    return { output: "当前没有可恢复的后台会话", isError: false };
+    return successfulToolResult("当前没有可恢复的后台会话", { raw: sessions });
   }
-  return {
-    output: JSON.stringify(
+  return successfulToolResult(
+    JSON.stringify(
       {
         sessions: sessions.map((session) => ({
           session_id: session.sessionId,
@@ -199,8 +215,8 @@ function formatSessionList(sessions: readonly SessionSummary[]): NormalizedToolR
       null,
       2,
     ),
-    isError: false,
-  };
+    { raw: sessions },
+  );
 }
 
 function bindUserCancellation(
@@ -235,114 +251,230 @@ export function buildSessionExecToolset(
   const execPollId = registry.register(EXEC_AGENT_NAME, EXEC_POLL_NAME);
   const execListId = registry.register(EXEC_AGENT_NAME, EXEC_LIST_NAME);
   const classifier = deps.classifier ?? unknownCommandClassifier;
+  const resolveCommandInvocation = (input: ExecCommandInput) => {
+    const workdir = resolve(settings.workdir, input.workdir ?? ".");
+    const yieldMs = clamp(
+      input.yield_time_ms ?? settings.defaultYieldMs,
+      MIN_EXEC_YIELD_MS,
+      MAX_EXEC_YIELD_MS,
+    );
+    const classification = isWithinWorkdirRoot(settings.workdir, workdir)
+      ? classifier.classify(input.command, workdir)
+      : "unknown";
+    return {
+      workdir,
+      yieldMs,
+      annotations: CLASSIFICATION_ANNOTATIONS[classification],
+    };
+  };
+  const commandPlan: ToolExecutionPlan = {
+    prepare: async (rawInput) => {
+      const parsed = execCommandInputSchema.safeParse(rawInput);
+      if (!parsed.success) {
+        return failedToolResult(
+          TOOL_OUTCOME_KINDS.invalidInput,
+          `参数校验失败: ${parsed.error.issues.map((issue) => issue.message).join("; ")}`,
+          { raw: parsed.error.issues },
+        );
+      }
+      const invocation = resolveCommandInvocation(parsed.data);
+      if (!existsSync(invocation.workdir)) {
+        return failedToolResult(
+          TOOL_OUTCOME_KINDS.invalidInput,
+          `工作目录不存在: ${invocation.workdir}`,
+        );
+      }
+      return gateExecCommand(
+        ctx,
+        {
+          command: parsed.data.command,
+          workdir: invocation.workdir,
+          yield_time_ms: invocation.yieldMs,
+        },
+        invocation.annotations,
+      );
+    },
+    resources: (rawInput) => {
+      const parsed = execCommandInputSchema.safeParse(rawInput);
+      const workdir = parsed.success
+        ? resolveCommandInvocation(parsed.data).workdir
+        : settings.workdir;
+      return [
+        { key: "exec-manager", mode: TOOL_RESOURCE_ACCESS_MODES.write },
+        { key: `shell:${workdir}`, mode: TOOL_RESOURCE_ACCESS_MODES.write },
+      ];
+    },
+  };
+  const pollPlan: ToolExecutionPlan = {
+    prepare: (rawInput) => {
+      const parsed = execPollInputSchema.safeParse(rawInput);
+      if (!parsed.success) {
+        return failedToolResult(
+          TOOL_OUTCOME_KINDS.invalidInput,
+          `参数校验失败: ${parsed.error.issues.map((issue) => issue.message).join("; ")}`,
+          { raw: parsed.error.issues },
+        );
+      }
+      if (!manager.get(parsed.data.session_id)) {
+        return failedToolResult(
+          TOOL_OUTCOME_KINDS.invalidInput,
+          `会话 ${String(parsed.data.session_id)} 不存在或已结束`,
+        );
+      }
+      return parsed.data.chars !== "" && parsed.data.chars !== INTERRUPT
+        ? failedToolResult(
+            TOOL_OUTCOME_KINDS.invalidInput,
+            "pipe 会话不支持交互输入（仅支持空 chars 轮询或 Ctrl-C \\u0003 中断）",
+          )
+        : undefined;
+    },
+    resources: (rawInput) => {
+      const parsed = execPollInputSchema.safeParse(rawInput);
+      return [
+        {
+          key: parsed.success ? `exec-session:${String(parsed.data.session_id)}` : "exec-session",
+          mode: TOOL_RESOURCE_ACCESS_MODES.write,
+        },
+      ];
+    },
+  };
+  const listPlan: ToolExecutionPlan = {
+    resources: () => [{ key: "exec-manager", mode: TOOL_RESOURCE_ACCESS_MODES.read }],
+  };
+  ctx.coordinator?.register(execCommandId, commandPlan);
+  ctx.coordinator?.register(execPollId, pollPlan);
+  ctx.coordinator?.register(execListId, listPlan);
 
   return {
     [execCommandId]: tool({
       description:
         "在后台会话中执行一条命令，等待一段时间后返回输出。若命令未结束会返回 session_id，用 exec_poll 续查进度、读取退出码。适合运行时间超过单轮预算的长脚本。命令继承 roll 进程的环境变量。",
       inputSchema: execCommandInputSchema,
+      toModelOutput: ({ output }) => toolResultToModelOutput(output),
       execute: async (
         input: ExecCommandInput,
         options: ToolExecutionOptions<unknown>,
       ): Promise<NormalizedToolResult> => {
-        throwIfSessionExecAborted(options.abortSignal);
-        const workdir = resolve(settings.workdir, input.workdir ?? ".");
-        if (!existsSync(workdir)) {
-          return { output: `工作目录不存在: ${workdir}`, isError: true };
-        }
-        const yieldMs = clamp(
-          input.yield_time_ms ?? settings.defaultYieldMs,
-          MIN_EXEC_YIELD_MS,
-          MAX_EXEC_YIELD_MS,
+        const { workdir, yieldMs } = resolveCommandInvocation(input);
+        return executeCoordinatedTool(
+          ctx.coordinator,
+          commandPlan,
+          execCommandId,
+          options.toolCallId,
+          input,
+          options.abortSignal,
+          async () => {
+            throwIfSessionExecAborted(options.abortSignal);
+            if (!existsSync(workdir)) {
+              return failedToolResult(
+                TOOL_OUTCOME_KINDS.invalidInput,
+                `工作目录不存在: ${workdir}`,
+              );
+            }
+            const maxChars =
+              (input.max_output_tokens ?? settings.maxOutputTokens) * CHARS_PER_TOKEN;
+            const onDelta = makeSessionDeltaHandler(ctx, options.toolCallId, EXEC_COMMAND_NAME);
+            let session: ManagedSession;
+            try {
+              session = manager.spawn({
+                command: input.command,
+                workdir,
+                ...(onDelta ? { onDelta } : {}),
+              });
+              deps.onSessionTouched?.(session.id);
+            } catch (error) {
+              const output =
+                error instanceof SessionCapError
+                  ? `${error.message}；先调用 ${execListId} 查看会话，再对 cleanup-failed 终态调用 ${execPollId} 领取结果并释放名额，或等待/中断仍在运行的会话后重试`
+                  : `无法启动会话: ${String(error)}`;
+              return failedToolResult(TOOL_OUTCOME_KINDS.toolFailed, output, { raw: error });
+            }
+            const unbindCancellation = bindUserCancellation(options.abortSignal, session, manager);
+            const result = await pollUntilDeadline(session, performance.now() + yieldMs, maxChars, {
+              ...(options.abortSignal ? { abortSignal: options.abortSignal } : {}),
+              ...(onDelta ? { onDelta } : {}),
+            }).finally(unbindCancellation);
+            if (result.kind === "exited") {
+              manager.delete(session.id);
+            }
+            return formatPollResult(result);
+          },
         );
-        const classification = isWithinWorkdirRoot(settings.workdir, workdir)
-          ? classifier.classify(input.command, workdir)
-          : "unknown";
-        const annotations = CLASSIFICATION_ANNOTATIONS[classification];
-        const approvalInput = { command: input.command, workdir, yield_time_ms: yieldMs };
-        const blocked = await gateExecCommand(ctx, approvalInput, annotations);
-        if (blocked) {
-          return blocked;
-        }
-        const maxChars = (input.max_output_tokens ?? settings.maxOutputTokens) * CHARS_PER_TOKEN;
-        const onDelta = makeSessionDeltaHandler(ctx, options.toolCallId, EXEC_COMMAND_NAME);
-        throwIfSessionExecAborted(options.abortSignal);
-        let session: ManagedSession;
-        try {
-          session = manager.spawn({
-            command: input.command,
-            workdir,
-            ...(onDelta ? { onDelta } : {}),
-          });
-          deps.onSessionTouched?.(session.id);
-        } catch (error) {
-          return {
-            output:
-              error instanceof SessionCapError
-                ? `${error.message}；先调用 ${execListId} 查看会话，再对 cleanup-failed 终态调用 ${execPollId} 领取结果并释放名额，或等待/中断仍在运行的会话后重试`
-                : `无法启动会话: ${String(error)}`,
-            isError: true,
-          };
-        }
-        const unbindCancellation = bindUserCancellation(options.abortSignal, session, manager);
-        const result = await pollUntilDeadline(session, performance.now() + yieldMs, maxChars, {
-          ...(options.abortSignal ? { abortSignal: options.abortSignal } : {}),
-          ...(onDelta ? { onDelta } : {}),
-        }).finally(unbindCancellation);
-        if (result.kind === "exited") {
-          manager.delete(session.id);
-        }
-        return formatPollResult(result);
       },
     }),
     [execPollId]: tool({
       description:
         '轮询或中断一个 exec_command 会话。session_id 为 exec_command 返回的 id；chars 留空表示纯轮询进度，"\\u0003" 表示发送 Ctrl-C 中断。返回最新输出，进程结束时返回退出码。',
       inputSchema: execPollInputSchema,
+      toModelOutput: ({ output }) => toolResultToModelOutput(output),
       execute: async (
         input: ExecPollInput,
         options: ToolExecutionOptions<unknown>,
       ): Promise<NormalizedToolResult> => {
-        throwIfSessionExecAborted(options.abortSignal);
-        const session = manager.get(input.session_id);
-        if (!session) {
-          return { output: `会话 ${String(input.session_id)} 不存在或已结束`, isError: true };
-        }
-        throwIfSessionExecAborted(options.abortSignal);
-        if (input.chars !== "" && input.chars !== INTERRUPT) {
-          return {
-            output: "pipe 会话不支持交互输入（仅支持空 chars 轮询或 Ctrl-C \\u0003 中断）",
-            isError: true,
-          };
-        }
-        deps.onSessionTouched?.(session.id);
-        if (input.chars === INTERRUPT) {
-          await manager.interrupt(session.id);
-        }
-        const onDelta = makeSessionDeltaHandler(ctx, options.toolCallId, EXEC_POLL_NAME);
-        const yieldMs = clamp(
-          input.yield_time_ms ?? Math.max(settings.defaultYieldMs, MIN_POLL_YIELD_MS),
-          MIN_POLL_YIELD_MS,
-          MAX_POLL_YIELD_MS,
+        return executeCoordinatedTool(
+          ctx.coordinator,
+          pollPlan,
+          execPollId,
+          options.toolCallId,
+          input,
+          options.abortSignal,
+          async () => {
+            throwIfSessionExecAborted(options.abortSignal);
+            const session = manager.get(input.session_id);
+            if (!session) {
+              return failedToolResult(
+                TOOL_OUTCOME_KINDS.invalidInput,
+                `会话 ${String(input.session_id)} 不存在或已结束`,
+              );
+            }
+            if (input.chars !== "" && input.chars !== INTERRUPT) {
+              return failedToolResult(
+                TOOL_OUTCOME_KINDS.invalidInput,
+                "pipe 会话不支持交互输入（仅支持空 chars 轮询或 Ctrl-C \\u0003 中断）",
+              );
+            }
+            deps.onSessionTouched?.(session.id);
+            if (input.chars === INTERRUPT) {
+              await manager.interrupt(session.id);
+            }
+            const onDelta = makeSessionDeltaHandler(ctx, options.toolCallId, EXEC_POLL_NAME);
+            const yieldMs = clamp(
+              input.yield_time_ms ?? Math.max(settings.defaultYieldMs, MIN_POLL_YIELD_MS),
+              MIN_POLL_YIELD_MS,
+              MAX_POLL_YIELD_MS,
+            );
+            const maxChars = settings.maxOutputTokens * CHARS_PER_TOKEN;
+            const unbindCancellation = bindUserCancellation(options.abortSignal, session, manager);
+            const result = await pollUntilDeadline(session, performance.now() + yieldMs, maxChars, {
+              ...(options.abortSignal ? { abortSignal: options.abortSignal } : {}),
+              ...(onDelta ? { onDelta } : {}),
+            }).finally(unbindCancellation);
+            if (result.kind === "exited") {
+              manager.delete(input.session_id);
+            }
+            return formatPollResult(result);
+          },
         );
-        const maxChars = settings.maxOutputTokens * CHARS_PER_TOKEN;
-        const unbindCancellation = bindUserCancellation(options.abortSignal, session, manager);
-        const result = await pollUntilDeadline(session, performance.now() + yieldMs, maxChars, {
-          ...(options.abortSignal ? { abortSignal: options.abortSignal } : {}),
-          ...(onDelta ? { onDelta } : {}),
-        }).finally(unbindCancellation);
-        if (result.kind === "exited") {
-          manager.delete(input.session_id);
-        }
-        return formatPollResult(result);
       },
     }),
     [execListId]: tool({
       description:
         "列出当前 roll chat 进程中的有界近期后台命令会话，包括仍在运行的会话和尚未领取最终结果的已结束会话。用于在轮超时或丢失 session_id 后恢复轮询，不是永久历史。",
       inputSchema: execListInputSchema,
-      execute: async (_input: ExecListInput): Promise<NormalizedToolResult> =>
-        formatSessionList(manager.list()),
+      toModelOutput: ({ output }) => toolResultToModelOutput(output),
+      execute: async (
+        input: ExecListInput,
+        options: ToolExecutionOptions<unknown>,
+      ): Promise<NormalizedToolResult> =>
+        executeCoordinatedTool(
+          ctx.coordinator,
+          listPlan,
+          execListId,
+          options.toolCallId,
+          input,
+          options.abortSignal,
+          () => Promise.resolve(formatSessionList(manager.list())),
+        ),
     }),
   };
 }

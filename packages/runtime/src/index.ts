@@ -18,7 +18,7 @@ export {
   SUMMARY_ACK,
 } from "./engine/compactor.ts";
 export type { CompactionInput, CompactionResult } from "./engine/compactor.ts";
-export { buildAgentToolset } from "./tool-bridge/build-tools.ts";
+export { ROLL_RESOURCE_HINTS_META_KEY, buildAgentToolset } from "./tool-bridge/build-tools.ts";
 export type {
   AgentToolSource,
   SourceTool,
@@ -58,8 +58,27 @@ export {
 } from "./tool-bridge/session-exec-tool.ts";
 export { ToolRegistry } from "./tool-bridge/naming.ts";
 export type { ToolRoute } from "./tool-bridge/naming.ts";
-export { normalizeToolResult } from "./tool-bridge/normalize-result.ts";
-export type { NormalizedToolResult } from "./tool-bridge/normalize-result.ts";
+export {
+  TOOL_RESOURCE_ACCESS_MODES,
+  TOOL_RESOURCE_HINT_KINDS,
+} from "./tool-bridge/tool-execution-coordinator.ts";
+export type {
+  ToolResourceAccess,
+  ToolResourceAccessMode,
+  ToolResourceHint,
+  ToolResourceHintKind,
+} from "./tool-bridge/tool-execution-coordinator.ts";
+export {
+  TOOL_OUTCOME_KINDS,
+  normalizeToolResult,
+  readToolOutcome,
+} from "./tool-bridge/normalize-result.ts";
+export type {
+  NormalizedToolResult,
+  ToolModelOutput,
+  ToolOutcome,
+  ToolOutcomeKind,
+} from "./tool-bridge/normalize-result.ts";
 export { ThreadStore, defaultThreadsDir, expandTilde } from "./store/thread-store.ts";
 export type { ThreadRecord, CreateThreadInput } from "./store/thread-store.ts";
 export { DefaultToolPolicy } from "./policy/default-policy.ts";

@@ -15,6 +15,7 @@ import type { ShellProfile } from "../bash/profile.ts";
 import { ToolRegistry } from "./naming.ts";
 import type { NormalizedToolResult } from "./normalize-result.ts";
 import type { ApprovalRequest } from "./build-tools.ts";
+import { ToolExecutionCoordinator } from "./tool-execution-coordinator.ts";
 import {
   BASH_TOOL_ID,
   POWERSHELL_TOOL_ID,
@@ -128,6 +129,40 @@ test("PowerShell profile 注册为 roll__powershell 且路由到 roll.powershell
     agentName: "roll",
     toolName: "powershell",
   });
+});
+
+test("不同 workdir 的 opaque destructive Shell 调用仍保守串行", async () => {
+  const coordinator = new ToolExecutionCoordinator();
+  let active = 0;
+  let maxActive = 0;
+  const execute = getExecute(
+    settings({ workdir: "/tmp" }),
+    {
+      policy: allowPolicy,
+      coordinator,
+      requestApproval: async () => ({ approved: true }),
+    },
+    async () => {
+      active += 1;
+      maxActive = Math.max(maxActive, active);
+      await new Promise<void>((resolve) => setTimeout(resolve, 20));
+      active -= 1;
+      return okResult;
+    },
+  );
+
+  await Promise.all([
+    execute(
+      { command: "printf first > /tmp/shared-output", workdir: "/tmp/left" },
+      options({ toolCallId: "shell-left" }),
+    ),
+    execute(
+      { command: "printf second > /tmp/shared-output", workdir: "/tmp/right" },
+      options({ toolCallId: "shell-right" }),
+    ),
+  ]);
+
+  assert.equal(maxActive, 1);
 });
 
 test("PowerShell 审批输入保留明文命令且使用 roll.powershell key", async () => {
