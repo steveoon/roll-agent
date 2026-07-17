@@ -209,6 +209,7 @@ describe("@roll-agent/reply-authority-client", () => {
   it("surfaces HTTP JSON errors before SSE starts", async () => {
     process.env.REPLY_AUTHORITY_URL = "https://reply-authority.duliday.com";
     process.env.REPLY_AUTHORITY_BEARER_TOKEN = "client-token";
+    delete process.env.REPLY_AUTHORITY_TIMEOUT_MS;
 
     globalThis.fetch = async () =>
       new Response(
@@ -230,8 +231,14 @@ describe("@roll-agent/reply-authority-client", () => {
           assert.fail("stream should fail before yielding events");
         }
       },
-      (error: unknown) =>
-        error instanceof ReplyAuthorityRequestError && /tenant is not allowed/.test(error.message),
+      (error: unknown) => {
+        if (!(error instanceof ReplyAuthorityRequestError)) {
+          return false;
+        }
+        assert.match(error.message, /tenant is not allowed/);
+        assert.equal(error.meta.timeoutMs, 60_000);
+        return true;
+      },
     );
   });
 

@@ -14,6 +14,7 @@ VALIDATE_OPEN_CHAT="$SCRIPT_DIR/validate-open-chat.mjs"
 FORMAT_OPEN_CHAT_FAILURE="$SCRIPT_DIR/format-open-chat-failure.mjs"
 VALIDATE_GENERATE="$SCRIPT_DIR/validate-generate.mjs"
 PARSE_GENERATE_PREVIEW="$SCRIPT_DIR/parse-generate-preview.mjs"
+FORMAT_PREVIEW_FAILURE="$SCRIPT_DIR/format-preview-failure.mjs"
 BUILD_SEND_PAYLOAD="$SCRIPT_DIR/build-send-payload.mjs"
 APPLY_SEND_BUNDLE="$SCRIPT_DIR/apply-send-bundle.mjs"
 COMPOSE_RESULT_INPUT="$SCRIPT_DIR/compose-result-input.mjs"
@@ -108,7 +109,7 @@ fi
 for helper in \
   "$SKIP_RULES_JS" "$EXTRACT_ROLL_JSON" "$BUILD_SKIP_INPUT" "$APPEND_JSONL" \
   "$FIND_UNREAD_REF" "$PARSE_READ_CANDIDATE" "$VALIDATE_OPEN_CHAT" "$FORMAT_OPEN_CHAT_FAILURE" \
-  "$PARSE_GENERATE_PREVIEW" "$BUILD_SEND_PAYLOAD" "$APPLY_SEND_BUNDLE" \
+  "$PARSE_GENERATE_PREVIEW" "$FORMAT_PREVIEW_FAILURE" "$BUILD_SEND_PAYLOAD" "$APPLY_SEND_BUNDLE" \
   "$COMPOSE_RESULT_INPUT" "$FORMAT_CANDIDATE_RESULT" "$PARSE_SEND_RESULT" "$VALIDATE_SEND" \
   "$CHECK_AGENT_HEALTH" "$VALIDATE_BROWSER_SELECTION" "$DETECT_EXPIRED" "$PARSE_PAGE_META"; do
   if [[ ! -f "$helper" ]]; then
@@ -410,14 +411,20 @@ process_one() {
   # 4. generate on current chat (no conversationId — avoids 3rd list click)
   write_json "$WORK_DIR/gp.json" '{"maxMessages":100}'
   log "zhipin_generate_reply_preview (current chat, no re-open)"
-  local preview_out preview_meta prepared_id has_dual send_bundle
+  local preview_out preview_meta prepared_id has_dual send_bundle failure_line
   preview_out=$(roll_json_file zhipin_generate_reply_preview "$WORK_DIR/gp.json")
   preview_meta=$(printf '%s' "$preview_out" | node "$PARSE_GENERATE_PREVIEW" 2>/dev/null) || preview_meta=""
   prepared_id=$(printf '%s' "$preview_meta" | node -e 'let j={};try{j=JSON.parse(require("fs").readFileSync(0,"utf8"));}catch{};process.stdout.write(j.preparedReplyId||"");' 2>/dev/null) || prepared_id=""
   has_dual=$(printf '%s' "$preview_meta" | node -e 'let j={};try{j=JSON.parse(require("fs").readFileSync(0,"utf8"));}catch{};process.stdout.write(j.hasDualDraft?"1":"0");' 2>/dev/null) || has_dual="0"
 
   if [[ -z "$prepared_id" ]]; then
-    append_result "{\"ts\":\"$ts\",\"name\":\"$name\",\"conversationId\":\"$cid\",\"ok\":false,\"stage\":\"preview\"}"
+    failure_line=$(printf '%s' "$preview_meta" | \
+      node "$FORMAT_PREVIEW_FAILURE" "$ts" "$name" "$cid" 2>/dev/null) || failure_line=""
+    if [[ -n "$failure_line" ]]; then
+      append_result "$failure_line"
+    else
+      append_result "{\"ts\":\"$ts\",\"name\":\"$name\",\"conversationId\":\"$cid\",\"ok\":false,\"stage\":\"preview\"}"
+    fi
     back_to_list
     return 1
   fi

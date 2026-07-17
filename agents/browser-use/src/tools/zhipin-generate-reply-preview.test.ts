@@ -278,6 +278,45 @@ async function* createFailingReplyAuthorityStream(
   });
 }
 
+async function* createTimedOutPlanningStream(): AsyncGenerator<ReplyStreamEvent> {
+  yield {
+    type: "stream.started",
+    sequence: 1,
+    timestamp: "2026-07-16T09:25:04.507Z",
+    requestId: "req-timeout-planning",
+    tenantId: "tenant-001",
+  };
+  yield {
+    type: "phase.completed",
+    sequence: 2,
+    timestamp: "2026-07-16T09:25:04.514Z",
+    phase: "tenant_context",
+    latencyMs: 7,
+  };
+  yield {
+    type: "phase.completed",
+    sequence: 3,
+    timestamp: "2026-07-16T09:25:04.518Z",
+    phase: "binding_check",
+    latencyMs: 4,
+  };
+  yield {
+    type: "phase.started",
+    sequence: 4,
+    timestamp: "2026-07-16T09:25:04.519Z",
+    phase: "turn_planning",
+    label: "生成结构化 TurnPlan",
+  };
+  throw new ReplyAuthorityRequestError("回复生成超过服务端截止时间 (50000ms)", {
+    meta: {
+      url: "https://reply-authority.example/generate-signed-reply",
+      timeoutMs: 60_000,
+      requestId: "req-timeout-planning",
+    },
+    statusCode: 504,
+  });
+}
+
 async function* createDualDraftMockStream(): AsyncGenerator<ReplyStreamEvent> {
   yield {
     type: "stream.started",
@@ -1154,5 +1193,33 @@ describe("zhipin_generate_reply_preview", () => {
       resetPreparedReplyStoreForTests();
       setZhipinGenerateReplyPreviewDepsForTests(undefined);
     }
+  });
+
+  it("preserves request and phase diagnostics when Reply Authority times out", async () => {
+    const calls: string[] = [];
+    setZhipinGenerateReplyPreviewDepsForTests({
+      openNativePagePort: async () => createNativePage(calls),
+      createNativeVisualActivitySession: () => createNoopSession(calls),
+      createReplyPreviewVisualSession: () => createPreviewSession(calls),
+      streamGenerateSignedReply: () => createTimedOutPlanningStream(),
+    });
+
+    const result = await zhipinGenerateReplyPreview.execute(
+      { conversationId: "conv-1", maxMessages: 20 },
+      createTestContext(),
+    );
+
+    assert.equal(result.success, false);
+    assert.equal(result.errorKind, "timeout");
+    assert.equal(result.requestId, "req-timeout-planning");
+    assert.equal(result.clientTimeoutMs, 60_000);
+    assert.equal(typeof result.elapsedMs, "number");
+    assert.equal(result.lastStartedPhase, "turn_planning");
+    assert.equal(result.activePhase, "turn_planning");
+    assert.deepEqual(result.phaseLatencies, {
+      tenant_context: 7,
+      binding_check: 4,
+    });
+    assert.doesNotMatch(result.error ?? "", /reply-authority\.example/);
   });
 });

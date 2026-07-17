@@ -12,6 +12,7 @@ $ValidateOpenChat = Join-Path $ScriptDir "validate-open-chat.mjs"
 $FormatOpenChatFailure = Join-Path $ScriptDir "format-open-chat-failure.mjs"
 $ValidateGenerate = Join-Path $ScriptDir "validate-generate.mjs"
 $ParseGeneratePreview = Join-Path $ScriptDir "parse-generate-preview.mjs"
+$FormatPreviewFailure = Join-Path $ScriptDir "format-preview-failure.mjs"
 $BuildSendPayload = Join-Path $ScriptDir "build-send-payload.mjs"
 $ApplySendBundle = Join-Path $ScriptDir "apply-send-bundle.mjs"
 $ComposeResultInput = Join-Path $ScriptDir "compose-result-input.mjs"
@@ -25,9 +26,11 @@ $ParsePageMeta = Join-Path $ScriptDir "parse-page-meta.mjs"
 
 # UTF-8 for child processes (roll/node) and PowerShell 5.1 native-command pipes.
 try {
-  [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
-  [Console]::InputEncoding = [System.Text.Encoding]::UTF8
-  $OutputEncoding = [System.Text.Encoding]::UTF8
+  # Encoding.UTF8 emits a BOM on native-command stdin, which makes JSON.parse fail.
+  $utf8NoBom = [System.Text.UTF8Encoding]::new($false)
+  [Console]::OutputEncoding = $utf8NoBom
+  [Console]::InputEncoding = $utf8NoBom
+  $OutputEncoding = $utf8NoBom
 }
 catch {
   # ignore on hosts that disallow changing console encoding
@@ -170,37 +173,58 @@ function Append-ResultObject($Row) {
   }
 }
 
-function Invoke-NodeStdin([string]$MjsPath, [string]$StdinText, [string[]]$NodeArgs = @()) {
+function Convert-NativeCommandOutput {
+  param([Parameter(ValueFromPipeline = $true)]$Item)
+  process {
+    if ($Item -is [System.Management.Automation.ErrorRecord]) {
+      if ($null -ne $Item.Exception -and $null -ne $Item.Exception.Message) {
+        return [string]$Item.Exception.Message
+      }
+      return [string]$Item.ToString()
+    }
+    if ($null -ne $Item) {
+      return [string]$Item
+    }
+  }
+}
+
+function Invoke-NodeStdinResult([string]$MjsPath, [string]$StdinText, [string[]]$NodeArgs = @()) {
   if ($null -eq $StdinText) { $StdinText = "" }
   $prev = $ErrorActionPreference
   $ErrorActionPreference = "Continue"
   try {
-    if ($NodeArgs.Count -gt 0) {
-      return [string]($StdinText | & node $MjsPath @NodeArgs 2>&1)
+    $raw =
+      if ($NodeArgs.Count -gt 0) {
+        $StdinText | & node $MjsPath @NodeArgs 2>&1
+      }
+      else {
+        $StdinText | & node $MjsPath 2>&1
+      }
+    $nodeExit = if ($null -ne $LASTEXITCODE) { [int]$LASTEXITCODE } else { 0 }
+
+    # Node helpers often exit 0 with empty stdout (exit-code-only validators). Normalize so
+    # callers can always call string methods like .Trim() on Windows PS.
+    $chunks = @($raw | Convert-NativeCommandOutput)
+    $text = (($chunks | Where-Object { $null -ne $_ }) -join [Environment]::NewLine)
+
+    return [pscustomobject]@{
+      Text = $text
+      ExitCode = $nodeExit
     }
-    return [string]($StdinText | & node $MjsPath 2>&1)
   }
   finally {
     $ErrorActionPreference = $prev
   }
 }
 
+function Invoke-NodeStdin([string]$MjsPath, [string]$StdinText, [string[]]$NodeArgs = @()) {
+  $result = Invoke-NodeStdinResult -MjsPath $MjsPath -StdinText $StdinText -NodeArgs $NodeArgs
+  return [string]$result.Text
+}
+
 function Invoke-NodeStdinExit([string]$MjsPath, [string]$StdinText, [string[]]$NodeArgs = @()) {
-  if ($null -eq $StdinText) { $StdinText = "" }
-  $prev = $ErrorActionPreference
-  $ErrorActionPreference = "Continue"
-  try {
-    if ($NodeArgs.Count -gt 0) {
-      $null = $StdinText | & node $MjsPath @NodeArgs 2>&1
-    }
-    else {
-      $null = $StdinText | & node $MjsPath 2>&1
-    }
-    return $LASTEXITCODE
-  }
-  finally {
-    $ErrorActionPreference = $prev
-  }
+  $result = Invoke-NodeStdinResult -MjsPath $MjsPath -StdinText $StdinText -NodeArgs $NodeArgs
+  return [int]$result.ExitCode
 }
 
 function Format-SendResultLine(
@@ -306,15 +330,16 @@ function Ensure-BrowserInstanceSelection {
   $previous = $env:ROLL_BROWSER_INSTANCE
   $env:ROLL_BROWSER_INSTANCE = $script:BrowserInstance
   try {
-    $message = (Invoke-NodeStdin $script:ValidateBrowserSelection $status).Trim()
-    $code = $LASTEXITCODE
+    $validation = Invoke-NodeStdinResult $script:ValidateBrowserSelection $status
+    $message = ([string]$validation.Text).Trim()
+    $code = [int]$validation.ExitCode
   }
   finally {
     $env:ROLL_BROWSER_INSTANCE = $previous
   }
 
   if ($code -ne 0) {
-    if ($message) {
+    if (-not [string]::IsNullOrWhiteSpace($message)) {
       Write-Error $message
     }
     else {
@@ -494,8 +519,9 @@ function Process-One([string]$Cid, [string]$Name, [string]$Preview) {
   }
 
   $skipInputRaw = [System.IO.File]::ReadAllText($skipInputPath, [System.Text.UTF8Encoding]::new($false))
-  $skipResult = Invoke-NodeStdin $SkipRulesJs $skipInputRaw
-  if ($LASTEXITCODE -ne 0 -or -not $skipResult) {
+  $skipEvaluation = Invoke-NodeStdinResult $SkipRulesJs $skipInputRaw
+  $skipResult = [string]$skipEvaluation.Text
+  if ($skipEvaluation.ExitCode -ne 0 -or -not $skipResult) {
     Append-ResultObject @{ ts = $ts; name = $Name; conversationId = $Cid; ok = $false; stage = "skip_eval" }
     return 1
   }
@@ -532,7 +558,13 @@ function Process-One([string]$Cid, [string]$Name, [string]$Preview) {
   $preparedId = [string]$previewMeta.preparedReplyId
   $hasDual = [bool]$previewMeta.hasDualDraft
   if ([string]::IsNullOrWhiteSpace($preparedId)) {
-    Append-ResultObject @{ ts = $ts; name = $Name; conversationId = $Cid; ok = $false; stage = "preview" }
+    $failureLine = (Invoke-NodeStdin $script:FormatPreviewFailure $previewMetaRaw @($ts, $Name, $Cid)).Trim()
+    if ($failureLine -and $failureLine.StartsWith("{")) {
+      Append-ResultObject ($failureLine | ConvertFrom-Json)
+    }
+    else {
+      Append-ResultObject @{ ts = $ts; name = $Name; conversationId = $Cid; ok = $false; stage = "preview" }
+    }
     Back-ToList
     return 1
   }
@@ -636,7 +668,7 @@ function Process-One([string]$Cid, [string]$Name, [string]$Preview) {
   return 10
 }
 
-Parse-Args @args
+Parse-Args -Argv $args
 
 if (-not (Get-Command roll -ErrorAction SilentlyContinue)) {
   Write-Error "roll CLI not found in PATH"
@@ -650,7 +682,7 @@ if (-not (Get-Command node -ErrorAction SilentlyContinue)) {
 $helpers = @(
   $ExtractRollJson, $BuildSkipInput, $AppendJsonl, $SkipRulesJs,
   $FindUnreadRef, $ParseReadCandidate, $ValidateOpenChat, $FormatOpenChatFailure,
-  $ParseGeneratePreview, $BuildSendPayload, $ApplySendBundle, $ComposeResultInput,
+  $ParseGeneratePreview, $FormatPreviewFailure, $BuildSendPayload, $ApplySendBundle, $ComposeResultInput,
   $FormatCandidateResult,
   $ParseSendResult,
   $ValidateSend, $CheckAgentHealth, $ValidateBrowserSelection, $DetectExpiredBanner, $ParsePageMeta
