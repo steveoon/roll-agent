@@ -59,7 +59,11 @@ case "$tool" in
     echo '{"candidateInfo":{"age":"30岁","experience":"5年"},"preferredBrand":"测试品牌","chatMessages":[]}'
     ;;
   zhipin_generate_reply_preview)
-    echo '{"success":true,"preparedReplyId":"prep-e2e","replyVariantSelection":{"options":[{"option":"option_1","suggestedReply":"A"},{"option":"option_2","suggestedReply":"B"}]}}'
+    if [[ "$ROLL_SHIM_PREVIEW_FAILURE" == "1" ]]; then
+      echo '{"success":false,"error":"AI 响应超时：回复生成超过服务端截止时间 (50000ms)","errorKind":"timeout","requestId":"req-e2e-timeout","elapsedMs":50031,"clientTimeoutMs":60000,"lastStartedPhase":"turn_planning","activePhase":"turn_planning","phaseLatencies":{"tenant_context":7,"binding_check":4},"signedEnvelope":"must-not-leak"}'
+    else
+      echo '{"success":true,"preparedReplyId":"prep-e2e","replyVariantSelection":{"options":[{"option":"option_1","suggestedReply":"A"},{"option":"option_2","suggestedReply":"B"}]}}'
+    fi
     ;;
   zhipin_send_prepared_reply)
     if [[ "$ROLL_SHIM_NO_JUDGE" == "1" ]]; then
@@ -77,7 +81,7 @@ esac
 );
 chmodSync(rollShimPath, 0o755);
 
-function runScenario(name, noJudge) {
+function runScenario(name, noJudge, previewFailure = false) {
   const tracePath = path.join(testDir, `${name}.trace`);
   const resultsPath = path.join(testDir, `${name}.jsonl`);
   const args = [
@@ -101,6 +105,7 @@ function runScenario(name, noJudge) {
       PATH: `${shimDir}:${process.env.PATH ?? ""}`,
       ROLL_SHIM_TRACE: tracePath,
       ROLL_SHIM_NO_JUDGE: noJudge ? "1" : "0",
+      ROLL_SHIM_PREVIEW_FAILURE: previewFailure ? "1" : "0",
     },
   });
   assert.equal(result.status, 0, `${name} failed:\n${result.stderr}\n${result.stdout}`);
@@ -117,13 +122,17 @@ function runScenario(name, noJudge) {
     });
   const tools = calls.map((call) => call.tool);
   assert.equal(tools.includes("zhipin_judge_prepared_reply"), false);
+  const resultRow = JSON.parse(readFileSync(resultsPath, "utf8").trim());
+  if (previewFailure) {
+    assert.equal(tools.includes("zhipin_send_prepared_reply"), false);
+    return { sendInput: null, resultRow };
+  }
+
   assert.ok(
     tools.indexOf("zhipin_generate_reply_preview") < tools.indexOf("zhipin_send_prepared_reply"),
   );
-
   const sendCall = calls.find((call) => call.tool === "zhipin_send_prepared_reply");
   assert.ok(sendCall);
-  const resultRow = JSON.parse(readFileSync(resultsPath, "utf8").trim());
   return { sendInput: sendCall.input, resultRow };
 }
 
@@ -131,6 +140,7 @@ try {
   const powershellSource = readFileSync(powershellScriptPath, "utf8");
   assert.doesNotMatch(powershellSource, /zhipin_judge_prepared_reply/);
   assert.match(powershellSource, /BuildSendPayload/);
+  assert.match(powershellSource, /FormatPreviewFailure/);
 
   const normal = runScenario("normal", false);
   assert.deepEqual(normal.sendInput, { preparedReplyId: "prep-e2e" });
@@ -148,6 +158,23 @@ try {
   assert.equal(noJudge.resultRow.feedbackGap, false);
   assert.equal(noJudge.resultRow.feedbackClosed, true);
   assert.equal(noJudge.resultRow.learningSkipped, true);
+
+  const previewFailure = runScenario("preview-failure", false, true);
+  assert.deepEqual(previewFailure.resultRow, {
+    ts: previewFailure.resultRow.ts,
+    name: "Alice",
+    conversationId: "cid-e2e",
+    ok: false,
+    stage: "preview",
+    error: "AI 响应超时：回复生成超过服务端截止时间 (50000ms)",
+    errorKind: "timeout",
+    requestId: "req-e2e-timeout",
+    elapsedMs: 50_031,
+    clientTimeoutMs: 60_000,
+    lastStartedPhase: "turn_planning",
+    activePhase: "turn_planning",
+    phaseLatencies: { tenant_context: 7, binding_check: 4 },
+  });
 
   console.log("reply-unread-safely.e2e.test.mjs: ok");
 } finally {

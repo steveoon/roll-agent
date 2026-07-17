@@ -387,7 +387,7 @@ describe("generateSignedReply", () => {
           error.meta.url,
           "https://reply-authority.duliday.com/resolve-recruiter-binding",
         );
-        assert.equal(error.meta.timeoutMs, 30_000);
+        assert.equal(error.meta.timeoutMs, 60_000);
         assert.match(error.meta.requestId ?? "", UUID_PATTERN);
         assert.equal(error.cause, undefined);
         return true;
@@ -422,13 +422,13 @@ describe("generateSignedReply", () => {
       }
       assert.match(error.message, /Reply Authority Service 请求失败 \(403\): tenant is not allowed/);
       assert.match(error.message, /url=https:\/\/reply-authority\.duliday\.com\/generate-signed-reply/);
-      assert.match(error.message, /timeoutMs=30000/);
+      assert.match(error.message, /timeoutMs=60000/);
       assert.match(error.message, /requestId=/);
       assert.equal(
         error.meta.url,
         "https://reply-authority.duliday.com/generate-signed-reply",
       );
-      assert.equal(error.meta.timeoutMs, 30_000);
+      assert.equal(error.meta.timeoutMs, 60_000);
       assert.match(error.meta.requestId ?? "", UUID_PATTERN);
       assert.ok(error.cause instanceof Error);
       assert.match(error.cause.message, /tenant is not allowed/);
@@ -468,7 +468,7 @@ describe("generateSignedReply", () => {
         error.meta.url,
         "https://reply-authority.duliday.com/resolve-recruiter-binding",
       );
-      assert.equal(error.meta.timeoutMs, 30_000);
+      assert.equal(error.meta.timeoutMs, 60_000);
       assert.match(error.meta.requestId ?? "", UUID_PATTERN);
       assert.ok(error.cause instanceof Error);
       assert.match(error.cause.message, /tenantId/);
@@ -505,7 +505,7 @@ describe("generateSignedReply", () => {
         error.meta.url,
         "https://reply-authority.duliday.com/generate-signed-reply",
       );
-      assert.equal(error.meta.timeoutMs, 30_000);
+      assert.equal(error.meta.timeoutMs, 60_000);
       assert.match(error.meta.requestId ?? "", UUID_PATTERN);
       assert.ok(error.cause instanceof Error);
       assert.match(error.cause.message, /signedEnvelope/);
@@ -534,7 +534,7 @@ describe("generateSignedReply", () => {
         error.meta.url,
         "https://reply-authority.duliday.com/generate-signed-reply",
       );
-      assert.equal(error.meta.timeoutMs, 30_000);
+      assert.equal(error.meta.timeoutMs, 60_000);
       assert.match(error.meta.requestId ?? "", UUID_PATTERN);
       assert.ok(error.cause instanceof Error);
       assert.equal(error.cause.name, "AbortError");
@@ -586,8 +586,8 @@ describe("generateSignedReply", () => {
         }
         assert.equal(
           error.meta.timeoutMs,
-          30_000,
-          `invalid value ${JSON.stringify(invalid)} should fall back to 30000`,
+          60_000,
+          `invalid value ${JSON.stringify(invalid)} should fall back to 60000`,
         );
         return true;
       });

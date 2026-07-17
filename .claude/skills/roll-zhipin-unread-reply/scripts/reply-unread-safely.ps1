@@ -12,6 +12,7 @@ $ValidateOpenChat = Join-Path $ScriptDir "validate-open-chat.mjs"
 $FormatOpenChatFailure = Join-Path $ScriptDir "format-open-chat-failure.mjs"
 $ValidateGenerate = Join-Path $ScriptDir "validate-generate.mjs"
 $ParseGeneratePreview = Join-Path $ScriptDir "parse-generate-preview.mjs"
+$FormatPreviewFailure = Join-Path $ScriptDir "format-preview-failure.mjs"
 $BuildSendPayload = Join-Path $ScriptDir "build-send-payload.mjs"
 $ApplySendBundle = Join-Path $ScriptDir "apply-send-bundle.mjs"
 $ComposeResultInput = Join-Path $ScriptDir "compose-result-input.mjs"
@@ -532,7 +533,13 @@ function Process-One([string]$Cid, [string]$Name, [string]$Preview) {
   $preparedId = [string]$previewMeta.preparedReplyId
   $hasDual = [bool]$previewMeta.hasDualDraft
   if ([string]::IsNullOrWhiteSpace($preparedId)) {
-    Append-ResultObject @{ ts = $ts; name = $Name; conversationId = $Cid; ok = $false; stage = "preview" }
+    $failureLine = (Invoke-NodeStdin $script:FormatPreviewFailure $previewMetaRaw @($ts, $Name, $Cid)).Trim()
+    if ($failureLine -and $failureLine.StartsWith("{")) {
+      Append-ResultObject ($failureLine | ConvertFrom-Json)
+    }
+    else {
+      Append-ResultObject @{ ts = $ts; name = $Name; conversationId = $Cid; ok = $false; stage = "preview" }
+    }
     Back-ToList
     return 1
   }
@@ -650,7 +657,7 @@ if (-not (Get-Command node -ErrorAction SilentlyContinue)) {
 $helpers = @(
   $ExtractRollJson, $BuildSkipInput, $AppendJsonl, $SkipRulesJs,
   $FindUnreadRef, $ParseReadCandidate, $ValidateOpenChat, $FormatOpenChatFailure,
-  $ParseGeneratePreview, $BuildSendPayload, $ApplySendBundle, $ComposeResultInput,
+  $ParseGeneratePreview, $FormatPreviewFailure, $BuildSendPayload, $ApplySendBundle, $ComposeResultInput,
   $FormatCandidateResult,
   $ParseSendResult,
   $ValidateSend, $CheckAgentHealth, $ValidateBrowserSelection, $DetectExpiredBanner, $ParsePageMeta

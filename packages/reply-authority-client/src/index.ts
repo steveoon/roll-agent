@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import type { ZodType } from "zod";
 import { z } from "zod";
 
-const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
+const DEFAULT_REQUEST_TIMEOUT_MS = 60_000;
 
 export const FunnelStageValues = [
   "trust_building",

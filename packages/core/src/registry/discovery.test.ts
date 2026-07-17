@@ -379,7 +379,7 @@ Tools list
     );
     assert.deepEqual(
       result.skill.env?.optional?.map((item) => ({ name: item.name, default: item.default })),
-      [{ name: "REPLY_AUTHORITY_TIMEOUT_MS", default: "30000" }],
+      [{ name: "REPLY_AUTHORITY_TIMEOUT_MS", default: "60000" }],
     );
   });
 

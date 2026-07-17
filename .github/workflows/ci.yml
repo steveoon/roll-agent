@@ -99,6 +99,7 @@ jobs:
           packages/runtime/src/engine/system-prompt.test.ts
           packages/runtime/src/engine/conversation-engine.test.ts
           packages/runtime/src/server/runtime-server.test.ts
+          .claude/skills/roll-zhipin-unread-reply/scripts/reply-unread-safely.powershell.e2e.test.mjs
           packages/core/src/config/migration.test.ts
           packages/core/src/config/schema.test.ts
           packages/core/src/cli/commands/config-setup.test.ts

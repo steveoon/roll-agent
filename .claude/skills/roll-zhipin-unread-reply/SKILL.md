@@ -123,7 +123,8 @@ When parallel full-reply runs misbehave but sequential runs on the same instance
 | `find-unread-ref.mjs` | Locate 未读 tab ref (regex fallback) |
 | `parse-read-candidate.mjs` | Parse `zhipin_read_messages` output |
 | `format-open-chat-failure.mjs` | Preserve initial/reload/retry errors after open-chat recovery fails |
-| `parse-generate-preview.mjs` | Parse preview output (`preparedReplyId`, `hasDualDraft`) |
+| `parse-generate-preview.mjs` | Parse preview success metadata or an allowlisted/redacted failure diagnostic |
+| `format-preview-failure.mjs` | Merge preview failure diagnostics into the per-candidate JSONL row |
 | `build-send-payload.mjs` | Build the send input; default only passes `preparedReplyId`, break-glass adds `skipVariantJudge:true` |
 | `apply-send-bundle.mjs` | Write validated `sp.json` from send bundle |
 | `compose-result-input.mjs` | Merge bundle + send result for JSONL formatting |
@@ -140,6 +141,7 @@ node scripts/evaluate-skip-rules.test.mjs
 node scripts/roll-helpers.test.mjs
 node scripts/pipeline-judge-send.test.mjs
 node scripts/reply-unread-safely.e2e.test.mjs
+node --test scripts/reply-unread-safely.powershell.e2e.test.mjs # Windows runs; other platforms skip
 ```
 
 ### Windows PowerShell pitfalls (addressed in repo)
@@ -193,6 +195,7 @@ All `roll run` inputs use **`--input-file`** (PowerShell-safe; macOS/Linux compa
 - If preview cannot validate the rubric or dual-draft shape, it keeps the server group as a non-learning terminal state instead of discarding it. Send then uses the top-level recommendation and closes that group without invoking Judge.
 - Fallback reasons crossing the feedback boundary are stable safe codes such as `rubric_fetch_failed`, `rubric_mismatch`, `invalid_variant_shape`, `judge_sampling_failed`, and `judge_output_invalid`; raw provider or parser errors stay only in local agent logs.
 - JSONL rows use the decision metadata returned by send and expose `decisionSource`, `decisionReason`, `judgeModel`, `fallbackReason`, `feedbackExpected`, `feedbackClosed`, `feedbackQueued`, `feedbackGap`, and `learningSkipped`. `feedbackExpected` means the outcome is eligible for learning; `feedbackGap` applies to every sent dual draft whose selected or `not_learned` terminal outcome is neither closed nor queued.
+- Preview failures preserve the allowlisted `error`, `errorKind`, `requestId`, `elapsedMs`, client-side wall-clock budget `clientTimeoutMs`, `lastStartedPhase`, `activePhase`, and completed `phaseLatencies` in JSONL. Raw service URLs, bearer tokens, signed envelopes, and unrecognized fields are not copied.
 - The script never retries `zhipin_send_prepared_reply` to repair feedback. When selected or `not_learned` feedback is `queued`, the browser-use agent outbox retries only the feedback POST, avoiding duplicate BOSS messages.
 - Multi-instance selection is validated at startup through `browser_status`; when multiple instances exist without a configured default, the script exits before touching BOSS unless `--browser-instance` / `-BrowserInstance` is provided.
 - Pre-flight is per `browserInstance`: check `browser_status`, `zhipin_get_username`, `zhipin_open_chat_page`, then one `zhipin_read_messages`.
