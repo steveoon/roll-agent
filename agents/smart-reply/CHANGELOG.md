@@ -1,5 +1,14 @@
 # smart-reply-agent
 
+## 1.3.8
+
+### Patch Changes
+
+- [#152](https://github.com/steveoon/roll-agent/pull/152) [`63cba26`](https://github.com/steveoon/roll-agent/commit/63cba264d29978662461cd6c3be3dec7af333318) Thanks [@steveoon](https://github.com/steveoon)! - Align smart-reply docs and `references/env.yaml` with the shared 60-second Reply Authority caller timeout default so deployments keep the client wall-clock above the service complete-request deadline.
+
+- Updated dependencies [[`63cba26`](https://github.com/steveoon/roll-agent/commit/63cba264d29978662461cd6c3be3dec7af333318)]:
+  - @roll-agent/reply-authority-client@0.7.0
+
 ## 1.3.7
 
 ### Patch Changes
