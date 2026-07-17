@@ -49,6 +49,21 @@ jobs:
       - name: E2E smoke
         run: pnpm test:e2e
 
+      - name: Chat PTY harness unit tests
+        run: pnpm perf:chat:test
+
+      - name: Chat PTY correctness smoke
+        run: pnpm perf:chat:check
+
+      - name: Upload chat PTY performance artifacts
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: chat-pty-${{ runner.os }}-${{ github.run_id }}
+          path: outputs/chat-pty
+          if-no-files-found: error
+          retention-days: 14
+
       - name: Build
         run: pnpm build
 
