@@ -157,7 +157,7 @@ chat 走独立的 skill 通道（对齐 `npx skills add` 标准生态，非 roll
 - **发现**：`packages/core/src/skills/library.ts` 的 `createSkillLibrary()` 自动发现项目级 `.agents/skills/*/SKILL.md`（从 cwd 向上查找）+ 用户级 `~/.agents/skills/` + 已注册 Agent 的 SKILL.md + config `skills.dirs` 补充目录；重名按 agent > project > user > config 优先级去重
 - **加载告警**：`roll chat` 普通 CLI 与 `--server` JSON-RPC 模式都必须传 `onSkillLibraryIssue`，把 malformed SKILL.md、重名或读取失败等问题写到 stderr，不能静默丢 skill
 - **渐进式披露**：`ConversationEngine` 把 skill 目录（name + description）注入 system prompt，模型按需调用内建只读工具 `roll__skill`（`packages/runtime/src/tool-bridge/skill-tool.ts`）加载正文或 `references/` 文件；skill 工具不经 policy 确认门
-- **手动指定**：Ink TUI 的 `/` 弹窗把内置命令和可加载 skill 合并展示；`/skills` 列出全部 skill；`/<skill-name> [/<skill-name> ...] 用户请求` 会隐藏注入“先调用 `roll__skill` 加载这些 skill”的指令，用户历史仍显示原始输入。基础 REPL 也支持 `/skills` 和 skill 前缀
+- **手动指定**：Ink TUI 的 `/` 弹窗把内置命令和可加载 skill 合并展示；`/skills` 列出全部 skill；`/<skill-name> [/<skill-name> ...] 用户请求` 由 `AgentSession` 在首次推理前直接加载主 Skill，并作为仅模型可见的 user/context 内容注入，核心 system prompt 权限不变，用户历史仍保留原始 slash 输入；同一 Turn 的 context-overflow 重放复用同一份 Skill 快照。主文档不再浪费一次 `roll__skill` Tool Call，只有按需读取 `references/` 时才调用该工具；未知 Skill 在模型调用前失败。基础 REPL 也支持 `/skills` 和 skill 前缀
 - **system prompt**：`packages/runtime/src/engine/system-prompt.ts` 的 `buildChatSystemPrompt()` 组装身份、工具接地纪律（禁止无工具结果声称完成）、任务推进、Skills 目录、输出通道规则。修改 chat 行为指导时改这里，不要在 `agent-session.ts` 里散落字符串
 - **测试封闭性**：引擎/会话测试需传 `skillLibrary: null`（引擎）或不传 `skillLibrary`（会话）避免读取真实 `~/.agents/skills`
 

@@ -584,7 +584,7 @@ test("ChatApp completes skill names from the slash popup", async () => {
   unmount();
 });
 
-test("ChatApp sends skill-prefixed prompts as grounded skill instructions", async () => {
+test("ChatApp 把显式 skill 原始输入交给 AgentSession，由 Harness 预加载", async () => {
   const sink: Sink = { approved: [], rejected: [] };
   const sent: string[] = [];
   const submitted: string[] = [];
@@ -609,9 +609,7 @@ test("ChatApp sends skill-prefixed prompts as grounded skill instructions", asyn
   await waitFor(() => assert.equal(sent.length, 1));
 
   assert.deepEqual(submitted, ["/typescript-magician 修一下类型"]);
-  assert.match(sent[0] ?? "", /roll__skill/);
-  assert.match(sent[0] ?? "", /typescript-magician/);
-  assert.match(sent[0] ?? "", /修一下类型/);
+  assert.equal(sent[0], "/typescript-magician 修一下类型");
   assert.match(plain(lastFrame() ?? ""), /\/typescript-magician 修一下类型/);
   unmount();
 });
@@ -782,11 +780,9 @@ test("plain 'exit' is sent as a message; only /exit quits", async () => {
     }),
   );
   await delay(10);
-  for (const ch of "/exit") {
-    second.stdin.write(ch);
-  }
-  await waitFor(() => assert.match(second.lastFrame() ?? "", /\/exit/));
-  second.stdin.write("\r");
+  // A real PTY may deliver the whole command and Enter in one input chunk, before React has
+  // rendered a slash-active frame. The submitted value must still route through runSlash().
+  second.stdin.write("/exit\r");
   await waitFor(() => assert.equal(exited, true));
   second.unmount();
 });

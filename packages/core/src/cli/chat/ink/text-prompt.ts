@@ -16,7 +16,7 @@ export interface TextPromptProps {
   readonly onSubmit: (value: string) => void;
   readonly onSlashMove: (direction: 1 | -1) => void;
   readonly onSlashComplete: () => void;
-  readonly onSlashRun: () => void;
+  readonly onSlashRun: (value: string) => void;
 }
 
 function isKeyboardProtocolResidue(input: string): boolean {
@@ -76,13 +76,13 @@ export function TextPrompt(props: TextPromptProps): ReactElement {
       }
       const hasEnter = key.return || input.includes("\r");
       if (hasEnter) {
-        if (slashActive) {
-          props.onSlashRun();
-          return;
-        }
         const before = input.split("\r", 1)[0] ?? "";
         const submitted =
           before.length > 0 ? insertText(editorRef.current, before) : editorRef.current;
+        if (slashActive || submitted.value.startsWith("/")) {
+          props.onSlashRun(submitted.value);
+          return;
+        }
         onSubmit(submitted.value);
         return;
       }

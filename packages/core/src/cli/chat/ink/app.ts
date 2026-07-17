@@ -13,7 +13,6 @@ import { TextPrompt } from "./text-prompt.ts";
 import { ConfirmSelect } from "./confirm-select.ts";
 import { SlashPopup } from "./slash-popup.ts";
 import {
-  buildSkillInvocationPrompt,
   buildSkillListLines,
   filterSlashEntries,
   parseSkillInvocation,
@@ -95,7 +94,7 @@ export function ChatApp(props: ChatAppProps): ReactElement {
     }
   });
 
-  const handleSubmit = (raw: string, sendText?: string): void => {
+  const handleSubmit = (raw: string): void => {
     const text = raw.trim();
     if (text.length === 0) {
       setDraft("");
@@ -104,7 +103,7 @@ export function ChatApp(props: ChatAppProps): ReactElement {
     // banner 需先于首条消息落入 Static，否则顺序颠倒
     handleBannerSettled();
     onUserSubmit(text);
-    submit(text, sendText);
+    submit(text);
   };
 
   const runSlash = (raw: string): void => {
@@ -178,7 +177,7 @@ export function ChatApp(props: ChatAppProps): ReactElement {
         setDraft(`${invocation.skills.map((skill) => `/${skill.name}`).join(" ")} `);
         return;
       }
-      handleSubmit(text, buildSkillInvocationPrompt(invocation));
+      handleSubmit(text);
       return;
     }
     commitHistory({ kind: "notice", id: randomUUID(), text: `未知命令 ${name}` });
@@ -198,8 +197,8 @@ export function ChatApp(props: ChatAppProps): ReactElement {
       setSelected(0);
     }
   };
-  const onSlashRun = (): void => {
-    const token = state.draft.trim().split(/\s+/, 1)[0] ?? "";
+  const onSlashRun = (raw: string): void => {
+    const token = raw.trim().split(/\s+/, 1)[0] ?? "";
     const exact = SLASH_COMMANDS.some((command) => command.name === token);
     const selectedEntry = matches[selectedIndex];
     if (!exact && selectedEntry?.kind === "skill") {
@@ -209,7 +208,7 @@ export function ChatApp(props: ChatAppProps): ReactElement {
       setSelected(0);
       return;
     }
-    runSlash(exact ? state.draft : (selectedEntry?.name ?? state.draft));
+    runSlash(exact ? raw : (selectedEntry?.name ?? raw));
   };
 
   const footer =

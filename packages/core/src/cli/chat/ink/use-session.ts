@@ -116,13 +116,13 @@ export function useSession(session: AgentSession, options: UseSessionOptions): U
   );
 
   const submit = useCallback(
-    (text: string, sendText?: string) => {
+    (text: string) => {
       if (busyRef.current) {
         return;
       }
       busyRef.current = true;
       dispatch({ type: "submit-user", id: randomUUID(), text });
-      drive(session.send(sendText ?? text)).catch(() => undefined);
+      drive(session.send(text)).catch(() => undefined);
     },
     [drive, session],
   );
