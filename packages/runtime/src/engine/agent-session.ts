@@ -1020,6 +1020,19 @@ export class AgentSession {
               this.debug(queue, "model", "first stream event", turnStartedAt, { part: part.type });
             }
             switch (part.type) {
+              case "reasoning-start":
+                queue.push({ type: "reasoning-start", reasoningId: part.id });
+                break;
+              case "reasoning-delta":
+                queue.push({
+                  type: "reasoning-delta",
+                  reasoningId: part.id,
+                  delta: part.text,
+                });
+                break;
+              case "reasoning-end":
+                queue.push({ type: "reasoning-end", reasoningId: part.id });
+                break;
               case "text-delta": {
                 if (!sawToolCall) {
                   const candidate = pendingEchoText + part.text;

@@ -344,7 +344,7 @@ test("multiline draft renders every line with its prefix", async () => {
   const { stdin, lastFrame, unmount } = render(h(Harness, { sink }));
   await delay(10);
   await type(stdin, "ab", "\n", "cd");
-  const frame = lastFrame() ?? "";
+  const frame = stripVTControlCharacters(lastFrame() ?? "");
   assert.match(frame, /› ab/);
   assert.match(frame, /cd/);
   unmount();

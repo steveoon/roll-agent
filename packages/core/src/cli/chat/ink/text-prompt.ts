@@ -20,6 +20,7 @@ export interface TextPromptProps {
   readonly value: string;
   readonly inputHistory: readonly string[];
   readonly disabled: boolean;
+  readonly disabledHint?: string;
   readonly slashActive: boolean;
   readonly slashPopupActive: boolean;
   readonly autoApprove: boolean;
@@ -231,7 +232,9 @@ export function TextPrompt(props: TextPromptProps): ReactElement {
       const prefix = h(
         Box,
         { width: PROMPT_PREFIX_WIDTH, flexShrink: 0 },
-        index === 0 ? h(Text, { color: "green" }, "› ") : h(Text, null, "  "),
+        index === 0
+          ? h(Text, disabled ? { dimColor: true } : { color: "green" }, "› ")
+          : h(Text, null, "  "),
       );
       if (disabled) {
         return h(
@@ -262,26 +265,28 @@ export function TextPrompt(props: TextPromptProps): ReactElement {
     }),
   );
   const hintText = disabled
-    ? "Esc 中断本轮"
+    ? (props.disabledHint ?? "Esc 中断本轮")
     : slashActive
       ? "↑↓ 选择 · Tab 补全 · Enter 执行 · Esc 取消"
       : autoApprove
         ? "Shift+Tab 关闭 · Enter 发送 · 空输入 ↑ 历史 · Shift+Enter/Ctrl+J 换行 · / 命令"
         : "Enter 发送 · 空输入 ↑ 历史 · Shift+Enter/Ctrl+J 换行 · / 命令 · Shift+Tab 自动批准";
+  // 自定义 disabled 提示是状态变更通知（如中断确认），用暗黄色让反馈落在视线焦点处
+  const hintProps =
+    disabled && props.disabledHint !== undefined
+      ? { color: "yellow", dimColor: true }
+      : { dimColor: true };
   const hint = h(
     Box,
     { marginLeft: 1 },
     ...(autoApprove
-      ? [
-          h(Text, { color: "yellow" }, `${GLYPHS.auto} auto`),
-          h(Text, { dimColor: true }, ` · ${hintText}`),
-        ]
-      : [h(Text, { dimColor: true }, hintText)]),
+      ? [h(Text, { color: "yellow" }, `${GLYPHS.auto} auto`), h(Text, hintProps, ` · ${hintText}`)]
+      : [h(Text, hintProps, hintText)]),
   );
   return h(
     Box,
     { flexDirection: "column", width },
-    h(Box, { borderStyle: "round", borderColor: disabled ? "yellow" : "cyan", paddingX: 2 }, body),
+    h(Box, { borderStyle: "round", borderColor: disabled ? "gray" : "cyan", paddingX: 2 }, body),
     hint,
   );
 }

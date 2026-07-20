@@ -6,6 +6,7 @@ import { parseThinking } from "./thinking-text.ts";
 import { Markdown } from "./markdown.ts";
 import { ToolLabel } from "./tool-label.ts";
 import { BannerLinesView } from "./banner-view.ts";
+import { ReasoningBlock } from "./reasoning-block.ts";
 
 const DENIAL_TEXT_PREFIXES = ["已取消执行", "策略拒绝执行"] as const;
 
@@ -43,6 +44,8 @@ export function HistoryItemView({ item }: { item: HistoryItem }): ReactElement {
             : h(Markdown, { key: String(index), text: segment.text }),
         ),
       );
+    case "reasoning":
+      return h(ReasoningBlock, { text: item.text });
     case "tool": {
       const args = item.args.length > 0 && item.args !== "{}" ? ` ${item.args}` : "";
       return h(

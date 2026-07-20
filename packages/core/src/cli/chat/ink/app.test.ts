@@ -109,10 +109,11 @@ test("ChatApp streams an assistant reply into history and shows status", async (
   assert.match(frame, /你好/);
   assert.match(frame, /qwen/);
   assert.match(frame, /left/);
+  assert.match(plain(frame), /qwen[^\n]*\n╭/);
   unmount();
 });
 
-test("ChatApp separates the thinking indicator from the submitted user message", async () => {
+test("ChatApp shows model-waiting status separately from the submitted user message", async () => {
   const sink: Sink = { approved: [], rejected: [] };
   async function* send(): AsyncIterable<SessionEvent> {
     yield { type: "message-start", messageId: "m" };
@@ -134,7 +135,7 @@ test("ChatApp separates the thinking indicator from the submitted user message",
   stdin.write("\r");
   await delay(20);
 
-  assert.match(lastFrame() ?? "", /刚才我不小心取消了，你重来一下\n\n.*思考中…/s);
+  assert.match(plain(lastFrame() ?? ""), /刚才我不小心取消了，你重来一下\n.*等待模型响应…/s);
   unmount();
 });
 
@@ -235,6 +236,7 @@ test("ChatApp Esc 中断 token streaming", async () => {
     yield { type: "message-start", messageId: "m" };
     yield { type: "text-delta", delta: "尚未完成的输出" };
     await cancellation;
+    await delay(80);
     yield { type: "turn-cancelled", reason: "user", message: "已取消本轮。" };
   }
   const { stdin, lastFrame, unmount } = render(
@@ -254,6 +256,7 @@ test("ChatApp Esc 中断 token streaming", async () => {
 
   stdin.write("\x1b");
   await waitFor(() => assert.equal(sink.cancelled, 1));
+  await waitFor(() => assert.match(plain(lastFrame() ?? ""), /正在中断…/));
   await waitFor(() => assert.match(plain(lastFrame() ?? ""), /已取消本轮/));
   assert.doesNotMatch(plain(lastFrame() ?? ""), /尚未完成的输出/);
   unmount();
@@ -493,6 +496,83 @@ test("ChatApp dims reasoning and never shows literal think tags", async () => {
   assert.match(frame, /最终答案/);
   assert.match(frame, /内部思考/);
   assert.doesNotMatch(frame, /<\/think>/);
+  unmount();
+});
+
+test("ChatApp streams provider reasoning separately from tool activity", async () => {
+  const sink: Sink = { approved: [], rejected: [] };
+  let releaseReasoning: (() => void) | undefined;
+  let releaseTool: (() => void) | undefined;
+  const reasoningDone = new Promise<void>((resolve) => {
+    releaseReasoning = resolve;
+  });
+  const toolDone = new Promise<void>((resolve) => {
+    releaseTool = resolve;
+  });
+  async function* send(): AsyncIterable<SessionEvent> {
+    yield { type: "message-start", messageId: "m" };
+    yield { type: "reasoning-start", reasoningId: "r1" };
+    yield {
+      type: "reasoning-delta",
+      reasoningId: "r1",
+      delta: "先检查输入状态，再定位工具调用边界。",
+    };
+    await reasoningDone;
+    yield { type: "reasoning-end", reasoningId: "r1" };
+    yield {
+      type: "tool-call",
+      toolCallId: "c1",
+      agentName: "roll",
+      toolName: "search",
+      input: { query: "input state" },
+    };
+    await toolDone;
+    yield {
+      type: "tool-result",
+      toolCallId: "c1",
+      agentName: "roll",
+      toolName: "search",
+      output: "found",
+      isError: false,
+    };
+    yield { type: "text-delta", delta: "已经定位并修复。" };
+    yield { type: "message-finish", text: "已经定位并修复。" };
+  }
+  const { stdin, lastFrame, unmount } = render(
+    h(ChatApp, {
+      session: makeSession(send, sink),
+      model: "qwen",
+      contextWindow: undefined,
+      onUserSubmit: () => {},
+      onExit: () => {},
+    }),
+  );
+  await delay(10);
+  stdin.write("debug");
+  await delay(10);
+  stdin.write("\r");
+
+  await waitFor(() => {
+    const frame = plain(lastFrame() ?? "");
+    assert.match(frame, /思考中…/);
+    assert.match(frame, /先检查输入状态，再定位工具调用边界/);
+    assert.match(frame, /推理过程\n\s*│ 先检查输入状态，再定位工具调用边界。\n\n.*思考中…/s);
+    assert.match(frame, /思考中…[^\n]*\n╭/);
+    assert.doesNotMatch(frame, /roll\.search/);
+  });
+
+  releaseReasoning?.();
+  await waitFor(() => {
+    const frame = plain(lastFrame() ?? "");
+    assert.match(frame, /执行 roll\.search/);
+    assert.match(frame, /推理过程/);
+    assert.match(frame, /工具调用边界。\n\n\s+· roll\.search/);
+    assert.doesNotMatch(frame, /工具调用边界。\n\n\n/);
+    assert.ok(frame.indexOf("先检查输入状态") < frame.indexOf("roll.search"));
+  });
+
+  releaseTool?.();
+  await waitFor(() => assert.match(plain(lastFrame() ?? ""), /已经定位并修复/));
   unmount();
 });
 

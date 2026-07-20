@@ -25,14 +25,60 @@ test("submit-user commits a user bubble and goes busy", () => {
   assert.deepEqual(state.history, [{ kind: "user", id: "u1", text: "hello" }]);
 });
 
-test("text-delta accumulates streaming text and clears thinking", () => {
+test("message-start remains a neutral lifecycle event and text-delta accumulates output", () => {
   let state = createInitialState("qwen", undefined);
   state = event(state, "x", { type: "message-start", messageId: "m" });
-  assert.equal(state.live.thinking, true);
+  assert.equal(state.live.reasoningActive, false);
   state = event(state, "x", { type: "text-delta", delta: "Hel" });
   state = event(state, "x", { type: "text-delta", delta: "lo" });
-  assert.equal(state.live.thinking, false);
+  assert.equal(state.live.reasoningActive, false);
   assert.equal(state.live.streamingText, "Hello");
+});
+
+test("reasoning tokens stream separately and flush before a tool call", () => {
+  let state = createInitialState("qwen", undefined);
+  state = event(state, "rs", { type: "reasoning-start", reasoningId: "r1" });
+  state = event(state, "rd", {
+    type: "reasoning-delta",
+    reasoningId: "r1",
+    delta: "先定位代码路径",
+  });
+  assert.equal(state.live.reasoningActive, true);
+  assert.equal(state.live.reasoningText, "先定位代码路径");
+  assert.equal(state.live.streamingText, "");
+
+  state = event(state, "tc", {
+    type: "tool-call",
+    toolCallId: "c1",
+    agentName: "roll",
+    toolName: "search",
+    input: { query: "input" },
+  });
+
+  assert.deepEqual(state.history, [
+    { kind: "reasoning", id: "tc-reasoning", text: "先定位代码路径" },
+  ]);
+  assert.equal(state.live.reasoningActive, false);
+  assert.equal(state.live.reasoningText, "");
+  assert.equal(state.live.activeTools[0]?.name, "roll.search");
+});
+
+test("reasoning-end commits a dedicated block before the final assistant reply", () => {
+  let state = createInitialState("qwen", undefined);
+  state = event(state, "rs", { type: "reasoning-start", reasoningId: "r1" });
+  state = event(state, "rd", {
+    type: "reasoning-delta",
+    reasoningId: "r1",
+    delta: "验证边界",
+  });
+  state = event(state, "re", { type: "reasoning-end", reasoningId: "r1" });
+  state = event(state, "td", { type: "text-delta", delta: "结论" });
+  state = event(state, "mf", { type: "message-finish", text: "结论" });
+
+  assert.deepEqual(state.history, [
+    { kind: "reasoning", id: "re-reasoning", text: "验证边界" },
+    { kind: "assistant", id: "mf", text: "结论" },
+  ]);
 });
 
 test("tool-call adds a live row; tool-result commits it to history", () => {
@@ -375,6 +421,16 @@ test("turn-end returns to idle", () => {
   });
   state = chatReducer(state, { type: "turn-end" });
   assert.equal(state.phase, "idle");
+});
+
+test("cancel-requested exposes the pending cancellation phase", () => {
+  let state = chatReducer(createInitialState("qwen", undefined), {
+    type: "submit-user",
+    id: "u1",
+    text: "hi",
+  });
+  state = chatReducer(state, { type: "cancel-requested" });
+  assert.equal(state.phase, "cancelling");
 });
 
 test("createInitialState seeds provided history and thinking level", () => {

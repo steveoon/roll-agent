@@ -24,6 +24,13 @@ export type SessionEvent =
     }
   | { readonly type: "message-start"; readonly messageId: string }
   | { readonly type: "text-delta"; readonly delta: string }
+  | { readonly type: "reasoning-start"; readonly reasoningId: string }
+  | {
+      readonly type: "reasoning-delta";
+      readonly reasoningId: string;
+      readonly delta: string;
+    }
+  | { readonly type: "reasoning-end"; readonly reasoningId: string }
   | {
       readonly type: "tool-call";
       readonly toolCallId: string;

@@ -5,7 +5,7 @@ import { Box, Static, useInput } from "ink";
 import type { AgentSession } from "@roll-agent/runtime";
 import type { ThinkingLevel } from "../../../llm/providers.ts";
 import { useSession } from "./use-session.ts";
-import type { HistoryItem } from "./state.ts";
+import { CHAT_PHASES, type HistoryItem } from "./state.ts";
 import { HistoryItemView } from "./history-item.ts";
 import { LiveRegion } from "./live-region.ts";
 import { StatusLine } from "./status-line.ts";
@@ -23,6 +23,8 @@ import { bannerTextLine, type BannerLine } from "../banner.ts";
 import { BannerHistoryView } from "./banner-view.ts";
 import { cycleThinking } from "./thinking.ts";
 import { appendInputHistory } from "./input-history.ts";
+import { resolveTurnActivity } from "./turn-activity.ts";
+import { TurnStatusLine } from "./turn-status-line.ts";
 
 export interface ChatAppProps {
   readonly session: AgentSession;
@@ -86,14 +88,14 @@ export function ChatApp(props: ChatAppProps): ReactElement {
   }, [commitHistory]);
   const animatedBanner = bannerSettled ? undefined : props.animatedBanner;
   const [selected, setSelected] = useState(0);
-  const slashActive = state.phase === "idle" && state.draft.startsWith("/");
+  const slashActive = state.phase === CHAT_PHASES.idle && state.draft.startsWith("/");
   const slashPopupActive = slashActive && state.draft.split(/\s+/).at(-1)?.startsWith("/") === true;
   const matches = slashPopupActive ? filterSlashEntries(state.draft, availableSkills) : [];
   const maxIndex = Math.max(matches.length - 1, 0);
   const selectedIndex = Math.min(selected, maxIndex);
 
   useInput((input, key) => {
-    if (state.phase === "busy" && key.escape && !key.meta) {
+    if (state.phase === CHAT_PHASES.busy && key.escape && !key.meta) {
       cancel();
     } else if (key.tab && key.shift) {
       toggleAutoMode();
@@ -224,7 +226,7 @@ export function ChatApp(props: ChatAppProps): ReactElement {
   };
 
   const footer =
-    state.phase === "confirm" && state.pendingConfirm !== undefined
+    state.phase === CHAT_PHASES.confirm && state.pendingConfirm !== undefined
       ? h(ConfirmSelect, {
           prompt: state.pendingConfirm.prompt,
           args: state.pendingConfirm.args,
@@ -233,7 +235,10 @@ export function ChatApp(props: ChatAppProps): ReactElement {
       : h(TextPrompt, {
           value: state.draft,
           inputHistory,
-          disabled: state.phase !== "idle",
+          disabled: state.phase !== CHAT_PHASES.idle,
+          ...(state.phase === CHAT_PHASES.cancelling
+            ? { disabledHint: "中断请求已发送，等待当前活动退出…" }
+            : {}),
           slashActive,
           slashPopupActive,
           autoApprove: state.status.autoApprove,
@@ -243,14 +248,20 @@ export function ChatApp(props: ChatAppProps): ReactElement {
           onSlashComplete,
           onSlashRun,
         });
+  const turnActivity = resolveTurnActivity(state);
 
   return h(
     Box,
     { flexDirection: "column" },
     h(Static<HistoryItem>, {
       items: staticItems,
-      children: (historyItem) => {
-        const spaced = historyItem.kind === "user" || historyItem.kind === "assistant";
+      children: (historyItem, index) => {
+        const previousItem = staticItems[index - 1];
+        const spaced =
+          historyItem.kind === "user" ||
+          historyItem.kind === "assistant" ||
+          historyItem.kind === "reasoning" ||
+          previousItem?.kind === "reasoning";
         const indented =
           historyItem.kind === "tool" ||
           historyItem.kind === "denied" ||
@@ -270,7 +281,13 @@ export function ChatApp(props: ChatAppProps): ReactElement {
         )
       : null,
     h(Box, { marginLeft: 1 }, h(LiveRegion, { live: state.live })),
-    h(StatusLine, { status: state.status }),
+    h(
+      Box,
+      { marginTop: turnActivity === undefined ? 0 : 1 },
+      turnActivity === undefined
+        ? h(StatusLine, { status: state.status })
+        : h(TurnStatusLine, { activity: turnActivity }),
+    ),
     slashActive ? h(SlashPopup, { matches, selected: selectedIndex }) : null,
     footer,
   );

@@ -480,8 +480,28 @@ test("AgentSession 保持 thinking 但不持久化 reasoning-only 输出", async
     (event): event is Extract<SessionEvent, { type: "message-finish" }> =>
       event.type === "message-finish",
   );
+  const reasoningEvents = events.filter(
+    (
+      event,
+    ): event is Extract<
+      SessionEvent,
+      { type: "reasoning-start" | "reasoning-delta" | "reasoning-end" }
+    > =>
+      event.type === "reasoning-start" ||
+      event.type === "reasoning-delta" ||
+      event.type === "reasoning-end",
+  );
 
   assert.ok(finish);
+  assert.deepEqual(reasoningEvents, [
+    { type: "reasoning-start", reasoningId: "r" },
+    {
+      type: "reasoning-delta",
+      reasoningId: "r",
+      delta: "内部思考和被误放进 reasoning 的最终答复",
+    },
+    { type: "reasoning-end", reasoningId: "r" },
+  ]);
   assert.equal(finish.text, "");
   assert.equal(finish.totalUsage?.outputTokens, 3);
   assert.deepEqual(session.getMessages(), [{ role: "user", content: "hi" }]);
