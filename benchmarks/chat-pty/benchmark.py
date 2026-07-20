@@ -708,23 +708,25 @@ def run_scenario(scenario: str) -> tuple[dict[str, float | int | bool], PtyFixtu
                 "production CLI Ink application",
             )
             # The final banner frame can be visible just before React commits the
-            # settled layout. Wait for that transition, then type like a real user
-            # so the probe cannot be swallowed by the animation boundary.
+            # settled layout. Wait for that transition, then open the slash popup:
+            # it proves input routing and forces a parent-level Ink render instead
+            # of relying on a draft-only footer diff.
             fixture.wait_quiet(quiet_ms=120, timeout=2)
             fixture.send("\x15")
             fixture.drain_for(0.04)
-            for char in "ok":
-                fixture.send(char)
-                fixture.drain_for(0.015)
+            fixture.send("/")
             ready_ms = fixture.wait_for(
-                lambda screen: re.search(r"›\s+ok", screen) is not None,
+                lambda screen: re.search(r"›\s+/", screen) is not None
+                and "↑↓ 选择 · Tab 补全" in screen,
                 2,
-                "production CLI Ink key echo",
+                "production CLI Ink slash popup",
             )
             fixture.send("\x15")
             fixture.drain_for(0.04)
             fixture.wait_for(
-                lambda screen: PROMPT in screen and re.search(r"›\s+ok", screen) is None,
+                lambda screen: PROMPT in screen
+                and re.search(r"›\s+/", screen) is None
+                and "↑↓ 选择 · Tab 补全" not in screen,
                 2,
                 "production CLI Ink probe cleanup",
             )
