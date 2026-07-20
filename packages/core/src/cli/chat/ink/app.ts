@@ -22,6 +22,7 @@ import {
 import { bannerTextLine, type BannerLine } from "../banner.ts";
 import { BannerHistoryView } from "./banner-view.ts";
 import { cycleThinking } from "./thinking.ts";
+import { appendInputHistory } from "./input-history.ts";
 
 export interface ChatAppProps {
   readonly session: AgentSession;
@@ -44,6 +45,15 @@ function helpText(): string {
 export function ChatApp(props: ChatAppProps): ReactElement {
   const { session, model, contextWindow, onUserSubmit, onExit } = props;
   const availableSkills = props.availableSkills ?? [];
+  const [inputHistory, setInputHistory] = useState<readonly string[]>(() =>
+    (props.initialHistory ?? []).reduce<readonly string[]>(
+      (history, item) => (item.kind === "user" ? appendInputHistory(history, item.text) : history),
+      [],
+    ),
+  );
+  const rememberInput = useCallback((text: string): void => {
+    setInputHistory((history) => appendInputHistory(history, text));
+  }, []);
   const {
     state,
     submit,
@@ -100,6 +110,7 @@ export function ChatApp(props: ChatAppProps): ReactElement {
       setDraft("");
       return;
     }
+    rememberInput(text);
     // banner 需先于首条消息落入 Static，否则顺序颠倒
     handleBannerSettled();
     onUserSubmit(text);
@@ -110,6 +121,7 @@ export function ChatApp(props: ChatAppProps): ReactElement {
     handleBannerSettled();
     setDraft("");
     const text = raw.trim();
+    rememberInput(text);
     const parts = text.split(/\s+/);
     const name = parts[0] ?? "";
     const arg = (parts[1] ?? "").toLowerCase();
@@ -220,6 +232,7 @@ export function ChatApp(props: ChatAppProps): ReactElement {
         })
       : h(TextPrompt, {
           value: state.draft,
+          inputHistory,
           disabled: state.phase !== "idle",
           slashActive,
           slashPopupActive,

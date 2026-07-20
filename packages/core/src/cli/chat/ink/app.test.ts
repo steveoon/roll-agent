@@ -138,6 +138,44 @@ test("ChatApp separates the thinking indicator from the submitted user message",
   unmount();
 });
 
+test("ChatApp recalls recent submitted inputs with the up arrow", async () => {
+  const sink: Sink = { approved: [], rejected: [] };
+  const submitted: string[] = [];
+  async function* send(): AsyncIterable<SessionEvent> {
+    await delay(30);
+    yield { type: "message-finish", text: "" };
+  }
+  const { stdin, lastFrame, unmount } = render(
+    h(ChatApp, {
+      session: makeSession(send, sink),
+      model: "qwen",
+      contextWindow: undefined,
+      initialHistory: [{ kind: "user", id: "history-first", text: "first" }],
+      onUserSubmit: (text: string) => submitted.push(text),
+      onExit: () => {},
+    }),
+  );
+  await delay(10);
+
+  stdin.write("second");
+  await delay(10);
+  stdin.write("\r");
+  await waitFor(() => assert.deepEqual(submitted, ["second"]));
+  await waitFor(() => assert.match(plain(lastFrame() ?? ""), /Esc 中断本轮/));
+  await waitFor(() => assert.match(plain(lastFrame() ?? ""), /Enter 发送/));
+  await delay(30);
+
+  stdin.write("\x1b[A");
+  await delay(10);
+  stdin.write("\x1b[A");
+  await delay(10);
+  stdin.write("\r");
+  await waitFor(() => assert.deepEqual(submitted, ["second", "first"]));
+  await waitFor(() => assert.match(plain(lastFrame() ?? ""), /Esc 中断本轮/));
+  await waitFor(() => assert.match(plain(lastFrame() ?? ""), /Enter 发送/));
+  unmount();
+});
+
 for (const [label, escapeSequence] of [
   ["legacy VT", "\x1b"],
   ["kitty keyboard", "\x1b[27u"],

@@ -120,6 +120,73 @@ function offsetForColumn(value: string, start: number, end: number, column: numb
   return offset;
 }
 
+interface VisualLineBounds {
+  readonly start: number;
+  readonly end: number;
+  readonly softWrap: boolean;
+}
+
+function visualLineBounds(value: string, columns: number, cursor: number): VisualLineBounds[] {
+  const width = Math.max(1, Math.floor(columns));
+  const rows: VisualLineBounds[] = [];
+  let logicalStart = 0;
+  while (logicalStart <= value.length) {
+    const newlineIndex = value.indexOf("\n", logicalStart);
+    const logicalEnd = newlineIndex === -1 ? value.length : newlineIndex;
+    let rowStart = logicalStart;
+    let rowWidth = 0;
+    for (const segment of graphemeSegmenter.segment(value.slice(logicalStart, logicalEnd))) {
+      const offset = logicalStart + segment.index;
+      const segmentWidth = displayWidth(segment.segment);
+      if (rowWidth > 0 && rowWidth + segmentWidth > width) {
+        rows.push({ start: rowStart, end: offset, softWrap: true });
+        rowStart = offset;
+        rowWidth = 0;
+      }
+      rowWidth += segmentWidth;
+    }
+    const cursorWraps = cursor === logicalEnd && rowWidth >= width;
+    rows.push({ start: rowStart, end: logicalEnd, softWrap: cursorWraps });
+    if (cursorWraps) {
+      rows.push({ start: logicalEnd, end: logicalEnd, softWrap: false });
+    }
+    if (newlineIndex === -1) {
+      break;
+    }
+    logicalStart = newlineIndex + 1;
+  }
+  return rows;
+}
+
+function visualLineIndexAt(rows: readonly VisualLineBounds[], cursor: number): number {
+  for (const [index, row] of rows.entries()) {
+    if (cursor < row.end || (cursor === row.end && !row.softWrap)) {
+      return index;
+    }
+  }
+  return Math.max(0, rows.length - 1);
+}
+
+function moveVisualVertical(
+  state: LineBufferState,
+  direction: -1 | 1,
+  columns: number,
+): LineBufferState {
+  const rows = visualLineBounds(state.value, columns, state.cursor);
+  const currentIndex = visualLineIndexAt(rows, state.cursor);
+  const current = rows[currentIndex];
+  const target = rows[currentIndex + direction];
+  if (current === undefined || target === undefined) {
+    return state;
+  }
+  const goal = state.goalColumn ?? displayWidth(state.value.slice(current.start, state.cursor));
+  let cursor = offsetForColumn(state.value, target.start, target.end, goal);
+  if (target.softWrap && cursor === target.end && target.start < target.end) {
+    cursor = previousGraphemeBoundary(state.value, target.end);
+  }
+  return { value: state.value, cursor, goalColumn: goal };
+}
+
 function clearGoal(state: LineBufferState): LineBufferState {
   if (state.goalColumn === undefined) {
     return state;
@@ -273,4 +340,12 @@ export function moveDown(state: LineBufferState): LineBufferState {
     cursor: offsetForColumn(state.value, next.start, next.end, goal),
     goalColumn: goal,
   };
+}
+
+export function moveVisualUp(state: LineBufferState, columns: number): LineBufferState {
+  return moveVisualVertical(state, -1, columns);
+}
+
+export function moveVisualDown(state: LineBufferState, columns: number): LineBufferState {
+  return moveVisualVertical(state, 1, columns);
 }
