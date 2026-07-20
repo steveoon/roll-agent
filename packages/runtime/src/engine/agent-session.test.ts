@@ -914,10 +914,14 @@ test("AgentSession 用 MCP resourceHints 归一化跨 Agent 文件锁，同时�
     const root = mkdtempSync(join(tmpdir(), "roll-resource-lock-"));
     const realBase = join(root, "real");
     const aliasBase = join(root, "alias");
+    const futureRealBase = join(root, "future-real");
+    const danglingAliasBase = join(root, "future-alias");
     try {
       mkdirSync(realBase);
       symlinkSync(realBase, aliasBase, "dir");
       assert.equal(await runBatch("out.txt", join(realBase, "out.txt"), aliasBase, root), 1);
+      symlinkSync("future-real", danglingAliasBase, "dir");
+      assert.equal(await runBatch("out.txt", "out.txt", danglingAliasBase, futureRealBase), 1);
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
@@ -937,6 +941,12 @@ test("AgentSession 用 MCP resourceHints 归一化跨 Agent 文件锁，同时�
         caseInsensitive ? 1 : 2,
       );
     }
+    assert.equal(
+      await runBatch("straße.txt", "STRASSE.txt", caseRoot, caseRoot),
+      caseInsensitive ? 1 : 2,
+    );
+    assert.equal(await runBatch("ẞ.txt", "SS.txt", caseRoot, caseRoot), caseInsensitive ? 1 : 2);
+    assert.equal(await runBatch("straße-left.txt", "STRASSE-right.txt", caseRoot, caseRoot), 2);
   } finally {
     rmSync(caseRoot, { recursive: true, force: true });
   }
@@ -1190,6 +1200,127 @@ test("AgentSession cancel 同批执行中 Tool exactly-once，并允许下一轮
   assert.equal(modelCalls, 2);
 });
 
+test(
+  "AgentSession cancel 可中断悬挂的 dynamic capability context，且不调用 Provider",
+  { timeout: 1_000 },
+  async () => {
+    const resolverStarted = Promise.withResolvers<void>();
+    const neverResolves = new Promise<never>(() => {});
+    let resolverSignal: AbortSignal | undefined;
+    let modelCalls = 0;
+    const session = new AgentSession({
+      id: "dynamic-context-cancel",
+      model: new MockLanguageModelV4({
+        doStream: async () => {
+          modelCalls += 1;
+          return streamChunks(textStep("不应调用"));
+        },
+      }),
+      sources: [],
+      maxSteps: 2,
+      resolveDynamicCapabilityContext: (abortSignal) => {
+        resolverSignal = abortSignal;
+        resolverStarted.resolve();
+        return neverResolves;
+      },
+    });
+
+    const turn = collect(session.send("cancel while resolving context"));
+    await resolverStarted.promise;
+    assert.equal(session.cancel(), true);
+    const events = await turn;
+
+    assert.equal(resolverSignal?.aborted, true);
+    assert.equal(modelCalls, 0);
+    const cancelled = events.find((event) => event.type === "turn-cancelled");
+    assert.ok(cancelled && cancelled.type === "turn-cancelled");
+    assert.equal(cancelled.reason, "user");
+    assert.equal(
+      events.some((event) => event.type === "message-finish"),
+      false,
+    );
+  },
+);
+
+test(
+  "AgentSession turnTimeout 可结束悬挂的 dynamic capability context，且不调用 Provider",
+  { timeout: 1_000 },
+  async () => {
+    const neverResolves = new Promise<never>(() => {});
+    let modelCalls = 0;
+    const session = new AgentSession({
+      id: "dynamic-context-timeout",
+      model: new MockLanguageModelV4({
+        doStream: async () => {
+          modelCalls += 1;
+          return streamChunks(textStep("不应调用"));
+        },
+      }),
+      sources: [],
+      maxSteps: 2,
+      turnTimeoutMs: 30,
+      resolveDynamicCapabilityContext: () => neverResolves,
+    });
+
+    const events = await collect(session.send("timeout while resolving context"));
+
+    assert.equal(modelCalls, 0);
+    const cancelled = events.find((event) => event.type === "turn-cancelled");
+    assert.ok(cancelled && cancelled.type === "turn-cancelled");
+    assert.equal(cancelled.reason, "timeout");
+    assert.match(cancelled.message, /30ms/u);
+    assert.equal(
+      events.some((event) => event.type === "message-finish"),
+      false,
+    );
+  },
+);
+
+test(
+  "AgentSession cancel 写盘失败时回滚内存并报告 persistence error",
+  { timeout: 1_000 },
+  async () => {
+    const resolverStarted = Promise.withResolvers<void>();
+    const neverResolves = new Promise<never>(() => {});
+    let modelCalls = 0;
+    let persistCalls = 0;
+    const session = new AgentSession({
+      id: "dynamic-context-cancel-persist-failure",
+      model: new MockLanguageModelV4({
+        doStream: async () => {
+          modelCalls += 1;
+          return streamChunks(textStep("不应调用"));
+        },
+      }),
+      sources: [],
+      maxSteps: 2,
+      resolveDynamicCapabilityContext: () => {
+        resolverStarted.resolve();
+        return neverResolves;
+      },
+      onPersist: () => {
+        persistCalls += 1;
+        throw new Error("disk full");
+      },
+    });
+
+    const turn = collect(session.send("cancel before persistence"));
+    await resolverStarted.promise;
+    assert.equal(session.cancel(), true);
+    const events = await turn;
+
+    assert.equal(modelCalls, 0);
+    assert.equal(persistCalls, 1);
+    assert.deepEqual(session.getMessages(), []);
+    assert.equal(events.filter((event) => event.type === "turn-cancelled").length, 1);
+    const persistenceError = events.find(
+      (event): event is Extract<SessionEvent, { type: "error" }> => event.type === "error",
+    );
+    assert.equal(persistenceError?.stage, "execute");
+    assert.match(persistenceError?.message ?? "", /取消状态持久化失败: disk full/u);
+  },
+);
+
 test("AgentSession reject 后终止当前 turn，不让模型重复调用工具", async () => {
   let calls = 0;
   const model = sequencedModel([
@@ -1385,6 +1516,42 @@ test("AgentSession cancel 为执行中的 Tool exactly-once 记录 cancelled out
   if (record.input.encoding === "json") {
     assert.deepEqual(record.input.value, { q: "cancel-me" });
   }
+});
+
+test("AgentSession cancel 的 Tool ledger 写盘失败时仍回滚并上报取消", async () => {
+  let started = false;
+  let ledgerCalls = 0;
+  const session = new AgentSession({
+    id: "s6-tool-cancel-ledger-failure",
+    model: sequencedModel([
+      toolCallStep("slow-agent__slow", { q: "cancel-me" }),
+      textStep("不应到达"),
+    ]),
+    sources: [
+      abortableSource("slow-agent", "slow", () => {
+        started = true;
+        session.cancel();
+      }),
+    ],
+    maxSteps: 4,
+    onToolExecution: () => {
+      ledgerCalls += 1;
+      throw new Error("ledger full");
+    },
+  });
+
+  const events = await collect(session.send("run slow"));
+
+  assert.equal(started, true);
+  assert.equal(ledgerCalls, 1);
+  assert.deepEqual(session.getMessages(), []);
+  assert.deepEqual(session.getToolExecutions({}, true), []);
+  assert.equal(events.filter((event) => event.type === "turn-cancelled").length, 1);
+  const persistenceError = events.find(
+    (event): event is Extract<SessionEvent, { type: "error" }> => event.type === "error",
+  );
+  assert.equal(persistenceError?.stage, "execute");
+  assert.match(persistenceError?.message ?? "", /取消工具账本持久化失败: ledger full/u);
 });
 
 test("AgentSession turnTimeout 为执行中的 Tool exactly-once 记录 cancelled outcome", async () => {

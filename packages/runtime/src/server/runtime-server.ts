@@ -25,6 +25,15 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+/**
+ * JSON-RPC host for trusted local transports.
+ *
+ * This class performs no authentication, authorization, or tenant-ownership checks;
+ * the entire `JsonRpcConnection` must therefore be trusted. `session.toolExecutions`
+ * defaults to a redacted projection, but `includeRaw: true` returns unredacted forensic
+ * evidence. Custom network or multi-tenant transports must enforce those boundaries
+ * before forwarding any request to this class.
+ */
 export class RuntimeServer {
   private readonly engine: ConversationEngine;
   private readonly connection: JsonRpcConnection;

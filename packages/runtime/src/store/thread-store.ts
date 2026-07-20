@@ -103,9 +103,21 @@ export interface ListTranscriptMessagesOptions {
   readonly limit?: number;
 }
 
+export interface CompactionEvidenceWatermarks {
+  /** Highest append-only transcript sequence that was visible while building the draft. */
+  readonly transcriptMessagesThroughSequence: number;
+  /** Highest append-only Tool execution sequence that was visible while building the draft. */
+  readonly toolExecutionsThroughSequence: number;
+}
+
 export interface CommitCompactionInput {
   readonly messages: readonly ModelMessage[];
+  /** Active projection observed while the checkpoint draft was built. */
+  readonly expectedActiveMessages: readonly ModelMessage[];
+  /** Latest checkpoint observed while the checkpoint draft was built. */
+  readonly expectedLatestCheckpointId: string | undefined;
   readonly draft: CompactionCheckpointDraftInput;
+  readonly evidenceWatermarks: CompactionEvidenceWatermarks;
 }
 
 export interface ThreadSessionState {
@@ -699,6 +711,9 @@ export class ThreadStore {
       throw new Error(`Thread "${threadId}" 不存在`);
     }
     const messages = input.messages.map((message) => modelMessageSchema.parse(message));
+    const expectedActiveMessages = input.expectedActiveMessages.map((message) =>
+      modelMessageSchema.parse(message),
+    );
     const activeProjection = repairActiveToolProtocol(messages);
     if (activeProjection.status !== ACTIVE_TOOL_PROTOCOL_REPAIR_STATUS.valid) {
       const malformedIds = [
@@ -716,7 +731,18 @@ export class ThreadStore {
 
     this.db.exec("BEGIN IMMEDIATE");
     try {
+      const currentActiveMessages = repairActiveToolProtocol(this.getMessages(threadId)).messages;
+      if (JSON.stringify(currentActiveMessages) !== JSON.stringify(expectedActiveMessages)) {
+        throw new Error(
+          "Compaction active projection changed after the draft snapshot was captured",
+        );
+      }
       const previous = this.getLatestCheckpoint(threadId);
+      if (previous?.id !== input.expectedLatestCheckpointId) {
+        throw new Error(
+          "Compaction checkpoint ancestry changed after the draft snapshot was captured",
+        );
+      }
       const lastValidSummaryCheckpoint = this.getLatestSummaryCheckpoint(threadId);
       const summary = linkLastValidSummaryCheckpoint(
         parsedDraft.summary,
@@ -730,15 +756,37 @@ export class ThreadStore {
             WHERE thread_id = ?`,
         )
         .get(threadId) as { readonly maxGeneration: number };
-      const messageHighWatermark = this.maxTranscriptMessageSequence(threadId);
-      const toolHighWatermark = this.maxToolExecutionSequence(threadId);
+      const currentMessageHighWatermark = this.maxTranscriptMessageSequence(threadId);
+      const currentToolHighWatermark = this.maxToolExecutionSequence(threadId);
+      const messageHighWatermark = input.evidenceWatermarks.transcriptMessagesThroughSequence;
+      const toolHighWatermark = input.evidenceWatermarks.toolExecutionsThroughSequence;
+      const previousMessageHighWatermark = previous?.transcript.messages.throughSequence ?? -1;
+      const previousToolHighWatermark = previous?.transcript.toolExecutions.throughSequence ?? -1;
+      if (
+        !Number.isInteger(messageHighWatermark) ||
+        messageHighWatermark < previousMessageHighWatermark ||
+        messageHighWatermark > currentMessageHighWatermark
+      ) {
+        throw new Error(
+          `Compaction transcript message watermark ${String(messageHighWatermark)} is outside the available range ${String(previousMessageHighWatermark)}-${String(currentMessageHighWatermark)}`,
+        );
+      }
+      if (
+        !Number.isInteger(toolHighWatermark) ||
+        toolHighWatermark < previousToolHighWatermark ||
+        toolHighWatermark > currentToolHighWatermark
+      ) {
+        throw new Error(
+          `Compaction tool execution watermark ${String(toolHighWatermark)} is outside the available range ${String(previousToolHighWatermark)}-${String(currentToolHighWatermark)}`,
+        );
+      }
       const transcript: CompactionTranscript = {
         messages: {
-          fromSequenceExclusive: previous?.transcript.messages.throughSequence ?? -1,
+          fromSequenceExclusive: previousMessageHighWatermark,
           throughSequence: messageHighWatermark,
         },
         toolExecutions: {
-          fromSequenceExclusive: previous?.transcript.toolExecutions.throughSequence ?? -1,
+          fromSequenceExclusive: previousToolHighWatermark,
           throughSequence: toolHighWatermark,
         },
         completeness: this.getTranscriptCompleteness(threadId),

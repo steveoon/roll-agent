@@ -71,6 +71,7 @@ import {
   type ToolExecutionRecord,
 } from "../tool-bridge/tool-execution-record.ts";
 import type {
+  CompactionEvidenceWatermarks,
   CommitCompactionInput,
   ListToolExecutionsOptions,
   ListTranscriptMessagesOptions,
@@ -166,9 +167,9 @@ export interface AgentSessionOptions {
    */
   readonly systemPrompt?: string;
   readonly capabilityContext?: AgentSessionCapabilityContext;
-  readonly resolveDynamicCapabilityContext?: () =>
-    | CapabilityExternalDynamicContext
-    | Promise<CapabilityExternalDynamicContext>;
+  readonly resolveDynamicCapabilityContext?: (
+    abortSignal: AbortSignal,
+  ) => CapabilityExternalDynamicContext | Promise<CapabilityExternalDynamicContext>;
   readonly skillLibrary?: SkillLibrary;
   readonly bash?: SessionBashSettings;
   readonly bashClassifier?: CommandClassifier;
@@ -225,6 +226,7 @@ interface ActiveTurn {
   readonly pendingToolCalls: Map<string, PendingToolCall>;
   aborted: boolean;
   cancellationEventEmitted: boolean;
+  cancellationPersistenceAttempted: boolean;
   cancellationPersisted: boolean;
   cancellationReason?: SessionCancellationReason;
 }
@@ -235,6 +237,13 @@ interface PendingToolCall {
   readonly toolName: string;
   readonly input: unknown;
   readonly resources: readonly ToolResourceAccess[];
+}
+
+interface CompactionDraftSnapshot {
+  readonly draft: CompactionCheckpointDraftInput;
+  readonly expectedActiveMessages: readonly ModelMessage[];
+  readonly expectedLatestCheckpointId: string | undefined;
+  readonly evidenceWatermarks: CompactionEvidenceWatermarks;
 }
 
 const SESSION_CLOSE_TIMEOUT_MS = 6_000;
@@ -252,12 +261,38 @@ function createActiveTurn(): ActiveTurn {
     pendingToolCalls: new Map<string, PendingToolCall>(),
     aborted: false,
     cancellationEventEmitted: false,
+    cancellationPersistenceAttempted: false,
     cancellationPersisted: false,
   };
 }
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function awaitAbortable<T>(value: T | PromiseLike<T>, abortSignal: AbortSignal): Promise<T> {
+  if (abortSignal.aborted) {
+    return Promise.reject(abortSignal.reason);
+  }
+
+  return new Promise<T>((resolve, reject) => {
+    let settled = false;
+    const settle = (callback: () => void): void => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      abortSignal.removeEventListener("abort", onAbort);
+      callback();
+    };
+    const onAbort = (): void => settle(() => reject(abortSignal.reason));
+
+    abortSignal.addEventListener("abort", onAbort, { once: true });
+    Promise.resolve(value).then(
+      (resolved) => settle(() => resolve(resolved)),
+      (error: unknown) => settle(() => reject(error)),
+    );
+  });
 }
 
 function toolOutputMessage(value: unknown): string {
@@ -459,7 +494,7 @@ export class AgentSession {
   private readonly explicitSystemPrompt: string | undefined;
   private capabilityContext: AgentSessionCapabilityContext;
   private readonly resolveDynamicCapabilityContext:
-    | (() => CapabilityExternalDynamicContext | Promise<CapabilityExternalDynamicContext>)
+    | NonNullable<AgentSessionOptions["resolveDynamicCapabilityContext"]>
     | undefined;
   private capabilityManifest: EffectiveCapabilityManifest;
   private lastCapabilityTurnContext: EffectiveCapabilityTurnContext | undefined;
@@ -823,8 +858,22 @@ export class AgentSession {
           : rawUserMessage;
       let externalDynamicContext: CapabilityExternalDynamicContext = {};
       try {
-        externalDynamicContext = (await this.resolveDynamicCapabilityContext?.()) ?? {};
+        externalDynamicContext =
+          (await awaitAbortable(
+            this.resolveDynamicCapabilityContext?.(activeTurn.abortController.signal) ?? {},
+            activeTurn.abortController.signal,
+          )) ?? {};
       } catch (error) {
+        if (this.isTurnAborted(activeTurn)) {
+          turnStart = this.messages.length;
+          this.messages.push(storedUserMessage);
+          activeTurn.cancellationReason = resolveCancellationReason(
+            activeTurn.cancellationReason,
+            activeTurn.abortController.signal.reason ?? error,
+          );
+          this.persistCancelledTurn(queue, activeTurn, turnStart, [], turnStartedAt);
+          return;
+        }
         this.debug(queue, "turn", "dynamic capability context unavailable", turnStartedAt, {
           message: errorMessage(error),
         });
@@ -1640,8 +1689,9 @@ export class AgentSession {
     return undefined;
   }
 
-  private buildCompactionDraft(summary: CompactionSummary): CompactionCheckpointDraftInput {
+  private buildCompactionDraft(summary: CompactionSummary): CompactionDraftSnapshot {
     const transcript = this.listCompactionTranscriptEvidence();
+    const toolExecutions = this.listCompactionToolEvidence();
     const completeness =
       this.compactionCheckpoint?.transcript.completeness === "legacy_snapshot" ||
       transcript.some((entry) => entry.provenance === "legacy_snapshot")
@@ -1661,27 +1711,41 @@ export class AgentSession {
     );
     const toolState = buildCompactionToolState(
       transcript.map((entry) => entry.message),
-      this.listCompactionToolEvidence(),
+      toolExecutions,
       32,
       completeness,
     );
     return {
-      ...(goal ? { goal } : {}),
-      constraints: [...constraints],
-      resources: [...this.compactionResources.values()].slice(-256),
-      toolState,
-      runningWork: [...this.currentCompactionRunningWork()],
-      context: {
-        cwd: this.capabilityManifest.dynamicContext.cwd,
-        stableRuleIds: [...this.capabilityManifest.stableContext.rules],
-        systemPromptSha256: createHash("sha256").update(this.systemPrompt).digest("hex"),
-        skills: this.capabilityManifest.skills.map((skill) => ({
-          name: skill.name,
-          source: skill.source,
-        })),
-        explicitSkillNames: [...this.latestExplicitSkillNames(transcript, newGoalSourceSequence)],
+      draft: {
+        ...(goal ? { goal } : {}),
+        constraints: [...constraints],
+        resources: [...this.compactionResources.values()].slice(-256),
+        toolState,
+        runningWork: [...this.currentCompactionRunningWork()],
+        context: {
+          cwd: this.capabilityManifest.dynamicContext.cwd,
+          stableRuleIds: [...this.capabilityManifest.stableContext.rules],
+          systemPromptSha256: createHash("sha256").update(this.systemPrompt).digest("hex"),
+          skills: this.capabilityManifest.skills.map((skill) => ({
+            name: skill.name,
+            source: skill.source,
+          })),
+          explicitSkillNames: [...this.latestExplicitSkillNames(transcript, newGoalSourceSequence)],
+        },
+        summary,
       },
-      summary,
+      expectedActiveMessages: [...this.messages],
+      expectedLatestCheckpointId: this.compactionCheckpoint?.id,
+      evidenceWatermarks: {
+        transcriptMessagesThroughSequence: Math.max(
+          this.compactionCheckpoint?.transcript.messages.throughSequence ?? -1,
+          transcript.at(-1)?.sequence ?? -1,
+        ),
+        toolExecutionsThroughSequence: Math.max(
+          this.compactionCheckpoint?.transcript.toolExecutions.throughSequence ?? -1,
+          toolExecutions.at(-1)?.sequence ?? -1,
+        ),
+      },
     };
   }
 
@@ -1807,9 +1871,13 @@ export class AgentSession {
     let checkpoint: CompactionCheckpoint | undefined;
     if (progressed) {
       if (this.commitPersistedCompaction !== undefined) {
+        const snapshot = this.buildCompactionDraft(summary);
         checkpoint = this.commitPersistedCompaction({
           messages: activeMessages,
-          draft: this.buildCompactionDraft(summary),
+          expectedActiveMessages: snapshot.expectedActiveMessages,
+          expectedLatestCheckpointId: snapshot.expectedLatestCheckpointId,
+          draft: snapshot.draft,
+          evidenceWatermarks: snapshot.evidenceWatermarks,
         });
       } else {
         this.onReplace?.(activeMessages);
@@ -1948,22 +2016,45 @@ export class AgentSession {
     completedResponseMessages: readonly ModelMessage[],
     turnStartedAt: number,
   ): void {
-    this.persistPendingToolCancellations(activeTurn);
+    try {
+      this.persistPendingToolCancellations(activeTurn);
+    } catch (error) {
+      this.messages.splice(turnStart);
+      activeTurn.cancellationPersistenceAttempted = true;
+      queue.push({
+        type: "error",
+        stage: "execute",
+        message: `取消工具账本持久化失败: ${errorMessage(error)}`,
+      });
+      this.emitCancellation(queue, activeTurn);
+      return;
+    }
     if (this.closed) {
       this.messages.splice(turnStart);
+      activeTurn.cancellationPersistenceAttempted = true;
       activeTurn.cancellationPersisted = true;
       this.emitCancellation(queue, activeTurn);
       return;
     }
-    if (!activeTurn.cancellationPersisted) {
+    if (!activeTurn.cancellationPersistenceAttempted) {
+      activeTurn.cancellationPersistenceAttempted = true;
       this.messages.splice(turnStart + 1);
       this.messages.push(...stripReasoningMessages(completedResponseMessages));
       this.messages.push({ role: "assistant", content: this.cancellationMessage(activeTurn) });
-      activeTurn.cancellationPersisted = true;
       this.debug(queue, "persist", "persisting cancelled turn", turnStartedAt, {
         appendedMessages: this.messages.length - turnStart,
       });
-      this.onPersist?.(this.messages.slice(turnStart));
+      try {
+        this.onPersist?.(this.messages.slice(turnStart));
+        activeTurn.cancellationPersisted = true;
+      } catch (error) {
+        this.messages.splice(turnStart);
+        queue.push({
+          type: "error",
+          stage: "execute",
+          message: `取消状态持久化失败: ${errorMessage(error)}`,
+        });
+      }
     }
     this.emitCancellation(queue, activeTurn);
   }

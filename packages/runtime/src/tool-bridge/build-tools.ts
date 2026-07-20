@@ -1,4 +1,4 @@
-import { lstatSync, readdirSync, realpathSync, statSync } from "node:fs";
+import { lstatSync, readdirSync, readlinkSync, realpathSync, statSync } from "node:fs";
 import { basename, dirname, isAbsolute, resolve } from "node:path";
 import { jsonSchema, tool, type ToolExecutionOptions, type ToolSet } from "ai";
 import type { JSONSchema7 } from "@ai-sdk/provider";
@@ -164,7 +164,7 @@ function hasCaseInsensitiveLookups(directory: string): boolean {
   try {
     device = lstatSync(directory).dev;
   } catch {
-    return rememberDirectoryCaseSensitivity(directory, false);
+    return rememberDirectoryCaseSensitivity(directory, true);
   }
 
   let candidateDirectory = directory;
@@ -200,10 +200,47 @@ function hasCaseInsensitiveLookups(directory: string): boolean {
     }
     candidateDirectory = parent;
   }
-  return rememberDirectoryCaseSensitivity(directory, false);
+  // An empty or non-letter-only filesystem gives us no observable casing probe.
+  // Treat that unknown state as case-insensitive so equivalent write paths cannot race.
+  return rememberDirectoryCaseSensitivity(directory, true);
 }
 
-function canonicalFileResourcePath(path: string): string {
+interface CanonicalFileResource {
+  readonly path: string;
+  readonly unresolvedAliasKey?: string;
+}
+
+function unicodeCaseFold(value: string): string {
+  // Some folds expand over more than one pass (for example ẞ -> ß -> ss).
+  let folded = value.normalize("NFC");
+  for (let pass = 0; pass < 8; pass += 1) {
+    const next = folded.toUpperCase().toLowerCase().normalize("NFC");
+    if (next === folded) {
+      return folded;
+    }
+    folded = next;
+  }
+  return folded;
+}
+
+function unresolvedFileAliasKey(
+  canonicalAncestor: string,
+  canonicalSuffix: readonly string[],
+): string | undefined {
+  try {
+    const identity = statSync(canonicalAncestor, { bigint: true });
+    const foldedSuffix = canonicalSuffix.map((segment) => unicodeCaseFold(segment));
+    // Scope the guard to one folded future path, rather than serializing the whole directory.
+    return `file-unresolved-alias:${identity.dev.toString()}:${identity.ino.toString()}:${JSON.stringify(foldedSuffix)}`;
+  } catch {
+    return undefined;
+  }
+}
+
+function canonicalFileResourcePath(
+  path: string,
+  visitedSymlinks: ReadonlySet<string> = new Set<string>(),
+): CanonicalFileResource {
   let ancestor = path;
   const suffix: string[] = [];
   while (true) {
@@ -211,18 +248,39 @@ function canonicalFileResourcePath(path: string): string {
       const canonicalAncestor = realpathSync.native(ancestor);
       const canonicalSuffix = suffix.reverse().map((segment) => segment.normalize("NFC"));
       if (canonicalSuffix.length === 0) {
-        return canonicalAncestor;
+        return { path: canonicalAncestor };
       }
-      return resolve(
+      const caseInsensitive = hasCaseInsensitiveLookups(canonicalAncestor);
+      const canonicalPath = resolve(
         canonicalAncestor,
-        ...(hasCaseInsensitiveLookups(canonicalAncestor)
+        ...(caseInsensitive
           ? canonicalSuffix.map((segment) => segment.toLowerCase())
           : canonicalSuffix),
       );
+      const unresolvedAliasKey = caseInsensitive
+        ? unresolvedFileAliasKey(canonicalAncestor, canonicalSuffix)
+        : undefined;
+      return {
+        path: canonicalPath,
+        ...(unresolvedAliasKey === undefined ? {} : { unresolvedAliasKey }),
+      };
     } catch {
+      try {
+        if (lstatSync(ancestor).isSymbolicLink() && !visitedSymlinks.has(ancestor)) {
+          const nextVisitedSymlinks = new Set(visitedSymlinks);
+          nextVisitedSymlinks.add(ancestor);
+          const target = readlinkSync(ancestor);
+          return canonicalFileResourcePath(
+            resolve(dirname(ancestor), target, ...[...suffix].reverse()),
+            nextVisitedSymlinks,
+          );
+        }
+      } catch {
+        // Keep walking to the nearest existing ancestor when this path is not a symlink.
+      }
       const parent = dirname(ancestor);
       if (parent === ancestor) {
-        return path;
+        return { path };
       }
       suffix.push(basename(ancestor));
       ancestor = parent;
@@ -253,9 +311,13 @@ function hintedResourceKey(
       if (!isAbsolute(normalized) && resourceBaseDir === undefined) {
         return undefined;
       }
-      const path = canonicalFileResourcePath(resolve(resourceBaseDir ?? "/", normalized));
-      const identityKey = existingFileIdentityKey(path);
-      return [`file:${path}`, ...(identityKey === undefined ? [] : [identityKey])];
+      const resource = canonicalFileResourcePath(resolve(resourceBaseDir ?? "/", normalized));
+      const identityKey = existingFileIdentityKey(resource.path);
+      return [
+        `file:${resource.path}`,
+        ...(resource.unresolvedAliasKey === undefined ? [] : [resource.unresolvedAliasKey]),
+        ...(identityKey === undefined ? [] : [identityKey]),
+      ];
     }
     case TOOL_RESOURCE_HINT_KINDS.browserSession:
       return [`browser-session:${normalized}`];

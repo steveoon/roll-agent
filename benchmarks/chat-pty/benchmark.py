@@ -24,6 +24,7 @@ import sys
 import termios
 import tempfile
 import time
+import traceback
 import unicodedata
 from dataclasses import dataclass
 from typing import Callable, Iterable, Mapping
@@ -46,6 +47,7 @@ SCENARIOS = (
     "idle",
 )
 PROMPT = "›"
+TERMINAL_QUERIES = (b"\x1b[?u", b"\x1b[6n", b"\x1b[c")
 
 REQUIRED_BASELINE_METRICS: Mapping[str, tuple[str, ...]] = {
     "cli-bootstrap": ("cliBootstrapReadyMs",),
@@ -322,6 +324,21 @@ class MarkerObservation:
     duplicates: tuple[int, ...]
 
 
+class ScenarioFailure(RuntimeError):
+    def __init__(
+        self,
+        scenario: str,
+        fixture: "PtyFixture",
+        final_screen: str,
+        failure_reason: str,
+    ) -> None:
+        super().__init__(f"PTY scenario {scenario!r} failed")
+        self.scenario = scenario
+        self.fixture = fixture
+        self.final_screen = final_screen
+        self.failure_reason = failure_reason
+
+
 class PtyFixture:
     def __init__(self, scenario: str, columns: int = 100, rows: int = 36) -> None:
         master, slave = os.openpty()
@@ -333,6 +350,7 @@ class PtyFixture:
         self.last_screen = ""
         self.closed = False
         self.scenario = scenario
+        self._terminal_query_tail = b""
         self._temporary_directory: tempfile.TemporaryDirectory[str] | None = None
         self._set_winsize(slave, columns, rows)
         env = {
@@ -415,18 +433,44 @@ class PtyFixture:
             pass
 
     def _respond_to_terminal_queries(self, chunk: bytes) -> None:
-        responses: list[bytes] = []
-        if b"\x1b[?u" in chunk:
-            responses.append(b"\x1b[?0u")
-        if b"\x1b[6n" in chunk:
-            responses.append(f"\x1b[{self.screen.y + 1};{self.screen.x + 1}R".encode())
-        if b"\x1b[c" in chunk:
-            responses.append(b"\x1b[?1;2c")
-        for response in responses:
+        combined = self._terminal_query_tail + chunk
+        tail_length = len(self._terminal_query_tail)
+        matches: list[tuple[int, bytes]] = []
+        for query in TERMINAL_QUERIES:
+            offset = 0
+            while True:
+                index = combined.find(query, offset)
+                if index < 0:
+                    break
+                end_in_chunk = index + len(query) - tail_length
+                if end_in_chunk > 0:
+                    matches.append((end_in_chunk, query))
+                offset = index + len(query)
+
+        self._terminal_query_tail = b""
+        for length in range(1, max(len(query) for query in TERMINAL_QUERIES)):
+            suffix = combined[-length:]
+            if any(
+                len(suffix) < len(query) and query.startswith(suffix)
+                for query in TERMINAL_QUERIES
+            ):
+                self._terminal_query_tail = suffix
+
+        chunk_offset = 0
+        for end_in_chunk, query in sorted(matches, key=lambda match: match[0]):
+            self.screen.feed(chunk[chunk_offset:end_in_chunk])
+            chunk_offset = end_in_chunk
+            if query == b"\x1b[?u":
+                response = b"\x1b[?0u"
+            elif query == b"\x1b[6n":
+                response = f"\x1b[{self.screen.y + 1};{self.screen.x + 1}R".encode()
+            else:
+                response = b"\x1b[?1;2c"
             try:
                 os.write(self.master, response)
             except OSError:
-                return
+                break
+        self.screen.feed(chunk[chunk_offset:])
 
     def pump(self, timeout: float) -> bool:
         if self.closed:
@@ -448,8 +492,9 @@ class PtyFixture:
                 break
             elapsed = self.elapsed_ms()
             self.raw_events.append((elapsed, chunk))
+            # A real terminal answers each query after applying only the bytes that
+            # precede it. PTY chunk boundaries do not preserve that ordering for us.
             self._respond_to_terminal_queries(chunk)
-            self.screen.feed(chunk)
             rendered = self.screen.render()
             if rendered != self.last_screen:
                 self.last_screen = rendered
@@ -786,9 +831,22 @@ def run_scenario(scenario: str) -> tuple[dict[str, float | int | bool], PtyFixtu
             return idle_result, fixture
 
         raise AssertionError(f"unknown scenario: {scenario}")
-    except Exception:
-        fixture.force_close()
-        raise
+    except Exception as error:
+        final_screen = fixture.screen.render()
+        failure_reason = "".join(traceback.format_exception(error)).rstrip()
+        try:
+            fixture.force_close()
+        except Exception as cleanup_error:
+            failure_reason += (
+                "\n\nPTY cleanup also failed:\n"
+                + "".join(traceback.format_exception(cleanup_error)).rstrip()
+            )
+        raise ScenarioFailure(
+            scenario,
+            fixture,
+            final_screen,
+            failure_reason,
+        ) from error
 
 
 def save_artifacts(
@@ -797,6 +855,7 @@ def save_artifacts(
     sample: int,
     fixture: PtyFixture,
     final_screen: str,
+    failure_reason: str | None = None,
 ) -> dict[str, str]:
     def display_path(path: Path) -> str:
         try:
@@ -809,6 +868,7 @@ def save_artifacts(
     ansi_path = artifact_dir / f"{stem}.ansi"
     frames_path = artifact_dir / f"{stem}.frames.jsonl"
     screen_path = artifact_dir / f"{stem}.screen.txt"
+    failure_path = artifact_dir / f"{stem}.failure.txt"
     ansi_path.write_bytes(b"".join(chunk for _, chunk in fixture.raw_events))
     with frames_path.open("w", encoding="utf-8") as handle:
         for elapsed_ms, chunk in fixture.raw_events:
@@ -825,11 +885,15 @@ def save_artifacts(
     # Keep the correctness artifact identical to the snapshot whose hash is in
     # results.json. Raw ANSI/frames intentionally include teardown for debugging.
     screen_path.write_text(final_screen, encoding="utf-8")
-    return {
+    artifacts = {
         "ansi": display_path(ansi_path),
         "frames": display_path(frames_path),
         "screen": display_path(screen_path),
     }
+    if failure_reason is not None:
+        failure_path.write_text(failure_reason.rstrip() + "\n", encoding="utf-8")
+        artifacts["failure"] = display_path(failure_path)
+    return artifacts
 
 
 def aggregate(samples: list[dict[str, object]]) -> dict[str, object]:
@@ -987,12 +1051,51 @@ def main() -> int:
     scenario_results: dict[str, object] = {}
     started = time.time()
 
+    def persist_failure(failure: ScenarioFailure, sample_index: int) -> int:
+        artifacts = save_artifacts(
+            artifact_dir,
+            failure.scenario,
+            sample_index,
+            failure.fixture,
+            failure.final_screen,
+            failure.failure_reason,
+        )
+        print(
+            f"PTY SCENARIO FAILED: {failure.scenario} sample {sample_index + 1}\n"
+            f"{failure.failure_reason}\n"
+            f"artifacts: {json.dumps(artifacts, ensure_ascii=False)}",
+            file=sys.stderr,
+        )
+        return 1
+
     for scenario in selected:
         samples: list[dict[str, object]] = []
         for sample_index in range(args.samples):
-            metrics, fixture = run_scenario(scenario)
+            try:
+                metrics, fixture = run_scenario(scenario)
+            except ScenarioFailure as failure:
+                return persist_failure(failure, sample_index)
             final_screen = fixture.screen.render()
-            fixture.exit_cleanly()
+            try:
+                fixture.exit_cleanly()
+            except Exception as error:
+                failure_reason = "".join(traceback.format_exception(error)).rstrip()
+                try:
+                    fixture.force_close()
+                except Exception as cleanup_error:
+                    failure_reason += (
+                        "\n\nPTY cleanup also failed:\n"
+                        + "".join(traceback.format_exception(cleanup_error)).rstrip()
+                    )
+                return persist_failure(
+                    ScenarioFailure(
+                        scenario,
+                        fixture,
+                        final_screen,
+                        failure_reason,
+                    ),
+                    sample_index,
+                )
             sample_result: dict[str, object] = {
                 **metrics,
                 "finalScreenSha256": hashlib.sha256(final_screen.encode()).hexdigest(),

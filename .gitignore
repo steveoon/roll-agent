@@ -2,6 +2,8 @@ node_modules/
 .pnpm-store/
 dist/
 coverage/
+__pycache__/
+*.pyc
 /outputs/
 /projects/
 .tmp-location-preview-report.json

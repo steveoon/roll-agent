@@ -39,6 +39,8 @@ tail latency from aggregate sample duration.
 Results use schema version 2 and suite name `roll-chat-real-pty`. They are written to
 `outputs/chat-pty/results.json`; raw ANSI bytes, timestamped base64 chunks, and the reconstructed final
 screen are saved beside the result for CI artifact upload.
+If a scenario fails, the harness still writes its raw ANSI stream, timestamped frames, reconstructed
+screen, and traceback before returning a non-zero status, so CI failures remain diagnosable.
 
 Baseline comparison is fail-closed. A supplied baseline must:
 

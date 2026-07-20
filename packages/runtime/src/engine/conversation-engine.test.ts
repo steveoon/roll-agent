@@ -1130,6 +1130,14 @@ test("ConversationEngine 原子提交 checkpoint，并在 resume 时注入受控
     assert.equal(checkpoint.goal?.verbatimRequest, "current-goal");
     assert.deepEqual(checkpoint.constraints, []);
     assert.equal(checkpoint.transcript.completeness, "complete");
+    assert.deepEqual(checkpoint.transcript.messages, {
+      fromSequenceExclusive: -1,
+      throughSequence: 3,
+    });
+    assert.deepEqual(checkpoint.transcript.toolExecutions, {
+      fromSequenceExclusive: -1,
+      throughSequence: -1,
+    });
     assert.deepEqual(store.getMessages(threadId), [
       { role: "user", content: "current-goal" },
       { role: "assistant", content: "current-answer" },
@@ -1386,6 +1394,8 @@ test("ConversationEngine 资源 checkpoint 按最近成功触达淘汰并保留 
     }));
     store.commitCompaction(threadId, {
       messages: [],
+      expectedActiveMessages: [],
+      expectedLatestCheckpointId: undefined,
       draft: {
         constraints: [],
         resources: seededResources,
@@ -1398,6 +1408,10 @@ test("ConversationEngine 资源 checkpoint 按最近成功触达淘汰并保留 
           explicitSkillNames: [],
         },
         summary: { status: "skipped" },
+      },
+      evidenceWatermarks: {
+        transcriptMessagesThroughSequence: -1,
+        toolExecutionsThroughSequence: -1,
       },
     });
     const engine = new ConversationEngine({
@@ -1743,7 +1757,8 @@ test("ConversationEngine 每 Turn 刷新 VCS context，而不重建稳定 capabi
     model: textModelCapture((options) => prompts.push(JSON.stringify(options.prompt))),
     sources: [],
     skillLibrary: null,
-    resolveDynamicCapabilityContext: () => {
+    resolveDynamicCapabilityContext: (abortSignal) => {
+      assert.equal(abortSignal.aborted, false);
       rulesResolution += 1;
       return { ruleIds: [`workspace/rules-v${String(rulesResolution)}`] };
     },

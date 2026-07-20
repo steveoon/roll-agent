@@ -39,12 +39,12 @@ import {
   type AgentSessionAgentInstall,
   type AgentSessionBashSession,
   type AgentSessionCapabilityContext,
+  type AgentSessionOptions,
   type SessionAgentRefresh,
 } from "./agent-session.ts";
 import { resolveContextWindow } from "./context-window.ts";
 import {
   CAPABILITY_HOST_MODES,
-  type CapabilityExternalDynamicContext,
   type CapabilityAgentOnboardingCatalogEntry,
   type CapabilityHostMode,
   type CapabilityVcsSnapshot,
@@ -85,9 +85,7 @@ export interface ConversationEngineOptions {
   readonly skillLibrary?: SkillLibrary | null;
   readonly onSkillLibraryIssue?: (message: string) => void;
   readonly hostMode?: CapabilityHostMode;
-  readonly resolveDynamicCapabilityContext?: () =>
-    | CapabilityExternalDynamicContext
-    | Promise<CapabilityExternalDynamicContext>;
+  readonly resolveDynamicCapabilityContext?: AgentSessionOptions["resolveDynamicCapabilityContext"];
   readonly sessionExecEnabled?: boolean;
   readonly shellProfile?: ShellProfile | null;
   readonly resolveShellProfileFn?: typeof resolveShellProfile;
@@ -246,7 +244,7 @@ export class ConversationEngine {
   private readonly onAgentBootstrapIssue: ((issue: AgentBootstrapIssue) => void) | undefined;
   private readonly hostMode: CapabilityHostMode;
   private readonly resolveDynamicCapabilityContext:
-    | (() => CapabilityExternalDynamicContext | Promise<CapabilityExternalDynamicContext>)
+    | NonNullable<ConversationEngineOptions["resolveDynamicCapabilityContext"]>
     | undefined;
   private readonly sessionExecEnabled: boolean;
   private readonly explicitShellProfile: ShellProfile | null | undefined;
@@ -424,10 +422,10 @@ export class ConversationEngine {
       model: context.model,
       sources: context.sources,
       capabilityContext,
-      resolveDynamicCapabilityContext: async () => {
+      resolveDynamicCapabilityContext: async (abortSignal) => {
         const [vcs, dynamic] = await Promise.all([
           this.inspectVcsContext(capabilityContext.cwd),
-          this.resolveDynamicCapabilityContext?.() ?? {},
+          this.resolveDynamicCapabilityContext?.(abortSignal) ?? {},
         ]);
         const effectiveVcs = dynamic.vcs ?? vcs;
         return {
