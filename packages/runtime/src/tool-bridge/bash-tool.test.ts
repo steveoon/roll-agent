@@ -1,6 +1,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { resolve } from "node:path";
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
 import type { ToolExecutionOptions } from "ai";
 import type { PolicyDecision, ToolPolicy } from "../types/policy.ts";
 import { DefaultToolPolicy } from "../policy/default-policy.ts";
@@ -449,6 +451,121 @@ test("T1a：ruleBasedClassifier 下 known-safe 命令免确认执行（guarded�
   assert.equal(executed, true);
 });
 
+test("known-safe 命令使用固定 shell/PATH 且不继承启动注入变量", async () => {
+  const calls: RunBashOptions[] = [];
+  const execute = getExecute(
+    settings(),
+    { policy: new DefaultToolPolicy(), requestApproval: async () => ({ approved: false }) },
+    async (input) => {
+      calls.push(input);
+      return okResult;
+    },
+    ruleBasedClassifier,
+  );
+
+  await execute({ command: "ls -la" }, options());
+
+  assert.equal(calls[0]?.env?.PATH, "/usr/bin:/bin:/usr/sbin:/sbin");
+  assert.equal(calls[0]?.env?.SHELL, "/bin/sh");
+  assert.equal(calls[0]?.env?.BASH_ENV, undefined);
+});
+
+test("known-safe 执行复用持锁复验通过的快照，不在副作用边界再次降级分类", async () => {
+  let classifyCalls = 0;
+  const classifier: CommandClassifier = {
+    classify: () => {
+      classifyCalls += 1;
+      return classifyCalls <= 2 ? "known-safe" : "unknown";
+    },
+  };
+  const calls: RunBashOptions[] = [];
+  const coordinator = new ToolExecutionCoordinator();
+  const execute = getExecute(
+    settings(),
+    {
+      policy: new DefaultToolPolicy(),
+      coordinator,
+      requestApproval: async () => ({ approved: false }),
+    },
+    async (input) => {
+      calls.push(input);
+      return okResult;
+    },
+    classifier,
+  );
+  const input = { command: "ls -la" };
+  coordinator.startBatch("snapshot-batch");
+  await coordinator.prepare("snapshot-call", BASH_TOOL_ID, input);
+  coordinator.sealBatch("snapshot-batch", [{ toolCallId: "snapshot-call", toolId: BASH_TOOL_ID }]);
+
+  await execute(input, options({ toolCallId: "snapshot-call" }));
+
+  assert.equal(classifyCalls, 2);
+  assert.equal(calls[0]?.env?.PATH, "/usr/bin:/bin:/usr/sbin:/sbin");
+  assert.notEqual(calls[0]?.env, process.env);
+});
+
+test(
+  "known-safe 文件在准入后越界时由 execution revalidation 阻止",
+  { skip: process.platform === "win32" },
+  async (context) => {
+    const fixture = mkdtempSync(join(tmpdir(), "roll-bash-revalidate-"));
+    context.after(() => rmSync(fixture, { recursive: true, force: true }));
+    const root = join(fixture, "root");
+    const outside = join(fixture, "outside.txt");
+    mkdirSync(root);
+    writeFileSync(join(root, "inside.txt"), "inside");
+    writeFileSync(outside, "outside");
+    const link = join(root, "target.txt");
+    symlinkSync("inside.txt", link);
+
+    const coordinator = new ToolExecutionCoordinator();
+    let executed = false;
+    const execute = getExecute(
+      settings({ workdir: root }),
+      {
+        policy: new DefaultToolPolicy(),
+        coordinator,
+        requestApproval: async () => ({ approved: false }),
+      },
+      async () => {
+        executed = true;
+        return okResult;
+      },
+      ruleBasedClassifier,
+    );
+    const input = { command: "cat target.txt" };
+    coordinator.startBatch("batch");
+    await coordinator.prepare("revalidate-call", BASH_TOOL_ID, input);
+    coordinator.sealBatch("batch", [{ toolCallId: "revalidate-call", toolId: BASH_TOOL_ID }]);
+    unlinkSync(link);
+    symlinkSync("../outside.txt", link);
+
+    const result = await execute(input, options({ toolCallId: "revalidate-call" }));
+
+    assert.equal(executed, false);
+    assert.equal(result.isError, true);
+    assert.match(String(result.output), /安全条件.*变化/);
+  },
+);
+
+test("显式允许的 unknown 命令仍保留原始运行环境", async () => {
+  const calls: RunBashOptions[] = [];
+  const execute = getExecute(
+    settings(),
+    { policy: allowPolicy, requestApproval: async () => ({ approved: false }) },
+    async (input) => {
+      calls.push(input);
+      return okResult;
+    },
+    unknownCommandClassifier,
+  );
+
+  await execute({ command: "custom-command" }, options());
+
+  assert.equal(calls[0]?.env, process.env);
+});
+
 test("T1a：ruleBasedClassifier 下 dangerous 命令仍需确认（guarded）", async () => {
   let confirmed = false;
   let executed = false;
@@ -533,11 +650,15 @@ test("P1：workdir 逃出会话根目录时强制 unknown，known-safe 命令也
   assert.equal(executed, false);
 });
 
-test("P1：workdir 在根目录内的子目录不受影响，known-safe 仍免确认", async () => {
+test("P1：现存 workdir 在 root 内时 known-safe 仍免确认", async (context) => {
+  const root = mkdtempSync(join(tmpdir(), "roll-bash-tool-root-"));
+  const child = join(root, "sub");
+  mkdirSync(child);
+  context.after(() => rmSync(root, { recursive: true, force: true }));
   let confirmed = false;
   let executed = false;
   const execute = getExecute(
-    settings({ workdir: "/tmp/roll-root" }),
+    settings({ workdir: root }),
     {
       policy: new DefaultToolPolicy(),
       requestApproval: async () => {
@@ -551,7 +672,30 @@ test("P1：workdir 在根目录内的子目录不受影响，known-safe 仍免�
     },
     ruleBasedClassifier,
   );
-  await execute({ command: "ls -la", workdir: "/tmp/roll-root/sub" }, options());
+  await execute({ command: "ls -la", workdir: child }, options());
   assert.equal(confirmed, false);
   assert.equal(executed, true);
+});
+
+test("P1：不存在的 workdir 不再获得 known-safe 自动批准", async () => {
+  let confirmed = false;
+  const root = mkdtempSync(join(tmpdir(), "roll-bash-tool-missing-"));
+  try {
+    const execute = getExecute(
+      settings({ workdir: root }),
+      {
+        policy: new DefaultToolPolicy(),
+        requestApproval: async () => {
+          confirmed = true;
+          return { approved: false };
+        },
+      },
+      async () => okResult,
+      ruleBasedClassifier,
+    );
+    await execute({ command: "ls -la", workdir: join(root, "future") }, options());
+    assert.equal(confirmed, true);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });

@@ -127,6 +127,89 @@ test("ToolExecutionCoordinator describeResources 复用执行计划且观察失�
   assert.deepEqual(coordinator.describeResources("broken", {}), []);
 });
 
+test("ToolExecutionCoordinator 在准入时封存资源计划，不受执行前动态状态漂移影响", async () => {
+  const coordinator = new ToolExecutionCoordinator();
+  let readOnly = true;
+  let resourceCalls = 0;
+  coordinator.register("tool", {
+    resources: () => {
+      resourceCalls += 1;
+      return [
+        {
+          key: "file:shared",
+          mode: readOnly ? TOOL_RESOURCE_ACCESS_MODES.read : TOOL_RESOURCE_ACCESS_MODES.write,
+        },
+      ];
+    },
+  });
+
+  await coordinator.prepare("c1", "tool", {});
+  readOnly = false;
+  const result = await coordinator.execute("c1", "tool", {}, undefined, async () =>
+    successfulToolResult("ok"),
+  );
+
+  assert.equal(readToolOutcome(result).kind, TOOL_OUTCOME_KINDS.success);
+  assert.equal(resourceCalls, 1);
+});
+
+test("ToolExecutionCoordinator 在持锁后复验准入快照，漂移时零副作用", async () => {
+  const coordinator = new ToolExecutionCoordinator();
+  let safetyState = "safe";
+  let sideEffects = 0;
+  coordinator.register("tool", {
+    resources: () => [{ key: "file:shared", mode: TOOL_RESOURCE_ACCESS_MODES.read }],
+    captureExecutionState: () => safetyState,
+    revalidateExecution: (_input, capturedState) =>
+      capturedState === safetyState
+        ? undefined
+        : failedToolResult(TOOL_OUTCOME_KINDS.toolFailed, "safety state changed"),
+  });
+
+  await coordinator.prepare("c1", "tool", {});
+  safetyState = "changed";
+  const result = await coordinator.execute("c1", "tool", {}, undefined, async () => {
+    sideEffects += 1;
+    return successfulToolResult("unexpected");
+  });
+
+  assert.equal(readToolOutcome(result).kind, TOOL_OUTCOME_KINDS.toolFailed);
+  assert.equal(sideEffects, 0);
+});
+
+test("ToolExecutionCoordinator 在准入前捕获一次状态，并贯穿 gate、资源与复验", async () => {
+  const coordinator = new ToolExecutionCoordinator();
+  let safetyState = "known-safe";
+  let sideEffects = 0;
+  const observed: unknown[] = [];
+  coordinator.register("tool", {
+    captureExecutionState: () => safetyState,
+    prepare: (_input, capturedState) => {
+      observed.push(capturedState);
+      safetyState = "unknown";
+      return undefined;
+    },
+    resources: (_input, capturedState) => {
+      observed.push(capturedState);
+      return [{ key: "file:shared", mode: TOOL_RESOURCE_ACCESS_MODES.read }];
+    },
+    revalidateExecution: (_input, capturedState) =>
+      capturedState === safetyState
+        ? undefined
+        : failedToolResult(TOOL_OUTCOME_KINDS.toolFailed, "safety state changed"),
+  });
+
+  await coordinator.prepare("c1", "tool", {});
+  const result = await coordinator.execute("c1", "tool", {}, undefined, async () => {
+    sideEffects += 1;
+    return successfulToolResult("unexpected");
+  });
+
+  assert.deepEqual(observed, ["known-safe", "known-safe"]);
+  assert.equal(readToolOutcome(result).kind, TOOL_OUTCOME_KINDS.toolFailed);
+  assert.equal(sideEffects, 0);
+});
+
 test("ToolExecutionCoordinator 串行完成整批准入后才允许副作用", async () => {
   const coordinator = new ToolExecutionCoordinator();
   const firstGate = Promise.withResolvers<void>();

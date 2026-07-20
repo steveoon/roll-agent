@@ -5,9 +5,11 @@ import type { SessionEvent } from "../types/events.ts";
 import type { ToolAnnotations } from "../types/policy.ts";
 import {
   CLASSIFICATION_ANNOTATIONS,
+  type CommandClassification,
   type CommandClassifier,
 } from "../types/command-classification.ts";
 import { runBashCommand } from "../bash/exec.ts";
+import { withAutoApprovedShellEnv } from "../bash/clean-env.ts";
 import { formatBashResult } from "../bash/format-result.ts";
 import type { ShellProfile, ShellToolName } from "../bash/profile.ts";
 import { isWithinWorkdirRoot } from "../bash/workdir.ts";
@@ -52,6 +54,10 @@ export interface BashToolContext extends ToolBridgeContext {
 export interface BashToolDeps {
   readonly classifier?: CommandClassifier;
   readonly exec?: typeof runBashCommand;
+}
+
+function capturedClassification(value: unknown): CommandClassification {
+  return value === "known-safe" || value === "dangerous" ? value : "unknown";
 }
 
 const bashToolInputSchema = z.object({
@@ -150,24 +156,32 @@ export function buildBashToolset(
   const id = registry.register(BASH_TOOL_AGENT_NAME, toolName);
   const classifier = deps.classifier ?? settings.profile;
   const exec = deps.exec ?? runBashCommand;
-  const resolveInvocation = (input: BashToolInput) => {
+  const resolveParameters = (input: BashToolInput) => {
     const workdir = resolve(settings.workdir, input.workdir ?? ".");
     const timeoutMs = Math.min(
       input.timeout_ms ?? settings.defaultTimeoutMs,
       settings.maxTimeoutMs,
       settings.turnTimeoutMs,
     );
+    return { workdir, timeoutMs };
+  };
+  const resolveInvocation = (
+    input: BashToolInput,
+    admittedClassification?: CommandClassification,
+  ) => {
+    const { workdir, timeoutMs } = resolveParameters(input);
     const classification = isWithinWorkdirRoot(settings.workdir, workdir)
-      ? classifier.classify(input.command, workdir)
+      ? (admittedClassification ?? classifier.classify(input.command, workdir))
       : "unknown";
     return {
       workdir,
       timeoutMs,
+      classification,
       annotations: CLASSIFICATION_ANNOTATIONS[classification],
     };
   };
   const plan: ToolExecutionPlan = {
-    prepare: async (rawInput) => {
+    prepare: async (rawInput, capturedState) => {
       if (!isBashToolInput(rawInput)) {
         return failedToolResult(
           TOOL_OUTCOME_KINDS.invalidInput,
@@ -175,7 +189,7 @@ export function buildBashToolset(
           { raw: rawInput },
         );
       }
-      const invocation = resolveInvocation(rawInput);
+      const invocation = resolveInvocation(rawInput, capturedClassification(capturedState));
       return gateBashCall(
         ctx,
         toolName,
@@ -187,14 +201,14 @@ export function buildBashToolset(
         invocation.annotations,
       );
     },
-    resources: (rawInput) => {
+    resources: (rawInput, capturedState) => {
       if (!isBashToolInput(rawInput)) {
         return [
           { key: OPAQUE_SHELL_SIDE_EFFECT_RESOURCE, mode: TOOL_RESOURCE_ACCESS_MODES.write },
           { key: `shell:${settings.workdir}`, mode: TOOL_RESOURCE_ACCESS_MODES.write },
         ];
       }
-      const invocation = resolveInvocation(rawInput);
+      const invocation = resolveInvocation(rawInput, capturedClassification(capturedState));
       const readOnly =
         invocation.annotations.readOnlyHint === true &&
         invocation.annotations.destructiveHint !== true;
@@ -209,20 +223,33 @@ export function buildBashToolset(
             workdirResource,
           ];
     },
+    captureExecutionState: (rawInput) =>
+      isBashToolInput(rawInput) ? resolveInvocation(rawInput).classification : "unknown",
+    revalidateExecution: (rawInput, capturedState) => {
+      if (capturedState !== "known-safe" || !isBashToolInput(rawInput)) {
+        return undefined;
+      }
+      return resolveInvocation(rawInput).classification === "known-safe"
+        ? undefined
+        : failedToolResult(
+            TOOL_OUTCOME_KINDS.toolFailed,
+            "shell 命令的安全条件在准入后发生变化，已在执行前阻止；请重新提交以重新确认",
+          );
+    },
   };
   ctx.coordinator?.register(id, plan);
 
   return {
     [id]: tool({
       description:
-        "在当前 shell 后端中执行一条命令并返回输出。命令继承 roll 进程的全部环境变量。总是用 workdir 参数设置工作目录，不要用 cd。",
+        "在当前 shell 后端中执行一条命令并返回输出。需确认的命令继承 roll 进程环境；自动批准的 known-safe 命令使用隔离的系统 PATH 与 shell 环境。总是用 workdir 参数设置工作目录，不要用 cd。",
       inputSchema: bashToolInputSchema,
       toModelOutput: ({ output }) => toolResultToModelOutput(output),
       execute: async (
         input: BashToolInput,
         options: ToolExecutionOptions<unknown>,
       ): Promise<NormalizedToolResult> => {
-        const { workdir, timeoutMs } = resolveInvocation(input);
+        const { workdir, timeoutMs } = resolveParameters(input);
         return executeCoordinatedTool(
           ctx.coordinator,
           plan,
@@ -230,7 +257,7 @@ export function buildBashToolset(
           options.toolCallId,
           input,
           options.abortSignal,
-          async () => {
+          async (capturedState) => {
             const onDelta = makeDeltaHandler(ctx, options.toolCallId, toolName);
             const result = await exec({
               command: input.command,
@@ -238,7 +265,10 @@ export function buildBashToolset(
               timeoutMs,
               maxCaptureBytes: settings.maxCaptureBytes,
               profile: settings.profile,
-              env: process.env,
+              env:
+                capturedState === "known-safe"
+                  ? withAutoApprovedShellEnv(process.env)
+                  : process.env,
               ...(options.abortSignal ? { abortSignal: options.abortSignal } : {}),
               ...(onDelta ? { onDelta } : {}),
             });

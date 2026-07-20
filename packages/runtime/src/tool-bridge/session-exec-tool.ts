@@ -8,9 +8,11 @@ import type { ToolAnnotations } from "../types/policy.ts";
 import {
   CLASSIFICATION_ANNOTATIONS,
   unknownCommandClassifier,
+  type CommandClassification,
   type CommandClassifier,
 } from "../types/command-classification.ts";
 import { isWithinWorkdirRoot } from "../bash/workdir.ts";
+import { withAutoApprovedShellEnv } from "../bash/clean-env.ts";
 import { SessionCapError, type SessionManager } from "../bash/session/session-manager.ts";
 import { pollUntilDeadline, throwIfSessionExecAborted } from "../bash/session/yield-loop.ts";
 import {
@@ -62,6 +64,10 @@ export interface SessionExecSettings {
 export interface SessionExecDeps {
   readonly classifier?: CommandClassifier;
   readonly onSessionTouched?: (sessionId: number) => void;
+}
+
+function capturedClassification(value: unknown): CommandClassification {
+  return value === "known-safe" || value === "dangerous" ? value : "unknown";
 }
 
 const execCommandInputSchema = z.object({
@@ -251,24 +257,32 @@ export function buildSessionExecToolset(
   const execPollId = registry.register(EXEC_AGENT_NAME, EXEC_POLL_NAME);
   const execListId = registry.register(EXEC_AGENT_NAME, EXEC_LIST_NAME);
   const classifier = deps.classifier ?? unknownCommandClassifier;
-  const resolveCommandInvocation = (input: ExecCommandInput) => {
+  const resolveCommandParameters = (input: ExecCommandInput) => {
     const workdir = resolve(settings.workdir, input.workdir ?? ".");
     const yieldMs = clamp(
       input.yield_time_ms ?? settings.defaultYieldMs,
       MIN_EXEC_YIELD_MS,
       MAX_EXEC_YIELD_MS,
     );
+    return { workdir, yieldMs };
+  };
+  const resolveCommandInvocation = (
+    input: ExecCommandInput,
+    admittedClassification?: CommandClassification,
+  ) => {
+    const { workdir, yieldMs } = resolveCommandParameters(input);
     const classification = isWithinWorkdirRoot(settings.workdir, workdir)
-      ? classifier.classify(input.command, workdir)
+      ? (admittedClassification ?? classifier.classify(input.command, workdir))
       : "unknown";
     return {
       workdir,
       yieldMs,
+      classification,
       annotations: CLASSIFICATION_ANNOTATIONS[classification],
     };
   };
   const commandPlan: ToolExecutionPlan = {
-    prepare: async (rawInput) => {
+    prepare: async (rawInput, capturedState) => {
       const parsed = execCommandInputSchema.safeParse(rawInput);
       if (!parsed.success) {
         return failedToolResult(
@@ -277,7 +291,10 @@ export function buildSessionExecToolset(
           { raw: parsed.error.issues },
         );
       }
-      const invocation = resolveCommandInvocation(parsed.data);
+      const invocation = resolveCommandInvocation(
+        parsed.data,
+        capturedClassification(capturedState),
+      );
       if (!existsSync(invocation.workdir)) {
         return failedToolResult(
           TOOL_OUTCOME_KINDS.invalidInput,
@@ -294,15 +311,31 @@ export function buildSessionExecToolset(
         invocation.annotations,
       );
     },
-    resources: (rawInput) => {
+    resources: (rawInput, capturedState) => {
       const parsed = execCommandInputSchema.safeParse(rawInput);
       const workdir = parsed.success
-        ? resolveCommandInvocation(parsed.data).workdir
+        ? resolveCommandInvocation(parsed.data, capturedClassification(capturedState)).workdir
         : settings.workdir;
       return [
         { key: "exec-manager", mode: TOOL_RESOURCE_ACCESS_MODES.write },
         { key: `shell:${workdir}`, mode: TOOL_RESOURCE_ACCESS_MODES.write },
       ];
+    },
+    captureExecutionState: (rawInput) => {
+      const parsed = execCommandInputSchema.safeParse(rawInput);
+      return parsed.success ? resolveCommandInvocation(parsed.data).classification : "unknown";
+    },
+    revalidateExecution: (rawInput, capturedState) => {
+      if (capturedState !== "known-safe") {
+        return undefined;
+      }
+      const parsed = execCommandInputSchema.safeParse(rawInput);
+      return parsed.success && resolveCommandInvocation(parsed.data).classification === "known-safe"
+        ? undefined
+        : failedToolResult(
+            TOOL_OUTCOME_KINDS.toolFailed,
+            "后台 shell 命令的安全条件在准入后发生变化，已在执行前阻止；请重新提交以重新确认",
+          );
     },
   };
   const pollPlan: ToolExecutionPlan = {
@@ -348,14 +381,14 @@ export function buildSessionExecToolset(
   return {
     [execCommandId]: tool({
       description:
-        "在后台会话中执行一条命令，等待一段时间后返回输出。若命令未结束会返回 session_id，用 exec_poll 续查进度、读取退出码。适合运行时间超过单轮预算的长脚本。命令继承 roll 进程的环境变量。",
+        "在后台会话中执行一条命令，等待一段时间后返回输出。若命令未结束会返回 session_id，用 exec_poll 续查进度、读取退出码。适合运行时间超过单轮预算的长脚本。需确认的命令继承 roll 进程环境；自动批准的 known-safe 命令使用隔离的系统 PATH 与 shell 环境。",
       inputSchema: execCommandInputSchema,
       toModelOutput: ({ output }) => toolResultToModelOutput(output),
       execute: async (
         input: ExecCommandInput,
         options: ToolExecutionOptions<unknown>,
       ): Promise<NormalizedToolResult> => {
-        const { workdir, yieldMs } = resolveCommandInvocation(input);
+        const { workdir, yieldMs } = resolveCommandParameters(input);
         return executeCoordinatedTool(
           ctx.coordinator,
           commandPlan,
@@ -363,7 +396,7 @@ export function buildSessionExecToolset(
           options.toolCallId,
           input,
           options.abortSignal,
-          async () => {
+          async (capturedState) => {
             throwIfSessionExecAborted(options.abortSignal);
             if (!existsSync(workdir)) {
               return failedToolResult(
@@ -379,6 +412,9 @@ export function buildSessionExecToolset(
               session = manager.spawn({
                 command: input.command,
                 workdir,
+                ...(capturedState === "known-safe"
+                  ? { env: withAutoApprovedShellEnv(process.env) }
+                  : {}),
                 ...(onDelta ? { onDelta } : {}),
               });
               deps.onSessionTouched?.(session.id);

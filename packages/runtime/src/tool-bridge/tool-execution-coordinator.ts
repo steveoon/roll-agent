@@ -36,8 +36,16 @@ export interface ToolResourceHint {
 export interface ToolExecutionPlan {
   readonly prepare?: (
     input: unknown,
+    capturedState: unknown,
   ) => NormalizedToolResult | undefined | Promise<NormalizedToolResult | undefined>;
-  readonly resources: (input: unknown) => readonly ToolResourceAccess[];
+  readonly resources: (input: unknown, capturedState: unknown) => readonly ToolResourceAccess[];
+  /** Capture immutable admission-time facts needed to detect TOCTOU drift. */
+  readonly captureExecutionState?: (input: unknown) => unknown;
+  /** Re-check captured facts after resource locks are held and before side effects begin. */
+  readonly revalidateExecution?: (
+    input: unknown,
+    capturedState: unknown,
+  ) => NormalizedToolResult | undefined | Promise<NormalizedToolResult | undefined>;
 }
 
 interface PreparedToolCall {
@@ -45,6 +53,14 @@ interface PreparedToolCall {
   readonly input: unknown;
   readonly batch: BatchState | undefined;
   readonly blocked: NormalizedToolResult | undefined;
+  readonly resources: readonly ToolResourceAccess[];
+  readonly capturedState: unknown;
+}
+
+interface PreparedPlan {
+  readonly blocked: NormalizedToolResult | undefined;
+  readonly resources: readonly ToolResourceAccess[];
+  readonly capturedState: unknown;
 }
 
 interface BatchAdmission {
@@ -283,7 +299,9 @@ export class ToolExecutionCoordinator {
   /** Returns the same normalized resource plan used by execution, without acquiring locks. */
   describeResources(toolId: string, input: unknown): readonly ToolResourceAccess[] {
     try {
-      return [...(this.plans.get(toolId)?.resources(input) ?? [])];
+      const plan = this.plans.get(toolId);
+      const capturedState = plan?.captureExecutionState?.(input);
+      return [...(plan?.resources(input, capturedState) ?? [])];
     } catch {
       // Resource planning must never make event/ledger observation fail. The actual execute path
       // will still surface the planner error as a typed Tool outcome.
@@ -325,18 +343,30 @@ export class ToolExecutionCoordinator {
     await previous;
     try {
       const plan = this.plans.get(toolId);
-      const blocked = batch?.cancelled
-        ? failedToolResult(TOOL_OUTCOME_KINDS.cancelled, "工具批次已结束，本调用未执行")
+      const preparedPlan = batch?.cancelled
+        ? {
+            blocked: failedToolResult(TOOL_OUTCOME_KINDS.cancelled, "工具批次已结束，本调用未执行"),
+            resources: [],
+            capturedState: undefined,
+          }
         : batch?.userRejected
-          ? failedToolResult(TOOL_OUTCOME_KINDS.cancelled, "同批次已有工具被用户拒绝，本调用未执行")
+          ? {
+              blocked: failedToolResult(
+                TOOL_OUTCOME_KINDS.cancelled,
+                "同批次已有工具被用户拒绝，本调用未执行",
+              ),
+              resources: [],
+              capturedState: undefined,
+            }
           : await this.prepareWithPlan(plan, input);
+      const { blocked } = preparedPlan;
       if (blocked && readToolOutcome(blocked).kind === TOOL_OUTCOME_KINDS.userRejected) {
         if (batch) {
           batch.userRejected = true;
         }
       }
       if (batch?.cancelled !== true) {
-        this.prepared.set(toolCallId, { toolId, input, batch, blocked });
+        this.prepared.set(toolCallId, { toolId, input, batch, ...preparedPlan });
       }
     } finally {
       if (batch) {
@@ -384,7 +414,7 @@ export class ToolExecutionCoordinator {
     toolId: string,
     input: unknown,
     abortSignal: AbortSignal | undefined,
-    operation: () => Promise<NormalizedToolResult>,
+    operation: (capturedState: unknown) => Promise<NormalizedToolResult>,
   ): Promise<NormalizedToolResult> {
     const batch = this.toolCallBatches.get(toolCallId) ?? this.activeBatch;
     if (batch) {
@@ -415,7 +445,7 @@ export class ToolExecutionCoordinator {
           toolId,
           input,
           batch: undefined,
-          blocked: await this.prepareWithPlan(plan, input),
+          ...(await this.prepareWithPlan(plan, input)),
         };
       }
       if (prepared.blocked) {
@@ -431,8 +461,11 @@ export class ToolExecutionCoordinator {
         throw abortError(abortSignal);
       }
       const plan = this.plans.get(toolId);
-      const resources = plan?.resources(input) ?? [];
-      return await this.locks.run(resources, abortSignal, operation);
+      const admittedCall = prepared;
+      return await this.locks.run(admittedCall.resources, abortSignal, async () => {
+        const invalidated = await plan?.revalidateExecution?.(input, admittedCall.capturedState);
+        return invalidated ?? operation(admittedCall.capturedState);
+      });
     } catch (error) {
       if (abortSignal?.aborted) {
         throw abortError(abortSignal);
@@ -458,11 +491,26 @@ export class ToolExecutionCoordinator {
   private async prepareWithPlan(
     plan: ToolExecutionPlan | undefined,
     input: unknown,
-  ): Promise<NormalizedToolResult | undefined> {
+  ): Promise<PreparedPlan> {
     try {
-      return await plan?.prepare?.(input);
+      const capturedState = plan?.captureExecutionState?.(input);
+      const blocked = await plan?.prepare?.(input, capturedState);
+      if (blocked) {
+        return { blocked, resources: [], capturedState: undefined };
+      }
+      return {
+        blocked: undefined,
+        resources: plan?.resources(input, capturedState) ?? [],
+        capturedState,
+      };
     } catch (error) {
-      return failedToolResult(TOOL_OUTCOME_KINDS.toolFailed, errorMessage(error), { raw: error });
+      return {
+        blocked: failedToolResult(TOOL_OUTCOME_KINDS.toolFailed, errorMessage(error), {
+          raw: error,
+        }),
+        resources: [],
+        capturedState: undefined,
+      };
     }
   }
 
@@ -527,7 +575,7 @@ export async function executeCoordinatedTool(
   toolCallId: string,
   input: unknown,
   abortSignal: AbortSignal | undefined,
-  operation: () => Promise<NormalizedToolResult>,
+  operation: (capturedState: unknown) => Promise<NormalizedToolResult>,
 ): Promise<NormalizedToolResult> {
   if (coordinator) {
     return coordinator.execute(toolCallId, toolId, input, abortSignal, operation);
@@ -536,14 +584,19 @@ export async function executeCoordinatedTool(
     if (abortSignal?.aborted) {
       throw abortError(abortSignal);
     }
-    const blocked = await plan.prepare?.(input);
+    const capturedState = plan.captureExecutionState?.(input);
+    const blocked = await plan.prepare?.(input, capturedState);
     if (blocked) {
       return blocked;
     }
     if (abortSignal?.aborted) {
       throw abortError(abortSignal);
     }
-    return await operation();
+    const invalidated = await plan.revalidateExecution?.(input, capturedState);
+    if (invalidated) {
+      return invalidated;
+    }
+    return await operation(capturedState);
   } catch (error) {
     if (abortSignal?.aborted) {
       throw abortError(abortSignal);

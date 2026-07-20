@@ -105,7 +105,7 @@ function createPosixShellProfile(deps: ShellProfileResolutionDeps): ShellProfile
     waitForTreeKillAfterRootExit: false,
     buildSpawn(command, workdir, env) {
       return {
-        file: resolveUserShell({ platform: deps.platform, env: deps.env, fileExists }),
+        file: resolveUserShell({ platform: deps.platform, env, fileExists }),
         args: ["-c", command],
         options: {
           cwd: workdir,
