@@ -704,18 +704,27 @@ def run_scenario(scenario: str) -> tuple[dict[str, float | int | bool], PtyFixtu
         if scenario == "cli-ink-cold-start":
             fixture.wait_for(
                 lambda screen: "Roll Agent v" in screen and "/exit 退出" in screen,
-                8,
+                15,
                 "production CLI Ink application",
             )
-            fixture.send("k")
+            # The final banner frame can be visible just before React commits the
+            # settled layout. Wait for that transition, then type like a real user
+            # so the probe cannot be swallowed by the animation boundary.
+            fixture.wait_quiet(quiet_ms=120, timeout=2)
+            fixture.send("\x15")
+            fixture.drain_for(0.04)
+            for char in "ok":
+                fixture.send(char)
+                fixture.drain_for(0.015)
             ready_ms = fixture.wait_for(
-                lambda screen: re.search(r"›\s+k", screen) is not None,
+                lambda screen: re.search(r"›\s+ok", screen) is not None,
                 2,
                 "production CLI Ink key echo",
             )
-            fixture.send("\x7f")
+            fixture.send("\x15")
+            fixture.drain_for(0.04)
             fixture.wait_for(
-                lambda screen: PROMPT in screen and re.search(r"›\s+k", screen) is None,
+                lambda screen: PROMPT in screen and re.search(r"›\s+ok", screen) is None,
                 2,
                 "production CLI Ink probe cleanup",
             )
