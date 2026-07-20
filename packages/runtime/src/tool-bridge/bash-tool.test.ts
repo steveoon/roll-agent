@@ -428,7 +428,7 @@ test("timeout_ms 被钳制到 turnTimeoutMs（不超过整轮预算）", async (
   assert.equal(calls[0]?.timeoutMs, 30_000);
 });
 
-test("T1a：ruleBasedClassifier 下 known-safe 命令免确认执行（guarded）", async () => {
+test("T1a：ruleBasedClassifier 仅在受支持平台免确认执行 known-safe 命令", async () => {
   let confirmed = false;
   let executed = false;
   const execute = getExecute(
@@ -447,30 +447,36 @@ test("T1a：ruleBasedClassifier 下 known-safe 命令免确认执行（guarded�
     ruleBasedClassifier,
   );
   await execute({ command: "ls -la" }, options());
-  assert.equal(confirmed, false);
-  assert.equal(executed, true);
+  assert.equal(confirmed, process.platform === "win32");
+  assert.equal(executed, process.platform !== "win32");
 });
 
-test("known-safe 命令使用固定 shell/PATH 且不继承启动注入变量", async () => {
-  const calls: RunBashOptions[] = [];
-  const execute = getExecute(
-    settings(),
-    { policy: new DefaultToolPolicy(), requestApproval: async () => ({ approved: false }) },
-    async (input) => {
-      calls.push(input);
-      return okResult;
-    },
-    ruleBasedClassifier,
-  );
+test(
+  "known-safe 命令使用固定 shell/PATH 且不继承启动注入变量",
+  { skip: process.platform === "win32" },
+  async () => {
+    const calls: RunBashOptions[] = [];
+    const execute = getExecute(
+      settings(),
+      { policy: new DefaultToolPolicy(), requestApproval: async () => ({ approved: false }) },
+      async (input) => {
+        calls.push(input);
+        return okResult;
+      },
+      ruleBasedClassifier,
+    );
 
-  await execute({ command: "ls -la" }, options());
+    await execute({ command: "ls -la" }, options());
 
-  assert.equal(calls[0]?.env?.PATH, "/usr/bin:/bin:/usr/sbin:/sbin");
-  assert.equal(calls[0]?.env?.SHELL, "/bin/sh");
-  assert.equal(calls[0]?.env?.BASH_ENV, undefined);
-});
+    assert.equal(calls[0]?.env?.PATH, "/usr/bin:/bin:/usr/sbin:/sbin");
+    assert.equal(calls[0]?.env?.SHELL, "/bin/sh");
+    assert.equal(calls[0]?.env?.BASH_ENV, undefined);
+  },
+);
 
-test("known-safe 执行复用持锁复验通过的快照，不在副作用边界再次降级分类", async () => {
+test("known-safe 执行复用持锁复验通过的快照，不在副作用边界再次降级分类", async (context) => {
+  const root = mkdtempSync(join(tmpdir(), "roll-bash-snapshot-"));
+  context.after(() => rmSync(root, { recursive: true, force: true }));
   let classifyCalls = 0;
   const classifier: CommandClassifier = {
     classify: () => {
@@ -481,7 +487,7 @@ test("known-safe 执行复用持锁复验通过的快照，不在副作用边界
   const calls: RunBashOptions[] = [];
   const coordinator = new ToolExecutionCoordinator();
   const execute = getExecute(
-    settings(),
+    settings({ workdir: root }),
     {
       policy: new DefaultToolPolicy(),
       coordinator,
@@ -650,7 +656,7 @@ test("P1：workdir 逃出会话根目录时强制 unknown，known-safe 命令也
   assert.equal(executed, false);
 });
 
-test("P1：现存 workdir 在 root 内时 known-safe 仍免确认", async (context) => {
+test("P1：现存 workdir 在 root 内时按平台决定是否免确认", async (context) => {
   const root = mkdtempSync(join(tmpdir(), "roll-bash-tool-root-"));
   const child = join(root, "sub");
   mkdirSync(child);
@@ -673,8 +679,8 @@ test("P1：现存 workdir 在 root 内时 known-safe 仍免确认", async (conte
     ruleBasedClassifier,
   );
   await execute({ command: "ls -la", workdir: child }, options());
-  assert.equal(confirmed, false);
-  assert.equal(executed, true);
+  assert.equal(confirmed, process.platform === "win32");
+  assert.equal(executed, process.platform !== "win32");
 });
 
 test("P1：不存在的 workdir 不再获得 known-safe 自动批准", async () => {
