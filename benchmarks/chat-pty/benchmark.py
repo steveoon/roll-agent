@@ -707,20 +707,34 @@ def run_scenario(scenario: str) -> tuple[dict[str, float | int | bool], PtyFixtu
                 15,
                 "production CLI Ink application",
             )
-            # The final banner frame can be visible just before React commits the
-            # settled layout. Wait for that transition, then open the slash popup:
-            # it proves input routing and forces a parent-level Ink render instead
-            # of relying on a draft-only footer diff.
-            fixture.wait_quiet(quiet_ms=120, timeout=2)
-            fixture.send("\x15")
-            fixture.drain_for(0.04)
-            fixture.send("/")
-            ready_ms = fixture.wait_for(
-                lambda screen: re.search(r"›\s+/", screen) is not None
-                and "↑↓ 选择 · Tab 补全" in screen,
-                2,
-                "production CLI Ink slash popup",
-            )
+            # The header can become visible before React mounts the prompt, so a
+            # one-shot key probe can be swallowed on a slow runner. Retry a bounded
+            # Ctrl-U + slash handshake until the slash popup proves input routing
+            # and forces a parent-level Ink render.
+            probe_deadline = time.monotonic() + 12
+            while time.monotonic() < probe_deadline:
+                fixture.send("\x15")
+                fixture.drain_for(0.04)
+                fixture.send("/")
+                fixture.drain_for(0.12)
+                screen = fixture.screen.render()
+                if (
+                    re.search(r"›\s+/", screen) is not None
+                    and "↑↓ 选择 · Tab 补全" in screen
+                ):
+                    ready_ms = fixture.elapsed_ms()
+                    break
+                if fixture.process.poll() is not None:
+                    raise AssertionError(
+                        "fixture exited before production CLI Ink slash popup "
+                        f"(status={fixture.process.returncode})\nscreen:\n{screen}"
+                    )
+                fixture.drain_for(0.08)
+            else:
+                raise AssertionError(
+                    "timed out waiting for production CLI Ink slash popup\n"
+                    f"screen:\n{fixture.screen.render()}"
+                )
             fixture.send("\x15")
             fixture.drain_for(0.04)
             fixture.wait_for(

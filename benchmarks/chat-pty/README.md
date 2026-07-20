@@ -6,7 +6,7 @@ both paths inside a real Unix PTY.
 | Scenario | Boundary measured | Isolation and correctness oracle |
 | --- | --- | --- |
 | `cli-bootstrap` | Production `roll chat --server` process through config loading, lazy imports, provider construction, and runtime-server readiness | Temporary `HOME`, config, threads, and agents directories; dummy key and loopback-only base URL; no model request |
-| `cli-ink-cold-start` | Production `roll chat` process through the first interactive Ink prompt | Same isolated config; waits for the banner to settle, opens `/`, requires the Prompt and slash-menu navigation hint, clears it, makes no model request, and exits through bounded `/exit` cleanup |
+| `cli-ink-cold-start` | Production `roll chat` process through the first interactive Ink prompt | Same isolated config; after the header appears, performs a bounded `Ctrl-U` + `/` handshake until the Prompt and slash-menu navigation hint respond, clears it, makes no model request, and exits through bounded `/exit` cleanup |
 | `fixture-ink-cold-start` | Real `runInkRepl()` startup through the first prompt | Deterministic in-process Session fixture; no provider or model request |
 | `keypress`, `text-stream`, `tool-stream`, `resize-storm`, `idle` | Real Ink input/render/resize/idle paths after deterministic fixture startup | Scenario-specific screen and stream oracles |
 
