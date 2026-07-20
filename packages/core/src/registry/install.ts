@@ -1,5 +1,14 @@
-import { existsSync, mkdirSync, rmSync, statSync } from "node:fs";
-import { resolve } from "node:path";
+import { randomUUID } from "node:crypto";
+import {
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
+import { basename, dirname, resolve } from "node:path";
 import {
   buildNpmRetryPolicy,
   formatPackageManagerError,
@@ -86,6 +95,25 @@ export interface InstallAgentSuccess {
 
 export type InstallAgentResult = InstallAgentSuccess | InstallAgentFailure;
 
+const INSTALL_LOCK_SUFFIX = ".install.lock";
+
+interface InstallLockMarker {
+  readonly token: string;
+  readonly pid: number;
+  readonly startedAt: string;
+}
+
+interface InstallWorkspace {
+  readonly installDir: string;
+  readonly lockPath: string;
+  readonly markerToken: string;
+  readonly createdByInvocation: boolean;
+}
+
+type InstallWorkspacePreparation =
+  | { readonly ok: true; readonly workspace: InstallWorkspace }
+  | { readonly ok: false; readonly failure: InstallAgentFailure };
+
 function buildInstallNetworkArgs(install: RollConfig["install"]): string[] {
   return npmInstallNetworkArgs({
     ...(install.registry ? { registry: install.registry } : {}),
@@ -112,6 +140,188 @@ function isLocalDirectorySpec(input: string): boolean {
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function hasErrorCode(error: unknown, code: string): boolean {
+  return typeof error === "object" && error !== null && "code" in error && error.code === code;
+}
+
+function reportCleanupWarning(report: InstallAgentReporter, message: string): void {
+  try {
+    report({ type: "warn", message });
+  } catch {
+    // 清理报告失败不能覆盖原始安装错误。
+  }
+}
+
+function installLockPath(installDir: string): string {
+  return resolve(dirname(installDir), `.${basename(installDir)}${INSTALL_LOCK_SUFFIX}`);
+}
+
+function writeInstallLock(lockPath: string, marker: InstallLockMarker): void {
+  writeFileSync(lockPath, `${JSON.stringify(marker)}\n`, {
+    encoding: "utf8",
+    flag: "wx",
+    mode: 0o600,
+  });
+}
+
+function readInstallLockToken(lockPath: string): string | undefined {
+  try {
+    const parsed: unknown = JSON.parse(readFileSync(lockPath, "utf8"));
+    if (
+      typeof parsed === "object" &&
+      parsed !== null &&
+      "token" in parsed &&
+      typeof parsed.token === "string"
+    ) {
+      return parsed.token;
+    }
+    return undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function releaseOwnedInstallLock(
+  workspace: Pick<InstallWorkspace, "installDir" | "lockPath" | "markerToken">,
+  report: InstallAgentReporter,
+): void {
+  const currentToken = readInstallLockToken(workspace.lockPath);
+  if (currentToken === undefined) {
+    if (existsSync(workspace.lockPath)) {
+      reportCleanupWarning(report, `安装锁内容无法验证，未自动删除: ${workspace.lockPath}`);
+    }
+    return;
+  }
+  if (currentToken !== workspace.markerToken) {
+    reportCleanupWarning(report, `安装锁已被其他任务替换，未执行清理: ${workspace.lockPath}`);
+    return;
+  }
+  try {
+    rmSync(workspace.lockPath);
+  } catch (cleanupError) {
+    reportCleanupWarning(
+      report,
+      `清理安装锁失败: ${workspace.lockPath}（${errorMessage(cleanupError)}）`,
+    );
+  }
+}
+
+function prepareInstallWorkspace(
+  installDir: string,
+  report: InstallAgentReporter,
+): InstallWorkspacePreparation {
+  const markerToken = randomUUID();
+  const lockPath = installLockPath(installDir);
+  const installedRoot = dirname(installDir);
+  try {
+    mkdirSync(installedRoot, { recursive: true });
+    writeInstallLock(lockPath, {
+      token: markerToken,
+      pid: process.pid,
+      startedAt: new Date().toISOString(),
+    });
+  } catch (error) {
+    const message = hasErrorCode(error, "EEXIST")
+      ? `Agent 安装任务正在使用锁文件: ${lockPath}。` +
+        `请先检查锁文件中的 pid，确认对应安装进程已结束后再手动删除该锁文件并重试；` +
+        `Roll 不会自动抢占疑似 stale lock。`
+      : `无法创建 Agent 安装锁: ${errorMessage(error)}`;
+    return { ok: false, failure: { ok: false, step: "resolve", message } };
+  }
+
+  let installDirStats: ReturnType<typeof lstatSync> | undefined;
+  try {
+    installDirStats = lstatSync(installDir);
+  } catch (error) {
+    if (!hasErrorCode(error, "ENOENT")) {
+      releaseOwnedInstallLock({ installDir, lockPath, markerToken }, report);
+      return {
+        ok: false,
+        failure: {
+          ok: false,
+          step: "resolve",
+          message: `无法检查 Agent 安装目录: ${errorMessage(error)}`,
+        },
+      };
+    }
+  }
+
+  if (installDirStats !== undefined) {
+    if (installDirStats.isSymbolicLink()) {
+      releaseOwnedInstallLock({ installDir, lockPath, markerToken }, report);
+      return {
+        ok: false,
+        failure: {
+          ok: false,
+          step: "resolve",
+          message: `Agent 安装目录不能是符号链接: ${installDir}`,
+        },
+      };
+    }
+    if (!installDirStats.isDirectory()) {
+      releaseOwnedInstallLock({ installDir, lockPath, markerToken }, report);
+      return {
+        ok: false,
+        failure: {
+          ok: false,
+          step: "resolve",
+          message: `Agent 安装路径已存在但不是目录: ${installDir}`,
+        },
+      };
+    }
+    return {
+      ok: true,
+      workspace: {
+        installDir,
+        lockPath,
+        markerToken,
+        createdByInvocation: false,
+      },
+    };
+  }
+
+  try {
+    mkdirSync(installDir);
+  } catch (error) {
+    releaseOwnedInstallLock({ installDir, lockPath, markerToken }, report);
+    return {
+      ok: false,
+      failure: {
+        ok: false,
+        step: "resolve",
+        message: `无法创建 Agent 安装目录: ${errorMessage(error)}`,
+      },
+    };
+  }
+
+  return {
+    ok: true,
+    workspace: { installDir, lockPath, markerToken, createdByInvocation: true },
+  };
+}
+
+function cleanupUnregisteredInstall(
+  workspace: InstallWorkspace,
+  report: InstallAgentReporter,
+): void {
+  if (!workspace.createdByInvocation) {
+    return;
+  }
+
+  if (readInstallLockToken(workspace.lockPath) !== workspace.markerToken) {
+    reportCleanupWarning(report, `安装目录锁不再属于当前任务，未删除目录: ${workspace.installDir}`);
+    return;
+  }
+  try {
+    rmSync(workspace.installDir, { recursive: true, force: true });
+  } catch (cleanupError) {
+    reportCleanupWarning(
+      report,
+      `清理未完成的安装目录失败: ${workspace.installDir}（${errorMessage(cleanupError)}）`,
+    );
+  }
 }
 
 function sourceTypeLabel(agent: RegisteredAgent): string {
@@ -195,190 +405,217 @@ export async function installAgent(
     );
   }
 
-  const installDirExisted = existsSync(installDir);
-  if (!installDirExisted) {
-    mkdirSync(installDir, { recursive: true });
+  const workspacePreparation = prepareInstallWorkspace(installDir, report);
+  if (!workspacePreparation.ok) {
+    return workspacePreparation.failure;
   }
+  const workspace = workspacePreparation.workspace;
 
-  if (deps.installConfig.registry) {
-    report({
-      type: "info",
-      message: `使用 npm registry: ${deps.installConfig.registry}（roll.config.yaml install.registry）`,
-    });
-  }
-
-  report({ type: "step", step: "download", message: `安装 ${packageSpec}...` });
-  const installSpec: PackageManagerRunSpec = {
-    command: "npm",
-    args: [
-      "install",
-      "--prefix",
-      installDir,
-      packageSpec,
-      ...buildInstallNetworkArgs(deps.installConfig),
-    ],
-  };
   try {
-    await runInstall(
-      installSpec,
-      { timeout: deps.installConfig.networkTimeoutMs },
-      {
-        ...buildNpmRetryPolicy(deps.installConfig.fetchRetries),
-        onRetry: ({ attempt, delayMs }) => {
-          report({ type: "retry", attempt, delayMs });
-        },
-      },
-    );
-  } catch (err) {
-    return {
-      ok: false,
-      step: "download",
-      message: `安装失败: ${formatPackageManagerError(installSpec, err)}`,
-    };
-  }
-
-  const packageRoot = resolvePackageRoot(installDir, packageName);
-  if (!existsSync(packageRoot)) {
-    return { ok: false, step: "discover", message: `安装完成但未找到包目录: ${packageRoot}` };
-  }
-  const installedManifest = readManifest(packageRoot);
-
-  report({ type: "step", step: "discover", message: "解析已安装 Agent 的 SKILL.md..." });
-  let discovered: DiscoveredAgent;
-  try {
-    discovered = discover(packageRoot);
-  } catch (err) {
-    return { ok: false, step: "discover", message: errorMessage(err) };
-  }
-
-  const agent: RegisteredAgent = {
-    skill: discovered.skill,
-    transport: discovered.transport,
-    runtime: discovered.runtime,
-    installPath: packageRoot,
-    registeredAt: new Date().toISOString(),
-    status: "idle",
-    source: {
-      type: "installed-package",
-      packageName: installedManifest?.name ?? packageName,
-      packageSpec,
-      installDir,
-      ...(installedManifest?.version ? { installedVersion: installedManifest.version } : {}),
-    },
-    ...(discovered.skillBody.length > 0 ? { skillBody: discovered.skillBody } : {}),
-  };
-
-  const existing = store.findByName(discovered.skill.name);
-  if (existing && needsReplaceAuthorization(existing, replaceExisting)) {
-    if (!installDirExisted) {
-      rmSync(installDir, { recursive: true, force: true });
-    }
-    return buildReplaceConflictFailure(
-      discovered.skill.name,
-      sourceTypeLabel(existing),
-      packageSpec,
-    );
-  }
-
-  if (
-    agent.runtime.ownership === "core-managed" &&
-    agent.runtime.setup?.playwright &&
-    !input.skipBrowserSetup
-  ) {
-    report({
-      type: "info",
-      message: `即将安装浏览器运行时 (${agent.runtime.setup.playwright.browsers.join(", ")})，这可能需要一些时间...`,
-    });
-  }
-
-  const setupResult = await runSetup(agent, {
-    skipBrowserSetup: input.skipBrowserSetup ?? false,
-  });
-  if (setupResult.ok && !setupResult.skipped) {
-    report({ type: "success", message: setupResult.message });
-  } else if (setupResult.ok) {
-    report({ type: "info", message: setupResult.message });
-  }
-
-  const wasRunning = existing?.runtime.ownership === "core-managed" && existing.status === "online";
-  try {
-    if (existing?.source?.type === "installed-package" || (existing && replaceExisting)) {
-      if (existing.source?.type !== "installed-package") {
-        const sourceType = existing.source?.type ?? "unknown";
-        report({
-          type: "info",
-          message: `Agent "${discovered.skill.name}" 已通过 ${sourceType} 来源注册，将替换为 npm 安装`,
-        });
-      }
-      store.replace(existing.skill.name, agent);
-    } else {
-      store.add(agent);
-    }
-  } catch (err) {
-    return { ok: false, step: "register", message: errorMessage(err) };
-  }
-
-  if (!setupResult.ok) {
-    if (wasRunning) {
-      await stopGracefully(deps.agentsConfig.dataDir, agent.skill.name).catch(() => {});
-    }
-    store.updateStatus(discovered.skill.name, "error");
-    return {
-      ok: false,
-      step: "setup",
-      message: setupResult.message,
-      ...(setupResult.retryCommand ? { retryCommand: setupResult.retryCommand } : {}),
-    };
-  }
-
-  const envReport = inspectAgentEnvRequirements(
-    agent.skill.name,
-    discovered.skill.env,
-    deps.agentsConfig.env,
-  );
-  const missingRequired = envReport?.missingRequired ?? [];
-
-  let started = false;
-  const shouldAttemptStart = agent.runtime.ownership === "core-managed" && autoStart;
-  const canAttemptStart = shouldAttemptStart && missingRequired.length === 0;
-  if (wasRunning && !canAttemptStart) {
-    await stopGracefully(deps.agentsConfig.dataDir, agent.skill.name).catch(() => {});
-    store.updateStatus(agent.skill.name, "idle");
-  }
-
-  if (shouldAttemptStart) {
-    if (missingRequired.length > 0) {
+    if (deps.installConfig.registry) {
       report({
-        type: "warn",
-        message: `Agent "${agent.skill.name}" 缺少必填环境变量（${missingRequired
-          .map((item) => item.name)
-          .join(", ")}），暂不启动。配置后运行 \`roll agent start ${agent.skill.name}\` 启动`,
+        type: "info",
+        message: `使用 npm registry: ${deps.installConfig.registry}（roll.config.yaml install.registry）`,
       });
-    } else {
-      let startInvoked = false;
-      try {
-        if (wasRunning) {
-          await stopGracefully(deps.agentsConfig.dataDir, agent.skill.name);
+    }
+
+    report({ type: "step", step: "download", message: `安装 ${packageSpec}...` });
+    const installSpec: PackageManagerRunSpec = {
+      command: "npm",
+      args: [
+        "install",
+        "--prefix",
+        installDir,
+        packageSpec,
+        ...buildInstallNetworkArgs(deps.installConfig),
+      ],
+    };
+    try {
+      await runInstall(
+        installSpec,
+        { timeout: deps.installConfig.networkTimeoutMs },
+        {
+          ...buildNpmRetryPolicy(deps.installConfig.fetchRetries),
+          onRetry: ({ attempt, delayMs }) => {
+            report({ type: "retry", attempt, delayMs });
+          },
+        },
+      );
+    } catch (err) {
+      cleanupUnregisteredInstall(workspace, report);
+      return {
+        ok: false,
+        step: "download",
+        message: `安装失败: ${formatPackageManagerError(installSpec, err)}`,
+      };
+    }
+
+    let packageRoot: string;
+    try {
+      packageRoot = resolvePackageRoot(installDir, packageName);
+    } catch (err) {
+      cleanupUnregisteredInstall(workspace, report);
+      throw err;
+    }
+    if (!existsSync(packageRoot)) {
+      cleanupUnregisteredInstall(workspace, report);
+      return { ok: false, step: "discover", message: `安装完成但未找到包目录: ${packageRoot}` };
+    }
+    let installedManifest: ReturnType<typeof readInstalledPackageManifest>;
+    try {
+      installedManifest = readManifest(packageRoot);
+    } catch (err) {
+      cleanupUnregisteredInstall(workspace, report);
+      throw err;
+    }
+
+    report({ type: "step", step: "discover", message: "解析已安装 Agent 的 SKILL.md..." });
+    let discovered: DiscoveredAgent;
+    try {
+      discovered = discover(packageRoot);
+    } catch (err) {
+      cleanupUnregisteredInstall(workspace, report);
+      return { ok: false, step: "discover", message: errorMessage(err) };
+    }
+
+    const agent: RegisteredAgent = {
+      skill: discovered.skill,
+      transport: discovered.transport,
+      runtime: discovered.runtime,
+      installPath: packageRoot,
+      registeredAt: new Date().toISOString(),
+      status: "idle",
+      source: {
+        type: "installed-package",
+        packageName: installedManifest?.name ?? packageName,
+        packageSpec,
+        installDir,
+        ...(installedManifest?.version ? { installedVersion: installedManifest.version } : {}),
+      },
+      ...(discovered.skillBody.length > 0 ? { skillBody: discovered.skillBody } : {}),
+    };
+
+    const existing = store.findByName(discovered.skill.name);
+    if (existing && needsReplaceAuthorization(existing, replaceExisting)) {
+      cleanupUnregisteredInstall(workspace, report);
+      return buildReplaceConflictFailure(
+        discovered.skill.name,
+        sourceTypeLabel(existing),
+        packageSpec,
+      );
+    }
+
+    if (
+      agent.runtime.ownership === "core-managed" &&
+      agent.runtime.setup?.playwright &&
+      !input.skipBrowserSetup
+    ) {
+      report({
+        type: "info",
+        message: `即将安装浏览器运行时 (${agent.runtime.setup.playwright.browsers.join(", ")})，这可能需要一些时间...`,
+      });
+    }
+
+    let setupResult: Awaited<ReturnType<typeof runAgentSetup>>;
+    try {
+      setupResult = await runSetup(agent, {
+        skipBrowserSetup: input.skipBrowserSetup ?? false,
+      });
+    } catch (err) {
+      cleanupUnregisteredInstall(workspace, report);
+      throw err;
+    }
+    if (setupResult.ok && !setupResult.skipped) {
+      report({ type: "success", message: setupResult.message });
+    } else if (setupResult.ok) {
+      report({ type: "info", message: setupResult.message });
+    }
+
+    const wasRunning =
+      existing?.runtime.ownership === "core-managed" && existing.status === "online";
+    try {
+      if (existing?.source?.type === "installed-package" || (existing && replaceExisting)) {
+        if (existing.source?.type !== "installed-package") {
+          const sourceType = existing.source?.type ?? "unknown";
+          report({
+            type: "info",
+            message: `Agent "${discovered.skill.name}" 已通过 ${sourceType} 来源注册，将替换为 npm 安装`,
+          });
         }
-        store.updateStatus(agent.skill.name, "starting");
-        start(agent, deps.agentsConfig.dataDir, deps.getStartEnv(agent.skill.name));
-        startInvoked = true;
-        await waitReady(agent, { startupTimeoutMs: 15_000, probeTimeoutMs: 2_000 });
-        store.updateStatus(agent.skill.name, "online");
-        started = true;
-      } catch (err) {
-        if (startInvoked) {
-          await stopGracefully(deps.agentsConfig.dataDir, agent.skill.name).catch(() => {});
+        if (!store.replace(existing.skill.name, agent)) {
+          throw new Error(`Agent "${existing.skill.name}" 在安装期间已被移除，请重试`);
         }
-        store.updateStatus(agent.skill.name, "error");
-        return {
-          ok: false,
-          step: "start",
-          message: `Agent "${discovered.skill.name}" 已安装，但自动启动失败：${errorMessage(err)}`,
-        };
+      } else {
+        store.add(agent);
+      }
+    } catch (err) {
+      cleanupUnregisteredInstall(workspace, report);
+      return { ok: false, step: "register", message: errorMessage(err) };
+    }
+    if (!setupResult.ok) {
+      if (wasRunning) {
+        await stopGracefully(deps.agentsConfig.dataDir, agent.skill.name).catch(() => {});
+      }
+      store.updateStatus(discovered.skill.name, "error");
+      return {
+        ok: false,
+        step: "setup",
+        message: setupResult.message,
+        ...(setupResult.retryCommand ? { retryCommand: setupResult.retryCommand } : {}),
+      };
+    }
+
+    const envReport = inspectAgentEnvRequirements(
+      agent.skill.name,
+      discovered.skill.env,
+      deps.agentsConfig.env,
+    );
+    const missingRequired = envReport?.missingRequired ?? [];
+
+    let started = false;
+    const shouldAttemptStart = agent.runtime.ownership === "core-managed" && autoStart;
+    const canAttemptStart = shouldAttemptStart && missingRequired.length === 0;
+    if (wasRunning && !canAttemptStart) {
+      await stopGracefully(deps.agentsConfig.dataDir, agent.skill.name).catch(() => {});
+      store.updateStatus(agent.skill.name, "idle");
+    }
+
+    if (shouldAttemptStart) {
+      if (missingRequired.length > 0) {
+        report({
+          type: "warn",
+          message: `Agent "${agent.skill.name}" 缺少必填环境变量（${missingRequired
+            .map((item) => item.name)
+            .join(", ")}），暂不启动。配置后运行 \`roll agent start ${agent.skill.name}\` 启动`,
+        });
+      } else {
+        let startInvoked = false;
+        try {
+          if (wasRunning) {
+            await stopGracefully(deps.agentsConfig.dataDir, agent.skill.name);
+          }
+          store.updateStatus(agent.skill.name, "starting");
+          start(agent, deps.agentsConfig.dataDir, deps.getStartEnv(agent.skill.name));
+          startInvoked = true;
+          await waitReady(agent, { startupTimeoutMs: 15_000, probeTimeoutMs: 2_000 });
+          store.updateStatus(agent.skill.name, "online");
+          started = true;
+        } catch (err) {
+          if (startInvoked) {
+            await stopGracefully(deps.agentsConfig.dataDir, agent.skill.name).catch(() => {});
+          }
+          store.updateStatus(agent.skill.name, "error");
+          return {
+            ok: false,
+            step: "start",
+            message: `Agent "${discovered.skill.name}" 已安装，但自动启动失败：${errorMessage(err)}`,
+          };
+        }
       }
     }
-  }
 
-  return { ok: true, agent, envReport, started };
+    return { ok: true, agent, envReport, started };
+  } finally {
+    releaseOwnedInstallLock(workspace, report);
+  }
 }
