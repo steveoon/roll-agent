@@ -702,10 +702,22 @@ def run_scenario(scenario: str) -> tuple[dict[str, float | int | bool], PtyFixtu
             }, fixture
 
         if scenario == "cli-ink-cold-start":
-            ready_ms = fixture.wait_for(
-                lambda screen: PROMPT in screen,
+            fixture.wait_for(
+                lambda screen: "Roll Agent v" in screen and "/exit 退出" in screen,
                 8,
-                "production CLI Ink interactive prompt",
+                "production CLI Ink application",
+            )
+            fixture.send("k")
+            ready_ms = fixture.wait_for(
+                lambda screen: re.search(r"›\s+k", screen) is not None,
+                2,
+                "production CLI Ink key echo",
+            )
+            fixture.send("\x7f")
+            fixture.wait_for(
+                lambda screen: PROMPT in screen and re.search(r"›\s+k", screen) is None,
+                2,
+                "production CLI Ink probe cleanup",
             )
             final_screen = fixture.screen.render()
             assert_prompt(final_screen)

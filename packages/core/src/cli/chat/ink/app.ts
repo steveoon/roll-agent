@@ -223,20 +223,14 @@ export function ChatApp(props: ChatAppProps): ReactElement {
     runSlash(exact ? raw : (selectedEntry?.name ?? raw));
   };
 
-  // Ink can leave an unchanged footer unpainted after the animated region is
-  // committed into Static. Changing the key remounts the footer at its final
-  // position while preserving the controlled draft held by useSession.
-  const footerKey = animatedBanner === undefined ? "banner-settled" : "banner-animating";
   const footer =
     state.phase === "confirm" && state.pendingConfirm !== undefined
       ? h(ConfirmSelect, {
-          key: footerKey,
           prompt: state.pendingConfirm.prompt,
           args: state.pendingConfirm.args,
           onDecide: resolveConfirm,
         })
       : h(TextPrompt, {
-          key: footerKey,
           value: state.draft,
           inputHistory,
           disabled: state.phase !== "idle",
