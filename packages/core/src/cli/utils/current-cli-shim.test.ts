@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { delimiter, dirname, join } from "node:path";
 import { spawnSync } from "node:child_process";
 import { installCurrentCliShim } from "./current-cli-shim.ts";
 
@@ -10,7 +10,9 @@ function testRoot(): string {
   return mkdtempSync(join(tmpdir(), "roll-current-cli-test-"));
 }
 
-test("current CLI shim 转发参数并在 dispose 后恢复环境", () => {
+const posixOnly = { skip: process.platform === "win32" };
+
+test("current CLI shim 转发参数并在 dispose 后恢复环境", posixOnly, () => {
   const root = testRoot();
   const entryPath = join(root, "entry.mjs");
   writeFileSync(entryPath, "console.log(JSON.stringify(process.argv.slice(2)));\n", "utf8");
@@ -32,6 +34,7 @@ test("current CLI shim 转发参数并在 dispose 后恢复环境", () => {
       encoding: "utf8",
       env: { ...process.env, ...env },
     });
+    assert.ifError(result.error);
     assert.equal(result.status, 0, result.stderr);
     assert.deepEqual(JSON.parse(result.stdout.trim()), ["hello world", "中文"]);
 
@@ -65,7 +68,7 @@ test("current CLI shim 不转发 inspect 参数", () => {
   }
 });
 
-test("current CLI shim 将相对 preload 固定到启动目录", () => {
+test("current CLI shim 将相对 preload 固定到启动目录", posixOnly, () => {
   const root = testRoot();
   const launchCwd = join(root, "launch");
   const childCwd = join(root, "child");
@@ -91,6 +94,7 @@ test("current CLI shim 将相对 preload 固定到启动目录", () => {
       env: process.env,
     });
 
+    assert.ifError(result.error);
     assert.equal(result.status, 0, result.stderr);
     assert.equal(result.stdout.trim(), "loaded");
     assert.match(readFileSync(shim.path, "utf8"), new RegExp(hookPath.replaceAll("/", "\\/"), "u"));
@@ -109,7 +113,7 @@ test("current CLI shim 非 LIFO 清理不会恢复已经删除的 shim", () => {
       execArgv: [],
       entryPath: "/workspace/cli.ts",
       env,
-      platform: "linux",
+      platform: process.platform,
       tempRoot: root,
     });
     const second = installCurrentCliShim({
@@ -117,14 +121,14 @@ test("current CLI shim 非 LIFO 清理不会恢复已经删除的 shim", () => {
       execArgv: [],
       entryPath: "/workspace/cli.ts",
       env,
-      platform: "linux",
+      platform: process.platform,
       tempRoot: root,
     });
 
     first.dispose();
     assert.equal(env.ROLL_CURRENT_CLI, second.path);
-    assert.equal((env.PATH ?? "").split(":").includes(dirname(first.path)), false);
-    assert.equal((env.PATH ?? "").split(":").includes(dirname(second.path)), true);
+    assert.equal((env.PATH ?? "").split(delimiter).includes(dirname(first.path)), false);
+    assert.equal((env.PATH ?? "").split(delimiter).includes(dirname(second.path)), true);
 
     second.dispose();
     assert.equal(env.PATH, "/base/bin");
@@ -173,11 +177,12 @@ test(
     const env: NodeJS.ProcessEnv = { ...process.env };
     try {
       const shim = installCurrentCliShim({ env, entryPath, execArgv: [] });
-      const result = spawnSync(shim.path, ["hello world", "中文"], {
+      const result = spawnSync(`"${shim.path}" "hello world" "中文"`, {
         encoding: "utf8",
         env,
         shell: true,
       });
+      assert.ifError(result.error);
       assert.equal(result.status, 7, result.stderr);
       assert.deepEqual(JSON.parse(result.stdout.trim()), ["hello world", "中文"]);
       shim.dispose();

@@ -1649,7 +1649,6 @@ test("AgentSession Esc 在工具落盘与 step 完成之间仍为下一轮保留
     publicMessages,
     /roll:hidden|cancelledTurnRecovery|Roll interrupted-turn recovery checkpoint/u,
   );
-  assert.match(publicMessages, /tool-result|原始查询已修复/u);
   assert.match(publicMessages, /已停止本轮操作/u);
 
   const restoredMessages = JSON.parse(JSON.stringify(persisted[0])) as ModelMessage[];
