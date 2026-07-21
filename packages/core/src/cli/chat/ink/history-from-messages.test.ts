@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import type { ModelMessage } from "ai";
-import { SUMMARY_ACK, SUMMARY_PREFIX } from "@roll-agent/runtime";
+import { createTurnCancellationMessage, SUMMARY_ACK, SUMMARY_PREFIX } from "@roll-agent/runtime";
 import { messagesToHistory } from "./history-from-messages.ts";
 
 test("messagesToHistory returns [] for empty input", () => {
@@ -105,4 +105,17 @@ test("messagesToHistory ignores assistant reasoning parts (no raw reasoning in U
   ];
   const history = messagesToHistory(messages);
   assert.deepEqual(history, [{ kind: "assistant", id: "h-0", text: "可见回复" }]);
+});
+
+test("messagesToHistory 恢复取消原因与专用展示语义", () => {
+  const message = createTurnCancellationMessage("本轮等待时间过长，已自动停止。", "timeout");
+
+  assert.deepEqual(messagesToHistory([message]), [
+    {
+      kind: "turn-cancelled",
+      id: "h-0",
+      text: "本轮等待时间过长，已自动停止。",
+      reason: "timeout",
+    },
+  ]);
 });

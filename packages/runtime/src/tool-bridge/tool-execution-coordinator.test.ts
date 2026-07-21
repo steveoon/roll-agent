@@ -127,6 +127,21 @@ test("ToolExecutionCoordinator describeResources 复用执行计划且观察失�
   assert.deepEqual(coordinator.describeResources("broken", {}), []);
 });
 
+test("ToolExecutionCoordinator 只在准入后单调记录本轮已开始执行", async () => {
+  const coordinator = new ToolExecutionCoordinator();
+  coordinator.register("write", resourcePlan("file:a", TOOL_RESOURCE_ACCESS_MODES.write));
+  assert.equal(coordinator.hasExecutionStarted("c1"), false);
+
+  await coordinator.execute("c1", "write", {}, undefined, async () => {
+    assert.equal(coordinator.hasExecutionStarted("c1"), true);
+    return successfulToolResult("ok");
+  });
+
+  assert.equal(coordinator.hasExecutionStarted("c1"), true);
+  coordinator.finishTurn();
+  assert.equal(coordinator.hasExecutionStarted("c1"), false);
+});
+
 test("ToolExecutionCoordinator 在准入时封存资源计划，不受执行前动态状态漂移影响", async () => {
   const coordinator = new ToolExecutionCoordinator();
   let readOnly = true;

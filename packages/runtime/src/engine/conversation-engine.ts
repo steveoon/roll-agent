@@ -94,6 +94,7 @@ export interface ConversationEngineOptions {
   readonly inspectVcsContext?: (
     cwd: string,
   ) => CapabilityVcsSnapshot | undefined | Promise<CapabilityVcsSnapshot | undefined>;
+  readonly shellEnv?: NodeJS.ProcessEnv;
 }
 
 export interface CreateSessionInput {
@@ -252,6 +253,7 @@ export class ConversationEngine {
   private readonly installAgentFn: typeof installAgent;
   private readonly resolveCatalogFn: typeof resolveAgentCatalog;
   private readonly inspectVcsContext: NonNullable<ConversationEngineOptions["inspectVcsContext"]>;
+  private readonly shellEnv: NodeJS.ProcessEnv;
   private ready: Promise<EngineContext> | undefined;
   private refreshChain: Promise<void> = Promise.resolve();
   private resolvedCatalog: readonly AgentCatalogEntry[] | undefined;
@@ -286,6 +288,7 @@ export class ConversationEngine {
     this.installAgentFn = options.installAgentFn ?? installAgent;
     this.resolveCatalogFn = options.resolveCatalogFn ?? resolveAgentCatalog;
     this.inspectVcsContext = options.inspectVcsContext ?? inspectGitVcsContext;
+    this.shellEnv = { ...(options.shellEnv ?? process.env) };
   }
 
   async createSession(input: CreateSessionInput = {}): Promise<AgentSession> {
@@ -340,7 +343,7 @@ export class ConversationEngine {
     if (this.shellProfileResolution === undefined) {
       this.shellProfileResolution = this.resolveShellProfileFn({
         platform: process.platform,
-        env: process.env,
+        env: this.shellEnv,
       });
     }
     const result = this.shellProfileResolution;
@@ -370,6 +373,7 @@ export class ConversationEngine {
       maxCaptureBytes: shell.maxCaptureBytes,
       maxModelOutputChars: shell.maxModelOutputChars,
       profile,
+      env: this.shellEnv,
     };
   }
 
@@ -391,6 +395,7 @@ export class ConversationEngine {
       defaultYieldMs: shell.session.defaultYieldMs,
       maxOutputTokens: shell.session.maxOutputTokens,
       bufferCapacity: shell.maxCaptureBytes,
+      env: this.shellEnv,
     };
   }
 

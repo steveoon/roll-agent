@@ -1,5 +1,5 @@
 import type { ModelMessage } from "ai";
-import { SUMMARY_ACK, SUMMARY_PREFIX } from "@roll-agent/runtime";
+import { readTurnCancellationReason, SUMMARY_ACK, SUMMARY_PREFIX } from "@roll-agent/runtime";
 import { formatToolInput } from "../../utils/tool-format.ts";
 import { GLYPHS } from "../../utils/glyphs.ts";
 import type { HistoryItem } from "./state.ts";
@@ -55,7 +55,12 @@ export function messagesToHistory(
         return;
       }
       if (text.length > 0) {
-        items.push({ kind: "assistant", id, text });
+        const cancellationReason = readTurnCancellationReason(message);
+        items.push(
+          cancellationReason
+            ? { kind: "turn-cancelled", id, text, reason: cancellationReason }
+            : { kind: "assistant", id, text },
+        );
       }
       if (typeof message.content !== "string") {
         message.content.forEach((part, partIndex) => {

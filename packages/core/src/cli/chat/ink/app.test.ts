@@ -2,9 +2,11 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { setTimeout as delay } from "node:timers/promises";
 import { createElement as h } from "react";
+import { Box } from "ink";
 import { render } from "ink-testing-library";
 import type { AgentSession, SessionEvent } from "@roll-agent/runtime";
 import { ChatApp } from "./app.ts";
+import { HistoryItemView } from "./history-item.ts";
 import { GLYPHS } from "../../utils/glyphs.ts";
 
 function literalPattern(text: string): RegExp {
@@ -200,7 +202,7 @@ for (const [label, escapeSequence] of [
       yield {
         type: "turn-cancelled",
         reason: "user",
-        message: "已取消本轮；正在运行的工具已收到中断请求。",
+        message: "已停止本轮操作。正在进行的任务也已请求停止。",
       };
     }
     const { stdin, lastFrame, unmount } = render(
@@ -221,7 +223,7 @@ for (const [label, escapeSequence] of [
     stdin.write(escapeSequence);
     await waitFor(() => assert.equal(sink.cancelled, 1));
     await waitFor(() => assert.match(plain(lastFrame() ?? ""), /roll\.powershell.*已中断/s));
-    assert.match(plain(lastFrame() ?? ""), /已取消本轮/);
+    assert.match(plain(lastFrame() ?? ""), /已停止本轮操作/);
     unmount();
   });
 }
@@ -237,7 +239,11 @@ test("ChatApp Esc 中断 token streaming", async () => {
     yield { type: "text-delta", delta: "尚未完成的输出" };
     await cancellation;
     await delay(80);
-    yield { type: "turn-cancelled", reason: "user", message: "已取消本轮。" };
+    yield {
+      type: "turn-cancelled",
+      reason: "user",
+      message: "已停止本轮回复。之前的对话会保留，你可以继续输入。",
+    };
   }
   const { stdin, lastFrame, unmount } = render(
     h(ChatApp, {
@@ -257,9 +263,38 @@ test("ChatApp Esc 中断 token streaming", async () => {
   stdin.write("\x1b");
   await waitFor(() => assert.equal(sink.cancelled, 1));
   await waitFor(() => assert.match(plain(lastFrame() ?? ""), /正在中断…/));
-  await waitFor(() => assert.match(plain(lastFrame() ?? ""), /已取消本轮/));
+  await waitFor(() => assert.match(plain(lastFrame() ?? ""), /已停止本轮回复/));
   assert.doesNotMatch(plain(lastFrame() ?? ""), /尚未完成的输出/);
   unmount();
+});
+
+test("turn-cancelled 窄宽度换行保持前缀列与正文列对齐", () => {
+  const message =
+    "已停止本轮操作。正在进行的任务也已请求停止。之前的对话和已完成进度会保留；部分已经完成的操作不会自动撤销，请检查结果。";
+  for (const [reason, prefix] of [
+    ["user", "■"],
+    ["timeout", "⚠"],
+    ["runtime", "✗"],
+  ] as const) {
+    const { lastFrame, unmount } = render(
+      h(
+        Box,
+        { width: 40 },
+        h(HistoryItemView, {
+          item: { kind: "turn-cancelled", id: reason, reason, text: message },
+        }),
+      ),
+    );
+    const lines = plain(lastFrame() ?? "").split("\n");
+
+    assert.ok(lines.length > 1);
+    assert.equal(lines[0]?.slice(0, 2), `${prefix} `);
+    for (const line of lines.slice(1)) {
+      assert.match(line, /^ {2}\S/u);
+    }
+    assert.equal(lines.map((line) => line.slice(2)).join(""), message);
+    unmount();
+  }
 });
 
 test("ChatApp confirm flow shows tool args and approves on y", async () => {

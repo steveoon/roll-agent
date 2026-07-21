@@ -97,7 +97,15 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-if ! command -v roll >/dev/null 2>&1; then
+roll_cli() {
+  if [[ -n "${ROLL_CURRENT_CLI:-}" && -x "$ROLL_CURRENT_CLI" ]]; then
+    "$ROLL_CURRENT_CLI" "$@"
+    return
+  fi
+  roll "$@"
+}
+
+if [[ -z "${ROLL_CURRENT_CLI:-}" || ! -x "$ROLL_CURRENT_CLI" ]] && ! command -v roll >/dev/null 2>&1; then
   echo "error: roll CLI not found in PATH" >&2
   exit 1
 fi
@@ -144,7 +152,7 @@ roll_json_file() {
       fs.writeFileSync(filePath, JSON.stringify(payload));
     ' "$file" "$BROWSER_INSTANCE"
   fi
-  roll run "$AGENT" "$tool" --input-file "$file" --json 2>&1 || true
+  roll_cli run "$AGENT" "$tool" --input-file "$file" --json 2>&1 || true
 }
 
 roll_no_input() {
@@ -221,12 +229,12 @@ log() { echo "[reply-unread] $*" >&2; }
 
 ensure_agent_healthy() {
   local health
-  health=$(roll agent health --json 2>&1) || health=""
+  health=$(roll_cli agent health --json 2>&1) || health=""
   if printf '%s' "$health" | node "$CHECK_AGENT_HEALTH" 2>/dev/null; then
     return 0
   fi
   log "starting agent $AGENT..."
-  roll agent start "$AGENT" >&2 || true
+  roll_cli agent start "$AGENT" >&2 || true
   sleep 2
 }
 

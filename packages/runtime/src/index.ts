@@ -115,6 +115,8 @@ export type {
   ContextCompactionStrategy,
 } from "./types/events.ts";
 export {
+  createTurnCancellationMessage,
+  readTurnCancellationReason,
   SESSION_CANCELLATION_REASONS,
   USER_CANCELLATION_ABORT_REASON,
 } from "./types/cancellation.ts";

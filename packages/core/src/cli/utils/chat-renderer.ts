@@ -149,7 +149,13 @@ export class ChatRenderer {
         }
         this.spinners.clear();
         this.toolLabels.clear();
-        log.warn(event.message);
+        if (event.reason === "user") {
+          process.stderr.write(`${chalk.gray(`■ ${event.message}`)}\n`);
+        } else if (event.reason === "timeout") {
+          log.warn(event.message);
+        } else {
+          log.error(event.message);
+        }
         break;
       case "error":
         this.stopMessageSpinner();

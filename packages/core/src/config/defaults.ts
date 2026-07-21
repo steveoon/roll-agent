@@ -1,6 +1,6 @@
 import { rollConfigSchema, type RollConfig } from "./schema.ts";
 
-export const LLM_PROVIDER_OPTIONS = ["anthropic", "openai", "qwen", "deepseek"] as const;
+export const LLM_PROVIDER_OPTIONS = ["anthropic", "openai", "qwen", "deepseek", "xai"] as const;
 export type LlmProviderOption = (typeof LLM_PROVIDER_OPTIONS)[number];
 
 export const DEFAULT_LLM_PROVIDER: LlmProviderOption = "anthropic";
@@ -10,6 +10,7 @@ export const DEFAULT_LLM_MODELS = {
   openai: "gpt-5.5",
   qwen: "qwen3.6-plus",
   deepseek: "deepseek-v4-flash",
+  xai: "grok-4.5",
 } as const satisfies Record<LlmProviderOption, string>;
 
 /** 仅为 schema 中没有默认值、但根配置要求存在的字段提供种子。 */

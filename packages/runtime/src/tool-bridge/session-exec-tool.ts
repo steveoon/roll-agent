@@ -59,6 +59,7 @@ export interface SessionExecSettings {
   readonly workdir: string;
   readonly defaultYieldMs: number;
   readonly maxOutputTokens: number;
+  readonly env?: NodeJS.ProcessEnv;
 }
 
 export interface SessionExecDeps {
@@ -413,7 +414,7 @@ export function buildSessionExecToolset(
                 command: input.command,
                 workdir,
                 ...(capturedState === "known-safe"
-                  ? { env: withAutoApprovedShellEnv(process.env) }
+                  ? { env: withAutoApprovedShellEnv(settings.env ?? process.env) }
                   : {}),
                 ...(onDelta ? { onDelta } : {}),
               });

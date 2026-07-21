@@ -100,7 +100,9 @@ agents:
   data-dir: ~/.roll-agent/agents
 ```
 
-支持的 provider：`anthropic`、`openai`、`deepseek`、`qwen`。每个 provider 可配置 `base-url` 用于自定义 API 端点。
+支持的 provider：`anthropic`、`openai`、`deepseek`、`qwen`、`xai`。每个 provider 可配置
+`base-url` 用于自定义 API 端点；xAI 默认模型为 `grok-4.5`（500k context window），API key 可通过
+`XAI_API_KEY` 注入。
 `ask.llm-model` 可选；未设置时会回退到 `llm.default-model`。
 
 如果本地还留着旧版 `router:` 配置段：

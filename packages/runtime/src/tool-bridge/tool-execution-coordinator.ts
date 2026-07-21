@@ -286,6 +286,7 @@ class ResourceLockManager {
 export class ToolExecutionCoordinator {
   private readonly plans = new Map<string, ToolExecutionPlan>();
   private readonly prepared = new Map<string, PreparedToolCall>();
+  private readonly startedToolCallIds = new Set<string>();
   private readonly batches = new Map<string, BatchState>();
   private readonly toolCallBatches = new Map<string, BatchState>();
   private readonly locks = new ResourceLockManager();
@@ -307,6 +308,10 @@ export class ToolExecutionCoordinator {
       // will still surface the planner error as a typed Tool outcome.
       return [];
     }
+  }
+
+  hasExecutionStarted(toolCallId: string): boolean {
+    return this.startedToolCallIds.has(toolCallId);
   }
 
   startBatch(callId: string): void {
@@ -403,6 +408,7 @@ export class ToolExecutionCoordinator {
       this.cancelBatch(batch);
     }
     this.prepared.clear();
+    this.startedToolCallIds.clear();
     this.batches.clear();
     this.toolCallBatches.clear();
     this.activeBatch = undefined;
@@ -464,7 +470,11 @@ export class ToolExecutionCoordinator {
       const admittedCall = prepared;
       return await this.locks.run(admittedCall.resources, abortSignal, async () => {
         const invalidated = await plan?.revalidateExecution?.(input, admittedCall.capturedState);
-        return invalidated ?? operation(admittedCall.capturedState);
+        if (invalidated) {
+          return invalidated;
+        }
+        this.startedToolCallIds.add(toolCallId);
+        return operation(admittedCall.capturedState);
       });
     } catch (error) {
       if (abortSignal?.aborted) {

@@ -253,7 +253,13 @@ function Invoke-RollCapture {
   $prev = $ErrorActionPreference
   $ErrorActionPreference = "Continue"
   try {
-    $chunks = @(& roll @RollArgs 2>&1 | ForEach-Object {
+    $rollCommand = if ($env:ROLL_CURRENT_CLI -and (Test-Path -LiteralPath $env:ROLL_CURRENT_CLI -PathType Leaf)) {
+      $env:ROLL_CURRENT_CLI
+    }
+    else {
+      "roll"
+    }
+    $chunks = @(& $rollCommand @RollArgs 2>&1 | ForEach-Object {
         if ($_ -is [System.Management.Automation.ErrorRecord]) {
           if ($null -ne $_.Exception -and $null -ne $_.Exception.Message) {
             $_.Exception.Message
@@ -670,7 +676,7 @@ function Process-One([string]$Cid, [string]$Name, [string]$Preview) {
 
 Parse-Args -Argv $args
 
-if (-not (Get-Command roll -ErrorAction SilentlyContinue)) {
+if ((-not $env:ROLL_CURRENT_CLI -or -not (Test-Path -LiteralPath $env:ROLL_CURRENT_CLI -PathType Leaf)) -and -not (Get-Command roll -ErrorAction SilentlyContinue)) {
   Write-Error "roll CLI not found in PATH"
   exit 1
 }

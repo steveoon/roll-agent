@@ -205,6 +205,39 @@ test("短跑命令首窗即 exited 且非零码标记 isError", { skip }, async 
   await manager.terminateAll();
 });
 
+test("known-safe exec_command 继承隔离的 Chat 环境", { skip }, async () => {
+  const scopedEnv = { ...process.env, ROLL_CURRENT_CLI: "/tmp/current-roll" };
+  const managerEnv = { ...process.env };
+  delete managerEnv.ROLL_CURRENT_CLI;
+  const manager = new SessionManager({
+    maxSessions: 2,
+    profile,
+    env: managerEnv,
+    bufferCapacity: 10_000,
+  });
+  const registry = new ToolRegistry();
+  const toolset = buildSessionExecToolset(
+    { ...settings(), env: scopedEnv },
+    manager,
+    registry,
+    {
+      policy: allowPolicy,
+      requestApproval: async () => ({ approved: true }),
+    },
+    { classifier: { classify: () => "known-safe" } },
+  );
+  const command = toolset[EXEC_COMMAND_ID];
+  assert.ok(command?.execute);
+
+  const result = (await command.execute(
+    { command: 'printf "%s" "$ROLL_CURRENT_CLI"', yield_time_ms: 3_000 },
+    options("scoped-env"),
+  )) as NormalizedToolResult;
+
+  assert.match(String(result.output), /\/tmp\/current-roll/u);
+  await manager.terminateAll();
+});
+
 test("exec_poll Ctrl-C 中断会话", { skip }, async () => {
   const { manager, execCommand, execPoll } = build({
     policy: allowPolicy,

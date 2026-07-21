@@ -45,6 +45,7 @@ export interface SessionBashSettings {
   readonly maxCaptureBytes: number;
   readonly maxModelOutputChars: number;
   readonly profile: ShellProfile;
+  readonly env?: NodeJS.ProcessEnv;
 }
 
 export interface BashToolContext extends ToolBridgeContext {
@@ -156,6 +157,7 @@ export function buildBashToolset(
   const id = registry.register(BASH_TOOL_AGENT_NAME, toolName);
   const classifier = deps.classifier ?? settings.profile;
   const exec = deps.exec ?? runBashCommand;
+  const shellEnv = settings.env ?? process.env;
   const resolveParameters = (input: BashToolInput) => {
     const workdir = resolve(settings.workdir, input.workdir ?? ".");
     const timeoutMs = Math.min(
@@ -265,10 +267,7 @@ export function buildBashToolset(
               timeoutMs,
               maxCaptureBytes: settings.maxCaptureBytes,
               profile: settings.profile,
-              env:
-                capturedState === "known-safe"
-                  ? withAutoApprovedShellEnv(process.env)
-                  : process.env,
+              env: capturedState === "known-safe" ? withAutoApprovedShellEnv(shellEnv) : shellEnv,
               ...(options.abortSignal ? { abortSignal: options.abortSignal } : {}),
               ...(onDelta ? { onDelta } : {}),
             });

@@ -31,6 +31,13 @@ describe("createProviderModel", () => {
     assert.equal(model.modelId, "qwen3.6-plus");
   });
 
+  it("should create an xAI model", () => {
+    const model = createProviderModel("xai", "grok-4.5", "test-key");
+    assert.ok(model);
+    assert.equal(model.modelId, "grok-4.5");
+    assert.equal(model.provider, "xai.responses");
+  });
+
   it("should accept custom baseURL", () => {
     const model = createProviderModel(
       "openai",
@@ -75,6 +82,15 @@ describe("resolveLLMCall", () => {
     assert.equal(resolved.model.modelId, "qwen3.7-plus");
     assert.deepEqual(resolved.providerOptions, {
       alibaba: { enableThinking: true, thinkingBudget: 8192 },
+    });
+  });
+
+  it("applies visible medium reasoning by default for xAI chat calls", () => {
+    const resolved = resolveLLMCall("xai", "grok-4.5", "test-key", "chat");
+
+    assert.equal(resolved.model.modelId, "grok-4.5");
+    assert.deepEqual(resolved.providerOptions, {
+      xai: { reasoningEffort: "medium", reasoningSummary: "auto" },
     });
   });
 
@@ -216,6 +232,40 @@ describe("resolveLLMCall", () => {
     );
   });
 
+  it("serializes xAI reasoning through the Responses API", async () => {
+    const originalFetch = globalThis.fetch;
+    let capturedUrl: string | undefined;
+    let capturedBody: unknown;
+
+    try {
+      globalThis.fetch = async (input: string | URL | Request, init?: RequestInit) => {
+        capturedUrl = input instanceof Request ? input.url : String(input);
+        if (typeof init?.body !== "string") {
+          throw new Error("Expected a JSON request body");
+        }
+        capturedBody = JSON.parse(init.body);
+
+        return new Response("", {
+          status: 200,
+          headers: { "content-type": "text/event-stream" },
+        });
+      };
+
+      const resolved = resolveLLMCall("xai", "grok-4.5", "test-key", "chat");
+      const result = await resolved.model.doStream({
+        prompt: [{ role: "user", content: [{ type: "text", text: "test" }] }],
+        ...(resolved.providerOptions ? { providerOptions: resolved.providerOptions } : {}),
+      });
+      await result.stream.cancel();
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+
+    assert.equal(capturedUrl, "https://api.x.ai/v1/responses");
+    assert.ok(isRecord(capturedBody));
+    assert.deepEqual(capturedBody.reasoning, { effort: "medium", summary: "auto" });
+  });
+
   it("applies the same thinking mapping to sampling calls as chat calls", () => {
     const chatOff = resolveLLMCall("qwen", "qwen3.7-plus", "k", "chat", undefined, "off");
     const samplingOff = resolveLLMCall("qwen", "qwen3.7-plus", "k", "sampling", undefined, "off");
@@ -300,6 +350,30 @@ describe("thinkingProviderOptions", () => {
     assert.deepEqual(thinkingProviderOptions("deepseek", "deepseek-reasoner", "off"), {
       deepseek: { thinking: { type: "disabled" } },
     });
+  });
+
+  it("maps xAI reasoning effort and requests visible summaries", () => {
+    assert.deepEqual(thinkingProviderOptions("xai", "grok-4.5", "off"), {
+      xai: { reasoningEffort: "none" },
+    });
+    assert.deepEqual(thinkingProviderOptions("xai", "grok-4.5", "low"), {
+      xai: { reasoningEffort: "low", reasoningSummary: "auto" },
+    });
+    assert.deepEqual(thinkingProviderOptions("xai", "grok-4.5", "medium"), {
+      xai: { reasoningEffort: "medium", reasoningSummary: "auto" },
+    });
+    assert.deepEqual(thinkingProviderOptions("xai", "grok-4.5", "high"), {
+      xai: { reasoningEffort: "high", reasoningSummary: "auto" },
+    });
+  });
+
+  it("respects xAI models with fixed or disabled reasoning", () => {
+    assert.equal(thinkingProviderOptions("xai", "grok-4.20-non-reasoning", "high"), undefined);
+    assert.equal(thinkingProviderOptions("xai", "grok-4.20-reasoning", "off"), undefined);
+    assert.deepEqual(thinkingProviderOptions("xai", "grok-4.20-reasoning", "medium"), {
+      xai: { reasoningSummary: "auto" },
+    });
+    assert.equal(thinkingProviderOptions("xai", "grok-3", "medium"), undefined);
   });
 
   it("treats deepseek effort levels as on-only (no effort granularity)", () => {

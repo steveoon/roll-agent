@@ -723,7 +723,7 @@ test("AgentSession context overflow 重放复用同一份显式 skill 快照", a
   assert.ok(prompts.every((prompt) => !prompt.includes("BODY_VERSION_2")));
 });
 
-test("AgentSession 将 AI SDK 的内建 Tool schema 错误分类为 invalid_input", async () => {
+test("AgentSession 将 AI SDK 的内建 Tool schema 错误分类为 invalid_input 且取消不误报副作用", async () => {
   const summary = { name: "demo", description: "demo skill", source: "project" as const };
   const library: SkillLibrary = {
     list: () => [summary],
@@ -739,11 +739,20 @@ test("AgentSession 将 AI SDK 的内建 Tool schema 错误分类为 invalid_inpu
     skillLibrary: library,
   });
 
-  const events = await collect(session.send("load skill"));
+  const events: SessionEvent[] = [];
+  for await (const event of session.send("load skill")) {
+    events.push(event);
+    if (event.type === "tool-result" && event.outcome?.kind === "invalid_input") {
+      session.cancel();
+    }
+  }
   const result = events.find((event) => event.type === "tool-result");
 
   assert.ok(result && result.type === "tool-result");
   assert.equal(result.outcome?.kind, "invalid_input", JSON.stringify(result));
+  const cancelled = events.find((event) => event.type === "turn-cancelled");
+  assert.ok(cancelled && cancelled.type === "turn-cancelled");
+  assert.doesNotMatch(cancelled.message, /正在进行|不会自动撤销|请检查结果/u);
 });
 
 test("AgentSession 不用英文错误文案猜测 invalid_input", async () => {
@@ -1288,7 +1297,8 @@ test(
     const cancelled = events.find((event) => event.type === "turn-cancelled");
     assert.ok(cancelled && cancelled.type === "turn-cancelled");
     assert.equal(cancelled.reason, "timeout");
-    assert.match(cancelled.message, /30ms/u);
+    assert.match(cancelled.message, /等待时间过长/u);
+    assert.doesNotMatch(cancelled.message, /30ms|session|外部副作用/u);
     assert.equal(
       events.some((event) => event.type === "message-finish"),
       false,
@@ -1332,7 +1342,10 @@ test(
     assert.equal(modelCalls, 0);
     assert.equal(persistCalls, 1);
     assert.deepEqual(session.getMessages(), []);
-    assert.equal(events.filter((event) => event.type === "turn-cancelled").length, 1);
+    const cancelled = events.find((event) => event.type === "turn-cancelled");
+    assert.ok(cancelled && cancelled.type === "turn-cancelled");
+    assert.match(cancelled.message, /未能保存/u);
+    assert.doesNotMatch(cancelled.message, /会保留/u);
     const persistenceError = events.find(
       (event): event is Extract<SessionEvent, { type: "error" }> => event.type === "error",
     );
@@ -1421,6 +1434,7 @@ test("AgentSession policy deny 返回类型化错误并允许模型恢复", asyn
 });
 
 test("AgentSession cancel 中途确认不悬挂且持久化取消标记", async () => {
+  let calls = 0;
   const model = sequencedModel([
     toolCallStep("msg-agent__send_message", { q: "hi" }),
     textStep("done"),
@@ -1428,7 +1442,7 @@ test("AgentSession cancel 中途确认不悬挂且持久化取消标记", async 
   const session = new AgentSession({
     id: "s6",
     model,
-    sources: [source("msg-agent", "send_message")],
+    sources: [source("msg-agent", "send_message", () => (calls += 1))],
     maxSteps: 8,
     policy: new DefaultToolPolicy(),
   });
@@ -1445,6 +1459,8 @@ test("AgentSession cancel 中途确认不悬挂且持久化取消标记", async 
   const cancelled = events.find((event) => event.type === "turn-cancelled");
   assert.ok(cancelled && cancelled.type === "turn-cancelled");
   assert.equal(cancelled.reason, "user");
+  assert.equal(calls, 0);
+  assert.doesNotMatch(cancelled.message, /正在进行|不会自动撤销|请检查结果/u);
   assert.equal(
     events.some((event) => event.type === "error"),
     false,
@@ -1454,7 +1470,7 @@ test("AgentSession cancel 中途确认不悬挂且持久化取消标记", async 
     false,
   );
   assert.equal(session.getMessages().length, 2);
-  assert.match(String(session.getMessages().at(-1)?.content), /已取消本轮/);
+  assert.match(String(session.getMessages().at(-1)?.content), /已停止本轮/);
 });
 
 test("AgentSession cancel 保留已完成工具步骤，丢弃未完成的后续输出", async () => {
@@ -1493,10 +1509,51 @@ test("AgentSession cancel 保留已完成工具步骤，丢弃未完成的后续
 
   const messages = JSON.stringify(session.getMessages());
   assert.match(messages, /result-ok/);
-  assert.match(messages, /已取消本轮/);
+  assert.match(messages, /已停止本轮/);
   assert.doesNotMatch(messages, /不应持久化/);
   assert.equal(persisted.length, 1);
   assert.equal(events.filter((event) => event.type === "turn-cancelled").length, 1);
+});
+
+test("已完成只读 Tool 后 Esc 不误报仍在运行或不可撤销操作", async () => {
+  const readOnlySource: AgentToolSource = {
+    ...source("read-agent", "inspect"),
+    tools: [
+      {
+        tool: {
+          name: "inspect",
+          inputSchema: {
+            type: "object" as const,
+            properties: { q: { type: "string" } },
+            required: ["q"],
+          },
+        },
+        annotations: { readOnlyHint: true },
+      },
+    ],
+  };
+  const session = new AgentSession({
+    id: "read-only-complete-cancel",
+    model: sequencedModel([
+      toolCallStep("read-agent__inspect", { q: "status" }),
+      textStep("不应完成"),
+    ]),
+    sources: [readOnlySource],
+    maxSteps: 4,
+  });
+
+  const events: SessionEvent[] = [];
+  for await (const event of session.send("读取状态")) {
+    events.push(event);
+    if (event.type === "tool-result" && event.outcome?.kind === "success") {
+      session.cancel();
+    }
+  }
+
+  const cancelled = events.find((event) => event.type === "turn-cancelled");
+  assert.ok(cancelled && cancelled.type === "turn-cancelled");
+  assert.match(cancelled.message, /已完成进度会保留/u);
+  assert.doesNotMatch(cancelled.message, /正在进行|不会自动撤销/u);
 });
 
 test("AgentSession cancel 为执行中的 Tool exactly-once 记录 cancelled outcome", async () => {
@@ -1538,6 +1595,91 @@ test("AgentSession cancel 为执行中的 Tool exactly-once 记录 cancelled out
   }
 });
 
+test("AgentSession Esc 在工具落盘与 step 完成之间仍为下一轮保留完整进度", async () => {
+  const persisted: ModelMessage[][] = [];
+  const sessionForCancel: { current: AgentSession | undefined } = { current: undefined };
+  let cancelRequested = false;
+  const resultClient = {
+    callTool: async () => ({
+      content: [{ type: "text", text: "原始查询已修复" }],
+    }),
+  } as unknown as Client;
+  const resultSource: AgentToolSource = {
+    agentName: "query-agent",
+    client: resultClient,
+    tools: [
+      {
+        tool: {
+          name: "repair",
+          inputSchema: {
+            type: "object" as const,
+            properties: { q: { type: "string" } },
+            required: ["q"],
+          },
+        },
+        annotations: undefined,
+      },
+    ],
+  };
+  const firstSession = new AgentSession({
+    id: "esc-ledger-step-race",
+    model: sequencedModel([toolCallStep("query-agent__repair", { q: "broken SQL" })]),
+    sources: [resultSource],
+    maxSteps: 4,
+    onToolExecution: () => {
+      if (!cancelRequested) {
+        cancelRequested = sessionForCancel.current?.cancel() ?? false;
+      }
+    },
+    onPersist: (messages) => persisted.push([...messages]),
+  });
+  sessionForCancel.current = firstSession;
+
+  const firstEvents = await collect(firstSession.send("修复查询"));
+  const cancelled = firstEvents.find((event) => event.type === "turn-cancelled");
+  assert.ok(cancelled && cancelled.type === "turn-cancelled");
+  assert.equal(cancelRequested, true);
+  assert.equal(cancelled.reason, "user");
+  assert.match(cancelled.message, /已停止本轮操作/u);
+  assert.doesNotMatch(cancelled.message, /session|外部副作用|tool result|Exit code/iu);
+  assert.equal(persisted.length, 1);
+
+  const publicMessages = JSON.stringify(firstSession.getMessages());
+  assert.doesNotMatch(
+    publicMessages,
+    /roll:hidden|cancelledTurnRecovery|Roll interrupted-turn recovery checkpoint/u,
+  );
+  assert.match(publicMessages, /tool-result|原始查询已修复/u);
+  assert.match(publicMessages, /已停止本轮操作/u);
+
+  const restoredMessages = JSON.parse(JSON.stringify(persisted[0])) as ModelMessage[];
+  let recoveryPrompt = "";
+  const restoredSession = new AgentSession({
+    id: "esc-ledger-step-race-restored",
+    model: new MockLanguageModelV4({
+      doStream: async (options) => {
+        recoveryPrompt = JSON.stringify(options.prompt);
+        return streamChunks(textStep("继续处理"));
+      },
+    }),
+    initialMessages: restoredMessages,
+    sources: [resultSource],
+    maxSteps: 4,
+  });
+
+  assert.doesNotMatch(
+    JSON.stringify(restoredSession.getMessages()),
+    /roll:hidden|cancelledTurnRecovery|Roll interrupted-turn recovery checkpoint/u,
+  );
+  const resumedEvents = await collect(restoredSession.send("继续"));
+  assert.match(recoveryPrompt, /原始查询已修复/u);
+  assert.match(recoveryPrompt, /不要自动重复/u);
+  assert.equal(
+    resumedEvents.some((event) => event.type === "message-finish" && event.text === "继续处理"),
+    true,
+  );
+});
+
 test("AgentSession cancel 的 Tool ledger 写盘失败时仍回滚并上报取消", async () => {
   let started = false;
   let ledgerCalls = 0;
@@ -1566,7 +1708,10 @@ test("AgentSession cancel 的 Tool ledger 写盘失败时仍回滚并上报取�
   assert.equal(ledgerCalls, 1);
   assert.deepEqual(session.getMessages(), []);
   assert.deepEqual(session.getToolExecutions({}, true), []);
-  assert.equal(events.filter((event) => event.type === "turn-cancelled").length, 1);
+  const cancelled = events.find((event) => event.type === "turn-cancelled");
+  assert.ok(cancelled && cancelled.type === "turn-cancelled");
+  assert.match(cancelled.message, /未能保存/u);
+  assert.doesNotMatch(cancelled.message, /会保留/u);
   const persistenceError = events.find(
     (event): event is Extract<SessionEvent, { type: "error" }> => event.type === "error",
   );
@@ -1626,7 +1771,8 @@ test("AgentSession turnTimeout 显式上报 timeout，不再退化为 aborted", 
   const cancelled = events.find((event) => event.type === "turn-cancelled");
   assert.ok(cancelled && cancelled.type === "turn-cancelled");
   assert.equal(cancelled.reason, "timeout");
-  assert.match(cancelled.message, /30ms/);
+  assert.match(cancelled.message, /等待时间过长/);
+  assert.doesNotMatch(cancelled.message, /30ms|session|外部副作用/u);
   assert.equal(cancelled.execSessionIds, undefined);
   assert.doesNotMatch(cancelled.message, /roll__exec_list/u);
   assert.equal(
@@ -1634,8 +1780,80 @@ test("AgentSession turnTimeout 显式上报 timeout，不再退化为 aborted", 
     false,
   );
   const persistedMessage = String(session.getMessages().at(-1)?.content);
-  assert.match(persistedMessage, /运行超时/);
-  assert.doesNotMatch(persistedMessage, /roll__exec_list/u);
+  assert.match(persistedMessage, /等待时间过长/);
+  assert.doesNotMatch(persistedMessage, /roll__exec_list|30ms|session|外部副作用/u);
+});
+
+test("已结束的 exec_command 不会在后续模型超时时误报为仍在运行", async () => {
+  const portableProfile: ShellProfile = {
+    id: process.platform === "win32" ? "powershell" : "posix",
+    toolName: process.platform === "win32" ? "powershell" : "bash",
+    supportsSessionExec: true,
+    supportsSafeCommandClassification: false,
+    waitForTreeKillAfterRootExit: false,
+    buildSpawn: (_command, workdir, env) => ({
+      file: process.execPath,
+      args: ["-e", "process.stdout.write('done')"],
+      options: {
+        cwd: workdir,
+        detached: false,
+        stdio: ["ignore", "pipe", "pipe"],
+        env,
+        windowsHide: true,
+      },
+    }),
+    classify: () => "unknown",
+    killTree: async () => undefined,
+    systemPromptHints: () => [],
+  };
+  let callCount = 0;
+  const model = new MockLanguageModelV4({
+    doStream: async () => {
+      callCount += 1;
+      if (callCount === 1) {
+        return streamChunks(
+          toolCallStep("roll__exec_command", {
+            command: "portable-short-fixture",
+            yield_time_ms: 3_000,
+          }),
+        );
+      }
+      return {
+        stream: simulateReadableStream<LanguageModelV4StreamPart>({
+          chunks: textStep("too late"),
+          initialDelayInMs: 1_000,
+          chunkDelayInMs: null,
+        }),
+      };
+    },
+  });
+  const session = new AgentSession({
+    id: "completed-exec-before-timeout",
+    model,
+    sources: [],
+    maxSteps: 4,
+    turnTimeoutMs: 500,
+    policy: allowToolPolicy,
+    bashSession: sessionExecSettings(portableProfile),
+  });
+
+  try {
+    const events = await collect(session.send("run then wait"));
+    const completed = events.find(
+      (event) =>
+        event.type === "tool-result" &&
+        event.toolName === "exec_command" &&
+        String(event.output).includes("Exit code: 0"),
+    );
+    assert.ok(completed);
+    const cancelled = events.find((event) => event.type === "turn-cancelled");
+    assert.ok(cancelled && cancelled.type === "turn-cancelled");
+    assert.equal(cancelled.reason, "timeout");
+    assert.equal(cancelled.execSessionIds, undefined);
+    assert.doesNotMatch(cancelled.message, /仍在运行|任务 #/u);
+  } finally {
+    await session.close();
+  }
 });
 
 test("provider 网络超时保持 error，不冒充 turnTimeout", async () => {
@@ -1717,11 +1935,8 @@ test(
       const cancelledId = cancelled.execSessionIds?.[0];
       assert.ok(cancelledId);
       assert.notEqual(cancelledId, untouchedId);
-      assert.match(cancelled.message, new RegExp(String(cancelledId), "u"));
-      assert.match(
-        String(session.getMessages().at(-1)?.content),
-        new RegExp(String(cancelledId), "u"),
-      );
+      assert.doesNotMatch(cancelled.message, /session|外部副作用/u);
+      assert.match(cancelled.message, /已停止本轮操作/u);
 
       const listed = listedExecSessions(await collect(session.send("list sessions")));
       assert.ok(listed.some((item) => item.session_id === untouchedId && item.state === "running"));
@@ -1956,13 +2171,9 @@ test(
         .getCapabilityManifest()
         .tools.find((tool) => tool.role === "session-list")?.id;
       assert.ok(sessionListToolId);
-      assert.match(cancelled.message, new RegExp(String(sessionId), "u"));
-      assert.match(cancelled.message, new RegExp(sessionListToolId, "u"));
-      assert.match(cancelled.message, /当前进程的下一轮/u);
-      assert.match(
-        String(session.getMessages().at(-1)?.content),
-        new RegExp(String(sessionId), "u"),
-      );
+      assert.match(cancelled.message, new RegExp(`任务 #${String(sessionId)}`, "u"));
+      assert.doesNotMatch(cancelled.message, new RegExp(sessionListToolId, "u"));
+      assert.match(cancelled.message, /下一条消息/u);
       assert.deepEqual(firstContext?.dynamic.ruleIds, ["tenant/rules-v1"]);
       assert.deepEqual(firstContext?.dynamic.sessions, []);
 
@@ -2017,9 +2228,9 @@ test(
       const events = await collect(session.send("start in one shot"));
       const cancelled = events.find((event) => event.type === "turn-cancelled");
       assert.ok(cancelled && cancelled.type === "turn-cancelled");
-      assert.match(cancelled.message, /本次 one-shot 结束时会清理/u);
-      assert.match(cancelled.message, /不能从后续 CLI 进程找回/u);
-      assert.doesNotMatch(cancelled.message, /当前进程的下一轮|roll__exec_list/u);
+      assert.match(cancelled.message, /本次命令结束/u);
+      assert.match(cancelled.message, /之后无法继续查看/u);
+      assert.doesNotMatch(cancelled.message, /one-shot|session|roll__exec_list/u);
     } finally {
       await session.close();
     }
@@ -2424,6 +2635,9 @@ test("AgentSession overflow compaction 被取消时不发起第二次 Turn 推�
       keepRecentTurns: 1,
       keepRecentTokens: 1,
     },
+    onPersist: () => {
+      throw new Error("cancel persistence failed");
+    },
   });
 
   const pending = collect(session.send("cancel recovery"));
@@ -2435,6 +2649,10 @@ test("AgentSession overflow compaction 被取消时不发起第二次 Turn 推�
   assert.equal(modelCalls, 1);
   assert.equal(events.filter((event) => event.type === "compaction-start").length, 1);
   assert.equal(events.filter((event) => event.type === "context-compacted").length, 0);
+  const cancelled = events.filter((event) => event.type === "turn-cancelled");
+  assert.equal(cancelled.length, 1);
+  assert.match(cancelled[0]?.message ?? "", /未能保存/u);
+  assert.doesNotMatch(cancelled[0]?.message ?? "", /会保留/u);
   assert.equal(
     events.some((event) => event.type === "text-delta" && event.delta.includes("recovered")),
     false,
@@ -2637,7 +2855,8 @@ test("AgentSession 已输出文本后 context overflow 不重放", async () => {
   assert.ok(events.some((event) => event.type === "text-delta"));
   const error = events.find((event) => event.type === "error");
   assert.ok(error && error.type === "error");
-  assert.match(error.message, /避免重复副作用/u);
+  assert.match(error.message, /为避免重复执行，未自动重试/u);
+  assert.doesNotMatch(error.message, /副作用|重放/u);
   assert.equal(persisted[0]?.content, "partial");
   assert.match(String(persisted[1]?.content), /部分文本/u);
 });
@@ -2686,9 +2905,11 @@ test("AgentSession Tool 已执行后下一 Step overflow 不重放副作用", as
   assert.equal(toolCalls, 1);
   const error = events.find((event) => event.type === "error");
   assert.ok(error && error.type === "error");
-  assert.match(error.message, /避免重复副作用/u);
+  assert.match(error.message, /为避免重复执行，未自动重试/u);
+  assert.doesNotMatch(error.message, /副作用|重放/u);
   assert.equal(persisted[0]?.content, "write once");
-  assert.match(String(persisted[1]?.content), /外部副作用可能已发生/u);
+  assert.match(String(persisted[1]?.content), /部分结果可能已经生效且不会自动撤销/u);
+  assert.doesNotMatch(String(persisted[1]?.content), /外部副作用|回滚|工具活动/u);
 });
 
 test("AgentSession summarize 自动压缩失败时降级 truncate 且不继续原始历史", async () => {
@@ -3155,7 +3376,7 @@ test("systemPrompt compatibility field appends without replacing capability grou
   await collect(session.send("hello"));
 
   assert.match(capturedSystem, /# 工具使用纪律/u);
-  assert.match(capturedSystem, /没有调用过工具，就如实说明尚未执行/u);
+  assert.match(capturedSystem, /没有这两类证据，就如实说明尚未执行或结果待确认/u);
   assert.match(capturedSystem, /# 附加会话指令/u);
   assert.match(capturedSystem, /CUSTOM_ONLY/u);
 });

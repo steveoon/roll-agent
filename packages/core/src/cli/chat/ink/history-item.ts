@@ -71,6 +71,24 @@ export function HistoryItemView({ item }: { item: HistoryItem }): ReactElement {
     }
     case "compaction":
       return h(Text, { dimColor: true }, item.notice);
+    case "turn-cancelled": {
+      const appearance =
+        item.reason === "user"
+          ? { prefix: "■", textProps: { dimColor: true } }
+          : item.reason === "timeout"
+            ? { prefix: "⚠", textProps: { color: "yellow" as const } }
+            : { prefix: "✗", textProps: { color: "red" as const } };
+      return h(
+        Box,
+        { alignItems: "flex-start" },
+        h(Box, { width: 2, flexShrink: 0 }, h(Text, appearance.textProps, appearance.prefix)),
+        h(
+          Box,
+          { flexGrow: 1, flexShrink: 1 },
+          h(Text, { ...appearance.textProps, wrap: "wrap" }, item.text),
+        ),
+      );
+    }
     case "notice":
       return h(
         Box,

@@ -199,7 +199,12 @@ test("turn-cancelled marks active tools as interrupted and records the reason", 
       name: "roll.powershell",
       args: '{"command":"Start-Sleep -Seconds 30"}',
     },
-    { kind: "notice", id: "cancel-1", text: "已取消本轮；工具已收到中断请求。" },
+    {
+      kind: "turn-cancelled",
+      id: "cancel-1",
+      text: "已取消本轮；工具已收到中断请求。",
+      reason: "user",
+    },
   ]);
 });
 
@@ -260,7 +265,12 @@ test("Ink reducer 保留 batch success/tool_failed/cancelled 的类型化事件�
       name: "batch-agent.wait",
       args: "{}",
     },
-    { kind: "notice", id: "batch-cancel", text: "已取消本轮。" },
+    {
+      kind: "turn-cancelled",
+      id: "batch-cancel",
+      text: "已取消本轮。",
+      reason: "user",
+    },
   ]);
 });
 

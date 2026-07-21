@@ -22,6 +22,7 @@ import { titleFromMessage } from "../chat/title.ts";
 import { buildBannerLines, renderBannerText, type BannerInfo } from "../chat/banner.ts";
 import { getCurrentVersion } from "../utils/update-checker.ts";
 import { formatSkillList, parseSkillInvocation } from "../chat/ink/commands.ts";
+import { installCurrentCliShim } from "../utils/current-cli-shim.ts";
 
 type RuntimeModule = typeof import("@roll-agent/runtime");
 
@@ -35,6 +36,7 @@ function createToolPolicy(runtime: RuntimeModule, config: RollConfig) {
 }
 
 type ThreadStoreInstance = InstanceType<RuntimeModule["ThreadStore"]>;
+type ConversationEngineInstance = InstanceType<RuntimeModule["ConversationEngine"]>;
 type ChatEngineOptions = ConstructorParameters<RuntimeModule["ConversationEngine"]>[0];
 
 export const CHAT_ENGINE_SURFACES = {
@@ -68,6 +70,12 @@ interface CreateChatEngineInput {
   readonly store: ThreadStoreInstance;
   readonly surface: ChatEngineSurface;
   readonly providerOptions?: NonNullable<ChatEngineOptions["providerOptions"]>;
+  readonly shellEnv?: NodeJS.ProcessEnv;
+}
+
+interface ChatCliScope {
+  readonly env: NodeJS.ProcessEnv;
+  dispose(): void;
 }
 
 interface ReplIo {
@@ -91,6 +99,19 @@ function reportSkillLibraryIssue(message: string): void {
   log.warn(`skill 目录加载警告：${message}`);
 }
 
+function createChatCliScope(): ChatCliScope {
+  const env = { ...process.env };
+  try {
+    const shim = installCurrentCliShim({ env });
+    return { env, dispose: () => shim.dispose() };
+  } catch (error) {
+    log.warn(
+      `无法锁定当前 Roll CLI，子任务将继续按 PATH 查找 roll：${error instanceof Error ? error.message : String(error)}`,
+    );
+    return { env, dispose: () => undefined };
+  }
+}
+
 export function createChatEngine(input: CreateChatEngineInput) {
   return new input.runtime.ConversationEngine({
     config: input.config,
@@ -103,6 +124,7 @@ export function createChatEngine(input: CreateChatEngineInput) {
     debugEvents: isDebugLogEnabled(),
     onAgentBootstrapIssue: reportAgentBootstrapIssue,
     onSkillLibraryIssue: reportSkillLibraryIssue,
+    ...(input.shellEnv ? { shellEnv: input.shellEnv } : {}),
   });
 }
 
@@ -165,27 +187,39 @@ async function runServer(config: RollConfig): Promise<void> {
     config.runtime.thinkingLevel,
   );
   const store = new ThreadStore(config.runtime.threadsDir);
-  const engine = createChatEngine({
-    runtime,
-    config,
-    model,
-    store,
-    surface: CHAT_ENGINE_SURFACES.server,
-    ...(providerOptions ? { providerOptions } : {}),
-  });
-  const connection = createStdioConnection(process.stdin, process.stdout);
-  const server = new RuntimeServer(engine, connection);
+  const chatCliScope = createChatCliScope();
+  let engine: ConversationEngineInstance | undefined;
+  try {
+    engine = createChatEngine({
+      runtime,
+      config,
+      model,
+      store,
+      surface: CHAT_ENGINE_SURFACES.server,
+      shellEnv: chatCliScope.env,
+      ...(providerOptions ? { providerOptions } : {}),
+    });
+    const activeEngine = engine;
+    const connection = createStdioConnection(process.stdin, process.stdout);
+    const server = new RuntimeServer(activeEngine, connection);
 
-  connection.onClose(() => {
-    server
-      .abortAll()
-      .then(() => engine.dispose())
-      .catch(() => {})
-      .finally(() => {
-        store.close();
-        process.exit(0);
-      });
-  });
+    connection.onClose(() => {
+      server
+        .abortAll()
+        .then(() => activeEngine.dispose())
+        .catch(() => {})
+        .finally(() => {
+          chatCliScope.dispose();
+          store.close();
+          process.exit(0);
+        });
+    });
+  } catch (error) {
+    await engine?.dispose().catch(() => {});
+    chatCliScope.dispose();
+    store.close();
+    throw error;
+  }
 
   log.info("roll runtime-server 已启动（stdio JSON-RPC，等待客户端连接）");
 }
@@ -472,17 +506,19 @@ export default defineCommand({
       : interactive
         ? CHAT_ENGINE_SURFACES.ink
         : CHAT_ENGINE_SURFACES.basicRepl;
-    const engine = createChatEngine({
-      runtime,
-      config,
-      model,
-      store,
-      surface,
-      ...(providerOptions ? { providerOptions } : {}),
-    });
-
+    const chatCliScope = createChatCliScope();
+    let engine: ConversationEngineInstance | undefined;
     let sessionForCleanup: AgentSession | undefined;
     try {
+      engine = createChatEngine({
+        runtime,
+        config,
+        model,
+        store,
+        surface,
+        shellEnv: chatCliScope.env,
+        ...(providerOptions ? { providerOptions } : {}),
+      });
       let session: AgentSession;
       if (args.session) {
         session = await engine.resumeSession(args.session);
@@ -566,8 +602,9 @@ export default defineCommand({
       process.exitCode = 1;
     } finally {
       await sessionForCleanup?.close();
-      await engine.dispose();
+      await engine?.dispose();
       store.close();
+      chatCliScope.dispose();
     }
   },
 });

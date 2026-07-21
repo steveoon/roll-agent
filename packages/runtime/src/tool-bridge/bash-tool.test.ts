@@ -572,6 +572,28 @@ test("显式允许的 unknown 命令仍保留原始运行环境", async () => {
   assert.equal(calls[0]?.env, process.env);
 });
 
+test("Chat 可为 unknown 命令注入隔离的当前 CLI 环境", async () => {
+  const shellEnv: NodeJS.ProcessEnv = {
+    PATH: "/tmp/current-roll:/usr/bin",
+    ROLL_CURRENT_CLI: "/tmp/current-roll/roll",
+  };
+  const calls: RunBashOptions[] = [];
+  const execute = getExecute(
+    settings({ env: shellEnv }),
+    { policy: allowPolicy, requestApproval: async () => ({ approved: false }) },
+    async (input) => {
+      calls.push(input);
+      return okResult;
+    },
+    unknownCommandClassifier,
+  );
+
+  await execute({ command: "roll run browser-use-agent browser_status --json" }, options());
+
+  assert.equal(calls[0]?.env, shellEnv);
+  assert.notEqual(calls[0]?.env, process.env);
+});
+
 test("T1a：ruleBasedClassifier 下 dangerous 命令仍需确认（guarded）", async () => {
   let confirmed = false;
   let executed = false;

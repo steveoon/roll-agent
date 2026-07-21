@@ -12,9 +12,12 @@ const scriptPath = path.join(dir, "reply-unread-safely.sh");
 const powershellScriptPath = path.join(dir, "reply-unread-safely.ps1");
 const testDir = mkdtempSync(path.join(tmpdir(), "roll-zhipin-bash-e2e-"));
 const shimDir = path.join(testDir, "bin");
+const staleShimDir = path.join(testDir, "stale-bin");
 
 const makeShim = spawnSync("mkdir", ["-p", shimDir], { encoding: "utf8" });
 assert.equal(makeShim.status, 0, makeShim.stderr);
+const makeStaleShim = spawnSync("mkdir", ["-p", staleShimDir], { encoding: "utf8" });
+assert.equal(makeStaleShim.status, 0, makeStaleShim.stderr);
 
 const rollShimPath = path.join(shimDir, "roll");
 writeFileSync(
@@ -81,7 +84,11 @@ esac
 );
 chmodSync(rollShimPath, 0o755);
 
-function runScenario(name, noJudge, previewFailure = false) {
+const staleRollPath = path.join(staleShimDir, "roll");
+writeFileSync(staleRollPath, "#!/bin/sh\necho 'stale roll must not run' >&2\nexit 99\n", "utf8");
+chmodSync(staleRollPath, 0o755);
+
+function runScenario(name, noJudge, previewFailure = false, useCurrentCli = false) {
   const tracePath = path.join(testDir, `${name}.trace`);
   const resultsPath = path.join(testDir, `${name}.jsonl`);
   const args = [
@@ -102,7 +109,8 @@ function runScenario(name, noJudge, previewFailure = false) {
     timeout: 15_000,
     env: {
       ...process.env,
-      PATH: `${shimDir}:${process.env.PATH ?? ""}`,
+      PATH: `${useCurrentCli ? staleShimDir : shimDir}:${process.env.PATH ?? ""}`,
+      ...(useCurrentCli ? { ROLL_CURRENT_CLI: rollShimPath } : {}),
       ROLL_SHIM_TRACE: tracePath,
       ROLL_SHIM_NO_JUDGE: noJudge ? "1" : "0",
       ROLL_SHIM_PREVIEW_FAILURE: previewFailure ? "1" : "0",
@@ -141,6 +149,9 @@ try {
   assert.doesNotMatch(powershellSource, /zhipin_judge_prepared_reply/);
   assert.match(powershellSource, /BuildSendPayload/);
   assert.match(powershellSource, /FormatPreviewFailure/);
+
+  const currentCli = runScenario("current-cli", false, false, true);
+  assert.deepEqual(currentCli.sendInput, { preparedReplyId: "prep-e2e" });
 
   const normal = runScenario("normal", false);
   assert.deepEqual(normal.sendInput, { preparedReplyId: "prep-e2e" });

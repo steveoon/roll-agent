@@ -12,6 +12,8 @@ export interface ToolRowState {
   readonly outputTail?: string;
 }
 
+type TurnCancelledReason = Extract<SessionEvent, { type: "turn-cancelled" }>["reason"];
+
 const MAX_TOOL_OUTPUT_TAIL_CHARS = 2_000;
 
 export type HistoryItem =
@@ -39,6 +41,12 @@ export type HistoryItem =
       readonly args: string;
     }
   | { readonly kind: "compaction"; readonly id: string; readonly notice: string }
+  | {
+      readonly kind: "turn-cancelled";
+      readonly id: string;
+      readonly text: string;
+      readonly reason: TurnCancelledReason;
+    }
   | { readonly kind: "notice"; readonly id: string; readonly text: string }
   | { readonly kind: "error"; readonly id: string; readonly message: string };
 
@@ -407,7 +415,11 @@ function applySessionEvent(state: ChatUiState, id: string, event: SessionEvent):
       }));
       return {
         ...state,
-        history: [...state.history, ...cancelledTools, { kind: "notice", id, text: event.message }],
+        history: [
+          ...state.history,
+          ...cancelledTools,
+          { kind: "turn-cancelled", id, text: event.message, reason: event.reason },
+        ],
         live: { ...EMPTY_LIVE },
       };
     }

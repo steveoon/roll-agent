@@ -140,6 +140,121 @@ test("ConversationEngine 同一 thread 复用 live session，显式 close 后允
   }
 });
 
+test("ConversationEngine 经过 ThreadStore 重开后保留 Esc 前的对话与恢复上下文", async () => {
+  const dir = tempDir();
+  const config = rollConfigSchema.parse({
+    llm: {
+      defaultProvider: "mock",
+      defaultModel: "default-model",
+      providers: { mock: { apiKey: "test" } },
+    },
+    ask: {},
+    agents: { dataDir: "/tmp/roll-engine-test" },
+  });
+  try {
+    let calls = 0;
+    const firstStore = new ThreadStore(dir);
+    const firstEngine = new ConversationEngine({
+      config,
+      model: new MockLanguageModelV4({
+        doStream: async () => {
+          calls += 1;
+          if (calls === 1) {
+            return {
+              stream: simulateReadableStream<LanguageModelV4StreamPart>({
+                chunks: engineTextStep("步骤 A 已完成"),
+                initialDelayInMs: null,
+                chunkDelayInMs: null,
+              }),
+            };
+          }
+          return {
+            stream: simulateReadableStream<LanguageModelV4StreamPart>({
+              chunks: engineTextStep("不应完成"),
+              initialDelayInMs: 200,
+              chunkDelayInMs: null,
+            }),
+          };
+        },
+      }),
+      store: firstStore,
+      sources: [],
+      skillLibrary: null,
+    });
+    const firstSession = await firstEngine.createSession();
+    const threadId = firstSession.id;
+    await drain(firstSession.send("先完成步骤 A"));
+    const cancelledEvents: SessionEvent[] = [];
+    for await (const event of firstSession.send("开始步骤 B")) {
+      cancelledEvents.push(event);
+      if (event.type === "message-start") {
+        firstSession.cancel();
+      }
+    }
+    assert.equal(
+      cancelledEvents.some((event) => event.type === "turn-cancelled"),
+      true,
+    );
+    await firstEngine.dispose();
+    firstStore.close();
+
+    let recoveryPrompt: LanguageModelV4CallOptions["prompt"] = [];
+    const reopenedStore = new ThreadStore(dir);
+    const reopenedEngine = new ConversationEngine({
+      config,
+      model: textModelCapture((options) => {
+        recoveryPrompt = options.prompt;
+      }),
+      store: reopenedStore,
+      sources: [],
+      skillLibrary: null,
+    });
+    const resumed = await reopenedEngine.resumeSession(threadId);
+    assert.doesNotMatch(
+      JSON.stringify(resumed.getMessages()),
+      /cancelledTurnRecovery|Roll interrupted-turn recovery checkpoint/u,
+    );
+    await drain(resumed.send("继续"));
+
+    const serializedRecoveryPrompt = JSON.stringify(recoveryPrompt);
+    assert.match(serializedRecoveryPrompt, /先完成步骤 A|步骤 A 已完成/u);
+    assert.match(serializedRecoveryPrompt, /开始步骤 B/u);
+    const recoveryCallMessage = recoveryPrompt.find(
+      (message) =>
+        message.role === "assistant" &&
+        message.content.some(
+          (part) =>
+            part.type === "tool-call" && part.toolName === "roll__interrupted_turn_recovery",
+        ),
+    );
+    const recoveryToolMessage = recoveryPrompt.find(
+      (message) =>
+        message.role === "tool" &&
+        message.content.some(
+          (part) =>
+            part.type === "tool-result" && part.toolName === "roll__interrupted_turn_recovery",
+        ),
+    );
+    assert.ok(recoveryCallMessage);
+    assert.ok(recoveryToolMessage?.role === "tool");
+    const recoveryResult = recoveryToolMessage.content.find(
+      (part) => part.type === "tool-result" && part.toolName === "roll__interrupted_turn_recovery",
+    );
+    assert.ok(recoveryResult && recoveryResult.type === "tool-result");
+    assert.equal(recoveryResult.output.type, "text");
+    if (recoveryResult.output.type === "text") {
+      assert.match(recoveryResult.output.value, /"source":"roll-runtime-tool-ledger"/u);
+      assert.match(recoveryResult.output.value, /已完成的步骤和工具记录仍然有效/u);
+    }
+    assert.doesNotMatch(serializedRecoveryPrompt, /rollHarness|cancelledTurnRecovery/u);
+
+    await reopenedEngine.dispose();
+    reopenedStore.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("ConversationEngine dispose 开始后拒绝新的 create 与 resume", async () => {
   const dir = tempDir();
   try {
@@ -2127,6 +2242,39 @@ test("运行期 shell profile 探测在 engine 实例内缓存", async () => {
     assert.equal(calls, 1);
     first.abort();
     second.abort();
+    await engine.dispose();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("ConversationEngine 使用隔离的 Chat shell 环境且不读取后续全局变更", async () => {
+  const dir = tempDir();
+  const shellEnv: NodeJS.ProcessEnv = {
+    PATH: "/tmp/current-roll:/usr/bin",
+    ROLL_CURRENT_CLI: "/tmp/current-roll/roll",
+  };
+  let observedEnv: Readonly<Record<string, string | undefined>> | undefined;
+  try {
+    const engine = new ConversationEngine({
+      config: sessionExecConfig(dir),
+      model: toolCapturingModel(() => {}),
+      sources: [],
+      skillLibrary: null,
+      shellEnv,
+      resolveShellProfileFn: ({ env }) => {
+        observedEnv = env;
+        return { supported: true, profile: powershellProfile };
+      },
+    });
+    shellEnv.PATH = "/mutated-after-construction";
+
+    const session = await engine.createSession();
+
+    assert.equal(observedEnv?.PATH, "/tmp/current-roll:/usr/bin");
+    assert.equal(observedEnv?.ROLL_CURRENT_CLI, "/tmp/current-roll/roll");
+    assert.notEqual(observedEnv, shellEnv);
+    session.abort();
     await engine.dispose();
   } finally {
     rmSync(dir, { recursive: true, force: true });
