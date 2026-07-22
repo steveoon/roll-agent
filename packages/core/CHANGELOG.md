@@ -1,5 +1,32 @@
 # @roll-agent/core
 
+## 0.20.0
+
+### Minor Changes
+
+- [#163](https://github.com/steveoon/roll-agent/pull/163) [`7a14d26`](https://github.com/steveoon/roll-agent/commit/7a14d2667e2bc92297279ea64d415f61e8c68236) Thanks [@steveoon](https://github.com/steveoon)! - Add native xAI Grok model support, including configuration setup, the `grok-4.5` 500k context window, reasoning effort, and visible reasoning summaries in `roll chat`.
+
+  Keep nested `roll` commands on the same CLI instance that launched Chat, so development sessions no longer cross over to an older globally installed release. Preserve completed steps and redacted tool progress when a turn is interrupted, and replace technical cancellation notices with user-facing status copy.
+
+- [#163](https://github.com/steveoon/roll-agent/pull/163) [`70f941d`](https://github.com/steveoon/roll-agent/commit/70f941d7bdee83635ac4d9d5f2947ec748331ad4) Thanks [@steveoon](https://github.com/steveoon)! - Improve `roll chat` prompt editing: use the full row before wrapping mixed-width drafts, keep the caret layout stable, navigate soft-wrapped rows with up/down, and recall up to 50 recent inputs from an empty prompt.
+
+- [#163](https://github.com/steveoon/roll-agent/pull/163) [`692b351`](https://github.com/steveoon/roll-agent/commit/692b351d91dad93909971cff8c1bcf641db562a5) Thanks [@steveoon](https://github.com/steveoon)! - Strengthen `roll chat` with resource-aware batch tool scheduling, typed three-layer tool results, bounded context-overflow replay, and direct explicit Skill preloading scoped to the active Turn with reference-only persistence. Durable Tool evidence now uses bounded write-time-redacted projections, automatic per-thread retention, and explicit Raw RPC authorization. Add atomic V2 compaction checkpoints with V1 compatibility, transcript recovery, provider-portable schema-constrained semantic drafts, user-only destructive transitions, structured constraint revocation, exact model-facing evidence excerpts, bounded evidence batches and watermarks, and deterministic hard-bounded checkpoint reminders. Semantic state is the validated V2 recovery fact source; compatibility goal/constraint projections must match it, and the state is injected once per Turn instead of duplicating derived summaries in active history. Legacy V1 active snapshots migrate only as low-confidence uncertainties, are atomically archived as redacted paginated transcript evidence, and remain untouched when the first V2 reminder cannot expose every migrated fragment. Also add a fail-closed capability manifest, safe debug snapshots, and a real Ink PTY performance harness with optional fail-closed baseline comparison.
+
+  Without a durable transcript store, legacy V1 checkpoints now remain active instead of being upgraded into V2 state whose source evidence could not be recovered.
+
+  Keep explicit Skill bodies scoped to the active turn, and persist only lightweight Skill references. Bound and redact durable Tool evidence, prune it by age and per-thread quota, and require explicit host authorization before JSON-RPC clients can request the retained raw/input projection.
+
+  Stream provider reasoning into a separate, non-persisted Ink thinking block and show responsive per-phase turn status above the prompt without conflating model wait, reasoning, reply, or tool activity.
+
+  Make schema-constrained compaction configurable through `runtime.compaction.timeout-ms`, `runtime.compaction.max-output-tokens`, and an optional `runtime.compaction.thinking-level` override. Compaction now defaults to a 120-second provider budget and 8192 output tokens, inherits the runtime thinking level through AI SDK's unified reasoning semantics where supported, keeps Qwen's required structured-output thinking override, reports phase timings in verbose mode, and recognizes xAI's non-streaming output-limit response without weakening fail-closed history and checkpoint semantics.
+
+### Patch Changes
+
+- [#163](https://github.com/steveoon/roll-agent/pull/163) [`b89325c`](https://github.com/steveoon/roll-agent/commit/b89325c373f1b62b21b089e0a358d244acd33730) Thanks [@steveoon](https://github.com/steveoon)! - Serialize concurrent `roll agent install` calls with an owned sibling lock while keeping npm's final prefix stable, and clean up only directories owned by a failed invocation.
+
+- Updated dependencies [[`7a14d26`](https://github.com/steveoon/roll-agent/commit/7a14d2667e2bc92297279ea64d415f61e8c68236), [`692b351`](https://github.com/steveoon/roll-agent/commit/692b351d91dad93909971cff8c1bcf641db562a5), [`ade7265`](https://github.com/steveoon/roll-agent/commit/ade7265993a3755795e7c46f86119818aa5c9874)]:
+  - @roll-agent/runtime@0.8.0
+
 ## 0.19.0
 
 ### Minor Changes

@@ -1,5 +1,12 @@
 # notify-agent
 
+## 0.1.4
+
+### Patch Changes
+
+- Updated dependencies [[`692b351`](https://github.com/steveoon/roll-agent/commit/692b351d91dad93909971cff8c1bcf641db562a5)]:
+  - @roll-agent/sdk@0.4.0
+
 ## 0.1.3
 
 ### Patch Changes
