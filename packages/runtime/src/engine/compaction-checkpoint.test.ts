@@ -4,9 +4,11 @@ import type { ModelMessage } from "ai";
 import {
   buildCompactionCheckpointReminder,
   buildCompactionToolState,
+  compactionCheckpointV1Schema,
   createCompactionCheckpoint,
   createCompactionCheckpointDraft,
   createCompactionSummary,
+  compactionSummaryQualityAdvisory,
   createEmptyCompactionToolState,
   extractExplicitCompactionConstraintCandidates,
   findLatestRealUserGoal,
@@ -16,7 +18,11 @@ import {
   type ArchivedTranscriptMessage,
   type CompactionCheckpointDraftInput,
 } from "./compaction-checkpoint.ts";
-import { SUMMARY_PREFIX } from "./compactor.ts";
+import {
+  createEmptyCompactionSemanticState,
+  replaceCompactionSemanticConstraints,
+  replaceCompactionSemanticGoal,
+} from "./compaction-semantic-state.ts";
 import { attachExplicitSkillCheckpoint } from "./explicit-skill-context.ts";
 import {
   TOOL_OUTCOME_KINDS,
@@ -60,7 +66,23 @@ function transcript(
   };
 }
 
-test("CompactionCheckpoint v1 round-trip 保留 version、previous 与双 transcript range", () => {
+test("CompactionCheckpoint V1 保持可读，V2 新写并保留 semantic state", () => {
+  const legacy = compactionCheckpointV1Schema.parse({
+    ...draft({
+      goal: { verbatimRequest: "旧 checkpoint", sourceSequence: 1, status: "active" },
+    }),
+    version: 1,
+    id: PREVIOUS_ID,
+    generation: 1,
+    createdAt: "2026-07-17T09:00:00.000Z",
+    transcript: {
+      messages: { fromSequenceExclusive: -1, throughSequence: 1 },
+      toolExecutions: { fromSequenceExclusive: -1, throughSequence: -1 },
+      completeness: "complete",
+    },
+  });
+  assert.deepEqual(parseCompactionCheckpoint(JSON.parse(JSON.stringify(legacy))), legacy);
+
   const checkpoint = createCompactionCheckpoint({
     id: CHECKPOINT_ID,
     previousCheckpointId: PREVIOUS_ID,
@@ -69,6 +91,10 @@ test("CompactionCheckpoint v1 round-trip 保留 version、previous 与双 transc
     draft: draft({
       goal: { verbatimRequest: "修复这个问题", sourceSequence: 4, status: "active" },
     }),
+    semanticState: replaceCompactionSemanticGoal(createEmptyCompactionSemanticState(), {
+      verbatimRequest: "修复这个问题",
+      sourceSequence: 4,
+    }),
     transcript: {
       messages: { fromSequenceExclusive: 2, throughSequence: 7 },
       toolExecutions: { fromSequenceExclusive: 0, throughSequence: 3 },
@@ -76,14 +102,22 @@ test("CompactionCheckpoint v1 round-trip 保留 version、previous 与双 transc
     },
   });
 
-  assert.equal(checkpoint.version, 1);
+  assert.equal(checkpoint.version, 2);
   assert.equal(checkpoint.id, CHECKPOINT_ID);
   assert.equal(checkpoint.previousCheckpointId, PREVIOUS_ID);
+  assert.equal(checkpoint.semanticState.goal?.text, "修复这个问题");
   assert.deepEqual(parseCompactionCheckpoint(JSON.parse(JSON.stringify(checkpoint))), checkpoint);
 });
 
 test("Checkpoint reminder 注入结构化状态和受控回查入口，不注入 raw transcript", () => {
   const currentManagerInstanceId = "83500e19-0ee3-4721-9ddb-58a8945aa7aa";
+  const semanticState = replaceCompactionSemanticConstraints(
+    replaceCompactionSemanticGoal(createEmptyCompactionSemanticState(), {
+      verbatimRequest: "修复 checkpoint 后继续任务",
+      sourceSequence: 7,
+    }),
+    [{ quote: "不要重复副作用", sourceSequence: 7 }],
+  );
   const checkpoint = createCompactionCheckpoint({
     id: CHECKPOINT_ID,
     generation: 3,
@@ -129,6 +163,7 @@ test("Checkpoint reminder 注入结构化状态和受控回查入口，不注入
         },
       ],
     }),
+    semanticState,
     transcript: {
       messages: { fromSequenceExclusive: 3, throughSequence: 7 },
       toolExecutions: { fromSequenceExclusive: 1, throughSequence: 4 },
@@ -143,6 +178,8 @@ test("Checkpoint reminder 注入结构化状态和受控回查入口，不注入
   );
   assert.match(reminder, new RegExp(CHECKPOINT_ID, "u"));
   assert.match(reminder, /"generation":3/u);
+  assert.match(reminder, /"semanticState":\{"version":1/u);
+  assert.match(reminder, /"omittedCounts"/u);
   assert.match(reminder, /"verbatimRequest":"修复 checkpoint 后继续任务"/u);
   assert.match(reminder, /"quote":"不要重复副作用"/u);
   assert.match(reminder, /"managerMatch":"current"/u);
@@ -151,6 +188,7 @@ test("Checkpoint reminder 注入结构化状态和受控回查入口，不注入
   assert.match(reminder, /"recoverability":"stale"/u);
   assert.match(reminder, /roll__transcript/u);
   assert.match(reminder, /kind="message".*kind="tool_execution"/u);
+  assert.ok([...reminder].length <= 32_000);
   assert.doesNotMatch(
     reminder,
     /message_json|record_json|raw transcript content|secret-command|secret-outcome-reason/u,
@@ -167,6 +205,66 @@ test("Checkpoint reminder 注入结构化状态和受控回查入口，不注入
   );
   assert.match(invalidId, /未提供可用的 transcript tool/u);
   assert.doesNotMatch(invalidId, /not a registered tool/u);
+});
+
+test("V2 checkpoint 拒绝与 semanticState 矛盾的兼容 goal/constraints 投影", () => {
+  const semanticState = replaceCompactionSemanticConstraints(
+    replaceCompactionSemanticGoal(createEmptyCompactionSemanticState(), {
+      verbatimRequest: "修复调度器",
+      sourceSequence: 4,
+    }),
+    [{ quote: "不要修改公开 API", sourceSequence: 4 }],
+  );
+  const checkpoint = createCompactionCheckpoint({
+    generation: 1,
+    draft: draft({
+      goal: { verbatimRequest: "修复调度器", sourceSequence: 4, status: "active" },
+      constraints: [{ quote: "不要修改公开 API", sourceSequence: 4 }],
+    }),
+    semanticState,
+    transcript: {
+      messages: { fromSequenceExclusive: -1, throughSequence: 4 },
+      toolExecutions: { fromSequenceExclusive: -1, throughSequence: -1 },
+      completeness: "complete",
+    },
+  });
+
+  assert.throws(
+    () =>
+      parseCompactionCheckpoint({
+        ...checkpoint,
+        goal: { verbatimRequest: "部署生产", sourceSequence: 4, status: "active" },
+      }),
+    /Invalid persisted compaction checkpoint/u,
+  );
+  assert.throws(
+    () => parseCompactionCheckpoint({ ...checkpoint, constraints: [] }),
+    /Invalid persisted compaction checkpoint/u,
+  );
+});
+
+test("Checkpoint reminder 对完整 payload 施加硬预算并显式报告省略项", () => {
+  const checkpoint = createCompactionCheckpoint({
+    generation: 1,
+    draft: draft({
+      resources: Array.from({ length: 32 }, (_, index) => ({
+        key: `${String(index)}:${"x".repeat(100_000)}`,
+        mode: "write",
+        evidenceToolCallId: `call-${String(index)}`,
+        evidenceExecutionId: `2410ef09-e409-4209-a33e-${String(index).padStart(12, "0")}`,
+      })),
+    }),
+    transcript: {
+      messages: { fromSequenceExclusive: -1, throughSequence: -1 },
+      toolExecutions: { fromSequenceExclusive: -1, throughSequence: -1 },
+      completeness: "complete",
+    },
+  });
+
+  const reminder = buildCompactionCheckpointReminder(checkpoint);
+  assert.ok([...reminder].length <= 32_000);
+  assert.match(reminder, /"resources":24/u);
+  assert.doesNotMatch(reminder, /x{2000}/u);
 });
 
 test("CompactionCheckpoint 拒绝回退的 transcript high watermark 和未知版本", () => {
@@ -195,7 +293,7 @@ test("CompactionCheckpoint 拒绝回退的 transcript high watermark 和未知�
   });
   assert.throws(
     () => parseCompactionCheckpoint({ ...checkpoint, version: 99 }),
-    /Invalid persisted compaction checkpoint/u,
+    /Unsupported compaction checkpoint version/u,
   );
 });
 
@@ -213,7 +311,11 @@ test("findLatestRealUserGoal 跳过无信息续接与 legacy summary，并读取
     transcript(1, explicit),
     transcript(
       2,
-      { role: "user", content: `${SUMMARY_PREFIX}\n\n这是历史摘要` },
+      {
+        role: "user",
+        content:
+          "以下摘要由另一个语言模型在压缩早前对话后产出。请据此继续推进、避免重复已完成的工作:\n\n这是历史摘要",
+      },
       "legacy_snapshot",
     ),
     transcript(3, { role: "user", content: "继续" }),
@@ -347,6 +449,21 @@ test("后续同 scope 显式允许会撤销旧约束，旧版整条 goal constra
     ]),
     [],
   );
+  for (const revocation of [
+    "公开 API 现在可以改了",
+    "解除公开 API 限制",
+    "可以修改公开 API 了",
+    "不需要避免修改公开 API",
+  ]) {
+    assert.deepEqual(
+      resolveActiveCompactionConstraints([
+        transcript(0, { role: "user", content: "绝对不要修改公开 API" }),
+        transcript(2, { role: "user", content: revocation }),
+      ]),
+      [],
+      revocation,
+    );
+  }
 });
 
 test("不允许、不可以、不再允许是负约束，不会从内部允许词误判为 revocation", () => {
@@ -454,23 +571,18 @@ test("Tool integrity 报告 orphan/result-without-record，不伪造成功", () 
   );
 });
 
-test("Summary quality 拒绝空、过短、缺结构与语义空洞，有效摘要只保存 digest", () => {
+test("Summary correctness 只拒绝空内容，语言无关的质量提示不参与恢复门禁", () => {
   assert.deepEqual(createCompactionSummary(""), {
     status: "fallback",
     reason: "empty summary",
   });
-  assert.equal(createCompactionSummary("太短").status, "fallback");
-  assert.deepEqual(
+  assert.equal(createCompactionSummary("太短").status, "valid");
+  assert.equal(compactionSummaryQualityAdvisory("太短"), "summary is unusually short");
+  assert.equal(
     createCompactionSummary(
-      "已经处理了不少内容，后续继续完成剩余工作即可，不需要关注任何具体细节。",
-    ),
-    { status: "fallback", reason: "summary lacks structured task state" },
-  );
-  assert.deepEqual(
-    createCompactionSummary(
-      "当前目标：继续任务。关键约束：遵守约束。下一步：继续推进。重要证据：查看内容。",
-    ),
-    { status: "fallback", reason: "summary lacks concrete task evidence" },
+      "現在の作業を安全に継続し、保存済みの制約と検証結果を確認してから次の変更を実施する。",
+    ).status,
+    "valid",
   );
   const valid = createCompactionSummary(
     "当前目标：完成 checkpoint。关键约束：保持旧 thread 可读。下一步：执行聚焦测试并校验 transcript。",

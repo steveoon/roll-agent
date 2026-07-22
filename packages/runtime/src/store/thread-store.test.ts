@@ -1,22 +1,28 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, statSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import type { ModelMessage } from "ai";
 import {
   ThreadStore,
+  TOOL_EXECUTION_RETENTION_POLICY,
   type CommitCompactionInput,
   type ReadCheckpointTranscriptOptions,
 } from "./thread-store.ts";
 import { createToolExecutionRecord } from "../tool-bridge/tool-execution-record.ts";
 import { successfulToolResult } from "../tool-bridge/normalize-result.ts";
 import {
+  UnsupportedCompactionCheckpointVersionError,
   createCompactionSummary,
   createEmptyCompactionToolState,
   type CompactionCheckpointDraftInput,
 } from "../engine/compaction-checkpoint.ts";
+import {
+  createEmptyCompactionSemanticState,
+  replaceCompactionSemanticGoal,
+} from "../engine/compaction-semantic-state.ts";
 
 function tempDir(): string {
   return mkdtempSync(join(tmpdir(), "roll-threads-"));
@@ -54,7 +60,7 @@ function execution(id: string, toolCallId: string, secret: string) {
         _meta: { secret },
       },
     }),
-    createdAt: "2026-07-17T10:00:00.000Z",
+    createdAt: new Date().toISOString(),
   });
 }
 
@@ -77,16 +83,45 @@ function checkpointDraft(
   };
 }
 
+function legacyExplicitSkillMessage(skillBody: string): ModelMessage {
+  return {
+    role: "user",
+    content: "/demo continue",
+    providerOptions: {
+      rollHarness: {
+        explicitSkillCheckpoint: {
+          version: 1,
+          kind: "explicit-skill",
+          snapshot: {
+            userPrompt: "continue",
+            modelUserContent: skillBody,
+            skillNames: ["demo"],
+          },
+        },
+      },
+    },
+  };
+}
+
 function currentCompactionGuard(
   store: ThreadStore,
   threadId: string,
 ): Pick<
   CommitCompactionInput,
-  "evidenceWatermarks" | "expectedActiveMessages" | "expectedLatestCheckpointId"
+  | "evidenceWatermarks"
+  | "expectedActiveMessages"
+  | "expectedLatestCheckpointId"
+  | "semanticEvidenceWatermarks"
+  | "semanticState"
 > {
   return {
     expectedActiveMessages: store.getMessages(threadId),
     expectedLatestCheckpointId: store.getLatestCheckpoint(threadId)?.id,
+    semanticState: createEmptyCompactionSemanticState(),
+    semanticEvidenceWatermarks: {
+      messagesThroughSequence: -1,
+      toolExecutionsThroughSequence: -1,
+    },
     evidenceWatermarks: {
       transcriptMessagesThroughSequence:
         store.listTranscriptMessages(threadId, { limit: 500 }).at(-1)?.sequence ?? -1,
@@ -314,10 +349,11 @@ test("ThreadStore tool execution ledger 跨实例保序且不受 replaceMessages
         { sequence: 1, id: secondRecord.id, toolCallId: "shared-call" },
       ],
     );
-    assert.deepEqual(second.getToolExecution(threadId, secondRecord.id), {
-      ...secondRecord,
-      sequence: 1,
-    });
+    const restored = second.getToolExecution(threadId, secondRecord.id);
+    assert.equal(restored?.id, secondRecord.id);
+    assert.equal(restored?.sequence, 1);
+    assert.equal(restored?.persistence?.version, 1);
+    assert.doesNotMatch(JSON.stringify(restored), /secret-2/u);
     assert.equal(second.listToolExecutions(threadId, { afterSequence: 0 }).length, 1);
     assert.equal(second.listToolExecutions(threadId, { toolCallId: "missing" }).length, 0);
     second.close();
@@ -361,6 +397,323 @@ test("ThreadStore 从 schema v1 迁移后可持久化 ToolExecutionRecord", () =
     assert.equal(store.appendToolExecution("legacy", record), 0);
     assert.equal(store.listToolExecutions("legacy")[0]?.id, record.id);
     store.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("ThreadStore schema v4 迁移会重写旧 ledger 为有界脱敏投影", () => {
+  const dir = tempDir();
+  try {
+    const initial = new ThreadStore(dir);
+    const threadId = initial.createThread();
+    const legacy = execution(
+      "2816151e-f934-479f-ac78-bd3206b15e62",
+      "legacy-raw-call",
+      "legacy-ledger-secret",
+    );
+    const legacySkillBody = "LEGACY_SKILL_BODY_MUST_BE_REMOVED";
+    const legacySkillMessage = legacyExplicitSkillMessage(legacySkillBody);
+    initial.appendMessages(threadId, [legacySkillMessage]);
+    initial.appendToolExecution(threadId, legacy);
+    initial.close();
+
+    const database = new DatabaseSync(join(dir, "threads.db"));
+    const serializedLegacySkillMessage = JSON.stringify(legacySkillMessage);
+    database
+      .prepare("UPDATE messages SET content_json = ? WHERE thread_id = ?")
+      .run(serializedLegacySkillMessage, threadId);
+    database
+      .prepare("UPDATE transcript_messages SET message_json = ? WHERE thread_id = ?")
+      .run(serializedLegacySkillMessage, threadId);
+    database
+      .prepare("UPDATE tool_executions SET record_json = ? WHERE thread_id = ?")
+      .run(JSON.stringify(legacy), threadId);
+    database.exec("PRAGMA user_version = 3;");
+    database.close();
+
+    const migrated = new ThreadStore(dir);
+    const restored = migrated.getToolExecution(threadId, legacy.id);
+    assert.equal(restored?.persistence?.version, 1);
+    assert.doesNotMatch(JSON.stringify(restored), /legacy-ledger-secret/u);
+    assert.doesNotMatch(
+      JSON.stringify(migrated.getMessages(threadId)),
+      new RegExp(legacySkillBody),
+    );
+    assert.doesNotMatch(
+      JSON.stringify(migrated.listTranscriptMessages(threadId)),
+      new RegExp(legacySkillBody),
+    );
+    migrated.close();
+
+    const inspected = new DatabaseSync(join(dir, "threads.db"));
+    const row = inspected
+      .prepare("SELECT record_json FROM tool_executions WHERE thread_id = ?")
+      .get(threadId) as { readonly record_json: string };
+    assert.doesNotMatch(row.record_json, /legacy-ledger-secret/u);
+    assert.equal(
+      (inspected.prepare("PRAGMA user_version").get() as { readonly user_version: number })
+        .user_version,
+      4,
+    );
+    inspected.close();
+    assert.equal(readFileSync(join(dir, "threads.db")).includes("legacy-ledger-secret"), false);
+    assert.equal(readFileSync(join(dir, "threads.db")).includes(legacySkillBody), false);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("ThreadStore 所有 message 写入边界都清除 legacy Skill 正文", () => {
+  const dir = tempDir();
+  try {
+    const store = new ThreadStore(dir);
+    const threadId = store.createThread();
+    const legacySkillBody = "LEGACY_SKILL_BODY_MUST_NEVER_REACH_DISK";
+    const legacySkillMessage = legacyExplicitSkillMessage(legacySkillBody);
+
+    store.appendMessages(threadId, [legacySkillMessage]);
+    assert.doesNotMatch(JSON.stringify(store.getMessages(threadId)), new RegExp(legacySkillBody));
+    assert.doesNotMatch(
+      JSON.stringify(store.listTranscriptMessages(threadId)),
+      new RegExp(legacySkillBody),
+    );
+
+    store.replaceMessages(threadId, [legacySkillMessage]);
+    assert.doesNotMatch(JSON.stringify(store.getMessages(threadId)), new RegExp(legacySkillBody));
+
+    store.commitCompaction(threadId, {
+      messages: [legacySkillMessage],
+      ...currentCompactionGuard(store, threadId),
+      draft: checkpointDraft(),
+    });
+    assert.doesNotMatch(JSON.stringify(store.getMessages(threadId)), new RegExp(legacySkillBody));
+    store.close();
+
+    assert.doesNotMatch(readFileSync(join(dir, "threads.db"), "utf8"), new RegExp(legacySkillBody));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("ThreadStore ledger 按 TTL prune 且 sequence 不复用", () => {
+  const dir = tempDir();
+  try {
+    const store = new ThreadStore(dir);
+    const threadId = store.createThread();
+    const expired = {
+      ...execution("41b2045a-14d4-4476-ab54-f4d467d6e135", "expired-call", "secret"),
+      createdAt: "2000-01-01T00:00:00.000Z",
+    };
+    assert.equal(store.appendToolExecution(threadId, expired), 0);
+    assert.deepEqual(store.listToolExecutions(threadId), []);
+    assert.equal(
+      store.appendToolExecution(
+        threadId,
+        execution("9c89c9bd-44ca-4550-8622-c55b7a339d4e", "current-call", "secret"),
+      ),
+      1,
+    );
+    assert.deepEqual(
+      store.listToolExecutions(threadId).map((record) => record.sequence),
+      [1],
+    );
+    assert.equal(store.getTranscriptCompleteness(threadId), "legacy_snapshot");
+    assert.equal(
+      store.appendToolExecution(
+        threadId,
+        execution("47c46fee-e878-4dd1-8776-929982102f7d", "next-call", "secret"),
+      ),
+      2,
+    );
+    store.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("ThreadStore v4 reopen 也会清理已过期的 inactive ledger", () => {
+  const dir = tempDir();
+  try {
+    const initial = new ThreadStore(dir);
+    const threadId = initial.createThread();
+    initial.appendToolExecution(
+      threadId,
+      execution("2b767742-b71a-42bd-ac92-f56af70b9f6f", "inactive-0", "secret"),
+    );
+    initial.appendToolExecution(
+      threadId,
+      execution("c6fdc054-201f-490d-8956-a1a76fd89ba8", "inactive-1", "secret"),
+    );
+    initial.close();
+
+    const database = new DatabaseSync(join(dir, "threads.db"));
+    database.prepare("UPDATE tool_executions SET created_at = '2000-01-01T00:00:00.000Z'").run();
+    database.close();
+
+    const reopened = new ThreadStore(dir);
+    assert.deepEqual(
+      reopened.listToolExecutions(threadId).map((record) => record.sequence),
+      [],
+    );
+    assert.equal(reopened.getTranscriptCompleteness(threadId), "legacy_snapshot");
+    assert.equal(
+      reopened.appendToolExecution(
+        threadId,
+        execution("a2831468-48e3-443f-bfb8-f2c3bc2e675d", "inactive-next", "secret"),
+      ),
+      2,
+    );
+    reopened.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("ThreadStore retention 后 checkpoint/read/resume 都保守降级并由后续 compaction 继承", () => {
+  const dir = tempDir();
+  try {
+    const initial = new ThreadStore(dir);
+    const threadId = initial.createThread();
+    initial.appendToolExecution(
+      threadId,
+      execution("ffb38c00-8351-4cc0-803a-fae7ef578f55", "checkpoint-old", "secret"),
+    );
+    initial.appendToolExecution(
+      threadId,
+      execution("22de59cf-b2db-4ce7-af9d-60f942141794", "checkpoint-live", "secret"),
+    );
+    const checkpoint = initial.commitCompaction(threadId, {
+      messages: [{ role: "user", content: "summary-before-retention" }],
+      ...currentCompactionGuard(initial, threadId),
+      draft: checkpointDraft(),
+    });
+    assert.equal(checkpoint.transcript.completeness, "complete");
+    initial.close();
+
+    const database = new DatabaseSync(join(dir, "threads.db"));
+    database
+      .prepare(
+        "UPDATE tool_executions SET created_at = '2000-01-01T00:00:00.000Z' WHERE thread_id = ? AND sequence = 0",
+      )
+      .run(threadId);
+    database.close();
+
+    const reopened = new ThreadStore(dir);
+    assert.deepEqual(
+      reopened.listToolExecutions(threadId).map((record) => record.sequence),
+      [1],
+    );
+    assert.equal(reopened.getTranscriptCompleteness(threadId), "legacy_snapshot");
+    assert.equal(
+      reopened.getLatestCheckpoint(threadId)?.transcript.completeness,
+      "legacy_snapshot",
+    );
+    assert.equal(reopened.getLatestCheckpoint(threadId)?.toolState.integrityStatus, "sanitized");
+    assert.equal(
+      reopened.getCheckpoint(threadId, checkpoint.id)?.transcript.completeness,
+      "legacy_snapshot",
+    );
+    assert.equal(
+      reopened.loadSessionState(threadId).checkpoint?.transcript.completeness,
+      "legacy_snapshot",
+    );
+    const page = reopened.readCheckpointTranscript(threadId, {
+      checkpointId: checkpoint.id,
+      kind: "tool_execution",
+    });
+    assert.equal(page.completeness, "legacy_snapshot");
+    assert.deepEqual(
+      page.entries.map((entry) => entry.sequence),
+      [1],
+    );
+
+    const inherited = reopened.commitCompaction(threadId, {
+      messages: [{ role: "user", content: "summary-after-retention" }],
+      ...currentCompactionGuard(reopened, threadId),
+      draft: checkpointDraft(),
+    });
+    assert.equal(inherited.transcript.completeness, "legacy_snapshot");
+    assert.equal(inherited.toolState.integrityStatus, "sanitized");
+    reopened.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("ThreadStore ledger aggregate bytes 超限时保留有界新后缀", () => {
+  const dir = tempDir();
+  try {
+    const store = new ThreadStore(dir);
+    const threadId = store.createThread();
+    const large = createToolExecutionRecord({
+      id: "00000000-0000-4000-8000-000000000000",
+      toolCallId: "large-0",
+      agentName: "demo-agent",
+      toolName: "read",
+      input: {},
+      result: successfulToolResult("ok", { raw: { text: "x".repeat(60 * 1_024) } }),
+    });
+    store.appendToolExecution(threadId, large);
+    const persisted = store.getToolExecution(threadId, large.id);
+    assert.ok(persisted);
+    store.close();
+
+    const database = new DatabaseSync(join(dir, "threads.db"));
+    const insert = database.prepare(
+      `INSERT INTO tool_executions
+         (thread_id, sequence, id, tool_call_id, agent_name, tool_name, record_json, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    );
+    database.exec("BEGIN IMMEDIATE");
+    for (let sequence = 1; sequence <= 300; sequence += 1) {
+      const suffix = sequence.toString(16).padStart(12, "0");
+      const id = `00000000-0000-4000-8000-${suffix}`;
+      const record = { ...persisted, id, toolCallId: `large-${String(sequence)}` };
+      insert.run(
+        threadId,
+        sequence,
+        id,
+        record.toolCallId,
+        record.agentName,
+        record.toolName,
+        JSON.stringify(record),
+        record.createdAt,
+      );
+    }
+    database.exec("COMMIT");
+    database.close();
+
+    const bounded = new ThreadStore(dir);
+    const nextSequence = bounded.appendToolExecution(
+      threadId,
+      execution("efc13f2c-3819-4eaf-831d-51eaa6ec777c", "after-quota", "secret"),
+    );
+    assert.equal(nextSequence, 301);
+    assert.equal(bounded.getTranscriptCompleteness(threadId), "legacy_snapshot");
+    bounded.close();
+
+    const inspected = new DatabaseSync(join(dir, "threads.db"));
+    const totals = inspected
+      .prepare(
+        `SELECT COUNT(*) AS record_count,
+                COALESCE(SUM(length(CAST(record_json AS BLOB))), 0) AS byte_count,
+                MIN(sequence) AS min_sequence,
+                MAX(sequence) AS max_sequence
+           FROM tool_executions
+          WHERE thread_id = ?`,
+      )
+      .get(threadId) as {
+      readonly record_count: number;
+      readonly byte_count: number;
+      readonly min_sequence: number;
+      readonly max_sequence: number;
+    };
+    assert.ok(totals.byte_count <= TOOL_EXECUTION_RETENTION_POLICY.maxBytesPerThread);
+    assert.ok(totals.record_count < 302);
+    assert.ok(totals.min_sequence > 0);
+    assert.equal(totals.max_sequence, 301);
+    inspected.close();
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -430,11 +783,15 @@ test("ThreadStore commitCompaction 原子写 active projection、versioned check
     const first = store.commitCompaction(threadId, {
       messages: [{ role: "user", content: "summary-1" }],
       ...currentCompactionGuard(store, threadId),
+      semanticState: replaceCompactionSemanticGoal(createEmptyCompactionSemanticState(), {
+        verbatimRequest: "turn-1",
+        sourceSequence: 0,
+      }),
       draft: checkpointDraft({
         goal: { verbatimRequest: "turn-1", sourceSequence: 0, status: "active" },
       }),
     });
-    assert.equal(first.version, 1);
+    assert.equal(first.version, 2);
     assert.equal(first.generation, 1);
     assert.deepEqual(first.transcript.messages, {
       fromSequenceExclusive: -1,
@@ -457,6 +814,10 @@ test("ThreadStore commitCompaction 原子写 active projection、versioned check
     const second = store.commitCompaction(threadId, {
       messages: [{ role: "user", content: "summary-2" }],
       ...currentCompactionGuard(store, threadId),
+      semanticState: replaceCompactionSemanticGoal(createEmptyCompactionSemanticState(), {
+        verbatimRequest: "turn-2",
+        sourceSequence: 2,
+      }),
       draft: checkpointDraft({
         goal: { verbatimRequest: "turn-2", sourceSequence: 2, status: "active" },
       }),
@@ -590,6 +951,11 @@ test("ThreadStore commitCompaction 保持 draft 快照，并拒绝覆盖晚到 a
           expectedActiveMessages: compactionStore.getMessages(threadId),
           expectedLatestCheckpointId: fresh.id,
           draft: checkpointDraft(),
+          semanticState: createEmptyCompactionSemanticState(),
+          semanticEvidenceWatermarks: {
+            messagesThroughSequence: 2,
+            toolExecutionsThroughSequence: 1,
+          },
           evidenceWatermarks: {
             transcriptMessagesThroughSequence: 3,
             toolExecutionsThroughSequence: 2,
@@ -756,6 +1122,67 @@ test("ThreadStore checkpoint transcript 受 checkpoint/thread/range 约束并可
   }
 });
 
+test("ThreadStore V1 transcript archive 与 checkpoint 同事务回滚", () => {
+  const dir = tempDir();
+  try {
+    const initialStore = new ThreadStore(dir);
+    const threadId = initialStore.createThread();
+    const activeMessages = [{ role: "user", content: "legacy goal" }] as const;
+    initialStore.appendMessages(threadId, activeMessages);
+    const seeded = initialStore.commitCompaction(threadId, {
+      messages: activeMessages,
+      ...currentCompactionGuard(initialStore, threadId),
+      draft: checkpointDraft(),
+    });
+    initialStore.close();
+
+    const legacyCheckpoint = {
+      version: 1,
+      id: seeded.id,
+      generation: seeded.generation,
+      createdAt: seeded.createdAt,
+      transcript: seeded.transcript,
+      goal: seeded.goal,
+      constraints: seeded.constraints,
+      resources: seeded.resources,
+      toolState: seeded.toolState,
+      runningWork: seeded.runningWork,
+      context: seeded.context,
+      summary: seeded.summary,
+    };
+    const database = new DatabaseSync(join(dir, "threads.db"));
+    database
+      .prepare(
+        `UPDATE compaction_checkpoints
+            SET schema_version = 1, checkpoint_json = ?
+          WHERE id = ?`,
+      )
+      .run(JSON.stringify(legacyCheckpoint), seeded.id);
+    database.close();
+
+    const store = new ThreadStore(dir);
+    const transcriptBefore = store.listTranscriptMessages(threadId, { limit: 500 });
+    assert.throws(
+      () =>
+        store.commitCompaction(threadId, {
+          messages: activeMessages,
+          ...currentCompactionGuard(store, threadId),
+          draft: checkpointDraft({
+            goal: { verbatimRequest: "legacy goal", sourceSequence: 0, status: "active" },
+          }),
+          legacySnapshotTranscriptFragments: ["ROLLBACK_LEGACY_MARKER"],
+        }),
+      /V2 goal compatibility projection requires semanticState.goal/u,
+    );
+    assert.deepEqual(store.listTranscriptMessages(threadId, { limit: 500 }), transcriptBefore);
+    assert.deepEqual(store.getMessages(threadId), activeMessages);
+    assert.equal(store.getLatestCheckpoint(threadId)?.id, seeded.id);
+    store.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("ThreadStore schema v2 迁移保守标记 legacy_snapshot，并在缺 tool 表时自愈", () => {
   const dir = tempDir();
   try {
@@ -871,7 +1298,7 @@ test("ThreadStore schema v2 迁移跳过无父 thread 的 legacy message", () =>
     const version = migrated.prepare("PRAGMA user_version").get() as {
       readonly user_version: number;
     };
-    assert.equal(version.user_version, 3);
+    assert.equal(version.user_version, 4);
     migrated.close();
 
     const reopened = new ThreadStore(dir);
@@ -911,18 +1338,119 @@ test("ThreadStore 跳过损坏的最新 checkpoint，继续返回上一条有效
         "51aabf47-369d-40cd-b409-ae4c3f3e07bb",
         threadId,
         2,
-        99,
+        2,
         0,
         0,
         -1,
         -1,
-        JSON.stringify({ version: 99 }),
+        JSON.stringify({ version: 2 }),
         "2026-07-17T10:00:00.000Z",
       );
     database.close();
 
     const reopened = new ThreadStore(dir);
     assert.equal(reopened.getLatestCheckpoint(threadId)?.id, valid.id);
+    reopened.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("ThreadStore checkpoint DB future version 在解析 payload 前 fail closed", () => {
+  const dir = tempDir();
+  try {
+    const store = new ThreadStore(dir);
+    const threadId = store.createThread();
+    store.appendMessages(threadId, [{ role: "user", content: "goal" }]);
+    const valid = store.commitCompaction(threadId, {
+      messages: [{ role: "user", content: "summary" }],
+      ...currentCompactionGuard(store, threadId),
+      draft: checkpointDraft(),
+    });
+    store.close();
+
+    const futureCheckpointId = "51aabf47-369d-40cd-b409-ae4c3f3e07bc";
+    const database = new DatabaseSync(join(dir, "threads.db"));
+    database
+      .prepare(
+        `INSERT INTO compaction_checkpoints
+           (id, thread_id, generation, schema_version,
+            message_from_sequence, message_through_sequence,
+            tool_from_sequence, tool_through_sequence,
+            checkpoint_json, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        futureCheckpointId,
+        threadId,
+        valid.generation + 1,
+        99,
+        valid.transcript.messages.throughSequence,
+        valid.transcript.messages.throughSequence,
+        valid.transcript.toolExecutions.throughSequence,
+        valid.transcript.toolExecutions.throughSequence,
+        "not-json",
+        "2026-07-17T10:00:00.000Z",
+      );
+    database.close();
+
+    const reopened = new ThreadStore(dir);
+    const rejectsFutureVersion = (error: unknown): boolean =>
+      error instanceof UnsupportedCompactionCheckpointVersionError &&
+      error.checkpointVersion === 99;
+    assert.throws(() => reopened.getLatestCheckpoint(threadId), rejectsFutureVersion);
+    assert.throws(() => reopened.getLatestSummaryCheckpoint(threadId), rejectsFutureVersion);
+    assert.throws(() => reopened.getCheckpoint(threadId, futureCheckpointId), rejectsFutureVersion);
+    reopened.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("ThreadStore checkpoint DB/payload 版本不一致时按损坏的已知版本回退", () => {
+  const dir = tempDir();
+  try {
+    const store = new ThreadStore(dir);
+    const threadId = store.createThread();
+    store.appendMessages(threadId, [{ role: "user", content: "goal" }]);
+    const valid = store.commitCompaction(threadId, {
+      messages: [{ role: "user", content: "summary" }],
+      ...currentCompactionGuard(store, threadId),
+      draft: checkpointDraft({
+        summary: createCompactionSummary("Keep the grounded checkpoint as the recovery point."),
+      }),
+    });
+    store.close();
+
+    const mismatchedCheckpointId = "51aabf47-369d-40cd-b409-ae4c3f3e07bd";
+    const database = new DatabaseSync(join(dir, "threads.db"));
+    database
+      .prepare(
+        `INSERT INTO compaction_checkpoints
+           (id, thread_id, generation, schema_version,
+            message_from_sequence, message_through_sequence,
+            tool_from_sequence, tool_through_sequence,
+            checkpoint_json, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        mismatchedCheckpointId,
+        threadId,
+        valid.generation + 1,
+        1,
+        valid.transcript.messages.throughSequence,
+        valid.transcript.messages.throughSequence,
+        valid.transcript.toolExecutions.throughSequence,
+        valid.transcript.toolExecutions.throughSequence,
+        JSON.stringify(valid),
+        "2026-07-17T10:00:00.000Z",
+      );
+    database.close();
+
+    const reopened = new ThreadStore(dir);
+    assert.equal(reopened.getLatestCheckpoint(threadId)?.id, valid.id);
+    assert.equal(reopened.getLatestSummaryCheckpoint(threadId)?.id, valid.id);
+    assert.equal(reopened.getCheckpoint(threadId, mismatchedCheckpointId), undefined);
     reopened.close();
   } finally {
     rmSync(dir, { recursive: true, force: true });

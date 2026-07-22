@@ -2,14 +2,17 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
   TOOL_EXECUTION_RECORD_VERSION,
+  TOOL_EXECUTION_PERSISTENCE_LIMITS,
   TOOL_EXECUTION_VALUE_DIAGNOSTIC_KINDS,
   TOOL_EXECUTION_VALUE_ENCODINGS,
   createToolExecutionRecord,
   createToolExecutionRecordId,
   encodeToolExecutionValue,
   isToolExecutionRecordId,
+  parsePersistedToolExecutionRecord,
   parseToolExecutionRecord,
   parseToolExecutionRecordId,
+  prepareToolExecutionRecordForPersistence,
   toRedactedToolExecutionRecordSummary,
 } from "./tool-execution-record.ts";
 import type { NormalizedToolResult } from "./normalize-result.ts";
@@ -174,6 +177,112 @@ test("parseToolExecutionRecord validates a persisted JSON round-trip", () => {
   );
 });
 
+test("prepareToolExecutionRecordForPersistence 保留内存原始结果但写盘投影有界且脱敏", () => {
+  const secret = "persist-me-never";
+  const binary = "A".repeat(96 * 1_024);
+  const record = createToolExecutionRecord({
+    id: RECORD_ID,
+    toolCallId: "call-bounded",
+    agentName: "demo-agent",
+    toolName: "render",
+    input: { apiKey: secret, query: "visible" },
+    result: result({
+      raw: {
+        content: [{ type: "image", data: binary, mimeType: "image/png" }],
+        _meta: { token: secret },
+      },
+      model: { type: "text", value: `password=${secret}\nstatus=ok` },
+      display: { imageData: binary, status: "ok" },
+    }),
+  });
+
+  const persisted = prepareToolExecutionRecordForPersistence(record);
+  const inMemory = JSON.stringify(record);
+  const durable = JSON.stringify(persisted);
+
+  assert.match(inMemory, new RegExp(secret, "u"));
+  assert.match(inMemory, /AAAA/u);
+  assert.doesNotMatch(durable, new RegExp(secret, "u"));
+  assert.doesNotMatch(durable, new RegExp(binary.slice(0, 256), "u"));
+  assert.equal(persisted.persistence.fields.input.redactionApplied, true);
+  assert.equal(persisted.persistence.fields.raw.redactionApplied, true);
+  assert.equal(persisted.persistence.fields.raw.truncated, false);
+  assert.ok(Buffer.byteLength(durable, "utf8") <= TOOL_EXECUTION_PERSISTENCE_LIMITS.recordBytes);
+  assert.deepEqual(persisted.outcome, { kind: "success" });
+});
+
+test("prepareToolExecutionRecordForPersistence 对超大 evidence 降级为 digest 而不抛错", () => {
+  const oversized = "x".repeat(TOOL_EXECUTION_PERSISTENCE_LIMITS.rawBytes * 4);
+  const record = createToolExecutionRecord({
+    id: RECORD_ID,
+    toolCallId: "call-oversized",
+    agentName: "demo-agent",
+    toolName: "read",
+    input: { text: oversized },
+    result: result({
+      raw: { text: oversized },
+      model: { type: "text", value: oversized },
+      display: oversized,
+      outcome: { kind: "tool_failed", reason: oversized },
+    }),
+  });
+
+  const persisted = prepareToolExecutionRecordForPersistence(record);
+  const serialized = JSON.stringify(persisted);
+
+  assert.equal(persisted.persistence.fields.input.truncated, true);
+  assert.equal(persisted.persistence.fields.raw.truncated, true);
+  assert.equal(persisted.persistence.fields.model.truncated, true);
+  assert.equal(persisted.persistence.fields.display.truncated, true);
+  assert.equal(persisted.persistence.fields.outcome.truncated, true);
+  assert.match(serialized, /redactedSha256/u);
+  assert.doesNotMatch(serialized, new RegExp(oversized.slice(0, 4_096), "u"));
+  assert.ok(Buffer.byteLength(serialized, "utf8") <= TOOL_EXECUTION_PERSISTENCE_LIMITS.recordBytes);
+  assert.equal(persisted.outcome.kind, "tool_failed");
+});
+
+test("parsePersistedToolExecutionRecord 对 durable projection 保持精确 round-trip", () => {
+  const oversized = "x".repeat(TOOL_EXECUTION_PERSISTENCE_LIMITS.rawBytes * 2);
+  const record = createToolExecutionRecord({
+    id: RECORD_ID,
+    toolCallId: "call-round-trip",
+    agentName: "demo-agent",
+    toolName: "read",
+    input: {},
+    result: result({ raw: { text: oversized } }),
+  });
+  const persisted = prepareToolExecutionRecordForPersistence(record);
+  const restored = parsePersistedToolExecutionRecord(JSON.parse(JSON.stringify(persisted)));
+
+  assert.deepEqual(restored, persisted);
+  assert.equal(restored.persistence.fields.raw.truncated, true);
+  assert.equal(restored.persistence.fields.raw.omissionReason, "size_limit");
+  assert.equal(
+    restored.persistence.fields.raw.originalByteLength,
+    persisted.persistence.fields.raw.originalByteLength,
+  );
+  assert.equal(
+    restored.persistence.fields.raw.redactedSha256,
+    persisted.persistence.fields.raw.redactedSha256,
+  );
+});
+
+test("parsePersistedToolExecutionRecord 只为 legacy record 创建 durable projection", () => {
+  const secret = "legacy-secret-must-not-persist";
+  const legacy = createToolExecutionRecord({
+    id: RECORD_ID,
+    toolCallId: "call-legacy",
+    agentName: "demo-agent",
+    toolName: "read",
+    input: { apikey: secret },
+    result: result({ raw: { password: secret } }),
+  });
+  const restored = parsePersistedToolExecutionRecord(JSON.parse(JSON.stringify(legacy)));
+
+  assert.equal(restored.persistence.version, 1);
+  assert.doesNotMatch(JSON.stringify(restored), new RegExp(secret, "u"));
+});
+
 test("parseToolExecutionRecord 拒绝对象属性中的 undefined", () => {
   const record = createToolExecutionRecord({
     id: RECORD_ID,
@@ -299,6 +408,66 @@ test("toRedactedToolExecutionRecordSummary 对 unquoted secret assignment 整行
   );
   assert.doesNotMatch(serialized, /totally-secret-value|another-secret-value/u);
   assert.doesNotMatch(serialized, /visible=kept/u);
+});
+
+test("durable projection 清理 quoted JSON key 与 compact sensitive key，保留明确反例", () => {
+  const record = createToolExecutionRecord({
+    id: RECORD_ID,
+    toolCallId: "call-quoted-and-compact-secret",
+    agentName: "demo-agent",
+    toolName: "read",
+    input: {
+      apikey: "compact-api-secret",
+      APIKEY: "uppercase-api-secret",
+      accesskey: "compact-access-secret",
+      privatekey: "compact-private-secret",
+      clientsecret: "compact-client-secret",
+      tokenCount: 7,
+      monkey: "banana",
+    },
+    result: result({
+      raw: {
+        text: [
+          '{"apiKey":"quoted-json-secret","status":"ok"}',
+          "'clientsecret': 'quoted-client-secret'",
+          "tokenCount=7 monkey=banana",
+        ].join("\n"),
+      },
+    }),
+  });
+
+  const persisted = prepareToolExecutionRecordForPersistence(record);
+  const serialized = JSON.stringify(persisted);
+
+  assert.doesNotMatch(
+    serialized,
+    /compact-api-secret|uppercase-api-secret|compact-access-secret|compact-private-secret|compact-client-secret|quoted-json-secret|quoted-client-secret/u,
+  );
+  assert.match(serialized, /"tokenCount":7/u);
+  assert.match(serialized, /"monkey":"banana"/u);
+  assert.match(serialized, /status/u);
+  assert.match(serialized, /tokenCount=7 monkey=banana/u);
+});
+
+test("durable projection 在所有 evidence 视图清理 passphrase", () => {
+  const secret = "correct horse battery staple";
+  const record = createToolExecutionRecord({
+    id: RECORD_ID,
+    toolCallId: "call-passphrase",
+    agentName: "demo-agent",
+    toolName: "read",
+    input: { passphrase: secret },
+    result: result({
+      raw: { passphrase: secret, text: `passphrase=${secret}` },
+      model: { type: "text", value: `passphrase: ${secret}` },
+      display: { passphrase: secret },
+    }),
+  });
+
+  const serialized = JSON.stringify(prepareToolExecutionRecordForPersistence(record));
+
+  assert.doesNotMatch(serialized, new RegExp(secret, "u"));
+  assert.match(serialized, /\[redacted\]/u);
 });
 
 test("toRedactedToolExecutionRecordSummary 统一识别 credential env 与 connection URI key", () => {

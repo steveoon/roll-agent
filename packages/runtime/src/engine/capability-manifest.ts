@@ -380,9 +380,12 @@ export function buildEffectiveCapabilityManifest(
     .map((id): EffectiveToolCapability => {
       const tool = input.tools[id];
       const route = input.resolveRoute(id);
-      const role = input.toolRoles[id] ?? CAPABILITY_TOOL_ROLES.agent;
       if (!tool || !route) {
         throw new Error(`无法为已注册工具 ${id} 构建 capability manifest`);
+      }
+      const role = input.toolRoles[id];
+      if (!role) {
+        throw new Error(`已注册工具 ${id} 缺少 capability role`);
       }
       const description = "description" in tool ? tool.description : undefined;
       return {

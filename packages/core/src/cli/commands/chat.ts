@@ -70,6 +70,10 @@ interface CreateChatEngineInput {
   readonly store: ThreadStoreInstance;
   readonly surface: ChatEngineSurface;
   readonly providerOptions?: NonNullable<ChatEngineOptions["providerOptions"]>;
+  readonly structuredOutputProviderOptions?: NonNullable<
+    ChatEngineOptions["structuredOutputProviderOptions"]
+  >;
+  readonly structuredOutputReasoning?: NonNullable<ChatEngineOptions["structuredOutputReasoning"]>;
   readonly shellEnv?: NodeJS.ProcessEnv;
 }
 
@@ -121,6 +125,12 @@ export function createChatEngine(input: CreateChatEngineInput) {
     policy: createToolPolicy(input.runtime, input.config),
     maxSteps: input.config.runtime.maxSteps,
     ...(input.providerOptions ? { providerOptions: input.providerOptions } : {}),
+    ...(input.structuredOutputProviderOptions
+      ? { structuredOutputProviderOptions: input.structuredOutputProviderOptions }
+      : {}),
+    ...(input.structuredOutputReasoning
+      ? { structuredOutputReasoning: input.structuredOutputReasoning }
+      : {}),
     debugEvents: isDebugLogEnabled(),
     onAgentBootstrapIssue: reportAgentBootstrapIssue,
     onSkillLibraryIssue: reportSkillLibraryIssue,
@@ -165,6 +175,45 @@ export function resolveChatLlmReadiness(config: RollConfig): LlmConfigReadiness 
   });
 }
 
+export function resolveChatLlmCalls(
+  provider: string,
+  modelName: string,
+  apiKey: string,
+  baseUrl: string | undefined,
+  thinkingLevel: RollConfig["runtime"]["thinkingLevel"],
+  compactionThinkingLevel: RollConfig["runtime"]["compaction"]["thinkingLevel"] = undefined,
+  compactionUsesStructuredOutput = true,
+): {
+  readonly model: NonNullable<ChatEngineOptions["model"]>;
+  readonly providerOptions?: NonNullable<ChatEngineOptions["providerOptions"]>;
+  readonly structuredOutputProviderOptions?: NonNullable<
+    ChatEngineOptions["structuredOutputProviderOptions"]
+  >;
+  readonly structuredOutputReasoning?: NonNullable<ChatEngineOptions["structuredOutputReasoning"]>;
+} {
+  const chat = resolveLLMCall(provider, modelName, apiKey, "chat", baseUrl, thinkingLevel);
+  const structuredOutput = compactionUsesStructuredOutput
+    ? resolveLLMCall(
+        provider,
+        modelName,
+        apiKey,
+        "structured-output",
+        baseUrl,
+        compactionThinkingLevel ?? thinkingLevel,
+      )
+    : undefined;
+  return {
+    model: chat.model,
+    ...(chat.providerOptions ? { providerOptions: chat.providerOptions } : {}),
+    ...(structuredOutput?.providerOptions
+      ? { structuredOutputProviderOptions: structuredOutput.providerOptions }
+      : {}),
+    ...(structuredOutput?.reasoning
+      ? { structuredOutputReasoning: structuredOutput.reasoning }
+      : {}),
+  };
+}
+
 async function runServer(config: RollConfig): Promise<void> {
   const llmStatus = resolveChatLlmReadiness(config);
   if (!llmStatus.configured || !llmStatus.providerConfig) {
@@ -178,14 +227,16 @@ async function runServer(config: RollConfig): Promise<void> {
 
   const runtime = await loadRuntime();
   const { ThreadStore, RuntimeServer, createStdioConnection } = runtime;
-  const { model, providerOptions } = resolveLLMCall(
-    provider,
-    modelName,
-    providerConfig.apiKey,
-    "chat",
-    providerConfig.baseUrl,
-    config.runtime.thinkingLevel,
-  );
+  const { model, providerOptions, structuredOutputProviderOptions, structuredOutputReasoning } =
+    resolveChatLlmCalls(
+      provider,
+      modelName,
+      providerConfig.apiKey,
+      providerConfig.baseUrl,
+      config.runtime.thinkingLevel,
+      config.runtime.compaction.thinkingLevel,
+      config.runtime.compaction.strategy === "summarize",
+    );
   const store = new ThreadStore(config.runtime.threadsDir);
   const chatCliScope = createChatCliScope();
   let engine: ConversationEngineInstance | undefined;
@@ -198,6 +249,8 @@ async function runServer(config: RollConfig): Promise<void> {
       surface: CHAT_ENGINE_SURFACES.server,
       shellEnv: chatCliScope.env,
       ...(providerOptions ? { providerOptions } : {}),
+      ...(structuredOutputProviderOptions ? { structuredOutputProviderOptions } : {}),
+      ...(structuredOutputReasoning ? { structuredOutputReasoning } : {}),
     });
     const activeEngine = engine;
     const connection = createStdioConnection(process.stdin, process.stdout);
@@ -487,14 +540,16 @@ export default defineCommand({
 
     const runtime = await loadRuntime();
     const { ThreadStore } = runtime;
-    const { model, providerOptions } = resolveLLMCall(
-      provider,
-      modelName,
-      providerConfig.apiKey,
-      "chat",
-      providerConfig.baseUrl,
-      config.runtime.thinkingLevel,
-    );
+    const { model, providerOptions, structuredOutputProviderOptions, structuredOutputReasoning } =
+      resolveChatLlmCalls(
+        provider,
+        modelName,
+        providerConfig.apiKey,
+        providerConfig.baseUrl,
+        config.runtime.thinkingLevel,
+        config.runtime.compaction.thinkingLevel,
+        config.runtime.compaction.strategy === "summarize",
+      );
     const store = new ThreadStore(config.runtime.threadsDir);
     const interactive = Boolean(
       process.stdout.isTTY && process.stdin.isTTY && typeof process.stdin.setRawMode === "function",
@@ -518,6 +573,8 @@ export default defineCommand({
         surface,
         shellEnv: chatCliScope.env,
         ...(providerOptions ? { providerOptions } : {}),
+        ...(structuredOutputProviderOptions ? { structuredOutputProviderOptions } : {}),
+        ...(structuredOutputReasoning ? { structuredOutputReasoning } : {}),
       });
       let session: AgentSession;
       if (args.session) {

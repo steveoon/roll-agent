@@ -6,6 +6,7 @@ const browserChannels = ["chrome", "chromium", "msedge"] as const;
 const runtimeApprovalDefaults = ["guarded", "auto", "deny"] as const;
 const runtimeApprovalOverrideActions = ["auto", "confirm", "deny"] as const;
 const runtimeCompactionStrategies = ["summarize", "truncate"] as const;
+export const runtimeThinkingLevels = ["off", "low", "medium", "high"] as const;
 
 const browserProfileColorSchema = z
   .string()
@@ -44,12 +45,13 @@ export const runtimeApprovalConfigSchema = z.object({
 export const runtimeCompactionConfigSchema = z.object({
   enabled: z.boolean().default(true),
   strategy: z.enum(runtimeCompactionStrategies).default("summarize"),
+  timeoutMs: z.number().int().min(10_000).max(600_000).default(120_000),
+  thinkingLevel: z.enum(runtimeThinkingLevels).optional(),
+  maxOutputTokens: z.number().int().min(2_048).max(32_768).default(8_192),
   threshold: z.number().min(0.1).max(0.95).default(0.75),
   keepRecentTurns: z.number().int().min(1).default(4),
   keepRecentTokens: z.number().int().min(1).default(32_000),
 });
-
-export const runtimeThinkingLevels = ["off", "low", "medium", "high"] as const;
 
 export const runtimeShellSessionConfigSchema = z.object({
   enabled: z.boolean().default(false),

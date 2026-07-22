@@ -85,6 +85,9 @@ describe("key-codec: decodeFromYaml", () => {
           },
         },
         compaction: {
+          "timeout-ms": 180_000,
+          "thinking-level": "high",
+          "max-output-tokens": 16_384,
           "keep-recent-turns": 6,
         },
       },
@@ -111,6 +114,9 @@ describe("key-codec: decodeFromYaml", () => {
           },
         },
         compaction: {
+          timeoutMs: 180_000,
+          thinkingLevel: "high",
+          maxOutputTokens: 16_384,
           keepRecentTurns: 6,
         },
       },
@@ -231,6 +237,11 @@ describe("key-codec: encodeToYaml", () => {
       skills: { dirs: ["./skills"] },
       runtime: {
         turnTimeoutMs: 60_000,
+        compaction: {
+          timeoutMs: 180_000,
+          thinkingLevel: "high",
+          maxOutputTokens: 16_384,
+        },
         approval: {
           overrides: {
             "roll.exec_command": "auto",
@@ -259,6 +270,11 @@ describe("key-codec: encodeToYaml", () => {
       skills: { dirs: ["./skills"] },
       runtime: {
         "turn-timeout-ms": 60_000,
+        compaction: {
+          "timeout-ms": 180_000,
+          "thinking-level": "high",
+          "max-output-tokens": 16_384,
+        },
         approval: {
           overrides: {
             "roll.exec_command": "auto",

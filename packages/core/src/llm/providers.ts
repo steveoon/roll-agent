@@ -1,4 +1,8 @@
-import type { LanguageModelV4, SharedV4ProviderOptions } from "@ai-sdk/provider";
+import type {
+  LanguageModelV4,
+  LanguageModelV4CallOptions,
+  SharedV4ProviderOptions,
+} from "@ai-sdk/provider";
 import { createAlibaba } from "@ai-sdk/alibaba";
 import { createAnthropic } from "@ai-sdk/anthropic";
 import { createOpenAI } from "@ai-sdk/openai";
@@ -7,13 +11,29 @@ import { createXai } from "@ai-sdk/xai";
 import { runtimeThinkingLevels } from "../config/schema.ts";
 
 export type ThinkingLevel = (typeof runtimeThinkingLevels)[number];
+export type UnifiedReasoning = NonNullable<LanguageModelV4CallOptions["reasoning"]>;
 
 const THINKING_BUDGETS = { low: 2048, medium: 8192, high: 16384 } as const;
-const OPENAI_NONE_REASONING_PREFIXES = ["gpt-5.1", "gpt-5.2", "gpt-5.3", "gpt-5.4"] as const;
-const XAI_FIXED_REASONING_MODEL_PATTERN = /^grok-4\.20(?:-\d{4})?-(?:non-)?reasoning(?:-beta)?$/;
+const OPENAI_NONE_REASONING_PREFIXES = [
+  "gpt-5.1",
+  "gpt-5.2",
+  "gpt-5.3",
+  "gpt-5.4",
+  "gpt-5.5",
+] as const;
+const OPENAI_REASONING_MODEL_PREFIXES = ["o1", "o3", "o4-mini"] as const;
+const XAI_GROK_420_PREFIX = "grok-4.20";
+const XAI_MULTI_AGENT_MARKER = "-multi-agent";
 
 function supportsOpenAINoneReasoningEffort(modelName: string): boolean {
   return OPENAI_NONE_REASONING_PREFIXES.some((prefix) => modelName.startsWith(prefix));
+}
+
+function isOpenAIReasoningModel(modelName: string): boolean {
+  return (
+    OPENAI_REASONING_MODEL_PREFIXES.some((prefix) => modelName.startsWith(prefix)) ||
+    (modelName.startsWith("gpt-5") && !modelName.startsWith("gpt-5-chat"))
+  );
 }
 
 function supportsAnthropicAdaptiveThinking(modelName: string): boolean {
@@ -34,7 +54,19 @@ function isXaiNonReasoningModel(modelName: string): boolean {
 }
 
 function supportsXaiReasoningEffort(modelName: string): boolean {
-  return !XAI_FIXED_REASONING_MODEL_PATTERN.test(modelName);
+  return !isXaiFixedGrok420Model(modelName);
+}
+
+function isXaiFixedGrok420Model(modelName: string): boolean {
+  return modelName.startsWith(XAI_GROK_420_PREFIX) && !modelName.includes(XAI_MULTI_AGENT_MARKER);
+}
+
+function isXaiRequiredReasoningModel(modelName: string): boolean {
+  return (
+    modelName === "grok-4.5" ||
+    modelName.includes(XAI_MULTI_AGENT_MARKER) ||
+    (isXaiFixedGrok420Model(modelName) && !isXaiNonReasoningModel(modelName))
+  );
 }
 
 export function thinkingProviderOptions(
@@ -148,7 +180,52 @@ export type LLMCallPurpose = "structured-output" | "text" | "sampling" | "chat";
 /** resolveLLMCall 的返回值 */
 export interface ResolvedLLMCall {
   readonly model: LanguageModelV4;
+  readonly reasoning?: UnifiedReasoning;
   readonly providerOptions?: SharedV4ProviderOptions;
+}
+
+function unifiedReasoningForThinkingLevel(level: ThinkingLevel): UnifiedReasoning {
+  return level === "off" ? "none" : level;
+}
+
+function resolveStructuredOutputReasoning(
+  providerName: string,
+  modelName: string,
+  level: ThinkingLevel,
+): UnifiedReasoning | undefined {
+  if (providerName === "openai") {
+    if (!isOpenAIReasoningModel(modelName)) {
+      return undefined;
+    }
+    if (level !== "off") {
+      return unifiedReasoningForThinkingLevel(level);
+    }
+    if (supportsOpenAINoneReasoningEffort(modelName)) {
+      return "none";
+    }
+    throw new Error(
+      `OpenAI model "${modelName}" cannot disable reasoning for structured output; set runtime.compaction.thinking-level to low or higher`,
+    );
+  }
+  if (providerName === "xai") {
+    if (isXaiNonReasoningModel(modelName)) {
+      return undefined;
+    }
+    if (isXaiFixedGrok420Model(modelName)) {
+      if (level === "off") {
+        throw new Error(
+          `xAI model "${modelName}" cannot disable reasoning for structured output; set runtime.compaction.thinking-level to low or higher`,
+        );
+      }
+      return undefined;
+    }
+    if (level === "off" && isXaiRequiredReasoningModel(modelName)) {
+      throw new Error(
+        `xAI model "${modelName}" cannot disable reasoning for structured output; set runtime.compaction.thinking-level to low or higher`,
+      );
+    }
+  }
+  return unifiedReasoningForThinkingLevel(level);
 }
 
 /**
@@ -172,8 +249,8 @@ export function toSamplingConnectOptions(call: ResolvedLLMCall | undefined): {
 /**
  * 按 provider + 调用目的解析 generateText 的完整调用上下文。
  *
- * structured-output 场景下，对 qwen provider 自动注入 enableThinking: false，
- * 因为阿里云 thinking mode 不支持 structured output。
+ * structured-output 场景优先使用 AI SDK 顶层 reasoning 统一语义；qwen 是例外，
+ * 因为阿里云 thinking mode 不支持 structured output，必须通过 providerOptions 强制关闭。
  *
  * chat 与 sampling 场景下都是纯文本 generateText 调用，复用同一套
  * thinkingProviderOptions 映射注入 reasoning/thinking effort。
@@ -190,11 +267,15 @@ export function resolveLLMCall(
 ): ResolvedLLMCall {
   const model = createProviderModel(providerName, modelName, apiKey, baseURL);
 
-  if (purpose === "structured-output" && providerName === "qwen") {
-    return {
-      model,
-      providerOptions: { alibaba: { enableThinking: false } },
-    };
+  if (purpose === "structured-output") {
+    if (providerName === "qwen") {
+      return {
+        model,
+        providerOptions: { alibaba: { enableThinking: false } },
+      };
+    }
+    const reasoning = resolveStructuredOutputReasoning(providerName, modelName, thinkingLevel);
+    return reasoning ? { model, reasoning } : { model };
   }
 
   if (purpose === "chat" || purpose === "sampling") {

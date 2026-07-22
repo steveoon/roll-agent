@@ -3,11 +3,12 @@ import assert from "node:assert/strict";
 import { modelMessageSchema, type ModelMessage } from "ai";
 import type { SkillLibrary, SkillSummary } from "@roll-agent/core/skills/library";
 import {
+  applyExplicitSkillContext,
   attachExplicitSkillCheckpoint,
   isExplicitSkillCheckpointV1,
-  materializeExplicitSkillCheckpoints,
   prepareExplicitSkillContext,
   readExplicitSkillCheckpoint,
+  sanitizePersistedExplicitSkillCheckpoint,
   stripExplicitSkillCheckpoints,
   type ExplicitSkillContextSnapshot,
 } from "./explicit-skill-context.ts";
@@ -17,7 +18,18 @@ function checkpointSnapshot(
   userPrompt: string,
   modelUserContent: string,
 ): ExplicitSkillContextSnapshot {
-  return { userPrompt, modelUserContent, skillNames: [name] };
+  return {
+    userPrompt,
+    modelUserContent,
+    skillNames: [name],
+    skillReferences: [
+      {
+        name,
+        source: "project",
+        contentSha256: "a".repeat(64),
+      },
+    ],
+  };
 }
 
 test("prepareExplicitSkillContext 对完整多 Skill 上下文执行 60000 字符硬预算", () => {
@@ -53,6 +65,17 @@ test("prepareExplicitSkillContext 对完整多 Skill 上下文执行 60000 字�
   assert.match(context, /"name":"two"/u);
   assert.doesNotMatch(context, /roll__skill/u);
   assert.equal(snapshot.userPrompt, "execute");
+  assert.deepEqual(
+    snapshot.skillReferences?.map((skill) => ({
+      name: skill.name,
+      source: skill.source,
+      digestLength: skill.contentSha256.length,
+    })),
+    [
+      { name: "one", source: "project", digestLength: 64 },
+      { name: "two", source: "user", digestLength: 64 },
+    ],
+  );
 });
 
 test("prepareExplicitSkillContext 在 metadata 本身超过硬预算时拒绝推理", () => {
@@ -80,7 +103,7 @@ test("prepareExplicitSkillContext 在 metadata 本身超过硬预算时拒绝推
   );
 });
 
-test("explicit Skill checkpoint 经 ModelMessage JSON roundtrip 后仍可读取且保留原始输入", () => {
+test("explicit Skill checkpoint JSON roundtrip 只持久化轻量引用，不包含 Skill 正文", () => {
   const snapshot = checkpointSnapshot("demo", "execute", "DEMO_BODY\n\nexecute");
   const attached = attachExplicitSkillCheckpoint(
     {
@@ -99,7 +122,12 @@ test("explicit Skill checkpoint 经 ModelMessage JSON roundtrip 后仍可读取�
   assert.equal(roundtripped.content, "/demo execute");
   assert.ok(checkpoint);
   assert.ok(isExplicitSkillCheckpointV1(checkpoint));
-  assert.deepEqual(checkpoint.snapshot, snapshot);
+  assert.deepEqual(checkpoint.snapshot, {
+    userPrompt: snapshot.userPrompt,
+    skillNames: snapshot.skillNames,
+    skills: snapshot.skillReferences,
+  });
+  assert.doesNotMatch(JSON.stringify(roundtripped), /DEMO_BODY/u);
   assert.deepEqual(roundtripped.providerOptions?.openai, { reasoningEffort: "high" });
   assert.equal(
     roundtripped.providerOptions?.rollHarness?.traceId,
@@ -108,7 +136,33 @@ test("explicit Skill checkpoint 经 ModelMessage JSON roundtrip 后仍可读取�
   );
 });
 
-test("materializeExplicitSkillCheckpoints 还原所有历史 checkpoint 并剥离隐藏 metadata", () => {
+test("readExplicitSkillCheckpoint 兼容旧 v1 checkpoint 并忽略历史正文", () => {
+  const legacy: ModelMessage = {
+    role: "user",
+    content: "/demo legacy",
+    providerOptions: {
+      rollHarness: {
+        explicitSkillCheckpoint: {
+          version: 1,
+          kind: "explicit-skill",
+          snapshot: {
+            userPrompt: "legacy",
+            modelUserContent: "LEGACY_SKILL_BODY",
+            skillNames: ["demo"],
+          },
+        },
+      },
+    },
+  };
+
+  const checkpoint = readExplicitSkillCheckpoint(legacy);
+
+  assert.equal(checkpoint?.snapshot.userPrompt, "legacy");
+  assert.deepEqual(checkpoint?.snapshot.skillNames, ["demo"]);
+  assert.doesNotMatch(JSON.stringify(checkpoint), /LEGACY_SKILL_BODY|modelUserContent/u);
+});
+
+test("历史 checkpoint 只保留原始输入，当前 Turn Skill context 由内存快照单独应用", () => {
   const first = attachExplicitSkillCheckpoint(
     {
       role: "user",
@@ -116,10 +170,6 @@ test("materializeExplicitSkillCheckpoints 还原所有历史 checkpoint 并剥�
       providerOptions: { openai: { cache: true } },
     },
     checkpointSnapshot("one", "first", "ONE_BODY\n\nfirst"),
-  );
-  const second = attachExplicitSkillCheckpoint(
-    { role: "user", content: "/two second" },
-    checkpointSnapshot("two", "second", "TWO_BODY\n\nsecond"),
   );
   const future: ModelMessage = {
     role: "user",
@@ -148,24 +198,28 @@ test("materializeExplicitSkillCheckpoints 还原所有历史 checkpoint 并剥�
     },
   };
 
-  const materialized = materializeExplicitSkillCheckpoints([
+  const stripped = stripExplicitSkillCheckpoints([
     first,
     { role: "assistant", content: "first done" },
-    second,
     future,
     assistantWithHiddenMetadata,
   ]);
+  const currentSnapshot = checkpointSnapshot("two", "second", "TWO_BODY\n\nsecond");
+  const materialized = applyExplicitSkillContext(
+    [...stripped, { role: "user", content: "/two second" }],
+    currentSnapshot,
+  );
 
-  assert.equal(materialized[0]?.content, "ONE_BODY\n\nfirst");
-  assert.equal(materialized[2]?.content, "TWO_BODY\n\nsecond");
-  assert.equal(materialized[3]?.content, "/future request", "未知版本必须安全忽略");
-  assert.equal(first.content, "/one first", "materialize 不得改写持久化原消息");
-  assert.equal(second.content, "/two second");
+  assert.equal(materialized[0]?.content, "/one first");
+  assert.equal(materialized[2]?.content, "/future request", "未知版本必须安全忽略");
+  assert.equal(materialized[4]?.content, "TWO_BODY\n\nsecond");
+  assert.equal(first.content, "/one first", "应用当前快照不得改写持久化原消息");
   assert.deepEqual(materialized[0]?.providerOptions, { openai: { cache: true } });
-  assert.deepEqual(materialized[3]?.providerOptions, {
+  assert.deepEqual(materialized[2]?.providerOptions, {
     anthropic: { cacheControl: { type: "ephemeral" } },
   });
-  assert.deepEqual(materialized[4]?.providerOptions, { openai: { itemId: "item-1" } });
+  assert.deepEqual(materialized[3]?.providerOptions, { openai: { itemId: "item-1" } });
+  assert.doesNotMatch(JSON.stringify(materialized), /ONE_BODY|FUTURE_BODY|rollHarness/u);
 });
 
 test("stripExplicitSkillCheckpoints 保留原始用户输入和其他 provider options", () => {
@@ -212,7 +266,7 @@ test("readExplicitSkillCheckpoint 对未知版本和畸形 snapshot 返回 undef
         explicitSkillCheckpoint: {
           version: 1,
           kind: "explicit-skill",
-          snapshot: { userPrompt: "execute", skillNames: ["demo"] },
+          snapshot: { userPrompt: "execute" },
         },
       },
     },
@@ -230,4 +284,58 @@ test("readExplicitSkillCheckpoint 对未知版本和畸形 snapshot 返回 undef
     isExplicitSkillCheckpointV1(malformed.providerOptions?.rollHarness?.explicitSkillCheckpoint),
     false,
   );
+});
+
+test("sanitizePersistedExplicitSkillCheckpoint fail-closed 清除异常 checkpoint 中的旧正文", () => {
+  const cases: readonly ModelMessage[] = [
+    {
+      role: "user",
+      content: "/demo unknown",
+      providerOptions: {
+        openai: { reasoningEffort: "high" },
+        rollHarness: {
+          traceId: "unknown-trace",
+          explicitSkillCheckpoint: {
+            version: 2,
+            kind: "explicit-skill",
+            snapshot: {
+              userPrompt: "unknown",
+              modelUserContent: "UNKNOWN_VERSION_BODY",
+              skillNames: ["demo"],
+            },
+          },
+        },
+      },
+    },
+    {
+      role: "user",
+      content: "/demo malformed",
+      providerOptions: {
+        anthropic: { effort: "high" },
+        rollHarness: {
+          traceId: "malformed-trace",
+          explicitSkillCheckpoint: {
+            version: 1,
+            kind: "explicit-skill",
+            snapshot: {
+              userPrompt: "malformed",
+              modelUserContent: "MALFORMED_BODY",
+            },
+          },
+        },
+      },
+    },
+  ];
+
+  const sanitized = cases.map(sanitizePersistedExplicitSkillCheckpoint);
+
+  assert.doesNotMatch(
+    JSON.stringify(sanitized),
+    /UNKNOWN_VERSION_BODY|MALFORMED_BODY|modelUserContent/u,
+  );
+  assert.equal(sanitized[0]?.providerOptions?.rollHarness?.traceId, "unknown-trace");
+  assert.deepEqual(sanitized[0]?.providerOptions?.openai, { reasoningEffort: "high" });
+  assert.equal(sanitized[1]?.providerOptions?.rollHarness?.traceId, "malformed-trace");
+  assert.deepEqual(sanitized[1]?.providerOptions?.anthropic, { effort: "high" });
+  assert.match(JSON.stringify(cases), /UNKNOWN_VERSION_BODY|MALFORMED_BODY/u);
 });

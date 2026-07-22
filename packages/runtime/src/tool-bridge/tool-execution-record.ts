@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import type { JSONValue } from "@ai-sdk/provider";
 import { TOOL_OUTCOME_KINDS } from "./normalize-result.ts";
 import type {
@@ -10,6 +10,22 @@ import type {
 
 export const TOOL_EXECUTION_RECORD_VERSION = 1 as const;
 export const TOOL_EXECUTION_VALUE_ENVELOPE_VERSION = 1 as const;
+export const TOOL_EXECUTION_PERSISTENCE_VERSION = 1 as const;
+
+export const TOOL_EXECUTION_PERSISTENCE_LIMITS = {
+  inputBytes: 32 * 1_024,
+  rawBytes: 64 * 1_024,
+  modelBytes: 64 * 1_024,
+  displayBytes: 32 * 1_024,
+  outcomeBytes: 8 * 1_024,
+  identifierBytes: 4 * 1_024,
+  recordBytes: 256 * 1_024,
+} as const;
+
+export const TOOL_EXECUTION_EVIDENCE_OMISSION_REASONS = {
+  sizeLimit: "size_limit",
+  recordLimit: "record_limit",
+} as const;
 
 export const TOOL_EXECUTION_VALUE_ENCODINGS = {
   json: "json",
@@ -29,6 +45,9 @@ export const TOOL_EXECUTION_VALUE_DIAGNOSTIC_KINDS = {
 
 export type ToolExecutionRecordVersion = typeof TOOL_EXECUTION_RECORD_VERSION;
 export type ToolExecutionValueEnvelopeVersion = typeof TOOL_EXECUTION_VALUE_ENVELOPE_VERSION;
+export type ToolExecutionPersistenceVersion = typeof TOOL_EXECUTION_PERSISTENCE_VERSION;
+export type ToolExecutionEvidenceOmissionReason =
+  (typeof TOOL_EXECUTION_EVIDENCE_OMISSION_REASONS)[keyof typeof TOOL_EXECUTION_EVIDENCE_OMISSION_REASONS];
 export type ToolExecutionValueEncoding =
   (typeof TOOL_EXECUTION_VALUE_ENCODINGS)[keyof typeof TOOL_EXECUTION_VALUE_ENCODINGS];
 export type ToolExecutionValueDiagnosticKind =
@@ -89,6 +108,40 @@ export interface ToolExecutionRecord {
   readonly outcome: ToolOutcome;
 }
 
+export interface PersistedToolExecutionFieldMetadata {
+  /** UTF-8 bytes before the write-time redaction pass. */
+  readonly originalByteLength: number;
+  /** UTF-8 bytes retained in the persisted projection. */
+  readonly storedByteLength: number;
+  /** SHA-256 of the redacted value, never of the original secret-bearing value. */
+  readonly redactedSha256: string;
+  readonly redactionApplied: true;
+  readonly truncated: boolean;
+  readonly omissionReason?: ToolExecutionEvidenceOmissionReason;
+}
+
+export interface ToolExecutionPersistenceMetadata {
+  readonly version: ToolExecutionPersistenceVersion;
+  readonly fields: {
+    readonly input: PersistedToolExecutionFieldMetadata;
+    readonly raw: PersistedToolExecutionFieldMetadata;
+    readonly model: PersistedToolExecutionFieldMetadata;
+    readonly display: PersistedToolExecutionFieldMetadata;
+    readonly outcome: PersistedToolExecutionFieldMetadata;
+  };
+}
+
+/**
+ * Durable projection of an in-memory ToolExecutionRecord.
+ *
+ * The core fields deliberately remain assignment-compatible with ToolExecutionRecord so existing
+ * recovery and compaction consumers can keep using typed identity/outcome/model/display data. The
+ * persistence metadata proves that the evidence passed the bounded write-time projection.
+ */
+export interface PersistedToolExecutionRecord extends ToolExecutionRecord {
+  readonly persistence: ToolExecutionPersistenceMetadata;
+}
+
 export interface CreateToolExecutionRecordInput {
   readonly id?: string;
   readonly toolCallId: string;
@@ -111,6 +164,7 @@ export interface RedactedToolExecutionRecordSummary {
   readonly model: ToolModelOutput;
   readonly display: PersistedToolExecutionValueEnvelope;
   readonly outcome: ToolOutcome;
+  readonly persistence?: ToolExecutionPersistenceMetadata;
 }
 
 interface EncodeState {
@@ -126,12 +180,29 @@ const REDACTED_VALUE: RedactedToolExecutionValueEnvelope = Object.freeze({
 });
 const REDACTED_TEXT = "[redacted]";
 const SENSITIVE_CJK_FIELD_SUFFIX_PATTERN = /(?:密码|口令|密钥|秘钥|令牌|凭证|授权(?:信息)?)$/u;
+const COMPACT_SENSITIVE_FIELD_NAMES = new Set([
+  "accesskey",
+  "accesstoken",
+  "apikey",
+  "authkey",
+  "authsecret",
+  "authtoken",
+  "bearertoken",
+  "clientkey",
+  "clientsecret",
+  "connectionstring",
+  "privatekey",
+  "refreshtoken",
+  "secretkey",
+  "sessiontoken",
+]);
 const TEXT_FIELD_ASSIGNMENT_PATTERN =
-  /(?<![\p{L}\p{N}_.-])([\p{L}_][\p{L}\p{N}_.-]*)(\s*[:=：＝]\s*)/gu;
+  /(?<![\p{L}\p{N}_.-])(?:(['"`])([\p{L}_][\p{L}\p{N}_.-]*)\1|([\p{L}_][\p{L}\p{N}_.-]*))(\s*[:=：＝]\s*)/gu;
 const EMBEDDED_BASE64_DATA_URI_PATTERN =
   /data:[^,\s]+;base64,[a-z0-9+/_=-]+(?:(?:[ \t]*\r?\n[ \t]*|[ \t]*\\(?:r\\n|n)[ \t]*)[a-z0-9+/_=-]+)*/giu;
 const PRIVATE_KEY_BLOCK_PATTERN =
   /-----BEGIN(?: [A-Z0-9]+)* PRIVATE KEY-----[\s\S]*?(?:-----END(?: [A-Z0-9]+)* PRIVATE KEY-----|$)/giu;
+const SHA256_PATTERN = /^[a-f0-9]{64}$/u;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -566,7 +637,12 @@ export function isSensitiveFieldName(fieldName: string): boolean {
   if (fieldName === "_meta") {
     return true;
   }
-  if (SENSITIVE_CJK_FIELD_SUFFIX_PATTERN.test(fieldName.trim())) {
+  const trimmed = fieldName.trim();
+  if (SENSITIVE_CJK_FIELD_SUFFIX_PATTERN.test(trimmed)) {
+    return true;
+  }
+  const compact = trimmed.toLowerCase().replace(/[^a-z0-9]+/gu, "");
+  if (COMPACT_SENSITIVE_FIELD_NAMES.has(compact)) {
     return true;
   }
   const tokens = fieldNameTokens(fieldName);
@@ -577,6 +653,7 @@ export function isSensitiveFieldName(fieldName: string): boolean {
         "cookie",
         "credential",
         "credentials",
+        "passphrase",
         "passwd",
         "password",
         "secret",
@@ -678,7 +755,7 @@ function redactSensitiveTextAssignments(value: string, redactedText: string): st
     if (match.index < cursor) {
       continue;
     }
-    const fieldName = match[1];
+    const fieldName = match[2] ?? match[3];
     if (fieldName === undefined || !isSensitiveFieldName(fieldName)) {
       continue;
     }
@@ -799,6 +876,302 @@ function redactOutcome(outcome: ToolOutcome): ToolOutcome {
   };
 }
 
+function serializedJson(value: unknown): string {
+  return JSON.stringify(value);
+}
+
+function utf8ByteLength(value: string): number {
+  return Buffer.byteLength(value, "utf8");
+}
+
+function sha256(value: string): string {
+  return createHash("sha256").update(value, "utf8").digest("hex");
+}
+
+function evidenceOmissionEnvelope(
+  redactedSha256: string,
+  reason: ToolExecutionEvidenceOmissionReason,
+): PersistedToolExecutionValueEnvelope {
+  return {
+    version: TOOL_EXECUTION_VALUE_ENVELOPE_VERSION,
+    encoding: TOOL_EXECUTION_VALUE_ENCODINGS.json,
+    value: {
+      $rollEvidence: {
+        omitted: true,
+        reason,
+        redactedSha256,
+      },
+    },
+  };
+}
+
+function persistedFieldMetadata(
+  originalSerialized: string,
+  redactedSerialized: string,
+  storedSerialized: string,
+  omissionReason?: ToolExecutionEvidenceOmissionReason,
+): PersistedToolExecutionFieldMetadata {
+  return {
+    originalByteLength: utf8ByteLength(originalSerialized),
+    storedByteLength: utf8ByteLength(storedSerialized),
+    redactedSha256: sha256(redactedSerialized),
+    redactionApplied: true,
+    truncated: omissionReason !== undefined,
+    ...(omissionReason !== undefined ? { omissionReason } : {}),
+  };
+}
+
+function boundPersistedEnvelope(
+  envelope: PersistedToolExecutionValueEnvelope,
+  byteLimit: number,
+  forcedReason?: ToolExecutionEvidenceOmissionReason,
+): {
+  readonly value: PersistedToolExecutionValueEnvelope;
+  readonly metadata: PersistedToolExecutionFieldMetadata;
+} {
+  const originalSerialized = serializedJson(envelope);
+  const redacted = redactPersistedEnvelope(envelope);
+  const redactedSerialized = serializedJson(redacted);
+  const omissionReason =
+    forcedReason ??
+    (utf8ByteLength(redactedSerialized) > byteLimit
+      ? TOOL_EXECUTION_EVIDENCE_OMISSION_REASONS.sizeLimit
+      : undefined);
+  if (omissionReason === undefined) {
+    return {
+      value: redacted,
+      metadata: persistedFieldMetadata(originalSerialized, redactedSerialized, redactedSerialized),
+    };
+  }
+  const omitted = evidenceOmissionEnvelope(sha256(redactedSerialized), omissionReason);
+  const omittedSerialized = serializedJson(omitted);
+  return {
+    value: omitted,
+    metadata: persistedFieldMetadata(
+      originalSerialized,
+      redactedSerialized,
+      omittedSerialized,
+      omissionReason,
+    ),
+  };
+}
+
+function boundedTextEvidence(
+  value: string,
+  byteLimit: number,
+  label: string,
+): { readonly value: string; readonly truncated: boolean } {
+  const redacted = redactSummaryString(value);
+  if (utf8ByteLength(redacted) <= byteLimit) {
+    return { value: redacted, truncated: false };
+  }
+  const digest = sha256(redacted);
+  const suffix = `…[${label} omitted; sha256:${digest}]`;
+  const suffixBytes = utf8ByteLength(suffix);
+  if (suffixBytes >= byteLimit) {
+    return { value: suffix.slice(0, byteLimit), truncated: true };
+  }
+  let retained = redacted;
+  while (retained.length > 0 && utf8ByteLength(retained) + suffixBytes > byteLimit) {
+    retained = retained.slice(0, Math.floor(retained.length * 0.9));
+  }
+  return { value: `${retained}${suffix}`, truncated: true };
+}
+
+function boundModelOutput(
+  model: ToolModelOutput,
+  byteLimit: number,
+  forcedReason?: ToolExecutionEvidenceOmissionReason,
+): { readonly value: ToolModelOutput; readonly metadata: PersistedToolExecutionFieldMetadata } {
+  const originalSerialized = serializedJson(model);
+  const redacted = redactModelOutput(model);
+  const redactedSerialized = serializedJson(redacted);
+  const omissionReason =
+    forcedReason ??
+    (utf8ByteLength(redactedSerialized) > byteLimit
+      ? TOOL_EXECUTION_EVIDENCE_OMISSION_REASONS.sizeLimit
+      : undefined);
+  const value: ToolModelOutput =
+    omissionReason === undefined
+      ? redacted
+      : {
+          type: "text",
+          value: `[durable model evidence omitted; sha256:${sha256(redactedSerialized)}]`,
+        };
+  const storedSerialized = serializedJson(value);
+  return {
+    value,
+    metadata: persistedFieldMetadata(
+      originalSerialized,
+      redactedSerialized,
+      storedSerialized,
+      omissionReason,
+    ),
+  };
+}
+
+function boundOutcome(
+  outcome: ToolOutcome,
+  byteLimit: number,
+  forcedReason?: ToolExecutionEvidenceOmissionReason,
+): { readonly value: ToolOutcome; readonly metadata: PersistedToolExecutionFieldMetadata } {
+  const originalSerialized = serializedJson(outcome);
+  const redacted = redactOutcome(outcome);
+  const redactedSerialized = serializedJson(redacted);
+  const omissionReason =
+    forcedReason ??
+    (utf8ByteLength(redactedSerialized) > byteLimit
+      ? TOOL_EXECUTION_EVIDENCE_OMISSION_REASONS.sizeLimit
+      : undefined);
+  const value: ToolOutcome =
+    omissionReason === undefined || redacted.kind === TOOL_OUTCOME_KINDS.success
+      ? redacted
+      : {
+          kind: redacted.kind,
+          reason: `[durable outcome detail omitted; sha256:${sha256(redactedSerialized)}]`,
+        };
+  const storedSerialized = serializedJson(value);
+  return {
+    value,
+    metadata: persistedFieldMetadata(
+      originalSerialized,
+      redactedSerialized,
+      storedSerialized,
+      omissionReason,
+    ),
+  };
+}
+
+function isPersistedFieldMetadata(value: unknown): value is PersistedToolExecutionFieldMetadata {
+  return (
+    isRecord(value) &&
+    Number.isInteger(value.originalByteLength) &&
+    typeof value.originalByteLength === "number" &&
+    value.originalByteLength >= 0 &&
+    Number.isInteger(value.storedByteLength) &&
+    typeof value.storedByteLength === "number" &&
+    value.storedByteLength >= 0 &&
+    typeof value.redactedSha256 === "string" &&
+    SHA256_PATTERN.test(value.redactedSha256) &&
+    value.redactionApplied === true &&
+    typeof value.truncated === "boolean" &&
+    (value.omissionReason === undefined ||
+      Object.values(TOOL_EXECUTION_EVIDENCE_OMISSION_REASONS).includes(
+        value.omissionReason as ToolExecutionEvidenceOmissionReason,
+      ))
+  );
+}
+
+function isToolExecutionPersistenceMetadata(
+  value: unknown,
+): value is ToolExecutionPersistenceMetadata {
+  return (
+    isRecord(value) &&
+    value.version === TOOL_EXECUTION_PERSISTENCE_VERSION &&
+    isRecord(value.fields) &&
+    isPersistedFieldMetadata(value.fields.input) &&
+    isPersistedFieldMetadata(value.fields.raw) &&
+    isPersistedFieldMetadata(value.fields.model) &&
+    isPersistedFieldMetadata(value.fields.display) &&
+    isPersistedFieldMetadata(value.fields.outcome)
+  );
+}
+
+export function isPersistedToolExecutionRecord(
+  value: unknown,
+): value is PersistedToolExecutionRecord {
+  return (
+    isToolExecutionRecord(value) &&
+    isRecord(value) &&
+    isToolExecutionPersistenceMetadata(value.persistence)
+  );
+}
+
+function createPersistedProjection(
+  record: ToolExecutionRecord,
+  forcedReason?: ToolExecutionEvidenceOmissionReason,
+): PersistedToolExecutionRecord {
+  const input = boundPersistedEnvelope(
+    record.input,
+    TOOL_EXECUTION_PERSISTENCE_LIMITS.inputBytes,
+    forcedReason,
+  );
+  const raw = boundPersistedEnvelope(
+    record.raw,
+    TOOL_EXECUTION_PERSISTENCE_LIMITS.rawBytes,
+    forcedReason,
+  );
+  const model = boundModelOutput(
+    record.model,
+    TOOL_EXECUTION_PERSISTENCE_LIMITS.modelBytes,
+    forcedReason,
+  );
+  const display = boundPersistedEnvelope(
+    record.display,
+    TOOL_EXECUTION_PERSISTENCE_LIMITS.displayBytes,
+    forcedReason,
+  );
+  const outcome = boundOutcome(
+    record.outcome,
+    TOOL_EXECUTION_PERSISTENCE_LIMITS.outcomeBytes,
+    forcedReason,
+  );
+  return {
+    version: record.version,
+    id: record.id,
+    toolCallId: boundedTextEvidence(
+      record.toolCallId,
+      TOOL_EXECUTION_PERSISTENCE_LIMITS.identifierBytes,
+      "toolCallId",
+    ).value,
+    agentName: boundedTextEvidence(
+      record.agentName,
+      TOOL_EXECUTION_PERSISTENCE_LIMITS.identifierBytes,
+      "agentName",
+    ).value,
+    toolName: boundedTextEvidence(
+      record.toolName,
+      TOOL_EXECUTION_PERSISTENCE_LIMITS.identifierBytes,
+      "toolName",
+    ).value,
+    createdAt: boundedTextEvidence(record.createdAt, 256, "createdAt").value,
+    input: input.value,
+    raw: raw.value,
+    model: model.value,
+    display: display.value,
+    outcome: outcome.value,
+    persistence: {
+      version: TOOL_EXECUTION_PERSISTENCE_VERSION,
+      fields: {
+        input: input.metadata,
+        raw: raw.metadata,
+        model: model.metadata,
+        display: display.metadata,
+        outcome: outcome.metadata,
+      },
+    },
+  };
+}
+
+export function prepareToolExecutionRecordForPersistence(
+  record: ToolExecutionRecord,
+): PersistedToolExecutionRecord {
+  const persisted = createPersistedProjection(record);
+  if (utf8ByteLength(serializedJson(persisted)) <= TOOL_EXECUTION_PERSISTENCE_LIMITS.recordBytes) {
+    return persisted;
+  }
+  // Identity and typed outcome are still retained; only evidence payloads are collapsed. This
+  // branch is deliberately non-throwing because the Tool side effect may already have happened.
+  return createPersistedProjection(record, TOOL_EXECUTION_EVIDENCE_OMISSION_REASONS.recordLimit);
+}
+
+export function parsePersistedToolExecutionRecord(value: unknown): PersistedToolExecutionRecord {
+  if (isPersistedToolExecutionRecord(value)) {
+    return value;
+  }
+  return prepareToolExecutionRecordForPersistence(parseToolExecutionRecord(value));
+}
+
 export function isToolExecutionRecordId(value: unknown): value is ToolExecutionRecordId {
   return typeof value === "string" && UUID_PATTERN.test(value);
 }
@@ -893,5 +1266,6 @@ export function toRedactedToolExecutionRecordSummary(
     model: redactModelOutput(record.model),
     display: redactPersistedEnvelope(record.display),
     outcome: redactOutcome(record.outcome),
+    ...(isPersistedToolExecutionRecord(record) ? { persistence: record.persistence } : {}),
   };
 }

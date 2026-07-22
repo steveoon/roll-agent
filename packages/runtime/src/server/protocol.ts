@@ -75,7 +75,7 @@ export const toolExecutionsParamsSchema = z.object({
     .boolean()
     .default(false)
     .describe(
-      "Returns unredacted Tool input/result evidence. RuntimeServer does not authorize this access; enable only when the entire connection is a trusted, single-tenant peer.",
+      "Requests bounded persisted Tool input/result evidence. RuntimeServer denies this by default; the host must provide an explicit authorization policy.",
     ),
   afterSequence: z.number().int().min(-1).optional(),
   limit: z.number().int().min(1).max(500).optional(),

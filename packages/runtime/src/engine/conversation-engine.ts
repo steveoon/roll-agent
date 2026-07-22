@@ -1,7 +1,11 @@
 import { randomUUID } from "node:crypto";
 import { waitForPromiseSettlement } from "../bounded-wait.ts";
 import type { ModelMessage } from "ai";
-import type { LanguageModelV4, SharedV4ProviderOptions } from "@ai-sdk/provider";
+import type {
+  LanguageModelV4,
+  LanguageModelV4CallOptions,
+  SharedV4ProviderOptions,
+} from "@ai-sdk/provider";
 import { McpClientManager } from "@roll-agent/core/mcp/client-manager";
 import { createProviderModel } from "@roll-agent/core/llm/providers";
 import { AgentStore } from "@roll-agent/core/registry/store";
@@ -79,6 +83,8 @@ export interface ConversationEngineOptions {
   readonly policy?: ToolPolicy;
   readonly maxSteps?: number;
   readonly providerOptions?: SharedV4ProviderOptions;
+  readonly structuredOutputProviderOptions?: SharedV4ProviderOptions;
+  readonly structuredOutputReasoning?: NonNullable<LanguageModelV4CallOptions["reasoning"]>;
   readonly ensureAgentReady?: EnsureAgentReady;
   readonly debugEvents?: boolean;
   readonly onAgentBootstrapIssue?: (issue: AgentBootstrapIssue) => void;
@@ -235,6 +241,10 @@ export class ConversationEngine {
   private readonly policy: ToolPolicy | undefined;
   private readonly maxSteps: number;
   private providerOptions: SharedV4ProviderOptions | undefined;
+  private readonly structuredOutputProviderOptions: SharedV4ProviderOptions | undefined;
+  private readonly structuredOutputReasoning:
+    | NonNullable<LanguageModelV4CallOptions["reasoning"]>
+    | undefined;
   private readonly ensureAgentReady: EnsureAgentReady;
   private readonly debugEvents: boolean;
   private readonly explicitAgents: readonly RegisteredAgent[] | undefined;
@@ -270,6 +280,8 @@ export class ConversationEngine {
     this.policy = options.policy;
     this.maxSteps = options.maxSteps ?? DEFAULT_MAX_STEPS;
     this.providerOptions = options.providerOptions;
+    this.structuredOutputProviderOptions = options.structuredOutputProviderOptions;
+    this.structuredOutputReasoning = options.structuredOutputReasoning;
     this.ensureAgentReady =
       options.ensureAgentReady ??
       ((agent, env) => ensureCoreManagedAgentReady(agent, this.config.agents.dataDir, env));
@@ -448,6 +460,12 @@ export class ConversationEngine {
       turnTimeoutMs: this.config.runtime.turnTimeoutMs,
       debugEvents: this.debugEvents,
       ...(this.providerOptions ? { providerOptions: this.providerOptions } : {}),
+      ...(this.structuredOutputProviderOptions
+        ? { structuredOutputProviderOptions: this.structuredOutputProviderOptions }
+        : {}),
+      ...(this.structuredOutputReasoning
+        ? { structuredOutputReasoning: this.structuredOutputReasoning }
+        : {}),
       onProviderOptionsChange: (providerOptions) => this.syncProviderOptions(providerOptions),
       ...(contextWindow !== undefined ? { contextWindow } : {}),
       ...(this.policy ? { policy: this.policy } : {}),

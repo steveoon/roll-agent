@@ -4,6 +4,7 @@ import type { AgentSession, SessionEvent } from "@roll-agent/runtime";
 import { chatReducer, createInitialState, type ChatUiState, type HistoryItem } from "./state.ts";
 import type { ThinkingLevel } from "../../../llm/providers.ts";
 import { log } from "../../utils/output.ts";
+import { formatDebugEvent } from "../../utils/debug-format.ts";
 
 export interface UseSessionOptions {
   readonly model: string;
@@ -92,7 +93,7 @@ export function useSession(session: AgentSession, options: UseSessionOptions): U
       try {
         for await (const event of iterable) {
           if (event.type === "debug") {
-            log.debug(`chat.${event.stage} ${event.message}`);
+            log.debug(formatDebugEvent(event));
             continue;
           }
           if (event.type === "text-delta" || event.type === "reasoning-delta") {

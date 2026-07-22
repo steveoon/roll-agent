@@ -109,6 +109,27 @@ test("manifest fails closed when the finalized toolset has no matching route", (
   );
 });
 
+test("manifest fails closed when a finalized tool has no explicit capability role", () => {
+  assert.throws(
+    () =>
+      buildEffectiveCapabilityManifest({
+        tools: {
+          orphan: tool({
+            inputSchema: z.object({}),
+            execute: () => Promise.resolve("ok"),
+          }),
+        },
+        toolRoles: {},
+        resolveRoute: () => ({ agentName: "demo", toolName: "orphan" }),
+        skills: [],
+        agentCount: 1,
+        profile: "test",
+        cwd: "/tmp",
+      }),
+    /orphan.*capability role/u,
+  );
+});
+
 test("manifest declares resumable session lifecycle only when the complete exec trio exists", () => {
   const makeTool = () =>
     tool({

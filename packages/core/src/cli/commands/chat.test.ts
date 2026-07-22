@@ -14,6 +14,7 @@ import {
   CHAT_ENGINE_SURFACES,
   chatHostModeForSurface,
   createChatEngine,
+  resolveChatLlmCalls,
   resolveChatLlmReadiness,
   runJsonTurn,
   runRepl,
@@ -124,6 +125,95 @@ test("resolveChatLlmReadiness uses default provider when runtime provider is uns
   assert.equal(status.status, "ready");
   assert.equal(status.provider, "anthropic");
   assert.equal(status.model, "claude-test");
+});
+
+test("resolveChatLlmCalls separates Qwen chat thinking from structured output", () => {
+  const resolved = resolveChatLlmCalls("qwen", "qwen3.7-plus", "test-key", undefined, "high");
+
+  assert.deepEqual(resolved.providerOptions, {
+    alibaba: { enableThinking: true, thinkingBudget: 16_384 },
+  });
+  assert.deepEqual(resolved.structuredOutputProviderOptions, {
+    alibaba: { enableThinking: false },
+  });
+  assert.equal(resolved.structuredOutputReasoning, undefined);
+});
+
+test("resolveChatLlmCalls uses unified reasoning for non-Qwen structured output", () => {
+  const resolved = resolveChatLlmCalls(
+    "openai",
+    "gpt-5.5",
+    "test-key",
+    "https://example.test/v1",
+    "high",
+  );
+
+  assert.deepEqual(resolved.providerOptions, {
+    openai: { reasoningEffort: "high", store: false },
+  });
+  assert.equal(resolved.structuredOutputProviderOptions, undefined);
+  assert.equal(resolved.structuredOutputReasoning, "high");
+});
+
+test("resolveChatLlmCalls lets compaction override the global thinking level", () => {
+  const resolved = resolveChatLlmCalls(
+    "anthropic",
+    "claude-sonnet-4-6",
+    "test-key",
+    undefined,
+    "low",
+    "high",
+  );
+
+  assert.deepEqual(resolved.providerOptions, {
+    anthropic: { thinking: { type: "adaptive" }, effort: "low" },
+  });
+  assert.equal(resolved.structuredOutputReasoning, "high");
+});
+
+test("resolveChatLlmCalls skips structured reasoning for truncate compaction", () => {
+  const resolved = resolveChatLlmCalls(
+    "xai",
+    "grok-4.5",
+    "test-key",
+    undefined,
+    "off",
+    "off",
+    false,
+  );
+
+  assert.equal(resolved.structuredOutputReasoning, undefined);
+  assert.equal(resolved.structuredOutputProviderOptions, undefined);
+});
+
+test("createChatEngine forwards structured output controls to the session", async () => {
+  const root = mkdtempSync(join(tmpdir(), "roll-chat-structured-options-"));
+  const runtime = await import("@roll-agent/runtime");
+  const config = parseChatConfig({ agents: { dataDir: join(root, "agents") } });
+  const store = new runtime.ThreadStore(join(root, "threads"));
+  const structuredOutputProviderOptions = { alibaba: { enableThinking: false } };
+  const engine = createChatEngine({
+    runtime,
+    config,
+    model: new MockLanguageModelV4({}),
+    store,
+    surface: CHAT_ENGINE_SURFACES.oneShot,
+    structuredOutputProviderOptions,
+    structuredOutputReasoning: "high",
+  });
+
+  try {
+    const session = await engine.createSession();
+    assert.deepEqual(
+      Reflect.get(session, "structuredOutputProviderOptions"),
+      structuredOutputProviderOptions,
+    );
+    assert.equal(Reflect.get(session, "structuredOutputReasoning"), "high");
+  } finally {
+    await engine.dispose();
+    store.close();
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test("resolveChatLlmReadiness rejects missing runtime provider even when default provider is ready", () => {

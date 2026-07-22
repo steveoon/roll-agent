@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+import { isJSONObject } from "@ai-sdk/provider";
 import type { ModelMessage, UserModelMessage } from "ai";
 import type { SkillLibrary, SkillSummary } from "@roll-agent/core/skills/library";
 import { z } from "zod";
@@ -27,23 +29,32 @@ const ROLL_HARNESS_METADATA = {
   kind: "explicit-skill",
 } as const;
 
-const explicitSkillCheckpointSnapshotV1Schema = z
+const explicitSkillReferenceV1Schema = z
   .object({
-    userPrompt: z.string(),
-    modelUserContent: z.string(),
-    skillNames: z.array(z.string()),
+    name: z.string(),
+    source: z.string(),
+    contentSha256: z.string().regex(/^[a-f0-9]{64}$/u),
   })
   .readonly();
 
-type PersistedExplicitSkillContextSnapshotV1 = z.infer<
-  typeof explicitSkillCheckpointSnapshotV1Schema
->;
+// Older v1 rows may contain modelUserContent. Zod's default unknown-key stripping keeps those
+// rows readable while ensuring the legacy Skill body never escapes the parser again.
+const explicitSkillCheckpointSnapshotV1Schema = z
+  .object({
+    userPrompt: z.string(),
+    skillNames: z.array(z.string()),
+    skills: z.array(explicitSkillReferenceV1Schema).optional(),
+  })
+  .readonly();
 
-export type ExplicitSkillContextSnapshot = Readonly<
-  Omit<PersistedExplicitSkillContextSnapshotV1, "skillNames"> & {
-    readonly skillNames: readonly PersistedExplicitSkillContextSnapshotV1["skillNames"][number][];
-  }
->;
+export type ExplicitSkillReferenceV1 = z.infer<typeof explicitSkillReferenceV1Schema>;
+
+export interface ExplicitSkillContextSnapshot {
+  readonly userPrompt: string;
+  readonly modelUserContent: string;
+  readonly skillNames: readonly string[];
+  readonly skillReferences?: readonly ExplicitSkillReferenceV1[];
+}
 
 export const explicitSkillCheckpointV1Schema = z
   .object({
@@ -68,8 +79,10 @@ export function attachExplicitSkillCheckpoint(
     kind: ROLL_HARNESS_METADATA.kind,
     snapshot: {
       userPrompt: snapshot.userPrompt,
-      modelUserContent: snapshot.modelUserContent,
       skillNames: [...snapshot.skillNames],
+      ...(snapshot.skillReferences && snapshot.skillReferences.length > 0
+        ? { skills: snapshot.skillReferences.map((skill) => ({ ...skill })) }
+        : {}),
     },
   };
   const harnessOptions = message.providerOptions?.[ROLL_HARNESS_METADATA.providerKey] ?? {};
@@ -100,6 +113,36 @@ export function readExplicitSkillCheckpoint(
   return parsed.success ? parsed.data : undefined;
 }
 
+/**
+ * Removes `modelUserContent` from the exact persisted checkpoint path even when the checkpoint is
+ * malformed or from an unknown version. Valid v1 checkpoints are normalized through the schema;
+ * unrelated provider and Harness metadata is preserved. Active-turn materialization never calls
+ * this function.
+ */
+export function sanitizePersistedExplicitSkillCheckpoint(message: ModelMessage): ModelMessage {
+  const harnessOptions = message.providerOptions?.[ROLL_HARNESS_METADATA.providerKey];
+  const rawCheckpoint = harnessOptions?.[ROLL_HARNESS_METADATA.checkpointKey];
+  if (!isJSONObject(rawCheckpoint) || !isJSONObject(rawCheckpoint["snapshot"])) {
+    return message;
+  }
+  const rawSnapshot = rawCheckpoint["snapshot"];
+  const scrubbedSnapshot = { ...rawSnapshot };
+  delete scrubbedSnapshot["modelUserContent"];
+  const scrubbedCheckpoint = { ...rawCheckpoint, snapshot: scrubbedSnapshot };
+  const parsed = explicitSkillCheckpointV1Schema.safeParse(scrubbedCheckpoint);
+  const checkpoint = parsed.success ? parsed.data : scrubbedCheckpoint;
+  return {
+    ...message,
+    providerOptions: {
+      ...message.providerOptions,
+      [ROLL_HARNESS_METADATA.providerKey]: {
+        ...harnessOptions,
+        [ROLL_HARNESS_METADATA.checkpointKey]: checkpoint,
+      },
+    },
+  };
+}
+
 function stripRollHarnessMetadata(message: ModelMessage): ModelMessage {
   if (!message.providerOptions?.[ROLL_HARNESS_METADATA.providerKey]) {
     return message;
@@ -112,19 +155,6 @@ function stripRollHarnessMetadata(message: ModelMessage): ModelMessage {
     return sanitized;
   }
   return { ...message, providerOptions };
-}
-
-export function materializeExplicitSkillCheckpoints(
-  messages: readonly ModelMessage[],
-): ModelMessage[] {
-  return messages.map((message) => {
-    const checkpoint = readExplicitSkillCheckpoint(message);
-    const sanitized = stripRollHarnessMetadata(message);
-    if (!checkpoint || sanitized.role !== "user") {
-      return sanitized;
-    }
-    return { ...sanitized, content: checkpoint.snapshot.modelUserContent };
-  });
 }
 
 export function stripExplicitSkillCheckpoints(messages: readonly ModelMessage[]): ModelMessage[] {
@@ -166,6 +196,10 @@ function sectionFrame(skill: SkillInvocationSummary): {
   };
 }
 
+function contentSha256(content: string): string {
+  return createHash("sha256").update(content, "utf8").digest("hex");
+}
+
 export function prepareExplicitSkillContext(input: {
   readonly rawInput: string;
   readonly skillSummaries: readonly SkillSummary[];
@@ -173,7 +207,12 @@ export function prepareExplicitSkillContext(input: {
 }): ExplicitSkillContextSnapshot {
   const parsed = parseSkillInvocationResult(input.rawInput, input.skillSummaries);
   if (parsed.kind === SKILL_INVOCATION_PARSE_KINDS.none) {
-    return { userPrompt: input.rawInput, modelUserContent: input.rawInput, skillNames: [] };
+    return {
+      userPrompt: input.rawInput,
+      modelUserContent: input.rawInput,
+      skillNames: [],
+      skillReferences: [],
+    };
   }
   if (parsed.kind === SKILL_INVOCATION_PARSE_KINDS.unknown) {
     throw new Error(`未知 skill ${parsed.token}；请先用 /skills 查看可用 Skill`);
@@ -202,7 +241,7 @@ export function prepareExplicitSkillContext(input: {
   const sharedContentBudget = MAX_EXPLICIT_SKILL_CONTEXT_CHARS - fixedContextChars;
   const baseBudget = Math.floor(sharedContentBudget / invocation.skills.length);
   let remainingExtra = sharedContentBudget % invocation.skills.length;
-  const sections = invocation.skills.map((skill, index) => {
+  const preparedSkills = invocation.skills.map((skill, index) => {
     const result = executeSkillTool(skillLibrary, { name: skill.name });
     const display = readDisplayOutput(result);
     if (
@@ -217,8 +256,16 @@ export function prepareExplicitSkillContext(input: {
     if (!frame) {
       throw new Error(`skill "${skill.name}" 上下文构建失败`);
     }
-    return `${frame.prefix}${clipForBudget(display, budget)}${frame.suffix}`;
+    return {
+      section: `${frame.prefix}${clipForBudget(display, budget)}${frame.suffix}`,
+      reference: {
+        name: skill.name,
+        source: skill.source,
+        contentSha256: contentSha256(display),
+      },
+    };
   });
+  const sections = preparedSkills.map((skill) => skill.section);
   const explicitContext = [CONTEXT_PREAMBLE, ...sections].join("\n\n");
   if (explicitContext.length > MAX_EXPLICIT_SKILL_CONTEXT_CHARS) {
     throw new Error("显式 Skill 上下文超出预算");
@@ -227,6 +274,7 @@ export function prepareExplicitSkillContext(input: {
     userPrompt: invocation.prompt,
     modelUserContent: `${explicitContext}\n\n[User request]\n${invocation.prompt}`,
     skillNames: invocation.skills.map((skill) => skill.name),
+    skillReferences: preparedSkills.map((skill) => skill.reference),
   };
 }
 

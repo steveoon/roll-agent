@@ -1,6 +1,7 @@
 import type { ConversationEngine } from "../engine/conversation-engine.ts";
 import type { AgentSession } from "../engine/agent-session.ts";
 import { createSafeCapabilitySnapshot } from "../engine/capability-manifest.ts";
+import { isPersistedToolExecutionRecord } from "../tool-bridge/tool-execution-record.ts";
 import {
   EVENT_NOTIFICATION,
   RpcMethod,
@@ -25,23 +26,45 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+export interface RawToolEvidenceAccessRequest {
+  readonly sessionId: string;
+  readonly executionId?: string;
+}
+
+export interface RuntimeServerOptions {
+  /**
+   * Explicit host authorization boundary for bounded raw/input ledger projections.
+   * Omission is deny-by-default; `includeRaw: true` is only a request, never authorization.
+   */
+  readonly authorizeRawToolEvidence?: (
+    request: RawToolEvidenceAccessRequest,
+  ) => boolean | Promise<boolean>;
+}
+
 /**
  * JSON-RPC host for trusted local transports.
  *
- * This class performs no authentication, authorization, or tenant-ownership checks;
- * the entire `JsonRpcConnection` must therefore be trusted. `session.toolExecutions`
- * defaults to a redacted projection, but `includeRaw: true` returns unredacted forensic
- * evidence. Custom network or multi-tenant transports must enforce those boundaries
- * before forwarding any request to this class.
+ * This class does not authenticate the connection or infer tenant ownership. Tool execution
+ * queries default to a redacted projection, and `includeRaw: true` remains denied unless the host
+ * supplies `authorizeRawToolEvidence`. Even authorized reads return the bounded, write-time
+ * redacted persistence projection rather than the original in-memory protocol result.
  */
 export class RuntimeServer {
   private readonly engine: ConversationEngine;
   private readonly connection: JsonRpcConnection;
+  private readonly authorizeRawToolEvidence:
+    | RuntimeServerOptions["authorizeRawToolEvidence"]
+    | undefined;
   private readonly sessions = new Map<string, AgentSession>();
 
-  constructor(engine: ConversationEngine, connection: JsonRpcConnection) {
+  constructor(
+    engine: ConversationEngine,
+    connection: JsonRpcConnection,
+    options: RuntimeServerOptions = {},
+  ) {
     this.engine = engine;
     this.connection = connection;
+    this.authorizeRawToolEvidence = options.authorizeRawToolEvidence;
     this.connection.onMessage((message) => this.handleMessage(message));
   }
 
@@ -132,22 +155,46 @@ export class RuntimeServer {
       case RpcMethod.ToolExecutions: {
         const params = toolExecutionsParamsSchema.parse(request.params);
         const session = this.requireSession(params.sessionId);
+        if (
+          params.includeRaw &&
+          !(
+            (await this.authorizeRawToolEvidence?.({
+              sessionId: params.sessionId,
+              ...(params.executionId !== undefined ? { executionId: params.executionId } : {}),
+            })) ?? false
+          )
+        ) {
+          throw new Error("Raw Tool evidence access denied by RuntimeServer policy");
+        }
         if (params.executionId !== undefined) {
+          const record = session.getToolExecution(params.executionId, params.includeRaw);
+          if (
+            params.includeRaw &&
+            record !== undefined &&
+            !isPersistedToolExecutionRecord(record)
+          ) {
+            throw new Error("Raw Tool evidence is unavailable without a durable ledger projection");
+          }
           return {
-            record: session.getToolExecution(params.executionId, params.includeRaw),
+            record,
           };
         }
+        const records = session.getToolExecutions(
+          {
+            ...(params.afterSequence !== undefined ? { afterSequence: params.afterSequence } : {}),
+            ...(params.limit !== undefined ? { limit: params.limit } : {}),
+            ...(params.toolCallId !== undefined ? { toolCallId: params.toolCallId } : {}),
+          },
+          params.includeRaw,
+        );
+        if (
+          params.includeRaw &&
+          records.some((record) => !isPersistedToolExecutionRecord(record))
+        ) {
+          throw new Error("Raw Tool evidence is unavailable without a durable ledger projection");
+        }
         return {
-          records: session.getToolExecutions(
-            {
-              ...(params.afterSequence !== undefined
-                ? { afterSequence: params.afterSequence }
-                : {}),
-              ...(params.limit !== undefined ? { limit: params.limit } : {}),
-              ...(params.toolCallId !== undefined ? { toolCallId: params.toolCallId } : {}),
-            },
-            params.includeRaw,
-          ),
+          records,
         };
       }
       case RpcMethod.Capabilities: {

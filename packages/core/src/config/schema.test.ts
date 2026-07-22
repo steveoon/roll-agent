@@ -56,6 +56,9 @@ describe("rollConfigSchema", () => {
         compaction: {
           enabled: true,
           strategy: "truncate",
+          timeoutMs: 180_000,
+          thinkingLevel: "high",
+          maxOutputTokens: 16_384,
           threshold: 0.8,
           keepRecentTurns: 6,
           keepRecentTokens: 50_000,
@@ -68,6 +71,12 @@ describe("rollConfigSchema", () => {
     assert.equal(result.success ? result.data.runtime.contextWindow : undefined, 128_000);
     assert.equal(result.success ? result.data.runtime.turnTimeoutMs : undefined, 45_000);
     assert.equal(result.success ? result.data.runtime.compaction.strategy : undefined, "truncate");
+    assert.equal(result.success ? result.data.runtime.compaction.timeoutMs : undefined, 180_000);
+    assert.equal(result.success ? result.data.runtime.compaction.thinkingLevel : undefined, "high");
+    assert.equal(
+      result.success ? result.data.runtime.compaction.maxOutputTokens : undefined,
+      16_384,
+    );
     assert.equal(result.success ? result.data.runtime.compaction.threshold : undefined, 0.8);
     assert.equal(result.success ? result.data.runtime.compaction.keepRecentTurns : undefined, 6);
     assert.equal(
@@ -76,7 +85,7 @@ describe("rollConfigSchema", () => {
     );
   });
 
-  it("should default runtime compaction keepRecentTokens", () => {
+  it("should default runtime compaction budgets", () => {
     const result = rollConfigSchema.safeParse({
       llm: { defaultProvider: "x", defaultModel: "y", providers: {} },
       ask: {},
@@ -87,6 +96,16 @@ describe("rollConfigSchema", () => {
     assert.equal(
       result.success ? result.data.runtime.compaction.keepRecentTokens : undefined,
       32_000,
+    );
+    assert.equal(result.success ? result.data.runtime.thinkingLevel : undefined, "medium");
+    assert.equal(result.success ? result.data.runtime.compaction.timeoutMs : undefined, 120_000);
+    assert.equal(
+      result.success ? result.data.runtime.compaction.maxOutputTokens : undefined,
+      8_192,
+    );
+    assert.equal(
+      result.success ? result.data.runtime.compaction.thinkingLevel : "present",
+      undefined,
     );
   });
 
@@ -133,6 +152,36 @@ describe("rollConfigSchema", () => {
       runtime: { compaction: { keepRecentTurns: 0 } },
       agents: { dataDir: "/tmp" },
     });
+    const invalidCompactionTimeout = rollConfigSchema.safeParse({
+      llm: { defaultProvider: "x", defaultModel: "y", providers: {} },
+      ask: {},
+      runtime: { compaction: { timeoutMs: 9_999 } },
+      agents: { dataDir: "/tmp" },
+    });
+    const excessiveCompactionTimeout = rollConfigSchema.safeParse({
+      llm: { defaultProvider: "x", defaultModel: "y", providers: {} },
+      ask: {},
+      runtime: { compaction: { timeoutMs: 600_001 } },
+      agents: { dataDir: "/tmp" },
+    });
+    const invalidCompactionThinkingLevel = rollConfigSchema.safeParse({
+      llm: { defaultProvider: "x", defaultModel: "y", providers: {} },
+      ask: {},
+      runtime: { compaction: { thinkingLevel: "maximum" } },
+      agents: { dataDir: "/tmp" },
+    });
+    const insufficientCompactionOutput = rollConfigSchema.safeParse({
+      llm: { defaultProvider: "x", defaultModel: "y", providers: {} },
+      ask: {},
+      runtime: { compaction: { maxOutputTokens: 2_047 } },
+      agents: { dataDir: "/tmp" },
+    });
+    const excessiveCompactionOutput = rollConfigSchema.safeParse({
+      llm: { defaultProvider: "x", defaultModel: "y", providers: {} },
+      ask: {},
+      runtime: { compaction: { maxOutputTokens: 32_769 } },
+      agents: { dataDir: "/tmp" },
+    });
     const invalidTurnTimeout = rollConfigSchema.safeParse({
       llm: { defaultProvider: "x", defaultModel: "y", providers: {} },
       ask: {},
@@ -143,6 +192,11 @@ describe("rollConfigSchema", () => {
     assert.equal(invalidStrategy.success, false);
     assert.equal(invalidThreshold.success, false);
     assert.equal(invalidKeepRecentTurns.success, false);
+    assert.equal(invalidCompactionTimeout.success, false);
+    assert.equal(excessiveCompactionTimeout.success, false);
+    assert.equal(invalidCompactionThinkingLevel.success, false);
+    assert.equal(insufficientCompactionOutput.success, false);
+    assert.equal(excessiveCompactionOutput.success, false);
     assert.equal(invalidTurnTimeout.success, false);
   });
 });

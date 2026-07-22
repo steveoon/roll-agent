@@ -216,8 +216,31 @@ export const CONFIG_GUIDANCE_ENTRIES = [
     path: "runtime.compaction.strategy",
     title: "上下文压缩策略",
     purpose: "选择 `summarize` 生成交接摘要，或用 `truncate` 直接移除较早消息。",
-    defaultBehavior: `默认值为 \`${DEFAULT_CONFIG.runtime.compaction.strategy}\`；摘要失败时自动退回 \`truncate\`。`,
+    defaultBehavior: `默认值为 \`${DEFAULT_CONFIG.runtime.compaction.strategy}\`；结构化输出无效或过长时退回 \`truncate\`，Provider、网络或超时错误则保留原上下文。`,
     example: `runtime:\n  compaction:\n    strategy: ${DEFAULT_CONFIG.runtime.compaction.strategy}`,
+  },
+  {
+    path: "runtime.compaction.timeout-ms",
+    title: "压缩模型超时",
+    purpose: "限制结构化 Checkpoint 模型请求的总等待时间，不包含本地证据整理和持久化。",
+    defaultBehavior: `默认值为 \`${String(DEFAULT_CONFIG.runtime.compaction.timeoutMs)}\` 毫秒；超时保持原上下文，不自动截断。`,
+    example: `runtime:\n  compaction:\n    timeout-ms: ${String(DEFAULT_CONFIG.runtime.compaction.timeoutMs)}`,
+  },
+  {
+    path: "runtime.compaction.thinking-level",
+    title: "压缩推理强度",
+    purpose:
+      "覆盖结构化 Checkpoint 生成的推理强度；使用 AI SDK 的统一 reasoning 语义映射到当前 Provider。",
+    defaultBehavior:
+      "默认不单独设置并继承 `runtime.thinking-level`；Qwen 结构化输出仍会强制关闭 thinking，不支持关闭推理的模型会在调用前报错。",
+    example: "runtime:\n  compaction:\n    thinking-level: high",
+  },
+  {
+    path: "runtime.compaction.max-output-tokens",
+    title: "压缩输出 Token 上限",
+    purpose: "限制结构化 Checkpoint 请求的 AI SDK 输出 token 预算。",
+    defaultBehavior: `默认值为 \`${String(DEFAULT_CONFIG.runtime.compaction.maxOutputTokens)}\`；Provider 的 reasoning token 也可能占用该预算。`,
+    example: `runtime:\n  compaction:\n    max-output-tokens: ${String(DEFAULT_CONFIG.runtime.compaction.maxOutputTokens)}`,
   },
   {
     path: "runtime.compaction.threshold",

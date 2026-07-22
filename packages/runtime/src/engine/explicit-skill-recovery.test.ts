@@ -96,7 +96,7 @@ function occurrences(value: string, fragment: string): number {
   return value.split(fragment).length - 1;
 }
 
-test("显式 Skill 内部持久化原始输入与 checkpoint，但公开历史不泄露隐藏上下文", async () => {
+test("显式 Skill 只持久化原始输入与轻量 checkpoint，内部和公开历史都不保存正文", async () => {
   const persisted: ModelMessage[][] = [];
   const session = new AgentSession({
     id: "explicit-skill-public-history",
@@ -114,7 +114,8 @@ test("显式 Skill 内部持久化原始输入与 checkpoint，但公开历史�
     const visible = JSON.stringify(session.getMessages());
     assert.equal(persisted[0]?.[0]?.content, "/demo 修一下类型");
     assert.match(stored, /explicitSkillCheckpoint/u);
-    assert.match(stored, /PRIVATE_SKILL_BODY/u);
+    assert.match(stored, /contentSha256/u);
+    assert.doesNotMatch(stored, /PRIVATE_SKILL_BODY/u);
     assert.equal(session.getMessages()[0]?.content, "/demo 修一下类型");
     assert.doesNotMatch(visible, /PRIVATE_SKILL_BODY|explicitSkillCheckpoint|rollHarness/u);
   } finally {
@@ -122,7 +123,33 @@ test("显式 Skill 内部持久化原始输入与 checkpoint，但公开历史�
   }
 });
 
-test("resume 使用首次持久化的 Skill 快照，不受当前 Skill 正文变更或删除影响", async () => {
+test("后续普通 Turn 不重复展开已完成 Turn 的显式 Skill 正文", async () => {
+  const prompts: string[] = [];
+  const session = new AgentSession({
+    id: "explicit-skill-current-turn-only",
+    model: textModel("done", (prompt) => prompts.push(prompt)),
+    sources: [],
+    maxSteps: 2,
+    skillLibrary: demoLibrary("CURRENT_TURN_ONLY_BODY"),
+  });
+
+  try {
+    await drain(session.send("/demo first request"));
+    await drain(session.send("continue"));
+    await drain(session.send("/demo third request"));
+
+    assert.equal(prompts.length, 3);
+    assert.deepEqual(
+      prompts.map((prompt) => occurrences(prompt, "CURRENT_TURN_ONLY_BODY")),
+      [1, 0, 1],
+    );
+    assert.ok(prompts.every((prompt) => !prompt.includes("rollHarness")));
+  } finally {
+    await session.close();
+  }
+});
+
+test("resume 不向后续普通 Turn 注入已完成 Turn 的持久化 Skill 快照", async () => {
   for (const currentSkillState of ["changed", "deleted"] as const) {
     const dir = mkdtempSync(join(tmpdir(), `roll-explicit-skill-${currentSkillState}-`));
     const store = new ThreadStore(join(dir, "threads"));
@@ -145,7 +172,8 @@ test("resume 使用首次持久化的 Skill 快照，不受当前 Skill 正文�
 
       const storedAfterFirstTurn = store.getMessages(threadId);
       assert.equal(storedAfterFirstTurn[0]?.content, "/demo first request");
-      assert.match(JSON.stringify(storedAfterFirstTurn), /SNAPSHOT_BODY_V1/u);
+      assert.match(JSON.stringify(storedAfterFirstTurn), /contentSha256/u);
+      assert.doesNotMatch(JSON.stringify(storedAfterFirstTurn), /SNAPSHOT_BODY_V1/u);
       assert.equal(initialLoads, 1);
 
       await firstSession.close();
@@ -170,7 +198,7 @@ test("resume 使用首次持久化的 Skill 快照，不受当前 Skill 正文�
       await drain(resumed.send("continue"));
 
       assert.equal(resumedPrompts.length, 1);
-      assert.equal(occurrences(resumedPrompts[0] ?? "", "SNAPSHOT_BODY_V1"), 1);
+      assert.equal(occurrences(resumedPrompts[0] ?? "", "SNAPSHOT_BODY_V1"), 0);
       assert.doesNotMatch(resumedPrompts[0] ?? "", /CURRENT_BODY_V2/u);
       assert.equal(currentLibraryLoads, 0, "历史 checkpoint 不应重新读取当前 SkillLibrary");
       assert.equal(resumed.getMessages()[0]?.content, "/demo first request");
@@ -234,6 +262,7 @@ test("context overflow 重试复用同一 checkpoint，Skill 正文只加载和�
     );
     assert.ok(prompts.every((prompt) => !prompt.includes("rollHarness")));
     assert.equal(occurrences(JSON.stringify(persisted), "explicitSkillCheckpoint"), 1);
+    assert.doesNotMatch(JSON.stringify(persisted), /OVERFLOW_SKILL_BODY/u);
     assert.equal(persisted.at(-1)?.[0]?.content, "/demo retry");
   } finally {
     await session.close();

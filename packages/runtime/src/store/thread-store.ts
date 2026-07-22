@@ -5,12 +5,17 @@ import { randomUUID } from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
 import { modelMessageSchema, type ModelMessage } from "ai";
 import {
-  parseToolExecutionRecord,
+  parsePersistedToolExecutionRecord,
+  prepareToolExecutionRecordForPersistence,
+  redactSecretText,
+  type ToolExecutionPersistenceMetadata,
   type ToolExecutionRecord,
 } from "../tool-bridge/tool-execution-record.ts";
 import {
+  COMPACTION_CHECKPOINT_VERSION,
   COMPACTION_TRANSCRIPT_COMPLETENESS,
   TRANSCRIPT_MESSAGE_PROVENANCES,
+  UnsupportedCompactionCheckpointVersionError,
   archivedTranscriptMessageSchema,
   createCompactionCheckpoint,
   createCompactionCheckpointDraft,
@@ -18,20 +23,33 @@ import {
   type ArchivedTranscriptMessage,
   type CompactionCheckpoint,
   type CompactionCheckpointDraftInput,
+  type CompactionSemanticEvidenceWatermarks,
   type CompactionSummary,
   type CompactionTranscript,
 } from "../engine/compaction-checkpoint.ts";
 import {
+  legacyCompactionTranscriptFragmentsSchema,
+  type CompactionSemanticState,
+} from "../engine/compaction-semantic-state.ts";
+import { createLegacyCompactionTranscriptMessage } from "../engine/compactor.ts";
+import {
   ACTIVE_TOOL_PROTOCOL_REPAIR_STATUS,
   repairActiveToolProtocol,
 } from "../engine/tool-protocol-repair.ts";
+import { sanitizePersistedExplicitSkillCheckpoint } from "../engine/explicit-skill-context.ts";
 
-const SCHEMA_VERSION = 3;
+const SCHEMA_VERSION = 4;
 const DEFAULT_TOOL_EXECUTION_LIMIT = 100;
 const MAX_TOOL_EXECUTION_LIMIT = 500;
 const DEFAULT_TRANSCRIPT_LIMIT = 50;
 const MAX_TRANSCRIPT_LIST_LIMIT = 500;
 const MAX_TRANSCRIPT_PAGE_LIMIT = 100;
+
+export const TOOL_EXECUTION_RETENTION_POLICY = {
+  maxBytesPerThread: 16 * 1_024 * 1_024,
+  maxRecordsPerThread: 2_000,
+  maxAgeMs: 30 * 24 * 60 * 60 * 1_000,
+} as const;
 
 export const TRANSCRIPT_ENTRY_KINDS = ["message", "tool_execution"] as const;
 export type TranscriptEntryKind = (typeof TRANSCRIPT_ENTRY_KINDS)[number];
@@ -71,6 +89,24 @@ interface ToolExecutionRow {
   readonly record_json: string;
 }
 
+interface StoredToolExecutionMigrationRow {
+  readonly storage_rowid: number;
+  readonly record_json: string;
+}
+
+interface StoredMessageMigrationRow {
+  readonly storage_rowid: number;
+  readonly message_json: string;
+}
+
+interface ToolExecutionRetentionRow {
+  readonly sequence: number;
+}
+
+interface ToolExecutionSequenceStateRow {
+  readonly next_sequence: number;
+}
+
 interface TranscriptMessageRow {
   readonly sequence: number;
   readonly provenance: string;
@@ -79,6 +115,7 @@ interface TranscriptMessageRow {
 }
 
 interface CompactionCheckpointRow {
+  readonly schema_version: number;
   readonly checkpoint_json: string;
 }
 
@@ -88,6 +125,8 @@ interface TranscriptCompletenessRow {
 
 export type SequencedToolExecutionRecord = ToolExecutionRecord & {
   readonly sequence: number;
+  /** Present for records loaded from the bounded durable ledger; absent for in-memory fallbacks. */
+  readonly persistence?: ToolExecutionPersistenceMetadata;
 };
 
 export interface ListToolExecutionsOptions {
@@ -117,7 +156,13 @@ export interface CommitCompactionInput {
   /** Latest checkpoint observed while the checkpoint draft was built. */
   readonly expectedLatestCheckpointId: string | undefined;
   readonly draft: CompactionCheckpointDraftInput;
+  /** Harness-validated semantic recovery state; model output is never persisted directly. */
+  readonly semanticState: CompactionSemanticState;
+  /** Evidence actually removed from active history and processed by the semantic draft. */
+  readonly semanticEvidenceWatermarks: CompactionSemanticEvidenceWatermarks;
   readonly evidenceWatermarks: CompactionEvidenceWatermarks;
+  /** Narrow V1 migration payload; archived atomically and never inserted into active history. */
+  readonly legacySnapshotTranscriptFragments?: readonly string[];
 }
 
 export interface ThreadSessionState {
@@ -195,6 +240,22 @@ function linkLastValidSummaryCheckpoint(
   };
 }
 
+function parseCompactionCheckpointRow(row: CompactionCheckpointRow): CompactionCheckpoint {
+  if (Number.isInteger(row.schema_version) && row.schema_version > COMPACTION_CHECKPOINT_VERSION) {
+    throw new UnsupportedCompactionCheckpointVersionError(row.schema_version);
+  }
+  if (!Number.isInteger(row.schema_version)) {
+    throw new Error("Invalid persisted compaction checkpoint schema version");
+  }
+  const checkpoint = parseCompactionCheckpoint(JSON.parse(row.checkpoint_json));
+  if (checkpoint.version !== row.schema_version) {
+    throw new Error(
+      `Compaction checkpoint schema version mismatch: row v${String(row.schema_version)}, payload v${String(checkpoint.version)}`,
+    );
+  }
+  return checkpoint;
+}
+
 function toRecord(row: ThreadRow): ThreadRecord {
   return {
     id: row.id,
@@ -214,8 +275,8 @@ export class ThreadStore {
       mkdirSync(resolved, { recursive: true, mode: 0o700 });
     }
     if (process.platform !== "win32") {
-      // ToolExecutionRecord intentionally retains raw protocol evidence. Keep both an existing
-      // configured directory and newly created stores private instead of relying on the host umask.
+      // The bounded ledger still contains operational evidence. Keep both an existing configured
+      // directory and newly created stores private instead of relying on the host umask.
       chmodSync(resolved, 0o700);
     }
     const databasePath = resolve(resolved, "threads.db");
@@ -232,7 +293,9 @@ export class ThreadStore {
   }
 
   private init(): void {
-    this.db.exec("PRAGMA foreign_keys = ON;");
+    // v4 rewrites and prunes legacy secret-bearing evidence. Secure deletion overwrites removed
+    // cells instead of leaving recoverable payloads on SQLite freelist pages.
+    this.db.exec("PRAGMA foreign_keys = ON; PRAGMA secure_delete = ON;");
     const versionRow = this.db.prepare("PRAGMA user_version").get() as {
       readonly user_version: number;
     };
@@ -299,6 +362,11 @@ export class ThreadStore {
            );
            CREATE INDEX IF NOT EXISTS idx_tool_executions_thread_call
              ON tool_executions(thread_id, tool_call_id, sequence);
+           CREATE TABLE IF NOT EXISTS thread_tool_execution_state (
+             thread_id TEXT PRIMARY KEY,
+             next_sequence INTEGER NOT NULL CHECK (next_sequence >= 0),
+             FOREIGN KEY (thread_id) REFERENCES threads(id) ON DELETE CASCADE
+           );
            CREATE TABLE IF NOT EXISTS transcript_messages (
              thread_id TEXT NOT NULL,
              sequence INTEGER NOT NULL,
@@ -331,6 +399,19 @@ export class ThreadStore {
            CREATE INDEX IF NOT EXISTS idx_compaction_checkpoints_thread_generation
              ON compaction_checkpoints(thread_id, generation DESC);`,
       );
+      this.db.exec(
+        `INSERT OR IGNORE INTO thread_tool_execution_state (thread_id, next_sequence)
+           SELECT id, 0 FROM threads;
+         UPDATE thread_tool_execution_state
+            SET next_sequence = MAX(
+              next_sequence,
+              COALESCE((
+                SELECT MAX(tool_executions.sequence) + 1
+                  FROM tool_executions
+                 WHERE tool_executions.thread_id = thread_tool_execution_state.thread_id
+              ), 0)
+            );`,
+      );
       if (versionRow.user_version < 3) {
         this.db.exec(
           `INSERT OR IGNORE INTO thread_transcript_state (thread_id, completeness)
@@ -341,11 +422,83 @@ export class ThreadStore {
                FROM messages;`,
         );
       }
+      if (versionRow.user_version < 4) {
+        this.migrateToolExecutionPersistenceInTransaction();
+        this.migrateExplicitSkillCheckpointPersistenceInTransaction();
+      }
+      this.enforceAllToolExecutionRetentionInTransaction(new Date().toISOString());
       this.db.exec(`PRAGMA user_version = ${String(SCHEMA_VERSION)};`);
       this.db.exec("COMMIT");
     } catch (error) {
       this.db.exec("ROLLBACK");
       throw error;
+    }
+  }
+
+  private migrateToolExecutionPersistenceInTransaction(): void {
+    const selectBatch = this.db.prepare(
+      `SELECT rowid AS storage_rowid, record_json
+         FROM tool_executions
+        WHERE rowid > ?
+        ORDER BY rowid ASC
+        LIMIT 100`,
+    );
+    const update = this.db.prepare(
+      `UPDATE tool_executions
+          SET tool_call_id = ?, agent_name = ?, tool_name = ?, record_json = ?, created_at = ?
+        WHERE rowid = ?`,
+    );
+    let afterRowId = 0;
+    while (true) {
+      const rows = selectBatch.all(afterRowId) as unknown as StoredToolExecutionMigrationRow[];
+      if (rows.length === 0) {
+        break;
+      }
+      for (const row of rows) {
+        const persisted = parsePersistedToolExecutionRecord(JSON.parse(row.record_json));
+        update.run(
+          persisted.toolCallId,
+          persisted.agentName,
+          persisted.toolName,
+          JSON.stringify(persisted),
+          persisted.createdAt,
+          row.storage_rowid,
+        );
+        afterRowId = row.storage_rowid;
+      }
+    }
+  }
+
+  private enforceAllToolExecutionRetentionInTransaction(now: string): void {
+    const threadRows = this.db
+      .prepare("SELECT DISTINCT thread_id AS id FROM tool_executions")
+      .all() as unknown as ReadonlyArray<{ readonly id: string }>;
+    for (const { id } of threadRows) {
+      this.enforceToolExecutionRetentionInTransaction(id, now);
+    }
+  }
+
+  private migrateExplicitSkillCheckpointPersistenceInTransaction(): void {
+    const targets = [
+      { table: "messages", column: "content_json" },
+      { table: "transcript_messages", column: "message_json" },
+    ] as const;
+    for (const target of targets) {
+      const rows = this.db
+        .prepare(
+          `SELECT rowid AS storage_rowid, ${target.column} AS message_json
+             FROM ${target.table}
+            WHERE ${target.column} LIKE '%"modelUserContent"%'`,
+        )
+        .all() as unknown as StoredMessageMigrationRow[];
+      const update = this.db.prepare(
+        `UPDATE ${target.table} SET ${target.column} = ? WHERE rowid = ?`,
+      );
+      for (const row of rows) {
+        const message = modelMessageSchema.parse(JSON.parse(row.message_json));
+        const sanitized = sanitizePersistedExplicitSkillCheckpoint(message);
+        update.run(JSON.stringify(sanitized), row.storage_rowid);
+      }
     }
   }
 
@@ -362,6 +515,9 @@ export class ThreadStore {
       this.db
         .prepare("INSERT INTO thread_transcript_state (thread_id, completeness) VALUES (?, ?)")
         .run(id, COMPACTION_TRANSCRIPT_COMPLETENESS[0]);
+      this.db
+        .prepare("INSERT INTO thread_tool_execution_state (thread_id, next_sequence) VALUES (?, 0)")
+        .run(id);
       this.db.exec("COMMIT");
       return id;
     } catch (error) {
@@ -410,7 +566,9 @@ export class ThreadStore {
     if (!this.hasThread(threadId)) {
       throw new Error(`Thread "${threadId}" 不存在`);
     }
-    const parsedMessages = messages.map((message) => modelMessageSchema.parse(message));
+    const parsedMessages = messages.map((message) =>
+      sanitizePersistedExplicitSkillCheckpoint(modelMessageSchema.parse(message)),
+    );
     const now = new Date().toISOString();
     const insertActive = this.db.prepare(
       "INSERT INTO messages (thread_id, idx, role, content_json, created_at) VALUES (?, ?, ?, ?, ?)",
@@ -489,7 +647,8 @@ export class ThreadStore {
     );
     this.db.prepare("DELETE FROM messages WHERE thread_id = ?").run(threadId);
     messages.forEach((message, idx) => {
-      insert.run(threadId, idx, message.role, JSON.stringify(message), now);
+      const persistedMessage = sanitizePersistedExplicitSkillCheckpoint(message);
+      insert.run(threadId, idx, persistedMessage.role, JSON.stringify(persistedMessage), now);
     });
     this.db.prepare("UPDATE threads SET updated_at = ? WHERE id = ?").run(now, threadId);
   }
@@ -498,16 +657,18 @@ export class ThreadStore {
     if (!this.hasThread(threadId)) {
       throw new Error(`Thread "${threadId}" 不存在`);
     }
-    const parsed = parseToolExecutionRecord(record);
+    const persisted = prepareToolExecutionRecordForPersistence(record);
+    const recordJson = JSON.stringify(persisted);
     const now = new Date().toISOString();
     this.db.exec("BEGIN IMMEDIATE");
     try {
-      const sequenceRow = this.db
-        .prepare(
-          "SELECT COALESCE(MAX(sequence), -1) AS maxSequence FROM tool_executions WHERE thread_id = ?",
-        )
-        .get(threadId) as { readonly maxSequence: number };
-      const sequence = sequenceRow.maxSequence + 1;
+      const sequenceState = this.db
+        .prepare("SELECT next_sequence FROM thread_tool_execution_state WHERE thread_id = ?")
+        .get(threadId) as ToolExecutionSequenceStateRow | undefined;
+      if (sequenceState === undefined) {
+        throw new Error(`Thread "${threadId}" 缺少 Tool execution sequence state`);
+      }
+      const sequence = sequenceState.next_sequence;
       this.db
         .prepare(
           `INSERT INTO tool_executions
@@ -517,19 +678,79 @@ export class ThreadStore {
         .run(
           threadId,
           sequence,
-          parsed.id,
-          parsed.toolCallId,
-          parsed.agentName,
-          parsed.toolName,
-          JSON.stringify(parsed),
-          parsed.createdAt,
+          persisted.id,
+          persisted.toolCallId,
+          persisted.agentName,
+          persisted.toolName,
+          recordJson,
+          persisted.createdAt,
         );
+      this.db
+        .prepare("UPDATE thread_tool_execution_state SET next_sequence = ? WHERE thread_id = ?")
+        .run(sequence + 1, threadId);
+      this.enforceToolExecutionRetentionInTransaction(threadId, now);
       this.db.prepare("UPDATE threads SET updated_at = ? WHERE id = ?").run(now, threadId);
       this.db.exec("COMMIT");
       return sequence;
     } catch (error) {
       this.db.exec("ROLLBACK");
       throw error;
+    }
+  }
+
+  private enforceToolExecutionRetentionInTransaction(threadId: string, now: string): void {
+    const cutoff = new Date(
+      Date.parse(now) - TOOL_EXECUTION_RETENTION_POLICY.maxAgeMs,
+    ).toISOString();
+    let pruned = false;
+    const expired = this.db
+      .prepare(
+        `DELETE FROM tool_executions
+          WHERE thread_id = ?
+            AND created_at < ?`,
+      )
+      .run(threadId, cutoff);
+    pruned = Number(expired.changes) > 0;
+
+    const overflowRows = this.db
+      .prepare(
+        `SELECT sequence
+           FROM (
+             SELECT sequence,
+                    ROW_NUMBER() OVER (ORDER BY sequence DESC) AS retained_rank,
+                    SUM(length(CAST(record_json AS BLOB))) OVER (
+                      ORDER BY sequence DESC
+                      ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+                    ) AS retained_bytes
+               FROM tool_executions
+              WHERE thread_id = ?
+           )
+          WHERE retained_rank > ? OR retained_bytes > ?`,
+      )
+      .all(
+        threadId,
+        TOOL_EXECUTION_RETENTION_POLICY.maxRecordsPerThread,
+        TOOL_EXECUTION_RETENTION_POLICY.maxBytesPerThread,
+      ) as unknown as ToolExecutionRetentionRow[];
+    if (overflowRows.length > 0) {
+      const remove = this.db.prepare(
+        "DELETE FROM tool_executions WHERE thread_id = ? AND sequence = ?",
+      );
+      for (const row of overflowRows) {
+        remove.run(threadId, row.sequence);
+      }
+      pruned = true;
+    }
+
+    if (pruned) {
+      // Checkpoint readers must not mistake a retained suffix for a complete execution transcript.
+      this.db
+        .prepare(
+          `INSERT INTO thread_transcript_state (thread_id, completeness)
+           VALUES (?, 'legacy_snapshot')
+           ON CONFLICT(thread_id) DO UPDATE SET completeness = 'legacy_snapshot'`,
+        )
+        .run(threadId);
     }
   }
 
@@ -572,7 +793,7 @@ export class ThreadStore {
         limit,
       ) as unknown as ToolExecutionRow[];
     return rows.map((row) => ({
-      ...parseToolExecutionRecord(JSON.parse(row.record_json)),
+      ...parsePersistedToolExecutionRecord(JSON.parse(row.record_json)),
       sequence: row.sequence,
     }));
   }
@@ -588,7 +809,7 @@ export class ThreadStore {
       return undefined;
     }
     return {
-      ...parseToolExecutionRecord(JSON.parse(row.record_json)),
+      ...parsePersistedToolExecutionRecord(JSON.parse(row.record_json)),
       sequence: row.sequence,
     };
   }
@@ -638,7 +859,7 @@ export class ThreadStore {
   getLatestCheckpoint(threadId: string): CompactionCheckpoint | undefined {
     const rows = this.db
       .prepare(
-        `SELECT checkpoint_json
+        `SELECT schema_version, checkpoint_json
            FROM compaction_checkpoints
           WHERE thread_id = ?
           ORDER BY generation DESC`,
@@ -646,9 +867,12 @@ export class ThreadStore {
       .all(threadId) as unknown as CompactionCheckpointRow[];
     for (const row of rows) {
       try {
-        return parseCompactionCheckpoint(JSON.parse(row.checkpoint_json));
-      } catch {
-        // A corrupt or unsupported newest row must not hide the previous valid checkpoint.
+        return this.withCurrentTranscriptCompleteness(threadId, parseCompactionCheckpointRow(row));
+      } catch (error) {
+        if (error instanceof UnsupportedCompactionCheckpointVersionError) {
+          throw error;
+        }
+        // A corrupt row must not hide the previous valid checkpoint.
       }
     }
     return undefined;
@@ -657,7 +881,7 @@ export class ThreadStore {
   getLatestSummaryCheckpoint(threadId: string): CompactionCheckpoint | undefined {
     const rows = this.db
       .prepare(
-        `SELECT checkpoint_json
+        `SELECT schema_version, checkpoint_json
            FROM compaction_checkpoints
           WHERE thread_id = ?
           ORDER BY generation DESC`,
@@ -665,11 +889,14 @@ export class ThreadStore {
       .all(threadId) as unknown as CompactionCheckpointRow[];
     for (const row of rows) {
       try {
-        const checkpoint = parseCompactionCheckpoint(JSON.parse(row.checkpoint_json));
+        const checkpoint = parseCompactionCheckpointRow(row);
         if (checkpoint.summary.status === "valid") {
-          return checkpoint;
+          return this.withCurrentTranscriptCompleteness(threadId, checkpoint);
         }
-      } catch {
+      } catch (error) {
+        if (error instanceof UnsupportedCompactionCheckpointVersionError) {
+          throw error;
+        }
         // Invalid rows are never eligible as the semantic-summary recovery point.
       }
     }
@@ -679,7 +906,7 @@ export class ThreadStore {
   getCheckpoint(threadId: string, checkpointId: string): CompactionCheckpoint | undefined {
     const row = this.db
       .prepare(
-        `SELECT checkpoint_json
+        `SELECT schema_version, checkpoint_json
            FROM compaction_checkpoints
           WHERE thread_id = ? AND id = ?`,
       )
@@ -688,8 +915,11 @@ export class ThreadStore {
       return undefined;
     }
     try {
-      return parseCompactionCheckpoint(JSON.parse(row.checkpoint_json));
-    } catch {
+      return this.withCurrentTranscriptCompleteness(threadId, parseCompactionCheckpointRow(row));
+    } catch (error) {
+      if (error instanceof UnsupportedCompactionCheckpointVersionError) {
+        throw error;
+      }
       return undefined;
     }
   }
@@ -727,6 +957,14 @@ export class ThreadStore {
       );
     }
     const parsedDraft = createCompactionCheckpointDraft(input.draft);
+    const legacySnapshotTranscriptFragments = legacyCompactionTranscriptFragmentsSchema.parse(
+      input.legacySnapshotTranscriptFragments ?? [],
+    );
+    const legacySnapshotTranscriptMessages = legacyCompactionTranscriptFragmentsSchema
+      .parse(legacySnapshotTranscriptFragments.map((fragment) => redactSecretText(fragment)))
+      .map((fragment) =>
+        modelMessageSchema.parse(createLegacyCompactionTranscriptMessage(fragment)),
+      );
     const now = new Date().toISOString();
 
     this.db.exec("BEGIN IMMEDIATE");
@@ -748,7 +986,20 @@ export class ThreadStore {
         parsedDraft.summary,
         lastValidSummaryCheckpoint,
       );
-      const draft = createCompactionCheckpointDraft({ ...parsedDraft, summary });
+      const transcriptCompleteness = this.getTranscriptCompleteness(threadId);
+      const draft = createCompactionCheckpointDraft({
+        ...parsedDraft,
+        summary,
+        ...(transcriptCompleteness === COMPACTION_TRANSCRIPT_COMPLETENESS[1] &&
+        parsedDraft.toolState.integrityStatus === "valid"
+          ? {
+              toolState: {
+                ...parsedDraft.toolState,
+                integrityStatus: "sanitized" as const,
+              },
+            }
+          : {}),
+      });
       const generationRow = this.db
         .prepare(
           `SELECT COALESCE(MAX(generation), 0) AS maxGeneration
@@ -762,6 +1013,13 @@ export class ThreadStore {
       const toolHighWatermark = input.evidenceWatermarks.toolExecutionsThroughSequence;
       const previousMessageHighWatermark = previous?.transcript.messages.throughSequence ?? -1;
       const previousToolHighWatermark = previous?.transcript.toolExecutions.throughSequence ?? -1;
+      const previousSemanticMessageHighWatermark =
+        previous?.version === 2 ? previous.semanticEvidence.messagesThroughSequence : -1;
+      const previousSemanticToolHighWatermark =
+        previous?.version === 2 ? previous.semanticEvidence.toolExecutionsThroughSequence : -1;
+      if (legacySnapshotTranscriptMessages.length > 0 && previous?.version !== 1) {
+        throw new Error("Legacy snapshot transcript archive requires a V1 parent checkpoint");
+      }
       if (
         !Number.isInteger(messageHighWatermark) ||
         messageHighWatermark < previousMessageHighWatermark ||
@@ -769,6 +1027,26 @@ export class ThreadStore {
       ) {
         throw new Error(
           `Compaction transcript message watermark ${String(messageHighWatermark)} is outside the available range ${String(previousMessageHighWatermark)}-${String(currentMessageHighWatermark)}`,
+        );
+      }
+      if (
+        !Number.isInteger(input.semanticEvidenceWatermarks.messagesThroughSequence) ||
+        input.semanticEvidenceWatermarks.messagesThroughSequence <
+          previousSemanticMessageHighWatermark ||
+        input.semanticEvidenceWatermarks.messagesThroughSequence > messageHighWatermark
+      ) {
+        throw new Error(
+          `Compaction semantic message watermark ${String(input.semanticEvidenceWatermarks.messagesThroughSequence)} is outside the available range ${String(previousSemanticMessageHighWatermark)}-${String(messageHighWatermark)}`,
+        );
+      }
+      if (
+        !Number.isInteger(input.semanticEvidenceWatermarks.toolExecutionsThroughSequence) ||
+        input.semanticEvidenceWatermarks.toolExecutionsThroughSequence <
+          previousSemanticToolHighWatermark ||
+        input.semanticEvidenceWatermarks.toolExecutionsThroughSequence > toolHighWatermark
+      ) {
+        throw new Error(
+          `Compaction semantic Tool watermark ${String(input.semanticEvidenceWatermarks.toolExecutionsThroughSequence)} is outside the available range ${String(previousSemanticToolHighWatermark)}-${String(toolHighWatermark)}`,
         );
       }
       if (
@@ -780,19 +1058,47 @@ export class ThreadStore {
           `Compaction tool execution watermark ${String(toolHighWatermark)} is outside the available range ${String(previousToolHighWatermark)}-${String(currentToolHighWatermark)}`,
         );
       }
+      let effectiveMessageHighWatermark = messageHighWatermark;
+      if (legacySnapshotTranscriptMessages.length > 0) {
+        if (messageHighWatermark !== currentMessageHighWatermark) {
+          throw new Error(
+            "Legacy snapshot transcript archive requires the latest message watermark",
+          );
+        }
+        const insertLegacySnapshot = this.db.prepare(
+          `INSERT INTO transcript_messages
+             (thread_id, sequence, role, message_json, provenance, created_at)
+           VALUES (?, ?, ?, ?, ?, ?)`,
+        );
+        let sequence = currentMessageHighWatermark + 1;
+        for (const message of legacySnapshotTranscriptMessages) {
+          insertLegacySnapshot.run(
+            threadId,
+            sequence,
+            message.role,
+            JSON.stringify(message),
+            TRANSCRIPT_MESSAGE_PROVENANCES[1],
+            now,
+          );
+          sequence += 1;
+        }
+        effectiveMessageHighWatermark = sequence - 1;
+      }
       const transcript: CompactionTranscript = {
         messages: {
           fromSequenceExclusive: previousMessageHighWatermark,
-          throughSequence: messageHighWatermark,
+          throughSequence: effectiveMessageHighWatermark,
         },
         toolExecutions: {
           fromSequenceExclusive: previousToolHighWatermark,
           throughSequence: toolHighWatermark,
         },
-        completeness: this.getTranscriptCompleteness(threadId),
+        completeness: transcriptCompleteness,
       };
       const checkpoint = createCompactionCheckpoint({
         draft,
+        semanticState: input.semanticState,
+        semanticEvidence: input.semanticEvidenceWatermarks,
         generation: generationRow.maxGeneration + 1,
         transcript,
         ...(previous !== undefined ? { previousCheckpointId: previous.id } : {}),
@@ -893,11 +1199,36 @@ export class ThreadStore {
 
   private maxToolExecutionSequence(threadId: string): number {
     const row = this.db
-      .prepare(
-        "SELECT COALESCE(MAX(sequence), -1) AS maxSequence FROM tool_executions WHERE thread_id = ?",
-      )
-      .get(threadId) as { readonly maxSequence: number };
-    return row.maxSequence;
+      .prepare("SELECT next_sequence FROM thread_tool_execution_state WHERE thread_id = ?")
+      .get(threadId) as ToolExecutionSequenceStateRow | undefined;
+    return (row?.next_sequence ?? 0) - 1;
+  }
+
+  private withCurrentTranscriptCompleteness(
+    threadId: string,
+    checkpoint: CompactionCheckpoint,
+  ): CompactionCheckpoint {
+    const legacy = COMPACTION_TRANSCRIPT_COMPLETENESS[1];
+    const completeness =
+      checkpoint.transcript.completeness === legacy ||
+      this.getTranscriptCompleteness(threadId) === legacy
+        ? legacy
+        : COMPACTION_TRANSCRIPT_COMPLETENESS[0];
+    const toolState =
+      completeness === legacy && checkpoint.toolState.integrityStatus === "valid"
+        ? { ...checkpoint.toolState, integrityStatus: "sanitized" as const }
+        : checkpoint.toolState;
+    if (checkpoint.transcript.completeness === completeness && checkpoint.toolState === toolState) {
+      return checkpoint;
+    }
+    return {
+      ...checkpoint,
+      toolState,
+      transcript: {
+        ...checkpoint.transcript,
+        completeness,
+      },
+    };
   }
 
   private validateTranscriptRange(

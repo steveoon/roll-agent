@@ -185,8 +185,10 @@ function memoryPair(): { serverConn: JsonRpcConnection; clientConn: JsonRpcConne
   };
 }
 
-test("RuntimeServer 完整往返：create → send → confirmation → approve → done", async () => {
+test("RuntimeServer 完整往返：create → send → confirmation → approve → done", async (t) => {
   const { serverConn, clientConn } = memoryPair();
+  const storeDir = mkdtempSync(join(tmpdir(), "roll-runtime-server-ledger-"));
+  const store = new ThreadStore(storeDir);
   const model = sequencedModel([
     [
       { type: "stream-start", warnings: [] },
@@ -212,8 +214,16 @@ test("RuntimeServer 完整往返：create → send → confirmation → approve 
     model,
     sources: [source("msg-agent", "send_message")],
     policy: new DefaultToolPolicy(),
+    store,
   });
-  const server = new RuntimeServer(engine, serverConn);
+  t.after(async () => {
+    await engine.dispose();
+    store.close();
+    rmSync(storeDir, { recursive: true, force: true });
+  });
+  const server = new RuntimeServer(engine, serverConn, {
+    authorizeRawToolEvidence: () => true,
+  });
   assert.ok(server);
 
   const events: SessionEvent[] = [];
@@ -323,6 +333,115 @@ test("RuntimeServer 完整往返：create → send → confirmation → approve 
   );
   assert.ok(capabilities.turnContext.effectiveToolIds.includes("msg-agent__send_message"));
   assert.deepEqual(capabilities.turnContext.explicitSkillNames, []);
+});
+
+test("RuntimeServer 默认拒绝 includeRaw，即使请求来自可用 session", async () => {
+  const { serverConn, clientConn } = memoryPair();
+  const engine = new ConversationEngine({
+    config,
+    model: sequencedModel([[]]),
+    sources: [],
+  });
+  const server = new RuntimeServer(engine, serverConn);
+  assert.ok(server);
+
+  const results = new Map<number, (result: unknown) => void>();
+  const errors = new Map<number, (error: unknown) => void>();
+  clientConn.onMessage((message) => {
+    if ("id" in message && typeof message.id === "number") {
+      if ("result" in message) {
+        results.get(message.id)?.(message.result);
+      } else if ("error" in message) {
+        errors.get(message.id)?.(message.error);
+      }
+    }
+  });
+  const request = (id: number, method: string, params: unknown): Promise<unknown> =>
+    new Promise((resolve) => {
+      results.set(id, resolve);
+      clientConn.send({ jsonrpc: "2.0", id, method, params });
+    });
+
+  const created = (await request(1, RpcMethod.Create, {})) as { readonly sessionId: string };
+  const error = await new Promise<unknown>((resolve) => {
+    errors.set(2, resolve);
+    clientConn.send({
+      jsonrpc: "2.0",
+      id: 2,
+      method: RpcMethod.ToolExecutions,
+      params: { sessionId: created.sessionId, includeRaw: true },
+    });
+  });
+  assert.ok(error && typeof error === "object" && "message" in error);
+  assert.match(String((error as { readonly message: unknown }).message), /access denied/u);
+  await engine.dispose();
+});
+
+test("RuntimeServer 即使授权也不会从无 Store session 返回完整内存 raw", async () => {
+  const { serverConn, clientConn } = memoryPair();
+  const model = sequencedModel([
+    [
+      { type: "stream-start", warnings: [] },
+      {
+        type: "tool-call",
+        toolCallId: "in-memory-only",
+        toolName: "fail-agent__read",
+        input: JSON.stringify({ q: "secret-input" }),
+      },
+      { type: "finish", usage: usage(), finishReason: TOOL_CALLS },
+    ],
+    [
+      { type: "stream-start", warnings: [] },
+      { type: "text-start", id: "t" },
+      { type: "text-delta", id: "t", delta: "recovered" },
+      { type: "text-end", id: "t" },
+      { type: "finish", usage: usage(), finishReason: STOP },
+    ],
+  ]);
+  const engine = new ConversationEngine({
+    config,
+    model,
+    sources: [failingSource("fail-agent", "read", "secret-result")],
+  });
+  const server = new RuntimeServer(engine, serverConn, {
+    authorizeRawToolEvidence: () => true,
+  });
+  assert.ok(server);
+
+  const results = new Map<number, (result: unknown) => void>();
+  const errors = new Map<number, (error: unknown) => void>();
+  clientConn.onMessage((message) => {
+    if ("id" in message && typeof message.id === "number") {
+      if ("result" in message) {
+        results.get(message.id)?.(message.result);
+      } else if ("error" in message) {
+        errors.get(message.id)?.(message.error);
+      }
+    }
+  });
+  const request = (id: number, method: string, params: unknown): Promise<unknown> =>
+    new Promise((resolve) => {
+      results.set(id, resolve);
+      clientConn.send({ jsonrpc: "2.0", id, method, params });
+    });
+
+  const created = (await request(1, RpcMethod.Create, {})) as { readonly sessionId: string };
+  await request(2, RpcMethod.Send, {
+    sessionId: created.sessionId,
+    input: "run in memory tool",
+  });
+  const error = await new Promise<unknown>((resolve) => {
+    errors.set(3, resolve);
+    clientConn.send({
+      jsonrpc: "2.0",
+      id: 3,
+      method: RpcMethod.ToolExecutions,
+      params: { sessionId: created.sessionId, includeRaw: true },
+    });
+  });
+  assert.ok(error && typeof error === "object" && "message" in error);
+  assert.match(String((error as { readonly message: unknown }).message), /durable ledger/u);
+  await engine.dispose();
 });
 
 test("RuntimeServer 透传同批 Tool 混合结果并允许模型恢复", async () => {

@@ -6,6 +6,7 @@ import { createSpinner, log } from "./output.ts";
 import { GLYPHS } from "./glyphs.ts";
 import { computeUsageParts, formatUsageLine } from "./token-format.ts";
 import { formatToolInput, formatApprovalDetails } from "./tool-format.ts";
+import { formatDebugEvent } from "./debug-format.ts";
 
 export interface ChatApprover {
   approve(approvalId: string): void;
@@ -25,17 +26,6 @@ export const clackConfirm: ChatConfirm = async (message) => {
   });
   return !isCancel(answer) && answer === "yes";
 };
-
-function formatDebugEvent(event: Extract<SessionEvent, { type: "debug" }>): string {
-  const parts = [`chat.${event.stage}`, event.message];
-  if (event.elapsedMs !== undefined) {
-    parts.push(`${String(event.elapsedMs)}ms`);
-  }
-  if (event.data !== undefined) {
-    parts.push(JSON.stringify(event.data));
-  }
-  return parts.join(" · ");
-}
 
 export class ChatRenderer {
   private readonly confirm: ChatConfirm;
