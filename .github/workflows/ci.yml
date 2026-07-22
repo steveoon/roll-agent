@@ -53,10 +53,11 @@ jobs:
         run: pnpm perf:chat:test
 
       - name: Chat PTY correctness smoke
+        id: chat-pty-smoke
         run: pnpm perf:chat:check
 
       - name: Upload chat PTY performance artifacts
-        if: always()
+        if: ${{ always() && (steps.chat-pty-smoke.outcome == 'success' || steps.chat-pty-smoke.outcome == 'failure') }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: chat-pty-${{ runner.os }}-${{ github.run_id }}
