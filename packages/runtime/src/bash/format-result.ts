@@ -1,4 +1,9 @@
-import type { NormalizedToolResult } from "../tool-bridge/normalize-result.ts";
+import {
+  TOOL_OUTCOME_KINDS,
+  failedToolResult,
+  successfulToolResult,
+  type NormalizedToolResult,
+} from "../tool-bridge/normalize-result.ts";
 import type { CapturedStream } from "./output-buffer.ts";
 import { partitionModelBudget } from "./output-buffer.ts";
 import { truncateMiddle } from "./truncate.ts";
@@ -64,7 +69,9 @@ export interface FormatBashResultInput {
 export function formatBashResult(input: FormatBashResultInput): NormalizedToolResult {
   const { result, maxModelOutputChars } = input;
   if (result.spawnError !== undefined) {
-    return { output: `命令无法启动: ${result.spawnError}`, isError: true };
+    return failedToolResult(TOOL_OUTCOME_KINDS.toolFailed, `命令无法启动: ${result.spawnError}`, {
+      raw: result,
+    });
   }
 
   const budget = partitionModelBudget(maxModelOutputChars, Array.from(result.stderr.text).length);
@@ -104,5 +111,11 @@ export function formatBashResult(input: FormatBashResultInput): NormalizedToolRe
   ].filter((section): section is string => section !== undefined);
 
   const output = [lines.join("\n"), ...sections].join("\n\n");
-  return { output, isError: result.exitCode !== 0 || result.terminationError !== undefined };
+  if (result.terminationCause === BASH_TERMINATION_CAUSES.abort) {
+    return failedToolResult(TOOL_OUTCOME_KINDS.cancelled, output, { raw: result });
+  }
+  if (result.exitCode !== 0 || result.terminationError !== undefined) {
+    return failedToolResult(TOOL_OUTCOME_KINDS.toolFailed, output, { raw: result });
+  }
+  return successfulToolResult(output, { raw: result });
 }

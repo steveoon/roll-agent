@@ -114,6 +114,7 @@
     "@ai-sdk/deepseek": "^3.0.2",
     "@ai-sdk/openai": "^4.0.4",
     "@ai-sdk/provider": "^4.0.1",
+    "@ai-sdk/xai": "4.0.12",
     "@clack/prompts": "1.4.0",
     "@modelcontextprotocol/sdk": "^1.12.0",
     "@roll-agent/runtime": "workspace:*",

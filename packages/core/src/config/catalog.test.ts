@@ -81,7 +81,7 @@ describe("buildRollConfigCatalog", () => {
     };
     visit(catalog.root);
 
-    assert.equal(leaves.length, 56);
+    assert.equal(leaves.length, 59);
     for (const leaf of leaves) {
       const path = leaf.path.join(".");
       const guidance = findConfigGuidance(path);
@@ -135,6 +135,42 @@ describe("buildRollConfigCatalog", () => {
         exclusiveMinimum: false,
         exclusiveMaximum: false,
         integer: false,
+      });
+    }
+
+    const compactionTimeout = findNode(catalog.root, ["runtime", "compaction", "timeoutMs"]);
+    assert.equal(compactionTimeout.kind, "number");
+    assert.equal(compactionTimeout.widget, "duration");
+    assert.equal(compactionTimeout.defaultValue, 120_000);
+    if (compactionTimeout.kind === "number") {
+      assert.deepEqual(compactionTimeout.constraints, {
+        minimum: 10_000,
+        maximum: 600_000,
+        exclusiveMinimum: false,
+        exclusiveMaximum: false,
+        integer: true,
+      });
+    }
+
+    const compactionThinking = findNode(catalog.root, ["runtime", "compaction", "thinkingLevel"]);
+    assert.equal(compactionThinking.kind, "enum");
+    assert.equal(compactionThinking.defaultValue, undefined);
+    assert.equal(compactionThinking.persistedRequired, false);
+    assert.match(compactionThinking.defaultBehavior ?? "", /继承 `runtime\.thinking-level`/u);
+    if (compactionThinking.kind === "enum") {
+      assert.deepEqual(compactionThinking.options, ["off", "low", "medium", "high"]);
+    }
+
+    const compactionOutput = findNode(catalog.root, ["runtime", "compaction", "maxOutputTokens"]);
+    assert.equal(compactionOutput.kind, "number");
+    assert.equal(compactionOutput.defaultValue, 8_192);
+    if (compactionOutput.kind === "number") {
+      assert.deepEqual(compactionOutput.constraints, {
+        minimum: 2_048,
+        maximum: 32_768,
+        exclusiveMinimum: false,
+        exclusiveMaximum: false,
+        integer: true,
       });
     }
 

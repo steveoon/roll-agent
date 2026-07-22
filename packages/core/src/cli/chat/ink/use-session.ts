@@ -4,6 +4,7 @@ import type { AgentSession, SessionEvent } from "@roll-agent/runtime";
 import { chatReducer, createInitialState, type ChatUiState, type HistoryItem } from "./state.ts";
 import type { ThinkingLevel } from "../../../llm/providers.ts";
 import { log } from "../../utils/output.ts";
+import { formatDebugEvent } from "../../utils/debug-format.ts";
 
 export interface UseSessionOptions {
   readonly model: string;
@@ -26,7 +27,9 @@ export interface UseSessionResult {
   readonly commitHistory: (item: HistoryItem) => void;
 }
 
-const TEXT_FLUSH_MS = 32;
+const STREAM_FLUSH_MS = 32;
+
+type StreamDeltaEvent = Extract<SessionEvent, { type: "text-delta" | "reasoning-delta" }>;
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
@@ -47,34 +50,54 @@ export function useSession(session: AgentSession, options: UseSessionOptions): U
 
   const drive = useCallback(
     async (iterable: AsyncIterable<SessionEvent>) => {
-      let pendingText = "";
+      let pendingDelta: StreamDeltaEvent | undefined;
       let flushTimer: ReturnType<typeof setTimeout> | undefined;
       const flushPending = () => {
         if (flushTimer !== undefined) {
           clearTimeout(flushTimer);
           flushTimer = undefined;
         }
-        if (pendingText.length > 0) {
-          const delta = pendingText;
-          pendingText = "";
+        if (pendingDelta !== undefined) {
+          const event = pendingDelta;
+          pendingDelta = undefined;
           dispatch({
             type: "session-event",
             id: randomUUID(),
-            event: { type: "text-delta", delta },
+            event,
           });
+        }
+      };
+      const bufferDelta = (event: StreamDeltaEvent): void => {
+        if (pendingDelta === undefined) {
+          pendingDelta = event;
+        } else if (pendingDelta.type === "text-delta" && event.type === "text-delta") {
+          pendingDelta = { type: "text-delta", delta: pendingDelta.delta + event.delta };
+        } else if (
+          pendingDelta.type === "reasoning-delta" &&
+          event.type === "reasoning-delta" &&
+          pendingDelta.reasoningId === event.reasoningId
+        ) {
+          pendingDelta = {
+            type: "reasoning-delta",
+            reasoningId: event.reasoningId,
+            delta: pendingDelta.delta + event.delta,
+          };
+        } else {
+          flushPending();
+          pendingDelta = event;
+        }
+        if (flushTimer === undefined) {
+          flushTimer = setTimeout(flushPending, STREAM_FLUSH_MS);
         }
       };
       try {
         for await (const event of iterable) {
           if (event.type === "debug") {
-            log.debug(`chat.${event.stage} ${event.message}`);
+            log.debug(formatDebugEvent(event));
             continue;
           }
-          if (event.type === "text-delta") {
-            pendingText += event.delta;
-            if (flushTimer === undefined) {
-              flushTimer = setTimeout(flushPending, TEXT_FLUSH_MS);
-            }
+          if (event.type === "text-delta" || event.type === "reasoning-delta") {
+            bufferDelta(event);
             continue;
           }
           flushPending();
@@ -116,13 +139,13 @@ export function useSession(session: AgentSession, options: UseSessionOptions): U
   );
 
   const submit = useCallback(
-    (text: string, sendText?: string) => {
+    (text: string) => {
       if (busyRef.current) {
         return;
       }
       busyRef.current = true;
       dispatch({ type: "submit-user", id: randomUUID(), text });
-      drive(session.send(sendText ?? text)).catch(() => undefined);
+      drive(session.send(text)).catch(() => undefined);
     },
     [drive, session],
   );
@@ -140,7 +163,9 @@ export function useSession(session: AgentSession, options: UseSessionOptions): U
     if (!busyRef.current) {
       return;
     }
-    session.cancel();
+    if (session.cancel()) {
+      dispatch({ type: "cancel-requested" });
+    }
   }, [session]);
 
   const resolveConfirm = useCallback((approved: boolean) => {

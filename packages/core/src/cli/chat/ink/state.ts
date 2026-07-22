@@ -1,4 +1,4 @@
-import type { SessionEvent, SessionTokenUsage } from "@roll-agent/runtime";
+import { TOOL_OUTCOME_KINDS, type SessionEvent, type SessionTokenUsage } from "@roll-agent/runtime";
 import { formatToolInput, formatApprovalDetails } from "../../utils/tool-format.ts";
 import { GLYPHS } from "../../utils/glyphs.ts";
 import { endsInsideThink } from "./thinking-text.ts";
@@ -12,12 +12,15 @@ export interface ToolRowState {
   readonly outputTail?: string;
 }
 
+type TurnCancelledReason = Extract<SessionEvent, { type: "turn-cancelled" }>["reason"];
+
 const MAX_TOOL_OUTPUT_TAIL_CHARS = 2_000;
 
 export type HistoryItem =
   | { readonly kind: "banner"; readonly id: string; readonly lines: readonly BannerLine[] }
   | { readonly kind: "user"; readonly id: string; readonly text: string }
   | { readonly kind: "assistant"; readonly id: string; readonly text: string }
+  | { readonly kind: "reasoning"; readonly id: string; readonly text: string }
   | {
       readonly kind: "tool";
       readonly id: string;
@@ -38,12 +41,20 @@ export type HistoryItem =
       readonly args: string;
     }
   | { readonly kind: "compaction"; readonly id: string; readonly notice: string }
+  | {
+      readonly kind: "turn-cancelled";
+      readonly id: string;
+      readonly text: string;
+      readonly reason: TurnCancelledReason;
+    }
   | { readonly kind: "notice"; readonly id: string; readonly text: string }
   | { readonly kind: "error"; readonly id: string; readonly message: string };
 
 export interface LiveState {
   readonly streamingText: string;
-  readonly thinking: boolean;
+  readonly reasoningId: string | undefined;
+  readonly reasoningText: string;
+  readonly reasoningActive: boolean;
   readonly thinkTagOpen: boolean;
   readonly activeTools: readonly ToolRowState[];
   readonly compacting: boolean;
@@ -61,7 +72,14 @@ export interface StatusState {
   readonly autoApprove: boolean;
 }
 
-export type ChatPhase = "idle" | "busy" | "confirm";
+export const CHAT_PHASES = {
+  idle: "idle",
+  busy: "busy",
+  confirm: "confirm",
+  cancelling: "cancelling",
+} as const;
+
+export type ChatPhase = (typeof CHAT_PHASES)[keyof typeof CHAT_PHASES];
 
 export interface PendingConfirm {
   readonly approvalId: string;
@@ -87,6 +105,7 @@ export type ChatUiAction =
   | { readonly type: "start-compaction" }
   | { readonly type: "session-event"; readonly id: string; readonly event: SessionEvent }
   | { readonly type: "confirm-resolved" }
+  | { readonly type: "cancel-requested" }
   | { readonly type: "turn-end" };
 
 export interface InitialStateOptions {
@@ -96,7 +115,9 @@ export interface InitialStateOptions {
 
 const EMPTY_LIVE: LiveState = {
   streamingText: "",
-  thinking: false,
+  reasoningId: undefined,
+  reasoningText: "",
+  reasoningActive: false,
   thinkTagOpen: false,
   activeTools: [],
   compacting: false,
@@ -143,10 +164,13 @@ function buildCompactionNotice(
 ): string {
   const label = event.reason === "auto" ? "自动压缩" : "手动压缩";
   const tools = event.truncatedTools ? `，精简 ${String(event.truncatedTools)} 个工具结果` : "";
+  const checkpoint = event.checkpointGeneration
+    ? `，checkpoint #${String(event.checkpointGeneration)}${event.checkpointSummaryStatus && event.checkpointSummaryStatus !== "valid" ? `(${event.checkpointSummaryStatus})` : ""}`
+    : "";
   if (event.removed === 0 && !event.truncatedTools) {
     return `${GLYPHS.compact} ${label}：无需压缩`;
   }
-  return `${GLYPHS.compact} ${label}(${event.strategy})：移除 ${String(event.removed)} 条 → 保留 ${String(event.kept)} 条${tools}`;
+  return `${GLYPHS.compact} ${label}(${event.strategy})：移除 ${String(event.removed)} 条 → 保留 ${String(event.kept)} 条${tools}${checkpoint}`;
 }
 
 const DENIAL_LABELS: ReadonlyArray<readonly [string, string]> = [
@@ -180,7 +204,14 @@ function commitTool(
   const active = state.live.activeTools.find((tool) => tool.toolCallId === event.toolCallId);
   const name = active?.name ?? `${event.agentName}.${event.toolName}`;
   const args = active?.args ?? "";
-  const denial = event.isError ? denialLabel(event.output) : undefined;
+  const denial =
+    event.outcome?.kind === TOOL_OUTCOME_KINDS.userRejected
+      ? "已取消"
+      : event.outcome?.kind === TOOL_OUTCOME_KINDS.policyDenied
+        ? "策略拒绝"
+        : event.outcome === undefined && event.isError
+          ? denialLabel(event.output)
+          : undefined;
   const item: HistoryItem =
     denial !== undefined
       ? { kind: "denied", id, name, label: denial }
@@ -195,42 +226,104 @@ function commitTool(
   };
 }
 
+function commitStreamingText(state: ChatUiState, id: string): ChatUiState {
+  if (state.live.streamingText.length === 0) {
+    return state;
+  }
+  return {
+    ...state,
+    history: [
+      ...state.history,
+      {
+        kind: "assistant",
+        id,
+        text: withThinkCarry(state.live.streamingText, state.live.thinkTagOpen),
+      },
+    ],
+    live: {
+      ...state.live,
+      streamingText: "",
+      thinkTagOpen: endsInsideThink(state.live.streamingText, state.live.thinkTagOpen),
+    },
+  };
+}
+
+function commitReasoning(state: ChatUiState, id: string): ChatUiState {
+  const history =
+    state.live.reasoningText.trim().length > 0
+      ? [...state.history, { kind: "reasoning", id, text: state.live.reasoningText } as const]
+      : state.history;
+  return {
+    ...state,
+    history,
+    live: {
+      ...state.live,
+      reasoningId: undefined,
+      reasoningText: "",
+      reasoningActive: false,
+    },
+  };
+}
+
+function beginReasoning(state: ChatUiState, id: string, reasoningId: string): ChatUiState {
+  const afterReasoning = commitReasoning(state, `${id}-previous-reasoning`);
+  const afterText = commitStreamingText(afterReasoning, id);
+  return {
+    ...afterText,
+    live: {
+      ...afterText.live,
+      reasoningId,
+      reasoningText: "",
+      reasoningActive: true,
+    },
+  };
+}
+
 function applySessionEvent(state: ChatUiState, id: string, event: SessionEvent): ChatUiState {
   switch (event.type) {
     case "message-start":
-      return { ...state, live: { ...state.live, thinking: true } };
-    case "text-delta":
+      return state;
+    case "reasoning-start":
+      return beginReasoning(state, id, event.reasoningId);
+    case "reasoning-delta": {
+      const current =
+        state.live.reasoningId === event.reasoningId
+          ? state
+          : beginReasoning(state, id, event.reasoningId);
       return {
-        ...state,
+        ...current,
         live: {
-          ...state.live,
-          thinking: false,
-          producedOutput: true,
-          streamingText: state.live.streamingText + event.delta,
+          ...current.live,
+          reasoningText: current.live.reasoningText + event.delta,
+          reasoningActive: true,
         },
       };
-    case "tool-call": {
-      const narration: HistoryItem[] =
-        state.live.streamingText.length > 0
-          ? [
-              {
-                kind: "assistant",
-                id,
-                text: withThinkCarry(state.live.streamingText, state.live.thinkTagOpen),
-              },
-            ]
-          : [];
+    }
+    case "reasoning-end":
+      return state.live.reasoningId === event.reasoningId
+        ? commitReasoning(state, `${id}-reasoning`)
+        : state;
+    case "text-delta": {
+      const current = commitReasoning(state, `${id}-reasoning`);
       return {
-        ...state,
-        history: [...state.history, ...narration],
+        ...current,
         live: {
-          ...state.live,
-          thinking: false,
+          ...current.live,
           producedOutput: true,
-          streamingText: "",
-          thinkTagOpen: endsInsideThink(state.live.streamingText, state.live.thinkTagOpen),
+          streamingText: current.live.streamingText + event.delta,
+        },
+      };
+    }
+    case "tool-call": {
+      const afterReasoning = commitReasoning(state, `${id}-reasoning`);
+      const current = commitStreamingText(afterReasoning, id);
+      return {
+        ...current,
+        live: {
+          ...current.live,
+          producedOutput: true,
           activeTools: [
-            ...state.live.activeTools,
+            ...current.live.activeTools,
             {
               toolCallId: event.toolCallId,
               name: `${event.agentName}.${event.toolName}`,
@@ -278,14 +371,15 @@ function applySessionEvent(state: ChatUiState, id: string, event: SessionEvent):
         ],
       };
     case "message-finish": {
+      const current = commitReasoning(state, `${id}-reasoning`);
       const committed: HistoryItem[] = [];
-      if (state.live.streamingText.length > 0) {
+      if (current.live.streamingText.length > 0) {
         committed.push({
           kind: "assistant",
           id,
-          text: withThinkCarry(state.live.streamingText, state.live.thinkTagOpen),
+          text: withThinkCarry(current.live.streamingText, current.live.thinkTagOpen),
         });
-      } else if (!state.live.producedOutput && (event.totalUsage?.outputTokens ?? 0) > 0) {
+      } else if (!current.live.producedOutput && (event.totalUsage?.outputTokens ?? 0) > 0) {
         committed.push({
           kind: "notice",
           id,
@@ -300,11 +394,11 @@ function applySessionEvent(state: ChatUiState, id: string, event: SessionEvent):
         });
       }
       return {
-        ...state,
-        history: [...state.history, ...committed],
+        ...current,
+        history: [...current.history, ...committed],
         live: { ...EMPTY_LIVE },
         status: {
-          ...state.status,
+          ...current.status,
           turnUsage: event.totalUsage,
           sessionUsage: event.sessionUsage,
           contextInputTokens: event.contextInputTokens,
@@ -321,7 +415,11 @@ function applySessionEvent(state: ChatUiState, id: string, event: SessionEvent):
       }));
       return {
         ...state,
-        history: [...state.history, ...cancelledTools, { kind: "notice", id, text: event.message }],
+        history: [
+          ...state.history,
+          ...cancelledTools,
+          { kind: "turn-cancelled", id, text: event.message, reason: event.reason },
+        ],
         live: { ...EMPTY_LIVE },
       };
     }
@@ -356,11 +454,18 @@ export function chatReducer(state: ChatUiState, action: ChatUiAction): ChatUiSta
     case "commit-history":
       return { ...state, history: [...state.history, action.item], draft: "" };
     case "start-compaction":
-      return { ...state, live: { ...EMPTY_LIVE }, phase: "busy", pendingConfirm: undefined };
+      return {
+        ...state,
+        live: { ...EMPTY_LIVE, compacting: true },
+        phase: "busy",
+        pendingConfirm: undefined,
+      };
     case "session-event":
       return applySessionEvent(state, action.id, action.event);
     case "confirm-resolved":
       return { ...state, phase: "busy", pendingConfirm: undefined };
+    case "cancel-requested":
+      return { ...state, phase: "cancelling", pendingConfirm: undefined };
     case "turn-end":
       return { ...state, phase: "idle", live: { ...EMPTY_LIVE } };
     default:

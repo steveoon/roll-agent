@@ -8,7 +8,7 @@ const FRAMES: readonly string[] = isUnicodeSupported()
   : ["-", "\\", "|", "/"];
 const FRAME_INTERVAL_MS = 80;
 
-export function Spinner(): ReactElement {
+export function Spinner({ color = "cyan" }: { readonly color?: string }): ReactElement {
   const [frame, setFrame] = useState(0);
   useEffect(() => {
     const timer = setInterval(() => {
@@ -18,5 +18,5 @@ export function Spinner(): ReactElement {
       clearInterval(timer);
     };
   }, []);
-  return h(Text, { color: "cyan" }, FRAMES[frame] ?? FRAMES[0] ?? "-");
+  return h(Text, { color }, FRAMES[frame] ?? FRAMES[0] ?? "-");
 }

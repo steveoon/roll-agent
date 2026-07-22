@@ -1,8 +1,19 @@
-import { tool, type ToolSet } from "ai";
+import { tool, type ToolExecutionOptions, type ToolSet } from "ai";
 import { z } from "zod";
 import type { ToolBridgeContext } from "./build-tools.ts";
 import type { ToolRegistry } from "./naming.ts";
-import type { NormalizedToolResult } from "./normalize-result.ts";
+import {
+  TOOL_OUTCOME_KINDS,
+  failedToolResult,
+  successfulToolResult,
+  toolResultToModelOutput,
+  type NormalizedToolResult,
+} from "./normalize-result.ts";
+import {
+  TOOL_RESOURCE_ACCESS_MODES,
+  executeCoordinatedTool,
+  type ToolExecutionPlan,
+} from "./tool-execution-coordinator.ts";
 
 export const AGENT_INSTALL_TOOL_AGENT_NAME = "roll";
 export const AGENT_INSTALL_TOOL_NAME = "agent_install";
@@ -36,11 +47,18 @@ export interface AgentInstallToolDeps {
   ) => Promise<AgentInstallToolOutcome>;
 }
 
-function renderOutcome(outcome: AgentInstallToolOutcome, logLines: readonly string[]): NormalizedToolResult {
+function renderOutcome(
+  outcome: AgentInstallToolOutcome,
+  logLines: readonly string[],
+): NormalizedToolResult {
   const logSection = logLines.length > 0 ? `\n\n安装日志：\n${logLines.join("\n")}` : "";
   if (!outcome.ok) {
     const retryNote = outcome.retryCommand ? `\n可在终端重试：${outcome.retryCommand}` : "";
-    return { output: `安装失败：${outcome.message}${retryNote}${logSection}`, isError: true };
+    return failedToolResult(
+      TOOL_OUTCOME_KINDS.toolFailed,
+      `安装失败：${outcome.message}${retryNote}${logSection}`,
+      { raw: outcome },
+    );
   }
 
   const versionNote = outcome.version ? ` v${outcome.version}` : "";
@@ -54,10 +72,10 @@ function renderOutcome(outcome: AgentInstallToolOutcome, logLines: readonly stri
   const retryNote = outcome.retryCommand
     ? `\n浏览器运行时已跳过安装，请让用户在终端补跑：${outcome.retryCommand}`
     : "";
-  return {
-    output: `已安装并注册 Agent "${outcome.agentName}"${versionNote}。${availabilityNote}${envNote}${retryNote}${logSection}`,
-    isError: false,
-  };
+  return successfulToolResult(
+    `已安装并注册 Agent "${outcome.agentName}"${versionNote}。${availabilityNote}${envNote}${retryNote}${logSection}`,
+    { raw: outcome },
+  );
 }
 
 export function buildAgentInstallToolset(
@@ -77,6 +95,50 @@ export function buildAgentInstallToolset(
       .enum([firstShortName, ...restShortNames])
       .describe(`要安装的官方 Agent 短名（可选：${shortNames.join("、")}）`),
   });
+  const plan: ToolExecutionPlan = {
+    prepare: async (rawInput) => {
+      const parsed = inputSchema.safeParse(rawInput);
+      if (!parsed.success) {
+        return failedToolResult(
+          TOOL_OUTCOME_KINDS.invalidInput,
+          `参数校验失败: ${parsed.error.issues.map((issue) => issue.message).join("; ")}`,
+          { raw: parsed.error.issues },
+        );
+      }
+      const decision = ctx.policy?.check({
+        agentName: AGENT_INSTALL_TOOL_AGENT_NAME,
+        toolName: AGENT_INSTALL_TOOL_NAME,
+        input: parsed.data,
+        annotations: { destructiveHint: true },
+      });
+      if (decision?.action === "deny") {
+        return failedToolResult(
+          TOOL_OUTCOME_KINDS.policyDenied,
+          `策略拒绝执行${decision.reason ? `: ${decision.reason}` : ""}`,
+          decision.reason ? { reason: decision.reason } : {},
+        );
+      }
+
+      const approval = await ctx.requestApproval({
+        agentName: AGENT_INSTALL_TOOL_AGENT_NAME,
+        toolName: AGENT_INSTALL_TOOL_NAME,
+        input: parsed.data,
+        reason: `将执行 npm install 并注册子 Agent "${parsed.data.agent}"`,
+      });
+      return approval.approved
+        ? undefined
+        : failedToolResult(
+            TOOL_OUTCOME_KINDS.userRejected,
+            `已取消执行${approval.reason ? `: ${approval.reason}` : ""}`,
+            approval.reason ? { reason: approval.reason } : {},
+          );
+    },
+    resources: () => [
+      { key: "agent-registry", mode: TOOL_RESOURCE_ACCESS_MODES.write },
+      { key: "package-manager", mode: TOOL_RESOURCE_ACCESS_MODES.write },
+    ],
+  };
+  ctx.coordinator?.register(id, plan);
 
   return {
     [id]: tool({
@@ -84,36 +146,24 @@ export function buildAgentInstallToolset(
         .map((entry) => `${entry.shortName}（${entry.description}）`)
         .join("；")}`,
       inputSchema,
-      execute: async (input): Promise<NormalizedToolResult> => {
-        const decision = ctx.policy?.check({
-          agentName: AGENT_INSTALL_TOOL_AGENT_NAME,
-          toolName: AGENT_INSTALL_TOOL_NAME,
+      toModelOutput: ({ output }) => toolResultToModelOutput(output),
+      execute: async (
+        input,
+        options: ToolExecutionOptions<unknown>,
+      ): Promise<NormalizedToolResult> => {
+        return executeCoordinatedTool(
+          ctx.coordinator,
+          plan,
+          id,
+          options.toolCallId,
           input,
-          annotations: { destructiveHint: true },
-        });
-        if (decision?.action === "deny") {
-          return {
-            output: `策略拒绝执行${decision.reason ? `: ${decision.reason}` : ""}`,
-            isError: true,
-          };
-        }
-
-        const approval = await ctx.requestApproval({
-          agentName: AGENT_INSTALL_TOOL_AGENT_NAME,
-          toolName: AGENT_INSTALL_TOOL_NAME,
-          input,
-          reason: `将执行 npm install 并注册子 Agent "${input.agent}"`,
-        });
-        if (!approval.approved) {
-          return {
-            output: `已取消执行${approval.reason ? `: ${approval.reason}` : ""}`,
-            isError: true,
-          };
-        }
-
-        const logLines: string[] = [];
-        const outcome = await deps.install(input.agent, (line) => logLines.push(line));
-        return renderOutcome(outcome, logLines);
+          options.abortSignal,
+          async () => {
+            const logLines: string[] = [];
+            const outcome = await deps.install(input.agent, (line) => logLines.push(line));
+            return renderOutcome(outcome, logLines);
+          },
+        );
       },
     }),
   };

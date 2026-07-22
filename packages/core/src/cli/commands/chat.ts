@@ -21,11 +21,8 @@ import type { LlmConfigReadiness } from "../../config/helpers.ts";
 import { titleFromMessage } from "../chat/title.ts";
 import { buildBannerLines, renderBannerText, type BannerInfo } from "../chat/banner.ts";
 import { getCurrentVersion } from "../utils/update-checker.ts";
-import {
-  buildSkillInvocationPrompt,
-  formatSkillList,
-  parseSkillInvocation,
-} from "../chat/ink/commands.ts";
+import { formatSkillList, parseSkillInvocation } from "../chat/ink/commands.ts";
+import { installCurrentCliShim } from "../utils/current-cli-shim.ts";
 
 type RuntimeModule = typeof import("@roll-agent/runtime");
 
@@ -39,6 +36,51 @@ function createToolPolicy(runtime: RuntimeModule, config: RollConfig) {
 }
 
 type ThreadStoreInstance = InstanceType<RuntimeModule["ThreadStore"]>;
+type ConversationEngineInstance = InstanceType<RuntimeModule["ConversationEngine"]>;
+type ChatEngineOptions = ConstructorParameters<RuntimeModule["ConversationEngine"]>[0];
+
+export const CHAT_ENGINE_SURFACES = {
+  ink: "ink",
+  basicRepl: "basic-repl",
+  oneShot: "one-shot",
+  json: "json",
+  server: "server",
+} as const;
+
+export type ChatEngineSurface = (typeof CHAT_ENGINE_SURFACES)[keyof typeof CHAT_ENGINE_SURFACES];
+
+const CHAT_HOST_MODE_BY_SURFACE = {
+  [CHAT_ENGINE_SURFACES.ink]: "interactive",
+  [CHAT_ENGINE_SURFACES.basicRepl]: "interactive",
+  [CHAT_ENGINE_SURFACES.oneShot]: "one-shot",
+  [CHAT_ENGINE_SURFACES.json]: "one-shot",
+  [CHAT_ENGINE_SURFACES.server]: "server",
+} as const satisfies Record<ChatEngineSurface, NonNullable<ChatEngineOptions["hostMode"]>>;
+
+export function chatHostModeForSurface(
+  surface: ChatEngineSurface,
+): NonNullable<ChatEngineOptions["hostMode"]> {
+  return CHAT_HOST_MODE_BY_SURFACE[surface];
+}
+
+interface CreateChatEngineInput {
+  readonly runtime: RuntimeModule;
+  readonly config: RollConfig;
+  readonly model: NonNullable<ChatEngineOptions["model"]>;
+  readonly store: ThreadStoreInstance;
+  readonly surface: ChatEngineSurface;
+  readonly providerOptions?: NonNullable<ChatEngineOptions["providerOptions"]>;
+  readonly structuredOutputProviderOptions?: NonNullable<
+    ChatEngineOptions["structuredOutputProviderOptions"]
+  >;
+  readonly structuredOutputReasoning?: NonNullable<ChatEngineOptions["structuredOutputReasoning"]>;
+  readonly shellEnv?: NodeJS.ProcessEnv;
+}
+
+interface ChatCliScope {
+  readonly env: NodeJS.ProcessEnv;
+  dispose(): void;
+}
 
 interface ReplIo {
   readonly input: NodeJS.ReadableStream;
@@ -61,11 +103,39 @@ function reportSkillLibraryIssue(message: string): void {
   log.warn(`skill 目录加载警告：${message}`);
 }
 
-function resolveSkillSendText(session: AgentSession, message: string): string {
-  const invocation = parseSkillInvocation(message, session.getSkillSummaries());
-  return invocation && invocation.prompt.length > 0
-    ? buildSkillInvocationPrompt(invocation)
-    : message;
+function createChatCliScope(): ChatCliScope {
+  const env = { ...process.env };
+  try {
+    const shim = installCurrentCliShim({ env });
+    return { env, dispose: () => shim.dispose() };
+  } catch (error) {
+    log.warn(
+      `无法锁定当前 Roll CLI，子任务将继续按 PATH 查找 roll：${error instanceof Error ? error.message : String(error)}`,
+    );
+    return { env, dispose: () => undefined };
+  }
+}
+
+export function createChatEngine(input: CreateChatEngineInput) {
+  return new input.runtime.ConversationEngine({
+    config: input.config,
+    model: input.model,
+    store: input.store,
+    hostMode: chatHostModeForSurface(input.surface),
+    policy: createToolPolicy(input.runtime, input.config),
+    maxSteps: input.config.runtime.maxSteps,
+    ...(input.providerOptions ? { providerOptions: input.providerOptions } : {}),
+    ...(input.structuredOutputProviderOptions
+      ? { structuredOutputProviderOptions: input.structuredOutputProviderOptions }
+      : {}),
+    ...(input.structuredOutputReasoning
+      ? { structuredOutputReasoning: input.structuredOutputReasoning }
+      : {}),
+    debugEvents: isDebugLogEnabled(),
+    onAgentBootstrapIssue: reportAgentBootstrapIssue,
+    onSkillLibraryIssue: reportSkillLibraryIssue,
+    ...(input.shellEnv ? { shellEnv: input.shellEnv } : {}),
+  });
 }
 
 async function readReplLine(
@@ -105,6 +175,45 @@ export function resolveChatLlmReadiness(config: RollConfig): LlmConfigReadiness 
   });
 }
 
+export function resolveChatLlmCalls(
+  provider: string,
+  modelName: string,
+  apiKey: string,
+  baseUrl: string | undefined,
+  thinkingLevel: RollConfig["runtime"]["thinkingLevel"],
+  compactionThinkingLevel: RollConfig["runtime"]["compaction"]["thinkingLevel"] = undefined,
+  compactionUsesStructuredOutput = true,
+): {
+  readonly model: NonNullable<ChatEngineOptions["model"]>;
+  readonly providerOptions?: NonNullable<ChatEngineOptions["providerOptions"]>;
+  readonly structuredOutputProviderOptions?: NonNullable<
+    ChatEngineOptions["structuredOutputProviderOptions"]
+  >;
+  readonly structuredOutputReasoning?: NonNullable<ChatEngineOptions["structuredOutputReasoning"]>;
+} {
+  const chat = resolveLLMCall(provider, modelName, apiKey, "chat", baseUrl, thinkingLevel);
+  const structuredOutput = compactionUsesStructuredOutput
+    ? resolveLLMCall(
+        provider,
+        modelName,
+        apiKey,
+        "structured-output",
+        baseUrl,
+        compactionThinkingLevel ?? thinkingLevel,
+      )
+    : undefined;
+  return {
+    model: chat.model,
+    ...(chat.providerOptions ? { providerOptions: chat.providerOptions } : {}),
+    ...(structuredOutput?.providerOptions
+      ? { structuredOutputProviderOptions: structuredOutput.providerOptions }
+      : {}),
+    ...(structuredOutput?.reasoning
+      ? { structuredOutputReasoning: structuredOutput.reasoning }
+      : {}),
+  };
+}
+
 async function runServer(config: RollConfig): Promise<void> {
   const llmStatus = resolveChatLlmReadiness(config);
   if (!llmStatus.configured || !llmStatus.providerConfig) {
@@ -117,40 +226,53 @@ async function runServer(config: RollConfig): Promise<void> {
   const modelName = llmStatus.model;
 
   const runtime = await loadRuntime();
-  const { ConversationEngine, ThreadStore, RuntimeServer, createStdioConnection } = runtime;
-  const { model, providerOptions } = resolveLLMCall(
-    provider,
-    modelName,
-    providerConfig.apiKey,
-    "chat",
-    providerConfig.baseUrl,
-    config.runtime.thinkingLevel,
-  );
+  const { ThreadStore, RuntimeServer, createStdioConnection } = runtime;
+  const { model, providerOptions, structuredOutputProviderOptions, structuredOutputReasoning } =
+    resolveChatLlmCalls(
+      provider,
+      modelName,
+      providerConfig.apiKey,
+      providerConfig.baseUrl,
+      config.runtime.thinkingLevel,
+      config.runtime.compaction.thinkingLevel,
+      config.runtime.compaction.strategy === "summarize",
+    );
   const store = new ThreadStore(config.runtime.threadsDir);
-  const engine = new ConversationEngine({
-    config,
-    model,
-    store,
-    policy: createToolPolicy(runtime, config),
-    maxSteps: config.runtime.maxSteps,
-    ...(providerOptions ? { providerOptions } : {}),
-    debugEvents: isDebugLogEnabled(),
-    onAgentBootstrapIssue: reportAgentBootstrapIssue,
-    onSkillLibraryIssue: reportSkillLibraryIssue,
-  });
-  const connection = createStdioConnection(process.stdin, process.stdout);
-  const server = new RuntimeServer(engine, connection);
+  const chatCliScope = createChatCliScope();
+  let engine: ConversationEngineInstance | undefined;
+  try {
+    engine = createChatEngine({
+      runtime,
+      config,
+      model,
+      store,
+      surface: CHAT_ENGINE_SURFACES.server,
+      shellEnv: chatCliScope.env,
+      ...(providerOptions ? { providerOptions } : {}),
+      ...(structuredOutputProviderOptions ? { structuredOutputProviderOptions } : {}),
+      ...(structuredOutputReasoning ? { structuredOutputReasoning } : {}),
+    });
+    const activeEngine = engine;
+    const connection = createStdioConnection(process.stdin, process.stdout);
+    const server = new RuntimeServer(activeEngine, connection);
 
-  connection.onClose(() => {
-    server
-      .abortAll()
-      .then(() => engine.dispose())
-      .catch(() => {})
-      .finally(() => {
-        store.close();
-        process.exit(0);
-      });
-  });
+    connection.onClose(() => {
+      server
+        .abortAll()
+        .then(() => activeEngine.dispose())
+        .catch(() => {})
+        .finally(() => {
+          chatCliScope.dispose();
+          store.close();
+          process.exit(0);
+        });
+    });
+  } catch (error) {
+    await engine?.dispose().catch(() => {});
+    chatCliScope.dispose();
+    store.close();
+    throw error;
+  }
 
   log.info("roll runtime-server 已启动（stdio JSON-RPC，等待客户端连接）");
 }
@@ -245,6 +367,13 @@ export async function runJsonTurn(
           ...(event.beforeInputTokens !== undefined
             ? { beforeInputTokens: event.beforeInputTokens }
             : {}),
+          ...(event.checkpointId !== undefined ? { checkpointId: event.checkpointId } : {}),
+          ...(event.checkpointGeneration !== undefined
+            ? { checkpointGeneration: event.checkpointGeneration }
+            : {}),
+          ...(event.checkpointSummaryStatus !== undefined
+            ? { checkpointSummaryStatus: event.checkpointSummaryStatus }
+            : {}),
         });
         break;
       case "turn-cancelled":
@@ -338,14 +467,13 @@ export async function runRepl(
         log.info("用法: /<skill-name> [/<skill-name> ...] 你的请求");
         continue;
       }
-      const sendInput = skillInvocation ? buildSkillInvocationPrompt(skillInvocation) : input;
       if (!titled) {
         store.updateTitle(session.id, titleFromMessage(input));
         titled = true;
       }
       submitted = true;
       log.debug(`chat.repl send start · chars=${String(input.length)}`);
-      for await (const event of session.send(sendInput)) {
+      for await (const event of session.send(input)) {
         await renderer.handle(event, session);
       }
       log.debug("chat.repl send completed");
@@ -411,31 +539,43 @@ export default defineCommand({
     }
 
     const runtime = await loadRuntime();
-    const { ConversationEngine, ThreadStore } = runtime;
-    const { model, providerOptions } = resolveLLMCall(
-      provider,
-      modelName,
-      providerConfig.apiKey,
-      "chat",
-      providerConfig.baseUrl,
-      config.runtime.thinkingLevel,
-    );
+    const { ThreadStore } = runtime;
+    const { model, providerOptions, structuredOutputProviderOptions, structuredOutputReasoning } =
+      resolveChatLlmCalls(
+        provider,
+        modelName,
+        providerConfig.apiKey,
+        providerConfig.baseUrl,
+        config.runtime.thinkingLevel,
+        config.runtime.compaction.thinkingLevel,
+        config.runtime.compaction.strategy === "summarize",
+      );
     const store = new ThreadStore(config.runtime.threadsDir);
-    const engine = new ConversationEngine({
-      config,
-      model,
-      store,
-      policy: createToolPolicy(runtime, config),
-      maxSteps: config.runtime.maxSteps,
-      ...(providerOptions ? { providerOptions } : {}),
-      debugEvents: isDebugLogEnabled(),
-      onAgentBootstrapIssue: reportAgentBootstrapIssue,
-      onSkillLibraryIssue: reportSkillLibraryIssue,
-      sessionExecEnabled: args.message === undefined,
-    });
-
+    const interactive = Boolean(
+      process.stdout.isTTY && process.stdin.isTTY && typeof process.stdin.setRawMode === "function",
+    );
+    const surface = args.message
+      ? args.json
+        ? CHAT_ENGINE_SURFACES.json
+        : CHAT_ENGINE_SURFACES.oneShot
+      : interactive
+        ? CHAT_ENGINE_SURFACES.ink
+        : CHAT_ENGINE_SURFACES.basicRepl;
+    const chatCliScope = createChatCliScope();
+    let engine: ConversationEngineInstance | undefined;
     let sessionForCleanup: AgentSession | undefined;
     try {
+      engine = createChatEngine({
+        runtime,
+        config,
+        model,
+        store,
+        surface,
+        shellEnv: chatCliScope.env,
+        ...(providerOptions ? { providerOptions } : {}),
+        ...(structuredOutputProviderOptions ? { structuredOutputProviderOptions } : {}),
+        ...(structuredOutputReasoning ? { structuredOutputReasoning } : {}),
+      });
       let session: AgentSession;
       if (args.session) {
         session = await engine.resumeSession(args.session);
@@ -455,7 +595,7 @@ export default defineCommand({
       sessionForCleanup = session;
 
       if (args.json && args.message) {
-        const result = await runJsonTurn(session, resolveSkillSendText(session, args.message));
+        const result = await runJsonTurn(session, args.message);
         printChatJson(result);
         if (result.status !== "completed") {
           process.exitCode = 1;
@@ -471,16 +611,11 @@ export default defineCommand({
       }
       if (args.message) {
         const renderer = new ChatRenderer(clackConfirm, session.getContextWindow());
-        for await (const event of session.send(resolveSkillSendText(session, args.message))) {
+        for await (const event of session.send(args.message)) {
           await renderer.handle(event, session);
         }
       } else {
         const isNewSession = !args.session && !args.last;
-        const interactive = Boolean(
-          process.stdout.isTTY &&
-          process.stdin.isTTY &&
-          typeof process.stdin.setRawMode === "function",
-        );
         const summary = await engine.getContextSummary();
         const banner: BannerInfo = {
           version: getCurrentVersion(),
@@ -524,8 +659,9 @@ export default defineCommand({
       process.exitCode = 1;
     } finally {
       await sessionForCleanup?.close();
-      await engine.dispose();
+      await engine?.dispose();
       store.close();
+      chatCliScope.dispose();
     }
   },
 });

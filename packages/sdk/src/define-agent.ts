@@ -15,6 +15,8 @@ import type { AgentContext, LogLevel } from "./context.ts";
 import { getMcpCompatibleInputSchema, parseToolInput } from "./mcp-schema.ts";
 import { isStructuredToolError } from "./tool-error.ts";
 
+const ROLL_RESOURCE_HINTS_META_KEY = "roll/resourceHints";
+
 /** defineAgent 额外选项 */
 export interface DefineAgentOptions {
   /** 最低日志级别，默认 "info" */
@@ -323,13 +325,21 @@ async function listenHttp(
 // ========== Tool Registration ==========
 
 /** 将单个 tool 注册到 MCP Server */
-function registerTool(server: McpServer, tool: AnyToolDefinition, ctx: AgentContext): void {
+export function registerTool(server: McpServer, tool: AnyToolDefinition, ctx: AgentContext): void {
   // AnyToolDefinition.execute 签名为 (never, ctx) 以阻止直接调用，注册时需转型为可调用签名
+  const metadata = {
+    ...(tool._meta ?? {}),
+    ...(tool.resourceHints && tool.resourceHints.length > 0
+      ? { [ROLL_RESOURCE_HINTS_META_KEY]: tool.resourceHints }
+      : {}),
+  };
   server.registerTool(
     tool.name,
     {
       description: tool.description,
       inputSchema: getMcpCompatibleInputSchema(tool.input),
+      ...(tool.annotations ? { annotations: tool.annotations } : {}),
+      ...(Object.keys(metadata).length > 0 ? { _meta: metadata } : {}),
     },
     async (params: Record<string, unknown>, extra: { signal: AbortSignal }) =>
       await executeToolForMcp(tool, ctx, params, extra.signal),

@@ -1,8 +1,11 @@
 import assert from "node:assert/strict";
 import { afterEach, describe, it } from "node:test";
 import { z } from "zod";
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
+import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { AgentContext } from "./context.ts";
-import { executeToolForMcp, resolveAgentLogLevel } from "./define-agent.ts";
+import { executeToolForMcp, registerTool, resolveAgentLogLevel } from "./define-agent.ts";
 import { defineTool } from "./define-tool.ts";
 import { StructuredToolError } from "./tool-error.ts";
 
@@ -128,6 +131,37 @@ describe("defineAgent tool execution", () => {
 
     assert.equal(receivedContext?.signal, undefined);
     assert.equal(receivedContext, TEST_CONTEXT);
+  });
+
+  it("publishes annotations and resource hints through MCP listTools", async () => {
+    const tool = defineTool({
+      name: "write_file",
+      description: "write a file",
+      input: z.object({ path: z.string() }),
+      output: z.object({ ok: z.boolean() }),
+      annotations: { readOnlyHint: false, destructiveHint: true },
+      resourceHints: [{ field: "path", kind: "file", mode: "write" }],
+      _meta: { owner: "sdk-test" },
+      execute: async () => ({ ok: true }),
+    });
+    const server = new McpServer({ name: "sdk-resource-test", version: "0.0.1" });
+    registerTool(server, tool, TEST_CONTEXT);
+    const client = new Client({ name: "sdk-resource-test-client", version: "0.0.1" });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+
+    try {
+      const listed = (await client.listTools()).tools.find((item) => item.name === "write_file");
+      assert.ok(listed);
+      assert.equal(listed.annotations?.destructiveHint, true);
+      assert.deepEqual(listed._meta, {
+        owner: "sdk-test",
+        "roll/resourceHints": [{ field: "path", kind: "file", mode: "write" }],
+      });
+    } finally {
+      await client.close();
+      await server.close();
+    }
   });
 });
 

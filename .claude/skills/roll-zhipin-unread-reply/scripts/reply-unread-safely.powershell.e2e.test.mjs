@@ -30,7 +30,9 @@ test(
   () => {
     const testDir = mkdtempSync(path.join(tmpdir(), "roll-zhipin-powershell-e2e-"));
     const shimDir = path.join(testDir, "bin");
+    const staleShimDir = path.join(testDir, "stale-bin");
     mkdirSync(shimDir);
+    mkdirSync(staleShimDir);
 
     const tracePath = path.join(testDir, "roll.trace.jsonl");
     const resultsPath = path.join(testDir, "results.jsonl");
@@ -50,6 +52,7 @@ test(
       ].join("\r\n"),
       "utf8",
     );
+    writeFileSync(path.join(staleShimDir, "roll.cmd"), "@echo off\r\nexit /b 99\r\n", "utf8");
     writeFileSync(
       shimScriptPath,
       String.raw`import { appendFileSync, readFileSync } from "node:fs";
@@ -144,7 +147,8 @@ console.log(JSON.stringify(responses[tool] ?? { success: false, error: "unexpect
           encoding: "utf8",
           timeout: 30_000,
           env: {
-            ...envWithPrependedPath(process.env, shimDir),
+            ...envWithPrependedPath(process.env, staleShimDir),
+            ROLL_CURRENT_CLI: shimCommandPath,
             ROLL_SHIM_TRACE: tracePath,
           },
         },

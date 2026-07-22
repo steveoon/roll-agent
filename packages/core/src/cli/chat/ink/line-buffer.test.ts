@@ -15,6 +15,8 @@ import {
   moveToLineEnd,
   moveToLineStart,
   moveUp,
+  moveVisualDown,
+  moveVisualUp,
   moveWordLeft,
   moveWordRight,
 } from "./line-buffer.ts";
@@ -254,6 +256,28 @@ test("moveUp on first line and moveDown on last line preserve state", () => {
 test("moveDown reaches empty trailing line", () => {
   const state = createLineBuffer("ab\n", 1);
   assert.equal(moveDown(state).cursor, 3);
+});
+
+test("visual movement follows hard-wrapped rows and preserves the goal column", () => {
+  const text = "abcdefg";
+  const upper = moveVisualUp(createLineBuffer(text), 4);
+  assert.equal(upper.cursor, 3);
+  assert.equal(upper.goalColumn, 3);
+  const lower = moveVisualDown(upper, 4);
+  assert.equal(lower.cursor, text.length);
+  assert.equal(lower.goalColumn, 3);
+});
+
+test("visual movement never splits a wide character at the target column", () => {
+  const upper = moveVisualUp(createLineBuffer("中文abc"), 4);
+  assert.equal(upper.cursor, 1);
+  assert.equal(upper.goalColumn, 3);
+});
+
+test("visual movement includes a wrapped cursor placeholder at an exact row boundary", () => {
+  const upper = moveVisualUp(createLineBuffer("abcd"), 4);
+  assert.equal(upper.cursor, 0);
+  assert.equal(upper.goalColumn, 0);
 });
 
 test("horizontal movement and edits clear goal column", () => {

@@ -100,7 +100,9 @@ agents:
   data-dir: ~/.roll-agent/agents
 ```
 
-支持的 provider：`anthropic`、`openai`、`deepseek`、`qwen`。每个 provider 可配置 `base-url` 用于自定义 API 端点。
+支持的 provider：`anthropic`、`openai`、`deepseek`、`qwen`、`xai`。每个 provider 可配置
+`base-url` 用于自定义 API 端点；xAI 默认模型为 `grok-4.5`（500k context window），API key 可通过
+`XAI_API_KEY` 注入。
 `ask.llm-model` 可选；未设置时会回退到 `llm.default-model`。
 
 如果本地还留着旧版 `router:` 配置段：
@@ -323,6 +325,27 @@ agent.listen(); // 默认以 stdio MCP Server 启动
 //   transport: { type: "http", host: "127.0.0.1", port: 3100 },
 // });
 ```
+
+会读写共享资源的 Tool 可以声明 `annotations` 和 `resourceHints`，让 `roll chat` 在同一
+model step 内并行无冲突调用，同时串行化同一资源的读写冲突：
+
+```typescript
+const writeFile = defineTool({
+  name: "write_file",
+  description: "写入工作区文件",
+  input: z.object({ path: z.string(), content: z.string() }),
+  output: z.object({ written: z.boolean() }),
+  annotations: { readOnlyHint: false, destructiveHint: true },
+  resourceHints: [{ field: "path", kind: "file", mode: "write" }],
+  execute: async ({ path, content }) => {
+    // ...
+    return { written: true };
+  },
+});
+```
+
+`field` 必须指向顶层 input 字段；它可以是单个资源 ID 或资源 ID 数组。stdio Agent 的相对
+文件路径以 Agent 安装目录为基准。未提供资源线索的外部副作用 Tool 会按 Agent 级别保守串行。
 
 对于 `local-path` / legacy fallback 场景，可在 SKILL.md metadata 中声明运行时信息：
 

@@ -1,10 +1,14 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { setTimeout as delay } from "node:timers/promises";
+import { stripVTControlCharacters } from "node:util";
 import { createElement as h, useState } from "react";
 import type { ReactElement } from "react";
 import { render } from "ink-testing-library";
 import { cursorPositionOf, TextPrompt } from "./text-prompt.ts";
+
+const MIXED_WIDTH_DRAFT =
+  "这里被丢弃的“孤儿消息”属于父 thread 已经删除的 session，本来就无法通过正常界面恢复，不会影响仍存在的旧对话。";
 
 interface HarnessSink {
   value: string;
@@ -21,6 +25,7 @@ function makeSink(): HarnessSink {
 interface HarnessProps {
   readonly sink: HarnessSink;
   readonly initial?: string;
+  readonly inputHistory?: readonly string[];
   readonly disabled?: boolean;
   readonly slashActive?: boolean;
   readonly slashPopupActive?: boolean;
@@ -31,11 +36,13 @@ function Harness(props: HarnessProps): ReactElement {
   const [value, setValue] = useState(props.initial ?? "");
   props.sink.value = value;
   props.sink.setValue = setValue;
+  const slashActive = props.slashActive ?? value.startsWith("/");
   return h(TextPrompt, {
     value,
+    inputHistory: props.inputHistory ?? [],
     disabled: props.disabled ?? false,
-    slashActive: props.slashActive ?? false,
-    slashPopupActive: props.slashPopupActive ?? false,
+    slashActive,
+    slashPopupActive: props.slashPopupActive ?? slashActive,
     autoApprove: false,
     onChange: (next: string) => {
       props.sink.changes.push(next);
@@ -222,11 +229,52 @@ test("up and down arrows move between draft lines", async () => {
 
 test("up arrow on single-line draft has no side effect", async () => {
   const sink = makeSink();
-  const { stdin, unmount } = render(h(Harness, { sink }));
+  const { stdin, unmount } = render(h(Harness, { sink, inputHistory: ["older input"] }));
   await delay(10);
   await type(stdin, "ab", "\x1b[A", "c");
   assert.equal(sink.value, "abc");
   assert.deepEqual(sink.submitted, []);
+  unmount();
+});
+
+test("empty draft browses input history from newest to oldest and back to empty", async () => {
+  const sink = makeSink();
+  const { stdin, unmount } = render(
+    h(Harness, { sink, inputHistory: ["first", "second", "third"] }),
+  );
+  await delay(10);
+
+  await type(stdin, "\x1b[A");
+  assert.equal(sink.value, "third");
+  await type(stdin, "\x1b[A");
+  assert.equal(sink.value, "second");
+  await type(stdin, "\x1b[B");
+  assert.equal(sink.value, "third");
+  await type(stdin, "\x1b[B");
+  assert.equal(sink.value, "");
+  unmount();
+});
+
+test("editing a recalled input exits history navigation", async () => {
+  const sink = makeSink();
+  const { stdin, unmount } = render(h(Harness, { sink, inputHistory: ["first", "second"] }));
+  await delay(10);
+
+  await type(stdin, "\x1b[A", "!", "\x1b[A");
+  assert.equal(sink.value, "second!");
+  unmount();
+});
+
+test("history navigation takes priority after recalling a slash command", async () => {
+  const sink = makeSink();
+  const { stdin, unmount } = render(
+    h(Harness, { sink, inputHistory: ["/help", "middle", "latest"] }),
+  );
+  await delay(10);
+
+  await type(stdin, "\x1b[A", "\x1b[A", "\x1b[A", "\x1b[B");
+  assert.equal(sink.value, "middle");
+  assert.deepEqual(sink.slashMoves, []);
   unmount();
 });
 
@@ -296,9 +344,45 @@ test("multiline draft renders every line with its prefix", async () => {
   const { stdin, lastFrame, unmount } = render(h(Harness, { sink }));
   await delay(10);
   await type(stdin, "ab", "\n", "cd");
-  const frame = lastFrame() ?? "";
+  const frame = stripVTControlCharacters(lastFrame() ?? "");
   assert.match(frame, /› ab/);
   assert.match(frame, /cd/);
+  unmount();
+});
+
+test("moving through a wrapped mixed-width draft preserves its layout", async () => {
+  const sink = makeSink();
+  const { stdin, lastFrame, unmount } = render(h(Harness, { sink, initial: MIXED_WIDTH_DRAFT }));
+  await delay(20);
+  const before = stripVTControlCharacters(lastFrame() ?? "");
+  await type(stdin, ...Array.from({ length: 12 }, () => "\x1b[D"));
+  const after = stripVTControlCharacters(lastFrame() ?? "");
+  assert.equal(after, before);
+  unmount();
+});
+
+test("mixed-width drafts use the remaining row before wrapping", async () => {
+  const sink = makeSink();
+  const { lastFrame, unmount } = render(h(Harness, { sink, initial: MIXED_WIDTH_DRAFT }));
+  await delay(20);
+  const [, firstInputRow = "", secondInputRow = ""] = stripVTControlCharacters(
+    lastFrame() ?? "",
+  ).split("\n");
+  assert.match(firstInputRow, /› 这里/);
+  assert.match(firstInputRow, /session.*不会影响/);
+  assert.match(secondInputRow, /仍存在的旧对话。/);
+  unmount();
+});
+
+test("up arrow moves through soft-wrapped visual rows", async () => {
+  const sink = makeSink();
+  const { stdin, unmount } = render(
+    h(Harness, { sink, initial: MIXED_WIDTH_DRAFT, inputHistory: ["older input"] }),
+  );
+  await delay(20);
+  await type(stdin, "\x1b[A", "X");
+  assert.equal(sink.value.replace("X", ""), MIXED_WIDTH_DRAFT);
+  assert.equal(sink.value.endsWith("X"), false);
   unmount();
 });
 

@@ -34,6 +34,9 @@ export interface ChatCompactionSummary {
   readonly kept: number;
   readonly truncatedTools?: number;
   readonly beforeInputTokens?: number;
+  readonly checkpointId?: string;
+  readonly checkpointGeneration?: number;
+  readonly checkpointSummaryStatus?: "valid" | "fallback" | "skipped";
 }
 
 export interface ChatInputRequirement {

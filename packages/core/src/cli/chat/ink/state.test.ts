@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import type { SessionEvent } from "@roll-agent/runtime";
+import { TOOL_OUTCOME_KINDS, type SessionEvent } from "@roll-agent/runtime";
 import { chatReducer, createInitialState, type ChatUiState } from "./state.ts";
 
 function event(state: ChatUiState, id: string, e: SessionEvent): ChatUiState {
@@ -25,14 +25,60 @@ test("submit-user commits a user bubble and goes busy", () => {
   assert.deepEqual(state.history, [{ kind: "user", id: "u1", text: "hello" }]);
 });
 
-test("text-delta accumulates streaming text and clears thinking", () => {
+test("message-start remains a neutral lifecycle event and text-delta accumulates output", () => {
   let state = createInitialState("qwen", undefined);
   state = event(state, "x", { type: "message-start", messageId: "m" });
-  assert.equal(state.live.thinking, true);
+  assert.equal(state.live.reasoningActive, false);
   state = event(state, "x", { type: "text-delta", delta: "Hel" });
   state = event(state, "x", { type: "text-delta", delta: "lo" });
-  assert.equal(state.live.thinking, false);
+  assert.equal(state.live.reasoningActive, false);
   assert.equal(state.live.streamingText, "Hello");
+});
+
+test("reasoning tokens stream separately and flush before a tool call", () => {
+  let state = createInitialState("qwen", undefined);
+  state = event(state, "rs", { type: "reasoning-start", reasoningId: "r1" });
+  state = event(state, "rd", {
+    type: "reasoning-delta",
+    reasoningId: "r1",
+    delta: "先定位代码路径",
+  });
+  assert.equal(state.live.reasoningActive, true);
+  assert.equal(state.live.reasoningText, "先定位代码路径");
+  assert.equal(state.live.streamingText, "");
+
+  state = event(state, "tc", {
+    type: "tool-call",
+    toolCallId: "c1",
+    agentName: "roll",
+    toolName: "search",
+    input: { query: "input" },
+  });
+
+  assert.deepEqual(state.history, [
+    { kind: "reasoning", id: "tc-reasoning", text: "先定位代码路径" },
+  ]);
+  assert.equal(state.live.reasoningActive, false);
+  assert.equal(state.live.reasoningText, "");
+  assert.equal(state.live.activeTools[0]?.name, "roll.search");
+});
+
+test("reasoning-end commits a dedicated block before the final assistant reply", () => {
+  let state = createInitialState("qwen", undefined);
+  state = event(state, "rs", { type: "reasoning-start", reasoningId: "r1" });
+  state = event(state, "rd", {
+    type: "reasoning-delta",
+    reasoningId: "r1",
+    delta: "验证边界",
+  });
+  state = event(state, "re", { type: "reasoning-end", reasoningId: "r1" });
+  state = event(state, "td", { type: "text-delta", delta: "结论" });
+  state = event(state, "mf", { type: "message-finish", text: "结论" });
+
+  assert.deepEqual(state.history, [
+    { kind: "reasoning", id: "re-reasoning", text: "验证边界" },
+    { kind: "assistant", id: "mf", text: "结论" },
+  ]);
 });
 
 test("tool-call adds a live row; tool-result commits it to history", () => {
@@ -98,6 +144,23 @@ test("tool-result with policy denial output commits a denied row", () => {
   ]);
 });
 
+test("tool-result uses typed outcome instead of localized display text", () => {
+  let state = createInitialState("qwen", undefined);
+  state = event(state, "d1", {
+    type: "tool-result",
+    toolCallId: "c1",
+    agentName: "browser-use-agent",
+    toolName: "click_ref",
+    outcome: { kind: TOOL_OUTCOME_KINDS.userRejected, reason: "declined" },
+    display: "arbitrary localized message",
+    output: "arbitrary localized message",
+    isError: true,
+  });
+  assert.deepEqual(state.history, [
+    { kind: "denied", id: "d1", name: "browser-use-agent.click_ref", label: "已取消" },
+  ]);
+});
+
 test("tool-result with ordinary error output keeps the red failure row", () => {
   let state = createInitialState("qwen", undefined);
   state = event(state, "t1", {
@@ -136,7 +199,78 @@ test("turn-cancelled marks active tools as interrupted and records the reason", 
       name: "roll.powershell",
       args: '{"command":"Start-Sleep -Seconds 30"}',
     },
-    { kind: "notice", id: "cancel-1", text: "已取消本轮；工具已收到中断请求。" },
+    {
+      kind: "turn-cancelled",
+      id: "cancel-1",
+      text: "已取消本轮；工具已收到中断请求。",
+      reason: "user",
+    },
+  ]);
+});
+
+test("Ink reducer 保留 batch success/tool_failed/cancelled 的类型化事件语义", () => {
+  let state = createInitialState("qwen", undefined);
+  for (const [toolCallId, toolName] of [
+    ["batch-ok", "read_ok"],
+    ["batch-fail", "read_fail"],
+    ["batch-running", "wait"],
+  ] as const) {
+    state = event(state, `call-${toolCallId}`, {
+      type: "tool-call",
+      toolCallId,
+      agentName: "batch-agent",
+      toolName,
+      input: {},
+    });
+  }
+  state = event(state, "result-ok", {
+    type: "tool-result",
+    toolCallId: "batch-ok",
+    agentName: "batch-agent",
+    toolName: "read_ok",
+    outcome: { kind: TOOL_OUTCOME_KINDS.success },
+    display: "ok",
+    output: "ok",
+    isError: false,
+  });
+  state = event(state, "result-fail", {
+    type: "tool-result",
+    toolCallId: "batch-fail",
+    agentName: "batch-agent",
+    toolName: "read_fail",
+    outcome: { kind: TOOL_OUTCOME_KINDS.toolFailed, reason: "boom" },
+    display: "boom",
+    output: "boom",
+    isError: true,
+  });
+  state = event(state, "batch-cancel", {
+    type: "turn-cancelled",
+    reason: "user",
+    message: "已取消本轮。",
+  });
+
+  assert.equal(state.live.activeTools.length, 0);
+  assert.deepEqual(state.history, [
+    { kind: "tool", id: "result-ok", name: "batch-agent.read_ok", args: "{}", ok: true },
+    {
+      kind: "tool",
+      id: "result-fail",
+      name: "batch-agent.read_fail",
+      args: "{}",
+      ok: false,
+    },
+    {
+      kind: "cancelled",
+      id: "batch-cancel-tool-0",
+      name: "batch-agent.wait",
+      args: "{}",
+    },
+    {
+      kind: "turn-cancelled",
+      id: "batch-cancel",
+      text: "已取消本轮。",
+      reason: "user",
+    },
   ]);
 });
 
@@ -243,12 +377,15 @@ test("compaction events toggle spinner and commit a notice", () => {
     removed: 58,
     kept: 14,
     truncatedTools: 3,
+    checkpointId: "8ba32466-1cb6-4166-a496-fdd8ff048891",
+    checkpointGeneration: 2,
+    checkpointSummaryStatus: "fallback",
   });
   assert.equal(state.live.compacting, false);
   const notice = state.history.at(-1);
   assert.match(
     notice?.kind === "compaction" ? notice.notice : "",
-    /移除 58 条 → 保留 14 条，精简 3 个工具结果/,
+    /移除 58 条 → 保留 14 条，精简 3 个工具结果，checkpoint #2\(fallback\)/,
   );
 });
 
@@ -294,6 +431,16 @@ test("turn-end returns to idle", () => {
   });
   state = chatReducer(state, { type: "turn-end" });
   assert.equal(state.phase, "idle");
+});
+
+test("cancel-requested exposes the pending cancellation phase", () => {
+  let state = chatReducer(createInitialState("qwen", undefined), {
+    type: "submit-user",
+    id: "u1",
+    text: "hi",
+  });
+  state = chatReducer(state, { type: "cancel-requested" });
+  assert.equal(state.phase, "cancelling");
 });
 
 test("createInitialState seeds provided history and thinking level", () => {

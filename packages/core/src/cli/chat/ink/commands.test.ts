@@ -63,6 +63,7 @@ test("parseSkillInvocation 未知前缀返回 undefined", async () => {
   const { parseSkillInvocation } = await import("./commands.ts");
   assert.equal(parseSkillInvocation("/nope 做某事", SKILLS), undefined);
   assert.equal(parseSkillInvocation("普通消息", SKILLS), undefined);
+  assert.equal(parseSkillInvocation("/frontend-design /typo 做某事", SKILLS), undefined);
 });
 
 test("buildSkillEntries 过滤与内置命令同名的 skill", async () => {
@@ -72,14 +73,11 @@ test("buildSkillEntries 过滤与内置命令同名的 skill", async () => {
   assert.ok(names.includes("/typescript-magician"));
 });
 
-test("buildSkillInvocationPrompt 引用 roll__skill 工具", async () => {
-  const { buildSkillInvocationPrompt, parseSkillInvocation } = await import("./commands.ts");
-  const invocation = parseSkillInvocation("/frontend-design 设计首页", SKILLS);
-  assert.ok(invocation);
-  const prompt = buildSkillInvocationPrompt(invocation);
-  assert.ok(prompt.includes("roll__skill"));
-  assert.ok(prompt.includes("- frontend-design"));
-  assert.ok(prompt.includes("设计首页"));
+test("parseSkillInvocation 大小写匹配但保留 canonical skill 名", async () => {
+  const { parseSkillInvocation } = await import("./commands.ts");
+  const invocation = parseSkillInvocation("/FRONTEND-DESIGN 设计首页", SKILLS);
+  assert.equal(invocation?.skills[0]?.name, "frontend-design");
+  assert.equal(invocation?.prompt, "设计首页");
 });
 
 test("buildSkillListLines 单行截断且首行带用法", async () => {

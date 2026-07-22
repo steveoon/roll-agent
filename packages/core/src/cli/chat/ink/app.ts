@@ -5,7 +5,7 @@ import { Box, Static, useInput } from "ink";
 import type { AgentSession } from "@roll-agent/runtime";
 import type { ThinkingLevel } from "../../../llm/providers.ts";
 import { useSession } from "./use-session.ts";
-import type { HistoryItem } from "./state.ts";
+import { CHAT_PHASES, type HistoryItem } from "./state.ts";
 import { HistoryItemView } from "./history-item.ts";
 import { LiveRegion } from "./live-region.ts";
 import { StatusLine } from "./status-line.ts";
@@ -13,7 +13,6 @@ import { TextPrompt } from "./text-prompt.ts";
 import { ConfirmSelect } from "./confirm-select.ts";
 import { SlashPopup } from "./slash-popup.ts";
 import {
-  buildSkillInvocationPrompt,
   buildSkillListLines,
   filterSlashEntries,
   parseSkillInvocation,
@@ -23,6 +22,9 @@ import {
 import { bannerTextLine, type BannerLine } from "../banner.ts";
 import { BannerHistoryView } from "./banner-view.ts";
 import { cycleThinking } from "./thinking.ts";
+import { appendInputHistory } from "./input-history.ts";
+import { resolveTurnActivity } from "./turn-activity.ts";
+import { TurnStatusLine } from "./turn-status-line.ts";
 
 export interface ChatAppProps {
   readonly session: AgentSession;
@@ -45,6 +47,15 @@ function helpText(): string {
 export function ChatApp(props: ChatAppProps): ReactElement {
   const { session, model, contextWindow, onUserSubmit, onExit } = props;
   const availableSkills = props.availableSkills ?? [];
+  const [inputHistory, setInputHistory] = useState<readonly string[]>(() =>
+    (props.initialHistory ?? []).reduce<readonly string[]>(
+      (history, item) => (item.kind === "user" ? appendInputHistory(history, item.text) : history),
+      [],
+    ),
+  );
+  const rememberInput = useCallback((text: string): void => {
+    setInputHistory((history) => appendInputHistory(history, text));
+  }, []);
   const {
     state,
     submit,
@@ -77,14 +88,14 @@ export function ChatApp(props: ChatAppProps): ReactElement {
   }, [commitHistory]);
   const animatedBanner = bannerSettled ? undefined : props.animatedBanner;
   const [selected, setSelected] = useState(0);
-  const slashActive = state.phase === "idle" && state.draft.startsWith("/");
+  const slashActive = state.phase === CHAT_PHASES.idle && state.draft.startsWith("/");
   const slashPopupActive = slashActive && state.draft.split(/\s+/).at(-1)?.startsWith("/") === true;
   const matches = slashPopupActive ? filterSlashEntries(state.draft, availableSkills) : [];
   const maxIndex = Math.max(matches.length - 1, 0);
   const selectedIndex = Math.min(selected, maxIndex);
 
   useInput((input, key) => {
-    if (state.phase === "busy" && key.escape && !key.meta) {
+    if (state.phase === CHAT_PHASES.busy && key.escape && !key.meta) {
       cancel();
     } else if (key.tab && key.shift) {
       toggleAutoMode();
@@ -95,22 +106,24 @@ export function ChatApp(props: ChatAppProps): ReactElement {
     }
   });
 
-  const handleSubmit = (raw: string, sendText?: string): void => {
+  const handleSubmit = (raw: string): void => {
     const text = raw.trim();
     if (text.length === 0) {
       setDraft("");
       return;
     }
+    rememberInput(text);
     // banner 需先于首条消息落入 Static，否则顺序颠倒
     handleBannerSettled();
     onUserSubmit(text);
-    submit(text, sendText);
+    submit(text);
   };
 
   const runSlash = (raw: string): void => {
     handleBannerSettled();
     setDraft("");
     const text = raw.trim();
+    rememberInput(text);
     const parts = text.split(/\s+/);
     const name = parts[0] ?? "";
     const arg = (parts[1] ?? "").toLowerCase();
@@ -178,7 +191,7 @@ export function ChatApp(props: ChatAppProps): ReactElement {
         setDraft(`${invocation.skills.map((skill) => `/${skill.name}`).join(" ")} `);
         return;
       }
-      handleSubmit(text, buildSkillInvocationPrompt(invocation));
+      handleSubmit(text);
       return;
     }
     commitHistory({ kind: "notice", id: randomUUID(), text: `未知命令 ${name}` });
@@ -198,8 +211,8 @@ export function ChatApp(props: ChatAppProps): ReactElement {
       setSelected(0);
     }
   };
-  const onSlashRun = (): void => {
-    const token = state.draft.trim().split(/\s+/, 1)[0] ?? "";
+  const onSlashRun = (raw: string): void => {
+    const token = raw.trim().split(/\s+/, 1)[0] ?? "";
     const exact = SLASH_COMMANDS.some((command) => command.name === token);
     const selectedEntry = matches[selectedIndex];
     if (!exact && selectedEntry?.kind === "skill") {
@@ -209,11 +222,11 @@ export function ChatApp(props: ChatAppProps): ReactElement {
       setSelected(0);
       return;
     }
-    runSlash(exact ? state.draft : (selectedEntry?.name ?? state.draft));
+    runSlash(exact ? raw : (selectedEntry?.name ?? raw));
   };
 
   const footer =
-    state.phase === "confirm" && state.pendingConfirm !== undefined
+    state.phase === CHAT_PHASES.confirm && state.pendingConfirm !== undefined
       ? h(ConfirmSelect, {
           prompt: state.pendingConfirm.prompt,
           args: state.pendingConfirm.args,
@@ -221,7 +234,11 @@ export function ChatApp(props: ChatAppProps): ReactElement {
         })
       : h(TextPrompt, {
           value: state.draft,
-          disabled: state.phase !== "idle",
+          inputHistory,
+          disabled: state.phase !== CHAT_PHASES.idle,
+          ...(state.phase === CHAT_PHASES.cancelling
+            ? { disabledHint: "中断请求已发送，等待当前活动退出…" }
+            : {}),
           slashActive,
           slashPopupActive,
           autoApprove: state.status.autoApprove,
@@ -231,14 +248,20 @@ export function ChatApp(props: ChatAppProps): ReactElement {
           onSlashComplete,
           onSlashRun,
         });
+  const turnActivity = resolveTurnActivity(state);
 
   return h(
     Box,
     { flexDirection: "column" },
     h(Static<HistoryItem>, {
       items: staticItems,
-      children: (historyItem) => {
-        const spaced = historyItem.kind === "user" || historyItem.kind === "assistant";
+      children: (historyItem, index) => {
+        const previousItem = staticItems[index - 1];
+        const spaced =
+          historyItem.kind === "user" ||
+          historyItem.kind === "assistant" ||
+          historyItem.kind === "reasoning" ||
+          previousItem?.kind === "reasoning";
         const indented =
           historyItem.kind === "tool" ||
           historyItem.kind === "denied" ||
@@ -258,7 +281,13 @@ export function ChatApp(props: ChatAppProps): ReactElement {
         )
       : null,
     h(Box, { marginLeft: 1 }, h(LiveRegion, { live: state.live })),
-    h(StatusLine, { status: state.status }),
+    h(
+      Box,
+      { marginTop: turnActivity === undefined ? 0 : 1 },
+      turnActivity === undefined
+        ? h(StatusLine, { status: state.status })
+        : h(TurnStatusLine, { activity: turnActivity }),
+    ),
     slashActive ? h(SlashPopup, { matches, selected: selectedIndex }) : null,
     footer,
   );

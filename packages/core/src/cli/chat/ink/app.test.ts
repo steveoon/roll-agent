@@ -2,9 +2,11 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { setTimeout as delay } from "node:timers/promises";
 import { createElement as h } from "react";
+import { Box } from "ink";
 import { render } from "ink-testing-library";
 import type { AgentSession, SessionEvent } from "@roll-agent/runtime";
 import { ChatApp } from "./app.ts";
+import { HistoryItemView } from "./history-item.ts";
 import { GLYPHS } from "../../utils/glyphs.ts";
 
 function literalPattern(text: string): RegExp {
@@ -109,10 +111,11 @@ test("ChatApp streams an assistant reply into history and shows status", async (
   assert.match(frame, /你好/);
   assert.match(frame, /qwen/);
   assert.match(frame, /left/);
+  assert.match(plain(frame), /qwen[^\n]*\n╭/);
   unmount();
 });
 
-test("ChatApp separates the thinking indicator from the submitted user message", async () => {
+test("ChatApp shows model-waiting status separately from the submitted user message", async () => {
   const sink: Sink = { approved: [], rejected: [] };
   async function* send(): AsyncIterable<SessionEvent> {
     yield { type: "message-start", messageId: "m" };
@@ -134,7 +137,45 @@ test("ChatApp separates the thinking indicator from the submitted user message",
   stdin.write("\r");
   await delay(20);
 
-  assert.match(lastFrame() ?? "", /刚才我不小心取消了，你重来一下\n\n.*思考中…/s);
+  assert.match(plain(lastFrame() ?? ""), /刚才我不小心取消了，你重来一下\n.*等待模型响应…/s);
+  unmount();
+});
+
+test("ChatApp recalls recent submitted inputs with the up arrow", async () => {
+  const sink: Sink = { approved: [], rejected: [] };
+  const submitted: string[] = [];
+  async function* send(): AsyncIterable<SessionEvent> {
+    await delay(30);
+    yield { type: "message-finish", text: "" };
+  }
+  const { stdin, lastFrame, unmount } = render(
+    h(ChatApp, {
+      session: makeSession(send, sink),
+      model: "qwen",
+      contextWindow: undefined,
+      initialHistory: [{ kind: "user", id: "history-first", text: "first" }],
+      onUserSubmit: (text: string) => submitted.push(text),
+      onExit: () => {},
+    }),
+  );
+  await delay(10);
+
+  stdin.write("second");
+  await delay(10);
+  stdin.write("\r");
+  await waitFor(() => assert.deepEqual(submitted, ["second"]));
+  await waitFor(() => assert.match(plain(lastFrame() ?? ""), /Esc 中断本轮/));
+  await waitFor(() => assert.match(plain(lastFrame() ?? ""), /Enter 发送/));
+  await delay(30);
+
+  stdin.write("\x1b[A");
+  await delay(10);
+  stdin.write("\x1b[A");
+  await delay(10);
+  stdin.write("\r");
+  await waitFor(() => assert.deepEqual(submitted, ["second", "first"]));
+  await waitFor(() => assert.match(plain(lastFrame() ?? ""), /Esc 中断本轮/));
+  await waitFor(() => assert.match(plain(lastFrame() ?? ""), /Enter 发送/));
   unmount();
 });
 
@@ -161,7 +202,7 @@ for (const [label, escapeSequence] of [
       yield {
         type: "turn-cancelled",
         reason: "user",
-        message: "已取消本轮；正在运行的工具已收到中断请求。",
+        message: "已停止本轮操作。正在进行的任务也已请求停止。",
       };
     }
     const { stdin, lastFrame, unmount } = render(
@@ -182,7 +223,7 @@ for (const [label, escapeSequence] of [
     stdin.write(escapeSequence);
     await waitFor(() => assert.equal(sink.cancelled, 1));
     await waitFor(() => assert.match(plain(lastFrame() ?? ""), /roll\.powershell.*已中断/s));
-    assert.match(plain(lastFrame() ?? ""), /已取消本轮/);
+    assert.match(plain(lastFrame() ?? ""), /已停止本轮操作/);
     unmount();
   });
 }
@@ -197,7 +238,12 @@ test("ChatApp Esc 中断 token streaming", async () => {
     yield { type: "message-start", messageId: "m" };
     yield { type: "text-delta", delta: "尚未完成的输出" };
     await cancellation;
-    yield { type: "turn-cancelled", reason: "user", message: "已取消本轮。" };
+    await delay(80);
+    yield {
+      type: "turn-cancelled",
+      reason: "user",
+      message: "已停止本轮回复。之前的对话会保留，你可以继续输入。",
+    };
   }
   const { stdin, lastFrame, unmount } = render(
     h(ChatApp, {
@@ -216,9 +262,39 @@ test("ChatApp Esc 中断 token streaming", async () => {
 
   stdin.write("\x1b");
   await waitFor(() => assert.equal(sink.cancelled, 1));
-  await waitFor(() => assert.match(plain(lastFrame() ?? ""), /已取消本轮/));
+  await waitFor(() => assert.match(plain(lastFrame() ?? ""), /正在中断…/));
+  await waitFor(() => assert.match(plain(lastFrame() ?? ""), /已停止本轮回复/));
   assert.doesNotMatch(plain(lastFrame() ?? ""), /尚未完成的输出/);
   unmount();
+});
+
+test("turn-cancelled 窄宽度换行保持前缀列与正文列对齐", () => {
+  const message =
+    "已停止本轮操作。正在进行的任务也已请求停止。之前的对话和已完成进度会保留；部分已经完成的操作不会自动撤销，请检查结果。";
+  for (const [reason, prefix] of [
+    ["user", "■"],
+    ["timeout", "⚠"],
+    ["runtime", "✗"],
+  ] as const) {
+    const { lastFrame, unmount } = render(
+      h(
+        Box,
+        { width: 40 },
+        h(HistoryItemView, {
+          item: { kind: "turn-cancelled", id: reason, reason, text: message },
+        }),
+      ),
+    );
+    const lines = plain(lastFrame() ?? "").split("\n");
+
+    assert.ok(lines.length > 1);
+    assert.equal(lines[0]?.slice(0, 2), `${prefix} `);
+    for (const line of lines.slice(1)) {
+      assert.match(line, /^ {2}\S/u);
+    }
+    assert.equal(lines.map((line) => line.slice(2)).join(""), message);
+    unmount();
+  }
 });
 
 test("ChatApp confirm flow shows tool args and approves on y", async () => {
@@ -458,6 +534,83 @@ test("ChatApp dims reasoning and never shows literal think tags", async () => {
   unmount();
 });
 
+test("ChatApp streams provider reasoning separately from tool activity", async () => {
+  const sink: Sink = { approved: [], rejected: [] };
+  let releaseReasoning: (() => void) | undefined;
+  let releaseTool: (() => void) | undefined;
+  const reasoningDone = new Promise<void>((resolve) => {
+    releaseReasoning = resolve;
+  });
+  const toolDone = new Promise<void>((resolve) => {
+    releaseTool = resolve;
+  });
+  async function* send(): AsyncIterable<SessionEvent> {
+    yield { type: "message-start", messageId: "m" };
+    yield { type: "reasoning-start", reasoningId: "r1" };
+    yield {
+      type: "reasoning-delta",
+      reasoningId: "r1",
+      delta: "先检查输入状态，再定位工具调用边界。",
+    };
+    await reasoningDone;
+    yield { type: "reasoning-end", reasoningId: "r1" };
+    yield {
+      type: "tool-call",
+      toolCallId: "c1",
+      agentName: "roll",
+      toolName: "search",
+      input: { query: "input state" },
+    };
+    await toolDone;
+    yield {
+      type: "tool-result",
+      toolCallId: "c1",
+      agentName: "roll",
+      toolName: "search",
+      output: "found",
+      isError: false,
+    };
+    yield { type: "text-delta", delta: "已经定位并修复。" };
+    yield { type: "message-finish", text: "已经定位并修复。" };
+  }
+  const { stdin, lastFrame, unmount } = render(
+    h(ChatApp, {
+      session: makeSession(send, sink),
+      model: "qwen",
+      contextWindow: undefined,
+      onUserSubmit: () => {},
+      onExit: () => {},
+    }),
+  );
+  await delay(10);
+  stdin.write("debug");
+  await delay(10);
+  stdin.write("\r");
+
+  await waitFor(() => {
+    const frame = plain(lastFrame() ?? "");
+    assert.match(frame, /思考中…/);
+    assert.match(frame, /先检查输入状态，再定位工具调用边界/);
+    assert.match(frame, /推理过程\n\s*│ 先检查输入状态，再定位工具调用边界。\n\n.*思考中…/s);
+    assert.match(frame, /思考中…[^\n]*\n╭/);
+    assert.doesNotMatch(frame, /roll\.search/);
+  });
+
+  releaseReasoning?.();
+  await waitFor(() => {
+    const frame = plain(lastFrame() ?? "");
+    assert.match(frame, /执行 roll\.search/);
+    assert.match(frame, /推理过程/);
+    assert.match(frame, /工具调用边界。\n\n\s+· roll\.search/);
+    assert.doesNotMatch(frame, /工具调用边界。\n\n\n/);
+    assert.ok(frame.indexOf("先检查输入状态") < frame.indexOf("roll.search"));
+  });
+
+  releaseTool?.();
+  await waitFor(() => assert.match(plain(lastFrame() ?? ""), /已经定位并修复/));
+  unmount();
+});
+
 test("ChatApp renders many tool rows in history", async () => {
   const sink: Sink = { approved: [], rejected: [] };
   async function* send(): AsyncIterable<SessionEvent> {
@@ -584,7 +737,7 @@ test("ChatApp completes skill names from the slash popup", async () => {
   unmount();
 });
 
-test("ChatApp sends skill-prefixed prompts as grounded skill instructions", async () => {
+test("ChatApp 把显式 skill 原始输入交给 AgentSession，由 Harness 预加载", async () => {
   const sink: Sink = { approved: [], rejected: [] };
   const sent: string[] = [];
   const submitted: string[] = [];
@@ -609,9 +762,7 @@ test("ChatApp sends skill-prefixed prompts as grounded skill instructions", asyn
   await waitFor(() => assert.equal(sent.length, 1));
 
   assert.deepEqual(submitted, ["/typescript-magician 修一下类型"]);
-  assert.match(sent[0] ?? "", /roll__skill/);
-  assert.match(sent[0] ?? "", /typescript-magician/);
-  assert.match(sent[0] ?? "", /修一下类型/);
+  assert.equal(sent[0], "/typescript-magician 修一下类型");
   assert.match(plain(lastFrame() ?? ""), /\/typescript-magician 修一下类型/);
   unmount();
 });
@@ -782,11 +933,9 @@ test("plain 'exit' is sent as a message; only /exit quits", async () => {
     }),
   );
   await delay(10);
-  for (const ch of "/exit") {
-    second.stdin.write(ch);
-  }
-  await waitFor(() => assert.match(second.lastFrame() ?? "", /\/exit/));
-  second.stdin.write("\r");
+  // A real PTY may deliver the whole command and Enter in one input chunk, before React has
+  // rendered a slash-active frame. The submitted value must still route through runSlash().
+  second.stdin.write("/exit\r");
   await waitFor(() => assert.equal(exited, true));
   second.unmount();
 });

@@ -42,6 +42,7 @@ export interface SessionManagerOptions {
 export interface SpawnRequest {
   readonly command: string;
   readonly workdir: string;
+  readonly env?: NodeJS.ProcessEnv;
   readonly onDelta?: (stream: BashStreamName, delta: string) => void;
 }
 
@@ -105,7 +106,7 @@ export class SessionManager {
       command: request.command,
       workdir: request.workdir,
       profile: this.options.profile,
-      env: this.options.env,
+      env: request.env ?? this.options.env,
       bufferCapacity: this.options.bufferCapacity,
       ...(request.onDelta ? { onDelta: request.onDelta } : {}),
     });

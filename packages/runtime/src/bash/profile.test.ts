@@ -73,7 +73,7 @@ test("resolveShellProfile 在非 Windows 返回 POSIX profile", () => {
   const result = resolveShellProfile({
     platform: "darwin",
     env: { SHELL: "/bin/zsh" },
-    fileExists: (path) => path === "/bin/zsh",
+    fileExists: (path) => path === "/bin/zsh" || path === "/bin/sh",
   });
   assert.equal(result.supported, true);
   if (!result.supported) {
@@ -87,6 +87,8 @@ test("resolveShellProfile 在非 Windows 返回 POSIX profile", () => {
   const spec = result.profile.buildSpawn("echo hi", "/tmp", {});
   assert.equal(spec.file, "/bin/zsh");
   assert.deepEqual(spec.args, ["-c", "echo hi"]);
+  const safeSpec = result.profile.buildSpawn("echo hi", "/tmp", { SHELL: "/bin/sh" });
+  assert.equal(safeSpec.file, "/bin/sh");
 });
 
 test("resolveShellProfile 在 win32 + pwsh 7 返回 PowerShell profile", () => {

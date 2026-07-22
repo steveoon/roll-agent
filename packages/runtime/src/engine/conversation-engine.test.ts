@@ -2,20 +2,39 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import { simulateReadableStream } from "ai";
 import { MockLanguageModelV4 } from "ai/test";
 import { rollConfigSchema } from "@roll-agent/core/config/schema";
 import type { McpClientManager } from "@roll-agent/core/mcp/client-manager";
 import type { RegisteredAgent } from "@roll-agent/core/types/agent";
-import type { LanguageModelV4StreamPart } from "@ai-sdk/provider";
+import type { LanguageModelV4CallOptions, LanguageModelV4StreamPart } from "@ai-sdk/provider";
 import { ThreadStore } from "../store/thread-store.ts";
 import { DefaultToolPolicy } from "../policy/default-policy.ts";
+import type { SessionEvent } from "../types/events.ts";
 import { ConversationEngine, type AgentBootstrapIssue } from "./conversation-engine.ts";
 import type { ShellProfile } from "../bash/profile.ts";
+import { killProcessGroup } from "../bash/kill.ts";
+import { executeTranscriptTool } from "../tool-bridge/transcript-tool.ts";
+import {
+  TOOL_RESOURCE_ACCESS_MODES,
+  TOOL_RESOURCE_HINT_KINDS,
+} from "../tool-bridge/tool-execution-coordinator.ts";
+import { createEmptyCompactionToolState } from "./compaction-checkpoint.ts";
+import { createEmptyCompactionSemanticState } from "./compaction-semantic-state.ts";
+import { SUMMARY_PREFIX } from "./compactor.ts";
 
 function tempDir(): string {
   return mkdtempSync(join(tmpdir(), "roll-engine-"));
+}
+
+async function drain(events: AsyncIterable<unknown>): Promise<void> {
+  const iterator = events[Symbol.asyncIterator]();
+  let next = await iterator.next();
+  while (next.done !== true) {
+    next = await iterator.next();
+  }
 }
 
 const powershellProfile: ShellProfile = {
@@ -31,6 +50,23 @@ const powershellProfile: ShellProfile = {
   classify: () => "unknown",
   killTree: async () => {},
   systemPromptHints: () => ["当前 shell 后端是 PowerShell 7。"],
+};
+
+const posixSessionProfile: ShellProfile = {
+  id: "posix",
+  toolName: "bash",
+  supportsSessionExec: true,
+  supportsSafeCommandClassification: true,
+  buildSpawn: (command, workdir, env) => ({
+    file: "/bin/sh",
+    args: ["-c", command],
+    options: { cwd: workdir, detached: true, stdio: ["ignore", "pipe", "pipe"], env },
+  }),
+  classify: () => "known-safe",
+  killTree: async (pid, intent) => {
+    killProcessGroup(pid, intent === "interrupt" ? "SIGINT" : "SIGKILL");
+  },
+  systemPromptHints: () => ["当前 shell 后端是 POSIX shell。"],
 };
 
 test("ConversationEngine records runtime model override on created threads", async () => {
@@ -102,6 +138,121 @@ test("ConversationEngine 同一 thread 复用 live session，显式 close 后允
 
     await engine.dispose();
     store.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("ConversationEngine 经过 ThreadStore 重开后保留 Esc 前的对话与恢复上下文", async () => {
+  const dir = tempDir();
+  const config = rollConfigSchema.parse({
+    llm: {
+      defaultProvider: "mock",
+      defaultModel: "default-model",
+      providers: { mock: { apiKey: "test" } },
+    },
+    ask: {},
+    agents: { dataDir: "/tmp/roll-engine-test" },
+  });
+  try {
+    let calls = 0;
+    const firstStore = new ThreadStore(dir);
+    const firstEngine = new ConversationEngine({
+      config,
+      model: new MockLanguageModelV4({
+        doStream: async () => {
+          calls += 1;
+          if (calls === 1) {
+            return {
+              stream: simulateReadableStream<LanguageModelV4StreamPart>({
+                chunks: engineTextStep("步骤 A 已完成"),
+                initialDelayInMs: null,
+                chunkDelayInMs: null,
+              }),
+            };
+          }
+          return {
+            stream: simulateReadableStream<LanguageModelV4StreamPart>({
+              chunks: engineTextStep("不应完成"),
+              initialDelayInMs: 200,
+              chunkDelayInMs: null,
+            }),
+          };
+        },
+      }),
+      store: firstStore,
+      sources: [],
+      skillLibrary: null,
+    });
+    const firstSession = await firstEngine.createSession();
+    const threadId = firstSession.id;
+    await drain(firstSession.send("先完成步骤 A"));
+    const cancelledEvents: SessionEvent[] = [];
+    for await (const event of firstSession.send("开始步骤 B")) {
+      cancelledEvents.push(event);
+      if (event.type === "message-start") {
+        firstSession.cancel();
+      }
+    }
+    assert.equal(
+      cancelledEvents.some((event) => event.type === "turn-cancelled"),
+      true,
+    );
+    await firstEngine.dispose();
+    firstStore.close();
+
+    let recoveryPrompt: LanguageModelV4CallOptions["prompt"] = [];
+    const reopenedStore = new ThreadStore(dir);
+    const reopenedEngine = new ConversationEngine({
+      config,
+      model: textModelCapture((options) => {
+        recoveryPrompt = options.prompt;
+      }),
+      store: reopenedStore,
+      sources: [],
+      skillLibrary: null,
+    });
+    const resumed = await reopenedEngine.resumeSession(threadId);
+    assert.doesNotMatch(
+      JSON.stringify(resumed.getMessages()),
+      /cancelledTurnRecovery|Roll interrupted-turn recovery checkpoint/u,
+    );
+    await drain(resumed.send("继续"));
+
+    const serializedRecoveryPrompt = JSON.stringify(recoveryPrompt);
+    assert.match(serializedRecoveryPrompt, /先完成步骤 A|步骤 A 已完成/u);
+    assert.match(serializedRecoveryPrompt, /开始步骤 B/u);
+    const recoveryCallMessage = recoveryPrompt.find(
+      (message) =>
+        message.role === "assistant" &&
+        message.content.some(
+          (part) =>
+            part.type === "tool-call" && part.toolName === "roll__interrupted_turn_recovery",
+        ),
+    );
+    const recoveryToolMessage = recoveryPrompt.find(
+      (message) =>
+        message.role === "tool" &&
+        message.content.some(
+          (part) =>
+            part.type === "tool-result" && part.toolName === "roll__interrupted_turn_recovery",
+        ),
+    );
+    assert.ok(recoveryCallMessage);
+    assert.ok(recoveryToolMessage?.role === "tool");
+    const recoveryResult = recoveryToolMessage.content.find(
+      (part) => part.type === "tool-result" && part.toolName === "roll__interrupted_turn_recovery",
+    );
+    assert.ok(recoveryResult && recoveryResult.type === "tool-result");
+    assert.equal(recoveryResult.output.type, "text");
+    if (recoveryResult.output.type === "text") {
+      assert.match(recoveryResult.output.value, /"source":"roll-runtime-tool-ledger"/u);
+      assert.match(recoveryResult.output.value, /已完成的步骤和工具记录仍然有效/u);
+    }
+    assert.doesNotMatch(serializedRecoveryPrompt, /rollHarness|cancelledTurnRecovery/u);
+
+    await reopenedEngine.dispose();
+    reopenedStore.close();
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -348,6 +499,7 @@ test("ConversationEngine ensures core-managed agents before connecting", async (
     installPath: "/tmp/browser-use-agent",
     registeredAt: "2026-06-17T00:00:00.000Z",
     status: "stopped",
+    source: { type: "remote-manifest", endpoint: "https://agents.example/browser" },
   };
   const ensured: Array<{
     readonly agentName: string;
@@ -357,7 +509,18 @@ test("ConversationEngine ensures core-managed agents before connecting", async (
   const clientManager = {
     connect: async (agentName: string) => {
       connected.push(agentName);
-      return { listTools: async () => ({ tools: [] }) };
+      return {
+        listTools: async () => ({
+          tools: [
+            {
+              name: "inspect",
+              description: "inspect browser",
+              inputSchema: { type: "object", properties: {} },
+              annotations: { readOnlyHint: true, destructiveHint: false },
+            },
+          ],
+        }),
+      };
     },
     disconnectAll: async () => {},
   } as unknown as McpClientManager;
@@ -372,10 +535,20 @@ test("ConversationEngine ensures core-managed agents before connecting", async (
     },
   });
 
-  await engine.createSession();
+  const session = await engine.createSession();
 
   assert.deepEqual(ensured, [{ agentName: "browser-use-agent", env: { TEST_ENV: "1" } }]);
   assert.deepEqual(connected, ["browser-use-agent"]);
+  const capability = session
+    .getCapabilityManifest()
+    .tools.find((tool) => tool.id === "browser-use-agent__inspect");
+  assert.equal(capability?.source, "remote-manifest");
+  assert.equal(capability?.transport, "streamable-http");
+  assert.equal(capability?.runtimeOwnership, "core-managed");
+  assert.deepEqual(capability?.annotations, {
+    readOnlyHint: true,
+    destructiveHint: false,
+  });
   await engine.dispose();
 });
 
@@ -438,6 +611,38 @@ test("ConversationEngine threads its providerOptions into sub-agent sampling con
 
   await engine.prepareAgentRefresh(agent);
   assert.deepEqual(connectOptionsCalls[1]?.samplingProviderOptions, nextProviderOptions);
+  await engine.dispose();
+});
+
+test("ConversationEngine threads structured output controls into AgentSession", async () => {
+  const config = rollConfigSchema.parse({
+    llm: {
+      defaultProvider: "mock",
+      defaultModel: "default-model",
+      providers: { mock: { apiKey: "test" } },
+    },
+    ask: {},
+    agents: { dataDir: "/tmp/roll-engine-test" },
+  });
+  const structuredOutputProviderOptions = { alibaba: { enableThinking: false } };
+  const engine = new ConversationEngine({
+    config,
+    model: new MockLanguageModelV4({}),
+    sources: [],
+    skillLibrary: null,
+    structuredOutputProviderOptions,
+    structuredOutputReasoning: "high",
+  });
+
+  const session = await engine.createSession();
+
+  assert.deepEqual(
+    Reflect.get(session, "structuredOutputProviderOptions"),
+    structuredOutputProviderOptions,
+  );
+  assert.equal(Reflect.get(session, "structuredOutputReasoning"), "high");
+  assert.equal(Reflect.get(session, "compaction").timeoutMs, 120_000);
+  assert.equal(Reflect.get(session, "compaction").maxOutputTokens, 8_192);
   await engine.dispose();
 });
 
@@ -591,6 +796,1861 @@ function toolThenDoneModel(toolName: string, input: unknown): MockLanguageModelV
     },
   });
 }
+
+function engineTextStep(text: string): LanguageModelV4StreamPart[] {
+  return [
+    { type: "stream-start", warnings: [] },
+    { type: "text-start", id: "t" },
+    { type: "text-delta", id: "t", delta: text },
+    { type: "text-end", id: "t" },
+    { type: "finish", usage: mockUsage(), finishReason: STOP_REASON },
+  ];
+}
+
+function engineStreamErrorStep(message: string): LanguageModelV4StreamPart[] {
+  return [
+    { type: "stream-start", warnings: [] },
+    { type: "error", error: message },
+  ];
+}
+
+function engineToolCallStep(
+  toolCallId: string,
+  toolName: string,
+  input: unknown,
+): LanguageModelV4StreamPart[] {
+  return [
+    { type: "stream-start", warnings: [] },
+    { type: "tool-call", toolCallId, toolName, input: JSON.stringify(input) },
+    { type: "finish", usage: mockUsage(), finishReason: TOOL_CALLS_REASON },
+  ];
+}
+
+function sequencedEngineModel(steps: readonly LanguageModelV4StreamPart[][]): MockLanguageModelV4 {
+  let index = 0;
+  return new MockLanguageModelV4({
+    doStream: async () => {
+      const chunks = steps[index] ?? steps.at(-1) ?? [];
+      index += 1;
+      return {
+        stream: simulateReadableStream<LanguageModelV4StreamPart>({
+          chunks,
+          initialDelayInMs: null,
+          chunkDelayInMs: null,
+        }),
+      };
+    },
+  });
+}
+
+function structuredCompactionEngineModel(
+  steps: readonly LanguageModelV4StreamPart[][],
+  draft: (options: LanguageModelV4CallOptions) => unknown,
+  observeStreamCall?: (options: LanguageModelV4CallOptions) => void,
+): MockLanguageModelV4 {
+  let index = 0;
+  return new MockLanguageModelV4({
+    doStream: async (options) => {
+      observeStreamCall?.(options);
+      const chunks = steps[index] ?? steps.at(-1) ?? [];
+      index += 1;
+      return {
+        stream: simulateReadableStream<LanguageModelV4StreamPart>({
+          chunks,
+          initialDelayInMs: null,
+          chunkDelayInMs: null,
+        }),
+      };
+    },
+    doGenerate: async (options) => ({
+      content: [{ type: "text", text: JSON.stringify(draft(options)) }],
+      finishReason: STOP_REASON,
+      usage: mockUsage(),
+      warnings: [],
+    }),
+  });
+}
+
+function opaqueEvidenceIds(options: LanguageModelV4CallOptions): readonly string[] {
+  return [
+    ...new Set(
+      [...JSON.stringify(options.prompt).matchAll(/evidence_[0-9a-f]{24}/gu)].map(
+        (match) => match[0],
+      ),
+    ),
+  ];
+}
+
+function nestedStrings(value: unknown): readonly string[] {
+  if (typeof value === "string") {
+    return [value];
+  }
+  if (Array.isArray(value)) {
+    return value.flatMap(nestedStrings);
+  }
+  if (typeof value !== "object" || value === null) {
+    return [];
+  }
+  return Object.values(value).flatMap(nestedStrings);
+}
+
+function structuredCompactionEvidence(options: LanguageModelV4CallOptions): readonly {
+  readonly evidenceId: string;
+  readonly summary: string;
+  readonly outcome?: string;
+}[] {
+  const prompt = nestedStrings(options.prompt).find((value) =>
+    value.includes("<harness-evidence>"),
+  );
+  assert.ok(prompt);
+  const match = /<harness-evidence>\n([\s\S]+)\n<\/harness-evidence>/u.exec(prompt);
+  assert.ok(match?.[1]);
+  const parsed = JSON.parse(match[1]) as {
+    readonly evidence: readonly {
+      readonly evidenceId: string;
+      readonly summary: string;
+      readonly outcome?: string;
+    }[];
+  };
+  return parsed.evidence;
+}
+
+test("ConversationEngine resourceHints 对 partial-invalid 整体回退，并规范化 field", async () => {
+  const config = rollConfigSchema.parse({
+    llm: {
+      defaultProvider: "mock",
+      defaultModel: "default-model",
+      providers: { mock: { apiKey: "test" } },
+    },
+    ask: {},
+    agents: { dataDir: "/tmp/roll-engine-test" },
+  });
+  const agent: RegisteredAgent = {
+    skill: { name: "resource-agent", description: "resource", metadata: {} },
+    transport: { type: "stdio", command: "node", args: ["dist/index.js"] },
+    runtime: { ownership: "on-demand" },
+    installPath: "/tmp/resource-agent",
+    registeredAt: "2026-07-17T00:00:00.000Z",
+    status: "idle",
+  };
+  const listedTool = (name: string) => ({
+    name,
+    inputSchema: {
+      type: "object",
+      properties: {
+        path: { type: "string" },
+        conversationId: { type: "string" },
+      },
+      required: ["path", "conversationId"],
+    },
+    annotations: { destructiveHint: true },
+    _meta: {
+      "roll/resourceHints": [
+        { field: "path", kind: "file", mode: "write" },
+        name === "left"
+          ? { field: "conversationId", kind: "custom", mode: "write" }
+          : { field: "", kind: "conversation", mode: "write" },
+      ],
+    },
+  });
+  let active = 0;
+  let maxActive = 0;
+  const clientManager = {
+    connect: async () => ({
+      listTools: async () => ({ tools: [listedTool("left"), listedTool("right")] }),
+      callTool: async () => {
+        active += 1;
+        maxActive = Math.max(maxActive, active);
+        await new Promise<void>((resolve) => setTimeout(resolve, 20));
+        active -= 1;
+        return { content: [{ type: "text", text: "ok" }] };
+      },
+    }),
+    disconnectAll: async () => {},
+  } as unknown as McpClientManager;
+  const issues: AgentBootstrapIssue[] = [];
+  const model = sequencedEngineModel([
+    [
+      { type: "stream-start", warnings: [] },
+      {
+        type: "tool-call",
+        toolCallId: "left-call",
+        toolName: "resource-agent__left",
+        input: JSON.stringify({ path: "left.txt", conversationId: "shared" }),
+      },
+      {
+        type: "tool-call",
+        toolCallId: "right-call",
+        toolName: "resource-agent__right",
+        input: JSON.stringify({ path: "right.txt", conversationId: "shared" }),
+      },
+      { type: "finish", usage: mockUsage(), finishReason: TOOL_CALLS_REASON },
+    ],
+    engineTextStep("done"),
+  ]);
+  const engine = new ConversationEngine({
+    config,
+    model,
+    agents: [agent],
+    skillLibrary: null,
+    clientManager,
+    ensureAgentReady: async () => {},
+    onAgentBootstrapIssue: (issue) => issues.push(issue),
+  });
+
+  const session = await engine.createSession();
+  await drain(session.send("run partial-invalid batch"));
+
+  assert.equal(maxActive, 1);
+  assert.equal(issues.length, 2);
+  for (const issue of issues) {
+    assert.equal(issue.agentName, "resource-agent");
+    assert.match(issue.message, /roll\/resourceHints 无效.*已回退 Agent 级资源锁/u);
+  }
+  await engine.dispose();
+
+  let trimmedActive = 0;
+  let trimmedMaxActive = 0;
+  const trimmedIssues: AgentBootstrapIssue[] = [];
+  const trimmedClientManager = {
+    connect: async () => ({
+      listTools: async () => ({
+        tools: ["left", "right"].map((name) => ({
+          name,
+          inputSchema: {
+            type: "object",
+            properties: {
+              path: { type: "string" },
+              conversationId: { type: "string" },
+            },
+            required: ["path", "conversationId"],
+          },
+          annotations: { destructiveHint: true },
+          _meta: {
+            "roll/resourceHints": [
+              { field: " path ", kind: "file", mode: "write" },
+              { field: "conversationId", kind: "conversation", mode: "write" },
+            ],
+          },
+        })),
+      }),
+      callTool: async () => {
+        trimmedActive += 1;
+        trimmedMaxActive = Math.max(trimmedMaxActive, trimmedActive);
+        await new Promise<void>((resolve) => setTimeout(resolve, 20));
+        trimmedActive -= 1;
+        return { content: [{ type: "text", text: "ok" }] };
+      },
+    }),
+    disconnectAll: async () => {},
+  } as unknown as McpClientManager;
+  const trimmedModel = sequencedEngineModel([
+    [
+      { type: "stream-start", warnings: [] },
+      {
+        type: "tool-call",
+        toolCallId: "trimmed-left",
+        toolName: "resource-agent__left",
+        input: JSON.stringify({ path: "shared.txt", conversationId: "left" }),
+      },
+      {
+        type: "tool-call",
+        toolCallId: "trimmed-right",
+        toolName: "resource-agent__right",
+        input: JSON.stringify({ path: "shared.txt", conversationId: "right" }),
+      },
+      { type: "finish", usage: mockUsage(), finishReason: TOOL_CALLS_REASON },
+    ],
+    engineTextStep("done"),
+  ]);
+  const trimmedEngine = new ConversationEngine({
+    config,
+    model: trimmedModel,
+    agents: [agent],
+    skillLibrary: null,
+    clientManager: trimmedClientManager,
+    ensureAgentReady: async () => {},
+    onAgentBootstrapIssue: (issue) => trimmedIssues.push(issue),
+  });
+
+  const trimmedSession = await trimmedEngine.createSession();
+  await drain(trimmedSession.send("run trimmed field batch"));
+
+  assert.equal(trimmedMaxActive, 1);
+  assert.deepEqual(trimmedIssues, []);
+  await trimmedEngine.dispose();
+});
+
+function textModelCapture(capture: (options: LanguageModelV4CallOptions) => void) {
+  return new MockLanguageModelV4({
+    doStream: async (options) => {
+      capture(options);
+      return {
+        stream: simulateReadableStream<LanguageModelV4StreamPart>({
+          chunks: [
+            { type: "stream-start", warnings: [] },
+            { type: "text-start", id: "t" },
+            { type: "text-delta", id: "t", delta: "resumed" },
+            { type: "text-end", id: "t" },
+            { type: "finish", usage: mockUsage(), finishReason: STOP_REASON },
+          ],
+          initialDelayInMs: null,
+          chunkDelayInMs: null,
+        }),
+      };
+    },
+  });
+}
+
+test("ConversationEngine context overflow 重放后仅持久化一组当前 Turn", async () => {
+  const dir = tempDir();
+  try {
+    const config = rollConfigSchema.parse({
+      llm: {
+        defaultProvider: "mock",
+        defaultModel: "default-model",
+        providers: { mock: { apiKey: "test" } },
+      },
+      ask: {},
+      runtime: {
+        compaction: {
+          enabled: true,
+          strategy: "truncate",
+          threshold: 0.75,
+          keepRecentTurns: 1,
+          keepRecentTokens: 1,
+        },
+      },
+      agents: { dataDir: "/tmp/roll-engine-test" },
+    });
+    let modelCalls = 0;
+    const steps = [
+      engineStreamErrorStep("context_length_exceeded: prompt is too long"),
+      engineTextStep("overflow recovered exactly once"),
+    ];
+    const model = new MockLanguageModelV4({
+      doStream: async () => {
+        const chunks = steps[modelCalls] ?? steps.at(-1) ?? [];
+        modelCalls += 1;
+        return {
+          stream: simulateReadableStream<LanguageModelV4StreamPart>({
+            chunks,
+            initialDelayInMs: null,
+            chunkDelayInMs: null,
+          }),
+        };
+      },
+    });
+    const store = new ThreadStore(dir);
+    const threadId = store.createThread();
+    store.appendMessages(threadId, [
+      { role: "user", content: "older turn" },
+      { role: "assistant", content: "older answer" },
+      { role: "user", content: "recent turn" },
+      { role: "assistant", content: "recent answer" },
+    ]);
+    const engine = new ConversationEngine({
+      config,
+      model,
+      store,
+      sources: [],
+      skillLibrary: null,
+    });
+
+    const session = await engine.resumeSession(threadId);
+    const events: SessionEvent[] = [];
+    for await (const event of session.send("overflow current turn")) {
+      events.push(event);
+    }
+
+    assert.equal(modelCalls, 2);
+    assert.equal(events.filter((event) => event.type === "message-start").length, 1);
+    assert.equal(events.filter((event) => event.type === "context-compacted").length, 1);
+    assert.equal(events.filter((event) => event.type === "message-finish").length, 1);
+    assert.equal(
+      events.some((event) => event.type === "error"),
+      false,
+    );
+
+    const activeMessages = store.getMessages(threadId);
+    assert.equal(
+      activeMessages.filter(
+        (message) => message.role === "user" && message.content === "overflow current turn",
+      ).length,
+      1,
+    );
+    assert.equal(
+      activeMessages.filter(
+        (message) =>
+          message.role === "assistant" &&
+          JSON.stringify(message.content).includes("overflow recovered exactly once"),
+      ).length,
+      1,
+    );
+    const transcript = store.listTranscriptMessages(threadId);
+    assert.equal(
+      transcript.filter(
+        (entry) =>
+          entry.message.role === "user" && entry.message.content === "overflow current turn",
+      ).length,
+      1,
+    );
+    assert.equal(
+      transcript.filter(
+        (entry) =>
+          entry.message.role === "assistant" &&
+          JSON.stringify(entry.message.content).includes("overflow recovered exactly once"),
+      ).length,
+      1,
+    );
+
+    await engine.dispose();
+    store.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("ConversationEngine 将 ToolExecutionRecord 持久化并可跨进程恢复", async () => {
+  const dir = tempDir();
+  try {
+    const config = rollConfigSchema.parse({
+      llm: {
+        defaultProvider: "mock",
+        defaultModel: "default-model",
+        providers: { mock: { apiKey: "test" } },
+      },
+      ask: {},
+      runtime: {
+        compaction: {
+          enabled: true,
+          strategy: "truncate",
+          threshold: 0.75,
+          keepRecentTurns: 1,
+          keepRecentTokens: 1,
+        },
+      },
+      agents: { dataDir: "/tmp/roll-engine-test" },
+    });
+    const store = new ThreadStore(dir);
+    const engine = new ConversationEngine({
+      config,
+      model: toolThenDoneModel("probe__inspect", { path: "secret.txt" }),
+      store,
+      sources: [
+        {
+          agentName: "probe",
+          client: {
+            callTool: async () => ({
+              content: [{ type: "text", text: "ok" }],
+              structuredContent: { inspected: true },
+              _meta: { trace: "kept-in-raw-ledger" },
+            }),
+          } as never,
+          resourceBaseDir: process.cwd(),
+          tools: [
+            {
+              tool: {
+                name: "inspect",
+                inputSchema: {
+                  type: "object" as const,
+                  properties: { path: { type: "string" } },
+                  required: ["path"],
+                },
+              },
+              annotations: { readOnlyHint: true },
+              resourceHints: [{ field: "path", kind: "file" }],
+            },
+          ],
+        },
+      ],
+      skillLibrary: null,
+    });
+
+    const session = await engine.createSession();
+    // Drain the full Tool loop so the ledger write and assistant response both settle.
+    await drain(session.send("inspect"));
+    const [record] = store.listToolExecutions(session.id);
+    assert.equal(record?.outcome.kind, "success");
+    assert.deepEqual(record?.input.value, { path: "secret.txt" });
+    const persistedRecordJson = JSON.stringify(record);
+    assert.doesNotMatch(persistedRecordJson, /kept-in-raw-ledger/u);
+    assert.match(persistedRecordJson, /\[redacted\]/u);
+    assert.equal(record?.persistence?.version, 1);
+    assert.equal(record?.persistence?.fields.raw.redactionApplied, true);
+    assert.match(JSON.stringify(record?.model), /ok/u);
+    assert.match(JSON.stringify(record?.display), /ok/u);
+
+    // Add a second completed turn so manual compaction has an older prefix to archive.
+    await drain(session.send("second turn"));
+    // Drain the atomic checkpoint commit.
+    await drain(session.compact("manual"));
+    const checkpoint = store.getLatestCheckpoint(session.id);
+    assert.ok(checkpoint);
+    assert.ok(
+      checkpoint.resources.some(
+        (resource) =>
+          resource.key === `file:${resolve(process.cwd(), "secret.txt")}` &&
+          resource.evidenceExecutionId === record?.id,
+      ),
+    );
+    assert.equal(checkpoint.toolState.countsByOutcome.success, 1);
+    assert.deepEqual(checkpoint.toolState.anomalies, []);
+    assert.equal(checkpoint.toolState.integrityStatus, "valid");
+
+    await engine.dispose();
+    store.close();
+    const reopened = new ThreadStore(dir);
+    assert.equal(reopened.listToolExecutions(session.id)[0]?.id, record?.id);
+    reopened.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("ConversationEngine 原子提交 checkpoint，并在 resume 时注入受控 transcript 入口", async () => {
+  const dir = tempDir();
+  try {
+    const config = rollConfigSchema.parse({
+      llm: {
+        defaultProvider: "mock",
+        defaultModel: "default-model",
+        providers: { mock: { apiKey: "test" } },
+      },
+      ask: {},
+      runtime: {
+        compaction: {
+          enabled: true,
+          strategy: "truncate",
+          threshold: 0.75,
+          keepRecentTurns: 1,
+          keepRecentTokens: 1,
+        },
+      },
+      agents: { dataDir: "/tmp/roll-engine-test" },
+    });
+    const store = new ThreadStore(dir);
+    const threadId = store.createThread();
+    store.appendMessages(threadId, [
+      { role: "user", content: "old-goal" },
+      { role: "assistant", content: "old-answer" },
+      { role: "user", content: "current-goal" },
+      { role: "assistant", content: "current-answer" },
+    ]);
+    let capturedPrompt = "";
+    const engine = new ConversationEngine({
+      config,
+      model: textModelCapture((options) => {
+        capturedPrompt = JSON.stringify(options.prompt);
+      }),
+      store,
+      sources: [],
+      skillLibrary: null,
+    });
+
+    const session = await engine.resumeSession(threadId);
+    const compactedEvents: SessionEvent[] = [];
+    for await (const event of session.compact("manual")) {
+      compactedEvents.push(event);
+    }
+    const checkpoint = store.getLatestCheckpoint(threadId);
+    assert.ok(checkpoint);
+    assert.equal(checkpoint.goal?.verbatimRequest, "current-goal");
+    assert.deepEqual(checkpoint.constraints, []);
+    assert.equal(checkpoint.transcript.completeness, "complete");
+    assert.deepEqual(checkpoint.transcript.messages, {
+      fromSequenceExclusive: -1,
+      throughSequence: 3,
+    });
+    assert.deepEqual(checkpoint.transcript.toolExecutions, {
+      fromSequenceExclusive: -1,
+      throughSequence: -1,
+    });
+    assert.deepEqual(checkpoint.version === 2 ? checkpoint.semanticEvidence : undefined, {
+      messagesThroughSequence: 3,
+      toolExecutionsThroughSequence: -1,
+    });
+    assert.deepEqual(store.getMessages(threadId), [
+      { role: "user", content: "current-goal" },
+      { role: "assistant", content: "current-answer" },
+    ]);
+    const compacted = compactedEvents.find((event) => event.type === "context-compacted");
+    assert.ok(compacted && compacted.type === "context-compacted");
+    assert.equal(compacted.checkpointId, checkpoint.id);
+    assert.equal(compacted.checkpointGeneration, 1);
+    assert.equal(compacted.checkpointSummaryStatus, "skipped");
+    assert.ok(
+      session.getCapabilityManifest().tools.some((tool) => tool.role === "transcript-read"),
+    );
+    assert.equal(
+      store.readCheckpointTranscript(threadId, {
+        checkpointId: checkpoint.id,
+        kind: "message",
+        limit: 1,
+      }).entries[0]?.sequence,
+      0,
+    );
+
+    await session.close();
+    const resumed = await engine.resumeSession(threadId);
+    // Drain the turn so the model call captures the reconstructed reminder.
+    await drain(resumed.send("continue"));
+    assert.match(capturedPrompt, new RegExp(checkpoint.id, "u"));
+    assert.match(capturedPrompt, /roll__transcript/u);
+    assert.match(
+      capturedPrompt,
+      /Unclassified evidence: message 0 user: old-goal/u,
+      "未分类的旧用户证据必须显式保留，而不是在 truncate 中静默消失",
+    );
+
+    await engine.dispose();
+    store.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("ConversationEngine 从持久化 V1 checkpoint 恢复时只用 watermark 后证据驱动下一次裁剪", async () => {
+  const dir = tempDir();
+  const config = rollConfigSchema.parse({
+    llm: {
+      defaultProvider: "mock",
+      defaultModel: "default-model",
+      providers: { mock: { apiKey: "test" } },
+    },
+    ask: {},
+    runtime: {
+      compaction: {
+        enabled: true,
+        strategy: "summarize",
+        threshold: 0.75,
+        keepRecentTurns: 1,
+        keepRecentTokens: 1,
+      },
+    },
+    agents: { dataDir: "/tmp/roll-engine-test" },
+  });
+  try {
+    const initialStore = new ThreadStore(dir);
+    const threadId = initialStore.createThread();
+    const archivedHistory = Array.from({ length: 40 }, (_, index) =>
+      index % 2 === 0
+        ? ({ role: "user", content: `archived-user-${String(index)}` } as const)
+        : ({ role: "assistant", content: `archived-assistant-${String(index)}` } as const),
+    );
+    initialStore.appendMessages(threadId, archivedHistory);
+    const seeded = initialStore.commitCompaction(threadId, {
+      messages: archivedHistory.slice(-2),
+      expectedActiveMessages: archivedHistory,
+      expectedLatestCheckpointId: undefined,
+      draft: {
+        constraints: [],
+        resources: [],
+        toolState: createEmptyCompactionToolState(),
+        runningWork: [],
+        context: {
+          cwd: process.cwd(),
+          stableRuleIds: [],
+          skills: [],
+          explicitSkillNames: [],
+        },
+        summary: { status: "skipped" },
+      },
+      semanticState: createEmptyCompactionSemanticState(),
+      semanticEvidenceWatermarks: {
+        messagesThroughSequence: 39,
+        toolExecutionsThroughSequence: -1,
+      },
+      evidenceWatermarks: {
+        transcriptMessagesThroughSequence: 39,
+        toolExecutionsThroughSequence: -1,
+      },
+    });
+    const legacyMarker = "LEGACY_PENDING_KEEP_ME";
+    const legacySecret = "legacy-super-secret";
+    const legacySummaryPrefix =
+      "以下摘要由另一个语言模型在压缩早前对话后产出。请据此继续推进、避免重复已完成的工作:";
+    initialStore.replaceMessages(threadId, [
+      {
+        role: "user",
+        content: `${legacySummaryPrefix}\n\n${legacyMarker}\nAWS_SECRET_ACCESS_KEY=${legacySecret}`,
+      },
+      { role: "assistant", content: "好的,我已读取之前工作的交接摘要,继续推进。" },
+      ...archivedHistory.slice(-2),
+    ]);
+    initialStore.close();
+
+    const legacyCheckpoint = {
+      version: 1,
+      id: seeded.id,
+      generation: seeded.generation,
+      createdAt: seeded.createdAt,
+      transcript: seeded.transcript,
+      goal: seeded.goal,
+      constraints: seeded.constraints,
+      resources: seeded.resources,
+      toolState: seeded.toolState,
+      runningWork: seeded.runningWork,
+      context: seeded.context,
+      summary: seeded.summary,
+    };
+    const database = new DatabaseSync(join(dir, "threads.db"));
+    database
+      .prepare(
+        `UPDATE compaction_checkpoints
+            SET schema_version = 1, checkpoint_json = ?
+          WHERE id = ?`,
+      )
+      .run(JSON.stringify(legacyCheckpoint), seeded.id);
+    database.close();
+
+    const store = new ThreadStore(dir);
+    store.appendMessages(threadId, [
+      { role: "user", content: "current-after-v1" },
+      { role: "assistant", content: "current-after-v1-answer" },
+    ]);
+    let semanticPrompt = "";
+    let recoveryPrompt = "";
+    const model = structuredCompactionEngineModel(
+      [engineTextStep("migration-continued")],
+      (options) => {
+        semanticPrompt = JSON.stringify(options.prompt);
+        const evidenceIds = opaqueEvidenceIds(options);
+        return {
+          startsNewGoalScope: false,
+          goal: null,
+          constraints: [],
+          decisions: [],
+          completedWork: [],
+          pendingWork: [],
+          resources: [],
+          runningSessions: [],
+          uncertainties: [],
+          resolutions: [],
+          evidenceReviews: evidenceIds.map((evidenceId) => ({
+            evidenceId,
+            disposition: "irrelevant",
+            reason: "watermark regression fixture",
+          })),
+        };
+      },
+      (options) => {
+        recoveryPrompt = JSON.stringify(options.prompt);
+      },
+    );
+    const engine = new ConversationEngine({
+      config,
+      model,
+      store,
+      sources: [],
+      skillLibrary: null,
+    });
+    const session = await engine.resumeSession(threadId);
+    const events: SessionEvent[] = [];
+    for await (const event of session.compact("manual")) {
+      events.push(event);
+    }
+
+    assert.match(semanticPrompt, /message 40 user: current-after-v1/u);
+    assert.match(semanticPrompt, /message 41 assistant: current-after-v1-answer/u);
+    assert.match(semanticPrompt, new RegExp(legacyMarker, "u"));
+    assert.doesNotMatch(semanticPrompt, /message 0 user: archived-user-0/u);
+    assert.equal(events.find((event) => event.type === "context-compacted")?.removed, 4);
+    const checkpoint = store.getLatestCheckpoint(threadId);
+    assert.ok(checkpoint);
+    assert.equal(checkpoint.version, 2);
+    if (checkpoint.version !== 2) {
+      assert.fail("expected V2 checkpoint after V1 recovery");
+    }
+    assert.equal(checkpoint.previousCheckpointId, seeded.id);
+    assert.equal(checkpoint.semanticEvidence.messagesThroughSequence, 41);
+    assert.ok(checkpoint.transcript.messages.throughSequence > 41);
+    assert.equal(checkpoint.semanticEvidence.toolExecutionsThroughSequence, -1);
+    assert.equal(
+      checkpoint.semanticState.uncertainties.some(
+        (item) =>
+          item.sourceQuotes.some((quote) => quote.includes(legacyMarker)) &&
+          item.provenance.every((reference) => reference.kind === "legacy_snapshot"),
+      ),
+      true,
+    );
+    assert.equal(checkpoint.semanticState.goal?.text.includes(legacyMarker) ?? false, false);
+    assert.equal(
+      [
+        ...checkpoint.semanticState.constraints,
+        ...checkpoint.semanticState.decisions,
+        ...checkpoint.semanticState.completedWork,
+        ...checkpoint.semanticState.pendingWork,
+      ].some((item) => item.text.includes(legacyMarker)),
+      false,
+    );
+    assert.deepEqual(store.getMessages(threadId), [
+      { role: "user", content: "current-after-v1" },
+      { role: "assistant", content: "current-after-v1-answer" },
+    ]);
+    await drain(session.send("continue-after-v1-migration"));
+    assert.match(recoveryPrompt, new RegExp(legacyMarker, "u"));
+
+    const archivedLegacyEntries = store
+      .listTranscriptMessages(threadId, { limit: 500 })
+      .filter((entry) => entry.provenance === "legacy_snapshot");
+    assert.ok(archivedLegacyEntries.length > 0);
+    assert.match(JSON.stringify(archivedLegacyEntries), new RegExp(legacyMarker, "u"));
+    assert.doesNotMatch(JSON.stringify(archivedLegacyEntries), new RegExp(legacySecret, "u"));
+
+    await engine.dispose();
+    store.close();
+
+    const denseStore = new ThreadStore(dir);
+    denseStore.appendMessages(
+      threadId,
+      Array.from({ length: 96 }, (_, index) => ({
+        role: "user" as const,
+        content: `must preserve dense constraint ${String(index)} ${"x".repeat(360)}`,
+      })),
+    );
+    let denseRecoveryPrompt = "";
+    const denseEngine = new ConversationEngine({
+      config,
+      model: structuredCompactionEngineModel(
+        [engineTextStep("dense-compaction-continued")],
+        (options) => {
+          const evidence = structuredCompactionEvidence(options);
+          return {
+            startsNewGoalScope: false,
+            goal: null,
+            constraints: [],
+            decisions: [],
+            completedWork: [],
+            pendingWork: [],
+            resources: [],
+            runningSessions: [],
+            uncertainties: evidence.map((entry) => ({
+              priorItemId: null,
+              text: entry.summary,
+              sourceEvidenceIds: [entry.evidenceId],
+              sourceQuotes: [entry.summary],
+            })),
+            resolutions: [],
+            evidenceReviews: [],
+          };
+        },
+        (options) => {
+          denseRecoveryPrompt = JSON.stringify(options.prompt);
+        },
+      ),
+      store: denseStore,
+      sources: [],
+      skillLibrary: null,
+    });
+    const denseSession = await denseEngine.resumeSession(threadId);
+    for (let round = 0; round < 3; round += 1) {
+      await drain(denseSession.compact("manual"));
+    }
+    const denseCheckpoint = denseStore.getLatestCheckpoint(threadId);
+    assert.ok(denseCheckpoint);
+    assert.equal(denseCheckpoint.version, 2);
+    await drain(denseSession.send("verify dense recovery"));
+    assert.doesNotMatch(
+      denseRecoveryPrompt,
+      new RegExp(legacyMarker, "u"),
+      "fixture must evict the legacy marker from the bounded reminder",
+    );
+
+    let checkpointId: string | undefined = denseCheckpoint.id;
+    let archivedMarkerFound = false;
+    const visitedCheckpointIds = new Set<string>();
+    while (checkpointId !== undefined && !visitedCheckpointIds.has(checkpointId)) {
+      visitedCheckpointIds.add(checkpointId);
+      let afterSequence: number | undefined;
+      let previousCheckpointId: string | undefined;
+      while (true) {
+        const page = denseStore.readCheckpointTranscript(threadId, {
+          checkpointId,
+          kind: "message",
+          ...(afterSequence !== undefined ? { afterSequence } : {}),
+          limit: 20,
+        });
+        previousCheckpointId = page.previousCheckpointId;
+        archivedMarkerFound ||= JSON.stringify(page.entries).includes(legacyMarker);
+        if (page.nextAfterSequence === undefined) {
+          break;
+        }
+        afterSequence = page.nextAfterSequence;
+      }
+      checkpointId = previousCheckpointId;
+    }
+    assert.equal(archivedMarkerFound, true);
+    assert.equal(
+      denseStore
+        .listTranscriptMessages(threadId, { limit: 500 })
+        .filter((entry) => entry.provenance === "legacy_snapshot").length,
+      archivedLegacyEntries.length,
+      "later V2 compaction must not duplicate the one-time V1 archive",
+    );
+
+    await denseEngine.dispose();
+    denseStore.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("ConversationEngine 无法在 reminder 完整投影 V1 snapshot 时保留原 checkpoint 与消息", async () => {
+  const dir = tempDir();
+  const config = rollConfigSchema.parse({
+    llm: {
+      defaultProvider: "mock",
+      defaultModel: "default-model",
+      providers: { mock: { apiKey: "test" } },
+    },
+    ask: {},
+    runtime: {
+      compaction: {
+        enabled: true,
+        strategy: "summarize",
+        threshold: 0.75,
+        keepRecentTurns: 1,
+        keepRecentTokens: 1,
+      },
+    },
+    agents: { dataDir: "/tmp/roll-engine-test" },
+  });
+  try {
+    const initialStore = new ThreadStore(dir);
+    const threadId = initialStore.createThread();
+    const archivedHistory = [
+      { role: "user", content: "legacy-goal" },
+      { role: "assistant", content: "legacy-answer" },
+    ] as const;
+    initialStore.appendMessages(threadId, archivedHistory);
+    const seeded = initialStore.commitCompaction(threadId, {
+      messages: archivedHistory,
+      expectedActiveMessages: archivedHistory,
+      expectedLatestCheckpointId: undefined,
+      draft: {
+        constraints: [],
+        resources: [],
+        toolState: createEmptyCompactionToolState(),
+        runningWork: [],
+        context: {
+          cwd: process.cwd(),
+          stableRuleIds: [],
+          skills: [],
+          explicitSkillNames: [],
+        },
+        summary: { status: "skipped" },
+      },
+      semanticState: createEmptyCompactionSemanticState(),
+      semanticEvidenceWatermarks: {
+        messagesThroughSequence: 1,
+        toolExecutionsThroughSequence: -1,
+      },
+      evidenceWatermarks: {
+        transcriptMessagesThroughSequence: 1,
+        toolExecutionsThroughSequence: -1,
+      },
+    });
+    const legacySummaryPrefix =
+      "以下摘要由另一个语言模型在压缩早前对话后产出。请据此继续推进、避免重复已完成的工作:";
+    const unmigratedMarker = "UNMIGRATED_REMINDER_MARKER";
+    const oversizedLegacySummary = `${unmigratedMarker}${"x".repeat(512 * 50)}`;
+    const activeMessages = [
+      { role: "user", content: `${legacySummaryPrefix}\n\n${oversizedLegacySummary}` },
+      { role: "assistant", content: "好的,我已读取之前工作的交接摘要,继续推进。" },
+      ...archivedHistory,
+    ] as const;
+    initialStore.replaceMessages(threadId, activeMessages);
+    initialStore.appendMessages(threadId, [
+      { role: "user", content: "post-v1-turn" },
+      { role: "assistant", content: "post-v1-answer" },
+    ]);
+    const legacyCheckpoint = {
+      version: 1,
+      id: seeded.id,
+      generation: seeded.generation,
+      createdAt: seeded.createdAt,
+      transcript: seeded.transcript,
+      goal: seeded.goal,
+      constraints: seeded.constraints,
+      resources: seeded.resources,
+      toolState: seeded.toolState,
+      runningWork: seeded.runningWork,
+      context: seeded.context,
+      summary: seeded.summary,
+    };
+    const database = new DatabaseSync(join(dir, "threads.db"));
+    database
+      .prepare(
+        `UPDATE compaction_checkpoints
+            SET schema_version = 1, checkpoint_json = ?
+          WHERE id = ?`,
+      )
+      .run(JSON.stringify(legacyCheckpoint), seeded.id);
+    database.close();
+    initialStore.close();
+
+    let draftCalls = 0;
+    const store = new ThreadStore(dir);
+    const engine = new ConversationEngine({
+      config,
+      model: structuredCompactionEngineModel([], () => {
+        draftCalls += 1;
+        return {
+          startsNewGoalScope: false,
+          goal: null,
+          constraints: [],
+          decisions: [],
+          completedWork: [],
+          pendingWork: [],
+          resources: [],
+          runningSessions: [],
+          uncertainties: [],
+          resolutions: [],
+          evidenceReviews: [],
+        };
+      }),
+      store,
+      sources: [],
+      skillLibrary: null,
+    });
+    const session = await engine.resumeSession(threadId);
+    const events: SessionEvent[] = [];
+    for await (const event of session.compact("manual")) {
+      events.push(event);
+    }
+
+    assert.equal(draftCalls, 1);
+    assert.equal(events.find((event) => event.type === "context-compacted")?.removed, 0);
+    assert.equal(store.getLatestCheckpoint(threadId)?.version, 1);
+    assert.equal(
+      store
+        .getMessages(threadId)
+        .some(
+          (message) =>
+            typeof message.content === "string" && message.content.includes(unmigratedMarker),
+        ),
+      true,
+    );
+
+    await engine.dispose();
+    store.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("ConversationEngine 结构化 checkpoint 跨重启继承 pending，并单独保留成功 Tool evidence", async () => {
+  const dir = tempDir();
+  const config = rollConfigSchema.parse({
+    llm: {
+      defaultProvider: "mock",
+      defaultModel: "default-model",
+      providers: { mock: { apiKey: "test" } },
+    },
+    ask: {},
+    runtime: {
+      compaction: {
+        enabled: true,
+        strategy: "summarize",
+        threshold: 0.75,
+        keepRecentTurns: 1,
+        keepRecentTokens: 1,
+      },
+    },
+    agents: { dataDir: "/tmp/roll-engine-test" },
+  });
+  try {
+    const initialStore = new ThreadStore(dir);
+    const initialModel = structuredCompactionEngineModel(
+      [engineTextStep("开始实现"), engineTextStep("仍需验证")],
+      (options) => {
+        const [goalEvidence] = structuredCompactionEvidence(options);
+        assert.ok(goalEvidence);
+        return {
+          startsNewGoalScope: false,
+          goal: null,
+          constraints: [],
+          decisions: [],
+          completedWork: [],
+          pendingWork: [
+            {
+              priorItemId: null,
+              text: "运行验证并确认结果",
+              sourceEvidenceIds: [goalEvidence.evidenceId],
+              sourceQuotes: [goalEvidence.summary],
+            },
+          ],
+          resources: [],
+          runningSessions: [],
+          uncertainties: [],
+          resolutions: [],
+          evidenceReviews: [],
+        };
+      },
+    );
+    const initialEngine = new ConversationEngine({
+      config,
+      model: initialModel,
+      store: initialStore,
+      sources: [],
+      skillLibrary: null,
+    });
+    const initialSession = await initialEngine.createSession();
+    const threadId = initialSession.id;
+    await drain(initialSession.send("实现结构化恢复"));
+    await drain(initialSession.send("继续"));
+    await drain(initialSession.compact("manual"));
+
+    const firstCheckpoint = initialStore.getLatestCheckpoint(threadId);
+    assert.ok(firstCheckpoint);
+    assert.equal(firstCheckpoint.version, 2);
+    if (firstCheckpoint.version !== 2) {
+      assert.fail("expected V2 checkpoint");
+    }
+    assert.equal(firstCheckpoint.semanticState.pendingWork.length, 1);
+    assert.equal(firstCheckpoint.semanticState.completedWork.length, 0);
+    assert.ok(firstCheckpoint.semanticEvidence.messagesThroughSequence >= 1);
+    const pendingItemId = firstCheckpoint.semanticState.pendingWork[0]?.id;
+    assert.ok(pendingItemId);
+    assert.equal(firstCheckpoint.summary.status, "valid");
+    await initialEngine.dispose();
+    initialStore.close();
+
+    const resumedStore = new ThreadStore(dir);
+    const resumedModel = structuredCompactionEngineModel(
+      [engineToolCallStep("verify-call", "probe__verify", {}), engineTextStep("验证完成")],
+      (options) => {
+        const prompt = JSON.stringify(options.prompt);
+        const evidence = structuredCompactionEvidence(options);
+        const successEvidence = evidence.find((entry) => entry.outcome === "success");
+        const previousPendingId = /semantic_pending_work_[0-9a-f]{24}/u.exec(prompt)?.[0];
+        assert.ok(successEvidence);
+        assert.ok(evidence.length > 0);
+        assert.equal(previousPendingId, pendingItemId);
+        return {
+          startsNewGoalScope: false,
+          goal: null,
+          constraints: [],
+          decisions: [],
+          completedWork: [
+            {
+              priorItemId: null,
+              text: "验证已成功完成",
+              sourceEvidenceIds: [successEvidence.evidenceId],
+              sourceQuotes: [successEvidence.summary],
+            },
+          ],
+          pendingWork: [],
+          resources: [],
+          runningSessions: [],
+          uncertainties: [],
+          resolutions: [],
+          evidenceReviews: [],
+        };
+      },
+    );
+    const resumedEngine = new ConversationEngine({
+      config,
+      model: resumedModel,
+      store: resumedStore,
+      sources: [
+        {
+          agentName: "probe",
+          client: {
+            callTool: async () => ({ content: [{ type: "text", text: "verified" }] }),
+          } as never,
+          tools: [
+            {
+              tool: {
+                name: "verify",
+                inputSchema: { type: "object" as const, additionalProperties: false },
+              },
+              annotations: { readOnlyHint: true },
+            },
+          ],
+        },
+      ],
+      skillLibrary: null,
+    });
+    const resumedSession = await resumedEngine.resumeSession(threadId);
+    await drain(resumedSession.send("好的，继续"));
+    await drain(resumedSession.compact("manual"));
+
+    const secondCheckpoint = resumedStore.getLatestCheckpoint(threadId);
+    assert.ok(secondCheckpoint);
+    assert.equal(secondCheckpoint.version, 2);
+    if (secondCheckpoint.version !== 2) {
+      assert.fail("expected V2 checkpoint");
+    }
+    assert.equal(secondCheckpoint.previousCheckpointId, firstCheckpoint.id);
+    assert.ok(
+      secondCheckpoint.semanticEvidence.messagesThroughSequence >
+        firstCheckpoint.semanticEvidence.messagesThroughSequence,
+    );
+    assert.ok(secondCheckpoint.semanticEvidence.toolExecutionsThroughSequence >= 0);
+    assert.equal(
+      secondCheckpoint.semanticState.pendingWork.length,
+      1,
+      "成功 Tool 事实不能在缺少任务级因果契约时自动删除 pending",
+    );
+    assert.equal(secondCheckpoint.semanticState.completedWork.length, 1);
+    assert.match(
+      secondCheckpoint.semanticState.completedWork[0]?.text ?? "",
+      /Successful Tool evidence:.*verified/u,
+    );
+    assert.equal(
+      secondCheckpoint.semanticState.completedWork[0]?.provenance.some(
+        (reference) => reference.kind === "tool_execution",
+      ),
+      true,
+    );
+    const summaries = resumedStore
+      .getMessages(threadId)
+      .filter(
+        (message) =>
+          message.role === "user" &&
+          typeof message.content === "string" &&
+          message.content.startsWith(SUMMARY_PREFIX),
+      );
+    assert.equal(summaries.length, 0, "structured state is injected once via checkpoint reminder");
+
+    await resumedEngine.dispose();
+    resumedStore.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("ConversationEngine 连续 compaction/resume 继承硬约束，并由后续同 scope 显式允许撤销", async () => {
+  const dir = tempDir();
+  try {
+    const config = rollConfigSchema.parse({
+      llm: {
+        defaultProvider: "mock",
+        defaultModel: "default-model",
+        providers: { mock: { apiKey: "test" } },
+      },
+      ask: {},
+      runtime: {
+        compaction: {
+          enabled: true,
+          strategy: "truncate",
+          threshold: 0.75,
+          keepRecentTurns: 1,
+          keepRecentTokens: 1,
+        },
+      },
+      agents: { dataDir: "/tmp/roll-engine-test" },
+    });
+    const store = new ThreadStore(dir);
+    const engine = new ConversationEngine({
+      config,
+      model: sequencedEngineModel([
+        engineTextStep("initial work done"),
+        engineTextStep("continued once"),
+        engineTextStep("continued twice"),
+      ]),
+      store,
+      sources: [],
+      skillLibrary: null,
+    });
+
+    const session = await engine.createSession();
+    const threadId = session.id;
+    await drain(session.send("修复调度器，但绝对不要修改公开 API"));
+    await drain(session.send("继续"));
+    await drain(session.compact("manual"));
+
+    const first = store.getLatestCheckpoint(threadId);
+    assert.ok(first);
+    assert.equal(first.goal?.verbatimRequest, "修复调度器，但绝对不要修改公开 API");
+    assert.deepEqual(first.constraints, [{ quote: "绝对不要修改公开 API", sourceSequence: 0 }]);
+
+    await drain(session.send("继续处理"));
+    await drain(session.compact("manual"));
+    const second = store.getLatestCheckpoint(threadId);
+    assert.ok(second);
+    assert.equal(second.generation, 2);
+    assert.equal(second.previousCheckpointId, first.id);
+    assert.equal(second.goal?.verbatimRequest, "修复调度器，但绝对不要修改公开 API");
+    assert.deepEqual(second.constraints, first.constraints);
+
+    await engine.dispose();
+    store.close();
+
+    const reopenedStore = new ThreadStore(dir);
+    const resumedPrompts: string[] = [];
+    const reopenedEngine = new ConversationEngine({
+      config,
+      model: textModelCapture((options) => {
+        resumedPrompts.push(JSON.stringify(options.prompt));
+      }),
+      store: reopenedStore,
+      sources: [],
+      skillLibrary: null,
+    });
+    const resumed = await reopenedEngine.resumeSession(threadId);
+    await drain(resumed.send("继续"));
+
+    assert.match(resumedPrompts[0] ?? "", /修复调度器，但绝对不要修改公开 API/u);
+    assert.match(resumedPrompts[0] ?? "", /绝对不要修改公开 API/u);
+    assert.match(resumedPrompts[0] ?? "", new RegExp(second.id, "u"));
+    assert.deepEqual(reopenedStore.getLatestCheckpoint(threadId)?.constraints, [
+      { quote: "绝对不要修改公开 API", sourceSequence: 0 },
+    ]);
+
+    await drain(resumed.send("现在允许修改公开 API"));
+    await drain(resumed.compact("manual"));
+    const third = reopenedStore.getLatestCheckpoint(threadId);
+    assert.ok(third);
+    assert.equal(third.generation, 3);
+    assert.equal(third.previousCheckpointId, second.id);
+    assert.equal(
+      third.goal?.verbatimRequest,
+      "修复调度器，但绝对不要修改公开 API",
+      "同 scope 的约束变更不能把主目标替换成一条权限说明",
+    );
+    assert.deepEqual(third.constraints, []);
+
+    await reopenedEngine.dispose();
+    reopenedStore.close();
+
+    const finalStore = new ThreadStore(dir);
+    let finalPrompt = "";
+    const finalEngine = new ConversationEngine({
+      config,
+      model: textModelCapture((options) => {
+        finalPrompt = JSON.stringify(options.prompt);
+      }),
+      store: finalStore,
+      sources: [],
+      skillLibrary: null,
+    });
+    const finalSession = await finalEngine.resumeSession(threadId);
+    await drain(finalSession.send("继续"));
+
+    assert.match(finalPrompt, /现在允许修改公开 API/u);
+    assert.match(finalPrompt, /semanticState 是 V2 恢复事实源/u);
+    assert.match(finalPrompt, /\\"constraints\\":\[\]/u);
+    assert.match(finalPrompt, new RegExp(third.id, "u"));
+    assert.deepEqual(finalStore.getLatestCheckpoint(threadId)?.constraints, []);
+
+    await finalEngine.dispose();
+    finalStore.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("ConversationEngine checkpoint Skill 绑定选中 goal，续接继承而普通新任务清空", async () => {
+  const dir = tempDir();
+  try {
+    const config = rollConfigSchema.parse({
+      llm: {
+        defaultProvider: "mock",
+        defaultModel: "default-model",
+        providers: { mock: { apiKey: "test" } },
+      },
+      ask: {},
+      runtime: {
+        compaction: {
+          enabled: true,
+          strategy: "truncate",
+          threshold: 0.75,
+          keepRecentTurns: 1,
+          keepRecentTokens: 1,
+        },
+      },
+      agents: { dataDir: "/tmp/roll-engine-test" },
+    });
+    const store = new ThreadStore(dir);
+    const reviewSkill = { name: "review", description: "审查", source: "project" } as const;
+    const engine = new ConversationEngine({
+      config,
+      model: sequencedEngineModel([
+        engineTextStep("reviewed"),
+        engineTextStep("continued"),
+        engineTextStep("continued politely"),
+        engineTextStep("new task handled"),
+      ]),
+      store,
+      sources: [],
+      skillLibrary: {
+        list: () => [reviewSkill],
+        load: (name) =>
+          name === reviewSkill.name
+            ? { summary: reviewSkill, content: "Review carefully.", referencePaths: [] }
+            : undefined,
+        loadReference: () => undefined,
+      },
+    });
+
+    const session = await engine.createSession();
+    await drain(session.send("/review 旧任务"));
+    await drain(session.send("继续"));
+    await drain(session.compact("manual"));
+    const first = store.getLatestCheckpoint(session.id);
+    assert.ok(first);
+    assert.equal(first.goal?.verbatimRequest, "旧任务");
+    assert.deepEqual(first.context.explicitSkillNames, ["review"]);
+
+    await drain(session.send("好的，继续吧"));
+    await drain(session.compact("manual"));
+    const second = store.getLatestCheckpoint(session.id);
+    assert.ok(second);
+    assert.equal(second.goal?.verbatimRequest, "旧任务");
+    assert.deepEqual(second.context.explicitSkillNames, ["review"]);
+
+    await drain(session.send("处理新的普通任务"));
+    await drain(session.compact("manual"));
+    const third = store.getLatestCheckpoint(session.id);
+    assert.ok(third);
+    assert.equal(third.goal?.verbatimRequest, "处理新的普通任务");
+    assert.deepEqual(third.context.explicitSkillNames, []);
+
+    await engine.dispose();
+    store.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("ConversationEngine 资源 checkpoint 按最近成功触达淘汰并保留 write evidence", async () => {
+  const dir = tempDir();
+  try {
+    const config = rollConfigSchema.parse({
+      llm: {
+        defaultProvider: "mock",
+        defaultModel: "default-model",
+        providers: { mock: { apiKey: "test" } },
+      },
+      ask: {},
+      runtime: {
+        compaction: {
+          enabled: true,
+          strategy: "truncate",
+          threshold: 0.75,
+          keepRecentTurns: 1,
+          keepRecentTokens: 1,
+        },
+      },
+      agents: { dataDir: "/tmp/roll-engine-test" },
+    });
+    const store = new ThreadStore(dir);
+    const threadId = store.createThread();
+    const seededResources = Array.from({ length: 256 }, (_, index) => ({
+      key: `fixture:${String(index)}`,
+      mode: TOOL_RESOURCE_ACCESS_MODES.write,
+      evidenceToolCallId: `seed-${String(index)}`,
+      evidenceExecutionId: `00000000-0000-4000-8000-${(index + 1).toString(16).padStart(12, "0")}`,
+    }));
+    store.commitCompaction(threadId, {
+      messages: [],
+      expectedActiveMessages: [],
+      expectedLatestCheckpointId: undefined,
+      draft: {
+        constraints: [],
+        resources: seededResources,
+        toolState: createEmptyCompactionToolState(),
+        runningWork: [],
+        context: {
+          cwd: process.cwd(),
+          stableRuleIds: [],
+          skills: [],
+          explicitSkillNames: [],
+        },
+        summary: { status: "skipped" },
+      },
+      semanticState: createEmptyCompactionSemanticState(),
+      semanticEvidenceWatermarks: {
+        messagesThroughSequence: -1,
+        toolExecutionsThroughSequence: -1,
+      },
+      evidenceWatermarks: {
+        transcriptMessagesThroughSequence: -1,
+        toolExecutionsThroughSequence: -1,
+      },
+    });
+    const engine = new ConversationEngine({
+      config,
+      model: sequencedEngineModel([
+        engineToolCallStep("call-new", "probe__touch", { resource: "256" }),
+        engineTextStep("new touched"),
+        engineToolCallStep("call-old-rewrite", "probe__touch", { resource: "0" }),
+        engineTextStep("old rewritten"),
+      ]),
+      store,
+      sources: [
+        {
+          agentName: "probe",
+          client: {
+            callTool: async () => ({ content: [{ type: "text", text: "ok" }] }),
+          } as never,
+          tools: [
+            {
+              tool: {
+                name: "touch",
+                inputSchema: {
+                  type: "object" as const,
+                  properties: { resource: { type: "string" } },
+                  required: ["resource"],
+                },
+              },
+              annotations: { readOnlyHint: true },
+              resourceHints: [
+                {
+                  field: "resource",
+                  kind: TOOL_RESOURCE_HINT_KINDS.custom,
+                  namespace: "fixture",
+                  mode: TOOL_RESOURCE_ACCESS_MODES.write,
+                },
+              ],
+            },
+          ],
+        },
+      ],
+      skillLibrary: null,
+    });
+
+    const session = await engine.resumeSession(threadId);
+    await drain(session.send("touch new resource"));
+    await drain(session.send("rewrite oldest resource"));
+    const rewritten = store
+      .listToolExecutions(threadId)
+      .find((record) => record.toolCallId === "call-old-rewrite");
+    assert.ok(rewritten);
+    await drain(session.compact("manual"));
+
+    const checkpoint = store.getLatestCheckpoint(threadId);
+    assert.ok(checkpoint);
+    assert.equal(checkpoint.resources.length, 256);
+    assert.deepEqual(
+      checkpoint.resources.find((resource) => resource.key === "fixture:0"),
+      {
+        key: "fixture:0",
+        mode: TOOL_RESOURCE_ACCESS_MODES.write,
+        evidenceToolCallId: "call-old-rewrite",
+        evidenceExecutionId: rewritten.id,
+      },
+    );
+    assert.ok(checkpoint.resources.some((resource) => resource.key === "fixture:256"));
+
+    await engine.dispose();
+    store.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("ConversationEngine 连续 AgentSession compaction 累计 typed Tool state", async () => {
+  const dir = tempDir();
+  try {
+    const config = rollConfigSchema.parse({
+      llm: {
+        defaultProvider: "mock",
+        defaultModel: "default-model",
+        providers: { mock: { apiKey: "test" } },
+      },
+      ask: {},
+      runtime: {
+        compaction: {
+          enabled: true,
+          strategy: "truncate",
+          threshold: 0.75,
+          keepRecentTurns: 1,
+          keepRecentTokens: 1,
+        },
+      },
+      agents: { dataDir: "/tmp/roll-engine-test" },
+    });
+    const store = new ThreadStore(dir);
+    const model = sequencedEngineModel([
+      engineToolCallStep("call-first", "probe__inspect", { value: "first" }),
+      engineTextStep("first done"),
+      engineTextStep("first checkpoint boundary"),
+      engineToolCallStep("call-second", "probe__inspect", { value: "second" }),
+      engineTextStep("second done"),
+      engineTextStep("second checkpoint boundary"),
+    ]);
+    const engine = new ConversationEngine({
+      config,
+      model,
+      store,
+      sources: [
+        {
+          agentName: "probe",
+          client: {
+            callTool: async () => ({ content: [{ type: "text", text: "inspected" }] }),
+          } as never,
+          tools: [
+            {
+              tool: {
+                name: "inspect",
+                inputSchema: {
+                  type: "object" as const,
+                  properties: { value: { type: "string" } },
+                  required: ["value"],
+                },
+              },
+              annotations: { readOnlyHint: true },
+            },
+          ],
+        },
+      ],
+      skillLibrary: null,
+    });
+
+    const session = await engine.createSession();
+    await drain(session.send("inspect first"));
+    await drain(session.send("checkpoint one"));
+    await drain(session.compact("manual"));
+    const first = store.getLatestCheckpoint(session.id);
+    assert.ok(first);
+    assert.equal(first.generation, 1);
+    assert.equal(first.toolState.countsByOutcome.success, 1);
+    assert.equal(first.toolState.integrityStatus, "valid");
+
+    await drain(session.send("inspect second"));
+    await drain(session.send("checkpoint two"));
+    await drain(session.compact("manual"));
+    const second = store.getLatestCheckpoint(session.id);
+    assert.ok(second);
+    assert.equal(second.generation, 2);
+    assert.equal(second.previousCheckpointId, first.id);
+    assert.equal(second.toolState.countsByOutcome.success, 2);
+    assert.deepEqual(
+      second.toolState.recentRecords.map((record) => record.toolCallId),
+      ["call-first", "call-second"],
+    );
+    assert.deepEqual(second.toolState.anomalies, []);
+
+    await engine.dispose();
+    store.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("ConversationEngine 截断 Tool Result 后仍可经 checkpoint transcript 回查原证据", async () => {
+  const dir = tempDir();
+  try {
+    const evidenceMarker = "ORIGINAL_TOOL_EVIDENCE_20260717";
+    const config = rollConfigSchema.parse({
+      llm: {
+        defaultProvider: "mock",
+        defaultModel: "default-model",
+        providers: { mock: { apiKey: "test" } },
+      },
+      ask: {},
+      runtime: {
+        compaction: {
+          enabled: true,
+          strategy: "truncate",
+          threshold: 0.75,
+          keepRecentTurns: 8,
+          keepRecentTokens: 100_000,
+        },
+      },
+      agents: { dataDir: "/tmp/roll-engine-test" },
+    });
+    const store = new ThreadStore(dir);
+    const engine = new ConversationEngine({
+      config,
+      model: sequencedEngineModel([
+        engineToolCallStep("call-large", "probe__large", {}),
+        engineTextStep("large result observed"),
+      ]),
+      store,
+      sources: [
+        {
+          agentName: "probe",
+          client: {
+            callTool: async () => ({
+              content: [{ type: "text", text: `${evidenceMarker}:${"x".repeat(6_000)}` }],
+            }),
+          } as never,
+          tools: [
+            {
+              tool: { name: "large", inputSchema: { type: "object" as const } },
+              annotations: { readOnlyHint: true },
+            },
+          ],
+        },
+      ],
+      skillLibrary: null,
+    });
+
+    const session = await engine.createSession();
+    await drain(session.send("read large result"));
+    const compactEvents: SessionEvent[] = [];
+    for await (const event of session.compact("manual")) {
+      compactEvents.push(event);
+    }
+    const checkpoint = store.getLatestCheckpoint(session.id);
+    assert.ok(checkpoint);
+    const compacted = compactEvents.find((event) => event.type === "context-compacted");
+    assert.ok(compacted && compacted.type === "context-compacted");
+    assert.equal(compacted.truncatedTools, 1);
+    assert.match(JSON.stringify(store.getMessages(session.id)), /已省略.*工具结果/u);
+    assert.doesNotMatch(
+      JSON.stringify(store.getMessages(session.id)),
+      new RegExp(evidenceMarker, "u"),
+    );
+
+    const recovered = executeTranscriptTool(
+      (options) => store.readCheckpointTranscript(session.id, options),
+      { checkpointId: checkpoint.id, kind: "message", limit: 10 },
+    );
+    assert.equal(recovered.outcome.kind, "success");
+    assert.match(JSON.stringify(recovered.raw), new RegExp(evidenceMarker, "u"));
+
+    await engine.dispose();
+    store.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test(
+  "ConversationEngine checkpoint 中的 live session 在新 manager resume 时降级为 stale",
+  { skip: process.platform === "win32" },
+  async () => {
+    const dir = tempDir();
+    try {
+      const config = rollConfigSchema.parse({
+        llm: {
+          defaultProvider: "mock",
+          defaultModel: "default-model",
+          providers: { mock: { apiKey: "test" } },
+        },
+        ask: {},
+        runtime: {
+          compaction: {
+            enabled: true,
+            strategy: "truncate",
+            threshold: 0.75,
+            keepRecentTurns: 1,
+            keepRecentTokens: 1,
+          },
+          shell: {
+            enabled: true,
+            autoApproveSafe: true,
+            session: { enabled: true, defaultYieldMs: 250 },
+          },
+        },
+        agents: { dataDir: "/tmp/roll-engine-test" },
+      });
+      const store = new ThreadStore(dir);
+      const engine = new ConversationEngine({
+        config,
+        model: sequencedEngineModel([
+          engineToolCallStep("call-live", "roll__exec_command", {
+            command: "sleep 30",
+            yield_time_ms: 250,
+          }),
+          engineTextStep("background started"),
+          engineTextStep("checkpoint boundary"),
+        ]),
+        store,
+        sources: [],
+        skillLibrary: null,
+        policy: new DefaultToolPolicy(),
+        shellProfile: posixSessionProfile,
+      });
+
+      const session = await engine.createSession();
+      await drain(session.send("start background work"));
+      await drain(session.send("prepare checkpoint"));
+      await drain(session.compact("manual"));
+      const checkpoint = store.getLatestCheckpoint(session.id);
+      assert.ok(checkpoint);
+      const liveWork = checkpoint.runningWork.find((work) => work.recoverability === "live");
+      assert.ok(liveWork);
+      assert.equal(liveWork.state, "running");
+      const threadId = session.id;
+      await engine.dispose();
+
+      let resumedPrompt = "";
+      const reopened = new ConversationEngine({
+        config,
+        model: textModelCapture((options) => {
+          resumedPrompt = JSON.stringify(options.prompt);
+        }),
+        store,
+        sources: [],
+        skillLibrary: null,
+        policy: new DefaultToolPolicy(),
+        shellProfile: posixSessionProfile,
+      });
+      const resumed = await reopened.resumeSession(threadId);
+      await drain(resumed.send("recover background status"));
+      assert.ok(resumedPrompt.includes(`\\"sessionId\\":${String(liveWork.sessionId)}`));
+      assert.ok(resumedPrompt.includes('\\"managerMatch\\":\\"foreign\\"'));
+      assert.ok(resumedPrompt.includes('\\"recoverability\\":\\"stale\\"'));
+
+      await reopened.dispose();
+      store.close();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  },
+);
+
+test("ConversationEngine 每 Turn 刷新 VCS context，而不重建稳定 capability manifest", async () => {
+  const config = rollConfigSchema.parse({
+    llm: {
+      defaultProvider: "mock",
+      defaultModel: "default-model",
+      providers: { mock: { apiKey: "test" } },
+    },
+    ask: {},
+    agents: { dataDir: "/tmp/roll-engine-test" },
+  });
+  const prompts: string[] = [];
+  let inspection = 0;
+  let rulesResolution = 0;
+  const engine = new ConversationEngine({
+    config,
+    model: textModelCapture((options) => prompts.push(JSON.stringify(options.prompt))),
+    sources: [],
+    skillLibrary: null,
+    resolveDynamicCapabilityContext: (abortSignal) => {
+      assert.equal(abortSignal.aborted, false);
+      rulesResolution += 1;
+      return { ruleIds: [`workspace/rules-v${String(rulesResolution)}`] };
+    },
+    inspectVcsContext: () => {
+      inspection += 1;
+      return inspection === 1
+        ? { branch: "main", dirty: false }
+        : { branch: "feature/checkpoint", dirty: true, ahead: 1 };
+    },
+  });
+
+  const session = await engine.createSession();
+  const stableManifest = JSON.stringify(session.getCapabilityManifest());
+  await drain(session.send("first"));
+  const first = session.getCapabilityTurnContext();
+  await drain(session.send("second"));
+  const second = session.getCapabilityTurnContext();
+
+  assert.deepEqual(first?.dynamic.vcs, { branch: "main", dirty: false });
+  assert.deepEqual(first?.dynamic.ruleIds, ["workspace/rules-v1"]);
+  assert.deepEqual(second?.dynamic.vcs, {
+    branch: "feature/checkpoint",
+    dirty: true,
+    ahead: 1,
+  });
+  assert.deepEqual(second?.dynamic.ruleIds, ["workspace/rules-v2"]);
+  assert.equal(JSON.stringify(session.getCapabilityManifest()), stableManifest);
+  assert.match(prompts[0] ?? "", /vcs=main;dirty=false/u);
+  assert.match(prompts[0] ?? "", /ruleIds=workspace\/rules-v1/u);
+  assert.match(prompts[1] ?? "", /vcs=feature\/checkpoint;dirty=true/u);
+  assert.match(prompts[1] ?? "", /ruleIds=workspace\/rules-v2/u);
+
+  await engine.dispose();
+});
 
 function bashEngineConfig(dataDir: string, autoApproveSafe: boolean) {
   return rollConfigSchema.parse({
@@ -925,6 +2985,39 @@ test("运行期 shell profile 探测在 engine 实例内缓存", async () => {
     assert.equal(calls, 1);
     first.abort();
     second.abort();
+    await engine.dispose();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("ConversationEngine 使用隔离的 Chat shell 环境且不读取后续全局变更", async () => {
+  const dir = tempDir();
+  const shellEnv: NodeJS.ProcessEnv = {
+    PATH: "/tmp/current-roll:/usr/bin",
+    ROLL_CURRENT_CLI: "/tmp/current-roll/roll",
+  };
+  let observedEnv: Readonly<Record<string, string | undefined>> | undefined;
+  try {
+    const engine = new ConversationEngine({
+      config: sessionExecConfig(dir),
+      model: toolCapturingModel(() => {}),
+      sources: [],
+      skillLibrary: null,
+      shellEnv,
+      resolveShellProfileFn: ({ env }) => {
+        observedEnv = env;
+        return { supported: true, profile: powershellProfile };
+      },
+    });
+    shellEnv.PATH = "/mutated-after-construction";
+
+    const session = await engine.createSession();
+
+    assert.equal(observedEnv?.PATH, "/tmp/current-roll:/usr/bin");
+    assert.equal(observedEnv?.ROLL_CURRENT_CLI, "/tmp/current-roll/roll");
+    assert.notEqual(observedEnv, shellEnv);
+    session.abort();
     await engine.dispose();
   } finally {
     rmSync(dir, { recursive: true, force: true });

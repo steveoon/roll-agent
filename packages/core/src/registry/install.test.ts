@@ -1,12 +1,22 @@
 import { describe, it, after } from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import {
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DEFAULT_CONFIG } from "../config/defaults.ts";
 import { installAgent } from "./install.ts";
 import { AgentStore } from "./store.ts";
 import type { InstallAgentDeps, InstallAgentEvent, InstallAgentInput } from "./install.ts";
+import type { PackageManagerRunSpec } from "../cli/utils/package-manager.ts";
 import type { DiscoveredAgent } from "./discovery.ts";
 import type { AgentSetupResult } from "./runtime-setup.ts";
 import type { RegisteredAgent } from "../types/agent.ts";
@@ -26,6 +36,14 @@ function makeDataDir(): string {
   return dir;
 }
 
+function installedAgentDir(dataDir: string): string {
+  return join(dataDir, "installed", "fake-agent-package");
+}
+
+function installLockPath(dataDir: string): string {
+  return join(dataDir, "installed", ".fake-agent-package.install.lock");
+}
+
 function makeDiscovered(overrides: Partial<DiscoveredAgent> = {}): DiscoveredAgent {
   return {
     skill: { name: "fake-agent", description: "测试 agent", metadata: {} },
@@ -40,7 +58,7 @@ function makeDiscovered(overrides: Partial<DiscoveredAgent> = {}): DiscoveredAge
 interface HarnessOptions {
   readonly dataDir: string;
   readonly discovered?: DiscoveredAgent;
-  readonly runInstall?: () => Promise<void>;
+  readonly runInstall?: (spec: PackageManagerRunSpec) => Promise<void>;
   readonly runSetup?: () => Promise<AgentSetupResult>;
   readonly waitReady?: () => Promise<void>;
 }
@@ -54,8 +72,6 @@ function makeDeps(options: HarnessOptions): {
   const events: InstallAgentEvent[] = [];
   const calls: string[] = [];
   const store = new AgentStore(options.dataDir);
-  const packageRoot = join(options.dataDir, "fake-package-root");
-  mkdirSync(packageRoot, { recursive: true });
 
   const deps: InstallAgentDeps = {
     agentsConfig: { ...DEFAULT_CONFIG.agents, dataDir: options.dataDir },
@@ -64,10 +80,16 @@ function makeDeps(options: HarnessOptions): {
     store,
     report: (event) => events.push(event),
     collaborators: {
-      runInstall: async () => {
+      runInstall: async (spec) => {
         calls.push("runInstall");
+        const prefixIndex = spec.args.indexOf("--prefix");
+        const installPrefix = spec.args[prefixIndex + 1];
+        if (installPrefix === undefined) {
+          throw new Error("install spec 缺少 --prefix 参数值");
+        }
+        mkdirSync(join(installPrefix, "fake-package-root"), { recursive: true });
         if (options.runInstall) {
-          await options.runInstall();
+          await options.runInstall(spec);
         }
         return { stdout: "", stderr: "" };
       },
@@ -96,7 +118,7 @@ function makeDeps(options: HarnessOptions): {
         calls.push("stopGracefully");
         return true;
       },
-      resolvePackageRoot: () => packageRoot,
+      resolvePackageRoot: (installDir) => join(installDir, "fake-package-root"),
       readManifest: () => ({ name: "@fake/agent-package", version: "1.2.3" }),
     },
   };
@@ -118,6 +140,10 @@ describe("installAgent", () => {
       assert.equal(result.agent.skill.name, "fake-agent");
       assert.equal(result.started, false);
       assert.equal(result.envReport, undefined);
+      assert.equal(
+        result.agent.installPath,
+        join(dataDir, "installed", "fake-agent-package", "fake-package-root"),
+      );
     }
 
     const stepEvents = events.filter((event) => event.type === "step");
@@ -152,6 +178,50 @@ describe("installAgent", () => {
     }
   });
 
+  it("拒绝符号链接 installDir 且不会开始下载", async () => {
+    const dataDir = makeDataDir();
+    const installDir = join(dataDir, "installed", "fake-agent-package");
+    const symlinkTarget = join(dataDir, "symlink-target");
+    mkdirSync(join(dataDir, "installed"), { recursive: true });
+    mkdirSync(symlinkTarget, { recursive: true });
+    symlinkSync(symlinkTarget, installDir, process.platform === "win32" ? "junction" : "dir");
+    const { deps, calls } = makeDeps({ dataDir });
+
+    const result = await installAgent(BASE_INPUT, deps);
+
+    assert.equal(result.ok, false);
+    if (!result.ok) {
+      assert.equal(result.step, "resolve");
+      assert.match(result.message, /符号链接/);
+    }
+    assert.deepEqual(calls, []);
+    assert.equal(lstatSync(installDir).isSymbolicLink(), true);
+    assert.equal(existsSync(symlinkTarget), true);
+  });
+
+  it("拒绝带有同级安装锁的 installDir，并给出安全的人工恢复提示", async () => {
+    const dataDir = makeDataDir();
+    const installDir = installedAgentDir(dataDir);
+    mkdirSync(installDir, { recursive: true });
+    writeFileSync(
+      installLockPath(dataDir),
+      JSON.stringify({ token: "another-install", pid: 12345, startedAt: "2026-01-01T00:00:00Z" }),
+      "utf8",
+    );
+    const { deps, calls } = makeDeps({ dataDir });
+
+    const result = await installAgent(BASE_INPUT, deps);
+
+    assert.equal(result.ok, false);
+    if (!result.ok) {
+      assert.equal(result.step, "resolve");
+      assert.match(result.message, /检查锁文件中的 pid/);
+      assert.match(result.message, /不会自动抢占/);
+      assert.match(result.message, /\.fake-agent-package\.install\.lock/);
+    }
+    assert.deepEqual(calls, []);
+  });
+
   it("npm install 失败返回 download 失败且不注册", async () => {
     const dataDir = makeDataDir();
     const { deps, store } = makeDeps({
@@ -168,6 +238,88 @@ describe("installAgent", () => {
       assert.match(result.message, /安装失败/);
     }
     assert.equal(store.findByName("fake-agent"), undefined);
+    assert.equal(existsSync(installedAgentDir(dataDir)), false);
+    assert.equal(existsSync(installLockPath(dataDir)), false);
+  });
+
+  it("npm install 失败不清理调用前已经存在的 installDir", async () => {
+    const dataDir = makeDataDir();
+    const installDir = join(dataDir, "installed", "fake-agent-package");
+    const existingMarker = join(installDir, "existing-content");
+    mkdirSync(existingMarker, { recursive: true });
+    const { deps } = makeDeps({
+      dataDir,
+      runInstall: async () => {
+        throw new Error("network down");
+      },
+    });
+
+    const result = await installAgent(BASE_INPUT, deps);
+
+    assert.equal(result.ok, false);
+    assert.equal(existsSync(existingMarker), true);
+    assert.equal(existsSync(installLockPath(dataDir)), false);
+  });
+
+  it("并发首次安装在 download 前互斥，失败方不会删除成功方目录", async () => {
+    const dataDir = makeDataDir();
+    const firstDownload = Promise.withResolvers<void>();
+    let downloadCount = 0;
+    const { deps, calls } = makeDeps({
+      dataDir,
+      runInstall: async () => {
+        downloadCount += 1;
+        await firstDownload.promise;
+      },
+    });
+
+    const firstInstall = installAgent(BASE_INPUT, deps);
+    assert.equal(downloadCount, 1);
+    const secondResult = await installAgent(BASE_INPUT, deps);
+
+    assert.equal(secondResult.ok, false);
+    if (!secondResult.ok) {
+      assert.equal(secondResult.step, "resolve");
+      assert.match(secondResult.message, /锁文件/);
+    }
+    assert.equal(downloadCount, 1);
+    assert.equal(calls.filter((call) => call === "runInstall").length, 1);
+    assert.equal(existsSync(installedAgentDir(dataDir)), true);
+    assert.equal(existsSync(installLockPath(dataDir)), true);
+
+    firstDownload.resolve();
+    const firstResult = await firstInstall;
+    assert.equal(firstResult.ok, true);
+    assert.equal(existsSync(join(installedAgentDir(dataDir), "fake-package-root")), true);
+    assert.equal(existsSync(installLockPath(dataDir)), false);
+    assert.equal(calls.filter((call) => call === "runSetup").length, 1);
+  });
+
+  it("npm lifecycle 始终看到稳定 final prefix，锁记录可审计字段并在成功后释放", async () => {
+    const dataDir = makeDataDir();
+    const installDir = installedAgentDir(dataDir);
+    const lockPath = installLockPath(dataDir);
+    const { deps } = makeDeps({
+      dataDir,
+      runInstall: async (spec) => {
+        const prefixIndex = spec.args.indexOf("--prefix");
+        assert.equal(spec.args[prefixIndex + 1], installDir);
+        assert.equal(existsSync(installDir), true);
+        const marker: unknown = JSON.parse(readFileSync(lockPath, "utf8"));
+        assert.equal(typeof marker, "object");
+        assert.notEqual(marker, null);
+        if (typeof marker === "object" && marker !== null) {
+          assert.equal(typeof Reflect.get(marker, "token"), "string");
+          assert.equal(Reflect.get(marker, "pid"), process.pid);
+          assert.match(String(Reflect.get(marker, "startedAt")), /^\d{4}-\d{2}-\d{2}T/);
+        }
+      },
+    });
+
+    const result = await installAgent(BASE_INPUT, deps);
+
+    assert.equal(result.ok, true);
+    assert.equal(existsSync(lockPath), false);
   });
 
   it("discover 抛错返回 discover 失败", async () => {
@@ -189,6 +341,46 @@ describe("installAgent", () => {
       assert.equal(result.step, "discover");
       assert.match(result.message, /SKILL.md/);
     }
+    assert.equal(existsSync(join(dataDir, "installed", "fake-agent-package")), false);
+  });
+
+  it("安装后找不到 package root 时清理新建 installDir", async () => {
+    const dataDir = makeDataDir();
+    const { deps } = makeDeps({ dataDir });
+    const missingPackageRoot = join(dataDir, "missing-package-root");
+    const failingDeps: InstallAgentDeps = {
+      ...deps,
+      collaborators: {
+        ...deps.collaborators,
+        resolvePackageRoot: () => missingPackageRoot,
+      },
+    };
+
+    const result = await installAgent(BASE_INPUT, failingDeps);
+
+    assert.equal(result.ok, false);
+    if (!result.ok) {
+      assert.equal(result.step, "discover");
+      assert.match(result.message, /未找到包目录/);
+    }
+    assert.equal(existsSync(join(dataDir, "installed", "fake-agent-package")), false);
+  });
+
+  it("读取安装包 manifest 抛错时保留原始异常并清理新建 installDir", async () => {
+    const dataDir = makeDataDir();
+    const { deps } = makeDeps({ dataDir });
+    const failingDeps: InstallAgentDeps = {
+      ...deps,
+      collaborators: {
+        ...deps.collaborators,
+        readManifest: () => {
+          throw new Error("manifest unreadable");
+        },
+      },
+    };
+
+    await assert.rejects(() => installAgent(BASE_INPUT, failingDeps), /manifest unreadable/);
+    assert.equal(existsSync(join(dataDir, "installed", "fake-agent-package")), false);
   });
 
   it("setup 失败：agent 注册为 error 且透传 retryCommand", async () => {
@@ -210,6 +402,20 @@ describe("installAgent", () => {
       assert.equal(result.retryCommand, "npx playwright install chromium");
     }
     assert.equal(store.findByName("fake-agent")?.status, "error");
+    assert.equal(existsSync(join(dataDir, "installed", "fake-agent-package")), true);
+  });
+
+  it("setup 抛错且尚未注册时保留原始异常并清理新建 installDir", async () => {
+    const dataDir = makeDataDir();
+    const { deps } = makeDeps({
+      dataDir,
+      runSetup: async () => {
+        throw new Error("setup crashed");
+      },
+    });
+
+    await assert.rejects(() => installAgent(BASE_INPUT, deps), /setup crashed/);
+    assert.equal(existsSync(join(dataDir, "installed", "fake-agent-package")), false);
   });
 
   it("同名 installed-package 走升级替换且不输出其他来源替换提示", async () => {
@@ -362,6 +568,44 @@ describe("installAgent", () => {
     assert.ok(!calls.includes("stopGracefully"));
   });
 
+  it("安装锁覆盖 waitReady，期间第二次安装不会开始 download", async () => {
+    const dataDir = makeDataDir();
+    const readyStarted = Promise.withResolvers<void>();
+    const releaseReady = Promise.withResolvers<void>();
+    const { deps, calls } = makeDeps({
+      dataDir,
+      discovered: makeDiscovered({
+        transport: { type: "streamable-http", endpoint: "http://127.0.0.1:4314/mcp" },
+        runtime: {
+          ownership: "core-managed",
+          start: { command: "node", args: ["dist/index.js"] },
+          endpoint: { path: "/mcp", port: 4314 },
+        },
+      }),
+      waitReady: async () => {
+        readyStarted.resolve();
+        await releaseReady.promise;
+      },
+    });
+
+    const firstInstall = installAgent(BASE_INPUT, deps);
+    await readyStarted.promise;
+    assert.equal(existsSync(installLockPath(dataDir)), true);
+
+    const secondResult = await installAgent(BASE_INPUT, deps);
+    assert.equal(secondResult.ok, false);
+    if (!secondResult.ok) {
+      assert.equal(secondResult.step, "resolve");
+      assert.match(secondResult.message, /锁文件/);
+    }
+    assert.equal(calls.filter((call) => call === "runInstall").length, 1);
+
+    releaseReady.resolve();
+    const firstResult = await firstInstall;
+    assert.equal(firstResult.ok, true);
+    assert.equal(existsSync(installLockPath(dataDir)), false);
+  });
+
   it("waitReady 失败：回滚 stopGracefully 并标记 error", async () => {
     const dataDir = makeDataDir();
     const { deps, store, calls } = makeDeps({
@@ -387,6 +631,7 @@ describe("installAgent", () => {
     }
     assert.equal(store.findByName("fake-agent")?.status, "error");
     assert.ok(calls.includes("stopGracefully"));
+    assert.equal(existsSync(installLockPath(dataDir)), false);
   });
 
   it("autoStart=false 时 core-managed 不启动", async () => {

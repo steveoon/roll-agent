@@ -1,5 +1,13 @@
-import { SKILL_TOOL_ID } from "../../../skills/library.ts";
+import {
+  findSkillBySlashName,
+  parseSkillInvocation,
+  type SkillInvocation,
+  type SkillInvocationSummary,
+} from "../../../skills/invocation.ts";
 import { displayWidth } from "./display-width.ts";
+
+export { findSkillBySlashName, parseSkillInvocation };
+export type { SkillInvocation };
 
 const graphemeSegmenter = new Intl.Segmenter(undefined, { granularity: "grapheme" });
 const ELLIPSIS = "…";
@@ -10,11 +18,7 @@ export interface SlashCommand {
   readonly description: string;
 }
 
-export interface SlashSkillSummary {
-  readonly name: string;
-  readonly description: string;
-  readonly source: string;
-}
+export type SlashSkillSummary = SkillInvocationSummary;
 
 export interface SlashSkillEntry {
   readonly kind: "skill";
@@ -109,61 +113,6 @@ export function filterSlashEntries(
 export function filterCommands(input: string): SlashCommand[] {
   const token = currentSlashToken(input).toLowerCase();
   return SLASH_COMMANDS.filter((command) => command.name.toLowerCase().startsWith(token));
-}
-
-export function findSkillBySlashName(
-  token: string,
-  skills: readonly SlashSkillSummary[],
-): SlashSkillSummary | undefined {
-  const normalized = token.toLowerCase();
-  return skills.find((skill) => skillSlashName(skill.name).toLowerCase() === normalized);
-}
-
-export interface SkillInvocation {
-  readonly skills: readonly SlashSkillSummary[];
-  readonly prompt: string;
-}
-
-export function parseSkillInvocation(
-  input: string,
-  skills: readonly SlashSkillSummary[],
-): SkillInvocation | undefined {
-  let rest = input.trimStart();
-  const selected: SlashSkillSummary[] = [];
-  const seen = new Set<string>();
-  while (true) {
-    const match = /^(\/\S+)(\s*)/.exec(rest);
-    if (!match) {
-      break;
-    }
-    const skill = findSkillBySlashName(match[1] ?? "", skills);
-    if (!skill) {
-      break;
-    }
-    if (!seen.has(skill.name)) {
-      selected.push(skill);
-      seen.add(skill.name);
-    }
-    rest = rest.slice(match[0].length);
-  }
-  if (selected.length === 0) {
-    return undefined;
-  }
-  return {
-    skills: selected,
-    prompt: rest.trim(),
-  };
-}
-
-export function buildSkillInvocationPrompt(invocation: SkillInvocation): string {
-  const names = invocation.skills.map((skill) => `- ${skill.name}`).join("\n");
-  return [
-    `请先调用 \`${SKILL_TOOL_ID}\` 工具加载以下 skill，并严格按它们的说明处理后续请求：`,
-    names,
-    "",
-    "用户请求：",
-    invocation.prompt,
-  ].join("\n");
 }
 
 const SKILL_LIST_DEFAULT_WIDTH = 96;

@@ -2,6 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import type { ChildProcess } from "node:child_process";
 import { EventEmitter } from "node:events";
+import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
@@ -10,6 +11,7 @@ import { BASH_TERMINATION_CAUSES } from "./format-result.ts";
 import { escalateKillGroup, killProcessGroup } from "./kill.ts";
 import type { ShellProfile } from "./profile.ts";
 import { TURN_TIMEOUT_ABORT_REASON } from "../types/cancellation.ts";
+import { withAutoApprovedShellEnv } from "./clean-env.ts";
 
 const skip = process.platform === "win32";
 const MB = 1_048_576;
@@ -88,6 +90,35 @@ test("echo 成功返回 stdout 与 exit 0", { skip }, async () => {
   assert.equal(result.timedOut, false);
   assert.equal(result.stdout.text.trim(), "hi");
   assert.ok(result.wallTimeMs >= 0);
+});
+
+test("known-safe 环境实跑不执行 PATH shadow 或 BASH_ENV function", { skip }, async (context) => {
+  const fixture = mkdtempSync(join(tmpdir(), "roll-safe-shell-env-"));
+  context.after(() => rmSync(fixture, { recursive: true, force: true }));
+  const fakeBin = join(fixture, "bin");
+  mkdirSync(fakeBin);
+  const fakeCat = join(fakeBin, "cat");
+  writeFileSync(fakeCat, "#!/bin/sh\nprintf PATH_SHADOW_EXECUTED\n");
+  chmodSync(fakeCat, 0o755);
+  const bashEnv = join(fixture, "bash-env.sh");
+  writeFileSync(bashEnv, "cat() { printf BASH_ENV_EXECUTED; }\nexport -f cat\n");
+  writeFileSync(join(fixture, "inside.txt"), "EXPECTED_SYSTEM_CAT");
+
+  const result = await runBashCommand(
+    opts({
+      command: "cat inside.txt",
+      workdir: fixture,
+      env: withAutoApprovedShellEnv({
+        ...process.env,
+        PATH: `${fakeBin}:/usr/bin:/bin`,
+        SHELL: "/bin/bash",
+        BASH_ENV: bashEnv,
+      }),
+    }),
+  );
+
+  assert.equal(result.exitCode, 0);
+  assert.equal(result.stdout.text, "EXPECTED_SYSTEM_CAT");
 });
 
 test("非零退出码透传", { skip }, async () => {
