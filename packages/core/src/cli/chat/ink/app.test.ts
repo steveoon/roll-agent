@@ -324,6 +324,12 @@ test("ChatApp confirm flow shows tool args and approves on y", async () => {
   stdin.write("\r");
   await waitFor(() => assert.match(lastFrame() ?? "", /执行 browser-use-agent\.click_ref/));
   assert.match(lastFrame() ?? "", /ref: node-42/);
+  const confirmationLines = plain(lastFrame() ?? "").split("\n");
+  const optionRow = confirmationLines.findIndex(
+    (line) => line.includes("Yes") && line.includes("No"),
+  );
+  assert.notEqual(optionRow, -1);
+  assert.match(confirmationLines[optionRow + 1] ?? "", /^╰/u);
   await delay(100);
 
   stdin.write("y");
