@@ -2,15 +2,12 @@ import { createElement as h } from "react";
 import { render } from "ink";
 import type { AgentSession } from "@roll-agent/runtime";
 import type { ThinkingLevel } from "../../../llm/providers.ts";
-import { ChatApp } from "./app.ts";
+import { ChatApp, INK_HINTS } from "./app.ts";
 import { messagesToHistory } from "./history-from-messages.ts";
 import { titleFromMessage } from "../title.ts";
-import { buildBannerLines, type BannerInfo } from "../banner.ts";
-import type { HistoryItem } from "./state.ts";
+import type { BannerInfo } from "../banner.ts";
 import { log } from "../../utils/output.ts";
-
-export const INK_HINTS =
-  "/exit 退出 · Esc 中断 · / 命令 · Shift+Enter/Ctrl+J 换行 · Alt+./Alt+, 调推理 · Shift+Tab 自动批准";
+import { createChatTerminalOutput } from "./terminal-output.ts";
 
 export interface InkReplStore {
   updateTitle(threadId: string, title: string): void;
@@ -23,6 +20,7 @@ export interface RunInkReplOptions {
   readonly banner?: BannerInfo;
   readonly initialThinkingLevel?: ThinkingLevel;
   readonly onThinkingChange?: (level: ThinkingLevel) => void;
+  readonly onStarted?: () => void;
 }
 
 export async function runInkRepl(
@@ -46,25 +44,10 @@ export async function runInkRepl(
     log.info(`多轮对话已就绪（${INK_HINTS}）`);
   }
   const priorHistory = messagesToHistory(session.getMessages());
-  const bannerLines = options.banner
-    ? buildBannerLines(options.banner, process.stdout.columns || 80, { hints: INK_HINTS })
-    : undefined;
-  // 恢复会话时历史消息已在 Static 区，动画 banner 会排到消息之后，只对全新会话做入场动画。
-  const animateBanner = bannerLines !== undefined && priorHistory.length === 0;
-  const bannerItems: HistoryItem[] =
-    bannerLines !== undefined && !animateBanner
-      ? [{ kind: "banner", id: "banner", lines: bannerLines }]
-      : [];
 
-  const rawModeAvailable =
-    process.stdin.isTTY === true && typeof process.stdin.setRawMode === "function";
-  if (rawModeAvailable) {
-    process.stdin.setRawMode(true);
-  }
-
-  let instance: ReturnType<typeof render>;
+  const terminalOutput = createChatTerminalOutput(process.stdout);
   try {
-    instance = render(
+    const instance: ReturnType<typeof render> = render(
       h(ChatApp, {
         session,
         model: options.model,
@@ -74,31 +57,40 @@ export async function runInkRepl(
         onExit: () => {
           instance.unmount();
         },
-        initialHistory: [...bannerItems, ...priorHistory],
-        ...(animateBanner && bannerLines !== undefined ? { animatedBanner: bannerLines } : {}),
+        initialHistory: priorHistory,
+        ...(options.banner === undefined ? {} : { banner: options.banner }),
         ...(options.initialThinkingLevel
           ? { initialThinkingLevel: options.initialThinkingLevel }
           : {}),
         ...(options.onThinkingChange ? { onThinkingChange: options.onThinkingChange } : {}),
       }),
       {
+        stdout: terminalOutput.stdout,
+        interactive: true,
+        alternateScreen: true,
         kittyKeyboard: {
           mode: "auto",
           flags: ["disambiguateEscapeCodes", "reportAlternateKeys"],
         },
       },
     );
-  } catch (error) {
-    if (rawModeAvailable) {
-      process.stdin.setRawMode(false);
-    }
-    throw error;
+    options.onStarted?.();
+    await instance.waitUntilExit();
+  } finally {
+    terminalOutput.dispose();
   }
-
-  await instance.waitUntilExit();
   await session.close();
 
   if (isNewSession && !submitted && store.countMessages(session.id) === 0) {
     store.deleteThread(session.id);
+    process.stderr.write("本次会话无消息，未保存\n");
+    return;
   }
+
+  const messageCount = session
+    .getMessages()
+    .filter((message) => message.role === "user" || message.role === "assistant").length;
+  process.stderr.write(
+    `会话 ${session.id} · ${String(messageCount)} 条消息\n继续：roll chat --session ${session.id}\n`,
+  );
 }

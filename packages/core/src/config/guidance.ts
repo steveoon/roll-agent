@@ -106,6 +106,23 @@ export const CONFIG_GUIDANCE_ENTRIES = [
     example: "ask:\n  confirm-threshold: 0.5",
   },
 
+  // Chat presentation
+  {
+    path: "chat",
+    title: "Chat 终端界面",
+    purpose: "控制 `roll chat` 交互会话使用全屏 TUI 还是基础 REPL。",
+    defaultBehavior: "默认自动判断终端能力与运行环境。",
+    example: `chat:\n  screen-mode: ${DEFAULT_CONFIG.chat.screenMode}`,
+  },
+  {
+    path: "chat.screen-mode",
+    title: "Chat 界面模式",
+    purpose: "选择 `auto` 自动检测、`fullscreen` 强制全屏 TUI，或 `inline` 使用基础 REPL。",
+    defaultBehavior:
+      "默认值为 `auto`；普通交互终端使用全屏，CI、无 ANSI 能力、screen reader、Zellij 和 tmux control mode 回退基础 REPL。",
+    example: `chat:\n  screen-mode: ${DEFAULT_CONFIG.chat.screenMode}`,
+  },
+
   // Chat runtime
   {
     path: "runtime",

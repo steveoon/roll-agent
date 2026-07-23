@@ -113,8 +113,139 @@ class MarkerOracleTests(unittest.TestCase):
                 with self.assertRaisesRegex(AssertionError, "sequence mismatch"):
                     benchmark.assert_complete_sequence("word", observation, 3)
 
+    def test_unique_sentinel_oracle_requires_each_marker_exactly_once(self) -> None:
+        sentinels = ("USER_SENTINEL", "ASSISTANT_SENTINEL", "DRAFT_SENTINEL")
+        self.assertTrue(
+            benchmark.has_unique_sentinels("\n".join(sentinels), sentinels)
+        )
+        benchmark.assert_unique_sentinels("checkpoint", "\n".join(sentinels), sentinels)
+
+        with self.assertRaisesRegex(AssertionError, "sentinel counts are not unique"):
+            benchmark.assert_unique_sentinels(
+                "checkpoint",
+                "USER_SENTINEL\nUSER_SENTINEL\nDRAFT_SENTINEL",
+                sentinels,
+            )
+
+
+class EditorCursorTests(unittest.TestCase):
+    def test_visible_cursor_at_cjk_insertion_point_passes(self) -> None:
+        screen = benchmark.VirtualScreen(30, 6)
+        screen.x = 3
+        screen.y = 2
+        screen.feed("› 输入".encode())
+
+        benchmark.assert_editor_cursor(screen, "输入")
+
+    def test_hidden_or_misaligned_cursor_fails_closed(self) -> None:
+        screen = benchmark.VirtualScreen(30, 6)
+        screen.feed("› 输入".encode())
+        screen.cursor_visible = False
+        with self.assertRaisesRegex(AssertionError, "IME preedit has no anchor"):
+            benchmark.assert_editor_cursor(screen, "输入")
+
+        screen.cursor_visible = True
+        screen.x -= 1
+        with self.assertRaisesRegex(AssertionError, "not at the insertion point"):
+            benchmark.assert_editor_cursor(screen, "输入")
+
+
+class VirtualScreenTests(unittest.TestCase):
+    def test_resize_reflows_full_width_lines_and_unwraps_them_on_expand(self) -> None:
+        screen = benchmark.VirtualScreen(10, 5)
+        screen.feed(b"ABCDEFGHIJ\r\nTAIL")
+
+        screen.resize(6, 5)
+        self.assertEqual(screen.render().splitlines()[:3], ["ABCDEF", "GHIJ", "TAIL"])
+
+        screen.resize(10, 5)
+        self.assertEqual(screen.render().splitlines()[:2], ["ABCDEFGHIJ", "TAIL"])
+
+    def test_alternate_screen_modes_restore_primary_buffer(self) -> None:
+        screen = benchmark.VirtualScreen(40, 8)
+        screen.feed(benchmark.PRIMARY_SCREEN_SENTINEL.encode())
+        screen.feed(b"\x1b[?1049h\x1b[?25l\x1b[?2004h\x1b[?1000;1006h\x1b[>1u")
+        screen.feed(b"ALTERNATE_UI")
+
+        self.assertEqual(screen.active_buffer, "alternate")
+        self.assertIn("ALTERNATE_UI", screen.render())
+        self.assertNotIn(benchmark.PRIMARY_SCREEN_SENTINEL, screen.render())
+
+        screen.feed(b"\x1b[?1000;1006l\x1b[?2004l\x1b[?25h\x1b[<u\x1b[?1049l")
+        state = screen.terminal_state()
+        self.assertEqual(state["activeBuffer"], "primary")
+        self.assertEqual(state["alternateEnterCount"], 1)
+        self.assertEqual(state["alternateLeaveCount"], 1)
+        self.assertTrue(state["cursorVisible"])
+        self.assertFalse(state["bracketedPaste"])
+        self.assertFalse(state["kittyKeyboard"])
+        self.assertEqual(state["mouseModes"], [])
+        self.assertIn(benchmark.PRIMARY_SCREEN_SENTINEL, screen.render())
+
+    def test_terminal_cleanup_oracle_rejects_open_modes_and_scrollback_clear(self) -> None:
+        fixture = object.__new__(benchmark.PtyFixture)
+        fixture.screen = benchmark.VirtualScreen(40, 8)
+        fixture.screen.feed(benchmark.PRIMARY_SCREEN_SENTINEL.encode())
+        fixture.screen.feed(b"\x1b[?1049h\x1b[?25l\x1b[?2004h")
+        fixture.raw_events = [(1.0, b"\x1b[3J")]
+
+        with self.assertRaisesRegex(AssertionError, "terminal cleanup failed"):
+            fixture.assert_terminal_restored()
+
+
+class PtyEnvironmentTests(unittest.TestCase):
+    def test_child_process_explicitly_disables_ci_classification(self) -> None:
+        process = SimpleNamespace(pid=1234)
+        with (
+            mock.patch.object(benchmark.os, "openpty", return_value=(10, 11)),
+            mock.patch.object(benchmark.PtyFixture, "_set_winsize"),
+            mock.patch.object(benchmark.subprocess, "Popen", return_value=process) as popen,
+            mock.patch.object(benchmark.os, "close"),
+            mock.patch.object(benchmark.os, "set_blocking"),
+            mock.patch.dict(
+                benchmark.os.environ,
+                {"CI": "true", "CONTINUOUS_INTEGRATION": "true"},
+                clear=False,
+            ),
+        ):
+            benchmark.PtyFixture("idle")
+
+        env = popen.call_args.kwargs["env"]
+        self.assertEqual(env["CI"], "false")
+        self.assertEqual(env["CONTINUOUS_INTEGRATION"], "false")
+
 
 class TerminalQueryTests(unittest.TestCase):
+    def test_pump_exposes_synchronized_update_only_after_commit(self) -> None:
+        fixture = object.__new__(benchmark.PtyFixture)
+        fixture.master = 42
+        fixture.screen = benchmark.VirtualScreen(100, 36)
+        fixture._terminal_query_tail = b""
+        fixture.raw_events = []
+        fixture.frames = []
+        fixture.last_screen = ""
+        fixture.closed = False
+        fixture.started_ns = benchmark.time.monotonic_ns()
+
+        reads = [
+            b"\x1b[?2026hpartial ",
+            BlockingIOError(),
+            b"frame\x1b[?2026l",
+            BlockingIOError(),
+        ]
+        with (
+            mock.patch.object(benchmark.select, "select", return_value=([42], [], [])),
+            mock.patch.object(benchmark.os, "read", side_effect=reads),
+        ):
+            fixture.pump(0)
+            self.assertEqual(fixture.frames, [])
+            self.assertEqual(fixture.observable_screen(), "")
+            fixture.pump(0)
+
+        self.assertEqual(len(fixture.frames), 1)
+        self.assertEqual(fixture.observable_screen(), fixture.frames[0].screen)
+        self.assertIn("partial frame", fixture.frames[0].screen)
+
     def test_every_terminal_query_split_is_answered_exactly_once(self) -> None:
         expected_responses = {
             b"\x1b[?u": b"\x1b[?0u",
@@ -210,6 +341,8 @@ class FailureArtifactTests(unittest.TestCase):
             self.assertEqual(stem.with_suffix(".ansi").read_bytes(), b"\x1b[31mRoll UI\x1b[0m")
             self.assertIn("dataBase64", stem.with_suffix(".frames.jsonl").read_text())
             self.assertEqual(stem.with_suffix(".screen.txt").read_text(), "Roll UI")
+            terminal_state = json.loads(stem.with_suffix(".terminal.json").read_text())
+            self.assertEqual(terminal_state["activeBuffer"], "primary")
             self.assertIn(
                 "timed out waiting for prompt",
                 stem.with_suffix(".failure.txt").read_text(),

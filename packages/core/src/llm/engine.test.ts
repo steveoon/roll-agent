@@ -13,6 +13,7 @@ const baseConfig: RollConfig = {
     },
   },
   ask: {},
+  chat: DEFAULT_CONFIG.chat,
   runtime: DEFAULT_CONFIG.runtime,
   skills: DEFAULT_CONFIG.skills,
   agents: { dataDir: "/tmp/agents" },

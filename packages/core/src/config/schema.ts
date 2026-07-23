@@ -7,6 +7,7 @@ const runtimeApprovalDefaults = ["guarded", "auto", "deny"] as const;
 const runtimeApprovalOverrideActions = ["auto", "confirm", "deny"] as const;
 const runtimeCompactionStrategies = ["summarize", "truncate"] as const;
 export const runtimeThinkingLevels = ["off", "low", "medium", "high"] as const;
+export const CHAT_SCREEN_MODES = ["auto", "fullscreen", "inline"] as const;
 
 const browserProfileColorSchema = z
   .string()
@@ -35,6 +36,12 @@ export const llmConfigSchema = z.object({
 export const askConfigSchema = z.object({
   llmModel: z.string().optional(),
   confirmThreshold: z.number().optional(),
+});
+
+export const chatScreenModeSchema = z.enum(CHAT_SCREEN_MODES);
+
+export const chatConfigSchema = z.object({
+  screenMode: chatScreenModeSchema.default("auto"),
 });
 
 export const runtimeApprovalConfigSchema = z.object({
@@ -199,6 +206,7 @@ export const browserConfigSchema = z
 export const rollConfigSchema = z.object({
   llm: llmConfigSchema,
   ask: askConfigSchema,
+  chat: chatConfigSchema.default({}),
   runtime: runtimeConfigSchema.default({}),
   skills: skillsConfigSchema.default({}),
   agents: agentsConfigSchema,
@@ -207,6 +215,8 @@ export const rollConfigSchema = z.object({
 });
 
 export type RollConfig = z.infer<typeof rollConfigSchema>;
+export type ChatConfig = z.infer<typeof chatConfigSchema>;
+export type ChatScreenMode = z.infer<typeof chatScreenModeSchema>;
 export type RuntimeConfig = z.infer<typeof runtimeConfigSchema>;
 export type SkillsConfig = z.infer<typeof skillsConfigSchema>;
 export type RuntimeApprovalConfig = z.infer<typeof runtimeApprovalConfigSchema>;

@@ -1,6 +1,6 @@
 import { createElement as h } from "react";
 import type { ReactElement } from "react";
-import { Box, Text, useStdout } from "ink";
+import { Box, Text } from "ink";
 import type { StatusState } from "./state.ts";
 import type { ThinkingLevel } from "../../../llm/providers.ts";
 import {
@@ -137,9 +137,13 @@ export function composeStatusSegments(status: StatusState, width: number): Statu
   return views;
 }
 
-export function StatusLine({ status }: { status: StatusState }): ReactElement {
-  const { stdout } = useStdout();
-  const width = stdout.columns || 80;
+export function StatusLine({
+  status,
+  width,
+}: {
+  readonly status: StatusState;
+  readonly width: number;
+}): ReactElement {
   const segments = composeStatusSegments(status, width);
   return h(
     Box,

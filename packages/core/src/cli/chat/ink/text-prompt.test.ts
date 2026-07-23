@@ -30,6 +30,10 @@ interface HarnessProps {
   readonly slashActive?: boolean;
   readonly slashPopupActive?: boolean;
   readonly ignoreChanges?: boolean;
+  readonly width?: number;
+  readonly viewportRows?: number;
+  readonly maxRows?: number;
+  readonly showHint?: boolean;
 }
 
 function Harness(props: HarnessProps): ReactElement {
@@ -39,6 +43,10 @@ function Harness(props: HarnessProps): ReactElement {
   const slashActive = props.slashActive ?? value.startsWith("/");
   return h(TextPrompt, {
     value,
+    width: props.width ?? 100,
+    viewportRows: props.viewportRows ?? 12,
+    maxRows: props.maxRows ?? 12,
+    showHint: props.showHint ?? true,
     inputHistory: props.inputHistory ?? [],
     disabled: props.disabled ?? false,
     slashActive,
@@ -391,5 +399,26 @@ test("disabled prompt renders without a cursor placeholder crash", async () => {
   const { lastFrame, unmount } = render(h(Harness, { sink, initial: "ab", disabled: true }));
   await delay(20);
   assert.match(lastFrame() ?? "", /ab/);
+  unmount();
+});
+
+test("long multiline drafts keep the cursor tail visible inside the prompt row budget", async () => {
+  const sink = makeSink();
+  const initial = Array.from({ length: 10 }, (_, index) => `line-${String(index)}`).join("\n");
+  const { lastFrame, unmount } = render(h(Harness, { sink, initial, maxRows: 5, showHint: false }));
+  await delay(20);
+  const frame = stripVTControlCharacters(lastFrame() ?? "");
+  assert.doesNotMatch(frame, /line-0/);
+  assert.match(frame, /line-9/);
+  assert.ok(frame.split("\n").length <= 5);
+  unmount();
+});
+
+test("SGR mouse bytes never enter the prompt draft", async () => {
+  const sink = makeSink();
+  const { stdin, unmount } = render(h(Harness, { sink }));
+  await delay(10);
+  await type(stdin, "\u001B[<64;10;5M");
+  assert.equal(sink.value, "");
   unmount();
 });

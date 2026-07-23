@@ -16,10 +16,16 @@ import type {
   ChatStepUsage,
   ChatTokenUsage,
 } from "../../types/chat.ts";
-import type { RollConfig } from "../../config/schema.ts";
+import { CHAT_SCREEN_MODES, type RollConfig } from "../../config/schema.ts";
 import type { LlmConfigReadiness } from "../../config/helpers.ts";
 import { titleFromMessage } from "../chat/title.ts";
 import { buildBannerLines, renderBannerText, type BannerInfo } from "../chat/banner.ts";
+import {
+  CHAT_PRESENTATIONS,
+  detectChatTerminalCapabilities,
+  resolveChatPresentation,
+  resolveChatScreenModeRequest,
+} from "../chat/screen-mode.ts";
 import { getCurrentVersion } from "../utils/update-checker.ts";
 import { formatSkillList, parseSkillInvocation } from "../chat/ink/commands.ts";
 import { installCurrentCliShim } from "../utils/current-cli-shim.ts";
@@ -501,9 +507,27 @@ export default defineCommand({
       description: "以 JSON-RPC daemon 模式运行（stdio，供 GUI/前端接入）",
       default: false,
     },
+    "screen-mode": {
+      type: "string",
+      description: `交互界面模式（${CHAT_SCREEN_MODES.join("|")}）`,
+    },
   },
   async run({ args }) {
     let { config } = loadConfig();
+
+    const screenModeRequest = resolveChatScreenModeRequest({
+      configMode: config.chat.screenMode,
+      ...(args["screen-mode"] !== undefined ? { cliValue: args["screen-mode"] } : {}),
+      messagePresent: args.message !== undefined,
+      json: args.json,
+      server: args.server,
+      list: args.list,
+    });
+    if (!screenModeRequest.ok) {
+      log.error(screenModeRequest.error);
+      process.exitCode = 1;
+      return;
+    }
 
     if (args.server) {
       await runServer(config);
@@ -538,6 +562,32 @@ export default defineCommand({
       return;
     }
 
+    const presentationDecision = args.message
+      ? undefined
+      : resolveChatPresentation({
+          mode: screenModeRequest.mode,
+          source: screenModeRequest.source,
+          capabilities: await detectChatTerminalCapabilities({
+            stdinIsTty: process.stdin.isTTY === true,
+            stdoutIsTty: process.stdout.isTTY === true,
+            rawModeSupported: typeof process.stdin.setRawMode === "function",
+            env: process.env,
+          }),
+        });
+    if (presentationDecision !== undefined && !presentationDecision.ok) {
+      log.error(presentationDecision.error);
+      process.exitCode = 1;
+      return;
+    }
+    if (presentationDecision?.warning) {
+      log.warn(presentationDecision.warning);
+    } else if (
+      presentationDecision?.presentation === CHAT_PRESENTATIONS.inline &&
+      presentationDecision.reason !== "requested"
+    ) {
+      log.debug(`chat 自动选择基础 REPL：${presentationDecision.reason}`);
+    }
+
     const runtime = await loadRuntime();
     const { ThreadStore } = runtime;
     const { model, providerOptions, structuredOutputProviderOptions, structuredOutputReasoning } =
@@ -551,14 +601,11 @@ export default defineCommand({
         config.runtime.compaction.strategy === "summarize",
       );
     const store = new ThreadStore(config.runtime.threadsDir);
-    const interactive = Boolean(
-      process.stdout.isTTY && process.stdin.isTTY && typeof process.stdin.setRawMode === "function",
-    );
     const surface = args.message
       ? args.json
         ? CHAT_ENGINE_SURFACES.json
         : CHAT_ENGINE_SURFACES.oneShot
-      : interactive
+      : presentationDecision?.presentation === CHAT_PRESENTATIONS.fullscreen
         ? CHAT_ENGINE_SURFACES.ink
         : CHAT_ENGINE_SURFACES.basicRepl;
     const chatCliScope = createChatCliScope();
@@ -603,7 +650,9 @@ export default defineCommand({
         return;
       }
 
-      log.info(`会话 ${session.id}`);
+      if (presentationDecision?.presentation !== CHAT_PRESENTATIONS.fullscreen) {
+        log.info(`会话 ${session.id}`);
+      }
       if (config.runtime.compaction.enabled && session.getContextWindow() === undefined) {
         log.warn(
           `未知模型 "${modelName}" 的 context window，阈值自动压缩不可用。可在 roll.config.yaml 设置 runtime.context-window`,
@@ -624,7 +673,7 @@ export default defineCommand({
           skillCount: summary.skillCount,
         };
         let usedInk = false;
-        if (interactive) {
+        if (presentationDecision?.presentation === CHAT_PRESENTATIONS.fullscreen) {
           try {
             const inkReplSpecifier = new URL(
               `../chat/ink/run-ink-repl.${moduleExtension}`,
@@ -637,11 +686,17 @@ export default defineCommand({
               model: modelName,
               banner,
               initialThinkingLevel: config.runtime.thinkingLevel,
+              onStarted: () => {
+                usedInk = true;
+              },
               onThinkingChange: (level) =>
                 session.setProviderOptions(thinkingProviderOptions(provider, modelName, level)),
             });
-            usedInk = true;
           } catch (inkError) {
+            if (usedInk) {
+              throw inkError;
+            }
+            log.info(`会话 ${session.id}`);
             log.warn(
               `Ink TUI 不可用，回退到基础多轮模式：${inkError instanceof Error ? inkError.message : String(inkError)}`,
             );

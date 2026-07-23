@@ -1,23 +1,31 @@
-import { createElement as h, useLayoutEffect, useRef, useState } from "react";
+import { createElement as h, useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { ReactElement } from "react";
-import { Box, Text, useInput, usePaste, useStdout } from "ink";
+import { Box, Text, useCursor, useInput, usePaste, useStdout } from "ink";
 import { GLYPHS } from "../../utils/glyphs.ts";
 import { applyEditorCommand, resolveEditorCommand } from "./editor-keymap.ts";
 import {
   createLineBuffer,
-  graphemeAt,
   insertText,
   moveVisualDown,
   moveVisualUp,
+  visualLineMetrics,
 } from "./line-buffer.ts";
 import type { LineBufferState } from "./line-buffer.ts";
+import { isMouseProtocolInput } from "./mouse-input.ts";
+import { CHAT_CURSOR_REFRESH_EVENT } from "./terminal-output.ts";
 
 const PROMPT_BORDER_WIDTH = 2;
 const PROMPT_HORIZONTAL_PADDING = 4;
 const PROMPT_PREFIX_WIDTH = 2;
+const PROMPT_CONTENT_LEFT =
+  PROMPT_BORDER_WIDTH / 2 + PROMPT_HORIZONTAL_PADDING / 2 + PROMPT_PREFIX_WIDTH;
 
 export interface TextPromptProps {
   readonly value: string;
+  readonly width: number;
+  readonly viewportRows: number;
+  readonly maxRows: number;
+  readonly showHint: boolean;
   readonly inputHistory: readonly string[];
   readonly disabled: boolean;
   readonly disabledHint?: string;
@@ -53,6 +61,9 @@ export function cursorPositionOf(
 export function TextPrompt(props: TextPromptProps): ReactElement {
   const {
     value,
+    width,
+    maxRows,
+    showHint,
     inputHistory,
     disabled,
     slashActive,
@@ -61,8 +72,21 @@ export function TextPrompt(props: TextPromptProps): ReactElement {
     onChange,
     onSubmit,
   } = props;
+  const { setCursorPosition } = useCursor();
   const { stdout } = useStdout();
-  const width = stdout.columns || 80;
+  const [, setCursorRevision] = useState(0);
+  useEffect(() => {
+    if (disabled) {
+      return;
+    }
+    const refresh = (): void => {
+      setCursorRevision((revision) => revision + 1);
+    };
+    stdout.on(CHAT_CURSOR_REFRESH_EVENT, refresh);
+    return () => {
+      stdout.off(CHAT_CURSOR_REFRESH_EVENT, refresh);
+    };
+  }, [disabled, stdout]);
   const editorWidth = Math.max(
     1,
     width - PROMPT_BORDER_WIDTH - PROMPT_HORIZONTAL_PADDING - PROMPT_PREFIX_WIDTH,
@@ -135,6 +159,9 @@ export function TextPrompt(props: TextPromptProps): ReactElement {
         return;
       }
       if (isKeyboardProtocolResidue(input)) {
+        return;
+      }
+      if (isMouseProtocolInput(input)) {
         return;
       }
       const newlineKey =
@@ -224,10 +251,37 @@ export function TextPrompt(props: TextPromptProps): ReactElement {
 
   const editor = editorRef.current;
   const lines = editor.value.split("\n");
-  const cursorPosition = cursorPositionOf(lines, editor.cursor);
-  const body = h(
+  const metrics = visualLineMetrics(editor, editorWidth);
+  const availableBodyRows = Math.max(1, Math.floor(maxRows) - 2 - (showHint ? 1 : 0));
+  const visibleBodyRows = Math.min(metrics.totalRows, availableBodyRows);
+  const firstVisibleRow = Math.min(
+    Math.max(0, metrics.cursorRow - visibleBodyRows + 1),
+    Math.max(0, metrics.totalRows - visibleBodyRows),
+  );
+  const visibleCursorRow = metrics.cursorRow - firstVisibleRow;
+  const promptHeight = visibleBodyRows + 2 + (showHint ? 1 : 0);
+  const promptTop = Math.max(0, props.viewportRows - promptHeight);
+  // TextPrompt is the final child of the fixed root viewport. Anchoring from the viewport bottom
+  // gives the cursor its post-layout row in the same render, while useBoxMetrics would report the
+  // previous sibling layout for one commit when the slash popup mounts or unmounts. Ink's real
+  // cursor is the terminal anchor used by IMEs to draw uncommitted preedit text.
+  setCursorPosition(
+    !disabled
+      ? {
+          x: PROMPT_CONTENT_LEFT + metrics.cursorColumn,
+          y: promptTop + 1 + visibleCursorRow,
+        }
+      : undefined,
+  );
+  const bodyContent = h(
     Box,
-    { flexDirection: "column" },
+    {
+      flexDirection: "column",
+      flexShrink: 0,
+      position: "relative",
+      top: -firstVisibleRow,
+      height: metrics.totalRows,
+    },
     ...lines.map((line, index) => {
       const prefix = h(
         Box,
@@ -244,25 +298,13 @@ export function TextPrompt(props: TextPromptProps): ReactElement {
           h(Text, { dimColor: true, wrap: "hard" }, line),
         );
       }
-      if (index !== cursorPosition.row) {
-        return h(Box, { key: String(index) }, prefix, h(Text, { wrap: "hard" }, line));
-      }
-      const cluster = graphemeAt(line, cursorPosition.col);
-      const before = line.slice(0, cursorPosition.col);
-      const after = line.slice(cursorPosition.col + cluster.length);
-      return h(
-        Box,
-        { key: String(index) },
-        prefix,
-        h(
-          Text,
-          { wrap: "hard" },
-          before,
-          h(Text, { inverse: true }, cluster === "" ? " " : cluster),
-          after,
-        ),
-      );
+      return h(Box, { key: String(index) }, prefix, h(Text, { wrap: "hard" }, line));
     }),
+  );
+  const body = h(
+    Box,
+    { flexDirection: "column", height: visibleBodyRows, overflowY: "hidden" },
+    bodyContent,
   );
   const hintText = disabled
     ? (props.disabledHint ?? "Esc 中断本轮")
@@ -276,17 +318,32 @@ export function TextPrompt(props: TextPromptProps): ReactElement {
     disabled && props.disabledHint !== undefined
       ? { color: "yellow", dimColor: true }
       : { dimColor: true };
-  const hint = h(
-    Box,
-    { marginLeft: 1 },
-    ...(autoApprove
-      ? [h(Text, { color: "yellow" }, `${GLYPHS.auto} auto`), h(Text, hintProps, ` · ${hintText}`)]
-      : [h(Text, hintProps, hintText)]),
-  );
+  const hint = showHint
+    ? h(
+        Box,
+        { marginLeft: 1, flexShrink: 0, height: 1, overflowY: "hidden" },
+        ...(autoApprove
+          ? [
+              h(Text, { color: "yellow", wrap: "truncate-end" }, `${GLYPHS.auto} auto`),
+              h(Text, { ...hintProps, wrap: "truncate-end" }, ` · ${hintText}`),
+            ]
+          : [h(Text, { ...hintProps, wrap: "truncate-end" }, hintText)]),
+      )
+    : null;
   return h(
     Box,
-    { flexDirection: "column", width },
-    h(Box, { borderStyle: "round", borderColor: disabled ? "gray" : "cyan", paddingX: 2 }, body),
+    { flexDirection: "column", width, flexShrink: 0 },
+    h(
+      Box,
+      {
+        borderStyle: "round",
+        borderColor: disabled ? "gray" : "cyan",
+        paddingX: 2,
+        height: visibleBodyRows + 2,
+        overflowY: "hidden",
+      },
+      body,
+    ),
     hint,
   );
 }

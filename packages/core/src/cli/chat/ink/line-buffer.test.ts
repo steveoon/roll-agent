@@ -19,6 +19,7 @@ import {
   moveVisualUp,
   moveWordLeft,
   moveWordRight,
+  visualLineMetrics,
 } from "./line-buffer.ts";
 
 const FAMILY = "👩‍👩‍👧‍👦";
@@ -278,6 +279,29 @@ test("visual movement includes a wrapped cursor placeholder at an exact row boun
   const upper = moveVisualUp(createLineBuffer("abcd"), 4);
   assert.equal(upper.cursor, 0);
   assert.equal(upper.goalColumn, 0);
+});
+
+test("visual line metrics expose the terminal cell for an IME cursor", () => {
+  assert.deepEqual(visualLineMetrics(createLineBuffer("ab中文", 3), 10), {
+    cursorRow: 0,
+    cursorColumn: 4,
+    totalRows: 1,
+  });
+  assert.deepEqual(visualLineMetrics(createLineBuffer("abcd"), 4), {
+    cursorRow: 1,
+    cursorColumn: 0,
+    totalRows: 2,
+  });
+  assert.deepEqual(visualLineMetrics(createLineBuffer("abcd\n", 4), 4), {
+    cursorRow: 1,
+    cursorColumn: 0,
+    totalRows: 2,
+  });
+  assert.deepEqual(visualLineMetrics(createLineBuffer("ab中文"), 4), {
+    cursorRow: 1,
+    cursorColumn: 2,
+    totalRows: 2,
+  });
 });
 
 test("horizontal movement and edits clear goal column", () => {

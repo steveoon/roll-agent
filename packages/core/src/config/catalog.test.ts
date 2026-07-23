@@ -81,7 +81,7 @@ describe("buildRollConfigCatalog", () => {
     };
     visit(catalog.root);
 
-    assert.equal(leaves.length, 59);
+    assert.equal(leaves.length, 60);
     for (const leaf of leaves) {
       const path = leaf.path.join(".");
       const guidance = findConfigGuidance(path);
@@ -110,6 +110,14 @@ describe("buildRollConfigCatalog", () => {
 
   it("derives nested form nodes, defaults, widgets and guidance from the config schema", () => {
     const catalog = buildRollConfigCatalog();
+
+    const screenMode = findNode(catalog.root, ["chat", "screenMode"]);
+    assert.equal(screenMode.kind, "enum");
+    assert.equal(screenMode.defaultValue, "auto");
+    assert.equal(screenMode.persistedRequired, false);
+    if (screenMode.kind === "enum") {
+      assert.deepEqual(screenMode.options, ["auto", "fullscreen", "inline"]);
+    }
 
     const timeout = findNode(catalog.root, ["runtime", "turnTimeoutMs"]);
     assert.equal(timeout.kind, "number");
