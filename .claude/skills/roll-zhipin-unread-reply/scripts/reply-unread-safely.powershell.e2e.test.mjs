@@ -55,13 +55,25 @@ test(
     writeFileSync(path.join(staleShimDir, "roll.cmd"), "@echo off\r\nexit /b 99\r\n", "utf8");
     writeFileSync(
       shimScriptPath,
-      String.raw`import { appendFileSync, readFileSync } from "node:fs";
+      String.raw`import { appendFileSync, readFileSync, writeSync } from "node:fs";
 
 const args = process.argv.slice(2);
 const tracePath = process.env.ROLL_SHIM_TRACE;
+const waitBuffer = new Int32Array(new SharedArrayBuffer(4));
 function trace(entry) {
   if (!tracePath) return;
   appendFileSync(tracePath, JSON.stringify(entry) + "\n");
+}
+
+function writeJsonWithInterleavedStderr(value) {
+  const json = JSON.stringify(value, null, 2);
+  const splitAt = json.indexOf('"defaultInstanceId"');
+  if (splitAt < 0) throw new Error("browser_status fixture is missing defaultInstanceId");
+  writeSync(1, json.slice(0, splitAt));
+  Atomics.wait(waitBuffer, 0, 0, 25);
+  writeSync(2, "fixture-agent stderr between JSON chunks\n");
+  Atomics.wait(waitBuffer, 0, 0, 25);
+  writeSync(1, json.slice(splitAt) + "\n");
 }
 
 if (args[0] === "agent" && args[1] === "health") {
@@ -120,7 +132,16 @@ const responses = {
     signedEnvelope: "must-not-leak",
   },
 };
-console.log(JSON.stringify(responses[tool] ?? { success: false, error: "unexpected tool", tool }));
+const response = responses[tool] ?? { success: false, error: "unexpected tool", tool };
+if (tool === "browser_status") {
+  if (process.env.ROLL_SHIM_FAIL_STATUS === "1") {
+    writeSync(2, "fixture browser_status failed\n");
+    process.exit(23);
+  }
+  writeJsonWithInterleavedStderr(response);
+} else {
+  console.log(JSON.stringify(response));
+}
 `,
       "utf8",
     );
@@ -208,6 +229,49 @@ console.log(JSON.stringify(responses[tool] ?? { success: false, error: "unexpect
         debug,
       );
       assert.doesNotMatch(resultsText, /signedEnvelope|must-not-leak|https:/);
+
+      const statusFailureTracePath = path.join(testDir, "status-failure.trace.jsonl");
+      const statusFailureResultsPath = path.join(testDir, "status-failure.results.jsonl");
+      const statusFailure = spawnSync(
+        "pwsh",
+        [
+          "-NoLogo",
+          "-NoProfile",
+          "-ExecutionPolicy",
+          "Bypass",
+          "-File",
+          scriptPath,
+          "-Limit",
+          "1",
+          "--no-unread-filter",
+          "-NoExchangeWechat",
+          "--results-file",
+          statusFailureResultsPath,
+        ],
+        {
+          encoding: "utf8",
+          timeout: 30_000,
+          env: {
+            ...envWithPrependedPath(process.env, staleShimDir),
+            ROLL_CURRENT_CLI: shimCommandPath,
+            ROLL_SHIM_TRACE: statusFailureTracePath,
+            ROLL_SHIM_FAIL_STATUS: "1",
+          },
+        },
+      );
+      assert.notEqual(statusFailure.status, 0);
+      assert.match(statusFailure.stderr, /fixture browser_status failed/);
+      const statusFailureCalls = readFileSync(statusFailureTracePath, "utf8")
+        .trim()
+        .split(/\r?\n/)
+        .filter(Boolean)
+        .map((line) => JSON.parse(line));
+      assert.equal(
+        statusFailureCalls.some(
+          (call) => call.kind === "run" && call.tool === "zhipin_open_chat_page",
+        ),
+        false,
+      );
     } finally {
       rmSync(testDir, { recursive: true, force: true });
     }

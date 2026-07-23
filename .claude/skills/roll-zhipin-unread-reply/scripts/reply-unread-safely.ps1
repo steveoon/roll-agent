@@ -252,6 +252,7 @@ function Invoke-RollCapture {
   param([Parameter(ValueFromRemainingArguments = $true)][string[]]$RollArgs)
   $prev = $ErrorActionPreference
   $ErrorActionPreference = "Continue"
+  $stderrPath = Join-Path ([System.IO.Path]::GetTempPath()) ("roll-stderr-{0}.log" -f ([guid]::NewGuid().ToString("N")))
   try {
     $rollCommand = if ($env:ROLL_CURRENT_CLI -and (Test-Path -LiteralPath $env:ROLL_CURRENT_CLI -PathType Leaf)) {
       $env:ROLL_CURRENT_CLI
@@ -259,22 +260,21 @@ function Invoke-RollCapture {
     else {
       "roll"
     }
-    $chunks = @(& $rollCommand @RollArgs 2>&1 | ForEach-Object {
-        if ($_ -is [System.Management.Automation.ErrorRecord]) {
-          if ($null -ne $_.Exception -and $null -ne $_.Exception.Message) {
-            $_.Exception.Message
-          }
-          else {
-            $_.ToString()
-          }
-        }
-        elseif ($null -ne $_) {
-          [string]$_
-        }
-      })
+    $raw = & $rollCommand @RollArgs 2> $stderrPath
+    $rollExit = if ($null -ne $LASTEXITCODE) { [int]$LASTEXITCODE } else { 0 }
+    $chunks = @($raw | Convert-NativeCommandOutput)
+    if ($rollExit -ne 0 -and (Test-Path -LiteralPath $stderrPath -PathType Leaf)) {
+      $stderrText = [System.IO.File]::ReadAllText($stderrPath)
+      if (-not [string]::IsNullOrWhiteSpace($stderrText)) {
+        [Console]::Error.WriteLine($stderrText.TrimEnd())
+      }
+    }
     return ($chunks -join [Environment]::NewLine)
   }
   finally {
+    if (Test-Path -LiteralPath $stderrPath -PathType Leaf) {
+      Remove-Item -LiteralPath $stderrPath -Force -ErrorAction SilentlyContinue
+    }
     $ErrorActionPreference = $prev
   }
 }

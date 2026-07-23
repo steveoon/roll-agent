@@ -44,7 +44,14 @@ printf '%s\t%s\n' "$tool" "$input" >>"$ROLL_SHIM_TRACE"
 
 case "$tool" in
   browser_status)
-    echo '{"instances":[],"defaultInstanceId":null}'
+    if [[ "$ROLL_SHIM_FAIL_STATUS" == "1" ]]; then
+      printf '%s\n' 'fixture browser_status failed' >&2
+      exit 23
+    fi
+    printf '{\n  "instances": [\n    {"id":"boss-a"}\n'
+    printf '%s\n' 'fixture-agent stderr between JSON chunks' >&2
+    sleep 0.05
+    printf '  ],\n  "defaultInstanceId": "boss-a"\n}\n'
     ;;
   zhipin_open_chat_page)
     echo '{"success":true,"chatReady":true}'
@@ -114,6 +121,7 @@ function runScenario(name, noJudge, previewFailure = false, useCurrentCli = fals
       ROLL_SHIM_TRACE: tracePath,
       ROLL_SHIM_NO_JUDGE: noJudge ? "1" : "0",
       ROLL_SHIM_PREVIEW_FAILURE: previewFailure ? "1" : "0",
+      ROLL_SHIM_FAIL_STATUS: "0",
     },
   });
   assert.equal(result.status, 0, `${name} failed:\n${result.stderr}\n${result.stdout}`);
@@ -186,6 +194,39 @@ try {
     activePhase: "turn_planning",
     phaseLatencies: { tenant_context: 7, binding_check: 4 },
   });
+
+  const statusFailureTracePath = path.join(testDir, "status-failure.trace");
+  const statusFailureResultsPath = path.join(testDir, "status-failure.jsonl");
+  const statusFailure = spawnSync(
+    "bash",
+    [
+      scriptPath,
+      "--limit",
+      "1",
+      "--no-unread-filter",
+      "--no-exchange-wechat",
+      "--results-file",
+      statusFailureResultsPath,
+    ],
+    {
+      encoding: "utf8",
+      timeout: 15_000,
+      env: {
+        ...process.env,
+        PATH: `${shimDir}:${process.env.PATH ?? ""}`,
+        ROLL_SHIM_TRACE: statusFailureTracePath,
+        ROLL_SHIM_FAIL_STATUS: "1",
+      },
+    },
+  );
+  assert.notEqual(statusFailure.status, 0);
+  assert.match(statusFailure.stderr, /fixture browser_status failed/);
+  const statusFailureTools = readFileSync(statusFailureTracePath, "utf8")
+    .trim()
+    .split("\n")
+    .filter(Boolean)
+    .map((line) => line.slice(0, line.indexOf("\t")));
+  assert.equal(statusFailureTools.includes("zhipin_open_chat_page"), false);
 
   console.log("reply-unread-safely.e2e.test.mjs: ok");
 } finally {

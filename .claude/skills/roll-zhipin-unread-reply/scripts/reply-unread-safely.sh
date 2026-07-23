@@ -138,6 +138,27 @@ cleanup() {
 }
 trap cleanup EXIT
 
+capture_roll_stdout() {
+  local stderr_file
+  stderr_file="$(mktemp "$WORK_DIR/roll-stderr.XXXXXX")"
+  local stdout=""
+  local exit_code=0
+
+  if stdout=$(roll_cli "$@" 2>"$stderr_file"); then
+    exit_code=0
+  else
+    exit_code=$?
+  fi
+
+  if [[ "$exit_code" -ne 0 && -s "$stderr_file" ]]; then
+    cat "$stderr_file" >&2
+  fi
+  rm -f -- "$stderr_file"
+
+  printf '%s' "$stdout"
+  return "$exit_code"
+}
+
 roll_json_file() {
   local tool="$1"
   local file="$2"
@@ -152,7 +173,7 @@ roll_json_file() {
       fs.writeFileSync(filePath, JSON.stringify(payload));
     ' "$file" "$BROWSER_INSTANCE"
   fi
-  roll_cli run "$AGENT" "$tool" --input-file "$file" --json 2>&1 || true
+  capture_roll_stdout run "$AGENT" "$tool" --input-file "$file" --json || true
 }
 
 roll_no_input() {
@@ -229,7 +250,7 @@ log() { echo "[reply-unread] $*" >&2; }
 
 ensure_agent_healthy() {
   local health
-  health=$(roll_cli agent health --json 2>&1) || health=""
+  health=$(capture_roll_stdout agent health --json) || health=""
   if printf '%s' "$health" | node "$CHECK_AGENT_HEALTH" 2>/dev/null; then
     return 0
   fi

@@ -152,7 +152,7 @@ node --test scripts/reply-unread-safely.powershell.e2e.test.mjs # Windows runs; 
 | `Get-Content` / `Set-Content` can re-encode JSON as ANSI | JSON input/results use `.NET` `ReadAllText` / `WriteAllText` with UTF-8 no BOM |
 | `Invoke-NodeStdin` given inline JS instead of file path | All logic in `*.mjs`; first arg is always a path |
 | `require()` inside `.mjs` / temp `.js` confusion | Helpers use ESM only (`import` from `roll-json-extract.mjs`) |
-| `Out-String` re-encodes roll output as ANSI | `Invoke-RollCapture` joins stream lines; no `Out-String` |
+| stdout/stderr merge can corrupt JSON | `Invoke-RollCapture` parses stdout only; failed commands emit stderr separately |
 | `ProcessStartInfo` on `roll.ps1` | **Not used** — invoke `roll` via PowerShell `& roll` |
 | Huge `browser_snapshot` JSON fails `JSON.parse` | `find-unread-ref.mjs` uses `extract-roll-json` + regex fallback |
 | Temp workdir deleted on exit | `-KeepWorkDir` / `--keep-workdir` keeps files for debugging |
