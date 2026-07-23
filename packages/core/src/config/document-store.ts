@@ -1,20 +1,17 @@
 import { createHash, randomUUID } from "node:crypto";
 import {
-  closeSync,
   existsSync,
-  fsyncSync,
   lstatSync,
   mkdirSync,
-  openSync,
   readFileSync,
   realpathSync,
-  renameSync,
   statSync,
   unlinkSync,
   writeFileSync,
 } from "node:fs";
-import { basename, dirname, resolve } from "node:path";
+import { dirname, resolve } from "node:path";
 import { parseDocument } from "yaml";
+import { atomicTextFileWriter } from "../internal/config-atomic-write.ts";
 import { isProcessStartToken, readProcessStartToken } from "../registry/process-identity.ts";
 import type { ProcessStartToken } from "../registry/process-identity.ts";
 
@@ -170,14 +167,19 @@ export class YamlConfigDocumentStore {
         options.backup !== false && current.existed
           ? writeBackup(writablePath, current.raw)
           : undefined;
-      writeTextAtomic(writablePath, preview.raw, current.existed, () => {
-        assertConfigDocumentUnchanged(
-          this.configPath,
-          this.fallbackRaw,
-          writablePath,
-          current.existed,
-          current.revision,
-        );
+      atomicTextFileWriter.write({
+        configPath: writablePath,
+        raw: preview.raw,
+        existed: current.existed,
+        verifyBeforeRename: () => {
+          assertConfigDocumentUnchanged(
+            this.configPath,
+            this.fallbackRaw,
+            writablePath,
+            current.existed,
+            current.revision,
+          );
+        },
       });
 
       return {
@@ -220,14 +222,19 @@ export class YamlConfigDocumentStore {
       }
 
       const backupPath = current.existed ? writeBackup(writablePath, current.raw) : undefined;
-      writeTextAtomic(writablePath, normalizedRaw, current.existed, () => {
-        assertConfigDocumentUnchanged(
-          this.configPath,
-          this.fallbackRaw,
-          writablePath,
-          current.existed,
-          current.revision,
-        );
+      atomicTextFileWriter.write({
+        configPath: writablePath,
+        raw: normalizedRaw,
+        existed: current.existed,
+        verifyBeforeRename: () => {
+          assertConfigDocumentUnchanged(
+            this.configPath,
+            this.fallbackRaw,
+            writablePath,
+            current.existed,
+            current.revision,
+          );
+        },
       });
 
       return {
@@ -396,40 +403,6 @@ function writeBackup(configPath: string, raw: string): string {
   return backupPath;
 }
 
-function writeTextAtomic(
-  configPath: string,
-  raw: string,
-  existed: boolean,
-  beforeRename?: () => void,
-): void {
-  const directory = dirname(configPath);
-  mkdirSync(directory, { recursive: true });
-  const fileMode = existed ? statSync(configPath).mode & 0o777 : 0o600;
-  const temporaryPath = resolve(
-    directory,
-    `.${basename(configPath)}.${String(process.pid)}.${randomUUID()}.tmp`,
-  );
-  let fileDescriptor: number | undefined;
-  try {
-    fileDescriptor = openSync(temporaryPath, "wx", fileMode);
-    writeFileSync(fileDescriptor, raw, "utf-8");
-    fsyncSync(fileDescriptor);
-    closeSync(fileDescriptor);
-    fileDescriptor = undefined;
-    beforeRename?.();
-    renameSync(temporaryPath, configPath);
-    fsyncDirectory(directory);
-  } catch (error) {
-    if (fileDescriptor !== undefined) {
-      closeSync(fileDescriptor);
-    }
-    if (existsSync(temporaryPath)) {
-      unlinkSync(temporaryPath);
-    }
-    throw error;
-  }
-}
-
 interface ConfigWriteLockFile {
   readonly pid: number;
   readonly processStartToken: ProcessStartToken;
@@ -591,25 +564,6 @@ function assertConfigDocumentUnchanged(
     resolveWritablePath(configPath) !== expectedWritablePath
   ) {
     throw new ConfigRevisionConflictError(expectedRevision, actualRevision);
-  }
-}
-
-function fsyncDirectory(directory: string): void {
-  // Windows does not expose a portable directory fsync through Node's fs APIs. The file itself
-  // was already fsynced before rename, so do not report failure after replacement succeeded just
-  // because FlushFileBuffers rejects a directory handle.
-  if (process.platform === "win32") {
-    return;
-  }
-
-  let directoryDescriptor: number | undefined;
-  try {
-    directoryDescriptor = openSync(directory, "r");
-    fsyncSync(directoryDescriptor);
-  } finally {
-    if (directoryDescriptor !== undefined) {
-      closeSync(directoryDescriptor);
-    }
   }
 }
 
