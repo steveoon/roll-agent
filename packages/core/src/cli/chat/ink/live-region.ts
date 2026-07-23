@@ -2,7 +2,7 @@ import { createElement as h } from "react";
 import type { ReactElement } from "react";
 import { Box, Text } from "ink";
 import type { LiveState } from "./state.ts";
-import { ThinkingText } from "./thinking-text.ts";
+import { AssistantContent } from "./assistant-content.ts";
 import { ToolLabel } from "./tool-label.ts";
 import { ReasoningBlock } from "./reasoning-block.ts";
 
@@ -42,7 +42,7 @@ export function LiveRegion({ live }: { live: LiveState }): ReactElement {
       ? h(
           Box,
           { marginTop: 1 },
-          h(ThinkingText, {
+          h(AssistantContent, {
             text: live.thinkTagOpen ? `<think>${live.streamingText}` : live.streamingText,
           }),
         )

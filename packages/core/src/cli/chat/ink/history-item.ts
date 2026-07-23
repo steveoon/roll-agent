@@ -2,8 +2,7 @@ import { createElement as h } from "react";
 import type { ReactElement } from "react";
 import { Box, Text } from "ink";
 import type { HistoryItem } from "./state.ts";
-import { parseThinking } from "./thinking-text.ts";
-import { Markdown } from "./markdown.ts";
+import { AssistantContent } from "./assistant-content.ts";
 import { ToolLabel } from "./tool-label.ts";
 import { BannerLinesView } from "./banner-view.ts";
 import { ReasoningBlock } from "./reasoning-block.ts";
@@ -35,15 +34,7 @@ export function HistoryItemView({ item }: { item: HistoryItem }): ReactElement {
           h(Text, { dimColor: true }, item.text.trim()),
         );
       }
-      return h(
-        Box,
-        { flexDirection: "column" },
-        ...parseThinking(item.text).map((segment, index) =>
-          segment.thinking
-            ? h(Text, { key: String(index), dimColor: true }, segment.text)
-            : h(Markdown, { key: String(index), text: segment.text }),
-        ),
-      );
+      return h(AssistantContent, { text: item.text });
     case "reasoning":
       return h(ReasoningBlock, { text: item.text });
     case "tool": {
