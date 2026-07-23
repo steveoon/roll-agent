@@ -1,5 +1,20 @@
 # @roll-agent/core
 
+## 0.21.0
+
+### Minor Changes
+
+- [#166](https://github.com/steveoon/roll-agent/pull/166) [`d31f24a`](https://github.com/steveoon/roll-agent/commit/d31f24aea007487c57bbb20374f62ac68290fff3) Thanks [@steveoon](https://github.com/steveoon)! - Systematically stabilize `roll chat` during terminal resizing with a bounded fullscreen viewport,
+  coalesced full-frame resize rendering, scrollable windowed history, responsive input and popup
+  layout, terminal-safe fallback modes, IME-aware real cursor placement, and main-screen restoration on
+  exit. Add
+  `chat.screen-mode` and `--screen-mode` with `auto`, `fullscreen`, and `inline` options.
+
+### Patch Changes
+
+- Updated dependencies []:
+  - @roll-agent/runtime@0.8.0
+
 ## 0.20.0
 
 ### Minor Changes
