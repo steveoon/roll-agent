@@ -1,13 +1,11 @@
 import { randomUUID } from "node:crypto";
-import { createElement as h, useCallback, useMemo, useRef, useState } from "react";
+import { createElement as h, useCallback, useState } from "react";
 import type { ReactElement } from "react";
-import { Box, Static, useInput } from "ink";
+import { Box, Text, useInput, useWindowSize } from "ink";
 import type { AgentSession } from "@roll-agent/runtime";
 import type { ThinkingLevel } from "../../../llm/providers.ts";
 import { useSession } from "./use-session.ts";
 import { CHAT_PHASES, type HistoryItem } from "./state.ts";
-import { HistoryItemView } from "./history-item.ts";
-import { LiveRegion } from "./live-region.ts";
 import { StatusLine } from "./status-line.ts";
 import { TextPrompt } from "./text-prompt.ts";
 import { ConfirmSelect } from "./confirm-select.ts";
@@ -19,20 +17,20 @@ import {
   SLASH_COMMANDS,
   type SlashSkillSummary,
 } from "./commands.ts";
-import { bannerTextLine, type BannerLine } from "../banner.ts";
-import { BannerHistoryView } from "./banner-view.ts";
+import { bannerTextLine, buildBannerLines, type BannerInfo } from "../banner.ts";
 import { cycleThinking } from "./thinking.ts";
 import { appendInputHistory } from "./input-history.ts";
 import { resolveTurnActivity } from "./turn-activity.ts";
 import { TurnStatusLine } from "./turn-status-line.ts";
+import { resolveChatLayout } from "./layout.ts";
+import { TranscriptViewport } from "./transcript-viewport.ts";
 
 export interface ChatAppProps {
   readonly session: AgentSession;
   readonly model: string;
   readonly contextWindow: number | undefined;
   readonly initialHistory?: readonly HistoryItem[];
-  /** Banner played as an entrance animation in the dynamic region, then committed to Static. */
-  readonly animatedBanner?: readonly BannerLine[];
+  readonly banner?: BannerInfo;
   readonly initialThinkingLevel?: ThinkingLevel;
   readonly availableSkills?: readonly SlashSkillSummary[];
   readonly onThinkingChange?: (level: ThinkingLevel) => void;
@@ -40,12 +38,17 @@ export interface ChatAppProps {
   readonly onExit: () => void;
 }
 
+export const INK_HINTS =
+  "/exit 退出 · Esc 中断 · / 命令 · Shift+Enter/Ctrl+J 换行 · Alt+./Alt+, 调推理 · Shift+Tab 自动批准";
+
 function helpText(): string {
   return SLASH_COMMANDS.map((command) => `${command.name} — ${command.description}`).join("\n");
 }
 
 export function ChatApp(props: ChatAppProps): ReactElement {
   const { session, model, contextWindow, onUserSubmit, onExit } = props;
+  const windowSize = useWindowSize();
+  const layout = resolveChatLayout(windowSize.columns, windowSize.rows);
   const availableSkills = props.availableSkills ?? [];
   const [inputHistory, setInputHistory] = useState<readonly string[]>(() =>
     (props.initialHistory ?? []).reduce<readonly string[]>(
@@ -75,18 +78,15 @@ export function ChatApp(props: ChatAppProps): ReactElement {
     ...(props.onThinkingChange ? { onThinkingChange: props.onThinkingChange } : {}),
   });
 
-  const staticItems = useMemo(() => [...state.history], [state.history]);
-  const [bannerSettled, setBannerSettled] = useState(false);
-  const animatedBannerRef = useRef(props.animatedBanner);
+  const animateBanner = props.banner !== undefined && (props.initialHistory?.length ?? 0) === 0;
+  const [bannerSettled, setBannerSettled] = useState(!animateBanner);
   const handleBannerSettled = useCallback(() => {
-    const bannerLines = animatedBannerRef.current;
-    if (bannerLines !== undefined) {
-      animatedBannerRef.current = undefined;
-      commitHistory({ kind: "banner", id: "banner", lines: bannerLines });
-    }
     setBannerSettled(true);
-  }, [commitHistory]);
-  const animatedBanner = bannerSettled ? undefined : props.animatedBanner;
+  }, []);
+  const bannerLines =
+    props.banner === undefined
+      ? undefined
+      : buildBannerLines(props.banner, layout.columns, { hints: INK_HINTS });
   const [selected, setSelected] = useState(0);
   const slashActive = state.phase === CHAT_PHASES.idle && state.draft.startsWith("/");
   const slashPopupActive = slashActive && state.draft.split(/\s+/).at(-1)?.startsWith("/") === true;
@@ -165,8 +165,7 @@ export function ChatApp(props: ChatAppProps): ReactElement {
       return;
     }
     if (name === "/skills") {
-      const width = (process.stdout.columns || 80) - 2;
-      const [header, ...rows] = buildSkillListLines(availableSkills, width);
+      const [header, ...rows] = buildSkillListLines(availableSkills, layout.contentWidth);
       commitHistory({
         kind: "banner",
         id: randomUUID(),
@@ -230,10 +229,16 @@ export function ChatApp(props: ChatAppProps): ReactElement {
       ? h(ConfirmSelect, {
           prompt: state.pendingConfirm.prompt,
           args: state.pendingConfirm.args,
+          width: layout.columns,
+          maxRows: layout.promptRows + layout.popupRows,
           onDecide: resolveConfirm,
         })
       : h(TextPrompt, {
           value: state.draft,
+          width: layout.columns,
+          viewportRows: layout.renderRows,
+          maxRows: layout.promptRows,
+          showHint: layout.showHelp,
           inputHistory,
           disabled: state.phase !== CHAT_PHASES.idle,
           ...(state.phase === CHAT_PHASES.cancelling
@@ -250,45 +255,54 @@ export function ChatApp(props: ChatAppProps): ReactElement {
         });
   const turnActivity = resolveTurnActivity(state);
 
+  if (layout.tooSmall) {
+    return h(
+      Box,
+      {
+        width: layout.columns,
+        height: layout.renderRows,
+        alignItems: "center",
+        justifyContent: "center",
+        flexDirection: "column",
+        overflow: "hidden",
+      },
+      h(Text, { color: "yellow", bold: true }, "终端窗口过小"),
+      h(Text, { dimColor: true }, "请调整到至少 40 × 10；当前会话和草稿已保留"),
+    );
+  }
+
   return h(
     Box,
-    { flexDirection: "column" },
-    h(Static<HistoryItem>, {
-      items: staticItems,
-      children: (historyItem, index) => {
-        const previousItem = staticItems[index - 1];
-        const spaced =
-          historyItem.kind === "user" ||
-          historyItem.kind === "assistant" ||
-          historyItem.kind === "reasoning" ||
-          previousItem?.kind === "reasoning";
-        const indented =
-          historyItem.kind === "tool" ||
-          historyItem.kind === "denied" ||
-          historyItem.kind === "cancelled";
-        return h(
-          Box,
-          { key: historyItem.id, marginTop: spaced ? 1 : 0, marginLeft: indented ? 3 : 1 },
-          h(HistoryItemView, { item: historyItem }),
-        );
-      },
+    {
+      flexDirection: "column",
+      width: layout.columns,
+      height: layout.renderRows,
+      overflow: "hidden",
+    },
+    h(TranscriptViewport, {
+      width: layout.columns,
+      history: state.history,
+      live: state.live,
+      onBannerSettled: handleBannerSettled,
+      animateBanner: animateBanner && !bannerSettled,
+      navigationBlocked: state.phase === CHAT_PHASES.confirm || slashPopupActive,
+      ...(bannerLines === undefined ? {} : { banner: bannerLines }),
     }),
-    animatedBanner !== undefined
-      ? h(
-          Box,
-          { marginLeft: 1 },
-          h(BannerHistoryView, { lines: animatedBanner, onSettled: handleBannerSettled }),
-        )
-      : null,
-    h(Box, { marginLeft: 1 }, h(LiveRegion, { live: state.live })),
     h(
       Box,
-      { marginTop: turnActivity === undefined ? 0 : 1 },
+      { flexShrink: 0, marginTop: turnActivity === undefined ? 0 : 1 },
       turnActivity === undefined
-        ? h(StatusLine, { status: state.status })
-        : h(TurnStatusLine, { activity: turnActivity }),
+        ? h(StatusLine, { status: state.status, width: layout.columns })
+        : h(TurnStatusLine, { activity: turnActivity, width: layout.columns }),
     ),
-    slashActive ? h(SlashPopup, { matches, selected: selectedIndex }) : null,
+    slashActive
+      ? h(SlashPopup, {
+          matches,
+          selected: selectedIndex,
+          width: layout.columns,
+          maxRows: layout.popupRows,
+        })
+      : null,
     footer,
   );
 }

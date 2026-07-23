@@ -7,11 +7,22 @@ const SCENARIOS = [
   "keypress",
   "text-stream",
   "tool-stream",
+  "resize-cycle",
   "resize-storm",
+  "stream-resize",
   "idle",
 ] as const;
 
 type Scenario = (typeof SCENARIOS)[number];
+
+const RESIZE_HISTORY = [
+  ...Array.from({ length: 24 }, (_, index) => ({
+    role: index % 2 === 0 ? "user" : "assistant",
+    content: `PTY_HISTORY_${String(index).padStart(2, "0")}`,
+  })),
+  { role: "user", content: "PTY_USER_4F21" },
+  { role: "assistant", content: "PTY_ASSIST_91C7" },
+] as const;
 
 function isScenario(value: string | undefined): value is Scenario {
   return SCENARIOS.some((scenario) => scenario === value);
@@ -22,8 +33,9 @@ async function* textStream(): AsyncIterable<SessionEvent> {
     index === 399 ? "STREAM_COMPLETE_400" : `word${String(index).padStart(3, "0")}`,
   );
   yield { type: "message-start", messageId: "text-stream" };
-  for (const word of words) {
-    yield { type: "text-delta", delta: `${word} ` };
+  for (const [index, word] of words.entries()) {
+    // Bounded lines keep each marker contiguous while the viewport reflows at narrow widths.
+    yield { type: "text-delta", delta: `${word}${index % 4 === 3 ? "\n" : " "}` };
     await delay(4);
   }
   const text = words.join(" ");
@@ -51,8 +63,10 @@ async function* toolStream(): AsyncIterable<SessionEvent> {
       agentName: "fixture",
       toolName: "stream_tool",
       stream: "stdout",
-      delta: `tool-chunk-${String(index).padStart(2, "0")}\n`,
+      delta: `tool-chunk-${String(index).padStart(2, "0")}${index % 8 === 7 ? "\n" : " "}`,
     };
+    // Group markers into bounded lines so every chunk remains observable even
+    // when Ink coalesces several 5 ms deltas into one visible frame.
     await delay(5);
   }
   // Leave the final tail visible for at least one terminal repaint before committing the row.
@@ -80,7 +94,11 @@ function createFixtureSession(scenario: Scenario): AgentSession {
   const session = {
     id: `pty-${scenario}`,
     getMessages() {
-      return [];
+      return scenario === "resize-cycle" ||
+        scenario === "resize-storm" ||
+        scenario === "stream-resize"
+        ? RESIZE_HISTORY
+        : [];
     },
     getContextWindow() {
       return 200_000;
@@ -89,7 +107,7 @@ function createFixtureSession(scenario: Scenario): AgentSession {
       return [];
     },
     async *send(): AsyncIterable<SessionEvent> {
-      if (scenario === "text-stream") {
+      if (scenario === "text-stream" || scenario === "stream-resize") {
         yield* textStream();
         return;
       }
@@ -150,7 +168,7 @@ if (!isScenario(scenarioArg)) {
     model: `pty-fixture/${scenarioArg}`,
     banner: {
       version: "benchmark",
-      model: `pty-fixture/${scenarioArg}`,
+      model: `pty-banner/${scenarioArg}`,
       agentCount: 1,
       skillCount: 0,
     },

@@ -591,6 +591,7 @@ agents:
       ["browser", "instances", "boss-a", "cdpPort"],
       ["agents", "env", "notify-agent", "FEISHU_BOT_WEBHOOK"],
       ["agents", "dataDir"],
+      ["chat", "screenMode"],
       ["runtime", "turnTimeoutMs"],
       ["llm", "defaultModel"],
     ]);
@@ -606,7 +607,12 @@ agents:
       ),
     );
     assert.ok(effects.some((effect) => effect.kind === "manual"));
-    assert.ok(effects.some((effect) => effect.kind === "next-chat"));
+    const nextChat = effects.find((effect) => effect.kind === "next-chat");
+    assert.ok(nextChat);
+    assert.deepEqual(nextChat.paths, [
+      ["chat", "screenMode"],
+      ["runtime", "turnTimeoutMs"],
+    ]);
     assert.ok(effects.some((effect) => effect.kind === "next-command"));
   });
 });

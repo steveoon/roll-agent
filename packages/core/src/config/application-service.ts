@@ -412,7 +412,7 @@ function describeActivation(path: ConfigPath): Omit<ConfigActivationEffect, "pat
       requiresConfirmation: true,
     };
   }
-  if (section === "runtime" || section === "skills") {
+  if (section === "chat" || section === "runtime" || section === "skills") {
     return {
       kind: "next-chat",
       title: "新会话生效",

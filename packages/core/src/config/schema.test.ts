@@ -1,7 +1,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { DEFAULT_CONFIG } from "./defaults.ts";
-import { rollConfigSchema } from "./schema.ts";
+import { CHAT_SCREEN_MODES, chatScreenModeSchema, rollConfigSchema } from "./schema.ts";
 
 describe("rollConfigSchema", () => {
   it("builds DEFAULT_CONFIG from schema defaults plus the required seed", () => {
@@ -18,8 +18,32 @@ describe("rollConfigSchema", () => {
       }),
     );
     assert.equal(DEFAULT_CONFIG.runtime.turnTimeoutMs, 300_000);
+    assert.equal(DEFAULT_CONFIG.chat.screenMode, "auto");
     assert.equal(DEFAULT_CONFIG.install.networkTimeoutMs, 120_000);
     assert.deepEqual(DEFAULT_CONFIG.browser.instances, {});
+  });
+
+  it("should validate chat screen mode from one shared runtime enum", () => {
+    assert.deepEqual(chatScreenModeSchema.options, [...CHAT_SCREEN_MODES]);
+
+    for (const screenMode of CHAT_SCREEN_MODES) {
+      const result = rollConfigSchema.safeParse({
+        llm: { defaultProvider: "x", defaultModel: "y", providers: {} },
+        ask: {},
+        chat: { screenMode },
+        agents: { dataDir: "/tmp" },
+      });
+      assert.equal(result.success, true, screenMode);
+      assert.equal(result.success ? result.data.chat.screenMode : undefined, screenMode);
+    }
+
+    const invalid = rollConfigSchema.safeParse({
+      llm: { defaultProvider: "x", defaultModel: "y", providers: {} },
+      ask: {},
+      chat: { screenMode: "split" },
+      agents: { dataDir: "/tmp" },
+    });
+    assert.equal(invalid.success, false);
   });
 
   it("should validate a valid config", () => {

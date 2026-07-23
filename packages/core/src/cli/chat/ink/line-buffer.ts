@@ -145,9 +145,12 @@ function visualLineBounds(value: string, columns: number, cursor: number): Visua
       }
       rowWidth += segmentWidth;
     }
-    const cursorWraps = cursor === logicalEnd && rowWidth >= width;
-    rows.push({ start: rowStart, end: logicalEnd, softWrap: cursorWraps });
-    if (cursorWraps) {
+    const cursorContinues = cursor === logicalEnd && rowWidth >= width;
+    // At end-of-buffer, a full row needs one extra cell for the terminal cursor. A hard newline
+    // already provides that next visual row, so adding another placeholder would double-count it.
+    const needsCursorPlaceholder = newlineIndex === -1 && cursorContinues;
+    rows.push({ start: rowStart, end: logicalEnd, softWrap: cursorContinues });
+    if (needsCursorPlaceholder) {
       rows.push({ start: logicalEnd, end: logicalEnd, softWrap: false });
     }
     if (newlineIndex === -1) {
@@ -165,6 +168,24 @@ function visualLineIndexAt(rows: readonly VisualLineBounds[], cursor: number): n
     }
   }
   return Math.max(0, rows.length - 1);
+}
+
+export interface VisualLineMetrics {
+  readonly cursorRow: number;
+  readonly cursorColumn: number;
+  readonly totalRows: number;
+}
+
+export function visualLineMetrics(state: LineBufferState, columns: number): VisualLineMetrics {
+  const rows = visualLineBounds(state.value, columns, state.cursor);
+  const cursorRow = visualLineIndexAt(rows, state.cursor);
+  const activeRow = rows[cursorRow];
+  return {
+    cursorRow,
+    cursorColumn:
+      activeRow === undefined ? 0 : displayWidth(state.value.slice(activeRow.start, state.cursor)),
+    totalRows: Math.max(1, rows.length),
+  };
 }
 
 function moveVisualVertical(

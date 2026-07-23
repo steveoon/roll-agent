@@ -42,10 +42,9 @@ export function BannerLinesView({
 }
 
 /**
- * Animated banner entrance. Must be rendered OUTSIDE Ink's Static region (Static prints
- * each item exactly once, so interval-driven re-renders are never repainted there).
- * Calls `onSettled` once the animation completes (immediately when there is no logo),
- * letting the parent commit the final banner into Static.
+ * Animated banner entrance for the managed transcript viewport. Calls `onSettled` once the
+ * animation completes (immediately when there is no logo), so the parent can switch to the
+ * stable banner renderer without changing its semantic transcript entry.
  */
 export function BannerHistoryView({
   lines,

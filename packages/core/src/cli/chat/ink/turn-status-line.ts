@@ -1,6 +1,6 @@
 import { createElement as h, useEffect, useRef, useState } from "react";
 import type { ReactElement } from "react";
-import { Box, Text, useStdout } from "ink";
+import { Box, Text } from "ink";
 import { displayWidth } from "./display-width.ts";
 import { Spinner } from "./spinner.ts";
 import { TURN_ACTIVITY_KINDS, type TurnActivity, type TurnActivityKind } from "./turn-activity.ts";
@@ -110,9 +110,13 @@ export function composeTurnStatusLine(
   return `${layout.label}${phaseTime}${layout.spacer}${layout.turnTime}`;
 }
 
-export function TurnStatusLine({ activity }: { activity: TurnActivity }): ReactElement {
-  const { stdout } = useStdout();
-  const width = stdout.columns || 80;
+export function TurnStatusLine({
+  activity,
+  width,
+}: {
+  readonly activity: TurnActivity;
+  readonly width: number;
+}): ReactElement {
   const renderedAt = Date.now();
   const turnStartedAt = useRef(renderedAt);
   const activityTiming = useRef({ key: activity.key, startedAt: renderedAt });

@@ -26,7 +26,7 @@ import tempfile
 import time
 import traceback
 import unicodedata
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Callable, Iterable, Mapping
 
 
@@ -43,10 +43,14 @@ SCENARIOS = (
     "keypress",
     "text-stream",
     "tool-stream",
+    "resize-cycle",
     "resize-storm",
+    "stream-resize",
     "idle",
 )
 PROMPT = "›"
+PRIMARY_SCREEN_SENTINEL = "PTY_PRIMARY_SCREEN_RESTORED"
+RESIZE_SENTINELS = ("PTY_USER_4F21", "PTY_ASSIST_91C7", "PTY_DRAFT_7A52")
 TERMINAL_QUERIES = (b"\x1b[?u", b"\x1b[6n", b"\x1b[c")
 
 REQUIRED_BASELINE_METRICS: Mapping[str, tuple[str, ...]] = {
@@ -68,10 +72,18 @@ REQUIRED_BASELINE_METRICS: Mapping[str, tuple[str, ...]] = {
         "frameIntervalP95Ms",
         "frameIntervalP99Ms",
     ),
+    "resize-cycle": ("stableAfterResizeMs",),
     "resize-storm": ("stableAfterLastResizeMs",),
+    "stream-resize": ("totalMs", "stableAfterLastResizeMs"),
     "idle": ("invalidFrames", "outputBytes"),
 }
 OPTIONAL_BASELINE_METRICS = {"idle": ("cpuMs",)}
+
+
+def format_exception(error: BaseException) -> str:
+    return "".join(
+        traceback.format_exception(type(error), error, error.__traceback__)
+    ).rstrip()
 
 
 def percentile(values: list[float], quantile: float) -> float:
@@ -109,36 +121,186 @@ def char_width(char: str) -> int:
     return 2 if unicodedata.east_asian_width(char) in ("W", "F") else 1
 
 
+@dataclass
+class ScreenBuffer:
+    grid: list[list[str]]
+    x: int = 0
+    y: int = 0
+    saved: tuple[int, int] = (0, 0)
+    soft_wrapped: list[bool] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        if not self.soft_wrapped:
+            self.soft_wrapped = [False] * len(self.grid)
+
+
 class VirtualScreen:
     """Small VT screen covering the cursor/erase sequences emitted by Ink 7."""
 
     def __init__(self, columns: int, rows: int) -> None:
         self.columns = columns
         self.rows = rows
-        self.grid = [[" "] * columns for _ in range(rows)]
-        self.x = 0
-        self.y = 0
-        self.saved = (0, 0)
+        self.buffers = {
+            "primary": ScreenBuffer([[" "] * columns for _ in range(rows)]),
+            "alternate": ScreenBuffer([[" "] * columns for _ in range(rows)]),
+        }
+        self.active_buffer = "primary"
+        self.alternate_enter_count = 0
+        self.alternate_leave_count = 0
+        self.cursor_visible = True
+        self.bracketed_paste = False
+        self.kitty_keyboard = False
+        self.synchronized_update = False
+        self.mouse_modes: set[int] = set()
         self.state = "normal"
         self.sequence = ""
         self.decoder = codecs.getincrementaldecoder("utf-8")("replace")
 
+    @property
+    def buffer(self) -> ScreenBuffer:
+        return self.buffers[self.active_buffer]
+
+    @property
+    def grid(self) -> list[list[str]]:
+        return self.buffer.grid
+
+    @grid.setter
+    def grid(self, value: list[list[str]]) -> None:
+        self.buffer.grid = value
+
+    @property
+    def x(self) -> int:
+        return self.buffer.x
+
+    @x.setter
+    def x(self, value: int) -> None:
+        self.buffer.x = value
+
+    @property
+    def y(self) -> int:
+        return self.buffer.y
+
+    @y.setter
+    def y(self, value: int) -> None:
+        self.buffer.y = value
+
+    @property
+    def saved(self) -> tuple[int, int]:
+        return self.buffer.saved
+
+    @saved.setter
+    def saved(self, value: tuple[int, int]) -> None:
+        self.buffer.saved = value
+
     def resize(self, columns: int, rows: int) -> None:
-        resized = [[" "] * columns for _ in range(rows)]
-        for row in range(min(rows, self.rows)):
-            for column in range(min(columns, self.columns)):
-                resized[row][column] = self.grid[row][column]
+        old_columns = self.columns
+        for buffer in self.buffers.values():
+            logical_lines: list[list[str]] = []
+            current_line: list[str] = []
+            cursor_position = (0, 0)
+            saved_position = (0, 0)
+            last_content_row = max(
+                (
+                    row_index
+                    for row_index, cells in enumerate(buffer.grid)
+                    if any(cell not in ("", " ") for cell in cells)
+                ),
+                default=0,
+            )
+            last_relevant_row = max(last_content_row, buffer.y, buffer.saved[1])
+            for row_index in range(min(last_relevant_row + 1, len(buffer.grid))):
+                cells = buffer.grid[row_index]
+                line_index = len(logical_lines)
+                line_offset = len(current_line)
+                if row_index == buffer.y:
+                    cursor_position = (line_index, line_offset + buffer.x)
+                if row_index == buffer.saved[1]:
+                    saved_position = (line_index, line_offset + buffer.saved[0])
+                if buffer.soft_wrapped[row_index]:
+                    used = old_columns
+                else:
+                    used = max(
+                        (
+                            column_index + 1
+                            for column_index, cell in enumerate(cells)
+                            if cell not in ("", " ")
+                        ),
+                        default=0,
+                    )
+                current_line.extend(cells[:used])
+                if not buffer.soft_wrapped[row_index]:
+                    logical_lines.append(current_line)
+                    current_line = []
+            if current_line or not logical_lines:
+                logical_lines.append(current_line)
+
+            resized: list[list[str]] = []
+            soft_wrapped: list[bool] = []
+            logical_starts: list[int] = []
+            for logical_line in logical_lines:
+                logical_starts.append(len(resized))
+                chunks = [
+                    logical_line[offset : offset + columns]
+                    for offset in range(0, len(logical_line), columns)
+                ] or [[]]
+                for chunk_index, chunk in enumerate(chunks):
+                    resized.append([*chunk, *([" "] * (columns - len(chunk)))])
+                    soft_wrapped.append(chunk_index < len(chunks) - 1)
+
+            cursor_line, cursor_offset = cursor_position
+            saved_line, saved_offset = saved_position
+            cursor_y = logical_starts[min(cursor_line, len(logical_starts) - 1)] + (
+                cursor_offset // columns
+            )
+            cursor_x = min(cursor_offset % columns, columns - 1)
+            saved_y = logical_starts[min(saved_line, len(logical_starts) - 1)] + (
+                saved_offset // columns
+            )
+            saved_x = min(saved_offset % columns, columns - 1)
+
+            dropped_rows = max(0, len(resized) - rows)
+            if dropped_rows:
+                resized = resized[dropped_rows:]
+                soft_wrapped = soft_wrapped[dropped_rows:]
+            while len(resized) < rows:
+                resized.append([" "] * columns)
+                soft_wrapped.append(False)
+            buffer.grid = resized
+            buffer.soft_wrapped = soft_wrapped
+            buffer.x = cursor_x
+            buffer.y = min(max(0, cursor_y - dropped_rows), rows - 1)
+            buffer.saved = (
+                saved_x,
+                min(max(0, saved_y - dropped_rows), rows - 1),
+            )
         self.columns = columns
         self.rows = rows
-        self.grid = resized
-        self.x = min(self.x, columns - 1)
-        self.y = min(self.y, rows - 1)
 
     def render(self) -> str:
-        lines = ["".join(cell for cell in row if cell != "").rstrip() for row in self.grid]
+        return self.render_buffer(self.active_buffer)
+
+    def render_buffer(self, name: str) -> str:
+        lines = [
+            "".join(cell for cell in row if cell != "").rstrip()
+            for row in self.buffers[name].grid
+        ]
         while lines and lines[-1] == "":
             lines.pop()
         return "\n".join(lines)
+
+    def terminal_state(self) -> dict[str, object]:
+        return {
+            "activeBuffer": self.active_buffer,
+            "alternateEnterCount": self.alternate_enter_count,
+            "alternateLeaveCount": self.alternate_leave_count,
+            "cursorVisible": self.cursor_visible,
+            "bracketedPaste": self.bracketed_paste,
+            "kittyKeyboard": self.kitty_keyboard,
+            "synchronizedUpdate": self.synchronized_update,
+            "mouseModes": sorted(self.mouse_modes),
+            "primaryScreen": self.render_buffer("primary"),
+            "alternateScreen": self.render_buffer("alternate"),
+        }
 
     def feed(self, data: bytes) -> None:
         for char in self.decoder.decode(data):
@@ -151,7 +313,7 @@ class VirtualScreen:
             elif char == "\r":
                 self.x = 0
             elif char == "\n":
-                self._line_feed()
+                self._line_feed(soft_wrap=False)
             elif char == "\b":
                 self.x = max(0, self.x - 1)
             elif char == "\t":
@@ -216,27 +378,32 @@ class VirtualScreen:
             return
         if self.x >= self.columns or (width == 2 and self.x == self.columns - 1):
             self.x = 0
-            self._line_feed()
+            self._line_feed(soft_wrap=True)
         self.grid[self.y][self.x] = char
         if width == 2 and self.x + 1 < self.columns:
             self.grid[self.y][self.x + 1] = ""
         self.x += width
 
-    def _line_feed(self) -> None:
+    def _line_feed(self, *, soft_wrap: bool) -> None:
+        self.buffer.soft_wrapped[self.y] = soft_wrap
         self.y += 1
         if self.y >= self.rows:
             self.grid.pop(0)
             self.grid.append([" "] * self.columns)
+            self.buffer.soft_wrapped.pop(0)
+            self.buffer.soft_wrapped.append(False)
             self.y = self.rows - 1
 
     def _clear(self) -> None:
         self.grid = [[" "] * self.columns for _ in range(self.rows)]
+        self.buffer.soft_wrapped = [False] * self.rows
         self.x = 0
         self.y = 0
 
     def _erase_line(self, mode: int) -> None:
         if mode == 2:
             self.grid[self.y] = [" "] * self.columns
+            self.buffer.soft_wrapped[self.y] = False
         elif mode == 1:
             for column in range(0, min(self.x + 1, self.columns)):
                 self.grid[self.y][column] = " "
@@ -258,18 +425,64 @@ class VirtualScreen:
             self.grid[row] = [" "] * self.columns
 
     @staticmethod
-    def _params(raw: str) -> tuple[list[int], bool]:
-        private = raw.startswith(("?", ">", "<", "="))
-        body = raw[1:] if private else raw
+    def _params(raw: str) -> tuple[list[int], str | None]:
+        private = raw[0] if raw.startswith(("?", ">", "<", "=")) else None
+        body = raw[1:] if private is not None else raw
         parts = body.split(";") if body else []
         parsed = [int(part) if part.isdigit() else 0 for part in parts]
         return parsed, private
+
+    def _enter_alternate_screen(self) -> None:
+        if self.active_buffer == "alternate":
+            return
+        self.buffers["alternate"] = ScreenBuffer(
+            [[" "] * self.columns for _ in range(self.rows)]
+        )
+        self.active_buffer = "alternate"
+        self.alternate_enter_count += 1
+
+    def _leave_alternate_screen(self) -> None:
+        if self.active_buffer != "alternate":
+            return
+        self.active_buffer = "primary"
+        self.alternate_leave_count += 1
+
+    def _apply_private_csi(self, final: str, params: list[int], private: str) -> None:
+        if private == ">" and final == "u":
+            self.kitty_keyboard = True
+            return
+        if private == "<" and final == "u":
+            self.kitty_keyboard = False
+            return
+        if private != "?" or final not in ("h", "l"):
+            return
+        enabled = final == "h"
+        for mode in params:
+            if mode in (47, 1047, 1049):
+                if enabled:
+                    self._enter_alternate_screen()
+                else:
+                    self._leave_alternate_screen()
+            elif mode == 25:
+                self.cursor_visible = enabled
+            elif mode in (1000, 1002, 1003, 1006):
+                if enabled:
+                    self.mouse_modes.add(mode)
+                else:
+                    self.mouse_modes.discard(mode)
+            elif mode == 2004:
+                self.bracketed_paste = enabled
+            elif mode == 2026:
+                self.synchronized_update = enabled
 
     def _apply_csi(self, sequence: str) -> None:
         final = sequence[-1]
         params, private = self._params(sequence[:-1])
         first = params[0] if params and params[0] > 0 else 1
-        if final == "m" or private:
+        if private is not None:
+            self._apply_private_csi(final, params, private)
+            return
+        if final == "m":
             return
         if final == "A":
             self.y = max(0, self.y - first)
@@ -306,10 +519,14 @@ class VirtualScreen:
             for _ in range(first):
                 self.grid.pop(0)
                 self.grid.append([" "] * self.columns)
+                self.buffer.soft_wrapped.pop(0)
+                self.buffer.soft_wrapped.append(False)
         elif final == "T":
             for _ in range(first):
                 self.grid.pop()
                 self.grid.insert(0, [" "] * self.columns)
+                self.buffer.soft_wrapped.pop()
+                self.buffer.soft_wrapped.insert(0, False)
 
 
 @dataclass(frozen=True)
@@ -344,6 +561,7 @@ class PtyFixture:
         master, slave = os.openpty()
         self.master = master
         self.screen = VirtualScreen(columns, rows)
+        self.screen.feed(PRIMARY_SCREEN_SENTINEL.encode("utf-8"))
         self.frames: list[Frame] = []
         self.raw_events: list[tuple[float, bytes]] = []
         self.started_ns = time.monotonic_ns()
@@ -501,24 +719,34 @@ class PtyFixture:
             # precede it. PTY chunk boundaries do not preserve that ordering for us.
             self._respond_to_terminal_queries(chunk)
             rendered = self.screen.render()
+            if self.screen.synchronized_update:
+                # CSI ?2026 is a terminal-level frame transaction: capable terminals keep the
+                # previous frame visible until the matching end marker. Do not turn PTY read
+                # boundaries inside that transaction into user-observable intermediate frames.
+                continue
             if rendered != self.last_screen:
                 self.last_screen = rendered
                 self.frames.append(Frame(elapsed, rendered))
                 changed = True
         return changed
 
+    def observable_screen(self) -> str:
+        if self.screen.synchronized_update:
+            return self.last_screen
+        return self.screen.render()
+
     def wait_for(self, predicate: Callable[[str], bool], timeout: float, label: str) -> float:
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
-            if predicate(self.screen.render()):
+            if predicate(self.observable_screen()):
                 return self.elapsed_ms()
             self.pump(min(0.05, max(0.0, deadline - time.monotonic())))
-            if self.process.poll() is not None and not predicate(self.screen.render()):
+            if self.process.poll() is not None and not predicate(self.observable_screen()):
                 raise AssertionError(
                     f"fixture exited before {label} (status={self.process.returncode})\n"
-                    f"screen:\n{self.screen.render()}"
+                    f"screen:\n{self.observable_screen()}"
                 )
-        raise AssertionError(f"timed out waiting for {label}\nscreen:\n{self.screen.render()}")
+        raise AssertionError(f"timed out waiting for {label}\nscreen:\n{self.observable_screen()}")
 
     def wait_quiet(self, quiet_ms: float = 220, timeout: float = 4.0) -> None:
         deadline = time.monotonic() + timeout
@@ -573,6 +801,42 @@ class PtyFixture:
             return None
         days, hours, minutes, seconds = match.groups(default="0")
         return int(days) * 86_400 + int(hours) * 3_600 + int(minutes) * 60 + float(seconds)
+
+    def assert_terminal_restored(self) -> None:
+        state = self.screen.terminal_state()
+        failures: list[str] = []
+        if state["alternateEnterCount"] != 1:
+            failures.append(
+                "alternate screen enter count is not exactly one "
+                f"(count={state['alternateEnterCount']})"
+            )
+        if state["activeBuffer"] != "primary":
+            failures.append(f"active buffer is {state['activeBuffer']!r}, expected 'primary'")
+        if state["alternateEnterCount"] != state["alternateLeaveCount"]:
+            failures.append(
+                "alternate screen enter/leave count differs "
+                f"({state['alternateEnterCount']} != {state['alternateLeaveCount']})"
+            )
+        if not state["cursorVisible"]:
+            failures.append("cursor remains hidden")
+        if state["bracketedPaste"]:
+            failures.append("bracketed paste remains enabled")
+        if state["kittyKeyboard"]:
+            failures.append("Kitty keyboard protocol remains enabled")
+        if state["synchronizedUpdate"]:
+            failures.append("synchronized update remains open")
+        if state["mouseModes"]:
+            failures.append(f"mouse modes remain enabled: {state['mouseModes']}")
+        if b"\x1b[3J" in b"".join(chunk for _, chunk in self.raw_events):
+            failures.append("terminal output cleared primary scrollback with CSI 3J")
+        primary_screen = str(state["primaryScreen"])
+        if primary_screen.count(PRIMARY_SCREEN_SENTINEL) != 1:
+            failures.append(
+                "primary screen sentinel was not restored exactly once "
+                f"(count={primary_screen.count(PRIMARY_SCREEN_SENTINEL)})"
+            )
+        if failures:
+            raise AssertionError("terminal cleanup failed: " + "; ".join(failures))
 
     def exit_cleanly(self) -> None:
         if self.process.poll() is None and self.scenario == "cli-bootstrap":
@@ -691,6 +955,39 @@ def assert_prompt(screen: str) -> None:
         raise AssertionError(f"final screen does not contain prompt\n{screen}")
 
 
+def assert_editor_cursor(screen: VirtualScreen, value: str) -> None:
+    if not screen.cursor_visible:
+        raise AssertionError("editor terminal cursor is hidden; IME preedit has no anchor")
+    expected_text = f"{PROMPT} {value}"
+    for row_index, cells in enumerate(screen.grid):
+        rendered = "".join(cell for cell in cells if cell != "")
+        if expected_text not in rendered:
+            continue
+        prompt_x = cells.index(PROMPT)
+        expected_x = prompt_x + char_width(PROMPT) + 1 + sum(char_width(char) for char in value)
+        if (screen.x, screen.y) != (expected_x, row_index):
+            raise AssertionError(
+                "editor terminal cursor is not at the insertion point "
+                f"(actual={screen.x},{screen.y}; expected={expected_x},{row_index})"
+            )
+        return
+    raise AssertionError(f"could not locate editor value for cursor assertion: {value!r}")
+
+
+def has_unique_sentinels(screen: str, sentinels: Iterable[str]) -> bool:
+    return all(screen.count(sentinel) == 1 for sentinel in sentinels)
+
+
+def assert_unique_sentinels(label: str, screen: str, sentinels: Iterable[str]) -> None:
+    invalid = {
+        sentinel: screen.count(sentinel)
+        for sentinel in sentinels
+        if screen.count(sentinel) != 1
+    }
+    if invalid:
+        raise AssertionError(f"{label} sentinel counts are not unique: {invalid}\n{screen}")
+
+
 def run_scenario(scenario: str) -> tuple[dict[str, float | int | bool], PtyFixture]:
     fixture = PtyFixture(scenario)
     try:
@@ -745,6 +1042,18 @@ def run_scenario(scenario: str) -> tuple[dict[str, float | int | bool], PtyFixtu
 
         fixture.wait_quiet()
         if scenario == "keypress":
+            assert_editor_cursor(fixture.screen, "")
+        if scenario in ("resize-cycle", "resize-storm"):
+            fixture.send("PTY_DRAFT_7A52")
+            fixture.wait_for(
+                lambda screen: has_unique_sentinels(
+                    screen, (*RESIZE_SENTINELS, f"pty-fixture/{scenario}")
+                ),
+                2,
+                "resize sentinels before first resize",
+            )
+            fixture.wait_quiet(quiet_ms=100)
+        if scenario == "keypress":
             started = fixture.elapsed_ms()
             fixture.send("k")
             rendered = fixture.wait_for(
@@ -753,13 +1062,33 @@ def run_scenario(scenario: str) -> tuple[dict[str, float | int | bool], PtyFixtu
                 "keypress echo",
             )
             assert_prompt(fixture.screen.render())
-            return {"keypressToRenderMs": rendered - started}, fixture
+            assert_editor_cursor(fixture.screen, "k")
+            fixture.send("\x15")
+            fixture.wait_for(
+                lambda screen: re.search(r"›\s+k", screen) is None,
+                2,
+                "clear ASCII keypress before CJK input",
+            )
+            fixture.send("输入")
+            fixture.wait_for(
+                lambda screen: re.search(r"›\s+输入", screen) is not None,
+                2,
+                "committed CJK input",
+            )
+            assert_editor_cursor(fixture.screen, "输入")
+            return {
+                "keypressToRenderMs": rendered - started,
+                "imeCursorReady": True,
+                "committedCjkCursorAligned": True,
+            }, fixture
 
         if scenario == "text-stream":
             started = fixture.elapsed_ms()
             first_frame_index = len(fixture.frames)
             fixture.send("stream\r")
-            first_token = fixture.wait_for(lambda screen: "word000" in screen, 3, "first stream token")
+            first_token = fixture.wait_for(
+                lambda screen: "word000" in screen, 3, "first stream token"
+            )
             completed = fixture.wait_for(
                 lambda screen: "STREAM_COMPLETE_400" in screen, 8, "400-word completion"
             )
@@ -810,28 +1139,157 @@ def run_scenario(scenario: str) -> tuple[dict[str, float | int | bool], PtyFixtu
                 "emittedChunks": 80,
             }, fixture
 
+        if scenario == "resize-cycle":
+            sizes = [(62, 20), (140, 42), (74, 24), (100, 36)]
+            stable_latencies: list[float] = []
+            for columns, rows in sizes:
+                frames_before_resize = len(fixture.frames)
+                resized_at = fixture.elapsed_ms()
+                fixture.resize(columns, rows)
+                stable = fixture.wait_for(
+                    lambda screen: len(fixture.frames) > frames_before_resize
+                    and has_unique_sentinels(
+                        screen, (*RESIZE_SENTINELS, "pty-fixture/resize-cycle")
+                    ),
+                    3,
+                    f"unique resize sentinels at {columns}x{rows}",
+                )
+                fixture.wait_quiet(quiet_ms=100)
+                assert_unique_sentinels(
+                    f"resize checkpoint {columns}x{rows}",
+                    fixture.screen.render(),
+                    (*RESIZE_SENTINELS, "pty-fixture/resize-cycle"),
+                )
+                assert_editor_cursor(fixture.screen, "PTY_DRAFT_7A52")
+                stable_latencies.append(stable - resized_at)
+            fixture.send("\x15")
+            fixture.drain_for(0.04)
+            fixture.send("/")
+            fixture.resize(40, 10)
+            fixture.wait_for(
+                lambda screen: "/compact" in screen,
+                3,
+                "compact slash popup after resize",
+            )
+            fixture.wait_quiet(quiet_ms=100)
+            compact_screen = fixture.screen.render()
+            compact_lines = compact_screen.splitlines()
+            compact_row = next(
+                (
+                    index
+                    for index, line in enumerate(compact_lines)
+                    if "/compact" in line
+                ),
+                -1,
+            )
+            if (
+                compact_row <= 0
+                or compact_row + 1 >= len(compact_lines)
+                or not compact_lines[compact_row - 1].lstrip().startswith("╭")
+                or not compact_lines[compact_row + 1].lstrip().startswith("╰")
+            ):
+                raise AssertionError(
+                    "40x10 slash popup does not retain separate border/content rows\n"
+                    + compact_screen
+                )
+            assert_prompt(compact_screen)
+            assert_editor_cursor(fixture.screen, "/")
+            return {
+                "resizeCount": len(sizes) + 1,
+                "stableAfterResizeMs": max(stable_latencies),
+                "uniqueCheckpointCount": len(sizes),
+                "compactPopupIntact": True,
+                "imeCursorStable": True,
+            }, fixture
+
         if scenario == "resize-storm":
-            sizes = [(62, 20), (140, 42), (78, 24), (120, 36)] * 6
+            sizes = ([(62, 20), (140, 42), (78, 24), (120, 36)] * 6) + [(66, 22)]
             first_frame_index = len(fixture.frames)
             for columns, rows in sizes:
                 fixture.resize(columns, rows)
-                fixture.drain_for(0.018)
-            last_resize = fixture.elapsed_ms()
+                fixture.drain_for(0.004)
             frames_before_final_resize = len(fixture.frames)
-            fixture.resize(100, 36)
+            fixture.resize(104, 34)
+            last_resize = fixture.elapsed_ms()
             stable = fixture.wait_for(
                 lambda screen: len(fixture.frames) > frames_before_final_resize
-                and PROMPT in screen
-                and "pty-fixture/resize-storm" in screen,
+                and has_unique_sentinels(
+                    screen, (*RESIZE_SENTINELS, "pty-fixture/resize-storm")
+                ),
                 3,
-                "stable screen after resize storm",
+                "settled redraw at the distinct final storm size",
             )
             fixture.wait_quiet(quiet_ms=150)
-            assert_prompt(fixture.screen.render())
+            final_screen = fixture.screen.render()
+            assert_prompt(final_screen)
+            assert_unique_sentinels(
+                "resize storm final screen",
+                final_screen,
+                (*RESIZE_SENTINELS, "pty-fixture/resize-storm"),
+            )
+            assert_editor_cursor(fixture.screen, "PTY_DRAFT_7A52")
             return {
                 "resizeCount": len(sizes) + 1,
                 "stableAfterLastResizeMs": stable - last_resize,
                 "redrawFrames": len(fixture.frames) - first_frame_index,
+                "settledRedraw": True,
+                "uniqueSentinels": True,
+                "imeCursorStable": True,
+            }, fixture
+
+        if scenario == "stream-resize":
+            assert_unique_sentinels(
+                "stream resize initial history",
+                fixture.screen.render(),
+                ("PTY_USER_4F21", "PTY_ASSIST_91C7", "pty-fixture/stream-resize"),
+            )
+            started = fixture.elapsed_ms()
+            first_frame_index = len(fixture.frames)
+            fixture.send("stream\r")
+            first_token = fixture.wait_for(
+                lambda screen: "word000" in screen, 3, "first stream token"
+            )
+            sizes = [(64, 20), (132, 40), (76, 24), (116, 34)] * 5
+            for columns, rows in sizes:
+                fixture.resize(columns, rows)
+                fixture.drain_for(0.025)
+            frames_before_final_resize = len(fixture.frames)
+            fixture.resize(100, 36)
+            last_resize = fixture.elapsed_ms()
+            stable = fixture.wait_for(
+                lambda screen: len(fixture.frames) > frames_before_final_resize
+                and PROMPT in screen
+                and re.search(r"word\d{3}", screen) is not None,
+                3,
+                "stable stream frame after final resize",
+            )
+            completed = fixture.wait_for(
+                lambda screen: screen.count("STREAM_COMPLETE_400") == 1,
+                8,
+                "resized 400-word completion",
+            )
+            fixture.wait_quiet(quiet_ms=150)
+            relevant = fixture.frames[first_frame_index:]
+            observed = observed_numeric_markers(relevant, re.compile(r"word(\d{3})"))
+            assert_complete_sequence("resized text word", observed, 399)
+            final_screen = fixture.screen.render()
+            assert_prompt(final_screen)
+            assert_unique_sentinels(
+                "stream resize final screen",
+                final_screen,
+                ("STREAM_COMPLETE_400", "pty-fixture/stream-resize"),
+            )
+            assert_editor_cursor(fixture.screen, "")
+            return {
+                "firstTokenMs": first_token - started,
+                "totalMs": completed - started,
+                "stableAfterLastResizeMs": stable - last_resize,
+                "resizeCount": len(sizes) + 1,
+                "observableFrames": len(relevant),
+                "observedWords": len(observed.first_seen) + 1,
+                "wordOracleComplete": True,
+                "uniqueSentinels": True,
+                "imeCursorRestored": True,
             }, fixture
 
         if scenario == "idle":
@@ -854,13 +1312,13 @@ def run_scenario(scenario: str) -> tuple[dict[str, float | int | bool], PtyFixtu
         raise AssertionError(f"unknown scenario: {scenario}")
     except Exception as error:
         final_screen = fixture.screen.render()
-        failure_reason = "".join(traceback.format_exception(error)).rstrip()
+        failure_reason = format_exception(error)
         try:
             fixture.force_close()
         except Exception as cleanup_error:
             failure_reason += (
                 "\n\nPTY cleanup also failed:\n"
-                + "".join(traceback.format_exception(cleanup_error)).rstrip()
+                + format_exception(cleanup_error)
             )
         raise ScenarioFailure(
             scenario,
@@ -889,6 +1347,7 @@ def save_artifacts(
     ansi_path = artifact_dir / f"{stem}.ansi"
     frames_path = artifact_dir / f"{stem}.frames.jsonl"
     screen_path = artifact_dir / f"{stem}.screen.txt"
+    terminal_path = artifact_dir / f"{stem}.terminal.json"
     failure_path = artifact_dir / f"{stem}.failure.txt"
     ansi_path.write_bytes(b"".join(chunk for _, chunk in fixture.raw_events))
     with frames_path.open("w", encoding="utf-8") as handle:
@@ -906,10 +1365,15 @@ def save_artifacts(
     # Keep the correctness artifact identical to the snapshot whose hash is in
     # results.json. Raw ANSI/frames intentionally include teardown for debugging.
     screen_path.write_text(final_screen, encoding="utf-8")
+    terminal_path.write_text(
+        json.dumps(fixture.screen.terminal_state(), ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
     artifacts = {
         "ansi": display_path(ansi_path),
         "frames": display_path(frames_path),
         "screen": display_path(screen_path),
+        "terminal": display_path(terminal_path),
     }
     if failure_reason is not None:
         failure_path.write_text(failure_reason.rstrip() + "\n", encoding="utf-8")
@@ -1099,14 +1563,16 @@ def main() -> int:
             final_screen = fixture.screen.render()
             try:
                 fixture.exit_cleanly()
+                if scenario != "cli-bootstrap":
+                    fixture.assert_terminal_restored()
             except Exception as error:
-                failure_reason = "".join(traceback.format_exception(error)).rstrip()
+                failure_reason = format_exception(error)
                 try:
                     fixture.force_close()
                 except Exception as cleanup_error:
                     failure_reason += (
                         "\n\nPTY cleanup also failed:\n"
-                        + "".join(traceback.format_exception(cleanup_error)).rstrip()
+                        + format_exception(cleanup_error)
                     )
                 return persist_failure(
                     ScenarioFailure(

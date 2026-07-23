@@ -204,6 +204,26 @@ pnpm dev -- chat "帮我把这批候选人处理掉"
 - `roll ask` 不会篡改原始 tool schema 的类型语义；对于无法可靠从自然语言提取的字段，会显式降级为“需要显式输入”，而不是伪造错误类型的参数
 - `roll chat` 支持交互式多轮编排与 session 恢复；仍为 experimental，且不会隐式降级到 `roll ask`
 
+### `roll chat` 终端界面模式
+
+`roll chat` 默认使用 `auto`：普通交互式 TTY（包括普通 tmux pane）进入全屏 TUI；
+CI、非 TTY、`TERM=dumb`、screen reader、Zellij、tmux control mode 或无法确认的 tmux
+环境自动回退到基础 REPL。
+
+```yaml
+chat:
+  screen-mode: auto # auto | fullscreen | inline
+```
+
+- 临时覆盖：`roll chat --screen-mode fullscreen` 或 `roll chat --screen-mode inline`
+- 历史浏览：`PageUp` / `PageDown`，`Ctrl+Home` 跳到最早处，`Ctrl+End` 返回最新内容；全屏模式也支持鼠标滚轮
+- 终端缩放：全屏 TUI 会按最新宽高重排，输入框保持有界，长历史只渲染当前视口附近内容
+- 中文输入法：全屏 TUI 会把真实终端光标锚定到输入位置；受支持终端中的拼音预编辑与候选窗口通常无需额外配置
+- 会话退出：恢复进入 TUI 前的主屏内容，并输出 session ID、消息数和继续命令
+
+`--screen-mode` 只适用于没有起始 message 的交互会话，不能与 `--json`、`--server` 或
+`--list` 同用。显式指定 `fullscreen` 但 stdin/stdout 不具备交互能力时会直接报错。
+
 ## CLI 命令参考
 
 ```
@@ -244,6 +264,7 @@ roll doctor --json              JSON 诊断结果（配置损坏时返回非零�
 | `roll update` | `--skip-browser-setup` | 更新 Agent 后跳过 Playwright 浏览器运行时安装/校验 |
 | `roll run` | `--input-json <json>` | 以 JSON 字符串提供完整 tool 输入对象 |
 | `roll run` | `--input-file <path>` | 从 JSON 文件读取完整 tool 输入对象 |
+| `roll chat` | `--screen-mode <auto\|fullscreen\|inline>` | 选择全屏 TUI、基础 REPL 或自动检测 |
 | `roll ui` | `--no-open` | 不自动打开浏览器，打印一次性认证链接 |
 | `roll ui` | `--config <path>` | 显式指定要编辑的配置文件 |
 | 支持 JSON 输出的命令 | `--json` | 输出结构化 JSON |
