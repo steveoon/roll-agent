@@ -1,5 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { stripVTControlCharacters } from "node:util";
 import { createElement as h } from "react";
 import { render } from "ink-testing-library";
 import { LiveRegion, reasoningTail } from "./live-region.ts";
@@ -30,12 +31,15 @@ test("LiveRegion renders streaming assistant text as Markdown preview", () => {
     producedOutput: true,
   };
   const { lastFrame, unmount } = render(h(LiveRegion, { live }));
-  const frame = lastFrame() ?? "";
-  assert.match(frame, /流式标题/);
-  assert.match(frame, /正在加粗/);
-  assert.match(frame, /• 第一项/);
-  assert.doesNotMatch(frame, /## |\*\*/);
-  unmount();
+  try {
+    const frame = stripVTControlCharacters(lastFrame() ?? "");
+    assert.match(frame, /流式标题/);
+    assert.match(frame, /正在加粗/);
+    assert.match(frame, /• 第一项/);
+    assert.doesNotMatch(frame, /## |\*\*/);
+  } finally {
+    unmount();
+  }
 });
 
 test("LiveRegion keeps thinking dim while previewing visible Markdown", () => {

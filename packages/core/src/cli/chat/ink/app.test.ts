@@ -139,22 +139,24 @@ test("ChatApp previews Markdown before the assistant stream finishes", async () 
       onExit: () => {},
     }),
   );
-  await delay(10);
-  stdin.write("preview");
-  await delay(10);
-  stdin.write("\r");
+  try {
+    await delay(10);
+    stdin.write("preview");
+    await delay(10);
+    stdin.write("\r");
 
-  await waitFor(() => {
-    const frame = lastFrame() ?? "";
-    assert.match(frame, /流式标题/);
-    assert.match(frame, /正在加粗/);
-    assert.match(frame, /• 第一项/);
-    assert.doesNotMatch(frame, /## |\*\*/);
-  });
-
-  releaseFinish?.();
-  await delay(40);
-  unmount();
+    await waitFor(() => {
+      const frame = plain(lastFrame() ?? "");
+      assert.match(frame, /流式标题/);
+      assert.match(frame, /正在加粗/);
+      assert.match(frame, /• 第一项/);
+      assert.doesNotMatch(frame, /## |\*\*/);
+    });
+  } finally {
+    releaseFinish?.();
+    await delay(40);
+    unmount();
+  }
 });
 
 test("ChatApp shows model-waiting status separately from the submitted user message", async () => {
