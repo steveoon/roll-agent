@@ -1,19 +1,20 @@
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
-import { once } from "node:events";
 import {
   chmodSync,
   existsSync,
   lstatSync,
   mkdtempSync,
   readFileSync,
+  readdirSync,
   rmSync,
   symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { delimiter, join } from "node:path";
+import { basename, delimiter, dirname, join } from "node:path";
 import { describe, it } from "node:test";
+import { atomicTextFileWriter } from "../internal/config-atomic-write.ts";
+import type { AtomicTextWriteRequest } from "../internal/config-atomic-write.ts";
 import { readProcessStartToken } from "../registry/process-identity.ts";
 import {
   ConfigRevisionConflictError,
@@ -163,51 +164,53 @@ agents:
     });
   });
 
-  it("rechecks the revision immediately before rename and preserves a non-cooperative edit", async () => {
-    const directory = mkdtempSync(join(tmpdir(), "roll-config-store-toctou-"));
-    const configPath = join(directory, "roll.config.yaml");
-    const largeRaw = `${FALLBACK_CONFIG}# ${"x".repeat(8 * 1024 * 1024)}\n`;
-    writeFileSync(configPath, largeRaw, "utf-8");
-    const store = new YamlConfigDocumentStore(configPath, FALLBACK_CONFIG);
-    const snapshot = store.read();
-    const preview = store.previewPatches(
-      [{ op: "set", path: ["ask", "confirm-threshold"], value: 0.6 }],
-      snapshot.revision,
-    );
-    const child = spawn(
-      process.execPath,
-      [
-        "--input-type=module",
-        "-e",
-        `import * as fs from "node:fs";
-import * as path from "node:path";
-const configPath = process.argv[1];
-const original = fs.readFileSync(configPath, "utf-8");
-process.send("ready");
-const timer = setInterval(() => {
-  const prefix = path.basename(configPath) + ".bak.";
-  if (!fs.readdirSync(path.dirname(configPath)).some((name) => name.startsWith(prefix))) return;
-  clearInterval(timer);
-  fs.writeFileSync(configPath, original + "# external edit\\n", "utf-8");
-  process.send("edited", () => process.disconnect());
-}, 1);`,
-        configPath,
-      ],
-      { stdio: ["ignore", "ignore", "ignore", "ipc"] },
-    );
+  it("rechecks the revision immediately before rename and preserves a non-cooperative edit", (t) => {
+    withTemporaryConfig(FALLBACK_CONFIG, ({ configPath, store }) => {
+      const snapshot = store.read();
+      const preview = store.previewPatches(
+        [{ op: "set", path: ["ask", "confirm-threshold"], value: 0.6 }],
+        snapshot.revision,
+      );
+      const externalRaw = `${FALLBACK_CONFIG}# external edit\n`;
+      const directory = dirname(configPath);
+      const fileName = basename(configPath);
+      const backupPrefix = `${fileName}.bak.`;
+      const temporaryPrefix = `.${fileName}.`;
+      const originalWrite = atomicTextFileWriter.write.bind(atomicTextFileWriter);
 
-    try {
-      const [readyMessage] = await once(child, "message");
-      assert.equal(readyMessage, "ready");
-      const edited = once(child, "message");
-      assert.throws(() => store.commit(preview), ConfigRevisionConflictError);
-      const [editedMessage] = await edited;
-      assert.equal(editedMessage, "edited");
-      assert.match(readFileSync(configPath, "utf-8"), /# external edit\n$/u);
-    } finally {
-      if (child.exitCode === null) child.kill("SIGKILL");
-      rmSync(directory, { recursive: true, force: true });
-    }
+      t.mock.method(atomicTextFileWriter, "write", (request: AtomicTextWriteRequest) => {
+        originalWrite({
+          ...request,
+          verifyBeforeRename: () => {
+            const entries = readdirSync(directory);
+            assert.ok(entries.some((entry) => entry.startsWith(backupPrefix)));
+            const temporaryName = entries.find(
+              (entry) => entry.startsWith(temporaryPrefix) && entry.endsWith(".tmp"),
+            );
+            assert.ok(temporaryName);
+            assert.equal(readFileSync(join(directory, temporaryName), "utf-8"), request.raw);
+
+            writeFileSync(configPath, externalRaw, "utf-8");
+            request.verifyBeforeRename();
+          },
+        });
+      });
+
+      assert.throws(
+        () => store.commit(preview),
+        (error: unknown) =>
+          error instanceof ConfigRevisionConflictError &&
+          error.expectedRevision === snapshot.revision &&
+          error.actualRevision === createConfigRevision(externalRaw),
+      );
+      assert.equal(readFileSync(configPath, "utf-8"), externalRaw);
+      assert.equal(
+        readdirSync(directory).some(
+          (entry) => entry.startsWith(temporaryPrefix) && entry.endsWith(".tmp"),
+        ),
+        false,
+      );
+    });
   });
 
   it("does not rewrite or create a backup when content is unchanged", () => {

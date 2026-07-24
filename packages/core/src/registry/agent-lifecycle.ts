@@ -7,14 +7,23 @@ import {
   acquireAgentLifecycleLock,
   getAgentPid,
   inspectManagedAgentRuntime,
+  MANAGED_AGENT_RUNTIME_RETENTIONS,
   probeAgentEndpoint,
+  sameManagedAgentRuntimeIdentity,
   startAgent,
   stopAgentGracefully,
   waitForAgentReady,
   type AgentLifecycleLock,
   type ManagedAgentRuntimeIdentity,
   type ManagedAgentRuntimeInspection,
+  type ManagedAgentRuntimeRetention,
 } from "./process-manager.ts";
+import {
+  acquireAgentUsageMaintenanceGuard,
+  AgentUsageBusyError,
+  type AgentUsageMaintenanceGuard,
+} from "./agent-usage-lease.ts";
+import { acquireAgentRegistryLockAsync, type AgentRegistryLock } from "./agent-registry-lock.ts";
 import { AgentStore } from "./store.ts";
 
 const BROWSER_USE_AGENT_NAME = "browser-use-agent";
@@ -35,6 +44,7 @@ export const AGENT_ACTIVATION_STATUSES = [
   "kept-stopped",
   "next-invocation",
   "manual",
+  "in-use",
   "runtime-changed",
   "failed",
 ] as const;
@@ -62,6 +72,7 @@ export interface AgentLifecycleBaselineState {
   readonly agent: RegisteredAgent;
   readonly pid?: number;
   readonly runtimeIdentity?: AgentLifecycleRuntimeIdentity;
+  readonly runtimeRetention?: ManagedAgentRuntimeRetention;
 }
 
 export type AgentLifecycleRuntimeIdentity = ManagedAgentRuntimeIdentity;
@@ -91,7 +102,12 @@ export interface AgentActivationResult {
 
 export interface AgentLifecycleCollaborators {
   readonly readAgents: (dataDir: string) => ReadonlyArray<RegisteredAgent>;
-  readonly updateStatus: (dataDir: string, agentName: string, status: AgentStatus) => void;
+  readonly updateStatus: (
+    dataDir: string,
+    agentName: string,
+    status: AgentStatus,
+    registryLock?: AgentRegistryLock,
+  ) => void;
   readonly getPid: (dataDir: string, agentName: string) => number | undefined;
   readonly inspectRuntime: (
     agent: RegisteredAgent,
@@ -105,7 +121,10 @@ export interface AgentLifecycleCollaborators {
     agent: RegisteredAgent,
     dataDir: string,
     env?: Readonly<Record<string, string>>,
-    options?: { readonly lifecycleLock?: AgentLifecycleLock },
+    options?: {
+      readonly lifecycleLock?: AgentLifecycleLock;
+      readonly retention?: ManagedAgentRuntimeRetention;
+    },
   ) => number;
   readonly stopGracefully: (
     dataDir: string,
@@ -129,7 +148,15 @@ export interface AgentLifecycleCollaborators {
     config: RollConfig,
     agentName: string,
   ) => Readonly<Record<string, string>> | undefined;
-  readonly acquireLifecycleLock: (dataDir: string, agentName: string) => AgentLifecycleLock;
+  readonly acquireMaintenanceGuard: (
+    agent: RegisteredAgent,
+    dataDir: string,
+  ) => Promise<
+    Pick<AgentUsageMaintenanceGuard, "lifecycleLock" | "release"> & {
+      readonly runtime?: AgentUsageMaintenanceGuard["runtime"];
+    }
+  >;
+  readonly acquireRegistryLock: (dataDir: string) => Promise<AgentRegistryLock>;
 }
 
 export interface AgentInspectionOptions {
@@ -138,8 +165,10 @@ export interface AgentInspectionOptions {
 
 const DEFAULT_COLLABORATORS: AgentLifecycleCollaborators = {
   readAgents: (dataDir) => new AgentStore(dataDir).list(),
-  updateStatus: (dataDir, agentName, status) => {
-    new AgentStore(dataDir).updateStatus(agentName, status);
+  updateStatus: (dataDir, agentName, status, registryLock) => {
+    new AgentStore(dataDir, {
+      ...(registryLock ? { registryLock } : {}),
+    }).updateStatus(agentName, status);
   },
   getPid: getAgentPid,
   inspectRuntime: inspectManagedAgentRuntime,
@@ -148,7 +177,16 @@ const DEFAULT_COLLABORATORS: AgentLifecycleCollaborators = {
   stopGracefully: stopAgentGracefully,
   waitUntilReady: waitForAgentReady,
   resolveAgentEnv: getAgentEnv,
-  acquireLifecycleLock: acquireAgentLifecycleLock,
+  acquireMaintenanceGuard: async (agent, dataDir) => {
+    const usageGuard = await acquireAgentUsageMaintenanceGuard(agent, dataDir);
+    if (usageGuard !== undefined) return usageGuard;
+    const lifecycleLock = acquireAgentLifecycleLock(dataDir, agent.skill.name);
+    return {
+      lifecycleLock,
+      release: () => lifecycleLock.release(),
+    };
+  },
+  acquireRegistryLock: acquireAgentRegistryLockAsync,
 };
 
 /**
@@ -188,10 +226,13 @@ export class AgentLifecycleService {
         runtimeInspection === undefined
           ? undefined
           : verifiedRuntimeIdentity(agent, runtimeInspection);
+      const runtimeRetention =
+        runtimeIdentity === undefined ? undefined : runtimeInspection?.sidecar?.retention;
       states[agent.skill.name] = {
         agent,
         ...(pid !== undefined ? { pid } : {}),
         ...(runtimeIdentity !== undefined ? { runtimeIdentity } : {}),
+        ...(runtimeRetention !== undefined ? { runtimeRetention } : {}),
       };
     }
 
@@ -258,7 +299,12 @@ export class AgentLifecycleService {
       items.push(describeNonRestartEffect(effect));
     }
 
-    const manualStatuses = new Set<AgentActivationStatus>(["manual", "runtime-changed", "failed"]);
+    const manualStatuses = new Set<AgentActivationStatus>([
+      "manual",
+      "in-use",
+      "runtime-changed",
+      "failed",
+    ]);
     return {
       success: items.every((item) => item.status !== "failed"),
       requiresManualAction: items.some((item) => manualStatuses.has(item.status)),
@@ -420,6 +466,7 @@ export class AgentLifecycleService {
       effect,
       baselineState.agent,
       baselineState.runtimeIdentity,
+      baselineState.runtimeRetention,
       effectiveConfig,
     );
   }
@@ -428,18 +475,37 @@ export class AgentLifecycleService {
     effect: ConfigActivationEffect,
     agent: RegisteredAgent,
     expectedIdentity: AgentLifecycleRuntimeIdentity,
+    expectedRetention: ManagedAgentRuntimeRetention | undefined,
     effectiveConfig: RollConfig,
   ): Promise<AgentActivationResultItem> {
     const expectedPid = expectedIdentity.pid;
     let startedPid: number | undefined;
     let startedIdentity: AgentLifecycleRuntimeIdentity | undefined;
-    let lifecycleLock: AgentLifecycleLock | undefined;
+    let maintenanceGuard:
+      | Awaited<ReturnType<AgentLifecycleCollaborators["acquireMaintenanceGuard"]>>
+      | undefined;
+    let registryLock: AgentRegistryLock | undefined;
     try {
-      lifecycleLock = this.collaborators.acquireLifecycleLock(this.dataDir, agent.skill.name);
+      registryLock = await this.collaborators.acquireRegistryLock(this.dataDir);
+      maintenanceGuard = await this.collaborators.acquireMaintenanceGuard(agent, this.dataDir);
+      const lifecycleLock = maintenanceGuard.lifecycleLock;
       const currentRuntime = this.collaborators.inspectRuntime(agent, this.dataDir);
       const currentIdentity = verifiedRuntimeIdentity(agent, currentRuntime);
-      if (!sameRuntimeIdentity(currentIdentity, expectedIdentity)) {
+      const runtimeRetention =
+        maintenanceGuard.runtime?.retention ?? MANAGED_AGENT_RUNTIME_RETENTIONS.persistent;
+      if (!sameManagedAgentRuntimeIdentity(currentIdentity, expectedIdentity)) {
         const currentPid = currentRuntime.pid;
+        if (
+          currentPid === undefined &&
+          expectedRetention === MANAGED_AGENT_RUNTIME_RETENTIONS.leaseBound
+        ) {
+          this.collaborators.updateStatus(this.dataDir, agent.skill.name, "stopped", registryLock);
+          return activationItem(
+            effect,
+            "kept-stopped",
+            `${agent.skill.name} 的临时托管进程已随最后一个使用方退出；保持停止，下次调用时会读取新配置。`,
+          );
+        }
         return activationItem(
           effect,
           "runtime-changed",
@@ -461,10 +527,21 @@ export class AgentLifecycleService {
           `${agent.skill.name} 在应用前已不再运行，为避免意外启动，未自动应用。`,
         );
       }
+      if (runtimeRetention === MANAGED_AGENT_RUNTIME_RETENTIONS.leaseBound) {
+        this.collaborators.updateStatus(this.dataDir, agent.skill.name, "stopped", registryLock);
+        return activationItem(
+          effect,
+          "kept-stopped",
+          `${agent.skill.name} 当前已无活动使用方；已停止临时托管进程并保持停止，下次调用时会读取新配置。`,
+        );
+      }
 
-      this.collaborators.updateStatus(this.dataDir, agent.skill.name, "starting");
+      this.collaborators.updateStatus(this.dataDir, agent.skill.name, "starting", registryLock);
       const env = this.collaborators.resolveAgentEnv(effectiveConfig, agent.skill.name);
-      startedPid = this.collaborators.start(agent, this.dataDir, env, { lifecycleLock });
+      startedPid = this.collaborators.start(agent, this.dataDir, env, {
+        lifecycleLock,
+        retention: runtimeRetention,
+      });
       startedIdentity = verifiedRuntimeIdentity(
         agent,
         this.collaborators.inspectRuntime(agent, this.dataDir),
@@ -473,9 +550,16 @@ export class AgentLifecycleService {
         throw new Error("Started Agent runtime identity could not be verified.");
       }
       await this.collaborators.waitUntilReady(agent);
-      this.collaborators.updateStatus(this.dataDir, agent.skill.name, "online");
+      this.collaborators.updateStatus(this.dataDir, agent.skill.name, "online", registryLock);
       return activationItem(effect, "restarted", restartedMessage(agent), startedPid);
-    } catch {
+    } catch (error) {
+      if (error instanceof AgentUsageBusyError) {
+        return activationItem(
+          effect,
+          "in-use",
+          `${agent.skill.name} 正被其他 Roll 进程使用，配置已保存但未自动重启。`,
+        );
+      }
       let replacementObserved = false;
       if (startedPid !== undefined) {
         const currentRuntime = this.collaborators.inspectRuntime(agent, this.dataDir);
@@ -483,24 +567,27 @@ export class AgentLifecycleService {
         let currentPid = currentRuntime.pid;
         if (
           startedIdentity !== undefined &&
-          sameRuntimeIdentity(currentIdentity, startedIdentity)
+          sameManagedAgentRuntimeIdentity(currentIdentity, startedIdentity)
         ) {
           await this.collaborators
             .stopGracefully(this.dataDir, agent.skill.name, {
               expectedIdentity: startedIdentity,
-              ...(lifecycleLock !== undefined ? { lifecycleLock } : {}),
+              ...(maintenanceGuard !== undefined
+                ? { lifecycleLock: maintenanceGuard.lifecycleLock }
+                : {}),
             })
             .catch(() => false);
           currentPid = this.collaborators.getPid(this.dataDir, agent.skill.name);
         }
         replacementObserved = currentPid !== undefined && currentPid !== startedPid;
       }
-      if (lifecycleLock !== undefined && !replacementObserved) {
-        this.collaborators.updateStatus(this.dataDir, agent.skill.name, "error");
+      if (maintenanceGuard !== undefined && !replacementObserved) {
+        this.collaborators.updateStatus(this.dataDir, agent.skill.name, "error", registryLock);
       }
       return activationItem(effect, "failed", `${agent.skill.name} 重启失败；请检查 Agent 日志。`);
     } finally {
-      lifecycleLock?.release();
+      maintenanceGuard?.release();
+      registryLock?.release();
     }
   }
 }
@@ -537,17 +624,6 @@ function verifiedRuntimeIdentity(
     processStartToken: sidecar.processStartToken,
     startedAt: sidecar.startedAt,
   };
-}
-
-function sameRuntimeIdentity(
-  current: AgentLifecycleRuntimeIdentity | undefined,
-  expected: AgentLifecycleRuntimeIdentity,
-): boolean {
-  return (
-    current?.pid === expected.pid &&
-    current.processStartToken === expected.processStartToken &&
-    current.startedAt === expected.startedAt
-  );
 }
 
 function inspectionIdentity(

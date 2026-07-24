@@ -15,6 +15,7 @@ import {
   getAgentPid,
   getRollCoreVersion,
   inspectManagedAgentRuntime,
+  readVerifiedManagedAgentRuntime,
   stopAgent,
   stopAgentGracefully,
   writeAgentRuntimeSidecar,
@@ -35,6 +36,35 @@ describe("managed agent runtime sidecar", () => {
     assert.equal(inspection.sidecar?.pid, process.pid);
     assert.equal(inspection.sidecar?.coreVersion, getRollCoreVersion());
     assert.deepEqual(inspection.issues, []);
+  });
+
+  it("reads legacy v2 sidecars as persistent runtimes", () => {
+    const dataDir = mkdtempSync(join(tmpdir(), "roll-process-manager-v2-"));
+    const agent = createCoreManagedAgent("http://127.0.0.1:4321/mcp");
+    try {
+      writePid(dataDir, agent.skill.name, process.pid);
+      writeAgentRuntimeSidecar(agent, dataDir, process.pid, {
+        retention: "lease-bound",
+      });
+      const current = inspectManagedAgentRuntime(agent, dataDir).sidecar;
+      assert.ok(current);
+      const { retention: _retention, ...legacy } = current;
+      writeFileSync(
+        join(dataDir, "pids", `${agent.skill.name}.runtime.json`),
+        `${JSON.stringify({ ...legacy, schemaVersion: 2 })}\n`,
+        "utf-8",
+      );
+
+      const inspection = inspectManagedAgentRuntime(agent, dataDir);
+      assert.equal(inspection.sidecar?.schemaVersion, 2);
+      assert.equal(inspection.sidecar?.retention, "persistent");
+      assert.equal(
+        readVerifiedManagedAgentRuntime(dataDir, agent.skill.name)?.retention,
+        "persistent",
+      );
+    } finally {
+      rmSync(dataDir, { recursive: true, force: true });
+    }
   });
 
   it("reports stale sidecar version, endpoint, and pid mismatches", () => {
@@ -376,5 +406,5 @@ function readRuntimeIdentity(agent: RegisteredAgent, dataDir: string): ManagedAg
 }
 
 function staleProcessStartToken(): string {
-  return `pst-v1:${"0".repeat(64)}`;
+  return `pst-v2:${"0".repeat(64)}`;
 }

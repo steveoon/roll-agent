@@ -9,8 +9,7 @@ import {
   inspectAgentEnvRequirements,
 } from "../../config/helpers.ts";
 import { AgentStore } from "../../registry/store.ts";
-import { McpClientManager } from "../../mcp/client-manager.ts";
-import { resolveTransportWithDevSpawnSpec } from "../../registry/dev-spawn.ts";
+import { ManagedAgentConnectionScope } from "../../mcp/managed-agent-connection.ts";
 import {
   resolveLLMCall,
   toSamplingConnectOptions,
@@ -66,7 +65,7 @@ export default defineCommand({
   async run({ args, rawArgs }) {
     const { config } = loadConfig();
     const store = new AgentStore(config.agents.dataDir);
-    const clientManager = new McpClientManager();
+    const connectionScope = new ManagedAgentConnectionScope(config.agents.dataDir, "run");
     const agentConnections = new Map<string, ConnectedAgent>();
 
     try {
@@ -74,7 +73,7 @@ export default defineCommand({
       const sharedRunOptions = {
         store,
         config,
-        clientManager,
+        connectionScope,
         agentConnections,
         ...(samplingCall ? { samplingCall } : {}),
       };
@@ -153,7 +152,7 @@ export default defineCommand({
       log.error(`${message}${cause}`);
       process.exitCode = 1;
     } finally {
-      await clientManager.disconnectAll();
+      await connectionScope.disconnectAll();
     }
   },
 });
@@ -188,7 +187,7 @@ interface RunToolCallOptions {
   readonly index: number;
   readonly store: AgentStore;
   readonly config: RollConfig;
-  readonly clientManager: McpClientManager;
+  readonly connectionScope: ManagedAgentConnectionScope;
   readonly agentConnections: Map<string, ConnectedAgent>;
   readonly samplingCall?: ResolvedLLMCall;
 }
@@ -573,16 +572,10 @@ async function getConnectedAgent(options: RunToolCallOptions): Promise<Connected
 
   log.info(`连接 Agent "${agent.skill.name}"...`);
   const agentEnv = getAgentEnv(options.config, agent.skill.name);
-  const transport = resolveTransportWithDevSpawnSpec(agent);
-  const client = await options.clientManager.connect(
-    agent.skill.name,
-    transport,
-    agent.installPath,
-    {
-      ...toSamplingConnectOptions(options.samplingCall),
-      ...(agentEnv ? { env: agentEnv } : {}),
-    },
-  );
+  const client = await options.connectionScope.connect(agent, {
+    ...toSamplingConnectOptions(options.samplingCall),
+    ...(agentEnv ? { env: agentEnv } : {}),
+  });
   const tools = normalizeListedTools((await client.listTools()).tools);
   const envReport = inspectAgentEnvRequirements(
     agent.skill.name,

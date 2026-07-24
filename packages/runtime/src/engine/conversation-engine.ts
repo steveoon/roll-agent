@@ -15,6 +15,10 @@ import {
   startAgent,
   waitForAgentReady,
 } from "@roll-agent/core/registry/process-manager";
+import {
+  acquireAgentUsageLease,
+  type AgentUsageLease,
+} from "@roll-agent/core/registry/agent-usage-lease";
 import { normalizeListedTools } from "@roll-agent/core/cli/utils/agent-tools";
 import { getAgentEnv } from "@roll-agent/core/config/helpers";
 import { catalogPackageSpec, getAgentCatalog } from "@roll-agent/core/registry/catalog";
@@ -73,6 +77,11 @@ export type EnsureAgentReady = (
   env: Readonly<Record<string, string>> | undefined,
 ) => Promise<void>;
 
+export type AcquireAgentUsage = (
+  agent: RegisteredAgent,
+  env: Readonly<Record<string, string>> | undefined,
+) => Promise<AgentUsageLease | undefined>;
+
 export interface ConversationEngineOptions {
   readonly config: RollConfig;
   readonly agents?: readonly RegisteredAgent[];
@@ -86,6 +95,7 @@ export interface ConversationEngineOptions {
   readonly structuredOutputProviderOptions?: SharedV4ProviderOptions;
   readonly structuredOutputReasoning?: NonNullable<LanguageModelV4CallOptions["reasoning"]>;
   readonly ensureAgentReady?: EnsureAgentReady;
+  readonly acquireAgentUsage?: AcquireAgentUsage;
   readonly debugEvents?: boolean;
   readonly onAgentBootstrapIssue?: (issue: AgentBootstrapIssue) => void;
   readonly skillLibrary?: SkillLibrary | null;
@@ -245,7 +255,7 @@ export class ConversationEngine {
   private readonly structuredOutputReasoning:
     | NonNullable<LanguageModelV4CallOptions["reasoning"]>
     | undefined;
-  private readonly ensureAgentReady: EnsureAgentReady;
+  private readonly acquireAgentUsage: AcquireAgentUsage;
   private readonly debugEvents: boolean;
   private readonly explicitAgents: readonly RegisteredAgent[] | undefined;
   private readonly explicitModel: LanguageModelV4 | undefined;
@@ -270,6 +280,7 @@ export class ConversationEngine {
   private shellProfileResolution: ShellProfileResolutionResult | undefined;
   private shellUnsupportedWarned = false;
   private readonly liveSessions = new Map<string, AgentSession>();
+  private readonly agentUsageLeases = new Map<string, AgentUsageLease>();
   private disposePromise: Promise<void> | undefined;
   private closing = false;
 
@@ -282,9 +293,14 @@ export class ConversationEngine {
     this.providerOptions = options.providerOptions;
     this.structuredOutputProviderOptions = options.structuredOutputProviderOptions;
     this.structuredOutputReasoning = options.structuredOutputReasoning;
-    this.ensureAgentReady =
-      options.ensureAgentReady ??
-      ((agent, env) => ensureCoreManagedAgentReady(agent, this.config.agents.dataDir, env));
+    this.acquireAgentUsage =
+      options.acquireAgentUsage ??
+      (options.ensureAgentReady
+        ? async (agent, env) => {
+            await options.ensureAgentReady?.(agent, env);
+            return undefined;
+          }
+        : (agent, env) => this.acquireDefaultAgentUsage(agent, env));
     this.debugEvents = options.debugEvents ?? false;
     this.hostMode = options.hostMode ?? CAPABILITY_HOST_MODES.embedded;
     this.resolveDynamicCapabilityContext = options.resolveDynamicCapabilityContext;
@@ -301,6 +317,20 @@ export class ConversationEngine {
     this.resolveCatalogFn = options.resolveCatalogFn ?? resolveAgentCatalog;
     this.inspectVcsContext = options.inspectVcsContext ?? inspectGitVcsContext;
     this.shellEnv = { ...(options.shellEnv ?? process.env) };
+  }
+
+  private async acquireDefaultAgentUsage(
+    agent: RegisteredAgent,
+    env: Readonly<Record<string, string>> | undefined,
+  ): Promise<AgentUsageLease | undefined> {
+    const lease = await acquireAgentUsageLease(agent, this.config.agents.dataDir, env, {
+      holderKind: "chat",
+      startIfStopped: true,
+    });
+    if (lease !== undefined) return lease;
+
+    await ensureCoreManagedAgentReady(agent, this.config.agents.dataDir, env);
+    return undefined;
   }
 
   async createSession(input: CreateSessionInput = {}): Promise<AgentSession> {
@@ -546,45 +576,58 @@ export class ConversationEngine {
     this.assertAcceptingSessions();
     const transport = resolveTransportWithDevSpawnSpec(agent);
     const env = getAgentEnv(this.config, agent.skill.name);
-    await this.ensureAgentReady(agent, env);
-    this.assertAcceptingSessions();
-    const client = await this.clientManager.connect(
-      agent.skill.name,
-      transport,
-      agent.installPath,
-      {
-        samplingModel: model,
-        ...(this.providerOptions ? { samplingProviderOptions: this.providerOptions } : {}),
-        ...(env ? { env } : {}),
-      },
-    );
-    this.assertAcceptingSessions();
-    const listed = (await client.listTools()).tools;
-    this.assertAcceptingSessions();
-    const normalized = normalizeListedTools(listed);
-    const sourceTools: SourceTool[] = normalized.map((agentTool, index) => {
-      const resourceHintExtraction = extractResourceHints(listed[index]);
-      if (resourceHintExtraction.issue !== undefined) {
-        this.onAgentBootstrapIssue?.({
-          agentName: agent.skill.name,
-          message: `Tool "${agentTool.name}" 的 ${ROLL_RESOURCE_HINTS_META_KEY} 无效（${resourceHintExtraction.issue}），已回退 Agent 级资源锁`,
-        });
+    const existingLease = this.agentUsageLeases.get(agent.skill.name);
+    const acquiredLease =
+      existingLease === undefined ? await this.acquireAgentUsage(agent, env) : undefined;
+    try {
+      this.assertAcceptingSessions();
+      const client = await this.clientManager.connect(
+        agent.skill.name,
+        transport,
+        agent.installPath,
+        {
+          samplingModel: model,
+          ...(this.providerOptions ? { samplingProviderOptions: this.providerOptions } : {}),
+          ...(env ? { env } : {}),
+        },
+      );
+      this.assertAcceptingSessions();
+      const listed = (await client.listTools()).tools;
+      this.assertAcceptingSessions();
+      const normalized = normalizeListedTools(listed);
+      const sourceTools: SourceTool[] = normalized.map((agentTool, index) => {
+        const resourceHintExtraction = extractResourceHints(listed[index]);
+        if (resourceHintExtraction.issue !== undefined) {
+          this.onAgentBootstrapIssue?.({
+            agentName: agent.skill.name,
+            message: `Tool "${agentTool.name}" 的 ${ROLL_RESOURCE_HINTS_META_KEY} 无效（${resourceHintExtraction.issue}），已回退 Agent 级资源锁`,
+          });
+        }
+        return {
+          tool: agentTool,
+          annotations: extractAnnotations(listed[index]),
+          ...(resourceHintExtraction.hints ? { resourceHints: resourceHintExtraction.hints } : {}),
+        };
+      });
+      if (acquiredLease !== undefined) {
+        this.agentUsageLeases.set(agent.skill.name, acquiredLease);
       }
       return {
-        tool: agentTool,
-        annotations: extractAnnotations(listed[index]),
-        ...(resourceHintExtraction.hints ? { resourceHints: resourceHintExtraction.hints } : {}),
+        agentName: agent.skill.name,
+        client,
+        tools: sourceTools,
+        ...(agent.source ? { agentSource: agent.source.type } : {}),
+        transport: transport.type,
+        runtimeOwnership: agent.runtime.ownership,
+        ...(transport.type === "stdio" ? { resourceBaseDir: agent.installPath } : {}),
       };
-    });
-    return {
-      agentName: agent.skill.name,
-      client,
-      tools: sourceTools,
-      ...(agent.source ? { agentSource: agent.source.type } : {}),
-      transport: transport.type,
-      runtimeOwnership: agent.runtime.ownership,
-      ...(transport.type === "stdio" ? { resourceBaseDir: agent.installPath } : {}),
-    };
+    } catch (error) {
+      if (acquiredLease !== undefined) {
+        await this.clientManager.disconnect(agent.skill.name).catch(() => {});
+        await acquiredLease.release().catch(() => {});
+      }
+      throw error;
+    }
   }
 
   async prepareAgentRefresh(agent: RegisteredAgent): Promise<SessionAgentRefresh> {
@@ -695,7 +738,7 @@ export class ConversationEngine {
       {
         packageSpec: catalogPackageSpec(entry),
         skipBrowserSetup: true,
-        autoStart: true,
+        autoStart: false,
         expectedSkillName: entry.skillName,
       },
       {
@@ -786,6 +829,30 @@ export class ConversationEngine {
     };
   }
 
+  private async releaseAgentUsageLeases(): Promise<void> {
+    const entries = [...this.agentUsageLeases.entries()];
+    const results = await Promise.allSettled(
+      entries.map(async ([agentName, lease]) => {
+        try {
+          await lease.release();
+        } finally {
+          if (this.agentUsageLeases.get(agentName) === lease) {
+            this.agentUsageLeases.delete(agentName);
+          }
+        }
+      }),
+    );
+    for (const result of results) {
+      if (result.status === "rejected") {
+        process.stderr.write(
+          `roll chat: Agent 使用租约释放失败: ${
+            result.reason instanceof Error ? result.reason.message : String(result.reason)
+          }\n`,
+        );
+      }
+    }
+  }
+
   async dispose(): Promise<void> {
     if (this.disposePromise !== undefined) {
       return this.disposePromise;
@@ -796,30 +863,56 @@ export class ConversationEngine {
       this.refreshChain,
     ]).then(() => undefined);
     this.disposePromise = (async () => {
+      let closeFailure:
+        | { readonly failed: false }
+        | { readonly failed: true; readonly error: unknown } = { failed: false };
       try {
         await Promise.all([...this.liveSessions.values()].map((session) => session.close()));
-      } finally {
-        this.liveSessions.clear();
-        const drained = await waitForPromiseSettlement(
-          pendingEngineWork,
-          ENGINE_WORK_DRAIN_TIMEOUT_MS,
-        );
-        if (!drained) {
-          process.stderr.write(
-            `roll chat: Engine 在 ${String(ENGINE_WORK_DRAIN_TIMEOUT_MS)}ms 内未完成在飞初始化，将在其结束后再清理迟到连接\n`,
-          );
-        }
-        await this.clientManager.disconnectAll();
-        if (!drained) {
-          pendingEngineWork
-            .then(() => this.clientManager.disconnectAll())
-            .catch((error: unknown) => {
-              process.stderr.write(
-                `roll chat: 迟到 MCP 连接清理失败: ${error instanceof Error ? error.message : String(error)}\n`,
-              );
-            });
-        }
+      } catch (error) {
+        closeFailure = { failed: true, error };
       }
+      this.liveSessions.clear();
+      const drained = await waitForPromiseSettlement(
+        pendingEngineWork,
+        ENGINE_WORK_DRAIN_TIMEOUT_MS,
+      );
+      if (!drained) {
+        process.stderr.write(
+          `roll chat: Engine 在 ${String(ENGINE_WORK_DRAIN_TIMEOUT_MS)}ms 内未完成在飞初始化，将在其结束后再清理迟到连接\n`,
+        );
+      }
+      let disconnectFailure:
+        | { readonly failed: false }
+        | { readonly failed: true; readonly error: unknown } = { failed: false };
+      try {
+        await this.clientManager.disconnectAll();
+      } catch (error) {
+        disconnectFailure = { failed: true, error };
+      }
+      await this.releaseAgentUsageLeases();
+      if (!drained) {
+        pendingEngineWork
+          .then(async () => {
+            try {
+              await this.clientManager.disconnectAll();
+            } finally {
+              await this.releaseAgentUsageLeases();
+            }
+          })
+          .catch((error: unknown) => {
+            process.stderr.write(
+              `roll chat: 迟到 MCP/租约清理失败: ${error instanceof Error ? error.message : String(error)}\n`,
+            );
+          });
+      }
+      if (closeFailure.failed && disconnectFailure.failed) {
+        throw new AggregateError(
+          [closeFailure.error, disconnectFailure.error],
+          "ConversationEngine 关闭 session 与 MCP 连接均失败。",
+        );
+      }
+      if (closeFailure.failed) throw closeFailure.error;
+      if (disconnectFailure.failed) throw disconnectFailure.error;
     })();
     return this.disposePromise;
   }

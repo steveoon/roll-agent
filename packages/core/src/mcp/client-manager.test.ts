@@ -152,6 +152,75 @@ describe("McpClientManager stdio stderr filtering", () => {
   });
 });
 
+describe("McpClientManager HTTP disconnect", () => {
+  it("terminates the remote MCP session before closing and evicting the client", async () => {
+    const order: string[] = [];
+    const manager = new McpClientManager();
+    const internals = manager as unknown as {
+      readonly connections: Map<
+        string,
+        {
+          readonly client: { close(): Promise<void> };
+          readonly transportType: "streamable-http";
+          readonly httpTransport: { terminateSession(): Promise<void> };
+        }
+      >;
+    };
+    internals.connections.set("http-agent", {
+      client: {
+        close: async () => {
+          order.push("close");
+        },
+      },
+      transportType: "streamable-http",
+      httpTransport: {
+        terminateSession: async () => {
+          order.push("terminate");
+        },
+      },
+    });
+
+    await manager.disconnect("http-agent");
+
+    assert.deepEqual(order, ["terminate", "close"]);
+    assert.equal(manager.isConnected("http-agent"), false);
+  });
+
+  it("still closes and evicts the HTTP client when session termination fails", async () => {
+    const order: string[] = [];
+    const manager = new McpClientManager();
+    const internals = manager as unknown as {
+      readonly connections: Map<
+        string,
+        {
+          readonly client: { close(): Promise<void> };
+          readonly transportType: "streamable-http";
+          readonly httpTransport: { terminateSession(): Promise<void> };
+        }
+      >;
+    };
+    internals.connections.set("http-agent", {
+      client: {
+        close: async () => {
+          order.push("close");
+        },
+      },
+      transportType: "streamable-http",
+      httpTransport: {
+        terminateSession: async () => {
+          order.push("terminate");
+          throw new Error("DELETE failed");
+        },
+      },
+    });
+
+    await manager.disconnect("http-agent");
+
+    assert.deepEqual(order, ["terminate", "close"]);
+    assert.equal(manager.isConnected("http-agent"), false);
+  });
+});
+
 function restoreEnv(key: string, value: string | undefined): void {
   if (value === undefined) {
     delete process.env[key];

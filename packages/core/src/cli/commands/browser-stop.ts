@@ -3,9 +3,8 @@ import type { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { z } from "zod";
 import { getAgentEnv } from "../../config/helpers.ts";
 import { loadConfig } from "../../config/loader.ts";
-import { McpClientManager } from "../../mcp/client-manager.ts";
+import { ManagedAgentConnectionScope } from "../../mcp/managed-agent-connection.ts";
 import { getAgentPid } from "../../registry/process-manager.ts";
-import { resolveTransportWithDevSpawnSpec } from "../../registry/dev-spawn.ts";
 import { AgentStore } from "../../registry/store.ts";
 import type { RegisteredAgent } from "../../types/agent.ts";
 import { formatMissingToolMessage, normalizeListedTools } from "../utils/agent-tools.ts";
@@ -82,7 +81,7 @@ export default defineCommand({
   },
   async run({ args, rawArgs }) {
     const jsonOutput = args.json === true;
-    const clientManager = new McpClientManager();
+    let connectionScope: ManagedAgentConnectionScope | undefined;
 
     try {
       const request = resolveBrowserStopRequest({
@@ -90,6 +89,7 @@ export default defineCommand({
         all: args.all === true,
       });
       const { config } = loadConfig();
+      connectionScope = new ManagedAgentConnectionScope(config.agents.dataDir, "browser-stop");
       validateDeclaredBrowserStopInstances(config.browser, request);
       const store = new AgentStore(config.agents.dataDir);
       const agent = store.findByName(BROWSER_USE_AGENT_NAME);
@@ -112,10 +112,9 @@ export default defineCommand({
       }
 
       const agentEnv = getAgentEnv(config, agent.skill.name);
-      const transport = resolveTransportWithDevSpawnSpec(agent);
       let client: Client;
       try {
-        client = await clientManager.connect(agent.skill.name, transport, agent.installPath, {
+        client = await connectionScope.connect(agent, {
           timeoutMs: 5_000,
           ...(agentEnv ? { env: agentEnv } : {}),
         });
@@ -165,7 +164,7 @@ export default defineCommand({
       }
       process.exitCode = 1;
     } finally {
-      await clientManager.disconnectAll();
+      await connectionScope?.disconnectAll();
     }
   },
 });

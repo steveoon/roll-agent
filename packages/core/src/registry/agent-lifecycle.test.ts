@@ -14,8 +14,13 @@ import {
   type AgentLifecycleCollaborators,
   type AgentLifecycleRuntimeIdentity,
 } from "./agent-lifecycle.ts";
+import { AgentUsageBusyError } from "./agent-usage-lease.ts";
 import { isProcessStartToken, type ProcessStartToken } from "./process-identity.ts";
-import { getRollCoreVersion } from "./process-manager.ts";
+import {
+  getRollCoreVersion,
+  MANAGED_AGENT_RUNTIME_RETENTIONS,
+  type ManagedAgentRuntimeRetention,
+} from "./process-manager.ts";
 
 describe("AgentLifecycleService.inspectAll", () => {
   it("distinguishes on-demand, core-managed, and external-managed status without starting agents", async () => {
@@ -157,6 +162,89 @@ describe("AgentLifecycleService.applyActivation", () => {
     assert.match(findResult(result.items, "notify-agent").message, /人工迁移/);
     assert.equal(harness.stopCalls.length, 0);
     assert.equal(harness.startCalls.length, 0);
+  });
+
+  it("does not restart a core-managed Agent while another Roll process holds a usage lease", async () => {
+    const agent = createAgent("notify-agent", "core-managed");
+    const harness = createHarness([agent], { "notify-agent": 101 });
+    const service = new AgentLifecycleService("/roll-data", {
+      ...harness.collaborators,
+      acquireMaintenanceGuard: async () => {
+        throw new AgentUsageBusyError(agent.skill.name, [
+          {
+            kind: "active",
+            leaseId: "00000000-0000-4000-8000-000000000001",
+            holderKind: "chat",
+            pid: 202,
+            acquiredAt: "2026-07-23T00:00:00.000Z",
+          },
+        ]);
+      },
+    });
+    const baseline = service.captureBaseline();
+
+    const result = await service.applyActivation(
+      [restartEffect(agent.skill.name)],
+      baseline,
+      DEFAULT_CONFIG,
+    );
+
+    assert.equal(result.success, true);
+    assert.equal(result.requiresManualAction, true);
+    assert.equal(result.items[0]?.status, "in-use");
+    assert.match(result.items[0]?.message ?? "", /其他 Roll 进程/u);
+    assert.equal(harness.stopCalls.length, 0);
+    assert.equal(harness.startCalls.length, 0);
+  });
+
+  it("stops and keeps stopped a lease-bound Agent when maintenance finds no active usage", async () => {
+    const agent = createAgent("notify-agent", "core-managed");
+    const harness = createHarness([agent], { "notify-agent": 101 });
+    harness.runtimeRetentions.set(agent.skill.name, MANAGED_AGENT_RUNTIME_RETENTIONS.leaseBound);
+    const service = new AgentLifecycleService("/roll-data", harness.collaborators);
+    const baseline = service.captureBaseline();
+
+    const result = await service.applyActivation(
+      [restartEffect(agent.skill.name)],
+      baseline,
+      DEFAULT_CONFIG,
+    );
+
+    assert.equal(result.success, true);
+    assert.equal(result.requiresManualAction, false);
+    assert.equal(result.items[0]?.status, "kept-stopped");
+    assert.match(result.items[0]?.message ?? "", /无活动使用方/u);
+    assert.deepEqual(harness.stopRequests, [{ agentName: agent.skill.name, expectedPid: 101 }]);
+    assert.equal(harness.startCalls.length, 0);
+    assert.equal(harness.waitCalls.length, 0);
+    assert.equal(harness.pids.has(agent.skill.name), false);
+    assert.deepEqual(harness.statusCalls, [{ agentName: agent.skill.name, status: "stopped" }]);
+  });
+
+  it("keeps a baseline lease-bound Agent stopped when its final lease exits before activation", async () => {
+    const agent = createAgent("notify-agent", "core-managed");
+    const harness = createHarness([agent], { "notify-agent": 101 });
+    harness.runtimeRetentions.set(agent.skill.name, MANAGED_AGENT_RUNTIME_RETENTIONS.leaseBound);
+    const service = new AgentLifecycleService("/roll-data", harness.collaborators);
+    const baseline = service.captureBaseline();
+
+    harness.pids.delete(agent.skill.name);
+    harness.runtimeProcessStartTokens.delete(agent.skill.name);
+
+    const result = await service.applyActivation(
+      [restartEffect(agent.skill.name)],
+      baseline,
+      DEFAULT_CONFIG,
+    );
+
+    assert.equal(result.success, true);
+    assert.equal(result.requiresManualAction, false);
+    assert.equal(result.items[0]?.status, "kept-stopped");
+    assert.match(result.items[0]?.message ?? "", /最后一个使用方退出/u);
+    assert.equal(harness.stopCalls.length, 0);
+    assert.equal(harness.startCalls.length, 0);
+    assert.equal(harness.waitCalls.length, 0);
+    assert.deepEqual(harness.statusCalls, [{ agentName: agent.skill.name, status: "stopped" }]);
   });
 
   it("does not stop a replacement process when the pid changed after capture", async () => {
@@ -357,6 +445,7 @@ interface Harness {
   readonly pidReplacementOnNextStop: Map<string, number>;
   readonly runtimeProcessStartTokens: Map<string, ProcessStartToken>;
   readonly runtimeStartedAt: Map<string, string>;
+  readonly runtimeRetentions: Map<string, ManagedAgentRuntimeRetention>;
   readonly waitCalls: string[];
   readonly statusCalls: Array<{ readonly agentName: string; readonly status: AgentStatus }>;
 }
@@ -381,6 +470,9 @@ function createHarness(
   const runtimeStartedAt = new Map(
     agents.map((agent) => [agent.skill.name, new Date(0).toISOString()] as const),
   );
+  const runtimeRetentions = new Map<string, ManagedAgentRuntimeRetention>(
+    agents.map((agent) => [agent.skill.name, MANAGED_AGENT_RUNTIME_RETENTIONS.persistent]),
+  );
   const waitCalls: string[] = [];
   const statusCalls: Harness["statusCalls"] = [];
   let nextPid = 1_000;
@@ -398,6 +490,7 @@ function createHarness(
     pidReplacementOnNextStop,
     runtimeProcessStartTokens,
     runtimeStartedAt,
+    runtimeRetentions,
     waitCalls,
     statusCalls,
     collaborators: {
@@ -423,6 +516,9 @@ function createHarness(
                     runtimeProcessStartTokens.get(agent.skill.name) ?? testProcessStartToken(0),
                   coreVersion: expectedCoreVersion,
                   startedAt: runtimeStartedAt.get(agent.skill.name) ?? new Date(0).toISOString(),
+                  retention:
+                    runtimeRetentions.get(agent.skill.name) ??
+                    MANAGED_AGENT_RUNTIME_RETENTIONS.persistent,
                   ...(expectedEndpoint !== undefined ? { endpoint: expectedEndpoint } : {}),
                 },
               }
@@ -449,10 +545,14 @@ function createHarness(
           throw new Error("endpoint unavailable: probe-secret");
         }
       },
-      start: (agent, dataDir, env) => {
+      start: (agent, dataDir, env, options) => {
         nextPid += 1;
         pids.set(agent.skill.name, nextPid);
         runtimeProcessStartTokens.set(agent.skill.name, testProcessStartToken(nextPid));
+        runtimeRetentions.set(
+          agent.skill.name,
+          options?.retention ?? MANAGED_AGENT_RUNTIME_RETENTIONS.persistent,
+        );
         startCalls.push({
           agentName: agent.skill.name,
           dataDir,
@@ -499,7 +599,28 @@ function createHarness(
         }
       },
       resolveAgentEnv: (config, agentName) => config.agents.env?.[agentName],
-      acquireLifecycleLock: () => ({ release: () => {} }),
+      acquireMaintenanceGuard: async (agent) => {
+        const pid = pids.get(agent.skill.name);
+        const processStartToken = runtimeProcessStartTokens.get(agent.skill.name);
+        const startedAt = runtimeStartedAt.get(agent.skill.name);
+        const retention = runtimeRetentions.get(agent.skill.name);
+        const runtime =
+          pid !== undefined &&
+          processStartToken !== undefined &&
+          startedAt !== undefined &&
+          retention !== undefined
+            ? {
+                identity: { pid, processStartToken, startedAt },
+                retention,
+              }
+            : undefined;
+        return {
+          ...(runtime !== undefined ? { runtime } : {}),
+          lifecycleLock: { release: () => {} },
+          release: () => {},
+        };
+      },
+      acquireRegistryLock: async () => ({ release: () => {} }),
     },
   };
 }

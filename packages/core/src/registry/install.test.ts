@@ -15,6 +15,8 @@ import { join } from "node:path";
 import { DEFAULT_CONFIG } from "../config/defaults.ts";
 import { installAgent } from "./install.ts";
 import { AgentStore } from "./store.ts";
+import { AgentUsageBusyError } from "./agent-usage-lease.ts";
+import { isProcessStartToken } from "./process-identity.ts";
 import type { InstallAgentDeps, InstallAgentEvent, InstallAgentInput } from "./install.ts";
 import type { PackageManagerRunSpec } from "../cli/utils/package-manager.ts";
 import type { DiscoveredAgent } from "./discovery.ts";
@@ -118,6 +120,23 @@ function makeDeps(options: HarnessOptions): {
         calls.push("stopGracefully");
         return true;
       },
+      acquireMaintenanceGuard: async (agent) => ({
+        agentName: agent.skill.name,
+        runtime:
+          agent.status === "online"
+            ? {
+                identity: {
+                  pid: 12_345,
+                  processStartToken: testProcessStartToken(),
+                  startedAt: "2026-07-23T00:00:00.000Z",
+                },
+                retention: "persistent",
+              }
+            : undefined,
+        lifecycleLock: { release: () => {} },
+        release: () => {},
+      }),
+      acquireLifecycleLock: async () => ({ release: () => {} }),
       resolvePackageRoot: (installDir) => join(installDir, "fake-package-root"),
       readManifest: () => ({ name: "@fake/agent-package", version: "1.2.3" }),
     },
@@ -127,6 +146,34 @@ function makeDeps(options: HarnessOptions): {
 }
 
 const BASE_INPUT: InstallAgentInput = { packageSpec: "@fake/agent-package" };
+
+function testProcessStartToken() {
+  const token = `pst-v2:${"0".repeat(64)}`;
+  assert.ok(isProcessStartToken(token));
+  return token;
+}
+
+function makeExistingInstalledCoreAgent(): RegisteredAgent {
+  return {
+    skill: { name: "fake-agent", description: "old", metadata: {} },
+    transport: { type: "streamable-http", endpoint: "http://127.0.0.1:4313/mcp" },
+    runtime: {
+      ownership: "core-managed",
+      start: { command: "node", args: ["dist/index.js"] },
+      endpoint: { path: "/mcp", port: 4_313 },
+    },
+    installPath: "/old/fake-agent",
+    registeredAt: "2026-01-01T00:00:00.000Z",
+    status: "online",
+    source: {
+      type: "installed-package",
+      packageName: "@fake/agent-package",
+      packageSpec: "@fake/agent-package",
+      installDir: "/old/install",
+      installedVersion: "1.0.0",
+    },
+  };
+}
 
 describe("installAgent", () => {
   it("成功链路：事件顺序、注册与版本写入", async () => {
@@ -261,19 +308,185 @@ describe("installAgent", () => {
     assert.equal(existsSync(installLockPath(dataDir)), false);
   });
 
+  it("活动使用租约会在 download 前阻止同名 Agent 覆盖安装", async () => {
+    const dataDir = makeDataDir();
+    const { deps, store, calls } = makeDeps({ dataDir });
+    store.add(makeExistingInstalledCoreAgent());
+    const blockedDeps: InstallAgentDeps = {
+      ...deps,
+      collaborators: {
+        ...deps.collaborators,
+        acquireMaintenanceGuard: async () => {
+          throw new AgentUsageBusyError("fake-agent", [
+            {
+              kind: "active",
+              leaseId: "00000000-0000-4000-8000-000000000001",
+              holderKind: "chat",
+              pid: 123,
+              acquiredAt: "2026-07-23T00:00:00.000Z",
+            },
+          ]);
+        },
+      },
+    };
+
+    const result = await installAgent(
+      { ...BASE_INPUT, expectedSkillName: "fake-agent" },
+      blockedDeps,
+    );
+
+    assert.equal(result.ok, false);
+    if (!result.ok) assert.equal(result.step, "resolve");
+    assert.equal(calls.includes("runInstall"), false);
+    assert.equal(store.findByName("fake-agent")?.source?.type, "installed-package");
+  });
+
+  it("停止现有 runtime 返回 false 时不修改安装目录或注册表", async () => {
+    const dataDir = makeDataDir();
+    const { deps, store, calls } = makeDeps({ dataDir });
+    const existing = makeExistingInstalledCoreAgent();
+    store.add(existing);
+    const failingDeps: InstallAgentDeps = {
+      ...deps,
+      collaborators: {
+        ...deps.collaborators,
+        stopGracefully: async () => {
+          calls.push("stopGracefully");
+          return false;
+        },
+      },
+    };
+
+    const result = await installAgent(
+      { ...BASE_INPUT, expectedSkillName: "fake-agent" },
+      failingDeps,
+    );
+
+    assert.equal(result.ok, false);
+    if (!result.ok) assert.equal(result.step, "resolve");
+    assert.deepEqual(calls, ["stopGracefully"]);
+    assert.deepEqual(store.findByName("fake-agent"), existing);
+  });
+
+  it("覆盖安装下载失败时恢复原 persistent Agent", async () => {
+    const dataDir = makeDataDir();
+    const oldMarker = join(installedAgentDir(dataDir), "old-version.txt");
+    mkdirSync(installedAgentDir(dataDir), { recursive: true });
+    writeFileSync(oldMarker, "v1", "utf8");
+    const { deps, store, calls } = makeDeps({
+      dataDir,
+      runInstall: async () => {
+        throw new Error("network down");
+      },
+    });
+    store.add(makeExistingInstalledCoreAgent());
+
+    const result = await installAgent({ ...BASE_INPUT, expectedSkillName: "fake-agent" }, deps);
+
+    assert.equal(result.ok, false);
+    if (!result.ok) assert.equal(result.step, "download");
+    assert.deepEqual(
+      calls.filter((call) => ["stopGracefully", "runInstall", "start", "waitReady"].includes(call)),
+      ["stopGracefully", "runInstall", "start", "waitReady"],
+    );
+    assert.equal(store.findByName("fake-agent")?.status, "online");
+    assert.equal(readFileSync(oldMarker, "utf8"), "v1");
+    assert.equal(existsSync(join(installedAgentDir(dataDir), "fake-package-root")), false);
+  });
+
+  it("覆盖安装 setup 失败时回滚磁盘、注册信息并恢复原 persistent Agent", async () => {
+    const dataDir = makeDataDir();
+    const oldMarker = join(installedAgentDir(dataDir), "old-version.txt");
+    const newMarker = join(installedAgentDir(dataDir), "new-version.txt");
+    mkdirSync(installedAgentDir(dataDir), { recursive: true });
+    writeFileSync(oldMarker, "v1", "utf8");
+    const { deps, store, calls } = makeDeps({
+      dataDir,
+      runInstall: async () => {
+        writeFileSync(newMarker, "v2", "utf8");
+      },
+      runSetup: async () => ({
+        ok: false,
+        skipped: false,
+        message: "setup failed",
+      }),
+    });
+    const existing = makeExistingInstalledCoreAgent();
+    store.add(existing);
+
+    const result = await installAgent({ ...BASE_INPUT, expectedSkillName: "fake-agent" }, deps);
+
+    assert.equal(result.ok, false);
+    if (!result.ok) assert.equal(result.step, "setup");
+    assert.equal(readFileSync(oldMarker, "utf8"), "v1");
+    assert.equal(existsSync(newMarker), false);
+    assert.equal(store.findByName("fake-agent")?.skill.description, existing.skill.description);
+    assert.equal(store.findByName("fake-agent")?.status, "online");
+    assert.deepEqual(
+      calls.filter((call) =>
+        ["stopGracefully", "runInstall", "runSetup", "start", "waitReady"].includes(call),
+      ),
+      ["stopGracefully", "runInstall", "runSetup", "start", "waitReady"],
+    );
+  });
+
+  it("覆盖安装注册表回滚失败时即使目录恢复成功也不重启旧 persistent Agent", async () => {
+    const dataDir = makeDataDir();
+    const oldMarker = join(installedAgentDir(dataDir), "old-version.txt");
+    mkdirSync(installedAgentDir(dataDir), { recursive: true });
+    writeFileSync(oldMarker, "v1", "utf8");
+    const { deps, store, calls, events } = makeDeps({
+      dataDir,
+      discovered: makeDiscovered({
+        transport: { type: "streamable-http", endpoint: "http://127.0.0.1:4313/mcp" },
+        runtime: {
+          ownership: "core-managed",
+          start: { command: "node", args: ["dist/index.js"] },
+          endpoint: { path: "/mcp", port: 4_313 },
+        },
+      }),
+      waitReady: async () => {
+        writeFileSync(
+          join(dataDir, "agents.json"),
+          JSON.stringify({ schemaVersion: 3, agents: [] }),
+          "utf8",
+        );
+        throw new Error("ready failed after registry changed");
+      },
+    });
+    store.add(makeExistingInstalledCoreAgent());
+
+    const result = await installAgent({ ...BASE_INPUT, expectedSkillName: "fake-agent" }, deps);
+
+    assert.equal(result.ok, false);
+    if (!result.ok) assert.equal(result.step, "start");
+    assert.equal(readFileSync(oldMarker, "utf8"), "v1");
+    assert.equal(calls.filter((call) => call === "start").length, 1);
+    assert.equal(calls.filter((call) => call === "waitReady").length, 1);
+    assert.equal(store.findByName("fake-agent"), undefined);
+    const warningMessages = events
+      .filter((event) => event.type === "warn")
+      .map((event) => event.message);
+    assert.ok(warningMessages.some((message) => message.includes("恢复旧 Agent 注册信息失败")));
+    assert.ok(warningMessages.some((message) => message.includes("未自动重启旧 persistent Agent")));
+  });
+
   it("并发首次安装在 download 前互斥，失败方不会删除成功方目录", async () => {
     const dataDir = makeDataDir();
     const firstDownload = Promise.withResolvers<void>();
+    const downloadStarted = Promise.withResolvers<void>();
     let downloadCount = 0;
     const { deps, calls } = makeDeps({
       dataDir,
       runInstall: async () => {
         downloadCount += 1;
+        downloadStarted.resolve();
         await firstDownload.promise;
       },
     });
 
     const firstInstall = installAgent(BASE_INPUT, deps);
+    await downloadStarted.promise;
     assert.equal(downloadCount, 1);
     const secondResult = await installAgent(BASE_INPUT, deps);
 

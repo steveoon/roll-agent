@@ -115,6 +115,50 @@ test("ChatApp streams an assistant reply into history and shows status", async (
   unmount();
 });
 
+test("ChatApp previews Markdown before the assistant stream finishes", async () => {
+  const sink: Sink = { approved: [], rejected: [] };
+  let releaseFinish: (() => void) | undefined;
+  const finishGate = new Promise<void>((resolve) => {
+    releaseFinish = resolve;
+  });
+  async function* send(): AsyncIterable<SessionEvent> {
+    yield { type: "message-start", messageId: "m" };
+    yield { type: "text-delta", delta: "## 流式标题\n\n**正在加粗**\n\n- 第一项" };
+    await finishGate;
+    yield {
+      type: "message-finish",
+      text: "## 流式标题\n\n**正在加粗**\n\n- 第一项",
+    };
+  }
+  const { stdin, lastFrame, unmount } = render(
+    h(ChatApp, {
+      session: makeSession(send, sink),
+      model: "qwen",
+      contextWindow: undefined,
+      onUserSubmit: () => {},
+      onExit: () => {},
+    }),
+  );
+  try {
+    await delay(10);
+    stdin.write("preview");
+    await delay(10);
+    stdin.write("\r");
+
+    await waitFor(() => {
+      const frame = plain(lastFrame() ?? "");
+      assert.match(frame, /流式标题/);
+      assert.match(frame, /正在加粗/);
+      assert.match(frame, /• 第一项/);
+      assert.doesNotMatch(frame, /## |\*\*/);
+    });
+  } finally {
+    releaseFinish?.();
+    await delay(40);
+    unmount();
+  }
+});
+
 test("ChatApp shows model-waiting status separately from the submitted user message", async () => {
   const sink: Sink = { approved: [], rejected: [] };
   async function* send(): AsyncIterable<SessionEvent> {
@@ -324,6 +368,12 @@ test("ChatApp confirm flow shows tool args and approves on y", async () => {
   stdin.write("\r");
   await waitFor(() => assert.match(lastFrame() ?? "", /执行 browser-use-agent\.click_ref/));
   assert.match(lastFrame() ?? "", /ref: node-42/);
+  const confirmationLines = plain(lastFrame() ?? "").split("\n");
+  const optionRow = confirmationLines.findIndex(
+    (line) => line.includes("Yes") && line.includes("No"),
+  );
+  assert.notEqual(optionRow, -1);
+  assert.match(confirmationLines[optionRow + 1] ?? "", /^╰/u);
   await delay(100);
 
   stdin.write("y");

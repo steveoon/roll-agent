@@ -4,6 +4,7 @@ import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync } fro
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
+import { Worker } from "node:worker_threads";
 import type { ModelMessage } from "ai";
 import {
   ThreadStore,
@@ -26,6 +27,61 @@ import {
 
 function tempDir(): string {
   return mkdtempSync(join(tmpdir(), "roll-threads-"));
+}
+
+type DatabaseLockWorkerMessage =
+  | { readonly type: "locked" | "released" }
+  | { readonly type: "error"; readonly message: string };
+
+function isDatabaseLockWorkerMessage(value: unknown): value is DatabaseLockWorkerMessage {
+  if (typeof value !== "object" || value === null || !("type" in value)) {
+    return false;
+  }
+  if (value.type === "locked" || value.type === "released") {
+    return true;
+  }
+  return value.type === "error" && "message" in value && typeof value.message === "string";
+}
+
+function waitForDatabaseLockWorker(
+  worker: Worker,
+  expectedType: "locked" | "released",
+): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => {
+      cleanup();
+      reject(new Error(`Timed out waiting for database lock worker to report ${expectedType}`));
+    }, 5_000);
+    const cleanup = () => {
+      clearTimeout(timeout);
+      worker.off("message", onMessage);
+      worker.off("error", onError);
+      worker.off("exit", onExit);
+    };
+    const onMessage = (message: unknown) => {
+      if (!isDatabaseLockWorkerMessage(message)) {
+        return;
+      }
+      if (message.type === "error") {
+        cleanup();
+        reject(new Error(message.message));
+      } else if (message.type === expectedType) {
+        cleanup();
+        resolve();
+      }
+    };
+    const onError = (error: Error) => {
+      cleanup();
+      reject(error);
+    };
+    const onExit = (code: number) => {
+      cleanup();
+      reject(new Error(`Database lock worker exited with code ${String(code)}`));
+    };
+    worker.on("message", onMessage);
+    worker.on("error", onError);
+    worker.on("exit", onExit);
+  });
 }
 
 test("ThreadStore 在 POSIX 上收紧 raw evidence 目录与数据库权限", () => {
@@ -146,6 +202,89 @@ test("ThreadStore 创建与查询 thread", () => {
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test(
+  "ThreadStore initialization waits for a cross-thread BEGIN IMMEDIATE lock",
+  { timeout: 10_000 },
+  async () => {
+    const dir = tempDir();
+    let worker: Worker | undefined;
+    let store: ThreadStore | undefined;
+    try {
+      const seed = new ThreadStore(dir);
+      seed.close();
+
+      worker = new Worker(
+        `
+          const { parentPort, workerData } = require("node:worker_threads");
+          const { DatabaseSync } = require("node:sqlite");
+          const database = new DatabaseSync(workerData.databasePath);
+          const fail = (error) => {
+            try {
+              database.close();
+            } catch {}
+            parentPort.postMessage({
+              type: "error",
+              message: error instanceof Error ? error.stack ?? error.message : String(error),
+            });
+            parentPort.close();
+          };
+          try {
+            database.exec("BEGIN IMMEDIATE");
+            parentPort.postMessage({ type: "locked" });
+            parentPort.once("message", ({ delayMs }) => {
+              setTimeout(() => {
+                try {
+                  database.exec("COMMIT");
+                  database.close();
+                  parentPort.postMessage({ type: "released" });
+                  parentPort.close();
+                } catch (error) {
+                  fail(error);
+                }
+              }, delayMs);
+            });
+          } catch (error) {
+            fail(error);
+          }
+        `,
+        {
+          eval: true,
+          execArgv: ["--experimental-sqlite"],
+          workerData: { databasePath: join(dir, "threads.db") },
+        },
+      );
+
+      await waitForDatabaseLockWorker(worker, "locked");
+      const released = waitForDatabaseLockWorker(worker, "released");
+      const startedAt = Date.now();
+      worker.postMessage({ delayMs: 500 });
+
+      let initializationError: unknown;
+      try {
+        store = new ThreadStore(dir);
+      } catch (error) {
+        initializationError = error;
+      }
+      const elapsedMs = Date.now() - startedAt;
+      await released;
+
+      if (initializationError !== undefined) {
+        throw initializationError;
+      }
+      assert.ok(store);
+      assert.ok(elapsedMs >= 400, `expected initialization to wait for lock, got ${elapsedMs}ms`);
+      const threadId = store.createThread({ title: "after-lock" });
+      assert.equal(store.getThread(threadId)?.title, "after-lock");
+    } finally {
+      store?.close();
+      if (worker !== undefined) {
+        await worker.terminate();
+      }
+      rmSync(dir, { recursive: true, force: true });
+    }
+  },
+);
 
 test("ThreadStore append/get messages 保序且可多次追加", () => {
   const dir = tempDir();

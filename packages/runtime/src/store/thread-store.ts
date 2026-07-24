@@ -44,6 +44,7 @@ const MAX_TOOL_EXECUTION_LIMIT = 500;
 const DEFAULT_TRANSCRIPT_LIMIT = 50;
 const MAX_TRANSCRIPT_LIST_LIMIT = 500;
 const MAX_TRANSCRIPT_PAGE_LIMIT = 100;
+const THREAD_STORE_BUSY_TIMEOUT_MS = 15_000;
 
 export const TOOL_EXECUTION_RETENTION_POLICY = {
   maxBytesPerThread: 16 * 1_024 * 1_024,
@@ -295,7 +296,11 @@ export class ThreadStore {
   private init(): void {
     // v4 rewrites and prunes legacy secret-bearing evidence. Secure deletion overwrites removed
     // cells instead of leaving recoverable payloads on SQLite freelist pages.
-    this.db.exec("PRAGMA foreign_keys = ON; PRAGMA secure_delete = ON;");
+    this.db.exec(
+      `PRAGMA busy_timeout = ${String(THREAD_STORE_BUSY_TIMEOUT_MS)};
+       PRAGMA foreign_keys = ON;
+       PRAGMA secure_delete = ON;`,
+    );
     const versionRow = this.db.prepare("PRAGMA user_version").get() as {
       readonly user_version: number;
     };

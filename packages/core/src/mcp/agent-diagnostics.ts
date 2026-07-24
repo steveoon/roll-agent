@@ -4,11 +4,10 @@ import {
   DIAGNOSTIC_TOOL_CANDIDATES,
   type AgentRuntimeEnvInspection,
 } from "../config/runtime-env.ts";
-import { resolveTransportWithDevSpawnSpec } from "../registry/dev-spawn.ts";
 import { getAgentPid } from "../registry/process-manager.ts";
 import type { RegisteredAgent } from "../types/agent.ts";
 import type { RollConfig } from "../config/schema.ts";
-import { McpClientManager } from "./client-manager.ts";
+import { ManagedAgentConnectionScope } from "./managed-agent-connection.ts";
 
 export async function inspectAgentRuntimeEnv(
   agent: RegisteredAgent,
@@ -34,15 +33,14 @@ export async function inspectAgentRuntimeEnv(
     }
   }
 
-  const clientManager = new McpClientManager();
+  const connectionScope = new ManagedAgentConnectionScope(agentsConfig.dataDir, "diagnostics");
 
   try {
-    const transport = resolveTransportWithDevSpawnSpec(agent);
     const agentEnv =
       options.config !== undefined
         ? getAgentEnv(options.config, agent.skill.name)
         : getAgentEnvFromAgentsConfig(agentsConfig, agent.skill.name);
-    const client = await clientManager.connect(agent.skill.name, transport, agent.installPath, {
+    const client = await connectionScope.connect(agent, {
       ...(options.timeoutMs !== undefined ? { timeoutMs: options.timeoutMs } : {}),
       ...(agentEnv ? { env: agentEnv } : {}),
     });
@@ -78,7 +76,7 @@ export async function inspectAgentRuntimeEnv(
       message: `无法校验运行态: ${error instanceof Error ? error.message : String(error)}`,
     };
   } finally {
-    await clientManager.disconnectAll();
+    await connectionScope.disconnectAll();
   }
 }
 
