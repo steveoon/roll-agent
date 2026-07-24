@@ -1,6 +1,8 @@
 import { defineCommand } from "citty";
 import { existsSync, rmSync } from "node:fs";
 import { loadAgentsConfig } from "../../config/loader.ts";
+import { acquireAgentRegistryLockAsync } from "../../registry/agent-registry-lock.ts";
+import { acquireAgentUsageMaintenanceGuard } from "../../registry/agent-usage-lease.ts";
 import { inferAgentSourceType } from "../../registry/source.ts";
 import { stopAgentGracefully } from "../../registry/process-manager.ts";
 import { AgentStore } from "../../registry/store.ts";
@@ -13,27 +15,40 @@ export default defineCommand({
   },
   async run({ args }) {
     const { agentsConfig } = loadAgentsConfig();
-    const store = new AgentStore(agentsConfig.dataDir);
-    const agent = store.findByName(args.name);
-
-    if (!agent) {
-      log.error(`Agent "${args.name}" 未找到`);
+    let registryLock: Awaited<ReturnType<typeof acquireAgentRegistryLockAsync>>;
+    try {
+      registryLock = await acquireAgentRegistryLockAsync(agentsConfig.dataDir);
+    } catch (error) {
+      log.error(error instanceof Error ? error.message : String(error));
       process.exitCode = 1;
       return;
     }
+    const store = new AgentStore(agentsConfig.dataDir, { registryLock });
 
-    if (agent.runtime.ownership === "core-managed") {
-      try {
-        await stopAgentGracefully(agentsConfig.dataDir, agent.skill.name);
-      } catch (err) {
-        log.error(`停止 ${args.name} 失败：${err instanceof Error ? err.message : String(err)}`);
+    let maintenanceGuard: Awaited<ReturnType<typeof acquireAgentUsageMaintenanceGuard>> | undefined;
+    try {
+      const agent = store.findByName(args.name);
+      if (!agent) {
+        log.error(`Agent "${args.name}" 未找到`);
         process.exitCode = 1;
         return;
       }
-    }
 
-    const sourceType = inferAgentSourceType(agent);
-    try {
+      if (agent.runtime.ownership === "core-managed") {
+        maintenanceGuard = await acquireAgentUsageMaintenanceGuard(agent, agentsConfig.dataDir);
+        await stopAgentGracefully(agentsConfig.dataDir, agent.skill.name, {
+          ...(maintenanceGuard
+            ? {
+                lifecycleLock: maintenanceGuard.lifecycleLock,
+                ...(maintenanceGuard.runtime
+                  ? { expectedIdentity: maintenanceGuard.runtime.identity }
+                  : {}),
+              }
+            : {}),
+        });
+      }
+
+      const sourceType = inferAgentSourceType(agent);
       switch (sourceType) {
         case "installed-package":
           if (agent.source?.type === "installed-package" && existsSync(agent.source.installDir)) {
@@ -49,19 +64,19 @@ export default defineCommand({
         case "local-path":
           break;
       }
+
+      const removed = store.remove(args.name);
+      if (!removed) {
+        throw new Error(`Agent "${args.name}" 未找到`);
+      }
+
+      log.success(`Agent "${args.name}" 已移除`);
     } catch (err) {
       log.error(`移除 ${args.name} 失败：${err instanceof Error ? err.message : String(err)}`);
       process.exitCode = 1;
-      return;
+    } finally {
+      maintenanceGuard?.release();
+      registryLock.release();
     }
-
-    const removed = store.remove(args.name);
-    if (!removed) {
-      log.error(`Agent "${args.name}" 未找到`);
-      process.exitCode = 1;
-      return;
-    }
-
-    log.success(`Agent "${args.name}" 已移除`);
   },
 });

@@ -7,9 +7,8 @@ import {
 } from "../../config/helpers.ts";
 import { shouldSkipRuntimeReadinessForTool } from "../../config/runtime-env.ts";
 import { resolveLLMCall, toSamplingConnectOptions } from "../../llm/providers.ts";
-import { McpClientManager } from "../../mcp/client-manager.ts";
+import { ManagedAgentConnectionScope } from "../../mcp/managed-agent-connection.ts";
 import { AgentStore } from "../../registry/store.ts";
-import { resolveTransportWithDevSpawnSpec } from "../../registry/dev-spawn.ts";
 import { routeWithLLM } from "../../router/llm-router.ts";
 import { extractToolInput } from "../../tool-runtime/argument-extractor.ts";
 import { formatValidationIssuesMessage } from "../../tool-runtime/messages.ts";
@@ -156,13 +155,12 @@ export default defineCommand({
       config.runtime.thinkingLevel,
     );
 
-    const clientManager = new McpClientManager();
+    const connectionScope = new ManagedAgentConnectionScope(config.agents.dataDir, "ask");
     let failureStage: "connect" | "execute" = "connect";
     try {
       log.info(`连接 Agent "${agent.skill.name}"...`);
       const agentEnv = getAgentEnv(config, agent.skill.name);
-      const transport = resolveTransportWithDevSpawnSpec(agent);
-      const client = await clientManager.connect(agent.skill.name, transport, agent.installPath, {
+      const client = await connectionScope.connect(agent, {
         ...toSamplingConnectOptions(samplingCall),
         ...(agentEnv ? { env: agentEnv } : {}),
       });
@@ -260,7 +258,7 @@ export default defineCommand({
       outputResult(result);
       process.exitCode = 1;
     } finally {
-      await clientManager.disconnectAll();
+      await connectionScope.disconnectAll();
     }
   },
 });

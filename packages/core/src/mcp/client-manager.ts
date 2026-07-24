@@ -16,6 +16,7 @@ type StdioAgentTransport = Extract<AgentTransport, { readonly type: "stdio" }>;
 interface ManagedConnection {
   readonly client: Client;
   readonly transportType: "stdio" | "streamable-http";
+  readonly httpTransport?: StreamableHTTPClientTransport;
   readonly samplingController?: SamplingHandlerController;
 }
 
@@ -150,11 +151,15 @@ export class McpClientManager {
       ? registerSamplingHandler(client, options.samplingModel, options.samplingProviderOptions)
       : undefined;
 
-    // 创建 MCP 传输（强制转换为 Transport 以绕过 exactOptionalPropertyTypes 与库类型的不兼容）
-    const mcpTransport: Transport =
-      transport.type === "streamable-http"
-        ? (new StreamableHTTPClientTransport(new URL(transport.endpoint)) as Transport)
-        : createStdioTransport(transport, cwd, options.env);
+    let httpTransport: StreamableHTTPClientTransport | undefined;
+    let mcpTransport: Transport;
+    if (transport.type === "streamable-http") {
+      httpTransport = new StreamableHTTPClientTransport(new URL(transport.endpoint));
+      // 强制转换为 Transport 以绕过 exactOptionalPropertyTypes 与库类型的不兼容。
+      mcpTransport = httpTransport as Transport;
+    } else {
+      mcpTransport = createStdioTransport(transport, cwd, options.env);
+    }
 
     const connectPromise = client.connect(mcpTransport);
     let timeoutId: ReturnType<typeof setTimeout> | undefined;
@@ -177,6 +182,7 @@ export class McpClientManager {
     this.connections.set(agentName, {
       client,
       transportType: transport.type,
+      ...(httpTransport ? { httpTransport } : {}),
       ...(samplingController ? { samplingController } : {}),
     });
     return client;
@@ -194,8 +200,17 @@ export class McpClientManager {
     const conn = this.connections.get(agentName);
     if (!conn) return;
 
-    await conn.client.close();
-    this.connections.delete(agentName);
+    try {
+      if (conn.httpTransport !== undefined) {
+        await conn.httpTransport.terminateSession().catch(() => {});
+      }
+    } finally {
+      try {
+        await conn.client.close();
+      } finally {
+        this.connections.delete(agentName);
+      }
+    }
   }
 
   /** 断开所有连接 */

@@ -5,14 +5,15 @@ import {
   existsSync,
   mkdirSync,
   mkdtempSync,
+  readdirSync,
   readFileSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
-import { resolve } from "node:path";
+import { delimiter, resolve } from "node:path";
 import { tmpdir } from "node:os";
-import { randomUUID } from "node:crypto";
-import { spawnSync } from "node:child_process";
+import { createHash, randomUUID } from "node:crypto";
+import { spawn, spawnSync, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { createServer } from "node:net";
 
 interface CliResult {
@@ -24,6 +25,25 @@ interface CliResult {
 interface RunRollOptions {
   readonly env?: Readonly<Record<string, string>>;
   readonly input?: string;
+}
+
+interface SpawnedRollProcess {
+  readonly child: ChildProcessWithoutNullStreams;
+  readonly output: {
+    stdout: string;
+    stderr: string;
+  };
+}
+
+interface ChildExitResult {
+  readonly code: number | null;
+  readonly signal: NodeJS.Signals | null;
+}
+
+interface AgentRuntimeSnapshot {
+  readonly raw: string;
+  readonly pid: number;
+  readonly retention: string;
 }
 
 const CURRENT_CORE_VERSION = readCurrentCoreVersion();
@@ -46,6 +66,213 @@ function runRoll(args: readonly string[], cwd: string, options: RunRollOptions =
     status: result.status,
     stdout: result.stdout,
     stderr: result.stderr,
+  };
+}
+
+function spawnRollProcess(
+  args: readonly string[],
+  cwd: string,
+  env: Readonly<Record<string, string>>,
+): SpawnedRollProcess {
+  const cliEntry = resolve(import.meta.dirname, "index.ts");
+  const child = spawn(
+    process.execPath,
+    ["--experimental-strip-types", "--experimental-sqlite", cliEntry, ...args],
+    {
+      cwd,
+      env: { ...process.env, NO_COLOR: "1", ...env },
+      stdio: ["pipe", "pipe", "pipe"],
+    },
+  );
+  const output = { stdout: "", stderr: "" };
+  child.stdout.setEncoding("utf-8");
+  child.stderr.setEncoding("utf-8");
+  child.stdout.on("data", (chunk: string) => {
+    output.stdout += chunk;
+  });
+  child.stderr.on("data", (chunk: string) => {
+    output.stderr += chunk;
+  });
+  child.stdin.on("error", () => {
+    // Cleanup can race with a child that already closed stdin.
+  });
+  return { child, output };
+}
+
+function spawnNodeScriptProcess(scriptPath: string, cwd: string): SpawnedRollProcess {
+  const child = spawn(process.execPath, ["--experimental-strip-types", scriptPath], {
+    cwd,
+    env: { ...process.env, NO_COLOR: "1" },
+    stdio: ["pipe", "pipe", "pipe"],
+  });
+  const output = { stdout: "", stderr: "" };
+  child.stdout.setEncoding("utf-8");
+  child.stderr.setEncoding("utf-8");
+  child.stdout.on("data", (chunk: string) => {
+    output.stdout += chunk;
+  });
+  child.stderr.on("data", (chunk: string) => {
+    output.stderr += chunk;
+  });
+  child.stdin.on("error", () => {
+    // Cleanup can race with a child that already closed stdin.
+  });
+  return { child, output };
+}
+
+function formatSpawnedRollProcess(label: string, process: SpawnedRollProcess): string {
+  return `${label} (PID: ${String(process.child.pid ?? "unavailable")})
+stdout:
+${process.output.stdout || "<empty>"}
+stderr:
+${process.output.stderr || "<empty>"}`;
+}
+
+async function waitForSmokeCondition(
+  description: string,
+  condition: () => boolean,
+  diagnostics: () => string,
+  timeoutMs = 30_000,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (condition()) return;
+    await new Promise<void>((resolve) => {
+      setTimeout(resolve, 100);
+    });
+  }
+  throw new Error(`Timed out waiting for ${description}\n${diagnostics()}`);
+}
+
+async function waitForSpawnedRollExit(
+  process: SpawnedRollProcess,
+  label: string,
+  timeoutMs = 15_000,
+): Promise<ChildExitResult> {
+  if (process.child.exitCode !== null || process.child.signalCode !== null) {
+    return { code: process.child.exitCode, signal: process.child.signalCode };
+  }
+
+  return new Promise<ChildExitResult>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      process.child.off("exit", onExit);
+      process.child.off("error", onError);
+      reject(
+        new Error(
+          `Timed out waiting for ${label} to exit\n${formatSpawnedRollProcess(label, process)}`,
+        ),
+      );
+    }, timeoutMs);
+    const onExit = (code: number | null, signal: NodeJS.Signals | null) => {
+      clearTimeout(timer);
+      process.child.off("error", onError);
+      resolve({ code, signal });
+    };
+    const onError = (error: Error) => {
+      clearTimeout(timer);
+      process.child.off("exit", onExit);
+      reject(
+        new Error(
+          `${label} process error: ${error.message}\n${formatSpawnedRollProcess(label, process)}`,
+        ),
+      );
+    };
+    process.child.once("exit", onExit);
+    process.child.once("error", onError);
+  });
+}
+
+async function exitRollChat(process: SpawnedRollProcess, label: string): Promise<void> {
+  process.child.stdin.write("exit\n");
+  const result = await waitForSpawnedRollExit(process, label);
+  assert.equal(
+    result.code,
+    0,
+    `${label} should exit cleanly (signal: ${String(result.signal)})\n${formatSpawnedRollProcess(label, process)}`,
+  );
+}
+
+async function cleanupSpawnedRollProcess(
+  process: SpawnedRollProcess | undefined,
+  label: string,
+): Promise<void> {
+  if (
+    process === undefined ||
+    process.child.exitCode !== null ||
+    process.child.signalCode !== null
+  ) {
+    return;
+  }
+
+  process.child.stdin.end("exit\n");
+  try {
+    await waitForSpawnedRollExit(process, label, 5_000);
+    return;
+  } catch {
+    process.child.kill("SIGTERM");
+  }
+  try {
+    await waitForSpawnedRollExit(process, label, 5_000);
+  } catch {
+    process.child.kill("SIGKILL");
+    await waitForSpawnedRollExit(process, label, 5_000).catch(() => {});
+  }
+}
+
+function countAgentUsageLeaseFiles(dataDir: string, agentName: string): number {
+  const digest = createHash("sha256").update(agentName).digest("hex");
+  const leaseDir = resolve(dataDir, "pids", ".leases", digest);
+  if (!existsSync(leaseDir)) return 0;
+  return readdirSync(leaseDir).filter((entry) => entry.endsWith(".json")).length;
+}
+
+function readAgentPidFile(dataDir: string, agentName: string): string | undefined {
+  const pidPath = resolve(dataDir, "pids", `${agentName}.pid`);
+  return existsSync(pidPath) ? readFileSync(pidPath, "utf-8").trim() : undefined;
+}
+
+function isProcessAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return error instanceof Error && "code" in error && error.code === "EPERM";
+  }
+}
+
+function forceKillProcess(pid: number): void {
+  try {
+    process.kill(pid, "SIGKILL");
+  } catch (error) {
+    if (!(error instanceof Error && "code" in error && error.code === "ESRCH")) {
+      throw error;
+    }
+  }
+}
+
+function readAgentRuntimeSnapshot(
+  dataDir: string,
+  agentName: string,
+): AgentRuntimeSnapshot | undefined {
+  const runtimePath = resolve(dataDir, "pids", `${agentName}.runtime.json`);
+  if (!existsSync(runtimePath)) return undefined;
+
+  const raw = readFileSync(runtimePath, "utf-8");
+  const parsed: unknown = JSON.parse(raw);
+  if (
+    typeof parsed !== "object" ||
+    parsed === null ||
+    !("pid" in parsed) ||
+    typeof parsed.pid !== "number" ||
+    !("retention" in parsed) ||
+    typeof parsed.retention !== "string"
+  ) {
+    throw new Error(`Invalid Agent runtime sidecar: ${runtimePath}`);
+  }
+  return {
+    raw,
+    pid: parsed.pid,
+    retention: parsed.retention,
   };
 }
 
@@ -175,6 +402,46 @@ process.exit(0);
   chmodSync(npmPath, 0o755);
 }
 
+function createDefaultRegistryBait(workspace: string): {
+  readonly storePath: string;
+  readonly originalStore: string;
+} {
+  const defaultDataDir = resolve(workspace, ".roll-agent/agents");
+  const storePath = resolve(defaultDataDir, "agents.json");
+  const unrelatedAgentPath = resolve(workspace, "unrelated-default-agent");
+  mkdirSync(defaultDataDir, { recursive: true });
+  writeFileSync(
+    storePath,
+    JSON.stringify(
+      {
+        schemaVersion: 2,
+        agents: [
+          {
+            skill: {
+              name: "default-registry-bait",
+              description: "must not be touched through config fallback",
+              metadata: {},
+            },
+            transport: { type: "stdio", command: "node" },
+            runtime: { ownership: "on-demand" },
+            installPath: unrelatedAgentPath,
+            registeredAt: "2026-01-01T00:00:00.000Z",
+            status: "idle",
+            source: { type: "local-path", path: unrelatedAgentPath },
+          },
+        ],
+      },
+      null,
+      2,
+    ),
+    "utf-8",
+  );
+  return {
+    storePath,
+    originalStore: readFileSync(storePath, "utf-8"),
+  };
+}
+
 function createFakeNpmAgentInstaller(
   binDir: string,
   options: {
@@ -183,6 +450,8 @@ function createFakeNpmAgentInstaller(
     readonly latestVersion: string;
     readonly coreVersion: string;
     readonly installLogPath: string;
+    readonly installedAgentName?: string;
+    readonly failInstall?: boolean;
   },
 ): void {
   mkdirSync(binDir, { recursive: true });
@@ -199,6 +468,8 @@ const oldVersion = ${JSON.stringify(options.oldVersion)};
 const latestVersion = ${JSON.stringify(options.latestVersion)};
 const coreVersion = ${JSON.stringify(options.coreVersion)};
 const installLogPath = ${JSON.stringify(options.installLogPath)};
+const installedAgentName = ${JSON.stringify(options.installedAgentName ?? "browser-use-agent")};
+const failInstall = ${JSON.stringify(options.failInstall ?? false)};
 
 function packageRoot(prefix) {
   return path.join(prefix, "node_modules", ...packageName.split("/"));
@@ -226,7 +497,7 @@ function writeInstalledPackage(prefix, version) {
   );
   fs.writeFileSync(
     path.join(root, "SKILL.md"),
-    "---\\nname: browser-use-agent\\ndescription: Browser automation agent\\n---\\n\\nFixture.\\n",
+    "---\\nname: " + installedAgentName + "\\ndescription: Browser automation agent\\n---\\n\\nFixture.\\n",
     "utf-8",
   );
 }
@@ -254,6 +525,12 @@ if (args[0] === "install") {
   }
 
   fs.appendFileSync(installLogPath, packageSpec + "\\n", "utf-8");
+  if (failInstall) {
+    fs.mkdirSync(prefix, { recursive: true });
+    fs.writeFileSync(path.join(prefix, "partial-install.txt"), "partial", "utf-8");
+    process.stderr.write("fixture install failed after a partial write\\n");
+    process.exit(1);
+  }
   const pinnedOldSpec = packageName + "@" + oldVersion;
   const rangedOldSpec = packageName + "@^" + oldVersion;
   const version =
@@ -275,6 +552,7 @@ function createCoreManagedHttpFixtureAgent(
   agentDir: string,
   port: number,
   options: {
+    readonly startupDelayMs?: number;
     readonly shutdownDelayMs?: number;
     readonly createBrokenDistEntry?: boolean;
   } = {},
@@ -284,6 +562,7 @@ function createCoreManagedHttpFixtureAgent(
     import.meta.dirname,
     "../../../../packages/sdk/node_modules/zod/index.js",
   );
+  const startupDelayMs = options.startupDelayMs ?? 0;
   const shutdownDelayMs = options.shutdownDelayMs ?? 0;
 
   mkdirSync(resolve(agentDir, "src"), { recursive: true });
@@ -333,6 +612,12 @@ Provides a single ping tool for lifecycle smoke tests.
     resolve(agentDir, "src/index.ts"),
     `import { defineAgent, defineTool } from ${JSON.stringify(sdkEntry)};
 import { z } from ${JSON.stringify(zodEntry)};
+
+if (${startupDelayMs} > 0) {
+  await new Promise((resolve) => {
+    setTimeout(resolve, ${startupDelayMs});
+  });
+}
 
 if (${shutdownDelayMs} > 0) {
   process.on("SIGTERM", () => {
@@ -1923,6 +2208,290 @@ test("e2e smoke: update resolves installed-package specs consistently", () => {
   }
 });
 
+test("e2e smoke: update recreates a missing installed-package directory", () => {
+  const workspace = mkdtempSync(resolve(tmpdir(), `roll-update-missing-install-${randomUUID()}-`));
+  const fakeBinDir = resolve(workspace, "fake-bin");
+  const dataDir = resolve(workspace, "agents-data");
+  const installDir = resolve(workspace, "missing-installed-agent");
+  const packageName = "@roll-agent/browser-use-agent";
+  const packageRoot = resolve(installDir, "node_modules/@roll-agent/browser-use-agent");
+  const installLogPath = resolve(workspace, "fake-npm-install.log");
+
+  try {
+    createFakeNpmAgentInstaller(fakeBinDir, {
+      packageName,
+      oldVersion: "0.15.0",
+      latestVersion: "0.20.0",
+      coreVersion: CURRENT_CORE_VERSION,
+      installLogPath,
+    });
+    mkdirSync(dataDir, { recursive: true });
+    writeFileSync(
+      resolve(workspace, "roll.config.yaml"),
+      `agents:
+  data-dir: ${JSON.stringify(dataDir)}
+`,
+      "utf-8",
+    );
+    writeFileSync(
+      resolve(dataDir, "agents.json"),
+      JSON.stringify(
+        {
+          schemaVersion: 2,
+          agents: [
+            {
+              skill: {
+                name: "browser-use-agent",
+                description: "Browser automation agent",
+                metadata: {},
+              },
+              transport: { type: "stdio", command: "node" },
+              runtime: { ownership: "on-demand" },
+              installPath: packageRoot,
+              registeredAt: "2026-01-01T00:00:00.000Z",
+              status: "idle",
+              source: {
+                type: "installed-package",
+                packageName,
+                packageSpec: `${packageName}@latest`,
+                installDir,
+                installedVersion: "0.15.0",
+              },
+            },
+          ],
+        },
+        null,
+        2,
+      ),
+      "utf-8",
+    );
+    assert.equal(existsSync(installDir), false);
+
+    const result = runRoll(["update"], workspace, {
+      env: {
+        HOME: workspace,
+        PATH: `${fakeBinDir}:${process.env["PATH"] ?? ""}`,
+      },
+    });
+
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stderr, /browser-use-agent 已重新安装/);
+    assert.equal(readFileSync(installLogPath, "utf-8").trim(), `${packageName}@latest`);
+
+    const manifest = JSON.parse(readFileSync(resolve(packageRoot, "package.json"), "utf-8")) as {
+      readonly version?: unknown;
+    };
+    assert.equal(manifest.version, "0.20.0");
+
+    const stored = JSON.parse(readFileSync(resolve(dataDir, "agents.json"), "utf-8")) as {
+      readonly agents?: ReadonlyArray<{
+        readonly source?: { readonly installedVersion?: unknown };
+      }>;
+    };
+    assert.equal(stored.agents?.[0]?.source?.installedVersion, "0.20.0");
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("e2e smoke: failed update removes a partially recreated install directory", () => {
+  const workspace = mkdtempSync(resolve(tmpdir(), `roll-update-missing-rollback-${randomUUID()}-`));
+  const fakeBinDir = resolve(workspace, "fake-bin");
+  const dataDir = resolve(workspace, "agents-data");
+  const installDir = resolve(workspace, "missing-installed-agent");
+  const packageName = "@roll-agent/browser-use-agent";
+  const packageRoot = resolve(installDir, "node_modules/@roll-agent/browser-use-agent");
+  const installLogPath = resolve(workspace, "fake-npm-install.log");
+
+  try {
+    createFakeNpmAgentInstaller(fakeBinDir, {
+      packageName,
+      oldVersion: "0.15.0",
+      latestVersion: "0.20.0",
+      coreVersion: CURRENT_CORE_VERSION,
+      installLogPath,
+      failInstall: true,
+    });
+    mkdirSync(dataDir, { recursive: true });
+    writeFileSync(
+      resolve(workspace, "roll.config.yaml"),
+      `agents:
+  data-dir: ${JSON.stringify(dataDir)}
+`,
+      "utf-8",
+    );
+    writeFileSync(
+      resolve(dataDir, "agents.json"),
+      JSON.stringify(
+        {
+          schemaVersion: 2,
+          agents: [
+            {
+              skill: {
+                name: "browser-use-agent",
+                description: "Browser automation agent",
+                metadata: {},
+              },
+              transport: { type: "stdio", command: "node" },
+              runtime: { ownership: "on-demand" },
+              installPath: packageRoot,
+              registeredAt: "2026-01-01T00:00:00.000Z",
+              status: "idle",
+              source: {
+                type: "installed-package",
+                packageName,
+                packageSpec: `${packageName}@latest`,
+                installDir,
+                installedVersion: "0.15.0",
+              },
+            },
+          ],
+        },
+        null,
+        2,
+      ),
+      "utf-8",
+    );
+
+    const result = runRoll(["update"], workspace, {
+      env: {
+        HOME: workspace,
+        USERPROFILE: workspace,
+        PATH: `${fakeBinDir}:${process.env["PATH"] ?? ""}`,
+      },
+    });
+
+    assert.equal(result.status, 1, result.stderr);
+    assert.match(result.stderr, /fixture install failed after a partial write/u);
+    assert.equal(existsSync(installDir), false);
+
+    const stored = JSON.parse(readFileSync(resolve(dataDir, "agents.json"), "utf-8")) as {
+      readonly agents?: ReadonlyArray<{
+        readonly skill?: { readonly name?: unknown };
+        readonly source?: { readonly installedVersion?: unknown };
+      }>;
+    };
+    assert.equal(stored.agents?.[0]?.skill?.name, "browser-use-agent");
+    assert.equal(stored.agents?.[0]?.source?.installedVersion, "0.15.0");
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("e2e smoke: installed-package rename is rejected and its directory is rolled back", () => {
+  const workspace = mkdtempSync(resolve(tmpdir(), `roll-update-package-rename-${randomUUID()}-`));
+  const fakeBinDir = resolve(workspace, "fake-bin");
+  const dataDir = resolve(workspace, "agents-data");
+  const installDir = resolve(workspace, "installed-agent");
+  const packageName = "@roll-agent/browser-use-agent";
+  const packageRoot = resolve(installDir, "node_modules/@roll-agent/browser-use-agent");
+  const installLogPath = resolve(workspace, "fake-npm-install.log");
+
+  try {
+    createFakeNpmAgentInstaller(fakeBinDir, {
+      packageName,
+      oldVersion: "0.15.0",
+      latestVersion: "0.20.0",
+      coreVersion: CURRENT_CORE_VERSION,
+      installLogPath,
+      installedAgentName: "renamed-browser-use-agent",
+    });
+    mkdirSync(packageRoot, { recursive: true });
+    mkdirSync(dataDir, { recursive: true });
+    writeFileSync(
+      resolve(workspace, "roll.config.yaml"),
+      `agents:
+  data-dir: ${JSON.stringify(dataDir)}
+`,
+      "utf-8",
+    );
+    writeFileSync(
+      resolve(packageRoot, "package.json"),
+      JSON.stringify({
+        name: packageName,
+        version: "0.15.0",
+        type: "module",
+        rollAgent: {
+          runtime: { ownership: "on-demand", transport: "stdio" },
+          start: { command: "node", args: ["dist/index.js"] },
+        },
+      }),
+      "utf-8",
+    );
+    writeFileSync(
+      resolve(packageRoot, "SKILL.md"),
+      "---\nname: browser-use-agent\ndescription: Browser automation agent\n---\n",
+      "utf-8",
+    );
+    writeFileSync(
+      resolve(dataDir, "agents.json"),
+      JSON.stringify(
+        {
+          schemaVersion: 2,
+          agents: [
+            {
+              skill: {
+                name: "browser-use-agent",
+                description: "Browser automation agent",
+                metadata: {},
+              },
+              transport: { type: "stdio", command: "node" },
+              runtime: { ownership: "on-demand" },
+              installPath: packageRoot,
+              registeredAt: "2026-01-01T00:00:00.000Z",
+              status: "idle",
+              source: {
+                type: "installed-package",
+                packageName,
+                packageSpec: `${packageName}@latest`,
+                installDir,
+                installedVersion: "0.15.0",
+              },
+            },
+          ],
+        },
+        null,
+        2,
+      ),
+      "utf-8",
+    );
+
+    const result = runRoll(["update"], workspace, {
+      env: {
+        HOME: workspace,
+        PATH: `${fakeBinDir}:${process.env["PATH"] ?? ""}`,
+      },
+    });
+
+    assert.equal(result.status, 1, result.stderr);
+    assert.match(
+      result.stderr,
+      /Agent "browser-use-agent" 更新后的名称变为 "renamed-browser-use-agent"/u,
+    );
+    assert.doesNotMatch(result.stderr, /Invalid Agent lifecycle lock handle/u);
+
+    const restoredManifest = JSON.parse(
+      readFileSync(resolve(packageRoot, "package.json"), "utf-8"),
+    ) as { readonly version?: unknown };
+    assert.equal(restoredManifest.version, "0.15.0");
+    assert.match(
+      readFileSync(resolve(packageRoot, "SKILL.md"), "utf-8"),
+      /name: browser-use-agent/u,
+    );
+
+    const stored = JSON.parse(readFileSync(resolve(dataDir, "agents.json"), "utf-8")) as {
+      readonly agents?: ReadonlyArray<{
+        readonly skill?: { readonly name?: unknown };
+        readonly source?: { readonly installedVersion?: unknown };
+      }>;
+    };
+    assert.equal(stored.agents?.[0]?.skill?.name, "browser-use-agent");
+    assert.equal(stored.agents?.[0]?.source?.installedVersion, "0.15.0");
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
 test("e2e smoke: update warns after self-update when config needs migration", () => {
   const workspace = mkdtempSync(resolve(tmpdir(), `roll-update-router-${randomUUID()}-`));
 
@@ -1956,11 +2525,13 @@ test("e2e smoke: update still self-updates when config YAML is invalid", () => {
   try {
     const fakeBinDir = resolve(workspace, "fake-bin");
     createFakeNpm(fakeBinDir, NEXT_PATCH_CORE_VERSION);
+    const defaultRegistry = createDefaultRegistryBait(workspace);
     writeFileSync(resolve(workspace, "roll.config.yaml"), "llm: [\n", "utf-8");
 
     const result = runRoll(["update"], workspace, {
       env: {
         HOME: workspace,
+        USERPROFILE: workspace,
         PATH: `${fakeBinDir}:${process.env["PATH"] ?? ""}`,
       },
     });
@@ -1968,6 +2539,40 @@ test("e2e smoke: update still self-updates when config YAML is invalid", () => {
     assert.match(result.stderr, /本地配置存在问题/);
     assert.match(result.stderr, new RegExp(`roll 已更新到 v${NEXT_PATCH_CORE_VERSION}`));
     assert.match(result.stderr, /请修复配置文件后再继续使用相关命令/);
+    assert.match(result.stderr, /已跳过已注册 Agent 更新/);
+    assert.doesNotMatch(result.stderr, /default-registry-bait/);
+    assert.doesNotMatch(result.stderr, /改用默认 Agent 数据目录/);
+    assert.equal(readFileSync(defaultRegistry.storePath, "utf-8"), defaultRegistry.originalStore);
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("e2e smoke: update --check does not inspect a default registry for invalid YAML", () => {
+  const workspace = mkdtempSync(
+    resolve(tmpdir(), `roll-update-check-invalid-config-${randomUUID()}-`),
+  );
+
+  try {
+    const fakeBinDir = resolve(workspace, "fake-bin");
+    createFakeNpm(fakeBinDir, CURRENT_CORE_VERSION);
+    const defaultRegistry = createDefaultRegistryBait(workspace);
+    writeFileSync(resolve(workspace, "roll.config.yaml"), "llm: [\n", "utf-8");
+
+    const result = runRoll(["update", "--check"], workspace, {
+      env: {
+        HOME: workspace,
+        USERPROFILE: workspace,
+        PATH: `${fakeBinDir}:${process.env["PATH"] ?? ""}`,
+      },
+    });
+
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stderr, /本地配置存在问题/);
+    assert.match(result.stderr, /跳过已注册 Agent 检查/);
+    assert.doesNotMatch(result.stderr, /default-registry-bait/);
+    assert.doesNotMatch(result.stderr, /改用默认 Agent 数据目录/);
+    assert.equal(readFileSync(defaultRegistry.storePath, "utf-8"), defaultRegistry.originalStore);
   } finally {
     rmSync(workspace, { recursive: true, force: true });
   }
@@ -2021,6 +2626,764 @@ test("e2e smoke: agent health --json returns empty array when no agents are regi
     rmSync(workspace, { recursive: true, force: true });
   }
 });
+
+test(
+  "e2e smoke: independent chats share a lease-bound HTTP Agent and unblock update on exit",
+  {
+    timeout: 180_000,
+  },
+  async () => {
+    const workspace = mkdtempSync(resolve(tmpdir(), `roll-chat-leases-${randomUUID()}-`));
+    const agentDir = resolve(workspace, "http-fixture-agent");
+    const dataDir = resolve(workspace, "agents-data");
+    const threadsDir = resolve(workspace, "threads");
+    const fakeBinDir = resolve(workspace, "fake-bin");
+    let firstChat: SpawnedRollProcess | undefined;
+    let secondChat: SpawnedRollProcess | undefined;
+
+    try {
+      const port = await getFreeLocalPort();
+      createCoreManagedHttpFixtureAgent(agentDir, port, { createBrokenDistEntry: true });
+      createFakeNpm(fakeBinDir, CURRENT_CORE_VERSION);
+      writeFileSync(
+        resolve(workspace, "roll.config.yaml"),
+        `llm:
+  default-provider: qwen
+  default-model: qwen3.7-plus
+  providers:
+    qwen:
+      api-key: test-key
+agents:
+  data-dir: ${JSON.stringify(dataDir)}
+runtime:
+  threads-dir: ${JSON.stringify(threadsDir)}
+chat:
+  screen-mode: inline
+`,
+        "utf-8",
+      );
+      const rollEnv = {
+        HOME: workspace,
+        USERPROFILE: workspace,
+        PATH: `${fakeBinDir}${delimiter}${process.env["PATH"] ?? ""}`,
+      };
+
+      const addResult = runRoll(["agent", "add", agentDir], workspace, {
+        env: { ...rollEnv, ROLL_SKIP_INSTALL: "1" },
+      });
+      assert.equal(
+        addResult.status,
+        0,
+        `agent add failed\nstdout:\n${addResult.stdout}\nstderr:\n${addResult.stderr}`,
+      );
+
+      const first = spawnRollProcess(["chat", "--screen-mode", "inline"], workspace, rollEnv);
+      firstChat = first;
+      const second = spawnRollProcess(["chat", "--screen-mode", "inline"], workspace, rollEnv);
+      secondChat = second;
+      const chatDiagnostics = () =>
+        [
+          `lease files: ${String(countAgentUsageLeaseFiles(dataDir, "http-fixture-agent"))}`,
+          `agent PID: ${readAgentPidFile(dataDir, "http-fixture-agent") ?? "<missing>"}`,
+          formatSpawnedRollProcess("first roll chat", first),
+          formatSpawnedRollProcess("second roll chat", second),
+          readHttpFixtureAgentLog(dataDir),
+        ].join("\n\n");
+
+      await waitForSmokeCondition(
+        "both roll chat processes to acquire usage leases",
+        () => {
+          if (
+            first.child.exitCode !== null ||
+            first.child.signalCode !== null ||
+            second.child.exitCode !== null ||
+            second.child.signalCode !== null
+          ) {
+            throw new Error(`roll chat exited before acquiring both leases\n${chatDiagnostics()}`);
+          }
+          return (
+            countAgentUsageLeaseFiles(dataDir, "http-fixture-agent") === 2 &&
+            readAgentPidFile(dataDir, "http-fixture-agent") !== undefined
+          );
+        },
+        chatDiagnostics,
+        45_000,
+      );
+
+      const originalPid = readAgentPidFile(dataDir, "http-fixture-agent");
+      assert.ok(originalPid, chatDiagnostics());
+
+      await exitRollChat(first, "first roll chat");
+      await waitForSmokeCondition(
+        "the first chat lease to be released",
+        () => countAgentUsageLeaseFiles(dataDir, "http-fixture-agent") === 1,
+        chatDiagnostics,
+      );
+      assert.equal(readAgentPidFile(dataDir, "http-fixture-agent"), originalPid, chatDiagnostics());
+
+      const pingResult = runRoll(["run", "http-fixture-agent", "ping"], workspace, {
+        env: rollEnv,
+      });
+      assert.equal(
+        pingResult.status,
+        0,
+        `second chat should keep the Agent usable\nstdout:\n${pingResult.stdout}\nstderr:\n${pingResult.stderr}\n${chatDiagnostics()}`,
+      );
+      assert.match(pingResult.stdout, /"ok"\s*:\s*true/u);
+      assert.equal(readAgentPidFile(dataDir, "http-fixture-agent"), originalPid, chatDiagnostics());
+
+      writeFileSync(
+        resolve(agentDir, "SKILL.md"),
+        `---
+name: http-fixture-agent
+description: Updated while chat lease is active
+---
+
+Provides a single ping tool for lifecycle smoke tests after update.
+`,
+        "utf-8",
+      );
+      const blockedUpdate = runRoll(["update"], workspace, { env: rollEnv });
+      assert.equal(
+        blockedUpdate.status,
+        1,
+        `roll update should fail while a chat lease is active\nstdout:\n${blockedUpdate.stdout}\nstderr:\n${blockedUpdate.stderr}\n${chatDiagnostics()}`,
+      );
+      assert.match(blockedUpdate.stderr, /尚未修改软件包或注册数据/u);
+      assert.match(blockedUpdate.stderr, /正被其他 Roll 进程使用|chat/u);
+      assert.equal(readAgentPidFile(dataDir, "http-fixture-agent"), originalPid, chatDiagnostics());
+
+      const listWhileBlocked = runRoll(["agent", "list", "--json"], workspace, { env: rollEnv });
+      assert.equal(listWhileBlocked.status, 0, listWhileBlocked.stderr);
+      const agentsWhileBlocked = JSON.parse(listWhileBlocked.stdout) as ReadonlyArray<{
+        readonly skill: { readonly name: string; readonly description: string };
+      }>;
+      const agentWhileBlocked = agentsWhileBlocked.find(
+        (agent) => agent.skill.name === "http-fixture-agent",
+      );
+      assert.ok(agentWhileBlocked);
+      assert.equal(agentWhileBlocked.skill.description, "Core managed HTTP fixture agent");
+
+      await exitRollChat(second, "second roll chat");
+      await waitForSmokeCondition(
+        "the final chat lease and lease-bound Agent PID to be removed",
+        () =>
+          countAgentUsageLeaseFiles(dataDir, "http-fixture-agent") === 0 &&
+          readAgentPidFile(dataDir, "http-fixture-agent") === undefined,
+        chatDiagnostics,
+      );
+
+      const successfulUpdate = runRoll(["update"], workspace, { env: rollEnv });
+      assert.equal(
+        successfulUpdate.status,
+        0,
+        `roll update should succeed after all chats exit\nstdout:\n${successfulUpdate.stdout}\nstderr:\n${successfulUpdate.stderr}\n${chatDiagnostics()}`,
+      );
+      assert.match(successfulUpdate.stderr, /1 个 Agent 已更新|更新完成/u);
+      assert.equal(countAgentUsageLeaseFiles(dataDir, "http-fixture-agent"), 0);
+      assert.equal(readAgentPidFile(dataDir, "http-fixture-agent"), undefined);
+
+      const listAfterUpdate = runRoll(["agent", "list", "--json"], workspace, { env: rollEnv });
+      assert.equal(listAfterUpdate.status, 0, listAfterUpdate.stderr);
+      const agentsAfterUpdate = JSON.parse(listAfterUpdate.stdout) as ReadonlyArray<{
+        readonly skill: { readonly name: string; readonly description: string };
+      }>;
+      const agentAfterUpdate = agentsAfterUpdate.find(
+        (agent) => agent.skill.name === "http-fixture-agent",
+      );
+      assert.ok(agentAfterUpdate);
+      assert.equal(agentAfterUpdate.skill.description, "Updated while chat lease is active");
+    } finally {
+      await cleanupSpawnedRollProcess(firstChat, "first roll chat");
+      await cleanupSpawnedRollProcess(secondChat, "second roll chat");
+      runRoll(["agent", "stop", "http-fixture-agent"], workspace, {
+        env: {
+          HOME: workspace,
+          USERPROFILE: workspace,
+          PATH: `${fakeBinDir}${delimiter}${process.env["PATH"] ?? ""}`,
+        },
+      });
+      rmSync(workspace, { recursive: true, force: true });
+    }
+  },
+);
+
+test(
+  "e2e smoke: failed agent start keeps a runtime leased by a concurrent chat",
+  {
+    timeout: 180_000,
+  },
+  async () => {
+    const workspace = mkdtempSync(resolve(tmpdir(), `roll-start-chat-race-${randomUUID()}-`));
+    const agentDir = resolve(workspace, "http-fixture-agent");
+    const dataDir = resolve(workspace, "agents-data");
+    const threadsDir = resolve(workspace, "threads");
+    let startProcess: SpawnedRollProcess | undefined;
+    let chat: SpawnedRollProcess | undefined;
+    let agentPid: number | undefined;
+
+    try {
+      const port = await getFreeLocalPort();
+      createCoreManagedHttpFixtureAgent(agentDir, port, {
+        startupDelayMs: 30_000,
+        createBrokenDistEntry: true,
+      });
+      writeFileSync(
+        resolve(workspace, "roll.config.yaml"),
+        `llm:
+  default-provider: qwen
+  default-model: qwen3.7-plus
+  providers:
+    qwen:
+      api-key: test-key
+agents:
+  data-dir: ${JSON.stringify(dataDir)}
+runtime:
+  threads-dir: ${JSON.stringify(threadsDir)}
+chat:
+  screen-mode: inline
+`,
+        "utf-8",
+      );
+      const rollEnv = {
+        HOME: workspace,
+        USERPROFILE: workspace,
+      };
+
+      const addResult = runRoll(["agent", "add", agentDir], workspace, {
+        env: { ...rollEnv, ROLL_SKIP_INSTALL: "1" },
+      });
+      assert.equal(
+        addResult.status,
+        0,
+        `agent add failed\nstdout:\n${addResult.stdout}\nstderr:\n${addResult.stderr}`,
+      );
+
+      const spawnedStart = spawnRollProcess(
+        ["agent", "start", "http-fixture-agent"],
+        workspace,
+        rollEnv,
+      );
+      startProcess = spawnedStart;
+      const diagnostics = () =>
+        [
+          `lease files: ${String(countAgentUsageLeaseFiles(dataDir, "http-fixture-agent"))}`,
+          `agent PID: ${readAgentPidFile(dataDir, "http-fixture-agent") ?? "<missing>"}`,
+          formatSpawnedRollProcess("roll agent start", spawnedStart),
+          ...(chat === undefined ? [] : [formatSpawnedRollProcess("roll chat", chat)]),
+          readHttpFixtureAgentLog(dataDir),
+        ].join("\n\n");
+
+      await waitForSmokeCondition(
+        "roll agent start to spawn its persistent runtime",
+        () => {
+          if (spawnedStart.child.exitCode !== null || spawnedStart.child.signalCode !== null) {
+            throw new Error(`roll agent start exited before spawning\n${diagnostics()}`);
+          }
+          return readAgentPidFile(dataDir, "http-fixture-agent") !== undefined;
+        },
+        diagnostics,
+      );
+
+      const agentPidText = readAgentPidFile(dataDir, "http-fixture-agent");
+      assert.ok(agentPidText, diagnostics());
+      agentPid = Number(agentPidText);
+      assert.ok(Number.isSafeInteger(agentPid) && agentPid > 0, diagnostics());
+
+      await new Promise<void>((resolve) => {
+        setTimeout(resolve, 5_000);
+      });
+
+      const spawnedChat = spawnRollProcess(["chat", "--screen-mode", "inline"], workspace, rollEnv);
+      chat = spawnedChat;
+      await waitForSmokeCondition(
+        "roll chat to lease the still-starting runtime",
+        () => {
+          if (spawnedStart.child.exitCode !== null || spawnedStart.child.signalCode !== null) {
+            throw new Error(
+              `roll agent start exited before chat acquired its lease\n${diagnostics()}`,
+            );
+          }
+          if (spawnedChat.child.exitCode !== null || spawnedChat.child.signalCode !== null) {
+            throw new Error(`roll chat exited before acquiring its lease\n${diagnostics()}`);
+          }
+          return countAgentUsageLeaseFiles(dataDir, "http-fixture-agent") === 1;
+        },
+        diagnostics,
+      );
+
+      const startExit = await waitForSpawnedRollExit(spawnedStart, "roll agent start", 30_000);
+      assert.equal(startExit.code, 1, diagnostics());
+      assert.match(spawnedStart.output.stderr, /did not become ready within 15000ms/u);
+      assert.match(
+        spawnedStart.output.stderr,
+        /启动探活失败，但 Agent 正被其他 Roll 使用，因此未停止/u,
+      );
+      assert.equal(countAgentUsageLeaseFiles(dataDir, "http-fixture-agent"), 1, diagnostics());
+      assert.equal(readAgentPidFile(dataDir, "http-fixture-agent"), agentPidText, diagnostics());
+      assert.equal(isProcessAlive(agentPid), true, diagnostics());
+
+      await cleanupSpawnedRollProcess(spawnedChat, "roll chat");
+      const stopResult = runRoll(["agent", "stop", "http-fixture-agent"], workspace, {
+        env: rollEnv,
+      });
+      assert.equal(
+        stopResult.status,
+        0,
+        `agent stop failed after chat exit\nstdout:\n${stopResult.stdout}\nstderr:\n${stopResult.stderr}\n${diagnostics()}`,
+      );
+      await waitForSmokeCondition(
+        "the retained runtime and lease metadata to be removed",
+        () =>
+          agentPid !== undefined &&
+          !isProcessAlive(agentPid) &&
+          readAgentPidFile(dataDir, "http-fixture-agent") === undefined &&
+          countAgentUsageLeaseFiles(dataDir, "http-fixture-agent") === 0,
+        diagnostics,
+      );
+    } finally {
+      await cleanupSpawnedRollProcess(chat, "roll chat");
+      await cleanupSpawnedRollProcess(startProcess, "roll agent start");
+      runRoll(["agent", "stop", "http-fixture-agent"], workspace, {
+        env: {
+          HOME: workspace,
+          USERPROFILE: workspace,
+        },
+      });
+      if (agentPid !== undefined && isProcessAlive(agentPid)) {
+        forceKillProcess(agentPid);
+      }
+      rmSync(workspace, { recursive: true, force: true });
+    }
+  },
+);
+
+test(
+  "e2e smoke: failed agent start cleans its runtime after health writes error",
+  {
+    timeout: 120_000,
+  },
+  async () => {
+    const workspace = mkdtempSync(resolve(tmpdir(), `roll-start-health-race-${randomUUID()}-`));
+    const agentDir = resolve(workspace, "http-fixture-agent");
+    const dataDir = resolve(workspace, "agents-data");
+    let startProcess: SpawnedRollProcess | undefined;
+    let agentPid: number | undefined;
+
+    try {
+      const port = await getFreeLocalPort();
+      createCoreManagedHttpFixtureAgent(agentDir, port, {
+        startupDelayMs: 30_000,
+        createBrokenDistEntry: true,
+      });
+      writeFileSync(resolve(workspace, "roll.config.yaml"), buildConfigYaml(dataDir), "utf-8");
+      const rollEnv = {
+        HOME: workspace,
+        USERPROFILE: workspace,
+      };
+
+      const addResult = runRoll(["agent", "add", agentDir], workspace, {
+        env: { ...rollEnv, ROLL_SKIP_INSTALL: "1" },
+      });
+      assert.equal(
+        addResult.status,
+        0,
+        `agent add failed\nstdout:\n${addResult.stdout}\nstderr:\n${addResult.stderr}`,
+      );
+
+      const spawnedStart = spawnRollProcess(
+        ["agent", "start", "http-fixture-agent"],
+        workspace,
+        rollEnv,
+      );
+      startProcess = spawnedStart;
+      const diagnostics = () =>
+        [
+          `agent PID: ${readAgentPidFile(dataDir, "http-fixture-agent") ?? "<missing>"}`,
+          formatSpawnedRollProcess("roll agent start", spawnedStart),
+          readHttpFixtureAgentLog(dataDir),
+        ].join("\n\n");
+
+      await waitForSmokeCondition(
+        "roll agent start to spawn its persistent runtime",
+        () => {
+          if (spawnedStart.child.exitCode !== null || spawnedStart.child.signalCode !== null) {
+            throw new Error(`roll agent start exited before spawning\n${diagnostics()}`);
+          }
+          return readAgentPidFile(dataDir, "http-fixture-agent") !== undefined;
+        },
+        diagnostics,
+      );
+
+      const agentPidText = readAgentPidFile(dataDir, "http-fixture-agent");
+      assert.ok(agentPidText, diagnostics());
+      agentPid = Number(agentPidText);
+      assert.ok(Number.isSafeInteger(agentPid) && agentPid > 0, diagnostics());
+
+      const healthResult = runRoll(["agent", "health", "--json"], workspace, {
+        env: rollEnv,
+      });
+      assert.equal(
+        healthResult.status,
+        1,
+        `health should mark the still-starting Agent as error\nstdout:\n${healthResult.stdout}\nstderr:\n${healthResult.stderr}\n${diagnostics()}`,
+      );
+      const health = JSON.parse(healthResult.stdout) as ReadonlyArray<{
+        readonly agentName: string;
+        readonly healthy: boolean;
+        readonly message: string;
+      }>;
+      const fixtureHealth = health.find((entry) => entry.agentName === "http-fixture-agent");
+      assert.ok(fixtureHealth);
+      assert.equal(fixtureHealth.healthy, false);
+      assert.match(fixtureHealth.message, /进程存在但不可连接/u);
+      assert.equal(spawnedStart.child.exitCode, null, diagnostics());
+
+      const startExit = await waitForSpawnedRollExit(spawnedStart, "roll agent start", 25_000);
+      assert.equal(startExit.code, 1, diagnostics());
+      assert.match(spawnedStart.output.stderr, /did not become ready within 15000ms/u);
+      await waitForSmokeCondition(
+        "the failed start runtime to be stopped after the health status update",
+        () =>
+          agentPid !== undefined &&
+          !isProcessAlive(agentPid) &&
+          readAgentPidFile(dataDir, "http-fixture-agent") === undefined,
+        diagnostics,
+      );
+      assert.equal(countAgentUsageLeaseFiles(dataDir, "http-fixture-agent"), 0, diagnostics());
+    } finally {
+      await cleanupSpawnedRollProcess(startProcess, "roll agent start");
+      runRoll(["agent", "stop", "http-fixture-agent"], workspace, {
+        env: {
+          HOME: workspace,
+          USERPROFILE: workspace,
+        },
+      });
+      if (agentPid !== undefined && isProcessAlive(agentPid)) {
+        forceKillProcess(agentPid);
+      }
+      rmSync(workspace, { recursive: true, force: true });
+    }
+  },
+);
+
+test(
+  "e2e smoke: failed agent start cleans its runtime when registry finalization times out",
+  {
+    timeout: 180_000,
+  },
+  async () => {
+    const workspace = mkdtempSync(
+      resolve(tmpdir(), `roll-start-registry-timeout-${randomUUID()}-`),
+    );
+    const agentDir = resolve(workspace, "http-fixture-agent");
+    const dataDir = resolve(workspace, "agents-data");
+    const lockMarkerPath = resolve(workspace, "registry-lock-held");
+    const lockHolderPath = resolve(workspace, "hold-registry-lock.mjs");
+    let startProcess: SpawnedRollProcess | undefined;
+    let lockHolder: SpawnedRollProcess | undefined;
+    let agentPid: number | undefined;
+
+    try {
+      const port = await getFreeLocalPort();
+      createCoreManagedHttpFixtureAgent(agentDir, port, {
+        startupDelayMs: 60_000,
+        createBrokenDistEntry: true,
+      });
+      writeFileSync(resolve(workspace, "roll.config.yaml"), buildConfigYaml(dataDir), "utf-8");
+      const rollEnv = {
+        HOME: workspace,
+        USERPROFILE: workspace,
+      };
+
+      const addResult = runRoll(["agent", "add", agentDir], workspace, {
+        env: { ...rollEnv, ROLL_SKIP_INSTALL: "1" },
+      });
+      assert.equal(
+        addResult.status,
+        0,
+        `agent add failed\nstdout:\n${addResult.stdout}\nstderr:\n${addResult.stderr}`,
+      );
+
+      const registryLockModule = resolve(import.meta.dirname, "../registry/agent-registry-lock.ts");
+      writeFileSync(
+        lockHolderPath,
+        `import { writeFileSync } from "node:fs";
+import { acquireAgentRegistryLockAsync } from ${JSON.stringify(registryLockModule)};
+
+const lock = await acquireAgentRegistryLockAsync(${JSON.stringify(dataDir)});
+writeFileSync(${JSON.stringify(lockMarkerPath)}, "locked", "utf-8");
+const release = () => {
+  lock.release();
+  process.exit(0);
+};
+process.stdin.once("data", release);
+process.once("SIGTERM", release);
+setTimeout(release, 45_000);
+await new Promise(() => {});
+`,
+        "utf-8",
+      );
+
+      const spawnedStart = spawnRollProcess(
+        ["agent", "start", "http-fixture-agent"],
+        workspace,
+        rollEnv,
+      );
+      startProcess = spawnedStart;
+      const diagnostics = () =>
+        [
+          `registry lock marker: ${existsSync(lockMarkerPath) ? "present" : "missing"}`,
+          `agent PID: ${readAgentPidFile(dataDir, "http-fixture-agent") ?? "<missing>"}`,
+          formatSpawnedRollProcess("roll agent start", spawnedStart),
+          ...(lockHolder === undefined
+            ? []
+            : [formatSpawnedRollProcess("registry lock holder", lockHolder)]),
+          readHttpFixtureAgentLog(dataDir),
+        ].join("\n\n");
+
+      await waitForSmokeCondition(
+        "roll agent start to spawn its persistent runtime",
+        () => {
+          if (spawnedStart.child.exitCode !== null || spawnedStart.child.signalCode !== null) {
+            throw new Error(`roll agent start exited before spawning\n${diagnostics()}`);
+          }
+          return readAgentPidFile(dataDir, "http-fixture-agent") !== undefined;
+        },
+        diagnostics,
+      );
+
+      const agentPidText = readAgentPidFile(dataDir, "http-fixture-agent");
+      assert.ok(agentPidText, diagnostics());
+      agentPid = Number(agentPidText);
+      assert.ok(Number.isSafeInteger(agentPid) && agentPid > 0, diagnostics());
+
+      const spawnedLockHolder = spawnNodeScriptProcess(lockHolderPath, workspace);
+      lockHolder = spawnedLockHolder;
+      await waitForSmokeCondition(
+        "the independent process to hold the registry lock",
+        () => {
+          if (
+            spawnedLockHolder.child.exitCode !== null ||
+            spawnedLockHolder.child.signalCode !== null
+          ) {
+            throw new Error(`registry lock holder exited early\n${diagnostics()}`);
+          }
+          return existsSync(lockMarkerPath);
+        },
+        diagnostics,
+      );
+
+      const startExit = await waitForSpawnedRollExit(spawnedStart, "roll agent start", 45_000);
+      assert.equal(startExit.code, 1, diagnostics());
+      assert.match(spawnedStart.output.stderr, /did not become ready within 15000ms/u);
+      assert.match(spawnedStart.output.stderr, /已按 runtime identity 安全回收新进程/u);
+      assert.match(spawnedStart.output.stderr, /Agent 注册表正在被另一项操作修改/u);
+      await waitForSmokeCondition(
+        "the failed start runtime to be stopped despite the registry lock",
+        () =>
+          agentPid !== undefined &&
+          !isProcessAlive(agentPid) &&
+          readAgentPidFile(dataDir, "http-fixture-agent") === undefined,
+        diagnostics,
+      );
+      assert.equal(countAgentUsageLeaseFiles(dataDir, "http-fixture-agent"), 0, diagnostics());
+    } finally {
+      await cleanupSpawnedRollProcess(startProcess, "roll agent start");
+      await cleanupSpawnedRollProcess(lockHolder, "registry lock holder");
+      runRoll(["agent", "stop", "http-fixture-agent"], workspace, {
+        env: {
+          HOME: workspace,
+          USERPROFILE: workspace,
+        },
+      });
+      if (agentPid !== undefined && isProcessAlive(agentPid)) {
+        forceKillProcess(agentPid);
+      }
+      rmSync(workspace, { recursive: true, force: true });
+    }
+  },
+);
+
+test(
+  "e2e smoke: an active chat lease blocks replacing a crashed lease-bound HTTP Agent",
+  {
+    timeout: 180_000,
+  },
+  async () => {
+    const workspace = mkdtempSync(resolve(tmpdir(), `roll-chat-crashed-agent-${randomUUID()}-`));
+    const agentDir = resolve(workspace, "http-fixture-agent");
+    const dataDir = resolve(workspace, "agents-data");
+    const threadsDir = resolve(workspace, "threads");
+    const runtimePath = resolve(dataDir, "pids", "http-fixture-agent.runtime.json");
+    let chat: SpawnedRollProcess | undefined;
+    let persistentPid: number | undefined;
+
+    try {
+      const port = await getFreeLocalPort();
+      createCoreManagedHttpFixtureAgent(agentDir, port, { createBrokenDistEntry: true });
+      writeFileSync(
+        resolve(workspace, "roll.config.yaml"),
+        `llm:
+  default-provider: qwen
+  default-model: qwen3.7-plus
+  providers:
+    qwen:
+      api-key: test-key
+agents:
+  data-dir: ${JSON.stringify(dataDir)}
+runtime:
+  threads-dir: ${JSON.stringify(threadsDir)}
+chat:
+  screen-mode: inline
+`,
+        "utf-8",
+      );
+      const rollEnv = {
+        HOME: workspace,
+        USERPROFILE: workspace,
+      };
+
+      const addResult = runRoll(["agent", "add", agentDir], workspace, {
+        env: { ...rollEnv, ROLL_SKIP_INSTALL: "1" },
+      });
+      assert.equal(
+        addResult.status,
+        0,
+        `agent add failed\nstdout:\n${addResult.stdout}\nstderr:\n${addResult.stderr}`,
+      );
+
+      const spawnedChat = spawnRollProcess(["chat", "--screen-mode", "inline"], workspace, rollEnv);
+      chat = spawnedChat;
+      const diagnostics = () =>
+        [
+          `lease files: ${String(countAgentUsageLeaseFiles(dataDir, "http-fixture-agent"))}`,
+          `agent PID: ${readAgentPidFile(dataDir, "http-fixture-agent") ?? "<missing>"}`,
+          formatSpawnedRollProcess("roll chat", spawnedChat),
+          readHttpFixtureAgentLog(dataDir),
+        ].join("\n\n");
+
+      await waitForSmokeCondition(
+        "roll chat to acquire a usage lease and start the HTTP Agent",
+        () => {
+          if (spawnedChat.child.exitCode !== null || spawnedChat.child.signalCode !== null) {
+            throw new Error(`roll chat exited before acquiring its lease\n${diagnostics()}`);
+          }
+          return (
+            countAgentUsageLeaseFiles(dataDir, "http-fixture-agent") === 1 &&
+            readAgentPidFile(dataDir, "http-fixture-agent") !== undefined
+          );
+        },
+        diagnostics,
+        45_000,
+      );
+
+      const leaseBoundPidText = readAgentPidFile(dataDir, "http-fixture-agent");
+      assert.ok(leaseBoundPidText, diagnostics());
+      const leaseBoundPid = Number(leaseBoundPidText);
+      assert.ok(Number.isSafeInteger(leaseBoundPid) && leaseBoundPid > 0, diagnostics());
+      const leaseBoundRuntime = readAgentRuntimeSnapshot(dataDir, "http-fixture-agent");
+      assert.ok(leaseBoundRuntime, diagnostics());
+      assert.equal(leaseBoundRuntime.pid, leaseBoundPid, diagnostics());
+      assert.equal(leaseBoundRuntime.retention, "lease-bound", diagnostics());
+
+      forceKillProcess(leaseBoundPid);
+      await waitForSmokeCondition(
+        "the lease-bound HTTP Agent process to exit while chat remains alive",
+        () => {
+          if (spawnedChat.child.exitCode !== null || spawnedChat.child.signalCode !== null) {
+            throw new Error(`roll chat exited after its Agent crashed\n${diagnostics()}`);
+          }
+          return (
+            !isProcessAlive(leaseBoundPid) &&
+            countAgentUsageLeaseFiles(dataDir, "http-fixture-agent") === 1
+          );
+        },
+        diagnostics,
+      );
+
+      const blockedStart = runRoll(["agent", "start", "http-fixture-agent"], workspace, {
+        env: rollEnv,
+      });
+      assert.equal(
+        blockedStart.status,
+        1,
+        `agent start should reject an active lease whose runtime crashed\nstdout:\n${blockedStart.stdout}\nstderr:\n${blockedStart.stderr}\n${diagnostics()}`,
+      );
+      assert.match(blockedStart.stderr, /正被其他 Roll 进程使用|活动 chat/u);
+      assert.equal(countAgentUsageLeaseFiles(dataDir, "http-fixture-agent"), 1, diagnostics());
+      assert.equal(
+        readAgentPidFile(dataDir, "http-fixture-agent"),
+        leaseBoundPidText,
+        diagnostics(),
+      );
+      assert.equal(
+        readAgentRuntimeSnapshot(dataDir, "http-fixture-agent")?.raw,
+        leaseBoundRuntime.raw,
+        diagnostics(),
+      );
+      assert.equal(isProcessAlive(leaseBoundPid), false, diagnostics());
+
+      await exitRollChat(spawnedChat, "roll chat");
+      await waitForSmokeCondition(
+        "the crashed Agent usage lease to be released",
+        () => countAgentUsageLeaseFiles(dataDir, "http-fixture-agent") === 0,
+        diagnostics,
+      );
+
+      const persistentStart = runRoll(["agent", "start", "http-fixture-agent"], workspace, {
+        env: rollEnv,
+      });
+      assert.equal(
+        persistentStart.status,
+        0,
+        `persistent agent start failed\nstdout:\n${persistentStart.stdout}\nstderr:\n${persistentStart.stderr}\n${diagnostics()}`,
+      );
+      assert.match(persistentStart.stderr, /已启动/u);
+
+      const persistentPidText = readAgentPidFile(dataDir, "http-fixture-agent");
+      assert.ok(persistentPidText, diagnostics());
+      persistentPid = Number(persistentPidText);
+      assert.ok(Number.isSafeInteger(persistentPid) && persistentPid > 0, diagnostics());
+      assert.equal(isProcessAlive(persistentPid), true, diagnostics());
+      const persistentRuntime = readAgentRuntimeSnapshot(dataDir, "http-fixture-agent");
+      assert.ok(persistentRuntime, diagnostics());
+      assert.equal(persistentRuntime.pid, persistentPid);
+      assert.equal(persistentRuntime.retention, "persistent");
+
+      const stopResult = runRoll(["agent", "stop", "http-fixture-agent"], workspace, {
+        env: rollEnv,
+      });
+      assert.equal(
+        stopResult.status,
+        0,
+        `agent stop failed\nstdout:\n${stopResult.stdout}\nstderr:\n${stopResult.stderr}\n${diagnostics()}`,
+      );
+      assert.match(stopResult.stderr, /已停止/u);
+      await waitForSmokeCondition(
+        "the persistent HTTP Agent to stop and clear runtime metadata",
+        () =>
+          persistentPid !== undefined &&
+          !isProcessAlive(persistentPid) &&
+          readAgentPidFile(dataDir, "http-fixture-agent") === undefined &&
+          !existsSync(runtimePath),
+        diagnostics,
+      );
+    } finally {
+      await cleanupSpawnedRollProcess(chat, "roll chat");
+      runRoll(["agent", "stop", "http-fixture-agent"], workspace, {
+        env: {
+          HOME: workspace,
+          USERPROFILE: workspace,
+        },
+      });
+      if (persistentPid !== undefined && isProcessAlive(persistentPid)) {
+        forceKillProcess(persistentPid);
+      }
+      rmSync(workspace, { recursive: true, force: true });
+    }
+  },
+);
 
 test(
   "e2e smoke: core-managed http agent can start, report health, and stop",
@@ -2215,6 +3578,82 @@ Provides a single ping tool for lifecycle smoke tests after update.
       const updatedEntry = health.find((entry) => entry.agentName === "http-fixture-agent");
       assert.ok(updatedEntry);
       assert.equal(updatedEntry.healthy, true);
+    } finally {
+      runRoll(["agent", "stop", "http-fixture-agent"], workspace);
+      rmSync(workspace, { recursive: true, force: true });
+    }
+  },
+);
+
+test(
+  "e2e smoke: update rejects a local Agent rename and keeps the old runtime stopped",
+  {
+    timeout: 120_000,
+  },
+  async () => {
+    const workspace = mkdtempSync(resolve(tmpdir(), `roll-http-update-rename-${randomUUID()}-`));
+
+    try {
+      const agentDir = resolve(workspace, "http-fixture-agent");
+      const dataDir = resolve(workspace, "agents-data");
+      const port = await getFreeLocalPort();
+
+      createCoreManagedHttpFixtureAgent(agentDir, port, { createBrokenDistEntry: true });
+      writeFileSync(resolve(workspace, "roll.config.yaml"), buildConfigYaml(dataDir), "utf-8");
+
+      const addResult = runRoll(["agent", "add", agentDir], workspace, {
+        env: { ROLL_SKIP_INSTALL: "1" },
+      });
+      assert.equal(addResult.status, 0, addResult.stderr);
+
+      const startResult = runRoll(["agent", "start", "http-fixture-agent"], workspace);
+      assert.equal(startResult.status, 0, formatHttpFixtureStartFailure(startResult, dataDir));
+
+      writeFileSync(
+        resolve(agentDir, "SKILL.md"),
+        `---
+name: renamed-http-fixture-agent
+description: Renamed core managed HTTP fixture agent
+---
+
+Update must reject this in-place rename.
+`,
+        "utf-8",
+      );
+
+      const updateResult = runRoll(["update"], workspace);
+      assert.equal(
+        updateResult.status,
+        1,
+        `roll update should reject an Agent rename\nstdout:\n${updateResult.stdout}\nstderr:\n${updateResult.stderr}`,
+      );
+      assert.match(
+        updateResult.stderr,
+        /Agent "http-fixture-agent" 更新后的名称变为 "renamed-http-fixture-agent"/u,
+      );
+      assert.match(updateResult.stderr, /未自动恢复常驻进程/u);
+      assert.doesNotMatch(updateResult.stderr, /Invalid Agent lifecycle lock handle/u);
+
+      const listResult = runRoll(["agent", "list", "--json"], workspace);
+      assert.equal(listResult.status, 0, listResult.stderr);
+      const agents = JSON.parse(listResult.stdout) as ReadonlyArray<{
+        readonly skill: { readonly name: string };
+      }>;
+      assert.deepEqual(
+        agents.map((agent) => agent.skill.name),
+        ["http-fixture-agent"],
+      );
+
+      const healthResult = runRoll(["agent", "health", "--json"], workspace);
+      assert.equal(healthResult.status, 1, healthResult.stderr);
+      const health = JSON.parse(healthResult.stdout) as ReadonlyArray<{
+        readonly agentName: string;
+        readonly healthy: boolean;
+      }>;
+      const oldEntry = health.find((entry) => entry.agentName === "http-fixture-agent");
+      assert.ok(oldEntry);
+      assert.equal(oldEntry.healthy, false);
+      assert.equal(existsSync(resolve(dataDir, "pids", "http-fixture-agent.pid")), false);
     } finally {
       runRoll(["agent", "stop", "http-fixture-agent"], workspace);
       rmSync(workspace, { recursive: true, force: true });

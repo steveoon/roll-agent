@@ -4,7 +4,7 @@ import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { randomUUID } from "node:crypto";
-import { AgentStore } from "./store.ts";
+import { AgentStore, readAgentStoreEntryCount } from "./store.ts";
 import { createDefaultRuntimeForTransport } from "../types/agent.ts";
 import type { RegisteredAgent } from "../types/agent.ts";
 
@@ -46,6 +46,32 @@ describe("AgentStore", () => {
   it("should return empty list when no agents registered", () => {
     const agents = store.list();
     assert.deepEqual(agents, []);
+  });
+
+  it("should count both current and legacy raw store entries", () => {
+    assert.equal(readAgentStoreEntryCount(tmpDir), 0);
+
+    writeFileSync(
+      resolve(tmpDir, "agents.json"),
+      JSON.stringify({ schemaVersion: 3, agents: [{ name: "a" }, { name: "b" }] }),
+      "utf-8",
+    );
+    assert.equal(readAgentStoreEntryCount(tmpDir), 2);
+
+    writeFileSync(resolve(tmpDir, "agents.json"), JSON.stringify([{ name: "legacy" }]), "utf-8");
+    assert.equal(readAgentStoreEntryCount(tmpDir), 1);
+  });
+
+  it("should reject an unreadable or structurally invalid store when counting entries", () => {
+    writeFileSync(resolve(tmpDir, "agents.json"), "{invalid", "utf-8");
+    assert.throws(() => readAgentStoreEntryCount(tmpDir));
+
+    writeFileSync(
+      resolve(tmpDir, "agents.json"),
+      JSON.stringify({ schemaVersion: 3, agents: "not-an-array" }),
+      "utf-8",
+    );
+    assert.throws(() => readAgentStoreEntryCount(tmpDir), /注册表格式无效/u);
   });
 
   it("should add and list an agent", () => {

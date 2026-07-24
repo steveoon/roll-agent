@@ -16,18 +16,27 @@ import { readJsonFile } from "./json-file.ts";
 import {
   isProcessStartToken,
   readProcessStartToken,
+  verifyProcessStartToken,
   type ProcessStartToken,
 } from "./process-identity.ts";
 import { resolveDevSpawnSpec } from "./dev-spawn.ts";
 import { inferAgentSourceType } from "./source.ts";
 import type { RegisteredAgent } from "../types/agent.ts";
 
-const RUNTIME_SIDECAR_SCHEMA_VERSION = 2 as const;
+const LEGACY_RUNTIME_SIDECAR_SCHEMA_VERSION = 2 as const;
+const RUNTIME_SIDECAR_SCHEMA_VERSION = 3 as const;
 const UNKNOWN_CORE_VERSION = "unknown";
 const DEFAULT_READY_STARTUP_TIMEOUT_MS = 15_000;
 const DEFAULT_READY_PROBE_TIMEOUT_MS = 2_000;
 const DEFAULT_READY_INTERVAL_MS = 500;
 const AGENT_LIFECYCLE_LOCK_STALE_MS = 5 * 60_000;
+
+export const MANAGED_AGENT_RUNTIME_RETENTIONS = {
+  persistent: "persistent",
+  leaseBound: "lease-bound",
+} as const;
+export type ManagedAgentRuntimeRetention =
+  (typeof MANAGED_AGENT_RUNTIME_RETENTIONS)[keyof typeof MANAGED_AGENT_RUNTIME_RETENTIONS];
 
 export interface AgentLifecycleLock {
   release(): void;
@@ -92,10 +101,18 @@ export interface ManagedAgentRuntimeIdentity {
 }
 
 export interface ManagedAgentRuntimeSidecar extends ManagedAgentRuntimeIdentity {
-  readonly schemaVersion: typeof RUNTIME_SIDECAR_SCHEMA_VERSION;
+  readonly schemaVersion:
+    | typeof LEGACY_RUNTIME_SIDECAR_SCHEMA_VERSION
+    | typeof RUNTIME_SIDECAR_SCHEMA_VERSION;
   readonly agentName: string;
   readonly coreVersion: string;
+  readonly retention: ManagedAgentRuntimeRetention;
   readonly endpoint?: string;
+}
+
+export interface VerifiedManagedAgentRuntime {
+  readonly identity: ManagedAgentRuntimeIdentity;
+  readonly retention: ManagedAgentRuntimeRetention;
 }
 
 export interface ManagedAgentRuntimeIssue {
@@ -190,6 +207,9 @@ export function writeAgentRuntimeSidecar(
   agent: RegisteredAgent,
   dataDir: string,
   pid: number,
+  options: {
+    readonly retention?: ManagedAgentRuntimeRetention;
+  } = {},
 ): void {
   const processStartToken = readProcessStartToken(pid);
   if (processStartToken === undefined) {
@@ -208,6 +228,7 @@ export function writeAgentRuntimeSidecar(
     processStartToken,
     coreVersion: getRollCoreVersion(),
     startedAt: new Date().toISOString(),
+    retention: options.retention ?? MANAGED_AGENT_RUNTIME_RETENTIONS.persistent,
     ...(agent.transport.type === "streamable-http" ? { endpoint: agent.transport.endpoint } : {}),
   };
   writeFileSync(sidecarPath, `${JSON.stringify(sidecar, null, 2)}\n`, "utf-8");
@@ -295,19 +316,24 @@ export function inspectManagedAgentRuntime(
   }
 
   if (sidecar.pid === pid) {
-    const currentProcessStartToken = readProcessStartToken(pid);
-    if (currentProcessStartToken === undefined) {
-      issues.push({
-        code: "process-identity-unavailable",
-        message: `无法读取 PID ${String(pid)} 的 OS 进程启动身份`,
-        fix: manualRuntimeIdentityFix(agent.skill.name, pid),
-      });
-    } else if (currentProcessStartToken !== sidecar.processStartToken) {
-      issues.push({
-        code: "process-identity-mismatch",
-        message: `PID ${String(pid)} 当前属于另一个进程实例，runtime 元数据已过期`,
-        fix: manualRuntimeIdentityFix(agent.skill.name, pid),
-      });
+    const verification = verifyProcessStartToken(pid, sidecar.processStartToken);
+    switch (verification.status) {
+      case "match":
+        break;
+      case "mismatch":
+        issues.push({
+          code: "process-identity-mismatch",
+          message: `PID ${String(pid)} 当前属于另一个进程实例，runtime 元数据已过期`,
+          fix: manualRuntimeIdentityFix(agent.skill.name, pid),
+        });
+        break;
+      case "unavailable":
+        issues.push({
+          code: "process-identity-unavailable",
+          message: `无法可靠验证 PID ${String(pid)} 的 OS 进程启动身份：${verification.reason}`,
+          fix: manualRuntimeIdentityFix(agent.skill.name, pid),
+        });
+        break;
     }
   }
 
@@ -427,11 +453,19 @@ export function startAgent(
   agent: RegisteredAgent,
   dataDir: string,
   env?: Readonly<Record<string, string>>,
-  options: { readonly lifecycleLock?: AgentLifecycleLock } = {},
+  options: {
+    readonly lifecycleLock?: AgentLifecycleLock;
+    readonly retention?: ManagedAgentRuntimeRetention;
+  } = {},
 ): number {
   const resolvedLock = resolveAgentLifecycleLock(dataDir, agent.skill.name, options.lifecycleLock);
   try {
-    return startAgentUnlocked(agent, dataDir, env);
+    return startAgentUnlocked(
+      agent,
+      dataDir,
+      env,
+      options.retention ?? MANAGED_AGENT_RUNTIME_RETENTIONS.persistent,
+    );
   } finally {
     if (resolvedLock.acquired) resolvedLock.lock.release();
   }
@@ -441,6 +475,7 @@ function startAgentUnlocked(
   agent: RegisteredAgent,
   dataDir: string,
   env?: Readonly<Record<string, string>>,
+  retention: ManagedAgentRuntimeRetention = MANAGED_AGENT_RUNTIME_RETENTIONS.persistent,
 ): number {
   if (agent.transport.type === "streamable-http" && agent.runtime.ownership !== "core-managed") {
     throw new Error(
@@ -483,7 +518,7 @@ function startAgentUnlocked(
   }
   try {
     writeFileSync(pidFile, String(child.pid), "utf-8");
-    writeAgentRuntimeSidecar(agent, dataDir, child.pid);
+    writeAgentRuntimeSidecar(agent, dataDir, child.pid, { retention });
   } catch (err) {
     try {
       // This handle belongs to the process returned by this exact spawn operation; do not fall
@@ -590,11 +625,8 @@ async function stopAgentGracefullyUnlocked(
       removeAgentRuntimeFilesForIdentity(dataDir, agentName, identity);
       return true;
     }
-    const currentProcessStartToken = readProcessStartToken(pid);
-    if (
-      currentProcessStartToken !== undefined &&
-      currentProcessStartToken !== identity.processStartToken
-    ) {
+    const verification = verifyProcessStartToken(pid, identity.processStartToken);
+    if (verification.status === "mismatch") {
       removeAgentRuntimeFilesForIdentity(dataDir, agentName, identity);
       return true;
     }
@@ -604,7 +636,7 @@ async function stopAgentGracefullyUnlocked(
   throw new Error(`Agent "${agentName}" did not stop within ${timeoutMs}ms`);
 }
 
-function readVerifiedAgentRuntimeIdentity(
+export function readVerifiedAgentRuntimeIdentity(
   dataDir: string,
   agentName: string,
   pid: number,
@@ -624,12 +656,15 @@ function readVerifiedAgentRuntimeIdentity(
     throw new AgentRuntimeIdentityError(agentName, pid, "runtime sidecar 与当前 Agent/PID 不一致");
   }
 
-  const currentProcessStartToken = readProcessStartToken(pid);
-  if (currentProcessStartToken === undefined) {
-    throw new AgentRuntimeIdentityError(agentName, pid, "无法读取 OS 进程启动身份");
-  }
-  if (currentProcessStartToken !== sidecar.processStartToken) {
-    throw new AgentRuntimeIdentityError(agentName, pid, "PID 当前属于另一个进程实例");
+  const verification = verifyProcessStartToken(pid, sidecar.processStartToken);
+  if (verification.status !== "match") {
+    throw new AgentRuntimeIdentityError(
+      agentName,
+      pid,
+      verification.status === "mismatch"
+        ? "PID 当前属于另一个进程实例"
+        : `无法可靠验证 OS 进程启动身份：${verification.reason}`,
+    );
   }
 
   return {
@@ -639,16 +674,68 @@ function readVerifiedAgentRuntimeIdentity(
   };
 }
 
+export function readVerifiedManagedAgentRuntime(
+  dataDir: string,
+  agentName: string,
+): VerifiedManagedAgentRuntime | undefined {
+  const pid = getAgentPid(dataDir, agentName);
+  if (pid === undefined) return undefined;
+  const identity = readVerifiedAgentRuntimeIdentity(dataDir, agentName, pid);
+  const sidecar = readAgentRuntimeSidecar(dataDir, agentName);
+  if (sidecar === undefined || sidecar === "invalid") {
+    throw new AgentRuntimeIdentityError(agentName, pid, "runtime sidecar 无法读取");
+  }
+  return { identity, retention: sidecar.retention };
+}
+
+export function promoteManagedAgentRuntimeToPersistent(
+  dataDir: string,
+  agentName: string,
+  options: { readonly lifecycleLock?: AgentLifecycleLock } = {},
+): boolean {
+  const resolvedLock = resolveAgentLifecycleLock(dataDir, agentName, options.lifecycleLock);
+  try {
+    const runtime = readVerifiedManagedAgentRuntime(dataDir, agentName);
+    if (runtime === undefined) return false;
+    if (runtime.retention === MANAGED_AGENT_RUNTIME_RETENTIONS.persistent) return true;
+
+    const sidecar = readAgentRuntimeSidecar(dataDir, agentName);
+    if (sidecar === undefined || sidecar === "invalid") {
+      throw new AgentRuntimeIdentityError(
+        agentName,
+        runtime.identity.pid,
+        "runtime sidecar 无法读取",
+      );
+    }
+    const promoted: ManagedAgentRuntimeSidecar = {
+      ...sidecar,
+      schemaVersion: RUNTIME_SIDECAR_SCHEMA_VERSION,
+      retention: MANAGED_AGENT_RUNTIME_RETENTIONS.persistent,
+    };
+    writeFileSync(
+      runtimeSidecarPath(dataDir, agentName),
+      `${JSON.stringify(promoted, null, 2)}\n`,
+      "utf-8",
+    );
+    return true;
+  } finally {
+    if (resolvedLock.acquired) resolvedLock.lock.release();
+  }
+}
+
 function signalVerifiedAgentProcess(
   agentName: string,
   identity: ManagedAgentRuntimeIdentity,
 ): void {
-  const currentProcessStartToken = readProcessStartToken(identity.pid);
-  if (currentProcessStartToken === undefined) {
-    throw new AgentRuntimeIdentityError(agentName, identity.pid, "发送信号前无法重新验证 OS 身份");
-  }
-  if (currentProcessStartToken !== identity.processStartToken) {
-    throw new AgentRuntimeIdentityError(agentName, identity.pid, "发送信号前 PID 已被其他进程复用");
+  const verification = verifyProcessStartToken(identity.pid, identity.processStartToken);
+  if (verification.status !== "match") {
+    throw new AgentRuntimeIdentityError(
+      agentName,
+      identity.pid,
+      verification.status === "mismatch"
+        ? "发送信号前 PID 已被其他进程复用"
+        : `发送信号前无法可靠验证 OS 身份：${verification.reason}`,
+    );
   }
 
   // This closes stale-PID reuse observed before validation. PID-based signaling still has a tiny
@@ -657,12 +744,12 @@ function signalVerifiedAgentProcess(
   process.kill(identity.pid, "SIGTERM");
 }
 
-function sameManagedAgentRuntimeIdentity(
-  current: ManagedAgentRuntimeIdentity,
+export function sameManagedAgentRuntimeIdentity(
+  current: ManagedAgentRuntimeIdentity | undefined,
   expected: ManagedAgentRuntimeIdentity,
 ): boolean {
   return (
-    current.pid === expected.pid &&
+    current?.pid === expected.pid &&
     current.processStartToken === expected.processStartToken &&
     current.startedAt === expected.startedAt
   );
@@ -810,10 +897,7 @@ function parseAgentLifecycleLockFile(raw: string): AgentLifecycleLockFile | unde
 
 function isLifecycleLockStale(record: AgentLifecycleLockFile): boolean {
   if (!isPidAlive(record.pid)) return true;
-  const currentProcessStartToken = readProcessStartToken(record.pid);
-  return (
-    currentProcessStartToken !== undefined && currentProcessStartToken !== record.processStartToken
-  );
+  return verifyProcessStartToken(record.pid, record.processStartToken).status === "mismatch";
 }
 
 function isPidAlive(pid: number): boolean {
@@ -934,20 +1018,24 @@ function readAgentRuntimeSidecar(
     return "invalid";
   }
 
-  if (!isManagedAgentRuntimeSidecar(parsed)) {
+  const sidecar = parseManagedAgentRuntimeSidecar(parsed);
+  if (sidecar === undefined) {
     return "invalid";
   }
 
-  return parsed;
+  return sidecar;
 }
 
-function isManagedAgentRuntimeSidecar(value: unknown): value is ManagedAgentRuntimeSidecar {
+function parseManagedAgentRuntimeSidecar(value: unknown): ManagedAgentRuntimeSidecar | undefined {
   if (!isRecordObject(value)) {
-    return false;
+    return undefined;
   }
 
-  if (value.schemaVersion !== RUNTIME_SIDECAR_SCHEMA_VERSION) {
-    return false;
+  if (
+    value.schemaVersion !== LEGACY_RUNTIME_SIDECAR_SCHEMA_VERSION &&
+    value.schemaVersion !== RUNTIME_SIDECAR_SCHEMA_VERSION
+  ) {
+    return undefined;
   }
 
   if (
@@ -958,10 +1046,35 @@ function isManagedAgentRuntimeSidecar(value: unknown): value is ManagedAgentRunt
     typeof value.coreVersion !== "string" ||
     typeof value.startedAt !== "string"
   ) {
-    return false;
+    return undefined;
   }
 
-  return value.endpoint === undefined || typeof value.endpoint === "string";
+  if (value.endpoint !== undefined && typeof value.endpoint !== "string") {
+    return undefined;
+  }
+
+  const retention =
+    value.schemaVersion === LEGACY_RUNTIME_SIDECAR_SCHEMA_VERSION
+      ? MANAGED_AGENT_RUNTIME_RETENTIONS.persistent
+      : value.retention;
+  if (!isManagedAgentRuntimeRetention(retention)) {
+    return undefined;
+  }
+
+  return {
+    schemaVersion: value.schemaVersion,
+    agentName: value.agentName,
+    pid: value.pid,
+    processStartToken: value.processStartToken,
+    coreVersion: value.coreVersion,
+    startedAt: value.startedAt,
+    retention,
+    ...(typeof value.endpoint === "string" ? { endpoint: value.endpoint } : {}),
+  };
+}
+
+function isManagedAgentRuntimeRetention(value: unknown): value is ManagedAgentRuntimeRetention {
+  return Object.values(MANAGED_AGENT_RUNTIME_RETENTIONS).some((retention) => retention === value);
 }
 
 function isRecordObject(value: unknown): value is Record<string, unknown> {

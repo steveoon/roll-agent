@@ -17,8 +17,36 @@ import {
   type PackageManagerRunSpec,
 } from "../cli/utils/package-manager.ts";
 import { inspectAgentEnvRequirements } from "../config/helpers.ts";
+import { acquireAgentRegistryLockAsync, type AgentRegistryLock } from "./agent-registry-lock.ts";
+import {
+  beginInstallDirectoryReplacement,
+  getInstallDirectoryBackupPath,
+} from "./install-directory-backup.ts";
+import {
+  INSTALLED_PACKAGE_REPLACEMENT_COMMIT_KINDS,
+  INSTALLED_PACKAGE_REPLACEMENT_FAILURE_STEPS,
+  INSTALLED_PACKAGE_REPLACEMENT_ROLLBACK_KINDS,
+  INSTALLED_PACKAGE_REPLACEMENT_RUNTIME_RECOVERY_KINDS,
+  commitInstalledPackageReplacement,
+  createInstalledPackageReplacement,
+  getInstalledPackageStoppedRuntime,
+  recordInstalledPackageDirectoryBackup,
+  recordInstalledPackageRegistrationReplacement,
+  recordInstalledPackageStoppedRuntime,
+  rollbackInstalledPackageReplacement,
+} from "./installed-package-replacement.ts";
+import {
+  acquireAgentLifecycleLockWithRetry,
+  acquireAgentUsageMaintenanceGuard,
+} from "./agent-usage-lease.ts";
 import { discoverAgent } from "./discovery.ts";
-import { startAgent, stopAgentGracefully, waitForAgentReady } from "./process-manager.ts";
+import {
+  MANAGED_AGENT_RUNTIME_RETENTIONS,
+  startAgent,
+  stopAgentGracefully,
+  waitForAgentReady,
+  type AgentLifecycleLock,
+} from "./process-manager.ts";
 import { runAgentSetup } from "./runtime-setup.ts";
 import {
   parsePackageName,
@@ -66,6 +94,8 @@ export interface InstallAgentCollaborators {
   readonly start?: typeof startAgent;
   readonly waitReady?: typeof waitForAgentReady;
   readonly stopGracefully?: typeof stopAgentGracefully;
+  readonly acquireMaintenanceGuard?: typeof acquireAgentUsageMaintenanceGuard;
+  readonly acquireLifecycleLock?: typeof acquireAgentLifecycleLockWithRetry;
   readonly resolvePackageRoot?: typeof resolveInstalledPackageRoot;
   readonly readManifest?: typeof readInstalledPackageManifest;
 }
@@ -365,6 +395,10 @@ export async function installAgent(
   const start = collaborators.start ?? startAgent;
   const waitReady = collaborators.waitReady ?? waitForAgentReady;
   const stopGracefully = collaborators.stopGracefully ?? stopAgentGracefully;
+  const acquireMaintenanceGuard =
+    collaborators.acquireMaintenanceGuard ?? acquireAgentUsageMaintenanceGuard;
+  const acquireLifecycleLock =
+    collaborators.acquireLifecycleLock ?? acquireAgentLifecycleLockWithRetry;
   const resolvePackageRoot = collaborators.resolvePackageRoot ?? resolveInstalledPackageRoot;
   const readManifest = collaborators.readManifest ?? readInstalledPackageManifest;
 
@@ -394,29 +428,115 @@ export async function installAgent(
     "installed",
     sanitizeInstallId(packageName),
   );
-  const store = deps.store ?? new AgentStore(deps.agentsConfig.dataDir);
-  const expectedSkillName = input.expectedSkillName;
-  const expectedExisting = expectedSkillName ? store.findByName(expectedSkillName) : undefined;
-  if (expectedExisting && needsReplaceAuthorization(expectedExisting, replaceExisting)) {
-    return buildReplaceConflictFailure(
-      expectedExisting.skill.name,
-      sourceTypeLabel(expectedExisting),
-      packageSpec,
-    );
-  }
-
   const workspacePreparation = prepareInstallWorkspace(installDir, report);
   if (!workspacePreparation.ok) {
     return workspacePreparation.failure;
   }
   const workspace = workspacePreparation.workspace;
 
+  let registryLock: AgentRegistryLock;
   try {
+    registryLock = await acquireAgentRegistryLockAsync(deps.agentsConfig.dataDir);
+  } catch (error) {
+    cleanupUnregisteredInstall(workspace, report);
+    releaseOwnedInstallLock(workspace, report);
+    return { ok: false, step: "resolve", message: errorMessage(error) };
+  }
+
+  let maintenanceGuard: Awaited<ReturnType<typeof acquireAgentUsageMaintenanceGuard>> | undefined;
+  let registrationLifecycleLock: AgentLifecycleLock | undefined;
+  let replacement = createInstalledPackageReplacement();
+  let installSucceeded = false;
+  const store = new AgentStore(deps.agentsConfig.dataDir, { registryLock });
+  try {
+    const expectedSkillName = input.expectedSkillName;
+    const expectedExisting = expectedSkillName ? store.findByName(expectedSkillName) : undefined;
+    if (expectedExisting && needsReplaceAuthorization(expectedExisting, replaceExisting)) {
+      cleanupUnregisteredInstall(workspace, report);
+      return buildReplaceConflictFailure(
+        expectedExisting.skill.name,
+        sourceTypeLabel(expectedExisting),
+        packageSpec,
+      );
+    }
+    const packageExisting =
+      expectedExisting ??
+      store
+        .list()
+        .find(
+          (agent) =>
+            agent.source?.type === "installed-package" && agent.source.packageName === packageName,
+        );
+
+    if (packageExisting !== undefined) {
+      try {
+        maintenanceGuard = await acquireMaintenanceGuard(
+          packageExisting,
+          deps.agentsConfig.dataDir,
+        );
+      } catch (error) {
+        cleanupUnregisteredInstall(workspace, report);
+        return {
+          ok: false,
+          step: "resolve",
+          message: errorMessage(error),
+        };
+      }
+    }
+
+    if (maintenanceGuard?.runtime !== undefined && packageExisting !== undefined) {
+      try {
+        const stopped = await stopGracefully(
+          deps.agentsConfig.dataDir,
+          packageExisting.skill.name,
+          {
+            lifecycleLock: maintenanceGuard.lifecycleLock,
+            expectedIdentity: maintenanceGuard.runtime.identity,
+          },
+        );
+        if (!stopped) {
+          cleanupUnregisteredInstall(workspace, report);
+          return {
+            ok: false,
+            step: "resolve",
+            message: `Agent "${packageExisting.skill.name}" 在安装前已发生运行时变化，拒绝覆盖安装目录。`,
+          };
+        }
+        replacement = recordInstalledPackageStoppedRuntime(
+          replacement,
+          packageExisting,
+          maintenanceGuard.runtime.retention,
+        );
+      } catch (error) {
+        cleanupUnregisteredInstall(workspace, report);
+        return {
+          ok: false,
+          step: "resolve",
+          message: `停止现有 Agent 失败，未修改安装目录：${errorMessage(error)}`,
+        };
+      }
+    }
+
     if (deps.installConfig.registry) {
       report({
         type: "info",
         message: `使用 npm registry: ${deps.installConfig.registry}（roll.config.yaml install.registry）`,
       });
+    }
+
+    if (!workspace.createdByInvocation) {
+      try {
+        replacement = recordInstalledPackageDirectoryBackup(
+          replacement,
+          beginInstallDirectoryReplacement(installDir),
+        );
+      } catch (error) {
+        return {
+          ok: false,
+          step: "download",
+          message: `无法准备现有安装目录替换与回滚：${errorMessage(error)}`,
+        };
+      }
     }
 
     report({ type: "step", step: "download", message: `安装 ${packageSpec}...` });
@@ -496,6 +616,16 @@ export async function installAgent(
     };
 
     const existing = store.findByName(discovered.skill.name);
+    if (packageExisting !== undefined && packageExisting.skill.name !== discovered.skill.name) {
+      cleanupUnregisteredInstall(workspace, report);
+      return {
+        ok: false,
+        step: "register",
+        message:
+          `已安装包把 Agent 名称从 "${packageExisting.skill.name}" 改为 ` +
+          `"${discovered.skill.name}"；为避免跨名称锁失效，请先移除旧 Agent 后再安装。`,
+      };
+    }
     if (existing && needsReplaceAuthorization(existing, replaceExisting)) {
       cleanupUnregisteredInstall(workspace, report);
       return buildReplaceConflictFailure(
@@ -503,6 +633,61 @@ export async function installAgent(
         sourceTypeLabel(existing),
         packageSpec,
       );
+    }
+    if (
+      existing !== undefined &&
+      maintenanceGuard === undefined &&
+      existing.runtime.ownership === "core-managed"
+    ) {
+      try {
+        maintenanceGuard = await acquireMaintenanceGuard(existing, deps.agentsConfig.dataDir);
+      } catch (error) {
+        cleanupUnregisteredInstall(workspace, report);
+        return { ok: false, step: "register", message: errorMessage(error) };
+      }
+    }
+    if (agent.runtime.ownership === "core-managed" && maintenanceGuard === undefined) {
+      try {
+        registrationLifecycleLock = await acquireLifecycleLock(
+          deps.agentsConfig.dataDir,
+          agent.skill.name,
+        );
+      } catch (error) {
+        cleanupUnregisteredInstall(workspace, report);
+        return { ok: false, step: "register", message: errorMessage(error) };
+      }
+    }
+    if (
+      existing !== undefined &&
+      maintenanceGuard?.runtime !== undefined &&
+      getInstalledPackageStoppedRuntime(replacement) === undefined
+    ) {
+      try {
+        const stopped = await stopGracefully(deps.agentsConfig.dataDir, existing.skill.name, {
+          lifecycleLock: maintenanceGuard.lifecycleLock,
+          expectedIdentity: maintenanceGuard.runtime.identity,
+        });
+        if (!stopped) {
+          cleanupUnregisteredInstall(workspace, report);
+          return {
+            ok: false,
+            step: "register",
+            message: `Agent "${existing.skill.name}" 在注册前已发生运行时变化，拒绝替换。`,
+          };
+        }
+        replacement = recordInstalledPackageStoppedRuntime(
+          replacement,
+          existing,
+          maintenanceGuard.runtime.retention,
+        );
+      } catch (error) {
+        cleanupUnregisteredInstall(workspace, report);
+        return {
+          ok: false,
+          step: "register",
+          message: `停止现有 Agent 失败，拒绝替换注册信息：${errorMessage(error)}`,
+        };
+      }
     }
 
     if (
@@ -531,8 +716,6 @@ export async function installAgent(
       report({ type: "info", message: setupResult.message });
     }
 
-    const wasRunning =
-      existing?.runtime.ownership === "core-managed" && existing.status === "online";
     try {
       if (existing?.source?.type === "installed-package" || (existing && replaceExisting)) {
         if (existing.source?.type !== "installed-package") {
@@ -545,6 +728,11 @@ export async function installAgent(
         if (!store.replace(existing.skill.name, agent)) {
           throw new Error(`Agent "${existing.skill.name}" 在安装期间已被移除，请重试`);
         }
+        replacement = recordInstalledPackageRegistrationReplacement(
+          replacement,
+          existing,
+          agent.skill.name,
+        );
       } else {
         store.add(agent);
       }
@@ -553,9 +741,6 @@ export async function installAgent(
       return { ok: false, step: "register", message: errorMessage(err) };
     }
     if (!setupResult.ok) {
-      if (wasRunning) {
-        await stopGracefully(deps.agentsConfig.dataDir, agent.skill.name).catch(() => {});
-      }
       store.updateStatus(discovered.skill.name, "error");
       return {
         ok: false,
@@ -573,15 +758,27 @@ export async function installAgent(
     const missingRequired = envReport?.missingRequired ?? [];
 
     let started = false;
-    const shouldAttemptStart = agent.runtime.ownership === "core-managed" && autoStart;
+    const stoppedExistingRuntime = getInstalledPackageStoppedRuntime(replacement);
+    const preservePersistentRuntime =
+      stoppedExistingRuntime?.retention === MANAGED_AGENT_RUNTIME_RETENTIONS.persistent;
+    const shouldAttemptStart =
+      agent.runtime.ownership === "core-managed" && (autoStart || preservePersistentRuntime);
     const canAttemptStart = shouldAttemptStart && missingRequired.length === 0;
-    if (wasRunning && !canAttemptStart) {
-      await stopGracefully(deps.agentsConfig.dataDir, agent.skill.name).catch(() => {});
+    if (stoppedExistingRuntime !== undefined && !canAttemptStart) {
       store.updateStatus(agent.skill.name, "idle");
     }
 
     if (shouldAttemptStart) {
       if (missingRequired.length > 0) {
+        if (preservePersistentRuntime) {
+          return {
+            ok: false,
+            step: "start",
+            message: `Agent "${agent.skill.name}" 缺少必填环境变量（${missingRequired
+              .map((item) => item.name)
+              .join(", ")}），无法恢复原有 persistent 运行状态。`,
+          };
+        }
         report({
           type: "warn",
           message: `Agent "${agent.skill.name}" 缺少必填环境变量（${missingRequired
@@ -591,18 +788,30 @@ export async function installAgent(
       } else {
         let startInvoked = false;
         try {
-          if (wasRunning) {
-            await stopGracefully(deps.agentsConfig.dataDir, agent.skill.name);
-          }
           store.updateStatus(agent.skill.name, "starting");
-          start(agent, deps.agentsConfig.dataDir, deps.getStartEnv(agent.skill.name));
+          start(agent, deps.agentsConfig.dataDir, deps.getStartEnv(agent.skill.name), {
+            ...(maintenanceGuard !== undefined
+              ? { lifecycleLock: maintenanceGuard.lifecycleLock }
+              : registrationLifecycleLock !== undefined
+                ? { lifecycleLock: registrationLifecycleLock }
+                : {}),
+            retention: MANAGED_AGENT_RUNTIME_RETENTIONS.persistent,
+          });
           startInvoked = true;
           await waitReady(agent, { startupTimeoutMs: 15_000, probeTimeoutMs: 2_000 });
           store.updateStatus(agent.skill.name, "online");
           started = true;
         } catch (err) {
           if (startInvoked) {
-            await stopGracefully(deps.agentsConfig.dataDir, agent.skill.name).catch(() => {});
+            await stopGracefully(
+              deps.agentsConfig.dataDir,
+              agent.skill.name,
+              maintenanceGuard !== undefined
+                ? { lifecycleLock: maintenanceGuard.lifecycleLock }
+                : registrationLifecycleLock !== undefined
+                  ? { lifecycleLock: registrationLifecycleLock }
+                  : undefined,
+            ).catch(() => {});
           }
           store.updateStatus(agent.skill.name, "error");
           return {
@@ -614,8 +823,88 @@ export async function installAgent(
       }
     }
 
+    installSucceeded = true;
     return { ok: true, agent, envReport, started };
   } finally {
+    const rollbackOutcome = installSucceeded
+      ? undefined
+      : rollbackInstalledPackageReplacement(replacement, store);
+    if (rollbackOutcome?.kind === INSTALLED_PACKAGE_REPLACEMENT_ROLLBACK_KINDS.partial) {
+      for (const failure of rollbackOutcome.failures) {
+        if (failure.step === INSTALLED_PACKAGE_REPLACEMENT_FAILURE_STEPS.registration) {
+          reportCleanupWarning(report, `恢复旧 Agent 注册信息失败：${errorMessage(failure.error)}`);
+          continue;
+        }
+        const backupPath = getInstallDirectoryBackupPath(failure.backup);
+        reportCleanupWarning(
+          report,
+          `恢复更新前 Agent 安装目录状态失败：${errorMessage(failure.error)}` +
+            (backupPath === undefined
+              ? `；请检查未清理的新安装目录 ${failure.backup.installDir}`
+              : `；已保留回滚副本 ${backupPath}`),
+        );
+      }
+    }
+
+    if (installSucceeded) {
+      const commitOutcome = commitInstalledPackageReplacement(replacement);
+      if (commitOutcome.kind === INSTALLED_PACKAGE_REPLACEMENT_COMMIT_KINDS.cleanupFailed) {
+        const backupPath = getInstallDirectoryBackupPath(commitOutcome.backup);
+        reportCleanupWarning(
+          report,
+          `清理旧 Agent 安装目录副本失败：${errorMessage(commitOutcome.error)}` +
+            `；请检查 ${backupPath ?? commitOutcome.backup.installDir}`,
+        );
+      }
+    }
+
+    const stoppedExistingRuntime = getInstalledPackageStoppedRuntime(replacement);
+    if (
+      rollbackOutcome?.kind === INSTALLED_PACKAGE_REPLACEMENT_ROLLBACK_KINDS.restored &&
+      rollbackOutcome.runtimeRecovery.kind ===
+        INSTALLED_PACKAGE_REPLACEMENT_RUNTIME_RECOVERY_KINDS.eligible
+    ) {
+      const runtimeBaseline = rollbackOutcome.runtimeRecovery.baseline;
+      try {
+        start(
+          runtimeBaseline.agent,
+          deps.agentsConfig.dataDir,
+          deps.getStartEnv(runtimeBaseline.agent.skill.name),
+          {
+            ...(maintenanceGuard !== undefined
+              ? { lifecycleLock: maintenanceGuard.lifecycleLock }
+              : registrationLifecycleLock !== undefined
+                ? { lifecycleLock: registrationLifecycleLock }
+                : {}),
+            retention: MANAGED_AGENT_RUNTIME_RETENTIONS.persistent,
+          },
+        );
+        await waitReady(runtimeBaseline.agent, {
+          startupTimeoutMs: 15_000,
+          probeTimeoutMs: 2_000,
+        });
+        store.updateStatus(runtimeBaseline.agent.skill.name, "online");
+      } catch (rollbackError) {
+        store.updateStatus(runtimeBaseline.agent.skill.name, "error");
+        reportCleanupWarning(
+          report,
+          `恢复旧 persistent Agent 失败：${errorMessage(rollbackError)}`,
+        );
+      }
+    } else if (
+      !installSucceeded &&
+      rollbackOutcome?.kind === INSTALLED_PACKAGE_REPLACEMENT_ROLLBACK_KINDS.partial &&
+      stoppedExistingRuntime?.retention === MANAGED_AGENT_RUNTIME_RETENTIONS.persistent
+    ) {
+      store.updateStatus(stoppedExistingRuntime.agent.skill.name, "error");
+      reportCleanupWarning(
+        report,
+        `未自动重启旧 persistent Agent "${stoppedExistingRuntime.agent.skill.name}"，因为注册信息或安装目录回滚未完成。`,
+      );
+    }
     releaseOwnedInstallLock(workspace, report);
+    registrationLifecycleLock?.release();
+    maintenanceGuard?.release();
+    registryLock.release();
   }
 }

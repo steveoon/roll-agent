@@ -1,8 +1,7 @@
 import { defineCommand } from "citty";
 import { getAgentEnvFromAgentsConfig } from "../../config/helpers.ts";
 import { loadAgentsConfig } from "../../config/loader.ts";
-import { McpClientManager } from "../../mcp/client-manager.ts";
-import { resolveTransportWithDevSpawnSpec } from "../../registry/dev-spawn.ts";
+import { ManagedAgentConnectionScope } from "../../mcp/managed-agent-connection.ts";
 import { AgentStore } from "../../registry/store.ts";
 import { normalizeListedTools } from "../utils/agent-tools.ts";
 import { formatAgentToolsTextOutput } from "../utils/agent-tools-output.ts";
@@ -25,12 +24,11 @@ export default defineCommand({
       return;
     }
 
-    const clientManager = new McpClientManager();
+    const connectionScope = new ManagedAgentConnectionScope(agentsConfig.dataDir, "agent-tools");
     try {
       log.info(`连接 Agent "${agent.skill.name}" 并获取 MCP tools/list...`);
-      const transport = resolveTransportWithDevSpawnSpec(agent);
       const agentEnv = getAgentEnvFromAgentsConfig(agentsConfig, agent.skill.name);
-      const client = await clientManager.connect(agent.skill.name, transport, agent.installPath, {
+      const client = await connectionScope.connect(agent, {
         ...(agentEnv ? { env: agentEnv } : {}),
       });
       const { tools } = await client.listTools();
@@ -51,7 +49,7 @@ export default defineCommand({
       log.error(error instanceof Error ? error.message : String(error));
       process.exitCode = 1;
     } finally {
-      await clientManager.disconnectAll();
+      await connectionScope.disconnectAll();
     }
   },
 });

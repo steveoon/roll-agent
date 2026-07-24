@@ -4,7 +4,7 @@ import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { randomUUID } from "node:crypto";
 import { tmpdir } from "node:os";
-import { detectInstallCommand, inferSourceType } from "./update.ts";
+import { detectInstallCommand, discoverUpdatedAgent, inferSourceType } from "./update.ts";
 import { createDefaultRuntimeForTransport } from "../../types/agent.ts";
 import type { RegisteredAgent } from "../../types/agent.ts";
 
@@ -152,6 +152,51 @@ describe("update — detectInstallCommand", () => {
     try {
       writeFileSync(resolve(tmpPath, "package.json"), JSON.stringify({ name: "foo" }), "utf-8");
       assert.equal(detectInstallCommand(tmpPath), undefined);
+    } finally {
+      rmSync(tmpPath, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("update — Agent identity", () => {
+  test("accepts refreshed metadata when the Agent name is unchanged", () => {
+    const tmpPath = resolve(tmpdir(), `roll-update-identity-${randomUUID()}`);
+    mkdirSync(tmpPath, { recursive: true });
+    writeFileSync(
+      resolve(tmpPath, "SKILL.md"),
+      "---\nname: test-agent\ndescription: refreshed\nmetadata: {}\n---\n",
+      "utf-8",
+    );
+
+    try {
+      const agent = makeAgent({
+        transport: { type: "stdio", command: "node" },
+        installPath: tmpPath,
+      });
+      assert.equal(discoverUpdatedAgent(agent, tmpPath).skill.description, "refreshed");
+    } finally {
+      rmSync(tmpPath, { recursive: true, force: true });
+    }
+  });
+
+  test("rejects an in-place Agent rename before replacing registry metadata", () => {
+    const tmpPath = resolve(tmpdir(), `roll-update-rename-${randomUUID()}`);
+    mkdirSync(tmpPath, { recursive: true });
+    writeFileSync(
+      resolve(tmpPath, "SKILL.md"),
+      "---\nname: renamed-agent\ndescription: renamed\nmetadata: {}\n---\n",
+      "utf-8",
+    );
+
+    try {
+      const agent = makeAgent({
+        transport: { type: "stdio", command: "node" },
+        installPath: tmpPath,
+      });
+      assert.throws(
+        () => discoverUpdatedAgent(agent, tmpPath),
+        /Agent "test-agent" 更新后的名称变为 "renamed-agent".*不支持原地改名/u,
+      );
     } finally {
       rmSync(tmpPath, { recursive: true, force: true });
     }

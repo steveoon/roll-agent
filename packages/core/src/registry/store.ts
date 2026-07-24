@@ -8,6 +8,11 @@ import {
   AGENT_ENV_VALUE_TYPES,
   createDefaultRuntimeForTransport,
 } from "../types/agent.ts";
+import {
+  acquireAgentRegistryLock,
+  assertAgentRegistryLock,
+  type AgentRegistryLock,
+} from "./agent-registry-lock.ts";
 import type {
   AgentEnvDeclaration,
   AgentStartCommand,
@@ -26,11 +31,31 @@ const STORE_FILE = "agents.json";
 type JsonRecord = Record<string, unknown>;
 type LegacySourceType = "git" | "local" | "installed" | "remote";
 
+/** 严格读取注册表中的原始条目数，用于识别被宽容加载逻辑丢弃的无效记录。 */
+export function readAgentStoreEntryCount(dataDir: string): number {
+  const storePath = resolve(dataDir, STORE_FILE);
+  if (!existsSync(storePath)) return 0;
+
+  const parsed = readJsonFile(storePath);
+  if (Array.isArray(parsed)) return parsed.length;
+  if (isJsonRecord(parsed) && Array.isArray(parsed["agents"])) {
+    return parsed["agents"].length;
+  }
+  throw new Error(`Agent 注册表格式无效: ${storePath}`);
+}
+
 /** Agent Store — 管理已注册 Agent 的持久化存储（JSON 文件） */
 export class AgentStore {
+  private readonly dataDir: string;
+  private readonly registryLock: AgentRegistryLock | undefined;
   private readonly storePath: string;
 
-  constructor(dataDir: string) {
+  constructor(dataDir: string, options: { readonly registryLock?: AgentRegistryLock } = {}) {
+    this.dataDir = dataDir;
+    this.registryLock = options.registryLock;
+    if (this.registryLock !== undefined) {
+      assertAgentRegistryLock(this.registryLock, dataDir);
+    }
     this.storePath = resolve(dataDir, STORE_FILE);
   }
 
@@ -46,52 +71,60 @@ export class AgentStore {
 
   /** 添加一个 Agent（名称重复则抛错） */
   add(agent: RegisteredAgent): void {
-    const agents = [...this.list()];
-    const existing = agents.findIndex((a) => a.skill.name === agent.skill.name);
+    this.withMutationLock(() => {
+      const agents = [...this.list()];
+      const existing = agents.findIndex((a) => a.skill.name === agent.skill.name);
 
-    if (existing !== -1) {
-      throw new Error(`Agent "${agent.skill.name}" is already registered`);
-    }
+      if (existing !== -1) {
+        throw new Error(`Agent "${agent.skill.name}" is already registered`);
+      }
 
-    agents.push(agent);
-    this.save(agents);
+      agents.push(agent);
+      this.save(agents);
+    });
   }
 
   /** 根据名称移除 Agent */
   remove(name: string): boolean {
-    const agents = this.list();
-    const filtered = agents.filter((a) => a.skill.name !== name);
+    return this.withMutationLock(() => {
+      const agents = this.list();
+      const filtered = agents.filter((a) => a.skill.name !== name);
 
-    if (filtered.length === agents.length) {
-      return false;
-    }
+      if (filtered.length === agents.length) {
+        return false;
+      }
 
-    this.save([...filtered]);
-    return true;
+      this.save([...filtered]);
+      return true;
+    });
   }
 
   /** 原子替换指定 Agent（名称可变更） */
   replace(name: string, next: RegisteredAgent): boolean {
-    const agents = [...this.list()];
-    const targetIndex = agents.findIndex((a) => a.skill.name === name);
-    if (targetIndex === -1) return false;
+    return this.withMutationLock(() => {
+      const agents = [...this.list()];
+      const targetIndex = agents.findIndex((a) => a.skill.name === name);
+      if (targetIndex === -1) return false;
 
-    const conflictIndex = agents.findIndex(
-      (a, index) => index !== targetIndex && a.skill.name === next.skill.name,
-    );
-    if (conflictIndex !== -1) {
-      throw new Error(`Agent "${next.skill.name}" is already registered`);
-    }
+      const conflictIndex = agents.findIndex(
+        (a, index) => index !== targetIndex && a.skill.name === next.skill.name,
+      );
+      if (conflictIndex !== -1) {
+        throw new Error(`Agent "${next.skill.name}" is already registered`);
+      }
 
-    agents[targetIndex] = next;
-    this.save(agents);
-    return true;
+      agents[targetIndex] = next;
+      this.save(agents);
+      return true;
+    });
   }
 
   /** 更新指定 Agent 的状态 */
   updateStatus(name: string, status: RegisteredAgent["status"]): void {
-    const agents = this.list().map((a) => (a.skill.name === name ? { ...a, status } : a));
-    this.save([...agents]);
+    this.withMutationLock(() => {
+      const agents = this.list().map((a) => (a.skill.name === name ? { ...a, status } : a));
+      this.save([...agents]);
+    });
   }
 
   /** 写入存储文件 */
@@ -122,6 +155,20 @@ export class AgentStore {
     }
 
     return normalizeStoreFile(parsed);
+  }
+
+  private withMutationLock<T>(mutation: () => T): T {
+    if (this.registryLock !== undefined) {
+      assertAgentRegistryLock(this.registryLock, this.dataDir);
+      return mutation();
+    }
+
+    const lock = acquireAgentRegistryLock(this.dataDir);
+    try {
+      return mutation();
+    } finally {
+      lock.release();
+    }
   }
 }
 

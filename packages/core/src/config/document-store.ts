@@ -12,7 +12,11 @@ import {
 import { dirname, resolve } from "node:path";
 import { parseDocument } from "yaml";
 import { atomicTextFileWriter } from "../internal/config-atomic-write.ts";
-import { isProcessStartToken, readProcessStartToken } from "../registry/process-identity.ts";
+import {
+  isProcessStartToken,
+  readProcessStartToken,
+  verifyProcessStartToken,
+} from "../registry/process-identity.ts";
 import type { ProcessStartToken } from "../registry/process-identity.ts";
 
 const CONFIG_REVISION_BRAND: unique symbol = Symbol("ConfigRevision");
@@ -519,10 +523,7 @@ function parseConfigWriteLockFile(raw: string): ConfigWriteLockFile | undefined 
 
 function isConfigWriteLockStale(record: ConfigWriteLockFile): boolean {
   if (!isPidAlive(record.pid)) return true;
-  const currentProcessStartToken = readProcessStartToken(record.pid);
-  return (
-    currentProcessStartToken !== undefined && currentProcessStartToken !== record.processStartToken
-  );
+  return verifyProcessStartToken(record.pid, record.processStartToken).status === "mismatch";
 }
 
 function isPidAlive(pid: number): boolean {

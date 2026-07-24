@@ -8,6 +8,7 @@ import { simulateReadableStream } from "ai";
 import { MockLanguageModelV4 } from "ai/test";
 import { rollConfigSchema } from "@roll-agent/core/config/schema";
 import type { McpClientManager } from "@roll-agent/core/mcp/client-manager";
+import type { AgentUsageLease } from "@roll-agent/core/registry/agent-usage-lease";
 import type { RegisteredAgent } from "@roll-agent/core/types/agent";
 import type { LanguageModelV4CallOptions, LanguageModelV4StreamPart } from "@ai-sdk/provider";
 import { ThreadStore } from "../store/thread-store.ts";
@@ -27,6 +28,35 @@ import { SUMMARY_PREFIX } from "./compactor.ts";
 
 function tempDir(): string {
   return mkdtempSync(join(tmpdir(), "roll-engine-"));
+}
+
+function makeManagedHttpAgent(name: string): RegisteredAgent {
+  return {
+    skill: { name, description: `${name} test fixture`, metadata: {} },
+    transport: { type: "streamable-http", endpoint: `http://127.0.0.1:3199/${name}` },
+    runtime: {
+      ownership: "core-managed",
+      start: { command: "node", args: ["dist/index.js"] },
+      endpoint: { path: `/${name}`, port: 3_199 },
+    },
+    installPath: `/tmp/${name}`,
+    registeredAt: "2026-07-23T00:00:00.000Z",
+    status: "online",
+  };
+}
+
+function fakeAgentUsageLease(agentName: string, release: () => Promise<void>): AgentUsageLease {
+  return {
+    agentName,
+    leaseId: "00000000-0000-4000-8000-000000000001" as AgentUsageLease["leaseId"],
+    runtimeIdentity: {
+      pid: 123,
+      processStartToken:
+        "pst-v2:0000000000000000000000000000000000000000000000000000000000000001" as AgentUsageLease["runtimeIdentity"]["processStartToken"],
+      startedAt: "2026-07-23T00:00:00.000Z",
+    },
+    release,
+  };
 }
 
 async function drain(events: AsyncIterable<unknown>): Promise<void> {
@@ -397,6 +427,101 @@ test("ConversationEngine.dispose 等待 live session close 后才断开 MCP", as
     releaseClose.resolve();
     await disposing;
   }
+});
+
+test("ConversationEngine.dispose 先断开 MCP，再释放持有的 Agent 使用租约", async () => {
+  const order: string[] = [];
+  const agent = makeManagedHttpAgent("leased-agent");
+  const lease = fakeAgentUsageLease(agent.skill.name, async () => {
+    order.push("release");
+  });
+  const clientManager = {
+    connect: async () => ({
+      listTools: async () => ({ tools: [] }),
+    }),
+    disconnectAll: async () => {
+      order.push("disconnect");
+    },
+  } as unknown as McpClientManager;
+  const engine = new ConversationEngine({
+    config: installEngineConfig("/tmp/roll-engine-lease-order"),
+    model: new MockLanguageModelV4({}),
+    agents: [agent],
+    skillLibrary: null,
+    clientManager,
+    acquireAgentUsage: async () => lease,
+  });
+
+  await engine.createSession();
+  await engine.dispose();
+
+  assert.deepEqual(order, ["disconnect", "release"]);
+});
+
+test("ConversationEngine.dispose 在 MCP 断开失败时仍释放 Agent 使用租约", async () => {
+  const order: string[] = [];
+  const agent = makeManagedHttpAgent("disconnect-failure-agent");
+  const lease = fakeAgentUsageLease(agent.skill.name, async () => {
+    order.push("release");
+  });
+  const clientManager = {
+    connect: async () => ({
+      listTools: async () => ({ tools: [] }),
+    }),
+    disconnectAll: async () => {
+      order.push("disconnect");
+      throw new Error("disconnect failed");
+    },
+  } as unknown as McpClientManager;
+  const engine = new ConversationEngine({
+    config: installEngineConfig("/tmp/roll-engine-disconnect-failure"),
+    model: new MockLanguageModelV4({}),
+    agents: [agent],
+    skillLibrary: null,
+    clientManager,
+    acquireAgentUsage: async () => lease,
+  });
+
+  await engine.createSession();
+  await assert.rejects(engine.dispose(), /disconnect failed/u);
+
+  assert.deepEqual(order, ["disconnect", "release"]);
+});
+
+test("ConversationEngine 在 MCP tools/list 失败时断开连接并释放刚取得的使用租约", async () => {
+  const order: string[] = [];
+  const issues: AgentBootstrapIssue[] = [];
+  const agent = makeManagedHttpAgent("broken-leased-agent");
+  const lease = fakeAgentUsageLease(agent.skill.name, async () => {
+    order.push("release");
+  });
+  const clientManager = {
+    connect: async () => ({
+      listTools: async () => {
+        throw new Error("list failed");
+      },
+    }),
+    disconnect: async () => {
+      order.push("disconnect");
+    },
+    disconnectAll: async () => {},
+  } as unknown as McpClientManager;
+  const engine = new ConversationEngine({
+    config: installEngineConfig("/tmp/roll-engine-lease-failure"),
+    model: new MockLanguageModelV4({}),
+    agents: [agent],
+    skillLibrary: null,
+    clientManager,
+    acquireAgentUsage: async () => lease,
+    onAgentBootstrapIssue: (issue) => issues.push(issue),
+  });
+
+  await engine.createSession();
+
+  assert.deepEqual(order, ["disconnect", "release"]);
+  assert.equal(issues[0]?.agentName, agent.skill.name);
+  assert.match(issues[0]?.message ?? "", /list failed/u);
+  await engine.dispose();
 });
 
 test("ConversationEngine.dispose 在 session close 失败时仍通过 finally 断开 MCP", async () => {
@@ -3185,7 +3310,7 @@ function fakeProbeClientManager(connectCalls: string[]): McpClientManager {
   } as unknown as McpClientManager;
 }
 
-test("chat 内安装走统一启动状态机（autoStart）并完成热刷新接线", async () => {
+test("chat 内安装不做持久 autoStart，改由会话租约启动并完成热刷新接线", async () => {
   const dataDir = tempDir();
   try {
     const connectCalls: string[] = [];
@@ -3231,7 +3356,7 @@ test("chat 内安装走统一启动状态机（autoStart）并完成热刷新接
       expectedSkillName?: string;
       replaceExisting?: boolean;
     };
-    assert.equal(input.autoStart, true);
+    assert.equal(input.autoStart, false);
     assert.equal(input.skipBrowserSetup, true);
     assert.equal(input.packageSpec, "@roll-agent/probe-agent");
     assert.equal(input.expectedSkillName, "probe-agent");
