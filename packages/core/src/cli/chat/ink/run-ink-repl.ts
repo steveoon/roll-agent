@@ -21,6 +21,7 @@ export interface RunInkReplOptions {
   readonly initialThinkingLevel?: ThinkingLevel;
   readonly onThinkingChange?: (level: ThinkingLevel) => void;
   readonly onStarted?: () => void;
+  readonly signal?: AbortSignal;
 }
 
 export async function runInkRepl(
@@ -75,7 +76,18 @@ export async function runInkRepl(
       },
     );
     options.onStarted?.();
-    await instance.waitUntilExit();
+    const handleAbort = (): void => {
+      instance.unmount();
+    };
+    options.signal?.addEventListener("abort", handleAbort, { once: true });
+    if (options.signal?.aborted === true) {
+      handleAbort();
+    }
+    try {
+      await instance.waitUntilExit();
+    } finally {
+      options.signal?.removeEventListener("abort", handleAbort);
+    }
   } finally {
     terminalOutput.dispose();
   }

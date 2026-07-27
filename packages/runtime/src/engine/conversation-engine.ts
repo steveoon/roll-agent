@@ -1,12 +1,14 @@
 import { randomUUID } from "node:crypto";
-import { waitForPromiseSettlement } from "../bounded-wait.ts";
 import type { ModelMessage } from "ai";
 import type {
   LanguageModelV4,
   LanguageModelV4CallOptions,
   SharedV4ProviderOptions,
 } from "@ai-sdk/provider";
-import { McpClientManager } from "@roll-agent/core/mcp/client-manager";
+import {
+  McpClientManager,
+  type McpConnectionAcquisition,
+} from "@roll-agent/core/mcp/client-manager";
 import { createProviderModel } from "@roll-agent/core/llm/providers";
 import { AgentStore } from "@roll-agent/core/registry/store";
 import { resolveTransportWithDevSpawnSpec } from "@roll-agent/core/registry/dev-spawn";
@@ -71,7 +73,9 @@ import { inspectGitVcsContext } from "./vcs-context.ts";
 import { AGENT_BOOTSTRAP_MAX_CONCURRENCY, mapWithBoundedConcurrency } from "./agent-bootstrap.ts";
 
 const DEFAULT_MAX_STEPS = 80;
-const ENGINE_WORK_DRAIN_TIMEOUT_MS = 6_000;
+const ENGINE_CLOSING_MESSAGE = "ConversationEngine is closing";
+const AGENT_BOOTSTRAP_CONNECT_TIMEOUT_MS = 30_000;
+const AGENT_BOOTSTRAP_LIST_TOOLS_TIMEOUT_MS = 60_000;
 
 const AGENT_BOOTSTRAP_ATTEMPT_KINDS = {
   connected: "connected",
@@ -81,11 +85,13 @@ const AGENT_BOOTSTRAP_ATTEMPT_KINDS = {
 export type EnsureAgentReady = (
   agent: RegisteredAgent,
   env: Readonly<Record<string, string>> | undefined,
+  signal?: AbortSignal,
 ) => Promise<void>;
 
 export type AcquireAgentUsage = (
   agent: RegisteredAgent,
   env: Readonly<Record<string, string>> | undefined,
+  signal?: AbortSignal,
 ) => Promise<AgentUsageLease | undefined>;
 
 export interface ConversationEngineOptions {
@@ -150,6 +156,61 @@ type AgentBootstrapAttempt =
       readonly kind: typeof AGENT_BOOTSTRAP_ATTEMPT_KINDS.failed;
       readonly issues: readonly AgentBootstrapIssue[];
     };
+
+interface ConnectAgentSourceOptions {
+  readonly signal?: AbortSignal;
+  readonly deadlineAt?: number;
+}
+
+class AgentBootstrapTimeoutError extends Error {
+  constructor(timeoutMs: number) {
+    super(`Agent bootstrap timed out after ${String(timeoutMs)}ms`);
+    this.name = "AgentBootstrapTimeoutError";
+  }
+}
+
+class AgentBootstrapCleanupError extends AggregateError {
+  readonly cleanupErrors: readonly unknown[];
+
+  constructor(agentName: string, operationError: unknown, cleanupErrors: readonly unknown[]) {
+    const cleanupSummary = cleanupErrors
+      .map((error) => (error instanceof Error ? error.message : String(error)))
+      .join("; ");
+    super(
+      [operationError, ...cleanupErrors],
+      `Agent "${agentName}" bootstrap failed and resource cleanup also failed: ${cleanupSummary}`,
+    );
+    this.name = "AgentBootstrapCleanupError";
+    this.cleanupErrors = cleanupErrors;
+  }
+}
+
+function createEngineClosingError(): Error {
+  return new Error(ENGINE_CLOSING_MESSAGE);
+}
+
+function abortReason(signal: AbortSignal): unknown {
+  return signal.reason ?? new Error("Operation aborted");
+}
+
+function throwIfAborted(signal: AbortSignal | undefined): void {
+  if (signal?.aborted === true) {
+    throw abortReason(signal);
+  }
+}
+
+function remainingStepTimeout(localTimeoutMs: number, deadlineAt: number | undefined): number {
+  if (deadlineAt === undefined) {
+    return localTimeoutMs;
+  }
+  return Math.max(1, Math.min(localTimeoutMs, deadlineAt - Date.now()));
+}
+
+function throwIfDeadlineExpired(deadlineAt: number | undefined): void {
+  if (deadlineAt !== undefined && Date.now() >= deadlineAt) {
+    throw new Error("Agent bootstrap deadline expired");
+  }
+}
 
 function extractAnnotations(listed: unknown): ToolAnnotations | undefined {
   if (typeof listed !== "object" || listed === null || !("annotations" in listed)) {
@@ -250,7 +311,9 @@ async function ensureCoreManagedAgentReady(
   agent: RegisteredAgent,
   dataDir: string,
   env: Readonly<Record<string, string>> | undefined,
+  signal?: AbortSignal,
 ): Promise<void> {
+  throwIfAborted(signal);
   if (agent.runtime.ownership !== "core-managed") {
     return;
   }
@@ -258,7 +321,7 @@ async function ensureCoreManagedAgentReady(
   if (getAgentPid(dataDir, agent.skill.name) === undefined) {
     startAgent(agent, dataDir, env);
   }
-  await waitForAgentReady(agent);
+  await waitForAgentReady(agent, { ...(signal ? { signal } : {}) });
 }
 
 export class ConversationEngine {
@@ -298,6 +361,7 @@ export class ConversationEngine {
   private shellUnsupportedWarned = false;
   private readonly liveSessions = new Map<string, AgentSession>();
   private readonly agentUsageLeases = new Map<string, AgentUsageLease>();
+  private readonly shutdownController = new AbortController();
   private disposePromise: Promise<void> | undefined;
   private closing = false;
 
@@ -313,11 +377,11 @@ export class ConversationEngine {
     this.acquireAgentUsage =
       options.acquireAgentUsage ??
       (options.ensureAgentReady
-        ? async (agent, env) => {
-            await options.ensureAgentReady?.(agent, env);
+        ? async (agent, env, signal) => {
+            await options.ensureAgentReady?.(agent, env, signal);
             return undefined;
           }
-        : (agent, env) => this.acquireDefaultAgentUsage(agent, env));
+        : (agent, env, signal) => this.acquireDefaultAgentUsage(agent, env, signal));
     this.debugEvents = options.debugEvents ?? false;
     this.hostMode = options.hostMode ?? CAPABILITY_HOST_MODES.embedded;
     this.resolveDynamicCapabilityContext = options.resolveDynamicCapabilityContext;
@@ -339,14 +403,16 @@ export class ConversationEngine {
   private async acquireDefaultAgentUsage(
     agent: RegisteredAgent,
     env: Readonly<Record<string, string>> | undefined,
+    signal?: AbortSignal,
   ): Promise<AgentUsageLease | undefined> {
     const lease = await acquireAgentUsageLease(agent, this.config.agents.dataDir, env, {
       holderKind: "chat",
       startIfStopped: true,
+      ...(signal ? { signal } : {}),
     });
     if (lease !== undefined) return lease;
 
-    await ensureCoreManagedAgentReady(agent, this.config.agents.dataDir, env);
+    await ensureCoreManagedAgentReady(agent, this.config.agents.dataDir, env, signal);
     return undefined;
   }
 
@@ -387,7 +453,7 @@ export class ConversationEngine {
 
   private assertAcceptingSessions(): void {
     if (this.closing) {
-      throw new Error("ConversationEngine is closing");
+      throw createEngineClosingError();
     }
   }
 
@@ -554,6 +620,7 @@ export class ConversationEngine {
   }
 
   private async bootstrap(): Promise<EngineContext> {
+    const bootstrapStartedAt = Date.now();
     const model = this.explicitModel ?? this.resolveModel();
     if (this.explicitSources) {
       return {
@@ -563,51 +630,148 @@ export class ConversationEngine {
       };
     }
     const agents = this.explicitAgents ?? new AgentStore(this.config.agents.dataDir).list();
-    if (this.agentInstallEnabled()) {
-      this.resolvedCatalog = await this.resolveCatalogFn(this.config, {
-        allowNetwork: false,
-        ...(this.config.install.registry ? { registry: this.config.install.registry } : {}),
-      });
+    const timeoutMs = this.config.runtime.agentBootstrap.timeoutMs;
+    const deadlineAt = bootstrapStartedAt + timeoutMs;
+    const operationController = new AbortController();
+    const timeoutError = new AgentBootstrapTimeoutError(timeoutMs);
+    let timedOut = false;
+    const abortForClosing = (): void => {
+      if (!operationController.signal.aborted) {
+        operationController.abort(abortReason(this.shutdownController.signal));
+      }
+    };
+    const expireBudgetIfNeeded = (): void => {
+      if (!this.closing && !operationController.signal.aborted && Date.now() >= deadlineAt) {
+        timedOut = true;
+        operationController.abort(timeoutError);
+      }
+    };
+    if (this.shutdownController.signal.aborted) {
+      abortForClosing();
+    } else {
+      this.shutdownController.signal.addEventListener("abort", abortForClosing, { once: true });
     }
-    const attempts = await mapWithBoundedConcurrency(
-      agents,
-      AGENT_BOOTSTRAP_MAX_CONCURRENCY,
-      async (agent): Promise<AgentBootstrapAttempt> => {
-        const issues: AgentBootstrapIssue[] = [];
-        const reportIssue = (issue: AgentBootstrapIssue): void => {
-          issues.push(issue);
-        };
-        try {
-          const source = await this.connectAgentSource(agent, model, reportIssue);
-          return {
-            kind: AGENT_BOOTSTRAP_ATTEMPT_KINDS.connected,
-            source,
-            issues,
-          };
-        } catch (error) {
-          issues.push({
-            agentName: agent.skill.name,
-            message: error instanceof Error ? error.message : String(error),
-          });
-          return {
-            kind: AGENT_BOOTSTRAP_ATTEMPT_KINDS.failed,
-            issues,
-          };
+    const timeoutHandle = setTimeout(
+      () => {
+        if (!this.closing && !operationController.signal.aborted) {
+          timedOut = true;
+          operationController.abort(timeoutError);
         }
       },
+      Math.max(0, deadlineAt - Date.now()),
     );
-    const sources: AgentToolSource[] = [];
-    for (const attempt of attempts) {
-      for (const issue of attempt.issues) {
-        this.onAgentBootstrapIssue?.(issue);
-      }
-      if (attempt.kind === AGENT_BOOTSTRAP_ATTEMPT_KINDS.connected) {
-        sources.push(attempt.source);
-      }
-    }
+    timeoutHandle.unref();
 
-    const skillLibrary = this.resolveSkillLibrary(agents);
-    return { model, sources, ...(skillLibrary ? { skillLibrary } : {}) };
+    const timeoutAttempt = (
+      agent: RegisteredAgent,
+      cleanupError?: AgentBootstrapCleanupError,
+    ): AgentBootstrapAttempt => ({
+      kind: AGENT_BOOTSTRAP_ATTEMPT_KINDS.failed,
+      issues: [
+        {
+          agentName: agent.skill.name,
+          message: timeoutError.message,
+        },
+        ...(cleanupError === undefined
+          ? []
+          : [
+              {
+                agentName: agent.skill.name,
+                message: cleanupError.message,
+              },
+            ]),
+      ],
+    });
+
+    try {
+      if (this.agentInstallEnabled()) {
+        try {
+          this.resolvedCatalog = await this.resolveCatalogFn(this.config, {
+            allowNetwork: false,
+            signal: operationController.signal,
+            ...(this.config.install.registry ? { registry: this.config.install.registry } : {}),
+          });
+        } catch (error) {
+          if (this.closing || this.shutdownController.signal.aborted) {
+            throw createEngineClosingError();
+          }
+          expireBudgetIfNeeded();
+          if (!timedOut) throw error;
+        }
+      }
+      if (this.closing || this.shutdownController.signal.aborted) {
+        throw createEngineClosingError();
+      }
+      expireBudgetIfNeeded();
+      if (agents.length === 0) {
+        const skillLibrary = this.resolveSkillLibrary(agents);
+        return { model, sources: [], ...(skillLibrary ? { skillLibrary } : {}) };
+      }
+      const attempts = await mapWithBoundedConcurrency(
+        agents,
+        AGENT_BOOTSTRAP_MAX_CONCURRENCY,
+        async (agent): Promise<AgentBootstrapAttempt> => {
+          const issues: AgentBootstrapIssue[] = [];
+          const reportIssue = (issue: AgentBootstrapIssue): void => {
+            issues.push(issue);
+          };
+          try {
+            expireBudgetIfNeeded();
+            throwIfAborted(operationController.signal);
+            const source = await this.connectAgentSource(agent, model, reportIssue, {
+              signal: operationController.signal,
+              deadlineAt,
+            });
+            return {
+              kind: AGENT_BOOTSTRAP_ATTEMPT_KINDS.connected,
+              source,
+              issues,
+            };
+          } catch (error) {
+            if (this.closing || this.shutdownController.signal.aborted) {
+              throw createEngineClosingError();
+            }
+            expireBudgetIfNeeded();
+            if (timedOut) {
+              return timeoutAttempt(
+                agent,
+                error instanceof AgentBootstrapCleanupError ? error : undefined,
+              );
+            }
+            issues.push({
+              agentName: agent.skill.name,
+              message: error instanceof Error ? error.message : String(error),
+            });
+            return {
+              kind: AGENT_BOOTSTRAP_ATTEMPT_KINDS.failed,
+              issues,
+            };
+          }
+        },
+        {
+          signal: operationController.signal,
+          onSkipped: (agent) => timeoutAttempt(agent),
+        },
+      );
+      if (this.closing || this.shutdownController.signal.aborted) {
+        throw createEngineClosingError();
+      }
+      const sources: AgentToolSource[] = [];
+      for (const attempt of attempts) {
+        for (const issue of attempt.issues) {
+          this.onAgentBootstrapIssue?.(issue);
+        }
+        if (attempt.kind === AGENT_BOOTSTRAP_ATTEMPT_KINDS.connected) {
+          sources.push(attempt.source);
+        }
+      }
+
+      const skillLibrary = this.resolveSkillLibrary(agents);
+      return { model, sources, ...(skillLibrary ? { skillLibrary } : {}) };
+    } finally {
+      clearTimeout(timeoutHandle);
+      this.shutdownController.signal.removeEventListener("abort", abortForClosing);
+    }
   }
 
   private async connectAgentSource(
@@ -615,28 +779,63 @@ export class ConversationEngine {
     model: LanguageModelV4,
     reportIssue: (issue: AgentBootstrapIssue) => void = (issue) =>
       this.onAgentBootstrapIssue?.(issue),
+    options: ConnectAgentSourceOptions = {},
   ): Promise<AgentToolSource> {
     this.assertAcceptingSessions();
+    throwIfAborted(options.signal);
+    throwIfDeadlineExpired(options.deadlineAt);
     const transport = resolveTransportWithDevSpawnSpec(agent);
     const env = getAgentEnv(this.config, agent.skill.name);
     const existingLease = this.agentUsageLeases.get(agent.skill.name);
-    const acquiredLease =
-      existingLease === undefined ? await this.acquireAgentUsage(agent, env) : undefined;
+    let acquiredLease: AgentUsageLease | undefined;
+    let connectionAcquisition: McpConnectionAcquisition | undefined;
     try {
+      acquiredLease =
+        existingLease === undefined
+          ? await this.acquireAgentUsage(agent, env, options.signal)
+          : undefined;
       this.assertAcceptingSessions();
-      const client = await this.clientManager.connect(
-        agent.skill.name,
-        transport,
-        agent.installPath,
-        {
-          samplingModel: model,
-          ...(this.providerOptions ? { samplingProviderOptions: this.providerOptions } : {}),
-          ...(env ? { env } : {}),
-        },
-      );
+      throwIfAborted(options.signal);
+      throwIfDeadlineExpired(options.deadlineAt);
+      const connectOptions = {
+        timeoutMs: remainingStepTimeout(AGENT_BOOTSTRAP_CONNECT_TIMEOUT_MS, options.deadlineAt),
+        samplingModel: model,
+        ...(this.providerOptions ? { samplingProviderOptions: this.providerOptions } : {}),
+        ...(env ? { env } : {}),
+        ...(options.signal ? { signal: options.signal } : {}),
+      };
+      const connectWithOwnership = this.clientManager.connectWithOwnership;
+      connectionAcquisition =
+        typeof connectWithOwnership === "function"
+          ? await connectWithOwnership.call(
+              this.clientManager,
+              agent.skill.name,
+              transport,
+              agent.installPath,
+              connectOptions,
+            )
+          : {
+              client: await this.clientManager.connect(
+                agent.skill.name,
+                transport,
+                agent.installPath,
+                connectOptions,
+              ),
+              commit: () => {},
+              rollback: async () => {},
+            };
       this.assertAcceptingSessions();
-      const listed = (await client.listTools()).tools;
+      throwIfAborted(options.signal);
+      throwIfDeadlineExpired(options.deadlineAt);
+      const listed = (
+        await connectionAcquisition.client.listTools(undefined, {
+          timeout: remainingStepTimeout(AGENT_BOOTSTRAP_LIST_TOOLS_TIMEOUT_MS, options.deadlineAt),
+          ...(options.signal ? { signal: options.signal } : {}),
+        })
+      ).tools;
       this.assertAcceptingSessions();
+      throwIfAborted(options.signal);
+      throwIfDeadlineExpired(options.deadlineAt);
       const normalized = normalizeListedTools(listed);
       const sourceTools: SourceTool[] = normalized.map((agentTool, index) => {
         const resourceHintExtraction = extractResourceHints(listed[index]);
@@ -652,12 +851,13 @@ export class ConversationEngine {
           ...(resourceHintExtraction.hints ? { resourceHints: resourceHintExtraction.hints } : {}),
         };
       });
+      connectionAcquisition.commit();
       if (acquiredLease !== undefined) {
         this.agentUsageLeases.set(agent.skill.name, acquiredLease);
       }
       return {
         agentName: agent.skill.name,
-        client,
+        client: connectionAcquisition.client,
         tools: sourceTools,
         ...(agent.source ? { agentSource: agent.source.type } : {}),
         transport: transport.type,
@@ -665,9 +865,21 @@ export class ConversationEngine {
         ...(transport.type === "stdio" ? { resourceBaseDir: agent.installPath } : {}),
       };
     } catch (error) {
+      const cleanupErrors: unknown[] = [];
+      if (connectionAcquisition !== undefined) {
+        await connectionAcquisition.rollback().catch((cleanupError: unknown) => {
+          cleanupErrors.push(cleanupError);
+        });
+      }
       if (acquiredLease !== undefined) {
-        await this.clientManager.disconnect(agent.skill.name).catch(() => {});
-        await acquiredLease.release().catch(() => {});
+        const leaseToRelease = acquiredLease;
+        await leaseToRelease.release().catch((cleanupError: unknown) => {
+          this.agentUsageLeases.set(agent.skill.name, leaseToRelease);
+          cleanupErrors.push(cleanupError);
+        });
+      }
+      if (cleanupErrors.length > 0) {
+        throw new AgentBootstrapCleanupError(agent.skill.name, error, cleanupErrors);
       }
       throw error;
     }
@@ -685,7 +897,9 @@ export class ConversationEngine {
 
   private async runAgentRefresh(agent: RegisteredAgent): Promise<SessionAgentRefresh> {
     const context = await this.ensureReady();
-    const source = await this.connectAgentSource(agent, context.model);
+    const source = await this.connectAgentSource(agent, context.model, undefined, {
+      signal: this.shutdownController.signal,
+    });
     const sources = [
       ...context.sources.filter((item) => item.agentName !== source.agentName),
       source,
@@ -901,6 +1115,7 @@ export class ConversationEngine {
       return this.disposePromise;
     }
     this.closing = true;
+    this.shutdownController.abort(createEngineClosingError());
     const pendingEngineWork = Promise.allSettled([
       ...(this.ready ? [this.ready] : []),
       this.refreshChain,
@@ -915,15 +1130,7 @@ export class ConversationEngine {
         closeFailure = { failed: true, error };
       }
       this.liveSessions.clear();
-      const drained = await waitForPromiseSettlement(
-        pendingEngineWork,
-        ENGINE_WORK_DRAIN_TIMEOUT_MS,
-      );
-      if (!drained) {
-        process.stderr.write(
-          `roll chat: Engine 在 ${String(ENGINE_WORK_DRAIN_TIMEOUT_MS)}ms 内未完成在飞初始化，将在其结束后再清理迟到连接\n`,
-        );
-      }
+      await pendingEngineWork;
       let disconnectFailure:
         | { readonly failed: false }
         | { readonly failed: true; readonly error: unknown } = { failed: false };
@@ -933,21 +1140,6 @@ export class ConversationEngine {
         disconnectFailure = { failed: true, error };
       }
       await this.releaseAgentUsageLeases();
-      if (!drained) {
-        pendingEngineWork
-          .then(async () => {
-            try {
-              await this.clientManager.disconnectAll();
-            } finally {
-              await this.releaseAgentUsageLeases();
-            }
-          })
-          .catch((error: unknown) => {
-            process.stderr.write(
-              `roll chat: 迟到 MCP/租约清理失败: ${error instanceof Error ? error.message : String(error)}\n`,
-            );
-          });
-      }
       if (closeFailure.failed && disconnectFailure.failed) {
         throw new AggregateError(
           [closeFailure.error, disconnectFailure.error],

@@ -183,19 +183,23 @@ export async function acquireAgentUsageLease(
     readonly startIfStopped: boolean;
     readonly waitUntilReady?: boolean;
     readonly lifecycleLockTimeoutMs?: number;
+    readonly signal?: AbortSignal;
   },
 ): Promise<AgentUsageLease | undefined> {
+  options.signal?.throwIfAborted();
   if (!isAgentUsageLeaseManaged(agent)) return undefined;
 
   const lifecycleLock = await acquireAgentLifecycleLockWithRetry(
     dataDir,
     agent.skill.name,
     options.lifecycleLockTimeoutMs,
+    options.signal,
   );
   let lease: AgentUsageLease | undefined;
   let runtimeStartedForLease: ManagedAgentRuntimeIdentity | undefined;
   let startedAgentForLease = false;
   try {
+    options.signal?.throwIfAborted();
     let runtime = readVerifiedManagedAgentRuntime(dataDir, agent.skill.name);
     if (runtime === undefined) {
       const reconciled = reconcileLeaseFiles(dataDir, agent.skill.name, undefined);
@@ -207,6 +211,7 @@ export async function acquireAgentUsageLease(
           `Agent "${agent.skill.name}" 当前未运行；请先执行 \`roll agent start ${agent.skill.name}\`。`,
         );
       }
+      options.signal?.throwIfAborted();
       startAgent(agent, dataDir, env, {
         lifecycleLock,
         retention: MANAGED_AGENT_RUNTIME_RETENTIONS.leaseBound,
@@ -228,6 +233,7 @@ export async function acquireAgentUsageLease(
       }
     }
 
+    options.signal?.throwIfAborted();
     const record = createLeaseRecord(agent.skill.name, options.holderKind, runtime.identity);
     const writtenLease = writeLeaseRecord(dataDir, record);
     lease = createLeaseHandle(agent, dataDir, writtenLease, record);
@@ -248,11 +254,12 @@ export async function acquireAgentUsageLease(
     lifecycleLock.release();
   }
 
-  if ((options.waitUntilReady ?? options.startIfStopped) === false) {
-    return lease;
-  }
   try {
-    await waitForAgentReady(agent);
+    options.signal?.throwIfAborted();
+    if ((options.waitUntilReady ?? options.startIfStopped) !== false) {
+      await waitForAgentReady(agent, options.signal ? { signal: options.signal } : {});
+    }
+    options.signal?.throwIfAborted();
     return lease;
   } catch (error) {
     try {
@@ -337,16 +344,19 @@ export async function acquireAgentLifecycleLockWithRetry(
   dataDir: string,
   agentName: string,
   timeoutMs = DEFAULT_LIFECYCLE_LOCK_TIMEOUT_MS,
+  signal?: AbortSignal,
 ): Promise<AgentLifecycleLock> {
+  signal?.throwIfAborted();
   const deadline = Date.now() + timeoutMs;
   while (true) {
     try {
       return acquireAgentLifecycleLock(dataDir, agentName);
     } catch (error) {
+      signal?.throwIfAborted();
       if (!(error instanceof AgentLifecycleBusyError) || Date.now() >= deadline) {
         throw error;
       }
-      await sleep(randomRetryDelayMs());
+      await sleep(randomRetryDelayMs(), signal);
     }
   }
 }
@@ -718,9 +728,20 @@ function formatAgentUsageBusyMessage(
   ].join("\n");
 }
 
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => {
-    setTimeout(resolve, ms);
+function sleep(ms: number, signal?: AbortSignal): Promise<void> {
+  signal?.throwIfAborted();
+  return new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => {
+      signal?.removeEventListener("abort", handleAbort);
+      resolve();
+    }, ms);
+    const handleAbort = (): void => {
+      clearTimeout(timeout);
+      signal?.removeEventListener("abort", handleAbort);
+      reject(signal?.reason);
+    };
+    signal?.addEventListener("abort", handleAbort, { once: true });
+    if (signal?.aborted === true) handleAbort();
   });
 }
 

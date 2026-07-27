@@ -108,3 +108,40 @@ test("mapWithBoundedConcurrency 逆序完成仍按输入顺序返回", async () 
   assert.deepEqual(await mapping, ["first-result", "second-result", "third-result"]);
   assert.deepEqual(completionOrder, ["third", "second", "first"]);
 });
+
+test("mapWithBoundedConcurrency 取消后不再领取排队任务", async () => {
+  const inputs = [0, 1, 2, 3, 4] as const;
+  const controller = new AbortController();
+  const starts = inputs.map(() => Promise.withResolvers<void>());
+  const started: number[] = [];
+  const aborted = new Promise<void>((resolve) => {
+    controller.signal.addEventListener("abort", () => resolve(), { once: true });
+  });
+
+  const mapping = mapWithBoundedConcurrency(
+    inputs,
+    2,
+    async (value, index) => {
+      started.push(value);
+      starts[index]?.resolve();
+      await aborted;
+      return `started-${String(value)}`;
+    },
+    {
+      signal: controller.signal,
+      onSkipped: (value) => `skipped-${String(value)}`,
+    },
+  );
+
+  await Promise.all([starts[0]?.promise, starts[1]?.promise]);
+  controller.abort(new Error("stop"));
+
+  assert.deepEqual(await mapping, [
+    "started-0",
+    "started-1",
+    "skipped-2",
+    "skipped-3",
+    "skipped-4",
+  ]);
+  assert.deepEqual(started, [0, 1]);
+});

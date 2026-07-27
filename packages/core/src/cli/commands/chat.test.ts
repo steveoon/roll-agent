@@ -519,3 +519,100 @@ test("runRepl keeps the prompt stream available around confirmation prompts", as
   assert.deepEqual(confirmationMessages, ["执行 browser-use-agent.click_ref?"]);
   assert.deepEqual(approved, ["approval-1"]);
 });
+
+test("runRepl closes a pending prompt when shutdown is requested", async () => {
+  const input = new PassThrough();
+  const controller = new AbortController();
+  const session = {
+    id: "session-signal",
+    getContextWindow() {
+      return undefined;
+    },
+    getSkillSummaries() {
+      return [];
+    },
+  } as unknown as AgentSession;
+  const store = {
+    updateTitle() {},
+    countMessages() {
+      return 1;
+    },
+    deleteThread() {},
+  } as unknown as Parameters<typeof runRepl>[1];
+
+  const done = runRepl(session, store, false, {
+    input,
+    output: sink(),
+    signal: controller.signal,
+  });
+  await delay(10);
+  controller.abort(new Error("shutdown"));
+
+  await done;
+});
+
+test("runRepl cancels a pending confirmation when shutdown is requested", async () => {
+  const input = new PassThrough();
+  const controller = new AbortController();
+  const confirmStarted = Promise.withResolvers<void>();
+  const rejected: string[] = [];
+  let observedSignal: AbortSignal | undefined;
+  const session = {
+    id: "session-confirm-signal",
+    async *send() {
+      yield {
+        type: "confirmation-required",
+        approvalId: "approval-signal",
+        agentName: "browser-use-agent",
+        toolName: "click_ref",
+        input: {},
+      } satisfies SessionEvent;
+      yield { type: "message-finish", text: "" } satisfies SessionEvent;
+    },
+    approve() {
+      return true;
+    },
+    reject(approvalId: string) {
+      rejected.push(approvalId);
+      return true;
+    },
+    getContextWindow() {
+      return undefined;
+    },
+    getSkillSummaries() {
+      return [];
+    },
+  } as unknown as AgentSession;
+  const store = {
+    updateTitle() {},
+    countMessages() {
+      return 1;
+    },
+    deleteThread() {},
+  } as unknown as Parameters<typeof runRepl>[1];
+
+  const done = runRepl(session, store, false, {
+    input,
+    output: sink(),
+    signal: controller.signal,
+    confirm: async (_message, signal) => {
+      observedSignal = signal;
+      confirmStarted.resolve();
+      if (signal?.aborted === true) {
+        return false;
+      }
+      return await new Promise<boolean>((resolve) => {
+        signal?.addEventListener("abort", () => resolve(false), { once: true });
+      });
+    },
+  });
+  input.write("run\n");
+  await confirmStarted.promise;
+  controller.abort(new Error("shutdown"));
+  input.end();
+
+  await done;
+
+  assert.equal(observedSignal, controller.signal);
+  assert.deepEqual(rejected, ["approval-signal"]);
+});
