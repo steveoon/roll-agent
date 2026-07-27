@@ -660,7 +660,6 @@ export class ConversationEngine {
       },
       Math.max(0, deadlineAt - Date.now()),
     );
-    timeoutHandle.unref();
 
     const timeoutAttempt = (
       agent: RegisteredAgent,
