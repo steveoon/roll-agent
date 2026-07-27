@@ -1,4 +1,4 @@
-export const AGENT_BOOTSTRAP_MAX_CONCURRENCY = 2;
+export const AGENT_BOOTSTRAP_MAX_CONCURRENCY = 4;
 
 export async function mapWithBoundedConcurrency<Input, Output>(
   inputs: readonly Input[],
