@@ -1,5 +1,17 @@
 # @roll-agent/runtime
 
+## 0.10.0
+
+### Minor Changes
+
+- [#172](https://github.com/steveoon/roll-agent/pull/172) [`9743f0b`](https://github.com/steveoon/roll-agent/commit/9743f0bdce77cff3fe10b79278d66193c86cefae) Thanks [@steveoon](https://github.com/steveoon)! - 为 `roll chat` Agent bootstrap 增加可配置的全局超时和端到端取消，确保超时或 Engine
+  关闭时停止排队任务、取消在飞连接，并在返回部分 catalog 前释放新建连接与使用租约。
+
+### Patch Changes
+
+- [#171](https://github.com/steveoon/roll-agent/pull/171) [`78150ab`](https://github.com/steveoon/roll-agent/commit/78150aba296181536017a14a9b172a2484202f2c) Thanks [@steveoon](https://github.com/steveoon)! - 在 `roll chat` 启动时按注册顺序有界并发初始化 Agent，缩短多 Agent catalog bootstrap
+  耗时，同时保持稳定 Tool ID、告警顺序和单 Agent 失败隔离。
+
 ## 0.9.0
 
 ### Minor Changes
