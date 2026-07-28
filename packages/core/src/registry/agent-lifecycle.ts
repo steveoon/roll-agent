@@ -113,10 +113,7 @@ export interface AgentLifecycleCollaborators {
     agent: RegisteredAgent,
     dataDir: string,
   ) => ManagedAgentRuntimeInspection;
-  readonly probe: (
-    agent: RegisteredAgent,
-    options?: { readonly timeoutMs?: number },
-  ) => Promise<void>;
+  readonly probe: typeof probeAgentEndpoint;
   readonly start: (
     agent: RegisteredAgent,
     dataDir: string,
@@ -136,14 +133,7 @@ export interface AgentLifecycleCollaborators {
       readonly lifecycleLock?: AgentLifecycleLock;
     },
   ) => Promise<boolean>;
-  readonly waitUntilReady: (
-    agent: RegisteredAgent,
-    options?: {
-      readonly startupTimeoutMs?: number;
-      readonly probeTimeoutMs?: number;
-      readonly intervalMs?: number;
-    },
-  ) => Promise<void>;
+  readonly waitUntilReady: typeof waitForAgentReady;
   readonly resolveAgentEnv: (
     config: RollConfig,
     agentName: string,
@@ -161,6 +151,7 @@ export interface AgentLifecycleCollaborators {
 
 export interface AgentInspectionOptions {
   readonly probeTimeoutMs?: number;
+  readonly signal?: AbortSignal;
 }
 
 const DEFAULT_COLLABORATORS: AgentLifecycleCollaborators = {
@@ -346,6 +337,7 @@ export class AgentLifecycleService {
             ...browserRuntimeBoundary(agent),
           };
         } catch {
+          options.signal?.throwIfAborted();
           return {
             ...common,
             state: "external-unreachable",
@@ -393,6 +385,7 @@ export class AgentLifecycleService {
             ...browserRuntimeBoundary(agent),
           };
         } catch {
+          options.signal?.throwIfAborted();
           return {
             ...common,
             state: "unreachable",
@@ -652,8 +645,13 @@ function sanitizeEndpointForDisplay(endpoint: string): string {
   }
 }
 
-function probeOptions(options: AgentInspectionOptions): { readonly timeoutMs?: number } {
-  return options.probeTimeoutMs !== undefined ? { timeoutMs: options.probeTimeoutMs } : {};
+function probeOptions(
+  options: AgentInspectionOptions,
+): NonNullable<Parameters<typeof probeAgentEndpoint>[1]> {
+  return {
+    ...(options.probeTimeoutMs !== undefined ? { timeoutMs: options.probeTimeoutMs } : {}),
+    ...(options.signal !== undefined ? { signal: options.signal } : {}),
+  };
 }
 
 function browserRuntimeBoundary(agent: RegisteredAgent): {

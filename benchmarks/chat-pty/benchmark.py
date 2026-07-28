@@ -30,15 +30,33 @@ from dataclasses import dataclass, field
 from typing import Callable, Iterable, Mapping
 
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
-FIXTURE = REPO_ROOT / "benchmarks" / "chat-pty" / "fixture.ts"
+HARNESS_ROOT = Path(__file__).resolve().parents[2]
+REPO_ROOT = Path(
+    os.environ.get("ROLL_CHAT_BENCH_TARGET_ROOT", str(HARNESS_ROOT))
+).resolve()
+FIXTURE = HARNESS_ROOT / "benchmarks" / "chat-pty" / "fixture.ts"
+AGENT_FIXTURE = HARNESS_ROOT / "benchmarks" / "chat-pty" / "agent-fixture.ts"
 CLI_ENTRY = REPO_ROOT / "packages" / "core" / "src" / "cli" / "index.ts"
-DEFAULT_OUTPUT = REPO_ROOT / "outputs" / "chat-pty" / "results.json"
-RESULT_SCHEMA_VERSION = 2
+DEFAULT_OUTPUT = HARNESS_ROOT / "outputs" / "chat-pty" / "results.json"
+RESULT_SCHEMA_VERSION = 3
 SUITE_NAME = "roll-chat-real-pty"
+CLI_SERVER_SCENARIOS = (
+    "cli-bootstrap",
+    "cli-server-1-agent-bootstrap",
+    "cli-server-5-agent-bootstrap",
+)
+CLI_INK_SCENARIOS = ("cli-ink-cold-start", "cli-ink-5-agent-cold-start")
+BOOTSTRAP_DELAYS: Mapping[str, tuple[int, ...]] = {
+    "cli-server-1-agent-bootstrap": (400,),
+    "cli-server-5-agent-bootstrap": (400, 300, 250, 150, 100),
+    "cli-ink-5-agent-cold-start": (400, 300, 250, 150, 100),
+}
 SCENARIOS = (
     "cli-bootstrap",
     "cli-ink-cold-start",
+    "cli-server-1-agent-bootstrap",
+    "cli-server-5-agent-bootstrap",
+    "cli-ink-5-agent-cold-start",
     "fixture-ink-cold-start",
     "keypress",
     "text-stream",
@@ -52,10 +70,16 @@ PROMPT = "›"
 PRIMARY_SCREEN_SENTINEL = "PTY_PRIMARY_SCREEN_RESTORED"
 RESIZE_SENTINELS = ("PTY_USER_4F21", "PTY_ASSIST_91C7", "PTY_DRAFT_7A52")
 TERMINAL_QUERIES = (b"\x1b[?u", b"\x1b[6n", b"\x1b[c")
+SENSITIVE_ENV_NAME = re.compile(
+    r"(?:KEY|TOKEN|SECRET|PASSWORD|CREDENTIAL)", re.IGNORECASE
+)
 
 REQUIRED_BASELINE_METRICS: Mapping[str, tuple[str, ...]] = {
     "cli-bootstrap": ("cliBootstrapReadyMs",),
     "cli-ink-cold-start": ("cliInkFirstInteractiveMs",),
+    "cli-server-1-agent-bootstrap": ("sessionCreateReadyMs",),
+    "cli-server-5-agent-bootstrap": ("sessionCreateReadyMs",),
+    "cli-ink-5-agent-cold-start": ("cliInkFiveAgentFirstInteractiveMs",),
     "fixture-ink-cold-start": ("fixtureInkFirstInteractiveMs",),
     "keypress": ("keypressToRenderMs",),
     "text-stream": (
@@ -78,12 +102,30 @@ REQUIRED_BASELINE_METRICS: Mapping[str, tuple[str, ...]] = {
     "idle": ("invalidFrames", "outputBytes"),
 }
 OPTIONAL_BASELINE_METRICS = {"idle": ("cpuMs",)}
+BOOTSTRAP_COMPARISON_METRICS: Mapping[str, str] = {
+    "cli-server-1-agent-bootstrap": "sessionCreateReadyMs",
+    "cli-server-5-agent-bootstrap": "sessionCreateReadyMs",
+    "cli-ink-5-agent-cold-start": "cliInkFiveAgentFirstInteractiveMs",
+}
+PAIRED_COMPARISON_METRICS: Mapping[str, str] = {
+    "cli-bootstrap": "cliBootstrapReadyMs",
+    "cli-ink-cold-start": "cliInkFirstInteractiveMs",
+    **BOOTSTRAP_COMPARISON_METRICS,
+}
 
 
 def format_exception(error: BaseException) -> str:
     return "".join(
         traceback.format_exception(type(error), error, error.__traceback__)
     ).rstrip()
+
+
+def sanitized_child_env(source: Mapping[str, str]) -> dict[str, str]:
+    return {
+        name: value
+        for name, value in source.items()
+        if SENSITIVE_ENV_NAME.search(name) is None and name != "NO_COLOR"
+    }
 
 
 def percentile(values: list[float], quantile: float) -> float:
@@ -556,6 +598,72 @@ class ScenarioFailure(RuntimeError):
         self.failure_reason = failure_reason
 
 
+def bootstrap_topology(scenario: str) -> tuple[dict[str, object], ...]:
+    delays = BOOTSTRAP_DELAYS.get(scenario, ())
+    return tuple(
+        {
+            "name": f"benchmark-agent-{index + 1}",
+            "delayMs": delay_ms,
+            "tool": "bootstrap_probe",
+            "transport": "stdio",
+            "runtimeOwnership": "on-demand",
+        }
+        for index, delay_ms in enumerate(delays)
+    )
+
+
+def canonical_hash(value: object) -> str:
+    encoded = json.dumps(
+        value, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    ).encode()
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def write_agent_registry(
+    data_dir: Path, lifecycle_dir: Path, topology: tuple[dict[str, object], ...]
+) -> None:
+    data_dir.mkdir(parents=True, exist_ok=True)
+    agents = []
+    for entry in topology:
+        name = str(entry["name"])
+        delay_ms = int(entry["delayMs"])
+        agents.append(
+            {
+                "skill": {
+                    "name": name,
+                    "description": f"Deterministic bootstrap benchmark Agent {name}",
+                    "metadata": {},
+                },
+                "skillBody": f"# {name}\n\nSynthetic bootstrap benchmark fixture.",
+                "transport": {
+                    "type": "stdio",
+                    "command": os.environ.get("NODE", "node"),
+                    "args": [
+                        "--disable-warning=ExperimentalWarning",
+                        "--experimental-strip-types",
+                        str(AGENT_FIXTURE),
+                        "--name",
+                        name,
+                        "--delay-ms",
+                        str(delay_ms),
+                        "--lifecycle-dir",
+                        str(lifecycle_dir),
+                    ],
+                },
+                "runtime": {"ownership": "on-demand"},
+                "installPath": str(AGENT_FIXTURE.parent),
+                "registeredAt": "2026-01-01T00:00:00.000Z",
+                "status": "idle",
+                "source": {"type": "local-path", "path": str(AGENT_FIXTURE.parent)},
+            }
+        )
+    (data_dir / "agents.json").write_text(
+        json.dumps({"schemaVersion": 2, "agents": agents}, ensure_ascii=False, indent=2)
+        + "\n",
+        encoding="utf-8",
+    )
+
+
 class PtyFixture:
     def __init__(self, scenario: str, columns: int = 100, rows: int = 36) -> None:
         master, slave = os.openpty()
@@ -564,15 +672,25 @@ class PtyFixture:
         self.screen.feed(PRIMARY_SCREEN_SENTINEL.encode("utf-8"))
         self.frames: list[Frame] = []
         self.raw_events: list[tuple[float, bytes]] = []
-        self.started_ns = time.monotonic_ns()
+        self.started_ns = 0
         self.last_screen = ""
         self.closed = False
         self.scenario = scenario
         self._terminal_query_tail = b""
+        self._rpc_line_buffer = b""
+        self._rpc_responses: dict[int, list[dict[str, object]]] = {}
+        self._rpc_protocol_error: str | None = None
         self._temporary_directory: tempfile.TemporaryDirectory[str] | None = None
+        self._rpc_id = 0
+        self.topology = bootstrap_topology(scenario)
+        self.topology_hash = canonical_hash(self.topology)
+        self.expected_agent_count = len(self.topology)
+        self._agent_lifecycle_dir: Path | None = None
+        self._final_lifecycle: tuple[dict[str, object], ...] = ()
+        self.forced_cleanup = False
         self._set_winsize(slave, columns, rows)
         env = {
-            **os.environ,
+            **sanitized_child_env(os.environ),
             "TERM": "xterm-256color",
             "COLORTERM": "truecolor",
             "FORCE_COLOR": "1",
@@ -591,10 +709,11 @@ class PtyFixture:
             scenario,
         ]
         cwd = REPO_ROOT
-        if scenario in ("cli-bootstrap", "cli-ink-cold-start"):
+        if scenario in (*CLI_SERVER_SCENARIOS, *CLI_INK_SCENARIOS):
             self._temporary_directory = tempfile.TemporaryDirectory(prefix="roll-chat-cli-")
             cwd = Path(self._temporary_directory.name)
             env["HOME"] = str(cwd)
+            agents_dir = cwd / "agents"
             config = {
                 "llm": {
                     "default-provider": "openai",
@@ -606,7 +725,7 @@ class PtyFixture:
                         }
                     },
                 },
-                "agents": {"data-dir": str(cwd / "agents")},
+                "agents": {"data-dir": str(agents_dir)},
                 "runtime": {
                     "threads-dir": str(cwd / "threads"),
                     "thinking-level": "off",
@@ -615,6 +734,9 @@ class PtyFixture:
             (cwd / "roll.config.yaml").write_text(
                 json.dumps(config, ensure_ascii=False), encoding="utf-8"
             )
+            if self.topology:
+                self._agent_lifecycle_dir = cwd / "agent-lifecycle"
+                write_agent_registry(agents_dir, self._agent_lifecycle_dir, self.topology)
             command = [
                 os.environ.get("NODE", "node"),
                 "--disable-warning=ExperimentalWarning",
@@ -622,17 +744,21 @@ class PtyFixture:
                 str(CLI_ENTRY),
                 "chat",
             ]
-            if scenario == "cli-bootstrap":
+            if scenario in CLI_SERVER_SCENARIOS:
                 command.append("--server")
+        self.started_ns = time.monotonic_ns()
         self.process = subprocess.Popen(
             command,
             cwd=cwd,
             env=env,
-            stdin=slave,
+            stdin=subprocess.PIPE if scenario in CLI_SERVER_SCENARIOS else slave,
             stdout=slave,
             stderr=slave,
             close_fds=True,
             start_new_session=True,
+        )
+        self._server_stdin = (
+            self.process.stdin if scenario in CLI_SERVER_SCENARIOS else None
         )
         os.close(slave)
         os.set_blocking(master, False)
@@ -645,7 +771,212 @@ class PtyFixture:
         return (time.monotonic_ns() - self.started_ns) / 1_000_000
 
     def send(self, text: str) -> None:
-        os.write(self.master, text.encode("utf-8"))
+        encoded = text.encode("utf-8")
+        if self._server_stdin is not None:
+            self._server_stdin.write(encoded)
+            self._server_stdin.flush()
+            return
+        os.write(self.master, encoded)
+
+    def _record_rpc_line(self, line: bytes) -> None:
+        trimmed = line.rstrip(b"\r").strip()
+        if not trimmed.startswith(b"{"):
+            return
+        try:
+            value: object = json.loads(trimmed.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            if b'"jsonrpc"' in trimmed:
+                self._rpc_protocol_error = "malformed JSON-RPC output line"
+            return
+        message = object_mapping(value)
+        if message is None or message.get("jsonrpc") != "2.0":
+            return
+        request_id = message.get("id")
+        if (
+            isinstance(request_id, bool)
+            or not isinstance(request_id, int)
+            or ("result" not in message and "error" not in message)
+        ):
+            return
+        responses = self._rpc_responses.setdefault(request_id, [])
+        responses.append(dict(message))
+        if len(responses) > 1:
+            self._rpc_protocol_error = (
+                f"duplicate JSON-RPC responses for id {request_id}"
+            )
+
+    def _feed_rpc_output(self, chunk: bytes) -> None:
+        combined = self._rpc_line_buffer + chunk
+        lines = combined.split(b"\n")
+        self._rpc_line_buffer = lines.pop()
+        for line in lines:
+            self._record_rpc_line(line)
+
+    def rpc_request(
+        self, method: str, params: Mapping[str, object], timeout: float = 15
+    ) -> tuple[dict[str, object], float]:
+        self._rpc_id += 1
+        request_id = self._rpc_id
+        started_ms = self.elapsed_ms()
+        self.send(
+            json.dumps(
+                {
+                    "jsonrpc": "2.0",
+                    "id": request_id,
+                    "method": method,
+                    "params": dict(params),
+                },
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
+            + "\n"
+        )
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if self._rpc_protocol_error is not None:
+                raise AssertionError(self._rpc_protocol_error)
+            responses = self._rpc_responses.get(request_id, [])
+            if len(responses) == 1:
+                response = responses[0]
+                if "error" in response:
+                    raise AssertionError(
+                        f"JSON-RPC {method} failed: {json.dumps(response['error'], ensure_ascii=False)}"
+                    )
+                return response, self.elapsed_ms() - started_ms
+            self.pump(min(0.05, max(0.0, deadline - time.monotonic())))
+            if self.process.poll() is not None:
+                raise AssertionError(
+                    f"fixture exited before JSON-RPC {method} response "
+                    f"(status={self.process.returncode})"
+                )
+        raise AssertionError(f"timed out waiting for JSON-RPC {method} response")
+
+    def agent_lifecycle(self) -> tuple[dict[str, object], ...]:
+        if self._agent_lifecycle_dir is None or not self._agent_lifecycle_dir.exists():
+            return ()
+        records: list[dict[str, object]] = []
+        for path in sorted(self._agent_lifecycle_dir.glob("*.json")):
+            try:
+                value: object = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError) as error:
+                raise AssertionError(
+                    f"invalid Agent fixture lifecycle file: {path}: {error}"
+                ) from error
+            record = object_mapping(value)
+            if record is None:
+                raise AssertionError(f"Agent fixture lifecycle must be an object: {path}")
+            records.append(dict(record))
+        return tuple(records)
+
+    @staticmethod
+    def _pid_is_alive(pid: int) -> bool:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            return True
+        return True
+
+    def validate_agent_lifecycle(self, require_exited: bool) -> int:
+        records = self.agent_lifecycle()
+        if len(records) != self.expected_agent_count:
+            raise AssertionError(
+                "Agent fixture lifecycle count differs "
+                f"(actual={len(records)}, expected={self.expected_agent_count})"
+            )
+        intervals: list[tuple[int, int]] = []
+        pids: list[int] = []
+        expected_events = ["started", "list-start", "list-end"]
+        if require_exited:
+            expected_events.append("exited")
+        for record, topology in zip(records, self.topology):
+            if (
+                record.get("name") != topology["name"]
+                or record.get("delayMs") != topology["delayMs"]
+                or record.get("toolCount") != 1
+            ):
+                raise AssertionError(
+                    f"Agent lifecycle metadata differs: {json.dumps(record, ensure_ascii=False)}"
+                )
+            pid = record.get("pid")
+            raw_events = record.get("events")
+            if isinstance(pid, bool) or not isinstance(pid, int) or not isinstance(
+                raw_events, list
+            ):
+                raise AssertionError("Agent lifecycle is missing pid or events")
+            event_names: list[object] = []
+            timestamps: list[int] = []
+            for raw_event in raw_events:
+                event = object_mapping(raw_event)
+                if event is None:
+                    raise AssertionError("Agent lifecycle event must be an object")
+                event_names.append(event.get("event"))
+                timestamp = event.get("monotonicNs")
+                if not isinstance(timestamp, str) or not timestamp.isdigit():
+                    raise AssertionError("Agent lifecycle timestamp must be a numeric string")
+                timestamps.append(int(timestamp))
+            if event_names != expected_events:
+                raise AssertionError(
+                    f"Agent lifecycle sequence differs for {record.get('name')}: "
+                    f"{event_names} != {expected_events}"
+                )
+            if timestamps != sorted(timestamps):
+                raise AssertionError("Agent lifecycle timestamps are not monotonic")
+            intervals.append((timestamps[1], timestamps[2]))
+            pids.append(pid)
+        if require_exited:
+            alive = [pid for pid in pids if self._pid_is_alive(pid)]
+            if alive:
+                raise AssertionError(
+                    f"orphan Agent fixture processes remain after clean EOF: {alive}"
+                )
+        else:
+            not_alive = [pid for pid in pids if not self._pid_is_alive(pid)]
+            if not_alive:
+                raise AssertionError(
+                    f"Agent fixture exited before session readiness: {not_alive}"
+                )
+        points = sorted(
+            [
+                point
+                for started, ended in intervals
+                for point in ((started, 1), (ended, -1))
+            ],
+            key=lambda point: (point[0], point[1]),
+        )
+        active = 0
+        peak = 0
+        for _, delta in points:
+            active += delta
+            peak = max(peak, active)
+        return peak
+
+    def assert_agent_processes_stopped(self, timeout: float = 2) -> None:
+        initial = self.agent_lifecycle()
+        pids = [
+            int(record["pid"])
+            for record in initial
+            if isinstance(record.get("pid"), int)
+            and not isinstance(record.get("pid"), bool)
+        ]
+        deadline = time.monotonic() + timeout
+        alive = [pid for pid in pids if self._pid_is_alive(pid)]
+        while alive and time.monotonic() < deadline:
+            time.sleep(0.02)
+            alive = [pid for pid in alive if self._pid_is_alive(pid)]
+        if alive:
+            raise AssertionError(f"orphan Agent fixture processes remain after cleanup: {alive}")
+        self._final_lifecycle = self.agent_lifecycle()
+        self.validate_agent_lifecycle(require_exited=True)
+
+    def cleanup_metrics(self) -> dict[str, object]:
+        return {
+            "cleanExit": self.process.returncode == 0,
+            "forcedCleanup": self.forced_cleanup,
+            "orphanAgentProcesses": 0,
+            "agentExitCount": len(self._final_lifecycle),
+        }
 
     def resize(self, columns: int, rows: int) -> None:
         self._set_winsize(self.master, columns, rows)
@@ -715,6 +1046,8 @@ class PtyFixture:
                 break
             elapsed = self.elapsed_ms()
             self.raw_events.append((elapsed, chunk))
+            if getattr(self, "scenario", "") in CLI_SERVER_SCENARIOS:
+                self._feed_rpc_output(chunk)
             # A real terminal answers each query after applying only the bytes that
             # precede it. PTY chunk boundaries do not preserve that ordering for us.
             self._respond_to_terminal_queries(chunk)
@@ -838,20 +1171,33 @@ class PtyFixture:
         if failures:
             raise AssertionError("terminal cleanup failed: " + "; ".join(failures))
 
-    def exit_cleanly(self) -> None:
-        if self.process.poll() is None and self.scenario == "cli-bootstrap":
+    def _wait_for_process_exit(self, timeout: float) -> bool:
+        deadline = time.monotonic() + timeout
+        while self.process.poll() is None and time.monotonic() < deadline:
+            self.pump(min(0.03, max(0.0, deadline - time.monotonic())))
+        return self.process.poll() is not None
+
+    def _force_process_cleanup(self) -> None:
+        self.forced_cleanup = True
+        try:
+            os.killpg(self.process.pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+        if not self._wait_for_process_exit(1):
             try:
-                os.killpg(self.process.pid, signal.SIGTERM)
+                os.killpg(self.process.pid, signal.SIGKILL)
             except ProcessLookupError:
                 pass
-            try:
-                self.process.wait(timeout=2)
-            except subprocess.TimeoutExpired:
-                try:
-                    os.killpg(self.process.pid, signal.SIGKILL)
-                except ProcessLookupError:
-                    pass
-                self.process.wait(timeout=1)
+            self.process.wait(timeout=1)
+
+    def exit_cleanly(self) -> None:
+        if self.process.poll() is None and self.scenario in CLI_SERVER_SCENARIOS:
+            if self._server_stdin is None:
+                raise AssertionError("runtime-server stdin pipe is unavailable for clean EOF")
+            self._server_stdin.close()
+            self._server_stdin = None
+            if not self._wait_for_process_exit(5):
+                self._force_process_cleanup()
         elif self.process.poll() is None:
             try:
                 # Clear any draft left by the keypress scenario before invoking the
@@ -870,25 +1216,20 @@ class PtyFixture:
                 if self.process.poll() is None:
                     raise subprocess.TimeoutExpired(self.process.args, 2)
             except (OSError, subprocess.TimeoutExpired):
-                try:
-                    os.killpg(self.process.pid, signal.SIGTERM)
-                except ProcessLookupError:
-                    pass
-                try:
-                    self.process.wait(timeout=1)
-                except subprocess.TimeoutExpired:
-                    try:
-                        os.killpg(self.process.pid, signal.SIGKILL)
-                    except ProcessLookupError:
-                        pass
-                    self.process.wait(timeout=1)
+                self._force_process_cleanup()
         try:
             self.drain_for(0.05)
+            if self.expected_agent_count > 0:
+                self.assert_agent_processes_stopped()
             if not self.closed:
                 os.close(self.master)
                 self.closed = True
-            if self.process.returncode not in (0, -signal.SIGTERM, -signal.SIGKILL):
+            if self.process.returncode != 0:
                 raise AssertionError(f"fixture exited with status {self.process.returncode}")
+            if self.forced_cleanup:
+                raise AssertionError(
+                    "fixture required TERM/KILL fallback instead of protocol-driven cleanup"
+                )
         finally:
             if self._temporary_directory is not None:
                 temporary_directory = self._temporary_directory
@@ -900,11 +1241,7 @@ class PtyFixture:
             self.exit_cleanly()
         except Exception:
             if self.process.poll() is None:
-                try:
-                    os.killpg(self.process.pid, signal.SIGKILL)
-                except ProcessLookupError:
-                    pass
-                self.process.wait(timeout=1)
+                self._force_process_cleanup()
             if not self.closed:
                 os.close(self.master)
                 self.closed = True
@@ -988,7 +1325,99 @@ def assert_unique_sentinels(label: str, screen: str, sentinels: Iterable[str]) -
         raise AssertionError(f"{label} sentinel counts are not unique: {invalid}\n{screen}")
 
 
-def run_scenario(scenario: str) -> tuple[dict[str, float | int | bool], PtyFixture]:
+def expected_agent_catalog(
+    topology: tuple[dict[str, object], ...],
+) -> tuple[dict[str, object], ...]:
+    return tuple(
+        {
+            "id": f"{entry['name']}__{entry['tool']}",
+            "agentName": entry["name"],
+            "toolName": entry["tool"],
+            "source": "local-path",
+            "transport": entry["transport"],
+            "runtimeOwnership": entry["runtimeOwnership"],
+        }
+        for entry in topology
+    )
+
+
+def assert_no_bootstrap_issues(fixture: PtyFixture) -> None:
+    output = b"".join(chunk for _, chunk in fixture.raw_events).decode("utf-8", "replace")
+    if re.search(r'Agent\s+"[^"]+"\s+启动失败', output) is not None:
+        raise AssertionError(f"Agent bootstrap issue was reported\n{output}")
+
+
+def validate_capabilities(
+    response: Mapping[str, object], topology: tuple[dict[str, object], ...]
+) -> str:
+    result = object_mapping(response.get("result"))
+    manifest = object_mapping(result.get("manifest")) if result is not None else None
+    if result is None:
+        raise AssertionError("session.capabilities result must be an object")
+    if manifest is None:
+        raise AssertionError("session.capabilities response is missing manifest")
+    turn_context_value = result.get("turnContext")
+    if turn_context_value is not None and object_mapping(turn_context_value) is None:
+        raise AssertionError(
+            "session.capabilities turnContext must be an object when present"
+        )
+    turn_context = object_mapping(turn_context_value)
+    if manifest.get("agentCount") != len(topology):
+        raise AssertionError(
+            "session.capabilities Agent count differs "
+            f"(actual={manifest.get('agentCount')!r}, expected={len(topology)})"
+        )
+    raw_tools = manifest.get("tools")
+    if not isinstance(raw_tools, list):
+        raise AssertionError("session.capabilities manifest.tools must be an array")
+    expected = expected_agent_catalog(topology)
+    agent_capabilities: list[dict[str, object]] = []
+    for value in raw_tools:
+        tool = object_mapping(value)
+        if tool is None:
+            raise AssertionError(
+                "session.capabilities manifest.tools entries must be objects"
+            )
+        if tool.get("source") == "built-in":
+            continue
+        agent_capabilities.append(dict(tool))
+    actual_identities = [
+        {
+            key: tool.get(key)
+            for key in (
+                "id",
+                "agentName",
+                "toolName",
+                "source",
+                "transport",
+                "runtimeOwnership",
+            )
+        }
+        for tool in agent_capabilities
+    ]
+    if actual_identities != list(expected):
+        raise AssertionError(
+            "session.capabilities Agent Tool catalog differs "
+            f"(actual={json.dumps(actual_identities, ensure_ascii=False)}, "
+            f"expected={json.dumps(expected, ensure_ascii=False)})"
+        )
+    if turn_context is not None:
+        effective_tool_ids = turn_context.get("effectiveToolIds")
+        if not isinstance(effective_tool_ids, list) or not all(
+            entry["id"] in effective_tool_ids for entry in expected
+        ):
+            raise AssertionError(
+                "session.capabilities turnContext is missing expected Agent Tool ids"
+            )
+    return canonical_hash(
+        {
+            "agentCount": len(topology),
+            "tools": agent_capabilities,
+        }
+    )
+
+
+def run_scenario(scenario: str) -> tuple[dict[str, object], PtyFixture]:
     fixture = PtyFixture(scenario)
     try:
         if scenario == "cli-bootstrap":
@@ -1001,6 +1430,43 @@ def run_scenario(scenario: str) -> tuple[dict[str, float | int | bool], PtyFixtu
                 "cliBootstrapReadyMs": ready_ms,
                 "configLoaded": True,
                 "runtimeServerStarted": True,
+            }, fixture
+
+        if scenario in (
+            "cli-server-1-agent-bootstrap",
+            "cli-server-5-agent-bootstrap",
+        ):
+            fixture.wait_for(
+                lambda screen: "roll runtime-server 已启动" in screen,
+                8,
+                "production CLI runtime-server readiness",
+            )
+            create_response, create_ms = fixture.rpc_request(
+                "session.create", {"title": "PTY bootstrap benchmark"}, timeout=20
+            )
+            create_result = object_mapping(create_response.get("result"))
+            session_id = (
+                create_result.get("sessionId") if create_result is not None else None
+            )
+            if not isinstance(session_id, str) or not session_id:
+                raise AssertionError("session.create response is missing sessionId")
+            capabilities, _ = fixture.rpc_request(
+                "session.capabilities", {"sessionId": session_id}, timeout=5
+            )
+            catalog_hash = validate_capabilities(capabilities, fixture.topology)
+            peak_active = fixture.validate_agent_lifecycle(require_exited=False)
+            assert_no_bootstrap_issues(fixture)
+            fixture.rpc_request("session.close", {"sessionId": session_id}, timeout=5)
+            return {
+                "sessionCreateReadyMs": create_ms,
+                "agentCount": fixture.expected_agent_count,
+                "toolCount": fixture.expected_agent_count,
+                "sessionCapabilitiesAvailable": True,
+                "bootstrapIssues": 0,
+                "peakActive": peak_active,
+                "lifecycleValidated": True,
+                "topologyHash": fixture.topology_hash,
+                "catalogHash": catalog_hash,
             }, fixture
 
         if scenario == "cli-ink-cold-start":
@@ -1033,6 +1499,31 @@ def run_scenario(scenario: str) -> tuple[dict[str, float | int | bool], PtyFixtu
                 "cliInkFirstInteractiveMs": ready_ms,
                 "productionCliStarted": True,
                 "interactivePromptReady": True,
+            }, fixture
+
+        if scenario == "cli-ink-5-agent-cold-start":
+            ready_ms = fixture.wait_for(
+                lambda screen: PROMPT in screen and "5 agents" in screen,
+                20,
+                "production CLI Ink prompt with five-Agent banner",
+            )
+            peak_active = fixture.validate_agent_lifecycle(require_exited=False)
+            assert_no_bootstrap_issues(fixture)
+            final_screen = fixture.screen.render()
+            assert_prompt(final_screen)
+            if final_screen.count("5 agents") != 1:
+                raise AssertionError(
+                    "production CLI Ink banner does not contain exactly one five-Agent marker"
+                )
+            return {
+                "cliInkFiveAgentFirstInteractiveMs": ready_ms,
+                "agentCount": fixture.expected_agent_count,
+                "toolCount": fixture.expected_agent_count,
+                "agentBannerReady": True,
+                "bootstrapIssues": 0,
+                "peakActive": peak_active,
+                "lifecycleValidated": True,
+                "topologyHash": fixture.topology_hash,
             }, fixture
 
         ready_ms = fixture.wait_for(lambda screen: PROMPT in screen, 6, "first interactive prompt")
@@ -1396,6 +1887,19 @@ def aggregate(samples: list[dict[str, object]]) -> dict[str, object]:
     return metrics
 
 
+def stable_sample_string(samples: list[dict[str, object]], key: str) -> str | None:
+    values = [sample.get(key) for sample in samples]
+    present = [value for value in values if value is not None]
+    if not present:
+        return None
+    if len(present) != len(values) or not all(isinstance(value, str) for value in present):
+        raise AssertionError(f"sample invariant {key} must be a string in every sample")
+    unique = set(present)
+    if len(unique) != 1:
+        raise AssertionError(f"sample invariant {key} is unstable: {sorted(unique)}")
+    return str(present[0])
+
+
 def object_mapping(value: object) -> Mapping[str, object] | None:
     return value if isinstance(value, dict) else None
 
@@ -1408,6 +1912,302 @@ def metric_median(metrics: Mapping[str, object], metric: str) -> float | None:
     if isinstance(median, bool) or not isinstance(median, (int, float)):
         return None
     return float(median)
+
+
+def metric_stat(
+    scenario: Mapping[str, object], metric: str, statistic: str
+) -> float | None:
+    metrics = object_mapping(scenario.get("metrics"))
+    metric_stats = (
+        object_mapping(metrics.get(metric)) if metrics is not None else None
+    )
+    value = metric_stats.get(statistic) if metric_stats is not None else None
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return float(value)
+
+
+def comparison_delta(baseline: float, candidate: float) -> dict[str, float]:
+    percent = (
+        ((candidate - baseline) / baseline) * 100
+        if baseline != 0
+        else (0.0 if candidate == 0 else math.inf)
+    )
+    return {
+        "baselineMs": round(baseline, 3),
+        "candidateMs": round(candidate, 3),
+        "absoluteDeltaMs": round(candidate - baseline, 3),
+        "percentDelta": round(percent, 3),
+    }
+
+
+def compare_bootstrap_results(
+    current: Mapping[str, object], baseline: Mapping[str, object]
+) -> tuple[dict[str, object], list[str]]:
+    current_scenarios = object_mapping(current.get("scenarios"))
+    baseline_scenarios = object_mapping(baseline.get("scenarios"))
+    if current_scenarios is None or baseline_scenarios is None:
+        return {}, ["bootstrap comparison requires scenario objects in both results"]
+
+    comparisons: dict[str, object] = {}
+    failures: list[str] = []
+    for scenario, metric in PAIRED_COMPARISON_METRICS.items():
+        current_value = current_scenarios.get(scenario)
+        if current_value is None:
+            continue
+        current_scenario = object_mapping(current_value)
+        baseline_scenario = object_mapping(baseline_scenarios.get(scenario))
+        if current_scenario is None:
+            failures.append(f"bootstrap comparison current scenario is invalid: {scenario}")
+            continue
+        if baseline_scenario is None:
+            failures.append(f"bootstrap comparison baseline missing scenario: {scenario}")
+            continue
+
+        topology_required = scenario in BOOTSTRAP_COMPARISON_METRICS
+        current_topology = current_scenario.get("topologyHash")
+        baseline_topology = baseline_scenario.get("topologyHash")
+        if topology_required:
+            if (
+                not isinstance(current_topology, str)
+                or not isinstance(baseline_topology, str)
+                or current_topology != baseline_topology
+            ):
+                failures.append(
+                    f"bootstrap comparison topologyHash mismatch: {scenario} "
+                    f"({current_topology!r} != {baseline_topology!r})"
+                )
+                continue
+        elif current_topology is not None or baseline_topology is not None:
+            failures.append(
+                f"bootstrap comparison unexpected topologyHash for zero-Agent scenario: {scenario}"
+            )
+            continue
+
+        current_catalog = current_scenario.get("catalogHash")
+        baseline_catalog = baseline_scenario.get("catalogHash")
+        catalog_required = scenario in (
+            "cli-server-1-agent-bootstrap",
+            "cli-server-5-agent-bootstrap",
+        )
+        if catalog_required and (
+            not isinstance(current_catalog, str)
+            or not isinstance(baseline_catalog, str)
+            or current_catalog != baseline_catalog
+        ):
+            failures.append(
+                f"bootstrap comparison catalogHash mismatch: {scenario} "
+                f"({current_catalog!r} != {baseline_catalog!r})"
+            )
+            continue
+        if not catalog_required and (
+            current_catalog is not None or baseline_catalog is not None
+        ):
+            failures.append(
+                f"bootstrap comparison unexpected catalogHash for Ink scenario: {scenario}"
+            )
+            continue
+
+        current_median = metric_stat(current_scenario, metric, "median")
+        baseline_median = metric_stat(baseline_scenario, metric, "median")
+        current_p95 = metric_stat(current_scenario, metric, "p95")
+        baseline_p95 = metric_stat(baseline_scenario, metric, "p95")
+        if None in (current_median, baseline_median, current_p95, baseline_p95):
+            failures.append(
+                f"bootstrap comparison metric is missing or non-numeric: {scenario}.{metric}"
+            )
+            continue
+
+        current_samples = current_scenario.get("samples")
+        baseline_samples = baseline_scenario.get("samples")
+        if not isinstance(current_samples, list) or not isinstance(baseline_samples, list):
+            failures.append(f"bootstrap comparison samples are missing: {scenario}")
+            continue
+        if len(current_samples) == 0 or len(current_samples) != len(baseline_samples):
+            failures.append(
+                f"bootstrap comparison sample count mismatch: {scenario} "
+                f"({len(current_samples)} != {len(baseline_samples)})"
+            )
+            continue
+        pairs: list[tuple[float, float]] = []
+        invalid_pair = False
+        for index, (current_sample, baseline_sample) in enumerate(
+            zip(current_samples, baseline_samples)
+        ):
+            current_mapping = object_mapping(current_sample)
+            baseline_mapping = object_mapping(baseline_sample)
+            current_metric = (
+                current_mapping.get(metric) if current_mapping is not None else None
+            )
+            baseline_metric = (
+                baseline_mapping.get(metric) if baseline_mapping is not None else None
+            )
+            if (
+                isinstance(current_metric, bool)
+                or not isinstance(current_metric, (int, float))
+                or isinstance(baseline_metric, bool)
+                or not isinstance(baseline_metric, (int, float))
+            ):
+                failures.append(
+                    f"bootstrap comparison sample metric is invalid: "
+                    f"{scenario}.samples[{index}].{metric}"
+                )
+                invalid_pair = True
+                break
+            pairs.append((float(baseline_metric), float(current_metric)))
+        if invalid_pair:
+            continue
+
+        comparisons[scenario] = {
+            "metric": metric,
+            **({"topologyHash": current_topology} if topology_required else {}),
+            **({"catalogHash": current_catalog} if catalog_required else {}),
+            "pairCount": len(pairs),
+            "fasterPairCount": sum(
+                1 for baseline_sample, current_sample in pairs if current_sample < baseline_sample
+            ),
+            "median": comparison_delta(baseline_median, current_median),
+            "p95": comparison_delta(baseline_p95, current_p95),
+        }
+    return comparisons, failures
+
+
+def evaluate_go_no_go(
+    comparisons: Mapping[str, object],
+    candidate: Mapping[str, object],
+    candidate_concurrency: int,
+) -> dict[str, object]:
+    checks: list[dict[str, object]] = []
+
+    def add(name: str, passed: bool, actual: object, required: str) -> None:
+        checks.append(
+            {
+                "name": name,
+                "passed": passed,
+                "actual": actual,
+                "required": required,
+            }
+        )
+
+    def comparison(scenario: str) -> Mapping[str, object] | None:
+        return object_mapping(comparisons.get(scenario))
+
+    for scenario, minimum_percent, minimum_ms in (
+        ("cli-server-5-agent-bootstrap", 20.0, 200.0),
+        ("cli-ink-5-agent-cold-start", 15.0, 150.0),
+    ):
+        value = comparison(scenario)
+        median = object_mapping(value.get("median")) if value is not None else None
+        p95 = object_mapping(value.get("p95")) if value is not None else None
+        median_delta = median.get("absoluteDeltaMs") if median is not None else None
+        median_percent = median.get("percentDelta") if median is not None else None
+        p95_delta = p95.get("absoluteDeltaMs") if p95 is not None else None
+        faster = value.get("fasterPairCount") if value is not None else None
+        pair_count = value.get("pairCount") if value is not None else None
+        add(
+            f"{scenario}.median-improvement",
+            isinstance(median_delta, (int, float))
+            and not isinstance(median_delta, bool)
+            and isinstance(median_percent, (int, float))
+            and not isinstance(median_percent, bool)
+            and median_delta <= -minimum_ms
+            and median_percent <= -minimum_percent,
+            {
+                "absoluteMs": median_delta,
+                "percent": median_percent,
+            },
+            f">= {minimum_ms:.0f}ms and >= {minimum_percent:.0f}%",
+        )
+        add(
+            f"{scenario}.paired-stability",
+            pair_count == 30
+            and isinstance(faster, int)
+            and not isinstance(faster, bool)
+            and faster >= 24,
+            {"fasterPairCount": faster, "pairCount": pair_count},
+            ">= 24/30 candidate-faster pairs",
+        )
+        add(
+            f"{scenario}.p95",
+            isinstance(p95_delta, (int, float))
+            and not isinstance(p95_delta, bool)
+            and p95_delta <= 0,
+            p95_delta,
+            "no regression",
+        )
+
+    for scenario in (
+        "cli-bootstrap",
+        "cli-ink-cold-start",
+        "cli-server-1-agent-bootstrap",
+    ):
+        value = comparison(scenario)
+        median = object_mapping(value.get("median")) if value is not None else None
+        baseline_ms = median.get("baselineMs") if median is not None else None
+        delta_ms = median.get("absoluteDeltaMs") if median is not None else None
+        allowed = (
+            max(float(baseline_ms) * 0.05, 20.0)
+            if isinstance(baseline_ms, (int, float))
+            and not isinstance(baseline_ms, bool)
+            else None
+        )
+        add(
+            f"{scenario}.median-regression",
+            allowed is not None
+            and isinstance(delta_ms, (int, float))
+            and not isinstance(delta_ms, bool)
+            and delta_ms <= allowed,
+            {"absoluteDeltaMs": delta_ms, "allowedMs": allowed},
+            "<= max(5%, 20ms)",
+        )
+
+    one_agent = comparison("cli-server-1-agent-bootstrap")
+    one_p95 = object_mapping(one_agent.get("p95")) if one_agent is not None else None
+    one_p95_percent = one_p95.get("percentDelta") if one_p95 is not None else None
+    add(
+        "cli-server-1-agent-bootstrap.p95-regression",
+        isinstance(one_p95_percent, (int, float))
+        and not isinstance(one_p95_percent, bool)
+        and one_p95_percent <= 10,
+        one_p95_percent,
+        "<= 10%",
+    )
+
+    candidate_scenarios = object_mapping(candidate.get("scenarios"))
+    for scenario in (
+        "cli-server-5-agent-bootstrap",
+        "cli-ink-5-agent-cold-start",
+    ):
+        scenario_value = (
+            object_mapping(candidate_scenarios.get(scenario))
+            if candidate_scenarios is not None
+            else None
+        )
+        minimum_peak = (
+            metric_stat(scenario_value, "peakActive", "min")
+            if scenario_value is not None
+            else None
+        )
+        maximum_peak = (
+            metric_stat(scenario_value, "peakActive", "max")
+            if scenario_value is not None
+            else None
+        )
+        add(
+            f"{scenario}.peak-active",
+            minimum_peak is not None
+            and maximum_peak is not None
+            and 1 < minimum_peak
+            and maximum_peak <= candidate_concurrency,
+            {"min": minimum_peak, "max": maximum_peak},
+            f"every sample has 1 < peakActive <= {candidate_concurrency}",
+        )
+
+    return {
+        "passed": all(bool(check["passed"]) for check in checks),
+        "candidateConcurrency": candidate_concurrency,
+        "checks": checks,
+    }
 
 
 def compare_baseline(
@@ -1511,6 +2311,214 @@ def environment() -> dict[str, object]:
     }
 
 
+def build_scenario_result(samples: list[dict[str, object]]) -> dict[str, object]:
+    scenario_result: dict[str, object] = {
+        "samples": samples,
+        "metrics": aggregate(samples),
+    }
+    for invariant in ("topologyHash", "catalogHash"):
+        value = stable_sample_string(samples, invariant)
+        if value is not None:
+            scenario_result[invariant] = value
+    return scenario_result
+
+
+def run_paired_member_sample(
+    target_root: Path,
+    scenario: str,
+    output_path: Path,
+) -> tuple[dict[str, object], Mapping[str, object]]:
+    env = {
+        **sanitized_child_env(os.environ),
+        "ROLL_CHAT_BENCH_TARGET_ROOT": str(target_root),
+    }
+    completed = subprocess.run(
+        [
+            sys.executable,
+            str(Path(__file__).resolve()),
+            "--samples",
+            "1",
+            "--check",
+            "--scenario",
+            scenario,
+            "--output",
+            str(output_path),
+        ],
+        cwd=HARNESS_ROOT,
+        env=env,
+        text=True,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        timeout=45,
+    )
+    if completed.returncode != 0:
+        raise RuntimeError(
+            f"paired benchmark member failed for {target_root} / {scenario}:\n"
+            f"{completed.stderr.rstrip()}"
+        )
+    value: object = json.loads(output_path.read_text(encoding="utf-8"))
+    result = object_mapping(value)
+    scenarios = object_mapping(result.get("scenarios")) if result is not None else None
+    scenario_result = (
+        object_mapping(scenarios.get(scenario)) if scenarios is not None else None
+    )
+    samples = scenario_result.get("samples") if scenario_result is not None else None
+    if not isinstance(samples, list) or len(samples) != 1:
+        raise RuntimeError(
+            f"paired benchmark member returned invalid samples for {scenario}"
+        )
+    sample = object_mapping(samples[0])
+    member_environment = (
+        object_mapping(result.get("environment")) if result is not None else None
+    )
+    if sample is None or member_environment is None:
+        raise RuntimeError(
+            f"paired benchmark member returned invalid result for {scenario}"
+        )
+    return (
+        {key: entry for key, entry in sample.items() if key != "artifacts"},
+        member_environment,
+    )
+
+
+def run_paired_benchmark(args: argparse.Namespace) -> int:
+    baseline_root = args.paired_baseline_root.resolve()
+    candidate_root = args.paired_candidate_root.resolve()
+    for label, target_root in (
+        ("baseline", baseline_root),
+        ("candidate", candidate_root),
+    ):
+        entry = target_root / "packages" / "core" / "src" / "cli" / "index.ts"
+        if not entry.is_file():
+            print(
+                f"paired {label} root does not contain the Roll CLI entrypoint: {entry}",
+                file=sys.stderr,
+            )
+            return 2
+    selected = tuple(args.scenarios or PAIRED_COMPARISON_METRICS)
+    unsupported = [
+        scenario
+        for scenario in selected
+        if scenario not in PAIRED_COMPARISON_METRICS
+    ]
+    if unsupported:
+        print(
+            "paired mode only supports CLI startup and Agent bootstrap scenarios: "
+            + ", ".join(unsupported),
+            file=sys.stderr,
+        )
+        return 2
+
+    baseline_samples: dict[str, list[dict[str, object]]] = {
+        scenario: [] for scenario in selected
+    }
+    candidate_samples: dict[str, list[dict[str, object]]] = {
+        scenario: [] for scenario in selected
+    }
+    baseline_environment: Mapping[str, object] | None = None
+    candidate_environment: Mapping[str, object] | None = None
+    started = time.time()
+    try:
+        with tempfile.TemporaryDirectory(prefix="roll-chat-paired-") as temporary:
+            temporary_root = Path(temporary)
+            invocation = 0
+
+            def invoke(
+                label: str, root: Path, scenario: str
+            ) -> tuple[dict[str, object], Mapping[str, object]]:
+                nonlocal invocation
+                invocation += 1
+                output = (
+                    temporary_root
+                    / f"{invocation:04d}-{label}-{scenario}"
+                    / "result.json"
+                )
+                output.parent.mkdir(parents=True)
+                return run_paired_member_sample(root, scenario, output)
+
+            for scenario in selected:
+                for _ in range(args.paired_warmups):
+                    invoke("baseline-warmup", baseline_root, scenario)
+                    invoke("candidate-warmup", candidate_root, scenario)
+                for _ in range(args.paired_rounds):
+                    for label, root, destination in (
+                        ("baseline", baseline_root, baseline_samples),
+                        ("candidate", candidate_root, candidate_samples),
+                        ("candidate", candidate_root, candidate_samples),
+                        ("baseline", baseline_root, baseline_samples),
+                    ):
+                        sample, member_environment = invoke(label, root, scenario)
+                        destination[scenario].append(sample)
+                        if label == "baseline":
+                            baseline_environment = member_environment
+                        else:
+                            candidate_environment = member_environment
+    except (OSError, subprocess.SubprocessError, RuntimeError, json.JSONDecodeError) as error:
+        print(f"PAIRED BENCHMARK FAILED: {error}", file=sys.stderr)
+        return 1
+
+    baseline_result: dict[str, object] = {
+        "schemaVersion": RESULT_SCHEMA_VERSION,
+        "suite": SUITE_NAME,
+        "mode": "paired-baseline",
+        "environment": dict(baseline_environment or {}),
+        "scenarios": {
+            scenario: build_scenario_result(samples)
+            for scenario, samples in baseline_samples.items()
+        },
+    }
+    candidate_result: dict[str, object] = {
+        "schemaVersion": RESULT_SCHEMA_VERSION,
+        "suite": SUITE_NAME,
+        "mode": "paired-candidate",
+        "environment": dict(candidate_environment or {}),
+        "scenarios": {
+            scenario: build_scenario_result(samples)
+            for scenario, samples in candidate_samples.items()
+        },
+    }
+    comparisons, failures = compare_bootstrap_results(
+        candidate_result, baseline_result
+    )
+    missing = sorted(set(selected) - set(comparisons))
+    failures.extend(
+        f"paired comparison missing scenario: {scenario}" for scenario in missing
+    )
+    go_no_go = evaluate_go_no_go(
+        comparisons, candidate_result, args.candidate_concurrency
+    )
+    if not go_no_go["passed"]:
+        failures.append("candidate did not satisfy the Agent bootstrap Go/No-Go gates")
+    result: dict[str, object] = {
+        "schemaVersion": RESULT_SCHEMA_VERSION,
+        "suite": SUITE_NAME,
+        "mode": "paired",
+        "createdAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "durationMs": round((time.time() - started) * 1_000, 3),
+        "schedule": {
+            "warmupsPerVersion": args.paired_warmups,
+            "rounds": args.paired_rounds,
+            "order": ["baseline", "candidate", "candidate", "baseline"],
+            "samplesPerVersion": args.paired_rounds * 2,
+        },
+        "baselineRoot": str(baseline_root),
+        "candidateRoot": str(candidate_root),
+        "baseline": baseline_result,
+        "candidate": candidate_result,
+        "comparisons": comparisons,
+        "goNoGo": go_no_go,
+        "failures": failures,
+    }
+    output_path = args.output.resolve()
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text(
+        json.dumps(result, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+    return 1 if failures else 0
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--samples", type=int, default=3)
@@ -1519,9 +2527,29 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-regression-percent", type=float, default=25.0)
     parser.add_argument("--check", action="store_true", help="correctness smoke; no timing budget")
     parser.add_argument("--scenario", action="append", choices=SCENARIOS, dest="scenarios")
+    parser.add_argument("--paired-baseline-root", type=Path)
+    parser.add_argument("--paired-candidate-root", type=Path)
+    parser.add_argument("--paired-warmups", type=int, default=3)
+    parser.add_argument("--paired-rounds", type=int, default=15)
+    parser.add_argument("--candidate-concurrency", type=int, choices=(2, 3, 4))
     args = parser.parse_args()
     if args.samples < 1:
         parser.error("--samples must be >= 1")
+    if (args.paired_baseline_root is None) != (
+        args.paired_candidate_root is None
+    ):
+        parser.error(
+            "--paired-baseline-root and --paired-candidate-root must be provided together"
+        )
+    paired_mode = args.paired_baseline_root is not None
+    if paired_mode and args.candidate_concurrency is None:
+        parser.error("--candidate-concurrency is required in paired mode")
+    if not paired_mode and args.candidate_concurrency is not None:
+        parser.error("--candidate-concurrency requires paired mode")
+    if args.paired_warmups < 0:
+        parser.error("--paired-warmups must be >= 0")
+    if args.paired_rounds < 1:
+        parser.error("--paired-rounds must be >= 1")
     return args
 
 
@@ -1530,6 +2558,8 @@ def main() -> int:
         print("chat PTY benchmark currently requires macOS or Linux", file=sys.stderr)
         return 2
     args = parse_args()
+    if getattr(args, "paired_baseline_root", None) is not None:
+        return run_paired_benchmark(args)
     selected = tuple(args.scenarios or SCENARIOS)
     output_path = args.output.resolve()
     artifact_dir = output_path.parent / "raw"
@@ -1563,7 +2593,7 @@ def main() -> int:
             final_screen = fixture.screen.render()
             try:
                 fixture.exit_cleanly()
-                if scenario != "cli-bootstrap":
+                if scenario not in CLI_SERVER_SCENARIOS:
                     fixture.assert_terminal_restored()
             except Exception as error:
                 failure_reason = format_exception(error)
@@ -1585,13 +2615,14 @@ def main() -> int:
                 )
             sample_result: dict[str, object] = {
                 **metrics,
+                **fixture.cleanup_metrics(),
                 "finalScreenSha256": hashlib.sha256(final_screen.encode()).hexdigest(),
                 "artifacts": save_artifacts(
                     artifact_dir, scenario, sample_index, fixture, final_screen
                 ),
             }
             samples.append(sample_result)
-        scenario_results[scenario] = {"samples": samples, "metrics": aggregate(samples)}
+        scenario_results[scenario] = build_scenario_result(samples)
 
     result: dict[str, object] = {
         "schemaVersion": RESULT_SCHEMA_VERSION,
@@ -1608,11 +2639,26 @@ def main() -> int:
         },
     }
 
-    failures = (
-        compare_baseline(result, args.baseline, args.max_regression_percent)
-        if args.baseline is not None and not args.check
-        else []
-    )
+    failures: list[str] = []
+    bootstrap_comparisons: dict[str, object] = {}
+    if args.baseline is not None and not args.check:
+        failures.extend(
+            compare_baseline(result, args.baseline, args.max_regression_percent)
+        )
+        try:
+            baseline_value: object = json.loads(
+                args.baseline.read_text(encoding="utf-8")
+            )
+        except (OSError, json.JSONDecodeError):
+            pass
+        else:
+            baseline = object_mapping(baseline_value)
+            if baseline is not None:
+                bootstrap_comparisons, comparison_failures = (
+                    compare_bootstrap_results(result, baseline)
+                )
+                failures.extend(comparison_failures)
+    result["budget"]["bootstrapComparisons"] = bootstrap_comparisons
     result["budget"]["failures"] = failures
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(json.dumps(result, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")

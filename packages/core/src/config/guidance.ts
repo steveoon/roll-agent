@@ -181,6 +181,22 @@ export const CONFIG_GUIDANCE_ENTRIES = [
     example: `runtime:\n  thinking-level: ${DEFAULT_CONFIG.runtime.thinkingLevel}`,
   },
 
+  // Agent bootstrap
+  {
+    path: "runtime.agent-bootstrap",
+    title: "Agent 目录加载",
+    purpose: "控制 `roll chat` 创建会话时发现、连接并读取已注册 Agent 工具目录的总预算。",
+    defaultBehavior: "默认允许 Agent 并行加载；单个 Agent 失败时继续保留其他成功 Agent 的目录。",
+    example: `runtime:\n  agent-bootstrap:\n    timeout-ms: ${DEFAULT_CONFIG.runtime.agentBootstrap.timeoutMs}`,
+  },
+  {
+    path: "runtime.agent-bootstrap.timeout-ms",
+    title: "Agent 目录加载超时",
+    purpose: "限制一次 Chat 会话加载全部已注册 Agent 工具目录的总等待时间，单位毫秒。",
+    defaultBehavior: `默认值为 \`${DEFAULT_CONFIG.runtime.agentBootstrap.timeoutMs}\`；超时后停止领取未开始的加载任务，取消正在进行的连接任务，清理资源并保留已完成的部分目录。`,
+    example: `runtime:\n  agent-bootstrap:\n    timeout-ms: ${DEFAULT_CONFIG.runtime.agentBootstrap.timeoutMs}`,
+  },
+
   // Tool approval
   {
     path: "runtime.approval",

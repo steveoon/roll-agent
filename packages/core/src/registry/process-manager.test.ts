@@ -5,7 +5,9 @@ import { once } from "node:events";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, it } from "node:test";
+import { describe, it, mock } from "node:test";
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { McpClientManager } from "../mcp/client-manager.ts";
 import type { RegisteredAgent } from "../types/agent.ts";
 import {
   AgentLifecycleBusyError,
@@ -15,12 +17,173 @@ import {
   getAgentPid,
   getRollCoreVersion,
   inspectManagedAgentRuntime,
+  probeAgentEndpoint,
   readVerifiedManagedAgentRuntime,
   stopAgent,
   stopAgentGracefully,
+  waitForAgentReady,
   writeAgentRuntimeSidecar,
   type ManagedAgentRuntimeIdentity,
 } from "./process-manager.ts";
+
+describe("managed Agent readiness cancellation", () => {
+  it("passes the shared signal and remaining budget to MCP connect/listTools, then disconnects", async () => {
+    const agent = createCoreManagedAgent("http://127.0.0.1:4321/mcp");
+    const client = new Client({ name: "readiness-test", version: "0.0.0" });
+    const listStarted = Promise.withResolvers<void>();
+    const abortController = new AbortController();
+    const abortReason = new Error("bootstrap canceled");
+    let connectOptions: Parameters<McpClientManager["connect"]>[3] | undefined;
+    let listOptions: Parameters<Client["listTools"]>[1] | undefined;
+    let disconnectCalls = 0;
+
+    const connectMock = mock.method(
+      McpClientManager.prototype,
+      "connect",
+      async (...args: Parameters<McpClientManager["connect"]>) => {
+        connectOptions = args[3];
+        return client;
+      },
+    );
+    const listToolsMock = mock.method(
+      client,
+      "listTools",
+      async (...args: Parameters<Client["listTools"]>) => {
+        listOptions = args[1];
+        return await new Promise<never>((_resolve, reject) => {
+          const signal = args[1]?.signal;
+          signal?.addEventListener("abort", () => reject(signal.reason), { once: true });
+          listStarted.resolve();
+        });
+      },
+    );
+    const disconnectMock = mock.method(McpClientManager.prototype, "disconnectAll", async () => {
+      disconnectCalls += 1;
+    });
+
+    try {
+      const probing = probeAgentEndpoint(agent, {
+        timeoutMs: 10_000,
+        signal: abortController.signal,
+      });
+      await listStarted.promise;
+      abortController.abort(abortReason);
+
+      await assert.rejects(probing, (error: unknown) => error === abortReason);
+      assert.equal(connectOptions?.signal, abortController.signal);
+      assert.ok((connectOptions?.timeoutMs ?? 0) > 0);
+      assert.ok((connectOptions?.timeoutMs ?? Infinity) <= 10_000);
+      assert.equal(listOptions?.signal, abortController.signal);
+      assert.ok((listOptions?.timeout ?? 0) > 0);
+      assert.ok((listOptions?.timeout ?? Infinity) <= 10_000);
+      assert.equal(disconnectCalls, 1);
+    } finally {
+      disconnectMock.mock.restore();
+      listToolsMock.mock.restore();
+      connectMock.mock.restore();
+    }
+  });
+
+  it("cancels the retry interval without wrapping the abort reason", async () => {
+    const agent = createCoreManagedAgent("http://127.0.0.1:4321/mcp");
+    const abortController = new AbortController();
+    const abortReason = new Error("engine closing");
+    const probeAttempted = Promise.withResolvers<void>();
+    let connectCalls = 0;
+    let observedSignal: AbortSignal | undefined;
+
+    const connectMock = mock.method(
+      McpClientManager.prototype,
+      "connect",
+      async (...args: Parameters<McpClientManager["connect"]>): Promise<never> => {
+        connectCalls += 1;
+        observedSignal = args[3]?.signal;
+        probeAttempted.resolve();
+        throw new Error("not ready");
+      },
+    );
+    const disconnectMock = mock.method(McpClientManager.prototype, "disconnectAll", async () => {});
+
+    try {
+      const waiting = waitForAgentReady(agent, {
+        startupTimeoutMs: 60_000,
+        probeTimeoutMs: 2_000,
+        intervalMs: 60_000,
+        signal: abortController.signal,
+      });
+      await probeAttempted.promise;
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      abortController.abort(abortReason);
+
+      await assert.rejects(waiting, (error: unknown) => error === abortReason);
+      assert.equal(observedSignal, abortController.signal);
+      assert.equal(connectCalls, 1);
+    } finally {
+      disconnectMock.mock.restore();
+      connectMock.mock.restore();
+    }
+  });
+
+  it("preserves both cancellation and MCP cleanup failures without retrying", async () => {
+    const agent = createCoreManagedAgent("http://127.0.0.1:4321/mcp");
+    const client = new Client({ name: "readiness-cleanup-test", version: "0.0.0" });
+    const listStarted = Promise.withResolvers<void>();
+    const abortController = new AbortController();
+    const abortReason = new Error("bootstrap canceled");
+    const cleanupFailure = new Error("cleanup failed");
+    let connectCalls = 0;
+
+    const connectMock = mock.method(
+      McpClientManager.prototype,
+      "connect",
+      async (): Promise<Client> => {
+        connectCalls += 1;
+        return client;
+      },
+    );
+    const listToolsMock = mock.method(
+      client,
+      "listTools",
+      async (...args: Parameters<Client["listTools"]>): Promise<never> => {
+        const signal = args[1]?.signal;
+        return await new Promise<never>((_resolve, reject) => {
+          signal?.addEventListener("abort", () => reject(signal.reason), { once: true });
+          listStarted.resolve();
+        });
+      },
+    );
+    const disconnectMock = mock.method(
+      McpClientManager.prototype,
+      "disconnectAll",
+      async (): Promise<never> => {
+        throw cleanupFailure;
+      },
+    );
+
+    try {
+      const waiting = waitForAgentReady(agent, {
+        startupTimeoutMs: 60_000,
+        probeTimeoutMs: 60_000,
+        intervalMs: 1,
+        signal: abortController.signal,
+      });
+      await listStarted.promise;
+      abortController.abort(abortReason);
+
+      await assert.rejects(waiting, (error: unknown) => {
+        assert.ok(error instanceof AggregateError);
+        assert.equal(error.name, "AgentProbeCleanupError");
+        assert.deepEqual(error.errors, [abortReason, cleanupFailure]);
+        return true;
+      });
+      assert.equal(connectCalls, 1);
+    } finally {
+      disconnectMock.mock.restore();
+      listToolsMock.mock.restore();
+      connectMock.mock.restore();
+    }
+  });
+});
 
 describe("managed agent runtime sidecar", () => {
   it("reports a clean runtime sidecar for the active pid and endpoint", () => {

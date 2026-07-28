@@ -46,13 +46,60 @@ function makeCollaborators(options: HarnessOptions): {
 }
 
 describe("resolveAgentCatalog", () => {
+  it("propagates cancellation instead of converting it into an empty discovery result", async () => {
+    const controller = new AbortController();
+    const abortReason = new Error("catalog canceled");
+    const searchStarted = Promise.withResolvers<void>();
+    const { collaborators } = makeCollaborators({});
+    const resolving = resolveAgentCatalog(undefined, {
+      signal: controller.signal,
+      collaborators: {
+        ...collaborators,
+        searchScopePackages: async (options) => {
+          assert.equal(options.signal, controller.signal);
+          searchStarted.resolve();
+          return await new Promise<never>((_resolve, reject) => {
+            options.signal?.addEventListener("abort", () => reject(options.signal?.reason), {
+              once: true,
+            });
+          });
+        },
+      },
+    });
+    await searchStarted.promise;
+    controller.abort(abortReason);
+
+    await assert.rejects(resolving, (error: unknown) => error === abortReason);
+  });
+
+  it("does not start another package lookup when cancellation races a successful lookup", async () => {
+    const controller = new AbortController();
+    const abortReason = new Error("stop catalog candidates");
+    const fetchCalls: string[] = [];
+    const { collaborators } = makeCollaborators({
+      searchResults: ["@roll-agent/a-agent", "@roll-agent/b-agent"],
+    });
+
+    await assert.rejects(
+      resolveAgentCatalog(undefined, {
+        signal: controller.signal,
+        collaborators: {
+          ...collaborators,
+          fetchPackageInfo: async (packageName) => {
+            fetchCalls.push(packageName);
+            controller.abort(abortReason);
+            return { description: packageName, hasRollAgentManifest: true };
+          },
+        },
+      }),
+      (error: unknown) => error === abortReason,
+    );
+    assert.deepEqual(fetchCalls, ["@roll-agent/a-agent"]);
+  });
+
   it("发现带 rollAgent manifest 的新包并合并在内置之后", async () => {
     const { collaborators, written } = makeCollaborators({
-      searchResults: [
-        "@roll-agent/new-thing-agent",
-        "@roll-agent/sdk",
-        "unrelated-package",
-      ],
+      searchResults: ["@roll-agent/new-thing-agent", "@roll-agent/sdk", "unrelated-package"],
       packages: {
         "@roll-agent/new-thing-agent": {
           description: "新工具 Agent",
@@ -95,7 +142,10 @@ describe("resolveAgentCatalog", () => {
       packages: {
         "@roll-agent/foo": { description: "占用 foo 短名", hasRollAgentManifest: true },
         "@roll-agent/foo-agent": { description: "派生名冲突后回退", hasRollAgentManifest: true },
-        "@roll-agent/octopus": { description: "与内置 octopus 短名冲突且无可用回退", hasRollAgentManifest: true },
+        "@roll-agent/octopus": {
+          description: "与内置 octopus 短名冲突且无可用回退",
+          hasRollAgentManifest: true,
+        },
       },
     });
 
