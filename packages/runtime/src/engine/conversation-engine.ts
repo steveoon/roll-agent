@@ -68,9 +68,15 @@ import {
   type ShellProfileResolutionResult,
 } from "../bash/profile.ts";
 import { inspectGitVcsContext } from "./vcs-context.ts";
+import { AGENT_BOOTSTRAP_MAX_CONCURRENCY, mapWithBoundedConcurrency } from "./agent-bootstrap.ts";
 
 const DEFAULT_MAX_STEPS = 80;
 const ENGINE_WORK_DRAIN_TIMEOUT_MS = 6_000;
+
+const AGENT_BOOTSTRAP_ATTEMPT_KINDS = {
+  connected: "connected",
+  failed: "failed",
+} as const;
 
 export type EnsureAgentReady = (
   agent: RegisteredAgent,
@@ -133,6 +139,17 @@ interface EngineContext {
   readonly sources: readonly AgentToolSource[];
   readonly skillLibrary?: SkillLibrary;
 }
+
+type AgentBootstrapAttempt =
+  | {
+      readonly kind: typeof AGENT_BOOTSTRAP_ATTEMPT_KINDS.connected;
+      readonly source: AgentToolSource;
+      readonly issues: readonly AgentBootstrapIssue[];
+    }
+  | {
+      readonly kind: typeof AGENT_BOOTSTRAP_ATTEMPT_KINDS.failed;
+      readonly issues: readonly AgentBootstrapIssue[];
+    };
 
 function extractAnnotations(listed: unknown): ToolAnnotations | undefined {
   if (typeof listed !== "object" || listed === null || !("annotations" in listed)) {
@@ -552,16 +569,40 @@ export class ConversationEngine {
         ...(this.config.install.registry ? { registry: this.config.install.registry } : {}),
       });
     }
+    const attempts = await mapWithBoundedConcurrency(
+      agents,
+      AGENT_BOOTSTRAP_MAX_CONCURRENCY,
+      async (agent): Promise<AgentBootstrapAttempt> => {
+        const issues: AgentBootstrapIssue[] = [];
+        const reportIssue = (issue: AgentBootstrapIssue): void => {
+          issues.push(issue);
+        };
+        try {
+          const source = await this.connectAgentSource(agent, model, reportIssue);
+          return {
+            kind: AGENT_BOOTSTRAP_ATTEMPT_KINDS.connected,
+            source,
+            issues,
+          };
+        } catch (error) {
+          issues.push({
+            agentName: agent.skill.name,
+            message: error instanceof Error ? error.message : String(error),
+          });
+          return {
+            kind: AGENT_BOOTSTRAP_ATTEMPT_KINDS.failed,
+            issues,
+          };
+        }
+      },
+    );
     const sources: AgentToolSource[] = [];
-
-    for (const agent of agents) {
-      try {
-        sources.push(await this.connectAgentSource(agent, model));
-      } catch (error) {
-        this.onAgentBootstrapIssue?.({
-          agentName: agent.skill.name,
-          message: error instanceof Error ? error.message : String(error),
-        });
+    for (const attempt of attempts) {
+      for (const issue of attempt.issues) {
+        this.onAgentBootstrapIssue?.(issue);
+      }
+      if (attempt.kind === AGENT_BOOTSTRAP_ATTEMPT_KINDS.connected) {
+        sources.push(attempt.source);
       }
     }
 
@@ -572,6 +613,8 @@ export class ConversationEngine {
   private async connectAgentSource(
     agent: RegisteredAgent,
     model: LanguageModelV4,
+    reportIssue: (issue: AgentBootstrapIssue) => void = (issue) =>
+      this.onAgentBootstrapIssue?.(issue),
   ): Promise<AgentToolSource> {
     this.assertAcceptingSessions();
     const transport = resolveTransportWithDevSpawnSpec(agent);
@@ -598,7 +641,7 @@ export class ConversationEngine {
       const sourceTools: SourceTool[] = normalized.map((agentTool, index) => {
         const resourceHintExtraction = extractResourceHints(listed[index]);
         if (resourceHintExtraction.issue !== undefined) {
-          this.onAgentBootstrapIssue?.({
+          reportIssue({
             agentName: agent.skill.name,
             message: `Tool "${agentTool.name}" 的 ${ROLL_RESOURCE_HINTS_META_KEY} 无效（${resourceHintExtraction.issue}），已回退 Agent 级资源锁`,
           });

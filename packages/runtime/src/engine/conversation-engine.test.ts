@@ -596,6 +596,243 @@ test("ConversationEngine reports agent bootstrap failures instead of swallowing 
   await engine.dispose();
 });
 
+test("ConversationEngine 并发 createSession 仍只执行一次 bootstrap", async () => {
+  const agents = [makeManagedHttpAgent("single-flight-a"), makeManagedHttpAgent("single-flight-b")];
+  const gates = agents.map(() => Promise.withResolvers<void>());
+  const starts = agents.map(() => Promise.withResolvers<void>());
+  const connectCalls: string[] = [];
+  const clientManager = {
+    connect: async (agentName: string) => {
+      const index = agents.findIndex((agent) => agent.skill.name === agentName);
+      assert.notEqual(index, -1);
+      const start = starts[index];
+      const gate = gates[index];
+      assert.ok(start);
+      assert.ok(gate);
+      connectCalls.push(agentName);
+      start.resolve();
+      await gate.promise;
+      return { listTools: async () => ({ tools: [] }) };
+    },
+    disconnectAll: async () => {},
+  } as unknown as McpClientManager;
+  const engine = new ConversationEngine({
+    config: installEngineConfig("/tmp/roll-engine-single-flight"),
+    model: new MockLanguageModelV4({}),
+    agents,
+    skillLibrary: null,
+    shellProfile: null,
+    clientManager,
+    ensureAgentReady: async () => {},
+  });
+
+  const creating = Promise.all([engine.createSession(), engine.createSession()]);
+  await Promise.all(starts.map(({ promise }) => promise));
+  assert.deepEqual(connectCalls, ["single-flight-a", "single-flight-b"]);
+  for (const gate of gates) {
+    gate.resolve();
+  }
+  const sessions = await creating;
+
+  assert.equal(sessions.length, 2);
+  assert.equal(new Set(sessions.map((session) => session.id)).size, 2);
+  assert.deepEqual(connectCalls, ["single-flight-a", "single-flight-b"]);
+  await engine.dispose();
+});
+
+test("ConversationEngine 逆序完成时按注册顺序输出 issue、source 与 Tool ID 冲突归属", async () => {
+  const agents = [
+    makeManagedHttpAgent("alpha.beta"),
+    makeManagedHttpAgent("broken-agent"),
+    makeManagedHttpAgent("alpha_beta"),
+  ];
+  const gates = agents.map(() => Promise.withResolvers<void>());
+  const starts = agents.map(() => Promise.withResolvers<void>());
+  const completions = agents.map(() => Promise.withResolvers<void>());
+  const completionOrder: string[] = [];
+  const issues: AgentBootstrapIssue[] = [];
+  const clientManager = {
+    connect: async (agentName: string) => {
+      const index = agents.findIndex((agent) => agent.skill.name === agentName);
+      assert.notEqual(index, -1);
+      const start = starts[index];
+      const gate = gates[index];
+      const completion = completions[index];
+      assert.ok(start);
+      assert.ok(gate);
+      assert.ok(completion);
+      start.resolve();
+      await gate.promise;
+      completionOrder.push(agentName);
+      completion.resolve();
+      if (agentName === "broken-agent") {
+        throw new Error("broken connect");
+      }
+      return {
+        listTools: async () => ({
+          tools: [
+            {
+              name: "shared",
+              description: `${agentName} shared tool`,
+              inputSchema: { type: "object", properties: {} },
+              _meta: { "roll/resourceHints": "invalid" },
+            },
+          ],
+        }),
+      };
+    },
+    disconnectAll: async () => {},
+  } as unknown as McpClientManager;
+  const engine = new ConversationEngine({
+    config: installEngineConfig("/tmp/roll-engine-stable-bootstrap"),
+    model: new MockLanguageModelV4({}),
+    agents,
+    skillLibrary: null,
+    shellProfile: null,
+    clientManager,
+    ensureAgentReady: async () => {},
+    onAgentBootstrapIssue: (issue) => issues.push(issue),
+  });
+
+  const creating = engine.createSession();
+  await Promise.all([starts[0]?.promise, starts[1]?.promise]);
+  gates[1]?.resolve();
+  await completions[1]?.promise;
+  await starts[2]?.promise;
+  gates[2]?.resolve();
+  await completions[2]?.promise;
+  gates[0]?.resolve();
+  const session = await creating;
+
+  assert.deepEqual(completionOrder, ["broken-agent", "alpha_beta", "alpha.beta"]);
+  assert.deepEqual(
+    issues.map((issue) => issue.agentName),
+    ["alpha.beta", "broken-agent", "alpha_beta"],
+  );
+  assert.match(issues[0]?.message ?? "", /roll\/resourceHints 无效/u);
+  assert.equal(issues[1]?.message, "broken connect");
+  assert.match(issues[2]?.message ?? "", /roll\/resourceHints 无效/u);
+
+  const agentTools = session
+    .getCapabilityManifest()
+    .tools.filter((tool) => tool.agentName === "alpha.beta" || tool.agentName === "alpha_beta");
+  assert.deepEqual(
+    agentTools.map((tool) => ({ id: tool.id, agentName: tool.agentName })),
+    [
+      { id: "alpha_beta__shared", agentName: "alpha.beta" },
+      { id: "alpha_beta__shared_1", agentName: "alpha_beta" },
+    ],
+  );
+  assert.equal(session.getCapabilityManifest().agentCount, 2);
+  await engine.dispose();
+});
+
+test("ConversationEngine explicitSources 继续直接绕过 Agent bootstrap", async () => {
+  const agent = makeManagedHttpAgent("must-not-connect");
+  let connectCalls = 0;
+  let readinessCalls = 0;
+  let catalogCalls = 0;
+  const clientManager = {
+    connect: async () => {
+      connectCalls += 1;
+      throw new Error("explicitSources must bypass connect");
+    },
+    disconnectAll: async () => {},
+  } as unknown as McpClientManager;
+  const engine = new ConversationEngine({
+    config: installEngineConfig("/tmp/roll-engine-explicit-sources"),
+    model: new MockLanguageModelV4({}),
+    agents: [agent],
+    sources: [],
+    skillLibrary: null,
+    shellProfile: null,
+    clientManager,
+    ensureAgentReady: async () => {
+      readinessCalls += 1;
+    },
+    resolveCatalogFn: async () => {
+      catalogCalls += 1;
+      throw new Error("explicitSources must bypass catalog resolution");
+    },
+  });
+
+  const session = await engine.createSession();
+
+  assert.equal(session.getCapabilityManifest().agentCount, 0);
+  assert.equal(connectCalls, 0);
+  assert.equal(readinessCalls, 0);
+  assert.equal(catalogCalls, 0);
+  await engine.dispose();
+});
+
+test("ConversationEngine prepareAgentRefresh 保持串行并即时报告 resourceHints issue", async () => {
+  const agents = [makeManagedHttpAgent("refresh-a"), makeManagedHttpAgent("refresh-b")];
+  const firstAgent = agents[0];
+  const secondAgent = agents[1];
+  assert.ok(firstAgent);
+  assert.ok(secondAgent);
+  const gates = agents.map(() => Promise.withResolvers<void>());
+  const starts = agents.map(() => Promise.withResolvers<void>());
+  const connectOrder: string[] = [];
+  const issues: AgentBootstrapIssue[] = [];
+  const clientManager = {
+    connect: async (agentName: string) => {
+      const index = agents.findIndex((agent) => agent.skill.name === agentName);
+      assert.notEqual(index, -1);
+      const start = starts[index];
+      const gate = gates[index];
+      assert.ok(start);
+      assert.ok(gate);
+      connectOrder.push(agentName);
+      start.resolve();
+      await gate.promise;
+      return {
+        listTools: async () => ({
+          tools: [
+            {
+              name: "refresh",
+              inputSchema: { type: "object", properties: {} },
+              ...(agentName === "refresh-a" ? { _meta: { "roll/resourceHints": "invalid" } } : {}),
+            },
+          ],
+        }),
+      };
+    },
+    disconnectAll: async () => {},
+  } as unknown as McpClientManager;
+  const engine = new ConversationEngine({
+    config: installEngineConfig("/tmp/roll-engine-refresh-chain"),
+    model: new MockLanguageModelV4({}),
+    agents: [],
+    skillLibrary: null,
+    shellProfile: null,
+    clientManager,
+    ensureAgentReady: async () => {},
+    onAgentBootstrapIssue: (issue) => issues.push(issue),
+  });
+  await engine.createSession();
+
+  const firstRefresh = engine.prepareAgentRefresh(firstAgent);
+  await starts[0]?.promise;
+  const secondRefresh = engine.prepareAgentRefresh(secondAgent);
+  await Promise.resolve();
+  assert.deepEqual(connectOrder, ["refresh-a"]);
+
+  gates[0]?.resolve();
+  await firstRefresh;
+  await starts[1]?.promise;
+  assert.deepEqual(connectOrder, ["refresh-a", "refresh-b"]);
+  assert.deepEqual(
+    issues.map((issue) => issue.agentName),
+    ["refresh-a"],
+  );
+  assert.match(issues[0]?.message ?? "", /roll\/resourceHints 无效/u);
+
+  gates[1]?.resolve();
+  await secondRefresh;
+  await engine.dispose();
+});
+
 test("ConversationEngine ensures core-managed agents before connecting", async () => {
   const config = rollConfigSchema.parse({
     llm: {
