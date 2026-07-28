@@ -29,6 +29,11 @@ import {
 import { getCurrentVersion } from "../utils/update-checker.ts";
 import { formatSkillList, parseSkillInvocation } from "../chat/ink/commands.ts";
 import { installCurrentCliShim } from "../utils/current-cli-shim.ts";
+import {
+  createChatEngineSignalScope,
+  type ChatEngineSignalScope,
+  type ChatEngineShutdownSignal,
+} from "../chat/engine-signal-scope.ts";
 
 type RuntimeModule = typeof import("@roll-agent/runtime");
 
@@ -92,6 +97,7 @@ interface ReplIo {
   readonly input: NodeJS.ReadableStream;
   readonly output: NodeJS.WritableStream;
   readonly confirm?: ChatConfirm;
+  readonly signal?: AbortSignal;
 }
 
 function printChatJson(result: ChatCommandResult): void {
@@ -107,6 +113,10 @@ function reportAgentBootstrapIssue(issue: {
 
 function reportSkillLibraryIssue(message: string): void {
   log.warn(`skill 目录加载警告：${message}`);
+}
+
+function shutdownSignalExitCode(signal: ChatEngineShutdownSignal): number {
+  return signal === "SIGINT" ? 130 : 143;
 }
 
 function createChatCliScope(): ChatCliScope {
@@ -148,11 +158,13 @@ async function readReplLine(
   rl: ReadlineInterface,
   prompt: string,
   label: string,
+  signal?: AbortSignal,
 ): Promise<string | undefined> {
   log.debug(`chat.repl input waiting · ${label}`);
   rl.resume();
   try {
-    const line = await rl.question(prompt);
+    const line =
+      signal === undefined ? await rl.question(prompt) : await rl.question(prompt, { signal });
     log.debug(`chat.repl input received · ${label} · chars=${String(line.length)}`);
     return line;
   } catch (error) {
@@ -246,6 +258,7 @@ async function runServer(config: RollConfig): Promise<void> {
   const store = new ThreadStore(config.runtime.threadsDir);
   const chatCliScope = createChatCliScope();
   let engine: ConversationEngineInstance | undefined;
+  let signalScope: ChatEngineSignalScope | undefined;
   try {
     engine = createChatEngine({
       runtime,
@@ -268,12 +281,26 @@ async function runServer(config: RollConfig): Promise<void> {
         .then(() => activeEngine.dispose())
         .catch(() => {})
         .finally(() => {
+          signalScope?.dispose();
           chatCliScope.dispose();
           store.close();
-          process.exit(0);
+          process.exit(process.exitCode ?? 0);
         });
     });
+    signalScope = createChatEngineSignalScope({
+      onSignal: (signal) => {
+        process.exitCode = shutdownSignalExitCode(signal);
+        connection.close();
+      },
+      onDisposeError: (error) => {
+        log.warn(
+          `roll runtime-server 关闭 Engine 失败：${error instanceof Error ? error.message : String(error)}`,
+        );
+      },
+    });
+    signalScope.setEngine(activeEngine);
   } catch (error) {
+    signalScope?.dispose();
     await engine?.dispose().catch(() => {});
     chatCliScope.dispose();
     store.close();
@@ -430,14 +457,14 @@ export async function runRepl(
   rl.on("SIGINT", () => rl.close());
   const confirmFn: ChatConfirm =
     io.confirm ??
-    (async (message) => {
+    (async (message, signal) => {
       log.debug("chat.repl input waiting · confirm");
       rl.pause();
-      const approved = await clackConfirm(message);
+      const approved = await clackConfirm(message, signal);
       log.debug(`chat.repl input received · confirm · approved=${String(approved)}`);
       return approved;
     });
-  const renderer = new ChatRenderer(confirmFn, session.getContextWindow());
+  const renderer = new ChatRenderer(confirmFn, session.getContextWindow(), io.signal);
   const availableSkills = session.getSkillSummaries();
   log.info("进入多轮对话（输入 exit / quit 或 Ctrl-C 退出，/compact 手动压缩上下文）");
 
@@ -445,7 +472,7 @@ export async function runRepl(
   let submitted = false;
   try {
     while (true) {
-      const answer = await readReplLine(rl, chalk.green("› "), "prompt");
+      const answer = await readReplLine(rl, chalk.green("› "), "prompt", io.signal);
       if (answer === undefined) {
         break;
       }
@@ -611,6 +638,7 @@ export default defineCommand({
     const chatCliScope = createChatCliScope();
     let engine: ConversationEngineInstance | undefined;
     let sessionForCleanup: AgentSession | undefined;
+    let signalScope: ChatEngineSignalScope | undefined;
     try {
       engine = createChatEngine({
         runtime,
@@ -623,6 +651,17 @@ export default defineCommand({
         ...(structuredOutputProviderOptions ? { structuredOutputProviderOptions } : {}),
         ...(structuredOutputReasoning ? { structuredOutputReasoning } : {}),
       });
+      signalScope = createChatEngineSignalScope({
+        onSignal: (signal) => {
+          process.exitCode = shutdownSignalExitCode(signal);
+        },
+        onDisposeError: (error) => {
+          log.warn(
+            `roll chat 关闭 Engine 失败：${error instanceof Error ? error.message : String(error)}`,
+          );
+        },
+      });
+      signalScope.setEngine(engine);
       let session: AgentSession;
       if (args.session) {
         session = await engine.resumeSession(args.session);
@@ -659,7 +698,11 @@ export default defineCommand({
         );
       }
       if (args.message) {
-        const renderer = new ChatRenderer(clackConfirm, session.getContextWindow());
+        const renderer = new ChatRenderer(
+          clackConfirm,
+          session.getContextWindow(),
+          signalScope.signal,
+        );
         for await (const event of session.send(args.message)) {
           await renderer.handle(event, session);
         }
@@ -689,6 +732,7 @@ export default defineCommand({
               onStarted: () => {
                 usedInk = true;
               },
+              signal: signalScope.signal,
               onThinkingChange: (level) =>
                 session.setProviderOptions(thinkingProviderOptions(provider, modelName, level)),
             });
@@ -706,13 +750,20 @@ export default defineCommand({
           process.stderr.write(
             `${renderBannerText(buildBannerLines(banner, process.stdout.columns || 80))}\n`,
           );
-          await runRepl(session, store, isNewSession);
+          await runRepl(session, store, isNewSession, {
+            input: process.stdin,
+            output: process.stdout,
+            signal: signalScope.signal,
+          });
         }
       }
     } catch (error) {
       log.error(error instanceof Error ? error.message : String(error));
-      process.exitCode = 1;
+      if (signalScope?.receivedSignal === undefined) {
+        process.exitCode = 1;
+      }
     } finally {
+      signalScope?.dispose();
       await sessionForCleanup?.close();
       await engine?.dispose();
       store.close();

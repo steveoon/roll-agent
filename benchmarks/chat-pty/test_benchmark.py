@@ -780,6 +780,91 @@ class ProcessCleanupTests(unittest.TestCase):
                 fixture.exit_cleanly()
 
 
+class RealInkSignalShutdownTests(unittest.TestCase):
+    @staticmethod
+    def _cleanup_fixture(fixture: benchmark.PtyFixture) -> None:
+        process = fixture.process
+        lifecycle = ()
+        try:
+            lifecycle = fixture.agent_lifecycle()
+        except Exception:
+            pass
+        agent_pids = [
+            int(record["pid"])
+            for record in lifecycle
+            if isinstance(record.get("pid"), int)
+            and not isinstance(record.get("pid"), bool)
+        ]
+        process_alive = process.poll() is None
+        agents_alive = any(fixture._pid_is_alive(pid) for pid in agent_pids)
+        if process_alive or agents_alive:
+            try:
+                benchmark.os.killpg(process.pid, benchmark.signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+        if process_alive:
+            try:
+                process.wait(timeout=2)
+            except benchmark.subprocess.TimeoutExpired:
+                pass
+
+        deadline = benchmark.time.monotonic() + 2
+        while (
+            any(fixture._pid_is_alive(pid) for pid in agent_pids)
+            and benchmark.time.monotonic() < deadline
+        ):
+            benchmark.time.sleep(0.02)
+
+        if not fixture.closed:
+            try:
+                benchmark.os.close(fixture.master)
+            except OSError:
+                pass
+            fixture.closed = True
+        temporary_directory = fixture._temporary_directory
+        fixture._temporary_directory = None
+        if temporary_directory is not None:
+            temporary_directory.cleanup()
+
+    @unittest.skipUnless(
+        benchmark.os.name == "posix" and hasattr(benchmark.os, "openpty"),
+        "real Ink signal regression requires a POSIX PTY",
+    )
+    def test_production_ink_sigterm_exits_143_and_cleans_agent_processes(self) -> None:
+        fixture = benchmark.PtyFixture("cli-ink-5-agent-cold-start")
+        try:
+            fixture.wait_for(
+                lambda screen: benchmark.PROMPT in screen and "5 agents" in screen,
+                20,
+                "production CLI Ink prompt with five-Agent banner",
+            )
+            self.assertEqual(fixture.expected_agent_count, 5)
+            fixture.validate_agent_lifecycle(require_exited=False)
+
+            benchmark.os.kill(fixture.process.pid, benchmark.signal.SIGTERM)
+
+            self.assertTrue(
+                fixture._wait_for_process_exit(10),
+                "roll chat did not finish graceful SIGTERM shutdown\n"
+                f"screen:\n{fixture.observable_screen()}",
+            )
+            fixture.drain_for(0.1)
+
+            with self.subTest("process exits through the signal handler"):
+                self.assertEqual(
+                    fixture.process.returncode,
+                    128 + int(benchmark.signal.SIGTERM),
+                    "expected graceful exit code 143 instead of raw signal status -15",
+                )
+                self.assertFalse(fixture.forced_cleanup)
+            with self.subTest("Ink restores terminal state"):
+                fixture.assert_terminal_restored()
+            with self.subTest("stdio Agent fixtures all exit"):
+                fixture.assert_agent_processes_stopped(timeout=5)
+        finally:
+            self._cleanup_fixture(fixture)
+
+
 class FailureArtifactTests(unittest.TestCase):
     def test_main_persists_artifacts_and_returns_nonzero_on_scenario_failure(self) -> None:
         fixture = object.__new__(benchmark.PtyFixture)

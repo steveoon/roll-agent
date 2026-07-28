@@ -13,9 +13,9 @@ export interface ChatApprover {
   reject(approvalId: string, reason?: string): void;
 }
 
-export type ChatConfirm = (message: string) => Promise<boolean>;
+export type ChatConfirm = (message: string, signal?: AbortSignal) => Promise<boolean>;
 
-export const clackConfirm: ChatConfirm = async (message) => {
+export const clackConfirm: ChatConfirm = async (message, signal) => {
   const answer = await select({
     message,
     options: [
@@ -23,6 +23,7 @@ export const clackConfirm: ChatConfirm = async (message) => {
       { value: "no", label: "No" },
     ],
     initialValue: "no",
+    ...(signal !== undefined ? { signal } : {}),
   });
   return !isCancel(answer) && answer === "yes";
 };
@@ -30,15 +31,17 @@ export const clackConfirm: ChatConfirm = async (message) => {
 export class ChatRenderer {
   private readonly confirm: ChatConfirm;
   private readonly contextWindow: number | undefined;
+  private readonly signal: AbortSignal | undefined;
   private readonly spinners = new Map<string, Ora>();
   private readonly toolLabels = new Map<string, string>();
   private compactionSpinner: Ora | undefined;
   private messageSpinner: Ora | undefined;
   private streaming = false;
 
-  constructor(confirm: ChatConfirm, contextWindow?: number) {
+  constructor(confirm: ChatConfirm, contextWindow?: number, signal?: AbortSignal) {
     this.confirm = confirm;
     this.contextWindow = contextWindow;
+    this.signal = signal;
   }
 
   async handle(event: SessionEvent, approver: ChatApprover): Promise<void> {
@@ -101,7 +104,10 @@ export class ChatRenderer {
         const reason = event.reason ? `（${event.reason}）` : "";
         const details = formatApprovalDetails(event.input);
         const header = `执行 ${event.agentName}.${event.toolName}${reason}?`;
-        const approved = await this.confirm(details ? `${header}\n${details}` : header);
+        const approved = await this.confirm(
+          details ? `${header}\n${details}` : header,
+          this.signal,
+        );
         if (approved) {
           approver.approve(event.approvalId);
         } else {

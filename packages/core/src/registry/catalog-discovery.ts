@@ -25,6 +25,7 @@ export interface DiscoveredPackageInfo {
 export interface DiscoveryCommandOptions {
   readonly registry?: string;
   readonly timeoutMs: number;
+  readonly signal?: AbortSignal;
 }
 
 export interface ResolveCatalogCollaborators {
@@ -43,6 +44,7 @@ export interface ResolveCatalogOptions {
   readonly forceRefresh?: boolean;
   readonly registry?: string;
   readonly timeoutMs?: number;
+  readonly signal?: AbortSignal;
   readonly collaborators?: ResolveCatalogCollaborators;
 }
 
@@ -50,6 +52,7 @@ export async function resolveAgentCatalog(
   config?: RollConfig,
   options: ResolveCatalogOptions = {},
 ): Promise<readonly AgentCatalogEntry[]> {
+  options.signal?.throwIfAborted();
   const builtIn = getAgentCatalog(config);
   const collaborators = options.collaborators ?? {};
   const readCache = collaborators.readCache ?? readCatalogCache;
@@ -60,14 +63,17 @@ export async function resolveAgentCatalog(
   const rawCache = readCache();
   const cache = rawCache?.registry === cacheRegistry ? rawCache : undefined;
   if (!(options.forceRefresh ?? false) && cache && now() - cache.checkedAt < CACHE_TTL_MS) {
+    options.signal?.throwIfAborted();
     return mergeCatalog(builtIn, cache.entries);
   }
 
   if (!(options.allowNetwork ?? true)) {
+    options.signal?.throwIfAborted();
     return mergeCatalog(builtIn, cache?.entries ?? []);
   }
 
   const discovered = await discoverScopeAgents(builtIn, options, collaborators);
+  options.signal?.throwIfAborted();
   if (discovered === undefined) {
     return mergeCatalog(builtIn, cache?.entries ?? []);
   }
@@ -86,12 +92,14 @@ async function discoverScopeAgents(
   const commandOptions: DiscoveryCommandOptions = {
     ...(options.registry ? { registry: options.registry } : {}),
     timeoutMs: options.timeoutMs ?? DEFAULT_COMMAND_TIMEOUT_MS,
+    ...(options.signal ? { signal: options.signal } : {}),
   };
 
   let names: readonly string[];
   try {
     names = await search(commandOptions);
   } catch {
+    options.signal?.throwIfAborted();
     return undefined;
   }
 
@@ -102,10 +110,13 @@ async function discoverScopeAgents(
 
   const entries: AgentCatalogEntry[] = [];
   for (const packageName of candidates) {
+    options.signal?.throwIfAborted();
     let info: DiscoveredPackageInfo | undefined;
     try {
       info = await fetchInfo(packageName, commandOptions);
+      options.signal?.throwIfAborted();
     } catch {
+      options.signal?.throwIfAborted();
       continue;
     }
     if (!info?.hasRollAgentManifest) {
@@ -124,7 +135,10 @@ function deriveShortName(packageName: string): string {
   return withoutSuffix.length > 0 ? withoutSuffix : bareName;
 }
 
-function buildDiscoveredEntry(packageName: string, description: string | undefined): AgentCatalogEntry {
+function buildDiscoveredEntry(
+  packageName: string,
+  description: string | undefined,
+): AgentCatalogEntry {
   const trimmedDescription = description?.trim() ?? "";
   return {
     shortName: deriveShortName(packageName),
@@ -177,7 +191,10 @@ async function searchScopePackagesViaNpm(
         ...networkArgs,
       ],
     },
-    { timeout: options.timeoutMs },
+    {
+      timeout: options.timeoutMs,
+      ...(options.signal ? { signal: options.signal } : {}),
+    },
   );
   const trimmed = stdout.trim();
   if (trimmed.length === 0) {
@@ -206,7 +223,10 @@ async function fetchPackageInfoViaNpm(
       command: "npm",
       args: ["view", packageName, "name", "description", "rollAgent", "--json", ...networkArgs],
     },
-    { timeout: options.timeoutMs },
+    {
+      timeout: options.timeoutMs,
+      ...(options.signal ? { signal: options.signal } : {}),
+    },
   );
   const trimmed = stdout.trim();
   if (trimmed.length === 0) {
@@ -219,8 +239,7 @@ async function fetchPackageInfoViaNpm(
   const record = parsed as Record<string, unknown>;
   return {
     ...(typeof record["description"] === "string" ? { description: record["description"] } : {}),
-    hasRollAgentManifest:
-      typeof record["rollAgent"] === "object" && record["rollAgent"] !== null,
+    hasRollAgentManifest: typeof record["rollAgent"] === "object" && record["rollAgent"] !== null,
   };
 }
 

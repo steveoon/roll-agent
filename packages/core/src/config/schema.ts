@@ -60,6 +60,10 @@ export const runtimeCompactionConfigSchema = z.object({
   keepRecentTokens: z.number().int().min(1).default(32_000),
 });
 
+export const runtimeAgentBootstrapConfigSchema = z.object({
+  timeoutMs: z.number().int().min(5_000).max(300_000).default(60_000),
+});
+
 export const runtimeShellSessionConfigSchema = z.object({
   enabled: z.boolean().default(false),
   maxSessions: z.number().int().min(1).max(64).default(8),
@@ -87,6 +91,7 @@ export const runtimeConfigSchema = z.object({
   thinkingLevel: z.enum(runtimeThinkingLevels).default("medium"),
   approval: runtimeApprovalConfigSchema.default({}),
   compaction: runtimeCompactionConfigSchema.default({}),
+  agentBootstrap: runtimeAgentBootstrapConfigSchema.default({}),
   shell: runtimeShellConfigSchema.default({}),
 });
 

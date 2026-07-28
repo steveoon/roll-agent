@@ -19,6 +19,7 @@ import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { describe, it, mock } from "node:test";
+import { McpClientManager } from "../mcp/client-manager.ts";
 import {
   AgentUsageBusyError,
   acquireAgentUsageLease,
@@ -26,6 +27,7 @@ import {
 } from "./agent-usage-lease.ts";
 import {
   MANAGED_AGENT_RUNTIME_RETENTIONS,
+  acquireAgentLifecycleLock,
   promoteManagedAgentRuntimeToPersistent,
   readVerifiedManagedAgentRuntime,
   stopAgentGracefully,
@@ -34,6 +36,81 @@ import {
 import type { RegisteredAgent } from "../types/agent.ts";
 
 describe("Agent usage leases", () => {
+  it("cancels lifecycle-lock retry before creating a lease", async () => {
+    const fixture = await createRuntimeFixture(MANAGED_AGENT_RUNTIME_RETENTIONS.persistent);
+    const lifecycleLock = acquireAgentLifecycleLock(fixture.dataDir, fixture.agent.skill.name);
+    const abortController = new AbortController();
+    const abortReason = new Error("bootstrap timed out");
+    try {
+      const acquiring = acquireAgentUsageLease(fixture.agent, fixture.dataDir, undefined, {
+        holderKind: "chat",
+        startIfStopped: false,
+        waitUntilReady: false,
+        lifecycleLockTimeoutMs: 60_000,
+        signal: abortController.signal,
+      });
+      abortController.abort(abortReason);
+
+      await assert.rejects(acquiring, (error: unknown) => error === abortReason);
+      assert.deepEqual(findLeasePaths(fixture), []);
+    } finally {
+      lifecycleLock.release();
+      await cleanupRuntimeFixture(fixture);
+    }
+  });
+
+  it("releases only the newly acquired lease when readiness is canceled", async () => {
+    const fixture = await createRuntimeFixture(MANAGED_AGENT_RUNTIME_RETENTIONS.persistent);
+    const existingLease = await acquireAgentUsageLease(fixture.agent, fixture.dataDir, undefined, {
+      holderKind: "run",
+      startIfStopped: false,
+      waitUntilReady: false,
+    });
+    assert.ok(existingLease);
+    const existingLeasePath = leasePathFor(fixture, existingLease.leaseId);
+    const readinessStarted = Promise.withResolvers<void>();
+    const abortController = new AbortController();
+    const abortReason = new Error("engine closing");
+    let observedSignal: AbortSignal | undefined;
+
+    const connectMock = mock.method(
+      McpClientManager.prototype,
+      "connect",
+      async (...args: Parameters<McpClientManager["connect"]>): Promise<never> => {
+        const signal = args[3]?.signal;
+        observedSignal = signal;
+        return await new Promise<never>((_resolve, reject) => {
+          signal?.addEventListener("abort", () => reject(signal.reason), { once: true });
+          readinessStarted.resolve();
+        });
+      },
+    );
+    const disconnectMock = mock.method(McpClientManager.prototype, "disconnectAll", async () => {});
+
+    try {
+      const acquiring = acquireAgentUsageLease(fixture.agent, fixture.dataDir, undefined, {
+        holderKind: "chat",
+        startIfStopped: false,
+        waitUntilReady: true,
+        signal: abortController.signal,
+      });
+      await readinessStarted.promise;
+      assert.equal(findLeasePaths(fixture).length, 2);
+
+      abortController.abort(abortReason);
+
+      await assert.rejects(acquiring, (error: unknown) => error === abortReason);
+      assert.equal(observedSignal, abortController.signal);
+      assert.equal(existsSync(existingLeasePath), true);
+      assert.deepEqual(findLeasePaths(fixture), [existingLeasePath]);
+    } finally {
+      disconnectMock.mock.restore();
+      connectMock.mock.restore();
+      await existingLease.release().catch(() => {});
+      await cleanupRuntimeFixture(fixture);
+    }
+  });
+
   it("keeps a lease-bound Agent alive until the last lease releases", async () => {
     const fixture = await createRuntimeFixture(MANAGED_AGENT_RUNTIME_RETENTIONS.leaseBound);
     try {
@@ -579,6 +656,15 @@ function findReleaseQuarantinePaths(fixture: RuntimeFixture): readonly string[] 
   return readdirSync(leaseDir)
     .filter((fileName) => fileName.endsWith(".releasing.json"))
     .map((fileName) => join(leaseDir, fileName));
+}
+
+function findLeasePaths(fixture: RuntimeFixture): readonly string[] {
+  const leaseDir = dirname(leasePathFor(fixture, randomUUID()));
+  if (!existsSync(leaseDir)) return [];
+  return readdirSync(leaseDir)
+    .filter((fileName) => !fileName.startsWith(".") && fileName.endsWith(".json"))
+    .map((fileName) => join(leaseDir, fileName))
+    .sort();
 }
 
 function escapeRegExp(value: string): string {

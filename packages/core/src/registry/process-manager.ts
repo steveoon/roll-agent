@@ -29,6 +29,8 @@ const UNKNOWN_CORE_VERSION = "unknown";
 const DEFAULT_READY_STARTUP_TIMEOUT_MS = 15_000;
 const DEFAULT_READY_PROBE_TIMEOUT_MS = 2_000;
 const DEFAULT_READY_INTERVAL_MS = 500;
+const DEFAULT_PROBE_CONNECT_TIMEOUT_MS = 30_000;
+const DEFAULT_PROBE_LIST_TOOLS_TIMEOUT_MS = 60_000;
 const AGENT_LIFECYCLE_LOCK_STALE_MS = 5 * 60_000;
 
 export const MANAGED_AGENT_RUNTIME_RETENTIONS = {
@@ -369,23 +371,56 @@ function manualRuntimeIdentityFix(agentName: string, pid: number): string {
   );
 }
 
+class AgentProbeCleanupError extends AggregateError {
+  constructor(agentName: string, errors: readonly unknown[]) {
+    super(errors, `Agent "${agentName}" endpoint probe failed to clean up its MCP connection.`);
+    this.name = "AgentProbeCleanupError";
+  }
+}
+
 /** 检查 core-managed Agent 对应的 MCP endpoint 是否已就绪。 */
 export async function probeAgentEndpoint(
   agent: RegisteredAgent,
-  options: { readonly timeoutMs?: number } = {},
+  options: {
+    readonly timeoutMs?: number;
+    readonly signal?: AbortSignal;
+  } = {},
 ): Promise<void> {
+  options.signal?.throwIfAborted();
   const clientManager = new McpClientManager();
+  const deadline =
+    options.timeoutMs === undefined ? undefined : Date.now() + Math.max(0, options.timeoutMs);
+  let probeFailure: { readonly error: unknown } | undefined;
 
   try {
     const client = await clientManager.connect(
       agent.skill.name,
       agent.transport,
       agent.installPath,
-      options.timeoutMs !== undefined ? { timeoutMs: options.timeoutMs } : {},
+      {
+        timeoutMs: requestTimeoutMs(DEFAULT_PROBE_CONNECT_TIMEOUT_MS, deadline),
+        ...(options.signal ? { signal: options.signal } : {}),
+      },
     );
-    await client.listTools();
-  } finally {
+    options.signal?.throwIfAborted();
+    await client.listTools(undefined, {
+      timeout: requestTimeoutMs(DEFAULT_PROBE_LIST_TOOLS_TIMEOUT_MS, deadline),
+      ...(options.signal ? { signal: options.signal } : {}),
+    });
+  } catch (error) {
+    probeFailure = { error };
+  }
+
+  try {
     await clientManager.disconnectAll();
+  } catch (cleanupError) {
+    throw new AgentProbeCleanupError(
+      agent.skill.name,
+      probeFailure === undefined ? [cleanupError] : [probeFailure.error, cleanupError],
+    );
+  }
+  if (probeFailure !== undefined) {
+    throw probeFailure.error;
   }
 }
 
@@ -409,8 +444,10 @@ export async function waitForAgentReady(
     readonly startupTimeoutMs?: number;
     readonly probeTimeoutMs?: number;
     readonly intervalMs?: number;
+    readonly signal?: AbortSignal;
   } = {},
 ): Promise<void> {
+  options.signal?.throwIfAborted();
   const startupTimeoutMs =
     readPositiveIntegerEnv("ROLL_AGENT_READY_STARTUP_TIMEOUT_MS") ??
     options.startupTimeoutMs ??
@@ -427,12 +464,24 @@ export async function waitForAgentReady(
   let lastError: unknown;
 
   while (Date.now() < deadline) {
+    options.signal?.throwIfAborted();
+    const remainingMs = deadline - Date.now();
+    if (remainingMs <= 0) break;
     try {
-      await probeAgentEndpoint(agent, { timeoutMs: probeTimeoutMs });
+      await probeAgentEndpoint(agent, {
+        timeoutMs: Math.min(probeTimeoutMs, remainingMs),
+        ...(options.signal ? { signal: options.signal } : {}),
+      });
       return;
     } catch (err) {
+      if (err instanceof AgentProbeCleanupError) {
+        throw err;
+      }
+      options.signal?.throwIfAborted();
       lastError = err;
-      await sleep(intervalMs);
+      const remainingAfterProbeMs = deadline - Date.now();
+      if (remainingAfterProbeMs <= 0) break;
+      await sleep(Math.min(intervalMs, remainingAfterProbeMs), options.signal);
     }
   }
 
@@ -996,9 +1045,25 @@ function resolveSpawnSpec(agent: RegisteredAgent): {
   throw new Error(`Agent "${agent.skill.name}" does not have a managed runtime start command`);
 }
 
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => {
-    setTimeout(resolve, ms);
+function requestTimeoutMs(localLimitMs: number, deadline: number | undefined): number {
+  if (deadline === undefined) return localLimitMs;
+  return Math.max(1, Math.min(localLimitMs, deadline - Date.now()));
+}
+
+function sleep(ms: number, signal?: AbortSignal): Promise<void> {
+  signal?.throwIfAborted();
+  return new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => {
+      signal?.removeEventListener("abort", handleAbort);
+      resolve();
+    }, ms);
+    const handleAbort = (): void => {
+      clearTimeout(timeout);
+      signal?.removeEventListener("abort", handleAbort);
+      reject(signal?.reason);
+    };
+    signal?.addEventListener("abort", handleAbort, { once: true });
+    if (signal?.aborted === true) handleAbort();
   });
 }
 

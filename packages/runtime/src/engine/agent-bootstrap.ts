@@ -1,9 +1,15 @@
 export const AGENT_BOOTSTRAP_MAX_CONCURRENCY = 4;
 
+export interface BoundedConcurrencyOptions<Input, Output> {
+  readonly signal: AbortSignal;
+  readonly onSkipped: (input: Input, index: number) => Output;
+}
+
 export async function mapWithBoundedConcurrency<Input, Output>(
   inputs: readonly Input[],
   maxConcurrency: number,
   mapper: (input: Input, index: number) => Promise<Output>,
+  options?: BoundedConcurrencyOptions<Input, Output>,
 ): Promise<Output[]> {
   if (!Number.isSafeInteger(maxConcurrency) || maxConcurrency < 1) {
     throw new RangeError("maxConcurrency must be a positive safe integer");
@@ -20,6 +26,9 @@ export async function mapWithBoundedConcurrency<Input, Output>(
 
   const runWorker = async (): Promise<void> => {
     while (true) {
+      if (options?.signal.aborted === true) {
+        return;
+      }
       const entry = entries.next();
       if (entry.done) {
         return;
@@ -30,7 +39,20 @@ export async function mapWithBoundedConcurrency<Input, Output>(
     }
   };
 
-  await Promise.all(Array.from({ length: workerCount }, runWorker));
+  const workerResults = await Promise.allSettled(Array.from({ length: workerCount }, runWorker));
+  const rejectedWorker = workerResults.find(
+    (result): result is PromiseRejectedResult => result.status === "rejected",
+  );
+  if (rejectedWorker !== undefined) {
+    throw rejectedWorker.reason;
+  }
+  if (options?.signal.aborted === true) {
+    for (const [index, input] of inputs.entries()) {
+      if (results[index] === undefined) {
+        results[index] = { value: options.onSkipped(input, index) };
+      }
+    }
+  }
 
   return results.map((result, index) => {
     if (result === undefined) {

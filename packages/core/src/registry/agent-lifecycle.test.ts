@@ -43,8 +43,12 @@ describe("AgentLifecycleService.inspectAll", () => {
     harness.probeFailures.add("offline-external-agent");
     harness.probeFailures.add("offline-core-agent");
     const service = new AgentLifecycleService("/roll-data", harness.collaborators);
+    const abortController = new AbortController();
 
-    const inspections = await service.inspectAll({ probeTimeoutMs: 321 });
+    const inspections = await service.inspectAll({
+      probeTimeoutMs: 321,
+      signal: abortController.signal,
+    });
 
     assert.equal(findInspection(inspections, "smart-reply-agent").state, "ready-on-demand");
     assert.equal(findInspection(inspections, "stopped-agent").state, "stopped");
@@ -76,8 +80,24 @@ describe("AgentLifecycleService.inspectAll", () => {
       "offline-external-agent",
     ]);
     assert.ok(harness.probeCalls.every((call) => call.timeoutMs === 321));
+    assert.ok(harness.probeCalls.every((call) => call.signal === abortController.signal));
     assert.equal(harness.startCalls.length, 0);
     assert.equal(harness.stopCalls.length, 0);
+  });
+
+  it("propagates inspection cancellation instead of converting it to unreachable", async () => {
+    const agent = createAgent("external-agent", "external-managed");
+    const harness = createHarness([agent], {});
+    const service = new AgentLifecycleService("/roll-data", harness.collaborators);
+    const abortController = new AbortController();
+    const abortReason = new Error("inspection canceled");
+    abortController.abort(abortReason);
+
+    await assert.rejects(
+      service.inspectAll({ signal: abortController.signal }),
+      (error: unknown) => error === abortReason,
+    );
+    assert.equal(harness.probeCalls[0]?.signal, abortController.signal);
   });
 
   it("marks an unverifiable core-managed runtime as unsafe for automatic restart", async () => {
@@ -434,7 +454,11 @@ interface Harness {
   readonly waitFailures: Set<string>;
   readonly unverifiableRuntimeIdentities: Set<string>;
   readonly replaceRuntimeIdentityOnWaitFailure: Set<string>;
-  readonly probeCalls: Array<{ readonly agentName: string; readonly timeoutMs?: number }>;
+  readonly probeCalls: Array<{
+    readonly agentName: string;
+    readonly timeoutMs?: number;
+    readonly signal?: AbortSignal;
+  }>;
   readonly startCalls: Array<{
     readonly agentName: string;
     readonly dataDir: string;
@@ -540,7 +564,9 @@ function createHarness(
         probeCalls.push({
           agentName: agent.skill.name,
           ...(options?.timeoutMs !== undefined ? { timeoutMs: options.timeoutMs } : {}),
+          ...(options?.signal !== undefined ? { signal: options.signal } : {}),
         });
+        options?.signal?.throwIfAborted();
         if (probeFailures.has(agent.skill.name)) {
           throw new Error("endpoint unavailable: probe-secret");
         }

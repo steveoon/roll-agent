@@ -18,6 +18,7 @@ describe("rollConfigSchema", () => {
       }),
     );
     assert.equal(DEFAULT_CONFIG.runtime.turnTimeoutMs, 300_000);
+    assert.equal(DEFAULT_CONFIG.runtime.agentBootstrap.timeoutMs, 60_000);
     assert.equal(DEFAULT_CONFIG.chat.screenMode, "auto");
     assert.equal(DEFAULT_CONFIG.install.networkTimeoutMs, 120_000);
     assert.deepEqual(DEFAULT_CONFIG.browser.instances, {});
@@ -77,6 +78,9 @@ describe("rollConfigSchema", () => {
       runtime: {
         contextWindow: 128_000,
         turnTimeoutMs: 45_000,
+        agentBootstrap: {
+          timeoutMs: 90_000,
+        },
         compaction: {
           enabled: true,
           strategy: "truncate",
@@ -94,6 +98,7 @@ describe("rollConfigSchema", () => {
     assert.equal(result.success, true);
     assert.equal(result.success ? result.data.runtime.contextWindow : undefined, 128_000);
     assert.equal(result.success ? result.data.runtime.turnTimeoutMs : undefined, 45_000);
+    assert.equal(result.success ? result.data.runtime.agentBootstrap.timeoutMs : undefined, 90_000);
     assert.equal(result.success ? result.data.runtime.compaction.strategy : undefined, "truncate");
     assert.equal(result.success ? result.data.runtime.compaction.timeoutMs : undefined, 180_000);
     assert.equal(result.success ? result.data.runtime.compaction.thinkingLevel : undefined, "high");
@@ -122,6 +127,7 @@ describe("rollConfigSchema", () => {
       32_000,
     );
     assert.equal(result.success ? result.data.runtime.thinkingLevel : undefined, "medium");
+    assert.equal(result.success ? result.data.runtime.agentBootstrap.timeoutMs : undefined, 60_000);
     assert.equal(result.success ? result.data.runtime.compaction.timeoutMs : undefined, 120_000);
     assert.equal(
       result.success ? result.data.runtime.compaction.maxOutputTokens : undefined,
@@ -212,6 +218,18 @@ describe("rollConfigSchema", () => {
       runtime: { turnTimeoutMs: 1000 },
       agents: { dataDir: "/tmp" },
     });
+    const insufficientAgentBootstrapTimeout = rollConfigSchema.safeParse({
+      llm: { defaultProvider: "x", defaultModel: "y", providers: {} },
+      ask: {},
+      runtime: { agentBootstrap: { timeoutMs: 4_999 } },
+      agents: { dataDir: "/tmp" },
+    });
+    const excessiveAgentBootstrapTimeout = rollConfigSchema.safeParse({
+      llm: { defaultProvider: "x", defaultModel: "y", providers: {} },
+      ask: {},
+      runtime: { agentBootstrap: { timeoutMs: 300_001 } },
+      agents: { dataDir: "/tmp" },
+    });
 
     assert.equal(invalidStrategy.success, false);
     assert.equal(invalidThreshold.success, false);
@@ -222,5 +240,7 @@ describe("rollConfigSchema", () => {
     assert.equal(insufficientCompactionOutput.success, false);
     assert.equal(excessiveCompactionOutput.success, false);
     assert.equal(invalidTurnTimeout.success, false);
+    assert.equal(insufficientAgentBootstrapTimeout.success, false);
+    assert.equal(excessiveAgentBootstrapTimeout.success, false);
   });
 });

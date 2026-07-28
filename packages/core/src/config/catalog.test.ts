@@ -81,7 +81,7 @@ describe("buildRollConfigCatalog", () => {
     };
     visit(catalog.root);
 
-    assert.equal(leaves.length, 60);
+    assert.equal(leaves.length, 61);
     for (const leaf of leaves) {
       const path = leaf.path.join(".");
       const guidance = findConfigGuidance(path);
@@ -154,6 +154,24 @@ describe("buildRollConfigCatalog", () => {
       assert.deepEqual(compactionTimeout.constraints, {
         minimum: 10_000,
         maximum: 600_000,
+        exclusiveMinimum: false,
+        exclusiveMaximum: false,
+        integer: true,
+      });
+    }
+
+    const agentBootstrapTimeout = findNode(catalog.root, [
+      "runtime",
+      "agentBootstrap",
+      "timeoutMs",
+    ]);
+    assert.equal(agentBootstrapTimeout.kind, "number");
+    assert.equal(agentBootstrapTimeout.widget, "duration");
+    assert.equal(agentBootstrapTimeout.defaultValue, 60_000);
+    if (agentBootstrapTimeout.kind === "number") {
+      assert.deepEqual(agentBootstrapTimeout.constraints, {
+        minimum: 5_000,
+        maximum: 300_000,
         exclusiveMinimum: false,
         exclusiveMaximum: false,
         integer: true,
