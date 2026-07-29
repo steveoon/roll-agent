@@ -68,6 +68,7 @@ SCENARIOS = (
 )
 PROMPT = "›"
 PRIMARY_SCREEN_SENTINEL = "PTY_PRIMARY_SCREEN_RESTORED"
+RUNTIME_SERVER_READY_TEXT = "roll runtime serve 已启动"
 RESIZE_SENTINELS = ("PTY_USER_4F21", "PTY_ASSIST_91C7", "PTY_DRAFT_7A52")
 TERMINAL_QUERIES = (b"\x1b[?u", b"\x1b[6n", b"\x1b[c")
 SENSITIVE_ENV_NAME = re.compile(
@@ -1422,7 +1423,7 @@ def run_scenario(scenario: str) -> tuple[dict[str, object], PtyFixture]:
     try:
         if scenario == "cli-bootstrap":
             ready_ms = fixture.wait_for(
-                lambda screen: "roll runtime-server 已启动" in screen,
+                lambda screen: RUNTIME_SERVER_READY_TEXT in screen,
                 8,
                 "production CLI runtime-server bootstrap",
             )
@@ -1437,7 +1438,7 @@ def run_scenario(scenario: str) -> tuple[dict[str, object], PtyFixture]:
             "cli-server-5-agent-bootstrap",
         ):
             fixture.wait_for(
-                lambda screen: "roll runtime-server 已启动" in screen,
+                lambda screen: RUNTIME_SERVER_READY_TEXT in screen,
                 8,
                 "production CLI runtime-server readiness",
             )
@@ -1493,7 +1494,7 @@ def run_scenario(scenario: str) -> tuple[dict[str, object], PtyFixture]:
             )
             final_screen = fixture.screen.render()
             assert_prompt(final_screen)
-            if "roll runtime-server 已启动" in final_screen:
+            if RUNTIME_SERVER_READY_TEXT in final_screen:
                 raise AssertionError("production CLI Ink scenario entered server mode")
             return {
                 "cliInkFirstInteractiveMs": ready_ms,
