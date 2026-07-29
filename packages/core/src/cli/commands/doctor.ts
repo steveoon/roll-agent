@@ -28,6 +28,11 @@ import {
 } from "../../config/runtime-env.ts";
 import { inspectAgentRuntimeEnv } from "../../mcp/agent-diagnostics.ts";
 import {
+  AGENT_USAGE_STOP_RECOVERY_STATUSES,
+  inspectAgentUsageStopRecovery,
+  type AgentUsageStopRecoveryInspection,
+} from "../../registry/agent-usage-lease.ts";
+import {
   cleanupOrphanAgentRuntimeMetadata,
   inspectManagedAgentRuntime,
 } from "../../registry/process-manager.ts";
@@ -493,6 +498,21 @@ export default defineCommand({
                 : {}),
             });
           }
+
+          try {
+            const recoveryInspection = await inspectAgentUsageStopRecovery(
+              agent,
+              fullConfig.dataDir,
+            );
+            const recoveryCheck = formatAgentUsageRecoveryCheck(recoveryInspection);
+            if (recoveryCheck !== undefined) checks.push(recoveryCheck);
+          } catch (error) {
+            checks.push({
+              name: `Agent usage lease (${agent.skill.name})`,
+              status: "warn",
+              message: `无法检查使用租约：${error instanceof Error ? error.message : String(error)}`,
+            });
+          }
         }
 
         const envReport = inspectAgentEnvRequirements(
@@ -635,6 +655,42 @@ export function formatDoctorJsonOutput(
 export function formatDoctorFixLines(fix: DoctorFixResult): string[] {
   const icon = FIX_STATUS_ICONS[fix.status];
   return [`  ${icon} ${fix.name}: ${fix.message}`];
+}
+
+export function formatAgentUsageRecoveryCheck(
+  inspection: AgentUsageStopRecoveryInspection,
+): CheckResult | undefined {
+  if (inspection.status === AGENT_USAGE_STOP_RECOVERY_STATUSES.NOT_NEEDED) return undefined;
+  if (inspection.status === AGENT_USAGE_STOP_RECOVERY_STATUSES.RECOVERABLE) {
+    const command = `roll agent stop ${inspection.agentName}`;
+    return {
+      name: `Agent usage lease (${inspection.agentName})`,
+      status: "warn",
+      message:
+        `检测到 ${String(inspection.releases.length)} 个上次停止中断留下的租约；` +
+        `可通过 \`${command}\` 交互确认恢复。`,
+      fix: `运行 \`${command}\` 并确认恢复；` + `非交互环境运行 \`${command} --recover\`。`,
+      details: {
+        type: "agent-usage-stop-recovery",
+        status: inspection.status,
+        runtimePid: inspection.runtimePid,
+        releases: inspection.releases,
+        command,
+      },
+    };
+  }
+  return {
+    name: `Agent usage lease (${inspection.agentName})`,
+    status: "warn",
+    message: `使用租约状态异常，无法安全自动恢复：${inspection.reason}`,
+    fix: "关闭相关 Roll 进程后重新运行 `roll doctor --fix-plan`；不要手工强删无法验证的租约。",
+    details: {
+      type: "agent-usage-stop-recovery",
+      status: inspection.status,
+      releases: inspection.releases,
+      reason: inspection.reason,
+    },
+  };
 }
 
 function applyConfigMigrationFix(inspection: ConfigInspectionNeedsMigration): DoctorFixResult {

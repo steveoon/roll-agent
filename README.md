@@ -235,8 +235,9 @@ roll agent list                 列出所有已注册 Agent
 roll agent tools <name>         查看 Agent 暴露的 MCP tools 及输入 schema
 roll agent start <name>         启动由 Roll 托管的 core-managed Agent
 roll agent stop <name>          停止由 Roll 托管的 core-managed Agent
+roll agent stop <name> --recover 非交互确认恢复可安全验证的中断租约后停止
 roll agent info <name>          查看 Agent 详情（SKILL.md / runtime / env）
-roll agent health               健康检查（兼容 on-demand / core-managed / external-managed）
+roll agent health               健康检查并报告中断租约（不自动恢复）
 
 roll run <agent> <tool> [args]  直接调用 MCP tool（支持 --key value / --input-json / --input-file）
 roll ask "<message>"            用 LLM 从自然语言中选择 Agent 和 MCP tool
@@ -260,6 +261,7 @@ roll doctor --json              JSON 诊断结果（配置损坏时返回非零�
 |------|------|------|
 | `roll agent install` | `--skip-browser-setup` | 跳过 Playwright 浏览器运行时安装/校验 |
 | `roll agent install` | `--no-start` | 安装后不自动启动 `core-managed` Agent |
+| `roll agent stop` | `--recover` | 非交互确认恢复；活动或无法验证的租约仍会拒绝 |
 | `roll update` | `--check` | 仅检查可用更新，不执行安装或刷新 |
 | `roll update` | `--skip-browser-setup` | 更新 Agent 后跳过 Playwright 浏览器运行时安装/校验 |
 | `roll run` | `--input-json <json>` | 以 JSON 字符串提供完整 tool 输入对象 |
@@ -417,11 +419,29 @@ roll run wechat-agent send_message --userId xxx --content "你好"
 
 - [docs/how-to-integrate-non-node-agents.md](./docs/how-to-integrate-non-node-agents.md)
 
+### 第三方 Web UI / GUI
+
+第三方 UI 使用版本化 Runtime Protocol，不直接依赖 `ConversationEngine`：
+
+```bash
+roll runtime serve --stdio
+```
+
+- [架构与安全边界](./docs/runtime-protocol-architecture.md)
+- [Runtime Protocol v1 参考](./docs/runtime-protocol-v1-reference.md)
+- [`@roll-agent/client-node` API 参考](./docs/client-node-reference.md)
+- [`@roll-agent/companion` Relay v1 参考](./docs/companion-relay-v1-reference.md)
+- [使用 Electron、Tauri、Python 或 Next.js 接入](./docs/how-to-build-roll-runtime-ui.md)
+- [最小客户端教程](./docs/tutorial-runtime-ui-quickstart.md)
+
 ## 项目结构
 
 ```
 packages/
   core/          指挥官：CLI + Registry + Router + MCP Client + LLM Engine
+  protocol/      第三方 UI 的版本化 Runtime Protocol + JSON Schema
+  client-node/   stdio Runtime Protocol Node 客户端
+  companion/     远程 Web 的本地 Companion / 出站 Relay bridge 基础能力（不含 Cloud Relay）
   sdk/           子 Agent 开发 SDK：defineAgent() + defineTool()
   browser/       浏览器运行时抽象层：BrowserRuntime + ContextManager + SessionStore
 agents/
@@ -479,6 +499,10 @@ pnpm release:legacy:dry-run        # 旧脚本 dry-run（诊断用）
 - `@roll-agent/sdk`
 - `@roll-agent/browser`
 - `@roll-agent/core`
+- `@roll-agent/runtime`
+- `@roll-agent/protocol`
+- `@roll-agent/client-node`
+- `@roll-agent/companion`
 - `@roll-agent/reply-authority-client`
 - `@roll-agent/browser-use-agent`
 - `@roll-agent/smart-reply-agent`

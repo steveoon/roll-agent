@@ -98,6 +98,12 @@ export type {
 export { ApprovalGate } from "./approval/approval-gate.ts";
 export type { ApprovalDecision } from "./approval/approval-gate.ts";
 export { RuntimeServer } from "./server/runtime-server.ts";
+export { RuntimeService, RuntimeServiceError } from "./service/runtime-service.ts";
+export type {
+  RuntimeServiceEngine,
+  RuntimeServiceOptions,
+  RuntimeServiceSession,
+} from "./service/runtime-service.ts";
 export { createStdioConnection } from "./server/transport/stdio.ts";
 export { RpcMethod, EVENT_NOTIFICATION, isRequest } from "./server/protocol.ts";
 export type {

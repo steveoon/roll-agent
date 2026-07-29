@@ -292,7 +292,7 @@ pnpm release-github-releases
 
 | 层级 | 必查点 | 代码/配置位置 | 失败处理 |
 |------|------|------|------|
-| 声明层 | 发布包必须属于当前 npm scope，且只覆盖 `@roll-agent/core`、`@roll-agent/sdk`、`@roll-agent/runtime`、`@roll-agent/browser`、`@roll-agent/reply-authority-client`、`@roll-agent/browser-use-agent`、`@roll-agent/smart-reply-agent` | `scripts/verify-published-packages.mjs` | 不把未知包加入发布清单；先明确包边界 |
+| 声明层 | 发布包必须属于当前 npm scope，权威白名单由 `scripts/published-packages.mjs` 统一维护；当前包含 `@roll-agent/core`、`@roll-agent/runtime`、`@roll-agent/protocol`、`@roll-agent/client-node`、`@roll-agent/companion`、`@roll-agent/sdk`、`@roll-agent/browser`、`@roll-agent/reply-authority-client`、`@roll-agent/browser-use-agent`、`@roll-agent/smart-reply-agent` | `scripts/published-packages.mjs`、`scripts/verify-published-packages.mjs` | 不把未知包加入发布清单；新增发布包必须同步 tarball 审计 |
 | CI 权限层 | GitHub Actions 必须使用 full SHA pin，不能使用 tag；PR CI 和 release workflow 都要满足仓库级 SHA pin 规则 | `.github/workflows/ci.yml`、`.github/workflows/release.yml` | CI 会在下载 action 前失败；先 pin SHA 再重跑 |
 | CI 权限层 | workflow 顶层保持 `permissions: {}`；`quality` 只给 `contents: read`；`release_pr` 只给 `contents: write` + `pull-requests: write`；`npm_publish` 只给 `contents: read` + `id-token: write`；`github_releases` 只给 `contents: write` | `.github/workflows/release.yml` | 不扩大默认 `GITHUB_TOKEN` 权限；不要把 OIDC 与 GitHub 写权限塞进同一 job |
 | CI 权限层 | npm 发布使用 Trusted Publishing（OIDC），`npm_publish` 必须持有 `id-token: write`；workflow 不得注入 `NPM_TOKEN` / `NODE_AUTH_TOKEN` | `.github/workflows/release.yml`、`scripts/release-packages.mjs` | publish job 禁止 `setup-node` 的 `registry-url`（会写入空 `_authToken` 并短路 OIDC） |

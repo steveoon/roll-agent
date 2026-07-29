@@ -1,0 +1,48 @@
+{
+  "name": "@roll-agent/protocol",
+  "version": "0.0.0",
+  "type": "module",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/steveoon/roll-agent"
+  },
+  "homepage": "https://github.com/steveoon/roll-agent",
+  "bugs": {
+    "url": "https://github.com/steveoon/roll-agent/issues"
+  },
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "default": "./src/index.ts"
+    },
+    "./schema": "./dist/schema/roll-runtime-protocol-v1.schema.json",
+    "./fixtures/*": "./fixtures/*"
+  },
+  "publishConfig": {
+    "access": "public",
+    "exports": {
+      ".": {
+        "types": "./dist/index.d.ts",
+        "default": "./dist/index.js"
+      },
+      "./schema": "./dist/schema/roll-runtime-protocol-v1.schema.json",
+      "./fixtures/*": "./fixtures/*"
+    }
+  },
+  "files": [
+    "dist",
+    "fixtures"
+  ],
+  "scripts": {
+    "build": "rm -rf dist && tsc -p tsconfig.build.json && node scripts/generate-schema.mjs",
+    "typecheck": "tsc --noEmit",
+    "test": "node --experimental-strip-types --test \"src/**/*.test.ts\"",
+    "clean": "rm -rf dist"
+  },
+  "dependencies": {
+    "zod": "3.25.76"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0"
+  }
+}

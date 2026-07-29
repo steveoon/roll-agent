@@ -8,6 +8,10 @@ description: Use when creating, checking, reviewing, or debugging Changesets rel
 | npm 包名 | 本地路径 |
 |---|---|
 | `@roll-agent/core` | `packages/core` |
+| `@roll-agent/runtime` | `packages/runtime` |
+| `@roll-agent/protocol` | `packages/protocol` |
+| `@roll-agent/client-node` | `packages/client-node` |
+| `@roll-agent/companion` | `packages/companion` |
 | `@roll-agent/sdk` | `packages/sdk` |
 | `@roll-agent/browser` | `packages/browser` |
 | `@roll-agent/reply-authority-client` | `packages/reply-authority-client` |

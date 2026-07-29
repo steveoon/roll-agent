@@ -1,0 +1,17 @@
+{
+  "jsonrpc": "2.0",
+  "method": "runtime.event",
+  "params": {
+    "protocolVersion": "1.0",
+    "runtimeInstanceId": "00000000-0000-4000-8000-000000000001",
+    "sequence": 7,
+    "timestamp": "2026-07-28T12:00:00.000Z",
+    "threadId": "00000000-0000-4000-8000-000000000002",
+    "turnId": "00000000-0000-4000-8000-000000000003",
+    "event": {
+      "type": "message.delta",
+      "streamId": "00000000-0000-4000-8000-000000000004",
+      "delta": "hello"
+    }
+  }
+}

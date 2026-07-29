@@ -41,6 +41,7 @@ const DEFAULT_LIFECYCLE_LOCK_TIMEOUT_MS = 15_000;
 const MIN_LIFECYCLE_LOCK_RETRY_MS = 50;
 const MAX_LIFECYCLE_LOCK_RETRY_MS = 250;
 const ABANDONED_TEMP_FILE_AGE_MS = 5 * 60_000;
+const RELEASE_QUARANTINE_FILE_PATTERN = /^\.([^.]+)\.([^.]+)\.releasing\.json$/u;
 
 export const AGENT_USAGE_HOLDER_KINDS = [
   "chat",
@@ -97,6 +98,45 @@ export interface AgentUsageInspection {
   readonly blockers: readonly AgentUsageBlocker[];
 }
 
+export const AGENT_USAGE_STOP_RECOVERY_STATUSES = {
+  NOT_NEEDED: "not-needed",
+  RECOVERABLE: "recoverable",
+  BLOCKED: "blocked",
+} as const;
+
+export interface InterruptedAgentUsageRelease {
+  readonly filePath: string;
+  readonly leaseId: AgentUsageLeaseId;
+  readonly holderKind: AgentUsageHolderKind;
+  readonly ownerPid: number;
+  readonly runtimePid: number;
+  readonly acquiredAt: string;
+}
+
+export type AgentUsageStopRecoveryInspection =
+  | {
+      readonly status: typeof AGENT_USAGE_STOP_RECOVERY_STATUSES.NOT_NEEDED;
+      readonly agentName: string;
+    }
+  | {
+      readonly status: typeof AGENT_USAGE_STOP_RECOVERY_STATUSES.RECOVERABLE;
+      readonly agentName: string;
+      readonly releases: readonly InterruptedAgentUsageRelease[];
+      readonly runtimePid: number | null;
+    }
+  | {
+      readonly status: typeof AGENT_USAGE_STOP_RECOVERY_STATUSES.BLOCKED;
+      readonly agentName: string;
+      readonly releases: readonly InterruptedAgentUsageRelease[];
+      readonly reason: string;
+    };
+
+export interface AgentUsageStopRecoveryResult {
+  readonly agentName: string;
+  readonly recoveredReleaseCount: number;
+  readonly runtimeStopped: boolean;
+}
+
 export interface AgentUsageLease {
   readonly agentName: string;
   readonly leaseId: AgentUsageLeaseId;
@@ -146,6 +186,18 @@ interface ReconciledLeaseState {
   readonly blockers: readonly AgentUsageBlocker[];
 }
 
+interface InterruptedReleaseCandidate {
+  readonly record: AgentUsageLeaseRecord;
+  readonly view: InterruptedAgentUsageRelease;
+  readonly ownedFile: OwnedLeaseFile;
+}
+
+interface AgentUsageStopRecoveryState {
+  readonly inspection: AgentUsageStopRecoveryInspection;
+  readonly candidates: readonly InterruptedReleaseCandidate[];
+  readonly runtime: VerifiedManagedAgentRuntime | undefined;
+}
+
 const agentUsageLeaseStates = new WeakMap<AgentUsageLease, AgentUsageLeaseState>();
 
 export class AgentUsageBusyError extends Error {
@@ -167,6 +219,25 @@ export class AgentUsageLeaseStateError extends Error {
   constructor(agentName: string, message: string) {
     super(`Agent "${agentName}" 的使用租约状态无效：${message}`);
     this.name = "AgentUsageLeaseStateError";
+  }
+}
+
+export class AgentUsageStopRecoveryError extends Error {
+  readonly code = "agent_usage_stop_recovery_blocked" as const;
+  readonly inspection: Extract<
+    AgentUsageStopRecoveryInspection,
+    { readonly status: typeof AGENT_USAGE_STOP_RECOVERY_STATUSES.BLOCKED }
+  >;
+
+  constructor(
+    inspection: Extract<
+      AgentUsageStopRecoveryInspection,
+      { readonly status: typeof AGENT_USAGE_STOP_RECOVERY_STATUSES.BLOCKED }
+    >,
+  ) {
+    super(inspection.reason);
+    this.name = "AgentUsageStopRecoveryError";
+    this.inspection = inspection;
   }
 }
 
@@ -306,6 +377,90 @@ export async function inspectAgentUsage(
   }
 }
 
+export async function inspectAgentUsageStopRecovery(
+  agent: RegisteredAgent,
+  dataDir: string,
+  options: { readonly lifecycleLockTimeoutMs?: number } = {},
+): Promise<AgentUsageStopRecoveryInspection> {
+  if (!isAgentUsageLeaseManaged(agent)) {
+    return {
+      status: AGENT_USAGE_STOP_RECOVERY_STATUSES.NOT_NEEDED,
+      agentName: agent.skill.name,
+    };
+  }
+
+  const lifecycleLock = await acquireAgentLifecycleLockWithRetry(
+    dataDir,
+    agent.skill.name,
+    options.lifecycleLockTimeoutMs,
+  );
+  try {
+    return inspectAgentUsageStopRecoveryWithLock(agent, dataDir).inspection;
+  } finally {
+    lifecycleLock.release();
+  }
+}
+
+export async function recoverInterruptedAgentStop(
+  agent: RegisteredAgent,
+  dataDir: string,
+  options: { readonly lifecycleLockTimeoutMs?: number } = {},
+): Promise<AgentUsageStopRecoveryResult | undefined> {
+  if (!isAgentUsageLeaseManaged(agent)) return undefined;
+
+  const lifecycleLock = await acquireAgentLifecycleLockWithRetry(
+    dataDir,
+    agent.skill.name,
+    options.lifecycleLockTimeoutMs,
+  );
+  try {
+    const state = inspectAgentUsageStopRecoveryWithLock(agent, dataDir);
+    if (state.inspection.status === AGENT_USAGE_STOP_RECOVERY_STATUSES.NOT_NEEDED) {
+      return undefined;
+    }
+    if (state.inspection.status === AGENT_USAGE_STOP_RECOVERY_STATUSES.BLOCKED) {
+      throw new AgentUsageStopRecoveryError(state.inspection);
+    }
+
+    const firstCandidate = state.candidates[0];
+    if (firstCandidate === undefined) {
+      throw new AgentUsageLeaseStateError(
+        agent.skill.name,
+        "恢复检查返回可恢复状态，但没有可验证的中断租约",
+      );
+    }
+    assertInterruptedReleaseCandidatesUnchanged(agent.skill.name, state.candidates);
+    const expectedRuntimeIdentity =
+      state.runtime?.identity ?? firstCandidate.record.runtimeIdentity;
+    const runtimeStopped = await stopAgentGracefully(dataDir, agent.skill.name, {
+      lifecycleLock,
+      expectedIdentity: expectedRuntimeIdentity,
+    });
+    if (
+      !runtimeStopped &&
+      (state.runtime !== undefined ||
+        readVerifiedManagedAgentRuntime(dataDir, agent.skill.name) !== undefined)
+    ) {
+      throw new AgentUsageLeaseStateError(
+        agent.skill.name,
+        "恢复期间 Runtime 身份发生变化，已保留中断租约并停止继续清理",
+      );
+    }
+
+    assertInterruptedReleaseCandidatesUnchanged(agent.skill.name, state.candidates);
+    for (const candidate of state.candidates) {
+      unlinkSync(candidate.ownedFile.leasePath);
+    }
+    return {
+      agentName: agent.skill.name,
+      recoveredReleaseCount: state.candidates.length,
+      runtimeStopped,
+    };
+  } finally {
+    lifecycleLock.release();
+  }
+}
+
 export async function acquireAgentUsageMaintenanceGuard(
   agent: RegisteredAgent,
   dataDir: string,
@@ -359,6 +514,215 @@ export async function acquireAgentLifecycleLockWithRetry(
       await sleep(randomRetryDelayMs(), signal);
     }
   }
+}
+
+function inspectAgentUsageStopRecoveryWithLock(
+  agent: RegisteredAgent,
+  dataDir: string,
+): AgentUsageStopRecoveryState {
+  const runtime = readVerifiedManagedAgentRuntime(dataDir, agent.skill.name);
+  const candidates = readInterruptedReleaseCandidates(dataDir, agent.skill.name);
+  const candidatePaths = new Set(candidates.map((candidate) => candidate.ownedFile.leasePath));
+  const reconciled = reconcileLeaseFiles(dataDir, agent.skill.name, runtime?.identity);
+  const otherBlockers = reconciled.blockers.filter(
+    (blocker) => blocker.kind !== "invalid" || !candidatePaths.has(blocker.filePath),
+  );
+
+  if (candidates.length === 0) {
+    const unsafeBlockers = otherBlockers.filter((blocker) => blocker.kind !== "active");
+    if (unsafeBlockers.length === 0) {
+      return {
+        inspection: {
+          status: AGENT_USAGE_STOP_RECOVERY_STATUSES.NOT_NEEDED,
+          agentName: agent.skill.name,
+        },
+        candidates,
+        runtime,
+      };
+    }
+    return createBlockedStopRecoveryState(
+      agent.skill.name,
+      candidates,
+      runtime,
+      formatAgentUsageBusyMessage(agent.skill.name, unsafeBlockers),
+    );
+  }
+
+  if (otherBlockers.length > 0) {
+    return createBlockedStopRecoveryState(
+      agent.skill.name,
+      candidates,
+      runtime,
+      formatAgentUsageBusyMessage(agent.skill.name, otherBlockers),
+    );
+  }
+
+  for (const candidate of candidates) {
+    const ownerVerification = verifyProcessStartToken(
+      candidate.record.ownerIdentity.pid,
+      candidate.record.ownerIdentity.processStartToken,
+    );
+    if (ownerVerification.status === "match") {
+      return createBlockedStopRecoveryState(
+        agent.skill.name,
+        candidates,
+        runtime,
+        `中断释放租约的持有进程 PID ${String(candidate.record.ownerIdentity.pid)} 仍在运行，拒绝恢复。`,
+      );
+    }
+    if (ownerVerification.status === "unavailable") {
+      return createBlockedStopRecoveryState(
+        agent.skill.name,
+        candidates,
+        runtime,
+        `无法验证中断释放租约持有进程 PID ${String(candidate.record.ownerIdentity.pid)}：${ownerVerification.reason}，拒绝恢复。`,
+      );
+    }
+
+    const referencesCurrentRuntime =
+      runtime !== undefined &&
+      sameManagedAgentRuntimeIdentity(runtime.identity, candidate.record.runtimeIdentity);
+    if (referencesCurrentRuntime) continue;
+
+    const referencedRuntimeVerification = verifyProcessStartToken(
+      candidate.record.runtimeIdentity.pid,
+      candidate.record.runtimeIdentity.processStartToken,
+    );
+    if (referencedRuntimeVerification.status === "match") {
+      return createBlockedStopRecoveryState(
+        agent.skill.name,
+        candidates,
+        runtime,
+        `租约引用的 Runtime PID ${String(candidate.record.runtimeIdentity.pid)} 仍在运行，但不匹配当前 runtime sidecar，拒绝恢复。`,
+      );
+    }
+    if (referencedRuntimeVerification.status === "unavailable") {
+      return createBlockedStopRecoveryState(
+        agent.skill.name,
+        candidates,
+        runtime,
+        `无法验证租约引用的 Runtime PID ${String(candidate.record.runtimeIdentity.pid)}：${referencedRuntimeVerification.reason}，拒绝恢复。`,
+      );
+    }
+  }
+
+  return {
+    inspection: {
+      status: AGENT_USAGE_STOP_RECOVERY_STATUSES.RECOVERABLE,
+      agentName: agent.skill.name,
+      releases: candidates.map((candidate) => candidate.view),
+      runtimePid: runtime?.identity.pid ?? null,
+    },
+    candidates,
+    runtime,
+  };
+}
+
+function createBlockedStopRecoveryState(
+  agentName: string,
+  candidates: readonly InterruptedReleaseCandidate[],
+  runtime: VerifiedManagedAgentRuntime | undefined,
+  reason: string,
+): AgentUsageStopRecoveryState {
+  return {
+    inspection: {
+      status: AGENT_USAGE_STOP_RECOVERY_STATUSES.BLOCKED,
+      agentName,
+      releases: candidates.map((candidate) => candidate.view),
+      reason,
+    },
+    candidates,
+    runtime,
+  };
+}
+
+function readInterruptedReleaseCandidates(
+  dataDir: string,
+  agentName: string,
+): readonly InterruptedReleaseCandidate[] {
+  const directory = leaseDirectory(dataDir, agentName);
+  if (!existsSync(directory)) return [];
+
+  const candidates: InterruptedReleaseCandidate[] = [];
+  for (const fileName of readdirSync(directory)) {
+    if (!fileName.endsWith(".releasing.json")) continue;
+    const match = RELEASE_QUARANTINE_FILE_PATTERN.exec(fileName);
+    if (match === null) continue;
+    const leaseIdResult = z.string().uuid().safeParse(match[1]);
+    const nonceResult = z.string().uuid().safeParse(match[2]);
+    if (!leaseIdResult.success || !nonceResult.success) continue;
+
+    const leasePath = resolve(directory, fileName);
+    const record = readLeaseRecord(leasePath);
+    const leaseFileIdentity = readLeaseFileIdentity(leasePath);
+    if (
+      record === undefined ||
+      leaseFileIdentity === undefined ||
+      record.agentName !== agentName ||
+      record.leaseId !== leaseIdResult.data
+    ) {
+      continue;
+    }
+
+    candidates.push({
+      record,
+      view: {
+        filePath: leasePath,
+        leaseId: createAgentUsageLeaseId(record.leaseId),
+        holderKind: record.holderKind,
+        ownerPid: record.ownerIdentity.pid,
+        runtimePid: record.runtimeIdentity.pid,
+        acquiredAt: record.acquiredAt,
+      },
+      ownedFile: {
+        leasePath,
+        expectedFileName: fileName,
+        leaseFileIdentity,
+      },
+    });
+  }
+  return candidates;
+}
+
+function assertInterruptedReleaseCandidatesUnchanged(
+  agentName: string,
+  candidates: readonly InterruptedReleaseCandidate[],
+): void {
+  const changedCandidate = candidates.find((candidate) => {
+    if (
+      !isSameOwnedLeaseFile(
+        candidate.ownedFile.leasePath,
+        candidate.ownedFile.expectedFileName,
+        candidate.ownedFile,
+      )
+    ) {
+      return true;
+    }
+    const current = readLeaseRecord(candidate.ownedFile.leasePath);
+    return current === undefined || !sameAgentUsageLeaseRecord(current, candidate.record);
+  });
+  if (changedCandidate !== undefined) {
+    throw new AgentUsageLeaseStateError(
+      agentName,
+      `恢复期间租约文件发生变化，已停止继续清理：${changedCandidate.ownedFile.leasePath}`,
+    );
+  }
+}
+
+function sameAgentUsageLeaseRecord(
+  left: AgentUsageLeaseRecord,
+  right: AgentUsageLeaseRecord,
+): boolean {
+  return (
+    left.schemaVersion === right.schemaVersion &&
+    left.leaseId === right.leaseId &&
+    left.agentName === right.agentName &&
+    left.holderKind === right.holderKind &&
+    left.ownerIdentity.pid === right.ownerIdentity.pid &&
+    left.ownerIdentity.processStartToken === right.ownerIdentity.processStartToken &&
+    sameManagedAgentRuntimeIdentity(left.runtimeIdentity, right.runtimeIdentity) &&
+    left.acquiredAt === right.acquiredAt
+  );
 }
 
 async function releaseAgentUsageLease(lease: AgentUsageLease): Promise<void> {

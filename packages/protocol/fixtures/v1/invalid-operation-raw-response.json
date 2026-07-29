@@ -1,0 +1,21 @@
+{
+  "jsonrpc": "2.0",
+  "id": 4,
+  "result": {
+    "operation": {
+      "id": "00000000-0000-4000-8000-000000000006",
+      "sequence": 0,
+      "toolCallId": "call-1",
+      "agentName": "demo-agent",
+      "toolName": "lookup",
+      "createdAt": "2026-07-28T12:00:00.000Z",
+      "outcome": {
+        "kind": "success"
+      },
+      "display": "visible",
+      "raw": {
+        "secret": "must-not-cross-the-wire"
+      }
+    }
+  }
+}

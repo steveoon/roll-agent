@@ -143,6 +143,21 @@ export interface ListTranscriptMessagesOptions {
   readonly limit?: number;
 }
 
+export interface ListRecentEntriesOptions {
+  readonly beforeSequence?: number;
+  readonly limit?: number;
+}
+
+export interface RecentTranscriptMessagePage {
+  readonly entries: readonly ArchivedTranscriptMessage[];
+  readonly nextBeforeSequence: number | undefined;
+}
+
+export interface RecentToolExecutionPage {
+  readonly entries: readonly SequencedToolExecutionRecord[];
+  readonly nextBeforeSequence: number | undefined;
+}
+
 export interface CompactionEvidenceWatermarks {
   /** Highest append-only transcript sequence that was visible while building the draft. */
   readonly transcriptMessagesThroughSequence: number;
@@ -556,6 +571,13 @@ export class ThreadStore {
     return row.n;
   }
 
+  countTranscriptMessages(threadId: string): number {
+    const row = this.db
+      .prepare("SELECT COUNT(*) AS n FROM transcript_messages WHERE thread_id = ?")
+      .get(threadId) as { readonly n: number };
+    return row.n;
+  }
+
   updateTitle(threadId: string, title: string): void {
     this.db.prepare("UPDATE threads SET title = ? WHERE id = ?").run(title, threadId);
   }
@@ -803,6 +825,37 @@ export class ThreadStore {
     }));
   }
 
+  listRecentToolExecutions(
+    threadId: string,
+    options: ListRecentEntriesOptions = {},
+  ): RecentToolExecutionPage {
+    const beforeSequence = options.beforeSequence ?? Number.MAX_SAFE_INTEGER;
+    const limit = options.limit ?? DEFAULT_TOOL_EXECUTION_LIMIT;
+    this.validateRecentPage(beforeSequence, limit, MAX_TOOL_EXECUTION_LIMIT);
+    const rows = this.db
+      .prepare(
+        `SELECT sequence, record_json
+           FROM tool_executions
+          WHERE thread_id = ?
+            AND sequence < ?
+          ORDER BY sequence DESC
+          LIMIT ?`,
+      )
+      .all(threadId, beforeSequence, limit + 1) as unknown as ToolExecutionRow[];
+    const hasMore = rows.length > limit;
+    const entries = rows
+      .slice(0, limit)
+      .map((row) => ({
+        ...parsePersistedToolExecutionRecord(JSON.parse(row.record_json)),
+        sequence: row.sequence,
+      }))
+      .reverse();
+    return {
+      entries,
+      nextBeforeSequence: hasMore ? entries[0]?.sequence : undefined,
+    };
+  }
+
   getToolExecution(
     threadId: string,
     executionId: string,
@@ -859,6 +912,41 @@ export class ThreadStore {
         message: JSON.parse(row.message_json),
       }),
     );
+  }
+
+  listRecentTranscriptMessages(
+    threadId: string,
+    options: ListRecentEntriesOptions = {},
+  ): RecentTranscriptMessagePage {
+    const beforeSequence = options.beforeSequence ?? Number.MAX_SAFE_INTEGER;
+    const limit = options.limit ?? DEFAULT_TRANSCRIPT_LIMIT;
+    this.validateRecentPage(beforeSequence, limit, MAX_TRANSCRIPT_LIST_LIMIT);
+    const rows = this.db
+      .prepare(
+        `SELECT sequence, provenance, created_at, message_json
+           FROM transcript_messages
+          WHERE thread_id = ?
+            AND sequence < ?
+          ORDER BY sequence DESC
+          LIMIT ?`,
+      )
+      .all(threadId, beforeSequence, limit + 1) as unknown as TranscriptMessageRow[];
+    const hasMore = rows.length > limit;
+    const entries = rows
+      .slice(0, limit)
+      .map((row) =>
+        archivedTranscriptMessageSchema.parse({
+          sequence: row.sequence,
+          provenance: row.provenance,
+          createdAt: row.created_at,
+          message: JSON.parse(row.message_json),
+        }),
+      )
+      .reverse();
+    return {
+      entries,
+      nextBeforeSequence: hasMore ? entries[0]?.sequence : undefined,
+    };
   }
 
   getLatestCheckpoint(threadId: string): CompactionCheckpoint | undefined {
@@ -1247,6 +1335,19 @@ export class ThreadStore {
     }
     if (!Number.isInteger(throughSequence) || throughSequence < -1) {
       throw new Error("throughSequence 必须是大于等于 -1 的整数");
+    }
+    if (!Number.isInteger(limit) || limit < 1 || limit > maxLimit) {
+      throw new Error(`limit 必须是 1-${String(maxLimit)} 之间的整数`);
+    }
+  }
+
+  private validateRecentPage(beforeSequence: number, limit: number, maxLimit: number): void {
+    if (
+      !Number.isSafeInteger(beforeSequence) ||
+      beforeSequence < 0 ||
+      beforeSequence > Number.MAX_SAFE_INTEGER
+    ) {
+      throw new Error("beforeSequence 必须是非负安全整数");
     }
     if (!Number.isInteger(limit) || limit < 1 || limit > maxLimit) {
       throw new Error(`limit 必须是 1-${String(maxLimit)} 之间的整数`);

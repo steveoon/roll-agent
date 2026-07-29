@@ -1,6 +1,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import {
+  formatAgentUsageRecoveryCheck,
   formatDoctorCheckLines,
   formatDoctorChecksForJsonOutput,
   formatDoctorFixLines,
@@ -126,5 +127,42 @@ describe("formatDoctorFixLines", () => {
       }),
       ["  ✓ Agent 数据目录: 已创建 /tmp/roll-agent"],
     );
+  });
+});
+
+describe("formatAgentUsageRecoveryCheck", () => {
+  it("points recoverable interrupted releases to agent stop", () => {
+    const check = formatAgentUsageRecoveryCheck({
+      status: "recoverable",
+      agentName: "browser-use-agent",
+      releases: [],
+      runtimePid: 123,
+    });
+
+    assert.ok(check);
+    assert.equal(check.status, "warn");
+    assert.match(check.message, /agent stop browser-use-agent/u);
+    assert.match(check.fix ?? "", /agent stop browser-use-agent --recover/u);
+    assert.deepEqual(check.details, {
+      type: "agent-usage-stop-recovery",
+      status: "recoverable",
+      runtimePid: 123,
+      releases: [],
+      command: "roll agent stop browser-use-agent",
+    });
+  });
+
+  it("does not offer automatic recovery for an unsafe lease state", () => {
+    const check = formatAgentUsageRecoveryCheck({
+      status: "blocked",
+      agentName: "browser-use-agent",
+      releases: [],
+      reason: "owner identity unavailable",
+    });
+
+    assert.ok(check);
+    assert.equal(check.status, "warn");
+    assert.match(check.message, /无法安全自动恢复/u);
+    assert.doesNotMatch(check.fix ?? "", /--recover/u);
   });
 });

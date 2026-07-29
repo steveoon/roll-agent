@@ -44,6 +44,8 @@ interface AgentRuntimeSnapshot {
   readonly raw: string;
   readonly pid: number;
   readonly retention: string;
+  readonly processStartToken: string;
+  readonly startedAt: string;
 }
 
 const CURRENT_CORE_VERSION = readCurrentCoreVersion();
@@ -265,7 +267,11 @@ function readAgentRuntimeSnapshot(
     !("pid" in parsed) ||
     typeof parsed.pid !== "number" ||
     !("retention" in parsed) ||
-    typeof parsed.retention !== "string"
+    typeof parsed.retention !== "string" ||
+    !("processStartToken" in parsed) ||
+    typeof parsed.processStartToken !== "string" ||
+    !("startedAt" in parsed) ||
+    typeof parsed.startedAt !== "string"
   ) {
     throw new Error(`Invalid Agent runtime sidecar: ${runtimePath}`);
   }
@@ -273,7 +279,47 @@ function readAgentRuntimeSnapshot(
     raw,
     pid: parsed.pid,
     retention: parsed.retention,
+    processStartToken: parsed.processStartToken,
+    startedAt: parsed.startedAt,
   };
+}
+
+function writeInterruptedAgentRelease(dataDir: string, agentName: string): string {
+  const runtime = readAgentRuntimeSnapshot(dataDir, agentName);
+  if (runtime === undefined) {
+    throw new Error(`Missing Agent runtime sidecar for ${agentName}`);
+  }
+
+  const leaseId = randomUUID();
+  const digest = createHash("sha256").update(agentName).digest("hex");
+  const leaseDir = resolve(dataDir, "pids", ".leases", digest);
+  const releasePath = resolve(leaseDir, `.${leaseId}.${randomUUID()}.releasing.json`);
+  mkdirSync(leaseDir, { recursive: true });
+  writeFileSync(
+    releasePath,
+    `${JSON.stringify(
+      {
+        schemaVersion: 1,
+        leaseId,
+        agentName,
+        holderKind: "chat",
+        ownerIdentity: {
+          pid: 2_147_483_647,
+          processStartToken: `pst-v2:${"0".repeat(64)}`,
+        },
+        runtimeIdentity: {
+          pid: runtime.pid,
+          processStartToken: runtime.processStartToken,
+          startedAt: runtime.startedAt,
+        },
+        acquiredAt: new Date().toISOString(),
+      },
+      null,
+      2,
+    )}\n`,
+    "utf-8",
+  );
+  return releasePath;
 }
 
 async function getFreeLocalPort(): Promise<number> {
@@ -1358,13 +1404,34 @@ test("e2e smoke: roll run aggregates missing input fields and env requirements",
   }
 });
 
-test("e2e smoke: roll --help includes chat", () => {
+test("e2e smoke: roll --help includes chat and runtime", () => {
   const workspace = mkdtempSync(resolve(tmpdir(), `roll-help-${randomUUID()}-`));
 
   try {
     const result = runRoll(["--help"], workspace);
     assert.equal(result.status, 0, `roll --help failed\nstderr:\n${result.stderr}`);
     assert.match(result.stdout, /\bchat\b/);
+    assert.match(result.stdout, /\bruntime\b/);
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("e2e smoke: runtime serve exposes the formal stdio entrypoint", () => {
+  const workspace = mkdtempSync(resolve(tmpdir(), `roll-runtime-help-${randomUUID()}-`));
+
+  try {
+    const help = runRoll(["runtime", "serve", "--help"], workspace);
+    assert.equal(
+      help.status,
+      0,
+      `roll runtime serve --help failed\nstdout:\n${help.stdout}\nstderr:\n${help.stderr}`,
+    );
+    assert.match(`${help.stdout}\n${help.stderr}`, /--stdio/);
+
+    const missingTransport = runRoll(["runtime", "serve"], workspace);
+    assert.equal(missingTransport.status, 1);
+    assert.match(missingTransport.stderr, /roll runtime serve --stdio/);
   } finally {
     rmSync(workspace, { recursive: true, force: true });
   }
@@ -3460,6 +3527,109 @@ test(
       assert.match(stoppedEntry.message, /未运行|PID/);
     } finally {
       runRoll(["agent", "stop", "http-fixture-agent"], workspace);
+      rmSync(workspace, { recursive: true, force: true });
+    }
+  },
+);
+
+test(
+  "e2e smoke: agent stop recovers an interrupted lease release only after confirmation",
+  {
+    timeout: 120_000,
+  },
+  async () => {
+    const workspace = mkdtempSync(resolve(tmpdir(), `roll-http-recover-${randomUUID()}-`));
+    const agentName = "http-fixture-agent";
+    let runtimePid: number | undefined;
+
+    try {
+      const agentDir = resolve(workspace, agentName);
+      const dataDir = resolve(workspace, "agents-data");
+      const port = await getFreeLocalPort();
+
+      createCoreManagedHttpFixtureAgent(agentDir, port, { createBrokenDistEntry: true });
+      writeFileSync(resolve(workspace, "roll.config.yaml"), buildConfigYaml(dataDir), "utf-8");
+
+      const addResult = runRoll(["agent", "add", agentDir], workspace, {
+        env: { ROLL_SKIP_INSTALL: "1" },
+      });
+      assert.equal(addResult.status, 0, addResult.stderr);
+
+      const startResult = runRoll(["agent", "start", agentName], workspace);
+      assert.equal(startResult.status, 0, formatHttpFixtureStartFailure(startResult, dataDir));
+      const runtime = readAgentRuntimeSnapshot(dataDir, agentName);
+      assert.ok(runtime);
+      runtimePid = runtime.pid;
+      const releasePath = writeInterruptedAgentRelease(dataDir, agentName);
+
+      const healthResult = runRoll(["agent", "health", "--json"], workspace);
+      assert.equal(healthResult.status, 1, healthResult.stderr);
+      const health = JSON.parse(healthResult.stdout) as ReadonlyArray<{
+        readonly agentName: string;
+        readonly healthy: boolean;
+        readonly message: string;
+        readonly recovery?: {
+          readonly status: string;
+          readonly command?: string;
+        };
+      }>;
+      const healthEntry = health.find((entry) => entry.agentName === agentName);
+      assert.ok(healthEntry);
+      assert.equal(healthEntry.healthy, false);
+      assert.equal(healthEntry.recovery?.status, "recoverable");
+      assert.equal(healthEntry.recovery?.command, `roll agent stop ${agentName}`);
+      assert.match(healthEntry.message, /--recover/u);
+
+      const doctorResult = runRoll(["doctor", "--json", "--fix-plan"], workspace);
+      assert.equal(doctorResult.status, 0, doctorResult.stderr);
+      const doctorChecks = JSON.parse(doctorResult.stdout) as ReadonlyArray<{
+        readonly name: string;
+        readonly fix?: string;
+        readonly details?: {
+          readonly type?: string;
+          readonly status?: string;
+        };
+      }>;
+      const leaseCheck = doctorChecks.find(
+        (check) => check.name === `Agent usage lease (${agentName})`,
+      );
+      assert.ok(leaseCheck);
+      assert.equal(leaseCheck.details?.type, "agent-usage-stop-recovery");
+      assert.equal(leaseCheck.details?.status, "recoverable");
+      assert.match(leaseCheck.fix ?? "", /agent stop http-fixture-agent --recover/u);
+
+      const unconfirmedStop = runRoll(["agent", "stop", agentName], workspace);
+      assert.equal(unconfirmedStop.status, 1);
+      assert.match(unconfirmedStop.stderr, /上次停止未完成/u);
+      assert.match(unconfirmedStop.stderr, new RegExp(`Agent\\s+${agentName}`, "u"));
+      assert.match(
+        unconfirmedStop.stderr,
+        new RegExp(`Runtime\\s+PID ${String(runtime.pid)}`, "u"),
+      );
+      assert.match(unconfirmedStop.stderr, /残留记录\s+1 个/u);
+      assert.match(unconfirmedStop.stderr, /中断来源\s+roll chat · PID \d+ 已退出/u);
+      assert.match(unconfirmedStop.stderr, /当前状态\s+未发现其他 Roll 进程正在使用此 Agent/u);
+      assert.match(unconfirmedStop.stderr, /当前环境无法显示确认菜单/u);
+      assert.equal(unconfirmedStop.stderr.includes(releasePath), false);
+      assert.doesNotMatch(unconfirmedStop.stderr, /\.releasing\.json/u);
+      assert.equal(existsSync(releasePath), true);
+      assert.equal(isProcessAlive(runtime.pid), true);
+
+      const recoveredStop = runRoll(["agent", "stop", agentName, "--recover"], workspace);
+      assert.equal(
+        recoveredStop.status,
+        0,
+        `agent stop --recover failed\nstdout:\n${recoveredStop.stdout}\nstderr:\n${recoveredStop.stderr}`,
+      );
+      assert.match(recoveredStop.stderr, /已清理 1 个残留记录并停止/u);
+      assert.equal(existsSync(releasePath), false);
+      assert.equal(isProcessAlive(runtime.pid), false);
+      assert.equal(readAgentPidFile(dataDir, agentName), undefined);
+    } finally {
+      runRoll(["agent", "stop", agentName, "--recover"], workspace);
+      if (runtimePid !== undefined && isProcessAlive(runtimePid)) {
+        forceKillProcess(runtimePid);
+      }
       rmSync(workspace, { recursive: true, force: true });
     }
   },
