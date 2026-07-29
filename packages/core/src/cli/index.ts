@@ -30,6 +30,7 @@ const main = defineCommand({
     run: () => loadMainCommand("run"),
     ask: () => loadMainCommand("ask"),
     chat: () => loadMainCommand("chat"),
+    runtime: () => loadMainCommand("runtime"),
     config: () => loadMainCommand("config"),
     setup: () => loadMainCommand("setup"),
     skills: () => loadMainCommand("skills"),

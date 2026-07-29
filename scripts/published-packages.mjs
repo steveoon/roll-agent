@@ -3,6 +3,9 @@ export const ALLOWED_PREPUBLISH_ONLY = "node ../../scripts/require-pnpm-publish.
 export const PUBLISHED_PACKAGES = [
   { name: "@roll-agent/core", packageJson: "packages/core/package.json" },
   { name: "@roll-agent/runtime", packageJson: "packages/runtime/package.json" },
+  { name: "@roll-agent/protocol", packageJson: "packages/protocol/package.json" },
+  { name: "@roll-agent/client-node", packageJson: "packages/client-node/package.json" },
+  { name: "@roll-agent/companion", packageJson: "packages/companion/package.json" },
   { name: "@roll-agent/sdk", packageJson: "packages/sdk/package.json" },
   {
     name: "@roll-agent/browser",

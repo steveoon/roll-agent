@@ -92,6 +92,46 @@ const PACKAGE_CHECKS = [
     },
   },
   {
+    name: "@roll-agent/protocol",
+    cwd: resolve(repoRoot, "packages/protocol"),
+    expectedFiles: [
+      "package/dist/index.js",
+      "package/dist/index.d.ts",
+      "package/dist/schema/roll-runtime-protocol-v1.schema.json",
+      "package/fixtures/v1/valid-initialize-request.json",
+      "package/fixtures/v1/valid-thread-snapshot-response.json",
+      "package/fixtures/v1/valid-runtime-event-notification.json",
+      "package/fixtures/v1/invalid-turn-start-request.json",
+      "package/fixtures/v1/invalid-operation-raw-response.json",
+    ],
+    verifyManifest(manifest) {
+      assert.equal(manifest.exports?.["."].default, "./dist/index.js");
+      assert.equal(manifest.exports?.["."].types, "./dist/index.d.ts");
+      assert.equal(
+        manifest.exports?.["./schema"],
+        "./dist/schema/roll-runtime-protocol-v1.schema.json",
+      );
+    },
+  },
+  {
+    name: "@roll-agent/client-node",
+    cwd: resolve(repoRoot, "packages/client-node"),
+    expectedFiles: ["package/dist/index.js", "package/dist/index.d.ts"],
+    verifyManifest(manifest) {
+      assert.equal(manifest.exports?.["."].default, "./dist/index.js");
+      assert.equal(manifest.exports?.["."].types, "./dist/index.d.ts");
+    },
+  },
+  {
+    name: "@roll-agent/companion",
+    cwd: resolve(repoRoot, "packages/companion"),
+    expectedFiles: ["package/dist/index.js", "package/dist/index.d.ts"],
+    verifyManifest(manifest) {
+      assert.equal(manifest.exports?.["."].default, "./dist/index.js");
+      assert.equal(manifest.exports?.["."].types, "./dist/index.d.ts");
+    },
+  },
+  {
     name: "@roll-agent/browser",
     cwd: resolve(repoRoot, "packages/browser"),
     expectedFiles: ["package/dist/index.js", "package/dist/index.d.ts"],

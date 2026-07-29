@@ -907,6 +907,69 @@ test("ThreadStore appendMessages 原子归档 transcript，replaceMessages 不�
   }
 });
 
+test("ThreadStore 按独立游标返回最近 transcript 与 Tool execution 页面", () => {
+  const dir = tempDir();
+  try {
+    const store = new ThreadStore(dir);
+    const threadId = store.createThread();
+    store.appendMessages(
+      threadId,
+      ["message-0", "message-1", "message-2", "message-3"].map((content) => ({
+        role: "user" as const,
+        content,
+      })),
+    );
+    (
+      [
+        ["177ece3b-4f12-4850-9255-39f7652a331a", "call-0"],
+        ["277ece3b-4f12-4850-9255-39f7652a331b", "call-1"],
+        ["377ece3b-4f12-4850-9255-39f7652a331c", "call-2"],
+        ["477ece3b-4f12-4850-9255-39f7652a331d", "call-3"],
+      ] as const
+    ).forEach(([id, toolCallId]) => {
+      store.appendToolExecution(threadId, execution(id, toolCallId, `secret-${toolCallId}`));
+    });
+
+    const recentMessages = store.listRecentTranscriptMessages(threadId, { limit: 2 });
+    assert.deepEqual(
+      recentMessages.entries.map((entry) => [entry.sequence, entry.message.content]),
+      [
+        [2, "message-2"],
+        [3, "message-3"],
+      ],
+    );
+    assert.equal(recentMessages.nextBeforeSequence, 2);
+    assert.deepEqual(
+      store
+        .listRecentTranscriptMessages(threadId, {
+          beforeSequence: recentMessages.nextBeforeSequence,
+          limit: 2,
+        })
+        .entries.map((entry) => entry.sequence),
+      [0, 1],
+    );
+
+    const recentOperations = store.listRecentToolExecutions(threadId, { limit: 2 });
+    assert.deepEqual(
+      recentOperations.entries.map((entry) => entry.sequence),
+      [2, 3],
+    );
+    assert.equal(recentOperations.nextBeforeSequence, 2);
+    const earlierOperations = store.listRecentToolExecutions(threadId, {
+      beforeSequence: recentOperations.nextBeforeSequence,
+      limit: 2,
+    });
+    assert.deepEqual(
+      earlierOperations.entries.map((entry) => entry.sequence),
+      [0, 1],
+    );
+    assert.equal(earlierOperations.nextBeforeSequence, undefined);
+    store.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("ThreadStore commitCompaction 原子写 active projection、versioned checkpoint 与增量 ranges", () => {
   const dir = tempDir();
   try {

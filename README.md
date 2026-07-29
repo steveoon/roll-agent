@@ -419,11 +419,27 @@ roll run wechat-agent send_message --userId xxx --content "你好"
 
 - [docs/how-to-integrate-non-node-agents.md](./docs/how-to-integrate-non-node-agents.md)
 
+### 第三方 Web UI / GUI
+
+第三方 UI 使用版本化 Runtime Protocol，不直接依赖 `ConversationEngine`：
+
+```bash
+roll runtime serve --stdio
+```
+
+- [架构与安全边界](./docs/runtime-protocol-architecture.md)
+- [Runtime Protocol v1 参考](./docs/runtime-protocol-v1-reference.md)
+- [使用 Electron、Tauri、Python 或 Next.js 接入](./docs/how-to-build-roll-runtime-ui.md)
+- [最小客户端教程](./docs/tutorial-runtime-ui-quickstart.md)
+
 ## 项目结构
 
 ```
 packages/
   core/          指挥官：CLI + Registry + Router + MCP Client + LLM Engine
+  protocol/      第三方 UI 的版本化 Runtime Protocol + JSON Schema
+  client-node/   stdio Runtime Protocol Node 客户端
+  companion/     远程 Web 的本地 Companion / Relay 基础能力
   sdk/           子 Agent 开发 SDK：defineAgent() + defineTool()
   browser/       浏览器运行时抽象层：BrowserRuntime + ContextManager + SessionStore
 agents/
@@ -481,6 +497,10 @@ pnpm release:legacy:dry-run        # 旧脚本 dry-run（诊断用）
 - `@roll-agent/sdk`
 - `@roll-agent/browser`
 - `@roll-agent/core`
+- `@roll-agent/runtime`
+- `@roll-agent/protocol`
+- `@roll-agent/client-node`
+- `@roll-agent/companion`
 - `@roll-agent/reply-authority-client`
 - `@roll-agent/browser-use-agent`
 - `@roll-agent/smart-reply-agent`

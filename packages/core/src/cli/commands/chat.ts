@@ -232,7 +232,7 @@ export function resolveChatLlmCalls(
   };
 }
 
-async function runServer(config: RollConfig): Promise<void> {
+export async function runServer(config: RollConfig): Promise<void> {
   const llmStatus = resolveChatLlmReadiness(config);
   if (!llmStatus.configured || !llmStatus.providerConfig) {
     log.error(llmStatus.message);
@@ -244,7 +244,7 @@ async function runServer(config: RollConfig): Promise<void> {
   const modelName = llmStatus.model;
 
   const runtime = await loadRuntime();
-  const { ThreadStore, RuntimeServer, createStdioConnection } = runtime;
+  const { RuntimeService, ThreadStore, RuntimeServer, createStdioConnection } = runtime;
   const { model, providerOptions, structuredOutputProviderOptions, structuredOutputReasoning } =
     resolveChatLlmCalls(
       provider,
@@ -273,7 +273,11 @@ async function runServer(config: RollConfig): Promise<void> {
     });
     const activeEngine = engine;
     const connection = createStdioConnection(process.stdin, process.stdout);
-    const server = new RuntimeServer(activeEngine, connection);
+    const runtimeService = new RuntimeService(activeEngine, store, {
+      serverVersion: "1.0",
+      runtimeVersion: getCurrentVersion(),
+    });
+    const server = new RuntimeServer(activeEngine, connection, { runtimeService });
 
     connection.onClose(() => {
       server
@@ -307,7 +311,7 @@ async function runServer(config: RollConfig): Promise<void> {
     throw error;
   }
 
-  log.info("roll runtime-server 已启动（stdio JSON-RPC，等待客户端连接）");
+  log.info("roll runtime serve 已启动（stdio JSON-RPC，等待客户端连接）");
 }
 
 async function listSessions(config: RollConfig, asJson: boolean): Promise<void> {

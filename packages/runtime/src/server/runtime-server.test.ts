@@ -7,9 +7,16 @@ import { simulateReadableStream } from "ai";
 import { MockLanguageModelV4 } from "ai/test";
 import type { LanguageModelV4FinishReason, LanguageModelV4StreamPart } from "@ai-sdk/provider";
 import type { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import {
+  RUNTIME_EVENT_NOTIFICATION,
+  RUNTIME_METHODS,
+  RUNTIME_PROTOCOL_VERSION,
+  type RuntimeEventEnvelope,
+} from "@roll-agent/protocol";
 import { rollConfigSchema } from "@roll-agent/core/config/schema";
 import { ConversationEngine } from "../engine/conversation-engine.ts";
 import { DefaultToolPolicy } from "../policy/default-policy.ts";
+import { RuntimeService } from "../service/runtime-service.ts";
 import { ThreadStore } from "../store/thread-store.ts";
 import type { AgentToolSource } from "../tool-bridge/build-tools.ts";
 import type { SessionEvent } from "../types/events.ts";
@@ -1017,4 +1024,105 @@ test("RuntimeServer 未知 session 返回错误响应", async () => {
     });
   });
   assert.ok(error && typeof error === "object" && "message" in error);
+});
+
+test("RuntimeServer 同时提供 Runtime Protocol v1 与 legacy session RPC", async (t) => {
+  const { serverConn, clientConn } = memoryPair();
+  const storeDir = mkdtempSync(join(tmpdir(), "roll-runtime-v1-server-"));
+  const store = new ThreadStore(storeDir);
+  const engine = new ConversationEngine({
+    config,
+    model: sequencedModel([
+      [
+        { type: "stream-start", warnings: [] },
+        { type: "text-start", id: "t" },
+        { type: "text-delta", id: "t", delta: "protocol response" },
+        { type: "text-end", id: "t" },
+        { type: "finish", usage: usage(), finishReason: STOP },
+      ],
+    ]),
+    sources: [],
+    store,
+  });
+  const service = new RuntimeService(engine, store, { runtimeVersion: "0.9.0-test" });
+  const server = new RuntimeServer(engine, serverConn, { runtimeService: service });
+  t.after(async () => {
+    await server.abortAll();
+    await engine.dispose();
+    store.close();
+    rmSync(storeDir, { recursive: true, force: true });
+  });
+
+  const responses = new Map<number, (result: unknown) => void>();
+  const errors = new Map<number, (error: unknown) => void>();
+  const events: RuntimeEventEnvelope[] = [];
+  clientConn.onMessage((message) => {
+    if ("method" in message && message.method === RUNTIME_EVENT_NOTIFICATION) {
+      events.push(message.params as RuntimeEventEnvelope);
+    } else if ("id" in message && "result" in message && typeof message.id === "number") {
+      responses.get(message.id)?.(message.result);
+    } else if ("id" in message && "error" in message && typeof message.id === "number") {
+      errors.get(message.id)?.(message.error);
+    }
+  });
+  const request = (id: number, method: string, params: unknown): Promise<unknown> =>
+    new Promise((resolve) => {
+      responses.set(id, resolve);
+      clientConn.send({ jsonrpc: "2.0", id, method, params });
+    });
+  const requestError = (id: number, method: string, params: unknown): Promise<unknown> =>
+    new Promise((resolve) => {
+      errors.set(id, resolve);
+      clientConn.send({ jsonrpc: "2.0", id, method, params });
+    });
+
+  const initializeRequired = await requestError(1, RUNTIME_METHODS.threadList, { limit: 10 });
+  assert.deepEqual(initializeRequired, {
+    code: -32_000,
+    message: "调用 Runtime Protocol 方法前必须先完成 initialize",
+    data: { rollCode: "INITIALIZE_REQUIRED", retryable: false },
+  });
+
+  const initialized = (await request(2, RUNTIME_METHODS.initialize, {
+    protocolVersions: [RUNTIME_PROTOCOL_VERSION],
+    client: { name: "runtime-server-test", version: "1.0.0" },
+  })) as { readonly protocolVersion: string; readonly runtimeInstanceId: string };
+  assert.equal(initialized.protocolVersion, "1.0");
+  assert.match(initialized.runtimeInstanceId, /^[0-9a-f-]{36}$/u);
+
+  const created = (await request(3, RUNTIME_METHODS.threadCreate, {
+    requestId: "00000000-0000-4000-8000-000000000201",
+    title: "Protocol thread",
+  })) as { readonly thread: { readonly id: string } };
+  const turnCompleted = Promise.withResolvers<void>();
+  clientConn.onMessage((message) => {
+    if (
+      "method" in message &&
+      message.method === RUNTIME_EVENT_NOTIFICATION &&
+      (message.params as RuntimeEventEnvelope).event.type === "turn.completed"
+    ) {
+      turnCompleted.resolve();
+    }
+  });
+  const started = (await request(4, RUNTIME_METHODS.turnStart, {
+    requestId: "00000000-0000-4000-8000-000000000202",
+    threadId: created.thread.id,
+    turnId: "00000000-0000-4000-8000-000000000203",
+    input: { text: "hello" },
+  })) as { readonly accepted: boolean };
+  assert.equal(started.accepted, true);
+  await turnCompleted.promise;
+  assert.equal(
+    events.some((event) => event.event.type === "message.delta"),
+    true,
+  );
+
+  const snapshot = (await request(5, RUNTIME_METHODS.threadSnapshot, {
+    threadId: created.thread.id,
+    limit: 100,
+  })) as { readonly messages: { readonly items: readonly unknown[] } };
+  assert.equal(snapshot.messages.items.length, 2);
+
+  const legacy = (await request(6, RpcMethod.Create, {})) as { readonly sessionId: string };
+  assert.match(legacy.sessionId, /^[0-9a-f-]{36}$/u);
 });

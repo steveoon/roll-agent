@@ -1,7 +1,10 @@
 import type { ConversationEngine } from "../engine/conversation-engine.ts";
+import { jsonValueSchema, type RuntimeProtocolErrorData } from "@roll-agent/protocol";
 import type { AgentSession } from "../engine/agent-session.ts";
 import { createSafeCapabilitySnapshot } from "../engine/capability-manifest.ts";
 import { isPersistedToolExecutionRecord } from "../tool-bridge/tool-execution-record.ts";
+import { RuntimeServiceError, type RuntimeService } from "../service/runtime-service.ts";
+import { RuntimeProtocolAdapter } from "./runtime-protocol-adapter.ts";
 import {
   EVENT_NOTIFICATION,
   RpcMethod,
@@ -26,6 +29,63 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+class MethodNotFoundError extends Error {}
+
+function isValidationError(error: unknown): boolean {
+  return (
+    error instanceof Error &&
+    error.name === "ZodError" &&
+    "issues" in error &&
+    Array.isArray(error.issues)
+  );
+}
+
+function toJsonRpcError(
+  error: unknown,
+  hideInternalMessage: boolean,
+): {
+  readonly code: number;
+  readonly message: string;
+  readonly data?: RuntimeProtocolErrorData;
+} {
+  if (error instanceof RuntimeServiceError) {
+    const details = jsonValueSchema.safeParse(error.details);
+    return {
+      code: -32_000,
+      message: error.message,
+      data: {
+        rollCode: error.rollCode,
+        retryable: error.retryable,
+        ...(details.success ? { details: details.data } : {}),
+      },
+    };
+  }
+  if (isValidationError(error)) {
+    return {
+      code: -32_602,
+      message: "Invalid params",
+      data: {
+        rollCode: "INVALID_PARAMS",
+        retryable: false,
+      },
+    };
+  }
+  if (error instanceof MethodNotFoundError) {
+    return {
+      code: -32_601,
+      message: error.message,
+    };
+  }
+  return {
+    code: -32_603,
+    message: hideInternalMessage ? "Internal error" : errorMessage(error),
+    data: {
+      rollCode: "INTERNAL_ERROR",
+      retryable: false,
+    },
+  };
+}
+
 export interface RawToolEvidenceAccessRequest {
   readonly sessionId: string;
   readonly executionId?: string;
@@ -39,6 +99,8 @@ export interface RuntimeServerOptions {
   readonly authorizeRawToolEvidence?: (
     request: RawToolEvidenceAccessRequest,
   ) => boolean | Promise<boolean>;
+  /** Versioned public Runtime Protocol adapter. Legacy `session.*` remains available. */
+  readonly runtimeService?: RuntimeService;
 }
 
 /**
@@ -56,6 +118,7 @@ export class RuntimeServer {
     | RuntimeServerOptions["authorizeRawToolEvidence"]
     | undefined;
   private readonly sessions = new Map<string, AgentSession>();
+  private readonly protocolAdapter: RuntimeProtocolAdapter | undefined;
 
   constructor(
     engine: ConversationEngine,
@@ -65,19 +128,27 @@ export class RuntimeServer {
     this.engine = engine;
     this.connection = connection;
     this.authorizeRawToolEvidence = options.authorizeRawToolEvidence;
+    this.protocolAdapter =
+      options.runtimeService === undefined
+        ? undefined
+        : new RuntimeProtocolAdapter(options.runtimeService, connection);
     this.connection.onMessage((message) => this.handleMessage(message));
   }
 
   async abortAll(): Promise<void> {
     const sessions = [...this.sessions.values()];
     this.sessions.clear();
-    await Promise.all(sessions.map((session) => session.close()));
+    await Promise.all([
+      ...sessions.map((session) => session.close()),
+      ...(this.protocolAdapter === undefined ? [] : [this.protocolAdapter.close()]),
+    ]);
   }
 
   private handleMessage(message: JsonRpcMessage): void {
     if (!isRequest(message)) {
       return;
     }
+    const isRuntimeProtocolRequest = this.protocolAdapter?.handles(message.method) === true;
     this.dispatch(message)
       .then((result) => {
         this.connection.send({ jsonrpc: "2.0", id: message.id, result });
@@ -86,7 +157,7 @@ export class RuntimeServer {
         this.connection.send({
           jsonrpc: "2.0",
           id: message.id,
-          error: { code: -32000, message: errorMessage(error) },
+          error: toJsonRpcError(error, isRuntimeProtocolRequest),
         });
       });
   }
@@ -100,6 +171,9 @@ export class RuntimeServer {
   }
 
   private async dispatch(request: JsonRpcRequest): Promise<unknown> {
+    if (this.protocolAdapter?.handles(request.method) === true) {
+      return this.protocolAdapter.dispatch(request);
+    }
     switch (request.method) {
       case RpcMethod.Create: {
         const params = createParamsSchema.parse(request.params);
@@ -218,7 +292,7 @@ export class RuntimeServer {
         return { status: "completed" };
       }
       default:
-        throw new Error(`Unknown method: ${request.method}`);
+        throw new MethodNotFoundError(`Method not found: ${request.method}`);
     }
   }
 }

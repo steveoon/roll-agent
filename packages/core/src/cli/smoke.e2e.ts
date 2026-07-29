@@ -1404,13 +1404,34 @@ test("e2e smoke: roll run aggregates missing input fields and env requirements",
   }
 });
 
-test("e2e smoke: roll --help includes chat", () => {
+test("e2e smoke: roll --help includes chat and runtime", () => {
   const workspace = mkdtempSync(resolve(tmpdir(), `roll-help-${randomUUID()}-`));
 
   try {
     const result = runRoll(["--help"], workspace);
     assert.equal(result.status, 0, `roll --help failed\nstderr:\n${result.stderr}`);
     assert.match(result.stdout, /\bchat\b/);
+    assert.match(result.stdout, /\bruntime\b/);
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("e2e smoke: runtime serve exposes the formal stdio entrypoint", () => {
+  const workspace = mkdtempSync(resolve(tmpdir(), `roll-runtime-help-${randomUUID()}-`));
+
+  try {
+    const help = runRoll(["runtime", "serve", "--help"], workspace);
+    assert.equal(
+      help.status,
+      0,
+      `roll runtime serve --help failed\nstdout:\n${help.stdout}\nstderr:\n${help.stderr}`,
+    );
+    assert.match(`${help.stdout}\n${help.stderr}`, /--stdio/);
+
+    const missingTransport = runRoll(["runtime", "serve"], workspace);
+    assert.equal(missingTransport.status, 1);
+    assert.match(missingTransport.stderr, /roll runtime serve --stdio/);
   } finally {
     rmSync(workspace, { recursive: true, force: true });
   }

@@ -1,0 +1,13 @@
+{
+  "jsonrpc": "2.0",
+  "id": 3,
+  "method": "turn.start",
+  "params": {
+    "requestId": "00000000-0000-4000-8000-000000000005",
+    "threadId": "00000000-0000-4000-8000-000000000002",
+    "turnId": "not-a-uuid",
+    "input": {
+      "text": "hello"
+    }
+  }
+}

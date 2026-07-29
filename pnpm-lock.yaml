@@ -109,6 +109,32 @@ importers:
         specifier: ^22.0.0
         version: 22.19.15
 
+  packages/client-node:
+    dependencies:
+      '@roll-agent/protocol':
+        specifier: workspace:*
+        version: link:../protocol
+    devDependencies:
+      '@types/node':
+        specifier: ^22.0.0
+        version: 22.19.15
+
+  packages/companion:
+    dependencies:
+      '@roll-agent/client-node':
+        specifier: workspace:*
+        version: link:../client-node
+      '@roll-agent/protocol':
+        specifier: workspace:*
+        version: link:../protocol
+      zod:
+        specifier: 3.25.76
+        version: 3.25.76
+    devDependencies:
+      '@types/node':
+        specifier: ^22.0.0
+        version: 22.19.15
+
   packages/core:
     dependencies:
       '@ai-sdk/alibaba':
@@ -212,6 +238,16 @@ importers:
         specifier: 6.4.3
         version: 6.4.3(@types/node@22.19.15)(jiti@2.7.0)(lightningcss@1.32.0)(terser@5.46.1)(yaml@2.8.3)
 
+  packages/protocol:
+    dependencies:
+      zod:
+        specifier: 3.25.76
+        version: 3.25.76
+    devDependencies:
+      '@types/node':
+        specifier: ^22.0.0
+        version: 22.19.15
+
   packages/reply-authority-client:
     dependencies:
       zod:
@@ -230,6 +266,9 @@ importers:
       '@modelcontextprotocol/sdk':
         specifier: ^1.12.0
         version: 1.28.0(zod@3.25.76)
+      '@roll-agent/protocol':
+        specifier: workspace:*
+        version: link:../protocol
       ai:
         specifier: ^7.0.9
         version: 7.0.11(zod@3.25.76)
