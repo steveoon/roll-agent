@@ -235,8 +235,9 @@ roll agent list                 列出所有已注册 Agent
 roll agent tools <name>         查看 Agent 暴露的 MCP tools 及输入 schema
 roll agent start <name>         启动由 Roll 托管的 core-managed Agent
 roll agent stop <name>          停止由 Roll 托管的 core-managed Agent
+roll agent stop <name> --recover 非交互确认恢复可安全验证的中断租约后停止
 roll agent info <name>          查看 Agent 详情（SKILL.md / runtime / env）
-roll agent health               健康检查（兼容 on-demand / core-managed / external-managed）
+roll agent health               健康检查并报告中断租约（不自动恢复）
 
 roll run <agent> <tool> [args]  直接调用 MCP tool（支持 --key value / --input-json / --input-file）
 roll ask "<message>"            用 LLM 从自然语言中选择 Agent 和 MCP tool
@@ -260,6 +261,7 @@ roll doctor --json              JSON 诊断结果（配置损坏时返回非零�
 |------|------|------|
 | `roll agent install` | `--skip-browser-setup` | 跳过 Playwright 浏览器运行时安装/校验 |
 | `roll agent install` | `--no-start` | 安装后不自动启动 `core-managed` Agent |
+| `roll agent stop` | `--recover` | 非交互确认恢复；活动或无法验证的租约仍会拒绝 |
 | `roll update` | `--check` | 仅检查可用更新，不执行安装或刷新 |
 | `roll update` | `--skip-browser-setup` | 更新 Agent 后跳过 Playwright 浏览器运行时安装/校验 |
 | `roll run` | `--input-json <json>` | 以 JSON 字符串提供完整 tool 输入对象 |

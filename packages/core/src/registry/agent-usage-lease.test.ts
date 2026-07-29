@@ -17,14 +17,19 @@ import fs, {
 } from "node:fs";
 import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { describe, it, mock } from "node:test";
 import { McpClientManager } from "../mcp/client-manager.ts";
 import {
+  AGENT_USAGE_STOP_RECOVERY_STATUSES,
   AgentUsageBusyError,
+  AgentUsageStopRecoveryError,
   acquireAgentUsageLease,
   acquireAgentUsageMaintenanceGuard,
+  inspectAgentUsageStopRecovery,
+  recoverInterruptedAgentStop,
 } from "./agent-usage-lease.ts";
+import { readProcessStartToken } from "./process-identity.ts";
 import {
   MANAGED_AGENT_RUNTIME_RETENTIONS,
   acquireAgentLifecycleLock,
@@ -368,6 +373,127 @@ describe("Agent usage leases", () => {
     }
   });
 
+  it("recovers an interrupted final release and stops the verified runtime", async () => {
+    const fixture = await createRuntimeFixture(MANAGED_AGENT_RUNTIME_RETENTIONS.leaseBound);
+    const releasePath = writeInterruptedReleaseFixture(fixture, {
+      ownerPid: 2_147_483_647,
+      ownerToken: `pst-v2:${"0".repeat(64)}`,
+    });
+    try {
+      const inspection = await inspectAgentUsageStopRecovery(fixture.agent, fixture.dataDir);
+      assert.equal(inspection.status, AGENT_USAGE_STOP_RECOVERY_STATUSES.RECOVERABLE);
+      if (inspection.status !== AGENT_USAGE_STOP_RECOVERY_STATUSES.RECOVERABLE) {
+        assert.fail("expected interrupted release to be recoverable");
+      }
+      assert.equal(inspection.runtimePid, fixture.child.pid);
+      assert.deepEqual(
+        inspection.releases.map((release) => release.filePath),
+        [releasePath],
+      );
+
+      const result = await recoverInterruptedAgentStop(fixture.agent, fixture.dataDir);
+
+      assert.ok(result);
+      assert.equal(result.runtimeStopped, true);
+      assert.equal(result.recoveredReleaseCount, 1);
+      assert.equal(existsSync(releasePath), false);
+      assert.equal(isChildAlive(fixture.child), false);
+      assert.equal(
+        readVerifiedManagedAgentRuntime(fixture.dataDir, fixture.agent.skill.name),
+        undefined,
+      );
+    } finally {
+      await cleanupRuntimeFixture(fixture);
+    }
+  });
+
+  it("refuses interrupted-release recovery while the recorded owner is still active", async () => {
+    const fixture = await createRuntimeFixture(MANAGED_AGENT_RUNTIME_RETENTIONS.leaseBound);
+    const ownerToken = readProcessStartToken(process.pid);
+    assert.ok(ownerToken);
+    const releasePath = writeInterruptedReleaseFixture(fixture, {
+      ownerPid: process.pid,
+      ownerToken,
+    });
+    try {
+      const inspection = await inspectAgentUsageStopRecovery(fixture.agent, fixture.dataDir);
+      assert.equal(inspection.status, AGENT_USAGE_STOP_RECOVERY_STATUSES.BLOCKED);
+      if (inspection.status !== AGENT_USAGE_STOP_RECOVERY_STATUSES.BLOCKED) {
+        assert.fail("expected active owner to block recovery");
+      }
+      assert.match(inspection.reason, /仍在运行/u);
+
+      await assert.rejects(
+        recoverInterruptedAgentStop(fixture.agent, fixture.dataDir),
+        AgentUsageStopRecoveryError,
+      );
+      assert.equal(existsSync(releasePath), true);
+      assert.equal(isChildAlive(fixture.child), true);
+    } finally {
+      await cleanupRuntimeFixture(fixture);
+    }
+  });
+
+  it("refuses interrupted-release recovery while another verified lease is active", async () => {
+    const fixture = await createRuntimeFixture(MANAGED_AGENT_RUNTIME_RETENTIONS.leaseBound);
+    const activeLease = await acquireAgentUsageLease(fixture.agent, fixture.dataDir, undefined, {
+      holderKind: "chat",
+      startIfStopped: false,
+      waitUntilReady: false,
+    });
+    assert.ok(activeLease);
+    const releasePath = writeInterruptedReleaseFixture(fixture, {
+      ownerPid: 2_147_483_647,
+      ownerToken: `pst-v2:${"0".repeat(64)}`,
+    });
+    try {
+      const inspection = await inspectAgentUsageStopRecovery(fixture.agent, fixture.dataDir);
+      assert.equal(inspection.status, AGENT_USAGE_STOP_RECOVERY_STATUSES.BLOCKED);
+      if (inspection.status !== AGENT_USAGE_STOP_RECOVERY_STATUSES.BLOCKED) {
+        assert.fail("expected another active lease to block recovery");
+      }
+      assert.match(inspection.reason, /活动 chat/u);
+
+      await assert.rejects(
+        recoverInterruptedAgentStop(fixture.agent, fixture.dataDir),
+        AgentUsageStopRecoveryError,
+      );
+      assert.equal(existsSync(releasePath), true);
+      assert.equal(isChildAlive(fixture.child), true);
+    } finally {
+      await activeLease.release().catch(() => {});
+      await cleanupRuntimeFixture(fixture);
+    }
+  });
+
+  it("refuses recovery for a malformed interrupted-release lease", async () => {
+    const fixture = await createRuntimeFixture(MANAGED_AGENT_RUNTIME_RETENTIONS.leaseBound);
+    const invalidLeasePath = writeInvalidLeaseFixture(fixture, "{not-json");
+    const leaseId = basename(invalidLeasePath, ".json");
+    const releasePath = join(
+      dirname(invalidLeasePath),
+      `.${leaseId}.${randomUUID()}.releasing.json`,
+    );
+    renameSync(invalidLeasePath, releasePath);
+    try {
+      const inspection = await inspectAgentUsageStopRecovery(fixture.agent, fixture.dataDir);
+      assert.equal(inspection.status, AGENT_USAGE_STOP_RECOVERY_STATUSES.BLOCKED);
+      if (inspection.status !== AGENT_USAGE_STOP_RECOVERY_STATUSES.BLOCKED) {
+        assert.fail("expected malformed interrupted release to block recovery");
+      }
+      assert.match(inspection.reason, /无法安全解析租约文件/u);
+
+      await assert.rejects(
+        recoverInterruptedAgentStop(fixture.agent, fixture.dataDir),
+        AgentUsageStopRecoveryError,
+      );
+      assert.equal(existsSync(releasePath), true);
+      assert.equal(isChildAlive(fixture.child), true);
+    } finally {
+      await cleanupRuntimeFixture(fixture);
+    }
+  });
+
   it("releases its own corrupted lease when the file identity is unchanged", async () => {
     const fixture = await createRuntimeFixture(MANAGED_AGENT_RUNTIME_RETENTIONS.leaseBound);
     try {
@@ -643,6 +769,17 @@ function writeInvalidLeaseFixture(fixture: RuntimeFixture, contents: string): st
   mkdirSync(dirname(leasePath), { recursive: true });
   writeFileSync(leasePath, contents, "utf-8");
   return leasePath;
+}
+
+function writeInterruptedReleaseFixture(
+  fixture: RuntimeFixture,
+  owner: { readonly ownerPid: number; readonly ownerToken: string },
+): string {
+  const leasePath = writeLeaseFixture(fixture, owner);
+  const leaseId = basename(leasePath, ".json");
+  const releasePath = join(dirname(leasePath), `.${leaseId}.${randomUUID()}.releasing.json`);
+  renameSync(leasePath, releasePath);
+  return releasePath;
 }
 
 function leasePathFor(fixture: RuntimeFixture, leaseId: string): string {

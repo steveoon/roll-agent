@@ -1,6 +1,10 @@
 import { defineCommand } from "citty";
 import { loadAgentsConfig } from "../../config/loader.ts";
 import {
+  AGENT_USAGE_STOP_RECOVERY_STATUSES,
+  inspectAgentUsageStopRecovery,
+} from "../../registry/agent-usage-lease.ts";
+import {
   getAgentLogPath,
   getAgentPid,
   inspectManagedAgentRuntime,
@@ -15,6 +19,14 @@ interface AgentHealthResult {
   readonly transport: RegisteredAgent["transport"]["type"];
   readonly healthy: boolean;
   readonly message: string;
+  readonly recovery?:
+    | {
+        readonly status: typeof AGENT_USAGE_STOP_RECOVERY_STATUSES.RECOVERABLE;
+        readonly command: string;
+      }
+    | {
+        readonly status: typeof AGENT_USAGE_STOP_RECOVERY_STATUSES.BLOCKED;
+      };
 }
 
 export default defineCommand({
@@ -129,6 +141,46 @@ async function checkCoreManagedHealth(
   store: AgentStore,
   dataDir: string,
 ): Promise<AgentHealthResult> {
+  try {
+    const recoveryInspection = await inspectAgentUsageStopRecovery(agent, dataDir);
+    if (recoveryInspection.status === AGENT_USAGE_STOP_RECOVERY_STATUSES.RECOVERABLE) {
+      store.updateStatus(agent.skill.name, "error");
+      const command = `roll agent stop ${agent.skill.name}`;
+      return {
+        agentName: agent.skill.name,
+        transport: agent.transport.type,
+        healthy: false,
+        message:
+          `检测到 ${String(recoveryInspection.releases.length)} 个上次停止中断留下的租约。` +
+          `运行 \`${command}\` 确认恢复；非交互环境使用 \`${command} --recover\`。`,
+        recovery: {
+          status: AGENT_USAGE_STOP_RECOVERY_STATUSES.RECOVERABLE,
+          command,
+        },
+      };
+    }
+    if (recoveryInspection.status === AGENT_USAGE_STOP_RECOVERY_STATUSES.BLOCKED) {
+      store.updateStatus(agent.skill.name, "error");
+      return {
+        agentName: agent.skill.name,
+        transport: agent.transport.type,
+        healthy: false,
+        message: `Agent 使用租约状态异常，无法安全自动恢复：${recoveryInspection.reason}`,
+        recovery: {
+          status: AGENT_USAGE_STOP_RECOVERY_STATUSES.BLOCKED,
+        },
+      };
+    }
+  } catch (error) {
+    store.updateStatus(agent.skill.name, "error");
+    return {
+      agentName: agent.skill.name,
+      transport: agent.transport.type,
+      healthy: false,
+      message: `无法检查 Agent 使用租约：${error instanceof Error ? error.message : String(error)}`,
+    };
+  }
+
   const pid = getAgentPid(dataDir, agent.skill.name);
   if (pid === undefined) {
     store.updateStatus(agent.skill.name, "stopped");
