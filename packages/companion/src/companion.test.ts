@@ -32,6 +32,7 @@ import {
   relayDeviceConnectSchema,
   relayMessageSchema,
   relayRuntimeRequestSchema,
+  relayRuntimeResponseSchema,
   workspaceIdSchema,
   type RelayEncryptedMessage,
   type RelayMessage,
@@ -597,6 +598,52 @@ test("CompanionRelayBridge supports opaque per-workspace E2E payload ciphers", a
     transport.sent.some((message) => message.type === "runtime.event"),
     false,
   );
+  bridge.close();
+});
+
+test("CompanionRelayBridge rejects plaintext requests for cipher workspaces", async () => {
+  const client = new FakeRuntimeClient();
+  const workspace = new CompanionWorkspace({
+    client,
+    localApprovalPolicy: () => "allow",
+  });
+  const workspaceId = workspaceIdSchema.parse(IDS.workspace);
+  const bridge = new CompanionRelayBridge({
+    deviceId: deviceIdSchema.parse(IDS.device),
+    pairingToken: "pairing-token-with-sufficient-length",
+    workspaces: new Map([[workspaceId, workspace]]),
+    ciphers: new Map([[workspaceId, testCipher]]),
+  });
+  const transport = new MemoryRelayTransport();
+  bridge.connect(transport);
+  await flush();
+
+  const sensitiveText = "plaintext must never reach Runtime";
+  transport.receive(turnRelayRequest(IDS.relayRequest, IDS.requestStart, IDS.turn, sensitiveText));
+  await flush();
+
+  assert.equal(client.requests.length, 0);
+  assert.equal(workspace.leases.canStopRuntime(), true);
+  assert.equal(
+    transport.sent.some((message) => message.type === "runtime.response"),
+    false,
+  );
+  const encryptedResponse = transport.sent.find(
+    (message): message is RelayEncryptedMessage =>
+      message.type === "runtime.encrypted" &&
+      message.payloadKind === "response" &&
+      message.requestId === IDS.relayRequest,
+  );
+  assert.ok(encryptedResponse !== undefined);
+  assert.deepEqual(
+    relayRuntimeResponseSchema.parse(await testCipher.decrypt(encryptedResponse)).error,
+    {
+      code: "RELAY_ENCRYPTION_REQUIRED",
+      message: "Encrypted Relay request required for this workspace",
+      retryable: false,
+    },
+  );
+  assert.equal(JSON.stringify(transport.sent).includes(sensitiveText), false);
   bridge.close();
 });
 

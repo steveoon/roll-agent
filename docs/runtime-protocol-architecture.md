@@ -33,6 +33,9 @@ Electron / Tauri / Qt / Python / IDE / Gateway
 Embedded Runtime SDK 仍可用于 Roll 第一方或版本锁定的高级宿主，但不与 Runtime Protocol
 共享兼容性承诺。
 
+具体 wire 契约见 [Runtime Protocol v1 参考](./runtime-protocol-v1-reference.md)；Node
+生命周期封装见 [`@roll-agent/client-node` API 参考](./client-node-reference.md)。
+
 ## 领域协议与 Transport 分层
 
 | 层 | 当前选择 | 稳定性 |
@@ -47,7 +50,9 @@ Thread、Turn 或事件语义。
 
 ## 状态恢复而非持久事件重放
 
-`runtime.event.sequence` 只在当前 `runtimeInstanceId` 内单调递增。Runtime 重启后：
+`runtime.event` Notification 的 `params.sequence`（即
+`RuntimeEventEnvelope.sequence`）只在当前 `runtimeInstanceId` 内单调递增。Runtime
+重启后：
 
 1. 客户端发现新的 `runtimeInstanceId`；
 2. 不自动重放结果未知的副作用命令；
@@ -75,9 +80,12 @@ Local Companion（主动出站）
 用户本机 Roll 与 Workspace
 ```
 
-`@roll-agent/companion` 保证：
+`@roll-agent/companion` 当前实现的本地基础能力：
 
-- 浏览器断线只释放浏览器 lease，不关闭活动 Turn、Shell Session 或待审批操作；
+- Browser client 与后台 Shell lease 由认证宿主手动接线；
+- 只有经 `CompanionWorkspace.startTurn()` 发起的 Turn 自动持有 lease，Approval lease 由
+  `approval.required` 与响应/终态事件自动维护；
+- Browser lease 释放不会关闭仍有 Turn、Shell 或 Approval lease 的 Runtime；
 - 最多缓冲 `10,000` 个事件或 `16 MiB`，溢出时返回 gap 并要求 Snapshot；
 - Relay bridge 只对 mutation 的 `workspaceId + requestId` 做有界响应缓存，并以
   SHA-256 指纹校验参数；活动请求不淘汰，已完成结果按 LRU 保留，读取请求不缓存大型
@@ -86,8 +94,27 @@ Local Companion（主动出站）
   中阻塞的发送或加密任务不会阻塞新连接握手与事件恢复；
 - 完全重复投递复用原 mutation 结果，相同 ID 配不同参数会被拒绝；Runtime 仍以协商得到
   的有界 `requestId` 与已完成 `turnId` 窗口作为第二道幂等边界；
-- 远程批准仍经过本地 Policy，可要求本机确认；
-- 敏感工作区可以注入 Browser 与 Companion 共享的 E2E cipher，Relay 只读取路由元数据。
+- 远程批准仍经过本地 Policy；`require-local-confirmation` 会返回
+  `LocalConfirmationRequiredError`，不会自行创建确认 UI；
+- cipher-bound Workspace 只接受 `runtime.encrypted` 请求；明文请求在触达 Runtime 前以
+  `RELAY_ENCRYPTION_REQUIRED`、`retryable: false` 拒绝，response/event 也只发送加密信封。
+
+上述事件缓冲、ACK、sequence、幂等缓存和 lease 都是 Companion 进程内状态，不是持久
+队列。Companion 重启后，宿主必须重建连接与 lease，并使用 `thread.snapshot` 收敛 UI。
+
+生产宿主必须另外实现：
+
+- Cloud Relay Server、账号/设备绑定存储、鉴权授权与 Workspace 路由；
+- TLS、Browser SDK、持久配对、心跳、帧上限、HA、监控和协议诊断；
+- Browser 连接身份到 `attachBrowser()` / `detachBrowser()` 的可信控制面；
+- Shell lease 生命周期；
+- 本机确认 UI 与只针对单次 Approval 的确认状态；
+- cipher 的算法、AEAD、nonce、密钥协商/轮换、Browser 实现和密钥存储。
+
+即使启用 payload cipher，Relay 仍可读取 Workspace ID、payload kind、request ID 或
+sequence 等路由元数据。`@roll-agent/companion` 不包含生产 Cloud Relay 服务；其精确消息、
+缓存与关闭语义见
+[`@roll-agent/companion` Relay v1 参考](./companion-relay-v1-reference.md)。
 
 公网多租户云端 Roll 必须按租户或 Workspace 使用独立 Worker。多个不可信租户不能共享一个
 Roll 进程、工作目录、环境变量或 Shell。
@@ -100,6 +127,7 @@ Roll 进程、工作目录、环境变量或 Shell。
 - Workflow DAG；
 - 权限 DSL；
 - stdio 之外的 Runtime Transport；
-- Runtime 崩溃后的自动执行恢复。
+- Runtime 崩溃后的自动执行恢复；
+- 生产 Cloud Relay、Browser SDK 或 Companion 状态持久化。
 
 这些能力可以在不破坏 v1 基础对象的前提下逐步扩展。

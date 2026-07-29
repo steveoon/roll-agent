@@ -429,6 +429,8 @@ roll runtime serve --stdio
 
 - [架构与安全边界](./docs/runtime-protocol-architecture.md)
 - [Runtime Protocol v1 参考](./docs/runtime-protocol-v1-reference.md)
+- [`@roll-agent/client-node` API 参考](./docs/client-node-reference.md)
+- [`@roll-agent/companion` Relay v1 参考](./docs/companion-relay-v1-reference.md)
 - [使用 Electron、Tauri、Python 或 Next.js 接入](./docs/how-to-build-roll-runtime-ui.md)
 - [最小客户端教程](./docs/tutorial-runtime-ui-quickstart.md)
 
@@ -439,7 +441,7 @@ packages/
   core/          指挥官：CLI + Registry + Router + MCP Client + LLM Engine
   protocol/      第三方 UI 的版本化 Runtime Protocol + JSON Schema
   client-node/   stdio Runtime Protocol Node 客户端
-  companion/     远程 Web 的本地 Companion / Relay 基础能力
+  companion/     远程 Web 的本地 Companion / 出站 Relay bridge 基础能力（不含 Cloud Relay）
   sdk/           子 Agent 开发 SDK：defineAgent() + defineTool()
   browser/       浏览器运行时抽象层：BrowserRuntime + ContextManager + SessionStore
 agents/

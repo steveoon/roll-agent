@@ -56,6 +56,11 @@ interface RelayTransportGeneration {
 }
 
 const DEFAULT_MAX_REQUEST_CACHE_ENTRIES = 10_000;
+const RELAY_ENCRYPTION_REQUIRED_ERROR = {
+  code: "RELAY_ENCRYPTION_REQUIRED",
+  message: "Encrypted Relay request required for this workspace",
+  retryable: false,
+} as const;
 const MUTATION_RUNTIME_METHODS = new Set<RuntimeMethod>([
   RUNTIME_METHODS.threadCreate,
   RUNTIME_METHODS.threadRename,
@@ -203,7 +208,11 @@ export class CompanionRelayBridge {
       });
   }
 
-  private async handleMessage(value: unknown, generation: RelayTransportGeneration): Promise<void> {
+  private async handleMessage(
+    value: unknown,
+    generation: RelayTransportGeneration,
+    decryptedWithWorkspaceCipher = false,
+  ): Promise<void> {
     if (this.transportGeneration !== generation) {
       return;
     }
@@ -228,7 +237,7 @@ export class CompanionRelayBridge {
         ) {
           return;
         }
-        await this.handleMessage(decrypted, generation);
+        await this.handleMessage(decrypted, generation, true);
       } catch {
         this.sendRuntimeResponse({
           type: "runtime.response",
@@ -259,6 +268,15 @@ export class CompanionRelayBridge {
       return;
     }
     if (message.type !== "runtime.request") {
+      return;
+    }
+    if (!decryptedWithWorkspaceCipher && this.ciphers.has(message.workspaceId)) {
+      this.sendRuntimeResponse({
+        type: "runtime.response",
+        requestId: message.requestId,
+        workspaceId: message.workspaceId,
+        error: RELAY_ENCRYPTION_REQUIRED_ERROR,
+      });
       return;
     }
     const workspace = this.workspaces.get(message.workspaceId);
