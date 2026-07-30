@@ -224,6 +224,219 @@ function createImmediateFixture(store: ThreadStore): {
   return { engine, sendCount: () => sends };
 }
 
+test("RuntimeService keeps pending approval on decision failure and cancels through listener errors", async () => {
+  const dir = tempDir();
+  const store = new ThreadStore(dir);
+  const fixture = createFixture(store);
+  const service = new RuntimeService(fixture.engine, store, { runtimeVersion: "0.9.0-test" });
+  const events: RuntimeEventEnvelope[] = [];
+  const originalCancel = fixture.session.cancel.bind(fixture.session);
+  let cancelCalls = 0;
+  fixture.session.cancel = () => {
+    cancelCalls += 1;
+    return originalCancel();
+  };
+  service.onEvent((event) => events.push(event));
+  try {
+    service.initialize({
+      protocolVersions: [RUNTIME_PROTOCOL_VERSION],
+      client: { name: "throwing-approval-test", version: "1.0.0" },
+    });
+    await service.createThread(
+      runtimeMethodSchemas["thread.create"].params.parse({
+        requestId: IDS.requestCreate,
+        title: "Throwing approval",
+      }),
+    );
+    await service.startTurn(
+      runtimeMethodSchemas["turn.start"].params.parse({
+        requestId: IDS.requestFirstTurn,
+        threadId: IDS.thread,
+        turnId: IDS.firstTurn,
+        input: { text: "trigger approval" },
+      }),
+    );
+    await nextTick();
+    const required = events.find((event) => event.event.type === "approval.required");
+    assert.ok(required?.event.type === "approval.required");
+    const identity = {
+      threadId: required.threadId,
+      turnId: required.event.approval.turnId,
+      approvalId: required.event.approval.id,
+    };
+    fixture.session.approve = () => {
+      throw new Error("approval gate failed");
+    };
+
+    assert.throws(
+      () => service.resolvePendingApproval(identity, { decision: "approve" }),
+      /approval gate failed/u,
+    );
+    assert.deepEqual(
+      service
+        .snapshotThread({ threadId: required.threadId, limit: 100 })
+        .pendingApprovals.map((approval) => approval.id),
+      [identity.approvalId],
+    );
+
+    const unsubscribeThrowingListener = service.onEvent((event) => {
+      if (event.event.type === "approval.resolved") {
+        throw new Error("approval.resolved listener failed");
+      }
+    });
+    assert.equal(
+      await service.failPendingApprovalInteraction(identity, "GUI approval handler failed"),
+      true,
+    );
+    unsubscribeThrowingListener();
+    assert.equal(cancelCalls, 1);
+    assert.deepEqual(
+      service.snapshotThread({ threadId: required.threadId, limit: 100 }).pendingApprovals,
+      [],
+    );
+    const resolved = events.find((event) => event.event.type === "approval.resolved");
+    assert.ok(resolved?.event.type === "approval.resolved");
+    assert.deepEqual(resolved.event.resolution, {
+      status: "cancelled",
+      reason: "GUI approval handler failed",
+    });
+    await nextTick();
+    const failed = events.find((event) => event.event.type === "turn.failed");
+    assert.ok(failed?.event.type === "turn.failed");
+    assert.equal(failed.event.message, "GUI approval handler failed");
+  } finally {
+    await service.close();
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("RuntimeService cancelTurn releases the approval gate when a resolved listener throws", async () => {
+  const dir = tempDir();
+  const store = new ThreadStore(dir);
+  const fixture = createFixture(store);
+  const service = new RuntimeService(fixture.engine, store, { runtimeVersion: "0.9.0-test" });
+  const events: RuntimeEventEnvelope[] = [];
+  const originalCancel = fixture.session.cancel.bind(fixture.session);
+  let cancelCalls = 0;
+  fixture.session.cancel = () => {
+    cancelCalls += 1;
+    return originalCancel();
+  };
+  service.onEvent((event) => events.push(event));
+  try {
+    service.initialize({
+      protocolVersions: [RUNTIME_PROTOCOL_VERSION],
+      client: { name: "throwing-cancel-listener-test", version: "1.0.0" },
+    });
+    await service.createThread(
+      runtimeMethodSchemas["thread.create"].params.parse({
+        requestId: IDS.requestCreate,
+        title: "Throwing cancel listener",
+      }),
+    );
+    await service.startTurn(
+      runtimeMethodSchemas["turn.start"].params.parse({
+        requestId: IDS.requestFirstTurn,
+        threadId: IDS.thread,
+        turnId: IDS.firstTurn,
+        input: { text: "trigger approval" },
+      }),
+    );
+    await nextTick();
+    assert.equal(
+      events.some((event) => event.event.type === "approval.required"),
+      true,
+    );
+    const unsubscribeThrowingListener = service.onEvent((event) => {
+      if (event.event.type === "approval.resolved") {
+        throw new Error("approval.resolved listener failed");
+      }
+    });
+
+    assert.deepEqual(
+      await service.cancelTurn(
+        runtimeMethodSchemas["turn.cancel"].params.parse({
+          requestId: IDS.requestCancel,
+          threadId: IDS.thread,
+          turnId: IDS.firstTurn,
+        }),
+      ),
+      { cancelling: true },
+    );
+    unsubscribeThrowingListener();
+    assert.equal(cancelCalls, 1);
+    assert.deepEqual(
+      service.snapshotThread({ threadId: threadIdSchema.parse(IDS.thread), limit: 100 })
+        .pendingApprovals,
+      [],
+    );
+    await nextTick();
+    assert.equal(
+      events.some((event) => event.event.type === "turn.cancelled"),
+      true,
+    );
+    assert.equal(
+      service.snapshotThread({ threadId: threadIdSchema.parse(IDS.thread), limit: 100 }).activeTurn,
+      undefined,
+    );
+  } finally {
+    await service.close();
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("RuntimeService isolates event listeners before starting and completing a Turn", async () => {
+  const dir = tempDir();
+  const store = new ThreadStore(dir);
+  const fixture = createImmediateFixture(store);
+  const service = new RuntimeService(fixture.engine, store, { runtimeVersion: "0.9.0-test" });
+  const eventsAfterThrow: RuntimeEventEnvelope[] = [];
+  service.onEvent(() => {
+    throw new Error("listener failed");
+  });
+  service.onEvent((event) => eventsAfterThrow.push(event));
+  try {
+    service.initialize({
+      protocolVersions: [RUNTIME_PROTOCOL_VERSION],
+      client: { name: "isolated-listener-test", version: "1.0.0" },
+    });
+    await service.createThread(
+      runtimeMethodSchemas["thread.create"].params.parse({
+        requestId: IDS.requestCreate,
+        title: "Isolated listener",
+      }),
+    );
+    assert.deepEqual(
+      await service.startTurn(
+        runtimeMethodSchemas["turn.start"].params.parse({
+          requestId: IDS.requestFirstTurn,
+          threadId: IDS.thread,
+          turnId: IDS.firstTurn,
+          input: { text: "complete despite listener failure" },
+        }),
+      ),
+      { accepted: true, turnId: IDS.firstTurn },
+    );
+    await nextTick();
+
+    assert.deepEqual(
+      eventsAfterThrow.map((event) => event.event.type),
+      ["turn.started", "message.started", "message.completed", "turn.completed"],
+    );
+    assert.equal(fixture.sendCount(), 1);
+    assert.equal(
+      service.snapshotThread({ threadId: threadIdSchema.parse(IDS.thread), limit: 100 }).activeTurn,
+      undefined,
+    );
+  } finally {
+    await service.close();
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("MutationRequestCache bounds settled results and retains failures inside the window", async () => {
   const cache = new MutationRequestCache(2);
   const first = runtimeMethodSchemas["thread.detach"].params.parse({
@@ -502,13 +715,27 @@ test("RuntimeService v1 supports lifecycle, concurrent approval/cancel and proce
   const fixture = createFixture(store);
   const service = new RuntimeService(fixture.engine, store, { runtimeVersion: "0.9.0-test" });
   const events: RuntimeEventEnvelope[] = [];
-  service.onEvent((event) => events.push(event));
+  let terminalSnapshotHadActiveTurn = false;
+  service.onEvent((event) => {
+    events.push(event);
+    if (
+      event.event.type === "turn.completed" ||
+      event.event.type === "turn.cancelled" ||
+      event.event.type === "turn.failed"
+    ) {
+      terminalSnapshotHadActiveTurn ||=
+        service.snapshotThread({
+          threadId: event.threadId,
+          limit: 100,
+        }).activeTurn !== undefined;
+    }
+  });
   try {
     const initialized = service.initialize({
       protocolVersions: [RUNTIME_PROTOCOL_VERSION],
       client: { name: "test-client", version: "1.0.0" },
     });
-    assert.equal(initialized.protocolVersion, "1.0");
+    assert.equal(initialized.protocolVersion, RUNTIME_PROTOCOL_VERSION);
     assert.equal(initialized.limits.eventReplay, false);
     assert.equal(initialized.limits.idempotencyCacheEntries, 10_000);
 
@@ -570,11 +797,20 @@ test("RuntimeService v1 supports lifecycle, concurrent approval/cancel and proce
         decision: "approve",
       }),
     );
-    await nextTick();
-    assert.equal(
-      events.some((event) => event.event.type === "turn.completed"),
-      true,
+    const approvalResolvedIndex = events.findIndex(
+      (event) => event.event.type === "approval.resolved",
     );
+    assert.ok(approvalResolvedIndex > events.indexOf(approvalEvent));
+    const approvalResolved = events[approvalResolvedIndex];
+    assert.ok(approvalResolved?.event.type === "approval.resolved");
+    assert.deepEqual(approvalResolved.event, {
+      type: "approval.resolved",
+      approvalId: IDS.approval,
+      resolution: { status: "resolved", decision: "approve" },
+    });
+    await nextTick();
+    const completedIndex = events.findIndex((event) => event.event.type === "turn.completed");
+    assert.ok(completedIndex > approvalResolvedIndex);
 
     const secondTurn = runtimeMethodSchemas["turn.start"].params.parse({
       requestId: IDS.requestSecondTurn,
@@ -601,6 +837,7 @@ test("RuntimeService v1 supports lifecycle, concurrent approval/cancel and proce
       events.some((event) => event.event.type === "turn.cancelled"),
       true,
     );
+    assert.equal(terminalSnapshotHadActiveTurn, false);
     assert.deepEqual(
       events.map((event) => event.sequence),
       events.map((_event, index) => index),
@@ -725,6 +962,58 @@ test("RuntimeService rejects unsupported protocol versions", async () => {
           client: { name: "future-client", version: "2.0.0" },
         }),
       /不支持客户端协议版本/u,
+    );
+  } finally {
+    await service.close();
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("RuntimeService 按客户端优先级协商 1.0/1.1", async () => {
+  const dir = tempDir();
+  const store = new ThreadStore(dir);
+  const fixture = createFixture(store);
+  const service = new RuntimeService(fixture.engine, store);
+  try {
+    assert.equal(
+      service.initialize({
+        protocolVersions: ["1.0", "1.1"],
+        client: { name: "legacy-first", version: "1.0.0" },
+      }).protocolVersion,
+      "1.0",
+    );
+    assert.equal(
+      service.initialize({
+        protocolVersions: ["1.1", "1.0"],
+        client: { name: "latest-first", version: "1.1.0" },
+      }).protocolVersion,
+      "1.1",
+    );
+  } finally {
+    await service.close();
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("RuntimeService 关闭后拒绝重新 initialize", async () => {
+  const dir = tempDir();
+  const store = new ThreadStore(dir);
+  const fixture = createFixture(store);
+  const service = new RuntimeService(fixture.engine, store);
+  try {
+    await service.close();
+    assert.throws(
+      () =>
+        service.initialize({
+          protocolVersions: ["1.1", "1.0"],
+          client: { name: "late-client", version: "1.1.0" },
+        }),
+      (error: unknown) =>
+        error instanceof RuntimeServiceError &&
+        error.rollCode === "RUNTIME_CLOSING" &&
+        error.retryable,
     );
   } finally {
     await service.close();

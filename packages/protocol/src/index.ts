@@ -1,7 +1,59 @@
 import { z } from "zod/v4";
 
-export const RUNTIME_PROTOCOL_VERSION = "1.0" as const;
+export const SUPPORTED_RUNTIME_PROTOCOL_VERSIONS = ["1.1", "1.0"] as const;
+export type RuntimeProtocolVersion = (typeof SUPPORTED_RUNTIME_PROTOCOL_VERSIONS)[number];
+export const RUNTIME_PROTOCOL_VERSION = SUPPORTED_RUNTIME_PROTOCOL_VERSIONS[0];
 export const RUNTIME_EVENT_NOTIFICATION = "runtime.event" as const;
+export const RUNTIME_SERVER_REQUEST_CANCEL_NOTIFICATION = "runtime.serverRequest.cancel" as const;
+
+export const RUNTIME_SERVER_REQUEST_METHODS = {
+  approvalRequest: "approval.request",
+} as const;
+
+export type RuntimeServerRequestMethod =
+  (typeof RUNTIME_SERVER_REQUEST_METHODS)[keyof typeof RUNTIME_SERVER_REQUEST_METHODS];
+
+export interface RuntimeProtocolCapabilities {
+  readonly serverRequests: boolean;
+  readonly approvalResolvedEvents: boolean;
+  readonly clientApprovalResponses: boolean;
+  readonly requiredServerRequestMethods: readonly RuntimeServerRequestMethod[];
+}
+
+export const RUNTIME_PROTOCOL_CAPABILITIES = {
+  "1.1": {
+    serverRequests: true,
+    approvalResolvedEvents: true,
+    clientApprovalResponses: false,
+    requiredServerRequestMethods: [RUNTIME_SERVER_REQUEST_METHODS.approvalRequest],
+  },
+  "1.0": {
+    serverRequests: false,
+    approvalResolvedEvents: false,
+    clientApprovalResponses: true,
+    requiredServerRequestMethods: [],
+  },
+} as const satisfies Readonly<Record<RuntimeProtocolVersion, RuntimeProtocolCapabilities>>;
+
+export const REQUIRED_RUNTIME_SERVER_REQUEST_METHODS_BY_VERSION = {
+  "1.1": RUNTIME_PROTOCOL_CAPABILITIES["1.1"].requiredServerRequestMethods,
+  "1.0": RUNTIME_PROTOCOL_CAPABILITIES["1.0"].requiredServerRequestMethods,
+} as const;
+
+export function getRuntimeProtocolCapabilities(
+  version: RuntimeProtocolVersion,
+): RuntimeProtocolCapabilities {
+  return RUNTIME_PROTOCOL_CAPABILITIES[version];
+}
+
+export function isRuntimeServerRequestMethodRequired(
+  version: RuntimeProtocolVersion,
+  method: RuntimeServerRequestMethod,
+): boolean {
+  return getRuntimeProtocolCapabilities(version).requiredServerRequestMethods.some(
+    (requiredMethod) => requiredMethod === method,
+  );
+}
 
 export const RUNTIME_METHODS = {
   initialize: "initialize",
@@ -63,6 +115,8 @@ export const streamIdSchema = z.string().uuid().brand<"StreamId">();
 export const operationIdSchema = z.string().uuid().brand<"OperationId">();
 export const timestampSchema = z.string().datetime({ offset: true });
 export const jsonValueSchema = z.json();
+export const jsonRpcIdSchema = z.union([z.string(), z.number()]);
+export const runtimeProtocolVersionSchema = z.enum(SUPPORTED_RUNTIME_PROTOCOL_VERSIONS);
 
 export type ThreadId = z.infer<typeof threadIdSchema>;
 export type TurnId = z.infer<typeof turnIdSchema>;
@@ -72,6 +126,7 @@ export type RequestId = z.infer<typeof requestIdSchema>;
 export type StreamId = z.infer<typeof streamIdSchema>;
 export type OperationId = z.infer<typeof operationIdSchema>;
 export type JsonValue = z.infer<typeof jsonValueSchema>;
+export type JsonRpcId = z.infer<typeof jsonRpcIdSchema>;
 
 const runtimeClientInfoFields = {
   name: z.string().trim().min(1).max(100),
@@ -108,7 +163,7 @@ export const initializeParamsSchema = z
 
 export const initializeResultSchema = z
   .object({
-    protocolVersion: z.literal(RUNTIME_PROTOCOL_VERSION),
+    protocolVersion: runtimeProtocolVersionSchema,
     runtimeInstanceId: runtimeInstanceIdSchema,
     server: runtimeServerInfoSchema,
     features: z.array(z.enum(RUNTIME_FEATURES)),
@@ -340,6 +395,8 @@ export const turnCancelParamsSchema = z
 
 export const turnCancelResultSchema = z.object({ cancelling: z.boolean() }).strict().readonly();
 
+const approvalRejectReasonSchema = z.string().min(1);
+
 export const approvalRespondParamsSchema = z
   .object({
     ...requestFields,
@@ -347,13 +404,47 @@ export const approvalRespondParamsSchema = z
     turnId: turnIdSchema,
     approvalId: approvalIdSchema,
     decision: z.enum(["approve", "reject"]),
-    reason: z.string().optional(),
+    reason: approvalRejectReasonSchema.optional(),
   })
   .strict()
   .readonly();
 
 export const approvalRespondResultSchema = z
   .object({ resolved: z.literal(true) })
+  .strict()
+  .readonly();
+
+export const approvalRequestParamsSchema = z
+  .object({
+    threadId: threadIdSchema,
+    approval: pendingApprovalSchema,
+    expiresAt: timestampSchema.optional(),
+  })
+  .strict()
+  .readonly();
+
+export const approvalRequestResultSchema = z.discriminatedUnion("decision", [
+  z
+    .object({
+      decision: z.literal("approve"),
+    })
+    .strict()
+    .readonly(),
+  z
+    .object({
+      decision: z.literal("reject"),
+      reason: approvalRejectReasonSchema.optional(),
+    })
+    .strict()
+    .readonly(),
+]);
+
+export const runtimeServerRequestCancelParamsSchema = z
+  .object({
+    serverRequestId: jsonRpcIdSchema,
+    approvalId: approvalIdSchema.optional(),
+    reason: z.string().min(1),
+  })
   .strict()
   .readonly();
 
@@ -371,6 +462,38 @@ export const operationGetResultSchema = z
   })
   .strict()
   .readonly();
+
+export const approvalResolutionSchema = z.union([
+  z
+    .object({
+      status: z.literal("resolved"),
+      decision: z.literal("approve"),
+    })
+    .strict()
+    .readonly(),
+  z
+    .object({
+      status: z.literal("resolved"),
+      decision: z.literal("reject"),
+      reason: approvalRejectReasonSchema.optional(),
+    })
+    .strict()
+    .readonly(),
+  z
+    .object({
+      status: z.literal("cancelled"),
+      reason: z.string().min(1),
+    })
+    .strict()
+    .readonly(),
+  z
+    .object({
+      status: z.literal("expired"),
+      reason: z.string().min(1).optional(),
+    })
+    .strict()
+    .readonly(),
+]);
 
 export const runtimeEventSchema = z.discriminatedUnion("type", [
   z
@@ -449,6 +572,14 @@ export const runtimeEventSchema = z.discriminatedUnion("type", [
     .strict()
     .readonly(),
   z
+    .object({
+      type: z.literal("approval.resolved"),
+      approvalId: approvalIdSchema,
+      resolution: approvalResolutionSchema,
+    })
+    .strict()
+    .readonly(),
+  z
     .object({ type: z.literal("turn.completed") })
     .strict()
     .readonly(),
@@ -476,7 +607,7 @@ export const runtimeEventSchema = z.discriminatedUnion("type", [
 
 export const runtimeEventEnvelopeSchema = z
   .object({
-    protocolVersion: z.literal(RUNTIME_PROTOCOL_VERSION),
+    protocolVersion: runtimeProtocolVersionSchema,
     runtimeInstanceId: runtimeInstanceIdSchema,
     sequence: z.number().int().nonnegative(),
     timestamp: timestampSchema,
@@ -485,6 +616,18 @@ export const runtimeEventEnvelopeSchema = z
     event: runtimeEventSchema,
   })
   .strict()
+  .superRefine((value, context) => {
+    if (
+      !getRuntimeProtocolCapabilities(value.protocolVersion).approvalResolvedEvents &&
+      value.event.type === "approval.resolved"
+    ) {
+      context.addIssue({
+        code: "custom",
+        message: "approval.resolved requires the negotiated approval-resolved event capability",
+        path: ["event", "type"],
+      });
+    }
+  })
   .readonly();
 
 export const runtimeProtocolErrorDataSchema = z
@@ -551,6 +694,13 @@ export const runtimeMethodSchemas = {
   },
 } as const;
 
+export const runtimeServerRequestSchemas = {
+  [RUNTIME_SERVER_REQUEST_METHODS.approvalRequest]: {
+    params: approvalRequestParamsSchema,
+    result: approvalRequestResultSchema,
+  },
+} as const;
+
 export type RuntimeMethod = keyof typeof runtimeMethodSchemas;
 export type RuntimeMethodInput<TMethod extends RuntimeMethod> = z.input<
   (typeof runtimeMethodSchemas)[TMethod]["params"]
@@ -561,6 +711,21 @@ export type RuntimeMethodParams<TMethod extends RuntimeMethod> = z.output<
 export type RuntimeMethodResult<TMethod extends RuntimeMethod> = z.output<
   (typeof runtimeMethodSchemas)[TMethod]["result"]
 >;
+export type RuntimeServerRequestInput<TMethod extends RuntimeServerRequestMethod> = z.input<
+  (typeof runtimeServerRequestSchemas)[TMethod]["params"]
+>;
+export type RuntimeServerRequestParams<TMethod extends RuntimeServerRequestMethod> = z.output<
+  (typeof runtimeServerRequestSchemas)[TMethod]["params"]
+>;
+export type RuntimeServerRequestResult<TMethod extends RuntimeServerRequestMethod> = z.output<
+  (typeof runtimeServerRequestSchemas)[TMethod]["result"]
+>;
+export type RuntimeServerRequestHandler<TMethod extends RuntimeServerRequestMethod> = (
+  params: RuntimeServerRequestParams<TMethod>,
+) => RuntimeServerRequestResult<TMethod> | Promise<RuntimeServerRequestResult<TMethod>>;
+export type RuntimeServerRequestHandlers = {
+  readonly [TMethod in RuntimeServerRequestMethod]?: RuntimeServerRequestHandler<TMethod>;
+};
 export type InitializeParams = z.output<typeof initializeParamsSchema>;
 export type InitializeResult = z.output<typeof initializeResultSchema>;
 export type RuntimeEvent = z.infer<typeof runtimeEventSchema>;
@@ -572,8 +737,12 @@ export type UiMessage = z.infer<typeof uiMessageSchema>;
 export type OperationView = z.infer<typeof operationViewSchema>;
 export type PendingApproval = z.infer<typeof pendingApprovalSchema>;
 export type ActiveTurn = z.infer<typeof activeTurnSchema>;
-
-export type JsonRpcId = number | string;
+export type ApprovalRequestParams = z.infer<typeof approvalRequestParamsSchema>;
+export type ApprovalRequestResult = z.infer<typeof approvalRequestResultSchema>;
+export type ApprovalResolution = z.infer<typeof approvalResolutionSchema>;
+export type RuntimeServerRequestCancelParams = z.infer<
+  typeof runtimeServerRequestCancelParamsSchema
+>;
 
 export interface JsonRpcRequest {
   readonly jsonrpc: "2.0";
@@ -626,4 +795,26 @@ export function parseRuntimeMethodResult<TMethod extends RuntimeMethod>(
   value: unknown,
 ): RuntimeMethodResult<TMethod> {
   return runtimeMethodSchemas[method].result.parse(value) as RuntimeMethodResult<TMethod>;
+}
+
+export function isRuntimeServerRequestMethod(value: string): value is RuntimeServerRequestMethod {
+  return Object.hasOwn(runtimeServerRequestSchemas, value);
+}
+
+export function parseRuntimeServerRequestParams<TMethod extends RuntimeServerRequestMethod>(
+  method: TMethod,
+  value: unknown,
+): RuntimeServerRequestParams<TMethod> {
+  return runtimeServerRequestSchemas[method].params.parse(
+    value,
+  ) as RuntimeServerRequestParams<TMethod>;
+}
+
+export function parseRuntimeServerRequestResult<TMethod extends RuntimeServerRequestMethod>(
+  method: TMethod,
+  value: unknown,
+): RuntimeServerRequestResult<TMethod> {
+  return runtimeServerRequestSchemas[method].result.parse(
+    value,
+  ) as RuntimeServerRequestResult<TMethod>;
 }

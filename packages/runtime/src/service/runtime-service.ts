@@ -5,13 +5,16 @@ import {
   RUNTIME_FEATURES,
   RUNTIME_METHODS,
   RUNTIME_PROTOCOL_VERSION,
+  SUPPORTED_RUNTIME_PROTOCOL_VERSIONS,
   approvalIdSchema,
   operationIdSchema,
   parseRuntimeMethodResult,
   runtimeInstanceIdSchema,
+  runtimeProtocolVersionSchema,
   streamIdSchema,
   threadIdSchema,
   type ActiveTurn,
+  type ApprovalResolution,
   type InitializeParams,
   type InitializeResult,
   type JsonValue,
@@ -22,6 +25,7 @@ import {
   type RuntimeInstanceId,
   type RuntimeMethodParams,
   type RuntimeMethodResult,
+  type RuntimeProtocolVersion,
   type RuntimeProtocolErrorData,
   type ThreadId,
   type ThreadSummary,
@@ -93,18 +97,36 @@ export interface RuntimeServiceOptions {
   readonly reasoningSummaryProjector?: (delta: string) => string | undefined;
 }
 
+export interface RuntimeApprovalIdentity {
+  readonly threadId: ThreadId;
+  readonly turnId: TurnId;
+  readonly approvalId: ReturnType<typeof approvalIdSchema.parse>;
+}
+
+export type RuntimeApprovalDecision =
+  | { readonly decision: "approve" }
+  | { readonly decision: "reject"; readonly reason?: string };
+
 interface ActiveTurnState {
   readonly threadId: ThreadId;
   readonly turnId: TurnId;
   readonly session: RuntimeServiceSession;
   readonly startedAt: string;
   status: ActiveTurn["status"];
+  interactionFailure: string | undefined;
 }
 
 interface TurnProjectionState {
   streamId: ReturnType<typeof streamIdSchema.parse> | undefined;
   text: string;
-  terminalEmitted: boolean;
+  terminalEvent:
+    | Extract<
+        RuntimeEvent,
+        {
+          readonly type: "turn.completed" | "turn.cancelled" | "turn.failed";
+        }
+      >
+    | undefined;
 }
 
 interface PendingApprovalState {
@@ -413,19 +435,28 @@ export class RuntimeService {
   }
 
   initialize(params: InitializeParams): InitializeResult {
-    if (!params.protocolVersions.includes(RUNTIME_PROTOCOL_VERSION)) {
+    this.assertOpen();
+    let protocolVersion: RuntimeProtocolVersion | undefined;
+    for (const candidate of params.protocolVersions) {
+      const parsed = runtimeProtocolVersionSchema.safeParse(candidate);
+      if (parsed.success) {
+        protocolVersion = parsed.data;
+        break;
+      }
+    }
+    if (protocolVersion === undefined) {
       throw new RuntimeServiceError(
         RUNTIME_ERROR_CODES.protocolVersionUnsupported,
         `不支持客户端协议版本：${params.protocolVersions.join(", ")}`,
         {
           details: {
-            supportedVersions: [RUNTIME_PROTOCOL_VERSION],
+            supportedVersions: SUPPORTED_RUNTIME_PROTOCOL_VERSIONS,
           },
         },
       );
     }
     return {
-      protocolVersion: RUNTIME_PROTOCOL_VERSION,
+      protocolVersion,
       runtimeInstanceId: this.runtimeInstanceId,
       server: {
         name: this.serverName,
@@ -679,6 +710,7 @@ export class RuntimeService {
           session,
           startedAt: new Date().toISOString(),
           status: "running",
+          interactionFailure: undefined,
         };
         this.activeTurns.set(params.threadId, state);
         this.activeTurnOwners.set(params.turnId, params.threadId);
@@ -702,7 +734,16 @@ export class RuntimeService {
         );
       }
       state.status = "cancelling";
-      return { cancelling: state.session.cancel() };
+      let cancelling = false;
+      try {
+        this.cancelPendingApprovalsForTurn(params.turnId, {
+          status: "cancelled",
+          reason: "Turn 已由客户端取消",
+        });
+      } finally {
+        cancelling = state.session.cancel();
+      }
+      return { cancelling };
     });
   }
 
@@ -713,33 +754,89 @@ export class RuntimeService {
       params.requestId,
       RUNTIME_METHODS.approvalRespond,
       params,
-      () => {
-        this.assertOpen();
-        const pending = this.pendingApprovals.get(params.approvalId);
-        if (
-          pending === undefined ||
-          pending.threadId !== params.threadId ||
-          pending.approval.turnId !== params.turnId
-        ) {
-          throw new RuntimeServiceError(
-            RUNTIME_ERROR_CODES.approvalNotFound,
-            `Approval "${params.approvalId}" 不存在或已失效`,
-          );
-        }
-        const resolved =
+      () =>
+        this.resolvePendingApproval(
+          params,
           params.decision === "approve"
-            ? pending.session.approve(params.approvalId)
-            : pending.session.reject(params.approvalId, params.reason);
-        if (!resolved) {
-          throw new RuntimeServiceError(
-            RUNTIME_ERROR_CODES.approvalNotFound,
-            `Approval "${params.approvalId}" 已失效`,
-          );
-        }
-        this.pendingApprovals.delete(params.approvalId);
-        return { resolved: true };
-      },
+            ? { decision: "approve" }
+            : {
+                decision: "reject",
+                ...(params.reason !== undefined ? { reason: params.reason } : {}),
+              },
+        ),
     );
+  }
+
+  resolvePendingApproval(
+    identity: RuntimeApprovalIdentity,
+    decision: RuntimeApprovalDecision,
+  ): RuntimeMethodResult<"approval.respond"> {
+    this.assertOpen();
+    const pending = this.requirePendingApproval(identity);
+    const resolved =
+      decision.decision === "approve"
+        ? pending.session.approve(identity.approvalId)
+        : pending.session.reject(identity.approvalId, decision.reason);
+    this.pendingApprovals.delete(identity.approvalId);
+    if (!resolved) {
+      this.emitApprovalResolved(pending, {
+        status: "cancelled",
+        reason: "审批已失效",
+      });
+      throw new RuntimeServiceError(
+        RUNTIME_ERROR_CODES.approvalNotFound,
+        `Approval "${identity.approvalId}" 已失效`,
+      );
+    }
+    this.emitApprovalResolved(
+      pending,
+      decision.decision === "approve"
+        ? { status: "resolved", decision: "approve" }
+        : {
+            status: "resolved",
+            decision: "reject",
+            ...(decision.reason !== undefined ? { reason: decision.reason } : {}),
+          },
+    );
+    return { resolved: true };
+  }
+
+  private cancelPendingApproval(
+    identity: RuntimeApprovalIdentity,
+    resolution: Extract<ApprovalResolution, { readonly status: "cancelled" | "expired" }>,
+  ): boolean {
+    const pending = this.findPendingApproval(identity);
+    if (pending === undefined) {
+      return false;
+    }
+    this.pendingApprovals.delete(identity.approvalId);
+    this.emitApprovalResolved(pending, resolution);
+    return true;
+  }
+
+  async failPendingApprovalInteraction(
+    identity: RuntimeApprovalIdentity,
+    reason: string,
+    resolution: Extract<ApprovalResolution, { readonly status: "cancelled" | "expired" }> = {
+      status: "cancelled",
+      reason,
+    },
+  ): Promise<boolean> {
+    const pending = this.findPendingApproval(identity);
+    if (pending === undefined) {
+      return false;
+    }
+    const activeTurn = this.activeTurns.get(identity.threadId);
+    if (activeTurn !== undefined && activeTurn.turnId === identity.turnId) {
+      activeTurn.interactionFailure = reason;
+    }
+    this.pendingApprovals.delete(identity.approvalId);
+    try {
+      this.emitApprovalResolved(pending, resolution);
+    } finally {
+      pending.session.cancel();
+    }
+    return true;
   }
 
   getOperation(params: RuntimeMethodParams<"operation.get">): RuntimeMethodResult<"operation.get"> {
@@ -812,7 +909,11 @@ export class RuntimeService {
     };
     this.sequence += 1;
     for (const listener of this.listeners) {
-      listener(envelope);
+      try {
+        listener(envelope);
+      } catch {
+        // Event consumers are observers. A broken transport/listener must not corrupt Runtime state.
+      }
     }
   }
 
@@ -820,34 +921,27 @@ export class RuntimeService {
     const projection: TurnProjectionState = {
       streamId: undefined,
       text: "",
-      terminalEmitted: false,
+      terminalEvent: undefined,
     };
+    let terminalEvent: NonNullable<TurnProjectionState["terminalEvent"]>;
     try {
       for await (const event of state.session.send(input)) {
         this.projectSessionEvent(state, projection, event);
       }
-      if (!projection.terminalEmitted) {
-        this.emit(state.threadId, state.turnId, { type: "turn.completed" });
-      }
+      terminalEvent = projection.terminalEvent ?? { type: "turn.completed" };
     } catch (error: unknown) {
-      if (!projection.terminalEmitted) {
-        this.emit(state.threadId, state.turnId, {
-          type: "turn.failed",
-          stage: "execute",
-          message: redactSecretText(errorMessage(error)),
-        });
-      }
+      terminalEvent = projection.terminalEvent ?? {
+        type: "turn.failed",
+        stage: "execute",
+        message: redactSecretText(errorMessage(error)),
+      };
     } finally {
       if (this.activeTurns.get(state.threadId) === state) {
         this.activeTurns.delete(state.threadId);
       }
       this.settleTurnOwner(state);
-      for (const [approvalId, pending] of this.pendingApprovals) {
-        if (pending.approval.turnId === state.turnId) {
-          this.pendingApprovals.delete(approvalId);
-        }
-      }
     }
+    this.emitTurnTerminal(state, terminalEvent);
   }
 
   private findTurnOwner(turnId: TurnId, expectedThreadId: ThreadId): ThreadId | undefined {
@@ -921,8 +1015,7 @@ export class RuntimeService {
           streamId,
           text: redactSecretText(event.text || projection.text),
         });
-        this.emit(state.threadId, state.turnId, { type: "turn.completed" });
-        projection.terminalEmitted = true;
+        projection.terminalEvent ??= { type: "turn.completed" };
         return;
       }
       case "reasoning-delta": {
@@ -983,21 +1076,27 @@ export class RuntimeService {
         });
         return;
       }
-      case "turn-cancelled":
-        this.emit(state.threadId, state.turnId, {
-          type: "turn.cancelled",
-          reason: event.reason,
-          message: redactSecretText(event.message),
-        });
-        projection.terminalEmitted = true;
+      case "turn-cancelled": {
+        projection.terminalEvent ??=
+          state.interactionFailure === undefined
+            ? {
+                type: "turn.cancelled",
+                reason: event.reason,
+                message: redactSecretText(event.message),
+              }
+            : {
+                type: "turn.failed",
+                stage: "execute",
+                message: redactSecretText(state.interactionFailure),
+              };
         break;
+      }
       case "error":
-        this.emit(state.threadId, state.turnId, {
+        projection.terminalEvent ??= {
           type: "turn.failed",
           stage: event.stage,
           message: redactSecretText(event.message),
-        });
-        projection.terminalEmitted = true;
+        };
         break;
       case "debug":
       case "reasoning-start":
@@ -1016,5 +1115,84 @@ export class RuntimeService {
         ? { reason: redactSecretText(outcome.reason) }
         : {}),
     };
+  }
+
+  private findPendingApproval(identity: RuntimeApprovalIdentity): PendingApprovalState | undefined {
+    const pending = this.pendingApprovals.get(identity.approvalId);
+    if (
+      pending === undefined ||
+      pending.threadId !== identity.threadId ||
+      pending.approval.turnId !== identity.turnId
+    ) {
+      return undefined;
+    }
+    return pending;
+  }
+
+  private requirePendingApproval(identity: RuntimeApprovalIdentity): PendingApprovalState {
+    const pending = this.findPendingApproval(identity);
+    if (pending === undefined) {
+      throw new RuntimeServiceError(
+        RUNTIME_ERROR_CODES.approvalNotFound,
+        `Approval "${identity.approvalId}" 不存在或已失效`,
+      );
+    }
+    return pending;
+  }
+
+  private emitApprovalResolved(
+    pending: PendingApprovalState,
+    resolution: ApprovalResolution,
+  ): void {
+    this.emit(pending.threadId, pending.approval.turnId, {
+      type: "approval.resolved",
+      approvalId: pending.approval.id,
+      resolution,
+    });
+  }
+
+  private cancelPendingApprovalsForTurn(
+    turnId: TurnId,
+    resolution: Extract<ApprovalResolution, { readonly status: "cancelled" | "expired" }>,
+  ): void {
+    const pendingForTurn = [...this.pendingApprovals.values()].filter(
+      (pending) => pending.approval.turnId === turnId,
+    );
+    let firstListenerError: unknown;
+    for (const pending of pendingForTurn) {
+      try {
+        this.cancelPendingApproval(
+          {
+            threadId: pending.threadId,
+            turnId: pending.approval.turnId,
+            approvalId: pending.approval.id,
+          },
+          resolution,
+        );
+      } catch (error: unknown) {
+        firstListenerError ??= error;
+      }
+    }
+    if (firstListenerError !== undefined) {
+      throw firstListenerError;
+    }
+  }
+
+  private emitTurnTerminal(
+    state: ActiveTurnState,
+    event: Extract<
+      RuntimeEvent,
+      {
+        readonly type: "turn.completed" | "turn.cancelled" | "turn.failed";
+      }
+    >,
+  ): void {
+    this.cancelPendingApprovalsForTurn(
+      state.turnId,
+      event.type === "turn.cancelled" && event.reason === "timeout"
+        ? { status: "expired", reason: "Turn 已超时" }
+        : { status: "cancelled", reason: `Turn 已终止：${event.type}` },
+    );
+    this.emit(state.threadId, state.turnId, event);
   }
 }

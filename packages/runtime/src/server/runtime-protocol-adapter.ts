@@ -2,37 +2,99 @@ import {
   RUNTIME_ERROR_CODES,
   RUNTIME_EVENT_NOTIFICATION,
   RUNTIME_METHODS,
+  RUNTIME_SERVER_REQUEST_METHODS,
+  getRuntimeProtocolCapabilities,
   isRuntimeMethod,
   runtimeMethodSchemas,
-  type JsonRpcRequest,
+  type ApprovalResolution,
+  type RuntimeEventEnvelope,
   type RuntimeMethod,
+  type RuntimeProtocolVersion,
 } from "@roll-agent/protocol";
-import { RuntimeService, RuntimeServiceError } from "../service/runtime-service.ts";
-import type { JsonRpcConnection } from "./protocol.ts";
+import {
+  RuntimeService,
+  RuntimeServiceError,
+  type RuntimeApprovalDecision,
+  type RuntimeApprovalIdentity,
+} from "../service/runtime-service.ts";
+import {
+  RuntimeClientRequestCancelledError,
+  RuntimeClientRequestCoordinator,
+  RuntimeClientRequestExpiredError,
+  createRuntimeClientResponderId,
+  type RuntimeClientRequest,
+  type RuntimeClientResponderId,
+} from "./runtime-client-request-coordinator.ts";
+import type { JsonRpcConnection, JsonRpcMessage, JsonRpcRequest } from "./protocol.ts";
+
+const CLIENT_APPROVAL_FAILURE_REASON = "客户端未完成审批请求，Runtime 已终止当前 Turn";
+const ACTIVE_RUNTIME_PROTOCOL_SERVICES = new WeakSet<RuntimeService>();
+
+function approvalResolutionReason(resolution: ApprovalResolution): string {
+  switch (resolution.status) {
+    case "resolved":
+      return resolution.decision === "approve" ? "审批已批准" : "审批已拒绝";
+    case "cancelled":
+      return resolution.reason;
+    case "expired":
+      return resolution.reason ?? "审批已到期";
+  }
+}
 
 export class RuntimeProtocolAdapter {
   private readonly service: RuntimeService;
   private readonly connection: JsonRpcConnection;
+  private readonly clientRequests: RuntimeClientRequestCoordinator;
+  private readonly responderId: RuntimeClientResponderId;
   private readonly unsubscribe: () => void;
+  private readonly settlementTasks = new Set<Promise<void>>();
+  private detachResponder: (() => void) | undefined;
   private initialized = false;
+  private closing = false;
+  private transportFailed = false;
+  private controlsService = false;
+  private protocolVersion: RuntimeProtocolVersion | undefined;
+  private eventSequence = 0;
+  private closePromise: Promise<void> | undefined;
 
-  constructor(service: RuntimeService, connection: JsonRpcConnection) {
+  constructor(
+    service: RuntimeService,
+    connection: JsonRpcConnection,
+    clientRequests: RuntimeClientRequestCoordinator,
+  ) {
+    if (ACTIVE_RUNTIME_PROTOCOL_SERVICES.has(service)) {
+      throw new RuntimeServiceError(
+        RUNTIME_ERROR_CODES.capabilityUnavailable,
+        "当前 RuntimeService 已绑定 Runtime Protocol Adapter",
+      );
+    }
+    ACTIVE_RUNTIME_PROTOCOL_SERVICES.add(service);
+    this.controlsService = true;
     this.service = service;
     this.connection = connection;
-    this.unsubscribe = service.onEvent((event) => {
-      if (!this.initialized) {
-        return;
-      }
-      this.connection.send({
-        jsonrpc: "2.0",
-        method: RUNTIME_EVENT_NOTIFICATION,
-        params: event,
-      });
-    });
+    this.clientRequests = clientRequests;
+    this.responderId = createRuntimeClientResponderId();
+    try {
+      this.unsubscribe = service.onEvent((event) => this.handleServiceEvent(event));
+    } catch (error: unknown) {
+      this.releaseServiceControl();
+      throw error;
+    }
   }
 
   handles(method: string): method is RuntimeMethod {
     return isRuntimeMethod(method);
+  }
+
+  handleResponse(message: JsonRpcMessage): boolean {
+    if (
+      this.protocolVersion === undefined ||
+      !getRuntimeProtocolCapabilities(this.protocolVersion).serverRequests ||
+      this.detachResponder === undefined
+    ) {
+      return false;
+    }
+    return this.clientRequests.handleResponse(this.responderId, message);
   }
 
   async dispatch(request: JsonRpcRequest): Promise<unknown> {
@@ -43,8 +105,23 @@ export class RuntimeProtocolAdapter {
       );
     }
     if (request.method === RUNTIME_METHODS.initialize) {
+      if (this.initialized) {
+        throw new RuntimeServiceError(
+          RUNTIME_ERROR_CODES.capabilityUnavailable,
+          "当前连接已完成 initialize，不能重新协商 Runtime Protocol",
+        );
+      }
       const params = runtimeMethodSchemas[RUNTIME_METHODS.initialize].params.parse(request.params);
       const result = this.service.initialize(params);
+      this.protocolVersion = result.protocolVersion;
+      if (getRuntimeProtocolCapabilities(result.protocolVersion).serverRequests) {
+        this.detachResponder = this.clientRequests.attachResponder({
+          id: this.responderId,
+          scopeId: result.runtimeInstanceId,
+          send: (message) => this.connection.send(message),
+          close: () => this.connection.close(),
+        });
+      }
       this.initialized = true;
       return result;
     }
@@ -52,6 +129,16 @@ export class RuntimeProtocolAdapter {
       throw new RuntimeServiceError(
         RUNTIME_ERROR_CODES.initializeRequired,
         "调用 Runtime Protocol 方法前必须先完成 initialize",
+      );
+    }
+    if (
+      request.method === RUNTIME_METHODS.approvalRespond &&
+      this.protocolVersion !== undefined &&
+      !getRuntimeProtocolCapabilities(this.protocolVersion).clientApprovalResponses
+    ) {
+      throw new RuntimeServiceError(
+        RUNTIME_ERROR_CODES.capabilityUnavailable,
+        "当前协商协议的审批只能通过 approval.request 响应完成",
       );
     }
 
@@ -108,7 +195,180 @@ export class RuntimeProtocolAdapter {
   }
 
   async close(): Promise<void> {
+    this.closePromise ??= this.performClose();
+    await this.closePromise;
+  }
+
+  disposeConstructionFailure(): void {
+    this.closing = true;
     this.unsubscribe();
-    await this.service.close();
+    this.releaseServiceControl();
+  }
+
+  releaseServiceControl(): void {
+    if (!this.controlsService) {
+      return;
+    }
+    ACTIVE_RUNTIME_PROTOCOL_SERVICES.delete(this.service);
+    this.controlsService = false;
+  }
+
+  private async performClose(): Promise<void> {
+    this.closing = true;
+    this.detachResponder?.();
+    this.detachResponder = undefined;
+    while (this.settlementTasks.size > 0) {
+      await Promise.allSettled([...this.settlementTasks]);
+    }
+    this.unsubscribe();
+  }
+
+  private handleServiceEvent(envelope: RuntimeEventEnvelope): void {
+    if (!this.initialized || this.closing || this.protocolVersion === undefined) {
+      return;
+    }
+    const capabilities = getRuntimeProtocolCapabilities(this.protocolVersion);
+    if (capabilities.serverRequests && envelope.event.type === "approval.resolved") {
+      this.clientRequests.cancel(
+        envelope.event.approvalId,
+        approvalResolutionReason(envelope.event.resolution),
+      );
+    }
+    if (capabilities.serverRequests && envelope.event.type === "approval.required") {
+      this.requestApproval(envelope.threadId, envelope.event.approval);
+    }
+    this.sendEvent(envelope);
+  }
+
+  private sendEvent(envelope: RuntimeEventEnvelope): void {
+    if (this.protocolVersion === undefined) {
+      return;
+    }
+    if (
+      !getRuntimeProtocolCapabilities(this.protocolVersion).approvalResolvedEvents &&
+      envelope.event.type === "approval.resolved"
+    ) {
+      return;
+    }
+    const projected: RuntimeEventEnvelope = {
+      ...envelope,
+      protocolVersion: this.protocolVersion,
+      sequence: Math.max(this.eventSequence, envelope.sequence),
+    };
+    this.eventSequence = projected.sequence + 1;
+    try {
+      this.connection.send({
+        jsonrpc: "2.0",
+        method: RUNTIME_EVENT_NOTIFICATION,
+        params: projected,
+      });
+    } catch {
+      this.closeBrokenTransport();
+    }
+  }
+
+  private closeBrokenTransport(): void {
+    if (this.closing) {
+      return;
+    }
+    this.transportFailed = true;
+    this.closing = true;
+    this.detachResponder?.();
+    this.detachResponder = undefined;
+    this.unsubscribe();
+    try {
+      this.connection.close();
+    } catch {
+      // The write already proved the transport unusable; local state is detached above.
+    }
+  }
+
+  private requestApproval(
+    threadId: RuntimeApprovalIdentity["threadId"],
+    approval: Extract<
+      RuntimeEventEnvelope["event"],
+      { readonly type: "approval.required" }
+    >["approval"],
+  ): void {
+    const identity: RuntimeApprovalIdentity = {
+      threadId,
+      turnId: approval.turnId,
+      approvalId: approval.id,
+    };
+    let request:
+      | RuntimeClientRequest<typeof RUNTIME_SERVER_REQUEST_METHODS.approvalRequest>
+      | undefined;
+    try {
+      request = this.clientRequests.request(
+        RUNTIME_SERVER_REQUEST_METHODS.approvalRequest,
+        {
+          threadId,
+          approval,
+        },
+        {
+          key: approval.id,
+          scopeId: this.service.runtimeInstanceId,
+          eligibleResponderId: this.responderId,
+          approvalId: approval.id,
+          threadId,
+          turnId: approval.turnId,
+        },
+      );
+    } catch {
+      const task = Promise.resolve()
+        .then(() =>
+          this.service.failPendingApprovalInteraction(identity, CLIENT_APPROVAL_FAILURE_REASON),
+        )
+        .then(() => undefined);
+      this.trackSettlement(task);
+      return;
+    }
+    const task = request.result.then(
+      async (result) => {
+        const decision: RuntimeApprovalDecision =
+          result.decision === "approve"
+            ? { decision: "approve" }
+            : {
+                decision: "reject",
+                ...(result.reason !== undefined ? { reason: result.reason } : {}),
+              };
+        try {
+          this.service.resolvePendingApproval(identity, decision);
+        } catch (error: unknown) {
+          if (
+            !(error instanceof RuntimeServiceError) ||
+            error.rollCode !== RUNTIME_ERROR_CODES.approvalNotFound
+          ) {
+            await this.service.failPendingApprovalInteraction(
+              identity,
+              CLIENT_APPROVAL_FAILURE_REASON,
+            );
+          }
+        }
+      },
+      async (error: unknown) => {
+        if (this.closing && !this.transportFailed) {
+          return;
+        }
+        if (error instanceof RuntimeClientRequestExpiredError) {
+          await this.service.failPendingApprovalInteraction(identity, "审批请求已到期", {
+            status: "expired",
+            reason: "审批请求已到期",
+          });
+          return;
+        }
+        const reason =
+          error instanceof RuntimeClientRequestCancelledError
+            ? error.reason
+            : CLIENT_APPROVAL_FAILURE_REASON;
+        await this.service.failPendingApprovalInteraction(identity, reason);
+      },
+    );
+    this.trackSettlement(task);
+  }
+
+  private trackSettlement(task: Promise<void>): void {
+    this.settlementTasks.add(task);
+    task.finally(() => this.settlementTasks.delete(task)).catch(() => undefined);
   }
 }

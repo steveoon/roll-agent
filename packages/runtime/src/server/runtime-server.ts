@@ -1,9 +1,14 @@
 import type { ConversationEngine } from "../engine/conversation-engine.ts";
-import { jsonValueSchema, type RuntimeProtocolErrorData } from "@roll-agent/protocol";
+import {
+  RUNTIME_ERROR_CODES,
+  jsonValueSchema,
+  type RuntimeProtocolErrorData,
+} from "@roll-agent/protocol";
 import type { AgentSession } from "../engine/agent-session.ts";
 import { createSafeCapabilitySnapshot } from "../engine/capability-manifest.ts";
 import { isPersistedToolExecutionRecord } from "../tool-bridge/tool-execution-record.ts";
 import { RuntimeServiceError, type RuntimeService } from "../service/runtime-service.ts";
+import { RuntimeClientRequestCoordinator } from "./runtime-client-request-coordinator.ts";
 import { RuntimeProtocolAdapter } from "./runtime-protocol-adapter.ts";
 import {
   EVENT_NOTIFICATION,
@@ -30,6 +35,7 @@ function errorMessage(error: unknown): string {
 }
 
 class MethodNotFoundError extends Error {}
+class RuntimeTransportWriteError extends Error {}
 
 function isValidationError(error: unknown): boolean {
   return (
@@ -99,9 +105,24 @@ export interface RuntimeServerOptions {
   readonly authorizeRawToolEvidence?: (
     request: RawToolEvidenceAccessRequest,
   ) => boolean | Promise<boolean>;
-  /** Versioned public Runtime Protocol adapter. Legacy `session.*` remains available. */
+  /**
+   * Versioned public Runtime Protocol adapter. Legacy `session.*` remains available on legacy
+   * connections, but a connection cannot mix the two protocol families.
+   */
   readonly runtimeService?: RuntimeService;
+  /** Optional service-lifetime coordinator injected into this service's single control adapter. */
+  readonly runtimeClientRequests?: RuntimeClientRequestCoordinator;
 }
+
+const CONNECTION_MODES = {
+  unselected: "unselected",
+  legacy: "legacy",
+  runtime: "runtime",
+} as const;
+
+type ConnectionMode = (typeof CONNECTION_MODES)[keyof typeof CONNECTION_MODES];
+
+const LEGACY_METHODS = new Set<string>(Object.values(RpcMethod));
 
 /**
  * JSON-RPC host for trusted local transports.
@@ -118,7 +139,11 @@ export class RuntimeServer {
     | RuntimeServerOptions["authorizeRawToolEvidence"]
     | undefined;
   private readonly sessions = new Map<string, AgentSession>();
+  private readonly runtimeService: RuntimeService | undefined;
+  private readonly runtimeClientRequests: RuntimeClientRequestCoordinator | undefined;
   private readonly protocolAdapter: RuntimeProtocolAdapter | undefined;
+  private connectionMode: ConnectionMode = CONNECTION_MODES.unselected;
+  private abortPromise: Promise<void> | undefined;
 
   constructor(
     engine: ConversationEngine,
@@ -128,38 +153,101 @@ export class RuntimeServer {
     this.engine = engine;
     this.connection = connection;
     this.authorizeRawToolEvidence = options.authorizeRawToolEvidence;
-    this.protocolAdapter =
+    this.runtimeService = options.runtimeService;
+    this.runtimeClientRequests =
       options.runtimeService === undefined
         ? undefined
-        : new RuntimeProtocolAdapter(options.runtimeService, connection);
-    this.connection.onMessage((message) => this.handleMessage(message));
+        : (options.runtimeClientRequests ?? new RuntimeClientRequestCoordinator());
+    this.protocolAdapter =
+      options.runtimeService === undefined || this.runtimeClientRequests === undefined
+        ? undefined
+        : new RuntimeProtocolAdapter(
+            options.runtimeService,
+            connection,
+            this.runtimeClientRequests,
+          );
+    try {
+      this.connection.onMessage((message) => this.handleMessage(message));
+    } catch (error: unknown) {
+      this.protocolAdapter?.disposeConstructionFailure();
+      throw error;
+    }
   }
 
   async abortAll(): Promise<void> {
+    this.abortPromise ??= this.performAbortAll();
+    await this.abortPromise;
+  }
+
+  private async performAbortAll(): Promise<void> {
     const sessions = [...this.sessions.values()];
     this.sessions.clear();
-    await Promise.all([
-      ...sessions.map((session) => session.close()),
-      ...(this.protocolAdapter === undefined ? [] : [this.protocolAdapter.close()]),
-    ]);
+    const protocolClose = this.protocolAdapter?.close();
+    this.runtimeClientRequests?.cancelAll("Runtime Server 已关闭");
+    try {
+      await Promise.all([
+        ...sessions.map((session) => session.close()),
+        ...(protocolClose === undefined ? [] : [protocolClose]),
+        ...(this.runtimeService === undefined ? [] : [this.runtimeService.close()]),
+      ]);
+    } finally {
+      this.protocolAdapter?.releaseServiceControl();
+    }
   }
 
   private handleMessage(message: JsonRpcMessage): void {
+    if (this.protocolAdapter?.handleResponse(message) === true) {
+      return;
+    }
     if (!isRequest(message)) {
       return;
     }
     const isRuntimeProtocolRequest = this.protocolAdapter?.handles(message.method) === true;
-    this.dispatch(message)
-      .then((result) => {
-        this.connection.send({ jsonrpc: "2.0", id: message.id, result });
-      })
-      .catch((error: unknown) => {
-        this.connection.send({
+    try {
+      this.selectConnectionMode(message.method, isRuntimeProtocolRequest);
+    } catch (error: unknown) {
+      this.sendOrClose({
+        jsonrpc: "2.0",
+        id: message.id,
+        error: toJsonRpcError(error, isRuntimeProtocolRequest),
+      });
+      return;
+    }
+    this.dispatch(message).then(
+      (result) => {
+        this.sendOrClose({ jsonrpc: "2.0", id: message.id, result });
+      },
+      (error: unknown) => {
+        if (error instanceof RuntimeTransportWriteError) {
+          return;
+        }
+        this.sendOrClose({
           jsonrpc: "2.0",
           id: message.id,
           error: toJsonRpcError(error, isRuntimeProtocolRequest),
         });
-      });
+      },
+    );
+  }
+
+  private sendOrClose(message: JsonRpcMessage): boolean {
+    try {
+      this.connection.send(message);
+      return true;
+    } catch {
+      try {
+        this.connection.close();
+      } catch {
+        // The transport is already unusable; there is no further response path.
+      }
+      return false;
+    }
+  }
+
+  private sendNotificationOrThrow(message: JsonRpcMessage): void {
+    if (!this.sendOrClose(message)) {
+      throw new RuntimeTransportWriteError("Runtime transport write failed");
+    }
   }
 
   private requireSession(sessionId: string): AgentSession {
@@ -168,6 +256,29 @@ export class RuntimeServer {
       throw new Error(`Session "${sessionId}" 不存在`);
     }
     return session;
+  }
+
+  private selectConnectionMode(method: string, isRuntimeProtocolRequest: boolean): void {
+    if (isRuntimeProtocolRequest) {
+      if (this.connectionMode === CONNECTION_MODES.legacy) {
+        throw new RuntimeServiceError(
+          RUNTIME_ERROR_CODES.capabilityUnavailable,
+          "当前连接已选择 legacy session.* 协议，不能切换到 Runtime Protocol",
+        );
+      }
+      this.connectionMode = CONNECTION_MODES.runtime;
+      return;
+    }
+    if (!LEGACY_METHODS.has(method)) {
+      return;
+    }
+    if (this.connectionMode === CONNECTION_MODES.runtime) {
+      throw new RuntimeServiceError(
+        RUNTIME_ERROR_CODES.capabilityUnavailable,
+        "当前连接已选择 Runtime Protocol，不能调用 legacy session.* 方法",
+      );
+    }
+    this.connectionMode = CONNECTION_MODES.legacy;
   }
 
   private async dispatch(request: JsonRpcRequest): Promise<unknown> {
@@ -193,7 +304,7 @@ export class RuntimeServer {
         const params = sendParamsSchema.parse(request.params);
         const session = this.requireSession(params.sessionId);
         for await (const event of session.send(params.input)) {
-          this.connection.send({
+          this.sendNotificationOrThrow({
             jsonrpc: "2.0",
             method: EVENT_NOTIFICATION,
             params: { sessionId: params.sessionId, event },
@@ -283,7 +394,7 @@ export class RuntimeServer {
         const params = compactParamsSchema.parse(request.params);
         const session = this.requireSession(params.sessionId);
         for await (const event of session.compact("manual")) {
-          this.connection.send({
+          this.sendNotificationOrThrow({
             jsonrpc: "2.0",
             method: EVENT_NOTIFICATION,
             params: { sessionId: params.sessionId, event },

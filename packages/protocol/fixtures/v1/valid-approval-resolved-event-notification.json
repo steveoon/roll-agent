@@ -1,0 +1,21 @@
+{
+  "jsonrpc": "2.0",
+  "method": "runtime.event",
+  "params": {
+    "protocolVersion": "1.1",
+    "runtimeInstanceId": "00000000-0000-4000-8000-000000000001",
+    "sequence": 8,
+    "timestamp": "2026-07-29T12:00:00.000Z",
+    "threadId": "00000000-0000-4000-8000-000000000002",
+    "turnId": "00000000-0000-4000-8000-000000000003",
+    "event": {
+      "type": "approval.resolved",
+      "approvalId": "00000000-0000-4000-8000-000000000005",
+      "resolution": {
+        "status": "resolved",
+        "decision": "reject",
+        "reason": "用户取消"
+      }
+    }
+  }
+}
