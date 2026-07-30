@@ -11,14 +11,41 @@ function leaseKey(lease: CompanionLease): string {
   return `${lease.kind}:${lease.id}`;
 }
 
+interface CompanionLeaseAttachment {
+  readonly lease: CompanionLease;
+  readonly previous: CompanionLeaseAttachment | undefined;
+  released: boolean;
+}
+
 export class WorkspaceLeaseManager {
-  private readonly leases = new Map<string, CompanionLease>();
+  private readonly leases = new Map<string, CompanionLeaseAttachment>();
 
   acquire(lease: CompanionLease): () => void {
     const key = leaseKey(lease);
-    this.leases.set(key, lease);
+    const attachment: CompanionLeaseAttachment = {
+      lease,
+      previous: this.leases.get(key),
+      released: false,
+    };
+    this.leases.set(key, attachment);
     return () => {
-      this.leases.delete(key);
+      if (attachment.released) {
+        return;
+      }
+      attachment.released = true;
+      if (this.leases.get(key) !== attachment) {
+        return;
+      }
+
+      let replacement = attachment.previous;
+      while (replacement?.released === true) {
+        replacement = replacement.previous;
+      }
+      if (replacement === undefined) {
+        this.leases.delete(key);
+      } else {
+        this.leases.set(key, replacement);
+      }
     };
   }
 
@@ -39,6 +66,6 @@ export class WorkspaceLeaseManager {
   }
 
   list(): readonly CompanionLease[] {
-    return [...this.leases.values()];
+    return [...this.leases.values()].map((attachment) => attachment.lease);
   }
 }

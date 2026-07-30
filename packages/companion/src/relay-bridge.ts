@@ -1,15 +1,20 @@
 import { createHash, randomUUID } from "node:crypto";
 import { RollRpcError } from "@roll-agent/client-node";
+import { jsonValueSchema, type JsonValue, type RuntimeEventEnvelope } from "@roll-agent/protocol";
 import {
-  RUNTIME_METHODS,
-  jsonValueSchema,
-  type JsonValue,
-  type RuntimeEventEnvelope,
-  type RuntimeMethod,
-} from "@roll-agent/protocol";
-import { CompanionWorkspace } from "./companion-workspace.ts";
+  CompanionWorkspace,
+  InvalidRelayRequestParamsError,
+  LocalApprovalDeniedError,
+  LocalConfirmationRequiredError,
+} from "./companion-workspace.ts";
 import {
   COMPANION_RELAY_PROTOCOL_VERSION,
+  RELAY_ERROR_CODES,
+  canonicalizeRelayJson,
+  classifyRelayAck,
+  getRelayErrorRetryability,
+  isRelayMutationRequestMethod,
+  relayEnvelopeIdSchema,
   relayMessageSchema,
   relayRuntimeRequestSchema,
   type DeviceId,
@@ -18,12 +23,16 @@ import {
   type RelayRuntimeRequest,
   type RelayRuntimeResponse,
   type WorkspaceId,
-} from "./relay-protocol.ts";
+} from "@roll-agent/relay-protocol";
 
 export interface RelayTransport {
   send(message: RelayMessage): void | Promise<void>;
   onMessage(listener: (message: unknown) => void): () => void;
   onClose(listener: () => void): () => void;
+  /**
+   * Closes the transport and must eventually notify every currently registered
+   * `onClose` listener. `OutboundCompanionRelay` uses that notification to reconnect.
+   */
   close(): void;
 }
 
@@ -57,33 +66,27 @@ interface RelayTransportGeneration {
 
 const DEFAULT_MAX_REQUEST_CACHE_ENTRIES = 10_000;
 const RELAY_ENCRYPTION_REQUIRED_ERROR = {
-  code: "RELAY_ENCRYPTION_REQUIRED",
+  code: RELAY_ERROR_CODES.encryptionRequired,
   message: "Encrypted Relay request required for this workspace",
-  retryable: false,
+  retryable: getRelayErrorRetryability(RELAY_ERROR_CODES.encryptionRequired),
 } as const;
-const MUTATION_RUNTIME_METHODS = new Set<RuntimeMethod>([
-  RUNTIME_METHODS.threadCreate,
-  RUNTIME_METHODS.threadRename,
-  RUNTIME_METHODS.threadDelete,
-  RUNTIME_METHODS.threadDetach,
-  RUNTIME_METHODS.turnStart,
-  RUNTIME_METHODS.turnCancel,
-  RUNTIME_METHODS.approvalRespond,
-]);
-
 function relayRequestFingerprint(request: RelayRuntimeRequest): string {
-  return createHash("sha256")
-    .update(
-      JSON.stringify({
-        workspaceId: request.workspaceId,
-        method: request.method,
-        params: request.params,
-      }),
-    )
-    .digest("hex");
+  const identity: JsonValue = {
+    workspaceId: request.workspaceId,
+    method: request.method,
+    params: request.params,
+  };
+  return createHash("sha256").update(canonicalizeRelayJson(identity)).digest("hex");
 }
 
 function toRelayError(error: unknown): NonNullable<RelayRuntimeResponse["error"]> {
+  if (error instanceof InvalidRelayRequestParamsError) {
+    return {
+      code: RELAY_ERROR_CODES.invalidParams,
+      message: "Invalid Relay request params",
+      retryable: getRelayErrorRetryability(RELAY_ERROR_CODES.invalidParams),
+    };
+  }
   if (error instanceof RollRpcError) {
     return {
       code: error.data?.rollCode ?? `JSON_RPC_${String(error.code)}`,
@@ -91,10 +94,24 @@ function toRelayError(error: unknown): NonNullable<RelayRuntimeResponse["error"]
       retryable: error.data?.retryable ?? false,
     };
   }
+  if (
+    error instanceof LocalApprovalDeniedError ||
+    error instanceof LocalConfirmationRequiredError
+  ) {
+    const code =
+      error instanceof LocalApprovalDeniedError
+        ? RELAY_ERROR_CODES.localApprovalDenied
+        : RELAY_ERROR_CODES.localConfirmationRequired;
+    return {
+      code,
+      message: error.message,
+      retryable: getRelayErrorRetryability(code),
+    };
+  }
   return {
-    code: error instanceof Error ? error.name : "COMPANION_ERROR",
-    message: error instanceof Error ? error.message : String(error),
-    retryable: false,
+    code: RELAY_ERROR_CODES.companionError,
+    message: "Companion request failed",
+    retryable: getRelayErrorRetryability(RELAY_ERROR_CODES.companionError),
   };
 }
 
@@ -204,8 +221,20 @@ export class CompanionRelayBridge {
         }
       })
       .catch(() => {
-        // The event remains in the workspace buffer and is replayed after reconnect.
+        this.failTransportGeneration(generation);
       });
+  }
+
+  private failTransportGeneration(generation: RelayTransportGeneration): void {
+    if (this.transportGeneration !== generation) {
+      return;
+    }
+    this.releaseCurrentTransport();
+    try {
+      generation.transport.close();
+    } catch {
+      // The failed generation is already detached; a later explicit connect can recover.
+    }
   }
 
   private async handleMessage(
@@ -244,9 +273,9 @@ export class CompanionRelayBridge {
           requestId: message.requestId,
           workspaceId: message.workspaceId,
           error: {
-            code: "ENCRYPTED_PAYLOAD_INVALID",
+            code: RELAY_ERROR_CODES.encryptedPayloadInvalid,
             message: "Encrypted Relay payload could not be authenticated or parsed",
-            retryable: false,
+            retryable: getRelayErrorRetryability(RELAY_ERROR_CODES.encryptedPayloadInvalid),
           },
         });
       }
@@ -254,14 +283,16 @@ export class CompanionRelayBridge {
     }
     if (message.type === "runtime.ack") {
       const workspace = this.workspaces.get(message.workspaceId);
-      if (
-        workspace === undefined ||
-        message.throughRelaySequence > (generation.advertisedThrough.get(message.workspaceId) ?? -1)
-      ) {
+      if (workspace === undefined) {
         return;
       }
       const current = this.acknowledged.get(message.workspaceId) ?? -1;
-      if (message.throughRelaySequence > current) {
+      const disposition = classifyRelayAck({
+        acknowledgedThrough: current,
+        advertisedThrough: generation.advertisedThrough.get(message.workspaceId) ?? -1,
+        incomingThrough: message.throughRelaySequence,
+      });
+      if (disposition === "advance") {
         this.acknowledged.set(message.workspaceId, message.throughRelaySequence);
         workspace.acknowledge(message.throughRelaySequence);
       }
@@ -286,9 +317,9 @@ export class CompanionRelayBridge {
         requestId: message.requestId,
         workspaceId: message.workspaceId,
         error: {
-          code: "WORKSPACE_NOT_FOUND",
+          code: RELAY_ERROR_CODES.workspaceNotFound,
           message: "The requested workspace is not paired with this Companion",
-          retryable: false,
+          retryable: getRelayErrorRetryability(RELAY_ERROR_CODES.workspaceNotFound),
         },
       });
       return;
@@ -319,13 +350,13 @@ export class CompanionRelayBridge {
         requestId: request.requestId,
         workspaceId: request.workspaceId,
         error: {
-          code: "RELAY_REQUEST_ID_CONFLICT",
+          code: RELAY_ERROR_CODES.requestIdConflict,
           message: "Relay requestId was reused with different method or params",
-          retryable: false,
+          retryable: getRelayErrorRetryability(RELAY_ERROR_CODES.requestIdConflict),
         },
       });
     }
-    if (!MUTATION_RUNTIME_METHODS.has(request.method)) {
+    if (!isRelayMutationRequestMethod(request.method)) {
       return this.executeRuntimeRequest(request, workspace);
     }
     const fingerprint = relayRequestFingerprint(request);
@@ -403,7 +434,7 @@ export class CompanionRelayBridge {
       await generation.transport.send({
         type: "runtime.encrypted",
         workspaceId,
-        envelopeId: randomUUID(),
+        envelopeId: relayEnvelopeIdSchema.parse(randomUUID()),
         payloadKind: "event",
         relaySequence,
         algorithm: cipher.algorithm,
@@ -432,7 +463,7 @@ export class CompanionRelayBridge {
       await generation.transport.send({
         type: "runtime.encrypted",
         workspaceId: response.workspaceId,
-        envelopeId: randomUUID(),
+        envelopeId: relayEnvelopeIdSchema.parse(randomUUID()),
         payloadKind: "response",
         requestId: response.requestId,
         algorithm: cipher.algorithm,

@@ -127,6 +127,9 @@ importers:
       '@roll-agent/protocol':
         specifier: workspace:*
         version: link:../protocol
+      '@roll-agent/relay-protocol':
+        specifier: workspace:*
+        version: link:../relay-protocol
       zod:
         specifier: 3.25.76
         version: 3.25.76

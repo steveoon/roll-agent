@@ -1,8 +1,11 @@
 export {
   COMPANION_RELAY_PROTOCOL_VERSION,
+  RELAY_REQUEST_METHODS,
   deviceIdSchema,
   workspaceIdSchema,
   relayRequestIdSchema,
+  relayApprovalCandidateParamsSchema,
+  relayApprovalCandidateResultSchema,
   relayDeviceConnectSchema,
   relayRuntimeRequestSchema,
   relayRuntimeResponseSchema,
@@ -16,6 +19,10 @@ export type {
   DeviceId,
   WorkspaceId,
   RelayRequestId,
+  RelayRequestMethod,
+  RelayApprovalCandidateInput,
+  RelayApprovalCandidateParams,
+  RelayApprovalCandidateResult,
   RelayMessage,
   RelayRuntimeRequest,
   RelayRuntimeResponse,
@@ -37,8 +44,11 @@ export type {
 export { COMPANION_LEASE_KINDS, WorkspaceLeaseManager } from "./lease-manager.ts";
 export type { CompanionLease, CompanionLeaseKind } from "./lease-manager.ts";
 export {
+  CompanionApprovalRequestBroker,
   CompanionWorkspace,
+  InvalidRelayRequestParamsError,
   LOCAL_APPROVAL_DECISIONS,
+  localApprovalDecisionSchema,
   LocalApprovalDeniedError,
   LocalConfirmationRequiredError,
   isRollNodeClient,
@@ -62,4 +72,5 @@ export type {
   CompanionWorkspaceOptions,
   LocalApprovalDecision,
   LocalApprovalPolicy,
+  LocalApprovalPolicyContext,
 } from "./companion-workspace.ts";
