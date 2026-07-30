@@ -127,6 +127,9 @@ importers:
       '@roll-agent/protocol':
         specifier: workspace:*
         version: link:../protocol
+      '@roll-agent/relay-protocol':
+        specifier: workspace:*
+        version: link:../relay-protocol
       zod:
         specifier: 3.25.76
         version: 3.25.76
@@ -247,6 +250,34 @@ importers:
       '@types/node':
         specifier: ^22.0.0
         version: 22.19.15
+      ajv:
+        specifier: 8.18.0
+        version: 8.18.0
+      ajv-formats:
+        specifier: 3.0.1
+        version: 3.0.1(ajv@8.18.0)
+
+  packages/relay-protocol:
+    dependencies:
+      '@roll-agent/protocol':
+        specifier: workspace:*
+        version: link:../protocol
+      zod:
+        specifier: 3.25.76
+        version: 3.25.76
+    devDependencies:
+      '@types/node':
+        specifier: ^22.0.0
+        version: 22.19.15
+      ajv:
+        specifier: 8.18.0
+        version: 8.18.0
+      ajv-formats:
+        specifier: 3.0.1
+        version: 3.0.1(ajv@8.18.0)
+      prettier:
+        specifier: 3.8.1
+        version: 3.8.1
 
   packages/reply-authority-client:
     dependencies:

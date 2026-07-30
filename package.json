@@ -9,8 +9,10 @@
   "scripts": {
     "dev": "node --disable-warning=ExperimentalWarning --experimental-strip-types --experimental-sqlite packages/core/src/cli/index.ts",
     "build": "pnpm -r run build",
+    "build:example:electron": "node examples/electron-runtime-client/esbuild.mjs",
     "security:audit": "pnpm audit --audit-level high",
     "verify:dependency-denylist": "node scripts/verify-dependency-denylist.mjs",
+    "verify:example:electron": "pnpm build:example:electron && node examples/electron-runtime-client/verify-build.mjs",
     "verify:published-packages": "pnpm verify:dependency-denylist && node scripts/verify-published-packages.mjs",
     "typecheck": "pnpm -r run typecheck",
     "test": "pnpm -r run test",

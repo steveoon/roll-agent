@@ -1,0 +1,37 @@
+:root {
+  color-scheme: light dark;
+  font-family: system-ui, sans-serif;
+}
+
+body {
+  margin: 1.5rem;
+}
+
+#chat-form {
+  display: flex;
+  gap: 0.5rem;
+}
+
+#message {
+  flex: 1;
+}
+
+#output {
+  white-space: pre-wrap;
+}
+
+#approval-dialog {
+  max-width: min(36rem, calc(100vw - 3rem));
+}
+
+#approval-preview {
+  max-height: 40vh;
+  overflow: auto;
+  white-space: pre-wrap;
+}
+
+.approval-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.5rem;
+}

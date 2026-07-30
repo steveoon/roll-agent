@@ -1,0 +1,7 @@
+{
+  "jsonrpc": "2.0",
+  "id": "approval-rpc-1",
+  "result": {
+    "decision": "defer"
+  }
+}

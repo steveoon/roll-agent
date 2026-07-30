@@ -1,0 +1,13 @@
+{
+  "type": "runtime.encrypted",
+  "workspaceId": "00000000-0000-4000-8000-000000000507",
+  "envelopeId": "00000000-0000-4000-8000-000000000508",
+  "payloadKind": "request",
+  "requestId": "00000000-0000-4000-8000-000000000505",
+  "algorithm": "example-aead",
+  "nonce": "opaque-nonce",
+  "ciphertext": "opaque-ciphertext",
+  "plaintext": {
+    "secret": "must-not-be-visible"
+  }
+}

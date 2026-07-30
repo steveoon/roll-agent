@@ -244,7 +244,13 @@ export async function runServer(config: RollConfig): Promise<void> {
   const modelName = llmStatus.model;
 
   const runtime = await loadRuntime();
-  const { RuntimeService, ThreadStore, RuntimeServer, createStdioConnection } = runtime;
+  const {
+    RuntimeClientRequestCoordinator,
+    RuntimeService,
+    ThreadStore,
+    RuntimeServer,
+    createStdioConnection,
+  } = runtime;
   const { model, providerOptions, structuredOutputProviderOptions, structuredOutputReasoning } =
     resolveChatLlmCalls(
       provider,
@@ -277,7 +283,11 @@ export async function runServer(config: RollConfig): Promise<void> {
       serverVersion: "1.0",
       runtimeVersion: getCurrentVersion(),
     });
-    const server = new RuntimeServer(activeEngine, connection, { runtimeService });
+    const runtimeClientRequests = new RuntimeClientRequestCoordinator();
+    const server = new RuntimeServer(activeEngine, connection, {
+      runtimeService,
+      runtimeClientRequests,
+    });
 
     connection.onClose(() => {
       server

@@ -100,6 +100,20 @@ export type {
 export { ApprovalGate } from "./approval/approval-gate.ts";
 export type { ApprovalDecision } from "./approval/approval-gate.ts";
 export { RuntimeServer } from "./server/runtime-server.ts";
+export {
+  RuntimeClientRequestCancelledError,
+  RuntimeClientRequestCoordinator,
+  RuntimeClientRequestError,
+  RuntimeClientRequestExpiredError,
+  createRuntimeClientResponderId,
+} from "./server/runtime-client-request-coordinator.ts";
+export type {
+  RuntimeClientRequest,
+  RuntimeClientRequestCoordinatorOptions,
+  RuntimeClientRequestOptions,
+  RuntimeClientResponder,
+  RuntimeClientResponderId,
+} from "./server/runtime-client-request-coordinator.ts";
 export { RuntimeService, RuntimeServiceError } from "./service/runtime-service.ts";
 export type {
   RuntimeServiceEngine,
