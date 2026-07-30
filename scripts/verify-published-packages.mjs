@@ -5,6 +5,7 @@ import { mkdtemp, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { promisify } from "node:util";
+import { PUBLISHED_PACKAGES } from "./published-packages.mjs";
 
 const execFileAsync = promisify(execFile);
 const repoRoot = resolve(import.meta.dirname, "..");
@@ -51,6 +52,12 @@ const SUSPICIOUS_TEXT_IOCS = [
   ".vscode/tasks",
   "@tanstack/setup",
   "filev2.getsession",
+];
+const RELAY_PROTOCOL_FORBIDDEN_IMPORTS = [
+  "node:",
+  "@roll-agent/client-node",
+  "@roll-agent/runtime",
+  "@roll-agent/companion",
 ];
 
 const PACKAGE_CHECKS = [
@@ -111,6 +118,31 @@ const PACKAGE_CHECKS = [
         manifest.exports?.["./schema"],
         "./dist/schema/roll-runtime-protocol-v1.schema.json",
       );
+    },
+  },
+  {
+    name: "@roll-agent/relay-protocol",
+    cwd: resolve(repoRoot, "packages/relay-protocol"),
+    expectedFiles: [
+      "package/dist/index.js",
+      "package/dist/index.d.ts",
+      "package/dist/conformance.js",
+      "package/dist/conformance.d.ts",
+      "package/dist/schema/roll-relay-protocol-v1.schema.json",
+    ],
+    expectedJavaScriptFiles: ["package/dist/conformance.js", "package/dist/index.js"],
+    expectedFixturePrefix: "package/fixtures/v1/",
+    forbiddenPackagedText: RELAY_PROTOCOL_FORBIDDEN_IMPORTS,
+    verifyManifest(manifest) {
+      assert.equal(manifest.exports?.["."].default, "./dist/index.js");
+      assert.equal(manifest.exports?.["."].types, "./dist/index.d.ts");
+      assert.equal(manifest.exports?.["./conformance"].default, "./dist/conformance.js");
+      assert.equal(manifest.exports?.["./conformance"].types, "./dist/conformance.d.ts");
+      assert.equal(
+        manifest.exports?.["./schema"],
+        "./dist/schema/roll-relay-protocol-v1.schema.json",
+      );
+      assert.equal(manifest.exports?.["./fixtures/*"], "./fixtures/*");
     },
   },
   {
@@ -188,6 +220,7 @@ const PACKAGE_CHECKS = [
 ];
 
 async function main() {
+  assertPublishedPackageChecksMatch();
   const packRoot = await mkdtemp(join(tmpdir(), "roll-agent-pack-verify-"));
 
   try {
@@ -204,7 +237,14 @@ async function main() {
       assertNoSuspiciousFileNames(pkg.name, tarEntries);
       assertExpectedFiles(pkg.name, tarEntries, pkg.expectedFiles);
       assertExpectedJavaScriptFiles(pkg.name, tarEntries, pkg.expectedJavaScriptFiles);
+      assertExpectedFixtureSet(pkg.name, tarEntries, pkg.expectedFixturePrefix);
       await assertNoSourceMapComments(pkg.name, tarballPath, tarEntries);
+      await assertNoForbiddenPackagedText(
+        pkg.name,
+        tarballPath,
+        tarEntries,
+        pkg.forbiddenPackagedText,
+      );
       await assertNoSuspiciousText(pkg.name, tarballPath, tarEntries);
 
       console.log(`  OK: ${pkg.name}`);
@@ -212,6 +252,17 @@ async function main() {
   } finally {
     await rm(packRoot, { recursive: true, force: true });
   }
+}
+
+function assertPublishedPackageChecksMatch() {
+  const publishedPackageNames = PUBLISHED_PACKAGES.map(({ name }) => name).sort();
+  const checkedPackageNames = PACKAGE_CHECKS.map(({ name }) => name).sort();
+
+  assert.deepEqual(
+    checkedPackageNames,
+    publishedPackageNames,
+    "Published package registry and tarball checks must contain the same package names",
+  );
 }
 
 async function packPackage(cwd, packRoot) {
@@ -324,6 +375,26 @@ function assertExpectedJavaScriptFiles(
   );
 }
 
+function assertExpectedFixtureSet(packageName, tarEntries, expectedFixturePrefix = undefined) {
+  if (!expectedFixturePrefix) {
+    return;
+  }
+
+  const fixtureFiles = tarEntries.filter(
+    (entry) => entry.startsWith(expectedFixturePrefix) && entry.endsWith(".json"),
+  );
+  const fixtureNames = fixtureFiles.map((entry) => entry.slice(expectedFixturePrefix.length));
+
+  assert.ok(
+    fixtureNames.some((name) => name.startsWith("valid-")),
+    `${packageName} tarball has no valid JSON fixture under ${expectedFixturePrefix}`,
+  );
+  assert.ok(
+    fixtureNames.some((name) => name.startsWith("invalid-")),
+    `${packageName} tarball has no invalid JSON fixture under ${expectedFixturePrefix}`,
+  );
+}
+
 async function assertNoSourceMapComments(packageName, tarballPath, tarEntries) {
   const textEntries = tarEntries.filter(
     (entry) => entry.endsWith(".js") || entry.endsWith(".d.ts"),
@@ -334,6 +405,32 @@ async function assertNoSourceMapComments(packageName, tarballPath, tarEntries) {
     assert.ok(
       !stdout.includes("sourceMappingURL="),
       `${packageName} packaged file still references a source map: ${entry}`,
+    );
+  }
+}
+
+async function assertNoForbiddenPackagedText(
+  packageName,
+  tarballPath,
+  tarEntries,
+  forbiddenText = undefined,
+) {
+  if (!forbiddenText) {
+    return;
+  }
+
+  const sourceEntries = tarEntries.filter(
+    (entry) => entry.endsWith(".js") || entry.endsWith(".d.ts"),
+  );
+
+  for (const entry of sourceEntries) {
+    const source = await readPackedText(tarballPath, entry);
+    const matches = forbiddenText.filter((indicator) => source.includes(indicator));
+
+    assert.equal(
+      matches.length,
+      0,
+      `${packageName} packaged source contains forbidden imports in ${entry}:\n${matches.join("\n")}`,
     );
   }
 }
