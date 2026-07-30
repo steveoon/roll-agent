@@ -1,5 +1,20 @@
 # @roll-agent/core
 
+## 0.25.0
+
+### Minor Changes
+
+- [#191](https://github.com/steveoon/roll-agent/pull/191) [`7b6c586`](https://github.com/steveoon/roll-agent/commit/7b6c586e34d467b3089aed94f62528ebb2a6a494) Thanks [@steveoon](https://github.com/steveoon)! - Add Runtime Protocol 1.1 bidirectional approval requests, expose them through the
+  `roll runtime serve --stdio` CLI, and provide typed Node handlers, connection-scoped
+  correlation, AbortSignal cancellation, authoritative terminal approval events,
+  Companion candidate brokering, observer/transport fail-closed boundaries, and a compatible
+  Protocol 1.0 fallback.
+
+### Patch Changes
+
+- Updated dependencies [[`7b6c586`](https://github.com/steveoon/roll-agent/commit/7b6c586e34d467b3089aed94f62528ebb2a6a494), [`86f6777`](https://github.com/steveoon/roll-agent/commit/86f677784542e5c9eb803ce8dbbe5017eda18a37)]:
+  - @roll-agent/runtime@0.12.0
+
 ## 0.24.0
 
 ### Minor Changes
