@@ -3,7 +3,11 @@ import { modelMessageSchema, type ModelMessage } from "ai";
 import { z } from "zod";
 import { SKILL_SOURCES } from "@roll-agent/core/skills/library";
 import { SESSION_STATES } from "../bash/session/types.ts";
-import { TOOL_OUTCOME_KINDS, type ToolOutcomeKind } from "../tool-bridge/normalize-result.ts";
+import {
+  TOOL_CANCELLATION_EXECUTION_STATES,
+  TOOL_OUTCOME_KINDS,
+  type ToolOutcomeKind,
+} from "../tool-bridge/normalize-result.ts";
 import type { ToolExecutionRecord } from "../tool-bridge/tool-execution-record.ts";
 import { TOOL_RESOURCE_ACCESS_MODES } from "../tool-bridge/tool-execution-coordinator.ts";
 import { readExplicitSkillCheckpoint } from "./explicit-skill-context.ts";
@@ -52,6 +56,10 @@ const TOOL_OUTCOME_VALUES = [
   TOOL_OUTCOME_KINDS.cancelled,
   TOOL_OUTCOME_KINDS.toolFailed,
 ] as const;
+const TOOL_CANCELLATION_EXECUTION_STATE_VALUES = [
+  TOOL_CANCELLATION_EXECUTION_STATES.notExecuted,
+  TOOL_CANCELLATION_EXECUTION_STATES.outcomeUnknown,
+] as const;
 const TOOL_RESOURCE_ACCESS_MODE_VALUES = [
   TOOL_RESOURCE_ACCESS_MODES.read,
   TOOL_RESOURCE_ACCESS_MODES.write,
@@ -72,8 +80,18 @@ const toolOutcomeSchema = z
   .object({
     kind: z.enum(TOOL_OUTCOME_VALUES),
     reason: z.string().optional(),
+    executionState: z.enum(TOOL_CANCELLATION_EXECUTION_STATE_VALUES).optional(),
   })
   .strict()
+  .superRefine((outcome, context) => {
+    if (outcome.executionState !== undefined && outcome.kind !== TOOL_OUTCOME_KINDS.cancelled) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "executionState is only valid for cancelled outcomes",
+        path: ["executionState"],
+      });
+    }
+  })
   .readonly();
 
 const compactionGoalSchema = z
@@ -490,6 +508,9 @@ function copyToolOutcome(outcome: ToolExecutionRecord["outcome"]): ToolExecution
     : {
         kind: outcome.kind,
         ...(outcome.reason !== undefined ? { reason: outcome.reason } : {}),
+        ...(outcome.kind === TOOL_OUTCOME_KINDS.cancelled && outcome.executionState !== undefined
+          ? { executionState: outcome.executionState }
+          : {}),
       };
 }
 
@@ -998,7 +1019,13 @@ export function buildCompactionCheckpointReminder(
     toolCallId: boundedReminderText(record.toolCallId, 128),
     agentName: boundedReminderText(record.agentName, 128),
     toolName: boundedReminderText(record.toolName, 128),
-    outcome: { kind: record.outcome.kind },
+    outcome: {
+      kind: record.outcome.kind,
+      ...(record.outcome.kind === TOOL_OUTCOME_KINDS.cancelled &&
+      record.outcome.executionState !== undefined
+        ? { executionState: record.outcome.executionState }
+        : {}),
+    },
   }));
   const anomalies = latestReminderItems(parsed.toolState.anomalies, 8, (anomaly) => ({
     kind: anomaly.kind,

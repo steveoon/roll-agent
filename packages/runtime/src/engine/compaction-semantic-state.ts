@@ -1,6 +1,9 @@
 import { createHash } from "node:crypto";
 import { z } from "zod";
-import { TOOL_OUTCOME_KINDS } from "../tool-bridge/normalize-result.ts";
+import {
+  TOOL_OUTCOME_KINDS,
+  type ToolCancellationExecutionState,
+} from "../tool-bridge/normalize-result.ts";
 
 export const COMPACTION_SEMANTIC_STATE_VERSION = 1 as const;
 
@@ -371,6 +374,7 @@ export interface CompactionSemanticToolEvidence {
   readonly resultSummary?: string;
   readonly outcome: {
     readonly kind: string;
+    readonly executionState?: ToolCancellationExecutionState;
   };
 }
 
@@ -398,6 +402,7 @@ export interface CompactionSemanticEvidenceRegistryEntry {
   readonly provenance: CompactionProvenanceRef;
   readonly messageRole?: string;
   readonly toolOutcomeKind?: string;
+  readonly toolCancellationExecutionState?: ToolCancellationExecutionState;
 }
 
 export type CompactionSemanticEvidenceRegistry = readonly CompactionSemanticEvidenceRegistryEntry[];
@@ -545,6 +550,9 @@ export function buildCompactionSemanticEvidenceRegistry(
       summary: boundedText(
         [
           `${tool.agentName ?? "agent"}/${tool.toolName ?? "tool"}: ${tool.outcome.kind}`,
+          ...(tool.outcome.executionState === undefined
+            ? []
+            : [`executionState=${tool.outcome.executionState}`]),
           ...(tool.inputSummary === undefined
             ? []
             : [`input=${boundedText(tool.inputSummary, 160)}`]),
@@ -556,6 +564,9 @@ export function buildCompactionSemanticEvidenceRegistry(
       ),
       provenance,
       toolOutcomeKind: tool.outcome.kind,
+      ...(tool.outcome.executionState === undefined
+        ? {}
+        : { toolCancellationExecutionState: tool.outcome.executionState }),
     });
   }
   for (const resource of input.resources) {
@@ -600,6 +611,7 @@ interface ModelEvidenceEntry {
   readonly summary: string;
   readonly role?: string;
   readonly outcome?: string;
+  readonly executionState?: ToolCancellationExecutionState;
 }
 
 interface ModelPreviousSemanticItem {
@@ -618,6 +630,9 @@ function modelEvidenceEntries(
     summary: modelFacingEvidenceSummary(entry),
     ...(entry.messageRole === undefined ? {} : { role: entry.messageRole }),
     ...(entry.toolOutcomeKind === undefined ? {} : { outcome: entry.toolOutcomeKind }),
+    ...(entry.toolCancellationExecutionState === undefined
+      ? {}
+      : { executionState: entry.toolCancellationExecutionState }),
   }));
 }
 

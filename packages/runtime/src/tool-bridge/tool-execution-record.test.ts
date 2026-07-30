@@ -15,7 +15,12 @@ import {
   prepareToolExecutionRecordForPersistence,
   toRedactedToolExecutionRecordSummary,
 } from "./tool-execution-record.ts";
-import type { NormalizedToolResult } from "./normalize-result.ts";
+import {
+  TOOL_CANCELLATION_EXECUTION_STATES,
+  TOOL_OUTCOME_KINDS,
+  createToolResult,
+  type NormalizedToolResult,
+} from "./normalize-result.ts";
 
 const RECORD_ID = "9d9bc41d-720d-4727-a570-446f14aab44c";
 
@@ -173,6 +178,74 @@ test("parseToolExecutionRecord validates a persisted JSON round-trip", () => {
   assert.deepEqual(parseToolExecutionRecord(JSON.parse(JSON.stringify(record))), record);
   assert.throws(
     () => parseToolExecutionRecord({ ...record, outcome: { kind: "invented" } }),
+    /Invalid persisted ToolExecutionRecord/u,
+  );
+});
+
+test("cancelled executionState 经 clone、redaction、durable fallback 与 round-trip 保留", () => {
+  const oversizedReason = "x".repeat(TOOL_EXECUTION_PERSISTENCE_LIMITS.outcomeBytes * 2);
+  const record = createToolExecutionRecord({
+    id: RECORD_ID,
+    toolCallId: "call-cancelled-outcome",
+    agentName: "demo-agent",
+    toolName: "write",
+    input: {},
+    result: createToolResult(
+      {
+        kind: TOOL_OUTCOME_KINDS.cancelled,
+        reason: oversizedReason,
+        executionState: TOOL_CANCELLATION_EXECUTION_STATES.outcomeUnknown,
+      },
+      "cancelled",
+    ),
+  });
+
+  assert.deepEqual(record.outcome, {
+    kind: TOOL_OUTCOME_KINDS.cancelled,
+    reason: oversizedReason,
+    executionState: TOOL_CANCELLATION_EXECUTION_STATES.outcomeUnknown,
+  });
+  const redactedOutcome = toRedactedToolExecutionRecordSummary(record).outcome;
+  if (redactedOutcome.kind !== TOOL_OUTCOME_KINDS.cancelled) {
+    assert.fail("expected cancelled redacted outcome");
+  }
+  assert.equal(redactedOutcome.executionState, TOOL_CANCELLATION_EXECUTION_STATES.outcomeUnknown);
+
+  const persisted = prepareToolExecutionRecordForPersistence(record);
+  assert.equal(persisted.persistence.fields.outcome.truncated, true);
+  if (persisted.outcome.kind !== TOOL_OUTCOME_KINDS.cancelled) {
+    assert.fail("expected cancelled persisted outcome");
+  }
+  assert.equal(persisted.outcome.executionState, TOOL_CANCELLATION_EXECUTION_STATES.outcomeUnknown);
+  assert.match("reason" in persisted.outcome ? (persisted.outcome.reason ?? "") : "", /sha256/u);
+
+  const restored = parsePersistedToolExecutionRecord(JSON.parse(JSON.stringify(persisted)));
+  assert.deepEqual(restored, persisted);
+  if (restored.outcome.kind !== TOOL_OUTCOME_KINDS.cancelled) {
+    assert.fail("expected cancelled restored outcome");
+  }
+  assert.equal(restored.outcome.executionState, TOOL_CANCELLATION_EXECUTION_STATES.outcomeUnknown);
+
+  assert.throws(
+    () =>
+      parseToolExecutionRecord({
+        ...record,
+        outcome: {
+          kind: TOOL_OUTCOME_KINDS.cancelled,
+          executionState: "invented",
+        },
+      }),
+    /Invalid persisted ToolExecutionRecord/u,
+  );
+  assert.throws(
+    () =>
+      parseToolExecutionRecord({
+        ...record,
+        outcome: {
+          kind: TOOL_OUTCOME_KINDS.success,
+          executionState: TOOL_CANCELLATION_EXECUTION_STATES.notExecuted,
+        },
+      }),
     /Invalid persisted ToolExecutionRecord/u,
   );
 });

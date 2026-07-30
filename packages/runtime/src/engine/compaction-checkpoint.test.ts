@@ -25,8 +25,9 @@ import {
 } from "./compaction-semantic-state.ts";
 import { attachExplicitSkillCheckpoint } from "./explicit-skill-context.ts";
 import {
+  TOOL_CANCELLATION_EXECUTION_STATES,
   TOOL_OUTCOME_KINDS,
-  failedToolResult,
+  createToolResult,
   successfulToolResult,
 } from "../tool-bridge/normalize-result.ts";
 import { createToolExecutionRecord } from "../tool-bridge/tool-execution-record.ts";
@@ -129,6 +130,7 @@ test("Checkpoint reminder 注入结构化状态和受控回查入口，不注入
         ...createEmptyCompactionToolState(),
         countsByOutcome: {
           ...createEmptyCompactionToolState().countsByOutcome,
+          cancelled: 1,
           tool_failed: 1,
         },
         recentRecords: [
@@ -139,6 +141,18 @@ test("Checkpoint reminder 注入结构化状态和受控回查入口，不注入
             agentName: "demo",
             toolName: "exec",
             outcome: { kind: "tool_failed", reason: "secret-outcome-reason" },
+          },
+          {
+            executionId: "379a4c56-7823-4695-89cf-c72bb6e74cca",
+            sequence: 5,
+            toolCallId: "call-cancelled",
+            agentName: "demo",
+            toolName: "exec",
+            outcome: {
+              kind: "cancelled",
+              reason: "user",
+              executionState: "not_executed",
+            },
           },
         ],
       },
@@ -186,6 +200,7 @@ test("Checkpoint reminder 注入结构化状态和受控回查入口，不注入
   assert.match(reminder, /"managerMatch":"foreign"/u);
   assert.match(reminder, /"recoverability":"live"/u);
   assert.match(reminder, /"recoverability":"stale"/u);
+  assert.match(reminder, /"executionState":"not_executed"/u);
   assert.match(reminder, /roll__transcript/u);
   assert.match(reminder, /kind="message".*kind="tool_execution"/u);
   assert.ok([...reminder].length <= 32_000);
@@ -518,13 +533,24 @@ test("Tool state 只信 typed outcome，不从误导 display 推断", () => {
     agentName: "demo",
     toolName: "write",
     input: {},
-    result: failedToolResult(TOOL_OUTCOME_KINDS.cancelled, "执行成功"),
+    result: createToolResult(
+      {
+        kind: TOOL_OUTCOME_KINDS.cancelled,
+        reason: "user",
+        executionState: TOOL_CANCELLATION_EXECUTION_STATES.notExecuted,
+      },
+      "执行成功",
+    ),
   });
 
   const state = buildCompactionToolState(messages, [{ ...record, sequence: 8 }]);
   assert.equal(state.countsByOutcome.cancelled, 1);
   assert.equal(state.countsByOutcome.success, 0);
   assert.equal(state.recentRecords[0]?.outcome.kind, TOOL_OUTCOME_KINDS.cancelled);
+  assert.equal(
+    state.recentRecords[0]?.outcome.executionState,
+    TOOL_CANCELLATION_EXECUTION_STATES.notExecuted,
+  );
   assert.equal(state.integrityStatus, "valid");
   assert.equal(
     buildCompactionToolState(messages, [{ ...record, sequence: 8 }], 0).recentRecords.length,
@@ -611,5 +637,29 @@ test("Draft schema 拒绝把未知 Tool outcome 写入持久化 checkpoint", () 
         },
       } as unknown as CompactionCheckpointDraftInput),
     /Invalid enum value/u,
+  );
+
+  assert.throws(
+    () =>
+      createCompactionCheckpointDraft({
+        ...draft(),
+        toolState: {
+          ...createEmptyCompactionToolState(),
+          recentRecords: [
+            {
+              executionId: "d2df3c50-10de-4efd-9199-a0f7d5dd323c",
+              sequence: 1,
+              toolCallId: "x",
+              agentName: "a",
+              toolName: "t",
+              outcome: {
+                kind: "cancelled",
+                executionState: "invented",
+              },
+            },
+          ],
+        },
+      } as unknown as CompactionCheckpointDraftInput),
+    /Invalid enum value|Invalid option/u,
   );
 });

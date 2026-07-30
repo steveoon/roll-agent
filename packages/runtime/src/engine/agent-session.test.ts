@@ -1466,6 +1466,15 @@ test("AgentSession cancel 中途确认不悬挂且持久化取消标记", async 
   assert.equal(cancelled.reason, "user");
   assert.equal(calls, 0);
   assert.doesNotMatch(cancelled.message, /正在进行|不会自动撤销|请检查结果/u);
+  const records = session.getToolExecutions({}, true);
+  assert.equal(records.length, 1);
+  assert.deepEqual(records[0]?.outcome, {
+    kind: "cancelled",
+    reason: "user",
+    executionState: "not_executed",
+  });
+  assert.match(JSON.stringify(records[0]?.display), /确定未执行/u);
+  assert.doesNotMatch(JSON.stringify(records[0]?.display), /最终结果尚未确认/u);
   assert.equal(
     events.some((event) => event.type === "error"),
     false,
@@ -1476,6 +1485,108 @@ test("AgentSession cancel 中途确认不悬挂且持久化取消标记", async 
   );
   assert.equal(session.getMessages().length, 2);
   assert.match(String(session.getMessages().at(-1)?.content), /已停止本轮/);
+});
+
+test("AgentSession recovery prompt 以最新真实用户意图为最终约束", async () => {
+  let calls = 0;
+  const persisted: ModelMessage[][] = [];
+  const sourceUnderTest = source("msg-agent", "send_message", () => {
+    calls += 1;
+  });
+  const firstSession = new AgentSession({
+    id: "cancelled-recovery-latest-user",
+    model: sequencedModel([toolCallStep("msg-agent__send_message", { q: "git status --short" })]),
+    sources: [sourceUnderTest],
+    maxSteps: 4,
+    policy: new DefaultToolPolicy(),
+    onPersist: (messages) => persisted.push([...messages]),
+  });
+
+  for await (const event of firstSession.send("执行 git status --short")) {
+    if (event.type === "confirmation-required") {
+      firstSession.cancel();
+    }
+  }
+  assert.equal(calls, 0);
+  assert.equal(persisted.length, 1);
+  const restoredMessages = JSON.parse(JSON.stringify(persisted[0])) as ModelMessage[];
+
+  let latestUserPrompt: LanguageModelV4CallOptions["prompt"] | undefined;
+  const latestUserSession = new AgentSession({
+    id: "cancelled-recovery-latest-user-restored",
+    model: new MockLanguageModelV4({
+      doStream: async (options) => {
+        latestUserPrompt = options.prompt;
+        return streamChunks(textStep("E2E_CONNECTION_OK"));
+      },
+    }),
+    initialMessages: restoredMessages,
+    sources: [sourceUnderTest],
+    maxSteps: 4,
+  });
+  const latestUserEvents = await collect(
+    latestUserSession.send("请只回复 E2E_CONNECTION_OK，不要调用工具。"),
+  );
+  const serializedLatestPrompt = JSON.stringify(latestUserPrompt);
+  const finalPromptMessage = latestUserPrompt?.at(-1);
+
+  assert.equal(finalPromptMessage?.role, "user");
+  assert.match(JSON.stringify(finalPromptMessage), /E2E_CONNECTION_OK.*不要调用工具/u);
+  assert.match(serializedLatestPrompt, /roll__interrupted_turn_recovery/u);
+  assert.match(serializedLatestPrompt, /\\"executionState\\":\\"not_executed\\"/u);
+  assert.match(serializedLatestPrompt, /不授权继续或重试旧任务/u);
+  assert.match(serializedLatestPrompt, /最新真实用户消息的目标和约束为准/u);
+  assert.ok(
+    serializedLatestPrompt.indexOf("git status --short") <
+      serializedLatestPrompt.lastIndexOf("E2E_CONNECTION_OK"),
+  );
+  assert.equal(calls, 0);
+  assert.equal(
+    latestUserEvents.some(
+      (event) => event.type === "message-finish" && event.text === "E2E_CONNECTION_OK",
+    ),
+    true,
+  );
+
+  let step = 0;
+  let continuePrompt: LanguageModelV4CallOptions["prompt"] | undefined;
+  const continueSession = new AgentSession({
+    id: "cancelled-recovery-explicit-continue",
+    model: new MockLanguageModelV4({
+      doStream: async (options) => {
+        continuePrompt ??= options.prompt;
+        const chunks =
+          step === 0
+            ? multiToolCallStep([
+                {
+                  toolCallId: "continued-call",
+                  toolName: "msg-agent__send_message",
+                  input: { q: "check prior task" },
+                },
+              ])
+            : textStep("已按新请求核对");
+        step += 1;
+        return streamChunks(chunks);
+      },
+    }),
+    initialMessages: restoredMessages,
+    sources: [sourceUnderTest],
+    maxSteps: 4,
+    policy: allowToolPolicy,
+  });
+  const continueEvents = await collect(
+    continueSession.send("继续上一任务并检查状态；确认后再决定，不要直接重试。"),
+  );
+
+  assert.equal(continuePrompt?.at(-1)?.role, "user");
+  assert.match(JSON.stringify(continuePrompt?.at(-1)), /继续上一任务并检查状态/u);
+  assert.equal(calls, 1);
+  assert.equal(
+    continueEvents.some(
+      (event) => event.type === "message-finish" && event.text === "已按新请求核对",
+    ),
+    true,
+  );
 });
 
 test("AgentSession cancel 保留已完成工具步骤，丢弃未完成的后续输出", async () => {
@@ -1594,6 +1705,7 @@ test("AgentSession cancel 为执行中的 Tool exactly-once 记录 cancelled out
   assert.equal(record.toolCallId, "c1");
   assert.equal(record.outcome.kind, "cancelled");
   assert.equal(record.outcome.reason, "user");
+  assert.equal(record.outcome.executionState, "outcome_unknown");
   assert.equal(record.input.encoding, "json");
   if (record.input.encoding === "json") {
     assert.deepEqual(record.input.value, { q: "cancel-me" });

@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import type { JSONValue } from "@ai-sdk/provider";
-import { TOOL_OUTCOME_KINDS } from "./normalize-result.ts";
+import { TOOL_OUTCOME_KINDS, isToolCancellationExecutionState } from "./normalize-result.ts";
 import type {
   NormalizedToolResult,
   ToolModelContentPart,
@@ -262,11 +262,19 @@ function isToolOutcome(value: unknown): value is ToolOutcome {
     return false;
   }
   if (value.kind === TOOL_OUTCOME_KINDS.success) {
-    return true;
+    return value.reason === undefined && value.executionState === undefined;
+  }
+  if (
+    !Object.values(TOOL_OUTCOME_KINDS).includes(value.kind as ToolOutcome["kind"]) ||
+    (value.reason !== undefined && typeof value.reason !== "string")
+  ) {
+    return false;
+  }
+  if (value.kind !== TOOL_OUTCOME_KINDS.cancelled) {
+    return value.executionState === undefined;
   }
   return (
-    Object.values(TOOL_OUTCOME_KINDS).includes(value.kind as ToolOutcome["kind"]) &&
-    (value.reason === undefined || typeof value.reason === "string")
+    value.executionState === undefined || isToolCancellationExecutionState(value.executionState)
   );
 }
 
@@ -622,6 +630,9 @@ function cloneOutcome(outcome: ToolOutcome): ToolOutcome {
   return {
     kind: outcome.kind,
     ...(outcome.reason !== undefined ? { reason: outcome.reason } : {}),
+    ...(outcome.kind === TOOL_OUTCOME_KINDS.cancelled && outcome.executionState !== undefined
+      ? { executionState: outcome.executionState }
+      : {}),
   };
 }
 
@@ -873,6 +884,9 @@ function redactOutcome(outcome: ToolOutcome): ToolOutcome {
   return {
     kind: outcome.kind,
     ...(outcome.reason !== undefined ? { reason: redactSummaryString(outcome.reason) } : {}),
+    ...(outcome.kind === TOOL_OUTCOME_KINDS.cancelled && outcome.executionState !== undefined
+      ? { executionState: outcome.executionState }
+      : {}),
   };
 }
 
@@ -1029,6 +1043,10 @@ function boundOutcome(
       : {
           kind: redacted.kind,
           reason: `[durable outcome detail omitted; sha256:${sha256(redactedSerialized)}]`,
+          ...(redacted.kind === TOOL_OUTCOME_KINDS.cancelled &&
+          redacted.executionState !== undefined
+            ? { executionState: redacted.executionState }
+            : {}),
         };
   const storedSerialized = serializedJson(value);
   return {

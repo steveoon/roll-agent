@@ -64,12 +64,15 @@ import {
 } from "../types/cancellation.ts";
 import { ToolRegistry } from "../tool-bridge/naming.ts";
 import {
+  TOOL_CANCELLATION_EXECUTION_STATES,
   TOOL_OUTCOME_KINDS,
+  createToolResult,
   failedToolResult,
   isNormalizedToolResult,
   normalizeToolResult,
   readDisplayOutput,
   readToolOutcome,
+  type ToolCancellationExecutionState,
 } from "../tool-bridge/normalize-result.ts";
 import {
   createToolExecutionRecord,
@@ -433,7 +436,10 @@ function compactionToolEvidence(record: SequencedToolExecutionRecord): {
   readonly toolName: string;
   readonly inputSummary: string;
   readonly resultSummary: string;
-  readonly outcome: { readonly kind: string };
+  readonly outcome: {
+    readonly kind: string;
+    readonly executionState?: ToolCancellationExecutionState;
+  };
 } {
   const persisted = prepareToolExecutionRecordForPersistence(record);
   return {
@@ -442,7 +448,13 @@ function compactionToolEvidence(record: SequencedToolExecutionRecord): {
     toolName: record.toolName,
     inputSummary: renderCompactionToolEvidenceValue(persisted.input.value),
     resultSummary: renderCompactionToolEvidenceValue(persisted.model),
-    outcome: { kind: record.outcome.kind },
+    outcome: {
+      kind: record.outcome.kind,
+      ...(record.outcome.kind === TOOL_OUTCOME_KINDS.cancelled &&
+      record.outcome.executionState !== undefined
+        ? { executionState: record.outcome.executionState }
+        : {}),
+    },
   };
 }
 
@@ -975,6 +987,31 @@ export class AgentSession {
     this.systemPrompt = this.compileSystemPrompt(systemPromptOverride ?? this.explicitSystemPrompt);
   }
 
+  private trackPendingToolCall(
+    activeTurn: ActiveTurn,
+    toolCallId: string,
+    toolName: string,
+    input: unknown,
+    resources?: readonly ToolResourceAccess[],
+  ): PendingToolCall {
+    const existing = activeTurn.pendingToolCalls.get(toolCallId);
+    if (existing && resources === undefined) {
+      return existing;
+    }
+    const route = this.registry.resolve(toolName);
+    const pending: PendingToolCall = {
+      toolCallId,
+      agentName: route?.agentName ?? toolName,
+      toolName: route?.toolName ?? toolName,
+      input,
+      potentialSideEffect:
+        route?.annotations?.readOnlyHint !== true || route.annotations.destructiveHint === true,
+      resources: resources ?? existing?.resources ?? [],
+    };
+    activeTurn.pendingToolCalls.set(toolCallId, pending);
+    return pending;
+  }
+
   private buildSkillTools(registry: ToolRegistry): ToolSet {
     this.skillToolBuilt = true;
     return buildSkillToolset(
@@ -1217,6 +1254,12 @@ export class AgentSession {
             tools: this.tools,
             stopWhen: [stepCountIs(this.maxSteps), stopOnUserRejected()],
             toolApproval: async ({ toolCall }) => {
+              this.trackPendingToolCall(
+                activeTurn,
+                toolCall.toolCallId,
+                toolCall.toolName,
+                toolCall.input,
+              );
               await this.toolCoordinator.prepare(
                 toolCall.toolCallId,
                 toolCall.toolName,
@@ -1355,22 +1398,18 @@ export class AgentSession {
               case "tool-call": {
                 sawToolCall = true;
                 pendingEchoText = "";
-                const route = this.registry.resolve(part.toolName);
-                activeTurn.pendingToolCalls.set(part.toolCallId, {
-                  toolCallId: part.toolCallId,
-                  agentName: route?.agentName ?? part.toolName,
-                  toolName: route?.toolName ?? part.toolName,
-                  input: part.input,
-                  potentialSideEffect:
-                    route?.annotations?.readOnlyHint !== true ||
-                    route.annotations.destructiveHint === true,
-                  resources: this.toolCoordinator.describeResources(part.toolName, part.input),
-                });
+                const pending = this.trackPendingToolCall(
+                  activeTurn,
+                  part.toolCallId,
+                  part.toolName,
+                  part.input,
+                  this.toolCoordinator.describeResources(part.toolName, part.input),
+                );
                 queue.push({
                   type: "tool-call",
                   toolCallId: part.toolCallId,
-                  agentName: route?.agentName ?? part.toolName,
-                  toolName: route?.toolName ?? part.toolName,
+                  agentName: pending.agentName,
+                  toolName: pending.toolName,
                   input: part.input,
                 });
                 break;
@@ -2817,25 +2856,27 @@ export class AgentSession {
       this.capabilityManifest,
       CAPABILITY_TOOL_ROLES.sessionList,
     );
+    const recoveryPolicy =
+      "这份恢复记录只描述上一轮的权威历史事实，不授权继续或重试旧任务。下一轮必须以最新真实用户消息的目标和约束为准；如果用户换题、放弃旧任务或禁止工具，不得为了恢复旧任务检查或调用工具。executionState=not_executed 表示工具确定未执行，无需检查；executionState=outcome_unknown 只允许在最新用户明确要求继续或核对上一任务时先检查，检查不等于重试。";
     switch (reason) {
       case SESSION_CANCELLATION_REASONS.user:
-        return `用户主动停止了本轮。${taskNumbers}这些任务已收到停止请求；已完成的步骤和工具记录仍然有效，不要自动重复 outcome=success 的操作，其他状态先检查实际结果。`;
+        return `用户主动停止了本轮。${taskNumbers}这些任务已收到停止请求；已完成的步骤和工具记录仍然有效，不要自动重复 outcome=success 的操作。${recoveryPolicy}`;
       case SESSION_CANCELLATION_REASONS.timeout: {
         const duration =
           this.turnTimeoutMs !== undefined ? `（${String(this.turnTimeoutMs)}ms）` : "";
         if (execSessionIds.length === 0) {
-          return `本轮因超时${duration}停止。已完成的步骤和工具记录仍然有效；继续前先检查未完成操作的实际结果。`;
+          return `本轮因超时${duration}停止。已完成的步骤和工具记录仍然有效。${recoveryPolicy}`;
         }
         if (this.capabilityManifest.lifecycle.hostMode === CAPABILITY_HOST_MODES.oneShot) {
-          return `本轮因超时${duration}停止。${taskNumbers}当前 one-shot 进程结束时会清理这些任务，后续 CLI 进程无法恢复。`;
+          return `本轮因超时${duration}停止。${taskNumbers}当前 one-shot 进程结束时会清理这些任务，后续 CLI 进程无法恢复。${recoveryPolicy}`;
         }
         if (sessionListToolId) {
-          return `本轮因超时${duration}停止，但后台任务仍在当前进程运行。${taskNumbers}下一轮先用 ${sessionListToolId} 找回并继续查看，确认结果前不要重复执行。`;
+          return `本轮因超时${duration}停止，但后台任务仍在当前进程运行。${taskNumbers}若且仅若最新用户明确要求继续或核对上一任务，可用 ${sessionListToolId} 找回并查看。${recoveryPolicy}`;
         }
-        return `本轮因超时${duration}停止，但后台任务可能仍在运行。${taskNumbers}当前没有可用的任务列表工具，不能安全恢复查看。`;
+        return `本轮因超时${duration}停止，但后台任务可能仍在运行。${taskNumbers}当前没有可用的任务列表工具，不能安全恢复查看。${recoveryPolicy}`;
       }
       case SESSION_CANCELLATION_REASONS.runtime:
-        return `本轮因运行异常中断。${taskNumbers}已完成的步骤和工具记录仍然有效；未标记 outcome=success 的操作必须先检查实际结果。`;
+        return `本轮因运行异常中断。${taskNumbers}已完成的步骤和工具记录仍然有效。${recoveryPolicy}`;
     }
   }
 
@@ -2930,14 +2971,28 @@ export class AgentSession {
     const cancellationReason =
       activeTurn.cancellationReason ?? SESSION_CANCELLATION_REASONS.runtime;
     for (const pending of activeTurn.pendingToolCalls.values()) {
-      const display = `工具调用因本轮 ${cancellationReason} 中断而取消；最终结果尚未确认`;
-      const result = failedToolResult(TOOL_OUTCOME_KINDS.cancelled, display, {
-        raw: {
-          cancellationReason,
-          abortReason: errorMessage(activeTurn.abortController.signal.reason),
+      const executionState = this.toolCoordinator.hasExecutionStarted(pending.toolCallId)
+        ? TOOL_CANCELLATION_EXECUTION_STATES.outcomeUnknown
+        : TOOL_CANCELLATION_EXECUTION_STATES.notExecuted;
+      const display =
+        executionState === TOOL_CANCELLATION_EXECUTION_STATES.notExecuted
+          ? `工具调用在开始执行前因本轮 ${cancellationReason} 中断而取消；确定未执行`
+          : `工具调用已开始，因本轮 ${cancellationReason} 中断而取消；最终结果尚未确认`;
+      const result = createToolResult(
+        {
+          kind: TOOL_OUTCOME_KINDS.cancelled,
+          reason: cancellationReason,
+          executionState,
         },
-        reason: cancellationReason,
-      });
+        display,
+        {
+          raw: {
+            cancellationReason,
+            executionState,
+            abortReason: errorMessage(activeTurn.abortController.signal.reason),
+          },
+        },
+      );
       this.persistToolExecution(
         createToolExecutionRecord({
           toolCallId: pending.toolCallId,

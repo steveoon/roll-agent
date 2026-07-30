@@ -1,7 +1,13 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import type { ModelMessage } from "ai";
-import { normalizeToolResult } from "../tool-bridge/normalize-result.ts";
+import {
+  TOOL_CANCELLATION_EXECUTION_STATES,
+  TOOL_OUTCOME_KINDS,
+  createToolResult,
+  normalizeToolResult,
+  type ToolCancellationExecutionState,
+} from "../tool-bridge/normalize-result.ts";
 import { createToolExecutionRecord } from "../tool-bridge/tool-execution-record.ts";
 import {
   buildCancelledTurnRecovery,
@@ -19,6 +25,33 @@ function record(toolCallId: string, display: string) {
     input: { token: "input-secret" },
     result: normalizeToolResult({ content: [{ type: "text", text: display }] }),
   });
+}
+
+function cancelledRecord(
+  toolCallId: string,
+  executionState: ToolCancellationExecutionState | undefined,
+  reason = "user",
+) {
+  return createToolExecutionRecord({
+    toolCallId,
+    agentName: "shell-agent",
+    toolName: "run",
+    input: { command: "git status --short" },
+    result: createToolResult(
+      {
+        kind: TOOL_OUTCOME_KINDS.cancelled,
+        reason,
+        ...(executionState === undefined ? {} : { executionState }),
+      },
+      "cancelled",
+    ),
+  });
+}
+
+function recoveryPayload(content: string): Record<string, unknown> {
+  const jsonStart = content.indexOf("\n{");
+  assert.ok(jsonStart >= 0);
+  return JSON.parse(content.slice(jsonStart + 1)) as Record<string, unknown>;
 }
 
 test("cancelled turn recovery 只补充未进入完整 tool protocol 的脱敏记录", () => {
@@ -65,6 +98,86 @@ test("cancelled turn recovery 限制记录数量与总长度", () => {
   assert.doesNotMatch(content, /output-0-/u);
   assert.match(content, /output-13-/u);
   assert.match(content, /"omittedEarlierRecords":4/u);
+});
+
+test("cancelled turn recovery 投影执行状态且只提供 facts-only 恢复边界", () => {
+  const content = buildCancelledTurnRecovery({
+    context: "用户停止了上一轮。",
+    completedMessages: [],
+    toolExecutions: [
+      cancelledRecord("not-started", TOOL_CANCELLATION_EXECUTION_STATES.notExecuted),
+      cancelledRecord("in-flight", TOOL_CANCELLATION_EXECUTION_STATES.outcomeUnknown),
+      cancelledRecord("legacy", undefined),
+    ],
+  });
+  const payload = recoveryPayload(content);
+  const evidence = payload.evidence as Array<{
+    readonly outcome: {
+      readonly executionState?: ToolCancellationExecutionState;
+    };
+  }>;
+
+  assert.deepEqual(
+    evidence.map((item) => item.outcome.executionState),
+    [
+      TOOL_CANCELLATION_EXECUTION_STATES.notExecuted,
+      TOOL_CANCELLATION_EXECUTION_STATES.outcomeUnknown,
+      undefined,
+    ],
+  );
+  assert.deepEqual(payload.continuationPolicy, {
+    recoveryAuthorizesContinuation: false,
+    latestUserIntentWins: true,
+    notExecutedRequiresCheck: false,
+    outcomeUnknownCheckRequiresExplicitUserIntent: true,
+    checkingAuthorizesRetry: false,
+  });
+  assert.match(content, /不授权继续或重试旧任务/u);
+  assert.match(content, /最新真实用户消息的目标和约束始终优先/u);
+  assert.match(content, /not_executed 表示确定未执行，无需检查/u);
+  assert.match(content, /outcome_unknown 只在最新用户明确要求继续或核对上一任务时先检查/u);
+  assert.match(content, /检查不等于重试/u);
+  assert.doesNotMatch(content, /其他状态先检查实际结果/u);
+});
+
+test("cancelled turn recovery 长度 fallback 仍保留结构化执行状态", () => {
+  const content = buildCancelledTurnRecovery({
+    context: "x".repeat(10_000),
+    completedMessages: [],
+    toolExecutions: Array.from({ length: 10 }, (_, index) =>
+      cancelledRecord(
+        `cancelled-${String(index)}`,
+        index % 2 === 0
+          ? TOOL_CANCELLATION_EXECUTION_STATES.notExecuted
+          : TOOL_CANCELLATION_EXECUTION_STATES.outcomeUnknown,
+        "\u0000".repeat(400),
+      ),
+    ),
+  });
+  const payload = recoveryPayload(content);
+  const evidence = payload.evidence as Array<{
+    readonly outcome: {
+      readonly executionState?: ToolCancellationExecutionState;
+      readonly reason?: string;
+    };
+    readonly displayPreview?: string;
+  }>;
+
+  assert.ok(content.length <= 12_000);
+  assert.match(String(payload.runtimeContext), /恢复详情超出安全预算/u);
+  assert.equal(evidence.length, 10);
+  assert.equal(
+    evidence.every((item) => item.outcome.executionState !== undefined),
+    true,
+  );
+  assert.equal(
+    evidence.every((item) => item.outcome.reason === undefined),
+    true,
+  );
+  assert.equal(
+    evidence.every((item) => item.displayPreview === undefined),
+    true,
+  );
 });
 
 test("cancelled turn recovery 只按校验后的 metadata 隐藏并在推理前物化", () => {

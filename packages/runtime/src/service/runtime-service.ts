@@ -347,7 +347,12 @@ function toOperationView(record: SequencedToolExecutionRecord): OperationView {
     agentName: redacted.agentName,
     toolName: redacted.toolName,
     createdAt: redacted.createdAt,
-    outcome: redacted.outcome,
+    outcome: {
+      kind: redacted.outcome.kind,
+      ...("reason" in redacted.outcome && redacted.outcome.reason !== undefined
+        ? { reason: redacted.outcome.reason }
+        : {}),
+    },
     display: safeJson(redacted.display, undefined),
   };
 }
