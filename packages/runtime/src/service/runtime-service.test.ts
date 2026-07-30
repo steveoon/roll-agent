@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import {
   RUNTIME_PROTOCOL_VERSION,
+  parseRuntimeMethodResult,
   requestIdSchema,
   runtimeMethodSchemas,
   threadIdSchema,
@@ -15,7 +16,11 @@ import {
   createToolExecutionRecord,
   type ToolExecutionRecord,
 } from "../tool-bridge/tool-execution-record.ts";
-import { successfulToolResult } from "../tool-bridge/normalize-result.ts";
+import {
+  TOOL_CANCELLATION_EXECUTION_STATES,
+  TOOL_OUTCOME_KINDS,
+  createToolResult,
+} from "../tool-bridge/normalize-result.ts";
 import {
   MutationRequestCache,
   RuntimeService,
@@ -65,9 +70,17 @@ function execution(): ToolExecutionRecord {
     agentName: "demo-agent",
     toolName: "lookup",
     input: { apiKey: "secret-input" },
-    result: successfulToolResult("visible", {
-      raw: { token: "secret-raw" },
-    }),
+    result: createToolResult(
+      {
+        kind: TOOL_OUTCOME_KINDS.cancelled,
+        reason: "user",
+        executionState: TOOL_CANCELLATION_EXECUTION_STATES.notExecuted,
+      },
+      "visible",
+      {
+        raw: { token: "secret-raw" },
+      },
+    ),
     createdAt: "2026-07-28T12:00:00.000Z",
   });
 }
@@ -667,6 +680,12 @@ test("RuntimeService snapshot reads append-only transcript and redacted Tool led
     assert.equal(previousPage.messages.nextBeforeSequence, null);
     assert.equal(JSON.stringify(snapshot).includes("compressed projection"), false);
     assert.equal(snapshot.operations.items.length, 1);
+    assert.deepEqual(snapshot.operations.items[0]?.outcome, {
+      kind: "cancelled",
+      reason: "user",
+    });
+    assert.equal("executionState" in (snapshot.operations.items[0]?.outcome ?? {}), false);
+    assert.doesNotThrow(() => parseRuntimeMethodResult("thread.snapshot", snapshot));
     assert.equal(JSON.stringify(snapshot.operations.items).includes("secret-input"), false);
     assert.equal(JSON.stringify(snapshot.operations.items).includes("secret-raw"), false);
     assert.equal(snapshot.transcriptCompleteness, "complete");
@@ -678,6 +697,12 @@ test("RuntimeService snapshot reads append-only transcript and redacted Tool led
       }),
     );
     assert.equal(operation.operation?.id, IDS.operation);
+    assert.deepEqual(operation.operation?.outcome, {
+      kind: "cancelled",
+      reason: "user",
+    });
+    assert.equal("executionState" in (operation.operation?.outcome ?? {}), false);
+    assert.doesNotThrow(() => parseRuntimeMethodResult("operation.get", operation));
     assert.equal("raw" in (operation.operation ?? {}), false);
     assert.equal("input" in (operation.operation ?? {}), false);
   } finally {

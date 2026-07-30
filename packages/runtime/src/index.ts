@@ -69,12 +69,14 @@ export type {
   ToolResourceHintKind,
 } from "./tool-bridge/tool-execution-coordinator.ts";
 export {
+  TOOL_CANCELLATION_EXECUTION_STATES,
   TOOL_OUTCOME_KINDS,
   normalizeToolResult,
   readToolOutcome,
 } from "./tool-bridge/normalize-result.ts";
 export type {
   NormalizedToolResult,
+  ToolCancellationExecutionState,
   ToolModelOutput,
   ToolOutcome,
   ToolOutcomeKind,

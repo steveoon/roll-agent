@@ -10,6 +10,11 @@ export const TOOL_OUTCOME_KINDS = {
   toolFailed: "tool_failed",
 } as const;
 
+export const TOOL_CANCELLATION_EXECUTION_STATES = {
+  notExecuted: "not_executed",
+  outcomeUnknown: "outcome_unknown",
+} as const;
+
 const MAX_TOOL_DISPLAY_CHARS = 16_000;
 const MAX_TOOL_DISPLAY_ITEMS = 64;
 const MAX_TOOL_MODEL_CHARS = 60_000;
@@ -17,6 +22,8 @@ const MAX_TOOL_MODEL_ITEMS = 128;
 const MODEL_CLIPPED_MARKER = "\n\n[工具模型内容已截断；完整结果仍保留在 raw 视图]";
 
 export type ToolOutcomeKind = (typeof TOOL_OUTCOME_KINDS)[keyof typeof TOOL_OUTCOME_KINDS];
+export type ToolCancellationExecutionState =
+  (typeof TOOL_CANCELLATION_EXECUTION_STATES)[keyof typeof TOOL_CANCELLATION_EXECUTION_STATES];
 
 export type ToolOutcome =
   | { readonly kind: typeof TOOL_OUTCOME_KINDS.success }
@@ -25,9 +32,19 @@ export type ToolOutcome =
         | typeof TOOL_OUTCOME_KINDS.userRejected
         | typeof TOOL_OUTCOME_KINDS.policyDenied
         | typeof TOOL_OUTCOME_KINDS.invalidInput
-        | typeof TOOL_OUTCOME_KINDS.cancelled
         | typeof TOOL_OUTCOME_KINDS.toolFailed;
       readonly reason?: string;
+    }
+  | {
+      readonly kind: typeof TOOL_OUTCOME_KINDS.cancelled;
+      readonly reason?: string;
+      /**
+       * Durable execution fact recorded when a Turn is interrupted.
+       *
+       * Missing means execution state was not captured, including legacy records and
+       * cancellations outside interrupted-Turn persistence.
+       */
+      readonly executionState?: ToolCancellationExecutionState;
     };
 
 export type ToolModelContentPart =
@@ -482,11 +499,28 @@ export function normalizeToolResult(result: unknown): NormalizedToolResult {
   });
 }
 
+export function isToolCancellationExecutionState(
+  value: unknown,
+): value is ToolCancellationExecutionState {
+  return Object.values(TOOL_CANCELLATION_EXECUTION_STATES).some((state) => state === value);
+}
+
 function isToolOutcome(value: unknown): value is ToolOutcome {
   if (!isRecord(value) || typeof value.kind !== "string") {
     return false;
   }
-  return Object.values(TOOL_OUTCOME_KINDS).some((kind) => kind === value.kind);
+  if (!Object.values(TOOL_OUTCOME_KINDS).some((kind) => kind === value.kind)) {
+    return false;
+  }
+  if (value.reason !== undefined && typeof value.reason !== "string") {
+    return false;
+  }
+  if (value.kind !== TOOL_OUTCOME_KINDS.cancelled) {
+    return value.executionState === undefined;
+  }
+  return (
+    value.executionState === undefined || isToolCancellationExecutionState(value.executionState)
+  );
 }
 
 export function isNormalizedToolResult(value: unknown): value is NormalizedToolResult {

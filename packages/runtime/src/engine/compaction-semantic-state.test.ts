@@ -521,6 +521,36 @@ test("模型每轮最多接收 32 条连续 evidence，并显式报告其余数�
   );
 });
 
+test("semantic compaction evidence 保留 cancelled executionState", () => {
+  const registry = buildCompactionSemanticEvidenceRegistry({
+    messages: [],
+    toolExecutions: [
+      {
+        id: FAILED_EXECUTION_ID,
+        agentName: "shell",
+        toolName: "run",
+        outcome: {
+          kind: "cancelled",
+          executionState: "not_executed",
+        },
+      },
+    ],
+    resources: [],
+    runningSessions: [],
+  });
+  const entry = registry[0];
+  assert.equal(entry?.toolCancellationExecutionState, "not_executed");
+  assert.match(entry?.summary ?? "", /executionState=not_executed/u);
+
+  const context = buildCompactionSemanticModelContext(registry, undefined, 48_000);
+  const payload = JSON.parse(context.prompt) as {
+    readonly evidence: readonly {
+      readonly executionState?: string;
+    }[];
+  };
+  assert.equal(payload.evidence[0]?.executionState, "not_executed");
+});
+
 test("连续 checkpoint 默认继承，只有有效 resolution 删除；新 goal scope 不隐式清理旧状态", () => {
   const registry = evidenceRegistry();
   const message7 = evidenceId(

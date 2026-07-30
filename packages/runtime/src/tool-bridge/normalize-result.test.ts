@@ -1,13 +1,59 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
+  TOOL_CANCELLATION_EXECUTION_STATES,
   TOOL_OUTCOME_KINDS,
+  createToolResult,
   failedToolResult,
+  isNormalizedToolResult,
   normalizeToolResult,
   readIsError,
   readToolOutcome,
   toolResultToModelOutput,
 } from "./normalize-result.ts";
+
+test("cancelled outcome 只接受兼容的结构化 executionState", () => {
+  for (const executionState of Object.values(TOOL_CANCELLATION_EXECUTION_STATES)) {
+    const result = createToolResult(
+      {
+        kind: TOOL_OUTCOME_KINDS.cancelled,
+        reason: "user",
+        executionState,
+      },
+      "cancelled",
+    );
+    assert.equal(isNormalizedToolResult(result), true);
+    assert.deepEqual(readToolOutcome(result), {
+      kind: TOOL_OUTCOME_KINDS.cancelled,
+      reason: "user",
+      executionState,
+    });
+  }
+
+  assert.equal(
+    isNormalizedToolResult(
+      createToolResult({ kind: TOOL_OUTCOME_KINDS.cancelled }, "legacy cancelled"),
+    ),
+    true,
+  );
+  assert.equal(
+    isNormalizedToolResult({
+      ...createToolResult({ kind: TOOL_OUTCOME_KINDS.cancelled }, "invalid"),
+      outcome: { kind: TOOL_OUTCOME_KINDS.cancelled, executionState: "invented" },
+    }),
+    false,
+  );
+  assert.equal(
+    isNormalizedToolResult({
+      ...createToolResult({ kind: TOOL_OUTCOME_KINDS.success }, "invalid"),
+      outcome: {
+        kind: TOOL_OUTCOME_KINDS.success,
+        executionState: TOOL_CANCELLATION_EXECUTION_STATES.notExecuted,
+      },
+    }),
+    false,
+  );
+});
 
 test("normalizeToolResult 提取 text content", () => {
   const result = normalizeToolResult({ content: [{ type: "text", text: "hello" }] });
