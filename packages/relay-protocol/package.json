@@ -45,7 +45,7 @@
     "node": ">=22.6.0"
   },
   "scripts": {
-    "build": "rm -rf dist && tsc -p tsconfig.build.json && node scripts/generate-schema.mjs",
+    "build": "rm -rf dist && tsc -p tsconfig.build.json && node --experimental-strip-types scripts/generate-schema.mjs",
     "typecheck": "tsc --noEmit",
     "test": "node --experimental-strip-types --test \"src/**/*.test.ts\"",
     "clean": "rm -rf dist"
