@@ -421,16 +421,24 @@ roll run wechat-agent send_message --userId xxx --content "你好"
 
 ### 第三方 Web UI / GUI
 
-第三方 UI 使用版本化 Runtime Protocol，不直接依赖 `ConversationEngine`：
+本地 Desktop UI 使用版本化 Runtime Protocol；远程 Web UI 通过 Cloud Relay 与用户本机
+Companion 间接访问 Runtime。两者都不直接依赖 `ConversationEngine`：
 
 ```bash
 roll runtime serve --stdio
 ```
 
+| 第三方宿主 | 直接依赖 | 说明 |
+|---|---|---|
+| 本地 Node/Electron Main | `@roll-agent/client-node`；直接使用 Schema 时再加 `@roll-agent/protocol` | Renderer 只走命名 IPC，不直接持有 Runtime Client |
+| Browser Web App | `@roll-agent/relay-protocol` | 当前需自行实现认证 Transport 与交互 UI；不安装 Companion |
+| Cloud Relay Server | `@roll-agent/relay-protocol` | 负责身份、路由与可靠投递；不安装 Companion |
+| 用户本机 Companion Host | `@roll-agent/companion`、`@roll-agent/client-node`、`@roll-agent/relay-protocol` | 仅在产品需要远程访问本机 Roll 时运行 |
+
 - [架构与安全边界](./docs/runtime-protocol-architecture.md)
 - [Runtime Protocol v1 参考](./docs/runtime-protocol-v1-reference.md)
 - [`@roll-agent/client-node` API 参考](./docs/client-node-reference.md)
-- [`@roll-agent/companion` Relay v1 参考](./docs/companion-relay-v1-reference.md)
+- [`@roll-agent/relay-protocol` Relay v1 参考](./docs/companion-relay-v1-reference.md)
 - [使用 Electron、Tauri、Python 或 Next.js 接入](./docs/how-to-build-roll-runtime-ui.md)
 - [最小客户端教程](./docs/tutorial-runtime-ui-quickstart.md)
 
@@ -440,6 +448,7 @@ roll runtime serve --stdio
 packages/
   core/          指挥官：CLI + Registry + Router + MCP Client + LLM Engine
   protocol/      第三方 UI 的版本化 Runtime Protocol + JSON Schema
+  relay-protocol/ Browser、Cloud Relay 与 Local Companion 共享的 Relay Wire 契约
   client-node/   stdio Runtime Protocol Node 客户端
   companion/     远程 Web 的本地 Companion / 出站 Relay bridge 基础能力（不含 Cloud Relay）
   sdk/           子 Agent 开发 SDK：defineAgent() + defineTool()
@@ -501,6 +510,7 @@ pnpm release:legacy:dry-run        # 旧脚本 dry-run（诊断用）
 - `@roll-agent/core`
 - `@roll-agent/runtime`
 - `@roll-agent/protocol`
+- `@roll-agent/relay-protocol`
 - `@roll-agent/client-node`
 - `@roll-agent/companion`
 - `@roll-agent/reply-authority-client`
@@ -515,6 +525,10 @@ pnpm release:legacy:dry-run        # 旧脚本 dry-run（诊断用）
 npm install -g @roll-agent/core
 roll --help
 ```
+
+全局安装 `@roll-agent/core` 只提供 `roll` CLI 与其 Runtime 依赖，不会安装
+`@roll-agent/companion`、启动后台服务或自动启用远程访问。Companion 必须由
+Remote-enabled Desktop 或独立本机 Host 显式安装、配对并启动。
 
 ## 技术栈
 

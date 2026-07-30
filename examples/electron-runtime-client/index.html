@@ -8,6 +8,7 @@
     />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Roll Runtime Protocol reference</title>
+    <link rel="stylesheet" href="./styles.css" />
   </head>
   <body>
     <form id="chat-form">
@@ -15,6 +16,17 @@
       <button type="submit">Send</button>
     </form>
     <pre id="output"></pre>
+    <dialog id="approval-dialog" aria-labelledby="approval-title">
+      <form method="dialog">
+        <h1 id="approval-title">Tool approval</h1>
+        <p id="approval-reason"></p>
+        <pre id="approval-preview"></pre>
+        <div class="approval-actions">
+          <button value="reject">Reject</button>
+          <button value="approve">Approve</button>
+        </div>
+      </form>
+    </dialog>
     <script type="module" src="./renderer.js"></script>
   </body>
 </html>

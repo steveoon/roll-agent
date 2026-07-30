@@ -1,7 +1,15 @@
 # 创建第一个 Roll Runtime UI 客户端
 
 本教程用 Node.js 创建一个最小终端客户端。完成后，它会启动本地 Roll、创建 Thread、显示
-流式事件，并在 Turn 完成后退出。
+流式事件、注册 `"1.1"` Approval handler，并在 Turn 完成后退出。
+
+本教程只覆盖本地 stdio Runtime Protocol：
+
+```text
+本地 UI → @roll-agent/client-node → roll runtime serve --stdio
+```
+
+它不安装或启动 `@roll-agent/companion`，也不启用 Cloud Relay 或远程 Web 访问。
 
 ## 前置条件
 
@@ -32,6 +40,18 @@ const outcomeUnknown = new Promise((resolve) => {
 
 const client = await RollNodeClient.start({
   cwd,
+  serverRequestHandlers: {
+    "approval.request": async ({ approval }, { signal }) => {
+      signal.throwIfAborted();
+      console.error(
+        `Quickstart 拒绝 Tool：${approval.agentName}/${approval.toolName}`,
+      );
+      return {
+        decision: "reject",
+        reason: "Quickstart 未实现交互式确认 UI",
+      };
+    },
+  },
   onStderr: (line) => console.error(line),
   onTurnOutcomeUnknown: (turnId) => {
     if (turnId === watchedTurnId) {
@@ -39,6 +59,15 @@ const client = await RollNodeClient.start({
     }
   },
 });
+
+const protocolVersion = client.getInitializationResult().protocolVersion;
+console.error(`Negotiated Runtime Protocol ${protocolVersion}`);
+if (protocolVersion !== "1.1") {
+  await client.shutdown();
+  throw new Error(
+    `This v1.1 quickstart does not implement the v1.0 approval.respond path (negotiated ${protocolVersion})`,
+  );
+}
 
 let releaseTerminalEvent = () => {};
 let releaseRuntimeExit = () => {};
@@ -104,11 +133,23 @@ node smoke.mjs /absolute/path/to/workspace
 预期结果：
 
 1. stderr 显示 Roll 启动日志；
-2. stdout 依次出现 `turn.started`、消息流和终止事件；
-3. 只有与本次 `threadId + turnId` 匹配的终止事件才会结束等待；
-4. Runtime 提前退出时脚本报告错误；已被 Runtime 接收但没有终态的 Turn 会报告
+2. 当前 Runtime 输出 `Negotiated Runtime Protocol 1.1`；旧 Runtime 若回退到 `"1.0"`，
+   脚本会安全退出，而不是留下一个无法回答 Approval 的 Turn；
+3. stdout 依次出现 `turn.started`、消息流和终止事件；
+4. 只有与本次 `threadId + turnId` 匹配的终止事件才会结束等待；
+5. 若本轮触发 Tool Approval，`approval.request` handler 安全拒绝，不会默认批准；
+6. Runtime 提前退出时脚本报告错误；已被 Runtime 接收但没有终态的 Turn 会报告
    `outcome unknown`，且不会自动重放；
-5. 脚本最终等待 Runtime 子进程真实退出。
+7. 脚本最终等待 Runtime 子进程真实退出。
+
+真实 GUI 应把 handler 的 `signal` 传给本地审批对话框：收到
+`runtime.serverRequest.cancel`（其中 `serverRequestId` 引用被取消的 JSON-RPC `id`）、
+Client shutdown 或 Runtime exit 后，关闭对话框并停止处理。Handler 迟到返回不会再写回
+Response。`approval.required` 在 `"1.1"` 中只用于展示，`approval.resolved` 用于收敛该
+View。
+
+若产品必须连接旧 Runtime，请实现一个明确分离的 `"1.0"` adapter：监听
+`approval.required` 并调用 `approval.respond`。不要让同一个审批决定同时走两条写入路径。
 
 ## 4. 验证恢复
 
@@ -144,6 +185,6 @@ Snapshot 的持久数据源是追加式 transcript，不是可能已被模型上
 
 下一步可参考
 [`如何用自己的技术栈接入 Roll Agent`](./how-to-build-roll-runtime-ui.md) 接入审批、取消或
-远程 Companion；精确 API 见
+远程 Web；精确 API 见
 [`Runtime Protocol v1 参考`](./runtime-protocol-v1-reference.md) 和
 [`Node 客户端参考`](./client-node-reference.md)。
