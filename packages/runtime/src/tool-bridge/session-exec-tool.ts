@@ -23,6 +23,7 @@ import {
 } from "../bash/session/types.ts";
 import { gateToolCall } from "./build-tools.ts";
 import type { BashToolContext } from "./bash-tool.ts";
+import { shellCommandExplanationSchema } from "./shell-explanation.ts";
 import { ToolRegistry } from "./naming.ts";
 import {
   TOOL_OUTCOME_KINDS,
@@ -73,6 +74,7 @@ function capturedClassification(value: unknown): CommandClassification {
 
 const execCommandInputSchema = z.object({
   command: z.string().min(1).describe("要在后台会话中执行的 shell 命令（单字符串）"),
+  explanation: shellCommandExplanationSchema.optional(),
   workdir: z
     .string()
     .min(1)
@@ -153,16 +155,22 @@ function makeSessionDeltaHandler(
 async function gateExecCommand(
   ctx: BashToolContext,
   input: Record<string, unknown>,
+  classification: CommandClassification,
   annotations: ToolAnnotations,
+  explanation?: string,
 ): Promise<NormalizedToolResult | undefined> {
   if (ctx.policy) {
-    return gateToolCall(ctx, EXEC_AGENT_NAME, EXEC_COMMAND_NAME, input, annotations);
+    return gateToolCall(ctx, EXEC_AGENT_NAME, EXEC_COMMAND_NAME, input, annotations, {
+      includePolicyReason: classification === "dangerous",
+      ...(explanation !== undefined ? { explanation } : {}),
+    });
   }
   const approval = await ctx.requestApproval({
     agentName: EXEC_AGENT_NAME,
     toolName: EXEC_COMMAND_NAME,
     input,
-    reason: "shell 命令需确认",
+    reason: classification === "dangerous" ? "破坏性操作" : undefined,
+    ...(explanation !== undefined ? { explanation } : {}),
   });
   if (!approval.approved) {
     return failedToolResult(
@@ -309,7 +317,9 @@ export function buildSessionExecToolset(
           workdir: invocation.workdir,
           yield_time_ms: invocation.yieldMs,
         },
+        invocation.classification,
         invocation.annotations,
+        parsed.data.explanation,
       );
     },
     resources: (rawInput, capturedState) => {

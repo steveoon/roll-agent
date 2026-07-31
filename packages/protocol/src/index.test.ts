@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { readFileSync } from "node:fs";
 import {
+  APPROVAL_EXPLANATION_MAX_CHARS,
+  APPROVAL_EXPLANATION_PREVIEW_KEY,
   RUNTIME_EVENT_NOTIFICATION,
   RUNTIME_METHODS,
   RUNTIME_PROTOCOL_CAPABILITIES,
@@ -9,6 +11,7 @@ import {
   RUNTIME_SERVER_REQUEST_CANCEL_NOTIFICATION,
   RUNTIME_SERVER_REQUEST_METHODS,
   SUPPORTED_RUNTIME_PROTOCOL_VERSIONS,
+  getApprovalExplanation,
   getRuntimeProtocolCapabilities,
   initializeParamsSchema,
   initializeResultSchema,
@@ -17,6 +20,7 @@ import {
   operationGetResultSchema,
   parseRuntimeServerRequestParams,
   parseRuntimeServerRequestResult,
+  pendingApprovalSchema,
   runtimeEventEnvelopeSchema,
   runtimeMethodSchemas,
   runtimeProtocolErrorDataSchema,
@@ -132,11 +136,17 @@ test("server request registry derives typed approval request params and results"
       turnId: IDS.turn,
       agentName: "browser-use-agent",
       toolName: "click",
-      preview: { selector: "#submit" },
+      preview: {
+        selector: "#submit",
+        [APPROVAL_EXPLANATION_PREVIEW_KEY]: "提交当前表单，以完成用户要求的操作。",
+      },
+      reason: "提交动作需确认",
     },
     expiresAt: "2026-07-29T12:10:00.000Z",
   });
   assert.equal(params.approval.id, IDS.approval);
+  assert.equal(getApprovalExplanation(params.approval), "提交当前表单，以完成用户要求的操作。");
+  assert.equal(params.approval.reason, "提交动作需确认");
 
   const handlers: RuntimeServerRequestHandlers = {
     [RUNTIME_SERVER_REQUEST_METHODS.approvalRequest]: async () => ({
@@ -158,6 +168,79 @@ test("server request registry derives typed approval request params and results"
       reason: "not valid for approval",
     }),
   );
+});
+
+test("approval explanation stays inside preview for v1.0/v1.1 wire compatibility", () => {
+  const approval = pendingApprovalSchema.parse({
+    id: IDS.approval,
+    turnId: IDS.turn,
+    agentName: "roll",
+    toolName: "bash",
+    preview: {
+      command: "pnpm test",
+      explanation: "运行项目测试，确认当前修改没有破坏既有功能。",
+    },
+  });
+  assert.equal(getApprovalExplanation(approval), "运行项目测试，确认当前修改没有破坏既有功能。");
+  assert.equal(approval.reason, undefined);
+  for (const preview of [
+    { command: "pnpm test" },
+    { explanation: 7 },
+    { explanation: null },
+    { explanation: "   " },
+    { explanation: "x".repeat(APPROVAL_EXPLANATION_MAX_CHARS + 1) },
+    [],
+    null,
+  ]) {
+    assert.equal(getApprovalExplanation({ ...approval, preview }), undefined);
+  }
+  assert.throws(() =>
+    pendingApprovalSchema.parse({
+      ...approval,
+      explanation: "顶层字段会破坏旧 strict parser",
+    }),
+  );
+
+  for (const protocolVersion of ["1.1", "1.0"] as const) {
+    const parsed = runtimeEventEnvelopeSchema.parse({
+      protocolVersion,
+      runtimeInstanceId: IDS.runtime,
+      sequence: 1,
+      timestamp: "2026-07-29T12:10:00.000Z",
+      threadId: IDS.thread,
+      turnId: IDS.turn,
+      event: { type: "approval.required", approval },
+    });
+    assert.equal(
+      parsed.event.type === "approval.required"
+        ? getApprovalExplanation(parsed.event.approval)
+        : undefined,
+      "运行项目测试，确认当前修改没有破坏既有功能。",
+    );
+    if (parsed.event.type === "approval.required") {
+      assert.equal(parsed.event.approval.reason, undefined);
+    }
+  }
+
+  const snapshot = threadSnapshotSchema.parse({
+    thread: {
+      id: IDS.thread,
+      title: "shell approval",
+      model: "mock",
+      createdAt: "2026-07-29T12:00:00.000Z",
+      updatedAt: "2026-07-29T12:00:00.000Z",
+      messageCount: 0,
+    },
+    messages: { items: [], nextBeforeSequence: null },
+    operations: { items: [], nextBeforeSequence: null },
+    pendingApprovals: [approval],
+    transcriptCompleteness: "complete",
+  });
+  assert.equal(
+    getApprovalExplanation(snapshot.pendingApprovals[0] ?? { preview: null }),
+    "运行项目测试，确认当前修改没有破坏既有功能。",
+  );
+  assert.equal(snapshot.pendingApprovals[0]?.reason, undefined);
 });
 
 test("server request cancellation has a stable notification envelope payload", () => {

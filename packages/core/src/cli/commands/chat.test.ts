@@ -520,6 +520,70 @@ test("runRepl keeps the prompt stream available around confirmation prompts", as
   assert.deepEqual(approved, ["approval-1"]);
 });
 
+test("runRepl shows a cleaned AI explanation before approval details", async () => {
+  const input = new PassThrough();
+  const approved: string[] = [];
+  const confirmationMessages: string[] = [];
+  const session = {
+    id: "session-explanation",
+    async *send() {
+      yield {
+        type: "confirmation-required",
+        approvalId: "approval-explanation",
+        agentName: "roll",
+        toolName: "bash",
+        input: { command: "pnpm --filter @roll-agent/core test" },
+        explanation: "  运行 Core 测试，\n\t确认审批界面没有回归\u0000  ",
+      } satisfies SessionEvent;
+      yield { type: "message-finish", text: "done" } satisfies SessionEvent;
+    },
+    approve(approvalId: string) {
+      approved.push(approvalId);
+      return true;
+    },
+    reject() {
+      return true;
+    },
+    getContextWindow() {
+      return undefined;
+    },
+    getSkillSummaries() {
+      return [];
+    },
+  } as unknown as AgentSession;
+  const store = {
+    updateTitle() {},
+    countMessages() {
+      return 1;
+    },
+    deleteThread() {},
+  } as unknown as Parameters<typeof runRepl>[1];
+
+  const done = runRepl(session, store, false, {
+    input,
+    output: sink(),
+    confirm: async (message) => {
+      confirmationMessages.push(message);
+      return true;
+    },
+  });
+  input.write("run\n");
+  await delay(10);
+  input.write("exit\n");
+  input.end();
+
+  await done;
+
+  assert.deepEqual(confirmationMessages, [
+    [
+      "执行 roll.bash?",
+      "AI 说明：运行 Core 测试， 确认审批界面没有回归",
+      "command: pnpm --filter @roll-agent/core test",
+    ].join("\n"),
+  ]);
+  assert.deepEqual(approved, ["approval-explanation"]);
+});
+
 test("runRepl closes a pending prompt when shutdown is requested", async () => {
   const input = new PassThrough();
   const controller = new AbortController();

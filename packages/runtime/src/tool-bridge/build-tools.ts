@@ -50,12 +50,19 @@ export interface ApprovalRequest {
   readonly toolName: string;
   readonly input: Record<string, unknown>;
   readonly reason: string | undefined;
+  readonly explanation?: string;
 }
 
 export interface ToolBridgeContext {
   readonly policy?: ToolPolicy;
   readonly requestApproval: (request: ApprovalRequest) => Promise<ApprovalDecision>;
   readonly coordinator?: ToolExecutionCoordinator;
+}
+
+interface ApprovalDisplayOptions {
+  readonly explanation?: string;
+  /** False when a conservative policy label would overstate the actual user-visible risk. */
+  readonly includePolicyReason?: boolean;
 }
 
 export interface BuiltToolset {
@@ -369,6 +376,7 @@ export async function gateToolCall(
   toolName: string,
   input: Record<string, unknown>,
   annotations: ToolAnnotations | undefined,
+  display?: ApprovalDisplayOptions,
 ): Promise<NormalizedToolResult | undefined> {
   if (!ctx.policy) {
     return undefined;
@@ -391,7 +399,8 @@ export async function gateToolCall(
       agentName,
       toolName,
       input,
-      reason: decision.reason,
+      reason: display?.includePolicyReason === false ? undefined : decision.reason,
+      ...(display?.explanation !== undefined ? { explanation: display.explanation } : {}),
     });
     if (!approval.approved) {
       return failedToolResult(

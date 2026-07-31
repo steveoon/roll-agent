@@ -5,6 +5,8 @@ export type RuntimeProtocolVersion = (typeof SUPPORTED_RUNTIME_PROTOCOL_VERSIONS
 export const RUNTIME_PROTOCOL_VERSION = SUPPORTED_RUNTIME_PROTOCOL_VERSIONS[0];
 export const RUNTIME_EVENT_NOTIFICATION = "runtime.event" as const;
 export const RUNTIME_SERVER_REQUEST_CANCEL_NOTIFICATION = "runtime.serverRequest.cancel" as const;
+export const APPROVAL_EXPLANATION_PREVIEW_KEY = "explanation" as const;
+export const APPROVAL_EXPLANATION_MAX_CHARS = 100;
 
 export const RUNTIME_SERVER_REQUEST_METHODS = {
   approvalRequest: "approval.request",
@@ -117,6 +119,11 @@ export const timestampSchema = z.string().datetime({ offset: true });
 export const jsonValueSchema = z.json();
 export const jsonRpcIdSchema = z.union([z.string(), z.number()]);
 export const runtimeProtocolVersionSchema = z.enum(SUPPORTED_RUNTIME_PROTOCOL_VERSIONS);
+export const approvalExplanationSchema = z
+  .string()
+  .trim()
+  .min(1)
+  .max(APPROVAL_EXPLANATION_MAX_CHARS);
 
 export type ThreadId = z.infer<typeof threadIdSchema>;
 export type TurnId = z.infer<typeof turnIdSchema>;
@@ -736,6 +743,7 @@ export type ThreadSnapshot = z.infer<typeof threadSnapshotSchema>;
 export type UiMessage = z.infer<typeof uiMessageSchema>;
 export type OperationView = z.infer<typeof operationViewSchema>;
 export type PendingApproval = z.infer<typeof pendingApprovalSchema>;
+export type ApprovalExplanation = z.infer<typeof approvalExplanationSchema>;
 export type ActiveTurn = z.infer<typeof activeTurnSchema>;
 export type ApprovalRequestParams = z.infer<typeof approvalRequestParamsSchema>;
 export type ApprovalRequestResult = z.infer<typeof approvalRequestResultSchema>;
@@ -743,6 +751,17 @@ export type ApprovalResolution = z.infer<typeof approvalResolutionSchema>;
 export type RuntimeServerRequestCancelParams = z.infer<
   typeof runtimeServerRequestCancelParamsSchema
 >;
+
+export function getApprovalExplanation(
+  approval: Pick<PendingApproval, "preview">,
+): ApprovalExplanation | undefined {
+  const preview = approval.preview;
+  if (typeof preview !== "object" || preview === null || Array.isArray(preview)) {
+    return undefined;
+  }
+  const parsed = approvalExplanationSchema.safeParse(preview[APPROVAL_EXPLANATION_PREVIEW_KEY]);
+  return parsed.success ? parsed.data : undefined;
+}
 
 export interface JsonRpcRequest {
   readonly jsonrpc: "2.0";

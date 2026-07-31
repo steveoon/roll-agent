@@ -30,6 +30,12 @@ body {
   white-space: pre-wrap;
 }
 
+#approval-explanation {
+  padding: 0.75rem;
+  border-inline-start: 0.25rem solid Highlight;
+  background: color-mix(in srgb, Highlight 12%, transparent);
+}
+
 .approval-actions {
   display: flex;
   justify-content: flex-end;

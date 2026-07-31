@@ -341,7 +341,7 @@ test("turn-cancelled 窄宽度换行保持前缀列与正文列对齐", () => {
   }
 });
 
-test("ChatApp confirm flow shows tool args and approves on y", async () => {
+test("ChatApp confirm flow shows the cleaned AI explanation and tool args, then approves on y", async () => {
   const sink: Sink = { approved: [], rejected: [] };
   async function* send(): AsyncIterable<SessionEvent> {
     yield {
@@ -350,6 +350,7 @@ test("ChatApp confirm flow shows tool args and approves on y", async () => {
       agentName: "browser-use-agent",
       toolName: "click_ref",
       input: { ref: "node-42" },
+      explanation: "  点击目标按钮，\n继续完成当前任务\u0000  ",
     };
     yield { type: "message-finish", text: "done" };
   }
@@ -367,6 +368,7 @@ test("ChatApp confirm flow shows tool args and approves on y", async () => {
   await delay(10);
   stdin.write("\r");
   await waitFor(() => assert.match(lastFrame() ?? "", /执行 browser-use-agent\.click_ref/));
+  assert.match(lastFrame() ?? "", /AI 说明：点击目标按钮， 继续完成当前任务/u);
   assert.match(lastFrame() ?? "", /ref: node-42/);
   const confirmationLines = plain(lastFrame() ?? "").split("\n");
   const optionRow = confirmationLines.findIndex(
@@ -390,6 +392,7 @@ test("Shift+Tab enables auto mode and confirmations are approved silently", asyn
       agentName: "browser-use-agent",
       toolName: "click_ref",
       input: {},
+      explanation: "点击目标按钮并继续当前任务",
     };
     yield { type: "message-finish", text: "done" };
   }
@@ -422,6 +425,7 @@ test("Shift+Tab during a pending confirmation approves it immediately", async ()
       agentName: "browser-use-agent",
       toolName: "click_ref",
       input: {},
+      explanation: "点击目标按钮并继续当前任务",
     };
     yield { type: "message-finish", text: "done" };
   }
@@ -439,6 +443,7 @@ test("Shift+Tab during a pending confirmation approves it immediately", async ()
   await delay(10);
   stdin.write("\r");
   await waitFor(() => assert.match(lastFrame() ?? "", /执行 browser-use-agent\.click_ref/));
+  assert.match(lastFrame() ?? "", /AI 说明：点击目标按钮并继续当前任务/u);
   await delay(100);
 
   stdin.write("\x1b[Z");

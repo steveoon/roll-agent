@@ -1,5 +1,7 @@
 import { redactToolArgsForLog } from "./output.ts";
 
+const MAX_APPROVAL_EXPLANATION_CHARS = 100;
+
 export function formatToolInput(input: unknown): string {
   const json = JSON.stringify(redactToolArgsForLog(input)) ?? "";
   return json.length > 80 ? `${json.slice(0, 79)}…` : json;
@@ -23,6 +25,14 @@ function sanitizeForDisplay(value: string): string {
     }
   }
   return out;
+}
+
+export function formatApprovalExplanation(value: string): string | undefined {
+  const normalized = sanitizeForDisplay(value).replace(/\s+/gu, " ").trim();
+  if (normalized.length === 0) {
+    return undefined;
+  }
+  return Array.from(normalized).slice(0, MAX_APPROVAL_EXPLANATION_CHARS).join("");
 }
 
 export function formatApprovalDetails(input: unknown): string {

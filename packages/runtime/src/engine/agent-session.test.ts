@@ -827,6 +827,7 @@ test("AgentSession 写类动作触发 confirmation，approve 后执行", async (
   const confirmation = events.find((event) => event.type === "confirmation-required");
   assert.ok(confirmation && confirmation.type === "confirmation-required");
   assert.equal(confirmation.toolName, "send_message");
+  assert.equal(confirmation.reason, "写/发送类操作");
   assert.equal(calls, 1);
   const toolResult = events.find((event) => event.type === "tool-result");
   assert.ok(toolResult && toolResult.type === "tool-result" && toolResult.isError === false);
@@ -3963,6 +3964,7 @@ test(
         model: sequencedModel([
           toolCallStep("roll__bash", {
             command: `grep -f ${outsidePattern} haystack.txt`,
+            explanation: "读取工作区外的匹配规则，以完成用户要求的内容筛选。",
           }),
           textStep("不应继续执行"),
         ]),
@@ -3979,7 +3981,11 @@ test(
           unsafeSession.reject(event.approvalId);
         }
       }
-      assert.ok(unsafeEvents.some((event) => event.type === "confirmation-required"));
+      const unsafeConfirmation = unsafeEvents.find(
+        (event) => event.type === "confirmation-required",
+      );
+      assert.ok(unsafeConfirmation?.type === "confirmation-required");
+      assert.equal(unsafeConfirmation.reason, undefined);
       const denied = unsafeEvents.find((event) => event.type === "tool-result");
       assert.equal(denied?.type, "tool-result");
       assert.equal(denied.isError, true);

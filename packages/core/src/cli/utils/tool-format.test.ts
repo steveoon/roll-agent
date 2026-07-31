@@ -1,6 +1,10 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { formatToolInput, formatApprovalDetails } from "./tool-format.ts";
+import {
+  formatApprovalDetails,
+  formatApprovalExplanation,
+  formatToolInput,
+} from "./tool-format.ts";
 
 test("formatToolInput 截断超长输入到 80 字符", () => {
   const long = "x".repeat(200);
@@ -46,4 +50,19 @@ test("formatApprovalDetails 保留合法换行与制表符（多行脚本）", (
   const script = "for f in a b; do\n\techo $f\ndone";
   const details = formatApprovalDetails({ command: script });
   assert.ok(details.includes("\n\techo $f"));
+});
+
+test("formatApprovalExplanation 清洗控制字符并把空白折叠成单行", () => {
+  const explanation = formatApprovalExplanation("  运行测试\n\t确认改动\u0000\u001b  ");
+  assert.equal(explanation, "运行测试 确认改动");
+});
+
+test("formatApprovalExplanation 按 Unicode 字符限制为 100 字", () => {
+  const explanation = formatApprovalExplanation("🙂".repeat(101));
+  assert.equal(Array.from(explanation ?? "").length, 100);
+  assert.equal(explanation, "🙂".repeat(100));
+});
+
+test("formatApprovalExplanation 对清洗后的空说明返回 undefined", () => {
+  assert.equal(formatApprovalExplanation("\u0000\u001b \n\t"), undefined);
 });

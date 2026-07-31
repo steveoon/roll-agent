@@ -1,4 +1,5 @@
 import type { RollRendererApi } from "./preload.ts";
+import { APPROVAL_EXPLANATION_PREVIEW_KEY, getApprovalExplanation } from "@roll-agent/protocol";
 
 declare global {
   interface Window {
@@ -12,6 +13,7 @@ const input = document.querySelector<HTMLInputElement>("#message");
 const approvalDialog = document.querySelector<HTMLDialogElement>("#approval-dialog");
 const approvalTitle = document.querySelector<HTMLElement>("#approval-title");
 const approvalReason = document.querySelector<HTMLElement>("#approval-reason");
+const approvalExplanation = document.querySelector<HTMLElement>("#approval-explanation");
 const approvalPreview = document.querySelector<HTMLElement>("#approval-preview");
 let threadId: string | undefined;
 
@@ -19,12 +21,14 @@ function requireApprovalDialog(): {
   readonly dialog: HTMLDialogElement;
   readonly title: HTMLElement;
   readonly reason: HTMLElement;
+  readonly explanation: HTMLElement;
   readonly preview: HTMLElement;
 } {
   if (
     approvalDialog === null ||
     approvalTitle === null ||
     approvalReason === null ||
+    approvalExplanation === null ||
     approvalPreview === null
   ) {
     throw new Error("Approval dialog is missing required elements");
@@ -33,12 +37,13 @@ function requireApprovalDialog(): {
     dialog: approvalDialog,
     title: approvalTitle,
     reason: approvalReason,
+    explanation: approvalExplanation,
     preview: approvalPreview,
   };
 }
 
 window.roll.onApprovalRequest(({ approval }, { signal }) => {
-  const { dialog, title, reason, preview } = requireApprovalDialog();
+  const { dialog, title, reason, explanation, preview } = requireApprovalDialog();
   if (signal.aborted) {
     return Promise.reject(
       signal.reason instanceof Error ? signal.reason : new Error("Approval request was cancelled"),
@@ -49,7 +54,21 @@ window.roll.onApprovalRequest(({ approval }, { signal }) => {
   }
   title.textContent = `${approval.agentName}.${approval.toolName}`;
   reason.textContent = approval.reason ?? "This tool requires your approval.";
-  preview.textContent = JSON.stringify(approval.preview, null, 2);
+  const explanationText = getApprovalExplanation(approval);
+  explanation.textContent =
+    explanationText === undefined ? "" : `AI explanation: ${explanationText}`;
+  explanation.hidden = explanationText === undefined;
+  if (
+    typeof approval.preview === "object" &&
+    approval.preview !== null &&
+    !Array.isArray(approval.preview)
+  ) {
+    const { [APPROVAL_EXPLANATION_PREVIEW_KEY]: _explanation, ...commandPreview } =
+      approval.preview;
+    preview.textContent = JSON.stringify(commandPreview, null, 2);
+  } else {
+    preview.textContent = JSON.stringify(approval.preview, null, 2);
+  }
 
   return new Promise((resolve, reject) => {
     const cleanup = () => {
