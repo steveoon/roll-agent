@@ -1,5 +1,15 @@
 # @roll-agent/protocol
 
+## 0.3.0
+
+### Minor Changes
+
+- [#192](https://github.com/steveoon/roll-agent/pull/192) [`bc81138`](https://github.com/steveoon/roll-agent/commit/bc8113876972545039714f15dc451068c2e4b6dd) Thanks [@steveoon](https://github.com/steveoon)! - Show concise model-generated explanations in Shell approval prompts and expose them to Runtime
+  Protocol GUI clients through the backward-compatible approval preview.
+
+  Keep conservative Shell confirmation behavior while hiding misleading destructive labels for
+  commands that were not actually classified as dangerous.
+
 ## 0.2.0
 
 ### Minor Changes
