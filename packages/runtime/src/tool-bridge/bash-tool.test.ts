@@ -286,7 +286,7 @@ test("bash 与 PowerShell 的 explanation 只透传审批展示，不进入 poli
     const calls: RunBashOptions[] = [];
     const command = profile.id === "powershell" ? "Write-Output 'hello'" : "printf hello";
     const execute = getExecute(
-      settings({ profile }),
+      settings({ profile, workdir: tmpdir() }),
       {
         policy: {
           check: (context) => {
@@ -314,7 +314,7 @@ test("bash 与 PowerShell 的 explanation 只透传审批展示，不进入 poli
     const result = await execute({ command, explanation }, options());
 
     assert.equal(result.isError, false);
-    assert.deepEqual(classifierCalls, [{ command, workdir: resolve("/tmp") }]);
+    assert.deepEqual(classifierCalls, [{ command, workdir: resolve(tmpdir()) }]);
     assert.equal(requests[0]?.reason, undefined);
     assert.equal(requests[0]?.explanation, explanation);
     assert.equal(Object.hasOwn(requests[0]?.input ?? {}, "explanation"), false);
@@ -466,7 +466,7 @@ test("dangerous 分类映射 destructiveHint，经 DefaultToolPolicy 触发 conf
   const dangerous: CommandClassifier = { classify: () => "dangerous" };
   const requests: ApprovalRequest[] = [];
   const execute = getExecute(
-    settings(),
+    settings({ workdir: tmpdir() }),
     {
       policy: new DefaultToolPolicy(),
       requestApproval: async (request) => {
