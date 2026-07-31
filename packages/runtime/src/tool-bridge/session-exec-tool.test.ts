@@ -9,6 +9,7 @@ import type { ShellProfile } from "../bash/profile.ts";
 import { ToolRegistry } from "./naming.ts";
 import type { NormalizedToolResult } from "./normalize-result.ts";
 import type { BashToolContext } from "./bash-tool.ts";
+import type { ApprovalRequest } from "./build-tools.ts";
 import {
   RUNTIME_CANCELLATION_ABORT_REASON,
   TURN_TIMEOUT_ABORT_REASON,
@@ -482,14 +483,92 @@ test("policy deny 时不启动会话", { skip }, async () => {
 });
 
 test("无 policy 时 fail-closed：确认被拒则不启动会话", { skip }, async () => {
+  const requests: ApprovalRequest[] = [];
   const { manager, execCommand } = build({
-    requestApproval: async () => ({ approved: false }),
+    requestApproval: async (request) => {
+      requests.push(request);
+      return { approved: false };
+    },
   });
   const result = await execCommand({ command: "sleep 5" }, "c1");
   assert.ok(String(result.output).includes("已取消执行"));
+  assert.equal(requests[0]?.reason, undefined);
+  assert.equal(requests[0]?.explanation, undefined);
   assert.equal(manager.size(), 0);
   await manager.terminateAll();
 });
+
+test(
+  "exec_command explanation 只透传审批展示，不进入 policy input 或实际命令",
+  { skip },
+  async () => {
+    const explanation = "输出一个固定标记，以确认后台命令会话能够正常启动并返回结果。";
+    const requests: ApprovalRequest[] = [];
+    const policyInputs: Record<string, unknown>[] = [];
+    const command = "printf command-only; sleep 1";
+    const { manager, execCommand } = build({
+      policy: {
+        check: (context) => {
+          policyInputs.push(context.input);
+          return { action: "confirm", reason: "破坏性操作" };
+        },
+      },
+      requestApproval: async (request) => {
+        requests.push(request);
+        return { approved: true };
+      },
+    });
+    try {
+      const result = await execCommand(
+        {
+          command,
+          explanation,
+          yield_time_ms: 250,
+        },
+        "explanation-contract",
+      );
+
+      assert.equal(result.isError, false);
+      assert.match(String(result.output), /command-only/u);
+      assert.equal(requests[0]?.reason, undefined);
+      assert.equal(requests[0]?.explanation, explanation);
+      assert.equal(Object.hasOwn(requests[0]?.input ?? {}, "explanation"), false);
+      assert.equal(Object.hasOwn(policyInputs[0] ?? {}, "explanation"), false);
+      assert.equal(manager.list()[0]?.commandPreview, command);
+    } finally {
+      await manager.terminateAll();
+    }
+  },
+);
+
+test(
+  "exec_command 在 explanation 为空白或超过 100 字符时于审批和 spawn 前失败",
+  { skip },
+  async () => {
+    let approvals = 0;
+    const { manager, execCommand } = build({
+      requestApproval: async () => {
+        approvals += 1;
+        return { approved: true };
+      },
+    });
+    try {
+      for (const explanation of ["   ", "x".repeat(101)]) {
+        const result = await execCommand(
+          { command: "printf should-not-run", explanation },
+          `invalid-explanation-${String(explanation.length)}`,
+        );
+        assert.equal(result.isError, true);
+        assert.match(String(result.output), /参数校验失败/u);
+      }
+      assert.equal(approvals, 0);
+      assert.equal(manager.size(), 0);
+      assert.deepEqual(manager.list(), []);
+    } finally {
+      await manager.terminateAll();
+    }
+  },
+);
 
 test("exec_poll 把流式 delta 重绑到自己的 toolCallId", { skip }, async () => {
   const events: SessionEvent[] = [];

@@ -1,11 +1,13 @@
 import { createHash, randomUUID } from "node:crypto";
 import type { ModelMessage } from "ai";
 import {
+  APPROVAL_EXPLANATION_PREVIEW_KEY,
   RUNTIME_ERROR_CODES,
   RUNTIME_FEATURES,
   RUNTIME_METHODS,
   RUNTIME_PROTOCOL_VERSION,
   SUPPORTED_RUNTIME_PROTOCOL_VERSIONS,
+  approvalExplanationSchema,
   approvalIdSchema,
   operationIdSchema,
   parseRuntimeMethodResult,
@@ -383,12 +385,24 @@ function toPendingApproval(
   turnId: TurnId,
   event: Extract<SessionEvent, { readonly type: "confirmation-required" }>,
 ): PendingApproval {
+  const safePreview = safeJson(event.input, undefined);
+  const parsedExplanation =
+    event.explanation === undefined
+      ? undefined
+      : approvalExplanationSchema.safeParse(redactSecretText(event.explanation));
+  const preview =
+    parsedExplanation?.success === true && isRecord(safePreview)
+      ? {
+          ...safePreview,
+          [APPROVAL_EXPLANATION_PREVIEW_KEY]: parsedExplanation.data,
+        }
+      : safePreview;
   return {
     id: approvalIdSchema.parse(event.approvalId),
     turnId,
     agentName: event.agentName,
     toolName: event.toolName,
-    preview: safeJson(event.input, undefined),
+    preview,
     ...(event.reason !== undefined ? { reason: redactSecretText(event.reason) } : {}),
   };
 }

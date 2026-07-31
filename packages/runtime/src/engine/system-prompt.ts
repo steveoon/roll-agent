@@ -139,6 +139,7 @@ function buildShellSection(
   return [
     "# Shell 工具",
     `- 需要在本机执行命令时调用 ${shellToolId}；用 workdir 参数指定工作目录，不要在 command 里用 cd。`,
+    `- 生成 Shell 命令时必须填写 explanation：使用用户当前语言，面向非技术用户，用一句话说明命令会做什么以及为何需要执行；建议 40-60 字符，最多 100 字符，不要声称命令安全或包含敏感值。${sessionExec ? `此要求同样适用于 ${sessionExec.command}。` : ""}`,
     ...shellHints.map((hint) => `- ${hint}`),
     "- 输出会被截断，优先用精确过滤或预览命令，而不是全量 dump 大文件。",
     "- 优先使用只读命令；有副作用或破坏性的命令可能需要用户确认，被拒绝时不要绕过。",

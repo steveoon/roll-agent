@@ -31,6 +31,9 @@ await Promise.all([
     entryPoints: [join(exampleDirectory, "renderer.ts")],
     outfile: join(outputDirectory, "renderer.js"),
     bundle: true,
+    alias: {
+      "@roll-agent/protocol": join(exampleDirectory, "../../packages/protocol/src/index.ts"),
+    },
     format: "esm",
     platform: "browser",
     target: "es2022",

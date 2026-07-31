@@ -1,5 +1,9 @@
 import { TOOL_OUTCOME_KINDS, type SessionEvent, type SessionTokenUsage } from "@roll-agent/runtime";
-import { formatToolInput, formatApprovalDetails } from "../../utils/tool-format.ts";
+import {
+  formatApprovalDetails,
+  formatApprovalExplanation,
+  formatToolInput,
+} from "../../utils/tool-format.ts";
 import { GLYPHS } from "../../utils/glyphs.ts";
 import { endsInsideThink } from "./thinking-text.ts";
 import type { ThinkingLevel } from "../../../llm/providers.ts";
@@ -85,6 +89,7 @@ export interface PendingConfirm {
   readonly approvalId: string;
   readonly prompt: string;
   readonly args: string;
+  readonly explanation?: string;
 }
 
 export interface ChatUiState {
@@ -349,7 +354,9 @@ function applySessionEvent(state: ChatUiState, id: string, event: SessionEvent):
     }
     case "tool-result":
       return commitTool(state, id, event);
-    case "confirmation-required":
+    case "confirmation-required": {
+      const explanation =
+        event.explanation === undefined ? undefined : formatApprovalExplanation(event.explanation);
       return {
         ...state,
         phase: "confirm",
@@ -357,8 +364,10 @@ function applySessionEvent(state: ChatUiState, id: string, event: SessionEvent):
           approvalId: event.approvalId,
           prompt: buildConfirmPrompt(event),
           args: formatApprovalDetails(event.input),
+          ...(explanation !== undefined ? { explanation } : {}),
         },
       };
+    }
     case "compaction-start":
       return { ...state, live: { ...state.live, compacting: true } };
     case "context-compacted":

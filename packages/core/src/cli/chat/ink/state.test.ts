@@ -354,16 +354,34 @@ test("confirmation-required enters confirm phase; confirm-resolved returns to bu
     toolName: "click_ref",
     input: {},
     reason: "高风险",
+    explanation: "  点击目标按钮，\n\t继续完成当前任务\u0000  ",
   });
   assert.equal(state.phase, "confirm");
   assert.deepEqual(state.pendingConfirm, {
     approvalId: "a1",
     prompt: "执行 browser-use-agent.click_ref（高风险）?",
     args: "",
+    explanation: "点击目标按钮， 继续完成当前任务",
   });
   state = chatReducer(state, { type: "confirm-resolved" });
   assert.equal(state.phase, "busy");
   assert.equal(state.pendingConfirm, undefined);
+});
+
+test("confirmation-required remains compatible when explanation is absent", () => {
+  const state = event(createInitialState("qwen", undefined), "x", {
+    type: "confirmation-required",
+    approvalId: "legacy-a1",
+    agentName: "browser-use-agent",
+    toolName: "click_ref",
+    input: { ref: "node-42" },
+  });
+
+  assert.deepEqual(state.pendingConfirm, {
+    approvalId: "legacy-a1",
+    prompt: "执行 browser-use-agent.click_ref?",
+    args: "ref: node-42",
+  });
 });
 
 test("compaction events toggle spinner and commit a notice", () => {

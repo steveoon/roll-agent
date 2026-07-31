@@ -19,6 +19,7 @@ import {
   RUNTIME_METHODS,
   RUNTIME_PROTOCOL_VERSION,
   RUNTIME_SERVER_REQUEST_METHODS,
+  getApprovalExplanation,
   parseRuntimeMethodParams,
   parseRuntimeServerRequestResult,
   type RuntimeEventEnvelope,
@@ -37,6 +38,9 @@ const approval = parseRuntimeServerRequestResult(
 );
 
 function handleEvent(event: RuntimeEventEnvelope): void {
+  if (event.event.type === "approval.required") {
+    console.log(getApprovalExplanation(event.event.approval));
+  }
   console.log(event.event.type, approval.decision);
 }
 ```
@@ -48,7 +52,7 @@ function handleEvent(event: RuntimeEventEnvelope): void {
   `RUNTIME_PROTOCOL_CAPABILITIES`、`REQUIRED_RUNTIME_SERVER_REQUEST_METHODS_BY_VERSION`、
   `RUNTIME_FEATURES`、`RUNTIME_ERROR_CODES`；
 - 能力查询：`getRuntimeProtocolCapabilities()`、
-  `isRuntimeServerRequestMethodRequired()`；
+  `isRuntimeServerRequestMethodRequired()`、`getApprovalExplanation()`；
 - 全部 Zod Schema 与派生类型；
 - `runtimeMethodSchemas`、`parseRuntimeMethodParams()`、
   `parseRuntimeMethodResult()`；
@@ -70,6 +74,14 @@ schema，并不代表调用方已实现对应 Client 能力。当前最新版本
 终止尚未完成的交互，并用只读
 `approval.resolved` Event 向所有观察端同步最终状态；`"1.0"` 继续使用
 `approval.required` + `approval.respond`。
+
+Shell 审批的模型说明位于 `approval.preview.explanation`。它是一个可选的、最多 100
+字符的显示辅助字段；`getApprovalExplanation()` 会完成类型和长度校验。说明不会替代
+原始命令，也不会影响 Policy。该字段刻意保留在既有 `preview` JSON 内，因此 Runtime
+Protocol `"1.0"` / `"1.1"` 的 strict 顶层结构不变，旧 GUI 可以继续解析，新 GUI
+则可将它单独显示为“AI 说明”。内置 Shell 命令仅在分类器明确判定为 `dangerous`
+时才向用户展示风险 `reason`；仅因无法证明安全而复用 `destructiveHint` 的 `unknown`
+命令不会显示“破坏性操作”。GUI 在 `reason` 缺失时应使用中性提示或直接省略。
 
 ## 文档
 

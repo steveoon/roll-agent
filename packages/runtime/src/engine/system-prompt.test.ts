@@ -77,6 +77,7 @@ test("无 bashToolId 时身份声明没有 shell，也不含 Shell 段", () => {
   const prompt = buildChatSystemPrompt();
   assert.ok(prompt.includes("没有独立的文件系统或 shell"));
   assert.ok(!prompt.includes("# Shell 工具"));
+  assert.ok(!prompt.includes("必须填写 explanation"));
 });
 
 test("有 bashToolId 时身份改写并注入 Shell 段", () => {
@@ -87,6 +88,11 @@ test("有 bashToolId 时身份改写并注入 Shell 段", () => {
   assert.ok(prompt.includes("roll__bash"));
   assert.ok(prompt.includes("timeout_ms"));
   assert.ok(!prompt.includes("roll__exec_command"));
+  assert.ok(prompt.includes("必须填写 explanation"));
+  assert.ok(prompt.includes("用户当前语言"));
+  assert.ok(prompt.includes("40-60 字符"));
+  assert.ok(prompt.includes("最多 100 字符"));
+  assert.ok(prompt.includes("不要声称命令安全"));
 });
 
 test("有 shellToolId 时注入 profile-specific shell hints", () => {
@@ -120,6 +126,7 @@ test("有 sessionExecToolIds 时改教模型用 exec_command 跑长任务", () =
   assert.ok(prompt.includes("一轮因超时"));
   assert.ok(prompt.includes("用户取消会中断本轮触达的会话"));
   assert.ok(!prompt.includes("调大 timeout_ms"));
+  assert.ok(prompt.includes("此要求同样适用于 roll__exec_command"));
 });
 
 test("agentCount 为 0 且提供 onboarding 信息时注入 Agent 安装段", () => {

@@ -10,7 +10,8 @@
       "agentName": "browser-use-agent",
       "toolName": "click",
       "preview": {
-        "selector": "#submit"
+        "selector": "#submit",
+        "explanation": "提交当前表单，以完成用户要求的操作。"
       },
       "reason": "此操作会提交表单"
     },

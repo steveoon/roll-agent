@@ -67,6 +67,8 @@ export type SessionEvent =
       readonly toolName: string;
       readonly input: unknown;
       readonly reason?: string;
+      /** Model-authored display aid. It never changes approval policy or command execution. */
+      readonly explanation?: string;
     }
   | {
       readonly type: "step-finish";

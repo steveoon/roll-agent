@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import {
   RUNTIME_PROTOCOL_VERSION,
+  getApprovalExplanation,
   parseRuntimeMethodResult,
   requestIdSchema,
   runtimeMethodSchemas,
@@ -108,6 +109,7 @@ function createFixture(store: ThreadStore): {
         toolName: "write",
         input: { path: "/tmp/demo", apiKey: "secret-preview" },
         reason: "requires approval",
+        explanation: "写入用户请求的文件，以完成当前任务。",
       };
       await new Promise<void>((resolve) => {
         resolveDecision = resolve;
@@ -787,6 +789,18 @@ test("RuntimeService v1 supports lifecycle, concurrent approval/cancel and proce
       JSON.stringify(approvalEvent.event.approval.preview).includes("secret-preview"),
       false,
     );
+    assert.equal(
+      getApprovalExplanation(approvalEvent.event.approval),
+      "写入用户请求的文件，以完成当前任务。",
+    );
+    assert.equal(approvalEvent.event.approval.reason, "requires approval");
+    const approvalSnapshot = service.snapshotThread({
+      threadId: approvalEvent.threadId,
+      limit: 100,
+    }).pendingApprovals[0];
+    assert.ok(approvalSnapshot);
+    assert.equal(getApprovalExplanation(approvalSnapshot), "写入用户请求的文件，以完成当前任务。");
+    assert.equal(approvalSnapshot.reason, "requires approval");
 
     await service.respondApproval(
       runtimeMethodSchemas["approval.respond"].params.parse({

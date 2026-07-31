@@ -26,6 +26,7 @@ import {
   executeCoordinatedTool,
   type ToolExecutionPlan,
 } from "./tool-execution-coordinator.ts";
+import { shellCommandExplanationSchema } from "./shell-explanation.ts";
 
 export const BASH_TOOL_AGENT_NAME = "roll";
 export const BASH_TOOL_NAME = "bash";
@@ -63,6 +64,7 @@ function capturedClassification(value: unknown): CommandClassification {
 
 const bashToolInputSchema = z.object({
   command: z.string().min(1).describe("要执行的 shell 命令（单字符串，由当前 shell 后端执行）"),
+  explanation: shellCommandExplanationSchema.optional(),
   workdir: z
     .string()
     .min(1)
@@ -81,17 +83,9 @@ const bashToolInputSchema = z.object({
 
 export type BashToolInput = z.infer<typeof bashToolInputSchema>;
 
-function isBashToolInput(value: unknown): value is BashToolInput {
-  if (typeof value !== "object" || value === null || !("command" in value)) {
-    return false;
-  }
-  return (
-    typeof value.command === "string" &&
-    (!("workdir" in value) || value.workdir === undefined || typeof value.workdir === "string") &&
-    (!("timeout_ms" in value) ||
-      value.timeout_ms === undefined ||
-      typeof value.timeout_ms === "number")
-  );
+function parseBashToolInput(value: unknown): BashToolInput | undefined {
+  const parsed = bashToolInputSchema.safeParse(value);
+  return parsed.success ? parsed.data : undefined;
 }
 
 function makeDeltaHandler(
@@ -126,16 +120,22 @@ async function gateBashCall(
   ctx: BashToolContext,
   toolName: ShellToolName,
   input: Record<string, unknown>,
+  classification: CommandClassification,
   annotations: ToolAnnotations,
+  explanation?: string,
 ): Promise<NormalizedToolResult | undefined> {
   if (ctx.policy) {
-    return gateToolCall(ctx, BASH_TOOL_AGENT_NAME, toolName, input, annotations);
+    return gateToolCall(ctx, BASH_TOOL_AGENT_NAME, toolName, input, annotations, {
+      includePolicyReason: classification === "dangerous",
+      ...(explanation !== undefined ? { explanation } : {}),
+    });
   }
   const approval = await ctx.requestApproval({
     agentName: BASH_TOOL_AGENT_NAME,
     toolName,
     input,
-    reason: "shell 命令需确认",
+    reason: classification === "dangerous" ? "破坏性操作" : undefined,
+    ...(explanation !== undefined ? { explanation } : {}),
   });
   if (!approval.approved) {
     return failedToolResult(
@@ -184,33 +184,37 @@ export function buildBashToolset(
   };
   const plan: ToolExecutionPlan = {
     prepare: async (rawInput, capturedState) => {
-      if (!isBashToolInput(rawInput)) {
+      const input = parseBashToolInput(rawInput);
+      if (input === undefined) {
         return failedToolResult(
           TOOL_OUTCOME_KINDS.invalidInput,
-          "参数校验失败: command 必须为字符串",
+          "参数校验失败: command 必须为非空字符串，explanation 最多 100 字符",
           { raw: rawInput },
         );
       }
-      const invocation = resolveInvocation(rawInput, capturedClassification(capturedState));
+      const invocation = resolveInvocation(input, capturedClassification(capturedState));
       return gateBashCall(
         ctx,
         toolName,
         {
-          command: rawInput.command,
+          command: input.command,
           workdir: invocation.workdir,
           timeout_ms: invocation.timeoutMs,
         },
+        invocation.classification,
         invocation.annotations,
+        input.explanation,
       );
     },
     resources: (rawInput, capturedState) => {
-      if (!isBashToolInput(rawInput)) {
+      const input = parseBashToolInput(rawInput);
+      if (input === undefined) {
         return [
           { key: OPAQUE_SHELL_SIDE_EFFECT_RESOURCE, mode: TOOL_RESOURCE_ACCESS_MODES.write },
           { key: `shell:${settings.workdir}`, mode: TOOL_RESOURCE_ACCESS_MODES.write },
         ];
       }
-      const invocation = resolveInvocation(rawInput, capturedClassification(capturedState));
+      const invocation = resolveInvocation(input, capturedClassification(capturedState));
       const readOnly =
         invocation.annotations.readOnlyHint === true &&
         invocation.annotations.destructiveHint !== true;
@@ -225,13 +229,16 @@ export function buildBashToolset(
             workdirResource,
           ];
     },
-    captureExecutionState: (rawInput) =>
-      isBashToolInput(rawInput) ? resolveInvocation(rawInput).classification : "unknown",
+    captureExecutionState: (rawInput) => {
+      const input = parseBashToolInput(rawInput);
+      return input === undefined ? "unknown" : resolveInvocation(input).classification;
+    },
     revalidateExecution: (rawInput, capturedState) => {
-      if (capturedState !== "known-safe" || !isBashToolInput(rawInput)) {
+      const input = parseBashToolInput(rawInput);
+      if (capturedState !== "known-safe" || input === undefined) {
         return undefined;
       }
-      return resolveInvocation(rawInput).classification === "known-safe"
+      return resolveInvocation(input).classification === "known-safe"
         ? undefined
         : failedToolResult(
             TOOL_OUTCOME_KINDS.toolFailed,

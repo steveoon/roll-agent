@@ -229,6 +229,9 @@ export function ChatApp(props: ChatAppProps): ReactElement {
       ? h(ConfirmSelect, {
           prompt: state.pendingConfirm.prompt,
           args: state.pendingConfirm.args,
+          ...(state.pendingConfirm.explanation !== undefined
+            ? { explanation: state.pendingConfirm.explanation }
+            : {}),
           width: layout.columns,
           maxRows: layout.promptRows + layout.popupRows,
           onDecide: resolveConfirm,

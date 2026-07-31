@@ -5,7 +5,11 @@ import type { SessionEvent } from "@roll-agent/runtime";
 import { createSpinner, log } from "./output.ts";
 import { GLYPHS } from "./glyphs.ts";
 import { computeUsageParts, formatUsageLine } from "./token-format.ts";
-import { formatToolInput, formatApprovalDetails } from "./tool-format.ts";
+import {
+  formatApprovalDetails,
+  formatApprovalExplanation,
+  formatToolInput,
+} from "./tool-format.ts";
 import { formatDebugEvent } from "./debug-format.ts";
 
 export interface ChatApprover {
@@ -104,10 +108,14 @@ export class ChatRenderer {
         const reason = event.reason ? `（${event.reason}）` : "";
         const details = formatApprovalDetails(event.input);
         const header = `执行 ${event.agentName}.${event.toolName}${reason}?`;
-        const approved = await this.confirm(
-          details ? `${header}\n${details}` : header,
-          this.signal,
-        );
+        const formattedExplanation =
+          event.explanation === undefined
+            ? undefined
+            : formatApprovalExplanation(event.explanation);
+        const explanation =
+          formattedExplanation === undefined ? "" : `AI 说明：${formattedExplanation}`;
+        const message = [header, explanation, details].filter((line) => line.length > 0).join("\n");
+        const approved = await this.confirm(message, this.signal);
         if (approved) {
           approver.approve(event.approvalId);
         } else {

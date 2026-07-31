@@ -1886,6 +1886,7 @@ export class AgentSession {
       toolName: request.toolName,
       input: request.input,
       ...(request.reason ? { reason: request.reason } : {}),
+      ...(request.explanation !== undefined ? { explanation: request.explanation } : {}),
     });
     return decision;
   }
