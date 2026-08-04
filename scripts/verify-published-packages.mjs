@@ -128,9 +128,19 @@ const PACKAGE_CHECKS = [
       "package/dist/index.d.ts",
       "package/dist/conformance.js",
       "package/dist/conformance.d.ts",
+      "package/dist/reference-adapter.js",
+      "package/dist/reference-adapter.d.ts",
       "package/dist/schema/roll-relay-protocol-v1.schema.json",
+      "package/dist/schema/roll-relay-protocol-v1.1.schema.json",
+      "package/fixtures/v1.1/manifest.json",
+      "package/fixtures/v1.1/valid-interaction-request-approval.json",
+      "package/fixtures/v1.1/valid-interaction-candidate-user-input.json",
     ],
-    expectedJavaScriptFiles: ["package/dist/conformance.js", "package/dist/index.js"],
+    expectedJavaScriptFiles: [
+      "package/dist/conformance.js",
+      "package/dist/index.js",
+      "package/dist/reference-adapter.js",
+    ],
     expectedFixturePrefix: "package/fixtures/v1/",
     forbiddenPackagedText: RELAY_PROTOCOL_FORBIDDEN_IMPORTS,
     verifyManifest(manifest) {
@@ -139,8 +149,24 @@ const PACKAGE_CHECKS = [
       assert.equal(manifest.exports?.["./conformance"].default, "./dist/conformance.js");
       assert.equal(manifest.exports?.["./conformance"].types, "./dist/conformance.d.ts");
       assert.equal(
+        manifest.exports?.["./reference-adapter"].default,
+        "./dist/reference-adapter.js",
+      );
+      assert.equal(
+        manifest.exports?.["./reference-adapter"].types,
+        "./dist/reference-adapter.d.ts",
+      );
+      assert.equal(
         manifest.exports?.["./schema"],
         "./dist/schema/roll-relay-protocol-v1.schema.json",
+      );
+      assert.equal(
+        manifest.exports?.["./schema/v1.0"],
+        "./dist/schema/roll-relay-protocol-v1.schema.json",
+      );
+      assert.equal(
+        manifest.exports?.["./schema/v1.1"],
+        "./dist/schema/roll-relay-protocol-v1.1.schema.json",
       );
       assert.equal(manifest.exports?.["./fixtures/*"], "./fixtures/*");
     },

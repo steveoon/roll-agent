@@ -1,0 +1,6 @@
+{
+  "type": "device.connect",
+  "protocolVersion": "1.1",
+  "deviceId": "00000000-0000-4000-8000-000000000506",
+  "pairingToken": "pairing-token-with-sufficient-length"
+}

@@ -1230,6 +1230,7 @@ test("Protocol 1.1 accepts a remote rejection without invoking approval policy",
 
 test("Companion Relay Protocol remains separate from Runtime Protocol", () => {
   assert.equal(legacyRelayMessageSchema, relayMessageSchema);
+  assert.equal(COMPANION_RELAY_PROTOCOL_VERSION, "1.0");
   assert.equal(
     relayDeviceConnectSchema.parse({
       type: "device.connect",
@@ -1385,6 +1386,10 @@ test("CompanionRelayBridge routes requests outbound and replays unacked events a
   bridge.connect(first);
   await flush();
   assert.equal(first.sent[0]?.type, "device.connect");
+  assert.equal(
+    first.sent[0]?.type === "device.connect" ? first.sent[0].protocolVersion : undefined,
+    "1.0",
+  );
 
   first.receive({
     type: "runtime.request",

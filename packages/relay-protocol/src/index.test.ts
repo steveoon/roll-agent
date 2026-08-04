@@ -6,12 +6,17 @@ import {
   runtimeEventEnvelopeSchema,
 } from "@roll-agent/protocol";
 import {
-  RELAY_MESSAGE_TYPE_VALUES,
   RELAY_ERROR_CODES,
   RELAY_ERROR_RETRYABILITY,
+  RELAY_INTERACTION_METHODS_V11,
+  RELAY_MESSAGE_TYPE_VALUES,
+  RELAY_MESSAGE_TYPE_VALUES_V11,
   RELAY_MUTATION_REQUEST_METHODS,
+  LATEST_RELAY_PROTOCOL_VERSION,
   RELAY_PROTOCOL_REGISTRY,
   RELAY_PROTOCOL_VERSION,
+  RELAY_REQUEST_METHODS_V11,
+  RELAY_REQUEST_METHOD_VALUES_V11,
   RELAY_REQUEST_REPLAY_DISPOSITIONS,
   RELAY_REQUEST_METHODS,
   RELAY_REQUEST_METHOD_DISPOSITIONS,
@@ -20,15 +25,25 @@ import {
   classifyRelayAck,
   classifyRelayRequestReplay,
   getRelayRequestMethodDisposition,
+  getRelayRequestMethodDispositionForVersion,
   getRelayProtocolRegistry,
   getRelayErrorRetryability,
   isRelayMutationRequestMethod,
   negotiateRelayProtocolVersion,
+  parseRelayInteractionCandidateForRequestV11,
+  parseRelayMessageForVersion,
   parseRelayRequestParams,
+  parseRelayRequestParamsForVersion,
   parseRelayRequestResult,
+  projectRuntimeEventEnvelopeForRelayV11,
   relayDeviceConnectSchema,
+  relayInteractionCancelledSchemaV11,
+  relayInteractionRequestSchemaV11,
+  relayInteractionResolvedSchemaV11,
   relayRuntimeEventSchema,
+  relayRuntimeEventSchemaV11,
   relayRuntimeRequestSchema,
+  relayRuntimeRequestSchemaV11,
 } from "./index.ts";
 
 const IDS = {
@@ -46,7 +61,8 @@ const IDS = {
 
 test("Relay Protocol v1.0 freezes message and request registries", () => {
   assert.equal(RELAY_PROTOCOL_VERSION, "1.0");
-  assert.deepEqual(SUPPORTED_RELAY_PROTOCOL_VERSIONS, ["1.0"]);
+  assert.equal(LATEST_RELAY_PROTOCOL_VERSION, "1.1");
+  assert.deepEqual(SUPPORTED_RELAY_PROTOCOL_VERSIONS, ["1.1", "1.0"]);
   assert.deepEqual(RELAY_MESSAGE_TYPE_VALUES, [
     "device.connect",
     "runtime.request",
@@ -73,6 +89,256 @@ test("Relay Protocol v1.0 freezes message and request registries", () => {
     "approval.candidate",
   ]);
   assert.deepEqual(getRelayProtocolRegistry("1.0"), RELAY_PROTOCOL_REGISTRY["1.0"]);
+});
+
+test("Relay Wire 1.1 registers typed interactions without legacy approval mutations", () => {
+  assert.deepEqual(RELAY_MESSAGE_TYPE_VALUES_V11, [
+    ...RELAY_MESSAGE_TYPE_VALUES,
+    "interaction.request",
+    "interaction.resolved",
+    "interaction.cancelled",
+  ]);
+  assert.deepEqual(RELAY_REQUEST_METHOD_VALUES_V11, [
+    "initialize",
+    "thread.list",
+    "thread.create",
+    "thread.open",
+    "thread.snapshot",
+    "thread.rename",
+    "thread.delete",
+    "thread.detach",
+    "thread.capabilities",
+    "turn.start",
+    "turn.cancel",
+    "operation.get",
+    "interaction.candidate",
+  ]);
+  assert.equal(
+    getRelayRequestMethodDispositionForVersion("1.1", "interaction.candidate"),
+    "mutation",
+  );
+  assert.equal(getRelayRequestMethodDispositionForVersion("1.1", "approval.respond"), undefined);
+  assert.equal(getRelayRequestMethodDispositionForVersion("1.1", "approval.candidate"), undefined);
+  assert.equal(getRelayRequestMethodDispositionForVersion("1.0", "approval.candidate"), "mutation");
+  assert.equal(negotiateRelayProtocolVersion(["1.0", "1.1"]), "1.1");
+});
+
+test("version-aware frame parsing cannot smuggle interactions into Wire 1.0", () => {
+  const request = {
+    type: "interaction.request",
+    workspaceId: IDS.workspace,
+    relaySequence: 4,
+    interactionId: IDS.interaction,
+    threadId: IDS.thread,
+    turnId: IDS.turn,
+    method: RELAY_INTERACTION_METHODS_V11.approvalRequest,
+    expiresAt: "2026-08-04T12:05:00.000Z",
+    sensitivity: "normal",
+    projection: {
+      approvalId: IDS.approval,
+      agentName: "workspace",
+      toolName: "write_file",
+      explanation: "写入用户明确要求的文件。",
+    },
+  } as const;
+  assert.equal(parseRelayMessageForVersion("1.1", request).type, "interaction.request");
+  assert.throws(() => parseRelayMessageForVersion("1.0", request));
+  assert.throws(() =>
+    relayInteractionRequestSchemaV11.parse({
+      ...request,
+      projection: {
+        ...request.projection,
+        input: { command: "secret command" },
+      },
+    }),
+  );
+  assert.throws(() =>
+    relayInteractionRequestSchemaV11.parse({
+      ...request,
+      sensitivity: "secret",
+    }),
+  );
+  assert.throws(() =>
+    relayInteractionResolvedSchemaV11.parse({
+      type: "interaction.resolved",
+      workspaceId: IDS.workspace,
+      relaySequence: 5,
+      interactionId: IDS.interaction,
+      threadId: IDS.thread,
+      turnId: IDS.turn,
+      method: request.method,
+      result: { decision: "approve" },
+    }),
+  );
+  assert.throws(() =>
+    relayInteractionCancelledSchemaV11.parse({
+      type: "interaction.cancelled",
+      workspaceId: IDS.workspace,
+      relaySequence: 5,
+      interactionId: IDS.interaction,
+      threadId: IDS.thread,
+      turnId: IDS.turn,
+      method: request.method,
+      reason: "local token: must-not-cross-wire",
+    }),
+  );
+});
+
+test("interaction candidates are method-specific and User Input is correlated to its form", () => {
+  const request = relayInteractionRequestSchemaV11.parse({
+    type: "interaction.request",
+    workspaceId: IDS.workspace,
+    relaySequence: 7,
+    interactionId: IDS.interaction,
+    threadId: IDS.thread,
+    turnId: IDS.turn,
+    method: RELAY_INTERACTION_METHODS_V11.userInputRequest,
+    expiresAt: "2026-08-04T12:05:00.000Z",
+    sensitivity: "normal",
+    projection: {
+      title: "部署配置",
+      controls: [
+        {
+          type: "choice",
+          id: "region",
+          label: "部署区域",
+          required: true,
+          multiple: false,
+          options: [
+            { id: "east", label: "华东" },
+            { id: "west", label: "华西" },
+          ],
+        },
+        {
+          type: "text",
+          id: "workspace",
+          label: "目标 Workspace",
+          required: true,
+        },
+      ],
+    },
+  });
+  assert.deepEqual(
+    parseRelayInteractionCandidateForRequestV11(request, {
+      status: "submitted",
+      values: [
+        { id: "workspace", value: "production" },
+        { id: "region", value: "east" },
+      ],
+    }).candidate,
+    {
+      status: "submitted",
+      values: [
+        { id: "region", value: "east" },
+        { id: "workspace", value: "production" },
+      ],
+    },
+  );
+  assert.throws(() =>
+    parseRelayInteractionCandidateForRequestV11(request, {
+      status: "submitted",
+      values: [
+        { id: "region", value: "north" },
+        { id: "workspace", value: "production" },
+      ],
+    }),
+  );
+  assert.throws(() =>
+    parseRelayRequestParamsForVersion("1.1", RELAY_REQUEST_METHODS_V11.interactionCandidate, {
+      interactionId: IDS.interaction,
+      threadId: IDS.thread,
+      turnId: IDS.turn,
+      method: RELAY_INTERACTION_METHODS_V11.approvalRequest,
+      candidate: { status: "submitted", values: [] },
+    }),
+  );
+  assert.throws(() =>
+    relayRuntimeRequestSchemaV11.parse({
+      type: "runtime.request",
+      requestId: IDS.request,
+      workspaceId: IDS.workspace,
+      method: "approval.respond",
+      params: {},
+    }),
+  );
+});
+
+test("Relay Wire 1.1 timeline projector strips Tool data and Approval preview", () => {
+  const toolStarted = runtimeEventEnvelopeSchema.parse({
+    protocolVersion: "1.2",
+    runtimeInstanceId: IDS.runtime,
+    sequence: 8,
+    timestamp: "2026-08-04T12:00:00.000Z",
+    threadId: IDS.thread,
+    turnId: IDS.turn,
+    event: {
+      type: "tool.started",
+      toolCallId: "tool-1",
+      agentName: "workspace",
+      toolName: "exec",
+      input: { command: "secret command" },
+    },
+  });
+  const projected = projectRuntimeEventEnvelopeForRelayV11(toolStarted);
+  assert.ok(projected?.event.type === "tool.started");
+  assert.equal("input" in projected.event, false);
+  assert.equal(
+    relayRuntimeEventSchemaV11.parse({
+      type: "runtime.event",
+      workspaceId: IDS.workspace,
+      relaySequence: 8,
+      event: projected,
+    }).event.protocolVersion,
+    "1.1",
+  );
+  assert.throws(() =>
+    relayRuntimeEventSchemaV11.parse({
+      type: "runtime.event",
+      workspaceId: IDS.workspace,
+      relaySequence: 8,
+      event: toolStarted,
+    }),
+  );
+
+  assert.equal(
+    projectRuntimeEventEnvelopeForRelayV11({
+      ...toolStarted,
+      event: {
+        type: "tool.output",
+        toolCallId: "tool-1",
+        agentName: "workspace",
+        toolName: "exec",
+        stream: "stdout",
+        delta: "secret output",
+      },
+    }),
+    undefined,
+  );
+
+  const approval = projectRuntimeEventEnvelopeForRelayV11({
+    ...toolStarted,
+    event: {
+      type: "approval.required",
+      approval: {
+        id: IDS.approval,
+        turnId: IDS.turn,
+        agentName: "workspace",
+        toolName: "exec",
+        preview: {
+          command: "secret command",
+          explanation: "运行测试以验证修改。",
+        },
+        reason: "local policy detail",
+      },
+    },
+  });
+  assert.ok(approval?.event.type === "approval.required");
+  assert.deepEqual(approval.event.approval, {
+    approvalId: IDS.approval,
+    agentName: "workspace",
+    toolName: "exec",
+    explanation: "运行测试以验证修改。",
+  });
 });
 
 test("every frozen Relay method has one explicit disposition", () => {
