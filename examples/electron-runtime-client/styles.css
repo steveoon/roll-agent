@@ -20,8 +20,64 @@ body {
   white-space: pre-wrap;
 }
 
-#approval-dialog {
+#approval-dialog,
+#user-input-dialog {
   max-width: min(36rem, calc(100vw - 3rem));
+}
+
+#user-input-form {
+  width: min(32rem, calc(100vw - 5rem));
+}
+
+#user-input-controls {
+  display: grid;
+  gap: 1rem;
+  max-height: 55vh;
+  overflow: auto;
+  padding-block: 0.5rem;
+}
+
+.user-input-control {
+  display: grid;
+  gap: 0.35rem;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.user-input-control > input,
+.user-input-control > textarea {
+  box-sizing: border-box;
+  width: 100%;
+}
+
+.user-input-control-description {
+  margin: 0;
+  opacity: 0.75;
+  font-size: 0.875rem;
+}
+
+.user-input-checkbox,
+.user-input-choice-option > label {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.5rem;
+}
+
+.user-input-choice-option {
+  display: grid;
+  gap: 0.25rem;
+}
+
+.user-input-choice-option .user-input-control-description {
+  margin-inline-start: 1.5rem;
+}
+
+#user-input-error {
+  color: CanvasText;
+  padding: 0.75rem;
+  border-inline-start: 0.25rem solid Mark;
+  background: color-mix(in srgb, Mark 18%, transparent);
 }
 
 #approval-preview {
@@ -40,4 +96,11 @@ body {
   display: flex;
   justify-content: flex-end;
   gap: 0.5rem;
+}
+
+.interaction-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.5rem;
+  margin-block-start: 1rem;
 }

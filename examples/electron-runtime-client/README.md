@@ -4,10 +4,10 @@ This is intentionally an Electron adapter, not a second Roll client
 implementation:
 
 - `main.ts` owns `@roll-agent/client-node`, the child process, stderr, and IPC.
-- `preload.ts` exposes named Thread/Turn methods plus
-  `onApprovalRequest(handler)`, never a generic `request(method, params)` escape hatch.
-- `renderer.ts` only renders events, sends named commands, and returns a decision from the
-  approval handler. It never constructs `approval.respond` or a JSON-RPC id.
+- `preload.ts` exposes named Thread/Turn methods plus `onApprovalRequest(handler)` and
+  `onUserInputRequest(handler)`, never a generic `request(method, params)` escape hatch.
+- `renderer.ts` only renders events, sends named commands, and completes typed Approval/User Input
+  handlers. It never constructs a Server Response or a JSON-RPC id.
 
 ## Scope
 
@@ -46,8 +46,9 @@ The build intentionally emits three different targets into the ignored
 | `preload.cjs` | Bundled CommonJS | Sandboxed Electron preloads cannot use the ESM loader |
 | `renderer.js` | Browser ESM | The renderer has no Node.js access |
 
-The verifier checks those boundaries as well as the CSP, sandbox, and absence of
-the blocking `window.confirm()` API. To run the built example, install Electron
+The verifier runs the pure renderer-interaction registry tests, enforces explicit raw/gzip renderer
+bundle budgets, and checks those boundaries as well as the CSP, sandbox, and absence of the
+blocking `window.confirm()` API. To run the built example, install Electron
 in a host project whose `package.json` points `main` at this `dist/main.js`, then
 start Electron with `--workspace=/absolute/path/to/project`.
 
@@ -57,13 +58,20 @@ expose API keys, environment variables, arbitrary process spawning, a generic
 Runtime request method, or a raw `ipcRenderer` object to the renderer.
 
 This reference accepts Runtime Protocol `"1.2"` and the N-1 `"1.1"` fallback. Its startup
-`approval.request` handler is included in the 1.2 `client.capabilities.set` handshake, so
-`RollNodeClient.start()` does not resolve until Runtime has acknowledged that capability. The
-example deliberately implements Approval only; it does not implement the #185
-`userInput.request` interaction.
+`approval.request` and named `userInput.request` handlers are included in the 1.2
+`client.capabilities.set` handshake, so `RollNodeClient.start()` does not resolve until Runtime has
+acknowledged those capabilities. When negotiation falls back to 1.1, Approval remains available
+and User Input is not advertised or delivered.
 
-Main owns a renderer-local request token, binds it to one `webContents`, and never treats that
-token as a Runtime JSON-RPC `id` or 1.2 `interactionId`. In 1.2 Runtime cancels by
-`interactionId`; in 1.1 it cancels by `serverRequestId`. `@roll-agent/client-node` maps either
-form to the same preload `AbortSignal`, closes the asynchronous `<dialog>`, suppresses a late
-Result, and rejects stale or cross-window responses.
+Main owns each renderer-local request token and binds it to the exact method, `webContents`, and
+main-document generation. Main-frame navigation/reload, renderer exit, destroyed/closed windows,
+and Runtime cancellation invalidate the token through one settlement registry. Wrong-window,
+wrong-method, old-generation, duplicate, and late responses cannot consume another valid pending
+interaction. The renderer token is never treated as a Runtime JSON-RPC `id`, 1.2 `interactionId`,
+or mutation `requestId`.
+
+The User Input dialog renders all five 1.2 controls (`text`, `multiline`, `number`, `boolean`, and
+`choice`) with DOM `createElement()`/`textContent` APIs. Escape and Cancel return a normal
+`{ status: "cancelled" }` result. Submitted values travel only over the named result IPC and are
+validated again against the original request in Main; they are not copied into logs or Runtime
+event output. The preload exposes neither raw `ipcRenderer` nor an untyped generic interaction API.

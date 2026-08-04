@@ -1,35 +1,55 @@
 import { app, BrowserWindow, ipcMain } from "electron";
-import { randomUUID } from "node:crypto";
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import {
   RUNTIME_METHODS,
   RUNTIME_SERVER_REQUEST_METHODS,
+  normalizeUserInputResult,
   parseRuntimeMethodParams,
   parseRuntimeServerRequestResultForVersion,
   type ApprovalRequestResult,
   type RuntimeServerRequestParamsForVersion,
+  type UserInputRequestParamsV12,
+  type UserInputResult,
 } from "@roll-agent/protocol";
 import { RollNodeClient } from "@roll-agent/client-node";
 import type { IpcMainInvokeEvent } from "electron";
+import {
+  RendererInteractionRegistry,
+  type RendererInteractionAuthority,
+  type RendererInteractionMethod,
+} from "./renderer-interaction-registry.ts";
 
 let client: RollNodeClient | undefined;
 let shutdownPromise: Promise<void> | undefined;
 let allowImmediateExit = false;
-
-interface PendingRendererApproval {
-  readonly webContentsId: number;
-  resolve(result: ApprovalRequestResult): void;
-  reject(error: Error): void;
-}
 
 type ApprovalProtocolVersion = "1.2" | "1.1";
 type RendererApprovalRequestParams = RuntimeServerRequestParamsForVersion<
   ApprovalProtocolVersion,
   typeof RUNTIME_SERVER_REQUEST_METHODS.approvalRequest
 >;
+type RendererInteractionParamsByMethod = {
+  readonly [RUNTIME_SERVER_REQUEST_METHODS.approvalRequest]: RendererApprovalRequestParams;
+  readonly [RUNTIME_SERVER_REQUEST_METHODS.userInputRequest]: UserInputRequestParamsV12;
+};
+type RendererInteractionResultByMethod = {
+  readonly [RUNTIME_SERVER_REQUEST_METHODS.approvalRequest]: ApprovalRequestResult;
+  readonly [RUNTIME_SERVER_REQUEST_METHODS.userInputRequest]: UserInputResult;
+};
 
-const pendingRendererApprovals = new Map<string, PendingRendererApproval>();
+const RENDERER_INTERACTION_CHANNELS = {
+  [RUNTIME_SERVER_REQUEST_METHODS.approvalRequest]: {
+    request: "roll:approval-request",
+    cancel: "roll:approval-cancel",
+  },
+  [RUNTIME_SERVER_REQUEST_METHODS.userInputRequest]: {
+    request: "roll:user-input-request",
+    cancel: "roll:user-input-cancel",
+  },
+} as const satisfies Readonly<
+  Record<RendererInteractionMethod, { readonly request: string; readonly cancel: string }>
+>;
 
 function requireClient(): RollNodeClient {
   if (client === undefined) {
@@ -38,49 +58,157 @@ function requireClient(): RollNodeClient {
   return client;
 }
 
-function assertTrustedSender(event: IpcMainInvokeEvent, trustedUrl: string): void {
-  if (event.senderFrame?.url !== trustedUrl) {
+function requireApprovalProtocolVersion(): ApprovalProtocolVersion {
+  const protocolVersion = requireClient().getInitializationResult().protocolVersion;
+  if (protocolVersion !== "1.2" && protocolVersion !== "1.1") {
+    throw new Error("Approval is unavailable for the negotiated Runtime Protocol version");
+  }
+  return protocolVersion;
+}
+
+function assertTrustedSender(
+  event: IpcMainInvokeEvent,
+  trustedUrl: string,
+  trustedWebContentsId: number,
+): void {
+  if (event.sender.id !== trustedWebContentsId || event.senderFrame?.url !== trustedUrl) {
     throw new Error("Rejected Roll IPC from an untrusted frame");
+  }
+}
+
+function requireRequestToken(value: unknown): string {
+  if (typeof value !== "string" || value.length === 0) {
+    throw new Error("Invalid renderer interaction request token");
+  }
+  return value;
+}
+
+function getAbortError(signal: AbortSignal): Error {
+  return signal.reason instanceof Error
+    ? signal.reason
+    : new Error("Runtime cancelled the renderer interaction");
+}
+
+function sendToRenderer(
+  window: BrowserWindow,
+  channel: string,
+  ...args: readonly unknown[]
+): boolean {
+  if (window.isDestroyed() || window.webContents.isDestroyed()) {
+    return false;
+  }
+  try {
+    window.webContents.send(channel, ...args);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function isMainFrameNavigation(
+  eventOrDetails: unknown,
+  detailsOrUrl: unknown,
+  legacyIsMainFrame: unknown,
+): boolean {
+  if (typeof legacyIsMainFrame === "boolean") {
+    return legacyIsMainFrame;
+  }
+  for (const candidate of [detailsOrUrl, eventOrDetails]) {
+    if (typeof candidate === "object" && candidate !== null && "isMainFrame" in candidate) {
+      return candidate.isMainFrame === true;
+    }
+  }
+  return true;
+}
+
+async function requestRendererInteraction<TMethod extends RendererInteractionMethod>(
+  window: BrowserWindow,
+  registry: RendererInteractionRegistry,
+  documentGeneration: number,
+  method: TMethod,
+  params: RendererInteractionParamsByMethod[TMethod],
+  signal: AbortSignal,
+  parseResult: (value: unknown) => RendererInteractionResultByMethod[TMethod],
+): Promise<RendererInteractionResultByMethod[TMethod]> {
+  if (signal.aborted) {
+    throw getAbortError(signal);
+  }
+  const authority = {
+    method,
+    webContentsId: window.webContents.id,
+    documentGeneration,
+  } satisfies RendererInteractionAuthority;
+  const registered = registry.register(authority);
+  const channels = RENDERER_INTERACTION_CHANNELS[method];
+  const abort = () => {
+    const error = getAbortError(signal);
+    if (registry.cancel(registered.requestToken, authority, error)) {
+      sendToRenderer(window, channels.cancel, registered.requestToken);
+    }
+  };
+
+  signal.addEventListener("abort", abort, { once: true });
+  if (signal.aborted) {
+    abort();
+  } else if (
+    !sendToRenderer(window, channels.request, {
+      requestToken: registered.requestToken,
+      params,
+    })
+  ) {
+    registry.cancel(
+      registered.requestToken,
+      authority,
+      new Error("Renderer is unavailable for this interaction"),
+    );
+  }
+
+  try {
+    return parseResult(await registered.promise);
+  } finally {
+    signal.removeEventListener("abort", abort);
   }
 }
 
 function requestRendererApproval(
   window: BrowserWindow,
+  registry: RendererInteractionRegistry,
+  documentGeneration: number,
   params: RendererApprovalRequestParams,
   signal: AbortSignal,
 ): Promise<ApprovalRequestResult> {
-  if (signal.aborted) {
-    return Promise.reject(
-      signal.reason instanceof Error ? signal.reason : new Error("Approval request was cancelled"),
-    );
-  }
-  const requestToken = randomUUID();
-  const deferred = Promise.withResolvers<ApprovalRequestResult>();
-  const finish = () => {
-    pendingRendererApprovals.delete(requestToken);
-    signal.removeEventListener("abort", abort);
-  };
-  const abort = () => {
-    finish();
-    window.webContents.send("roll:approval-cancel", requestToken);
-    deferred.reject(
-      signal.reason instanceof Error ? signal.reason : new Error("Approval request was cancelled"),
-    );
-  };
-  pendingRendererApprovals.set(requestToken, {
-    webContentsId: window.webContents.id,
-    resolve: (result) => {
-      finish();
-      deferred.resolve(result);
-    },
-    reject: (error) => {
-      finish();
-      deferred.reject(error);
-    },
-  });
-  signal.addEventListener("abort", abort, { once: true });
-  window.webContents.send("roll:approval-request", { requestToken, params });
-  return deferred.promise;
+  return requestRendererInteraction(
+    window,
+    registry,
+    documentGeneration,
+    RUNTIME_SERVER_REQUEST_METHODS.approvalRequest,
+    params,
+    signal,
+    (value) =>
+      parseRuntimeServerRequestResultForVersion(
+        requireApprovalProtocolVersion(),
+        RUNTIME_SERVER_REQUEST_METHODS.approvalRequest,
+        value,
+      ),
+  );
+}
+
+function requestRendererUserInput(
+  window: BrowserWindow,
+  registry: RendererInteractionRegistry,
+  documentGeneration: number,
+  params: UserInputRequestParamsV12,
+  signal: AbortSignal,
+): Promise<UserInputResult> {
+  return requestRendererInteraction(
+    window,
+    registry,
+    documentGeneration,
+    RUNTIME_SERVER_REQUEST_METHODS.userInputRequest,
+    params,
+    signal,
+    (value) => normalizeUserInputResult(params, value),
+  );
 }
 
 async function createWindow(): Promise<void> {
@@ -98,17 +226,47 @@ async function createWindow(): Promise<void> {
       preload: resolve(import.meta.dirname, "preload.cjs"),
     },
   });
+  const webContentsId = window.webContents.id;
+  const rendererInteractions = new RendererInteractionRegistry();
+  let documentGeneration = 0;
+  const invalidateRenderer = (message: string) => {
+    rendererInteractions.invalidateWebContents(webContentsId, new Error(message));
+  };
+
   window.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
   window.webContents.on("will-navigate", (event) => event.preventDefault());
+  window.webContents.on("did-start-navigation", (event, detailsOrUrl, _isInPlace, isMainFrame) => {
+    if (!isMainFrameNavigation(event, detailsOrUrl, isMainFrame)) {
+      return;
+    }
+    rendererInteractions.invalidateDocument(
+      webContentsId,
+      documentGeneration,
+      new Error("Renderer document navigation started"),
+    );
+    documentGeneration += 1;
+  });
+  window.webContents.on("render-process-gone", () => {
+    invalidateRenderer("Renderer process exited");
+  });
+  window.webContents.on("destroyed", () => {
+    invalidateRenderer("Renderer webContents was destroyed");
+  });
+  window.on("closed", () => {
+    invalidateRenderer("Renderer window was closed");
+  });
+
   client = await RollNodeClient.start({
     cwd: resolve(workspace),
     serverRequestHandlers: {
       [RUNTIME_SERVER_REQUEST_METHODS.approvalRequest]: (params, { signal }) =>
-        requestRendererApproval(window, params, signal),
+        requestRendererApproval(window, rendererInteractions, documentGeneration, params, signal),
     },
+    onUserInputRequest: (params, { signal }) =>
+      requestRendererUserInput(window, rendererInteractions, documentGeneration, params, signal),
     onStderr: (line) => console.error(`[roll] ${line}`),
     onTurnOutcomeUnknown: (turnId) => {
-      window.webContents.send("roll:outcome-unknown", turnId);
+      sendToRenderer(window, "roll:outcome-unknown", turnId);
     },
   });
   const protocolVersion = client.getInitializationResult().protocolVersion;
@@ -118,73 +276,97 @@ async function createWindow(): Promise<void> {
     throw new Error("This Electron reference requires Runtime Protocol 1.2 or 1.1");
   }
   client.onEvent((event) => {
-    window.webContents.send("roll:event", event);
+    sendToRenderer(window, "roll:event", event);
   });
-  window.on("closed", () => {
-    for (const [requestToken, pending] of pendingRendererApprovals) {
-      if (pending.webContentsId === window.webContents.id) {
-        pendingRendererApprovals.delete(requestToken);
-        pending.reject(new Error("Approval window was closed"));
-      }
+
+  const interactionAuthority = (
+    method: RendererInteractionMethod,
+    event: IpcMainInvokeEvent,
+  ): RendererInteractionAuthority => ({
+    method,
+    webContentsId: event.sender.id,
+    documentGeneration,
+  });
+  const rejectRendererInteraction = (
+    method: RendererInteractionMethod,
+    event: IpcMainInvokeEvent,
+    requestTokenValue: unknown,
+    message: unknown,
+  ) => {
+    assertTrustedSender(event, trustedUrl, webContentsId);
+    if (typeof message !== "string") {
+      throw new Error("Invalid renderer interaction error");
     }
-  });
+    rendererInteractions.reject(
+      requireRequestToken(requestTokenValue),
+      interactionAuthority(method, event),
+      new Error(message.slice(0, 500) || "Renderer interaction handler failed"),
+    );
+    return { accepted: true };
+  };
+
   ipcMain.handle("roll:thread-create", (event, input: unknown) => {
-    assertTrustedSender(event, trustedUrl);
+    assertTrustedSender(event, trustedUrl, webContentsId);
     return requireClient().request(
       RUNTIME_METHODS.threadCreate,
       parseRuntimeMethodParams(RUNTIME_METHODS.threadCreate, input),
     );
   });
   ipcMain.handle("roll:thread-snapshot", (event, input: unknown) => {
-    assertTrustedSender(event, trustedUrl);
+    assertTrustedSender(event, trustedUrl, webContentsId);
     return requireClient().request(
       RUNTIME_METHODS.threadSnapshot,
       parseRuntimeMethodParams(RUNTIME_METHODS.threadSnapshot, input),
     );
   });
   ipcMain.handle("roll:turn-start", (event, input: unknown) => {
-    assertTrustedSender(event, trustedUrl);
+    assertTrustedSender(event, trustedUrl, webContentsId);
     return requireClient().request(
       RUNTIME_METHODS.turnStart,
       parseRuntimeMethodParams(RUNTIME_METHODS.turnStart, input),
     );
   });
   ipcMain.handle("roll:turn-cancel", (event, input: unknown) => {
-    assertTrustedSender(event, trustedUrl);
+    assertTrustedSender(event, trustedUrl, webContentsId);
     return requireClient().request(
       RUNTIME_METHODS.turnCancel,
       parseRuntimeMethodParams(RUNTIME_METHODS.turnCancel, input),
     );
   });
   ipcMain.handle("roll:approval-result", (event, requestToken: unknown, input: unknown) => {
-    assertTrustedSender(event, trustedUrl);
-    if (typeof requestToken !== "string") {
-      throw new Error("Invalid approval request token");
-    }
-    const pending = pendingRendererApprovals.get(requestToken);
-    if (pending === undefined || pending.webContentsId !== event.sender.id) {
-      throw new Error("Approval request is no longer pending for this window");
-    }
-    const result = parseRuntimeServerRequestResultForVersion(
-      protocolVersion,
-      RUNTIME_SERVER_REQUEST_METHODS.approvalRequest,
+    assertTrustedSender(event, trustedUrl, webContentsId);
+    rendererInteractions.resolve(
+      requireRequestToken(requestToken),
+      interactionAuthority(RUNTIME_SERVER_REQUEST_METHODS.approvalRequest, event),
       input,
     );
-    pending.resolve(result);
     return { accepted: true };
   });
-  ipcMain.handle("roll:approval-error", (event, requestToken: unknown, message: unknown) => {
-    assertTrustedSender(event, trustedUrl);
-    if (typeof requestToken !== "string" || typeof message !== "string") {
-      throw new Error("Invalid approval error");
-    }
-    const pending = pendingRendererApprovals.get(requestToken);
-    if (pending === undefined || pending.webContentsId !== event.sender.id) {
-      throw new Error("Approval request is no longer pending for this window");
-    }
-    pending.reject(new Error(message.slice(0, 500) || "Renderer approval handler failed"));
+  ipcMain.handle("roll:approval-error", (event, requestToken: unknown, message: unknown) =>
+    rejectRendererInteraction(
+      RUNTIME_SERVER_REQUEST_METHODS.approvalRequest,
+      event,
+      requestToken,
+      message,
+    ),
+  );
+  ipcMain.handle("roll:user-input-result", (event, requestToken: unknown, input: unknown) => {
+    assertTrustedSender(event, trustedUrl, webContentsId);
+    rendererInteractions.resolve(
+      requireRequestToken(requestToken),
+      interactionAuthority(RUNTIME_SERVER_REQUEST_METHODS.userInputRequest, event),
+      input,
+    );
     return { accepted: true };
   });
+  ipcMain.handle("roll:user-input-error", (event, requestToken: unknown, message: unknown) =>
+    rejectRendererInteraction(
+      RUNTIME_SERVER_REQUEST_METHODS.userInputRequest,
+      event,
+      requestToken,
+      message,
+    ),
+  );
   await window.loadFile(htmlPath);
 }
 

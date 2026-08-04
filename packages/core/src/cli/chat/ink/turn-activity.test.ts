@@ -69,3 +69,31 @@ test("manual compaction reports compacting immediately", () => {
   });
   assert.equal(resolveTurnActivity(state)?.kind, TURN_ACTIVITY_KINDS.compacting);
 });
+
+test("resolveTurnActivity reports user input separately from approval", () => {
+  type PendingUserInput = Extract<SessionEvent, { readonly type: "user-input-required" }>;
+  const requestId = "00000000-0000-4000-8000-000000000185" as PendingUserInput["requestId"];
+  const state = event(busyState(), {
+    type: "user-input-required",
+    requestId,
+    form: {
+      controls: [
+        {
+          type: "choice",
+          id: "region",
+          label: "部署区域",
+          required: true,
+          multiple: false,
+          options: [{ id: "north", label: "北区" }],
+        },
+      ],
+    },
+    expiresAt: "2099-01-01T00:00:00.000Z",
+  });
+  const activity = resolveTurnActivity(state);
+
+  assert.equal(activity?.kind, TURN_ACTIVITY_KINDS.waitingUser);
+  assert.equal(activity?.label, "等待你填写…");
+  assert.equal(activity?.key, `waiting-user-input:${requestId}`);
+  assert.equal(activity?.animated, false);
+});

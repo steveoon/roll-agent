@@ -4,6 +4,7 @@ import { inspectLlmConfigReadiness } from "../../config/helpers.ts";
 import { loadConfig } from "../../config/loader.ts";
 import { resolveLLMCall, thinkingProviderOptions } from "../../llm/providers.ts";
 import { createInterface, type Interface as ReadlineInterface } from "node:readline/promises";
+import type { Readable, Writable } from "node:stream";
 import chalk from "chalk";
 import Table from "cli-table3";
 import { isDebugLogEnabled, log } from "../utils/output.ts";
@@ -34,6 +35,10 @@ import {
   type ChatEngineSignalScope,
   type ChatEngineShutdownSignal,
 } from "../chat/engine-signal-scope.ts";
+import {
+  createClackUserInputPrompt,
+  type ChatUserInputPrompt,
+} from "../utils/user-input-prompts.ts";
 
 type RuntimeModule = typeof import("@roll-agent/runtime");
 
@@ -94,9 +99,10 @@ interface ChatCliScope {
 }
 
 interface ReplIo {
-  readonly input: NodeJS.ReadableStream;
-  readonly output: NodeJS.WritableStream;
+  readonly input: Readable;
+  readonly output: Writable;
   readonly confirm?: ChatConfirm;
+  readonly userInputPrompt?: ChatUserInputPrompt;
   readonly signal?: AbortSignal;
 }
 
@@ -478,8 +484,25 @@ export async function runRepl(
       log.debug(`chat.repl input received · confirm · approved=${String(approved)}`);
       return approved;
     });
-  const renderer = new ChatRenderer(confirmFn, session.getContextWindow(), io.signal);
+  const userInputPromptSource =
+    io.userInputPrompt ?? createClackUserInputPrompt({ input: io.input, output: io.output });
+  const userInputPrompt: ChatUserInputPrompt = {
+    async request(form, signal) {
+      log.debug("chat.repl input waiting · user-input");
+      rl.pause();
+      const result = await userInputPromptSource.request(form, signal);
+      log.debug(`chat.repl input received · user-input · status=${result.status}`);
+      return result;
+    },
+  };
+  const renderer = new ChatRenderer(
+    confirmFn,
+    session.getContextWindow(),
+    io.signal,
+    userInputPrompt,
+  );
   const availableSkills = session.getSkillSummaries();
+  session.setUserInputAvailable(true);
   log.info("进入多轮对话（输入 exit / quit 或 Ctrl-C 退出，/compact 手动压缩上下文）");
 
   let titled = !isNewSession;
@@ -526,9 +549,13 @@ export async function runRepl(
       log.debug("chat.repl send completed");
     }
   } finally {
-    rl.close();
-    if (isNewSession && !submitted && store.countMessages(session.id) === 0) {
-      store.deleteThread(session.id);
+    try {
+      session.setUserInputAvailable(false);
+    } finally {
+      rl.close();
+      if (isNewSession && !submitted && store.countMessages(session.id) === 0) {
+        store.deleteThread(session.id);
+      }
     }
   }
 }

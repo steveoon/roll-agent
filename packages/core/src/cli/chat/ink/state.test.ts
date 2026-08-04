@@ -501,3 +501,39 @@ test("set-auto toggles status.autoApprove without touching confirm state", () =>
   state = chatReducer(state, { type: "set-auto", value: false });
   assert.equal(state.status.autoApprove, false);
 });
+
+test("user input has an independent phase and only the matching request can clear it", () => {
+  type PendingUserInput = Extract<SessionEvent, { readonly type: "user-input-required" }>;
+  const requestId = "00000000-0000-4000-8000-000000000185" as PendingUserInput["requestId"];
+  const otherRequestId = "00000000-0000-4000-8000-000000000186" as PendingUserInput["requestId"];
+  let state = event(createInitialState("qwen", undefined), "input", {
+    type: "user-input-required",
+    requestId,
+    form: {
+      controls: [
+        {
+          type: "text",
+          id: "workspace",
+          label: "目标 Workspace",
+          required: true,
+        },
+      ],
+    },
+    expiresAt: "2099-01-01T00:00:00.000Z",
+  });
+
+  assert.equal(state.phase, "user-input");
+  assert.equal(state.pendingUserInput?.requestId, requestId);
+  assert.equal(state.pendingConfirm, undefined);
+
+  state = event(state, "other", {
+    type: "user-input-settled",
+    requestId: otherRequestId,
+    status: "cancelled",
+  });
+  assert.equal(state.phase, "user-input");
+
+  state = chatReducer(state, { type: "user-input-resolved", requestId });
+  assert.equal(state.phase, "busy");
+  assert.equal(state.pendingUserInput, undefined);
+});

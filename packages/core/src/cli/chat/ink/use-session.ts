@@ -1,7 +1,13 @@
 import { randomUUID } from "node:crypto";
-import { useCallback, useReducer, useRef } from "react";
+import { useCallback, useEffect, useReducer, useRef } from "react";
 import type { AgentSession, SessionEvent } from "@roll-agent/runtime";
-import { chatReducer, createInitialState, type ChatUiState, type HistoryItem } from "./state.ts";
+import {
+  chatReducer,
+  createInitialState,
+  type ChatUiState,
+  type HistoryItem,
+  type PendingUserInput,
+} from "./state.ts";
 import type { ThinkingLevel } from "../../../llm/providers.ts";
 import { log } from "../../utils/output.ts";
 import { formatDebugEvent } from "../../utils/debug-format.ts";
@@ -20,6 +26,10 @@ export interface UseSessionResult {
   readonly compact: () => void;
   readonly cancel: () => void;
   readonly resolveConfirm: (approved: boolean) => void;
+  readonly resolveUserInput: (
+    requestId: PendingUserInput["requestId"],
+    result: UserInputResult,
+  ) => void;
   readonly setDraft: (value: string) => void;
   readonly setThinking: (level: ThinkingLevel) => void;
   readonly setAutoMode: (value: boolean) => void;
@@ -30,6 +40,12 @@ export interface UseSessionResult {
 const STREAM_FLUSH_MS = 32;
 
 type StreamDeltaEvent = Extract<SessionEvent, { type: "text-delta" | "reasoning-delta" }>;
+type UserInputResult = Parameters<AgentSession["resolveUserInput"]>[1];
+
+interface PendingUserInputDecision {
+  readonly requestId: PendingUserInput["requestId"];
+  readonly resolve: (result: UserInputResult) => void;
+}
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
@@ -45,8 +61,21 @@ export function useSession(session: AgentSession, options: UseSessionOptions): U
   );
   const onThinkingChange = options.onThinkingChange;
   const decisionRef = useRef<((approved: boolean) => void) | null>(null);
+  const userInputDecisionRef = useRef<PendingUserInputDecision | null>(null);
   const autoModeRef = useRef(false);
   const busyRef = useRef(false);
+
+  useEffect(() => {
+    session.setUserInputAvailable?.(true);
+    return () => {
+      userInputDecisionRef.current?.resolve({
+        status: "cancelled",
+        reason: "用户输入界面已关闭",
+      });
+      userInputDecisionRef.current = null;
+      session.setUserInputAvailable?.(false);
+    };
+  }, [session]);
 
   const drive = useCallback(
     async (iterable: AsyncIterable<SessionEvent>) => {
@@ -120,6 +149,41 @@ export function useSession(session: AgentSession, options: UseSessionOptions): U
             dispatch({ type: "confirm-resolved" });
             continue;
           }
+          if (event.type === "user-input-required") {
+            dispatch({ type: "session-event", id: randomUUID(), event });
+            const result = await new Promise<UserInputResult>((resolve) => {
+              let settled = false;
+              const expiresAt = Date.parse(event.expiresAt);
+              const remainingMs = Number.isFinite(expiresAt)
+                ? Math.max(0, expiresAt - Date.now())
+                : 0;
+              const expiryTimer = setTimeout(() => {
+                settle({ status: "cancelled", reason: "用户输入请求已超时" });
+              }, remainingMs);
+              const settle = (candidate: UserInputResult): void => {
+                if (settled) {
+                  return;
+                }
+                settled = true;
+                clearTimeout(expiryTimer);
+                resolve(candidate);
+              };
+              userInputDecisionRef.current = {
+                requestId: event.requestId,
+                resolve: settle,
+              };
+            });
+            if (userInputDecisionRef.current?.requestId === event.requestId) {
+              userInputDecisionRef.current = null;
+            }
+            if (result.status === "submitted") {
+              session.resolveUserInput?.(event.requestId, result);
+            } else {
+              session.cancelUserInput?.(event.requestId, result.reason);
+            }
+            dispatch({ type: "user-input-resolved", requestId: event.requestId });
+            continue;
+          }
           dispatch({ type: "session-event", id: randomUUID(), event });
         }
       } catch (error) {
@@ -172,6 +236,16 @@ export function useSession(session: AgentSession, options: UseSessionOptions): U
     decisionRef.current?.(approved);
   }, []);
 
+  const resolveUserInput = useCallback(
+    (requestId: PendingUserInput["requestId"], result: UserInputResult) => {
+      const pending = userInputDecisionRef.current;
+      if (pending?.requestId === requestId) {
+        pending.resolve(result);
+      }
+    },
+    [],
+  );
+
   const setDraft = useCallback((value: string) => {
     dispatch({ type: "set-draft", value });
   }, []);
@@ -206,6 +280,7 @@ export function useSession(session: AgentSession, options: UseSessionOptions): U
     compact,
     cancel,
     resolveConfirm,
+    resolveUserInput,
     setDraft,
     setThinking,
     setAutoMode,
