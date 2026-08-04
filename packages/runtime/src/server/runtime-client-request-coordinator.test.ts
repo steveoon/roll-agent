@@ -15,6 +15,7 @@ import {
   RuntimeClientRequestError,
   RuntimeClientRequestExpiredError,
   createRuntimeClientResponderId,
+  getRuntimeClientRequestCoordinatorInternal,
 } from "./runtime-client-request-coordinator.ts";
 import type { JsonRpcMessage } from "./protocol.ts";
 
@@ -55,6 +56,12 @@ function requestId(responder: MemoryResponder): JsonRpcRequest["id"] {
   );
   assert.ok(message);
   return message.id;
+}
+
+function requestMessages(responder: MemoryResponder): readonly JsonRpcRequest[] {
+  return responder.sent.filter(
+    (candidate): candidate is JsonRpcRequest => "method" in candidate && "id" in candidate,
+  );
 }
 
 test("id:null JSON-RPC error fails only the selected responder and closes it", async () => {
@@ -123,6 +130,7 @@ test("response must come from the eligible responder", async () => {
   const other = new MemoryResponder();
   const eligibleId = createRuntimeClientResponderId();
   const otherId = createRuntimeClientResponderId();
+  const unattachedId = createRuntimeClientResponderId();
   const coordinator = new RuntimeClientRequestCoordinator();
   coordinator.attachResponder({
     id: eligibleId,
@@ -158,6 +166,17 @@ test("response must come from the eligible responder", async () => {
 
   assert.equal(
     coordinator.handleResponse(otherId, {
+      jsonrpc: "2.0",
+      id,
+      result: { decision: "approve" },
+    }),
+    true,
+  );
+  await Promise.resolve();
+  assert.equal(settled, false);
+
+  assert.equal(
+    coordinator.handleResponse(unattachedId, {
       jsonrpc: "2.0",
       id,
       result: { decision: "approve" },
@@ -222,6 +241,59 @@ test("stale detach closure cannot detach a newer responder attachment with the s
     decision: "reject",
     reason: "用户取消",
   });
+});
+
+test("a stale responder session cannot fail a newer attachment with the same id", async () => {
+  const first = new MemoryResponder();
+  const second = new MemoryResponder();
+  const responderId = createRuntimeClientResponderId();
+  const coordinator = new RuntimeClientRequestCoordinator();
+  const detachFirst = coordinator.attachResponder({
+    id: responderId,
+    scopeId,
+    send: (message) => first.send(message),
+    close: () => first.close(),
+  });
+  detachFirst();
+  const detachSecond = coordinator.attachResponder({
+    id: responderId,
+    scopeId,
+    send: (message) => second.send(message),
+    close: () => second.close(),
+  });
+  const pending = coordinator.request(
+    RUNTIME_SERVER_REQUEST_METHODS.approvalRequest,
+    approvalRequestInput(),
+    {
+      key: approvalId,
+      scopeId,
+      eligibleResponderId: responderId,
+      approvalId,
+      threadId,
+      turnId,
+    },
+  );
+  const deliveryId = requestId(second);
+  const internal = getRuntimeClientRequestCoordinatorInternal(coordinator);
+
+  assert.equal(
+    internal.handleResponseForAttachment(detachFirst, {
+      jsonrpc: "2.0",
+      id: null,
+      error: { code: -32_700, message: "stale session parse error" },
+    }),
+    false,
+  );
+  assert.equal(second.closeCalls, 0);
+  assert.equal(
+    internal.handleResponseForAttachment(detachSecond, {
+      jsonrpc: "2.0",
+      id: deliveryId,
+      result: { decision: "approve" },
+    }),
+    true,
+  );
+  assert.deepEqual(await pending.result, { decision: "approve" });
 });
 
 test("absolute deadline expires without delivering or approving", async () => {
@@ -417,4 +489,591 @@ test("far-future deadline is scheduled in bounded timer segments", async (t) => 
     pending.result,
     (error: unknown) => error instanceof RuntimeClientRequestExpiredError,
   );
+});
+
+test("explicit redelivery retires the old delivery and preserves the logical request", async () => {
+  const responder = new MemoryResponder();
+  const responderId = createRuntimeClientResponderId();
+  const coordinator = new RuntimeClientRequestCoordinator();
+  coordinator.attachResponder({
+    id: responderId,
+    scopeId,
+    send: (message) => responder.send(message),
+    close: () => responder.close(),
+  });
+  const pending = coordinator.request(
+    RUNTIME_SERVER_REQUEST_METHODS.approvalRequest,
+    approvalRequestInput(),
+    {
+      key: approvalId,
+      scopeId,
+      eligibleResponderId: responderId,
+      approvalId,
+      threadId,
+      turnId,
+    },
+  );
+  const firstId = requestId(responder);
+
+  assert.equal(
+    getRuntimeClientRequestCoordinatorInternal(coordinator).redeliver(approvalId, responderId),
+    true,
+  );
+  const requests = requestMessages(responder);
+  assert.equal(requests.length, 2);
+  const secondRequest = requests[1];
+  assert.ok(secondRequest);
+  const secondId = secondRequest.id;
+  assert.notEqual(secondId, firstId);
+  assert.deepEqual(responder.sent[1], {
+    jsonrpc: "2.0",
+    method: RUNTIME_SERVER_REQUEST_CANCEL_NOTIFICATION,
+    params: {
+      serverRequestId: firstId,
+      approvalId,
+      reason: "Runtime 请求已重新投递",
+    },
+  });
+
+  assert.equal(
+    coordinator.handleResponse(responderId, {
+      jsonrpc: "2.0",
+      id: firstId,
+      result: { decision: "approve" },
+    }),
+    false,
+  );
+  assert.equal(
+    coordinator.handleResponse(responderId, {
+      jsonrpc: "2.0",
+      id: secondId,
+      result: { decision: "reject", reason: "changed mind" },
+    }),
+    true,
+  );
+  assert.deepEqual(await pending.result, {
+    decision: "reject",
+    reason: "changed mind",
+  });
+});
+
+test("redelivery cannot switch to a different responder", async () => {
+  const eligibleResponder = new MemoryResponder();
+  const otherResponder = new MemoryResponder();
+  const eligibleResponderId = createRuntimeClientResponderId();
+  const otherResponderId = createRuntimeClientResponderId();
+  const coordinator = new RuntimeClientRequestCoordinator();
+  coordinator.attachResponder({
+    id: eligibleResponderId,
+    scopeId,
+    send: (message) => eligibleResponder.send(message),
+    close: () => eligibleResponder.close(),
+  });
+  coordinator.attachResponder({
+    id: otherResponderId,
+    scopeId,
+    send: (message) => otherResponder.send(message),
+    close: () => otherResponder.close(),
+  });
+  const pending = coordinator.request(
+    RUNTIME_SERVER_REQUEST_METHODS.approvalRequest,
+    approvalRequestInput(),
+    {
+      key: approvalId,
+      scopeId,
+      eligibleResponderId,
+      approvalId,
+      threadId,
+      turnId,
+    },
+  );
+  const deliveryId = requestId(eligibleResponder);
+
+  assert.equal(
+    getRuntimeClientRequestCoordinatorInternal(coordinator).redeliver(approvalId, otherResponderId),
+    false,
+  );
+  assert.equal(otherResponder.sent.length, 0);
+  assert.equal(requestMessages(eligibleResponder).length, 1);
+  assert.equal(
+    coordinator.handleResponse(eligibleResponderId, {
+      jsonrpc: "2.0",
+      id: deliveryId,
+      result: { decision: "approve" },
+    }),
+    true,
+  );
+  assert.deepEqual(await pending.result, { decision: "approve" });
+});
+
+test("redelivery does not send a replacement after reentrant cancellation", async () => {
+  const sent: JsonRpcMessage[] = [];
+  const responderId = createRuntimeClientResponderId();
+  const coordinator = new RuntimeClientRequestCoordinator();
+  let reentrantCancellationStarted = false;
+  coordinator.attachResponder({
+    id: responderId,
+    scopeId,
+    send: (message) => {
+      sent.push(message);
+      if (
+        !reentrantCancellationStarted &&
+        "method" in message &&
+        message.method === RUNTIME_SERVER_REQUEST_CANCEL_NOTIFICATION
+      ) {
+        reentrantCancellationStarted = true;
+        assert.equal(coordinator.cancel(approvalId, "reentrant cancellation"), true);
+      }
+    },
+    close: () => undefined,
+  });
+  const pending = coordinator.request(
+    RUNTIME_SERVER_REQUEST_METHODS.approvalRequest,
+    approvalRequestInput(),
+    {
+      key: approvalId,
+      scopeId,
+      eligibleResponderId: responderId,
+      approvalId,
+      threadId,
+      turnId,
+    },
+  );
+
+  assert.equal(
+    getRuntimeClientRequestCoordinatorInternal(coordinator).redeliver(approvalId, responderId),
+    false,
+  );
+  assert.equal(
+    sent.filter((message): message is JsonRpcRequest => "method" in message && "id" in message)
+      .length,
+    1,
+  );
+  await assert.rejects(
+    pending.result,
+    (error: unknown) =>
+      error instanceof RuntimeClientRequestCancelledError &&
+      error.reason === "reentrant cancellation",
+  );
+});
+
+test("redelivery does not cross the original deadline while notifying the responder", async () => {
+  const startMs = Date.parse("2026-07-29T12:00:00.000Z");
+  let nowMs = startMs;
+  let crossedDeadline = false;
+  const sent: JsonRpcMessage[] = [];
+  const responderId = createRuntimeClientResponderId();
+  const coordinator = new RuntimeClientRequestCoordinator({ now: () => nowMs });
+  coordinator.attachResponder({
+    id: responderId,
+    scopeId,
+    send: (message) => {
+      sent.push(message);
+      if (
+        !crossedDeadline &&
+        "method" in message &&
+        message.method === RUNTIME_SERVER_REQUEST_CANCEL_NOTIFICATION
+      ) {
+        crossedDeadline = true;
+        nowMs = startMs + 1_000;
+      }
+    },
+    close: () => undefined,
+  });
+  const pending = coordinator.request(
+    RUNTIME_SERVER_REQUEST_METHODS.approvalRequest,
+    approvalRequestInput(),
+    {
+      key: approvalId,
+      scopeId,
+      eligibleResponderId: responderId,
+      approvalId,
+      threadId,
+      turnId,
+      expiresAt: new Date(startMs + 1_000).toISOString(),
+    },
+  );
+
+  assert.equal(
+    getRuntimeClientRequestCoordinatorInternal(coordinator).redeliver(approvalId, responderId),
+    false,
+  );
+  assert.equal(
+    sent.filter((message): message is JsonRpcRequest => "method" in message && "id" in message)
+      .length,
+    1,
+  );
+  assert.equal(
+    sent.filter(
+      (message) =>
+        "method" in message && message.method === RUNTIME_SERVER_REQUEST_CANCEL_NOTIFICATION,
+    ).length,
+    2,
+  );
+  await assert.rejects(
+    pending.result,
+    (error: unknown) => error instanceof RuntimeClientRequestExpiredError,
+  );
+});
+
+test("redelivery keeps the original absolute deadline", async (t) => {
+  const startMs = Date.parse("2026-07-29T12:00:00.000Z");
+  let nowMs = startMs;
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const responder = new MemoryResponder();
+  const responderId = createRuntimeClientResponderId();
+  const coordinator = new RuntimeClientRequestCoordinator({ now: () => nowMs });
+  coordinator.attachResponder({
+    id: responderId,
+    scopeId,
+    send: (message) => responder.send(message),
+    close: () => responder.close(),
+  });
+  const pending = coordinator.request(
+    RUNTIME_SERVER_REQUEST_METHODS.approvalRequest,
+    approvalRequestInput(),
+    {
+      key: approvalId,
+      scopeId,
+      eligibleResponderId: responderId,
+      approvalId,
+      threadId,
+      turnId,
+      expiresAt: new Date(startMs + 1_000).toISOString(),
+    },
+  );
+
+  nowMs += 500;
+  t.mock.timers.tick(500);
+  assert.equal(
+    getRuntimeClientRequestCoordinatorInternal(coordinator).redeliver(approvalId, responderId),
+    true,
+  );
+  const latestId = requestMessages(responder)[1]?.id;
+
+  nowMs += 500;
+  t.mock.timers.tick(500);
+  await assert.rejects(
+    pending.result,
+    (error: unknown) => error instanceof RuntimeClientRequestExpiredError,
+  );
+  const cancellations = responder.sent.filter(
+    (message) =>
+      "method" in message && message.method === RUNTIME_SERVER_REQUEST_CANCEL_NOTIFICATION,
+  );
+  assert.equal(cancellations.length, 2);
+  assert.deepEqual(cancellations[1], {
+    jsonrpc: "2.0",
+    method: RUNTIME_SERVER_REQUEST_CANCEL_NOTIFICATION,
+    params: {
+      serverRequestId: latestId,
+      approvalId,
+      reason: "Runtime 请求已到期",
+    },
+  });
+});
+
+test("detaching a responder fails only its logical interactions and is idempotent", async () => {
+  const first = new MemoryResponder();
+  const second = new MemoryResponder();
+  const firstId = createRuntimeClientResponderId();
+  const secondId = createRuntimeClientResponderId();
+  const coordinator = new RuntimeClientRequestCoordinator();
+  const detachFirst = coordinator.attachResponder({
+    id: firstId,
+    scopeId,
+    send: (message) => first.send(message),
+    close: () => first.close(),
+  });
+  coordinator.attachResponder({
+    id: secondId,
+    scopeId,
+    send: (message) => second.send(message),
+    close: () => second.close(),
+  });
+  const firstPending = coordinator.request(
+    RUNTIME_SERVER_REQUEST_METHODS.approvalRequest,
+    approvalRequestInput(),
+    {
+      key: "first-responder-request",
+      scopeId,
+      eligibleResponderId: firstId,
+      approvalId,
+      threadId,
+      turnId,
+    },
+  );
+  const secondPending = coordinator.request(
+    RUNTIME_SERVER_REQUEST_METHODS.approvalRequest,
+    approvalRequestInput(),
+    {
+      key: "second-responder-request",
+      scopeId,
+      eligibleResponderId: secondId,
+      approvalId,
+      threadId,
+      turnId,
+    },
+  );
+  const staleFirstDeliveryId = requestId(first);
+  const secondDeliveryId = requestId(second);
+
+  detachFirst();
+  detachFirst();
+  await assert.rejects(
+    firstPending.result,
+    (error: unknown) => error instanceof RuntimeClientRequestCancelledError,
+  );
+  assert.equal(
+    first.sent.filter(
+      (message) =>
+        "method" in message && message.method === RUNTIME_SERVER_REQUEST_CANCEL_NOTIFICATION,
+    ).length,
+    1,
+  );
+  assert.equal(
+    coordinator.handleResponse(firstId, {
+      jsonrpc: "2.0",
+      id: staleFirstDeliveryId,
+      result: { decision: "approve" },
+    }),
+    false,
+  );
+  assert.equal(
+    coordinator.handleResponse(secondId, {
+      jsonrpc: "2.0",
+      id: secondDeliveryId,
+      result: { decision: "approve" },
+    }),
+    true,
+  );
+  assert.deepEqual(await secondPending.result, { decision: "approve" });
+});
+
+test("detaching removes the responder before a cancellation callback can create work", async () => {
+  const sent: JsonRpcMessage[] = [];
+  const responderId = createRuntimeClientResponderId();
+  const coordinator = new RuntimeClientRequestCoordinator();
+  let reentrantResult: Promise<unknown> | undefined;
+  let reentrantRequestStarted = false;
+  const detach = coordinator.attachResponder({
+    id: responderId,
+    scopeId,
+    send: (message) => {
+      sent.push(message);
+      if (
+        !reentrantRequestStarted &&
+        "method" in message &&
+        message.method === RUNTIME_SERVER_REQUEST_CANCEL_NOTIFICATION
+      ) {
+        reentrantRequestStarted = true;
+        reentrantResult = coordinator.request(
+          RUNTIME_SERVER_REQUEST_METHODS.approvalRequest,
+          approvalRequestInput(),
+          {
+            key: approvalId,
+            scopeId,
+            eligibleResponderId: responderId,
+            approvalId,
+            threadId,
+            turnId,
+          },
+        ).result;
+      }
+    },
+    close: () => undefined,
+  });
+  const original = coordinator.request(
+    RUNTIME_SERVER_REQUEST_METHODS.approvalRequest,
+    approvalRequestInput(),
+    {
+      key: approvalId,
+      scopeId,
+      eligibleResponderId: responderId,
+      approvalId,
+      threadId,
+      turnId,
+    },
+  );
+
+  detach();
+  await assert.rejects(
+    original.result,
+    (error: unknown) => error instanceof RuntimeClientRequestCancelledError,
+  );
+  const capturedReentrantResult = reentrantResult;
+  assert.notEqual(capturedReentrantResult, undefined);
+  if (capturedReentrantResult === undefined) {
+    throw new Error("Expected the cancellation callback to create a request");
+  }
+  await assert.rejects(
+    capturedReentrantResult,
+    (error: unknown) =>
+      error instanceof RuntimeClientRequestError && /没有可处理/u.test(error.message),
+  );
+  assert.equal(
+    sent.filter((message): message is JsonRpcRequest => "method" in message && "id" in message)
+      .length,
+    1,
+  );
+});
+
+test("cancellation retires the delivery before notifying a reentrant responder", async () => {
+  const sent: JsonRpcMessage[] = [];
+  const responderId = createRuntimeClientResponderId();
+  const coordinator = new RuntimeClientRequestCoordinator();
+  let deliveryId: JsonRpcRequest["id"] | undefined;
+  coordinator.attachResponder({
+    id: responderId,
+    scopeId,
+    send: (message) => {
+      sent.push(message);
+      if ("method" in message && "id" in message) {
+        deliveryId = message.id;
+      } else if (
+        "method" in message &&
+        message.method === RUNTIME_SERVER_REQUEST_CANCEL_NOTIFICATION
+      ) {
+        const retiredDeliveryId = deliveryId;
+        assert.notEqual(retiredDeliveryId, undefined);
+        if (retiredDeliveryId === undefined) {
+          throw new Error("Expected an active delivery before cancellation");
+        }
+        coordinator.handleResponse(responderId, {
+          jsonrpc: "2.0",
+          id: retiredDeliveryId,
+          result: { decision: "approve" },
+        });
+      }
+    },
+    close: () => undefined,
+  });
+  const pending = coordinator.request(
+    RUNTIME_SERVER_REQUEST_METHODS.approvalRequest,
+    approvalRequestInput(),
+    {
+      key: approvalId,
+      scopeId,
+      eligibleResponderId: responderId,
+      approvalId,
+      threadId,
+      turnId,
+    },
+  );
+
+  assert.equal(coordinator.cancel(approvalId, "cancel before response"), true);
+  await assert.rejects(
+    pending.result,
+    (error: unknown) =>
+      error instanceof RuntimeClientRequestCancelledError &&
+      error.reason === "cancel before response",
+  );
+  assert.equal(sent.length, 2);
+});
+
+test("synchronous send failure clears the logical key for a later request", async () => {
+  const responderId = createRuntimeClientResponderId();
+  let sends = 0;
+  const coordinator = new RuntimeClientRequestCoordinator();
+  coordinator.attachResponder({
+    id: responderId,
+    scopeId,
+    send: () => {
+      sends += 1;
+      throw new Error("transport unavailable");
+    },
+    close: () => undefined,
+  });
+  const first = coordinator.request(
+    RUNTIME_SERVER_REQUEST_METHODS.approvalRequest,
+    approvalRequestInput(),
+    {
+      key: approvalId,
+      scopeId,
+      eligibleResponderId: responderId,
+      approvalId,
+      threadId,
+      turnId,
+    },
+  );
+  await assert.rejects(first.result, /transport unavailable/u);
+
+  const second = coordinator.request(
+    RUNTIME_SERVER_REQUEST_METHODS.approvalRequest,
+    approvalRequestInput(),
+    {
+      key: approvalId,
+      scopeId,
+      eligibleResponderId: responderId,
+      approvalId,
+      threadId,
+      turnId,
+    },
+  );
+  await assert.rejects(second.result, /transport unavailable/u);
+  assert.equal(sends, 2);
+});
+
+test("id:null failure is isolated from another responder", async () => {
+  const first = new MemoryResponder();
+  const second = new MemoryResponder();
+  const firstId = createRuntimeClientResponderId();
+  const secondId = createRuntimeClientResponderId();
+  const coordinator = new RuntimeClientRequestCoordinator();
+  coordinator.attachResponder({
+    id: firstId,
+    scopeId,
+    send: (message) => first.send(message),
+    close: () => first.close(),
+  });
+  coordinator.attachResponder({
+    id: secondId,
+    scopeId,
+    send: (message) => second.send(message),
+    close: () => second.close(),
+  });
+  const firstPending = coordinator.request(
+    RUNTIME_SERVER_REQUEST_METHODS.approvalRequest,
+    approvalRequestInput(),
+    {
+      key: "fatal-responder-request",
+      scopeId,
+      eligibleResponderId: firstId,
+      approvalId,
+      threadId,
+      turnId,
+    },
+  );
+  const secondPending = coordinator.request(
+    RUNTIME_SERVER_REQUEST_METHODS.approvalRequest,
+    approvalRequestInput(),
+    {
+      key: "healthy-responder-request",
+      scopeId,
+      eligibleResponderId: secondId,
+      approvalId,
+      threadId,
+      turnId,
+    },
+  );
+  const secondDeliveryId = requestId(second);
+
+  coordinator.handleResponse(firstId, {
+    jsonrpc: "2.0",
+    id: null,
+    error: { code: -32_700, message: "Parse error" },
+  });
+  await assert.rejects(firstPending.result, /无法关联/u);
+  assert.equal(first.closeCalls, 1);
+  assert.equal(second.closeCalls, 0);
+
+  assert.equal(
+    coordinator.handleResponse(secondId, {
+      jsonrpc: "2.0",
+      id: secondDeliveryId,
+      result: { decision: "approve" },
+    }),
+    true,
+  );
+  assert.deepEqual(await secondPending.result, { decision: "approve" });
 });

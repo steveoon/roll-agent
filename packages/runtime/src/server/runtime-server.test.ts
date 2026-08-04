@@ -33,6 +33,7 @@ import {
   RuntimeClientRequestError,
   type RuntimeClientRequest,
   type RuntimeClientRequestOptions,
+  type RuntimeClientResponder,
 } from "./runtime-client-request-coordinator.ts";
 import { RuntimeServer } from "./runtime-server.ts";
 import {
@@ -286,6 +287,13 @@ class SynchronouslyFailingRuntimeClientRequestCoordinator extends RuntimeClientR
     _options: RuntimeClientRequestOptions,
   ): RuntimeClientRequest<TMethod> {
     throw new RuntimeClientRequestError("synchronous request setup failure");
+  }
+}
+
+class DetachWrappingRuntimeClientRequestCoordinator extends RuntimeClientRequestCoordinator {
+  override attachResponder(responder: RuntimeClientResponder): () => void {
+    const detachResponder = super.attachResponder(responder);
+    return () => detachResponder();
   }
 }
 
@@ -1866,6 +1874,46 @@ test("Runtime Protocol 1.1 接受 Client 收到 server request 后立即返回�
   assert.ok(resolvedIndex >= 0);
   assert.ok(toolCompletedIndex > resolvedIndex);
   assert.equal(terminal.protocolVersion, "1.1");
+});
+
+test("Runtime Protocol 1.1 兼容注入 Coordinator 包装 responder detach closure", async (t) => {
+  const harness = createApprovalProtocolHarness(
+    undefined,
+    undefined,
+    new DetachWrappingRuntimeClientRequestCoordinator(),
+  );
+  const client = attachRuntimeProtocolClient(harness.clientConn);
+  t.after(() => harness.close());
+
+  harness.clientConn.onMessage((message) => {
+    if (isRequest(message) && message.method === RUNTIME_SERVER_REQUEST_METHODS.approvalRequest) {
+      harness.clientConn.send({
+        jsonrpc: "2.0",
+        id: message.id,
+        result: { decision: "approve" },
+      });
+    }
+  });
+
+  await client.request(1, RUNTIME_METHODS.initialize, {
+    protocolVersions: ["1.1"],
+    client: { name: "wrapped-detach-client", version: "1.1.0" },
+  });
+  const created = (await client.request(2, RUNTIME_METHODS.threadCreate, {
+    requestId: "00000000-0000-4000-8000-000000000344",
+    title: "wrapped detach approval",
+  })) as { readonly thread: { readonly id: string } };
+  await client.request(3, RUNTIME_METHODS.turnStart, {
+    requestId: "00000000-0000-4000-8000-000000000345",
+    threadId: created.thread.id,
+    turnId: "00000000-0000-4000-8000-000000000346",
+    input: { text: "approve through wrapped detach" },
+  });
+
+  await waitForValue(
+    () => client.events.find((envelope) => envelope.event.type === "turn.completed"),
+    "包装 detach closure 后的审批响应未完成 Turn",
+  );
 });
 
 test("Runtime Protocol 1.1 用户拒绝保持成功业务结果并阻止 Tool 副作用", async (t) => {

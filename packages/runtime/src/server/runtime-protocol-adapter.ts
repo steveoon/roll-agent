@@ -22,6 +22,7 @@ import {
   RuntimeClientRequestCoordinator,
   RuntimeClientRequestExpiredError,
   createRuntimeClientResponderId,
+  getRuntimeClientRequestCoordinatorInternal,
   type RuntimeClientRequest,
   type RuntimeClientResponderId,
 } from "./runtime-client-request-coordinator.ts";
@@ -94,7 +95,10 @@ export class RuntimeProtocolAdapter {
     ) {
       return false;
     }
-    return this.clientRequests.handleResponse(this.responderId, message);
+    const attachmentResult = getRuntimeClientRequestCoordinatorInternal(
+      this.clientRequests,
+    ).handleResponseForAttachment(this.detachResponder, message);
+    return attachmentResult ?? this.clientRequests.handleResponse(this.responderId, message);
   }
 
   async dispatch(request: JsonRpcRequest): Promise<unknown> {
