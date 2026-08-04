@@ -2,14 +2,17 @@ import type { ConversationEngine } from "../engine/conversation-engine.ts";
 import {
   RUNTIME_ERROR_CODES,
   jsonValueSchema,
-  type RuntimeProtocolErrorDataV12,
+  type RuntimeProtocolErrorDataV13,
 } from "@roll-agent/protocol";
 import type { AgentSession } from "../engine/agent-session.ts";
 import { createSafeCapabilitySnapshot } from "../engine/capability-manifest.ts";
 import { isPersistedToolExecutionRecord } from "../tool-bridge/tool-execution-record.ts";
 import { RuntimeServiceError, type RuntimeService } from "../service/runtime-service.ts";
 import { RuntimeClientRequestCoordinator } from "./runtime-client-request-coordinator.ts";
-import { RuntimeProtocolAdapter } from "./runtime-protocol-adapter.ts";
+import {
+  RuntimeProtocolAdapter,
+  type RuntimeProtocolDispatchResult,
+} from "./runtime-protocol-adapter.ts";
 import {
   EVENT_NOTIFICATION,
   RpcMethod,
@@ -52,7 +55,7 @@ function toJsonRpcError(
 ): {
   readonly code: number;
   readonly message: string;
-  readonly data?: RuntimeProtocolErrorDataV12;
+  readonly data?: RuntimeProtocolErrorDataV13;
 } {
   if (error instanceof RuntimeServiceError) {
     const details = jsonValueSchema.safeParse(error.details);
@@ -214,8 +217,13 @@ export class RuntimeServer {
       return;
     }
     this.dispatch(message).then(
-      (result) => {
-        this.sendOrClose({ jsonrpc: "2.0", id: message.id, result });
+      (dispatchResult) => {
+        const sent = this.sendOrClose({
+          jsonrpc: "2.0",
+          id: message.id,
+          result: dispatchResult.result,
+        });
+        dispatchResult.afterResponse?.(sent);
       },
       (error: unknown) => {
         if (error instanceof RuntimeTransportWriteError) {
@@ -281,10 +289,14 @@ export class RuntimeServer {
     this.connectionMode = CONNECTION_MODES.legacy;
   }
 
-  private async dispatch(request: JsonRpcRequest): Promise<unknown> {
+  private async dispatch(request: JsonRpcRequest): Promise<RuntimeProtocolDispatchResult> {
     if (this.protocolAdapter?.handles(request.method) === true) {
       return this.protocolAdapter.dispatch(request);
     }
+    return { result: await this.dispatchLegacy(request) };
+  }
+
+  private async dispatchLegacy(request: JsonRpcRequest): Promise<unknown> {
     switch (request.method) {
       case RpcMethod.Create: {
         const params = createParamsSchema.parse(request.params);

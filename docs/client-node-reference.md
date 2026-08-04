@@ -6,10 +6,10 @@
 |---|---|
 | Node.js | `>=22.6.0` |
 | 默认命令 | `roll runtime serve --stdio` |
-| 最新协议 | Roll Runtime Protocol `"1.2"` |
-| 无 Server Request handler 时 | 广告 `["1.2","1.0"]`；1.2 capability 集合为空 |
+| 最新协议 | Roll Runtime Protocol `"1.3"` |
+| 无 Server Request handler 时 | 默认帧预算下广告 `["1.3","1.2","1.0"]`；1.3/1.2 capability 集合为空 |
 | 默认请求超时 | `30,000 ms` |
-| 默认本地帧上限 | `4 MiB` |
+| 默认本地帧上限 | `17 MiB` |
 | 默认读取重试 | 最多 `1` 次，间隔 `100 ms` |
 | 默认关闭阶段 | stdin `30s` → SIGTERM `10s` → SIGKILL `5s` |
 
@@ -33,17 +33,17 @@
 | `clientVersion` | `string` | 当前 `@roll-agent/client-node` 包版本 | 初始化客户端版本 |
 | `onStderr` | `(line) => void` | 无 | 逐行接收 Runtime 日志 |
 | `onTurnOutcomeUnknown` | `(turnId) => void` | 无 | Turn 结果无法确认时调用 |
-| `maxFrameBytes` | `number` | `4 MiB` | 本地入站与初始出站上限 |
+| `maxFrameBytes` | `number` | `17 MiB` | 本地入站与初始出站上限；低于 17 MiB 时不广告 1.3 |
 | `requestTimeoutMs` | `number` | `30,000` | 单次请求超时 |
 | `maxReadRetries` | `number` | `1` | 明确可重试读取的最大重试次数 |
 | `readRetryDelayMs` | `number` | `100` | 读取重试间隔 |
 | `shutdownOptions` | `RuntimeShutdownOptions` | 见关闭阶段 | 默认关闭预算 |
-| `serverRequestHandlers` | `RuntimeServerRequestHandlers` | 无 | Runtime→Client typed handler；1.2 通过 capability handshake 协商，1.1 仍要求覆盖必需方法 |
+| `serverRequestHandlers` | `RuntimeServerRequestHandlers` | 无 | Runtime→Client typed handler；1.3/1.2 通过 capability handshake 协商，1.1 仍要求覆盖必需方法 |
 
 客户端构造成功后的 `initialize` 协商失败会进入有界关闭，不会把未完成初始化的子进程交给
 调用方。
 
-`start()` / `connect()` 会自动且仅发送一次 `initialize`。若协商到 `"1.2"`，
+`start()` / `connect()` 会自动且仅发送一次 `initialize`。若协商到 `"1.3"` 或 `"1.2"`，
 还会发送首个 `client.capabilities.set` 并等待 Runtime ACK；因此返回的 Client 已经可以
 安全接收当前声明的 Server Request，ACK 前不会向调用方暴露连接。连接成功后再次通过
 `request("initialize", ...)` 初始化会被客户端拒绝，既不会写入 Transport，也不会改变
@@ -77,6 +77,7 @@ interface RuntimeClientTransport {
 |---|---|---|
 | `request(method, input)` | 方法对应 result | 校验 params/result 并发送 JSON-RPC 请求 |
 | `onEvent(listener)` | 取消订阅函数 | 订阅已通过 Schema 校验的 Runtime 事件 |
+| `createEventRecovery(options?)` | `RuntimeEventRecoveryManager` | 创建当前连接唯一的 1.3 durable event 恢复管理器 |
 | `onExit(listener)` | 取消订阅函数 | 订阅真实进程退出或最终有界终止失败 |
 | `getInitializationResult()` | `InitializeResult` | 读取协商版本、实例 ID、features 与 limits |
 | `getOutcomeUnknownTurnIds()` | `readonly TurnId[]` | 当前客户端生命周期内累计的未知 Turn |
@@ -91,7 +92,7 @@ interface RuntimeClientTransport {
 
 ### 启动时注册
 
-`approval.request` 是 1.2 与 1.1 共同支持的 Server Request；1.2 还支持可选的
+`approval.request` 是 1.3/1.2/1.1 共同支持的 Server Request；1.3/1.2 还支持可选的
 `userInput.request` named Handler：
 
 ```ts
@@ -143,7 +144,7 @@ Handler 必须返回符合 `@roll-agent/protocol` Schema 的结果。用户拒�
 失败返回 `-32603`，Runtime 随后 fail-closed 终止当前 Turn；它不会把系统失败记录成
 `user_rejected`。
 
-1.2 params 包含 `interactionId`、`threadId`、`turnId`、`expiresAt`、
+1.3/1.2 params 包含 `interactionId`、`threadId`、`turnId`、`expiresAt`、
 `sensitivity` 和方法专属 payload；1.1 Approval params 继续保持
 `{ threadId, approval, expiresAt? }`。分支代码应使用 `"interactionId" in params`
 收窄，而不是把 JSON-RPC `requestId`、逻辑 `interactionId` 或 mutation
@@ -153,16 +154,17 @@ Handler 必须返回符合 `@roll-agent/protocol` Schema 的结果。用户拒�
 
 | 构造时 handlers | Client 广告 | 可能协商结果 |
 |---|---|---|
-| 注册 `approval.request` | `["1.2","1.1","1.0"]` | 新 Runtime 为 `"1.2"`；1.1/1.0 Runtime 可逐级回退 |
-| 仅注册 `userInput.request` | `["1.2","1.0"]` | 新 Runtime 为 `"1.2"`；旧 Runtime 回退 `"1.0"` |
-| 无 handler / 空对象 | `["1.2","1.0"]` | 新 Runtime 为 `"1.2"` 且 ACK 空 capability；旧 Runtime 回退 `"1.0"` |
+| 注册 `approval.request` | `["1.3","1.2","1.1","1.0"]` | 新 Runtime 为 `"1.3"`；旧 Runtime 可逐级回退 |
+| 仅注册 `userInput.request` | `["1.3","1.2","1.0"]` | 新 Runtime 为 `"1.3"`；旧 Runtime 可回退 1.2/1.0 |
+| 无 handler / 空对象 | `["1.3","1.2","1.0"]` | 新 Runtime 为 `"1.3"` 且 ACK 空 capability；旧 Runtime 可回退 1.2/1.0 |
+| 任意 handlers，`maxFrameBytes < 17 MiB` | 上述列表移除 `"1.3"` | 不会协商 1.3；按 handler 规则回落到旧版本 |
 
-`"1.2"` 没有强制 handler；所有 Server Request 都由初始化后的
+`"1.3"` 与 `"1.2"` 没有强制 handler；所有 Server Request 都由初始化后的
 `client.capabilities.set` 协商。`"1.1"` 当前唯一必需 handler 是
 `approval.request`。必需方法表由
 `REQUIRED_RUNTIME_SERVER_REQUEST_METHODS_BY_VERSION` 提供；未来协议版本新增必需方法时，
 Client 必须覆盖该版本的全部方法才会广告它。`userInput.request` 等可选 UI Request 走
-同一 1.2 capability 协商，不能静默扩大既有版本的必需方法集合。调用方也可使用
+同一 capability 协商，不能静默扩大既有版本的必需方法集合。调用方也可使用
 `getRuntimeProtocolCapabilities()` 和 `isRuntimeServerRequestMethodRequired()` 查询同一
 协议能力表。
 
@@ -170,13 +172,13 @@ Client 必须覆盖该版本的全部方法才会广告它。`userInput.request`
 `registerServerRequestHandler()` 会抛错；应把初始 handler 传给
 `serverRequestHandlers`。
 
-协商到 `"1.2"` 时，Client 在 `initialize` 后发送 revision `1`。后续新增或撤销
+协商到 `"1.3"` 或 `"1.2"` 时，Client 在 `initialize` 后发送 revision `1`。后续新增或撤销
 handler 都会串行发送更高 revision，并核验 Runtime 返回相同 revision 与预期交集。
 capability 同步失败、revision 冲突或 ACK 集合异常会使连接 fail closed。
 
 ### `registerServerRequestHandler(method, handler)`
 
-在已协商 `"1.2"` 或 `"1.1"` 的连接上注册或替换 handler，并返回取消注册函数：
+在已协商 `"1.3"`、`"1.2"` 或 `"1.1"` 的连接上注册或替换 handler，并返回取消注册函数：
 
 ```ts
 const unregister = client.registerServerRequestHandler(
@@ -189,7 +191,7 @@ const unregister = client.registerServerRequestHandler(
 unregister();
 ```
 
-取消注册不会降级当前连接的协议版本。在 1.2 中，Client 先立即撤销本地可处理资格并 abort
+取消注册不会降级当前连接的协议版本。在 1.3/1.2 中，Client 先立即撤销本地可处理资格并 abort
 该 method 的全部未决交互，再发送更高 capability revision；迟到 Result 不会写回。
 若该 handler 已经被后续注册替换，旧 disposer 是 no-op，不会误删新 handler。
 
@@ -217,7 +219,7 @@ Runtime 会针对原始 Params 二次校验提交值并按 control 定义顺序�
 以下情况会 abort 正在执行的 handler：
 
 - Runtime 发送 `runtime.serverRequest.cancel`；
-- 1.2 撤销该 method 的 capability；
+- 1.3/1.2 撤销该 method 的 capability；
 - Client `shutdown()` / `close()`；
 - Runtime 进程或 Transport 退出。
 
@@ -227,14 +229,62 @@ Response。
 
 `requestTimeoutMs` 只约束 Client→Runtime 的普通请求，不给人工审批或 User Input 添加
 `30s` timeout。
-1.2 cancel 使用逻辑 `interactionId`，1.1 cancel 使用当前投递的 JSON-RPC
+1.3/1.2 cancel 使用逻辑 `interactionId`，1.1 cancel 使用当前投递的 JSON-RPC
 `serverRequestId`；Client 都映射到同一个 handler `AbortSignal`。当前 `stdio` 连接
-不支持持久 Server Request replay/resume：断线会 abort 全部 handler，重启后应读取
-Snapshot 收敛，不能自动重放旧审批、旧 User Input 或旧 Turn。
+不支持持久 Server Request replay/resume：1.3 只恢复 durable View Event，不恢复控制请求。
+断线会 abort 全部 handler，重启后应读取 Snapshot 收敛，不能自动重放旧审批、旧 User
+Input 或旧 Turn。
 
-在 `"1.2"` 与 `"1.1"` 中，`onEvent()` 收到的 `approval.required` 只是只读 View Event；审批结果
+在 `"1.3"`、`"1.2"` 与 `"1.1"` 中，`onEvent()` 收到的 `approval.required` 只是只读 View Event；审批结果
 必须由 `approval.request` handler 返回。`approval.resolved` 用于关闭审批卡片、同步最终
 状态。`"1.0"` 才继续使用 `approval.required` + `approval.respond`。
+
+## 1.3 durable event 恢复
+
+一个 Client 连接使用一个 `RuntimeEventRecoveryManager`，再按 Thread 调用
+`resumeThread()`。管理器会在请求 Snapshot/replay 前先接管该 Thread 的事件，暂存并发 live
+durable event，并在 `runtime.events.resume` Response barrier 后按 cursor 排序、按 eventId
+去重后交付：
+
+```ts
+const recovery = client.createEventRecovery();
+
+const result = await recovery.resumeThread({
+  threadId,
+  checkpoint: loadCheckpoint(threadId),
+  applySnapshot: async (snapshot, { reason }) => {
+    replaceThreadView(snapshot, reason);
+  },
+  onDurableEvent: async (event, checkpoint) => {
+    applyDurableEvent(event);
+    await saveCheckpoint(checkpoint);
+  },
+  onEphemeralEvent: (event) => {
+    renderTransientEvent(event);
+  },
+});
+```
+
+`checkpoint` 绑定 `threadId + runtimeInstanceId + cursor`。未提供 checkpoint 时先读 Snapshot；
+若 Runtime instance 已变化、Runtime 返回 `EVENT_CURSOR_EXPIRED` / `EVENT_CURSOR_GAP`，或
+检测到 replay/live gap、cursor 冲突、buffer overflow，管理器也会自动回退 Snapshot，再从
+Snapshot 的可空 `eventCursor` 继续。1.2/1.1/1.0 协商结果返回
+`mode: "snapshot-only"`，不会发送 `runtime.events.resume`。
+
+1.3 的 Snapshot fallback 会发送 `{ threadId, limit: 1, recovery: true }`，并要求响应携带
+`recoveryProjection: true`。这是一个保证单帧可承载的 checkpoint 投影：messages、operations、
+pending Approvals 与 pending Interactions 故意为空，`applySnapshot` context 同时暴露
+`recoveryProjection: true`。宿主如需完整 timeline，应在恢复完成后另发普通 Snapshot 分页；
+当前连接的 typed Server Request 是未决 Interaction 的权威来源。旧协议只收到普通 Snapshot，
+context 为 `false`。
+
+默认恢复暂存上限为 10,000 条或 32 MiB，可由 `createEventRecovery()` options 收紧。
+`onDurableEvent` 成功后才推进内存 checkpoint；宿主应在 callback 内持久化新 checkpoint，
+不要自行解析或构造不透明 cursor。被 recovery manager 接管的 Thread 不再穿透到普通
+`client.onEvent()`，避免业务层重复消费；ephemeral event 只在 live 阶段回调，永不重放。
+
+Replay notification 只恢复安全事件投影，不能重新触发 Approval、User Input、Tool、Turn
+或其他副作用。恢复管理器也不改变 Server Request 断线即 abort 的边界。
 
 ## 重试与幂等
 
@@ -269,6 +319,8 @@ UI 收到未知结果后必须：
 
 ## 帧限制
 
+- 广告 `"1.3"` 等同声明本地入站上限至少为 `17 MiB`；显式配置更低预算时 Client 会从
+  初始化版本列表移除 `"1.3"`；
 - 入站 Runtime 帧超过本地 `maxFrameBytes`：`RollProtocolViolationError`，连接关闭；
 - 初始化完成后的出站上限：
   `min(client.maxFrameBytes, initialize.limits.maxFrameBytes)`；
@@ -287,6 +339,7 @@ UI 收到未知结果后必须：
 | `RollRuntimeClosingError` | 无 | 客户端已进入关闭阶段 |
 | `RollRuntimeShutdownTimeoutError` | 三阶段 timeout | 有界关闭最终失败 |
 | `RollProtocolViolationError` | `cause?` | 帧、事件、错误 data 或 result 不符合协议 |
+| `RuntimeEventRecoveryError` | 无 | 1.3 replay barrier、cursor 或本地恢复状态无法安全收敛 |
 
 ## 相关文档
 

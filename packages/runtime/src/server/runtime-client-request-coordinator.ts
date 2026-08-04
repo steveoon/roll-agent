@@ -3,6 +3,7 @@ import {
   RUNTIME_SERVER_REQUEST_CANCEL_NOTIFICATION,
   RUNTIME_SERVER_REQUEST_METHODS,
   approvalRequestParamsV12Schema,
+  getRuntimeProtocolCapabilities,
   getRuntimeProtocolRegistry,
   interactionIdSchema,
   isRuntimeServerRequestMethodAvailable,
@@ -239,8 +240,10 @@ export class RuntimeClientRequestCoordinator {
       );
     }
     const parsedParams = requestDefinition.params.parse(params);
+    const usesInteractionMetadata =
+      getRuntimeProtocolCapabilities(protocolVersion).serverRequestCapabilityNegotiation;
     if (
-      protocolVersion === "1.2" &&
+      usesInteractionMetadata &&
       (options.expiresAt === undefined ||
         typeof parsedParams !== "object" ||
         parsedParams === null ||
@@ -248,19 +251,18 @@ export class RuntimeClientRequestCoordinator {
         parsedParams.expiresAt !== options.expiresAt)
     ) {
       throw new RuntimeClientRequestError(
-        "Runtime Protocol 1.2 请求必须提供一致的绝对 expiresAt deadline",
+        `Runtime Protocol ${protocolVersion} 请求必须提供一致的绝对 expiresAt deadline`,
       );
     }
-    const interactionId =
-      protocolVersion === "1.2"
-        ? interactionIdSchema.parse(
-            typeof parsedParams === "object" &&
-              parsedParams !== null &&
-              "interactionId" in parsedParams
-              ? parsedParams.interactionId
-              : undefined,
-          )
-        : interactionIdSchema.parse(randomUUID());
+    const interactionId = usesInteractionMetadata
+      ? interactionIdSchema.parse(
+          typeof parsedParams === "object" &&
+            parsedParams !== null &&
+            "interactionId" in parsedParams
+            ? parsedParams.interactionId
+            : undefined,
+        )
+      : interactionIdSchema.parse(randomUUID());
     let expiresAt: string | undefined;
     if (options.expiresAt !== undefined) {
       const parsedExpiresAt = timestampSchema.safeParse(options.expiresAt);
@@ -627,7 +629,8 @@ export class RuntimeClientRequestCoordinator {
         interaction.scopeId !== attachment.responder.scopeId ||
         (interaction.state.kind === "delivered" &&
           interaction.state.delivery.attachment !== attachment) ||
-        interaction.protocolVersion !== "1.2" ||
+        !getRuntimeProtocolCapabilities(interaction.protocolVersion)
+          .serverRequestCapabilityNegotiation ||
         !attachment.acceptedServerRequestMethods.has(interaction.method)
       ) {
         return [];

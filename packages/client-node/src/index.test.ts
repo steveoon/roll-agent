@@ -8,6 +8,7 @@ import {
   RUNTIME_METHODS,
   RUNTIME_SERVER_REQUEST_CANCEL_NOTIFICATION,
   RUNTIME_SERVER_REQUEST_METHODS,
+  RUNTIME_V13_MIN_CLIENT_FRAME_BYTES,
   parseRuntimeMethodParams,
   projectClientCapabilitiesSetResult,
   runtimeEventEnvelopeSchema,
@@ -610,7 +611,7 @@ test("RollNodeClient advertises Server Request protocol versions only when handl
   assert.ok(legacyInitialize && "method" in legacyInitialize && "id" in legacyInitialize);
   assert.deepEqual(
     parseRuntimeMethodParams(RUNTIME_METHODS.initialize, legacyInitialize.params).protocolVersions,
-    ["1.2", "1.0"],
+    ["1.3", "1.2", "1.0"],
   );
   assert.equal(legacyClient.getInitializationResult().protocolVersion, "1.0");
 
@@ -644,7 +645,7 @@ test("RollNodeClient advertises Server Request protocol versions only when handl
   assert.ok(v11Initialize && "method" in v11Initialize && "id" in v11Initialize);
   assert.deepEqual(
     parseRuntimeMethodParams(RUNTIME_METHODS.initialize, v11Initialize.params).protocolVersions,
-    ["1.2", "1.1", "1.0"],
+    ["1.3", "1.2", "1.1", "1.0"],
   );
   assert.equal(v11Client.getInitializationResult().protocolVersion, "1.1");
   assert.equal(
@@ -701,7 +702,7 @@ test("RollNodeClient advertises Server Request protocol versions only when handl
   assert.deepEqual(
     parseRuntimeMethodParams(RUNTIME_METHODS.initialize, fallbackInitialize.params)
       .protocolVersions,
-    ["1.2", "1.1", "1.0"],
+    ["1.3", "1.2", "1.1", "1.0"],
   );
   assert.equal(fallbackClient.getInitializationResult().protocolVersion, "1.0");
   assert.equal(
@@ -711,6 +712,28 @@ test("RollNodeClient advertises Server Request protocol versions only when handl
     false,
   );
   await fallbackClient.shutdown();
+});
+
+test("RollNodeClient opts out of Protocol 1.3 when its explicit frame budget is too small", async () => {
+  const transport = new MemoryTransport();
+  const messages: JsonRpcMessage[] = [];
+  installFakeRuntime(transport, (message) => messages.push(message), ["1.3", "1.2", "1.0"]);
+  const client = await RollNodeClient.connect({
+    transport,
+    maxFrameBytes: RUNTIME_V13_MIN_CLIENT_FRAME_BYTES - 1,
+  });
+  const initialize = messages.find(
+    (message): message is JsonRpcRequest =>
+      "method" in message && "id" in message && message.method === RUNTIME_METHODS.initialize,
+  );
+  assert.ok(initialize);
+  assert.deepEqual(
+    parseRuntimeMethodParams(RUNTIME_METHODS.initialize, initialize.params).protocolVersions,
+    ["1.2", "1.0"],
+  );
+  assert.equal(client.getInitializationResult().protocolVersion, "1.2");
+  assert.equal(client.getInitializationResult().limits.maxFrameBytes, 4 * 1_024 * 1_024);
+  await client.shutdown();
 });
 
 test("RollNodeClient waits for an empty Protocol 1.2 capability ACK before connecting", async () => {
@@ -736,7 +759,7 @@ test("RollNodeClient waits for an empty Protocol 1.2 capability ACK before conne
   assert.ok(initialize && "method" in initialize && "id" in initialize);
   assert.deepEqual(
     parseRuntimeMethodParams(RUNTIME_METHODS.initialize, initialize.params).protocolVersions,
-    ["1.2", "1.0"],
+    ["1.3", "1.2", "1.0"],
   );
   await flushMessages();
   assert.equal(settled, false);
@@ -1811,7 +1834,7 @@ test("RollNodeClient rejects a Runtime-selected protocol version it did not adve
     }
     assert.deepEqual(
       parseRuntimeMethodParams(RUNTIME_METHODS.initialize, request.params).protocolVersions,
-      ["1.2", "1.0"],
+      ["1.3", "1.2", "1.0"],
     );
     writeJson(transport.stdout, {
       jsonrpc: "2.0",

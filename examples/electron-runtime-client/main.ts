@@ -19,14 +19,17 @@ import {
   type RendererInteractionAuthority,
   type RendererInteractionMethod,
 } from "./renderer-interaction-registry.ts";
+import {
+  isElectronRuntimeProtocolVersion,
+  type ElectronRuntimeProtocolVersion,
+} from "./supported-protocols.ts";
 
 let client: RollNodeClient | undefined;
 let shutdownPromise: Promise<void> | undefined;
 let allowImmediateExit = false;
 
-type ApprovalProtocolVersion = "1.2" | "1.1";
 type RendererApprovalRequestParams = RuntimeServerRequestParamsForVersion<
-  ApprovalProtocolVersion,
+  ElectronRuntimeProtocolVersion,
   typeof RUNTIME_SERVER_REQUEST_METHODS.approvalRequest
 >;
 type RendererInteractionParamsByMethod = {
@@ -58,9 +61,9 @@ function requireClient(): RollNodeClient {
   return client;
 }
 
-function requireApprovalProtocolVersion(): ApprovalProtocolVersion {
+function requireApprovalProtocolVersion(): ElectronRuntimeProtocolVersion {
   const protocolVersion = requireClient().getInitializationResult().protocolVersion;
-  if (protocolVersion !== "1.2" && protocolVersion !== "1.1") {
+  if (!isElectronRuntimeProtocolVersion(protocolVersion)) {
     throw new Error("Approval is unavailable for the negotiated Runtime Protocol version");
   }
   return protocolVersion;
@@ -270,10 +273,10 @@ async function createWindow(): Promise<void> {
     },
   });
   const protocolVersion = client.getInitializationResult().protocolVersion;
-  if (protocolVersion !== "1.2" && protocolVersion !== "1.1") {
+  if (!isElectronRuntimeProtocolVersion(protocolVersion)) {
     await client.shutdown();
     client = undefined;
-    throw new Error("This Electron reference requires Runtime Protocol 1.2 or 1.1");
+    throw new Error("This Electron reference requires Runtime Protocol 1.3, 1.2 or 1.1");
   }
   client.onEvent((event) => {
     sendToRenderer(window, "roll:event", event);

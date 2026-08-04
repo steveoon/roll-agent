@@ -11,6 +11,8 @@ import {
   approvalIdSchema,
   operationIdSchema,
   parseRuntimeMethodResult,
+  runtimeDurableEventV13Schema,
+  runtimeEphemeralEventV13Schema,
   runtimeInstanceIdSchema,
   runtimeProtocolVersionSchema,
   streamIdSchema,
@@ -23,13 +25,15 @@ import {
   type OperationView,
   type PendingApproval,
   type RuntimeEvent,
-  type RuntimeEventEnvelope,
+  type RuntimeEventEnvelopeV13,
+  type RuntimeEventsResumeParams,
+  type RuntimeEventsResumeResult,
   type RuntimeInstanceId,
   type RuntimeMethodParams,
   type RuntimeMethodResult,
   type RuntimeProtocolVersion,
-  type RuntimeProtocolErrorDataV12,
-  type ThreadSnapshot,
+  type RuntimeProtocolErrorDataV13,
+  type ThreadSnapshotV13Full,
   type ThreadId,
   type ThreadSummary,
   type TurnId,
@@ -48,7 +52,10 @@ import {
 } from "../tool-bridge/tool-execution-record.ts";
 import type { ToolOutcome } from "../tool-bridge/normalize-result.ts";
 import {
+  RuntimeEventCursorExpiredError,
+  RuntimeEventCursorGapError,
   ThreadStore,
+  type StoredRuntimeEvent,
   type SequencedToolExecutionRecord,
   type ThreadRecord,
 } from "../store/thread-store.ts";
@@ -65,13 +72,13 @@ const REDACTED_KEYS = new Set([
   "authorization",
   "cookie",
   "password",
-  "providerOptions",
+  "provideroptions",
   "raw",
   "secret",
   "token",
 ]);
 
-type RollErrorCode = RuntimeProtocolErrorDataV12["rollCode"];
+type RollErrorCode = RuntimeProtocolErrorDataV13["rollCode"];
 
 export type RuntimeServiceSession = Pick<
   AgentSession,
@@ -152,7 +159,11 @@ interface PendingUserInputState {
   readonly expiresAt: string;
 }
 
-export type RuntimeThreadSnapshot = Omit<ThreadSnapshot, "pendingInteractions">;
+export type RuntimeThreadSnapshot = Omit<ThreadSnapshotV13Full, "pendingInteractions">;
+
+export interface RuntimeEventReplayBatch extends RuntimeEventsResumeResult {
+  readonly events: readonly StoredRuntimeEvent[];
+}
 
 export type RuntimeUserInputInteractionEvent =
   | {
@@ -460,7 +471,8 @@ export class RuntimeService {
   private readonly settledTurnOwners = new Map<TurnId, ThreadId>();
   private readonly pendingApprovals = new Map<string, PendingApprovalState>();
   private readonly pendingUserInputs = new Map<SessionUserInputRequestId, PendingUserInputState>();
-  private readonly listeners = new Set<(event: RuntimeEventEnvelope) => void>();
+  private readonly listeners = new Set<(event: RuntimeEventEnvelopeV13) => void>();
+  private readonly fatalErrorListeners = new Set<(error: unknown) => void>();
   private readonly userInputListeners = new Set<
     (event: RuntimeUserInputInteractionEvent) => void
   >();
@@ -508,7 +520,7 @@ export class RuntimeService {
         },
       );
     }
-    return {
+    const commonResult = {
       protocolVersion,
       runtimeInstanceId: this.runtimeInstanceId,
       server: {
@@ -523,16 +535,33 @@ export class RuntimeService {
       limits: {
         maxFrameBytes: this.maxFrameBytes,
         maxPageSize: DEFAULT_MAX_PAGE_SIZE,
-        eventReplay: false,
         idempotencyCacheEntries: this.idempotencyCacheEntries,
       },
     };
+    return protocolVersion === "1.3"
+      ? {
+          ...commonResult,
+          protocolVersion,
+          limits: { ...commonResult.limits, eventReplay: true },
+        }
+      : {
+          ...commonResult,
+          protocolVersion,
+          limits: { ...commonResult.limits, eventReplay: false },
+        };
   }
 
-  onEvent(listener: (event: RuntimeEventEnvelope) => void): () => void {
+  onEvent(listener: (event: RuntimeEventEnvelopeV13) => void): () => void {
     this.listeners.add(listener);
     return () => {
       this.listeners.delete(listener);
+    };
+  }
+
+  onFatalError(listener: (error: unknown) => void): () => void {
+    this.fatalErrorListeners.add(listener);
+    return () => {
+      this.fatalErrorListeners.delete(listener);
     };
   }
 
@@ -646,7 +675,32 @@ export class RuntimeService {
         .filter((pending) => pending.threadId === params.threadId)
         .map((pending) => pending.approval),
       transcriptCompleteness: this.store.getTranscriptCompleteness(params.threadId),
+      eventCursor: this.store.getRuntimeEventCursor(params.threadId),
     };
+  }
+
+  resumeEvents(params: RuntimeEventsResumeParams): RuntimeEventReplayBatch {
+    this.assertOpen();
+    this.requireThread(params.threadId);
+    try {
+      return this.store.resumeRuntimeEvents(params.threadId, params.afterCursor);
+    } catch (error: unknown) {
+      if (error instanceof RuntimeEventCursorExpiredError) {
+        throw new RuntimeServiceError(
+          RUNTIME_ERROR_CODES.eventCursorExpired,
+          "Runtime Event cursor 已超出当前 Thread 的保留窗口，请回退到 thread.snapshot",
+          { details: { threadId: params.threadId } },
+        );
+      }
+      if (error instanceof RuntimeEventCursorGapError) {
+        throw new RuntimeServiceError(
+          RUNTIME_ERROR_CODES.eventCursorGap,
+          "Runtime Event cursor 与当前 Thread 事件日志不连续，请回退到 thread.snapshot",
+          { details: { threadId: params.threadId } },
+        );
+      }
+      throw error;
+    }
   }
 
   async renameThread(
@@ -783,7 +837,13 @@ export class RuntimeService {
         };
         this.activeTurns.set(params.threadId, state);
         this.activeTurnOwners.set(params.turnId, params.threadId);
-        this.emit(params.threadId, params.turnId, { type: "turn.started" });
+        try {
+          this.emit(params.threadId, params.turnId, { type: "turn.started" });
+        } catch (error: unknown) {
+          this.activeTurns.delete(params.threadId);
+          this.activeTurnOwners.delete(params.turnId);
+          throw error;
+        }
         this.driveTurn(state, params.input.text).catch(() => undefined);
         return { accepted: true, turnId: params.turnId };
       },
@@ -977,6 +1037,7 @@ export class RuntimeService {
     this.userInputListeners.clear();
     await Promise.allSettled(sessions.map((session) => session.close()));
     this.mutationRequests.clear();
+    this.fatalErrorListeners.clear();
   }
 
   private assertOpen(): void {
@@ -1016,21 +1077,66 @@ export class RuntimeService {
   }
 
   private emit(threadId: ThreadId, turnId: TurnId | undefined, event: RuntimeEvent): void {
-    const envelope: RuntimeEventEnvelope = {
+    const timestamp = new Date().toISOString();
+    const commonEnvelope = {
       protocolVersion: RUNTIME_PROTOCOL_VERSION,
       runtimeInstanceId: this.runtimeInstanceId,
       sequence: this.sequence,
-      timestamp: new Date().toISOString(),
+      timestamp,
       threadId,
       ...(turnId !== undefined ? { turnId } : {}),
-      event,
-    };
+    } as const;
+    const durableEvent = runtimeDurableEventV13Schema.safeParse(event);
+    const envelope: RuntimeEventEnvelopeV13 = durableEvent.success
+      ? (() => {
+          let stored: StoredRuntimeEvent;
+          try {
+            stored = this.store.appendRuntimeEvent({
+              threadId,
+              ...(turnId === undefined ? {} : { turnId }),
+              timestamp,
+              event: durableEvent.data,
+            });
+          } catch (error: unknown) {
+            this.notifyFatalError(error);
+            throw error;
+          }
+          return {
+            ...commonEnvelope,
+            durability: "durable" as const,
+            eventId: stored.eventId,
+            cursor: stored.cursor,
+            event: durableEvent.data,
+          };
+        })()
+      : {
+          ...commonEnvelope,
+          durability: "ephemeral",
+          event: runtimeEphemeralEventV13Schema.parse(event),
+        };
     this.sequence += 1;
     for (const listener of this.listeners) {
       try {
         listener(envelope);
       } catch {
         // Event consumers are observers. A broken transport/listener must not corrupt Runtime state.
+      }
+    }
+  }
+
+  private notifyFatalError(error: unknown): void {
+    for (const turn of this.activeTurns.values()) {
+      try {
+        turn.session.cancel();
+      } catch {
+        // A cancellation failure must not replace the durable Store error that triggered shutdown.
+      }
+    }
+    for (const listener of this.fatalErrorListeners) {
+      try {
+        listener(error);
+      } catch {
+        // Fatal observers are best-effort shutdown signals; the storage error remains primary.
       }
     }
   }
@@ -1311,10 +1417,14 @@ export class RuntimeService {
     pending: PendingApprovalState,
     resolution: ApprovalResolution,
   ): void {
+    const safeResolution: ApprovalResolution =
+      "reason" in resolution && resolution.reason !== undefined
+        ? { ...resolution, reason: redactSecretText(resolution.reason) }
+        : resolution;
     this.emit(pending.threadId, pending.approval.turnId, {
       type: "approval.resolved",
       approvalId: pending.approval.id,
-      resolution,
+      resolution: safeResolution,
     });
   }
 

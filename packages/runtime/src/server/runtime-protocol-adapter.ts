@@ -4,21 +4,30 @@ import {
   RUNTIME_EVENT_NOTIFICATION,
   RUNTIME_METHODS,
   RUNTIME_SERVER_REQUEST_METHODS,
+  RUNTIME_V13_DEFAULT_REPLAY_BUFFER_BYTES,
+  RUNTIME_V13_MAX_DURABLE_EVENT_RECORDS,
+  RUNTIME_V13_RECOVERY_SNAPSHOT_METADATA_MAX_CHARS,
   clientCapabilitiesSetParamsSchema,
   getRuntimeProtocolCapabilities,
   getRuntimeProtocolRegistry,
   interactionIdSchema,
   isRuntimeMethodAvailable,
   normalizeUserInputResult,
+  parseRuntimeMethodParamsForVersion,
   projectClientCapabilitiesSetResult,
+  projectRuntimeEventEnvelopeForVersion,
   projectThreadSnapshotForVersion,
   runtimeMethodSchemas,
+  runtimeDurableEventV13Schema,
+  turnIdSchema,
   type ApprovalResolution,
   type ClientCapabilitiesSetResult,
   type LatestRuntimeMethod,
   type PendingInteractionProjection,
-  type RuntimeEventEnvelope,
+  type RuntimeEventEnvelopeV13,
+  type RuntimeEventsResumeResult,
   type RuntimeProtocolVersion,
+  type ThreadId,
   type ThreadSnapshotForVersion,
   type UserInputRequestParamsV12,
 } from "@roll-agent/protocol";
@@ -28,6 +37,7 @@ import {
   type RuntimeApprovalDecision,
   type RuntimeApprovalIdentity,
   type RuntimeThreadSnapshot,
+  type RuntimeEventReplayBatch,
   type RuntimeUserInputInteractionEvent,
 } from "../service/runtime-service.ts";
 import {
@@ -44,6 +54,19 @@ import type { JsonRpcConnection, JsonRpcMessage, JsonRpcRequest } from "./protoc
 const CLIENT_APPROVAL_FAILURE_REASON = "客户端未完成审批请求，Runtime 已终止当前 Turn";
 const CLIENT_USER_INPUT_FAILURE_REASON = "客户端未完成用户输入请求";
 const ACTIVE_RUNTIME_PROTOCOL_SERVICES = new WeakSet<RuntimeService>();
+const MAX_REPLAY_LIVE_BUFFER_EVENTS = RUNTIME_V13_MAX_DURABLE_EVENT_RECORDS;
+const MAX_REPLAY_LIVE_BUFFER_BYTES = RUNTIME_V13_DEFAULT_REPLAY_BUFFER_BYTES;
+
+interface RuntimeEventReplayGate {
+  readonly threadId: ThreadId;
+  readonly buffered: RuntimeEventEnvelopeV13[];
+  bufferedBytes: number;
+}
+
+export interface RuntimeProtocolDispatchResult {
+  readonly result: unknown;
+  readonly afterResponse?: (sent: boolean) => void;
+}
 
 function userInputInteractionKey(
   requestId: Extract<RuntimeUserInputInteractionEvent, { readonly type: "required" }>["requestId"],
@@ -68,6 +91,7 @@ export class RuntimeProtocolAdapter {
   private readonly clientRequests: RuntimeClientRequestCoordinator;
   private readonly responderId: RuntimeClientResponderId;
   private readonly unsubscribe: () => void;
+  private readonly unsubscribeFatalError: () => void;
   private readonly unsubscribeUserInput: () => void;
   private readonly settlementTasks = new Set<Promise<void>>();
   private detachResponder: (() => void) | undefined;
@@ -79,6 +103,7 @@ export class RuntimeProtocolAdapter {
   private capabilityRevision: number | undefined;
   private capabilityMethods: readonly string[] | undefined;
   private capabilityResult: ClientCapabilitiesSetResult | undefined;
+  private readonly replayGates = new Map<ThreadId, RuntimeEventReplayGate>();
   private eventSequence = 0;
   private closePromise: Promise<void> | undefined;
 
@@ -114,10 +139,86 @@ export class RuntimeProtocolAdapter {
       this.releaseServiceControl();
       throw error;
     }
+    try {
+      this.unsubscribeFatalError = service.onFatalError(() => this.closeBrokenTransport());
+    } catch (error: unknown) {
+      this.unsubscribeUserInput();
+      this.unsubscribe();
+      this.releaseServiceControl();
+      throw error;
+    }
+  }
+
+  private dispatchEventResume(request: JsonRpcRequest): RuntimeProtocolDispatchResult {
+    if (!this.initialized) {
+      throw new RuntimeServiceError(
+        RUNTIME_ERROR_CODES.initializeRequired,
+        "调用 Runtime Protocol 方法前必须先完成 initialize",
+      );
+    }
+    if (this.protocolVersion !== "1.3") {
+      throw new RuntimeServiceError(
+        RUNTIME_ERROR_CODES.capabilityUnavailable,
+        `Runtime Protocol ${String(this.protocolVersion)} 不支持方法：${request.method}`,
+      );
+    }
+    const params = runtimeMethodSchemas[RUNTIME_METHODS.runtimeEventsResume].params.parse(
+      request.params,
+    );
+    if (this.replayGates.has(params.threadId)) {
+      throw new RuntimeServiceError(
+        RUNTIME_ERROR_CODES.threadBusy,
+        `Thread "${params.threadId}" 已有进行中的 Runtime Event replay`,
+        { retryable: true },
+      );
+    }
+    const gate: RuntimeEventReplayGate = {
+      threadId: params.threadId,
+      buffered: [],
+      bufferedBytes: 0,
+    };
+    this.replayGates.set(params.threadId, gate);
+    try {
+      const replay: RuntimeEventReplayBatch = this.service.resumeEvents(params);
+      for (const stored of replay.events) {
+        const replayEnvelope: RuntimeEventEnvelopeV13 = {
+          protocolVersion: "1.3",
+          runtimeInstanceId: this.service.runtimeInstanceId,
+          sequence: this.eventSequence,
+          timestamp: stored.timestamp,
+          threadId: params.threadId,
+          ...(stored.turnId === undefined ? {} : { turnId: turnIdSchema.parse(stored.turnId) }),
+          durability: "durable",
+          eventId: stored.eventId,
+          cursor: stored.cursor,
+          event: runtimeDurableEventV13Schema.parse(stored.event),
+        };
+        if (!this.sendEvent(replayEnvelope)) {
+          throw new Error("Runtime Event replay transport write failed");
+        }
+      }
+      const result: RuntimeEventsResumeResult = {
+        throughCursor: replay.throughCursor,
+        replayedCount: replay.replayedCount,
+      };
+      return {
+        result,
+        afterResponse: (sent) => {
+          if (!sent) {
+            this.releaseReplayGate(gate);
+            return;
+          }
+          this.flushReplayGate(gate);
+        },
+      };
+    } catch (error: unknown) {
+      this.releaseReplayGate(gate);
+      throw error;
+    }
   }
 
   handles(method: string): method is LatestRuntimeMethod {
-    return isRuntimeMethodAvailable("1.2", method);
+    return isRuntimeMethodAvailable("1.3", method);
   }
 
   handleResponse(message: JsonRpcMessage): boolean {
@@ -134,7 +235,14 @@ export class RuntimeProtocolAdapter {
     return attachmentResult ?? this.clientRequests.handleResponse(this.responderId, message);
   }
 
-  async dispatch(request: JsonRpcRequest): Promise<unknown> {
+  async dispatch(request: JsonRpcRequest): Promise<RuntimeProtocolDispatchResult> {
+    if (request.method === RUNTIME_METHODS.runtimeEventsResume) {
+      return this.dispatchEventResume(request);
+    }
+    return { result: await this.dispatchValue(request) };
+  }
+
+  private async dispatchValue(request: JsonRpcRequest): Promise<unknown> {
     if (!this.handles(request.method)) {
       throw new RuntimeServiceError(
         RUNTIME_ERROR_CODES.capabilityUnavailable,
@@ -192,10 +300,13 @@ export class RuntimeProtocolAdapter {
       );
     }
     if (request.method === RUNTIME_METHODS.clientCapabilitiesSet) {
-      if (this.protocolVersion !== "1.2") {
+      if (
+        this.protocolVersion === undefined ||
+        !getRuntimeProtocolCapabilities(this.protocolVersion).serverRequestCapabilityNegotiation
+      ) {
         throw new RuntimeServiceError(
           RUNTIME_ERROR_CODES.capabilityUnavailable,
-          `Runtime Protocol ${String(this.protocolVersion)} 不支持方法：${request.method}`,
+          `Runtime Protocol ${String(this.protocolVersion)} 不支持 capability negotiation：${request.method}`,
         );
       }
       return this.setClientCapabilities(clientCapabilitiesSetParamsSchema.parse(request.params));
@@ -235,12 +346,28 @@ export class RuntimeProtocolAdapter {
             runtimeMethodSchemas[RUNTIME_METHODS.threadOpen].params.parse(request.params),
           ),
         );
-      case RUNTIME_METHODS.threadSnapshot:
-        return this.projectThreadSnapshot(
-          this.service.snapshotThread(
-            runtimeMethodSchemas[RUNTIME_METHODS.threadSnapshot].params.parse(request.params),
-          ),
+      case RUNTIME_METHODS.threadSnapshot: {
+        const params = parseRuntimeMethodParamsForVersion(
+          this.protocolVersion,
+          RUNTIME_METHODS.threadSnapshot,
+          request.params,
         );
+        const recoveryProjection =
+          this.protocolVersion === "1.3" && "recovery" in params && params.recovery === true;
+        return this.projectThreadSnapshot(
+          this.service.snapshotThread({
+            threadId: params.threadId,
+            ...(params.messageBeforeSequence === undefined
+              ? {}
+              : { messageBeforeSequence: params.messageBeforeSequence }),
+            ...(params.operationBeforeSequence === undefined
+              ? {}
+              : { operationBeforeSequence: params.operationBeforeSequence }),
+            limit: params.limit,
+          }),
+          recoveryProjection,
+        );
+      }
       case RUNTIME_METHODS.threadRename:
         return this.service.renameThread(
           runtimeMethodSchemas[RUNTIME_METHODS.threadRename].params.parse(request.params),
@@ -273,6 +400,8 @@ export class RuntimeProtocolAdapter {
         return this.service.getOperation(
           runtimeMethodSchemas[RUNTIME_METHODS.operationGet].params.parse(request.params),
         );
+      case RUNTIME_METHODS.runtimeEventsResume:
+        throw new Error("runtime.events.resume requires the response-barrier dispatch path");
     }
   }
 
@@ -283,6 +412,7 @@ export class RuntimeProtocolAdapter {
 
   disposeConstructionFailure(): void {
     this.closing = true;
+    this.unsubscribeFatalError();
     this.unsubscribe();
     this.unsubscribeUserInput();
     this.releaseServiceControl();
@@ -298,19 +428,35 @@ export class RuntimeProtocolAdapter {
 
   private async performClose(): Promise<void> {
     this.closing = true;
+    this.replayGates.clear();
     this.service.setUserInputAvailable(false);
     this.detachResponder?.();
     this.detachResponder = undefined;
     while (this.settlementTasks.size > 0) {
       await Promise.allSettled([...this.settlementTasks]);
     }
+    this.unsubscribeFatalError();
     this.unsubscribe();
     this.unsubscribeUserInput();
   }
 
-  private handleServiceEvent(envelope: RuntimeEventEnvelope): void {
+  private handleServiceEvent(envelope: RuntimeEventEnvelopeV13): void {
     if (!this.initialized || this.closing || this.protocolVersion === undefined) {
       return;
+    }
+    const replayGate = this.replayGates.get(envelope.threadId);
+    if (replayGate !== undefined) {
+      if (!this.bufferReplayLiveEvent(replayGate, envelope)) {
+        this.closeBrokenTransport();
+      }
+      return;
+    }
+    this.deliverLiveEvent(envelope);
+  }
+
+  private deliverLiveEvent(envelope: RuntimeEventEnvelopeV13): boolean {
+    if (!this.initialized || this.closing || this.protocolVersion === undefined) {
+      return false;
     }
     const capabilities = getRuntimeProtocolCapabilities(this.protocolVersion);
     if (capabilities.serverRequests && envelope.event.type === "approval.resolved") {
@@ -322,34 +468,77 @@ export class RuntimeProtocolAdapter {
     if (capabilities.serverRequests && envelope.event.type === "approval.required") {
       this.requestApproval(envelope.threadId, envelope.event.approval);
     }
-    this.sendEvent(envelope);
+    return this.sendEvent(envelope);
   }
 
-  private sendEvent(envelope: RuntimeEventEnvelope): void {
+  private sendEvent(envelope: RuntimeEventEnvelopeV13): boolean {
     if (this.protocolVersion === undefined) {
-      return;
+      return false;
     }
     if (
       !getRuntimeProtocolCapabilities(this.protocolVersion).approvalResolvedEvents &&
       envelope.event.type === "approval.resolved"
     ) {
-      return;
+      return true;
     }
-    const projected: RuntimeEventEnvelope = {
+    const sequenced: RuntimeEventEnvelopeV13 = {
       ...envelope,
-      protocolVersion: this.protocolVersion,
       sequence: Math.max(this.eventSequence, envelope.sequence),
     };
-    this.eventSequence = projected.sequence + 1;
+    this.eventSequence = sequenced.sequence + 1;
+    const projected = projectRuntimeEventEnvelopeForVersion(this.protocolVersion, sequenced);
     try {
       this.connection.send({
         jsonrpc: "2.0",
         method: RUNTIME_EVENT_NOTIFICATION,
         params: projected,
       });
+      return true;
     } catch {
       this.closeBrokenTransport();
+      return false;
     }
+  }
+
+  private bufferReplayLiveEvent(
+    gate: RuntimeEventReplayGate,
+    envelope: RuntimeEventEnvelopeV13,
+  ): boolean {
+    const bytes = Buffer.byteLength(JSON.stringify(envelope), "utf8");
+    if (
+      gate.buffered.length >= MAX_REPLAY_LIVE_BUFFER_EVENTS ||
+      gate.bufferedBytes + bytes > MAX_REPLAY_LIVE_BUFFER_BYTES
+    ) {
+      this.releaseReplayGate(gate);
+      return false;
+    }
+    gate.buffered.push(envelope);
+    gate.bufferedBytes += bytes;
+    return true;
+  }
+
+  private flushReplayGate(gate: RuntimeEventReplayGate): void {
+    if (this.replayGates.get(gate.threadId) !== gate) {
+      return;
+    }
+    let index = 0;
+    while (index < gate.buffered.length) {
+      const envelope = gate.buffered[index];
+      index += 1;
+      if (envelope !== undefined && !this.deliverLiveEvent(envelope)) {
+        this.releaseReplayGate(gate);
+        return;
+      }
+    }
+    this.releaseReplayGate(gate);
+  }
+
+  private releaseReplayGate(gate: RuntimeEventReplayGate): void {
+    if (this.replayGates.get(gate.threadId) === gate) {
+      this.replayGates.delete(gate.threadId);
+    }
+    gate.buffered.length = 0;
+    gate.bufferedBytes = 0;
   }
 
   private closeBrokenTransport(): void {
@@ -358,9 +547,11 @@ export class RuntimeProtocolAdapter {
     }
     this.transportFailed = true;
     this.closing = true;
+    this.replayGates.clear();
     this.service.setUserInputAvailable(false);
     this.detachResponder?.();
     this.detachResponder = undefined;
+    this.unsubscribeFatalError();
     this.unsubscribe();
     this.unsubscribeUserInput();
     try {
@@ -372,6 +563,7 @@ export class RuntimeProtocolAdapter {
 
   private projectThreadSnapshot(
     snapshot: RuntimeThreadSnapshot,
+    recoveryProjection = false,
   ): ThreadSnapshotForVersion<RuntimeProtocolVersion> {
     const protocolVersion = this.protocolVersion;
     if (protocolVersion === undefined) {
@@ -381,7 +573,10 @@ export class RuntimeProtocolAdapter {
       );
     }
     let pendingInteractions: readonly PendingInteractionProjection[] = [];
-    if (protocolVersion === "1.2") {
+    if (
+      !recoveryProjection &&
+      getRuntimeProtocolCapabilities(protocolVersion).serverRequestCapabilityNegotiation
+    ) {
       if (this.detachResponder === undefined) {
         throw new RuntimeServiceError(
           RUNTIME_ERROR_CODES.capabilityUnavailable,
@@ -402,10 +597,26 @@ export class RuntimeProtocolAdapter {
       }
       pendingInteractions = responderProjection;
     }
-    return projectThreadSnapshotForVersion(protocolVersion, {
-      ...snapshot,
-      pendingInteractions,
-    });
+    if (recoveryProjection) {
+      const clipMetadata = (value: string | undefined): string | undefined =>
+        value?.slice(0, RUNTIME_V13_RECOVERY_SNAPSHOT_METADATA_MAX_CHARS);
+      const title = clipMetadata(snapshot.thread.title);
+      const model = clipMetadata(snapshot.thread.model);
+      return projectThreadSnapshotForVersion(protocolVersion, {
+        ...snapshot,
+        thread: {
+          ...snapshot.thread,
+          ...(title === undefined ? {} : { title }),
+          ...(model === undefined ? {} : { model }),
+        },
+        messages: { items: [], nextBeforeSequence: null },
+        operations: { items: [], nextBeforeSequence: null },
+        pendingApprovals: [],
+        pendingInteractions: [],
+        recoveryProjection: true,
+      });
+    }
+    return projectThreadSnapshotForVersion(protocolVersion, { ...snapshot, pendingInteractions });
   }
 
   private handleUserInputInteraction(event: RuntimeUserInputInteractionEvent): void {
@@ -413,7 +624,12 @@ export class RuntimeProtocolAdapter {
       this.clientRequests.cancel(userInputInteractionKey(event.requestId), event.reason);
       return;
     }
-    if (this.closing || !this.initialized || this.protocolVersion !== "1.2") {
+    if (
+      this.closing ||
+      !this.initialized ||
+      this.protocolVersion === undefined ||
+      !getRuntimeProtocolCapabilities(this.protocolVersion).serverRequestCapabilityNegotiation
+    ) {
       this.service.cancelPendingUserInput(event.requestId, CLIENT_USER_INPUT_FAILURE_REASON);
       return;
     }
@@ -423,6 +639,14 @@ export class RuntimeProtocolAdapter {
   private requestUserInput(
     interaction: Extract<RuntimeUserInputInteractionEvent, { readonly type: "required" }>,
   ): void {
+    const protocolVersion = this.protocolVersion;
+    if (
+      protocolVersion === undefined ||
+      !getRuntimeProtocolCapabilities(protocolVersion).serverRequestCapabilityNegotiation
+    ) {
+      this.service.cancelPendingUserInput(interaction.requestId, CLIENT_USER_INPUT_FAILURE_REASON);
+      return;
+    }
     const params: UserInputRequestParamsV12 = {
       interactionId: interactionIdSchema.parse(randomUUID()),
       threadId: interaction.threadId,
@@ -442,7 +666,7 @@ export class RuntimeProtocolAdapter {
           eligibleResponderId: this.responderId,
           threadId: interaction.threadId,
           turnId: interaction.turnId,
-          protocolVersion: "1.2",
+          protocolVersion,
           expiresAt: interaction.expiresAt,
         },
       );
@@ -478,7 +702,7 @@ export class RuntimeProtocolAdapter {
   private requestApproval(
     threadId: RuntimeApprovalIdentity["threadId"],
     approval: Extract<
-      RuntimeEventEnvelope["event"],
+      RuntimeEventEnvelopeV13["event"],
       { readonly type: "approval.required" }
     >["approval"],
   ): void {
@@ -496,31 +720,31 @@ export class RuntimeProtocolAdapter {
         throw new RuntimeClientRequestCancelledError("当前协议不支持 Server Request");
       }
       const expiresAt = this.service.getPendingApprovalExpiresAt(identity);
-      const interactionExpiresAt =
-        protocolVersion === "1.2"
-          ? (() => {
-              if (expiresAt === undefined) {
-                throw new RuntimeClientRequestCancelledError(
-                  "Runtime Protocol 1.2 审批请求缺少绝对 expiresAt deadline",
-                );
-              }
-              return expiresAt;
-            })()
-          : undefined;
-      const params =
-        protocolVersion === "1.2"
-          ? {
-              interactionId: interactionIdSchema.parse(randomUUID()),
-              threadId,
-              turnId: approval.turnId,
-              expiresAt: interactionExpiresAt,
-              sensitivity: "normal" as const,
-              approval,
+      const usesInteractionMetadata =
+        getRuntimeProtocolCapabilities(protocolVersion).serverRequestCapabilityNegotiation;
+      const interactionExpiresAt = usesInteractionMetadata
+        ? (() => {
+            if (expiresAt === undefined) {
+              throw new RuntimeClientRequestCancelledError(
+                "Runtime Protocol 1.2 审批请求缺少绝对 expiresAt deadline",
+              );
             }
-          : {
-              threadId,
-              approval,
-            };
+            return expiresAt;
+          })()
+        : undefined;
+      const params = usesInteractionMetadata
+        ? {
+            interactionId: interactionIdSchema.parse(randomUUID()),
+            threadId,
+            turnId: approval.turnId,
+            expiresAt: interactionExpiresAt,
+            sensitivity: "normal" as const,
+            approval,
+          }
+        : {
+            threadId,
+            approval,
+          };
       request = this.clientRequests.request(
         RUNTIME_SERVER_REQUEST_METHODS.approvalRequest,
         params,
@@ -591,10 +815,14 @@ export class RuntimeProtocolAdapter {
   private setClientCapabilities(
     params: ReturnType<typeof clientCapabilitiesSetParamsSchema.parse>,
   ): ClientCapabilitiesSetResult {
-    if (this.protocolVersion !== "1.2" || this.detachResponder === undefined) {
+    if (
+      this.protocolVersion === undefined ||
+      !getRuntimeProtocolCapabilities(this.protocolVersion).serverRequestCapabilityNegotiation ||
+      this.detachResponder === undefined
+    ) {
       throw new RuntimeServiceError(
         RUNTIME_ERROR_CODES.capabilityUnavailable,
-        "client.capabilities.set 仅可用于 Runtime Protocol 1.2",
+        "client.capabilities.set 仅可用于支持 capability negotiation 的 Runtime Protocol",
       );
     }
     const canonicalMethods = [...params.serverRequestMethods].sort();

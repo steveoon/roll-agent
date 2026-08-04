@@ -9,7 +9,7 @@
 Electron / Tauri / Qt / Python / IDE / Gateway
           │ Request / Notification / Response
           ▼
- Roll Runtime Protocol v1.2
+ Roll Runtime Protocol v1.3
           │ JSON-RPC + NDJSON + stdio
           ▼
  RuntimeProtocolAdapter（连接级协商）
@@ -50,11 +50,11 @@ Embedded Runtime SDK 仍可用于 Roll 第一方或版本锁定的高级宿主�
 | 分帧 | 一行一个 JSON（NDJSON） | stdio Adapter 契约 |
 | Transport | stdio | v1 正式入口 |
 
-协议版本从 `"1.0"` 开始，当前最新版本为 `"1.2"`，与 npm 包版本独立。未来增加
+协议版本从 `"1.0"` 开始，当前最新版本为 `"1.3"`，与 npm 包版本独立。未来增加
 Transport 时，不需要改变 Thread、Turn 或事件语义。
 
 `RUNTIME_PROTOCOL_VERSION` 只表示协议包中的最新 wire schema，不代表每个 Client 自动拥有
-该版本的入站能力。1.2 保持 `initialize` 的 strict 形状，并在协商完成后通过
+该版本的入站能力。1.3/1.2 保持 `initialize` 的 strict 形状，并在协商完成后通过
 `client.capabilities.set` 申明当前可处理的 Server Request method。1.1/1.0 Client
 继续按原契约回退，不能把 1.2 capability 字段塞入旧握手。
 
@@ -94,7 +94,7 @@ ApprovalGate 继续或拒绝
 | `RuntimeProtocolAdapter` | 连接级版本协商、typed wire 转换 | 可跨连接存续的业务状态 |
 | Client / GUI | 已 ACK capability 对应的临时交互 UI | Thread/Turn 权威状态、跨进程恢复和最终状态 |
 
-本地 Runtime 1.2 Interaction 链路中的身份不能混用：
+本地 Runtime 1.3/1.2 Interaction 链路中的身份不能混用：
 
 | ID | 生命周期 | 用途 |
 |---|---|---|
@@ -120,19 +120,33 @@ Relay 可靠传输语义，不能仅凭当前连接内的 Coordinator 推导出�
 不能在同一连接混用。普通 `roll chat` TUI 直接使用进程内 `AgentSession` 与既有 `clack`
 确认，不经过这条 Server Request 链路。
 
-## 状态恢复而非持久事件重放
+## 持久事件恢复与 Snapshot 收敛
 
-`runtime.event` Notification 的 `params.sequence`（即
-`RuntimeEventEnvelope.sequence`）只在当前 `runtimeInstanceId` 内单调递增。Runtime
-重启后：
+1.3 把事件分为两类：
 
-1. 客户端发现新的 `runtimeInstanceId`；
-2. 不自动重放结果未知的副作用命令；
-3. 调用 `thread.snapshot` 恢复 transcript、Operation、活动 Turn、待审批 View，以及 1.2
-   当前 responder 已 ACK 的安全 `pendingInteractions` 投影；
-4. 对 Runtime 崩溃时仍未终止的 Turn 显示 `outcome unknown`。
+- durable：Turn 状态、完整消息、安全 Tool 完成投影、安全 Approval 状态和 capability
+  变更。Runtime 必须先把事件与 cursor 事务提交到 Thread 事件日志，再发布 live；Store
+  失败时不能发布不可恢复的 durable event。
+- ephemeral：Token/message/reasoning/tool-output delta 与开始态，只带进程内 `sequence`，
+  不进入持久日志。
 
-Snapshot 从追加式 transcript 与 Tool ledger 构造，不读取可能已被上下文压缩的活动模型消息。
+`RuntimeEventEnvelope.sequence` 仍只在当前 `runtimeInstanceId` 内单调递增；1.3 durable
+event 另有互不兼容的 `eventId` 与不透明 Thread `cursor`。客户端恢复顺序是：先暂存并发
+live durable event，再调用 `runtime.events.resume({ threadId, afterCursor })`；Runtime 逐条
+发送 replay notification，最后的 RPC Response `{ throughCursor, replayedCount }` 构成
+replay→live barrier。Client 只能在收到 Response 后按 cursor 排序、按 eventId 去重并释放
+暂存 live event。
+
+Replay 使用专用无副作用发送路径，不能重新触发 Approval、User Input、Tool、Turn 或其他
+执行。每个 Thread 保留 10,000 条、16 MiB、30 天，只裁剪最老连续前缀；
+`afterCursor: null` 固定表示原始日志起点，若该起点已经被裁剪则返回
+`EVENT_CURSOR_EXPIRED`。cursor 过期或出现 gap、Runtime instance 变化或 Client 检测到 stream
+gap 时都回退 `thread.snapshot`。1.3 Snapshot 的 `eventCursor` 是新的恢复 checkpoint；
+1.2/1.1/1.0 继续只使用 Snapshot。
+
+Snapshot 从追加式 transcript 与 Tool ledger 构造，不读取可能已被上下文压缩的活动模型消息，
+并恢复活动 Turn、安全 `pendingInteractions` 与 UI 投影。结果未知的副作用命令始终不能自动
+重放；Runtime 崩溃时仍未终止的 Turn仍显示 `outcome unknown`。
 
 ## 本地与远程信任边界
 
@@ -173,39 +187,42 @@ Local Companion（主动出站）
 `npm install -g @roll-agent/core` 不会安装/启动它；普通 `roll chat`、Local-only Electron
 和 `roll runtime serve --stdio` 也不会创建 Relay 连接。
 
+`authentication.request` 与 File Picker 没有远程 projector，保持 local-only。Runtime 1.3
+event replay 只恢复既有安全事件投影，不会把这类本地能力带入 Relay；未来启用必须先完成
+安全 RFC #186。
+
 Browser、Cloud Relay 与 Local Companion 都应直接以 `@roll-agent/relay-protocol` 校验 Wire
 frame；不能为了获得 Schema 而依赖整个 `@roll-agent/companion`。
 
-当前只冻结 Relay Wire `"1.0"`。其中 `approval.candidate` 是已经存在的 Approval 专属
-候选方法，不是通用 typed interaction。Runtime Protocol `"1.2"` 已拥有逻辑
-`interactionId`，但通用 request/resolved/cancelled 的远程投影仍由
-[#187](https://github.com/steveoon/roll-agent/issues/187) 的后续 Relay Wire version
-承载，不能静默扩大 `"1.0"` 注册表。
+Relay Wire 1.1 提供通用 `interaction.request/resolved/cancelled` 与
+`interaction.candidate`；冻结的 1.0 继续只承载 Approval 专属路径。Runtime 1.3 的 event
+cursor 不会被投影成 Relay ACK，也不能静默扩大任一 Relay registry。
 
-跨层接线必须区分以下五类 correlation、幂等与投递标识：
+跨层接线必须区分以下 correlation、幂等与投递标识：
 
 | 标识或游标 | 所属层 | 语义 |
 |---|---|---|
 | Runtime JSON-RPC `id` | Runtime ↔ Local Client/Companion | 当前本地连接上的一次 Request/Response 投递 |
-| Runtime `interactionId` | Runtime typed Interaction | 当前进程内显式重投保持稳定；Relay `"1.0"` 尚未定义，也不提供跨进程恢复 |
+| Runtime `interactionId` | Runtime typed Interaction | 当前进程内显式重投保持稳定；不提供跨进程 Server Request 恢复 |
 | Relay `requestId` | Browser/Cloud Relay ↔ Companion | Relay response correlation、重投、冲突检测与响应缓存 |
 | Runtime mutation `params.requestId` | Client/Companion → Runtime | `turn.start` 等 Runtime 写操作幂等 |
-| `sequence` / cursor | Runtime event 或 Relay delivery | 各自在自己的序列空间内排序和恢复 |
+| Runtime `eventId` / `eventCursor` | 单 Thread durable event 日志 | 事件去重、replay 与 Snapshot checkpoint |
+| Relay `relaySequence` / ACK | 单 Workspace Relay 投递流 | Relay generation 内排序、重投与确认 |
 
-`RuntimeEventEnvelope.sequence` 只在当前 `runtimeInstanceId` 内递增；Relay
-`relaySequence`/ACK cursor 只描述 Companion→Relay 的投递进度。两者即使数值相同也没有
-等价关系：Relay ACK 不能确认 Runtime cursor，Runtime restart 后也不能用 Relay cursor
-续接事件。`threadId`、`turnId`、`approvalId` 等业务对象 ID 不属于上述五类。
+`RuntimeEventEnvelope.sequence` 只在当前 `runtimeInstanceId` 内递增；Runtime event cursor
+按 Thread 标识持久日志位置；Relay `relaySequence`/ACK 只描述单 Workspace 的安全投影投递
+进度。三者即使数值相同也没有等价关系：Relay ACK 不能确认 Runtime cursor，Runtime 也
+不能用 Relay cursor 续接事件。#176 不修改 Relay Wire 或增加持久 Relay outbox。
 
 `@roll-agent/companion` 当前实现的本地基础能力：
 
 - Browser client 与后台 Shell lease 由认证宿主手动接线；
 - 只有经 `CompanionWorkspace.startTurn()` 发起的 Turn 自动持有 lease；Runtime
-  `"1.2"` / `"1.1"` 的
-  Approval lease 由 `CompanionApprovalRequestBroker` handler 获取并在 Result/Abort 时
-  释放，`"1.0"` fallback 才由 Event 与响应/终态事件维护；
-- Browser lease 释放不会关闭仍有 Turn、Shell 或 Approval lease 的 Runtime；
-- 最多缓冲 `10,000` 个事件或 `16 MiB`，溢出时返回 gap 并要求 Snapshot；
+  `"1.3"` / `"1.2"` 的 Interaction lease 由 `CompanionInteractionBroker` handler 获取并在
+  Result/Abort 时释放；`"1.1"` 可在一个 minor 兼容期内使用 deprecated
+  `CompanionApprovalRequestBroker`，`"1.0"` fallback 才由 Event 与响应/终态事件维护；
+- Browser lease 释放不会关闭仍有 Turn、Shell 或 Interaction lease 的 Runtime；
+- 最多缓冲 `10,000` 个事件或 `32 MiB`，溢出时返回 gap 并要求 Snapshot；
 - Relay bridge 只对 mutation 的 `workspaceId + requestId` 做有界响应缓存，并以
   SHA-256 指纹校验参数；活动请求不淘汰，已完成结果按 LRU 保留，读取请求不缓存大型
   Snapshot；
@@ -213,23 +230,24 @@ frame；不能为了获得 Schema 而依赖整个 `@roll-agent/companion`。
   中阻塞的发送或加密任务不会阻塞新连接握手与事件恢复；
 - 完全重复投递复用原 mutation 结果，相同 ID 配不同参数会被拒绝；Runtime 仍以协商得到
   的有界 `requestId` 与已完成 `turnId` 窗口作为第二道幂等边界；
-- Runtime `"1.2"` / `"1.1"` 的 Browser 决策通过 Relay 专属
-  `approval.candidate` 提交，成功只表示
-  `{ accepted: true }`；Runtime 权威终态仍由 `approval.resolved` Event 给出，不能通过
-  Relay 直接调用 `approval.respond`；
-- Browser 必须按 Relay 事件内的 Runtime 兼容版本选择上述控制路径：本地 Runtime
-  `"1.2"` 在 Relay Wire `"1.0"` 上投影为 `protocolVersion: "1.1"`，因此收到 `"1.1"`
-  走 `approval.candidate`，收到 `"1.0"` 走 `approval.respond` fallback；外层 Companion
-  Relay `"1.0"` 不代表 Runtime 审批能力，也不能承载 Runtime `"1.2"` 新字段；
+- Relay Wire `"1.1"` 的 Browser 候选统一通过 `interaction.candidate` 提交；冻结 Wire
+  `"1.0"` 在 Runtime `"1.3"` / `"1.2"` / `"1.1"` 下继续使用 Approval 专属
+  `approval.candidate`。候选成功只表示 `{ accepted: true }`；Runtime 权威终态仍由
+  `approval.resolved` Event 给出，不能通过新 Wire 直接调用 `approval.respond`；
+- Browser 必须按 Relay 事件内的 Runtime 兼容版本选择冻结 Wire `"1.0"` 的控制路径：
+  本地 Runtime `"1.3"` / `"1.2"` / `"1.1"` 都投影为 `protocolVersion: "1.1"`，因此走
+  `approval.candidate`；收到 `"1.0"` 才走 `approval.respond` fallback。外层 Companion Relay
+  `"1.0"` 不代表 Runtime 审批能力，也不能承载 Runtime `"1.3"` / `"1.2"` 新字段；
 - 远程 approve 候选仍经过本地 Policy；`require-local-confirmation` 会返回
   `LocalConfirmationRequiredError`，不会自行创建确认 UI；远程拒绝只会收窄权限，可直接
   返回拒绝；
 - cipher-bound Workspace 只接受 `runtime.encrypted` 请求；明文请求在触达 Runtime 前以
   `RELAY_ENCRYPTION_REQUIRED`、`retryable: false` 拒绝，response/event 也只发送加密信封。
 
-上述事件缓冲、ACK、sequence、幂等缓存和 lease 都是 Companion 进程内状态，不是持久
-队列。Companion 重启后，宿主必须重建连接与 lease，并使用 `thread.snapshot` 收敛 UI。
-这里的 ACK 只推进 Relay `relaySequence`，不会确认 Runtime event cursor。
+上述 Relay buffer、ACK、幂等缓存和 lease 都是 Companion 进程内状态，不是持久队列。
+Companion 重启后，宿主必须重建连接与 lease；本地 Runtime 协商到 1.3 时可用 durable
+event replay，否则使用 `thread.snapshot` 收敛 UI。Relay ACK 只推进 `relaySequence`，不会
+确认 Runtime event cursor。
 
 生产宿主必须另外实现：
 
@@ -250,7 +268,6 @@ Roll 进程、工作目录、环境变量或 Shell。
 
 ## v1 明确不覆盖
 
-- 持久事件重放；
 - 附件和二进制传输；
 - Artifact 生命周期；
 - Workflow DAG；
@@ -258,6 +275,6 @@ Roll 进程、工作目录、环境变量或 Shell。
 - stdio 之外的 Runtime Transport；
 - Runtime 崩溃后的自动执行恢复；
 - 生产 Cloud Relay、Browser SDK 或 Companion 状态持久化；
-- Runtime Server Request 的持久重投、Relay `seq/ack/resume` 与跨进程 responder 恢复。
+- Runtime Server Request 的持久重投、持久 Relay outbox 与跨进程 responder 恢复。
 
 这些能力可以在不破坏 v1 基础对象的前提下逐步扩展。
