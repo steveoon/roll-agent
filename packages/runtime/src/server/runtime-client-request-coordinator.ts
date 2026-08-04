@@ -375,6 +375,10 @@ export class RuntimeClientRequestCoordinator {
       this.diagnose(`忽略 Runtime scope 不匹配的响应 ${String(message.id)} (${interaction.key})`);
       return true;
     }
+    if (this.isExpired(interaction)) {
+      this.expire(interaction);
+      return true;
+    }
     if ("error" in message) {
       this.rejectInteraction(
         interaction,

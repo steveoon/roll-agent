@@ -665,6 +665,59 @@ test("absolute deadline expires without delivering or approving", async () => {
   assert.deepEqual(responder.sent, []);
 });
 
+test("a response at the exact absolute deadline expires before settlement", async () => {
+  const startMs = Date.parse("2026-07-29T12:00:00.000Z");
+  let nowMs = startMs;
+  const responder = new MemoryResponder();
+  const responderId = createRuntimeClientResponderId();
+  const coordinator = new RuntimeClientRequestCoordinator({ now: () => nowMs });
+  coordinator.attachResponder({
+    id: responderId,
+    scopeId,
+    send: (message) => responder.send(message),
+    close: () => responder.close(),
+  });
+  const expiresAt = new Date(startMs + 1_000).toISOString();
+  const pending = coordinator.request(
+    RUNTIME_SERVER_REQUEST_METHODS.approvalRequest,
+    approvalRequestInput(),
+    {
+      key: approvalId,
+      scopeId,
+      eligibleResponderId: responderId,
+      approvalId,
+      threadId,
+      turnId,
+      expiresAt,
+    },
+  );
+  const deliveryId = requestId(responder);
+
+  nowMs = Date.parse(expiresAt);
+  assert.equal(
+    coordinator.handleResponse(responderId, {
+      jsonrpc: "2.0",
+      id: deliveryId,
+      result: { decision: "approve" },
+    }),
+    true,
+  );
+  await assert.rejects(
+    pending.result,
+    (error: unknown) =>
+      error instanceof RuntimeClientRequestExpiredError && error.expiresAt === expiresAt,
+  );
+  assert.deepEqual(responder.sent[1], {
+    jsonrpc: "2.0",
+    method: RUNTIME_SERVER_REQUEST_CANCEL_NOTIFICATION,
+    params: {
+      serverRequestId: deliveryId,
+      approvalId,
+      reason: "Runtime 请求已到期",
+    },
+  });
+});
+
 test("invalid absolute deadline fails before registering or delivering a request", async () => {
   const responder = new MemoryResponder();
   const responderId = createRuntimeClientResponderId();
