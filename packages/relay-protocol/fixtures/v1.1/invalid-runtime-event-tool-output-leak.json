@@ -1,0 +1,21 @@
+{
+  "type": "runtime.event",
+  "workspaceId": "00000000-0000-4000-8000-000000000507",
+  "relaySequence": 15,
+  "event": {
+    "protocolVersion": "1.1",
+    "runtimeInstanceId": "00000000-0000-4000-8000-000000000501",
+    "sequence": 15,
+    "timestamp": "2026-08-04T00:00:15.000Z",
+    "threadId": "00000000-0000-4000-8000-000000000502",
+    "turnId": "00000000-0000-4000-8000-000000000503",
+    "event": {
+      "type": "tool.output",
+      "toolCallId": "tool-1",
+      "agentName": "workspace-agent",
+      "toolName": "deploy",
+      "stream": "stdout",
+      "delta": "relay-security-sentinel"
+    }
+  }
+}
