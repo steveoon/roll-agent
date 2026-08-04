@@ -10,12 +10,16 @@ import type {
   UserInputRequestParamsV12,
   UserInputResult,
 } from "@roll-agent/protocol";
+import type { ElectronRuntimeProtocolVersion } from "./supported-protocols.ts";
 
 type RendererApprovalRequestParams = RuntimeServerRequestParamsForVersion<
-  "1.2" | "1.1",
+  ElectronRuntimeProtocolVersion,
   "approval.request"
 >;
-type RendererSnapshotResult = RuntimeMethodResultForVersion<"1.2" | "1.1", "thread.snapshot">;
+type RendererSnapshotResult = RuntimeMethodResultForVersion<
+  ElectronRuntimeProtocolVersion,
+  "thread.snapshot"
+>;
 
 export interface RendererInteractionRequestContext {
   readonly signal: AbortSignal;

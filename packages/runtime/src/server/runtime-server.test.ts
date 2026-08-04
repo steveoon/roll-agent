@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import { simulateReadableStream } from "ai";
 import { MockLanguageModelV4 } from "ai/test";
 import type { LanguageModelV4FinishReason, LanguageModelV4StreamPart } from "@ai-sdk/provider";
@@ -13,13 +14,18 @@ import {
   RUNTIME_PROTOCOL_VERSION,
   RUNTIME_SERVER_REQUEST_CANCEL_NOTIFICATION,
   RUNTIME_SERVER_REQUEST_METHODS,
+  RUNTIME_V13_MAX_DURABLE_EVENT_RECORD_BYTES,
+  RUNTIME_V13_MIN_CLIENT_FRAME_BYTES,
+  approvalIdSchema,
   requestIdSchema,
+  streamIdSchema,
   threadIdSchema,
   turnIdSchema,
   type ApprovalRequestParams,
   type ApprovalRequestParamsV12,
   type PendingInteractionProjection,
   type RuntimeEventEnvelope,
+  type RuntimeEventEnvelopeV13,
   type RuntimeServerRequestInputForSupportedVersions,
   type RuntimeServerRequestMethod,
   type UserInputRequestParamsV12,
@@ -353,11 +359,16 @@ function createApprovalProtocolHarness(
     runtimeService: service,
     ...(runtimeClientRequests !== undefined ? { runtimeClientRequests } : {}),
   });
+  serverConn.onClose(() => {
+    server.abortAll().catch(() => {});
+  });
   return {
     clientConn,
     engine,
     server,
     service,
+    store,
+    storeDir,
     async close() {
       await server.abortAll();
       await engine.dispose();
@@ -525,6 +536,11 @@ test("Runtime Protocol 1.2 capability revisions are ordered, idempotent and vers
     readonly data?: { readonly rollCode?: string };
   };
   assert.equal(stale.data?.rollCode, "CAPABILITY_REVISION_CONFLICT");
+  const replayUnavailable = (await client.requestError(7, RUNTIME_METHODS.runtimeEventsResume, {
+    threadId: "00000000-0000-4000-8000-000000000290",
+    afterCursor: null,
+  })) as { readonly data?: { readonly rollCode?: string } };
+  assert.equal(replayUnavailable.data?.rollCode, "CAPABILITY_UNAVAILABLE");
 
   const legacyHarness = createApprovalProtocolHarness();
   const legacy = attachRuntimeProtocolClient(legacyHarness.clientConn);
@@ -538,6 +554,94 @@ test("Runtime Protocol 1.2 capability revisions are ordered, idempotent and vers
     serverRequestMethods: [],
   })) as { readonly data?: { readonly rollCode?: string } };
   assert.equal(unavailable.data?.rollCode, "CAPABILITY_UNAVAILABLE");
+});
+
+test("Runtime Protocol 1.3 recovery Snapshot is bounded and remains strict in 1.2", async (t) => {
+  const harness = createApprovalProtocolHarness();
+  const client = attachRuntimeProtocolClient(harness.clientConn);
+  t.after(() => harness.close());
+
+  await client.request(1, RUNTIME_METHODS.initialize, {
+    protocolVersions: ["1.3"],
+    client: { name: "bounded-recovery-client", version: "1.3.0" },
+  });
+  await client.request(2, RUNTIME_METHODS.clientCapabilitiesSet, {
+    revision: 1,
+    serverRequestMethods: [],
+  });
+  const created = (await client.request(3, RUNTIME_METHODS.threadCreate, {
+    requestId: "00000000-0000-4000-8000-000000000289",
+    title: "bounded recovery",
+  })) as { readonly thread: { readonly id: string } };
+  const threadId = threadIdSchema.parse(created.thread.id);
+  const oversizedPart = "x".repeat(9 * 1_024 * 1_024);
+  harness.store.appendMessages(threadId, [{ role: "assistant", content: oversizedPart }]);
+  const pendingApproval = {
+    id: approvalIdSchema.parse("00000000-0000-4000-8000-000000000288"),
+    turnId: turnIdSchema.parse("00000000-0000-4000-8000-000000000287"),
+    agentName: "bounded-agent",
+    toolName: "bounded-tool",
+    preview: { detail: oversizedPart },
+  } as const;
+  const internal = harness.service as unknown as {
+    pendingApprovals: Map<
+      string,
+      {
+        readonly threadId: typeof threadId;
+        readonly session: { cancel(): boolean };
+        readonly approval: typeof pendingApproval;
+        readonly expiresAt: string;
+      }
+    >;
+  };
+  internal.pendingApprovals.set(pendingApproval.id, {
+    threadId,
+    session: { cancel: () => true },
+    approval: pendingApproval,
+    expiresAt: "2099-08-04T12:05:00.000Z",
+  });
+  const unbounded = {
+    ...harness.service.snapshotThread({ threadId, limit: 1 }),
+    pendingInteractions: [],
+  };
+  assert.ok(
+    Buffer.byteLength(JSON.stringify(unbounded), "utf8") > RUNTIME_V13_MIN_CLIENT_FRAME_BYTES,
+  );
+
+  const recovery = (await client.request(4, RUNTIME_METHODS.threadSnapshot, {
+    threadId,
+    limit: 1,
+    recovery: true,
+  })) as {
+    readonly recoveryProjection?: true;
+    readonly messages: { readonly items: readonly unknown[] };
+    readonly operations: { readonly items: readonly unknown[] };
+    readonly pendingApprovals: readonly unknown[];
+    readonly pendingInteractions: readonly unknown[];
+  };
+  assert.equal(recovery.recoveryProjection, true);
+  assert.deepEqual(recovery.messages.items, []);
+  assert.deepEqual(recovery.operations.items, []);
+  assert.deepEqual(recovery.pendingApprovals, []);
+  assert.deepEqual(recovery.pendingInteractions, []);
+  assert.ok(
+    Buffer.byteLength(JSON.stringify({ jsonrpc: "2.0", id: 4, result: recovery }), "utf8") <
+      RUNTIME_V13_MIN_CLIENT_FRAME_BYTES,
+  );
+
+  const legacyHarness = createApprovalProtocolHarness();
+  const legacy = attachRuntimeProtocolClient(legacyHarness.clientConn);
+  t.after(() => legacyHarness.close());
+  await legacy.request(1, RUNTIME_METHODS.initialize, {
+    protocolVersions: ["1.2"],
+    client: { name: "strict-recovery-client", version: "1.2.0" },
+  });
+  const invalid = (await legacy.requestError(2, RUNTIME_METHODS.threadSnapshot, {
+    threadId,
+    limit: 1,
+    recovery: true,
+  })) as { readonly data?: { readonly rollCode?: string } };
+  assert.equal(invalid.data?.rollCode, "INVALID_PARAMS");
 });
 
 test("Runtime Protocol 1.2 exposes user input only after ACK and keeps answers out of projections", async (t) => {
@@ -1915,6 +2019,233 @@ test("RuntimeServer 未知 session 返回错误响应", async () => {
   assert.ok(error && typeof error === "object" && "message" in error);
 });
 
+test("Runtime Protocol 1.3 replay 在 response barrier 后发布并发 live 且无副作用", async (t) => {
+  const storeDir = mkdtempSync(join(tmpdir(), "roll-runtime-replay-v13-"));
+  const store = new ThreadStore(storeDir);
+  const threadId = threadIdSchema.parse("00000000-0000-4000-8000-000000000291");
+  const turnId = turnIdSchema.parse("00000000-0000-4000-8000-000000000292");
+  const approvalId = approvalIdSchema.parse("00000000-0000-4000-8000-000000000293");
+  const liveApprovalId = approvalIdSchema.parse("00000000-0000-4000-8000-000000000295");
+  const liveStreamId = streamIdSchema.parse("00000000-0000-4000-8000-000000000296");
+  const largeLiveText = "x".repeat(RUNTIME_V13_MAX_DURABLE_EVENT_RECORD_BYTES - 4_096);
+  store.createThread({ id: threadId, title: "Replay" });
+  store.appendRuntimeEvent({
+    threadId,
+    turnId,
+    timestamp: "2026-08-04T12:00:00.000Z",
+    event: {
+      type: "approval.required",
+      approval: {
+        id: approvalId,
+        turnId,
+        agentName: "safe-agent",
+        toolName: "safe-tool",
+        preview: { summary: "safe projection" },
+      },
+    },
+  });
+  store.appendRuntimeEvent({
+    threadId,
+    turnId,
+    timestamp: "2026-08-04T12:00:01.000Z",
+    event: {
+      type: "message.completed",
+      streamId: streamIdSchema.parse("00000000-0000-4000-8000-000000000294"),
+      text: "durable message",
+    },
+  });
+  const expectedReplayThroughCursor = store.getRuntimeEventCursor(threadId);
+
+  const engine = {
+    async createSession() {
+      throw new Error("not used");
+    },
+    async resumeSession() {
+      throw new Error("not used");
+    },
+  } as unknown as ConversationEngine;
+  const service = new RuntimeService(engine, store, { runtimeVersion: "v1.3-replay-test" });
+  const liveApproval = {
+    id: liveApprovalId,
+    turnId,
+    agentName: "live-agent",
+    toolName: "live-tool",
+    preview: { summary: "buffered live approval" },
+  } as const;
+  const internal = service as unknown as {
+    pendingApprovals: Map<
+      string,
+      {
+        readonly threadId: typeof threadId;
+        readonly session: { cancel(): boolean };
+        readonly approval: typeof liveApproval;
+        readonly expiresAt: string;
+      }
+    >;
+    emit(
+      targetThreadId: typeof threadId,
+      targetTurnId: typeof turnId,
+      event:
+        | { readonly type: "approval.required"; readonly approval: typeof liveApproval }
+        | {
+            readonly type: "message.completed";
+            readonly streamId: typeof liveStreamId;
+            readonly text: string;
+          },
+    ): void;
+  };
+  internal.pendingApprovals.set(liveApprovalId, {
+    threadId,
+    session: { cancel: () => true },
+    approval: liveApproval,
+    expiresAt: "2099-08-04T12:05:00.000Z",
+  });
+  let receive: ((message: JsonRpcMessage) => void) | undefined;
+  const sent: JsonRpcMessage[] = [];
+  let injectedLive = false;
+  let resumeResponseSent = false;
+  let approvalRequestBeforeResumeResponse = false;
+  let observerCalls = 0;
+  service.onEvent(() => {
+    observerCalls += 1;
+  });
+  const connection: JsonRpcConnection = {
+    send(message) {
+      sent.push(message);
+      if ("id" in message && message.id === 3 && "result" in message) {
+        resumeResponseSent = true;
+      }
+      if (
+        isRequest(message) &&
+        message.method === RUNTIME_SERVER_REQUEST_METHODS.approvalRequest &&
+        !resumeResponseSent
+      ) {
+        approvalRequestBeforeResumeResponse = true;
+      }
+      if (
+        !injectedLive &&
+        "method" in message &&
+        message.method === RUNTIME_EVENT_NOTIFICATION &&
+        (message.params as RuntimeEventEnvelopeV13).event.type === "approval.required"
+      ) {
+        injectedLive = true;
+        internal.emit(threadId, turnId, { type: "approval.required", approval: liveApproval });
+        internal.emit(threadId, turnId, {
+          type: "message.completed",
+          streamId: liveStreamId,
+          text: largeLiveText,
+        });
+      }
+    },
+    onMessage(listener) {
+      receive = listener;
+    },
+    onClose() {},
+    close() {},
+  };
+  const server = new RuntimeServer(engine, connection, { runtimeService: service });
+  t.after(async () => {
+    await server.abortAll();
+    store.close();
+    rmSync(storeDir, { recursive: true, force: true });
+  });
+  assert.ok(receive !== undefined);
+  const request = async (id: number, method: string, params: unknown): Promise<JsonRpcMessage> => {
+    receive?.({ jsonrpc: "2.0", id, method, params });
+    return waitForValue(
+      () => sent.find((message) => "id" in message && message.id === id),
+      `missing response for ${method}`,
+    );
+  };
+
+  await request(1, RUNTIME_METHODS.initialize, {
+    protocolVersions: ["1.3", "1.2", "1.1", "1.0"],
+    client: { name: "replay-client", version: "1.3.0" },
+  });
+  await request(2, RUNTIME_METHODS.clientCapabilitiesSet, {
+    revision: 1,
+    serverRequestMethods: [RUNTIME_SERVER_REQUEST_METHODS.approvalRequest],
+  });
+  sent.length = 0;
+
+  const response = await request(3, RUNTIME_METHODS.runtimeEventsResume, {
+    threadId,
+    afterCursor: null,
+  });
+  assert.ok("result" in response);
+  assert.deepEqual(response.result, {
+    throughCursor: expectedReplayThroughCursor,
+    replayedCount: 2,
+  });
+  assert.deepEqual(
+    sent.map((message) => {
+      if ("method" in message && message.method === RUNTIME_EVENT_NOTIFICATION) {
+        return (message.params as RuntimeEventEnvelopeV13).event.type;
+      }
+      if ("id" in message && message.id === 3) {
+        return "resume.response";
+      }
+      if (
+        "method" in message &&
+        message.method === RUNTIME_SERVER_REQUEST_METHODS.approvalRequest
+      ) {
+        return "approval.request";
+      }
+      return "unexpected";
+    }),
+    [
+      "approval.required",
+      "message.completed",
+      "resume.response",
+      "approval.request",
+      "approval.required",
+      "message.completed",
+    ],
+  );
+  assert.equal(
+    sent.filter(
+      (message) =>
+        "method" in message && message.method === RUNTIME_SERVER_REQUEST_METHODS.approvalRequest,
+    ).length,
+    1,
+  );
+  assert.equal(approvalRequestBeforeResumeResponse, false);
+  const liveApprovalRequest = sent.find(
+    (message): message is JsonRpcRequest =>
+      isRequest(message) && message.method === RUNTIME_SERVER_REQUEST_METHODS.approvalRequest,
+  );
+  assert.ok(liveApprovalRequest);
+  assert.equal(
+    (liveApprovalRequest.params as ApprovalRequestParamsV12).approval.id,
+    liveApprovalId,
+  );
+  const largeLiveEvent = sent.find(
+    (message): message is JsonRpcNotification =>
+      "method" in message &&
+      !("id" in message) &&
+      message.method === RUNTIME_EVENT_NOTIFICATION &&
+      (() => {
+        const event = (message.params as RuntimeEventEnvelopeV13).event;
+        return event.type === "message.completed" && event.text.length === largeLiveText.length;
+      })(),
+  );
+  assert.ok(largeLiveEvent);
+  const largeLiveEnvelope = largeLiveEvent.params as RuntimeEventEnvelopeV13;
+  assert.equal(largeLiveEnvelope.event.type, "message.completed");
+  if (largeLiveEnvelope.event.type === "message.completed") {
+    assert.equal(largeLiveEnvelope.event.text.length, largeLiveText.length);
+  }
+  assert.equal(observerCalls, 2);
+
+  sent.length = 0;
+  const gap = await request(4, RUNTIME_METHODS.runtimeEventsResume, {
+    threadId,
+    afterCursor: "rte1:00000000-0000-4000-8000-000000000299:0:00000000-0000-4000-8000-000000000298",
+  });
+  assert.ok("error" in gap);
+  assert.equal(gap.error.data?.rollCode, "EVENT_CURSOR_GAP");
+});
+
 test("RuntimeServer 每条连接只能选择 Runtime Protocol 或 legacy session RPC", async (t) => {
   const { serverConn, clientConn } = memoryPair();
   const storeDir = mkdtempSync(join(tmpdir(), "roll-runtime-v1-server-"));
@@ -2218,6 +2549,93 @@ test("Runtime Protocol 1.1 同步请求初始化失败时先投影 required 再�
       client.events.find((event) => event.turnId === turnId && event.event.type === "turn.failed"),
     "同步请求失败后 Turn 未进入失败终态",
   );
+});
+
+test("Runtime Protocol approval.resolved 写盘失败时取消 Turn 并关闭 transport", async (t) => {
+  let executionCount = 0;
+  let closeCalls = 0;
+  let closeHandler: (() => void) | undefined;
+  const harness = createApprovalProtocolHarness(
+    () => {
+      executionCount += 1;
+    },
+    undefined,
+    undefined,
+    (connection) => {
+      connection.onClose = (handler) => {
+        closeHandler = handler;
+      };
+      connection.close = () => {
+        closeCalls += 1;
+        closeHandler?.();
+      };
+    },
+  );
+  const client = attachRuntimeProtocolClient(harness.clientConn);
+  const database = new DatabaseSync(join(harness.storeDir, "threads.db"));
+  t.after(async () => {
+    database.close();
+    await harness.close();
+  });
+
+  await client.request(1, RUNTIME_METHODS.initialize, {
+    protocolVersions: ["1.1"],
+    client: { name: "failing-durable-approval", version: "1.1.0" },
+  });
+  const created = (await client.request(2, RUNTIME_METHODS.threadCreate, {
+    requestId: "00000000-0000-4000-8000-000000000450",
+    title: "failing durable approval",
+  })) as { readonly thread: { readonly id: string } };
+  const threadId = threadIdSchema.parse(created.thread.id);
+  await client.request(3, RUNTIME_METHODS.turnStart, {
+    requestId: "00000000-0000-4000-8000-000000000452",
+    threadId,
+    turnId: "00000000-0000-4000-8000-000000000451",
+    input: { text: "trigger guarded tool" },
+  });
+  const approvalRequest = await waitForValue(
+    () =>
+      client.wire.find(
+        (message): message is JsonRpcRequest =>
+          isRequest(message) && message.method === RUNTIME_SERVER_REQUEST_METHODS.approvalRequest,
+      ),
+    "未收到 approval.request",
+  );
+
+  database.exec(`
+    CREATE TRIGGER reject_protocol_approval_resolution
+    BEFORE INSERT ON runtime_events
+    WHEN NEW.event_json LIKE '%"approval.resolved"%'
+    BEGIN
+      SELECT RAISE(ABORT, 'blocked protocol approval resolution');
+    END;
+  `);
+  harness.clientConn.send({
+    jsonrpc: "2.0",
+    id: approvalRequest.id,
+    result: { decision: "approve" },
+  });
+
+  await waitForValue(() => (closeCalls === 1 ? true : undefined), "Store 失败后连接未关闭");
+  await harness.server.abortAll();
+  await new Promise<void>((resolve) => setImmediate(resolve));
+
+  assert.equal(closeCalls, 1);
+  assert.equal(executionCount, 0);
+  assert.equal(
+    client.events.some((event) => event.event.type === "approval.resolved"),
+    false,
+  );
+  assert.equal(
+    harness.store
+      .resumeRuntimeEvents(threadId, null)
+      .events.some((event) => event.event.type === "approval.resolved"),
+    false,
+  );
+  const internalService = harness.service as unknown as {
+    readonly pendingApprovals: ReadonlyMap<string, unknown>;
+  };
+  assert.equal(internalService.pendingApprovals.size, 0);
 });
 
 test("Runtime Protocol event write failure closes the transport after local settlement", async (t) => {

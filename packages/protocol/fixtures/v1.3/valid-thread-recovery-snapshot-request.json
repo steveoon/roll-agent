@@ -1,0 +1,10 @@
+{
+  "jsonrpc": "2.0",
+  "id": 15,
+  "method": "thread.snapshot",
+  "params": {
+    "threadId": "00000000-0000-4000-8000-000000000002",
+    "limit": 1,
+    "recovery": true
+  }
+}

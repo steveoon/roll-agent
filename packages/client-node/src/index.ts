@@ -4,10 +4,17 @@ import { createInterface } from "node:readline";
 import type { Readable, Writable } from "node:stream";
 import clientNodePackage from "../package.json" with { type: "json" };
 import {
+  RuntimeEventRecoveryError,
+  RuntimeEventRecoveryManager,
+  type RuntimeEventRecoveryManagerOptions,
+  type RuntimeEventRecoverySnapshot,
+} from "./runtime-event-recovery.ts";
+import {
   RUNTIME_EVENT_NOTIFICATION,
   RUNTIME_METHODS,
   RUNTIME_SERVER_REQUEST_CANCEL_NOTIFICATION,
   RUNTIME_SERVER_REQUEST_METHODS,
+  RUNTIME_V13_MIN_CLIENT_FRAME_BYTES,
   SUPPORTED_RUNTIME_PROTOCOL_VERSIONS,
   getRuntimeProtocolCapabilities,
   getRuntimeProtocolRegistry,
@@ -34,6 +41,7 @@ import {
   type RuntimeEventEnvelope,
   type RuntimeMethod,
   type RuntimeMethodInput,
+  type RuntimeMethodInputForVersion,
   type RuntimeMethodParamsForVersion,
   type RuntimeMethodResultForVersion,
   type RuntimeProtocolErrorDataForVersion,
@@ -41,10 +49,31 @@ import {
   type RuntimeServerRequestMethod,
   type RuntimeServerRequestParamsForSupportedVersions,
   type RuntimeServerRequestResultForSupportedVersions,
+  type ThreadId,
   type TurnId,
 } from "@roll-agent/protocol";
 
-const DEFAULT_MAX_FRAME_BYTES = 4 * 1_024 * 1_024;
+export {
+  DEFAULT_RUNTIME_EVENT_RECOVERY_MAX_BUFFERED_BYTES,
+  DEFAULT_RUNTIME_EVENT_RECOVERY_MAX_BUFFERED_EVENTS,
+  RUNTIME_EVENT_RECOVERY_SNAPSHOT_REASONS,
+  RuntimeEventRecoveryError,
+  RuntimeEventRecoveryManager,
+  type RuntimeDurableEventEnvelope,
+  type RuntimeEphemeralEventEnvelope,
+  type RuntimeEventRecoveryBridge,
+  type RuntimeEventRecoveryCheckpoint,
+  type RuntimeEventRecoveryErrorContext,
+  type RuntimeEventRecoveryManagerOptions,
+  type RuntimeEventRecoveryMode,
+  type RuntimeEventRecoverySnapshot,
+  type RuntimeEventRecoverySnapshotContext,
+  type RuntimeEventRecoverySnapshotReason,
+  type RuntimeEventRecoveryStartResult,
+  type RuntimeEventRecoveryThreadOptions,
+} from "./runtime-event-recovery.ts";
+
+const DEFAULT_MAX_FRAME_BYTES = RUNTIME_V13_MIN_CLIENT_FRAME_BYTES;
 const DEFAULT_MAX_READ_RETRIES = 1;
 const DEFAULT_READ_RETRY_DELAY_MS = 100;
 const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
@@ -140,6 +169,14 @@ type MutableRuntimeServerRequestHandlers = {
   -readonly [TMethod in RuntimeServerRequestMethod]?: RuntimeServerRequestHandler<TMethod>;
 };
 
+type DynamicCapabilityRuntimeProtocolVersion = Extract<RuntimeProtocolVersion, "1.3" | "1.2">;
+
+function usesDynamicServerRequestCapabilities(
+  version: RuntimeProtocolVersion,
+): version is DynamicCapabilityRuntimeProtocolVersion {
+  return version === "1.3" || version === "1.2";
+}
+
 function setRuntimeServerRequestHandler<TMethod extends RuntimeServerRequestMethod>(
   handlers: MutableRuntimeServerRequestHandlers,
   method: TMethod,
@@ -179,11 +216,11 @@ function supportsRuntimeProtocolVersion(
 }
 
 function parseClientRuntimeServerRequestParams<TMethod extends RuntimeServerRequestMethod>(
-  version: "1.2" | "1.1",
+  version: "1.3" | "1.2" | "1.1",
   method: TMethod,
   value: unknown,
 ): RuntimeServerRequestHandlerParams<TMethod> {
-  if (version === "1.2") {
+  if (usesDynamicServerRequestCapabilities(version)) {
     if (!isRuntimeServerRequestMethodAvailable(version, method)) {
       throw new Error(`Runtime Protocol ${version} does not support server request ${method}`);
     }
@@ -220,11 +257,11 @@ function parseClientRuntimeMethodResult<TMethod extends RuntimeMethod>(
 }
 
 function parseClientRuntimeServerRequestResult<TMethod extends RuntimeServerRequestMethod>(
-  version: "1.2" | "1.1",
+  version: "1.3" | "1.2" | "1.1",
   method: TMethod,
   value: unknown,
 ): RuntimeServerRequestResultForSupportedVersions<TMethod> {
-  if (version === "1.2") {
+  if (usesDynamicServerRequestCapabilities(version)) {
     if (!isRuntimeServerRequestMethodAvailable(version, method)) {
       throw new Error(`Runtime Protocol ${version} does not support server request ${method}`);
     }
@@ -571,6 +608,7 @@ export class RollNodeClient {
   private connectionFailure: Error | undefined;
   private exitResult: RuntimeClientExit | undefined;
   private shutdownPromise: Promise<RuntimeClientExit> | undefined;
+  private eventRecoveryManager: RuntimeEventRecoveryManager | undefined;
 
   private constructor(options: ConnectRuntimeClientOptions) {
     this.transport = options.transport;
@@ -583,8 +621,10 @@ export class RollNodeClient {
     this.defaultShutdownOptions = normalizeShutdownOptions(options.shutdownOptions);
     this.serverRequestHandlers = resolveRuntimeServerRequestHandlers(options);
     this.activeServerRequestHandlers = { ...this.serverRequestHandlers };
-    this.advertisedProtocolVersions = SUPPORTED_RUNTIME_PROTOCOL_VERSIONS.filter((version) =>
-      supportsRuntimeProtocolVersion(version, this.serverRequestHandlers),
+    this.advertisedProtocolVersions = SUPPORTED_RUNTIME_PROTOCOL_VERSIONS.filter(
+      (version) =>
+        supportsRuntimeProtocolVersion(version, this.serverRequestHandlers) &&
+        (version !== "1.3" || this.maxFrameBytes >= RUNTIME_V13_MIN_CLIENT_FRAME_BYTES),
     );
     if (!Number.isInteger(this.maxFrameBytes) || this.maxFrameBytes <= 0) {
       throw new Error("maxFrameBytes must be a positive integer");
@@ -686,7 +726,7 @@ export class RollNodeClient {
 
   private async initializeServerRequestCapabilities(): Promise<void> {
     const protocolVersion = this.getInitializationResult().protocolVersion;
-    if (protocolVersion === "1.2") {
+    if (usesDynamicServerRequestCapabilities(protocolVersion)) {
       await this.queueServerRequestCapabilitySync();
       return;
     }
@@ -698,7 +738,8 @@ export class RollNodeClient {
   }
 
   private queueServerRequestCapabilitySync(): Promise<void> {
-    if (this.getInitializationResult().protocolVersion !== "1.2") {
+    const protocolVersion = this.getInitializationResult().protocolVersion;
+    if (!usesDynamicServerRequestCapabilities(protocolVersion)) {
       return Promise.resolve();
     }
     if (this.capabilityRevision >= Number.MAX_SAFE_INTEGER) {
@@ -708,22 +749,23 @@ export class RollNodeClient {
     }
     const revision = this.capabilityRevision + 1;
     this.capabilityRevision = revision;
-    const serverRequestMethods = getRuntimeProtocolRegistry("1.2").serverRequestMethods.filter(
-      (method) => this.serverRequestHandlers[method] !== undefined,
-    );
+    const serverRequestMethods = getRuntimeProtocolRegistry(
+      protocolVersion,
+    ).serverRequestMethods.filter((method) => this.serverRequestHandlers[method] !== undefined);
     for (const method of serverRequestMethods) {
       if (!this.serverRequestHandlerCapabilityRevisions.has(method)) {
         this.serverRequestHandlerCapabilityRevisions.set(method, revision);
       }
     }
     const sync = this.capabilitySyncTail.then(async () => {
-      await this.requestClientCapabilitiesSet(revision, serverRequestMethods);
+      await this.requestClientCapabilitiesSet(protocolVersion, revision, serverRequestMethods);
     });
     this.capabilitySyncTail = sync;
     return sync;
   }
 
   private requestClientCapabilitiesSet(
+    protocolVersion: DynamicCapabilityRuntimeProtocolVersion,
     revision: number,
     serverRequestMethods: readonly RuntimeServerRequestMethod[],
   ): Promise<ClientCapabilitiesSetResult> {
@@ -737,27 +779,33 @@ export class RollNodeClient {
       return Promise.reject(new RollRuntimeClosingError());
     }
     const method = RUNTIME_METHODS.clientCapabilitiesSet;
-    const params = parseRuntimeMethodParamsForVersion("1.2", method, {
+    const params = parseRuntimeMethodParamsForVersion(protocolVersion, method, {
       revision,
       serverRequestMethods: [...serverRequestMethods],
     });
     return this.requestOnce(
       method,
       params,
-      (value) => parseRuntimeMethodResultForVersion("1.2", method, value),
+      (value) => parseRuntimeMethodResultForVersion(protocolVersion, method, value),
       (value) => {
-        this.acceptClientCapabilitiesSetResult(revision, serverRequestMethods, value);
+        this.acceptClientCapabilitiesSetResult(
+          protocolVersion,
+          revision,
+          serverRequestMethods,
+          value,
+        );
       },
     );
   }
 
   private acceptClientCapabilitiesSetResult(
+    protocolVersion: DynamicCapabilityRuntimeProtocolVersion,
     revision: number,
     serverRequestMethods: readonly RuntimeServerRequestMethod[],
     value: unknown,
   ): void {
     const result = parseRuntimeMethodResultForVersion(
-      "1.2",
+      protocolVersion,
       RUNTIME_METHODS.clientCapabilitiesSet,
       value,
     );
@@ -780,7 +828,7 @@ export class RollNodeClient {
     }
     this.acknowledgedCapabilityRevision = revision;
     this.acknowledgedServerRequestMethods = new Set(result.acceptedServerRequestMethods);
-    for (const method of getRuntimeProtocolRegistry("1.2").serverRequestMethods) {
+    for (const method of getRuntimeProtocolRegistry(protocolVersion).serverRequestMethods) {
       if (
         !this.acknowledgedServerRequestMethods.has(method) &&
         this.serverRequestHandlers[method] === undefined
@@ -801,6 +849,34 @@ export class RollNodeClient {
     return () => {
       this.listeners.delete(listener);
     };
+  }
+
+  /** Creates the single per-connection manager for durable Runtime Event recovery. */
+  createEventRecovery(
+    options: RuntimeEventRecoveryManagerOptions = {},
+  ): RuntimeEventRecoveryManager {
+    if (this.connectionFailure !== undefined) {
+      throw this.connectionFailure;
+    }
+    if (this.exited) {
+      throw this.exitResult?.error ?? new RollRuntimeExitedError(null, null);
+    }
+    if (this.closing) {
+      throw new RollRuntimeClosingError();
+    }
+    if (this.eventRecoveryManager !== undefined && !this.eventRecoveryManager.isClosed()) {
+      return this.eventRecoveryManager;
+    }
+    this.eventRecoveryManager = new RuntimeEventRecoveryManager(
+      {
+        getInitializationResult: () => this.getInitializationResult(),
+        requestSnapshot: (threadId) => this.requestEventRecoverySnapshot(threadId),
+        requestResume: (input, acceptResult) =>
+          this.requestRuntimeEventsResume(input, acceptResult),
+      },
+      options,
+    );
+    return this.eventRecoveryManager;
   }
 
   onExit(listener: (exit: RuntimeClientExit) => void): () => void {
@@ -858,7 +934,11 @@ export class RollNodeClient {
     const previousHandler = this.serverRequestHandlers[method];
     setRuntimeServerRequestHandler(this.serverRequestHandlers, method, handler);
     setRuntimeServerRequestHandler(this.activeServerRequestHandlers, method, handler);
-    if (protocolVersion === "1.2" && previousHandler === undefined) {
+    if (
+      protocolVersion !== undefined &&
+      usesDynamicServerRequestCapabilities(protocolVersion) &&
+      previousHandler === undefined
+    ) {
       this.observeServerRequestCapabilitySync(this.queueServerRequestCapabilitySync());
     }
     return () => {
@@ -880,7 +960,10 @@ export class RollNodeClient {
       }
       delete this.serverRequestHandlers[method];
       this.serverRequestHandlerCapabilityRevisions.delete(method);
-      if (negotiatedVersion === "1.2") {
+      if (
+        negotiatedVersion !== undefined &&
+        usesDynamicServerRequestCapabilities(negotiatedVersion)
+      ) {
         this.retireServerRequestsForMethod(
           method,
           new Error(`Runtime Client capability "${method}" was withdrawn`),
@@ -892,11 +975,70 @@ export class RollNodeClient {
     };
   }
 
-  /** Registers the typed Runtime Protocol 1.2 userInput.request handler. */
+  /** Registers the typed Runtime Protocol 1.3/1.2 userInput.request handler. */
   onUserInputRequest(handler: UserInputRequestHandler): () => void {
     return this.registerServerRequestHandler(
       RUNTIME_SERVER_REQUEST_METHODS.userInputRequest,
       handler,
+    );
+  }
+
+  private requestEventRecoverySnapshot(threadId: ThreadId): Promise<RuntimeEventRecoverySnapshot> {
+    if (this.connectionFailure !== undefined) {
+      return Promise.reject(this.connectionFailure);
+    }
+    if (this.exited) {
+      return Promise.reject(this.exitResult?.error ?? new RollRuntimeExitedError(null, null));
+    }
+    if (this.closing) {
+      return Promise.reject(new RollRuntimeClosingError());
+    }
+    const protocolVersion = this.getInitializationResult().protocolVersion;
+    if (protocolVersion !== "1.3") {
+      return this.request(RUNTIME_METHODS.threadSnapshot, { threadId, limit: 1 });
+    }
+    const method = RUNTIME_METHODS.threadSnapshot;
+    const params = parseRuntimeMethodParamsForVersion(protocolVersion, method, {
+      threadId,
+      limit: 1,
+      recovery: true,
+    });
+    return this.requestOnce(method, params, (value) =>
+      parseRuntimeMethodResultForVersion(protocolVersion, method, value),
+    );
+  }
+
+  private requestRuntimeEventsResume(
+    input: RuntimeMethodInputForVersion<"1.3", typeof RUNTIME_METHODS.runtimeEventsResume>,
+    acceptResult: (
+      result: RuntimeMethodResultForVersion<"1.3", typeof RUNTIME_METHODS.runtimeEventsResume>,
+    ) => void,
+  ): Promise<RuntimeMethodResultForVersion<"1.3", typeof RUNTIME_METHODS.runtimeEventsResume>> {
+    if (this.connectionFailure !== undefined) {
+      return Promise.reject(this.connectionFailure);
+    }
+    if (this.exited) {
+      return Promise.reject(this.exitResult?.error ?? new RollRuntimeExitedError(null, null));
+    }
+    if (this.closing) {
+      return Promise.reject(new RollRuntimeClosingError());
+    }
+    if (this.getInitializationResult().protocolVersion !== "1.3") {
+      return Promise.reject(
+        new RuntimeEventRecoveryError(
+          "runtime.events.resume requires negotiated Runtime Protocol 1.3",
+        ),
+      );
+    }
+    const method = RUNTIME_METHODS.runtimeEventsResume;
+    const params = parseRuntimeMethodParamsForVersion("1.3", method, input);
+    return this.requestOnce(
+      method,
+      params,
+      (value) => parseRuntimeMethodResultForVersion("1.3", method, value),
+      (value) => {
+        acceptResult(parseRuntimeMethodResultForVersion("1.3", method, value));
+      },
     );
   }
 
@@ -1310,7 +1452,7 @@ export class RollNodeClient {
         return;
       }
       try {
-        if (protocolVersion === "1.2") {
+        if (usesDynamicServerRequestCapabilities(protocolVersion)) {
           const cancellation = parseRuntimeServerRequestCancelParamsForVersion(
             protocolVersion,
             params,
@@ -1383,7 +1525,7 @@ export class RollNodeClient {
     const handler = this.activeServerRequestHandlers[method];
     const requiredCapabilityRevision = this.serverRequestHandlerCapabilityRevisions.get(method);
     if (
-      (protocolVersion === "1.2" &&
+      (usesDynamicServerRequestCapabilities(protocolVersion) &&
         (!this.acknowledgedServerRequestMethods.has(method) ||
           requiredCapabilityRevision === undefined ||
           this.acknowledgedCapabilityRevision < requiredCapabilityRevision)) ||
@@ -1411,7 +1553,7 @@ export class RollNodeClient {
   }
 
   private async dispatchServerRequest<TMethod extends RuntimeServerRequestMethod>(
-    protocolVersion: "1.2" | "1.1",
+    protocolVersion: "1.3" | "1.2" | "1.1",
     id: JsonRpcId,
     method: TMethod,
     input: unknown,
@@ -1565,6 +1707,9 @@ export class RollNodeClient {
     ) {
       this.activeTurns.delete(event.turnId);
     }
+    if (this.eventRecoveryManager?.acceptEvent(event) === true) {
+      return;
+    }
     for (const listener of this.listeners) {
       try {
         listener(event);
@@ -1631,6 +1776,7 @@ export class RollNodeClient {
     this.rejectPending(error);
     this.markActiveTurnsOutcomeUnknown();
     this.exitResult = { code, signal, error };
+    this.eventRecoveryManager?.acceptClientExit(error);
     this.resolveExit(this.exitResult);
     for (const listener of this.exitListeners) {
       try {

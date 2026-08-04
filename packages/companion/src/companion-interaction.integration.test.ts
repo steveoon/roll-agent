@@ -73,6 +73,12 @@ class ProtocolV12Client implements CompanionRuntimeClient {
   close(): void {}
 }
 
+class ProtocolV13Client extends ProtocolV12Client {
+  override getInitializationResult(): Pick<InitializeResult, "protocolVersion"> {
+    return { protocolVersion: "1.3" };
+  }
+}
+
 function nextTask(): Promise<void> {
   return new Promise((resolve) => setImmediate(resolve));
 }
@@ -99,15 +105,17 @@ test("the Runtime handler manifest excludes local-only interactions", () => {
   assert.equal("filePicker.request" in handlers, false);
 });
 
-test("Runtime Protocol 1.2 fails closed when no Interaction Broker is configured", () => {
-  assert.throws(
-    () =>
-      new CompanionWorkspace({
-        client: new ProtocolV12Client(),
-        localApprovalPolicy: () => "deny",
-      }),
-    /requires a CompanionInteractionBroker/u,
-  );
+test("Runtime Protocol 1.3/1.2 fails closed when no Interaction Broker is configured", () => {
+  for (const client of [new ProtocolV13Client(), new ProtocolV12Client()]) {
+    assert.throws(
+      () =>
+        new CompanionWorkspace({
+          client,
+          localApprovalPolicy: () => "deny",
+        }),
+      /requires a CompanionInteractionBroker/u,
+    );
+  }
 });
 
 test(

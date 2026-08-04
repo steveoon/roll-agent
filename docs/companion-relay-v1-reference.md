@@ -44,7 +44,7 @@ Broker、ACK/gap 缓冲、去重与出站重连。它不包含生产 Cloud Relay
 所有未带 `V11` 后缀的 legacy 通用 exports 都继续固定为 1.0。新 Companion 与旧 peer 使用 1.0
 时不能发送 1.1 Interaction；1.0 registry、Schema 和 fixtures 不再扩张。
 
-Wire version 与 npm package version、Runtime Protocol version 相互独立。本地 Runtime 1.2 的
+Wire version 与 npm package version、Runtime Protocol version 相互独立。本地 Runtime 1.3 的
 字段不能直接偷渡进 Wire 1.0；每一层都必须按自己的 registry 解析和投影。
 
 ## Wire 1.1 消息
@@ -63,7 +63,8 @@ Wire version 与 npm package version、Runtime Protocol version 相互独立。�
 | `runtime.encrypted` | 双向 | Workspace payload cipher 信封 |
 
 `runtime.event` 和三类 Interaction 帧共享单个 Workspace `relaySequence`。ACK 只确认 Relay
-投递前缀，不确认 Runtime event cursor。
+安全投影的投递前缀，不确认 Runtime event cursor；#176 不改变 Relay Wire，也不增加持久
+Relay outbox。
 
 ### Typed Interaction
 
@@ -122,7 +123,8 @@ Browser 必须等待有序的 `interaction.resolved` 或 `interaction.cancelled`
 命中 Broker 当前 pending `interactionId`，不能从 timeline event 直接执行控制操作。
 
 `authentication.request` 和 File Picker 没有 Wire 1.1 projector，也不注册 Runtime handlers，
-保持 local-only。未来若要启用必须先完成安全 RFC #186。
+保持 local-only。Runtime 1.3 replay 不会扩大这个边界；未来若要启用必须先完成安全 RFC
+#186。
 
 ## ID 与 cursor
 
@@ -133,10 +135,12 @@ Browser 必须等待有序的 `interaction.resolved` 或 `interaction.cancelled`
 | Relay `requestId` | 一次 Relay request 及其重投 | response correlation、冲突检测与缓存 |
 | Runtime mutation `params.requestId` | 一次 Runtime 写操作 | Runtime 幂等键 |
 | Relay `relaySequence` / ACK | 单 Workspace Relay 投递流 | 重投、ACK 与 gap |
-| Runtime event cursor/sequence | Runtime event 流 | Runtime 自己的恢复语义 |
+| Runtime process `sequence` | 当前 `runtimeInstanceId` | live event 进程内排序，不持久 |
+| Runtime `eventId` / `eventCursor` | 单 Thread durable event 日志 | 1.3 replay、去重与 Snapshot checkpoint |
 
 这些类型和值不能混用。Relay `requestId` 不能充当 `interactionId` 或 Runtime mutation
-`requestId`；Relay ACK 也不能确认 Runtime event cursor。
+`requestId`；Relay `relaySequence` 按 Workspace 安全投影排序，Runtime cursor 按 Thread
+durable 日志排序，Relay ACK 不能确认 Runtime event cursor。
 
 ## Companion 接线
 
@@ -166,7 +170,7 @@ bridge.connect(authenticatedTransport, {
 ```
 
 `responderContext` 是 Host-owned opaque state。Companion 不解释它，也不因其存在就提供生产
-身份或 controller 选举。Protocol 1.2 Runtime 若未接入 Interaction Broker 会 fail closed；
+身份或 controller 选举。Protocol 1.3/1.2 Runtime 若未接入 Interaction Broker 会 fail closed；
 不会通过 timeline event 猜测或回退成未授权响应。
 
 `CompanionInteractionBroker` 持有 pending Interaction 与 lease：Approval 使用 `approval`
@@ -180,7 +184,7 @@ cancel、deadline、terminal Turn、绑定释放或 close 时只结算并释放�
 ## ACK、buffer 与重连
 
 Wire 1.1 使用 `CompanionRelayFrameBuffer` 将安全 Runtime event 与 Interaction 帧放入同一
-有序流。默认上限为 10,000 条 / 16 MiB，只保留进程内状态。
+有序流。默认上限为 10,000 条 / 32 MiB，只保留进程内状态。
 
 - ACK 不能超过当前 transport generation 已成功发送的最高连续 sequence。
 - 重连使用新 generation 和独立发送队列，重投未 ACK 的帧。
@@ -189,7 +193,9 @@ Wire 1.1 使用 `CompanionRelayFrameBuffer` 将安全 Runtime event 与 Interact
 - bridge 的 `close()` 是终态，并终止仍 pending 的远程 Interaction。
 
 这不是可靠 outbox、Interaction WAL 或持久 Runtime event log。Companion 进程重启后应重新
-建立 Workspace 状态并用 Snapshot 收敛。
+建立 Workspace 状态；本地 Runtime 协商到 1.3 时可通过 `runtime.events.resume` 恢复 durable
+event，否则用 Snapshot 收敛。Runtime replay 的 Response barrier 与 Relay ACK 是两个独立
+生命周期。
 
 ## Workspace payload cipher
 

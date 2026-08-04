@@ -5,6 +5,17 @@ import { randomUUID } from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
 import { modelMessageSchema, type ModelMessage } from "ai";
 import {
+  RUNTIME_V13_MAX_DURABLE_EVENT_RECORD_BYTES,
+  RUNTIME_V13_MAX_DURABLE_EVENT_RECORDS,
+  runtimeDurableEventV13Schema,
+  runtimeEventCursorSchema,
+  runtimeEventIdSchema,
+  timestampSchema,
+  type RuntimeDurableEventV13,
+  type RuntimeEventCursor,
+  type RuntimeEventId,
+} from "@roll-agent/protocol";
+import {
   parsePersistedToolExecutionRecord,
   prepareToolExecutionRecordForPersistence,
   redactSecretText,
@@ -38,7 +49,7 @@ import {
 } from "../engine/tool-protocol-repair.ts";
 import { sanitizePersistedExplicitSkillCheckpoint } from "../engine/explicit-skill-context.ts";
 
-const SCHEMA_VERSION = 4;
+const SCHEMA_VERSION = 5;
 const DEFAULT_TOOL_EXECUTION_LIMIT = 100;
 const MAX_TOOL_EXECUTION_LIMIT = 500;
 const DEFAULT_TRANSCRIPT_LIMIT = 50;
@@ -51,6 +62,55 @@ export const TOOL_EXECUTION_RETENTION_POLICY = {
   maxRecordsPerThread: 2_000,
   maxAgeMs: 30 * 24 * 60 * 60 * 1_000,
 } as const;
+
+export const RUNTIME_EVENT_RETENTION_POLICY = {
+  maxBytesPerThread: RUNTIME_V13_MAX_DURABLE_EVENT_RECORD_BYTES,
+  maxRecordsPerThread: RUNTIME_V13_MAX_DURABLE_EVENT_RECORDS,
+  maxAgeMs: 30 * 24 * 60 * 60 * 1_000,
+} as const;
+
+export interface AppendRuntimeEventInput {
+  readonly threadId: string;
+  readonly turnId?: string;
+  readonly timestamp: string;
+  readonly event: RuntimeDurableEventV13;
+}
+
+export interface StoredRuntimeEvent {
+  readonly eventId: RuntimeEventId;
+  readonly cursor: RuntimeEventCursor;
+  readonly threadSequence: number;
+  readonly threadId: string;
+  readonly turnId?: string;
+  readonly timestamp: string;
+  readonly event: RuntimeDurableEventV13;
+}
+
+export interface ResumeRuntimeEventsResult {
+  readonly events: readonly StoredRuntimeEvent[];
+  readonly throughCursor: RuntimeEventCursor | null;
+  readonly replayedCount: number;
+}
+
+export class RuntimeEventCursorExpiredError extends Error {
+  readonly cursor: RuntimeEventCursor | null;
+
+  constructor(cursor: RuntimeEventCursor | null) {
+    super("Runtime event cursor is older than the retained event prefix");
+    this.name = "RuntimeEventCursorExpiredError";
+    this.cursor = cursor;
+  }
+}
+
+export class RuntimeEventCursorGapError extends Error {
+  readonly cursor: RuntimeEventCursor;
+
+  constructor(cursor: RuntimeEventCursor) {
+    super("Runtime event cursor does not belong to the current Thread event log");
+    this.name = "RuntimeEventCursorGapError";
+    this.cursor = cursor;
+  }
+}
 
 export const TRANSCRIPT_ENTRY_KINDS = ["message", "tool_execution"] as const;
 export type TranscriptEntryKind = (typeof TRANSCRIPT_ENTRY_KINDS)[number];
@@ -122,6 +182,44 @@ interface CompactionCheckpointRow {
 
 interface TranscriptCompletenessRow {
   readonly completeness: string;
+}
+
+interface RuntimeEventStateRow {
+  readonly event_log_id: string;
+  readonly next_sequence: number;
+  readonly retained_from_sequence: number;
+  readonly retained_predecessor_event_id: string | null;
+  readonly latest_event_id: string | null;
+  readonly retained_count: number;
+  readonly retained_bytes: number;
+}
+
+interface RuntimeEventRow {
+  readonly thread_sequence: number;
+  readonly event_id: string;
+  readonly turn_id: string | null;
+  readonly event_timestamp: string;
+  readonly event_json: string;
+}
+
+interface RuntimeEventSequenceRow {
+  readonly thread_sequence: number;
+  readonly event_id: string;
+}
+
+interface RuntimeEventRetentionAggregateRow {
+  readonly removed_count: number;
+  readonly removed_bytes: number | null;
+}
+
+interface RuntimeEventRetentionBoundaryRow {
+  readonly keep_from: number | null;
+}
+
+interface ParsedRuntimeEventCursor {
+  readonly eventLogId: string;
+  readonly threadSequence: number;
+  readonly eventId: RuntimeEventId;
 }
 
 export type SequencedToolExecutionRecord = ToolExecutionRecord & {
@@ -282,6 +380,62 @@ function toRecord(row: ThreadRow): ThreadRecord {
   };
 }
 
+function createStoredRuntimeEventId(): RuntimeEventId {
+  return runtimeEventIdSchema.parse(randomUUID());
+}
+
+function createStoredRuntimeEventCursor(
+  eventLogId: string,
+  threadSequence: number,
+  eventId: RuntimeEventId,
+): RuntimeEventCursor {
+  return runtimeEventCursorSchema.parse(`rte1:${eventLogId}:${String(threadSequence)}:${eventId}`);
+}
+
+function parseStoredRuntimeEventCursor(cursor: string): ParsedRuntimeEventCursor | undefined {
+  const parsed = runtimeEventCursorSchema.safeParse(cursor);
+  if (!parsed.success) {
+    return undefined;
+  }
+  const parts = parsed.data.split(":");
+  const threadSequence = Number(parts[2]);
+  const eventId = runtimeEventIdSchema.safeParse(parts[3]);
+  if (
+    parts[1] === undefined ||
+    !Number.isSafeInteger(threadSequence) ||
+    threadSequence < 0 ||
+    !eventId.success
+  ) {
+    return undefined;
+  }
+  return {
+    eventLogId: parts[1],
+    threadSequence,
+    eventId: eventId.data,
+  };
+}
+
+function normalizeRuntimeEventTimestamp(timestamp: string): string {
+  return new Date(Date.parse(timestampSchema.parse(timestamp))).toISOString();
+}
+
+function parseRuntimeEventRow(
+  eventLogId: string,
+  threadId: string,
+  row: RuntimeEventRow,
+): StoredRuntimeEvent {
+  const eventId = runtimeEventIdSchema.parse(row.event_id);
+  return {
+    eventId,
+    cursor: createStoredRuntimeEventCursor(eventLogId, row.thread_sequence, eventId),
+    threadSequence: row.thread_sequence,
+    threadId,
+    ...(row.turn_id === null ? {} : { turnId: row.turn_id }),
+    timestamp: row.event_timestamp,
+    event: runtimeDurableEventV13Schema.parse(JSON.parse(row.event_json)),
+  };
+}
+
 export class ThreadStore {
   private readonly db: DatabaseSync;
 
@@ -417,7 +571,44 @@ export class ThreadStore {
              FOREIGN KEY (thread_id) REFERENCES threads(id) ON DELETE CASCADE
            );
            CREATE INDEX IF NOT EXISTS idx_compaction_checkpoints_thread_generation
-             ON compaction_checkpoints(thread_id, generation DESC);`,
+             ON compaction_checkpoints(thread_id, generation DESC);
+           CREATE TABLE IF NOT EXISTS thread_runtime_event_state (
+             thread_id TEXT PRIMARY KEY,
+             event_log_id TEXT NOT NULL UNIQUE,
+             next_sequence INTEGER NOT NULL CHECK (next_sequence >= 0),
+             retained_from_sequence INTEGER NOT NULL
+               CHECK (retained_from_sequence >= 0 AND retained_from_sequence <= next_sequence),
+             retained_predecessor_event_id TEXT,
+             latest_event_id TEXT,
+             retained_count INTEGER NOT NULL CHECK (retained_count >= 0),
+             retained_bytes INTEGER NOT NULL CHECK (retained_bytes >= 0),
+             CHECK (
+               (next_sequence = 0
+                 AND retained_from_sequence = 0
+                 AND retained_predecessor_event_id IS NULL
+                 AND latest_event_id IS NULL)
+               OR (next_sequence > 0 AND latest_event_id IS NOT NULL)
+             ),
+             CHECK (
+               (retained_from_sequence = 0 AND retained_predecessor_event_id IS NULL)
+               OR (retained_from_sequence > 0 AND retained_predecessor_event_id IS NOT NULL)
+             ),
+             FOREIGN KEY (thread_id) REFERENCES threads(id) ON DELETE CASCADE
+           );
+           CREATE TABLE IF NOT EXISTS runtime_events (
+             thread_id TEXT NOT NULL,
+             thread_sequence INTEGER NOT NULL CHECK (thread_sequence >= 0),
+             event_id TEXT NOT NULL UNIQUE,
+             turn_id TEXT,
+             event_timestamp TEXT NOT NULL,
+             event_json TEXT NOT NULL,
+             size_bytes INTEGER NOT NULL CHECK (size_bytes > 0),
+             created_at TEXT NOT NULL,
+             PRIMARY KEY (thread_id, thread_sequence),
+             FOREIGN KEY (thread_id) REFERENCES threads(id) ON DELETE CASCADE
+           );
+           CREATE INDEX IF NOT EXISTS idx_runtime_events_thread_created
+             ON runtime_events(thread_id, created_at, thread_sequence);`,
       );
       this.db.exec(
         `INSERT OR IGNORE INTO thread_tool_execution_state (thread_id, next_sequence)
@@ -446,7 +637,9 @@ export class ThreadStore {
         this.migrateToolExecutionPersistenceInTransaction();
         this.migrateExplicitSkillCheckpointPersistenceInTransaction();
       }
+      this.initializeMissingRuntimeEventStatesInTransaction();
       this.enforceAllToolExecutionRetentionInTransaction(new Date().toISOString());
+      this.enforceAllRuntimeEventRetentionInTransaction(new Date().toISOString());
       this.db.exec(`PRAGMA user_version = ${String(SCHEMA_VERSION)};`);
       this.db.exec("COMMIT");
     } catch (error) {
@@ -522,6 +715,36 @@ export class ThreadStore {
     }
   }
 
+  private initializeMissingRuntimeEventStatesInTransaction(): void {
+    const rows = this.db
+      .prepare(
+        `SELECT threads.id
+           FROM threads
+           LEFT JOIN thread_runtime_event_state
+             ON thread_runtime_event_state.thread_id = threads.id
+          WHERE thread_runtime_event_state.thread_id IS NULL`,
+      )
+      .all() as unknown as ReadonlyArray<{ readonly id: string }>;
+    const insert = this.db.prepare(
+      `INSERT INTO thread_runtime_event_state
+         (thread_id, event_log_id, next_sequence, retained_from_sequence,
+          retained_predecessor_event_id, latest_event_id, retained_count, retained_bytes)
+       VALUES (?, ?, 0, 0, NULL, NULL, 0, 0)`,
+    );
+    for (const row of rows) {
+      insert.run(row.id, randomUUID());
+    }
+  }
+
+  private enforceAllRuntimeEventRetentionInTransaction(now: string): void {
+    const rows = this.db
+      .prepare("SELECT thread_id AS id FROM thread_runtime_event_state")
+      .all() as unknown as ReadonlyArray<{ readonly id: string }>;
+    for (const row of rows) {
+      this.enforceRuntimeEventRetentionInTransaction(row.id, now);
+    }
+  }
+
   createThread(input: CreateThreadInput = {}): string {
     const id = input.id ?? randomUUID();
     const now = new Date().toISOString();
@@ -538,6 +761,14 @@ export class ThreadStore {
       this.db
         .prepare("INSERT INTO thread_tool_execution_state (thread_id, next_sequence) VALUES (?, 0)")
         .run(id);
+      this.db
+        .prepare(
+          `INSERT INTO thread_runtime_event_state
+             (thread_id, event_log_id, next_sequence, retained_from_sequence,
+              retained_predecessor_event_id, latest_event_id, retained_count, retained_bytes)
+           VALUES (?, ?, 0, 0, NULL, NULL, 0, 0)`,
+        )
+        .run(id, randomUUID());
       this.db.exec("COMMIT");
       return id;
     } catch (error) {
@@ -584,6 +815,317 @@ export class ThreadStore {
 
   deleteThread(threadId: string): void {
     this.db.prepare("DELETE FROM threads WHERE id = ?").run(threadId);
+  }
+
+  appendRuntimeEvent(input: AppendRuntimeEventInput): StoredRuntimeEvent {
+    const event = runtimeDurableEventV13Schema.parse(input.event);
+    const eventJson = JSON.stringify(event);
+    const timestamp = normalizeRuntimeEventTimestamp(input.timestamp);
+    const sizeBytes =
+      Buffer.byteLength(eventJson, "utf8") +
+      Buffer.byteLength(timestamp, "utf8") +
+      Buffer.byteLength(input.turnId ?? "", "utf8");
+    if (sizeBytes > RUNTIME_EVENT_RETENTION_POLICY.maxBytesPerThread) {
+      throw new Error("Runtime event exceeds the per-Thread retained byte limit");
+    }
+
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const state = this.db
+        .prepare(
+          `SELECT event_log_id, next_sequence, retained_from_sequence,
+                  retained_predecessor_event_id, latest_event_id,
+                  retained_count, retained_bytes
+             FROM thread_runtime_event_state
+            WHERE thread_id = ?`,
+        )
+        .get(input.threadId) as RuntimeEventStateRow | undefined;
+      if (state === undefined) {
+        throw new Error(`Thread "${input.threadId}" 不存在或缺少 Runtime event state`);
+      }
+      const eventId = createStoredRuntimeEventId();
+      const threadSequence = state.next_sequence;
+      this.db
+        .prepare(
+          `INSERT INTO runtime_events
+             (thread_id, thread_sequence, event_id, turn_id, event_timestamp,
+              event_json, size_bytes, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          input.threadId,
+          threadSequence,
+          eventId,
+          input.turnId ?? null,
+          timestamp,
+          eventJson,
+          sizeBytes,
+          timestamp,
+        );
+      this.db
+        .prepare(
+          `UPDATE thread_runtime_event_state
+              SET next_sequence = ?, latest_event_id = ?,
+                  retained_count = retained_count + 1,
+                  retained_bytes = retained_bytes + ?
+            WHERE thread_id = ?`,
+        )
+        .run(threadSequence + 1, eventId, sizeBytes, input.threadId);
+      this.enforceRuntimeEventRetentionInTransaction(input.threadId, timestamp);
+      this.db.exec("COMMIT");
+      return {
+        eventId,
+        cursor: createStoredRuntimeEventCursor(state.event_log_id, threadSequence, eventId),
+        threadSequence,
+        threadId: input.threadId,
+        ...(input.turnId === undefined ? {} : { turnId: input.turnId }),
+        timestamp,
+        event,
+      };
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  getRuntimeEventCursor(threadId: string): RuntimeEventCursor | null {
+    const state = this.db
+      .prepare(
+        `SELECT event_log_id, next_sequence, retained_from_sequence,
+                retained_predecessor_event_id, latest_event_id,
+                retained_count, retained_bytes
+           FROM thread_runtime_event_state
+          WHERE thread_id = ?`,
+      )
+      .get(threadId) as RuntimeEventStateRow | undefined;
+    if (state === undefined) {
+      throw new Error(`Thread "${threadId}" 不存在或缺少 Runtime event state`);
+    }
+    if (state.next_sequence === 0 || state.latest_event_id === null) {
+      return null;
+    }
+    return createStoredRuntimeEventCursor(
+      state.event_log_id,
+      state.next_sequence - 1,
+      runtimeEventIdSchema.parse(state.latest_event_id),
+    );
+  }
+
+  resumeRuntimeEvents(
+    threadId: string,
+    afterCursor: RuntimeEventCursor | null,
+  ): ResumeRuntimeEventsResult {
+    const parsedCursor =
+      afterCursor === null ? undefined : parseStoredRuntimeEventCursor(afterCursor);
+    if (afterCursor !== null && parsedCursor === undefined) {
+      throw new RuntimeEventCursorGapError(afterCursor);
+    }
+
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      this.enforceRuntimeEventRetentionInTransaction(threadId, new Date().toISOString());
+      const state = this.db
+        .prepare(
+          `SELECT event_log_id, next_sequence, retained_from_sequence,
+                  retained_predecessor_event_id, latest_event_id,
+                  retained_count, retained_bytes
+             FROM thread_runtime_event_state
+            WHERE thread_id = ?`,
+        )
+        .get(threadId) as RuntimeEventStateRow | undefined;
+      if (state === undefined) {
+        throw new Error(`Thread "${threadId}" 不存在或缺少 Runtime event state`);
+      }
+      if (afterCursor === null && state.retained_from_sequence > 0) {
+        throw new RuntimeEventCursorExpiredError(afterCursor);
+      }
+      if (afterCursor !== null && parsedCursor !== undefined) {
+        this.validateRuntimeEventCursor(state, afterCursor, parsedCursor, threadId);
+      }
+      if (state.next_sequence === 0 || state.latest_event_id === null) {
+        this.db.exec("COMMIT");
+        return { events: [], throughCursor: null, replayedCount: 0 };
+      }
+      const throughSequence = state.next_sequence - 1;
+      const afterSequence = parsedCursor?.threadSequence ?? -1;
+      const rows = this.db
+        .prepare(
+          `SELECT thread_sequence, event_id, turn_id, event_timestamp, event_json
+             FROM runtime_events
+            WHERE thread_id = ?
+              AND thread_sequence > ?
+              AND thread_sequence <= ?
+            ORDER BY thread_sequence ASC`,
+        )
+        .all(threadId, afterSequence, throughSequence) as unknown as RuntimeEventRow[];
+      const events = rows.map((row) => parseRuntimeEventRow(state.event_log_id, threadId, row));
+      const throughCursor = createStoredRuntimeEventCursor(
+        state.event_log_id,
+        throughSequence,
+        runtimeEventIdSchema.parse(state.latest_event_id),
+      );
+      this.db.exec("COMMIT");
+      return {
+        events,
+        throughCursor,
+        replayedCount: events.length,
+      };
+    } catch (error) {
+      if (
+        error instanceof RuntimeEventCursorExpiredError ||
+        error instanceof RuntimeEventCursorGapError
+      ) {
+        this.db.exec("COMMIT");
+      } else {
+        this.db.exec("ROLLBACK");
+      }
+      throw error;
+    }
+  }
+
+  countRuntimeEvents(threadId: string): number {
+    const row = this.db
+      .prepare("SELECT COUNT(*) AS count FROM runtime_events WHERE thread_id = ?")
+      .get(threadId) as { readonly count: number };
+    return row.count;
+  }
+
+  private validateRuntimeEventCursor(
+    state: RuntimeEventStateRow,
+    cursor: RuntimeEventCursor,
+    parsedCursor: ParsedRuntimeEventCursor,
+    threadId: string,
+  ): void {
+    if (
+      parsedCursor.eventLogId !== state.event_log_id ||
+      parsedCursor.threadSequence >= state.next_sequence
+    ) {
+      throw new RuntimeEventCursorGapError(cursor);
+    }
+    const retainedPredecessorSequence = state.retained_from_sequence - 1;
+    if (parsedCursor.threadSequence < retainedPredecessorSequence) {
+      throw new RuntimeEventCursorExpiredError(cursor);
+    }
+    if (parsedCursor.threadSequence === retainedPredecessorSequence) {
+      if (parsedCursor.eventId !== state.retained_predecessor_event_id) {
+        throw new RuntimeEventCursorGapError(cursor);
+      }
+      return;
+    }
+    const row = this.db
+      .prepare(
+        `SELECT thread_sequence, event_id
+           FROM runtime_events
+          WHERE thread_id = ? AND thread_sequence = ?`,
+      )
+      .get(threadId, parsedCursor.threadSequence) as RuntimeEventSequenceRow | undefined;
+    if (row === undefined || row.event_id !== parsedCursor.eventId) {
+      throw new RuntimeEventCursorGapError(cursor);
+    }
+  }
+
+  private enforceRuntimeEventRetentionInTransaction(threadId: string, now: string): void {
+    const state = this.db
+      .prepare(
+        `SELECT event_log_id, next_sequence, retained_from_sequence,
+                retained_predecessor_event_id, latest_event_id,
+                retained_count, retained_bytes
+           FROM thread_runtime_event_state
+          WHERE thread_id = ?`,
+      )
+      .get(threadId) as RuntimeEventStateRow | undefined;
+    if (state === undefined || state.retained_count === 0) {
+      return;
+    }
+
+    let keepFrom = state.retained_from_sequence;
+    if (state.retained_count > RUNTIME_EVENT_RETENTION_POLICY.maxRecordsPerThread) {
+      const countBoundary = this.db
+        .prepare(
+          `SELECT thread_sequence AS keep_from
+             FROM runtime_events
+            WHERE thread_id = ?
+            ORDER BY thread_sequence DESC
+            LIMIT 1 OFFSET ?`,
+        )
+        .get(threadId, RUNTIME_EVENT_RETENTION_POLICY.maxRecordsPerThread - 1) as unknown as
+        | RuntimeEventRetentionBoundaryRow
+        | undefined;
+      keepFrom = Math.max(keepFrom, countBoundary?.keep_from ?? state.next_sequence);
+    }
+
+    if (state.retained_bytes > RUNTIME_EVENT_RETENTION_POLICY.maxBytesPerThread) {
+      const byteBoundary = this.db
+        .prepare(
+          `SELECT MIN(thread_sequence) AS keep_from
+             FROM (
+               SELECT thread_sequence,
+                      SUM(size_bytes) OVER (
+                        ORDER BY thread_sequence DESC
+                        ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+                      ) AS retained_bytes
+                 FROM runtime_events
+                WHERE thread_id = ?
+             )
+            WHERE retained_bytes <= ?`,
+        )
+        .get(
+          threadId,
+          RUNTIME_EVENT_RETENTION_POLICY.maxBytesPerThread,
+        ) as unknown as RuntimeEventRetentionBoundaryRow;
+      keepFrom = Math.max(keepFrom, byteBoundary.keep_from ?? state.next_sequence);
+    }
+
+    const cutoff = new Date(
+      Date.parse(now) - RUNTIME_EVENT_RETENTION_POLICY.maxAgeMs,
+    ).toISOString();
+    const ageBoundary = this.db
+      .prepare(
+        `SELECT MIN(thread_sequence) AS keep_from
+           FROM runtime_events
+          WHERE thread_id = ? AND created_at >= ?`,
+      )
+      .get(threadId, cutoff) as unknown as RuntimeEventRetentionBoundaryRow;
+    keepFrom = Math.max(keepFrom, ageBoundary.keep_from ?? state.next_sequence);
+
+    if (keepFrom <= state.retained_from_sequence) {
+      return;
+    }
+    const predecessor = this.db
+      .prepare(
+        `SELECT thread_sequence, event_id
+           FROM runtime_events
+          WHERE thread_id = ? AND thread_sequence = ?`,
+      )
+      .get(threadId, keepFrom - 1) as RuntimeEventSequenceRow | undefined;
+    if (predecessor === undefined) {
+      throw new Error("Runtime event retention boundary is not a continuous retained prefix");
+    }
+    const removed = this.db
+      .prepare(
+        `SELECT COUNT(*) AS removed_count, SUM(size_bytes) AS removed_bytes
+           FROM runtime_events
+          WHERE thread_id = ? AND thread_sequence < ?`,
+      )
+      .get(threadId, keepFrom) as unknown as RuntimeEventRetentionAggregateRow;
+    this.db
+      .prepare("DELETE FROM runtime_events WHERE thread_id = ? AND thread_sequence < ?")
+      .run(threadId, keepFrom);
+    this.db
+      .prepare(
+        `UPDATE thread_runtime_event_state
+            SET retained_from_sequence = ?, retained_predecessor_event_id = ?,
+                retained_count = retained_count - ?,
+                retained_bytes = retained_bytes - ?
+          WHERE thread_id = ?`,
+      )
+      .run(
+        keepFrom,
+        predecessor.event_id,
+        removed.removed_count,
+        removed.removed_bytes ?? 0,
+        threadId,
+      );
   }
 
   appendMessages(threadId: string, messages: readonly ModelMessage[]): void {

@@ -8,6 +8,7 @@ import {
   CLIENT_CAPABILITY_METHOD_MAX_CHARS,
   RUNTIME_EVENT_NOTIFICATION,
   RUNTIME_ERROR_CODES,
+  RUNTIME_ERROR_CODES_V12,
   RUNTIME_METHODS,
   RUNTIME_PROTOCOL_CAPABILITIES,
   RUNTIME_PROTOCOL_REGISTRY,
@@ -16,8 +17,15 @@ import {
   RUNTIME_SERVER_REQUEST_METHODS,
   RUNTIME_SERVER_REQUEST_METHOD_VALUES,
   RUNTIME_SERVER_REQUEST_METHOD_VALUES_V11,
+  RUNTIME_V13_DEFAULT_REPLAY_BUFFER_BYTES,
+  RUNTIME_V13_MAX_DURABLE_EVENT_RECORD_BYTES,
+  RUNTIME_V13_MAX_DURABLE_EVENT_RECORDS,
+  RUNTIME_V13_MIN_CLIENT_FRAME_BYTES,
+  RUNTIME_V13_RECOVERY_SNAPSHOT_METADATA_MAX_CHARS,
+  RUNTIME_V13_RECOVERY_SNAPSHOT_TIMESTAMP_MAX_CHARS,
   SUPPORTED_RUNTIME_PROTOCOL_VERSIONS,
   SUPPORTED_RUNTIME_PROTOCOL_VERSIONS_V11,
+  SUPPORTED_RUNTIME_PROTOCOL_VERSIONS_V12,
   USER_INPUT_CHOICE_OPTION_MAX_COUNT,
   USER_INPUT_CONTROL_ID_MAX_CHARS,
   USER_INPUT_CONTROL_MAX_COUNT,
@@ -30,6 +38,7 @@ import {
   approvalRequestParamsV12Schema,
   clientCapabilitiesSetParamsSchema,
   clientCapabilitiesSetResultSchema,
+  compareRuntimeEventCursors,
   getApprovalExplanation,
   getRuntimeProtocolCapabilities,
   getRuntimeProtocolRegistry,
@@ -62,12 +71,21 @@ import {
   projectThreadSnapshotForVersion,
   runtimeEventEnvelopeSchema,
   runtimeEventEnvelopeV11Schema,
+  runtimeEventEnvelopeV13Schema,
+  runtimeEventCursorDistance,
+  runtimeEventCursorSchema,
+  runtimeEventIdSchema,
+  runtimeEventsResumeParamsSchema,
+  runtimeEventsResumeResultSchema,
   runtimeMethodSchemas,
   runtimeProtocolErrorDataSchema,
   runtimeServerRequestCancelParamsSchema,
   runtimeServerRequestCancelParamsV12Schema,
   runtimeServerRequestSchemas,
   threadSnapshotSchema,
+  threadSnapshotParamsV12Schema,
+  threadSnapshotParamsV13Schema,
+  threadSnapshotV12Schema,
   threadSnapshotV11Schema,
   userInputFormSchema,
   userInputRequestParamsV12Schema,
@@ -78,6 +96,8 @@ import {
   type LatestRuntimeServerRequestParams,
   type LatestRuntimeServerRequestResult,
   type RuntimeProtocolVersion,
+  type RuntimeEventCursor,
+  type RuntimeEventId,
   type RuntimeServerRequestCancelParamsForVersion,
   type RuntimeServerRequestHandlers,
   type RuntimeServerRequestInputForSupportedVersions,
@@ -89,6 +109,38 @@ import {
   type UserInputResult,
 } from "./index.ts";
 
+test("Runtime Protocol 1.3 frame and replay budgets cover the durable retention window", () => {
+  assert.equal(RUNTIME_V13_MAX_DURABLE_EVENT_RECORD_BYTES, 16 * 1_024 * 1_024);
+  assert.equal(RUNTIME_V13_MAX_DURABLE_EVENT_RECORDS, 10_000);
+  assert.equal(RUNTIME_V13_MIN_CLIENT_FRAME_BYTES, 17 * 1_024 * 1_024);
+  assert.equal(RUNTIME_V13_DEFAULT_REPLAY_BUFFER_BYTES, 32 * 1_024 * 1_024);
+
+  const nearLimitEvent = {
+    jsonrpc: "2.0",
+    method: RUNTIME_EVENT_NOTIFICATION,
+    params: runtimeEventEnvelopeV13Schema.parse({
+      protocolVersion: "1.3",
+      runtimeInstanceId: "00000000-0000-4000-8000-000000000001",
+      sequence: Number.MAX_SAFE_INTEGER,
+      timestamp: "2026-08-04T12:00:00.000Z",
+      threadId: "00000000-0000-4000-8000-000000000002",
+      turnId: "00000000-0000-4000-8000-000000000003",
+      durability: "durable",
+      eventId: "00000000-0000-4000-8000-000000000004",
+      cursor:
+        "rte1:00000000-0000-4000-8000-000000000005:9007199254740991:00000000-0000-4000-8000-000000000004",
+      event: {
+        type: "message.completed",
+        streamId: "00000000-0000-4000-8000-000000000006",
+        text: "x".repeat(RUNTIME_V13_MAX_DURABLE_EVENT_RECORD_BYTES - 4_096),
+      },
+    }),
+  } as const;
+  assert.ok(
+    Buffer.byteLength(JSON.stringify(nearLimitEvent), "utf8") < RUNTIME_V13_MIN_CLIENT_FRAME_BYTES,
+  );
+});
+
 const IDS = {
   runtime: "00000000-0000-4000-8000-000000000001",
   thread: "00000000-0000-4000-8000-000000000002",
@@ -96,6 +148,14 @@ const IDS = {
   stream: "00000000-0000-4000-8000-000000000004",
   approval: "00000000-0000-4000-8000-000000000005",
   interaction: "00000000-0000-4000-8000-000000000006",
+  event: "00000000-0000-4000-8000-000000000007",
+  event2: "00000000-0000-4000-8000-000000000008",
+  eventLog: "00000000-0000-4000-8000-000000000009",
+} as const;
+
+const CURSORS = {
+  first: `rte1:${IDS.eventLog}:0:${IDS.event}`,
+  second: `rte1:${IDS.eventLog}:1:${IDS.event2}`,
 } as const;
 
 function fixture(name: string): Record<string, unknown> {
@@ -107,6 +167,12 @@ function fixture(name: string): Record<string, unknown> {
 function fixtureV12(name: string): Record<string, unknown> {
   return JSON.parse(
     readFileSync(new URL(`../fixtures/v1.2/${name}`, import.meta.url), "utf8"),
+  ) as Record<string, unknown>;
+}
+
+function fixtureV13(name: string): Record<string, unknown> {
+  return JSON.parse(
+    readFileSync(new URL(`../fixtures/v1.3/${name}`, import.meta.url), "utf8"),
   ) as Record<string, unknown>;
 }
 
@@ -144,14 +210,15 @@ function userInputRequestParams(controls: UserInputForm["controls"]): UserInputR
   });
 }
 
-test("initialize advertises v1.2 first without changing the strict request shape", () => {
+test("initialize advertises v1.3 first without changing the strict request shape", () => {
   const input = {
     protocolVersions: [...SUPPORTED_RUNTIME_PROTOCOL_VERSIONS],
     client: { name: "fixture-client", version: "1.0.0" },
   } as const;
   const parsed = initializeParamsSchema.parse(input);
-  assert.equal(RUNTIME_PROTOCOL_VERSION, "1.2");
-  assert.deepEqual(parsed.protocolVersions, ["1.2", "1.1", "1.0"]);
+  assert.equal(RUNTIME_PROTOCOL_VERSION, "1.3");
+  assert.deepEqual(parsed.protocolVersions, ["1.3", "1.2", "1.1", "1.0"]);
+  assert.deepEqual(SUPPORTED_RUNTIME_PROTOCOL_VERSIONS_V12, ["1.2", "1.1", "1.0"]);
   assert.deepEqual(SUPPORTED_RUNTIME_PROTOCOL_VERSIONS_V11, ["1.1", "1.0"]);
   for (const version of SUPPORTED_RUNTIME_PROTOCOL_VERSIONS) {
     assert.deepEqual(
@@ -185,7 +252,7 @@ test("initialize advertises v1.2 first without changing the strict request shape
     "1.0",
   );
   const latestResult = initializeResultSchema.parse({
-    protocolVersion: "1.2",
+    protocolVersion: "1.3",
     runtimeInstanceId: IDS.runtime,
     server: {
       name: "fixture-runtime",
@@ -196,14 +263,14 @@ test("initialize advertises v1.2 first without changing the strict request shape
     limits: {
       maxFrameBytes: 1,
       maxPageSize: 1,
-      eventReplay: false,
+      eventReplay: true,
       idempotencyCacheEntries: 1,
     },
   });
   assert.equal(
-    parseRuntimeMethodResultForVersion("1.2", RUNTIME_METHODS.initialize, latestResult)
+    parseRuntimeMethodResultForVersion("1.3", RUNTIME_METHODS.initialize, latestResult)
       .protocolVersion,
-    "1.2",
+    "1.3",
   );
   assert.throws(() =>
     parseRuntimeMethodResultForVersion("1.1", RUNTIME_METHODS.initialize, latestResult),
@@ -211,7 +278,7 @@ test("initialize advertises v1.2 first without changing the strict request shape
   assert.throws(() =>
     parseRuntimeMethodResultForVersion("1.1", RUNTIME_METHODS.initialize, {
       ...latestResult,
-      protocolVersion: "1.3",
+      protocolVersion: "1.4",
     }),
   );
   assert.equal(RUNTIME_EVENT_NOTIFICATION, "runtime.event");
@@ -340,7 +407,7 @@ test("client.capabilities.set validates bounds and projects the ordered registry
   );
 });
 
-test("CAPABILITY_REVISION_CONFLICT is available only to the v1.2 error schema", () => {
+test("v1.2 errors stay frozen while v1.3 adds replay cursor failures", () => {
   const error = {
     rollCode: RUNTIME_ERROR_CODES.capabilityRevisionConflict,
     retryable: false,
@@ -349,8 +416,26 @@ test("CAPABILITY_REVISION_CONFLICT is available only to the v1.2 error schema", 
     parseRuntimeProtocolErrorDataForVersion("1.2", error).rollCode,
     "CAPABILITY_REVISION_CONFLICT",
   );
+  assert.equal(parseRuntimeProtocolErrorDataForVersion("1.3", error).rollCode, error.rollCode);
   assert.throws(() => runtimeProtocolErrorDataSchema.parse(error));
   assert.throws(() => parseRuntimeProtocolErrorDataForVersion("1.1", error));
+
+  for (const rollCode of [
+    RUNTIME_ERROR_CODES.eventCursorExpired,
+    RUNTIME_ERROR_CODES.eventCursorGap,
+  ] as const) {
+    assert.equal(
+      parseRuntimeProtocolErrorDataForVersion("1.3", { rollCode, retryable: false }).rollCode,
+      rollCode,
+    );
+    assert.equal(
+      (Object.values(RUNTIME_ERROR_CODES_V12) as readonly string[]).includes(rollCode),
+      false,
+    );
+    assert.throws(() =>
+      parseRuntimeProtocolErrorDataForVersion("1.2", { rollCode, retryable: false }),
+    );
+  }
 });
 
 test("InteractionId is validated and nominally distinct from ApprovalId", () => {
@@ -362,6 +447,65 @@ test("InteractionId is validated and nominally distinct from ApprovalId", () => 
   // @ts-expect-error ApprovalId and InteractionId must not be interchangeable.
   const wrongInteractionId: InteractionId = approvalId;
   assert.equal(wrongInteractionId, IDS.approval);
+});
+
+test("Runtime Event ids and opaque cursors are nominally distinct and null-aware", () => {
+  const eventId: RuntimeEventId = runtimeEventIdSchema.parse(IDS.event);
+  const first: RuntimeEventCursor = runtimeEventCursorSchema.parse(CURSORS.first);
+  const second = runtimeEventCursorSchema.parse(CURSORS.second);
+  assert.equal(compareRuntimeEventCursors(null, null), 0);
+  assert.equal(compareRuntimeEventCursors(null, first), -1);
+  assert.equal(compareRuntimeEventCursors(first, null), 1);
+  assert.equal(compareRuntimeEventCursors(first, second), -1);
+  assert.equal(runtimeEventCursorDistance(null, first), 1n);
+  assert.equal(runtimeEventCursorDistance(null, second), 2n);
+  assert.equal(runtimeEventCursorDistance(first, second), 1n);
+  assert.equal(runtimeEventCursorDistance(second, null), -2n);
+
+  // @ts-expect-error RuntimeEventId and RuntimeEventCursor must not be interchangeable.
+  const wrongCursor: RuntimeEventCursor = eventId;
+  assert.equal(wrongCursor, IDS.event);
+  assert.throws(() =>
+    compareRuntimeEventCursors(
+      first,
+      runtimeEventCursorSchema.parse(`rte1:${IDS.runtime}:1:${IDS.event2}`),
+    ),
+  );
+  assert.throws(() =>
+    compareRuntimeEventCursors(
+      first,
+      runtimeEventCursorSchema.parse(`rte1:${IDS.eventLog}:0:${IDS.event2}`),
+    ),
+  );
+});
+
+test("runtime.events.resume is v1.3-only and accepts the null checkpoint", () => {
+  assert.equal(isRuntimeMethodAvailable("1.3", RUNTIME_METHODS.runtimeEventsResume), true);
+  for (const version of SUPPORTED_RUNTIME_PROTOCOL_VERSIONS_V12) {
+    assert.equal(isRuntimeMethodAvailable(version, RUNTIME_METHODS.runtimeEventsResume), false);
+  }
+  assert.deepEqual(
+    runtimeEventsResumeParamsSchema.parse({ threadId: IDS.thread, afterCursor: null }),
+    {
+      threadId: IDS.thread,
+      afterCursor: null,
+    },
+  );
+  assert.deepEqual(
+    runtimeEventsResumeResultSchema.parse({ throughCursor: null, replayedCount: 0 }),
+    {
+      throughCursor: null,
+      replayedCount: 0,
+    },
+  );
+  assert.equal(
+    parseRuntimeMethodParamsForVersion("1.3", RUNTIME_METHODS.runtimeEventsResume, {
+      threadId: IDS.thread,
+      afterCursor: CURSORS.first,
+    }).afterCursor,
+    CURSORS.first,
+  );
+  assert.throws(() => runtimeEventsResumeParamsSchema.parse({ threadId: IDS.thread }));
 });
 
 test("runtime method registry exposes the complete v1 surface", () => {
@@ -377,35 +521,55 @@ test("runtime method registry exposes the complete v1 surface", () => {
 });
 
 test("runtime event envelope is ordered by runtime instance and sequence", () => {
-  const parsed = runtimeEventEnvelopeSchema.parse({
+  const input = {
     protocolVersion: RUNTIME_PROTOCOL_VERSION,
     runtimeInstanceId: IDS.runtime,
     sequence: 7,
     timestamp: "2026-07-28T12:00:00.000Z",
     threadId: IDS.thread,
     turnId: IDS.turn,
+    durability: "ephemeral",
     event: {
       type: "message.delta",
       streamId: IDS.stream,
       delta: "hello",
     },
-  });
+  } as const;
+  const parsed = runtimeEventEnvelopeV13Schema.parse(input);
   assert.equal(parsed.sequence, 7);
   assert.equal(parsed.event.type, "message.delta");
+  assert.throws(() =>
+    runtimeEventEnvelopeV13Schema.parse({
+      ...input,
+      durability: "durable",
+      eventId: IDS.event,
+      cursor: CURSORS.first,
+    }),
+  );
+  assert.throws(() =>
+    runtimeEventEnvelopeV13Schema.parse({
+      ...input,
+      eventId: IDS.event,
+      cursor: CURSORS.first,
+    }),
+  );
 });
 
 test("runtime event envelopes project explicitly to the frozen v1.1 shape", () => {
   const latest = runtimeEventEnvelopeSchema.parse({
-    protocolVersion: "1.2",
+    protocolVersion: "1.3",
     runtimeInstanceId: IDS.runtime,
     sequence: 7,
     timestamp: "2026-07-28T12:00:00.000Z",
     threadId: IDS.thread,
     turnId: IDS.turn,
+    durability: "durable",
+    eventId: IDS.event,
+    cursor: CURSORS.first,
     event: {
-      type: "message.delta",
+      type: "message.completed",
       streamId: IDS.stream,
-      delta: "hello",
+      text: "hello",
     },
   });
 
@@ -418,18 +582,23 @@ test("runtime event envelopes project explicitly to the frozen v1.1 shape", () =
   );
   const projected = projectRuntimeEventEnvelopeForVersion("1.1", latest);
   assert.deepEqual(projected, {
-    ...latest,
     protocolVersion: "1.1",
+    runtimeInstanceId: IDS.runtime,
+    sequence: 7,
+    timestamp: "2026-07-28T12:00:00.000Z",
+    threadId: IDS.thread,
+    turnId: IDS.turn,
+    event: latest.event,
   });
   assert.equal(runtimeEventEnvelopeV11Schema.parse(projected).protocolVersion, "1.1");
-  assert.deepEqual(projectRuntimeEventEnvelopeForVersion("1.2", latest), latest);
-  assert.equal(
-    projectRuntimeEventEnvelopeForVersion("1.2", {
-      ...latest,
-      protocolVersion: "1.1",
-    }).protocolVersion,
-    "1.2",
-  );
+  const v12 = projectRuntimeEventEnvelopeForVersion("1.2", latest);
+  assert.equal(v12.protocolVersion, "1.2");
+  assert.equal("durability" in v12, false);
+  assert.equal("eventId" in v12, false);
+  assert.equal("cursor" in v12, false);
+  assert.deepEqual(projectRuntimeEventEnvelopeForVersion("1.1", v12), projected);
+  assert.throws(() => projectRuntimeEventEnvelopeForVersion("1.3", v12));
+  assert.deepEqual(projectRuntimeEventEnvelopeForVersion("1.3", latest), latest);
 });
 
 test("server request registry derives typed approval request params and results", async () => {
@@ -1079,6 +1248,7 @@ test("approval explanation stays inside preview for v1.0/v1.1 wire compatibility
       },
     ],
     transcriptCompleteness: "complete",
+    eventCursor: null,
   });
   assert.equal(
     getApprovalExplanation(snapshot.pendingApprovals[0] ?? { preview: null }),
@@ -1213,12 +1383,18 @@ test("v1.2 snapshot projects only safe pending Interaction metadata to frozen le
     sensitivity: "normal",
     approvalId: IDS.approval,
   });
-  const latest = projectThreadSnapshotForVersion("1.2", {
+  const sourceV13 = {
     ...legacy,
     pendingInteractions: [interaction],
-  });
-  assert.deepEqual(latest.pendingInteractions, [interaction]);
-  assert.deepEqual(Object.keys(latest.pendingInteractions[0] ?? {}).sort(), [
+    eventCursor: CURSORS.first,
+  } as const;
+  const v12 = projectThreadSnapshotForVersion("1.2", sourceV13);
+  assert.deepEqual(projectThreadSnapshotForVersion("1.3", sourceV13), sourceV13);
+  assert.deepEqual(projectThreadSnapshotForVersion("1.2", v12), v12);
+  assert.throws(() => projectThreadSnapshotForVersion("1.3", v12));
+  assert.deepEqual(v12.pendingInteractions, [interaction]);
+  assert.equal("eventCursor" in v12, false);
+  assert.deepEqual(Object.keys(v12.pendingInteractions[0] ?? {}).sort(), [
     "approvalId",
     "expiresAt",
     "interactionId",
@@ -1228,8 +1404,9 @@ test("v1.2 snapshot projects only safe pending Interaction metadata to frozen le
     "turnId",
   ]);
   for (const version of ["1.1", "1.0"] as const) {
-    const projected = projectThreadSnapshotForVersion(version, latest);
+    const projected = projectThreadSnapshotForVersion(version, sourceV13);
     assert.deepEqual(projected, legacy);
+    assert.deepEqual(projectThreadSnapshotForVersion(version, v12), legacy);
     assert.equal("pendingInteractions" in projected, false);
     assert.deepEqual(
       parseRuntimeMethodResultForVersion(version, RUNTIME_METHODS.threadSnapshot, projected),
@@ -1241,8 +1418,9 @@ test("v1.2 snapshot projects only safe pending Interaction metadata to frozen le
     parseRuntimeMethodResult(RUNTIME_METHODS.threadSnapshot, legacy),
     threadSnapshotV11Schema.parse(legacy),
   );
-  assert.throws(() => parseRuntimeMethodResult(RUNTIME_METHODS.threadSnapshot, latest));
-  assert.throws(() => threadSnapshotV11Schema.parse(latest));
+  assert.throws(() => parseRuntimeMethodResult(RUNTIME_METHODS.threadSnapshot, v12));
+  assert.throws(() => threadSnapshotV11Schema.parse(v12));
+  assert.deepEqual(threadSnapshotV12Schema.parse(v12), v12);
   assert.throws(() => threadSnapshotSchema.parse(legacy));
   for (const forbidden of [
     { preview: { selector: "#submit" } },
@@ -1256,6 +1434,96 @@ test("v1.2 snapshot projects only safe pending Interaction metadata to frozen le
         ...forbidden,
       }),
     );
+  }
+});
+
+test("v1.3 recovery Snapshot is explicit, byte-bounded and stripped from frozen versions", () => {
+  assert.equal(RUNTIME_V13_RECOVERY_SNAPSHOT_TIMESTAMP_MAX_CHARS, 64);
+  const params = {
+    threadId: IDS.thread,
+    limit: 1,
+    recovery: true,
+  } as const;
+  assert.deepEqual(threadSnapshotParamsV13Schema.parse(params), params);
+  assert.deepEqual(
+    parseRuntimeMethodParamsForVersion("1.3", RUNTIME_METHODS.threadSnapshot, params),
+    params,
+  );
+  assert.throws(() => threadSnapshotParamsV12Schema.parse(params));
+  assert.throws(() =>
+    parseRuntimeMethodParamsForVersion("1.2", RUNTIME_METHODS.threadSnapshot, params),
+  );
+
+  const recovery = {
+    thread: {
+      id: IDS.thread,
+      title: "bounded recovery",
+      model: "mock",
+      createdAt: "2026-08-04T12:00:00.000Z",
+      updatedAt: "2026-08-04T12:00:00.000Z",
+      messageCount: 1,
+    },
+    messages: { items: [], nextBeforeSequence: null },
+    operations: { items: [], nextBeforeSequence: null },
+    pendingApprovals: [],
+    pendingInteractions: [],
+    transcriptCompleteness: "complete",
+    eventCursor: CURSORS.first,
+    recoveryProjection: true,
+  } as const;
+  assert.deepEqual(threadSnapshotSchema.parse(recovery), recovery);
+  assert.throws(() =>
+    threadSnapshotSchema.parse({
+      ...recovery,
+      messages: {
+        items: [
+          {
+            sequence: 0,
+            role: "assistant",
+            createdAt: "2026-08-04T12:00:00.000Z",
+            parts: [{ type: "text", text: "not bounded" }],
+          },
+        ],
+        nextBeforeSequence: null,
+      },
+    }),
+  );
+  assert.throws(() =>
+    threadSnapshotSchema.parse({
+      ...recovery,
+      thread: {
+        ...recovery.thread,
+        title: "x".repeat(RUNTIME_V13_RECOVERY_SNAPSHOT_METADATA_MAX_CHARS + 1),
+      },
+    }),
+  );
+  const oversizedTimestamp = `2026-08-04T12:00:00.${"1".repeat(
+    RUNTIME_V13_RECOVERY_SNAPSHOT_TIMESTAMP_MAX_CHARS,
+  )}Z`;
+  assert.throws(() =>
+    threadSnapshotSchema.parse({
+      ...recovery,
+      thread: { ...recovery.thread, createdAt: oversizedTimestamp },
+    }),
+  );
+  assert.throws(() =>
+    threadSnapshotSchema.parse({
+      ...recovery,
+      activeTurn: {
+        id: IDS.turn,
+        status: "running",
+        startedAt: oversizedTimestamp,
+      },
+    }),
+  );
+
+  const v12 = projectThreadSnapshotForVersion("1.2", recovery);
+  assert.equal("eventCursor" in v12, false);
+  assert.equal("recoveryProjection" in v12, false);
+  for (const version of ["1.1", "1.0"] as const) {
+    const legacy = projectThreadSnapshotForVersion(version, recovery);
+    assert.equal("eventCursor" in legacy, false);
+    assert.equal("recoveryProjection" in legacy, false);
   }
 });
 
@@ -1304,7 +1572,7 @@ test("v1.2 pending user input projection contains only interaction metadata and 
     );
   }
 
-  const latest = projectThreadSnapshotForVersion("1.2", {
+  const sourceV13 = {
     thread: {
       id: IDS.thread,
       title: "pending user input",
@@ -1323,10 +1591,12 @@ test("v1.2 pending user input projection contains only interaction metadata and 
     pendingApprovals: [],
     pendingInteractions: [projection],
     transcriptCompleteness: "complete",
-  });
-  assert.deepEqual(latest.pendingInteractions, [projection]);
+    eventCursor: null,
+  } as const;
+  const v12 = projectThreadSnapshotForVersion("1.2", sourceV13);
+  assert.deepEqual(v12.pendingInteractions, [projection]);
   for (const version of ["1.1", "1.0"] as const) {
-    const legacy = projectThreadSnapshotForVersion(version, latest);
+    const legacy = projectThreadSnapshotForVersion(version, sourceV13);
     assert.equal(legacy.activeTurn?.status, "running");
     assert.equal("pendingInteractions" in legacy, false);
   }
@@ -1341,7 +1611,7 @@ test("v1.2 active Turn adds waiting-for-user while legacy snapshots map it to ru
   assert.deepEqual(activeTurnV12Schema.parse(activeTurn), activeTurn);
   assert.throws(() => activeTurnV11Schema.parse(activeTurn));
 
-  const latest = projectThreadSnapshotForVersion("1.2", {
+  const sourceV13 = {
     thread: {
       id: IDS.thread,
       title: "waiting for user",
@@ -1356,11 +1626,13 @@ test("v1.2 active Turn adds waiting-for-user while legacy snapshots map it to ru
     pendingApprovals: [],
     pendingInteractions: [],
     transcriptCompleteness: "complete",
-  });
-  assert.equal(latest.activeTurn?.status, "waiting-for-user");
+    eventCursor: null,
+  } as const;
+  const v12 = projectThreadSnapshotForVersion("1.2", sourceV13);
+  assert.equal(v12.activeTurn?.status, "waiting-for-user");
 
   for (const version of ["1.1", "1.0"] as const) {
-    const projected = projectThreadSnapshotForVersion(version, latest);
+    const projected = projectThreadSnapshotForVersion(version, sourceV13);
     assert.equal(projected.activeTurn?.status, "running");
     assert.deepEqual(
       parseRuntimeMethodResultForVersion(version, RUNTIME_METHODS.threadSnapshot, projected),
@@ -1394,6 +1666,7 @@ test("thread snapshot never exposes raw Tool evidence fields", () => {
     pendingApprovals: [],
     pendingInteractions: [],
     transcriptCompleteness: "complete",
+    eventCursor: null,
   });
   assert.equal(snapshot.messages.items[0]?.parts[0]?.text, "hello");
   assert.equal("raw" in snapshot.operations, false);
@@ -1426,6 +1699,40 @@ test("cross-language golden fixtures keep request, response and event compatibil
     "hello",
   );
   assert.throws(() => threadSnapshotSchema.parse(snapshot.result));
+
+  const recoveryRequest = fixtureV13("valid-thread-recovery-snapshot-request.json");
+  assert.equal(
+    parseRuntimeMethodParamsForVersion(
+      "1.3",
+      RUNTIME_METHODS.threadSnapshot,
+      recoveryRequest.params,
+    ).recovery,
+    true,
+  );
+  const recoveryResponse = fixtureV13("valid-thread-recovery-snapshot-response.json");
+  const parsedRecoveryResponse = parseRuntimeMethodResultForVersion(
+    "1.3",
+    RUNTIME_METHODS.threadSnapshot,
+    recoveryResponse.result,
+  );
+  assert.equal(
+    "recoveryProjection" in parsedRecoveryResponse && parsedRecoveryResponse.recoveryProjection,
+    true,
+  );
+  assert.throws(() =>
+    parseRuntimeMethodResultForVersion(
+      "1.3",
+      RUNTIME_METHODS.threadSnapshot,
+      fixtureV13("invalid-thread-recovery-snapshot-response.json").result,
+    ),
+  );
+  assert.throws(() =>
+    parseRuntimeMethodResultForVersion(
+      "1.3",
+      RUNTIME_METHODS.threadSnapshot,
+      fixtureV13("invalid-thread-recovery-snapshot-timestamp-response.json").result,
+    ),
+  );
 
   const snapshotV12 = fixtureV12("valid-thread-snapshot-response.json");
   assert.equal(

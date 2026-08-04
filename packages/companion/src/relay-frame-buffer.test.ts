@@ -1,6 +1,10 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { runtimeEventEnvelopeSchema, type RuntimeEventEnvelope } from "@roll-agent/protocol";
+import {
+  RUNTIME_V13_MAX_DURABLE_EVENT_RECORD_BYTES,
+  runtimeEventEnvelopeSchema,
+  type RuntimeEventEnvelope,
+} from "@roll-agent/protocol";
 import {
   RELAY_INTERACTION_METHODS_V11,
   relayInteractionRequestSchemaV11,
@@ -16,6 +20,8 @@ const IDS = {
   turn: "00000000-0000-4000-8000-000000000704",
   interaction: "00000000-0000-4000-8000-000000000705",
   approval: "00000000-0000-4000-8000-000000000706",
+  runtimeEvent: "00000000-0000-4000-8000-000000000707",
+  eventLog: "00000000-0000-4000-8000-000000000708",
 } as const;
 
 const workspaceId = workspaceIdSchema.parse(IDS.workspace);
@@ -28,6 +34,21 @@ function envelope(sequence: number, event: RuntimeEventEnvelope["event"]): Runti
     timestamp: "2026-08-04T12:00:00.000Z",
     threadId: IDS.thread,
     turnId: IDS.turn,
+    event,
+  });
+}
+
+function durableEnvelope(sequence: number, event: unknown): RuntimeEventEnvelope {
+  return runtimeEventEnvelopeSchema.parse({
+    protocolVersion: "1.3",
+    runtimeInstanceId: IDS.runtime,
+    sequence,
+    timestamp: "2026-08-04T12:00:00.000Z",
+    threadId: IDS.thread,
+    turnId: IDS.turn,
+    durability: "durable",
+    eventId: IDS.runtimeEvent,
+    cursor: `rte1:${IDS.eventLog}:${String(sequence)}:${IDS.runtimeEvent}`,
     event,
   });
 }
@@ -125,6 +146,23 @@ test("Wire 1.1 frame replay reports count/byte gaps and supports ACK", () => {
     fromRelaySequence: 0,
     throughRelaySequence: 0,
   });
+});
+
+test("Wire 1.1 frame buffer default retains one near-limit durable Runtime event", () => {
+  const nearLimitText = "x".repeat(RUNTIME_V13_MAX_DURABLE_EVENT_RECORD_BYTES - 256);
+  const event = durableEnvelope(0, {
+    type: "message.completed",
+    streamId: IDS.turn,
+    text: nearLimitText,
+  });
+  const buffer = new CompanionRelayFrameBuffer();
+  const entry = buffer.appendRuntimeEvent(event);
+
+  assert.ok(entry !== undefined);
+  assert.ok(buffer.bytes > RUNTIME_V13_MAX_DURABLE_EVENT_RECORD_BYTES);
+  assert.equal(buffer.size, 1);
+  assert.equal(buffer.replay().gap, undefined);
+  assert.equal(buffer.replay().frames[0], entry);
 });
 
 test("materialization is schema-strict and safe projections do not leak tool data", () => {

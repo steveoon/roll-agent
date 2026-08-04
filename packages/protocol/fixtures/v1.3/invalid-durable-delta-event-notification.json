@@ -1,0 +1,19 @@
+{
+  "jsonrpc": "2.0",
+  "method": "runtime.event",
+  "params": {
+    "protocolVersion": "1.3",
+    "runtimeInstanceId": "00000000-0000-4000-8000-000000000001",
+    "sequence": 10,
+    "timestamp": "2026-07-30T12:00:02.000Z",
+    "threadId": "00000000-0000-4000-8000-000000000002",
+    "durability": "durable",
+    "eventId": "00000000-0000-4000-8000-000000000007",
+    "cursor": "rte1:00000000-0000-4000-8000-000000000008:0:00000000-0000-4000-8000-000000000007",
+    "event": {
+      "type": "message.delta",
+      "streamId": "00000000-0000-4000-8000-000000000004",
+      "delta": "unsafe to replay"
+    }
+  }
+}

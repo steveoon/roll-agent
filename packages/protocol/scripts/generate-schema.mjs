@@ -11,13 +11,15 @@ import {
   SUPPORTED_RUNTIME_PROTOCOL_VERSIONS,
   getRuntimeProtocolRegistry,
   jsonRpcIdSchema,
-  runtimeEventEnvelopeSchema,
-  runtimeEventEnvelopeV11Schema,
 } from "../dist/index.js";
 
 const schemaDir = resolve(import.meta.dirname, "../dist/schema");
 const latestSchemaPath = resolve(schemaDir, "roll-runtime-protocol-v1.schema.json");
 const fixtureSuites = [
+  {
+    directory: resolve(import.meta.dirname, "../fixtures/v1.3"),
+    defaultVersion: "1.3",
+  },
   {
     directory: resolve(import.meta.dirname, "../fixtures/v1"),
     defaultVersion: "1.1",
@@ -73,23 +75,38 @@ function rewriteReferences(value, definitionNames, sharedDefinitionNames) {
 
 function setProtocolVersionConst(definitions, definitionName, version) {
   const definition = definitions[definitionName];
-  const protocolVersion = definition?.properties?.protocolVersion;
-  if (protocolVersion === undefined) {
+  let updated = false;
+  function visit(schema) {
+    if (schema === null || typeof schema !== "object") {
+      return;
+    }
+    if (schema.properties?.protocolVersion !== undefined) {
+      schema.properties.protocolVersion = {
+        type: "string",
+        const: version,
+      };
+      updated = true;
+    }
+    for (const keyword of ["anyOf", "oneOf", "allOf"]) {
+      const branches = schema[keyword];
+      if (Array.isArray(branches)) {
+        for (const branch of branches) {
+          visit(branch);
+        }
+      }
+    }
+  }
+  visit(definition);
+  if (!updated) {
     throw new Error(`Missing ${definitionName}.protocolVersion JSON Schema property`);
   }
-  definition.properties.protocolVersion = {
-    type: "string",
-    const: version,
-  };
 }
 
 function createProtocolBundle(version) {
   const protocolRegistry = getRuntimeProtocolRegistry(version);
-  const eventEnvelopeSchema =
-    version === "1.2" ? runtimeEventEnvelopeSchema : runtimeEventEnvelopeV11Schema;
   const schemaEntries = [
     ["jsonRpcId", jsonRpcIdSchema],
-    ["runtimeEventEnvelope", eventEnvelopeSchema],
+    ["runtimeEventEnvelope", protocolRegistry.eventEnvelopeSchema],
     ["runtimeProtocolErrorData", protocolRegistry.errorDataSchema],
   ];
   if (protocolRegistry.serverRequestCancelParamsSchema !== null) {
@@ -140,7 +157,7 @@ function createProtocolBundle(version) {
 
   setProtocolVersionConst(definitions, "runtimeEventEnvelope", version);
   setProtocolVersionConst(definitions, "initializeResult", version);
-  if (version === "1.2") {
+  if (version === "1.3" || version === "1.2") {
     definitions.clientCapabilitiesSetParams.properties.serverRequestMethods.uniqueItems = true;
     definitions.clientCapabilitiesSetResult.properties.acceptedServerRequestMethods.uniqueItems = true;
   }

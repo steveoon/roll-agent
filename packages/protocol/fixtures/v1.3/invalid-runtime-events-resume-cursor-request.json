@@ -1,0 +1,9 @@
+{
+  "jsonrpc": "2.0",
+  "id": 13,
+  "method": "runtime.events.resume",
+  "params": {
+    "threadId": "00000000-0000-4000-8000-000000000002",
+    "afterCursor": "00000000-0000-4000-8000-000000000007"
+  }
+}

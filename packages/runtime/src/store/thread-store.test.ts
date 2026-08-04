@@ -6,7 +6,11 @@ import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { Worker } from "node:worker_threads";
 import type { ModelMessage } from "ai";
+import type { RuntimeEventCursor } from "@roll-agent/protocol";
 import {
+  RUNTIME_EVENT_RETENTION_POLICY,
+  RuntimeEventCursorExpiredError,
+  RuntimeEventCursorGapError,
   ThreadStore,
   TOOL_EXECUTION_RETENTION_POLICY,
   type CommitCompactionInput,
@@ -593,7 +597,7 @@ test("ThreadStore schema v4 迁移会重写旧 ledger 为有界脱敏投影", ()
     assert.equal(
       (inspected.prepare("PRAGMA user_version").get() as { readonly user_version: number })
         .user_version,
-      4,
+      5,
     );
     inspected.close();
     assert.equal(readFileSync(join(dir, "threads.db")).includes("legacy-ledger-secret"), false);
@@ -1500,7 +1504,7 @@ test("ThreadStore schema v2 迁移跳过无父 thread 的 legacy message", () =>
     const version = migrated.prepare("PRAGMA user_version").get() as {
       readonly user_version: number;
     };
-    assert.equal(version.user_version, 4);
+    assert.equal(version.user_version, 5);
     migrated.close();
 
     const reopened = new ThreadStore(dir);
@@ -1685,6 +1689,412 @@ test("ThreadStore 两个连接追加 ToolExecutionRecord 时 sequence 单调且�
     );
     second.close();
     first.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("ThreadStore Runtime event log 跨重启保留 cursor 并从 null 或 cursor 恢复", () => {
+  const dir = tempDir();
+  try {
+    const first = new ThreadStore(dir);
+    const threadId = first.createThread();
+    assert.equal(first.getRuntimeEventCursor(threadId), null);
+    assert.deepEqual(first.resumeRuntimeEvents(threadId, null), {
+      events: [],
+      throughCursor: null,
+      replayedCount: 0,
+    });
+
+    const started = first.appendRuntimeEvent({
+      threadId,
+      turnId: "00000000-0000-4000-8000-000000000001",
+      timestamp: "2026-08-04T12:00:00+08:00",
+      event: { type: "turn.started" },
+    });
+    const completed = first.appendRuntimeEvent({
+      threadId,
+      turnId: "00000000-0000-4000-8000-000000000001",
+      timestamp: "2026-08-04T12:00:01+08:00",
+      event: { type: "turn.completed" },
+    });
+    assert.equal(started.threadSequence, 0);
+    assert.equal(completed.threadSequence, 1);
+    assert.equal(first.getRuntimeEventCursor(threadId), completed.cursor);
+    assert.deepEqual(
+      first.resumeRuntimeEvents(threadId, started.cursor).events.map((event) => ({
+        sequence: event.threadSequence,
+        cursor: event.cursor,
+        timestamp: event.timestamp,
+        payload: event.event,
+      })),
+      [
+        {
+          sequence: 1,
+          cursor: completed.cursor,
+          timestamp: "2026-08-04T04:00:01.000Z",
+          payload: { type: "turn.completed" },
+        },
+      ],
+    );
+    first.close();
+
+    const reopened = new ThreadStore(dir);
+    assert.equal(reopened.getRuntimeEventCursor(threadId), completed.cursor);
+    const replay = reopened.resumeRuntimeEvents(threadId, null);
+    assert.deepEqual(
+      replay.events.map((event) => event.threadSequence),
+      [0, 1],
+    );
+    assert.equal(replay.throughCursor, completed.cursor);
+    assert.equal(replay.replayedCount, 2);
+    reopened.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("ThreadStore Runtime event sequence 在两个连接间单调且 cursor 不混用", () => {
+  const dir = tempDir();
+  try {
+    const first = new ThreadStore(dir);
+    const firstThread = first.createThread();
+    const secondThread = first.createThread();
+    const second = new ThreadStore(dir);
+    const firstEvent = first.appendRuntimeEvent({
+      threadId: firstThread,
+      timestamp: "2026-08-04T04:00:00.000Z",
+      event: { type: "turn.started" },
+    });
+    const secondEvent = second.appendRuntimeEvent({
+      threadId: firstThread,
+      timestamp: "2026-08-04T04:00:01.000Z",
+      event: { type: "turn.completed" },
+    });
+    assert.deepEqual([firstEvent.threadSequence, secondEvent.threadSequence], [0, 1]);
+
+    const foreignCursor = second.appendRuntimeEvent({
+      threadId: secondThread,
+      timestamp: "2026-08-04T04:00:02.000Z",
+      event: { type: "turn.started" },
+    }).cursor;
+    assert.throws(
+      () => first.resumeRuntimeEvents(firstThread, foreignCursor),
+      RuntimeEventCursorGapError,
+    );
+    const [, eventLogId] = firstEvent.cursor.split(":");
+    assert.ok(eventLogId !== undefined);
+    assert.throws(
+      () =>
+        first.resumeRuntimeEvents(
+          firstThread,
+          `rte1:${eventLogId}:0:00000000-0000-4000-8000-000000000099` as RuntimeEventCursor,
+        ),
+      RuntimeEventCursorGapError,
+    );
+    assert.throws(
+      () =>
+        first.resumeRuntimeEvents(
+          firstThread,
+          "rte1:not-a-log:0:not-an-event" as RuntimeEventCursor,
+        ),
+      RuntimeEventCursorGapError,
+    );
+    second.close();
+    first.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test(
+  "ThreadStore Runtime event count retention 只裁连续前缀并区分 boundary 与 expired cursor",
+  { timeout: 30_000 },
+  () => {
+    const dir = tempDir();
+    try {
+      const store = new ThreadStore(dir);
+      const threadId = store.createThread();
+      const first = store.appendRuntimeEvent({
+        threadId,
+        timestamp: "2026-08-04T04:00:00.000Z",
+        event: { type: "turn.started" },
+      });
+      const second = store.appendRuntimeEvent({
+        threadId,
+        timestamp: "2026-08-04T04:00:00.000Z",
+        event: { type: "turn.started" },
+      });
+      for (
+        let index = 2;
+        index < RUNTIME_EVENT_RETENTION_POLICY.maxRecordsPerThread + 2;
+        index += 1
+      ) {
+        store.appendRuntimeEvent({
+          threadId,
+          timestamp: "2026-08-04T04:00:00.000Z",
+          event: { type: "turn.started" },
+        });
+      }
+
+      assert.equal(
+        store.countRuntimeEvents(threadId),
+        RUNTIME_EVENT_RETENTION_POLICY.maxRecordsPerThread,
+      );
+      assert.throws(
+        () => store.resumeRuntimeEvents(threadId, null),
+        RuntimeEventCursorExpiredError,
+      );
+      assert.throws(
+        () => store.resumeRuntimeEvents(threadId, first.cursor),
+        RuntimeEventCursorExpiredError,
+      );
+      const replay = store.resumeRuntimeEvents(threadId, second.cursor);
+      assert.equal(replay.events[0]?.threadSequence, 2);
+      assert.equal(replay.events.at(-1)?.threadSequence, 10_001);
+      assert.equal(replay.replayedCount, RUNTIME_EVENT_RETENTION_POLICY.maxRecordsPerThread);
+      store.close();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  },
+);
+
+test("ThreadStore Runtime event byte retention 保留不超过 16 MiB 的最新连续后缀", () => {
+  const dir = tempDir();
+  try {
+    const store = new ThreadStore(dir);
+    const threadId = store.createThread();
+    const payload = "x".repeat(9 * 1_024 * 1_024);
+    const first = store.appendRuntimeEvent({
+      threadId,
+      timestamp: "2026-08-04T04:00:00.000Z",
+      event: {
+        type: "tool.completed",
+        toolCallId: "large-call-1",
+        agentName: "fixture-agent",
+        toolName: "fixture-tool",
+        display: payload,
+      },
+    });
+    const second = store.appendRuntimeEvent({
+      threadId,
+      timestamp: "2026-08-04T04:00:01.000Z",
+      event: {
+        type: "tool.completed",
+        toolCallId: "large-call-2",
+        agentName: "fixture-agent",
+        toolName: "fixture-tool",
+        display: payload,
+      },
+    });
+
+    assert.equal(store.countRuntimeEvents(threadId), 1);
+    assert.throws(() => store.resumeRuntimeEvents(threadId, null), RuntimeEventCursorExpiredError);
+    const replay = store.resumeRuntimeEvents(threadId, first.cursor);
+    assert.equal(replay.replayedCount, 1);
+    assert.equal(replay.events[0]?.cursor, second.cursor);
+    assert.equal(store.getRuntimeEventCursor(threadId), second.cursor);
+    store.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("ThreadStore 拒绝单条超过 Runtime event byte retention 上限的记录", () => {
+  const dir = tempDir();
+  try {
+    const store = new ThreadStore(dir);
+    const threadId = store.createThread();
+    assert.throws(
+      () =>
+        store.appendRuntimeEvent({
+          threadId,
+          timestamp: "2026-08-04T04:00:00.000Z",
+          event: {
+            type: "tool.completed",
+            toolCallId: "oversized-call",
+            agentName: "fixture-agent",
+            toolName: "fixture-tool",
+            display: "x".repeat(RUNTIME_EVENT_RETENTION_POLICY.maxBytesPerThread + 1),
+          },
+        }),
+      /exceeds the per-Thread retained byte limit/u,
+    );
+    assert.equal(store.countRuntimeEvents(threadId), 0);
+    assert.equal(store.getRuntimeEventCursor(threadId), null);
+    store.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("ThreadStore Runtime event age retention 遇到未过期记录后不在中间打洞", () => {
+  const dir = tempDir();
+  try {
+    const store = new ThreadStore(dir);
+    const threadId = store.createThread();
+    const events = [0, 1, 2].map(() =>
+      store.appendRuntimeEvent({
+        threadId,
+        timestamp: "2026-08-04T04:00:00.000Z",
+        event: { type: "turn.started" },
+      }),
+    );
+    const database = new DatabaseSync(join(dir, "threads.db"));
+    database
+      .prepare(
+        `UPDATE runtime_events
+            SET created_at = '2026-06-01T00:00:00.000Z'
+          WHERE thread_id = ? AND thread_sequence IN (0, 2)`,
+      )
+      .run(threadId);
+    database.close();
+
+    store.appendRuntimeEvent({
+      threadId,
+      timestamp: "2026-08-04T04:00:01.000Z",
+      event: { type: "turn.completed" },
+    });
+    assert.equal(store.countRuntimeEvents(threadId), 3);
+    assert.throws(() => store.resumeRuntimeEvents(threadId, null), RuntimeEventCursorExpiredError);
+    assert.deepEqual(
+      store
+        .resumeRuntimeEvents(threadId, events[0]?.cursor ?? null)
+        .events.map((event) => event.threadSequence),
+      [1, 2, 3],
+    );
+    store.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("ThreadStore Runtime event resume 会裁剪静默 Thread 的过期前缀", () => {
+  const dir = tempDir();
+  try {
+    const store = new ThreadStore(dir);
+    const threadId = store.createThread();
+    const retained = store.appendRuntimeEvent({
+      threadId,
+      timestamp: new Date().toISOString(),
+      event: { type: "turn.started" },
+    });
+    const expiredAt = new Date(
+      Date.now() - RUNTIME_EVENT_RETENTION_POLICY.maxAgeMs - 1_000,
+    ).toISOString();
+    const database = new DatabaseSync(join(dir, "threads.db"));
+    database
+      .prepare("UPDATE runtime_events SET created_at = ? WHERE thread_id = ?")
+      .run(expiredAt, threadId);
+    database.close();
+
+    assert.throws(() => store.resumeRuntimeEvents(threadId, null), RuntimeEventCursorExpiredError);
+    assert.equal(store.countRuntimeEvents(threadId), 0);
+    assert.deepEqual(store.resumeRuntimeEvents(threadId, retained.cursor), {
+      events: [],
+      throughCursor: retained.cursor,
+      replayedCount: 0,
+    });
+    store.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("ThreadStore v4 到 v5 只建立空 Runtime event log，不从旧 transcript 伪造事件", () => {
+  const dir = tempDir();
+  try {
+    const initial = new ThreadStore(dir);
+    const threadId = initial.createThread();
+    initial.appendMessages(threadId, [
+      { role: "user", content: "legacy goal" },
+      { role: "assistant", content: "legacy answer" },
+    ]);
+    initial.close();
+
+    const legacy = new DatabaseSync(join(dir, "threads.db"));
+    legacy.exec(`
+      DROP TABLE runtime_events;
+      DROP TABLE thread_runtime_event_state;
+      PRAGMA user_version = 4;
+    `);
+    legacy.close();
+
+    const migrated = new ThreadStore(dir);
+    assert.equal(migrated.countRuntimeEvents(threadId), 0);
+    assert.equal(migrated.getRuntimeEventCursor(threadId), null);
+    assert.equal(migrated.countTranscriptMessages(threadId), 2);
+    migrated.close();
+
+    const inspected = new DatabaseSync(join(dir, "threads.db"));
+    const stateCount = inspected
+      .prepare("SELECT COUNT(*) AS count FROM thread_runtime_event_state WHERE thread_id = ?")
+      .get(threadId) as { readonly count: number };
+    const version = inspected.prepare("PRAGMA user_version").get() as {
+      readonly user_version: number;
+    };
+    assert.equal(stateCount.count, 1);
+    assert.equal(version.user_version, 5);
+    inspected.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("ThreadStore deleteThread 级联删除 Runtime event state 与 ledger", () => {
+  const dir = tempDir();
+  try {
+    const store = new ThreadStore(dir);
+    const threadId = store.createThread();
+    store.appendRuntimeEvent({
+      threadId,
+      timestamp: "2026-08-04T04:00:00.000Z",
+      event: { type: "turn.started" },
+    });
+    store.deleteThread(threadId);
+    assert.equal(store.countRuntimeEvents(threadId), 0);
+    store.close();
+
+    const database = new DatabaseSync(join(dir, "threads.db"));
+    const stateCount = database
+      .prepare("SELECT COUNT(*) AS count FROM thread_runtime_event_state WHERE thread_id = ?")
+      .get(threadId) as { readonly count: number };
+    assert.equal(stateCount.count, 0);
+    assert.deepEqual(database.prepare("PRAGMA foreign_key_check").all(), []);
+    database.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("ThreadStore Runtime event append 失败会回滚 sequence 且不产生 cursor", () => {
+  const dir = tempDir();
+  try {
+    const store = new ThreadStore(dir);
+    const threadId = store.createThread();
+    const database = new DatabaseSync(join(dir, "threads.db"));
+    database.exec(`
+      CREATE TRIGGER reject_runtime_event_insert
+      BEFORE INSERT ON runtime_events
+      BEGIN
+        SELECT RAISE(ABORT, 'simulated runtime event persistence failure');
+      END;
+    `);
+    database.close();
+
+    assert.throws(
+      () =>
+        store.appendRuntimeEvent({
+          threadId,
+          timestamp: "2026-08-04T04:00:00.000Z",
+          event: { type: "turn.started" },
+        }),
+      /simulated runtime event persistence failure/u,
+    );
+    assert.equal(store.countRuntimeEvents(threadId), 0);
+    assert.equal(store.getRuntimeEventCursor(threadId), null);
+    store.close();
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

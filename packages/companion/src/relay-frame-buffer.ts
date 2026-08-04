@@ -1,4 +1,7 @@
-import type { RuntimeEventEnvelope } from "@roll-agent/protocol";
+import {
+  RUNTIME_V13_DEFAULT_REPLAY_BUFFER_BYTES,
+  type RuntimeEventEnvelope,
+} from "@roll-agent/protocol";
 import {
   projectRuntimeEventEnvelopeForRelayV11,
   relayInteractionCancelledSchemaV11,
@@ -13,7 +16,7 @@ import {
 import type { CompanionInteractionFrameDraftV11 } from "./interaction-broker.ts";
 
 export const DEFAULT_COMPANION_RELAY_FRAME_MAX_EVENTS = 10_000;
-export const DEFAULT_COMPANION_RELAY_FRAME_MAX_BYTES = 16 * 1_024 * 1_024;
+export const DEFAULT_COMPANION_RELAY_FRAME_MAX_BYTES = RUNTIME_V13_DEFAULT_REPLAY_BUFFER_BYTES;
 
 const DRAFT_VALIDATION_WORKSPACE_ID = workspaceIdSchema.parse(
   "00000000-0000-4000-8000-000000000000",

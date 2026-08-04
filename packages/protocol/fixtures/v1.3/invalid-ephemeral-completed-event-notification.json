@@ -1,0 +1,15 @@
+{
+  "jsonrpc": "2.0",
+  "method": "runtime.event",
+  "params": {
+    "protocolVersion": "1.3",
+    "runtimeInstanceId": "00000000-0000-4000-8000-000000000001",
+    "sequence": 11,
+    "timestamp": "2026-07-30T12:00:03.000Z",
+    "threadId": "00000000-0000-4000-8000-000000000002",
+    "durability": "ephemeral",
+    "event": {
+      "type": "turn.completed"
+    }
+  }
+}

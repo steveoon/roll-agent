@@ -1,0 +1,8 @@
+{
+  "jsonrpc": "2.0",
+  "id": 12,
+  "result": {
+    "throughCursor": null,
+    "replayedCount": 0
+  }
+}

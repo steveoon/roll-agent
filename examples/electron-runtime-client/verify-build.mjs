@@ -6,17 +6,27 @@ import { join } from "node:path";
 
 const outputDirectory = join(import.meta.dirname, "dist");
 const rendererPath = join(outputDirectory, "renderer.js");
-const [main, preload, rendererBuffer, html, styles, mainSource, preloadSource, rendererSource] =
-  await Promise.all([
-    readFile(join(outputDirectory, "main.js"), "utf8"),
-    readFile(join(outputDirectory, "preload.cjs"), "utf8"),
-    readFile(rendererPath),
-    readFile(join(outputDirectory, "index.html"), "utf8"),
-    readFile(join(outputDirectory, "styles.css"), "utf8"),
-    readFile(join(import.meta.dirname, "main.ts"), "utf8"),
-    readFile(join(import.meta.dirname, "preload.ts"), "utf8"),
-    readFile(join(import.meta.dirname, "renderer.ts"), "utf8"),
-  ]);
+const [
+  main,
+  preload,
+  rendererBuffer,
+  html,
+  styles,
+  mainSource,
+  preloadSource,
+  rendererSource,
+  supportedProtocolsSource,
+] = await Promise.all([
+  readFile(join(outputDirectory, "main.js"), "utf8"),
+  readFile(join(outputDirectory, "preload.cjs"), "utf8"),
+  readFile(rendererPath),
+  readFile(join(outputDirectory, "index.html"), "utf8"),
+  readFile(join(outputDirectory, "styles.css"), "utf8"),
+  readFile(join(import.meta.dirname, "main.ts"), "utf8"),
+  readFile(join(import.meta.dirname, "preload.ts"), "utf8"),
+  readFile(join(import.meta.dirname, "renderer.ts"), "utf8"),
+  readFile(join(import.meta.dirname, "supported-protocols.ts"), "utf8"),
+]);
 const renderer = rendererBuffer.toString("utf8");
 const rendererRawBudget = 550 * 1024;
 const rendererGzipBudget = 90 * 1024;
@@ -25,8 +35,8 @@ assert.match(main, /preload\.cjs/);
 assert.match(main, /sandbox:\s*true/);
 assert.match(main, /nodeIntegration:\s*false/);
 assert.match(main, /contextIsolation:\s*true/);
-assert.match(main, /protocolVersion !== "1\.2"/);
-assert.match(main, /protocolVersion !== "1\.1"/);
+assert.match(main, /\[\s*"1\.3",\s*"1\.2",\s*"1\.1",?\s*\]/);
+assert.match(main, /isElectronRuntimeProtocolVersion/);
 assert.match(main, /normalizeUserInputResult/);
 assert.match(main, /onUserInputRequest/);
 assert.match(mainSource, /did-start-navigation/);
@@ -36,7 +46,8 @@ assert.match(mainSource, /RendererInteractionRegistry/);
 assert.match(preload, /require\(["']electron["']\)/);
 assert.doesNotMatch(preload, /^\s*import\s/m);
 assert.match(preloadSource, /RuntimeMethodResultForVersion/);
-assert.match(preloadSource, /"1\.2"\s*\|\s*"1\.1"/);
+assert.match(preloadSource, /ElectronRuntimeProtocolVersion/);
+assert.match(supportedProtocolsSource, /\[\s*"1\.3",\s*"1\.2",\s*"1\.1",?\s*\] as const/);
 assert.match(preloadSource, /onUserInputRequest/);
 assert.doesNotMatch(preloadSource, /snapshotThread[\s\S]*?RuntimeMethodResult<"thread\.snapshot">/);
 assert.doesNotMatch(preloadSource, /exposeInMainWorld\([^\n]*ipcRenderer/);

@@ -14,7 +14,9 @@ import {
   type RuntimeMethodInput,
   type RuntimeMethodParams,
   type RuntimeMethodResult,
+  type RuntimeMethodResultForVersion,
   type RuntimeProtocolCapabilities,
+  type RuntimeProtocolVersion,
 } from "@roll-agent/protocol";
 import type {
   RollNodeClient,
@@ -71,7 +73,7 @@ export interface CompanionRuntimeClient {
   request<TMethod extends RuntimeMethod>(
     method: TMethod,
     input: RuntimeMethodInput<TMethod>,
-  ): Promise<RuntimeMethodResult<TMethod>>;
+  ): Promise<RuntimeMethodResultForVersion<RuntimeProtocolVersion, TMethod>>;
   onEvent(listener: (event: RuntimeEventEnvelope) => void): () => void;
   getInitializationResult?(): Pick<InitializeResult, "protocolVersion">;
   close(): void;
@@ -430,8 +432,11 @@ export class CompanionWorkspace {
         "Provide either interactionBroker or the deprecated approvalRequestBroker, not both",
       );
     }
-    if (protocolVersion === "1.2" && this.interactionBroker === undefined) {
-      throw new Error("Runtime Protocol 1.2 requires a CompanionInteractionBroker");
+    if (
+      this.protocolCapabilities.serverRequestCapabilityNegotiation &&
+      this.interactionBroker === undefined
+    ) {
+      throw new Error(`Runtime Protocol ${protocolVersion} requires a CompanionInteractionBroker`);
     }
     if (
       this.protocolCapabilities.serverRequests &&

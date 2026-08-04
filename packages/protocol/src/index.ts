@@ -1,14 +1,32 @@
 import { z } from "zod/v4";
 
 export const SUPPORTED_RUNTIME_PROTOCOL_VERSIONS_V11 = ["1.1", "1.0"] as const;
-export const SUPPORTED_RUNTIME_PROTOCOL_VERSIONS = [
+export const SUPPORTED_RUNTIME_PROTOCOL_VERSIONS_V12 = [
   "1.2",
   ...SUPPORTED_RUNTIME_PROTOCOL_VERSIONS_V11,
+] as const;
+export const SUPPORTED_RUNTIME_PROTOCOL_VERSIONS = [
+  "1.3",
+  ...SUPPORTED_RUNTIME_PROTOCOL_VERSIONS_V12,
 ] as const;
 export type RuntimeProtocolVersion = (typeof SUPPORTED_RUNTIME_PROTOCOL_VERSIONS)[number];
 export const RUNTIME_PROTOCOL_VERSION = SUPPORTED_RUNTIME_PROTOCOL_VERSIONS[0];
 export const RUNTIME_EVENT_NOTIFICATION = "runtime.event" as const;
 export const RUNTIME_SERVER_REQUEST_CANCEL_NOTIFICATION = "runtime.serverRequest.cancel" as const;
+export const RUNTIME_V13_MAX_DURABLE_EVENT_RECORD_BYTES = 16 * 1_024 * 1_024;
+export const RUNTIME_V13_MAX_DURABLE_EVENT_RECORDS = 10_000;
+/**
+ * Advertising Protocol 1.3 is a declaration that the Client accepts at least this many bytes in
+ * one Runtime-to-Client NDJSON frame. The margin above the durable record limit covers the bounded
+ * Runtime envelope and JSON-RPC notification metadata.
+ */
+export const RUNTIME_V13_MIN_CLIENT_FRAME_BYTES =
+  RUNTIME_V13_MAX_DURABLE_EVENT_RECORD_BYTES + 1 * 1_024 * 1_024;
+/** Default bounded window for a complete retained replay batch plus per-envelope metadata. */
+export const RUNTIME_V13_DEFAULT_REPLAY_BUFFER_BYTES = 32 * 1_024 * 1_024;
+/** Recovery Snapshot metadata is clipped because the projection must always fit one Client frame. */
+export const RUNTIME_V13_RECOVERY_SNAPSHOT_METADATA_MAX_CHARS = 1_024;
+export const RUNTIME_V13_RECOVERY_SNAPSHOT_TIMESTAMP_MAX_CHARS = 64;
 export const APPROVAL_EXPLANATION_PREVIEW_KEY = "explanation" as const;
 export const APPROVAL_EXPLANATION_MAX_CHARS = 100;
 export const CLIENT_CAPABILITY_METHOD_MAX_COUNT = 64;
@@ -65,6 +83,13 @@ export const RUNTIME_PROTOCOL_CAPABILITIES = {
     clientApprovalResponses: false,
     requiredServerRequestMethods: [],
   },
+  "1.3": {
+    serverRequests: true,
+    serverRequestCapabilityNegotiation: true,
+    approvalResolvedEvents: true,
+    clientApprovalResponses: false,
+    requiredServerRequestMethods: [],
+  },
   "1.1": {
     serverRequests: true,
     serverRequestCapabilityNegotiation: false,
@@ -82,6 +107,7 @@ export const RUNTIME_PROTOCOL_CAPABILITIES = {
 } as const satisfies Readonly<Record<RuntimeProtocolVersion, RuntimeProtocolCapabilities>>;
 
 export const REQUIRED_RUNTIME_SERVER_REQUEST_METHODS_BY_VERSION = {
+  "1.3": RUNTIME_PROTOCOL_CAPABILITIES["1.3"].requiredServerRequestMethods,
   "1.2": RUNTIME_PROTOCOL_CAPABILITIES["1.2"].requiredServerRequestMethods,
   "1.1": RUNTIME_PROTOCOL_CAPABILITIES["1.1"].requiredServerRequestMethods,
   "1.0": RUNTIME_PROTOCOL_CAPABILITIES["1.0"].requiredServerRequestMethods,
@@ -109,6 +135,7 @@ export const RUNTIME_METHODS = {
   threadCreate: "thread.create",
   threadOpen: "thread.open",
   threadSnapshot: "thread.snapshot",
+  runtimeEventsResume: "runtime.events.resume",
   threadRename: "thread.rename",
   threadDelete: "thread.delete",
   threadDetach: "thread.detach",
@@ -145,10 +172,19 @@ export const RUNTIME_ERROR_CODES_V11 = {
   internalError: "INTERNAL_ERROR",
 } as const;
 
-export const RUNTIME_ERROR_CODES = {
+/** Runtime Protocol 1.2 error registry. Keep this object frozen. */
+export const RUNTIME_ERROR_CODES_V12 = {
   ...RUNTIME_ERROR_CODES_V11,
   capabilityRevisionConflict: "CAPABILITY_REVISION_CONFLICT",
 } as const;
+
+export const RUNTIME_ERROR_CODES = {
+  ...RUNTIME_ERROR_CODES_V12,
+  eventCursorExpired: "EVENT_CURSOR_EXPIRED",
+  eventCursorGap: "EVENT_CURSOR_GAP",
+} as const;
+
+export const RUNTIME_ERROR_CODES_V13 = RUNTIME_ERROR_CODES;
 
 export const TOOL_OUTCOME_KINDS = [
   "success",
@@ -167,10 +203,19 @@ export const runtimeInstanceIdSchema = z.string().uuid().brand<"RuntimeInstanceI
 export const requestIdSchema = z.string().uuid().brand<"RequestId">();
 export const streamIdSchema = z.string().uuid().brand<"StreamId">();
 export const operationIdSchema = z.string().uuid().brand<"OperationId">();
+export const runtimeEventIdSchema = z.string().uuid().brand<"RuntimeEventId">();
+export const runtimeEventCursorSchema = z
+  .string()
+  .max(128)
+  .regex(
+    /^rte1:[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}:(?:0|[1-9]\d*):[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/u,
+  )
+  .brand<"RuntimeEventCursor">();
 export const timestampSchema = z.string().datetime({ offset: true });
 export const jsonValueSchema = z.json();
 export const jsonRpcIdSchema = z.union([z.string(), z.number()]);
 export const runtimeProtocolVersionSchema = z.enum(SUPPORTED_RUNTIME_PROTOCOL_VERSIONS);
+export const runtimeProtocolVersionV12Schema = z.enum(SUPPORTED_RUNTIME_PROTOCOL_VERSIONS_V12);
 export const runtimeProtocolVersionV11Schema = z.enum(SUPPORTED_RUNTIME_PROTOCOL_VERSIONS_V11);
 export const interactionSensitivitySchema = z.enum(INTERACTION_SENSITIVITIES);
 const runtimeInteractionMetadataObjectSchema = z
@@ -197,9 +242,85 @@ export type RuntimeInstanceId = z.infer<typeof runtimeInstanceIdSchema>;
 export type RequestId = z.infer<typeof requestIdSchema>;
 export type StreamId = z.infer<typeof streamIdSchema>;
 export type OperationId = z.infer<typeof operationIdSchema>;
+export type RuntimeEventId = z.infer<typeof runtimeEventIdSchema>;
+export type RuntimeEventCursor = z.infer<typeof runtimeEventCursorSchema>;
 export type JsonValue = z.infer<typeof jsonValueSchema>;
 export type JsonRpcId = z.infer<typeof jsonRpcIdSchema>;
 export type InteractionSensitivity = z.infer<typeof interactionSensitivitySchema>;
+
+type RuntimeEventCursorParts = {
+  readonly eventLogId: string;
+  readonly threadSequence: bigint;
+  readonly eventId: RuntimeEventId;
+};
+
+function runtimeEventCursorParts(cursor: RuntimeEventCursor): RuntimeEventCursorParts {
+  const parsed = runtimeEventCursorSchema.parse(cursor);
+  const [, eventLogId, threadSequence, eventId] = parsed.split(":");
+  if (eventLogId === undefined || threadSequence === undefined || eventId === undefined) {
+    throw new Error("Runtime Event cursor has an invalid shape");
+  }
+  return {
+    eventLogId,
+    threadSequence: BigInt(threadSequence),
+    eventId: runtimeEventIdSchema.parse(eventId),
+  };
+}
+
+function assertComparableRuntimeEventCursors(
+  left: RuntimeEventCursorParts,
+  right: RuntimeEventCursorParts,
+): void {
+  if (left.eventLogId !== right.eventLogId) {
+    throw new Error("Runtime Event cursors belong to different event logs");
+  }
+  if (left.threadSequence === right.threadSequence && left.eventId !== right.eventId) {
+    throw new Error("Runtime Event cursors conflict at the same Thread sequence");
+  }
+}
+
+/** Compares opaque cursors from one Thread event log without exposing their encoded fields. */
+export function compareRuntimeEventCursors(
+  left: RuntimeEventCursor | null,
+  right: RuntimeEventCursor | null,
+): -1 | 0 | 1 {
+  if (left === null) {
+    return right === null ? 0 : -1;
+  }
+  if (right === null) {
+    return 1;
+  }
+  const leftParts = runtimeEventCursorParts(left);
+  const rightParts = runtimeEventCursorParts(right);
+  assertComparableRuntimeEventCursors(leftParts, rightParts);
+  if (leftParts.threadSequence < rightParts.threadSequence) {
+    return -1;
+  }
+  if (leftParts.threadSequence > rightParts.threadSequence) {
+    return 1;
+  }
+  return 0;
+}
+
+/** Returns the signed step distance, treating `null` as the checkpoint before sequence zero. */
+export function runtimeEventCursorDistance(
+  from: RuntimeEventCursor | null,
+  to: RuntimeEventCursor | null,
+): bigint {
+  if (from === null) {
+    if (to === null) {
+      return 0n;
+    }
+    return runtimeEventCursorParts(to).threadSequence + 1n;
+  }
+  if (to === null) {
+    return -(runtimeEventCursorParts(from).threadSequence + 1n);
+  }
+  const fromParts = runtimeEventCursorParts(from);
+  const toParts = runtimeEventCursorParts(to);
+  assertComparableRuntimeEventCursors(fromParts, toParts);
+  return toParts.threadSequence - fromParts.threadSequence;
+}
 
 const runtimeClientInfoFields = {
   name: z.string().trim().min(1).max(100),
@@ -216,7 +337,8 @@ export const runtimeServerInfoSchema = z
   .strict()
   .readonly();
 
-export const runtimeLimitsSchema = z
+/** Runtime Protocol 1.2/1.1/1.0 limits. Keep this schema frozen. */
+export const runtimeLimitsV12Schema = z
   .object({
     maxFrameBytes: z.number().int().positive(),
     maxPageSize: z.number().int().positive(),
@@ -226,6 +348,18 @@ export const runtimeLimitsSchema = z
   .strict()
   .readonly();
 
+export const runtimeLimitsV13Schema = z
+  .object({
+    maxFrameBytes: z.number().int().positive(),
+    maxPageSize: z.number().int().positive(),
+    eventReplay: z.literal(true),
+    idempotencyCacheEntries: z.number().int().positive(),
+  })
+  .strict()
+  .readonly();
+
+export const runtimeLimitsSchema = z.union([runtimeLimitsV13Schema, runtimeLimitsV12Schema]);
+
 export const initializeParamsSchema = z
   .object({
     protocolVersions: z.array(z.string().min(1)).min(1),
@@ -234,18 +368,18 @@ export const initializeParamsSchema = z
   .strict()
   .readonly();
 
-const initializeResultFields = {
+const initializeResultCommonFields = {
   runtimeInstanceId: runtimeInstanceIdSchema,
   server: runtimeServerInfoSchema,
   features: z.array(z.enum(RUNTIME_FEATURES)),
-  limits: runtimeLimitsSchema,
 } as const;
 
 /** Runtime Protocol 1.1/1.0 initialize result. Keep this schema frozen. */
 export const initializeResultV11Schema = z
   .object({
     protocolVersion: runtimeProtocolVersionV11Schema,
-    ...initializeResultFields,
+    ...initializeResultCommonFields,
+    limits: runtimeLimitsV12Schema,
   })
   .strict()
   .readonly();
@@ -253,14 +387,28 @@ export const initializeResultV11Schema = z
 /** Runtime Protocol 1.2 initialize result. */
 export const initializeResultV12Schema = z
   .object({
-    protocolVersion: runtimeProtocolVersionSchema,
-    ...initializeResultFields,
+    protocolVersion: z.literal("1.2"),
+    ...initializeResultCommonFields,
+    limits: runtimeLimitsV12Schema,
   })
   .strict()
   .readonly();
 
-/** Latest Runtime Protocol initialize result. */
-export const initializeResultSchema = initializeResultV12Schema;
+export const initializeResultV13Schema = z
+  .object({
+    protocolVersion: z.literal("1.3"),
+    ...initializeResultCommonFields,
+    limits: runtimeLimitsV13Schema,
+  })
+  .strict()
+  .readonly();
+
+/** Any currently supported Runtime Protocol initialize result. */
+export const initializeResultSchema = z.union([
+  initializeResultV13Schema,
+  initializeResultV12Schema,
+  initializeResultV11Schema,
+]);
 
 const clientCapabilityMethodNameSchema = z.string().min(1).max(CLIENT_CAPABILITY_METHOD_MAX_CHARS);
 
@@ -698,17 +846,88 @@ export const pendingInteractionProjectionSchema = z.discriminatedUnion("method",
   pendingUserInputInteractionProjectionSchema,
 ]);
 
-export const threadSnapshotV12Schema = z
+const threadSnapshotV12Fields = {
+  ...threadSnapshotV11Fields,
+  activeTurn: activeTurnV12Schema.optional(),
+  pendingInteractions: z.array(pendingInteractionProjectionSchema),
+} as const;
+
+/** Runtime Protocol 1.2 snapshot. Keep this schema frozen. */
+export const threadSnapshotV12Schema = z.object(threadSnapshotV12Fields).strict().readonly();
+
+export const threadSnapshotV13FullSchema = z
   .object({
-    ...threadSnapshotV11Fields,
-    activeTurn: activeTurnV12Schema.optional(),
-    pendingInteractions: z.array(pendingInteractionProjectionSchema),
+    ...threadSnapshotV12Fields,
+    eventCursor: runtimeEventCursorSchema.nullable(),
   })
   .strict()
   .readonly();
 
-/** Latest Runtime Protocol snapshot. Use threadSnapshotV11Schema for the compatibility facade. */
-export const threadSnapshotSchema = threadSnapshotV12Schema;
+const recoveryThreadSummarySchema = z
+  .object({
+    id: threadIdSchema,
+    title: z.string().max(RUNTIME_V13_RECOVERY_SNAPSHOT_METADATA_MAX_CHARS).optional(),
+    model: z.string().max(RUNTIME_V13_RECOVERY_SNAPSHOT_METADATA_MAX_CHARS).optional(),
+    createdAt: z
+      .string()
+      .max(RUNTIME_V13_RECOVERY_SNAPSHOT_TIMESTAMP_MAX_CHARS)
+      .datetime({ offset: true }),
+    updatedAt: z
+      .string()
+      .max(RUNTIME_V13_RECOVERY_SNAPSHOT_TIMESTAMP_MAX_CHARS)
+      .datetime({ offset: true }),
+    messageCount: z.number().int().nonnegative(),
+  })
+  .strict()
+  .readonly();
+const recoveryMessagePageSchema = z
+  .object({
+    items: z.array(uiMessageSchema).max(0),
+    nextBeforeSequence: z.null(),
+  })
+  .strict()
+  .readonly();
+const recoveryOperationPageSchema = z
+  .object({
+    items: z.array(operationViewSchema).max(0),
+    nextBeforeSequence: z.null(),
+  })
+  .strict()
+  .readonly();
+const recoveryActiveTurnSchema = z
+  .object({
+    id: turnIdSchema,
+    status: z.enum(["running", "cancelling", "waiting-for-user"]),
+    startedAt: z
+      .string()
+      .max(RUNTIME_V13_RECOVERY_SNAPSHOT_TIMESTAMP_MAX_CHARS)
+      .datetime({ offset: true }),
+  })
+  .strict()
+  .readonly();
+
+export const threadRecoverySnapshotV13Schema = z
+  .object({
+    ...threadSnapshotV12Fields,
+    thread: recoveryThreadSummarySchema,
+    messages: recoveryMessagePageSchema,
+    operations: recoveryOperationPageSchema,
+    pendingApprovals: z.array(pendingApprovalSchema).max(0),
+    pendingInteractions: z.array(pendingInteractionProjectionSchema).max(0),
+    activeTurn: recoveryActiveTurnSchema.optional(),
+    eventCursor: runtimeEventCursorSchema.nullable(),
+    recoveryProjection: z.literal(true),
+  })
+  .strict()
+  .readonly();
+
+export const threadSnapshotV13Schema = z.union([
+  threadSnapshotV13FullSchema,
+  threadRecoverySnapshotV13Schema,
+]);
+
+/** Latest Runtime Protocol snapshot. Use versioned schemas for compatibility. */
+export const threadSnapshotSchema = threadSnapshotV13Schema;
 
 const pageSizeSchema = z.number().int().min(1).max(500).default(100);
 const requestFields = { requestId: requestIdSchema } as const;
@@ -749,18 +968,51 @@ export const threadOpenParamsSchema = z.object(threadRequestFields).strict().rea
 export const threadOpenResultV11Schema = threadSnapshotV11Schema;
 export const threadOpenResultSchema = threadSnapshotSchema;
 
-export const threadSnapshotParamsSchema = z
+const threadSnapshotParamFields = {
+  ...threadRequestFields,
+  messageBeforeSequence: z.number().int().nonnegative().optional(),
+  operationBeforeSequence: z.number().int().nonnegative().optional(),
+  limit: pageSizeSchema,
+} as const;
+
+/** Runtime Protocol 1.2/1.1/1.0 request shape. Keep this schema frozen. */
+export const threadSnapshotParamsV12Schema = z
   .object({
-    ...threadRequestFields,
-    messageBeforeSequence: z.number().int().nonnegative().optional(),
-    operationBeforeSequence: z.number().int().nonnegative().optional(),
-    limit: pageSizeSchema,
+    ...threadSnapshotParamFields,
   })
   .strict()
   .readonly();
 
+export const threadSnapshotParamsV13Schema = z
+  .object({
+    ...threadSnapshotParamFields,
+    recovery: z.literal(true).optional(),
+  })
+  .strict()
+  .readonly();
+
+/** Latest Runtime Protocol request shape. Use the versioned schemas for compatibility. */
+export const threadSnapshotParamsSchema = threadSnapshotParamsV13Schema;
+
 export const threadSnapshotResultV11Schema = threadSnapshotV11Schema;
+export const threadSnapshotResultV12Schema = threadSnapshotV12Schema;
 export const threadSnapshotResultSchema = threadSnapshotSchema;
+
+export const runtimeEventsResumeParamsSchema = z
+  .object({
+    ...threadRequestFields,
+    afterCursor: runtimeEventCursorSchema.nullable(),
+  })
+  .strict()
+  .readonly();
+
+export const runtimeEventsResumeResultSchema = z
+  .object({
+    throughCursor: runtimeEventCursorSchema.nullable(),
+    replayedCount: z.number().int().nonnegative(),
+  })
+  .strict()
+  .readonly();
 
 export const threadRenameParamsSchema = z
   .object({
@@ -979,122 +1231,142 @@ export const approvalResolutionSchema = z.union([
     .readonly(),
 ]);
 
-/** Runtime Protocol 1.1/1.0 event payloads. Keep this schema frozen. */
+const turnStartedEventSchema = z
+  .object({ type: z.literal("turn.started") })
+  .strict()
+  .readonly();
+const messageStartedEventSchema = z
+  .object({ type: z.literal("message.started"), streamId: streamIdSchema })
+  .strict()
+  .readonly();
+const messageDeltaEventSchema = z
+  .object({ type: z.literal("message.delta"), streamId: streamIdSchema, delta: z.string() })
+  .strict()
+  .readonly();
+const messageCompletedEventSchema = z
+  .object({ type: z.literal("message.completed"), streamId: streamIdSchema, text: z.string() })
+  .strict()
+  .readonly();
+const reasoningSummaryDeltaEventSchema = z
+  .object({
+    type: z.literal("reasoning.summary.delta"),
+    reasoningId: z.string().min(1),
+    delta: z.string(),
+  })
+  .strict()
+  .readonly();
+const toolStartedEventSchema = z
+  .object({
+    type: z.literal("tool.started"),
+    toolCallId: z.string().min(1),
+    agentName: z.string().min(1),
+    toolName: z.string().min(1),
+    input: jsonValueSchema,
+  })
+  .strict()
+  .readonly();
+const toolOutputEventSchema = z
+  .object({
+    type: z.literal("tool.output"),
+    toolCallId: z.string().min(1),
+    agentName: z.string().min(1),
+    toolName: z.string().min(1),
+    stream: z.enum(["stdout", "stderr"]),
+    delta: z.string(),
+  })
+  .strict()
+  .readonly();
+const toolCompletedEventSchema = z
+  .object({
+    type: z.literal("tool.completed"),
+    toolCallId: z.string().min(1),
+    agentName: z.string().min(1),
+    toolName: z.string().min(1),
+    operationId: operationIdSchema.optional(),
+    outcome: toolOutcomeSchema.optional(),
+    display: jsonValueSchema,
+  })
+  .strict()
+  .readonly();
+const approvalRequiredEventSchema = z
+  .object({ type: z.literal("approval.required"), approval: pendingApprovalSchema })
+  .strict()
+  .readonly();
+const approvalResolvedEventSchema = z
+  .object({
+    type: z.literal("approval.resolved"),
+    approvalId: approvalIdSchema,
+    resolution: approvalResolutionSchema,
+  })
+  .strict()
+  .readonly();
+const turnCompletedEventSchema = z
+  .object({ type: z.literal("turn.completed") })
+  .strict()
+  .readonly();
+const turnCancelledEventSchema = z
+  .object({ type: z.literal("turn.cancelled"), reason: z.string(), message: z.string() })
+  .strict()
+  .readonly();
+const turnFailedEventSchema = z
+  .object({
+    type: z.literal("turn.failed"),
+    stage: z.enum(["bootstrap", "plan", "execute"]),
+    message: z.string(),
+  })
+  .strict()
+  .readonly();
+const capabilitiesChangedEventSchema = z
+  .object({ type: z.literal("capabilities.changed") })
+  .strict()
+  .readonly();
+
+/** Runtime Protocol 1.1/1.0 event payloads. Keep this registry and ordering frozen. */
 export const runtimeEventV11Schema = z.discriminatedUnion("type", [
-  z
-    .object({ type: z.literal("turn.started") })
-    .strict()
-    .readonly(),
-  z
-    .object({
-      type: z.literal("message.started"),
-      streamId: streamIdSchema,
-    })
-    .strict()
-    .readonly(),
-  z
-    .object({
-      type: z.literal("message.delta"),
-      streamId: streamIdSchema,
-      delta: z.string(),
-    })
-    .strict()
-    .readonly(),
-  z
-    .object({
-      type: z.literal("message.completed"),
-      streamId: streamIdSchema,
-      text: z.string(),
-    })
-    .strict()
-    .readonly(),
-  z
-    .object({
-      type: z.literal("reasoning.summary.delta"),
-      reasoningId: z.string().min(1),
-      delta: z.string(),
-    })
-    .strict()
-    .readonly(),
-  z
-    .object({
-      type: z.literal("tool.started"),
-      toolCallId: z.string().min(1),
-      agentName: z.string().min(1),
-      toolName: z.string().min(1),
-      input: jsonValueSchema,
-    })
-    .strict()
-    .readonly(),
-  z
-    .object({
-      type: z.literal("tool.output"),
-      toolCallId: z.string().min(1),
-      agentName: z.string().min(1),
-      toolName: z.string().min(1),
-      stream: z.enum(["stdout", "stderr"]),
-      delta: z.string(),
-    })
-    .strict()
-    .readonly(),
-  z
-    .object({
-      type: z.literal("tool.completed"),
-      toolCallId: z.string().min(1),
-      agentName: z.string().min(1),
-      toolName: z.string().min(1),
-      operationId: operationIdSchema.optional(),
-      outcome: toolOutcomeSchema.optional(),
-      display: jsonValueSchema,
-    })
-    .strict()
-    .readonly(),
-  z
-    .object({
-      type: z.literal("approval.required"),
-      approval: pendingApprovalSchema,
-    })
-    .strict()
-    .readonly(),
-  z
-    .object({
-      type: z.literal("approval.resolved"),
-      approvalId: approvalIdSchema,
-      resolution: approvalResolutionSchema,
-    })
-    .strict()
-    .readonly(),
-  z
-    .object({ type: z.literal("turn.completed") })
-    .strict()
-    .readonly(),
-  z
-    .object({
-      type: z.literal("turn.cancelled"),
-      reason: z.string(),
-      message: z.string(),
-    })
-    .strict()
-    .readonly(),
-  z
-    .object({
-      type: z.literal("turn.failed"),
-      stage: z.enum(["bootstrap", "plan", "execute"]),
-      message: z.string(),
-    })
-    .strict()
-    .readonly(),
-  z
-    .object({ type: z.literal("capabilities.changed") })
-    .strict()
-    .readonly(),
+  turnStartedEventSchema,
+  messageStartedEventSchema,
+  messageDeltaEventSchema,
+  messageCompletedEventSchema,
+  reasoningSummaryDeltaEventSchema,
+  toolStartedEventSchema,
+  toolOutputEventSchema,
+  toolCompletedEventSchema,
+  approvalRequiredEventSchema,
+  approvalResolvedEventSchema,
+  turnCompletedEventSchema,
+  turnCancelledEventSchema,
+  turnFailedEventSchema,
+  capabilitiesChangedEventSchema,
+]);
+
+export const runtimeDurableEventV13Schema = z.discriminatedUnion("type", [
+  turnStartedEventSchema,
+  messageCompletedEventSchema,
+  toolCompletedEventSchema,
+  approvalRequiredEventSchema,
+  approvalResolvedEventSchema,
+  turnCompletedEventSchema,
+  turnCancelledEventSchema,
+  turnFailedEventSchema,
+  capabilitiesChangedEventSchema,
+]);
+
+export const runtimeEphemeralEventV13Schema = z.discriminatedUnion("type", [
+  messageStartedEventSchema,
+  messageDeltaEventSchema,
+  reasoningSummaryDeltaEventSchema,
+  toolStartedEventSchema,
+  toolOutputEventSchema,
 ]);
 
 /** Runtime Protocol 1.2 event payloads. Currently identical to the 1.1 payload registry. */
 export const runtimeEventV12Schema = runtimeEventV11Schema;
 
+/** Runtime Protocol 1.3 retains the event payload registry and versions durability in the envelope. */
+export const runtimeEventV13Schema = runtimeEventV12Schema;
+
 /** Latest Runtime Protocol event payloads. */
-export const runtimeEventSchema = runtimeEventV12Schema;
+export const runtimeEventSchema = runtimeEventV13Schema;
 
 const runtimeEventEnvelopeFields = {
   runtimeInstanceId: runtimeInstanceIdSchema,
@@ -1136,10 +1408,10 @@ export const runtimeEventEnvelopeV11Schema = z
   .superRefine(validateRuntimeEventCapabilities)
   .readonly();
 
-/** Latest Runtime Protocol 1.2-capable event envelope. */
+/** Runtime Protocol 1.2 event envelope. Keep this schema frozen. */
 export const runtimeEventEnvelopeV12Schema = z
   .object({
-    protocolVersion: runtimeProtocolVersionSchema,
+    protocolVersion: z.literal("1.2"),
     ...runtimeEventEnvelopeFields,
     event: runtimeEventV12Schema,
   })
@@ -1147,7 +1419,41 @@ export const runtimeEventEnvelopeV12Schema = z
   .superRefine(validateRuntimeEventCapabilities)
   .readonly();
 
-export const runtimeEventEnvelopeSchema = runtimeEventEnvelopeV12Schema;
+export const runtimeDurableEventEnvelopeV13Schema = z
+  .object({
+    protocolVersion: z.literal("1.3"),
+    ...runtimeEventEnvelopeFields,
+    durability: z.literal("durable"),
+    eventId: runtimeEventIdSchema,
+    cursor: runtimeEventCursorSchema,
+    event: runtimeDurableEventV13Schema,
+  })
+  .strict()
+  .superRefine(validateRuntimeEventCapabilities)
+  .readonly();
+
+export const runtimeEphemeralEventEnvelopeV13Schema = z
+  .object({
+    protocolVersion: z.literal("1.3"),
+    ...runtimeEventEnvelopeFields,
+    durability: z.literal("ephemeral"),
+    event: runtimeEphemeralEventV13Schema,
+  })
+  .strict()
+  .superRefine(validateRuntimeEventCapabilities)
+  .readonly();
+
+export const runtimeEventEnvelopeV13Schema = z.discriminatedUnion("durability", [
+  runtimeDurableEventEnvelopeV13Schema,
+  runtimeEphemeralEventEnvelopeV13Schema,
+]);
+
+/** Any currently supported Runtime Event envelope. */
+export const runtimeEventEnvelopeSchema = z.union([
+  runtimeEventEnvelopeV13Schema,
+  runtimeEventEnvelopeV12Schema,
+  runtimeEventEnvelopeV11Schema,
+]);
 
 export const runtimeProtocolErrorDataSchema = z
   .object({
@@ -1163,7 +1469,16 @@ export const runtimeProtocolErrorDataV11Schema = runtimeProtocolErrorDataSchema;
 
 export const runtimeProtocolErrorDataV12Schema = z
   .object({
-    rollCode: z.enum(Object.values(RUNTIME_ERROR_CODES)),
+    rollCode: z.enum(Object.values(RUNTIME_ERROR_CODES_V12)),
+    retryable: z.boolean(),
+    details: jsonValueSchema.optional(),
+  })
+  .strict()
+  .readonly();
+
+export const runtimeProtocolErrorDataV13Schema = z
+  .object({
+    rollCode: z.enum(Object.values(RUNTIME_ERROR_CODES_V13)),
     retryable: z.boolean(),
     details: jsonValueSchema.optional(),
   })
@@ -1188,7 +1503,7 @@ export const runtimeMethodSchemasV11 = {
     result: threadOpenResultV11Schema,
   },
   [RUNTIME_METHODS.threadSnapshot]: {
-    params: threadSnapshotParamsSchema,
+    params: threadSnapshotParamsV12Schema,
     result: threadSnapshotResultV11Schema,
   },
   [RUNTIME_METHODS.threadRename]: {
@@ -1235,11 +1550,11 @@ export const runtimeMethodSchemasV12 = {
   },
   [RUNTIME_METHODS.threadOpen]: {
     params: threadOpenParamsSchema,
-    result: threadOpenResultSchema,
+    result: threadSnapshotV12Schema,
   },
   [RUNTIME_METHODS.threadSnapshot]: {
-    params: threadSnapshotParamsSchema,
-    result: threadSnapshotResultSchema,
+    params: threadSnapshotParamsV12Schema,
+    result: threadSnapshotResultV12Schema,
   },
   [RUNTIME_METHODS.clientCapabilitiesSet]: {
     params: clientCapabilitiesSetParamsSchema,
@@ -1247,8 +1562,28 @@ export const runtimeMethodSchemasV12 = {
   },
 } as const;
 
+export const runtimeMethodSchemasV13 = {
+  ...runtimeMethodSchemasV12,
+  [RUNTIME_METHODS.initialize]: {
+    params: initializeParamsSchema,
+    result: initializeResultV13Schema,
+  },
+  [RUNTIME_METHODS.threadOpen]: {
+    params: threadOpenParamsSchema,
+    result: threadOpenResultSchema,
+  },
+  [RUNTIME_METHODS.threadSnapshot]: {
+    params: threadSnapshotParamsV13Schema,
+    result: threadSnapshotResultSchema,
+  },
+  [RUNTIME_METHODS.runtimeEventsResume]: {
+    params: runtimeEventsResumeParamsSchema,
+    result: runtimeEventsResumeResultSchema,
+  },
+} as const;
+
 /** Latest Runtime method registry. Use the version registry for negotiated availability. */
-export const runtimeMethodSchemas = runtimeMethodSchemasV12;
+export const runtimeMethodSchemas = runtimeMethodSchemasV13;
 
 export const runtimeServerRequestSchemasV10 = {} as const;
 
@@ -1270,6 +1605,8 @@ export const runtimeServerRequestSchemasV12 = {
   },
 } as const;
 
+export const runtimeServerRequestSchemasV13 = runtimeServerRequestSchemasV12;
+
 /** Protocol 1.1 compatibility facade. Prefer the version registry in new code. */
 export const runtimeServerRequestSchemas = runtimeServerRequestSchemasV11;
 
@@ -1283,15 +1620,25 @@ export interface RuntimeProtocolRegistry {
   readonly serverRequests: Readonly<Record<string, RuntimeMethodSchemaPair>>;
   readonly serverRequestMethods: readonly RuntimeServerRequestMethod[];
   readonly serverRequestCancelParamsSchema: z.ZodType | null;
+  readonly eventEnvelopeSchema: z.ZodType;
   readonly errorDataSchema: z.ZodType;
 }
 
 export const RUNTIME_PROTOCOL_REGISTRY = {
+  "1.3": {
+    methods: runtimeMethodSchemasV13,
+    serverRequests: runtimeServerRequestSchemasV13,
+    serverRequestMethods: RUNTIME_SERVER_REQUEST_METHOD_VALUES,
+    serverRequestCancelParamsSchema: runtimeServerRequestCancelParamsV12Schema,
+    eventEnvelopeSchema: runtimeEventEnvelopeV13Schema,
+    errorDataSchema: runtimeProtocolErrorDataV13Schema,
+  },
   "1.2": {
     methods: runtimeMethodSchemasV12,
     serverRequests: runtimeServerRequestSchemasV12,
     serverRequestMethods: RUNTIME_SERVER_REQUEST_METHOD_VALUES,
     serverRequestCancelParamsSchema: runtimeServerRequestCancelParamsV12Schema,
+    eventEnvelopeSchema: runtimeEventEnvelopeV12Schema,
     errorDataSchema: runtimeProtocolErrorDataV12Schema,
   },
   "1.1": {
@@ -1299,6 +1646,7 @@ export const RUNTIME_PROTOCOL_REGISTRY = {
     serverRequests: runtimeServerRequestSchemasV11,
     serverRequestMethods: RUNTIME_SERVER_REQUEST_METHOD_VALUES_V11,
     serverRequestCancelParamsSchema: runtimeServerRequestCancelParamsV11Schema,
+    eventEnvelopeSchema: runtimeEventEnvelopeV11Schema,
     errorDataSchema: runtimeProtocolErrorDataV11Schema,
   },
   "1.0": {
@@ -1306,6 +1654,7 @@ export const RUNTIME_PROTOCOL_REGISTRY = {
     serverRequests: runtimeServerRequestSchemasV10,
     serverRequestMethods: [],
     serverRequestCancelParamsSchema: null,
+    eventEnvelopeSchema: runtimeEventEnvelopeV11Schema,
     errorDataSchema: runtimeProtocolErrorDataV11Schema,
   },
 } as const satisfies Readonly<Record<RuntimeProtocolVersion, RuntimeProtocolRegistry>>;
@@ -1457,18 +1806,32 @@ export type InitializeParams = z.output<typeof initializeParamsSchema>;
 export type InitializeResult = z.output<typeof initializeResultSchema>;
 export type InitializeResultV11 = z.output<typeof initializeResultV11Schema>;
 export type InitializeResultV12 = z.output<typeof initializeResultV12Schema>;
+export type InitializeResultV13 = z.output<typeof initializeResultV13Schema>;
 export type ClientCapabilitiesSetParams = z.output<typeof clientCapabilitiesSetParamsSchema>;
 export type ClientCapabilitiesSetResult = z.output<typeof clientCapabilitiesSetResultSchema>;
 export type RuntimeEvent = z.infer<typeof runtimeEventSchema>;
 export type RuntimeEventV11 = z.infer<typeof runtimeEventV11Schema>;
 export type RuntimeEventV12 = z.infer<typeof runtimeEventV12Schema>;
+export type RuntimeDurableEventV13 = z.infer<typeof runtimeDurableEventV13Schema>;
+export type RuntimeEphemeralEventV13 = z.infer<typeof runtimeEphemeralEventV13Schema>;
+export type RuntimeEventV13 = z.infer<typeof runtimeEventV13Schema>;
 export type RuntimeEventEnvelope = z.infer<typeof runtimeEventEnvelopeSchema>;
 export type RuntimeEventEnvelopeV11 = z.infer<typeof runtimeEventEnvelopeV11Schema>;
 export type RuntimeEventEnvelopeV12 = z.infer<typeof runtimeEventEnvelopeV12Schema>;
+export type RuntimeDurableEventEnvelopeV13 = z.infer<typeof runtimeDurableEventEnvelopeV13Schema>;
+export type RuntimeEphemeralEventEnvelopeV13 = z.infer<
+  typeof runtimeEphemeralEventEnvelopeV13Schema
+>;
+export type RuntimeEventEnvelopeV13 = z.infer<typeof runtimeEventEnvelopeV13Schema>;
 export type RuntimeEventEnvelopeForVersion<TVersion extends RuntimeProtocolVersion> =
-  TVersion extends "1.2" ? RuntimeEventEnvelopeV12 : RuntimeEventEnvelopeV11;
+  TVersion extends "1.3"
+    ? RuntimeEventEnvelopeV13
+    : TVersion extends "1.2"
+      ? RuntimeEventEnvelopeV12
+      : RuntimeEventEnvelopeV11;
 export type RuntimeProtocolErrorData = z.infer<typeof runtimeProtocolErrorDataSchema>;
 export type RuntimeProtocolErrorDataV12 = z.infer<typeof runtimeProtocolErrorDataV12Schema>;
+export type RuntimeProtocolErrorDataV13 = z.infer<typeof runtimeProtocolErrorDataV13Schema>;
 export type RuntimeProtocolErrorDataForVersion<TVersion extends RuntimeProtocolVersion> =
   TVersion extends RuntimeProtocolVersion
     ? z.output<RuntimeProtocolRegistryMap[TVersion]["errorDataSchema"]>
@@ -1476,8 +1839,16 @@ export type RuntimeProtocolErrorDataForVersion<TVersion extends RuntimeProtocolV
 export type ThreadSummary = z.infer<typeof threadSummarySchema>;
 export type ThreadSnapshot = z.infer<typeof threadSnapshotSchema>;
 export type ThreadSnapshotV11 = z.infer<typeof threadSnapshotV11Schema>;
+export type ThreadSnapshotV12 = z.infer<typeof threadSnapshotV12Schema>;
+export type ThreadSnapshotV13Full = z.infer<typeof threadSnapshotV13FullSchema>;
+export type ThreadRecoverySnapshotV13 = z.infer<typeof threadRecoverySnapshotV13Schema>;
+export type ThreadSnapshotV13 = z.infer<typeof threadSnapshotV13Schema>;
 export type ThreadSnapshotForVersion<TVersion extends RuntimeProtocolVersion> =
-  TVersion extends "1.2" ? ThreadSnapshot : ThreadSnapshotV11;
+  TVersion extends "1.3"
+    ? ThreadSnapshotV13
+    : TVersion extends "1.2"
+      ? ThreadSnapshotV12
+      : ThreadSnapshotV11;
 export type UiMessage = z.infer<typeof uiMessageSchema>;
 export type OperationView = z.infer<typeof operationViewSchema>;
 export type PendingApproval = z.infer<typeof pendingApprovalSchema>;
@@ -1519,6 +1890,8 @@ export type RuntimeServerRequestCancelParamsV12 = z.infer<
 export type RuntimeServerRequestCancelProjectionInput = z.infer<
   typeof runtimeServerRequestCancelProjectionInputSchema
 >;
+export type RuntimeEventsResumeParams = z.infer<typeof runtimeEventsResumeParamsSchema>;
+export type RuntimeEventsResumeResult = z.infer<typeof runtimeEventsResumeResultSchema>;
 type SchemaOutputOrNever<TSchema> = TSchema extends z.ZodType ? z.output<TSchema> : never;
 export type RuntimeServerRequestCancelParamsForVersion<TVersion extends RuntimeProtocolVersion> =
   TVersion extends RuntimeProtocolVersion
@@ -1526,7 +1899,7 @@ export type RuntimeServerRequestCancelParamsForVersion<TVersion extends RuntimeP
     : never;
 export type ProjectedRuntimeServerRequestParams<
   TVersion extends RuntimeProtocolVersion,
-  TMethod extends RuntimeServerRequestMethodForVersion<"1.2">,
+  TMethod extends RuntimeServerRequestMethodForVersion<"1.3">,
 > =
   TMethod extends RuntimeServerRequestMethodForVersion<TVersion>
     ? RuntimeServerRequestParamsForVersion<TVersion, TMethod>
@@ -1557,9 +1930,9 @@ export function projectClientCapabilitiesSetResult(value: unknown): ClientCapabi
   const requested = new Set(params.serverRequestMethods);
   return clientCapabilitiesSetResultSchema.parse({
     revision: params.revision,
-    acceptedServerRequestMethods: RUNTIME_PROTOCOL_REGISTRY["1.2"].serverRequestMethods.filter(
-      (method) => requested.has(method),
-    ),
+    acceptedServerRequestMethods: RUNTIME_PROTOCOL_REGISTRY[
+      RUNTIME_PROTOCOL_VERSION
+    ].serverRequestMethods.filter((method) => requested.has(method)),
   });
 }
 
@@ -1849,27 +2222,42 @@ export function projectThreadSnapshotForVersion<TVersion extends RuntimeProtocol
   version: TVersion,
   value: unknown,
 ): ThreadSnapshotForVersion<TVersion> {
-  const latest = threadSnapshotV12Schema.parse(value);
+  const latest = threadSnapshotV13Schema.safeParse(value);
+  if (version === "1.3") {
+    if (!latest.success) {
+      throw latest.error;
+    }
+    return latest.data as ThreadSnapshotForVersion<TVersion>;
+  }
+  const v12 = latest.success
+    ? threadSnapshotV12Schema.parse({
+        thread: latest.data.thread,
+        messages: latest.data.messages,
+        operations: latest.data.operations,
+        ...(latest.data.activeTurn === undefined ? {} : { activeTurn: latest.data.activeTurn }),
+        pendingApprovals: latest.data.pendingApprovals,
+        pendingInteractions: latest.data.pendingInteractions,
+        transcriptCompleteness: latest.data.transcriptCompleteness,
+      })
+    : threadSnapshotV12Schema.parse(value);
   if (version === "1.2") {
-    return latest as ThreadSnapshotForVersion<TVersion>;
+    return v12 as ThreadSnapshotForVersion<TVersion>;
   }
   return threadSnapshotV11Schema.parse({
-    thread: latest.thread,
-    messages: latest.messages,
-    operations: latest.operations,
-    ...(latest.activeTurn === undefined
+    thread: v12.thread,
+    messages: v12.messages,
+    operations: v12.operations,
+    ...(v12.activeTurn === undefined
       ? {}
       : {
           activeTurn: {
-            ...latest.activeTurn,
+            ...v12.activeTurn,
             status:
-              latest.activeTurn.status === "waiting-for-user"
-                ? "running"
-                : latest.activeTurn.status,
+              v12.activeTurn.status === "waiting-for-user" ? "running" : v12.activeTurn.status,
           },
         }),
-    pendingApprovals: latest.pendingApprovals,
-    transcriptCompleteness: latest.transcriptCompleteness,
+    pendingApprovals: v12.pendingApprovals,
+    transcriptCompleteness: v12.transcriptCompleteness,
   }) as ThreadSnapshotForVersion<TVersion>;
 }
 
@@ -1877,25 +2265,28 @@ export function projectRuntimeEventEnvelopeForVersion<TVersion extends RuntimePr
   version: TVersion,
   value: unknown,
 ): RuntimeEventEnvelopeForVersion<TVersion> {
-  const latest = runtimeEventEnvelopeV12Schema.parse(value);
+  const source = runtimeEventEnvelopeSchema.parse(value);
+  if (version === "1.3") {
+    return runtimeEventEnvelopeV13Schema.parse(source) as RuntimeEventEnvelopeForVersion<TVersion>;
+  }
   const projectedEnvelopeFields = {
-    runtimeInstanceId: latest.runtimeInstanceId,
-    sequence: latest.sequence,
-    timestamp: latest.timestamp,
-    threadId: latest.threadId,
-    ...(latest.turnId === undefined ? {} : { turnId: latest.turnId }),
+    runtimeInstanceId: source.runtimeInstanceId,
+    sequence: source.sequence,
+    timestamp: source.timestamp,
+    threadId: source.threadId,
+    ...(source.turnId === undefined ? {} : { turnId: source.turnId }),
   } as const;
   if (version === "1.2") {
     return runtimeEventEnvelopeV12Schema.parse({
       protocolVersion: version,
       ...projectedEnvelopeFields,
-      event: runtimeEventV12Schema.parse(latest.event),
+      event: runtimeEventV12Schema.parse(source.event),
     }) as RuntimeEventEnvelopeForVersion<TVersion>;
   }
   return runtimeEventEnvelopeV11Schema.parse({
     protocolVersion: version,
     ...projectedEnvelopeFields,
-    event: runtimeEventV11Schema.parse(latest.event),
+    event: runtimeEventV11Schema.parse(source.event),
   }) as RuntimeEventEnvelopeForVersion<TVersion>;
 }
 
@@ -1908,7 +2299,7 @@ export function isRuntimeServerRequestMethod(
 export function isLatestRuntimeServerRequestMethod(
   value: string,
 ): value is LatestRuntimeServerRequestMethod {
-  return Object.hasOwn(runtimeServerRequestSchemasV12, value);
+  return Object.hasOwn(runtimeServerRequestSchemasV13, value);
 }
 
 export function parseRuntimeServerRequestParamsForVersion<
@@ -1966,14 +2357,14 @@ export function parseRuntimeProtocolErrorDataForVersion<TVersion extends Runtime
 
 export function projectRuntimeServerRequestParams<
   TVersion extends RuntimeProtocolVersion,
-  TMethod extends RuntimeServerRequestMethodForVersion<"1.2">,
+  TMethod extends RuntimeServerRequestMethodForVersion<"1.3">,
 >(
   version: TVersion,
   method: TMethod,
-  value: RuntimeServerRequestInputForVersion<"1.2", TMethod>,
+  value: RuntimeServerRequestInputForVersion<"1.3", TMethod>,
 ): ProjectedRuntimeServerRequestParams<TVersion, TMethod> {
-  const latest = parseRuntimeServerRequestParamsForVersion("1.2", method, value);
-  if (version === "1.2") {
+  const latest = parseRuntimeServerRequestParamsForVersion("1.3", method, value);
+  if (version === "1.3" || version === "1.2") {
     return latest as ProjectedRuntimeServerRequestParams<TVersion, TMethod>;
   }
   if (version === "1.1" && method === RUNTIME_SERVER_REQUEST_METHODS.approvalRequest) {
@@ -1992,7 +2383,7 @@ export function projectRuntimeServerRequestCancelParams<TVersion extends Runtime
   value: RuntimeServerRequestCancelProjectionInput,
 ): RuntimeServerRequestCancelParamsForVersion<TVersion> {
   const input = runtimeServerRequestCancelProjectionInputSchema.parse(value);
-  if (version === "1.2") {
+  if (version === "1.3" || version === "1.2") {
     return runtimeServerRequestCancelParamsV12Schema.parse({
       interactionId: input.interactionId,
       reason: input.reason,
