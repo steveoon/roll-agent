@@ -23,6 +23,7 @@ export const CAPABILITY_TOOL_ROLES = {
   sessionList: "session-list",
   agentInstall: "agent-install",
   transcriptRead: "transcript-read",
+  userInput: "user-input",
 } as const;
 
 export type CapabilityToolRole = (typeof CAPABILITY_TOOL_ROLES)[keyof typeof CAPABILITY_TOOL_ROLES];
@@ -336,6 +337,7 @@ const CAPABILITY_APPROVAL_BY_ROLE: Readonly<
   [CAPABILITY_TOOL_ROLES.sessionList]: CAPABILITY_APPROVAL_MODES.readOnly,
   [CAPABILITY_TOOL_ROLES.transcriptRead]: CAPABILITY_APPROVAL_MODES.readOnly,
   [CAPABILITY_TOOL_ROLES.agentInstall]: CAPABILITY_APPROVAL_MODES.alwaysConfirm,
+  [CAPABILITY_TOOL_ROLES.userInput]: CAPABILITY_APPROVAL_MODES.readOnly,
 };
 
 function approvalForRole(role: CapabilityToolRole): CapabilityApprovalMode {

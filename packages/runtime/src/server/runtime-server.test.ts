@@ -20,8 +20,9 @@ import {
   type ApprovalRequestParamsV12,
   type PendingInteractionProjection,
   type RuntimeEventEnvelope,
-  type RuntimeServerRequestInput,
+  type RuntimeServerRequestInputForSupportedVersions,
   type RuntimeServerRequestMethod,
+  type UserInputRequestParamsV12,
 } from "@roll-agent/protocol";
 import { rollConfigSchema } from "@roll-agent/core/config/schema";
 import { ConversationEngine } from "../engine/conversation-engine.ts";
@@ -286,7 +287,7 @@ function isNotification(message: JsonRpcMessage): message is JsonRpcNotification
 class SynchronouslyFailingRuntimeClientRequestCoordinator extends RuntimeClientRequestCoordinator {
   override request<TMethod extends RuntimeServerRequestMethod>(
     _method: TMethod,
-    _params: RuntimeServerRequestInput<TMethod>,
+    _params: RuntimeServerRequestInputForSupportedVersions<TMethod>,
     _options: RuntimeClientRequestOptions,
   ): RuntimeClientRequest<TMethod> {
     throw new RuntimeClientRequestError("synchronous request setup failure");
@@ -357,6 +358,80 @@ function createApprovalProtocolHarness(
     engine,
     server,
     service,
+    async close() {
+      await server.abortAll();
+      await engine.dispose();
+      store.close();
+      rmSync(storeDir, { recursive: true, force: true });
+    },
+  };
+}
+
+function createUserInputProtocolHarness(turnTimeoutMs: number | undefined = undefined) {
+  const { serverConn, clientConn } = memoryPair();
+  const storeDir = mkdtempSync(join(tmpdir(), "roll-runtime-user-input-v12-"));
+  const store = new ThreadStore(storeDir);
+  const engine = new ConversationEngine({
+    config:
+      turnTimeoutMs === undefined
+        ? config
+        : {
+            ...config,
+            runtime: {
+              ...config.runtime,
+              turnTimeoutMs,
+            },
+          },
+    model: sequencedModel([
+      [
+        { type: "stream-start", warnings: [] },
+        {
+          type: "tool-call",
+          toolCallId: "user-input-call",
+          toolName: "roll__user_input",
+          input: JSON.stringify({
+            title: "配置部署目标",
+            controls: [
+              {
+                type: "choice",
+                id: "region",
+                label: "部署区域",
+                required: true,
+                multiple: false,
+                options: [
+                  { id: "east", label: "东区" },
+                  { id: "west", label: "西区" },
+                ],
+              },
+              {
+                type: "text",
+                id: "workspace",
+                label: "目标 Workspace",
+                required: true,
+                maxLength: 120,
+              },
+            ],
+          }),
+        },
+        { type: "finish", usage: usage(), finishReason: TOOL_CALLS },
+      ],
+      [
+        { type: "stream-start", warnings: [] },
+        { type: "text-start", id: "user-input-result" },
+        { type: "text-delta", id: "user-input-result", delta: "已记录部署目标" },
+        { type: "text-end", id: "user-input-result" },
+        { type: "finish", usage: usage(), finishReason: STOP },
+      ],
+    ]),
+    sources: [],
+    policy: new DefaultToolPolicy(),
+    store,
+  });
+  const service = new RuntimeService(engine, store, { runtimeVersion: "v1.2-user-input-test" });
+  const server = new RuntimeServer(engine, serverConn, { runtimeService: service });
+  return {
+    clientConn,
+    server,
     async close() {
       await server.abortAll();
       await engine.dispose();
@@ -463,6 +538,300 @@ test("Runtime Protocol 1.2 capability revisions are ordered, idempotent and vers
     serverRequestMethods: [],
   })) as { readonly data?: { readonly rollCode?: string } };
   assert.equal(unavailable.data?.rollCode, "CAPABILITY_UNAVAILABLE");
+});
+
+test("Runtime Protocol 1.2 exposes user input only after ACK and keeps answers out of projections", async (t) => {
+  const harness = createUserInputProtocolHarness();
+  const client = attachRuntimeProtocolClient(harness.clientConn);
+  t.after(() => harness.close());
+
+  await client.request(1, RUNTIME_METHODS.initialize, {
+    protocolVersions: ["1.2"],
+    client: { name: "user-input-client", version: "1.2.0" },
+  });
+  const created = (await client.request(2, RUNTIME_METHODS.threadCreate, {
+    requestId: "00000000-0000-4000-8000-000000000430",
+    title: "User input interaction",
+  })) as { readonly thread: { readonly id: string } };
+  const beforeAck = (await client.request(3, RUNTIME_METHODS.threadCapabilities, {
+    threadId: created.thread.id,
+  })) as {
+    readonly manifest: {
+      readonly manifest: { readonly tools: ReadonlyArray<{ readonly role: string }> };
+    };
+  };
+  assert.equal(
+    beforeAck.manifest.manifest.tools.some((tool) => tool.role === "user-input"),
+    false,
+  );
+
+  await client.request(4, RUNTIME_METHODS.clientCapabilitiesSet, {
+    revision: 1,
+    serverRequestMethods: [RUNTIME_SERVER_REQUEST_METHODS.userInputRequest],
+  });
+  const afterAck = (await client.request(5, RUNTIME_METHODS.threadCapabilities, {
+    threadId: created.thread.id,
+  })) as {
+    readonly manifest: {
+      readonly manifest: { readonly tools: ReadonlyArray<{ readonly role: string }> };
+    };
+  };
+  assert.equal(
+    afterAck.manifest.manifest.tools.some((tool) => tool.role === "user-input"),
+    true,
+  );
+
+  const turnId = "00000000-0000-4000-8000-000000000431";
+  await client.request(6, RUNTIME_METHODS.turnStart, {
+    requestId: "00000000-0000-4000-8000-000000000432",
+    threadId: created.thread.id,
+    turnId,
+    input: { text: "配置部署目标" },
+  });
+  const userInputRequest = await waitForValue(
+    () =>
+      client.wire.find(
+        (message): message is JsonRpcRequest =>
+          isRequest(message) && message.method === RUNTIME_SERVER_REQUEST_METHODS.userInputRequest,
+      ),
+    "capability ACK 后未收到 userInput.request",
+  );
+  const params = userInputRequest.params as UserInputRequestParamsV12;
+  assert.equal(params.threadId, created.thread.id);
+  assert.equal(params.turnId, turnId);
+  assert.equal(params.sensitivity, "normal");
+  assert.deepEqual(
+    params.controls.map((control) => control.id),
+    ["region", "workspace"],
+  );
+  assert.notEqual(params.interactionId, userInputRequest.id);
+
+  const waiting = (await client.request(7, RUNTIME_METHODS.threadSnapshot, {
+    threadId: created.thread.id,
+    limit: 100,
+  })) as {
+    readonly activeTurn?: { readonly status: string };
+    readonly pendingInteractions: readonly PendingInteractionProjection[];
+  };
+  assert.equal(waiting.activeTurn?.status, "waiting-for-user");
+  assert.equal(waiting.pendingInteractions.length, 1);
+  assert.equal(
+    waiting.pendingInteractions[0]?.method,
+    RUNTIME_SERVER_REQUEST_METHODS.userInputRequest,
+  );
+  assert.equal(JSON.stringify(waiting).includes("product-docs"), false);
+
+  harness.clientConn.send({
+    jsonrpc: "2.0",
+    id: userInputRequest.id,
+    result: {
+      status: "submitted",
+      values: [
+        { id: "workspace", value: "product-docs" },
+        { id: "region", value: "east" },
+      ],
+    },
+  });
+  await waitForValue(
+    () => client.events.find((event) => event.event.type === "turn.completed"),
+    "user input 提交后 Turn 未完成",
+  );
+  const publicWire = JSON.stringify(client.wire);
+  assert.equal(publicWire.includes("product-docs"), false);
+  assert.equal(publicWire.includes('"value":"east"'), false);
+  const settled = (await client.request(8, RUNTIME_METHODS.threadSnapshot, {
+    threadId: created.thread.id,
+    limit: 100,
+  })) as { readonly pendingInteractions: readonly PendingInteractionProjection[] };
+  assert.deepEqual(settled.pendingInteractions, []);
+});
+
+test("Runtime Protocol 1.2 user input deadline is capped by the remaining Turn lifetime", async (t) => {
+  const harness = createUserInputProtocolHarness(10_000);
+  const client = attachRuntimeProtocolClient(harness.clientConn);
+  t.after(() => harness.close());
+
+  await client.request(1, RUNTIME_METHODS.initialize, {
+    protocolVersions: ["1.2"],
+    client: { name: "user-input-deadline-client", version: "1.2.0" },
+  });
+  await client.request(2, RUNTIME_METHODS.clientCapabilitiesSet, {
+    revision: 1,
+    serverRequestMethods: [RUNTIME_SERVER_REQUEST_METHODS.userInputRequest],
+  });
+  const created = (await client.request(3, RUNTIME_METHODS.threadCreate, {
+    requestId: "00000000-0000-4000-8000-000000000439",
+    title: "User input deadline",
+  })) as { readonly thread: { readonly id: string } };
+  const startedAt = Date.now();
+  await client.request(4, RUNTIME_METHODS.turnStart, {
+    requestId: "00000000-0000-4000-8000-000000000440",
+    threadId: created.thread.id,
+    turnId: "00000000-0000-4000-8000-000000000441",
+    input: { text: "在短 Turn 内配置部署目标" },
+  });
+  const userInputRequest = await waitForValue(
+    () =>
+      client.wire.find(
+        (message): message is JsonRpcRequest =>
+          isRequest(message) && message.method === RUNTIME_SERVER_REQUEST_METHODS.userInputRequest,
+      ),
+    "短 Turn 未收到 userInput.request",
+  );
+  const params = userInputRequest.params as UserInputRequestParamsV12;
+  assert.ok(Date.parse(params.expiresAt) > startedAt);
+  assert.ok(Date.parse(params.expiresAt) <= startedAt + 10_100);
+
+  harness.clientConn.send({
+    jsonrpc: "2.0",
+    id: userInputRequest.id,
+    result: { status: "cancelled", reason: "测试完成" },
+  });
+  await waitForValue(
+    () => client.events.find((event) => event.event.type === "turn.completed"),
+    "取消短 Turn 用户输入后未完成",
+  );
+});
+
+test("Runtime Protocol 1.2 capability withdrawal cancels user input once and ignores late answers", async (t) => {
+  const harness = createUserInputProtocolHarness();
+  const client = attachRuntimeProtocolClient(harness.clientConn);
+  t.after(() => harness.close());
+
+  await client.request(1, RUNTIME_METHODS.initialize, {
+    protocolVersions: ["1.2"],
+    client: { name: "user-input-withdrawal-client", version: "1.2.0" },
+  });
+  await client.request(2, RUNTIME_METHODS.clientCapabilitiesSet, {
+    revision: 1,
+    serverRequestMethods: [RUNTIME_SERVER_REQUEST_METHODS.userInputRequest],
+  });
+  const created = (await client.request(3, RUNTIME_METHODS.threadCreate, {
+    requestId: "00000000-0000-4000-8000-000000000433",
+    title: "User input capability withdrawal",
+  })) as { readonly thread: { readonly id: string } };
+  const turnId = "00000000-0000-4000-8000-000000000434";
+  await client.request(4, RUNTIME_METHODS.turnStart, {
+    requestId: "00000000-0000-4000-8000-000000000435",
+    threadId: created.thread.id,
+    turnId,
+    input: { text: "配置部署目标后撤销输入能力" },
+  });
+  const userInputRequest = await waitForValue(
+    () =>
+      client.wire.find(
+        (message): message is JsonRpcRequest =>
+          isRequest(message) && message.method === RUNTIME_SERVER_REQUEST_METHODS.userInputRequest,
+      ),
+    "capability 撤销前未收到 userInput.request",
+  );
+  const interactionId = (userInputRequest.params as UserInputRequestParamsV12).interactionId;
+
+  await client.request(5, RUNTIME_METHODS.clientCapabilitiesSet, {
+    revision: 2,
+    serverRequestMethods: [],
+  });
+  await waitForValue(
+    () => client.events.find((event) => event.event.type === "turn.completed"),
+    "user input capability 撤销后 Turn 未收敛",
+  );
+  const cancellations = client.wire.filter(
+    (message) =>
+      "method" in message &&
+      message.method === RUNTIME_SERVER_REQUEST_CANCEL_NOTIFICATION &&
+      typeof message.params === "object" &&
+      message.params !== null &&
+      "interactionId" in message.params &&
+      message.params.interactionId === interactionId,
+  );
+  assert.equal(cancellations.length, 1);
+
+  harness.clientConn.send({
+    jsonrpc: "2.0",
+    id: userInputRequest.id,
+    result: {
+      status: "submitted",
+      values: [
+        { id: "region", value: "west" },
+        { id: "workspace", value: "late-workspace-value" },
+      ],
+    },
+  });
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  const snapshot = (await client.request(6, RUNTIME_METHODS.threadSnapshot, {
+    threadId: created.thread.id,
+    limit: 100,
+  })) as {
+    readonly activeTurn?: unknown;
+    readonly pendingInteractions: readonly PendingInteractionProjection[];
+  };
+  assert.equal(snapshot.activeTurn, undefined);
+  assert.deepEqual(snapshot.pendingInteractions, []);
+  assert.equal(JSON.stringify(client.wire).includes("late-workspace-value"), false);
+});
+
+test("RuntimeServer.abortAll cancels a pending user input interaction once", async (t) => {
+  const harness = createUserInputProtocolHarness();
+  const client = attachRuntimeProtocolClient(harness.clientConn);
+  t.after(() => harness.close());
+
+  await client.request(1, RUNTIME_METHODS.initialize, {
+    protocolVersions: ["1.2"],
+    client: { name: "user-input-disconnect-client", version: "1.2.0" },
+  });
+  await client.request(2, RUNTIME_METHODS.clientCapabilitiesSet, {
+    revision: 1,
+    serverRequestMethods: [RUNTIME_SERVER_REQUEST_METHODS.userInputRequest],
+  });
+  const created = (await client.request(3, RUNTIME_METHODS.threadCreate, {
+    requestId: "00000000-0000-4000-8000-000000000436",
+    title: "User input disconnect",
+  })) as { readonly thread: { readonly id: string } };
+  await client.request(4, RUNTIME_METHODS.turnStart, {
+    requestId: "00000000-0000-4000-8000-000000000437",
+    threadId: created.thread.id,
+    turnId: "00000000-0000-4000-8000-000000000438",
+    input: { text: "配置部署目标后断开 Runtime" },
+  });
+  const userInputRequest = await waitForValue(
+    () =>
+      client.wire.find(
+        (message): message is JsonRpcRequest =>
+          isRequest(message) && message.method === RUNTIME_SERVER_REQUEST_METHODS.userInputRequest,
+      ),
+    "断连测试未收到 userInput.request",
+  );
+  const interactionId = (userInputRequest.params as UserInputRequestParamsV12).interactionId;
+
+  await harness.server.abortAll();
+  const cancellations = client.wire.filter(
+    (message) =>
+      "method" in message &&
+      message.method === RUNTIME_SERVER_REQUEST_CANCEL_NOTIFICATION &&
+      typeof message.params === "object" &&
+      message.params !== null &&
+      "interactionId" in message.params &&
+      message.params.interactionId === interactionId,
+  );
+  assert.equal(cancellations.length, 1);
+  assert.equal(
+    client.events.some((event) => event.event.type === "tool.completed"),
+    false,
+  );
+
+  harness.clientConn.send({
+    jsonrpc: "2.0",
+    id: userInputRequest.id,
+    result: {
+      status: "submitted",
+      values: [
+        { id: "region", value: "east" },
+        { id: "workspace", value: "late-disconnected-value" },
+      ],
+    },
+  });
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(JSON.stringify(client.wire).includes("late-disconnected-value"), false);
 });
 
 test("Runtime Protocol 1.2 ACK precedes Interaction delivery and uses distinct IDs", async (t) => {

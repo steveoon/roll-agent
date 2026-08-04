@@ -9,6 +9,7 @@ import {
   pendingInteractionProjectionSchema,
   projectRuntimeServerRequestCancelParams,
   timestampSchema,
+  userInputRequestParamsV12Schema,
   type ApprovalId,
   type PendingInteractionProjection,
   type RuntimeInstanceId,
@@ -627,30 +628,47 @@ export class RuntimeClientRequestCoordinator {
         (interaction.state.kind === "delivered" &&
           interaction.state.delivery.attachment !== attachment) ||
         interaction.protocolVersion !== "1.2" ||
-        interaction.method !== RUNTIME_SERVER_REQUEST_METHODS.approvalRequest ||
         !attachment.acceptedServerRequestMethods.has(interaction.method)
       ) {
         return [];
       }
-      const approval = approvalRequestParamsV12Schema.safeParse(interaction.params);
-      if (!approval.success) {
+      if (interaction.method === RUNTIME_SERVER_REQUEST_METHODS.approvalRequest) {
+        const approval = approvalRequestParamsV12Schema.safeParse(interaction.params);
+        if (!approval.success) {
+          this.diagnose(
+            `忽略无法投影的 pending Interaction "${interaction.key}"：params 不符合 1.2 schema`,
+          );
+          return [];
+        }
+        if (approval.data.threadId !== threadId) {
+          return [];
+        }
+        return [
+          pendingInteractionProjectionSchema.parse({
+            method: interaction.method,
+            interactionId: interaction.interactionId,
+            threadId: approval.data.threadId,
+            turnId: approval.data.turnId,
+            expiresAt: approval.data.expiresAt,
+            sensitivity: approval.data.sensitivity,
+            approvalId: approval.data.approval.id,
+          }),
+        ];
+      }
+      const userInput = userInputRequestParamsV12Schema.safeParse(interaction.params);
+      if (!userInput.success) {
         this.diagnose(
           `忽略无法投影的 pending Interaction "${interaction.key}"：params 不符合 1.2 schema`,
         );
         return [];
       }
-      if (approval.data.threadId !== threadId) {
+      if (userInput.data.threadId !== threadId) {
         return [];
       }
       return [
         pendingInteractionProjectionSchema.parse({
           method: interaction.method,
-          interactionId: interaction.interactionId,
-          threadId: approval.data.threadId,
-          turnId: approval.data.turnId,
-          expiresAt: approval.data.expiresAt,
-          sensitivity: approval.data.sensitivity,
-          approvalId: approval.data.approval.id,
+          ...userInput.data,
         }),
       ];
     });

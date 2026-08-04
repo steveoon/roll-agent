@@ -128,9 +128,9 @@ Runtime 按客户端 `protocolVersions` 的顺序选择第一个双方支持的�
 协议版本与控制路径。
 
 `REQUIRED_RUNTIME_SERVER_REQUEST_METHODS_BY_VERSION` 只描述某个 wire 版本的**必需**
-Client handler，是从上述能力表派生的兼容导出。1.2 当前 registry 只包含
-`approval.request`，但它不是强制 handler；未来 method 必须通过 1.2 capability 集合
-显式启用，不能静默追加到 1.1 的必需方法中。
+Client handler，是从上述能力表派生的兼容导出。1.2 registry 包含可选的
+`approval.request` 与 `userInput.request`；未来 method 也必须通过 1.2 capability 集合显式
+启用，不能静默追加到 1.1 的必需方法中。
 
 ### 1.2 Client capability handshake
 
@@ -143,7 +143,7 @@ Client handler，是从上述能力表派生的兼容导出。1.2 当前 registr
   "method": "client.capabilities.set",
   "params": {
     "revision": 1,
-    "serverRequestMethods": ["approval.request"]
+    "serverRequestMethods": ["approval.request", "userInput.request"]
   }
 }
 ```
@@ -157,7 +157,7 @@ Client 可以发送未来未知 method，Runtime 返回按自身 registry 顺序
   "id": 2,
   "result": {
     "revision": 1,
-    "acceptedServerRequestMethods": ["approval.request"]
+    "acceptedServerRequestMethods": ["approval.request", "userInput.request"]
   }
 }
 ```
@@ -244,7 +244,7 @@ transcriptCompleteness      complete | legacy_snapshot
 `running`，而不是把未知 enum 值泄漏给旧 Client。
 
 `pendingInteractions` 是当前 responder 已 ACK、且对该 Thread 仍未结算的 Interaction 安全
-投影。当前 Approval 项严格只有：
+投影。Approval 项严格只有：
 
 ```text
 method = approval.request
@@ -257,8 +257,10 @@ approvalId
 ```
 
 JSON-RPC `id`、Approval `preview`、原始 payload/result 与 secret 不会进入该投影。
-1.1/1.0 的 `thread.open`、`thread.snapshot` 会完全剥离 `pendingInteractions`。1.2 Approval
-若缺少 Runtime 提供的绝对 `expiresAt`，则 fail-closed，不会临时伪造 deadline。
+User Input 项包含相同 Interaction metadata 与安全表单字段（title、description、controls、
+choice options），但不包含完整 Result 或任何提交值。1.1/1.0 的 `thread.open`、
+`thread.snapshot` 会完全剥离 `pendingInteractions`。1.2 Interaction 若缺少 Runtime 提供的
+绝对 `expiresAt`，则 fail-closed，不会临时伪造 deadline。
 
 消息与 Operation 使用独立游标。首页返回最近一页，但页内保持时间正序；下一页把
 `nextBeforeSequence` 原样传回对应的 `messageBeforeSequence` 或
@@ -324,6 +326,9 @@ Raw model reasoning、compaction/debug 事件和 AI SDK `ModelMessage` 不进入
 仍可用于渲染审批卡片或观察 pending 状态，但 Client 不得据此调用
 `approval.respond`；在这两个版本上调用该方法会返回 `CAPABILITY_UNAVAILABLE`。
 1.2 还要求 `approval.request` 已出现在最近一次 ACK 的 capability 集合中。
+1.2 的 User Input 同样只有 `userInput.request` Result 这一条写入路径，并要求该 method
+已出现在最近一次 ACK 中；没有 Handler 时 Runtime 不会把内建 `roll__user_input` Tool 暴露
+给模型。
 
 Runtime 会先登记并发送 `approval.request`，再发送对应的只读 `approval.required`
 projection，避免 UI 快速响应时控制请求尚未存在。Client 仍应以 Server Request handler
@@ -376,6 +381,58 @@ projection，避免 UI 快速响应时控制请求尚未存在。Client 仍应�
 其中 1.1 `expiresAt` 仍可省略，且没有 `interactionId`、顶层 `turnId` 或
 `sensitivity`。1.0 不发送 Server Request，继续使用 `approval.required` +
 `approval.respond`。
+
+### User Input 1.2
+
+`userInput.request` Params 使用相同 Interaction metadata，并携带 1..16 个结构化 control：
+
+```json
+{
+  "interactionId": "uuid",
+  "threadId": "uuid",
+  "turnId": "uuid",
+  "expiresAt": "2026-07-29T12:10:00.000Z",
+  "sensitivity": "normal",
+  "title": "配置部署目标",
+  "controls": [
+    {
+      "type": "choice",
+      "id": "region",
+      "label": "部署区域",
+      "required": true,
+      "multiple": false,
+      "options": [{ "id": "east", "label": "东区" }]
+    },
+    {
+      "type": "text",
+      "id": "workspace",
+      "label": "目标 Workspace",
+      "required": true,
+      "maxLength": 120
+    }
+  ]
+}
+```
+
+control 类型固定为 `text | multiline | number | boolean | choice`。control ID 最长 64、
+label 最长 200、description 最长 500；choice 最多 50 个稳定 ID option，文本绝对上限
+10,000 字符。首版只允许 `sensitivity: "normal"`，不定义 password、token、secret、
+authentication 或 file-picker 字段。
+
+提交与正常取消结果分别为：
+
+```json
+{ "status": "submitted", "values": [{ "id": "workspace", "value": "product-docs" }] }
+```
+
+```json
+{ "status": "cancelled", "reason": "用户关闭了表单" }
+```
+
+Runtime 必须结合原始 Params 二次校验必填项、类型、未知/重复 ID、choice option 与数量边界，
+再按 control 定义顺序规范化。等待期间 1.2 Snapshot 使用 `waiting-for-user`，默认 deadline
+为 5 分钟或 Turn 剩余期限中的较小值；旧协议投影仍为 `running`。Result 只返回当前 Tool
+调用，完整值不会进入 Runtime Event 或 Snapshot。
 
 批准与拒绝都是成功的业务结果：
 
@@ -451,7 +508,7 @@ Client 必须终止对应的本地交互，且不得在取消后发送迟到 Res
 - `{ status: "cancelled", reason }`
 - `{ status: "expired", reason? }`
 
-`"1.0"` 不发送 `approval.resolved`。人的审批不使用普通 Client `30s` RPC timeout；
+`"1.0"` 不发送 `approval.resolved`。人的审批与 User Input 不使用普通 Client `30s` RPC timeout；
 生命周期由 `expiresAt`、Response、显式取消、Turn 终态、capability 撤销或连接关闭控制。
 
 当前 `stdio` Transport 是单连接、进程绑定的边界。一个 `RuntimeService` 只接受一个

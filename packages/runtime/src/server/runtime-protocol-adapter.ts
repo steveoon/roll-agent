@@ -9,6 +9,7 @@ import {
   getRuntimeProtocolRegistry,
   interactionIdSchema,
   isRuntimeMethodAvailable,
+  normalizeUserInputResult,
   projectClientCapabilitiesSetResult,
   projectThreadSnapshotForVersion,
   runtimeMethodSchemas,
@@ -19,13 +20,15 @@ import {
   type RuntimeEventEnvelope,
   type RuntimeProtocolVersion,
   type ThreadSnapshotForVersion,
-  type ThreadSnapshotV11,
+  type UserInputRequestParamsV12,
 } from "@roll-agent/protocol";
 import {
   RuntimeService,
   RuntimeServiceError,
   type RuntimeApprovalDecision,
   type RuntimeApprovalIdentity,
+  type RuntimeThreadSnapshot,
+  type RuntimeUserInputInteractionEvent,
 } from "../service/runtime-service.ts";
 import {
   RuntimeClientRequestCancelledError,
@@ -39,7 +42,14 @@ import {
 import type { JsonRpcConnection, JsonRpcMessage, JsonRpcRequest } from "./protocol.ts";
 
 const CLIENT_APPROVAL_FAILURE_REASON = "客户端未完成审批请求，Runtime 已终止当前 Turn";
+const CLIENT_USER_INPUT_FAILURE_REASON = "客户端未完成用户输入请求";
 const ACTIVE_RUNTIME_PROTOCOL_SERVICES = new WeakSet<RuntimeService>();
+
+function userInputInteractionKey(
+  requestId: Extract<RuntimeUserInputInteractionEvent, { readonly type: "required" }>["requestId"],
+): string {
+  return `user-input:${requestId}`;
+}
 
 function approvalResolutionReason(resolution: ApprovalResolution): string {
   switch (resolution.status) {
@@ -58,6 +68,7 @@ export class RuntimeProtocolAdapter {
   private readonly clientRequests: RuntimeClientRequestCoordinator;
   private readonly responderId: RuntimeClientResponderId;
   private readonly unsubscribe: () => void;
+  private readonly unsubscribeUserInput: () => void;
   private readonly settlementTasks = new Set<Promise<void>>();
   private detachResponder: (() => void) | undefined;
   private initialized = false;
@@ -91,6 +102,15 @@ export class RuntimeProtocolAdapter {
     try {
       this.unsubscribe = service.onEvent((event) => this.handleServiceEvent(event));
     } catch (error: unknown) {
+      this.releaseServiceControl();
+      throw error;
+    }
+    try {
+      this.unsubscribeUserInput = service.onUserInputInteraction((event) =>
+        this.handleUserInputInteraction(event),
+      );
+    } catch (error: unknown) {
+      this.unsubscribe();
       this.releaseServiceControl();
       throw error;
     }
@@ -264,6 +284,7 @@ export class RuntimeProtocolAdapter {
   disposeConstructionFailure(): void {
     this.closing = true;
     this.unsubscribe();
+    this.unsubscribeUserInput();
     this.releaseServiceControl();
   }
 
@@ -277,12 +298,14 @@ export class RuntimeProtocolAdapter {
 
   private async performClose(): Promise<void> {
     this.closing = true;
+    this.service.setUserInputAvailable(false);
     this.detachResponder?.();
     this.detachResponder = undefined;
     while (this.settlementTasks.size > 0) {
       await Promise.allSettled([...this.settlementTasks]);
     }
     this.unsubscribe();
+    this.unsubscribeUserInput();
   }
 
   private handleServiceEvent(envelope: RuntimeEventEnvelope): void {
@@ -335,9 +358,11 @@ export class RuntimeProtocolAdapter {
     }
     this.transportFailed = true;
     this.closing = true;
+    this.service.setUserInputAvailable(false);
     this.detachResponder?.();
     this.detachResponder = undefined;
     this.unsubscribe();
+    this.unsubscribeUserInput();
     try {
       this.connection.close();
     } catch {
@@ -346,7 +371,7 @@ export class RuntimeProtocolAdapter {
   }
 
   private projectThreadSnapshot(
-    snapshot: ThreadSnapshotV11,
+    snapshot: RuntimeThreadSnapshot,
   ): ThreadSnapshotForVersion<RuntimeProtocolVersion> {
     const protocolVersion = this.protocolVersion;
     if (protocolVersion === undefined) {
@@ -381,6 +406,73 @@ export class RuntimeProtocolAdapter {
       ...snapshot,
       pendingInteractions,
     });
+  }
+
+  private handleUserInputInteraction(event: RuntimeUserInputInteractionEvent): void {
+    if (event.type === "settled") {
+      this.clientRequests.cancel(userInputInteractionKey(event.requestId), event.reason);
+      return;
+    }
+    if (this.closing || !this.initialized || this.protocolVersion !== "1.2") {
+      this.service.cancelPendingUserInput(event.requestId, CLIENT_USER_INPUT_FAILURE_REASON);
+      return;
+    }
+    this.requestUserInput(event);
+  }
+
+  private requestUserInput(
+    interaction: Extract<RuntimeUserInputInteractionEvent, { readonly type: "required" }>,
+  ): void {
+    const params: UserInputRequestParamsV12 = {
+      interactionId: interactionIdSchema.parse(randomUUID()),
+      threadId: interaction.threadId,
+      turnId: interaction.turnId,
+      expiresAt: interaction.expiresAt,
+      sensitivity: "normal",
+      ...interaction.form,
+    };
+    let request: RuntimeClientRequest<typeof RUNTIME_SERVER_REQUEST_METHODS.userInputRequest>;
+    try {
+      request = this.clientRequests.request(
+        RUNTIME_SERVER_REQUEST_METHODS.userInputRequest,
+        params,
+        {
+          key: userInputInteractionKey(interaction.requestId),
+          scopeId: this.service.runtimeInstanceId,
+          eligibleResponderId: this.responderId,
+          threadId: interaction.threadId,
+          turnId: interaction.turnId,
+          protocolVersion: "1.2",
+          expiresAt: interaction.expiresAt,
+        },
+      );
+    } catch {
+      this.service.cancelPendingUserInput(interaction.requestId, CLIENT_USER_INPUT_FAILURE_REASON);
+      return;
+    }
+    const task = request.result.then(
+      (candidate) => {
+        try {
+          const normalized = normalizeUserInputResult(params, candidate);
+          this.service.resolvePendingUserInput(interaction.requestId, normalized);
+        } catch {
+          this.service.cancelPendingUserInput(
+            interaction.requestId,
+            "客户端返回的用户输入不符合原始表单约束",
+          );
+        }
+      },
+      (error: unknown) => {
+        const reason =
+          error instanceof RuntimeClientRequestExpiredError
+            ? "用户输入请求已超时"
+            : error instanceof RuntimeClientRequestCancelledError
+              ? error.reason
+              : CLIENT_USER_INPUT_FAILURE_REASON;
+        this.service.cancelPendingUserInput(interaction.requestId, reason);
+      },
+    );
+    this.trackSettlement(task);
   }
 
   private requestApproval(
@@ -545,6 +637,9 @@ export class RuntimeProtocolAdapter {
         "Runtime 客户端 responder 已失效",
       );
     }
+    this.service.setUserInputAvailable(
+      result.acceptedServerRequestMethods.includes(RUNTIME_SERVER_REQUEST_METHODS.userInputRequest),
+    );
     this.capabilityRevision = params.revision;
     this.capabilityMethods = canonicalMethods;
     this.capabilityResult = result;

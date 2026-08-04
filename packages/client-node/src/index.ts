@@ -7,9 +7,11 @@ import {
   RUNTIME_EVENT_NOTIFICATION,
   RUNTIME_METHODS,
   RUNTIME_SERVER_REQUEST_CANCEL_NOTIFICATION,
+  RUNTIME_SERVER_REQUEST_METHODS,
   SUPPORTED_RUNTIME_PROTOCOL_VERSIONS,
   getRuntimeProtocolCapabilities,
   getRuntimeProtocolRegistry,
+  interactionIdSchema,
   isRuntimeServerRequestMethodAvailable,
   isLatestRuntimeServerRequestMethod,
   isRuntimeServerRequestMethodRequired,
@@ -119,6 +121,13 @@ export type RuntimeServerRequestHandlers = {
   readonly [TMethod in RuntimeServerRequestMethod]?: RuntimeServerRequestHandler<TMethod>;
 };
 
+export type UserInputRequestHandlerParams = RuntimeServerRequestHandlerParams<
+  typeof RUNTIME_SERVER_REQUEST_METHODS.userInputRequest
+>;
+export type UserInputRequestHandler = RuntimeServerRequestHandler<
+  typeof RUNTIME_SERVER_REQUEST_METHODS.userInputRequest
+>;
+
 export type RuntimeClientMethodResult<TMethod extends RuntimeMethod> =
   RuntimeMethodResultForVersion<RuntimeProtocolVersion, TMethod>;
 
@@ -130,6 +139,35 @@ type RuntimeClientMethodParams<TMethod extends RuntimeMethod> = RuntimeMethodPar
 type MutableRuntimeServerRequestHandlers = {
   -readonly [TMethod in RuntimeServerRequestMethod]?: RuntimeServerRequestHandler<TMethod>;
 };
+
+function setRuntimeServerRequestHandler<TMethod extends RuntimeServerRequestMethod>(
+  handlers: MutableRuntimeServerRequestHandlers,
+  method: TMethod,
+  handler: RuntimeServerRequestHandler<TMethod>,
+): void {
+  Object.assign(handlers, { [method]: handler });
+}
+
+function resolveRuntimeServerRequestHandlers(options: {
+  readonly serverRequestHandlers?: RuntimeServerRequestHandlers;
+  readonly onUserInputRequest?: UserInputRequestHandler;
+}): MutableRuntimeServerRequestHandlers {
+  const handlers: MutableRuntimeServerRequestHandlers = { ...options.serverRequestHandlers };
+  const genericUserInputHandler = handlers[RUNTIME_SERVER_REQUEST_METHODS.userInputRequest];
+  if (
+    genericUserInputHandler !== undefined &&
+    options.onUserInputRequest !== undefined &&
+    genericUserInputHandler !== options.onUserInputRequest
+  ) {
+    throw new Error(
+      'Provide userInput.request through either "onUserInputRequest" or "serverRequestHandlers", not both',
+    );
+  }
+  if (options.onUserInputRequest !== undefined) {
+    handlers[RUNTIME_SERVER_REQUEST_METHODS.userInputRequest] = options.onUserInputRequest;
+  }
+  return handlers;
+}
 
 function supportsRuntimeProtocolVersion(
   version: RuntimeProtocolVersion,
@@ -221,6 +259,7 @@ export interface RollNodeClientOptions {
   readonly readRetryDelayMs?: number;
   readonly shutdownOptions?: RuntimeShutdownOptions;
   readonly serverRequestHandlers?: RuntimeServerRequestHandlers;
+  readonly onUserInputRequest?: UserInputRequestHandler;
 }
 
 export interface ConnectRuntimeClientOptions {
@@ -235,6 +274,7 @@ export interface ConnectRuntimeClientOptions {
   readonly readRetryDelayMs?: number;
   readonly shutdownOptions?: RuntimeShutdownOptions;
   readonly serverRequestHandlers?: RuntimeServerRequestHandlers;
+  readonly onUserInputRequest?: UserInputRequestHandler;
 }
 
 interface PendingRequest {
@@ -363,6 +403,14 @@ export class RollUncorrelatedRpcError extends RollRpcError {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function readInteractionId(value: unknown): InteractionId | undefined {
+  if (!isRecord(value)) {
+    return undefined;
+  }
+  const parsed = interactionIdSchema.safeParse(value.interactionId);
+  return parsed.success ? parsed.data : undefined;
 }
 
 function isJsonRpcId(value: unknown): value is JsonRpcId {
@@ -533,8 +581,8 @@ export class RollNodeClient {
     this.maxReadRetries = options.maxReadRetries ?? DEFAULT_MAX_READ_RETRIES;
     this.readRetryDelayMs = options.readRetryDelayMs ?? DEFAULT_READ_RETRY_DELAY_MS;
     this.defaultShutdownOptions = normalizeShutdownOptions(options.shutdownOptions);
-    this.serverRequestHandlers = { ...options.serverRequestHandlers };
-    this.activeServerRequestHandlers = { ...options.serverRequestHandlers };
+    this.serverRequestHandlers = resolveRuntimeServerRequestHandlers(options);
+    this.activeServerRequestHandlers = { ...this.serverRequestHandlers };
     this.advertisedProtocolVersions = SUPPORTED_RUNTIME_PROTOCOL_VERSIONS.filter((version) =>
       supportsRuntimeProtocolVersion(version, this.serverRequestHandlers),
     );
@@ -604,6 +652,9 @@ export class RollNodeClient {
         : {}),
       ...(options.serverRequestHandlers !== undefined
         ? { serverRequestHandlers: options.serverRequestHandlers }
+        : {}),
+      ...(options.onUserInputRequest !== undefined
+        ? { onUserInputRequest: options.onUserInputRequest }
         : {}),
     });
     return client;
@@ -805,8 +856,8 @@ export class RollNodeClient {
       );
     }
     const previousHandler = this.serverRequestHandlers[method];
-    this.serverRequestHandlers[method] = handler;
-    this.activeServerRequestHandlers[method] = handler;
+    setRuntimeServerRequestHandler(this.serverRequestHandlers, method, handler);
+    setRuntimeServerRequestHandler(this.activeServerRequestHandlers, method, handler);
     if (protocolVersion === "1.2" && previousHandler === undefined) {
       this.observeServerRequestCapabilitySync(this.queueServerRequestCapabilitySync());
     }
@@ -839,6 +890,14 @@ export class RollNodeClient {
       }
       delete this.activeServerRequestHandlers[method];
     };
+  }
+
+  /** Registers the typed Runtime Protocol 1.2 userInput.request handler. */
+  onUserInputRequest(handler: UserInputRequestHandler): () => void {
+    return this.registerServerRequestHandler(
+      RUNTIME_SERVER_REQUEST_METHODS.userInputRequest,
+      handler,
+    );
   }
 
   async request<TMethod extends RuntimeMethod>(
@@ -1377,8 +1436,7 @@ export class RollNodeClient {
         );
         return;
       }
-      const interactionId =
-        isRecord(params) && "interactionId" in params ? params.interactionId : undefined;
+      const interactionId = readInteractionId(params);
       if (
         interactionId !== undefined &&
         this.inFlightServerRequestsByInteractionId.has(interactionId)

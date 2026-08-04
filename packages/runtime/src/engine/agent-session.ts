@@ -15,6 +15,7 @@ import type {
   LanguageModelV4CallOptions,
   SharedV4ProviderOptions,
 } from "@ai-sdk/provider";
+import type { UserInputForm, UserInputResult } from "@roll-agent/protocol";
 import type { SkillLibrary, SkillSummary } from "@roll-agent/core/skills/library";
 import type {
   ContextCompactionReason,
@@ -167,6 +168,11 @@ import {
   repairActiveToolProtocol,
 } from "./tool-protocol-repair.ts";
 import { buildTranscriptToolset, type TranscriptReader } from "../tool-bridge/transcript-tool.ts";
+import {
+  UserInputInteractionManager,
+  type SessionUserInputRequestId,
+} from "../interaction/user-input-interaction-manager.ts";
+import { buildUserInputTool } from "../tool-bridge/user-input-tool.ts";
 
 export interface SessionCompactionSettings {
   readonly enabled: boolean;
@@ -778,9 +784,13 @@ export class AgentSession {
   private skillToolBuilt = false;
   private readonly toolSourceAgentNames: Set<string>;
   private readonly gate = new ApprovalGate();
+  private readonly userInputInteractions = new UserInputInteractionManager();
   private readonly toolCoordinator = new ToolExecutionCoordinator();
   private tools: ToolSet;
   private readonly registry: ToolRegistry;
+  private readonly userInputToolId: string;
+  private readonly userInputTool: ToolSet;
+  private userInputAvailable = false;
   private readonly sessionManager: SessionManager | undefined;
   private readonly sessionManagerInstanceId = randomUUID();
   private compactionCheckpoint: CompactionCheckpoint | undefined;
@@ -847,6 +857,18 @@ export class AgentSession {
     this.toolSourceAgentNames = new Set(options.sources.map((source) => source.agentName));
     const registry = new ToolRegistry();
     const toolRoles: Record<string, CapabilityToolRole> = {};
+    const userInputTool = buildUserInputTool(
+      {
+        sessionId: this.id,
+        isAvailable: () => this.userInputAvailable,
+        request: (form, abortSignal) => this.requestUserInput(form, abortSignal),
+      },
+      registry,
+      this.toolCoordinator,
+    );
+    this.userInputToolId = userInputTool.id;
+    this.userInputTool = userInputTool.tools;
+    markToolRole(toolRoles, userInputTool.tools, CAPABILITY_TOOL_ROLES.userInput);
     const transcriptTools = options.readCheckpointTranscript
       ? buildTranscriptToolset(
           options.readCheckpointTranscript,
@@ -986,6 +1008,77 @@ export class AgentSession {
   private refreshCapabilityManifest(systemPromptOverride?: string): void {
     this.capabilityManifest = this.compileCapabilityManifest();
     this.systemPrompt = this.compileSystemPrompt(systemPromptOverride ?? this.explicitSystemPrompt);
+  }
+
+  setUserInputAvailable(available: boolean): void {
+    if (this.userInputAvailable === available) {
+      return;
+    }
+    this.userInputAvailable = available;
+    if (available) {
+      this.tools = { ...this.tools, ...this.userInputTool };
+    } else {
+      const tools = { ...this.tools };
+      delete tools[this.userInputToolId];
+      this.tools = tools;
+      this.userInputInteractions.cancelAll("当前客户端已撤销用户输入处理能力");
+    }
+    this.refreshCapabilityManifest();
+  }
+
+  resolveUserInput(requestId: SessionUserInputRequestId, result: UserInputResult): boolean {
+    return this.userInputInteractions.resolve(requestId, result);
+  }
+
+  cancelUserInput(requestId: SessionUserInputRequestId, reason?: string): boolean {
+    return this.userInputInteractions.cancel(requestId, reason);
+  }
+
+  private async requestUserInput(
+    form: UserInputForm,
+    abortSignal: AbortSignal | undefined,
+  ): Promise<UserInputResult> {
+    const activeTurn = this.activeTurn;
+    if (!this.userInputAvailable || activeTurn === undefined || this.emit === undefined) {
+      return { status: "cancelled", reason: "当前无法向用户请求输入" };
+    }
+    const now = Date.now();
+    const turnExpiresAt =
+      activeTurn.expiresAt === undefined
+        ? Number.POSITIVE_INFINITY
+        : Date.parse(activeTurn.expiresAt);
+    const expiresAtMs = Math.min(
+      now + 5 * 60 * 1_000,
+      Number.isFinite(turnExpiresAt) ? turnExpiresAt : Number.POSITIVE_INFINITY,
+    );
+    if (expiresAtMs <= now || abortSignal?.aborted) {
+      return { status: "cancelled", reason: "用户输入请求已超时" };
+    }
+    const interaction = this.userInputInteractions.request(
+      form,
+      new Date(expiresAtMs).toISOString(),
+    );
+    const cancelForAbort = (): void => {
+      this.userInputInteractions.cancel(interaction.requestId, "本轮已终止");
+    };
+    abortSignal?.addEventListener("abort", cancelForAbort, { once: true });
+    this.emit({
+      type: "user-input-required",
+      requestId: interaction.requestId,
+      form: interaction.form,
+      expiresAt: interaction.expiresAt,
+    });
+    try {
+      return await interaction.result;
+    } finally {
+      abortSignal?.removeEventListener("abort", cancelForAbort);
+      const result = await interaction.result;
+      this.emit?.({
+        type: "user-input-settled",
+        requestId: interaction.requestId,
+        status: result.status,
+      });
+    }
   }
 
   private trackPendingToolCall(
@@ -1167,6 +1260,7 @@ export class AgentSession {
           activeTurn.aborted = true;
           activeTurn.cancellationReason = SESSION_CANCELLATION_REASONS.timeout;
           this.gate.abortAll("本轮运行超时");
+          this.userInputInteractions.cancelAll("本轮运行超时");
           activeTurn.abortController.abort(TURN_TIMEOUT_ABORT_REASON);
         }, this.turnTimeoutMs);
       }
@@ -2768,6 +2862,7 @@ export class AgentSession {
     activeTurn.aborted = true;
     activeTurn.cancellationReason ??= SESSION_CANCELLATION_REASONS.runtime;
     this.gate.abortAll("本轮事件流已停止");
+    this.userInputInteractions.cancelAll("本轮事件流已停止");
     this.interruptExecSessions(activeTurn);
     activeTurn.abortController.abort(RUNTIME_CANCELLATION_ABORT_REASON);
   }
@@ -3020,6 +3115,7 @@ export class AgentSession {
     activeTurn.aborted = true;
     activeTurn.cancellationReason = SESSION_CANCELLATION_REASONS.user;
     this.gate.abortAll("用户取消本轮");
+    this.userInputInteractions.cancelAll("用户取消本轮");
     this.interruptExecSessions(activeTurn);
     activeTurn.abortController.abort(USER_CANCELLATION_ABORT_REASON);
     return true;
@@ -3036,6 +3132,7 @@ export class AgentSession {
       activeTurn.aborted = true;
       activeTurn.cancellationReason ??= SESSION_CANCELLATION_REASONS.runtime;
       this.gate.abortAll();
+      this.userInputInteractions.cancelAll("Runtime 正在关闭");
       activeTurn.abortController.abort(RUNTIME_CANCELLATION_ABORT_REASON);
     }
 

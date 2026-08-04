@@ -14,8 +14,16 @@ import {
   RUNTIME_PROTOCOL_VERSION,
   RUNTIME_SERVER_REQUEST_CANCEL_NOTIFICATION,
   RUNTIME_SERVER_REQUEST_METHODS,
+  RUNTIME_SERVER_REQUEST_METHOD_VALUES,
+  RUNTIME_SERVER_REQUEST_METHOD_VALUES_V11,
   SUPPORTED_RUNTIME_PROTOCOL_VERSIONS,
   SUPPORTED_RUNTIME_PROTOCOL_VERSIONS_V11,
+  USER_INPUT_CHOICE_OPTION_MAX_COUNT,
+  USER_INPUT_CONTROL_ID_MAX_CHARS,
+  USER_INPUT_CONTROL_MAX_COUNT,
+  USER_INPUT_DESCRIPTION_MAX_CHARS,
+  USER_INPUT_LABEL_MAX_CHARS,
+  USER_INPUT_TEXT_MAX_CHARS,
   activeTurnV11Schema,
   activeTurnV12Schema,
   approvalIdSchema,
@@ -33,6 +41,7 @@ import {
   isRuntimeServerRequestMethod,
   isRuntimeServerRequestMethodAvailable,
   isRuntimeServerRequestMethodRequired,
+  normalizeUserInputResult,
   operationGetResultSchema,
   parseRuntimeMethodResult,
   parseRuntimeMethodResultForVersion,
@@ -42,8 +51,10 @@ import {
   parseRuntimeServerRequestCancelParamsForVersion,
   parseRuntimeServerRequestParamsForVersion,
   parseRuntimeServerRequestResult,
+  parseRuntimeServerRequestResultForVersion,
   pendingApprovalSchema,
   pendingInteractionProjectionSchema,
+  pendingUserInputInteractionProjectionSchema,
   projectClientCapabilitiesSetResult,
   projectRuntimeEventEnvelopeForVersion,
   projectRuntimeServerRequestCancelParams,
@@ -58,6 +69,9 @@ import {
   runtimeServerRequestSchemas,
   threadSnapshotSchema,
   threadSnapshotV11Schema,
+  userInputFormSchema,
+  userInputRequestParamsV12Schema,
+  userInputResultSchema,
   type ApprovalId,
   type InteractionId,
   type LatestRuntimeServerRequestInput,
@@ -70,6 +84,9 @@ import {
   type RuntimeServerRequestParamsForVersion,
   type RuntimeServerRequestParamsForSupportedVersions,
   type RuntimeServerRequestResultForSupportedVersions,
+  type UserInputForm,
+  type UserInputRequestParamsV12,
+  type UserInputResult,
 } from "./index.ts";
 
 const IDS = {
@@ -112,6 +129,19 @@ function parseNegotiatedApproval(
     RUNTIME_SERVER_REQUEST_METHODS.approvalRequest,
     value,
   );
+}
+
+function userInputRequestParams(controls: UserInputForm["controls"]): UserInputRequestParamsV12 {
+  return userInputRequestParamsV12Schema.parse({
+    interactionId: IDS.interaction,
+    threadId: IDS.thread,
+    turnId: IDS.turn,
+    expiresAt: "2026-07-29T12:10:00.000Z",
+    sensitivity: "normal",
+    title: "部署配置",
+    description: "请确认本次部署所需的普通配置，不要填写密码或 token。",
+    controls,
+  });
 }
 
 test("initialize advertises v1.2 first without changing the strict request shape", () => {
@@ -195,6 +225,10 @@ test("protocol capabilities centralize version-specific control behavior", () =>
     isRuntimeServerRequestMethodRequired("1.2", RUNTIME_SERVER_REQUEST_METHODS.approvalRequest),
     false,
   );
+  assert.equal(
+    isRuntimeServerRequestMethodRequired("1.2", RUNTIME_SERVER_REQUEST_METHODS.userInputRequest),
+    false,
+  );
   assert.deepEqual(getRuntimeProtocolCapabilities("1.1"), RUNTIME_PROTOCOL_CAPABILITIES["1.1"]);
   assert.equal(getRuntimeProtocolCapabilities("1.1").serverRequests, true);
   assert.equal(getRuntimeProtocolCapabilities("1.1").serverRequestCapabilityNegotiation, false);
@@ -227,25 +261,52 @@ test("protocol registry isolates v1.2 capability negotiation from older versions
     true,
   );
   assert.equal(
+    isRuntimeServerRequestMethodAvailable("1.2", RUNTIME_SERVER_REQUEST_METHODS.userInputRequest),
+    true,
+  );
+  assert.equal(
     isRuntimeServerRequestMethodAvailable("1.1", RUNTIME_SERVER_REQUEST_METHODS.approvalRequest),
     true,
+  );
+  assert.equal(
+    isRuntimeServerRequestMethodAvailable("1.1", RUNTIME_SERVER_REQUEST_METHODS.userInputRequest),
+    false,
   );
   assert.equal(
     isRuntimeServerRequestMethodAvailable("1.0", RUNTIME_SERVER_REQUEST_METHODS.approvalRequest),
     false,
   );
   assert.equal(RUNTIME_PROTOCOL_REGISTRY["1.0"].serverRequestCancelParamsSchema, null);
+  assert.deepEqual(RUNTIME_PROTOCOL_REGISTRY["1.2"].serverRequestMethods, [
+    RUNTIME_SERVER_REQUEST_METHODS.approvalRequest,
+    RUNTIME_SERVER_REQUEST_METHODS.userInputRequest,
+  ]);
+  assert.deepEqual(
+    RUNTIME_PROTOCOL_REGISTRY["1.1"].serverRequestMethods,
+    RUNTIME_SERVER_REQUEST_METHOD_VALUES_V11,
+  );
 });
 
 test("client.capabilities.set validates bounds and projects the ordered registry intersection", () => {
   const parsed = parseRuntimeMethodParamsForVersion("1.2", RUNTIME_METHODS.clientCapabilitiesSet, {
     revision: 7,
-    serverRequestMethods: ["future.request", RUNTIME_SERVER_REQUEST_METHODS.approvalRequest],
+    serverRequestMethods: [
+      RUNTIME_SERVER_REQUEST_METHODS.userInputRequest,
+      "future.request",
+      RUNTIME_SERVER_REQUEST_METHODS.approvalRequest,
+    ],
   });
-  assert.deepEqual(parsed.serverRequestMethods, ["future.request", "approval.request"]);
+  assert.deepEqual(parsed.serverRequestMethods, [
+    "userInput.request",
+    "future.request",
+    "approval.request",
+  ]);
   assert.deepEqual(projectClientCapabilitiesSetResult(parsed), {
     revision: 7,
-    acceptedServerRequestMethods: [RUNTIME_SERVER_REQUEST_METHODS.approvalRequest],
+    acceptedServerRequestMethods: [
+      RUNTIME_SERVER_REQUEST_METHODS.approvalRequest,
+      RUNTIME_SERVER_REQUEST_METHODS.userInputRequest,
+    ],
   });
 
   for (const value of [
@@ -374,8 +435,12 @@ test("runtime event envelopes project explicitly to the frozen v1.1 shape", () =
 test("server request registry derives typed approval request params and results", async () => {
   assert.deepEqual(
     Object.keys(runtimeServerRequestSchemas),
-    Object.values(RUNTIME_SERVER_REQUEST_METHODS),
+    RUNTIME_SERVER_REQUEST_METHOD_VALUES_V11,
   );
+  assert.deepEqual(RUNTIME_SERVER_REQUEST_METHOD_VALUES, [
+    RUNTIME_SERVER_REQUEST_METHODS.approvalRequest,
+    RUNTIME_SERVER_REQUEST_METHODS.userInputRequest,
+  ]);
   assert.equal(isRuntimeServerRequestMethod("approval.request"), true);
   assert.equal(isRuntimeServerRequestMethod("approval.respond"), false);
 
@@ -485,6 +550,400 @@ test("v1.2 approval.request carries strict interaction metadata and projects to 
   ]) {
     assert.throws(() => approvalRequestParamsV12Schema.parse(invalid));
   }
+});
+
+test("v1.2 userInput.request derives all safe controls from one strict form schema", () => {
+  const controls: UserInputForm["controls"] = [
+    {
+      type: "text",
+      id: "deployment-region",
+      label: "部署区域",
+      description: "填写普通区域名称，例如 华东。",
+      required: true,
+      minLength: 2,
+      maxLength: 20,
+    },
+    {
+      type: "multiline",
+      id: "release-notes",
+      label: "发布说明",
+      required: false,
+      maxLength: 200,
+    },
+    {
+      type: "number",
+      id: "replicas",
+      label: "实例数量",
+      required: true,
+      min: 1,
+      max: 5,
+      integer: true,
+    },
+    {
+      type: "boolean",
+      id: "dry-run",
+      label: "仅预演",
+      required: true,
+    },
+    {
+      type: "choice",
+      id: "target-workspace",
+      label: "目标 Workspace",
+      required: true,
+      multiple: false,
+      options: [
+        { id: "workspace-a", label: "Workspace A" },
+        { id: "workspace-b", label: "Workspace B" },
+      ],
+    },
+    {
+      type: "choice",
+      id: "reviewers",
+      label: "复核人",
+      required: false,
+      multiple: true,
+      minSelections: 0,
+      maxSelections: 2,
+      options: [
+        { id: "reviewer-a", label: "复核人 A" },
+        { id: "reviewer-b", label: "复核人 B" },
+        { id: "reviewer-c", label: "复核人 C" },
+      ],
+    },
+  ];
+  const input = userInputRequestParams(controls) satisfies LatestRuntimeServerRequestInput<
+    typeof RUNTIME_SERVER_REQUEST_METHODS.userInputRequest
+  >;
+  const parsed = parseRuntimeServerRequestParamsForVersion(
+    "1.2",
+    RUNTIME_SERVER_REQUEST_METHODS.userInputRequest,
+    input,
+  );
+  assert.deepEqual(parsed.controls, controls);
+  assert.equal(parsed.sensitivity, "normal");
+  assert.deepEqual(
+    userInputFormSchema.parse({
+      title: parsed.title,
+      description: parsed.description,
+      controls: parsed.controls,
+    }),
+    {
+      title: input.title,
+      description: input.description,
+      controls,
+    },
+  );
+  assert.deepEqual(
+    projectRuntimeServerRequestParams(
+      "1.2",
+      RUNTIME_SERVER_REQUEST_METHODS.userInputRequest,
+      input,
+    ),
+    parsed,
+  );
+  assert.throws(() =>
+    projectRuntimeServerRequestParams(
+      "1.1",
+      RUNTIME_SERVER_REQUEST_METHODS.userInputRequest,
+      input,
+    ),
+  );
+  assert.equal(
+    isLatestRuntimeServerRequestMethod(RUNTIME_SERVER_REQUEST_METHODS.userInputRequest),
+    true,
+  );
+  assert.equal(
+    isRuntimeServerRequestMethod(RUNTIME_SERVER_REQUEST_METHODS.userInputRequest),
+    false,
+  );
+});
+
+test("user input form rejects unsafe bounds, duplicate ids and incoherent choice definitions", () => {
+  const validText = {
+    type: "text",
+    id: "region",
+    label: "部署区域",
+    required: true,
+    minLength: 1,
+    maxLength: 20,
+  } as const;
+  const validChoice = {
+    type: "choice",
+    id: "workspace",
+    label: "目标 Workspace",
+    required: true,
+    multiple: false,
+    options: [
+      { id: "workspace-a", label: "Workspace A" },
+      { id: "workspace-b", label: "Workspace B" },
+    ],
+  } as const;
+  assert.deepEqual(userInputFormSchema.parse({ controls: [validText, validChoice] }).controls, [
+    validText,
+    validChoice,
+  ]);
+
+  const invalidForms: readonly unknown[] = [
+    { controls: [] },
+    {
+      controls: Array.from({ length: USER_INPUT_CONTROL_MAX_COUNT + 1 }, (_, index) => ({
+        ...validText,
+        id: `region-${String(index)}`,
+      })),
+    },
+    { controls: [validText, { ...validChoice, id: validText.id }] },
+    { controls: [{ ...validText, id: "x".repeat(USER_INPUT_CONTROL_ID_MAX_CHARS + 1) }] },
+    { controls: [{ ...validText, label: "x".repeat(USER_INPUT_LABEL_MAX_CHARS + 1) }] },
+    {
+      description: "x".repeat(USER_INPUT_DESCRIPTION_MAX_CHARS + 1),
+      controls: [validText],
+    },
+    { controls: [{ ...validText, minLength: 21, maxLength: 20 }] },
+    { controls: [{ ...validText, minLength: undefined, maxLength: 0 }] },
+    { controls: [{ ...validText, maxLength: USER_INPUT_TEXT_MAX_CHARS + 1 }] },
+    {
+      controls: [
+        {
+          type: "number",
+          id: "replicas",
+          label: "实例数量",
+          required: true,
+          min: 5,
+          max: 1,
+        },
+      ],
+    },
+    {
+      controls: [
+        {
+          type: "number",
+          id: "replicas",
+          label: "实例数量",
+          required: true,
+          integer: true,
+          min: 0.1,
+          max: 0.9,
+        },
+      ],
+    },
+    {
+      controls: [
+        {
+          ...validChoice,
+          options: [
+            { id: "same", label: "A" },
+            { id: "same", label: "B" },
+          ],
+        },
+      ],
+    },
+    { controls: [{ ...validChoice, minSelections: 2, maxSelections: 1 }] },
+    { controls: [{ ...validChoice, maxSelections: 2 }] },
+    {
+      controls: [
+        {
+          ...validChoice,
+          multiple: true,
+          maxSelections: 3,
+        },
+      ],
+    },
+    {
+      controls: [
+        {
+          ...validChoice,
+          multiple: true,
+          options: Array.from({ length: USER_INPUT_CHOICE_OPTION_MAX_COUNT + 1 }, (_, index) => ({
+            id: `option-${String(index)}`,
+            label: `Option ${String(index)}`,
+          })),
+        },
+      ],
+    },
+  ];
+  for (const form of invalidForms) {
+    assert.throws(() => userInputFormSchema.parse(form));
+  }
+
+  const validParams = userInputRequestParams([validText]);
+  assert.throws(() =>
+    userInputRequestParamsV12Schema.parse({ ...validParams, sensitivity: "secret" }),
+  );
+  assert.throws(() => userInputRequestParamsV12Schema.parse({ ...validParams, password: "no" }));
+});
+
+test("normalizeUserInputResult correlates values and returns form definition order", () => {
+  const params = userInputRequestParams([
+    {
+      type: "text",
+      id: "region",
+      label: "部署区域",
+      required: true,
+      minLength: 2,
+      maxLength: 10,
+    },
+    {
+      type: "number",
+      id: "replicas",
+      label: "实例数量",
+      required: true,
+      min: 1,
+      max: 5,
+      integer: true,
+    },
+    {
+      type: "boolean",
+      id: "dry-run",
+      label: "仅预演",
+      required: true,
+    },
+    {
+      type: "choice",
+      id: "workspace",
+      label: "目标 Workspace",
+      required: true,
+      multiple: false,
+      options: [
+        { id: "workspace-a", label: "Workspace A" },
+        { id: "workspace-b", label: "Workspace B" },
+      ],
+    },
+    {
+      type: "choice",
+      id: "reviewers",
+      label: "复核人",
+      required: false,
+      multiple: true,
+      maxSelections: 2,
+      options: [
+        { id: "reviewer-a", label: "复核人 A" },
+        { id: "reviewer-b", label: "复核人 B" },
+      ],
+    },
+  ]);
+  const raw: UserInputResult = {
+    status: "submitted",
+    values: [
+      { id: "reviewers", value: ["reviewer-b", "reviewer-a"] },
+      { id: "workspace", value: "workspace-b" },
+      { id: "dry-run", value: false },
+      { id: "replicas", value: 3 },
+      { id: "region", value: "华东" },
+    ],
+  };
+  const normalized = normalizeUserInputResult(params, raw);
+  assert.deepEqual(normalized, {
+    status: "submitted",
+    values: [
+      { id: "region", value: "华东" },
+      { id: "replicas", value: 3 },
+      { id: "dry-run", value: false },
+      { id: "workspace", value: "workspace-b" },
+      { id: "reviewers", value: ["reviewer-b", "reviewer-a"] },
+    ],
+  });
+  assert.deepEqual(normalizeUserInputResult(params, { status: "cancelled", reason: "用户取消" }), {
+    status: "cancelled",
+    reason: "用户取消",
+  });
+});
+
+test("normalizeUserInputResult rejects missing, unknown, duplicate and incompatible values", () => {
+  const params = userInputRequestParams([
+    {
+      type: "text",
+      id: "region",
+      label: "部署区域",
+      required: true,
+      minLength: 2,
+      maxLength: 4,
+    },
+    {
+      type: "number",
+      id: "replicas",
+      label: "实例数量",
+      required: true,
+      min: 1,
+      max: 3,
+      integer: true,
+    },
+    {
+      type: "boolean",
+      id: "dry-run",
+      label: "仅预演",
+      required: true,
+    },
+    {
+      type: "choice",
+      id: "workspace",
+      label: "目标 Workspace",
+      required: true,
+      multiple: false,
+      options: [{ id: "workspace-a", label: "Workspace A" }],
+    },
+    {
+      type: "choice",
+      id: "reviewers",
+      label: "复核人",
+      required: true,
+      multiple: true,
+      minSelections: 1,
+      maxSelections: 2,
+      options: [
+        { id: "reviewer-a", label: "复核人 A" },
+        { id: "reviewer-b", label: "复核人 B" },
+        { id: "reviewer-c", label: "复核人 C" },
+      ],
+    },
+  ]);
+  const validValues = [
+    { id: "region", value: "华东" },
+    { id: "replicas", value: 2 },
+    { id: "dry-run", value: false },
+    { id: "workspace", value: "workspace-a" },
+    { id: "reviewers", value: ["reviewer-a"] },
+  ] as const;
+  const invalidValues: readonly (readonly unknown[])[] = [
+    [],
+    [...validValues, { id: "unknown", value: "x" }],
+    [...validValues, { id: "region", value: "华南" }],
+    validValues.map((entry) => (entry.id === "region" ? { ...entry, value: 1 } : entry)),
+    validValues.map((entry) => (entry.id === "region" ? { ...entry, value: "x" } : entry)),
+    validValues.map((entry) => (entry.id === "region" ? { ...entry, value: "12345" } : entry)),
+    validValues.map((entry) => (entry.id === "replicas" ? { ...entry, value: "2" } : entry)),
+    validValues.map((entry) => (entry.id === "replicas" ? { ...entry, value: 1.5 } : entry)),
+    validValues.map((entry) => (entry.id === "replicas" ? { ...entry, value: 0 } : entry)),
+    validValues.map((entry) => (entry.id === "replicas" ? { ...entry, value: 4 } : entry)),
+    validValues.map((entry) => (entry.id === "dry-run" ? { ...entry, value: "false" } : entry)),
+    validValues.map((entry) =>
+      entry.id === "workspace" ? { ...entry, value: ["workspace-a"] } : entry,
+    ),
+    validValues.map((entry) =>
+      entry.id === "workspace" ? { ...entry, value: "workspace-b" } : entry,
+    ),
+    validValues.map((entry) =>
+      entry.id === "reviewers" ? { ...entry, value: "reviewer-a" } : entry,
+    ),
+    validValues.map((entry) => (entry.id === "reviewers" ? { ...entry, value: [] } : entry)),
+    validValues.map((entry) =>
+      entry.id === "reviewers" ? { ...entry, value: ["reviewer-a", "reviewer-a"] } : entry,
+    ),
+    validValues.map((entry) =>
+      entry.id === "reviewers" ? { ...entry, value: ["reviewer-unknown"] } : entry,
+    ),
+    validValues.map((entry) =>
+      entry.id === "reviewers"
+        ? { ...entry, value: ["reviewer-a", "reviewer-b", "reviewer-c"] }
+        : entry,
+    ),
+  ];
+  for (const values of invalidValues) {
+    assert.throws(() => normalizeUserInputResult(params, { status: "submitted", values }));
+  }
+  assert.throws(() => userInputResultSchema.parse({ status: "cancelled", reason: "" }));
+  assert.throws(() =>
+    userInputResultSchema.parse({ status: "submitted", values: [], token: "no" }),
+  );
 });
 
 test("server request legacy, latest and supported-version aliases derive from registries", () => {
@@ -800,6 +1259,79 @@ test("v1.2 snapshot projects only safe pending Interaction metadata to frozen le
   }
 });
 
+test("v1.2 pending user input projection contains only interaction metadata and safe form fields", () => {
+  const params = userInputRequestParams([
+    {
+      type: "choice",
+      id: "workspace",
+      label: "目标 Workspace",
+      description: "选择本次操作的目标工作区。",
+      required: true,
+      multiple: false,
+      options: [
+        { id: "workspace-a", label: "Workspace A" },
+        { id: "workspace-b", label: "Workspace B" },
+      ],
+    },
+  ]);
+  const projection = pendingUserInputInteractionProjectionSchema.parse({
+    method: RUNTIME_SERVER_REQUEST_METHODS.userInputRequest,
+    ...params,
+  });
+  assert.deepEqual(pendingInteractionProjectionSchema.parse(projection), projection);
+  assert.deepEqual(Object.keys(projection).sort(), [
+    "controls",
+    "description",
+    "expiresAt",
+    "interactionId",
+    "method",
+    "sensitivity",
+    "threadId",
+    "title",
+    "turnId",
+  ]);
+  for (const forbidden of [
+    { id: "runtime-json-rpc-id" },
+    { values: [{ id: "workspace", value: "workspace-a" }] },
+    { result: { status: "submitted", values: [] } },
+    { token: "do-not-project" },
+  ]) {
+    assert.throws(() =>
+      pendingUserInputInteractionProjectionSchema.parse({
+        ...projection,
+        ...forbidden,
+      }),
+    );
+  }
+
+  const latest = projectThreadSnapshotForVersion("1.2", {
+    thread: {
+      id: IDS.thread,
+      title: "pending user input",
+      model: "mock",
+      createdAt: "2026-07-29T12:00:00.000Z",
+      updatedAt: "2026-07-29T12:00:00.000Z",
+      messageCount: 0,
+    },
+    messages: { items: [], nextBeforeSequence: null },
+    operations: { items: [], nextBeforeSequence: null },
+    activeTurn: {
+      id: IDS.turn,
+      status: "waiting-for-user",
+      startedAt: "2026-07-29T12:00:00.000Z",
+    },
+    pendingApprovals: [],
+    pendingInteractions: [projection],
+    transcriptCompleteness: "complete",
+  });
+  assert.deepEqual(latest.pendingInteractions, [projection]);
+  for (const version of ["1.1", "1.0"] as const) {
+    const legacy = projectThreadSnapshotForVersion(version, latest);
+    assert.equal(legacy.activeTurn?.status, "running");
+    assert.equal("pendingInteractions" in legacy, false);
+  }
+});
+
 test("v1.2 active Turn adds waiting-for-user while legacy snapshots map it to running", () => {
   const activeTurn = {
     id: IDS.turn,
@@ -922,6 +1454,34 @@ test("cross-language golden fixtures keep request, response and event compatibil
       approvalResponse.result,
     ).decision,
     "reject",
+  );
+
+  const userInputRequest = fixtureV12("valid-user-input-request.json");
+  assert.equal(userInputRequest.method, RUNTIME_SERVER_REQUEST_METHODS.userInputRequest);
+  assert.equal(
+    parseRuntimeServerRequestParamsForVersion(
+      "1.2",
+      RUNTIME_SERVER_REQUEST_METHODS.userInputRequest,
+      userInputRequest.params,
+    ).controls[0]?.label,
+    "部署区域",
+  );
+  const userInputResponse = fixtureV12("valid-user-input-request-response.json");
+  assert.equal(
+    parseRuntimeServerRequestResultForVersion(
+      "1.2",
+      RUNTIME_SERVER_REQUEST_METHODS.userInputRequest,
+      userInputResponse.result,
+    ).status,
+    "submitted",
+  );
+  assert.throws(() =>
+    userInputRequestParamsV12Schema.parse(
+      fixtureV12("invalid-sensitive-user-input-request.json").params,
+    ),
+  );
+  assert.throws(() =>
+    userInputResultSchema.parse(fixtureV12("invalid-user-input-request-response.json").result),
   );
 
   const cancelNotification = fixture("valid-server-request-cancel-notification.json");
