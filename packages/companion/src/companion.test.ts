@@ -8,6 +8,7 @@ import {
   parseRuntimeMethodResult,
   parseRuntimeServerRequestParams,
   runtimeEventEnvelopeSchema,
+  runtimeEventEnvelopeV11Schema,
   type ApprovalRequestParams,
   type InitializeResult,
   type JsonValue,
@@ -29,6 +30,7 @@ import { CompanionEventBuffer } from "./event-buffer.ts";
 import {
   CompanionRelayBridge,
   OutboundCompanionRelay,
+  relayEventMessage,
   type RelayPayloadCipher,
   type RelayTransport,
 } from "./relay-bridge.ts";
@@ -39,6 +41,7 @@ import {
   deviceIdSchema,
   relayDeviceConnectSchema,
   relayMessageSchema,
+  relayRequestMethodSchemas,
   relayRuntimeRequestSchema,
   relayRuntimeResponseSchema,
   workspaceIdSchema,
@@ -90,6 +93,18 @@ function envelope(sequence: number, event: unknown): RuntimeEventEnvelope {
 function v11Envelope(sequence: number, event: unknown): RuntimeEventEnvelope {
   return runtimeEventEnvelopeSchema.parse({
     protocolVersion: "1.1",
+    runtimeInstanceId: IDS.runtime,
+    sequence,
+    timestamp: "2026-07-28T12:00:00.000Z",
+    threadId: IDS.thread,
+    turnId: IDS.turn,
+    event,
+  });
+}
+
+function v12Envelope(sequence: number, event: unknown): RuntimeEventEnvelope {
+  return runtimeEventEnvelopeSchema.parse({
+    protocolVersion: "1.2",
     runtimeInstanceId: IDS.runtime,
     sequence,
     timestamp: "2026-07-28T12:00:00.000Z",
@@ -194,6 +209,47 @@ class FailingSubscriptionRuntimeClient extends FakeV11RuntimeClient {
 class InvalidRelayResultWorkspace extends CompanionWorkspace {
   override async handleRemoteRequest(_request: RelayRuntimeRequest): Promise<unknown> {
     return undefined;
+  }
+}
+
+class LatestSnapshotWorkspace extends CompanionWorkspace {
+  override async handleRemoteRequest(request: RelayRuntimeRequest): Promise<unknown> {
+    if (
+      request.method !== RUNTIME_METHODS.threadOpen &&
+      request.method !== RUNTIME_METHODS.threadSnapshot
+    ) {
+      throw new Error(`Unexpected latest Snapshot request: ${request.method}`);
+    }
+    return {
+      thread: {
+        id: IDS.thread,
+        title: "Runtime 1.2 snapshot",
+        model: "fixture-model",
+        createdAt: "2026-07-28T12:00:00.000Z",
+        updatedAt: "2026-07-28T12:01:00.000Z",
+        messageCount: 0,
+      },
+      messages: { items: [], nextBeforeSequence: null },
+      operations: { items: [], nextBeforeSequence: null },
+      activeTurn: {
+        id: IDS.turn,
+        status: "waiting-for-user",
+        startedAt: "2026-07-28T12:00:00.000Z",
+      },
+      pendingApprovals: [],
+      pendingInteractions: [
+        {
+          method: RUNTIME_SERVER_REQUEST_METHODS.approvalRequest,
+          interactionId: IDS.serverApprovalRequest,
+          threadId: IDS.thread,
+          turnId: IDS.turn,
+          expiresAt: "2026-07-28T12:05:00.000Z",
+          sensitivity: "normal",
+          approvalId: IDS.approval,
+        },
+      ],
+      transcriptCompleteness: "complete",
+    };
   }
 }
 
@@ -1211,6 +1267,106 @@ test("Companion consumes the shared Relay Protocol conformance suite", () => {
     passed: true,
     failures: [],
   });
+});
+
+test("Relay 1.0 projects Runtime 1.2 events to its frozen Runtime 1.1 envelope", async () => {
+  const workspaceId = workspaceIdSchema.parse(IDS.workspace);
+  const client = new FakeRuntimeClient();
+  const workspace = new CompanionWorkspace({
+    client,
+    localApprovalPolicy: () => "allow",
+  });
+  const bridge = new CompanionRelayBridge({
+    deviceId: deviceIdSchema.parse(IDS.device),
+    pairingToken: "pairing-token-with-sufficient-length",
+    workspaces: new Map([[workspaceId, workspace]]),
+  });
+  const transport = new MemoryRelayTransport();
+  bridge.connect(transport);
+  await flush();
+
+  const runtimeEvent = v12Envelope(0, { type: "turn.completed" });
+  client.emit(runtimeEvent);
+  await flush();
+  const relayed = transport.sent.find((message) => message.type === "runtime.event");
+  assert.ok(relayed?.type === "runtime.event");
+  assert.equal(relayed.event.protocolVersion, "1.1");
+  assert.deepEqual(relayMessageSchema.parse(relayed), relayed);
+
+  const projected = relayEventMessage(workspaceId, 1, runtimeEvent);
+  assert.ok(projected.type === "runtime.event");
+  assert.equal(projected.event.protocolVersion, "1.1");
+  bridge.close();
+
+  const encryptedClient = new FakeRuntimeClient();
+  const encryptedWorkspace = new CompanionWorkspace({
+    client: encryptedClient,
+    localApprovalPolicy: () => "allow",
+  });
+  const encryptedBridge = new CompanionRelayBridge({
+    deviceId: deviceIdSchema.parse(IDS.device),
+    pairingToken: "pairing-token-with-sufficient-length",
+    workspaces: new Map([[workspaceId, encryptedWorkspace]]),
+    ciphers: new Map([[workspaceId, testCipher]]),
+  });
+  const encryptedTransport = new MemoryRelayTransport();
+  encryptedBridge.connect(encryptedTransport);
+  await flush();
+  encryptedClient.emit(runtimeEvent);
+  await flush();
+  const encrypted = encryptedTransport.sent.find(
+    (message) => message.type === "runtime.encrypted" && message.payloadKind === "event",
+  );
+  assert.ok(encrypted?.type === "runtime.encrypted" && encrypted.payloadKind === "event");
+  assert.equal(
+    runtimeEventEnvelopeV11Schema.parse(await testCipher.decrypt(encrypted)).protocolVersion,
+    "1.1",
+  );
+  encryptedBridge.close();
+});
+
+test("Relay 1.0 projects Runtime 1.2 thread results to the frozen Snapshot shape", async () => {
+  const workspaceId = workspaceIdSchema.parse(IDS.workspace);
+  const workspace = new LatestSnapshotWorkspace({
+    client: new FakeRuntimeClient(),
+    localApprovalPolicy: () => "allow",
+  });
+  const bridge = new CompanionRelayBridge({
+    deviceId: deviceIdSchema.parse(IDS.device),
+    pairingToken: "pairing-token-with-sufficient-length",
+    workspaces: new Map([[workspaceId, workspace]]),
+  });
+  const transport = new MemoryRelayTransport();
+  bridge.connect(transport);
+  await flush();
+
+  for (const [requestId, method, params] of [
+    [
+      IDS.relaySnapshotRequest,
+      RUNTIME_METHODS.threadSnapshot,
+      { threadId: IDS.thread, limit: 100 },
+    ],
+    [IDS.relaySecondRequest, RUNTIME_METHODS.threadOpen, { threadId: IDS.thread }],
+  ] as const) {
+    transport.receive({
+      type: "runtime.request",
+      requestId,
+      workspaceId,
+      method,
+      params,
+    });
+    await flush();
+    const response = transport.sent.find(
+      (message) => message.type === "runtime.response" && message.requestId === requestId,
+    );
+    assert.ok(response?.type === "runtime.response");
+    assert.equal(response.error, undefined);
+    const snapshot = relayRequestMethodSchemas[method].result.parse(response.result);
+    assert.equal(Object.hasOwn(snapshot, "pendingInteractions"), false);
+    assert.equal(snapshot.activeTurn?.status, "running");
+  }
+
+  bridge.close();
 });
 
 test("CompanionRelayBridge routes requests outbound and replays unacked events after reconnect", async () => {

@@ -66,7 +66,8 @@ TypeScript/JavaScript 实现直接使用本包；其他语言使用本包发布�
 
 Relay version 冻结外层 envelope、message type 与 recognized method registry。
 `local-only` 方法（当前为 `initialize`）只能由 Companion 在本地处理，不得转发给 Runtime；
-`query` / `mutation` 才是远程请求分类。既有 Runtime method 的 Params/Result 继续属于按
-Workspace 协商的 Runtime Protocol 契约；`relayRequestMethodSchemas` 是当前
-`@roll-agent/protocol` 依赖版本的 typed 视图，不应被解释为 Relay `"1.0"` 单独复制的一套
-Runtime Schema。
+`query` / `mutation` 才是远程请求分类。Relay Wire `"1.0"` 的
+`relayRequestMethodSchemas` 明确绑定冻结的 Runtime Protocol `"1.1"` 兼容视图；本地
+Runtime `"1.2"` 的 Thread Snapshot 与 Event 必须先投影到该视图，不能把
+`pendingInteractions`、`waiting-for-user`、`protocolVersion: "1.2"` 等新增字段带入旧
+Wire。它不是对最新 `@roll-agent/protocol` registry 的动态别名。

@@ -1,0 +1,15 @@
+{
+  "jsonrpc": "2.0",
+  "id": "approval-rpc-legacy",
+  "method": "approval.request",
+  "params": {
+    "threadId": "00000000-0000-4000-8000-000000000002",
+    "approval": {
+      "id": "00000000-0000-4000-8000-000000000005",
+      "turnId": "00000000-0000-4000-8000-000000000003",
+      "agentName": "browser-use-agent",
+      "toolName": "click",
+      "preview": {}
+    }
+  }
+}

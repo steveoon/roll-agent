@@ -1,15 +1,25 @@
+import { randomUUID } from "node:crypto";
 import {
   RUNTIME_ERROR_CODES,
   RUNTIME_EVENT_NOTIFICATION,
   RUNTIME_METHODS,
   RUNTIME_SERVER_REQUEST_METHODS,
+  clientCapabilitiesSetParamsSchema,
   getRuntimeProtocolCapabilities,
-  isRuntimeMethod,
+  getRuntimeProtocolRegistry,
+  interactionIdSchema,
+  isRuntimeMethodAvailable,
+  projectClientCapabilitiesSetResult,
+  projectThreadSnapshotForVersion,
   runtimeMethodSchemas,
   type ApprovalResolution,
+  type ClientCapabilitiesSetResult,
+  type LatestRuntimeMethod,
+  type PendingInteractionProjection,
   type RuntimeEventEnvelope,
-  type RuntimeMethod,
   type RuntimeProtocolVersion,
+  type ThreadSnapshotForVersion,
+  type ThreadSnapshotV11,
 } from "@roll-agent/protocol";
 import {
   RuntimeService,
@@ -55,6 +65,9 @@ export class RuntimeProtocolAdapter {
   private transportFailed = false;
   private controlsService = false;
   private protocolVersion: RuntimeProtocolVersion | undefined;
+  private capabilityRevision: number | undefined;
+  private capabilityMethods: readonly string[] | undefined;
+  private capabilityResult: ClientCapabilitiesSetResult | undefined;
   private eventSequence = 0;
   private closePromise: Promise<void> | undefined;
 
@@ -83,8 +96,8 @@ export class RuntimeProtocolAdapter {
     }
   }
 
-  handles(method: string): method is RuntimeMethod {
-    return isRuntimeMethod(method);
+  handles(method: string): method is LatestRuntimeMethod {
+    return isRuntimeMethodAvailable("1.2", method);
   }
 
   handleResponse(message: JsonRpcMessage): boolean {
@@ -119,12 +132,35 @@ export class RuntimeProtocolAdapter {
       const result = this.service.initialize(params);
       this.protocolVersion = result.protocolVersion;
       if (getRuntimeProtocolCapabilities(result.protocolVersion).serverRequests) {
-        this.detachResponder = this.clientRequests.attachResponder({
-          id: this.responderId,
-          scopeId: result.runtimeInstanceId,
-          send: (message) => this.connection.send(message),
-          close: () => this.connection.close(),
-        });
+        const requiresCapabilityAck = getRuntimeProtocolCapabilities(
+          result.protocolVersion,
+        ).serverRequestCapabilityNegotiation;
+        this.detachResponder = this.clientRequests.attachResponder(
+          {
+            id: this.responderId,
+            scopeId: result.runtimeInstanceId,
+            send: (message) => this.connection.send(message),
+            close: () => this.connection.close(),
+          },
+          {
+            acceptedServerRequestMethods: requiresCapabilityAck
+              ? []
+              : getRuntimeProtocolRegistry(result.protocolVersion).serverRequestMethods,
+            capabilitiesAcknowledged: !requiresCapabilityAck,
+          },
+        );
+        if (requiresCapabilityAck) {
+          const internal = getRuntimeClientRequestCoordinatorInternal(this.clientRequests);
+          const initialized =
+            internal.beginCapabilityNegotiationForAttachment(this.detachResponder) ??
+            this.clientRequests.beginResponderCapabilityNegotiation(this.responderId);
+          if (!initialized) {
+            throw new RuntimeServiceError(
+              RUNTIME_ERROR_CODES.capabilityUnavailable,
+              "Runtime 客户端 responder 无法进入 capability negotiation",
+            );
+          }
+        }
       }
       this.initialized = true;
       return result;
@@ -133,6 +169,24 @@ export class RuntimeProtocolAdapter {
       throw new RuntimeServiceError(
         RUNTIME_ERROR_CODES.initializeRequired,
         "调用 Runtime Protocol 方法前必须先完成 initialize",
+      );
+    }
+    if (request.method === RUNTIME_METHODS.clientCapabilitiesSet) {
+      if (this.protocolVersion !== "1.2") {
+        throw new RuntimeServiceError(
+          RUNTIME_ERROR_CODES.capabilityUnavailable,
+          `Runtime Protocol ${String(this.protocolVersion)} 不支持方法：${request.method}`,
+        );
+      }
+      return this.setClientCapabilities(clientCapabilitiesSetParamsSchema.parse(request.params));
+    }
+    if (
+      this.protocolVersion === undefined ||
+      !isRuntimeMethodAvailable(this.protocolVersion, request.method)
+    ) {
+      throw new RuntimeServiceError(
+        RUNTIME_ERROR_CODES.capabilityUnavailable,
+        `Runtime Protocol ${String(this.protocolVersion)} 不支持方法：${request.method}`,
       );
     }
     if (
@@ -156,12 +210,16 @@ export class RuntimeProtocolAdapter {
           runtimeMethodSchemas[RUNTIME_METHODS.threadCreate].params.parse(request.params),
         );
       case RUNTIME_METHODS.threadOpen:
-        return this.service.openThread(
-          runtimeMethodSchemas[RUNTIME_METHODS.threadOpen].params.parse(request.params),
+        return this.projectThreadSnapshot(
+          await this.service.openThread(
+            runtimeMethodSchemas[RUNTIME_METHODS.threadOpen].params.parse(request.params),
+          ),
         );
       case RUNTIME_METHODS.threadSnapshot:
-        return this.service.snapshotThread(
-          runtimeMethodSchemas[RUNTIME_METHODS.threadSnapshot].params.parse(request.params),
+        return this.projectThreadSnapshot(
+          this.service.snapshotThread(
+            runtimeMethodSchemas[RUNTIME_METHODS.threadSnapshot].params.parse(request.params),
+          ),
         );
       case RUNTIME_METHODS.threadRename:
         return this.service.renameThread(
@@ -287,6 +345,44 @@ export class RuntimeProtocolAdapter {
     }
   }
 
+  private projectThreadSnapshot(
+    snapshot: ThreadSnapshotV11,
+  ): ThreadSnapshotForVersion<RuntimeProtocolVersion> {
+    const protocolVersion = this.protocolVersion;
+    if (protocolVersion === undefined) {
+      throw new RuntimeServiceError(
+        RUNTIME_ERROR_CODES.initializeRequired,
+        "投影 Thread Snapshot 前必须先完成 initialize",
+      );
+    }
+    let pendingInteractions: readonly PendingInteractionProjection[] = [];
+    if (protocolVersion === "1.2") {
+      if (this.detachResponder === undefined) {
+        throw new RuntimeServiceError(
+          RUNTIME_ERROR_CODES.capabilityUnavailable,
+          "Runtime Protocol 1.2 responder 已失效",
+        );
+      }
+      const projected = getRuntimeClientRequestCoordinatorInternal(
+        this.clientRequests,
+      ).getPendingInteractionProjectionsForAttachment(this.detachResponder, snapshot.thread.id);
+      const responderProjection =
+        projected ??
+        this.clientRequests.getPendingInteractionProjections(this.responderId, snapshot.thread.id);
+      if (responderProjection === undefined) {
+        throw new RuntimeServiceError(
+          RUNTIME_ERROR_CODES.capabilityUnavailable,
+          "Runtime Protocol 1.2 responder attachment 已失效",
+        );
+      }
+      pendingInteractions = responderProjection;
+    }
+    return projectThreadSnapshotForVersion(protocolVersion, {
+      ...snapshot,
+      pendingInteractions,
+    });
+  }
+
   private requestApproval(
     threadId: RuntimeApprovalIdentity["threadId"],
     approval: Extract<
@@ -303,12 +399,39 @@ export class RuntimeProtocolAdapter {
       | RuntimeClientRequest<typeof RUNTIME_SERVER_REQUEST_METHODS.approvalRequest>
       | undefined;
     try {
+      const protocolVersion = this.protocolVersion;
+      if (protocolVersion === undefined || protocolVersion === "1.0") {
+        throw new RuntimeClientRequestCancelledError("当前协议不支持 Server Request");
+      }
+      const expiresAt = this.service.getPendingApprovalExpiresAt(identity);
+      const interactionExpiresAt =
+        protocolVersion === "1.2"
+          ? (() => {
+              if (expiresAt === undefined) {
+                throw new RuntimeClientRequestCancelledError(
+                  "Runtime Protocol 1.2 审批请求缺少绝对 expiresAt deadline",
+                );
+              }
+              return expiresAt;
+            })()
+          : undefined;
+      const params =
+        protocolVersion === "1.2"
+          ? {
+              interactionId: interactionIdSchema.parse(randomUUID()),
+              threadId,
+              turnId: approval.turnId,
+              expiresAt: interactionExpiresAt,
+              sensitivity: "normal" as const,
+              approval,
+            }
+          : {
+              threadId,
+              approval,
+            };
       request = this.clientRequests.request(
         RUNTIME_SERVER_REQUEST_METHODS.approvalRequest,
-        {
-          threadId,
-          approval,
-        },
+        params,
         {
           key: approval.id,
           scopeId: this.service.runtimeInstanceId,
@@ -316,6 +439,8 @@ export class RuntimeProtocolAdapter {
           approvalId: approval.id,
           threadId,
           turnId: approval.turnId,
+          protocolVersion,
+          ...(interactionExpiresAt === undefined ? {} : { expiresAt: interactionExpiresAt }),
         },
       );
     } catch {
@@ -369,6 +494,61 @@ export class RuntimeProtocolAdapter {
       },
     );
     this.trackSettlement(task);
+  }
+
+  private setClientCapabilities(
+    params: ReturnType<typeof clientCapabilitiesSetParamsSchema.parse>,
+  ): ClientCapabilitiesSetResult {
+    if (this.protocolVersion !== "1.2" || this.detachResponder === undefined) {
+      throw new RuntimeServiceError(
+        RUNTIME_ERROR_CODES.capabilityUnavailable,
+        "client.capabilities.set 仅可用于 Runtime Protocol 1.2",
+      );
+    }
+    const canonicalMethods = [...params.serverRequestMethods].sort();
+    if (this.capabilityRevision !== undefined) {
+      const isSameRevision = params.revision === this.capabilityRevision;
+      const isSameMethods =
+        canonicalMethods.length === this.capabilityMethods?.length &&
+        canonicalMethods.every((method, index) => method === this.capabilityMethods?.[index]);
+      if (isSameRevision && isSameMethods && this.capabilityResult !== undefined) {
+        return this.capabilityResult;
+      }
+      if (params.revision <= this.capabilityRevision) {
+        throw new RuntimeServiceError(
+          RUNTIME_ERROR_CODES.capabilityRevisionConflict,
+          `Capability revision ${String(params.revision)} 与当前 revision ${String(
+            this.capabilityRevision,
+          )} 冲突`,
+        );
+      }
+    }
+    const result = projectClientCapabilitiesSetResult(params);
+    const reason = `Runtime 客户端已在 capability revision ${String(params.revision)} 撤销处理能力`;
+    const internal = getRuntimeClientRequestCoordinatorInternal(this.clientRequests);
+    const updated =
+      internal.setServerRequestMethodsForAttachment(
+        this.detachResponder,
+        result.acceptedServerRequestMethods,
+        reason,
+        true,
+      ) ??
+      this.clientRequests.setResponderServerRequestMethods(
+        this.responderId,
+        result.acceptedServerRequestMethods,
+        reason,
+        true,
+      );
+    if (!updated) {
+      throw new RuntimeServiceError(
+        RUNTIME_ERROR_CODES.capabilityUnavailable,
+        "Runtime 客户端 responder 已失效",
+      );
+    }
+    this.capabilityRevision = params.revision;
+    this.capabilityMethods = canonicalMethods;
+    this.capabilityResult = result;
+    return result;
   }
 
   private trackSettlement(task: Promise<void>): void {

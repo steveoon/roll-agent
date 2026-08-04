@@ -1,8 +1,8 @@
 import {
   approvalIdSchema,
   jsonValueSchema,
-  runtimeEventEnvelopeSchema,
-  runtimeMethodSchemas,
+  runtimeEventEnvelopeV11Schema,
+  runtimeMethodSchemasV11,
   threadIdSchema,
   turnIdSchema,
   type JsonValue,
@@ -168,19 +168,19 @@ export const relayApprovalCandidateResultSchema = z
   .readonly();
 
 export const relayRequestMethodSchemas = {
-  [RELAY_REQUEST_METHODS.initialize]: runtimeMethodSchemas["initialize"],
-  [RELAY_REQUEST_METHODS.threadList]: runtimeMethodSchemas["thread.list"],
-  [RELAY_REQUEST_METHODS.threadCreate]: runtimeMethodSchemas["thread.create"],
-  [RELAY_REQUEST_METHODS.threadOpen]: runtimeMethodSchemas["thread.open"],
-  [RELAY_REQUEST_METHODS.threadSnapshot]: runtimeMethodSchemas["thread.snapshot"],
-  [RELAY_REQUEST_METHODS.threadRename]: runtimeMethodSchemas["thread.rename"],
-  [RELAY_REQUEST_METHODS.threadDelete]: runtimeMethodSchemas["thread.delete"],
-  [RELAY_REQUEST_METHODS.threadDetach]: runtimeMethodSchemas["thread.detach"],
-  [RELAY_REQUEST_METHODS.threadCapabilities]: runtimeMethodSchemas["thread.capabilities"],
-  [RELAY_REQUEST_METHODS.turnStart]: runtimeMethodSchemas["turn.start"],
-  [RELAY_REQUEST_METHODS.turnCancel]: runtimeMethodSchemas["turn.cancel"],
-  [RELAY_REQUEST_METHODS.approvalRespond]: runtimeMethodSchemas["approval.respond"],
-  [RELAY_REQUEST_METHODS.operationGet]: runtimeMethodSchemas["operation.get"],
+  [RELAY_REQUEST_METHODS.initialize]: runtimeMethodSchemasV11["initialize"],
+  [RELAY_REQUEST_METHODS.threadList]: runtimeMethodSchemasV11["thread.list"],
+  [RELAY_REQUEST_METHODS.threadCreate]: runtimeMethodSchemasV11["thread.create"],
+  [RELAY_REQUEST_METHODS.threadOpen]: runtimeMethodSchemasV11["thread.open"],
+  [RELAY_REQUEST_METHODS.threadSnapshot]: runtimeMethodSchemasV11["thread.snapshot"],
+  [RELAY_REQUEST_METHODS.threadRename]: runtimeMethodSchemasV11["thread.rename"],
+  [RELAY_REQUEST_METHODS.threadDelete]: runtimeMethodSchemasV11["thread.delete"],
+  [RELAY_REQUEST_METHODS.threadDetach]: runtimeMethodSchemasV11["thread.detach"],
+  [RELAY_REQUEST_METHODS.threadCapabilities]: runtimeMethodSchemasV11["thread.capabilities"],
+  [RELAY_REQUEST_METHODS.turnStart]: runtimeMethodSchemasV11["turn.start"],
+  [RELAY_REQUEST_METHODS.turnCancel]: runtimeMethodSchemasV11["turn.cancel"],
+  [RELAY_REQUEST_METHODS.approvalRespond]: runtimeMethodSchemasV11["approval.respond"],
+  [RELAY_REQUEST_METHODS.operationGet]: runtimeMethodSchemasV11["operation.get"],
   [RELAY_REQUEST_METHODS.approvalCandidate]: {
     params: relayApprovalCandidateParamsSchema,
     result: relayApprovalCandidateResultSchema,
@@ -282,7 +282,7 @@ export const relayRuntimeEventSchema = z
     type: z.literal(RELAY_MESSAGE_TYPES.runtimeEvent),
     workspaceId: workspaceIdSchema,
     relaySequence: z.number().int().nonnegative(),
-    event: runtimeEventEnvelopeSchema,
+    event: runtimeEventEnvelopeV11Schema,
   })
   .strict()
   .readonly();

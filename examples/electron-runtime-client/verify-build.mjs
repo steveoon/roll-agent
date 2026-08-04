@@ -3,18 +3,25 @@ import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 
 const outputDirectory = join(import.meta.dirname, "dist");
-const [main, preload, renderer, html, styles] = await Promise.all(
-  ["main.js", "preload.cjs", "renderer.js", "index.html", "styles.css"].map((file) =>
-    readFile(join(outputDirectory, file), "utf8"),
-  ),
+const [main, preload, renderer, html, styles, preloadSource] = await Promise.all(
+  ["main.js", "preload.cjs", "renderer.js", "index.html", "styles.css"]
+    .map((file) => readFile(join(outputDirectory, file), "utf8"))
+    .concat(readFile(join(import.meta.dirname, "preload.ts"), "utf8")),
 );
 
 assert.match(main, /preload\.cjs/);
 assert.match(main, /sandbox:\s*true/);
 assert.match(main, /nodeIntegration:\s*false/);
 assert.match(main, /contextIsolation:\s*true/);
+assert.match(main, /protocolVersion !== "1\.2"/);
+assert.match(main, /protocolVersion !== "1\.1"/);
+assert.match(main, /parseRuntimeServerRequestResultForVersion/);
+assert.doesNotMatch(main, /userInput\.request/);
 assert.match(preload, /require\(["']electron["']\)/);
 assert.doesNotMatch(preload, /^\s*import\s/m);
+assert.match(preloadSource, /RuntimeMethodResultForVersion/);
+assert.match(preloadSource, /"1\.2"\s*\|\s*"1\.1"/);
+assert.doesNotMatch(preloadSource, /snapshotThread[\s\S]*?RuntimeMethodResult<"thread\.snapshot">/);
 assert.doesNotMatch(renderer, /window\.confirm/);
 assert.match(renderer, /\.showModal\(\)/);
 assert.match(renderer, /addEventListener\(["']abort["']/);

@@ -1,0 +1,42 @@
+{
+  "jsonrpc": "2.0",
+  "id": 2,
+  "result": {
+    "thread": {
+      "id": "00000000-0000-4000-8000-000000000002",
+      "title": "Golden thread",
+      "model": "fixture-model",
+      "createdAt": "2026-07-28T12:00:00.000Z",
+      "updatedAt": "2026-07-28T12:01:00.000Z",
+      "messageCount": 1
+    },
+    "messages": {
+      "items": [
+        {
+          "sequence": 0,
+          "role": "user",
+          "createdAt": "2026-07-28T12:00:00.000Z",
+          "parts": [{ "type": "text", "text": "hello" }]
+        }
+      ],
+      "nextBeforeSequence": null
+    },
+    "operations": {
+      "items": [],
+      "nextBeforeSequence": null
+    },
+    "pendingApprovals": [],
+    "pendingInteractions": [
+      {
+        "method": "approval.request",
+        "interactionId": "00000000-0000-4000-8000-000000000006",
+        "threadId": "00000000-0000-4000-8000-000000000002",
+        "turnId": "00000000-0000-4000-8000-000000000003",
+        "expiresAt": "2026-07-29T12:10:00.000Z",
+        "sensitivity": "normal",
+        "approvalId": "00000000-0000-4000-8000-000000000005"
+      }
+    ],
+    "transcriptCompleteness": "complete"
+  }
+}

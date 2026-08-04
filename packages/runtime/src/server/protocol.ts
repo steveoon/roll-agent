@@ -1,5 +1,5 @@
 import { z } from "zod";
-import type { RuntimeProtocolErrorData } from "@roll-agent/protocol";
+import type { RuntimeProtocolErrorDataV12 } from "@roll-agent/protocol";
 
 export type JsonRpcId = number | string;
 
@@ -28,7 +28,7 @@ export interface JsonRpcErrorResponse {
   readonly error: {
     readonly code: number;
     readonly message: string;
-    readonly data?: RuntimeProtocolErrorData;
+    readonly data?: RuntimeProtocolErrorDataV12;
   };
 }
 

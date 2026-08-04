@@ -1,0 +1,8 @@
+{
+  "jsonrpc": "2.0",
+  "id": "capability-rpc-1",
+  "result": {
+    "revision": 1,
+    "acceptedServerRequestMethods": ["approval.request"]
+  }
+}

@@ -17,6 +17,8 @@ import {
   threadIdSchema,
   turnIdSchema,
   type ApprovalRequestParams,
+  type ApprovalRequestParamsV12,
+  type PendingInteractionProjection,
   type RuntimeEventEnvelope,
   type RuntimeServerRequestInput,
   type RuntimeServerRequestMethod,
@@ -34,6 +36,7 @@ import {
   type RuntimeClientRequest,
   type RuntimeClientRequestOptions,
   type RuntimeClientResponder,
+  type RuntimeClientResponderOptions,
 } from "./runtime-client-request-coordinator.ts";
 import { RuntimeServer } from "./runtime-server.ts";
 import {
@@ -291,8 +294,11 @@ class SynchronouslyFailingRuntimeClientRequestCoordinator extends RuntimeClientR
 }
 
 class DetachWrappingRuntimeClientRequestCoordinator extends RuntimeClientRequestCoordinator {
-  override attachResponder(responder: RuntimeClientResponder): () => void {
-    const detachResponder = super.attachResponder(responder);
+  override attachResponder(
+    responder: RuntimeClientResponder,
+    options: RuntimeClientResponderOptions = {},
+  ): () => void {
+    const detachResponder = super.attachResponder(responder, options);
     return () => detachResponder();
   }
 }
@@ -396,6 +402,315 @@ function attachRuntimeProtocolClient(connection: JsonRpcConnection) {
     },
   };
 }
+
+test("Runtime Protocol 1.2 capability revisions are ordered, idempotent and version-scoped", async (t) => {
+  const harness = createApprovalProtocolHarness();
+  const client = attachRuntimeProtocolClient(harness.clientConn);
+  t.after(() => harness.close());
+
+  const initialized = (await client.request(1, RUNTIME_METHODS.initialize, {
+    protocolVersions: ["1.2", "1.1", "1.0"],
+    client: { name: "capability-client", version: "1.2.0" },
+  })) as { readonly protocolVersion: string };
+  assert.equal(initialized.protocolVersion, "1.2");
+
+  const revisionOne = {
+    revision: 1,
+    serverRequestMethods: [
+      "future.interaction.request",
+      RUNTIME_SERVER_REQUEST_METHODS.approvalRequest,
+    ],
+  } as const;
+  const firstAck = await client.request(2, RUNTIME_METHODS.clientCapabilitiesSet, revisionOne);
+  assert.deepEqual(firstAck, {
+    revision: 1,
+    acceptedServerRequestMethods: [RUNTIME_SERVER_REQUEST_METHODS.approvalRequest],
+  });
+  assert.deepEqual(
+    await client.request(3, RUNTIME_METHODS.clientCapabilitiesSet, revisionOne),
+    firstAck,
+  );
+  const conflicting = (await client.requestError(4, RUNTIME_METHODS.clientCapabilitiesSet, {
+    revision: 1,
+    serverRequestMethods: ["future.interaction.request"],
+  })) as { readonly data?: { readonly rollCode?: string } };
+  assert.equal(conflicting.data?.rollCode, "CAPABILITY_REVISION_CONFLICT");
+  assert.deepEqual(
+    await client.request(5, RUNTIME_METHODS.clientCapabilitiesSet, {
+      revision: 2,
+      serverRequestMethods: [],
+    }),
+    { revision: 2, acceptedServerRequestMethods: [] },
+  );
+  const stale = (await client.requestError(
+    6,
+    RUNTIME_METHODS.clientCapabilitiesSet,
+    revisionOne,
+  )) as {
+    readonly data?: { readonly rollCode?: string };
+  };
+  assert.equal(stale.data?.rollCode, "CAPABILITY_REVISION_CONFLICT");
+
+  const legacyHarness = createApprovalProtocolHarness();
+  const legacy = attachRuntimeProtocolClient(legacyHarness.clientConn);
+  t.after(() => legacyHarness.close());
+  await legacy.request(1, RUNTIME_METHODS.initialize, {
+    protocolVersions: ["1.1"],
+    client: { name: "legacy-capability-client", version: "1.1.0" },
+  });
+  const unavailable = (await legacy.requestError(2, RUNTIME_METHODS.clientCapabilitiesSet, {
+    revision: 1,
+    serverRequestMethods: [],
+  })) as { readonly data?: { readonly rollCode?: string } };
+  assert.equal(unavailable.data?.rollCode, "CAPABILITY_UNAVAILABLE");
+});
+
+test("Runtime Protocol 1.2 ACK precedes Interaction delivery and uses distinct IDs", async (t) => {
+  let executionCount = 0;
+  const harness = createApprovalProtocolHarness(() => {
+    executionCount += 1;
+  });
+  const client = attachRuntimeProtocolClient(harness.clientConn);
+  t.after(() => harness.close());
+
+  await client.request(1, RUNTIME_METHODS.initialize, {
+    protocolVersions: ["1.2"],
+    client: { name: "interaction-client", version: "1.2.0" },
+  });
+  const created = (await client.request(2, RUNTIME_METHODS.threadCreate, {
+    requestId: "00000000-0000-4000-8000-000000000391",
+    title: "v1.2 interaction",
+  })) as { readonly thread: { readonly id: string } };
+  const turnId = "00000000-0000-4000-8000-000000000392";
+  await client.request(3, RUNTIME_METHODS.turnStart, {
+    requestId: "00000000-0000-4000-8000-000000000393",
+    threadId: created.thread.id,
+    turnId,
+    input: { text: "run guarded tool after capability ACK" },
+  });
+  await waitForValue(
+    () => client.events.find((event) => event.event.type === "approval.required"),
+    "v1.2 capability ACK 前未产生 approval view",
+  );
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(
+    client.wire.some(
+      (message) =>
+        isRequest(message) && message.method === RUNTIME_SERVER_REQUEST_METHODS.approvalRequest,
+    ),
+    false,
+  );
+
+  await client.request(4, RUNTIME_METHODS.clientCapabilitiesSet, {
+    revision: 1,
+    serverRequestMethods: [RUNTIME_SERVER_REQUEST_METHODS.approvalRequest],
+  });
+  const approvalRequest = await waitForValue(
+    () =>
+      client.wire.find(
+        (message): message is JsonRpcRequest =>
+          isRequest(message) && message.method === RUNTIME_SERVER_REQUEST_METHODS.approvalRequest,
+      ),
+    "v1.2 capability ACK 后未收到 approval.request",
+  );
+  const capabilityAckIndex = client.wire.findIndex(
+    (message) => "id" in message && message.id === 4 && "result" in message,
+  );
+  assert.ok(capabilityAckIndex >= 0);
+  assert.ok(capabilityAckIndex < client.wire.indexOf(approvalRequest));
+  const params = approvalRequest.params as ApprovalRequestParamsV12;
+  assert.equal(params.threadId, created.thread.id);
+  assert.equal(params.turnId, turnId);
+  assert.equal(params.approval.turnId, turnId);
+  assert.equal(params.sensitivity, "normal");
+  assert.match(params.interactionId, /^[0-9a-f-]{36}$/u);
+  assert.ok(Date.parse(params.expiresAt) > Date.now());
+  assert.notEqual(params.interactionId, approvalRequest.id);
+
+  const expectedPendingInteraction = {
+    method: RUNTIME_SERVER_REQUEST_METHODS.approvalRequest,
+    interactionId: params.interactionId,
+    threadId: threadIdSchema.parse(created.thread.id),
+    turnId: turnIdSchema.parse(turnId),
+    expiresAt: params.expiresAt,
+    sensitivity: "normal",
+    approvalId: params.approval.id,
+  } as const satisfies PendingInteractionProjection;
+  const waitingSnapshot = (await client.request(5, RUNTIME_METHODS.threadSnapshot, {
+    threadId: created.thread.id,
+    limit: 100,
+  })) as { readonly pendingInteractions: readonly PendingInteractionProjection[] };
+  assert.deepEqual(waitingSnapshot.pendingInteractions, [expectedPendingInteraction]);
+  const projectedInteraction = waitingSnapshot.pendingInteractions[0];
+  assert.ok(projectedInteraction);
+  assert.deepEqual(Object.keys(projectedInteraction).sort(), [
+    "approvalId",
+    "expiresAt",
+    "interactionId",
+    "method",
+    "sensitivity",
+    "threadId",
+    "turnId",
+  ]);
+  for (const forbidden of ["id", "preview", "payload", "result"] as const) {
+    assert.equal(forbidden in projectedInteraction, false);
+  }
+  const openedSnapshot = (await client.request(6, RUNTIME_METHODS.threadOpen, {
+    threadId: created.thread.id,
+  })) as { readonly pendingInteractions: readonly PendingInteractionProjection[] };
+  assert.deepEqual(openedSnapshot.pendingInteractions, [expectedPendingInteraction]);
+
+  harness.clientConn.send({
+    jsonrpc: "2.0",
+    id: approvalRequest.id,
+    result: { decision: "approve" },
+  });
+  await waitForValue(
+    () => client.events.find((event) => event.event.type === "turn.completed"),
+    "v1.2 approval 后 Turn 未完成",
+  );
+  assert.equal(executionCount, 1);
+  const settledSnapshot = (await client.request(7, RUNTIME_METHODS.threadSnapshot, {
+    threadId: created.thread.id,
+    limit: 100,
+  })) as { readonly pendingInteractions: readonly PendingInteractionProjection[] };
+  assert.deepEqual(settledSnapshot.pendingInteractions, []);
+});
+
+test("Runtime Protocol 1.2 fails approval closed when its absolute deadline is missing", async (t) => {
+  let executionCount = 0;
+  let deadlineLookups = 0;
+  const harness = createApprovalProtocolHarness(() => {
+    executionCount += 1;
+  });
+  Object.defineProperty(harness.service, "getPendingApprovalExpiresAt", {
+    configurable: true,
+    value: () => {
+      deadlineLookups += 1;
+      return undefined;
+    },
+  });
+  const client = attachRuntimeProtocolClient(harness.clientConn);
+  t.after(() => harness.close());
+
+  await client.request(1, RUNTIME_METHODS.initialize, {
+    protocolVersions: ["1.2"],
+    client: { name: "missing-deadline-client", version: "1.2.0" },
+  });
+  await client.request(2, RUNTIME_METHODS.clientCapabilitiesSet, {
+    revision: 1,
+    serverRequestMethods: [RUNTIME_SERVER_REQUEST_METHODS.approvalRequest],
+  });
+  const created = (await client.request(3, RUNTIME_METHODS.threadCreate, {
+    requestId: "00000000-0000-4000-8000-000000000397",
+    title: "missing interaction deadline",
+  })) as { readonly thread: { readonly id: string } };
+  const turnId = "00000000-0000-4000-8000-000000000398";
+  await client.request(4, RUNTIME_METHODS.turnStart, {
+    requestId: "00000000-0000-4000-8000-000000000399",
+    threadId: created.thread.id,
+    turnId,
+    input: { text: "fail closed without an absolute deadline" },
+  });
+
+  const resolved = await waitForValue(
+    () => client.events.find((event) => event.event.type === "approval.resolved"),
+    "缺少 deadline 后 approval 未 fail-closed",
+  );
+  assert.equal(deadlineLookups, 1);
+  assert.equal(
+    client.wire.some(
+      (message) =>
+        isRequest(message) && message.method === RUNTIME_SERVER_REQUEST_METHODS.approvalRequest,
+    ),
+    false,
+  );
+  assert.ok(resolved.event.type === "approval.resolved");
+  assert.deepEqual(resolved.event.resolution, {
+    status: "cancelled",
+    reason: "客户端未完成审批请求，Runtime 已终止当前 Turn",
+  });
+  await waitForValue(
+    () =>
+      client.events.find((event) => event.turnId === turnId && event.event.type === "turn.failed"),
+    "缺少 deadline 后 Turn 未进入失败终态",
+  );
+  assert.equal(executionCount, 0);
+  const snapshot = (await client.request(5, RUNTIME_METHODS.threadSnapshot, {
+    threadId: created.thread.id,
+    limit: 100,
+  })) as { readonly pendingInteractions: readonly PendingInteractionProjection[] };
+  assert.deepEqual(snapshot.pendingInteractions, []);
+});
+
+test("Runtime Protocol 1.2 capability withdrawal cancels the pending Interaction once", async (t) => {
+  let executionCount = 0;
+  const harness = createApprovalProtocolHarness(() => {
+    executionCount += 1;
+  });
+  const client = attachRuntimeProtocolClient(harness.clientConn);
+  t.after(() => harness.close());
+
+  await client.request(1, RUNTIME_METHODS.initialize, {
+    protocolVersions: ["1.2"],
+    client: { name: "withdraw-client", version: "1.2.0" },
+  });
+  await client.request(2, RUNTIME_METHODS.clientCapabilitiesSet, {
+    revision: 1,
+    serverRequestMethods: [RUNTIME_SERVER_REQUEST_METHODS.approvalRequest],
+  });
+  const created = (await client.request(3, RUNTIME_METHODS.threadCreate, {
+    requestId: "00000000-0000-4000-8000-000000000394",
+    title: "withdraw interaction",
+  })) as { readonly thread: { readonly id: string } };
+  const turnId = "00000000-0000-4000-8000-000000000395";
+  await client.request(4, RUNTIME_METHODS.turnStart, {
+    requestId: "00000000-0000-4000-8000-000000000396",
+    threadId: created.thread.id,
+    turnId,
+    input: { text: "withdraw while approval is pending" },
+  });
+  const approvalRequest = await waitForValue(
+    () =>
+      client.wire.find(
+        (message): message is JsonRpcRequest =>
+          isRequest(message) && message.method === RUNTIME_SERVER_REQUEST_METHODS.approvalRequest,
+      ),
+    "撤销测试未收到 v1.2 approval.request",
+  );
+  const params = approvalRequest.params as ApprovalRequestParamsV12;
+  await client.request(5, RUNTIME_METHODS.clientCapabilitiesSet, {
+    revision: 2,
+    serverRequestMethods: [],
+  });
+  const cancellation = await waitForValue(
+    () =>
+      client.wire.find(
+        (message): message is JsonRpcNotification =>
+          isNotification(message) && message.method === RUNTIME_SERVER_REQUEST_CANCEL_NOTIFICATION,
+      ),
+    "撤销 capability 后未收到 v1.2 cancel",
+  );
+  assert.deepEqual(cancellation.params, {
+    interactionId: params.interactionId,
+    reason: "Runtime 客户端已在 capability revision 2 撤销处理能力",
+  });
+  const resolution = await waitForValue(
+    () => client.events.find((event) => event.event.type === "approval.resolved"),
+    "撤销 capability 后 approval 未收口",
+  );
+  assert.ok(resolution.event.type === "approval.resolved");
+  assert.equal(resolution.event.resolution.status, "cancelled");
+
+  harness.clientConn.send({
+    jsonrpc: "2.0",
+    id: approvalRequest.id,
+    result: { decision: "approve" },
+  });
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(executionCount, 0);
+  assert.equal(client.events.filter((event) => event.event.type === "approval.resolved").length, 1);
+});
 
 test("RuntimeServer 完整往返：create → send → confirmation → approve → done", async (t) => {
   const { serverConn, clientConn } = memoryPair();
@@ -1740,6 +2055,7 @@ test("Runtime Protocol 1.1 以 approval.request 作为唯一审批控制路径",
   );
   assert.ok(client.wire.indexOf(approvalRequest) < client.wire.indexOf(approvalView));
   const approvalParams = approvalRequest.params as ApprovalRequestParams;
+  assert.deepEqual(Object.keys(approvalParams).sort(), ["approval", "threadId"]);
 
   for (let attempt = 0; attempt < 3; attempt += 1) {
     await new Promise<void>((resolve) => setImmediate(resolve));
@@ -1747,11 +2063,15 @@ test("Runtime Protocol 1.1 以 approval.request 作为唯一审批控制路径",
   const waitingSnapshot = (await client.request(4, RUNTIME_METHODS.threadSnapshot, {
     threadId: created.thread.id,
     limit: 100,
-  })) as { readonly pendingApprovals: readonly { readonly id: string }[] };
+  })) as {
+    readonly pendingApprovals: readonly { readonly id: string }[];
+    readonly pendingInteractions?: unknown;
+  };
   assert.deepEqual(
     waitingSnapshot.pendingApprovals.map((approval) => approval.id),
     [approvalParams.approval.id],
   );
+  assert.equal(Object.hasOwn(waitingSnapshot, "pendingInteractions"), false);
 
   const legacyControlError = (await client.requestError(5, RUNTIME_METHODS.approvalRespond, {
     requestId: "00000000-0000-4000-8000-000000000304",
@@ -1913,6 +2233,72 @@ test("Runtime Protocol 1.1 兼容注入 Coordinator 包装 responder detach clos
   await waitForValue(
     () => client.events.find((envelope) => envelope.event.type === "turn.completed"),
     "包装 detach closure 后的审批响应未完成 Turn",
+  );
+});
+
+test("Runtime Protocol 1.2 wrapped detach 仍可安全投影 pending Interaction", async (t) => {
+  const harness = createApprovalProtocolHarness(
+    undefined,
+    undefined,
+    new DetachWrappingRuntimeClientRequestCoordinator(),
+  );
+  const client = attachRuntimeProtocolClient(harness.clientConn);
+  t.after(() => harness.close());
+
+  await client.request(1, RUNTIME_METHODS.initialize, {
+    protocolVersions: ["1.2"],
+    client: { name: "wrapped-detach-v12-client", version: "1.2.0" },
+  });
+  await client.request(2, RUNTIME_METHODS.clientCapabilitiesSet, {
+    revision: 1,
+    serverRequestMethods: [RUNTIME_SERVER_REQUEST_METHODS.approvalRequest],
+  });
+  const created = (await client.request(3, RUNTIME_METHODS.threadCreate, {
+    requestId: "00000000-0000-4000-8000-000000000347",
+    title: "wrapped detach v1.2 interaction",
+  })) as { readonly thread: { readonly id: string } };
+  const turnId = "00000000-0000-4000-8000-000000000348";
+  await client.request(4, RUNTIME_METHODS.turnStart, {
+    requestId: "00000000-0000-4000-8000-000000000349",
+    threadId: created.thread.id,
+    turnId,
+    input: { text: "project through wrapped detach" },
+  });
+  const approvalRequest = await waitForValue(
+    () =>
+      client.wire.find(
+        (message): message is JsonRpcRequest =>
+          isRequest(message) && message.method === RUNTIME_SERVER_REQUEST_METHODS.approvalRequest,
+      ),
+    "包装 detach closure 后未收到 v1.2 approval.request",
+  );
+  const params = approvalRequest.params as ApprovalRequestParamsV12;
+
+  for (const snapshot of [
+    await client.request(5, RUNTIME_METHODS.threadSnapshot, {
+      threadId: created.thread.id,
+      limit: 100,
+    }),
+    await client.request(6, RUNTIME_METHODS.threadOpen, {
+      threadId: created.thread.id,
+    }),
+  ]) {
+    const projected = snapshot as {
+      readonly pendingInteractions: readonly PendingInteractionProjection[];
+    };
+    assert.equal(projected.pendingInteractions.length, 1);
+    assert.equal(projected.pendingInteractions[0]?.interactionId, params.interactionId);
+    assert.equal(projected.pendingInteractions[0]?.threadId, created.thread.id);
+  }
+
+  harness.clientConn.send({
+    jsonrpc: "2.0",
+    id: approvalRequest.id,
+    result: { decision: "reject", reason: "test complete" },
+  });
+  await waitForValue(
+    () => client.events.find((event) => event.event.type === "turn.completed"),
+    "包装 detach closure 后的 v1.2 拒绝未完成 Turn",
   );
 });
 

@@ -56,7 +56,14 @@ sender, blocks navigation/new windows, and supplies a restrictive CSP. Do not
 expose API keys, environment variables, arbitrary process spawning, a generic
 Runtime request method, or a raw `ipcRenderer` object to the renderer.
 
-This reference intentionally requires Runtime Protocol `"1.1"`. Main owns the
-Runtime→Renderer request token, binds it to one `webContents`, translates Runtime
-cancellation into a preload `AbortSignal`, closes the asynchronous `<dialog>`,
-and rejects stale or cross-window responses.
+This reference accepts Runtime Protocol `"1.2"` and the N-1 `"1.1"` fallback. Its startup
+`approval.request` handler is included in the 1.2 `client.capabilities.set` handshake, so
+`RollNodeClient.start()` does not resolve until Runtime has acknowledged that capability. The
+example deliberately implements Approval only; it does not implement the #185
+`userInput.request` interaction.
+
+Main owns a renderer-local request token, binds it to one `webContents`, and never treats that
+token as a Runtime JSON-RPC `id` or 1.2 `interactionId`. In 1.2 Runtime cancels by
+`interactionId`; in 1.1 it cancels by `serverRequestId`. `@roll-agent/client-node` maps either
+form to the same preload `AbortSignal`, closes the asynchronous `<dialog>`, suppresses a late
+Result, and rejects stale or cross-window responses.

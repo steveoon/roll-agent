@@ -1,6 +1,12 @@
 import { createHash, randomUUID } from "node:crypto";
 import { RollRpcError } from "@roll-agent/client-node";
-import { jsonValueSchema, type JsonValue, type RuntimeEventEnvelope } from "@roll-agent/protocol";
+import {
+  jsonValueSchema,
+  projectRuntimeEventEnvelopeForVersion,
+  projectThreadSnapshotForVersion,
+  type JsonValue,
+  type RuntimeEventEnvelope,
+} from "@roll-agent/protocol";
 import {
   CompanionWorkspace,
   InvalidRelayRequestParamsError,
@@ -10,12 +16,14 @@ import {
 import {
   COMPANION_RELAY_PROTOCOL_VERSION,
   RELAY_ERROR_CODES,
+  RELAY_REQUEST_METHODS,
   canonicalizeRelayJson,
   classifyRelayAck,
   getRelayErrorRetryability,
   isRelayMutationRequestMethod,
   relayEnvelopeIdSchema,
   relayMessageSchema,
+  relayRequestMethodSchemas,
   relayRuntimeRequestSchema,
   type DeviceId,
   type RelayEncryptedMessage,
@@ -70,6 +78,28 @@ const RELAY_ENCRYPTION_REQUIRED_ERROR = {
   message: "Encrypted Relay request required for this workspace",
   retryable: getRelayErrorRetryability(RELAY_ERROR_CODES.encryptionRequired),
 } as const;
+
+function projectRelayRuntimeResult(request: RelayRuntimeRequest, value: unknown): JsonValue {
+  const resultSchema = relayRequestMethodSchemas[request.method].result;
+  const legacyResult = resultSchema.safeParse(value);
+  if (legacyResult.success) {
+    return jsonValueSchema.parse(legacyResult.data);
+  }
+  if (
+    request.method === RELAY_REQUEST_METHODS.threadOpen ||
+    request.method === RELAY_REQUEST_METHODS.threadSnapshot
+  ) {
+    const projected = projectThreadSnapshotForVersion("1.1", value);
+    return jsonValueSchema.parse(resultSchema.parse(projected));
+  }
+  throw legacyResult.error;
+}
+
+function projectRelayRuntimeEvent(event: RuntimeEventEnvelope) {
+  const version = event.protocolVersion === "1.2" ? "1.1" : event.protocolVersion;
+  return projectRuntimeEventEnvelopeForVersion(version, event);
+}
+
 function relayRequestFingerprint(request: RelayRuntimeRequest): string {
   const identity: JsonValue = {
     workspaceId: request.workspaceId,
@@ -384,7 +414,7 @@ export class CompanionRelayBridge {
         type: "runtime.response",
         requestId: request.requestId,
         workspaceId: request.workspaceId,
-        result: jsonValueSchema.parse(result),
+        result: projectRelayRuntimeResult(request, result),
       };
     } catch (error: unknown) {
       return {
@@ -414,13 +444,14 @@ export class CompanionRelayBridge {
     relaySequence: number,
     event: RuntimeEventEnvelope,
   ): void {
+    const relayEvent = projectRelayRuntimeEvent(event);
     const cipher = this.ciphers.get(workspaceId);
     if (cipher === undefined) {
       this.enqueue({
         type: "runtime.event",
         workspaceId,
         relaySequence,
-        event,
+        event: relayEvent,
       });
       return;
     }
@@ -429,7 +460,7 @@ export class CompanionRelayBridge {
       return;
     }
     this.enqueueTask(generation, async () => {
-      const encrypted = await cipher.encrypt(jsonValueSchema.parse(event));
+      const encrypted = await cipher.encrypt(jsonValueSchema.parse(relayEvent));
       if (this.transportGeneration !== generation) return;
       await generation.transport.send({
         type: "runtime.encrypted",
@@ -633,6 +664,6 @@ export function relayEventMessage(
     type: "runtime.event",
     workspaceId,
     relaySequence,
-    event,
+    event: projectRelayRuntimeEvent(event),
   };
 }

@@ -1,6 +1,11 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
+  projectRuntimeEventEnvelopeForVersion,
+  projectThreadSnapshotForVersion,
+  runtimeEventEnvelopeSchema,
+} from "@roll-agent/protocol";
+import {
   RELAY_MESSAGE_TYPE_VALUES,
   RELAY_ERROR_CODES,
   RELAY_ERROR_RETRYABILITY,
@@ -20,11 +25,14 @@ import {
   isRelayMutationRequestMethod,
   negotiateRelayProtocolVersion,
   parseRelayRequestParams,
+  parseRelayRequestResult,
   relayDeviceConnectSchema,
+  relayRuntimeEventSchema,
   relayRuntimeRequestSchema,
 } from "./index.ts";
 
 const IDS = {
+  runtime: "00000000-0000-4000-8000-000000000609",
   thread: "00000000-0000-4000-8000-000000000601",
   turn: "00000000-0000-4000-8000-000000000602",
   approval: "00000000-0000-4000-8000-000000000603",
@@ -33,6 +41,7 @@ const IDS = {
   device: "00000000-0000-4000-8000-000000000605",
   workspace: "00000000-0000-4000-8000-000000000606",
   secondWorkspace: "00000000-0000-4000-8000-000000000608",
+  interaction: "00000000-0000-4000-8000-000000000610",
 } as const;
 
 test("Relay Protocol v1.0 freezes message and request registries", () => {
@@ -124,6 +133,71 @@ test("method-specific parsing validates approval candidates", () => {
       reason: "",
     }),
   );
+});
+
+test("Relay Wire 1.0 accepts only projected Runtime 1.1 events and snapshots", () => {
+  const latestEvent = runtimeEventEnvelopeSchema.parse({
+    protocolVersion: "1.2",
+    runtimeInstanceId: IDS.runtime,
+    sequence: 0,
+    timestamp: "2026-07-30T00:00:00.000Z",
+    threadId: IDS.thread,
+    turnId: IDS.turn,
+    event: { type: "turn.completed" },
+  });
+  const latestEventFrame = {
+    type: "runtime.event",
+    workspaceId: IDS.workspace,
+    relaySequence: 0,
+    event: latestEvent,
+  } as const;
+
+  assert.throws(() => relayRuntimeEventSchema.parse(latestEventFrame));
+  const projectedEvent = projectRuntimeEventEnvelopeForVersion("1.1", latestEvent);
+  assert.equal(
+    relayRuntimeEventSchema.parse({
+      ...latestEventFrame,
+      event: projectedEvent,
+    }).event.protocolVersion,
+    "1.1",
+  );
+
+  const latestSnapshot = projectThreadSnapshotForVersion("1.2", {
+    thread: {
+      id: IDS.thread,
+      title: "Relay projection",
+      model: "mock",
+      createdAt: "2026-07-30T00:00:00.000Z",
+      updatedAt: "2026-07-30T00:00:00.000Z",
+      messageCount: 0,
+    },
+    messages: { items: [], nextBeforeSequence: null },
+    operations: { items: [], nextBeforeSequence: null },
+    pendingApprovals: [],
+    pendingInteractions: [
+      {
+        method: "approval.request",
+        interactionId: IDS.interaction,
+        threadId: IDS.thread,
+        turnId: IDS.turn,
+        expiresAt: "2026-07-30T00:05:00.000Z",
+        sensitivity: "normal",
+        approvalId: IDS.approval,
+      },
+    ],
+    transcriptCompleteness: "complete",
+  });
+
+  assert.throws(() =>
+    parseRelayRequestResult(RELAY_REQUEST_METHODS.threadSnapshot, latestSnapshot),
+  );
+  const projectedSnapshot = projectThreadSnapshotForVersion("1.1", latestSnapshot);
+  const parsedSnapshot = parseRelayRequestResult(
+    RELAY_REQUEST_METHODS.threadSnapshot,
+    projectedSnapshot,
+  );
+  assert.equal(parsedSnapshot.thread.id, IDS.thread);
+  assert.equal("pendingInteractions" in parsedSnapshot, false);
 });
 
 test("replay classification uses workspace and request IDs as the idempotency key", () => {

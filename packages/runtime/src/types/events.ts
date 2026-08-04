@@ -66,6 +66,8 @@ export type SessionEvent =
       readonly agentName: string;
       readonly toolName: string;
       readonly input: unknown;
+      /** Absolute deadline shared with Runtime-to-Client interaction delivery. */
+      readonly expiresAt?: string;
       readonly reason?: string;
       /** Model-authored display aid. It never changes approval policy or command execution. */
       readonly explanation?: string;

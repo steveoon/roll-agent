@@ -1,19 +1,26 @@
 import { contextBridge, ipcRenderer } from "electron";
 import type {
-  ApprovalRequestParams,
   ApprovalRequestResult,
   RuntimeEventEnvelope,
   RuntimeMethodInput,
   RuntimeMethodResult,
+  RuntimeMethodResultForVersion,
+  RuntimeServerRequestParamsForVersion,
   TurnId,
 } from "@roll-agent/protocol";
+
+type RendererApprovalRequestParams = RuntimeServerRequestParamsForVersion<
+  "1.2" | "1.1",
+  "approval.request"
+>;
+type RendererSnapshotResult = RuntimeMethodResultForVersion<"1.2" | "1.1", "thread.snapshot">;
 
 export interface RendererApprovalRequestContext {
   readonly signal: AbortSignal;
 }
 
 export type RendererApprovalRequestHandler = (
-  params: ApprovalRequestParams,
+  params: RendererApprovalRequestParams,
   context: RendererApprovalRequestContext,
 ) => ApprovalRequestResult | Promise<ApprovalRequestResult>;
 
@@ -21,9 +28,7 @@ export interface RollRendererApi {
   createThread(
     params: RuntimeMethodInput<"thread.create">,
   ): Promise<RuntimeMethodResult<"thread.create">>;
-  snapshotThread(
-    params: RuntimeMethodInput<"thread.snapshot">,
-  ): Promise<RuntimeMethodResult<"thread.snapshot">>;
+  snapshotThread(params: RuntimeMethodInput<"thread.snapshot">): Promise<RendererSnapshotResult>;
   startTurn(params: RuntimeMethodInput<"turn.start">): Promise<RuntimeMethodResult<"turn.start">>;
   cancelTurn(
     params: RuntimeMethodInput<"turn.cancel">,
@@ -42,7 +47,7 @@ const api: RollRendererApi = {
     const controllers = new Map<string, AbortController>();
     const requestHandler = (
       _event: Electron.IpcRendererEvent,
-      value: { readonly requestToken: string; readonly params: ApprovalRequestParams },
+      value: { readonly requestToken: string; readonly params: RendererApprovalRequestParams },
     ) => {
       const controller = new AbortController();
       controllers.set(value.requestToken, controller);

@@ -15,7 +15,7 @@ import {
   runtimeProtocolVersionSchema,
   streamIdSchema,
   threadIdSchema,
-  type ActiveTurn,
+  type ActiveTurnV11,
   type ApprovalResolution,
   type InitializeParams,
   type InitializeResult,
@@ -28,7 +28,7 @@ import {
   type RuntimeMethodParams,
   type RuntimeMethodResult,
   type RuntimeProtocolVersion,
-  type RuntimeProtocolErrorData,
+  type RuntimeProtocolErrorDataV12,
   type ThreadId,
   type ThreadSummary,
   type TurnId,
@@ -67,7 +67,7 @@ const REDACTED_KEYS = new Set([
   "token",
 ]);
 
-type RollErrorCode = RuntimeProtocolErrorData["rollCode"];
+type RollErrorCode = RuntimeProtocolErrorDataV12["rollCode"];
 
 export type RuntimeServiceSession = Pick<
   AgentSession,
@@ -114,7 +114,7 @@ interface ActiveTurnState {
   readonly turnId: TurnId;
   readonly session: RuntimeServiceSession;
   readonly startedAt: string;
-  status: ActiveTurn["status"];
+  status: ActiveTurnV11["status"];
   interactionFailure: string | undefined;
 }
 
@@ -135,6 +135,7 @@ interface PendingApprovalState {
   readonly threadId: ThreadId;
   readonly session: RuntimeServiceSession;
   readonly approval: PendingApproval;
+  readonly expiresAt: string | undefined;
 }
 
 export class RuntimeServiceError extends Error {
@@ -565,7 +566,7 @@ export class RuntimeService {
       limit: params.limit,
     });
     const active = this.activeTurns.get(params.threadId);
-    const activeTurn: ActiveTurn | undefined =
+    const activeTurn: ActiveTurnV11 | undefined =
       active === undefined
         ? undefined
         : {
@@ -813,6 +814,10 @@ export class RuntimeService {
           },
     );
     return { resolved: true };
+  }
+
+  getPendingApprovalExpiresAt(identity: RuntimeApprovalIdentity): string | undefined {
+    return this.findPendingApproval(identity)?.expiresAt;
   }
 
   private cancelPendingApproval(
@@ -1083,6 +1088,7 @@ export class RuntimeService {
           threadId: state.threadId,
           session: state.session,
           approval,
+          expiresAt: event.expiresAt,
         });
         this.emit(state.threadId, state.turnId, {
           type: "approval.required",

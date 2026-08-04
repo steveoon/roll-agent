@@ -814,8 +814,10 @@ test("AgentSession 写类动作触发 confirmation，approve 后执行", async (
     sources: [source("msg-agent", "send_message", () => (calls += 1))],
     maxSteps: 8,
     policy: new DefaultToolPolicy(),
+    turnTimeoutMs: 60_000,
   });
 
+  const startedAt = Date.now();
   const events: SessionEvent[] = [];
   for await (const event of session.send("需要")) {
     events.push(event);
@@ -828,6 +830,10 @@ test("AgentSession 写类动作触发 confirmation，approve 后执行", async (
   assert.ok(confirmation && confirmation.type === "confirmation-required");
   assert.equal(confirmation.toolName, "send_message");
   assert.equal(confirmation.reason, "写/发送类操作");
+  assert.ok(confirmation.expiresAt !== undefined);
+  const expiresAt = Date.parse(confirmation.expiresAt);
+  assert.ok(expiresAt >= startedAt + 60_000);
+  assert.ok(expiresAt <= Date.now() + 60_000);
   assert.equal(calls, 1);
   const toolResult = events.find((event) => event.type === "tool-result");
   assert.ok(toolResult && toolResult.type === "tool-result" && toolResult.isError === false);

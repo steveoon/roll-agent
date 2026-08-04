@@ -80,10 +80,11 @@ Policy 会收到 `{ signal }`，Runtime 取消时该信号同步 abort。返回�
 `reason`，不复用 Runtime mutation 的 UUID `requestId`。Relay envelope 自己的
 `requestId` 只负责重投和响应缓存。`"1.0"` 兼容连接继续走
 `approval.required` + `approval.respond`；`"1.1"` 上调用后者会 fail closed。
-这里的 `"1.0"` / `"1.1"` 指 `RuntimeEventEnvelope.protocolVersion`，不是外层
-Companion Relay `"1.0"`。Browser 必须按每个 Runtime Event 的协议版本选择审批方法：
-Runtime `"1.0"` 走 `approval.respond`，Runtime `"1.1"` 才走 `approval.candidate`；
-滚动升级时不能仅凭 Relay 版本推断该能力。
+这里的 `"1.0"` / `"1.1"` 指 Relay 事件内的 Runtime 兼容版本，不是外层 Companion
+Relay `"1.0"`。本地 Runtime `"1.2"` 会先投影成冻结的 `"1.1"` envelope；Browser
+收到 `"1.0"` 时走 `approval.respond`，收到 `"1.1"` 时走 `approval.candidate`。Relay
+Wire `"1.0"` 不暴露 Runtime `"1.2"` 新字段，滚动升级时也不能仅凭外层 Relay 版本推断
+审批能力。
 
 当前 `@roll-agent/relay-protocol` 只冻结已经存在的 Companion Relay Wire `"1.0"`。
 `approval.candidate` 仍是该版本中的 Approval 专属候选方法；通用 typed interaction

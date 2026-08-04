@@ -4,6 +4,7 @@ import {
   RUNTIME_SERVER_REQUEST_CANCEL_NOTIFICATION,
   RUNTIME_SERVER_REQUEST_METHODS,
   approvalIdSchema,
+  interactionIdSchema,
   runtimeInstanceIdSchema,
   threadIdSchema,
   turnIdSchema,
@@ -34,8 +35,10 @@ class MemoryResponder {
 
 const scopeId = runtimeInstanceIdSchema.parse("00000000-0000-4000-8000-000000000360");
 const threadId = threadIdSchema.parse("00000000-0000-4000-8000-000000000361");
+const otherThreadId = threadIdSchema.parse("00000000-0000-4000-8000-000000000365");
 const approvalId = approvalIdSchema.parse("00000000-0000-4000-8000-000000000362");
 const turnId = turnIdSchema.parse("00000000-0000-4000-8000-000000000363");
+const interactionId = interactionIdSchema.parse("00000000-0000-4000-8000-000000000364");
 
 function approvalRequestInput() {
   return {
@@ -47,6 +50,17 @@ function approvalRequestInput() {
       toolName: "click",
       preview: { selector: "#submit" },
     },
+  } as const;
+}
+
+function approvalRequestInputV12() {
+  return {
+    interactionId,
+    threadId,
+    turnId,
+    expiresAt: "2099-07-28T12:05:00.000Z",
+    sensitivity: "normal",
+    approval: approvalRequestInput().approval,
   } as const;
 }
 
@@ -63,6 +77,328 @@ function requestMessages(responder: MemoryResponder): readonly JsonRpcRequest[] 
     (candidate): candidate is JsonRpcRequest => "method" in candidate && "id" in candidate,
   );
 }
+
+test("Protocol 1.2 does not deliver before capability ACK", async () => {
+  const responder = new MemoryResponder();
+  const responderId = createRuntimeClientResponderId();
+  const coordinator = new RuntimeClientRequestCoordinator();
+  const detach = coordinator.attachResponder(
+    {
+      id: responderId,
+      scopeId,
+      send: (message) => responder.send(message),
+      close: () => responder.close(),
+    },
+    { acceptedServerRequestMethods: [], capabilitiesAcknowledged: false },
+  );
+  const pending = coordinator.request(
+    RUNTIME_SERVER_REQUEST_METHODS.approvalRequest,
+    approvalRequestInputV12(),
+    {
+      key: approvalId,
+      scopeId,
+      eligibleResponderId: responderId,
+      approvalId,
+      threadId,
+      turnId,
+      expiresAt: approvalRequestInputV12().expiresAt,
+      protocolVersion: "1.2",
+    },
+  );
+
+  const internal = getRuntimeClientRequestCoordinatorInternal(coordinator);
+  assert.deepEqual(requestMessages(responder), []);
+  assert.deepEqual(internal.getPendingInteractionProjectionsForAttachment(detach, threadId), []);
+  assert.equal(
+    internal.setServerRequestMethodsForAttachment(
+      detach,
+      [RUNTIME_SERVER_REQUEST_METHODS.approvalRequest],
+      "capability update",
+      true,
+    ),
+    true,
+  );
+  assert.deepEqual(requestMessages(responder), []);
+  const expectedProjection = {
+    method: RUNTIME_SERVER_REQUEST_METHODS.approvalRequest,
+    interactionId,
+    threadId,
+    turnId,
+    expiresAt: approvalRequestInputV12().expiresAt,
+    sensitivity: "normal",
+    approvalId,
+  } as const;
+  assert.deepEqual(internal.getPendingInteractionProjectionsForAttachment(detach, threadId), [
+    expectedProjection,
+  ]);
+  await new Promise<void>((resolve) => setTimeout(resolve, 0));
+  const delivery = requestMessages(responder)[0];
+  assert.ok(delivery);
+  assert.deepEqual(delivery.params, approvalRequestInputV12());
+  assert.deepEqual(
+    internal.getPendingInteractionProjectionsForAttachment(detach, otherThreadId),
+    [],
+  );
+  const projections = internal.getPendingInteractionProjectionsForAttachment(detach, threadId);
+  assert.deepEqual(projections, [expectedProjection]);
+  const projection = projections?.[0];
+  assert.ok(projection);
+  assert.equal("id" in projection, false);
+  assert.equal("preview" in projection, false);
+  assert.equal("payload" in projection, false);
+  assert.equal("result" in projection, false);
+
+  assert.equal(
+    coordinator.handleResponse(responderId, {
+      jsonrpc: "2.0",
+      id: delivery.id,
+      result: { decision: "approve" },
+    }),
+    true,
+  );
+  assert.deepEqual(await pending.result, { decision: "approve" });
+  assert.deepEqual(internal.getPendingInteractionProjectionsForAttachment(detach, threadId), []);
+});
+
+test("accepted methods cannot bypass Protocol 1.2 capability ACK", async () => {
+  const responder = new MemoryResponder();
+  const responderId = createRuntimeClientResponderId();
+  const coordinator = new RuntimeClientRequestCoordinator();
+  const detach = coordinator.attachResponder(
+    {
+      id: responderId,
+      scopeId,
+      send: (message) => responder.send(message),
+      close: () => responder.close(),
+    },
+    {
+      acceptedServerRequestMethods: [RUNTIME_SERVER_REQUEST_METHODS.approvalRequest],
+      capabilitiesAcknowledged: false,
+    },
+  );
+  const pending = coordinator.request(
+    RUNTIME_SERVER_REQUEST_METHODS.approvalRequest,
+    approvalRequestInputV12(),
+    {
+      key: approvalId,
+      scopeId,
+      eligibleResponderId: responderId,
+      approvalId,
+      threadId,
+      turnId,
+      expiresAt: approvalRequestInputV12().expiresAt,
+      protocolVersion: "1.2",
+    },
+  );
+  const internal = getRuntimeClientRequestCoordinatorInternal(coordinator);
+
+  assert.deepEqual(requestMessages(responder), []);
+  assert.equal(internal.redeliver(approvalId, responderId), false);
+  assert.equal(
+    internal.setServerRequestMethodsForAttachment(
+      detach,
+      [RUNTIME_SERVER_REQUEST_METHODS.approvalRequest],
+      "capability ACK",
+      false,
+    ),
+    true,
+  );
+  const delivery = requestMessages(responder)[0];
+  assert.ok(delivery);
+  assert.equal(
+    coordinator.handleResponse(responderId, {
+      jsonrpc: "2.0",
+      id: delivery.id,
+      result: { decision: "approve" },
+    }),
+    true,
+  );
+  assert.deepEqual(await pending.result, { decision: "approve" });
+});
+
+test("pre-ACK id:null fails waiting interactions without affecting another responder", async () => {
+  const waitingResponder = new MemoryResponder();
+  const healthyResponder = new MemoryResponder();
+  const waitingResponderId = createRuntimeClientResponderId();
+  const healthyResponderId = createRuntimeClientResponderId();
+  const coordinator = new RuntimeClientRequestCoordinator();
+  coordinator.attachResponder(
+    {
+      id: waitingResponderId,
+      scopeId,
+      send: (message) => waitingResponder.send(message),
+      close: () => waitingResponder.close(),
+    },
+    {
+      acceptedServerRequestMethods: [RUNTIME_SERVER_REQUEST_METHODS.approvalRequest],
+      capabilitiesAcknowledged: false,
+    },
+  );
+  coordinator.attachResponder({
+    id: healthyResponderId,
+    scopeId,
+    send: (message) => healthyResponder.send(message),
+    close: () => healthyResponder.close(),
+  });
+  const waiting = coordinator.request(
+    RUNTIME_SERVER_REQUEST_METHODS.approvalRequest,
+    approvalRequestInputV12(),
+    {
+      key: "waiting-before-ack",
+      scopeId,
+      eligibleResponderId: waitingResponderId,
+      approvalId,
+      threadId,
+      turnId,
+      expiresAt: approvalRequestInputV12().expiresAt,
+      protocolVersion: "1.2",
+    },
+  );
+  const healthy = coordinator.request(
+    RUNTIME_SERVER_REQUEST_METHODS.approvalRequest,
+    approvalRequestInput(),
+    {
+      key: "healthy-default-v1.1",
+      scopeId,
+      eligibleResponderId: healthyResponderId,
+      approvalId,
+      threadId,
+      turnId,
+    },
+  );
+  const healthyDelivery = requestMessages(healthyResponder)[0];
+  assert.ok(healthyDelivery);
+  assert.deepEqual(requestMessages(waitingResponder), []);
+
+  assert.equal(
+    coordinator.handleResponse(waitingResponderId, {
+      jsonrpc: "2.0",
+      id: null,
+      error: { code: -32_700, message: "Parse error before ACK" },
+    }),
+    true,
+  );
+  await assert.rejects(waiting.result, /无法关联/u);
+  assert.equal(waitingResponder.closeCalls, 1);
+  assert.equal(healthyResponder.closeCalls, 0);
+  assert.equal(
+    coordinator.handleResponse(healthyResponderId, {
+      jsonrpc: "2.0",
+      id: healthyDelivery.id,
+      result: { decision: "approve" },
+    }),
+    true,
+  );
+  assert.deepEqual(await healthy.result, { decision: "approve" });
+});
+
+test("Protocol 1.2 empty capability ACK fails an already-waiting request closed", async () => {
+  const responder = new MemoryResponder();
+  const responderId = createRuntimeClientResponderId();
+  const coordinator = new RuntimeClientRequestCoordinator();
+  const detach = coordinator.attachResponder(
+    {
+      id: responderId,
+      scopeId,
+      send: (message) => responder.send(message),
+      close: () => responder.close(),
+    },
+    { acceptedServerRequestMethods: [], capabilitiesAcknowledged: false },
+  );
+  const pending = coordinator.request(
+    RUNTIME_SERVER_REQUEST_METHODS.approvalRequest,
+    approvalRequestInputV12(),
+    {
+      key: approvalId,
+      scopeId,
+      eligibleResponderId: responderId,
+      approvalId,
+      threadId,
+      turnId,
+      expiresAt: approvalRequestInputV12().expiresAt,
+      protocolVersion: "1.2",
+    },
+  );
+
+  assert.equal(
+    getRuntimeClientRequestCoordinatorInternal(coordinator).setServerRequestMethodsForAttachment(
+      detach,
+      [],
+      "empty ACK",
+      true,
+    ),
+    true,
+  );
+  await assert.rejects(
+    pending.result,
+    (error: unknown) =>
+      error instanceof RuntimeClientRequestError &&
+      /未协商 Runtime Server Request/u.test(error.message),
+  );
+  assert.deepEqual(responder.sent, []);
+});
+
+test("Protocol 1.2 capability withdrawal cancels by InteractionId and ignores late response", async () => {
+  const responder = new MemoryResponder();
+  const responderId = createRuntimeClientResponderId();
+  const coordinator = new RuntimeClientRequestCoordinator();
+  coordinator.attachResponder(
+    {
+      id: responderId,
+      scopeId,
+      send: (message) => responder.send(message),
+      close: () => responder.close(),
+    },
+    {
+      acceptedServerRequestMethods: [RUNTIME_SERVER_REQUEST_METHODS.approvalRequest],
+      capabilitiesAcknowledged: true,
+    },
+  );
+  const pending = coordinator.request(
+    RUNTIME_SERVER_REQUEST_METHODS.approvalRequest,
+    approvalRequestInputV12(),
+    {
+      key: approvalId,
+      scopeId,
+      eligibleResponderId: responderId,
+      approvalId,
+      threadId,
+      turnId,
+      expiresAt: approvalRequestInputV12().expiresAt,
+      protocolVersion: "1.2",
+    },
+  );
+  const delivery = requestMessages(responder)[0];
+  assert.ok(delivery);
+
+  assert.equal(
+    coordinator.setResponderServerRequestMethods(responderId, [], "capability withdrawn"),
+    true,
+  );
+  await assert.rejects(
+    pending.result,
+    (error: unknown) =>
+      error instanceof RuntimeClientRequestCancelledError &&
+      error.reason === "capability withdrawn",
+  );
+  const cancellation = responder.sent.find(
+    (message) =>
+      "method" in message && message.method === RUNTIME_SERVER_REQUEST_CANCEL_NOTIFICATION,
+  );
+  assert.ok(cancellation && "method" in cancellation && !("id" in cancellation));
+  assert.deepEqual(cancellation.params, {
+    interactionId,
+    reason: "capability withdrawn",
+  });
+  assert.equal(
+    coordinator.handleResponse(responderId, {
+      jsonrpc: "2.0",
+      id: delivery.id,
+      result: { decision: "approve" },
+    }),
+    false,
+  );
+});
 
 test("id:null JSON-RPC error fails only the selected responder and closes it", async () => {
   const responder = new MemoryResponder();
@@ -355,6 +691,29 @@ test("invalid absolute deadline fails before registering or delivering a request
       error instanceof RuntimeClientRequestError && /expiresAt/u.test(error.message),
   );
   assert.deepEqual(responder.sent, []);
+
+  for (const expiresAt of [undefined, "2099-07-28T12:06:00.000Z"]) {
+    assert.throws(
+      () =>
+        coordinator.request(
+          RUNTIME_SERVER_REQUEST_METHODS.approvalRequest,
+          approvalRequestInputV12(),
+          {
+            key: `v1.2-deadline-${String(expiresAt)}`,
+            scopeId,
+            eligibleResponderId: responderId,
+            approvalId,
+            threadId,
+            turnId,
+            ...(expiresAt === undefined ? {} : { expiresAt }),
+            protocolVersion: "1.2",
+          },
+        ),
+      (error: unknown) =>
+        error instanceof RuntimeClientRequestError &&
+        /绝对 expiresAt deadline/u.test(error.message),
+    );
+  }
 
   const replacement = coordinator.request(
     RUNTIME_SERVER_REQUEST_METHODS.approvalRequest,

@@ -1,0 +1,9 @@
+{
+  "jsonrpc": "2.0",
+  "id": "capability-rpc-1",
+  "method": "client.capabilities.set",
+  "params": {
+    "revision": 1,
+    "serverRequestMethods": ["future.request", "approval.request"]
+  }
+}

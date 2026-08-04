@@ -2,7 +2,7 @@ import type { ConversationEngine } from "../engine/conversation-engine.ts";
 import {
   RUNTIME_ERROR_CODES,
   jsonValueSchema,
-  type RuntimeProtocolErrorData,
+  type RuntimeProtocolErrorDataV12,
 } from "@roll-agent/protocol";
 import type { AgentSession } from "../engine/agent-session.ts";
 import { createSafeCapabilitySnapshot } from "../engine/capability-manifest.ts";
@@ -52,7 +52,7 @@ function toJsonRpcError(
 ): {
   readonly code: number;
   readonly message: string;
-  readonly data?: RuntimeProtocolErrorData;
+  readonly data?: RuntimeProtocolErrorDataV12;
 } {
   if (error instanceof RuntimeServiceError) {
     const details = jsonValueSchema.safeParse(error.details);

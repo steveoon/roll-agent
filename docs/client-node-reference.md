@@ -6,8 +6,8 @@
 |---|---|
 | Node.js | `>=22.6.0` |
 | 默认命令 | `roll runtime serve --stdio` |
-| 最新协议 | Roll Runtime Protocol `"1.1"` |
-| 无 Server Request handler 时 | 仅广告 `"1.0"` |
+| 最新协议 | Roll Runtime Protocol `"1.2"` |
+| 无 Server Request handler 时 | 广告 `["1.2","1.0"]`；1.2 capability 集合为空 |
 | 默认请求超时 | `30,000 ms` |
 | 默认本地帧上限 | `4 MiB` |
 | 默认读取重试 | 最多 `1` 次，间隔 `100 ms` |
@@ -38,12 +38,14 @@
 | `maxReadRetries` | `number` | `1` | 明确可重试读取的最大重试次数 |
 | `readRetryDelayMs` | `number` | `100` | 读取重试间隔 |
 | `shutdownOptions` | `RuntimeShutdownOptions` | 见关闭阶段 | 默认关闭预算 |
-| `serverRequestHandlers` | `RuntimeServerRequestHandlers` | 无 | Runtime→Client typed handler；覆盖目标版本全部必需方法后才广告该版本 |
+| `serverRequestHandlers` | `RuntimeServerRequestHandlers` | 无 | Runtime→Client typed handler；1.2 通过 capability handshake 协商，1.1 仍要求覆盖必需方法 |
 
 客户端构造成功后的 `initialize` 协商失败会进入有界关闭，不会把未完成初始化的子进程交给
 调用方。
 
-`start()` / `connect()` 会自动且仅发送一次 `initialize`。连接成功后再次通过
+`start()` / `connect()` 会自动且仅发送一次 `initialize`。若协商到 `"1.2"`，
+还会发送首个 `client.capabilities.set` 并等待 Runtime ACK；因此返回的 Client 已经可以
+安全接收当前声明的 Server Request，ACK 前不会向调用方暴露连接。连接成功后再次通过
 `request("initialize", ...)` 初始化会被客户端拒绝，既不会写入 Transport，也不会改变
 已协商版本。
 
@@ -78,7 +80,7 @@ interface RuntimeClientTransport {
 | `onExit(listener)` | 取消订阅函数 | 订阅真实进程退出或最终有界终止失败 |
 | `getInitializationResult()` | `InitializeResult` | 读取协商版本、实例 ID、features 与 limits |
 | `getOutcomeUnknownTurnIds()` | `readonly TurnId[]` | 当前客户端生命周期内累计的未知 Turn |
-| `registerServerRequestHandler(method, handler)` | 取消注册函数 | 在已协商 `"1.1"` 的连接上注册或替换 typed handler |
+| `registerServerRequestHandler(method, handler)` | 取消注册函数 | 注册或替换 typed handler；1.2 自动同步递增 capability revision |
 | `shutdown(options?)` | `Promise<RuntimeClientExit>` | 可等待且幂等的有界关闭 |
 | `close()` | `void` | fire-and-forget 关闭；不向调用方暴露 shutdown rejection |
 
@@ -89,15 +91,18 @@ interface RuntimeClientTransport {
 
 ### 启动时注册
 
-`approval.request` 是 `"1.1"` 当前唯一的 Server Request：
+`approval.request` 是 1.2 与 1.1 当前共同支持的 Server Request：
 
 ```ts
 const client = await RollNodeClient.start({
   cwd: "/absolute/path/to/workspace",
   serverRequestHandlers: {
-    "approval.request": async ({ approval }, { requestId, signal }) => {
+    "approval.request": async (params, { requestId, signal }) => {
+      const { approval } = params;
+      const interactionId = "interactionId" in params ? params.interactionId : undefined;
       const decision = await showApprovalDialog({
         requestId,
+        interactionId,
         approval,
         signal,
       });
@@ -118,11 +123,11 @@ interface RuntimeServerRequestContext {
 }
 
 type RuntimeServerRequestHandler<TMethod extends RuntimeServerRequestMethod> = (
-  params: RuntimeServerRequestParams<TMethod>,
+  params: RuntimeServerRequestParamsForSupportedVersions<TMethod>,
   context: RuntimeServerRequestContext,
 ) =>
-  | RuntimeServerRequestResult<TMethod>
-  | Promise<RuntimeServerRequestResult<TMethod>>;
+  | RuntimeServerRequestResultForSupportedVersions<TMethod>
+  | Promise<RuntimeServerRequestResultForSupportedVersions<TMethod>>;
 ```
 
 Handler 必须返回符合 `@roll-agent/protocol` Schema 的结果。用户拒绝是正常
@@ -130,27 +135,39 @@ Handler 必须返回符合 `@roll-agent/protocol` Schema 的结果。用户拒�
 失败返回 `-32603`，Runtime 随后 fail-closed 终止当前 Turn；它不会把系统失败记录成
 `user_rejected`。
 
+1.2 params 包含 `interactionId`、`threadId`、`turnId`、`expiresAt`、
+`sensitivity` 和方法专属 payload；1.1 Approval params 继续保持
+`{ threadId, approval, expiresAt? }`。分支代码应使用 `"interactionId" in params`
+收窄，而不是把 JSON-RPC `requestId`、逻辑 `interactionId` 或 mutation
+`params.requestId` 互相转换。
+
 ### 版本广告
 
 | 构造时 handlers | Client 广告 | 可能协商结果 |
 |---|---|---|
-| 覆盖 `"1.1"` 全部必需 handler | `["1.1","1.0"]` | 新 Runtime 为 `"1.1"`；旧 Runtime 可回退 `"1.0"` |
-| 无 handler / 空对象 | `["1.0"]` | `"1.0"` |
+| 注册 `approval.request` | `["1.2","1.1","1.0"]` | 新 Runtime 为 `"1.2"`；1.1/1.0 Runtime 可逐级回退 |
+| 无 handler / 空对象 | `["1.2","1.0"]` | 新 Runtime 为 `"1.2"` 且 ACK 空 capability；旧 Runtime 回退 `"1.0"` |
 
-`"1.1"` 当前唯一必需 handler 是 `approval.request`。必需方法表由
+`"1.2"` 没有强制 handler；所有 Server Request 都由初始化后的
+`client.capabilities.set` 协商。`"1.1"` 当前唯一必需 handler 是
+`approval.request`。必需方法表由
 `REQUIRED_RUNTIME_SERVER_REQUEST_METHODS_BY_VERSION` 提供；未来协议版本新增必需方法时，
 Client 必须覆盖该版本的全部方法才会广告它。可选 UI Request 应走独立的 Client
 capability 协商，不能静默扩大既有版本的必需方法集合。调用方也可使用
 `getRuntimeProtocolCapabilities()` 和 `isRuntimeServerRequestMethodRequired()` 查询同一
 协议能力表。
 
-是否广告 `"1.1"` 在 `start()` / `connect()` 初始化前决定。若已协商 `"1.0"`，再调用
+`"1.1"` 是否被广告仍在 `start()` / `connect()` 初始化前决定。若已协商 `"1.0"`，再调用
 `registerServerRequestHandler()` 会抛错；应把初始 handler 传给
 `serverRequestHandlers`。
 
+协商到 `"1.2"` 时，Client 在 `initialize` 后发送 revision `1`。后续新增或撤销
+handler 都会串行发送更高 revision，并核验 Runtime 返回相同 revision 与预期交集。
+capability 同步失败、revision 冲突或 ACK 集合异常会使连接 fail closed。
+
 ### `registerServerRequestHandler(method, handler)`
 
-在已协商 `"1.1"` 的连接上注册或替换 handler，并返回取消注册函数：
+在已协商 `"1.2"` 或 `"1.1"` 的连接上注册或替换 handler，并返回取消注册函数：
 
 ```ts
 const unregister = client.registerServerRequestHandler(
@@ -163,16 +180,19 @@ const unregister = client.registerServerRequestHandler(
 unregister();
 ```
 
-取消注册不会降级当前连接的协议版本。若 disposer 要移除的是已协商版本的必需 handler，
-Client 会立即按协议违规 fail closed 并关闭连接，避免继续宣称无法履行的能力；若该 handler
-已经被后续注册替换，旧 disposer 是 no-op，不会误删新 handler。未来可选方法没有 handler
-时，Client 才会对对应 Request 返回 `-32601 Method not found`。
+取消注册不会降级当前连接的协议版本。在 1.2 中，Client 先立即撤销本地可处理资格并 abort
+该 method 的全部未决交互，再发送更高 capability revision；迟到 Result 不会写回。
+若该 handler 已经被后续注册替换，旧 disposer 是 no-op，不会误删新 handler。
+
+在 1.1 中，若 disposer 要移除必需 handler，Client 会立即按协议违规 fail closed 并关闭
+连接，避免继续宣称无法履行的能力。1.0 不支持连接建立后的 handler 注册。
 
 ### `AbortSignal` 与断线边界
 
 以下情况会 abort 正在执行的 handler：
 
 - Runtime 发送 `runtime.serverRequest.cancel`；
+- 1.2 撤销该 method 的 capability；
 - Client `shutdown()` / `close()`；
 - Runtime 进程或 Transport 退出。
 
@@ -181,10 +201,12 @@ Handler 应把 `signal` 传给本地对话框、Promise 或其他可取消交互
 Response。
 
 `requestTimeoutMs` 只约束 Client→Runtime 的普通请求，不给人工审批添加 `30s` timeout。
-当前 `stdio` 连接不支持 Server Request replay/resume：断线会 abort 全部 handler，
-重启后应读取 Snapshot 收敛，不能自动重放旧审批或旧 Turn。
+1.2 cancel 使用逻辑 `interactionId`，1.1 cancel 使用当前投递的 JSON-RPC
+`serverRequestId`；Client 都映射到同一个 handler `AbortSignal`。当前 `stdio` 连接
+不支持持久 Server Request replay/resume：断线会 abort 全部 handler，重启后应读取
+Snapshot 收敛，不能自动重放旧审批或旧 Turn。
 
-在 `"1.1"` 中，`onEvent()` 收到的 `approval.required` 只是只读 View Event；审批结果
+在 `"1.2"` 与 `"1.1"` 中，`onEvent()` 收到的 `approval.required` 只是只读 View Event；审批结果
 必须由 `approval.request` handler 返回。`approval.resolved` 用于关闭审批卡片、同步最终
 状态。`"1.0"` 才继续使用 `approval.required` + `approval.respond`。
 
