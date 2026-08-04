@@ -6,9 +6,9 @@ import {
   RUNTIME_METHODS,
   RUNTIME_SERVER_REQUEST_METHODS,
   parseRuntimeMethodParams,
-  parseRuntimeServerRequestResult,
-  type ApprovalRequestParams,
+  parseRuntimeServerRequestResultForVersion,
   type ApprovalRequestResult,
+  type RuntimeServerRequestParamsForVersion,
 } from "@roll-agent/protocol";
 import { RollNodeClient } from "@roll-agent/client-node";
 import type { IpcMainInvokeEvent } from "electron";
@@ -22,6 +22,12 @@ interface PendingRendererApproval {
   resolve(result: ApprovalRequestResult): void;
   reject(error: Error): void;
 }
+
+type ApprovalProtocolVersion = "1.2" | "1.1";
+type RendererApprovalRequestParams = RuntimeServerRequestParamsForVersion<
+  ApprovalProtocolVersion,
+  typeof RUNTIME_SERVER_REQUEST_METHODS.approvalRequest
+>;
 
 const pendingRendererApprovals = new Map<string, PendingRendererApproval>();
 
@@ -40,7 +46,7 @@ function assertTrustedSender(event: IpcMainInvokeEvent, trustedUrl: string): voi
 
 function requestRendererApproval(
   window: BrowserWindow,
-  params: ApprovalRequestParams,
+  params: RendererApprovalRequestParams,
   signal: AbortSignal,
 ): Promise<ApprovalRequestResult> {
   if (signal.aborted) {
@@ -105,10 +111,11 @@ async function createWindow(): Promise<void> {
       window.webContents.send("roll:outcome-unknown", turnId);
     },
   });
-  if (client.getInitializationResult().protocolVersion !== "1.1") {
+  const protocolVersion = client.getInitializationResult().protocolVersion;
+  if (protocolVersion !== "1.2" && protocolVersion !== "1.1") {
     await client.shutdown();
     client = undefined;
-    throw new Error("This Electron reference requires Runtime Protocol 1.1");
+    throw new Error("This Electron reference requires Runtime Protocol 1.2 or 1.1");
   }
   client.onEvent((event) => {
     window.webContents.send("roll:event", event);
@@ -158,7 +165,8 @@ async function createWindow(): Promise<void> {
     if (pending === undefined || pending.webContentsId !== event.sender.id) {
       throw new Error("Approval request is no longer pending for this window");
     }
-    const result = parseRuntimeServerRequestResult(
+    const result = parseRuntimeServerRequestResultForVersion(
+      protocolVersion,
       RUNTIME_SERVER_REQUEST_METHODS.approvalRequest,
       input,
     );

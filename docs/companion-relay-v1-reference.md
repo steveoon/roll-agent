@@ -51,17 +51,16 @@ HA、监控或本地确认 UI。
 `RUNTIME_METHODS` 自动扩张。新增 Wire message、method 或必需 handler 必须进入显式的新
 Relay version，并提供兼容矩阵；不能静默修改 `"1.0"`。
 
-这里冻结的是 Relay envelope 与 recognized method registry；registry 会明确区分
-`query`、`mutation` 和不得转发的 `local-only`。既有 Runtime method 的 Params/Result
-仍由每个 Workspace 已协商的 Runtime Protocol 版本定义。
-`relayRequestMethodSchemas` 只是当前 `@roll-agent/protocol` 依赖版本的 typed 视图，不是
-Relay `"1.0"` 复制出的第二套 Runtime Schema。
+这里冻结的是 Relay envelope、recognized method registry，以及这些 method 在旧 Wire 上
+使用的 Runtime Protocol `"1.1"` 兼容 Params/Result 视图；registry 会明确区分 `query`、
+`mutation` 和不得转发的 `local-only`。`relayRequestMethodSchemas` 明确绑定该冻结视图，
+不会随最新 `@roll-agent/protocol` registry 自动扩张。
 
-Relay `"1.0"` 只描述外层信封与传输；嵌套的 Runtime 能力以
-`RuntimeEventEnvelope.protocolVersion` 为准。Browser 必须逐 Workspace/Runtime 记录该
-版本：收到 Runtime `"1.0"` 的 `approval.required` 时发送 `approval.respond`，只有收到
-Runtime `"1.1"` 时才发送 `approval.candidate`。因此新 Browser 与旧 Companion
-滚动共存时会显式走 Runtime `"1.0"` fallback，不能从 Relay 版本猜测审批能力。
+Relay `"1.0"` 只描述外层信封与传输；嵌套事件携带 Runtime 兼容版本。本地 Runtime
+`"1.2"` 事件会投影成 `protocolVersion: "1.1"`，Browser 必须逐 Workspace 记录该版本：
+收到 `"1.0"` 的 `approval.required` 时发送 `approval.respond`，收到 `"1.1"` 时发送
+`approval.candidate`。因此新 Runtime 与旧 Browser/Companion 滚动共存时不会把 1.2 字段
+偷渡进旧 Wire，也不能从外层 Relay 版本猜测审批能力。
 
 | 消息 `type` | 方向 | 用途 |
 |---|---|---|

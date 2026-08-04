@@ -275,6 +275,7 @@ interface ActiveTurn {
   readonly pendingToolCalls: Map<string, PendingToolCall>;
   readonly completedStepResponses: Map<string, readonly ModelMessage[]>;
   readonly toolExecutions: ToolExecutionRecord[];
+  expiresAt?: string;
   hadPotentialSideEffects: boolean;
   aborted: boolean;
   cancellationActivity?: TurnCancellationActivity;
@@ -1157,6 +1158,7 @@ export class AgentSession {
 
       queue.push({ type: "message-start", messageId: randomUUID() });
       if (this.turnTimeoutMs !== undefined) {
+        activeTurn.expiresAt = new Date(Date.now() + this.turnTimeoutMs).toISOString();
         turnTimeout = setTimeout(() => {
           if (activeTurn.abortController.signal.aborted) {
             return;
@@ -1885,6 +1887,7 @@ export class AgentSession {
       agentName: request.agentName,
       toolName: request.toolName,
       input: request.input,
+      ...(this.activeTurn?.expiresAt !== undefined ? { expiresAt: this.activeTurn.expiresAt } : {}),
       ...(request.reason ? { reason: request.reason } : {}),
       ...(request.explanation !== undefined ? { explanation: request.explanation } : {}),
     });

@@ -21,7 +21,7 @@ import {
   RUNTIME_SERVER_REQUEST_METHODS,
   getApprovalExplanation,
   parseRuntimeMethodParams,
-  parseRuntimeServerRequestResult,
+  parseRuntimeServerRequestParamsForVersion,
   type RuntimeEventEnvelope,
 } from "@roll-agent/protocol";
 
@@ -32,16 +32,18 @@ const params = parseRuntimeMethodParams(RUNTIME_METHODS.threadSnapshot, {
 
 console.log(RUNTIME_PROTOCOL_VERSION, params);
 
-const approval = parseRuntimeServerRequestResult(
+declare const incoming: { readonly params: unknown };
+const approval = parseRuntimeServerRequestParamsForVersion(
+  "1.2",
   RUNTIME_SERVER_REQUEST_METHODS.approvalRequest,
-  { decision: "approve" },
+  incoming.params,
 );
 
 function handleEvent(event: RuntimeEventEnvelope): void {
   if (event.event.type === "approval.required") {
     console.log(getApprovalExplanation(event.event.approval));
   }
-  console.log(event.event.type, approval.decision);
+  console.log(event.event.type, approval.interactionId);
 }
 ```
 
@@ -52,28 +54,62 @@ function handleEvent(event: RuntimeEventEnvelope): void {
   `RUNTIME_PROTOCOL_CAPABILITIES`、`REQUIRED_RUNTIME_SERVER_REQUEST_METHODS_BY_VERSION`、
   `RUNTIME_FEATURES`、`RUNTIME_ERROR_CODES`；
 - 能力查询：`getRuntimeProtocolCapabilities()`、
-  `isRuntimeServerRequestMethodRequired()`、`getApprovalExplanation()`；
+  `getRuntimeProtocolRegistry()`、`isRuntimeMethodAvailable()`、
+  `isRuntimeServerRequestMethodAvailable()`、`isRuntimeServerRequestMethodRequired()`、
+  `isLatestRuntimeServerRequestMethod()`、`getApprovalExplanation()`；
 - 全部 Zod Schema 与派生类型；
 - `runtimeMethodSchemas`、`parseRuntimeMethodParams()`、
   `parseRuntimeMethodResult()`；
 - `runtimeServerRequestSchemas`、`parseRuntimeServerRequestParams()`、
   `parseRuntimeServerRequestResult()`；
+- 按协商版本解析与投影：`parseRuntimeMethodParamsForVersion()`、
+  `parseRuntimeServerRequestParamsForVersion()`、
+  `parseRuntimeServerRequestCancelParamsForVersion()`、
+  `projectRuntimeServerRequestParams()`、`projectRuntimeServerRequestCancelParams()`；
+- latest 与矩阵类型：`LatestRuntimeServerRequestInput/Params/Result<TMethod>`、
+  `RuntimeServerRequestInput/Params/ResultForVersion<TVersion,TMethod>`、
+  `RuntimeServerRequestInput/Params/ResultForSupportedVersions<TMethod>`；
 - JSON-RPC 与 Runtime Event Envelope 类型。
 
 ## JSON Schema 与 fixtures
 
-- `@roll-agent/protocol/schema`：JSON Schema Draft 2020-12 根 Schema；
-- `@roll-agent/protocol/fixtures/v1/*`：跨语言有效/无效消息 fixtures。
+- `@roll-agent/protocol/schema` 与 `@roll-agent/protocol/schema/latest`：最新版本
+  JSON Schema Draft 2020-12 根 Schema；
+- `@roll-agent/protocol/schema/1.2`、`/1.1`、`/1.0`：严格按协商版本隔离的 Schema；
+- `@roll-agent/protocol/fixtures/v1/*`：冻结的 1.1/1.0 跨语言有效/无效消息 fixtures。
+- `@roll-agent/protocol/fixtures/v1.2/*`：Protocol 1.2 capability/interaction fixtures。
 
 协议版本与 npm 包版本相互独立。`RUNTIME_PROTOCOL_VERSION` 表示这个包提供的最新 wire
-schema，并不代表调用方已实现对应 Client 能力。当前最新版本是 `"1.1"`；只有覆盖该版本
-全部必需 Server Request handler 的 Client 才应广告它，否则应协商回退到 `"1.0"`。
+schema，并不代表调用方已实现对应 Client 能力。当前支持顺序为
+`["1.2", "1.1", "1.0"]`。`initialize` 请求保持旧 strict 形状；协商到 `"1.2"` 后，
+Client 必须用 `client.capabilities.set` 提交单调 `revision` 与当前 Handler methods，Runtime
+返回 registry 交集后才进入 interaction-ready。未知的未来 method 名可安全发送但不会被接受。
 
-`"1.1"` 首个 Server Request 是 `approval.request`。Runtime 可用
+`"1.2"` 的 `approval.request` 使用独立的 UUID brand `interactionId`，并携带
+`threadId`、`turnId`、绝对 `expiresAt` 与首版固定的 `sensitivity: "normal"`。
+`runtime.serverRequest.cancel` 也只投影 `{ interactionId, reason }`。JSON-RPC `id`、
+`InteractionId` 与 mutation `RequestId` 是不同生命周期的类型，不能混用。
+
+`"1.1"` 的首个 Server Request 仍是 `approval.request`。Runtime 可用
 `runtime.serverRequest.cancel.params.serverRequestId` 引用该请求的 JSON-RPC `id`，
 终止尚未完成的交互，并用只读
 `approval.resolved` Event 向所有观察端同步最终状态；`"1.0"` 继续使用
 `approval.required` + `approval.respond`。
+
+为避免已有宿主被 minor 版本打断，无 version 的 `approvalRequestParamsSchema`、
+`runtimeServerRequestCancelParamsSchema`、`runtimeServerRequestSchemas` 与对应 parse helper
+固定为 `"1.1"` compatibility façade。无 version 的 Runtime method type/parser 同样冻结在
+`"1.1"`；新实现应始终使用 negotiated-version helper/registry，或使用 supported-version
+派生类型处理多个已协商版本。`runtimeMethodSchemas` 则表示 latest registry，不能单独用来
+判断旧版本 method availability。
+
+1.2 的 `thread.open` / `thread.snapshot` 必须返回 `pendingInteractions`（允许空数组）。当前
+Approval 安全投影严格只有 `method`、`interactionId`、`threadId`、`turnId`、`expiresAt`、
+`sensitivity: "normal"` 与 `approvalId`；JSON-RPC `id`、`preview`、原始 payload/result 与
+secret 不会进入 Snapshot。1.1/1.0 会剥离整个字段。
+
+1.2 的 `activeTurn.status` 额外允许 `waiting-for-user`；1.1/1.0 仍冻结为
+`running | cancelling`，version projector 会把 `waiting-for-user` 映射为 `running`。
 
 Shell 审批的模型说明位于 `approval.preview.explanation`。它是一个可选的、最多 100
 字符的显示辅助字段；`getApprovalExplanation()` 会完成类型和长度校验。说明不会替代

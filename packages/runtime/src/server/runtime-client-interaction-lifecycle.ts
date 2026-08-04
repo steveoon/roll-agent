@@ -2,8 +2,10 @@ import { randomUUID } from "node:crypto";
 import { z } from "zod/v4";
 import type {
   ApprovalId,
+  InteractionId,
   JsonRpcId,
   RuntimeInstanceId,
+  RuntimeProtocolVersion,
   RuntimeServerRequestMethod,
 } from "@roll-agent/protocol";
 
@@ -22,6 +24,8 @@ export interface RuntimeClientInteractionInput<TResponderId extends string> {
   readonly params: unknown;
   readonly scopeId: RuntimeInstanceId;
   readonly eligibleResponderId: TResponderId;
+  readonly protocolVersion: RuntimeProtocolVersion;
+  readonly interactionId: InteractionId;
   readonly legacyApprovalId: ApprovalId | undefined;
   readonly expiresAt: string | undefined;
   readonly resolveResponse: (value: unknown) => void;
@@ -58,6 +62,8 @@ export interface RuntimeClientInteraction<TResponderId extends string, TAttachme
   readonly params: unknown;
   readonly scopeId: RuntimeInstanceId;
   readonly eligibleResponderId: TResponderId;
+  readonly protocolVersion: RuntimeProtocolVersion;
+  readonly interactionId: InteractionId;
   readonly legacyApprovalId: ApprovalId | undefined;
   readonly expiresAt: string | undefined;
   readonly resolveResponse: (value: unknown) => void;
@@ -103,6 +109,8 @@ export class RuntimeClientInteractionLifecycle<
       params: input.params,
       scopeId: input.scopeId,
       eligibleResponderId: input.eligibleResponderId,
+      protocolVersion: input.protocolVersion,
+      interactionId: input.interactionId,
       legacyApprovalId: input.legacyApprovalId,
       expiresAt: input.expiresAt,
       resolveResponse: input.resolveResponse,

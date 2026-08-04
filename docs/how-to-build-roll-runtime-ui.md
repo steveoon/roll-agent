@@ -4,9 +4,9 @@
 
 让 Electron、Tauri、Qt、Python、.NET 或 IDE 扩展通过 `Roll Runtime Protocol v1`
 连接本地 Runtime，并让远程 Next.js Web UI 通过 Cloud Relay 与用户本机 Companion
-间接访问同一 Runtime。新本地 UI 使用 `"1.1"` 的 Runtime→Client Server Request；
-没有对应 handler 的既有 UI 继续协商 `"1.0"`。所有第三方接入都不依赖
-`ConversationEngine` 内部 API。
+间接访问同一 Runtime。新本地 UI 优先使用 `"1.2"` 的 capability handshake 与 typed
+Interaction；N-1 UI 可继续协商 `"1.1"`，不支持 Server Request 的旧 UI 回退
+`"1.0"`。所有第三方接入都不依赖 `ConversationEngine` 内部 API。
 
 ## 先选择接入形态
 
@@ -64,10 +64,13 @@ const client = await RollNodeClient.start({
 });
 
 const initialization = client.getInitializationResult();
-if (initialization.protocolVersion !== "1.1") {
+if (
+  initialization.protocolVersion !== "1.2" &&
+  initialization.protocolVersion !== "1.1"
+) {
   await client.shutdown();
   throw new Error(
-    "This adapter requires Runtime Protocol 1.1; load the separate v1.0 adapter instead",
+    "This adapter requires Runtime Protocol 1.2 or 1.1; load the separate v1.0 adapter instead",
   );
 }
 console.log(initialization.runtimeInstanceId);
@@ -76,7 +79,7 @@ client.onExit(({ error }) => {
 });
 
 client.onEvent((event) => {
-  // 1.1 的 approval.required 只负责显示；不能从这里调用 approval.respond。
+  // 1.2/1.1 的 approval.required 只负责显示；不能从这里调用 approval.respond。
   renderRuntimeEvent(event);
 });
 
@@ -105,22 +108,30 @@ async function shutdownApplication() {
 
 | 协商版本 | 可写控制路径 | View 收敛 |
 |---|---|---|
+| `"1.2"` | capability ACK 后由 `approval.request` handler 返回 approve/reject | `approval.required` 只读展示；`approval.resolved` 关闭或更新 |
 | `"1.1"` | `approval.request` handler 返回 approve/reject | `approval.required` 只读展示；`approval.resolved` 关闭或更新 |
 | `"1.0"` | 收到 `approval.required` 后调用 `approval.respond` | Snapshot / Turn 终态 |
 
-`RollNodeClient` 只有在 `start()` / `connect()` 的 `serverRequestHandlers` 中覆盖目标版本
-全部必需方法时才广告该版本；`"1.1"` 当前只要求 `approval.request`，否则只广告
-`["1.0"]`。不要同时实现两条可写 Approval 路径。在 `"1.1"` 上调用
-`approval.respond` 会返回
-`CAPABILITY_UNAVAILABLE`。
+`RollNodeClient` 总能广告没有强制 handler 的 `"1.2"`。初始化后它发送
+`client.capabilities.set`，并在 capability ACK 完成后才让 `start()` / `connect()`
+返回；构造时注册的 `approval.request` 会包含在 revision 1 中。动态注册或撤销 handler
+会自动递增 revision，撤销还会 abort 该方法的所有未决交互并抑制迟到 Result。
 
-上面的示例是严格的 `"1.1"` adapter，因此旧 Runtime 协商到 `"1.0"` 后会关闭连接并
-显式失败。需要兼容旧 Runtime 时，按协商结果选择另一个只实现
+`"1.1"` 当前仍要求在初始化前注册 `approval.request`，否则不会被广告；旧 Runtime
+随后回退 `"1.0"`。不要同时实现两条可写 Approval 路径。在 `"1.2"` 或 `"1.1"` 上
+调用 `approval.respond` 会返回 `CAPABILITY_UNAVAILABLE`。
+
+上面的示例接受 `"1.2"` 与 N-1 `"1.1"`，因此更旧 Runtime 协商到 `"1.0"` 后会关闭
+连接并显式失败。需要兼容旧 Runtime 时，按协商结果选择另一个只实现
 `approval.required` + `approval.respond` 的 adapter。
 
 Runtime 取消 Approval 时，handler 的 `AbortSignal` 会 abort。对话框必须随之关闭，且
 不能发送迟到决定；Client 会自动抑制迟到 Response。人工 Approval 不使用普通
 `requestTimeoutMs`，由 Response、Turn 终态、显式 cancel 或连接关闭结束。
+
+1.2 cancel 使用逻辑 `interactionId`；1.1 保留
+`{ serverRequestId, approvalId?, reason }`。JSON-RPC `id`、`interactionId` 与
+mutation `params.requestId` 属于三个不同生命周期，不能互换。
 
 ### 连接失败后的 UI 收敛
 
@@ -134,6 +145,8 @@ Runtime 取消 Approval 时，handler 的 `AbortSignal` 会 abort。对话框必
 连接仍健康时可直接读取 `thread.snapshot`；连接已退出时，先启动新的 Runtime、确认新的
 `runtimeInstanceId`，再调用 `thread.open` / `thread.snapshot` 收敛。Snapshot 的数据源是
 追加式 transcript，但响应有分页；messages 与 operations 必须分别遍历自己的 cursor。
+1.2 UI 还应从 `pendingInteractions` 恢复当前 responder 已 ACK 的安全 Interaction 视图；
+该投影不包含 JSON-RPC `id`、原始 payload/result 或 secret，1.1 则没有这个字段。
 
 Electron 主进程参考见
 [`examples/electron-runtime-client`](../examples/electron-runtime-client/README.md)。API Key、
@@ -154,21 +167,27 @@ roll runtime serve --stdio
 
 1. 将一条 JSON-RPC Request 写成一行 JSON；
 2. 持续读取 stdout，并按 `id` 解析 Response；
-3. 同时识别 Runtime 发来的带 `method + id` JSON-RPC Request；实现审批时广告
-   `["1.1","1.0"]`，收到 `approval.request` 后用同一个 `id` 返回 typed Result；
-4. 将 `runtime.event` Notification 分发到 UI；在 `"1.1"` 中把
+3. 初始化时广告 `["1.2","1.1","1.0"]`。若协商到 `"1.2"`，立即发送
+   `client.capabilities.set({ revision: 1, serverRequestMethods })`，并在 ACK 前保持
+   Interaction 不可投递；后续 handler 变更使用严格递增 revision；
+4. 同时识别 Runtime 发来的带 `method + id` JSON-RPC Request；收到
+   `approval.request` 后用同一个 JSON-RPC `id` 返回 typed Result；
+5. 将 `runtime.event` Notification 分发到 UI；在 `"1.2"` / `"1.1"` 中把
    `approval.required` 当作只读 View Event；
-5. 处理 `runtime.serverRequest.cancel`，终止对应本地交互并丢弃迟到结果；
-6. 把 stderr 作为日志，不尝试按 JSON 解析；
-7. `initialize` 前应用本地入站/出站帧上限；初始化后，出站上限使用本地值与
+6. 处理 `runtime.serverRequest.cancel`：1.2 按 `interactionId`，1.1 按
+   `serverRequestId` 终止本地交互并丢弃迟到结果；
+7. 把 stderr 作为日志，不尝试按 JSON 解析；
+8. `initialize` 前应用本地入站/出站帧上限；初始化后，出站上限使用本地值与
    `limits.maxFrameBytes` 的较小值；
-8. 收到合法但 `id: null` 的 JSON-RPC error 时，不尝试关联挂起请求；把连接视为不可信并
+9. 收到合法但 `id: null` 的 JSON-RPC error 时，不尝试关联挂起请求；把连接视为不可信并
    让所有挂起操作收敛；
-9. Runtime 退出后，终止所有未决 Server Request，不自动重放 Approval、
+10. Runtime 退出后，终止所有未决 Server Request，不自动重放 Approval、
    `turn.start` 等副作用命令。
 
 Python 标准库示例见
-[`examples/python-runtime-client`](../examples/python-runtime-client/README.md)。
+[`examples/python-runtime-client`](../examples/python-runtime-client/README.md)。该示例
+有意固定为 N-1 `"1.1"` / `"1.0"` conformance fixture，不是 1.2 capability
+handshake 的参考实现。
 
 ## 云端 Next.js 控制用户本机 Roll
 
@@ -275,7 +294,8 @@ adapter；它不包含生产 Cloud Relay Server。
 `@roll-agent/companion`。
 
 `CompanionApprovalRequestBroker` 必须在 `RollNodeClient.start()` 前创建并作为
-`approval.request` handler 注册，再注入 `CompanionWorkspace`。在 `"1.1"` 下，
+`approval.request` handler 注册，再注入 `CompanionWorkspace`。在 Runtime
+`"1.2"` / `"1.1"` 下，
 `approval.required` 仅作为只读事件转发；Browser/Relay 必须通过 Relay 专属
 `approval.candidate` 提交候选决定。成功的 `runtime.response` 只返回
 `{ accepted: true }`，表示 Broker 已接受候选；权威终态仍以 `approval.resolved` Event
@@ -283,23 +303,25 @@ adapter；它不包含生产 Cloud Relay Server。
 可直接返回拒绝。
 没有 Broker 的既有 Companion 会协商 `"1.0"`，继续使用独立的 Event +
 `approval.respond` fallback。
-Browser 的选择依据必须是收到的 `RuntimeEventEnvelope.protocolVersion`，不是外层
-Companion Relay 的 `"1.0"`：Runtime `"1.0"` 使用 `approval.respond`，Runtime `"1.1"`
-使用 `approval.candidate`。这也是新 Browser 与旧 Companion 滚动升级时的 fallback
-边界。
+Browser 的选择依据必须是 Relay 事件内的 Runtime 兼容版本，不是外层 Companion Relay
+的 `"1.0"`：本地 Runtime `"1.2"` 事件在 Relay Wire `"1.0"` 上会安全投影为
+`protocolVersion: "1.1"`，因此 Browser 看到 `"1.1"` 时使用 `approval.candidate`，看到
+`"1.0"` 时使用 `approval.respond` fallback。Relay Wire `"1.0"` 不会暴露 Runtime
+`"1.2"` 的新增字段；这也是新 Runtime 与旧 Browser/Companion 滚动升级时的边界。
 
 当前 Relay 契约只冻结 Wire `"1.0"`。其中的 `approval.candidate` 是 Approval 专属能力，
-不是通用交互抽象。未来的 typed interaction request/result/cancelled 与逻辑
-`interactionId` 由 [#184](https://github.com/steveoon/roll-agent/issues/184)、
-[#187](https://github.com/steveoon/roll-agent/issues/187) 及后续 Relay Wire version
-承载；不能在不升级 Relay version 的情况下把它们塞进 `"1.0"`。
+不是通用交互抽象。Runtime Protocol `"1.2"` 已定义逻辑 `interactionId` 与 typed
+Interaction 生命周期，但 Relay Wire `"1.0"` 没有对应字段；远程
+request/resolved/cancelled 投影仍由
+[#187](https://github.com/steveoon/roll-agent/issues/187) 的新 Relay version 承载，不能
+把 Runtime 1.2 字段偷渡进 Relay `"1.0"`。
 
 跨 Runtime 与 Relay 接线时，以下五类标识/游标不能复用：
 
 | 标识或游标 | 所属层 | 用途 |
 |---|---|---|
 | Runtime JSON-RPC `id` | Runtime ↔ Local Client/Companion | 单次本地连接上的 Request/Response correlation |
-| `interactionId` | 未来 typed interaction | 跨投递、重连与恢复的逻辑交互身份；当前 Relay `"1.0"` 尚无此字段 |
+| Runtime `interactionId` | Runtime typed Interaction | 同一逻辑交互在显式重投时保持稳定；当前 Relay `"1.0"` 尚无此字段，也不承诺跨进程恢复 |
 | Relay `requestId` | Browser/Cloud Relay ↔ Companion | Relay request 重投、response correlation 与 Companion 响应缓存 |
 | Runtime mutation `params.requestId` | Client/Companion → Runtime | `turn.start` 等 Runtime 写操作幂等 |
 | `sequence` / cursor | Runtime event 或 Relay delivery | 各自在自己的序列空间内排序、恢复和 ACK |
@@ -321,7 +343,7 @@ lease 边界如下：
 | Browser client | 宿主在认证连接建立/断开时手动调用 `attachBrowser()` / `detachBrowser()` |
 | 后台 Shell | 宿主手动调用 `acquireBackgroundShellLease()` 并保存 release 函数 |
 | Turn | 只有经 `CompanionWorkspace.startTurn()` 发起时自动获取；终态事件自动释放 |
-| Approval | `"1.1"` Broker handler 获取，Result/Abort 时释放；`"1.0"` 由 Event fallback 获取和释放 |
+| Approval | `"1.2"` / `"1.1"` Broker handler 获取，Result/Abort 时释放；`"1.0"` 由 Event fallback 获取和释放 |
 
 浏览器断线不要调用 `thread.detach` 或直接关闭 Runtime。`outbound.stop()` 只终止 Relay、
 Bridge 与订阅，不关闭 Runtime；Runtime 生命周期由 `workspace.closeIfIdle()` 单独管理。
@@ -357,9 +379,11 @@ Next.js Web/API 保持无状态；不要让多个不可信租户共享同一个 
 
 ## 验证清单
 
-- 注册 Approval handler 时初始化返回 `"1.1"`；没有 handler 时安全回退 `"1.0"`；
+- 新 Runtime 初始化返回 `"1.2"`，且 `connect()` 返回前完成 capability ACK；
+- 动态注册/撤销 handler 会递增 revision；撤销会 abort 未决交互并抑制迟到 Result；
+- N-1 Runtime 可回退 `"1.1"`；不支持 Server Request 的旧 Runtime 安全回退 `"1.0"`；
 - 创建、列表、打开、重命名、删除和历史分页正常；
-- `"1.1"` 只有 `approval.request` 能决定 Tool 是否执行，`approval.required` 只读；
+- `"1.2"` / `"1.1"` 只有 `approval.request` 能决定 Tool 是否执行，`approval.required` 只读；
 - `runtime.serverRequest.cancel` 会 abort 本地 handler，`approval.resolved` 收敛 View；
 - 上下文压缩后，分页遍历 Snapshot 仍能恢复新格式 Thread 的 transcript；
 - Snapshot 不含 `raw` 或 Tool input；

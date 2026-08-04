@@ -16,6 +16,10 @@
       "default": "./src/index.ts"
     },
     "./schema": "./dist/schema/roll-runtime-protocol-v1.schema.json",
+    "./schema/latest": "./dist/schema/roll-runtime-protocol-v1.schema.json",
+    "./schema/1.2": "./dist/schema/roll-runtime-protocol-v1.2.schema.json",
+    "./schema/1.1": "./dist/schema/roll-runtime-protocol-v1.1.schema.json",
+    "./schema/1.0": "./dist/schema/roll-runtime-protocol-v1.0.schema.json",
     "./fixtures/*": "./fixtures/*"
   },
   "publishConfig": {
@@ -26,6 +30,10 @@
         "default": "./dist/index.js"
       },
       "./schema": "./dist/schema/roll-runtime-protocol-v1.schema.json",
+      "./schema/latest": "./dist/schema/roll-runtime-protocol-v1.schema.json",
+      "./schema/1.2": "./dist/schema/roll-runtime-protocol-v1.2.schema.json",
+      "./schema/1.1": "./dist/schema/roll-runtime-protocol-v1.1.schema.json",
+      "./schema/1.0": "./dist/schema/roll-runtime-protocol-v1.0.schema.json",
       "./fixtures/*": "./fixtures/*"
     }
   },

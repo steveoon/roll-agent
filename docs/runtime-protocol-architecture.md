@@ -9,7 +9,7 @@
 Electron / Tauri / Qt / Python / IDE / Gateway
           │ Request / Notification / Response
           ▼
- Roll Runtime Protocol v1.1
+ Roll Runtime Protocol v1.2
           │ JSON-RPC + NDJSON + stdio
           ▼
  RuntimeProtocolAdapter（连接级协商）
@@ -50,17 +50,19 @@ Embedded Runtime SDK 仍可用于 Roll 第一方或版本锁定的高级宿主�
 | 分帧 | 一行一个 JSON（NDJSON） | stdio Adapter 契约 |
 | Transport | stdio | v1 正式入口 |
 
-协议版本从 `"1.0"` 开始，当前最新版本为 `"1.1"`，与 npm 包版本独立。未来增加
+协议版本从 `"1.0"` 开始，当前最新版本为 `"1.2"`，与 npm 包版本独立。未来增加
 Transport 时，不需要改变 Thread、Turn 或事件语义。
 
 `RUNTIME_PROTOCOL_VERSION` 只表示协议包中的最新 wire schema，不代表每个 Client 自动拥有
-该版本的入站能力。Client 必须按实际 handler 广告版本；未来可选的 GUI Request 应使用
-独立 Client capability 协商，不能静默扩大既有版本的必需 handler 集合。
+该版本的入站能力。1.2 保持 `initialize` 的 strict 形状，并在协商完成后通过
+`client.capabilities.set` 申明当前可处理的 Server Request method。1.1/1.0 Client
+继续按原契约回退，不能把 1.2 capability 字段塞入旧握手。
 
 ## Runtime → Client 双向 RPC
 
 `"1.1"` 把 Approval 从 Event + mutation 特例升级为 Runtime 发起的 typed Server
-Request：
+Request；`"1.2"` 再把内部生命周期推广为 method-agnostic Interaction，并加入显式
+Client capability revision：
 
 ```text
 AgentSession 等待 ApprovalGate
@@ -70,7 +72,7 @@ RuntimeService 登记 PendingApproval
           │
           ▼
 RuntimeClientRequestCoordinator
-  ├─ 保存逻辑请求、目标 responder、Runtime scope 和 deadline
+  ├─ 保存 interactionId、method、目标 responder、Runtime scope 和原始 deadline
   └─ 为本次投递生成 JSON-RPC id
           │ approval.request
           ▼
@@ -87,24 +89,27 @@ ApprovalGate 继续或拒绝
 
 | 层 | 持有 | 不持有 |
 |---|---|---|
-| `RuntimeService` | Approval 权威状态、Turn 归属、最终决议、终态顺序 | JSON-RPC correlation |
-| `RuntimeClientRequestCoordinator` | 当前连接的 pending request、投递 ID、responder/scope 校验、取消、deadline | Tool policy、持久化与跨连接重投 |
+| `RuntimeService` | Interaction 对应的领域权威状态、Turn 归属、最终决议、终态顺序 | JSON-RPC correlation |
+| `RuntimeClientRequestCoordinator` | 当前进程的逻辑 Interaction、投递 ID、eligible responder/scope 校验、取消、deadline、显式重投 | Tool policy、持久化与跨进程恢复 |
 | `RuntimeProtocolAdapter` | 连接级版本协商、typed wire 转换 | 可跨连接存续的业务状态 |
-| Client / GUI | 临时对话框与用户输入 | Thread/Turn/Approval 关联、去重、超时和最终状态 |
+| Client / GUI | 已 ACK capability 对应的临时交互 UI | Thread/Turn 权威状态、跨进程恢复和最终状态 |
 
-本地 Runtime Approval 链路中的三种 ID 不能混用：
+本地 Runtime 1.2 Interaction 链路中的身份不能混用：
 
 | ID | 生命周期 | 用途 |
 |---|---|---|
 | JSON-RPC `id` | 单次连接上的一次投递 | Server Request 与 Response 关联 |
-| `approvalId` | 整个 Approval 生命周期 | Snapshot、审计、取消、恢复和去重 |
+| `interactionId` | 一次逻辑 Interaction | 显式重投、取消与迟到结果去重；1.2 cancel 使用该 ID |
+| `approvalId` | Approval 领域对象 | Snapshot、审计与 Approval View；不是通用 Interaction ID |
 | mutation `requestId` | Client → Runtime mutation | `turn.start` 等写操作幂等 |
 
-`approvalId` 是业务对象 ID；接入远程 Relay 后还会增加 Relay request、未来逻辑
-interaction 与 delivery cursor。它们的完整跨层关系见下文。
+`approvalId` 是业务对象 ID；接入远程 Relay 后还会增加 Relay request 与 delivery
+cursor。它们的完整跨层关系见下文。
 
-当前 stdio Host 使用断线即取消策略；Coordinator 不保留可跨连接重投的 Request。
-持久 Relay 的 `seq/ack/resume`、responder 身份恢复和跨进程存储属于后续协议层。
+Coordinator 可在当前进程内对 eligible responder 执行显式重投：新的 JSON-RPC `id`
+仍引用同一个 `interactionId`，且不会延长原始 deadline。stdio Host 仍使用断线即取消
+策略，不保留可跨进程恢复的 Request；持久 Relay 的 `seq/ack/resume`、responder 身份
+恢复和跨进程存储属于后续协议层。
 
 当前 v1 stdio Host 明确限制一个 `RuntimeService` 同时只能绑定一个
 `RuntimeProtocolAdapter` 控制连接，避免两个 GUI Controller 竞相投递或完成同一
@@ -123,7 +128,8 @@ Relay 可靠传输语义，不能仅凭当前连接内的 Coordinator 推导出�
 
 1. 客户端发现新的 `runtimeInstanceId`；
 2. 不自动重放结果未知的副作用命令；
-3. 调用 `thread.snapshot` 恢复 transcript、Operation、活动 Turn 和待审批状态；
+3. 调用 `thread.snapshot` 恢复 transcript、Operation、活动 Turn、待审批 View，以及 1.2
+   当前 responder 已 ACK 的安全 `pendingInteractions` 投影；
 4. 对 Runtime 崩溃时仍未终止的 Turn 显示 `outcome unknown`。
 
 Snapshot 从追加式 transcript 与 Tool ledger 构造，不读取可能已被上下文压缩的活动模型消息。
@@ -171,10 +177,9 @@ Browser、Cloud Relay 与 Local Companion 都应直接以 `@roll-agent/relay-pro
 frame；不能为了获得 Schema 而依赖整个 `@roll-agent/companion`。
 
 当前只冻结 Relay Wire `"1.0"`。其中 `approval.candidate` 是已经存在的 Approval 专属
-候选方法，不是通用 typed interaction。通用 request/result/cancelled、逻辑
-`interactionId` 与跨连接恢复由
-[#184](https://github.com/steveoon/roll-agent/issues/184)、
-[#187](https://github.com/steveoon/roll-agent/issues/187) 和后续 Relay Wire version
+候选方法，不是通用 typed interaction。Runtime Protocol `"1.2"` 已拥有逻辑
+`interactionId`，但通用 request/resolved/cancelled 的远程投影仍由
+[#187](https://github.com/steveoon/roll-agent/issues/187) 的后续 Relay Wire version
 承载，不能静默扩大 `"1.0"` 注册表。
 
 跨层接线必须区分以下五类 correlation、幂等与投递标识：
@@ -182,7 +187,7 @@ frame；不能为了获得 Schema 而依赖整个 `@roll-agent/companion`。
 | 标识或游标 | 所属层 | 语义 |
 |---|---|---|
 | Runtime JSON-RPC `id` | Runtime ↔ Local Client/Companion | 当前本地连接上的一次 Request/Response 投递 |
-| `interactionId` | 未来 typed interaction | 跨重投、重连和恢复的逻辑交互身份；Relay `"1.0"` 尚未定义 |
+| Runtime `interactionId` | Runtime typed Interaction | 当前进程内显式重投保持稳定；Relay `"1.0"` 尚未定义，也不提供跨进程恢复 |
 | Relay `requestId` | Browser/Cloud Relay ↔ Companion | Relay response correlation、重投、冲突检测与响应缓存 |
 | Runtime mutation `params.requestId` | Client/Companion → Runtime | `turn.start` 等 Runtime 写操作幂等 |
 | `sequence` / cursor | Runtime event 或 Relay delivery | 各自在自己的序列空间内排序和恢复 |
@@ -195,7 +200,8 @@ frame；不能为了获得 Schema 而依赖整个 `@roll-agent/companion`。
 `@roll-agent/companion` 当前实现的本地基础能力：
 
 - Browser client 与后台 Shell lease 由认证宿主手动接线；
-- 只有经 `CompanionWorkspace.startTurn()` 发起的 Turn 自动持有 lease；`"1.1"` 的
+- 只有经 `CompanionWorkspace.startTurn()` 发起的 Turn 自动持有 lease；Runtime
+  `"1.2"` / `"1.1"` 的
   Approval lease 由 `CompanionApprovalRequestBroker` handler 获取并在 Result/Abort 时
   释放，`"1.0"` fallback 才由 Event 与响应/终态事件维护；
 - Browser lease 释放不会关闭仍有 Turn、Shell 或 Approval lease 的 Runtime；
@@ -207,12 +213,14 @@ frame；不能为了获得 Schema 而依赖整个 `@roll-agent/companion`。
   中阻塞的发送或加密任务不会阻塞新连接握手与事件恢复；
 - 完全重复投递复用原 mutation 结果，相同 ID 配不同参数会被拒绝；Runtime 仍以协商得到
   的有界 `requestId` 与已完成 `turnId` 窗口作为第二道幂等边界；
-- `"1.1"` 的 Browser 决策通过 Relay 专属 `approval.candidate` 提交，成功只表示
+- Runtime `"1.2"` / `"1.1"` 的 Browser 决策通过 Relay 专属
+  `approval.candidate` 提交，成功只表示
   `{ accepted: true }`；Runtime 权威终态仍由 `approval.resolved` Event 给出，不能通过
   Relay 直接调用 `approval.respond`；
-- Browser 必须按 `RuntimeEventEnvelope.protocolVersion` 选择上述控制路径：Runtime
-  `"1.0"` 走 `approval.respond` fallback，Runtime `"1.1"` 才走
-  `approval.candidate`；外层 Companion Relay `"1.0"` 不代表 Runtime 审批能力；
+- Browser 必须按 Relay 事件内的 Runtime 兼容版本选择上述控制路径：本地 Runtime
+  `"1.2"` 在 Relay Wire `"1.0"` 上投影为 `protocolVersion: "1.1"`，因此收到 `"1.1"`
+  走 `approval.candidate`，收到 `"1.0"` 走 `approval.respond` fallback；外层 Companion
+  Relay `"1.0"` 不代表 Runtime 审批能力，也不能承载 Runtime `"1.2"` 新字段；
 - 远程 approve 候选仍经过本地 Policy；`require-local-confirmation` 会返回
   `LocalConfirmationRequiredError`，不会自行创建确认 UI；远程拒绝只会收窄权限，可直接
   返回拒绝；

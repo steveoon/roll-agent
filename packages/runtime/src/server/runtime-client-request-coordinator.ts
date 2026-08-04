@@ -1,15 +1,21 @@
 import { randomUUID } from "node:crypto";
 import {
   RUNTIME_SERVER_REQUEST_CANCEL_NOTIFICATION,
-  parseRuntimeServerRequestParams,
-  parseRuntimeServerRequestResult,
-  runtimeServerRequestCancelParamsSchema,
+  RUNTIME_SERVER_REQUEST_METHODS,
+  approvalRequestParamsV12Schema,
+  getRuntimeProtocolRegistry,
+  interactionIdSchema,
+  isRuntimeServerRequestMethodAvailable,
+  pendingInteractionProjectionSchema,
+  projectRuntimeServerRequestCancelParams,
   timestampSchema,
   type ApprovalId,
+  type PendingInteractionProjection,
   type RuntimeInstanceId,
-  type RuntimeServerRequestInput,
+  type RuntimeProtocolRegistry,
   type RuntimeServerRequestMethod,
-  type RuntimeServerRequestResult,
+  type RuntimeServerRequestResultForSupportedVersions,
+  type RuntimeProtocolVersion,
   type ThreadId,
   type TurnId,
 } from "@roll-agent/protocol";
@@ -47,6 +53,8 @@ export interface RuntimeClientRequestCoordinatorOptions {
 
 interface RuntimeClientResponderAttachment {
   readonly responder: RuntimeClientResponder;
+  acceptedServerRequestMethods: ReadonlySet<RuntimeServerRequestMethod>;
+  capabilitiesAcknowledged: boolean;
 }
 
 type ManagedRuntimeClientInteraction = RuntimeClientInteraction<
@@ -63,11 +71,20 @@ export interface RuntimeClientRequestOptions {
   readonly threadId?: ThreadId;
   readonly turnId?: TurnId;
   readonly expiresAt?: string;
+  /** Defaults to Protocol 1.1 for compatibility with existing package-internal callers. */
+  readonly protocolVersion?: RuntimeProtocolVersion;
+}
+
+export interface RuntimeClientResponderOptions {
+  /** Defaults to the frozen Protocol 1.1 Server Request registry. */
+  readonly acceptedServerRequestMethods?: readonly RuntimeServerRequestMethod[];
+  /** Protocol 1.2 responders start false and become eligible only after capability ACK. */
+  readonly capabilitiesAcknowledged?: boolean;
 }
 
 export interface RuntimeClientRequest<TMethod extends RuntimeServerRequestMethod> {
   readonly key: string;
-  readonly result: Promise<RuntimeServerRequestResult<TMethod>>;
+  readonly result: Promise<RuntimeServerRequestResultForSupportedVersions<TMethod>>;
 }
 
 export interface RuntimeClientRequestCoordinatorInternal {
@@ -75,6 +92,17 @@ export interface RuntimeClientRequestCoordinatorInternal {
     detachResponder: () => void,
     message: JsonRpcMessage,
   ): boolean | undefined;
+  setServerRequestMethodsForAttachment(
+    detachResponder: () => void,
+    methods: readonly RuntimeServerRequestMethod[],
+    reason: string,
+    deferDelivery: boolean,
+  ): boolean | undefined;
+  beginCapabilityNegotiationForAttachment(detachResponder: () => void): boolean | undefined;
+  getPendingInteractionProjectionsForAttachment(
+    detachResponder: () => void,
+    threadId: ThreadId,
+  ): readonly PendingInteractionProjection[] | undefined;
   redeliver(key: string, responderId: RuntimeClientResponderId): boolean;
 }
 
@@ -142,15 +170,44 @@ export class RuntimeClientRequestCoordinator {
           ? undefined
           : this.handleResponseFromAttachment(attachment, message);
       },
+      setServerRequestMethodsForAttachment: (detachResponder, methods, reason, deferDelivery) => {
+        const attachment = this.responderAttachments.get(detachResponder);
+        return attachment === undefined
+          ? undefined
+          : this.setServerRequestMethodsForAttachment(attachment, methods, reason, deferDelivery);
+      },
+      beginCapabilityNegotiationForAttachment: (detachResponder) => {
+        const attachment = this.responderAttachments.get(detachResponder);
+        return attachment === undefined
+          ? undefined
+          : this.beginCapabilityNegotiationForAttachment(attachment);
+      },
+      getPendingInteractionProjectionsForAttachment: (detachResponder, threadId) => {
+        const attachment = this.responderAttachments.get(detachResponder);
+        return attachment === undefined
+          ? undefined
+          : this.getPendingInteractionProjectionsForAttachment(attachment, threadId);
+      },
       redeliver: (key, responderId) => this.redeliver(key, responderId),
     });
   }
 
-  attachResponder(responder: RuntimeClientResponder): () => void {
+  attachResponder(
+    responder: RuntimeClientResponder,
+    options: RuntimeClientResponderOptions = {},
+  ): () => void {
     if (this.responders.has(responder.id)) {
       throw new RuntimeClientRequestError(`Runtime responder "${responder.id}" 已连接`);
     }
-    const attachment: RuntimeClientResponderAttachment = { responder };
+    const acceptedServerRequestMethods = new Set(
+      options.acceptedServerRequestMethods ??
+        getRuntimeProtocolRegistry("1.1").serverRequestMethods,
+    );
+    const attachment: RuntimeClientResponderAttachment = {
+      responder,
+      acceptedServerRequestMethods,
+      capabilitiesAcknowledged: options.capabilitiesAcknowledged ?? true,
+    };
     this.responders.set(responder.id, attachment);
     const detachResponder = () => {
       this.detachResponder(attachment, "Runtime 客户端连接已关闭");
@@ -161,13 +218,48 @@ export class RuntimeClientRequestCoordinator {
 
   request<TMethod extends RuntimeServerRequestMethod>(
     method: TMethod,
-    params: RuntimeServerRequestInput<TMethod>,
+    params: unknown,
     options: RuntimeClientRequestOptions,
   ): RuntimeClientRequest<TMethod> {
     if (this.interactions.has(options.key)) {
       throw new RuntimeClientRequestError(`Runtime 请求 "${options.key}" 已存在`);
     }
-    const parsedParams = parseRuntimeServerRequestParams(method, params);
+    const protocolVersion = options.protocolVersion ?? "1.1";
+    if (!isRuntimeServerRequestMethodAvailable(protocolVersion, method)) {
+      throw new RuntimeClientRequestError(
+        `Runtime Protocol ${protocolVersion} 不支持 Server Request "${method}"`,
+      );
+    }
+    const registry: RuntimeProtocolRegistry = getRuntimeProtocolRegistry(protocolVersion);
+    const requestDefinition = registry.serverRequests[method];
+    if (requestDefinition === undefined) {
+      throw new RuntimeClientRequestError(
+        `Runtime Protocol ${protocolVersion} 缺少 Server Request "${method}" schema`,
+      );
+    }
+    const parsedParams = requestDefinition.params.parse(params);
+    if (
+      protocolVersion === "1.2" &&
+      (options.expiresAt === undefined ||
+        typeof parsedParams !== "object" ||
+        parsedParams === null ||
+        !("expiresAt" in parsedParams) ||
+        parsedParams.expiresAt !== options.expiresAt)
+    ) {
+      throw new RuntimeClientRequestError(
+        "Runtime Protocol 1.2 请求必须提供一致的绝对 expiresAt deadline",
+      );
+    }
+    const interactionId =
+      protocolVersion === "1.2"
+        ? interactionIdSchema.parse(
+            typeof parsedParams === "object" &&
+              parsedParams !== null &&
+              "interactionId" in parsedParams
+              ? parsedParams.interactionId
+              : undefined,
+          )
+        : interactionIdSchema.parse(randomUUID());
     let expiresAt: string | undefined;
     if (options.expiresAt !== undefined) {
       const parsedExpiresAt = timestampSchema.safeParse(options.expiresAt);
@@ -176,19 +268,26 @@ export class RuntimeClientRequestCoordinator {
       }
       expiresAt = parsedExpiresAt.data;
     }
-    const deferred = Promise.withResolvers<RuntimeServerRequestResult<TMethod>>();
+    const deferred =
+      Promise.withResolvers<RuntimeServerRequestResultForSupportedVersions<TMethod>>();
     const interaction = this.interactions.register({
       key: options.key,
       method,
       params: parsedParams,
       scopeId: options.scopeId,
       eligibleResponderId: options.eligibleResponderId,
+      protocolVersion,
+      interactionId,
       legacyApprovalId: options.approvalId,
       expiresAt,
       reject: deferred.reject,
       resolveResponse: (value) => {
         try {
-          deferred.resolve(parseRuntimeServerRequestResult(method, value));
+          deferred.resolve(
+            requestDefinition.result.parse(
+              value,
+            ) as RuntimeServerRequestResultForSupportedVersions<TMethod>,
+          );
         } catch (error: unknown) {
           deferred.reject(
             new RuntimeClientRequestError(
@@ -276,6 +375,10 @@ export class RuntimeClientRequestCoordinator {
       this.diagnose(`忽略 Runtime scope 不匹配的响应 ${String(message.id)} (${interaction.key})`);
       return true;
     }
+    if (this.isExpired(interaction)) {
+      this.expire(interaction);
+      return true;
+    }
     if ("error" in message) {
       this.rejectInteraction(
         interaction,
@@ -317,13 +420,45 @@ export class RuntimeClientRequestCoordinator {
     }
   }
 
+  setResponderServerRequestMethods(
+    responderId: RuntimeClientResponderId,
+    methods: readonly RuntimeServerRequestMethod[],
+    reason: string,
+    deferDelivery = false,
+  ): boolean {
+    const attachment = this.responders.get(responderId);
+    return attachment === undefined
+      ? false
+      : this.setServerRequestMethodsForAttachment(attachment, methods, reason, deferDelivery);
+  }
+
+  beginResponderCapabilityNegotiation(responderId: RuntimeClientResponderId): boolean {
+    const attachment = this.responders.get(responderId);
+    return attachment === undefined
+      ? false
+      : this.beginCapabilityNegotiationForAttachment(attachment);
+  }
+
+  getPendingInteractionProjections(
+    responderId: RuntimeClientResponderId,
+    threadId: ThreadId,
+  ): readonly PendingInteractionProjection[] | undefined {
+    const attachment = this.responders.get(responderId);
+    return attachment === undefined
+      ? undefined
+      : this.getPendingInteractionProjectionsForAttachment(attachment, threadId);
+  }
+
   private detachResponder(attachment: RuntimeClientResponderAttachment, reason: string): void {
     const { responder } = attachment;
     if (this.responders.get(responder.id) !== attachment) {
       return;
     }
     this.responders.delete(responder.id);
-    for (const interaction of this.interactions.pendingForAttachment(attachment)) {
+    for (const interaction of this.interactions.pending()) {
+      if (interaction.eligibleResponderId !== responder.id) {
+        continue;
+      }
       const settlement = this.interactions.settle(interaction, { kind: "cancelled", reason });
       if (settlement.settled) {
         this.sendCancellation(interaction, settlement.retiredDelivery, reason);
@@ -342,6 +477,18 @@ export class RuntimeClientRequestCoordinator {
       this.rejectInteraction(
         interaction,
         new RuntimeClientRequestError("没有可处理 Runtime 请求的目标客户端"),
+      );
+      return;
+    }
+    if (!attachment.capabilitiesAcknowledged) {
+      return;
+    }
+    if (!attachment.acceptedServerRequestMethods.has(interaction.method)) {
+      this.rejectInteraction(
+        interaction,
+        new RuntimeClientRequestError(
+          `目标客户端未协商 Runtime Server Request "${interaction.method}"`,
+        ),
       );
       return;
     }
@@ -431,7 +578,8 @@ export class RuntimeClientRequestCoordinator {
       return;
     }
     try {
-      const params = runtimeServerRequestCancelParamsSchema.parse({
+      const params = projectRuntimeServerRequestCancelParams(interaction.protocolVersion, {
+        interactionId: interaction.interactionId,
         serverRequestId: delivery.id,
         ...(interaction.legacyApprovalId !== undefined
           ? { approvalId: interaction.legacyApprovalId }
@@ -449,9 +597,63 @@ export class RuntimeClientRequestCoordinator {
   }
 
   private failAttachment(attachment: RuntimeClientResponderAttachment, error: Error): void {
-    for (const interaction of this.interactions.pendingForAttachment(attachment)) {
+    for (const interaction of this.interactions.pending()) {
+      if (
+        interaction.eligibleResponderId !== attachment.responder.id ||
+        interaction.scopeId !== attachment.responder.scopeId ||
+        (interaction.state.kind === "delivered" &&
+          interaction.state.delivery.attachment !== attachment)
+      ) {
+        continue;
+      }
       this.rejectInteraction(interaction, error);
     }
+  }
+
+  private getPendingInteractionProjectionsForAttachment(
+    attachment: RuntimeClientResponderAttachment,
+    threadId: ThreadId,
+  ): readonly PendingInteractionProjection[] {
+    if (
+      this.responders.get(attachment.responder.id) !== attachment ||
+      !attachment.capabilitiesAcknowledged
+    ) {
+      return [];
+    }
+    return this.interactions.pending().flatMap((interaction) => {
+      if (
+        interaction.eligibleResponderId !== attachment.responder.id ||
+        interaction.scopeId !== attachment.responder.scopeId ||
+        (interaction.state.kind === "delivered" &&
+          interaction.state.delivery.attachment !== attachment) ||
+        interaction.protocolVersion !== "1.2" ||
+        interaction.method !== RUNTIME_SERVER_REQUEST_METHODS.approvalRequest ||
+        !attachment.acceptedServerRequestMethods.has(interaction.method)
+      ) {
+        return [];
+      }
+      const approval = approvalRequestParamsV12Schema.safeParse(interaction.params);
+      if (!approval.success) {
+        this.diagnose(
+          `忽略无法投影的 pending Interaction "${interaction.key}"：params 不符合 1.2 schema`,
+        );
+        return [];
+      }
+      if (approval.data.threadId !== threadId) {
+        return [];
+      }
+      return [
+        pendingInteractionProjectionSchema.parse({
+          method: interaction.method,
+          interactionId: interaction.interactionId,
+          threadId: approval.data.threadId,
+          turnId: approval.data.turnId,
+          expiresAt: approval.data.expiresAt,
+          sensitivity: approval.data.sensitivity,
+          approvalId: approval.data.approval.id,
+        }),
+      ];
+    });
   }
 
   private diagnose(message: string): void {
@@ -470,6 +672,8 @@ export class RuntimeClientRequestCoordinator {
       attachment === undefined ||
       interaction.eligibleResponderId !== responderId ||
       attachment.responder.scopeId !== interaction.scopeId ||
+      !attachment.capabilitiesAcknowledged ||
+      !attachment.acceptedServerRequestMethods.has(interaction.method) ||
       this.isExpired(interaction)
     ) {
       if (interaction !== undefined && this.isExpired(interaction)) {
@@ -503,6 +707,65 @@ export class RuntimeClientRequestCoordinator {
       return false;
     }
     interaction.reject(error);
+    return true;
+  }
+
+  private setServerRequestMethodsForAttachment(
+    attachment: RuntimeClientResponderAttachment,
+    methods: readonly RuntimeServerRequestMethod[],
+    reason: string,
+    deferDelivery: boolean,
+  ): boolean {
+    const { responder } = attachment;
+    if (this.responders.get(responder.id) !== attachment) {
+      return false;
+    }
+    const accepted = new Set(methods);
+    const removed = new Set(
+      [...attachment.acceptedServerRequestMethods].filter((method) => !accepted.has(method)),
+    );
+    attachment.acceptedServerRequestMethods = accepted;
+    attachment.capabilitiesAcknowledged = true;
+    for (const interaction of this.interactions.pending()) {
+      if (interaction.eligibleResponderId !== responder.id || !removed.has(interaction.method)) {
+        continue;
+      }
+      const settlement = this.interactions.settle(interaction, { kind: "cancelled", reason });
+      if (!settlement.settled) {
+        continue;
+      }
+      this.sendCancellation(interaction, settlement.retiredDelivery, reason);
+      interaction.reject(new RuntimeClientRequestCancelledError(reason));
+    }
+    const deliverWaiting = () => {
+      if (this.responders.get(responder.id) !== attachment) {
+        return;
+      }
+      for (const interaction of this.interactions.pending()) {
+        if (
+          interaction.eligibleResponderId === responder.id &&
+          interaction.state.kind === "waiting"
+        ) {
+          this.deliver(interaction);
+        }
+      }
+    };
+    if (deferDelivery) {
+      setTimeout(deliverWaiting, 0);
+    } else {
+      deliverWaiting();
+    }
+    return true;
+  }
+
+  private beginCapabilityNegotiationForAttachment(
+    attachment: RuntimeClientResponderAttachment,
+  ): boolean {
+    if (this.responders.get(attachment.responder.id) !== attachment) {
+      return false;
+    }
+    attachment.acceptedServerRequestMethods = new Set();
+    attachment.capabilitiesAcknowledged = false;
     return true;
   }
 }

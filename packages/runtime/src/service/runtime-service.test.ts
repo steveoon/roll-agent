@@ -108,6 +108,7 @@ function createFixture(store: ThreadStore): {
         agentName: "demo-agent",
         toolName: "write",
         input: { path: "/tmp/demo", apiKey: "secret-preview" },
+        expiresAt: "2026-07-28T12:05:00.000Z",
         reason: "requires approval",
         explanation: "写入用户请求的文件，以完成当前任务。",
       };
@@ -266,6 +267,7 @@ test("RuntimeService keeps pending approval on decision failure and cancels thro
       turnId: required.event.approval.turnId,
       approvalId: required.event.approval.id,
     };
+    assert.equal(service.getPendingApprovalExpiresAt(identity), "2026-07-28T12:05:00.000Z");
     fixture.session.approve = () => {
       throw new Error("approval gate failed");
     };
