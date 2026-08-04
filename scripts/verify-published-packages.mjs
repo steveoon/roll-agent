@@ -183,10 +183,29 @@ const PACKAGE_CHECKS = [
   {
     name: "@roll-agent/companion",
     cwd: resolve(repoRoot, "packages/companion"),
-    expectedFiles: ["package/dist/index.js", "package/dist/index.d.ts"],
+    expectedFiles: [
+      "package/dist/index.js",
+      "package/dist/index.d.ts",
+      "package/dist/testing.js",
+      "package/dist/testing.d.ts",
+    ],
+    expectedJavaScriptFiles: [
+      "package/dist/companion-workspace.js",
+      "package/dist/event-buffer.js",
+      "package/dist/index.js",
+      "package/dist/interaction-broker.js",
+      "package/dist/lease-manager.js",
+      "package/dist/relay-bridge-v11.js",
+      "package/dist/relay-bridge.js",
+      "package/dist/relay-frame-buffer.js",
+      "package/dist/relay-protocol.js",
+      "package/dist/testing.js",
+    ],
     verifyManifest(manifest) {
       assert.equal(manifest.exports?.["."].default, "./dist/index.js");
       assert.equal(manifest.exports?.["."].types, "./dist/index.d.ts");
+      assert.equal(manifest.exports?.["./testing"].default, "./dist/testing.js");
+      assert.equal(manifest.exports?.["./testing"].types, "./dist/testing.d.ts");
     },
   },
   {

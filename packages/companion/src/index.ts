@@ -41,8 +41,34 @@ export type {
   EventBufferGap,
   EventBufferReplay,
 } from "./event-buffer.ts";
+export {
+  CompanionRelayFrameBuffer,
+  DEFAULT_COMPANION_RELAY_FRAME_MAX_BYTES,
+  DEFAULT_COMPANION_RELAY_FRAME_MAX_EVENTS,
+  materializeRelayFrameV11,
+} from "./relay-frame-buffer.ts";
+export type {
+  BufferedRelayInteractionFrameV11,
+  BufferedRelayRuntimeEventV11,
+  CompanionRelayFrameBufferOptions,
+  CompanionRelayFrameEntryV11,
+  CompanionRelayFrameReplayV11,
+  RelayFrameBufferGapV11,
+} from "./relay-frame-buffer.ts";
 export { COMPANION_LEASE_KINDS, WorkspaceLeaseManager } from "./lease-manager.ts";
 export type { CompanionLease, CompanionLeaseKind } from "./lease-manager.ts";
+export {
+  CompanionInteractionBroker,
+  createRuntimeServerRequestHandlers,
+} from "./interaction-broker.ts";
+export type {
+  CompanionInteractionBrokerOptions,
+  CompanionInteractionFrameDraftV11,
+  CompanionInteractionWorkspaceBinding,
+  RemoteInteractionCandidateContext,
+  RemoteInteractionResponderPolicy,
+  RemoteInteractionResponderPolicyInput,
+} from "./interaction-broker.ts";
 export {
   CompanionApprovalRequestBroker,
   CompanionWorkspace,
@@ -59,6 +85,11 @@ export {
   createWebSocketRelayTransport,
   relayEventMessage,
 } from "./relay-bridge.ts";
+export {
+  CompanionRelayBridgeV11,
+  OutboundCompanionRelayV11,
+  createWebSocketRelayTransportV11,
+} from "./relay-bridge-v11.ts";
 export type {
   CompanionRelayBridgeOptions,
   OutboundCompanionRelayOptions,
@@ -67,6 +98,17 @@ export type {
   WebSocketLike,
   WebSocketMessageEventLike,
 } from "./relay-bridge.ts";
+export type {
+  CompanionRelayBridgeV11Options,
+  CompanionRelayConnectionV11Options,
+  CompanionWorkspaceV11Port,
+  OutboundCompanionRelayV11Connection,
+  OutboundCompanionRelayV11Options,
+  RelayPayloadCipherV11,
+  RelayTransportV11,
+  WebSocketLikeV11,
+  WebSocketMessageEventLikeV11,
+} from "./relay-bridge-v11.ts";
 export type {
   CompanionRuntimeClient,
   CompanionWorkspaceOptions,
