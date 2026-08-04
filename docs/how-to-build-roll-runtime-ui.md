@@ -47,6 +47,9 @@ import { RollNodeClient } from "@roll-agent/client-node";
 const client = await RollNodeClient.start({
   cwd: "/absolute/path/to/workspace",
   requestTimeoutMs: 30_000,
+  onUserInputRequest: async (form, { signal }) => {
+    return await showLocalUserInputForm(form, { signal });
+  },
   serverRequestHandlers: {
     "approval.request": async ({ approval }, { signal }) => {
       const result = await showLocalApprovalDialog(approval, { signal });
@@ -133,6 +136,20 @@ Runtime 取消 Approval 时，handler 的 `AbortSignal` 会 abort。对话框必
 `{ serverRequestId, approvalId?, reason }`。JSON-RPC `id`、`interactionId` 与
 mutation `params.requestId` 属于三个不同生命周期，不能互换。
 
+### User Input 控制路径
+
+`userInput.request` 是 1.2 的可选 typed Interaction。只有
+`onUserInputRequest`（或等价 typed handler）已完成 capability ACK 时，Runtime 才会把
+内建 `roll__user_input` Tool 加入 capability manifest 与 system prompt。表单固定支持
+`text | multiline | number | boolean | choice`；用户关闭或按 Esc 应返回正常
+`{ status: "cancelled", reason? }`，不能 throw 或取消整个 Turn。
+
+等待期间 1.2 Snapshot 的 Turn 状态为 `waiting-for-user`，旧协议兼容投影为 `running`。
+Handler 的完整 `submitted.values` 只能作为当前 Server Request Result 返回；UI 不得把它们
+写入 Runtime Event 日志、诊断或遥测。Runtime 会按原始表单二次校验并重新排序。首版仅允许
+`sensitivity: "normal"`，不得用该表单请求 password、token、secret、authentication 或
+file picker。
+
 ### 连接失败后的 UI 收敛
 
 `onTurnOutcomeUnknown` 与 `onExit` 解决的是两个不同层面：
@@ -171,7 +188,7 @@ roll runtime serve --stdio
    `client.capabilities.set({ revision: 1, serverRequestMethods })`，并在 ACK 前保持
    Interaction 不可投递；后续 handler 变更使用严格递增 revision；
 4. 同时识别 Runtime 发来的带 `method + id` JSON-RPC Request；收到
-   `approval.request` 后用同一个 JSON-RPC `id` 返回 typed Result；
+   `approval.request` 或 `userInput.request` 后用同一个 JSON-RPC `id` 返回 typed Result；
 5. 将 `runtime.event` Notification 分发到 UI；在 `"1.2"` / `"1.1"` 中把
    `approval.required` 当作只读 View Event；
 6. 处理 `runtime.serverRequest.cancel`：1.2 按 `interactionId`，1.1 按
@@ -181,8 +198,8 @@ roll runtime serve --stdio
    `limits.maxFrameBytes` 的较小值；
 9. 收到合法但 `id: null` 的 JSON-RPC error 时，不尝试关联挂起请求；把连接视为不可信并
    让所有挂起操作收敛；
-10. Runtime 退出后，终止所有未决 Server Request，不自动重放 Approval、
-   `turn.start` 等副作用命令。
+10. Runtime 退出后，终止所有未决 Server Request，不自动重放 Approval、User Input、
+    `turn.start` 等副作用命令。
 
 Python 标准库示例见
 [`examples/python-runtime-client`](../examples/python-runtime-client/README.md)。该示例

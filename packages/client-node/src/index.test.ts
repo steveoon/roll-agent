@@ -29,6 +29,7 @@ import {
   type RuntimeClientExit,
   type RuntimeClientTransport,
   type RuntimeServerRequestHandler,
+  type UserInputRequestHandler,
 } from "./index.ts";
 
 const IDS = {
@@ -201,6 +202,51 @@ function approvalRequestParamsV12(interactionId: string = IDS.interaction) {
       preview: { selector: "#submit" },
       reason: "This action submits the form",
     },
+  } as const;
+}
+
+function deploymentRegionRequestParamsV12(interactionId: string = IDS.interaction) {
+  return {
+    interactionId,
+    threadId: IDS.thread,
+    turnId: IDS.turn,
+    expiresAt: "2026-07-29T12:10:00.000Z",
+    sensitivity: "normal",
+    title: "部署配置",
+    controls: [
+      {
+        type: "text",
+        id: "deployment-region",
+        label: "部署区域",
+        required: true,
+        minLength: 2,
+        maxLength: 20,
+      },
+    ],
+  } as const;
+}
+
+function targetWorkspaceRequestParamsV12(interactionId: string = IDS.interaction2) {
+  return {
+    interactionId,
+    threadId: IDS.thread,
+    turnId: IDS.turn,
+    expiresAt: "2026-07-29T12:10:00.000Z",
+    sensitivity: "normal",
+    title: "Workspace 配置",
+    controls: [
+      {
+        type: "choice",
+        id: "target-workspace",
+        label: "目标 Workspace",
+        required: true,
+        multiple: false,
+        options: [
+          { id: "workspace-a", label: "Workspace A" },
+          { id: "workspace-b", label: "Workspace B" },
+        ],
+      },
+    ],
   } as const;
 }
 
@@ -748,6 +794,96 @@ test("RollNodeClient does not deliver Protocol 1.2 Server Requests before capabi
   const afterAck = findClientResponse(runtime.messages, "approval-after-capability-ack");
   assert.ok(afterAck && "result" in afterAck);
   assert.deepEqual(afterAck.result, { decision: "approve" });
+  await client.shutdown();
+});
+
+test("RollNodeClient onUserInputRequest option advertises and handles typed deployment input", async () => {
+  const transport = new MemoryTransport();
+  const runtime = new ControlledCapabilityRuntime(transport);
+  let receivedLabel: string | undefined;
+  let receivedRequestId: string | number | undefined;
+  const handler: UserInputRequestHandler = async (params, context) => {
+    receivedLabel = params.controls[0]?.label;
+    receivedRequestId = context.requestId;
+    return {
+      status: "submitted",
+      values: [{ id: "deployment-region", value: "华东" }],
+    };
+  };
+  const connecting = RollNodeClient.connect({
+    transport,
+    onUserInputRequest: handler,
+  });
+  const capability = await runtime.nextCapabilityRequest();
+  assert.deepEqual(capability.params, {
+    revision: 1,
+    serverRequestMethods: [RUNTIME_SERVER_REQUEST_METHODS.userInputRequest],
+  });
+  runtime.acknowledgeCapabilityRequest(capability);
+  const client = await connecting;
+
+  writeJson(transport.stdout, {
+    jsonrpc: "2.0",
+    id: "deployment-region-request",
+    method: RUNTIME_SERVER_REQUEST_METHODS.userInputRequest,
+    params: deploymentRegionRequestParamsV12(),
+  });
+  await flushMessages();
+  assert.equal(receivedLabel, "部署区域");
+  assert.equal(receivedRequestId, "deployment-region-request");
+  const response = findClientResponse(runtime.messages, "deployment-region-request");
+  assert.ok(response && "result" in response);
+  assert.deepEqual(response.result, {
+    status: "submitted",
+    values: [{ id: "deployment-region", value: "华东" }],
+  });
+  await client.shutdown();
+});
+
+test("RollNodeClient onUserInputRequest method dynamically registers target Workspace input", async () => {
+  const transport = new MemoryTransport();
+  const runtime = new ControlledCapabilityRuntime(transport);
+  const connecting = RollNodeClient.connect({ transport });
+  const initialCapability = await runtime.nextCapabilityRequest();
+  runtime.acknowledgeCapabilityRequest(initialCapability);
+  const client = await connecting;
+
+  let selectedControlId: string | undefined;
+  const unregister = client.onUserInputRequest(async (params) => {
+    selectedControlId = params.controls[0]?.id;
+    return {
+      status: "submitted",
+      values: [{ id: "target-workspace", value: "workspace-b" }],
+    };
+  });
+  const addCapability = await runtime.nextCapabilityRequest();
+  assert.deepEqual(addCapability.params, {
+    revision: 2,
+    serverRequestMethods: [RUNTIME_SERVER_REQUEST_METHODS.userInputRequest],
+  });
+  runtime.acknowledgeCapabilityRequest(addCapability);
+  await flushMessages();
+
+  writeJson(transport.stdout, {
+    jsonrpc: "2.0",
+    id: "target-workspace-request",
+    method: RUNTIME_SERVER_REQUEST_METHODS.userInputRequest,
+    params: targetWorkspaceRequestParamsV12(),
+  });
+  await flushMessages();
+  assert.equal(selectedControlId, "target-workspace");
+  const response = findClientResponse(runtime.messages, "target-workspace-request");
+  assert.ok(response && "result" in response);
+  assert.deepEqual(response.result, {
+    status: "submitted",
+    values: [{ id: "target-workspace", value: "workspace-b" }],
+  });
+
+  unregister();
+  const removeCapability = await runtime.nextCapabilityRequest();
+  assert.deepEqual(removeCapability.params, { revision: 3, serverRequestMethods: [] });
+  runtime.acknowledgeCapabilityRequest(removeCapability);
+  await flushMessages();
   await client.shutdown();
 });
 

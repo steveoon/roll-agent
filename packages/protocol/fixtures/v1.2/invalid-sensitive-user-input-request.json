@@ -1,0 +1,20 @@
+{
+  "jsonrpc": "2.0",
+  "id": "user-input-rpc-secret",
+  "method": "userInput.request",
+  "params": {
+    "interactionId": "00000000-0000-4000-8000-000000000006",
+    "threadId": "00000000-0000-4000-8000-000000000002",
+    "turnId": "00000000-0000-4000-8000-000000000003",
+    "expiresAt": "2026-07-29T12:10:00.000Z",
+    "sensitivity": "secret",
+    "controls": [
+      {
+        "type": "text",
+        "id": "credential",
+        "label": "Credential",
+        "required": true
+      }
+    ]
+  }
+}

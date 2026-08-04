@@ -15,7 +15,7 @@ import {
   runtimeProtocolVersionSchema,
   streamIdSchema,
   threadIdSchema,
-  type ActiveTurnV11,
+  type ActiveTurn,
   type ApprovalResolution,
   type InitializeParams,
   type InitializeResult,
@@ -29,12 +29,16 @@ import {
   type RuntimeMethodResult,
   type RuntimeProtocolVersion,
   type RuntimeProtocolErrorDataV12,
+  type ThreadSnapshot,
   type ThreadId,
   type ThreadSummary,
   type TurnId,
   type UiMessage,
+  type UserInputForm,
+  type UserInputResult,
 } from "@roll-agent/protocol";
 import type { AgentSession } from "../engine/agent-session.ts";
+import type { SessionUserInputRequestId } from "../interaction/user-input-interaction-manager.ts";
 import { createSafeCapabilitySnapshot } from "../engine/capability-manifest.ts";
 import type { SessionEvent } from "../types/events.ts";
 import {
@@ -79,7 +83,8 @@ export type RuntimeServiceSession = Pick<
   | "close"
   | "getCapabilityManifest"
   | "getCapabilityTurnContext"
->;
+> &
+  Partial<Pick<AgentSession, "setUserInputAvailable" | "resolveUserInput" | "cancelUserInput">>;
 
 export interface RuntimeServiceEngine {
   createSession(input?: { readonly title?: string }): Promise<RuntimeServiceSession>;
@@ -114,7 +119,7 @@ interface ActiveTurnState {
   readonly turnId: TurnId;
   readonly session: RuntimeServiceSession;
   readonly startedAt: string;
-  status: ActiveTurnV11["status"];
+  status: ActiveTurn["status"];
   interactionFailure: string | undefined;
 }
 
@@ -137,6 +142,34 @@ interface PendingApprovalState {
   readonly approval: PendingApproval;
   readonly expiresAt: string | undefined;
 }
+
+interface PendingUserInputState {
+  readonly requestId: SessionUserInputRequestId;
+  readonly threadId: ThreadId;
+  readonly turnId: TurnId;
+  readonly session: RuntimeServiceSession;
+  readonly form: UserInputForm;
+  readonly expiresAt: string;
+}
+
+export type RuntimeThreadSnapshot = Omit<ThreadSnapshot, "pendingInteractions">;
+
+export type RuntimeUserInputInteractionEvent =
+  | {
+      readonly type: "required";
+      readonly requestId: SessionUserInputRequestId;
+      readonly threadId: ThreadId;
+      readonly turnId: TurnId;
+      readonly form: UserInputForm;
+      readonly expiresAt: string;
+    }
+  | {
+      readonly type: "settled";
+      readonly requestId: SessionUserInputRequestId;
+      readonly threadId: ThreadId;
+      readonly turnId: TurnId;
+      readonly reason: string;
+    };
 
 export class RuntimeServiceError extends Error {
   readonly rollCode: RollErrorCode;
@@ -426,10 +459,15 @@ export class RuntimeService {
   private readonly activeTurnOwners = new Map<TurnId, ThreadId>();
   private readonly settledTurnOwners = new Map<TurnId, ThreadId>();
   private readonly pendingApprovals = new Map<string, PendingApprovalState>();
+  private readonly pendingUserInputs = new Map<SessionUserInputRequestId, PendingUserInputState>();
   private readonly listeners = new Set<(event: RuntimeEventEnvelope) => void>();
+  private readonly userInputListeners = new Set<
+    (event: RuntimeUserInputInteractionEvent) => void
+  >();
   private readonly mutationRequests: MutationRequestCache;
   private sequence = 0;
   private closing = false;
+  private userInputAvailable = false;
 
   constructor(
     engine: RuntimeServiceEngine,
@@ -498,6 +536,26 @@ export class RuntimeService {
     };
   }
 
+  onUserInputInteraction(listener: (event: RuntimeUserInputInteractionEvent) => void): () => void {
+    this.userInputListeners.add(listener);
+    return () => {
+      this.userInputListeners.delete(listener);
+    };
+  }
+
+  setUserInputAvailable(available: boolean): void {
+    if (this.userInputAvailable === available) {
+      return;
+    }
+    this.userInputAvailable = available;
+    if (!available) {
+      this.cancelAllPendingUserInputs("当前客户端已撤销用户输入处理能力");
+    }
+    for (const session of this.sessions.values()) {
+      session.setUserInputAvailable?.(available);
+    }
+  }
+
   listThreads(params: RuntimeMethodParams<"thread.list">): RuntimeMethodResult<"thread.list"> {
     this.assertOpen();
     const offset = params.cursor === undefined ? 0 : Number(params.cursor);
@@ -530,7 +588,7 @@ export class RuntimeService {
         const session = await this.engine.createSession(
           params.title !== undefined ? { title: params.title } : {},
         );
-        this.sessions.set(session.id, session);
+        this.rememberSession(session);
         return {
           thread: toThreadSummary(this.store, this.requireThread(session.id)),
         };
@@ -538,9 +596,7 @@ export class RuntimeService {
     );
   }
 
-  async openThread(
-    params: RuntimeMethodParams<"thread.open">,
-  ): Promise<RuntimeMethodResult<"thread.open">> {
+  async openThread(params: RuntimeMethodParams<"thread.open">): Promise<RuntimeThreadSnapshot> {
     await this.requireSession(params.threadId);
     return this.snapshotThread({
       threadId: params.threadId,
@@ -548,9 +604,7 @@ export class RuntimeService {
     });
   }
 
-  snapshotThread(
-    params: RuntimeMethodParams<"thread.snapshot">,
-  ): RuntimeMethodResult<"thread.snapshot"> {
+  snapshotThread(params: RuntimeMethodParams<"thread.snapshot">): RuntimeThreadSnapshot {
     this.assertOpen();
     const record = this.requireThread(params.threadId);
     const messagePage = this.store.listRecentTranscriptMessages(params.threadId, {
@@ -566,7 +620,7 @@ export class RuntimeService {
       limit: params.limit,
     });
     const active = this.activeTurns.get(params.threadId);
-    const activeTurn: ActiveTurnV11 | undefined =
+    const activeTurn: ActiveTurn | undefined =
       active === undefined
         ? undefined
         : {
@@ -751,6 +805,7 @@ export class RuntimeService {
       state.status = "cancelling";
       let cancelling = false;
       try {
+        this.cancelPendingUserInputsForTurn(params.turnId, "Turn 已由客户端取消");
         this.cancelPendingApprovalsForTurn(params.turnId, {
           status: "cancelled",
           reason: "Turn 已由客户端取消",
@@ -858,6 +913,42 @@ export class RuntimeService {
     return true;
   }
 
+  resolvePendingUserInput(requestId: SessionUserInputRequestId, result: UserInputResult): boolean {
+    const pending = this.pendingUserInputs.get(requestId);
+    if (pending === undefined) {
+      return false;
+    }
+    this.pendingUserInputs.delete(requestId);
+    const resolved = pending.session.resolveUserInput?.(requestId, result) ?? false;
+    this.restoreRunningStatus(pending);
+    this.emitUserInputInteraction({
+      type: "settled",
+      requestId,
+      threadId: pending.threadId,
+      turnId: pending.turnId,
+      reason: result.status === "submitted" ? "用户已提交输入" : "用户已取消输入",
+    });
+    return resolved;
+  }
+
+  cancelPendingUserInput(requestId: SessionUserInputRequestId, reason: string): boolean {
+    const pending = this.pendingUserInputs.get(requestId);
+    if (pending === undefined) {
+      return false;
+    }
+    this.pendingUserInputs.delete(requestId);
+    const cancelled = pending.session.cancelUserInput?.(requestId, reason) ?? false;
+    this.restoreRunningStatus(pending);
+    this.emitUserInputInteraction({
+      type: "settled",
+      requestId,
+      threadId: pending.threadId,
+      turnId: pending.turnId,
+      reason,
+    });
+    return cancelled;
+  }
+
   getOperation(params: RuntimeMethodParams<"operation.get">): RuntimeMethodResult<"operation.get"> {
     this.assertOpen();
     this.requireThread(params.threadId);
@@ -872,6 +963,7 @@ export class RuntimeService {
       return;
     }
     this.closing = true;
+    this.setUserInputAvailable(false);
     for (const turn of this.activeTurns.values()) {
       turn.session.cancel();
     }
@@ -881,6 +973,8 @@ export class RuntimeService {
     this.activeTurnOwners.clear();
     this.settledTurnOwners.clear();
     this.pendingApprovals.clear();
+    this.pendingUserInputs.clear();
+    this.userInputListeners.clear();
     await Promise.allSettled(sessions.map((session) => session.close()));
     this.mutationRequests.clear();
   }
@@ -912,8 +1006,13 @@ export class RuntimeService {
       return existing;
     }
     const session = await this.engine.resumeSession(threadId);
-    this.sessions.set(threadId, session);
+    this.rememberSession(session);
     return session;
+  }
+
+  private rememberSession(session: RuntimeServiceSession): void {
+    session.setUserInputAvailable?.(this.userInputAvailable);
+    this.sessions.set(session.id, session);
   }
 
   private emit(threadId: ThreadId, turnId: TurnId | undefined, event: RuntimeEvent): void {
@@ -1096,6 +1195,54 @@ export class RuntimeService {
         });
         return;
       }
+      case "user-input-required": {
+        if (
+          !this.userInputAvailable ||
+          state.session.resolveUserInput === undefined ||
+          state.session.cancelUserInput === undefined
+        ) {
+          state.session.cancelUserInput?.(event.requestId, "当前客户端未协商用户输入处理能力");
+          return;
+        }
+        const pending: PendingUserInputState = {
+          requestId: event.requestId,
+          threadId: state.threadId,
+          turnId: state.turnId,
+          session: state.session,
+          form: event.form,
+          expiresAt: event.expiresAt,
+        };
+        this.pendingUserInputs.set(event.requestId, pending);
+        state.status = "waiting-for-user";
+        const delivered = this.emitUserInputInteraction({
+          type: "required",
+          requestId: event.requestId,
+          threadId: state.threadId,
+          turnId: state.turnId,
+          form: event.form,
+          expiresAt: event.expiresAt,
+        });
+        if (!delivered) {
+          this.cancelPendingUserInput(event.requestId, "当前没有可处理用户输入请求的客户端");
+        }
+        return;
+      }
+      case "user-input-settled": {
+        const pending = this.pendingUserInputs.get(event.requestId);
+        if (pending === undefined) {
+          return;
+        }
+        this.pendingUserInputs.delete(event.requestId);
+        this.restoreRunningStatus(pending);
+        this.emitUserInputInteraction({
+          type: "settled",
+          requestId: pending.requestId,
+          threadId: pending.threadId,
+          turnId: pending.turnId,
+          reason: event.status === "submitted" ? "用户输入请求已结算" : "用户输入请求已取消",
+        });
+        return;
+      }
       case "turn-cancelled": {
         projection.terminalEvent ??=
           state.interactionFailure === undefined
@@ -1198,6 +1345,45 @@ export class RuntimeService {
     }
   }
 
+  private cancelPendingUserInputsForTurn(turnId: TurnId, reason: string): void {
+    const requestIds = [...this.pendingUserInputs.values()]
+      .filter((pending) => pending.turnId === turnId)
+      .map((pending) => pending.requestId);
+    for (const requestId of requestIds) {
+      this.cancelPendingUserInput(requestId, reason);
+    }
+  }
+
+  private cancelAllPendingUserInputs(reason: string): void {
+    for (const requestId of [...this.pendingUserInputs.keys()]) {
+      this.cancelPendingUserInput(requestId, reason);
+    }
+  }
+
+  private restoreRunningStatus(pending: PendingUserInputState): void {
+    const active = this.activeTurns.get(pending.threadId);
+    if (
+      active !== undefined &&
+      active.turnId === pending.turnId &&
+      active.status === "waiting-for-user"
+    ) {
+      active.status = "running";
+    }
+  }
+
+  private emitUserInputInteraction(event: RuntimeUserInputInteractionEvent): boolean {
+    let delivered = false;
+    for (const listener of this.userInputListeners) {
+      try {
+        listener(event);
+        delivered = true;
+      } catch {
+        // Interaction observers cannot corrupt Runtime state. Deadlines remain fail-closed.
+      }
+    }
+    return delivered;
+  }
+
   private emitTurnTerminal(
     state: ActiveTurnState,
     event: Extract<
@@ -1207,6 +1393,7 @@ export class RuntimeService {
       }
     >,
   ): void {
+    this.cancelPendingUserInputsForTurn(state.turnId, `Turn 已终止：${event.type}`);
     this.cancelPendingApprovalsForTurn(
       state.turnId,
       event.type === "turn.cancelled" && event.reason === "timeout"

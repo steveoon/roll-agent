@@ -1,0 +1,35 @@
+{
+  "jsonrpc": "2.0",
+  "id": "user-input-rpc-1",
+  "method": "userInput.request",
+  "params": {
+    "interactionId": "00000000-0000-4000-8000-000000000006",
+    "threadId": "00000000-0000-4000-8000-000000000002",
+    "turnId": "00000000-0000-4000-8000-000000000003",
+    "expiresAt": "2026-07-29T12:10:00.000Z",
+    "sensitivity": "normal",
+    "title": "部署配置",
+    "description": "请确认普通部署配置。",
+    "controls": [
+      {
+        "type": "text",
+        "id": "deployment-region",
+        "label": "部署区域",
+        "required": true,
+        "minLength": 2,
+        "maxLength": 20
+      },
+      {
+        "type": "choice",
+        "id": "target-workspace",
+        "label": "目标 Workspace",
+        "required": true,
+        "multiple": false,
+        "options": [
+          { "id": "workspace-a", "label": "Workspace A" },
+          { "id": "workspace-b", "label": "Workspace B" }
+        ]
+      }
+    ]
+  }
+}

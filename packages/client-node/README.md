@@ -67,7 +67,8 @@ try {
 ## Runtime→Client Request
 
 - `"1.2"` 没有强制 Handler，因此即使没有 Handler 也会广告 `["1.2","1.0"]`，并以
-  revision 1 ACK 空能力集合；存在 `approval.request` 时广告 `["1.2","1.1","1.0"]`；
+  revision 1 ACK 空能力集合；只有 `userInput.request` 时仍广告 `["1.2","1.0"]`，存在
+  `approval.request` 时才同时广告要求该 Handler 的 1.1；
 - `connect()` / `start()` 只有在 `"1.2"` 初始 capability ACK 后才 resolve，ACK 前不会把
   Runtime Server Request 投递给 Handler；
 - `"1.1"` 的 `approval.request` handler 是唯一审批写入路径，
@@ -81,6 +82,9 @@ try {
   替换只在本地原子完成，不产生无意义 revision，旧 disposer 不会误删替代者；
 - 撤销 `"1.2"` 能力会立即 abort 该 method 的未决 Interaction，并抑制迟到 Response；
   `runtime.serverRequest.cancel` 使用 `interactionId`，不会与 JSON-RPC request id 混用；
+- `userInput.request` 可通过构造选项或实例方法 `onUserInputRequest()` 注册 typed named
+  Handler。用户按 Esc 或关闭表单应返回正常 `{ status: "cancelled", reason? }`，不能 throw；
+  完整提交值只返回给当前 Tool 调用，不会出现在 Runtime Event 或 Snapshot；
 - 已协商 `"1.0"` 后不能通过 `registerServerRequestHandler()` 动态升级；应在
   `start()` / `connect()` 时传入初始 handler；
 - 已协商 `"1.1"` 后仍可原子替换 handler；旧 handler 的 disposer 不会误删替代者。
@@ -91,7 +95,7 @@ try {
 `@roll-agent/client-node` 包版本，不需要在源码与 `package.json` 之间手工同步。
 
 当前 `stdio` Transport 不提供 Request replay/resume。断线后终止本地交互，并通过
-Snapshot 收敛；不要重放旧 Approval 或 Turn。
+Snapshot 收敛；不要重放旧 Approval、User Input 或 Turn。
 
 ## 文档
 

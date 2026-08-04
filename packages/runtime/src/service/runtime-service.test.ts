@@ -13,6 +13,7 @@ import {
   type RuntimeEventEnvelope,
 } from "@roll-agent/protocol";
 import { ThreadStore } from "../store/thread-store.ts";
+import { sessionUserInputRequestIdSchema } from "../interaction/user-input-interaction-manager.ts";
 import {
   createToolExecutionRecord,
   type ToolExecutionRecord,
@@ -28,6 +29,7 @@ import {
   RuntimeServiceError,
   type RuntimeServiceEngine,
   type RuntimeServiceSession,
+  type RuntimeUserInputInteractionEvent,
 } from "./runtime-service.ts";
 
 const IDS = {
@@ -1031,6 +1033,134 @@ test("RuntimeService 关闭后拒绝重新 initialize", async () => {
         error.rollCode === "RUNTIME_CLOSING" &&
         error.retryable,
     );
+  } finally {
+    await service.close();
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("RuntimeService projects waiting-for-user and settles user input exactly once", async () => {
+  const dir = tempDir();
+  const store = new ThreadStore(dir);
+  const requestId = sessionUserInputRequestIdSchema.parse("00000000-0000-4000-8000-000000000130");
+  const settled = Promise.withResolvers<void>();
+  const enabled: boolean[] = [];
+  let pending = true;
+  const session: RuntimeServiceSession = {
+    id: IDS.thread,
+    async *send() {
+      yield { type: "message-start", messageId: IDS.message };
+      yield {
+        type: "user-input-required",
+        requestId,
+        expiresAt: new Date(Date.now() + 60_000).toISOString(),
+        form: {
+          title: "选择目标 Workspace",
+          controls: [
+            {
+              type: "text",
+              id: "workspace",
+              label: "目标 Workspace",
+              required: true,
+              maxLength: 120,
+            },
+          ],
+        },
+      };
+      await settled.promise;
+      yield { type: "user-input-settled", requestId, status: "submitted" };
+      yield { type: "message-finish", text: "done" };
+    },
+    approve() {
+      return false;
+    },
+    reject() {
+      return false;
+    },
+    cancel() {
+      return false;
+    },
+    async close() {},
+    setUserInputAvailable(available) {
+      enabled.push(available);
+    },
+    resolveUserInput(candidateRequestId) {
+      if (!pending || candidateRequestId !== requestId) {
+        return false;
+      }
+      pending = false;
+      settled.resolve();
+      return true;
+    },
+    cancelUserInput(candidateRequestId) {
+      if (!pending || candidateRequestId !== requestId) {
+        return false;
+      }
+      pending = false;
+      settled.resolve();
+      return true;
+    },
+    getCapabilityManifest() {
+      throw new Error("capabilities are not used by this fixture");
+    },
+    getCapabilityTurnContext() {
+      return undefined;
+    },
+  };
+  const engine: RuntimeServiceEngine = {
+    async createSession() {
+      store.createThread({ id: IDS.thread, model: "fixture-model" });
+      return session;
+    },
+    async resumeSession() {
+      return session;
+    },
+  };
+  const service = new RuntimeService(engine, store);
+  const interactions: RuntimeUserInputInteractionEvent[] = [];
+  service.onUserInputInteraction((event) => interactions.push(event));
+  try {
+    service.setUserInputAvailable(true);
+    await service.createThread(
+      runtimeMethodSchemas["thread.create"].params.parse({
+        requestId: IDS.requestCreate,
+      }),
+    );
+    await service.startTurn(
+      runtimeMethodSchemas["turn.start"].params.parse({
+        requestId: IDS.requestFirstTurn,
+        threadId: IDS.thread,
+        turnId: IDS.firstTurn,
+        input: { text: "需要 workspace" },
+      }),
+    );
+    await nextTick();
+
+    assert.deepEqual(enabled, [true]);
+    assert.equal(
+      service.snapshotThread({ threadId: threadIdSchema.parse(IDS.thread), limit: 100 }).activeTurn
+        ?.status,
+      "waiting-for-user",
+    );
+    assert.equal(interactions[0]?.type, "required");
+    assert.equal(
+      service.resolvePendingUserInput(requestId, {
+        status: "submitted",
+        values: [{ id: "workspace", value: "product-docs" }],
+      }),
+      true,
+    );
+    assert.equal(
+      service.resolvePendingUserInput(requestId, {
+        status: "submitted",
+        values: [{ id: "workspace", value: "late-duplicate" }],
+      }),
+      false,
+    );
+    await nextTick();
+    assert.equal(interactions.filter((event) => event.type === "settled").length, 1);
+    assert.equal(JSON.stringify(interactions).includes("product-docs"), false);
   } finally {
     await service.close();
     store.close();

@@ -13,16 +13,38 @@ export const APPROVAL_EXPLANATION_PREVIEW_KEY = "explanation" as const;
 export const APPROVAL_EXPLANATION_MAX_CHARS = 100;
 export const CLIENT_CAPABILITY_METHOD_MAX_COUNT = 64;
 export const CLIENT_CAPABILITY_METHOD_MAX_CHARS = 100;
+export const USER_INPUT_CONTROL_MAX_COUNT = 16;
+export const USER_INPUT_CONTROL_ID_MAX_CHARS = 64;
+export const USER_INPUT_LABEL_MAX_CHARS = 200;
+export const USER_INPUT_DESCRIPTION_MAX_CHARS = 500;
+export const USER_INPUT_CHOICE_OPTION_MAX_COUNT = 50;
+export const USER_INPUT_TEXT_MAX_CHARS = 10_000;
+export const USER_INPUT_CANCEL_REASON_MAX_CHARS = 500;
 
 export const INTERACTION_SENSITIVITIES = ["normal"] as const;
 
 export const RUNTIME_SERVER_REQUEST_METHODS = {
   approvalRequest: "approval.request",
+  userInputRequest: "userInput.request",
 } as const;
 
-export const RUNTIME_SERVER_REQUEST_METHOD_VALUES = [
+/** Protocol 1.1 Server Request registry. Keep this list frozen. */
+export const RUNTIME_SERVER_REQUEST_METHOD_VALUES_V11 = [
   RUNTIME_SERVER_REQUEST_METHODS.approvalRequest,
 ] as const;
+
+export const RUNTIME_SERVER_REQUEST_METHOD_VALUES = [
+  ...RUNTIME_SERVER_REQUEST_METHOD_VALUES_V11,
+  RUNTIME_SERVER_REQUEST_METHODS.userInputRequest,
+] as const;
+
+export const USER_INPUT_CONTROL_TYPES = {
+  text: "text",
+  multiline: "multiline",
+  number: "number",
+  boolean: "boolean",
+  choice: "choice",
+} as const;
 
 export type RuntimeServerRequestMethod =
   (typeof RUNTIME_SERVER_REQUEST_METHODS)[keyof typeof RUNTIME_SERVER_REQUEST_METHODS];
@@ -151,6 +173,16 @@ export const jsonRpcIdSchema = z.union([z.string(), z.number()]);
 export const runtimeProtocolVersionSchema = z.enum(SUPPORTED_RUNTIME_PROTOCOL_VERSIONS);
 export const runtimeProtocolVersionV11Schema = z.enum(SUPPORTED_RUNTIME_PROTOCOL_VERSIONS_V11);
 export const interactionSensitivitySchema = z.enum(INTERACTION_SENSITIVITIES);
+const runtimeInteractionMetadataObjectSchema = z
+  .object({
+    interactionId: interactionIdSchema,
+    threadId: threadIdSchema,
+    turnId: turnIdSchema,
+    expiresAt: timestampSchema,
+    sensitivity: interactionSensitivitySchema,
+  })
+  .strict();
+export const runtimeInteractionMetadataSchema = runtimeInteractionMetadataObjectSchema.readonly();
 export const approvalExplanationSchema = z
   .string()
   .trim()
@@ -395,6 +427,253 @@ const threadSnapshotV11Fields = {
 /** Protocol 1.1/1.0 wire shape. Keep this schema frozen. */
 export const threadSnapshotV11Schema = z.object(threadSnapshotV11Fields).strict().readonly();
 
+const userInputIdentifierSchema = z
+  .string()
+  .min(1)
+  .max(USER_INPUT_CONTROL_ID_MAX_CHARS)
+  .refine((value) => value.trim().length > 0, { message: "identifier must not be blank" });
+const userInputLabelSchema = z
+  .string()
+  .min(1)
+  .max(USER_INPUT_LABEL_MAX_CHARS)
+  .refine((value) => value.trim().length > 0, { message: "label must not be blank" });
+const userInputDescriptionSchema = z.string().min(1).max(USER_INPUT_DESCRIPTION_MAX_CHARS);
+const userInputLengthSchema = z.number().int().min(0).max(USER_INPUT_TEXT_MAX_CHARS);
+const userInputSelectionCountSchema = z
+  .number()
+  .int()
+  .min(0)
+  .max(USER_INPUT_CHOICE_OPTION_MAX_COUNT);
+const userInputControlBaseFields = {
+  id: userInputIdentifierSchema,
+  label: userInputLabelSchema,
+  description: userInputDescriptionSchema.optional(),
+  required: z.boolean(),
+} as const;
+const userInputTextControlFields = {
+  ...userInputControlBaseFields,
+  minLength: userInputLengthSchema.optional(),
+  maxLength: userInputLengthSchema.optional(),
+} as const;
+
+export const userInputTextControlSchema = z
+  .object({
+    type: z.literal(USER_INPUT_CONTROL_TYPES.text),
+    ...userInputTextControlFields,
+  })
+  .strict()
+  .superRefine((control, context) => {
+    const minimum = Math.max(control.minLength ?? 0, control.required ? 1 : 0);
+    const maximum = control.maxLength ?? USER_INPUT_TEXT_MAX_CHARS;
+    if (minimum > maximum) {
+      context.addIssue({
+        code: "custom",
+        message: "effective minLength must not exceed maxLength",
+        path: ["maxLength"],
+      });
+    }
+  })
+  .readonly();
+
+export const userInputMultilineControlSchema = z
+  .object({
+    type: z.literal(USER_INPUT_CONTROL_TYPES.multiline),
+    ...userInputTextControlFields,
+  })
+  .strict()
+  .superRefine((control, context) => {
+    const minimum = Math.max(control.minLength ?? 0, control.required ? 1 : 0);
+    const maximum = control.maxLength ?? USER_INPUT_TEXT_MAX_CHARS;
+    if (minimum > maximum) {
+      context.addIssue({
+        code: "custom",
+        message: "effective minLength must not exceed maxLength",
+        path: ["maxLength"],
+      });
+    }
+  })
+  .readonly();
+
+export const userInputNumberControlSchema = z
+  .object({
+    type: z.literal(USER_INPUT_CONTROL_TYPES.number),
+    ...userInputControlBaseFields,
+    min: z.number().finite().optional(),
+    max: z.number().finite().optional(),
+    integer: z.boolean().optional(),
+  })
+  .strict()
+  .superRefine((control, context) => {
+    if (control.min !== undefined && control.max !== undefined && control.min > control.max) {
+      context.addIssue({
+        code: "custom",
+        message: "min must not exceed max",
+        path: ["min"],
+      });
+    }
+    if (
+      control.integer === true &&
+      Math.ceil(control.min ?? Number.NEGATIVE_INFINITY) >
+        Math.floor(control.max ?? Number.POSITIVE_INFINITY)
+    ) {
+      context.addIssue({
+        code: "custom",
+        message: "integer bounds must include at least one integer",
+        path: ["integer"],
+      });
+    }
+  })
+  .readonly();
+
+export const userInputBooleanControlSchema = z
+  .object({
+    type: z.literal(USER_INPUT_CONTROL_TYPES.boolean),
+    ...userInputControlBaseFields,
+  })
+  .strict()
+  .readonly();
+
+export const userInputChoiceOptionSchema = z
+  .object({
+    id: userInputIdentifierSchema,
+    label: userInputLabelSchema,
+    description: userInputDescriptionSchema.optional(),
+  })
+  .strict()
+  .readonly();
+
+export const userInputChoiceControlSchema = z
+  .object({
+    type: z.literal(USER_INPUT_CONTROL_TYPES.choice),
+    ...userInputControlBaseFields,
+    multiple: z.boolean(),
+    options: z.array(userInputChoiceOptionSchema).min(1).max(USER_INPUT_CHOICE_OPTION_MAX_COUNT),
+    minSelections: userInputSelectionCountSchema.optional(),
+    maxSelections: userInputSelectionCountSchema.min(1).optional(),
+  })
+  .strict()
+  .superRefine((control, context) => {
+    const optionIds = new Set<string>();
+    for (const [index, option] of control.options.entries()) {
+      if (optionIds.has(option.id)) {
+        context.addIssue({
+          code: "custom",
+          message: "choice option ids must be unique",
+          path: ["options", index, "id"],
+        });
+      }
+      optionIds.add(option.id);
+    }
+    const maximum = control.maxSelections ?? (control.multiple ? control.options.length : 1);
+    if (control.minSelections !== undefined && control.minSelections > maximum) {
+      context.addIssue({
+        code: "custom",
+        message: "minSelections must not exceed maxSelections",
+        path: ["minSelections"],
+      });
+    }
+    if (maximum > control.options.length) {
+      context.addIssue({
+        code: "custom",
+        message: "maxSelections must not exceed the option count",
+        path: ["maxSelections"],
+      });
+    }
+    if (
+      !control.multiple &&
+      ((control.minSelections !== undefined && control.minSelections > 1) || maximum > 1)
+    ) {
+      context.addIssue({
+        code: "custom",
+        message: "single-choice controls allow at most one selection",
+        path: [
+          control.minSelections !== undefined && control.minSelections > 1
+            ? "minSelections"
+            : "maxSelections",
+        ],
+      });
+    }
+  })
+  .readonly();
+
+export const userInputControlSchema = z.discriminatedUnion("type", [
+  userInputTextControlSchema,
+  userInputMultilineControlSchema,
+  userInputNumberControlSchema,
+  userInputBooleanControlSchema,
+  userInputChoiceControlSchema,
+]);
+
+const userInputControlsSchema = z
+  .array(userInputControlSchema)
+  .min(1)
+  .max(USER_INPUT_CONTROL_MAX_COUNT)
+  .superRefine((controls, context) => {
+    const controlIds = new Set<string>();
+    for (const [index, control] of controls.entries()) {
+      if (controlIds.has(control.id)) {
+        context.addIssue({
+          code: "custom",
+          message: "control ids must be unique",
+          path: [index, "id"],
+        });
+      }
+      controlIds.add(control.id);
+    }
+  });
+const userInputFormObjectSchema = z
+  .object({
+    title: userInputLabelSchema.optional(),
+    description: userInputDescriptionSchema.optional(),
+    controls: userInputControlsSchema,
+  })
+  .strict();
+
+/** Safe model-authored form definition shared by Runtime, clients and first-party UI. */
+export const userInputFormSchema = userInputFormObjectSchema.readonly();
+
+const userInputRequestParamsV12ObjectSchema = runtimeInteractionMetadataObjectSchema.extend(
+  userInputFormObjectSchema.shape,
+);
+
+export const userInputRequestParamsV12Schema = userInputRequestParamsV12ObjectSchema.readonly();
+
+export const userInputValueSchema = z.union([
+  z.string().max(USER_INPUT_TEXT_MAX_CHARS),
+  z.number().finite(),
+  z.boolean(),
+  z.array(z.string().max(USER_INPUT_CONTROL_ID_MAX_CHARS)).max(USER_INPUT_CHOICE_OPTION_MAX_COUNT),
+]);
+
+export const userInputSubmittedValueSchema = z
+  .object({
+    id: userInputIdentifierSchema,
+    value: userInputValueSchema,
+  })
+  .strict()
+  .readonly();
+
+export const userInputSubmittedResultSchema = z
+  .object({
+    status: z.literal("submitted"),
+    values: z.array(userInputSubmittedValueSchema).max(USER_INPUT_CONTROL_MAX_COUNT),
+  })
+  .strict()
+  .readonly();
+
+export const userInputCancelledResultSchema = z
+  .object({
+    status: z.literal("cancelled"),
+    reason: z.string().min(1).max(USER_INPUT_CANCEL_REASON_MAX_CHARS).optional(),
+  })
+  .strict()
+  .readonly();
+
+export const userInputResultSchema = z.discriminatedUnion("status", [
+  userInputSubmittedResultSchema,
+  userInputCancelledResultSchema,
+]);
+
 export const pendingApprovalInteractionProjectionSchema = z
   .object({
     method: z.literal(RUNTIME_SERVER_REQUEST_METHODS.approvalRequest),
@@ -408,8 +687,15 @@ export const pendingApprovalInteractionProjectionSchema = z
   .strict()
   .readonly();
 
+export const pendingUserInputInteractionProjectionSchema = userInputRequestParamsV12ObjectSchema
+  .extend({
+    method: z.literal(RUNTIME_SERVER_REQUEST_METHODS.userInputRequest),
+  })
+  .readonly();
+
 export const pendingInteractionProjectionSchema = z.discriminatedUnion("method", [
   pendingApprovalInteractionProjectionSchema,
+  pendingUserInputInteractionProjectionSchema,
 ]);
 
 export const threadSnapshotV12Schema = z
@@ -578,17 +864,6 @@ export const approvalRequestParamsSchema = z
 
 /** Protocol 1.1 wire shape. Keep this alias frozen with approvalRequestParamsSchema. */
 export const approvalRequestParamsV11Schema = approvalRequestParamsSchema;
-
-export const runtimeInteractionMetadataSchema = z
-  .object({
-    interactionId: interactionIdSchema,
-    threadId: threadIdSchema,
-    turnId: turnIdSchema,
-    expiresAt: timestampSchema,
-    sensitivity: interactionSensitivitySchema,
-  })
-  .strict()
-  .readonly();
 
 export const approvalRequestParamsV12Schema = z
   .object({
@@ -989,6 +1264,10 @@ export const runtimeServerRequestSchemasV12 = {
     params: approvalRequestParamsV12Schema,
     result: approvalRequestResultSchema,
   },
+  [RUNTIME_SERVER_REQUEST_METHODS.userInputRequest]: {
+    params: userInputRequestParamsV12Schema,
+    result: userInputResultSchema,
+  },
 } as const;
 
 /** Protocol 1.1 compatibility facade. Prefer the version registry in new code. */
@@ -1018,7 +1297,7 @@ export const RUNTIME_PROTOCOL_REGISTRY = {
   "1.1": {
     methods: runtimeMethodSchemasV11,
     serverRequests: runtimeServerRequestSchemasV11,
-    serverRequestMethods: RUNTIME_SERVER_REQUEST_METHOD_VALUES,
+    serverRequestMethods: RUNTIME_SERVER_REQUEST_METHOD_VALUES_V11,
     serverRequestCancelParamsSchema: runtimeServerRequestCancelParamsV11Schema,
     errorDataSchema: runtimeProtocolErrorDataV11Schema,
   },
@@ -1203,6 +1482,21 @@ export type UiMessage = z.infer<typeof uiMessageSchema>;
 export type OperationView = z.infer<typeof operationViewSchema>;
 export type PendingApproval = z.infer<typeof pendingApprovalSchema>;
 export type PendingInteractionProjection = z.infer<typeof pendingInteractionProjectionSchema>;
+export type UserInputTextControl = z.infer<typeof userInputTextControlSchema>;
+export type UserInputMultilineControl = z.infer<typeof userInputMultilineControlSchema>;
+export type UserInputNumberControl = z.infer<typeof userInputNumberControlSchema>;
+export type UserInputBooleanControl = z.infer<typeof userInputBooleanControlSchema>;
+export type UserInputChoiceOption = z.infer<typeof userInputChoiceOptionSchema>;
+export type UserInputChoiceControl = z.infer<typeof userInputChoiceControlSchema>;
+export type UserInputControl = z.infer<typeof userInputControlSchema>;
+export type UserInputForm = z.infer<typeof userInputFormSchema>;
+export type UserInputRequestParamsV12 = z.infer<typeof userInputRequestParamsV12Schema>;
+export type UserInputSubmittedValue = z.infer<typeof userInputSubmittedValueSchema>;
+export type UserInputSubmittedResult = z.infer<typeof userInputSubmittedResultSchema>;
+export type UserInputCancelledResult = z.infer<typeof userInputCancelledResultSchema>;
+export type UserInputResult = z.infer<typeof userInputResultSchema>;
+/** A submitted result whose values were correlated and ordered against the original form. */
+export type NormalizedUserInputResult = UserInputResult;
 export type ApprovalExplanation = z.infer<typeof approvalExplanationSchema>;
 export type ActiveTurn = z.infer<typeof activeTurnSchema>;
 export type ActiveTurnV11 = z.infer<typeof activeTurnV11Schema>;
@@ -1278,6 +1572,165 @@ export function getApprovalExplanation(
   }
   const parsed = approvalExplanationSchema.safeParse(preview[APPROVAL_EXPLANATION_PREVIEW_KEY]);
   return parsed.success ? parsed.data : undefined;
+}
+
+type UserInputValidationPath = readonly (string | number)[];
+type AddUserInputValidationIssue = (path: UserInputValidationPath, message: string) => void;
+type UserInputValueValidator = (
+  control: UserInputControl,
+  value: UserInputSubmittedValue["value"],
+  path: UserInputValidationPath,
+  addIssue: AddUserInputValidationIssue,
+) => void;
+
+function validateUserInputTextValue(
+  control: UserInputTextControl | UserInputMultilineControl,
+  value: UserInputSubmittedValue["value"],
+  path: UserInputValidationPath,
+  addIssue: AddUserInputValidationIssue,
+): void {
+  if (typeof value !== "string") {
+    addIssue(path, `${control.type} control requires a string value`);
+    return;
+  }
+  const minimum = Math.max(control.minLength ?? 0, control.required ? 1 : 0);
+  const maximum = control.maxLength ?? USER_INPUT_TEXT_MAX_CHARS;
+  if (value.length < minimum) {
+    addIssue(path, `string value must contain at least ${String(minimum)} characters`);
+  }
+  if (value.length > maximum) {
+    addIssue(path, `string value must contain at most ${String(maximum)} characters`);
+  }
+}
+
+const USER_INPUT_VALUE_VALIDATORS = {
+  [USER_INPUT_CONTROL_TYPES.text]: ((control, value, path, addIssue) => {
+    validateUserInputTextValue(userInputTextControlSchema.parse(control), value, path, addIssue);
+  }) satisfies UserInputValueValidator,
+  [USER_INPUT_CONTROL_TYPES.multiline]: ((control, value, path, addIssue) => {
+    validateUserInputTextValue(
+      userInputMultilineControlSchema.parse(control),
+      value,
+      path,
+      addIssue,
+    );
+  }) satisfies UserInputValueValidator,
+  [USER_INPUT_CONTROL_TYPES.number]: ((control, value, path, addIssue) => {
+    const numberControl = userInputNumberControlSchema.parse(control);
+    if (typeof value !== "number" || !Number.isFinite(value)) {
+      addIssue(path, "number control requires a finite number value");
+      return;
+    }
+    if (numberControl.integer === true && !Number.isInteger(value)) {
+      addIssue(path, "number control requires an integer value");
+    }
+    if (numberControl.min !== undefined && value < numberControl.min) {
+      addIssue(path, `number value must be at least ${String(numberControl.min)}`);
+    }
+    if (numberControl.max !== undefined && value > numberControl.max) {
+      addIssue(path, `number value must be at most ${String(numberControl.max)}`);
+    }
+  }) satisfies UserInputValueValidator,
+  [USER_INPUT_CONTROL_TYPES.boolean]: ((control, value, path, addIssue) => {
+    userInputBooleanControlSchema.parse(control);
+    if (typeof value !== "boolean") {
+      addIssue(path, "boolean control requires a boolean value");
+    }
+  }) satisfies UserInputValueValidator,
+  [USER_INPUT_CONTROL_TYPES.choice]: ((control, value, path, addIssue) => {
+    const choiceControl = userInputChoiceControlSchema.parse(control);
+    const optionIds = new Set(choiceControl.options.map((option) => option.id));
+    if (!choiceControl.multiple) {
+      if (typeof value !== "string") {
+        addIssue(path, "single-choice control requires one option id");
+        return;
+      }
+      if (!optionIds.has(value)) {
+        addIssue(path, `unknown choice option id: ${value}`);
+      }
+      return;
+    }
+    if (!Array.isArray(value)) {
+      addIssue(path, "multiple-choice control requires an array of option ids");
+      return;
+    }
+    const selected = new Set<string>();
+    for (const [index, optionId] of value.entries()) {
+      if (selected.has(optionId)) {
+        addIssue([...path, index], `duplicate choice option id: ${optionId}`);
+      }
+      selected.add(optionId);
+      if (!optionIds.has(optionId)) {
+        addIssue([...path, index], `unknown choice option id: ${optionId}`);
+      }
+    }
+    const minimum = Math.max(choiceControl.minSelections ?? 0, choiceControl.required ? 1 : 0);
+    const maximum = choiceControl.maxSelections ?? choiceControl.options.length;
+    if (value.length < minimum) {
+      addIssue(path, `choice value must contain at least ${String(minimum)} selections`);
+    }
+    if (value.length > maximum) {
+      addIssue(path, `choice value must contain at most ${String(maximum)} selections`);
+    }
+  }) satisfies UserInputValueValidator,
+} as const satisfies Readonly<Record<UserInputControl["type"], UserInputValueValidator>>;
+
+function userInputControlRequiresValue(control: UserInputControl): boolean {
+  if (control.required) {
+    return true;
+  }
+  return control.type === USER_INPUT_CONTROL_TYPES.choice && (control.minSelections ?? 0) > 0;
+}
+
+/**
+ * Correlates a structurally valid Client result with the original request and returns values in
+ * form definition order. Unknown, duplicate, missing or type-incompatible values are rejected.
+ */
+export function normalizeUserInputResult(
+  params: UserInputRequestParamsV12,
+  result: unknown,
+): NormalizedUserInputResult {
+  const parsedParams = userInputRequestParamsV12Schema.parse(params);
+  const parsedResult = userInputResultSchema.parse(result);
+  if (parsedResult.status === "cancelled") {
+    return parsedResult;
+  }
+  const controlsById = new Map(parsedParams.controls.map((control) => [control.id, control]));
+  const correlatedResult = userInputSubmittedResultSchema
+    .superRefine((submitted, context) => {
+      const submittedControlIds = new Set<string>();
+      const addIssue: AddUserInputValidationIssue = (path, message) => {
+        context.addIssue({ code: "custom", message, path: [...path] });
+      };
+      for (const [index, submittedValue] of submitted.values.entries()) {
+        const path = ["values", index, "value"] as const;
+        if (submittedControlIds.has(submittedValue.id)) {
+          addIssue(["values", index, "id"], `duplicate control id: ${submittedValue.id}`);
+          continue;
+        }
+        submittedControlIds.add(submittedValue.id);
+        const control = controlsById.get(submittedValue.id);
+        if (control === undefined) {
+          addIssue(["values", index, "id"], `unknown control id: ${submittedValue.id}`);
+          continue;
+        }
+        USER_INPUT_VALUE_VALIDATORS[control.type](control, submittedValue.value, path, addIssue);
+      }
+      for (const control of parsedParams.controls) {
+        if (userInputControlRequiresValue(control) && !submittedControlIds.has(control.id)) {
+          addIssue(["values"], `required control is missing: ${control.id}`);
+        }
+      }
+    })
+    .parse(parsedResult);
+  const submittedById = new Map(correlatedResult.values.map((value) => [value.id, value]));
+  return userInputSubmittedResultSchema.parse({
+    status: "submitted",
+    values: parsedParams.controls.flatMap((control) => {
+      const value = submittedById.get(control.id);
+      return value === undefined ? [] : [value];
+    }),
+  });
 }
 
 export interface JsonRpcRequest {

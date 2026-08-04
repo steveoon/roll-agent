@@ -85,10 +85,16 @@ schema，并不代表调用方已实现对应 Client 能力。当前支持顺序
 Client 必须用 `client.capabilities.set` 提交单调 `revision` 与当前 Handler methods，Runtime
 返回 registry 交集后才进入 interaction-ready。未知的未来 method 名可安全发送但不会被接受。
 
-`"1.2"` 的 `approval.request` 使用独立的 UUID brand `interactionId`，并携带
-`threadId`、`turnId`、绝对 `expiresAt` 与首版固定的 `sensitivity: "normal"`。
+`"1.2"` 的 `approval.request` 与 `userInput.request` 使用独立的 UUID brand
+`interactionId`，并携带 `threadId`、`turnId`、绝对 `expiresAt` 与首版固定的
+`sensitivity: "normal"`。
 `runtime.serverRequest.cancel` 也只投影 `{ interactionId, reason }`。JSON-RPC `id`、
 `InteractionId` 与 mutation `RequestId` 是不同生命周期的类型，不能混用。
+
+`userInput.request` 提供 `text | multiline | number | boolean | choice` 五类 control，表单
+最多 16 项且不支持 secret/password 类型。Client 返回 `submitted` 或正常的 `cancelled`
+结果后，Runtime 会结合原始表单再次校验必填项、值类型、choice option、未知/重复 ID 与
+数量边界，并按 control 定义顺序规范化提交值。
 
 `"1.1"` 的首个 Server Request 仍是 `approval.request`。Runtime 可用
 `runtime.serverRequest.cancel.params.serverRequestId` 引用该请求的 JSON-RPC `id`，
@@ -103,10 +109,11 @@ Client 必须用 `client.capabilities.set` 提交单调 `revision` 与当前 Han
 派生类型处理多个已协商版本。`runtimeMethodSchemas` 则表示 latest registry，不能单独用来
 判断旧版本 method availability。
 
-1.2 的 `thread.open` / `thread.snapshot` 必须返回 `pendingInteractions`（允许空数组）。当前
+1.2 的 `thread.open` / `thread.snapshot` 必须返回 `pendingInteractions`（允许空数组）。
 Approval 安全投影严格只有 `method`、`interactionId`、`threadId`、`turnId`、`expiresAt`、
-`sensitivity: "normal"` 与 `approvalId`；JSON-RPC `id`、`preview`、原始 payload/result 与
-secret 不会进入 Snapshot。1.1/1.0 会剥离整个字段。
+`sensitivity: "normal"` 与 `approvalId`；User Input 投影只包含相同 metadata 和安全表单
+字段。JSON-RPC `id`、原始 payload/result、提交值与 secret 不会进入 Snapshot。1.1/1.0
+会剥离整个字段。
 
 1.2 的 `activeTurn.status` 额外允许 `waiting-for-user`；1.1/1.0 仍冻结为
 `running | cancelling`，version projector 会把 `waiting-for-user` 映射为 `running`。

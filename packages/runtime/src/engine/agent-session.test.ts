@@ -87,6 +87,53 @@ function sequencedModel(steps: LanguageModelV4StreamPart[][]): MockLanguageModel
   });
 }
 
+test("AgentSession exposes a stable user input Tool only while the host capability is enabled", async () => {
+  const calls: LanguageModelV4CallOptions[] = [];
+  const model = new MockLanguageModelV4({
+    doStream: async (options) => {
+      calls.push(options);
+      return streamChunks(textStep("done"));
+    },
+  });
+  const session = new AgentSession({
+    id: "user-input-capability",
+    model,
+    sources: [],
+    maxSteps: 4,
+  });
+  try {
+    assert.equal(
+      session.getCapabilityManifest().tools.some((tool) => tool.role === "user-input"),
+      false,
+    );
+    session.setUserInputAvailable(true);
+    const firstTool = session
+      .getCapabilityManifest()
+      .tools.find((tool) => tool.role === "user-input");
+    assert.equal(firstTool?.id, "roll__user_input");
+    session.setUserInputAvailable(false);
+    assert.equal(
+      session.getCapabilityManifest().tools.some((tool) => tool.role === "user-input"),
+      false,
+    );
+    session.setUserInputAvailable(true);
+    assert.equal(
+      session.getCapabilityManifest().tools.find((tool) => tool.role === "user-input")?.id,
+      firstTool?.id,
+    );
+
+    await collect(session.send("need structured input"));
+    assert.match(JSON.stringify(calls[0]?.tools), /roll__user_input/u);
+    const systemPrompt = JSON.stringify(
+      calls[0]?.prompt.find((message) => message.role === "system"),
+    );
+    assert.match(systemPrompt, /不请求密码、令牌、密钥/u);
+    assert.match(systemPrompt, /用户取消属于正常结果/u);
+  } finally {
+    await session.close();
+  }
+});
+
 function textStep(text: string, inputTokens = 1, outputTokens = 1): LanguageModelV4StreamPart[] {
   return [
     { type: "stream-start", warnings: [] },

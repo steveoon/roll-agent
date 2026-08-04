@@ -91,11 +91,15 @@ interface RuntimeClientTransport {
 
 ### 启动时注册
 
-`approval.request` 是 1.2 与 1.1 当前共同支持的 Server Request：
+`approval.request` 是 1.2 与 1.1 共同支持的 Server Request；1.2 还支持可选的
+`userInput.request` named Handler：
 
 ```ts
 const client = await RollNodeClient.start({
   cwd: "/absolute/path/to/workspace",
+  onUserInputRequest: async (form, { signal }) => {
+    return await showUserInputForm(form, signal);
+  },
   serverRequestHandlers: {
     "approval.request": async (params, { requestId, signal }) => {
       const { approval } = params;
@@ -113,6 +117,10 @@ const client = await RollNodeClient.start({
   },
 });
 ```
+
+同一个 `userInput.request` 不能同时通过 `onUserInputRequest` 与
+`serverRequestHandlers` 提供不同 Handler。连接后可用
+`client.onUserInputRequest(handler)` 动态注册，并用返回的 disposer 撤销能力。
 
 公开类型：
 
@@ -146,14 +154,15 @@ Handler 必须返回符合 `@roll-agent/protocol` Schema 的结果。用户拒�
 | 构造时 handlers | Client 广告 | 可能协商结果 |
 |---|---|---|
 | 注册 `approval.request` | `["1.2","1.1","1.0"]` | 新 Runtime 为 `"1.2"`；1.1/1.0 Runtime 可逐级回退 |
+| 仅注册 `userInput.request` | `["1.2","1.0"]` | 新 Runtime 为 `"1.2"`；旧 Runtime 回退 `"1.0"` |
 | 无 handler / 空对象 | `["1.2","1.0"]` | 新 Runtime 为 `"1.2"` 且 ACK 空 capability；旧 Runtime 回退 `"1.0"` |
 
 `"1.2"` 没有强制 handler；所有 Server Request 都由初始化后的
 `client.capabilities.set` 协商。`"1.1"` 当前唯一必需 handler 是
 `approval.request`。必需方法表由
 `REQUIRED_RUNTIME_SERVER_REQUEST_METHODS_BY_VERSION` 提供；未来协议版本新增必需方法时，
-Client 必须覆盖该版本的全部方法才会广告它。可选 UI Request 应走独立的 Client
-capability 协商，不能静默扩大既有版本的必需方法集合。调用方也可使用
+Client 必须覆盖该版本的全部方法才会广告它。`userInput.request` 等可选 UI Request 走
+同一 1.2 capability 协商，不能静默扩大既有版本的必需方法集合。调用方也可使用
 `getRuntimeProtocolCapabilities()` 和 `isRuntimeServerRequestMethodRequired()` 查询同一
 协议能力表。
 
@@ -187,6 +196,22 @@ unregister();
 在 1.1 中，若 disposer 要移除必需 handler，Client 会立即按协议违规 fail closed 并关闭
 连接，避免继续宣称无法履行的能力。1.0 不支持连接建立后的 handler 注册。
 
+### `onUserInputRequest(handler)`
+
+这是 `registerServerRequestHandler("userInput.request", handler)` 的 typed named facade。
+Params 包含 Interaction metadata 与 1..16 个 `text | multiline | number | boolean | choice`
+control。Handler 返回：
+
+```ts
+{ status: "submitted", values: [{ id: "workspace", value: "product-docs" }] }
+// 或
+{ status: "cancelled", reason: "用户关闭了表单" }
+```
+
+Runtime 会针对原始 Params 二次校验提交值并按 control 定义顺序规范化；未知/重复 ID、错误
+类型、未知 choice option、缺失必填项或越界值都会使交互安全取消。首版只允许
+`sensitivity: "normal"`，表单不提供 password、token、secret 或 file-picker control。
+
 ### `AbortSignal` 与断线边界
 
 以下情况会 abort 正在执行的 handler：
@@ -200,11 +225,12 @@ Handler 应把 `signal` 传给本地对话框、Promise 或其他可取消交互
 副作用。即使 Handler 忽略 signal 后迟到返回，Client 也不会再发送该 Request 的
 Response。
 
-`requestTimeoutMs` 只约束 Client→Runtime 的普通请求，不给人工审批添加 `30s` timeout。
+`requestTimeoutMs` 只约束 Client→Runtime 的普通请求，不给人工审批或 User Input 添加
+`30s` timeout。
 1.2 cancel 使用逻辑 `interactionId`，1.1 cancel 使用当前投递的 JSON-RPC
 `serverRequestId`；Client 都映射到同一个 handler `AbortSignal`。当前 `stdio` 连接
 不支持持久 Server Request replay/resume：断线会 abort 全部 handler，重启后应读取
-Snapshot 收敛，不能自动重放旧审批或旧 Turn。
+Snapshot 收敛，不能自动重放旧审批、旧 User Input 或旧 Turn。
 
 在 `"1.2"` 与 `"1.1"` 中，`onEvent()` 收到的 `approval.required` 只是只读 View Event；审批结果
 必须由 `approval.request` handler 返回。`approval.resolved` 用于关闭审批卡片、同步最终
