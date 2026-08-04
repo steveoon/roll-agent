@@ -11,13 +11,77 @@ import {
   formatToolInput,
 } from "./tool-format.ts";
 import { formatDebugEvent } from "./debug-format.ts";
+import type { ChatUserInputPrompt, ChatUserInputResult } from "./user-input-prompts.ts";
+
+type UserInputRequiredEvent = Extract<SessionEvent, { readonly type: "user-input-required" }>;
 
 export interface ChatApprover {
   approve(approvalId: string): void;
   reject(approvalId: string, reason?: string): void;
+  resolveUserInput?(
+    requestId: UserInputRequiredEvent["requestId"],
+    result: ChatUserInputResult,
+  ): boolean;
+  cancelUserInput?(requestId: UserInputRequiredEvent["requestId"], reason?: string): boolean;
 }
 
 export type ChatConfirm = (message: string, signal?: AbortSignal) => Promise<boolean>;
+
+const USER_INPUT_TIMEOUT_REASON = "用户输入请求已超时";
+const MAX_TIMEOUT_DELAY_MS = 2_147_483_647;
+
+interface UserInputPromptSignalScope {
+  readonly signal: AbortSignal;
+  hasExpired(): boolean;
+  dispose(): void;
+}
+
+function createUserInputPromptSignalScope(
+  expiresAt: string,
+  outerSignal: AbortSignal | undefined,
+): UserInputPromptSignalScope {
+  const deadlineMs = Date.parse(expiresAt);
+  const deadlineController = new AbortController();
+  let expired = Number.isFinite(deadlineMs) && Date.now() >= deadlineMs;
+  let deadlineTimer: ReturnType<typeof setTimeout> | undefined;
+  const expire = (): void => {
+    expired = true;
+    if (!deadlineController.signal.aborted) {
+      deadlineController.abort(new Error(USER_INPUT_TIMEOUT_REASON));
+    }
+  };
+  const scheduleExpiration = (): void => {
+    const remainingMs = deadlineMs - Date.now();
+    if (remainingMs <= 0) {
+      expire();
+      return;
+    }
+    deadlineTimer = setTimeout(scheduleExpiration, Math.min(remainingMs, MAX_TIMEOUT_DELAY_MS));
+  };
+  if (Number.isFinite(deadlineMs)) {
+    if (expired) {
+      expire();
+    } else {
+      scheduleExpiration();
+    }
+  }
+  const signal =
+    outerSignal === undefined
+      ? deadlineController.signal
+      : AbortSignal.any([outerSignal, deadlineController.signal]);
+  return {
+    signal,
+    hasExpired() {
+      return expired || (Number.isFinite(deadlineMs) && Date.now() >= deadlineMs);
+    },
+    dispose() {
+      if (deadlineTimer !== undefined) {
+        clearTimeout(deadlineTimer);
+        deadlineTimer = undefined;
+      }
+    },
+  };
+}
 
 export const clackConfirm: ChatConfirm = async (message, signal) => {
   const answer = await select({
@@ -36,19 +100,26 @@ export class ChatRenderer {
   private readonly confirm: ChatConfirm;
   private readonly contextWindow: number | undefined;
   private readonly signal: AbortSignal | undefined;
+  private readonly userInputPrompt: ChatUserInputPrompt | undefined;
   private readonly spinners = new Map<string, Ora>();
   private readonly toolLabels = new Map<string, string>();
   private compactionSpinner: Ora | undefined;
   private messageSpinner: Ora | undefined;
   private streaming = false;
 
-  constructor(confirm: ChatConfirm, contextWindow?: number, signal?: AbortSignal) {
+  constructor(
+    confirm: ChatConfirm,
+    contextWindow?: number,
+    signal?: AbortSignal,
+    userInputPrompt?: ChatUserInputPrompt,
+  ) {
     this.confirm = confirm;
     this.contextWindow = contextWindow;
     this.signal = signal;
+    this.userInputPrompt = userInputPrompt;
   }
 
-  async handle(event: SessionEvent, approver: ChatApprover): Promise<void> {
+  async handle(event: SessionEvent, responder: ChatApprover): Promise<void> {
     switch (event.type) {
       case "debug":
         log.debug(formatDebugEvent(event));
@@ -117,9 +188,42 @@ export class ChatRenderer {
         const message = [header, explanation, details].filter((line) => line.length > 0).join("\n");
         const approved = await this.confirm(message, this.signal);
         if (approved) {
-          approver.approve(event.approvalId);
+          responder.approve(event.approvalId);
         } else {
-          approver.reject(event.approvalId, "用户取消");
+          responder.reject(event.approvalId, "用户取消");
+        }
+        break;
+      }
+      case "user-input-required": {
+        this.stopMessageSpinner();
+        this.flushLine();
+        const promptScope = createUserInputPromptSignalScope(event.expiresAt, this.signal);
+        try {
+          const result =
+            this.userInputPrompt === undefined
+              ? ({
+                  status: "cancelled",
+                  reason: "当前界面不支持用户输入",
+                } satisfies ChatUserInputResult)
+              : await this.userInputPrompt.request(event.form, promptScope.signal);
+          if (promptScope.hasExpired()) {
+            if (responder.cancelUserInput === undefined) {
+              throw new Error("Chat responder cannot cancel user input");
+            }
+            responder.cancelUserInput(event.requestId, USER_INPUT_TIMEOUT_REASON);
+          } else if (result.status === "submitted") {
+            if (responder.resolveUserInput === undefined) {
+              throw new Error("Chat responder cannot resolve user input");
+            }
+            responder.resolveUserInput(event.requestId, result);
+          } else {
+            if (responder.cancelUserInput === undefined) {
+              throw new Error("Chat responder cannot cancel user input");
+            }
+            responder.cancelUserInput(event.requestId, result.reason);
+          }
+        } finally {
+          promptScope.dispose();
         }
         break;
       }

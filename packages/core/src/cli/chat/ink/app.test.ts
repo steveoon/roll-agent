@@ -9,6 +9,9 @@ import { ChatApp } from "./app.ts";
 import { HistoryItemView } from "./history-item.ts";
 import { GLYPHS } from "../../utils/glyphs.ts";
 
+type PendingUserInput = Extract<SessionEvent, { readonly type: "user-input-required" }>;
+type UserInputResult = Parameters<AgentSession["resolveUserInput"]>[1];
+
 function literalPattern(text: string): RegExp {
   return new RegExp(text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
 }
@@ -19,6 +22,15 @@ interface Sink {
   approved: string[];
   rejected: string[];
   cancelled?: number;
+  userInputAvailability?: boolean[];
+  resolvedUserInputs?: Array<{
+    requestId: PendingUserInput["requestId"];
+    result: UserInputResult;
+  }>;
+  cancelledUserInputs?: Array<{
+    requestId: PendingUserInput["requestId"];
+    reason: string | undefined;
+  }>;
 }
 
 function makeSession(
@@ -43,6 +55,20 @@ function makeSession(
     cancel() {
       sink.cancelled = (sink.cancelled ?? 0) + 1;
       onCancel?.();
+      return true;
+    },
+    setUserInputAvailable(available: boolean) {
+      sink.userInputAvailability ??= [];
+      sink.userInputAvailability.push(available);
+    },
+    resolveUserInput(requestId: PendingUserInput["requestId"], result: UserInputResult) {
+      sink.resolvedUserInputs ??= [];
+      sink.resolvedUserInputs.push({ requestId, result });
+      return true;
+    },
+    cancelUserInput(requestId: PendingUserInput["requestId"], reason?: string) {
+      sink.cancelledUserInputs ??= [];
+      sink.cancelledUserInputs.push({ requestId, reason });
       return true;
     },
     abort() {},
@@ -380,6 +406,173 @@ test("ChatApp confirm flow shows the cleaned AI explanation and tool args, then 
 
   stdin.write("y");
   await waitFor(() => assert.deepEqual(sink.approved, ["a1"]));
+  unmount();
+});
+
+test("ChatApp Esc cancels a user input form without cancelling the turn", async () => {
+  const sink: Sink = {
+    approved: [],
+    rejected: [],
+    cancelled: 0,
+    userInputAvailability: [],
+    resolvedUserInputs: [],
+    cancelledUserInputs: [],
+  };
+  const requestId = "00000000-0000-4000-8000-000000000185" as PendingUserInput["requestId"];
+  async function* send(): AsyncIterable<SessionEvent> {
+    yield {
+      type: "user-input-required",
+      requestId,
+      form: {
+        title: "部署配置",
+        controls: [
+          {
+            type: "text",
+            id: "workspace",
+            label: "目标 Workspace",
+            required: true,
+          },
+        ],
+      },
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+    };
+    yield { type: "message-finish", text: "已取消输入" };
+  }
+  const { stdin, lastFrame, unmount } = render(
+    h(ChatApp, {
+      session: makeSession(send, sink),
+      model: "qwen",
+      contextWindow: undefined,
+      onUserSubmit: () => {},
+      onExit: () => {},
+    }),
+  );
+  await waitFor(() => assert.deepEqual(sink.userInputAvailability, [true]));
+  stdin.write("go");
+  stdin.write("\r");
+  await waitFor(() => assert.match(plain(lastFrame() ?? ""), /目标 Workspace/));
+
+  stdin.write("\x1b");
+  await waitFor(() => assert.equal(sink.cancelledUserInputs?.length, 1));
+  assert.deepEqual(sink.cancelledUserInputs, [{ requestId, reason: "用户取消" }]);
+  assert.deepEqual(sink.resolvedUserInputs, []);
+  assert.equal(sink.cancelled, 0);
+  unmount();
+  await delay(10);
+  assert.deepEqual(sink.userInputAvailability, [true, false]);
+});
+
+test("ChatApp auto-approve never fills or submits user input", async () => {
+  const sink: Sink = {
+    approved: [],
+    rejected: [],
+    userInputAvailability: [],
+    resolvedUserInputs: [],
+    cancelledUserInputs: [],
+  };
+  const requestId = "00000000-0000-4000-8000-000000000186" as PendingUserInput["requestId"];
+  async function* send(): AsyncIterable<SessionEvent> {
+    yield {
+      type: "user-input-required",
+      requestId,
+      form: {
+        title: "部署配置",
+        controls: [
+          {
+            type: "text",
+            id: "workspace",
+            label: "目标 Workspace",
+            required: true,
+          },
+        ],
+      },
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+    };
+    yield { type: "message-finish", text: "完成" };
+  }
+  const { stdin, lastFrame, unmount } = render(
+    h(ChatApp, {
+      session: makeSession(send, sink),
+      model: "qwen",
+      contextWindow: undefined,
+      onUserSubmit: () => {},
+      onExit: () => {},
+    }),
+  );
+  await delay(10);
+  stdin.write("\x1b[Z");
+  await waitFor(() => assert.match(lastFrame() ?? "", AUTO_BADGE_PATTERN));
+  stdin.write("go");
+  stdin.write("\r");
+  await waitFor(() => assert.match(plain(lastFrame() ?? ""), /目标 Workspace/));
+
+  stdin.write("\x1b[Z");
+  await delay(30);
+  assert.deepEqual(sink.resolvedUserInputs, []);
+  assert.deepEqual(sink.cancelledUserInputs, []);
+
+  stdin.write("team-green");
+  stdin.write("\r");
+  await waitFor(() => assert.equal(sink.resolvedUserInputs?.length, 1));
+  assert.deepEqual(sink.resolvedUserInputs, [
+    {
+      requestId,
+      result: {
+        status: "submitted",
+        values: [{ id: "workspace", value: "team-green" }],
+      },
+    },
+  ]);
+  unmount();
+});
+
+test("ChatApp expires a pending user input once without waiting for another key", async () => {
+  const sink: Sink = {
+    approved: [],
+    rejected: [],
+    cancelled: 0,
+    resolvedUserInputs: [],
+    cancelledUserInputs: [],
+  };
+  const requestId = "00000000-0000-4000-8000-000000000187" as PendingUserInput["requestId"];
+  async function* send(): AsyncIterable<SessionEvent> {
+    yield {
+      type: "user-input-required",
+      requestId,
+      form: {
+        controls: [
+          {
+            type: "text",
+            id: "workspace",
+            label: "目标 Workspace",
+            required: true,
+          },
+        ],
+      },
+      expiresAt: new Date(Date.now() + 80).toISOString(),
+    };
+    yield { type: "message-finish", text: "已超时" };
+  }
+  const { stdin, lastFrame, unmount } = render(
+    h(ChatApp, {
+      session: makeSession(send, sink),
+      model: "qwen",
+      contextWindow: undefined,
+      onUserSubmit: () => {},
+      onExit: () => {},
+    }),
+  );
+  await delay(10);
+  stdin.write("go");
+  stdin.write("\r");
+  await waitFor(() => assert.match(plain(lastFrame() ?? ""), /目标 Workspace/));
+  await waitFor(() => assert.equal(sink.cancelledUserInputs?.length, 1));
+
+  assert.deepEqual(sink.cancelledUserInputs, [{ requestId, reason: "用户输入请求已超时" }]);
+  assert.deepEqual(sink.resolvedUserInputs, []);
+  assert.equal(sink.cancelled, 0);
+  await delay(30);
+  assert.equal(sink.cancelledUserInputs?.length, 1);
   unmount();
 });
 

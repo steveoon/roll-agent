@@ -28,6 +28,18 @@
         </div>
       </form>
     </dialog>
+    <dialog id="user-input-dialog" aria-labelledby="user-input-title">
+      <form id="user-input-form" autocomplete="off" novalidate>
+        <h1 id="user-input-title">Input required</h1>
+        <p id="user-input-description" hidden></p>
+        <div id="user-input-controls"></div>
+        <p id="user-input-error" role="alert" hidden></p>
+        <div class="interaction-actions">
+          <button id="user-input-cancel" type="button">Cancel</button>
+          <button type="submit">Submit</button>
+        </div>
+      </form>
+    </dialog>
     <script type="module" src="./renderer.js"></script>
   </body>
 </html>

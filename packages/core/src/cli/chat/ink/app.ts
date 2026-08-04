@@ -9,6 +9,7 @@ import { CHAT_PHASES, type HistoryItem } from "./state.ts";
 import { StatusLine } from "./status-line.ts";
 import { TextPrompt } from "./text-prompt.ts";
 import { ConfirmSelect } from "./confirm-select.ts";
+import { UserInputForm } from "./user-input-form.ts";
 import { SlashPopup } from "./slash-popup.ts";
 import {
   buildSkillListLines,
@@ -65,6 +66,7 @@ export function ChatApp(props: ChatAppProps): ReactElement {
     compact,
     cancel,
     resolveConfirm,
+    resolveUserInput,
     setDraft,
     setThinking,
     setAutoMode,
@@ -95,6 +97,15 @@ export function ChatApp(props: ChatAppProps): ReactElement {
   const selectedIndex = Math.min(selected, maxIndex);
 
   useInput((input, key) => {
+    if (state.phase === CHAT_PHASES.userInput) {
+      if (layout.tooSmall && key.escape && !key.meta && state.pendingUserInput !== undefined) {
+        resolveUserInput(state.pendingUserInput.requestId, {
+          status: "cancelled",
+          reason: "用户取消",
+        });
+      }
+      return;
+    }
     if (state.phase === CHAT_PHASES.busy && key.escape && !key.meta) {
       cancel();
     } else if (key.tab && key.shift) {
@@ -236,26 +247,39 @@ export function ChatApp(props: ChatAppProps): ReactElement {
           maxRows: layout.promptRows + layout.popupRows,
           onDecide: resolveConfirm,
         })
-      : h(TextPrompt, {
-          value: state.draft,
-          width: layout.columns,
-          viewportRows: layout.renderRows,
-          maxRows: layout.promptRows,
-          showHint: layout.showHelp,
-          inputHistory,
-          disabled: state.phase !== CHAT_PHASES.idle,
-          ...(state.phase === CHAT_PHASES.cancelling
-            ? { disabledHint: "中断请求已发送，等待当前活动退出…" }
-            : {}),
-          slashActive,
-          slashPopupActive,
-          autoApprove: state.status.autoApprove,
-          onChange: setDraft,
-          onSubmit: handleSubmit,
-          onSlashMove,
-          onSlashComplete,
-          onSlashRun,
-        });
+      : state.phase === CHAT_PHASES.userInput && state.pendingUserInput !== undefined
+        ? h(UserInputForm, {
+            key: state.pendingUserInput.requestId,
+            request: state.pendingUserInput,
+            width: layout.columns,
+            viewportRows: layout.renderRows,
+            maxRows: layout.promptRows + layout.popupRows,
+            onResolve: (result) => {
+              if (state.pendingUserInput !== undefined) {
+                resolveUserInput(state.pendingUserInput.requestId, result);
+              }
+            },
+          })
+        : h(TextPrompt, {
+            value: state.draft,
+            width: layout.columns,
+            viewportRows: layout.renderRows,
+            maxRows: layout.promptRows,
+            showHint: layout.showHelp,
+            inputHistory,
+            disabled: state.phase !== CHAT_PHASES.idle,
+            ...(state.phase === CHAT_PHASES.cancelling
+              ? { disabledHint: "中断请求已发送，等待当前活动退出…" }
+              : {}),
+            slashActive,
+            slashPopupActive,
+            autoApprove: state.status.autoApprove,
+            onChange: setDraft,
+            onSubmit: handleSubmit,
+            onSlashMove,
+            onSlashComplete,
+            onSlashRun,
+          });
   const turnActivity = resolveTurnActivity(state);
 
   if (layout.tooSmall) {
@@ -288,7 +312,10 @@ export function ChatApp(props: ChatAppProps): ReactElement {
       live: state.live,
       onBannerSettled: handleBannerSettled,
       animateBanner: animateBanner && !bannerSettled,
-      navigationBlocked: state.phase === CHAT_PHASES.confirm || slashPopupActive,
+      navigationBlocked:
+        state.phase === CHAT_PHASES.confirm ||
+        state.phase === CHAT_PHASES.userInput ||
+        slashPopupActive,
       ...(bannerLines === undefined ? {} : { banner: bannerLines }),
     }),
     h(
