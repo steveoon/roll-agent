@@ -81,7 +81,7 @@ interface RuntimeClientTransport {
 | `onExit(listener)` | 取消订阅函数 | 订阅真实进程退出或最终有界终止失败 |
 | `getInitializationResult()` | `InitializeResult` | 读取协商版本、实例 ID、features 与 limits |
 | `getOutcomeUnknownTurnIds()` | `readonly TurnId[]` | 当前客户端生命周期内累计的未知 Turn |
-| `registerServerRequestHandler(method, handler)` | 取消注册函数 | 注册或替换 typed handler；1.2 自动同步递增 capability revision |
+| `registerServerRequestHandler(method, handler)` | 取消注册函数 | 注册或替换 typed handler；1.3/1.2 自动同步递增 capability revision |
 | `shutdown(options?)` | `Promise<RuntimeClientExit>` | 可等待且幂等的有界关闭 |
 | `close()` | `void` | fire-and-forget 关闭；不向调用方暴露 shutdown rejection |
 
@@ -173,8 +173,12 @@ Client 必须覆盖该版本的全部方法才会广告它。`userInput.request`
 `serverRequestHandlers`。
 
 协商到 `"1.3"` 或 `"1.2"` 时，Client 在 `initialize` 后发送 revision `1`。后续新增或撤销
-handler 都会串行发送更高 revision，并核验 Runtime 返回相同 revision 与预期交集。
-capability 同步失败、revision 冲突或 ACK 集合异常会使连接 fail closed。
+handler 都会串行发送更高 revision。ACK 的 accepted methods 可以为空或为请求集的任意子集，
+并按 Runtime registry 排序；Client 按集合语义应用结果，不要求顺序与请求完全一致。只有
+revision 不匹配或 ACK 出现未请求 method 才是协议违例。未被接受的 method 不再本地投递；
+若 Runtime 后续仍发送该 Request，Client 返回 `-32601`。初始 ACK Response 写出后 Client
+才进入 interaction-ready，`connect()` / `start()` 也只在该 barrier 后返回。capability
+同步失败、revision 冲突或 ACK 集合异常会使连接 fail closed。
 
 ### `registerServerRequestHandler(method, handler)`
 

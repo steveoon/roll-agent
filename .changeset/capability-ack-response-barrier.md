@@ -8,6 +8,6 @@ and die with -32601. Withdrawal cancellations stay synchronous while acknowledge
 delivery run after the response is written, which also closes the same race on revision upgrades,
 without changing the existing public coordinator setter. Approvals additionally gain the same
 absolute deadline fallback as user input (`min(now + 5 minutes, remaining turn lifetime)`) so
-embedding without `turnTimeoutMs` no longer fails every 1.2 approval closed, and user input
+embedding without `turnTimeoutMs` no longer causes every Protocol 1.2 approval to fail closed, and user input
 results are normalized against an immutable copy of the original form at both the RuntimeService
 boundary and inside the engine before reaching the model.

@@ -82,7 +82,7 @@ export interface RuntimeClientRequestOptions {
 export interface RuntimeClientResponderOptions {
   /** Defaults to the frozen Protocol 1.1 Server Request registry. */
   readonly acceptedServerRequestMethods?: readonly RuntimeServerRequestMethod[];
-  /** Protocol 1.2 responders start false and become eligible only after capability ACK. */
+  /** Protocol 1.3/1.2 responders start false and become eligible only after capability ACK. */
   readonly capabilitiesAcknowledged?: boolean;
 }
 

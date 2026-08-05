@@ -427,8 +427,9 @@ projection，避免 UI 快速响应时控制请求尚未存在。Client 仍应�
 ```
 
 `turnId` 必须与 `approval.turnId` 相同。首版只允许
-`sensitivity: "normal"`；`expiresAt` 是绝对截止时间，显式重投不会延长它。1.1 wire
-形状保持冻结：
+`sensitivity: "normal"`。Runtime 生成的 Approval 与 User Input deadline 均为
+`min(now + 5 minutes, Turn 剩余期限)`；`expiresAt` 是绝对截止时间，显式重投不会延长它。
+1.1 wire 形状保持冻结：
 
 ```json
 {
