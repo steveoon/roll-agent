@@ -99,8 +99,6 @@ test("Protocol 1.2 does not deliver before capability ACK", async () => {
       scopeId,
       eligibleResponderId: responderId,
       approvalId,
-      threadId,
-      turnId,
       expiresAt: approvalRequestInputV12().expiresAt,
       protocolVersion: "1.2",
     },
@@ -181,8 +179,6 @@ test("accepted methods cannot bypass Protocol 1.2 capability ACK", async () => {
       scopeId,
       eligibleResponderId: responderId,
       approvalId,
-      threadId,
-      turnId,
       expiresAt: approvalRequestInputV12().expiresAt,
       protocolVersion: "1.2",
     },
@@ -245,8 +241,6 @@ test("pre-ACK id:null fails waiting interactions without affecting another respo
       scopeId,
       eligibleResponderId: waitingResponderId,
       approvalId,
-      threadId,
-      turnId,
       expiresAt: approvalRequestInputV12().expiresAt,
       protocolVersion: "1.2",
     },
@@ -259,8 +253,6 @@ test("pre-ACK id:null fails waiting interactions without affecting another respo
       scopeId,
       eligibleResponderId: healthyResponderId,
       approvalId,
-      threadId,
-      turnId,
     },
   );
   const healthyDelivery = requestMessages(healthyResponder)[0];
@@ -310,8 +302,6 @@ test("Protocol 1.2 empty capability ACK fails an already-waiting request closed"
       scopeId,
       eligibleResponderId: responderId,
       approvalId,
-      threadId,
-      turnId,
       expiresAt: approvalRequestInputV12().expiresAt,
       protocolVersion: "1.2",
     },
@@ -447,8 +437,6 @@ test("Protocol 1.2 capability withdrawal cancels by InteractionId and ignores la
       scopeId,
       eligibleResponderId: responderId,
       approvalId,
-      threadId,
-      turnId,
       expiresAt: approvalRequestInputV12().expiresAt,
       protocolVersion: "1.2",
     },
@@ -508,8 +496,6 @@ test("id:null JSON-RPC error fails only the selected responder and closes it", a
       scopeId,
       eligibleResponderId: responderId,
       approvalId,
-      threadId,
-      turnId,
     },
   );
 
@@ -536,8 +522,6 @@ test("id:null JSON-RPC error fails only the selected responder and closes it", a
       scopeId,
       eligibleResponderId: responderId,
       approvalId,
-      threadId,
-      turnId,
     },
   );
   await assert.rejects(
@@ -578,8 +562,6 @@ test("response must come from the eligible responder", async () => {
       scopeId,
       eligibleResponderId: eligibleId,
       approvalId,
-      threadId,
-      turnId,
     },
   );
   const id = requestId(eligible);
@@ -650,8 +632,6 @@ test("stale detach closure cannot detach a newer responder attachment with the s
       scopeId,
       eligibleResponderId: responderId,
       approvalId,
-      threadId,
-      turnId,
     },
   );
   const secondId = requestId(second);
@@ -695,8 +675,6 @@ test("a stale responder session cannot fail a newer attachment with the same id"
       scopeId,
       eligibleResponderId: responderId,
       approvalId,
-      threadId,
-      turnId,
     },
   );
   const deliveryId = requestId(second);
@@ -742,8 +720,6 @@ test("absolute deadline expires without delivering or approving", async () => {
       scopeId,
       eligibleResponderId: responderId,
       approvalId,
-      threadId,
-      turnId,
       expiresAt: "2026-07-29T11:59:59.000Z",
     },
   );
@@ -776,8 +752,6 @@ test("a response at the exact absolute deadline expires before settlement", asyn
       scopeId,
       eligibleResponderId: responderId,
       approvalId,
-      threadId,
-      turnId,
       expiresAt,
     },
   );
@@ -826,8 +800,6 @@ test("invalid absolute deadline fails before registering or delivering a request
         scopeId,
         eligibleResponderId: responderId,
         approvalId,
-        threadId,
-        turnId,
         expiresAt: "not-a-date",
       }),
     (error: unknown) =>
@@ -846,8 +818,6 @@ test("invalid absolute deadline fails before registering or delivering a request
             scopeId,
             eligibleResponderId: responderId,
             approvalId,
-            threadId,
-            turnId,
             ...(expiresAt === undefined ? {} : { expiresAt }),
             protocolVersion: "1.2",
           },
@@ -866,8 +836,6 @@ test("invalid absolute deadline fails before registering or delivering a request
       scopeId,
       eligibleResponderId: responderId,
       approvalId,
-      threadId,
-      turnId,
     },
   );
   assert.equal(coordinator.cancel(approvalId, "test cleanup"), true);
@@ -895,8 +863,6 @@ test("empty cancellation reasons are normalized and cancelAll settles every requ
       scopeId,
       eligibleResponderId: responderId,
       approvalId,
-      threadId,
-      turnId,
     },
   );
   const second = coordinator.request(
@@ -907,8 +873,6 @@ test("empty cancellation reasons are normalized and cancelAll settles every requ
       scopeId,
       eligibleResponderId: responderId,
       approvalId,
-      threadId,
-      turnId,
     },
   );
 
@@ -965,8 +929,6 @@ test("far-future deadline is scheduled in bounded timer segments", async (t) => 
       scopeId,
       eligibleResponderId: responderId,
       approvalId,
-      threadId,
-      turnId,
       expiresAt: new Date(startMs + maximumTimerDelayMs + 1_000).toISOString(),
     },
   );
@@ -1011,8 +973,6 @@ test("explicit redelivery retires the old delivery and preserves the logical req
       scopeId,
       eligibleResponderId: responderId,
       approvalId,
-      threadId,
-      turnId,
     },
   );
   const firstId = requestId(responder);
@@ -1085,8 +1045,6 @@ test("redelivery cannot switch to a different responder", async () => {
       scopeId,
       eligibleResponderId,
       approvalId,
-      threadId,
-      turnId,
     },
   );
   const deliveryId = requestId(eligibleResponder);
@@ -1137,8 +1095,6 @@ test("redelivery does not send a replacement after reentrant cancellation", asyn
       scopeId,
       eligibleResponderId: responderId,
       approvalId,
-      threadId,
-      turnId,
     },
   );
 
@@ -1190,8 +1146,6 @@ test("redelivery does not cross the original deadline while notifying the respon
       scopeId,
       eligibleResponderId: responderId,
       approvalId,
-      threadId,
-      turnId,
       expiresAt: new Date(startMs + 1_000).toISOString(),
     },
   );
@@ -1239,8 +1193,6 @@ test("redelivery keeps the original absolute deadline", async (t) => {
       scopeId,
       eligibleResponderId: responderId,
       approvalId,
-      threadId,
-      turnId,
       expiresAt: new Date(startMs + 1_000).toISOString(),
     },
   );
@@ -1301,8 +1253,6 @@ test("detaching a responder fails only its logical interactions and is idempoten
       scopeId,
       eligibleResponderId: firstId,
       approvalId,
-      threadId,
-      turnId,
     },
   );
   const secondPending = coordinator.request(
@@ -1313,8 +1263,6 @@ test("detaching a responder fails only its logical interactions and is idempoten
       scopeId,
       eligibleResponderId: secondId,
       approvalId,
-      threadId,
-      turnId,
     },
   );
   const staleFirstDeliveryId = requestId(first);
@@ -1377,8 +1325,6 @@ test("detaching removes the responder before a cancellation callback can create 
             scopeId,
             eligibleResponderId: responderId,
             approvalId,
-            threadId,
-            turnId,
           },
         ).result;
       }
@@ -1393,8 +1339,6 @@ test("detaching removes the responder before a cancellation callback can create 
       scopeId,
       eligibleResponderId: responderId,
       approvalId,
-      threadId,
-      turnId,
     },
   );
 
@@ -1458,8 +1402,6 @@ test("cancellation retires the delivery before notifying a reentrant responder",
       scopeId,
       eligibleResponderId: responderId,
       approvalId,
-      threadId,
-      turnId,
     },
   );
 
@@ -1494,8 +1436,6 @@ test("synchronous send failure clears the logical key for a later request", asyn
       scopeId,
       eligibleResponderId: responderId,
       approvalId,
-      threadId,
-      turnId,
     },
   );
   await assert.rejects(first.result, /transport unavailable/u);
@@ -1508,8 +1448,6 @@ test("synchronous send failure clears the logical key for a later request", asyn
       scopeId,
       eligibleResponderId: responderId,
       approvalId,
-      threadId,
-      turnId,
     },
   );
   await assert.rejects(second.result, /transport unavailable/u);
@@ -1542,8 +1480,6 @@ test("id:null failure is isolated from another responder", async () => {
       scopeId,
       eligibleResponderId: firstId,
       approvalId,
-      threadId,
-      turnId,
     },
   );
   const secondPending = coordinator.request(
@@ -1554,8 +1490,6 @@ test("id:null failure is isolated from another responder", async () => {
       scopeId,
       eligibleResponderId: secondId,
       approvalId,
-      threadId,
-      turnId,
     },
   );
   const secondDeliveryId = requestId(second);

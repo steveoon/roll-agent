@@ -19,7 +19,6 @@ import {
   type RuntimeServerRequestResultForSupportedVersions,
   type RuntimeProtocolVersion,
   type ThreadId,
-  type TurnId,
 } from "@roll-agent/protocol";
 import {
   RuntimeClientInteractionLifecycle,
@@ -70,8 +69,6 @@ export interface RuntimeClientRequestOptions {
   readonly scopeId: RuntimeInstanceId;
   readonly eligibleResponderId: RuntimeClientResponderId;
   readonly approvalId?: ApprovalId;
-  readonly threadId?: ThreadId;
-  readonly turnId?: TurnId;
   readonly expiresAt?: string;
   /** Defaults to Protocol 1.1 for compatibility with existing package-internal callers. */
   readonly protocolVersion?: RuntimeProtocolVersion;
