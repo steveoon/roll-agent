@@ -1100,14 +1100,18 @@ test("Runtime Protocol 1.2 capability ACK frame precedes an Interaction created 
       if (raceRequest !== undefined || responder === undefined) {
         return;
       }
-      raceRequest = coordinator.request(RUNTIME_SERVER_REQUEST_METHODS.approvalRequest, raceParams, {
-        key: "race-approval",
-        scopeId: responder.scopeId,
-        eligibleResponderId: responder.id,
-        approvalId: raceApprovalId,
-        expiresAt: raceExpiresAt,
-        protocolVersion: "1.2",
-      });
+      raceRequest = coordinator.request(
+        RUNTIME_SERVER_REQUEST_METHODS.approvalRequest,
+        raceParams,
+        {
+          key: "race-approval",
+          scopeId: responder.scopeId,
+          eligibleResponderId: responder.id,
+          approvalId: raceApprovalId,
+          expiresAt: raceExpiresAt,
+          protocolVersion: "1.2",
+        },
+      );
     },
   });
 
