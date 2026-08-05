@@ -28,11 +28,12 @@ test("SessionPicker renders rows, moves cursor and selects with Enter", async ()
   );
   await delay(10);
   assert.match(lastFrame() ?? "", /切换会话/);
-  assert.match(lastFrame() ?? "", /› 会话 0/);
+  assert.match(lastFrame() ?? "", /❯ 会话 0\s{2,}0 小时前 · 0 条消息/);
+  assert.match(lastFrame() ?? "", /共 3 个会话/);
   assert.match(lastFrame() ?? "", /Enter 切换/);
   stdin.write("\x1b[B");
   await delay(10);
-  assert.match(lastFrame() ?? "", /› 会话 1/);
+  assert.match(lastFrame() ?? "", /❯ 会话 1/);
   stdin.write("\r");
   await delay(10);
   assert.deepEqual(selected, ["t1"]);
@@ -74,11 +75,13 @@ test("SessionPicker windows long lists following the cursor", async () => {
   );
   await delay(10);
   assert.doesNotMatch(lastFrame() ?? "", /会话 9/);
+  assert.match(lastFrame() ?? "", /1\/10 · ↑↓ 浏览/);
   for (let index = 0; index < 9; index += 1) {
     stdin.write("\x1b[B");
   }
   await delay(20);
-  assert.match(lastFrame() ?? "", /› 会话 9/);
+  assert.match(lastFrame() ?? "", /❯ 会话 9/);
+  assert.match(lastFrame() ?? "", /10\/10 · ↑↓ 浏览/);
   assert.doesNotMatch(lastFrame() ?? "", /会话 0/);
   unmount();
 });
