@@ -131,9 +131,11 @@ async function shutdownApplication() {
 连接并显式失败。需要兼容旧 Runtime 时，按协商结果选择另一个只实现
 `approval.required` + `approval.respond` 的 adapter。
 
-Runtime 取消 Approval 时，handler 的 `AbortSignal` 会 abort。对话框必须随之关闭，且
-不能发送迟到决定；Client 会自动抑制迟到 Response。人工 Approval 不使用普通
-`requestTimeoutMs`，由 Response、Turn 终态、显式 cancel 或连接关闭结束。
+Runtime 生成的 Approval deadline 为 `min(now + 5 minutes, Turn 剩余期限)`；1.3/1.2 的
+`expiresAt` 是绝对截止时间，显式重投不会延长它。Runtime cancel、capability 撤销或连接关闭
+都会 abort handler 的 `AbortSignal`；对话框必须随之关闭，且不能发送迟到决定，Client 也会
+自动抑制迟到 Response。人工 Approval 不使用普通 `requestTimeoutMs`，由 Response、deadline、
+Turn 终态、显式 cancel、capability 撤销或连接关闭结束。
 
 1.3/1.2 cancel 使用逻辑 `interactionId`；1.1 保留
 `{ serverRequestId, approvalId?, reason }`。JSON-RPC `id`、`interactionId` 与
@@ -197,8 +199,11 @@ roll runtime serve --stdio
 3. 只有本地入站帧预算至少为 `17 MiB` 时才广告
    `["1.3","1.2","1.1","1.0"]`；预算更低时必须省略 `"1.3"`。若协商到 `"1.3"` 或
    `"1.2"`，立即发送
-   `client.capabilities.set({ revision: 1, serverRequestMethods })`，并在 ACK 前保持
-   Interaction 不可投递；后续 handler 变更使用严格递增 revision；
+   `client.capabilities.set({ revision: 1, serverRequestMethods })`，并把 ACK Response 作为
+   Interaction-ready barrier；后续 handler 变更使用严格递增 revision。ACK 可接受空集或请求
+   集的任意子集，并按 Runtime registry 排序；Client 应按集合语义应用结果。revision 不匹配或
+   ACK 包含未请求 method 才是协议违例；未被接受的 method 不得本地投递，若 Runtime 仍发来
+   该 Request 则返回 `-32601`；
 4. 同时识别 Runtime 发来的带 `method + id` JSON-RPC Request；收到
    `approval.request` 或 `userInput.request` 后用同一个 JSON-RPC `id` 返回 typed Result；
 5. 将 `runtime.event` Notification 分发到 UI；在 `"1.3"` / `"1.2"` / `"1.1"` 中把
@@ -261,25 +266,29 @@ pnpm add @roll-agent/companion @roll-agent/client-node @roll-agent/relay-protoco
 ```ts
 import { RollNodeClient } from "@roll-agent/client-node";
 import {
-  CompanionApprovalRequestBroker,
-  CompanionRelayBridge,
+  CompanionInteractionBroker,
+  CompanionRelayBridgeV11,
   CompanionWorkspace,
-  OutboundCompanionRelay,
-  createWebSocketRelayTransport,
+  OutboundCompanionRelayV11,
+  createRuntimeServerRequestHandlers,
+  createWebSocketRelayTransportV11,
 } from "@roll-agent/companion";
 import { deviceIdSchema, workspaceIdSchema } from "@roll-agent/relay-protocol";
 
-const approvalRequestBroker = new CompanionApprovalRequestBroker();
+const interactionBroker = new CompanionInteractionBroker();
 const runtime = await RollNodeClient.start({
   cwd: workspacePath,
-  serverRequestHandlers: {
-    "approval.request": approvalRequestBroker.handle,
-  },
+  serverRequestHandlers: createRuntimeServerRequestHandlers(interactionBroker),
 });
+if (runtime.getInitializationResult().protocolVersion === "1.0") {
+  await runtime.shutdown();
+  throw new Error("Runtime Protocol 1.1 or newer is required for Relay Wire 1.1");
+}
 const workspaceId = workspaceIdSchema.parse(savedWorkspaceId);
 const workspace = new CompanionWorkspace({
   client: runtime,
-  approvalRequestBroker,
+  workspaceId,
+  interactionBroker,
   localApprovalPolicy: async (approval) =>
     isHighRisk(approval) ? "require-local-confirmation" : "allow",
 });
@@ -288,16 +297,21 @@ const workspace = new CompanionWorkspace({
 const clientId = authenticatedBrowserClientId;
 const releaseBrowserLease = workspace.attachBrowser(clientId);
 
-const bridge = new CompanionRelayBridge({
+const bridge = new CompanionRelayBridgeV11({
   deviceId: deviceIdSchema.parse(savedDeviceId),
   pairingToken,
   workspaces: new Map([[workspaceId, workspace]]),
 });
-const outbound = new OutboundCompanionRelay({
+const outbound = new OutboundCompanionRelayV11({
   bridge,
   connectTransport: async () => {
     const socket = await openAuthenticatedWebSocket(relayUrl);
-    return createWebSocketRelayTransport(socket);
+    return {
+      transport: createWebSocketRelayTransportV11(socket),
+      responderContext: authenticatedRelaySession,
+      responderPolicy: async ({ responderContext, signal }) =>
+        authorizeInteractionResponder(responderContext, { signal }),
+    };
   },
 });
 outbound.start();
@@ -314,34 +328,39 @@ async function shutdownCompanionHost() {
 }
 ```
 
-这段代码不是完整的可运行产品。`authenticatedBrowserClientId`、`pairingToken`、
+这段代码不是完整的可运行产品。`authenticatedBrowserClientId`、
+`authenticatedRelaySession`、`authorizeInteractionResponder()`、`pairingToken`、
 `openAuthenticatedWebSocket()`、设备/Workspace 持久化、本机确认 UI 和 Host 进程生命周期
-都必须由产品实现。当前仓库没有 Browser SDK、`roll companion` CLI 或自动启动 daemon。
+都必须由产品实现。`responderContext` 是 Host-owned opaque state，Companion 不把它当成已认证
+身份或 controller 选举。当前仓库没有 Browser SDK、`roll companion` CLI 或自动启动 daemon。
 
 `@roll-agent/relay-protocol` 是 Browser、Cloud Relay 和 Local Companion 共享的 Wire
 契约来源，提供 Relay version、消息/方法注册表、ID Schema、JSON Schema、fixtures 与
 TypeScript types。`@roll-agent/companion` 只消费该契约，并提供本机的
-`CompanionWorkspace`、Relay bridge、Approval Policy、主动出站重连和 WebSocket 文本
-adapter；它不包含生产 Cloud Relay Server。
+`CompanionWorkspace`、Interaction Broker、Relay Wire 1.1 bridge、Approval Policy、主动
+出站重连和 WebSocket 文本 adapter；它不包含生产 Cloud Relay Server。
 
 账号/设备绑定、鉴权授权、TLS、Browser SDK、持久配对、心跳、帧上限、HA、监控和协议诊断
 都由生产宿主实现。Browser 或 Cloud Relay 不应为了校验 Wire frame 而依赖
 `@roll-agent/companion`。
 
-`CompanionApprovalRequestBroker` 必须在 `RollNodeClient.start()` 前创建并作为
-`approval.request` handler 注册，再注入 `CompanionWorkspace`。在 Runtime
-`"1.3"` / `"1.2"` / `"1.1"` 下，
-`approval.required` 仅作为只读事件转发；Browser/Relay 必须通过 Relay 专属
-`approval.candidate` 提交候选决定。成功的 `runtime.response` 只返回
-`{ accepted: true }`，表示 Broker 已接受候选；权威终态仍以 `approval.resolved` Event
-为准。Broker 会在返回 Runtime Result 前重新执行本地 Policy。远端拒绝只会收窄权限，
-可直接返回拒绝。
-没有 Broker 的既有 Companion 会协商 `"1.0"`，继续使用独立的 Event +
-`approval.respond` fallback。
-Browser 的选择依据必须是协商后的 Relay Wire 与 Interaction method。Wire 1.1 使用
-`interaction.request/resolved/cancelled` 与 `interaction.candidate`；冻结的 Wire 1.0 只保留
-Approval 专属路径。新 Companion 与旧 peer 协商到 1.0 时，不能把 Runtime 1.3/1.2 的
-Interaction 或 event cursor 偷渡进旧 registry。
+`CompanionInteractionBroker` 必须在 `RollNodeClient.start()` 前创建，通过
+`createRuntimeServerRequestHandlers()` 注册 `approval.request` / `userInput.request`，再注入
+`CompanionWorkspace`。它处理 Runtime 1.3/1.2 的 typed Interaction，也为 Runtime 1.1 的
+Approval 提供兼容 facade。1.3/1.2 未接受的 method 不会暴露，并对意外 Request 返回
+`-32601`；1.1 缺少 `approval.request` handler 时 Client 不广告 1.1，而是回落 1.0。远程 V11
+Host 必须像示例一样拒绝 Runtime 1.0 或其他没有 typed Approval 控制路径的组合，不能从
+timeline event 猜测候选结果。
+`CompanionApprovalRequestBroker` 只为一个 minor 周期保留为 deprecated legacy API。
+
+Browser 的控制路径必须由协商后的 Relay Wire 决定。Wire 1.1 使用
+`interaction.request/resolved/cancelled` 与 `interaction.candidate`。成功的
+`runtime.response` 只返回 `{ accepted: true }`，表示 Broker 已接受并结算候选；Browser 仍应
+等待有序的 `interaction.resolved` / `interaction.cancelled` 收敛视图，且不能据此推断 Tool 已
+执行。Approval approve 在返回 Runtime Result 前还会重新经过本地 Policy；reject 只会收窄
+权限。冻结的 Wire 1.0 只保留 Approval 专属路径，且未按远程威胁模型完成安全投影，只适用于
+等价本地信任边界内的 legacy peer。面向 Cloud/Browser 的 Host 必须协商 Wire 1.1，失败时
+拒绝连接，不能把 1.3/1.2 Interaction、event cursor 或原始 Runtime 结果偷渡进 Wire 1.0。
 
 跨 Runtime 与 Relay 接线时，以下标识/游标不能复用：
 
@@ -372,7 +391,8 @@ lease 边界如下：
 | Browser client | 宿主在认证连接建立/断开时手动调用 `attachBrowser()` / `detachBrowser()` |
 | 后台 Shell | 宿主手动调用 `acquireBackgroundShellLease()` 并保存 release 函数 |
 | Turn | 只有经 `CompanionWorkspace.startTurn()` 发起时自动获取；终态事件自动释放 |
-| Approval | `"1.2"` / `"1.1"` Broker handler 获取，Result/Abort 时释放；`"1.0"` 由 Event fallback 获取和释放 |
+| Interaction | Runtime `"1.3"` / `"1.2"` 的 Approval 与 User Input、以及 `"1.1"` Approval facade 都由 Broker 管理；Result/Abort/deadline/Turn 终态共用单次结算路径 |
+| Runtime 1.0 Approval fallback | 仅在受信 Wire 1.0 legacy bridge 内由 `approval.required` Event 获取，并在响应或终态 Event 释放；不得作为 Cloud/Browser 安全降级 |
 
 浏览器断线不要调用 `thread.detach` 或直接关闭 Runtime。`outbound.stop()` 只终止 Relay、
 Bridge 与订阅，不关闭 Runtime；Runtime 生命周期由 `workspace.closeIfIdle()` 单独管理。
@@ -388,7 +408,7 @@ Relay buffer、ACK、幂等缓存和 lease 都只存在于 Companion 进程内�
 `authentication.request` 与 File Picker 没有远程 projector，保持 local-only。1.3 replay
 不会扩大这个边界；未来远程启用必须先完成安全 RFC #186。
 
-敏感 Workspace 可向 `CompanionRelayBridge` 注入 `RelayPayloadCipher`。一旦绑定 cipher：
+敏感 Workspace 可向 `CompanionRelayBridgeV11` 注入 `RelayPayloadCipherV11`。一旦绑定 cipher：
 
 - 明文 `runtime.request` 会在触达 Runtime 前被拒绝，稳定错误为
   `RELAY_ENCRYPTION_REQUIRED` 且 `retryable: false`；
@@ -414,9 +434,11 @@ Next.js Web/API 保持无状态；不要让多个不可信租户共享同一个 
 
 - 新 Runtime 初始化返回 `"1.3"`，且 `connect()` 返回前完成 capability ACK；
 - 动态注册/撤销 handler 会递增 revision；撤销会 abort 未决交互并抑制迟到 Result；
-- N-1 Runtime 可回退 `"1.1"`；不支持 Server Request 的旧 Runtime 安全回退 `"1.0"`；
+- Local-only UI adapter 可让 N-1 Runtime 回退 `"1.1"`，并让不支持 Server Request 的旧
+  Runtime 回退 `"1.0"`；Relay Wire 1.1 Host 则必须拒绝 Runtime 1.0；
 - 创建、列表、打开、重命名、删除和历史分页正常；
-- `"1.3"` / `"1.2"` / `"1.1"` 只有 `approval.request` 能决定 Tool 是否执行，`approval.required` 只读；
+- `"1.3"` / `"1.2"` 的 Approval/User Input 与 `"1.1"` Approval 只由 typed Server Request
+  Handler 结算，`approval.required` 只读；
 - `runtime.serverRequest.cancel` 会 abort 本地 handler，`approval.resolved` 收敛 View；
 - 上下文压缩后，分页遍历 Snapshot 仍能恢复新格式 Thread 的 transcript；
 - Snapshot 不含 `raw` 或 Tool input；
@@ -427,6 +449,10 @@ Next.js Web/API 保持无状态；不要让多个不可信租户共享同一个 
 - 非法帧或响应 DTO 会关闭连接并拒绝挂起请求；
 - Relay 重复投递不会启动第二个 Turn；
 - 远程批准不能绕过本地 Policy；
+- Relay Wire 1.1 Host 在本地 Runtime 只协商到 1.0 时显式拒绝连接，不把 legacy Event 当作
+  typed Interaction；
+- Wire 1.1 的 pull query 使用显式 projector，畸形结果 fail closed，公开错误不泄露 Runtime
+  或本地 Policy 原文；
 - cipher-bound Workspace 拒绝明文请求且只返回加密 response/event；
 - 浏览器断线后本地长任务继续运行；
 - Companion 重启后通过 Runtime 1.3 replay 或 Snapshot 收敛，不依赖旧 Relay ACK/cache/lease。

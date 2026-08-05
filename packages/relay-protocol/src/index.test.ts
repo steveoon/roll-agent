@@ -35,6 +35,8 @@ import {
   parseRelayRequestParams,
   parseRelayRequestParamsForVersion,
   parseRelayRequestResult,
+  projectRelayOperationGetResultV11,
+  projectRelayThreadSnapshotV11,
   projectRuntimeEventEnvelopeForRelayV11,
   relayDeviceConnectSchema,
   relayInteractionCancelledSchemaV11,
@@ -57,6 +59,7 @@ const IDS = {
   workspace: "00000000-0000-4000-8000-000000000606",
   secondWorkspace: "00000000-0000-4000-8000-000000000608",
   interaction: "00000000-0000-4000-8000-000000000610",
+  operation: "00000000-0000-4000-8000-000000000611",
 } as const;
 
 test("Relay Protocol v1.0 freezes message and request registries", () => {
@@ -339,6 +342,210 @@ test("Relay Wire 1.1 timeline projector strips Tool data and Approval preview", 
     toolName: "exec",
     explanation: "运行测试以验证修改。",
   });
+});
+
+test("Relay Wire 1.1 snapshot projector strips Tool and local Approval sentinels", () => {
+  const rawToolReason = "__RAW_TOOL_REASON_SENTINEL__";
+  const rawToolDisplay = "__RAW_TOOL_DISPLAY_SENTINEL__";
+  const rawApprovalInput = "__RAW_APPROVAL_INPUT_SENTINEL__";
+  const localPolicyReason = "__LOCAL_POLICY_REASON_SENTINEL__";
+  const projected = projectRelayThreadSnapshotV11({
+    thread: {
+      id: IDS.thread,
+      title: "Safe Relay snapshot",
+      model: "mock",
+      createdAt: "2026-08-04T12:00:00.000Z",
+      updatedAt: "2026-08-04T12:01:00.000Z",
+      messageCount: 1,
+    },
+    messages: {
+      items: [
+        {
+          sequence: 0,
+          role: "user",
+          createdAt: "2026-08-04T12:00:00.000Z",
+          parts: [{ type: "text", text: "Run the requested check." }],
+        },
+      ],
+      nextBeforeSequence: null,
+    },
+    operations: {
+      items: [
+        {
+          id: IDS.operation,
+          sequence: 1,
+          toolCallId: "tool-1",
+          agentName: "workspace",
+          toolName: "exec",
+          createdAt: "2026-08-04T12:00:30.000Z",
+          outcome: { kind: "tool_failed", reason: rawToolReason },
+          display: { stdout: rawToolDisplay },
+        },
+      ],
+      nextBeforeSequence: 1,
+    },
+    activeTurn: {
+      id: IDS.turn,
+      status: "running",
+      startedAt: "2026-08-04T12:00:00.000Z",
+    },
+    pendingApprovals: [
+      {
+        id: IDS.approval,
+        turnId: IDS.turn,
+        agentName: "workspace",
+        toolName: "exec",
+        preview: {
+          explanation: "Run tests requested by the user.",
+          input: { command: rawApprovalInput },
+        },
+        reason: localPolicyReason,
+      },
+    ],
+    transcriptCompleteness: "complete",
+  });
+
+  assert.deepEqual(projected.operations, {
+    items: [
+      {
+        id: IDS.operation,
+        sequence: 1,
+        toolCallId: "tool-1",
+        agentName: "workspace",
+        toolName: "exec",
+        createdAt: "2026-08-04T12:00:30.000Z",
+        outcome: { kind: "tool_failed" },
+        display: null,
+      },
+    ],
+    nextBeforeSequence: 1,
+  });
+  assert.deepEqual(projected.pendingApprovals, [
+    {
+      id: IDS.approval,
+      turnId: IDS.turn,
+      agentName: "workspace",
+      toolName: "exec",
+      preview: { explanation: "Run tests requested by the user." },
+    },
+  ]);
+  assert.equal(projected.messages.items[0]?.parts[0]?.text, "Run the requested check.");
+  assert.equal("pendingInteractions" in projected, false);
+
+  const serialized = JSON.stringify(projected);
+  for (const sentinel of [rawToolReason, rawToolDisplay, rawApprovalInput, localPolicyReason]) {
+    assert.equal(serialized.includes(sentinel), false);
+  }
+});
+
+test("Relay Wire 1.1 operation.get projector handles null and redacts non-null results", () => {
+  assert.deepEqual(projectRelayOperationGetResultV11({ operation: null }), { operation: null });
+
+  const rawOutcome = "__OPERATION_GET_OUTCOME_SENTINEL__";
+  const rawDisplay = "__OPERATION_GET_DISPLAY_SENTINEL__";
+  const projected = projectRelayOperationGetResultV11({
+    operation: {
+      id: IDS.operation,
+      sequence: 7,
+      toolCallId: "tool-7",
+      agentName: "workspace",
+      toolName: "read_file",
+      createdAt: "2026-08-04T12:02:00.000Z",
+      outcome: { kind: "success", reason: rawOutcome },
+      display: { content: rawDisplay },
+    },
+  });
+
+  assert.deepEqual(projected, {
+    operation: {
+      id: IDS.operation,
+      sequence: 7,
+      toolCallId: "tool-7",
+      agentName: "workspace",
+      toolName: "read_file",
+      createdAt: "2026-08-04T12:02:00.000Z",
+      outcome: { kind: "success" },
+      display: null,
+    },
+  });
+  assert.equal(JSON.stringify(projected).includes(rawOutcome), false);
+  assert.equal(JSON.stringify(projected).includes(rawDisplay), false);
+});
+
+test("Relay Wire 1.1 query projectors fail closed for malformed Runtime results", () => {
+  assert.throws(() =>
+    projectRelayThreadSnapshotV11({
+      thread: {
+        id: IDS.thread,
+        title: "Malformed snapshot",
+        model: "mock",
+        createdAt: "2026-08-04T12:00:00.000Z",
+        updatedAt: "2026-08-04T12:00:00.000Z",
+        messageCount: 0,
+      },
+      messages: { items: [], nextBeforeSequence: null },
+      operations: { items: [], nextBeforeSequence: null },
+      pendingApprovals: [],
+      pendingInteractions: [],
+      transcriptCompleteness: "complete",
+      rawRuntimeSecret: "__UNEXPECTED_SNAPSHOT_FIELD__",
+    }),
+  );
+  assert.throws(() =>
+    projectRelayOperationGetResultV11({
+      operation: {
+        id: IDS.operation,
+        sequence: 7,
+        toolCallId: "tool-7",
+        agentName: "workspace",
+        toolName: "read_file",
+        createdAt: "2026-08-04T12:02:00.000Z",
+        outcome: { kind: "success" },
+        display: null,
+        rawToolInput: "__UNEXPECTED_OPERATION_FIELD__",
+      },
+    }),
+  );
+});
+
+test("Relay Wire 1.1 snapshot projector downgrades Runtime 1.3 recovery fields", () => {
+  const runtimeV13Snapshot = projectThreadSnapshotForVersion("1.3", {
+    thread: {
+      id: IDS.thread,
+      title: "Runtime 1.3 snapshot",
+      model: "mock",
+      createdAt: "2026-08-04T12:00:00.000Z",
+      updatedAt: "2026-08-04T12:03:00.000Z",
+      messageCount: 0,
+    },
+    messages: { items: [], nextBeforeSequence: null },
+    operations: { items: [], nextBeforeSequence: null },
+    activeTurn: {
+      id: IDS.turn,
+      status: "waiting-for-user",
+      startedAt: "2026-08-04T12:00:00.000Z",
+    },
+    pendingApprovals: [],
+    pendingInteractions: [
+      {
+        method: "approval.request",
+        interactionId: IDS.interaction,
+        threadId: IDS.thread,
+        turnId: IDS.turn,
+        expiresAt: "2026-08-04T12:05:00.000Z",
+        sensitivity: "normal",
+        approvalId: IDS.approval,
+      },
+    ],
+    transcriptCompleteness: "complete",
+    eventCursor: `rte1:${IDS.runtime}:42:${IDS.request}`,
+  });
+
+  const projected = projectRelayThreadSnapshotV11(runtimeV13Snapshot);
+  assert.equal(projected.activeTurn?.status, "running");
+  assert.equal("pendingInteractions" in projected, false);
+  assert.equal("eventCursor" in projected, false);
+  assert.equal(projected.thread.id, IDS.thread);
 });
 
 test("every frozen Relay method has one explicit disposition", () => {

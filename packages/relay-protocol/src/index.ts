@@ -8,17 +8,25 @@ import {
   interactionIdSchema,
   jsonValueSchema,
   normalizeUserInputResult,
+  operationGetResultSchema,
+  operationViewSchema,
+  pendingApprovalSchema,
+  projectThreadSnapshotForVersion,
   runtimeEventEnvelopeSchema,
   runtimeEventEnvelopeV11Schema,
   runtimeMethodSchemasV11,
   runtimeInstanceIdSchema,
   streamIdSchema,
   threadIdSchema,
+  threadSnapshotV11Schema,
   timestampSchema,
   turnIdSchema,
   userInputFormSchema,
   userInputResultSchema,
   type JsonValue,
+  type OperationView,
+  type PendingApproval,
+  type ThreadSnapshotV11,
 } from "@roll-agent/protocol";
 import { z } from "zod/v4";
 
@@ -724,6 +732,59 @@ export function projectRuntimeEventEnvelopeForRelayV11(
     threadId: envelope.threadId,
     ...(envelope.turnId === undefined ? {} : { turnId: envelope.turnId }),
     event,
+  });
+}
+
+function redactRelayOperationViewV11(operation: OperationView): OperationView {
+  return operationViewSchema.parse({
+    id: operation.id,
+    sequence: operation.sequence,
+    toolCallId: operation.toolCallId,
+    agentName: operation.agentName,
+    toolName: operation.toolName,
+    createdAt: operation.createdAt,
+    outcome: { kind: operation.outcome.kind },
+    display: null,
+  });
+}
+
+function redactRelayPendingApprovalV11(approval: PendingApproval): PendingApproval {
+  const explanation = getApprovalExplanation(approval);
+  return pendingApprovalSchema.parse({
+    id: approval.id,
+    turnId: approval.turnId,
+    agentName: approval.agentName,
+    toolName: approval.toolName,
+    preview: explanation === undefined ? null : { explanation },
+  });
+}
+
+/** Projects a Runtime snapshot into the allowlisted Relay Wire 1.1 query shape. */
+export function projectRelayThreadSnapshotV11(value: unknown): ThreadSnapshotV11 {
+  const legacySnapshot = threadSnapshotV11Schema.safeParse(value);
+  const snapshot = legacySnapshot.success
+    ? legacySnapshot.data
+    : projectThreadSnapshotForVersion("1.1", value);
+  return threadSnapshotV11Schema.parse({
+    thread: snapshot.thread,
+    messages: snapshot.messages,
+    operations: {
+      items: snapshot.operations.items.map(redactRelayOperationViewV11),
+      nextBeforeSequence: snapshot.operations.nextBeforeSequence,
+    },
+    ...(snapshot.activeTurn === undefined ? {} : { activeTurn: snapshot.activeTurn }),
+    pendingApprovals: snapshot.pendingApprovals.map(redactRelayPendingApprovalV11),
+    transcriptCompleteness: snapshot.transcriptCompleteness,
+  });
+}
+
+/** Projects an operation query result without local display or outcome details. */
+export function projectRelayOperationGetResultV11(
+  value: unknown,
+): z.output<typeof operationGetResultSchema> {
+  const result = operationGetResultSchema.parse(value);
+  return operationGetResultSchema.parse({
+    operation: result.operation === null ? null : redactRelayOperationViewV11(result.operation),
   });
 }
 

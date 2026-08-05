@@ -1,10 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { RollRpcError } from "@roll-agent/client-node";
-import {
-  jsonValueSchema,
-  projectThreadSnapshotForVersion,
-  type JsonValue,
-} from "@roll-agent/protocol";
+import { jsonValueSchema, type JsonValue } from "@roll-agent/protocol";
 import {
   RELAY_ERROR_CODES,
   RELAY_MESSAGE_TYPES_V11,
@@ -15,6 +11,8 @@ import {
   getRelayRequestMethodDispositionForVersion,
   parseRelayRequestParamsForVersion,
   parseRelayRequestResultForVersion,
+  projectRelayOperationGetResultV11,
+  projectRelayThreadSnapshotV11,
   relayEnvelopeIdSchema,
   relayMessageSchemaV11,
   relayRuntimeRequestSchemaV11,
@@ -128,20 +126,16 @@ function relayRequestFingerprintV11(request: RelayRuntimeRequestV11): string {
 }
 
 function projectRelayRuntimeResultV11(request: RelayRuntimeRequestV11, value: unknown): JsonValue {
-  try {
-    return jsonValueSchema.parse(parseRelayRequestResultForVersion("1.1", request.method, value));
-  } catch (error: unknown) {
-    if (
-      request.method !== RELAY_REQUEST_METHODS_V11.threadOpen &&
-      request.method !== RELAY_REQUEST_METHODS_V11.threadSnapshot
-    ) {
-      throw error;
-    }
-    const projected = projectThreadSnapshotForVersion("1.1", value);
-    return jsonValueSchema.parse(
-      parseRelayRequestResultForVersion("1.1", request.method, projected),
-    );
+  let projected = value;
+  if (
+    request.method === RELAY_REQUEST_METHODS_V11.threadOpen ||
+    request.method === RELAY_REQUEST_METHODS_V11.threadSnapshot
+  ) {
+    projected = projectRelayThreadSnapshotV11(value);
+  } else if (request.method === RELAY_REQUEST_METHODS_V11.operationGet) {
+    projected = projectRelayOperationGetResultV11(value);
   }
+  return jsonValueSchema.parse(parseRelayRequestResultForVersion("1.1", request.method, projected));
 }
 
 function toRelayErrorV11(error: unknown): NonNullable<RelayRuntimeResponseV11["error"]> {
@@ -155,7 +149,7 @@ function toRelayErrorV11(error: unknown): NonNullable<RelayRuntimeResponseV11["e
   if (error instanceof RollRpcError) {
     return {
       code: error.data?.rollCode ?? `JSON_RPC_${String(error.code)}`,
-      message: error.message,
+      message: "Runtime request failed",
       retryable: error.data?.retryable ?? false,
     };
   }
@@ -172,7 +166,10 @@ function toRelayErrorV11(error: unknown): NonNullable<RelayRuntimeResponseV11["e
         : RELAY_ERROR_CODES.localConfirmationRequired;
     return {
       code,
-      message: error.message,
+      message:
+        code === RELAY_ERROR_CODES.localApprovalDenied
+          ? "Local approval denied"
+          : "Local confirmation required",
       retryable: getRelayErrorRetryability(code),
     };
   }

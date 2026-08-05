@@ -1,13 +1,27 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { approvalIdSchema, threadIdSchema, turnIdSchema } from "@roll-agent/protocol";
+import { RollRpcError } from "@roll-agent/client-node";
 import {
+  approvalIdSchema,
+  jsonValueSchema,
+  operationIdSchema,
+  threadIdSchema,
+  turnIdSchema,
+  type JsonValue,
+} from "@roll-agent/protocol";
+import {
+  RELAY_ERROR_CODES,
   RELAY_INTERACTION_METHODS_V11,
+  RELAY_REQUEST_METHODS_V11,
   deviceIdSchema,
   relayInteractionIdSchema,
   relayInteractionCandidateParamsSchemaV11,
+  relayMessageSchemaV11,
   relayRequestIdSchema,
+  relayRuntimeRequestSchemaV11,
+  relayRuntimeResponseSchemaV11,
   workspaceIdSchema,
+  type RelayEncryptedMessageV11,
   type RelayMessageV11,
   type RelayRuntimeRequestV11,
 } from "@roll-agent/relay-protocol";
@@ -16,7 +30,9 @@ import {
   CompanionRelayBridgeV11,
   type CompanionWorkspaceV11Port,
   type RelayPayloadCipherV11,
+  type RelayTransportV11,
 } from "./relay-bridge-v11.ts";
+import { LocalApprovalDeniedError, LocalConfirmationRequiredError } from "./companion-workspace.ts";
 import {
   CompanionRelayFrameBuffer,
   type CompanionRelayFrameEntryV11,
@@ -35,13 +51,41 @@ const IDS = {
   interaction: relayInteractionIdSchema.parse("00000000-0000-4000-8000-000000000205"),
   approval: approvalIdSchema.parse("00000000-0000-4000-8000-000000000206"),
   request: relayRequestIdSchema.parse("00000000-0000-4000-8000-000000000207"),
+  operation: operationIdSchema.parse("00000000-0000-4000-8000-000000000208"),
+  snapshotRequest: relayRequestIdSchema.parse("00000000-0000-4000-8000-000000000209"),
+  openRequest: relayRequestIdSchema.parse("00000000-0000-4000-8000-000000000210"),
+  operationRequest: relayRequestIdSchema.parse("00000000-0000-4000-8000-000000000211"),
+  runtimeErrorRequest: relayRequestIdSchema.parse("00000000-0000-4000-8000-000000000212"),
+  deniedErrorRequest: relayRequestIdSchema.parse("00000000-0000-4000-8000-000000000213"),
+  confirmationErrorRequest: relayRequestIdSchema.parse("00000000-0000-4000-8000-000000000214"),
+  operationEnvelope: "00000000-0000-4000-8000-000000000215",
+  runtimeErrorEnvelope: "00000000-0000-4000-8000-000000000216",
+  deniedErrorEnvelope: "00000000-0000-4000-8000-000000000217",
+  confirmationErrorEnvelope: "00000000-0000-4000-8000-000000000218",
 } as const;
+
+const SECRET_SENTINEL = "relay-secret-sentinel=abc123";
+
+type WorkspaceRequestHandlerV11 = (
+  request: RelayRuntimeRequestV11,
+  context: RemoteInteractionCandidateContext,
+) => unknown | Promise<unknown>;
+
+type RelayRuntimeResponseMessageV11 = Extract<
+  RelayMessageV11,
+  { readonly type: "runtime.response" }
+>;
 
 class WorkspacePort implements CompanionWorkspaceV11Port {
   readonly frames = new CompanionRelayFrameBuffer();
   calls = 0;
   closeCalls = 0;
   private readonly listeners = new Set<(entry: CompanionRelayFrameEntryV11) => void>();
+  private readonly requestHandler: WorkspaceRequestHandlerV11;
+
+  constructor(requestHandler: WorkspaceRequestHandlerV11 = () => ({ accepted: true })) {
+    this.requestHandler = requestHandler;
+  }
 
   onBufferedRelayFrameV11(listener: (entry: CompanionRelayFrameEntryV11) => void): () => void {
     this.listeners.add(listener);
@@ -57,11 +101,11 @@ class WorkspacePort implements CompanionWorkspaceV11Port {
   }
 
   async handleRemoteRequestV11(
-    _request: RelayRuntimeRequestV11,
-    _context: RemoteInteractionCandidateContext,
+    request: RelayRuntimeRequestV11,
+    context: RemoteInteractionCandidateContext,
   ): Promise<unknown> {
     this.calls += 1;
-    return { accepted: true };
+    return this.requestHandler(request, context);
   }
 
   closeRemoteInteractions(): void {
@@ -90,6 +134,68 @@ class WorkspacePort implements CompanionWorkspaceV11Port {
   }
 }
 
+class MemoryRelayTransportV11 implements RelayTransportV11 {
+  readonly sent: RelayMessageV11[] = [];
+  private readonly messageListeners = new Set<(message: unknown) => void>();
+  private readonly closeListeners = new Set<() => void>();
+
+  send(message: RelayMessageV11): void {
+    this.sent.push(relayMessageSchemaV11.parse(message));
+  }
+
+  onMessage(listener: (message: unknown) => void): () => void {
+    this.messageListeners.add(listener);
+    return () => this.messageListeners.delete(listener);
+  }
+
+  onClose(listener: () => void): () => void {
+    this.closeListeners.add(listener);
+    return () => this.closeListeners.delete(listener);
+  }
+
+  close(): void {
+    for (const listener of [...this.closeListeners]) {
+      listener();
+    }
+  }
+
+  receive(message: unknown): void {
+    for (const listener of [...this.messageListeners]) {
+      listener(message);
+    }
+  }
+}
+
+class RecordingRelayPayloadCipherV11 implements RelayPayloadCipherV11 {
+  readonly algorithm = "test-only-recording-cipher";
+  readonly encryptedValues: JsonValue[] = [];
+  private readonly requests = new Map<string, JsonValue>();
+
+  queueRequest(request: RelayRuntimeRequestV11): void {
+    this.requests.set(request.requestId, jsonValueSchema.parse(request));
+  }
+
+  async encrypt(value: JsonValue) {
+    this.encryptedValues.push(value);
+    return {
+      nonce: `nonce-${String(this.encryptedValues.length)}`,
+      ciphertext: `ciphertext-${String(this.encryptedValues.length)}`,
+    };
+  }
+
+  async decrypt(message: RelayEncryptedMessageV11): Promise<JsonValue> {
+    const requestId = message.requestId;
+    if (requestId === undefined) {
+      throw new Error("Encrypted test request is missing requestId");
+    }
+    const request = this.requests.get(requestId);
+    if (request === undefined) {
+      throw new Error(`No encrypted test request queued for ${requestId}`);
+    }
+    return request;
+  }
+}
+
 function candidate(decision: "approve" | "reject" = "approve") {
   return relayInteractionCandidateParamsSchemaV11.parse({
     interactionId: IDS.interaction,
@@ -109,11 +215,279 @@ function responses(messages: readonly RelayMessageV11[]) {
   return messages.filter((message) => message.type === "runtime.response");
 }
 
+function responseForV11(
+  messages: readonly RelayMessageV11[],
+  requestId: string,
+): RelayRuntimeResponseMessageV11 {
+  const response = messages.find(
+    (message): message is RelayRuntimeResponseMessageV11 =>
+      message.type === "runtime.response" && message.requestId === requestId,
+  );
+  assert.ok(response);
+  return response;
+}
+
+function sensitiveOperation() {
+  return {
+    id: IDS.operation,
+    sequence: 7,
+    toolCallId: "tool-call-sensitive",
+    agentName: "deploy-agent",
+    toolName: "deploy",
+    createdAt: "2026-08-04T12:00:00.000Z",
+    outcome: { kind: "tool_failed", reason: SECRET_SENTINEL },
+    display: { rawToolOutput: SECRET_SENTINEL },
+  } as const;
+}
+
+function sensitiveSnapshot() {
+  return {
+    thread: {
+      id: IDS.thread,
+      title: "Sensitive projection fixture",
+      model: "fixture-model",
+      createdAt: "2026-08-04T12:00:00.000Z",
+      updatedAt: "2026-08-04T12:01:00.000Z",
+      messageCount: 0,
+    },
+    messages: { items: [], nextBeforeSequence: null },
+    operations: { items: [sensitiveOperation()], nextBeforeSequence: null },
+    pendingApprovals: [
+      {
+        id: IDS.approval,
+        turnId: IDS.turn,
+        agentName: "deploy-agent",
+        toolName: "deploy",
+        preview: {
+          command: SECRET_SENTINEL,
+          explanation: "Approve the deployment",
+        },
+        reason: SECRET_SENTINEL,
+      },
+    ],
+    pendingInteractions: [],
+    transcriptCompleteness: "complete",
+  } as const;
+}
+
+function queryRequestV11(
+  requestId: string,
+  method:
+    | typeof RELAY_REQUEST_METHODS_V11.threadOpen
+    | typeof RELAY_REQUEST_METHODS_V11.threadSnapshot
+    | typeof RELAY_REQUEST_METHODS_V11.operationGet,
+) {
+  return relayRuntimeRequestSchemaV11.parse({
+    type: "runtime.request",
+    requestId,
+    workspaceId: IDS.workspace,
+    method,
+    params:
+      method === RELAY_REQUEST_METHODS_V11.operationGet
+        ? { threadId: IDS.thread, operationId: IDS.operation }
+        : { threadId: IDS.thread },
+  });
+}
+
+function encryptedRequestEnvelopeV11(request: RelayRuntimeRequestV11, envelopeId: string) {
+  return {
+    type: "runtime.encrypted",
+    workspaceId: request.workspaceId,
+    envelopeId,
+    payloadKind: "request",
+    requestId: request.requestId,
+    algorithm: "test-only-recording-cipher",
+    nonce: `request-nonce-${request.requestId}`,
+    ciphertext: `request-ciphertext-${request.requestId}`,
+  } as const;
+}
+
+function sensitiveErrorCases() {
+  return [
+    {
+      requestId: IDS.runtimeErrorRequest,
+      envelopeId: IDS.runtimeErrorEnvelope,
+      error: new RollRpcError({
+        code: -32_000,
+        message: `${SECRET_SENTINEL}:runtime`,
+        data: { rollCode: "RUNTIME_CLOSING", retryable: true },
+      }),
+      expected: {
+        code: "RUNTIME_CLOSING",
+        message: "Runtime request failed",
+        retryable: true,
+      },
+    },
+    {
+      requestId: IDS.deniedErrorRequest,
+      envelopeId: IDS.deniedErrorEnvelope,
+      error: new LocalApprovalDeniedError(`${SECRET_SENTINEL}:denied`),
+      expected: {
+        code: RELAY_ERROR_CODES.localApprovalDenied,
+        message: "Local approval denied",
+        retryable: false,
+      },
+    },
+    {
+      requestId: IDS.confirmationErrorRequest,
+      envelopeId: IDS.confirmationErrorEnvelope,
+      error: new LocalConfirmationRequiredError(`${SECRET_SENTINEL}:confirmation`),
+      expected: {
+        code: RELAY_ERROR_CODES.localConfirmationRequired,
+        message: "Local confirmation required",
+        retryable: false,
+      },
+    },
+  ] as const;
+}
+
 test("Companion Wire 1.1 consumes the shared Relay conformance suite", () => {
   assert.deepEqual(
     runRelayProtocolConformanceForVersion("1.1", runtimeRelayProtocolConformanceAdapterV11),
     { protocolVersion: "1.1", passed: true, failures: [] },
   );
+});
+
+test("Wire 1.1 redacts sensitive Snapshot and operation.get query results", async () => {
+  const workspace = new WorkspacePort((request) => {
+    if (request.method === RELAY_REQUEST_METHODS_V11.operationGet) {
+      return { operation: sensitiveOperation() };
+    }
+    if (
+      request.method === RELAY_REQUEST_METHODS_V11.threadOpen ||
+      request.method === RELAY_REQUEST_METHODS_V11.threadSnapshot
+    ) {
+      return sensitiveSnapshot();
+    }
+    throw new Error(`Unexpected query method: ${request.method}`);
+  });
+  const bridge = new CompanionRelayBridgeV11({
+    deviceId: IDS.device,
+    pairingToken: "pairing-token-long-enough",
+    workspaces: new Map([[IDS.workspace, workspace]]),
+  });
+  const transport = new MemoryRelayTransportV11();
+  bridge.connect(transport, { responderContext: null, responderPolicy: () => true });
+  await flush();
+
+  const requests = [
+    queryRequestV11(IDS.snapshotRequest, RELAY_REQUEST_METHODS_V11.threadSnapshot),
+    queryRequestV11(IDS.openRequest, RELAY_REQUEST_METHODS_V11.threadOpen),
+    queryRequestV11(IDS.operationRequest, RELAY_REQUEST_METHODS_V11.operationGet),
+  ];
+  for (const request of requests) {
+    transport.receive(request);
+  }
+  await flush();
+
+  for (const request of requests) {
+    const response = responseForV11(transport.sent, request.requestId);
+    assert.equal(response.error, undefined);
+    assert.equal(JSON.stringify(response).includes(SECRET_SENTINEL), false);
+  }
+  assert.equal(workspace.calls, 3);
+  assert.deepEqual(responseForV11(transport.sent, IDS.operationRequest).result, {
+    operation: {
+      ...sensitiveOperation(),
+      outcome: { kind: "tool_failed" },
+      display: null,
+    },
+  });
+  for (const requestId of [IDS.snapshotRequest, IDS.openRequest]) {
+    const serialized = JSON.stringify(responseForV11(transport.sent, requestId).result);
+    assert.equal(serialized.includes("rawToolOutput"), false);
+    assert.equal(serialized.includes("Approve the deployment"), true);
+  }
+  bridge.close();
+});
+
+test("Wire 1.1 exposes only fixed public error messages in plaintext responses", async () => {
+  const cases = sensitiveErrorCases();
+  const workspace = new WorkspacePort((request) => {
+    const failure = cases.find((entry) => entry.requestId === request.requestId);
+    if (failure === undefined) {
+      throw new Error(`Unexpected error fixture request: ${request.requestId}`);
+    }
+    throw failure.error;
+  });
+  const bridge = new CompanionRelayBridgeV11({
+    deviceId: IDS.device,
+    pairingToken: "pairing-token-long-enough",
+    workspaces: new Map([[IDS.workspace, workspace]]),
+  });
+  const transport = new MemoryRelayTransportV11();
+  bridge.connect(transport, { responderContext: null, responderPolicy: () => true });
+  await flush();
+
+  for (const entry of cases) {
+    transport.receive(queryRequestV11(entry.requestId, RELAY_REQUEST_METHODS_V11.threadSnapshot));
+  }
+  await flush();
+
+  for (const entry of cases) {
+    const response = responseForV11(transport.sent, entry.requestId);
+    assert.deepEqual(response.error, entry.expected);
+    assert.equal(JSON.stringify(response).includes(SECRET_SENTINEL), false);
+  }
+  bridge.close();
+});
+
+test("Wire 1.1 redacts query results and errors before encrypting responses", async () => {
+  const cases = sensitiveErrorCases();
+  const workspace = new WorkspacePort((request) => {
+    if (request.requestId === IDS.operationRequest) {
+      return { operation: sensitiveOperation() };
+    }
+    const failure = cases.find((entry) => entry.requestId === request.requestId);
+    if (failure === undefined) {
+      throw new Error(`Unexpected encrypted fixture request: ${request.requestId}`);
+    }
+    throw failure.error;
+  });
+  const cipher = new RecordingRelayPayloadCipherV11();
+  const bridge = new CompanionRelayBridgeV11({
+    deviceId: IDS.device,
+    pairingToken: "pairing-token-long-enough",
+    workspaces: new Map([[IDS.workspace, workspace]]),
+    ciphers: new Map([[IDS.workspace, cipher]]),
+  });
+  const transport = new MemoryRelayTransportV11();
+  bridge.connect(transport, { responderContext: null, responderPolicy: () => true });
+  await flush();
+
+  const operationRequest = queryRequestV11(
+    IDS.operationRequest,
+    RELAY_REQUEST_METHODS_V11.operationGet,
+  );
+  cipher.queueRequest(operationRequest);
+  transport.receive(encryptedRequestEnvelopeV11(operationRequest, IDS.operationEnvelope));
+  for (const entry of cases) {
+    const request = queryRequestV11(entry.requestId, RELAY_REQUEST_METHODS_V11.threadSnapshot);
+    cipher.queueRequest(request);
+    transport.receive(encryptedRequestEnvelopeV11(request, entry.envelopeId));
+  }
+  await flush();
+
+  const encryptedResponses = cipher.encryptedValues.map((value) =>
+    relayRuntimeResponseSchemaV11.parse(value),
+  );
+  const operationResponse = responseForV11(encryptedResponses, IDS.operationRequest);
+  assert.deepEqual(operationResponse.result, {
+    operation: {
+      ...sensitiveOperation(),
+      outcome: { kind: "tool_failed" },
+      display: null,
+    },
+  });
+  assert.equal(JSON.stringify(operationResponse).includes(SECRET_SENTINEL), false);
+  for (const entry of cases) {
+    const response = responseForV11(encryptedResponses, entry.requestId);
+    assert.deepEqual(response.error, entry.expected);
+    assert.equal(JSON.stringify(response).includes(SECRET_SENTINEL), false);
+  }
+  assert.equal(JSON.stringify(cipher.encryptedValues).includes(SECRET_SENTINEL), false);
+  assert.equal(JSON.stringify(transport.sent).includes(SECRET_SENTINEL), false);
+  bridge.close();
 });
 
 test("Wire 1.1 mutation cache deduplicates candidates and rejects conflicts", async () => {

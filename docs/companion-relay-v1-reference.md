@@ -44,6 +44,10 @@ Broker、ACK/gap 缓冲、去重与出站重连。它不包含生产 Cloud Relay
 所有未带 `V11` 后缀的 legacy 通用 exports 都继续固定为 1.0。新 Companion 与旧 peer 使用 1.0
 时不能发送 1.1 Interaction；1.0 registry、Schema 和 fixtures 不再扩张。
 
+Wire 1.0 的冻结只保证兼容性，不代表 payload 已按远程威胁模型脱敏。它只适用于处在等价
+本地信任边界内的 legacy peer，不能作为面向不受信 Cloud/Browser 的安全降级路径。生产 Host
+若要求远程投影，必须协商 1.1，并在协商失败时拒绝连接。
+
 Wire version 与 npm package version、Runtime Protocol version 相互独立。本地 Runtime 1.3 的
 字段不能直接偷渡进 Wire 1.0；每一层都必须按自己的 registry 解析和投影。
 
@@ -122,6 +126,36 @@ Browser 必须等待有序的 `interaction.resolved` 或 `interaction.cancelled`
 `approval.required` 等 Runtime timeline event 即使被安全投影，也只是只读时间线；远程响应必须
 命中 Broker 当前 pending `interactionId`，不能从 timeline event 直接执行控制操作。
 
+同一规则覆盖 pull 查询：`thread.open` / `thread.snapshot` 将 Approval preview 限制为可选
+explanation、移除本地 reason，并清空 Operation display 与 outcome reason；`operation.get`
+复用 Operation 投影。Host 对前两种结果调用 `projectRelayThreadSnapshotV11(value)`，对
+`operation.get` 调用 `projectRelayOperationGetResultV11(value)`；畸形 Runtime 结果会抛错并
+fail closed。第一方 `CompanionRelayBridgeV11` 自动应用这些 projector；自定义 Host 必须在
+构造 `runtime.response` 前显式调用，不能把 Runtime 原始结果直接发送。
+
+`CompanionRelayBridgeV11` 会发出的 `runtime.response.error` 固定为：
+
+| 来源 | Wire `code` | 固定公开 `message` | `retryable` |
+|---|---|---|---:|
+| 加密 payload 无法认证或解析 | `ENCRYPTED_PAYLOAD_INVALID` | `Encrypted Relay payload could not be authenticated or parsed` | `false` |
+| cipher-bound Workspace 收到明文 | `RELAY_ENCRYPTION_REQUIRED` | `Encrypted Relay request required for this workspace` | `false` |
+| Workspace 未配对 | `WORKSPACE_NOT_FOUND` | `The requested workspace is not paired with this Companion` | `false` |
+| `requestId` 携带冲突内容重用 | `RELAY_REQUEST_ID_CONFLICT` | `Relay requestId was reused with different method or params` | `false` |
+| request params 无效 | `INVALID_PARAMS` | `Invalid Relay request params` | `false` |
+| Runtime `RollRpcError` | `rollCode`，缺失时为 `JSON_RPC_<code>` | `Runtime request failed` | Runtime 显式值，缺失时 `false` |
+| `LocalApprovalDeniedError`（Policy deny/failure 等） | `LocalApprovalDeniedError` | `Local approval denied` | `false` |
+| 需要本机确认 | `LocalConfirmationRequiredError` | `Local confirmation required` | `false` |
+| 其他 Companion 错误 | `COMPANION_ERROR` | `Companion request failed` | `false` |
+
+该映射不会回传 Runtime、Policy 或异常对象的原始错误消息。自定义 Host 需要维持等价的固定
+公开文案与 fail-closed 行为。legacy Wire 1.0 bridge 也会把响应错误替换为固定公开文案，但
+不会因此获得 Wire 1.1 的 query/interaction 安全投影，仍只适用于等价本地信任边界。
+
+以下内容是有意保留的远端暴露面：完整 transcript 消息、Thread 标题/模型/时间元数据、安全
+timeline 的消息与 reasoning 摘要、Turn 状态、Tool 名称和完成摘要，以及
+`thread.capabilities.manifest` 中可能包含的 cwd、平台、模型、Agent、Skill、Tool Schema、规则
+标识与 VCS 元数据。它们仍需由 Cloud Relay 与 Browser 宿主按敏感数据保护。
+
 `authentication.request` 和 File Picker 没有 Wire 1.1 projector，也不注册 Runtime handlers，
 保持 local-only。Runtime 1.3 replay 不会扩大这个边界；未来若要启用必须先完成安全 RFC
 #186。
@@ -170,14 +204,15 @@ bridge.connect(authenticatedTransport, {
 ```
 
 `responderContext` 是 Host-owned opaque state。Companion 不解释它，也不因其存在就提供生产
-身份或 controller 选举。Protocol 1.3/1.2 Runtime 若未接入 Interaction Broker 会 fail closed；
-不会通过 timeline event 猜测或回退成未授权响应。
+身份或 controller 选举。`CompanionInteractionBroker` 同时处理 Protocol 1.3/1.2 typed
+Interaction 与 Protocol 1.1 Approval facade；1.3/1.2 Runtime 若未接入对应 Handler 会 fail
+closed，不会通过 timeline event 猜测或回退成未授权响应。
 
 `CompanionInteractionBroker` 持有 pending Interaction 与 lease：Approval 使用 `approval`
 lease，User Input 复用其 Turn lease。它在 Runtime Handler 开始时发布 request，在 Result、
 cancel、deadline、terminal Turn、绑定释放或 close 时只结算并释放一次。
 
-旧的 `CompanionApprovalRequestBroker` 已 deprecated，保留一个 minor 周期支持 Wire 1.0。
+旧的 `CompanionApprovalRequestBroker` 已 deprecated，仅作为一个 minor 周期的 legacy API。
 旧 `CompanionRelayBridge.connect(transport)` 不接受 1.1 options，仍发送
 `protocolVersion: "1.0"`。
 

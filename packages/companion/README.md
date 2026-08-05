@@ -79,6 +79,25 @@ Wire 投影有意最小化：
   状态都不会进入 Wire。
 - `authentication.request` 与 File Picker 不注册远程 projector，保持 local-only。
 
+查询通道（pull）与事件通道（push）执行同一投影纪律：Wire 1.1 的 `thread.snapshot` /
+`thread.open` 结果中 `pendingApprovals[].preview` 被替换为 `{ explanation }` 或 `null`、
+`reason` 被移除；`operations[].display` 替换为 `null`、`outcome.reason` 被移除
+（`operation.get` 同规则）。
+
+已知保留的远端暴露面（有意决策，记录在案）：
+
+- `thread.capabilities` 结果中的 `manifest` 原样传输，可能包含 cwd、平台、模型、Agent、
+  Skill、Tool Schema、规则标识与 VCS 等 capability 元数据；远端 UI 依赖它做功能门控。
+- `thread.list` / snapshot 中的 Thread 标题、模型与时间元数据，以及 transcript 的用户/助手
+  完整消息文本。
+- Timeline 中已列入安全 Schema 的消息与 reasoning 摘要、Turn 状态、Tool 名称和安全完成
+  摘要。它们仍是用户内容或工作流元数据，Relay/Browser 宿主必须按敏感数据保护。
+
+Wire 1.0 没有 query/interaction 安全投影；只有错误响应正文会替换为固定公开文案，避免
+Runtime 或本地 policy 细节进入 Relay。其余 legacy payload 仍按冻结行为原样传输，因此它只
+适用于宿主已建立等价本地信任边界的 legacy peer，不能作为面向不受信 Cloud/Browser 的安全
+降级路径；远程部署必须协商 Wire 1.1，协商失败时应拒绝连接。
+
 Runtime cancel、Turn 终态、deadline、Workspace 解绑、bridge 关闭和重连 generation 失效共用
 单次终止语义；旧 generation 的迟到候选不会结算新的连接。`interaction.resolved` 也不携带完整
 结果，Browser 只用终态帧收敛视图。
@@ -91,6 +110,9 @@ Relay exports，以及 `CompanionApprovalRequestBroker` 均固定为 Wire 1.0。
 
 新 Host 必须显式选择 `CompanionRelayBridgeV11` 才能发送 typed Interaction；协商到 1.0 的
 peer 只使用既有 Approval 路径，不会收到 1.1 Interaction 帧。
+
+Wire 1.0 的 registry、Schema 和 fixtures 冻结不代表其内容经过安全投影。生产 Host 不得因
+版本回落而把原本要求 1.1 的远程会话接到 1.0 bridge。
 
 ## ACK、重连与加密
 
