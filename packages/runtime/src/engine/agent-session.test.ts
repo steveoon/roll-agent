@@ -886,6 +886,38 @@ test("AgentSession 写类动作触发 confirmation，approve 后执行", async (
   assert.ok(toolResult && toolResult.type === "tool-result" && toolResult.isError === false);
 });
 
+test("AgentSession 未配置 turnTimeoutMs 时 confirmation 携带默认交互 deadline", async () => {
+  let calls = 0;
+  const model = sequencedModel([
+    toolCallStep("msg-agent__send_message", { q: "hi" }),
+    textStep("已发送"),
+  ]);
+  const session = new AgentSession({
+    id: "s3-default-deadline",
+    model,
+    sources: [source("msg-agent", "send_message", () => (calls += 1))],
+    maxSteps: 8,
+    policy: new DefaultToolPolicy(),
+  });
+
+  const startedAt = Date.now();
+  const events: SessionEvent[] = [];
+  for await (const event of session.send("需要")) {
+    events.push(event);
+    if (event.type === "confirmation-required") {
+      session.approve(event.approvalId);
+    }
+  }
+
+  const confirmation = events.find((event) => event.type === "confirmation-required");
+  assert.ok(confirmation && confirmation.type === "confirmation-required");
+  assert.ok(confirmation.expiresAt !== undefined);
+  const expiresAt = Date.parse(confirmation.expiresAt);
+  assert.ok(expiresAt >= startedAt + 5 * 60 * 1_000);
+  assert.ok(expiresAt <= Date.now() + 5 * 60 * 1_000);
+  assert.equal(calls, 1);
+});
+
 test("AgentSession 同批 Tool 先顺序完成全部准入，任一拒绝则整批零副作用", async () => {
   let calls = 0;
   const model = sequencedModel([

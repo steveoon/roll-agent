@@ -352,6 +352,7 @@ interface LegacyV1ActiveSnapshot {
 }
 
 const SESSION_CLOSE_TIMEOUT_MS = 6_000;
+const DEFAULT_INTERACTION_TIMEOUT_MS = 5 * 60 * 1_000;
 const MAX_CONTEXT_RECOVERY_ATTEMPTS = 1;
 const MAX_COMPACTION_RESOURCE_KEY_CHARS = 1_024;
 const SERIALIZED_INVALID_TOOL_INPUT_PREFIX = "AI_InvalidToolInputError:";
@@ -1043,14 +1044,7 @@ export class AgentSession {
       return { status: "cancelled", reason: "当前无法向用户请求输入" };
     }
     const now = Date.now();
-    const turnExpiresAt =
-      activeTurn.expiresAt === undefined
-        ? Number.POSITIVE_INFINITY
-        : Date.parse(activeTurn.expiresAt);
-    const expiresAtMs = Math.min(
-      now + 5 * 60 * 1_000,
-      Number.isFinite(turnExpiresAt) ? turnExpiresAt : Number.POSITIVE_INFINITY,
-    );
+    const expiresAtMs = this.interactionDeadlineMs(activeTurn, now);
     if (expiresAtMs <= now || abortSignal?.aborted) {
       return { status: "cancelled", reason: "用户输入请求已超时" };
     }
@@ -1964,6 +1958,17 @@ export class AgentSession {
     this.compactionResources.set(resource.key, retained);
   }
 
+  private interactionDeadlineMs(activeTurn: ActiveTurn, now: number): number {
+    const turnExpiresAt =
+      activeTurn.expiresAt === undefined
+        ? Number.POSITIVE_INFINITY
+        : Date.parse(activeTurn.expiresAt);
+    return Math.min(
+      now + DEFAULT_INTERACTION_TIMEOUT_MS,
+      Number.isFinite(turnExpiresAt) ? turnExpiresAt : Number.POSITIVE_INFINITY,
+    );
+  }
+
   private requestApproval(request: ApprovalRequest): Promise<ApprovalDecision> {
     const approvalId = randomUUID();
     const decision = this.gate.request(approvalId);
@@ -1975,13 +1980,17 @@ export class AgentSession {
       return decision;
     }
 
+    const expiresAt =
+      this.activeTurn === undefined
+        ? undefined
+        : new Date(this.interactionDeadlineMs(this.activeTurn, Date.now())).toISOString();
     this.emit({
       type: "confirmation-required",
       approvalId,
       agentName: request.agentName,
       toolName: request.toolName,
       input: request.input,
-      ...(this.activeTurn?.expiresAt !== undefined ? { expiresAt: this.activeTurn.expiresAt } : {}),
+      ...(expiresAt !== undefined ? { expiresAt } : {}),
       ...(request.reason ? { reason: request.reason } : {}),
       ...(request.explanation !== undefined ? { explanation: request.explanation } : {}),
     });
