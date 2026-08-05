@@ -9,6 +9,7 @@ import { simulateReadableStream } from "ai";
 import { MockLanguageModelV4 } from "ai/test";
 import type { LanguageModelV4StreamPart } from "@ai-sdk/provider";
 import type { AgentSession, SessionEvent } from "@roll-agent/runtime";
+import type { ChatUserInputPrompt, ChatUserInputResult } from "../utils/user-input-prompts.ts";
 import { rollConfigSchema } from "../../config/schema.ts";
 import {
   CHAT_ENGINE_SURFACES,
@@ -52,6 +53,7 @@ function fakeSession(events: readonly SessionEvent[], contextWindow?: number): A
     getSkillSummaries() {
       return [];
     },
+    setUserInputAvailable() {},
   } as unknown as AgentSession;
 }
 
@@ -491,6 +493,7 @@ test("runRepl keeps the prompt stream available around confirmation prompts", as
     getSkillSummaries() {
       return [];
     },
+    setUserInputAvailable() {},
   } as unknown as AgentSession;
   const store = {
     updateTitle() {},
@@ -550,6 +553,7 @@ test("runRepl shows a cleaned AI explanation before approval details", async () 
     getSkillSummaries() {
       return [];
     },
+    setUserInputAvailable() {},
   } as unknown as AgentSession;
   const store = {
     updateTitle() {},
@@ -595,6 +599,7 @@ test("runRepl closes a pending prompt when shutdown is requested", async () => {
     getSkillSummaries() {
       return [];
     },
+    setUserInputAvailable() {},
   } as unknown as AgentSession;
   const store = {
     updateTitle() {},
@@ -646,6 +651,7 @@ test("runRepl cancels a pending confirmation when shutdown is requested", async 
     getSkillSummaries() {
       return [];
     },
+    setUserInputAvailable() {},
   } as unknown as AgentSession;
   const store = {
     updateTitle() {},
@@ -679,4 +685,210 @@ test("runRepl cancels a pending confirmation when shutdown is requested", async 
 
   assert.equal(observedSignal, controller.signal);
   assert.deepEqual(rejected, ["approval-signal"]);
+});
+
+test("runRepl enables typed user input and resumes readline after submission", async () => {
+  type UserInputRequiredEvent = Extract<SessionEvent, { readonly type: "user-input-required" }>;
+  const requestId = "b92f0f10-a5f5-4fad-a243-53d39c9972bf" as UserInputRequiredEvent["requestId"];
+  const input = new PassThrough();
+  const promptStarted = Promise.withResolvers<void>();
+  const promptResult = Promise.withResolvers<ChatUserInputResult>();
+  const sentMessages: string[] = [];
+  const capabilityStates: boolean[] = [];
+  const resolved: Array<{ readonly requestId: string; readonly result: ChatUserInputResult }> = [];
+  let confirmationCalls = 0;
+  let firstTurn = true;
+  const session = {
+    id: "session-user-input",
+    async *send(message: string) {
+      sentMessages.push(message);
+      if (firstTurn) {
+        firstTurn = false;
+        yield {
+          type: "user-input-required",
+          requestId,
+          expiresAt: "2030-01-01T00:00:00.000Z",
+          form: {
+            controls: [
+              {
+                type: "choice",
+                id: "region",
+                label: "部署区域",
+                required: true,
+                multiple: false,
+                options: [{ id: "sg", label: "Singapore" }],
+              },
+            ],
+          },
+        } satisfies SessionEvent;
+      }
+      yield { type: "message-finish", text: "done" } satisfies SessionEvent;
+    },
+    approve() {
+      return true;
+    },
+    reject() {
+      return true;
+    },
+    resolveUserInput(candidateRequestId: string, result: ChatUserInputResult) {
+      resolved.push({ requestId: candidateRequestId, result });
+      return true;
+    },
+    cancelUserInput() {
+      return true;
+    },
+    cancel() {
+      assert.fail("submitting user input must not cancel the Turn");
+    },
+    setUserInputAvailable(available: boolean) {
+      capabilityStates.push(available);
+    },
+    getContextWindow() {
+      return undefined;
+    },
+    getSkillSummaries() {
+      return [];
+    },
+  } as unknown as AgentSession;
+  const store = {
+    updateTitle() {},
+    countMessages() {
+      return 1;
+    },
+    deleteThread() {},
+  } as unknown as Parameters<typeof runRepl>[1];
+  const userInputPrompt: ChatUserInputPrompt = {
+    async request() {
+      promptStarted.resolve();
+      return promptResult.promise;
+    },
+  };
+
+  const done = runRepl(session, store, false, {
+    input,
+    output: sink(),
+    confirm: async () => {
+      confirmationCalls += 1;
+      return true;
+    },
+    userInputPrompt,
+  });
+  input.write("run\n");
+  await promptStarted.promise;
+  input.write("next\n");
+  promptResult.resolve({
+    status: "submitted",
+    values: [{ id: "region", value: "sg" }],
+  });
+  await delay(10);
+  input.write("exit\n");
+  input.end();
+
+  await done;
+
+  assert.deepEqual(sentMessages, ["run", "next"]);
+  assert.deepEqual(capabilityStates, [true, false]);
+  assert.deepEqual(resolved, [
+    {
+      requestId,
+      result: { status: "submitted", values: [{ id: "region", value: "sg" }] },
+    },
+  ]);
+  assert.equal(confirmationCalls, 0, "Approval confirm must not answer user input");
+});
+
+test("runRepl settles shutdown during user input as cancelled without cancelling the Turn", async () => {
+  type UserInputRequiredEvent = Extract<SessionEvent, { readonly type: "user-input-required" }>;
+  const requestId = "2700be7e-5f5a-4509-9681-b47432074388" as UserInputRequiredEvent["requestId"];
+  const input = new PassThrough();
+  const controller = new AbortController();
+  const promptStarted = Promise.withResolvers<void>();
+  const cancellations: Array<{ readonly requestId: string; readonly reason?: string }> = [];
+  let turnCancellations = 0;
+  const session = {
+    id: "session-user-input-shutdown",
+    async *send() {
+      yield {
+        type: "user-input-required",
+        requestId,
+        expiresAt: "2030-01-01T00:00:00.000Z",
+        form: {
+          controls: [
+            {
+              type: "text",
+              id: "owner",
+              label: "负责人",
+              required: true,
+            },
+          ],
+        },
+      } satisfies SessionEvent;
+      yield { type: "message-finish", text: "" } satisfies SessionEvent;
+    },
+    approve() {
+      return true;
+    },
+    reject() {
+      return true;
+    },
+    resolveUserInput() {
+      return true;
+    },
+    cancelUserInput(candidateRequestId: string, reason?: string) {
+      cancellations.push({
+        requestId: candidateRequestId,
+        ...(reason !== undefined ? { reason } : {}),
+      });
+      return true;
+    },
+    cancel() {
+      turnCancellations += 1;
+      return true;
+    },
+    setUserInputAvailable() {},
+    getContextWindow() {
+      return undefined;
+    },
+    getSkillSummaries() {
+      return [];
+    },
+  } as unknown as AgentSession;
+  const store = {
+    updateTitle() {},
+    countMessages() {
+      return 1;
+    },
+    deleteThread() {},
+  } as unknown as Parameters<typeof runRepl>[1];
+  const userInputPrompt: ChatUserInputPrompt = {
+    async request(_form, signal) {
+      promptStarted.resolve();
+      if (signal?.aborted === true) {
+        return { status: "cancelled", reason: "会话正在关闭" };
+      }
+      return new Promise<ChatUserInputResult>((resolve) => {
+        signal?.addEventListener(
+          "abort",
+          () => resolve({ status: "cancelled", reason: "会话正在关闭" }),
+          { once: true },
+        );
+      });
+    },
+  };
+
+  const done = runRepl(session, store, false, {
+    input,
+    output: sink(),
+    signal: controller.signal,
+    userInputPrompt,
+  });
+  input.write("run\n");
+  await promptStarted.promise;
+  controller.abort(new Error("shutdown"));
+  input.end();
+
+  await done;
+
+  assert.deepEqual(cancellations, [{ requestId, reason: "会话正在关闭" }]);
+  assert.equal(turnCancellations, 0);
 });

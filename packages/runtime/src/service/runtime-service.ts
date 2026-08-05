@@ -9,12 +9,16 @@ import {
   SUPPORTED_RUNTIME_PROTOCOL_VERSIONS,
   approvalExplanationSchema,
   approvalIdSchema,
+  normalizeUserInputResultForForm,
   operationIdSchema,
   parseRuntimeMethodResult,
+  runtimeDurableEventV13Schema,
+  runtimeEphemeralEventV13Schema,
   runtimeInstanceIdSchema,
   runtimeProtocolVersionSchema,
   streamIdSchema,
   threadIdSchema,
+  userInputFormSchema,
   type ActiveTurn,
   type ApprovalResolution,
   type InitializeParams,
@@ -23,18 +27,24 @@ import {
   type OperationView,
   type PendingApproval,
   type RuntimeEvent,
-  type RuntimeEventEnvelope,
+  type RuntimeEventEnvelopeV13,
+  type RuntimeEventsResumeParams,
+  type RuntimeEventsResumeResult,
   type RuntimeInstanceId,
   type RuntimeMethodParams,
   type RuntimeMethodResult,
   type RuntimeProtocolVersion,
-  type RuntimeProtocolErrorData,
+  type RuntimeProtocolErrorDataV13,
+  type ThreadSnapshotV13Full,
   type ThreadId,
   type ThreadSummary,
   type TurnId,
   type UiMessage,
+  type UserInputForm,
+  type UserInputResult,
 } from "@roll-agent/protocol";
 import type { AgentSession } from "../engine/agent-session.ts";
+import type { SessionUserInputRequestId } from "../interaction/user-input-interaction-manager.ts";
 import { createSafeCapabilitySnapshot } from "../engine/capability-manifest.ts";
 import type { SessionEvent } from "../types/events.ts";
 import {
@@ -44,7 +54,10 @@ import {
 } from "../tool-bridge/tool-execution-record.ts";
 import type { ToolOutcome } from "../tool-bridge/normalize-result.ts";
 import {
+  RuntimeEventCursorExpiredError,
+  RuntimeEventCursorGapError,
   ThreadStore,
+  type StoredRuntimeEvent,
   type SequencedToolExecutionRecord,
   type ThreadRecord,
 } from "../store/thread-store.ts";
@@ -61,13 +74,13 @@ const REDACTED_KEYS = new Set([
   "authorization",
   "cookie",
   "password",
-  "providerOptions",
+  "provideroptions",
   "raw",
   "secret",
   "token",
 ]);
 
-type RollErrorCode = RuntimeProtocolErrorData["rollCode"];
+type RollErrorCode = RuntimeProtocolErrorDataV13["rollCode"];
 
 export type RuntimeServiceSession = Pick<
   AgentSession,
@@ -79,7 +92,8 @@ export type RuntimeServiceSession = Pick<
   | "close"
   | "getCapabilityManifest"
   | "getCapabilityTurnContext"
->;
+> &
+  Partial<Pick<AgentSession, "setUserInputAvailable" | "resolveUserInput" | "cancelUserInput">>;
 
 export interface RuntimeServiceEngine {
   createSession(input?: { readonly title?: string }): Promise<RuntimeServiceSession>;
@@ -135,7 +149,40 @@ interface PendingApprovalState {
   readonly threadId: ThreadId;
   readonly session: RuntimeServiceSession;
   readonly approval: PendingApproval;
+  readonly expiresAt: string | undefined;
 }
+
+interface PendingUserInputState {
+  readonly requestId: SessionUserInputRequestId;
+  readonly threadId: ThreadId;
+  readonly turnId: TurnId;
+  readonly session: RuntimeServiceSession;
+  readonly form: UserInputForm;
+  readonly expiresAt: string;
+}
+
+export type RuntimeThreadSnapshot = Omit<ThreadSnapshotV13Full, "pendingInteractions">;
+
+export interface RuntimeEventReplayBatch extends RuntimeEventsResumeResult {
+  readonly events: readonly StoredRuntimeEvent[];
+}
+
+export type RuntimeUserInputInteractionEvent =
+  | {
+      readonly type: "required";
+      readonly requestId: SessionUserInputRequestId;
+      readonly threadId: ThreadId;
+      readonly turnId: TurnId;
+      readonly form: UserInputForm;
+      readonly expiresAt: string;
+    }
+  | {
+      readonly type: "settled";
+      readonly requestId: SessionUserInputRequestId;
+      readonly threadId: ThreadId;
+      readonly turnId: TurnId;
+      readonly reason: string;
+    };
 
 export class RuntimeServiceError extends Error {
   readonly rollCode: RollErrorCode;
@@ -425,10 +472,16 @@ export class RuntimeService {
   private readonly activeTurnOwners = new Map<TurnId, ThreadId>();
   private readonly settledTurnOwners = new Map<TurnId, ThreadId>();
   private readonly pendingApprovals = new Map<string, PendingApprovalState>();
-  private readonly listeners = new Set<(event: RuntimeEventEnvelope) => void>();
+  private readonly pendingUserInputs = new Map<SessionUserInputRequestId, PendingUserInputState>();
+  private readonly listeners = new Set<(event: RuntimeEventEnvelopeV13) => void>();
+  private readonly fatalErrorListeners = new Set<(error: unknown) => void>();
+  private readonly userInputListeners = new Set<
+    (event: RuntimeUserInputInteractionEvent) => void
+  >();
   private readonly mutationRequests: MutationRequestCache;
   private sequence = 0;
   private closing = false;
+  private userInputAvailable = false;
 
   constructor(
     engine: RuntimeServiceEngine,
@@ -469,7 +522,7 @@ export class RuntimeService {
         },
       );
     }
-    return {
+    const commonResult = {
       protocolVersion,
       runtimeInstanceId: this.runtimeInstanceId,
       server: {
@@ -484,17 +537,54 @@ export class RuntimeService {
       limits: {
         maxFrameBytes: this.maxFrameBytes,
         maxPageSize: DEFAULT_MAX_PAGE_SIZE,
-        eventReplay: false,
         idempotencyCacheEntries: this.idempotencyCacheEntries,
       },
     };
+    return protocolVersion === "1.3"
+      ? {
+          ...commonResult,
+          protocolVersion,
+          limits: { ...commonResult.limits, eventReplay: true },
+        }
+      : {
+          ...commonResult,
+          protocolVersion,
+          limits: { ...commonResult.limits, eventReplay: false },
+        };
   }
 
-  onEvent(listener: (event: RuntimeEventEnvelope) => void): () => void {
+  onEvent(listener: (event: RuntimeEventEnvelopeV13) => void): () => void {
     this.listeners.add(listener);
     return () => {
       this.listeners.delete(listener);
     };
+  }
+
+  onFatalError(listener: (error: unknown) => void): () => void {
+    this.fatalErrorListeners.add(listener);
+    return () => {
+      this.fatalErrorListeners.delete(listener);
+    };
+  }
+
+  onUserInputInteraction(listener: (event: RuntimeUserInputInteractionEvent) => void): () => void {
+    this.userInputListeners.add(listener);
+    return () => {
+      this.userInputListeners.delete(listener);
+    };
+  }
+
+  setUserInputAvailable(available: boolean): void {
+    if (this.userInputAvailable === available) {
+      return;
+    }
+    this.userInputAvailable = available;
+    if (!available) {
+      this.cancelAllPendingUserInputs("当前客户端已撤销用户输入处理能力");
+    }
+    for (const session of this.sessions.values()) {
+      session.setUserInputAvailable?.(available);
+    }
   }
 
   listThreads(params: RuntimeMethodParams<"thread.list">): RuntimeMethodResult<"thread.list"> {
@@ -529,7 +619,7 @@ export class RuntimeService {
         const session = await this.engine.createSession(
           params.title !== undefined ? { title: params.title } : {},
         );
-        this.sessions.set(session.id, session);
+        this.rememberSession(session);
         return {
           thread: toThreadSummary(this.store, this.requireThread(session.id)),
         };
@@ -537,9 +627,7 @@ export class RuntimeService {
     );
   }
 
-  async openThread(
-    params: RuntimeMethodParams<"thread.open">,
-  ): Promise<RuntimeMethodResult<"thread.open">> {
+  async openThread(params: RuntimeMethodParams<"thread.open">): Promise<RuntimeThreadSnapshot> {
     await this.requireSession(params.threadId);
     return this.snapshotThread({
       threadId: params.threadId,
@@ -547,9 +635,7 @@ export class RuntimeService {
     });
   }
 
-  snapshotThread(
-    params: RuntimeMethodParams<"thread.snapshot">,
-  ): RuntimeMethodResult<"thread.snapshot"> {
+  snapshotThread(params: RuntimeMethodParams<"thread.snapshot">): RuntimeThreadSnapshot {
     this.assertOpen();
     const record = this.requireThread(params.threadId);
     const messagePage = this.store.listRecentTranscriptMessages(params.threadId, {
@@ -591,7 +677,32 @@ export class RuntimeService {
         .filter((pending) => pending.threadId === params.threadId)
         .map((pending) => pending.approval),
       transcriptCompleteness: this.store.getTranscriptCompleteness(params.threadId),
+      eventCursor: this.store.getRuntimeEventCursor(params.threadId),
     };
+  }
+
+  resumeEvents(params: RuntimeEventsResumeParams): RuntimeEventReplayBatch {
+    this.assertOpen();
+    this.requireThread(params.threadId);
+    try {
+      return this.store.resumeRuntimeEvents(params.threadId, params.afterCursor);
+    } catch (error: unknown) {
+      if (error instanceof RuntimeEventCursorExpiredError) {
+        throw new RuntimeServiceError(
+          RUNTIME_ERROR_CODES.eventCursorExpired,
+          "Runtime Event cursor 已超出当前 Thread 的保留窗口，请回退到 thread.snapshot",
+          { details: { threadId: params.threadId } },
+        );
+      }
+      if (error instanceof RuntimeEventCursorGapError) {
+        throw new RuntimeServiceError(
+          RUNTIME_ERROR_CODES.eventCursorGap,
+          "Runtime Event cursor 与当前 Thread 事件日志不连续，请回退到 thread.snapshot",
+          { details: { threadId: params.threadId } },
+        );
+      }
+      throw error;
+    }
   }
 
   async renameThread(
@@ -728,7 +839,13 @@ export class RuntimeService {
         };
         this.activeTurns.set(params.threadId, state);
         this.activeTurnOwners.set(params.turnId, params.threadId);
-        this.emit(params.threadId, params.turnId, { type: "turn.started" });
+        try {
+          this.emit(params.threadId, params.turnId, { type: "turn.started" });
+        } catch (error: unknown) {
+          this.activeTurns.delete(params.threadId);
+          this.activeTurnOwners.delete(params.turnId);
+          throw error;
+        }
         this.driveTurn(state, params.input.text).catch(() => undefined);
         return { accepted: true, turnId: params.turnId };
       },
@@ -750,6 +867,7 @@ export class RuntimeService {
       state.status = "cancelling";
       let cancelling = false;
       try {
+        this.cancelPendingUserInputsForTurn(params.turnId, "Turn 已由客户端取消");
         this.cancelPendingApprovalsForTurn(params.turnId, {
           status: "cancelled",
           reason: "Turn 已由客户端取消",
@@ -815,6 +933,10 @@ export class RuntimeService {
     return { resolved: true };
   }
 
+  getPendingApprovalExpiresAt(identity: RuntimeApprovalIdentity): string | undefined {
+    return this.findPendingApproval(identity)?.expiresAt;
+  }
+
   private cancelPendingApproval(
     identity: RuntimeApprovalIdentity,
     resolution: Extract<ApprovalResolution, { readonly status: "cancelled" | "expired" }>,
@@ -853,6 +975,62 @@ export class RuntimeService {
     return true;
   }
 
+  resolvePendingUserInput(requestId: SessionUserInputRequestId, result: UserInputResult): boolean {
+    const pending = this.pendingUserInputs.get(requestId);
+    if (pending === undefined) {
+      return false;
+    }
+    let normalized: UserInputResult;
+    try {
+      normalized = normalizeUserInputResultForForm(pending.form, result);
+    } catch {
+      this.cancelPendingUserInput(requestId, "用户输入不符合原始表单约束");
+      return false;
+    }
+    this.pendingUserInputs.delete(requestId);
+    const resolved = pending.session.resolveUserInput?.(requestId, normalized) ?? false;
+    if (!resolved) {
+      const reason = "用户输入请求已失效";
+      pending.session.cancelUserInput?.(requestId, reason);
+      this.restoreRunningStatus(pending);
+      this.emitUserInputInteraction({
+        type: "settled",
+        requestId,
+        threadId: pending.threadId,
+        turnId: pending.turnId,
+        reason,
+      });
+      return false;
+    }
+    this.restoreRunningStatus(pending);
+    this.emitUserInputInteraction({
+      type: "settled",
+      requestId,
+      threadId: pending.threadId,
+      turnId: pending.turnId,
+      reason: normalized.status === "submitted" ? "用户已提交输入" : "用户已取消输入",
+    });
+    return resolved;
+  }
+
+  cancelPendingUserInput(requestId: SessionUserInputRequestId, reason: string): boolean {
+    const pending = this.pendingUserInputs.get(requestId);
+    if (pending === undefined) {
+      return false;
+    }
+    this.pendingUserInputs.delete(requestId);
+    const cancelled = pending.session.cancelUserInput?.(requestId, reason) ?? false;
+    this.restoreRunningStatus(pending);
+    this.emitUserInputInteraction({
+      type: "settled",
+      requestId,
+      threadId: pending.threadId,
+      turnId: pending.turnId,
+      reason,
+    });
+    return cancelled;
+  }
+
   getOperation(params: RuntimeMethodParams<"operation.get">): RuntimeMethodResult<"operation.get"> {
     this.assertOpen();
     this.requireThread(params.threadId);
@@ -867,6 +1045,7 @@ export class RuntimeService {
       return;
     }
     this.closing = true;
+    this.setUserInputAvailable(false);
     for (const turn of this.activeTurns.values()) {
       turn.session.cancel();
     }
@@ -876,8 +1055,11 @@ export class RuntimeService {
     this.activeTurnOwners.clear();
     this.settledTurnOwners.clear();
     this.pendingApprovals.clear();
+    this.pendingUserInputs.clear();
+    this.userInputListeners.clear();
     await Promise.allSettled(sessions.map((session) => session.close()));
     this.mutationRequests.clear();
+    this.fatalErrorListeners.clear();
   }
 
   private assertOpen(): void {
@@ -907,26 +1089,76 @@ export class RuntimeService {
       return existing;
     }
     const session = await this.engine.resumeSession(threadId);
-    this.sessions.set(threadId, session);
+    this.rememberSession(session);
     return session;
   }
 
+  private rememberSession(session: RuntimeServiceSession): void {
+    session.setUserInputAvailable?.(this.userInputAvailable);
+    this.sessions.set(session.id, session);
+  }
+
   private emit(threadId: ThreadId, turnId: TurnId | undefined, event: RuntimeEvent): void {
-    const envelope: RuntimeEventEnvelope = {
+    const timestamp = new Date().toISOString();
+    const commonEnvelope = {
       protocolVersion: RUNTIME_PROTOCOL_VERSION,
       runtimeInstanceId: this.runtimeInstanceId,
       sequence: this.sequence,
-      timestamp: new Date().toISOString(),
+      timestamp,
       threadId,
       ...(turnId !== undefined ? { turnId } : {}),
-      event,
-    };
+    } as const;
+    const durableEvent = runtimeDurableEventV13Schema.safeParse(event);
+    const envelope: RuntimeEventEnvelopeV13 = durableEvent.success
+      ? (() => {
+          let stored: StoredRuntimeEvent;
+          try {
+            stored = this.store.appendRuntimeEvent({
+              threadId,
+              ...(turnId === undefined ? {} : { turnId }),
+              timestamp,
+              event: durableEvent.data,
+            });
+          } catch (error: unknown) {
+            this.notifyFatalError(error);
+            throw error;
+          }
+          return {
+            ...commonEnvelope,
+            durability: "durable" as const,
+            eventId: stored.eventId,
+            cursor: stored.cursor,
+            event: durableEvent.data,
+          };
+        })()
+      : {
+          ...commonEnvelope,
+          durability: "ephemeral",
+          event: runtimeEphemeralEventV13Schema.parse(event),
+        };
     this.sequence += 1;
     for (const listener of this.listeners) {
       try {
         listener(envelope);
       } catch {
         // Event consumers are observers. A broken transport/listener must not corrupt Runtime state.
+      }
+    }
+  }
+
+  private notifyFatalError(error: unknown): void {
+    for (const turn of this.activeTurns.values()) {
+      try {
+        turn.session.cancel();
+      } catch {
+        // A cancellation failure must not replace the durable Store error that triggered shutdown.
+      }
+    }
+    for (const listener of this.fatalErrorListeners) {
+      try {
+        listener(error);
+      } catch {
+        // Fatal observers are best-effort shutdown signals; the storage error remains primary.
       }
     }
   }
@@ -1083,10 +1315,61 @@ export class RuntimeService {
           threadId: state.threadId,
           session: state.session,
           approval,
+          expiresAt: event.expiresAt,
         });
         this.emit(state.threadId, state.turnId, {
           type: "approval.required",
           approval,
+        });
+        return;
+      }
+      case "user-input-required": {
+        if (
+          !this.userInputAvailable ||
+          state.session.resolveUserInput === undefined ||
+          state.session.cancelUserInput === undefined
+        ) {
+          state.session.cancelUserInput?.(event.requestId, "当前客户端未协商用户输入处理能力");
+          return;
+        }
+        const storedForm = userInputFormSchema.parse(event.form);
+        const exposedForm = userInputFormSchema.parse(storedForm);
+        const pending: PendingUserInputState = {
+          requestId: event.requestId,
+          threadId: state.threadId,
+          turnId: state.turnId,
+          session: state.session,
+          form: storedForm,
+          expiresAt: event.expiresAt,
+        };
+        this.pendingUserInputs.set(event.requestId, pending);
+        state.status = "waiting-for-user";
+        const delivered = this.emitUserInputInteraction({
+          type: "required",
+          requestId: event.requestId,
+          threadId: state.threadId,
+          turnId: state.turnId,
+          form: exposedForm,
+          expiresAt: event.expiresAt,
+        });
+        if (!delivered) {
+          this.cancelPendingUserInput(event.requestId, "当前没有可处理用户输入请求的客户端");
+        }
+        return;
+      }
+      case "user-input-settled": {
+        const pending = this.pendingUserInputs.get(event.requestId);
+        if (pending === undefined) {
+          return;
+        }
+        this.pendingUserInputs.delete(event.requestId);
+        this.restoreRunningStatus(pending);
+        this.emitUserInputInteraction({
+          type: "settled",
+          requestId: pending.requestId,
+          threadId: pending.threadId,
+          turnId: pending.turnId,
+          reason: event.status === "submitted" ? "用户输入请求已结算" : "用户输入请求已取消",
         });
         return;
       }
@@ -1158,10 +1441,14 @@ export class RuntimeService {
     pending: PendingApprovalState,
     resolution: ApprovalResolution,
   ): void {
+    const safeResolution: ApprovalResolution =
+      "reason" in resolution && resolution.reason !== undefined
+        ? { ...resolution, reason: redactSecretText(resolution.reason) }
+        : resolution;
     this.emit(pending.threadId, pending.approval.turnId, {
       type: "approval.resolved",
       approvalId: pending.approval.id,
-      resolution,
+      resolution: safeResolution,
     });
   }
 
@@ -1192,6 +1479,45 @@ export class RuntimeService {
     }
   }
 
+  private cancelPendingUserInputsForTurn(turnId: TurnId, reason: string): void {
+    const requestIds = [...this.pendingUserInputs.values()]
+      .filter((pending) => pending.turnId === turnId)
+      .map((pending) => pending.requestId);
+    for (const requestId of requestIds) {
+      this.cancelPendingUserInput(requestId, reason);
+    }
+  }
+
+  private cancelAllPendingUserInputs(reason: string): void {
+    for (const requestId of [...this.pendingUserInputs.keys()]) {
+      this.cancelPendingUserInput(requestId, reason);
+    }
+  }
+
+  private restoreRunningStatus(pending: PendingUserInputState): void {
+    const active = this.activeTurns.get(pending.threadId);
+    if (
+      active !== undefined &&
+      active.turnId === pending.turnId &&
+      active.status === "waiting-for-user"
+    ) {
+      active.status = "running";
+    }
+  }
+
+  private emitUserInputInteraction(event: RuntimeUserInputInteractionEvent): boolean {
+    let delivered = false;
+    for (const listener of this.userInputListeners) {
+      try {
+        listener(event);
+        delivered = true;
+      } catch {
+        // Interaction observers cannot corrupt Runtime state. Deadlines remain fail-closed.
+      }
+    }
+    return delivered;
+  }
+
   private emitTurnTerminal(
     state: ActiveTurnState,
     event: Extract<
@@ -1201,6 +1527,7 @@ export class RuntimeService {
       }
     >,
   ): void {
+    this.cancelPendingUserInputsForTurn(state.turnId, `Turn 已终止：${event.type}`);
     this.cancelPendingApprovalsForTurn(
       state.turnId,
       event.type === "turn.cancelled" && event.reason === "timeout"

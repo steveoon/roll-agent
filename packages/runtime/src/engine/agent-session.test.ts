@@ -87,6 +87,53 @@ function sequencedModel(steps: LanguageModelV4StreamPart[][]): MockLanguageModel
   });
 }
 
+test("AgentSession exposes a stable user input Tool only while the host capability is enabled", async () => {
+  const calls: LanguageModelV4CallOptions[] = [];
+  const model = new MockLanguageModelV4({
+    doStream: async (options) => {
+      calls.push(options);
+      return streamChunks(textStep("done"));
+    },
+  });
+  const session = new AgentSession({
+    id: "user-input-capability",
+    model,
+    sources: [],
+    maxSteps: 4,
+  });
+  try {
+    assert.equal(
+      session.getCapabilityManifest().tools.some((tool) => tool.role === "user-input"),
+      false,
+    );
+    session.setUserInputAvailable(true);
+    const firstTool = session
+      .getCapabilityManifest()
+      .tools.find((tool) => tool.role === "user-input");
+    assert.equal(firstTool?.id, "roll__user_input");
+    session.setUserInputAvailable(false);
+    assert.equal(
+      session.getCapabilityManifest().tools.some((tool) => tool.role === "user-input"),
+      false,
+    );
+    session.setUserInputAvailable(true);
+    assert.equal(
+      session.getCapabilityManifest().tools.find((tool) => tool.role === "user-input")?.id,
+      firstTool?.id,
+    );
+
+    await collect(session.send("need structured input"));
+    assert.match(JSON.stringify(calls[0]?.tools), /roll__user_input/u);
+    const systemPrompt = JSON.stringify(
+      calls[0]?.prompt.find((message) => message.role === "system"),
+    );
+    assert.match(systemPrompt, /不请求密码、令牌、密钥/u);
+    assert.match(systemPrompt, /用户取消属于正常结果/u);
+  } finally {
+    await session.close();
+  }
+});
+
 function textStep(text: string, inputTokens = 1, outputTokens = 1): LanguageModelV4StreamPart[] {
   return [
     { type: "stream-start", warnings: [] },
@@ -814,8 +861,10 @@ test("AgentSession 写类动作触发 confirmation，approve 后执行", async (
     sources: [source("msg-agent", "send_message", () => (calls += 1))],
     maxSteps: 8,
     policy: new DefaultToolPolicy(),
+    turnTimeoutMs: 60_000,
   });
 
+  const startedAt = Date.now();
   const events: SessionEvent[] = [];
   for await (const event of session.send("需要")) {
     events.push(event);
@@ -828,9 +877,45 @@ test("AgentSession 写类动作触发 confirmation，approve 后执行", async (
   assert.ok(confirmation && confirmation.type === "confirmation-required");
   assert.equal(confirmation.toolName, "send_message");
   assert.equal(confirmation.reason, "写/发送类操作");
+  assert.ok(confirmation.expiresAt !== undefined);
+  const expiresAt = Date.parse(confirmation.expiresAt);
+  assert.ok(expiresAt >= startedAt + 60_000);
+  assert.ok(expiresAt <= Date.now() + 60_000);
   assert.equal(calls, 1);
   const toolResult = events.find((event) => event.type === "tool-result");
   assert.ok(toolResult && toolResult.type === "tool-result" && toolResult.isError === false);
+});
+
+test("AgentSession 未配置 turnTimeoutMs 时 confirmation 携带默认交互 deadline", async () => {
+  let calls = 0;
+  const model = sequencedModel([
+    toolCallStep("msg-agent__send_message", { q: "hi" }),
+    textStep("已发送"),
+  ]);
+  const session = new AgentSession({
+    id: "s3-default-deadline",
+    model,
+    sources: [source("msg-agent", "send_message", () => (calls += 1))],
+    maxSteps: 8,
+    policy: new DefaultToolPolicy(),
+  });
+
+  const startedAt = Date.now();
+  const events: SessionEvent[] = [];
+  for await (const event of session.send("需要")) {
+    events.push(event);
+    if (event.type === "confirmation-required") {
+      session.approve(event.approvalId);
+    }
+  }
+
+  const confirmation = events.find((event) => event.type === "confirmation-required");
+  assert.ok(confirmation && confirmation.type === "confirmation-required");
+  assert.ok(confirmation.expiresAt !== undefined);
+  const expiresAt = Date.parse(confirmation.expiresAt);
+  assert.ok(expiresAt >= startedAt + 5 * 60 * 1_000);
+  assert.ok(expiresAt <= Date.now() + 5 * 60 * 1_000);
+  assert.equal(calls, 1);
 });
 
 test("AgentSession 同批 Tool 先顺序完成全部准入，任一拒绝则整批零副作用", async () => {

@@ -38,6 +38,7 @@ export interface BuildChatSystemPromptOptions {
   readonly sessionHostMode?: CapabilityHostMode;
   readonly agentCount?: number;
   readonly agentOnboarding?: AgentOnboardingPromptInfo;
+  readonly userInputToolId?: string;
 }
 
 const MAX_SKILL_DESCRIPTION_CHARS = 240;
@@ -75,6 +76,16 @@ const OUTPUT_SECTION = [
   "- 工具调用完成后，在 text 通道给出简洁结论；最终回复不要重复，也不要复述用户输入。",
   "- 像可靠的同事一样汇报：先结论，后必要细节，保持简洁。",
 ].join("\n");
+
+function buildUserInputSection(toolId: string): string {
+  return [
+    "# 用户输入",
+    `- 只有完成当前任务确实缺少、且无法从上下文或已有工具结果推断的信息，才调用 ${toolId} 展示结构化表单。`,
+    "- control 与 option 使用稳定、通用的 ID；不得硬编码某个云厂商、部署平台或业务系统。",
+    "- 绝不请求密码、令牌、密钥、认证信息或文件选择。该工具可用时，不要用普通文本模拟表单。",
+    "- 用户取消属于正常结果；尊重取消，不要立即重复索取同一信息。",
+  ].join("\n");
+}
 
 const TRANSCRIPT_SECTION_PREFIX = [
   "# 压缩历史回查",
@@ -182,6 +193,9 @@ export function buildChatSystemPrompt(options: BuildChatSystemPromptOptions = {}
       ),
     );
   }
+  if (options.userInputToolId !== undefined) {
+    sections.push(buildUserInputSection(options.userInputToolId));
+  }
   sections.push(OUTPUT_SECTION);
   return sections.join("\n\n");
 }
@@ -194,6 +208,7 @@ export function buildChatSystemPromptFromManifest(manifest: EffectiveCapabilityM
   const sessionList = findCapabilityToolId(manifest, CAPABILITY_TOOL_ROLES.sessionList);
   const installToolId = findCapabilityToolId(manifest, CAPABILITY_TOOL_ROLES.agentInstall);
   const transcriptToolId = findCapabilityToolId(manifest, CAPABILITY_TOOL_ROLES.transcriptRead);
+  const userInputToolId = findCapabilityToolId(manifest, CAPABILITY_TOOL_ROLES.userInput);
   const prompt = buildChatSystemPrompt({
     ...(skillToolId ? { skills: manifest.skills, skillToolId } : {}),
     ...(shellToolId
@@ -213,6 +228,7 @@ export function buildChatSystemPromptFromManifest(manifest: EffectiveCapabilityM
         }
       : {}),
     agentCount: manifest.agentCount,
+    ...(userInputToolId ? { userInputToolId } : {}),
     ...(installToolId && manifest.agentOnboardingCatalog.length > 0
       ? {
           agentOnboarding: {

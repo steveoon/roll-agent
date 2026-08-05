@@ -1,5 +1,7 @@
 import type { SessionCancellationReason } from "./cancellation.ts";
 import type { ToolOutcome } from "../tool-bridge/normalize-result.ts";
+import type { UserInputForm } from "@roll-agent/protocol";
+import type { SessionUserInputRequestId } from "../interaction/user-input-interaction-manager.ts";
 
 export interface SessionTokenUsage {
   readonly inputTokens?: number;
@@ -66,9 +68,24 @@ export type SessionEvent =
       readonly agentName: string;
       readonly toolName: string;
       readonly input: unknown;
+      /** Absolute deadline shared with Runtime-to-Client interaction delivery. */
+      readonly expiresAt?: string;
       readonly reason?: string;
       /** Model-authored display aid. It never changes approval policy or command execution. */
       readonly explanation?: string;
+    }
+  | {
+      /** Engine-internal request; Runtime Protocol assigns a separate InteractionId. */
+      readonly type: "user-input-required";
+      readonly requestId: SessionUserInputRequestId;
+      readonly form: UserInputForm;
+      readonly expiresAt: string;
+    }
+  | {
+      /** Contains no submitted values so public event projectors cannot leak form answers. */
+      readonly type: "user-input-settled";
+      readonly requestId: SessionUserInputRequestId;
+      readonly status: "submitted" | "cancelled";
     }
   | {
       readonly type: "step-finish";

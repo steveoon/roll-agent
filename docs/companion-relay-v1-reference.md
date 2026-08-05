@@ -1,4 +1,4 @@
-# `@roll-agent/relay-protocol` Relay v1 参考
+# `@roll-agent/relay-protocol` Relay 1.1/1.0 参考
 
 ## 边界
 
@@ -13,252 +13,255 @@ Browser ── Cloud Relay ── Companion Relay Protocol ── Local Companio
                                                    Runtime
 ```
 
-`@roll-agent/relay-protocol` 是 Browser、Cloud Relay 和 Local Companion 共享的唯一 Wire
-契约来源，提供 Relay version、显式冻结的消息/方法注册表、ID Schema、JSON Schema、
-fixtures 与 TypeScript types。它是 Browser-safe 的纯协议包，不包含 Transport、账号、
-数据库、Policy 或部署代码。
+`@roll-agent/relay-protocol` 是 Browser、Cloud Relay 和 Local Companion 共享的 Browser-safe
+Wire 契约来源，提供版本注册表、严格消息/方法 Schema、ID、JSON Schema、fixtures、reference
+adapter 与 conformance suite。它不包含 Transport、账号、数据库、Policy 或部署代码。
 
-`@roll-agent/companion` 消费上述契约并提供用户本机 Host 侧 bridge、Workspace lease、本地
-Approval Policy、ACK/gap 缓冲、去重与出站重连。它不定义第二套 Wire Schema，也不包含
-生产 Cloud Relay Server、Browser SDK、账号/设备存储、鉴权授权、TLS、心跳、帧大小限制、
-HA、监控或本地确认 UI。
-
-### 安装与运行位置
+`@roll-agent/companion` 消费该契约，提供本机 Host 侧 bridge、Workspace lease、Interaction
+Broker、ACK/gap 缓冲、去重与出站重连。它不包含生产 Cloud Relay、Browser SDK、账号/设备
+身份、controller 选举、鉴权授权、TLS、可靠投递、持久 outbox、Interaction WAL、HA、监控
+或本地确认 UI。
 
 | 组件 | 直接依赖 | 运行位置 |
 |---|---|---|
 | Browser Web App | `@roll-agent/relay-protocol` | 用户浏览器 |
 | Cloud Relay Server | `@roll-agent/relay-protocol` | 云端 |
-| Local Companion Host | `@roll-agent/companion`、`@roll-agent/client-node`、`@roll-agent/relay-protocol` | 用户本机 Node/Electron Main/daemon |
-| Local-only Desktop GUI | `@roll-agent/client-node`，按需加 `@roll-agent/protocol` | 用户本机；不需要 Companion |
+| Local Companion Host | `@roll-agent/companion`、`@roll-agent/client-node` | 用户本机 Node/Electron Main/daemon |
+| Local-only Desktop GUI | `@roll-agent/client-node` | 用户本机；不需要 Companion |
 
-`@roll-agent/companion` 当前是可嵌入的库，不是已安装即运行的应用：它没有 CLI、daemon、
-登录/配对 UI 或自动启动机制。全局安装 `@roll-agent/core` 只提供 `roll` CLI 和 Runtime，
-不会安装或启动 Companion。只有宿主显式启动 `OutboundCompanionRelay`，或向
-`CompanionRelayBridge` 绑定已经建立的 Transport 后，才会产生 Relay 连接。
+安装任一 npm 包都不会隐式建立 Relay 连接。宿主必须显式完成认证与 Workspace 绑定，再启动
+`OutboundCompanionRelayV11`（或旧的 V1.0 `OutboundCompanionRelay`）。
 
-## 版本与消息
+## 版本矩阵
 
-| 项目 | 值 |
-|---|---|
-| Relay protocol | `"1.0"` |
-| 默认事件缓冲 | `10,000` 条 / `16 MiB` |
-| 默认 mutation 结果缓存 | `10,000` 个已完成结果 |
-| 默认重连退避 | `500 ms` 起，最高 `30,000 ms` |
-| 状态持久性 | 仅 Companion 进程内 |
+`SUPPORTED_RELAY_PROTOCOL_VERSIONS` 固定为 `["1.1", "1.0"]`。
 
-当前包只冻结已经存在的 Relay Wire `"1.0"`，其 message/method 集合不会再随最新
-`RUNTIME_METHODS` 自动扩张。新增 Wire message、method 或必需 handler 必须进入显式的新
-Relay version，并提供兼容矩阵；不能静默修改 `"1.0"`。
+| Wire | Companion API | 远程交互 |
+|---|---|---|
+| `1.1` | `CompanionRelayBridgeV11.connect(transport, options)` | `interaction.request/resolved/cancelled` + `interaction.candidate` |
+| `1.0` | `CompanionRelayBridge.connect(transport)` | 冻结的 Approval 专属路径 |
 
-这里冻结的是 Relay envelope 与 recognized method registry；registry 会明确区分
-`query`、`mutation` 和不得转发的 `local-only`。既有 Runtime method 的 Params/Result
-仍由每个 Workspace 已协商的 Runtime Protocol 版本定义。
-`relayRequestMethodSchemas` 只是当前 `@roll-agent/protocol` 依赖版本的 typed 视图，不是
-Relay `"1.0"` 复制出的第二套 Runtime Schema。
+所有未带 `V11` 后缀的 legacy 通用 exports 都继续固定为 1.0。新 Companion 与旧 peer 使用 1.0
+时不能发送 1.1 Interaction；1.0 registry、Schema 和 fixtures 不再扩张。
 
-Relay `"1.0"` 只描述外层信封与传输；嵌套的 Runtime 能力以
-`RuntimeEventEnvelope.protocolVersion` 为准。Browser 必须逐 Workspace/Runtime 记录该
-版本：收到 Runtime `"1.0"` 的 `approval.required` 时发送 `approval.respond`，只有收到
-Runtime `"1.1"` 时才发送 `approval.candidate`。因此新 Browser 与旧 Companion
-滚动共存时会显式走 Runtime `"1.0"` fallback，不能从 Relay 版本猜测审批能力。
+Wire 1.0 的冻结只保证兼容性，不代表 payload 已按远程威胁模型脱敏。它只适用于处在等价
+本地信任边界内的 legacy peer，不能作为面向不受信 Cloud/Browser 的安全降级路径。生产 Host
+若要求远程投影，必须协商 1.1，并在协商失败时拒绝连接。
+
+Wire version 与 npm package version、Runtime Protocol version 相互独立。本地 Runtime 1.3 的
+字段不能直接偷渡进 Wire 1.0；每一层都必须按自己的 registry 解析和投影。
+
+## Wire 1.1 消息
 
 | 消息 `type` | 方向 | 用途 |
 |---|---|---|
-| `device.connect` | Companion → Relay | 协议版本、设备 ID、pairing token |
-| `runtime.request` | Relay → Companion | Runtime 方法或 Relay 专属 `approval.candidate` 请求 |
-| `runtime.response` | Companion → Relay | 未绑定 cipher 的 Workspace 明文结果或稳定错误 |
-| `runtime.event` | Companion → Relay | 未绑定 cipher 的 Workspace 事件与 Relay sequence |
-| `runtime.ack` | Relay → Companion | 确认已接收的最高 Relay sequence |
-| `runtime.gap` | Companion → Relay | 缓冲缺口；恢复方式为 `thread.snapshot` |
+| `device.connect` | Companion → Relay | `protocolVersion: "1.1"`、设备 ID、pairing token |
+| `runtime.request` | Relay → Companion | query/mutation 或 `interaction.candidate` |
+| `runtime.response` | Companion → Relay | request 结果或稳定错误 |
+| `runtime.event` | Companion → Relay | 安全 Runtime event 投影 |
+| `interaction.request` | Companion → Relay | 安全的 Approval/User Input 请求投影 |
+| `interaction.resolved` | Companion → Relay | 逻辑交互已完成；不携带完整 Result |
+| `interaction.cancelled` | Companion → Relay | 逻辑交互已取消；不携带本地错误细节 |
+| `runtime.ack` | Relay → Companion | 确认最高连续 `relaySequence` |
+| `runtime.gap` | Companion → Relay | 缓冲缺口；回退 `thread.snapshot` |
 | `runtime.encrypted` | 双向 | Workspace payload cipher 信封 |
 
-### ID 与 cursor
+`runtime.event` 和三类 Interaction 帧共享单个 Workspace `relaySequence`。ACK 只确认 Relay
+安全投影的投递前缀，不确认 Runtime event cursor；#176 不改变 Relay Wire，也不增加持久
+Relay outbox。
 
-跨 Runtime 与 Relay 的 correlation、逻辑交互、幂等和投递进度分为五类；它们不能互相
-代替：
+### Typed Interaction
 
-| 标识或游标 | 生命周期 | 用途 |
+Wire 1.1 只支持两类远程 Interaction：
+
+| `method` | request projection | candidate |
 |---|---|---|
-| Runtime JSON-RPC `id` | 当前 Runtime 连接上的一次投递 | Runtime Request/Response correlation；断线重投可生成新值 |
-| `interactionId` | 未来 typed interaction 的完整逻辑生命周期 | 关联 request/result/cancelled、重投与恢复；Relay `"1.0"` 尚未定义 |
-| Relay `requestId` | 一次逻辑 Relay request 及其重投 | Browser/Relay 与 Companion response correlation、冲突检测和响应缓存 |
-| Runtime mutation `params.requestId` | 一次 Runtime 写操作 | `turn.start` 等 mutation 的 Runtime 幂等键 |
-| `sequence` / cursor | 各自所属的有序流 | Runtime event 恢复或 Relay delivery ACK |
+| `approval.request` | `approvalId/agentName/toolName/explanation?` | `{ decision: "approve" | "reject", reason? }` |
+| `userInput.request` | title/description 与五类安全 form controls | submitted/cancelled User Input Result |
 
-其中第五类包含两个不能互换的序列空间：
-
-| cursor | 权威范围 | 恢复/确认方式 |
-|---|---|---|
-| `RuntimeEventEnvelope.sequence` | 单个 `runtimeInstanceId` 内的 Runtime event 顺序 | Runtime 重启后使用 `thread.snapshot` 收敛，不能跨实例续接 |
-| Relay `relaySequence` / ACK cursor | 单个 Workspace 的 Companion→Relay 投递进度 | `runtime.ack`、gap 与重投；不能 ACK Runtime event cursor |
-
-因此每个新 mutation 必须分别生成 Relay `requestId` 与 Runtime
-`params.requestId`；不能把 Runtime JSON-RPC `id`、任一 sequence 或未来
-`interactionId` 当成另一个层的幂等键。`threadId`、`turnId`、`approvalId` 等业务对象 ID
-不属于上述五类。
-
-`"1.1"` Approval 是例外：Browser 不直接转发 Runtime 的 `approval.respond`，而是提交
-Relay 专属候选决定：
+请求公共字段为 `interactionId/threadId/turnId/expiresAt/sensitivity`。当前只允许
+`sensitivity: "normal"`。远端通过 mutation `interaction.candidate` 提交候选：
 
 ```json
 {
   "type": "runtime.request",
   "requestId": "00000000-0000-4000-8000-000000000701",
   "workspaceId": "00000000-0000-4000-8000-000000000702",
-  "method": "approval.candidate",
+  "method": "interaction.candidate",
   "params": {
-    "threadId": "00000000-0000-4000-8000-000000000703",
-    "turnId": "00000000-0000-4000-8000-000000000704",
-    "approvalId": "00000000-0000-4000-8000-000000000705",
-    "decision": "approve",
-    "reason": "用户已确认"
+    "interactionId": "00000000-0000-4000-8000-000000000703",
+    "threadId": "00000000-0000-4000-8000-000000000704",
+    "turnId": "00000000-0000-4000-8000-000000000705",
+    "method": "approval.request",
+    "candidate": { "decision": "approve" }
   }
 }
 ```
 
-成功响应沿用 `runtime.response` 信封，`result` 为 `{ "accepted": true }`。这里的
-`accepted` 只表示本机 Broker 已接受并处理该候选，不代表 Tool 已执行；Browser 必须等待
-权威 `approval.resolved` Event 收敛 View。`approval.candidate.params` 不包含 Runtime
-mutation `requestId`，幂等键只有 Relay 外层 `workspaceId + requestId`。`"1.0"` fallback
-才允许 `approval.respond -> { resolved: true }`。可选 `reason` 一旦提供就必须是非空
-字符串；参数不合法时返回
-`{ code: "INVALID_PARAMS", message: "Invalid Relay request params", retryable: false }`。
+`{ "accepted": true }` 只表示候选已由本机 Broker 接受并结算，不代表 Tool 已执行。
+Browser 必须等待有序的 `interaction.resolved` 或 `interaction.cancelled` 收敛视图。
 
-`initialize` 由本地 Companion 与 Runtime 完成，不能通过 Relay 转发。
+候选验证顺序为：
 
-`approval.candidate` 是 Relay `"1.0"` 中已冻结的 Approval 专属候选方法，不代表通用
-Server→Browser interaction 已经落地。通用 typed interaction
-request/result/cancelled、逻辑 `interactionId` 和跨连接恢复属于
-[#184](https://github.com/steveoon/roll-agent/issues/184)、
-[#187](https://github.com/steveoon/roll-agent/issues/187) 以及后续 Relay Wire version；
-不能通过向 `"1.0"` 注册表追加字段或 method 来实现。
+1. Wire Schema 先拒绝非法信封、未知 method 和畸形 candidate 外形。
+2. Host 提供的 responder policy 验证当前认证会话/连接 generation 是否有资格响应。
+3. Broker 对照 pending Interaction 与 Runtime 原始 Params 做 method-specific 二次校验；User
+   Input 按 control 顺序规范化。
+4. Approval approve 再经过本地 Approval Policy；reject 不扩大权限。
 
-## `CompanionWorkspace`
+重复的同一 `workspaceId + requestId` 返回缓存结果；相同 ID 携带不同 method/params 返回
+`RELAY_REQUEST_ID_CONFLICT`。Runtime cancel、Turn 终态、deadline、Workspace 解绑、bridge
+关闭和重连 generation 失效都进入单次原子终止路径。旧 generation 的迟到候选不能结算。
+
+### 安全边界
+
+以下数据不得进入 Wire：
+
+- Runtime JSON-RPC `id`；
+- 原始 Tool input/output/evidence 与 secret；
+- 完整 User Input Result；
+- 本地授权状态、Policy 内部错误和确认凭据。
+
+`interaction.resolved/cancelled` 只携带关联字段和 method，不携带完整 Result 或错误正文。
+`approval.required` 等 Runtime timeline event 即使被安全投影，也只是只读时间线；远程响应必须
+命中 Broker 当前 pending `interactionId`，不能从 timeline event 直接执行控制操作。
+
+同一规则覆盖 pull 查询：`thread.open` / `thread.snapshot` 将 Approval preview 限制为可选
+explanation、移除本地 reason，并清空 Operation display 与 outcome reason；`operation.get`
+复用 Operation 投影。Host 对前两种结果调用 `projectRelayThreadSnapshotV11(value)`，对
+`operation.get` 调用 `projectRelayOperationGetResultV11(value)`；畸形 Runtime 结果会抛错并
+fail closed。第一方 `CompanionRelayBridgeV11` 自动应用这些 projector；自定义 Host 必须在
+构造 `runtime.response` 前显式调用，不能把 Runtime 原始结果直接发送。
+
+`CompanionRelayBridgeV11` 会发出的 `runtime.response.error` 固定为：
+
+| 来源 | Wire `code` | 固定公开 `message` | `retryable` |
+|---|---|---|---:|
+| 加密 payload 无法认证或解析 | `ENCRYPTED_PAYLOAD_INVALID` | `Encrypted Relay payload could not be authenticated or parsed` | `false` |
+| cipher-bound Workspace 收到明文 | `RELAY_ENCRYPTION_REQUIRED` | `Encrypted Relay request required for this workspace` | `false` |
+| Workspace 未配对 | `WORKSPACE_NOT_FOUND` | `The requested workspace is not paired with this Companion` | `false` |
+| `requestId` 携带冲突内容重用 | `RELAY_REQUEST_ID_CONFLICT` | `Relay requestId was reused with different method or params` | `false` |
+| request params 无效 | `INVALID_PARAMS` | `Invalid Relay request params` | `false` |
+| Runtime `RollRpcError` | `rollCode`，缺失时为 `JSON_RPC_<code>` | `Runtime request failed` | Runtime 显式值，缺失时 `false` |
+| `LocalApprovalDeniedError`（Policy deny/failure 等） | `LocalApprovalDeniedError` | `Local approval denied` | `false` |
+| 需要本机确认 | `LocalConfirmationRequiredError` | `Local confirmation required` | `false` |
+| 其他 Companion 错误 | `COMPANION_ERROR` | `Companion request failed` | `false` |
+
+该映射不会回传 Runtime、Policy 或异常对象的原始错误消息。自定义 Host 需要维持等价的固定
+公开文案与 fail-closed 行为。legacy Wire 1.0 bridge 也会把响应错误替换为固定公开文案，但
+不会因此获得 Wire 1.1 的 query/interaction 安全投影，仍只适用于等价本地信任边界。
+
+以下内容是有意保留的远端暴露面：完整 transcript 消息、Thread 标题/模型/时间元数据、安全
+timeline 的消息与 reasoning 摘要、Turn 状态、Tool 名称和完成摘要，以及
+`thread.capabilities.manifest` 中可能包含的 cwd、平台、模型、Agent、Skill、Tool Schema、规则
+标识与 VCS 元数据。它们仍需由 Cloud Relay 与 Browser 宿主按敏感数据保护。
+
+`authentication.request` 和 File Picker 没有 Wire 1.1 projector，也不注册 Runtime handlers，
+保持 local-only。Runtime 1.3 replay 不会扩大这个边界；未来若要启用必须先完成安全 RFC
+#186。
+
+## ID 与 cursor
+
+| 标识或游标 | 生命周期 | 用途 |
+|---|---|---|
+| Runtime JSON-RPC `id` | 当前 Runtime 连接的一次投递 | Request/Response correlation |
+| `interactionId` | 一次逻辑 Interaction 完整生命周期 | request/resolved/cancelled 与候选关联 |
+| Relay `requestId` | 一次 Relay request 及其重投 | response correlation、冲突检测与缓存 |
+| Runtime mutation `params.requestId` | 一次 Runtime 写操作 | Runtime 幂等键 |
+| Relay `relaySequence` / ACK | 单 Workspace Relay 投递流 | 重投、ACK 与 gap |
+| Runtime process `sequence` | 当前 `runtimeInstanceId` | live event 进程内排序，不持久 |
+| Runtime `eventId` / `eventCursor` | 单 Thread durable event 日志 | 1.3 replay、去重与 Snapshot checkpoint |
+
+这些类型和值不能混用。Relay `requestId` 不能充当 `interactionId` 或 Runtime mutation
+`requestId`；Relay `relaySequence` 按 Workspace 安全投影排序，Runtime cursor 按 Thread
+durable 日志排序，Relay ACK 不能确认 Runtime event cursor。
+
+## Companion 接线
 
 ```ts
-const approvalRequestBroker = new CompanionApprovalRequestBroker();
-const runtimeClient = await RollNodeClient.start({
+const broker = new CompanionInteractionBroker();
+const runtime = await RollNodeClient.start({
   cwd: workspacePath,
-  serverRequestHandlers: {
-    "approval.request": approvalRequestBroker.handle,
-  },
+  serverRequestHandlers: createRuntimeServerRequestHandlers(broker),
 });
 const workspace = new CompanionWorkspace({
-  client: runtimeClient,
-  approvalRequestBroker,
+  client: runtime,
+  workspaceId,
+  interactionBroker: broker,
   localApprovalPolicy,
-  maxEvents: 10_000,
-  maxBytes: 16 * 1024 * 1024,
 });
-```
-
-| API | lease | 说明 |
-|---|---|---|
-| `attachBrowser(clientId)` | `client`，手动 | 返回 release 函数 |
-| `detachBrowser(clientId)` | `client`，手动 | 由认证连接控制面调用 |
-| `acquireBackgroundShellLease(sessionId)` | `shell-session`，手动 | 返回 release 函数 |
-| `startTurn()` | `turn`，自动 | 终态事件自动释放 |
-| `submitApprovalCandidate()` | 已有 Broker approval lease | `"1.1"` 提交 Relay 候选，返回 `{ accepted: true }` |
-| `respondApproval()` | `approval`，自动 | 仅 `"1.0"` Event fallback；`"1.1"` 会拒绝 |
-| `replay(afterSequence)` | 无 | 返回未 ACK 事件及可选 gap |
-| `acknowledge(throughSequence)` | 无 | 释放已确认缓冲 |
-| `closeIfIdle()` | 无 | 无任何 lease 时才关闭 Runtime，返回是否已关闭 |
-
-Browser/Shell 的身份与连接生命周期不在 Relay 消息 Schema 中，必须由经过认证的 Relay/
-Companion 宿主显式接线。
-
-### 本地批准策略
-
-`localApprovalPolicy(approval, { signal })` 返回：
-
-| 值 | 行为 |
-|---|---|
-| `"allow"` | Broker 向 Runtime 返回 approve Result |
-| `"deny"` | Broker 向 Runtime 返回 reject，并向远端抛出 `LocalApprovalDeniedError` |
-| `"require-local-confirmation"` | 抛出 `LocalConfirmationRequiredError` |
-
-`"require-local-confirmation"` 不会自动弹窗。宿主必须实现本地 UI 和一次性确认状态，再允许
-后续批准继续。Runtime 取消请求时会同步 abort `signal`；非法返回值或 Policy 异常会
-fail-closed、终止 Runtime Handler 并释放 lease。未知本地异常对 Relay 统一返回
-`COMPANION_ERROR / Companion request failed`，不会把内部错误消息发送到远端。
-
-Broker 必须在 Runtime Client 初始化前作为 `approval.request` handler 注册。`"1.1"` 不再从
-`approval.required` 复制 Approval 业务状态；Handler 开始时获取 lease，Result、Runtime
-Cancel、连接退出或 Handler 失败时释放。远端 reject 不会扩大权限，因此不调用授权 Policy。
-Relay bridge 会把 `approval.candidate` 视为 mutation，使用与其他 mutation 相同的有界
-响应缓存和 `workspaceId + requestId` 冲突检测。
-
-## `CompanionRelayBridge`
-
-```ts
-const bridge = new CompanionRelayBridge({
+const bridge = new CompanionRelayBridgeV11({
   deviceId,
   pairingToken,
-  workspaces,
-  ciphers,
-  maxRequestCacheEntries: 10_000,
+  workspaces: new Map([[workspaceId, workspace]]),
+});
+
+bridge.connect(authenticatedTransport, {
+  responderContext: authenticatedSession,
+  responderPolicy: ({ responderContext, signal }) =>
+    authorizeResponder(responderContext, { signal }),
 });
 ```
 
-- mutation 按 `workspaceId + Relay requestId` 去重；
-- 指纹包含 Workspace、method 与 params，并递归规范化 JSON object key 顺序；同 ID 配
-  不同语义请求会被拒绝；
-- 执行中的 mutation 不受 LRU 容量淘汰；
-- 已完成成功/失败结果进入有界 LRU；
-- 读取请求不缓存大型 Snapshot；
-- ACK 不能超过当前 Transport 已成功发送的最高 sequence；
-- 每次重连使用独立发送队列，旧连接阻塞不会卡住新连接。
+`responderContext` 是 Host-owned opaque state。Companion 不解释它，也不因其存在就提供生产
+身份或 controller 选举。`CompanionInteractionBroker` 同时处理 Protocol 1.3/1.2 typed
+Interaction 与 Protocol 1.1 Approval facade；1.3/1.2 Runtime 若未接入对应 Handler 会 fail
+closed，不会通过 timeline event 猜测或回退成未授权响应。
 
-所有缓存、ACK、sequence 和 lease 都是进程内状态。Companion 重启后必须重新建立设备/
-Workspace 状态，并通过 `thread.snapshot` 收敛 UI；不能把 Relay buffer 当作持久事件日志。
+`CompanionInteractionBroker` 持有 pending Interaction 与 lease：Approval 使用 `approval`
+lease，User Input 复用其 Turn lease。它在 Runtime Handler 开始时发布 request，在 Result、
+cancel、deadline、terminal Turn、绑定释放或 close 时只结算并释放一次。
 
-这里的 ACK 只推进 Relay `relaySequence`，不确认
-`RuntimeEventEnvelope.sequence`。Runtime event cursor 与 Relay delivery cursor 即使数值
-偶然相同，也没有可替换关系。
+旧的 `CompanionApprovalRequestBroker` 已 deprecated，仅作为一个 minor 周期的 legacy API。
+旧 `CompanionRelayBridge.connect(transport)` 不接受 1.1 options，仍发送
+`protocolVersion: "1.0"`。
+
+## ACK、buffer 与重连
+
+Wire 1.1 使用 `CompanionRelayFrameBuffer` 将安全 Runtime event 与 Interaction 帧放入同一
+有序流。默认上限为 10,000 条 / 32 MiB，只保留进程内状态。
+
+- ACK 不能超过当前 transport generation 已成功发送的最高连续 sequence。
+- 重连使用新 generation 和独立发送队列，重投未 ACK 的帧。
+- 缓冲前缀已裁剪时发送 `runtime.gap`，Browser 回退 `thread.snapshot`。
+- generation 关闭会 abort 它提交中的候选；旧异步结果不会发送到新连接。
+- bridge 的 `close()` 是终态，并终止仍 pending 的远程 Interaction。
+
+这不是可靠 outbox、Interaction WAL 或持久 Runtime event log。Companion 进程重启后应重新
+建立 Workspace 状态；本地 Runtime 协商到 1.3 时可通过 `runtime.events.resume` 恢复 durable
+event，否则用 Snapshot 收敛。Runtime replay 的 Response barrier 与 Relay ACK 是两个独立
+生命周期。
 
 ## Workspace payload cipher
 
-`ciphers` 按 Workspace 注入：
+Wire 1.1 使用 `RelayPayloadCipherV11`。配置 cipher 的 Workspace 只接受
+`runtime.encrypted` request，response/event/interaction 也只以 encrypted envelope 发送。
+Relay 仍可见 Workspace ID、payload kind、request ID 或 sequence 等路由元数据。
+
+算法选择、AEAD、nonce 管理、密钥协商/轮换、Browser 实现和密钥存储均由宿主负责；
+`decrypt()` 必须验证算法与信封元数据，而不只是解码 ciphertext。
+
+## 出站连接与测试 fake
+
+`OutboundCompanionRelayV11.connectTransport()` 每次重连返回：
 
 ```ts
-interface RelayPayloadCipher {
-  algorithm: string;
-  encrypt(value: JsonValue): Promise<{ nonce: string; ciphertext: string }>;
-  decrypt(message: RelayEncryptedMessage): Promise<JsonValue>;
+{
+  transport: RelayTransportV11;
+  responderPolicy: RemoteInteractionResponderPolicy;
+  responderContext: unknown;
 }
 ```
 
-配置 cipher 的 Workspace 只接受 `runtime.encrypted` request，response/event 也只以
-`runtime.encrypted` 发送。明文 request 不会进入 Runtime，而会收到同样经过加密的
-`RELAY_ENCRYPTION_REQUIRED`（`retryable: false`）响应。Relay 仍可看到 Workspace ID、
-payload kind、request ID 或 sequence 等路由元数据。
+这使 responder 权限与具体认证 generation 绑定。`start()` 启动指数退避；`stop()` 关闭当前
+Transport 与 bridge，但 Runtime 生命周期仍由 Workspace Host 管理。
 
-本包只定义 cipher hook 与 encrypted-only enforcement。算法选择、AEAD、nonce 管理、
-密钥协商/轮换、Browser 实现和密钥存储均由宿主负责；`decrypt()` 也必须验证算法与信封
-元数据，而不能只解码 `ciphertext`。
+`createWebSocketRelayTransportV11()` 只是文本 JSON adapter。生产 Host 仍必须实现鉴权、
+帧上限、心跳、日志和协议诊断。
 
-## `OutboundCompanionRelay`
-
-```ts
-const outbound = new OutboundCompanionRelay({
-  bridge,
-  connectTransport,
-  minReconnectMs: 500,
-  maxReconnectMs: 30_000,
-});
-```
-
-`start()` 启动主动出站连接和指数退避重连。`stop()` 关闭 Transport、Bridge 及 Workspace
-事件订阅，应视为终态操作；它不会关闭 Runtime。Runtime 生命周期应单独通过
-`workspace.closeIfIdle()` 管理。
-
-这两个方法只会被 Companion Host 的显式生命周期代码调用；安装 npm 包、启动普通
-`roll chat`、运行 Local-only Electron GUI 或执行 `roll runtime serve --stdio` 都不会隐式
-创建 Relay 连接。
-
-`createWebSocketRelayTransport()` 只提供文本 JSON adapter。它会忽略非法 JSON 与非文本
-帧；生产 Transport 必须自行实现鉴权、帧上限、心跳、日志和协议诊断。
+`@roll-agent/companion/testing` 的 `InMemoryRelayTransportV11` 仅用于确定性测试候选、重复、
+ACK、断线与迟到 generation。它不提供生产身份、鉴权、controller 选举、可靠投递、持久
+outbox 或 WAL，不能作为生产 Transport。
 
 ## 相关文档
 

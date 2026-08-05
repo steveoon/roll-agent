@@ -4,37 +4,76 @@ import { createInterface } from "node:readline";
 import type { Readable, Writable } from "node:stream";
 import clientNodePackage from "../package.json" with { type: "json" };
 import {
+  RuntimeEventRecoveryError,
+  RuntimeEventRecoveryManager,
+  type RuntimeEventRecoveryManagerOptions,
+  type RuntimeEventRecoverySnapshot,
+} from "./runtime-event-recovery.ts";
+import {
   RUNTIME_EVENT_NOTIFICATION,
   RUNTIME_METHODS,
   RUNTIME_SERVER_REQUEST_CANCEL_NOTIFICATION,
+  RUNTIME_SERVER_REQUEST_METHODS,
+  RUNTIME_V13_MIN_CLIENT_FRAME_BYTES,
   SUPPORTED_RUNTIME_PROTOCOL_VERSIONS,
   getRuntimeProtocolCapabilities,
-  isRuntimeServerRequestMethod,
+  getRuntimeProtocolRegistry,
+  interactionIdSchema,
+  isRuntimeServerRequestMethodAvailable,
+  isLatestRuntimeServerRequestMethod,
   isRuntimeServerRequestMethodRequired,
   parseRuntimeMethodParams,
+  parseRuntimeMethodParamsForVersion,
   parseRuntimeMethodResult,
-  parseRuntimeServerRequestParams,
-  parseRuntimeServerRequestResult,
+  parseRuntimeMethodResultForVersion,
+  parseRuntimeProtocolErrorDataForVersion,
+  parseRuntimeServerRequestCancelParamsForVersion,
+  parseRuntimeServerRequestParamsForVersion,
+  parseRuntimeServerRequestResultForVersion,
+  initializeResultSchema,
   runtimeEventEnvelopeSchema,
-  runtimeProtocolErrorDataSchema,
-  runtimeServerRequestCancelParamsSchema,
+  type ClientCapabilitiesSetResult,
   type InitializeResult,
+  type InteractionId,
   type JsonRpcId,
   type JsonRpcMessage,
+  type LatestRuntimeMethod,
   type RuntimeEventEnvelope,
   type RuntimeMethod,
   type RuntimeMethodInput,
-  type RuntimeMethodParams,
-  type RuntimeMethodResult,
-  type RuntimeProtocolErrorData,
+  type RuntimeMethodInputForVersion,
+  type RuntimeMethodParamsForVersion,
+  type RuntimeMethodResultForVersion,
+  type RuntimeProtocolErrorDataForVersion,
   type RuntimeProtocolVersion,
   type RuntimeServerRequestMethod,
-  type RuntimeServerRequestParams,
-  type RuntimeServerRequestResult,
+  type RuntimeServerRequestParamsForSupportedVersions,
+  type RuntimeServerRequestResultForSupportedVersions,
+  type ThreadId,
   type TurnId,
 } from "@roll-agent/protocol";
 
-const DEFAULT_MAX_FRAME_BYTES = 4 * 1_024 * 1_024;
+export {
+  DEFAULT_RUNTIME_EVENT_RECOVERY_MAX_BUFFERED_BYTES,
+  DEFAULT_RUNTIME_EVENT_RECOVERY_MAX_BUFFERED_EVENTS,
+  RUNTIME_EVENT_RECOVERY_SNAPSHOT_REASONS,
+  RuntimeEventRecoveryError,
+  RuntimeEventRecoveryManager,
+  type RuntimeDurableEventEnvelope,
+  type RuntimeEphemeralEventEnvelope,
+  type RuntimeEventRecoveryBridge,
+  type RuntimeEventRecoveryCheckpoint,
+  type RuntimeEventRecoveryErrorContext,
+  type RuntimeEventRecoveryManagerOptions,
+  type RuntimeEventRecoveryMode,
+  type RuntimeEventRecoverySnapshot,
+  type RuntimeEventRecoverySnapshotContext,
+  type RuntimeEventRecoverySnapshotReason,
+  type RuntimeEventRecoveryStartResult,
+  type RuntimeEventRecoveryThreadOptions,
+} from "./runtime-event-recovery.ts";
+
+const DEFAULT_MAX_FRAME_BYTES = RUNTIME_V13_MIN_CLIENT_FRAME_BYTES;
 const DEFAULT_MAX_READ_RETRIES = 1;
 const DEFAULT_READ_RETRY_DELAY_MS = 100;
 const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
@@ -97,18 +136,75 @@ export interface RuntimeServerRequestContext {
   readonly signal: AbortSignal;
 }
 
+export type RuntimeServerRequestHandlerParams<TMethod extends RuntimeServerRequestMethod> =
+  RuntimeServerRequestParamsForSupportedVersions<TMethod>;
+
 export type RuntimeServerRequestHandler<TMethod extends RuntimeServerRequestMethod> = (
-  params: RuntimeServerRequestParams<TMethod>,
+  params: RuntimeServerRequestHandlerParams<TMethod>,
   context: RuntimeServerRequestContext,
-) => RuntimeServerRequestResult<TMethod> | Promise<RuntimeServerRequestResult<TMethod>>;
+) =>
+  | RuntimeServerRequestResultForSupportedVersions<TMethod>
+  | Promise<RuntimeServerRequestResultForSupportedVersions<TMethod>>;
 
 export type RuntimeServerRequestHandlers = {
   readonly [TMethod in RuntimeServerRequestMethod]?: RuntimeServerRequestHandler<TMethod>;
 };
 
+export type UserInputRequestHandlerParams = RuntimeServerRequestHandlerParams<
+  typeof RUNTIME_SERVER_REQUEST_METHODS.userInputRequest
+>;
+export type UserInputRequestHandler = RuntimeServerRequestHandler<
+  typeof RUNTIME_SERVER_REQUEST_METHODS.userInputRequest
+>;
+
+export type RuntimeClientMethodResult<TMethod extends RuntimeMethod> =
+  RuntimeMethodResultForVersion<RuntimeProtocolVersion, TMethod>;
+
+type RuntimeClientMethodParams<TMethod extends RuntimeMethod> = RuntimeMethodParamsForVersion<
+  RuntimeProtocolVersion,
+  TMethod
+>;
+
 type MutableRuntimeServerRequestHandlers = {
   -readonly [TMethod in RuntimeServerRequestMethod]?: RuntimeServerRequestHandler<TMethod>;
 };
+
+type DynamicCapabilityRuntimeProtocolVersion = Extract<RuntimeProtocolVersion, "1.3" | "1.2">;
+
+function usesDynamicServerRequestCapabilities(
+  version: RuntimeProtocolVersion,
+): version is DynamicCapabilityRuntimeProtocolVersion {
+  return version === "1.3" || version === "1.2";
+}
+
+function setRuntimeServerRequestHandler<TMethod extends RuntimeServerRequestMethod>(
+  handlers: MutableRuntimeServerRequestHandlers,
+  method: TMethod,
+  handler: RuntimeServerRequestHandler<TMethod>,
+): void {
+  Object.assign(handlers, { [method]: handler });
+}
+
+function resolveRuntimeServerRequestHandlers(options: {
+  readonly serverRequestHandlers?: RuntimeServerRequestHandlers;
+  readonly onUserInputRequest?: UserInputRequestHandler;
+}): MutableRuntimeServerRequestHandlers {
+  const handlers: MutableRuntimeServerRequestHandlers = { ...options.serverRequestHandlers };
+  const genericUserInputHandler = handlers[RUNTIME_SERVER_REQUEST_METHODS.userInputRequest];
+  if (
+    genericUserInputHandler !== undefined &&
+    options.onUserInputRequest !== undefined &&
+    genericUserInputHandler !== options.onUserInputRequest
+  ) {
+    throw new Error(
+      'Provide userInput.request through either "onUserInputRequest" or "serverRequestHandlers", not both',
+    );
+  }
+  if (options.onUserInputRequest !== undefined) {
+    handlers[RUNTIME_SERVER_REQUEST_METHODS.userInputRequest] = options.onUserInputRequest;
+  }
+  return handlers;
+}
 
 function supportsRuntimeProtocolVersion(
   version: RuntimeProtocolVersion,
@@ -117,6 +213,72 @@ function supportsRuntimeProtocolVersion(
   return getRuntimeProtocolCapabilities(version).requiredServerRequestMethods.every(
     (method) => typeof handlers[method] === "function",
   );
+}
+
+function parseClientRuntimeServerRequestParams<TMethod extends RuntimeServerRequestMethod>(
+  version: "1.3" | "1.2" | "1.1",
+  method: TMethod,
+  value: unknown,
+): RuntimeServerRequestHandlerParams<TMethod> {
+  if (usesDynamicServerRequestCapabilities(version)) {
+    if (!isRuntimeServerRequestMethodAvailable(version, method)) {
+      throw new Error(`Runtime Protocol ${version} does not support server request ${method}`);
+    }
+    return parseRuntimeServerRequestParamsForVersion(
+      version,
+      method,
+      value,
+    ) as RuntimeServerRequestHandlerParams<TMethod>;
+  }
+  if (!isRuntimeServerRequestMethodAvailable(version, method)) {
+    throw new Error(`Runtime Protocol ${version} does not support server request ${method}`);
+  }
+  return parseRuntimeServerRequestParamsForVersion(
+    version,
+    method,
+    value,
+  ) as RuntimeServerRequestHandlerParams<TMethod>;
+}
+
+function parseClientRuntimeMethodParams<TMethod extends RuntimeMethod>(
+  version: RuntimeProtocolVersion,
+  method: TMethod,
+  value: unknown,
+): RuntimeClientMethodParams<TMethod> {
+  return parseRuntimeMethodParamsForVersion(version, method, value);
+}
+
+function parseClientRuntimeMethodResult<TMethod extends RuntimeMethod>(
+  version: RuntimeProtocolVersion,
+  method: TMethod,
+  value: unknown,
+): RuntimeClientMethodResult<TMethod> {
+  return parseRuntimeMethodResultForVersion(version, method, value);
+}
+
+function parseClientRuntimeServerRequestResult<TMethod extends RuntimeServerRequestMethod>(
+  version: "1.3" | "1.2" | "1.1",
+  method: TMethod,
+  value: unknown,
+): RuntimeServerRequestResultForSupportedVersions<TMethod> {
+  if (usesDynamicServerRequestCapabilities(version)) {
+    if (!isRuntimeServerRequestMethodAvailable(version, method)) {
+      throw new Error(`Runtime Protocol ${version} does not support server request ${method}`);
+    }
+    return parseRuntimeServerRequestResultForVersion(
+      version,
+      method,
+      value,
+    ) as RuntimeServerRequestResultForSupportedVersions<TMethod>;
+  }
+  if (!isRuntimeServerRequestMethodAvailable(version, method)) {
+    throw new Error(`Runtime Protocol ${version} does not support server request ${method}`);
+  }
+  return parseRuntimeServerRequestResultForVersion(
+    version,
+    method,
+    value,
+  ) as RuntimeServerRequestResultForSupportedVersions<TMethod>;
 }
 
 export interface RollNodeClientOptions {
@@ -134,6 +296,7 @@ export interface RollNodeClientOptions {
   readonly readRetryDelayMs?: number;
   readonly shutdownOptions?: RuntimeShutdownOptions;
   readonly serverRequestHandlers?: RuntimeServerRequestHandlers;
+  readonly onUserInputRequest?: UserInputRequestHandler;
 }
 
 export interface ConnectRuntimeClientOptions {
@@ -148,18 +311,25 @@ export interface ConnectRuntimeClientOptions {
   readonly readRetryDelayMs?: number;
   readonly shutdownOptions?: RuntimeShutdownOptions;
   readonly serverRequestHandlers?: RuntimeServerRequestHandlers;
+  readonly onUserInputRequest?: UserInputRequestHandler;
 }
 
 interface PendingRequest {
-  readonly method: RuntimeMethod;
+  readonly method: LatestRuntimeMethod;
   readonly resolve: (value: unknown) => void;
   readonly reject: (error: Error) => void;
   readonly timer: ReturnType<typeof setTimeout>;
+  readonly acceptResult?: (value: unknown) => void;
 }
 
 interface InFlightServerRequest {
   readonly controller: AbortController;
+  readonly method: RuntimeServerRequestMethod;
+  readonly requestId: JsonRpcId;
+  interactionId?: InteractionId;
 }
+
+type ClientRuntimeProtocolErrorData = RuntimeProtocolErrorDataForVersion<RuntimeProtocolVersion>;
 
 export interface RuntimeClientExit {
   readonly code: number | null;
@@ -169,12 +339,12 @@ export interface RuntimeClientExit {
 
 export class RollRpcError extends Error {
   readonly code: number;
-  readonly data: RuntimeProtocolErrorData | undefined;
+  readonly data: ClientRuntimeProtocolErrorData | undefined;
 
   constructor(error: {
     readonly code: number;
     readonly message: string;
-    readonly data?: RuntimeProtocolErrorData;
+    readonly data?: ClientRuntimeProtocolErrorData;
   }) {
     super(error.message);
     this.name = "RollRpcError";
@@ -198,10 +368,10 @@ export class RollRuntimeExitedError extends Error {
 }
 
 export class RollRequestTimeoutError extends Error {
-  readonly method: RuntimeMethod;
+  readonly method: LatestRuntimeMethod;
   readonly timeoutMs: number;
 
-  constructor(method: RuntimeMethod, timeoutMs: number) {
+  constructor(method: LatestRuntimeMethod, timeoutMs: number) {
     super(`Roll Runtime request "${method}" timed out after ${String(timeoutMs)} ms`);
     this.name = "RollRequestTimeoutError";
     this.method = method;
@@ -261,7 +431,7 @@ export class RollUncorrelatedRpcError extends RollRpcError {
   constructor(error: {
     readonly code: number;
     readonly message: string;
-    readonly data?: RuntimeProtocolErrorData;
+    readonly data?: ClientRuntimeProtocolErrorData;
   }) {
     super(error);
     this.name = "RollUncorrelatedRpcError";
@@ -270,6 +440,14 @@ export class RollUncorrelatedRpcError extends RollRpcError {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function readInteractionId(value: unknown): InteractionId | undefined {
+  if (!isRecord(value)) {
+    return undefined;
+  }
+  const parsed = interactionIdSchema.safeParse(value.interactionId);
+  return parsed.success ? parsed.data : undefined;
 }
 
 function isJsonRpcId(value: unknown): value is JsonRpcId {
@@ -305,10 +483,11 @@ function normalizeShutdownOptions(
 function parseRpcError(
   value: unknown,
   context: string,
+  protocolVersion: RuntimeProtocolVersion | undefined,
 ): {
   readonly code: number;
   readonly message: string;
-  readonly data?: RuntimeProtocolErrorData;
+  readonly data?: ClientRuntimeProtocolErrorData;
 } {
   if (
     !isRecord(value) ||
@@ -318,18 +497,21 @@ function parseRpcError(
   ) {
     throw new RollProtocolViolationError(`Roll Runtime returned an invalid error for ${context}`);
   }
-  const errorData =
-    value.data === undefined ? undefined : runtimeProtocolErrorDataSchema.safeParse(value.data);
-  if (errorData !== undefined && !errorData.success) {
-    throw new RollProtocolViolationError(
-      `Roll Runtime returned invalid error data for ${context}`,
-      errorData.error,
-    );
+  let errorData: ClientRuntimeProtocolErrorData | undefined;
+  if (value.data !== undefined) {
+    try {
+      errorData = parseRuntimeProtocolErrorDataForVersion(protocolVersion ?? "1.1", value.data);
+    } catch (error: unknown) {
+      throw new RollProtocolViolationError(
+        `Roll Runtime returned invalid error data for ${context}`,
+        error,
+      );
+    }
   }
   return {
     code: value.code,
     message: value.message,
-    ...(errorData?.success === true ? { data: errorData.data } : {}),
+    ...(errorData === undefined ? {} : { data: errorData }),
   };
 }
 
@@ -392,8 +574,17 @@ export class RollNodeClient {
   private readonly activeTurns = new Set<TurnId>();
   private readonly unknownTurns = new Set<TurnId>();
   private readonly serverRequestHandlers: MutableRuntimeServerRequestHandlers;
+  private readonly serverRequestHandlerCapabilityRevisions = new Map<
+    RuntimeServerRequestMethod,
+    number
+  >();
   private readonly advertisedProtocolVersions: readonly RuntimeProtocolVersion[];
   private readonly inFlightServerRequests = new Map<JsonRpcId, InFlightServerRequest>();
+  private readonly inFlightServerRequestsByInteractionId = new Map<
+    InteractionId,
+    InFlightServerRequest
+  >();
+  private acknowledgedServerRequestMethods = new Set<RuntimeServerRequestMethod>();
   private readonly onTurnOutcomeUnknown: ((turnId: TurnId) => void) | undefined;
   private readonly requestTimeoutMs: number;
   private readonly maxReadRetries: number;
@@ -402,7 +593,10 @@ export class RollNodeClient {
   private readonly outputReader: ReturnType<typeof createInterface>;
   private readonly stderrReader: ReturnType<typeof createInterface> | undefined;
   private requestId = 0;
+  private capabilityRevision = 0;
+  private acknowledgedCapabilityRevision = 0;
   private writeQueue = Promise.resolve();
+  private capabilitySyncTail = Promise.resolve();
   private readonly exitPromise: Promise<RuntimeClientExit>;
   private resolveExit!: (exit: RuntimeClientExit) => void;
   private exited = false;
@@ -413,6 +607,7 @@ export class RollNodeClient {
   private connectionFailure: Error | undefined;
   private exitResult: RuntimeClientExit | undefined;
   private shutdownPromise: Promise<RuntimeClientExit> | undefined;
+  private eventRecoveryManager: RuntimeEventRecoveryManager | undefined;
 
   private constructor(options: ConnectRuntimeClientOptions) {
     this.transport = options.transport;
@@ -423,9 +618,11 @@ export class RollNodeClient {
     this.maxReadRetries = options.maxReadRetries ?? DEFAULT_MAX_READ_RETRIES;
     this.readRetryDelayMs = options.readRetryDelayMs ?? DEFAULT_READ_RETRY_DELAY_MS;
     this.defaultShutdownOptions = normalizeShutdownOptions(options.shutdownOptions);
-    this.serverRequestHandlers = { ...options.serverRequestHandlers };
-    this.advertisedProtocolVersions = SUPPORTED_RUNTIME_PROTOCOL_VERSIONS.filter((version) =>
-      supportsRuntimeProtocolVersion(version, this.serverRequestHandlers),
+    this.serverRequestHandlers = resolveRuntimeServerRequestHandlers(options);
+    this.advertisedProtocolVersions = SUPPORTED_RUNTIME_PROTOCOL_VERSIONS.filter(
+      (version) =>
+        supportsRuntimeProtocolVersion(version, this.serverRequestHandlers) &&
+        (version !== "1.3" || this.maxFrameBytes >= RUNTIME_V13_MIN_CLIENT_FRAME_BYTES),
     );
     if (!Number.isInteger(this.maxFrameBytes) || this.maxFrameBytes <= 0) {
       throw new Error("maxFrameBytes must be a positive integer");
@@ -494,6 +691,9 @@ export class RollNodeClient {
       ...(options.serverRequestHandlers !== undefined
         ? { serverRequestHandlers: options.serverRequestHandlers }
         : {}),
+      ...(options.onUserInputRequest !== undefined
+        ? { onUserInputRequest: options.onUserInputRequest }
+        : {}),
     });
     return client;
   }
@@ -510,6 +710,7 @@ export class RollNodeClient {
         },
       });
       client.acceptInitializationResult(client.initializationResult);
+      await client.initializeServerRequestCapabilities();
       return client;
     } catch (error: unknown) {
       if (client === undefined) {
@@ -521,11 +722,150 @@ export class RollNodeClient {
     }
   }
 
+  private async initializeServerRequestCapabilities(): Promise<void> {
+    const protocolVersion = this.getInitializationResult().protocolVersion;
+    if (usesDynamicServerRequestCapabilities(protocolVersion)) {
+      await this.queueServerRequestCapabilitySync();
+      return;
+    }
+    this.acknowledgedServerRequestMethods = new Set(
+      getRuntimeProtocolRegistry(protocolVersion).serverRequestMethods.filter(
+        (method) => this.serverRequestHandlers[method] !== undefined,
+      ),
+    );
+  }
+
+  private queueServerRequestCapabilitySync(): Promise<void> {
+    const protocolVersion = this.getInitializationResult().protocolVersion;
+    if (!usesDynamicServerRequestCapabilities(protocolVersion)) {
+      return Promise.resolve();
+    }
+    if (this.capabilityRevision >= Number.MAX_SAFE_INTEGER) {
+      return Promise.reject(
+        new RollProtocolViolationError("Runtime Client capability revision was exhausted"),
+      );
+    }
+    const revision = this.capabilityRevision + 1;
+    this.capabilityRevision = revision;
+    const serverRequestMethods = getRuntimeProtocolRegistry(
+      protocolVersion,
+    ).serverRequestMethods.filter((method) => this.serverRequestHandlers[method] !== undefined);
+    for (const method of serverRequestMethods) {
+      if (!this.serverRequestHandlerCapabilityRevisions.has(method)) {
+        this.serverRequestHandlerCapabilityRevisions.set(method, revision);
+      }
+    }
+    const sync = this.capabilitySyncTail.then(async () => {
+      await this.requestClientCapabilitiesSet(protocolVersion, revision, serverRequestMethods);
+    });
+    this.capabilitySyncTail = sync;
+    return sync;
+  }
+
+  private requestClientCapabilitiesSet(
+    protocolVersion: DynamicCapabilityRuntimeProtocolVersion,
+    revision: number,
+    serverRequestMethods: readonly RuntimeServerRequestMethod[],
+  ): Promise<ClientCapabilitiesSetResult> {
+    if (this.connectionFailure !== undefined) {
+      return Promise.reject(this.connectionFailure);
+    }
+    if (this.exited) {
+      return Promise.reject(this.exitResult?.error ?? new RollRuntimeExitedError(null, null));
+    }
+    if (this.closing) {
+      return Promise.reject(new RollRuntimeClosingError());
+    }
+    const method = RUNTIME_METHODS.clientCapabilitiesSet;
+    const params = parseRuntimeMethodParamsForVersion(protocolVersion, method, {
+      revision,
+      serverRequestMethods: [...serverRequestMethods],
+    });
+    return this.requestOnce(
+      method,
+      params,
+      (value) => parseRuntimeMethodResultForVersion(protocolVersion, method, value),
+      (value) => {
+        this.acceptClientCapabilitiesSetResult(
+          protocolVersion,
+          revision,
+          serverRequestMethods,
+          value,
+        );
+      },
+    );
+  }
+
+  private acceptClientCapabilitiesSetResult(
+    protocolVersion: DynamicCapabilityRuntimeProtocolVersion,
+    revision: number,
+    serverRequestMethods: readonly RuntimeServerRequestMethod[],
+    value: unknown,
+  ): void {
+    const result = parseRuntimeMethodResultForVersion(
+      protocolVersion,
+      RUNTIME_METHODS.clientCapabilitiesSet,
+      value,
+    );
+    if (result.revision !== revision) {
+      throw new RollProtocolViolationError(
+        `Roll Runtime acknowledged Client capability revision ${String(
+          result.revision,
+        )}; expected ${String(revision)}`,
+      );
+    }
+    const requested = new Set(serverRequestMethods);
+    const accepted = new Set(result.acceptedServerRequestMethods);
+    for (const method of accepted) {
+      if (!requested.has(method)) {
+        throw new RollProtocolViolationError(
+          `Roll Runtime acknowledged Client capability method "${method}" that was not requested`,
+        );
+      }
+    }
+    this.acknowledgedCapabilityRevision = revision;
+    this.acknowledgedServerRequestMethods = accepted;
+  }
+
+  private observeServerRequestCapabilitySync(sync: Promise<void>): void {
+    sync.catch((error: unknown) => {
+      this.failConnection(error instanceof Error ? error : new Error(String(error)));
+    });
+  }
+
   onEvent(listener: (event: RuntimeEventEnvelope) => void): () => void {
     this.listeners.add(listener);
     return () => {
       this.listeners.delete(listener);
     };
+  }
+
+  /** Creates the single per-connection manager for durable Runtime Event recovery. */
+  createEventRecovery(
+    options: RuntimeEventRecoveryManagerOptions = {},
+  ): RuntimeEventRecoveryManager {
+    if (this.connectionFailure !== undefined) {
+      throw this.connectionFailure;
+    }
+    if (this.exited) {
+      throw this.exitResult?.error ?? new RollRuntimeExitedError(null, null);
+    }
+    if (this.closing) {
+      throw new RollRuntimeClosingError();
+    }
+    if (this.eventRecoveryManager !== undefined && !this.eventRecoveryManager.isClosed()) {
+      return this.eventRecoveryManager;
+    }
+    this.eventRecoveryManager = new RuntimeEventRecoveryManager(
+      {
+        getInitializationResult: () => this.getInitializationResult(),
+        requestSnapshot: (threadId) => this.requestEventRecoverySnapshot(threadId),
+        requestResume: (input, acceptResult) =>
+          this.requestRuntimeEventsResume(input, acceptResult),
+      },
+      options,
+    );
+    return this.eventRecoveryManager;
   }
 
   onExit(listener: (exit: RuntimeClientExit) => void): () => void {
@@ -557,7 +897,16 @@ export class RollNodeClient {
     method: TMethod,
     handler: RuntimeServerRequestHandler<TMethod>,
   ): () => void {
-    if (!isRuntimeServerRequestMethod(method)) {
+    if (this.connectionFailure !== undefined) {
+      throw this.connectionFailure;
+    }
+    if (this.exited) {
+      throw this.exitResult?.error ?? new RollRuntimeExitedError(null, null);
+    }
+    if (this.closing) {
+      throw new RollRuntimeClosingError();
+    }
+    if (!isLatestRuntimeServerRequestMethod(method)) {
       throw new Error(`Unknown Runtime server request method: ${String(method)}`);
     }
     const protocolVersion = this.initializationResult?.protocolVersion;
@@ -571,7 +920,15 @@ export class RollNodeClient {
           "pass serverRequestHandlers to RollNodeClient.connect() or RollNodeClient.start()",
       );
     }
-    this.serverRequestHandlers[method] = handler;
+    const previousHandler = this.serverRequestHandlers[method];
+    setRuntimeServerRequestHandler(this.serverRequestHandlers, method, handler);
+    if (
+      protocolVersion !== undefined &&
+      usesDynamicServerRequestCapabilities(protocolVersion) &&
+      previousHandler === undefined
+    ) {
+      this.observeServerRequestCapabilitySync(this.queueServerRequestCapabilitySync());
+    }
     return () => {
       if (this.serverRequestHandlers[method] !== handler) {
         return;
@@ -590,13 +947,91 @@ export class RollNodeClient {
         return;
       }
       delete this.serverRequestHandlers[method];
+      this.serverRequestHandlerCapabilityRevisions.delete(method);
+      if (
+        negotiatedVersion !== undefined &&
+        usesDynamicServerRequestCapabilities(negotiatedVersion)
+      ) {
+        this.retireServerRequestsForMethod(
+          method,
+          new Error(`Runtime Client capability "${method}" was withdrawn`),
+        );
+        this.observeServerRequestCapabilitySync(this.queueServerRequestCapabilitySync());
+      }
     };
+  }
+
+  /** Registers the typed Runtime Protocol 1.3/1.2 userInput.request handler. */
+  onUserInputRequest(handler: UserInputRequestHandler): () => void {
+    return this.registerServerRequestHandler(
+      RUNTIME_SERVER_REQUEST_METHODS.userInputRequest,
+      handler,
+    );
+  }
+
+  private requestEventRecoverySnapshot(threadId: ThreadId): Promise<RuntimeEventRecoverySnapshot> {
+    if (this.connectionFailure !== undefined) {
+      return Promise.reject(this.connectionFailure);
+    }
+    if (this.exited) {
+      return Promise.reject(this.exitResult?.error ?? new RollRuntimeExitedError(null, null));
+    }
+    if (this.closing) {
+      return Promise.reject(new RollRuntimeClosingError());
+    }
+    const protocolVersion = this.getInitializationResult().protocolVersion;
+    if (protocolVersion !== "1.3") {
+      return this.request(RUNTIME_METHODS.threadSnapshot, { threadId, limit: 1 });
+    }
+    const method = RUNTIME_METHODS.threadSnapshot;
+    const params = parseRuntimeMethodParamsForVersion(protocolVersion, method, {
+      threadId,
+      limit: 1,
+      recovery: true,
+    });
+    return this.requestOnce(method, params, (value) =>
+      parseRuntimeMethodResultForVersion(protocolVersion, method, value),
+    );
+  }
+
+  private requestRuntimeEventsResume(
+    input: RuntimeMethodInputForVersion<"1.3", typeof RUNTIME_METHODS.runtimeEventsResume>,
+    acceptResult: (
+      result: RuntimeMethodResultForVersion<"1.3", typeof RUNTIME_METHODS.runtimeEventsResume>,
+    ) => void,
+  ): Promise<RuntimeMethodResultForVersion<"1.3", typeof RUNTIME_METHODS.runtimeEventsResume>> {
+    if (this.connectionFailure !== undefined) {
+      return Promise.reject(this.connectionFailure);
+    }
+    if (this.exited) {
+      return Promise.reject(this.exitResult?.error ?? new RollRuntimeExitedError(null, null));
+    }
+    if (this.closing) {
+      return Promise.reject(new RollRuntimeClosingError());
+    }
+    if (this.getInitializationResult().protocolVersion !== "1.3") {
+      return Promise.reject(
+        new RuntimeEventRecoveryError(
+          "runtime.events.resume requires negotiated Runtime Protocol 1.3",
+        ),
+      );
+    }
+    const method = RUNTIME_METHODS.runtimeEventsResume;
+    const params = parseRuntimeMethodParamsForVersion("1.3", method, input);
+    return this.requestOnce(
+      method,
+      params,
+      (value) => parseRuntimeMethodResultForVersion("1.3", method, value),
+      (value) => {
+        acceptResult(parseRuntimeMethodResultForVersion("1.3", method, value));
+      },
+    );
   }
 
   async request<TMethod extends RuntimeMethod>(
     method: TMethod,
     input: RuntimeMethodInput<TMethod>,
-  ): Promise<RuntimeMethodResult<TMethod>> {
+  ): Promise<RuntimeClientMethodResult<TMethod>> {
     if (this.connectionFailure !== undefined) {
       throw this.connectionFailure;
     }
@@ -609,7 +1044,11 @@ export class RollNodeClient {
     if (method === RUNTIME_METHODS.initialize && this.initializationResult !== undefined) {
       throw new Error("Roll Runtime client has already completed initialization");
     }
-    const params = parseRuntimeMethodParams(method, input);
+    const protocolVersion = this.initializationResult?.protocolVersion;
+    const params =
+      protocolVersion === undefined
+        ? parseRuntimeMethodParams(method, input)
+        : parseClientRuntimeMethodParams(protocolVersion, method, input);
     const startingTurn =
       method === RUNTIME_METHODS.turnStart
         ? parseRuntimeMethodParams(RUNTIME_METHODS.turnStart, params).turnId
@@ -620,7 +1059,13 @@ export class RollNodeClient {
     let readRetries = 0;
     while (true) {
       try {
-        return await this.requestOnce(method, params);
+        return await this.requestOnce(method, params, (value) =>
+          protocolVersion === undefined
+            ? method === RUNTIME_METHODS.initialize
+              ? (initializeResultSchema.parse(value) as RuntimeClientMethodResult<TMethod>)
+              : parseRuntimeMethodResult(method, value)
+            : parseClientRuntimeMethodResult(protocolVersion, method, value),
+        );
       } catch (error: unknown) {
         if (
           !READ_ONLY_RUNTIME_METHODS.has(method) ||
@@ -648,10 +1093,12 @@ export class RollNodeClient {
     }
   }
 
-  private async requestOnce<TMethod extends RuntimeMethod>(
+  private async requestOnce<TMethod extends LatestRuntimeMethod, TResult>(
     method: TMethod,
-    params: RuntimeMethodParams<TMethod>,
-  ): Promise<RuntimeMethodResult<TMethod>> {
+    params: unknown,
+    parseResult: (value: unknown) => TResult,
+    acceptResult?: (value: unknown) => void,
+  ): Promise<TResult> {
     const id = this.requestId;
     this.requestId += 1;
     const response = new Promise<unknown>((resolve, reject) => {
@@ -660,7 +1107,13 @@ export class RollNodeClient {
           reject(new RollRequestTimeoutError(method, this.requestTimeoutMs));
         }
       }, this.requestTimeoutMs);
-      this.pending.set(id, { method, resolve, reject, timer });
+      this.pending.set(id, {
+        method,
+        resolve,
+        reject,
+        timer,
+        ...(acceptResult === undefined ? {} : { acceptResult }),
+      });
     });
     try {
       await this.write({
@@ -671,7 +1124,7 @@ export class RollNodeClient {
       });
       const result = await response;
       try {
-        return parseRuntimeMethodResult(method, result);
+        return parseResult(result);
       } catch (error: unknown) {
         const violation = new RollProtocolViolationError(
           `Roll Runtime returned an invalid result for "${method}"`,
@@ -847,7 +1300,13 @@ export class RollNodeClient {
       }
       try {
         this.failConnection(
-          new RollUncorrelatedRpcError(parseRpcError(parsed.error, "an uncorrelated request")),
+          new RollUncorrelatedRpcError(
+            parseRpcError(
+              parsed.error,
+              "an uncorrelated request",
+              this.initializationResult?.protocolVersion,
+            ),
+          ),
         );
       } catch (error: unknown) {
         this.failProtocol(
@@ -880,7 +1339,13 @@ export class RollNodeClient {
     if (hasError) {
       let rpcError: RollRpcError;
       try {
-        rpcError = new RollRpcError(parseRpcError(parsed.error, `"${pending.method}"`));
+        rpcError = new RollRpcError(
+          parseRpcError(
+            parsed.error,
+            `"${pending.method}"`,
+            this.initializationResult?.protocolVersion,
+          ),
+        );
       } catch (error: unknown) {
         this.failProtocol(
           error instanceof RollProtocolViolationError
@@ -899,15 +1364,28 @@ export class RollNodeClient {
     }
     if (pending.method === RUNTIME_METHODS.initialize) {
       try {
-        this.acceptInitializationResult(
-          parseRuntimeMethodResult(RUNTIME_METHODS.initialize, parsed.result),
-        );
+        this.acceptInitializationResult(initializeResultSchema.parse(parsed.result));
       } catch (error: unknown) {
         this.failProtocol(
           error instanceof RollProtocolViolationError
             ? error
             : new RollProtocolViolationError(
                 'Roll Runtime returned an invalid result for "initialize"',
+                error,
+              ),
+        );
+        return;
+      }
+    }
+    if (pending.acceptResult !== undefined) {
+      try {
+        pending.acceptResult(parsed.result);
+      } catch (error: unknown) {
+        this.failProtocol(
+          error instanceof RollProtocolViolationError
+            ? error
+            : new RollProtocolViolationError(
+                `Roll Runtime returned an invalid result for "${pending.method}"`,
                 error,
               ),
         );
@@ -946,9 +1424,10 @@ export class RollNodeClient {
       return;
     }
     if (method === RUNTIME_SERVER_REQUEST_CANCEL_NOTIFICATION) {
+      const protocolVersion = this.initializationResult?.protocolVersion;
       if (
-        this.initializationResult === undefined ||
-        !getRuntimeProtocolCapabilities(this.initializationResult.protocolVersion).serverRequests
+        protocolVersion === undefined ||
+        !getRuntimeProtocolCapabilities(protocolVersion).serverRequests
       ) {
         this.failProtocol(
           new RollProtocolViolationError(
@@ -958,21 +1437,45 @@ export class RollNodeClient {
         );
         return;
       }
-      const cancellation = runtimeServerRequestCancelParamsSchema.safeParse(params);
-      if (!cancellation.success) {
+      try {
+        if (usesDynamicServerRequestCapabilities(protocolVersion)) {
+          const cancellation = parseRuntimeServerRequestCancelParamsForVersion(
+            protocolVersion,
+            params,
+          );
+          const inFlight = this.inFlightServerRequestsByInteractionId.get(
+            cancellation.interactionId,
+          );
+          if (inFlight !== undefined) {
+            this.retireServerRequest(inFlight, new Error(cancellation.reason));
+          }
+          return;
+        }
+        if (protocolVersion === "1.1") {
+          const cancellation = parseRuntimeServerRequestCancelParamsForVersion(
+            protocolVersion,
+            params,
+          );
+          const inFlight = this.inFlightServerRequests.get(cancellation.serverRequestId);
+          if (inFlight !== undefined) {
+            this.retireServerRequest(inFlight, new Error(cancellation.reason));
+          }
+          return;
+        }
+      } catch (error: unknown) {
         this.failProtocol(
           new RollProtocolViolationError(
             "Roll Runtime emitted an invalid runtime.serverRequest.cancel",
-            cancellation.error,
+            error,
           ),
         );
         return;
       }
-      const inFlight = this.inFlightServerRequests.get(cancellation.data.serverRequestId);
-      if (inFlight !== undefined) {
-        this.inFlightServerRequests.delete(cancellation.data.serverRequestId);
-        inFlight.controller.abort(new Error(cancellation.data.reason));
-      }
+      this.failProtocol(
+        new RollProtocolViolationError(
+          `Roll Runtime emitted runtime.serverRequest.cancel for unsupported Protocol ${protocolVersion}`,
+        ),
+      );
       return;
     }
     this.failProtocol(
@@ -992,10 +1495,13 @@ export class RollNodeClient {
       );
       return;
     }
+    const protocolVersion = this.initializationResult?.protocolVersion;
     if (
-      this.initializationResult === undefined ||
-      !getRuntimeProtocolCapabilities(this.initializationResult.protocolVersion).serverRequests ||
-      !isRuntimeServerRequestMethod(method)
+      protocolVersion === undefined ||
+      protocolVersion === "1.0" ||
+      !getRuntimeProtocolCapabilities(protocolVersion).serverRequests ||
+      !isLatestRuntimeServerRequestMethod(method) ||
+      !isRuntimeServerRequestMethodAvailable(protocolVersion, method)
     ) {
       this.observeServerRequestResponse(
         this.writeServerRequestError(id, JSON_RPC_ERROR_CODES.methodNotFound, "Method not found"),
@@ -1003,13 +1509,22 @@ export class RollNodeClient {
       return;
     }
     const handler = this.serverRequestHandlers[method];
-    if (handler === undefined) {
+    const requiredCapabilityRevision = this.serverRequestHandlerCapabilityRevisions.get(method);
+    if (
+      (usesDynamicServerRequestCapabilities(protocolVersion) &&
+        (!this.acknowledgedServerRequestMethods.has(method) ||
+          requiredCapabilityRevision === undefined ||
+          this.acknowledgedCapabilityRevision < requiredCapabilityRevision)) ||
+      handler === undefined
+    ) {
       this.observeServerRequestResponse(
         this.writeServerRequestError(id, JSON_RPC_ERROR_CODES.methodNotFound, "Method not found"),
       );
       return;
     }
-    this.observeServerRequestResponse(this.dispatchServerRequest(id, method, params, handler));
+    this.observeServerRequestResponse(
+      this.dispatchServerRequest(protocolVersion, id, method, params, handler),
+    );
   }
 
   private observeServerRequestResponse(response: Promise<void>): void {
@@ -1023,17 +1538,22 @@ export class RollNodeClient {
   }
 
   private async dispatchServerRequest<TMethod extends RuntimeServerRequestMethod>(
+    protocolVersion: "1.3" | "1.2" | "1.1",
     id: JsonRpcId,
     method: TMethod,
     input: unknown,
     handler: RuntimeServerRequestHandler<TMethod>,
   ): Promise<void> {
-    const inFlight = { controller: new AbortController() };
+    const inFlight: InFlightServerRequest = {
+      controller: new AbortController(),
+      method,
+      requestId: id,
+    };
     this.inFlightServerRequests.set(id, inFlight);
     try {
-      let params: RuntimeServerRequestParams<TMethod>;
+      let params: RuntimeServerRequestHandlerParams<TMethod>;
       try {
-        params = parseRuntimeServerRequestParams(method, input);
+        params = parseClientRuntimeServerRequestParams(protocolVersion, method, input);
       } catch {
         await this.writeServerRequestError(
           id,
@@ -1043,7 +1563,32 @@ export class RollNodeClient {
         );
         return;
       }
-      let rawResult: RuntimeServerRequestResult<TMethod>;
+      const interactionId = readInteractionId(params);
+      if (
+        interactionId !== undefined &&
+        this.inFlightServerRequestsByInteractionId.has(interactionId)
+      ) {
+        this.failProtocol(
+          new RollProtocolViolationError(
+            `Roll Runtime reused in-flight interaction id ${JSON.stringify(interactionId)}`,
+          ),
+        );
+        return;
+      }
+      if (interactionId !== undefined) {
+        inFlight.interactionId = interactionId;
+        this.inFlightServerRequestsByInteractionId.set(interactionId, inFlight);
+        inFlight.controller.signal.addEventListener(
+          "abort",
+          () => {
+            if (this.inFlightServerRequestsByInteractionId.get(interactionId) === inFlight) {
+              this.inFlightServerRequestsByInteractionId.delete(interactionId);
+            }
+          },
+          { once: true },
+        );
+      }
+      let rawResult: RuntimeServerRequestResultForSupportedVersions<TMethod>;
       try {
         rawResult = await handler(params, {
           requestId: id,
@@ -1063,9 +1608,9 @@ export class RollNodeClient {
       if (!this.isServerRequestActive(id, inFlight)) {
         return;
       }
-      let result: RuntimeServerRequestResult<TMethod>;
+      let result: RuntimeServerRequestResultForSupportedVersions<TMethod>;
       try {
-        result = parseRuntimeServerRequestResult(method, rawResult);
+        result = parseClientRuntimeServerRequestResult(protocolVersion, method, rawResult);
       } catch {
         await this.writeServerRequestError(
           id,
@@ -1081,8 +1626,29 @@ export class RollNodeClient {
         );
       }
     } finally {
-      if (this.inFlightServerRequests.get(id) === inFlight) {
-        this.inFlightServerRequests.delete(id);
+      this.retireServerRequest(inFlight);
+    }
+  }
+
+  private retireServerRequest(request: InFlightServerRequest, reason?: Error): void {
+    if (this.inFlightServerRequests.get(request.requestId) === request) {
+      this.inFlightServerRequests.delete(request.requestId);
+    }
+    if (
+      request.interactionId !== undefined &&
+      this.inFlightServerRequestsByInteractionId.get(request.interactionId) === request
+    ) {
+      this.inFlightServerRequestsByInteractionId.delete(request.interactionId);
+    }
+    if (reason !== undefined && !request.controller.signal.aborted) {
+      request.controller.abort(reason);
+    }
+  }
+
+  private retireServerRequestsForMethod(method: RuntimeServerRequestMethod, reason: Error): void {
+    for (const request of [...this.inFlightServerRequests.values()]) {
+      if (request.method === method) {
+        this.retireServerRequest(request, reason);
       }
     }
   }
@@ -1125,6 +1691,9 @@ export class RollNodeClient {
         event.event.type === "turn.failed")
     ) {
       this.activeTurns.delete(event.turnId);
+    }
+    if (this.eventRecoveryManager?.acceptEvent(event) === true) {
+      return;
     }
     for (const listener of this.listeners) {
       try {
@@ -1192,6 +1761,7 @@ export class RollNodeClient {
     this.rejectPending(error);
     this.markActiveTurnsOutcomeUnknown();
     this.exitResult = { code, signal, error };
+    this.eventRecoveryManager?.acceptClientExit(error);
     this.resolveExit(this.exitResult);
     for (const listener of this.exitListeners) {
       try {

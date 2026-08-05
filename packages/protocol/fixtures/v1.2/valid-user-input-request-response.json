@@ -1,0 +1,11 @@
+{
+  "jsonrpc": "2.0",
+  "id": "user-input-rpc-1",
+  "result": {
+    "status": "submitted",
+    "values": [
+      { "id": "deployment-region", "value": "华东" },
+      { "id": "target-workspace", "value": "workspace-a" }
+    ]
+  }
+}

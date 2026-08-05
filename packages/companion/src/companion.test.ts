@@ -2,12 +2,14 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { RollRpcError } from "@roll-agent/client-node";
 import {
+  RUNTIME_V13_MAX_DURABLE_EVENT_RECORD_BYTES,
   RUNTIME_METHODS,
   RUNTIME_SERVER_REQUEST_METHODS,
   parseRuntimeMethodParams,
   parseRuntimeMethodResult,
   parseRuntimeServerRequestParams,
   runtimeEventEnvelopeSchema,
+  runtimeEventEnvelopeV11Schema,
   type ApprovalRequestParams,
   type InitializeResult,
   type JsonValue,
@@ -22,6 +24,7 @@ import {
   LocalApprovalDeniedError,
   LocalConfirmationRequiredError,
   type CompanionRuntimeClient,
+  type CompanionWorkspaceOptions,
   type LocalApprovalDecision,
   type LocalApprovalPolicy,
 } from "./companion-workspace.ts";
@@ -29,6 +32,7 @@ import { CompanionEventBuffer } from "./event-buffer.ts";
 import {
   CompanionRelayBridge,
   OutboundCompanionRelay,
+  relayEventMessage,
   type RelayPayloadCipher,
   type RelayTransport,
 } from "./relay-bridge.ts";
@@ -39,6 +43,7 @@ import {
   deviceIdSchema,
   relayDeviceConnectSchema,
   relayMessageSchema,
+  relayRequestMethodSchemas,
   relayRuntimeRequestSchema,
   relayRuntimeResponseSchema,
   workspaceIdSchema,
@@ -73,7 +78,12 @@ const IDS = {
   thirdTurn: "00000000-0000-4000-8000-000000000416",
   thirdRequestStart: "00000000-0000-4000-8000-000000000417",
   serverApprovalRequest: "00000000-0000-4000-8000-000000000418",
+  runtimeEvent: "00000000-0000-4000-8000-000000000419",
+  eventLog: "00000000-0000-4000-8000-000000000420",
+  relayRuntimeErrorEnvelope: "00000000-0000-4000-8000-000000000421",
 } as const;
+
+const RUNTIME_ERROR_SENTINEL = "runtime-error-secret=abc123";
 
 function envelope(sequence: number, event: unknown): RuntimeEventEnvelope {
   return runtimeEventEnvelopeSchema.parse({
@@ -95,6 +105,33 @@ function v11Envelope(sequence: number, event: unknown): RuntimeEventEnvelope {
     timestamp: "2026-07-28T12:00:00.000Z",
     threadId: IDS.thread,
     turnId: IDS.turn,
+    event,
+  });
+}
+
+function v12Envelope(sequence: number, event: unknown): RuntimeEventEnvelope {
+  return runtimeEventEnvelopeSchema.parse({
+    protocolVersion: "1.2",
+    runtimeInstanceId: IDS.runtime,
+    sequence,
+    timestamp: "2026-07-28T12:00:00.000Z",
+    threadId: IDS.thread,
+    turnId: IDS.turn,
+    event,
+  });
+}
+
+function v13Envelope(sequence: number, event: unknown): RuntimeEventEnvelope {
+  return runtimeEventEnvelopeSchema.parse({
+    protocolVersion: "1.3",
+    runtimeInstanceId: IDS.runtime,
+    sequence,
+    timestamp: "2026-07-28T12:00:00.000Z",
+    threadId: IDS.thread,
+    turnId: IDS.turn,
+    durability: "durable",
+    eventId: IDS.runtimeEvent,
+    cursor: `rte1:${IDS.eventLog}:${String(sequence)}:${IDS.runtimeEvent}`,
     event,
   });
 }
@@ -197,6 +234,60 @@ class InvalidRelayResultWorkspace extends CompanionWorkspace {
   }
 }
 
+class LatestSnapshotWorkspace extends CompanionWorkspace {
+  private readonly sourceProtocolVersion: "1.2" | "1.3";
+
+  constructor(options: CompanionWorkspaceOptions, sourceProtocolVersion: "1.2" | "1.3") {
+    super(options);
+    this.sourceProtocolVersion = sourceProtocolVersion;
+  }
+
+  override async handleRemoteRequest(request: RelayRuntimeRequest): Promise<unknown> {
+    if (
+      request.method !== RUNTIME_METHODS.threadOpen &&
+      request.method !== RUNTIME_METHODS.threadSnapshot
+    ) {
+      throw new Error(`Unexpected latest Snapshot request: ${request.method}`);
+    }
+    const snapshot = {
+      thread: {
+        id: IDS.thread,
+        title: `Runtime ${this.sourceProtocolVersion} snapshot`,
+        model: "fixture-model",
+        createdAt: "2026-07-28T12:00:00.000Z",
+        updatedAt: "2026-07-28T12:01:00.000Z",
+        messageCount: 0,
+      },
+      messages: { items: [], nextBeforeSequence: null },
+      operations: { items: [], nextBeforeSequence: null },
+      activeTurn: {
+        id: IDS.turn,
+        status: "waiting-for-user",
+        startedAt: "2026-07-28T12:00:00.000Z",
+      },
+      pendingApprovals: [],
+      pendingInteractions: [
+        {
+          method: RUNTIME_SERVER_REQUEST_METHODS.approvalRequest,
+          interactionId: IDS.serverApprovalRequest,
+          threadId: IDS.thread,
+          turnId: IDS.turn,
+          expiresAt: "2026-07-28T12:05:00.000Z",
+          sensitivity: "normal",
+          approvalId: IDS.approval,
+        },
+      ],
+      transcriptCompleteness: "complete",
+    } as const;
+    return this.sourceProtocolVersion === "1.3"
+      ? {
+          ...snapshot,
+          eventCursor: `rte1:${IDS.eventLog}:0:${IDS.runtimeEvent}`,
+        }
+      : snapshot;
+  }
+}
+
 class DeferredTurnRuntimeClient extends FakeRuntimeClient {
   private releasePendingRequest: (() => void) | undefined;
   private readonly pendingRequest = new Promise<void>((resolve) => {
@@ -267,7 +358,7 @@ class FailingRuntimeClient implements CompanionRuntimeClient {
   ): Promise<RuntimeMethodResult<TMethod>> {
     throw new RollRpcError({
       code: -32_000,
-      message: "runtime is closing",
+      message: RUNTIME_ERROR_SENTINEL,
       data: {
         rollCode: "RUNTIME_CLOSING",
         retryable: true,
@@ -443,6 +534,25 @@ test("CompanionEventBuffer emits a gap after count/byte eviction and supports AC
   );
   buffer.acknowledge(99);
   assert.equal(buffer.size, 1);
+});
+
+test("CompanionEventBuffer default retains one near-limit durable Runtime envelope", () => {
+  const nearLimitText = "x".repeat(RUNTIME_V13_MAX_DURABLE_EVENT_RECORD_BYTES - 256);
+  const event = v13Envelope(0, {
+    type: "message.completed",
+    streamId: IDS.turn,
+    text: nearLimitText,
+  });
+  assert.ok(
+    Buffer.byteLength(JSON.stringify(event), "utf8") > RUNTIME_V13_MAX_DURABLE_EVENT_RECORD_BYTES,
+  );
+
+  const buffer = new CompanionEventBuffer();
+  buffer.append(event);
+
+  assert.equal(buffer.size, 1);
+  assert.equal(buffer.replay().gap, undefined);
+  assert.equal(buffer.replay().events[0]?.event, event);
 });
 
 test("WorkspaceLeaseManager stale release cannot remove a replacement lease", () => {
@@ -1174,6 +1284,7 @@ test("Protocol 1.1 accepts a remote rejection without invoking approval policy",
 
 test("Companion Relay Protocol remains separate from Runtime Protocol", () => {
   assert.equal(legacyRelayMessageSchema, relayMessageSchema);
+  assert.equal(COMPANION_RELAY_PROTOCOL_VERSION, "1.0");
   assert.equal(
     relayDeviceConnectSchema.parse({
       type: "device.connect",
@@ -1213,6 +1324,132 @@ test("Companion consumes the shared Relay Protocol conformance suite", () => {
   });
 });
 
+test("Relay 1.0 projects Runtime 1.2 events to its frozen Runtime 1.1 envelope", async () => {
+  const workspaceId = workspaceIdSchema.parse(IDS.workspace);
+  const client = new FakeRuntimeClient();
+  const workspace = new CompanionWorkspace({
+    client,
+    localApprovalPolicy: () => "allow",
+  });
+  const bridge = new CompanionRelayBridge({
+    deviceId: deviceIdSchema.parse(IDS.device),
+    pairingToken: "pairing-token-with-sufficient-length",
+    workspaces: new Map([[workspaceId, workspace]]),
+  });
+  const transport = new MemoryRelayTransport();
+  bridge.connect(transport);
+  await flush();
+
+  const runtimeEvent = v12Envelope(0, { type: "turn.completed" });
+  client.emit(runtimeEvent);
+  await flush();
+  const relayed = transport.sent.find((message) => message.type === "runtime.event");
+  assert.ok(relayed?.type === "runtime.event");
+  assert.equal(relayed.event.protocolVersion, "1.1");
+  assert.deepEqual(relayMessageSchema.parse(relayed), relayed);
+
+  const projected = relayEventMessage(workspaceId, 1, runtimeEvent);
+  assert.ok(projected.type === "runtime.event");
+  assert.equal(projected.event.protocolVersion, "1.1");
+  bridge.close();
+
+  const encryptedClient = new FakeRuntimeClient();
+  const encryptedWorkspace = new CompanionWorkspace({
+    client: encryptedClient,
+    localApprovalPolicy: () => "allow",
+  });
+  const encryptedBridge = new CompanionRelayBridge({
+    deviceId: deviceIdSchema.parse(IDS.device),
+    pairingToken: "pairing-token-with-sufficient-length",
+    workspaces: new Map([[workspaceId, encryptedWorkspace]]),
+    ciphers: new Map([[workspaceId, testCipher]]),
+  });
+  const encryptedTransport = new MemoryRelayTransport();
+  encryptedBridge.connect(encryptedTransport);
+  await flush();
+  encryptedClient.emit(runtimeEvent);
+  await flush();
+  const encrypted = encryptedTransport.sent.find(
+    (message) => message.type === "runtime.encrypted" && message.payloadKind === "event",
+  );
+  assert.ok(encrypted?.type === "runtime.encrypted" && encrypted.payloadKind === "event");
+  assert.equal(
+    runtimeEventEnvelopeV11Schema.parse(await testCipher.decrypt(encrypted)).protocolVersion,
+    "1.1",
+  );
+  encryptedBridge.close();
+});
+
+test("Relay 1.0 projects Runtime 1.3 events without durable recovery metadata", () => {
+  const workspaceId = workspaceIdSchema.parse(IDS.workspace);
+  const runtimeEvent = v13Envelope(0, { type: "turn.completed" });
+  const projected = relayEventMessage(workspaceId, 0, runtimeEvent);
+
+  assert.equal(projected.type, "runtime.event");
+  assert.equal(projected.event.protocolVersion, "1.1");
+  assert.equal(Object.hasOwn(projected.event, "durability"), false);
+  assert.equal(Object.hasOwn(projected.event, "eventId"), false);
+  assert.equal(Object.hasOwn(projected.event, "cursor"), false);
+  assert.deepEqual(runtimeEventEnvelopeV11Schema.parse(projected.event), projected.event);
+  const legacyProjected = relayEventMessage(
+    workspaceId,
+    1,
+    envelope(1, { type: "turn.completed" }),
+  );
+  assert.equal(legacyProjected.type, "runtime.event");
+  assert.equal(legacyProjected.event.protocolVersion, "1.0");
+});
+
+test("Relay 1.0 projects Runtime 1.2/1.3 thread results to the frozen Snapshot shape", async () => {
+  const workspaceId = workspaceIdSchema.parse(IDS.workspace);
+  for (const sourceProtocolVersion of ["1.2", "1.3"] as const) {
+    const workspace = new LatestSnapshotWorkspace(
+      {
+        client: new FakeRuntimeClient(),
+        localApprovalPolicy: () => "allow",
+      },
+      sourceProtocolVersion,
+    );
+    const bridge = new CompanionRelayBridge({
+      deviceId: deviceIdSchema.parse(IDS.device),
+      pairingToken: "pairing-token-with-sufficient-length",
+      workspaces: new Map([[workspaceId, workspace]]),
+    });
+    const transport = new MemoryRelayTransport();
+    bridge.connect(transport);
+    await flush();
+
+    for (const [requestId, method, params] of [
+      [
+        IDS.relaySnapshotRequest,
+        RUNTIME_METHODS.threadSnapshot,
+        { threadId: IDS.thread, limit: 100 },
+      ],
+      [IDS.relaySecondRequest, RUNTIME_METHODS.threadOpen, { threadId: IDS.thread }],
+    ] as const) {
+      transport.receive({
+        type: "runtime.request",
+        requestId,
+        workspaceId,
+        method,
+        params,
+      });
+      await flush();
+      const response = transport.sent.find(
+        (message) => message.type === "runtime.response" && message.requestId === requestId,
+      );
+      assert.ok(response?.type === "runtime.response");
+      assert.equal(response.error, undefined);
+      const snapshot = relayRequestMethodSchemas[method].result.parse(response.result);
+      assert.equal(Object.hasOwn(snapshot, "pendingInteractions"), false);
+      assert.equal(Object.hasOwn(snapshot, "eventCursor"), false);
+      assert.equal(snapshot.activeTurn?.status, "running");
+    }
+
+    bridge.close();
+  }
+});
+
 test("CompanionRelayBridge routes requests outbound and replays unacked events after reconnect", async () => {
   const client = new FakeRuntimeClient();
   const workspace = new CompanionWorkspace({
@@ -1229,6 +1466,10 @@ test("CompanionRelayBridge routes requests outbound and replays unacked events a
   bridge.connect(first);
   await flush();
   assert.equal(first.sent[0]?.type, "device.connect");
+  assert.equal(
+    first.sent[0]?.type === "device.connect" ? first.sent[0].protocolVersion : undefined,
+    "1.0",
+  );
 
   first.receive({
     type: "runtime.request",
@@ -1995,39 +2236,70 @@ test("CompanionRelayBridge never charges in-flight mutations against the settled
   bridge.close();
 });
 
-test("CompanionRelayBridge preserves stable Runtime error semantics", async () => {
+test("CompanionRelayBridge exposes a fixed Runtime error message in plaintext and ciphertext", async () => {
   const workspaceId = workspaceIdSchema.parse(IDS.workspace);
-  const workspace = new CompanionWorkspace({
-    client: new FailingRuntimeClient(),
-    localApprovalPolicy: () => "allow",
-  });
-  const bridge = new CompanionRelayBridge({
-    deviceId: deviceIdSchema.parse(IDS.device),
-    pairingToken: "pairing-token-with-sufficient-length",
-    workspaces: new Map([[workspaceId, workspace]]),
-  });
-  const transport = new MemoryRelayTransport();
-  bridge.connect(transport);
-  await flush();
-  transport.receive({
-    type: "runtime.request",
-    requestId: IDS.relayRequest,
-    workspaceId,
-    method: RUNTIME_METHODS.threadSnapshot,
-    params: { threadId: IDS.thread, limit: 100 },
-  });
-  await flush();
+  for (const encrypted of [false, true]) {
+    const workspace = new CompanionWorkspace({
+      client: new FailingRuntimeClient(),
+      localApprovalPolicy: () => "allow",
+    });
+    const bridge = new CompanionRelayBridge({
+      deviceId: deviceIdSchema.parse(IDS.device),
+      pairingToken: "pairing-token-with-sufficient-length",
+      workspaces: new Map([[workspaceId, workspace]]),
+      ...(encrypted ? { ciphers: new Map([[workspaceId, testCipher]]) } : {}),
+    });
+    const transport = new MemoryRelayTransport();
+    bridge.connect(transport);
+    await flush();
+    const request = relayRuntimeRequestSchema.parse({
+      type: "runtime.request",
+      requestId: IDS.relayRequest,
+      workspaceId,
+      method: RUNTIME_METHODS.threadSnapshot,
+      params: { threadId: IDS.thread, limit: 100 },
+    });
+    if (encrypted) {
+      const payload = await testCipher.encrypt(request);
+      transport.receive({
+        type: "runtime.encrypted",
+        workspaceId,
+        envelopeId: IDS.relayRuntimeErrorEnvelope,
+        payloadKind: "request",
+        requestId: IDS.relayRequest,
+        algorithm: testCipher.algorithm,
+        nonce: payload.nonce,
+        ciphertext: payload.ciphertext,
+      });
+    } else {
+      transport.receive(request);
+    }
+    await flush();
 
-  const response = transport.sent.find(
-    (message) => message.type === "runtime.response" && message.requestId === IDS.relayRequest,
-  );
-  assert.equal(response?.type, "runtime.response");
-  assert.deepEqual(response?.type === "runtime.response" ? response.error : undefined, {
-    code: "RUNTIME_CLOSING",
-    message: "runtime is closing",
-    retryable: true,
-  });
-  bridge.close();
+    const rawResponse = encrypted
+      ? await (async () => {
+          const encryptedResponse = transport.sent.find(
+            (message): message is RelayEncryptedMessage =>
+              message.type === "runtime.encrypted" &&
+              message.payloadKind === "response" &&
+              message.requestId === IDS.relayRequest,
+          );
+          assert.ok(encryptedResponse);
+          return testCipher.decrypt(encryptedResponse);
+        })()
+      : transport.sent.find(
+          (message) =>
+            message.type === "runtime.response" && message.requestId === IDS.relayRequest,
+        );
+    const response = relayRuntimeResponseSchema.parse(rawResponse);
+    assert.deepEqual(response.error, {
+      code: "RUNTIME_CLOSING",
+      message: "Runtime request failed",
+      retryable: true,
+    });
+    assert.equal(JSON.stringify(response).includes(RUNTIME_ERROR_SENTINEL), false);
+    bridge.close();
+  }
 });
 
 test("CompanionRelayBridge reports only method-param validation as INVALID_PARAMS", async () => {

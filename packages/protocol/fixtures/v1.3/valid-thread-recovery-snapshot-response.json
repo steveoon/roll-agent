@@ -1,0 +1,21 @@
+{
+  "jsonrpc": "2.0",
+  "id": 15,
+  "result": {
+    "thread": {
+      "id": "00000000-0000-4000-8000-000000000002",
+      "title": "Bounded recovery",
+      "model": "fixture-model",
+      "createdAt": "2026-07-30T12:00:00.000Z",
+      "updatedAt": "2026-07-30T12:00:00.000Z",
+      "messageCount": 42
+    },
+    "messages": { "items": [], "nextBeforeSequence": null },
+    "operations": { "items": [], "nextBeforeSequence": null },
+    "pendingApprovals": [],
+    "pendingInteractions": [],
+    "transcriptCompleteness": "complete",
+    "eventCursor": null,
+    "recoveryProjection": true
+  }
+}

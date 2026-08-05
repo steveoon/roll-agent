@@ -49,6 +49,13 @@ export function resolveTurnActivity(state: ChatUiState): TurnActivity | undefine
       timed: false,
     });
   }
+  if (state.phase === CHAT_PHASES.userInput) {
+    return activity(TURN_ACTIVITY_KINDS.waitingUser, "等待你填写…", {
+      key: `waiting-user-input:${state.pendingUserInput?.requestId ?? "unknown"}`,
+      animated: false,
+      timed: false,
+    });
+  }
   if (state.live.compacting) {
     return activity(TURN_ACTIVITY_KINDS.compacting, "压缩上下文中…");
   }

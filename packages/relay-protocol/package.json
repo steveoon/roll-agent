@@ -1,6 +1,6 @@
 {
   "name": "@roll-agent/relay-protocol",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "type": "module",
   "repository": {
     "type": "git",
@@ -19,7 +19,13 @@
       "types": "./src/conformance.ts",
       "default": "./src/conformance.ts"
     },
+    "./reference-adapter": {
+      "types": "./src/reference-adapter.ts",
+      "default": "./src/reference-adapter.ts"
+    },
     "./schema": "./dist/schema/roll-relay-protocol-v1.schema.json",
+    "./schema/v1.0": "./dist/schema/roll-relay-protocol-v1.schema.json",
+    "./schema/v1.1": "./dist/schema/roll-relay-protocol-v1.1.schema.json",
     "./fixtures/*": "./fixtures/*"
   },
   "publishConfig": {
@@ -33,7 +39,13 @@
         "types": "./dist/conformance.d.ts",
         "default": "./dist/conformance.js"
       },
+      "./reference-adapter": {
+        "types": "./dist/reference-adapter.d.ts",
+        "default": "./dist/reference-adapter.js"
+      },
       "./schema": "./dist/schema/roll-relay-protocol-v1.schema.json",
+      "./schema/v1.0": "./dist/schema/roll-relay-protocol-v1.schema.json",
+      "./schema/v1.1": "./dist/schema/roll-relay-protocol-v1.1.schema.json",
       "./fixtures/*": "./fixtures/*"
     }
   },

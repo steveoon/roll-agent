@@ -14,7 +14,9 @@ import {
   type RuntimeMethodInput,
   type RuntimeMethodParams,
   type RuntimeMethodResult,
+  type RuntimeMethodResultForVersion,
   type RuntimeProtocolCapabilities,
+  type RuntimeProtocolVersion,
 } from "@roll-agent/protocol";
 import type {
   RollNodeClient,
@@ -27,15 +29,29 @@ import {
   type CompanionEventBufferOptions,
   type EventBufferReplay,
 } from "./event-buffer.ts";
+import {
+  CompanionRelayFrameBuffer,
+  type CompanionRelayFrameEntryV11,
+  type CompanionRelayFrameReplayV11,
+} from "./relay-frame-buffer.ts";
+import {
+  CompanionInteractionBroker,
+  type RemoteInteractionCandidateContext,
+} from "./interaction-broker.ts";
 import { WorkspaceLeaseManager } from "./lease-manager.ts";
 import {
   RELAY_REQUEST_METHODS,
+  RELAY_REQUEST_METHODS_V11,
   relayApprovalCandidateParamsSchema,
+  relayInteractionCandidateParamsSchemaV11,
   type RelayApprovalCandidateInput,
   type RelayApprovalCandidateParams,
   type RelayApprovalCandidateResult,
-  type RelayRequestMethod,
+  type RelayInteractionCandidateParamsV11,
+  type RelayInteractionCandidateResultV11,
   type RelayRuntimeRequest,
+  type RelayRuntimeRequestV11,
+  type WorkspaceId,
 } from "@roll-agent/relay-protocol";
 
 export const LOCAL_APPROVAL_DECISIONS = ["allow", "deny", "require-local-confirmation"] as const;
@@ -57,7 +73,7 @@ export interface CompanionRuntimeClient {
   request<TMethod extends RuntimeMethod>(
     method: TMethod,
     input: RuntimeMethodInput<TMethod>,
-  ): Promise<RuntimeMethodResult<TMethod>>;
+  ): Promise<RuntimeMethodResultForVersion<RuntimeProtocolVersion, TMethod>>;
   onEvent(listener: (event: RuntimeEventEnvelope) => void): () => void;
   getInitializationResult?(): Pick<InitializeResult, "protocolVersion">;
   close(): void;
@@ -67,6 +83,9 @@ export interface CompanionRuntimeClient {
 export interface CompanionWorkspaceOptions extends CompanionEventBufferOptions {
   readonly client: CompanionRuntimeClient;
   readonly localApprovalPolicy: LocalApprovalPolicy;
+  readonly workspaceId?: WorkspaceId;
+  readonly interactionBroker?: CompanionInteractionBroker;
+  /** @deprecated Use interactionBroker with createRuntimeServerRequestHandlers(). */
   readonly approvalRequestBroker?: CompanionApprovalRequestBroker;
 }
 
@@ -85,9 +104,9 @@ export class LocalConfirmationRequiredError extends Error {
 }
 
 export class InvalidRelayRequestParamsError extends Error {
-  readonly method: RelayRequestMethod;
+  readonly method: string;
 
-  constructor(method: RelayRequestMethod) {
+  constructor(method: string) {
     super(`Invalid params for Relay method "${method}"`);
     this.name = "InvalidRelayRequestParamsError";
     this.method = method;
@@ -109,6 +128,16 @@ function parseRelayApprovalCandidateParams(input: unknown): RelayApprovalCandida
   const parsed = relayApprovalCandidateParamsSchema.safeParse(input);
   if (!parsed.success) {
     throw new InvalidRelayRequestParamsError(RELAY_REQUEST_METHODS.approvalCandidate);
+  }
+  return parsed.data;
+}
+
+function parseRelayInteractionCandidateParamsV11(
+  input: unknown,
+): RelayInteractionCandidateParamsV11 {
+  const parsed = relayInteractionCandidateParamsSchemaV11.safeParse(input);
+  if (!parsed.success) {
+    throw new InvalidRelayRequestParamsError(RELAY_REQUEST_METHODS_V11.interactionCandidate);
   }
   return parsed.data;
 }
@@ -185,6 +214,7 @@ async function evaluateLocalApprovalPolicy(
   }
 }
 
+/** @deprecated Use CompanionInteractionBroker with createRuntimeServerRequestHandlers(). */
 export class CompanionApprovalRequestBroker {
   readonly leases = new WorkspaceLeaseManager();
   readonly handle: RuntimeServerRequestHandler<
@@ -373,46 +403,89 @@ export class CompanionApprovalRequestBroker {
 export class CompanionWorkspace {
   readonly leases: WorkspaceLeaseManager;
   readonly events: CompanionEventBuffer;
+  readonly relayFramesV11: CompanionRelayFrameBuffer;
 
   private readonly client: CompanionRuntimeClient;
   private readonly localApprovalPolicy: LocalApprovalPolicy;
   private readonly protocolCapabilities: RuntimeProtocolCapabilities;
+  private readonly interactionBroker: CompanionInteractionBroker | undefined;
   private readonly approvalRequestBroker: CompanionApprovalRequestBroker | undefined;
   private readonly approvals = new Map<string, LegacyPendingApproval>();
   private readonly eventListeners = new Set<
     (event: { readonly relaySequence: number; readonly event: RuntimeEventEnvelope }) => void
   >();
+  private readonly relayFrameListenersV11 = new Set<(entry: CompanionRelayFrameEntryV11) => void>();
   private readonly releaseClientSubscription: () => void;
   private readonly releaseApprovalPolicyBinding: (() => void) | undefined;
+  private readonly releaseInteractionBinding: (() => void) | undefined;
   private closed = false;
 
   constructor(options: CompanionWorkspaceOptions) {
     this.client = options.client;
     this.localApprovalPolicy = options.localApprovalPolicy;
-    this.protocolCapabilities = getRuntimeProtocolCapabilities(
-      this.client.getInitializationResult?.().protocolVersion ?? "1.0",
-    );
+    const protocolVersion = this.client.getInitializationResult?.().protocolVersion ?? "1.0";
+    this.protocolCapabilities = getRuntimeProtocolCapabilities(protocolVersion);
+    this.interactionBroker = options.interactionBroker;
     this.approvalRequestBroker = options.approvalRequestBroker;
-    if (this.protocolCapabilities.serverRequests && this.approvalRequestBroker === undefined) {
+    if (this.interactionBroker !== undefined && this.approvalRequestBroker !== undefined) {
       throw new Error(
-        "The negotiated Runtime Protocol requires a CompanionApprovalRequestBroker registered during client initialization",
+        "Provide either interactionBroker or the deprecated approvalRequestBroker, not both",
+      );
+    }
+    if (
+      this.protocolCapabilities.serverRequestCapabilityNegotiation &&
+      this.interactionBroker === undefined
+    ) {
+      throw new Error(`Runtime Protocol ${protocolVersion} requires a CompanionInteractionBroker`);
+    }
+    if (
+      this.protocolCapabilities.serverRequests &&
+      this.interactionBroker === undefined &&
+      this.approvalRequestBroker === undefined
+    ) {
+      throw new Error(
+        "The negotiated Runtime Protocol requires a CompanionApprovalRequestBroker (deprecated) or CompanionInteractionBroker registered during client initialization",
       );
     }
     this.events = new CompanionEventBuffer({
       ...(options.maxEvents !== undefined ? { maxEvents: options.maxEvents } : {}),
       ...(options.maxBytes !== undefined ? { maxBytes: options.maxBytes } : {}),
     });
-    this.leases = this.approvalRequestBroker?.leases ?? new WorkspaceLeaseManager();
+    this.relayFramesV11 = new CompanionRelayFrameBuffer({
+      ...(options.maxEvents !== undefined ? { maxEvents: options.maxEvents } : {}),
+      ...(options.maxBytes !== undefined ? { maxBytes: options.maxBytes } : {}),
+    });
+    this.leases =
+      this.interactionBroker?.leases ??
+      this.approvalRequestBroker?.leases ??
+      new WorkspaceLeaseManager();
     const releaseApprovalPolicyBinding = this.approvalRequestBroker?.bindLocalApprovalPolicy(
       this.localApprovalPolicy,
     );
+    let releaseInteractionBinding: (() => void) | undefined;
+    if (this.interactionBroker !== undefined) {
+      if (options.workspaceId === undefined) {
+        releaseApprovalPolicyBinding?.();
+        throw new Error("workspaceId is required when interactionBroker is configured");
+      }
+      releaseInteractionBinding = this.interactionBroker.bindWorkspace({
+        workspaceId: options.workspaceId,
+        localApprovalPolicy: this.localApprovalPolicy,
+        publish: (frame) => {
+          const entry = this.relayFramesV11.appendInteraction(frame);
+          this.publishRelayFrameV11(entry);
+        },
+      });
+    }
     try {
       this.releaseClientSubscription = this.client.onEvent((event) => this.handleEvent(event));
     } catch (error: unknown) {
+      releaseInteractionBinding?.();
       releaseApprovalPolicyBinding?.();
       throw error;
     }
     this.releaseApprovalPolicyBinding = releaseApprovalPolicyBinding;
+    this.releaseInteractionBinding = releaseInteractionBinding;
   }
 
   attachBrowser(clientId: string): () => void {
@@ -439,12 +512,27 @@ export class CompanionWorkspace {
     };
   }
 
+  onBufferedRelayFrameV11(listener: (entry: CompanionRelayFrameEntryV11) => void): () => void {
+    this.relayFrameListenersV11.add(listener);
+    return () => {
+      this.relayFrameListenersV11.delete(listener);
+    };
+  }
+
   replay(afterRelaySequence = -1): EventBufferReplay {
     return this.events.replay(afterRelaySequence);
   }
 
   acknowledge(throughRelaySequence: number): void {
     this.events.acknowledge(throughRelaySequence);
+  }
+
+  replayRelayFramesV11(afterRelaySequence = -1): CompanionRelayFrameReplayV11 {
+    return this.relayFramesV11.replay(afterRelaySequence);
+  }
+
+  acknowledgeRelayFramesV11(throughRelaySequence: number): void {
+    this.relayFramesV11.acknowledge(throughRelaySequence);
   }
 
   async startTurn(
@@ -514,11 +602,28 @@ export class CompanionWorkspace {
         "Relay approval.candidate requires Runtime server-request capability",
       );
     }
-    const broker = this.approvalRequestBroker;
-    if (broker === undefined) {
+    if (this.interactionBroker !== undefined) {
+      return this.interactionBroker.submitLegacyApprovalCandidate(params);
+    }
+    const legacyBroker = this.approvalRequestBroker;
+    if (legacyBroker === undefined) {
       throw new LocalApprovalDeniedError("Runtime server-request approval broker is unavailable");
     }
-    return broker.submitCandidate(params);
+    return legacyBroker.submitCandidate(params);
+  }
+
+  async submitInteractionCandidateV11(
+    input: RelayInteractionCandidateParamsV11,
+    context: RemoteInteractionCandidateContext,
+  ): Promise<RelayInteractionCandidateResultV11> {
+    const params = parseRelayInteractionCandidateParamsV11(input);
+    const broker = this.interactionBroker;
+    if (broker === undefined) {
+      throw new LocalApprovalDeniedError(
+        "Relay interaction.candidate requires CompanionInteractionBroker",
+      );
+    }
+    return broker.submitCandidate(params, context);
   }
 
   async handleRemoteRequest(request: RelayRuntimeRequest): Promise<unknown> {
@@ -590,6 +695,81 @@ export class CompanionWorkspace {
     }
   }
 
+  async handleRemoteRequestV11(
+    request: RelayRuntimeRequestV11,
+    context: RemoteInteractionCandidateContext,
+  ): Promise<unknown> {
+    switch (request.method) {
+      case RELAY_REQUEST_METHODS_V11.interactionCandidate:
+        return this.submitInteractionCandidateV11(
+          parseRelayInteractionCandidateParamsV11(request.params),
+          context,
+        );
+      case RELAY_REQUEST_METHODS_V11.initialize:
+        throw new LocalApprovalDeniedError(
+          "initialize is owned by the local Companion and cannot be relayed",
+        );
+      case RELAY_REQUEST_METHODS_V11.threadList:
+        return this.client.request(
+          RUNTIME_METHODS.threadList,
+          parseRelayRuntimeMethodParams(RUNTIME_METHODS.threadList, request.params),
+        );
+      case RELAY_REQUEST_METHODS_V11.threadCreate:
+        return this.client.request(
+          RUNTIME_METHODS.threadCreate,
+          parseRelayRuntimeMethodParams(RUNTIME_METHODS.threadCreate, request.params),
+        );
+      case RELAY_REQUEST_METHODS_V11.threadOpen:
+        return this.client.request(
+          RUNTIME_METHODS.threadOpen,
+          parseRelayRuntimeMethodParams(RUNTIME_METHODS.threadOpen, request.params),
+        );
+      case RELAY_REQUEST_METHODS_V11.threadSnapshot:
+        return this.client.request(
+          RUNTIME_METHODS.threadSnapshot,
+          parseRelayRuntimeMethodParams(RUNTIME_METHODS.threadSnapshot, request.params),
+        );
+      case RELAY_REQUEST_METHODS_V11.threadRename:
+        return this.client.request(
+          RUNTIME_METHODS.threadRename,
+          parseRelayRuntimeMethodParams(RUNTIME_METHODS.threadRename, request.params),
+        );
+      case RELAY_REQUEST_METHODS_V11.threadDelete:
+        return this.client.request(
+          RUNTIME_METHODS.threadDelete,
+          parseRelayRuntimeMethodParams(RUNTIME_METHODS.threadDelete, request.params),
+        );
+      case RELAY_REQUEST_METHODS_V11.threadDetach:
+        return this.client.request(
+          RUNTIME_METHODS.threadDetach,
+          parseRelayRuntimeMethodParams(RUNTIME_METHODS.threadDetach, request.params),
+        );
+      case RELAY_REQUEST_METHODS_V11.threadCapabilities:
+        return this.client.request(
+          RUNTIME_METHODS.threadCapabilities,
+          parseRelayRuntimeMethodParams(RUNTIME_METHODS.threadCapabilities, request.params),
+        );
+      case RELAY_REQUEST_METHODS_V11.turnStart:
+        return this.startTurn(
+          parseRelayRuntimeMethodParams(RUNTIME_METHODS.turnStart, request.params),
+        );
+      case RELAY_REQUEST_METHODS_V11.turnCancel:
+        return this.client.request(
+          RUNTIME_METHODS.turnCancel,
+          parseRelayRuntimeMethodParams(RUNTIME_METHODS.turnCancel, request.params),
+        );
+      case RELAY_REQUEST_METHODS_V11.operationGet:
+        return this.client.request(
+          RUNTIME_METHODS.operationGet,
+          parseRelayRuntimeMethodParams(RUNTIME_METHODS.operationGet, request.params),
+        );
+    }
+  }
+
+  closeRemoteInteractions(reason: Error): void {
+    this.interactionBroker?.close(reason);
+  }
+
   async closeIfIdle(): Promise<boolean> {
     if (this.closed) {
       return true;
@@ -598,9 +778,11 @@ export class CompanionWorkspace {
       return false;
     }
     this.closed = true;
+    this.interactionBroker?.close(new Error("Companion workspace closed"));
     try {
       this.releaseClientSubscription();
     } finally {
+      this.releaseInteractionBinding?.();
       this.releaseApprovalPolicyBinding?.();
     }
     if (this.client.shutdown === undefined) {
@@ -621,6 +803,20 @@ export class CompanionWorkspace {
         // Relay/event observers must not block later subscribers or workspace state updates.
       }
     }
+    const relayFrameV11 = this.relayFramesV11.appendRuntimeEvent(event);
+    if (relayFrameV11 !== undefined) {
+      this.publishRelayFrameV11(relayFrameV11);
+    }
+  }
+
+  private publishRelayFrameV11(entry: CompanionRelayFrameEntryV11): void {
+    for (const listener of this.relayFrameListenersV11) {
+      try {
+        listener(entry);
+      } catch {
+        // Relay observers cannot block the remaining subscribers or Interaction lifecycle.
+      }
+    }
   }
 
   private updateLeases(event: RuntimeEventEnvelope): void {
@@ -631,6 +827,11 @@ export class CompanionWorkspace {
         event.event.type === "turn.failed")
     ) {
       this.leases.release({ kind: "turn", id: event.turnId });
+      this.interactionBroker?.cancelTurn(
+        event.threadId,
+        event.turnId,
+        new Error(`Turn ended with ${event.event.type}`),
+      );
       if (this.protocolCapabilities.clientApprovalResponses) {
         for (const [approvalId, pending] of this.approvals) {
           if (pending.approval.turnId === event.turnId) {

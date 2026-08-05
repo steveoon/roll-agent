@@ -1,19 +1,31 @@
 import { randomUUID } from "node:crypto";
 import {
   RUNTIME_SERVER_REQUEST_CANCEL_NOTIFICATION,
-  parseRuntimeServerRequestParams,
-  parseRuntimeServerRequestResult,
-  runtimeServerRequestCancelParamsSchema,
+  RUNTIME_SERVER_REQUEST_METHODS,
+  approvalRequestParamsV12Schema,
+  getRuntimeProtocolCapabilities,
+  getRuntimeProtocolRegistry,
+  interactionIdSchema,
+  isRuntimeServerRequestMethodAvailable,
+  pendingInteractionProjectionSchema,
+  projectRuntimeServerRequestCancelParams,
   timestampSchema,
+  userInputRequestParamsV12Schema,
   type ApprovalId,
-  type JsonRpcId,
+  type PendingInteractionProjection,
   type RuntimeInstanceId,
-  type RuntimeServerRequestInput,
+  type RuntimeProtocolRegistry,
   type RuntimeServerRequestMethod,
-  type RuntimeServerRequestResult,
+  type RuntimeServerRequestResultForSupportedVersions,
+  type RuntimeProtocolVersion,
   type ThreadId,
   type TurnId,
 } from "@roll-agent/protocol";
+import {
+  RuntimeClientInteractionLifecycle,
+  type RuntimeClientDelivery,
+  type RuntimeClientInteraction,
+} from "./runtime-client-interaction-lifecycle.ts";
 import type { JsonRpcMessage } from "./protocol.ts";
 
 const MAX_TIMEOUT_DELAY_MS = 2_147_483_647;
@@ -43,44 +55,69 @@ export interface RuntimeClientRequestCoordinatorOptions {
 
 interface RuntimeClientResponderAttachment {
   readonly responder: RuntimeClientResponder;
+  acceptedServerRequestMethods: ReadonlySet<RuntimeServerRequestMethod>;
+  capabilitiesAcknowledged: boolean;
 }
 
-interface RuntimeClientRequestDelivery {
-  readonly key: string;
-  readonly requestId: JsonRpcId;
-  readonly responderId: RuntimeClientResponderId;
-}
-
-interface PendingRuntimeClientRequest {
-  readonly key: string;
-  readonly method: RuntimeServerRequestMethod;
-  readonly params: unknown;
-  readonly scopeId: RuntimeInstanceId;
-  readonly eligibleResponderId: RuntimeClientResponderId;
-  readonly approvalId: ApprovalId | undefined;
-  readonly threadId: ThreadId | undefined;
-  readonly turnId: TurnId | undefined;
-  readonly expiresAt: string | undefined;
-  readonly reject: (error: Error) => void;
-  readonly resolve: (result: unknown) => void;
-  expiresTimer: ReturnType<typeof setTimeout> | undefined;
-  delivery: RuntimeClientRequestDelivery | undefined;
-}
+type ManagedRuntimeClientInteraction = RuntimeClientInteraction<
+  RuntimeClientResponderId,
+  RuntimeClientResponderAttachment
+>;
+type ManagedRuntimeClientDelivery = RuntimeClientDelivery<RuntimeClientResponderAttachment>;
 
 export interface RuntimeClientRequestOptions {
   readonly key: string;
   readonly scopeId: RuntimeInstanceId;
   readonly eligibleResponderId: RuntimeClientResponderId;
   readonly approvalId?: ApprovalId;
+  /** @deprecated Thread identity is carried by the validated request params. */
   readonly threadId?: ThreadId;
+  /** @deprecated Turn identity is carried by the validated request params. */
   readonly turnId?: TurnId;
   readonly expiresAt?: string;
+  /** Defaults to Protocol 1.1 for compatibility with existing package-internal callers. */
+  readonly protocolVersion?: RuntimeProtocolVersion;
+}
+
+export interface RuntimeClientResponderOptions {
+  /** Defaults to the frozen Protocol 1.1 Server Request registry. */
+  readonly acceptedServerRequestMethods?: readonly RuntimeServerRequestMethod[];
+  /** Protocol 1.3/1.2 responders start false and become eligible only after capability ACK. */
+  readonly capabilitiesAcknowledged?: boolean;
 }
 
 export interface RuntimeClientRequest<TMethod extends RuntimeServerRequestMethod> {
   readonly key: string;
-  readonly result: Promise<RuntimeServerRequestResult<TMethod>>;
+  readonly result: Promise<RuntimeServerRequestResultForSupportedVersions<TMethod>>;
 }
+
+export interface RuntimeClientRequestCoordinatorInternal {
+  handleResponseForAttachment(
+    detachResponder: () => void,
+    message: JsonRpcMessage,
+  ): boolean | undefined;
+  setServerRequestMethodsForAttachment(
+    detachResponder: () => void,
+    methods: readonly RuntimeServerRequestMethod[],
+    reason: string,
+  ): (() => void) | false | undefined;
+  setServerRequestMethodsForResponder(
+    responderId: RuntimeClientResponderId,
+    methods: readonly RuntimeServerRequestMethod[],
+    reason: string,
+  ): (() => void) | false;
+  beginCapabilityNegotiationForAttachment(detachResponder: () => void): boolean | undefined;
+  getPendingInteractionProjectionsForAttachment(
+    detachResponder: () => void,
+    threadId: ThreadId,
+  ): readonly PendingInteractionProjection[] | undefined;
+  redeliver(key: string, responderId: RuntimeClientResponderId): boolean;
+}
+
+const runtimeClientRequestCoordinatorInternals = new WeakMap<
+  RuntimeClientRequestCoordinator,
+  RuntimeClientRequestCoordinatorInternal
+>();
 
 export class RuntimeClientRequestError extends Error {
   constructor(message: string) {
@@ -122,34 +159,122 @@ export class RuntimeClientRequestCoordinator {
     RuntimeClientResponderId,
     RuntimeClientResponderAttachment
   >();
-  private readonly pendingByKey = new Map<string, PendingRuntimeClientRequest>();
-  private readonly deliveries = new Map<JsonRpcId, RuntimeClientRequestDelivery>();
+  private readonly responderAttachments = new WeakMap<
+    () => void,
+    RuntimeClientResponderAttachment
+  >();
+  private readonly interactions = new RuntimeClientInteractionLifecycle<
+    RuntimeClientResponderId,
+    RuntimeClientResponderAttachment
+  >();
 
   constructor(options: RuntimeClientRequestCoordinatorOptions = {}) {
     this.now = options.now ?? Date.now;
     this.onDiagnostic = options.onDiagnostic;
+    runtimeClientRequestCoordinatorInternals.set(this, {
+      handleResponseForAttachment: (detachResponder, message) => {
+        const attachment = this.responderAttachments.get(detachResponder);
+        return attachment === undefined
+          ? undefined
+          : this.handleResponseFromAttachment(attachment, message);
+      },
+      setServerRequestMethodsForAttachment: (detachResponder, methods, reason) => {
+        const attachment = this.responderAttachments.get(detachResponder);
+        return attachment === undefined
+          ? undefined
+          : this.setServerRequestMethodsForAttachment(attachment, methods, reason);
+      },
+      setServerRequestMethodsForResponder: (responderId, methods, reason) => {
+        const attachment = this.responders.get(responderId);
+        return attachment === undefined
+          ? false
+          : this.setServerRequestMethodsForAttachment(attachment, methods, reason);
+      },
+      beginCapabilityNegotiationForAttachment: (detachResponder) => {
+        const attachment = this.responderAttachments.get(detachResponder);
+        return attachment === undefined
+          ? undefined
+          : this.beginCapabilityNegotiationForAttachment(attachment);
+      },
+      getPendingInteractionProjectionsForAttachment: (detachResponder, threadId) => {
+        const attachment = this.responderAttachments.get(detachResponder);
+        return attachment === undefined
+          ? undefined
+          : this.getPendingInteractionProjectionsForAttachment(attachment, threadId);
+      },
+      redeliver: (key, responderId) => this.redeliver(key, responderId),
+    });
   }
 
-  attachResponder(responder: RuntimeClientResponder): () => void {
+  attachResponder(
+    responder: RuntimeClientResponder,
+    options: RuntimeClientResponderOptions = {},
+  ): () => void {
     if (this.responders.has(responder.id)) {
       throw new RuntimeClientRequestError(`Runtime responder "${responder.id}" 已连接`);
     }
-    const attachment: RuntimeClientResponderAttachment = { responder };
+    const acceptedServerRequestMethods = new Set(
+      options.acceptedServerRequestMethods ??
+        getRuntimeProtocolRegistry("1.1").serverRequestMethods,
+    );
+    const attachment: RuntimeClientResponderAttachment = {
+      responder,
+      acceptedServerRequestMethods,
+      capabilitiesAcknowledged: options.capabilitiesAcknowledged ?? true,
+    };
     this.responders.set(responder.id, attachment);
-    return () => {
+    const detachResponder = () => {
       this.detachResponder(attachment, "Runtime 客户端连接已关闭");
     };
+    this.responderAttachments.set(detachResponder, attachment);
+    return detachResponder;
   }
 
   request<TMethod extends RuntimeServerRequestMethod>(
     method: TMethod,
-    params: RuntimeServerRequestInput<TMethod>,
+    params: unknown,
     options: RuntimeClientRequestOptions,
   ): RuntimeClientRequest<TMethod> {
-    if (this.pendingByKey.has(options.key)) {
+    if (this.interactions.has(options.key)) {
       throw new RuntimeClientRequestError(`Runtime 请求 "${options.key}" 已存在`);
     }
-    const parsedParams = parseRuntimeServerRequestParams(method, params);
+    const protocolVersion = options.protocolVersion ?? "1.1";
+    if (!isRuntimeServerRequestMethodAvailable(protocolVersion, method)) {
+      throw new RuntimeClientRequestError(
+        `Runtime Protocol ${protocolVersion} 不支持 Server Request "${method}"`,
+      );
+    }
+    const registry: RuntimeProtocolRegistry = getRuntimeProtocolRegistry(protocolVersion);
+    const requestDefinition = registry.serverRequests[method];
+    if (requestDefinition === undefined) {
+      throw new RuntimeClientRequestError(
+        `Runtime Protocol ${protocolVersion} 缺少 Server Request "${method}" schema`,
+      );
+    }
+    const parsedParams = requestDefinition.params.parse(params);
+    const usesInteractionMetadata =
+      getRuntimeProtocolCapabilities(protocolVersion).serverRequestCapabilityNegotiation;
+    if (
+      usesInteractionMetadata &&
+      (options.expiresAt === undefined ||
+        typeof parsedParams !== "object" ||
+        parsedParams === null ||
+        !("expiresAt" in parsedParams) ||
+        parsedParams.expiresAt !== options.expiresAt)
+    ) {
+      throw new RuntimeClientRequestError(
+        `Runtime Protocol ${protocolVersion} 请求必须提供一致的绝对 expiresAt deadline`,
+      );
+    }
+    const interactionId = usesInteractionMetadata
+      ? interactionIdSchema.parse(
+          typeof parsedParams === "object" &&
+            parsedParams !== null &&
+            "interactionId" in parsedParams
+            ? parsedParams.interactionId
+            : undefined,
+        )
+      : interactionIdSchema.parse(randomUUID());
     let expiresAt: string | undefined;
     if (options.expiresAt !== undefined) {
       const parsedExpiresAt = timestampSchema.safeParse(options.expiresAt);
@@ -158,21 +283,26 @@ export class RuntimeClientRequestCoordinator {
       }
       expiresAt = parsedExpiresAt.data;
     }
-    const deferred = Promise.withResolvers<RuntimeServerRequestResult<TMethod>>();
-    const pending: PendingRuntimeClientRequest = {
+    const deferred =
+      Promise.withResolvers<RuntimeServerRequestResultForSupportedVersions<TMethod>>();
+    const interaction = this.interactions.register({
       key: options.key,
       method,
       params: parsedParams,
       scopeId: options.scopeId,
       eligibleResponderId: options.eligibleResponderId,
-      approvalId: options.approvalId,
-      threadId: options.threadId,
-      turnId: options.turnId,
+      protocolVersion,
+      interactionId,
+      legacyApprovalId: options.approvalId,
       expiresAt,
       reject: deferred.reject,
-      resolve: (value) => {
+      resolveResponse: (value) => {
         try {
-          deferred.resolve(parseRuntimeServerRequestResult(method, value));
+          deferred.resolve(
+            requestDefinition.result.parse(
+              value,
+            ) as RuntimeServerRequestResultForSupportedVersions<TMethod>,
+          );
         } catch (error: unknown) {
           deferred.reject(
             new RuntimeClientRequestError(
@@ -183,97 +313,165 @@ export class RuntimeClientRequestCoordinator {
           );
         }
       },
-      expiresTimer: undefined,
-      delivery: undefined,
-    };
-    this.pendingByKey.set(pending.key, pending);
-    this.scheduleExpiration(pending);
-    if (this.pendingByKey.get(pending.key) === pending) {
-      this.deliver(pending);
+    });
+    this.scheduleExpiration(interaction);
+    if (this.interactions.get(interaction.key) === interaction) {
+      this.deliver(interaction);
     }
     return {
-      key: pending.key,
+      key: interaction.key,
       result: deferred.promise,
     };
   }
 
   handleResponse(responderId: RuntimeClientResponderId, message: JsonRpcMessage): boolean {
+    const attachment = this.responders.get(responderId);
+    if (attachment === undefined) {
+      if ("method" in message || !("id" in message)) {
+        return false;
+      }
+      if (message.id === null) {
+        return true;
+      }
+      const correlated = this.interactions.getByDeliveryId(message.id);
+      if (correlated === undefined) {
+        return false;
+      }
+      this.diagnose(
+        '忽略来自非目标 responder "' + responderId + '" 的 Runtime 响应 ' + String(message.id),
+      );
+      return true;
+    }
+    return this.handleResponseFromAttachment(attachment, message);
+  }
+
+  private handleResponseFromAttachment(
+    attachment: RuntimeClientResponderAttachment,
+    message: JsonRpcMessage,
+  ): boolean {
     if ("method" in message || !("id" in message)) {
       return false;
     }
-    const attachment = this.responders.get(responderId);
-    const responder = attachment?.responder;
+    const { responder } = attachment;
+    const responderId = responder.id;
+    if (this.responders.get(responderId) !== attachment) {
+      this.diagnose('忽略来自已失效 responder session "' + responderId + '" 的 Runtime 响应');
+      return false;
+    }
     if (message.id === null) {
       const detail =
         "error" in message
           ? `${message.error.code} ${message.error.message}`
           : "客户端返回了非法的 id:null 成功响应";
-      this.failResponder(
-        responderId,
+      this.responders.delete(responderId);
+      this.failAttachment(
+        attachment,
         new RuntimeClientRequestError(`客户端返回无法关联的 JSON-RPC 错误：${detail}`),
       );
-      if (attachment !== undefined && this.responders.get(responderId) === attachment) {
-        this.responders.delete(responderId);
-      }
       try {
-        responder?.close();
+        responder.close();
       } catch {
         // Correlated requests were already failed closed.
       }
       return true;
     }
-    const delivery = this.deliveries.get(message.id);
-    if (delivery === undefined) {
+    const correlated = this.interactions.getByDeliveryId(message.id);
+    if (correlated === undefined) {
       return false;
     }
-    if (delivery.responderId !== responderId) {
+    const { interaction, delivery } = correlated;
+    if (delivery.attachment !== attachment) {
       this.diagnose(
         `忽略来自非目标 responder "${responderId}" 的 Runtime 响应 ${String(message.id)}`,
       );
       return true;
     }
-    const pending = this.pendingByKey.get(delivery.key);
-    if (pending === undefined) {
-      this.deliveries.delete(message.id);
+    if (responder.scopeId !== interaction.scopeId) {
+      this.diagnose(`忽略 Runtime scope 不匹配的响应 ${String(message.id)} (${interaction.key})`);
       return true;
     }
-    if (responder === undefined || responder.scopeId !== pending.scopeId) {
-      this.diagnose(`忽略 Runtime scope 不匹配的响应 ${String(message.id)} (${pending.key})`);
+    if (this.isExpired(interaction)) {
+      this.expire(interaction);
       return true;
     }
-    this.removePending(pending);
     if ("error" in message) {
-      pending.reject(
+      this.rejectInteraction(
+        interaction,
         new RuntimeClientRequestError(
           `客户端未完成 Runtime 请求：${message.error.code} ${message.error.message}`,
         ),
       );
     } else {
-      pending.resolve(message.result);
+      const settlement = this.interactions.settle(interaction, { kind: "response" });
+      if (settlement.settled) {
+        interaction.resolveResponse(message.result);
+      }
     }
     return true;
   }
 
   cancel(key: string, reason: string): boolean {
-    const pending = this.pendingByKey.get(key);
-    if (pending === undefined) {
+    const interaction = this.interactions.get(key);
+    if (interaction === undefined) {
       return false;
     }
     const cancellationReason =
       typeof reason === "string" && reason.length > 0 ? reason : DEFAULT_CANCELLATION_REASON;
-    try {
-      this.sendCancellation(pending, cancellationReason);
-    } finally {
-      this.removePending(pending);
-      pending.reject(new RuntimeClientRequestCancelledError(cancellationReason));
+    const settlement = this.interactions.settle(interaction, {
+      kind: "cancelled",
+      reason: cancellationReason,
+    });
+    if (!settlement.settled) {
+      return false;
     }
+    this.sendCancellation(interaction, settlement.retiredDelivery, cancellationReason);
+    interaction.reject(new RuntimeClientRequestCancelledError(cancellationReason));
     return true;
   }
 
   cancelAll(reason: string): void {
-    for (const key of [...this.pendingByKey.keys()]) {
-      this.cancel(key, reason);
+    for (const interaction of this.interactions.pending()) {
+      this.cancel(interaction.key, reason);
     }
+  }
+
+  setResponderServerRequestMethods(
+    responderId: RuntimeClientResponderId,
+    methods: readonly RuntimeServerRequestMethod[],
+    reason: string,
+    deferDelivery = false,
+  ): boolean {
+    const attachment = this.responders.get(responderId);
+    if (attachment === undefined) {
+      return false;
+    }
+    const commit = this.setServerRequestMethodsForAttachment(attachment, methods, reason);
+    if (commit === false) {
+      return false;
+    }
+    if (deferDelivery) {
+      setTimeout(commit, 0);
+    } else {
+      commit();
+    }
+    return true;
+  }
+
+  beginResponderCapabilityNegotiation(responderId: RuntimeClientResponderId): boolean {
+    const attachment = this.responders.get(responderId);
+    return attachment === undefined
+      ? false
+      : this.beginCapabilityNegotiationForAttachment(attachment);
+  }
+
+  getPendingInteractionProjections(
+    responderId: RuntimeClientResponderId,
+    threadId: ThreadId,
+  ): readonly PendingInteractionProjection[] | undefined {
+    const attachment = this.responders.get(responderId);
+    return attachment === undefined
+      ? undefined
+      : this.getPendingInteractionProjectionsForAttachment(attachment, threadId);
   }
 
   private detachResponder(attachment: RuntimeClientResponderAttachment, reason: string): void {
@@ -281,49 +479,64 @@ export class RuntimeClientRequestCoordinator {
     if (this.responders.get(responder.id) !== attachment) {
       return;
     }
-    const affected = [...this.pendingByKey.values()].filter(
-      (pending) => pending.delivery?.responderId === responder.id,
-    );
-    for (const pending of affected) {
-      if (pending.delivery !== undefined) {
-        this.sendCancellation(pending, reason);
-        this.deliveries.delete(pending.delivery.requestId);
-        pending.delivery = undefined;
-      }
-      this.removePending(pending);
-      pending.reject(new RuntimeClientRequestCancelledError(reason));
-    }
     this.responders.delete(responder.id);
+    for (const interaction of this.interactions.pending()) {
+      if (interaction.eligibleResponderId !== responder.id) {
+        continue;
+      }
+      const settlement = this.interactions.settle(interaction, { kind: "cancelled", reason });
+      if (settlement.settled) {
+        this.sendCancellation(interaction, settlement.retiredDelivery, reason);
+        interaction.reject(new RuntimeClientRequestCancelledError(reason));
+      }
+    }
   }
 
-  private deliver(pending: PendingRuntimeClientRequest): void {
-    if (this.isExpired(pending)) {
-      this.expire(pending);
+  private deliver(interaction: ManagedRuntimeClientInteraction): void {
+    if (this.isExpired(interaction)) {
+      this.expire(interaction);
       return;
     }
-    const responder = this.responders.get(pending.eligibleResponderId)?.responder;
-    if (responder === undefined || responder.scopeId !== pending.scopeId) {
-      this.removePending(pending);
-      pending.reject(new RuntimeClientRequestError("没有可处理 Runtime 请求的目标客户端"));
+    const attachment = this.responders.get(interaction.eligibleResponderId);
+    if (attachment === undefined || attachment.responder.scopeId !== interaction.scopeId) {
+      this.rejectInteraction(
+        interaction,
+        new RuntimeClientRequestError("没有可处理 Runtime 请求的目标客户端"),
+      );
       return;
     }
-    const delivery: RuntimeClientRequestDelivery = {
-      key: pending.key,
-      requestId: `runtime:${randomUUID()}`,
-      responderId: responder.id,
-    };
-    pending.delivery = delivery;
-    this.deliveries.set(delivery.requestId, delivery);
+    if (!attachment.capabilitiesAcknowledged) {
+      return;
+    }
+    if (!attachment.acceptedServerRequestMethods.has(interaction.method)) {
+      this.rejectInteraction(
+        interaction,
+        new RuntimeClientRequestError(
+          `目标客户端未协商 Runtime Server Request "${interaction.method}"`,
+        ),
+      );
+      return;
+    }
+    const delivery = this.interactions.beginDelivery(interaction, attachment);
+    if (delivery !== undefined) {
+      this.sendDelivery(interaction, delivery);
+    }
+  }
+
+  private sendDelivery(
+    interaction: ManagedRuntimeClientInteraction,
+    delivery: ManagedRuntimeClientDelivery,
+  ): void {
     try {
-      responder.send({
+      delivery.attachment.responder.send({
         jsonrpc: "2.0",
-        id: delivery.requestId,
-        method: pending.method,
-        params: pending.params,
+        id: delivery.id,
+        method: interaction.method,
+        params: interaction.params,
       });
     } catch (error: unknown) {
-      this.removePending(pending);
-      pending.reject(
+      this.rejectInteraction(
+        interaction,
         new RuntimeClientRequestError(
           error instanceof Error
             ? `Runtime 请求发送失败：${error.message}`
@@ -333,58 +546,72 @@ export class RuntimeClientRequestCoordinator {
     }
   }
 
-  private scheduleExpiration(pending: PendingRuntimeClientRequest): void {
-    if (pending.expiresAt === undefined) {
+  private scheduleExpiration(interaction: ManagedRuntimeClientInteraction): void {
+    if (interaction.expiresAt === undefined) {
       return;
     }
-    const expiresAtMs = Date.parse(pending.expiresAt);
+    const expiresAtMs = Date.parse(interaction.expiresAt);
     const remainingMs = expiresAtMs - this.now();
     if (remainingMs <= 0) {
-      this.expire(pending);
+      this.expire(interaction);
       return;
     }
-    pending.expiresTimer = setTimeout(
+    interaction.expiresTimer = setTimeout(
       () => {
-        pending.expiresTimer = undefined;
-        if (this.pendingByKey.get(pending.key) !== pending) {
+        interaction.expiresTimer = undefined;
+        if (this.interactions.get(interaction.key) !== interaction) {
           return;
         }
-        if (this.isExpired(pending)) {
-          this.expire(pending);
+        if (this.isExpired(interaction)) {
+          this.expire(interaction);
         } else {
-          this.scheduleExpiration(pending);
+          this.scheduleExpiration(interaction);
         }
       },
       Math.min(remainingMs, MAX_TIMEOUT_DELAY_MS),
     );
   }
 
-  private isExpired(pending: PendingRuntimeClientRequest): boolean {
-    return pending.expiresAt !== undefined && Date.parse(pending.expiresAt) <= this.now();
+  private isExpired(interaction: ManagedRuntimeClientInteraction): boolean {
+    return interaction.expiresAt !== undefined && Date.parse(interaction.expiresAt) <= this.now();
   }
 
-  private expire(pending: PendingRuntimeClientRequest): void {
-    if (pending.expiresAt === undefined || this.pendingByKey.get(pending.key) !== pending) {
+  private expire(interaction: ManagedRuntimeClientInteraction): void {
+    if (
+      interaction.expiresAt === undefined ||
+      this.interactions.get(interaction.key) !== interaction
+    ) {
       return;
     }
-    this.sendCancellation(pending, "Runtime 请求已到期");
-    this.removePending(pending);
-    pending.reject(new RuntimeClientRequestExpiredError(pending.expiresAt));
+    const settlement = this.interactions.settle(interaction, {
+      kind: "expired",
+      expiresAt: interaction.expiresAt,
+    });
+    if (!settlement.settled) {
+      return;
+    }
+    this.sendCancellation(interaction, settlement.retiredDelivery, "Runtime 请求已到期");
+    interaction.reject(new RuntimeClientRequestExpiredError(interaction.expiresAt));
   }
 
-  private sendCancellation(pending: PendingRuntimeClientRequest, reason: string): void {
-    const delivery = pending.delivery;
+  private sendCancellation(
+    interaction: ManagedRuntimeClientInteraction,
+    delivery: ManagedRuntimeClientDelivery | undefined,
+    reason: string,
+  ): void {
     if (delivery === undefined) {
       return;
     }
-    const responder = this.responders.get(delivery.responderId)?.responder;
     try {
-      const params = runtimeServerRequestCancelParamsSchema.parse({
-        serverRequestId: delivery.requestId,
-        ...(pending.approvalId !== undefined ? { approvalId: pending.approvalId } : {}),
+      const params = projectRuntimeServerRequestCancelParams(interaction.protocolVersion, {
+        interactionId: interaction.interactionId,
+        serverRequestId: delivery.id,
+        ...(interaction.legacyApprovalId !== undefined
+          ? { approvalId: interaction.legacyApprovalId }
+          : {}),
         reason,
       });
-      responder?.send({
+      delivery.attachment.responder.send({
         jsonrpc: "2.0",
         method: RUNTIME_SERVER_REQUEST_CANCEL_NOTIFICATION,
         params,
@@ -394,14 +621,82 @@ export class RuntimeClientRequestCoordinator {
     }
   }
 
-  private failResponder(responderId: RuntimeClientResponderId, error: Error): void {
-    const affected = [...this.pendingByKey.values()].filter(
-      (pending) => pending.delivery?.responderId === responderId,
-    );
-    for (const pending of affected) {
-      this.removePending(pending);
-      pending.reject(error);
+  private failAttachment(attachment: RuntimeClientResponderAttachment, error: Error): void {
+    for (const interaction of this.interactions.pending()) {
+      if (
+        interaction.eligibleResponderId !== attachment.responder.id ||
+        interaction.scopeId !== attachment.responder.scopeId ||
+        (interaction.state.kind === "delivered" &&
+          interaction.state.delivery.attachment !== attachment)
+      ) {
+        continue;
+      }
+      this.rejectInteraction(interaction, error);
     }
+  }
+
+  private getPendingInteractionProjectionsForAttachment(
+    attachment: RuntimeClientResponderAttachment,
+    threadId: ThreadId,
+  ): readonly PendingInteractionProjection[] {
+    if (
+      this.responders.get(attachment.responder.id) !== attachment ||
+      !attachment.capabilitiesAcknowledged
+    ) {
+      return [];
+    }
+    return this.interactions.pending().flatMap((interaction) => {
+      if (
+        interaction.eligibleResponderId !== attachment.responder.id ||
+        interaction.scopeId !== attachment.responder.scopeId ||
+        (interaction.state.kind === "delivered" &&
+          interaction.state.delivery.attachment !== attachment) ||
+        !getRuntimeProtocolCapabilities(interaction.protocolVersion)
+          .serverRequestCapabilityNegotiation ||
+        !attachment.acceptedServerRequestMethods.has(interaction.method)
+      ) {
+        return [];
+      }
+      if (interaction.method === RUNTIME_SERVER_REQUEST_METHODS.approvalRequest) {
+        const approval = approvalRequestParamsV12Schema.safeParse(interaction.params);
+        if (!approval.success) {
+          this.diagnose(
+            `忽略无法投影的 pending Interaction "${interaction.key}"：params 不符合 1.2 schema`,
+          );
+          return [];
+        }
+        if (approval.data.threadId !== threadId) {
+          return [];
+        }
+        return [
+          pendingInteractionProjectionSchema.parse({
+            method: interaction.method,
+            interactionId: interaction.interactionId,
+            threadId: approval.data.threadId,
+            turnId: approval.data.turnId,
+            expiresAt: approval.data.expiresAt,
+            sensitivity: approval.data.sensitivity,
+            approvalId: approval.data.approval.id,
+          }),
+        ];
+      }
+      const userInput = userInputRequestParamsV12Schema.safeParse(interaction.params);
+      if (!userInput.success) {
+        this.diagnose(
+          `忽略无法投影的 pending Interaction "${interaction.key}"：params 不符合 1.2 schema`,
+        );
+        return [];
+      }
+      if (userInput.data.threadId !== threadId) {
+        return [];
+      }
+      return [
+        pendingInteractionProjectionSchema.parse({
+          method: interaction.method,
+          ...userInput.data,
+        }),
+      ];
+    });
   }
 
   private diagnose(message: string): void {
@@ -412,17 +707,116 @@ export class RuntimeClientRequestCoordinator {
     }
   }
 
-  private removePending(pending: PendingRuntimeClientRequest): void {
-    if (this.pendingByKey.get(pending.key) === pending) {
-      this.pendingByKey.delete(pending.key);
+  private redeliver(key: string, responderId: RuntimeClientResponderId): boolean {
+    const interaction = this.interactions.get(key);
+    const attachment = this.responders.get(responderId);
+    if (
+      interaction === undefined ||
+      attachment === undefined ||
+      interaction.eligibleResponderId !== responderId ||
+      attachment.responder.scopeId !== interaction.scopeId ||
+      !attachment.capabilitiesAcknowledged ||
+      !attachment.acceptedServerRequestMethods.has(interaction.method) ||
+      this.isExpired(interaction)
+    ) {
+      if (interaction !== undefined && this.isExpired(interaction)) {
+        this.expire(interaction);
+      }
+      return false;
     }
-    if (pending.expiresTimer !== undefined) {
-      clearTimeout(pending.expiresTimer);
-      pending.expiresTimer = undefined;
+    const replacement = this.interactions.replaceDelivery(interaction, attachment);
+    if (replacement === undefined) {
+      return false;
     }
-    if (pending.delivery !== undefined) {
-      this.deliveries.delete(pending.delivery.requestId);
-      pending.delivery = undefined;
+    this.sendCancellation(interaction, replacement.previous, "Runtime 请求已重新投递");
+    const activeReplacement = this.interactions.getByDeliveryId(replacement.delivery.id);
+    if (
+      activeReplacement?.interaction !== interaction ||
+      activeReplacement.delivery !== replacement.delivery
+    ) {
+      return false;
     }
+    if (this.isExpired(interaction)) {
+      this.expire(interaction);
+      return false;
+    }
+    this.sendDelivery(interaction, replacement.delivery);
+    return this.interactions.get(interaction.key) === interaction;
   }
+
+  private rejectInteraction(interaction: ManagedRuntimeClientInteraction, error: Error): boolean {
+    const settlement = this.interactions.settle(interaction, { kind: "failed", error });
+    if (!settlement.settled) {
+      return false;
+    }
+    interaction.reject(error);
+    return true;
+  }
+
+  private setServerRequestMethodsForAttachment(
+    attachment: RuntimeClientResponderAttachment,
+    methods: readonly RuntimeServerRequestMethod[],
+    reason: string,
+  ): (() => void) | false {
+    const { responder } = attachment;
+    if (this.responders.get(responder.id) !== attachment) {
+      return false;
+    }
+    const accepted = new Set(methods);
+    const removed = new Set(
+      [...attachment.acceptedServerRequestMethods].filter((method) => !accepted.has(method)),
+    );
+    attachment.acceptedServerRequestMethods = accepted;
+    attachment.capabilitiesAcknowledged = false;
+    for (const interaction of this.interactions.pending()) {
+      if (interaction.eligibleResponderId !== responder.id || !removed.has(interaction.method)) {
+        continue;
+      }
+      const settlement = this.interactions.settle(interaction, { kind: "cancelled", reason });
+      if (!settlement.settled) {
+        continue;
+      }
+      this.sendCancellation(interaction, settlement.retiredDelivery, reason);
+      interaction.reject(new RuntimeClientRequestCancelledError(reason));
+    }
+    return () => {
+      if (
+        this.responders.get(responder.id) !== attachment ||
+        attachment.acceptedServerRequestMethods !== accepted
+      ) {
+        return;
+      }
+      attachment.capabilitiesAcknowledged = true;
+      for (const interaction of this.interactions.pending()) {
+        if (
+          interaction.eligibleResponderId === responder.id &&
+          interaction.state.kind === "waiting"
+        ) {
+          this.deliver(interaction);
+        }
+      }
+    };
+  }
+
+  private beginCapabilityNegotiationForAttachment(
+    attachment: RuntimeClientResponderAttachment,
+  ): boolean {
+    if (this.responders.get(attachment.responder.id) !== attachment) {
+      return false;
+    }
+    attachment.acceptedServerRequestMethods = new Set();
+    attachment.capabilitiesAcknowledged = false;
+    return true;
+  }
+}
+
+/** @internal Package-private transport binding and controlled redelivery. */
+export function getRuntimeClientRequestCoordinatorInternal(
+  coordinator: RuntimeClientRequestCoordinator,
+): RuntimeClientRequestCoordinatorInternal {
+  const internal = runtimeClientRequestCoordinatorInternals.get(coordinator);
+  if (internal === undefined) {
+    throw new RuntimeClientRequestError("Runtime client request coordinator is not initialized");
+  }
+  return internal;
 }

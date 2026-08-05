@@ -1,0 +1,22 @@
+{
+  "jsonrpc": "2.0",
+  "id": "approval-rpc-2",
+  "method": "approval.request",
+  "params": {
+    "interactionId": "00000000-0000-4000-8000-000000000006",
+    "threadId": "00000000-0000-4000-8000-000000000002",
+    "turnId": "00000000-0000-4000-8000-000000000003",
+    "expiresAt": "2026-07-29T12:10:00.000Z",
+    "sensitivity": "normal",
+    "approval": {
+      "id": "00000000-0000-4000-8000-000000000005",
+      "turnId": "00000000-0000-4000-8000-000000000003",
+      "agentName": "browser-use-agent",
+      "toolName": "click",
+      "preview": {
+        "selector": "#submit"
+      },
+      "reason": "此操作会提交表单"
+    }
+  }
+}

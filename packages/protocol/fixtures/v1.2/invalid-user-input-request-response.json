@@ -1,0 +1,13 @@
+{
+  "jsonrpc": "2.0",
+  "id": "user-input-rpc-1",
+  "result": {
+    "status": "submitted",
+    "values": [
+      {
+        "id": "deployment-region",
+        "value": { "secret": "not-a-supported-value" }
+      }
+    ]
+  }
+}

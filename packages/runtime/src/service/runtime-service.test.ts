@@ -2,17 +2,21 @@ import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import { test } from "node:test";
 import {
   RUNTIME_PROTOCOL_VERSION,
+  RUNTIME_V13_MIN_CLIENT_FRAME_BYTES,
   getApprovalExplanation,
-  parseRuntimeMethodResult,
+  parseRuntimeMethodResultForVersion,
   requestIdSchema,
   runtimeMethodSchemas,
   threadIdSchema,
-  type RuntimeEventEnvelope,
+  type RuntimeEventEnvelopeV13,
+  type UserInputForm,
 } from "@roll-agent/protocol";
 import { ThreadStore } from "../store/thread-store.ts";
+import { sessionUserInputRequestIdSchema } from "../interaction/user-input-interaction-manager.ts";
 import {
   createToolExecutionRecord,
   type ToolExecutionRecord,
@@ -28,6 +32,7 @@ import {
   RuntimeServiceError,
   type RuntimeServiceEngine,
   type RuntimeServiceSession,
+  type RuntimeUserInputInteractionEvent,
 } from "./runtime-service.ts";
 
 const IDS = {
@@ -55,6 +60,10 @@ const IDS = {
   requestReplaySecondTurn: "00000000-0000-4000-8000-000000000126",
   requestReplayThirdTurn: "00000000-0000-4000-8000-000000000127",
 } as const;
+
+const APPROVAL_PROVIDER_OPTIONS_SENTINEL = "approval-provider-token-sentinel-176";
+const APPROVAL_REJECTION_SENTINEL = "approval-rejection-token-sentinel-176";
+const TOOL_PROVIDER_OPTIONS_SENTINEL = "tool-provider-token-sentinel-176";
 
 function tempDir(): string {
   return mkdtempSync(join(tmpdir(), "roll-runtime-service-"));
@@ -107,7 +116,12 @@ function createFixture(store: ThreadStore): {
         approvalId: IDS.approval,
         agentName: "demo-agent",
         toolName: "write",
-        input: { path: "/tmp/demo", apiKey: "secret-preview" },
+        input: {
+          path: "/tmp/demo",
+          apiKey: "secret-preview",
+          providerOptions: { configuration: APPROVAL_PROVIDER_OPTIONS_SENTINEL },
+        },
+        expiresAt: "2026-07-28T12:05:00.000Z",
         reason: "requires approval",
         explanation: "写入用户请求的文件，以完成当前任务。",
       };
@@ -122,6 +136,18 @@ function createFixture(store: ThreadStore): {
         };
         return;
       }
+      yield {
+        type: "tool-result",
+        toolCallId: "call-safe-projection",
+        agentName: "demo-agent",
+        toolName: "write",
+        output: "visible",
+        isError: false,
+        display: {
+          status: "completed",
+          providerOptions: { configuration: TOOL_PROVIDER_OPTIONS_SENTINEL },
+        },
+      };
       store.appendMessages(IDS.thread, [{ role: "assistant", content: "completed" }]);
       yield { type: "text-delta", delta: "completed" };
       yield { type: "message-finish", text: "completed" };
@@ -231,7 +257,7 @@ test("RuntimeService keeps pending approval on decision failure and cancels thro
   const store = new ThreadStore(dir);
   const fixture = createFixture(store);
   const service = new RuntimeService(fixture.engine, store, { runtimeVersion: "0.9.0-test" });
-  const events: RuntimeEventEnvelope[] = [];
+  const events: RuntimeEventEnvelopeV13[] = [];
   const originalCancel = fixture.session.cancel.bind(fixture.session);
   let cancelCalls = 0;
   fixture.session.cancel = () => {
@@ -266,6 +292,7 @@ test("RuntimeService keeps pending approval on decision failure and cancels thro
       turnId: required.event.approval.turnId,
       approvalId: required.event.approval.id,
     };
+    assert.equal(service.getPendingApprovalExpiresAt(identity), "2026-07-28T12:05:00.000Z");
     fixture.session.approve = () => {
       throw new Error("approval gate failed");
     };
@@ -313,12 +340,76 @@ test("RuntimeService keeps pending approval on decision failure and cancels thro
   }
 });
 
+test("RuntimeService redacts approval rejection reasons before durable replay", async () => {
+  const dir = tempDir();
+  const store = new ThreadStore(dir);
+  const fixture = createFixture(store);
+  const service = new RuntimeService(fixture.engine, store, { runtimeVersion: "0.9.0-test" });
+  const events: RuntimeEventEnvelopeV13[] = [];
+  service.onEvent((event) => events.push(event));
+  try {
+    service.initialize({
+      protocolVersions: [RUNTIME_PROTOCOL_VERSION],
+      client: { name: "approval-rejection-redaction-test", version: "1.0.0" },
+    });
+    await service.createThread(
+      runtimeMethodSchemas["thread.create"].params.parse({
+        requestId: IDS.requestCreate,
+        title: "Approval rejection redaction",
+      }),
+    );
+    await service.startTurn(
+      runtimeMethodSchemas["turn.start"].params.parse({
+        requestId: IDS.requestFirstTurn,
+        threadId: IDS.thread,
+        turnId: IDS.firstTurn,
+        input: { text: "trigger approval" },
+      }),
+    );
+    await nextTick();
+    const required = events.find((event) => event.event.type === "approval.required");
+    assert.ok(required?.event.type === "approval.required");
+
+    assert.deepEqual(
+      service.resolvePendingApproval(
+        {
+          threadId: required.threadId,
+          turnId: required.event.approval.turnId,
+          approvalId: required.event.approval.id,
+        },
+        {
+          decision: "reject",
+          reason: `apiKey=${APPROVAL_REJECTION_SENTINEL}`,
+        },
+      ),
+      { resolved: true },
+    );
+
+    const resolved = events.find((event) => event.event.type === "approval.resolved");
+    assert.ok(resolved?.event.type === "approval.resolved");
+    assert.equal(JSON.stringify(resolved).includes(APPROVAL_REJECTION_SENTINEL), false);
+    assert.equal(JSON.stringify(resolved).includes("[redacted]"), true);
+
+    const replay = store.resumeRuntimeEvents(required.threadId, null);
+    const replayedResolution = replay.events.find(
+      (event) => event.event.type === "approval.resolved",
+    );
+    assert.ok(replayedResolution?.event.type === "approval.resolved");
+    assert.equal(JSON.stringify(replayedResolution).includes(APPROVAL_REJECTION_SENTINEL), false);
+    assert.equal(JSON.stringify(replayedResolution).includes("[redacted]"), true);
+  } finally {
+    await service.close();
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("RuntimeService cancelTurn releases the approval gate when a resolved listener throws", async () => {
   const dir = tempDir();
   const store = new ThreadStore(dir);
   const fixture = createFixture(store);
   const service = new RuntimeService(fixture.engine, store, { runtimeVersion: "0.9.0-test" });
-  const events: RuntimeEventEnvelope[] = [];
+  const events: RuntimeEventEnvelopeV13[] = [];
   const originalCancel = fixture.session.cancel.bind(fixture.session);
   let cancelCalls = 0;
   fixture.session.cancel = () => {
@@ -394,7 +485,7 @@ test("RuntimeService isolates event listeners before starting and completing a T
   const store = new ThreadStore(dir);
   const fixture = createImmediateFixture(store);
   const service = new RuntimeService(fixture.engine, store, { runtimeVersion: "0.9.0-test" });
-  const eventsAfterThrow: RuntimeEventEnvelope[] = [];
+  const eventsAfterThrow: RuntimeEventEnvelopeV13[] = [];
   service.onEvent(() => {
     throw new Error("listener failed");
   });
@@ -711,12 +802,186 @@ test("RuntimeService bounds completed turnId dedupe with an LRU window", async (
   }
 });
 
+test("RuntimeService durable event Store 失败时不发布 live 且回滚 turn.started", async () => {
+  const dir = tempDir();
+  const store = new ThreadStore(dir);
+  const fixture = createImmediateFixture(store);
+  const service = new RuntimeService(fixture.engine, store);
+  let database: DatabaseSync | undefined;
+  const events: RuntimeEventEnvelopeV13[] = [];
+  service.onEvent((event) => events.push(event));
+  try {
+    await service.createThread(
+      runtimeMethodSchemas["thread.create"].params.parse({
+        requestId: IDS.requestCreate,
+        title: "durable failure",
+      }),
+    );
+    database = new DatabaseSync(join(dir, "threads.db"));
+    database.exec(`
+      CREATE TRIGGER reject_runtime_event_insert
+      BEFORE INSERT ON runtime_events
+      BEGIN
+        SELECT RAISE(ABORT, 'blocked runtime event insert');
+      END;
+    `);
+
+    await assert.rejects(
+      service.startTurn(
+        runtimeMethodSchemas["turn.start"].params.parse({
+          requestId: IDS.requestFirstTurn,
+          threadId: IDS.thread,
+          turnId: IDS.firstTurn,
+          input: { text: "must not execute" },
+        }),
+      ),
+      /blocked runtime event insert/u,
+    );
+    assert.equal(fixture.sendCount(), 0);
+    assert.deepEqual(events, []);
+    const snapshot = service.snapshotThread({
+      threadId: threadIdSchema.parse(IDS.thread),
+      limit: 100,
+    });
+    assert.equal(snapshot.activeTurn, undefined);
+    assert.equal(snapshot.eventCursor, null);
+  } finally {
+    database?.close();
+    await service.close();
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("RuntimeService terminal durable 写盘失败会触发 fatal shutdown signal", async () => {
+  const dir = tempDir();
+  const store = new ThreadStore(dir);
+  const fixture = createImmediateFixture(store);
+  const service = new RuntimeService(fixture.engine, store);
+  let database: DatabaseSync | undefined;
+  const events: RuntimeEventEnvelopeV13[] = [];
+  const fatalErrors: unknown[] = [];
+  service.onEvent((event) => events.push(event));
+  service.onFatalError((error) => fatalErrors.push(error));
+  try {
+    await service.createThread(
+      runtimeMethodSchemas["thread.create"].params.parse({
+        requestId: IDS.requestCreate,
+        title: "terminal durable failure",
+      }),
+    );
+    database = new DatabaseSync(join(dir, "threads.db"));
+    database.exec(`
+      CREATE TRIGGER reject_terminal_runtime_event
+      BEFORE INSERT ON runtime_events
+      WHEN NEW.event_json LIKE '%"turn.completed"%'
+      BEGIN
+        SELECT RAISE(ABORT, 'blocked terminal runtime event insert');
+      END;
+    `);
+
+    assert.equal(
+      (
+        await service.startTurn(
+          runtimeMethodSchemas["turn.start"].params.parse({
+            requestId: IDS.requestFirstTurn,
+            threadId: IDS.thread,
+            turnId: IDS.firstTurn,
+            input: { text: "complete then fail persistence" },
+          }),
+        )
+      ).accepted,
+      true,
+    );
+    await nextTick();
+
+    assert.equal(fatalErrors.length, 1);
+    assert.match(String(fatalErrors[0]), /blocked terminal runtime event insert/u);
+    assert.equal(
+      events.some((event) => event.event.type === "turn.completed"),
+      false,
+    );
+    assert.equal(
+      service
+        .resumeEvents({ threadId: threadIdSchema.parse(IDS.thread), afterCursor: null })
+        .events.some((event) => event.event.type === "turn.completed"),
+      false,
+    );
+  } finally {
+    database?.close();
+    await service.close();
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("RuntimeService approval resolution durable 写盘失败会触发 fatal shutdown signal", async () => {
+  const dir = tempDir();
+  const store = new ThreadStore(dir);
+  const fixture = createFixture(store);
+  const service = new RuntimeService(fixture.engine, store);
+  let database: DatabaseSync | undefined;
+  const events: RuntimeEventEnvelopeV13[] = [];
+  const fatalErrors: unknown[] = [];
+  service.onEvent((event) => events.push(event));
+  service.onFatalError((error) => fatalErrors.push(error));
+  try {
+    await service.createThread(
+      runtimeMethodSchemas["thread.create"].params.parse({
+        requestId: IDS.requestCreate,
+        title: "approval durable failure",
+      }),
+    );
+    await service.startTurn(
+      runtimeMethodSchemas["turn.start"].params.parse({
+        requestId: IDS.requestFirstTurn,
+        threadId: IDS.thread,
+        turnId: IDS.firstTurn,
+        input: { text: "approve then fail persistence" },
+      }),
+    );
+    await nextTick();
+    const required = events.find((event) => event.event.type === "approval.required");
+    assert.ok(required?.event.type === "approval.required");
+    const identity = {
+      threadId: required.threadId,
+      turnId: required.event.approval.turnId,
+      approvalId: required.event.approval.id,
+    };
+    database = new DatabaseSync(join(dir, "threads.db"));
+    database.exec(`
+      CREATE TRIGGER reject_approval_resolution_runtime_event
+      BEFORE INSERT ON runtime_events
+      WHEN NEW.event_json LIKE '%"approval.resolved"%'
+      BEGIN
+        SELECT RAISE(ABORT, 'blocked approval resolution runtime event insert');
+      END;
+    `);
+
+    assert.throws(
+      () => service.resolvePendingApproval(identity, { decision: "approve" }),
+      /blocked approval resolution runtime event insert/u,
+    );
+    assert.equal(fatalErrors.length, 1);
+    assert.match(String(fatalErrors[0]), /blocked approval resolution runtime event insert/u);
+    assert.equal(
+      events.some((event) => event.event.type === "approval.resolved"),
+      false,
+    );
+  } finally {
+    database?.close();
+    await service.close();
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("RuntimeService v1 supports lifecycle, concurrent approval/cancel and process-local dedupe", async () => {
   const dir = tempDir();
   const store = new ThreadStore(dir);
   const fixture = createFixture(store);
   const service = new RuntimeService(fixture.engine, store, { runtimeVersion: "0.9.0-test" });
-  const events: RuntimeEventEnvelope[] = [];
+  const events: RuntimeEventEnvelopeV13[] = [];
   let terminalSnapshotHadActiveTurn = false;
   service.onEvent((event) => {
     events.push(event);
@@ -738,7 +1003,7 @@ test("RuntimeService v1 supports lifecycle, concurrent approval/cancel and proce
       client: { name: "test-client", version: "1.0.0" },
     });
     assert.equal(initialized.protocolVersion, RUNTIME_PROTOCOL_VERSION);
-    assert.equal(initialized.limits.eventReplay, false);
+    assert.equal(initialized.limits.eventReplay, true);
     assert.equal(initialized.limits.idempotencyCacheEntries, 10_000);
 
     const created = await service.createThread(
@@ -790,6 +1055,12 @@ test("RuntimeService v1 supports lifecycle, concurrent approval/cancel and proce
       false,
     );
     assert.equal(
+      JSON.stringify(approvalEvent.event.approval.preview).includes(
+        APPROVAL_PROVIDER_OPTIONS_SENTINEL,
+      ),
+      false,
+    );
+    assert.equal(
       getApprovalExplanation(approvalEvent.event.approval),
       "写入用户请求的文件，以完成当前任务。",
     );
@@ -823,6 +1094,12 @@ test("RuntimeService v1 supports lifecycle, concurrent approval/cancel and proce
       resolution: { status: "resolved", decision: "approve" },
     });
     await nextTick();
+    const toolCompleted = events.find((event) => event.event.type === "tool.completed");
+    assert.ok(toolCompleted?.event.type === "tool.completed");
+    assert.equal(
+      JSON.stringify(toolCompleted.event.display).includes(TOOL_PROVIDER_OPTIONS_SENTINEL),
+      false,
+    );
     const completedIndex = events.findIndex((event) => event.event.type === "turn.completed");
     assert.ok(completedIndex > approvalResolvedIndex);
 
@@ -855,6 +1132,51 @@ test("RuntimeService v1 supports lifecycle, concurrent approval/cancel and proce
     assert.deepEqual(
       events.map((event) => event.sequence),
       events.map((_event, index) => index),
+    );
+    const durableTypes = new Set([
+      "turn.started",
+      "message.completed",
+      "tool.completed",
+      "approval.required",
+      "approval.resolved",
+      "turn.completed",
+      "turn.cancelled",
+      "turn.failed",
+      "capabilities.changed",
+    ]);
+    for (const event of events) {
+      assert.equal(event.durability, durableTypes.has(event.event.type) ? "durable" : "ephemeral");
+    }
+    const replay = service.resumeEvents({
+      threadId: threadIdSchema.parse(IDS.thread),
+      afterCursor: null,
+    });
+    const durableEvents = events.filter((event) => event.durability === "durable");
+    assert.equal(replay.replayedCount, durableEvents.length);
+    assert.deepEqual(
+      replay.events.map((event) => event.event.type),
+      durableEvents.map((event) => event.event.type),
+    );
+    const replayedApproval = replay.events.find(
+      (event) => event.event.type === "approval.required",
+    );
+    assert.ok(replayedApproval?.event.type === "approval.required");
+    assert.equal(
+      JSON.stringify(replayedApproval.event.approval.preview).includes(
+        APPROVAL_PROVIDER_OPTIONS_SENTINEL,
+      ),
+      false,
+    );
+    const replayedTool = replay.events.find((event) => event.event.type === "tool.completed");
+    assert.ok(replayedTool?.event.type === "tool.completed");
+    assert.equal(
+      JSON.stringify(replayedTool.event.display).includes(TOOL_PROVIDER_OPTIONS_SENTINEL),
+      false,
+    );
+    assert.equal(
+      replay.throughCursor,
+      service.snapshotThread({ threadId: threadIdSchema.parse(IDS.thread), limit: 100 })
+        .eventCursor,
     );
 
     const renamed = await service.renameThread(
@@ -936,7 +1258,12 @@ test("RuntimeService snapshot reads append-only transcript and redacted Tool led
       reason: "user",
     });
     assert.equal("executionState" in (snapshot.operations.items[0]?.outcome ?? {}), false);
-    assert.doesNotThrow(() => parseRuntimeMethodResult("thread.snapshot", snapshot));
+    assert.doesNotThrow(() =>
+      parseRuntimeMethodResultForVersion("1.3", "thread.snapshot", {
+        ...snapshot,
+        pendingInteractions: [],
+      }),
+    );
     assert.equal(JSON.stringify(snapshot.operations.items).includes("secret-input"), false);
     assert.equal(JSON.stringify(snapshot.operations.items).includes("secret-raw"), false);
     assert.equal(snapshot.transcriptCompleteness, "complete");
@@ -953,9 +1280,48 @@ test("RuntimeService snapshot reads append-only transcript and redacted Tool led
       reason: "user",
     });
     assert.equal("executionState" in (operation.operation?.outcome ?? {}), false);
-    assert.doesNotThrow(() => parseRuntimeMethodResult("operation.get", operation));
+    assert.doesNotThrow(() =>
+      parseRuntimeMethodResultForVersion("1.3", "operation.get", operation),
+    );
     assert.equal("raw" in (operation.operation ?? {}), false);
     assert.equal("input" in (operation.operation ?? {}), false);
+  } finally {
+    await service.close();
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("RuntimeService limit-one recovery Snapshot keeps large transcript pages frame-bounded", async () => {
+  const dir = tempDir();
+  const store = new ThreadStore(dir);
+  const fixture = createFixture(store);
+  const service = new RuntimeService(fixture.engine, store);
+  try {
+    await service.createThread(
+      runtimeMethodSchemas["thread.create"].params.parse({
+        requestId: requestIdSchema.parse(IDS.requestCreate),
+        title: "Large recovery Snapshot",
+      }),
+    );
+    const text = "x".repeat(9 * 1_024 * 1_024);
+    store.appendMessages(IDS.thread, [
+      { role: "assistant", content: text },
+      { role: "assistant", content: text },
+    ]);
+
+    const snapshot = service.snapshotThread(
+      runtimeMethodSchemas["thread.snapshot"].params.parse({
+        threadId: IDS.thread,
+        limit: 1,
+      }),
+    );
+    assert.equal(snapshot.messages.items.length, 1);
+    assert.equal(snapshot.messages.items[0]?.parts[0]?.text.length, text.length);
+    assert.equal(snapshot.messages.nextBeforeSequence, 1);
+    assert.ok(
+      Buffer.byteLength(JSON.stringify(snapshot), "utf8") < RUNTIME_V13_MIN_CLIENT_FRAME_BYTES,
+    );
   } finally {
     await service.close();
     store.close();
@@ -1029,6 +1395,226 @@ test("RuntimeService 关闭后拒绝重新 initialize", async () => {
         error.rollCode === "RUNTIME_CLOSING" &&
         error.retryable,
     );
+  } finally {
+    await service.close();
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("RuntimeService projects waiting-for-user and settles user input exactly once", async () => {
+  const dir = tempDir();
+  const store = new ThreadStore(dir);
+  const requestId = sessionUserInputRequestIdSchema.parse("00000000-0000-4000-8000-000000000130");
+  const invalidRequestId = sessionUserInputRequestIdSchema.parse(
+    "00000000-0000-4000-8000-000000000131",
+  );
+  const staleRequestId = sessionUserInputRequestIdSchema.parse(
+    "00000000-0000-4000-8000-000000000132",
+  );
+  const submitted = Promise.withResolvers<void>();
+  const cancelled = Promise.withResolvers<void>();
+  const staleCancelled = Promise.withResolvers<void>();
+  const enabled: boolean[] = [];
+  const cancellationReasons: string[] = [];
+  let submittedPending = true;
+  let invalidPending = true;
+  let stalePending = true;
+  let resolveCalls = 0;
+  const form: UserInputForm = {
+    title: "选择目标 Workspace",
+    controls: [
+      {
+        type: "text",
+        id: "workspace",
+        label: "目标 Workspace",
+        required: true,
+        maxLength: 120,
+      },
+    ],
+  };
+  const session: RuntimeServiceSession = {
+    id: IDS.thread,
+    async *send() {
+      yield { type: "message-start", messageId: IDS.message };
+      yield {
+        type: "user-input-required",
+        requestId,
+        expiresAt: new Date(Date.now() + 60_000).toISOString(),
+        form,
+      };
+      await submitted.promise;
+      yield { type: "user-input-settled", requestId, status: "submitted" };
+      yield {
+        type: "user-input-required",
+        requestId: invalidRequestId,
+        expiresAt: new Date(Date.now() + 60_000).toISOString(),
+        form,
+      };
+      await cancelled.promise;
+      yield { type: "user-input-settled", requestId: invalidRequestId, status: "cancelled" };
+      yield {
+        type: "user-input-required",
+        requestId: staleRequestId,
+        expiresAt: new Date(Date.now() + 60_000).toISOString(),
+        form,
+      };
+      await staleCancelled.promise;
+      yield { type: "user-input-settled", requestId: staleRequestId, status: "cancelled" };
+      yield { type: "message-finish", text: "done" };
+    },
+    approve() {
+      return false;
+    },
+    reject() {
+      return false;
+    },
+    cancel() {
+      return false;
+    },
+    async close() {},
+    setUserInputAvailable(available) {
+      enabled.push(available);
+    },
+    resolveUserInput(candidateRequestId) {
+      if (candidateRequestId === staleRequestId) {
+        resolveCalls += 1;
+        return false;
+      }
+      if (!submittedPending || candidateRequestId !== requestId) {
+        return false;
+      }
+      resolveCalls += 1;
+      submittedPending = false;
+      submitted.resolve();
+      return true;
+    },
+    cancelUserInput(candidateRequestId, reason) {
+      if (invalidPending && candidateRequestId === invalidRequestId) {
+        invalidPending = false;
+        cancellationReasons.push(reason ?? "");
+        cancelled.resolve();
+        return true;
+      }
+      if (stalePending && candidateRequestId === staleRequestId) {
+        stalePending = false;
+        cancellationReasons.push(reason ?? "");
+        staleCancelled.resolve();
+        return true;
+      }
+      return false;
+    },
+    getCapabilityManifest() {
+      throw new Error("capabilities are not used by this fixture");
+    },
+    getCapabilityTurnContext() {
+      return undefined;
+    },
+  };
+  const engine: RuntimeServiceEngine = {
+    async createSession() {
+      store.createThread({ id: IDS.thread, model: "fixture-model" });
+      return session;
+    },
+    async resumeSession() {
+      return session;
+    },
+  };
+  const service = new RuntimeService(engine, store);
+  const interactions: RuntimeUserInputInteractionEvent[] = [];
+  service.onUserInputInteraction((event) => interactions.push(event));
+  try {
+    service.setUserInputAvailable(true);
+    await service.createThread(
+      runtimeMethodSchemas["thread.create"].params.parse({
+        requestId: IDS.requestCreate,
+      }),
+    );
+    await service.startTurn(
+      runtimeMethodSchemas["turn.start"].params.parse({
+        requestId: IDS.requestFirstTurn,
+        threadId: IDS.thread,
+        turnId: IDS.firstTurn,
+        input: { text: "需要 workspace" },
+      }),
+    );
+    await nextTick();
+
+    assert.deepEqual(enabled, [true]);
+    assert.equal(
+      service.snapshotThread({ threadId: threadIdSchema.parse(IDS.thread), limit: 100 }).activeTurn
+        ?.status,
+      "waiting-for-user",
+    );
+    const required = interactions[0];
+    assert.ok(required?.type === "required");
+    assert.notEqual(required.form, form);
+    assert.notEqual(required.form.controls[0], form.controls[0]);
+    Object.assign(form.controls[0]!, { maxLength: 1 });
+    assert.throws(() => Object.assign(required.form.controls[0]!, { maxLength: 2 }), TypeError);
+    assert.equal(
+      service.resolvePendingUserInput(requestId, {
+        status: "submitted",
+        values: [{ id: "workspace", value: "product-docs" }],
+      }),
+      true,
+    );
+    Object.assign(form.controls[0]!, { maxLength: 120 });
+    assert.equal(
+      service.resolvePendingUserInput(requestId, {
+        status: "submitted",
+        values: [{ id: "workspace", value: "late-duplicate" }],
+      }),
+      false,
+    );
+    await nextTick();
+    assert.equal(
+      service.snapshotThread({ threadId: threadIdSchema.parse(IDS.thread), limit: 100 }).activeTurn
+        ?.status,
+      "waiting-for-user",
+    );
+    assert.equal(
+      service.resolvePendingUserInput(invalidRequestId, {
+        status: "submitted",
+        values: [{ id: "workspace", value: true }],
+      }),
+      false,
+    );
+    assert.equal(resolveCalls, 1);
+    assert.deepEqual(cancellationReasons, ["用户输入不符合原始表单约束"]);
+    assert.equal(
+      service.snapshotThread({ threadId: threadIdSchema.parse(IDS.thread), limit: 100 }).activeTurn
+        ?.status,
+      "running",
+    );
+    const invalidSettled = interactions.find(
+      (event) => event.type === "settled" && event.requestId === invalidRequestId,
+    );
+    assert.ok(invalidSettled?.type === "settled");
+    assert.equal(invalidSettled.reason, "用户输入不符合原始表单约束");
+    await nextTick();
+    assert.equal(
+      service.snapshotThread({ threadId: threadIdSchema.parse(IDS.thread), limit: 100 }).activeTurn
+        ?.status,
+      "waiting-for-user",
+    );
+    assert.equal(
+      service.resolvePendingUserInput(staleRequestId, {
+        status: "submitted",
+        values: [{ id: "workspace", value: "still-valid" }],
+      }),
+      false,
+    );
+    assert.equal(resolveCalls, 2);
+    assert.deepEqual(cancellationReasons, ["用户输入不符合原始表单约束", "用户输入请求已失效"]);
+    const staleSettled = interactions.find(
+      (event) => event.type === "settled" && event.requestId === staleRequestId,
+    );
+    assert.ok(staleSettled?.type === "settled");
+    assert.equal(staleSettled.reason, "用户输入请求已失效");
+    await nextTick();
+    assert.equal(interactions.filter((event) => event.type === "settled").length, 3);
+    assert.equal(JSON.stringify(interactions).includes("product-docs"), false);
   } finally {
     await service.close();
     store.close();

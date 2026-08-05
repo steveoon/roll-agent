@@ -1,0 +1,673 @@
+{
+  "protocolVersion": "1.1",
+  "frames": [
+    {
+      "id": "device-connect-v11",
+      "fixture": "valid-device-connect.json",
+      "valid": true
+    },
+    {
+      "id": "runtime-request-v11",
+      "fixture": "valid-runtime-request.json",
+      "valid": true
+    },
+    {
+      "id": "interaction-candidate-user-input",
+      "fixture": "valid-interaction-candidate-user-input.json",
+      "valid": true
+    },
+    {
+      "id": "runtime-response-v11",
+      "fixture": "valid-runtime-response.json",
+      "valid": true
+    },
+    {
+      "id": "runtime-event-v11",
+      "fixture": "valid-runtime-event.json",
+      "valid": true
+    },
+    {
+      "id": "runtime-event-runtime-n-minus-one",
+      "fixture": "valid-runtime-event-runtime-n-minus-one.json",
+      "valid": true
+    },
+    {
+      "id": "runtime-ack-v11",
+      "fixture": "valid-runtime-ack.json",
+      "valid": true
+    },
+    {
+      "id": "runtime-gap-v11",
+      "fixture": "valid-runtime-gap.json",
+      "valid": true
+    },
+    {
+      "id": "runtime-encrypted-interaction-v11",
+      "fixture": "valid-runtime-encrypted-interaction.json",
+      "valid": true
+    },
+    {
+      "id": "interaction-request-approval",
+      "fixture": "valid-interaction-request-approval.json",
+      "valid": true
+    },
+    {
+      "id": "interaction-request-user-input",
+      "fixture": "valid-interaction-request-user-input.json",
+      "valid": true
+    },
+    {
+      "id": "interaction-resolved",
+      "fixture": "valid-interaction-resolved.json",
+      "valid": true
+    },
+    {
+      "id": "interaction-cancelled",
+      "fixture": "valid-interaction-cancelled.json",
+      "valid": true
+    },
+    {
+      "id": "n-minus-one-device-connect-rejected",
+      "fixture": "invalid-n-minus-one-device-connect.json",
+      "valid": false
+    },
+    {
+      "id": "legacy-approval-respond-rejected",
+      "fixture": "invalid-legacy-approval-respond.json",
+      "valid": false
+    },
+    {
+      "id": "legacy-approval-candidate-rejected",
+      "fixture": "invalid-legacy-approval-candidate.json",
+      "valid": false
+    },
+    {
+      "id": "approval-projection-raw-input-leak",
+      "fixture": "invalid-approval-projection-raw-input-leak.json",
+      "valid": false
+    },
+    {
+      "id": "user-input-projection-secret-leak",
+      "fixture": "invalid-user-input-projection-secret-leak.json",
+      "valid": false
+    },
+    {
+      "id": "non-normal-sensitivity-rejected",
+      "fixture": "invalid-non-normal-sensitivity.json",
+      "valid": false
+    },
+    {
+      "id": "authentication-local-only",
+      "fixture": "invalid-authentication-local-only.json",
+      "valid": false
+    },
+    {
+      "id": "file-picker-local-only",
+      "fixture": "invalid-file-picker-local-only.json",
+      "valid": false
+    },
+    {
+      "id": "interaction-resolved-result-leak",
+      "fixture": "invalid-interaction-resolved-result-leak.json",
+      "valid": false
+    },
+    {
+      "id": "interaction-cancelled-reason-leak",
+      "fixture": "invalid-interaction-cancelled-reason-leak.json",
+      "valid": false
+    },
+    {
+      "id": "runtime-event-tool-input-leak",
+      "fixture": "invalid-runtime-event-tool-input-leak.json",
+      "valid": false
+    },
+    {
+      "id": "runtime-event-tool-output-leak",
+      "fixture": "invalid-runtime-event-tool-output-leak.json",
+      "valid": false
+    }
+  ],
+  "negotiation": [
+    {
+      "id": "same-version-v11",
+      "peerVersions": ["1.1"],
+      "expected": "1.1"
+    },
+    {
+      "id": "latest-supported-version-preferred",
+      "peerVersions": ["1.0", "1.1"],
+      "expected": "1.1"
+    },
+    {
+      "id": "n-minus-one-fallback",
+      "peerVersions": ["1.0"],
+      "expected": "1.0"
+    },
+    {
+      "id": "unknown-before-supported-v11",
+      "peerVersions": ["9.9", "1.1"],
+      "expected": "1.1"
+    },
+    {
+      "id": "unknown-only-v11",
+      "peerVersions": ["9.9"],
+      "expected": null
+    }
+  ],
+  "methodRegistry": [
+    {
+      "id": "method-disposition-v11-initialize",
+      "value": "initialize",
+      "expected": "local-only"
+    },
+    {
+      "id": "method-disposition-v11-thread.list",
+      "value": "thread.list",
+      "expected": "query"
+    },
+    {
+      "id": "method-disposition-v11-thread.create",
+      "value": "thread.create",
+      "expected": "mutation"
+    },
+    {
+      "id": "method-disposition-v11-thread.open",
+      "value": "thread.open",
+      "expected": "query"
+    },
+    {
+      "id": "method-disposition-v11-thread.snapshot",
+      "value": "thread.snapshot",
+      "expected": "query"
+    },
+    {
+      "id": "method-disposition-v11-thread.rename",
+      "value": "thread.rename",
+      "expected": "mutation"
+    },
+    {
+      "id": "method-disposition-v11-thread.delete",
+      "value": "thread.delete",
+      "expected": "mutation"
+    },
+    {
+      "id": "method-disposition-v11-thread.detach",
+      "value": "thread.detach",
+      "expected": "mutation"
+    },
+    {
+      "id": "method-disposition-v11-thread.capabilities",
+      "value": "thread.capabilities",
+      "expected": "query"
+    },
+    {
+      "id": "method-disposition-v11-turn.start",
+      "value": "turn.start",
+      "expected": "mutation"
+    },
+    {
+      "id": "method-disposition-v11-turn.cancel",
+      "value": "turn.cancel",
+      "expected": "mutation"
+    },
+    {
+      "id": "method-disposition-v11-operation.get",
+      "value": "operation.get",
+      "expected": "query"
+    },
+    {
+      "id": "method-disposition-v11-interaction.candidate",
+      "value": "interaction.candidate",
+      "expected": "mutation"
+    },
+    {
+      "id": "legacy-approval-respond-not-recognized-v11",
+      "value": "approval.respond",
+      "expected": null
+    },
+    {
+      "id": "legacy-approval-candidate-not-recognized-v11",
+      "value": "approval.candidate",
+      "expected": null
+    },
+    {
+      "id": "unknown-method-not-recognized-v11",
+      "value": "runtime.futureMethod",
+      "expected": null
+    }
+  ],
+  "methods": [
+    {
+      "id": "interaction-candidate-approval-params",
+      "method": "interaction.candidate",
+      "kind": "params",
+      "valid": true,
+      "value": {
+        "interactionId": "00000000-0000-4000-8000-000000000511",
+        "threadId": "00000000-0000-4000-8000-000000000502",
+        "turnId": "00000000-0000-4000-8000-000000000503",
+        "method": "approval.request",
+        "candidate": {
+          "decision": "approve"
+        }
+      }
+    },
+    {
+      "id": "interaction-candidate-user-input-params",
+      "method": "interaction.candidate",
+      "kind": "params",
+      "valid": true,
+      "value": {
+        "interactionId": "00000000-0000-4000-8000-000000000511",
+        "threadId": "00000000-0000-4000-8000-000000000502",
+        "turnId": "00000000-0000-4000-8000-000000000503",
+        "method": "userInput.request",
+        "candidate": {
+          "status": "submitted",
+          "values": [
+            {
+              "id": "region",
+              "value": ["north"]
+            },
+            {
+              "id": "workspace",
+              "value": "production"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "interaction-candidate-method-result-mismatch",
+      "method": "interaction.candidate",
+      "kind": "params",
+      "valid": false,
+      "value": {
+        "interactionId": "00000000-0000-4000-8000-000000000511",
+        "threadId": "00000000-0000-4000-8000-000000000502",
+        "turnId": "00000000-0000-4000-8000-000000000503",
+        "method": "approval.request",
+        "candidate": {
+          "status": "submitted",
+          "values": []
+        }
+      }
+    },
+    {
+      "id": "interaction-candidate-missing-identity",
+      "method": "interaction.candidate",
+      "kind": "params",
+      "valid": false,
+      "value": {
+        "method": "userInput.request",
+        "candidate": {
+          "status": "cancelled"
+        }
+      }
+    },
+    {
+      "id": "interaction-candidate-result",
+      "method": "interaction.candidate",
+      "kind": "result",
+      "valid": true,
+      "value": {
+        "accepted": true
+      }
+    },
+    {
+      "id": "interaction-candidate-result-must-be-accepted",
+      "method": "interaction.candidate",
+      "kind": "result",
+      "valid": false,
+      "value": {
+        "accepted": false
+      }
+    }
+  ],
+  "replay": [
+    {
+      "id": "interaction-candidate-duplicate",
+      "existing": {
+        "type": "runtime.request",
+        "requestId": "00000000-0000-4000-8000-000000000509",
+        "workspaceId": "00000000-0000-4000-8000-000000000507",
+        "method": "interaction.candidate",
+        "params": {
+          "interactionId": "00000000-0000-4000-8000-000000000511",
+          "threadId": "00000000-0000-4000-8000-000000000502",
+          "turnId": "00000000-0000-4000-8000-000000000503",
+          "method": "userInput.request",
+          "candidate": {
+            "status": "submitted",
+            "values": [
+              {
+                "id": "region",
+                "value": "north"
+              },
+              {
+                "id": "workspace",
+                "value": "target-workspace"
+              }
+            ]
+          }
+        }
+      },
+      "candidate": {
+        "type": "runtime.request",
+        "requestId": "00000000-0000-4000-8000-000000000509",
+        "workspaceId": "00000000-0000-4000-8000-000000000507",
+        "method": "interaction.candidate",
+        "params": {
+          "turnId": "00000000-0000-4000-8000-000000000503",
+          "interactionId": "00000000-0000-4000-8000-000000000511",
+          "candidate": {
+            "values": [
+              {
+                "value": "north",
+                "id": "region"
+              },
+              {
+                "value": "target-workspace",
+                "id": "workspace"
+              }
+            ],
+            "status": "submitted"
+          },
+          "method": "userInput.request",
+          "threadId": "00000000-0000-4000-8000-000000000502"
+        }
+      },
+      "expected": {
+        "disposition": "replay"
+      }
+    },
+    {
+      "id": "interaction-candidate-conflict",
+      "existing": {
+        "type": "runtime.request",
+        "requestId": "00000000-0000-4000-8000-000000000509",
+        "workspaceId": "00000000-0000-4000-8000-000000000507",
+        "method": "interaction.candidate",
+        "params": {
+          "interactionId": "00000000-0000-4000-8000-000000000511",
+          "threadId": "00000000-0000-4000-8000-000000000502",
+          "turnId": "00000000-0000-4000-8000-000000000503",
+          "method": "userInput.request",
+          "candidate": {
+            "status": "submitted",
+            "values": [
+              {
+                "id": "region",
+                "value": "north"
+              },
+              {
+                "id": "workspace",
+                "value": "target-workspace"
+              }
+            ]
+          }
+        }
+      },
+      "candidate": {
+        "type": "runtime.request",
+        "requestId": "00000000-0000-4000-8000-000000000509",
+        "workspaceId": "00000000-0000-4000-8000-000000000507",
+        "method": "interaction.candidate",
+        "params": {
+          "interactionId": "00000000-0000-4000-8000-000000000512",
+          "threadId": "00000000-0000-4000-8000-000000000502",
+          "turnId": "00000000-0000-4000-8000-000000000503",
+          "method": "userInput.request",
+          "candidate": {
+            "status": "submitted",
+            "values": [
+              {
+                "id": "region",
+                "value": "north"
+              },
+              {
+                "id": "workspace",
+                "value": "target-workspace"
+              }
+            ]
+          }
+        }
+      },
+      "expected": {
+        "disposition": "conflict",
+        "errorCode": "RELAY_REQUEST_ID_CONFLICT"
+      }
+    },
+    {
+      "id": "interaction-candidate-different-request-id",
+      "existing": {
+        "type": "runtime.request",
+        "requestId": "00000000-0000-4000-8000-000000000509",
+        "workspaceId": "00000000-0000-4000-8000-000000000507",
+        "method": "interaction.candidate",
+        "params": {
+          "interactionId": "00000000-0000-4000-8000-000000000511",
+          "threadId": "00000000-0000-4000-8000-000000000502",
+          "turnId": "00000000-0000-4000-8000-000000000503",
+          "method": "userInput.request",
+          "candidate": {
+            "status": "submitted",
+            "values": [
+              {
+                "id": "region",
+                "value": "north"
+              },
+              {
+                "id": "workspace",
+                "value": "target-workspace"
+              }
+            ]
+          }
+        }
+      },
+      "candidate": {
+        "type": "runtime.request",
+        "requestId": "00000000-0000-4000-8000-000000000505",
+        "workspaceId": "00000000-0000-4000-8000-000000000507",
+        "method": "interaction.candidate",
+        "params": {
+          "interactionId": "00000000-0000-4000-8000-000000000511",
+          "threadId": "00000000-0000-4000-8000-000000000502",
+          "turnId": "00000000-0000-4000-8000-000000000503",
+          "method": "userInput.request",
+          "candidate": {
+            "status": "submitted",
+            "values": [
+              {
+                "id": "region",
+                "value": "north"
+              },
+              {
+                "id": "workspace",
+                "value": "target-workspace"
+              }
+            ]
+          }
+        }
+      },
+      "expected": {
+        "disposition": "new"
+      }
+    },
+    {
+      "id": "interaction-candidate-different-workspace",
+      "existing": {
+        "type": "runtime.request",
+        "requestId": "00000000-0000-4000-8000-000000000509",
+        "workspaceId": "00000000-0000-4000-8000-000000000507",
+        "method": "interaction.candidate",
+        "params": {
+          "interactionId": "00000000-0000-4000-8000-000000000511",
+          "threadId": "00000000-0000-4000-8000-000000000502",
+          "turnId": "00000000-0000-4000-8000-000000000503",
+          "method": "userInput.request",
+          "candidate": {
+            "status": "submitted",
+            "values": [
+              {
+                "id": "region",
+                "value": "north"
+              },
+              {
+                "id": "workspace",
+                "value": "target-workspace"
+              }
+            ]
+          }
+        }
+      },
+      "candidate": {
+        "type": "runtime.request",
+        "requestId": "00000000-0000-4000-8000-000000000509",
+        "workspaceId": "00000000-0000-4000-8000-000000000510",
+        "method": "interaction.candidate",
+        "params": {
+          "interactionId": "00000000-0000-4000-8000-000000000511",
+          "threadId": "00000000-0000-4000-8000-000000000502",
+          "turnId": "00000000-0000-4000-8000-000000000503",
+          "method": "userInput.request",
+          "candidate": {
+            "status": "submitted",
+            "values": [
+              {
+                "id": "region",
+                "value": "north"
+              },
+              {
+                "id": "workspace",
+                "value": "target-workspace"
+              }
+            ]
+          }
+        }
+      },
+      "expected": {
+        "disposition": "new"
+      }
+    }
+  ],
+  "ack": [
+    {
+      "id": "initial-advance",
+      "acknowledgedThrough": -1,
+      "advertisedThrough": 0,
+      "incomingThrough": 0,
+      "expected": "advance"
+    },
+    {
+      "id": "advance-contiguous-prefix",
+      "acknowledgedThrough": 0,
+      "advertisedThrough": 2,
+      "incomingThrough": 2,
+      "expected": "advance"
+    },
+    {
+      "id": "equal-duplicate-ack",
+      "acknowledgedThrough": 2,
+      "advertisedThrough": 2,
+      "incomingThrough": 2,
+      "expected": "duplicate"
+    },
+    {
+      "id": "stale-duplicate-ack",
+      "acknowledgedThrough": 2,
+      "advertisedThrough": 2,
+      "incomingThrough": 1,
+      "expected": "duplicate"
+    },
+    {
+      "id": "ack-beyond-advertised",
+      "acknowledgedThrough": 0,
+      "advertisedThrough": 1,
+      "incomingThrough": 2,
+      "expected": "invalid"
+    },
+    {
+      "id": "fractional-ack",
+      "acknowledgedThrough": 0,
+      "advertisedThrough": 1,
+      "incomingThrough": 0.5,
+      "expected": "invalid"
+    },
+    {
+      "id": "ack-below-sentinel",
+      "acknowledgedThrough": -2,
+      "advertisedThrough": 0,
+      "incomingThrough": 0,
+      "expected": "invalid"
+    }
+  ],
+  "errors": [
+    {
+      "id": "error-retryability-RELAY_PROTOCOL_VERSION_UNSUPPORTED",
+      "code": "RELAY_PROTOCOL_VERSION_UNSUPPORTED",
+      "retryable": false
+    },
+    {
+      "id": "error-retryability-RELAY_INVALID_FRAME",
+      "code": "RELAY_INVALID_FRAME",
+      "retryable": false
+    },
+    {
+      "id": "error-retryability-INVALID_PARAMS",
+      "code": "INVALID_PARAMS",
+      "retryable": false
+    },
+    {
+      "id": "error-retryability-RELAY_REQUEST_ID_CONFLICT",
+      "code": "RELAY_REQUEST_ID_CONFLICT",
+      "retryable": false
+    },
+    {
+      "id": "error-retryability-WORKSPACE_NOT_FOUND",
+      "code": "WORKSPACE_NOT_FOUND",
+      "retryable": false
+    },
+    {
+      "id": "error-retryability-RELAY_ENCRYPTION_REQUIRED",
+      "code": "RELAY_ENCRYPTION_REQUIRED",
+      "retryable": false
+    },
+    {
+      "id": "error-retryability-ENCRYPTED_PAYLOAD_INVALID",
+      "code": "ENCRYPTED_PAYLOAD_INVALID",
+      "retryable": false
+    },
+    {
+      "id": "error-retryability-LocalApprovalDeniedError",
+      "code": "LocalApprovalDeniedError",
+      "retryable": false
+    },
+    {
+      "id": "error-retryability-LocalConfirmationRequiredError",
+      "code": "LocalConfirmationRequiredError",
+      "retryable": false
+    },
+    {
+      "id": "error-retryability-COMPANION_ERROR",
+      "code": "COMPANION_ERROR",
+      "retryable": false
+    }
+  ],
+  "encryptedVisibleMetadataFields": [
+    "type",
+    "workspaceId",
+    "envelopeId",
+    "payloadKind",
+    "requestId",
+    "relaySequence",
+    "algorithm",
+    "nonce",
+    "ciphertext"
+  ],
+  "deferredBreakingRules": [
+    "runtime.response-result-xor-error",
+    "encrypted-payload-kind-required-metadata",
+    "gap-from-not-after-through"
+  ]
+}

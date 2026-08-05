@@ -1,104 +1,137 @@
 # `@roll-agent/companion`
 
-连接云端 Web UI 与用户本机 Roll 的 Local Companion / Relay bridge 基础库。
+连接远程 Web UI 与用户本机 Roll Runtime 的 Local Companion 基础库。
 
-本包只安装在用户本机的 Node.js Host 中，例如 Remote-enabled Electron Main 或独立
-Companion Daemon。Browser Web App、Cloud Relay Server、普通 `roll chat` 和只做本地 GUI
-的 Desktop App 都不安装它。
+本包只运行在用户本机的 Node.js Host（例如 Electron Main 或独立 Companion daemon），消费
+`@roll-agent/relay-protocol` 的 Relay Wire 契约，并提供 Workspace 生命周期、Interaction
+Broker、Relay ACK/gap 缓冲、mutation 去重、出站重连和可插拔 payload cipher。
 
-本包消费 `@roll-agent/relay-protocol` 的 Relay Wire 契约，提供 Workspace 生命周期
-lease、本地 Approval Policy、事件 ACK/gap 缓冲、mutation 去重、出站重连和可插拔的
-Workspace payload cipher。Wire Schema、ID、JSON Schema、fixtures 与版本注册表由
-`@roll-agent/relay-protocol` 唯一维护；本包不再定义另一套协议。
+它不包含生产 Cloud Relay、Browser SDK、账号/设备身份、controller 选举、TLS、可靠投递、
+持久 outbox、Interaction WAL、本地确认 UI 或自动启动机制。安装本包或
+`@roll-agent/core` 不会建立远程连接；宿主必须显式完成认证并启动 bridge。
 
-本包不包含生产 Cloud Relay Server、Browser SDK、账号/设备存储、TLS、鉴权授权、本地确认
-UI、HA 或监控，也不提供 CLI、daemon 或自动启动机制。`npm install` 与
-`npm install -g @roll-agent/core` 都不会启动 Companion；宿主必须在用户显式启用远程访问
-后完成配对，并显式启动 `OutboundCompanionRelay` 或向 `CompanionRelayBridge` 绑定
-Transport。
-
-## 在 Local Companion Host 中安装
+## 安装
 
 ```bash
 pnpm add @roll-agent/companion @roll-agent/client-node @roll-agent/relay-protocol
 ```
 
-## 最小骨架
+## Relay Wire 1.1
 
-下面是宿主接线骨架，不是可直接运行的完整 Companion 应用。`workspacePath`、设备/Workspace
-身份、`pairingToken`、认证 Transport、本机确认 UI 和进程生命周期都必须由宿主提供。
+Wire 1.1 使用显式的 `CompanionRelayBridgeV11` API。Runtime 的
+`approval.request` / `userInput.request` 由 `CompanionInteractionBroker` 注册为 named
+handlers，再投影成安全的 `interaction.request/resolved/cancelled` 帧。远端只能通过
+`interaction.candidate` 提交候选结果。
 
 ```ts
 import { RollNodeClient } from "@roll-agent/client-node";
 import {
-  CompanionApprovalRequestBroker,
-  CompanionRelayBridge,
+  CompanionInteractionBroker,
+  CompanionRelayBridgeV11,
   CompanionWorkspace,
-  OutboundCompanionRelay,
+  OutboundCompanionRelayV11,
+  createRuntimeServerRequestHandlers,
 } from "@roll-agent/companion";
 import { deviceIdSchema, workspaceIdSchema } from "@roll-agent/relay-protocol";
 
-const approvalRequestBroker = new CompanionApprovalRequestBroker();
+const interactionBroker = new CompanionInteractionBroker();
 const runtime = await RollNodeClient.start({
   cwd: workspacePath,
-  serverRequestHandlers: {
-    "approval.request": approvalRequestBroker.handle,
-  },
+  serverRequestHandlers: createRuntimeServerRequestHandlers(interactionBroker),
 });
+
 const workspaceId = workspaceIdSchema.parse(savedWorkspaceId);
 const workspace = new CompanionWorkspace({
   client: runtime,
-  approvalRequestBroker,
+  workspaceId,
+  interactionBroker,
   localApprovalPolicy: async () => "require-local-confirmation",
 });
-const bridge = new CompanionRelayBridge({
+const bridge = new CompanionRelayBridgeV11({
   deviceId: deviceIdSchema.parse(savedDeviceId),
   pairingToken,
   workspaces: new Map([[workspaceId, workspace]]),
 });
-const outbound = new OutboundCompanionRelay({
+const outbound = new OutboundCompanionRelayV11({
   bridge,
-  connectTransport: openAuthenticatedRelayTransport,
+  connectTransport: async () => ({
+    transport: await openAuthenticatedRelayTransport(),
+    responderContext: authenticatedRelaySession,
+    responderPolicy: async ({ responderContext, signal }) =>
+      authorizeInteractionResponder(responderContext, { signal }),
+  }),
 });
 
 outbound.start();
 ```
 
-Browser 与后台 Shell lease 由宿主显式接线；Turn lease 由 `CompanionWorkspace` 管理，
-`"1.1"` Approval lease 由 `CompanionApprovalRequestBroker` 的 Handler 生命周期管理。
-Browser 通过 Relay 专属 `approval.candidate` 提交候选决定；成功响应
-`{ accepted: true }` 只表示本地 Broker 已接受候选，权威终态必须等待有序的
-`approval.resolved` Event。候选批准必须重新经过本地 Policy，候选拒绝可以抢占仍在
-等待 Policy 的批准并以 deny-wins 收敛；并发批准仍会被拒绝。
-`require-local-confirmation` 只会以错误拒绝这次远程批准，不会自动显示本机确认 UI。
-Policy 会收到 `{ signal }`，Runtime 取消时该信号同步 abort。返回值严格校验为
-`allow | deny | require-local-confirmation`；JavaScript Host 返回其他值时 fail-closed，
-不会把批准转发给 Runtime。未知本地异常对 Relay 统一脱敏为
-`COMPANION_ERROR / Companion request failed`。
+`responderContext` 是宿主注入的不透明认证/会话状态；Companion 不解释它，也不因其存在就声称
+Browser 已认证或 controller 已选出。Wire Schema 先拒绝畸形帧；合法 candidate 再经过宿主的
+responder policy，然后按 Runtime 原始请求做 method-specific 校验。Approval 的 approve 候选
+还必须通过本地 Approval Policy；reject 不扩大权限。User Input 候选按原始表单规范化，完整
+结果只回给 Runtime。
 
-`approval.candidate` 的参数只有 `threadId`、`turnId`、`approvalId`、`decision` 与可选
-`reason`，不复用 Runtime mutation 的 UUID `requestId`。Relay envelope 自己的
-`requestId` 只负责重投和响应缓存。`"1.0"` 兼容连接继续走
-`approval.required` + `approval.respond`；`"1.1"` 上调用后者会 fail closed。
-这里的 `"1.0"` / `"1.1"` 指 `RuntimeEventEnvelope.protocolVersion`，不是外层
-Companion Relay `"1.0"`。Browser 必须按每个 Runtime Event 的协议版本选择审批方法：
-Runtime `"1.0"` 走 `approval.respond`，Runtime `"1.1"` 才走 `approval.candidate`；
-滚动升级时不能仅凭 Relay 版本推断该能力。
+Wire 投影有意最小化：
 
-当前 `@roll-agent/relay-protocol` 只冻结已经存在的 Companion Relay Wire `"1.0"`。
-`approval.candidate` 仍是该版本中的 Approval 专属候选方法；通用 typed interaction
-request/result/cancelled 以及逻辑 `interactionId` 不属于当前 `"1.0"`，由
-[#184](https://github.com/steveoon/roll-agent/issues/184)、
-[#187](https://github.com/steveoon/roll-agent/issues/187) 和后续 Relay Wire version
-继续设计。
+- Approval 只包含 `approvalId/agentName/toolName/explanation?`。
+- User Input 只包含安全表单字段。
+- Runtime JSON-RPC `id`、原始 Tool input/output、secret、完整 User Input Result 和本地授权
+  状态都不会进入 Wire。
+- `authentication.request` 与 File Picker 不注册远程 projector，保持 local-only。
 
-为 Workspace 配置 `RelayPayloadCipher` 后，Runtime request、response 和 event 必须走
-`runtime.encrypted`。明文 request 不会进入 Runtime，而会收到加密的
-`RELAY_ENCRYPTION_REQUIRED`（`retryable: false`）响应；cipher、密钥管理和 Browser 端
-实现由宿主提供。
+查询通道（pull）与事件通道（push）执行同一投影纪律：Wire 1.1 的 `thread.snapshot` /
+`thread.open` 结果中 `pendingApprovals[].preview` 被替换为 `{ explanation }` 或 `null`、
+`reason` 被移除；`operations[].display` 替换为 `null`、`outcome.reason` 被移除
+（`operation.get` 同规则）。
+
+已知保留的远端暴露面（有意决策，记录在案）：
+
+- `thread.capabilities` 结果中的 `manifest` 原样传输，可能包含 cwd、平台、模型、Agent、
+  Skill、Tool Schema、规则标识与 VCS 等 capability 元数据；远端 UI 依赖它做功能门控。
+- `thread.list` / snapshot 中的 Thread 标题、模型与时间元数据，以及 transcript 的用户/助手
+  完整消息文本。
+- Timeline 中已列入安全 Schema 的消息与 reasoning 摘要、Turn 状态、Tool 名称和安全完成
+  摘要。它们仍是用户内容或工作流元数据，Relay/Browser 宿主必须按敏感数据保护。
+
+Wire 1.0 没有 query/interaction 安全投影；只有错误响应正文会替换为固定公开文案，避免
+Runtime 或本地 policy 细节进入 Relay。其余 legacy payload 仍按冻结行为原样传输，因此它只
+适用于宿主已建立等价本地信任边界的 legacy peer，不能作为面向不受信 Cloud/Browser 的安全
+降级路径；远程部署必须协商 Wire 1.1，协商失败时应拒绝连接。
+
+Runtime cancel、Turn 终态、deadline、Workspace 解绑、bridge 关闭和重连 generation 失效共用
+单次终止语义；旧 generation 的迟到候选不会结算新的连接。`interaction.resolved` 也不携带完整
+结果，Browser 只用终态帧收敛视图。
+
+## Wire 1.0 兼容
+
+旧的 `CompanionRelayBridge.connect(transport)`、`OutboundCompanionRelay`、通用未带版本后缀的
+Relay exports，以及 `CompanionApprovalRequestBroker` 均固定为 Wire 1.0。后者已 deprecated，
+保留一个 minor 周期用于 `approval.required` / `approval.candidate` 兼容路径。
+
+新 Host 必须显式选择 `CompanionRelayBridgeV11` 才能发送 typed Interaction；协商到 1.0 的
+peer 只使用既有 Approval 路径，不会收到 1.1 Interaction 帧。
+
+Wire 1.0 的 registry、Schema 和 fixtures 冻结不代表其内容经过安全投影。生产 Host 不得因
+版本回落而把原本要求 1.1 的远程会话接到 1.0 bridge。
+
+## ACK、重连与加密
+
+Wire 1.1 的安全 Runtime event 与 Interaction 帧共享单个 Workspace `relaySequence`。ACK 只能
+推进当前 generation 已成功发送的连续前缀；重连会重投未 ACK 帧，缓冲缺口要求
+`thread.snapshot` 收敛。所有 buffer、ACK、dedupe 和 lease 都只在 Companion 进程内，不能当作
+持久事件日志或可靠 outbox。
+
+配置 `RelayPayloadCipherV11` 后，request/response/event/interaction 必须走
+`runtime.encrypted`。算法、AEAD、nonce、密钥协商/轮换和 Browser 实现仍由宿主负责。
+
+## 测试 fake
+
+`@roll-agent/companion/testing` 导出 `InMemoryRelayTransportV11`，用于协议测试中的候选注入、
+重复、ACK、断线和旧 generation 迟到消息。它不提供生产身份、鉴权、controller 选举、可靠
+投递、持久 outbox 或 WAL，不能作为生产 Transport。
 
 ## 文档
 
-- [`@roll-agent/relay-protocol` Relay v1 参考](https://github.com/steveoon/roll-agent/blob/main/docs/companion-relay-v1-reference.md)
+- [`@roll-agent/relay-protocol` Relay 1.1/1.0 参考](https://github.com/steveoon/roll-agent/blob/main/docs/companion-relay-v1-reference.md)
 - [使用自己的技术栈接入 Roll](https://github.com/steveoon/roll-agent/blob/main/docs/how-to-build-roll-runtime-ui.md)
 - [Runtime Protocol 架构与安全边界](https://github.com/steveoon/roll-agent/blob/main/docs/runtime-protocol-architecture.md)

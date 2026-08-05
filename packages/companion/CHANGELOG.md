@@ -1,5 +1,30 @@
 # @roll-agent/companion
 
+## 0.3.0
+
+### Minor Changes
+
+- [#200](https://github.com/steveoon/roll-agent/pull/200) [`a86c3f7`](https://github.com/steveoon/roll-agent/commit/a86c3f7f6cf433e3f8a5a32116547a8e7245d770) Thanks [@steveoon](https://github.com/steveoon)! - Add the Relay Wire 1.1 Companion interaction broker, safe remote projections, generation-scoped
+  candidate policy, and an explicitly non-production in-memory testing transport.
+
+### Patch Changes
+
+- [#201](https://github.com/steveoon/roll-agent/pull/201) [`c9597e3`](https://github.com/steveoon/roll-agent/commit/c9597e3520059701640f3cc33cf7bf1be0bf0e8d) Thanks [@steveoon](https://github.com/steveoon)! - Add Runtime Protocol 1.3 durable event cursors, bounded per-Thread replay storage, a
+  replay-to-live response barrier, and a Node client recovery manager with Snapshot fallback.
+
+- [#196](https://github.com/steveoon/roll-agent/pull/196) [`fda44ec`](https://github.com/steveoon/roll-agent/commit/fda44ec80bd87fae0492d4f41fbd7677f680e733) Thanks [@steveoon](https://github.com/steveoon)! - Negotiate Runtime Protocol 1.2 Server Request capabilities before delivery, carry branded
+  Interaction metadata on Approval requests, cancel 1.2 requests by InteractionId, and keep the
+  Protocol 1.1 and 1.0 control paths wire-compatible.
+  Freeze Relay Wire 1.0 against Runtime 1.2 schema drift and project newer Runtime snapshots and
+  events to its existing Runtime 1.1-compatible envelope before remote delivery.
+
+- [#204](https://github.com/steveoon/roll-agent/pull/204) [`90afb81`](https://github.com/steveoon/roll-agent/commit/90afb819604dd718a59e5d0065b80f6a9b8ded23) Thanks [@steveoon](https://github.com/steveoon)! - Add explicit Relay Wire 1.1 query projectors for snapshots and operations, apply them in the
+  Companion bridge, and prevent Runtime or local policy error details from crossing the Relay wire.
+- Updated dependencies [[`c9597e3`](https://github.com/steveoon/roll-agent/commit/c9597e3520059701640f3cc33cf7bf1be0bf0e8d), [`df979d9`](https://github.com/steveoon/roll-agent/commit/df979d98dcf09250f6705a599b42c13bafba915a), [`cc19da9`](https://github.com/steveoon/roll-agent/commit/cc19da92533320cf4ebff9ba665001f1194f2776), [`fda44ec`](https://github.com/steveoon/roll-agent/commit/fda44ec80bd87fae0492d4f41fbd7677f680e733), [`e17ca19`](https://github.com/steveoon/roll-agent/commit/e17ca19259e5b8a263aa99bfa0979e475ab3c00d), [`90afb81`](https://github.com/steveoon/roll-agent/commit/90afb819604dd718a59e5d0065b80f6a9b8ded23), [`df979d9`](https://github.com/steveoon/roll-agent/commit/df979d98dcf09250f6705a599b42c13bafba915a), [`fda44ec`](https://github.com/steveoon/roll-agent/commit/fda44ec80bd87fae0492d4f41fbd7677f680e733)]:
+  - @roll-agent/protocol@0.4.0
+  - @roll-agent/client-node@0.3.0
+  - @roll-agent/relay-protocol@0.2.0
+
 ## 0.2.1
 
 ### Patch Changes

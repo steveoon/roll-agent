@@ -80,6 +80,7 @@ export const CHAT_PHASES = {
   idle: "idle",
   busy: "busy",
   confirm: "confirm",
+  userInput: "user-input",
   cancelling: "cancelling",
 } as const;
 
@@ -92,6 +93,8 @@ export interface PendingConfirm {
   readonly explanation?: string;
 }
 
+export type PendingUserInput = Extract<SessionEvent, { readonly type: "user-input-required" }>;
+
 export interface ChatUiState {
   readonly history: readonly HistoryItem[];
   readonly draft: string;
@@ -99,6 +102,7 @@ export interface ChatUiState {
   readonly status: StatusState;
   readonly phase: ChatPhase;
   readonly pendingConfirm: PendingConfirm | undefined;
+  readonly pendingUserInput: PendingUserInput | undefined;
 }
 
 export type ChatUiAction =
@@ -110,6 +114,7 @@ export type ChatUiAction =
   | { readonly type: "start-compaction" }
   | { readonly type: "session-event"; readonly id: string; readonly event: SessionEvent }
   | { readonly type: "confirm-resolved" }
+  | { readonly type: "user-input-resolved"; readonly requestId: PendingUserInput["requestId"] }
   | { readonly type: "cancel-requested" }
   | { readonly type: "turn-end" };
 
@@ -154,6 +159,7 @@ export function createInitialState(
     },
     phase: "idle",
     pendingConfirm: undefined,
+    pendingUserInput: undefined,
   };
 }
 
@@ -366,8 +372,20 @@ function applySessionEvent(state: ChatUiState, id: string, event: SessionEvent):
           args: formatApprovalDetails(event.input),
           ...(explanation !== undefined ? { explanation } : {}),
         },
+        pendingUserInput: undefined,
       };
     }
+    case "user-input-required":
+      return {
+        ...state,
+        phase: CHAT_PHASES.userInput,
+        pendingConfirm: undefined,
+        pendingUserInput: event,
+      };
+    case "user-input-settled":
+      return state.pendingUserInput?.requestId === event.requestId
+        ? { ...state, phase: CHAT_PHASES.busy, pendingUserInput: undefined }
+        : state;
     case "compaction-start":
       return { ...state, live: { ...state.live, compacting: true } };
     case "context-compacted":
@@ -453,6 +471,7 @@ export function chatReducer(state: ChatUiState, action: ChatUiAction): ChatUiSta
         live: { ...EMPTY_LIVE },
         phase: "busy",
         pendingConfirm: undefined,
+        pendingUserInput: undefined,
       };
     case "set-draft":
       return { ...state, draft: action.value };
@@ -468,15 +487,31 @@ export function chatReducer(state: ChatUiState, action: ChatUiAction): ChatUiSta
         live: { ...EMPTY_LIVE, compacting: true },
         phase: "busy",
         pendingConfirm: undefined,
+        pendingUserInput: undefined,
       };
     case "session-event":
       return applySessionEvent(state, action.id, action.event);
     case "confirm-resolved":
       return { ...state, phase: "busy", pendingConfirm: undefined };
+    case "user-input-resolved":
+      return state.pendingUserInput?.requestId === action.requestId
+        ? { ...state, phase: CHAT_PHASES.busy, pendingUserInput: undefined }
+        : state;
     case "cancel-requested":
-      return { ...state, phase: "cancelling", pendingConfirm: undefined };
+      return {
+        ...state,
+        phase: "cancelling",
+        pendingConfirm: undefined,
+        pendingUserInput: undefined,
+      };
     case "turn-end":
-      return { ...state, phase: "idle", live: { ...EMPTY_LIVE } };
+      return {
+        ...state,
+        phase: "idle",
+        live: { ...EMPTY_LIVE },
+        pendingConfirm: undefined,
+        pendingUserInput: undefined,
+      };
     default:
       return state;
   }
