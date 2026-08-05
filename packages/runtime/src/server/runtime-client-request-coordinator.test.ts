@@ -109,16 +109,17 @@ test("Protocol 1.2 does not deliver before capability ACK", async () => {
   const internal = getRuntimeClientRequestCoordinatorInternal(coordinator);
   assert.deepEqual(requestMessages(responder), []);
   assert.deepEqual(internal.getPendingInteractionProjectionsForAttachment(detach, threadId), []);
-  assert.equal(
-    internal.setServerRequestMethodsForAttachment(
-      detach,
-      [RUNTIME_SERVER_REQUEST_METHODS.approvalRequest],
-      "capability update",
-      true,
-    ),
-    true,
+  const commit = internal.setServerRequestMethodsForAttachment(
+    detach,
+    [RUNTIME_SERVER_REQUEST_METHODS.approvalRequest],
+    "capability update",
   );
+  if (typeof commit !== "function") {
+    assert.fail("capability update should return a commit closure");
+  }
   assert.deepEqual(requestMessages(responder), []);
+  assert.deepEqual(internal.getPendingInteractionProjectionsForAttachment(detach, threadId), []);
+  commit();
   const expectedProjection = {
     method: RUNTIME_SERVER_REQUEST_METHODS.approvalRequest,
     interactionId,
@@ -128,10 +129,6 @@ test("Protocol 1.2 does not deliver before capability ACK", async () => {
     sensitivity: "normal",
     approvalId,
   } as const;
-  assert.deepEqual(internal.getPendingInteractionProjectionsForAttachment(detach, threadId), [
-    expectedProjection,
-  ]);
-  await new Promise<void>((resolve) => setTimeout(resolve, 0));
   const delivery = requestMessages(responder)[0];
   assert.ok(delivery);
   assert.deepEqual(delivery.params, approvalRequestInputV12());
@@ -194,15 +191,15 @@ test("accepted methods cannot bypass Protocol 1.2 capability ACK", async () => {
 
   assert.deepEqual(requestMessages(responder), []);
   assert.equal(internal.redeliver(approvalId, responderId), false);
-  assert.equal(
-    internal.setServerRequestMethodsForAttachment(
-      detach,
-      [RUNTIME_SERVER_REQUEST_METHODS.approvalRequest],
-      "capability ACK",
-      false,
-    ),
-    true,
+  const ackCommit = internal.setServerRequestMethodsForAttachment(
+    detach,
+    [RUNTIME_SERVER_REQUEST_METHODS.approvalRequest],
+    "capability ACK",
   );
+  if (typeof ackCommit !== "function") {
+    assert.fail("capability ACK should return a commit closure");
+  }
+  ackCommit();
   const delivery = requestMessages(responder)[0];
   assert.ok(delivery);
   assert.equal(
@@ -320,15 +317,13 @@ test("Protocol 1.2 empty capability ACK fails an already-waiting request closed"
     },
   );
 
-  assert.equal(
-    getRuntimeClientRequestCoordinatorInternal(coordinator).setServerRequestMethodsForAttachment(
-      detach,
-      [],
-      "empty ACK",
-      true,
-    ),
-    true,
-  );
+  const commit = getRuntimeClientRequestCoordinatorInternal(
+    coordinator,
+  ).setServerRequestMethodsForAttachment(detach, [], "empty ACK");
+  if (typeof commit !== "function") {
+    assert.fail("empty ACK should return a commit closure");
+  }
+  commit();
   await assert.rejects(
     pending.result,
     (error: unknown) =>
@@ -336,6 +331,96 @@ test("Protocol 1.2 empty capability ACK fails an already-waiting request closed"
       /未协商 Runtime Server Request/u.test(error.message),
   );
   assert.deepEqual(responder.sent, []);
+});
+
+test("Protocol 1.2 interaction created before capability commit stays waiting until commit", async () => {
+  const responder = new MemoryResponder();
+  const responderId = createRuntimeClientResponderId();
+  const coordinator = new RuntimeClientRequestCoordinator();
+  const detach = coordinator.attachResponder(
+    {
+      id: responderId,
+      scopeId,
+      send: (message) => responder.send(message),
+      close: () => responder.close(),
+    },
+    { acceptedServerRequestMethods: [], capabilitiesAcknowledged: false },
+  );
+  const internal = getRuntimeClientRequestCoordinatorInternal(coordinator);
+  const commit = internal.setServerRequestMethodsForAttachment(
+    detach,
+    [RUNTIME_SERVER_REQUEST_METHODS.approvalRequest],
+    "capability update",
+  );
+  if (typeof commit !== "function") {
+    assert.fail("capability update should return a commit closure");
+  }
+  const pending = coordinator.request(
+    RUNTIME_SERVER_REQUEST_METHODS.approvalRequest,
+    approvalRequestInputV12(),
+    {
+      key: approvalId,
+      scopeId,
+      eligibleResponderId: responderId,
+      approvalId,
+      expiresAt: approvalRequestInputV12().expiresAt,
+      protocolVersion: "1.2",
+    },
+  );
+  assert.deepEqual(requestMessages(responder), []);
+  commit();
+  const delivery = requestMessages(responder)[0];
+  assert.ok(delivery);
+  assert.deepEqual(delivery.params, approvalRequestInputV12());
+  assert.equal(
+    coordinator.handleResponse(responderId, {
+      jsonrpc: "2.0",
+      id: delivery.id,
+      result: { decision: "approve" },
+    }),
+    true,
+  );
+  assert.deepEqual(await pending.result, { decision: "approve" });
+});
+
+test("Protocol 1.2 capability commit after responder detach is a no-op", async () => {
+  const responder = new MemoryResponder();
+  const responderId = createRuntimeClientResponderId();
+  const coordinator = new RuntimeClientRequestCoordinator();
+  const detach = coordinator.attachResponder(
+    {
+      id: responderId,
+      scopeId,
+      send: (message) => responder.send(message),
+      close: () => responder.close(),
+    },
+    { acceptedServerRequestMethods: [], capabilitiesAcknowledged: false },
+  );
+  const internal = getRuntimeClientRequestCoordinatorInternal(coordinator);
+  const commit = internal.setServerRequestMethodsForAttachment(
+    detach,
+    [RUNTIME_SERVER_REQUEST_METHODS.approvalRequest],
+    "capability update",
+  );
+  if (typeof commit !== "function") {
+    assert.fail("capability update should return a commit closure");
+  }
+  const pending = coordinator.request(
+    RUNTIME_SERVER_REQUEST_METHODS.approvalRequest,
+    approvalRequestInputV12(),
+    {
+      key: approvalId,
+      scopeId,
+      eligibleResponderId: responderId,
+      approvalId,
+      expiresAt: approvalRequestInputV12().expiresAt,
+      protocolVersion: "1.2",
+    },
+  );
+  detach();
+  await assert.rejects(pending.result, RuntimeClientRequestError);
+  commit();
+  assert.deepEqual(requestMessages(responder), []);
 });
 
 test("Protocol 1.2 capability withdrawal cancels by InteractionId and ignores late response", async () => {
@@ -371,10 +456,14 @@ test("Protocol 1.2 capability withdrawal cancels by InteractionId and ignores la
   const delivery = requestMessages(responder)[0];
   assert.ok(delivery);
 
-  assert.equal(
-    coordinator.setResponderServerRequestMethods(responderId, [], "capability withdrawn"),
-    true,
+  const withdrawCommit = coordinator.setResponderServerRequestMethods(
+    responderId,
+    [],
+    "capability withdrawn",
   );
+  if (typeof withdrawCommit !== "function") {
+    assert.fail("capability withdrawal should return a commit closure");
+  }
   await assert.rejects(
     pending.result,
     (error: unknown) =>
@@ -390,6 +479,7 @@ test("Protocol 1.2 capability withdrawal cancels by InteractionId and ignores la
     interactionId,
     reason: "capability withdrawn",
   });
+  withdrawCommit();
   assert.equal(
     coordinator.handleResponse(responderId, {
       jsonrpc: "2.0",

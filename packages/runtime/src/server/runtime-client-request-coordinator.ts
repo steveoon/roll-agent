@@ -98,8 +98,7 @@ export interface RuntimeClientRequestCoordinatorInternal {
     detachResponder: () => void,
     methods: readonly RuntimeServerRequestMethod[],
     reason: string,
-    deferDelivery: boolean,
-  ): boolean | undefined;
+  ): (() => void) | false | undefined;
   beginCapabilityNegotiationForAttachment(detachResponder: () => void): boolean | undefined;
   getPendingInteractionProjectionsForAttachment(
     detachResponder: () => void,
@@ -172,11 +171,11 @@ export class RuntimeClientRequestCoordinator {
           ? undefined
           : this.handleResponseFromAttachment(attachment, message);
       },
-      setServerRequestMethodsForAttachment: (detachResponder, methods, reason, deferDelivery) => {
+      setServerRequestMethodsForAttachment: (detachResponder, methods, reason) => {
         const attachment = this.responderAttachments.get(detachResponder);
         return attachment === undefined
           ? undefined
-          : this.setServerRequestMethodsForAttachment(attachment, methods, reason, deferDelivery);
+          : this.setServerRequestMethodsForAttachment(attachment, methods, reason);
       },
       beginCapabilityNegotiationForAttachment: (detachResponder) => {
         const attachment = this.responderAttachments.get(detachResponder);
@@ -427,12 +426,11 @@ export class RuntimeClientRequestCoordinator {
     responderId: RuntimeClientResponderId,
     methods: readonly RuntimeServerRequestMethod[],
     reason: string,
-    deferDelivery = false,
-  ): boolean {
+  ): (() => void) | false {
     const attachment = this.responders.get(responderId);
     return attachment === undefined
       ? false
-      : this.setServerRequestMethodsForAttachment(attachment, methods, reason, deferDelivery);
+      : this.setServerRequestMethodsForAttachment(attachment, methods, reason);
   }
 
   beginResponderCapabilityNegotiation(responderId: RuntimeClientResponderId): boolean {
@@ -735,8 +733,7 @@ export class RuntimeClientRequestCoordinator {
     attachment: RuntimeClientResponderAttachment,
     methods: readonly RuntimeServerRequestMethod[],
     reason: string,
-    deferDelivery: boolean,
-  ): boolean {
+  ): (() => void) | false {
     const { responder } = attachment;
     if (this.responders.get(responder.id) !== attachment) {
       return false;
@@ -746,7 +743,7 @@ export class RuntimeClientRequestCoordinator {
       [...attachment.acceptedServerRequestMethods].filter((method) => !accepted.has(method)),
     );
     attachment.acceptedServerRequestMethods = accepted;
-    attachment.capabilitiesAcknowledged = true;
+    attachment.capabilitiesAcknowledged = false;
     for (const interaction of this.interactions.pending()) {
       if (interaction.eligibleResponderId !== responder.id || !removed.has(interaction.method)) {
         continue;
@@ -758,10 +755,11 @@ export class RuntimeClientRequestCoordinator {
       this.sendCancellation(interaction, settlement.retiredDelivery, reason);
       interaction.reject(new RuntimeClientRequestCancelledError(reason));
     }
-    const deliverWaiting = () => {
+    return () => {
       if (this.responders.get(responder.id) !== attachment) {
         return;
       }
+      attachment.capabilitiesAcknowledged = true;
       for (const interaction of this.interactions.pending()) {
         if (
           interaction.eligibleResponderId === responder.id &&
@@ -771,12 +769,6 @@ export class RuntimeClientRequestCoordinator {
         }
       }
     };
-    if (deferDelivery) {
-      setTimeout(deliverWaiting, 0);
-    } else {
-      deliverWaiting();
-    }
-    return true;
   }
 
   private beginCapabilityNegotiationForAttachment(
