@@ -31,7 +31,7 @@
 
 ### Ink 选择器
 
-新组件 `session-picker.ts`,作为 footer 浮层(与 user-input form 同位置),沿用既有 select 交互语言:`›` 光标、↑↓ 移动、Enter 确认、Esc 取消、窗口化滚动(cursor-following)、hint 行"↑↓ 选择 · Enter 切换 · Esc 取消"。空列表显示"暂无其他会话"。切换失败时在 picker 内显示错误行,picker 保持打开。
+新组件 `session-picker.ts`,**占用 footer 的 prompt 槽位**——与 `TextPrompt`/`UserInputForm`/`ConfirmSelect` 走同一 swap 机制(picker 打开期间 `TextPrompt` 不渲染,不存在双输入焦点与光标锚点冲突),不做叠加浮层。交互沿用既有 select 语言:`›` 光标、↑↓ 移动、Enter 确认、Esc 取消、窗口化滚动(cursor-following)、hint 行"↑↓ 选择 · Enter 切换 · Esc 取消"。空列表显示"暂无其他会话"。切换失败时在 picker 内显示错误行,picker 保持打开。
 
 ### REPL 选择器
 
@@ -46,7 +46,7 @@ clack `select`,**option 的 `value` 是 thread id**,label 用共享 formatter �
    旧 session:setUserInputAvailable(false) → close()
    新 session:setUserInputAvailable(true)
    ```
-   Ink 侧新旧 session 的 userInput 开关由 `useSession` 的 mount/unmount effect 随 keyed remount 自动完成;旧 session 的 `close()` 在视图切换回调(旧 view 已卸载)之后由 `run-ink-repl` 执行,避免对已关闭 session 调用 cleanup。REPL 侧两步均手动执行。
+   Ink 侧新旧 session 的 userInput 开关由 `useSession` 的 mount/unmount effect 随 keyed remount 自动完成;旧 session 的退役必须是 **effect-based handoff**——`setActiveSession(next)` 是异步的,不得在其后同步 `close()`。`ChatApp` 以 `useEffect`(依赖 `activeSession`)持退役引用执行收尾:React 同一次 commit 内先跑旧 `ChatSessionView` 的 cleanup(`setUserInputAvailable(false)`)、再跑新 view 的 mount effect(`(true)`)、最后才轮到父组件 effect(effects 自底向上),此时 `close()` 旧 session 并回调 `run-ink-repl` 更新活跃引用与记账,顺序天然安全。REPL 侧无 React,两步顺序手动执行。
 3. **Esc/取消零副作用**:不触碰任何 session 状态。
 4. **切走时空会话清理**:仅"本次运行新建且零消息未提交"的会话适用(恢复来的会话永不适用)——`deleteThread`,且**静默执行**(alternate screen 激活期间不写 stderr;"未保存"提示仅保留在最终退出路径)。
 5. **per-session 状态重置**:`titled`/`submitted`/`isNewSession` 随切换重置;切到已有会话后 `isNewSession = false`,`titled` 以目标线程是否已有标题为准(`thread.title !== undefined`),避免覆盖已有标题、也兜住无标题旧线程。
@@ -66,7 +66,7 @@ clack `select`,**option 的 `value` 是 thread id**,label 用共享 formatter �
 ### run-ink-repl:活跃会话追踪
 
 - `RunInkReplOptions` 增加 `resumeSession: (threadId: string) => Promise<AgentSession>`(`chat.ts` 闭包 engine 注入,TUI 不感知 engine)与会话切换回调;`InkReplStore` 按需补 `listThreads` 等只读方法
-- `runInkRepl` 维护**活跃会话引用**:每次成功切换更新引用并同步 `titled`/`submitted`/`isNewSession` 记账;被替换的旧会话在切换点 `close()`,最终退出路径 `await activeSession.close()`——保证任意时刻只有一个 live session,无泄漏
+- `runInkRepl` 维护**活跃会话引用**:切换回调(由 `ChatApp` 的 effect handoff 触发,旧会话已在该 effect 内 `close()`)到达时更新引用并同步 `titled`/`submitted`/`isNewSession` 记账;最终退出路径 `await activeSession.close()`——保证任意时刻只有一个 live session,无泄漏
 - `onUserSubmit` 的标题写入基于当前活跃会话引用(切换发生在 idle,submit 必然晚于引用更新,顺序安全)
 
 ### REPL:session 可变引用
