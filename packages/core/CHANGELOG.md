@@ -1,5 +1,28 @@
 # @roll-agent/core
 
+## 0.28.0
+
+### Minor Changes
+
+- [#205](https://github.com/steveoon/roll-agent/pull/205) [`fd93237`](https://github.com/steveoon/roll-agent/commit/fd9323769a19095368ce7d25715f3b80c636de26) Thanks [@steveoon](https://github.com/steveoon)! - roll chat 新增 /resume 命令：Ink TUI 与基础 REPL 均可在对话中列出已有会话并切换。切换先恢复目标会话成功后才关闭当前会话，失败时当前会话不受影响；切走的零消息新会话自动清理；Ink 侧切换后完整重建 transcript 历史。
+
+### Patch Changes
+
+- [#205](https://github.com/steveoon/roll-agent/pull/205) [`a18c22f`](https://github.com/steveoon/roll-agent/commit/a18c22f80cdad7a6a0fec5d962232f3e87d0a628) Thanks [@steveoon](https://github.com/steveoon)! - Fix the Ink user-input form's text controls anchoring the real terminal cursor one or two rows
+  below the input line (the embedded TextPrompt assumed it sat flush with the viewport bottom, so
+  IME preedit text rendered outside the box and typing looked dead until the form timed out).
+  TextPrompt now accepts a bottomOffset for rows rendered beneath it, and the form layout gains a
+  consistent one-column indent, spacing between the header and the active control, and a yellow
+  required marker.
+
+- [#205](https://github.com/steveoon/roll-agent/pull/205) [`3484ccc`](https://github.com/steveoon/roll-agent/commit/3484cccd1b7106e17d25625a609436d1cdefa288) Thanks [@steveoon](https://github.com/steveoon)! - Rework the Ink user-input form interaction: Esc now steps back to the previous control with its
+  confirmed value restored (cancelling only from the first control), confirming the last control
+  opens a review summary where any answer can be revisited before an explicit submit, and boolean
+  controls default to 否 in both the Ink form and the clack REPL. Optional boolean controls in the
+  clack REPL gain the same skip capability as the Ink form via a skippable 是/否 select.
+- Updated dependencies []:
+  - @roll-agent/runtime@0.14.0
+
 ## 0.27.0
 
 ### Minor Changes
