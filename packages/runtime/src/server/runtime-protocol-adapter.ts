@@ -860,7 +860,7 @@ export class RuntimeProtocolAdapter {
         result.acceptedServerRequestMethods,
         reason,
       ) ??
-      this.clientRequests.setResponderServerRequestMethods(
+      internal.setServerRequestMethodsForResponder(
         this.responderId,
         result.acceptedServerRequestMethods,
         reason,

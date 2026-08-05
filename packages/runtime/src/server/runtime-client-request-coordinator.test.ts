@@ -17,6 +17,7 @@ import {
   RuntimeClientRequestExpiredError,
   createRuntimeClientResponderId,
   getRuntimeClientRequestCoordinatorInternal,
+  type RuntimeClientRequestOptions,
 } from "./runtime-client-request-coordinator.ts";
 import type { JsonRpcMessage } from "./protocol.ts";
 
@@ -413,6 +414,64 @@ test("Protocol 1.2 capability commit after responder detach is a no-op", async (
   assert.deepEqual(requestMessages(responder), []);
 });
 
+test("Protocol 1.2 stale capability commit cannot reopen a newer negotiation barrier", async () => {
+  const responder = new MemoryResponder();
+  const responderId = createRuntimeClientResponderId();
+  const coordinator = new RuntimeClientRequestCoordinator();
+  const detach = coordinator.attachResponder(
+    {
+      id: responderId,
+      scopeId,
+      send: (message) => responder.send(message),
+      close: () => responder.close(),
+    },
+    { acceptedServerRequestMethods: [], capabilitiesAcknowledged: false },
+  );
+  const internal = getRuntimeClientRequestCoordinatorInternal(coordinator);
+  const staleCommit = internal.setServerRequestMethodsForAttachment(
+    detach,
+    [RUNTIME_SERVER_REQUEST_METHODS.approvalRequest],
+    "capability revision 1",
+  );
+  const currentCommit = internal.setServerRequestMethodsForAttachment(
+    detach,
+    [RUNTIME_SERVER_REQUEST_METHODS.approvalRequest],
+    "capability revision 2",
+  );
+  if (typeof staleCommit !== "function" || typeof currentCommit !== "function") {
+    assert.fail("capability updates should return commit closures");
+  }
+  const pending = coordinator.request(
+    RUNTIME_SERVER_REQUEST_METHODS.approvalRequest,
+    approvalRequestInputV12(),
+    {
+      key: approvalId,
+      scopeId,
+      eligibleResponderId: responderId,
+      approvalId,
+      expiresAt: approvalRequestInputV12().expiresAt,
+      protocolVersion: "1.2",
+    },
+  );
+
+  staleCommit();
+  assert.deepEqual(requestMessages(responder), []);
+  assert.deepEqual(internal.getPendingInteractionProjectionsForAttachment(detach, threadId), []);
+
+  currentCommit();
+  const delivery = requestMessages(responder)[0];
+  assert.ok(delivery);
+  assert.equal(
+    coordinator.handleResponse(responderId, {
+      jsonrpc: "2.0",
+      id: delivery.id,
+      result: { decision: "approve" },
+    }),
+    true,
+  );
+  assert.deepEqual(await pending.result, { decision: "approve" });
+});
+
 test("Protocol 1.2 capability withdrawal cancels by InteractionId and ignores late response", async () => {
   const responder = new MemoryResponder();
   const responderId = createRuntimeClientResponderId();
@@ -444,14 +503,12 @@ test("Protocol 1.2 capability withdrawal cancels by InteractionId and ignores la
   const delivery = requestMessages(responder)[0];
   assert.ok(delivery);
 
-  const withdrawCommit = coordinator.setResponderServerRequestMethods(
+  const updated: boolean = coordinator.setResponderServerRequestMethods(
     responderId,
     [],
     "capability withdrawn",
   );
-  if (typeof withdrawCommit !== "function") {
-    assert.fail("capability withdrawal should return a commit closure");
-  }
+  assert.equal(updated, true);
   await assert.rejects(
     pending.result,
     (error: unknown) =>
@@ -467,7 +524,6 @@ test("Protocol 1.2 capability withdrawal cancels by InteractionId and ignores la
     interactionId,
     reason: "capability withdrawn",
   });
-  withdrawCommit();
   assert.equal(
     coordinator.handleResponse(responderId, {
       jsonrpc: "2.0",
@@ -476,6 +532,58 @@ test("Protocol 1.2 capability withdrawal cancels by InteractionId and ignores la
     }),
     false,
   );
+});
+
+test("public capability setter preserves deferred delivery and legacy request options", async () => {
+  const responder = new MemoryResponder();
+  const responderId = createRuntimeClientResponderId();
+  const coordinator = new RuntimeClientRequestCoordinator();
+  coordinator.attachResponder(
+    {
+      id: responderId,
+      scopeId,
+      send: (message) => responder.send(message),
+      close: () => responder.close(),
+    },
+    { acceptedServerRequestMethods: [], capabilitiesAcknowledged: false },
+  );
+
+  const updated: boolean = coordinator.setResponderServerRequestMethods(
+    responderId,
+    [RUNTIME_SERVER_REQUEST_METHODS.approvalRequest],
+    "legacy deferred capability update",
+    true,
+  );
+  assert.equal(updated, true);
+  const options: RuntimeClientRequestOptions = {
+    key: approvalId,
+    scopeId,
+    eligibleResponderId: responderId,
+    approvalId,
+    threadId,
+    turnId,
+    expiresAt: approvalRequestInputV12().expiresAt,
+    protocolVersion: "1.2",
+  };
+  const pending = coordinator.request(
+    RUNTIME_SERVER_REQUEST_METHODS.approvalRequest,
+    approvalRequestInputV12(),
+    options,
+  );
+  assert.deepEqual(requestMessages(responder), []);
+
+  await new Promise<void>((resolve) => setTimeout(resolve, 0));
+  const delivery = requestMessages(responder)[0];
+  assert.ok(delivery);
+  assert.equal(
+    coordinator.handleResponse(responderId, {
+      jsonrpc: "2.0",
+      id: delivery.id,
+      result: { decision: "approve" },
+    }),
+    true,
+  );
+  assert.deepEqual(await pending.result, { decision: "approve" });
 });
 
 test("id:null JSON-RPC error fails only the selected responder and closes it", async () => {

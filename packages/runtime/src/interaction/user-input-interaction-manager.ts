@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { z } from "zod/v4";
 import {
   normalizeUserInputResultForForm,
+  userInputFormSchema,
   type UserInputForm,
   type UserInputResult,
 } from "@roll-agent/protocol";
@@ -53,18 +54,20 @@ export class UserInputInteractionManager {
     if (!Number.isFinite(expiresAtMs)) {
       throw new Error("user input expiresAt must be a valid ISO 8601 timestamp");
     }
+    const storedForm = userInputFormSchema.parse(form);
+    const exposedForm = userInputFormSchema.parse(storedForm);
     const requestId = sessionUserInputRequestIdSchema.parse(randomUUID());
     const deferred = Promise.withResolvers<UserInputResult>();
     const interaction: PendingSessionUserInputInteraction = {
       requestId,
-      form,
+      form: storedForm,
       resolve: deferred.resolve,
       expiresAtMs,
       expiresTimer: undefined,
     };
     this.pending.set(requestId, interaction);
     this.scheduleExpiration(interaction, expiresAtMs);
-    return { requestId, form, expiresAt, result: deferred.promise };
+    return { requestId, form: exposedForm, expiresAt, result: deferred.promise };
   }
 
   resolve(requestId: SessionUserInputRequestId, result: UserInputResult): boolean {

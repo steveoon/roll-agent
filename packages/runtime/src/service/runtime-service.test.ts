@@ -13,6 +13,7 @@ import {
   runtimeMethodSchemas,
   threadIdSchema,
   type RuntimeEventEnvelopeV13,
+  type UserInputForm,
 } from "@roll-agent/protocol";
 import { ThreadStore } from "../store/thread-store.ts";
 import { sessionUserInputRequestIdSchema } from "../interaction/user-input-interaction-manager.ts";
@@ -1405,9 +1406,33 @@ test("RuntimeService projects waiting-for-user and settles user input exactly on
   const dir = tempDir();
   const store = new ThreadStore(dir);
   const requestId = sessionUserInputRequestIdSchema.parse("00000000-0000-4000-8000-000000000130");
-  const settled = Promise.withResolvers<void>();
+  const invalidRequestId = sessionUserInputRequestIdSchema.parse(
+    "00000000-0000-4000-8000-000000000131",
+  );
+  const staleRequestId = sessionUserInputRequestIdSchema.parse(
+    "00000000-0000-4000-8000-000000000132",
+  );
+  const submitted = Promise.withResolvers<void>();
+  const cancelled = Promise.withResolvers<void>();
+  const staleCancelled = Promise.withResolvers<void>();
   const enabled: boolean[] = [];
-  let pending = true;
+  const cancellationReasons: string[] = [];
+  let submittedPending = true;
+  let invalidPending = true;
+  let stalePending = true;
+  let resolveCalls = 0;
+  const form: UserInputForm = {
+    title: "选择目标 Workspace",
+    controls: [
+      {
+        type: "text",
+        id: "workspace",
+        label: "目标 Workspace",
+        required: true,
+        maxLength: 120,
+      },
+    ],
+  };
   const session: RuntimeServiceSession = {
     id: IDS.thread,
     async *send() {
@@ -1416,21 +1441,26 @@ test("RuntimeService projects waiting-for-user and settles user input exactly on
         type: "user-input-required",
         requestId,
         expiresAt: new Date(Date.now() + 60_000).toISOString(),
-        form: {
-          title: "选择目标 Workspace",
-          controls: [
-            {
-              type: "text",
-              id: "workspace",
-              label: "目标 Workspace",
-              required: true,
-              maxLength: 120,
-            },
-          ],
-        },
+        form,
       };
-      await settled.promise;
+      await submitted.promise;
       yield { type: "user-input-settled", requestId, status: "submitted" };
+      yield {
+        type: "user-input-required",
+        requestId: invalidRequestId,
+        expiresAt: new Date(Date.now() + 60_000).toISOString(),
+        form,
+      };
+      await cancelled.promise;
+      yield { type: "user-input-settled", requestId: invalidRequestId, status: "cancelled" };
+      yield {
+        type: "user-input-required",
+        requestId: staleRequestId,
+        expiresAt: new Date(Date.now() + 60_000).toISOString(),
+        form,
+      };
+      await staleCancelled.promise;
+      yield { type: "user-input-settled", requestId: staleRequestId, status: "cancelled" };
       yield { type: "message-finish", text: "done" };
     },
     approve() {
@@ -1447,20 +1477,32 @@ test("RuntimeService projects waiting-for-user and settles user input exactly on
       enabled.push(available);
     },
     resolveUserInput(candidateRequestId) {
-      if (!pending || candidateRequestId !== requestId) {
+      if (candidateRequestId === staleRequestId) {
+        resolveCalls += 1;
         return false;
       }
-      pending = false;
-      settled.resolve();
+      if (!submittedPending || candidateRequestId !== requestId) {
+        return false;
+      }
+      resolveCalls += 1;
+      submittedPending = false;
+      submitted.resolve();
       return true;
     },
-    cancelUserInput(candidateRequestId) {
-      if (!pending || candidateRequestId !== requestId) {
-        return false;
+    cancelUserInput(candidateRequestId, reason) {
+      if (invalidPending && candidateRequestId === invalidRequestId) {
+        invalidPending = false;
+        cancellationReasons.push(reason ?? "");
+        cancelled.resolve();
+        return true;
       }
-      pending = false;
-      settled.resolve();
-      return true;
+      if (stalePending && candidateRequestId === staleRequestId) {
+        stalePending = false;
+        cancellationReasons.push(reason ?? "");
+        staleCancelled.resolve();
+        return true;
+      }
+      return false;
     },
     getCapabilityManifest() {
       throw new Error("capabilities are not used by this fixture");
@@ -1520,7 +1562,52 @@ test("RuntimeService projects waiting-for-user and settles user input exactly on
       false,
     );
     await nextTick();
-    assert.equal(interactions.filter((event) => event.type === "settled").length, 1);
+    assert.equal(
+      service.snapshotThread({ threadId: threadIdSchema.parse(IDS.thread), limit: 100 }).activeTurn
+        ?.status,
+      "waiting-for-user",
+    );
+    assert.equal(
+      service.resolvePendingUserInput(invalidRequestId, {
+        status: "submitted",
+        values: [{ id: "workspace", value: true }],
+      }),
+      false,
+    );
+    assert.equal(resolveCalls, 1);
+    assert.deepEqual(cancellationReasons, ["用户输入不符合原始表单约束"]);
+    assert.equal(
+      service.snapshotThread({ threadId: threadIdSchema.parse(IDS.thread), limit: 100 }).activeTurn
+        ?.status,
+      "running",
+    );
+    const invalidSettled = interactions.find(
+      (event) => event.type === "settled" && event.requestId === invalidRequestId,
+    );
+    assert.ok(invalidSettled?.type === "settled");
+    assert.equal(invalidSettled.reason, "用户输入不符合原始表单约束");
+    await nextTick();
+    assert.equal(
+      service.snapshotThread({ threadId: threadIdSchema.parse(IDS.thread), limit: 100 }).activeTurn
+        ?.status,
+      "waiting-for-user",
+    );
+    assert.equal(
+      service.resolvePendingUserInput(staleRequestId, {
+        status: "submitted",
+        values: [{ id: "workspace", value: "still-valid" }],
+      }),
+      false,
+    );
+    assert.equal(resolveCalls, 2);
+    assert.deepEqual(cancellationReasons, ["用户输入不符合原始表单约束", "用户输入请求已失效"]);
+    const staleSettled = interactions.find(
+      (event) => event.type === "settled" && event.requestId === staleRequestId,
+    );
+    assert.ok(staleSettled?.type === "settled");
+    assert.equal(staleSettled.reason, "用户输入请求已失效");
+    await nextTick();
+    assert.equal(interactions.filter((event) => event.type === "settled").length, 3);
     assert.equal(JSON.stringify(interactions).includes("product-docs"), false);
   } finally {
     await service.close();

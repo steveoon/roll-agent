@@ -9,6 +9,7 @@ import {
   SUPPORTED_RUNTIME_PROTOCOL_VERSIONS,
   approvalExplanationSchema,
   approvalIdSchema,
+  normalizeUserInputResultForForm,
   operationIdSchema,
   parseRuntimeMethodResult,
   runtimeDurableEventV13Schema,
@@ -978,15 +979,35 @@ export class RuntimeService {
     if (pending === undefined) {
       return false;
     }
+    let normalized: UserInputResult;
+    try {
+      normalized = normalizeUserInputResultForForm(pending.form, result);
+    } catch {
+      this.cancelPendingUserInput(requestId, "用户输入不符合原始表单约束");
+      return false;
+    }
     this.pendingUserInputs.delete(requestId);
-    const resolved = pending.session.resolveUserInput?.(requestId, result) ?? false;
+    const resolved = pending.session.resolveUserInput?.(requestId, normalized) ?? false;
+    if (!resolved) {
+      const reason = "用户输入请求已失效";
+      pending.session.cancelUserInput?.(requestId, reason);
+      this.restoreRunningStatus(pending);
+      this.emitUserInputInteraction({
+        type: "settled",
+        requestId,
+        threadId: pending.threadId,
+        turnId: pending.turnId,
+        reason,
+      });
+      return false;
+    }
     this.restoreRunningStatus(pending);
     this.emitUserInputInteraction({
       type: "settled",
       requestId,
       threadId: pending.threadId,
       turnId: pending.turnId,
-      reason: result.status === "submitted" ? "用户已提交输入" : "用户已取消输入",
+      reason: normalized.status === "submitted" ? "用户已提交输入" : "用户已取消输入",
     });
     return resolved;
   }
