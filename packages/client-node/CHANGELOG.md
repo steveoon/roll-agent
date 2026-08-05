@@ -1,5 +1,34 @@
 # @roll-agent/client-node
 
+## 0.3.0
+
+### Minor Changes
+
+- [#201](https://github.com/steveoon/roll-agent/pull/201) [`c9597e3`](https://github.com/steveoon/roll-agent/commit/c9597e3520059701640f3cc33cf7bf1be0bf0e8d) Thanks [@steveoon](https://github.com/steveoon)! - Add Runtime Protocol 1.3 durable event cursors, bounded per-Thread replay storage, a
+  replay-to-live response barrier, and a Node client recovery manager with Snapshot fallback.
+
+- [#196](https://github.com/steveoon/roll-agent/pull/196) [`fda44ec`](https://github.com/steveoon/roll-agent/commit/fda44ec80bd87fae0492d4f41fbd7677f680e733) Thanks [@steveoon](https://github.com/steveoon)! - Negotiate Runtime Protocol 1.2 Server Request capabilities before delivery, carry branded
+  Interaction metadata on Approval requests, cancel 1.2 requests by InteractionId, and keep the
+  Protocol 1.1 and 1.0 control paths wire-compatible.
+  Freeze Relay Wire 1.0 against Runtime 1.2 schema drift and project newer Runtime snapshots and
+  events to its existing Runtime 1.1-compatible envelope before remote delivery.
+
+- [#197](https://github.com/steveoon/roll-agent/pull/197) [`e17ca19`](https://github.com/steveoon/roll-agent/commit/e17ca19259e5b8a263aa99bfa0979e475ab3c00d) Thanks [@steveoon](https://github.com/steveoon)! - Add the Runtime Protocol 1.2 `userInput.request` interaction, including five bounded control
+  types, request-correlated result validation, safe pending projections, and a typed Node client
+  handler. Expose the built-in `roll__user_input` Tool only after capability acknowledgement, wait
+  in `waiting-for-user`, and settle cancellation, timeout, disconnect, or late responses exactly once.
+
+### Patch Changes
+
+- [#203](https://github.com/steveoon/roll-agent/pull/203) [`df979d9`](https://github.com/steveoon/roll-agent/commit/df979d98dcf09250f6705a599b42c13bafba915a) Thanks [@steveoon](https://github.com/steveoon)! - Accept Runtime capability ACKs that return the registry-ordered intersection of the requested
+  Server Request methods, as the protocol contract specifies. The client previously demanded an
+  element-and-order-exact echo and failed the connection on any legal subset, so a client-node
+  newer than its Runtime could never negotiate. Unrequested methods and revision mismatches are
+  still rejected, dropped methods answer -32601, and the redundant internal handler mirror map
+  was folded into the single handler registry.
+- Updated dependencies [[`c9597e3`](https://github.com/steveoon/roll-agent/commit/c9597e3520059701640f3cc33cf7bf1be0bf0e8d), [`df979d9`](https://github.com/steveoon/roll-agent/commit/df979d98dcf09250f6705a599b42c13bafba915a), [`e17ca19`](https://github.com/steveoon/roll-agent/commit/e17ca19259e5b8a263aa99bfa0979e475ab3c00d), [`fda44ec`](https://github.com/steveoon/roll-agent/commit/fda44ec80bd87fae0492d4f41fbd7677f680e733)]:
+  - @roll-agent/protocol@0.4.0
+
 ## 0.2.1
 
 ### Patch Changes
