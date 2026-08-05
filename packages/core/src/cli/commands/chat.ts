@@ -703,6 +703,7 @@ export default defineCommand({
         },
       });
       signalScope.setEngine(engine);
+      const chatEngine = engine;
       let session: AgentSession;
       if (args.session) {
         session = await engine.resumeSession(args.session);
@@ -776,6 +777,11 @@ export default defineCommand({
               signal: signalScope.signal,
               onThinkingChange: (level) =>
                 session.setProviderOptions(thinkingProviderOptions(provider, modelName, level)),
+              resumeSession: (threadId) => chatEngine.resumeSession(threadId),
+              onActiveSessionChange: (next) => {
+                session = next;
+                sessionForCleanup = next;
+              },
             });
           } catch (inkError) {
             if (usedInk) {
