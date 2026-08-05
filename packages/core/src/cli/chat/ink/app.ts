@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { createElement as h, useCallback, useState } from "react";
+import { createElement as h, useCallback, useEffect, useRef, useState } from "react";
 import type { ReactElement } from "react";
 import { Box, Text, useInput, useWindowSize } from "ink";
 import type { AgentSession } from "@roll-agent/runtime";
@@ -11,12 +11,14 @@ import { TextPrompt } from "./text-prompt.ts";
 import { ConfirmSelect } from "./confirm-select.ts";
 import { UserInputForm } from "./user-input-form.ts";
 import { SlashPopup } from "./slash-popup.ts";
+import { SessionPicker } from "./session-picker.ts";
+import { messagesToHistory } from "./history-from-messages.ts";
+import type { SessionPickerItem } from "../session-picker-format.ts";
 import {
   buildSkillListLines,
   filterSlashEntries,
   parseSkillInvocation,
   SLASH_COMMANDS,
-  type SlashSkillSummary,
 } from "./commands.ts";
 import { bannerTextLine, buildBannerLines, type BannerInfo } from "../banner.ts";
 import { cycleThinking } from "./thinking.ts";
@@ -26,17 +28,35 @@ import { TurnStatusLine } from "./turn-status-line.ts";
 import { resolveChatLayout } from "./layout.ts";
 import { TranscriptViewport } from "./transcript-viewport.ts";
 
+export interface ChatSessionSwitching {
+  readonly loadItems: (currentSessionId: string) => readonly SessionPickerItem[];
+  readonly resume: (threadId: string) => Promise<AgentSession>;
+  readonly onRetired: (threadId: string) => void;
+}
+
 export interface ChatAppProps {
   readonly session: AgentSession;
   readonly model: string;
-  readonly contextWindow: number | undefined;
   readonly initialHistory?: readonly HistoryItem[];
   readonly banner?: BannerInfo;
   readonly initialThinkingLevel?: ThinkingLevel;
-  readonly availableSkills?: readonly SlashSkillSummary[];
   readonly onThinkingChange?: (level: ThinkingLevel) => void;
   readonly onUserSubmit: (text: string) => void;
   readonly onExit: () => void;
+  readonly sessionSwitching?: ChatSessionSwitching;
+}
+
+interface SessionPickerState {
+  readonly items: readonly SessionPickerItem[];
+  readonly busy: boolean;
+  readonly error?: string;
+}
+
+interface ChatSessionViewProps extends Omit<ChatAppProps, "sessionSwitching"> {
+  readonly picker: SessionPickerState | undefined;
+  readonly onOpenPicker: () => boolean;
+  readonly onPickerSelect: (threadId: string) => void;
+  readonly onPickerCancel: () => void;
 }
 
 export const INK_HINTS =
@@ -47,10 +67,89 @@ function helpText(): string {
 }
 
 export function ChatApp(props: ChatAppProps): ReactElement {
-  const { session, model, contextWindow, onUserSubmit, onExit } = props;
+  const [activeSession, setActiveSession] = useState(props.session);
+  const [sessionHistory, setSessionHistory] = useState<readonly HistoryItem[] | undefined>(
+    props.initialHistory,
+  );
+  const [picker, setPicker] = useState<SessionPickerState | undefined>(undefined);
+  const retiringRef = useRef<AgentSession | undefined>(undefined);
+  const sessionSwitching = props.sessionSwitching;
+
+  useEffect(() => {
+    const retiring = retiringRef.current;
+    if (retiring === undefined || retiring === activeSession) {
+      return;
+    }
+    retiringRef.current = undefined;
+    const finish = (): void => {
+      sessionSwitching?.onRetired(retiring.id);
+    };
+    retiring.close().then(finish, finish);
+  }, [activeSession, sessionSwitching]);
+
+  const openPicker = useCallback((): boolean => {
+    if (sessionSwitching === undefined) {
+      return false;
+    }
+    setPicker({ items: sessionSwitching.loadItems(activeSession.id), busy: false });
+    return true;
+  }, [sessionSwitching, activeSession]);
+
+  const cancelPicker = useCallback(() => {
+    setPicker(undefined);
+  }, []);
+
+  const selectSession = useCallback(
+    (threadId: string) => {
+      if (sessionSwitching === undefined) {
+        return;
+      }
+      setPicker((current) =>
+        current === undefined ? current : { items: current.items, busy: true },
+      );
+      sessionSwitching.resume(threadId).then(
+        (next) => {
+          retiringRef.current = activeSession;
+          setSessionHistory(messagesToHistory(next.getMessages()));
+          setActiveSession(next);
+          setPicker(undefined);
+        },
+        (error: unknown) => {
+          const message = error instanceof Error ? error.message : String(error);
+          setPicker((current) =>
+            current === undefined ? current : { items: current.items, busy: false, error: message },
+          );
+        },
+      );
+    },
+    [sessionSwitching, activeSession],
+  );
+
+  return h(ChatSessionView, {
+    key: activeSession.id,
+    session: activeSession,
+    model: props.model,
+    onUserSubmit: props.onUserSubmit,
+    onExit: props.onExit,
+    ...(sessionHistory !== undefined ? { initialHistory: sessionHistory } : {}),
+    ...(props.banner !== undefined ? { banner: props.banner } : {}),
+    ...(props.initialThinkingLevel !== undefined
+      ? { initialThinkingLevel: props.initialThinkingLevel }
+      : {}),
+    ...(props.onThinkingChange !== undefined ? { onThinkingChange: props.onThinkingChange } : {}),
+    picker,
+    onOpenPicker: openPicker,
+    onPickerSelect: selectSession,
+    onPickerCancel: cancelPicker,
+  });
+}
+
+function ChatSessionView(props: ChatSessionViewProps): ReactElement {
+  const { session, model, onUserSubmit, onExit } = props;
   const windowSize = useWindowSize();
   const layout = resolveChatLayout(windowSize.columns, windowSize.rows);
-  const availableSkills = props.availableSkills ?? [];
+  const contextWindow = session.getContextWindow();
+  const availableSkills = session.getSkillSummaries();
   const [inputHistory, setInputHistory] = useState<readonly string[]>(() =>
     (props.initialHistory ?? []).reduce<readonly string[]>(
       (history, item) => (item.kind === "user" ? appendInputHistory(history, item.text) : history),
@@ -97,6 +196,9 @@ export function ChatApp(props: ChatAppProps): ReactElement {
   const selectedIndex = Math.min(selected, maxIndex);
 
   useInput((input, key) => {
+    if (props.picker !== undefined) {
+      return;
+    }
     if (state.phase === CHAT_PHASES.userInput) {
       if (layout.tooSmall && key.escape && !key.meta && state.pendingUserInput !== undefined) {
         resolveUserInput(state.pendingUserInput.requestId, {
@@ -187,6 +289,12 @@ export function ChatApp(props: ChatAppProps): ReactElement {
       });
       return;
     }
+    if (name === "/resume") {
+      if (!props.onOpenPicker()) {
+        commitHistory({ kind: "notice", id: randomUUID(), text: "当前界面不支持会话切换" });
+      }
+      return;
+    }
     if (name === "/help") {
       commitHistory({ kind: "notice", id: randomUUID(), text: helpText() });
       return;
@@ -236,50 +344,60 @@ export function ChatApp(props: ChatAppProps): ReactElement {
   };
 
   const footer =
-    state.phase === CHAT_PHASES.confirm && state.pendingConfirm !== undefined
-      ? h(ConfirmSelect, {
-          prompt: state.pendingConfirm.prompt,
-          args: state.pendingConfirm.args,
-          ...(state.pendingConfirm.explanation !== undefined
-            ? { explanation: state.pendingConfirm.explanation }
-            : {}),
+    props.picker !== undefined
+      ? h(SessionPicker, {
+          items: props.picker.items,
+          busy: props.picker.busy,
+          ...(props.picker.error !== undefined ? { error: props.picker.error } : {}),
           width: layout.columns,
           maxRows: layout.promptRows + layout.popupRows,
-          onDecide: resolveConfirm,
+          onSelect: props.onPickerSelect,
+          onCancel: props.onPickerCancel,
         })
-      : state.phase === CHAT_PHASES.userInput && state.pendingUserInput !== undefined
-        ? h(UserInputForm, {
-            key: state.pendingUserInput.requestId,
-            request: state.pendingUserInput,
-            width: layout.columns,
-            viewportRows: layout.renderRows,
-            maxRows: layout.promptRows + layout.popupRows,
-            onResolve: (result) => {
-              if (state.pendingUserInput !== undefined) {
-                resolveUserInput(state.pendingUserInput.requestId, result);
-              }
-            },
-          })
-        : h(TextPrompt, {
-            value: state.draft,
-            width: layout.columns,
-            viewportRows: layout.renderRows,
-            maxRows: layout.promptRows,
-            showHint: layout.showHelp,
-            inputHistory,
-            disabled: state.phase !== CHAT_PHASES.idle,
-            ...(state.phase === CHAT_PHASES.cancelling
-              ? { disabledHint: "中断请求已发送，等待当前活动退出…" }
+      : state.phase === CHAT_PHASES.confirm && state.pendingConfirm !== undefined
+        ? h(ConfirmSelect, {
+            prompt: state.pendingConfirm.prompt,
+            args: state.pendingConfirm.args,
+            ...(state.pendingConfirm.explanation !== undefined
+              ? { explanation: state.pendingConfirm.explanation }
               : {}),
-            slashActive,
-            slashPopupActive,
-            autoApprove: state.status.autoApprove,
-            onChange: setDraft,
-            onSubmit: handleSubmit,
-            onSlashMove,
-            onSlashComplete,
-            onSlashRun,
-          });
+            width: layout.columns,
+            maxRows: layout.promptRows + layout.popupRows,
+            onDecide: resolveConfirm,
+          })
+        : state.phase === CHAT_PHASES.userInput && state.pendingUserInput !== undefined
+          ? h(UserInputForm, {
+              key: state.pendingUserInput.requestId,
+              request: state.pendingUserInput,
+              width: layout.columns,
+              viewportRows: layout.renderRows,
+              maxRows: layout.promptRows + layout.popupRows,
+              onResolve: (result) => {
+                if (state.pendingUserInput !== undefined) {
+                  resolveUserInput(state.pendingUserInput.requestId, result);
+                }
+              },
+            })
+          : h(TextPrompt, {
+              value: state.draft,
+              width: layout.columns,
+              viewportRows: layout.renderRows,
+              maxRows: layout.promptRows,
+              showHint: layout.showHelp,
+              inputHistory,
+              disabled: state.phase !== CHAT_PHASES.idle,
+              ...(state.phase === CHAT_PHASES.cancelling
+                ? { disabledHint: "中断请求已发送，等待当前活动退出…" }
+                : {}),
+              slashActive,
+              slashPopupActive,
+              autoApprove: state.status.autoApprove,
+              onChange: setDraft,
+              onSubmit: handleSubmit,
+              onSlashMove,
+              onSlashComplete,
+              onSlashRun,
+            });
   const turnActivity = resolveTurnActivity(state);
 
   if (layout.tooSmall) {
@@ -315,7 +433,8 @@ export function ChatApp(props: ChatAppProps): ReactElement {
       navigationBlocked:
         state.phase === CHAT_PHASES.confirm ||
         state.phase === CHAT_PHASES.userInput ||
-        slashPopupActive,
+        slashPopupActive ||
+        props.picker !== undefined,
       ...(bannerLines === undefined ? {} : { banner: bannerLines }),
     }),
     h(

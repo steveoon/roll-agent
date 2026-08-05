@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { filterCommands, SLASH_COMMANDS } from "./commands.ts";
+import { filterCommands, filterSlashEntries, SLASH_COMMANDS } from "./commands.ts";
 
 test("filterCommands returns all on a bare slash", () => {
   assert.equal(filterCommands("/").length, SLASH_COMMANDS.length);
@@ -102,4 +102,12 @@ test("truncateDisplay 对 CJK 宽字符按显示宽度截断", async () => {
   assert.ok(truncated.endsWith("…"));
   assert.ok(truncated.length < 8);
   assert.equal(truncateDisplay("👩‍👩‍👧‍👦abc", 3), "👩‍👩‍👧‍👦…");
+});
+
+test("filterSlashEntries matches /resume", () => {
+  const entries = filterSlashEntries("/res");
+  assert.deepEqual(
+    entries.map((entry) => entry.name),
+    ["/resume"],
+  );
 });

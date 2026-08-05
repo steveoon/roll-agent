@@ -364,6 +364,24 @@ async function promptBooleanControl(
   context: UserInputPromptContext,
 ): Promise<PromptedControl> {
   const control = requireControlType(candidate, "boolean");
+  if (!control.required) {
+    const answer = await context.driver.select({
+      message: promptMessage(context, control),
+      options: [
+        { value: "true", label: "是" },
+        { value: "false", label: "否" },
+      ],
+      optional: true,
+      ...(context.signal !== undefined ? { signal: context.signal } : {}),
+    });
+    if (answer.status === "cancelled") {
+      return answer;
+    }
+    if (answer.value === undefined) {
+      return { status: "omitted" };
+    }
+    return { status: "value", value: { id: control.id, value: answer.value === "true" } };
+  }
   const answer = await context.driver.confirm({
     message: promptMessage(context, control),
     ...(context.signal !== undefined ? { signal: context.signal } : {}),

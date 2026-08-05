@@ -307,3 +307,29 @@ test("Esc and shutdown are normal cancelled results", async () => {
   );
   assert.equal(shutdownDriver.textCalls.length, 0);
 });
+
+test("optional boolean controls prompt as a skippable select", async () => {
+  const form = {
+    controls: [
+      { type: "boolean", id: "notify", label: "发送通知", required: false },
+      { type: "boolean", id: "canary", label: "启用灰度", required: false },
+    ],
+  } satisfies ChatUserInputForm;
+  const driver = new ScriptedUserInputDriver({
+    select: [answer(undefined), answer("false")],
+  });
+
+  const result = await createUserInputPromptAdapter(driver).request(form);
+
+  assert.deepEqual(result, {
+    status: "submitted",
+    values: [{ id: "canary", value: false }],
+  });
+  assert.equal(driver.confirmCalls.length, 0);
+  assert.equal(driver.selectCalls.length, 2);
+  assert.equal(driver.selectCalls[0]?.optional, true);
+  assert.deepEqual(
+    driver.selectCalls[0]?.options.map((option) => option.label),
+    ["是", "否"],
+  );
+});

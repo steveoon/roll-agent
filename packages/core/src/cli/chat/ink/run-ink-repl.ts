@@ -5,14 +5,22 @@ import type { ThinkingLevel } from "../../../llm/providers.ts";
 import { ChatApp, INK_HINTS } from "./app.ts";
 import { messagesToHistory } from "./history-from-messages.ts";
 import { titleFromMessage } from "../title.ts";
+import { buildSessionPickerItems } from "../session-picker-format.ts";
 import type { BannerInfo } from "../banner.ts";
 import { log } from "../../utils/output.ts";
 import { createChatTerminalOutput } from "./terminal-output.ts";
+
+export interface InkReplThreadSummary {
+  readonly id: string;
+  readonly title: string | undefined;
+  readonly updatedAt: string;
+}
 
 export interface InkReplStore {
   updateTitle(threadId: string, title: string): void;
   countMessages(threadId: string): number;
   deleteThread(threadId: string): void;
+  listThreads(): readonly InkReplThreadSummary[];
 }
 
 export interface RunInkReplOptions {
@@ -22,6 +30,8 @@ export interface RunInkReplOptions {
   readonly onThinkingChange?: (level: ThinkingLevel) => void;
   readonly onStarted?: () => void;
   readonly signal?: AbortSignal;
+  readonly resumeSession?: (threadId: string) => Promise<AgentSession>;
+  readonly onActiveSessionChange?: (session: AgentSession) => void;
 }
 
 export async function runInkRepl(
@@ -30,16 +40,50 @@ export async function runInkRepl(
   isNewSession: boolean,
   options: RunInkReplOptions,
 ): Promise<void> {
-  let submitted = false;
+  let active = session;
   let titled = !isNewSession;
+  const initial = { id: session.id, isNew: isNewSession, submitted: false };
 
   const onUserSubmit = (text: string): void => {
-    submitted = true;
+    if (active.id === initial.id) {
+      initial.submitted = true;
+    }
     if (!titled) {
-      store.updateTitle(session.id, titleFromMessage(text));
+      store.updateTitle(active.id, titleFromMessage(text));
       titled = true;
     }
   };
+
+  const resumeSession = options.resumeSession;
+  const sessionSwitching =
+    resumeSession === undefined
+      ? undefined
+      : {
+          loadItems: (currentSessionId: string) =>
+            buildSessionPickerItems(store.listThreads(), {
+              currentSessionId,
+              countMessages: (threadId: string) => store.countMessages(threadId),
+              now: new Date(),
+            }),
+          resume: async (threadId: string) => {
+            const next = await resumeSession(threadId);
+            active = next;
+            titled =
+              store.listThreads().find((thread) => thread.id === next.id)?.title !== undefined;
+            options.onActiveSessionChange?.(next);
+            return next;
+          },
+          onRetired: (threadId: string) => {
+            if (
+              initial.isNew &&
+              threadId === initial.id &&
+              !initial.submitted &&
+              store.countMessages(threadId) === 0
+            ) {
+              store.deleteThread(threadId);
+            }
+          },
+        };
 
   if (!options.banner) {
     log.info(`多轮对话已就绪（${INK_HINTS}）`);
@@ -52,13 +96,12 @@ export async function runInkRepl(
       h(ChatApp, {
         session,
         model: options.model,
-        contextWindow: session.getContextWindow(),
-        availableSkills: session.getSkillSummaries(),
         onUserSubmit,
         onExit: () => {
           instance.unmount();
         },
         initialHistory: priorHistory,
+        ...(sessionSwitching === undefined ? {} : { sessionSwitching }),
         ...(options.banner === undefined ? {} : { banner: options.banner }),
         ...(options.initialThinkingLevel
           ? { initialThinkingLevel: options.initialThinkingLevel }
@@ -91,18 +134,23 @@ export async function runInkRepl(
   } finally {
     terminalOutput.dispose();
   }
-  await session.close();
+  await active.close();
 
-  if (isNewSession && !submitted && store.countMessages(session.id) === 0) {
-    store.deleteThread(session.id);
+  if (
+    initial.isNew &&
+    active.id === initial.id &&
+    !initial.submitted &&
+    store.countMessages(active.id) === 0
+  ) {
+    store.deleteThread(active.id);
     process.stderr.write("本次会话无消息，未保存\n");
     return;
   }
 
-  const messageCount = session
+  const messageCount = active
     .getMessages()
     .filter((message) => message.role === "user" || message.role === "assistant").length;
   process.stderr.write(
-    `会话 ${session.id} · ${String(messageCount)} 条消息\n继续：roll chat --session ${session.id}\n`,
+    `会话 ${active.id} · ${String(messageCount)} 条消息\n继续：roll chat --session ${active.id}\n`,
   );
 }

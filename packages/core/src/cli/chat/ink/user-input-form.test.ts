@@ -106,8 +106,6 @@ test("UserInputForm validates all five controls and submits values in definition
   await delay(20);
   assert.match(lastFrame() ?? "", /仅预演/);
 
-  stdin.write("\x1b[B");
-  await delay(10);
   stdin.write("\r");
   await delay(20);
   assert.match(lastFrame() ?? "", /部署区域/);
@@ -120,6 +118,12 @@ test("UserInputForm validates all five controls and submits values in definition
   assert.match(lastFrame() ?? "", /至少选择 2 项/);
   stdin.write(" ");
   await delay(10);
+  stdin.write("\r");
+  await delay(20);
+  assert.match(lastFrame() ?? "", /确认提交/);
+  assert.match(lastFrame() ?? "", /abc/);
+  assert.match(lastFrame() ?? "", /北区、南区/);
+  assert.deepEqual(results, []);
   stdin.write("\r");
   await delay(20);
 
@@ -194,6 +198,10 @@ test("UserInputForm skips optional controls and rejects text beyond its maximum"
   await delay(20);
   stdin.write("s");
   await delay(20);
+  assert.match(lastFrame() ?? "", /确认提交/);
+  assert.match(lastFrame() ?? "", /（未填）/);
+  stdin.write("\r");
+  await delay(20);
 
   assert.deepEqual(results, [{ status: "submitted", values: [] }]);
   unmount();
@@ -225,6 +233,10 @@ test("UserInputForm does not coerce an empty required number to zero", async () 
   assert.deepEqual(results, []);
 
   stdin.write("0");
+  stdin.write("\r");
+  await delay(20);
+  assert.match(lastFrame() ?? "", /确认提交/);
+  assert.deepEqual(results, []);
   stdin.write("\r");
   await delay(20);
   assert.deepEqual(results, [{ status: "submitted", values: [{ id: "replicas", value: 0 }] }]);
@@ -259,5 +271,112 @@ test("UserInputForm treats Esc as normal cancellation exactly once and ignores S
   stdin.write("\x1b");
   await delay(20);
   assert.deepEqual(results, [{ status: "cancelled", reason: "用户取消" }]);
+  unmount();
+});
+
+test("UserInputForm goes back with Esc and restores confirmed values", async () => {
+  const results: UserInputResult[] = [];
+  const { stdin, lastFrame, unmount } = render(
+    h(UserInputForm, {
+      request: request([
+        { type: "text", id: "name", label: "服务名", required: true },
+        {
+          type: "choice",
+          id: "env",
+          label: "部署环境",
+          required: true,
+          multiple: false,
+          options: [
+            { id: "dev", label: "开发" },
+            { id: "prod", label: "生产" },
+          ],
+        },
+      ]),
+      width: 80,
+      viewportRows: 30,
+      maxRows: 14,
+      onResolve: (result: UserInputResult) => results.push(result),
+    }),
+  );
+
+  await delay(10);
+  stdin.write("abc");
+  stdin.write("\r");
+  await delay(20);
+  assert.match(lastFrame() ?? "", /部署环境/);
+  stdin.write("\x1b");
+  await delay(20);
+  assert.match(lastFrame() ?? "", /服务名/);
+  assert.match(lastFrame() ?? "", /abc/);
+  assert.match(lastFrame() ?? "", /Esc 取消/);
+  stdin.write("\r");
+  await delay(20);
+  assert.match(lastFrame() ?? "", /Esc 返回/);
+  stdin.write("\x1b[B");
+  await delay(10);
+  stdin.write("\r");
+  await delay(20);
+  assert.match(lastFrame() ?? "", /确认提交/);
+  assert.match(lastFrame() ?? "", /生产/);
+  stdin.write("\x1b");
+  await delay(20);
+  assert.match(lastFrame() ?? "", /部署环境/);
+  assert.match(lastFrame() ?? "", /› ● 生产/);
+  stdin.write("\r");
+  await delay(20);
+  stdin.write("\r");
+  await delay(20);
+
+  assert.deepEqual(results, [
+    {
+      status: "submitted",
+      values: [
+        { id: "name", value: "abc" },
+        { id: "env", value: "prod" },
+      ],
+    },
+  ]);
+  unmount();
+});
+
+test("UserInputForm edits a control from the summary and resubmits", async () => {
+  const results: UserInputResult[] = [];
+  const { stdin, lastFrame, unmount } = render(
+    h(UserInputForm, {
+      request: request([{ type: "text", id: "name", label: "服务名", required: true }]),
+      width: 80,
+      viewportRows: 30,
+      maxRows: 14,
+      onResolve: (result: UserInputResult) => results.push(result),
+    }),
+  );
+
+  await delay(10);
+  stdin.write("abc");
+  stdin.write("\r");
+  await delay(20);
+  assert.match(lastFrame() ?? "", /确认提交/);
+  stdin.write("\x1b[A");
+  await delay(10);
+  stdin.write("\r");
+  await delay(20);
+  assert.match(lastFrame() ?? "", /Esc 返回/);
+  stdin.write("\x1b");
+  await delay(20);
+  assert.match(lastFrame() ?? "", /确认提交/);
+  assert.match(lastFrame() ?? "", /abc/);
+  stdin.write("\r");
+  await delay(20);
+  stdin.write("\x15");
+  stdin.write("xyz");
+  stdin.write("\r");
+  await delay(20);
+  assert.match(lastFrame() ?? "", /确认提交/);
+  assert.match(lastFrame() ?? "", /xyz/);
+  assert.deepEqual(results, []);
+  stdin.write("\r");
+  await delay(20);
+
+  assert.deepEqual(results, [{ status: "submitted", values: [{ id: "name", value: "xyz" }] }]);
   unmount();
 });

@@ -892,3 +892,109 @@ test("runRepl settles shutdown during user input as cancelled without cancelling
   assert.deepEqual(cancellations, [{ requestId, reason: "会话正在关闭" }]);
   assert.equal(turnCancellations, 0);
 });
+
+function replFakeSession(id: string): {
+  readonly session: AgentSession;
+  readonly sent: () => readonly string[];
+  readonly isClosed: () => boolean;
+} {
+  let closed = false;
+  const sent: string[] = [];
+  const session = {
+    id,
+    async *send(message: string) {
+      sent.push(message);
+      yield { type: "message-finish", text: "done" } satisfies SessionEvent;
+    },
+    close: async () => {
+      closed = true;
+    },
+    getMessages: () => [],
+    getContextWindow: () => undefined,
+    getSkillSummaries: () => [],
+    setUserInputAvailable: () => {},
+  } as unknown as AgentSession;
+  return { session, sent: () => sent, isClosed: () => closed };
+}
+
+test("runRepl switches sessions via /resume", async () => {
+  const first = replFakeSession("s1");
+  const second = replFakeSession("s2");
+  const deleted: string[] = [];
+  const switched: string[] = [];
+  const store = {
+    listThreads: () => [
+      { id: "s1", title: "当前", updatedAt: "2026-08-05T10:00:00.000Z" },
+      { id: "t2", title: "发布计划", updatedAt: "2026-08-05T09:00:00.000Z" },
+    ],
+    countMessages: () => 2,
+    getThread: (threadId: string) =>
+      threadId === "s2" ? { id: "s2", title: "发布计划" } : undefined,
+    updateTitle: () => {},
+    deleteThread: (threadId: string) => deleted.push(threadId),
+  } as unknown as Parameters<typeof runRepl>[1];
+  const input = new PassThrough();
+  const done = runRepl(first.session, store, false, {
+    input,
+    output: sink(),
+    sessionPicker: async (items) => {
+      assert.deepEqual(
+        items.map((item) => item.id),
+        ["t2"],
+      );
+      return "t2";
+    },
+    resumeSession: async () => second.session,
+    onActiveSessionChange: (next) => switched.push(next.id),
+  });
+  await delay(20);
+  input.write("/resume\n");
+  await delay(30);
+  input.write("hi\n");
+  await delay(30);
+  input.write("exit\n");
+  input.end();
+  await done;
+  assert.deepEqual(switched, ["s2"]);
+  assert.equal(first.isClosed(), true);
+  assert.deepEqual(second.sent(), ["hi"]);
+  assert.deepEqual(first.sent(), []);
+  assert.deepEqual(deleted, []);
+});
+
+test("runRepl keeps current session when picker cancels or resume fails", async () => {
+  const first = replFakeSession("s1");
+  const store = {
+    listThreads: () => [{ id: "t2", title: "发布计划", updatedAt: "2026-08-05T09:00:00.000Z" }],
+    countMessages: () => 2,
+    getThread: () => undefined,
+    updateTitle: () => {},
+    deleteThread: () => {},
+  } as unknown as Parameters<typeof runRepl>[1];
+  const input = new PassThrough();
+  let call = 0;
+  const done = runRepl(first.session, store, false, {
+    input,
+    output: sink(),
+    sessionPicker: async () => {
+      call += 1;
+      return call === 1 ? undefined : "t2";
+    },
+    resumeSession: async () => {
+      throw new Error("线程不存在");
+    },
+  });
+  await delay(20);
+  input.write("/resume\n");
+  await delay(30);
+  input.write("/resume\n");
+  await delay(30);
+  input.write("hi\n");
+  await delay(30);
+  input.write("exit\n");
+  input.end();
+  await done;
+  assert.equal(call, 2);
+  assert.equal(first.isClosed(), false);
+  assert.deepEqual(first.sent(), ["hi"]);
+});

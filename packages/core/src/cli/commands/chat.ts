@@ -39,6 +39,8 @@ import {
   createClackUserInputPrompt,
   type ChatUserInputPrompt,
 } from "../utils/user-input-prompts.ts";
+import { buildSessionPickerItems, type SessionPickerItem } from "../chat/session-picker-format.ts";
+import { clackSessionPicker } from "../utils/clack-session-picker.ts";
 
 type RuntimeModule = typeof import("@roll-agent/runtime");
 
@@ -104,6 +106,9 @@ interface ReplIo {
   readonly confirm?: ChatConfirm;
   readonly userInputPrompt?: ChatUserInputPrompt;
   readonly signal?: AbortSignal;
+  readonly resumeSession?: (threadId: string) => Promise<AgentSession>;
+  readonly sessionPicker?: (items: readonly SessionPickerItem[]) => Promise<string | undefined>;
+  readonly onActiveSessionChange?: (session: AgentSession) => void;
 }
 
 function printChatJson(result: ChatCommandResult): void {
@@ -495,18 +500,18 @@ export async function runRepl(
       return result;
     },
   };
-  const renderer = new ChatRenderer(
+  let renderer = new ChatRenderer(
     confirmFn,
     session.getContextWindow(),
     io.signal,
     userInputPrompt,
   );
-  const availableSkills = session.getSkillSummaries();
+  let availableSkills = session.getSkillSummaries();
   session.setUserInputAvailable(true);
   log.info("进入多轮对话（输入 exit / quit 或 Ctrl-C 退出，/compact 手动压缩上下文）");
 
   let titled = !isNewSession;
-  let submitted = false;
+  const initial = { id: session.id, isNew: isNewSession, submitted: false };
   try {
     while (true) {
       const answer = await readReplLine(rl, chalk.green("› "), "prompt", io.signal);
@@ -532,6 +537,60 @@ export async function runRepl(
         log.info(formatSkillList(availableSkills, (process.stdout.columns || 96) - 2));
         continue;
       }
+      if (input === "/resume") {
+        if (io.resumeSession === undefined) {
+          log.info("当前模式不支持会话切换");
+          continue;
+        }
+        const items = buildSessionPickerItems(store.listThreads(), {
+          currentSessionId: session.id,
+          countMessages: (threadId) => store.countMessages(threadId),
+          now: new Date(),
+        });
+        if (items.length === 0) {
+          log.info("暂无其他会话");
+          continue;
+        }
+        rl.pause();
+        const targetId = await (io.sessionPicker ?? clackSessionPicker)(items);
+        if (targetId === undefined) {
+          continue;
+        }
+        let next: AgentSession;
+        try {
+          next = await io.resumeSession(targetId);
+        } catch (error) {
+          log.error(`切换失败：${error instanceof Error ? error.message : String(error)}`);
+          continue;
+        }
+        const previous = session;
+        previous.setUserInputAvailable(false);
+        await previous.close();
+        if (
+          initial.isNew &&
+          previous.id === initial.id &&
+          !initial.submitted &&
+          store.countMessages(previous.id) === 0
+        ) {
+          store.deleteThread(previous.id);
+        }
+        session = next;
+        session.setUserInputAvailable(true);
+        renderer = new ChatRenderer(
+          confirmFn,
+          session.getContextWindow(),
+          io.signal,
+          userInputPrompt,
+        );
+        availableSkills = session.getSkillSummaries();
+        const record = store.getThread(session.id);
+        titled = record?.title !== undefined;
+        io.onActiveSessionChange?.(session);
+        log.info(
+          `已切换到会话 ${session.id}${record?.title === undefined ? "" : ` · ${record.title}`}`,
+        );
+        continue;
+      }
       const skillInvocation = parseSkillInvocation(input, availableSkills);
       if (skillInvocation && skillInvocation.prompt.length === 0) {
         log.info("用法: /<skill-name> [/<skill-name> ...] 你的请求");
@@ -541,7 +600,9 @@ export async function runRepl(
         store.updateTitle(session.id, titleFromMessage(input));
         titled = true;
       }
-      submitted = true;
+      if (session.id === initial.id) {
+        initial.submitted = true;
+      }
       log.debug(`chat.repl send start · chars=${String(input.length)}`);
       for await (const event of session.send(input)) {
         await renderer.handle(event, session);
@@ -553,7 +614,12 @@ export async function runRepl(
       session.setUserInputAvailable(false);
     } finally {
       rl.close();
-      if (isNewSession && !submitted && store.countMessages(session.id) === 0) {
+      if (
+        initial.isNew &&
+        session.id === initial.id &&
+        !initial.submitted &&
+        store.countMessages(session.id) === 0
+      ) {
         store.deleteThread(session.id);
       }
     }
@@ -703,6 +769,7 @@ export default defineCommand({
         },
       });
       signalScope.setEngine(engine);
+      const chatEngine = engine;
       let session: AgentSession;
       if (args.session) {
         session = await engine.resumeSession(args.session);
@@ -776,6 +843,11 @@ export default defineCommand({
               signal: signalScope.signal,
               onThinkingChange: (level) =>
                 session.setProviderOptions(thinkingProviderOptions(provider, modelName, level)),
+              resumeSession: (threadId) => chatEngine.resumeSession(threadId),
+              onActiveSessionChange: (next) => {
+                session = next;
+                sessionForCleanup = next;
+              },
             });
           } catch (inkError) {
             if (usedInk) {
@@ -795,6 +867,11 @@ export default defineCommand({
             input: process.stdin,
             output: process.stdout,
             signal: signalScope.signal,
+            resumeSession: (threadId) => chatEngine.resumeSession(threadId),
+            onActiveSessionChange: (next) => {
+              session = next;
+              sessionForCleanup = next;
+            },
           });
         }
       }

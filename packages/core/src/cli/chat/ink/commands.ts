@@ -40,6 +40,7 @@ export const SLASH_COMMANDS: readonly SlashCommand[] = [
     description: "开关自动批准工具调用 (on | off)，Shift+Tab 快捷切换",
   },
   { kind: "command", name: "/skills", description: "列出可加载的 SKILL" },
+  { kind: "command", name: "/resume", description: "切换到已有会话" },
   { kind: "command", name: "/help", description: "列出可用命令" },
   { kind: "command", name: "/exit", description: "退出对话" },
 ];
