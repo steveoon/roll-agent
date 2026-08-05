@@ -295,12 +295,20 @@ export function UserInputForm(props: UserInputFormProps): ReactElement {
   }
 
   const title = props.request.form.title ?? "需要你的输入";
-  const headingRows =
-    4 +
-    (props.request.form.description === undefined ? 0 : 1) +
-    (control.description === undefined ? 0 : 1);
-  const choiceRows = Math.max(1, props.maxRows - headingRows - 2);
-  const editorRows = Math.max(3, Math.min(6, props.maxRows - headingRows));
+  const formDescription = props.request.form.description;
+  const headerRows = 1 + (formDescription === undefined ? 0 : 1);
+  const labelRows = 1 + (control.description === undefined ? 0 : 1);
+  const chromeRows = headerRows + labelRows + 1 + (error === undefined ? 0 : 1);
+  const spacious = props.maxRows >= chromeRows + 2 + 3;
+  const gapRows = spacious ? 1 : 0;
+  const topMargin = spacious ? 1 : 0;
+  const bodyBudget = Math.max(1, props.maxRows - chromeRows - gapRows - topMargin);
+  const choiceRows = bodyBudget;
+  const editorRows = Math.max(3, Math.min(6, bodyBudget));
+  const errorRow =
+    error === undefined
+      ? null
+      : h(Box, { paddingX: 1 }, h(Text, { color: "red", wrap: "truncate-end" }, error));
   const field =
     control.type === "text" || control.type === "multiline" || control.type === "number"
       ? h(TextPrompt, {
@@ -309,6 +317,7 @@ export function UserInputForm(props: UserInputFormProps): ReactElement {
           width: props.width,
           viewportRows: props.viewportRows,
           maxRows: editorRows,
+          bottomOffset: 1 + (error === undefined ? 0 : 1),
           showHint: false,
           inputHistory: [],
           disabled: false,
@@ -327,7 +336,7 @@ export function UserInputForm(props: UserInputFormProps): ReactElement {
       : control.type === "boolean"
         ? h(
             Box,
-            { gap: 2 },
+            { paddingX: 1, gap: 2 },
             h(
               Text,
               booleanValue ? { color: "cyan", bold: true } : null,
@@ -341,32 +350,41 @@ export function UserInputForm(props: UserInputFormProps): ReactElement {
           )
         : h(
             Box,
-            { flexDirection: "column" },
+            { paddingX: 1, flexDirection: "column" },
             ...optionRows(control, optionCursor, selectedOptions, choiceRows),
           );
 
   return h(
     Box,
-    { flexDirection: "column", width: props.width, flexShrink: 0 },
+    { flexDirection: "column", width: props.width, flexShrink: 0, marginTop: topMargin },
     h(
       Box,
       { paddingX: 1, justifyContent: "space-between" },
       h(Text, { bold: true, color: "cyan", wrap: "truncate-end" }, title),
-      h(Text, { dimColor: true }, `${String(controlIndex + 1)}/${String(controls.length)}`),
+      h(Text, { dimColor: true }, ` ${String(controlIndex + 1)}/${String(controls.length)}`),
     ),
-    props.request.form.description === undefined
+    formDescription === undefined
       ? null
-      : h(Text, { dimColor: true, wrap: "truncate-end" }, props.request.form.description),
+      : h(Box, { paddingX: 1 }, h(Text, { dimColor: true, wrap: "truncate-end" }, formDescription)),
     h(
-      Text,
-      { bold: true, wrap: "truncate-end" },
-      `${control.label}${control.required ? " *" : ""}`,
+      Box,
+      { paddingX: 1, marginTop: gapRows },
+      h(Text, { bold: true, wrap: "truncate-end" }, control.label),
+      control.required ? h(Text, { color: "yellow" }, " *") : null,
     ),
     control.description === undefined
       ? null
-      : h(Text, { dimColor: true, wrap: "truncate-end" }, control.description),
+      : h(
+          Box,
+          { paddingX: 1 },
+          h(Text, { dimColor: true, wrap: "truncate-end" }, control.description),
+        ),
     field,
-    error === undefined ? null : h(Text, { color: "red", wrap: "truncate-end" }, error),
-    h(Text, { dimColor: true, wrap: "truncate-end" }, controlHint(control)),
+    errorRow,
+    h(
+      Box,
+      { paddingX: 1 },
+      h(Text, { dimColor: true, wrap: "truncate-end" }, controlHint(control)),
+    ),
   );
 }

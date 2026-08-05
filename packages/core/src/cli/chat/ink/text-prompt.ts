@@ -25,6 +25,8 @@ export interface TextPromptProps {
   readonly width: number;
   readonly viewportRows: number;
   readonly maxRows: number;
+  /** Rows rendered below this prompt inside the viewport; keeps the cursor anchor accurate. */
+  readonly bottomOffset?: number;
   readonly showHint: boolean;
   readonly inputHistory: readonly string[];
   readonly disabled: boolean;
@@ -260,7 +262,7 @@ export function TextPrompt(props: TextPromptProps): ReactElement {
   );
   const visibleCursorRow = metrics.cursorRow - firstVisibleRow;
   const promptHeight = visibleBodyRows + 2 + (showHint ? 1 : 0);
-  const promptTop = Math.max(0, props.viewportRows - promptHeight);
+  const promptTop = Math.max(0, props.viewportRows - (props.bottomOffset ?? 0) - promptHeight);
   // TextPrompt is the final child of the fixed root viewport. Anchoring from the viewport bottom
   // gives the cursor its post-layout row in the same render, while useBoxMetrics would report the
   // previous sibling layout for one commit when the slash popup mounts or unmounts. Ink's real
