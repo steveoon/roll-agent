@@ -574,7 +574,6 @@ export class RollNodeClient {
   private readonly activeTurns = new Set<TurnId>();
   private readonly unknownTurns = new Set<TurnId>();
   private readonly serverRequestHandlers: MutableRuntimeServerRequestHandlers;
-  private readonly activeServerRequestHandlers: MutableRuntimeServerRequestHandlers;
   private readonly serverRequestHandlerCapabilityRevisions = new Map<
     RuntimeServerRequestMethod,
     number
@@ -620,7 +619,6 @@ export class RollNodeClient {
     this.readRetryDelayMs = options.readRetryDelayMs ?? DEFAULT_READ_RETRY_DELAY_MS;
     this.defaultShutdownOptions = normalizeShutdownOptions(options.shutdownOptions);
     this.serverRequestHandlers = resolveRuntimeServerRequestHandlers(options);
-    this.activeServerRequestHandlers = { ...this.serverRequestHandlers };
     this.advertisedProtocolVersions = SUPPORTED_RUNTIME_PROTOCOL_VERSIONS.filter(
       (version) =>
         supportsRuntimeProtocolVersion(version, this.serverRequestHandlers) &&
@@ -732,7 +730,7 @@ export class RollNodeClient {
     }
     this.acknowledgedServerRequestMethods = new Set(
       getRuntimeProtocolRegistry(protocolVersion).serverRequestMethods.filter(
-        (method) => this.activeServerRequestHandlers[method] !== undefined,
+        (method) => this.serverRequestHandlers[method] !== undefined,
       ),
     );
   }
@@ -816,26 +814,17 @@ export class RollNodeClient {
         )}; expected ${String(revision)}`,
       );
     }
-    if (
-      result.acceptedServerRequestMethods.length !== serverRequestMethods.length ||
-      result.acceptedServerRequestMethods.some(
-        (method, index) => method !== serverRequestMethods[index],
-      )
-    ) {
-      throw new RollProtocolViolationError(
-        "Roll Runtime acknowledged an unexpected Client capability method set",
-      );
-    }
-    this.acknowledgedCapabilityRevision = revision;
-    this.acknowledgedServerRequestMethods = new Set(result.acceptedServerRequestMethods);
-    for (const method of getRuntimeProtocolRegistry(protocolVersion).serverRequestMethods) {
-      if (
-        !this.acknowledgedServerRequestMethods.has(method) &&
-        this.serverRequestHandlers[method] === undefined
-      ) {
-        delete this.activeServerRequestHandlers[method];
+    const requested = new Set(serverRequestMethods);
+    const accepted = new Set(result.acceptedServerRequestMethods);
+    for (const method of accepted) {
+      if (!requested.has(method)) {
+        throw new RollProtocolViolationError(
+          `Roll Runtime acknowledged Client capability method "${method}" that was not requested`,
+        );
       }
     }
+    this.acknowledgedCapabilityRevision = revision;
+    this.acknowledgedServerRequestMethods = accepted;
   }
 
   private observeServerRequestCapabilitySync(sync: Promise<void>): void {
@@ -933,7 +922,6 @@ export class RollNodeClient {
     }
     const previousHandler = this.serverRequestHandlers[method];
     setRuntimeServerRequestHandler(this.serverRequestHandlers, method, handler);
-    setRuntimeServerRequestHandler(this.activeServerRequestHandlers, method, handler);
     if (
       protocolVersion !== undefined &&
       usesDynamicServerRequestCapabilities(protocolVersion) &&
@@ -969,9 +957,7 @@ export class RollNodeClient {
           new Error(`Runtime Client capability "${method}" was withdrawn`),
         );
         this.observeServerRequestCapabilitySync(this.queueServerRequestCapabilitySync());
-        return;
       }
-      delete this.activeServerRequestHandlers[method];
     };
   }
 
@@ -1522,15 +1508,14 @@ export class RollNodeClient {
       );
       return;
     }
-    const handler = this.activeServerRequestHandlers[method];
+    const handler = this.serverRequestHandlers[method];
     const requiredCapabilityRevision = this.serverRequestHandlerCapabilityRevisions.get(method);
     if (
       (usesDynamicServerRequestCapabilities(protocolVersion) &&
         (!this.acknowledgedServerRequestMethods.has(method) ||
           requiredCapabilityRevision === undefined ||
           this.acknowledgedCapabilityRevision < requiredCapabilityRevision)) ||
-      handler === undefined ||
-      this.serverRequestHandlers[method] !== handler
+      handler === undefined
     ) {
       this.observeServerRequestResponse(
         this.writeServerRequestError(id, JSON_RPC_ERROR_CODES.methodNotFound, "Method not found"),

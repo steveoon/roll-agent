@@ -239,7 +239,29 @@ export class RuntimeProtocolAdapter {
     if (request.method === RUNTIME_METHODS.runtimeEventsResume) {
       return this.dispatchEventResume(request);
     }
+    if (request.method === RUNTIME_METHODS.clientCapabilitiesSet) {
+      return this.dispatchClientCapabilitiesSet(request);
+    }
     return { result: await this.dispatchValue(request) };
+  }
+
+  private dispatchClientCapabilitiesSet(request: JsonRpcRequest): RuntimeProtocolDispatchResult {
+    if (!this.initialized) {
+      throw new RuntimeServiceError(
+        RUNTIME_ERROR_CODES.initializeRequired,
+        "调用 Runtime Protocol 方法前必须先完成 initialize",
+      );
+    }
+    if (
+      this.protocolVersion === undefined ||
+      !getRuntimeProtocolCapabilities(this.protocolVersion).serverRequestCapabilityNegotiation
+    ) {
+      throw new RuntimeServiceError(
+        RUNTIME_ERROR_CODES.capabilityUnavailable,
+        `Runtime Protocol ${String(this.protocolVersion)} 不支持 capability negotiation：${request.method}`,
+      );
+    }
+    return this.setClientCapabilities(clientCapabilitiesSetParamsSchema.parse(request.params));
   }
 
   private async dispatchValue(request: JsonRpcRequest): Promise<unknown> {
@@ -298,18 +320,6 @@ export class RuntimeProtocolAdapter {
         RUNTIME_ERROR_CODES.initializeRequired,
         "调用 Runtime Protocol 方法前必须先完成 initialize",
       );
-    }
-    if (request.method === RUNTIME_METHODS.clientCapabilitiesSet) {
-      if (
-        this.protocolVersion === undefined ||
-        !getRuntimeProtocolCapabilities(this.protocolVersion).serverRequestCapabilityNegotiation
-      ) {
-        throw new RuntimeServiceError(
-          RUNTIME_ERROR_CODES.capabilityUnavailable,
-          `Runtime Protocol ${String(this.protocolVersion)} 不支持 capability negotiation：${request.method}`,
-        );
-      }
-      return this.setClientCapabilities(clientCapabilitiesSetParamsSchema.parse(request.params));
     }
     if (
       this.protocolVersion === undefined ||
@@ -402,6 +412,8 @@ export class RuntimeProtocolAdapter {
         );
       case RUNTIME_METHODS.runtimeEventsResume:
         throw new Error("runtime.events.resume requires the response-barrier dispatch path");
+      case RUNTIME_METHODS.clientCapabilitiesSet:
+        throw new Error("client.capabilities.set requires the response-barrier dispatch path");
     }
   }
 
@@ -664,8 +676,6 @@ export class RuntimeProtocolAdapter {
           key: userInputInteractionKey(interaction.requestId),
           scopeId: this.service.runtimeInstanceId,
           eligibleResponderId: this.responderId,
-          threadId: interaction.threadId,
-          turnId: interaction.turnId,
           protocolVersion,
           expiresAt: interaction.expiresAt,
         },
@@ -753,8 +763,6 @@ export class RuntimeProtocolAdapter {
           scopeId: this.service.runtimeInstanceId,
           eligibleResponderId: this.responderId,
           approvalId: approval.id,
-          threadId,
-          turnId: approval.turnId,
           protocolVersion,
           ...(interactionExpiresAt === undefined ? {} : { expiresAt: interactionExpiresAt }),
         },
@@ -814,7 +822,7 @@ export class RuntimeProtocolAdapter {
 
   private setClientCapabilities(
     params: ReturnType<typeof clientCapabilitiesSetParamsSchema.parse>,
-  ): ClientCapabilitiesSetResult {
+  ): RuntimeProtocolDispatchResult {
     if (
       this.protocolVersion === undefined ||
       !getRuntimeProtocolCapabilities(this.protocolVersion).serverRequestCapabilityNegotiation ||
@@ -832,7 +840,7 @@ export class RuntimeProtocolAdapter {
         canonicalMethods.length === this.capabilityMethods?.length &&
         canonicalMethods.every((method, index) => method === this.capabilityMethods?.[index]);
       if (isSameRevision && isSameMethods && this.capabilityResult !== undefined) {
-        return this.capabilityResult;
+        return { result: this.capabilityResult };
       }
       if (params.revision <= this.capabilityRevision) {
         throw new RuntimeServiceError(
@@ -846,20 +854,18 @@ export class RuntimeProtocolAdapter {
     const result = projectClientCapabilitiesSetResult(params);
     const reason = `Runtime 客户端已在 capability revision ${String(params.revision)} 撤销处理能力`;
     const internal = getRuntimeClientRequestCoordinatorInternal(this.clientRequests);
-    const updated =
+    const commit =
       internal.setServerRequestMethodsForAttachment(
         this.detachResponder,
         result.acceptedServerRequestMethods,
         reason,
-        true,
       ) ??
-      this.clientRequests.setResponderServerRequestMethods(
+      internal.setServerRequestMethodsForResponder(
         this.responderId,
         result.acceptedServerRequestMethods,
         reason,
-        true,
       );
-    if (!updated) {
+    if (commit === false) {
       throw new RuntimeServiceError(
         RUNTIME_ERROR_CODES.capabilityUnavailable,
         "Runtime 客户端 responder 已失效",
@@ -871,7 +877,14 @@ export class RuntimeProtocolAdapter {
     this.capabilityRevision = params.revision;
     this.capabilityMethods = canonicalMethods;
     this.capabilityResult = result;
-    return result;
+    return {
+      result,
+      afterResponse: (sent) => {
+        if (sent) {
+          commit();
+        }
+      },
+    };
   }
 
   private trackSettlement(task: Promise<void>): void {

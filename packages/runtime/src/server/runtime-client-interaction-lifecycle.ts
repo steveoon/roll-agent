@@ -36,7 +36,6 @@ export interface RuntimeClientDelivery<TAttachment extends object> {
   readonly id: RuntimeDeliveryId;
   readonly interactionKey: LogicalInteractionKey;
   readonly attachment: TAttachment;
-  readonly generation: number;
 }
 
 export type RuntimeClientInteractionSettlement =
@@ -69,7 +68,6 @@ export interface RuntimeClientInteraction<TResponderId extends string, TAttachme
   readonly resolveResponse: (value: unknown) => void;
   readonly reject: (error: Error) => void;
   state: RuntimeClientInteractionState<TAttachment>;
-  nextDeliveryGeneration: number;
   expiresTimer: ReturnType<typeof setTimeout> | undefined;
 }
 
@@ -116,7 +114,6 @@ export class RuntimeClientInteractionLifecycle<
       resolveResponse: input.resolveResponse,
       reject: input.reject,
       state: { kind: "waiting" },
-      nextDeliveryGeneration: 1,
       expiresTimer: undefined,
     };
     this.interactions.set(key, interaction);
@@ -178,16 +175,6 @@ export class RuntimeClientInteractionLifecycle<
     return delivery === undefined ? undefined : { previous, delivery };
   }
 
-  pendingForAttachment(
-    attachment: TAttachment,
-  ): readonly RuntimeClientInteraction<TResponderId, TAttachment>[] {
-    return [...this.interactions.values()].filter(
-      (interaction) =>
-        interaction.state.kind === "delivered" &&
-        interaction.state.delivery.attachment === attachment,
-    );
-  }
-
   pending(): readonly RuntimeClientInteraction<TResponderId, TAttachment>[] {
     return [...this.interactions.values()];
   }
@@ -230,9 +217,7 @@ export class RuntimeClientInteractionLifecycle<
       id: runtimeDeliveryIdSchema.parse(`runtime:${randomUUID()}`),
       interactionKey: interaction.key,
       attachment,
-      generation: interaction.nextDeliveryGeneration,
     };
-    interaction.nextDeliveryGeneration += 1;
     interaction.state = { kind: "delivered", delivery };
     this.deliveries.set(delivery.id, delivery);
     return delivery;

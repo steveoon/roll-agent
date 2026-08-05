@@ -174,8 +174,13 @@ Client 可以发送未来未知 method，Runtime 返回按自身 registry 顺序
 }
 ```
 
+Client 必须按集合语义处理 `acceptedServerRequestMethods`：它是请求集的子集，顺序以
+Runtime registry 为准，可以为空；只有出现未请求的 method 才构成协议违例。被 Runtime
+丢弃的 method 不进入已协商集合，其 Server Request 到达 Client 时应答 `-32601`。
+
 同 revision、同 method 集合是幂等重试；旧 revision，或同 revision 配不同集合，返回
-`CAPABILITY_REVISION_CONFLICT`。ACK 前 Runtime 不得投递 Interaction。
+`CAPABILITY_REVISION_CONFLICT`。ACK 前 Runtime 不得投递 Interaction；ACK 响应帧先于
+其后任何新 Interaction 的投递帧写出。
 `RollNodeClient.connect()` / `start()` 会等待首个 ACK 后才返回；动态注册或撤销
 handler 会串行发送更高 revision。撤销 method 会终止该 method 的未决 Interaction，
 迟到 Result 不能结算。
@@ -422,8 +427,9 @@ projection，避免 UI 快速响应时控制请求尚未存在。Client 仍应�
 ```
 
 `turnId` 必须与 `approval.turnId` 相同。首版只允许
-`sensitivity: "normal"`；`expiresAt` 是绝对截止时间，显式重投不会延长它。1.1 wire
-形状保持冻结：
+`sensitivity: "normal"`。Runtime 生成的 Approval 与 User Input deadline 均为
+`min(now + 5 minutes, Turn 剩余期限)`；`expiresAt` 是绝对截止时间，显式重投不会延长它。
+1.1 wire 形状保持冻结：
 
 ```json
 {

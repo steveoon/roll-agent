@@ -23,6 +23,7 @@ import {
   getApprovalExplanation,
   parseRuntimeMethodParams,
   parseRuntimeServerRequestParamsForVersion,
+  normalizeUserInputResultForForm,
   type RuntimeEventEnvelopeV13,
 } from "@roll-agent/protocol";
 
@@ -68,6 +69,9 @@ function handleEvent(event: RuntimeEventEnvelopeV13): void {
   `parseRuntimeMethodResult()`；
 - `runtimeServerRequestSchemas`、`parseRuntimeServerRequestParams()`、
   `parseRuntimeServerRequestResult()`；
+- User Input 关联校验：`normalizeUserInputResult()`、
+  `normalizeUserInputResultForForm()` 与 `NormalizedUserInputResult`；后者供只持有原始表单的
+  Runtime/Host 边界校验 submitted values，并按 control 定义顺序规范化；
 - 按协商版本解析与投影：`parseRuntimeMethodParamsForVersion()`、
   `parseRuntimeServerRequestParamsForVersion()`、
   `parseRuntimeServerRequestCancelParamsForVersion()`、
@@ -92,7 +96,8 @@ schema，并不代表调用方已实现对应 Client 能力。当前支持顺序
 `["1.3", "1.2", "1.1", "1.0"]`。`initialize` 请求保持旧 strict 形状；协商到 `"1.2"`
 或 `"1.3"` 后，
 Client 必须用 `client.capabilities.set` 提交单调 `revision` 与当前 Handler methods，Runtime
-返回 registry 交集后才进入 interaction-ready。未知的未来 method 名可安全发送但不会被接受。
+返回 registry 交集后才进入 interaction-ready。ACK 可以为空或为请求集的任意子集，顺序按
+Runtime registry；Client 必须按集合语义处理。未知的未来 method 名可安全发送但不会被接受。
 
 广告 `"1.3"` 同时声明 Client 能接收至少 `17 MiB` 的单个 Runtime→Client NDJSON 帧：
 durable record 的绝对上限为 `16 MiB`，额外 1 MiB 留给 envelope 与 JSON-RPC 元数据。本地

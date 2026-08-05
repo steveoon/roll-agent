@@ -17,6 +17,7 @@ import {
   RUNTIME_V13_MAX_DURABLE_EVENT_RECORD_BYTES,
   RUNTIME_V13_MIN_CLIENT_FRAME_BYTES,
   approvalIdSchema,
+  interactionIdSchema,
   requestIdSchema,
   streamIdSchema,
   threadIdSchema,
@@ -307,6 +308,18 @@ class DetachWrappingRuntimeClientRequestCoordinator extends RuntimeClientRequest
   ): () => void {
     const detachResponder = super.attachResponder(responder, options);
     return () => detachResponder();
+  }
+}
+
+class ResponderCapturingRuntimeClientRequestCoordinator extends RuntimeClientRequestCoordinator {
+  attachedResponder: RuntimeClientResponder | undefined;
+
+  override attachResponder(
+    responder: RuntimeClientResponder,
+    options: RuntimeClientResponderOptions = {},
+  ): () => void {
+    this.attachedResponder = responder;
+    return super.attachResponder(responder, options);
   }
 }
 
@@ -1048,6 +1061,85 @@ test("Runtime Protocol 1.2 ACK precedes Interaction delivery and uses distinct I
     limit: 100,
   })) as { readonly pendingInteractions: readonly PendingInteractionProjection[] };
   assert.deepEqual(settledSnapshot.pendingInteractions, []);
+});
+
+test("Runtime Protocol 1.2 capability ACK frame precedes an Interaction created inside the ACK window", async (t) => {
+  const coordinator = new ResponderCapturingRuntimeClientRequestCoordinator();
+  const harness = createApprovalProtocolHarness(undefined, undefined, coordinator);
+  const client = attachRuntimeProtocolClient(harness.clientConn);
+  t.after(() => harness.close());
+
+  await client.request(1, RUNTIME_METHODS.initialize, {
+    protocolVersions: ["1.2"],
+    client: { name: "ack-window-client", version: "1.2.0" },
+  });
+
+  const raceTurnId = turnIdSchema.parse("00000000-0000-4000-8000-0000000009ac");
+  const raceApprovalId = approvalIdSchema.parse("00000000-0000-4000-8000-0000000009ad");
+  const raceExpiresAt = new Date(Date.now() + 60_000).toISOString();
+  const raceParams = {
+    interactionId: interactionIdSchema.parse("00000000-0000-4000-8000-0000000009aa"),
+    threadId: threadIdSchema.parse("00000000-0000-4000-8000-0000000009ab"),
+    turnId: raceTurnId,
+    expiresAt: raceExpiresAt,
+    sensitivity: "normal",
+    approval: {
+      id: raceApprovalId,
+      turnId: raceTurnId,
+      agentName: "race-agent",
+      toolName: "write",
+      preview: { q: "race" },
+    },
+  } as const;
+  let raceRequest: RuntimeClientRequest<"approval.request"> | undefined;
+  const originalSetUserInputAvailable = harness.service.setUserInputAvailable.bind(harness.service);
+  Object.defineProperty(harness.service, "setUserInputAvailable", {
+    value: (available: boolean) => {
+      originalSetUserInputAvailable(available);
+      const responder = coordinator.attachedResponder;
+      if (raceRequest !== undefined || responder === undefined) {
+        return;
+      }
+      raceRequest = coordinator.request(
+        RUNTIME_SERVER_REQUEST_METHODS.approvalRequest,
+        raceParams,
+        {
+          key: "race-approval",
+          scopeId: responder.scopeId,
+          eligibleResponderId: responder.id,
+          approvalId: raceApprovalId,
+          expiresAt: raceExpiresAt,
+          protocolVersion: "1.2",
+        },
+      );
+    },
+  });
+
+  await client.request(2, RUNTIME_METHODS.clientCapabilitiesSet, {
+    revision: 1,
+    serverRequestMethods: [RUNTIME_SERVER_REQUEST_METHODS.approvalRequest],
+  });
+  assert.ok(raceRequest);
+  const approvalRequest = await waitForValue(
+    () =>
+      client.wire.find(
+        (message): message is JsonRpcRequest =>
+          isRequest(message) && message.method === RUNTIME_SERVER_REQUEST_METHODS.approvalRequest,
+      ),
+    "capability commit 后未投递 ACK 窗口内新建的 approval.request",
+  );
+  const capabilityAckIndex = client.wire.findIndex(
+    (message) => "id" in message && message.id === 2 && "result" in message,
+  );
+  assert.ok(capabilityAckIndex >= 0);
+  assert.ok(capabilityAckIndex < client.wire.indexOf(approvalRequest));
+
+  harness.clientConn.send({
+    jsonrpc: "2.0",
+    id: approvalRequest.id,
+    result: { decision: "approve" },
+  });
+  assert.deepEqual(await raceRequest.result, { decision: "approve" });
 });
 
 test("Runtime Protocol 1.2 fails approval closed when its absolute deadline is missing", async (t) => {

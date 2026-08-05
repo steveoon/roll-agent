@@ -9,6 +9,7 @@ import {
   SUPPORTED_RUNTIME_PROTOCOL_VERSIONS,
   approvalExplanationSchema,
   approvalIdSchema,
+  normalizeUserInputResultForForm,
   operationIdSchema,
   parseRuntimeMethodResult,
   runtimeDurableEventV13Schema,
@@ -17,6 +18,7 @@ import {
   runtimeProtocolVersionSchema,
   streamIdSchema,
   threadIdSchema,
+  userInputFormSchema,
   type ActiveTurn,
   type ApprovalResolution,
   type InitializeParams,
@@ -978,15 +980,35 @@ export class RuntimeService {
     if (pending === undefined) {
       return false;
     }
+    let normalized: UserInputResult;
+    try {
+      normalized = normalizeUserInputResultForForm(pending.form, result);
+    } catch {
+      this.cancelPendingUserInput(requestId, "用户输入不符合原始表单约束");
+      return false;
+    }
     this.pendingUserInputs.delete(requestId);
-    const resolved = pending.session.resolveUserInput?.(requestId, result) ?? false;
+    const resolved = pending.session.resolveUserInput?.(requestId, normalized) ?? false;
+    if (!resolved) {
+      const reason = "用户输入请求已失效";
+      pending.session.cancelUserInput?.(requestId, reason);
+      this.restoreRunningStatus(pending);
+      this.emitUserInputInteraction({
+        type: "settled",
+        requestId,
+        threadId: pending.threadId,
+        turnId: pending.turnId,
+        reason,
+      });
+      return false;
+    }
     this.restoreRunningStatus(pending);
     this.emitUserInputInteraction({
       type: "settled",
       requestId,
       threadId: pending.threadId,
       turnId: pending.turnId,
-      reason: result.status === "submitted" ? "用户已提交输入" : "用户已取消输入",
+      reason: normalized.status === "submitted" ? "用户已提交输入" : "用户已取消输入",
     });
     return resolved;
   }
@@ -1310,12 +1332,14 @@ export class RuntimeService {
           state.session.cancelUserInput?.(event.requestId, "当前客户端未协商用户输入处理能力");
           return;
         }
+        const storedForm = userInputFormSchema.parse(event.form);
+        const exposedForm = userInputFormSchema.parse(storedForm);
         const pending: PendingUserInputState = {
           requestId: event.requestId,
           threadId: state.threadId,
           turnId: state.turnId,
           session: state.session,
-          form: event.form,
+          form: storedForm,
           expiresAt: event.expiresAt,
         };
         this.pendingUserInputs.set(event.requestId, pending);
@@ -1325,7 +1349,7 @@ export class RuntimeService {
           requestId: event.requestId,
           threadId: state.threadId,
           turnId: state.turnId,
-          form: event.form,
+          form: exposedForm,
           expiresAt: event.expiresAt,
         });
         if (!delivered) {

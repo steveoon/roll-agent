@@ -70,7 +70,9 @@ export interface RuntimeClientRequestOptions {
   readonly scopeId: RuntimeInstanceId;
   readonly eligibleResponderId: RuntimeClientResponderId;
   readonly approvalId?: ApprovalId;
+  /** @deprecated Thread identity is carried by the validated request params. */
   readonly threadId?: ThreadId;
+  /** @deprecated Turn identity is carried by the validated request params. */
   readonly turnId?: TurnId;
   readonly expiresAt?: string;
   /** Defaults to Protocol 1.1 for compatibility with existing package-internal callers. */
@@ -80,7 +82,7 @@ export interface RuntimeClientRequestOptions {
 export interface RuntimeClientResponderOptions {
   /** Defaults to the frozen Protocol 1.1 Server Request registry. */
   readonly acceptedServerRequestMethods?: readonly RuntimeServerRequestMethod[];
-  /** Protocol 1.2 responders start false and become eligible only after capability ACK. */
+  /** Protocol 1.3/1.2 responders start false and become eligible only after capability ACK. */
   readonly capabilitiesAcknowledged?: boolean;
 }
 
@@ -98,8 +100,12 @@ export interface RuntimeClientRequestCoordinatorInternal {
     detachResponder: () => void,
     methods: readonly RuntimeServerRequestMethod[],
     reason: string,
-    deferDelivery: boolean,
-  ): boolean | undefined;
+  ): (() => void) | false | undefined;
+  setServerRequestMethodsForResponder(
+    responderId: RuntimeClientResponderId,
+    methods: readonly RuntimeServerRequestMethod[],
+    reason: string,
+  ): (() => void) | false;
   beginCapabilityNegotiationForAttachment(detachResponder: () => void): boolean | undefined;
   getPendingInteractionProjectionsForAttachment(
     detachResponder: () => void,
@@ -172,11 +178,17 @@ export class RuntimeClientRequestCoordinator {
           ? undefined
           : this.handleResponseFromAttachment(attachment, message);
       },
-      setServerRequestMethodsForAttachment: (detachResponder, methods, reason, deferDelivery) => {
+      setServerRequestMethodsForAttachment: (detachResponder, methods, reason) => {
         const attachment = this.responderAttachments.get(detachResponder);
         return attachment === undefined
           ? undefined
-          : this.setServerRequestMethodsForAttachment(attachment, methods, reason, deferDelivery);
+          : this.setServerRequestMethodsForAttachment(attachment, methods, reason);
+      },
+      setServerRequestMethodsForResponder: (responderId, methods, reason) => {
+        const attachment = this.responders.get(responderId);
+        return attachment === undefined
+          ? false
+          : this.setServerRequestMethodsForAttachment(attachment, methods, reason);
       },
       beginCapabilityNegotiationForAttachment: (detachResponder) => {
         const attachment = this.responderAttachments.get(detachResponder);
@@ -430,9 +442,19 @@ export class RuntimeClientRequestCoordinator {
     deferDelivery = false,
   ): boolean {
     const attachment = this.responders.get(responderId);
-    return attachment === undefined
-      ? false
-      : this.setServerRequestMethodsForAttachment(attachment, methods, reason, deferDelivery);
+    if (attachment === undefined) {
+      return false;
+    }
+    const commit = this.setServerRequestMethodsForAttachment(attachment, methods, reason);
+    if (commit === false) {
+      return false;
+    }
+    if (deferDelivery) {
+      setTimeout(commit, 0);
+    } else {
+      commit();
+    }
+    return true;
   }
 
   beginResponderCapabilityNegotiation(responderId: RuntimeClientResponderId): boolean {
@@ -735,8 +757,7 @@ export class RuntimeClientRequestCoordinator {
     attachment: RuntimeClientResponderAttachment,
     methods: readonly RuntimeServerRequestMethod[],
     reason: string,
-    deferDelivery: boolean,
-  ): boolean {
+  ): (() => void) | false {
     const { responder } = attachment;
     if (this.responders.get(responder.id) !== attachment) {
       return false;
@@ -746,7 +767,7 @@ export class RuntimeClientRequestCoordinator {
       [...attachment.acceptedServerRequestMethods].filter((method) => !accepted.has(method)),
     );
     attachment.acceptedServerRequestMethods = accepted;
-    attachment.capabilitiesAcknowledged = true;
+    attachment.capabilitiesAcknowledged = false;
     for (const interaction of this.interactions.pending()) {
       if (interaction.eligibleResponderId !== responder.id || !removed.has(interaction.method)) {
         continue;
@@ -758,10 +779,14 @@ export class RuntimeClientRequestCoordinator {
       this.sendCancellation(interaction, settlement.retiredDelivery, reason);
       interaction.reject(new RuntimeClientRequestCancelledError(reason));
     }
-    const deliverWaiting = () => {
-      if (this.responders.get(responder.id) !== attachment) {
+    return () => {
+      if (
+        this.responders.get(responder.id) !== attachment ||
+        attachment.acceptedServerRequestMethods !== accepted
+      ) {
         return;
       }
+      attachment.capabilitiesAcknowledged = true;
       for (const interaction of this.interactions.pending()) {
         if (
           interaction.eligibleResponderId === responder.id &&
@@ -771,12 +796,6 @@ export class RuntimeClientRequestCoordinator {
         }
       }
     };
-    if (deferDelivery) {
-      setTimeout(deliverWaiting, 0);
-    } else {
-      deliverWaiting();
-    }
-    return true;
   }
 
   private beginCapabilityNegotiationForAttachment(

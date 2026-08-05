@@ -1,6 +1,11 @@
 import { randomUUID } from "node:crypto";
 import { z } from "zod/v4";
-import type { UserInputForm, UserInputResult } from "@roll-agent/protocol";
+import {
+  normalizeUserInputResultForForm,
+  userInputFormSchema,
+  type UserInputForm,
+  type UserInputResult,
+} from "@roll-agent/protocol";
 
 const MAX_TIMEOUT_DELAY_MS = 2_147_483_647;
 
@@ -20,6 +25,7 @@ export interface SessionUserInputInteraction {
 
 interface PendingSessionUserInputInteraction {
   readonly requestId: SessionUserInputRequestId;
+  readonly form: UserInputForm;
   readonly resolve: (result: UserInputResult) => void;
   readonly expiresAtMs: number;
   expiresTimer: ReturnType<typeof setTimeout> | undefined;
@@ -48,29 +54,45 @@ export class UserInputInteractionManager {
     if (!Number.isFinite(expiresAtMs)) {
       throw new Error("user input expiresAt must be a valid ISO 8601 timestamp");
     }
+    const storedForm = userInputFormSchema.parse(form);
+    const exposedForm = userInputFormSchema.parse(storedForm);
     const requestId = sessionUserInputRequestIdSchema.parse(randomUUID());
     const deferred = Promise.withResolvers<UserInputResult>();
     const interaction: PendingSessionUserInputInteraction = {
       requestId,
+      form: storedForm,
       resolve: deferred.resolve,
       expiresAtMs,
       expiresTimer: undefined,
     };
     this.pending.set(requestId, interaction);
     this.scheduleExpiration(interaction, expiresAtMs);
-    return { requestId, form, expiresAt, result: deferred.promise };
+    return { requestId, form: exposedForm, expiresAt, result: deferred.promise };
   }
 
   resolve(requestId: SessionUserInputRequestId, result: UserInputResult): boolean {
     const interaction = this.pending.get(requestId);
-    if (interaction !== undefined && this.now() >= interaction.expiresAtMs) {
+    if (interaction === undefined) {
+      return false;
+    }
+    if (this.now() >= interaction.expiresAtMs) {
       this.settle(interaction.requestId, {
         status: "cancelled",
         reason: "用户输入请求已超时",
       });
       return false;
     }
-    return this.settle(requestId, result);
+    let normalized: UserInputResult;
+    try {
+      normalized = normalizeUserInputResultForForm(interaction.form, result);
+    } catch {
+      this.settle(interaction.requestId, {
+        status: "cancelled",
+        reason: "用户输入不符合原始表单约束",
+      });
+      return false;
+    }
+    return this.settle(requestId, normalized);
   }
 
   cancel(requestId: SessionUserInputRequestId, reason?: string): boolean {

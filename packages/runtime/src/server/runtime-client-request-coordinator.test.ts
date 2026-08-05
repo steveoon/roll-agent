@@ -17,6 +17,7 @@ import {
   RuntimeClientRequestExpiredError,
   createRuntimeClientResponderId,
   getRuntimeClientRequestCoordinatorInternal,
+  type RuntimeClientRequestOptions,
 } from "./runtime-client-request-coordinator.ts";
 import type { JsonRpcMessage } from "./protocol.ts";
 
@@ -99,8 +100,6 @@ test("Protocol 1.2 does not deliver before capability ACK", async () => {
       scopeId,
       eligibleResponderId: responderId,
       approvalId,
-      threadId,
-      turnId,
       expiresAt: approvalRequestInputV12().expiresAt,
       protocolVersion: "1.2",
     },
@@ -109,16 +108,17 @@ test("Protocol 1.2 does not deliver before capability ACK", async () => {
   const internal = getRuntimeClientRequestCoordinatorInternal(coordinator);
   assert.deepEqual(requestMessages(responder), []);
   assert.deepEqual(internal.getPendingInteractionProjectionsForAttachment(detach, threadId), []);
-  assert.equal(
-    internal.setServerRequestMethodsForAttachment(
-      detach,
-      [RUNTIME_SERVER_REQUEST_METHODS.approvalRequest],
-      "capability update",
-      true,
-    ),
-    true,
+  const commit = internal.setServerRequestMethodsForAttachment(
+    detach,
+    [RUNTIME_SERVER_REQUEST_METHODS.approvalRequest],
+    "capability update",
   );
+  if (typeof commit !== "function") {
+    assert.fail("capability update should return a commit closure");
+  }
   assert.deepEqual(requestMessages(responder), []);
+  assert.deepEqual(internal.getPendingInteractionProjectionsForAttachment(detach, threadId), []);
+  commit();
   const expectedProjection = {
     method: RUNTIME_SERVER_REQUEST_METHODS.approvalRequest,
     interactionId,
@@ -128,10 +128,6 @@ test("Protocol 1.2 does not deliver before capability ACK", async () => {
     sensitivity: "normal",
     approvalId,
   } as const;
-  assert.deepEqual(internal.getPendingInteractionProjectionsForAttachment(detach, threadId), [
-    expectedProjection,
-  ]);
-  await new Promise<void>((resolve) => setTimeout(resolve, 0));
   const delivery = requestMessages(responder)[0];
   assert.ok(delivery);
   assert.deepEqual(delivery.params, approvalRequestInputV12());
@@ -184,8 +180,6 @@ test("accepted methods cannot bypass Protocol 1.2 capability ACK", async () => {
       scopeId,
       eligibleResponderId: responderId,
       approvalId,
-      threadId,
-      turnId,
       expiresAt: approvalRequestInputV12().expiresAt,
       protocolVersion: "1.2",
     },
@@ -194,15 +188,15 @@ test("accepted methods cannot bypass Protocol 1.2 capability ACK", async () => {
 
   assert.deepEqual(requestMessages(responder), []);
   assert.equal(internal.redeliver(approvalId, responderId), false);
-  assert.equal(
-    internal.setServerRequestMethodsForAttachment(
-      detach,
-      [RUNTIME_SERVER_REQUEST_METHODS.approvalRequest],
-      "capability ACK",
-      false,
-    ),
-    true,
+  const ackCommit = internal.setServerRequestMethodsForAttachment(
+    detach,
+    [RUNTIME_SERVER_REQUEST_METHODS.approvalRequest],
+    "capability ACK",
   );
+  if (typeof ackCommit !== "function") {
+    assert.fail("capability ACK should return a commit closure");
+  }
+  ackCommit();
   const delivery = requestMessages(responder)[0];
   assert.ok(delivery);
   assert.equal(
@@ -248,8 +242,6 @@ test("pre-ACK id:null fails waiting interactions without affecting another respo
       scopeId,
       eligibleResponderId: waitingResponderId,
       approvalId,
-      threadId,
-      turnId,
       expiresAt: approvalRequestInputV12().expiresAt,
       protocolVersion: "1.2",
     },
@@ -262,8 +254,6 @@ test("pre-ACK id:null fails waiting interactions without affecting another respo
       scopeId,
       eligibleResponderId: healthyResponderId,
       approvalId,
-      threadId,
-      turnId,
     },
   );
   const healthyDelivery = requestMessages(healthyResponder)[0];
@@ -313,22 +303,18 @@ test("Protocol 1.2 empty capability ACK fails an already-waiting request closed"
       scopeId,
       eligibleResponderId: responderId,
       approvalId,
-      threadId,
-      turnId,
       expiresAt: approvalRequestInputV12().expiresAt,
       protocolVersion: "1.2",
     },
   );
 
-  assert.equal(
-    getRuntimeClientRequestCoordinatorInternal(coordinator).setServerRequestMethodsForAttachment(
-      detach,
-      [],
-      "empty ACK",
-      true,
-    ),
-    true,
-  );
+  const commit = getRuntimeClientRequestCoordinatorInternal(
+    coordinator,
+  ).setServerRequestMethodsForAttachment(detach, [], "empty ACK");
+  if (typeof commit !== "function") {
+    assert.fail("empty ACK should return a commit closure");
+  }
+  commit();
   await assert.rejects(
     pending.result,
     (error: unknown) =>
@@ -336,6 +322,154 @@ test("Protocol 1.2 empty capability ACK fails an already-waiting request closed"
       /未协商 Runtime Server Request/u.test(error.message),
   );
   assert.deepEqual(responder.sent, []);
+});
+
+test("Protocol 1.2 interaction created before capability commit stays waiting until commit", async () => {
+  const responder = new MemoryResponder();
+  const responderId = createRuntimeClientResponderId();
+  const coordinator = new RuntimeClientRequestCoordinator();
+  const detach = coordinator.attachResponder(
+    {
+      id: responderId,
+      scopeId,
+      send: (message) => responder.send(message),
+      close: () => responder.close(),
+    },
+    { acceptedServerRequestMethods: [], capabilitiesAcknowledged: false },
+  );
+  const internal = getRuntimeClientRequestCoordinatorInternal(coordinator);
+  const commit = internal.setServerRequestMethodsForAttachment(
+    detach,
+    [RUNTIME_SERVER_REQUEST_METHODS.approvalRequest],
+    "capability update",
+  );
+  if (typeof commit !== "function") {
+    assert.fail("capability update should return a commit closure");
+  }
+  const pending = coordinator.request(
+    RUNTIME_SERVER_REQUEST_METHODS.approvalRequest,
+    approvalRequestInputV12(),
+    {
+      key: approvalId,
+      scopeId,
+      eligibleResponderId: responderId,
+      approvalId,
+      expiresAt: approvalRequestInputV12().expiresAt,
+      protocolVersion: "1.2",
+    },
+  );
+  assert.deepEqual(requestMessages(responder), []);
+  commit();
+  const delivery = requestMessages(responder)[0];
+  assert.ok(delivery);
+  assert.deepEqual(delivery.params, approvalRequestInputV12());
+  assert.equal(
+    coordinator.handleResponse(responderId, {
+      jsonrpc: "2.0",
+      id: delivery.id,
+      result: { decision: "approve" },
+    }),
+    true,
+  );
+  assert.deepEqual(await pending.result, { decision: "approve" });
+});
+
+test("Protocol 1.2 capability commit after responder detach is a no-op", async () => {
+  const responder = new MemoryResponder();
+  const responderId = createRuntimeClientResponderId();
+  const coordinator = new RuntimeClientRequestCoordinator();
+  const detach = coordinator.attachResponder(
+    {
+      id: responderId,
+      scopeId,
+      send: (message) => responder.send(message),
+      close: () => responder.close(),
+    },
+    { acceptedServerRequestMethods: [], capabilitiesAcknowledged: false },
+  );
+  const internal = getRuntimeClientRequestCoordinatorInternal(coordinator);
+  const commit = internal.setServerRequestMethodsForAttachment(
+    detach,
+    [RUNTIME_SERVER_REQUEST_METHODS.approvalRequest],
+    "capability update",
+  );
+  if (typeof commit !== "function") {
+    assert.fail("capability update should return a commit closure");
+  }
+  const pending = coordinator.request(
+    RUNTIME_SERVER_REQUEST_METHODS.approvalRequest,
+    approvalRequestInputV12(),
+    {
+      key: approvalId,
+      scopeId,
+      eligibleResponderId: responderId,
+      approvalId,
+      expiresAt: approvalRequestInputV12().expiresAt,
+      protocolVersion: "1.2",
+    },
+  );
+  detach();
+  await assert.rejects(pending.result, RuntimeClientRequestError);
+  commit();
+  assert.deepEqual(requestMessages(responder), []);
+});
+
+test("Protocol 1.2 stale capability commit cannot reopen a newer negotiation barrier", async () => {
+  const responder = new MemoryResponder();
+  const responderId = createRuntimeClientResponderId();
+  const coordinator = new RuntimeClientRequestCoordinator();
+  const detach = coordinator.attachResponder(
+    {
+      id: responderId,
+      scopeId,
+      send: (message) => responder.send(message),
+      close: () => responder.close(),
+    },
+    { acceptedServerRequestMethods: [], capabilitiesAcknowledged: false },
+  );
+  const internal = getRuntimeClientRequestCoordinatorInternal(coordinator);
+  const staleCommit = internal.setServerRequestMethodsForAttachment(
+    detach,
+    [RUNTIME_SERVER_REQUEST_METHODS.approvalRequest],
+    "capability revision 1",
+  );
+  const currentCommit = internal.setServerRequestMethodsForAttachment(
+    detach,
+    [RUNTIME_SERVER_REQUEST_METHODS.approvalRequest],
+    "capability revision 2",
+  );
+  if (typeof staleCommit !== "function" || typeof currentCommit !== "function") {
+    assert.fail("capability updates should return commit closures");
+  }
+  const pending = coordinator.request(
+    RUNTIME_SERVER_REQUEST_METHODS.approvalRequest,
+    approvalRequestInputV12(),
+    {
+      key: approvalId,
+      scopeId,
+      eligibleResponderId: responderId,
+      approvalId,
+      expiresAt: approvalRequestInputV12().expiresAt,
+      protocolVersion: "1.2",
+    },
+  );
+
+  staleCommit();
+  assert.deepEqual(requestMessages(responder), []);
+  assert.deepEqual(internal.getPendingInteractionProjectionsForAttachment(detach, threadId), []);
+
+  currentCommit();
+  const delivery = requestMessages(responder)[0];
+  assert.ok(delivery);
+  assert.equal(
+    coordinator.handleResponse(responderId, {
+      jsonrpc: "2.0",
+      id: delivery.id,
+      result: { decision: "approve" },
+    }),
+    true,
+  );
+  assert.deepEqual(await pending.result, { decision: "approve" });
 });
 
 test("Protocol 1.2 capability withdrawal cancels by InteractionId and ignores late response", async () => {
@@ -362,8 +496,6 @@ test("Protocol 1.2 capability withdrawal cancels by InteractionId and ignores la
       scopeId,
       eligibleResponderId: responderId,
       approvalId,
-      threadId,
-      turnId,
       expiresAt: approvalRequestInputV12().expiresAt,
       protocolVersion: "1.2",
     },
@@ -371,10 +503,12 @@ test("Protocol 1.2 capability withdrawal cancels by InteractionId and ignores la
   const delivery = requestMessages(responder)[0];
   assert.ok(delivery);
 
-  assert.equal(
-    coordinator.setResponderServerRequestMethods(responderId, [], "capability withdrawn"),
-    true,
+  const updated: boolean = coordinator.setResponderServerRequestMethods(
+    responderId,
+    [],
+    "capability withdrawn",
   );
+  assert.equal(updated, true);
   await assert.rejects(
     pending.result,
     (error: unknown) =>
@@ -400,6 +534,58 @@ test("Protocol 1.2 capability withdrawal cancels by InteractionId and ignores la
   );
 });
 
+test("public capability setter preserves deferred delivery and legacy request options", async () => {
+  const responder = new MemoryResponder();
+  const responderId = createRuntimeClientResponderId();
+  const coordinator = new RuntimeClientRequestCoordinator();
+  coordinator.attachResponder(
+    {
+      id: responderId,
+      scopeId,
+      send: (message) => responder.send(message),
+      close: () => responder.close(),
+    },
+    { acceptedServerRequestMethods: [], capabilitiesAcknowledged: false },
+  );
+
+  const updated: boolean = coordinator.setResponderServerRequestMethods(
+    responderId,
+    [RUNTIME_SERVER_REQUEST_METHODS.approvalRequest],
+    "legacy deferred capability update",
+    true,
+  );
+  assert.equal(updated, true);
+  const options: RuntimeClientRequestOptions = {
+    key: approvalId,
+    scopeId,
+    eligibleResponderId: responderId,
+    approvalId,
+    threadId,
+    turnId,
+    expiresAt: approvalRequestInputV12().expiresAt,
+    protocolVersion: "1.2",
+  };
+  const pending = coordinator.request(
+    RUNTIME_SERVER_REQUEST_METHODS.approvalRequest,
+    approvalRequestInputV12(),
+    options,
+  );
+  assert.deepEqual(requestMessages(responder), []);
+
+  await new Promise<void>((resolve) => setTimeout(resolve, 0));
+  const delivery = requestMessages(responder)[0];
+  assert.ok(delivery);
+  assert.equal(
+    coordinator.handleResponse(responderId, {
+      jsonrpc: "2.0",
+      id: delivery.id,
+      result: { decision: "approve" },
+    }),
+    true,
+  );
+  assert.deepEqual(await pending.result, { decision: "approve" });
+});
+
 test("id:null JSON-RPC error fails only the selected responder and closes it", async () => {
   const responder = new MemoryResponder();
   const responderId = createRuntimeClientResponderId();
@@ -418,8 +604,6 @@ test("id:null JSON-RPC error fails only the selected responder and closes it", a
       scopeId,
       eligibleResponderId: responderId,
       approvalId,
-      threadId,
-      turnId,
     },
   );
 
@@ -446,8 +630,6 @@ test("id:null JSON-RPC error fails only the selected responder and closes it", a
       scopeId,
       eligibleResponderId: responderId,
       approvalId,
-      threadId,
-      turnId,
     },
   );
   await assert.rejects(
@@ -488,8 +670,6 @@ test("response must come from the eligible responder", async () => {
       scopeId,
       eligibleResponderId: eligibleId,
       approvalId,
-      threadId,
-      turnId,
     },
   );
   const id = requestId(eligible);
@@ -560,8 +740,6 @@ test("stale detach closure cannot detach a newer responder attachment with the s
       scopeId,
       eligibleResponderId: responderId,
       approvalId,
-      threadId,
-      turnId,
     },
   );
   const secondId = requestId(second);
@@ -605,8 +783,6 @@ test("a stale responder session cannot fail a newer attachment with the same id"
       scopeId,
       eligibleResponderId: responderId,
       approvalId,
-      threadId,
-      turnId,
     },
   );
   const deliveryId = requestId(second);
@@ -652,8 +828,6 @@ test("absolute deadline expires without delivering or approving", async () => {
       scopeId,
       eligibleResponderId: responderId,
       approvalId,
-      threadId,
-      turnId,
       expiresAt: "2026-07-29T11:59:59.000Z",
     },
   );
@@ -686,8 +860,6 @@ test("a response at the exact absolute deadline expires before settlement", asyn
       scopeId,
       eligibleResponderId: responderId,
       approvalId,
-      threadId,
-      turnId,
       expiresAt,
     },
   );
@@ -736,8 +908,6 @@ test("invalid absolute deadline fails before registering or delivering a request
         scopeId,
         eligibleResponderId: responderId,
         approvalId,
-        threadId,
-        turnId,
         expiresAt: "not-a-date",
       }),
     (error: unknown) =>
@@ -756,8 +926,6 @@ test("invalid absolute deadline fails before registering or delivering a request
             scopeId,
             eligibleResponderId: responderId,
             approvalId,
-            threadId,
-            turnId,
             ...(expiresAt === undefined ? {} : { expiresAt }),
             protocolVersion: "1.2",
           },
@@ -776,8 +944,6 @@ test("invalid absolute deadline fails before registering or delivering a request
       scopeId,
       eligibleResponderId: responderId,
       approvalId,
-      threadId,
-      turnId,
     },
   );
   assert.equal(coordinator.cancel(approvalId, "test cleanup"), true);
@@ -805,8 +971,6 @@ test("empty cancellation reasons are normalized and cancelAll settles every requ
       scopeId,
       eligibleResponderId: responderId,
       approvalId,
-      threadId,
-      turnId,
     },
   );
   const second = coordinator.request(
@@ -817,8 +981,6 @@ test("empty cancellation reasons are normalized and cancelAll settles every requ
       scopeId,
       eligibleResponderId: responderId,
       approvalId,
-      threadId,
-      turnId,
     },
   );
 
@@ -875,8 +1037,6 @@ test("far-future deadline is scheduled in bounded timer segments", async (t) => 
       scopeId,
       eligibleResponderId: responderId,
       approvalId,
-      threadId,
-      turnId,
       expiresAt: new Date(startMs + maximumTimerDelayMs + 1_000).toISOString(),
     },
   );
@@ -921,8 +1081,6 @@ test("explicit redelivery retires the old delivery and preserves the logical req
       scopeId,
       eligibleResponderId: responderId,
       approvalId,
-      threadId,
-      turnId,
     },
   );
   const firstId = requestId(responder);
@@ -995,8 +1153,6 @@ test("redelivery cannot switch to a different responder", async () => {
       scopeId,
       eligibleResponderId,
       approvalId,
-      threadId,
-      turnId,
     },
   );
   const deliveryId = requestId(eligibleResponder);
@@ -1047,8 +1203,6 @@ test("redelivery does not send a replacement after reentrant cancellation", asyn
       scopeId,
       eligibleResponderId: responderId,
       approvalId,
-      threadId,
-      turnId,
     },
   );
 
@@ -1100,8 +1254,6 @@ test("redelivery does not cross the original deadline while notifying the respon
       scopeId,
       eligibleResponderId: responderId,
       approvalId,
-      threadId,
-      turnId,
       expiresAt: new Date(startMs + 1_000).toISOString(),
     },
   );
@@ -1149,8 +1301,6 @@ test("redelivery keeps the original absolute deadline", async (t) => {
       scopeId,
       eligibleResponderId: responderId,
       approvalId,
-      threadId,
-      turnId,
       expiresAt: new Date(startMs + 1_000).toISOString(),
     },
   );
@@ -1211,8 +1361,6 @@ test("detaching a responder fails only its logical interactions and is idempoten
       scopeId,
       eligibleResponderId: firstId,
       approvalId,
-      threadId,
-      turnId,
     },
   );
   const secondPending = coordinator.request(
@@ -1223,8 +1371,6 @@ test("detaching a responder fails only its logical interactions and is idempoten
       scopeId,
       eligibleResponderId: secondId,
       approvalId,
-      threadId,
-      turnId,
     },
   );
   const staleFirstDeliveryId = requestId(first);
@@ -1287,8 +1433,6 @@ test("detaching removes the responder before a cancellation callback can create 
             scopeId,
             eligibleResponderId: responderId,
             approvalId,
-            threadId,
-            turnId,
           },
         ).result;
       }
@@ -1303,8 +1447,6 @@ test("detaching removes the responder before a cancellation callback can create 
       scopeId,
       eligibleResponderId: responderId,
       approvalId,
-      threadId,
-      turnId,
     },
   );
 
@@ -1368,8 +1510,6 @@ test("cancellation retires the delivery before notifying a reentrant responder",
       scopeId,
       eligibleResponderId: responderId,
       approvalId,
-      threadId,
-      turnId,
     },
   );
 
@@ -1404,8 +1544,6 @@ test("synchronous send failure clears the logical key for a later request", asyn
       scopeId,
       eligibleResponderId: responderId,
       approvalId,
-      threadId,
-      turnId,
     },
   );
   await assert.rejects(first.result, /transport unavailable/u);
@@ -1418,8 +1556,6 @@ test("synchronous send failure clears the logical key for a later request", asyn
       scopeId,
       eligibleResponderId: responderId,
       approvalId,
-      threadId,
-      turnId,
     },
   );
   await assert.rejects(second.result, /transport unavailable/u);
@@ -1452,8 +1588,6 @@ test("id:null failure is isolated from another responder", async () => {
       scopeId,
       eligibleResponderId: firstId,
       approvalId,
-      threadId,
-      turnId,
     },
   );
   const secondPending = coordinator.request(
@@ -1464,8 +1598,6 @@ test("id:null failure is isolated from another responder", async () => {
       scopeId,
       eligibleResponderId: secondId,
       approvalId,
-      threadId,
-      turnId,
     },
   );
   const secondDeliveryId = requestId(second);

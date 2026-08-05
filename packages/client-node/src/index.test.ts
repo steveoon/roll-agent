@@ -1389,6 +1389,130 @@ test("RollNodeClient rejects a mismatched Protocol 1.2 capability ACK revision",
   });
 });
 
+test("RollNodeClient accepts a Protocol 1.2 subset capability ACK and answers dropped methods with -32601", async () => {
+  const transport = new MemoryTransport();
+  const runtime = new ControlledCapabilityRuntime(transport);
+  let approvalCalls = 0;
+  let userInputCalls = 0;
+  const connecting = RollNodeClient.connect({
+    transport,
+    serverRequestHandlers: {
+      [RUNTIME_SERVER_REQUEST_METHODS.approvalRequest]: async () => {
+        approvalCalls += 1;
+        return { decision: "approve" };
+      },
+      [RUNTIME_SERVER_REQUEST_METHODS.userInputRequest]: async () => {
+        userInputCalls += 1;
+        return { status: "cancelled" };
+      },
+    },
+  });
+  const capability = await runtime.nextCapabilityRequest();
+  assert.deepEqual(capability.params, {
+    revision: 1,
+    serverRequestMethods: [
+      RUNTIME_SERVER_REQUEST_METHODS.approvalRequest,
+      RUNTIME_SERVER_REQUEST_METHODS.userInputRequest,
+    ],
+  });
+  writeJson(transport.stdout, {
+    jsonrpc: "2.0",
+    id: capability.id,
+    result: {
+      revision: 1,
+      acceptedServerRequestMethods: [RUNTIME_SERVER_REQUEST_METHODS.approvalRequest],
+    },
+  });
+  const client = await connecting;
+
+  writeJson(transport.stdout, {
+    jsonrpc: "2.0",
+    id: "dropped-user-input-request",
+    method: RUNTIME_SERVER_REQUEST_METHODS.userInputRequest,
+    params: deploymentRegionRequestParamsV12(),
+  });
+  await flushMessages();
+  const dropped = findClientResponse(runtime.messages, "dropped-user-input-request");
+  assert.ok(dropped && "error" in dropped);
+  assert.equal(dropped.error.code, -32_601);
+  assert.equal(userInputCalls, 0);
+
+  writeJson(transport.stdout, {
+    jsonrpc: "2.0",
+    id: "accepted-approval-request",
+    method: RUNTIME_SERVER_REQUEST_METHODS.approvalRequest,
+    params: approvalRequestParamsV12(),
+  });
+  await flushMessages();
+  const approved = findClientResponse(runtime.messages, "accepted-approval-request");
+  assert.ok(approved && "result" in approved);
+  assert.deepEqual(approved.result, { decision: "approve" });
+  assert.equal(approvalCalls, 1);
+  await client.shutdown();
+});
+
+test("RollNodeClient accepts a reordered Protocol 1.2 capability ACK", async () => {
+  const transport = new MemoryTransport();
+  const runtime = new ControlledCapabilityRuntime(transport);
+  let approvalCalls = 0;
+  const connecting = RollNodeClient.connect({
+    transport,
+    serverRequestHandlers: {
+      [RUNTIME_SERVER_REQUEST_METHODS.approvalRequest]: async () => {
+        approvalCalls += 1;
+        return { decision: "approve" };
+      },
+      [RUNTIME_SERVER_REQUEST_METHODS.userInputRequest]: async () => ({ status: "cancelled" }),
+    },
+  });
+  const capability = await runtime.nextCapabilityRequest();
+  writeJson(transport.stdout, {
+    jsonrpc: "2.0",
+    id: capability.id,
+    result: {
+      revision: 1,
+      acceptedServerRequestMethods: [
+        RUNTIME_SERVER_REQUEST_METHODS.userInputRequest,
+        RUNTIME_SERVER_REQUEST_METHODS.approvalRequest,
+      ],
+    },
+  });
+  const client = await connecting;
+  writeJson(transport.stdout, {
+    jsonrpc: "2.0",
+    id: "reordered-approval-request",
+    method: RUNTIME_SERVER_REQUEST_METHODS.approvalRequest,
+    params: approvalRequestParamsV12(),
+  });
+  await flushMessages();
+  const approved = findClientResponse(runtime.messages, "reordered-approval-request");
+  assert.ok(approved && "result" in approved);
+  assert.deepEqual(approved.result, { decision: "approve" });
+  assert.equal(approvalCalls, 1);
+  await client.shutdown();
+});
+
+test("RollNodeClient rejects a capability ACK containing an unrequested method", async () => {
+  const transport = new MemoryTransport();
+  const runtime = new ControlledCapabilityRuntime(transport);
+  const connecting = RollNodeClient.connect({ transport });
+  const capability = await runtime.nextCapabilityRequest();
+  assert.deepEqual(capability.params, { revision: 1, serverRequestMethods: [] });
+  writeJson(transport.stdout, {
+    jsonrpc: "2.0",
+    id: capability.id,
+    result: {
+      revision: 1,
+      acceptedServerRequestMethods: [RUNTIME_SERVER_REQUEST_METHODS.approvalRequest],
+    },
+  });
+  await assert.rejects(connecting, (error: unknown) => {
+    assert.ok(error instanceof RollProtocolViolationError);
+    assert.match(error.message, /not requested/u);
+    return true;
+  });
+});
+
 test("RollNodeClient dispatches typed Server Requests and supports dynamic replacement", async () => {
   const transport = new MemoryTransport();
   const messages: JsonRpcMessage[] = [];

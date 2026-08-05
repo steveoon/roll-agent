@@ -80,6 +80,9 @@ try {
   最大 durable event frame；`"1.2"` / `"1.1"` / `"1.0"` 的回落规则保持不变；
 - `connect()` / `start()` 只有在 `"1.3"` / `"1.2"` 初始 capability ACK 后才 resolve，ACK 前不会把
   Runtime Server Request 投递给 Handler；
+- ACK 的 accepted methods 可以为空或为请求集的任意子集，并按 Runtime registry 排序；Client
+  按集合语义应用结果。只有 revision 不匹配或出现未请求 method 才是协议违例；未被接受的
+  method 若仍被 Runtime 请求，Client 返回 `-32601`；
 - `"1.1"` 的 `approval.request` handler 是唯一审批写入路径，
   `approval.required` 只是只读 View Event；
 - Handler context 提供 `requestId` 和 `AbortSignal`。Runtime cancel、Client shutdown

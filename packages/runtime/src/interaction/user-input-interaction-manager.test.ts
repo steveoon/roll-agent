@@ -77,3 +77,85 @@ test("UserInputInteractionManager rejects a response after the absolute deadline
     reason: "用户输入请求已超时",
   });
 });
+
+test("UserInputInteractionManager cancels a submission that violates the original form", async () => {
+  const manager = new UserInputInteractionManager();
+  const interaction = manager.request(FORM, new Date(Date.now() + 60_000).toISOString());
+
+  assert.equal(
+    manager.resolve(interaction.requestId, {
+      status: "submitted",
+      values: [{ id: "region", value: "north" }],
+    }),
+    false,
+  );
+  assert.deepEqual(await interaction.result, {
+    status: "cancelled",
+    reason: "用户输入不符合原始表单约束",
+  });
+  assert.equal(manager.cancel(interaction.requestId, "late cancellation"), false);
+});
+
+test("UserInputInteractionManager snapshots the form before exposing the interaction", async () => {
+  const manager = new UserInputInteractionManager();
+  const form: UserInputForm = {
+    controls: [
+      {
+        type: "choice",
+        id: "region",
+        label: "部署区域",
+        required: true,
+        multiple: false,
+        options: [{ id: "east", label: "东区" }],
+      },
+    ],
+  };
+  const interaction = manager.request(form, new Date(Date.now() + 60_000).toISOString());
+  const sourceControl = form.controls[0];
+  const exposedControl = interaction.form.controls[0];
+  assert.ok(sourceControl?.type === "choice");
+  assert.ok(exposedControl?.type === "choice");
+  sourceControl.options.push({ id: "north", label: "北区" });
+  exposedControl.options.push({ id: "north", label: "北区" });
+
+  assert.equal(
+    manager.resolve(interaction.requestId, {
+      status: "submitted",
+      values: [{ id: "region", value: "north" }],
+    }),
+    false,
+  );
+  assert.deepEqual(await interaction.result, {
+    status: "cancelled",
+    reason: "用户输入不符合原始表单约束",
+  });
+});
+
+test("UserInputInteractionManager normalizes submitted values into form definition order", async () => {
+  const manager = new UserInputInteractionManager();
+  const form: UserInputForm = {
+    controls: [
+      { type: "text", id: "first", label: "第一项", required: true },
+      { type: "boolean", id: "second", label: "第二项", required: true },
+    ],
+  };
+  const interaction = manager.request(form, new Date(Date.now() + 60_000).toISOString());
+
+  assert.equal(
+    manager.resolve(interaction.requestId, {
+      status: "submitted",
+      values: [
+        { id: "second", value: true },
+        { id: "first", value: "值" },
+      ],
+    }),
+    true,
+  );
+  assert.deepEqual(await interaction.result, {
+    status: "submitted",
+    values: [
+      { id: "first", value: "值" },
+      { id: "second", value: true },
+    ],
+  });
+});
