@@ -64,6 +64,18 @@ Runtime JSON-RPC `id`、原始 Tool input/output、secret、完整 User Input Re
 以及 Authentication/File Picker projector 都不能进入 Companion→Browser 投影。Browser→Companion 的
 `interaction.candidate` 是 User Input Result 唯一允许的入站位置，并且必须关联原始表单重新校验。
 
+Wire 1.1 的 pull 查询遵守同一边界：`thread.open` / `thread.snapshot` 必须把 Approval preview
+投影为可选 explanation、移除本地 reason，并把 Operation display 与 outcome reason 脱敏；
+`operation.get` 使用相同 Operation 投影。Schema 只能验证 frame 形状，Host 仍必须调用本包
+导出的 query projector，不能把 Runtime 原始结果直接放入 `runtime.response`。
+
+有意保留的内容包括完整 transcript 消息、Thread 标题/模型/时间元数据、安全 timeline 摘要，
+以及 `thread.capabilities.manifest` 中可能出现的 cwd、平台、Agent、Skill、Tool Schema、规则
+标识与 VCS 元数据。它们不是公开信息，Relay 与 Browser 宿主仍需按敏感数据保护。
+
+冻结的 Wire 1.0 没有这些安全投影，只适用于处在等价本地信任边界内的 legacy peer。它不是
+面向不受信 Cloud/Browser 的降级协议；需要远程投影的 Host 必须协商 1.1，失败时拒绝连接。
+
 ## Browser reference adapter
 
 `@roll-agent/relay-protocol/reference-adapter` 提供最小、纯内存的 typed reference adapter：

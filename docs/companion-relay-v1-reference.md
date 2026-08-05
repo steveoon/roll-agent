@@ -44,6 +44,10 @@ Broker、ACK/gap 缓冲、去重与出站重连。它不包含生产 Cloud Relay
 所有未带 `V11` 后缀的 legacy 通用 exports 都继续固定为 1.0。新 Companion 与旧 peer 使用 1.0
 时不能发送 1.1 Interaction；1.0 registry、Schema 和 fixtures 不再扩张。
 
+Wire 1.0 的冻结只保证兼容性，不代表 payload 已按远程威胁模型脱敏。它只适用于处在等价
+本地信任边界内的 legacy peer，不能作为面向不受信 Cloud/Browser 的安全降级路径。生产 Host
+若要求远程投影，必须协商 1.1，并在协商失败时拒绝连接。
+
 Wire version 与 npm package version、Runtime Protocol version 相互独立。本地 Runtime 1.3 的
 字段不能直接偷渡进 Wire 1.0；每一层都必须按自己的 registry 解析和投影。
 
@@ -121,6 +125,17 @@ Browser 必须等待有序的 `interaction.resolved` 或 `interaction.cancelled`
 `interaction.resolved/cancelled` 只携带关联字段和 method，不携带完整 Result 或错误正文。
 `approval.required` 等 Runtime timeline event 即使被安全投影，也只是只读时间线；远程响应必须
 命中 Broker 当前 pending `interactionId`，不能从 timeline event 直接执行控制操作。
+
+同一规则覆盖 pull 查询：`thread.open` / `thread.snapshot` 将 Approval preview 限制为可选
+explanation、移除本地 reason，并清空 Operation display 与 outcome reason；`operation.get`
+复用 Operation 投影。Host 必须先调用 Relay projector 再构造 `runtime.response`，不能把 Runtime
+原始结果直接发送。响应错误只保留稳定 code/retryable 与固定公开文案，不回传 Runtime 或本地
+Policy 的原始错误消息。
+
+以下内容是有意保留的远端暴露面：完整 transcript 消息、Thread 标题/模型/时间元数据、安全
+timeline 的消息与 reasoning 摘要、Turn 状态、Tool 名称和完成摘要，以及
+`thread.capabilities.manifest` 中可能包含的 cwd、平台、模型、Agent、Skill、Tool Schema、规则
+标识与 VCS 元数据。它们仍需由 Cloud Relay 与 Browser 宿主按敏感数据保护。
 
 `authentication.request` 和 File Picker 没有 Wire 1.1 projector，也不注册 Runtime handlers，
 保持 local-only。Runtime 1.3 replay 不会扩大这个边界；未来若要启用必须先完成安全 RFC

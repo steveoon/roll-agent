@@ -80,7 +80,10 @@ const IDS = {
   serverApprovalRequest: "00000000-0000-4000-8000-000000000418",
   runtimeEvent: "00000000-0000-4000-8000-000000000419",
   eventLog: "00000000-0000-4000-8000-000000000420",
+  relayRuntimeErrorEnvelope: "00000000-0000-4000-8000-000000000421",
 } as const;
+
+const RUNTIME_ERROR_SENTINEL = "runtime-error-secret=abc123";
 
 function envelope(sequence: number, event: unknown): RuntimeEventEnvelope {
   return runtimeEventEnvelopeSchema.parse({
@@ -355,7 +358,7 @@ class FailingRuntimeClient implements CompanionRuntimeClient {
   ): Promise<RuntimeMethodResult<TMethod>> {
     throw new RollRpcError({
       code: -32_000,
-      message: "runtime is closing",
+      message: RUNTIME_ERROR_SENTINEL,
       data: {
         rollCode: "RUNTIME_CLOSING",
         retryable: true,
@@ -2233,39 +2236,70 @@ test("CompanionRelayBridge never charges in-flight mutations against the settled
   bridge.close();
 });
 
-test("CompanionRelayBridge preserves stable Runtime error semantics", async () => {
+test("CompanionRelayBridge exposes a fixed Runtime error message in plaintext and ciphertext", async () => {
   const workspaceId = workspaceIdSchema.parse(IDS.workspace);
-  const workspace = new CompanionWorkspace({
-    client: new FailingRuntimeClient(),
-    localApprovalPolicy: () => "allow",
-  });
-  const bridge = new CompanionRelayBridge({
-    deviceId: deviceIdSchema.parse(IDS.device),
-    pairingToken: "pairing-token-with-sufficient-length",
-    workspaces: new Map([[workspaceId, workspace]]),
-  });
-  const transport = new MemoryRelayTransport();
-  bridge.connect(transport);
-  await flush();
-  transport.receive({
-    type: "runtime.request",
-    requestId: IDS.relayRequest,
-    workspaceId,
-    method: RUNTIME_METHODS.threadSnapshot,
-    params: { threadId: IDS.thread, limit: 100 },
-  });
-  await flush();
+  for (const encrypted of [false, true]) {
+    const workspace = new CompanionWorkspace({
+      client: new FailingRuntimeClient(),
+      localApprovalPolicy: () => "allow",
+    });
+    const bridge = new CompanionRelayBridge({
+      deviceId: deviceIdSchema.parse(IDS.device),
+      pairingToken: "pairing-token-with-sufficient-length",
+      workspaces: new Map([[workspaceId, workspace]]),
+      ...(encrypted ? { ciphers: new Map([[workspaceId, testCipher]]) } : {}),
+    });
+    const transport = new MemoryRelayTransport();
+    bridge.connect(transport);
+    await flush();
+    const request = relayRuntimeRequestSchema.parse({
+      type: "runtime.request",
+      requestId: IDS.relayRequest,
+      workspaceId,
+      method: RUNTIME_METHODS.threadSnapshot,
+      params: { threadId: IDS.thread, limit: 100 },
+    });
+    if (encrypted) {
+      const payload = await testCipher.encrypt(request);
+      transport.receive({
+        type: "runtime.encrypted",
+        workspaceId,
+        envelopeId: IDS.relayRuntimeErrorEnvelope,
+        payloadKind: "request",
+        requestId: IDS.relayRequest,
+        algorithm: testCipher.algorithm,
+        nonce: payload.nonce,
+        ciphertext: payload.ciphertext,
+      });
+    } else {
+      transport.receive(request);
+    }
+    await flush();
 
-  const response = transport.sent.find(
-    (message) => message.type === "runtime.response" && message.requestId === IDS.relayRequest,
-  );
-  assert.equal(response?.type, "runtime.response");
-  assert.deepEqual(response?.type === "runtime.response" ? response.error : undefined, {
-    code: "RUNTIME_CLOSING",
-    message: "runtime is closing",
-    retryable: true,
-  });
-  bridge.close();
+    const rawResponse = encrypted
+      ? await (async () => {
+          const encryptedResponse = transport.sent.find(
+            (message): message is RelayEncryptedMessage =>
+              message.type === "runtime.encrypted" &&
+              message.payloadKind === "response" &&
+              message.requestId === IDS.relayRequest,
+          );
+          assert.ok(encryptedResponse);
+          return testCipher.decrypt(encryptedResponse);
+        })()
+      : transport.sent.find(
+          (message) =>
+            message.type === "runtime.response" && message.requestId === IDS.relayRequest,
+        );
+    const response = relayRuntimeResponseSchema.parse(rawResponse);
+    assert.deepEqual(response.error, {
+      code: "RUNTIME_CLOSING",
+      message: "Runtime request failed",
+      retryable: true,
+    });
+    assert.equal(JSON.stringify(response).includes(RUNTIME_ERROR_SENTINEL), false);
+    bridge.close();
+  }
 });
 
 test("CompanionRelayBridge reports only method-param validation as INVALID_PARAMS", async () => {
