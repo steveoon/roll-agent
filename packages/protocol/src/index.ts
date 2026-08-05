@@ -2056,19 +2056,19 @@ function userInputControlRequiresValue(control: UserInputControl): boolean {
 }
 
 /**
- * Correlates a structurally valid Client result with the original request and returns values in
+ * Correlates a structurally valid Client result with the original form and returns values in
  * form definition order. Unknown, duplicate, missing or type-incompatible values are rejected.
  */
-export function normalizeUserInputResult(
-  params: UserInputRequestParamsV12,
+export function normalizeUserInputResultForForm(
+  form: UserInputForm,
   result: unknown,
 ): NormalizedUserInputResult {
-  const parsedParams = userInputRequestParamsV12Schema.parse(params);
+  const parsedForm = userInputFormSchema.parse(form);
   const parsedResult = userInputResultSchema.parse(result);
   if (parsedResult.status === "cancelled") {
     return parsedResult;
   }
-  const controlsById = new Map(parsedParams.controls.map((control) => [control.id, control]));
+  const controlsById = new Map(parsedForm.controls.map((control) => [control.id, control]));
   const correlatedResult = userInputSubmittedResultSchema
     .superRefine((submitted, context) => {
       const submittedControlIds = new Set<string>();
@@ -2089,7 +2089,7 @@ export function normalizeUserInputResult(
         }
         USER_INPUT_VALUE_VALIDATORS[control.type](control, submittedValue.value, path, addIssue);
       }
-      for (const control of parsedParams.controls) {
+      for (const control of parsedForm.controls) {
         if (userInputControlRequiresValue(control) && !submittedControlIds.has(control.id)) {
           addIssue(["values"], `required control is missing: ${control.id}`);
         }
@@ -2099,11 +2099,30 @@ export function normalizeUserInputResult(
   const submittedById = new Map(correlatedResult.values.map((value) => [value.id, value]));
   return userInputSubmittedResultSchema.parse({
     status: "submitted",
-    values: parsedParams.controls.flatMap((control) => {
+    values: parsedForm.controls.flatMap((control) => {
       const value = submittedById.get(control.id);
       return value === undefined ? [] : [value];
     }),
   });
+}
+
+/**
+ * Correlates a structurally valid Client result with the original request and returns values in
+ * form definition order. Unknown, duplicate, missing or type-incompatible values are rejected.
+ */
+export function normalizeUserInputResult(
+  params: UserInputRequestParamsV12,
+  result: unknown,
+): NormalizedUserInputResult {
+  const parsedParams = userInputRequestParamsV12Schema.parse(params);
+  return normalizeUserInputResultForForm(
+    {
+      ...(parsedParams.title === undefined ? {} : { title: parsedParams.title }),
+      ...(parsedParams.description === undefined ? {} : { description: parsedParams.description }),
+      controls: parsedParams.controls,
+    },
+    result,
+  );
 }
 
 export interface JsonRpcRequest {
