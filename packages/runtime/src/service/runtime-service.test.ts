@@ -1546,7 +1546,12 @@ test("RuntimeService projects waiting-for-user and settles user input exactly on
         ?.status,
       "waiting-for-user",
     );
-    assert.equal(interactions[0]?.type, "required");
+    const required = interactions[0];
+    assert.ok(required?.type === "required");
+    assert.notEqual(required.form, form);
+    assert.notEqual(required.form.controls[0], form.controls[0]);
+    Object.assign(form.controls[0]!, { maxLength: 1 });
+    assert.throws(() => Object.assign(required.form.controls[0]!, { maxLength: 2 }), TypeError);
     assert.equal(
       service.resolvePendingUserInput(requestId, {
         status: "submitted",
@@ -1554,6 +1559,7 @@ test("RuntimeService projects waiting-for-user and settles user input exactly on
       }),
       true,
     );
+    Object.assign(form.controls[0]!, { maxLength: 120 });
     assert.equal(
       service.resolvePendingUserInput(requestId, {
         status: "submitted",

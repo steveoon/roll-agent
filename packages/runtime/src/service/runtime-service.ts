@@ -18,6 +18,7 @@ import {
   runtimeProtocolVersionSchema,
   streamIdSchema,
   threadIdSchema,
+  userInputFormSchema,
   type ActiveTurn,
   type ApprovalResolution,
   type InitializeParams,
@@ -1331,12 +1332,14 @@ export class RuntimeService {
           state.session.cancelUserInput?.(event.requestId, "当前客户端未协商用户输入处理能力");
           return;
         }
+        const storedForm = userInputFormSchema.parse(event.form);
+        const exposedForm = userInputFormSchema.parse(storedForm);
         const pending: PendingUserInputState = {
           requestId: event.requestId,
           threadId: state.threadId,
           turnId: state.turnId,
           session: state.session,
-          form: event.form,
+          form: storedForm,
           expiresAt: event.expiresAt,
         };
         this.pendingUserInputs.set(event.requestId, pending);
@@ -1346,7 +1349,7 @@ export class RuntimeService {
           requestId: event.requestId,
           threadId: state.threadId,
           turnId: state.turnId,
-          form: event.form,
+          form: exposedForm,
           expiresAt: event.expiresAt,
         });
         if (!delivered) {
