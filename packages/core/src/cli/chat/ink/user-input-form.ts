@@ -2,6 +2,7 @@ import { createElement as h, useRef, useState } from "react";
 import type { ReactElement } from "react";
 import { Box, Text, useInput } from "ink";
 import type { AgentSession, SessionEvent } from "@roll-agent/runtime";
+import { displayWidth } from "./display-width.ts";
 import { TextPrompt } from "./text-prompt.ts";
 
 type PendingUserInput = Extract<SessionEvent, { readonly type: "user-input-required" }>;
@@ -19,6 +20,8 @@ export interface UserInputFormProps {
   readonly maxRows: number;
   readonly onResolve: (result: UserInputResult) => void;
 }
+
+const SUMMARY_LABEL_MAX_WIDTH = 24;
 
 function textValidationError(
   control: Extract<UserInputControl, { readonly type: "text" | "multiline" }>,
@@ -72,31 +75,31 @@ function choiceValidationError(
   return undefined;
 }
 
-function controlHint(control: UserInputControl): string {
+function controlHint(control: UserInputControl, escLabel: string): string {
   if (control.type === "text") {
-    return control.required ? "Enter 确认 · Esc 取消" : "Enter 确认（留空跳过）· Esc 取消";
+    return control.required ? `Enter 确认 · ${escLabel}` : `Enter 确认（留空跳过）· ${escLabel}`;
   }
   if (control.type === "multiline") {
     return control.required
-      ? "Enter 确认 · Shift+Enter/Ctrl+J 换行 · Esc 取消"
-      : "Enter 确认（留空跳过）· Shift+Enter/Ctrl+J 换行 · Esc 取消";
+      ? `Enter 确认 · Shift+Enter/Ctrl+J 换行 · ${escLabel}`
+      : `Enter 确认（留空跳过）· Shift+Enter/Ctrl+J 换行 · ${escLabel}`;
   }
   if (control.type === "number") {
-    return control.required ? "Enter 确认 · Esc 取消" : "Enter 确认（留空跳过）· Esc 取消";
+    return control.required ? `Enter 确认 · ${escLabel}` : `Enter 确认（留空跳过）· ${escLabel}`;
   }
   if (control.type === "boolean") {
     return control.required
-      ? "↑↓ 选择 · Enter 确认 · Esc 取消"
-      : "↑↓ 选择 · Enter 确认 · S 跳过 · Esc 取消";
+      ? `↑↓ 选择 · Enter 确认 · ${escLabel}`
+      : `↑↓ 选择 · Enter 确认 · S 跳过 · ${escLabel}`;
   }
   if (control.multiple) {
     return control.required || (control.minSelections ?? 0) > 0
-      ? "↑↓ 移动 · Space 勾选 · Enter 确认 · Esc 取消"
-      : "↑↓ 移动 · Space 勾选 · Enter 确认 · S 跳过 · Esc 取消";
+      ? `↑↓ 移动 · Space 勾选 · Enter 确认 · ${escLabel}`
+      : `↑↓ 移动 · Space 勾选 · Enter 确认 · S 跳过 · ${escLabel}`;
   }
   return control.required || (control.minSelections ?? 0) > 0
-    ? "↑↓ 选择 · Enter 确认 · Esc 取消"
-    : "↑↓ 选择 · Enter 确认 · S 跳过 · Esc 取消";
+    ? `↑↓ 选择 · Enter 确认 · ${escLabel}`
+    : `↑↓ 选择 · Enter 确认 · S 跳过 · ${escLabel}`;
 }
 
 function optionRows(
@@ -129,8 +132,38 @@ function optionRows(
   });
 }
 
+function summaryValueText(
+  control: UserInputControl,
+  stored: UserInputValue | undefined,
+): { readonly text: string; readonly dim: boolean } {
+  if (stored === undefined) {
+    return { text: "（未填）", dim: true };
+  }
+  if (control.type === "boolean") {
+    return { text: stored === true ? "是" : "否", dim: false };
+  }
+  if (control.type === "choice") {
+    const ids = Array.isArray(stored) ? stored : [String(stored)];
+    const labels = ids.map((id) => control.options.find((option) => option.id === id)?.label ?? id);
+    if (labels.length === 0) {
+      return { text: "（未选）", dim: true };
+    }
+    return { text: labels.join("、"), dim: false };
+  }
+  const raw = String(stored);
+  const firstLine = raw.split("\n", 1)[0] ?? "";
+  return { text: raw.includes("\n") ? `${firstLine} …` : firstLine, dim: false };
+}
+
+function padToWidth(value: string, width: number): string {
+  return `${value}${" ".repeat(Math.max(0, width - displayWidth(value)))}`;
+}
+
 export function UserInputForm(props: UserInputFormProps): ReactElement {
   const controls = props.request.form.controls;
+  const [view, setView] = useState<"control" | "summary">("control");
+  const [returnToSummary, setReturnToSummary] = useState(false);
+  const [summaryCursor, setSummaryCursor] = useState(0);
   const [controlIndex, setControlIndex] = useState(0);
   const [draft, setDraft] = useState("");
   const [error, setError] = useState<string | undefined>(undefined);
@@ -138,7 +171,7 @@ export function UserInputForm(props: UserInputFormProps): ReactElement {
   const [selectedOptions, setSelectedOptions] = useState<ReadonlySet<string>>(
     () => new Set<string>(),
   );
-  const [booleanValue, setBooleanValue] = useState(true);
+  const [booleanValue, setBooleanValue] = useState(false);
   const valuesRef = useRef(new Map<string, UserInputValue>());
   const settledRef = useRef(false);
   const control = controls[controlIndex] ?? controls[0];
@@ -151,6 +184,49 @@ export function UserInputForm(props: UserInputFormProps): ReactElement {
     props.onResolve(result);
   };
 
+  const enterControl = (index: number, editFromSummary: boolean): void => {
+    const target = controls[index];
+    if (target === undefined) {
+      return;
+    }
+    const stored = valuesRef.current.get(target.id);
+    setView("control");
+    setReturnToSummary(editFromSummary);
+    setControlIndex(index);
+    setError(undefined);
+    if (target.type === "text" || target.type === "multiline") {
+      setDraft(typeof stored === "string" ? stored : "");
+      return;
+    }
+    if (target.type === "number") {
+      setDraft(typeof stored === "number" ? String(stored) : "");
+      return;
+    }
+    if (target.type === "boolean") {
+      setBooleanValue(stored === true);
+      return;
+    }
+    const selectedIds = Array.isArray(stored) ? stored : typeof stored === "string" ? [stored] : [];
+    setSelectedOptions(new Set(selectedIds));
+    const cursor = target.multiple ? 0 : target.options.findIndex((option) => option.id === stored);
+    setOptionCursor(cursor >= 0 ? cursor : 0);
+  };
+
+  const enterSummary = (cursor: number): void => {
+    setView("summary");
+    setReturnToSummary(false);
+    setSummaryCursor(cursor);
+    setError(undefined);
+  };
+
+  const buildSubmission = (): UserInputResult => ({
+    status: "submitted",
+    values: controls.flatMap((candidate) => {
+      const candidateValue = valuesRef.current.get(candidate.id);
+      return candidateValue === undefined ? [] : [{ id: candidate.id, value: candidateValue }];
+    }),
+  });
+
   const advance = (value: UserInputValue | undefined): void => {
     if (control === undefined) {
       finish({ status: "cancelled", reason: "用户输入表单无可用字段" });
@@ -161,20 +237,29 @@ export function UserInputForm(props: UserInputFormProps): ReactElement {
     } else {
       valuesRef.current.set(control.id, value);
     }
-    if (controlIndex >= controls.length - 1) {
-      const values = controls.flatMap((candidate) => {
-        const candidateValue = valuesRef.current.get(candidate.id);
-        return candidateValue === undefined ? [] : [{ id: candidate.id, value: candidateValue }];
-      });
-      finish({ status: "submitted", values });
+    if (returnToSummary || controlIndex >= controls.length - 1) {
+      enterSummary(controls.length);
       return;
     }
-    setControlIndex((index) => index + 1);
-    setDraft("");
-    setError(undefined);
-    setOptionCursor(0);
-    setSelectedOptions(new Set<string>());
-    setBooleanValue(true);
+    enterControl(controlIndex + 1, false);
+  };
+
+  const goBack = (): void => {
+    if (view === "summary") {
+      enterControl(controls.length - 1, false);
+      return;
+    }
+    if (returnToSummary) {
+      setView("summary");
+      setReturnToSummary(false);
+      setError(undefined);
+      return;
+    }
+    if (controlIndex <= 0) {
+      finish({ status: "cancelled", reason: "用户取消" });
+      return;
+    }
+    enterControl(controlIndex - 1, false);
   };
 
   const submitDraft = (raw: string): void => {
@@ -216,10 +301,29 @@ export function UserInputForm(props: UserInputFormProps): ReactElement {
 
   useInput((input, key) => {
     if (key.escape && !key.meta) {
-      finish({ status: "cancelled", reason: "用户取消" });
+      goBack();
       return;
     }
     if (key.tab && key.shift) {
+      return;
+    }
+    if (view === "summary") {
+      const rowCount = controls.length + 1;
+      if (key.upArrow) {
+        setSummaryCursor((cursor) => (cursor <= 0 ? rowCount - 1 : cursor - 1));
+        return;
+      }
+      if (key.downArrow) {
+        setSummaryCursor((cursor) => (cursor >= rowCount - 1 ? 0 : cursor + 1));
+        return;
+      }
+      if (key.return || input.includes("\r")) {
+        if (summaryCursor >= controls.length) {
+          finish(buildSubmission());
+        } else {
+          enterControl(summaryCursor, true);
+        }
+      }
       return;
     }
     if (
@@ -295,6 +399,79 @@ export function UserInputForm(props: UserInputFormProps): ReactElement {
   }
 
   const title = props.request.form.title ?? "需要你的输入";
+
+  if (view === "summary") {
+    const rowCount = controls.length + 1;
+    const chromeRows = 2;
+    const spacious = props.maxRows >= chromeRows + 2 + Math.min(rowCount, 4);
+    const gapRows = spacious ? 1 : 0;
+    const topMargin = spacious ? 1 : 0;
+    const bodyBudget = Math.max(1, props.maxRows - chromeRows - gapRows - topMargin);
+    const first = Math.min(
+      Math.max(0, summaryCursor - bodyBudget + 1),
+      Math.max(0, rowCount - bodyBudget),
+    );
+    const labelWidth = Math.min(
+      SUMMARY_LABEL_MAX_WIDTH,
+      controls.reduce((width, candidate) => Math.max(width, displayWidth(candidate.label)), 0),
+    );
+    const rows: ReactElement[] = [];
+    for (let index = first; index < Math.min(first + bodyBudget, rowCount); index += 1) {
+      const active = index === summaryCursor;
+      if (index >= controls.length) {
+        rows.push(
+          h(
+            Box,
+            { key: "__submit", marginTop: spacious && rowCount <= bodyBudget ? 1 : 0 },
+            h(Text, active ? { color: "green", bold: true } : null, `${active ? "›" : " "} 提交`),
+          ),
+        );
+        continue;
+      }
+      const candidate = controls[index];
+      if (candidate === undefined) {
+        continue;
+      }
+      const value = summaryValueText(candidate, valuesRef.current.get(candidate.id));
+      rows.push(
+        h(
+          Box,
+          { key: candidate.id },
+          h(
+            Text,
+            active ? { color: "cyan", bold: true } : null,
+            `${active ? "›" : " "} ${padToWidth(candidate.label, labelWidth)}`,
+          ),
+          h(
+            Text,
+            {
+              ...(active ? { color: "cyan" } : value.dim ? { dimColor: true } : {}),
+              wrap: "truncate-end",
+            },
+            `  ${value.text}`,
+          ),
+        ),
+      );
+    }
+    return h(
+      Box,
+      { flexDirection: "column", width: props.width, flexShrink: 0, marginTop: topMargin },
+      h(
+        Box,
+        { paddingX: 1, justifyContent: "space-between" },
+        h(Text, { bold: true, color: "cyan", wrap: "truncate-end" }, title),
+        h(Text, { dimColor: true }, " 确认提交"),
+      ),
+      h(Box, { paddingX: 1, marginTop: gapRows, flexDirection: "column" }, ...rows),
+      h(
+        Box,
+        { paddingX: 1 },
+        h(Text, { dimColor: true, wrap: "truncate-end" }, "↑↓ 选择 · Enter 确认 · Esc 返回"),
+      ),
+    );
+  }
+
+  const escLabel = controlIndex === 0 && !returnToSummary ? "Esc 取消" : "Esc 返回";
   const formDescription = props.request.form.description;
   const headerRows = 1 + (formDescription === undefined ? 0 : 1);
   const labelRows = 1 + (control.description === undefined ? 0 : 1);
@@ -384,7 +561,7 @@ export function UserInputForm(props: UserInputFormProps): ReactElement {
     h(
       Box,
       { paddingX: 1 },
-      h(Text, { dimColor: true, wrap: "truncate-end" }, controlHint(control)),
+      h(Text, { dimColor: true, wrap: "truncate-end" }, controlHint(control, escLabel)),
     ),
   );
 }

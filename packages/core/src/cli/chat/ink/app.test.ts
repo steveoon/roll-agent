@@ -513,6 +513,11 @@ test("ChatApp auto-approve never fills or submits user input", async () => {
 
   stdin.write("team-green");
   stdin.write("\r");
+  await waitFor(() => assert.match(plain(lastFrame() ?? ""), /确认提交/));
+  stdin.write("\x1b[Z");
+  await delay(30);
+  assert.deepEqual(sink.resolvedUserInputs, []);
+  stdin.write("\r");
   await waitFor(() => assert.equal(sink.resolvedUserInputs?.length, 1));
   assert.deepEqual(sink.resolvedUserInputs, [
     {
