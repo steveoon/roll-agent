@@ -66,8 +66,10 @@ Runtime JSON-RPC `id`、原始 Tool input/output、secret、完整 User Input Re
 
 Wire 1.1 的 pull 查询遵守同一边界：`thread.open` / `thread.snapshot` 必须把 Approval preview
 投影为可选 explanation、移除本地 reason，并把 Operation display 与 outcome reason 脱敏；
-`operation.get` 使用相同 Operation 投影。Schema 只能验证 frame 形状，Host 仍必须调用本包
-导出的 query projector，不能把 Runtime 原始结果直接放入 `runtime.response`。
+Host 对前两种结果调用 `projectRelayThreadSnapshotV11(value)`，对 `operation.get` 调用
+`projectRelayOperationGetResultV11(value)`。两个 projector 遇到畸形 Runtime 结果都会抛错并
+fail closed。第一方 `CompanionRelayBridgeV11` 已自动应用它们；自定义 Host 仍必须在构造
+`runtime.response` 前显式调用，不能把 Runtime 原始结果直接发送。
 
 有意保留的内容包括完整 transcript 消息、Thread 标题/模型/时间元数据、安全 timeline 摘要，
 以及 `thread.capabilities.manifest` 中可能出现的 cwd、平台、Agent、Skill、Tool Schema、规则

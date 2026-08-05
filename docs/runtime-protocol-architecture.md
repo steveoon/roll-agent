@@ -198,6 +198,14 @@ Relay Wire 1.1 提供通用 `interaction.request/resolved/cancelled` 与
 `interaction.candidate`；冻结的 1.0 继续只承载 Approval 专属路径。Runtime 1.3 的 event
 cursor 不会被投影成 Relay ACK，也不能静默扩大任一 Relay registry。
 
+push event 与 pull query 使用同一安全边界。Wire 1.1 的 `thread.open` / `thread.snapshot`
+必须经 `projectRelayThreadSnapshotV11()`，`operation.get` 必须经
+`projectRelayOperationGetResultV11()`；projector 遇到畸形 Runtime 结果会 fail closed。
+`CompanionRelayBridgeV11` 自动应用这些 projector，并把错误收敛为稳定 code、retryable 与
+固定公开文案；自定义 Host 必须在构造 `runtime.response` 前显式执行相同投影，不能回传 Runtime
+或本地 Policy 的原始错误消息。冻结 Wire 1.0 不具备该远程安全保证，仅限等价本地信任边界
+内的 legacy peer；面向 Cloud/Browser 时协商失败必须拒绝连接。
+
 跨层接线必须区分以下 correlation、幂等与投递标识：
 
 | 标识或游标 | 所属层 | 语义 |
@@ -217,10 +225,10 @@ cursor 不会被投影成 Relay ACK，也不能静默扩大任一 Relay registry
 `@roll-agent/companion` 当前实现的本地基础能力：
 
 - Browser client 与后台 Shell lease 由认证宿主手动接线；
-- 只有经 `CompanionWorkspace.startTurn()` 发起的 Turn 自动持有 lease；Runtime
-  `"1.3"` / `"1.2"` 的 Interaction lease 由 `CompanionInteractionBroker` handler 获取并在
-  Result/Abort 时释放；`"1.1"` 可在一个 minor 兼容期内使用 deprecated
-  `CompanionApprovalRequestBroker`，`"1.0"` fallback 才由 Event 与响应/终态事件维护；
+- 只有经 `CompanionWorkspace.startTurn()` 发起的 Turn 自动持有 lease；
+  `CompanionInteractionBroker` 处理 Runtime `"1.3"` / `"1.2"` 的 Approval/User Input，并为
+  Runtime `"1.1"` Approval 提供兼容 facade，在 Result/Abort/deadline/Turn 终态时只结算一次；
+  deprecated `CompanionApprovalRequestBroker` 只作为一个 minor 周期的 legacy API 保留；
 - Browser lease 释放不会关闭仍有 Turn、Shell 或 Interaction lease 的 Runtime；
 - 最多缓冲 `10,000` 个事件或 `32 MiB`，溢出时返回 gap 并要求 Snapshot；
 - Relay bridge 只对 mutation 的 `workspaceId + requestId` 做有界响应缓存，并以
@@ -231,13 +239,10 @@ cursor 不会被投影成 Relay ACK，也不能静默扩大任一 Relay registry
 - 完全重复投递复用原 mutation 结果，相同 ID 配不同参数会被拒绝；Runtime 仍以协商得到
   的有界 `requestId` 与已完成 `turnId` 窗口作为第二道幂等边界；
 - Relay Wire `"1.1"` 的 Browser 候选统一通过 `interaction.candidate` 提交；冻结 Wire
-  `"1.0"` 在 Runtime `"1.3"` / `"1.2"` / `"1.1"` 下继续使用 Approval 专属
-  `approval.candidate`。候选成功只表示 `{ accepted: true }`；Runtime 权威终态仍由
-  `approval.resolved` Event 给出，不能通过新 Wire 直接调用 `approval.respond`；
-- Browser 必须按 Relay 事件内的 Runtime 兼容版本选择冻结 Wire `"1.0"` 的控制路径：
-  本地 Runtime `"1.3"` / `"1.2"` / `"1.1"` 都投影为 `protocolVersion: "1.1"`，因此走
-  `approval.candidate`；收到 `"1.0"` 才走 `approval.respond` fallback。外层 Companion Relay
-  `"1.0"` 不代表 Runtime 审批能力，也不能承载 Runtime `"1.3"` / `"1.2"` 新字段；
+  `"1.0"` 只在受信 legacy peer 内保留 Approval 专属路径：其事件投影中的 Runtime 兼容版本为
+  `"1.1"` 时使用 `approval.candidate`，为 `"1.0"` 时使用 `approval.respond`。候选成功只表示
+  `{ accepted: true }`；Runtime 权威终态仍由有序 Event 给出。外层 Wire `"1.0"` 不代表
+  Runtime 审批能力，也不能承载 Runtime `"1.3"` / `"1.2"` 新字段；
 - 远程 approve 候选仍经过本地 Policy；`require-local-confirmation` 会返回
   `LocalConfirmationRequiredError`，不会自行创建确认 UI；远程拒绝只会收窄权限，可直接
   返回拒绝；
