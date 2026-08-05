@@ -33,15 +33,28 @@ interface Sink {
   }>;
 }
 
+interface MakeSessionOptions {
+  readonly contextWindow?: number;
+  readonly skills?: ReadonlyArray<{
+    readonly name: string;
+    readonly description: string;
+    readonly source: string;
+  }>;
+}
+
 function makeSession(
   send: (input: string) => AsyncIterable<SessionEvent>,
   sink: Sink,
   onCancel?: () => void,
+  options?: MakeSessionOptions,
 ): AgentSession {
   return {
     id: "s1",
     getContextWindow() {
-      return 200000;
+      return options?.contextWindow;
+    },
+    getSkillSummaries() {
+      return options?.skills ?? [];
     },
     send,
     approve(id: string) {
@@ -120,9 +133,8 @@ test("ChatApp streams an assistant reply into history and shows status", async (
   }
   const { stdin, lastFrame, unmount } = render(
     h(ChatApp, {
-      session: makeSession(send, sink),
+      session: makeSession(send, sink, undefined, { contextWindow: 200000 }),
       model: "qwen",
-      contextWindow: 200000,
       onUserSubmit: () => {},
       onExit: () => {},
     }),
@@ -160,7 +172,6 @@ test("ChatApp previews Markdown before the assistant stream finishes", async () 
     h(ChatApp, {
       session: makeSession(send, sink),
       model: "qwen",
-      contextWindow: undefined,
       onUserSubmit: () => {},
       onExit: () => {},
     }),
@@ -196,7 +207,6 @@ test("ChatApp shows model-waiting status separately from the submitted user mess
     h(ChatApp, {
       session: makeSession(send, sink),
       model: "qwen",
-      contextWindow: undefined,
       onUserSubmit: () => {},
       onExit: () => {},
     }),
@@ -222,7 +232,6 @@ test("ChatApp recalls recent submitted inputs with the up arrow", async () => {
     h(ChatApp, {
       session: makeSession(send, sink),
       model: "qwen",
-      contextWindow: undefined,
       initialHistory: [{ kind: "user", id: "history-first", text: "first" }],
       onUserSubmit: (text: string) => submitted.push(text),
       onExit: () => {},
@@ -279,7 +288,6 @@ for (const [label, escapeSequence] of [
       h(ChatApp, {
         session: makeSession(send, sink, () => releaseCancellation?.()),
         model: "qwen",
-        contextWindow: undefined,
         onUserSubmit: () => {},
         onExit: () => {},
       }),
@@ -319,7 +327,6 @@ test("ChatApp Esc 中断 token streaming", async () => {
     h(ChatApp, {
       session: makeSession(send, sink, () => releaseCancellation?.()),
       model: "qwen",
-      contextWindow: undefined,
       onUserSubmit: () => {},
       onExit: () => {},
     }),
@@ -384,7 +391,6 @@ test("ChatApp confirm flow shows the cleaned AI explanation and tool args, then 
     h(ChatApp, {
       session: makeSession(send, sink),
       model: "qwen",
-      contextWindow: undefined,
       onUserSubmit: () => {},
       onExit: () => {},
     }),
@@ -442,7 +448,6 @@ test("ChatApp Esc cancels a user input form without cancelling the turn", async 
     h(ChatApp, {
       session: makeSession(send, sink),
       model: "qwen",
-      contextWindow: undefined,
       onUserSubmit: () => {},
       onExit: () => {},
     }),
@@ -494,7 +499,6 @@ test("ChatApp auto-approve never fills or submits user input", async () => {
     h(ChatApp, {
       session: makeSession(send, sink),
       model: "qwen",
-      contextWindow: undefined,
       onUserSubmit: () => {},
       onExit: () => {},
     }),
@@ -562,7 +566,6 @@ test("ChatApp expires a pending user input once without waiting for another key"
     h(ChatApp, {
       session: makeSession(send, sink),
       model: "qwen",
-      contextWindow: undefined,
       onUserSubmit: () => {},
       onExit: () => {},
     }),
@@ -598,7 +601,6 @@ test("Shift+Tab enables auto mode and confirmations are approved silently", asyn
     h(ChatApp, {
       session: makeSession(send, sink),
       model: "qwen",
-      contextWindow: undefined,
       onUserSubmit: () => {},
       onExit: () => {},
     }),
@@ -631,7 +633,6 @@ test("Shift+Tab during a pending confirmation approves it immediately", async ()
     h(ChatApp, {
       session: makeSession(send, sink),
       model: "qwen",
-      contextWindow: undefined,
       onUserSubmit: () => {},
       onExit: () => {},
     }),
@@ -666,7 +667,6 @@ test("Shift+Tab twice turns auto mode back off and manual confirm returns", asyn
     h(ChatApp, {
       session: makeSession(send, sink),
       model: "qwen",
-      contextWindow: undefined,
       onUserSubmit: () => {},
       onExit: () => {},
     }),
@@ -696,7 +696,6 @@ test("kitty-encoded Shift+Tab toggles auto mode", async () => {
     h(ChatApp, {
       session: makeSession(send, sink),
       model: "qwen",
-      contextWindow: undefined,
       onUserSubmit: () => {},
       onExit: () => {},
     }),
@@ -716,7 +715,6 @@ test("Shift+Tab in the slash popup toggles auto without completing", async () =>
     h(ChatApp, {
       session: makeSession(send, sink),
       model: "qwen",
-      contextWindow: undefined,
       onUserSubmit: () => {},
       onExit: () => {},
     }),
@@ -745,7 +743,6 @@ test("/auto slash command toggles auto mode", async () => {
     h(ChatApp, {
       session: makeSession(send, sink),
       model: "qwen",
-      contextWindow: undefined,
       onUserSubmit: () => {},
       onExit: () => {},
     }),
@@ -770,7 +767,6 @@ test("ChatApp dims reasoning and never shows literal think tags", async () => {
     h(ChatApp, {
       session: makeSession(send, sink),
       model: "qwen",
-      contextWindow: undefined,
       onUserSubmit: () => {},
       onExit: () => {},
     }),
@@ -830,7 +826,6 @@ test("ChatApp streams provider reasoning separately from tool activity", async (
     h(ChatApp, {
       session: makeSession(send, sink),
       model: "qwen",
-      contextWindow: undefined,
       onUserSubmit: () => {},
       onExit: () => {},
     }),
@@ -891,7 +886,6 @@ test("ChatApp renders many tool rows in history", async () => {
     h(ChatApp, {
       session: makeSession(send, sink),
       model: "qwen",
-      contextWindow: undefined,
       onUserSubmit: () => {},
       onExit: () => {},
     }),
@@ -918,7 +912,6 @@ test("ChatApp shows a slash popup that filters as you type", async () => {
     h(ChatApp, {
       session: makeSession(send, sink),
       model: "qwen",
-      contextWindow: undefined,
       onUserSubmit: () => {},
       onExit: () => {},
     }),
@@ -944,10 +937,8 @@ test("ChatApp /skills lists loadable skills", async () => {
   }
   const { stdin, lastFrame, unmount } = render(
     h(ChatApp, {
-      session: makeSession(send, sink),
+      session: makeSession(send, sink, undefined, { skills: [TYPE_SKILL] }),
       model: "qwen",
-      contextWindow: undefined,
-      availableSkills: [TYPE_SKILL],
       onUserSubmit: () => {},
       onExit: () => {},
     }),
@@ -972,10 +963,8 @@ test("ChatApp completes skill names from the slash popup", async () => {
   }
   const { stdin, lastFrame, unmount } = render(
     h(ChatApp, {
-      session: makeSession(send, sink),
+      session: makeSession(send, sink, undefined, { skills: [TYPE_SKILL] }),
       model: "qwen",
-      contextWindow: undefined,
-      availableSkills: [TYPE_SKILL],
       onUserSubmit: () => {},
       onExit: () => {},
     }),
@@ -1000,10 +989,8 @@ test("ChatApp 把显式 skill 原始输入交给 AgentSession，由 Harness 预�
   }
   const { stdin, lastFrame, unmount } = render(
     h(ChatApp, {
-      session: makeSession(send, sink),
+      session: makeSession(send, sink, undefined, { skills: [TYPE_SKILL] }),
       model: "qwen",
-      contextWindow: undefined,
-      availableSkills: [TYPE_SKILL],
       onUserSubmit: (text: string) => submitted.push(text),
       onExit: () => {},
     }),
@@ -1031,7 +1018,6 @@ test("Ctrl+J inserts a newline instead of submitting", async () => {
     h(ChatApp, {
       session: makeSession(send, sink),
       model: "qwen",
-      contextWindow: undefined,
       onUserSubmit: () => {},
       onExit: () => {},
     }),
@@ -1055,7 +1041,6 @@ test("ChatApp ignores leaked keyboard protocol response text", async () => {
     h(ChatApp, {
       session: makeSession(send, sink),
       model: "qwen",
-      contextWindow: undefined,
       onUserSubmit: (text: string) => submitted.push(text),
       onExit: () => {},
     }),
@@ -1082,7 +1067,6 @@ test("Alt+. raises the thinking level in the status line", async () => {
     h(ChatApp, {
       session: makeSession(send, sink),
       model: "qwen",
-      contextWindow: undefined,
       onUserSubmit: () => {},
       onExit: () => {},
     }),
@@ -1104,7 +1088,6 @@ test("ChatApp seeds resumed conversation history", async () => {
     h(ChatApp, {
       session: makeSession(send, sink),
       model: "qwen",
-      contextWindow: undefined,
       initialHistory: [
         { kind: "user", id: "h-0", text: "之前的问题" },
         { kind: "assistant", id: "h-1", text: "之前的回答" },
@@ -1130,7 +1113,6 @@ test("rapid char-by-char typing accumulates without dropping chars", async () =>
     h(ChatApp, {
       session: makeSession(send, sink),
       model: "qwen",
-      contextWindow: undefined,
       onUserSubmit: (text: string) => submitted.push(text),
       onExit: () => {},
     }),
@@ -1157,7 +1139,6 @@ test("plain 'exit' is sent as a message; only /exit quits", async () => {
     h(ChatApp, {
       session: makeSession(send, sink),
       model: "qwen",
-      contextWindow: undefined,
       onUserSubmit: (text: string) => submitted.push(text),
       onExit: () => {
         exited = true;
@@ -1178,7 +1159,6 @@ test("plain 'exit' is sent as a message; only /exit quits", async () => {
     h(ChatApp, {
       session: makeSession(send, sink),
       model: "qwen",
-      contextWindow: undefined,
       onUserSubmit: (text: string) => submitted.push(text),
       onExit: () => {
         exited = true;
@@ -1203,7 +1183,6 @@ test("ChatApp submits text corrected with arrow-key cursor editing", async () =>
     h(ChatApp, {
       session: makeSession(send, sink),
       model: "qwen",
-      contextWindow: undefined,
       onUserSubmit: (text: string) => submitted.push(text),
       onExit: () => {},
     }),
@@ -1229,7 +1208,6 @@ test("ChatApp slash popup arrows keep selecting candidates instead of moving the
     h(ChatApp, {
       session: makeSession(send, sink),
       model: "qwen",
-      contextWindow: undefined,
       onUserSubmit: () => {},
       onExit: () => {},
     }),
@@ -1258,7 +1236,6 @@ test("ChatApp enter submits the whole multiline draft with cursor on an upper li
     h(ChatApp, {
       session: makeSession(send, sink),
       model: "qwen",
-      contextWindow: undefined,
       onUserSubmit: (text: string) => submitted.push(text),
       onExit: () => {},
     }),
@@ -1274,5 +1251,137 @@ test("ChatApp enter submits the whole multiline draft with cursor on an upper li
   await delay(10);
   stdin.write("\r");
   await waitFor(() => assert.deepEqual(submitted, ["ab\ncd"]));
+  unmount();
+});
+
+function switchableFakeSession(
+  id: string,
+  messages: readonly { role: string; content: string }[] = [],
+): {
+  readonly session: AgentSession;
+  readonly sent: () => readonly string[];
+  readonly isClosed: () => boolean;
+} {
+  let closed = false;
+  const sent: string[] = [];
+  const session = {
+    id,
+    send: (text: string) => {
+      sent.push(text);
+      return (async function* (): AsyncGenerator<never> {})();
+    },
+    compact: () => (async function* (): AsyncGenerator<never> {})(),
+    cancel: () => false,
+    approve: () => {},
+    reject: () => {},
+    close: async () => {
+      closed = true;
+    },
+    getMessages: () => messages,
+    getContextWindow: () => undefined,
+    getSkillSummaries: () => [],
+    setUserInputAvailable: () => {},
+    resolveUserInput: () => {},
+    cancelUserInput: () => {},
+  } as unknown as AgentSession;
+  return { session, sent: () => sent, isClosed: () => closed };
+}
+
+test("ChatApp switches sessions via /resume picker", async () => {
+  const first = switchableFakeSession("s1");
+  const second = switchableFakeSession("s2", [
+    { role: "user", content: "旧消息" },
+    { role: "assistant", content: "旧回复" },
+  ]);
+  const retired: string[] = [];
+  const { stdin, lastFrame, unmount } = render(
+    h(ChatApp, {
+      session: first.session,
+      model: "test-model",
+      onUserSubmit: () => {},
+      onExit: () => {},
+      sessionSwitching: {
+        loadItems: () => [{ id: "t2", title: "发布计划", meta: "2 小时前 · 2 条消息" }],
+        resume: async () => second.session,
+        onRetired: (threadId: string) => retired.push(threadId),
+      },
+    }),
+  );
+  await delay(20);
+  stdin.write("/resume");
+  await delay(20);
+  stdin.write("\r");
+  await delay(20);
+  assert.match(lastFrame() ?? "", /切换会话/);
+  assert.match(lastFrame() ?? "", /发布计划/);
+  stdin.write("\r");
+  await delay(50);
+  await waitFor(() => {
+    assert.match(lastFrame() ?? "", /旧消息/);
+    assert.equal(first.isClosed(), true);
+    assert.deepEqual(retired, ["s1"]);
+  });
+  stdin.write("hello");
+  await delay(20);
+  stdin.write("\r");
+  await delay(30);
+  assert.deepEqual(second.sent(), ["hello"]);
+  assert.deepEqual(first.sent(), []);
+  unmount();
+});
+
+test("ChatApp keeps current session when resume fails", async () => {
+  const first = switchableFakeSession("s1");
+  const { stdin, lastFrame, unmount } = render(
+    h(ChatApp, {
+      session: first.session,
+      model: "test-model",
+      onUserSubmit: () => {},
+      onExit: () => {},
+      sessionSwitching: {
+        loadItems: () => [{ id: "t2", title: "发布计划", meta: "2 小时前 · 2 条消息" }],
+        resume: async () => {
+          throw new Error("线程不存在");
+        },
+        onRetired: () => {},
+      },
+    }),
+  );
+  await delay(20);
+  stdin.write("/resume");
+  await delay(20);
+  stdin.write("\r");
+  await delay(20);
+  stdin.write("\r");
+  await waitFor(() => {
+    assert.match(lastFrame() ?? "", /切换失败：线程不存在/);
+  });
+  assert.equal(first.isClosed(), false);
+  stdin.write("\x1b");
+  await delay(30);
+  stdin.write("hi");
+  await delay(20);
+  stdin.write("\r");
+  await delay(30);
+  assert.deepEqual(first.sent(), ["hi"]);
+  unmount();
+});
+
+test("ChatApp reports notice when session switching is unavailable", async () => {
+  const first = switchableFakeSession("s1");
+  const { stdin, lastFrame, unmount } = render(
+    h(ChatApp, {
+      session: first.session,
+      model: "test-model",
+      onUserSubmit: () => {},
+      onExit: () => {},
+    }),
+  );
+  await delay(20);
+  stdin.write("/resume");
+  await delay(20);
+  stdin.write("\r");
+  await delay(30);
+  assert.match(lastFrame() ?? "", /当前界面不支持会话切换/);
   unmount();
 });

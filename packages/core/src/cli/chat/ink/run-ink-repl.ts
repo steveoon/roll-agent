@@ -52,8 +52,6 @@ export async function runInkRepl(
       h(ChatApp, {
         session,
         model: options.model,
-        contextWindow: session.getContextWindow(),
-        availableSkills: session.getSkillSummaries(),
         onUserSubmit,
         onExit: () => {
           instance.unmount();
