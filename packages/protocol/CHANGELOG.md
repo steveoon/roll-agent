@@ -1,5 +1,26 @@
 # @roll-agent/protocol
 
+## 0.4.0
+
+### Minor Changes
+
+- [#201](https://github.com/steveoon/roll-agent/pull/201) [`c9597e3`](https://github.com/steveoon/roll-agent/commit/c9597e3520059701640f3cc33cf7bf1be0bf0e8d) Thanks [@steveoon](https://github.com/steveoon)! - Add Runtime Protocol 1.3 durable event cursors, bounded per-Thread replay storage, a
+  replay-to-live response barrier, and a Node client recovery manager with Snapshot fallback.
+
+- [#203](https://github.com/steveoon/roll-agent/pull/203) [`df979d9`](https://github.com/steveoon/roll-agent/commit/df979d98dcf09250f6705a599b42c13bafba915a) Thanks [@steveoon](https://github.com/steveoon)! - Add `normalizeUserInputResultForForm(form, result)` for validating a user input result against
+  a bare form without Interaction metadata; `normalizeUserInputResult(params, result)` now
+  delegates to it. Document that clients must treat `acceptedServerRequestMethods` in the
+  capability ACK as a set-semantics subset of the requested methods.
+
+- [#197](https://github.com/steveoon/roll-agent/pull/197) [`e17ca19`](https://github.com/steveoon/roll-agent/commit/e17ca19259e5b8a263aa99bfa0979e475ab3c00d) Thanks [@steveoon](https://github.com/steveoon)! - Add the Runtime Protocol 1.2 `userInput.request` interaction, including five bounded control
+  types, request-correlated result validation, safe pending projections, and a typed Node client
+  handler. Expose the built-in `roll__user_input` Tool only after capability acknowledgement, wait
+  in `waiting-for-user`, and settle cancellation, timeout, disconnect, or late responses exactly once.
+
+- [#196](https://github.com/steveoon/roll-agent/pull/196) [`fda44ec`](https://github.com/steveoon/roll-agent/commit/fda44ec80bd87fae0492d4f41fbd7677f680e733) Thanks [@steveoon](https://github.com/steveoon)! - Add Runtime Protocol 1.2 with dynamic Server Request capability negotiation, branded interaction
+  metadata, version-aware registries and parsers, and strict per-version JSON Schema exports while
+  preserving the Protocol 1.1 compatibility facade.
+
 ## 0.3.0
 
 ### Minor Changes

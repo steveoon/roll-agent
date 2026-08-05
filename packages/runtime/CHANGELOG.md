@@ -1,5 +1,37 @@
 # @roll-agent/runtime
 
+## 0.14.0
+
+### Minor Changes
+
+- [#201](https://github.com/steveoon/roll-agent/pull/201) [`c9597e3`](https://github.com/steveoon/roll-agent/commit/c9597e3520059701640f3cc33cf7bf1be0bf0e8d) Thanks [@steveoon](https://github.com/steveoon)! - Add Runtime Protocol 1.3 durable event cursors, bounded per-Thread replay storage, a
+  replay-to-live response barrier, and a Node client recovery manager with Snapshot fallback.
+
+- [#196](https://github.com/steveoon/roll-agent/pull/196) [`fda44ec`](https://github.com/steveoon/roll-agent/commit/fda44ec80bd87fae0492d4f41fbd7677f680e733) Thanks [@steveoon](https://github.com/steveoon)! - Negotiate Runtime Protocol 1.2 Server Request capabilities before delivery, carry branded
+  Interaction metadata on Approval requests, cancel 1.2 requests by InteractionId, and keep the
+  Protocol 1.1 and 1.0 control paths wire-compatible.
+  Freeze Relay Wire 1.0 against Runtime 1.2 schema drift and project newer Runtime snapshots and
+  events to its existing Runtime 1.1-compatible envelope before remote delivery.
+
+- [#197](https://github.com/steveoon/roll-agent/pull/197) [`e17ca19`](https://github.com/steveoon/roll-agent/commit/e17ca19259e5b8a263aa99bfa0979e475ab3c00d) Thanks [@steveoon](https://github.com/steveoon)! - Add the Runtime Protocol 1.2 `userInput.request` interaction, including five bounded control
+  types, request-correlated result validation, safe pending projections, and a typed Node client
+  handler. Expose the built-in `roll__user_input` Tool only after capability acknowledgement, wait
+  in `waiting-for-user`, and settle cancellation, timeout, disconnect, or late responses exactly once.
+
+### Patch Changes
+
+- [#203](https://github.com/steveoon/roll-agent/pull/203) [`df979d9`](https://github.com/steveoon/roll-agent/commit/df979d98dcf09250f6705a599b42c13bafba915a) Thanks [@steveoon](https://github.com/steveoon)! - Commit Protocol 1.2+ capability acknowledgements behind the JSON-RPC response barrier so an
+  Interaction created inside the ACK window can no longer reach the client before the ACK frame
+  and die with -32601. Withdrawal cancellations stay synchronous while acknowledgement and
+  delivery run after the response is written, which also closes the same race on revision upgrades,
+  without changing the existing public coordinator setter. Approvals additionally gain the same
+  absolute deadline fallback as user input (`min(now + 5 minutes, remaining turn lifetime)`) so
+  embedding without `turnTimeoutMs` no longer causes every Protocol 1.2 approval to fail closed, and user input
+  results are normalized against an immutable copy of the original form at both the RuntimeService
+  boundary and inside the engine before reaching the model.
+- Updated dependencies [[`c9597e3`](https://github.com/steveoon/roll-agent/commit/c9597e3520059701640f3cc33cf7bf1be0bf0e8d), [`df979d9`](https://github.com/steveoon/roll-agent/commit/df979d98dcf09250f6705a599b42c13bafba915a), [`e17ca19`](https://github.com/steveoon/roll-agent/commit/e17ca19259e5b8a263aa99bfa0979e475ab3c00d), [`fda44ec`](https://github.com/steveoon/roll-agent/commit/fda44ec80bd87fae0492d4f41fbd7677f680e733)]:
+  - @roll-agent/protocol@0.4.0
+
 ## 0.13.0
 
 ### Minor Changes
