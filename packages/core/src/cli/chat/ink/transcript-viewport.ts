@@ -1,17 +1,17 @@
 import {
   createElement as h,
   type ReactElement,
-  type RefObject,
   useCallback,
   useEffect,
   useMemo,
   useRef,
   useState,
 } from "react";
-import { Box, Text, useBoxMetrics, useInput, useStdout } from "ink";
+import { Box, Text, useInput, useStdout } from "ink";
 import type { DOMElement } from "ink";
 import type { BannerLine } from "../banner.ts";
 import { BannerHistoryView, BannerLinesView } from "./banner-view.ts";
+import { useDeferredBoxMetrics } from "./deferred-box-metrics.ts";
 import { HistoryItemView } from "./history-item.ts";
 import { LiveRegion } from "./live-region.ts";
 import {
@@ -142,7 +142,7 @@ function MeasuredEntry({
 export function TranscriptViewport(props: TranscriptViewportProps): ReactElement {
   const { stdout } = useStdout();
   const viewportRef = useRef<DOMElement | null>(null);
-  const viewportMetrics = useBoxMetrics(viewportRef as RefObject<DOMElement>);
+  const viewportMetrics = useDeferredBoxMetrics(viewportRef);
   const [heights, setHeights] = useState<ReadonlyMap<string, number>>(() => new Map());
   const [scrollOffset, setScrollOffset] = useState(0);
   const [unseenHistory, setUnseenHistory] = useState(0);
