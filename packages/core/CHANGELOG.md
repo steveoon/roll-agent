@@ -1,5 +1,14 @@
 # @roll-agent/core
 
+## 0.28.1
+
+### Patch Changes
+
+- [#207](https://github.com/steveoon/roll-agent/pull/207) [`f4846d1`](https://github.com/steveoon/roll-agent/commit/f4846d1d82946209c216890726ba7b7fb9d938f4) Thanks [@steveoon](https://github.com/steveoon)! - Prevent fullscreen `roll chat` from crashing with a React maximum update depth error after terminal resize and continued output.
+
+- Updated dependencies []:
+  - @roll-agent/runtime@0.14.0
+
 ## 0.28.0
 
 ### Minor Changes
