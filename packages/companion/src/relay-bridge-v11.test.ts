@@ -11,6 +11,7 @@ import {
 } from "@roll-agent/protocol";
 import {
   RELAY_ERROR_CODES,
+  RELAY_ERROR_CODES_V11,
   RELAY_INTERACTION_METHODS_V11,
   RELAY_REQUEST_METHODS_V11,
   deviceIdSchema,
@@ -28,6 +29,7 @@ import {
 import type { RemoteInteractionCandidateContext } from "./interaction-broker.ts";
 import {
   CompanionRelayBridgeV11,
+  OutboundCompanionRelayV11,
   type CompanionWorkspaceV11Port,
   type RelayPayloadCipherV11,
   type RelayTransportV11,
@@ -348,6 +350,70 @@ test("Companion Wire 1.1 consumes the shared Relay conformance suite", () => {
   );
 });
 
+test("Wire 1.1 authorizes every remote request before cache lookup or Runtime dispatch", async () => {
+  const workspace = new WorkspacePort();
+  const responderContext = { subject: "authenticated-web-user" };
+  const seen: Array<{
+    readonly workspaceId: string;
+    readonly requestId: string;
+    readonly method: string;
+    readonly responderContext: unknown;
+    readonly signal: AbortSignal;
+  }> = [];
+  const bridge = new CompanionRelayBridgeV11({
+    deviceId: IDS.device,
+    pairingToken: "pairing-token-long-enough",
+    workspaces: new Map([[IDS.workspace, workspace]]),
+  });
+  const transport = new MemoryRelayTransportV11();
+  bridge.connect(transport, {
+    requestPolicy: (input) => {
+      seen.push(input);
+      if (input.requestId === IDS.openRequest) {
+        throw new Error(`${SECRET_SENTINEL}:request-policy`);
+      }
+      return false;
+    },
+    responderContext,
+    responderPolicy: () => true,
+  });
+  await flush();
+
+  const denied = queryRequestV11(IDS.snapshotRequest, RELAY_REQUEST_METHODS_V11.threadSnapshot);
+  const failedClosed = queryRequestV11(IDS.openRequest, RELAY_REQUEST_METHODS_V11.threadOpen);
+  transport.receive(denied);
+  transport.receive(failedClosed);
+  await flush();
+
+  assert.equal(workspace.calls, 0);
+  assert.equal(seen.length, 2);
+  assert.deepEqual(
+    {
+      workspaceId: seen[0]?.workspaceId,
+      requestId: seen[0]?.requestId,
+      method: seen[0]?.method,
+      responderContext: seen[0]?.responderContext,
+    },
+    {
+      workspaceId: IDS.workspace,
+      requestId: IDS.snapshotRequest,
+      method: RELAY_REQUEST_METHODS_V11.threadSnapshot,
+      responderContext,
+    },
+  );
+  assert.ok(seen[0]?.signal instanceof AbortSignal);
+  for (const request of [denied, failedClosed]) {
+    assert.deepEqual(responseForV11(transport.sent, request.requestId).error, {
+      code: RELAY_ERROR_CODES_V11.remoteRequestDenied,
+      message: "Remote request denied",
+      retryable: false,
+    });
+  }
+  assert.equal(JSON.stringify(transport.sent).includes(SECRET_SENTINEL), false);
+  bridge.close();
+  assert.equal(seen[0]?.signal.aborted, true);
+});
+
 test("Wire 1.1 redacts sensitive Snapshot and operation.get query results", async () => {
   const workspace = new WorkspacePort((request) => {
     if (request.method === RELAY_REQUEST_METHODS_V11.operationGet) {
@@ -367,7 +433,11 @@ test("Wire 1.1 redacts sensitive Snapshot and operation.get query results", asyn
     workspaces: new Map([[IDS.workspace, workspace]]),
   });
   const transport = new MemoryRelayTransportV11();
-  bridge.connect(transport, { responderContext: null, responderPolicy: () => true });
+  bridge.connect(transport, {
+    requestPolicy: () => true,
+    responderContext: null,
+    responderPolicy: () => true,
+  });
   await flush();
 
   const requests = [
@@ -416,7 +486,11 @@ test("Wire 1.1 exposes only fixed public error messages in plaintext responses",
     workspaces: new Map([[IDS.workspace, workspace]]),
   });
   const transport = new MemoryRelayTransportV11();
-  bridge.connect(transport, { responderContext: null, responderPolicy: () => true });
+  bridge.connect(transport, {
+    requestPolicy: () => true,
+    responderContext: null,
+    responderPolicy: () => true,
+  });
   await flush();
 
   for (const entry of cases) {
@@ -452,7 +526,11 @@ test("Wire 1.1 redacts query results and errors before encrypting responses", as
     ciphers: new Map([[IDS.workspace, cipher]]),
   });
   const transport = new MemoryRelayTransportV11();
-  bridge.connect(transport, { responderContext: null, responderPolicy: () => true });
+  bridge.connect(transport, {
+    requestPolicy: () => true,
+    responderContext: null,
+    responderPolicy: () => true,
+  });
   await flush();
 
   const operationRequest = queryRequestV11(
@@ -492,13 +570,21 @@ test("Wire 1.1 redacts query results and errors before encrypting responses", as
 
 test("Wire 1.1 mutation cache deduplicates candidates and rejects conflicts", async () => {
   const workspace = new WorkspacePort();
+  let requestPolicyCalls = 0;
   const bridge = new CompanionRelayBridgeV11({
     deviceId: IDS.device,
     pairingToken: "pairing-token-long-enough",
     workspaces: new Map([[IDS.workspace, workspace]]),
   });
   const transport = new InMemoryRelayTransportV11();
-  bridge.connect(transport, { responderContext: null, responderPolicy: () => true });
+  bridge.connect(transport, {
+    requestPolicy: () => {
+      requestPolicyCalls += 1;
+      return true;
+    },
+    responderContext: null,
+    responderPolicy: () => true,
+  });
 
   transport.injectDuplicateCandidate({
     requestId: IDS.request,
@@ -507,6 +593,7 @@ test("Wire 1.1 mutation cache deduplicates candidates and rejects conflicts", as
   });
   await flush();
   assert.equal(workspace.calls, 1);
+  assert.equal(requestPolicyCalls, 2, "duplicates must be re-authorized before cache lookup");
   assert.equal(responses(transport.outbound).length, 2);
   assert.deepEqual(responses(transport.outbound)[0]?.result, { accepted: true });
 
@@ -517,6 +604,7 @@ test("Wire 1.1 mutation cache deduplicates candidates and rejects conflicts", as
   });
   await flush();
   assert.equal(workspace.calls, 1);
+  assert.equal(requestPolicyCalls, 3, "conflicting requestIds must also be authorized first");
   assert.equal(responses(transport.outbound).at(-1)?.error?.code, "RELAY_REQUEST_ID_CONFLICT");
   bridge.close();
 });
@@ -530,12 +618,20 @@ test("Wire 1.1 replays the same frame sequence after a send generation fails", a
     workspaces: new Map([[IDS.workspace, workspace]]),
   });
   const first = new InMemoryRelayTransportV11();
-  bridge.connect(first, { responderContext: "first", responderPolicy: () => true });
+  bridge.connect(first, {
+    requestPolicy: () => true,
+    responderContext: "first",
+    responderPolicy: () => true,
+  });
   await flush();
   first.disconnect();
 
   const second = new InMemoryRelayTransportV11();
-  bridge.connect(second, { responderContext: "second", responderPolicy: () => true });
+  bridge.connect(second, {
+    requestPolicy: () => true,
+    responderContext: "second",
+    responderPolicy: () => true,
+  });
   await flush();
   const replay = second.outbound.find(
     (message): message is Extract<RelayMessageV11, { readonly type: "interaction.request" }> =>
@@ -556,7 +652,11 @@ test("Wire 1.1 ACK advances only through the prefix advertised on that generatio
     workspaces: new Map([[IDS.workspace, workspace]]),
   });
   const first = new InMemoryRelayTransportV11();
-  bridge.connect(first, { responderContext: null, responderPolicy: () => true });
+  bridge.connect(first, {
+    requestPolicy: () => true,
+    responderContext: null,
+    responderPolicy: () => true,
+  });
   await flush();
   first.injectAck(IDS.workspace, 0);
   await flush();
@@ -568,7 +668,11 @@ test("Wire 1.1 ACK advances only through the prefix advertised on that generatio
   first.disconnect();
 
   const second = new InMemoryRelayTransportV11();
-  bridge.connect(second, { responderContext: null, responderPolicy: () => true });
+  bridge.connect(second, {
+    requestPolicy: () => true,
+    responderContext: null,
+    responderPolicy: () => true,
+  });
   await flush();
   const replayed = second.outbound.filter(
     (message): message is Extract<RelayMessageV11, { readonly type: "interaction.request" }> =>
@@ -602,7 +706,11 @@ test("Wire 1.1 encrypts Interaction frames as interaction payloads", async () =>
     ciphers: new Map([[IDS.workspace, cipher]]),
   });
   const transport = new InMemoryRelayTransportV11();
-  bridge.connect(transport, { responderContext: null, responderPolicy: () => true });
+  bridge.connect(transport, {
+    requestPolicy: () => true,
+    responderContext: null,
+    responderPolicy: () => true,
+  });
   await flush();
 
   const encrypted = transport.outbound.find(
@@ -615,4 +723,38 @@ test("Wire 1.1 encrypts Interaction frames as interaction payloads", async () =>
   assert.ok(typeof encryptedValue === "object" && encryptedValue !== null);
   assert.equal(Reflect.get(encryptedValue, "type"), "interaction.request");
   bridge.close();
+});
+
+test("Outbound Wire 1.1 connections forward the required request policy", async () => {
+  const workspace = new WorkspacePort();
+  const bridge = new CompanionRelayBridgeV11({
+    deviceId: IDS.device,
+    pairingToken: "pairing-token-long-enough",
+    workspaces: new Map([[IDS.workspace, workspace]]),
+  });
+  const transport = new MemoryRelayTransportV11();
+  let requestPolicyCalls = 0;
+  const outbound = new OutboundCompanionRelayV11({
+    bridge,
+    connectTransport: async () => ({
+      transport,
+      requestPolicy: () => {
+        requestPolicyCalls += 1;
+        return true;
+      },
+      responderContext: { subject: "web-user" },
+      responderPolicy: () => true,
+    }),
+    minReconnectMs: 1,
+    maxReconnectMs: 2,
+  });
+
+  outbound.start();
+  await flush();
+  transport.receive(queryRequestV11(IDS.snapshotRequest, RELAY_REQUEST_METHODS_V11.threadSnapshot));
+  await flush();
+
+  assert.equal(requestPolicyCalls, 1);
+  assert.equal(workspace.calls, 1);
+  outbound.stop();
 });

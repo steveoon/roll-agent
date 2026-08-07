@@ -45,7 +45,8 @@ const workspace = new CompanionWorkspace({
   client: runtime,
   workspaceId,
   interactionBroker,
-  localApprovalPolicy: async () => "require-local-confirmation",
+  // Official roll companion keeps Runtime approval as the single authority.
+  localApprovalPolicy: async () => "allow",
 });
 const bridge = new CompanionRelayBridgeV11({
   deviceId: deviceIdSchema.parse(savedDeviceId),
@@ -57,6 +58,8 @@ const outbound = new OutboundCompanionRelayV11({
   connectTransport: async () => ({
     transport: await openAuthenticatedRelayTransport(),
     responderContext: authenticatedRelaySession,
+    requestPolicy: async ({ workspaceId, method, responderContext, signal }) =>
+      authorizeRemoteRuntimeRequest(responderContext, { workspaceId, method, signal }),
     responderPolicy: async ({ responderContext, signal }) =>
       authorizeInteractionResponder(responderContext, { signal }),
   }),
@@ -68,8 +71,14 @@ outbound.start();
 `responderContext` 是宿主注入的不透明认证/会话状态；Companion 不解释它，也不因其存在就声称
 Browser 已认证或 controller 已选出。Wire Schema 先拒绝畸形帧；合法 candidate 再经过宿主的
 responder policy，然后按 Runtime 原始请求做 method-specific 校验。Approval 的 approve 候选
-还必须通过本地 Approval Policy；reject 不扩大权限。User Input 候选按原始表单规范化，完整
-结果只回给 Runtime。
+仍会经过低层库的本地 Approval Policy；官方 `roll companion` 将其固定为 allow，不增加第二套
+权限事实源，也绝不把 Runtime deny 提升为可远程批准。自定义 Host 可以进一步收紧权限，但不能
+放宽 Runtime 决议。User Input 候选按原始表单规范化，完整结果只回给 Runtime。
+
+Wire 1.1 的 `requestPolicy` 是必填 Host authorizer。每个 `runtime.request` 都会在 request cache
+查询和 Runtime dispatch 之前重新授权；相同 requestId 的重投也不会绕过当前策略。false、抛错
+或连接 generation 中止都 fail closed 为固定 `REMOTE_REQUEST_DENIED`，本机策略原因不会进入
+Relay。`interaction.candidate` 通过该全请求策略后，仍必须再经过 `responderPolicy`。
 
 Wire 投影有意最小化：
 

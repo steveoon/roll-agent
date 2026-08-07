@@ -15,7 +15,8 @@
 
 `@roll-agent/client-node` 只管理本地 Runtime Transport。它不会安装或启动
 `@roll-agent/companion`，也不会让 Runtime 自动接入 Cloud Relay。需要远程 Web 访问时，
-由用户本机另一个 Host 显式集成 Companion。
+由官方 `roll companion` 服务在用户本机管理这个 Client 和 Relay；普通第三方 Web App 使用
+`@roll-agent/relay-client`，不直接组装本地 Host。
 
 ## 创建客户端
 

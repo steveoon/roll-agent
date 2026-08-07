@@ -13,8 +13,10 @@ stdio 分帧两端剥 `\r`、包管理器调用已有完整 cmd.exe 适配（`pa
 
 ## Windows 安装与配置指引
 
-安装本身零特殊配置：官方 MSI 安装 Node ≥ 22.6.0，`npm i -g @roll-agent/core` 后
-`roll` 命令经 npm `.cmd` shim 直接可用。以下是需要注意的使用习惯与已知限制。
+当前开发安装要求 Node ≥ 22.6.0；执行 `npm i -g @roll-agent/core` 后，`roll` 命令经 npm
+`.cmd` shim 直接可用。包含 Node/Roll、注册当前用户 Companion Scheduled Task 且经过
+Authenticode 签名的 x64 MSI 是 GA 门槛，当前仓库尚未产出该签名 artifact。以下是开发态
+需要注意的使用习惯与已知限制。
 
 ### 必须注意
 

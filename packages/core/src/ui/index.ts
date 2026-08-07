@@ -1,8 +1,20 @@
+export {
+  createRollUiCompanionController,
+  RollUiCompanionBusyError,
+  RollUiCompanionRequestError,
+} from "./companion-controller.ts";
+export type {
+  CompanionApplicationPort,
+  RollUiCompanionControllerOptions,
+} from "./companion-controller.ts";
 export { createConfigApplicationUiController } from "./config-controller.ts";
 export type { ConfigApplicationUiControllerOptions } from "./config-controller.ts";
 export {
   ROLL_UI_CONFIG_EDIT_MODES,
   type RollUiApplyEffectsRequest,
+  type RollUiCompanionController,
+  type RollUiCompanionEnrollRequest,
+  type RollUiCompanionWorkspaceRequest,
   type RollUiConfigEditMode,
   type RollUiConfigRequest,
   type RollUiController,

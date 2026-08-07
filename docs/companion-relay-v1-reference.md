@@ -13,24 +13,45 @@ Browser ── Cloud Relay ── Companion Relay Protocol ── Local Companio
                                                    Runtime
 ```
 
-`@roll-agent/relay-protocol` 是 Browser、Cloud Relay 和 Local Companion 共享的 Browser-safe
-Wire 契约来源，提供版本注册表、严格消息/方法 Schema、ID、JSON Schema、fixtures、reference
-adapter 与 conformance suite。它不包含 Transport、账号、数据库、Policy 或部署代码。
+`@roll-agent/relay-protocol` 是 Cloud Relay、Browser Client 和 Local Companion 共享的
+Browser-safe 契约来源，提供版本注册表、严格消息/方法 Schema、ID、JSON Schema、fixtures、
+reference adapter 与 conformance suite。它不包含 Transport、账号、数据库、Policy 或部署
+代码。普通 Web App 通过 `@roll-agent/relay-client` 间接消费它。
 
 `@roll-agent/companion` 消费该契约，提供本机 Host 侧 bridge、Workspace lease、Interaction
-Broker、ACK/gap 缓冲、去重与出站重连。它不包含生产 Cloud Relay、Browser SDK、账号/设备
+Broker、ACK/gap 缓冲、去重与出站重连。它不包含生产 Cloud Relay、Browser UI、账号/设备
 身份、controller 选举、鉴权授权、TLS、可靠投递、持久 outbox、Interaction WAL、HA、监控
 或本地确认 UI。
 
 | 组件 | 直接依赖 | 运行位置 |
 |---|---|---|
-| Browser Web App | `@roll-agent/relay-protocol` | 用户浏览器 |
+| Browser Web App | `@roll-agent/relay-client` | 用户浏览器 |
 | Cloud Relay Server | `@roll-agent/relay-protocol` | 云端 |
-| Local Companion Host | `@roll-agent/companion`、`@roll-agent/client-node` | 用户本机 Node/Electron Main/daemon |
+| 官方 Local Companion Host | `roll companion`（Core 内部使用 `companion`、`client-node`） | 用户本机 per-user daemon |
+| 高级自定义 Host | `@roll-agent/companion`、`@roll-agent/client-node` | 版本锁定的 Node/Electron Main |
 | Local-only Desktop GUI | `@roll-agent/client-node` | 用户本机；不需要 Companion |
 
-安装任一 npm 包都不会隐式建立 Relay 连接。宿主必须显式完成认证与 Workspace 绑定，再启动
-`OutboundCompanionRelayV11`（或旧的 V1.0 `OutboundCompanionRelay`）。
+安装任一 npm 包都不会隐式建立 Relay 连接。官方 Host 必须先完成 enrollment 与本机 Workspace
+绑定；只有高级宿主才直接装配 `OutboundCompanionRelayV11`。冻结的 V1.0
+`OutboundCompanionRelay` 不得用于公网 Browser 接入。
+
+## Browser Control 1.0
+
+Relay Wire 1.1 继续承载 Chat 数据面；`@roll-agent/relay-protocol/control` 独立定义 Browser
+session bootstrap：
+
+- `relaySessionDescriptorSchema` 校验第三方后端返回的 `wss:// connectUrl` 与 `expiresAt`；
+- `session.ready` 必须是 Browser WSS 收到的第一帧，并固定 Control 1.0 + Wire 1.1；
+- `workspace.status` 表示 Companion/Runtime online 或 offline；
+- `session.error` 只包含稳定 code 与 retryable；
+- Browser → Relay 只允许 `runtime.request` 与 `runtime.ack`；Relay → Browser 只允许三类
+  Control frame，以及 response/event/gap/Interaction 数据面 frame；
+- P0 明确排除 `runtime.encrypted`，因为尚未交付 E2EE。
+
+Control message 没有加入 `relayMessageSchemaV11`，Cloud Relay 必须按连接方向分别校验。
+Wire 1.1 Snapshot 不能恢复可响应的 `interactionId`；Cloud Relay 必须保留并向替代 Browser
+session 重投尚未 resolved/cancelled 的 `interaction.request`，Browser 不能从 `approvalId`
+猜测它。
 
 ## 版本矩阵
 
@@ -65,6 +86,9 @@ Wire version 与 npm package version、Runtime Protocol version 相互独立。�
 | `runtime.ack` | Relay → Companion | 确认最高连续 `relaySequence` |
 | `runtime.gap` | Companion → Relay | 缓冲缺口；回退 `thread.snapshot` |
 | `runtime.encrypted` | 双向 | Workspace payload cipher 信封 |
+
+`device.connect.pairingToken` 是冻结的 legacy 字段名。在 P0 中它承载 enrollment 返回并由
+Keychain/DPAPI 保存的长期 device credential，绝不是用户输入的一次性 pairing code。
 
 `runtime.event` 和三类 Interaction 帧共享单个 Workspace `relaySequence`。ACK 只确认 Relay
 安全投影的投递前缀，不确认 Runtime event cursor；#176 不改变 Relay Wire，也不增加持久
@@ -104,10 +128,13 @@ Browser 必须等待有序的 `interaction.resolved` 或 `interaction.cancelled`
 候选验证顺序为：
 
 1. Wire Schema 先拒绝非法信封、未知 method 和畸形 candidate 外形。
-2. Host 提供的 responder policy 验证当前认证会话/连接 generation 是否有资格响应。
-3. Broker 对照 pending Interaction 与 Runtime 原始 Params 做 method-specific 二次校验；User
+2. Host 的 `requestPolicy` 在 request cache 与 Runtime dispatch 前验证 Workspace 和 method；
+   拒绝统一返回 `REMOTE_REQUEST_DENIED`，不泄漏本机原因。
+3. Host 提供的 responder policy 验证当前认证会话/连接 generation 是否有资格响应。
+4. Broker 对照 pending Interaction 与 Runtime 原始 Params 做 method-specific 二次校验；User
    Input 按 control 顺序规范化。
-4. Approval approve 再经过本地 Approval Policy；reject 不扩大权限。
+5. Approval approve 再经过本地 Approval Policy；reject 不扩大权限。官方 P0 Host 的本地
+   Policy 固定放行 Runtime 已产生的 `confirm`，不会添加电脑端二次确认。
 
 重复的同一 `workspaceId + requestId` 返回缓存结果；相同 ID 携带不同 method/params 返回
 `RELAY_REQUEST_ID_CONFLICT`。Runtime cancel、Turn 终态、deadline、Workspace 解绑、bridge

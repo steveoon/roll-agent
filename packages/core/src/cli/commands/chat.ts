@@ -638,7 +638,7 @@ export default defineCommand({
     json: { type: "boolean", description: "JSON 格式输出", default: false },
     server: {
       type: "boolean",
-      description: "以 JSON-RPC daemon 模式运行（stdio，供 GUI/前端接入）",
+      description: "旧兼容入口：JSON-RPC over stdio（新宿主使用 `roll runtime serve --stdio`）",
       default: false,
     },
     "screen-mode": {

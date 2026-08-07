@@ -140,7 +140,11 @@ test(
       workspaces: new Map([[IDS.workspace, workspace]]),
     });
     const transport = new InMemoryRelayTransportV11();
-    bridge.connect(transport, { responderContext: null, responderPolicy: () => true });
+    bridge.connect(transport, {
+      requestPolicy: () => true,
+      responderContext: null,
+      responderPolicy: () => true,
+    });
 
     client.emit(
       runtimeEventEnvelopeSchema.parse({
@@ -218,6 +222,7 @@ test(
     });
     const transport = new InMemoryRelayTransportV11();
     bridge.connect(transport, {
+      requestPolicy: () => true,
       responderContext,
       responderPolicy: (input) => {
         seenResponderContext = input.responderContext;
@@ -309,7 +314,11 @@ test(
       workspaces: new Map([[IDS.workspace, workspace]]),
     });
     const transport = new InMemoryRelayTransportV11();
-    bridge.connect(transport, { responderContext: null, responderPolicy: () => true });
+    bridge.connect(transport, {
+      requestPolicy: () => true,
+      responderContext: null,
+      responderPolicy: () => true,
+    });
 
     const handlers = createRuntimeServerRequestHandlers(broker);
     const userInputHandler = handlers[RUNTIME_SERVER_REQUEST_METHODS.userInputRequest];
@@ -430,6 +439,7 @@ test(
     const firstPolicyResult = Promise.withResolvers<boolean>();
     const firstTransport = new InMemoryRelayTransportV11();
     bridge.connect(firstTransport, {
+      requestPolicy: () => true,
       responderContext: "first-generation",
       responderPolicy: () => {
         firstPolicyStarted.resolve();
@@ -481,6 +491,7 @@ test(
     let secondPolicyCalls = 0;
     const secondTransport = new InMemoryRelayTransportV11();
     bridge.connect(secondTransport, {
+      requestPolicy: () => true,
       responderContext: "second-generation",
       responderPolicy: () => {
         secondPolicyCalls += 1;

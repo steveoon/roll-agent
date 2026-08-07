@@ -12,6 +12,7 @@ import {
 import { AgentEnvironmentEditor } from "./components/AgentEnvironmentEditor.tsx";
 import { ApplyDialog } from "./components/ApplyDialog.tsx";
 import { CatalogEditor } from "./components/CatalogEditor.tsx";
+import { CompanionPanel } from "./components/CompanionPanel.tsx";
 import { Navigation } from "./components/Navigation.tsx";
 import { ReviewPanel } from "./components/ReviewPanel.tsx";
 import { YamlEditor } from "./components/YamlEditor.tsx";
@@ -20,6 +21,7 @@ import {
   resolveValidationIssueTarget,
   resolveVisibleNavigationTarget,
 } from "./lib/catalog-search.ts";
+import { isCompanionUnavailableError } from "./lib/companion-state.ts";
 import { createConfiguredSecretPathKeys } from "./lib/config-secret.ts";
 import { cloneObject, deleteAtPath, setAtPath } from "./lib/config-value.ts";
 import type {
@@ -49,6 +51,7 @@ type LoadState =
 
 type Toast = { readonly tone: "success" | "warning"; readonly message: string };
 type BusyAction = "preview" | "save" | "apply";
+type WorkspaceView = "config" | "companion";
 
 const api = new RollUiApi();
 
@@ -75,6 +78,8 @@ export function App() {
   const [applyDialogOpen, setApplyDialogOpen] = useState(false);
   const [activationResult, setActivationResult] = useState<AgentActivationResult>();
   const [toast, setToast] = useState<Toast>();
+  const [view, setView] = useState<WorkspaceView>("config");
+  const [companionAvailable, setCompanionAvailable] = useState(false);
   const draftGenerationRef = useRef(0);
   const activeActionRef = useRef<BusyAction | null>(null);
 
@@ -119,6 +124,12 @@ export function App() {
     });
   }, []);
 
+  const handleCompanionUnavailable = useCallback(() => {
+    setCompanionAvailable(false);
+    setView("config");
+    setToast({ tone: "warning", message: "当前 roll ui 未启用 Companion 管理。" });
+  }, []);
+
   const loadAgentStatus = useCallback(async () => {
     setAgentsLoading(true);
     setAgentStatusError(undefined);
@@ -140,17 +151,22 @@ export function App() {
     async function initialize(): Promise<void> {
       try {
         const bootstrap = await api.bootstrap();
-        const [catalog, loadedSnapshot, statusResult] = await Promise.all([
+        const [catalog, loadedSnapshot, statusResult, companionSupported] = await Promise.all([
           api.getCatalog(),
           api.getConfig(),
           api.getAgentStatus().then(
             (status) => ({ status: "success" as const, value: status }),
             (error: unknown) => ({ status: "error" as const, message: describeError(error) }),
           ),
+          api.getCompanionStatus().then(
+            () => true,
+            (error: unknown) => !isCompanionUnavailableError(error),
+          ),
         ]);
         if (!activeRequest) {
           return;
         }
+        setCompanionAvailable(companionSupported);
         setPersistedDraft(cloneObject(loadedSnapshot.persisted));
         setYamlDraft(loadedSnapshot.yaml);
         if (loadedSnapshot.repairMode === true) {
@@ -385,6 +401,7 @@ export function App() {
 
   function navigateTo(target: NavigationTarget, focusPath?: readonly string[]): void {
     setActive(target);
+    setView("config");
     if (focusPath === undefined) return;
     window.requestAnimationFrame(() => {
       window.requestAnimationFrame(() => focusConfigPath(focusPath.join(".")));
@@ -497,8 +514,10 @@ export function App() {
     },
   };
 
+  const companionView = view === "companion" && companionAvailable;
+
   return (
-    <div className="app-shell">
+    <div className={companionView ? "app-shell companion-view" : "app-shell"}>
       <a className="skip-link" href="#config-editor-main">
         跳到配置编辑区
       </a>
@@ -575,57 +594,70 @@ export function App() {
         active={visibleActive ?? active}
         query={query}
         disabled={mode === "yaml"}
+        companionAvailable={companionAvailable}
+        companionActive={companionView}
         onQueryChange={setQuery}
         onNavigate={navigateTo}
+        onOpenCompanion={() => setView("companion")}
       />
 
       <main id="config-editor-main" className="editor-main" tabIndex={-1}>
         <div className="editor-scroll-region">
-          {currentSnapshot.repairMode === true && (
-            <div className="repair-banner" role="alert">
-              <strong>REPAIR MODE</strong>
-              <span>当前 YAML 可解析，但配置校验失败；只有修复为有效配置后才能保存。</span>
-            </div>
-          )}
-          {mode === "yaml" ? (
-            <YamlEditor
-              value={yamlDraft}
-              onChange={(value) => {
-                setYamlDraft(value);
-                markEdited();
-              }}
-            />
-          ) : visibleActive === undefined ? (
-            <div className="empty-state" role="status">
-              没有匹配“{query}”的配置。
-            </div>
-          ) : selectedRollNode !== undefined && visibleActive.type === "roll" ? (
-            <CatalogEditor
-              node={selectedRollNode}
-              path={[visibleActive.key]}
-              persisted={persistedDraft}
-              baseline={currentSnapshot.persisted}
-              searchQuery={normalizedQuery}
-              onSet={setConfigValue}
-              onDelete={deleteConfigValue}
-              onValidityChange={handleValidityChange}
-              configuredSecretPathKeys={configuredSecretPathKeys}
-              invalidJsonDraftsByPath={invalidJsonDraftsByPath}
-              onInvalidJsonDraftChange={handleInvalidJsonDraftChange}
-            />
-          ) : selectedAgent !== undefined ? (
-            <AgentEnvironmentEditor
-              agent={selectedAgent}
-              persisted={persistedDraft}
-              baseline={currentSnapshot.persisted}
-              searchQuery={normalizedQuery}
-              onSet={setConfigValue}
-              onDelete={deleteConfigValue}
-              onValidityChange={handleValidityChange}
-              configuredSecretPathKeys={configuredSecretPathKeys}
+          {companionView ? (
+            <CompanionPanel
+              api={api}
+              onToast={setToast}
+              onUnavailable={handleCompanionUnavailable}
             />
           ) : (
-            <div className="empty-state">请选择一个配置模块。</div>
+            <>
+              {currentSnapshot.repairMode === true && (
+                <div className="repair-banner" role="alert">
+                  <strong>REPAIR MODE</strong>
+                  <span>当前 YAML 可解析，但配置校验失败；只有修复为有效配置后才能保存。</span>
+                </div>
+              )}
+              {mode === "yaml" ? (
+                <YamlEditor
+                  value={yamlDraft}
+                  onChange={(value) => {
+                    setYamlDraft(value);
+                    markEdited();
+                  }}
+                />
+              ) : visibleActive === undefined ? (
+                <div className="empty-state" role="status">
+                  没有匹配“{query}”的配置。
+                </div>
+              ) : selectedRollNode !== undefined && visibleActive.type === "roll" ? (
+                <CatalogEditor
+                  node={selectedRollNode}
+                  path={[visibleActive.key]}
+                  persisted={persistedDraft}
+                  baseline={currentSnapshot.persisted}
+                  searchQuery={normalizedQuery}
+                  onSet={setConfigValue}
+                  onDelete={deleteConfigValue}
+                  onValidityChange={handleValidityChange}
+                  configuredSecretPathKeys={configuredSecretPathKeys}
+                  invalidJsonDraftsByPath={invalidJsonDraftsByPath}
+                  onInvalidJsonDraftChange={handleInvalidJsonDraftChange}
+                />
+              ) : selectedAgent !== undefined ? (
+                <AgentEnvironmentEditor
+                  agent={selectedAgent}
+                  persisted={persistedDraft}
+                  baseline={currentSnapshot.persisted}
+                  searchQuery={normalizedQuery}
+                  onSet={setConfigValue}
+                  onDelete={deleteConfigValue}
+                  onValidityChange={handleValidityChange}
+                  configuredSecretPathKeys={configuredSecretPathKeys}
+                />
+              ) : (
+                <div className="empty-state">请选择一个配置模块。</div>
+              )}
+            </>
           )}
         </div>
         <footer className="editor-footer">
@@ -636,20 +668,22 @@ export function App() {
         </footer>
       </main>
 
-      <ReviewPanel
-        dirty={dirty}
-        preview={preview}
-        catalog={catalog}
-        before={currentSnapshot.persisted}
-        issues={[...issues, ...clientIssues]}
-        busy={busyAction !== null}
-        agentStatus={agentStatusProps}
-        onPreview={() => {
-          runPreview().catch(handleActionError);
-        }}
-        onIssueSelect={revealValidationIssue}
-        {...(activationResult !== undefined ? { activationResult } : {})}
-      />
+      {!companionView && (
+        <ReviewPanel
+          dirty={dirty}
+          preview={preview}
+          catalog={catalog}
+          before={currentSnapshot.persisted}
+          issues={[...issues, ...clientIssues]}
+          busy={busyAction !== null}
+          agentStatus={agentStatusProps}
+          onPreview={() => {
+            runPreview().catch(handleActionError);
+          }}
+          onIssueSelect={revealValidationIssue}
+          {...(activationResult !== undefined ? { activationResult } : {})}
+        />
+      )}
 
       <ApplyDialog
         open={applyDialogOpen}

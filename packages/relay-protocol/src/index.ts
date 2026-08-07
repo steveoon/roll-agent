@@ -261,6 +261,23 @@ export function getRelayErrorRetryability(code: RelayErrorCode): boolean {
   return RELAY_ERROR_RETRYABILITY[code];
 }
 
+/** Wire 1.1 adds Host-level request authorization without mutating frozen Wire 1.0 exports. */
+export const RELAY_ERROR_CODES_V11 = {
+  ...RELAY_ERROR_CODES,
+  remoteRequestDenied: "REMOTE_REQUEST_DENIED",
+} as const;
+
+export type RelayErrorCodeV11 = (typeof RELAY_ERROR_CODES_V11)[keyof typeof RELAY_ERROR_CODES_V11];
+
+export const RELAY_ERROR_RETRYABILITY_V11 = {
+  ...RELAY_ERROR_RETRYABILITY,
+  [RELAY_ERROR_CODES_V11.remoteRequestDenied]: false,
+} as const satisfies Readonly<Record<RelayErrorCodeV11, boolean>>;
+
+export function getRelayErrorRetryabilityV11(code: RelayErrorCodeV11): boolean {
+  return RELAY_ERROR_RETRYABILITY_V11[code];
+}
+
 export const relayProtocolVersionSchema = z.enum(SUPPORTED_RELAY_PROTOCOL_VERSIONS);
 export const deviceIdSchema = z.string().uuid().brand<"DeviceId">();
 export const workspaceIdSchema = z.string().uuid().brand<"WorkspaceId">();
@@ -1253,6 +1270,7 @@ export type RelayTimelineEventV11 = z.output<typeof relayTimelineEventSchemaV11>
 export type RelayRuntimeEventEnvelopeV11 = z.output<typeof relayRuntimeEventEnvelopeSchemaV11>;
 export type RelayMessageV10 = z.output<typeof relayMessageSchemaV10>;
 export type RelayMessageV11 = z.output<typeof relayMessageSchemaV11>;
+export type RelayRequestMethodV11 = RelayRequestMethodForVersion<"1.1">;
 export type RelayRuntimeRequestV10 = z.output<typeof relayRuntimeRequestSchemaV10>;
 export type RelayRuntimeRequestV11 = z.output<typeof relayRuntimeRequestSchemaV11>;
 export type RelayRuntimeEventV10 = z.output<typeof relayRuntimeEventSchemaV10>;

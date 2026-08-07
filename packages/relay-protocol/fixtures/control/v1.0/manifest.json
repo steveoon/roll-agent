@@ -1,0 +1,52 @@
+{
+  "controlVersion": "1.0",
+  "messages": [
+    {
+      "fixture": "valid-session-ready.json",
+      "valid": true,
+      "validFirstFrame": true
+    },
+    {
+      "fixture": "valid-workspace-status.json",
+      "valid": true,
+      "validFirstFrame": false
+    },
+    {
+      "fixture": "valid-session-error.json",
+      "valid": true,
+      "validFirstFrame": false
+    },
+    {
+      "fixture": "invalid-session-ready-wire-version.json",
+      "valid": false,
+      "validFirstFrame": false
+    },
+    {
+      "fixture": "invalid-control-extra-field.json",
+      "valid": false,
+      "validFirstFrame": false
+    }
+  ],
+  "sessions": [
+    {
+      "fixture": "valid-browser-session.json",
+      "valid": true
+    },
+    {
+      "fixture": "invalid-browser-session-ws.json",
+      "valid": false
+    },
+    {
+      "fixture": "invalid-browser-session-url.json",
+      "valid": false
+    },
+    {
+      "fixture": "invalid-browser-session-uppercase-scheme.json",
+      "valid": false
+    },
+    {
+      "fixture": "invalid-browser-session-trailing-whitespace.json",
+      "valid": false
+    }
+  ]
+}

@@ -6,8 +6,8 @@ overrides:
   "fast-uri@3.1.2": 3.1.5
   hono: 4.12.25
   "ip-address@10.2.0": 10.3.1
-  "js-yaml@3.14.2": 3.15.0
-  "js-yaml@4.1.1": 4.3.0
+  "js-yaml@3.14.2": 3.15.1
+  "js-yaml@4.1.1": 4.3.1
   "minimatch@3.1.5>brace-expansion": 5.0.9
   "minimatch@10.2.4>brace-expansion": 5.0.9
   postcss: 8.5.18
@@ -21,6 +21,8 @@ minimumReleaseAgeExclude:
   - "@esbuild/*"
   - "brace-expansion@5.0.9"
   - "fast-uri@3.1.5"
+  - "js-yaml@3.15.1"
+  - "js-yaml@4.3.1"
 blockExoticSubdeps: true
 savePrefix: ""
 

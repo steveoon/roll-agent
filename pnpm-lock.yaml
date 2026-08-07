@@ -8,8 +8,8 @@ overrides:
   fast-uri@3.1.2: 3.1.5
   hono: 4.12.25
   ip-address@10.2.0: 10.3.1
-  js-yaml@3.14.2: 3.15.0
-  js-yaml@4.1.1: 4.3.0
+  js-yaml@3.14.2: 3.15.1
+  js-yaml@4.1.1: 4.3.1
   minimatch@3.1.5>brace-expansion: 5.0.9
   minimatch@10.2.4>brace-expansion: 5.0.9
   postcss: 8.5.18
@@ -165,6 +165,15 @@ importers:
       '@modelcontextprotocol/sdk':
         specifier: ^1.12.0
         version: 1.28.0(zod@3.25.76)
+      '@roll-agent/client-node':
+        specifier: workspace:*
+        version: link:../client-node
+      '@roll-agent/companion':
+        specifier: workspace:*
+        version: link:../companion
+      '@roll-agent/relay-protocol':
+        specifier: workspace:*
+        version: link:../relay-protocol
       '@roll-agent/runtime':
         specifier: workspace:*
         version: link:../runtime
@@ -257,6 +266,22 @@ importers:
       ajv-formats:
         specifier: 3.0.1
         version: 3.0.1(ajv@8.18.0)
+
+  packages/relay-client:
+    dependencies:
+      '@roll-agent/relay-protocol':
+        specifier: workspace:*
+        version: link:../relay-protocol
+      zod:
+        specifier: 3.25.76
+        version: 3.25.76
+    devDependencies:
+      '@types/node':
+        specifier: ^22.0.0
+        version: 22.19.15
+      esbuild:
+        specifier: 0.28.1
+        version: 0.28.1
 
   packages/relay-protocol:
     dependencies:
@@ -2461,12 +2486,12 @@ packages:
   js-tokens@4.0.0:
     resolution: {integrity: sha512-RdJUflcE3cUzKiMqQgsCu06FPu9UdIJO0beYbPhHN4k6apgJtifcoCtT9bcxOpYBtpD2kCM6Sbzg4CausW/PKQ==}
 
-  js-yaml@3.15.0:
-    resolution: {integrity: sha512-ttBQIIQPDeLjpPOohtUdXuXUVoA2uIB6fEH9HyJ7234s5mBJ5wTx20njxplLZQgLaOfpmPQA7X2t5AX6tIPbog==}
+  js-yaml@3.15.1:
+    resolution: {integrity: sha512-S99WuO3HlhO3XN41EtYUNl9zzXjoJx7QvmipxsJVxtCBT0YHEFy+iOJhjSvrmV12nYhWpZaM8lPHkJm0yUMbag==}
     hasBin: true
 
-  js-yaml@4.3.0:
-    resolution: {integrity: sha512-1td788aAnnZ5qs7V2QIRl1owjtYpbKt749Y3xauqQgwIIGF/xXWz1wMTEBx5O3LK3lXLVuqXPdPxj2BoFHaW9Q==}
+  js-yaml@4.3.1:
+    resolution: {integrity: sha512-CY6crGq313MX8GkwvB7tzgp99vjQxY1++5y10/BKN/GUfHqWaOGQMNZkBvqSzsZKWk/ijwHlWzzkLulsGHhjWQ==}
     hasBin: true
 
   jsesc@3.1.0:
@@ -3748,7 +3773,7 @@ snapshots:
   '@changesets/parse@0.4.3':
     dependencies:
       '@changesets/types': 6.1.0
-      js-yaml: 4.3.0
+      js-yaml: 4.3.1
 
   '@changesets/pre@2.0.2':
     dependencies:
@@ -4001,7 +4026,7 @@ snapshots:
       globals: 14.0.0
       ignore: 5.3.2
       import-fresh: 3.3.1
-      js-yaml: 4.3.0
+      js-yaml: 4.3.1
       minimatch: 3.1.5(patch_hash=17cdab99cb781e786f874b89dde33381a6e581b7321e4270c004237eaa17a41a)
       strip-json-comments: 3.1.1
     transitivePeerDependencies:
@@ -5416,7 +5441,7 @@ snapshots:
 
   gray-matter@4.0.3:
     dependencies:
-      js-yaml: 3.15.0
+      js-yaml: 3.15.1
       kind-of: 6.0.3
       section-matter: 1.0.0
       strip-bom-string: 1.0.0
@@ -5677,12 +5702,12 @@ snapshots:
 
   js-tokens@4.0.0: {}
 
-  js-yaml@3.15.0:
+  js-yaml@3.15.1:
     dependencies:
       argparse: 1.0.10
       esprima: 4.0.1
 
-  js-yaml@4.3.0:
+  js-yaml@4.3.1:
     dependencies:
       argparse: 2.0.1
 
@@ -6085,7 +6110,7 @@ snapshots:
   read-yaml-file@1.1.0:
     dependencies:
       graceful-fs: 4.2.11
-      js-yaml: 3.15.0
+      js-yaml: 3.15.1
       pify: 4.0.1
       strip-bom: 3.0.0
 

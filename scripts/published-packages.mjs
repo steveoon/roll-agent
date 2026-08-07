@@ -8,6 +8,7 @@ export const PUBLISHED_PACKAGES = [
     name: "@roll-agent/relay-protocol",
     packageJson: "packages/relay-protocol/package.json",
   },
+  { name: "@roll-agent/relay-client", packageJson: "packages/relay-client/package.json" },
   { name: "@roll-agent/client-node", packageJson: "packages/client-node/package.json" },
   { name: "@roll-agent/companion", packageJson: "packages/companion/package.json" },
   { name: "@roll-agent/sdk", packageJson: "packages/sdk/package.json" },

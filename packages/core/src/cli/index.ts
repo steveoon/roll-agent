@@ -31,6 +31,7 @@ const main = defineCommand({
     ask: () => loadMainCommand("ask"),
     chat: () => loadMainCommand("chat"),
     runtime: () => loadMainCommand("runtime"),
+    companion: () => loadMainCommand("companion"),
     config: () => loadMainCommand("config"),
     setup: () => loadMainCommand("setup"),
     skills: () => loadMainCommand("skills"),

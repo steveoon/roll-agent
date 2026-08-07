@@ -1,23 +1,34 @@
+import { COMPANION_ACTION_PATHS, type CompanionAction } from "./lib/companion-state.ts";
 import { isRecord } from "./lib/config-value.ts";
-import type {
-  AgentApplyResult,
-  AgentActivationResult,
-  AgentConfigCatalog,
-  AgentEnvCatalogField,
-  AgentOwnership,
-  AgentRuntimeStatus,
-  AgentStatusResponse,
-  BootstrapInfo,
-  ConfigActivationEffect,
-  ConfigApplicationPreview,
-  ConfigApplicationSnapshot,
-  ConfigCatalogNode,
-  ConfigDiffLine,
-  ConfigPath,
-  ConfigValidationIssue,
-  RollConfigCatalog,
-  SaveDraft,
+import {
+  COMPANION_PHASES,
+  type AgentApplyResult,
+  type AgentActivationResult,
+  type AgentConfigCatalog,
+  type AgentEnvCatalogField,
+  type AgentOwnership,
+  type AgentRuntimeStatus,
+  type AgentStatusResponse,
+  type BootstrapInfo,
+  type CompanionDoctorCheck,
+  type CompanionDoctorResult,
+  type CompanionPhase,
+  type CompanionStatus,
+  type ConfigActivationEffect,
+  type ConfigApplicationPreview,
+  type ConfigApplicationSnapshot,
+  type ConfigCatalogNode,
+  type ConfigDiffLine,
+  type ConfigPath,
+  type ConfigValidationIssue,
+  type RollConfigCatalog,
+  type SaveDraft,
 } from "./types.ts";
+
+export interface CompanionLogStreamHandlers {
+  readonly onText: (text: string) => void;
+  readonly onError: () => void;
+}
 
 const JSON_HEADERS = {
   Accept: "application/json",
@@ -161,6 +172,45 @@ export class RollUiApi {
       ...(typeof candidate.message === "string" ? { message: candidate.message } : {}),
       ...(result !== undefined ? { result } : {}),
     };
+  }
+
+  async getCompanionStatus(): Promise<CompanionStatus> {
+    const candidate = unwrapData(await this.request("/api/companion/status"));
+    if (!isCompanionStatus(candidate)) throw apiShapeError("Companion 状态响应格式无效");
+    return candidate;
+  }
+
+  async getCompanionDoctor(): Promise<CompanionDoctorResult> {
+    const candidate = unwrapData(await this.request("/api/companion/doctor"));
+    if (!isCompanionDoctorResult(candidate)) throw apiShapeError("Companion 体检响应格式无效");
+    return candidate;
+  }
+
+  async getCompanionLogs(): Promise<string> {
+    const candidate = unwrapData(await this.request("/api/companion/logs"));
+    if (!isRecord(candidate) || typeof candidate.text !== "string") {
+      throw apiShapeError("Companion 日志响应格式无效");
+    }
+    return candidate.text;
+  }
+
+  async runCompanionAction(action: CompanionAction, body?: unknown): Promise<void> {
+    await this.request(COMPANION_ACTION_PATHS[action], {
+      method: "POST",
+      ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
+    });
+  }
+
+  openCompanionLogStream(handlers: CompanionLogStreamHandlers): () => void {
+    const source = new EventSource(resolveApiEndpoint("/api/companion/logs/stream"));
+    source.addEventListener("log", (event) => {
+      if (event instanceof MessageEvent && typeof event.data === "string") {
+        handlers.onText(event.data);
+      }
+    });
+    source.addEventListener("stream-error", () => handlers.onError());
+    source.addEventListener("error", () => handlers.onError());
+    return () => source.close();
   }
 
   private async request(path: string, init: RequestInit = {}): Promise<unknown> {
@@ -477,6 +527,43 @@ function isAgentRuntimeStatus(value: unknown): value is AgentRuntimeStatus {
     optionalString(value.detail) &&
     optionalString(value.lastError) &&
     optionalBoolean(value.browserRunning)
+  );
+}
+
+function isCompanionStatus(value: unknown): value is CompanionStatus {
+  return (
+    isRecord(value) &&
+    isCompanionPhase(value.phase) &&
+    typeof value.enabled === "boolean" &&
+    typeof value.enrolled === "boolean" &&
+    typeof value.runtimeOnline === "boolean" &&
+    typeof value.relayProfile === "string" &&
+    optionalString(value.deviceId) &&
+    optionalString(value.workspaceId) &&
+    optionalString(value.cwd) &&
+    optionalString(value.lastError)
+  );
+}
+
+function isCompanionPhase(value: unknown): value is CompanionPhase {
+  return COMPANION_PHASES.some((phase) => phase === value);
+}
+
+function isCompanionDoctorResult(value: unknown): value is CompanionDoctorResult {
+  return (
+    isRecord(value) &&
+    typeof value.ok === "boolean" &&
+    Array.isArray(value.checks) &&
+    value.checks.every(isCompanionDoctorCheck)
+  );
+}
+
+function isCompanionDoctorCheck(value: unknown): value is CompanionDoctorCheck {
+  return (
+    isRecord(value) &&
+    typeof value.name === "string" &&
+    typeof value.ok === "boolean" &&
+    typeof value.detail === "string"
   );
 }
 

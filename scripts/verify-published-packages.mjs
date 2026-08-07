@@ -59,6 +59,14 @@ const RELAY_PROTOCOL_FORBIDDEN_IMPORTS = [
   "@roll-agent/runtime",
   "@roll-agent/companion",
 ];
+const RELAY_CLIENT_FORBIDDEN_IMPORTS = [
+  "node:",
+  "@roll-agent/client-node",
+  "@roll-agent/runtime",
+  "@roll-agent/companion",
+  "@roll-agent/core",
+  "react",
+];
 
 const PACKAGE_CHECKS = [
   {
@@ -128,26 +136,46 @@ const PACKAGE_CHECKS = [
       "package/dist/index.d.ts",
       "package/dist/conformance.js",
       "package/dist/conformance.d.ts",
+      "package/dist/control.js",
+      "package/dist/control.d.ts",
       "package/dist/reference-adapter.js",
       "package/dist/reference-adapter.d.ts",
       "package/dist/schema/roll-relay-protocol-v1.schema.json",
       "package/dist/schema/roll-relay-protocol-v1.1.schema.json",
+      "package/dist/schema/roll-relay-control-v1.schema.json",
+      "package/dist/schema/roll-relay-browser-session-v1.schema.json",
+      "package/fixtures/control/v1.0/manifest.json",
+      "package/fixtures/control/v1.0/valid-session-ready.json",
+      "package/fixtures/control/v1.0/invalid-session-ready-wire-version.json",
       "package/fixtures/v1.1/manifest.json",
       "package/fixtures/v1.1/valid-interaction-request-approval.json",
       "package/fixtures/v1.1/valid-interaction-candidate-user-input.json",
     ],
     expectedJavaScriptFiles: [
       "package/dist/conformance.js",
+      "package/dist/control.js",
       "package/dist/index.js",
       "package/dist/reference-adapter.js",
     ],
     expectedFixturePrefix: "package/fixtures/v1/",
+    expectedFixtureManifest: "package/fixtures/control/v1.0/manifest.json",
     forbiddenPackagedText: RELAY_PROTOCOL_FORBIDDEN_IMPORTS,
     verifyManifest(manifest) {
       assert.equal(manifest.exports?.["."].default, "./dist/index.js");
       assert.equal(manifest.exports?.["."].types, "./dist/index.d.ts");
       assert.equal(manifest.exports?.["./conformance"].default, "./dist/conformance.js");
       assert.equal(manifest.exports?.["./conformance"].types, "./dist/conformance.d.ts");
+      assert.equal(manifest.exports?.["./control"].default, "./dist/control.js");
+      assert.equal(manifest.exports?.["./control"].types, "./dist/control.d.ts");
+      assert.equal(
+        manifest.exports?.["./control/schema"],
+        "./dist/schema/roll-relay-control-v1.schema.json",
+      );
+      assert.equal(
+        manifest.exports?.["./control/session-schema"],
+        "./dist/schema/roll-relay-browser-session-v1.schema.json",
+      );
+      assert.equal(manifest.exports?.["./control/fixtures/*"], "./fixtures/control/v1.0/*");
       assert.equal(
         manifest.exports?.["./reference-adapter"].default,
         "./dist/reference-adapter.js",
@@ -169,6 +197,30 @@ const PACKAGE_CHECKS = [
         "./dist/schema/roll-relay-protocol-v1.1.schema.json",
       );
       assert.equal(manifest.exports?.["./fixtures/*"], "./fixtures/*");
+    },
+  },
+  {
+    name: "@roll-agent/relay-client",
+    cwd: resolve(repoRoot, "packages/relay-client"),
+    expectedFiles: [
+      "package/dist/index.js",
+      "package/dist/index.d.ts",
+      "package/dist/testing.js",
+      "package/dist/testing.d.ts",
+    ],
+    expectedJavaScriptFiles: [
+      "package/dist/client.js",
+      "package/dist/index.js",
+      "package/dist/schemas.js",
+      "package/dist/testing.js",
+      "package/dist/transport.js",
+    ],
+    forbiddenPackagedText: RELAY_CLIENT_FORBIDDEN_IMPORTS,
+    verifyManifest(manifest) {
+      assert.equal(manifest.exports?.["."].default, "./dist/index.js");
+      assert.equal(manifest.exports?.["."].types, "./dist/index.d.ts");
+      assert.equal(manifest.exports?.["./testing"].default, "./dist/testing.js");
+      assert.equal(manifest.exports?.["./testing"].types, "./dist/testing.d.ts");
     },
   },
   {
@@ -283,6 +335,12 @@ async function main() {
       assertExpectedFiles(pkg.name, tarEntries, pkg.expectedFiles);
       assertExpectedJavaScriptFiles(pkg.name, tarEntries, pkg.expectedJavaScriptFiles);
       assertExpectedFixtureSet(pkg.name, tarEntries, pkg.expectedFixturePrefix);
+      await assertExpectedFixtureManifest(
+        pkg.name,
+        tarballPath,
+        tarEntries,
+        pkg.expectedFixtureManifest,
+      );
       await assertNoSourceMapComments(pkg.name, tarballPath, tarEntries);
       await assertNoForbiddenPackagedText(
         pkg.name,
@@ -437,6 +495,44 @@ function assertExpectedFixtureSet(packageName, tarEntries, expectedFixturePrefix
   assert.ok(
     fixtureNames.some((name) => name.startsWith("invalid-")),
     `${packageName} tarball has no invalid JSON fixture under ${expectedFixturePrefix}`,
+  );
+}
+
+async function assertExpectedFixtureManifest(
+  packageName,
+  tarballPath,
+  tarEntries,
+  expectedFixtureManifest = undefined,
+) {
+  if (!expectedFixtureManifest) {
+    return;
+  }
+
+  const manifest = await readPackedJson(tarballPath, expectedFixtureManifest);
+  const collections = [manifest.messages, manifest.sessions];
+  const fixtureNames = collections.flatMap((entries) => {
+    assert.ok(Array.isArray(entries), `${expectedFixtureManifest} must contain fixture arrays`);
+    return entries.map((entry) => {
+      assert.equal(
+        typeof entry.fixture,
+        "string",
+        `${expectedFixtureManifest} has invalid entries`,
+      );
+      return entry.fixture;
+    });
+  });
+  const fixturePrefix = expectedFixtureManifest.slice(
+    0,
+    expectedFixtureManifest.lastIndexOf("/") + 1,
+  );
+  const entrySet = new Set(tarEntries);
+  const missingFixtures = fixtureNames
+    .map((fixture) => `${fixturePrefix}${fixture}`)
+    .filter((fixture) => !entrySet.has(fixture));
+  assert.equal(
+    missingFixtures.length,
+    0,
+    `${packageName} tarball is missing fixtures declared by ${expectedFixtureManifest}:\n${missingFixtures.join("\n")}`,
   );
 }
 

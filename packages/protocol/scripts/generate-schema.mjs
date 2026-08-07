@@ -308,7 +308,7 @@ function createProtocolBundle(version) {
   ];
   return {
     $schema: "https://json-schema.org/draft/2020-12/schema",
-    $id: `https://roll-agent.dev/schemas/runtime-protocol/${version}`,
+    $id: `urn:roll-agent:schema:runtime-protocol:${version}`,
     title: `Roll Runtime Protocol v${version}`,
     description:
       "Bidirectional JSON-RPC requests, responses, and notifications for Roll Runtime Protocol.",

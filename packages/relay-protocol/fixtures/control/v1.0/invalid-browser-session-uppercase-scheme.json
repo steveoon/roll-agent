@@ -1,0 +1,4 @@
+{
+  "connectUrl": "WSS://relay.example.test/v1/browser?ticket=single-use",
+  "expiresAt": "2026-08-06T12:00:00.000Z"
+}

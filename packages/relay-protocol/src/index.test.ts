@@ -7,7 +7,9 @@ import {
 } from "@roll-agent/protocol";
 import {
   RELAY_ERROR_CODES,
+  RELAY_ERROR_CODES_V11,
   RELAY_ERROR_RETRYABILITY,
+  RELAY_ERROR_RETRYABILITY_V11,
   RELAY_INTERACTION_METHODS_V11,
   RELAY_MESSAGE_TYPE_VALUES,
   RELAY_MESSAGE_TYPE_VALUES_V11,
@@ -28,6 +30,7 @@ import {
   getRelayRequestMethodDispositionForVersion,
   getRelayProtocolRegistry,
   getRelayErrorRetryability,
+  getRelayErrorRetryabilityV11,
   isRelayMutationRequestMethod,
   negotiateRelayProtocolVersion,
   parseRelayInteractionCandidateForRequestV11,
@@ -571,6 +574,12 @@ test("every stable Relay error code has one retryability decision", () => {
   for (const code of Object.values(RELAY_ERROR_CODES)) {
     assert.equal(getRelayErrorRetryability(code), false);
   }
+  assert.equal("remoteRequestDenied" in RELAY_ERROR_CODES, false);
+  assert.deepEqual(
+    Object.keys(RELAY_ERROR_RETRYABILITY_V11).sort(),
+    [...Object.values(RELAY_ERROR_CODES_V11)].sort(),
+  );
+  assert.equal(getRelayErrorRetryabilityV11(RELAY_ERROR_CODES_V11.remoteRequestDenied), false);
 });
 
 test("version selection fails closed for unknown Relay versions", () => {

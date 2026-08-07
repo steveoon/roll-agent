@@ -41,8 +41,8 @@ import { z } from "zod/v4";
 
 const schemaDir = resolve(import.meta.dirname, "../dist/schema");
 const frozenSchemaHashes = {
-  "1.0": "d6417ea791f754776fa0c2bedaaadf30e609d57bf276642e2bd2290eb7f61f21",
-  1.1: "0523ac0e41dcd4e298e86dea3b432858af9b4746af9c3a3ebf10fbd9ac1e898a",
+  "1.0": "0e393e2278d141e620fbdd69da8ed7b805311ba0cccaaf4ff495175bd2edf2c1",
+  1.1: "3e8688aad7e60d32915e140e095998410986ab90ef683c2938cca368a8e1c162",
 };
 
 const frozenV1FixtureHashes = {
@@ -198,7 +198,7 @@ function generateSchema(config) {
   return {
     ...relayMessageDefinition,
     $schema: "https://json-schema.org/draft/2020-12/schema",
-    $id: `https://roll-agent.dev/schemas/relay-protocol/${config.protocolVersion}`,
+    $id: `urn:roll-agent:schema:relay-protocol:${config.protocolVersion}`,
     title: `Roll Relay Protocol v${config.protocolVersion}`,
     description: "Versioned Companion Relay frames shared by Browser, Cloud Relay and Companion.",
     $defs: definitions,

@@ -167,32 +167,36 @@ Local Companion（主动出站）
 用户本机 Roll 与 Workspace
 ```
 
-远程层分成两个独立 package 边界：
+远程层分成三个公开 package 边界与一个 Core 内部 Host：
 
 | 包 | 负责 | 不负责 |
 |---|---|---|
-| `@roll-agent/relay-protocol` | Relay Wire version、显式冻结的消息/方法注册表、ID Schema、JSON Schema、fixtures、TypeScript types | Transport、账号、数据库、Policy、部署 |
+| `@roll-agent/relay-protocol` | Relay Wire、Browser Control、方向 allowlist、ID Schema、JSON Schema、fixtures、TypeScript types | Transport、账号、数据库、Policy、部署 |
+| `@roll-agent/relay-client` | Browser session、correlation、Chat/Interaction reducer、ACK/gap、重连和 Snapshot 收敛 | React UI、第三方登录、Cloud Relay 管理 API、raw frame API |
 | `@roll-agent/companion` | 消费 Relay 契约；提供本机 bridge、Workspace lease、本地 Policy、ACK/gap 缓冲、去重与出站重连 | 定义第二套 Wire Schema、生产 Cloud Relay、Browser 业务状态机 |
+| `@roll-agent/core` 内部 Companion Host | `roll companion`、设备凭据、Workspace 映射、Runtime supervision、本机 IPC 与 per-user 服务 | 稳定 Host SDK、Cloud Relay、第三方业务 UI |
 
 对应的安装与激活边界是：
 
 | 产品组件 | 安装 | 激活方式 |
 |---|---|---|
 | Local-only Desktop | `@roll-agent/client-node`，按需加 `@roll-agent/protocol` | Desktop Main 显式启动本地 stdio Runtime |
-| Browser Web App | `@roll-agent/relay-protocol` | 连接经过认证的 Cloud Relay |
+| Browser Web App | `@roll-agent/relay-client` | 第三方后端先兑换短期 session，Client 再连接认证 Relay |
 | Cloud Relay | `@roll-agent/relay-protocol` | 生产服务负责账号、路由与可靠投递 |
-| Local Companion Host | `@roll-agent/companion`、`@roll-agent/client-node`、`@roll-agent/relay-protocol` | 用户显式启用远程访问后启动 Outbound Relay 或绑定 Transport |
+| Local Companion Host | 官方签名安装包 / `@roll-agent/core` 开发安装 | `roll companion service install` + enrollment；服务只建立出站 WSS |
 
-`@roll-agent/companion` 是用户本机 Host 库，不是 Cloud 服务或自动运行的 daemon。
-`npm install -g @roll-agent/core` 不会安装/启动它；普通 `roll chat`、Local-only Electron
-和 `roll runtime serve --stdio` 也不会创建 Relay 连接。
+`@roll-agent/companion` 仍是低层库，不是第三方必须组装的产品 Host。官方 daemon 位于 Core
+内部并只通过 `roll companion` 管理；P0 不发布稳定 `companion-host` SDK。npm 安装不会自动
+enrollment 或启动服务；普通 `roll chat`、Local-only Electron 和
+`roll runtime serve --stdio` 也不会创建 Relay 连接。
 
 `authentication.request` 与 File Picker 没有远程 projector，保持 local-only。Runtime 1.3
 event replay 只恢复既有安全事件投影，不会把这类本地能力带入 Relay；未来启用必须先完成
 安全 RFC #186。
 
-Browser、Cloud Relay 与 Local Companion 都应直接以 `@roll-agent/relay-protocol` 校验 Wire
-frame；不能为了获得 Schema 而依赖整个 `@roll-agent/companion`。
+Cloud Relay 与高级自定义 Transport 直接以 `@roll-agent/relay-protocol` 校验 frame；普通
+Browser App 使用 `@roll-agent/relay-client`，不能为了处理 Wire 而依赖整个
+`@roll-agent/companion`。
 
 Relay Wire 1.1 提供通用 `interaction.request/resolved/cancelled` 与
 `interaction.candidate`；冻结的 1.0 继续只承载 Approval 专属路径。Runtime 1.3 的 event
@@ -222,7 +226,7 @@ push event 与 pull query 使用同一安全边界。Wire 1.1 的 `thread.open` 
 进度。三者即使数值相同也没有等价关系：Relay ACK 不能确认 Runtime cursor，Runtime 也
 不能用 Relay cursor 续接事件。#176 不修改 Relay Wire 或增加持久 Relay outbox。
 
-`@roll-agent/companion` 当前实现的本地基础能力：
+`@roll-agent/companion` 当前实现的低层本地基础能力：
 
 - Browser client 与后台 Shell lease 由认证宿主手动接线；
 - 只有经 `CompanionWorkspace.startTurn()` 发起的 Turn 自动持有 lease；
@@ -249,19 +253,27 @@ push event 与 pull query 使用同一安全边界。Wire 1.1 的 `thread.open` 
 - cipher-bound Workspace 只接受 `runtime.encrypted` 请求；明文请求在触达 Runtime 前以
   `RELAY_ENCRYPTION_REQUIRED`、`retryable: false` 拒绝，response/event 也只发送加密信封。
 
+Wire 1.1 Host 还必须为每次连接提供 `requestPolicy`。Bridge 会在 request cache 与 Runtime
+dispatch 之前对每个 `runtime.request` 调用它；拒绝只返回稳定的
+`REMOTE_REQUEST_DENIED`。官方 P0 Host 只允许绑定 Workspace 的 Thread list/create/open/
+snapshot/capabilities、Turn start/cancel、Operation get 与 Interaction candidate。
+
 上述 Relay buffer、ACK、幂等缓存和 lease 都是 Companion 进程内状态，不是持久队列。
 Companion 重启后，宿主必须重建连接与 lease；本地 Runtime 协商到 1.3 时可用 durable
 event replay，否则使用 `thread.snapshot` 收敛 UI。Relay ACK 只推进 `relaySequence`，不会
 确认 Runtime event cursor。
 
-生产宿主必须另外实现：
+独立 `roll-cloud-relay` 服务必须另外实现：
 
 - Cloud Relay Server、账号/设备绑定存储、鉴权授权与 Workspace 路由；
-- TLS、Browser SDK、持久配对、心跳、帧上限、HA、监控和协议诊断；
+- TLS、Browser session、持久设备绑定、心跳、帧上限、限流、HA、监控和协议诊断；
 - Browser 连接身份到 `attachBrowser()` / `detachBrowser()` 的可信控制面；
 - Shell lease 生命周期；
-- 本机确认 UI 与只针对单次 Approval 的确认状态；
 - cipher 的算法、AEAD、nonce、密钥协商/轮换、Browser 实现和密钥存储。
+
+官方 P0 Companion 不启用本机二次确认：Runtime `runtime.approval` 的 `auto/confirm/deny` 是
+唯一事实源；Web 只能完成 Runtime 已产生的 `confirm` Interaction，不能越过 `deny`。低层
+`@roll-agent/companion` 仍保留可收窄权限的本地 Policy，供未来高级宿主使用。
 
 即使启用 payload cipher，Relay 仍可读取 Workspace ID、payload kind、request ID 或
 sequence 等路由元数据。`@roll-agent/companion` 不包含生产 Cloud Relay 服务；其精确消息、
@@ -279,7 +291,7 @@ Roll 进程、工作目录、环境变量或 Shell。
 - 权限 DSL；
 - stdio 之外的 Runtime Transport；
 - Runtime 崩溃后的自动执行恢复；
-- 生产 Cloud Relay、Browser SDK 或 Companion 状态持久化；
+- 生产 Cloud Relay、Relay HA 或持久 Browser outbox；
 - Runtime Server Request 的持久重投、持久 Relay outbox 与跨进程 responder 恢复。
 
 这些能力可以在不破坏 v1 基础对象的前提下逐步扩展。
