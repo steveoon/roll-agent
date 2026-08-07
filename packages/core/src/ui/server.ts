@@ -18,8 +18,10 @@ import {
   type ConfigPath,
   type ConfigRevision,
 } from "../config/document-store.ts";
+import { RollUiCompanionBusyError, RollUiCompanionRequestError } from "./companion-controller.ts";
 import type {
   RollUiApplyEffectsRequest,
+  RollUiCompanionController,
   RollUiConfigRequest,
   RollUiController,
   RollUiSaveConfigRequest,
@@ -39,6 +41,11 @@ const TOKEN_BYTES = 32;
 const ROUTE_TOKEN_BYTES = 24;
 const HEADERS_TIMEOUT_MS = 10_000;
 const REQUEST_TIMEOUT_MS = 30_000;
+const COMPANION_API_PREFIX = "/api/companion/";
+const COMPANION_LOG_STREAM_PATH = "/api/companion/logs/stream";
+const COMPANION_LOG_STREAM_RETRY_MS = 3_000;
+const COMPANION_LOG_STREAM_FAILURE_CODE = "companion_log_stream_failed";
+const COMPANION_ERROR_MESSAGE_LIMIT = 500;
 const CONTENT_SECURITY_POLICY = [
   "default-src 'self'",
   "base-uri 'none'",
@@ -60,12 +67,56 @@ interface SessionState {
   readonly csrfToken: string;
 }
 
+interface CompanionLogStream {
+  readonly response: ServerResponse;
+  readonly abort: () => void;
+}
+
+interface CompanionMutation {
+  readonly requiresBody: boolean;
+  readonly run: (controller: RollUiCompanionController, body: unknown) => unknown;
+}
+
+const COMPANION_READS: Readonly<
+  Record<string, (controller: RollUiCompanionController) => unknown>
+> = {
+  "/api/companion/status": (controller) => controller.getStatus(),
+  "/api/companion/doctor": (controller) => controller.getDoctor(),
+  "/api/companion/logs": (controller) => controller.readLogs(),
+};
+
+const COMPANION_MUTATIONS: Readonly<Record<string, CompanionMutation>> = {
+  "/api/companion/enroll": {
+    requiresBody: true,
+    run: (controller, body) => controller.enroll(body),
+  },
+  "/api/companion/workspace": {
+    requiresBody: true,
+    run: (controller, body) => controller.setWorkspace(body),
+  },
+  "/api/companion/unenroll": { requiresBody: false, run: (controller) => controller.unenroll() },
+  "/api/companion/enable": { requiresBody: false, run: (controller) => controller.enable() },
+  "/api/companion/disable": { requiresBody: false, run: (controller) => controller.disable() },
+  "/api/companion/service/install": {
+    requiresBody: false,
+    run: (controller) => controller.installService(),
+  },
+  "/api/companion/service/uninstall": {
+    requiresBody: false,
+    run: (controller) => controller.uninstallService(),
+  },
+  "/api/companion/start": { requiresBody: false, run: (controller) => controller.start() },
+  "/api/companion/stop": { requiresBody: false, run: (controller) => controller.stop() },
+  "/api/companion/restart": { requiresBody: false, run: (controller) => controller.restart() },
+};
+
 interface RequestRuntime {
   readonly origin: string;
   readonly expectedHost: string;
   readonly basePath: string;
   readonly sessionCookieName: string;
   readonly bodyLimitBytes: number;
+  readonly logStreams: Set<CompanionLogStream>;
   bootstrapToken: string | null;
   session: SessionState | null;
 }
@@ -73,6 +124,7 @@ interface RequestRuntime {
 export interface StartRollUiServerOptions {
   readonly controller: RollUiController;
   readonly staticAssets: RollUiStaticAssetProvider;
+  readonly companionController?: RollUiCompanionController;
   readonly signal?: AbortSignal;
   readonly onError?: (error: unknown) => void;
   readonly bodyLimitBytes?: number;
@@ -118,6 +170,7 @@ export async function startRollUiServer(
   const bootstrapToken = createToken();
   const routeToken = randomBytes(ROUTE_TOKEN_BYTES).toString("base64url");
   const basePath = `/__roll_ui/${routeToken}`;
+  const logStreams = new Set<CompanionLogStream>();
   let runtime: RequestRuntime | null = null;
 
   const server = createServer((request, response) => {
@@ -144,6 +197,7 @@ export async function startRollUiServer(
       basePath,
       sessionCookieName: `${ROLL_UI_SESSION_COOKIE}_${routeToken}`,
       bodyLimitBytes,
+      logStreams,
       bootstrapToken,
       session: null,
     };
@@ -158,6 +212,11 @@ export async function startRollUiServer(
       options.signal.removeEventListener("abort", abortListener);
     }
     closePromise = new Promise<void>((resolve, reject) => {
+      for (const stream of logStreams) {
+        stream.abort();
+        discardCompanionLogStream(stream.response);
+      }
+      logStreams.clear();
       server.close((error) => {
         if (error !== undefined) reject(error);
         else resolve();
@@ -196,7 +255,7 @@ async function handleRequest(
   const pathname = stripBasePath(url.pathname, runtime.basePath);
 
   if (pathname === "/api" || pathname.startsWith("/api/")) {
-    await handleApiRequest(request, response, pathname, runtime, options.controller);
+    await handleApiRequest(request, response, pathname, runtime, options);
     return;
   }
   await handleStaticRequest(request, response, pathname, options.staticAssets);
@@ -207,8 +266,9 @@ async function handleApiRequest(
   response: ServerResponse,
   pathname: string,
   runtime: RequestRuntime,
-  controller: RollUiController,
+  options: StartRollUiServerOptions,
 ): Promise<void> {
+  const controller = options.controller;
   const method = request.method ?? "";
   enforceApiProvenance(request.headers, runtime.origin, method !== "GET");
 
@@ -276,9 +336,127 @@ async function handleApiRequest(
     sendData(response, await controller.applyAgentEffects(applyRequest));
     return;
   }
+  if (pathname.startsWith(COMPANION_API_PREFIX)) {
+    await handleCompanionRequest(request, response, pathname, method, runtime, session, options);
+    return;
+  }
 
   if (isKnownApiPath(pathname)) throw methodNotAllowed(allowedMethods(pathname));
   throw new RollUiHttpError(404, "not_found", "Not found.");
+}
+
+async function handleCompanionRequest(
+  request: IncomingMessage,
+  response: ServerResponse,
+  pathname: string,
+  method: string,
+  runtime: RequestRuntime,
+  session: SessionState,
+  options: StartRollUiServerOptions,
+): Promise<void> {
+  const controller = options.companionController;
+  if (controller === undefined) {
+    throw new RollUiHttpError(404, "companion_unavailable", "当前 roll ui 未启用 Companion 管理。");
+  }
+  if (pathname === COMPANION_LOG_STREAM_PATH) {
+    if (method !== "GET") throw methodNotAllowed("GET");
+    await streamCompanionLogs(request, response, controller, runtime.logStreams, options.onError);
+    return;
+  }
+  const read = COMPANION_READS[pathname];
+  if (read !== undefined) {
+    if (method !== "GET") throw methodNotAllowed("GET");
+    sendData(response, await runCompanionOperation(() => read(controller)));
+    return;
+  }
+  const mutation = COMPANION_MUTATIONS[pathname];
+  if (mutation === undefined) throw new RollUiHttpError(404, "not_found", "Not found.");
+  if (method !== "POST") throw methodNotAllowed("POST");
+  requireCsrf(request.headers, session);
+  const body = mutation.requiresBody
+    ? await readJsonBody(request, runtime.bodyLimitBytes)
+    : undefined;
+  sendData(response, await runCompanionOperation(() => mutation.run(controller, body)));
+}
+
+async function streamCompanionLogs(
+  request: IncomingMessage,
+  response: ServerResponse,
+  controller: RollUiCompanionController,
+  streams: Set<CompanionLogStream>,
+  onError: ((error: unknown) => void) | undefined,
+): Promise<void> {
+  const aborter = new AbortController();
+  const stream: CompanionLogStream = { response, abort: () => aborter.abort() };
+  const stopOnDisconnect = (): void => aborter.abort();
+  streams.add(stream);
+  request.on("close", stopOnDisconnect);
+  response.statusCode = 200;
+  response.setHeader("Content-Type", "text/event-stream; charset=utf-8");
+  response.setHeader("Connection", "keep-alive");
+  response.flushHeaders();
+  writeSseChunk(response, `retry: ${String(COMPANION_LOG_STREAM_RETRY_MS)}\n\n`);
+  try {
+    await controller.followLogs((text) => writeSseEvent(response, "log", text), aborter.signal);
+  } catch (error) {
+    onError?.(error);
+    writeSseEvent(response, "stream-error", COMPANION_LOG_STREAM_FAILURE_CODE);
+  } finally {
+    streams.delete(stream);
+    request.off("close", stopOnDisconnect);
+    endCompanionLogStream(response);
+  }
+}
+
+async function runCompanionOperation(work: () => unknown): Promise<unknown> {
+  try {
+    return await work();
+  } catch (error) {
+    throw toCompanionHttpError(error);
+  }
+}
+
+function toCompanionHttpError(error: unknown): unknown {
+  if (error instanceof RollUiHttpError) return error;
+  if (error instanceof RollUiCompanionBusyError) {
+    return new RollUiHttpError(409, error.code, error.message);
+  }
+  if (error instanceof RollUiCompanionRequestError) {
+    return new RollUiHttpError(400, error.code, error.message);
+  }
+  if (error instanceof Error && error.message.length > 0) {
+    return new RollUiHttpError(
+      422,
+      "companion_operation_failed",
+      error.message.slice(0, COMPANION_ERROR_MESSAGE_LIMIT),
+    );
+  }
+  return error;
+}
+
+function writeSseEvent(response: ServerResponse, event: string, data: string): void {
+  const payload = data
+    .replaceAll("\r\n", "\n")
+    .replaceAll("\r", "\n")
+    .split("\n")
+    .map((line) => `data: ${line}`)
+    .join("\n");
+  writeSseChunk(response, `event: ${event}\n${payload}\n\n`);
+}
+
+function writeSseChunk(response: ServerResponse, chunk: string): void {
+  if (!response.writable || response.writableEnded || response.destroyed) return;
+  response.write(chunk);
+}
+
+function endCompanionLogStream(response: ServerResponse): void {
+  if (response.writableEnded || response.destroyed) return;
+  response.end();
+}
+
+function discardCompanionLogStream(response: ServerResponse): void {
+  endCompanionLogStream(response);
+  response.destroy();
 }
 
 async function handleStaticRequest(

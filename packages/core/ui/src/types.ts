@@ -211,6 +211,39 @@ export interface AgentApplyResult {
   readonly result?: AgentActivationResult;
 }
 
+export const COMPANION_PHASES = [
+  "stopped",
+  "starting",
+  "running",
+  "recovering",
+  "stopping",
+] as const;
+
+export type CompanionPhase = (typeof COMPANION_PHASES)[number];
+
+export interface CompanionStatus {
+  readonly phase: CompanionPhase;
+  readonly enabled: boolean;
+  readonly enrolled: boolean;
+  readonly runtimeOnline: boolean;
+  readonly relayProfile: string;
+  readonly deviceId?: string;
+  readonly workspaceId?: string;
+  readonly cwd?: string;
+  readonly lastError?: string;
+}
+
+export interface CompanionDoctorCheck {
+  readonly name: string;
+  readonly ok: boolean;
+  readonly detail: string;
+}
+
+export interface CompanionDoctorResult {
+  readonly ok: boolean;
+  readonly checks: readonly CompanionDoctorCheck[];
+}
+
 export type EditorMode = "form" | "yaml";
 
 export type NavigationTarget =

@@ -49,6 +49,39 @@ export interface RollUiController {
   applyAgentEffects(request: RollUiApplyEffectsRequest): Awaitable<unknown>;
 }
 
+/** Shape accepted after the controller validates an untrusted enroll request body. */
+export interface RollUiCompanionEnrollRequest {
+  readonly pairingCode: string;
+  readonly workspace: string;
+}
+
+/** Shape accepted after the controller validates an untrusted workspace request body. */
+export interface RollUiCompanionWorkspaceRequest {
+  readonly workspace: string;
+}
+
+/**
+ * Companion Host management boundary. Reads stay concurrent while mutations are serialized
+ * by the implementation. Mutation request bodies arrive as untrusted client input and are
+ * validated by the controller, never by the transport.
+ */
+export interface RollUiCompanionController {
+  getStatus(): Awaitable<unknown>;
+  getDoctor(): Awaitable<unknown>;
+  readLogs(): Awaitable<unknown>;
+  followLogs(onText: (text: string) => void, signal: AbortSignal): Promise<void>;
+  enroll(request: unknown): Awaitable<unknown>;
+  unenroll(): Awaitable<unknown>;
+  enable(): Awaitable<unknown>;
+  disable(): Awaitable<unknown>;
+  setWorkspace(request: unknown): Awaitable<unknown>;
+  installService(): Awaitable<unknown>;
+  uninstallService(): Awaitable<unknown>;
+  start(): Awaitable<unknown>;
+  stop(): Awaitable<unknown>;
+  restart(): Awaitable<unknown>;
+}
+
 export interface RollUiStaticAsset {
   readonly body: Uint8Array | string;
   readonly contentType: string;

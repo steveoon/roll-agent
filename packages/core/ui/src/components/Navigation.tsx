@@ -1,4 +1,5 @@
 import { getCatalogSearchMatches, getCatalogSearchResults } from "../lib/catalog-search.ts";
+import { isConfigTargetHighlighted } from "../lib/navigation-state.ts";
 import type { NavigationTarget, RollConfigCatalog } from "../types.ts";
 
 interface NavigationProps {
@@ -6,8 +7,11 @@ interface NavigationProps {
   readonly active: NavigationTarget;
   readonly query: string;
   readonly disabled: boolean;
+  readonly companionAvailable: boolean;
+  readonly companionActive: boolean;
   readonly onQueryChange: (query: string) => void;
   readonly onNavigate: (target: NavigationTarget, focusPath?: readonly string[]) => void;
+  readonly onOpenCompanion: () => void;
 }
 
 export function Navigation({
@@ -15,8 +19,11 @@ export function Navigation({
   active,
   query,
   disabled,
+  companionAvailable,
+  companionActive,
   onQueryChange,
   onNavigate,
+  onOpenCompanion,
 }: NavigationProps) {
   const { rollModules, agents: agentModules } = getCatalogSearchMatches(catalog, query);
   const searchResults = getCatalogSearchResults(catalog, query);
@@ -78,13 +85,14 @@ export function Navigation({
             <div className="nav-list">
               {rollModules.map(([key, node], index) => {
                 const target: NavigationTarget = { type: "roll", key };
+                const targetActive = isConfigTargetHighlighted(active, target, companionActive);
                 return (
                   <button
                     key={key}
-                    className={isActive(active, target) ? "active" : ""}
+                    className={targetActive ? "active" : ""}
                     type="button"
                     disabled={disabled}
-                    aria-current={isActive(active, target) ? "page" : undefined}
+                    aria-current={targetActive ? "page" : undefined}
                     onClick={() => onNavigate(target)}
                   >
                     <span className="nav-index">{String(index + 1).padStart(2, "0")}</span>
@@ -104,13 +112,14 @@ export function Navigation({
             <div className="nav-list agent-nav-list">
               {agentModules.map((agent, index) => {
                 const target: NavigationTarget = { type: "agent", name: agent.name };
+                const targetActive = isConfigTargetHighlighted(active, target, companionActive);
                 return (
                   <button
                     key={agent.name}
-                    className={isActive(active, target) ? "active" : ""}
+                    className={targetActive ? "active" : ""}
                     type="button"
                     disabled={disabled}
-                    aria-current={isActive(active, target) ? "page" : undefined}
+                    aria-current={targetActive ? "page" : undefined}
                     onClick={() => onNavigate(target)}
                   >
                     <span className="nav-index">A{String(index + 1).padStart(2, "0")}</span>
@@ -128,6 +137,29 @@ export function Navigation({
 
             {rollModules.length === 0 && agentModules.length === 0 && (
               <div className="nav-empty">没有可配置的模块。</div>
+            )}
+
+            {companionAvailable && (
+              <>
+                <NavSectionLabel label="COMPANION" count={1} />
+                <div className="nav-list">
+                  <button
+                    className={companionActive ? "active" : ""}
+                    type="button"
+                    aria-current={companionActive ? "page" : undefined}
+                    onClick={onOpenCompanion}
+                  >
+                    <span className="nav-index">C1</span>
+                    <span>
+                      <strong>Companion 管理</strong>
+                      <small>绑定 / 服务 / 日志</small>
+                    </span>
+                    <span className="nav-arrow" aria-hidden="true">
+                      →
+                    </span>
+                  </button>
+                </div>
+              </>
             )}
           </>
         )}
@@ -147,15 +179,6 @@ function NavSectionLabel({ label, count }: { readonly label: string; readonly co
       <span>{label}</span>
       <span>{String(count).padStart(2, "0")}</span>
     </div>
-  );
-}
-
-function isActive(current: NavigationTarget, target: NavigationTarget): boolean {
-  return (
-    current.type === target.type &&
-    (current.type === "roll" && target.type === "roll"
-      ? current.key === target.key
-      : current.type === "agent" && target.type === "agent" && current.name === target.name)
   );
 }
 
