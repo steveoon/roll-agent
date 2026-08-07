@@ -4,11 +4,14 @@ import { homedir } from "node:os";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { defineCommand } from "citty";
+import { createDefaultCompanionApplication } from "../../companion-host/application.ts";
 import { resolveConfigPath } from "../../config/loader.ts";
 import {
   createFileSystemStaticAssetProvider,
+  createRollUiCompanionController,
   createRollUiRuntimeController,
   startRollUiServer,
+  type RollUiCompanionController,
   type RollUiServerHandle,
 } from "../../ui/index.ts";
 import { log } from "../utils/output.ts";
@@ -63,10 +66,12 @@ export async function runRollUi(
   const configPath = resolveRollUiConfigPath(options.configPath);
   const assetsDirectory = dependencies.assetsDirectory ?? resolveRollUiAssetsDirectory();
   assertRollUiAssetsAvailable(assetsDirectory);
+  const companionController = resolveCompanionController();
 
   const server = await startRollUiServer({
     controller: createRollUiRuntimeController({ configPath }),
     staticAssets: createFileSystemStaticAssetProvider(assetsDirectory),
+    ...(companionController !== undefined ? { companionController } : {}),
     onError: (error) => {
       log.error(`配置台请求失败：${error instanceof Error ? error.message : String(error)}`);
     },
@@ -88,6 +93,18 @@ export function resolveRollUiConfigPath(explicitPath?: string): string {
     ...(explicitPath !== undefined ? { configPath: explicitPath } : {}),
   });
   return resolve(discovered ?? resolve(homedir(), "roll.config.yaml"));
+}
+
+export function resolveCompanionController(
+  platform: NodeJS.Platform = process.platform,
+): RollUiCompanionController | undefined {
+  if (platform !== "darwin" && platform !== "win32") return undefined;
+  try {
+    return createRollUiCompanionController({ application: createDefaultCompanionApplication() });
+  } catch (error) {
+    log.warn(`Companion 管理面板不可用：${error instanceof Error ? error.message : String(error)}`);
+    return undefined;
+  }
 }
 
 export function resolveRollUiAssetsDirectory(moduleUrl = import.meta.url): string {
