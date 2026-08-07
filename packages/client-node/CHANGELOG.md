@@ -1,5 +1,12 @@
 # @roll-agent/client-node
 
+## 0.3.1
+
+### Patch Changes
+
+- Updated dependencies [[`da6bf86`](https://github.com/steveoon/roll-agent/commit/da6bf862b208ca4bf04a0d8e4c274bfe51b3b37c)]:
+  - @roll-agent/protocol@0.4.1
+
 ## 0.3.0
 
 ### Minor Changes
