@@ -1,0 +1,8 @@
+{
+  "type": "session.ready",
+  "controlVersion": "1.0",
+  "relayProtocolVersion": "1.1",
+  "sessionId": "browser-session-301",
+  "workspaceId": "00000000-0000-4000-8000-000000000302",
+  "workspaceStatus": "online"
+}

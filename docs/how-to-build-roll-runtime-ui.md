@@ -14,13 +14,13 @@ handshake 与 typed Interaction；旧 UI 可逐级回退 1.2/1.1/1.0。所有第
 |---|---|---:|
 | Local-only Electron/Node GUI | `@roll-agent/client-node`；直接使用 Schema 时再加 `@roll-agent/protocol` | 否 |
 | Tauri、Qt、Python、.NET | 自行实现 Runtime Protocol Transport；使用 JSON Schema/fixtures | 否 |
-| Browser Web App | `@roll-agent/relay-protocol` | Browser 不安装；用户本机必须运行 Companion Host |
+| Browser Web App | `@roll-agent/relay-client` | Browser 不安装本机组件；用户电脑必须运行官方 Companion |
 | Cloud Relay Server | `@roll-agent/relay-protocol` | 否 |
-| 用户本机 Companion Host | `@roll-agent/companion`、`@roll-agent/client-node`、`@roll-agent/relay-protocol` | 是 |
+| 用户本机 Companion Host | 官方 `roll companion` 服务 | 是 |
 
-`@roll-agent/relay-protocol` 是三方共同 Wire 契约，不是 WebSocket Client；
-`@roll-agent/companion` 是本机 Host 库，不是 Cloud 服务或安装后自动运行的 daemon。
-全局安装 `@roll-agent/core` 不会安装 Companion，也不会自动启用远程访问。
+`@roll-agent/relay-protocol` 是实现 Relay 的 Wire/Control 契约；普通 Web App 不直接处理它。
+`@roll-agent/companion` 是官方 Host 使用的低层库，不是要求第三方组装的 Host SDK。安装
+`@roll-agent/core` 不会自动 enrollment 或启用远程访问。
 
 ## 本地 Node/Electron 宿主
 
@@ -231,6 +231,11 @@ handshake 的参考实现。
 
 ## 云端 Next.js 控制用户本机 Roll
 
+普通第三方应用应使用[远程 Web App 接入指南](./how-to-connect-remote-web-app.md)：前端只依赖
+`@roll-agent/relay-client`，后端只实现一个短期 session exchange；用户电脑由官方
+`roll companion` 管理。下面保留的代码只面向需要理解底层 Bridge 的 Roll/Relay 维护者，
+不是普通 Web App 的集成路径。
+
 不要从 Next.js Route Handler 直接启动用户电脑上的 Roll，也不要把本地 RuntimeServer
 端口暴露到公网。
 
@@ -250,9 +255,9 @@ roll runtime serve --stdio
 
 | 组件 | 安装 |
 |---|---|
-| Browser Web App | `pnpm add @roll-agent/relay-protocol` |
+| Browser Web App | `pnpm add @roll-agent/relay-client` |
 | Cloud Relay Server | `pnpm add @roll-agent/relay-protocol` |
-| 用户本机 Companion Host | `pnpm add @roll-agent/companion @roll-agent/client-node @roll-agent/relay-protocol` |
+| 官方 Companion 开发安装 | `pnpm add -g @roll-agent/core` |
 
 下面的依赖和代码属于用户本机 Companion Host，不应放进 Next.js Browser bundle 或 Cloud
 Relay Server：
@@ -273,7 +278,23 @@ import {
   createRuntimeServerRequestHandlers,
   createWebSocketRelayTransportV11,
 } from "@roll-agent/companion";
-import { deviceIdSchema, workspaceIdSchema } from "@roll-agent/relay-protocol";
+import {
+  RELAY_REQUEST_METHODS_V11,
+  deviceIdSchema,
+  workspaceIdSchema,
+} from "@roll-agent/relay-protocol";
+
+const P0_REMOTE_METHODS = new Set([
+  RELAY_REQUEST_METHODS_V11.threadList,
+  RELAY_REQUEST_METHODS_V11.threadCreate,
+  RELAY_REQUEST_METHODS_V11.threadOpen,
+  RELAY_REQUEST_METHODS_V11.threadSnapshot,
+  RELAY_REQUEST_METHODS_V11.threadCapabilities,
+  RELAY_REQUEST_METHODS_V11.turnStart,
+  RELAY_REQUEST_METHODS_V11.turnCancel,
+  RELAY_REQUEST_METHODS_V11.operationGet,
+  RELAY_REQUEST_METHODS_V11.interactionCandidate,
+]);
 
 const interactionBroker = new CompanionInteractionBroker();
 const runtime = await RollNodeClient.start({
@@ -289,8 +310,8 @@ const workspace = new CompanionWorkspace({
   client: runtime,
   workspaceId,
   interactionBroker,
-  localApprovalPolicy: async (approval) =>
-    isHighRisk(approval) ? "require-local-confirmation" : "allow",
+  // Runtime 的 runtime.approval 是唯一事实源；官方 P0 不增加电脑端二次确认。
+  localApprovalPolicy: async () => "allow",
 });
 
 // clientId 必须来自宿主已经认证的 Browser 连接控制面。
@@ -302,6 +323,10 @@ const bridge = new CompanionRelayBridgeV11({
   pairingToken,
   workspaces: new Map([[workspaceId, workspace]]),
 });
+const requestPolicy = async ({ workspaceId: requestedWorkspaceId, method, signal }) =>
+  !signal.aborted &&
+  requestedWorkspaceId === workspaceId &&
+  P0_REMOTE_METHODS.has(method);
 const outbound = new OutboundCompanionRelayV11({
   bridge,
   connectTransport: async () => {
@@ -309,6 +334,7 @@ const outbound = new OutboundCompanionRelayV11({
     return {
       transport: createWebSocketRelayTransportV11(socket),
       responderContext: authenticatedRelaySession,
+      requestPolicy,
       responderPolicy: async ({ responderContext, signal }) =>
         authorizeInteractionResponder(responderContext, { signal }),
     };
@@ -330,9 +356,10 @@ async function shutdownCompanionHost() {
 
 这段代码不是完整的可运行产品。`authenticatedBrowserClientId`、
 `authenticatedRelaySession`、`authorizeInteractionResponder()`、`pairingToken`、
-`openAuthenticatedWebSocket()`、设备/Workspace 持久化、本机确认 UI 和 Host 进程生命周期
-都必须由产品实现。`responderContext` 是 Host-owned opaque state，Companion 不把它当成已认证
-身份或 controller 选举。当前仓库没有 Browser SDK、`roll companion` CLI 或自动启动 daemon。
+`openAuthenticatedWebSocket()`、设备/Workspace 持久化和 Host 进程生命周期
+都必须由高级宿主实现。`responderContext` 是 Host-owned opaque state，Companion 不把它当成
+已认证身份或 controller 选举。普通应用不应复制这段装配；当前仓库提供
+`@roll-agent/relay-client` 与官方 `roll companion` CLI/daemon。
 
 `@roll-agent/relay-protocol` 是 Browser、Cloud Relay 和 Local Companion 共享的 Wire
 契约来源，提供 Relay version、消息/方法注册表、ID Schema、JSON Schema、fixtures 与
@@ -340,8 +367,8 @@ TypeScript types。`@roll-agent/companion` 只消费该契约，并提供本机�
 `CompanionWorkspace`、Interaction Broker、Relay Wire 1.1 bridge、Approval Policy、主动
 出站重连和 WebSocket 文本 adapter；它不包含生产 Cloud Relay Server。
 
-账号/设备绑定、鉴权授权、TLS、Browser SDK、持久配对、心跳、帧上限、HA、监控和协议诊断
-都由生产宿主实现。Browser 或 Cloud Relay 不应为了校验 Wire frame 而依赖
+账号/设备绑定、鉴权授权、TLS、Browser session、心跳、帧上限、HA、监控和协议诊断由独立
+Cloud Relay 实现。Browser 或 Cloud Relay 不应为了校验 Wire frame 而依赖
 `@roll-agent/companion`。
 
 `CompanionInteractionBroker` 必须在 `RollNodeClient.start()` 前创建，通过
@@ -397,9 +424,9 @@ lease 边界如下：
 浏览器断线不要调用 `thread.detach` 或直接关闭 Runtime。`outbound.stop()` 只终止 Relay、
 Bridge 与订阅，不关闭 Runtime；Runtime 生命周期由 `workspace.closeIfIdle()` 单独管理。
 
-`localApprovalPolicy` 返回 `"require-local-confirmation"` 时只会抛出
-`LocalConfirmationRequiredError`，不会自动弹窗。宿主必须实现本机确认 UI，并维护只针对
-该 Approval 的一次性确认状态。
+低层自定义 Host 仍可用 `localApprovalPolicy` 进一步收窄权限；返回
+`"require-local-confirmation"` 只会抛出 `LocalConfirmationRequiredError`，不会自动弹窗。
+官方 P0 Host 固定返回 `"allow"`，只让 Web 完成 Runtime 已决定的 `confirm` Interaction。
 
 Relay buffer、ACK、幂等缓存和 lease 都只存在于 Companion 进程内。Companion 重启后必须
 重建连接/lease；本地 Runtime 协商到 1.3 时可恢复 durable event，否则用

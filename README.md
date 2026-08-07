@@ -431,14 +431,15 @@ roll runtime serve --stdio
 | 第三方宿主 | 直接依赖 | 说明 |
 |---|---|---|
 | 本地 Node/Electron Main | `@roll-agent/client-node`；直接使用 Schema 时再加 `@roll-agent/protocol` | Renderer 只走命名 IPC，不直接持有 Runtime Client |
-| Browser Web App | `@roll-agent/relay-protocol` | 当前需自行实现认证 Transport 与交互 UI；不安装 Companion |
+| Browser Web App | `@roll-agent/relay-client` | 前端只实现 Chat/Approval/User Input UI；后端兑换短期 Relay session |
 | Cloud Relay Server | `@roll-agent/relay-protocol` | 负责身份、路由与可靠投递；不安装 Companion |
-| 用户本机 Companion Host | `@roll-agent/companion`、`@roll-agent/client-node`、`@roll-agent/relay-protocol` | 仅在产品需要远程访问本机 Roll 时运行 |
+| 用户本机 Companion Host | 官方 `roll companion` 服务 | 安装/一次 enrollment 后常驻；普通第三方不组装 Host SDK |
 
 - [架构与安全边界](./docs/runtime-protocol-architecture.md)
 - [Runtime Protocol v1 参考](./docs/runtime-protocol-v1-reference.md)
 - [`@roll-agent/client-node` API 参考](./docs/client-node-reference.md)
 - [`@roll-agent/relay-protocol` Relay v1 参考](./docs/companion-relay-v1-reference.md)
+- [远程 Web App 接入指南](./docs/how-to-connect-remote-web-app.md)
 - [使用 Electron、Tauri、Python 或 Next.js 接入](./docs/how-to-build-roll-runtime-ui.md)
 - [最小客户端教程](./docs/tutorial-runtime-ui-quickstart.md)
 
@@ -449,8 +450,9 @@ packages/
   core/          指挥官：CLI + Registry + Router + MCP Client + LLM Engine
   protocol/      第三方 UI 的版本化 Runtime Protocol + JSON Schema
   relay-protocol/ Browser、Cloud Relay 与 Local Companion 共享的 Relay Wire 契约
+  relay-client/  普通第三方 Web App 使用的 Browser-safe Relay Client
   client-node/   stdio Runtime Protocol Node 客户端
-  companion/     远程 Web 的本地 Companion / 出站 Relay bridge 基础能力（不含 Cloud Relay）
+  companion/     Companion 的低层 Bridge/Lease/Interaction 基础能力（不含 Cloud Relay）
   sdk/           子 Agent 开发 SDK：defineAgent() + defineTool()
   browser/       浏览器运行时抽象层：BrowserRuntime + ContextManager + SessionStore
 agents/
@@ -511,6 +513,7 @@ pnpm release:legacy:dry-run        # 旧脚本 dry-run（诊断用）
 - `@roll-agent/runtime`
 - `@roll-agent/protocol`
 - `@roll-agent/relay-protocol`
+- `@roll-agent/relay-client`
 - `@roll-agent/client-node`
 - `@roll-agent/companion`
 - `@roll-agent/reply-authority-client`
@@ -526,9 +529,10 @@ npm install -g @roll-agent/core
 roll --help
 ```
 
-全局安装 `@roll-agent/core` 只提供 `roll` CLI 与其 Runtime 依赖，不会安装
-`@roll-agent/companion`、启动后台服务或自动启用远程访问。Companion 必须由
-Remote-enabled Desktop 或独立本机 Host 显式安装、配对并启动。
+全局安装 `@roll-agent/core` 会提供 `roll companion` 管理命令，但不会自动 enrollment、
+安装后台服务或启用远程访问。GA 交付目标是包含版本匹配 Node/Roll 的官方签名安装包；当前
+工作树尚未产出已签名/notarize 的 macOS 安装包或 Authenticode MSI，因此 npm 安装仅面向
+开发、CI 与受控 OEM 验证，不能被描述为普通终端用户的完整安装体验。
 
 ## 技术栈
 

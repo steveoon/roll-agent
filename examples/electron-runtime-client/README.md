@@ -19,13 +19,13 @@ Electron Renderer → preload IPC → Electron Main → @roll-agent/client-node 
 
 It intentionally does not import `@roll-agent/companion` or
 `@roll-agent/relay-protocol`, does not connect to a Cloud Relay, and does not enable remote
-Browser access. Installing `@roll-agent/core` only makes the `roll` Runtime command available; it
-does not install or start Companion.
+Browser access. Installing `@roll-agent/core` makes both Runtime and Companion management commands
+available, but does not enroll, install or start the Companion service.
 
-If a product later adds remote Web access, the Electron Main process—or a separate local
-daemon—must explicitly host `@roll-agent/companion`, complete device/Workspace pairing, and start
-an authenticated outbound Relay connection. The Renderer must still stay behind named preload
-IPC.
+If a product later adds remote Web access, prefer the separate official `roll companion` service
+and `@roll-agent/relay-client`; do not move raw Relay handling into Electron Main or Renderer. A
+version-locked OEM may use the low-level Companion package, but owns that security boundary. The
+Renderer must still stay behind named preload IPC.
 
 For a third-party local-only Electron host, the Roll-side application dependencies are
 `@roll-agent/client-node` plus `@roll-agent/protocol` when it imports protocol constants, schemas,

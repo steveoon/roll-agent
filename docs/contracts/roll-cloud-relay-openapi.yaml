@@ -1,0 +1,236 @@
+openapi: 3.1.0
+info:
+  title: Roll Cloud Relay control-plane contract
+  version: 1.0.0
+  description: >-
+    Cross-repository contract consumed by roll-cloud-relay and Roll clients. The current
+    roll-cloud-relay implementation has not yet been updated to this contract.
+servers:
+  - url: https://RELAY_HOST_NOT_DECIDED_YET
+    description: >-
+      The official Relay host is not decided yet. Only the paths below are frozen; the host is
+      filled in once the domain is registered, and Companion fails closed until then.
+paths:
+  /v1/browser-sessions:
+    post:
+      operationId: createBrowserSession
+      summary: Exchange the current third-party user for a short-lived Browser WSS ticket
+      security:
+        - appServerCredential: []
+      parameters:
+        - in: header
+          name: Idempotency-Key
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateBrowserSessionRequest"
+      responses:
+        "201":
+          description: Single-use Browser connection ticket created
+          headers:
+            Cache-Control:
+              schema:
+                type: string
+                const: no-store
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RelaySessionDescriptor"
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          description: No unique enrolled Workspace exists for the subject
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RelayApiError"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+  /v1/device-enrollments/redeem:
+    post:
+      operationId: redeemDeviceEnrollment
+      summary: Redeem a short-lived pairing code from roll companion
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RedeemDeviceEnrollmentRequest"
+      responses:
+        "200":
+          description: Device enrolled; the credential must immediately enter OS protected storage
+          headers:
+            Cache-Control:
+              schema:
+                type: string
+                const: no-store
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RedeemDeviceEnrollmentResponse"
+        "400":
+          description: Pairing code is malformed, expired, or already consumed
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RelayApiError"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+components:
+  securitySchemes:
+    appServerCredential:
+      type: http
+      scheme: bearer
+      bearerFormat: opaque app server credential
+      description: >-
+        Identifies one Tenant and App. In P0 the registered App has exactly one allowed Browser
+        Origin; the Relay copies that configured Origin into each ticket and verifies the WebSocket
+        Origin header when the ticket is consumed. The request body cannot choose or override it.
+  schemas:
+    CreateBrowserSessionRequest:
+      type: object
+      additionalProperties: false
+      required: [subject]
+      properties:
+        subject:
+          type: string
+          minLength: 1
+          maxLength: 255
+          description: Stable ID of the current user in the third-party application.
+    RelaySessionDescriptor:
+      type: object
+      additionalProperties: false
+      required: [connectUrl, expiresAt]
+      properties:
+        connectUrl:
+          type: string
+          format: uri
+          pattern: '^wss://\S+$'
+          description: Contains an opaque ticket valid for at most 60 seconds and one consumption.
+        expiresAt:
+          type: string
+          format: date-time
+    RedeemDeviceEnrollmentRequest:
+      type: object
+      additionalProperties: false
+      required: [code]
+      properties:
+        code:
+          type: string
+          minLength: 6
+          maxLength: 512
+          writeOnly: true
+    RedeemDeviceEnrollmentResponse:
+      type: object
+      additionalProperties: false
+      required: [deviceId, workspaceId, deviceCredential]
+      properties:
+        deviceId:
+          type: string
+          format: uuid
+        workspaceId:
+          type: string
+          format: uuid
+        deviceCredential:
+          type: string
+          minLength: 16
+          writeOnly: true
+          description: Opaque credential; never write it to Companion YAML or logs.
+    RelayApiError:
+      type: object
+      additionalProperties: false
+      required: [code, retryable]
+      properties:
+        code:
+          type: string
+        retryable:
+          type: boolean
+  responses:
+    Unauthenticated:
+      description: Missing or invalid app server credential
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/RelayApiError"
+    Forbidden:
+      description: App, Origin policy, subject, or Workspace scope is not allowed
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/RelayApiError"
+    RateLimited:
+      description: Request rate or pending-session limit exceeded
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/RelayApiError"
+x-roll-websocket-contract:
+  companion:
+    path: /v1/companion
+    authentication: device credential
+    firstFrame: Roll Relay Wire 1.1 device.connect
+    inboundAllowlist:
+      - device.connect
+      - runtime.response
+      - runtime.event
+      - runtime.gap
+      - interaction.request
+      - interaction.resolved
+      - interaction.cancelled
+    outboundAllowlist:
+      - runtime.request
+      - runtime.ack
+  browser:
+    path: /v1/browser?ticket={single-use-ticket}
+    ticketTtlSeconds: 60
+    ticketBindings: [app, origin, subject, workspace]
+    firstFrame: Roll Browser Control 1.0 session.ready
+    inboundAllowlist:
+      - runtime.request
+      - runtime.ack
+    outboundAllowlist:
+      - session.ready
+      - workspace.status
+      - session.error
+      - runtime.response
+      - runtime.event
+      - runtime.gap
+      - interaction.request
+      - interaction.resolved
+      - interaction.cancelled
+    handshakeErrorCodes:
+      - SESSION_TICKET_INVALID
+      - SESSION_TICKET_EXPIRED
+      - SESSION_TICKET_ALREADY_USED
+      - ORIGIN_NOT_ALLOWED
+  invariants:
+    - The app server credential determines the tenant; request bodies cannot select a tenant.
+    - >-
+      In P0 each app server credential resolves to exactly one registered Browser Origin. The
+      Browser-session request cannot supply an Origin, and the Browser WebSocket handshake must
+      exactly match the Origin embedded in the ticket.
+    - >-
+      Invalid, expired, or reused tickets and disallowed Origins reject the HTTP WebSocket upgrade.
+      They are never emitted as session.error because session.ready is the first authenticated
+      Browser frame.
+    - Browser requests cannot select deviceId, workspaceId, cwd, or allowed methods.
+    - A session is scoped to exactly one enrolled Workspace and one controller.
+    - New turn.start requests fail while the Companion or Runtime is offline; they are not queued.
+    - Wire 1.0 and messages sent in the wrong direction fail closed.
+    - >-
+      device.connect.pairingToken is the frozen Wire 1.1 field name for the long-lived device
+      credential returned by enrollment and stored by the OS; it is not the one-time enrollment
+      pairing code.
+    - >-
+      The Relay retains unresolved interaction.request frames and re-delivers them to a replacement
+      Browser session until interaction.resolved or interaction.cancelled; Browser snapshots must
+      never synthesize interactionId from approvalId.

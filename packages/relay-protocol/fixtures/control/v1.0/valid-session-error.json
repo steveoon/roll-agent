@@ -1,0 +1,5 @@
+{
+  "type": "session.error",
+  "code": "CONTROLLER_CONFLICT",
+  "retryable": false
+}

@@ -23,6 +23,13 @@
       "types": "./src/reference-adapter.ts",
       "default": "./src/reference-adapter.ts"
     },
+    "./control": {
+      "types": "./src/control.ts",
+      "default": "./src/control.ts"
+    },
+    "./control/schema": "./dist/schema/roll-relay-control-v1.schema.json",
+    "./control/session-schema": "./dist/schema/roll-relay-browser-session-v1.schema.json",
+    "./control/fixtures/*": "./fixtures/control/v1.0/*",
     "./schema": "./dist/schema/roll-relay-protocol-v1.schema.json",
     "./schema/v1.0": "./dist/schema/roll-relay-protocol-v1.schema.json",
     "./schema/v1.1": "./dist/schema/roll-relay-protocol-v1.1.schema.json",
@@ -43,6 +50,13 @@
         "types": "./dist/reference-adapter.d.ts",
         "default": "./dist/reference-adapter.js"
       },
+      "./control": {
+        "types": "./dist/control.d.ts",
+        "default": "./dist/control.js"
+      },
+      "./control/schema": "./dist/schema/roll-relay-control-v1.schema.json",
+      "./control/session-schema": "./dist/schema/roll-relay-browser-session-v1.schema.json",
+      "./control/fixtures/*": "./fixtures/control/v1.0/*",
       "./schema": "./dist/schema/roll-relay-protocol-v1.schema.json",
       "./schema/v1.0": "./dist/schema/roll-relay-protocol-v1.schema.json",
       "./schema/v1.1": "./dist/schema/roll-relay-protocol-v1.1.schema.json",
@@ -57,7 +71,7 @@
     "node": ">=22.6.0"
   },
   "scripts": {
-    "build": "rm -rf dist && tsc -p tsconfig.build.json && node --experimental-strip-types scripts/generate-schema.mjs",
+    "build": "rm -rf dist && tsc -p tsconfig.build.json && node --experimental-strip-types scripts/generate-schema.mjs && node --experimental-strip-types scripts/generate-control-schema.mjs",
     "typecheck": "tsc --noEmit",
     "test": "node --experimental-strip-types --test \"src/**/*.test.ts\"",
     "clean": "rm -rf dist"

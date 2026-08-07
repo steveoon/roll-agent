@@ -9,7 +9,8 @@ Browser-safe 的 Roll Companion Relay Wire 契约。
 
 | 使用方 | 是否直接安装 | 用途 |
 |---|---:|---|
-| Browser Web App | 是 | 构造、校验并投影 Relay frame |
+| 普通 Browser Web App | 否 | 安装 `@roll-agent/relay-client`，不直接处理 frame |
+| 自定义 Browser Transport | 是 | 实现 Relay frame、ACK/gap 与恢复 |
 | Cloud Relay Server | 是 | 校验、路由和持久化 Relay frame |
 | Local Companion Host | 是 | 与 Cloud 使用同一 Wire 契约 |
 | Local-only Desktop GUI | 否 | 直接使用 Runtime Protocol，不经过 Relay |
@@ -18,6 +19,39 @@ Browser-safe 的 Roll Companion Relay Wire 契约。
 ```bash
 pnpm add @roll-agent/relay-protocol
 ```
+
+普通第三方 Web App 应安装 `@roll-agent/relay-client`；本包面向 Cloud Relay、Companion 和确实
+需要自定义 Transport 的高级实现者。
+
+## Control 1.0 与方向合同
+
+Browser Session 的 HTTP 返回和 WebSocket 控制面从独立 subpath 导入，不属于
+`relayMessageSchemaV11` 数据面 union：
+
+```ts
+import {
+  RELAY_BROWSER_WSS_MESSAGE_TYPES_BY_DIRECTION,
+  RELAY_COMPANION_WSS_MESSAGE_TYPES_BY_DIRECTION,
+  parseRelayBrowserFirstControlFrame,
+  relayBrowserControlMessageSchema,
+  relaySessionDescriptorSchema,
+} from "@roll-agent/relay-protocol/control";
+
+const session = relaySessionDescriptorSchema.parse(await response.json());
+const ready = parseRelayBrowserFirstControlFrame(firstWebSocketFrame);
+relayBrowserControlMessageSchema.parse(laterControlFrame);
+```
+
+`session.ready` 必须是 Browser WebSocket 收到的第一帧，并固定声明 Control 1.0、Wire 1.1、
+Relay 绑定的 Workspace 和在线状态。Browser 不能在请求中自行指定 `workspaceId`。
+Ticket 无效、过期、重复消费或 Origin 不匹配时，Relay 必须在 HTTP upgrade 阶段拒绝连接；
+这些错误属于 `RELAY_BROWSER_HANDSHAKE_ERROR_CODES`，不能伪装成已认证连接中的
+`session.error`。后者只承载 `session.ready` 之后的会话错误。
+
+方向 allowlist 固定为：Browser→Relay 只允许 Wire 1.1 `runtime.request` 与 `runtime.ack`；
+Relay→Companion 同样只允许这两类。Relay→Browser 允许 Control 帧以及 response/event/gap/
+Interaction 帧；Companion→Relay 还包含首帧 `device.connect`。`runtime.ack` 是 Wire 数据面，
+不是 Control ACK。P0 不提供 E2EE，因此这些 P0 WSS allowlist 明确不含 `runtime.encrypted`。
 
 ## 版本
 
@@ -50,8 +84,10 @@ Wire 1.1 增加 `interaction.request`、`interaction.resolved`、
 `interaction.cancelled` 三种 Companion→Browser frame。Browser 通过 mutation
 `interaction.candidate` 提交候选；`approval.candidate` 只存在于冻结的 Wire 1.0。
 
-远端候选不是 Runtime 的权威决议。Companion 仍持有 Runtime Handler、绝对 deadline 和
-本地 Policy；Approval approve candidate 必须在本机重新经过 Policy。
+远端候选不是独立授权事实源。Runtime policy 先决定 auto/confirm/deny；只有 confirm 才产生
+可响应 Interaction，deny 不会被远端越过。官方 Companion 只再验证 request policy、Workspace、
+responder 与绝对 deadline，不增加电脑端二次审批。低层自定义 Host 可以进一步收紧，但不能
+放宽 Runtime 决议。
 
 安全投影只允许：
 
@@ -63,6 +99,10 @@ Wire 1.1 增加 `interaction.request`、`interaction.resolved`、
 Runtime JSON-RPC `id`、原始 Tool input/output、secret、完整 User Input Result、本地授权信息
 以及 Authentication/File Picker projector 都不能进入 Companion→Browser 投影。Browser→Companion 的
 `interaction.candidate` 是 User Input Result 唯一允许的入站位置，并且必须关联原始表单重新校验。
+
+Wire 1.1 Snapshot 不能重建一个仍可响应的 `interactionId`。Browser Session 重连时，Cloud
+Relay 必须保留并重新投递尚未 resolved/cancelled 的 `interaction.request`；客户端不得从
+`approvalId` 或 Snapshot 自行合成 Interaction identity。
 
 Wire 1.1 的 pull 查询遵守同一边界：`thread.open` / `thread.snapshot` 必须把 Approval preview
 投影为可选 explanation、移除本地 reason，并把 Operation display 与 outcome reason 脱敏；
@@ -104,6 +144,10 @@ context 必须由宿主注入。
 
 - `@roll-agent/relay-protocol/schema` 与 `/schema/v1.0`：冻结的 Wire 1.0 JSON Schema；
 - `@roll-agent/relay-protocol/schema/v1.1`：Wire 1.1 JSON Schema；
+- `@roll-agent/relay-protocol/control`：Control 1.0、Browser Session 和 WSS 方向 Schema；
+- `@roll-agent/relay-protocol/control/schema`：Control 1.0 JSON Schema；
+- `@roll-agent/relay-protocol/control/session-schema`：Browser Session JSON Schema；
+- `@roll-agent/relay-protocol/control/fixtures/*`：Control/Session golden fixtures；
 - `@roll-agent/relay-protocol/fixtures/v1/*`：字节冻结的 Wire 1.0 golden fixtures；
 - `@roll-agent/relay-protocol/fixtures/v1.1/*`：Wire 1.1 Interaction 与安全负例；
 - `@roll-agent/relay-protocol/conformance`：可复用的 N/N-1 suite。

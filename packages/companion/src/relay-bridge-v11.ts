@@ -3,11 +3,13 @@ import { RollRpcError } from "@roll-agent/client-node";
 import { jsonValueSchema, type JsonValue } from "@roll-agent/protocol";
 import {
   RELAY_ERROR_CODES,
+  RELAY_ERROR_CODES_V11,
   RELAY_MESSAGE_TYPES_V11,
   RELAY_REQUEST_METHODS_V11,
   canonicalizeRelayJson,
   classifyRelayAck,
   getRelayErrorRetryability,
+  getRelayErrorRetryabilityV11,
   getRelayRequestMethodDispositionForVersion,
   parseRelayRequestParamsForVersion,
   parseRelayRequestResultForVersion,
@@ -19,6 +21,8 @@ import {
   type DeviceId,
   type RelayEncryptedMessageV11,
   type RelayMessageV11,
+  type RelayRequestId,
+  type RelayRequestMethodV11,
   type RelayRuntimeRequestV11,
   type WorkspaceId,
 } from "@roll-agent/relay-protocol";
@@ -71,6 +75,7 @@ export interface CompanionRelayBridgeV11Options {
 }
 
 export interface CompanionRelayConnectionV11Options {
+  readonly requestPolicy: RemoteRequestPolicy;
   readonly responderPolicy: RemoteInteractionResponderPolicy;
   /**
    * Opaque host-owned authentication/session state. The Companion never interprets this value
@@ -78,6 +83,14 @@ export interface CompanionRelayConnectionV11Options {
    */
   readonly responderContext: unknown;
 }
+
+export type RemoteRequestPolicy = (input: {
+  readonly workspaceId: WorkspaceId;
+  readonly requestId: RelayRequestId;
+  readonly method: RelayRequestMethodV11;
+  readonly responderContext: unknown;
+  readonly signal: AbortSignal;
+}) => boolean | Promise<boolean>;
 
 interface CachedRelayResponseV11 {
   readonly fingerprint: string;
@@ -88,6 +101,7 @@ interface CachedRelayResponseV11 {
 
 interface RelayTransportGenerationV11 {
   readonly transport: RelayTransportV11;
+  readonly requestPolicy: RemoteRequestPolicy;
   readonly responderPolicy: RemoteInteractionResponderPolicy;
   readonly responderContext: unknown;
   readonly controller: AbortController;
@@ -114,6 +128,11 @@ const RELAY_ENCRYPTION_REQUIRED_ERROR = {
   code: RELAY_ERROR_CODES.encryptionRequired,
   message: "Encrypted Relay request required for this workspace",
   retryable: getRelayErrorRetryability(RELAY_ERROR_CODES.encryptionRequired),
+} as const;
+const REMOTE_REQUEST_DENIED_ERROR = {
+  code: RELAY_ERROR_CODES_V11.remoteRequestDenied,
+  message: "Remote request denied",
+  retryable: getRelayErrorRetryabilityV11(RELAY_ERROR_CODES_V11.remoteRequestDenied),
 } as const;
 
 function relayRequestFingerprintV11(request: RelayRuntimeRequestV11): string {
@@ -226,6 +245,7 @@ export class CompanionRelayBridgeV11 {
     this.releaseCurrentGeneration(true);
     const generation: RelayTransportGenerationV11 = {
       transport,
+      requestPolicy: options.requestPolicy,
       responderPolicy: options.responderPolicy,
       responderContext: options.responderContext,
       controller: new AbortController(),
@@ -388,6 +408,19 @@ export class CompanionRelayBridgeV11 {
       });
       return;
     }
+    const allowed = await this.isRemoteRequestAllowed(message, generation);
+    if (this.generation !== generation) {
+      return;
+    }
+    if (!allowed) {
+      this.sendRuntimeResponse(generation, {
+        type: RELAY_MESSAGE_TYPES_V11.runtimeResponse,
+        requestId: message.requestId,
+        workspaceId: message.workspaceId,
+        error: REMOTE_REQUEST_DENIED_ERROR,
+      });
+      return;
+    }
     const workspace = this.workspaces.get(message.workspaceId);
     if (workspace === undefined) {
       this.sendRuntimeResponse(generation, {
@@ -405,6 +438,24 @@ export class CompanionRelayBridgeV11 {
     const response = await this.resolveRuntimeRequest(message, workspace, generation);
     if (this.generation === generation) {
       this.sendRuntimeResponse(generation, response);
+    }
+  }
+
+  private async isRemoteRequestAllowed(
+    request: RelayRuntimeRequestV11,
+    generation: RelayTransportGenerationV11,
+  ): Promise<boolean> {
+    try {
+      const allowed = await generation.requestPolicy({
+        workspaceId: request.workspaceId,
+        requestId: request.requestId,
+        method: request.method,
+        responderContext: generation.responderContext,
+        signal: generation.controller.signal,
+      });
+      return allowed && !generation.controller.signal.aborted;
+    } catch {
+      return false;
     }
   }
 
@@ -672,6 +723,7 @@ export function createWebSocketRelayTransportV11(socket: WebSocketLikeV11): Rela
 
 export interface OutboundCompanionRelayV11Connection {
   readonly transport: RelayTransportV11;
+  readonly requestPolicy: RemoteRequestPolicy;
   readonly responderPolicy: RemoteInteractionResponderPolicy;
   readonly responderContext: unknown;
 }
@@ -741,6 +793,7 @@ export class OutboundCompanionRelayV11 {
         }
       });
       this.bridge.connect(connection.transport, {
+        requestPolicy: connection.requestPolicy,
         responderPolicy: connection.responderPolicy,
         responderContext: connection.responderContext,
       });

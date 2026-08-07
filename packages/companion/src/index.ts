@@ -105,6 +105,7 @@ export type {
   OutboundCompanionRelayV11Connection,
   OutboundCompanionRelayV11Options,
   RelayPayloadCipherV11,
+  RemoteRequestPolicy,
   RelayTransportV11,
   WebSocketLikeV11,
   WebSocketMessageEventLikeV11,
