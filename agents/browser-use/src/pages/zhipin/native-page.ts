@@ -430,6 +430,12 @@ export type NativeResumeCanvasCapture = {
   readonly error?: string;
 };
 
+export type NativeResumeStitchProgress = {
+  readonly round: number;
+  readonly scrolledPx: number;
+  readonly totalPx: number;
+};
+
 export type NativeResumeCloseResult = {
   readonly closed: boolean;
   readonly method?: "close-button" | "escape";
@@ -2578,7 +2584,9 @@ export class ZhipinNativePagePort {
     return state;
   }
 
-  async captureResumeCanvas(): Promise<NativeResumeCanvasCapture> {
+  async captureResumeCanvas(
+    onProgress?: (progress: NativeResumeStitchProgress) => void | Promise<void>,
+  ): Promise<NativeResumeCanvasCapture> {
     await delay(RESUME_STITCH_INIT_SETTLE_MS);
     const initExpression = this.buildResumeStitchInitExpression();
     let viaFrame = false;
@@ -2600,12 +2608,20 @@ export class ZhipinNativePagePort {
         ? await this.evaluateRecommendFrameJson(expression)
         : await this.evaluateJson(expression).catch(() => undefined);
 
+    const totalPx =
+      typeof initValue["maxScrollTotal"] === "number" && initValue["maxScrollTotal"] > 0
+        ? initValue["maxScrollTotal"]
+        : 0;
     const stepExpression = this.buildResumeStitchStepExpression();
     for (let round = 0; round < RESUME_STITCH_MAX_ROUNDS; round++) {
       await delay(RESUME_STITCH_RENDER_SETTLE_MS);
       const stepValue = await evaluateInContext(stepExpression);
       if (!isRecord(stepValue) || stepValue["ok"] !== true || stepValue["done"] === true) {
         break;
+      }
+      if (onProgress !== undefined) {
+        const scrolledPx = typeof stepValue["scrollTop"] === "number" ? stepValue["scrollTop"] : 0;
+        await Promise.resolve(onProgress({ round, scrolledPx, totalPx })).catch(() => {});
       }
     }
 
@@ -3484,6 +3500,7 @@ export class ZhipinNativePagePort {
       return {
         found: true,
         needScroll: maxScrollTotal > 4,
+        maxScrollTotal,
         resumeFrameRect: { x: iframeRect.x, y: iframeRect.y },
         canvasRect: {
           x: canvasRect.x,
