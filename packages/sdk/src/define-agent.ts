@@ -346,22 +346,51 @@ export function registerTool(server: McpServer, tool: AnyToolDefinition, ctx: Ag
   );
 }
 
-type McpTextToolResult = {
-  isError?: true;
-  content: [
-    {
-      type: "text";
-      text: string;
-    },
-  ];
+export type ToolResultImage = {
+  readonly data: string;
+  readonly mimeType: string;
 };
+
+type McpToolContentBlock =
+  | { type: "text"; text: string }
+  | { type: "image"; data: string; mimeType: string };
+
+type McpToolResult = {
+  isError?: true;
+  content: [{ type: "text"; text: string }, ...McpToolContentBlock[]];
+};
+
+function extractToolResultImages(result: unknown): {
+  readonly payload: unknown;
+  readonly images: readonly ToolResultImage[];
+} {
+  if (typeof result !== "object" || result === null || Array.isArray(result)) {
+    return { payload: result, images: [] };
+  }
+
+  const record = result as Record<string, unknown>;
+  const rawImages = record["mcpImages"];
+  if (!Array.isArray(rawImages)) {
+    return { payload: result, images: [] };
+  }
+
+  const images = rawImages.filter(
+    (item): item is ToolResultImage =>
+      typeof item === "object" &&
+      item !== null &&
+      typeof (item as Record<string, unknown>)["data"] === "string" &&
+      typeof (item as Record<string, unknown>)["mimeType"] === "string",
+  );
+  const { mcpImages: _dropped, ...payload } = record;
+  return { payload, images };
+}
 
 export async function executeToolForMcp(
   tool: AnyToolDefinition,
   ctx: AgentContext,
   params: Record<string, unknown>,
   signal?: AbortSignal,
-): Promise<McpTextToolResult> {
+): Promise<McpToolResult> {
   const parsedInput = await parseToolInput(tool.input, params);
   const callCtx: AgentContext = signal === undefined ? ctx : { ...ctx, signal };
   try {
@@ -369,8 +398,18 @@ export async function executeToolForMcp(
       parsedInput,
       callCtx,
     );
+    const { payload, images } = extractToolResultImages(result);
     return {
-      content: [{ type: "text", text: JSON.stringify(result) }],
+      content: [
+        { type: "text", text: JSON.stringify(payload) },
+        ...images.map(
+          (image): McpToolContentBlock => ({
+            type: "image",
+            data: image.data,
+            mimeType: image.mimeType,
+          }),
+        ),
+      ],
     };
   } catch (error) {
     if (isStructuredToolError(error)) {

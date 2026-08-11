@@ -53,6 +53,48 @@ describe("defineAgent tool execution", () => {
     });
   });
 
+  it("extracts mcpImages into MCP image content blocks", async () => {
+    const tool = defineTool({
+      name: "capture_thing",
+      description: "capture",
+      input: z.object({}),
+      output: z.object({
+        success: z.boolean(),
+        mcpImages: z.array(z.object({ data: z.string(), mimeType: z.string() })).optional(),
+      }),
+      execute: async () => ({
+        success: true,
+        mcpImages: [{ data: "aW1hZ2U=", mimeType: "image/png" }],
+      }),
+    });
+
+    const result = await executeToolForMcp(tool, TEST_CONTEXT, {});
+
+    assert.equal(result.isError, undefined);
+    assert.equal(result.content.length, 2);
+    assert.deepEqual(JSON.parse(result.content[0].text) as unknown, { success: true });
+    assert.deepEqual(result.content[1], {
+      type: "image",
+      data: "aW1hZ2U=",
+      mimeType: "image/png",
+    });
+  });
+
+  it("keeps plain results as single text block when mcpImages is absent", async () => {
+    const tool = defineTool({
+      name: "plain_tool",
+      description: "plain",
+      input: z.object({}),
+      output: z.object({ value: z.number() }),
+      execute: async () => ({ value: 42 }),
+    });
+
+    const result = await executeToolForMcp(tool, TEST_CONTEXT, {});
+
+    assert.equal(result.content.length, 1);
+    assert.deepEqual(JSON.parse(result.content[0].text) as unknown, { value: 42 });
+  });
+
   it("returns structurally compatible tool errors as MCP isError results", async () => {
     const tool = defineTool({
       name: "browser_action",

@@ -15,6 +15,10 @@ const OutputSchema = z.object({
   canvasSize: z.object({ width: z.number(), height: z.number() }).optional(),
   note: z.string().optional(),
   error: z.string().optional(),
+  mcpImages: z
+    .array(z.object({ data: z.string(), mimeType: z.string() }))
+    .optional()
+    .describe("截图的 MCP image content（base64）；由 SDK 转为 image block 返回，调用方无需解析"),
 });
 
 type ZhipinCaptureResumeDeps = {
@@ -115,6 +119,7 @@ export const zhipinCaptureResume = defineTool({
         captureMode,
         canvasSize: capture.canvasSize,
         ...(note !== undefined ? { note } : {}),
+        mcpImages: [{ data: pngBase64, mimeType: "image/png" }],
       };
     } finally {
       nativePage?.close();

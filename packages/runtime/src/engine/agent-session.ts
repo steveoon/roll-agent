@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { waitForPromiseSettlement } from "../bounded-wait.ts";
+import { relocateToolImagesToUserMessages } from "./relocate-tool-images.ts";
 import {
   stepCountIs,
   streamText,
@@ -1342,6 +1343,9 @@ export class AgentSession {
             system: this.systemPrompt,
             messages: inferenceMessages,
             tools: this.tools,
+            prepareStep: ({ messages }) => ({
+              messages: relocateToolImagesToUserMessages(messages),
+            }),
             stopWhen: [stepCountIs(this.maxSteps), stopOnUserRejected()],
             toolApproval: async ({ toolCall }) => {
               this.trackPendingToolCall(
