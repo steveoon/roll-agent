@@ -68,12 +68,13 @@ export const zhipinCaptureResume = defineTool({
 
     const deps = getZhipinCaptureResumeDeps();
     let nativePage: ZhipinNativePagePort | undefined;
+    let session: NativeVisualActivitySession | undefined;
     try {
       nativePage = await deps.openNativePagePort();
-      const session = new NativeVisualActivitySession(nativePage);
+      session = new NativeVisualActivitySession(nativePage);
       await session.begin("正在读取简历");
 
-      const dialogState = await nativePage.waitForResumeDialog(3_000);
+      const dialogState = await nativePage.waitForResumeDialog(12_000);
       if (!dialogState.iframeFound) {
         await session.fail("简历弹窗未打开");
         return { success: false, error: "简历弹窗未打开，请先调用 zhipin_open_resume" };
@@ -84,7 +85,7 @@ export const zhipinCaptureResume = defineTool({
       }
 
       const capture = await nativePage.captureResumeCanvas(async (progress) => {
-        await session.begin(formatStitchProgressLabel(progress));
+        await session?.begin(formatStitchProgressLabel(progress));
       });
       if (!capture.found || capture.canvasSize === undefined) {
         await session.fail("未找到简历内容");
@@ -137,6 +138,12 @@ export const zhipinCaptureResume = defineTool({
         ...(note !== undefined ? { note } : {}),
         mcpImages: [{ data: pngBase64, mimeType: "image/png" }],
       };
+    } catch (error) {
+      await session?.fail("简历读取失败");
+      ctx.logger.warn(
+        `Native zhipin capture resume failed: ${error instanceof Error ? error.message : String(error)}`,
+      );
+      return { success: false, error: "简历读取失败，请重试" };
     } finally {
       nativePage?.close();
     }

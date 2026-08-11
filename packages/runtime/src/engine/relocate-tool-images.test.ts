@@ -59,4 +59,71 @@ describe("relocateToolImagesToUserMessages", () => {
     ];
     assert.deepEqual(relocateToolImagesToUserMessages(messages), messages);
   });
+
+  it("drops images from stale relocated messages keeping the most recent two", () => {
+    const result = relocateToolImagesToUserMessages([
+      toolMessageWithImage(),
+      toolMessageWithImage(),
+      toolMessageWithImage(),
+    ]);
+
+    const relocated = result.filter(
+      (message) => message.role === "user" && Array.isArray(message.content),
+    );
+    assert.equal(relocated.length, 3);
+    const [stale, ...fresh] = relocated;
+    assert.ok(stale !== undefined);
+    const staleParts = stale.content as unknown as Array<Record<string, unknown>>;
+    assert.equal(
+      staleParts.some((part) => part["type"] === "file"),
+      false,
+    );
+    assert.ok(
+      staleParts.some(
+        (part) => part["type"] === "text" && part["text"] === "[历史工具图像已省略]",
+      ),
+    );
+    for (const message of fresh) {
+      const parts = message.content as unknown as Array<Record<string, unknown>>;
+      assert.equal(
+        parts.some((part) => part["type"] === "file"),
+        true,
+      );
+    }
+  });
+
+  it("keeps stale-image trimming idempotent", () => {
+    const once = relocateToolImagesToUserMessages([
+      toolMessageWithImage(),
+      toolMessageWithImage(),
+      toolMessageWithImage(),
+    ]);
+    const twice = relocateToolImagesToUserMessages(once);
+    assert.deepEqual(twice, once);
+  });
+
+  it("never touches user-authored image messages", () => {
+    const userImageMessage: ModelMessage = {
+      role: "user",
+      content: [
+        { type: "text", text: "帮我看看这张截图" },
+        { type: "file", data: "dXNlcg==", mediaType: "image/png" },
+      ],
+    } as unknown as ModelMessage;
+
+    const result = relocateToolImagesToUserMessages([
+      userImageMessage,
+      toolMessageWithImage(),
+      toolMessageWithImage(),
+      toolMessageWithImage(),
+    ]);
+
+    const first = result[0];
+    assert.ok(first !== undefined);
+    const parts = first.content as unknown as Array<Record<string, unknown>>;
+    assert.equal(
+      parts.some((part) => part["type"] === "file" && part["data"] === "dXNlcg=="),
+      true,
+    );
+  });
 });

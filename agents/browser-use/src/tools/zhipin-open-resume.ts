@@ -140,6 +140,12 @@ export const zhipinOpenResume = defineTool({
         resumeReady,
         ...(resumeReady ? {} : { error: "简历弹窗已出现，但 canvas 尚未就绪" }),
       };
+    } catch (error) {
+      await session?.fail("打开简历失败");
+      ctx.logger.warn(
+        `Native zhipin open resume failed: ${error instanceof Error ? error.message : String(error)}`,
+      );
+      return failure(candidateRef, "打开简历失败，请重试");
     } finally {
       nativePage?.close();
     }

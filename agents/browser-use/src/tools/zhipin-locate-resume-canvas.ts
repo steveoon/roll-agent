@@ -48,19 +48,36 @@ export const zhipinLocateResumeCanvas = defineTool({
     let nativePage: ZhipinNativePagePort | undefined;
     try {
       nativePage = await deps.openNativePagePort();
-      const capture = await nativePage.captureResumeCanvas();
-      if (!capture.found || capture.screenshotArea === undefined || capture.canvasSize === undefined) {
-        return { success: false, error: capture.error ?? "未找到简历 canvas" };
+      const dialogState = await nativePage.waitForResumeDialog(5_000);
+      if (!dialogState.iframeFound) {
+        return { success: false, error: "简历弹窗未打开，请先调用 zhipin_open_resume" };
+      }
+      if (!dialogState.canvasReady) {
+        return { success: false, error: "简历 canvas 未加载完成，请稍后重试" };
+      }
+
+      const geometry = await nativePage.readResumeCanvasGeometry();
+      if (
+        !geometry.found ||
+        geometry.screenshotArea === undefined ||
+        geometry.canvasSize === undefined
+      ) {
+        return { success: false, error: geometry.error ?? "未找到简历 canvas" };
       }
 
       ctx.logger.info(
-        `Canvas located at (${String(capture.screenshotArea.x)}, ${String(capture.screenshotArea.y)})`,
+        `Canvas located at (${String(geometry.screenshotArea.x)}, ${String(geometry.screenshotArea.y)})`,
       );
       return {
         success: true,
-        screenshotArea: capture.screenshotArea,
-        canvasInfo: capture.canvasSize,
+        screenshotArea: geometry.screenshotArea,
+        canvasInfo: geometry.canvasSize,
       };
+    } catch (error) {
+      ctx.logger.warn(
+        `Native zhipin locate resume canvas failed: ${error instanceof Error ? error.message : String(error)}`,
+      );
+      return { success: false, error: "定位简历 canvas 失败" };
     } finally {
       nativePage?.close();
     }

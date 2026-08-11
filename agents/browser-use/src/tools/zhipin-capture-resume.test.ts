@@ -40,6 +40,8 @@ function createNativePage(options: CapturePageOptions): ZhipinNativePagePort {
         options.events.push(`visual-label:${extractLabel(expression)}`);
       } else if (expression.includes("简历读取完成")) {
         options.events.push("visual-succeed");
+      } else if (expression.includes("简历读取失败")) {
+        options.events.push("visual-fail");
       }
       return true;
     },
@@ -163,5 +165,21 @@ describe("zhipin_capture_resume visual feedback", () => {
 
     assert.equal(result.success, true);
     assert.deepEqual(events, []);
+  });
+
+  it("returns failure and renders error state when capture throws mid-flow", async () => {
+    setVisualActivityEnabledForTests(true);
+    const events: string[] = [];
+    const page = createNativePage({ events });
+    (page as unknown as Record<string, unknown>)["captureResumeCanvas"] = async () => {
+      throw new Error("target detached");
+    };
+    installDeps(page);
+
+    const result = await zhipinCaptureResume.execute({}, createTestContext());
+
+    assert.equal(result.success, false);
+    assert.equal(result.error, "简历读取失败，请重试");
+    assert.ok(events.includes("visual-fail"));
   });
 });

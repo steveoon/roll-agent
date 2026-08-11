@@ -43,9 +43,9 @@ import {
   ZHIPIN_RESUME_CANVAS_SELECTOR,
   ZHIPIN_RESUME_CARD_CLICK_SURFACE_SELECTOR,
   ZHIPIN_RESUME_DIALOG_SELECTOR,
-  ZHIPIN_RESUME_IFRAME_CLOSE_SELECTORS,
+  ZHIPIN_RESUME_CLOSE_ELEMENT_SELECTORS,
+  ZHIPIN_RESUME_CLOSE_SCOPE_SELECTOR,
   ZHIPIN_RESUME_IFRAME_SELECTOR,
-  ZHIPIN_RESUME_PAGE_CLOSE_SELECTORS,
   type ZhipinResumeCanvasRect,
 } from "./resume-dom-contract.ts";
 import { ZHIPIN_SELECTORS } from "./selectors.ts";
@@ -410,13 +410,10 @@ export type NativeRecommendGreetResult = NativeRecommendCardInspection & {
   readonly clicked: boolean;
 };
 
-export type NativeRecommendCardClickResult = NativeRecommendCardInspection & {
-  readonly clicked: boolean;
-};
-
 export type NativeResumeDialogState = {
   readonly dialogVisible: boolean;
   readonly iframeFound: boolean;
+  readonly iframeVisible: boolean;
   readonly canvasReady: boolean;
 };
 
@@ -844,6 +841,15 @@ function toResumeOffset(value: unknown): { readonly x: number; readonly y: numbe
   return { x: value["x"], y: value["y"] };
 }
 
+function toResumeSize(
+  value: unknown,
+): { readonly width: number; readonly height: number } | undefined {
+  if (!isRecord(value) || typeof value["width"] !== "number" || typeof value["height"] !== "number") {
+    return undefined;
+  }
+  return { width: value["width"], height: value["height"] };
+}
+
 function toResumeRect(value: unknown): ZhipinResumeCanvasRect | undefined {
   if (
     !isRecord(value) ||
@@ -859,12 +865,13 @@ function toResumeRect(value: unknown): ZhipinResumeCanvasRect | undefined {
 
 function toNativeResumeDialogState(value: unknown): NativeResumeDialogState {
   if (!isRecord(value)) {
-    return { dialogVisible: false, iframeFound: false, canvasReady: false };
+    return { dialogVisible: false, iframeFound: false, iframeVisible: false, canvasReady: false };
   }
 
   return {
     dialogVisible: value["dialogVisible"] === true,
     iframeFound: value["iframeFound"] === true,
+    iframeVisible: value["iframeVisible"] === true,
     canvasReady: value["canvasReady"] === true,
   };
 }
@@ -2584,6 +2591,65 @@ export class ZhipinNativePagePort {
     return state;
   }
 
+  async readResumeCanvasGeometry(): Promise<NativeResumeCanvasCapture> {
+    const expression = this.buildResumeCanvasGeometryExpression();
+    let viaFrame = false;
+    let value: unknown = await this.evaluateJson(expression).catch(() => undefined);
+    if (!isRecord(value) || value["found"] !== true) {
+      const frameValue = await this.evaluateRecommendFrameJson(expression);
+      if (frameValue !== undefined) {
+        value = frameValue;
+        viaFrame = true;
+      }
+    }
+    if (!isRecord(value) || value["found"] !== true) {
+      const error = isRecord(value) ? value["error"] : undefined;
+      return { found: false, error: typeof error === "string" ? error : "未找到简历 canvas" };
+    }
+
+    const canvasRect = toResumeRect(value["canvasRect"]);
+    const canvasSize = toResumeSize(value["canvasSize"]);
+    if (canvasRect === undefined || canvasSize === undefined) {
+      return { found: false, error: "简历 canvas 坐标读取失败" };
+    }
+
+    const resumeFrameRect = toResumeOffset(value["resumeFrameRect"]);
+    const offset = viaFrame ? await this.readRecommendFrameOffset() : undefined;
+    const screenshotArea = composeResumeCanvasArea({
+      recommendFrameRect:
+        offset !== undefined && offset.found ? { x: offset.left, y: offset.top } : null,
+      resumeFrameRect: resumeFrameRect ?? null,
+      canvasRect,
+    });
+    return { found: true, screenshotArea, canvasSize };
+  }
+
+  private buildResumeCanvasGeometryExpression(): string {
+    return `(() => {
+      const resumeIframeSelector = ${JSON.stringify(ZHIPIN_RESUME_IFRAME_SELECTOR)};
+      const canvasSelector = ${JSON.stringify(ZHIPIN_RESUME_CANVAS_SELECTOR)};
+      const resumeIframe = document.querySelector(resumeIframeSelector);
+      if (!resumeIframe) return { found: false, error: "未找到简历 iframe" };
+      const resumeDoc = resumeIframe.contentDocument;
+      if (!resumeDoc) return { found: false, error: "无法访问简历 iframe 内容" };
+      const canvas = resumeDoc.querySelector(canvasSelector);
+      if (!canvas) return { found: false, error: "简历 canvas 未加载" };
+      const iframeRect = resumeIframe.getBoundingClientRect();
+      const canvasRect = canvas.getBoundingClientRect();
+      return {
+        found: true,
+        resumeFrameRect: { x: iframeRect.x, y: iframeRect.y },
+        canvasRect: {
+          x: canvasRect.x,
+          y: canvasRect.y,
+          width: canvasRect.width,
+          height: canvasRect.height
+        },
+        canvasSize: { width: canvas.width, height: canvas.height }
+      };
+    })()`;
+  }
+
   async captureResumeCanvas(
     onProgress?: (progress: NativeResumeStitchProgress) => void | Promise<void>,
   ): Promise<NativeResumeCanvasCapture> {
@@ -2676,8 +2742,18 @@ export class ZhipinNativePagePort {
       }
     }
 
-    await this.controller.dispatchKeyEvent({ type: "keyDown", key: "Escape", code: "Escape" });
-    await this.controller.dispatchKeyEvent({ type: "keyUp", key: "Escape", code: "Escape" });
+    await this.controller.dispatchKeyEvent({
+      type: "keyDown",
+      key: "Escape",
+      code: "Escape",
+      windowsVirtualKeyCode: 27,
+    });
+    await this.controller.dispatchKeyEvent({
+      type: "keyUp",
+      key: "Escape",
+      code: "Escape",
+      windowsVirtualKeyCode: 27,
+    });
     if (await this.waitForResumeDialogGone()) {
       return { closed: true, method: "escape" };
     }
@@ -2697,6 +2773,7 @@ export class ZhipinNativePagePort {
     return {
       dialogVisible: main.dialogVisible || frame.dialogVisible,
       iframeFound: frame.iframeFound,
+      iframeVisible: frame.iframeVisible,
       canvasReady: frame.canvasReady,
     };
   }
@@ -2705,7 +2782,7 @@ export class ZhipinNativePagePort {
     const startedAt = Date.now();
     while (Date.now() - startedAt < timeoutMs) {
       const state = await this.readResumeDialogState();
-      if (!state.iframeFound && !state.dialogVisible) {
+      if ((!state.iframeFound || !state.iframeVisible) && !state.dialogVisible) {
         return true;
       }
       await delay(NATIVE_SELECTOR_POLL_MS);
@@ -3331,7 +3408,7 @@ export class ZhipinNativePagePort {
     })()`;
   }
 
-  private buildRecommendGreetClickExpression(index: number): string {
+  private buildRecommendCardTargetClickExpression(index: number, targetResolverJs: string): string {
     return `(() => {
       const index = ${JSON.stringify(index)};
       const primarySelector = ${JSON.stringify(RECOMMEND_CARD_SELECTOR)};
@@ -3345,14 +3422,10 @@ export class ZhipinNativePagePort {
           : Array.from(root.querySelectorAll(fallbackSelector));
       const item = cards[index];
       if (!item) return { found: false, x: 0, y: 0 };
-      const button =
-        item.querySelector("button.btn.btn-greet") ??
-        item.querySelector("button.btn-greet") ??
-        item.querySelector(".btn-greet") ??
-        item.querySelector(".op-btn");
-      if (!button) return { found: false, x: 0, y: 0 };
-      button.scrollIntoView({ block: "center", inline: "center" });
-      const rect = button.getBoundingClientRect();
+      const target = ${targetResolverJs};
+      if (!target) return { found: false, x: 0, y: 0 };
+      target.scrollIntoView({ block: "center", inline: "center" });
+      const rect = target.getBoundingClientRect();
       if (rect.width <= 0 || rect.height <= 0) return { found: false, x: 0, y: 0 };
       return {
         found: true,
@@ -3362,31 +3435,18 @@ export class ZhipinNativePagePort {
     })()`;
   }
 
+  private buildRecommendGreetClickExpression(index: number): string {
+    return this.buildRecommendCardTargetClickExpression(
+      index,
+      'item.querySelector("button.btn.btn-greet") ?? item.querySelector("button.btn-greet") ?? item.querySelector(".btn-greet") ?? item.querySelector(".op-btn")',
+    );
+  }
+
   private buildRecommendCardOpenClickExpression(index: number): string {
-    return `(() => {
-      const index = ${JSON.stringify(index)};
-      const primarySelector = ${JSON.stringify(RECOMMEND_CARD_SELECTOR)};
-      const fallbackSelector = ${JSON.stringify(RECOMMEND_FALLBACK_CARD_SELECTOR)};
-      const clickSurfaceSelector = ${JSON.stringify(ZHIPIN_RESUME_CARD_CLICK_SURFACE_SELECTOR)};
-      const iframe = document.querySelector(${JSON.stringify(ZHIPIN_SELECTORS.recommend.iframe)});
-      const root = iframe?.contentDocument ?? document;
-      const primaryCards = Array.from(root.querySelectorAll(primarySelector));
-      const cards =
-        primaryCards.length > 0
-          ? primaryCards
-          : Array.from(root.querySelectorAll(fallbackSelector));
-      const item = cards[index];
-      if (!item) return { found: false, x: 0, y: 0 };
-      const surface = item.querySelector(clickSurfaceSelector) ?? item;
-      surface.scrollIntoView({ block: "center", inline: "center" });
-      const rect = surface.getBoundingClientRect();
-      if (rect.width <= 0 || rect.height <= 0) return { found: false, x: 0, y: 0 };
-      return {
-        found: true,
-        x: Math.round(rect.left + rect.width / 2),
-        y: Math.round(rect.top + rect.height / 2)
-      };
-    })()`;
+    return this.buildRecommendCardTargetClickExpression(
+      index,
+      `item.querySelector(${JSON.stringify(ZHIPIN_RESUME_CARD_CLICK_SURFACE_SELECTOR)}) ?? item`,
+    );
   }
 
   private buildResumeDialogStateExpression(): string {
@@ -3401,17 +3461,19 @@ export class ZhipinNativePagePort {
 
       let dialogVisible = false;
       let iframeFound = false;
+      let iframeVisible = false;
       let canvasReady = false;
       const dialog = document.querySelector(dialogSelector);
       if (dialog && visible(dialog)) dialogVisible = true;
       const resumeIframe = document.querySelector(resumeIframeSelector);
       if (resumeIframe) {
         iframeFound = true;
+        iframeVisible = visible(resumeIframe);
         const resumeDoc = resumeIframe.contentDocument;
         const canvas = resumeDoc ? resumeDoc.querySelector(canvasSelector) : null;
         if (canvas && canvas.width > 0 && canvas.height > 0) canvasReady = true;
       }
-      return { dialogVisible, iframeFound, canvasReady };
+      return { dialogVisible, iframeFound, iframeVisible, canvasReady };
     })()`;
   }
 
@@ -3644,25 +3706,26 @@ export class ZhipinNativePagePort {
   }
 
   private buildResumeCloseTargetExpression(): string {
-    const closeSelectors = [
-      ...new Set([...ZHIPIN_RESUME_IFRAME_CLOSE_SELECTORS, ...ZHIPIN_RESUME_PAGE_CLOSE_SELECTORS]),
-    ];
     return `(() => {
-      const selectors = ${JSON.stringify(closeSelectors)};
+      const scopeSelector = ${JSON.stringify(ZHIPIN_RESUME_CLOSE_SCOPE_SELECTOR)};
+      const closeSelectors = ${JSON.stringify([...ZHIPIN_RESUME_CLOSE_ELEMENT_SELECTORS])};
       const visible = (element) => {
         const rect = element.getBoundingClientRect();
         return rect.width > 0 && rect.height > 0;
       };
-      for (const selector of selectors) {
-        for (const element of Array.from(document.querySelectorAll(selector))) {
-          if (!visible(element)) continue;
-          element.scrollIntoView({ block: "center", inline: "center" });
-          const rect = element.getBoundingClientRect();
-          return {
-            found: true,
-            x: Math.round(rect.left + rect.width / 2),
-            y: Math.round(rect.top + rect.height / 2)
-          };
+      const scopes = Array.from(document.querySelectorAll(scopeSelector)).filter(visible);
+      for (const scope of scopes) {
+        for (const selector of closeSelectors) {
+          for (const element of Array.from(scope.querySelectorAll(selector))) {
+            if (!visible(element)) continue;
+            element.scrollIntoView({ block: "center", inline: "center" });
+            const rect = element.getBoundingClientRect();
+            return {
+              found: true,
+              x: Math.round(rect.left + rect.width / 2),
+              y: Math.round(rect.top + rect.height / 2)
+            };
+          }
         }
       }
       return { found: false, x: 0, y: 0 };
