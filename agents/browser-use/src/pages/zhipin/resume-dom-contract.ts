@@ -28,7 +28,7 @@ export const ZHIPIN_RESUME_PAGE_CLOSE_SELECTORS = [
 ] as const;
 
 export const ZHIPIN_RESUME_DIALOG_SELECTOR =
-  ".boss-popup__wrapper, .dialog-lib-resume, .boss-dialog" as const;
+  '.boss-popup__wrapper, .dialog-lib-resume, .boss-dialog, [data-type="boss-dialog"]' as const;
 export const ZHIPIN_RESUME_PAGE_DIALOG_SELECTOR = ".boss-popup__wrapper" as const;
 export const ZHIPIN_RESUME_IFRAME_SELECTOR = 'iframe[src*="c-resume"]' as const;
 export const ZHIPIN_RESUME_CANVAS_SELECTOR = "canvas#resume, div#resume canvas" as const;
