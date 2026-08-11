@@ -30,7 +30,6 @@ import { zhipinOpenRecommendPage } from "./tools/zhipin-open-recommend-page.ts";
 import { zhipinSelectRecommendJob } from "./tools/zhipin-select-recommend-job.ts";
 import { zhipinSayHello } from "./tools/zhipin-say-hello.ts";
 import { zhipinOpenResume } from "./tools/zhipin-open-resume.ts";
-import { zhipinLocateResumeCanvas } from "./tools/zhipin-locate-resume-canvas.ts";
 import { zhipinCaptureResume } from "./tools/zhipin-capture-resume.ts";
 import { zhipinCloseResume } from "./tools/zhipin-close-resume.ts";
 // Yupao
@@ -120,7 +119,6 @@ const agent = defineAgent(
       zhipinGetCandidateList,
       zhipinSayHello,
       zhipinOpenResume,
-      zhipinLocateResumeCanvas,
       zhipinCaptureResume,
       zhipinCloseResume,
       // Yupao

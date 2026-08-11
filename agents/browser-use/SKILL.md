@@ -209,7 +209,9 @@ click_ref(@eN) 或 type_ref(@eN, text, clear?)
 
 诊断细节见 `references/zhipin-diagnostics.md`。正常业务路径不要默认调用 `zhipin_diagnose_browser_state()`。
 
-常见诊断 phase 关键词：`native`、`native-watch`、`native-ws-connect`、`native-page-bring-front`、`native-evaluate-url-no-runtime-enable`、`native-dom-read-no-runtime-enable`、`native-input-move-no-runtime-enable`、`native-runtime-enable`、`browser-attach`、`page-attach`、`network-watch`、`page-evaluate`、`detector-fingerprint`、`storage-summary`。
+常见诊断 phase 关键词：`native`、`native-watch`、`native-ws-connect`、`native-page-bring-front`、`native-evaluate-url-no-runtime-enable`、`native-dom-read-no-runtime-enable`、`native-input-move-no-runtime-enable`、`native-runtime-enable`、`resume-canvas`、`browser-attach`、`page-attach`、`network-watch`、`page-evaluate`、`detector-fingerprint`、`storage-summary`。
+
+`resume-canvas` phase 是只读探针：报告简历弹窗可见性、`iframe`/canvas 就绪状态与截图坐标（`resumeCanvas` 输出段），用于 `zhipin_capture_resume` 失败后的低成本排障，不滚动、不截图。
 
 ## BOSS直聘聊天 Tools
 
@@ -239,7 +241,6 @@ click_ref(@eN) 或 type_ref(@eN, text, clear?)
 | `zhipin_say_hello(indices?, candidateRefs?)` | native CDP | 批量点击「打招呼」；优先传 `candidateRefs`，`indices` 只作当前 DOM 快照兜底。 |
 | `zhipin_open_resume(index?, candidateRef?)` | native CDP | 点击候选人卡片打开简历详情弹窗；优先传 `candidateRef`；返回 `resumeReady` 表示简历 canvas 是否就绪。 |
 | `zhipin_capture_resume(outputPath?)` | native CDP | 截取当前简历弹窗为完整 PNG 长图；简历 canvas 是随滚动重绘的视口窗口，工具自动滚动分段并在浏览器内拼接（页面显示百分比进度胶囊）。返回 `imagePath` 与 MCP image content（多模态编排器可直接识图）；canvas 空白的 DOM 版式简历自动回退截取弹窗区域，`captureMode` 标识实际路径（`canvas-data-url` / `dom-screenshot` / `viewport-clip`）。需先 `zhipin_open_resume`。 |
-| `zhipin_locate_resume_canvas()` | native CDP | 探测简历弹窗结构与 canvas 就绪状态；结构为 `iframe[name="recommendFrame"] -> iframe[src*="c-resume"] -> canvas#resume`。 |
 | `zhipin_close_resume()` | native CDP | 关闭简历弹窗；优先点击关闭按钮，兜底发送 Escape；selector 契约见 `src/pages/zhipin/resume-dom-contract.ts`。 |
 
 推荐链路和动态列表细节见 `references/zhipin-workflows.md`。

@@ -12,6 +12,7 @@ import { BrowserPageInfoSchema } from "@roll-agent/browser";
 import { z } from "zod";
 import { getContextManager, getRuntime } from "../runtime-holder.ts";
 import { matchesPlatformHost } from "../platforms.ts";
+import { openZhipinNativePagePort } from "../pages/zhipin/native-page.ts";
 import { toAttachedPageInfo, toNativePageInfo } from "../page-info.ts";
 
 const ZHIPIN_DIAGNOSTIC_PHASES = [
@@ -25,6 +26,7 @@ const ZHIPIN_DIAGNOSTIC_PHASES = [
   "native-runtime-enable",
   "native-evaluate-url",
   "native-dom-read",
+  "resume-canvas",
   "browser-attach",
   "page-attach",
   "network-watch",
@@ -193,7 +195,7 @@ const NavigationEventSummarySchema = z.object({
 
 const ZhipinDiagnoseBrowserStateInputSchema = z.object({
   phase: ZhipinDiagnosticPhaseSchema.default("native").describe(
-    "诊断阶段。默认 native 只枚举原生 CDP target；native-* 阶段使用原生 CDP page WebSocket；browser-attach 及更深阶段才会使用 Playwright attach。",
+    "诊断阶段。默认 native 只枚举原生 CDP target；native-* 阶段使用原生 CDP page WebSocket；resume-canvas 只读探测简历弹窗与 canvas 就绪状态和坐标；browser-attach 及更深阶段才会使用 Playwright attach。",
   ),
   targetPageId: z
     .string()
@@ -229,6 +231,19 @@ const ZhipinDiagnoseBrowserStateOutputSchema = z.object({
   networkEvents: z.array(NetworkEventSummarySchema).optional(),
   navigationEvents: z.array(NavigationEventSummarySchema).optional(),
   nativeCdp: NativeCdpProbeSummarySchema.optional(),
+  resumeCanvas: z
+    .object({
+      dialogVisible: z.boolean(),
+      iframeFound: z.boolean(),
+      iframeVisible: z.boolean(),
+      canvasReady: z.boolean(),
+      screenshotArea: z
+        .object({ x: z.number(), y: z.number(), width: z.number(), height: z.number() })
+        .optional(),
+      canvasSize: z.object({ width: z.number(), height: z.number() }).optional(),
+      error: z.string().optional(),
+    })
+    .optional(),
   evaluate: PageEvaluateSummarySchema.optional(),
   detectorFingerprint: DetectorFingerprintSummarySchema.optional(),
   storage: z
@@ -1424,6 +1439,52 @@ export const zhipinDiagnoseBrowserState = defineTool({
         pageAttached,
         nativeTimeline,
         nativeCdp: nativeCdpProbe.summary,
+        phases,
+        warnings,
+      };
+    }
+
+    if (requestedPhase === "resume-canvas") {
+      const resumePhase = await measurePhase("resume-canvas", async () => {
+        const nativePage = await openZhipinNativePagePort();
+        try {
+          const dialogState = await nativePage.waitForResumeDialog(1_000);
+          const geometry = dialogState.canvasReady
+            ? await nativePage.readResumeCanvasGeometry()
+            : undefined;
+          return { dialogState, geometry };
+        } finally {
+          nativePage.close();
+        }
+      });
+      phases.push(resumePhase.phaseResult);
+      const probe = resumePhase.result;
+      return {
+        success: resumePhase.phaseResult.success,
+        requestedPhase,
+        mode: runtime.mode,
+        nativePages,
+        ...(targetPage !== undefined ? { targetPage } : {}),
+        browserAttached,
+        pageAttached,
+        nativeTimeline,
+        ...(probe !== undefined
+          ? {
+              resumeCanvas: {
+                dialogVisible: probe.dialogState.dialogVisible,
+                iframeFound: probe.dialogState.iframeFound,
+                iframeVisible: probe.dialogState.iframeVisible,
+                canvasReady: probe.dialogState.canvasReady,
+                ...(probe.geometry?.screenshotArea !== undefined
+                  ? { screenshotArea: probe.geometry.screenshotArea }
+                  : {}),
+                ...(probe.geometry?.canvasSize !== undefined
+                  ? { canvasSize: probe.geometry.canvasSize }
+                  : {}),
+                ...(probe.geometry?.error !== undefined ? { error: probe.geometry.error } : {}),
+              },
+            }
+          : {}),
         phases,
         warnings,
       };
