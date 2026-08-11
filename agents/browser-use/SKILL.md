@@ -1,13 +1,13 @@
 ---
 name: browser-use-agent
-description: 浏览器操控 Agent。控制浏览器操作招聘平台：读取消息、打开聊天、发送签名回复、换微信、滚动动态列表、查看推荐列表、筛选候选人、打招呼、查看简历；也提供通用 AX snapshot、@eN element ref 点击/输入，以及 BOSS直聘 native CDP / Playwright attach 风控诊断。
+description: 浏览器操控 Agent。控制浏览器操作招聘平台：读取消息、打开聊天、发送签名回复、换微信、滚动动态列表、查看推荐列表、筛选候选人、打招呼、打开简历弹窗并截取完整简历长图（供多模态识图）；也提供通用 AX snapshot、@eN element ref 点击/输入，以及 BOSS直聘 native CDP / Playwright attach 风控诊断。
 metadata:
   roll-env-file: references/env.yaml
 ---
 
 # Browser Use Agent
 
-浏览器自动化执行层。BOSS 直聘主链路优先走 native CDP backend；未迁移的低优先级简历弹窗工具仍使用 Playwright-backed 页面 attach。
+浏览器自动化执行层。BOSS 直聘链路（含简历弹窗与简历截图工具）全部使用 native CDP backend；Playwright attach 仅保留在显式诊断工具中。
 
 ## 使用前提
 
@@ -29,8 +29,8 @@ metadata:
 - `BROWSER_USE_POLICY_JSON` 可选配置 browser-use 工具级业务策略；日常推荐只把 `zhipin_send_prepared_reply` 配为 `confirm`。
 - 长任务前或状态异常时先跑 `roll doctor --fix-plan --json`；仅对配置迁移、`agents.dataDir`、孤儿 runtime 元数据这类安全项才使用 `roll doctor --fix --json`。
 - 页内反馈默认开启：
-  - `BROWSER_VISUAL_CURSOR`：native CDP 点击/拖拽/滚动前显示同源虚拟鼠标轨迹和点击波纹；简历弹窗等 Playwright-backed 工具仍使用旧虚拟指针。
-  - `BROWSER_VISUAL_ACTIVITY`：读取、识别、提取等操作显示状态胶囊和区域高亮。
+  - `BROWSER_VISUAL_CURSOR`：native CDP 点击/拖拽/滚动前显示同源虚拟鼠标轨迹和点击波纹。
+  - `BROWSER_VISUAL_ACTIVITY`：读取、识别、提取等操作显示状态胶囊和区域高亮；简历截图期间显示滚动读取百分比进度，截图前会自动隐藏反馈层避免进入图像。
 - 需要关闭反馈时，将对应环境变量设为 `false`。
 
 ## 多 Boss 账号 / 多 Profile 托管模式
@@ -237,9 +237,10 @@ click_ref(@eN) 或 type_ref(@eN, text, clear?)
 | `zhipin_filter_recommend_candidates(applyMode?, locationCity?, locationDistrict?, ageMin?, ageMax?, gender?, activity?, major?, recentNotView?, exchangeResumeWithColleague?, candidateKeywords?, school?, switchJobFrequency?, intention?, salary?, degree?, experience?, callPhone?)` | native CDP | 标准推荐筛选工具，覆盖推荐页顶部地区筛选和当前筛选面板里的年龄、性别、活跃度、专业、近期没有看过、是否与同事交换简历、牛人关键词、院校、跳槽频率、求职意向、薪资、学历、经验、是否可拨打电话；`locationCity:"上海市", locationDistrict:"浦东新区"` 可筛到区级；`applyMode:"patch"` 只改显式传入字段，`applyMode:"replace"` 先点普通筛选面板的 `清除` 再设置显式字段，地区只在显式传入 `locationCity/locationDistrict` 时修改；旧式 `{}` / 只传 `age/gender/activity` 仍按原三项重置语义执行。若返回 `status:"requires_vip"`，表示当前账号无法使用该筛选。 |
 | `zhipin_get_candidate_list(maxResults?, autoScroll?, maxScrolls?)` | native CDP | 读取推荐候选人卡片；默认滚动并按 `candidateId` / `data-geek` 去重，返回 `candidateRef`。 |
 | `zhipin_say_hello(indices?, candidateRefs?)` | native CDP | 批量点击「打招呼」；优先传 `candidateRefs`，`indices` 只作当前 DOM 快照兜底。 |
-| `zhipin_open_resume(index?, candidateRef?)` | Playwright-backed | 打开简历弹窗；优先传 `candidateRef`，低优先级未迁移项。 |
-| `zhipin_locate_resume_canvas()` | Playwright-backed | 定位 `#recommendFrame -> iframe[src*="c-resume"] -> canvas#resume, div#resume canvas`。 |
-| `zhipin_close_resume()` | Playwright-backed | 关闭简历弹窗；selector 契约见 `src/pages/zhipin/resume-dom-contract.ts`。 |
+| `zhipin_open_resume(index?, candidateRef?)` | native CDP | 点击候选人卡片打开简历详情弹窗；优先传 `candidateRef`；返回 `resumeReady` 表示简历 canvas 是否就绪。 |
+| `zhipin_capture_resume(outputPath?)` | native CDP | 截取当前简历弹窗为完整 PNG 长图；简历 canvas 是随滚动重绘的视口窗口，工具自动滚动分段并在浏览器内拼接（页面显示百分比进度胶囊）。返回 `imagePath` 与 MCP image content（多模态编排器可直接识图）；canvas 空白的 DOM 版式简历自动回退截取弹窗区域，`captureMode` 标识实际路径（`canvas-data-url` / `dom-screenshot` / `viewport-clip`）。需先 `zhipin_open_resume`。 |
+| `zhipin_locate_resume_canvas()` | native CDP | 探测简历弹窗结构与 canvas 就绪状态；结构为 `iframe[name="recommendFrame"] -> iframe[src*="c-resume"] -> canvas#resume`。 |
+| `zhipin_close_resume()` | native CDP | 关闭简历弹窗；优先点击关闭按钮，兜底发送 Escape；selector 契约见 `src/pages/zhipin/resume-dom-contract.ts`。 |
 
 推荐链路和动态列表细节见 `references/zhipin-workflows.md`。
 
@@ -309,7 +310,9 @@ click_ref(@eN) 或 type_ref(@eN, text, clear?)
 34. 不要用 `navigate_active_tab` 直接跳转 `https://www.zhipin.com/web/chat/*`；聊天页用 `zhipin_open_chat_page()`，推荐页用 `zhipin_open_recommend_page()`。
 35. BOSS 已有专用工具能表达业务意图时，不要为了“看见按钮”而绕开专用工具改用 `click_ref` / `type_ref`。
 36. 对 BOSS 未建模按钮，例如新出现的“交换电话”，可以先用 `browser_snapshot` 找到对应 `@eN`，再 `click_ref`；弹窗确认类二次动作必须重新 snapshot 后再点击。
-37. 长跑同一 BOSS tab 出现「选中态丢失 / 列表错乱 / 依赖当前选中聊天的工具失败」时，做 periodic recovery 的边界：
+37. 简历正文是 canvas 图像渲染，DOM/AX 拿不到文本；理解简历内容必须走 `zhipin_capture_resume` 的图像通道（多模态识图），不要尝试用 `browser_snapshot` 抓简历正文。
+38. `zhipin_capture_resume` 必须在 `zhipin_open_resume` 成功（`resumeReady:true`）后调用；截图结果同时通过 MCP image content 和 `imagePath` 文件两条通道返回，无图像通道的编排器读取 `imagePath`。读完简历后调用 `zhipin_close_resume` 再继续列表操作。
+39. 长跑同一 BOSS tab 出现「选中态丢失 / 列表错乱 / 依赖当前选中聊天的工具失败」时，做 periodic recovery 的边界：
     - 优先 `zhipin_open_chat_page({ forceReload: true })`（或通用 `browser_reload_active_tab`）：等价手动 F5，清空当前 document 的 DOM 与页面内 SPA 状态，保留 Chrome 窗口与 profile 登录态；BOSS 专用工具会在 document swap 后继续等待实际聊天列表 DOM。reload 后所有 `@eN` / `candidateRef` 失效，必须重新 snapshot / 读列表，并由编排器恢复页面筛选状态。
     - 普通 `zhipin_open_chat_page()`（不带 forceReload）在已处于沟通页时只返回 `alreadyOnChat`，**不会**卸载 document，无法清状态。
     - `roll browser stop` 才能回收 renderer 进程内存，但会关闭浏览器窗口；reload 只清 document 级状态，**不保证** renderer 100% 把内存归还 OS，杀进程仍由 `roll browser stop` 负责。
@@ -332,6 +335,13 @@ zhipin_open_recommend_page
   -> zhipin_get_candidate_list(maxResults?, autoScroll=true)
   -> 按 buttonText/年龄/业务资格过滤
   -> zhipin_say_hello(candidateRefs)
+
+查看简历:
+zhipin_get_candidate_list
+  -> zhipin_open_resume(candidateRef)          # resumeReady:true 后再截图
+  -> zhipin_capture_resume()                    # 长简历自动滚动拼接为完整长图
+  -> 编排器用多模态识图能力理解返回的图像 / imagePath
+  -> zhipin_close_resume()
 ```
 
 ## 参考资料
