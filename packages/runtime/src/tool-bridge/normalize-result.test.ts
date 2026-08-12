@@ -194,7 +194,7 @@ test("normalizeToolResult 从 display 移除 structuredContent 中的二进制�
   assert.doesNotMatch(display, /hidden|a{100}|b{100}|c{100}|d{100}|e{100}|f{100}|g{100}|h{100}/u);
 });
 
-test("normalizeToolResult 对组合 text/structured/media 模型投影执行统一预算", () => {
+test("normalizeToolResult 文本走统一预算而 media 走独立文件预算", () => {
   const result = normalizeToolResult({
     content: [
       { type: "text", text: "t".repeat(200_000) },
@@ -205,13 +205,37 @@ test("normalizeToolResult 对组合 text/structured/media 模型投影执行统�
 
   assert.equal(result.model.type, "content");
   if (result.model.type === "content") {
-    const projectedChars = result.model.value.reduce(
-      (total, part) => total + (part.type === "text" ? part.text.length : part.data.data.length),
+    const textChars = result.model.value.reduce(
+      (total, part) => total + (part.type === "text" ? part.text.length : 0),
       0,
     );
-    assert.ok(projectedChars <= 60_000, `actual model chars: ${String(projectedChars)}`);
+    assert.ok(textChars <= 60_000, `actual text chars: ${String(textChars)}`);
+    const imagePart = result.model.value.find((part) => part.type === "file");
+    assert.ok(imagePart !== undefined, "image file part should survive model projection");
+    if (imagePart !== undefined && imagePart.type === "file") {
+      assert.equal(imagePart.data.data.length, 200_000);
+    }
   }
   assert.equal(result.raw && typeof result.raw === "object", true);
+});
+
+test("normalizeToolResult 超出文件预算的 media 降级为标记文本", () => {
+  const result = normalizeToolResult({
+    content: [{ type: "image", data: "x".repeat(13_000_000), mimeType: "image/png" }],
+  });
+
+  assert.equal(result.model.type, "content");
+  if (result.model.type === "content") {
+    assert.equal(
+      result.model.value.some((part) => part.type === "file"),
+      false,
+    );
+    const marker = result.model.value.find((part) => part.type === "text");
+    assert.ok(marker !== undefined && marker.type === "text");
+    if (marker !== undefined && marker.type === "text") {
+      assert.match(marker.text, /file omitted from model projection/u);
+    }
+  }
 });
 
 test("normalizeToolResult 同时限制零字节 media part 数量", () => {

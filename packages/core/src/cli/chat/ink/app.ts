@@ -23,6 +23,15 @@ import {
 import { bannerTextLine, buildBannerLines, type BannerInfo } from "../banner.ts";
 import { cycleThinking } from "./thinking.ts";
 import { appendInputHistory } from "./input-history.ts";
+import {
+  attachmentExists,
+  formatAttachmentSize,
+  loadPendingAttachment,
+  MAX_ATTACHMENT_BYTES,
+  parsePastedImagePaths,
+  type PendingChatAttachment,
+} from "./paste-attachments.ts";
+import { readClipboardImage } from "./clipboard-image.ts";
 import { resolveTurnActivity } from "./turn-activity.ts";
 import { TurnStatusLine } from "./turn-status-line.ts";
 import { resolveChatLayout } from "./layout.ts";
@@ -219,17 +228,114 @@ function ChatSessionView(props: ChatSessionViewProps): ReactElement {
     }
   });
 
+  const [attachments, setAttachments] = useState<readonly PendingChatAttachment[]>([]);
+
+  const handlePasteText = useCallback(
+    (pasted: string): boolean => {
+      const paths = parsePastedImagePaths(pasted);
+      if (paths === undefined || !paths.every(attachmentExists)) {
+        return false;
+      }
+      const loaded: PendingChatAttachment[] = [];
+      for (const path of paths) {
+        const result = loadPendingAttachment(path);
+        if (result.ok) {
+          loaded.push(result.attachment);
+        } else {
+          commitHistory({ kind: "notice", id: randomUUID(), text: result.message });
+        }
+      }
+      if (loaded.length === 0) {
+        return false;
+      }
+      setAttachments((current) => [...current, ...loaded]);
+      return true;
+    },
+    [commitHistory],
+  );
+
+  const removeLastAttachment = useCallback(() => {
+    setAttachments((current) => current.slice(0, -1));
+  }, []);
+
+  const [clipboardPending, setClipboardPending] = useState(false);
+  const clipboardBusyRef = useRef(false);
+  const clipboardCounterRef = useRef(0);
+  const attachmentEpochRef = useRef(0);
+  const handleClipboardImage = useCallback(() => {
+    if (clipboardBusyRef.current) {
+      return;
+    }
+    clipboardBusyRef.current = true;
+    setClipboardPending(true);
+    const epoch = attachmentEpochRef.current;
+    const notice = (text: string): void => {
+      commitHistory({ kind: "notice", id: randomUUID(), text });
+    };
+    readClipboardImage().then((result) => {
+      clipboardBusyRef.current = false;
+      setClipboardPending(false);
+      if (epoch !== attachmentEpochRef.current) {
+        notice("剪贴板图像在消息发送后才读取完成，已丢弃；如需附上请再按一次 Ctrl+V");
+        return;
+      }
+      if (result.kind === "file") {
+        const loaded = loadPendingAttachment(result.path);
+        if (loaded.ok) {
+          setAttachments((current) => [...current, loaded.attachment]);
+        } else {
+          notice(loaded.message);
+        }
+        return;
+      }
+      if (result.kind === "image") {
+        const bytes = Buffer.from(result.data, "base64").length;
+        if (bytes > MAX_ATTACHMENT_BYTES) {
+          notice(
+            `剪贴板图像超过 ${formatAttachmentSize(MAX_ATTACHMENT_BYTES)} 上限（实际 ${formatAttachmentSize(bytes)}）`,
+          );
+          return;
+        }
+        clipboardCounterRef.current += 1;
+        setAttachments((current) => [
+          ...current,
+          {
+            name: `剪贴板图像${String(clipboardCounterRef.current)}.png`,
+            path: "",
+            sizeLabel: formatAttachmentSize(bytes),
+            data: result.data,
+            mediaType: result.mediaType,
+          },
+        ]);
+        return;
+      }
+      if (result.kind === "none") {
+        notice("剪贴板中没有图像");
+        return;
+      }
+      if (result.kind === "unsupported") {
+        notice("当前平台暂不支持剪贴板图像粘贴");
+        return;
+      }
+      notice(`读取剪贴板失败: ${result.message}`);
+    });
+  }, [commitHistory]);
+
   const handleSubmit = (raw: string): void => {
     const text = raw.trim();
-    if (text.length === 0) {
+    if (text.length === 0 && attachments.length === 0) {
       setDraft("");
       return;
     }
-    rememberInput(text);
+    if (text.length > 0) {
+      rememberInput(text);
+    }
     // banner 需先于首条消息落入 Static，否则顺序颠倒
     handleBannerSettled();
-    onUserSubmit(text);
-    submit(text);
+    onUserSubmit(text.length > 0 ? text : "[图片]");
+    submit(text, attachments);
+    attachmentEpochRef.current += 1;
+    setAttachments([]);
   };
 
   const runSlash = (raw: string): void => {
@@ -392,11 +498,16 @@ function ChatSessionView(props: ChatSessionViewProps): ReactElement {
               slashActive,
               slashPopupActive,
               autoApprove: state.status.autoApprove,
+              attachments,
+              attachmentsPending: clipboardPending,
               onChange: setDraft,
               onSubmit: handleSubmit,
               onSlashMove,
               onSlashComplete,
               onSlashRun,
+              onPasteText: handlePasteText,
+              onRemoveLastAttachment: removeLastAttachment,
+              onRequestClipboardImage: handleClipboardImage,
             });
   const turnActivity = resolveTurnActivity(state);
 

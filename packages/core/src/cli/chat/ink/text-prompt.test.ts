@@ -422,3 +422,180 @@ test("SGR mouse bytes never enter the prompt draft", async () => {
   assert.equal(sink.value, "");
   unmount();
 });
+
+interface AttachmentHarnessProps {
+  readonly sink: HarnessSink;
+  readonly attachments?: readonly { name: string; sizeLabel: string }[];
+  readonly pasted?: string[];
+  readonly consumePaste?: boolean;
+  readonly removed?: { count: number };
+}
+
+function AttachmentHarness(props: AttachmentHarnessProps): ReactElement {
+  const [value, setValue] = useState("");
+  props.sink.value = value;
+  props.sink.setValue = setValue;
+  return h(TextPrompt, {
+    value,
+    width: 100,
+    viewportRows: 12,
+    maxRows: 12,
+    showHint: true,
+    inputHistory: [],
+    disabled: false,
+    slashActive: false,
+    slashPopupActive: false,
+    autoApprove: false,
+    ...(props.attachments !== undefined ? { attachments: props.attachments } : {}),
+    onChange: (next: string) => {
+      props.sink.changes.push(next);
+      setValue(next);
+    },
+    onSubmit: (submitted: string) => {
+      props.sink.submitted.push(submitted);
+    },
+    onSlashMove: () => {},
+    onSlashComplete: () => {},
+    onSlashRun: () => {},
+    onPasteText: (text: string) => {
+      props.pasted?.push(text);
+      return props.consumePaste ?? false;
+    },
+    onRemoveLastAttachment: () => {
+      if (props.removed !== undefined) {
+        props.removed.count += 1;
+      }
+    },
+  });
+}
+
+test("onPasteText 消费粘贴后不再插入文本", async () => {
+  const sink = makeSink();
+  const pasted: string[] = [];
+  const { stdin, unmount } = render(h(AttachmentHarness, { sink, pasted, consumePaste: true }));
+  await delay(10);
+  await type(stdin, "\x1b[200~/tmp/shot.png\x1b[201~");
+  assert.deepEqual(pasted, ["/tmp/shot.png"]);
+  assert.equal(sink.value, "");
+  unmount();
+});
+
+test("onPasteText 放行时按原文插入", async () => {
+  const sink = makeSink();
+  const pasted: string[] = [];
+  const { stdin, unmount } = render(h(AttachmentHarness, { sink, pasted, consumePaste: false }));
+  await delay(10);
+  await type(stdin, "\x1b[200~普通文本\x1b[201~");
+  assert.deepEqual(pasted, ["普通文本"]);
+  assert.equal(sink.value, "普通文本");
+  unmount();
+});
+
+test("附件 chip 行渲染文件名与大小", async () => {
+  const sink = makeSink();
+  const { lastFrame, unmount } = render(
+    h(AttachmentHarness, {
+      sink,
+      attachments: [
+        { name: "shot.png", sizeLabel: "118KB" },
+        { name: "b.jpg", sizeLabel: "2.1MB" },
+      ],
+    }),
+  );
+  await delay(10);
+  const frame = stripVTControlCharacters(lastFrame() ?? "");
+  assert.match(frame, /shot\.png 118KB/u);
+  assert.match(frame, /b\.jpg 2\.1MB/u);
+  assert.match(frame, /空输入退格移除/u);
+  unmount();
+});
+
+test("空输入退格移除最后一个附件，非空输入退格删字符", async () => {
+  const sink = makeSink();
+  const removed = { count: 0 };
+  const { stdin, unmount } = render(
+    h(AttachmentHarness, {
+      sink,
+      removed,
+      attachments: [{ name: "shot.png", sizeLabel: "118KB" }],
+    }),
+  );
+  await delay(10);
+  await type(stdin, "\x7f");
+  assert.equal(removed.count, 1);
+  await type(stdin, "ab", "\x7f");
+  assert.equal(sink.value, "a");
+  assert.equal(removed.count, 1);
+  unmount();
+});
+
+test("Ctrl+V 触发剪贴板图像回调而不落入编辑器", async () => {
+  const sink = makeSink();
+  let requested = 0;
+  const { stdin, unmount } = render(
+    h(TextPrompt, {
+      value: "",
+      width: 100,
+      viewportRows: 12,
+      maxRows: 12,
+      showHint: true,
+      inputHistory: [],
+      disabled: false,
+      slashActive: false,
+      slashPopupActive: false,
+      autoApprove: false,
+      onChange: (next: string) => {
+        sink.changes.push(next);
+      },
+      onSubmit: () => {},
+      onSlashMove: () => {},
+      onSlashComplete: () => {},
+      onSlashRun: () => {},
+      onRequestClipboardImage: () => {
+        requested += 1;
+      },
+    }),
+  );
+  await delay(10);
+  await type(stdin, "\x16");
+  assert.equal(requested, 1);
+  assert.deepEqual(sink.changes, []);
+  unmount();
+});
+
+test("读取剪贴板 pending 状态渲染提示行", async () => {
+  const sink = makeSink();
+  const { lastFrame, unmount } = render(h(AttachmentHarness, { sink, attachments: [] }));
+  await delay(10);
+  const idleFrame = stripVTControlCharacters(lastFrame() ?? "");
+  assert.doesNotMatch(idleFrame, /读取剪贴板/u);
+  unmount();
+
+  const pendingSink = makeSink();
+  const pending = render(
+    h(TextPrompt, {
+      value: "",
+      width: 100,
+      viewportRows: 12,
+      maxRows: 12,
+      showHint: true,
+      inputHistory: [],
+      disabled: false,
+      slashActive: false,
+      slashPopupActive: false,
+      autoApprove: false,
+      attachmentsPending: true,
+      onChange: (next: string) => {
+        pendingSink.changes.push(next);
+      },
+      onSubmit: () => {},
+      onSlashMove: () => {},
+      onSlashComplete: () => {},
+      onSlashRun: () => {},
+    }),
+  );
+  await delay(10);
+  const pendingFrame = stripVTControlCharacters(pending.lastFrame() ?? "");
+  assert.match(pendingFrame, /读取剪贴板…/u);
+  pending.unmount();
+});

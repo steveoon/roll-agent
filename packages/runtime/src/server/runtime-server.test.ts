@@ -26,7 +26,7 @@ import {
   type ApprovalRequestParamsV12,
   type PendingInteractionProjection,
   type RuntimeEventEnvelope,
-  type RuntimeEventEnvelopeV13,
+  type RuntimeEventEnvelopeV14,
   type RuntimeServerRequestInputForSupportedVersions,
   type RuntimeServerRequestMethod,
   type UserInputRequestParamsV12,
@@ -2218,7 +2218,7 @@ test("Runtime Protocol 1.3 replay 在 response barrier 后发布并发 live 且�
         !injectedLive &&
         "method" in message &&
         message.method === RUNTIME_EVENT_NOTIFICATION &&
-        (message.params as RuntimeEventEnvelopeV13).event.type === "approval.required"
+        (message.params as RuntimeEventEnvelopeV14).event.type === "approval.required"
       ) {
         injectedLive = true;
         internal.emit(threadId, turnId, { type: "approval.required", approval: liveApproval });
@@ -2272,7 +2272,7 @@ test("Runtime Protocol 1.3 replay 在 response barrier 后发布并发 live 且�
   assert.deepEqual(
     sent.map((message) => {
       if ("method" in message && message.method === RUNTIME_EVENT_NOTIFICATION) {
-        return (message.params as RuntimeEventEnvelopeV13).event.type;
+        return (message.params as RuntimeEventEnvelopeV14).event.type;
       }
       if ("id" in message && message.id === 3) {
         return "resume.response";
@@ -2317,12 +2317,12 @@ test("Runtime Protocol 1.3 replay 在 response barrier 后发布并发 live 且�
       !("id" in message) &&
       message.method === RUNTIME_EVENT_NOTIFICATION &&
       (() => {
-        const event = (message.params as RuntimeEventEnvelopeV13).event;
+        const event = (message.params as RuntimeEventEnvelopeV14).event;
         return event.type === "message.completed" && event.text.length === largeLiveText.length;
       })(),
   );
   assert.ok(largeLiveEvent);
-  const largeLiveEnvelope = largeLiveEvent.params as RuntimeEventEnvelopeV13;
+  const largeLiveEnvelope = largeLiveEvent.params as RuntimeEventEnvelopeV14;
   assert.equal(largeLiveEnvelope.event.type, "message.completed");
   if (largeLiveEnvelope.event.type === "message.completed") {
     assert.equal(largeLiveEnvelope.event.text.length, largeLiveText.length);
@@ -3714,4 +3714,93 @@ test("RuntimeServer.abortAll 对未决审批发送 cancel 并 fail-closed 收口
     client.events.some((envelope) => envelope.event.type === "tool.completed"),
     false,
   );
+});
+
+test("Runtime Protocol 1.4 routes attachment methods to the service and gates 1.3 sessions", async (t) => {
+  const harness = createApprovalProtocolHarness();
+  const client = attachRuntimeProtocolClient(harness.clientConn);
+  t.after(() => harness.close());
+
+  await client.request(1, RUNTIME_METHODS.initialize, {
+    protocolVersions: ["1.4"],
+    client: { name: "attachment-routing-client", version: "1.0.0" },
+  });
+  await client.request(2, RUNTIME_METHODS.clientCapabilitiesSet, {
+    revision: 1,
+    serverRequestMethods: [],
+  });
+  const created = (await client.request(3, RUNTIME_METHODS.threadCreate, {
+    requestId: "00000000-0000-4000-8000-0000000000e0",
+    title: "attachment routing",
+  })) as { readonly thread: { readonly id: string } };
+  const stageParams = {
+    requestId: "00000000-0000-4000-8000-0000000000e1",
+    threadId: created.thread.id,
+    fileName: "shot.png",
+    mediaType: "image/png",
+    bytes: 5,
+    sha256: "a".repeat(64),
+    source: "local-path",
+    sourcePath: "/tmp/shot.png",
+  };
+  const reachedService = (await client.requestError(
+    4,
+    RUNTIME_METHODS.attachmentStage,
+    stageParams,
+  )) as {
+    readonly message?: string;
+    readonly data?: { readonly rollCode?: string };
+  };
+  assert.equal(reachedService.data?.rollCode, "CAPABILITY_UNAVAILABLE");
+  assert.match(reachedService.message ?? "", /未配置附件存储/u);
+
+  const legacyHarness = createApprovalProtocolHarness();
+  const legacy = attachRuntimeProtocolClient(legacyHarness.clientConn);
+  t.after(() => legacyHarness.close());
+  await legacy.request(1, RUNTIME_METHODS.initialize, {
+    protocolVersions: ["1.3"],
+    client: { name: "v13-attachment-client", version: "1.3.0" },
+  });
+  await legacy.request(2, RUNTIME_METHODS.clientCapabilitiesSet, {
+    revision: 1,
+    serverRequestMethods: [],
+  });
+  const gated = (await legacy.requestError(3, RUNTIME_METHODS.attachmentStage, stageParams)) as {
+    readonly message?: string;
+    readonly data?: { readonly rollCode?: string };
+  };
+  assert.equal(gated.data?.rollCode, "CAPABILITY_UNAVAILABLE");
+  assert.match(gated.message ?? "", /1\.3 不支持方法/u);
+});
+
+test("Runtime Protocol 1.4 sessions receive the bounded recovery snapshot projection", async (t) => {
+  const harness = createApprovalProtocolHarness();
+  const client = attachRuntimeProtocolClient(harness.clientConn);
+  t.after(() => harness.close());
+
+  await client.request(1, RUNTIME_METHODS.initialize, {
+    protocolVersions: ["1.4"],
+    client: { name: "v14-recovery-client", version: "1.0.0" },
+  });
+  await client.request(2, RUNTIME_METHODS.clientCapabilitiesSet, {
+    revision: 1,
+    serverRequestMethods: [],
+  });
+  const created = (await client.request(3, RUNTIME_METHODS.threadCreate, {
+    requestId: "00000000-0000-4000-8000-0000000000e5",
+    title: "v14 recovery",
+  })) as { readonly thread: { readonly id: string } };
+  const threadId = threadIdSchema.parse(created.thread.id);
+  harness.store.appendMessages(threadId, [{ role: "assistant", content: "x".repeat(2_048) }]);
+
+  const recovery = (await client.request(4, RUNTIME_METHODS.threadSnapshot, {
+    threadId,
+    limit: 1,
+    recovery: true,
+  })) as {
+    readonly recoveryProjection?: true;
+    readonly messages: { readonly items: readonly unknown[] };
+  };
+  assert.equal(recovery.recoveryProjection, true);
+  assert.deepEqual(recovery.messages.items, []);
 });

@@ -1,21 +1,33 @@
 import { defineTool } from "@roll-agent/sdk";
 import { z } from "zod";
-import { getContextManager } from "../runtime-holder.ts";
-import {
-  ZHIPIN_RESUME_DIALOG_SELECTOR,
-  ZHIPIN_RESUME_IFRAME_CLOSE_SELECTORS,
-  ZHIPIN_RESUME_PAGE_CLOSE_SELECTORS,
-  ZHIPIN_RESUME_PAGE_DIALOG_SELECTOR,
-  ZHIPIN_RESUME_RECOMMEND_FRAME_NAME,
-  ZHIPIN_RESUME_RECOMMEND_FRAME_URL_MARKER,
-} from "../pages/zhipin/resume-dom-contract.ts";
-import { moveVisualCursorToLocator, showVisualClickOnLocator } from "../visual-cursor.ts";
+import { openZhipinNativePagePort } from "../pages/zhipin/native-page.ts";
+import type { ZhipinNativePagePort } from "../pages/zhipin/native-page.ts";
 
 const OutputSchema = z.object({
   success: z.boolean(),
   closed: z.boolean(),
+  method: z.enum(["close-button", "escape"]).optional(),
   error: z.string().optional(),
 });
+
+type ZhipinCloseResumeDeps = {
+  readonly openNativePagePort: typeof openZhipinNativePagePort;
+};
+
+let zhipinCloseResumeDepsOverride: Partial<ZhipinCloseResumeDeps> | undefined;
+
+function getZhipinCloseResumeDeps(): ZhipinCloseResumeDeps {
+  return {
+    openNativePagePort: openZhipinNativePagePort,
+    ...zhipinCloseResumeDepsOverride,
+  };
+}
+
+export function setZhipinCloseResumeDepsForTests(
+  override: Partial<ZhipinCloseResumeDeps> | undefined,
+): void {
+  zhipinCloseResumeDepsOverride = override;
+}
 
 export const zhipinCloseResume = defineTool({
   name: "zhipin_close_resume",
@@ -23,59 +35,25 @@ export const zhipinCloseResume = defineTool({
   input: z.object({}),
   output: OutputSchema,
   execute: async (_input, ctx) => {
-    ctx.logger.info("Closing resume detail modal");
+    ctx.logger.info("Closing resume detail modal through native backend");
 
-    const ctxManager = getContextManager();
-    const page = await ctxManager.getPage("zhipin");
-    const frame =
-      page.frame(ZHIPIN_RESUME_RECOMMEND_FRAME_NAME) ??
-      page.frames().find((frame) => frame.url().includes(ZHIPIN_RESUME_RECOMMEND_FRAME_URL_MARKER));
-
-    const closed = await (async () => {
-      // 优先在 iframe 中查找
-      if (frame) {
-        for (const sel of ZHIPIN_RESUME_IFRAME_CLOSE_SELECTORS) {
-          const btn = frame.locator(sel).first();
-          if (await btn.isVisible()) {
-            await moveVisualCursorToLocator(page, btn, { target: frame });
-            await showVisualClickOnLocator(page, btn, { target: frame });
-            await btn.click();
-            return true;
-          }
-        }
+    const deps = getZhipinCloseResumeDeps();
+    let nativePage: ZhipinNativePagePort | undefined;
+    try {
+      nativePage = await deps.openNativePagePort();
+      const result = await nativePage.closeResumeDialog();
+      if (!result.closed) {
+        return { success: false, closed: false, error: result.error ?? "简历弹窗未关闭" };
       }
 
-      // 回退到主页面
-      for (const sel of ZHIPIN_RESUME_PAGE_CLOSE_SELECTORS) {
-        const btn = page.locator(sel).first();
-        if (await btn.isVisible()) {
-          await moveVisualCursorToLocator(page, btn);
-          await showVisualClickOnLocator(page, btn);
-          await btn.click();
-          return true;
-        }
-      }
-      return false;
-    })();
-
-    if (!closed) return { success: false, closed: false, error: "未找到关闭按钮" };
-
-    // 验证关闭（轮询）
-    let verified = false;
-    for (let i = 0; i < 5; i++) {
-      await page.waitForTimeout(300);
-      const dialogExists = frame
-        ? await frame.$(ZHIPIN_RESUME_DIALOG_SELECTOR)
-        : await page.$(ZHIPIN_RESUME_PAGE_DIALOG_SELECTOR);
-      if (!dialogExists || !(await dialogExists.isVisible())) {
-        verified = true;
-        break;
-      }
+      ctx.logger.info(`Resume modal closed via ${result.method ?? "unknown"}`);
+      return {
+        success: true,
+        closed: true,
+        ...(result.method !== undefined ? { method: result.method } : {}),
+      };
+    } finally {
+      nativePage?.close();
     }
-
-    ctx.logger.info(
-      verified ? "Resume modal closed and verified" : "Resume modal close unverified",
-    );
-    return { success: true, closed: true };
   },
 });

@@ -38,6 +38,16 @@ import {
   ZHIPIN_RECOMMEND_FILTER_OPTION_FIELDS,
   shouldApplyRecommendAgeRange,
 } from "./recommend-filter.ts";
+import {
+  composeResumeCanvasArea,
+  ZHIPIN_RESUME_CANVAS_SELECTOR,
+  ZHIPIN_RESUME_CARD_CLICK_SURFACE_SELECTOR,
+  ZHIPIN_RESUME_DIALOG_SELECTOR,
+  ZHIPIN_RESUME_CLOSE_ELEMENT_SELECTORS,
+  ZHIPIN_RESUME_CLOSE_SCOPE_SELECTOR,
+  ZHIPIN_RESUME_IFRAME_SELECTOR,
+  type ZhipinResumeCanvasRect,
+} from "./resume-dom-contract.ts";
 import { ZHIPIN_SELECTORS } from "./selectors.ts";
 import type { UsernameEvidence } from "./username.ts";
 import { ZHIPIN_USERNAME_LENGTH_LIMIT } from "./username.ts";
@@ -58,6 +68,9 @@ const NATIVE_RECOMMEND_BOUNDARY_LOAD_RETRIES = 4;
 const NATIVE_RECOMMEND_MAX_NO_NEW_ROUNDS = 4;
 const NATIVE_CLICK_SETTLE_MS = 250;
 const NATIVE_CLICK_PRESS_MS = 90;
+const RESUME_STITCH_MAX_ROUNDS = 30;
+const RESUME_STITCH_RENDER_SETTLE_MS = 700;
+const RESUME_STITCH_INIT_SETTLE_MS = 800;
 const NATIVE_WHEEL_SCROLL_DISTANCE = 520;
 const NATIVE_DEFAULT_AGE_MIN = 16;
 const NATIVE_AGE_SLIDER_NUMERIC_MAX_ESTIMATE = 50;
@@ -395,6 +408,35 @@ export type NativeRecommendCardInspection = {
 
 export type NativeRecommendGreetResult = NativeRecommendCardInspection & {
   readonly clicked: boolean;
+};
+
+export type NativeResumeDialogState = {
+  readonly dialogVisible: boolean;
+  readonly iframeFound: boolean;
+  readonly iframeVisible: boolean;
+  readonly canvasReady: boolean;
+};
+
+export type NativeResumeCanvasCapture = {
+  readonly found: boolean;
+  readonly screenshotArea?: ZhipinResumeCanvasRect;
+  readonly canvasSize?: { readonly width: number; readonly height: number };
+  readonly dataUrl?: string;
+  readonly dataUrlError?: string;
+  readonly blank?: boolean;
+  readonly error?: string;
+};
+
+export type NativeResumeStitchProgress = {
+  readonly round: number;
+  readonly scrolledPx: number;
+  readonly totalPx: number;
+};
+
+export type NativeResumeCloseResult = {
+  readonly closed: boolean;
+  readonly method?: "close-button" | "escape";
+  readonly error?: string;
 };
 
 export type NativeRecommendJobOption = {
@@ -789,6 +831,87 @@ function toNativeClickTarget(value: unknown): NativeClickTarget {
     found: requireBoolean(value["found"]),
     x: requireNumber(value["x"]),
     y: requireNumber(value["y"]),
+  };
+}
+
+function toResumeOffset(value: unknown): { readonly x: number; readonly y: number } | null {
+  if (!isRecord(value) || typeof value["x"] !== "number" || typeof value["y"] !== "number") {
+    return null;
+  }
+  return { x: value["x"], y: value["y"] };
+}
+
+function toResumeSize(
+  value: unknown,
+): { readonly width: number; readonly height: number } | undefined {
+  if (!isRecord(value) || typeof value["width"] !== "number" || typeof value["height"] !== "number") {
+    return undefined;
+  }
+  return { width: value["width"], height: value["height"] };
+}
+
+function toResumeRect(value: unknown): ZhipinResumeCanvasRect | undefined {
+  if (
+    !isRecord(value) ||
+    typeof value["x"] !== "number" ||
+    typeof value["y"] !== "number" ||
+    typeof value["width"] !== "number" ||
+    typeof value["height"] !== "number"
+  ) {
+    return undefined;
+  }
+  return { x: value["x"], y: value["y"], width: value["width"], height: value["height"] };
+}
+
+function toNativeResumeDialogState(value: unknown): NativeResumeDialogState {
+  if (!isRecord(value)) {
+    return { dialogVisible: false, iframeFound: false, iframeVisible: false, canvasReady: false };
+  }
+
+  return {
+    dialogVisible: value["dialogVisible"] === true,
+    iframeFound: value["iframeFound"] === true,
+    iframeVisible: value["iframeVisible"] === true,
+    canvasReady: value["canvasReady"] === true,
+  };
+}
+
+function toNativeResumeStitchedCapture(
+  initValue: unknown,
+  exportValue: unknown,
+  recommendFrameOffset: { readonly x: number; readonly y: number } | null,
+): NativeResumeCanvasCapture {
+  if (!isRecord(initValue) || initValue["found"] !== true) {
+    return { found: false, error: "无法读取简历 canvas 状态" };
+  }
+
+  const canvasRect = toResumeRect(initValue["canvasRect"]);
+  if (canvasRect === undefined) {
+    return { found: false, error: "简历 canvas 坐标不完整" };
+  }
+
+  const screenshotArea = composeResumeCanvasArea({
+    recommendFrameRect: recommendFrameOffset,
+    resumeFrameRect: toResumeOffset(initValue["resumeFrameRect"]),
+    canvasRect,
+  });
+
+  const exported = isRecord(exportValue) ? exportValue : {};
+  const rawSize = exported["canvasSize"];
+  const canvasSize =
+    isRecord(rawSize) && typeof rawSize["width"] === "number" && typeof rawSize["height"] === "number"
+      ? { width: rawSize["width"], height: rawSize["height"] }
+      : { width: Math.round(canvasRect.width), height: Math.round(canvasRect.height) };
+
+  const dataUrl = exported["dataUrl"];
+  const dataUrlError = exported["dataUrlError"];
+  return {
+    found: true,
+    screenshotArea,
+    canvasSize,
+    ...(typeof dataUrl === "string" && dataUrl.startsWith("data:image/") ? { dataUrl } : {}),
+    ...(typeof dataUrlError === "string" ? { dataUrlError } : {}),
+    ...(exported["blank"] === true ? { blank: true } : {}),
   };
 }
 
@@ -2448,6 +2571,225 @@ export class ZhipinNativePagePort {
     };
   }
 
+  async clickRecommendCardSurface(
+    index: number,
+    options: NativeClickOptions = {},
+  ): Promise<boolean> {
+    const target = await this.resolveRecommendClickTarget(
+      this.buildRecommendCardOpenClickExpression(Math.max(0, Math.floor(index))),
+    );
+    return await this.dispatchNativeClick(target, options);
+  }
+
+  async waitForResumeDialog(timeoutMs = 10_000): Promise<NativeResumeDialogState> {
+    const startedAt = Date.now();
+    let state = await this.readResumeDialogState();
+    while (!state.canvasReady && Date.now() - startedAt < timeoutMs) {
+      await delay(NATIVE_SELECTOR_POLL_MS);
+      state = await this.readResumeDialogState();
+    }
+    return state;
+  }
+
+  async readResumeCanvasGeometry(): Promise<NativeResumeCanvasCapture> {
+    const expression = this.buildResumeCanvasGeometryExpression();
+    let viaFrame = false;
+    let value: unknown = await this.evaluateJson(expression).catch(() => undefined);
+    if (!isRecord(value) || value["found"] !== true) {
+      const frameValue = await this.evaluateRecommendFrameJson(expression);
+      if (frameValue !== undefined) {
+        value = frameValue;
+        viaFrame = true;
+      }
+    }
+    if (!isRecord(value) || value["found"] !== true) {
+      const error = isRecord(value) ? value["error"] : undefined;
+      return { found: false, error: typeof error === "string" ? error : "未找到简历 canvas" };
+    }
+
+    const canvasRect = toResumeRect(value["canvasRect"]);
+    const canvasSize = toResumeSize(value["canvasSize"]);
+    if (canvasRect === undefined || canvasSize === undefined) {
+      return { found: false, error: "简历 canvas 坐标读取失败" };
+    }
+
+    const resumeFrameRect = toResumeOffset(value["resumeFrameRect"]);
+    const offset = viaFrame ? await this.readRecommendFrameOffset() : undefined;
+    const screenshotArea = composeResumeCanvasArea({
+      recommendFrameRect:
+        offset !== undefined && offset.found ? { x: offset.left, y: offset.top } : null,
+      resumeFrameRect: resumeFrameRect ?? null,
+      canvasRect,
+    });
+    return { found: true, screenshotArea, canvasSize };
+  }
+
+  private buildResumeCanvasGeometryExpression(): string {
+    return `(() => {
+      const resumeIframeSelector = ${JSON.stringify(ZHIPIN_RESUME_IFRAME_SELECTOR)};
+      const canvasSelector = ${JSON.stringify(ZHIPIN_RESUME_CANVAS_SELECTOR)};
+      const resumeIframe = document.querySelector(resumeIframeSelector);
+      if (!resumeIframe) return { found: false, error: "未找到简历 iframe" };
+      const resumeDoc = resumeIframe.contentDocument;
+      if (!resumeDoc) return { found: false, error: "无法访问简历 iframe 内容" };
+      const canvas = resumeDoc.querySelector(canvasSelector);
+      if (!canvas) return { found: false, error: "简历 canvas 未加载" };
+      const iframeRect = resumeIframe.getBoundingClientRect();
+      const canvasRect = canvas.getBoundingClientRect();
+      return {
+        found: true,
+        resumeFrameRect: { x: iframeRect.x, y: iframeRect.y },
+        canvasRect: {
+          x: canvasRect.x,
+          y: canvasRect.y,
+          width: canvasRect.width,
+          height: canvasRect.height
+        },
+        canvasSize: { width: canvas.width, height: canvas.height }
+      };
+    })()`;
+  }
+
+  async captureResumeCanvas(
+    onProgress?: (progress: NativeResumeStitchProgress) => void | Promise<void>,
+  ): Promise<NativeResumeCanvasCapture> {
+    await delay(RESUME_STITCH_INIT_SETTLE_MS);
+    const initExpression = this.buildResumeStitchInitExpression();
+    let viaFrame = false;
+    let initValue: unknown = await this.evaluateJson(initExpression).catch(() => undefined);
+    if (!isRecord(initValue) || initValue["found"] !== true) {
+      const frameValue = await this.evaluateRecommendFrameJson(initExpression);
+      if (frameValue !== undefined) {
+        initValue = frameValue;
+        viaFrame = true;
+      }
+    }
+    if (!isRecord(initValue) || initValue["found"] !== true) {
+      const error = isRecord(initValue) ? initValue["error"] : undefined;
+      return { found: false, error: typeof error === "string" ? error : "未找到简历 canvas" };
+    }
+
+    const evaluateInContext = async (expression: string): Promise<unknown> =>
+      viaFrame
+        ? await this.evaluateRecommendFrameJson(expression)
+        : await this.evaluateJson(expression).catch(() => undefined);
+
+    const totalPx =
+      typeof initValue["maxScrollTotal"] === "number" && initValue["maxScrollTotal"] > 0
+        ? initValue["maxScrollTotal"]
+        : 0;
+    const stepExpression = this.buildResumeStitchStepExpression();
+    for (let round = 0; round < RESUME_STITCH_MAX_ROUNDS; round++) {
+      await delay(RESUME_STITCH_RENDER_SETTLE_MS);
+      const stepValue = await evaluateInContext(stepExpression);
+      if (!isRecord(stepValue) || stepValue["ok"] !== true || stepValue["done"] === true) {
+        break;
+      }
+      if (onProgress !== undefined) {
+        const scrolledPx = typeof stepValue["scrollTop"] === "number" ? stepValue["scrollTop"] : 0;
+        await Promise.resolve(onProgress({ round, scrolledPx, totalPx })).catch(() => {});
+      }
+    }
+
+    const exportValue = await evaluateInContext(this.buildResumeStitchExportExpression());
+    const offset = viaFrame ? await this.readRecommendFrameOffset() : undefined;
+    return toNativeResumeStitchedCapture(
+      initValue,
+      exportValue,
+      offset !== undefined && offset.found ? { x: offset.left, y: offset.top } : null,
+    );
+  }
+
+  async captureViewportClip(clip: ZhipinResumeCanvasRect, scale = 1): Promise<string> {
+    return await this.controller.captureScreenshot({
+      format: "png",
+      clip: { x: clip.x, y: clip.y, width: clip.width, height: clip.height, scale },
+      timeoutMs: 15_000,
+    });
+  }
+
+  async readResumeDialogClipArea(): Promise<ZhipinResumeCanvasRect | undefined> {
+    const expression = this.buildResumeDialogRectExpression();
+    const main = toResumeRect(await this.evaluateJson(expression).catch(() => undefined));
+    if (main !== undefined) {
+      return main;
+    }
+
+    const frameRect = toResumeRect(await this.evaluateRecommendFrameJson(expression));
+    if (frameRect === undefined) {
+      return undefined;
+    }
+
+    const offset = await this.readRecommendFrameOffset();
+    if (!offset.found) {
+      return frameRect;
+    }
+    return {
+      x: Math.round(frameRect.x + offset.left),
+      y: Math.round(frameRect.y + offset.top),
+      width: Math.round(frameRect.width),
+      height: Math.round(frameRect.height),
+    };
+  }
+
+  async closeResumeDialog(options: NativeClickOptions = {}): Promise<NativeResumeCloseResult> {
+    const closeTarget = await this.resolveRecommendClickTarget(
+      this.buildResumeCloseTargetExpression(),
+    );
+    if (closeTarget.found && (await this.dispatchNativeClick(closeTarget, options))) {
+      if (await this.waitForResumeDialogGone()) {
+        return { closed: true, method: "close-button" };
+      }
+    }
+
+    await this.controller.dispatchKeyEvent({
+      type: "keyDown",
+      key: "Escape",
+      code: "Escape",
+      windowsVirtualKeyCode: 27,
+    });
+    await this.controller.dispatchKeyEvent({
+      type: "keyUp",
+      key: "Escape",
+      code: "Escape",
+      windowsVirtualKeyCode: 27,
+    });
+    if (await this.waitForResumeDialogGone()) {
+      return { closed: true, method: "escape" };
+    }
+    return { closed: false, error: "简历弹窗未关闭" };
+  }
+
+  private async readResumeDialogState(): Promise<NativeResumeDialogState> {
+    const expression = this.buildResumeDialogStateExpression();
+    const main = toNativeResumeDialogState(
+      await this.evaluateJson(expression).catch(() => undefined),
+    );
+    if (main.iframeFound) {
+      return main;
+    }
+
+    const frame = toNativeResumeDialogState(await this.evaluateRecommendFrameJson(expression));
+    return {
+      dialogVisible: main.dialogVisible || frame.dialogVisible,
+      iframeFound: frame.iframeFound,
+      iframeVisible: frame.iframeVisible,
+      canvasReady: frame.canvasReady,
+    };
+  }
+
+  private async waitForResumeDialogGone(timeoutMs = 4_000): Promise<boolean> {
+    const startedAt = Date.now();
+    while (Date.now() - startedAt < timeoutMs) {
+      const state = await this.readResumeDialogState();
+      if ((!state.iframeFound || !state.iframeVisible) && !state.dialogVisible) {
+        return true;
+      }
+      await delay(NATIVE_SELECTOR_POLL_MS);
+    }
+    return false;
+  }
+
   async exchangeWechat(options: NativeClickOptions = {}): Promise<NativeWechatExchangeResult> {
     const wechatButtonTarget = toNativeClickTarget(
       await this.evaluateJson(
@@ -3066,7 +3408,7 @@ export class ZhipinNativePagePort {
     })()`;
   }
 
-  private buildRecommendGreetClickExpression(index: number): string {
+  private buildRecommendCardTargetClickExpression(index: number, targetResolverJs: string): string {
     return `(() => {
       const index = ${JSON.stringify(index)};
       const primarySelector = ${JSON.stringify(RECOMMEND_CARD_SELECTOR)};
@@ -3080,20 +3422,313 @@ export class ZhipinNativePagePort {
           : Array.from(root.querySelectorAll(fallbackSelector));
       const item = cards[index];
       if (!item) return { found: false, x: 0, y: 0 };
-      const button =
-        item.querySelector("button.btn.btn-greet") ??
-        item.querySelector("button.btn-greet") ??
-        item.querySelector(".btn-greet") ??
-        item.querySelector(".op-btn");
-      if (!button) return { found: false, x: 0, y: 0 };
-      button.scrollIntoView({ block: "center", inline: "center" });
-      const rect = button.getBoundingClientRect();
+      const target = ${targetResolverJs};
+      if (!target) return { found: false, x: 0, y: 0 };
+      target.scrollIntoView({ block: "center", inline: "center" });
+      const rect = target.getBoundingClientRect();
       if (rect.width <= 0 || rect.height <= 0) return { found: false, x: 0, y: 0 };
       return {
         found: true,
         x: Math.round(rect.left + rect.width / 2),
         y: Math.round(rect.top + rect.height / 2)
       };
+    })()`;
+  }
+
+  private buildRecommendGreetClickExpression(index: number): string {
+    return this.buildRecommendCardTargetClickExpression(
+      index,
+      'item.querySelector("button.btn.btn-greet") ?? item.querySelector("button.btn-greet") ?? item.querySelector(".btn-greet") ?? item.querySelector(".op-btn")',
+    );
+  }
+
+  private buildRecommendCardOpenClickExpression(index: number): string {
+    return this.buildRecommendCardTargetClickExpression(
+      index,
+      `item.querySelector(${JSON.stringify(ZHIPIN_RESUME_CARD_CLICK_SURFACE_SELECTOR)}) ?? item`,
+    );
+  }
+
+  private buildResumeDialogStateExpression(): string {
+    return `(() => {
+      const resumeIframeSelector = ${JSON.stringify(ZHIPIN_RESUME_IFRAME_SELECTOR)};
+      const dialogSelector = ${JSON.stringify(ZHIPIN_RESUME_DIALOG_SELECTOR)};
+      const canvasSelector = ${JSON.stringify(ZHIPIN_RESUME_CANVAS_SELECTOR)};
+      const visible = (element) => {
+        const rect = element.getBoundingClientRect();
+        return rect.width > 0 && rect.height > 0;
+      };
+
+      let dialogVisible = false;
+      let iframeFound = false;
+      let iframeVisible = false;
+      let canvasReady = false;
+      const dialog = document.querySelector(dialogSelector);
+      if (dialog && visible(dialog)) dialogVisible = true;
+      const resumeIframe = document.querySelector(resumeIframeSelector);
+      if (resumeIframe) {
+        iframeFound = true;
+        iframeVisible = visible(resumeIframe);
+        const resumeDoc = resumeIframe.contentDocument;
+        const canvas = resumeDoc ? resumeDoc.querySelector(canvasSelector) : null;
+        if (canvas && canvas.width > 0 && canvas.height > 0) canvasReady = true;
+      }
+      return { dialogVisible, iframeFound, iframeVisible, canvasReady };
+    })()`;
+  }
+
+  private buildResumeStitchInitExpression(): string {
+    return `(() => {
+      const resumeIframeSelector = ${JSON.stringify(ZHIPIN_RESUME_IFRAME_SELECTOR)};
+      const canvasSelector = ${JSON.stringify(ZHIPIN_RESUME_CANVAS_SELECTOR)};
+      const resumeIframe = document.querySelector(resumeIframeSelector);
+      if (!resumeIframe) return { found: false, error: "未找到简历 iframe" };
+      const resumeDoc = resumeIframe.contentDocument;
+      if (!resumeDoc) return { found: false, error: "无法访问简历 iframe 内容" };
+      const canvas = resumeDoc.querySelector(canvasSelector);
+      if (!canvas) return { found: false, error: "简历 canvas 未加载" };
+
+      const scrollers = [];
+      let node = resumeIframe.parentElement;
+      while (node) {
+        if (node.scrollHeight > node.clientHeight + 20) scrollers.push(node);
+        node = node.parentElement;
+      }
+      const rootScroller = document.scrollingElement;
+      if (
+        rootScroller &&
+        rootScroller.scrollHeight > rootScroller.clientHeight + 20 &&
+        !scrollers.includes(rootScroller)
+      ) {
+        scrollers.push(rootScroller);
+      }
+
+      const iframeRect = resumeIframe.getBoundingClientRect();
+      const canvasRect = canvas.getBoundingClientRect();
+      const dpr = canvasRect.width > 0 ? canvas.width / canvasRect.width : 1;
+      const maxScrollTotal = scrollers.reduce(
+        (sum, el) => sum + Math.max(0, el.scrollHeight - el.clientHeight),
+        0
+      );
+      const totalHeightPx = Math.max(
+        Math.round((maxScrollTotal + canvasRect.height) * dpr),
+        canvas.height
+      );
+
+      const stitched = resumeDoc.createElement("canvas");
+      stitched.width = canvas.width;
+      stitched.height = totalHeightPx;
+      const context = stitched.getContext("2d");
+      if (!context) return { found: false, error: "无法创建拼接 canvas 上下文" };
+      context.fillStyle = "#ffffff";
+      context.fillRect(0, 0, stitched.width, stitched.height);
+
+      for (const el of scrollers) el.scrollTop = 0;
+      globalThis.__rollResumeStitch = {
+        stitched,
+        context,
+        canvas,
+        scrollers,
+        dpr,
+        maxDrawnY: 0,
+        scrollerIndex: 0,
+        effectiveOffset: 0,
+        pending: null,
+        pendingFpBase: "",
+        readFp: function () {
+          try {
+            if (!this.fpContext) {
+              const fpCanvas = this.canvas.ownerDocument.createElement("canvas");
+              fpCanvas.width = 32;
+              fpCanvas.height = 32;
+              this.fpContext = fpCanvas.getContext("2d", { willReadFrequently: true });
+            }
+            const fpContext = this.fpContext;
+            if (!fpContext) return "noctx";
+            fpContext.fillStyle = "#ffffff";
+            fpContext.fillRect(0, 0, 32, 32);
+            fpContext.drawImage(this.canvas, 0, 0, 32, 32);
+            const data = fpContext.getImageData(0, 0, 32, 32).data;
+            let hash = 0;
+            for (let index = 0; index < data.length; index += 4) {
+              hash = ((hash * 31 + data[index] + data[index + 1] + data[index + 2]) >>> 0);
+            }
+            return String(hash);
+          } catch (error) {
+            return "err";
+          }
+        }
+      };
+      return {
+        found: true,
+        needScroll: maxScrollTotal > 4,
+        maxScrollTotal,
+        resumeFrameRect: { x: iframeRect.x, y: iframeRect.y },
+        canvasRect: {
+          x: canvasRect.x,
+          y: canvasRect.y,
+          width: canvasRect.width,
+          height: canvasRect.height
+        }
+      };
+    })()`;
+  }
+
+  private buildResumeStitchStepExpression(): string {
+    return `(() => {
+      const state = globalThis.__rollResumeStitch;
+      if (!state) return { ok: false, error: "stitch 未初始化" };
+      const fingerprint = state.readFp();
+
+      if (state.pending) {
+        const pendingScroller = state.scrollers[state.pending.index];
+        const realDelta = pendingScroller
+          ? pendingScroller.scrollTop - state.pending.before
+          : 0;
+        if (realDelta <= 2) {
+          state.scrollerIndex = state.pending.index + 1;
+        } else if (fingerprint !== state.pendingFpBase) {
+          state.effectiveOffset += realDelta;
+        } else {
+          if (pendingScroller) pendingScroller.scrollTop = state.pending.before;
+          state.scrollerIndex = state.pending.index + 1;
+        }
+        state.pending = null;
+      }
+
+      const drawY = Math.round(state.effectiveOffset * state.dpr);
+      const drawnBottom = drawY + state.canvas.height;
+      if (drawnBottom > state.stitched.height) {
+        const grown = state.stitched.ownerDocument.createElement("canvas");
+        grown.width = state.stitched.width;
+        grown.height = drawnBottom;
+        const grownContext = grown.getContext("2d");
+        if (!grownContext) return { ok: false, error: "无法扩容拼接 canvas" };
+        grownContext.fillStyle = "#ffffff";
+        grownContext.fillRect(0, 0, grown.width, grown.height);
+        grownContext.drawImage(state.stitched, 0, 0);
+        state.stitched = grown;
+        state.context = grownContext;
+      }
+      state.context.drawImage(state.canvas, 0, drawY);
+      if (drawnBottom > state.maxDrawnY) state.maxDrawnY = drawnBottom;
+
+      const scroller = state.scrollers[state.scrollerIndex];
+      if (scroller) {
+        const before = scroller.scrollTop;
+        scroller.scrollTop = before + scroller.clientHeight;
+        state.pending = { index: state.scrollerIndex, before };
+        state.pendingFpBase = fingerprint;
+      }
+      return { ok: true, done: !scroller, scrollTop: state.effectiveOffset };
+    })()`;
+  }
+
+  private buildResumeStitchExportExpression(): string {
+    return `(() => {
+      const state = globalThis.__rollResumeStitch;
+      if (!state) return { ok: false, error: "stitch 未初始化" };
+      delete globalThis.__rollResumeStitch;
+      let output = state.stitched;
+      const finalHeight = Math.min(
+        state.stitched.height,
+        Math.max(state.maxDrawnY, state.canvas.height)
+      );
+      if (finalHeight < state.stitched.height) {
+        const trimmed = state.stitched.ownerDocument.createElement("canvas");
+        trimmed.width = state.stitched.width;
+        trimmed.height = finalHeight;
+        const trimContext = trimmed.getContext("2d");
+        if (trimContext) {
+          trimContext.drawImage(state.stitched, 0, 0);
+          output = trimmed;
+        }
+      }
+      let blank = true;
+      const outputContext = output.getContext("2d");
+      if (outputContext) {
+        try {
+          const stepX = Math.max(1, Math.floor(output.width / 16));
+          const stepY = Math.max(1, Math.floor(output.height / 16));
+          outer: for (let y = 0; y < output.height; y += stepY) {
+            for (let x = 0; x < output.width; x += stepX) {
+              const pixel = outputContext.getImageData(x, y, 1, 1).data;
+              if (pixel[3] > 8 && (pixel[0] < 246 || pixel[1] < 246 || pixel[2] < 246)) {
+                blank = false;
+                break outer;
+              }
+            }
+          }
+        } catch (error) {
+          blank = false;
+        }
+      }
+      let dataUrl = null;
+      let dataUrlError = null;
+      try {
+        dataUrl = output.toDataURL("image/png");
+      } catch (error) {
+        dataUrlError = error instanceof Error ? error.message : String(error);
+      }
+      for (const el of state.scrollers) el.scrollTop = 0;
+      return {
+        ok: true,
+        dataUrl,
+        dataUrlError,
+        blank,
+        canvasSize: { width: output.width, height: output.height }
+      };
+    })()`;
+  }
+
+  private buildResumeDialogRectExpression(): string {
+    return `(() => {
+      const dialogSelector = ${JSON.stringify(ZHIPIN_RESUME_DIALOG_SELECTOR)};
+      let best = null;
+      let bestArea = 0;
+      for (const element of Array.from(document.querySelectorAll(dialogSelector))) {
+        const rect = element.getBoundingClientRect();
+        const area = rect.width * rect.height;
+        if (rect.width > 0 && rect.height > 0 && area > bestArea) {
+          best = rect;
+          bestArea = area;
+        }
+      }
+      if (!best) return { found: false };
+      return {
+        found: true,
+        x: Math.max(0, best.x),
+        y: Math.max(0, best.y),
+        width: best.width,
+        height: best.height
+      };
+    })()`;
+  }
+
+  private buildResumeCloseTargetExpression(): string {
+    return `(() => {
+      const scopeSelector = ${JSON.stringify(ZHIPIN_RESUME_CLOSE_SCOPE_SELECTOR)};
+      const closeSelectors = ${JSON.stringify([...ZHIPIN_RESUME_CLOSE_ELEMENT_SELECTORS])};
+      const visible = (element) => {
+        const rect = element.getBoundingClientRect();
+        return rect.width > 0 && rect.height > 0;
+      };
+      const scopes = Array.from(document.querySelectorAll(scopeSelector)).filter(visible);
+      for (const scope of scopes) {
+        for (const selector of closeSelectors) {
+          for (const element of Array.from(scope.querySelectorAll(selector))) {
+            if (!visible(element)) continue;
+            element.scrollIntoView({ block: "center", inline: "center" });
+            const rect = element.getBoundingClientRect();
+            return {
+              found: true,
+              x: Math.round(rect.left + rect.width / 2),
+              y: Math.round(rect.top + rect.height / 2)
+            };
+          }
+        }
+      }
+      return { found: false, x: 0, y: 0 };
     })()`;
   }
 

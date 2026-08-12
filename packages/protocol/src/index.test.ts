@@ -26,6 +26,7 @@ import {
   SUPPORTED_RUNTIME_PROTOCOL_VERSIONS,
   SUPPORTED_RUNTIME_PROTOCOL_VERSIONS_V11,
   SUPPORTED_RUNTIME_PROTOCOL_VERSIONS_V12,
+  SUPPORTED_RUNTIME_PROTOCOL_VERSIONS_V13,
   USER_INPUT_CHOICE_OPTION_MAX_COUNT,
   USER_INPUT_CONTROL_ID_MAX_CHARS,
   USER_INPUT_CONTROL_MAX_COUNT,
@@ -72,6 +73,7 @@ import {
   runtimeEventEnvelopeSchema,
   runtimeEventEnvelopeV11Schema,
   runtimeEventEnvelopeV13Schema,
+  runtimeEventEnvelopeV14Schema,
   runtimeEventCursorDistance,
   runtimeEventCursorSchema,
   runtimeEventIdSchema,
@@ -210,14 +212,15 @@ function userInputRequestParams(controls: UserInputForm["controls"]): UserInputR
   });
 }
 
-test("initialize advertises v1.3 first without changing the strict request shape", () => {
+test("initialize advertises v1.4 first without changing the strict request shape", () => {
   const input = {
     protocolVersions: [...SUPPORTED_RUNTIME_PROTOCOL_VERSIONS],
     client: { name: "fixture-client", version: "1.0.0" },
   } as const;
   const parsed = initializeParamsSchema.parse(input);
-  assert.equal(RUNTIME_PROTOCOL_VERSION, "1.3");
-  assert.deepEqual(parsed.protocolVersions, ["1.3", "1.2", "1.1", "1.0"]);
+  assert.equal(RUNTIME_PROTOCOL_VERSION, "1.4");
+  assert.deepEqual(parsed.protocolVersions, ["1.4", "1.3", "1.2", "1.1", "1.0"]);
+  assert.deepEqual(SUPPORTED_RUNTIME_PROTOCOL_VERSIONS_V13, ["1.3", "1.2", "1.1", "1.0"]);
   assert.deepEqual(SUPPORTED_RUNTIME_PROTOCOL_VERSIONS_V12, ["1.2", "1.1", "1.0"]);
   assert.deepEqual(SUPPORTED_RUNTIME_PROTOCOL_VERSIONS_V11, ["1.1", "1.0"]);
   for (const version of SUPPORTED_RUNTIME_PROTOCOL_VERSIONS) {
@@ -535,11 +538,11 @@ test("runtime event envelope is ordered by runtime instance and sequence", () =>
       delta: "hello",
     },
   } as const;
-  const parsed = runtimeEventEnvelopeV13Schema.parse(input);
+  const parsed = runtimeEventEnvelopeV14Schema.parse(input);
   assert.equal(parsed.sequence, 7);
   assert.equal(parsed.event.type, "message.delta");
   assert.throws(() =>
-    runtimeEventEnvelopeV13Schema.parse({
+    runtimeEventEnvelopeV14Schema.parse({
       ...input,
       durability: "durable",
       eventId: IDS.event,
@@ -1668,7 +1671,9 @@ test("thread snapshot never exposes raw Tool evidence fields", () => {
     transcriptCompleteness: "complete",
     eventCursor: null,
   });
-  assert.equal(snapshot.messages.items[0]?.parts[0]?.text, "hello");
+  const firstPart = snapshot.messages.items[0]?.parts[0];
+  assert.ok(firstPart?.type === "text");
+  assert.equal(firstPart.text, "hello");
   assert.equal("raw" in snapshot.operations, false);
 });
 
@@ -1826,4 +1831,92 @@ test("cross-language golden fixtures keep request, response and event compatibil
 test("cross-language event fixtures reject invalid process-local ordering", () => {
   const invalidEvent = fixture("invalid-runtime-event-notification.json");
   assert.throws(() => runtimeEventEnvelopeSchema.parse(invalidEvent.params));
+});
+
+test("v1.4 attachment methods stay unavailable to v1.3 sessions", () => {
+  for (const method of [
+    "attachment.stage",
+    "attachment.chunk",
+    "attachment.commit",
+    "attachment.release",
+  ] as const) {
+    assert.equal(isRuntimeMethodAvailable("1.4", method), true);
+    assert.equal(isRuntimeMethodAvailable("1.3", method), false);
+  }
+});
+
+test("turn.start attachments are accepted by v1.4 and rejected by v1.3 strict params", () => {
+  const attachmentId = "00000000-0000-4000-8000-0000000000c1";
+  const base = {
+    requestId: "00000000-0000-4000-8000-0000000000c0",
+    threadId: IDS.thread,
+    turnId: IDS.turn,
+  } as const;
+  const withAttachments = {
+    ...base,
+    input: { text: "看下这张图", attachments: [attachmentId] },
+  };
+  const parsed = parseRuntimeMethodParamsForVersion(
+    "1.4",
+    RUNTIME_METHODS.turnStart,
+    withAttachments,
+  );
+  assert.deepEqual(parsed.input.attachments, [attachmentId]);
+  assert.throws(() =>
+    parseRuntimeMethodParamsForVersion("1.3", RUNTIME_METHODS.turnStart, withAttachments),
+  );
+  assert.throws(() =>
+    parseRuntimeMethodParamsForVersion("1.4", RUNTIME_METHODS.turnStart, {
+      ...base,
+      input: { text: "", attachments: [] },
+    }),
+  );
+  const emptyTextWithAttachment = parseRuntimeMethodParamsForVersion(
+    "1.4",
+    RUNTIME_METHODS.turnStart,
+    { ...base, input: { text: "", attachments: [attachmentId] } },
+  );
+  assert.equal(emptyTextWithAttachment.input.text, "");
+});
+
+test("v1.4 snapshot projects attachment parts down to text-only for v1.3 clients", () => {
+  const snapshotV14 = {
+    thread: {
+      id: IDS.thread,
+      title: "demo",
+      model: "mock",
+      createdAt: "2026-07-28T12:00:00.000Z",
+      updatedAt: "2026-07-28T12:00:00.000Z",
+      messageCount: 1,
+    },
+    messages: {
+      items: [
+        {
+          sequence: 0,
+          role: "user",
+          createdAt: "2026-07-28T12:00:00.000Z",
+          parts: [
+            { type: "text", text: "看下这张图" },
+            { type: "attachment", mediaType: "image/png", bytes: 5161 },
+          ],
+        },
+      ],
+      nextBeforeSequence: null,
+    },
+    operations: { items: [], nextBeforeSequence: null },
+    pendingApprovals: [],
+    pendingInteractions: [],
+    transcriptCompleteness: "complete",
+    eventCursor: null,
+  } as const;
+
+  const v14 = projectThreadSnapshotForVersion("1.4", snapshotV14);
+  assert.equal(v14.messages.items[0]?.parts.length, 2);
+
+  const v13 = projectThreadSnapshotForVersion("1.3", snapshotV14);
+  assert.deepEqual(v13.messages.items[0]?.parts, [{ type: "text", text: "看下这张图" }]);
+  assert.doesNotMatch(JSON.stringify(v13), /attachment/u);
+
+  const v11 = projectThreadSnapshotForVersion("1.1", snapshotV14);
+  assert.deepEqual(v11.messages.items[0]?.parts, [{ type: "text", text: "看下这张图" }]);
 });

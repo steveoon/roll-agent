@@ -339,3 +339,30 @@ test("sanitizePersistedExplicitSkillCheckpoint fail-closed 清除异常 checkpoi
   assert.deepEqual(sanitized[1]?.providerOptions?.anthropic, { effort: "high" });
   assert.match(JSON.stringify(cases), /UNKNOWN_VERSION_BODY|MALFORMED_BODY/u);
 });
+
+test("applyExplicitSkillContext 替换文本时保留用户消息的附件 parts", () => {
+  const snapshot = checkpointSnapshot("demo", "看下这张截图", "SKILL_BODY\n\n看下这张截图");
+  const messages: ModelMessage[] = [
+    { role: "user", content: "earlier" },
+    { role: "assistant", content: "done" },
+    {
+      role: "user",
+      content: [
+        { type: "text", text: "/demo 看下这张截图" },
+        { type: "file", data: "aGVsbG8=", mediaType: "image/png" },
+      ],
+    },
+  ];
+
+  const materialized = applyExplicitSkillContext(messages, snapshot);
+
+  assert.deepEqual(materialized[2], {
+    role: "user",
+    content: [
+      { type: "text", text: "SKILL_BODY\n\n看下这张截图" },
+      { type: "file", data: "aGVsbG8=", mediaType: "image/png" },
+    ],
+  });
+  assert.equal(materialized[0]?.content, "earlier");
+  assert.doesNotThrow(() => modelMessageSchema.parse(materialized[2]));
+});

@@ -611,7 +611,7 @@ test("RollNodeClient advertises Server Request protocol versions only when handl
   assert.ok(legacyInitialize && "method" in legacyInitialize && "id" in legacyInitialize);
   assert.deepEqual(
     parseRuntimeMethodParams(RUNTIME_METHODS.initialize, legacyInitialize.params).protocolVersions,
-    ["1.3", "1.2", "1.0"],
+    ["1.4", "1.3", "1.2", "1.0"],
   );
   assert.equal(legacyClient.getInitializationResult().protocolVersion, "1.0");
 
@@ -645,7 +645,7 @@ test("RollNodeClient advertises Server Request protocol versions only when handl
   assert.ok(v11Initialize && "method" in v11Initialize && "id" in v11Initialize);
   assert.deepEqual(
     parseRuntimeMethodParams(RUNTIME_METHODS.initialize, v11Initialize.params).protocolVersions,
-    ["1.3", "1.2", "1.1", "1.0"],
+    ["1.4", "1.3", "1.2", "1.1", "1.0"],
   );
   assert.equal(v11Client.getInitializationResult().protocolVersion, "1.1");
   assert.equal(
@@ -702,7 +702,7 @@ test("RollNodeClient advertises Server Request protocol versions only when handl
   assert.deepEqual(
     parseRuntimeMethodParams(RUNTIME_METHODS.initialize, fallbackInitialize.params)
       .protocolVersions,
-    ["1.3", "1.2", "1.1", "1.0"],
+    ["1.4", "1.3", "1.2", "1.1", "1.0"],
   );
   assert.equal(fallbackClient.getInitializationResult().protocolVersion, "1.0");
   assert.equal(
@@ -759,7 +759,7 @@ test("RollNodeClient waits for an empty Protocol 1.2 capability ACK before conne
   assert.ok(initialize && "method" in initialize && "id" in initialize);
   assert.deepEqual(
     parseRuntimeMethodParams(RUNTIME_METHODS.initialize, initialize.params).protocolVersions,
-    ["1.3", "1.2", "1.0"],
+    ["1.4", "1.3", "1.2", "1.0"],
   );
   await flushMessages();
   assert.equal(settled, false);
@@ -1958,7 +1958,7 @@ test("RollNodeClient rejects a Runtime-selected protocol version it did not adve
     }
     assert.deepEqual(
       parseRuntimeMethodParams(RUNTIME_METHODS.initialize, request.params).protocolVersions,
-      ["1.3", "1.2", "1.0"],
+      ["1.4", "1.3", "1.2", "1.0"],
     );
     writeJson(transport.stdout, {
       jsonrpc: "2.0",
@@ -2660,4 +2660,118 @@ test("RollNodeClient does not retry thread.open because opening mutates runtime 
   );
   assert.equal(openCalls, 1);
   client.close();
+});
+
+test("RollNodeClient drives v1.4 attachment methods and turn.start attachments through request()", async () => {
+  const transport = new MemoryTransport();
+  const attachmentId = "00000000-0000-4000-8000-0000000000d1";
+  const received: JsonRpcRequest[] = [];
+  const reader = createInterface({ input: transport.stdin });
+  reader.on("line", (line) => {
+    const message = JSON.parse(line) as JsonRpcMessage;
+    if (!("method" in message) || !("id" in message)) {
+      return;
+    }
+    received.push(message);
+    if (message.method === RUNTIME_METHODS.initialize) {
+      writeJson(transport.stdout, {
+        jsonrpc: "2.0",
+        id: message.id,
+        result: {
+          protocolVersion: "1.4",
+          runtimeInstanceId: IDS.runtime,
+          server: { name: "fake-runtime", version: "1.0.0", runtimeVersion: "0.9.0" },
+          features: ["thread-management", "turns", "attachments"],
+          limits: {
+            maxFrameBytes: 16 * 1_024 * 1_024 + 1 * 1_024 * 1_024,
+            maxPageSize: 500,
+            eventReplay: true,
+            idempotencyCacheEntries: 10_000,
+            maxAttachmentBytes: 16 * 1_024 * 1_024,
+            maxAttachmentChunkBytes: 2 * 1_024 * 1_024,
+            maxTurnAttachments: 8,
+            maxStagedAttachments: 16,
+          },
+        },
+      });
+      return;
+    }
+    if (message.method === RUNTIME_METHODS.clientCapabilitiesSet) {
+      writeJson(transport.stdout, {
+        jsonrpc: "2.0",
+        id: message.id,
+        result: projectClientCapabilitiesSetResult(message.params),
+      });
+      return;
+    }
+    if (message.method === RUNTIME_METHODS.attachmentStage) {
+      writeJson(transport.stdout, {
+        jsonrpc: "2.0",
+        id: message.id,
+        result: {
+          attachmentId,
+          state: "committed",
+          descriptor: {
+            attachmentId,
+            fileName: "shot.png",
+            displayName: "shot.png",
+            mediaType: "image/png",
+            bytes: 5,
+            sha256: "a".repeat(64),
+            source: "local-path",
+            createdAt: "2026-08-12T12:00:00.000Z",
+          },
+        },
+      });
+      return;
+    }
+    if (message.method === RUNTIME_METHODS.turnStart) {
+      writeJson(transport.stdout, {
+        jsonrpc: "2.0",
+        id: message.id,
+        result: { accepted: true, turnId: IDS.turn },
+      });
+      return;
+    }
+    writeJson(transport.stdout, {
+      jsonrpc: "2.0",
+      id: message.id,
+      error: { code: -32_601, message: "Method not found" },
+    });
+  });
+
+  const client = await RollNodeClient.connect({
+    transport,
+    maxFrameBytes: 32 * 1_024 * 1_024,
+  });
+  assert.equal(client.getInitializationResult().protocolVersion, "1.4");
+
+  const staged = await client.request(RUNTIME_METHODS.attachmentStage, {
+    requestId: "00000000-0000-4000-8000-0000000000d2",
+    threadId: IDS.thread,
+    fileName: "shot.png",
+    mediaType: "image/png",
+    bytes: 5,
+    sha256: "a".repeat(64),
+    source: "local-path",
+    sourcePath: "/tmp/shot.png",
+  });
+  assert.equal(staged.state, "committed");
+  assert.equal(staged.descriptor?.displayName, "shot.png");
+
+  const turn = await client.request(RUNTIME_METHODS.turnStart, {
+    requestId: "00000000-0000-4000-8000-0000000000d3",
+    threadId: IDS.thread,
+    turnId: IDS.turn,
+    input: { text: "看下这张图", attachments: [attachmentId] },
+  });
+  assert.equal(turn.accepted, true);
+
+  const turnFrame = received.find((message) => message.method === RUNTIME_METHODS.turnStart);
+  assert.ok(turnFrame);
+  const turnParams = turnFrame.params as {
+    readonly input: { readonly text: string; readonly attachments?: readonly string[] };
+  };
+  assert.deepEqual(turnParams.input.attachments, [attachmentId]);
+  await client.shutdown();
 });

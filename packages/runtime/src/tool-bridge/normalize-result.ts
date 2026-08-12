@@ -18,6 +18,7 @@ export const TOOL_CANCELLATION_EXECUTION_STATES = {
 const MAX_TOOL_DISPLAY_CHARS = 16_000;
 const MAX_TOOL_DISPLAY_ITEMS = 64;
 const MAX_TOOL_MODEL_CHARS = 60_000;
+const MAX_TOOL_MODEL_FILE_CHARS = 12_000_000;
 const MAX_TOOL_MODEL_ITEMS = 128;
 const MODEL_CLIPPED_MARKER = "\n\n[工具模型内容已截断；完整结果仍保留在 raw 视图]";
 
@@ -246,20 +247,27 @@ function boundedTextModelOutput(value: string, isError = false): ToolModelOutput
 function boundedModelContent(parts: readonly ToolModelContentPart[]): ToolModelContentPart[] {
   const bounded: ToolModelContentPart[] = [];
   let remaining = MAX_TOOL_MODEL_CHARS;
+  let remainingFileChars = MAX_TOOL_MODEL_FILE_CHARS;
   for (const part of parts.slice(0, MAX_TOOL_MODEL_ITEMS)) {
-    if (remaining <= 0) {
+    if (remaining <= 0 && remainingFileChars <= 0) {
       break;
     }
     if (part.type === "text") {
+      if (remaining <= 0) {
+        continue;
+      }
       const text = clipTextToBudget(part.text, remaining, MODEL_CLIPPED_MARKER);
       bounded.push({ type: "text", text });
       remaining -= text.length;
       continue;
     }
     const size = part.data.data.length;
-    if (size <= remaining) {
+    if (size <= remainingFileChars) {
       bounded.push(part);
-      remaining -= size;
+      remainingFileChars -= size;
+      continue;
+    }
+    if (remaining <= 0) {
       continue;
     }
     const marker = clipTextToBudget(

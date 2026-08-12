@@ -4319,3 +4319,66 @@ test("agent_install 被拒绝时不执行安装", async () => {
   assert.ok(toolResult && toolResult.type === "tool-result" && toolResult.isError === true);
   assert.match(JSON.stringify(toolResult.output), /已取消执行/);
 });
+
+test("send 支持附件输入并以 parts 数组持久化用户消息", async () => {
+  const calls: LanguageModelV4CallOptions[] = [];
+  const model = new MockLanguageModelV4({
+    doStream: async (options) => {
+      calls.push(options);
+      return streamChunks(textStep("看到了"));
+    },
+  });
+  const persisted: ModelMessage[][] = [];
+  const session = new AgentSession({
+    id: "attachment-send",
+    model,
+    sources: [],
+    maxSteps: 2,
+    onPersist: (messages) => persisted.push([...messages]),
+  });
+  try {
+    await collect(
+      session.send({
+        text: "看下这张截图",
+        attachments: [{ data: "aGVsbG8=", mediaType: "image/png" }],
+      }),
+    );
+
+    const storedUser = persisted[0]?.find((message) => message.role === "user");
+    assert.deepEqual(storedUser?.content, [
+      { type: "text", text: "看下这张截图" },
+      { type: "file", data: "aGVsbG8=", mediaType: "image/png" },
+    ]);
+
+    const modelUser = calls[0]?.prompt.find((message) => message.role === "user");
+    assert.ok(Array.isArray(modelUser?.content));
+    const fileParts = modelUser.content.filter((part) => part.type === "file");
+    assert.equal(fileParts.length, 1);
+    assert.equal(fileParts[0]?.mediaType, "image/png");
+
+    await collect(session.send("纯文本跟进"));
+    const followUp = persisted[1]?.find((message) => message.role === "user");
+    assert.equal(followUp?.content, "纯文本跟进");
+  } finally {
+    await session.close();
+  }
+});
+
+test("send 对无效附件在开始回合前抛错", async () => {
+  const session = new AgentSession({
+    id: "attachment-invalid",
+    model: sequencedModel([textStep("unused")]),
+    sources: [],
+    maxSteps: 2,
+  });
+  try {
+    await assert.rejects(
+      collect(session.send({ text: "x", attachments: [{ data: "", mediaType: "image/png" }] })),
+      /data 不能为空/u,
+    );
+    const events = await collect(session.send("正常继续"));
+    assert.ok(events.some((event) => event.type === "text-delta"));
+  } finally {
+    await session.close();
+  }
+});

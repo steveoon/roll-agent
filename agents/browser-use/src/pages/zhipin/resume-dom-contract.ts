@@ -11,24 +11,18 @@ export const ZHIPIN_RESUME_CARD_CLICK_SURFACE_SELECTOR =
 export const ZHIPIN_RESUME_CANDIDATE_ID_SELECTOR = "[data-geek]" as const;
 export const ZHIPIN_RESUME_CANDIDATE_NAME_SELECTOR = ".name" as const;
 
-export const ZHIPIN_RESUME_IFRAME_CLOSE_SELECTORS = [
-  ".recommendV2 .boss-popup__close",
-  ".dialog-lib-resume .boss-popup__close",
-  ".boss-dialog .boss-popup__close",
-  ".boss-popup__close",
-  ".close-btn",
-  ".dialog-close",
-] as const;
+export const ZHIPIN_RESUME_DIALOG_SELECTOR =
+  '.boss-popup__wrapper, .dialog-lib-resume, .boss-dialog, [data-type="boss-dialog"]' as const;
 
-export const ZHIPIN_RESUME_PAGE_CLOSE_SELECTORS = [
+export const ZHIPIN_RESUME_CLOSE_SCOPE_SELECTOR =
+  `${ZHIPIN_RESUME_DIALOG_SELECTOR}, .recommendV2` as const;
+
+export const ZHIPIN_RESUME_CLOSE_ELEMENT_SELECTORS = [
   ".boss-popup__close",
   ".close-btn",
   ".dialog-close",
   ".modal-close",
 ] as const;
-
-export const ZHIPIN_RESUME_DIALOG_SELECTOR =
-  ".boss-popup__wrapper, .dialog-lib-resume, .boss-dialog" as const;
 export const ZHIPIN_RESUME_PAGE_DIALOG_SELECTOR = ".boss-popup__wrapper" as const;
 export const ZHIPIN_RESUME_IFRAME_SELECTOR = 'iframe[src*="c-resume"]' as const;
 export const ZHIPIN_RESUME_CANVAS_SELECTOR = "canvas#resume, div#resume canvas" as const;

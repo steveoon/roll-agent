@@ -9,9 +9,10 @@ import {
   ZHIPIN_RESUME_CARD_FALLBACK_SELECTOR,
   ZHIPIN_RESUME_CARD_LIST_SELECTOR,
   ZHIPIN_RESUME_CARD_PRIMARY_SELECTOR,
-  ZHIPIN_RESUME_IFRAME_CLOSE_SELECTORS,
+  ZHIPIN_RESUME_CLOSE_ELEMENT_SELECTORS,
+  ZHIPIN_RESUME_CLOSE_SCOPE_SELECTOR,
+  ZHIPIN_RESUME_DIALOG_SELECTOR,
   ZHIPIN_RESUME_IFRAME_SELECTOR,
-  ZHIPIN_RESUME_PAGE_CLOSE_SELECTORS,
   ZHIPIN_RESUME_RECOMMEND_FRAME_NAME,
   ZHIPIN_RESUME_RECOMMEND_FRAME_SELECTOR,
   ZHIPIN_RESUME_RECOMMEND_FRAME_URL_MARKER,
@@ -72,20 +73,13 @@ describe("zhipin resume DOM contract", () => {
     );
   });
 
-  it("records close button selector priority", () => {
-    assert.deepEqual(
-      [...ZHIPIN_RESUME_IFRAME_CLOSE_SELECTORS],
-      [
-        ".recommendV2 .boss-popup__close",
-        ".dialog-lib-resume .boss-popup__close",
-        ".boss-dialog .boss-popup__close",
-        ".boss-popup__close",
-        ".close-btn",
-        ".dialog-close",
-      ],
+  it("scopes close button search to visible dialog containers", () => {
+    assert.equal(
+      ZHIPIN_RESUME_CLOSE_SCOPE_SELECTOR,
+      `${ZHIPIN_RESUME_DIALOG_SELECTOR}, .recommendV2`,
     );
     assert.deepEqual(
-      [...ZHIPIN_RESUME_PAGE_CLOSE_SELECTORS],
+      [...ZHIPIN_RESUME_CLOSE_ELEMENT_SELECTORS],
       [".boss-popup__close", ".close-btn", ".dialog-close", ".modal-close"],
     );
   });

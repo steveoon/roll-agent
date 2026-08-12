@@ -21,6 +21,7 @@ const NORMAL_NATIVE_CDP_METHODS = [
   "Page.reload",
   "Page.getFrameTree",
   "Page.createIsolatedWorld",
+  "Page.captureScreenshot",
   "Input.dispatchMouseEvent",
   "Input.dispatchKeyEvent",
   "Input.insertText",
@@ -206,6 +207,22 @@ export type NativeCdpCreateIsolatedWorldOptions = {
   readonly timeoutMs?: number;
 };
 
+export type NativeCdpScreenshotClip = {
+  readonly x: number;
+  readonly y: number;
+  readonly width: number;
+  readonly height: number;
+  readonly scale?: number;
+};
+
+export type NativeCdpCaptureScreenshotOptions = {
+  readonly format?: "png" | "jpeg";
+  readonly quality?: number;
+  readonly clip?: NativeCdpScreenshotClip;
+  readonly captureBeyondViewport?: boolean;
+  readonly timeoutMs?: number;
+};
+
 type NativeCdpSuccessResponse = {
   readonly id: number;
   readonly result?: unknown;
@@ -365,6 +382,18 @@ function readFrameTreeResponse(value: unknown): NativeCdpFrameTree {
   }
 
   return frameTree;
+}
+
+function readCaptureScreenshotResponse(value: unknown): string {
+  if (!isRecord(value)) {
+    throw new Error("Native CDP Page.captureScreenshot returned an unexpected response.");
+  }
+
+  const data = value["data"];
+  if (typeof data !== "string" || data.length === 0) {
+    throw new Error("Native CDP Page.captureScreenshot did not return image data.");
+  }
+  return data;
 }
 
 function readNavigateResponse(value: unknown): NativeCdpNavigateResult {
@@ -780,6 +809,33 @@ export class NativeCdpController {
 
   async getFrameTree(options: { readonly timeoutMs?: number } = {}): Promise<NativeCdpFrameTree> {
     return readFrameTreeResponse(await this.sendNormal("Page.getFrameTree", {}, options.timeoutMs));
+  }
+
+  async captureScreenshot(options: NativeCdpCaptureScreenshotOptions = {}): Promise<string> {
+    return readCaptureScreenshotResponse(
+      await this.sendNormal(
+        "Page.captureScreenshot",
+        {
+          format: options.format ?? "png",
+          ...(options.quality !== undefined ? { quality: options.quality } : {}),
+          ...(options.clip !== undefined
+            ? {
+                clip: {
+                  x: options.clip.x,
+                  y: options.clip.y,
+                  width: options.clip.width,
+                  height: options.clip.height,
+                  scale: options.clip.scale ?? 1,
+                },
+              }
+            : {}),
+          ...(options.captureBeyondViewport !== undefined
+            ? { captureBeyondViewport: options.captureBeyondViewport }
+            : {}),
+        },
+        options.timeoutMs,
+      ),
+    );
   }
 
   async createIsolatedWorld(

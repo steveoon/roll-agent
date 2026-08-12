@@ -5,9 +5,13 @@ export const SUPPORTED_RUNTIME_PROTOCOL_VERSIONS_V12 = [
   "1.2",
   ...SUPPORTED_RUNTIME_PROTOCOL_VERSIONS_V11,
 ] as const;
-export const SUPPORTED_RUNTIME_PROTOCOL_VERSIONS = [
+export const SUPPORTED_RUNTIME_PROTOCOL_VERSIONS_V13 = [
   "1.3",
   ...SUPPORTED_RUNTIME_PROTOCOL_VERSIONS_V12,
+] as const;
+export const SUPPORTED_RUNTIME_PROTOCOL_VERSIONS = [
+  "1.4",
+  ...SUPPORTED_RUNTIME_PROTOCOL_VERSIONS_V13,
 ] as const;
 export type RuntimeProtocolVersion = (typeof SUPPORTED_RUNTIME_PROTOCOL_VERSIONS)[number];
 export const RUNTIME_PROTOCOL_VERSION = SUPPORTED_RUNTIME_PROTOCOL_VERSIONS[0];
@@ -38,6 +42,26 @@ export const USER_INPUT_DESCRIPTION_MAX_CHARS = 500;
 export const USER_INPUT_CHOICE_OPTION_MAX_COUNT = 50;
 export const USER_INPUT_TEXT_MAX_CHARS = 10_000;
 export const USER_INPUT_CANCEL_REASON_MAX_CHARS = 500;
+
+export const RUNTIME_V14_MAX_ATTACHMENT_BYTES = 16 * 1_024 * 1_024;
+export const RUNTIME_V14_MAX_TURN_ATTACHMENTS = 8;
+/**
+ * Chunk payloads are raw bytes before base64 framing. 2 MiB of raw data grows to about 2.7 MiB of
+ * base64 text, which keeps a full attachment.chunk request inside the 4 MiB stdio frame limit.
+ */
+export const RUNTIME_V14_MAX_ATTACHMENT_CHUNK_BYTES = 2 * 1_024 * 1_024;
+export const RUNTIME_V14_MAX_STAGED_ATTACHMENTS = 16;
+export const ATTACHMENT_FILE_NAME_MAX_CHARS = 255;
+export const SUPPORTED_ATTACHMENT_MEDIA_TYPES = [
+  "image/png",
+  "image/jpeg",
+  "image/gif",
+  "image/webp",
+  "application/pdf",
+  "text/plain",
+  "text/markdown",
+] as const;
+export const ATTACHMENT_SOURCES = ["local-path", "chunks"] as const;
 
 export const INTERACTION_SENSITIVITIES = ["normal"] as const;
 
@@ -76,6 +100,13 @@ export interface RuntimeProtocolCapabilities {
 }
 
 export const RUNTIME_PROTOCOL_CAPABILITIES = {
+  "1.4": {
+    serverRequests: true,
+    serverRequestCapabilityNegotiation: true,
+    approvalResolvedEvents: true,
+    clientApprovalResponses: false,
+    requiredServerRequestMethods: [],
+  },
   "1.2": {
     serverRequests: true,
     serverRequestCapabilityNegotiation: true,
@@ -107,6 +138,7 @@ export const RUNTIME_PROTOCOL_CAPABILITIES = {
 } as const satisfies Readonly<Record<RuntimeProtocolVersion, RuntimeProtocolCapabilities>>;
 
 export const REQUIRED_RUNTIME_SERVER_REQUEST_METHODS_BY_VERSION = {
+  "1.4": RUNTIME_PROTOCOL_CAPABILITIES["1.4"].requiredServerRequestMethods,
   "1.3": RUNTIME_PROTOCOL_CAPABILITIES["1.3"].requiredServerRequestMethods,
   "1.2": RUNTIME_PROTOCOL_CAPABILITIES["1.2"].requiredServerRequestMethods,
   "1.1": RUNTIME_PROTOCOL_CAPABILITIES["1.1"].requiredServerRequestMethods,
@@ -144,9 +176,13 @@ export const RUNTIME_METHODS = {
   turnCancel: "turn.cancel",
   approvalRespond: "approval.respond",
   operationGet: "operation.get",
+  attachmentStage: "attachment.stage",
+  attachmentChunk: "attachment.chunk",
+  attachmentCommit: "attachment.commit",
+  attachmentRelease: "attachment.release",
 } as const;
 
-export const RUNTIME_FEATURES = [
+export const RUNTIME_FEATURES_V13 = [
   "thread-management",
   "snapshots",
   "turns",
@@ -156,6 +192,10 @@ export const RUNTIME_FEATURES = [
   "operation-projection",
   "process-local-sequence",
 ] as const;
+
+export const RUNTIME_FEATURES_V14 = [...RUNTIME_FEATURES_V13, "attachments"] as const;
+
+export const RUNTIME_FEATURES = RUNTIME_FEATURES_V14;
 
 export const RUNTIME_ERROR_CODES_V11 = {
   protocolVersionUnsupported: "PROTOCOL_VERSION_UNSUPPORTED",
@@ -178,13 +218,26 @@ export const RUNTIME_ERROR_CODES_V12 = {
   capabilityRevisionConflict: "CAPABILITY_REVISION_CONFLICT",
 } as const;
 
-export const RUNTIME_ERROR_CODES = {
+export const RUNTIME_ERROR_CODES_V13 = {
   ...RUNTIME_ERROR_CODES_V12,
   eventCursorExpired: "EVENT_CURSOR_EXPIRED",
   eventCursorGap: "EVENT_CURSOR_GAP",
 } as const;
 
-export const RUNTIME_ERROR_CODES_V13 = RUNTIME_ERROR_CODES;
+/** Runtime Protocol 1.4 error registry. Keep this object frozen. */
+export const RUNTIME_ERROR_CODES_V14 = {
+  ...RUNTIME_ERROR_CODES_V13,
+  attachmentNotFound: "ATTACHMENT_NOT_FOUND",
+  attachmentNotCommitted: "ATTACHMENT_NOT_COMMITTED",
+  attachmentTooLarge: "ATTACHMENT_TOO_LARGE",
+  attachmentTypeUnsupported: "ATTACHMENT_TYPE_UNSUPPORTED",
+  attachmentHashMismatch: "ATTACHMENT_HASH_MISMATCH",
+  attachmentQuotaExceeded: "ATTACHMENT_QUOTA_EXCEEDED",
+  attachmentUploadIncomplete: "ATTACHMENT_UPLOAD_INCOMPLETE",
+  attachmentPathRejected: "ATTACHMENT_PATH_REJECTED",
+} as const;
+
+export const RUNTIME_ERROR_CODES = RUNTIME_ERROR_CODES_V14;
 
 export const TOOL_OUTCOME_KINDS = [
   "success",
@@ -204,6 +257,7 @@ export const requestIdSchema = z.string().uuid().brand<"RequestId">();
 export const streamIdSchema = z.string().uuid().brand<"StreamId">();
 export const operationIdSchema = z.string().uuid().brand<"OperationId">();
 export const runtimeEventIdSchema = z.string().uuid().brand<"RuntimeEventId">();
+export const attachmentIdSchema = z.string().uuid().brand<"AttachmentId">();
 export const runtimeEventCursorSchema = z
   .string()
   .max(128)
@@ -244,6 +298,7 @@ export type StreamId = z.infer<typeof streamIdSchema>;
 export type OperationId = z.infer<typeof operationIdSchema>;
 export type RuntimeEventId = z.infer<typeof runtimeEventIdSchema>;
 export type RuntimeEventCursor = z.infer<typeof runtimeEventCursorSchema>;
+export type AttachmentId = z.infer<typeof attachmentIdSchema>;
 export type JsonValue = z.infer<typeof jsonValueSchema>;
 export type JsonRpcId = z.infer<typeof jsonRpcIdSchema>;
 export type InteractionSensitivity = z.infer<typeof interactionSensitivitySchema>;
@@ -358,7 +413,25 @@ export const runtimeLimitsV13Schema = z
   .strict()
   .readonly();
 
-export const runtimeLimitsSchema = z.union([runtimeLimitsV13Schema, runtimeLimitsV12Schema]);
+export const runtimeLimitsV14Schema = z
+  .object({
+    maxFrameBytes: z.number().int().positive(),
+    maxPageSize: z.number().int().positive(),
+    eventReplay: z.literal(true),
+    idempotencyCacheEntries: z.number().int().positive(),
+    maxAttachmentBytes: z.number().int().positive(),
+    maxAttachmentChunkBytes: z.number().int().positive(),
+    maxTurnAttachments: z.number().int().positive(),
+    maxStagedAttachments: z.number().int().positive(),
+  })
+  .strict()
+  .readonly();
+
+export const runtimeLimitsSchema = z.union([
+  runtimeLimitsV14Schema,
+  runtimeLimitsV13Schema,
+  runtimeLimitsV12Schema,
+]);
 
 export const initializeParamsSchema = z
   .object({
@@ -371,7 +444,13 @@ export const initializeParamsSchema = z
 const initializeResultCommonFields = {
   runtimeInstanceId: runtimeInstanceIdSchema,
   server: runtimeServerInfoSchema,
-  features: z.array(z.enum(RUNTIME_FEATURES)),
+  features: z.array(z.enum(RUNTIME_FEATURES_V13)),
+} as const;
+
+const initializeResultV14Fields = {
+  runtimeInstanceId: runtimeInstanceIdSchema,
+  server: runtimeServerInfoSchema,
+  features: z.array(z.enum(RUNTIME_FEATURES_V14)),
 } as const;
 
 /** Runtime Protocol 1.1/1.0 initialize result. Keep this schema frozen. */
@@ -403,8 +482,18 @@ export const initializeResultV13Schema = z
   .strict()
   .readonly();
 
+export const initializeResultV14Schema = z
+  .object({
+    protocolVersion: z.literal("1.4"),
+    ...initializeResultV14Fields,
+    limits: runtimeLimitsV14Schema,
+  })
+  .strict()
+  .readonly();
+
 /** Any currently supported Runtime Protocol initialize result. */
 export const initializeResultSchema = z.union([
+  initializeResultV14Schema,
   initializeResultV13Schema,
   initializeResultV12Schema,
   initializeResultV11Schema,
@@ -482,12 +571,38 @@ export const uiMessagePartSchema = z
   .strict()
   .readonly();
 
+/**
+ * Safe attachment metadata inside a projected message. Carries no binary content and no
+ * filesystem path; bytes are derived from the persisted model message.
+ */
+export const uiMessageAttachmentPartSchema = z
+  .object({
+    type: z.literal("attachment"),
+    mediaType: z.string().min(1),
+    bytes: z.number().int().nonnegative(),
+    displayName: z.string().min(1).max(ATTACHMENT_FILE_NAME_MAX_CHARS).optional(),
+  })
+  .strict()
+  .readonly();
+
+export const uiMessagePartV14Schema = z.union([uiMessagePartSchema, uiMessageAttachmentPartSchema]);
+
 export const uiMessageSchema = z
   .object({
     sequence: z.number().int().nonnegative(),
     role: z.enum(["user", "assistant"]),
     createdAt: timestampSchema,
     parts: z.array(uiMessagePartSchema),
+  })
+  .strict()
+  .readonly();
+
+export const uiMessageV14Schema = z
+  .object({
+    sequence: z.number().int().nonnegative(),
+    role: z.enum(["user", "assistant"]),
+    createdAt: timestampSchema,
+    parts: z.array(uiMessagePartV14Schema),
   })
   .strict()
   .readonly();
@@ -550,6 +665,14 @@ export const pendingApprovalSchema = z
 export const messagePageSchema = z
   .object({
     items: z.array(uiMessageSchema),
+    nextBeforeSequence: z.number().int().nonnegative().nullable(),
+  })
+  .strict()
+  .readonly();
+
+export const messagePageV14Schema = z
+  .object({
+    items: z.array(uiMessageV14Schema),
     nextBeforeSequence: z.number().int().nonnegative().nullable(),
   })
   .strict()
@@ -926,8 +1049,22 @@ export const threadSnapshotV13Schema = z.union([
   threadRecoverySnapshotV13Schema,
 ]);
 
+export const threadSnapshotV14FullSchema = z
+  .object({
+    ...threadSnapshotV12Fields,
+    messages: messagePageV14Schema,
+    eventCursor: runtimeEventCursorSchema.nullable(),
+  })
+  .strict()
+  .readonly();
+
+export const threadSnapshotV14Schema = z.union([
+  threadSnapshotV14FullSchema,
+  threadRecoverySnapshotV13Schema,
+]);
+
 /** Latest Runtime Protocol snapshot. Use versioned schemas for compatibility. */
-export const threadSnapshotSchema = threadSnapshotV13Schema;
+export const threadSnapshotSchema = threadSnapshotV14Schema;
 
 const pageSizeSchema = z.number().int().min(1).max(500).default(100);
 const requestFields = { requestId: requestIdSchema } as const;
@@ -1052,6 +1189,115 @@ export const threadCapabilitiesResultSchema = z
   .strict()
   .readonly();
 
+export const attachmentSourceSchema = z.enum(ATTACHMENT_SOURCES);
+export const attachmentMediaTypeSchema = z.enum(SUPPORTED_ATTACHMENT_MEDIA_TYPES);
+export const attachmentSha256Schema = z.string().regex(/^[a-f0-9]{64}$/u);
+export const attachmentFileNameSchema = z.string().min(1).max(ATTACHMENT_FILE_NAME_MAX_CHARS);
+export const ATTACHMENT_STATES = ["staged", "committed"] as const;
+export const attachmentStateSchema = z.enum(ATTACHMENT_STATES);
+
+/**
+ * Safe attachment metadata. Never carries client filesystem paths or inline binary content; the
+ * displayName is a server-sanitized rendering of the client-declared fileName.
+ */
+export const attachmentDescriptorSchema = z
+  .object({
+    attachmentId: attachmentIdSchema,
+    fileName: attachmentFileNameSchema,
+    displayName: attachmentFileNameSchema,
+    mediaType: attachmentMediaTypeSchema,
+    bytes: z.number().int().positive().max(RUNTIME_V14_MAX_ATTACHMENT_BYTES),
+    sha256: attachmentSha256Schema,
+    source: attachmentSourceSchema,
+    createdAt: timestampSchema,
+  })
+  .strict()
+  .readonly();
+
+export const attachmentStageParamsSchema = z
+  .object({
+    ...requestFields,
+    ...threadRequestFields,
+    fileName: attachmentFileNameSchema,
+    mediaType: attachmentMediaTypeSchema,
+    bytes: z.number().int().positive().max(RUNTIME_V14_MAX_ATTACHMENT_BYTES),
+    sha256: attachmentSha256Schema,
+    source: attachmentSourceSchema,
+    sourcePath: z.string().min(1).optional(),
+  })
+  .strict()
+  .refine((params) => (params.source === "local-path" ? params.sourcePath !== undefined : true), {
+    message: "source 为 local-path 时必须提供 sourcePath",
+  })
+  .refine((params) => (params.source === "chunks" ? params.sourcePath === undefined : true), {
+    message: "source 为 chunks 时不能提供 sourcePath",
+  })
+  .readonly();
+
+export const attachmentStageResultSchema = z
+  .object({
+    attachmentId: attachmentIdSchema,
+    state: attachmentStateSchema,
+    descriptor: attachmentDescriptorSchema.optional(),
+  })
+  .strict()
+  .readonly();
+
+export const attachmentChunkParamsSchema = z
+  .object({
+    ...requestFields,
+    ...threadRequestFields,
+    attachmentId: attachmentIdSchema,
+    sequence: z.number().int().nonnegative(),
+    dataBase64: z
+      .string()
+      .min(1)
+      .max(Math.ceil(RUNTIME_V14_MAX_ATTACHMENT_CHUNK_BYTES / 3) * 4 + 4)
+      .regex(/^[A-Za-z0-9+/]+={0,2}$/u),
+  })
+  .strict()
+  .readonly();
+
+export const attachmentChunkResultSchema = z
+  .object({
+    receivedBytes: z.number().int().nonnegative(),
+    nextSequence: z.number().int().nonnegative(),
+  })
+  .strict()
+  .readonly();
+
+export const attachmentCommitParamsSchema = z
+  .object({
+    ...requestFields,
+    ...threadRequestFields,
+    attachmentId: attachmentIdSchema,
+  })
+  .strict()
+  .readonly();
+
+export const attachmentCommitResultSchema = z
+  .object({
+    descriptor: attachmentDescriptorSchema,
+  })
+  .strict()
+  .readonly();
+
+export const attachmentReleaseParamsSchema = z
+  .object({
+    ...requestFields,
+    ...threadRequestFields,
+    attachmentId: attachmentIdSchema,
+  })
+  .strict()
+  .readonly();
+
+export const attachmentReleaseResultSchema = z
+  .object({
+    released: z.boolean(),
+  })
+  .strict()
+  .readonly();
+
 export const turnStartParamsSchema = z
   .object({
     ...requestFields,
@@ -1062,6 +1308,29 @@ export const turnStartParamsSchema = z
         text: z.string().min(1),
       })
       .strict()
+      .readonly(),
+  })
+  .strict()
+  .readonly();
+
+export const turnStartParamsV14Schema = z
+  .object({
+    ...requestFields,
+    ...threadRequestFields,
+    turnId: turnIdSchema,
+    input: z
+      .object({
+        text: z.string(),
+        attachments: z
+          .array(attachmentIdSchema)
+          .min(1)
+          .max(RUNTIME_V14_MAX_TURN_ATTACHMENTS)
+          .optional(),
+      })
+      .strict()
+      .refine((input) => input.text.length > 0 || input.attachments !== undefined, {
+        message: "input.text 为空时必须至少引用一个附件",
+      })
       .readonly(),
   })
   .strict()
@@ -1448,8 +1717,38 @@ export const runtimeEventEnvelopeV13Schema = z.discriminatedUnion("durability", 
   runtimeEphemeralEventEnvelopeV13Schema,
 ]);
 
+export const runtimeDurableEventEnvelopeV14Schema = z
+  .object({
+    protocolVersion: z.literal("1.4"),
+    ...runtimeEventEnvelopeFields,
+    durability: z.literal("durable"),
+    eventId: runtimeEventIdSchema,
+    cursor: runtimeEventCursorSchema,
+    event: runtimeDurableEventV13Schema,
+  })
+  .strict()
+  .superRefine(validateRuntimeEventCapabilities)
+  .readonly();
+
+export const runtimeEphemeralEventEnvelopeV14Schema = z
+  .object({
+    protocolVersion: z.literal("1.4"),
+    ...runtimeEventEnvelopeFields,
+    durability: z.literal("ephemeral"),
+    event: runtimeEphemeralEventV13Schema,
+  })
+  .strict()
+  .superRefine(validateRuntimeEventCapabilities)
+  .readonly();
+
+export const runtimeEventEnvelopeV14Schema = z.discriminatedUnion("durability", [
+  runtimeDurableEventEnvelopeV14Schema,
+  runtimeEphemeralEventEnvelopeV14Schema,
+]);
+
 /** Any currently supported Runtime Event envelope. */
 export const runtimeEventEnvelopeSchema = z.union([
+  runtimeEventEnvelopeV14Schema,
   runtimeEventEnvelopeV13Schema,
   runtimeEventEnvelopeV12Schema,
   runtimeEventEnvelopeV11Schema,
@@ -1479,6 +1778,15 @@ export const runtimeProtocolErrorDataV12Schema = z
 export const runtimeProtocolErrorDataV13Schema = z
   .object({
     rollCode: z.enum(Object.values(RUNTIME_ERROR_CODES_V13)),
+    retryable: z.boolean(),
+    details: jsonValueSchema.optional(),
+  })
+  .strict()
+  .readonly();
+
+export const runtimeProtocolErrorDataV14Schema = z
+  .object({
+    rollCode: z.enum(Object.values(RUNTIME_ERROR_CODES_V14)),
     retryable: z.boolean(),
     details: jsonValueSchema.optional(),
   })
@@ -1570,11 +1878,11 @@ export const runtimeMethodSchemasV13 = {
   },
   [RUNTIME_METHODS.threadOpen]: {
     params: threadOpenParamsSchema,
-    result: threadOpenResultSchema,
+    result: threadSnapshotV13Schema,
   },
   [RUNTIME_METHODS.threadSnapshot]: {
     params: threadSnapshotParamsV13Schema,
-    result: threadSnapshotResultSchema,
+    result: threadSnapshotV13Schema,
   },
   [RUNTIME_METHODS.runtimeEventsResume]: {
     params: runtimeEventsResumeParamsSchema,
@@ -1582,8 +1890,44 @@ export const runtimeMethodSchemasV13 = {
   },
 } as const;
 
+export const runtimeMethodSchemasV14 = {
+  ...runtimeMethodSchemasV13,
+  [RUNTIME_METHODS.initialize]: {
+    params: initializeParamsSchema,
+    result: initializeResultV14Schema,
+  },
+  [RUNTIME_METHODS.threadOpen]: {
+    params: threadOpenParamsSchema,
+    result: threadSnapshotV14Schema,
+  },
+  [RUNTIME_METHODS.threadSnapshot]: {
+    params: threadSnapshotParamsV13Schema,
+    result: threadSnapshotV14Schema,
+  },
+  [RUNTIME_METHODS.turnStart]: {
+    params: turnStartParamsV14Schema,
+    result: turnStartResultSchema,
+  },
+  [RUNTIME_METHODS.attachmentStage]: {
+    params: attachmentStageParamsSchema,
+    result: attachmentStageResultSchema,
+  },
+  [RUNTIME_METHODS.attachmentChunk]: {
+    params: attachmentChunkParamsSchema,
+    result: attachmentChunkResultSchema,
+  },
+  [RUNTIME_METHODS.attachmentCommit]: {
+    params: attachmentCommitParamsSchema,
+    result: attachmentCommitResultSchema,
+  },
+  [RUNTIME_METHODS.attachmentRelease]: {
+    params: attachmentReleaseParamsSchema,
+    result: attachmentReleaseResultSchema,
+  },
+} as const;
+
 /** Latest Runtime method registry. Use the version registry for negotiated availability. */
-export const runtimeMethodSchemas = runtimeMethodSchemasV13;
+export const runtimeMethodSchemas = runtimeMethodSchemasV14;
 
 export const runtimeServerRequestSchemasV10 = {} as const;
 
@@ -1625,6 +1969,14 @@ export interface RuntimeProtocolRegistry {
 }
 
 export const RUNTIME_PROTOCOL_REGISTRY = {
+  "1.4": {
+    methods: runtimeMethodSchemasV14,
+    serverRequests: runtimeServerRequestSchemasV13,
+    serverRequestMethods: RUNTIME_SERVER_REQUEST_METHOD_VALUES,
+    serverRequestCancelParamsSchema: runtimeServerRequestCancelParamsV12Schema,
+    eventEnvelopeSchema: runtimeEventEnvelopeV14Schema,
+    errorDataSchema: runtimeProtocolErrorDataV14Schema,
+  },
   "1.3": {
     methods: runtimeMethodSchemasV13,
     serverRequests: runtimeServerRequestSchemasV13,
@@ -1771,6 +2123,15 @@ export type RuntimeServerRequestHandlersForVersion<TVersion extends RuntimeProto
 /** Protocol 1.1 compatibility method union. Use RuntimeMethodForVersion in new code. */
 export type RuntimeMethod = keyof typeof runtimeMethodSchemasV11;
 export type LatestRuntimeMethod = keyof typeof runtimeMethodSchemas;
+export type LatestRuntimeMethodInput<TMethod extends LatestRuntimeMethod> = z.input<
+  (typeof runtimeMethodSchemas)[TMethod]["params"]
+>;
+export type LatestRuntimeMethodParams<TMethod extends LatestRuntimeMethod> = z.output<
+  (typeof runtimeMethodSchemas)[TMethod]["params"]
+>;
+export type LatestRuntimeMethodResult<TMethod extends LatestRuntimeMethod> = z.output<
+  (typeof runtimeMethodSchemas)[TMethod]["result"]
+>;
 export type LegacyRuntimeServerRequestMethod = RuntimeServerRequestMethodForVersion<"1.1">;
 export type LatestRuntimeServerRequestMethod = RuntimeServerRequestMethodForVersion<
   typeof RUNTIME_PROTOCOL_VERSION
@@ -1807,6 +2168,18 @@ export type InitializeResult = z.output<typeof initializeResultSchema>;
 export type InitializeResultV11 = z.output<typeof initializeResultV11Schema>;
 export type InitializeResultV12 = z.output<typeof initializeResultV12Schema>;
 export type InitializeResultV13 = z.output<typeof initializeResultV13Schema>;
+export type InitializeResultV14 = z.output<typeof initializeResultV14Schema>;
+export type AttachmentSource = z.infer<typeof attachmentSourceSchema>;
+export type AttachmentState = z.infer<typeof attachmentStateSchema>;
+export type AttachmentDescriptor = z.infer<typeof attachmentDescriptorSchema>;
+export type AttachmentStageParams = z.output<typeof attachmentStageParamsSchema>;
+export type AttachmentStageResult = z.output<typeof attachmentStageResultSchema>;
+export type AttachmentChunkParams = z.output<typeof attachmentChunkParamsSchema>;
+export type AttachmentChunkResult = z.output<typeof attachmentChunkResultSchema>;
+export type AttachmentCommitParams = z.output<typeof attachmentCommitParamsSchema>;
+export type AttachmentCommitResult = z.output<typeof attachmentCommitResultSchema>;
+export type AttachmentReleaseParams = z.output<typeof attachmentReleaseParamsSchema>;
+export type AttachmentReleaseResult = z.output<typeof attachmentReleaseResultSchema>;
 export type ClientCapabilitiesSetParams = z.output<typeof clientCapabilitiesSetParamsSchema>;
 export type ClientCapabilitiesSetResult = z.output<typeof clientCapabilitiesSetResultSchema>;
 export type RuntimeEvent = z.infer<typeof runtimeEventSchema>;
@@ -1823,15 +2196,23 @@ export type RuntimeEphemeralEventEnvelopeV13 = z.infer<
   typeof runtimeEphemeralEventEnvelopeV13Schema
 >;
 export type RuntimeEventEnvelopeV13 = z.infer<typeof runtimeEventEnvelopeV13Schema>;
+export type RuntimeDurableEventEnvelopeV14 = z.infer<typeof runtimeDurableEventEnvelopeV14Schema>;
+export type RuntimeEphemeralEventEnvelopeV14 = z.infer<
+  typeof runtimeEphemeralEventEnvelopeV14Schema
+>;
+export type RuntimeEventEnvelopeV14 = z.infer<typeof runtimeEventEnvelopeV14Schema>;
 export type RuntimeEventEnvelopeForVersion<TVersion extends RuntimeProtocolVersion> =
-  TVersion extends "1.3"
-    ? RuntimeEventEnvelopeV13
-    : TVersion extends "1.2"
-      ? RuntimeEventEnvelopeV12
-      : RuntimeEventEnvelopeV11;
+  TVersion extends "1.4"
+    ? RuntimeEventEnvelopeV14
+    : TVersion extends "1.3"
+      ? RuntimeEventEnvelopeV13
+      : TVersion extends "1.2"
+        ? RuntimeEventEnvelopeV12
+        : RuntimeEventEnvelopeV11;
 export type RuntimeProtocolErrorData = z.infer<typeof runtimeProtocolErrorDataSchema>;
 export type RuntimeProtocolErrorDataV12 = z.infer<typeof runtimeProtocolErrorDataV12Schema>;
 export type RuntimeProtocolErrorDataV13 = z.infer<typeof runtimeProtocolErrorDataV13Schema>;
+export type RuntimeProtocolErrorDataV14 = z.infer<typeof runtimeProtocolErrorDataV14Schema>;
 export type RuntimeProtocolErrorDataForVersion<TVersion extends RuntimeProtocolVersion> =
   TVersion extends RuntimeProtocolVersion
     ? z.output<RuntimeProtocolRegistryMap[TVersion]["errorDataSchema"]>
@@ -1843,13 +2224,20 @@ export type ThreadSnapshotV12 = z.infer<typeof threadSnapshotV12Schema>;
 export type ThreadSnapshotV13Full = z.infer<typeof threadSnapshotV13FullSchema>;
 export type ThreadRecoverySnapshotV13 = z.infer<typeof threadRecoverySnapshotV13Schema>;
 export type ThreadSnapshotV13 = z.infer<typeof threadSnapshotV13Schema>;
+export type ThreadSnapshotV14Full = z.infer<typeof threadSnapshotV14FullSchema>;
+export type ThreadSnapshotV14 = z.infer<typeof threadSnapshotV14Schema>;
 export type ThreadSnapshotForVersion<TVersion extends RuntimeProtocolVersion> =
-  TVersion extends "1.3"
-    ? ThreadSnapshotV13
-    : TVersion extends "1.2"
-      ? ThreadSnapshotV12
-      : ThreadSnapshotV11;
+  TVersion extends "1.4"
+    ? ThreadSnapshotV14
+    : TVersion extends "1.3"
+      ? ThreadSnapshotV13
+      : TVersion extends "1.2"
+        ? ThreadSnapshotV12
+        : ThreadSnapshotV11;
 export type UiMessage = z.infer<typeof uiMessageSchema>;
+export type UiMessageV14 = z.infer<typeof uiMessageV14Schema>;
+export type UiMessagePartV14 = z.infer<typeof uiMessagePartV14Schema>;
+export type UiMessageAttachmentPart = z.infer<typeof uiMessageAttachmentPartSchema>;
 export type OperationView = z.infer<typeof operationViewSchema>;
 export type PendingApproval = z.infer<typeof pendingApprovalSchema>;
 export type PendingInteractionProjection = z.infer<typeof pendingInteractionProjectionSchema>;
@@ -2237,11 +2625,49 @@ export function parseRuntimeMethodResult<TMethod extends RuntimeMethod>(
   return runtimeMethodSchemasV11[method].result.parse(value) as RuntimeMethodResult<TMethod>;
 }
 
+export function parseLatestRuntimeMethodParams<TMethod extends LatestRuntimeMethod>(
+  method: TMethod,
+  value: unknown,
+): LatestRuntimeMethodParams<TMethod> {
+  return runtimeMethodSchemas[method].params.parse(value) as LatestRuntimeMethodParams<TMethod>;
+}
+
+export function parseLatestRuntimeMethodResult<TMethod extends LatestRuntimeMethod>(
+  method: TMethod,
+  value: unknown,
+): LatestRuntimeMethodResult<TMethod> {
+  return runtimeMethodSchemas[method].result.parse(value) as LatestRuntimeMethodResult<TMethod>;
+}
+
+function projectUiMessagePageToTextParts(page: ThreadSnapshotV14Full["messages"]): unknown {
+  return {
+    items: page.items.map((message) => ({
+      ...message,
+      parts: message.parts.filter((part) => part.type === "text"),
+    })),
+    nextBeforeSequence: page.nextBeforeSequence,
+  };
+}
+
 export function projectThreadSnapshotForVersion<TVersion extends RuntimeProtocolVersion>(
   version: TVersion,
   value: unknown,
 ): ThreadSnapshotForVersion<TVersion> {
-  const latest = threadSnapshotV13Schema.safeParse(value);
+  const latestV14 = threadSnapshotV14Schema.safeParse(value);
+  if (version === "1.4") {
+    if (!latestV14.success) {
+      throw latestV14.error;
+    }
+    return latestV14.data as ThreadSnapshotForVersion<TVersion>;
+  }
+  const v13Candidate =
+    latestV14.success && !("recoveryProjection" in latestV14.data)
+      ? {
+          ...latestV14.data,
+          messages: projectUiMessagePageToTextParts(latestV14.data.messages),
+        }
+      : value;
+  const latest = threadSnapshotV13Schema.safeParse(v13Candidate);
   if (version === "1.3") {
     if (!latest.success) {
       throw latest.error;
@@ -2258,7 +2684,7 @@ export function projectThreadSnapshotForVersion<TVersion extends RuntimeProtocol
         pendingInteractions: latest.data.pendingInteractions,
         transcriptCompleteness: latest.data.transcriptCompleteness,
       })
-    : threadSnapshotV12Schema.parse(value);
+    : threadSnapshotV12Schema.parse(v13Candidate);
   if (version === "1.2") {
     return v12 as ThreadSnapshotForVersion<TVersion>;
   }
@@ -2285,8 +2711,17 @@ export function projectRuntimeEventEnvelopeForVersion<TVersion extends RuntimePr
   value: unknown,
 ): RuntimeEventEnvelopeForVersion<TVersion> {
   const source = runtimeEventEnvelopeSchema.parse(value);
+  if (version === "1.4") {
+    return runtimeEventEnvelopeV14Schema.parse({
+      ...source,
+      protocolVersion: version,
+    }) as RuntimeEventEnvelopeForVersion<TVersion>;
+  }
   if (version === "1.3") {
-    return runtimeEventEnvelopeV13Schema.parse(source) as RuntimeEventEnvelopeForVersion<TVersion>;
+    return runtimeEventEnvelopeV13Schema.parse({
+      ...source,
+      protocolVersion: version,
+    }) as RuntimeEventEnvelopeForVersion<TVersion>;
   }
   const projectedEnvelopeFields = {
     runtimeInstanceId: source.runtimeInstanceId,

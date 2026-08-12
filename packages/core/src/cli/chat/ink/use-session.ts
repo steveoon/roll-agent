@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { useCallback, useEffect, useReducer, useRef } from "react";
-import type { AgentSession, SessionEvent } from "@roll-agent/runtime";
+import type { AgentSession, SessionAttachment, SessionEvent } from "@roll-agent/runtime";
 import {
   chatReducer,
   createInitialState,
@@ -20,9 +20,13 @@ export interface UseSessionOptions {
   readonly onThinkingChange?: (level: ThinkingLevel) => void;
 }
 
+export interface UseSessionSubmitAttachment extends SessionAttachment {
+  readonly name: string;
+}
+
 export interface UseSessionResult {
   readonly state: ChatUiState;
-  readonly submit: (text: string, sendText?: string) => void;
+  readonly submit: (text: string, attachments?: readonly UseSessionSubmitAttachment[]) => void;
   readonly compact: () => void;
   readonly cancel: () => void;
   readonly resolveConfirm: (approved: boolean) => void;
@@ -203,13 +207,30 @@ export function useSession(session: AgentSession, options: UseSessionOptions): U
   );
 
   const submit = useCallback(
-    (text: string) => {
+    (text: string, attachments?: readonly UseSessionSubmitAttachment[]) => {
       if (busyRef.current) {
         return;
       }
       busyRef.current = true;
-      dispatch({ type: "submit-user", id: randomUUID(), text });
-      drive(session.send(text)).catch(() => undefined);
+      dispatch({
+        type: "submit-user",
+        id: randomUUID(),
+        text,
+        ...(attachments !== undefined && attachments.length > 0
+          ? { attachmentLabels: attachments.map((attachment) => attachment.name) }
+          : {}),
+      });
+      const input =
+        attachments !== undefined && attachments.length > 0
+          ? {
+              text,
+              attachments: attachments.map((attachment) => ({
+                data: attachment.data,
+                mediaType: attachment.mediaType,
+              })),
+            }
+          : text;
+      drive(session.send(input)).catch(() => undefined);
     },
     [drive, session],
   );

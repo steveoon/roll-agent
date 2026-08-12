@@ -67,6 +67,7 @@ export {
 export type { BrowserCdpHealth, FetchCdpHealth } from "./runtime/cdp-health.ts";
 export { NativeCdpController } from "./runtime/native-cdp-controller.ts";
 export type {
+  NativeCdpCaptureScreenshotOptions,
   NativeCdpControllerOptions,
   NativeCdpCreateIsolatedWorldOptions,
   NativeCdpDescribeNodeOptions,
@@ -82,6 +83,7 @@ export type {
   NativeCdpMouseEventInput,
   NativeCdpNavigateResult,
   NativeCdpQuerySelectorAllOptions,
+  NativeCdpScreenshotClip,
   NativeCdpScrollIntoViewOptions,
   NativeCdpSettableWindowState,
   NativeCdpWindowBounds,
