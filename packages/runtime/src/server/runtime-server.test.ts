@@ -3715,3 +3715,60 @@ test("RuntimeServer.abortAll 对未决审批发送 cancel 并 fail-closed 收口
     false,
   );
 });
+
+test("Runtime Protocol 1.4 routes attachment methods to the service and gates 1.3 sessions", async (t) => {
+  const harness = createApprovalProtocolHarness();
+  const client = attachRuntimeProtocolClient(harness.clientConn);
+  t.after(() => harness.close());
+
+  await client.request(1, RUNTIME_METHODS.initialize, {
+    protocolVersions: ["1.4"],
+    client: { name: "attachment-routing-client", version: "1.0.0" },
+  });
+  await client.request(2, RUNTIME_METHODS.clientCapabilitiesSet, {
+    revision: 1,
+    serverRequestMethods: [],
+  });
+  const created = (await client.request(3, RUNTIME_METHODS.threadCreate, {
+    requestId: "00000000-0000-4000-8000-0000000000e0",
+    title: "attachment routing",
+  })) as { readonly thread: { readonly id: string } };
+  const stageParams = {
+    requestId: "00000000-0000-4000-8000-0000000000e1",
+    threadId: created.thread.id,
+    fileName: "shot.png",
+    mediaType: "image/png",
+    bytes: 5,
+    sha256: "a".repeat(64),
+    source: "local-path",
+    sourcePath: "/tmp/shot.png",
+  };
+  const reachedService = (await client.requestError(
+    4,
+    RUNTIME_METHODS.attachmentStage,
+    stageParams,
+  )) as {
+    readonly message?: string;
+    readonly data?: { readonly rollCode?: string };
+  };
+  assert.equal(reachedService.data?.rollCode, "CAPABILITY_UNAVAILABLE");
+  assert.match(reachedService.message ?? "", /未配置附件存储/u);
+
+  const legacyHarness = createApprovalProtocolHarness();
+  const legacy = attachRuntimeProtocolClient(legacyHarness.clientConn);
+  t.after(() => legacyHarness.close());
+  await legacy.request(1, RUNTIME_METHODS.initialize, {
+    protocolVersions: ["1.3"],
+    client: { name: "v13-attachment-client", version: "1.3.0" },
+  });
+  await legacy.request(2, RUNTIME_METHODS.clientCapabilitiesSet, {
+    revision: 1,
+    serverRequestMethods: [],
+  });
+  const gated = (await legacy.requestError(3, RUNTIME_METHODS.attachmentStage, stageParams)) as {
+    readonly message?: string;
+    readonly data?: { readonly rollCode?: string };
+  };
+  assert.equal(gated.data?.rollCode, "CAPABILITY_UNAVAILABLE");
+  assert.match(gated.message ?? "", /1\.3 不支持方法/u);
+});

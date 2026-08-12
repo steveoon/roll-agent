@@ -3,6 +3,7 @@ import {
   RUNTIME_ERROR_CODES,
   RUNTIME_EVENT_NOTIFICATION,
   RUNTIME_METHODS,
+  RUNTIME_PROTOCOL_VERSION,
   RUNTIME_SERVER_REQUEST_METHODS,
   RUNTIME_V13_DEFAULT_REPLAY_BUFFER_BYTES,
   RUNTIME_V13_MAX_DURABLE_EVENT_RECORDS,
@@ -218,7 +219,7 @@ export class RuntimeProtocolAdapter {
   }
 
   handles(method: string): method is LatestRuntimeMethod {
-    return isRuntimeMethodAvailable("1.3", method);
+    return isRuntimeMethodAvailable(RUNTIME_PROTOCOL_VERSION, method);
   }
 
   handleResponse(message: JsonRpcMessage): boolean {
