@@ -364,7 +364,9 @@ export class RuntimeProtocolAdapter {
           request.params,
         );
         const recoveryProjection =
-          this.protocolVersion === "1.3" && "recovery" in params && params.recovery === true;
+          (this.protocolVersion === "1.3" || this.protocolVersion === "1.4") &&
+          "recovery" in params &&
+          params.recovery === true;
         return this.projectThreadSnapshot(
           this.service.snapshotThread({
             threadId: params.threadId,

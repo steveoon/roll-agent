@@ -88,7 +88,7 @@ function expandPathToken(token: string): string | undefined {
   if (token.startsWith("~/")) {
     return resolve(homedir(), token.slice(2));
   }
-  return isAbsolute(token) ? token : resolve(token);
+  return isAbsolute(token) ? token : undefined;
 }
 
 function imageMediaTypeOf(path: string): string | undefined {

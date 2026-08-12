@@ -1,6 +1,15 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { existsSync, mkdtempSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  rmSync,
+  symlinkSync,
+  utimesSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -346,7 +355,7 @@ test("staging 并发配额与 release 幂等", () => {
   );
 });
 
-test("close 清空目录，构造时清扫历史残留", () => {
+test("并存实例互不破坏：新实例构造不删活跃实例的附件，close 只清自己", () => {
   const storeDir = join(tempDir(), "attachments");
   const workDir = tempDir();
   const data = Buffer.from("survivor");
@@ -363,18 +372,64 @@ test("close 清空目录，构造时清扫历史残留", () => {
     sourcePath,
   });
   assert.ok(staged.ok);
-  assert.equal(readdirSync(storeDir).length, 1);
 
   const second = new AttachmentStore({ dir: storeDir });
-  assert.equal(readdirSync(storeDir).length, 0);
-  const orphan = second.readCommitted({
+  const survived = first.readCommitted({
     threadId: THREAD_A,
     attachmentId: attachmentIdSchema.parse(staged.attachmentId),
   });
-  assert.ok(!orphan.ok && orphan.code === "ATTACHMENT_NOT_FOUND");
+  assert.ok(survived.ok);
+  assert.equal(survived.dataBase64, data.toString("base64"));
+
   second.close();
-  assert.equal(existsSync(storeDir), false);
+  const afterSecondClose = first.readCommitted({
+    threadId: THREAD_A,
+    attachmentId: attachmentIdSchema.parse(staged.attachmentId),
+  });
+  assert.ok(afterSecondClose.ok);
+  first.close();
+  assert.equal(readdirSync(storeDir).length, 0);
   rmSync(workDir, { recursive: true, force: true });
+});
+
+test("构造时清扫超龄的孤儿实例目录", () => {
+  const storeDir = join(tempDir(), "attachments");
+  const staleDir = join(storeDir, "00000000-dead-4000-8000-000000000001");
+  mkdirSync(staleDir, { recursive: true });
+  writeFileSync(join(staleDir, "orphan.bin"), Buffer.from("orphan"));
+  const staleMs = Date.now() - 10 * 60 * 60 * 1_000;
+  utimesSync(staleDir, staleMs / 1_000, staleMs / 1_000);
+
+  const store = new AttachmentStore({ dir: storeDir });
+  assert.equal(existsSync(staleDir), false);
+  store.close();
+});
+
+test("local-path committed 附件计入暂存配额", () => {
+  withStore(
+    ({ store, workDir }) => {
+      const data = Buffer.from("quota");
+      const sourcePath = writeSource(workDir, "q.png", data);
+      const base = {
+        threadId: THREAD_A,
+        fileName: "q.png",
+        mediaType: "image/png",
+        bytes: data.length,
+        sha256: sha256(data),
+        source: "local-path",
+        sourcePath,
+      } as const;
+      const first = store.stage(base);
+      assert.ok(first.ok && first.state === "committed");
+      const second = store.stage(base);
+      assert.ok(!second.ok && second.code === "ATTACHMENT_QUOTA_EXCEEDED");
+
+      store.release({ threadId: THREAD_A, attachmentId: first.attachmentId });
+      const third = store.stage(base);
+      assert.ok(third.ok);
+    },
+    { maxStagedAttachments: 1 },
+  );
 });
 
 test("local-path 实际文件超限时报 ATTACHMENT_TOO_LARGE 而非申报不一致", () => {

@@ -245,9 +245,10 @@ function ChatSessionView(props: ChatSessionViewProps): ReactElement {
           commitHistory({ kind: "notice", id: randomUUID(), text: result.message });
         }
       }
-      if (loaded.length > 0) {
-        setAttachments((current) => [...current, ...loaded]);
+      if (loaded.length === 0) {
+        return false;
       }
+      setAttachments((current) => [...current, ...loaded]);
       return true;
     },
     [commitHistory],
@@ -260,18 +261,24 @@ function ChatSessionView(props: ChatSessionViewProps): ReactElement {
   const [clipboardPending, setClipboardPending] = useState(false);
   const clipboardBusyRef = useRef(false);
   const clipboardCounterRef = useRef(0);
+  const attachmentEpochRef = useRef(0);
   const handleClipboardImage = useCallback(() => {
     if (clipboardBusyRef.current) {
       return;
     }
     clipboardBusyRef.current = true;
     setClipboardPending(true);
+    const epoch = attachmentEpochRef.current;
     const notice = (text: string): void => {
       commitHistory({ kind: "notice", id: randomUUID(), text });
     };
     readClipboardImage().then((result) => {
       clipboardBusyRef.current = false;
       setClipboardPending(false);
+      if (epoch !== attachmentEpochRef.current) {
+        notice("剪贴板图像在消息发送后才读取完成，已丢弃；如需附上请再按一次 Ctrl+V");
+        return;
+      }
       if (result.kind === "file") {
         const loaded = loadPendingAttachment(result.path);
         if (loaded.ok) {
@@ -327,6 +334,7 @@ function ChatSessionView(props: ChatSessionViewProps): ReactElement {
     handleBannerSettled();
     onUserSubmit(text.length > 0 ? text : "[图片]");
     submit(text, attachments);
+    attachmentEpochRef.current += 1;
     setAttachments([]);
   };
 

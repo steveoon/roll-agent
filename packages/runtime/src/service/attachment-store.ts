@@ -1,5 +1,14 @@
 import { createHash, randomUUID } from "node:crypto";
-import { appendFileSync, lstatSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  appendFileSync,
+  lstatSync,
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+  type Dirent,
+} from "node:fs";
 import { basename, extname, isAbsolute, join } from "node:path";
 import {
   attachmentIdSchema,
@@ -103,6 +112,29 @@ function extensionMatchesMediaType(fileName: string, mediaType: string): boolean
   return allowed.includes(extension);
 }
 
+function sweepStaleInstanceDirs(rootDir: string, staleMs: number): void {
+  let entries: Dirent[];
+  try {
+    entries = readdirSync(rootDir, { withFileTypes: true });
+  } catch {
+    return;
+  }
+  const cutoffMs = Date.now() - staleMs;
+  for (const entry of entries) {
+    if (!entry.isDirectory()) {
+      continue;
+    }
+    const path = join(rootDir, entry.name);
+    try {
+      if (lstatSync(path).mtimeMs < cutoffMs) {
+        rmSync(path, { recursive: true, force: true });
+      }
+    } catch {
+      continue;
+    }
+  }
+}
+
 export class AttachmentStore {
   private readonly dir: string;
   private readonly maxAttachmentBytes: number;
@@ -114,13 +146,13 @@ export class AttachmentStore {
   private closed = false;
 
   constructor(options: AttachmentStoreOptions) {
-    this.dir = options.dir;
     this.maxAttachmentBytes = options.maxAttachmentBytes ?? RUNTIME_V14_MAX_ATTACHMENT_BYTES;
     this.maxStagedAttachments = options.maxStagedAttachments ?? RUNTIME_V14_MAX_STAGED_ATTACHMENTS;
     this.stagedTtlMs = options.stagedTtlMs ?? DEFAULT_STAGED_TTL_MS;
     this.committedTtlMs = options.committedTtlMs ?? DEFAULT_COMMITTED_TTL_MS;
     this.now = options.now ?? Date.now;
-    rmSync(this.dir, { recursive: true, force: true });
+    this.dir = join(options.dir, randomUUID());
+    sweepStaleInstanceDirs(options.dir, Math.max(this.stagedTtlMs, this.committedTtlMs) * 2);
     mkdirSync(this.dir, { recursive: true });
   }
 
@@ -166,14 +198,11 @@ export class AttachmentStore {
         message: `文件扩展名与 mediaType "${input.mediaType}" 不一致`,
       };
     }
-    const stagedCount = [...this.records.values()].filter(
-      (record) => record.state === "staged",
-    ).length;
-    if (stagedCount >= this.maxStagedAttachments) {
+    if (this.records.size >= this.maxStagedAttachments) {
       return {
         ok: false,
         code: RUNTIME_ERROR_CODES.attachmentQuotaExceeded,
-        message: `staging 中的附件数已达上限 ${String(this.maxStagedAttachments)}`,
+        message: `暂存的附件数已达上限 ${String(this.maxStagedAttachments)}，请先在 turn.start 中引用或 release 释放`,
         retryable: true,
       };
     }

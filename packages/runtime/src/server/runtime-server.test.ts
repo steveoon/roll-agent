@@ -3772,3 +3772,35 @@ test("Runtime Protocol 1.4 routes attachment methods to the service and gates 1.
   assert.equal(gated.data?.rollCode, "CAPABILITY_UNAVAILABLE");
   assert.match(gated.message ?? "", /1\.3 不支持方法/u);
 });
+
+test("Runtime Protocol 1.4 sessions receive the bounded recovery snapshot projection", async (t) => {
+  const harness = createApprovalProtocolHarness();
+  const client = attachRuntimeProtocolClient(harness.clientConn);
+  t.after(() => harness.close());
+
+  await client.request(1, RUNTIME_METHODS.initialize, {
+    protocolVersions: ["1.4"],
+    client: { name: "v14-recovery-client", version: "1.0.0" },
+  });
+  await client.request(2, RUNTIME_METHODS.clientCapabilitiesSet, {
+    revision: 1,
+    serverRequestMethods: [],
+  });
+  const created = (await client.request(3, RUNTIME_METHODS.threadCreate, {
+    requestId: "00000000-0000-4000-8000-0000000000e5",
+    title: "v14 recovery",
+  })) as { readonly thread: { readonly id: string } };
+  const threadId = threadIdSchema.parse(created.thread.id);
+  harness.store.appendMessages(threadId, [{ role: "assistant", content: "x".repeat(2_048) }]);
+
+  const recovery = (await client.request(4, RUNTIME_METHODS.threadSnapshot, {
+    threadId,
+    limit: 1,
+    recovery: true,
+  })) as {
+    readonly recoveryProjection?: true;
+    readonly messages: { readonly items: readonly unknown[] };
+  };
+  assert.equal(recovery.recoveryProjection, true);
+  assert.deepEqual(recovery.messages.items, []);
+});

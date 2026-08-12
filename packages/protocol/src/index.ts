@@ -193,7 +193,9 @@ export const RUNTIME_FEATURES_V13 = [
   "process-local-sequence",
 ] as const;
 
-export const RUNTIME_FEATURES = [...RUNTIME_FEATURES_V13, "attachments"] as const;
+export const RUNTIME_FEATURES_V14 = [...RUNTIME_FEATURES_V13, "attachments"] as const;
+
+export const RUNTIME_FEATURES = RUNTIME_FEATURES_V14;
 
 export const RUNTIME_ERROR_CODES_V11 = {
   protocolVersionUnsupported: "PROTOCOL_VERSION_UNSUPPORTED",
@@ -448,7 +450,7 @@ const initializeResultCommonFields = {
 const initializeResultV14Fields = {
   runtimeInstanceId: runtimeInstanceIdSchema,
   server: runtimeServerInfoSchema,
-  features: z.array(z.enum(RUNTIME_FEATURES)),
+  features: z.array(z.enum(RUNTIME_FEATURES_V14)),
 } as const;
 
 /** Runtime Protocol 1.1/1.0 initialize result. Keep this schema frozen. */
@@ -1896,11 +1898,11 @@ export const runtimeMethodSchemasV14 = {
   },
   [RUNTIME_METHODS.threadOpen]: {
     params: threadOpenParamsSchema,
-    result: threadOpenResultSchema,
+    result: threadSnapshotV14Schema,
   },
   [RUNTIME_METHODS.threadSnapshot]: {
     params: threadSnapshotParamsV13Schema,
-    result: threadSnapshotResultSchema,
+    result: threadSnapshotV14Schema,
   },
   [RUNTIME_METHODS.turnStart]: {
     params: turnStartParamsV14Schema,

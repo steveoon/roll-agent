@@ -84,3 +84,9 @@ test("formatAttachmentSize 输出人类可读大小", () => {
   assert.equal(formatAttachmentSize(118 * 1024), "118KB");
   assert.equal(formatAttachmentSize(2.15 * 1024 * 1024), "2.1MB");
 });
+
+test("parsePastedImagePaths 不把相对路径 resolve 到 cwd", () => {
+  assert.equal(parsePastedImagePaths("logo.png"), undefined);
+  assert.equal(parsePastedImagePaths("images/logo.png"), undefined);
+  assert.equal(parsePastedImagePaths("./logo.png"), undefined);
+});
