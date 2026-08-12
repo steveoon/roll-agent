@@ -109,7 +109,9 @@ function createFixture(store: ThreadStore): {
     async *send(input) {
       sends += 1;
       cancelled = false;
-      store.appendMessages(IDS.thread, [{ role: "user", content: input }]);
+      store.appendMessages(IDS.thread, [
+        { role: "user", content: typeof input === "string" ? input : input.text },
+      ]);
       yield { type: "message-start", messageId: IDS.message };
       yield {
         type: "confirmation-required",
@@ -212,7 +214,7 @@ function createImmediateFixture(store: ThreadStore): {
     async *send(input) {
       sends += 1;
       store.appendMessages(IDS.thread, [
-        { role: "user", content: input },
+        { role: "user", content: typeof input === "string" ? input : input.text },
         { role: "assistant", content: "completed" },
       ]);
       yield { type: "message-start", messageId: IDS.message };

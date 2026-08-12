@@ -161,6 +161,20 @@ export function stripExplicitSkillCheckpoints(messages: readonly ModelMessage[])
   return messages.map(stripRollHarnessMetadata);
 }
 
+function replaceUserMessageText(
+  existing: UserModelMessage["content"],
+  text: string,
+): UserModelMessage["content"] {
+  if (typeof existing === "string") {
+    return text;
+  }
+  const retainedParts = existing.filter((part) => part.type !== "text");
+  if (retainedParts.length === 0) {
+    return text;
+  }
+  return [{ type: "text", text }, ...retainedParts];
+}
+
 function replaceLastUserMessage(
   messages: readonly ModelMessage[],
   content: string,
@@ -169,7 +183,7 @@ function replaceLastUserMessage(
   for (let index = copy.length - 1; index >= 0; index -= 1) {
     const message = copy[index];
     if (message?.role === "user") {
-      copy[index] = { role: "user", content };
+      copy[index] = { role: "user", content: replaceUserMessageText(message.content, content) };
       return copy;
     }
   }

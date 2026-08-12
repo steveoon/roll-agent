@@ -2,6 +2,13 @@ import { createHash, randomUUID } from "node:crypto";
 import { waitForPromiseSettlement } from "../bounded-wait.ts";
 import { relocateToolImagesToUserMessages } from "./relocate-tool-images.ts";
 import {
+  buildUserMessageContent,
+  normalizeSessionSendInput,
+  redactBinaryPartsForEvidence,
+  type NormalizedSessionSendInput,
+  type SessionSendInput,
+} from "./session-attachments.ts";
+import {
   stepCountIs,
   streamText,
   InvalidToolInputError,
@@ -431,7 +438,7 @@ function renderCompactionMessageEvidence(entry: ArchivedTranscriptMessage): stri
       ? explicitSkillCheckpoint.snapshot.userPrompt
       : typeof message.content === "string"
         ? message.content
-        : JSON.stringify(message.content);
+        : JSON.stringify(redactBinaryPartsForEvidence(message.content));
   return `message ${String(entry.sequence)} ${message.role}: ${content}`;
 }
 
@@ -1145,20 +1152,21 @@ export class AgentSession {
     this.refreshCapabilityManifest(refresh.systemPrompt);
   }
 
-  async *send(input: string): AsyncIterable<SessionEvent> {
+  async *send(input: string | SessionSendInput): AsyncIterable<SessionEvent> {
     if (this.closed) {
       throw new Error("session is closed");
     }
     if (this.activeTurn) {
       throw new Error("session already has an active turn");
     }
+    const normalizedInput = normalizeSessionSendInput(input);
 
     const queue = new AsyncEventQueue<SessionEvent>();
     this.emit = (event) => queue.push(event);
     const activeTurn = createActiveTurn();
     this.activeTurn = activeTurn;
 
-    this.runTurn(queue, activeTurn, input).catch((error: unknown) => {
+    this.runTurn(queue, activeTurn, normalizedInput).catch((error: unknown) => {
       queue.push({ type: "error", stage: "execute", message: errorMessage(error) });
       queue.close();
     });
@@ -1212,16 +1220,18 @@ export class AgentSession {
   private async runTurn(
     queue: AsyncEventQueue<SessionEvent>,
     activeTurn: ActiveTurn,
-    input: string,
+    input: NormalizedSessionSendInput,
   ): Promise<void> {
     const turnStartedAt = Date.now();
     let turnStart: number | undefined;
     let turnTimeout: ReturnType<typeof setTimeout> | undefined;
+    const userMessageContent = buildUserMessageContent(input.text, input.attachments);
     try {
       this.debug(queue, "turn", "start", turnStartedAt, {
         messages: this.messages.length,
         tools: Object.keys(this.tools).length,
         maxSteps: this.maxSteps,
+        ...(input.attachments.length > 0 ? { attachments: input.attachments.length } : {}),
         ...(this.contextWindow !== undefined ? { contextWindow: this.contextWindow } : {}),
         ...(this.lastInputTokens !== undefined ? { lastInputTokens: this.lastInputTokens } : {}),
       });
@@ -1239,7 +1249,7 @@ export class AgentSession {
       }
       if (activeTurn.aborted || activeTurn.abortController.signal.aborted) {
         turnStart = this.messages.length;
-        this.messages.push({ role: "user", content: input });
+        this.messages.push({ role: "user", content: userMessageContent });
         this.persistCancelledTurn(queue, activeTurn, turnStart, [], turnStartedAt);
         return;
       }
@@ -1261,11 +1271,11 @@ export class AgentSession {
       }
       let contextRecoveryAttempts = 0;
       const explicitSkillContext = prepareExplicitSkillContext({
-        rawInput: input,
+        rawInput: input.text,
         skillSummaries: this.skillSummaries,
         skillLibrary: this.skillLibrary,
       });
-      const rawUserMessage: UserModelMessage = { role: "user", content: input };
+      const rawUserMessage: UserModelMessage = { role: "user", content: userMessageContent };
       const storedUserMessage =
         explicitSkillContext.skillNames.length > 0
           ? attachExplicitSkillCheckpoint(rawUserMessage, explicitSkillContext)

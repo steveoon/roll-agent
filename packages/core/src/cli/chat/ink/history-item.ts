@@ -1,6 +1,7 @@
 import { createElement as h } from "react";
 import type { ReactElement } from "react";
 import { Box, Text } from "ink";
+import { GLYPHS } from "../../utils/glyphs.ts";
 import type { HistoryItem } from "./state.ts";
 import { AssistantContent } from "./assistant-content.ts";
 import { ToolLabel } from "./tool-label.ts";
@@ -18,13 +19,25 @@ export function HistoryItemView({ item }: { item: HistoryItem }): ReactElement {
   switch (item.kind) {
     case "banner":
       return h(BannerLinesView, { lines: item.lines });
-    case "user":
+    case "user": {
+      const attachmentLabel =
+        item.attachmentLabels !== undefined && item.attachmentLabels.length > 0
+          ? `${GLYPHS.attach} ${item.attachmentLabels.join(" · ")}`
+          : undefined;
       return h(
         Box,
         null,
         h(Text, { color: "cyan", bold: true }, "▌ "),
-        h(Text, { color: "cyan" }, item.text),
+        item.text.length > 0 ? h(Text, { color: "cyan" }, item.text) : null,
+        attachmentLabel !== undefined
+          ? h(
+              Text,
+              { color: "cyan", dimColor: true },
+              item.text.length > 0 ? `  ${attachmentLabel}` : attachmentLabel,
+            )
+          : null,
       );
+    }
     case "assistant":
       if (isDenialText(item.text)) {
         return h(

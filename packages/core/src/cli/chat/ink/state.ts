@@ -22,7 +22,12 @@ const MAX_TOOL_OUTPUT_TAIL_CHARS = 2_000;
 
 export type HistoryItem =
   | { readonly kind: "banner"; readonly id: string; readonly lines: readonly BannerLine[] }
-  | { readonly kind: "user"; readonly id: string; readonly text: string }
+  | {
+      readonly kind: "user";
+      readonly id: string;
+      readonly text: string;
+      readonly attachmentLabels?: readonly string[];
+    }
   | { readonly kind: "assistant"; readonly id: string; readonly text: string }
   | { readonly kind: "reasoning"; readonly id: string; readonly text: string }
   | {
@@ -106,7 +111,12 @@ export interface ChatUiState {
 }
 
 export type ChatUiAction =
-  | { readonly type: "submit-user"; readonly id: string; readonly text: string }
+  | {
+      readonly type: "submit-user";
+      readonly id: string;
+      readonly text: string;
+      readonly attachmentLabels?: readonly string[];
+    }
   | { readonly type: "set-draft"; readonly value: string }
   | { readonly type: "set-thinking"; readonly level: ThinkingLevel }
   | { readonly type: "set-auto"; readonly value: boolean }
@@ -466,7 +476,17 @@ export function chatReducer(state: ChatUiState, action: ChatUiAction): ChatUiSta
     case "submit-user":
       return {
         ...state,
-        history: [...state.history, { kind: "user", id: action.id, text: action.text }],
+        history: [
+          ...state.history,
+          {
+            kind: "user",
+            id: action.id,
+            text: action.text,
+            ...(action.attachmentLabels !== undefined && action.attachmentLabels.length > 0
+              ? { attachmentLabels: action.attachmentLabels }
+              : {}),
+          },
+        ],
         draft: "",
         live: { ...EMPTY_LIVE },
         phase: "busy",

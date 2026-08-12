@@ -537,3 +537,15 @@ test("user input has an independent phase and only the matching request can clea
   assert.equal(state.phase, "busy");
   assert.equal(state.pendingUserInput, undefined);
 });
+
+test("submit-user 携带附件标注时记录到 user 历史项", () => {
+  const state = chatReducer(createInitialState("qwen", undefined), {
+    type: "submit-user",
+    id: "u1",
+    text: "看下这张截图",
+    attachmentLabels: ["shot.png", "b.jpg"],
+  });
+  assert.deepEqual(state.history, [
+    { kind: "user", id: "u1", text: "看下这张截图", attachmentLabels: ["shot.png", "b.jpg"] },
+  ]);
+});

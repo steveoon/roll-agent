@@ -119,3 +119,29 @@ test("messagesToHistory 恢复取消原因与专用展示语义", () => {
     },
   ]);
 });
+
+test("messagesToHistory 为带附件的用户消息生成附件标注", () => {
+  const history = messagesToHistory([
+    {
+      role: "user",
+      content: [
+        { type: "text", text: "看下这张截图" },
+        { type: "file", data: "aGVsbG8=", mediaType: "image/png" },
+        { type: "file", data: "d29ybGQ=", mediaType: "image/jpeg" },
+      ],
+    },
+  ]);
+  assert.deepEqual(history, [
+    { kind: "user", id: "h-0", text: "看下这张截图", attachmentLabels: ["图片 ×2"] },
+  ]);
+});
+
+test("messagesToHistory 保留纯附件无文本的用户消息", () => {
+  const history = messagesToHistory([
+    {
+      role: "user",
+      content: [{ type: "file", data: "aGVsbG8=", mediaType: "image/png" }],
+    },
+  ]);
+  assert.deepEqual(history, [{ kind: "user", id: "h-0", text: "", attachmentLabels: ["图片 ×1"] }]);
+});

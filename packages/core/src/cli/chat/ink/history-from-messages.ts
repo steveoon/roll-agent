@@ -13,6 +13,14 @@ function textFromContent(content: ModelMessage["content"]): string {
   return content.map((part) => (part.type === "text" ? part.text : "")).join("");
 }
 
+function userAttachmentLabels(content: ModelMessage["content"]): readonly string[] {
+  if (typeof content === "string") {
+    return [];
+  }
+  const count = content.filter((part) => part.type === "file" || part.type === "image").length;
+  return count > 0 ? [`图片 ×${String(count)}`] : [];
+}
+
 function toolDisplayName(toolName: string): string {
   const index = toolName.indexOf("__");
   return index >= 0 ? `${toolName.slice(0, index)}.${toolName.slice(index + 2)}` : toolName;
@@ -44,8 +52,14 @@ export function messagesToHistory(
         items.push({ kind: "compaction", id, notice: `${GLYPHS.compact} 已恢复的上下文摘要` });
         return;
       }
-      if (text.length > 0) {
-        items.push({ kind: "user", id, text });
+      const attachmentLabels = userAttachmentLabels(message.content);
+      if (text.length > 0 || attachmentLabels.length > 0) {
+        items.push({
+          kind: "user",
+          id,
+          text,
+          ...(attachmentLabels.length > 0 ? { attachmentLabels } : {}),
+        });
       }
       return;
     }

@@ -20,6 +20,11 @@ const PROMPT_PREFIX_WIDTH = 2;
 const PROMPT_CONTENT_LEFT =
   PROMPT_BORDER_WIDTH / 2 + PROMPT_HORIZONTAL_PADDING / 2 + PROMPT_PREFIX_WIDTH;
 
+export interface TextPromptAttachmentChip {
+  readonly name: string;
+  readonly sizeLabel: string;
+}
+
 export interface TextPromptProps {
   readonly value: string;
   readonly width: number;
@@ -34,11 +39,16 @@ export interface TextPromptProps {
   readonly slashActive: boolean;
   readonly slashPopupActive: boolean;
   readonly autoApprove: boolean;
+  readonly attachments?: readonly TextPromptAttachmentChip[];
+  readonly attachmentsPending?: boolean;
   readonly onChange: (value: string) => void;
   readonly onSubmit: (value: string) => void;
   readonly onSlashMove: (direction: 1 | -1) => void;
   readonly onSlashComplete: () => void;
   readonly onSlashRun: (value: string) => void;
+  readonly onPasteText?: (text: string) => boolean;
+  readonly onRemoveLastAttachment?: () => void;
+  readonly onRequestClipboardImage?: () => void;
 }
 
 function isKeyboardProtocolResidue(input: string): boolean {
@@ -212,8 +222,20 @@ export function TextPrompt(props: TextPromptProps): ReactElement {
         commit(createLineBuffer(""));
         return;
       }
+      if (key.ctrl && input === "v" && props.onRequestClipboardImage !== undefined) {
+        props.onRequestClipboardImage();
+        return;
+      }
       const command = resolveEditorCommand(input, key);
       if (command !== undefined) {
+        if (
+          command === "delete-backward" &&
+          editorRef.current.value.length === 0 &&
+          (props.attachments?.length ?? 0) > 0
+        ) {
+          props.onRemoveLastAttachment?.();
+          return;
+        }
         leaveHistoryNavigation();
         const next =
           command === "move-up"
@@ -246,6 +268,9 @@ export function TextPrompt(props: TextPromptProps): ReactElement {
   usePaste(
     (text) => {
       leaveHistoryNavigation();
+      if (props.onPasteText?.(text) === true) {
+        return;
+      }
       commit(insertText(editorRef.current, text.replace(/\r\n?/g, "\n")));
     },
     { isActive: !disabled },
@@ -254,14 +279,20 @@ export function TextPrompt(props: TextPromptProps): ReactElement {
   const editor = editorRef.current;
   const lines = editor.value.split("\n");
   const metrics = visualLineMetrics(editor, editorWidth);
-  const availableBodyRows = Math.max(1, Math.floor(maxRows) - 2 - (showHint ? 1 : 0));
+  const attachments = props.attachments ?? [];
+  const attachmentsPending = props.attachmentsPending === true;
+  const attachmentRows = attachments.length > 0 || attachmentsPending ? 1 : 0;
+  const availableBodyRows = Math.max(
+    1,
+    Math.floor(maxRows) - 2 - (showHint ? 1 : 0) - attachmentRows,
+  );
   const visibleBodyRows = Math.min(metrics.totalRows, availableBodyRows);
   const firstVisibleRow = Math.min(
     Math.max(0, metrics.cursorRow - visibleBodyRows + 1),
     Math.max(0, metrics.totalRows - visibleBodyRows),
   );
   const visibleCursorRow = metrics.cursorRow - firstVisibleRow;
-  const promptHeight = visibleBodyRows + 2 + (showHint ? 1 : 0);
+  const promptHeight = visibleBodyRows + 2 + (showHint ? 1 : 0) + attachmentRows;
   const promptTop = Math.max(0, props.viewportRows - (props.bottomOffset ?? 0) - promptHeight);
   // TextPrompt is the final child of the fixed root viewport. Anchoring from the viewport bottom
   // gives the cursor its post-layout row in the same render, while useBoxMetrics would report the
@@ -271,7 +302,7 @@ export function TextPrompt(props: TextPromptProps): ReactElement {
     !disabled
       ? {
           x: PROMPT_CONTENT_LEFT + metrics.cursorColumn,
-          y: promptTop + 1 + visibleCursorRow,
+          y: promptTop + attachmentRows + 1 + visibleCursorRow,
         }
       : undefined,
   );
@@ -332,9 +363,38 @@ export function TextPrompt(props: TextPromptProps): ReactElement {
           : [h(Text, { ...hintProps, wrap: "truncate-end" }, hintText)]),
       )
     : null;
+  const attachmentRow =
+    attachmentRows > 0
+      ? h(
+          Box,
+          { marginLeft: 1, flexShrink: 0, height: 1, overflowY: "hidden" },
+          attachments.length > 0
+            ? h(
+                Text,
+                { color: "cyan", wrap: "truncate-end" },
+                attachments
+                  .map(
+                    (attachment) => `${GLYPHS.attach} ${attachment.name} ${attachment.sizeLabel}`,
+                  )
+                  .join(" · "),
+              )
+            : null,
+          attachmentsPending
+            ? h(
+                Text,
+                { color: "yellow", wrap: "truncate-end" },
+                attachments.length > 0 ? " · 读取剪贴板…" : "读取剪贴板…",
+              )
+            : null,
+          attachments.length > 0
+            ? h(Text, { dimColor: true, wrap: "truncate-end" }, " · 空输入退格移除")
+            : null,
+        )
+      : null;
   return h(
     Box,
     { flexDirection: "column", width, flexShrink: 0 },
+    attachmentRow,
     h(
       Box,
       {

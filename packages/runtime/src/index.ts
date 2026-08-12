@@ -10,6 +10,7 @@ export type {
   SessionCompactionSettings,
   SessionSkillSummary,
 } from "./engine/agent-session.ts";
+export type { SessionAttachment, SessionSendInput } from "./engine/session-attachments.ts";
 export { resolveContextWindow, lookupContextWindow } from "./engine/context-window.ts";
 export {
   compactMessages,
