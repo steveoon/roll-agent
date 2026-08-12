@@ -226,7 +226,10 @@ test("normalizeToolResult 超出文件预算的 media 降级为标记文本", ()
 
   assert.equal(result.model.type, "content");
   if (result.model.type === "content") {
-    assert.equal(result.model.value.some((part) => part.type === "file"), false);
+    assert.equal(
+      result.model.value.some((part) => part.type === "file"),
+      false,
+    );
     const marker = result.model.value.find((part) => part.type === "text");
     assert.ok(marker !== undefined && marker.type === "text");
     if (marker !== undefined && marker.type === "text") {

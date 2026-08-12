@@ -79,9 +79,7 @@ describe("relocateToolImagesToUserMessages", () => {
       false,
     );
     assert.ok(
-      staleParts.some(
-        (part) => part["type"] === "text" && part["text"] === "[历史工具图像已省略]",
-      ),
+      staleParts.some((part) => part["type"] === "text" && part["text"] === "[历史工具图像已省略]"),
     );
     for (const message of fresh) {
       const parts = message.content as unknown as Array<Record<string, unknown>>;
