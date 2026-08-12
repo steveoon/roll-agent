@@ -116,6 +116,8 @@ export type {
   RuntimeClientResponderId,
 } from "./server/runtime-client-request-coordinator.ts";
 export { RuntimeService, RuntimeServiceError } from "./service/runtime-service.ts";
+export { AttachmentStore } from "./service/attachment-store.ts";
+export type { AttachmentStoreOptions, AttachmentStoreFailure } from "./service/attachment-store.ts";
 export type {
   RuntimeServiceEngine,
   RuntimeServiceOptions,

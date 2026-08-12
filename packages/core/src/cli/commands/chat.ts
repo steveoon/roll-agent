@@ -1,3 +1,4 @@
+import { join } from "node:path";
 import { defineCommand } from "citty";
 import type { AgentSession } from "@roll-agent/runtime";
 import { inspectLlmConfigReadiness } from "../../config/helpers.ts";
@@ -256,6 +257,7 @@ export async function runServer(config: RollConfig): Promise<void> {
 
   const runtime = await loadRuntime();
   const {
+    AttachmentStore,
     RuntimeClientRequestCoordinator,
     RuntimeService,
     ThreadStore,
@@ -293,6 +295,9 @@ export async function runServer(config: RollConfig): Promise<void> {
     const runtimeService = new RuntimeService(activeEngine, store, {
       serverVersion: "1.0",
       runtimeVersion: getCurrentVersion(),
+      attachmentStore: new AttachmentStore({
+        dir: join(config.runtime.threadsDir, "attachments"),
+      }),
     });
     const runtimeClientRequests = new RuntimeClientRequestCoordinator();
     const server = new RuntimeServer(activeEngine, connection, {
