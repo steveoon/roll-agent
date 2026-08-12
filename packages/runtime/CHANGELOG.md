@@ -1,5 +1,42 @@
 # @roll-agent/runtime
 
+## 0.15.0
+
+### Minor Changes
+
+- [#211](https://github.com/steveoon/roll-agent/pull/211) [`8549330`](https://github.com/steveoon/roll-agent/commit/85493304ac978f99889029f725e8f35ddf6a3301) Thanks [@steveoon](https://github.com/steveoon)! - chat 端到端图像链路：工具截图可直接被多模态模型识别
+  - SDK：工具结果新增 `mcpImages` 约定字段（导出 `ToolResultImage` 类型），`executeToolForMcp` 将其摘出为 MCP 标准 image content block，base64 不再混入文本 JSON 载荷
+  - runtime：tool result 中的 file part（图像）改走独立预算（`MAX_TOOL_MODEL_FILE_CHARS`，12M 字符），不再被 60k 文本预算截断——图像 token 成本按分辨率计算而非字符数
+  - runtime：新增 `relocateToolImagesToUserMessages` 幂等消息变换，经 `streamText` 的 `prepareStep` 在每步请求前把 tool 消息中的图像搬运到紧随的 user 消息——dashscope 等 provider 对 tool 角色消息中的图按纯文本计入 input length，仅 user 消息中的图走视觉通道
+  - browser-use-agent：`zhipin_capture_resume` 返回值携带 `mcpImages`，chat 模式下模型可直接看到简历截图（实测 qwen3.7-plus / grok-4.5 / gpt-5.5 皆可识别并继续调用工具）
+
+- [#211](https://github.com/steveoon/roll-agent/pull/211) [`38bb3c6`](https://github.com/steveoon/roll-agent/commit/38bb3c66dcd9090cf929b1eb6f85082839a2218f) Thanks [@steveoon](https://github.com/steveoon)! - Runtime Protocol 1.4：附件与二进制载荷引用（issue [#177](https://github.com/steveoon/roll-agent/issues/177)）
+  - **protocol**：新增协议版本 1.4。`AttachmentDescriptor`（ID/文件名/安全展示名/MIME/字节数/sha256/来源）、`attachment.stage|chunk|commit|release` 四方法与 staging→committed→release 生命周期；`turn.start` 的 input 扩展 `attachments` 引用数组（纯附件可空文本）；八个稳定错误码（NOT_FOUND/NOT_COMMITTED/TOO_LARGE/TYPE_UNSUPPORTED/HASH_MISMATCH/QUOTA_EXCEEDED/UPLOAD_INCOMPLETE/PATH_REJECTED）；initialize limits 广播附件配额；`UiMessage` V14 新增 `attachment` 安全元数据 part，快照投影到 ≤1.3 时自动降级为 text-only；V13 及更早 schema 全部冻结不变，`turn.start` 携带 attachments 在 1.3 会话被 strict 拒绝
+  - **runtime**：新增 `AttachmentStore`（staging 目录 + 内存状态机）：local-path 来源校验绝对路径/拒 symlink/大小与 sha256 匹配后一步 commit；chunks 来源按序追加（单 chunk ≤2MiB 原始字节，不突破 4MiB NDJSON 帧）、commit 时校验完整性与 hash，不匹配即回收；staged/committed 双 TTL 惰性回收、thread 删除联动清理、进程重启清扫孤儿文件；`RuntimeService` 注入 `attachmentStore` 后启用 attachments 能力，`turn.start` 解析附件引用为引擎 `SessionAttachment` 且客户端路径不落 thread；Thread Snapshot 返回附件安全元数据（mediaType/bytes），不含二进制与本地路径
+  - **client-node**：协商版本联合扩展 1.4，事件重放与 recovery snapshot 在 1.4 会话可用；`request()` 通道从 Protocol 1.1 方法域升级到 latest 方法域——`attachment.stage|chunk|commit|release` 与带 `attachments` 的 `turn.start` 均可通过 `client.request(...)` 类型安全地调用（此前 V11 facade 会在类型层拒绝且 turnId 提取路径运行时崩溃）
+
+- [#211](https://github.com/steveoon/roll-agent/pull/211) [`540f530`](https://github.com/steveoon/roll-agent/commit/540f530cff10975736c4a66669fad59b6020b4cb) Thanks [@steveoon](https://github.com/steveoon)! - `AgentSession.send()` 支持图像/文件附件输入（TUI 粘贴、GUI/WebUI 附件闭环的引擎底座）
+  - `send()` 签名扩展为 `string | SessionSendInput`（`{ text, attachments?: [{ data: base64, mediaType }] }`），纯字符串调用方零改动
+  - 带附件时用户消息以 AI SDK parts 数组构造（text part 在前、file part 在后，空文本纯附件省略 text part），无附件时保持 string content，ThreadStore 持久化经 `modelMessageSchema` 原生兼容
+  - 显式 Skill 上下文（`/<skill> 请求`）应用到带附件消息时只替换文本、保留 file parts，不再整体覆写
+  - compaction evidence 渲染前统一脱敏内联二进制：用户消息 file/image part 与 tool-result 输出中的图像 base64 均替换为占位符，防止历史图像数据灌入 compaction prompt
+  - 新增导出类型 `SessionAttachment` / `SessionSendInput`
+
+### Patch Changes
+
+- [#211](https://github.com/steveoon/roll-agent/pull/211) [`5218a94`](https://github.com/steveoon/roll-agent/commit/5218a94269afc3a94fdbf341a7533c9fcd86c652) Thanks [@steveoon](https://github.com/steveoon)! - 简历工具链 code review 修复（8 项）
+  - `zhipin_locate_resume_canvas` 改用轻量几何探测 `readResumeCanvasGeometry()`，不再跑完整滚动拼接（实测 ~20s → 0.5s），恢复 5s canvas 等待与结构化错误返回，`canvasInfo` 语义回归 canvas 缓冲区尺寸
+  - `zhipin_capture_resume` / `zhipin_open_resume` 补 catch：CDP 中途异常不再泄漏为 raw MCP 错误，visual 反馈以 error 态收尾而非永久残留「正在读取」胶囊
+  - `zhipin_capture_resume` 的弹窗等待预算 3s → 12s，与 `zhipin_open_resume` 对齐，消除慢网下的过早失败
+  - 关闭按钮搜索限定在可见 dialog 容器作用域内（`.close-btn` 等通用选择器不再可能命中主文档无关元素）
+  - 弹窗关闭判定加入 iframe 可见性（站点隐藏而非卸载弹窗时不再误报"未关闭"）
+  - Escape 兜底按键补 `windowsVirtualKeyCode: 27`（此前合成事件 keyCode 为 0，legacy 键盘监听收不到）
+  - 打招呼/打开卡片两个点击表达式去重为共享 builder，消除 DOM 变更时的双份维护漂移
+  - runtime：relocate 的工具图像只保留最近 2 条消息的图，更早的替换为占位文本，长会话不再每轮重发全部历史图（用户自发的图像消息不受影响）
+
+- Updated dependencies [[`38bb3c6`](https://github.com/steveoon/roll-agent/commit/38bb3c66dcd9090cf929b1eb6f85082839a2218f)]:
+  - @roll-agent/protocol@0.5.0
+
 ## 0.14.1
 
 ### Patch Changes
