@@ -22,9 +22,9 @@ import {
   isRuntimeServerRequestMethodAvailable,
   isLatestRuntimeServerRequestMethod,
   isRuntimeServerRequestMethodRequired,
-  parseRuntimeMethodParams,
+  parseLatestRuntimeMethodParams,
   parseRuntimeMethodParamsForVersion,
-  parseRuntimeMethodResult,
+  parseLatestRuntimeMethodResult,
   parseRuntimeMethodResultForVersion,
   parseRuntimeProtocolErrorDataForVersion,
   parseRuntimeServerRequestCancelParamsForVersion,
@@ -39,8 +39,7 @@ import {
   type JsonRpcMessage,
   type LatestRuntimeMethod,
   type RuntimeEventEnvelope,
-  type RuntimeMethod,
-  type RuntimeMethodInput,
+  type LatestRuntimeMethodInput,
   type RuntimeMethodInputForVersion,
   type RuntimeMethodParamsForVersion,
   type RuntimeMethodResultForVersion,
@@ -102,7 +101,7 @@ const JSON_RPC_ERROR_CODES = {
   internalError: -32_603,
 } as const;
 
-const READ_ONLY_RUNTIME_METHODS = new Set<RuntimeMethod>([
+const READ_ONLY_RUNTIME_METHODS = new Set<LatestRuntimeMethod>([
   RUNTIME_METHODS.threadList,
   RUNTIME_METHODS.threadSnapshot,
   RUNTIME_METHODS.threadCapabilities,
@@ -157,10 +156,10 @@ export type UserInputRequestHandler = RuntimeServerRequestHandler<
   typeof RUNTIME_SERVER_REQUEST_METHODS.userInputRequest
 >;
 
-export type RuntimeClientMethodResult<TMethod extends RuntimeMethod> =
+export type RuntimeClientMethodResult<TMethod extends LatestRuntimeMethod> =
   RuntimeMethodResultForVersion<RuntimeProtocolVersion, TMethod>;
 
-type RuntimeClientMethodParams<TMethod extends RuntimeMethod> = RuntimeMethodParamsForVersion<
+type RuntimeClientMethodParams<TMethod extends LatestRuntimeMethod> = RuntimeMethodParamsForVersion<
   RuntimeProtocolVersion,
   TMethod
 >;
@@ -169,12 +168,15 @@ type MutableRuntimeServerRequestHandlers = {
   -readonly [TMethod in RuntimeServerRequestMethod]?: RuntimeServerRequestHandler<TMethod>;
 };
 
-type DynamicCapabilityRuntimeProtocolVersion = Extract<RuntimeProtocolVersion, "1.3" | "1.2">;
+type DynamicCapabilityRuntimeProtocolVersion = Extract<
+  RuntimeProtocolVersion,
+  "1.4" | "1.3" | "1.2"
+>;
 
 function usesDynamicServerRequestCapabilities(
   version: RuntimeProtocolVersion,
 ): version is DynamicCapabilityRuntimeProtocolVersion {
-  return version === "1.3" || version === "1.2";
+  return version === "1.4" || version === "1.3" || version === "1.2";
 }
 
 function setRuntimeServerRequestHandler<TMethod extends RuntimeServerRequestMethod>(
@@ -216,7 +218,7 @@ function supportsRuntimeProtocolVersion(
 }
 
 function parseClientRuntimeServerRequestParams<TMethod extends RuntimeServerRequestMethod>(
-  version: "1.3" | "1.2" | "1.1",
+  version: "1.4" | "1.3" | "1.2" | "1.1",
   method: TMethod,
   value: unknown,
 ): RuntimeServerRequestHandlerParams<TMethod> {
@@ -240,7 +242,7 @@ function parseClientRuntimeServerRequestParams<TMethod extends RuntimeServerRequ
   ) as RuntimeServerRequestHandlerParams<TMethod>;
 }
 
-function parseClientRuntimeMethodParams<TMethod extends RuntimeMethod>(
+function parseClientRuntimeMethodParams<TMethod extends LatestRuntimeMethod>(
   version: RuntimeProtocolVersion,
   method: TMethod,
   value: unknown,
@@ -248,7 +250,7 @@ function parseClientRuntimeMethodParams<TMethod extends RuntimeMethod>(
   return parseRuntimeMethodParamsForVersion(version, method, value);
 }
 
-function parseClientRuntimeMethodResult<TMethod extends RuntimeMethod>(
+function parseClientRuntimeMethodResult<TMethod extends LatestRuntimeMethod>(
   version: RuntimeProtocolVersion,
   method: TMethod,
   value: unknown,
@@ -257,7 +259,7 @@ function parseClientRuntimeMethodResult<TMethod extends RuntimeMethod>(
 }
 
 function parseClientRuntimeServerRequestResult<TMethod extends RuntimeServerRequestMethod>(
-  version: "1.3" | "1.2" | "1.1",
+  version: "1.4" | "1.3" | "1.2" | "1.1",
   method: TMethod,
   value: unknown,
 ): RuntimeServerRequestResultForSupportedVersions<TMethod> {
@@ -622,7 +624,8 @@ export class RollNodeClient {
     this.advertisedProtocolVersions = SUPPORTED_RUNTIME_PROTOCOL_VERSIONS.filter(
       (version) =>
         supportsRuntimeProtocolVersion(version, this.serverRequestHandlers) &&
-        (version !== "1.3" || this.maxFrameBytes >= RUNTIME_V13_MIN_CLIENT_FRAME_BYTES),
+        ((version !== "1.3" && version !== "1.4") ||
+          this.maxFrameBytes >= RUNTIME_V13_MIN_CLIENT_FRAME_BYTES),
     );
     if (!Number.isInteger(this.maxFrameBytes) || this.maxFrameBytes <= 0) {
       throw new Error("maxFrameBytes must be a positive integer");
@@ -980,7 +983,7 @@ export class RollNodeClient {
       return Promise.reject(new RollRuntimeClosingError());
     }
     const protocolVersion = this.getInitializationResult().protocolVersion;
-    if (protocolVersion !== "1.3") {
+    if (protocolVersion !== "1.3" && protocolVersion !== "1.4") {
       return this.request(RUNTIME_METHODS.threadSnapshot, { threadId, limit: 1 });
     }
     const method = RUNTIME_METHODS.threadSnapshot;
@@ -1009,10 +1012,11 @@ export class RollNodeClient {
     if (this.closing) {
       return Promise.reject(new RollRuntimeClosingError());
     }
-    if (this.getInitializationResult().protocolVersion !== "1.3") {
+    const negotiatedVersion = this.getInitializationResult().protocolVersion;
+    if (negotiatedVersion !== "1.3" && negotiatedVersion !== "1.4") {
       return Promise.reject(
         new RuntimeEventRecoveryError(
-          "runtime.events.resume requires negotiated Runtime Protocol 1.3",
+          "runtime.events.resume requires negotiated Runtime Protocol 1.3 or newer",
         ),
       );
     }
@@ -1028,9 +1032,9 @@ export class RollNodeClient {
     );
   }
 
-  async request<TMethod extends RuntimeMethod>(
+  async request<TMethod extends LatestRuntimeMethod>(
     method: TMethod,
-    input: RuntimeMethodInput<TMethod>,
+    input: LatestRuntimeMethodInput<TMethod>,
   ): Promise<RuntimeClientMethodResult<TMethod>> {
     if (this.connectionFailure !== undefined) {
       throw this.connectionFailure;
@@ -1047,11 +1051,11 @@ export class RollNodeClient {
     const protocolVersion = this.initializationResult?.protocolVersion;
     const params =
       protocolVersion === undefined
-        ? parseRuntimeMethodParams(method, input)
+        ? parseLatestRuntimeMethodParams(method, input)
         : parseClientRuntimeMethodParams(protocolVersion, method, input);
     const startingTurn =
       method === RUNTIME_METHODS.turnStart
-        ? parseRuntimeMethodParams(RUNTIME_METHODS.turnStart, params).turnId
+        ? parseLatestRuntimeMethodParams(RUNTIME_METHODS.turnStart, params).turnId
         : undefined;
     if (startingTurn !== undefined) {
       this.activeTurns.add(startingTurn);
@@ -1063,7 +1067,7 @@ export class RollNodeClient {
           protocolVersion === undefined
             ? method === RUNTIME_METHODS.initialize
               ? (initializeResultSchema.parse(value) as RuntimeClientMethodResult<TMethod>)
-              : parseRuntimeMethodResult(method, value)
+              : parseLatestRuntimeMethodResult(method, value)
             : parseClientRuntimeMethodResult(protocolVersion, method, value),
         );
       } catch (error: unknown) {
@@ -1538,7 +1542,7 @@ export class RollNodeClient {
   }
 
   private async dispatchServerRequest<TMethod extends RuntimeServerRequestMethod>(
-    protocolVersion: "1.3" | "1.2" | "1.1",
+    protocolVersion: "1.4" | "1.3" | "1.2" | "1.1",
     id: JsonRpcId,
     method: TMethod,
     input: unknown,

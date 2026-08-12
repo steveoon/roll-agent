@@ -26,7 +26,7 @@ import {
   type ApprovalRequestParamsV12,
   type PendingInteractionProjection,
   type RuntimeEventEnvelope,
-  type RuntimeEventEnvelopeV13,
+  type RuntimeEventEnvelopeV14,
   type RuntimeServerRequestInputForSupportedVersions,
   type RuntimeServerRequestMethod,
   type UserInputRequestParamsV12,
@@ -2218,7 +2218,7 @@ test("Runtime Protocol 1.3 replay 在 response barrier 后发布并发 live 且�
         !injectedLive &&
         "method" in message &&
         message.method === RUNTIME_EVENT_NOTIFICATION &&
-        (message.params as RuntimeEventEnvelopeV13).event.type === "approval.required"
+        (message.params as RuntimeEventEnvelopeV14).event.type === "approval.required"
       ) {
         injectedLive = true;
         internal.emit(threadId, turnId, { type: "approval.required", approval: liveApproval });
@@ -2272,7 +2272,7 @@ test("Runtime Protocol 1.3 replay 在 response barrier 后发布并发 live 且�
   assert.deepEqual(
     sent.map((message) => {
       if ("method" in message && message.method === RUNTIME_EVENT_NOTIFICATION) {
-        return (message.params as RuntimeEventEnvelopeV13).event.type;
+        return (message.params as RuntimeEventEnvelopeV14).event.type;
       }
       if ("id" in message && message.id === 3) {
         return "resume.response";
@@ -2317,12 +2317,12 @@ test("Runtime Protocol 1.3 replay 在 response barrier 后发布并发 live 且�
       !("id" in message) &&
       message.method === RUNTIME_EVENT_NOTIFICATION &&
       (() => {
-        const event = (message.params as RuntimeEventEnvelopeV13).event;
+        const event = (message.params as RuntimeEventEnvelopeV14).event;
         return event.type === "message.completed" && event.text.length === largeLiveText.length;
       })(),
   );
   assert.ok(largeLiveEvent);
-  const largeLiveEnvelope = largeLiveEvent.params as RuntimeEventEnvelopeV13;
+  const largeLiveEnvelope = largeLiveEvent.params as RuntimeEventEnvelopeV14;
   assert.equal(largeLiveEnvelope.event.type, "message.completed");
   if (largeLiveEnvelope.event.type === "message.completed") {
     assert.equal(largeLiveEnvelope.event.text.length, largeLiveText.length);

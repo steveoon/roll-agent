@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -12,7 +13,7 @@ import {
   requestIdSchema,
   runtimeMethodSchemas,
   threadIdSchema,
-  type RuntimeEventEnvelopeV13,
+  type RuntimeEventEnvelopeV14,
   type UserInputForm,
 } from "@roll-agent/protocol";
 import { ThreadStore } from "../store/thread-store.ts";
@@ -26,6 +27,7 @@ import {
   TOOL_OUTCOME_KINDS,
   createToolResult,
 } from "../tool-bridge/normalize-result.ts";
+import { AttachmentStore } from "./attachment-store.ts";
 import {
   MutationRequestCache,
   RuntimeService,
@@ -259,7 +261,7 @@ test("RuntimeService keeps pending approval on decision failure and cancels thro
   const store = new ThreadStore(dir);
   const fixture = createFixture(store);
   const service = new RuntimeService(fixture.engine, store, { runtimeVersion: "0.9.0-test" });
-  const events: RuntimeEventEnvelopeV13[] = [];
+  const events: RuntimeEventEnvelopeV14[] = [];
   const originalCancel = fixture.session.cancel.bind(fixture.session);
   let cancelCalls = 0;
   fixture.session.cancel = () => {
@@ -347,7 +349,7 @@ test("RuntimeService redacts approval rejection reasons before durable replay", 
   const store = new ThreadStore(dir);
   const fixture = createFixture(store);
   const service = new RuntimeService(fixture.engine, store, { runtimeVersion: "0.9.0-test" });
-  const events: RuntimeEventEnvelopeV13[] = [];
+  const events: RuntimeEventEnvelopeV14[] = [];
   service.onEvent((event) => events.push(event));
   try {
     service.initialize({
@@ -411,7 +413,7 @@ test("RuntimeService cancelTurn releases the approval gate when a resolved liste
   const store = new ThreadStore(dir);
   const fixture = createFixture(store);
   const service = new RuntimeService(fixture.engine, store, { runtimeVersion: "0.9.0-test" });
-  const events: RuntimeEventEnvelopeV13[] = [];
+  const events: RuntimeEventEnvelopeV14[] = [];
   const originalCancel = fixture.session.cancel.bind(fixture.session);
   let cancelCalls = 0;
   fixture.session.cancel = () => {
@@ -487,7 +489,7 @@ test("RuntimeService isolates event listeners before starting and completing a T
   const store = new ThreadStore(dir);
   const fixture = createImmediateFixture(store);
   const service = new RuntimeService(fixture.engine, store, { runtimeVersion: "0.9.0-test" });
-  const eventsAfterThrow: RuntimeEventEnvelopeV13[] = [];
+  const eventsAfterThrow: RuntimeEventEnvelopeV14[] = [];
   service.onEvent(() => {
     throw new Error("listener failed");
   });
@@ -810,7 +812,7 @@ test("RuntimeService durable event Store 失败时不发布 live 且回滚 turn.
   const fixture = createImmediateFixture(store);
   const service = new RuntimeService(fixture.engine, store);
   let database: DatabaseSync | undefined;
-  const events: RuntimeEventEnvelopeV13[] = [];
+  const events: RuntimeEventEnvelopeV14[] = [];
   service.onEvent((event) => events.push(event));
   try {
     await service.createThread(
@@ -861,7 +863,7 @@ test("RuntimeService terminal durable 写盘失败会触发 fatal shutdown signa
   const fixture = createImmediateFixture(store);
   const service = new RuntimeService(fixture.engine, store);
   let database: DatabaseSync | undefined;
-  const events: RuntimeEventEnvelopeV13[] = [];
+  const events: RuntimeEventEnvelopeV14[] = [];
   const fatalErrors: unknown[] = [];
   service.onEvent((event) => events.push(event));
   service.onFatalError((error) => fatalErrors.push(error));
@@ -923,7 +925,7 @@ test("RuntimeService approval resolution durable 写盘失败会触发 fatal shu
   const fixture = createFixture(store);
   const service = new RuntimeService(fixture.engine, store);
   let database: DatabaseSync | undefined;
-  const events: RuntimeEventEnvelopeV13[] = [];
+  const events: RuntimeEventEnvelopeV14[] = [];
   const fatalErrors: unknown[] = [];
   service.onEvent((event) => events.push(event));
   service.onFatalError((error) => fatalErrors.push(error));
@@ -983,7 +985,7 @@ test("RuntimeService v1 supports lifecycle, concurrent approval/cancel and proce
   const store = new ThreadStore(dir);
   const fixture = createFixture(store);
   const service = new RuntimeService(fixture.engine, store, { runtimeVersion: "0.9.0-test" });
-  const events: RuntimeEventEnvelopeV13[] = [];
+  const events: RuntimeEventEnvelopeV14[] = [];
   let terminalSnapshotHadActiveTurn = false;
   service.onEvent((event) => {
     events.push(event);
@@ -1237,7 +1239,10 @@ test("RuntimeService snapshot reads append-only transcript and redacted Tool led
       }),
     );
     assert.deepEqual(
-      snapshot.messages.items.map((message) => message.parts[0]?.text),
+      snapshot.messages.items.map((message) => {
+        const part = message.parts[0];
+        return part?.type === "text" ? part.text : undefined;
+      }),
       ["second user message", "second assistant message"],
     );
     assert.equal(snapshot.messages.nextBeforeSequence, 2);
@@ -1249,7 +1254,10 @@ test("RuntimeService snapshot reads append-only transcript and redacted Tool led
       }),
     );
     assert.deepEqual(
-      previousPage.messages.items.map((message) => message.parts[0]?.text),
+      previousPage.messages.items.map((message) => {
+        const part = message.parts[0];
+        return part?.type === "text" ? part.text : undefined;
+      }),
       ["original user message", "original assistant message"],
     );
     assert.equal(previousPage.messages.nextBeforeSequence, null);
@@ -1319,7 +1327,9 @@ test("RuntimeService limit-one recovery Snapshot keeps large transcript pages fr
       }),
     );
     assert.equal(snapshot.messages.items.length, 1);
-    assert.equal(snapshot.messages.items[0]?.parts[0]?.text.length, text.length);
+    const firstPart = snapshot.messages.items[0]?.parts[0];
+    assert.ok(firstPart?.type === "text");
+    assert.equal(firstPart.text.length, text.length);
     assert.equal(snapshot.messages.nextBeforeSequence, 1);
     assert.ok(
       Buffer.byteLength(JSON.stringify(snapshot), "utf8") < RUNTIME_V13_MIN_CLIENT_FRAME_BYTES,
@@ -1617,6 +1627,202 @@ test("RuntimeService projects waiting-for-user and settles user input exactly on
     await nextTick();
     assert.equal(interactions.filter((event) => event.type === "settled").length, 3);
     assert.equal(JSON.stringify(interactions).includes("product-docs"), false);
+  } finally {
+    await service.close();
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("RuntimeService v1.4 附件生命周期：stage → turn.start 引用 → snapshot 安全元数据", async () => {
+  const dir = tempDir();
+  const store = new ThreadStore(dir);
+  const attachmentStore = new AttachmentStore({ dir: join(tempDir(), "attachments") });
+  const workDir = tempDir();
+  const capturedInputs: unknown[] = [];
+  const session: RuntimeServiceSession = {
+    id: IDS.thread,
+    async *send(input) {
+      capturedInputs.push(input);
+      const content =
+        typeof input === "string"
+          ? input
+          : [
+              ...(input.text.length > 0 ? [{ type: "text" as const, text: input.text }] : []),
+              ...(input.attachments ?? []).map((attachment) => ({
+                type: "file" as const,
+                data: attachment.data,
+                mediaType: attachment.mediaType,
+              })),
+            ];
+      store.appendMessages(IDS.thread, [
+        { role: "user", content },
+        { role: "assistant", content: "看到了" },
+      ]);
+      yield { type: "message-start", messageId: IDS.message };
+      yield { type: "message-finish", text: "看到了" };
+    },
+    approve() {
+      return false;
+    },
+    reject() {
+      return false;
+    },
+    cancel() {
+      return false;
+    },
+    async close() {},
+    getCapabilityManifest() {
+      throw new Error("unused");
+    },
+    getCapabilityTurnContext() {
+      return undefined;
+    },
+  };
+  const engine: RuntimeServiceEngine = {
+    async createSession(input) {
+      store.createThread({
+        id: IDS.thread,
+        ...(input?.title !== undefined ? { title: input.title } : {}),
+        model: "fixture-model",
+      });
+      return session;
+    },
+    async resumeSession() {
+      return session;
+    },
+  };
+  const service = new RuntimeService(engine, store, { attachmentStore });
+  try {
+    const initialized = service.initialize({
+      protocolVersions: ["1.4"],
+      client: { name: "test-client", version: "1.0.0" },
+    });
+    assert.equal(initialized.protocolVersion, "1.4");
+    assert.ok(initialized.features.includes("attachments"));
+    assert.ok("maxAttachmentBytes" in initialized.limits);
+    assert.ok("maxTurnAttachments" in initialized.limits);
+
+    await service.createThread(
+      runtimeMethodSchemas["thread.create"].params.parse({
+        requestId: IDS.requestCreate,
+        title: "附件会话",
+      }),
+    );
+
+    const data = Buffer.from("png-bytes-for-vision-model");
+    const sourcePath = join(workDir, "shot.png");
+    writeFileSync(sourcePath, data);
+    const sha256 = createHash("sha256").update(data).digest("hex");
+    const stageParams = runtimeMethodSchemas["attachment.stage"].params.parse({
+      requestId: "00000000-0000-4000-8000-0000000000a1",
+      threadId: IDS.thread,
+      fileName: "shot.png",
+      mediaType: "image/png",
+      bytes: data.length,
+      sha256,
+      source: "local-path",
+      sourcePath,
+    });
+    const staged = await service.stageAttachment(stageParams);
+    assert.equal(staged.state, "committed");
+    assert.equal(staged.descriptor?.displayName, "shot.png");
+
+    const replay = await service.stageAttachment(stageParams);
+    assert.equal(replay.attachmentId, staged.attachmentId);
+
+    await service.startTurn(
+      runtimeMethodSchemas["turn.start"].params.parse({
+        requestId: "00000000-0000-4000-8000-0000000000a2",
+        threadId: IDS.thread,
+        turnId: IDS.firstTurn,
+        input: { text: "看下这张图", attachments: [staged.attachmentId] },
+      }),
+    );
+    await nextTick();
+    await nextTick();
+
+    assert.equal(capturedInputs.length, 1);
+    assert.deepEqual(capturedInputs[0], {
+      text: "看下这张图",
+      attachments: [{ data: data.toString("base64"), mediaType: "image/png" }],
+    });
+
+    const snapshot = service.snapshotThread({
+      threadId: threadIdSchema.parse(IDS.thread),
+      limit: 10,
+    });
+    const userMessage = snapshot.messages.items.find((message) => message.role === "user");
+    assert.ok(userMessage);
+    assert.deepEqual(userMessage.parts, [
+      { type: "text", text: "看下这张图" },
+      { type: "attachment", mediaType: "image/png", bytes: data.length },
+    ]);
+    assert.doesNotMatch(JSON.stringify(snapshot), /png-bytes-for-vision|base64|sourcePath/u);
+
+    await assert.rejects(
+      service.startTurn(
+        runtimeMethodSchemas["turn.start"].params.parse({
+          requestId: "00000000-0000-4000-8000-0000000000a3",
+          threadId: IDS.thread,
+          turnId: IDS.secondTurn,
+          input: { text: "引用不存在附件", attachments: ["00000000-0000-4000-8000-0000000000ff"] },
+        }),
+      ),
+      (error: unknown) =>
+        error instanceof RuntimeServiceError && error.rollCode === "ATTACHMENT_NOT_FOUND",
+    );
+
+    const released = await service.releaseAttachment(
+      runtimeMethodSchemas["attachment.release"].params.parse({
+        requestId: "00000000-0000-4000-8000-0000000000a4",
+        threadId: IDS.thread,
+        attachmentId: staged.attachmentId,
+      }),
+    );
+    assert.equal(released.released, true);
+  } finally {
+    await service.close();
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+    rmSync(workDir, { recursive: true, force: true });
+  }
+});
+
+test("RuntimeService 未配置附件存储时 attachments 能力关闭且方法拒绝", async () => {
+  const dir = tempDir();
+  const store = new ThreadStore(dir);
+  const fixture = createImmediateFixture(store);
+  const service = new RuntimeService(fixture.engine, store, {});
+  try {
+    const initialized = service.initialize({
+      protocolVersions: ["1.4"],
+      client: { name: "test-client", version: "1.0.0" },
+    });
+    assert.equal(initialized.protocolVersion, "1.4");
+    assert.equal(initialized.features.includes("attachments"), false);
+
+    await service.createThread(
+      runtimeMethodSchemas["thread.create"].params.parse({
+        requestId: IDS.requestCreate,
+        title: "无附件存储",
+      }),
+    );
+    await assert.rejects(
+      service.stageAttachment(
+        runtimeMethodSchemas["attachment.stage"].params.parse({
+          requestId: "00000000-0000-4000-8000-0000000000b1",
+          threadId: IDS.thread,
+          fileName: "x.png",
+          mediaType: "image/png",
+          bytes: 1,
+          sha256: "0".repeat(64),
+          source: "chunks",
+        }),
+      ),
+      (error: unknown) =>
+        error instanceof RuntimeServiceError && error.rollCode === "CAPABILITY_UNAVAILABLE",
+    );
   } finally {
     await service.close();
     store.close();

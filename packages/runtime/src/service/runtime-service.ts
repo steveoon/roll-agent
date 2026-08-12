@@ -6,12 +6,16 @@ import {
   RUNTIME_FEATURES,
   RUNTIME_METHODS,
   RUNTIME_PROTOCOL_VERSION,
+  RUNTIME_V14_MAX_ATTACHMENT_BYTES,
+  RUNTIME_V14_MAX_ATTACHMENT_CHUNK_BYTES,
+  RUNTIME_V14_MAX_STAGED_ATTACHMENTS,
+  RUNTIME_V14_MAX_TURN_ATTACHMENTS,
   SUPPORTED_RUNTIME_PROTOCOL_VERSIONS,
   approvalExplanationSchema,
   approvalIdSchema,
   normalizeUserInputResultForForm,
   operationIdSchema,
-  parseRuntimeMethodResult,
+  parseLatestRuntimeMethodResult,
   runtimeDurableEventV13Schema,
   runtimeEphemeralEventV13Schema,
   runtimeInstanceIdSchema,
@@ -27,23 +31,27 @@ import {
   type OperationView,
   type PendingApproval,
   type RuntimeEvent,
-  type RuntimeEventEnvelopeV13,
+  type RuntimeEventEnvelopeV14,
   type RuntimeEventsResumeParams,
   type RuntimeEventsResumeResult,
   type RuntimeInstanceId,
+  type LatestRuntimeMethodParams,
+  type LatestRuntimeMethodResult,
   type RuntimeMethodParams,
   type RuntimeMethodResult,
   type RuntimeProtocolVersion,
-  type RuntimeProtocolErrorDataV13,
-  type ThreadSnapshotV13Full,
+  type RuntimeProtocolErrorDataV14,
+  type ThreadSnapshotV14Full,
   type ThreadId,
   type ThreadSummary,
   type TurnId,
-  type UiMessage,
+  type UiMessageV14,
   type UserInputForm,
   type UserInputResult,
 } from "@roll-agent/protocol";
 import type { AgentSession } from "../engine/agent-session.ts";
+import type { SessionAttachment } from "../engine/session-attachments.ts";
+import { AttachmentStore, type AttachmentStoreFailure } from "./attachment-store.ts";
 import type { SessionUserInputRequestId } from "../interaction/user-input-interaction-manager.ts";
 import { createSafeCapabilitySnapshot } from "../engine/capability-manifest.ts";
 import type { SessionEvent } from "../types/events.ts";
@@ -80,7 +88,7 @@ const REDACTED_KEYS = new Set([
   "token",
 ]);
 
-type RollErrorCode = RuntimeProtocolErrorDataV13["rollCode"];
+type RollErrorCode = RuntimeProtocolErrorDataV14["rollCode"];
 
 export type RuntimeServiceSession = Pick<
   AgentSession,
@@ -111,6 +119,8 @@ export interface RuntimeServiceOptions {
    * Supplying this enables the `reasoning-summary` capability.
    */
   readonly reasoningSummaryProjector?: (delta: string) => string | undefined;
+  /** Supplying this enables the Protocol 1.4 `attachments` capability. */
+  readonly attachmentStore?: AttachmentStore;
 }
 
 export interface RuntimeApprovalIdentity {
@@ -161,7 +171,7 @@ interface PendingUserInputState {
   readonly expiresAt: string;
 }
 
-export type RuntimeThreadSnapshot = Omit<ThreadSnapshotV13Full, "pendingInteractions">;
+export type RuntimeThreadSnapshot = Omit<ThreadSnapshotV14Full, "pendingInteractions">;
 
 export interface RuntimeEventReplayBatch extends RuntimeEventsResumeResult {
   readonly events: readonly StoredRuntimeEvent[];
@@ -209,7 +219,11 @@ type MutationRuntimeMethod =
   | typeof RUNTIME_METHODS.threadDetach
   | typeof RUNTIME_METHODS.turnStart
   | typeof RUNTIME_METHODS.turnCancel
-  | typeof RUNTIME_METHODS.approvalRespond;
+  | typeof RUNTIME_METHODS.approvalRespond
+  | typeof RUNTIME_METHODS.attachmentStage
+  | typeof RUNTIME_METHODS.attachmentChunk
+  | typeof RUNTIME_METHODS.attachmentCommit
+  | typeof RUNTIME_METHODS.attachmentRelease;
 
 interface MutationRequestEntry {
   readonly method: MutationRuntimeMethod;
@@ -243,21 +257,21 @@ export class MutationRequestCache {
   run<TMethod extends MutationRuntimeMethod>(
     requestId: string,
     method: TMethod,
-    params: RuntimeMethodParams<TMethod>,
-    action: () => RuntimeMethodResult<TMethod> | Promise<RuntimeMethodResult<TMethod>>,
-  ): Promise<RuntimeMethodResult<TMethod>> {
+    params: LatestRuntimeMethodParams<TMethod>,
+    action: () => LatestRuntimeMethodResult<TMethod> | Promise<LatestRuntimeMethodResult<TMethod>>,
+  ): Promise<LatestRuntimeMethodResult<TMethod>> {
     const fingerprint = mutationRequestFingerprint(params);
     const inFlight = this.inFlight.get(requestId);
     if (inFlight !== undefined) {
       this.assertMatchingRequest(requestId, method, fingerprint, inFlight);
-      return inFlight.response.then((result) => parseRuntimeMethodResult(method, result));
+      return inFlight.response.then((result) => parseLatestRuntimeMethodResult(method, result));
     }
     const settled = this.settled.get(requestId);
     if (settled !== undefined) {
       this.assertMatchingRequest(requestId, method, fingerprint, settled);
       this.settled.delete(requestId);
       this.settled.set(requestId, settled);
-      return settled.response.then((result) => parseRuntimeMethodResult(method, result));
+      return settled.response.then((result) => parseLatestRuntimeMethodResult(method, result));
     }
     const pending = Promise.resolve().then(action);
     const entry: MutationRequestEntry = {
@@ -379,6 +393,48 @@ function messageText(message: ModelMessage): string {
     .join("");
 }
 
+function base64ByteLength(data: string): number {
+  const padding = data.endsWith("==") ? 2 : data.endsWith("=") ? 1 : 0;
+  return Math.max(0, Math.floor(data.length / 4) * 3 - padding);
+}
+
+function messageAttachmentParts(
+  message: ModelMessage,
+): Extract<UiMessageV14["parts"][number], { type: "attachment" }>[] {
+  const content: unknown = message.content;
+  if (message.role !== "user" || !Array.isArray(content)) {
+    return [];
+  }
+  return content.flatMap((part) => {
+    if (!isRecord(part)) {
+      return [];
+    }
+    if (
+      part.type === "file" &&
+      typeof part.mediaType === "string" &&
+      typeof part.data === "string"
+    ) {
+      return [
+        {
+          type: "attachment" as const,
+          mediaType: part.mediaType,
+          bytes: base64ByteLength(part.data),
+        },
+      ];
+    }
+    if (part.type === "image" && typeof part.image === "string") {
+      return [
+        {
+          type: "attachment" as const,
+          mediaType: "image/*",
+          bytes: base64ByteLength(part.image),
+        },
+      ];
+    }
+    return [];
+  });
+}
+
 function toThreadId(id: string): ThreadId {
   return threadIdSchema.parse(id);
 }
@@ -396,7 +452,7 @@ function toThreadSummary(store: ThreadStore, record: ThreadRecord): ThreadSummar
 
 function toUiMessage(
   entry: ReturnType<ThreadStore["listRecentTranscriptMessages"]>["entries"][number],
-): UiMessage | undefined {
+): UiMessageV14 | undefined {
   if (entry.message.role !== "user" && entry.message.role !== "assistant") {
     return undefined;
   }
@@ -405,7 +461,10 @@ function toUiMessage(
     sequence: entry.sequence,
     role: entry.message.role,
     createdAt: entry.createdAt,
-    parts: text.length > 0 ? [{ type: "text", text }] : [],
+    parts: [
+      ...(text.length > 0 ? [{ type: "text" as const, text }] : []),
+      ...messageAttachmentParts(entry.message),
+    ],
   };
 }
 
@@ -467,13 +526,14 @@ export class RuntimeService {
   private readonly reasoningSummaryProjector:
     | RuntimeServiceOptions["reasoningSummaryProjector"]
     | undefined;
+  private readonly attachmentStore: AttachmentStore | undefined;
   private readonly sessions = new Map<string, RuntimeServiceSession>();
   private readonly activeTurns = new Map<string, ActiveTurnState>();
   private readonly activeTurnOwners = new Map<TurnId, ThreadId>();
   private readonly settledTurnOwners = new Map<TurnId, ThreadId>();
   private readonly pendingApprovals = new Map<string, PendingApprovalState>();
   private readonly pendingUserInputs = new Map<SessionUserInputRequestId, PendingUserInputState>();
-  private readonly listeners = new Set<(event: RuntimeEventEnvelopeV13) => void>();
+  private readonly listeners = new Set<(event: RuntimeEventEnvelopeV14) => void>();
   private readonly fatalErrorListeners = new Set<(error: unknown) => void>();
   private readonly userInputListeners = new Set<
     (event: RuntimeUserInputInteractionEvent) => void
@@ -498,6 +558,7 @@ export class RuntimeService {
       options.idempotencyCacheEntries ?? DEFAULT_IDEMPOTENCY_CACHE_ENTRIES;
     this.mutationRequests = new MutationRequestCache(this.idempotencyCacheEntries);
     this.reasoningSummaryProjector = options.reasoningSummaryProjector;
+    this.attachmentStore = options.attachmentStore;
     this.runtimeInstanceId = runtimeInstanceIdSchema.parse(randomUUID());
   }
 
@@ -532,7 +593,9 @@ export class RuntimeService {
       },
       features: RUNTIME_FEATURES.filter(
         (feature) =>
-          feature !== "reasoning-summary" || this.reasoningSummaryProjector !== undefined,
+          (feature !== "reasoning-summary" || this.reasoningSummaryProjector !== undefined) &&
+          (feature !== "attachments" ||
+            (protocolVersion === "1.4" && this.attachmentStore !== undefined)),
       ),
       limits: {
         maxFrameBytes: this.maxFrameBytes,
@@ -540,6 +603,23 @@ export class RuntimeService {
         idempotencyCacheEntries: this.idempotencyCacheEntries,
       },
     };
+    if (protocolVersion === "1.4") {
+      const storeLimits = this.attachmentStore?.limits;
+      return {
+        ...commonResult,
+        protocolVersion,
+        limits: {
+          ...commonResult.limits,
+          eventReplay: true,
+          maxAttachmentBytes: storeLimits?.maxAttachmentBytes ?? RUNTIME_V14_MAX_ATTACHMENT_BYTES,
+          maxAttachmentChunkBytes:
+            storeLimits?.maxAttachmentChunkBytes ?? RUNTIME_V14_MAX_ATTACHMENT_CHUNK_BYTES,
+          maxTurnAttachments: RUNTIME_V14_MAX_TURN_ATTACHMENTS,
+          maxStagedAttachments:
+            storeLimits?.maxStagedAttachments ?? RUNTIME_V14_MAX_STAGED_ATTACHMENTS,
+        },
+      };
+    }
     return protocolVersion === "1.3"
       ? {
           ...commonResult,
@@ -553,7 +633,7 @@ export class RuntimeService {
         };
   }
 
-  onEvent(listener: (event: RuntimeEventEnvelopeV13) => void): () => void {
+  onEvent(listener: (event: RuntimeEventEnvelopeV14) => void): () => void {
     this.listeners.add(listener);
     return () => {
       this.listeners.delete(listener);
@@ -740,6 +820,7 @@ export class RuntimeService {
           await session.close();
           this.sessions.delete(params.threadId);
         }
+        this.attachmentStore?.releaseThread(params.threadId);
         this.store.deleteThread(params.threadId);
         return { deleted: true };
       },
@@ -786,8 +867,8 @@ export class RuntimeService {
   }
 
   async startTurn(
-    params: RuntimeMethodParams<"turn.start">,
-  ): Promise<RuntimeMethodResult<"turn.start">> {
+    params: LatestRuntimeMethodParams<"turn.start">,
+  ): Promise<LatestRuntimeMethodResult<"turn.start">> {
     return this.mutationRequests.run(
       params.requestId,
       RUNTIME_METHODS.turnStart,
@@ -829,6 +910,7 @@ export class RuntimeService {
             { retryable: true },
           );
         }
+        const attachments = this.resolveTurnAttachments(params);
         const state: ActiveTurnState = {
           threadId: params.threadId,
           turnId: params.turnId,
@@ -846,7 +928,7 @@ export class RuntimeService {
           this.activeTurnOwners.delete(params.turnId);
           throw error;
         }
-        this.driveTurn(state, params.input.text).catch(() => undefined);
+        this.driveTurn(state, params.input.text, attachments).catch(() => undefined);
         return { accepted: true, turnId: params.turnId };
       },
     );
@@ -935,6 +1017,142 @@ export class RuntimeService {
 
   getPendingApprovalExpiresAt(identity: RuntimeApprovalIdentity): string | undefined {
     return this.findPendingApproval(identity)?.expiresAt;
+  }
+
+  async stageAttachment(
+    params: LatestRuntimeMethodParams<"attachment.stage">,
+  ): Promise<LatestRuntimeMethodResult<"attachment.stage">> {
+    return this.mutationRequests.run(
+      params.requestId,
+      RUNTIME_METHODS.attachmentStage,
+      params,
+      () => {
+        this.assertOpen();
+        this.requireThread(params.threadId);
+        const result = this.requireAttachmentStore().stage({
+          threadId: params.threadId,
+          fileName: params.fileName,
+          mediaType: params.mediaType,
+          bytes: params.bytes,
+          sha256: params.sha256,
+          source: params.source,
+          sourcePath: params.sourcePath,
+        });
+        if (!result.ok) {
+          this.throwAttachmentFailure(result);
+        }
+        return {
+          attachmentId: result.attachmentId,
+          state: result.state,
+          ...(result.descriptor !== undefined ? { descriptor: result.descriptor } : {}),
+        };
+      },
+    );
+  }
+
+  async appendAttachmentChunk(
+    params: LatestRuntimeMethodParams<"attachment.chunk">,
+  ): Promise<LatestRuntimeMethodResult<"attachment.chunk">> {
+    return this.mutationRequests.run(
+      params.requestId,
+      RUNTIME_METHODS.attachmentChunk,
+      params,
+      () => {
+        this.assertOpen();
+        const result = this.requireAttachmentStore().appendChunk({
+          threadId: params.threadId,
+          attachmentId: params.attachmentId,
+          sequence: params.sequence,
+          dataBase64: params.dataBase64,
+        });
+        if (!result.ok) {
+          this.throwAttachmentFailure(result);
+        }
+        return { receivedBytes: result.receivedBytes, nextSequence: result.nextSequence };
+      },
+    );
+  }
+
+  async commitAttachment(
+    params: LatestRuntimeMethodParams<"attachment.commit">,
+  ): Promise<LatestRuntimeMethodResult<"attachment.commit">> {
+    return this.mutationRequests.run(
+      params.requestId,
+      RUNTIME_METHODS.attachmentCommit,
+      params,
+      () => {
+        this.assertOpen();
+        const result = this.requireAttachmentStore().commit({
+          threadId: params.threadId,
+          attachmentId: params.attachmentId,
+        });
+        if (!result.ok) {
+          this.throwAttachmentFailure(result);
+        }
+        return { descriptor: result.descriptor };
+      },
+    );
+  }
+
+  async releaseAttachment(
+    params: LatestRuntimeMethodParams<"attachment.release">,
+  ): Promise<LatestRuntimeMethodResult<"attachment.release">> {
+    return this.mutationRequests.run(
+      params.requestId,
+      RUNTIME_METHODS.attachmentRelease,
+      params,
+      () => {
+        this.assertOpen();
+        const result = this.requireAttachmentStore().release({
+          threadId: params.threadId,
+          attachmentId: params.attachmentId,
+        });
+        return { released: result.released };
+      },
+    );
+  }
+
+  private requireAttachmentStore(): AttachmentStore {
+    if (this.attachmentStore === undefined) {
+      throw new RuntimeServiceError(
+        RUNTIME_ERROR_CODES.capabilityUnavailable,
+        "Runtime 未配置附件存储，attachments 能力不可用",
+      );
+    }
+    return this.attachmentStore;
+  }
+
+  private throwAttachmentFailure(failure: AttachmentStoreFailure): never {
+    throw new RuntimeServiceError(failure.code, failure.message, {
+      ...(failure.retryable !== undefined ? { retryable: failure.retryable } : {}),
+    });
+  }
+
+  private resolveTurnAttachments(
+    params: LatestRuntimeMethodParams<"turn.start">,
+  ): SessionAttachment[] | undefined {
+    const ids = params.input.attachments;
+    if (ids === undefined || ids.length === 0) {
+      return undefined;
+    }
+    const store = this.requireAttachmentStore();
+    const seen = new Set<string>();
+    const resolved: SessionAttachment[] = [];
+    for (const attachmentId of ids) {
+      if (seen.has(attachmentId)) {
+        throw new RuntimeServiceError(
+          RUNTIME_ERROR_CODES.invalidParams,
+          `附件 "${attachmentId}" 在同一 Turn 中重复引用`,
+        );
+      }
+      seen.add(attachmentId);
+      const read = store.readCommitted({ threadId: params.threadId, attachmentId });
+      if (!read.ok) {
+        this.throwAttachmentFailure(read);
+      }
+      resolved.push({ data: read.dataBase64, mediaType: read.descriptor.mediaType });
+    }
+    return resolved;
   }
 
   private cancelPendingApproval(
@@ -1057,6 +1275,7 @@ export class RuntimeService {
     this.pendingApprovals.clear();
     this.pendingUserInputs.clear();
     this.userInputListeners.clear();
+    this.attachmentStore?.close();
     await Promise.allSettled(sessions.map((session) => session.close()));
     this.mutationRequests.clear();
     this.fatalErrorListeners.clear();
@@ -1109,7 +1328,7 @@ export class RuntimeService {
       ...(turnId !== undefined ? { turnId } : {}),
     } as const;
     const durableEvent = runtimeDurableEventV13Schema.safeParse(event);
-    const envelope: RuntimeEventEnvelopeV13 = durableEvent.success
+    const envelope: RuntimeEventEnvelopeV14 = durableEvent.success
       ? (() => {
           let stored: StoredRuntimeEvent;
           try {
@@ -1163,15 +1382,21 @@ export class RuntimeService {
     }
   }
 
-  private async driveTurn(state: ActiveTurnState, input: string): Promise<void> {
+  private async driveTurn(
+    state: ActiveTurnState,
+    input: string,
+    attachments: readonly SessionAttachment[] | undefined,
+  ): Promise<void> {
     const projection: TurnProjectionState = {
       streamId: undefined,
       text: "",
       terminalEvent: undefined,
     };
+    const sendInput =
+      attachments !== undefined && attachments.length > 0 ? { text: input, attachments } : input;
     let terminalEvent: NonNullable<TurnProjectionState["terminalEvent"]>;
     try {
-      for await (const event of state.session.send(input)) {
+      for await (const event of state.session.send(sendInput)) {
         this.projectSessionEvent(state, projection, event);
       }
       terminalEvent = projection.terminalEvent ?? { type: "turn.completed" };
