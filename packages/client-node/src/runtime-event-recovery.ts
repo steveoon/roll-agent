@@ -54,11 +54,11 @@ export type RuntimeEventRecoverySnapshotReason =
 
 export type RuntimeDurableEventEnvelope = Extract<
   RuntimeEventEnvelope,
-  { readonly protocolVersion: "1.3"; readonly durability: "durable" }
+  { readonly protocolVersion: "1.3" | "1.4"; readonly durability: "durable" }
 >;
 export type RuntimeEphemeralEventEnvelope = Extract<
   RuntimeEventEnvelope,
-  { readonly protocolVersion: "1.3"; readonly durability: "ephemeral" }
+  { readonly protocolVersion: "1.3" | "1.4"; readonly durability: "ephemeral" }
 >;
 export type RuntimeEventRecoverySnapshot = RuntimeMethodResultForVersion<
   RuntimeProtocolVersion,
@@ -114,14 +114,22 @@ export interface RuntimeEventRecoveryManagerOptions {
 export type RuntimeEventRecoveryStartResult =
   | {
       readonly mode: "resumed" | "snapshot-resumed";
-      readonly protocolVersion: "1.3";
+      readonly protocolVersion: DurableRecoveryProtocolVersion;
       readonly checkpoint: RuntimeEventRecoveryCheckpoint;
     }
   | {
       readonly mode: "snapshot-only";
-      readonly protocolVersion: Exclude<RuntimeProtocolVersion, "1.3">;
+      readonly protocolVersion: Exclude<RuntimeProtocolVersion, DurableRecoveryProtocolVersion>;
       readonly checkpoint: null;
     };
+
+export type DurableRecoveryProtocolVersion = Extract<RuntimeProtocolVersion, "1.3" | "1.4">;
+
+function supportsDurableRecovery(
+  version: RuntimeProtocolVersion,
+): version is DurableRecoveryProtocolVersion {
+  return version === "1.3" || version === "1.4";
+}
 
 /**
  * Internal transport bridge supplied by RollNodeClient.
@@ -274,12 +282,22 @@ function safeCursorDistance(
   }
 }
 
-function isV13DurableEvent(event: RuntimeEventEnvelope): event is RuntimeDurableEventEnvelope {
-  return event.protocolVersion === "1.3" && event.durability === "durable";
+function isRecoverableDurableEvent(
+  event: RuntimeEventEnvelope,
+): event is RuntimeDurableEventEnvelope {
+  return (
+    (event.protocolVersion === "1.3" || event.protocolVersion === "1.4") &&
+    event.durability === "durable"
+  );
 }
 
-function isV13EphemeralEvent(event: RuntimeEventEnvelope): event is RuntimeEphemeralEventEnvelope {
-  return event.protocolVersion === "1.3" && event.durability === "ephemeral";
+function isRecoverableEphemeralEvent(
+  event: RuntimeEventEnvelope,
+): event is RuntimeEphemeralEventEnvelope {
+  return (
+    (event.protocolVersion === "1.3" || event.protocolVersion === "1.4") &&
+    event.durability === "ephemeral"
+  );
 }
 
 /**
@@ -335,12 +353,13 @@ export class RuntimeEventRecoveryManager {
     }
 
     const initialization = this.bridge.getInitializationResult();
-    if (initialization.protocolVersion !== "1.3") {
+    if (!supportsDurableRecovery(initialization.protocolVersion)) {
       const snapshot = await this.bridge.requestSnapshot(options.threadId);
       await options.applySnapshot(snapshot, {
         reason: RUNTIME_EVENT_RECOVERY_SNAPSHOT_REASONS.protocolUnsupported,
         protocolVersion: initialization.protocolVersion,
-        recoveryProjection: false,
+        recoveryProjection:
+          "recoveryProjection" in snapshot && snapshot.recoveryProjection === true,
       });
       return {
         mode: RECOVERY_MODES.snapshotOnly,
@@ -405,7 +424,7 @@ export class RuntimeEventRecoveryManager {
       this.scheduleLiveDrain(state);
       return {
         mode,
-        protocolVersion: "1.3",
+        protocolVersion: initialization.protocolVersion,
         checkpoint: state.checkpoint,
       };
     } catch (error: unknown) {
@@ -457,7 +476,7 @@ export class RuntimeEventRecoveryManager {
       );
       return true;
     }
-    if (isV13EphemeralEvent(event)) {
+    if (isRecoverableEphemeralEvent(event)) {
       if (state.phase === RECOVERY_PHASES.live) {
         try {
           state.options.onEphemeralEvent?.(event);
@@ -467,7 +486,7 @@ export class RuntimeEventRecoveryManager {
       }
       return true;
     }
-    if (!isV13DurableEvent(event)) {
+    if (!isRecoverableDurableEvent(event)) {
       this.markIntegrityFailure(
         state,
         new RuntimeEventStreamIntegrityError(
@@ -504,7 +523,7 @@ export class RuntimeEventRecoveryManager {
       assertRecoveryProjection(snapshot);
       await state.options.applySnapshot(snapshot, {
         reason,
-        protocolVersion: "1.3",
+        protocolVersion: this.bridge.getInitializationResult().protocolVersion,
         recoveryProjection: true,
       });
       this.assertActive(state);
