@@ -442,6 +442,12 @@ export const initializeParamsSchema = z
 const initializeResultCommonFields = {
   runtimeInstanceId: runtimeInstanceIdSchema,
   server: runtimeServerInfoSchema,
+  features: z.array(z.enum(RUNTIME_FEATURES_V13)),
+} as const;
+
+const initializeResultV14Fields = {
+  runtimeInstanceId: runtimeInstanceIdSchema,
+  server: runtimeServerInfoSchema,
   features: z.array(z.enum(RUNTIME_FEATURES)),
 } as const;
 
@@ -477,7 +483,7 @@ export const initializeResultV13Schema = z
 export const initializeResultV14Schema = z
   .object({
     protocolVersion: z.literal("1.4"),
-    ...initializeResultCommonFields,
+    ...initializeResultV14Fields,
     limits: runtimeLimitsV14Schema,
   })
   .strict()

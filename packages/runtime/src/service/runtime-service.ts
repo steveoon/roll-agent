@@ -3,7 +3,7 @@ import type { ModelMessage } from "ai";
 import {
   APPROVAL_EXPLANATION_PREVIEW_KEY,
   RUNTIME_ERROR_CODES,
-  RUNTIME_FEATURES,
+  RUNTIME_FEATURES_V13,
   RUNTIME_METHODS,
   RUNTIME_PROTOCOL_VERSION,
   RUNTIME_V14_MAX_ATTACHMENT_BYTES,
@@ -583,6 +583,9 @@ export class RuntimeService {
         },
       );
     }
+    const legacyFeatures = RUNTIME_FEATURES_V13.filter(
+      (feature) => feature !== "reasoning-summary" || this.reasoningSummaryProjector !== undefined,
+    );
     const commonResult = {
       protocolVersion,
       runtimeInstanceId: this.runtimeInstanceId,
@@ -591,12 +594,7 @@ export class RuntimeService {
         version: this.serverVersion,
         runtimeVersion: this.runtimeVersion,
       },
-      features: RUNTIME_FEATURES.filter(
-        (feature) =>
-          (feature !== "reasoning-summary" || this.reasoningSummaryProjector !== undefined) &&
-          (feature !== "attachments" ||
-            (protocolVersion === "1.4" && this.attachmentStore !== undefined)),
-      ),
+      features: legacyFeatures,
       limits: {
         maxFrameBytes: this.maxFrameBytes,
         maxPageSize: DEFAULT_MAX_PAGE_SIZE,
@@ -608,6 +606,10 @@ export class RuntimeService {
       return {
         ...commonResult,
         protocolVersion,
+        features:
+          this.attachmentStore !== undefined
+            ? [...legacyFeatures, "attachments" as const]
+            : [...legacyFeatures],
         limits: {
           ...commonResult.limits,
           eventReplay: true,
