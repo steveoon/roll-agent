@@ -24,7 +24,7 @@ function withStore(
     readonly workDir: string;
     readonly advance: (ms: number) => void;
   }) => void,
-  options: { readonly maxStagedAttachments?: number } = {},
+  options: { readonly maxStagedAttachments?: number; readonly maxAttachmentBytes?: number } = {},
 ): void {
   const storeDir = tempDir();
   const workDir = tempDir();
@@ -36,6 +36,9 @@ function withStore(
     now: () => nowMs,
     ...(options.maxStagedAttachments !== undefined
       ? { maxStagedAttachments: options.maxStagedAttachments }
+      : {}),
+    ...(options.maxAttachmentBytes !== undefined
+      ? { maxAttachmentBytes: options.maxAttachmentBytes }
       : {}),
   });
   try {
@@ -372,4 +375,36 @@ test("close 清空目录，构造时清扫历史残留", () => {
   second.close();
   assert.equal(existsSync(storeDir), false);
   rmSync(workDir, { recursive: true, force: true });
+});
+
+test("local-path 实际文件超限时报 ATTACHMENT_TOO_LARGE 而非申报不一致", () => {
+  withStore(
+    ({ store, workDir }) => {
+      const data = Buffer.alloc(2_048);
+      const sourcePath = writeSource(workDir, "big.png", data);
+      const lied = store.stage({
+        threadId: THREAD_A,
+        fileName: "big.png",
+        mediaType: "image/png",
+        bytes: 512,
+        sha256: sha256(data),
+        source: "local-path",
+        sourcePath,
+      });
+      assert.ok(!lied.ok && lied.code === "ATTACHMENT_TOO_LARGE");
+      assert.match(lied.message, /实际大小/u);
+
+      const honestButOversized = store.stage({
+        threadId: THREAD_A,
+        fileName: "big.png",
+        mediaType: "image/png",
+        bytes: 1_024,
+        sha256: sha256(data),
+        source: "local-path",
+        sourcePath,
+      });
+      assert.ok(!honestButOversized.ok && honestButOversized.code === "ATTACHMENT_TOO_LARGE");
+    },
+    { maxAttachmentBytes: 1_024 },
+  );
 });

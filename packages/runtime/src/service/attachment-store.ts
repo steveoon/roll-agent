@@ -408,6 +408,13 @@ export class AttachmentStore {
         message: "sourcePath 不是普通文件",
       };
     }
+    if (stats.size > this.maxAttachmentBytes) {
+      return {
+        ok: false,
+        code: RUNTIME_ERROR_CODES.attachmentTooLarge,
+        message: `文件实际大小 ${String(stats.size)} 超过单文件上限 ${String(this.maxAttachmentBytes)} 字节`,
+      };
+    }
     if (stats.size !== declaredBytes) {
       return {
         ok: false,
