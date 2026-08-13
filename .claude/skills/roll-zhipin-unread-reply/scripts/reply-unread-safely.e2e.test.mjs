@@ -57,10 +57,18 @@ case "$tool" in
     echo '{"success":true,"chatReady":true}'
     ;;
   zhipin_read_messages)
-    echo '{"candidates":[{"conversationId":"cid-e2e","name":"Alice","preview":"请问排班时间？"}],"page":{"url":"https://www.zhipin.com/web/chat/index","title":"BOSS直聘"}}'
+    if [[ "$ROLL_SHIM_RESTRICTED" == "read" ]]; then
+      echo '{"ok":false,"error":"tool 返回 isError=true","result":{"code":"zhipin_access_restricted","message":"BOSS 风控页已出现（ip_block）。","details":{"kind":"ip_block","url":"https://www.zhipin.com/web/passport/zp/403.html?code=31","title":"访问受限"}}}'
+    else
+      echo '{"candidates":[{"conversationId":"cid-e2e","name":"Alice","preview":"请问排班时间？"}],"page":{"url":"https://www.zhipin.com/web/chat/index","title":"BOSS直聘"}}'
+    fi
     ;;
   zhipin_open_chat)
-    echo '{"success":true,"conversationId":"cid-e2e"}'
+    if [[ "$ROLL_SHIM_RESTRICTED" == "open" ]]; then
+      echo '{"ok":false,"error":"tool 返回 isError=true","result":{"code":"zhipin_access_restricted","message":"BOSS 风控页已出现（ip_block）。","details":{"kind":"ip_block","url":"https://www.zhipin.com/web/passport/zp/403.html?code=31","title":"访问受限"}}}'
+    else
+      echo '{"success":true,"conversationId":"cid-e2e"}'
+    fi
     ;;
   browser_snapshot)
     echo '{"page":{"url":"https://www.zhipin.com/web/chat/index","title":"BOSS直聘"},"snapshot":{"text":"正常会话"}}'
@@ -122,6 +130,7 @@ function runScenario(name, noJudge, previewFailure = false, useCurrentCli = fals
       ROLL_SHIM_NO_JUDGE: noJudge ? "1" : "0",
       ROLL_SHIM_PREVIEW_FAILURE: previewFailure ? "1" : "0",
       ROLL_SHIM_FAIL_STATUS: "0",
+      ROLL_SHIM_RESTRICTED: "0",
     },
   });
   assert.equal(result.status, 0, `${name} failed:\n${result.stderr}\n${result.stdout}`);
@@ -216,6 +225,7 @@ try {
         PATH: `${shimDir}:${process.env.PATH ?? ""}`,
         ROLL_SHIM_TRACE: statusFailureTracePath,
         ROLL_SHIM_FAIL_STATUS: "1",
+        ROLL_SHIM_RESTRICTED: "0",
       },
     },
   );
@@ -227,6 +237,75 @@ try {
     .filter(Boolean)
     .map((line) => line.slice(0, line.indexOf("\t")));
   assert.equal(statusFailureTools.includes("zhipin_open_chat_page"), false);
+
+  function runRestricted(name, restricted) {
+    const tracePath = path.join(testDir, `${name}.trace`);
+    const resultsPath = path.join(testDir, `${name}.jsonl`);
+    return {
+      tracePath,
+      resultsPath,
+      result: spawnSync(
+        "bash",
+        [
+          scriptPath,
+          "--limit",
+          "1",
+          "--no-unread-filter",
+          "--no-exchange-wechat",
+          "--results-file",
+          resultsPath,
+        ],
+        {
+          encoding: "utf8",
+          timeout: 15_000,
+          env: {
+            ...process.env,
+            PATH: `${shimDir}:${process.env.PATH ?? ""}`,
+            ROLL_SHIM_TRACE: tracePath,
+            ROLL_SHIM_FAIL_STATUS: "0",
+            ROLL_SHIM_RESTRICTED: restricted,
+          },
+        },
+      ),
+    };
+  }
+
+  const restrictedRead = runRestricted("restricted-read", "read");
+  assert.equal(restrictedRead.result.status, 2, restrictedRead.result.stderr);
+  assert.match(restrictedRead.result.stderr, /STOP: access_restricted \(read_messages\)/);
+  assert.match(restrictedRead.result.stderr, /do not reload or retry/);
+  const restrictedReadTools = readFileSync(restrictedRead.tracePath, "utf8")
+    .trim()
+    .split("\n")
+    .filter(Boolean)
+    .map((line) => line.slice(0, line.indexOf("\t")));
+  assert.equal(restrictedReadTools.includes("zhipin_open_chat"), false);
+  const restrictedReadRow = JSON.parse(readFileSync(restrictedRead.resultsPath, "utf8").trim());
+  assert.equal(restrictedReadRow.reason, "access_restricted");
+  assert.equal(restrictedReadRow.stage, "read_messages");
+
+  const restrictedOpen = runRestricted("restricted-open", "open");
+  assert.equal(restrictedOpen.result.status, 2, restrictedOpen.result.stderr);
+  assert.match(restrictedOpen.result.stderr, /STOP: access_restricted \(open_chat\)/);
+  const restrictedOpenCalls = readFileSync(restrictedOpen.tracePath, "utf8")
+    .trim()
+    .split("\n")
+    .filter(Boolean)
+    .map((line) => {
+      const separator = line.indexOf("\t");
+      return {
+        tool: line.slice(0, separator),
+        input: JSON.parse(line.slice(separator + 1)),
+      };
+    });
+  assert.equal(
+    restrictedOpenCalls.some((call) => call.input.forceReload === true),
+    false,
+  );
+  assert.equal(restrictedOpenCalls.filter((call) => call.tool === "zhipin_open_chat").length, 1);
+  const restrictedOpenRow = JSON.parse(readFileSync(restrictedOpen.resultsPath, "utf8").trim());
+  assert.equal(restrictedOpenRow.reason, "access_restricted");
+  assert.equal(restrictedOpenRow.stage, "open_chat");
 
   console.log("reply-unread-safely.e2e.test.mjs: ok");
 } finally {

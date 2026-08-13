@@ -7,6 +7,7 @@ import type {
   NativeRecommendJobListResult,
   ZhipinNativePagePort,
 } from "../pages/zhipin/native-page.ts";
+import { rethrowStructuredToolError } from "../pages/zhipin/risk-page.ts";
 import { rememberZhipinRecommendJobRefs } from "../pages/zhipin/semantic-refs.ts";
 import { maybeBringToFront } from "../browser-foreground.ts";
 
@@ -147,6 +148,7 @@ export const zhipinListRecommendJobs = defineTool({
 
       return toToolOutput(result);
     } catch (error) {
+      rethrowStructuredToolError(error);
       const message = error instanceof Error ? error.message : "读取推荐岗位失败";
       await session?.fail(message);
       return toToolOutput({

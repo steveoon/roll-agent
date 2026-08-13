@@ -1,7 +1,12 @@
 import assert from "node:assert/strict";
 import { afterEach, describe, it } from "node:test";
 import type { AgentContext } from "@roll-agent/sdk";
+import { StructuredToolError } from "@roll-agent/sdk";
 import type { ZhipinNativePagePort } from "../pages/zhipin/native-page.ts";
+import {
+  ZHIPIN_ACCESS_RESTRICTED_CODE,
+  createZhipinAccessRestrictedError,
+} from "../pages/zhipin/risk-page.ts";
 import {
   clearZhipinCandidateRefsForTests,
   rememberZhipinCandidateRefs,
@@ -188,6 +193,9 @@ describe("zhipin_say_hello", () => {
           clicked: true,
         };
       },
+      async assertNotRestricted() {
+        calls.push("risk-check");
+      },
       close() {
         calls.push("close");
       },
@@ -217,7 +225,7 @@ describe("zhipin_say_hello", () => {
     assert.equal(result.success, false);
     assert.equal(result.results[0]?.candidateRef, "@c1");
     assert.match(result.results[0]?.error ?? "", /已过期/);
-    assert.deepEqual(calls, ["inspect:0", "close"]);
+    assert.deepEqual(calls, ["inspect:0", "risk-check", "close"]);
   });
 
   it("rejects invalid candidate refs before execution", () => {
@@ -225,5 +233,202 @@ describe("zhipin_say_hello", () => {
       () => zhipinSayHello.input.parse({ candidateRefs: ["candidate-1"] }),
       /candidateRef 应类似 @c1/,
     );
+  });
+
+  it("aborts the batch when a remembered ref inspect fails because of a risk page", async () => {
+    const calls: string[] = [];
+    rememberZhipinCandidateRefs([
+      { index: 0, candidateId: "candidate-1", name: "候选人 A" },
+      { index: 1, candidateId: "candidate-2", name: "候选人 B" },
+    ]);
+    const nativePage = {
+      async waitForRecommendList() {
+        return true;
+      },
+      async inspectRecommendCard(index: number) {
+        calls.push(`inspect:${index}`);
+        return {
+          found: false,
+          cardSelector: "",
+          candidateId: "",
+          name: "",
+          hasGreetButton: false,
+        };
+      },
+      async clickRecommendGreet(index: number) {
+        calls.push(`greet:${index}`);
+        return {
+          found: false,
+          cardSelector: "",
+          candidateId: "",
+          name: "",
+          hasGreetButton: false,
+          clicked: false,
+          error: "未找到候选人卡片",
+        };
+      },
+      async assertNotRestricted() {
+        calls.push("risk-check");
+        throw createZhipinAccessRestrictedError({
+          kind: "ip_block",
+          url: "https://www.zhipin.com/web/passport/zp/403.html?code=31",
+          title: "访问受限",
+        });
+      },
+      close() {
+        calls.push("close");
+      },
+    } as unknown as ZhipinNativePagePort;
+
+    setZhipinSayHelloDepsForTests({
+      openNativePagePort: async () => nativePage,
+      createNativeVisualActivitySession: () => ({
+        async begin() {
+          return true;
+        },
+        async highlightSelector() {
+          return true;
+        },
+        async previewMouseMotion() {},
+        async succeed() {
+          return true;
+        },
+        async fail() {
+          calls.push("visual-fail");
+          return true;
+        },
+      }),
+      sleep: async () => {},
+    });
+
+    await assert.rejects(
+      zhipinSayHello.execute({ candidateRefs: ["@c1", "@c2"] }, createTestContext()),
+      (error: unknown) => {
+        assert.ok(error instanceof StructuredToolError);
+        assert.equal(error.payload.code, ZHIPIN_ACCESS_RESTRICTED_CODE);
+        return true;
+      },
+    );
+    assert.deepEqual(calls, ["inspect:0", "risk-check", "close"]);
+  });
+
+  it("aborts the batch when a failed click reveals a risk page", async () => {
+    const calls: string[] = [];
+    const nativePage = {
+      async waitForRecommendList() {
+        return true;
+      },
+      async clickRecommendGreet(index: number) {
+        calls.push(`greet:${index}`);
+        return {
+          found: false,
+          cardSelector: "",
+          candidateId: "",
+          name: "",
+          hasGreetButton: false,
+          clicked: false,
+          error: "未找到候选人卡片",
+        };
+      },
+      async assertNotRestricted() {
+        calls.push("risk-check");
+        throw createZhipinAccessRestrictedError({
+          kind: "ip_block",
+          url: "https://www.zhipin.com/web/passport/zp/403.html?code=31",
+          title: "访问受限",
+        });
+      },
+      close() {
+        calls.push("close");
+      },
+    } as unknown as ZhipinNativePagePort;
+
+    setZhipinSayHelloDepsForTests({
+      openNativePagePort: async () => nativePage,
+      createNativeVisualActivitySession: () => ({
+        async begin() {
+          return true;
+        },
+        async highlightSelector() {
+          return true;
+        },
+        async previewMouseMotion() {},
+        async succeed() {
+          return true;
+        },
+        async fail() {
+          calls.push("visual-fail");
+          return true;
+        },
+      }),
+      sleep: async () => {},
+    });
+
+    await assert.rejects(
+      zhipinSayHello.execute({ candidateRefs: ["@c1", "@c2"] }, createTestContext()),
+      (error: unknown) => {
+        assert.ok(error instanceof StructuredToolError);
+        assert.equal(error.payload.code, ZHIPIN_ACCESS_RESTRICTED_CODE);
+        return true;
+      },
+    );
+    assert.deepEqual(calls, ["greet:0", "risk-check", "close"]);
+  });
+
+  it("continues the batch when a failed click happens on a normal page", async () => {
+    const calls: string[] = [];
+    const nativePage = {
+      async waitForRecommendList() {
+        return true;
+      },
+      async clickRecommendGreet(index: number) {
+        calls.push(`greet:${index}`);
+        return {
+          found: index !== 0,
+          cardSelector: ".candidate-card-wrap",
+          candidateId: `candidate-${index}`,
+          name: `候选人 ${index}`,
+          hasGreetButton: index !== 0,
+          clicked: index !== 0,
+          ...(index === 0 ? { error: "未找到候选人卡片" } : {}),
+        };
+      },
+      async assertNotRestricted() {
+        calls.push("risk-check");
+      },
+      close() {
+        calls.push("close");
+      },
+    } as unknown as ZhipinNativePagePort;
+
+    setZhipinSayHelloDepsForTests({
+      openNativePagePort: async () => nativePage,
+      createNativeVisualActivitySession: () => ({
+        async begin() {
+          return true;
+        },
+        async highlightSelector() {
+          return true;
+        },
+        async previewMouseMotion() {},
+        async succeed() {
+          return true;
+        },
+        async fail() {
+          return true;
+        },
+      }),
+      sleep: async () => {},
+    });
+
+    const result = await zhipinSayHello.execute(
+      { candidateRefs: ["@c1", "@c2"] },
+      createTestContext(),
+    );
+
+    assert.equal(result.success, false);
+    assert.equal(result.summary.failed, 1);
+    assert.equal(result.summary.succeeded, 1);
+    assert.deepEqual(calls, ["greet:0", "risk-check", "greet:1", "close"]);
   });
 });

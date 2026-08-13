@@ -1,7 +1,19 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import type { NativeCdpController, NativeCdpMouseEventInput } from "@roll-agent/browser";
-import { parseZhipinCandidateProfileTokens, ZhipinNativePagePort } from "./native-page.ts";
+import type {
+  BrowserContextManager,
+  BrowserInspectablePage,
+  BrowserRuntime,
+  NativeCdpController,
+  NativeCdpMouseEventInput,
+} from "@roll-agent/browser";
+import { StructuredToolError } from "@roll-agent/sdk";
+import {
+  parseZhipinCandidateProfileTokens,
+  openZhipinNativePagePort,
+  ZhipinNativePagePort,
+} from "./native-page.ts";
+import { ZHIPIN_ACCESS_RESTRICTED_CODE } from "./risk-page.ts";
 import { ZHIPIN_SELECTORS } from "./selectors.ts";
 
 function createPort(
@@ -1578,5 +1590,186 @@ describe("ZhipinNativePagePort", () => {
     assert.equal(result.success, false);
     assert.deepEqual(result.items, []);
     assert.equal(result.before.containerFound, false);
+  });
+});
+
+const BLOCKED_PAGE: BrowserInspectablePage = {
+  targetId: "target-boss",
+  type: "page",
+  title: "访问受限",
+  url: "https://www.zhipin.com/web/passport/zp/403.html?code=31",
+};
+
+const CHAT_PAGE: BrowserInspectablePage = {
+  targetId: "target-boss",
+  type: "page",
+  title: "BOSS直聘",
+  url: "https://www.zhipin.com/web/chat/index",
+};
+
+function createCtxManager(
+  pages: readonly BrowserInspectablePage[],
+  selectedTargetId = "target-boss",
+): BrowserContextManager {
+  return {
+    isNativePageSelected(targetId: string) {
+      return targetId === selectedTargetId;
+    },
+    async listNativePages() {
+      return [...pages];
+    },
+  } as unknown as BrowserContextManager;
+}
+
+function createRuntime(options: {
+  readonly evaluateJson?: (expression: string) => Promise<unknown>;
+  readonly onConnect?: () => void;
+  readonly onClose?: () => void;
+}): BrowserRuntime {
+  return {
+    async connectNativePage() {
+      options.onConnect?.();
+      return {
+        evaluateJson: options.evaluateJson ?? (async () => CHAT_PAGE.url),
+        async getFrameTree() {
+          return {
+            frame: {
+              id: "main-frame",
+              url: CHAT_PAGE.url,
+            },
+          };
+        },
+        async createIsolatedWorld() {
+          return 7;
+        },
+        async dispatchMouseEvent(_input: NativeCdpMouseEventInput) {},
+        async bringToFront() {},
+        close() {
+          options.onClose?.();
+        },
+      } as unknown as NativeCdpController;
+    },
+  } as unknown as BrowserRuntime;
+}
+
+describe("openZhipinNativePagePort risk gate", () => {
+  it("throws zhipin_access_restricted before connect when the listed URL is a 403 page", async () => {
+    let connected = false;
+    await assert.rejects(
+      () =>
+        openZhipinNativePagePort(
+          {},
+          {
+            ctxManager: createCtxManager([BLOCKED_PAGE]),
+            runtime: createRuntime({
+              onConnect: () => {
+                connected = true;
+              },
+            }),
+          },
+        ),
+      (error: unknown) => {
+        assert.ok(error instanceof StructuredToolError);
+        assert.equal(error.payload.code, ZHIPIN_ACCESS_RESTRICTED_CODE);
+        assert.match(error.message, /换 browserInstance\/profile 均无效/u);
+        return true;
+      },
+    );
+    assert.equal(connected, false);
+  });
+
+  it("does not treat a 403 tab as a missing chat page when requireChatPage is set", async () => {
+    await assert.rejects(
+      () =>
+        openZhipinNativePagePort(
+          { requireChatPage: true },
+          {
+            ctxManager: createCtxManager([BLOCKED_PAGE]),
+            runtime: createRuntime({}),
+          },
+        ),
+      (error: unknown) => {
+        assert.ok(error instanceof StructuredToolError);
+        assert.equal(error.payload.code, ZHIPIN_ACCESS_RESTRICTED_CODE);
+        return true;
+      },
+    );
+  });
+
+  it("connects a 403 page when skipRiskGate is true", async () => {
+    let connected = false;
+    const port = await openZhipinNativePagePort(
+      { skipRiskGate: true },
+      {
+        ctxManager: createCtxManager([BLOCKED_PAGE]),
+        runtime: createRuntime({
+          onConnect: () => {
+            connected = true;
+          },
+        }),
+      },
+    );
+    assert.equal(connected, true);
+    port.close();
+  });
+
+  it("throws after connect when inspectPage shows a risk URL the list still had as chat", async () => {
+    let closed = false;
+    await assert.rejects(
+      () =>
+        openZhipinNativePagePort(
+          {},
+          {
+            ctxManager: createCtxManager([CHAT_PAGE]),
+            runtime: createRuntime({
+              evaluateJson: async (expression) => {
+                if (expression === "location.href") {
+                  return BLOCKED_PAGE.url;
+                }
+                if (expression === "document.title") {
+                  return BLOCKED_PAGE.title;
+                }
+                return CHAT_PAGE.url;
+              },
+              onClose: () => {
+                closed = true;
+              },
+            }),
+          },
+        ),
+      (error: unknown) => {
+        assert.ok(error instanceof StructuredToolError);
+        assert.equal(error.payload.code, ZHIPIN_ACCESS_RESTRICTED_CODE);
+        return true;
+      },
+    );
+    assert.equal(closed, true);
+  });
+
+  it("fails closed with a plain error when the live URL cannot be read", async () => {
+    let closed = false;
+    await assert.rejects(
+      () =>
+        openZhipinNativePagePort(
+          {},
+          {
+            ctxManager: createCtxManager([CHAT_PAGE]),
+            runtime: createRuntime({
+              evaluateJson: async () => {
+                throw new Error("CDP detached");
+              },
+              onClose: () => {
+                closed = true;
+              },
+            }),
+          },
+        ),
+      (error: unknown) => {
+        assert.ok(error instanceof Error && !(error instanceof StructuredToolError));
+        assert.match(error.message, /无法读取当前页面地址/u);
+        return true;
+      },
+    );
+    assert.equal(closed, true);
   });
 });

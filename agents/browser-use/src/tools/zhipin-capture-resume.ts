@@ -9,6 +9,7 @@ import type {
   NativeResumeStitchProgress,
   ZhipinNativePagePort,
 } from "../pages/zhipin/native-page.ts";
+import { rethrowStructuredToolError } from "../pages/zhipin/risk-page.ts";
 
 const PNG_DATA_URL_PREFIX = "data:image/png;base64,";
 
@@ -92,6 +93,7 @@ export const zhipinCaptureResume = defineTool({
         await session.fail("未找到简历内容");
         return { success: false, error: capture.error ?? "未找到简历 canvas" };
       }
+      await nativePage.assertNotRestricted();
 
       let pngBase64: string;
       let captureMode: "canvas-data-url" | "viewport-clip" | "dom-screenshot";
@@ -140,6 +142,7 @@ export const zhipinCaptureResume = defineTool({
         mcpImages: [{ data: pngBase64, mimeType: "image/png" }],
       };
     } catch (error) {
+      rethrowStructuredToolError(error);
       await session?.fail("简历读取失败");
       ctx.logger.warn(
         `Native zhipin capture resume failed: ${error instanceof Error ? error.message : String(error)}`,

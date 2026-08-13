@@ -4,6 +4,7 @@
  * stdin: JSON { preview, candidateInfo, preferredBrand, chatMessages, pageUrl, pageTitle }
  * stdout: JSON { skip: boolean, reason?: string }
  */
+import { classifyZhipinRiskPage } from "./risk-paths.mjs";
 let input;
 try {
   const raw = await new Promise((resolve) => {
@@ -19,11 +20,20 @@ try {
   process.exit(1);
 }
 
-const { preview = "", candidateInfo = {}, preferredBrand = "", chatMessages = [], pageUrl = "", pageTitle = "" } = input;
+const {
+  preview = "",
+  candidateInfo = {},
+  preferredBrand = "",
+  chatMessages = [],
+  pageUrl = "",
+  pageTitle = "",
+} = input;
 
 const DECLINE = ["不考虑了", "不合适", "不感兴趣", "算了", "谢谢不用了"];
 const STUDENT_KW = ["应届", "在校", "在读", "大三", "大四"];
 const WECHAT_ADDED_KW = ["我加您了", "我加了", "加了您", "已经加了", "已添加", "加你微信了"];
+
+// Shared classifier: keep risk-paths.mjs in sync with agents/browser-use/src/pages/zhipin/risk-page.ts
 
 function allText() {
   const parts = [preview, candidateInfo.education, candidateInfo.experience, candidateInfo.age];
@@ -38,10 +48,26 @@ function parseAge(ageStr) {
   return m ? Number(m[1]) : null;
 }
 
-function captcha() {
-  if (pageUrl.includes("/web/passport/zp/verify.html")) return "captcha_url";
-  if (pageTitle.includes("安全验证")) return "captcha_title";
+const riskHit = classifyZhipinRiskPage(pageUrl, pageTitle);
+
+function accessRestricted() {
+  if (riskHit !== null && riskHit.kind !== "verify") {
+    return "access_restricted";
+  }
   return null;
+}
+
+function captcha() {
+  if (riskHit?.kind === "verify") {
+    return riskHit.via === "title" ? "captcha_title" : "captcha_url";
+  }
+  return null;
+}
+
+const restricted = accessRestricted();
+if (restricted) {
+  console.log(JSON.stringify({ skip: false, stop: true, reason: restricted }));
+  process.exit(0);
 }
 
 const cap = captcha();

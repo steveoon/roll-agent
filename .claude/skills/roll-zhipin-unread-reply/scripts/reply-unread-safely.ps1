@@ -23,6 +23,7 @@ $CheckAgentHealth = Join-Path $ScriptDir "check-agent-health.mjs"
 $ValidateBrowserSelection = Join-Path $ScriptDir "validate-browser-selection.mjs"
 $DetectExpiredBanner = Join-Path $ScriptDir "detect-expired-banner.mjs"
 $ParsePageMeta = Join-Path $ScriptDir "parse-page-meta.mjs"
+$DetectAccessStop = Join-Path $ScriptDir "detect-access-stop.mjs"
 
 # UTF-8 for child processes (roll/node) and PowerShell 5.1 native-command pipes.
 try {
@@ -71,7 +72,7 @@ Requires: roll and node on PATH.
   -KeepWorkDir              Do not delete temp workdir (debug)
   -Help
 
-Exit: 0 ok | 1 usage | 2 captcha | 3 consecutive failures
+Exit: 0 ok | 1 usage | 2 captcha/access_restricted | 3 consecutive failures
 "@
 }
 
@@ -360,12 +361,8 @@ function Ensure-BrowserInstanceSelection {
 }
 
 function Ensure-ChatList {
-  try {
-    [void](Extract-RollJson (Invoke-RollNoInput "zhipin_open_chat_page"))
-  }
-  catch {
-    Write-Log "warn: zhipin_open_chat_page failed"
-  }
+  $out = Invoke-RollNoInput "zhipin_open_chat_page"
+  Stop-IfRiskPage -Out $out -Stage "open_chat_page"
 }
 
 function Apply-UnreadFilterIfNeeded {
@@ -378,6 +375,7 @@ function Apply-UnreadFilterIfNeeded {
   $snapFile = Join-Path $script:WorkDir "snapshot.json"
   Write-JsonFile $snapFile '{"interactiveOnly":true,"maxNodes":500}'
   $snap = Invoke-RollJsonFile "browser_snapshot" $snapFile
+  Stop-IfRiskPage -Out $snap -Stage "unread_filter"
   $ref = ""
   try {
     $ref = (Invoke-NodeStdin $script:FindUnreadRef $snap).Trim()
@@ -418,6 +416,7 @@ function Get-NextUnread {
   $readFile = Join-Path $script:WorkDir "read.json"
   Write-JsonFile $readFile '{"onlyUnread":true,"limit":1,"autoScroll":false}'
   $out = Invoke-RollJsonFile "zhipin_read_messages" $readFile
+  Stop-IfRiskPage -Out $out -Stage "read_messages"
   $code = Invoke-NodeStdinExit $script:ParseReadCandidate $out @()
   if ($code -ne 0) { return $null }
   $json = (Invoke-NodeStdin $script:ParseReadCandidate $out).Trim()
@@ -427,6 +426,35 @@ function Get-NextUnread {
 
 function Test-PageBlockers([string]$SnapText) {
   return (Invoke-NodeStdin $script:DetectExpiredBanner $SnapText).Trim()
+}
+
+function Stop-IfRiskPage {
+  param(
+    [string]$Out,
+    [string]$Stage = "tool",
+    [string]$Name = "",
+    [string]$Cid = ""
+  )
+  $detectedRaw = (Invoke-NodeStdin $script:DetectAccessStop $Out).Trim()
+  if (-not $detectedRaw -or -not $detectedRaw.StartsWith("{")) {
+    return
+  }
+  $detected = $detectedRaw | ConvertFrom-Json
+  if (-not $detected.stop) {
+    return
+  }
+  $reason = if ($detected.reason) { [string]$detected.reason } else { "access_restricted" }
+  $ts = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
+  Append-ResultObject @{
+    ts = $ts
+    name = $Name
+    conversationId = $Cid
+    ok = $false
+    stage = $Stage
+    reason = $reason
+  }
+  Write-Log "STOP: $reason ($Stage) — do not reload or retry"
+  exit 2
 }
 
 function Back-ToList {
@@ -440,6 +468,7 @@ function Process-One([string]$Cid, [string]$Name, [string]$Preview) {
   Write-JsonFile $cFile (@{ conversationId = $Cid } | ConvertTo-Json -Compress)
   Write-Log "zhipin_open_chat $Name (list click)"
   $openOut = Invoke-RollJsonFile "zhipin_open_chat" $cFile
+  Stop-IfRiskPage -Out $openOut -Stage "open_chat" -Name $Name -Cid $Cid
 
   $openCode = Invoke-NodeStdinExit $script:ValidateOpenChat $openOut @($Cid)
   if ($openCode -ne 0) {
@@ -453,11 +482,13 @@ function Process-One([string]$Cid, [string]$Name, [string]$Preview) {
     Write-JsonFile $reloadFile (@{ forceReload = $true; expectedConversationId = $Cid } | ConvertTo-Json -Compress)
     $reloadOut = Invoke-RollJsonFile "zhipin_open_chat_page" $reloadFile
     Write-TextFile $reloadPath $reloadOut
+    Stop-IfRiskPage -Out $reloadOut -Stage "open_chat_page" -Name $Name -Cid $Cid
     Invalidate-UnreadFilterAfterReload
 
     Write-Log "retry zhipin_open_chat $Name after force reload"
     $openOut = Invoke-RollJsonFile "zhipin_open_chat" $cFile
     Write-TextFile $retryOpenPath $openOut
+    Stop-IfRiskPage -Out $openOut -Stage "open_chat" -Name $Name -Cid $Cid
     $openCode = Invoke-NodeStdinExit $script:ValidateOpenChat $openOut @($Cid)
     if ($openCode -ne 0) {
       $failureLine = [string](& node $script:FormatOpenChatFailure `
@@ -482,7 +513,7 @@ function Process-One([string]$Cid, [string]$Name, [string]$Preview) {
   $snap = Invoke-RollJsonFile "browser_snapshot" $snapFile
   $pageUrl = ""
   $pageTitle = ""
-  $meta = @{ captcha = $false; url = ""; title = "" }
+  $meta = @{ captcha = $false; blocked = $false; url = ""; title = "" }
   try {
     $metaJson = Invoke-NodeStdin $script:ParsePageMeta $snap
     $meta = $metaJson | ConvertFrom-Json
@@ -498,6 +529,11 @@ function Process-One([string]$Cid, [string]$Name, [string]$Preview) {
     Write-Log "STOP: captcha (url/title)"
     exit 2
   }
+  if ($meta.blocked -eq $true) {
+    Append-ResultObject @{ ts = $ts; name = $Name; conversationId = $Cid; ok = $false; stage = "preflight"; reason = "access_restricted" }
+    Write-Log "STOP: access_restricted (url/title)"
+    exit 2
+  }
 
   if ((Test-PageBlockers $snap) -eq "expired") {
     Append-ResultObject @{ ts = $ts; name = $Name; conversationId = $Cid; ok = $false; stage = "preflight"; reason = "position_expired" }
@@ -510,6 +546,7 @@ function Process-One([string]$Cid, [string]$Name, [string]$Preview) {
   Write-JsonFile $infoFile '{"maxMessages":100}'
   Write-Log "zhipin_get_candidate_info (current chat, no re-open)"
   $infoOut = Invoke-RollJsonFile "zhipin_get_candidate_info" $infoFile
+  Stop-IfRiskPage -Out $infoOut -Stage "get_candidate_info" -Name $Name -Cid $Cid
   $infoRaw = Extract-RollJson $infoOut
   if (-not $infoRaw) { $infoRaw = "{}" }
   $infoRawPath = Join-Path $script:WorkDir "info-raw.json"
@@ -533,7 +570,8 @@ function Process-One([string]$Cid, [string]$Name, [string]$Preview) {
   }
   $skipObj = $skipResult | ConvertFrom-Json
   if ($skipObj.stop) {
-    Append-ResultObject @{ ts = $ts; name = $Name; conversationId = $Cid; ok = $false; stage = "preflight"; reason = "captcha" }
+    $stopReason = if ($skipObj.reason) { [string]$skipObj.reason } else { "captcha" }
+    Append-ResultObject @{ ts = $ts; name = $Name; conversationId = $Cid; ok = $false; stage = "preflight"; reason = $stopReason }
     exit 2
   }
   if ($skipObj.skip) {
@@ -554,6 +592,7 @@ function Process-One([string]$Cid, [string]$Name, [string]$Preview) {
   Write-JsonFile $gpFile '{"maxMessages":100}'
   Write-Log "zhipin_generate_reply_preview (current chat, no re-open)"
   $previewOut = Invoke-RollJsonFile "zhipin_generate_reply_preview" $gpFile
+  Stop-IfRiskPage -Out $previewOut -Stage "preview" -Name $Name -Cid $Cid
   $previewMetaRaw = (Invoke-NodeStdin $script:ParseGeneratePreview $previewOut @()).Trim()
   if (-not $previewMetaRaw -or -not $previewMetaRaw.StartsWith("{")) {
     Append-ResultObject @{ ts = $ts; name = $Name; conversationId = $Cid; ok = $false; stage = "preview" }
@@ -603,6 +642,7 @@ function Process-One([string]$Cid, [string]$Name, [string]$Preview) {
   }
 
   $sendOut = Invoke-RollJsonFile "zhipin_send_prepared_reply" $spFile
+  Stop-IfRiskPage -Out $sendOut -Stage "send" -Name $Name -Cid $Cid
   $sendResultRaw = (Invoke-NodeStdin $script:ParseSendResult $sendOut).Trim()
   if (-not $sendResultRaw -or -not $sendResultRaw.StartsWith("{")) {
     $sendResultRaw = '{"ok":false}'
@@ -626,7 +666,9 @@ function Process-One([string]$Cid, [string]$Name, [string]$Preview) {
     $wxFile = Join-Path $script:WorkDir "wx.json"
     Write-JsonFile $wxFile "{}"
     Write-Log "zhipin_exchange_wechat (current chat)"
-    [void](Extract-RollJson (Invoke-RollJsonFile "zhipin_exchange_wechat" $wxFile))
+    $wxOut = Invoke-RollJsonFile "zhipin_exchange_wechat" $wxFile
+    Stop-IfRiskPage -Out $wxOut -Stage "exchange_wechat" -Name $Name -Cid $Cid
+    [void](Extract-RollJson $wxOut)
   }
 
   $successLine = Format-SendResultLine "sent" $ts $Name $Cid $preparedId $sendResultRaw $(if ($script:ExchangeWechat) { 1 } else { 0 })
@@ -691,7 +733,8 @@ $helpers = @(
   $ParseGeneratePreview, $FormatPreviewFailure, $BuildSendPayload, $ApplySendBundle, $ComposeResultInput,
   $FormatCandidateResult,
   $ParseSendResult,
-  $ValidateSend, $CheckAgentHealth, $ValidateBrowserSelection, $DetectExpiredBanner, $ParsePageMeta
+  $ValidateSend, $CheckAgentHealth, $ValidateBrowserSelection, $DetectExpiredBanner, $ParsePageMeta,
+  $DetectAccessStop
 )
 foreach ($helper in $helpers) {
   if (-not (Test-Path $helper)) {

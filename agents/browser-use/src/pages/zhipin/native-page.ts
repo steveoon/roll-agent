@@ -27,6 +27,7 @@ import {
   type OpenChatResult,
 } from "./chat-navigation.ts";
 import { getZhipinListSurfaceConfig, type ZhipinListSurface } from "./list-surfaces.ts";
+import { assertZhipinPageNotRestricted } from "./risk-page.ts";
 import type {
   ZhipinRecommendFilterApplied,
   ZhipinRecommendFilterLocationSelection,
@@ -531,6 +532,7 @@ type NativeClickOptions = {
 
 type NativePageResolutionOptions = {
   readonly requireChatPage?: boolean;
+  readonly skipRiskGate?: boolean;
 };
 
 function delay(ms: number): Promise<void> {
@@ -844,7 +846,11 @@ function toResumeOffset(value: unknown): { readonly x: number; readonly y: numbe
 function toResumeSize(
   value: unknown,
 ): { readonly width: number; readonly height: number } | undefined {
-  if (!isRecord(value) || typeof value["width"] !== "number" || typeof value["height"] !== "number") {
+  if (
+    !isRecord(value) ||
+    typeof value["width"] !== "number" ||
+    typeof value["height"] !== "number"
+  ) {
     return undefined;
   }
   return { width: value["width"], height: value["height"] };
@@ -899,7 +905,9 @@ function toNativeResumeStitchedCapture(
   const exported = isRecord(exportValue) ? exportValue : {};
   const rawSize = exported["canvasSize"];
   const canvasSize =
-    isRecord(rawSize) && typeof rawSize["width"] === "number" && typeof rawSize["height"] === "number"
+    isRecord(rawSize) &&
+    typeof rawSize["width"] === "number" &&
+    typeof rawSize["height"] === "number"
       ? { width: rawSize["width"], height: rawSize["height"] }
       : { width: Math.round(canvasRect.width), height: Math.round(canvasRect.height) };
 
@@ -1130,6 +1138,21 @@ function resolveSelectedNativePage(
   throw new Error("No BOSS page found.");
 }
 
+function pickRiskGateCandidate(
+  ctxManager: BrowserContextManager,
+  pages: ReadonlyArray<BrowserInspectablePage>,
+): BrowserInspectablePage | undefined {
+  const zhipinPages = pages.filter((page) => matchesPlatformHost(page.url, "zhipin"));
+  const selected = zhipinPages.find((page) => ctxManager.isNativePageSelected(page.targetId));
+  if (selected) {
+    return selected;
+  }
+  if (zhipinPages.length === 1) {
+    return zhipinPages[0];
+  }
+  return undefined;
+}
+
 export async function openZhipinNativePagePort(
   options: NativePageResolutionOptions = {},
   deps: {
@@ -1139,9 +1162,25 @@ export async function openZhipinNativePagePort(
 ): Promise<ZhipinNativePagePort> {
   const ctxManager = deps.ctxManager ?? getContextManager();
   const runtime = deps.runtime ?? getRuntime();
-  const target = resolveSelectedNativePage(ctxManager, await ctxManager.listNativePages(), options);
+  const pages = await ctxManager.listNativePages();
+  if (options.skipRiskGate !== true) {
+    const candidate = pickRiskGateCandidate(ctxManager, pages);
+    if (candidate) {
+      assertZhipinPageNotRestricted(candidate);
+    }
+  }
+  const target = resolveSelectedNativePage(ctxManager, pages, options);
   const controller = await runtime.connectNativePage(target);
-  return new ZhipinNativePagePort({ target, controller });
+  const port = new ZhipinNativePagePort({ target, controller });
+  if (options.skipRiskGate !== true) {
+    try {
+      await port.assertNotRestricted();
+    } catch (error) {
+      port.close();
+      throw error;
+    }
+  }
+  return port;
 }
 
 export class ZhipinNativePagePort {
@@ -1167,6 +1206,17 @@ export class ZhipinNativePagePort {
       url: await this.url().catch(() => this.target.url),
       title: await this.title().catch(() => this.target.title),
     };
+  }
+
+  async assertNotRestricted(): Promise<void> {
+    let url: string;
+    try {
+      url = await this.url();
+    } catch {
+      throw new Error("无法读取当前页面地址，已中止后续操作（页面可能已跳转或失效）");
+    }
+    const title = await this.title().catch(() => "");
+    assertZhipinPageNotRestricted({ url, title });
   }
 
   async url(): Promise<string> {

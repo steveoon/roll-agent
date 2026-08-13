@@ -42,13 +42,15 @@
 
 跳过记录写入 JSONL：`ok:false`, `reason:<skip_reason>`。
 
-## 人机验证 — 立即停止
+## 人机验证 / 风控页 — 立即停止
 
-- URL 含 `/web/passport/zp/verify.html`
+- URL 含 `/web/passport/zp/verify.html` 或其他验证/安全检查页
 - 页面标题含 `安全验证`
+- URL 为 BOSS 403 页（如 `/web/passport/zp/403.html?code=31`）或标题含 `访问受限`
+- 任一 `zhipin_*` / snapshot 返回 `zhipin_access_restricted`（含列表轮询、`open_chat` 失败恢复；**不要** force reload）
 - 连续空读列表（脚本默认 2 次）
 
-停止后通知用户手动验证，**不要**立即重试。
+停止后通知用户手动验证或等待页面标明的解封时间，**不要**刷新、**不要**换 tool 重试。
 
 ## 相关 tools
 

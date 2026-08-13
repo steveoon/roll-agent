@@ -17,7 +17,11 @@ function run(input) {
 
 assert.equal(run({ preview: "我加您了", candidateInfo: {}, chatMessages: [] }).skip, true);
 assert.equal(
-  run({ preview: "hello", candidateInfo: { age: "20岁", experience: "工作26年" }, chatMessages: [] }).reason,
+  run({
+    preview: "hello",
+    candidateInfo: { age: "20岁", experience: "工作26年" },
+    chatMessages: [],
+  }).reason,
   "student_age_experience_year",
 );
 assert.equal(
@@ -28,6 +32,15 @@ assert.equal(
     chatMessages: [],
   }).stop,
   true,
+);
+assert.deepEqual(
+  run({
+    preview: "ok",
+    pageUrl: "https://www.zhipin.com/web/passport/zp/403.html?code=31",
+    candidateInfo: {},
+    chatMessages: [],
+  }),
+  { skip: false, stop: true, reason: "access_restricted" },
 );
 assert.equal(run({ preview: "ok", candidateInfo: {}, chatMessages: [] }).skip, false);
 

@@ -24,6 +24,7 @@ import type {
   NativeCandidateChatDetails,
   ZhipinNativePagePort,
 } from "../pages/zhipin/native-page.ts";
+import { rethrowStructuredToolError } from "../pages/zhipin/risk-page.ts";
 import { pickBestUsername } from "../pages/zhipin/username.ts";
 import {
   PreparedReplyFallbackReasons,
@@ -903,6 +904,7 @@ export const zhipinGenerateReplyPreview = defineTool({
 
       return toOutput(preparedRecord, timingSummary, gateRewritten);
     } catch (error) {
+      rethrowStructuredToolError(error);
       const failure = classifyReplyPreviewError(error);
       const diagnostics = buildFailureDiagnostics(diagnosticsState, error);
       await preview?.fail(failure.message);

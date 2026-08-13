@@ -55,6 +55,106 @@ const captcha = runHelper(
   JSON.stringify({ page: { url: "https://x/verify.html", title: "安全验证" } }),
 );
 assert.equal(JSON.parse(captcha.stdout).captcha, true);
+assert.equal(JSON.parse(captcha.stdout).blocked, true);
+
+const blocked = runHelper(
+  "parse-page-meta.mjs",
+  JSON.stringify({
+    page: { url: "https://www.zhipin.com/web/passport/zp/403.html?code=31", title: "访问受限" },
+  }),
+);
+assert.equal(JSON.parse(blocked.stdout).captcha, false);
+assert.equal(JSON.parse(blocked.stdout).blocked, true);
+
+const antiSpider = runHelper(
+  "parse-page-meta.mjs",
+  JSON.stringify({
+    page: { url: "https://www.zhipin.com/web/user/?ka=header-login&code=38", title: "BOSS直聘" },
+  }),
+);
+assert.equal(JSON.parse(antiSpider.stdout).blocked, true);
+
+const normalLogin = runHelper(
+  "parse-page-meta.mjs",
+  JSON.stringify({
+    page: { url: "https://www.zhipin.com/web/user/?ka=header-login", title: "BOSS直聘-登录" },
+  }),
+);
+assert.equal(JSON.parse(normalLogin.stdout).blocked, false);
+
+const userInfoNoFalsePositive = runHelper(
+  "parse-page-meta.mjs",
+  JSON.stringify({
+    page: { url: "https://www.zhipin.com/web/userinfo?code=38", title: "BOSS直聘" },
+  }),
+);
+assert.equal(JSON.parse(userInfoNoFalsePositive.stdout).blocked, false);
+
+const antiSpiderStop = runHelper(
+  "detect-access-stop.mjs",
+  JSON.stringify({
+    ok: true,
+    result: {
+      page: { url: "https://www.zhipin.com/web/user/?ka=header-login&code=38", title: "BOSS直聘" },
+    },
+  }),
+);
+assert.deepEqual(JSON.parse(antiSpiderStop.stdout), { stop: true, reason: "access_restricted" });
+
+const restrictedEnvelope = runHelper(
+  "detect-access-stop.mjs",
+  JSON.stringify({
+    ok: false,
+    error: "tool 返回 isError=true",
+    result: {
+      code: "zhipin_access_restricted",
+      message: "BOSS 风控页已出现（ip_block）。",
+      details: {
+        kind: "ip_block",
+        url: "https://www.zhipin.com/web/passport/zp/403.html?code=31",
+        title: "访问受限",
+      },
+    },
+  }),
+);
+assert.deepEqual(JSON.parse(restrictedEnvelope.stdout), {
+  stop: true,
+  reason: "access_restricted",
+});
+
+const verifyKind = runHelper(
+  "detect-access-stop.mjs",
+  JSON.stringify({
+    isError: true,
+    content: [
+      {
+        type: "text",
+        text: JSON.stringify({
+          code: "zhipin_access_restricted",
+          details: { kind: "verify" },
+        }),
+      },
+    ],
+  }),
+);
+assert.deepEqual(JSON.parse(verifyKind.stdout), { stop: true, reason: "captcha" });
+
+const pageStop = runHelper(
+  "detect-access-stop.mjs",
+  JSON.stringify({
+    page: { url: "https://www.zhipin.com/web/passport/zp/403.html?code=31", title: "访问受限" },
+  }),
+);
+assert.deepEqual(JSON.parse(pageStop.stdout), { stop: true, reason: "access_restricted" });
+
+const chatOk = runHelper(
+  "detect-access-stop.mjs",
+  JSON.stringify({
+    ok: true,
+    result: { page: { url: "https://www.zhipin.com/web/chat/index", title: "BOSS直聘" } },
+  }),
+);
+assert.deepEqual(JSON.parse(chatOk.stdout), { stop: false });
 
 const multiInstanceNoSelection = runHelper(
   "validate-browser-selection.mjs",

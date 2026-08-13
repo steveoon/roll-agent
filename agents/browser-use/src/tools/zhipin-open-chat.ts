@@ -3,6 +3,7 @@ import { z } from "zod";
 import { NativeVisualActivitySession } from "../native-visual-activity-session.ts";
 import { openZhipinNativePagePort } from "../pages/zhipin/native-page.ts";
 import type { ZhipinNativePagePort } from "../pages/zhipin/native-page.ts";
+import { rethrowStructuredToolError } from "../pages/zhipin/risk-page.ts";
 
 const OutputSchema = z.object({
   success: z.boolean(),
@@ -116,6 +117,7 @@ export const zhipinOpenChat = defineTool({
         messagePreview: result.messagePreview,
       };
     } catch (error) {
+      rethrowStructuredToolError(error);
       await session?.fail("打开聊天失败");
       ctx.logger.warn(
         `Native zhipin open chat failed: ${error instanceof Error ? error.message : String(error)}`,
