@@ -1,6 +1,6 @@
 import { mkdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, isAbsolute, join } from "node:path";
 import { defineTool } from "@roll-agent/sdk";
 import { z } from "zod";
 import { NativeVisualActivitySession } from "../native-visual-activity-session.ts";
@@ -59,6 +59,7 @@ export const zhipinCaptureResume = defineTool({
     outputPath: z
       .string()
       .min(1)
+      .refine((value) => isAbsolute(value), { message: "outputPath 必须是绝对路径" })
       .optional()
       .describe("PNG 输出文件的绝对路径；缺省时写入系统临时目录"),
   }),

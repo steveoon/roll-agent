@@ -124,4 +124,51 @@ describe("relocateToolImagesToUserMessages", () => {
       true,
     );
   });
+
+  it("keeps user messages whose text collides with the relocation prefix", () => {
+    const collidingUserMessage: ModelMessage = {
+      role: "user",
+      content: [
+        { type: "text", text: "以下图像来自工具 别人发我的，帮我看看" },
+        { type: "file", data: "Y29sbGlkZQ==", mediaType: "image/png" },
+      ],
+    } as unknown as ModelMessage;
+
+    const result = relocateToolImagesToUserMessages([
+      collidingUserMessage,
+      toolMessageWithImage(),
+      toolMessageWithImage(),
+      toolMessageWithImage(),
+    ]);
+
+    const first = result[0];
+    assert.ok(first !== undefined);
+    const parts = first.content as unknown as Array<Record<string, unknown>>;
+    assert.equal(
+      parts.some((part) => part["type"] === "file" && part["data"] === "Y29sbGlkZQ=="),
+      true,
+    );
+  });
+
+  it("counts marker-tagged messages from a previous step toward stale trimming", () => {
+    const previousStep = relocateToolImagesToUserMessages([toolMessageWithImage()]);
+    const nextStepInput = [...previousStep, toolMessageWithImage(), toolMessageWithImage()];
+
+    const result = relocateToolImagesToUserMessages(nextStepInput);
+
+    const oldest = result.find(
+      (message) => message.role === "user" && Array.isArray(message.content),
+    );
+    assert.ok(oldest !== undefined);
+    const oldestParts = oldest.content as unknown as Array<Record<string, unknown>>;
+    assert.equal(
+      oldestParts.some((part) => part["type"] === "file"),
+      false,
+    );
+    assert.ok(
+      oldestParts.some(
+        (part) => part["type"] === "text" && part["text"] === "[历史工具图像已省略]",
+      ),
+    );
+  });
 });

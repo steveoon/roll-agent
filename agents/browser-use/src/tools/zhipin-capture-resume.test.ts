@@ -182,4 +182,15 @@ describe("zhipin_capture_resume visual feedback", () => {
     assert.equal(result.error, "简历读取失败，请重试");
     assert.ok(events.includes("visual-fail"));
   });
+
+  it("rejects relative outputPath at the input schema", () => {
+    const relative = zhipinCaptureResume.input.safeParse({ outputPath: "captures/resume.png" });
+    assert.equal(relative.success, false);
+
+    const absolute = zhipinCaptureResume.input.safeParse({ outputPath: "/tmp/resume.png" });
+    assert.equal(absolute.success, true);
+
+    const omitted = zhipinCaptureResume.input.safeParse({});
+    assert.equal(omitted.success, true);
+  });
 });

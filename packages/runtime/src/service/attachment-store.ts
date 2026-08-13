@@ -202,7 +202,7 @@ export class AttachmentStore {
       return {
         ok: false,
         code: RUNTIME_ERROR_CODES.attachmentQuotaExceeded,
-        message: `暂存的附件数已达上限 ${String(this.maxStagedAttachments)}，请先在 turn.start 中引用或 release 释放`,
+        message: `附件数已达上限 ${String(this.maxStagedAttachments)}：附件被 turn.start 引用后不会自动释放，请调用 attachment.release 释放不再需要的附件，或等待 TTL 回收`,
         retryable: true,
       };
     }
@@ -227,7 +227,12 @@ export class AttachmentStore {
       this.records.set(attachmentId, record);
       return { ok: true, attachmentId, state: "staged" };
     }
-    const loaded = this.loadLocalFile(input.sourcePath ?? "", input.bytes, input.sha256);
+    const loaded = this.loadLocalFile(
+      input.sourcePath ?? "",
+      input.mediaType,
+      input.bytes,
+      input.sha256,
+    );
     if (!loaded.ok) {
       return loaded;
     }
@@ -403,6 +408,7 @@ export class AttachmentStore {
 
   private loadLocalFile(
     sourcePath: string,
+    mediaType: string,
     declaredBytes: number,
     declaredSha256: string,
   ): { readonly ok: true; readonly data: Buffer } | AttachmentStoreFailure {
@@ -411,6 +417,13 @@ export class AttachmentStore {
         ok: false,
         code: RUNTIME_ERROR_CODES.attachmentPathRejected,
         message: "sourcePath 必须是绝对路径",
+      };
+    }
+    if (!extensionMatchesMediaType(sourcePath, mediaType)) {
+      return {
+        ok: false,
+        code: RUNTIME_ERROR_CODES.attachmentTypeUnsupported,
+        message: `sourcePath 扩展名与 mediaType "${mediaType}" 不一致`,
       };
     }
     let stats: ReturnType<typeof lstatSync>;

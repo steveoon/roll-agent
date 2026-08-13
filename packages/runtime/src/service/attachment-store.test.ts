@@ -158,6 +158,24 @@ test("类型白名单与扩展名一致性", () => {
   });
 });
 
+test("local-path 拒绝 fileName 合法但 sourcePath 扩展名与 mediaType 不一致的文件", () => {
+  withStore(({ store, workDir }) => {
+    const data = Buffer.from("secret-material");
+    const sourcePath = writeSource(workDir, "id_ed25519.pem", data);
+    const disguised = store.stage({
+      threadId: THREAD_A,
+      fileName: "note.txt",
+      mediaType: "text/plain",
+      bytes: data.length,
+      sha256: sha256(data),
+      source: "local-path",
+      sourcePath,
+    });
+    assert.ok(!disguised.ok && disguised.code === "ATTACHMENT_TYPE_UNSUPPORTED");
+    assert.match(disguised.message, /sourcePath 扩展名/u);
+  });
+});
+
 test("chunks 生命周期：顺序上传、commit 校验、hash 不匹配即回收", () => {
   withStore(({ store }) => {
     const part1 = Buffer.from("hello ");
@@ -423,6 +441,8 @@ test("local-path committed 附件计入暂存配额", () => {
       assert.ok(first.ok && first.state === "committed");
       const second = store.stage(base);
       assert.ok(!second.ok && second.code === "ATTACHMENT_QUOTA_EXCEEDED");
+      assert.match(second.message, /attachment\.release/u);
+      assert.doesNotMatch(second.message, /在 turn\.start 中引用或/u);
 
       store.release({ threadId: THREAD_A, attachmentId: first.attachmentId });
       const third = store.stage(base);

@@ -4,6 +4,8 @@ const RELOCATED_IMAGE_MARKER = "[图像内容已随后作为用户消息提供]"
 const RELOCATED_IMAGE_PREFIX = "以下图像来自工具 ";
 const DROPPED_IMAGE_MARKER = "[历史工具图像已省略]";
 const MAX_RETAINED_IMAGE_MESSAGES = 2;
+const RELOCATED_PROVIDER_NAMESPACE = "rollRuntime";
+const RELOCATED_PROVIDER_KEY = "relocatedToolImages";
 
 type ToolImageFilePart = {
   readonly type: "file";
@@ -79,6 +81,7 @@ export function relocateToolImagesToUserMessages(
             mediaType: part.mediaType,
           })),
         ],
+        providerOptions: { [RELOCATED_PROVIDER_NAMESPACE]: { [RELOCATED_PROVIDER_KEY]: true } },
       });
     }
   }
@@ -86,16 +89,11 @@ export function relocateToolImagesToUserMessages(
 }
 
 function isRelocatedImageUserMessage(message: ModelMessage): boolean {
-  if (message.role !== "user" || !Array.isArray(message.content)) {
+  if (message.role !== "user") {
     return false;
   }
-  const first = (message.content as readonly unknown[])[0];
-  return (
-    isRecord(first) &&
-    first["type"] === "text" &&
-    typeof first["text"] === "string" &&
-    first["text"].startsWith(RELOCATED_IMAGE_PREFIX)
-  );
+  const namespace = message.providerOptions?.[RELOCATED_PROVIDER_NAMESPACE];
+  return isRecord(namespace) && namespace[RELOCATED_PROVIDER_KEY] === true;
 }
 
 function dropStaleRelocatedImages(messages: ModelMessage[]): ModelMessage[] {
