@@ -46,6 +46,10 @@ import {
 } from "../tool-bridge/agent-install-tool.ts";
 import { buildSkillToolset } from "../tool-bridge/skill-tool.ts";
 import {
+  buildFileToolset,
+  type SessionFileToolsSettings,
+} from "../tool-bridge/file-tools/index.ts";
+import {
   buildBashToolset,
   type BashToolContext,
   type SessionBashSettings,
@@ -233,6 +237,7 @@ export interface AgentSessionOptions {
     abortSignal: AbortSignal,
   ) => CapabilityExternalDynamicContext | Promise<CapabilityExternalDynamicContext>;
   readonly skillLibrary?: SkillLibrary;
+  readonly fileTools?: SessionFileToolsSettings;
   readonly bash?: SessionBashSettings;
   readonly bashClassifier?: CommandClassifier;
   readonly bashSession?: AgentSessionBashSession;
@@ -889,6 +894,17 @@ export class AgentSession {
     markToolRole(toolRoles, transcriptTools, CAPABILITY_TOOL_ROLES.transcriptRead);
     const skillTools = options.skillLibrary ? this.buildSkillTools(registry) : {};
     markToolRole(toolRoles, skillTools, CAPABILITY_TOOL_ROLES.skill);
+    const fileToolset = options.fileTools
+      ? buildFileToolset(options.fileTools, registry, {
+          ...(options.policy ? { policy: options.policy } : {}),
+          requestApproval: (request) => this.requestApproval(request),
+          coordinator: this.toolCoordinator,
+        })
+      : undefined;
+    if (fileToolset) {
+      markToolRole(toolRoles, fileToolset.readTools, CAPABILITY_TOOL_ROLES.fileRead);
+      markToolRole(toolRoles, fileToolset.editTools, CAPABILITY_TOOL_ROLES.fileEdit);
+    }
     const bashCtx: BashToolContext = {
       ...(options.policy ? { policy: options.policy } : {}),
       requestApproval: (request) => this.requestApproval(request),
@@ -963,6 +979,7 @@ export class AgentSession {
     this.tools = {
       ...transcriptTools,
       ...skillTools,
+      ...(fileToolset ? { ...fileToolset.readTools, ...fileToolset.editTools } : {}),
       ...bashTools,
       ...sessionExecTools,
       ...agentInstallTools,

@@ -4382,3 +4382,34 @@ test("send 对无效附件在开始回合前抛错", async () => {
     await session.close();
   }
 });
+
+test("AgentSession 注册文件工具并按 role 标记 capability", async () => {
+  const calls: LanguageModelV4CallOptions[] = [];
+  const model = new MockLanguageModelV4({
+    doStream: async (options) => {
+      calls.push(options);
+      return streamChunks(textStep("done"));
+    },
+  });
+  const session = new AgentSession({
+    id: "file-tools-capability",
+    model,
+    sources: [],
+    maxSteps: 2,
+    fileTools: { workdir: process.cwd() },
+  });
+  try {
+    const tools = session.getCapabilityManifest().tools;
+    assert.equal(
+      tools.find((tool) => tool.role === "file-read" && tool.id === "roll__read_file")?.id,
+      "roll__read_file",
+    );
+    assert.ok(tools.some((tool) => tool.role === "file-edit" && tool.id === "roll__edit_file"));
+    assert.ok(tools.some((tool) => tool.role === "file-edit" && tool.id === "roll__write_file"));
+    assert.ok(tools.some((tool) => tool.role === "file-read" && tool.id === "roll__list_dir"));
+    await collect(session.send("hi"));
+    assert.match(JSON.stringify(calls[0]?.tools), /roll__edit_file/u);
+  } finally {
+    await session.close();
+  }
+});
