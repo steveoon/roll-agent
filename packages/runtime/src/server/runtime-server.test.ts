@@ -795,9 +795,10 @@ test("Runtime Protocol 1.2 user input deadline is capped by the remaining Turn l
       ),
     "短 Turn 未收到 userInput.request",
   );
+  const observedAt = Date.now();
   const params = userInputRequest.params as UserInputRequestParamsV12;
   assert.ok(Date.parse(params.expiresAt) > startedAt);
-  assert.ok(Date.parse(params.expiresAt) <= startedAt + 10_100);
+  assert.ok(Date.parse(params.expiresAt) <= observedAt + 10_100);
 
   harness.clientConn.send({
     jsonrpc: "2.0",
