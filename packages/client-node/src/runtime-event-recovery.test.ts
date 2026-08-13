@@ -130,7 +130,7 @@ function ephemeralEvent(sequence: number): RuntimeEphemeralEventEnvelope {
   });
 }
 
-function snapshot(eventCursor: RuntimeEventCursor | null, protocolVersion: "1.3" | "1.2") {
+function snapshot(eventCursor: RuntimeEventCursor | null, protocolVersion: "1.4" | "1.3" | "1.2") {
   return {
     thread: {
       id: IDS.thread,
@@ -145,7 +145,7 @@ function snapshot(eventCursor: RuntimeEventCursor | null, protocolVersion: "1.3"
     pendingApprovals: [],
     transcriptCompleteness: "complete",
     pendingInteractions: [],
-    ...(protocolVersion === "1.3" ? { eventCursor, recoveryProjection: true as const } : {}),
+    ...(protocolVersion !== "1.2" ? { eventCursor, recoveryProjection: true as const } : {}),
   } as const;
 }
 
@@ -159,15 +159,15 @@ class RecoveryRuntime {
   readonly snapshotRequestParams: unknown[] = [];
   snapshotValue: unknown;
   onResume: ResumeHandler | undefined;
-  private readonly protocolVersion: "1.3" | "1.2";
+  private readonly protocolVersion: "1.4" | "1.3" | "1.2";
 
   constructor(
-    protocolVersion: "1.3" | "1.2" = "1.3",
+    protocolVersion: "1.4" | "1.3" | "1.2" = "1.3",
     transport: MemoryTransport = new MemoryTransport(),
   ) {
     this.protocolVersion = protocolVersion;
     this.transport = transport;
-    this.snapshotValue = snapshot(protocolVersion === "1.3" ? null : null, protocolVersion);
+    this.snapshotValue = snapshot(null, protocolVersion);
     const reader = createInterface({ input: this.transport.stdin });
     reader.on("line", (line) => this.handle(JSON.parse(line) as JsonRpcMessage));
   }
@@ -215,8 +215,16 @@ class RecoveryRuntime {
           limits: {
             maxFrameBytes: 4 * 1_024 * 1_024,
             maxPageSize: 500,
-            eventReplay: this.protocolVersion === "1.3",
+            eventReplay: this.protocolVersion !== "1.2",
             idempotencyCacheEntries: 10_000,
+            ...(this.protocolVersion === "1.4"
+              ? {
+                  maxAttachmentBytes: 16 * 1_024 * 1_024,
+                  maxAttachmentChunkBytes: 2 * 1_024 * 1_024,
+                  maxTurnAttachments: 8,
+                  maxStagedAttachments: 16,
+                }
+              : {}),
           },
         });
         return;
@@ -760,4 +768,25 @@ test("transport exit is terminal before a recovery onError re-enters shutdown", 
   runtime.transport.close();
   assert.equal(recoveryErrors, 1);
   assert.equal(exitNotifications, 1);
+});
+
+test("recovery resumes a 1.4 session with durable replay and an honest projection context", async (t) => {
+  const runtime = new RecoveryRuntime("1.4");
+  const client = await RollNodeClient.connect({ transport: runtime.transport });
+  t.after(() => client.shutdown());
+  const contexts: unknown[] = [];
+  const result = await client.createEventRecovery().resumeThread({
+    threadId: IDS.thread,
+    applySnapshot: (_snapshot, context) => {
+      contexts.push(context);
+    },
+    onDurableEvent: () => {},
+  });
+  assert.equal(result.mode, "snapshot-resumed");
+  assert.equal(result.protocolVersion, "1.4");
+  assert.ok(result.checkpoint !== null);
+  assert.deepEqual(contexts, [
+    { reason: "initial", protocolVersion: "1.4", recoveryProjection: true },
+  ]);
+  assert.equal(runtime.resumeRequests.length, 1);
 });
