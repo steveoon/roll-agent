@@ -28,6 +28,13 @@ export interface AgentOnboardingPromptInfo {
   readonly catalog: readonly AgentOnboardingCatalogEntry[];
 }
 
+export interface FileToolPromptIds {
+  readonly read: string;
+  readonly edit: string;
+  readonly write: string;
+  readonly listDir: string;
+}
+
 export interface BuildChatSystemPromptOptions {
   readonly skills?: readonly SkillPromptSummary[];
   readonly skillToolId?: string;
@@ -39,6 +46,7 @@ export interface BuildChatSystemPromptOptions {
   readonly agentCount?: number;
   readonly agentOnboarding?: AgentOnboardingPromptInfo;
   readonly userInputToolId?: string;
+  readonly fileToolIds?: FileToolPromptIds;
 }
 
 const MAX_SKILL_DESCRIPTION_CHARS = 240;
@@ -128,6 +136,18 @@ function buildAgentOnboardingSection(info: AgentOnboardingPromptInfo): string {
   ].join("\n");
 }
 
+function buildFileToolsSection(ids: FileToolPromptIds): string {
+  return [
+    "# 文件工具",
+    `- 读文件用 ${ids.read}：输出每行带行号前缀（如 "   12→"），行号前缀不是文件内容，复制内容时必须去掉前缀。`,
+    `- 修改文件前必须先用 ${ids.read} 读取；${ids.edit} 的 old_string 必须逐字复制读到的内容（不含行号前缀），包括缩进与标点。`,
+    `- old_string 必须能唯一定位目标；同一文件的多处修改放进同一次 ${ids.edit} 调用的 edits 数组，一次提交。`,
+    `- 新建文件或整文件重写用 ${ids.write}；浏览目录用 ${ids.listDir}。`,
+    `- ${ids.edit} 与 ${ids.write} 成功的返回已附带修改点最新内容，无需再次读取确认。`,
+    "- 读取和修改文件优先用文件工具，不要用 shell 的 cat/sed/echo 重定向操作文件。",
+  ].join("\n");
+}
+
 function buildShellSection(
   shellToolId: string,
   sessionExec: SessionExecToolIds | undefined,
@@ -183,6 +203,9 @@ export function buildChatSystemPrompt(options: BuildChatSystemPromptOptions = {}
   if (skills.length > 0 && options.skillToolId !== undefined) {
     sections.push(buildSkillsSection(skills, options.skillToolId));
   }
+  if (options.fileToolIds) {
+    sections.push(buildFileToolsSection(options.fileToolIds));
+  }
   if (shellToolId !== undefined) {
     sections.push(
       buildShellSection(
@@ -209,6 +232,22 @@ export function buildChatSystemPromptFromManifest(manifest: EffectiveCapabilityM
   const installToolId = findCapabilityToolId(manifest, CAPABILITY_TOOL_ROLES.agentInstall);
   const transcriptToolId = findCapabilityToolId(manifest, CAPABILITY_TOOL_ROLES.transcriptRead);
   const userInputToolId = findCapabilityToolId(manifest, CAPABILITY_TOOL_ROLES.userInput);
+  const fileRead = manifest.tools.find(
+    (tool) => tool.role === CAPABILITY_TOOL_ROLES.fileRead && tool.id.endsWith("read_file"),
+  );
+  const fileEdit = manifest.tools.find(
+    (tool) => tool.role === CAPABILITY_TOOL_ROLES.fileEdit && tool.id.endsWith("edit_file"),
+  );
+  const fileWrite = manifest.tools.find(
+    (tool) => tool.role === CAPABILITY_TOOL_ROLES.fileEdit && tool.id.endsWith("write_file"),
+  );
+  const fileList = manifest.tools.find(
+    (tool) => tool.role === CAPABILITY_TOOL_ROLES.fileRead && tool.id.endsWith("list_dir"),
+  );
+  const fileToolIds =
+    fileRead && fileEdit && fileWrite && fileList
+      ? { read: fileRead.id, edit: fileEdit.id, write: fileWrite.id, listDir: fileList.id }
+      : undefined;
   const prompt = buildChatSystemPrompt({
     ...(skillToolId ? { skills: manifest.skills, skillToolId } : {}),
     ...(shellToolId
@@ -229,6 +268,7 @@ export function buildChatSystemPromptFromManifest(manifest: EffectiveCapabilityM
       : {}),
     agentCount: manifest.agentCount,
     ...(userInputToolId ? { userInputToolId } : {}),
+    ...(fileToolIds ? { fileToolIds } : {}),
     ...(installToolId && manifest.agentOnboardingCatalog.length > 0
       ? {
           agentOnboarding: {

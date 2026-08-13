@@ -289,3 +289,24 @@ test("manifest prompt only advertises finalized tool ids and keeps dynamic conte
   assert.equal(buildChatSystemPromptFromManifest(manifest), prompt);
   assert.doesNotMatch(prompt, /feature\/checkpoint|42:running|2026-07-17/u);
 });
+
+test("提供 fileToolIds 时注入文件工具纪律", () => {
+  const prompt = buildChatSystemPrompt({
+    fileToolIds: {
+      read: "roll__read_file",
+      edit: "roll__edit_file",
+      write: "roll__write_file",
+      listDir: "roll__list_dir",
+    },
+  });
+  assert.match(prompt, /# 文件工具/u);
+  assert.match(prompt, /行号前缀不是文件内容/u);
+  assert.match(prompt, /先用 roll__read_file/u);
+  assert.match(prompt, /edits 数组/u);
+  assert.match(prompt, /无需再次读取确认/u);
+});
+
+test("未提供 fileToolIds 时不出现文件工具章节", () => {
+  const prompt = buildChatSystemPrompt({});
+  assert.doesNotMatch(prompt, /# 文件工具/u);
+});
