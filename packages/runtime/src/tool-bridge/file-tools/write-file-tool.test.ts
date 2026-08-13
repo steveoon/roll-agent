@@ -76,3 +76,20 @@ test("写入目标是目录时拒绝", () => {
   assert.equal(result.outcome.kind, TOOL_OUTCOME_KINDS.invalidInput);
   assert.ok(existsSync(workdir));
 });
+
+test("覆盖带 BOM 的已存在文件后新文件不带 BOM", () => {
+  const workdir = mkdtempSync(join(tmpdir(), "write-tool-test-"));
+  const path = join(workdir, "exists.txt");
+  writeFileSync(path, "﻿旧内容", "utf8");
+  const settings = resolveFileToolsSettings({ workdir });
+  const tracker = new FileStateTracker();
+  tracker.recordKnownContent(canonicalFileKey(path), "旧内容");
+  const result = executeWriteFile(settings, tracker, {
+    file_path: "exists.txt",
+    content: "新内容",
+  });
+  assert.equal(result.outcome.kind, TOOL_OUTCOME_KINDS.success);
+  const firstThreeBytes = readFileSync(path).subarray(0, 3);
+  assert.equal(firstThreeBytes.equals(Buffer.from([0xef, 0xbb, 0xbf])), false);
+  assert.equal(readFileSync(path, "utf8"), "新内容");
+});

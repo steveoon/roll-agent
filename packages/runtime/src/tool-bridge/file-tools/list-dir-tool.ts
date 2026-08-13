@@ -63,7 +63,9 @@ export function executeListDir(
   });
   const shown = sorted.slice(0, MAX_ENTRIES);
   const lines = shown.map((entry) =>
-    entry.isDirectory() ? `${entry.name}/` : `${entry.name}${fileSizeSuffix(resolve(path, entry.name))}`,
+    entry.isDirectory()
+      ? `${entry.name}/`
+      : `${entry.name}${fileSizeSuffix(resolve(path, entry.name))}`,
   );
   const parts = [`目录: ${path}`, lines.join("\n")];
   if (sorted.length > shown.length) {
@@ -84,9 +86,18 @@ export function buildListDirTool(
     prepare: async (rawInput) => {
       const parsed = listDirInputSchema.safeParse(rawInput);
       if (!parsed.success) {
-        return failedToolResult(TOOL_OUTCOME_KINDS.invalidInput, "参数校验失败: path 须为非空字符串");
+        return failedToolResult(
+          TOOL_OUTCOME_KINDS.invalidInput,
+          "参数校验失败: path 须为非空字符串",
+        );
       }
-      return gateToolCall(ctx, FILE_TOOLS_AGENT_NAME, LIST_DIR_TOOL_NAME, parsed.data, LIST_ANNOTATIONS);
+      return gateToolCall(
+        ctx,
+        FILE_TOOLS_AGENT_NAME,
+        LIST_DIR_TOOL_NAME,
+        parsed.data,
+        LIST_ANNOTATIONS,
+      );
     },
     resources: (rawInput) => {
       const parsed = listDirInputSchema.safeParse(rawInput);
@@ -103,8 +114,14 @@ export function buildListDirTool(
       inputSchema: listDirInputSchema,
       toModelOutput: ({ output }) => toolResultToModelOutput(output),
       execute: (input: ListDirInput, options): Promise<NormalizedToolResult> =>
-        executeCoordinatedTool(ctx.coordinator, plan, id, options.toolCallId, input, options.abortSignal, () =>
-          Promise.resolve(executeListDir(settings, input)),
+        executeCoordinatedTool(
+          ctx.coordinator,
+          plan,
+          id,
+          options.toolCallId,
+          input,
+          options.abortSignal,
+          () => Promise.resolve(executeListDir(settings, input)),
         ),
     }),
   };
