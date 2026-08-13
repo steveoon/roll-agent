@@ -1,5 +1,14 @@
 # @roll-agent/core
 
+## 0.30.1
+
+### Patch Changes
+
+- Updated dependencies [[`6841eb5`](https://github.com/steveoon/roll-agent/commit/6841eb5b30694b36cb97863507aa9e0f61f00366), [`547f370`](https://github.com/steveoon/roll-agent/commit/547f3709d8d269c92a6d55258434ca912b13f7cc)]:
+  - @roll-agent/runtime@0.15.1
+  - @roll-agent/client-node@0.5.0
+  - @roll-agent/companion@0.4.2
+
 ## 0.30.0
 
 ### Minor Changes

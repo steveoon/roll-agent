@@ -1,5 +1,14 @@
 # @roll-agent/runtime
 
+## 0.15.1
+
+### Patch Changes
+
+- [#213](https://github.com/steveoon/roll-agent/pull/213) [`6841eb5`](https://github.com/steveoon/roll-agent/commit/6841eb5b30694b36cb97863507aa9e0f61f00366) Thanks [@steveoon](https://github.com/steveoon)! - 附件栈发布后 review 修复：
+  - `ATTACHMENT_QUOTA_EXCEEDED` 错误文案如实反映配额契约——附件被 `turn.start` 引用后不会自动释放，恢复路径是 `attachment.release` 或等待 TTL 回收（原文案声称引用可腾出槽位，与实现不符）
+  - local-path stage 现在同时校验 `sourcePath` 的扩展名与申报 `mediaType` 一致，拒绝用合法 `fileName` 包装任意扩展名的本地文件
+  - 工具图像搬迁消息改用 `providerOptions.rollRuntime.relocatedToolImages` 显式标记识别，替代「以下图像来自工具 」文本前缀启发式；以该前缀开头且携带图片的用户消息不再被 stale 修剪误伤
+
 ## 0.15.0
 
 ### Minor Changes
