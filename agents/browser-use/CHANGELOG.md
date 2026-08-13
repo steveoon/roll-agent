@@ -1,5 +1,13 @@
 # @roll-agent/browser-use-agent
 
+## 0.25.1
+
+### Patch Changes
+
+- [#215](https://github.com/steveoon/roll-agent/pull/215) [`87dcfb6`](https://github.com/steveoon/roll-agent/commit/87dcfb66ffa2ee594a4bbec6f8e6873f11ae3b87) Thanks [@steveoon](https://github.com/steveoon)! - 命中 BOSS 403/验证码/安全检查页时，常规 `zhipin_*` 抛 `zhipin_access_restricted` 并硬停止，避免被 catch 成「请重试」后继续打接口
+
+- [#213](https://github.com/steveoon/roll-agent/pull/213) [`6841eb5`](https://github.com/steveoon/roll-agent/commit/6841eb5b30694b36cb97863507aa9e0f61f00366) Thanks [@steveoon](https://github.com/steveoon)! - `zhipin_capture_resume` 的 `outputPath` 在 input schema 层强制绝对路径，与工具描述对齐；相对路径不再相对进程 cwd 写盘
+
 ## 0.25.0
 
 ### Minor Changes

@@ -1,5 +1,12 @@
 # @roll-agent/companion
 
+## 0.4.2
+
+### Patch Changes
+
+- Updated dependencies [[`547f370`](https://github.com/steveoon/roll-agent/commit/547f3709d8d269c92a6d55258434ca912b13f7cc)]:
+  - @roll-agent/client-node@0.5.0
+
 ## 0.4.1
 
 ### Patch Changes
