@@ -80,7 +80,7 @@ test("写入目标是目录时拒绝", () => {
 test("覆盖带 BOM 的已存在文件后新文件不带 BOM", () => {
   const workdir = mkdtempSync(join(tmpdir(), "write-tool-test-"));
   const path = join(workdir, "exists.txt");
-  writeFileSync(path, "﻿旧内容", "utf8");
+  writeFileSync(path, "\uFEFF旧内容", "utf8");
   const settings = resolveFileToolsSettings({ workdir });
   const tracker = new FileStateTracker();
   tracker.recordKnownContent(canonicalFileKey(path), "旧内容");
