@@ -1,5 +1,26 @@
 # @roll-agent/core
 
+## 0.30.0
+
+### Minor Changes
+
+- [#211](https://github.com/steveoon/roll-agent/pull/211) [`b048f0e`](https://github.com/steveoon/roll-agent/commit/b048f0ec02fcd38722ba88aa9c08c2e87e696e9e) Thanks [@steveoon](https://github.com/steveoon)! - `roll chat --server` 注入 `AttachmentStore`（`<threadsDir>/attachments`），启用 Runtime Protocol 1.4 attachments 能力——GUI 客户端协商 1.4 后即可 stage 附件并在 `turn.start` 中引用
+
+- [#211](https://github.com/steveoon/roll-agent/pull/211) [`540f530`](https://github.com/steveoon/roll-agent/commit/540f530cff10975736c4a66669fad59b6020b4cb) Thanks [@steveoon](https://github.com/steveoon)! - `roll chat` Ink TUI 支持拖拽/粘贴图片文件与 Ctrl+V 剪贴板图像作为消息附件
+  - 拖拽文件进终端或粘贴图片路径（裸路径、shell 转义空格、引号包裹、`file://` URL、`~` 前缀、多文件混合）自动识别为附件，不再以路径文本插入输入框
+  - Ctrl+V 读取 macOS 剪贴板：Finder 复制的图片文件（`«class furl»`，经 `clipboard info` 精确判定避免纯文本被 furl coercion 误吞）与位图数据（`«class PNGf»`，截图场景）均可入附件；读取期间 chip 行显示「读取剪贴板…」，无图/超限/失败以 notice 提示，非 macOS 平台提示暂不支持
+  - 输入框上方渲染附件 chip 行（`📎 文件名 大小`），空输入时退格移除最后一个附件
+  - 支持 png/jpg/jpeg/gif/webp，单文件 8MB 上限；文件不存在或含非图像 token 时按普通文本粘贴放行，读取失败以 notice 提示
+  - 发送走 `AgentSession.send({ text, attachments })`，支持纯图无文本消息；用户历史项与 `/resume` 水合均显示 `📎` 附件标注
+
+### Patch Changes
+
+- Updated dependencies [[`8549330`](https://github.com/steveoon/roll-agent/commit/85493304ac978f99889029f725e8f35ddf6a3301), [`5218a94`](https://github.com/steveoon/roll-agent/commit/5218a94269afc3a94fdbf341a7533c9fcd86c652), [`38bb3c6`](https://github.com/steveoon/roll-agent/commit/38bb3c66dcd9090cf929b1eb6f85082839a2218f), [`540f530`](https://github.com/steveoon/roll-agent/commit/540f530cff10975736c4a66669fad59b6020b4cb)]:
+  - @roll-agent/runtime@0.15.0
+  - @roll-agent/client-node@0.4.0
+  - @roll-agent/companion@0.4.1
+  - @roll-agent/relay-protocol@0.3.1
+
 ## 0.29.0
 
 ### Minor Changes

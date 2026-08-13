@@ -1,5 +1,49 @@
 # @roll-agent/browser-use-agent
 
+## 0.25.0
+
+### Minor Changes
+
+- [#211](https://github.com/steveoon/roll-agent/pull/211) [`8549330`](https://github.com/steveoon/roll-agent/commit/85493304ac978f99889029f725e8f35ddf6a3301) Thanks [@steveoon](https://github.com/steveoon)! - chat 端到端图像链路：工具截图可直接被多模态模型识别
+  - SDK：工具结果新增 `mcpImages` 约定字段（导出 `ToolResultImage` 类型），`executeToolForMcp` 将其摘出为 MCP 标准 image content block，base64 不再混入文本 JSON 载荷
+  - runtime：tool result 中的 file part（图像）改走独立预算（`MAX_TOOL_MODEL_FILE_CHARS`，12M 字符），不再被 60k 文本预算截断——图像 token 成本按分辨率计算而非字符数
+  - runtime：新增 `relocateToolImagesToUserMessages` 幂等消息变换，经 `streamText` 的 `prepareStep` 在每步请求前把 tool 消息中的图像搬运到紧随的 user 消息——dashscope 等 provider 对 tool 角色消息中的图按纯文本计入 input length，仅 user 消息中的图走视觉通道
+  - browser-use-agent：`zhipin_capture_resume` 返回值携带 `mcpImages`，chat 模式下模型可直接看到简历截图（实测 qwen3.7-plus / grok-4.5 / gpt-5.5 皆可识别并继续调用工具）
+
+- [#211](https://github.com/steveoon/roll-agent/pull/211) [`8037453`](https://github.com/steveoon/roll-agent/commit/803745358aea19aa4ac77eec4ccf153c485ec7fc) Thanks [@steveoon](https://github.com/steveoon)! - 移除 `zhipin_locate_resume_canvas` 工具，其探测能力并入 `zhipin_diagnose_browser_state` 的新 `resume-canvas` phase
+  - `zhipin_capture_resume` 自包含全部前置检查与定位，locate 在标准链路（open → capture → close）中从无必要调用
+  - 需要低成本排障时改用 `zhipin_diagnose_browser_state({ phase: "resume-canvas" })`：只读返回 `resumeCanvas` 段（弹窗可见性、iframe/canvas 就绪状态、截图坐标与 canvas 尺寸），不滚动、不截图
+
+- [#211](https://github.com/steveoon/roll-agent/pull/211) [`cbe4b0d`](https://github.com/steveoon/roll-agent/commit/cbe4b0d6e5da685148931c02796c5d50ad49f916) Thanks [@steveoon](https://github.com/steveoon)! - feat: 简历详情弹窗全链路 native CDP 化，新增 zhipin_capture_resume 长图截取工具
+  - `@roll-agent/browser`：`NativeCdpController` 新增 `Page.captureScreenshot` allowlist 与 `captureScreenshot()` 方法（支持 clip/scale）
+  - `zhipin_open_resume` / `zhipin_locate_resume_canvas` / `zhipin_close_resume` 摆脱 Playwright attach，全部改走 native CDP（isolated world + Input dispatch），修复 attach 掉线与页面异常刷新问题
+  - 新增 `zhipin_capture_resume`：滚动分段 + 浏览器内离屏 canvas 拼接，输出完整简历 PNG 长图（实测 7448px 全量）；适配 smooth-scrolling 滚动容器、canvas 视口窗口重绘机制与 getImageData 读取防御（drawImage 指纹确认）；canvas 空白（DOM 文本渲染版式）时回退弹窗区域截图（captureMode: dom-screenshot）
+  - 编排器读取 `imagePath` 用自身多模态能力理解简历内容（方案 B：工具只产图，不做内容理解）
+
+- [#211](https://github.com/steveoon/roll-agent/pull/211) [`4f958ed`](https://github.com/steveoon/roll-agent/commit/4f958ed6e85bed7904c8a76efcbd2b885d0f1ac0) Thanks [@steveoon](https://github.com/steveoon)! - zhipin_capture_resume 全程 visual 反馈，消除滚动截图期间的无提示等待
+  - 复用 NativeVisualActivitySession：开始显示「正在读取简历」胶囊 + 视口光晕，滚动拼接中按实测位移显示百分比进度（总量来自 stitch init 新返回的 maxScrollTotal），完成/失败分别以 success/error 主题收尾
+  - 首轮滚动位移尚未实测时不显示「0%」，有真实位移后才出现百分比
+  - dom-screenshot / viewport-clip 路径在 Page.captureScreenshot 前主动 clear overlay 并等待淡出，确保反馈层不会进入简历截图
+  - `captureResumeCanvas` 新增可选 `onProgress` 回调（导出 `NativeResumeStitchProgress` 类型），既有调用方不受影响
+
+### Patch Changes
+
+- [#211](https://github.com/steveoon/roll-agent/pull/211) [`5218a94`](https://github.com/steveoon/roll-agent/commit/5218a94269afc3a94fdbf341a7533c9fcd86c652) Thanks [@steveoon](https://github.com/steveoon)! - 简历工具链 code review 修复（8 项）
+  - `zhipin_locate_resume_canvas` 改用轻量几何探测 `readResumeCanvasGeometry()`，不再跑完整滚动拼接（实测 ~20s → 0.5s），恢复 5s canvas 等待与结构化错误返回，`canvasInfo` 语义回归 canvas 缓冲区尺寸
+  - `zhipin_capture_resume` / `zhipin_open_resume` 补 catch：CDP 中途异常不再泄漏为 raw MCP 错误，visual 反馈以 error 态收尾而非永久残留「正在读取」胶囊
+  - `zhipin_capture_resume` 的弹窗等待预算 3s → 12s，与 `zhipin_open_resume` 对齐，消除慢网下的过早失败
+  - 关闭按钮搜索限定在可见 dialog 容器作用域内（`.close-btn` 等通用选择器不再可能命中主文档无关元素）
+  - 弹窗关闭判定加入 iframe 可见性（站点隐藏而非卸载弹窗时不再误报"未关闭"）
+  - Escape 兜底按键补 `windowsVirtualKeyCode: 27`（此前合成事件 keyCode 为 0，legacy 键盘监听收不到）
+  - 打招呼/打开卡片两个点击表达式去重为共享 builder，消除 DOM 变更时的双份维护漂移
+  - runtime：relocate 的工具图像只保留最近 2 条消息的图，更早的替换为占位文本，长会话不再每轮重发全部历史图（用户自发的图像消息不受影响）
+
+- [#211](https://github.com/steveoon/roll-agent/pull/211) [`79def06`](https://github.com/steveoon/roll-agent/commit/79def06ed0e0190f16652e8282b6e0f7bc39124e) Thanks [@steveoon](https://github.com/steveoon)! - SKILL.md 同步简历工具链现状：`zhipin_open_resume` / `zhipin_locate_resume_canvas` / `zhipin_close_resume` 标注更正为 native CDP（不再是"Playwright-backed 未迁移项"），收录新工具 `zhipin_capture_resume`（滚动拼接长图 + MCP image content + captureMode 三态 + 进度反馈），新增「查看简历」典型链路与两条编排硬规则（简历正文只能走图像通道；capture 需在 resumeReady 后调用）
+
+- Updated dependencies [[`8549330`](https://github.com/steveoon/roll-agent/commit/85493304ac978f99889029f725e8f35ddf6a3301), [`cbe4b0d`](https://github.com/steveoon/roll-agent/commit/cbe4b0d6e5da685148931c02796c5d50ad49f916)]:
+  - @roll-agent/sdk@0.5.0
+  - @roll-agent/browser@0.10.0
+
 ## 0.24.1
 
 ### Patch Changes
