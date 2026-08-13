@@ -302,13 +302,14 @@ pnpm release-github-releases
 | 依赖解析层 | `minimumReleaseAge: 10080` 必须保留，新解析依赖至少发布满 7 天 | `pnpm-workspace.yaml` | 不能为了临时升级绕过冷却期 |
 | 依赖解析层 | `blockExoticSubdeps: true` 必须保留，阻断传递依赖使用 git/tarball 等 exotic source | `pnpm-workspace.yaml` | 需要例外时先做人工供应链审计 |
 | 依赖解析层 | `savePrefix: ""` 必须保留，新加依赖默认保存精确版本 | `pnpm-workspace.yaml` | 不机械移除既有 range，但新增依赖应 exact |
-| build script 层 | `allowBuilds` denylist 必须显式拒绝当前已知 dependency build scripts，例如 `esbuild`、`unrs-resolver` | `pnpm-workspace.yaml` | 新增 build script 先审计再决定是否允许 |
+| 依赖解析层 | 依赖 denylist 必须包含已知恶意坐标，包括 Shai-Hulud `keyv` 家族坏版本（如 `keyv@6.0.0`） | `scripts/verify-dependency-denylist.mjs` | 命中即失败；不能为了升级依赖而删坐标 |
+| build script 层 | `strictDepBuilds: true` 必须保留，未审查的 dependency lifecycle 安装失败；`allowBuilds` denylist 必须显式拒绝当前已知 dependency build scripts，例如 `esbuild`、`unrs-resolver` | `pnpm-workspace.yaml` | 新增 build script 先审计再决定是否允许 |
 | 发布 job 层 | `release_pr` / `npm_publish` / `github_releases` 均不能启用 `cache: pnpm`；`quality` job 可以保留 cache | `.github/workflows/release.yml` | 发布相关 job 发现缓存时必须删除 |
 | 发布命令层 | CI publish 必须走 `pnpm release-packages` / `node scripts/release-packages.mjs`，不能直接裸跑 `changeset publish` | `package.json`、`scripts/release-packages.mjs` | 保证 publish 前置校验不会被跳过 |
 | 发布命令层 | `scripts/release-packages.mjs` 仅允许在 GitHub Actions OIDC 环境发布（校验 `GITHUB_ACTIONS` + `ACTIONS_ID_TOKEN_*`）；不得再写临时 `.npmrc` token | `scripts/release-packages.mjs` | 本地只能 `--dry-run`；真实发布走 Trusted Publisher |
 | GitHub Release 层 | npm publish 成功后必须运行 `node scripts/create-github-releases.mjs`，为当前已发布包版本补齐 GitHub Release | `.github/workflows/release.yml`、`scripts/create-github-releases.mjs` | 不能只发布 npm 而丢失 GitHub Releases |
 | tarball 审计层 | packed manifest 禁止 `preinstall`、`install`、`postinstall`、`prepare` lifecycle | `scripts/verify-published-packages.mjs` | 命中即失败，禁止发布 |
-| tarball 审计层 | packed files 禁止已知可疑文件名：`router_init.js`、`router_runtime.js`、`tanstack_runner.js`、`setup.mjs`、`gh-token-monitor` | `scripts/verify-published-packages.mjs` | 命中即失败，先定位来源 |
+| tarball 审计层 | packed files 禁止已知可疑文件名：`router_init.js`、`router_runtime.js`、`tanstack_runner.js`、`setup.mjs`、`Math_Symbol.js`、`math_init.js`、`gh-token-monitor` | `scripts/verify-published-packages.mjs` | 命中即失败，先定位来源 |
 | tarball 审计层 | packed text 必须扫描已知 IoC：`IfYouRevoke`、`toJSON(secrets)`、`.claude/settings`、`.vscode/tasks`、`@tanstack/setup`、`filev2.getsession` | `scripts/verify-published-packages.mjs` | 命中即失败，不能人工忽略 |
 
 发布前最小验证命令：
@@ -347,7 +348,7 @@ node scripts/create-github-releases.mjs --dry-run
 <!-- gitnexus:start -->
 # GitNexus — Code Intelligence
 
-This project is indexed by GitNexus as **roll-agent** (14805 symbols, 40948 relationships, 300 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
+This project is indexed by GitNexus as **roll-agent** (14821 symbols, 41048 relationships, 300 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
 
 > Index stale? Run `node .gitnexus/run.cjs analyze` from the project root — it auto-selects an available runner. No `.gitnexus/run.cjs` yet? `npx gitnexus analyze` (npm 11 crash → `npm i -g gitnexus`; #1939).
 

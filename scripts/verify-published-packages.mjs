@@ -4,6 +4,7 @@ import { execFile } from "node:child_process";
 import { mkdtemp, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 import { PUBLISHED_PACKAGES } from "./published-packages.mjs";
 
@@ -38,11 +39,13 @@ const ALLOWED_LIFECYCLE_SCRIPTS = new Map([
     new Map([["prepublishOnly", "node ../../scripts/require-pnpm-publish.mjs"]]),
   ],
 ]);
-const SUSPICIOUS_FILE_NAMES = new Set([
+export const SUSPICIOUS_FILE_NAMES = new Set([
   "router_init.js",
   "router_runtime.js",
   "tanstack_runner.js",
   "setup.mjs",
+  "Math_Symbol.js",
+  "math_init.js",
   "gh-token-monitor",
 ]);
 const SUSPICIOUS_TEXT_IOCS = [
@@ -589,7 +592,12 @@ async function assertNoSuspiciousText(packageName, tarballPath, tarEntries) {
   }
 }
 
-main().catch((error) => {
-  console.error("verify-published-packages.mjs failed:", error);
-  process.exit(1);
-});
+const entryPointUrl =
+  process.argv[1] !== undefined ? pathToFileURL(process.argv[1]).href : undefined;
+
+if (import.meta.url === entryPointUrl) {
+  main().catch((error) => {
+    console.error("verify-published-packages.mjs failed:", error);
+    process.exit(1);
+  });
+}
