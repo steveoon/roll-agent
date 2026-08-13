@@ -13,54 +13,9 @@ concurrency:
 
 jobs:
   quality:
-    runs-on: ubuntu-latest
+    uses: ./.github/workflows/quality-pipeline.yml
     permissions:
       contents: read
-    steps:
-      - name: Checkout
-        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
-        with:
-          fetch-depth: 0
-          persist-credentials: false
-
-      - name: Setup pnpm
-        uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v5
-        env:
-          FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
-
-      - name: Setup Node.js
-        uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
-        with:
-          node-version: 22.14.0
-          cache: pnpm
-          registry-url: https://registry.npmjs.org
-
-      - name: Install dependencies
-        run: pnpm install --frozen-lockfile
-
-      - name: Dependency denylist
-        run: pnpm verify:dependency-denylist
-
-      - name: Security audit
-        run: pnpm security:audit
-
-      - name: Typecheck
-        run: pnpm typecheck
-
-      - name: Lint
-        run: pnpm lint
-
-      - name: Unit tests
-        run: pnpm test
-
-      - name: Script tests
-        run: pnpm test:scripts
-
-      - name: E2E smoke
-        run: pnpm test:e2e
-
-      - name: Build
-        run: pnpm build
 
   release_pr:
     runs-on: ubuntu-latest

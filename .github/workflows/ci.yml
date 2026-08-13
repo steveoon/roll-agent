@@ -10,137 +10,26 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  static:
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
+  pipeline:
+    uses: ./.github/workflows/quality-pipeline.yml
     permissions:
       contents: read
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
-        with:
-          persist-credentials: false
-
-      - name: Setup workspace
-        uses: ./.github/actions/setup-workspace
-
-      - name: Dependency denylist
-        run: pnpm verify:dependency-denylist
-
-      - name: Security audit
-        run: pnpm security:audit
-
-      - name: Typecheck
-        run: pnpm typecheck
-
-      - name: Lint
-        run: pnpm lint
-
-  unit-tests:
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    permissions:
-      contents: read
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
-        with:
-          persist-credentials: false
-
-      - name: Setup workspace
-        uses: ./.github/actions/setup-workspace
-
-      - name: Unit tests
-        run: pnpm test
-
-  e2e:
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    permissions:
-      contents: read
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
-        with:
-          persist-credentials: false
-
-      - name: Setup workspace
-        uses: ./.github/actions/setup-workspace
-
-      - name: E2E smoke
-        run: pnpm test:e2e
-
-  build:
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    permissions:
-      contents: read
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
-        with:
-          persist-credentials: false
-
-      - name: Setup workspace
-        uses: ./.github/actions/setup-workspace
-
-      - name: Build
-        run: pnpm build
-
-  chat-pty:
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    permissions:
-      contents: read
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
-        with:
-          persist-credentials: false
-
-      - name: Setup workspace
-        uses: ./.github/actions/setup-workspace
-
-      - name: Chat PTY harness unit tests
-        run: pnpm perf:chat:test
-
-      - name: Chat PTY correctness smoke
-        id: chat-pty-smoke
-        run: pnpm perf:chat:check
-
-      - name: Upload chat PTY performance artifacts
-        if: ${{ always() && (steps.chat-pty-smoke.outcome == 'success' || steps.chat-pty-smoke.outcome == 'failure') }}
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        with:
-          name: chat-pty-${{ runner.os }}-${{ github.run_id }}
-          path: outputs/chat-pty
-          if-no-files-found: error
-          retention-days: 14
 
   quality:
     if: always()
-    needs: [static, unit-tests, e2e, build, chat-pty]
+    needs: [pipeline]
     runs-on: ubuntu-latest
     timeout-minutes: 5
 
     steps:
-      - name: Verify required jobs
+      - name: Verify quality pipeline
         env:
-          RESULTS: ${{ join(needs.*.result, ' ') }}
+          RESULT: ${{ needs.pipeline.result }}
         run: |
-          status=0
-          for result in $RESULTS; do
-            if [ "$result" != "success" ]; then
-              status=1
-            fi
-          done
-          echo "Job results: $RESULTS"
-          exit "$status"
+          echo "Quality pipeline result: $RESULT"
+          if [ "$RESULT" != "success" ]; then
+            exit 1
+          fi
 
   windows-shell-smoke:
     runs-on: windows-latest
