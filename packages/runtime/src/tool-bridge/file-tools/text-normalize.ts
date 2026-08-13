@@ -1,5 +1,5 @@
 const CHAR_FOLD: Readonly<Record<string, string>> = {
-  " ": " ",
+  "\u{00A0}": " ",
   "　": " ",
   "\u{201C}": '"',
   "\u{201D}": '"',

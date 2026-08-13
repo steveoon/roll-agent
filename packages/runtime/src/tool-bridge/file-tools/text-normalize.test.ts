@@ -14,7 +14,7 @@ test("全角标点与智能引号折叠为半角", () => {
 });
 
 test("全角空格与 NBSP 折叠为半角空格", () => {
-  assert.equal(normalizeForMatch("a　b c").text, "a b c");
+  assert.equal(normalizeForMatch("a　b\u{00A0}c").text, "a b c");
 });
 
 test("破折号族折叠为连字符", () => {
