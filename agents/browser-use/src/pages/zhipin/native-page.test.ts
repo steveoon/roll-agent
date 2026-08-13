@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { describe, it } from "node:test";
+import { describe, it, type TestContext } from "node:test";
 import type {
   BrowserContextManager,
   BrowserInspectablePage,
@@ -15,6 +15,48 @@ import {
 } from "./native-page.ts";
 import { ZHIPIN_ACCESS_RESTRICTED_CODE } from "./risk-page.ts";
 import { ZHIPIN_SELECTORS } from "./selectors.ts";
+
+const VIRTUAL_ELAPSED = {
+  scrollsChatListWhileWaiting: 792,
+  opensChatThroughNativeMatching: 814,
+  resetsToChatListTop: 1158,
+  scrollsCandidatesThroughSurface: 644,
+  fallsBackToNativeWheel: 644,
+  scrollsOverflowHiddenChatList: 345,
+  preservesNativeWheelSuccess: 345,
+  clicksRecommendGreetButton: 564,
+  listsRecommendJobs: 2164,
+  doesNotReportCanSwitch: 2164,
+  selectsRecommendJobByValue: 2728,
+  forceClicksCurrentRecommendJob: 2728,
+  appliesCityDistrictLocationFilter: 3284,
+  sendsChatReplies: 2374,
+  exchangesWechat: 2928,
+  clicksSidebarSections: 564,
+} as const;
+
+function enableHumanRhythmClock(t: TestContext): void {
+  t.mock.timers.enable({ apis: ["Date", "setTimeout"], now: 0 });
+}
+
+async function settleWithMockTimers<T>(t: TestContext, promise: Promise<T>): Promise<T> {
+  let settled = false;
+  const tracked = promise.finally(() => {
+    settled = true;
+  });
+  for (let guard = 0; guard < 10_000; guard += 1) {
+    if (settled) {
+      return await tracked;
+    }
+    await new Promise<void>((resolve) => {
+      setImmediate(resolve);
+    });
+    if (!settled) {
+      t.mock.timers.runAll();
+    }
+  }
+  return assert.fail("mock-timer driver did not settle within 10000 rounds");
+}
 
 function createPort(
   evaluateJson: (expression: string) => Promise<unknown>,
@@ -268,7 +310,8 @@ describe("ZhipinNativePagePort", () => {
     assert.equal(candidateReads, 1);
   });
 
-  it("scrolls the native chat list while waiting for an offscreen conversation", async () => {
+  it("scrolls the native chat list while waiting for an offscreen conversation", async (t) => {
+    enableHumanRhythmClock(t);
     let scrollTop = 0;
     const maxScrollTop = 520;
     const mouseInputs: NativeCdpMouseEventInput[] = [];
@@ -321,9 +364,9 @@ describe("ZhipinNativePagePort", () => {
       },
     );
 
-    const ready = await port.waitForChatListReady(
-      { expectedConversationId: "conversation-target" },
-      2_000,
+    const ready = await settleWithMockTimers(
+      t,
+      port.waitForChatListReady({ expectedConversationId: "conversation-target" }, 2_000),
     );
 
     assert.equal(ready, true);
@@ -331,6 +374,7 @@ describe("ZhipinNativePagePort", () => {
       mouseInputs.some((input) => input.type === "mouseWheel" && (input.deltaY ?? 0) > 0),
       true,
     );
+    assert.equal(Date.now(), VIRTUAL_ELAPSED.scrollsChatListWhileWaiting);
   });
 
   it("reads chat candidates from the native chat item DOM expression", async () => {
@@ -368,7 +412,8 @@ describe("ZhipinNativePagePort", () => {
     ]);
   });
 
-  it("opens a chat through native candidate matching and mouse input", async () => {
+  it("opens a chat through native candidate matching and mouse input", async (t) => {
+    enableHumanRhythmClock(t);
     const mouseInputs: NativeCdpMouseEventInput[] = [];
     const port = createPort(
       async (expression) => {
@@ -413,11 +458,14 @@ describe("ZhipinNativePagePort", () => {
       },
     );
 
-    const result = await port.openChat({
-      conversationId: "conversation-1",
-      candidateName: undefined,
-      index: undefined,
-    });
+    const result = await settleWithMockTimers(
+      t,
+      port.openChat({
+        conversationId: "conversation-1",
+        candidateName: undefined,
+        index: undefined,
+      }),
+    );
 
     assert.equal(result.found, true);
     assert.equal(result.conversationId, "conversation-1");
@@ -426,6 +474,7 @@ describe("ZhipinNativePagePort", () => {
     assert.equal(mouseInputs.at(-1)?.type, "mouseReleased");
     assert.equal(mouseInputs.at(-1)?.x, 88);
     assert.equal(mouseInputs.at(-1)?.y, 216);
+    assert.equal(Date.now(), VIRTUAL_ELAPSED.opensChatThroughNativeMatching);
   });
 
   it("diagnoses hidden-page state when the native chat panel does not synchronize", async (t) => {
@@ -490,7 +539,8 @@ describe("ZhipinNativePagePort", () => {
     assert.match(result.error ?? "", /其他 macOS Space/);
   });
 
-  it("resets to the chat-list top before scanning for an explicit chat target", async () => {
+  it("resets to the chat-list top before scanning for an explicit chat target", async (t) => {
+    enableHumanRhythmClock(t);
     let scrollTop = 520;
     const maxScrollTop = 1040;
     const mouseInputs: NativeCdpMouseEventInput[] = [];
@@ -575,12 +625,15 @@ describe("ZhipinNativePagePort", () => {
       },
     );
 
-    const result = await port.openChat({
-      conversationId: "conversation-1",
-      candidateName: undefined,
-      index: undefined,
-      maxScrolls: 2,
-    });
+    const result = await settleWithMockTimers(
+      t,
+      port.openChat({
+        conversationId: "conversation-1",
+        candidateName: undefined,
+        index: undefined,
+        maxScrolls: 2,
+      }),
+    );
 
     assert.equal(result.found, true);
     assert.equal(result.conversationId, "conversation-1");
@@ -589,9 +642,11 @@ describe("ZhipinNativePagePort", () => {
       mouseInputs.some((input) => input.type === "mouseWheel" && (input.deltaY ?? 0) < 0),
       true,
     );
+    assert.equal(Date.now(), VIRTUAL_ELAPSED.resetsToChatListTop);
   });
 
-  it("scrolls chat candidates through the chat-list surface container resolution", async () => {
+  it("scrolls chat candidates through the chat-list surface container resolution", async (t) => {
+    enableHumanRhythmClock(t);
     let readCount = 0;
     let surfaceEvaluations = 0;
     const port = createPort(async (expression) => {
@@ -668,17 +723,22 @@ describe("ZhipinNativePagePort", () => {
       return false;
     });
 
-    const candidates = await port.readChatCandidates({
-      autoScroll: true,
-      maxScrolls: 1,
-      targetCount: 2,
-    });
+    const candidates = await settleWithMockTimers(
+      t,
+      port.readChatCandidates({
+        autoScroll: true,
+        maxScrolls: 1,
+        targetCount: 2,
+      }),
+    );
 
     assert.equal(candidates.length, 2);
     assert.equal(surfaceEvaluations, 2);
+    assert.equal(Date.now(), VIRTUAL_ELAPSED.scrollsCandidatesThroughSurface);
   });
 
-  it("falls back to native mouse wheel when chat-list has items but no scrollable node", async () => {
+  it("falls back to native mouse wheel when chat-list has items but no scrollable node", async (t) => {
+    enableHumanRhythmClock(t);
     let readCount = 0;
     const wheelInputs: NativeCdpMouseEventInput[] = [];
     const port = createPort(
@@ -744,11 +804,14 @@ describe("ZhipinNativePagePort", () => {
       },
     );
 
-    const candidates = await port.readChatCandidates({
-      autoScroll: true,
-      maxScrolls: 1,
-      targetCount: 2,
-    });
+    const candidates = await settleWithMockTimers(
+      t,
+      port.readChatCandidates({
+        autoScroll: true,
+        maxScrolls: 1,
+        targetCount: 2,
+      }),
+    );
 
     assert.equal(candidates.length, 2);
     const wheelEvent = wheelInputs.find((input) => input.type === "mouseWheel");
@@ -756,9 +819,11 @@ describe("ZhipinNativePagePort", () => {
     assert.equal(wheelEvent?.x, 96);
     assert.equal(wheelEvent?.y, 240);
     assert.equal(wheelEvent?.deltaY, 520);
+    assert.equal(Date.now(), VIRTUAL_ELAPSED.fallsBackToNativeWheel);
   });
 
-  it("scrolls overflow-hidden chat-list through native wheel and preserves native scroll metrics", async () => {
+  it("scrolls overflow-hidden chat-list through native wheel and preserves native scroll metrics", async (t) => {
+    enableHumanRhythmClock(t);
     let surfaceEvaluations = 0;
     const wheelInputs: NativeCdpMouseEventInput[] = [];
     const port = createPort(
@@ -790,7 +855,10 @@ describe("ZhipinNativePagePort", () => {
       },
     );
 
-    const result = await port.scrollSurface("chat-list", { steps: 1, settleMs: 1 });
+    const result = await settleWithMockTimers(
+      t,
+      port.scrollSurface("chat-list", { steps: 1, settleMs: 1 }),
+    );
 
     assert.equal(result.success, true);
     assert.equal(result.stepsCompleted, 1);
@@ -803,9 +871,11 @@ describe("ZhipinNativePagePort", () => {
       wheelInputs.some((input) => input.type === "mouseWheel"),
       true,
     );
+    assert.equal(Date.now(), VIRTUAL_ELAPSED.scrollsOverflowHiddenChatList);
   });
 
-  it("preserves native wheel success when the settled chat-list snapshot still lacks scroll metrics", async () => {
+  it("preserves native wheel success when the settled chat-list snapshot still lacks scroll metrics", async (t) => {
+    enableHumanRhythmClock(t);
     let surfaceEvaluations = 0;
     const wheelInputs: NativeCdpMouseEventInput[] = [];
     const port = createPort(
@@ -837,7 +907,10 @@ describe("ZhipinNativePagePort", () => {
       },
     );
 
-    const result = await port.scrollSurface("chat-list", { steps: 1, settleMs: 1 });
+    const result = await settleWithMockTimers(
+      t,
+      port.scrollSurface("chat-list", { steps: 1, settleMs: 1 }),
+    );
 
     assert.equal(result.success, true);
     assert.equal(result.stepsCompleted, 1);
@@ -851,6 +924,7 @@ describe("ZhipinNativePagePort", () => {
       wheelInputs.some((input) => input.type === "mouseWheel"),
       true,
     );
+    assert.equal(Date.now(), VIRTUAL_ELAPSED.preservesNativeWheelSuccess);
   });
 
   it("reads username evidence from native DOM expression", async () => {
@@ -1073,7 +1147,8 @@ describe("ZhipinNativePagePort", () => {
     assert.equal(result.items[0]?.candidateId, "candidate-frame-1");
   });
 
-  it("clicks a recommend greet button without Playwright locators or DOM markers", async () => {
+  it("clicks a recommend greet button without Playwright locators or DOM markers", async (t) => {
+    enableHumanRhythmClock(t);
     const mouseInputs: NativeCdpMouseEventInput[] = [];
     const port = createPort(
       async (expression) => {
@@ -1100,7 +1175,7 @@ describe("ZhipinNativePagePort", () => {
       },
     );
 
-    const result = await port.clickRecommendGreet(0);
+    const result = await settleWithMockTimers(t, port.clickRecommendGreet(0));
 
     assert.equal(result.clicked, true);
     assert.equal(result.candidateId, "candidate-1");
@@ -1109,9 +1184,11 @@ describe("ZhipinNativePagePort", () => {
     assert.equal(mouseInputs.at(-1)?.type, "mouseReleased");
     assert.equal(mouseInputs.at(-1)?.x, 160);
     assert.equal(mouseInputs.at(-1)?.y, 260);
+    assert.equal(Date.now(), VIRTUAL_ELAPSED.clicksRecommendGreetButton);
   });
 
-  it("lists recommend jobs without selecting another job", async () => {
+  it("lists recommend jobs without selecting another job", async (t) => {
+    enableHumanRhythmClock(t);
     let selectorOpen = false;
     const mouseInputs: NativeCdpMouseEventInput[] = [];
     const port = createPort(
@@ -1160,7 +1237,7 @@ describe("ZhipinNativePagePort", () => {
       },
     );
 
-    const result = await port.listRecommendJobs();
+    const result = await settleWithMockTimers(t, port.listRecommendJobs());
 
     assert.equal(result.success, true);
     assert.equal(result.status, "listed");
@@ -1169,9 +1246,11 @@ describe("ZhipinNativePagePort", () => {
     assert.equal(result.current?.value, "job-1");
     assert.equal(result.options[1]?.value, "job-2");
     assert.equal(mouseInputs.filter((input) => input.type === "mousePressed").length, 1);
+    assert.equal(Date.now(), VIRTUAL_ELAPSED.listsRecommendJobs);
   });
 
-  it("does not report canSwitch when the only recommend job has no current marker", async () => {
+  it("does not report canSwitch when the only recommend job has no current marker", async (t) => {
+    enableHumanRhythmClock(t);
     let selectorOpen = false;
     const port = createPort(
       async (expression) => {
@@ -1211,15 +1290,17 @@ describe("ZhipinNativePagePort", () => {
       },
     );
 
-    const result = await port.listRecommendJobs();
+    const result = await settleWithMockTimers(t, port.listRecommendJobs());
 
     assert.equal(result.success, true);
     assert.equal(result.availableCount, 1);
     assert.equal(result.canSwitch, false);
     assert.equal(result.current, undefined);
+    assert.equal(Date.now(), VIRTUAL_ELAPSED.doesNotReportCanSwitch);
   });
 
-  it("selects a recommend job by stable job value", async () => {
+  it("selects a recommend job by stable job value", async (t) => {
+    enableHumanRhythmClock(t);
     let selectorOpen = false;
     let selectedValue = "job-1";
     const mouseInputs: NativeCdpMouseEventInput[] = [];
@@ -1272,16 +1353,18 @@ describe("ZhipinNativePagePort", () => {
       },
     );
 
-    const result = await port.selectRecommendJob({ jobValue: "job-2" });
+    const result = await settleWithMockTimers(t, port.selectRecommendJob({ jobValue: "job-2" }));
 
     assert.equal(result.success, true);
     assert.equal(result.status, "selected");
     assert.equal(result.selected?.value, "job-2");
     assert.equal(result.current?.value, "job-2");
     assert.equal(mouseInputs.filter((input) => input.type === "mousePressed").length, 2);
+    assert.equal(Date.now(), VIRTUAL_ELAPSED.selectsRecommendJobByValue);
   });
 
-  it("force-clicks the current recommend job when requested", async () => {
+  it("force-clicks the current recommend job when requested", async (t) => {
+    enableHumanRhythmClock(t);
     let selectorOpen = false;
     const clickedTargets: string[] = [];
     const port = createPort(
@@ -1327,14 +1410,19 @@ describe("ZhipinNativePagePort", () => {
       },
     );
 
-    const result = await port.selectRecommendJob({ jobValue: "job-1", forceClick: true });
+    const result = await settleWithMockTimers(
+      t,
+      port.selectRecommendJob({ jobValue: "job-1", forceClick: true }),
+    );
 
     assert.equal(result.success, true);
     assert.equal(result.status, "selected");
     assert.deepEqual(clickedTargets, ["label", "job"]);
+    assert.equal(Date.now(), VIRTUAL_ELAPSED.forceClicksCurrentRecommendJob);
   });
 
-  it("applies a city and district location filter without opening the standard filter panel", async () => {
+  it("applies a city and district location filter without opening the standard filter panel", async (t) => {
+    enableHumanRhythmClock(t);
     let locationPanelOpen = false;
     const clickedTargets: string[] = [];
     const evaluatedExpressions: string[] = [];
@@ -1392,14 +1480,17 @@ describe("ZhipinNativePagePort", () => {
       },
     );
 
-    const result = await port.applyRecommendFilter({
-      applyMode: "patch",
-      location: {
-        city: "上海市",
-        district: "浦东新区",
-      },
-      optionSelections: [],
-    });
+    const result = await settleWithMockTimers(
+      t,
+      port.applyRecommendFilter({
+        applyMode: "patch",
+        location: {
+          city: "上海市",
+          district: "浦东新区",
+        },
+        optionSelections: [],
+      }),
+    );
 
     assert.equal(result.status, "applied");
     assert.deepEqual(result.applied?.location, {
@@ -1411,9 +1502,11 @@ describe("ZhipinNativePagePort", () => {
       evaluatedExpressions.some((expression) => expression.includes("filterPanel")),
       false,
     );
+    assert.equal(Date.now(), VIRTUAL_ELAPSED.appliesCityDistrictLocationFilter);
   });
 
-  it("sends chat replies through native focus, key events, insertText, and native send click", async () => {
+  it("sends chat replies through native focus, key events, insertText, and native send click", async (t) => {
+    enableHumanRhythmClock(t);
     const keyInputs: Array<Record<string, unknown>> = [];
     const inserted: string[] = [];
     const mouseInputs: NativeCdpMouseEventInput[] = [];
@@ -1442,7 +1535,7 @@ describe("ZhipinNativePagePort", () => {
       },
     );
 
-    const result = await port.sendChatReply("您好，方便沟通吗");
+    const result = await settleWithMockTimers(t, port.sendChatReply("您好，方便沟通吗"));
 
     assert.equal(result.success, true);
     assert.deepEqual(inserted, ["您好，方便沟通吗"]);
@@ -1459,9 +1552,11 @@ describe("ZhipinNativePagePort", () => {
       true,
     );
     assert.equal(mouseInputs.filter((input) => input.type === "mousePressed").length, 2);
+    assert.equal(Date.now(), VIRTUAL_ELAPSED.sendsChatReplies);
   });
 
-  it("exchanges WeChat through native button and confirm clicks", async () => {
+  it("exchanges WeChat through native button and confirm clicks", async (t) => {
+    enableHumanRhythmClock(t);
     let phase = 0;
     const mouseInputs: NativeCdpMouseEventInput[] = [];
     const port = createPort(
@@ -1489,15 +1584,17 @@ describe("ZhipinNativePagePort", () => {
       },
     );
 
-    const result = await port.exchangeWechat();
+    const result = await settleWithMockTimers(t, port.exchangeWechat());
 
     assert.equal(result.success, true);
     assert.equal(result.wechatNumber, "wxid_12345");
     assert.equal(phase, 2);
     assert.equal(mouseInputs.filter((input) => input.type === "mousePressed").length, 2);
+    assert.equal(Date.now(), VIRTUAL_ELAPSED.exchangesWechat);
   });
 
-  it("clicks sidebar sections through narrow native targets", async () => {
+  it("clicks sidebar sections through narrow native targets", async (t) => {
+    enableHumanRhythmClock(t);
     const dispatched: Array<Record<string, unknown>> = [];
     const port = new ZhipinNativePagePort({
       target: {
@@ -1536,7 +1633,7 @@ describe("ZhipinNativePagePort", () => {
       } as unknown as NativeCdpController,
     });
 
-    const clicked = await port.clickSidebarSection("recommend");
+    const clicked = await settleWithMockTimers(t, port.clickSidebarSection("recommend"));
 
     assert.equal(clicked, true);
     assert.equal(dispatched.filter((input) => input["type"] === "mouseMoved").length > 1, true);
@@ -1556,6 +1653,7 @@ describe("ZhipinNativePagePort", () => {
       buttons: 0,
       clickCount: 1,
     });
+    assert.equal(Date.now(), VIRTUAL_ELAPSED.clicksSidebarSections);
   });
 
   it("gates recommend surface detection on not being on the chat URL", async () => {
