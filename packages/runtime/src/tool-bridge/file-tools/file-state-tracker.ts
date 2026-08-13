@@ -34,8 +34,6 @@ export class FileStateTracker {
     if (recorded === undefined) {
       return FILE_FRESHNESS.unread;
     }
-    return recorded === contentDigest(currentContent)
-      ? FILE_FRESHNESS.fresh
-      : FILE_FRESHNESS.stale;
+    return recorded === contentDigest(currentContent) ? FILE_FRESHNESS.fresh : FILE_FRESHNESS.stale;
   }
 }

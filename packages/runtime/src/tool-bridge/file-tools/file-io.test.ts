@@ -29,7 +29,7 @@ test("loadTextFile 读取 UTF-8 内容", () => {
 test("loadTextFile 剥离 BOM 并标记", () => {
   const dir = tempDir();
   const path = join(dir, "bom.txt");
-  writeFileSync(path, "﻿内容", "utf8");
+  writeFileSync(path, "\uFEFF内容", "utf8");
   const loaded = loadTextFile(path, LIMITS);
   assert.ok(loaded.ok);
   assert.equal(loaded.content, "内容");
@@ -60,5 +60,5 @@ test("saveTextFile 自动建父目录并按需还原 BOM", () => {
   const dir = tempDir();
   const nested = join(dir, "sub", "deep", "out.txt");
   saveTextFile(nested, "内容", true);
-  assert.equal(readFileSync(nested, "utf8"), "﻿内容");
+  assert.equal(readFileSync(nested, "utf8"), "\uFEFF内容");
 });

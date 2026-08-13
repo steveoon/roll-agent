@@ -17,7 +17,7 @@ import {
   executeCoordinatedTool,
   type ToolExecutionPlan,
 } from "../tool-execution-coordinator.ts";
-import { canonicalFileKey, resolveFilePath } from "./file-io.ts";
+import { canonicalFileKey, escapesWorkdir, resolveFilePath } from "./file-io.ts";
 import { FILE_TOOLS_AGENT_NAME, type ResolvedFileToolsSettings } from "./settings.ts";
 
 export const LIST_DIR_TOOL_NAME = "list_dir";
@@ -90,6 +90,21 @@ export function buildListDirTool(
           TOOL_OUTCOME_KINDS.invalidInput,
           "参数校验失败: path 须为非空字符串",
         );
+      }
+      if (escapesWorkdir(settings.workdir, parsed.data.path ?? ".")) {
+        const approval = await ctx.requestApproval({
+          agentName: FILE_TOOLS_AGENT_NAME,
+          toolName: LIST_DIR_TOOL_NAME,
+          input: parsed.data,
+          reason: "读取工作目录以外的文件",
+        });
+        if (!approval.approved) {
+          return failedToolResult(
+            TOOL_OUTCOME_KINDS.userRejected,
+            `已取消执行${approval.reason ? `: ${approval.reason}` : ""}`,
+            approval.reason ? { reason: approval.reason } : {},
+          );
+        }
       }
       return gateToolCall(
         ctx,

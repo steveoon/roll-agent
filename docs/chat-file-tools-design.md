@@ -141,3 +141,4 @@ checkFreshness(key, current) → fresh | stale | unread
 | 归一化只做 1:1 折叠 | 保证 normalized→original 映射精确，替换永不污染非目标字节 |
 | 归一化命中必须唯一 | 容错不能引入新的歧义；多命中一律走诊断让模型决策 |
 | 内建工具而非 MCP 子 agent | 反馈回路依赖 session 级状态连续（tracker、上下文管理）；跨进程会切断状态 |
+| read/list 的 workdir 外路径走确认门 | 与 bash 通道 auditResolvedPath 的静默放行收敛语义对齐；绝对路径能力保留，仅收敛零确认面 |

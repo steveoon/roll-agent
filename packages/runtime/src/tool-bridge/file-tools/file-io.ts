@@ -1,7 +1,7 @@
 import { mkdirSync, readFileSync, realpathSync, statSync, writeFileSync } from "node:fs";
-import { dirname, isAbsolute, resolve } from "node:path";
+import { dirname, isAbsolute, relative, resolve } from "node:path";
 
-const UTF8_BOM = "﻿";
+const UTF8_BOM = "\uFEFF";
 const BINARY_PROBE_BYTES = 8192;
 
 export type LoadFileFailure = {
@@ -29,6 +29,13 @@ export function canonicalFileKey(path: string): string {
   } catch {
     return path;
   }
+}
+
+export function escapesWorkdir(workdir: string, path: string): boolean {
+  const canonicalWorkdir = canonicalFileKey(workdir);
+  const canonicalPath = canonicalFileKey(resolveFilePath(workdir, path));
+  const rel = relative(canonicalWorkdir, canonicalPath);
+  return rel.startsWith("..") || isAbsolute(rel);
 }
 
 function looksBinary(buffer: Buffer): boolean {

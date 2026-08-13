@@ -16,7 +16,7 @@ import {
   type ToolExecutionPlan,
 } from "../tool-execution-coordinator.ts";
 import { renderNumberedLines } from "./match-pipeline.ts";
-import { canonicalFileKey, loadTextFile, resolveFilePath } from "./file-io.ts";
+import { canonicalFileKey, escapesWorkdir, loadTextFile, resolveFilePath } from "./file-io.ts";
 import type { FileStateTracker } from "./file-state-tracker.ts";
 import { FILE_TOOLS_AGENT_NAME, type ResolvedFileToolsSettings } from "./settings.ts";
 
@@ -49,7 +49,6 @@ export function executeReadFile(
   if (!loaded.ok) {
     return failedToolResult(TOOL_OUTCOME_KINDS.invalidInput, loaded.message);
   }
-  tracker.recordKnownContent(loaded.key, loaded.content);
   const lines = loaded.content.split("\n");
   const offset = input.offset ?? 1;
   const limit = input.limit ?? DEFAULT_LINE_LIMIT;
@@ -59,6 +58,7 @@ export function executeReadFile(
       `offset ${String(offset)} 超出文件行数（共 ${String(lines.length)} 行）`,
     );
   }
+  tracker.recordKnownContent(loaded.key, loaded.content);
   const slice = lines.slice(offset - 1, offset - 1 + limit).map(clipLine);
   let body = renderNumberedLines(slice, offset);
   if (body.length > settings.maxOutputChars) {
@@ -96,6 +96,21 @@ export function buildReadFileTool(
           TOOL_OUTCOME_KINDS.invalidInput,
           "参数校验失败: path 必须为非空字符串，offset/limit 须为正整数",
         );
+      }
+      if (escapesWorkdir(settings.workdir, parsed.data.path)) {
+        const approval = await ctx.requestApproval({
+          agentName: FILE_TOOLS_AGENT_NAME,
+          toolName: READ_FILE_TOOL_NAME,
+          input: parsed.data,
+          reason: "读取工作目录以外的文件",
+        });
+        if (!approval.approved) {
+          return failedToolResult(
+            TOOL_OUTCOME_KINDS.userRejected,
+            `已取消执行${approval.reason ? `: ${approval.reason}` : ""}`,
+            approval.reason ? { reason: approval.reason } : {},
+          );
+        }
       }
       return gateToolCall(
         ctx,
