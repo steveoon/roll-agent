@@ -53,7 +53,7 @@ function makeApiErrorModel(): MockLanguageModelV4 {
         statusCode: 503,
         responseHeaders: {},
         responseBody: "unavailable",
-        isRetryable: true,
+        isRetryable: false,
       });
     },
   });
