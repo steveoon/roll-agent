@@ -4,6 +4,7 @@ import type { ChatListItem } from "../pages/zhipin/chat-navigation.ts";
 import { NativeVisualActivitySession } from "../native-visual-activity-session.ts";
 import { openZhipinNativePagePort } from "../pages/zhipin/native-page.ts";
 import type { ZhipinNativePagePort } from "../pages/zhipin/native-page.ts";
+import { rethrowStructuredToolError } from "../pages/zhipin/risk-page.ts";
 import { recordZhipinMessageReceivedEvents } from "../recruitment-events/zhipin-events.ts";
 
 const CandidateItemSchema = z.object({
@@ -170,6 +171,7 @@ export const zhipinReadMessages = defineTool({
       recordZhipinMessageReceivedEvents(filtered, ctx.logger);
       return { success: true, candidates: filtered, total: candidates.length, stats };
     } catch (error) {
+      rethrowStructuredToolError(error);
       await session?.fail("读取消息列表失败");
       ctx.logger.warn(
         `Native zhipin message read failed: ${error instanceof Error ? error.message : String(error)}`,

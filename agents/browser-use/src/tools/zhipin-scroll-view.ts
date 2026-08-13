@@ -8,6 +8,7 @@ import {
 import type { ZhipinListSurface } from "../pages/zhipin/list-surfaces.ts";
 import { openZhipinNativePagePort } from "../pages/zhipin/native-page.ts";
 import type { ZhipinNativePagePort } from "../pages/zhipin/native-page.ts";
+import { rethrowStructuredToolError } from "../pages/zhipin/risk-page.ts";
 import type { ScrollDirection } from "../pages/shared/dynamic-list-scroller.ts";
 
 const SCROLL_POSITIONS = ["unknown", "top", "middle", "bottom", "only-page"] as const;
@@ -185,6 +186,7 @@ export const zhipinScrollView = defineTool({
         after: result.after,
       };
     } catch (error) {
+      rethrowStructuredToolError(error);
       await session?.fail("滚动失败");
       const emptySnapshot = createEmptySnapshot();
       return {

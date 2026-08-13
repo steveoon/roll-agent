@@ -1,11 +1,16 @@
 import assert from "node:assert/strict";
 import { afterEach, describe, it } from "node:test";
-import type { AgentContext } from "@roll-agent/sdk";
+import { StructuredToolError, type AgentContext } from "@roll-agent/sdk";
 import { setVisualActivityEnabledForTests } from "../visual-activity.ts";
 import type {
   NativeResumeStitchProgress,
   ZhipinNativePagePort,
 } from "../pages/zhipin/native-page.ts";
+import {
+  ZHIPIN_ACCESS_RESTRICTED_CODE,
+  assertZhipinPageNotRestricted,
+  createZhipinAccessRestrictedError,
+} from "../pages/zhipin/risk-page.ts";
 import {
   setZhipinCaptureResumeDepsForTests,
   zhipinCaptureResume,
@@ -29,6 +34,10 @@ type CapturePageOptions = {
   readonly events: string[];
   readonly progressUpdates?: readonly NativeResumeStitchProgress[];
   readonly blank?: boolean;
+  readonly inspectPage?: {
+    readonly url: string;
+    readonly title: string;
+  };
 };
 
 function createNativePage(options: CapturePageOptions): ZhipinNativePagePort {
@@ -47,6 +56,20 @@ function createNativePage(options: CapturePageOptions): ZhipinNativePagePort {
     },
     async waitForResumeDialog() {
       return { iframeFound: true, dialogFound: true, canvasReady: true };
+    },
+    async inspectPage() {
+      return {
+        targetId: "target-boss",
+        type: "page",
+        title: options.inspectPage?.title ?? "BOSS直聘",
+        url: options.inspectPage?.url ?? "https://www.zhipin.com/web/geek/recommend",
+      };
+    },
+    async assertNotRestricted() {
+      assertZhipinPageNotRestricted({
+        url: options.inspectPage?.url ?? "https://www.zhipin.com/web/geek/recommend",
+        title: options.inspectPage?.title ?? "BOSS直聘",
+      });
     },
     async captureResumeCanvas(
       onProgress?: (progress: NativeResumeStitchProgress) => void | Promise<void>,
@@ -192,5 +215,54 @@ describe("zhipin_capture_resume visual feedback", () => {
 
     const omitted = zhipinCaptureResume.input.safeParse({});
     assert.equal(omitted.success, true);
+  });
+
+  it("rethrows zhipin_access_restricted from openNativePagePort instead of asking to retry", async () => {
+    setZhipinCaptureResumeDepsForTests({
+      openNativePagePort: async () => {
+        throw createZhipinAccessRestrictedError({
+          kind: "ip_block",
+          url: "https://www.zhipin.com/web/passport/zp/403.html?code=31",
+          title: "访问受限",
+        });
+      },
+      writePngFile: async () => {
+        assert.fail("must not write a screenshot after access restriction");
+      },
+      now: () => 1234,
+    });
+
+    await assert.rejects(
+      () => zhipinCaptureResume.execute({}, createTestContext()),
+      (error: unknown) => {
+        assert.ok(error instanceof StructuredToolError);
+        assert.equal(error.payload.code, ZHIPIN_ACCESS_RESTRICTED_CODE);
+        assert.doesNotMatch(error.message, /请重试/u);
+        return true;
+      },
+    );
+  });
+
+  it("throws zhipin_access_restricted after stitching if the live URL became a risk page", async () => {
+    const events: string[] = [];
+    installDeps(
+      createNativePage({
+        events,
+        inspectPage: {
+          url: "https://www.zhipin.com/web/passport/zp/403.html?code=31",
+          title: "访问受限",
+        },
+      }),
+    );
+
+    await assert.rejects(
+      () => zhipinCaptureResume.execute({}, createTestContext()),
+      (error: unknown) => {
+        assert.ok(error instanceof StructuredToolError);
+        assert.equal(error.payload.code, ZHIPIN_ACCESS_RESTRICTED_CODE);
+        return true;
+      },
+    );
+    assert.equal(events.includes("clip"), false);
   });
 });

@@ -227,7 +227,7 @@ click_ref(@eN) 或 type_ref(@eN, text, clear?)
 | `zhipin_exchange_wechat(conversationId?, candidateName?, index?)` | native CDP | 点击「换微信」和确认弹窗，优先按 `conversationId` 定位聊天。 |
 | `zhipin_get_username()` | native CDP | 读取当前登录招聘者用户名；用于 `recruiterUsername` / `recruiterBinding` 链路。 |
 
-失败策略：native backend 不可用时返回 `success:false`，不自动 fallback 到 Playwright。
+失败策略：native backend 不可用时返回 `success:false`，不自动 fallback 到 Playwright。若当前页已是 BOSS 403 / 验证码 / 安全检查 / 反爬登录拦截页，常规 `zhipin_*` 会抛 `zhipin_access_restricted` 并硬停止；**不要刷新、不要换 tool 重试**。403 的 code 31/32 是 IP / 账号级封禁：换 `browserInstance`、换 profile、重开浏览器**同样无效**（同一出口 IP 一损俱损），只能等待页面标明的解封时间或人工处理。排障仍可用 `zhipin_diagnose_browser_state`（可连上风控页）。
 
 ## BOSS直聘推荐 Tools
 

@@ -3,6 +3,7 @@ import { z } from "zod";
 import { NativeVisualActivitySession } from "../native-visual-activity-session.ts";
 import { openZhipinNativePagePort } from "../pages/zhipin/native-page.ts";
 import type { ZhipinNativePagePort } from "../pages/zhipin/native-page.ts";
+import { rethrowStructuredToolError } from "../pages/zhipin/risk-page.ts";
 import {
   ZHIPIN_CANDIDATE_REF_PATTERN,
   isZhipinCandidateTargetCurrent,
@@ -137,6 +138,7 @@ export const zhipinSayHello = defineTool({
         if (hasStableCandidateIdentity(target)) {
           const currentCandidate = await nativePage.inspectRecommendCard(target.index);
           if (!isZhipinCandidateTargetCurrent(target, currentCandidate)) {
+            await nativePage.assertNotRestricted();
             results.push({
               index: target.index,
               candidateRef: target.candidateRef,
@@ -165,6 +167,9 @@ export const zhipinSayHello = defineTool({
           ...(result.error !== undefined ? { error: result.error } : {}),
         });
         recordZhipinCandidateContactedEvent(result, ctx.logger);
+        if (!result.clicked) {
+          await nativePage.assertNotRestricted();
+        }
       }
 
       const summary = {
@@ -180,6 +185,7 @@ export const zhipinSayHello = defineTool({
 
       return { success: summary.failed === 0, results, summary };
     } catch (err) {
+      rethrowStructuredToolError(err);
       const error = err instanceof Error ? err.message : String(err);
       await session?.fail(error);
       const results = candidateTargets.map((target) => ({

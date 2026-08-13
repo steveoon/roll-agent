@@ -4,6 +4,7 @@ import { NativeVisualActivitySession } from "../native-visual-activity-session.t
 import { DYNAMIC_LIST_COLLECTION_STOP_REASONS } from "../pages/shared/dynamic-list-scroller.ts";
 import { openZhipinNativePagePort } from "../pages/zhipin/native-page.ts";
 import type { ZhipinNativePagePort } from "../pages/zhipin/native-page.ts";
+import { rethrowStructuredToolError } from "../pages/zhipin/risk-page.ts";
 import { rememberZhipinCandidateRefs } from "../pages/zhipin/semantic-refs.ts";
 
 const CandidateCardSchema = z.object({
@@ -163,6 +164,7 @@ export const zhipinGetCandidateList = defineTool({
         ...(scrollStats !== undefined ? { scrollStats } : {}),
       };
     } catch (error) {
+      rethrowStructuredToolError(error);
       await session?.fail("读取推荐列表失败");
       return {
         success: false,

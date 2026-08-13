@@ -3,6 +3,7 @@ import { z } from "zod";
 import { NativeVisualActivitySession } from "../native-visual-activity-session.ts";
 import { openZhipinNativePagePort } from "../pages/zhipin/native-page.ts";
 import type { ZhipinNativePagePort } from "../pages/zhipin/native-page.ts";
+import { rethrowStructuredToolError } from "../pages/zhipin/risk-page.ts";
 import { pickBestUsername } from "../pages/zhipin/username.ts";
 
 const OutputSchema = z.object({
@@ -54,7 +55,7 @@ export const zhipinGetUsername = defineTool({
       nativePage = await deps.openNativePagePort();
       session = deps.createNativeVisualActivitySession(nativePage);
       await session.begin("正在识别登录账号");
-      await session.highlightSelector("header, #header, [role=\"banner\"], [role=\"navigation\"]", {
+      await session.highlightSelector('header, #header, [role="banner"], [role="navigation"]', {
         label: "正在识别登录账号",
         padding: 10,
       });
@@ -76,6 +77,7 @@ export const zhipinGetUsername = defineTool({
         source: result.source,
       };
     } catch (error) {
+      rethrowStructuredToolError(error);
       await session?.fail("获取用户名失败");
 
       return {

@@ -9,6 +9,7 @@ import { z } from "zod";
 import { NativeVisualActivitySession } from "../native-visual-activity-session.ts";
 import { resolveConversationSignals } from "../pages/zhipin/job-signals.ts";
 import { openZhipinNativePagePort } from "../pages/zhipin/native-page.ts";
+import { rethrowStructuredToolError } from "../pages/zhipin/risk-page.ts";
 import type {
   NativeCandidateChatDetails,
   NativeSelectedChatTarget,
@@ -451,6 +452,7 @@ export const zhipinGetCandidateInfo = defineTool({
         stats,
       };
     } catch (error) {
+      rethrowStructuredToolError(error);
       await session?.fail("提取聊天记录失败");
       ctx.logger.warn(
         `Native zhipin candidate info read failed: ${error instanceof Error ? error.message : String(error)}`,

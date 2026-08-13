@@ -629,9 +629,7 @@ async function appendNativeWatchSnapshots(
     await delay(Math.min(500, remainingMs));
   }
 
-  return nativeTimeline
-    .slice(startedLength)
-    .some((snapshot) => snapshot.urlChangedFromPrevious);
+  return nativeTimeline.slice(startedLength).some((snapshot) => snapshot.urlChangedFromPrevious);
 }
 
 function readPageEvaluateSummaryFromUnknown(value: unknown): PageEvaluateSummary {
@@ -707,9 +705,7 @@ async function readNativeCdpPageEvaluateSummary(
   return readPageEvaluateSummaryFromUnknown(value);
 }
 
-async function readNativeCdpDomSummary(
-  client: NativeCdpController,
-): Promise<NativeCdpDomSummary> {
+async function readNativeCdpDomSummary(client: NativeCdpController): Promise<NativeCdpDomSummary> {
   const documentPayload = await client.getDocument({
     depth: 1,
     pierce: false,
@@ -855,17 +851,14 @@ async function runNativeCdpProbe(params: {
   let client: NativeCdpController | undefined;
 
   try {
-    const connectPhase = await measurePhase(
-      "native-ws-connect",
-      async () => {
-        if (webSocketDebuggerUrl === undefined || webSocketDebuggerUrl.length === 0) {
-          throw new Error("Native CDP target does not expose webSocketDebuggerUrl.");
-        }
-        return await params.runtime.connectNativePage(params.target, {
-          allowUnsafeRuntimeEnableForDiagnostics: true,
-        });
-      },
-    );
+    const connectPhase = await measurePhase("native-ws-connect", async () => {
+      if (webSocketDebuggerUrl === undefined || webSocketDebuggerUrl.length === 0) {
+        throw new Error("Native CDP target does not expose webSocketDebuggerUrl.");
+      }
+      return await params.runtime.connectNativePage(params.target, {
+        allowUnsafeRuntimeEnableForDiagnostics: true,
+      });
+    });
     params.phases.push(connectPhase.phaseResult);
     client = connectPhase.result;
     summary.connected = connectPhase.phaseResult.success;
@@ -1446,7 +1439,7 @@ export const zhipinDiagnoseBrowserState = defineTool({
 
     if (requestedPhase === "resume-canvas") {
       const resumePhase = await measurePhase("resume-canvas", async () => {
-        const nativePage = await openZhipinNativePagePort();
+        const nativePage = await openZhipinNativePagePort({ skipRiskGate: true });
         try {
           const dialogState = await nativePage.waitForResumeDialog(1_000);
           const geometry = dialogState.canvasReady

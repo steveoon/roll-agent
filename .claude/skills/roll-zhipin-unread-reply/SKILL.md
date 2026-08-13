@@ -217,16 +217,18 @@ Skipped candidates are logged in JSONL with `"stage":"skip"` and `"reason":…`:
 
 Logic: `scripts/evaluate-skip-rules.mjs`
 
-## CAPTCHA — stop immediately
+## CAPTCHA / 风控页 — stop immediately
 
 Script exits **2** when:
 
-- URL contains `/web/passport/zp/verify.html`
+- URL contains `/web/passport/zp/verify.html` (or other verify/security paths)
 - Title contains `安全验证`
+- URL is a BOSS 403 page (`/web/passport/zp/403.html`, `/web/common/403.html`, …) or title contains `访问受限`
+- Any `zhipin_*` or snapshot result with `zhipin_access_restricted` (including the unread-list loop and `open_chat` recovery — **do not force reload**)
 - Snapshot text matches verification keywords
 - **2** consecutive empty unread reads
 
-Tell the user to complete verification manually; do not retry immediately.
+Tell the user to complete verification or wait for the listed unban time; **do not retry**, **do not reload**, and do not switch to another `zhipin_*` tool. JSONL reason is `captcha` or `access_restricted`.
 
 ## Agent checklist
 
@@ -244,7 +246,7 @@ Tell the user to complete verification manually; do not retry immediately.
 | --- | --- |
 | 0 | Done or no unread |
 | 1 | Missing `roll`/`node` or bad args |
-| 2 | Captcha — user action required |
+| 2 | Captcha or access-restricted page — user action / wait required |
 | 3 | Consecutive failures |
 
 ## References

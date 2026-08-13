@@ -2,6 +2,7 @@ import { defineTool } from "@roll-agent/sdk";
 import { z } from "zod";
 import { NativeVisualActivitySession } from "../native-visual-activity-session.ts";
 import { openZhipinNativePagePort } from "../pages/zhipin/native-page.ts";
+import { rethrowStructuredToolError } from "../pages/zhipin/risk-page.ts";
 import type { ZhipinNativePagePort } from "../pages/zhipin/native-page.ts";
 import {
   buildZhipinCandidateRef,
@@ -141,6 +142,7 @@ export const zhipinOpenResume = defineTool({
         ...(resumeReady ? {} : { error: "简历弹窗已出现，但 canvas 尚未就绪" }),
       };
     } catch (error) {
+      rethrowStructuredToolError(error);
       await session?.fail("打开简历失败");
       ctx.logger.warn(
         `Native zhipin open resume failed: ${error instanceof Error ? error.message : String(error)}`,

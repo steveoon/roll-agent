@@ -1,6 +1,6 @@
 import type { BrowserContextManager, BrowserPageInfo } from "@roll-agent/browser";
 import { BrowserActionApprovalSchema, BrowserPageInfoSchema } from "@roll-agent/browser";
-import { defineTool, StructuredToolError } from "@roll-agent/sdk";
+import { defineTool } from "@roll-agent/sdk";
 import { z } from "zod";
 import { NativeVisualActivitySession } from "../native-visual-activity-session.ts";
 import { openZhipinNativePagePort } from "../pages/zhipin/native-page.ts";
@@ -8,6 +8,7 @@ import {
   ZHIPIN_CHAT_RELOAD_SKIPPED_REASONS,
   type ZhipinNativePagePort,
 } from "../pages/zhipin/native-page.ts";
+import { rethrowStructuredToolError } from "../pages/zhipin/risk-page.ts";
 import { ZHIPIN_SELECTORS } from "../pages/zhipin/selectors.ts";
 import { toNativePageInfo } from "../page-info.ts";
 import { getContextManager, getRuntime } from "../runtime-holder.ts";
@@ -223,10 +224,7 @@ export const zhipinOpenChatPage = defineTool({
         page: await buildPageInfo(ctxManager, nativePage),
       };
     } catch (error) {
-      if (error instanceof StructuredToolError) {
-        await session?.fail("沟通页操作未获授权");
-        throw error;
-      }
+      rethrowStructuredToolError(error);
       await session?.fail("切换沟通页失败");
       return {
         success: false,

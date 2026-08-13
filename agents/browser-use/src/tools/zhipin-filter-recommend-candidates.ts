@@ -3,6 +3,7 @@ import { z } from "zod";
 import { NativeVisualActivitySession } from "../native-visual-activity-session.ts";
 import { openZhipinNativePagePort } from "../pages/zhipin/native-page.ts";
 import type { ZhipinNativePagePort } from "../pages/zhipin/native-page.ts";
+import { rethrowStructuredToolError } from "../pages/zhipin/risk-page.ts";
 import {
   ZHIPIN_RECOMMEND_ACTIVITY_VALUES,
   ZHIPIN_RECOMMEND_FILTER_APPLY_MODE_VALUES,
@@ -410,6 +411,7 @@ export const zhipinFilterRecommendCandidates = defineTool({
 
       return toToolOutput(result);
     } catch (error) {
+      rethrowStructuredToolError(error);
       const message = error instanceof Error ? error.message : "推荐筛选失败";
       await session?.fail(message);
       return toToolOutput({

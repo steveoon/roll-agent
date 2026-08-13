@@ -25,6 +25,7 @@ CHECK_AGENT_HEALTH="$SCRIPT_DIR/check-agent-health.mjs"
 VALIDATE_BROWSER_SELECTION="$SCRIPT_DIR/validate-browser-selection.mjs"
 DETECT_EXPIRED="$SCRIPT_DIR/detect-expired-banner.mjs"
 PARSE_PAGE_META="$SCRIPT_DIR/parse-page-meta.mjs"
+DETECT_ACCESS_STOP="$SCRIPT_DIR/detect-access-stop.mjs"
 
 AGENT="${ROLL_AGENT:-browser-use-agent}"
 BROWSER_INSTANCE="${ROLL_BROWSER_INSTANCE:-}"
@@ -66,7 +67,7 @@ Options:
   --keep-workdir         Do not delete temp workdir (debug)
   -h, --help
 
-Exit codes: 0 ok | 1 usage | 2 captcha | 3 consecutive failures
+Exit codes: 0 ok | 1 usage | 2 captcha/access_restricted | 3 consecutive failures
 EOF
 }
 
@@ -119,7 +120,8 @@ for helper in \
   "$FIND_UNREAD_REF" "$PARSE_READ_CANDIDATE" "$VALIDATE_OPEN_CHAT" "$FORMAT_OPEN_CHAT_FAILURE" \
   "$PARSE_GENERATE_PREVIEW" "$FORMAT_PREVIEW_FAILURE" "$BUILD_SEND_PAYLOAD" "$APPLY_SEND_BUNDLE" \
   "$COMPOSE_RESULT_INPUT" "$FORMAT_CANDIDATE_RESULT" "$PARSE_SEND_RESULT" "$VALIDATE_SEND" \
-  "$CHECK_AGENT_HEALTH" "$VALIDATE_BROWSER_SELECTION" "$DETECT_EXPIRED" "$PARSE_PAGE_META"; do
+  "$CHECK_AGENT_HEALTH" "$VALIDATE_BROWSER_SELECTION" "$DETECT_EXPIRED" "$PARSE_PAGE_META" \
+  "$DETECT_ACCESS_STOP"; do
   if [[ ! -f "$helper" ]]; then
     echo "error: missing helper script: $helper" >&2
     exit 1
@@ -214,6 +216,24 @@ append_result() {
   append_result_json "$1"
 }
 
+stop_if_risk_page() {
+  local out="$1"
+  local stage="${2:-tool}"
+  local name="${3:-}"
+  local cid="${4:-}"
+  local detected stop_flag reason ts
+  detected=$(printf '%s' "$out" | node "$DETECT_ACCESS_STOP" 2>/dev/null) || detected='{"stop":false}'
+  stop_flag=$(printf '%s' "$detected" | node -e "console.log(JSON.parse(require('fs').readFileSync(0,'utf8')).stop?'1':'0');" 2>/dev/null) || stop_flag="0"
+  if [[ "$stop_flag" != "1" ]]; then
+    return 0
+  fi
+  reason=$(printf '%s' "$detected" | node -e "console.log(JSON.parse(require('fs').readFileSync(0,'utf8')).reason||'access_restricted');" 2>/dev/null) || reason="access_restricted"
+  ts=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+  append_result "{\"ts\":\"$ts\",\"name\":\"$name\",\"conversationId\":\"$cid\",\"ok\":false,\"stage\":\"$stage\",\"reason\":\"$reason\"}"
+  log "STOP: $reason ($stage) — do not reload or retry"
+  exit 2
+}
+
 format_send_result_line() {
   local mode="$1"
   local line_ts="$2"
@@ -272,7 +292,9 @@ ensure_browser_instance_selection() {
 
 # Return to chat list only (no 未读 click).
 ensure_chat_list() {
-  roll_no_input zhipin_open_chat_page | extract_json_object >/dev/null || true
+  local out
+  out=$(roll_no_input zhipin_open_chat_page)
+  stop_if_risk_page "$out" "open_chat_page"
 }
 
 # Apply 「未读」 once per current SPA document; force reload invalidates this state.
@@ -288,6 +310,7 @@ apply_unread_filter_if_needed() {
   write_json "$WORK_DIR/snapshot.json" '{"interactiveOnly":true,"maxNodes":500}'
   local snap ref
   snap=$(roll_json_file browser_snapshot "$WORK_DIR/snapshot.json")
+  stop_if_risk_page "$snap" "unread_filter"
   ref=$(printf '%s' "$snap" | node "$FIND_UNREAD_REF" 2>/dev/null) || ref=""
   if [[ -n "$ref" ]]; then
     log "click 未读 filter $ref (current SPA document)"
@@ -319,6 +342,7 @@ fetch_next_unread() {
   write_json "$WORK_DIR/read.json" '{"onlyUnread":true,"limit":1,"autoScroll":false}'
   local out
   out=$(roll_json_file zhipin_read_messages "$WORK_DIR/read.json")
+  stop_if_risk_page "$out" "read_messages"
   printf '%s' "$out" | node "$PARSE_READ_CANDIDATE" 2>/dev/null || true
 }
 
@@ -344,6 +368,7 @@ process_one() {
   log "zhipin_open_chat $name (list click)"
   local open_out
   open_out=$(roll_json_file zhipin_open_chat "$WORK_DIR/c.json")
+  stop_if_risk_page "$open_out" "open_chat" "$name" "$cid"
   if ! printf '%s' "$open_out" | node "$VALIDATE_OPEN_CHAT" "$cid" 2>/dev/null; then
     local initial_open_path reload_path retry_open_path reload_out failure_line
     initial_open_path="$WORK_DIR/open-chat-initial.out"
@@ -355,11 +380,13 @@ process_one() {
     write_json "$WORK_DIR/reload-chat.json" "{\"forceReload\":true,\"expectedConversationId\":\"$cid\"}"
     reload_out=$(roll_json_file zhipin_open_chat_page "$WORK_DIR/reload-chat.json")
     write_text "$reload_path" "$reload_out"
+    stop_if_risk_page "$reload_out" "open_chat_page" "$name" "$cid"
     invalidate_unread_filter_after_reload
 
     log "retry zhipin_open_chat $name after force reload"
     open_out=$(roll_json_file zhipin_open_chat "$WORK_DIR/c.json")
     write_text "$retry_open_path" "$open_out"
+    stop_if_risk_page "$open_out" "open_chat" "$name" "$cid"
     if ! printf '%s' "$open_out" | node "$VALIDATE_OPEN_CHAT" "$cid" 2>/dev/null; then
       failure_line=$(node "$FORMAT_OPEN_CHAT_FAILURE" \
         "$ts" "$name" "$cid" "$initial_open_path" "$reload_path" "$retry_open_path" 2>/dev/null) \
@@ -378,15 +405,21 @@ process_one() {
   write_json "$WORK_DIR/snap-preflight.json" '{"interactiveOnly":false,"maxNodes":250}'
   local snap page_url page_title
   snap=$(roll_json_file browser_snapshot "$WORK_DIR/snap-preflight.json")
-  local page_meta captcha_flag
-  page_meta=$(printf '%s' "$snap" | node "$PARSE_PAGE_META" 2>/dev/null) || page_meta='{"url":"","title":"","captcha":false}'
+  local page_meta captcha_flag blocked_flag
+  page_meta=$(printf '%s' "$snap" | node "$PARSE_PAGE_META" 2>/dev/null) || page_meta='{"url":"","title":"","captcha":false,"blocked":false}'
   page_url=$(printf '%s' "$page_meta" | node -e "console.log(JSON.parse(require('fs').readFileSync(0,'utf8')).url||'');" 2>/dev/null) || page_url=""
   page_title=$(printf '%s' "$page_meta" | node -e "console.log(JSON.parse(require('fs').readFileSync(0,'utf8')).title||'');" 2>/dev/null) || page_title=""
   captcha_flag=$(printf '%s' "$page_meta" | node -e "console.log(JSON.parse(require('fs').readFileSync(0,'utf8')).captcha?'1':'0');" 2>/dev/null) || captcha_flag="0"
+  blocked_flag=$(printf '%s' "$page_meta" | node -e "console.log(JSON.parse(require('fs').readFileSync(0,'utf8')).blocked?'1':'0');" 2>/dev/null) || blocked_flag="0"
 
   if [[ "$captcha_flag" == "1" ]]; then
     append_result "{\"ts\":\"$ts\",\"name\":\"$name\",\"conversationId\":\"$cid\",\"ok\":false,\"stage\":\"preflight\",\"reason\":\"captcha\"}"
     log "STOP: captcha (url/title)"
+    exit 2
+  fi
+  if [[ "$blocked_flag" == "1" ]]; then
+    append_result "{\"ts\":\"$ts\",\"name\":\"$name\",\"conversationId\":\"$cid\",\"ok\":false,\"stage\":\"preflight\",\"reason\":\"access_restricted\"}"
+    log "STOP: access_restricted (url/title)"
     exit 2
   fi
 
@@ -403,6 +436,7 @@ process_one() {
   log "zhipin_get_candidate_info (current chat, no re-open)"
   local info_out
   info_out=$(roll_json_file zhipin_get_candidate_info "$WORK_DIR/info.json")
+  stop_if_risk_page "$info_out" "get_candidate_info" "$name" "$cid"
   write_json "$WORK_DIR/info-raw.json" "$(printf '%s' "$info_out" | extract_json_object 2>/dev/null || echo '{}')"
 
   # 3. skip rules (file-based payload avoids shell quoting issues)
@@ -442,6 +476,7 @@ process_one() {
   log "zhipin_generate_reply_preview (current chat, no re-open)"
   local preview_out preview_meta prepared_id has_dual send_bundle failure_line
   preview_out=$(roll_json_file zhipin_generate_reply_preview "$WORK_DIR/gp.json")
+  stop_if_risk_page "$preview_out" "preview" "$name" "$cid"
   preview_meta=$(printf '%s' "$preview_out" | node "$PARSE_GENERATE_PREVIEW" 2>/dev/null) || preview_meta=""
   prepared_id=$(printf '%s' "$preview_meta" | node -e 'let j={};try{j=JSON.parse(require("fs").readFileSync(0,"utf8"));}catch{};process.stdout.write(j.preparedReplyId||"");' 2>/dev/null) || prepared_id=""
   has_dual=$(printf '%s' "$preview_meta" | node -e 'let j={};try{j=JSON.parse(require("fs").readFileSync(0,"utf8"));}catch{};process.stdout.write(j.hasDualDraft?"1":"0");' 2>/dev/null) || has_dual="0"
@@ -476,6 +511,7 @@ process_one() {
   # 5. sp.json → send
   local send_out send_result send_ok
   send_out=$(roll_json_file zhipin_send_prepared_reply "$WORK_DIR/sp.json")
+  stop_if_risk_page "$send_out" "send" "$name" "$cid"
   send_result=$(printf '%s' "$send_out" | node "$PARSE_SEND_RESULT" 2>/dev/null) || send_result='{"ok":false}'
   if printf '%s' "$send_result" | node -e 'let j={};try{j=JSON.parse(require("fs").readFileSync(0,"utf8"));}catch{};process.exit(j.ok?0:1);' 2>/dev/null; then
     send_ok="1"
@@ -501,7 +537,10 @@ process_one() {
   if [[ "$EXCHANGE_WECHAT" -eq 1 ]]; then
     write_json "$WORK_DIR/wx.json" '{}'
     log "zhipin_exchange_wechat (current chat)"
-    roll_json_file zhipin_exchange_wechat "$WORK_DIR/wx.json" | extract_json_object >/dev/null || {
+    local wx_out
+    wx_out=$(roll_json_file zhipin_exchange_wechat "$WORK_DIR/wx.json")
+    stop_if_risk_page "$wx_out" "exchange_wechat" "$name" "$cid"
+    printf '%s' "$wx_out" | extract_json_object >/dev/null || {
       log "warn: exchange_wechat failed for $name"
     }
   fi

@@ -6,6 +6,7 @@ import type {
   NativeCandidateChatDetails,
   ZhipinNativePagePort,
 } from "../pages/zhipin/native-page.ts";
+import { rethrowStructuredToolError } from "../pages/zhipin/risk-page.ts";
 import { recordZhipinWechatRequestedEvent } from "../recruitment-events/zhipin-events.ts";
 import { maybeBringToFront } from "../browser-foreground.ts";
 
@@ -176,6 +177,7 @@ export const zhipinExchangeWechat = defineTool({
       await session.fail(result.error ?? "换微信失败");
       return result;
     } catch (err) {
+      rethrowStructuredToolError(err);
       const error = err instanceof Error ? err.message : String(err);
       await session?.fail(error);
       return { success: false, exchanged: false, error };

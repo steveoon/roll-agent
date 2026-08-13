@@ -5,6 +5,7 @@ import { z } from "zod";
 import { NativeVisualActivitySession } from "../native-visual-activity-session.ts";
 import { openZhipinNativePagePort } from "../pages/zhipin/native-page.ts";
 import type { ZhipinNativePagePort } from "../pages/zhipin/native-page.ts";
+import { rethrowStructuredToolError } from "../pages/zhipin/risk-page.ts";
 import { ZHIPIN_SELECTORS } from "../pages/zhipin/selectors.ts";
 import { toNativePageInfo } from "../page-info.ts";
 import { getContextManager } from "../runtime-holder.ts";
@@ -130,6 +131,7 @@ export const zhipinOpenRecommendPage = defineTool({
         page: await buildPageInfo(ctxManager, nativePage),
       };
     } catch (error) {
+      rethrowStructuredToolError(error);
       await session?.fail("切换推荐牛人页失败");
       return {
         success: false,

@@ -8,6 +8,7 @@ import type {
   NativeSelectedChatTarget,
   ZhipinNativePagePort,
 } from "../pages/zhipin/native-page.ts";
+import { rethrowStructuredToolError } from "../pages/zhipin/risk-page.ts";
 import { matchesRecruiterBinding } from "../pages/zhipin/recruiter-identity.ts";
 import { pickBestUsername } from "../pages/zhipin/username.ts";
 import { getReplyAuthorityKeysLoaded } from "../runtime-holder.ts";
@@ -255,6 +256,7 @@ export async function sendSignedZhipinReply(
     await session.succeed("已发送回复");
     return { success: true, sentMessage };
   } catch (err) {
+    rethrowStructuredToolError(err);
     const error = err instanceof Error ? err.message : String(err);
     await session?.fail(error);
     return { success: false, sentMessage, error };
