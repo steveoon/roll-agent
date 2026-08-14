@@ -1322,6 +1322,33 @@ test("approval rejection reasons use the same non-empty contract", () => {
   );
 });
 
+test("approval respond 的可选 scope 字段与旧客户端/旧字段双向兼容", () => {
+  const base = {
+    requestId: IDS.turn,
+    threadId: IDS.thread,
+    turnId: IDS.turn,
+    approvalId: IDS.approval,
+    decision: "approve",
+  } as const;
+  assert.equal(
+    runtimeMethodSchemas[RUNTIME_METHODS.approvalRespond].params.parse({
+      ...base,
+      scope: "session",
+    }).scope,
+    "session",
+  );
+  assert.equal(
+    runtimeMethodSchemas[RUNTIME_METHODS.approvalRespond].params.parse(base).scope,
+    undefined,
+  );
+  assert.throws(() =>
+    runtimeMethodSchemas[RUNTIME_METHODS.approvalRespond].params.parse({
+      ...base,
+      scope: "forever",
+    }),
+  );
+});
+
 test("approval resolution remains available from v1.1 onward", () => {
   const envelope = {
     runtimeInstanceId: IDS.runtime,

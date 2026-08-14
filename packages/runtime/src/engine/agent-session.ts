@@ -2031,8 +2031,11 @@ export class AgentSession {
     return decision;
   }
 
-  approve(approvalId: string): boolean {
-    return this.gate.resolve(approvalId, { approved: true });
+  approve(approvalId: string, scope?: "once" | "session"): boolean {
+    return this.gate.resolve(approvalId, {
+      approved: true,
+      ...(scope !== undefined ? { scope } : {}),
+    });
   }
 
   reject(approvalId: string, reason?: string): boolean {

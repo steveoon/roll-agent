@@ -886,6 +886,73 @@ test("AgentSession 写类动作触发 confirmation，approve 后执行", async (
   assert.ok(toolResult && toolResult.type === "tool-result" && toolResult.isError === false);
 });
 
+test("AgentSession.approve 的 scope 透传到批准记忆：workdir 内二次编辑免于再次确认", async () => {
+  const workdir = mkdtempSync(join(tmpdir(), "agent-session-approve-scope-"));
+  writeFileSync(join(workdir, "a.txt"), "第一行\n第二行", "utf8");
+  const model = sequencedModel([
+    toolCallStep("roll__read_file", { path: "a.txt" }),
+    toolCallStep("roll__edit_file", {
+      file_path: "a.txt",
+      edits: [{ old_string: "第一行", new_string: "改后一" }],
+    }),
+    textStep("已编辑第一行"),
+    toolCallStep("roll__read_file", { path: "a.txt" }),
+    toolCallStep("roll__edit_file", {
+      file_path: "a.txt",
+      edits: [{ old_string: "第二行", new_string: "改后二" }],
+    }),
+    textStep("已编辑第二行"),
+  ]);
+  const session = new AgentSession({
+    id: "approve-scope-passthrough",
+    model,
+    sources: [],
+    fileTools: { workdir },
+    maxSteps: 8,
+    policy: new DefaultToolPolicy(),
+  });
+
+  const firstEvents: SessionEvent[] = [];
+  for await (const event of session.send("编辑第一行")) {
+    firstEvents.push(event);
+    if (event.type === "confirmation-required") {
+      session.approve(event.approvalId, "session");
+    }
+  }
+  const firstConfirmations = firstEvents.filter((event) => event.type === "confirmation-required");
+  assert.equal(firstConfirmations.length, 1);
+  const firstEditResult = firstEvents.find(
+    (event) => event.type === "tool-result" && event.toolName === "edit_file",
+  );
+  assert.ok(
+    firstEditResult && firstEditResult.type === "tool-result" && firstEditResult.isError === false,
+  );
+
+  const secondEvents: SessionEvent[] = [];
+  for await (const event of session.send("编辑第二行")) {
+    secondEvents.push(event);
+    if (event.type === "confirmation-required") {
+      session.approve(event.approvalId, "session");
+    }
+  }
+  const secondConfirmations = secondEvents.filter(
+    (event) => event.type === "confirmation-required",
+  );
+  assert.equal(
+    secondConfirmations.length,
+    0,
+    "approve 的 scope=session 应已写入批准记忆，第二次编辑不应再次触发确认",
+  );
+  const secondEditResult = secondEvents.find(
+    (event) => event.type === "tool-result" && event.toolName === "edit_file",
+  );
+  assert.ok(
+    secondEditResult &&
+      secondEditResult.type === "tool-result" &&
+      secondEditResult.isError === false,
+  );
+});
+
 test("AgentSession 未配置 turnTimeoutMs 时 confirmation 携带默认交互 deadline", async () => {
   let calls = 0;
   const model = sequencedModel([

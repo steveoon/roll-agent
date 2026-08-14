@@ -130,7 +130,7 @@ export interface RuntimeApprovalIdentity {
 }
 
 export type RuntimeApprovalDecision =
-  | { readonly decision: "approve" }
+  | { readonly decision: "approve"; readonly scope?: "once" | "session" }
   | { readonly decision: "reject"; readonly reason?: string };
 
 interface ActiveTurnState {
@@ -974,7 +974,10 @@ export class RuntimeService {
         this.resolvePendingApproval(
           params,
           params.decision === "approve"
-            ? { decision: "approve" }
+            ? {
+                decision: "approve",
+                ...(params.scope !== undefined ? { scope: params.scope } : {}),
+              }
             : {
                 decision: "reject",
                 ...(params.reason !== undefined ? { reason: params.reason } : {}),
@@ -991,7 +994,7 @@ export class RuntimeService {
     const pending = this.requirePendingApproval(identity);
     const resolved =
       decision.decision === "approve"
-        ? pending.session.approve(identity.approvalId)
+        ? pending.session.approve(identity.approvalId, decision.scope)
         : pending.session.reject(identity.approvalId, decision.reason);
     this.pendingApprovals.delete(identity.approvalId);
     if (!resolved) {

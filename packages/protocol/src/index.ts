@@ -1365,6 +1365,7 @@ export const approvalRespondParamsSchema = z
     approvalId: approvalIdSchema,
     decision: z.enum(["approve", "reject"]),
     reason: approvalRejectReasonSchema.optional(),
+    scope: z.enum(["once", "session"]).optional(),
   })
   .strict()
   .readonly();

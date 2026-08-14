@@ -101,10 +101,12 @@ function createFixture(store: ThreadStore): {
   readonly engine: RuntimeServiceEngine;
   readonly session: RuntimeServiceSession;
   readonly sendCount: () => number;
+  readonly lastApproveScope: () => string | undefined;
 } {
   let sends = 0;
   let resolveDecision: (() => void) | undefined;
   let cancelled = false;
+  let approveScope: string | undefined;
 
   const session: RuntimeServiceSession = {
     id: IDS.thread,
@@ -156,10 +158,11 @@ function createFixture(store: ThreadStore): {
       yield { type: "text-delta", delta: "completed" };
       yield { type: "message-finish", text: "completed" };
     },
-    approve(approvalId) {
+    approve(approvalId, scope) {
       if (approvalId !== IDS.approval || resolveDecision === undefined) {
         return false;
       }
+      approveScope = scope;
       resolveDecision();
       resolveDecision = undefined;
       return true;
@@ -203,7 +206,7 @@ function createFixture(store: ThreadStore): {
       return session;
     },
   };
-  return { engine, session, sendCount: () => sends };
+  return { engine, session, sendCount: () => sends, lastApproveScope: () => approveScope };
 }
 
 function createImmediateFixture(store: ThreadStore): {
@@ -337,6 +340,93 @@ test("RuntimeService keeps pending approval on decision failure and cancels thro
     const failed = events.find((event) => event.event.type === "turn.failed");
     assert.ok(failed?.event.type === "turn.failed");
     assert.equal(failed.event.message, "GUI approval handler failed");
+  } finally {
+    await service.close();
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("RuntimeService respondApproval 将 params.scope 透传进 session.approve", async () => {
+  const dir = tempDir();
+  const store = new ThreadStore(dir);
+  const fixture = createFixture(store);
+  const service = new RuntimeService(fixture.engine, store, { runtimeVersion: "0.9.0-test" });
+  try {
+    service.initialize({
+      protocolVersions: [RUNTIME_PROTOCOL_VERSION],
+      client: { name: "scope-passthrough-test", version: "1.0.0" },
+    });
+    await service.createThread(
+      runtimeMethodSchemas["thread.create"].params.parse({
+        requestId: IDS.requestCreate,
+        title: "Scope passthrough",
+      }),
+    );
+    await service.startTurn(
+      runtimeMethodSchemas["turn.start"].params.parse({
+        requestId: IDS.requestFirstTurn,
+        threadId: IDS.thread,
+        turnId: IDS.firstTurn,
+        input: { text: "trigger approval" },
+      }),
+    );
+    await nextTick();
+
+    await service.respondApproval(
+      runtimeMethodSchemas["approval.respond"].params.parse({
+        requestId: IDS.requestApprove,
+        threadId: IDS.thread,
+        turnId: IDS.firstTurn,
+        approvalId: IDS.approval,
+        decision: "approve",
+        scope: "session",
+      }),
+    );
+    assert.equal(fixture.lastApproveScope(), "session");
+  } finally {
+    await service.close();
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("RuntimeService respondApproval 不带 scope 时 session.approve 收到 undefined", async () => {
+  const dir = tempDir();
+  const store = new ThreadStore(dir);
+  const fixture = createFixture(store);
+  const service = new RuntimeService(fixture.engine, store, { runtimeVersion: "0.9.0-test" });
+  try {
+    service.initialize({
+      protocolVersions: [RUNTIME_PROTOCOL_VERSION],
+      client: { name: "scope-omitted-test", version: "1.0.0" },
+    });
+    await service.createThread(
+      runtimeMethodSchemas["thread.create"].params.parse({
+        requestId: IDS.requestCreate,
+        title: "Scope omitted",
+      }),
+    );
+    await service.startTurn(
+      runtimeMethodSchemas["turn.start"].params.parse({
+        requestId: IDS.requestFirstTurn,
+        threadId: IDS.thread,
+        turnId: IDS.firstTurn,
+        input: { text: "trigger approval" },
+      }),
+    );
+    await nextTick();
+
+    await service.respondApproval(
+      runtimeMethodSchemas["approval.respond"].params.parse({
+        requestId: IDS.requestApprove,
+        threadId: IDS.thread,
+        turnId: IDS.firstTurn,
+        approvalId: IDS.approval,
+        decision: "approve",
+      }),
+    );
+    assert.equal(fixture.lastApproveScope(), undefined);
   } finally {
     await service.close();
     store.close();
