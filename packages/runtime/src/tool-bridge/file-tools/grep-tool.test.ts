@@ -113,6 +113,42 @@ test("超长命中行内容超过 500 字符时截断", async () => {
   assert.ok(!text.includes(longLine));
 });
 
+test("path 直接指向单个文件时仍能正确解析命中（依赖 --with-filename）", async () => {
+  const workdir = fixtureWorkdir("grep-singlefile-");
+  const filePath = join(workdir, "a.ts");
+  writeFileSync(filePath, 'function foo() {\n  console.log("hello");\n}\n', "utf8");
+  const settings = resolveFileToolsSettings({ workdir });
+  const result = await executeGrep(settings, { pattern: "foo", path: filePath });
+  assert.equal(result.outcome.kind, TOOL_OUTCOME_KINDS.success);
+  const text = String(result.display);
+  assert.ok(text.includes(filePath));
+  assert.ok(text.includes("    1→function foo() {"));
+});
+
+test("单文件命中数超过 max_results 时按全局计数截断并提示", async () => {
+  const workdir = fixtureWorkdir("grep-percap-over-");
+  const content = Array.from({ length: 60 }, (_, index) => `hit-${String(index)}`).join("\n");
+  writeFileSync(join(workdir, "a.txt"), `${content}\n`, "utf8");
+  const settings = resolveFileToolsSettings({ workdir });
+  const result = await executeGrep(settings, { pattern: "hit-", max_results: 50 });
+  const text = String(result.display);
+  const arrowCount = (text.match(/→/gu) ?? []).length;
+  assert.equal(arrowCount, 50);
+  assert.match(text, /结果过多已截断/u);
+});
+
+test("单文件命中数恰好等于 max_results 时不误报截断", async () => {
+  const workdir = fixtureWorkdir("grep-percap-exact-");
+  const content = Array.from({ length: 50 }, (_, index) => `hit-${String(index)}`).join("\n");
+  writeFileSync(join(workdir, "a.txt"), `${content}\n`, "utf8");
+  const settings = resolveFileToolsSettings({ workdir });
+  const result = await executeGrep(settings, { pattern: "hit-", max_results: 50 });
+  const text = String(result.display);
+  const arrowCount = (text.match(/→/gu) ?? []).length;
+  assert.equal(arrowCount, 50);
+  assert.doesNotMatch(text, /结果过多已截断/u);
+});
+
 function executeOptions(
   overrides: Partial<ToolExecutionOptions<unknown>> = {},
 ): ToolExecutionOptions<unknown> {

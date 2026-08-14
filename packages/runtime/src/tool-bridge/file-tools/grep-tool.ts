@@ -24,7 +24,6 @@ import { FILE_TOOLS_AGENT_NAME, type ResolvedFileToolsSettings } from "./setting
 export const GREP_TOOL_NAME = "grep";
 
 const DEFAULT_MAX_RESULTS = 100;
-const PER_FILE_MAX_COUNT = 50;
 const MAX_LINE_CHARS = 500;
 const TRUNCATION_NOTICE = "结果过多已截断，请缩小范围（加 glob 或更精确的 pattern）";
 
@@ -45,7 +44,7 @@ export type GrepInput = z.infer<typeof grepInputSchema>;
 
 const GREP_ANNOTATIONS = { readOnlyHint: true } as const;
 
-function buildRgArgs(input: GrepInput, resolvedPath: string): string[] {
+function buildRgArgs(input: GrepInput, resolvedPath: string, maxResults: number): string[] {
   return [
     "--line-number",
     "--no-heading",
@@ -56,7 +55,7 @@ function buildRgArgs(input: GrepInput, resolvedPath: string): string[] {
     ...(input.context ? ["-C", String(input.context)] : []),
     ...(input.glob ? ["-g", input.glob] : []),
     "--max-count",
-    String(PER_FILE_MAX_COUNT),
+    String(maxResults + 1),
     "-e",
     input.pattern,
     resolvedPath,
@@ -144,7 +143,7 @@ export async function executeGrep(
 ): Promise<NormalizedToolResult> {
   const resolvedPath = resolveFilePath(settings.workdir, input.path ?? ".");
   const maxResults = input.max_results ?? DEFAULT_MAX_RESULTS;
-  const result = await runRg(buildRgArgs(input, resolvedPath), settings.workdir);
+  const result = await runRg(buildRgArgs(input, resolvedPath, maxResults), settings.workdir);
   if (!result.ok) {
     return failedToolResult(TOOL_OUTCOME_KINDS.invalidInput, result.errorMessage ?? "rg 执行失败");
   }
