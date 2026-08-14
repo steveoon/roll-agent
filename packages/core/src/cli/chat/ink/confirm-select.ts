@@ -2,6 +2,7 @@ import { createElement as h, useState } from "react";
 import type { ReactElement } from "react";
 import { Box, Text, useInput } from "ink";
 import { displayWidth } from "./display-width.ts";
+import type { ConfirmDecision } from "./state.ts";
 
 export interface ConfirmSelectProps {
   readonly prompt: string;
@@ -9,8 +10,22 @@ export interface ConfirmSelectProps {
   readonly explanation?: string;
   readonly width: number;
   readonly maxRows: number;
-  readonly onDecide: (approved: boolean) => void;
+  readonly onDecide: (decision: ConfirmDecision) => void;
 }
+
+type ConfirmOption = "yes" | "session" | "no";
+
+const NEXT_CONFIRM_OPTION: Record<ConfirmOption, ConfirmOption> = {
+  yes: "session",
+  session: "no",
+  no: "yes",
+};
+
+const CONFIRM_OPTION_DECISIONS: Record<ConfirmOption, ConfirmDecision> = {
+  yes: { approved: true },
+  session: { approved: true, scope: "session" },
+  no: { approved: false },
+};
 
 const COMPACT_CONFIRM_MAX_ROWS = 11;
 
@@ -68,23 +83,27 @@ export function ConfirmSelect({
   maxRows,
   onDecide,
 }: ConfirmSelectProps): ReactElement {
-  const [selected, setSelected] = useState<"yes" | "no">("no");
+  const [selected, setSelected] = useState<ConfirmOption>("no");
   useInput((input, key) => {
     if (key.leftArrow || key.rightArrow || key.upArrow || key.downArrow) {
-      setSelected((current) => (current === "yes" ? "no" : "yes"));
+      setSelected((current) => NEXT_CONFIRM_OPTION[current]);
       return;
     }
     if (key.return || input.includes("\r") || input.includes("\n")) {
-      onDecide(selected === "yes");
+      onDecide(CONFIRM_OPTION_DECISIONS[selected]);
       return;
     }
     const lowered = input.toLowerCase();
     if (key.escape || lowered === "n") {
-      onDecide(false);
+      onDecide(CONFIRM_OPTION_DECISIONS.no);
       return;
     }
     if (lowered === "y") {
-      onDecide(true);
+      onDecide(CONFIRM_OPTION_DECISIONS.yes);
+      return;
+    }
+    if (lowered === "a") {
+      onDecide(CONFIRM_OPTION_DECISIONS.session);
     }
   });
   const showArgs = args.length > 0 && args !== "{}";
@@ -94,6 +113,11 @@ export function ConfirmSelect({
     Box,
     compact ? { flexShrink: 0 } : { marginTop: 1, flexShrink: 0 },
     h(Text, selected === "yes" ? { color: "green" } : {}, `${selected === "yes" ? "❯ " : "  "}Yes`),
+    h(
+      Text,
+      selected === "session" ? { color: "green" } : {},
+      `   ${selected === "session" ? "❯ " : "  "}Always`,
+    ),
     h(Text, selected === "no" ? { color: "green" } : {}, `   ${selected === "no" ? "❯ " : "  "}No`),
   );
   const helpRow = h(
@@ -103,8 +127,8 @@ export function ConfirmSelect({
       Text,
       { dimColor: true, wrap: "truncate-end" },
       compact
-        ? "←→/y/n 选择 · Enter · Esc · ⇧Tab 自动"
-        : "←→/y/n 选择 · Enter 确认 · Esc 取消 · Shift+Tab 自动批准本次及后续",
+        ? "←→/y/a/n 选择 · Enter · Esc · ⇧Tab 自动"
+        : "←→/y/a/n 选择 · Enter 确认 · Esc 取消 · a 允许并且本会话内不再询问 · Shift+Tab 自动批准本次及后续",
     ),
   );
   if (compact) {

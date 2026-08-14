@@ -98,6 +98,11 @@ export interface PendingConfirm {
   readonly explanation?: string;
 }
 
+export interface ConfirmDecision {
+  readonly approved: boolean;
+  readonly scope?: "session";
+}
+
 export type PendingUserInput = Extract<SessionEvent, { readonly type: "user-input-required" }>;
 
 export interface ChatUiState {
