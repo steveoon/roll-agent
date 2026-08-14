@@ -20,6 +20,7 @@ export const CAPABILITY_TOOL_ROLES = {
   shell: "shell",
   fileRead: "file-read",
   fileEdit: "file-edit",
+  fileVerify: "file-verify",
   sessionCommand: "session-command",
   sessionPoll: "session-poll",
   sessionList: "session-list",

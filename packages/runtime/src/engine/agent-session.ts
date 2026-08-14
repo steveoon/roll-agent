@@ -907,6 +907,7 @@ export class AgentSession {
     if (fileToolset) {
       markToolRole(toolRoles, fileToolset.readTools, CAPABILITY_TOOL_ROLES.fileRead);
       markToolRole(toolRoles, fileToolset.editTools, CAPABILITY_TOOL_ROLES.fileEdit);
+      markToolRole(toolRoles, fileToolset.verifyTools, CAPABILITY_TOOL_ROLES.fileVerify);
     }
     const bashCtx: BashToolContext = {
       ...(options.policy ? { policy: options.policy } : {}),
@@ -982,7 +983,9 @@ export class AgentSession {
     this.tools = {
       ...transcriptTools,
       ...skillTools,
-      ...(fileToolset ? { ...fileToolset.readTools, ...fileToolset.editTools } : {}),
+      ...(fileToolset
+        ? { ...fileToolset.readTools, ...fileToolset.editTools, ...fileToolset.verifyTools }
+        : {}),
       ...bashTools,
       ...sessionExecTools,
       ...agentInstallTools,

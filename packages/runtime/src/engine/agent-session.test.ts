@@ -4474,6 +4474,9 @@ test("AgentSession 注册文件工具并按 role 标记 capability", async () =>
     assert.ok(tools.some((tool) => tool.role === "file-edit" && tool.id === "roll__edit_file"));
     assert.ok(tools.some((tool) => tool.role === "file-edit" && tool.id === "roll__write_file"));
     assert.ok(tools.some((tool) => tool.role === "file-read" && tool.id === "roll__list_dir"));
+    assert.ok(tools.some((tool) => tool.role === "file-read" && tool.id === "roll__grep"));
+    assert.ok(tools.some((tool) => tool.role === "file-read" && tool.id === "roll__glob"));
+    assert.ok(tools.some((tool) => tool.role === "file-verify" && tool.id === "roll__verify_file"));
     await collect(session.send("hi"));
     assert.match(JSON.stringify(calls[0]?.tools), /roll__edit_file/u);
   } finally {

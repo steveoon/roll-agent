@@ -31,11 +31,17 @@ function buildFixture(workdir: string, memory?: SessionApprovalMemory) {
   return { approvals, registry, toolset };
 }
 
-test("注册四个 roll__ 前缀工具并按读写分组", () => {
+test("注册七个 roll__ 前缀工具并按读/写/验证分组", () => {
   const workdir = mkdtempSync(join(tmpdir(), "file-toolset-test-"));
   const { toolset } = buildFixture(workdir);
-  assert.deepEqual(Object.keys(toolset.readTools).sort(), ["roll__list_dir", "roll__read_file"]);
+  assert.deepEqual(Object.keys(toolset.readTools).sort(), [
+    "roll__glob",
+    "roll__grep",
+    "roll__list_dir",
+    "roll__read_file",
+  ]);
   assert.deepEqual(Object.keys(toolset.editTools).sort(), ["roll__edit_file", "roll__write_file"]);
+  assert.deepEqual(Object.keys(toolset.verifyTools).sort(), ["roll__verify_file"]);
 });
 
 test("read 与 edit 共享同一 tracker：读后即可编辑", async () => {
