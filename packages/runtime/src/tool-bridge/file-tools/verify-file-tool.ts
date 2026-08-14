@@ -25,6 +25,7 @@ import {
   type Verifier,
   type VerifierOutcome,
 } from "./verifier-registry.ts";
+import { gateExternalPath } from "./external-approval.ts";
 import { FILE_TOOLS_AGENT_NAME, type ResolvedFileToolsSettings } from "./settings.ts";
 
 export const VERIFY_FILE_TOOL_NAME = "verify_file";
@@ -157,24 +158,9 @@ export function buildVerifyFileTool(
       }
       const path = resolveFilePath(settings.workdir, parsed.data.path);
       if (escapesWorkdir(settings.workdir, parsed.data.path)) {
-        const memoryKey = `${VERIFY_FILE_TOOL_NAME}:external`;
-        if (!ctx.approvalMemory?.isGranted(memoryKey)) {
-          const approval = await ctx.requestApproval({
-            agentName: FILE_TOOLS_AGENT_NAME,
-            toolName: VERIFY_FILE_TOOL_NAME,
-            input: parsed.data,
-            reason: "读取工作目录以外的文件",
-          });
-          if (!approval.approved) {
-            return failedToolResult(
-              TOOL_OUTCOME_KINDS.userRejected,
-              `已取消执行${approval.reason ? `: ${approval.reason}` : ""}`,
-              approval.reason ? { reason: approval.reason } : {},
-            );
-          }
-          if (approval.scope === "session") {
-            ctx.approvalMemory?.grant(memoryKey);
-          }
+        const gated = await gateExternalPath(ctx, VERIFY_FILE_TOOL_NAME, parsed.data);
+        if (gated !== undefined) {
+          return gated;
         }
       }
       const level = parsed.data.level ?? VERIFIER_LEVELS.fast;

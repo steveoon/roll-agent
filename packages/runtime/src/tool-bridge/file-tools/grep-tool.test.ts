@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, realpathSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ToolExecutionOptions } from "ai";
@@ -81,11 +81,11 @@ test("0 命中且 pattern 无需归一化时不追加提示", async () => {
   assert.equal(String(result.display), "未找到匹配。");
 });
 
-test("非法正则返回 invalid_input 且带可读错误信息", async () => {
+test("非法正则返回 tool_failed 且带可读错误信息", async () => {
   const workdir = fixtureWorkdir("grep-badregex-");
   const settings = resolveFileToolsSettings({ workdir });
   const result = await executeGrep(settings, { pattern: "([unclosed" });
-  assert.equal(result.outcome.kind, TOOL_OUTCOME_KINDS.invalidInput);
+  assert.equal(result.outcome.kind, TOOL_OUTCOME_KINDS.toolFailed);
   assert.match(String(result.display), /regex/iu);
 });
 
@@ -111,6 +111,20 @@ test("超长命中行内容超过 500 字符时截断", async () => {
   const text = String(result.display);
   assert.ok(text.includes("…"));
   assert.ok(!text.includes(longLine));
+});
+
+test("文件名含「分隔符+数字+分隔符」（如日期前缀）时不误判路径与行号", async () => {
+  const workdir = fixtureWorkdir("grep-datefile-");
+  mkdirSync(join(workdir, "docs"), { recursive: true });
+  const filePath = join(workdir, "docs", "2026-08-14-plan.md");
+  writeFileSync(filePath, "alpha\nbeta\nneedle-gamma\n", "utf8");
+  const settings = resolveFileToolsSettings({ workdir });
+  const result = await executeGrep(settings, { pattern: "needle" });
+  assert.equal(result.outcome.kind, TOOL_OUTCOME_KINDS.success);
+  const text = String(result.display);
+  assert.ok(text.includes(filePath));
+  assert.match(text, /共 1 处命中（1 个文件）/u);
+  assert.ok(text.includes("    3→needle-gamma"));
 });
 
 test("path 直接指向单个文件时仍能正确解析命中（依赖 --with-filename）", async () => {
@@ -147,6 +161,26 @@ test("单文件命中数恰好等于 max_results 时不误报截断", async () =
   const arrowCount = (text.match(/→/gu) ?? []).length;
   assert.equal(arrowCount, 50);
   assert.doesNotMatch(text, /结果过多已截断/u);
+});
+
+test("命中输出超过 settings.maxOutputChars 时按行边界截断并提示", async () => {
+  const workdir = fixtureWorkdir("grep-outputcap-");
+  const lines = Array.from(
+    { length: 200 },
+    (_, index) => `hit-line-${String(index).padStart(3, "0")}-${"x".repeat(20)}`,
+  ).join("\n");
+  writeFileSync(join(workdir, "a.txt"), `${lines}\n`, "utf8");
+  const settings = resolveFileToolsSettings({ workdir, maxOutputChars: 500 });
+  const result = await executeGrep(settings, { pattern: "hit-line", max_results: 200 });
+  assert.equal(result.outcome.kind, TOOL_OUTCOME_KINDS.success);
+  const text = String(result.display);
+  assert.ok(text.length < lines.length);
+  assert.match(text, /（输出达上限已截断，请缩小范围）/u);
+  const resultLines = text.split("\n").filter((line) => line.includes("→"));
+  assert.ok(resultLines.length > 0);
+  for (const line of resultLines) {
+    assert.match(line, /^\s*\d+→hit-line-\d{3}-x{20}$/u);
+  }
 });
 
 function executeOptions(

@@ -72,7 +72,7 @@ function detectShrink(newLineCount: number, loaded: LoadedTextFile | LoadFileFai
   const percent = Math.round((1 - newLineCount / originalLineCount) * 100);
   return {
     shrinking: true,
-    warning: `⚠ 新内容 ${String(newLineCount)}行，比原文件 ${String(originalLineCount)} 行减少 ${String(percent)}%，请确认是有意删减`,
+    warning: `⚠ 新内容 ${String(newLineCount)} 行，比原文件 ${String(originalLineCount)} 行减少 ${String(percent)}%，请确认是有意删减`,
   };
 }
 

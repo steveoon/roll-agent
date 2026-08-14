@@ -85,14 +85,14 @@ test("0 命中返回明确提示", async () => {
   assert.equal(String(result.display), "未找到匹配 *.md 的文件。");
 });
 
-test("path 指向不存在的目录时返回 invalid_input", async () => {
+test("path 指向不存在的目录时返回 tool_failed（rg 层执行失败）", async () => {
   const workdir = fixtureWorkdir("glob-badpath-");
   const settings = resolveFileToolsSettings({ workdir });
   const result = await executeGlob(settings, {
     pattern: "*.md",
     path: join(workdir, "does-not-exist"),
   });
-  assert.equal(result.outcome.kind, TOOL_OUTCOME_KINDS.invalidInput);
+  assert.equal(result.outcome.kind, TOOL_OUTCOME_KINDS.toolFailed);
 });
 
 test("path 指向已存在的文件而非目录时返回 invalid_input 并引导至 roll__read_file", async () => {

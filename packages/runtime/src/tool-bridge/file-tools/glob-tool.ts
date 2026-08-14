@@ -19,6 +19,7 @@ import {
 } from "../tool-execution-coordinator.ts";
 import { canonicalFileKey, escapesWorkdir, resolveFilePath } from "./file-io.ts";
 import { runRg } from "./rg-exec.ts";
+import { gateExternalPath } from "./external-approval.ts";
 import { FILE_TOOLS_AGENT_NAME, type ResolvedFileToolsSettings } from "./settings.ts";
 
 export const GLOB_TOOL_NAME = "glob";
@@ -94,7 +95,7 @@ export async function executeGlob(
   }
   const result = await runRg(buildRgArgs(input.pattern, resolvedPath), settings.workdir);
   if (!result.ok) {
-    return failedToolResult(TOOL_OUTCOME_KINDS.invalidInput, result.errorMessage ?? "rg 执行失败");
+    return failedToolResult(TOOL_OUTCOME_KINDS.toolFailed, result.errorMessage ?? "rg 执行失败");
   }
   const lines = result.stdout.split("\n").filter((line) => line.length > 0);
   if (lines.length === 0) {
@@ -129,24 +130,9 @@ export function buildGlobTool(
         );
       }
       if (escapesWorkdir(settings.workdir, parsed.data.path ?? ".")) {
-        const memoryKey = `${GLOB_TOOL_NAME}:external`;
-        if (!ctx.approvalMemory?.isGranted(memoryKey)) {
-          const approval = await ctx.requestApproval({
-            agentName: FILE_TOOLS_AGENT_NAME,
-            toolName: GLOB_TOOL_NAME,
-            input: parsed.data,
-            reason: "读取工作目录以外的文件",
-          });
-          if (!approval.approved) {
-            return failedToolResult(
-              TOOL_OUTCOME_KINDS.userRejected,
-              `已取消执行${approval.reason ? `: ${approval.reason}` : ""}`,
-              approval.reason ? { reason: approval.reason } : {},
-            );
-          }
-          if (approval.scope === "session") {
-            ctx.approvalMemory?.grant(memoryKey);
-          }
+        const gated = await gateExternalPath(ctx, GLOB_TOOL_NAME, parsed.data);
+        if (gated !== undefined) {
+          return gated;
         }
       }
       return gateToolCall(

@@ -19,6 +19,7 @@ import {
 import { canonicalFileKey, escapesWorkdir, resolveFilePath } from "./file-io.ts";
 import { normalizeForMatch } from "./text-normalize.ts";
 import { runRg } from "./rg-exec.ts";
+import { gateExternalPath } from "./external-approval.ts";
 import { FILE_TOOLS_AGENT_NAME, type ResolvedFileToolsSettings } from "./settings.ts";
 
 export const GREP_TOOL_NAME = "grep";
@@ -26,6 +27,7 @@ export const GREP_TOOL_NAME = "grep";
 const DEFAULT_MAX_RESULTS = 100;
 const MAX_LINE_CHARS = 500;
 const TRUNCATION_NOTICE = "结果过多已截断，请缩小范围（加 glob 或更精确的 pattern）";
+const OUTPUT_CAP_NOTICE = "（输出达上限已截断，请缩小范围）";
 
 const grepInputSchema = z.object({
   pattern: z.string().min(1).describe("搜索正则（ripgrep 语法）"),
@@ -46,6 +48,7 @@ const GREP_ANNOTATIONS = { readOnlyHint: true } as const;
 
 function buildRgArgs(input: GrepInput, resolvedPath: string, maxResults: number): string[] {
   return [
+    "--null",
     "--line-number",
     "--no-heading",
     "--with-filename",
@@ -69,23 +72,27 @@ interface RgLineParse {
   readonly isMatch: boolean;
 }
 
-const RESULT_LINE_PATTERN = /^(.+?)([-:])(\d+)[-:](.*)$/u;
+// With --null, rg emits NUL right after the filename: "path\0<lineNumber><sep><content>".
+// The path segment (before the NUL) may itself contain "-" or ":" (e.g. date-prefixed
+// filenames like "2026-08-14-plan.md"), so it must never be parsed by a shared regex —
+// splitting on the NUL byte is the only way to recover the exact filename rg reported.
+const REST_LINE_PATTERN = /^(\d+)([-:])(.*)$/u;
 
 function parseRgLine(line: string): RgLineParse | undefined {
-  const match = RESULT_LINE_PATTERN.exec(line);
+  const nulIndex = line.indexOf("\0");
+  if (nulIndex === -1) {
+    return undefined;
+  }
+  const path = line.slice(0, nulIndex);
+  const rest = line.slice(nulIndex + 1);
+  const match = REST_LINE_PATTERN.exec(rest);
   if (match === null) {
     return undefined;
   }
-  const path = match[1];
+  const lineNumberText = match[1];
   const separator = match[2];
-  const lineNumberText = match[3];
-  const content = match[4];
-  if (
-    path === undefined ||
-    separator === undefined ||
-    lineNumberText === undefined ||
-    content === undefined
-  ) {
+  const content = match[3];
+  if (lineNumberText === undefined || separator === undefined || content === undefined) {
     return undefined;
   }
   return { path, lineNumber: Number(lineNumberText), content, isMatch: separator === ":" };
@@ -137,6 +144,19 @@ function renderGrepOutput(cwd: string, stdout: string, maxResults: number): Rend
   return { body, matchCount, fileCount: order.length, truncatedByMaxResults };
 }
 
+interface CappedOutput {
+  readonly body: string;
+  readonly wasCapped: boolean;
+}
+
+function capOutputBody(body: string, maxOutputChars: number): CappedOutput {
+  if (body.length <= maxOutputChars) {
+    return { body, wasCapped: false };
+  }
+  const cut = body.lastIndexOf("\n", maxOutputChars);
+  return { body: body.slice(0, cut > 0 ? cut : maxOutputChars), wasCapped: true };
+}
+
 export async function executeGrep(
   settings: ResolvedFileToolsSettings,
   input: GrepInput,
@@ -145,7 +165,7 @@ export async function executeGrep(
   const maxResults = input.max_results ?? DEFAULT_MAX_RESULTS;
   const result = await runRg(buildRgArgs(input, resolvedPath, maxResults), settings.workdir);
   if (!result.ok) {
-    return failedToolResult(TOOL_OUTCOME_KINDS.invalidInput, result.errorMessage ?? "rg 执行失败");
+    return failedToolResult(TOOL_OUTCOME_KINDS.toolFailed, result.errorMessage ?? "rg 执行失败");
   }
   const rendered = renderGrepOutput(settings.workdir, result.stdout, maxResults);
   if (rendered.matchCount === 0) {
@@ -156,12 +176,16 @@ export async function executeGrep(
     }
     return successfulToolResult(parts.join("\n"));
   }
+  const capped = capOutputBody(rendered.body, settings.maxOutputChars);
   const parts = [
     `共 ${String(rendered.matchCount)} 处命中（${String(rendered.fileCount)} 个文件）：`,
-    rendered.body,
+    capped.body,
   ];
   if (rendered.truncatedByMaxResults || result.truncated) {
     parts.push(TRUNCATION_NOTICE);
+  }
+  if (capped.wasCapped) {
+    parts.push(OUTPUT_CAP_NOTICE);
   }
   return successfulToolResult(parts.join("\n\n"));
 }
@@ -184,24 +208,9 @@ export function buildGrepTool(
         );
       }
       if (escapesWorkdir(settings.workdir, parsed.data.path ?? ".")) {
-        const memoryKey = `${GREP_TOOL_NAME}:external`;
-        if (!ctx.approvalMemory?.isGranted(memoryKey)) {
-          const approval = await ctx.requestApproval({
-            agentName: FILE_TOOLS_AGENT_NAME,
-            toolName: GREP_TOOL_NAME,
-            input: parsed.data,
-            reason: "读取工作目录以外的文件",
-          });
-          if (!approval.approved) {
-            return failedToolResult(
-              TOOL_OUTCOME_KINDS.userRejected,
-              `已取消执行${approval.reason ? `: ${approval.reason}` : ""}`,
-              approval.reason ? { reason: approval.reason } : {},
-            );
-          }
-          if (approval.scope === "session") {
-            ctx.approvalMemory?.grant(memoryKey);
-          }
+        const gated = await gateExternalPath(ctx, GREP_TOOL_NAME, parsed.data);
+        if (gated !== undefined) {
+          return gated;
         }
       }
       return gateToolCall(
