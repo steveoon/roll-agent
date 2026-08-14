@@ -33,6 +33,9 @@ export interface FileToolPromptIds {
   readonly edit: string;
   readonly write: string;
   readonly listDir: string;
+  readonly grep: string;
+  readonly glob: string;
+  readonly verify: string;
 }
 
 export interface BuildChatSystemPromptOptions {
@@ -145,6 +148,8 @@ function buildFileToolsSection(ids: FileToolPromptIds): string {
     `- 新建文件或整文件重写用 ${ids.write}；浏览目录用 ${ids.listDir}。`,
     `- ${ids.edit} 与 ${ids.write} 成功的返回已附带修改点最新内容，无需再次读取确认。`,
     "- 读取和修改文件优先用文件工具，不要用 shell 的 cat/sed/echo 重定向操作文件。",
+    `- 在文件中搜索内容用 ${ids.grep}（结果行号可直接用作 ${ids.read} 的 offset），按文件名找文件用 ${ids.glob}；不要用 shell 的 grep/find 代替。`,
+    `- 修改代码文件后用 ${ids.verify} 验证（默认 fast 级）；验证失败先修复再汇报完成，验证被跳过时如实说明未验证。`,
   ].join("\n");
 }
 
@@ -244,9 +249,26 @@ export function buildChatSystemPromptFromManifest(manifest: EffectiveCapabilityM
   const fileList = manifest.tools.find(
     (tool) => tool.role === CAPABILITY_TOOL_ROLES.fileRead && tool.id.endsWith("list_dir"),
   );
+  const fileGrep = manifest.tools.find(
+    (tool) => tool.role === CAPABILITY_TOOL_ROLES.fileRead && tool.id.endsWith("grep"),
+  );
+  const fileGlob = manifest.tools.find(
+    (tool) => tool.role === CAPABILITY_TOOL_ROLES.fileRead && tool.id.endsWith("glob"),
+  );
+  const fileVerify = manifest.tools.find(
+    (tool) => tool.role === CAPABILITY_TOOL_ROLES.fileVerify && tool.id.endsWith("verify_file"),
+  );
   const fileToolIds =
-    fileRead && fileEdit && fileWrite && fileList
-      ? { read: fileRead.id, edit: fileEdit.id, write: fileWrite.id, listDir: fileList.id }
+    fileRead && fileEdit && fileWrite && fileList && fileGrep && fileGlob && fileVerify
+      ? {
+          read: fileRead.id,
+          edit: fileEdit.id,
+          write: fileWrite.id,
+          listDir: fileList.id,
+          grep: fileGrep.id,
+          glob: fileGlob.id,
+          verify: fileVerify.id,
+        }
       : undefined;
   const prompt = buildChatSystemPrompt({
     ...(skillToolId ? { skills: manifest.skills, skillToolId } : {}),
