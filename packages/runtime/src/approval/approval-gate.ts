@@ -1,6 +1,7 @@
 export interface ApprovalDecision {
   readonly approved: boolean;
   readonly reason?: string;
+  readonly scope?: "once" | "session";
 }
 
 type Resolver = (decision: ApprovalDecision) => void;
