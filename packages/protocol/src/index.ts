@@ -1365,6 +1365,19 @@ export const approvalRespondParamsSchema = z
     approvalId: approvalIdSchema,
     decision: z.enum(["approve", "reject"]),
     reason: approvalRejectReasonSchema.optional(),
+  })
+  .strict()
+  .readonly();
+
+/** Protocol 1.4 wire shape. Adds the optional `scope` field on top of the frozen V11 params. */
+export const approvalRespondParamsSchemaV14 = z
+  .object({
+    ...requestFields,
+    ...threadRequestFields,
+    turnId: turnIdSchema,
+    approvalId: approvalIdSchema,
+    decision: z.enum(["approve", "reject"]),
+    reason: approvalRejectReasonSchema.optional(),
     scope: z.enum(["once", "session"]).optional(),
   })
   .strict()
@@ -1908,6 +1921,10 @@ export const runtimeMethodSchemasV14 = {
   [RUNTIME_METHODS.turnStart]: {
     params: turnStartParamsV14Schema,
     result: turnStartResultSchema,
+  },
+  [RUNTIME_METHODS.approvalRespond]: {
+    params: approvalRespondParamsSchemaV14,
+    result: approvalRespondResultSchema,
   },
   [RUNTIME_METHODS.attachmentStage]: {
     params: attachmentStageParamsSchema,

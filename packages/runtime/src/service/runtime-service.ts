@@ -964,8 +964,8 @@ export class RuntimeService {
   }
 
   async respondApproval(
-    params: RuntimeMethodParams<"approval.respond">,
-  ): Promise<RuntimeMethodResult<"approval.respond">> {
+    params: LatestRuntimeMethodParams<"approval.respond">,
+  ): Promise<LatestRuntimeMethodResult<"approval.respond">> {
     return this.mutationRequests.run(
       params.requestId,
       RUNTIME_METHODS.approvalRespond,
