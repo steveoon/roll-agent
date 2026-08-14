@@ -77,7 +77,7 @@
 - **集成点**：`ToolBridgeContext` 加 `approvalMemory?: SessionApprovalMemory`；`gateToolCall` 的 display options 加 `memoryKey?: string`——confirm 决策时先查记忆命中即放行；`requestApproval` 返回 `scope === "session"` 且有 memoryKey 时写入记忆。**不传 memoryKey 的工具（bash、MCP）完全不受影响**
 - **key 粒度**：`${toolName}:${workdir 内 ? "workdir" : "external"}`——「本会话内 workdir 内的 edit_file 不再询问」是开发者自用的甜点粒度；workdir 外逐次确认不吃记忆（read/list 的 external 确认门同样接 memory，key 用 external 段）
 - **UI**（core 包 TUI）：确认组件加第三选项「允许并且本会话内不再询问」→ decision `{approved: true, scope: "session"}`（实施时先探查现有确认组件的选项结构——校准点）
-- **协议**（protocol 包）：`approval.respond` payload 加可选 `scope` 字段——旧客户端（GUI/companion/python 示例）不传即 once，向后兼容，无需 bump 协议版本（可选字段；实施时核对 respond schema 是否 strict——校准点）
+- **协议**（protocol 包）：`approval.respond` payload 加可选 `scope` 字段。`approvalRespondParamsSchema` 是 `.strict()`（沿用 `reason` 字段的既有模式），兼容性因此是**单向**的：旧客户端不发 `scope` → 新 server 正常解析为 `undefined`（已测）；反过来**新客户端发 `scope` → 旧 server（schema 未升级）会被当未知键拒绝，不是静默忽略**，即前向不兼容。当前零调用方在 wire 上发送 `scope`：Ink TUI（`packages/core/src/cli/chat/ink/use-session.ts`）是进程内直接持有 `AgentSession` 调用 `session.approve()`/`session.reject()`，不经过 JSON-RPC，不受此风险影响；但 Companion 链路（`packages/companion/src/companion-workspace.ts` 的 `handleRemoteRequest → respondApproval`）经 relay 解析同一份 schema 后由 `client-node` 转发本地 Runtime，Companion（独立版本号，如 `0.4.2`）与本地 Runtime（如 `0.15.1`）版本不同步的错配通道**今天已完整存在**，只是尚无调用方往里塞 `scope` 值。`RUNTIME_FEATURES`/`clientApprovalResponses` 只有方法级布尔开关，没有字段级能力声明机制，无法直接探测"对端 schema 是否认识 `scope`"。**首个在 wire 上写 `scope` 的接入方（companion/GUI 方向）落地前必须先评估版本错配处理（能力探测或协议演进），不得沿用「可选字段自动兼容」这一假设**
 - **生命周期**：AgentSession 实例字段，session 结束即失效；**不持久化**（重启后重新确认——保守默认，真实场景验证后再议）
 - **缩水防护强制确认优先于记忆**（见 3.4）
 
@@ -108,3 +108,4 @@
 | 批准记忆 opt-in（用户在弹窗选）且不持久化 | 保守默认；粒度 `${tool}:${workdir|external}` 是甜点，逐文件太碎、全局太粗 |
 | bash 不接记忆 | 命令 key 语义复杂，误放行面大；留验证反馈 |
 | 缩水防护强制确认不吃记忆 | 整文件覆盖丢内容是最难自救的事故类型 |
+| approval scope 用可选字段附加到 `approval.respond`，不 bump 协议版本 | `.strict()` schema 下仅单向兼容（旧客户端→新 server OK，新客户端→旧 server 拒绝）；P2 唯一调用方 Ink TUI 是进程内调用不上 wire，不受影响；Companion/GUI 的 wire 错配通道已存在但尚无调用方发送 scope，留给该方向接入时先做能力探测或协议演进，不得默认「可选字段即兼容」 |
