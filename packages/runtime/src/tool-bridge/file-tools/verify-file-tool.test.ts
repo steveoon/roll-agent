@@ -234,6 +234,96 @@ test("level: project 被拒绝时返回 user_rejected", async () => {
   assert.equal(approvals.length, 1);
 });
 
+test("workdir 外路径触发确认门，拒绝时返回 user_rejected", async () => {
+  const workdir = fixtureWorkdir("verify-outside-gate-");
+  const outsideDir = fixtureWorkdir("verify-outside-");
+  writeFileSync(join(outsideDir, "secret.json"), '{"a":1}', "utf8");
+  const approvals: ApprovalRequest[] = [];
+  const tools = buildVerifyFixture(workdir, approvals, false);
+  const verifyTool = tools.roll__verify_file;
+  assert.ok(verifyTool?.execute !== undefined);
+  const result = (await verifyTool.execute(
+    { path: join(outsideDir, "secret.json") },
+    executeOptions(),
+  )) as NormalizedToolResult;
+  assert.equal(result.outcome.kind, TOOL_OUTCOME_KINDS.userRejected);
+  assert.equal(approvals.length, 1);
+  assert.equal(approvals[0]?.toolName, "verify_file");
+  assert.equal(approvals[0]?.reason, "读取工作目录以外的文件");
+});
+
+test("workdir 外路径批准后可正常验证", async () => {
+  const workdir = fixtureWorkdir("verify-outside-gate-");
+  const outsideDir = fixtureWorkdir("verify-outside-");
+  writeFileSync(join(outsideDir, "secret.json"), '{"a":1}', "utf8");
+  const approvals: ApprovalRequest[] = [];
+  const tools = buildVerifyFixture(workdir, approvals, true);
+  const verifyTool = tools.roll__verify_file;
+  assert.ok(verifyTool?.execute !== undefined);
+  const result = (await verifyTool.execute(
+    { path: join(outsideDir, "secret.json") },
+    executeOptions(),
+  )) as NormalizedToolResult;
+  assert.equal(result.outcome.kind, TOOL_OUTCOME_KINDS.success);
+  assert.equal(approvals.length, 1);
+});
+
+test("workdir 内路径不触发确认门", async () => {
+  const workdir = fixtureWorkdir("verify-outside-gate-");
+  writeFileSync(join(workdir, "a.json"), '{"a":1}', "utf8");
+  const approvals: ApprovalRequest[] = [];
+  const tools = buildVerifyFixture(workdir, approvals, true);
+  const verifyTool = tools.roll__verify_file;
+  assert.ok(verifyTool?.execute !== undefined);
+  const result = (await verifyTool.execute(
+    { path: "a.json" },
+    executeOptions(),
+  )) as NormalizedToolResult;
+  assert.equal(result.outcome.kind, TOOL_OUTCOME_KINDS.success);
+  assert.equal(approvals.length, 0);
+});
+
+test("workdir 外路径 scope=session 批准后第二次验证免弹", async () => {
+  const workdir = fixtureWorkdir("verify-outside-gate-");
+  const outsideDir = fixtureWorkdir("verify-outside-");
+  writeFileSync(join(outsideDir, "secret.json"), '{"a":1}', "utf8");
+  const approvals: ApprovalRequest[] = [];
+  const memory = new SessionApprovalMemory();
+  const tools = buildVerifyFixture(workdir, approvals, true, { scope: "session", memory });
+  const verifyTool = tools.roll__verify_file;
+  assert.ok(verifyTool?.execute !== undefined);
+  const first = (await verifyTool.execute(
+    { path: join(outsideDir, "secret.json") },
+    executeOptions({ toolCallId: "t1" }),
+  )) as NormalizedToolResult;
+  assert.equal(first.outcome.kind, TOOL_OUTCOME_KINDS.success);
+  assert.equal(approvals.length, 1);
+  const second = (await verifyTool.execute(
+    { path: join(outsideDir, "secret.json") },
+    executeOptions({ toolCallId: "t2" }),
+  )) as NormalizedToolResult;
+  assert.equal(second.outcome.kind, TOOL_OUTCOME_KINDS.success);
+  assert.equal(approvals.length, 1);
+});
+
+test("workdir 外路径叠加 level: project 时两道确认门各自独立触发一次", async () => {
+  const workdir = fixtureWorkdir("verify-outside-gate-");
+  const outsideDir = fixtureWorkdir("verify-outside-");
+  writeFileSync(join(outsideDir, "secret.json"), '{"a":1}', "utf8");
+  const approvals: ApprovalRequest[] = [];
+  const tools = buildVerifyFixture(workdir, approvals, true);
+  const verifyTool = tools.roll__verify_file;
+  assert.ok(verifyTool?.execute !== undefined);
+  const result = (await verifyTool.execute(
+    { path: join(outsideDir, "secret.json"), level: "project" },
+    executeOptions(),
+  )) as NormalizedToolResult;
+  assert.equal(result.outcome.kind, TOOL_OUTCOME_KINDS.success);
+  assert.equal(approvals.length, 2);
+  assert.equal(approvals[0]?.reason, "读取工作目录以外的文件");
+  assert.ok(approvals[1]?.explanation?.includes("项目级验证"));
+});
+
 test("参数校验失败返回 invalid_input", async () => {
   const workdir = fixtureWorkdir("verify-badinput-");
   const approvals: ApprovalRequest[] = [];
