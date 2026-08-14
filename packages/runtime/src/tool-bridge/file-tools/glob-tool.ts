@@ -73,11 +73,25 @@ function truncationNotice(total: number, rgTruncated: boolean): string | undefin
   return rgTruncated ? RG_TRUNCATED_NOTICE : undefined;
 }
 
+function isRegularFile(path: string): boolean {
+  try {
+    return statSync(path).isFile();
+  } catch {
+    return false;
+  }
+}
+
 export async function executeGlob(
   settings: ResolvedFileToolsSettings,
   input: GlobInput,
 ): Promise<NormalizedToolResult> {
   const resolvedPath = resolveFilePath(settings.workdir, input.path ?? ".");
+  if (isRegularFile(resolvedPath)) {
+    return failedToolResult(
+      TOOL_OUTCOME_KINDS.invalidInput,
+      `${resolvedPath} 是文件而非目录：读取内容用 roll__read_file，按 pattern 找文件请把 path 设为起始目录`,
+    );
+  }
   const result = await runRg(buildRgArgs(input.pattern, resolvedPath), settings.workdir);
   if (!result.ok) {
     return failedToolResult(TOOL_OUTCOME_KINDS.invalidInput, result.errorMessage ?? "rg 执行失败");

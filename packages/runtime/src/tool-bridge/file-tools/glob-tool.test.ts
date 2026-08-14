@@ -95,6 +95,18 @@ test("path 指向不存在的目录时返回 invalid_input", async () => {
   assert.equal(result.outcome.kind, TOOL_OUTCOME_KINDS.invalidInput);
 });
 
+test("path 指向已存在的文件而非目录时返回 invalid_input 并引导至 roll__read_file", async () => {
+  const workdir = fixtureWorkdir("glob-filepath-");
+  const filePath = join(workdir, "a.md");
+  writeFileSync(filePath, "x", "utf8");
+  const settings = resolveFileToolsSettings({ workdir });
+  const result = await executeGlob(settings, { pattern: "*.zzznomatch", path: filePath });
+  assert.equal(result.outcome.kind, TOOL_OUTCOME_KINDS.invalidInput);
+  const text = String(result.display);
+  assert.ok(text.includes(filePath));
+  assert.ok(text.includes("roll__read_file"));
+});
+
 function executeOptions(
   overrides: Partial<ToolExecutionOptions<unknown>> = {},
 ): ToolExecutionOptions<unknown> {
