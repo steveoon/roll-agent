@@ -40,7 +40,7 @@ const pathBinaryCache = new Map<string, boolean>();
 function defaultBinaryProbe(bin: string): boolean {
   try {
     const result = spawnSync(bin, ["--version"], { timeout: PATH_PROBE_TIMEOUT_MS });
-    return result.status === 0;
+    return result.error === undefined;
   } catch {
     return false;
   }
@@ -167,7 +167,7 @@ const gofmtVerifier: Verifier = {
 const goVetVerifier: Verifier = {
   id: "go-vet",
   level: VERIFIER_LEVELS.project,
-  detect: (workdir) => existsSync(join(workdir, "go.mod")) && isBinaryOnPath("gofmt"),
+  detect: (workdir) => existsSync(join(workdir, "go.mod")) && isBinaryOnPath("go"),
   command: () => ({ bin: "go", args: ["vet", "./..."] }),
   timeoutMs: PROJECT_TIMEOUT_MS,
 };
@@ -225,10 +225,11 @@ export function outcomeFromExecution(
   if (exitCode === 0 && !gofmtDirty) {
     return { id: verifier.id, status: "pass" };
   }
+  const combined = combineStreams(stdout, stderr);
   return {
     id: verifier.id,
     status: "fail",
-    output: truncateOutput(combineStreams(stdout, stderr)),
+    output: combined.length > 0 ? truncateOutput(combined) : `退出码 ${String(exitCode)}`,
   };
 }
 

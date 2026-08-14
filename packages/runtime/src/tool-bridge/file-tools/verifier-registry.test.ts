@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, realpathSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, realpathSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -244,6 +244,15 @@ test("cargo-check detect：缺少 Cargo.toml 时返回 false（不依赖 PATH �
   assert.equal(verifier.detect(workdir, join(workdir, "a.rs")), false);
 });
 
+test("go-vet detect 探测的是将要执行的 go 本身，而非 gofmt", () => {
+  const workdir = fixtureWorkdir("verifier-govet-probe-go-");
+  writeFileSync(join(workdir, "go.mod"), "module fixture\n", "utf8");
+  const verifier = verifiersForFile("a.go").find((v) => v.id === "go-vet");
+  assert.ok(verifier);
+  const expected = isBinaryOnPath("go");
+  assert.equal(verifier.detect(workdir, join(workdir, "a.go")), expected);
+});
+
 test("isBinaryOnPath：注入的 probe 返回 true 时结果为 true", () => {
   assert.equal(
     isBinaryOnPath("fixture-bin-available-1", () => true),
@@ -269,6 +278,24 @@ test("isBinaryOnPath：同一 bin 名的探测结果按模块级缓存复用，�
   assert.equal(first, true);
   assert.equal(second, true);
   assert.equal(callCount, 1);
+});
+
+test("isBinaryOnPath 真实探测实现：二进制存在但拒绝 --version（非零退出、无 spawn 错误）仍判定为可用", () => {
+  const workdir = fixtureWorkdir("verifier-probe-realimpl-");
+  const scriptPath = join(workdir, "fake-tool");
+  writeFileSync(
+    scriptPath,
+    '#!/bin/sh\nif [ "$1" = "--version" ]; then\n  exit 1\nfi\nexit 0\n',
+    "utf8",
+  );
+  chmodSync(scriptPath, 0o755);
+  assert.equal(isBinaryOnPath(scriptPath), true);
+});
+
+test("isBinaryOnPath 真实探测实现：二进制确实不存在时判定为不可用", () => {
+  const workdir = fixtureWorkdir("verifier-probe-realimpl-missing-");
+  const missingPath = join(workdir, "no-such-binary-here");
+  assert.equal(isBinaryOnPath(missingPath), false);
 });
 
 test("ruff 验证器 detect 与 isBinaryOnPath('ruff') 结果一致", () => {
@@ -413,6 +440,11 @@ test("outcomeFromExecution：输出超过 4000 字符时被截断", () => {
     assert.ok(outcome.output.length < longOutput.length);
     assert.ok(outcome.output.length <= 4000 + 20);
   }
+});
+
+test("outcomeFromExecution：非零退出但 stdout 与 stderr 均为空时，output 兜底为退出码说明", () => {
+  const outcome = outcomeFromExecution(fakeVerifier("ruff"), 1, "", "");
+  assert.deepEqual(outcome, { id: "ruff", status: "fail", output: "退出码 1" });
 });
 
 test("runVerifier：外部命令 exit 0 时返回 pass", async () => {
