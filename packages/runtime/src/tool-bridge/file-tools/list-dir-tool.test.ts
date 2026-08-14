@@ -9,6 +9,7 @@ import { buildListDirTool, executeListDir } from "./list-dir-tool.ts";
 import type { ApprovalRequest } from "../build-tools.ts";
 import { ToolRegistry } from "../naming.ts";
 import { DefaultToolPolicy } from "../../policy/default-policy.ts";
+import { SessionApprovalMemory } from "../../approval/approval-memory.ts";
 import { TOOL_OUTCOME_KINDS, type NormalizedToolResult } from "../normalize-result.ts";
 
 test("目录优先排序且文件附带大小", () => {
@@ -45,15 +46,25 @@ function executeOptions(
   return { toolCallId: "call-1", messages: [], context: undefined, ...overrides };
 }
 
-function buildListDirFixture(workdir: string, approvals: ApprovalRequest[], approve: boolean) {
+function buildListDirFixture(
+  workdir: string,
+  approvals: ApprovalRequest[],
+  approve: boolean,
+  options: { readonly scope?: "once" | "session"; readonly memory?: SessionApprovalMemory } = {},
+) {
   const registry = new ToolRegistry();
   const settings = resolveFileToolsSettings({ workdir });
   return buildListDirTool(settings, registry, {
     policy: new DefaultToolPolicy(),
     requestApproval: (request) => {
       approvals.push(request);
-      return Promise.resolve({ approved: approve });
+      return Promise.resolve(
+        options.scope !== undefined
+          ? { approved: approve, scope: options.scope }
+          : { approved: approve },
+      );
     },
+    ...(options.memory ? { approvalMemory: options.memory } : {}),
   });
 }
 
@@ -100,4 +111,27 @@ test("workdir 内路径不触发确认门", async () => {
   const result = (await listTool.execute({}, executeOptions())) as NormalizedToolResult;
   assert.equal(result.outcome.kind, TOOL_OUTCOME_KINDS.success);
   assert.equal(approvals.length, 0);
+});
+
+test("workdir 外路径 scope=session 批准后第二次列目录免弹", async () => {
+  const workdir = realpathSync(mkdtempSync(join(tmpdir(), "list-dir-gate-test-")));
+  const outsideDir = realpathSync(mkdtempSync(join(tmpdir(), "list-dir-outside-test-")));
+  writeFileSync(join(outsideDir, "a.txt"), "hello", "utf8");
+  const approvals: ApprovalRequest[] = [];
+  const memory = new SessionApprovalMemory();
+  const tools = buildListDirFixture(workdir, approvals, true, { scope: "session", memory });
+  const listTool = tools.roll__list_dir;
+  assert.ok(listTool?.execute !== undefined);
+  const first = (await listTool.execute(
+    { path: outsideDir },
+    executeOptions({ toolCallId: "t1" }),
+  )) as NormalizedToolResult;
+  assert.equal(first.outcome.kind, TOOL_OUTCOME_KINDS.success);
+  assert.equal(approvals.length, 1);
+  const second = (await listTool.execute(
+    { path: outsideDir },
+    executeOptions({ toolCallId: "t2" }),
+  )) as NormalizedToolResult;
+  assert.equal(second.outcome.kind, TOOL_OUTCOME_KINDS.success);
+  assert.equal(approvals.length, 1);
 });

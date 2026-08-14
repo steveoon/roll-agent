@@ -171,6 +171,28 @@ test("old_string 与 new_string 相同返回 invalid_input", () => {
   assert.equal(result.outcome.kind, TOOL_OUTCOME_KINDS.invalidInput);
 });
 
+test("单条编辑无匹配的失败提示引导改用 write_file 整文件重写", () => {
+  const f = fixture("alpha\nbeta");
+  markRead(f);
+  const result = executeEditFile(f.settings, f.tracker, {
+    file_path: "target.txt",
+    edits: [{ old_string: "不存在的内容", new_string: "x" }],
+  });
+  assert.equal(result.outcome.kind, TOOL_OUTCOME_KINDS.toolFailed);
+  assert.match(String(result.display), /roll__write_file 整文件重写/u);
+});
+
+test("replace_all 无匹配的失败提示引导改用 write_file 整文件重写", () => {
+  const f = fixture("alpha\nbeta");
+  markRead(f);
+  const result = executeEditFile(f.settings, f.tracker, {
+    file_path: "target.txt",
+    edits: [{ old_string: "不存在的内容", new_string: "x", replace_all: true }],
+  });
+  assert.equal(result.outcome.kind, TOOL_OUTCOME_KINDS.toolFailed);
+  assert.match(String(result.display), /roll__write_file 整文件重写/u);
+});
+
 test("BOM 文件编辑后 BOM 保留", () => {
   const f = fixture("\uFEFF内容");
   f.tracker.recordKnownContent(canonicalFileKey(f.path), "内容");

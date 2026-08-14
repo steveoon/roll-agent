@@ -3,11 +3,16 @@ import assert from "node:assert/strict";
 import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import type { ToolExecutionOptions } from "ai";
 import { FileStateTracker } from "./file-state-tracker.ts";
 import { canonicalFileKey } from "./file-io.ts";
 import { resolveFileToolsSettings } from "./settings.ts";
-import { executeWriteFile } from "./write-file-tool.ts";
-import { TOOL_OUTCOME_KINDS } from "../normalize-result.ts";
+import { buildWriteFileTool, executeWriteFile } from "./write-file-tool.ts";
+import type { ApprovalRequest } from "../build-tools.ts";
+import { ToolRegistry } from "../naming.ts";
+import { DefaultToolPolicy } from "../../policy/default-policy.ts";
+import { SessionApprovalMemory } from "../../approval/approval-memory.ts";
+import { TOOL_OUTCOME_KINDS, type NormalizedToolResult } from "../normalize-result.ts";
 
 test("新文件写入成功并自动建父目录", () => {
   const workdir = mkdtempSync(join(tmpdir(), "write-tool-test-"));
@@ -92,4 +97,73 @@ test("覆盖带 BOM 的已存在文件后新文件不带 BOM", () => {
   const firstThreeBytes = readFileSync(path).subarray(0, 3);
   assert.equal(firstThreeBytes.equals(Buffer.from([0xef, 0xbb, 0xbf])), false);
   assert.equal(readFileSync(path, "utf8"), "新内容");
+});
+
+function executeOptions(
+  overrides: Partial<ToolExecutionOptions<unknown>> = {},
+): ToolExecutionOptions<unknown> {
+  return { toolCallId: "call-1", messages: [], context: undefined, ...overrides };
+}
+
+function buildWriteFixture(
+  workdir: string,
+  tracker: FileStateTracker,
+  approvals: ApprovalRequest[],
+  memory: SessionApprovalMemory,
+) {
+  const registry = new ToolRegistry();
+  const settings = resolveFileToolsSettings({ workdir });
+  return buildWriteFileTool(settings, tracker, registry, {
+    policy: new DefaultToolPolicy(),
+    requestApproval: (request) => {
+      approvals.push(request);
+      return Promise.resolve({ approved: true, scope: "session" });
+    },
+    approvalMemory: memory,
+  });
+}
+
+test("缩水覆盖即使记忆已授权仍会弹出确认，explanation 提示有意删减", async () => {
+  const workdir = mkdtempSync(join(tmpdir(), "write-tool-shrink-test-"));
+  const path = join(workdir, "big.txt");
+  const originalLines = Array.from({ length: 30 }, (_, index) => `第${String(index + 1)}行`);
+  writeFileSync(path, originalLines.join("\n"), "utf8");
+  const tracker = new FileStateTracker();
+  tracker.recordKnownContent(canonicalFileKey(path), originalLines.join("\n"));
+  const approvals: ApprovalRequest[] = [];
+  const memory = new SessionApprovalMemory();
+  memory.grant("write_file:workdir");
+  const tools = buildWriteFixture(workdir, tracker, approvals, memory);
+  const writeTool = tools.roll__write_file;
+  assert.ok(writeTool?.execute !== undefined);
+  const newLines = Array.from({ length: 5 }, (_, index) => `新${String(index + 1)}行`);
+  const result = (await writeTool.execute(
+    { file_path: "big.txt", content: newLines.join("\n") },
+    executeOptions(),
+  )) as NormalizedToolResult;
+  assert.equal(result.outcome.kind, TOOL_OUTCOME_KINDS.success);
+  assert.equal(approvals.length, 1);
+  assert.match(approvals[0]?.explanation ?? "", /有意删减/u);
+});
+
+test("非缩水覆盖命中已授权记忆，不再弹出确认", async () => {
+  const workdir = mkdtempSync(join(tmpdir(), "write-tool-shrink-test-"));
+  const path = join(workdir, "small.txt");
+  const originalLines = Array.from({ length: 25 }, (_, index) => `第${String(index + 1)}行`);
+  writeFileSync(path, originalLines.join("\n"), "utf8");
+  const tracker = new FileStateTracker();
+  tracker.recordKnownContent(canonicalFileKey(path), originalLines.join("\n"));
+  const approvals: ApprovalRequest[] = [];
+  const memory = new SessionApprovalMemory();
+  memory.grant("write_file:workdir");
+  const tools = buildWriteFixture(workdir, tracker, approvals, memory);
+  const writeTool = tools.roll__write_file;
+  assert.ok(writeTool?.execute !== undefined);
+  const newLines = Array.from({ length: 25 }, (_, index) => `改${String(index + 1)}行`);
+  const result = (await writeTool.execute(
+    { file_path: "small.txt", content: newLines.join("\n") },
+    executeOptions(),
+  )) as NormalizedToolResult;
+  assert.equal(result.outcome.kind, TOOL_OUTCOME_KINDS.success);
+  assert.equal(approvals.length, 0);
 });

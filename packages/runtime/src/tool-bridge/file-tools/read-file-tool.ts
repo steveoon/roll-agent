@@ -98,18 +98,24 @@ export function buildReadFileTool(
         );
       }
       if (escapesWorkdir(settings.workdir, parsed.data.path)) {
-        const approval = await ctx.requestApproval({
-          agentName: FILE_TOOLS_AGENT_NAME,
-          toolName: READ_FILE_TOOL_NAME,
-          input: parsed.data,
-          reason: "读取工作目录以外的文件",
-        });
-        if (!approval.approved) {
-          return failedToolResult(
-            TOOL_OUTCOME_KINDS.userRejected,
-            `已取消执行${approval.reason ? `: ${approval.reason}` : ""}`,
-            approval.reason ? { reason: approval.reason } : {},
-          );
+        const memoryKey = `${READ_FILE_TOOL_NAME}:external`;
+        if (!ctx.approvalMemory?.isGranted(memoryKey)) {
+          const approval = await ctx.requestApproval({
+            agentName: FILE_TOOLS_AGENT_NAME,
+            toolName: READ_FILE_TOOL_NAME,
+            input: parsed.data,
+            reason: "读取工作目录以外的文件",
+          });
+          if (!approval.approved) {
+            return failedToolResult(
+              TOOL_OUTCOME_KINDS.userRejected,
+              `已取消执行${approval.reason ? `: ${approval.reason}` : ""}`,
+              approval.reason ? { reason: approval.reason } : {},
+            );
+          }
+          if (approval.scope === "session") {
+            ctx.approvalMemory?.grant(memoryKey);
+          }
         }
       }
       return gateToolCall(

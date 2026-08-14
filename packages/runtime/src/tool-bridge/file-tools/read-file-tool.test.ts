@@ -11,6 +11,7 @@ import { buildReadFileTool, executeReadFile } from "./read-file-tool.ts";
 import type { ApprovalRequest } from "../build-tools.ts";
 import { ToolRegistry } from "../naming.ts";
 import { DefaultToolPolicy } from "../../policy/default-policy.ts";
+import { SessionApprovalMemory } from "../../approval/approval-memory.ts";
 import { TOOL_OUTCOME_KINDS, type NormalizedToolResult } from "../normalize-result.ts";
 
 function fixture(): { workdir: string; tracker: FileStateTracker } {
@@ -93,6 +94,7 @@ function buildReadFixture(
   tracker: FileStateTracker,
   approvals: ApprovalRequest[],
   approve: boolean,
+  options: { readonly scope?: "once" | "session"; readonly memory?: SessionApprovalMemory } = {},
 ) {
   const registry = new ToolRegistry();
   const settings = resolveFileToolsSettings({ workdir });
@@ -100,8 +102,13 @@ function buildReadFixture(
     policy: new DefaultToolPolicy(),
     requestApproval: (request) => {
       approvals.push(request);
-      return Promise.resolve({ approved: approve });
+      return Promise.resolve(
+        options.scope !== undefined
+          ? { approved: approve, scope: options.scope }
+          : { approved: approve },
+      );
     },
+    ...(options.memory ? { approvalMemory: options.memory } : {}),
   });
 }
 
@@ -162,4 +169,29 @@ test("workdir 内路径不触发确认门", async () => {
   )) as NormalizedToolResult;
   assert.equal(result.outcome.kind, TOOL_OUTCOME_KINDS.success);
   assert.equal(approvals.length, 0);
+});
+
+test("workdir 外路径 scope=session 批准后第二次读取免弹", async () => {
+  const workdir = realpathSync(mkdtempSync(join(tmpdir(), "read-tool-gate-test-")));
+  const outsideDir = realpathSync(mkdtempSync(join(tmpdir(), "read-tool-outside-test-")));
+  const outsidePath = join(outsideDir, "allowed.txt");
+  writeFileSync(outsidePath, "内容", "utf8");
+  const tracker = new FileStateTracker();
+  const approvals: ApprovalRequest[] = [];
+  const memory = new SessionApprovalMemory();
+  const tools = buildReadFixture(workdir, tracker, approvals, true, { scope: "session", memory });
+  const readTool = tools.roll__read_file;
+  assert.ok(readTool?.execute !== undefined);
+  const first = (await readTool.execute(
+    { path: outsidePath },
+    executeOptions({ toolCallId: "t1" }),
+  )) as NormalizedToolResult;
+  assert.equal(first.outcome.kind, TOOL_OUTCOME_KINDS.success);
+  assert.equal(approvals.length, 1);
+  const second = (await readTool.execute(
+    { path: outsidePath },
+    executeOptions({ toolCallId: "t2" }),
+  )) as NormalizedToolResult;
+  assert.equal(second.outcome.kind, TOOL_OUTCOME_KINDS.success);
+  assert.equal(approvals.length, 1);
 });

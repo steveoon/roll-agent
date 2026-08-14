@@ -18,13 +18,23 @@ import {
   type ToolExecutionPlan,
 } from "../tool-execution-coordinator.ts";
 import { renderNumberedLines } from "./match-pipeline.ts";
-import { canonicalFileKey, loadTextFile, resolveFilePath, saveTextFile } from "./file-io.ts";
+import {
+  canonicalFileKey,
+  escapesWorkdir,
+  loadTextFile,
+  resolveFilePath,
+  saveTextFile,
+  type LoadedTextFile,
+  type LoadFileFailure,
+} from "./file-io.ts";
 import { FILE_FRESHNESS, type FileStateTracker } from "./file-state-tracker.ts";
 import { FILE_TOOLS_AGENT_NAME, type ResolvedFileToolsSettings } from "./settings.ts";
 
 export const WRITE_FILE_TOOL_NAME = "write_file";
 
 const PREVIEW_LINES = 10;
+const SHRINK_MIN_ORIGINAL_LINES = 20;
+const SHRINK_RATIO_THRESHOLD = 0.5;
 
 const writeFileInputSchema = z.object({
   file_path: z.string().min(1).describe("要写入的文件路径，相对当前工作目录或绝对路径"),
@@ -41,6 +51,29 @@ function existsAsFile(path: string): boolean | "directory" {
   } catch {
     return false;
   }
+}
+
+interface ShrinkCheck {
+  readonly shrinking: boolean;
+  readonly warning: string | undefined;
+}
+
+function detectShrink(newLineCount: number, loaded: LoadedTextFile | LoadFileFailure): ShrinkCheck {
+  if (!loaded.ok) {
+    return { shrinking: false, warning: undefined };
+  }
+  const originalLineCount = loaded.content.split("\n").length;
+  if (
+    originalLineCount < SHRINK_MIN_ORIGINAL_LINES ||
+    newLineCount >= originalLineCount * SHRINK_RATIO_THRESHOLD
+  ) {
+    return { shrinking: false, warning: undefined };
+  }
+  const percent = Math.round((1 - newLineCount / originalLineCount) * 100);
+  return {
+    shrinking: true,
+    warning: `⚠ 新内容 ${String(newLineCount)}行，比原文件 ${String(originalLineCount)} 行减少 ${String(percent)}%，请确认是有意删减`,
+  };
 }
 
 export function executeWriteFile(
@@ -105,6 +138,13 @@ export function buildWriteFileTool(
         );
       }
       const path = resolveFilePath(settings.workdir, parsed.data.file_path);
+      const newLineCount = parsed.data.content.split("\n").length;
+      const loaded = loadTextFile(path, { maxFileBytes: settings.maxFileBytes });
+      const { shrinking, warning } = detectShrink(newLineCount, loaded);
+      const explanation = `写入 ${basename(path)}（${String(newLineCount)} 行）${warning !== undefined ? `\n${warning}` : ""}`;
+      const memoryKey = shrinking
+        ? undefined
+        : `${WRITE_FILE_TOOL_NAME}:${escapesWorkdir(settings.workdir, parsed.data.file_path) ? "external" : "workdir"}`;
       return gateToolCall(
         ctx,
         FILE_TOOLS_AGENT_NAME,
@@ -112,7 +152,8 @@ export function buildWriteFileTool(
         parsed.data,
         WRITE_ANNOTATIONS,
         {
-          explanation: `写入 ${basename(path)}（${String(parsed.data.content.split("\n").length)} 行）`,
+          explanation,
+          ...(memoryKey !== undefined ? { memoryKey } : {}),
         },
       );
     },

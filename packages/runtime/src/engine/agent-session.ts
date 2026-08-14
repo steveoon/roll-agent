@@ -108,6 +108,7 @@ import {
   type ToolResourceAccess,
 } from "../tool-bridge/tool-execution-coordinator.ts";
 import { ApprovalGate, type ApprovalDecision } from "../approval/approval-gate.ts";
+import { SessionApprovalMemory } from "../approval/approval-memory.ts";
 import {
   COMPACTION_DRAFT_FALLBACK_REASONS,
   compactMessages,
@@ -894,11 +895,13 @@ export class AgentSession {
     markToolRole(toolRoles, transcriptTools, CAPABILITY_TOOL_ROLES.transcriptRead);
     const skillTools = options.skillLibrary ? this.buildSkillTools(registry) : {};
     markToolRole(toolRoles, skillTools, CAPABILITY_TOOL_ROLES.skill);
+    const fileApprovalMemory = new SessionApprovalMemory();
     const fileToolset = options.fileTools
       ? buildFileToolset(options.fileTools, registry, {
           ...(options.policy ? { policy: options.policy } : {}),
           requestApproval: (request) => this.requestApproval(request),
           coordinator: this.toolCoordinator,
+          approvalMemory: fileApprovalMemory,
         })
       : undefined;
     if (fileToolset) {

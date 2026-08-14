@@ -25,13 +25,22 @@ import {
   renderNumberedLines,
   type MatchSpan,
 } from "./match-pipeline.ts";
-import { canonicalFileKey, loadTextFile, resolveFilePath, saveTextFile } from "./file-io.ts";
+import {
+  canonicalFileKey,
+  escapesWorkdir,
+  loadTextFile,
+  resolveFilePath,
+  saveTextFile,
+} from "./file-io.ts";
 import { FILE_FRESHNESS, type FileStateTracker } from "./file-state-tracker.ts";
 import { FILE_TOOLS_AGENT_NAME, type ResolvedFileToolsSettings } from "./settings.ts";
 
 export const EDIT_FILE_TOOL_NAME = "edit_file";
 
 const SNAPSHOT_RADIUS = 3;
+
+const NO_MATCH_STEERING =
+  "若修改面较大或文件已大幅变化，可改用 roll__write_file 整文件重写（需先 read_file）";
 
 const editEntrySchema = z.object({
   old_string: z
@@ -169,7 +178,7 @@ export function executeEditFile(
       if (spans.length === 0) {
         return failedToolResult(
           TOOL_OUTCOME_KINDS.toolFailed,
-          `${label}失败，未写入任何修改。\n${formatNoMatchDiagnosis(working, oldAdapted)}`,
+          `${label}失败，未写入任何修改。\n${formatNoMatchDiagnosis(working, oldAdapted)}\n${NO_MATCH_STEERING}`,
         );
       }
       working = applyReplaceAll(working, spans, newAdapted, applied);
@@ -179,7 +188,7 @@ export function executeEditFile(
     if (match.kind === "none") {
       return failedToolResult(
         TOOL_OUTCOME_KINDS.toolFailed,
-        `${label}失败，未写入任何修改。\n${formatNoMatchDiagnosis(working, oldAdapted)}`,
+        `${label}失败，未写入任何修改。\n${formatNoMatchDiagnosis(working, oldAdapted)}\n${NO_MATCH_STEERING}`,
       );
     }
     if (match.kind === "multiple") {
@@ -214,6 +223,7 @@ export function buildEditFileTool(
         );
       }
       const path = resolveFilePath(settings.workdir, parsed.data.file_path);
+      const memoryKey = `${EDIT_FILE_TOOL_NAME}:${escapesWorkdir(settings.workdir, parsed.data.file_path) ? "external" : "workdir"}`;
       return gateToolCall(
         ctx,
         FILE_TOOLS_AGENT_NAME,
@@ -222,6 +232,7 @@ export function buildEditFileTool(
         EDIT_ANNOTATIONS,
         {
           explanation: `修改 ${basename(path)}：${String(parsed.data.edits.length)} 处编辑`,
+          memoryKey,
         },
       );
     },
