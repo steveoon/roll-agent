@@ -5,6 +5,7 @@ import {
   failedToolResult,
   type NormalizedToolResult,
 } from "../normalize-result.ts";
+import { formatControlCharCode, isRawControlCode } from "./control-chars.ts";
 
 const UTF8_BOM = "\uFEFF";
 const BINARY_PROBE_BYTES = 8192;
@@ -151,14 +152,21 @@ export function revalidateFilePathAdmission(
     : undefined;
 }
 
-function looksBinary(buffer: Buffer): boolean {
+/**
+ * Binary probe shares its control-character definition with the write-side
+ * rejection in control-chars.ts: a file the write path refuses to create is
+ * exactly a file the read path refuses to load. Bytes >= 0x80 are UTF-8
+ * multibyte fragments, never raw controls.
+ */
+function findBinaryControlByte(buffer: Buffer): number | undefined {
   const probeLength = Math.min(buffer.length, BINARY_PROBE_BYTES);
   for (let index = 0; index < probeLength; index += 1) {
-    if (buffer[index] === 0) {
-      return true;
+    const byte = buffer[index];
+    if (byte !== undefined && byte <= 0x7f && isRawControlCode(byte)) {
+      return byte;
     }
   }
-  return false;
+  return undefined;
 }
 
 export function loadTextFile(
@@ -194,8 +202,13 @@ export function loadTextFile(
     };
   }
   const buffer = readFileSync(path);
-  if (looksBinary(buffer)) {
-    return { ok: false, code: "binary", message: `${path} 是二进制文件，文件工具仅支持文本` };
+  const binaryByte = findBinaryControlByte(buffer);
+  if (binaryByte !== undefined) {
+    return {
+      ok: false,
+      code: "binary",
+      message: `${path} 是二进制文件（含原始控制字符 ${formatControlCharCode(binaryByte)}），文件工具仅支持文本。若确实需要处理该文件，请用 shell 命令。`,
+    };
   }
   const raw = buffer.toString("utf8");
   const hadBom = raw.startsWith(UTF8_BOM);

@@ -13,7 +13,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ToolExecutionOptions } from "ai";
 import { FileStateTracker } from "./file-state-tracker.ts";
-import { canonicalFileKey } from "./file-io.ts";
+import { canonicalFileKey, loadTextFile } from "./file-io.ts";
 import { resolveFileToolsSettings } from "./settings.ts";
 import { buildWriteFileTool, executeWriteFile } from "./write-file-tool.ts";
 import type { ApprovalRequest } from "../build-tools.ts";
@@ -34,6 +34,80 @@ test("新文件写入成功并自动建父目录", () => {
   assert.equal(readFileSync(join(workdir, "sub/dir/new.txt"), "utf8"), "第一行\n第二行");
   assert.match(String(result.display), /已写入/u);
   assert.match(String(result.display), / {4}1→第一行/u);
+});
+
+const ctrl = (code: number): string => String.fromCharCode(code);
+
+test("content 含原始控制字符被拒绝且未创建文件", () => {
+  const workdir = mkdtempSync(join(tmpdir(), "write-tool-test-"));
+  const settings = resolveFileToolsSettings({ workdir });
+  const target = join(workdir, "rejected.txt");
+  const result = executeWriteFile(settings, new FileStateTracker(), {
+    file_path: "rejected.txt",
+    content: `abc${ctrl(0x00)}def`,
+  });
+  assert.equal(result.outcome.kind, TOOL_OUTCOME_KINDS.invalidInput);
+  assert.equal(existsSync(target), false);
+  const message = String(result.display);
+  assert.match(message, /U\+0000/u);
+  // 自救指引：双反斜杠转义文本 + shell 生成原始字节两条路径
+  const doubleEscape = String.fromCharCode(0x5c, 0x5c) + "u0000";
+  assert.ok(message.includes(doubleEscape));
+  assert.match(message, /shell/u);
+});
+
+test("content 含 VT/DEL 等其它受管控制字符同样被拒绝", () => {
+  const settings = resolveFileToolsSettings({
+    workdir: mkdtempSync(join(tmpdir(), "write-tool-test-")),
+  });
+  for (const code of [0x0b, 0x0c, 0x1b, 0x7f]) {
+    const result = executeWriteFile(settings, new FileStateTracker(), {
+      file_path: "rejected.txt",
+      content: `x${ctrl(code)}y`,
+    });
+    assert.equal(result.outcome.kind, TOOL_OUTCOME_KINDS.invalidInput);
+  }
+});
+
+test("content 含转义序列文本（6 个 ASCII 字符）正常写入", () => {
+  const workdir = mkdtempSync(join(tmpdir(), "write-tool-test-"));
+  const settings = resolveFileToolsSettings({ workdir });
+  const singleEscape = String.fromCharCode(0x5c) + "u0000";
+  const content = `const marker = "${singleEscape}";\n`;
+  const result = executeWriteFile(settings, new FileStateTracker(), {
+    file_path: "escape-text.ts",
+    content,
+  });
+  assert.equal(result.outcome.kind, TOOL_OUTCOME_KINDS.success);
+  assert.equal(readFileSync(join(workdir, "escape-text.ts"), "utf8"), content);
+});
+
+test("写入侧拒绝集合与读取侧二进制判定一致（round-trip 不变式）", () => {
+  const workdir = mkdtempSync(join(tmpdir(), "write-tool-test-"));
+  const settings = resolveFileToolsSettings({ workdir });
+  const rejectedCodes = [0x00, 0x01, 0x08, 0x0b, 0x0c, 0x0e, 0x1f, 0x7f];
+  for (const code of rejectedCodes) {
+    const writeResult = executeWriteFile(settings, new FileStateTracker(), {
+      file_path: "probe.txt",
+      content: `a${ctrl(code)}b`,
+    });
+    assert.equal(writeResult.outcome.kind, TOOL_OUTCOME_KINDS.invalidInput);
+    const probePath = join(workdir, `probe-${String(code)}.bin`);
+    writeFileSync(probePath, Buffer.from([0x61, code, 0x62]));
+    const readResult = loadTextFile(probePath, { maxFileBytes: 1024 });
+    assert.ok(!readResult.ok && readResult.code === "binary");
+  }
+  const allowedCodes = [0x09, 0x0d];
+  for (const code of allowedCodes) {
+    const writeResult = executeWriteFile(settings, new FileStateTracker(), {
+      file_path: `allowed-${String(code)}.txt`,
+      content: `a${ctrl(code)}b`,
+    });
+    assert.equal(writeResult.outcome.kind, TOOL_OUTCOME_KINDS.success);
+    const probePath = join(workdir, `allowed-${String(code)}.txt`);
+    const readResult = loadTextFile(probePath, { maxFileBytes: 1024 });
+    assert.ok(readResult.ok);
+  }
 });
 
 test("覆盖已存在但未读取过的文件被拒绝", () => {
@@ -152,6 +226,26 @@ test("缩水覆盖即使记忆已授权仍会弹出确认，explanation 提示�
   assert.equal(result.outcome.kind, TOOL_OUTCOME_KINDS.success);
   assert.equal(approvals.length, 1);
   assert.match(approvals[0]?.explanation ?? "", /有意删减/u);
+});
+
+test("含控制字符的写入在弹窗前被拒绝，不产生审批请求", async () => {
+  const workdir = mkdtempSync(join(tmpdir(), "write-tool-ctrl-approval-"));
+  const approvals: ApprovalRequest[] = [];
+  const tools = buildWriteFixture(
+    workdir,
+    new FileStateTracker(),
+    approvals,
+    new SessionApprovalMemory(),
+  );
+  const writeTool = tools.roll__write_file;
+  assert.ok(writeTool?.execute !== undefined);
+  const result = (await writeTool.execute(
+    { file_path: "new.txt", content: `abc${ctrl(0x00)}def` },
+    executeOptions(),
+  )) as NormalizedToolResult;
+  assert.equal(result.outcome.kind, TOOL_OUTCOME_KINDS.invalidInput);
+  assert.equal(approvals.length, 0);
+  assert.equal(existsSync(join(workdir, "new.txt")), false);
 });
 
 test("未读取过的文件即使缩水也在弹窗前被 read-before-overwrite 拦下", async () => {

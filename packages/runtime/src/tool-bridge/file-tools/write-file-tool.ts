@@ -31,6 +31,7 @@ import {
   type LoadedTextFile,
   type LoadFileFailure,
 } from "./file-io.ts";
+import { rejectTextWithRawControlChars } from "./control-chars.ts";
 import { FILE_FRESHNESS, type FileStateTracker } from "./file-state-tracker.ts";
 import { FILE_TOOLS_AGENT_NAME, type ResolvedFileToolsSettings } from "./settings.ts";
 
@@ -106,6 +107,10 @@ export function executeWriteFile(
   tracker: FileStateTracker,
   input: WriteFileInput,
 ): NormalizedToolResult {
+  const contentRejected = rejectTextWithRawControlChars("content", input.content);
+  if (contentRejected !== undefined) {
+    return contentRejected;
+  }
   const path = resolveFilePath(settings.workdir, input.file_path);
   const existing = existsAsFile(path);
   if (existing === "directory") {
@@ -152,6 +157,10 @@ export function buildWriteFileTool(
           TOOL_OUTCOME_KINDS.invalidInput,
           "参数校验失败: file_path 必须为非空字符串，content 必须为字符串",
         );
+      }
+      const contentRejected = rejectTextWithRawControlChars("content", parsed.data.content);
+      if (contentRejected !== undefined) {
+        return contentRejected;
       }
       const newLineCount = parsed.data.content.split("\n").length;
       const path = resolveFilePath(settings.workdir, parsed.data.file_path);
@@ -212,7 +221,7 @@ export function buildWriteFileTool(
   return {
     [id]: tool({
       description:
-        "新建文件或整文件重写。已存在的文件必须先 roll__read_file 读取确认后才能覆盖；只改部分内容时优先用 roll__edit_file。",
+        "新建文件或整文件重写。已存在的文件必须先 roll__read_file 读取确认后才能覆盖；只改部分内容时优先用 roll__edit_file。仅支持文本内容，content 含原始控制字符会被拒绝；需要写入转义序列文本时用双反斜杠，需要原始字节时改用 shell。",
       inputSchema: writeFileInputSchema,
       toModelOutput: ({ output }) => toolResultToModelOutput(output),
       execute: (input: WriteFileInput, options): Promise<NormalizedToolResult> =>

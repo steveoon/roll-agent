@@ -35,6 +35,7 @@ import {
   revalidateFilePathAdmission,
   saveTextFile,
 } from "./file-io.ts";
+import { rejectTextWithRawControlChars } from "./control-chars.ts";
 import { FILE_FRESHNESS, type FileStateTracker } from "./file-state-tracker.ts";
 import { FILE_TOOLS_AGENT_NAME, type ResolvedFileToolsSettings } from "./settings.ts";
 
@@ -140,11 +141,30 @@ function renderEditSuccess(
     : rendered;
 }
 
+function rejectControlCharsInEdits(input: EditFileInput): NormalizedToolResult | undefined {
+  for (const [index, edit] of input.edits.entries()) {
+    const label = `第 ${String(index + 1)} 条编辑（共 ${String(input.edits.length)} 条）的`;
+    const oldRejected = rejectTextWithRawControlChars(`${label} old_string`, edit.old_string);
+    if (oldRejected !== undefined) {
+      return oldRejected;
+    }
+    const newRejected = rejectTextWithRawControlChars(`${label} new_string`, edit.new_string);
+    if (newRejected !== undefined) {
+      return newRejected;
+    }
+  }
+  return undefined;
+}
+
 export function executeEditFile(
   settings: ResolvedFileToolsSettings,
   tracker: FileStateTracker,
   input: EditFileInput,
 ): NormalizedToolResult {
+  const controlRejected = rejectControlCharsInEdits(input);
+  if (controlRejected !== undefined) {
+    return controlRejected;
+  }
   const path = resolveFilePath(settings.workdir, input.file_path);
   const loaded = loadTextFile(path, { maxFileBytes: settings.maxFileBytes });
   if (!loaded.ok) {
@@ -237,6 +257,10 @@ export function buildEditFileTool(
           "参数校验失败: file_path 必须为非空字符串，edits 至少一条且每条含非空 old_string 与 new_string",
         );
       }
+      const controlRejected = rejectControlCharsInEdits(parsed.data);
+      if (controlRejected !== undefined) {
+        return controlRejected;
+      }
       const displayPath = formatPathForApproval(settings.workdir, parsed.data.file_path);
       const external = escapesWorkdir(settings.workdir, parsed.data.file_path);
       const memoryKey = external ? undefined : `${EDIT_FILE_TOOL_NAME}:workdir`;
@@ -285,7 +309,7 @@ export function buildEditFileTool(
   return {
     [id]: tool({
       description:
-        "对文本文件做精确字符串替换。使用前必须先 roll__read_file 读取文件；old_string 逐字复制读到的内容（不含行号前缀）且须唯一定位；同一文件多处修改放进 edits 数组一次提交，任何一条失败则整体不写入。成功返回已含修改点最新内容，无需再次读取确认。",
+        "对文本文件做精确字符串替换。使用前必须先 roll__read_file 读取文件；old_string 逐字复制读到的内容（不含行号前缀）且须唯一定位；同一文件多处修改放进 edits 数组一次提交，任何一条失败则整体不写入。成功返回已含修改点最新内容，无需再次读取确认。仅支持文本内容，old_string/new_string 含原始控制字符会被拒绝；需要写入转义序列文本时用双反斜杠，需要原始字节时改用 shell。",
       inputSchema: editFileInputSchema,
       toModelOutput: ({ output }) => toolResultToModelOutput(output),
       execute: (input: EditFileInput, options): Promise<NormalizedToolResult> =>

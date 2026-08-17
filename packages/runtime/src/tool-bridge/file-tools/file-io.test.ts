@@ -74,6 +74,28 @@ test("loadTextFile 拒绝超大文件与二进制文件", () => {
   assert.ok(!binary.ok && binary.code === "binary");
 });
 
+test("loadTextFile 拒绝仅含非 NUL 控制字符的文件并指明码点", () => {
+  const dir = tempDir();
+  const vt = join(dir, "vt.txt");
+  writeFileSync(vt, Buffer.from([0x61, 0x0b, 0x62]));
+  const loaded = loadTextFile(vt, LIMITS);
+  assert.ok(!loaded.ok && loaded.code === "binary");
+  assert.match(loaded.message, /U\+000B/u);
+  const del = join(dir, "del.txt");
+  writeFileSync(del, Buffer.from([0x61, 0x7f, 0x62]));
+  const delLoaded = loadTextFile(del, LIMITS);
+  assert.ok(!delLoaded.ok && delLoaded.code === "binary");
+  assert.match(delLoaded.message, /U\+007F/u);
+});
+
+test("loadTextFile 放行 TAB 与 CRLF 文本", () => {
+  const dir = tempDir();
+  const path = join(dir, "tabs.txt");
+  writeFileSync(path, "a\tb\r\nc\r\n", "utf8");
+  const loaded = loadTextFile(path, LIMITS);
+  assert.ok(loaded.ok);
+});
+
 test("saveTextFile 自动建父目录并按需还原 BOM", () => {
   const dir = tempDir();
   const nested = join(dir, "sub", "deep", "out.txt");

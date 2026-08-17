@@ -32,6 +32,48 @@ function markRead(f: Fixture): void {
   f.tracker.recordKnownContent(canonicalFileKey(f.path), readFileSync(f.path, "utf8"));
 }
 
+const ctrl = (code: number): string => String.fromCharCode(code);
+
+test("old_string 含原始控制字符被拒绝且不写入", () => {
+  const f = fixture("abc");
+  markRead(f);
+  const result = executeEditFile(f.settings, f.tracker, {
+    file_path: "target.txt",
+    edits: [{ old_string: `a${ctrl(0x00)}b`, new_string: "x" }],
+  });
+  assert.equal(result.outcome.kind, TOOL_OUTCOME_KINDS.invalidInput);
+  assert.match(String(result.display), /old_string/u);
+  assert.match(String(result.display), /U\+0000/u);
+  assert.equal(readFileSync(f.path, "utf8"), "abc");
+});
+
+test("new_string 含原始控制字符被拒绝且不写入，消息指明编辑序号", () => {
+  const f = fixture("abc");
+  markRead(f);
+  const result = executeEditFile(f.settings, f.tracker, {
+    file_path: "target.txt",
+    edits: [
+      { old_string: "abc", new_string: "abd" },
+      { old_string: "abd", new_string: `x${ctrl(0x1b)}y` },
+    ],
+  });
+  assert.equal(result.outcome.kind, TOOL_OUTCOME_KINDS.invalidInput);
+  assert.match(String(result.display), /第 2 条编辑（共 2 条）的 new_string/u);
+  assert.match(String(result.display), /U\+001B/u);
+  assert.equal(readFileSync(f.path, "utf8"), "abc");
+});
+
+test("old_string/new_string 含转义序列文本（6 个 ASCII 字符）正常编辑", () => {
+  const singleEscape = String.fromCharCode(0x5c) + "u0000";
+  const f = fixture(`const a = "${singleEscape}";`);
+  markRead(f);
+  const result = executeEditFile(f.settings, f.tracker, {
+    file_path: "target.txt",
+    edits: [{ old_string: `"${singleEscape}"`, new_string: `"${singleEscape}${singleEscape}"` }],
+  });
+  assert.equal(result.outcome.kind, TOOL_OUTCOME_KINDS.success);
+});
+
 test("未读取过的文件拒绝编辑", () => {
   const f = fixture("内容");
   const result = executeEditFile(f.settings, f.tracker, {
