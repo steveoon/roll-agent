@@ -974,9 +974,7 @@ export class RuntimeService {
         this.resolvePendingApproval(
           params,
           params.decision === "approve"
-            ? {
-                decision: "approve",
-              }
+            ? { decision: "approve" }
             : {
                 decision: "reject",
                 ...(params.reason !== undefined ? { reason: params.reason } : {}),

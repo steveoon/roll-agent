@@ -229,6 +229,10 @@ function isVerifyAdmission(value: unknown): value is VerifyAdmission {
   );
 }
 
+function sameVerifierIds(a: readonly string[], b: readonly string[]): boolean {
+  return a.length === b.length && a.every((value, index) => value === b[index]);
+}
+
 export function revalidateVerifyAdmission(
   settings: ResolvedFileToolsSettings,
   input: VerifyFileInput,
@@ -239,7 +243,7 @@ export function revalidateVerifyAdmission(
   }
   const now = captureVerifyAdmission(settings, input);
   const containmentDrift = !captured.external && now.external;
-  const verifierDrift = captured.detectedIds.join(" ") !== now.detectedIds.join(" ");
+  const verifierDrift = !sameVerifierIds(captured.detectedIds, now.detectedIds);
   return containmentDrift || verifierDrift
     ? failedToolResult(TOOL_OUTCOME_KINDS.toolFailed, VERIFY_ADMISSION_DRIFT_MESSAGE)
     : undefined;
