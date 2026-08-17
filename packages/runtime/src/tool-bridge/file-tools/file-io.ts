@@ -29,6 +29,7 @@ export interface LoadedTextFile {
 
 export interface FilePathAdmission {
   readonly admittedExternal: boolean;
+  readonly admittedTarget: string | undefined;
 }
 
 export function resolveFilePath(workdir: string, input: string): string {
@@ -110,16 +111,26 @@ export function formatPathForApproval(workdir: string, inputPath: string): strin
   return rel === "" ? "." : rel;
 }
 
+function admittedTargetOf(workdir: string, inputPath: string): string | undefined {
+  const target = resolveContainmentPath(resolveFilePath(workdir, inputPath));
+  return target.ok ? target.path : undefined;
+}
+
 export function captureFilePathAdmission(workdir: string, inputPath: string): FilePathAdmission {
-  return { admittedExternal: escapesWorkdir(workdir, inputPath) };
+  return {
+    admittedExternal: escapesWorkdir(workdir, inputPath),
+    admittedTarget: admittedTargetOf(workdir, inputPath),
+  };
 }
 
 function isFilePathAdmission(value: unknown): value is FilePathAdmission {
+  if (typeof value !== "object" || value === null) {
+    return false;
+  }
+  const candidate = value as { admittedExternal?: unknown; admittedTarget?: unknown };
   return (
-    typeof value === "object" &&
-    value !== null &&
-    "admittedExternal" in value &&
-    typeof (value as { admittedExternal: unknown }).admittedExternal === "boolean"
+    typeof candidate.admittedExternal === "boolean" &&
+    (candidate.admittedTarget === undefined || typeof candidate.admittedTarget === "string")
   );
 }
 
@@ -128,13 +139,16 @@ export function revalidateFilePathAdmission(
   inputPath: string,
   captured: unknown,
 ): NormalizedToolResult | undefined {
-  if (!isFilePathAdmission(captured) || captured.admittedExternal) {
+  if (!isFilePathAdmission(captured)) {
     return undefined;
   }
-  if (!escapesWorkdir(workdir, inputPath)) {
-    return undefined;
-  }
-  return failedToolResult(TOOL_OUTCOME_KINDS.toolFailed, FILE_CONTAINMENT_DRIFT_MESSAGE);
+  const escapedNow = escapesWorkdir(workdir, inputPath);
+  const targetNow = admittedTargetOf(workdir, inputPath);
+  const containmentDrift = !captured.admittedExternal && escapedNow;
+  const targetDrift = captured.admittedTarget !== targetNow;
+  return containmentDrift || targetDrift
+    ? failedToolResult(TOOL_OUTCOME_KINDS.toolFailed, FILE_CONTAINMENT_DRIFT_MESSAGE)
+    : undefined;
 }
 
 function looksBinary(buffer: Buffer): boolean {

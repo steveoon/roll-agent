@@ -134,6 +134,38 @@ test("准入后父目录换成越界 symlink 时 revalidate 阻止", () => {
   assert.equal(String(blocked.display), FILE_CONTAINMENT_DRIFT_MESSAGE);
 });
 
+test("准入后 external symlink 改指向另一外部目录时 revalidate 阻止", () => {
+  const workdir = realpathSync(tempDir());
+  const outsideA = realpathSync(tempDir());
+  const outsideB = realpathSync(tempDir());
+  symlinkSync(outsideA, join(workdir, "out"));
+  const captured = captureFilePathAdmission(workdir, join("out", "secret.txt"));
+  assert.equal(captured.admittedExternal, true);
+  assert.equal(captured.admittedTarget, join(outsideA, "secret.txt"));
+  assert.equal(
+    revalidateFilePathAdmission(workdir, join("out", "secret.txt"), captured),
+    undefined,
+  );
+  rmSync(join(workdir, "out"));
+  symlinkSync(outsideB, join(workdir, "out"));
+  const blocked = revalidateFilePathAdmission(workdir, join("out", "secret.txt"), captured);
+  assert.ok(blocked !== undefined);
+  assert.equal(blocked.outcome.kind, "tool_failed");
+});
+
+test("准入后目标未变时 revalidate 放行（含文件在此期间被创建）", () => {
+  const workdir = realpathSync(tempDir());
+  const captured = captureFilePathAdmission(workdir, join("nested", "new.txt"));
+  assert.equal(captured.admittedExternal, false);
+  assert.equal(captured.admittedTarget, join(workdir, "nested", "new.txt"));
+  mkdirSync(join(workdir, "nested"));
+  writeFileSync(join(workdir, "nested", "new.txt"), "created meanwhile", "utf8");
+  assert.equal(
+    revalidateFilePathAdmission(workdir, join("nested", "new.txt"), captured),
+    undefined,
+  );
+});
+
 test("loadTextFile 拒绝非普通文件", (t) => {
   const workdir = realpathSync(tempDir());
   const fifo = join(workdir, "pipe.fifo");

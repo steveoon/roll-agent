@@ -5,6 +5,7 @@ import {
   mkdtempSync,
   readFileSync,
   realpathSync,
+  rmSync,
   symlinkSync,
   writeFileSync,
 } from "node:fs";
@@ -177,6 +178,41 @@ test("symlink 目录写入时 explanation 含 outside 的真实路径", async ()
     new RegExp(outside.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "u"),
   );
   assert.match(approvals[0]?.explanation ?? "", /secret\.txt（工作目录外）/u);
+});
+
+test("确认期间 external symlink 改指向另一外部目录时阻止写入", async () => {
+  const workdir = realpathSync(mkdtempSync(join(tmpdir(), "write-tool-retarget-wd-")));
+  const outsideA = realpathSync(mkdtempSync(join(tmpdir(), "write-tool-retarget-a-")));
+  const outsideB = realpathSync(mkdtempSync(join(tmpdir(), "write-tool-retarget-b-")));
+  symlinkSync(outsideA, join(workdir, "out"));
+  const approvals: ApprovalRequest[] = [];
+  const tools = buildWriteFileTool(
+    resolveFileToolsSettings({ workdir }),
+    new FileStateTracker(),
+    new ToolRegistry(),
+    {
+      policy: new DefaultToolPolicy(),
+      requestApproval: (request) => {
+        approvals.push(request);
+        rmSync(join(workdir, "out"));
+        symlinkSync(outsideB, join(workdir, "out"));
+        return Promise.resolve({ approved: true });
+      },
+      approvalMemory: new SessionApprovalMemory(),
+    },
+  );
+  const writeTool = tools.roll__write_file;
+  assert.ok(writeTool?.execute !== undefined);
+  const result = (await writeTool.execute(
+    { file_path: "out/secret.txt", content: "secret\n" },
+    executeOptions(),
+  )) as NormalizedToolResult;
+  assert.equal(result.outcome.kind, TOOL_OUTCOME_KINDS.toolFailed);
+  assert.match(String(result.display), /安全条件.*变化/u);
+  assert.equal(approvals.length, 1);
+  assert.match(approvals[0]?.explanation ?? "", /secret\.txt（工作目录外）/u);
+  assert.equal(existsSync(join(outsideA, "secret.txt")), false);
+  assert.equal(existsSync(join(outsideB, "secret.txt")), false);
 });
 
 test("external write 选 session 后再写另一个 external 路径仍弹窗", async () => {
