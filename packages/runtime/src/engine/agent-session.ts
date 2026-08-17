@@ -1886,11 +1886,7 @@ export class AgentSession {
           ...(outputTokensPerSecond !== undefined ? { outputTokensPerSecond } : {}),
           ...(stoppedAtStepLimit ? { stoppedAtStepLimit: true } : {}),
         });
-        if (
-          !activeTurn.pausedForContextPressure ||
-          lastStepFinishReason !== "tool-calls" ||
-          activeTurn.contextPressureContinuations >= MAX_CONTEXT_PRESSURE_CONTINUATIONS
-        ) {
+        if (!activeTurn.pausedForContextPressure || lastStepFinishReason !== "tool-calls") {
           return;
         }
         activeTurn.pausedForContextPressure = false;
@@ -1899,10 +1895,12 @@ export class AgentSession {
           pressureTokens: this.contextPressureTokens(),
         });
         const progressed = await this.runAutoCompactionPasses(queue, activeTurn, turnStartedAt);
-        if (!progressed || this.isTurnAborted(activeTurn)) {
+        if (this.isTurnAborted(activeTurn)) {
           return;
         }
-        activeTurn.contextPressureContinuations += 1;
+        activeTurn.contextPressureContinuations = progressed
+          ? activeTurn.contextPressureContinuations + 1
+          : MAX_CONTEXT_PRESSURE_CONTINUATIONS;
         continuation = true;
         queue.push({ type: "message-start", messageId: randomUUID() });
       }
@@ -2198,6 +2196,7 @@ export class AgentSession {
         settings === undefined ||
         !settings.enabled ||
         this.contextWindow === undefined ||
+        activeTurn.contextPressureContinuations >= MAX_CONTEXT_PRESSURE_CONTINUATIONS ||
         last === undefined ||
         last.finishReason !== "tool-calls"
       ) {

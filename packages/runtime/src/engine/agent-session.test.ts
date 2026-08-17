@@ -2710,6 +2710,40 @@ test("AgentSession 轮内步骤后上下文压力超阈值时暂停、压缩并�
   assert.equal(secondPrompt.filter((message) => message.role === "user").length, 1);
 });
 
+test("AgentSession 轮内暂停后即使压缩无进展也续跑完成本轮,且不再重复暂停", async () => {
+  const model = sequencedModel([
+    toolCallStep("echo-agent__echo", { q: "x" }, 170),
+    toolCallStep("echo-agent__echo", { q: "y" }, 180),
+    textStep("finished", 190),
+  ]);
+  const session = new AgentSession({
+    id: "c1-mid-turn-pressure-noop",
+    model,
+    sources: [source("echo-agent", "echo")],
+    maxSteps: 8,
+    contextWindow: 200,
+    compaction: {
+      enabled: true,
+      strategy: "truncate",
+      threshold: 0.75,
+      keepRecentTurns: 1,
+      keepRecentTokens: 1,
+    },
+  });
+
+  const events = await collect(session.send("tool loop"));
+  const compactions = events.filter((event) => event.type === "context-compacted");
+  assert.equal(compactions.length, 1);
+  const finishes = events.filter(
+    (event): event is Extract<SessionEvent, { type: "message-finish" }> =>
+      event.type === "message-finish",
+  );
+  assert.equal(finishes.length, 2);
+  assert.equal(finishes.at(-1)?.text, "finished");
+  assert.equal(events.at(-1)?.type, "message-finish");
+  assert.equal(model.doStreamCalls.length, 3);
+});
+
 test("AgentSession 累计输入超阈值但上下文输入未超阈值时不自动压缩", async () => {
   const model = sequencedModel([
     toolCallStep("echo-agent__echo", { q: "x" }, 50),
