@@ -8,6 +8,7 @@ const runtimeApprovalOverrideActions = ["auto", "confirm", "deny"] as const;
 const runtimeCompactionStrategies = ["summarize", "truncate"] as const;
 export const runtimeThinkingLevels = ["off", "low", "medium", "high"] as const;
 export const CHAT_SCREEN_MODES = ["auto", "fullscreen", "inline"] as const;
+export const CHAT_THINKING_DISPLAY_MODES = ["collapsed", "expanded"] as const;
 
 const browserProfileColorSchema = z
   .string()
@@ -39,8 +40,6 @@ export const askConfigSchema = z.object({
 });
 
 export const chatScreenModeSchema = z.enum(CHAT_SCREEN_MODES);
-
-export const CHAT_THINKING_DISPLAY_MODES = ["collapsed", "expanded"] as const;
 export const chatThinkingDisplaySchema = z.enum(CHAT_THINKING_DISPLAY_MODES);
 
 export const chatConfigSchema = z.object({

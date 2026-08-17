@@ -34,7 +34,6 @@ export type HistoryItem =
       readonly kind: "reasoning";
       readonly id: string;
       readonly text: string;
-      /** 思考从开始到落盘的墙钟时长，供折叠摘要展示。 */
       readonly durationMs?: number;
     }
   | {
@@ -71,7 +70,6 @@ export interface LiveState {
   readonly reasoningId: string | undefined;
   readonly reasoningText: string;
   readonly reasoningActive: boolean;
-  /** 当前 reasoning 段开始时的墙钟时间戳，用于计算折叠摘要中的思考时长。 */
   readonly reasoningStartedAt: number | undefined;
   readonly thinkTagOpen: boolean;
   readonly activeTools: readonly ToolRowState[];
@@ -123,7 +121,6 @@ export interface ChatUiState {
   readonly phase: ChatPhase;
   readonly pendingConfirm: PendingConfirm | undefined;
   readonly pendingUserInput: PendingUserInput | undefined;
-  /** 已完成思考内容的展示方式；仅影响已落盘 history 的渲染，不影响思考中的实时展示。 */
   readonly thinkingDisplay: ChatThinkingDisplay;
 }
 
@@ -140,7 +137,12 @@ export type ChatUiAction =
   | { readonly type: "set-auto"; readonly value: boolean }
   | { readonly type: "commit-history"; readonly item: HistoryItem }
   | { readonly type: "start-compaction" }
-  | { readonly type: "session-event"; readonly id: string; readonly event: SessionEvent }
+  | {
+      readonly type: "session-event";
+      readonly id: string;
+      readonly at: number;
+      readonly event: SessionEvent;
+    }
   | { readonly type: "confirm-resolved" }
   | { readonly type: "user-input-resolved"; readonly requestId: PendingUserInput["requestId"] }
   | { readonly type: "cancel-requested" }
@@ -290,11 +292,11 @@ function commitStreamingText(state: ChatUiState, id: string): ChatUiState {
   };
 }
 
-function commitReasoning(state: ChatUiState, id: string): ChatUiState {
+function commitReasoning(state: ChatUiState, id: string, at: number): ChatUiState {
   const durationMs =
     state.live.reasoningStartedAt === undefined
       ? undefined
-      : Math.max(0, Date.now() - state.live.reasoningStartedAt);
+      : Math.max(0, at - state.live.reasoningStartedAt);
   const history =
     state.live.reasoningText.trim().length > 0
       ? [
@@ -320,8 +322,13 @@ function commitReasoning(state: ChatUiState, id: string): ChatUiState {
   };
 }
 
-function beginReasoning(state: ChatUiState, id: string, reasoningId: string): ChatUiState {
-  const afterReasoning = commitReasoning(state, `${id}-previous-reasoning`);
+function beginReasoning(
+  state: ChatUiState,
+  id: string,
+  reasoningId: string,
+  at: number,
+): ChatUiState {
+  const afterReasoning = commitReasoning(state, `${id}-previous-reasoning`, at);
   const afterText = commitStreamingText(afterReasoning, id);
   return {
     ...afterText,
@@ -330,22 +337,27 @@ function beginReasoning(state: ChatUiState, id: string, reasoningId: string): Ch
       reasoningId,
       reasoningText: "",
       reasoningActive: true,
-      reasoningStartedAt: Date.now(),
+      reasoningStartedAt: at,
     },
   };
 }
 
-function applySessionEvent(state: ChatUiState, id: string, event: SessionEvent): ChatUiState {
+function applySessionEvent(
+  state: ChatUiState,
+  id: string,
+  at: number,
+  event: SessionEvent,
+): ChatUiState {
   switch (event.type) {
     case "message-start":
       return state;
     case "reasoning-start":
-      return beginReasoning(state, id, event.reasoningId);
+      return beginReasoning(state, id, event.reasoningId, at);
     case "reasoning-delta": {
       const current =
         state.live.reasoningId === event.reasoningId
           ? state
-          : beginReasoning(state, id, event.reasoningId);
+          : beginReasoning(state, id, event.reasoningId, at);
       return {
         ...current,
         live: {
@@ -357,10 +369,10 @@ function applySessionEvent(state: ChatUiState, id: string, event: SessionEvent):
     }
     case "reasoning-end":
       return state.live.reasoningId === event.reasoningId
-        ? commitReasoning(state, `${id}-reasoning`)
+        ? commitReasoning(state, `${id}-reasoning`, at)
         : state;
     case "text-delta": {
-      const current = commitReasoning(state, `${id}-reasoning`);
+      const current = commitReasoning(state, `${id}-reasoning`, at);
       return {
         ...current,
         live: {
@@ -371,7 +383,7 @@ function applySessionEvent(state: ChatUiState, id: string, event: SessionEvent):
       };
     }
     case "tool-call": {
-      const afterReasoning = commitReasoning(state, `${id}-reasoning`);
+      const afterReasoning = commitReasoning(state, `${id}-reasoning`, at);
       const current = commitStreamingText(afterReasoning, id);
       return {
         ...current,
@@ -446,7 +458,7 @@ function applySessionEvent(state: ChatUiState, id: string, event: SessionEvent):
         ],
       };
     case "message-finish": {
-      const current = commitReasoning(state, `${id}-reasoning`);
+      const current = commitReasoning(state, `${id}-reasoning`, at);
       const committed: HistoryItem[] = [];
       if (current.live.streamingText.length > 0) {
         committed.push({
@@ -550,7 +562,7 @@ export function chatReducer(state: ChatUiState, action: ChatUiAction): ChatUiSta
         pendingUserInput: undefined,
       };
     case "session-event":
-      return applySessionEvent(state, action.id, action.event);
+      return applySessionEvent(state, action.id, action.at, action.event);
     case "confirm-resolved":
       return { ...state, phase: "busy", pendingConfirm: undefined };
     case "user-input-resolved":

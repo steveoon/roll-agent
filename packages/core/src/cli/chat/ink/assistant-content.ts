@@ -2,16 +2,28 @@ import { createElement as h } from "react";
 import type { ReactElement } from "react";
 import { Box, Text } from "ink";
 import { Markdown } from "./markdown.ts";
-import { parseThinking } from "./thinking-text.ts";
-import { ReasoningSummary } from "./reasoning-block.ts";
+import { parseThinking, type TextSegment } from "./thinking-text.ts";
+import { countReasoningChars, ReasoningSummary } from "./reasoning-block.ts";
 
 export interface AssistantContentProps {
   readonly text: string;
-  /**
-   * 已落盘历史使用：把内联 `<think>` 思考段折叠为一行摘要。
-   * 流式 live 区不传此项——思考进行中始终实时展示。
-   */
   readonly collapseThinking?: boolean;
+}
+
+function renderSegment(
+  segment: TextSegment,
+  key: string,
+  collapseThinking: boolean,
+): ReactElement | null {
+  if (!segment.thinking) {
+    return h(Markdown, { key, text: segment.text });
+  }
+  if (!collapseThinking) {
+    return h(Text, { key, dimColor: true }, segment.text);
+  }
+  return countReasoningChars(segment.text) === 0
+    ? null
+    : h(Box, { key }, h(ReasoningSummary, { text: segment.text }));
 }
 
 export function AssistantContent({
@@ -22,11 +34,7 @@ export function AssistantContent({
     Box,
     { flexDirection: "column" },
     ...parseThinking(text).map((segment, index) =>
-      segment.thinking && collapseThinking
-        ? h(Box, { key: String(index) }, h(ReasoningSummary, { text: segment.text }))
-        : segment.thinking
-          ? h(Text, { key: String(index), dimColor: true }, segment.text)
-          : h(Markdown, { key: String(index), text: segment.text }),
+      renderSegment(segment, String(index), collapseThinking),
     ),
   );
 }

@@ -100,11 +100,7 @@ export function useSession(session: AgentSession, options: UseSessionOptions): U
         if (pendingDelta !== undefined) {
           const event = pendingDelta;
           pendingDelta = undefined;
-          dispatch({
-            type: "session-event",
-            id: randomUUID(),
-            event,
-          });
+          dispatch({ type: "session-event", id: randomUUID(), at: Date.now(), event });
         }
       };
       const bufferDelta = (event: StreamDeltaEvent): void => {
@@ -149,7 +145,7 @@ export function useSession(session: AgentSession, options: UseSessionOptions): U
             const decisionPromise = new Promise<ConfirmDecision>((resolve) => {
               decisionRef.current = resolve;
             });
-            dispatch({ type: "session-event", id: randomUUID(), event });
+            dispatch({ type: "session-event", id: randomUUID(), at: Date.now(), event });
             const decision = await decisionPromise;
             decisionRef.current = null;
             if (decision.approved) {
@@ -161,7 +157,7 @@ export function useSession(session: AgentSession, options: UseSessionOptions): U
             continue;
           }
           if (event.type === "user-input-required") {
-            dispatch({ type: "session-event", id: randomUUID(), event });
+            dispatch({ type: "session-event", id: randomUUID(), at: Date.now(), event });
             const result = await new Promise<UserInputResult>((resolve) => {
               let settled = false;
               const expiresAt = Date.parse(event.expiresAt);
@@ -195,13 +191,14 @@ export function useSession(session: AgentSession, options: UseSessionOptions): U
             dispatch({ type: "user-input-resolved", requestId: event.requestId });
             continue;
           }
-          dispatch({ type: "session-event", id: randomUUID(), event });
+          dispatch({ type: "session-event", id: randomUUID(), at: Date.now(), event });
         }
       } catch (error) {
         flushPending();
         dispatch({
           type: "session-event",
           id: randomUUID(),
+          at: Date.now(),
           event: { type: "error", stage: "execute", message: errorMessage(error) },
         });
       } finally {

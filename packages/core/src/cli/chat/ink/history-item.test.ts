@@ -5,10 +5,11 @@ import { createElement as h } from "react";
 import { render } from "ink-testing-library";
 import { HistoryItemView } from "./history-item.ts";
 import type { HistoryItem } from "./state.ts";
+import type { ChatThinkingDisplay } from "../../../config/schema.ts";
 
 const REASONING_BODY = "先检查输入状态，再定位工具调用边界。";
 
-function renderFrame(item: HistoryItem, thinkingDisplay?: "collapsed" | "expanded"): string {
+function renderFrame(item: HistoryItem, thinkingDisplay?: ChatThinkingDisplay): string {
   const { lastFrame, unmount } = render(
     h(HistoryItemView, {
       item,
@@ -61,5 +62,16 @@ test("assistant inline think segments stay visible when display is expanded", ()
   );
   assert.match(frame, /最终答案/);
   assert.match(frame, /内部推理过程/);
+  assert.doesNotMatch(frame, /已折叠/);
+});
+
+test("whitespace-only inline think segments render no collapsed trace", () => {
+  const frame = renderFrame({
+    kind: "assistant",
+    id: "a1",
+    text: "<think>  \n\t </think>最终答案",
+  });
+  assert.match(frame, /最终答案/);
+  assert.doesNotMatch(frame, /推理过程/);
   assert.doesNotMatch(frame, /已折叠/);
 });

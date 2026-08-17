@@ -918,6 +918,8 @@ test("ChatApp streams provider reasoning separately from tool activity", async (
     assert.match(frame, /推理过程/);
     assert.match(frame, /已折叠/);
     assert.doesNotMatch(frame, /先检查输入状态/);
+    assert.match(frame, /已折叠\n\n\s+· roll\.search/);
+    assert.doesNotMatch(frame, /已折叠\n\n\n/);
     assert.ok(frame.indexOf("已折叠") < frame.indexOf("roll.search"));
   });
 

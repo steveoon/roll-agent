@@ -193,7 +193,7 @@ export function TranscriptViewport(props: TranscriptViewportProps): ReactElement
 
   useEffect(() => {
     setHeights(new Map());
-  }, [props.width]);
+  }, [props.width, props.thinkingDisplay]);
 
   const onMeasure = useCallback((key: string, height: number): void => {
     setHeights((current) => {

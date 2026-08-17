@@ -3,8 +3,10 @@ import assert from "node:assert/strict";
 import { TOOL_OUTCOME_KINDS, type SessionEvent } from "@roll-agent/runtime";
 import { chatReducer, createInitialState, type ChatUiState } from "./state.ts";
 
-function event(state: ChatUiState, id: string, e: SessionEvent): ChatUiState {
-  return chatReducer(state, { type: "session-event", id, event: e });
+const FIXED_AT = 1_700_000_000_000;
+
+function event(state: ChatUiState, id: string, e: SessionEvent, at = FIXED_AT): ChatUiState {
+  return chatReducer(state, { type: "session-event", id, at, event: e });
 }
 
 test("createInitialState seeds model + idle phase", () => {
@@ -71,15 +73,9 @@ test("reasoning tokens stream separately and flush before a tool call", () => {
     input: { query: "input" },
   });
 
-  assert.equal(state.history.length, 1);
-  const committed = state.history[0];
-  assert.equal(committed?.kind, "reasoning");
-  if (committed?.kind === "reasoning") {
-    assert.equal(committed.id, "tc-reasoning");
-    assert.equal(committed.text, "先定位代码路径");
-    assert.equal(typeof committed.durationMs, "number");
-    assert.ok((committed.durationMs ?? Number.NaN) >= 0);
-  }
+  assert.deepEqual(state.history, [
+    { kind: "reasoning", id: "tc-reasoning", text: "先定位代码路径", durationMs: 0 },
+  ]);
   assert.equal(state.live.reasoningActive, false);
   assert.equal(state.live.reasoningText, "");
   assert.equal(state.live.activeTools[0]?.name, "roll.search");
@@ -97,14 +93,33 @@ test("reasoning-end commits a dedicated block before the final assistant reply",
   state = event(state, "td", { type: "text-delta", delta: "结论" });
   state = event(state, "mf", { type: "message-finish", text: "结论" });
 
-  assert.equal(state.history.length, 2);
-  const reasoning = state.history[0];
-  assert.equal(reasoning?.kind, "reasoning");
-  if (reasoning?.kind === "reasoning") {
-    assert.equal(reasoning.id, "re-reasoning");
-    assert.equal(reasoning.text, "验证边界");
-  }
-  assert.deepEqual(state.history[1], { kind: "assistant", id: "mf", text: "结论" });
+  assert.deepEqual(state.history, [
+    { kind: "reasoning", id: "re-reasoning", text: "验证边界", durationMs: 0 },
+    { kind: "assistant", id: "mf", text: "结论" },
+  ]);
+});
+
+test("reasoning durationMs is the elapsed time between reasoning-start and reasoning-end", () => {
+  let state = createInitialState("qwen", undefined);
+  state = event(state, "rs", { type: "reasoning-start", reasoningId: "r1" }, 10_000);
+  assert.equal(state.live.reasoningStartedAt, 10_000);
+  state = event(state, "rd", { type: "reasoning-delta", reasoningId: "r1", delta: "推演" }, 12_500);
+  state = event(state, "re", { type: "reasoning-end", reasoningId: "r1" }, 18_250);
+
+  assert.deepEqual(state.history, [
+    { kind: "reasoning", id: "re-reasoning", text: "推演", durationMs: 8_250 },
+  ]);
+  assert.equal(state.live.reasoningStartedAt, undefined);
+});
+
+test("reasoning durationMs never goes negative when timestamps regress", () => {
+  let state = createInitialState("qwen", undefined);
+  state = event(state, "rs", { type: "reasoning-start", reasoningId: "r1" }, 20_000);
+  state = event(state, "rd", { type: "reasoning-delta", reasoningId: "r1", delta: "推演" }, 20_100);
+  state = event(state, "re", { type: "reasoning-end", reasoningId: "r1" }, 19_000);
+  assert.deepEqual(state.history, [
+    { kind: "reasoning", id: "re-reasoning", text: "推演", durationMs: 0 },
+  ]);
 });
 
 test("tool-call adds a live row; tool-result commits it to history", () => {

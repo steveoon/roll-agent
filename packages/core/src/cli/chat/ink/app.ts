@@ -73,6 +73,8 @@ interface ChatSessionViewProps extends Omit<ChatAppProps, "sessionSwitching"> {
 export const INK_HINTS =
   "/exit 退出 · Esc 中断 · / 命令 · Shift+Enter/Ctrl+J 换行 · Alt+./Alt+, 调推理 · Shift+Tab 自动批准";
 
+const SHOW_THINK_SCOPE_HINT = "（仅当前会话生效，/resume 切换会话后按配置重置）";
+
 function helpText(): string {
   return SLASH_COMMANDS.map((command) => `${command.name} — ${command.description}`).join("\n");
 }
@@ -397,8 +399,8 @@ function ChatSessionView(props: ChatSessionViewProps): ReactElement {
         id: randomUUID(),
         text:
           next === "expanded"
-            ? "已完成的思考将完整显示"
-            : "已完成的思考将折叠为一行摘要，/show-think on 可恢复完整显示",
+            ? `已完成的思考将完整显示${SHOW_THINK_SCOPE_HINT}`
+            : `已完成的思考将折叠为一行摘要，/show-think on 可恢复完整显示${SHOW_THINK_SCOPE_HINT}`,
       });
       return;
     }

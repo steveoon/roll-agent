@@ -18,7 +18,6 @@ function isDenialText(text: string): boolean {
 
 export interface HistoryItemViewProps {
   readonly item: HistoryItem;
-  /** 已完成思考内容的展示方式；缺省与产品默认一致（折叠）。 */
   readonly thinkingDisplay?: ChatThinkingDisplay;
 }
 
