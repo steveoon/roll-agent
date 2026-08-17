@@ -161,6 +161,33 @@ test("CRLF 文件回写保持 CRLF", () => {
   assert.equal(readFileSync(f.path, "utf8"), "first\r\nchanged\r\n");
 });
 
+test("CRLF 文件上只改换行符的编辑被拒绝且不写入", () => {
+  const f = fixture("first\r\nsecond\r\n");
+  markRead(f);
+  const result = executeEditFile(f.settings, f.tracker, {
+    file_path: "target.txt",
+    edits: [{ old_string: "first\nsecond", new_string: "first\r\nsecond" }],
+  });
+  assert.equal(result.outcome.kind, TOOL_OUTCOME_KINDS.invalidInput);
+  assert.match(String(result.display), /只改换行符不会产生变化/u);
+  assert.equal(readFileSync(f.path, "utf8"), "first\r\nsecond\r\n");
+});
+
+test("多条编辑互相抵消导致内容不变时拒绝并说明", () => {
+  const f = fixture("alpha beta\n");
+  markRead(f);
+  const result = executeEditFile(f.settings, f.tracker, {
+    file_path: "target.txt",
+    edits: [
+      { old_string: "alpha", new_string: "gamma" },
+      { old_string: "gamma", new_string: "alpha" },
+    ],
+  });
+  assert.equal(result.outcome.kind, TOOL_OUTCOME_KINDS.invalidInput);
+  assert.match(String(result.display), /与原文件完全相同/u);
+  assert.equal(readFileSync(f.path, "utf8"), "alpha beta\n");
+});
+
 test("old_string 与 new_string 相同返回 invalid_input", () => {
   const f = fixture("same");
   markRead(f);

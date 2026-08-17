@@ -175,6 +175,12 @@ export function executeEditFile(
     }
     const oldAdapted = adaptLineEndings(edit.old_string, crlfOnly);
     const newAdapted = adaptLineEndings(edit.new_string, crlfOnly);
+    if (oldAdapted === newAdapted) {
+      return failedToolResult(
+        TOOL_OUTCOME_KINDS.invalidInput,
+        `${label}：该文件使用 CRLF 换行，行尾会自动适配，这条编辑在适配后 new_string 与 old_string 相同（只改换行符不会产生变化）。未写入任何修改。`,
+      );
+    }
     if (edit.replace_all === true) {
       const spans = findAllExact(working, oldAdapted);
       if (spans.length === 0) {
@@ -200,6 +206,12 @@ export function executeEditFile(
       );
     }
     working = applySpan(working, match.span, newAdapted, applied);
+  }
+  if (working === loaded.content) {
+    return failedToolResult(
+      TOOL_OUTCOME_KINDS.invalidInput,
+      "所有编辑应用后文件内容与原文件完全相同，没有可写入的变化。未写入任何修改。",
+    );
   }
   saveTextFile(path, working, loaded.hadBom);
   tracker.recordKnownContent(loaded.key, working);

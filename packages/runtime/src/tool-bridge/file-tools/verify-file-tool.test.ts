@@ -13,13 +13,17 @@ import { join } from "node:path";
 import type { ToolExecutionOptions } from "ai";
 import { resolveFileToolsSettings } from "./settings.ts";
 import {
+  VERIFY_ADMISSION_DRIFT_MESSAGE,
   VERIFY_FILE_TOOL_NAME,
   buildVerifyFileTool,
+  captureVerifyAdmission,
   executeVerifyFile,
   renderVerifyReport,
+  revalidateVerifyAdmission,
 } from "./verify-file-tool.ts";
 import type { ApprovalRequest } from "../build-tools.ts";
 import { ToolRegistry } from "../naming.ts";
+import { ToolExecutionCoordinator } from "../tool-execution-coordinator.ts";
 import { DefaultToolPolicy } from "../../policy/default-policy.ts";
 import { SessionApprovalMemory } from "../../approval/approval-memory.ts";
 import { TOOL_OUTCOME_KINDS, type NormalizedToolResult } from "../normalize-result.ts";
@@ -169,6 +173,66 @@ function buildVerifyFixture(
 
 test("VERIFY_FILE_TOOL_NAME 为 verify_file", () => {
   assert.equal(VERIFY_FILE_TOOL_NAME, "verify_file");
+});
+
+function installFakeEslint(workdir: string, marker: string): void {
+  mkdirSync(join(workdir, "node_modules", ".bin"), { recursive: true });
+  writeFileSync(join(workdir, "eslint.config.js"), "export default [];\n", "utf8");
+  const bin = join(workdir, "node_modules", ".bin", "eslint");
+  writeFileSync(bin, `#!/bin/sh\nprintf 'ran\\n' >> "${marker}"\nprintf '[]'\nexit 0\n`, "utf8");
+  chmodSync(bin, 0o755);
+}
+
+test("准入后新增会执行项目代码的验证器时 revalidate 阻止", () => {
+  const workdir = fixtureWorkdir("verify-admission-drift-");
+  writeFileSync(join(workdir, "a.ts"), "export const a = 1;\n", "utf8");
+  const settings = resolveFileToolsSettings({ workdir });
+  const captured = captureVerifyAdmission(settings, { path: "a.ts" });
+  assert.deepEqual(captured, { external: false, detectedIds: [] });
+  assert.equal(revalidateVerifyAdmission(settings, { path: "a.ts" }, captured), undefined);
+  installFakeEslint(workdir, join(workdir, "MARKER"));
+  const blocked = revalidateVerifyAdmission(settings, { path: "a.ts" }, captured);
+  assert.ok(blocked !== undefined);
+  assert.equal(blocked.outcome.kind, TOOL_OUTCOME_KINDS.toolFailed);
+  assert.equal(String(blocked.display), VERIFY_ADMISSION_DRIFT_MESSAGE);
+});
+
+test("同批次准入后写入的本地 eslint 不会在 execute 阶段免确认执行", async () => {
+  const workdir = fixtureWorkdir("verify-batch-drift-");
+  writeFileSync(join(workdir, "a.ts"), "export const a = 1;\n", "utf8");
+  const marker = join(workdir, "MARKER");
+  const approvals: ApprovalRequest[] = [];
+  const coordinator = new ToolExecutionCoordinator();
+  const registry = new ToolRegistry();
+  const tools = buildVerifyFileTool(resolveFileToolsSettings({ workdir }), registry, {
+    policy: new DefaultToolPolicy(),
+    requestApproval: (request) => {
+      approvals.push(request);
+      return Promise.resolve({ approved: true });
+    },
+    coordinator,
+  });
+  const verifyTool = tools.roll__verify_file;
+  assert.ok(verifyTool?.execute !== undefined);
+  const input = { path: "a.ts" };
+  await coordinator.prepare("verify-batch", "roll__verify_file", input);
+  assert.equal(approvals.length, 0);
+  installFakeEslint(workdir, marker);
+  const result = (await verifyTool.execute(
+    input,
+    executeOptions({ toolCallId: "verify-batch" }),
+  )) as NormalizedToolResult;
+  assert.equal(result.outcome.kind, TOOL_OUTCOME_KINDS.toolFailed);
+  assert.equal(String(result.display), VERIFY_ADMISSION_DRIFT_MESSAGE);
+  assert.equal(existsSync(marker), false);
+  const retry = (await verifyTool.execute(
+    input,
+    executeOptions({ toolCallId: "verify-retry" }),
+  )) as NormalizedToolResult;
+  assert.equal(approvals.length, 1);
+  assert.match(approvals[0]?.explanation ?? "", /将运行项目本地 eslint/u);
+  assert.equal(retry.outcome.kind, TOOL_OUTCOME_KINDS.success);
+  assert.equal(existsSync(marker), true);
 });
 
 test("level 缺省（fast）不触发确认门", async () => {

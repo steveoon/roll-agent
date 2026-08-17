@@ -154,6 +154,30 @@ test("缩水覆盖即使记忆已授权仍会弹出确认，explanation 提示�
   assert.match(approvals[0]?.explanation ?? "", /有意删减/u);
 });
 
+test("未读取过的文件即使缩水也在弹窗前被 read-before-overwrite 拦下", async () => {
+  const workdir = mkdtempSync(join(tmpdir(), "write-tool-unread-shrink-"));
+  const path = join(workdir, "big.txt");
+  const originalLines = Array.from({ length: 30 }, (_, index) => `第${String(index + 1)}行`);
+  writeFileSync(path, originalLines.join("\n"), "utf8");
+  const approvals: ApprovalRequest[] = [];
+  const tools = buildWriteFixture(
+    workdir,
+    new FileStateTracker(),
+    approvals,
+    new SessionApprovalMemory(),
+  );
+  const writeTool = tools.roll__write_file;
+  assert.ok(writeTool?.execute !== undefined);
+  const result = (await writeTool.execute(
+    { file_path: "big.txt", content: "只剩一行" },
+    executeOptions(),
+  )) as NormalizedToolResult;
+  assert.equal(result.outcome.kind, TOOL_OUTCOME_KINDS.toolFailed);
+  assert.match(String(result.display), /先用 roll__read_file/u);
+  assert.equal(approvals.length, 0);
+  assert.equal(readFileSync(path, "utf8"), originalLines.join("\n"));
+});
+
 test("symlink 目录写入时 explanation 含 outside 的真实路径", async () => {
   const workdir = realpathSync(mkdtempSync(join(tmpdir(), "write-tool-symlink-expl-")));
   const outside = realpathSync(mkdtempSync(join(tmpdir(), "write-tool-symlink-out-")));

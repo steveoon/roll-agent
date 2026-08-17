@@ -79,6 +79,27 @@ function detectShrink(newLineCount: number, loaded: LoadedTextFile | LoadFileFai
   };
 }
 
+function overwriteGuard(
+  tracker: FileStateTracker,
+  path: string,
+  loaded: LoadedTextFile,
+): NormalizedToolResult | undefined {
+  const freshness = tracker.checkFreshness(loaded.key, loaded.content);
+  if (freshness === FILE_FRESHNESS.unread) {
+    return failedToolResult(
+      TOOL_OUTCOME_KINDS.toolFailed,
+      `${path} 已存在。覆盖前请先用 roll__read_file 读取并确认现有内容；若只改部分内容，优先用 roll__edit_file。`,
+    );
+  }
+  if (freshness === FILE_FRESHNESS.stale) {
+    return failedToolResult(
+      TOOL_OUTCOME_KINDS.toolFailed,
+      `${path} 在你上次读取后已被修改（可能是用户或其他程序改动）。请重新 roll__read_file 确认最新内容后再决定是否覆盖。`,
+    );
+  }
+  return undefined;
+}
+
 export function executeWriteFile(
   settings: ResolvedFileToolsSettings,
   tracker: FileStateTracker,
@@ -94,18 +115,9 @@ export function executeWriteFile(
     if (!loaded.ok) {
       return failedToolResult(TOOL_OUTCOME_KINDS.invalidInput, loaded.message);
     }
-    const freshness = tracker.checkFreshness(loaded.key, loaded.content);
-    if (freshness === FILE_FRESHNESS.unread) {
-      return failedToolResult(
-        TOOL_OUTCOME_KINDS.toolFailed,
-        `${path} 已存在。覆盖前请先用 roll__read_file 读取并确认现有内容；若只改部分内容，优先用 roll__edit_file。`,
-      );
-    }
-    if (freshness === FILE_FRESHNESS.stale) {
-      return failedToolResult(
-        TOOL_OUTCOME_KINDS.toolFailed,
-        `${path} 在你上次读取后已被修改（可能是用户或其他程序改动）。请重新 roll__read_file 确认最新内容后再决定是否覆盖。`,
-      );
+    const guarded = overwriteGuard(tracker, path, loaded);
+    if (guarded !== undefined) {
+      return guarded;
     }
   }
   saveTextFile(path, input.content, false);
@@ -141,9 +153,14 @@ export function buildWriteFileTool(
         );
       }
       const newLineCount = parsed.data.content.split("\n").length;
-      const loaded = loadTextFile(resolveFilePath(settings.workdir, parsed.data.file_path), {
-        maxFileBytes: settings.maxFileBytes,
-      });
+      const path = resolveFilePath(settings.workdir, parsed.data.file_path);
+      const loaded = loadTextFile(path, { maxFileBytes: settings.maxFileBytes });
+      if (loaded.ok) {
+        const guarded = overwriteGuard(tracker, path, loaded);
+        if (guarded !== undefined) {
+          return guarded;
+        }
+      }
       const { shrinking, warning } = detectShrink(newLineCount, loaded);
       const displayPath = formatPathForApproval(settings.workdir, parsed.data.file_path);
       const explanation = `写入 ${displayPath}（${String(newLineCount)} 行）${warning !== undefined ? `\n${warning}` : ""}`;

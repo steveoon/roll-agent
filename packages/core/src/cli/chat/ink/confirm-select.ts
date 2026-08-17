@@ -40,6 +40,36 @@ function stepConfirmOption(
 const COMPACT_CONFIRM_MAX_ROWS = 11;
 const COMPACT_ESSENTIAL_ROWS = 3;
 
+interface CompactRowPlan {
+  readonly explanationRows: number;
+  readonly showLabel: boolean;
+  readonly showArgs: boolean;
+}
+
+function planCompactRows(
+  boundedRows: number,
+  hasExplanation: boolean,
+  hasLabel: boolean,
+  hasArgs: boolean,
+): CompactRowPlan {
+  let spare = Math.max(0, boundedRows - COMPACT_ESSENTIAL_ROWS);
+  let explanationRows = 0;
+  if (hasExplanation && spare > 0) {
+    explanationRows = 1;
+    spare -= 1;
+  }
+  const showLabel = hasLabel && spare > 0;
+  if (showLabel) {
+    spare -= 1;
+  }
+  if (explanationRows === 1 && spare > 0) {
+    explanationRows = 2;
+    spare -= 1;
+  }
+  const showArgs = hasArgs && spare > 0;
+  return { explanationRows, showLabel, showArgs };
+}
+
 function normalizeInlineText(value: string): string {
   return value.replace(/\s+/gu, " ").trim();
 }
@@ -95,7 +125,19 @@ export function ConfirmSelect({
   maxRows,
   onDecide,
 }: ConfirmSelectProps): ReactElement {
-  const hasSession = sessionGrantLabel !== undefined;
+  const showArgs = args.length > 0 && args !== "{}";
+  const boundedRows = Math.max(1, Math.floor(maxRows));
+  const compact = boundedRows <= COMPACT_CONFIRM_MAX_ROWS;
+  const rowPlan = compact
+    ? planCompactRows(
+        boundedRows,
+        explanation !== undefined,
+        sessionGrantLabel !== undefined,
+        showArgs,
+      )
+    : undefined;
+  const hasSession =
+    sessionGrantLabel !== undefined && (rowPlan === undefined || rowPlan.showLabel);
   const options = confirmOptions(hasSession);
   const [selected, setSelected] = useState<ConfirmOption>("no");
   useInput((input, key) => {
@@ -124,9 +166,6 @@ export function ConfirmSelect({
       onDecide(CONFIRM_OPTION_DECISIONS.session);
     }
   });
-  const showArgs = args.length > 0 && args !== "{}";
-  const boundedRows = Math.max(1, Math.floor(maxRows));
-  const compact = boundedRows <= COMPACT_CONFIRM_MAX_ROWS;
   const optionRow = h(
     Box,
     compact ? { flexShrink: 0 } : { marginTop: 1, flexShrink: 0 },
@@ -151,16 +190,9 @@ export function ConfirmSelect({
     { marginLeft: compact ? 0 : 1, height: 1, flexShrink: 0, overflowY: "hidden" },
     h(Text, { dimColor: true, wrap: "truncate-end" }, compact ? compactHelp : expandedHelp),
   );
-  if (compact) {
+  if (rowPlan !== undefined) {
     const contentWidth = Math.max(1, width);
-    let spareRows = Math.max(0, boundedRows - COMPACT_ESSENTIAL_ROWS);
-    const explanationRows = explanation === undefined ? 0 : Math.min(2, spareRows);
-    spareRows -= explanationRows;
-    const showArgsRow = showArgs && spareRows > 0;
-    if (showArgsRow) {
-      spareRows -= 1;
-    }
-    const showLabelRow = sessionGrantLabel !== undefined && spareRows > 0;
+    const { explanationRows, showLabel: showLabelRow, showArgs: showArgsRow } = rowPlan;
     return h(
       Box,
       {

@@ -58,7 +58,7 @@
 | .go | `gofmt -l`（格式） | `go vet ./...` |
 | .rs | — | `cargo check`（Cargo.toml + cargo 探测） |
 
-- **执行安全**：argv 数组 execFile（无 shell 注入面）；cwd=workdir；只跑注册表白名单（**绝不**从 package.json scripts 取命令——那是任意代码）；fast 超时 10s / project 120s；输出截断。project 级走确认门的理由：cargo check 会执行 build.rs、go vet 会触发构建——任意代码执行面，须用户可见
+- **执行安全**：argv 数组 execFile（无 shell 注入面）；cwd=workdir；只跑注册表白名单（**绝不**从 package.json scripts 取命令——那是任意代码）；fast 超时 10s / project 120s；输出截断。project 级走确认门的理由：cargo check 会执行 build.rs、go vet 会触发构建——任意代码执行面，须用户可见。准入时记录「路径归属 + 探测到的验证器集合」，执行前复核：同批次里先写入 `node_modules/.bin/eslint` / `eslint.config.*` 再 verify 这类顺序，会因验证器集合变化被阻止并要求重提（重提时走确认门）
 - **fail-honest**（与 extraction schema 原则同源）：验证器探测不过 → 结果明确写「<id>: 未安装/未配置，跳过」；全部不可用 → 「该文件类型无可用验证器」——**绝不把「没验证」表述成「验证通过」**
 - 返回：逐验证器 `✓ 通过` / `✗ 失败 + 错误输出（截断）` / `– 跳过（原因）`；模型据此决定修复或汇报
 - capability role：新增 `file-verify`（approval mode 走 runtimePolicy——fast 级纯解析免确认，eslint 等会执行项目代码的验证器需确认一次；project 走确认门、不吃记忆）

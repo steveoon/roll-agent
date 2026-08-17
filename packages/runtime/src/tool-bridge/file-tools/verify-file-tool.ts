@@ -185,6 +185,65 @@ export async function executeVerifyFile(
     : successfulToolResult(report);
 }
 
+export const VERIFY_ADMISSION_DRIFT_MESSAGE =
+  "验证器条件在准入后发生变化（可用验证器或路径归属改变），已在执行前阻止；请重新提交以重新确认";
+
+export interface VerifyAdmission {
+  readonly external: boolean;
+  readonly detectedIds: readonly string[];
+}
+
+function detectedVerifiers(
+  settings: ResolvedFileToolsSettings,
+  input: VerifyFileInput,
+): readonly Verifier[] {
+  const path = resolveFilePath(settings.workdir, input.path);
+  const level = input.level ?? VERIFIER_LEVELS.fast;
+  return levelFilteredVerifiers(verifiersForFile(path), level).filter((verifier) =>
+    verifier.detect(settings.workdir, path),
+  );
+}
+
+export function captureVerifyAdmission(
+  settings: ResolvedFileToolsSettings,
+  input: VerifyFileInput,
+): VerifyAdmission {
+  return {
+    external: escapesWorkdir(settings.workdir, input.path),
+    detectedIds: detectedVerifiers(settings, input)
+      .map((verifier) => verifier.id)
+      .sort(),
+  };
+}
+
+function isVerifyAdmission(value: unknown): value is VerifyAdmission {
+  if (typeof value !== "object" || value === null) {
+    return false;
+  }
+  const candidate = value as { external?: unknown; detectedIds?: unknown };
+  return (
+    typeof candidate.external === "boolean" &&
+    Array.isArray(candidate.detectedIds) &&
+    candidate.detectedIds.every((entry) => typeof entry === "string")
+  );
+}
+
+export function revalidateVerifyAdmission(
+  settings: ResolvedFileToolsSettings,
+  input: VerifyFileInput,
+  captured: unknown,
+): NormalizedToolResult | undefined {
+  if (!isVerifyAdmission(captured)) {
+    return undefined;
+  }
+  const now = captureVerifyAdmission(settings, input);
+  const containmentDrift = !captured.external && now.external;
+  const verifierDrift = captured.detectedIds.join(" ") !== now.detectedIds.join(" ");
+  return containmentDrift || verifierDrift
+    ? failedToolResult(TOOL_OUTCOME_KINDS.toolFailed, VERIFY_ADMISSION_DRIFT_MESSAGE)
+    : undefined;
+}
+
 export function buildVerifyFileTool(
   settings: ResolvedFileToolsSettings,
   registry: ToolRegistry,
@@ -209,9 +268,7 @@ export function buildVerifyFileTool(
         }
       }
       const level = parsed.data.level ?? VERIFIER_LEVELS.fast;
-      const candidates = verifiersForFile(path);
-      const selected = levelFilteredVerifiers(candidates, level);
-      const detected = selected.filter((verifier) => verifier.detect(settings.workdir, path));
+      const detected = detectedVerifiers(settings, parsed.data);
       if (level === VERIFIER_LEVELS.project) {
         const preview =
           detected.length > 0
@@ -271,6 +328,17 @@ export function buildVerifyFileTool(
         { key: `file:${canonicalResourcePath(path)}`, mode: TOOL_RESOURCE_ACCESS_MODES.read },
         { key: `verify:${settings.workdir}`, mode: TOOL_RESOURCE_ACCESS_MODES.write },
       ];
+    },
+    captureExecutionState: (rawInput) => {
+      const parsed = verifyFileInputSchema.safeParse(rawInput);
+      return parsed.success ? captureVerifyAdmission(settings, parsed.data) : undefined;
+    },
+    revalidateExecution: (rawInput, capturedState) => {
+      const parsed = verifyFileInputSchema.safeParse(rawInput);
+      if (!parsed.success) {
+        return undefined;
+      }
+      return revalidateVerifyAdmission(settings, parsed.data, capturedState);
     },
   };
   ctx.coordinator?.register(id, plan);

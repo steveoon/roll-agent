@@ -54,30 +54,66 @@ test("compact confirmation stays inside its row budget", () => {
   unmount();
 });
 
-test("compact confirmation keeps options and help visible when a session label is present", () => {
-  for (const maxRows of [6, 4, 3]) {
+test("compact confirmation keeps options and help visible and only offers Always with its label", () => {
+  const renderCompact = (maxRows: number) => {
     const { lastFrame, unmount } = render(
       h(ConfirmSelect, {
         prompt: "执行 roll.write_file？",
         explanation: "写入 src/a.ts（12 行）",
         args: `file_path: src/a.ts content: ${"x".repeat(60)}`,
-        sessionGrantLabel: "本会话内不再询问：写入工作目录内的文件",
+        sessionGrantLabel: SESSION_LABEL,
         width: 40,
         maxRows,
         onDecide: () => {},
       }),
     );
     const frame = (lastFrame() ?? "").replace(ANSI_STYLE_PATTERN, "");
+    unmount();
     const lines = frame.split("\n");
-    const optionLine = lines.find((line) => line.includes("Yes") && line.includes("No")) ?? "";
     assert.ok(
       lines.length <= maxRows,
       `maxRows=${String(maxRows)} rendered ${String(lines.length)}`,
     );
-    assert.match(optionLine, /Yes\s+Always\s+❯ No/u);
-    assert.match(lines.at(-1) ?? "", /←→\/y\/a\/n 选择 · Enter · Esc · ⇧Tab 自动/u);
-    unmount();
+    return {
+      frame,
+      optionLine: lines.find((line) => line.includes("Yes") && line.includes("No")) ?? "",
+      helpLine: lines.at(-1) ?? "",
+    };
+  };
+
+  const roomy = renderCompact(6);
+  assert.match(roomy.optionLine, /Yes\s+Always\s+❯ No/u);
+  assert.match(roomy.frame, new RegExp(SESSION_LABEL, "u"));
+  assert.match(roomy.helpLine, /←→\/y\/a\/n 选择 · Enter · Esc · ⇧Tab 自动/u);
+
+  for (const maxRows of [4, 3]) {
+    const tight = renderCompact(maxRows);
+    assert.match(tight.optionLine, /Yes\s+❯ No/u);
+    assert.doesNotMatch(tight.optionLine, /Always/u);
+    assert.doesNotMatch(tight.frame, new RegExp(SESSION_LABEL, "u"));
+    assert.match(tight.helpLine, /←→\/y\/n 选择 · Enter · Esc · ⇧Tab 自动/u);
   }
+});
+
+test("compact confirmation without room for the label ignores the a shortcut", async () => {
+  const decisions: ConfirmDecision[] = [];
+  const { stdin, unmount } = render(
+    h(ConfirmSelect, {
+      prompt: "执行 roll.write_file？",
+      explanation: "写入 src/a.ts（12 行）",
+      args: "file_path: src/a.ts",
+      sessionGrantLabel: SESSION_LABEL,
+      width: 40,
+      maxRows: 4,
+      onDecide: (decision) => {
+        decisions.push(decision);
+      },
+    }),
+  );
+  stdin.write("a");
+  await delay(10);
+  unmount();
+  assert.deepEqual(decisions, []);
 });
 
 async function decideAfter(
