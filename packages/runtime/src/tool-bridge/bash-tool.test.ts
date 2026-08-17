@@ -17,7 +17,11 @@ import type { ShellProfile } from "../bash/profile.ts";
 import { ToolRegistry } from "./naming.ts";
 import type { NormalizedToolResult } from "./normalize-result.ts";
 import type { ApprovalRequest } from "./build-tools.ts";
-import { ToolExecutionCoordinator } from "./tool-execution-coordinator.ts";
+import {
+  OPAQUE_SIDE_EFFECT_RESOURCE,
+  TOOL_RESOURCE_ACCESS_MODES,
+  ToolExecutionCoordinator,
+} from "./tool-execution-coordinator.ts";
 import {
   BASH_TOOL_ID,
   POWERSHELL_TOOL_ID,
@@ -131,6 +135,23 @@ test("PowerShell profile 注册为 roll__powershell 且路由到 roll.powershell
     agentName: "roll",
     toolName: "powershell",
   });
+});
+
+test("opaque Shell 使用与文件工具共享的 side-effect write lock", () => {
+  const coordinator = new ToolExecutionCoordinator();
+  buildBashToolset(
+    settings(),
+    new ToolRegistry(),
+    { coordinator, requestApproval: async () => ({ approved: true }) },
+    { classifier: unknownCommandClassifier },
+  );
+
+  assert.deepEqual(
+    coordinator
+      .describeResources(BASH_TOOL_ID, { command: "printf changed" })
+      .find((resource) => resource.key === OPAQUE_SIDE_EFFECT_RESOURCE),
+    { key: OPAQUE_SIDE_EFFECT_RESOURCE, mode: TOOL_RESOURCE_ACCESS_MODES.write },
+  );
 });
 
 test("不同 workdir 的 opaque destructive Shell 调用仍保守串行", async () => {

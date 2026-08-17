@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, realpathSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ToolExecutionOptions } from "ai";
@@ -11,6 +11,7 @@ import { ToolRegistry } from "../naming.ts";
 import { DefaultToolPolicy } from "../../policy/default-policy.ts";
 import { SessionApprovalMemory } from "../../approval/approval-memory.ts";
 import { TOOL_OUTCOME_KINDS, type NormalizedToolResult } from "../normalize-result.ts";
+import { ToolExecutionCoordinator } from "../tool-execution-coordinator.ts";
 
 test("目录优先排序且文件附带大小", () => {
   const workdir = mkdtempSync(join(tmpdir(), "list-dir-test-"));
@@ -112,6 +113,47 @@ test("workdir 内路径不触发确认门", async () => {
   assert.equal(result.outcome.kind, TOOL_OUTCOME_KINDS.success);
   assert.equal(approvals.length, 0);
 });
+
+test(
+  "准入后内部目录换成越界 symlink 时执行前阻止列出",
+  { skip: process.platform === "win32" },
+  async () => {
+    const workdir = realpathSync(mkdtempSync(join(tmpdir(), "list-dir-drift-workdir-")));
+    const outsideDir = realpathSync(mkdtempSync(join(tmpdir(), "list-dir-drift-outside-")));
+    const admittedDir = join(workdir, "notes");
+    mkdirSync(admittedDir);
+    writeFileSync(join(admittedDir, "inside.txt"), "inside", "utf8");
+    writeFileSync(join(outsideDir, "LEAKED_SECRET.txt"), "secret", "utf8");
+    const approvals: ApprovalRequest[] = [];
+    const coordinator = new ToolExecutionCoordinator();
+    const tools = buildListDirTool(resolveFileToolsSettings({ workdir }), new ToolRegistry(), {
+      policy: new DefaultToolPolicy(),
+      requestApproval: (request) => {
+        approvals.push(request);
+        return Promise.resolve({ approved: true });
+      },
+      coordinator,
+    });
+    const listTool = tools.roll__list_dir;
+    assert.ok(listTool?.execute !== undefined);
+    const input = { path: "notes" };
+    const toolCallId = "list-dir-admission-drift";
+    await coordinator.prepare(toolCallId, "roll__list_dir", input);
+    assert.equal(approvals.length, 0);
+    rmSync(admittedDir, { recursive: true });
+    symlinkSync(outsideDir, admittedDir, "dir");
+
+    const result = (await listTool.execute(
+      input,
+      executeOptions({ toolCallId }),
+    )) as NormalizedToolResult;
+
+    assert.equal(result.outcome.kind, TOOL_OUTCOME_KINDS.toolFailed);
+    assert.match(String(result.display), /安全条件.*变化/u);
+    assert.doesNotMatch(String(result.display), /LEAKED_SECRET/u);
+    assert.equal(String(result.display).includes(outsideDir), false);
+  },
+);
 
 test("workdir 外路径 scope=session 批准后第二次列目录免弹", async () => {
   const workdir = realpathSync(mkdtempSync(join(tmpdir(), "list-dir-gate-test-")));

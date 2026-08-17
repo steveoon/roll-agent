@@ -13,6 +13,7 @@ import {
   type NormalizedToolResult,
 } from "../normalize-result.ts";
 import {
+  OPAQUE_SIDE_EFFECT_RESOURCE,
   TOOL_RESOURCE_ACCESS_MODES,
   executeCoordinatedTool,
   type ToolExecutionPlan,
@@ -325,6 +326,7 @@ export function buildVerifyFileTool(
       }
       const path = resolveFilePath(settings.workdir, parsed.data.path);
       return [
+        { key: OPAQUE_SIDE_EFFECT_RESOURCE, mode: TOOL_RESOURCE_ACCESS_MODES.read },
         { key: `file:${canonicalResourcePath(path)}`, mode: TOOL_RESOURCE_ACCESS_MODES.read },
         { key: `verify:${settings.workdir}`, mode: TOOL_RESOURCE_ACCESS_MODES.write },
       ];

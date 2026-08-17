@@ -32,7 +32,7 @@
 - 输入：`pattern`（rg 正则）、`path?`（默认 workdir）、`glob?`（`-g` 过滤）、`context?`（`-C` 行数，默认 0）、`ignore_case?`、`max_results?`（默认 100 命中）
 - 输出契约（与 read/edit 耦合）：按文件分组，命中行渲染为 `行号→内容`（与 read_file 行号前缀同构），文件头一行绝对路径——模型可从结果直接接 `read_file offset` 或复制内容作 `old_string`
 - 0 命中诊断：若 pattern 含归一化折叠表（CHAR_FOLD）中的字符（全角标点/智能引号），提示归一化变体：「pattern 含全角/智能标点，文件中可能是半角形式，试试：<normalizeForMatch(pattern).text>」——归一化资产延伸到检索层，两家都没有
-- 安全：workdir 外 path 走确认门（`escapesWorkdir` 复用）；readOnly annotations；resources `file:<canonical>` read
+- 安全：workdir 外 path 走确认门（`escapesWorkdir` 复用）；readOnly annotations；准入时捕获路径归属与 canonical target，持锁后、读盘前复验，变化即 fail-closed；resources 同时持有 `file:<canonical>` read 与 `shell:opaque-side-effects` read，后者与未知/破坏性 shell 的 write lock 互斥
 - 执行：`execFile(rgPath, argv)`（无 shell）、10s 超时、输出超限截断（沿用 maxOutputChars）；rg 默认尊重 .gitignore（`--no-ignore?` 不暴露，保持默认）
 
 ### 3.2 `roll__glob`
@@ -51,7 +51,7 @@
 |---|---|---|
 | .ts/.tsx/.mts/.cts | eslint（项目本地 `node_modules/.bin/eslint`，有 eslint 配置才启用） | tsc --noEmit（本地 typescript + tsconfig） |
 | .js/.jsx/.mjs/.cjs | eslint（同上） | — |
-| .py | ruff check --no-fix（PATH 探测）；无 ruff 时 `python3 -m py_compile` 兜底 | — |
+| .py | ruff check --no-fix（PATH 探测）；无 ruff 时用隔离模式 `python3 -I -c 'compile(...)'` 做无 `__pycache__` 副作用的语法检查 | — |
 | .json | 内建 JSON.parse（零依赖） | — |
 | .yaml/.yml | yaml 解析（动态 import("yaml")，不可用则如实跳过） | — |
 | .sh/.bash | `bash -n`（语法检查） | — |

@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, realpathSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ToolExecutionOptions } from "ai";
@@ -11,6 +11,7 @@ import { ToolRegistry } from "../naming.ts";
 import { DefaultToolPolicy } from "../../policy/default-policy.ts";
 import { SessionApprovalMemory } from "../../approval/approval-memory.ts";
 import { TOOL_OUTCOME_KINDS, type NormalizedToolResult } from "../normalize-result.ts";
+import { ToolExecutionCoordinator } from "../tool-execution-coordinator.ts";
 
 function fixtureWorkdir(prefix: string): string {
   return realpathSync(mkdtempSync(join(tmpdir(), prefix)));
@@ -259,6 +260,47 @@ test("workdir 内路径不触发确认门", async () => {
   assert.equal(result.outcome.kind, TOOL_OUTCOME_KINDS.success);
   assert.equal(approvals.length, 0);
 });
+
+test(
+  "准入后搜索根换成越界 symlink 时执行前阻止 grep",
+  { skip: process.platform === "win32" },
+  async () => {
+    const workdir = fixtureWorkdir("grep-drift-workdir-");
+    const outsideDir = fixtureWorkdir("grep-drift-outside-");
+    const admittedDir = join(workdir, "notes");
+    mkdirSync(admittedDir);
+    writeFileSync(join(admittedDir, "inside.txt"), "inside\n", "utf8");
+    writeFileSync(join(outsideDir, "secret.txt"), "LEAKED_SECRET\n", "utf8");
+    const approvals: ApprovalRequest[] = [];
+    const coordinator = new ToolExecutionCoordinator();
+    const tools = buildGrepTool(resolveFileToolsSettings({ workdir }), new ToolRegistry(), {
+      policy: new DefaultToolPolicy(),
+      requestApproval: (request) => {
+        approvals.push(request);
+        return Promise.resolve({ approved: true });
+      },
+      coordinator,
+    });
+    const grepTool = tools.roll__grep;
+    assert.ok(grepTool?.execute !== undefined);
+    const input = { pattern: "LEAKED_SECRET", path: "notes" };
+    const toolCallId = "grep-admission-drift";
+    await coordinator.prepare(toolCallId, "roll__grep", input);
+    assert.equal(approvals.length, 0);
+    rmSync(admittedDir, { recursive: true });
+    symlinkSync(outsideDir, admittedDir, "dir");
+
+    const result = (await grepTool.execute(
+      input,
+      executeOptions({ toolCallId }),
+    )) as NormalizedToolResult;
+
+    assert.equal(result.outcome.kind, TOOL_OUTCOME_KINDS.toolFailed);
+    assert.match(String(result.display), /安全条件.*变化/u);
+    assert.doesNotMatch(String(result.display), /LEAKED_SECRET/u);
+    assert.equal(String(result.display).includes(outsideDir), false);
+  },
+);
 
 test("workdir 外路径 scope=session 批准后第二次搜索免弹", async () => {
   const workdir = fixtureWorkdir("grep-gate-");

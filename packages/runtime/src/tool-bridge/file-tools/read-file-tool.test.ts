@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, realpathSync, writeFileSync } from "node:fs";
+import { mkdtempSync, realpathSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ToolExecutionOptions } from "ai";
@@ -13,6 +13,7 @@ import { ToolRegistry } from "../naming.ts";
 import { DefaultToolPolicy } from "../../policy/default-policy.ts";
 import { SessionApprovalMemory } from "../../approval/approval-memory.ts";
 import { TOOL_OUTCOME_KINDS, type NormalizedToolResult } from "../normalize-result.ts";
+import { ToolExecutionCoordinator } from "../tool-execution-coordinator.ts";
 
 function fixture(): { workdir: string; tracker: FileStateTracker } {
   return {
@@ -170,6 +171,56 @@ test("workdir 内路径不触发确认门", async () => {
   assert.equal(result.outcome.kind, TOOL_OUTCOME_KINDS.success);
   assert.equal(approvals.length, 0);
 });
+
+test(
+  "准入后内部文件换成越界 symlink 时执行前阻止读取",
+  { skip: process.platform === "win32" },
+  async () => {
+    const workdir = realpathSync(mkdtempSync(join(tmpdir(), "read-tool-drift-workdir-")));
+    const outsideDir = realpathSync(mkdtempSync(join(tmpdir(), "read-tool-drift-outside-")));
+    const admittedPath = join(workdir, "notes.txt");
+    const outsidePath = join(outsideDir, "secret.txt");
+    writeFileSync(admittedPath, "inside", "utf8");
+    writeFileSync(outsidePath, "LEAKED_SECRET", "utf8");
+    const tracker = new FileStateTracker();
+    const approvals: ApprovalRequest[] = [];
+    const coordinator = new ToolExecutionCoordinator();
+    const tools = buildReadFileTool(
+      resolveFileToolsSettings({ workdir }),
+      tracker,
+      new ToolRegistry(),
+      {
+        policy: new DefaultToolPolicy(),
+        requestApproval: (request) => {
+          approvals.push(request);
+          return Promise.resolve({ approved: true });
+        },
+        coordinator,
+      },
+    );
+    const readTool = tools.roll__read_file;
+    assert.ok(readTool?.execute !== undefined);
+    const input = { path: "notes.txt" };
+    const toolCallId = "read-file-admission-drift";
+    await coordinator.prepare(toolCallId, "roll__read_file", input);
+    assert.equal(approvals.length, 0);
+    unlinkSync(admittedPath);
+    symlinkSync(outsidePath, admittedPath);
+
+    const result = (await readTool.execute(
+      input,
+      executeOptions({ toolCallId }),
+    )) as NormalizedToolResult;
+
+    assert.equal(result.outcome.kind, TOOL_OUTCOME_KINDS.toolFailed);
+    assert.match(String(result.display), /安全条件.*变化/u);
+    assert.doesNotMatch(String(result.display), /LEAKED_SECRET/u);
+    assert.equal(
+      tracker.checkFreshness(canonicalFileKey(admittedPath), "LEAKED_SECRET"),
+      FILE_FRESHNESS.unread,
+    );
+  },
+);
 
 test("workdir 外路径 scope=session 批准后第二次读取免弹", async () => {
   const workdir = realpathSync(mkdtempSync(join(tmpdir(), "read-tool-gate-test-")));

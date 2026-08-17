@@ -11,12 +11,20 @@ import {
   type NormalizedToolResult,
 } from "../normalize-result.ts";
 import {
+  OPAQUE_SIDE_EFFECT_RESOURCE,
   TOOL_RESOURCE_ACCESS_MODES,
   executeCoordinatedTool,
   type ToolExecutionPlan,
 } from "../tool-execution-coordinator.ts";
 import { renderNumberedLines } from "./match-pipeline.ts";
-import { canonicalResourcePath, escapesWorkdir, loadTextFile, resolveFilePath } from "./file-io.ts";
+import {
+  canonicalResourcePath,
+  captureFilePathAdmission,
+  escapesWorkdir,
+  loadTextFile,
+  resolveFilePath,
+  revalidateFilePathAdmission,
+} from "./file-io.ts";
 import type { FileStateTracker } from "./file-state-tracker.ts";
 import { gateExternalPath } from "./external-approval.ts";
 import { FILE_TOOLS_AGENT_NAME, type ResolvedFileToolsSettings } from "./settings.ts";
@@ -117,7 +125,23 @@ export function buildReadFileTool(
       const key = parsed.success
         ? `file:${canonicalResourcePath(resolveFilePath(settings.workdir, parsed.data.path))}`
         : `file-tools:${settings.workdir}`;
-      return [{ key, mode: TOOL_RESOURCE_ACCESS_MODES.read }];
+      return [
+        { key: OPAQUE_SIDE_EFFECT_RESOURCE, mode: TOOL_RESOURCE_ACCESS_MODES.read },
+        { key, mode: TOOL_RESOURCE_ACCESS_MODES.read },
+      ];
+    },
+    captureExecutionState: (rawInput) => {
+      const parsed = readFileInputSchema.safeParse(rawInput);
+      return parsed.success
+        ? captureFilePathAdmission(settings.workdir, parsed.data.path)
+        : undefined;
+    },
+    revalidateExecution: (rawInput, capturedState) => {
+      const parsed = readFileInputSchema.safeParse(rawInput);
+      if (!parsed.success) {
+        return undefined;
+      }
+      return revalidateFilePathAdmission(settings.workdir, parsed.data.path, capturedState);
     },
   };
   ctx.coordinator?.register(id, plan);

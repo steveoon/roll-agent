@@ -128,11 +128,17 @@ export function ConfirmSelect({
   const showArgs = args.length > 0 && args !== "{}";
   const boundedRows = Math.max(1, Math.floor(maxRows));
   const compact = boundedRows <= COMPACT_CONFIRM_MAX_ROWS;
+  const compactContentWidth = Math.max(1, width);
+  const compactSessionGrantLabel =
+    sessionGrantLabel === undefined ? undefined : normalizeInlineText(sessionGrantLabel);
+  const compactSessionGrantLabelFits =
+    compactSessionGrantLabel !== undefined &&
+    displayWidth(compactSessionGrantLabel) <= compactContentWidth;
   const rowPlan = compact
     ? planCompactRows(
         boundedRows,
         explanation !== undefined,
-        sessionGrantLabel !== undefined,
+        compactSessionGrantLabelFits,
         showArgs,
       )
     : undefined;
@@ -191,7 +197,6 @@ export function ConfirmSelect({
     h(Text, { dimColor: true, wrap: "truncate-end" }, compact ? compactHelp : expandedHelp),
   );
   if (rowPlan !== undefined) {
-    const contentWidth = Math.max(1, width);
     const { explanationRows, showLabel: showLabelRow, showArgs: showArgsRow } = rowPlan;
     return h(
       Box,
@@ -202,18 +207,18 @@ export function ConfirmSelect({
         flexShrink: 0,
         overflowY: "hidden",
       },
-      h(Text, { wrap: "truncate-end" }, truncateDisplayLine(prompt, contentWidth)),
+      h(Text, { wrap: "truncate-end" }, truncateDisplayLine(prompt, compactContentWidth)),
       explanationRows === 0
         ? null
         : h(
             Text,
             { color: "cyan" },
-            wrapDisplayLines(`AI 说明：${explanation ?? ""}`, contentWidth, explanationRows),
+            wrapDisplayLines(`AI 说明：${explanation ?? ""}`, compactContentWidth, explanationRows),
           ),
-      showArgsRow ? h(Text, { dimColor: true }, truncateDisplayLine(args, contentWidth)) : null,
-      showLabelRow
-        ? h(Text, { dimColor: true }, truncateDisplayLine(sessionGrantLabel ?? "", contentWidth))
+      showArgsRow
+        ? h(Text, { dimColor: true }, truncateDisplayLine(args, compactContentWidth))
         : null,
+      showLabelRow ? h(Text, { dimColor: true }, compactSessionGrantLabel ?? "") : null,
       optionRow,
       helpRow,
     );

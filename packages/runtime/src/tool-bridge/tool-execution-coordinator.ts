@@ -6,6 +6,8 @@ export const TOOL_RESOURCE_ACCESS_MODES = {
   write: "write",
 } as const;
 
+export const OPAQUE_SIDE_EFFECT_RESOURCE = "shell:opaque-side-effects";
+
 export type ToolResourceAccessMode =
   (typeof TOOL_RESOURCE_ACCESS_MODES)[keyof typeof TOOL_RESOURCE_ACCESS_MODES];
 

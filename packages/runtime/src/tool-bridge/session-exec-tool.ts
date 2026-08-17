@@ -33,6 +33,7 @@ import {
   type NormalizedToolResult,
 } from "./normalize-result.ts";
 import {
+  OPAQUE_SIDE_EFFECT_RESOURCE,
   TOOL_RESOURCE_ACCESS_MODES,
   executeCoordinatedTool,
   type ToolExecutionPlan,
@@ -324,13 +325,22 @@ export function buildSessionExecToolset(
     },
     resources: (rawInput, capturedState) => {
       const parsed = execCommandInputSchema.safeParse(rawInput);
-      const workdir = parsed.success
-        ? resolveCommandInvocation(parsed.data, capturedClassification(capturedState)).workdir
-        : settings.workdir;
-      return [
+      const invocation = parsed.success
+        ? resolveCommandInvocation(parsed.data, capturedClassification(capturedState))
+        : undefined;
+      const resources = [
         { key: "exec-manager", mode: TOOL_RESOURCE_ACCESS_MODES.write },
-        { key: `shell:${workdir}`, mode: TOOL_RESOURCE_ACCESS_MODES.write },
-      ];
+        {
+          key: `shell:${invocation?.workdir ?? settings.workdir}`,
+          mode: TOOL_RESOURCE_ACCESS_MODES.write,
+        },
+      ] as const;
+      return invocation?.classification === "known-safe"
+        ? resources
+        : [
+            { key: OPAQUE_SIDE_EFFECT_RESOURCE, mode: TOOL_RESOURCE_ACCESS_MODES.write },
+            ...resources,
+          ];
     },
     captureExecutionState: (rawInput) => {
       const parsed = execCommandInputSchema.safeParse(rawInput);

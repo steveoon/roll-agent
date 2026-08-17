@@ -111,6 +111,7 @@ checkFreshness(key, current) → fresh | stale | unread
 - 确认门展示：edit/write 在 `prepare` 阶段生成 `display.explanation`（`修改 <文件名>：N 处编辑` 摘要），复用 `gateToolCall` 既有机制
 - 新增 capability roles：`file-read`（approval mode = readOnly）、`file-edit`（默认 runtimePolicy）
 - 资源互斥：`resources` 返回 `file:<canonical>` key（与 `build-tools.ts` 中 MCP 工具的 file hint key 同前缀），read 工具 read mode、edit/write 工具 write mode——并行工具调度天然按文件互斥
+- 路径准入与 opaque shell 互斥：准入时捕获路径归属和 canonical target，持锁后、读盘前复验；containment 或目标变化即 fail-closed。所有文件工具同时持有 `shell:opaque-side-effects` read lock，未知/破坏性 shell 持 write lock，不允许 shell 在文件工具的复验与执行之间并行改指 symlink
 
 ### 5.5 System prompt 纪律
 

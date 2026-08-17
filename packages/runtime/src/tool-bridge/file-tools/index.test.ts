@@ -9,6 +9,11 @@ import { DefaultToolPolicy } from "../../policy/default-policy.ts";
 import { SessionApprovalMemory } from "../../approval/approval-memory.ts";
 import type { ApprovalRequest } from "../build-tools.ts";
 import type { NormalizedToolResult } from "../normalize-result.ts";
+import {
+  OPAQUE_SIDE_EFFECT_RESOURCE,
+  TOOL_RESOURCE_ACCESS_MODES,
+  ToolExecutionCoordinator,
+} from "../tool-execution-coordinator.ts";
 import { buildFileToolset } from "./index.ts";
 
 function executeOptions(
@@ -42,6 +47,40 @@ test("注册七个 roll__ 前缀工具并按读/写/验证分组", () => {
   ]);
   assert.deepEqual(Object.keys(toolset.editTools).sort(), ["roll__edit_file", "roll__write_file"]);
   assert.deepEqual(Object.keys(toolset.verifyTools).sort(), ["roll__verify_file"]);
+});
+
+test("七个文件工具都持有 opaque side-effect read lock", () => {
+  const workdir = mkdtempSync(join(tmpdir(), "file-toolset-resource-test-"));
+  writeFileSync(join(workdir, "a.txt"), "hello", "utf8");
+  const coordinator = new ToolExecutionCoordinator();
+  const registry = new ToolRegistry();
+  buildFileToolset({ workdir }, registry, {
+    policy: new DefaultToolPolicy(),
+    coordinator,
+    requestApproval: async () => ({ approved: true }),
+  });
+  const inputs: Readonly<Record<string, Record<string, unknown>>> = {
+    roll__read_file: { path: "a.txt" },
+    roll__list_dir: {},
+    roll__grep: { pattern: "hello" },
+    roll__glob: { pattern: "**/*.txt" },
+    roll__edit_file: {
+      file_path: "a.txt",
+      edits: [{ old_string: "hello", new_string: "world" }],
+    },
+    roll__write_file: { file_path: "a.txt", content: "world" },
+    roll__verify_file: { path: "a.txt" },
+  };
+
+  for (const [toolId, input] of Object.entries(inputs)) {
+    assert.deepEqual(
+      coordinator
+        .describeResources(toolId, input)
+        .find((resource) => resource.key === OPAQUE_SIDE_EFFECT_RESOURCE),
+      { key: OPAQUE_SIDE_EFFECT_RESOURCE, mode: TOOL_RESOURCE_ACCESS_MODES.read },
+      toolId,
+    );
+  }
 });
 
 test("read 与 edit 共享同一 tracker：读后即可编辑", async () => {

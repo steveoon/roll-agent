@@ -9,6 +9,7 @@ import type { ConfirmDecision } from "./state.ts";
 const ANSI_STYLE_PATTERN = new RegExp(`${String.fromCharCode(27)}\\[[0-9;]*m`, "g");
 const ESC = "\u001b";
 const SESSION_LABEL = "本会话内不再询问：写入工作目录内的文件";
+const EXTERNAL_SESSION_LABEL = "本会话内不再询问：roll__read_file 访问工作目录外的任意路径";
 
 test("confirmation treats its row budget as a ceiling instead of a fixed height", () => {
   const { lastFrame, unmount } = render(
@@ -62,7 +63,7 @@ test("compact confirmation keeps options and help visible and only offers Always
         explanation: "写入 src/a.ts（12 行）",
         args: `file_path: src/a.ts content: ${"x".repeat(60)}`,
         sessionGrantLabel: SESSION_LABEL,
-        width: 40,
+        width: 80,
         maxRows,
         onDecide: () => {},
       }),
@@ -116,6 +117,52 @@ test("compact confirmation without room for the label ignores the a shortcut", a
   assert.deepEqual(decisions, []);
 });
 
+test("compact confirmation only offers Always when the external-path scope is fully visible", async () => {
+  const narrowDecisions: ConfirmDecision[] = [];
+  const narrow = render(
+    h(ConfirmSelect, {
+      prompt: "执行 roll__read_file？",
+      args: "path: /tmp/harmless",
+      sessionGrantLabel: EXTERNAL_SESSION_LABEL,
+      width: 40,
+      maxRows: 6,
+      onDecide: (decision) => {
+        narrowDecisions.push(decision);
+      },
+    }),
+  );
+  const narrowFrame = (narrow.lastFrame() ?? "").replace(ANSI_STYLE_PATTERN, "");
+  assert.doesNotMatch(narrowFrame, /工作目录外的任意路径/u);
+  assert.doesNotMatch(narrowFrame, /Always/u);
+  assert.match(narrowFrame, /←→\/y\/n 选择/u);
+  narrow.stdin.write("a");
+  await delay(10);
+  narrow.unmount();
+  assert.deepEqual(narrowDecisions, []);
+
+  const wideDecisions: ConfirmDecision[] = [];
+  const wide = render(
+    h(ConfirmSelect, {
+      prompt: "执行 roll__read_file？",
+      args: "path: /tmp/harmless",
+      sessionGrantLabel: EXTERNAL_SESSION_LABEL,
+      width: 100,
+      maxRows: 6,
+      onDecide: (decision) => {
+        wideDecisions.push(decision);
+      },
+    }),
+  );
+  const wideFrame = (wide.lastFrame() ?? "").replace(ANSI_STYLE_PATTERN, "");
+  assert.match(wideFrame, new RegExp(EXTERNAL_SESSION_LABEL, "u"));
+  assert.match(wideFrame, /Always/u);
+  assert.match(wideFrame, /←→\/y\/a\/n 选择/u);
+  wide.stdin.write("a");
+  await delay(10);
+  wide.unmount();
+  assert.deepEqual(wideDecisions, [{ approved: true, scope: "session" }]);
+});
+
 async function decideAfter(
   inputs: readonly string[],
   sessionGrantLabel?: string,
@@ -125,7 +172,7 @@ async function decideAfter(
     h(ConfirmSelect, {
       prompt: "执行 roll.bash?",
       args: "command: pnpm test",
-      width: 40,
+      width: 100,
       maxRows: 6,
       ...(sessionGrantLabel !== undefined ? { sessionGrantLabel } : {}),
       onDecide: (decision) => {

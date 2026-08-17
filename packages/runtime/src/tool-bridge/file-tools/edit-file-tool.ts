@@ -11,6 +11,7 @@ import {
   type NormalizedToolResult,
 } from "../normalize-result.ts";
 import {
+  OPAQUE_SIDE_EFFECT_RESOURCE,
   TOOL_RESOURCE_ACCESS_MODES,
   executeCoordinatedTool,
   type ToolExecutionPlan,
@@ -261,7 +262,10 @@ export function buildEditFileTool(
       const key = parsed.success
         ? `file:${canonicalResourcePath(resolveFilePath(settings.workdir, parsed.data.file_path))}`
         : `file-tools:${settings.workdir}`;
-      return [{ key, mode: TOOL_RESOURCE_ACCESS_MODES.write }];
+      return [
+        { key: OPAQUE_SIDE_EFFECT_RESOURCE, mode: TOOL_RESOURCE_ACCESS_MODES.read },
+        { key, mode: TOOL_RESOURCE_ACCESS_MODES.write },
+      ];
     },
     captureExecutionState: (rawInput) => {
       const parsed = editFileInputSchema.safeParse(rawInput);

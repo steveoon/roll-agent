@@ -527,7 +527,7 @@ export type VerifierOutcome =
 | eslint | .ts .tsx .mts .cts .js .jsx .mjs .cjs | fast | `existsSync(join(workdir, "node_modules/.bin/eslint"))` 且 workdir 向上找得到 eslint 配置（`eslint.config.{js,mjs,cjs,ts}` 或 `.eslintrc*`——只查 workdir 一层即可，不向上递归，简化） | `{bin: join(workdir, "node_modules/.bin/eslint"), args: ["--no-fix", filePath]}` |
 | tsc | .ts .tsx .mts .cts | project | 本地 `node_modules/.bin/tsc` + workdir 下有 `tsconfig.json` | `{bin: <local tsc>, args: ["--noEmit"]}` |
 | ruff | .py | fast | PATH 探测（`spawnSync("ruff", ["--version"])` status===0；探测结果模块级缓存） | `{bin: "ruff", args: ["check", "--no-fix", filePath]}` |
-| py-compile | .py | fast | PATH 探测 python3；仅当 ruff 探测失败时作为兜底进入候选 | `{bin: "python3", args: ["-m", "py_compile", filePath]}` |
+| py-compile | .py | fast | PATH 探测 python3；仅当 ruff 探测失败时作为兜底进入候选 | `{bin: "python3", args: ["-I", "-c", "import sys; compile(open(sys.argv[1], 'rb').read(), sys.argv[1], 'exec')", filePath]}`（隔离模式，不生成 `__pycache__`） |
 | json | .json | fast | 恒 true | `"builtin-json"`（readFileSync + JSON.parse，SyntaxError → fail） |
 | yaml | .yaml .yml | fast | 动态 `import("yaml")` 可用（缓存探测结果） | `"builtin-yaml"`（parse，异常 → fail） |
 | bash-syntax | .sh .bash | fast | PATH 探测 bash | `{bin: "bash", args: ["-n", filePath]}` |
