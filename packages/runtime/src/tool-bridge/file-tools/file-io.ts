@@ -5,10 +5,9 @@ import {
   failedToolResult,
   type NormalizedToolResult,
 } from "../normalize-result.ts";
-import { formatControlCharCode, isRawControlCode } from "./control-chars.ts";
+import { RAW_NUL_LABEL } from "./control-chars.ts";
 
 const UTF8_BOM = "\uFEFF";
-const BINARY_PROBE_BYTES = 8192;
 
 export const FILE_CONTAINMENT_DRIFT_MESSAGE =
   "文件路径的安全条件在准入后发生变化，已在执行前阻止；请重新提交以重新确认";
@@ -152,21 +151,18 @@ export function revalidateFilePathAdmission(
     : undefined;
 }
 
-/**
- * Binary probe shares its control-character definition with the write-side
- * rejection in control-chars.ts: a file the write path refuses to create is
- * exactly a file the read path refuses to load. Bytes >= 0x80 are UTF-8
- * multibyte fragments, never raw controls.
- */
-function findBinaryControlByte(buffer: Buffer): number | undefined {
-  const probeLength = Math.min(buffer.length, BINARY_PROBE_BYTES);
-  for (let index = 0; index < probeLength; index += 1) {
-    const byte = buffer[index];
-    if (byte !== undefined && byte <= 0x7f && isRawControlCode(byte)) {
-      return byte;
-    }
-  }
-  return undefined;
+function containsRawNul(buffer: Buffer): boolean {
+  return buffer.indexOf(0x00) !== -1;
+}
+
+export interface BomSplitText {
+  readonly content: string;
+  readonly hadBom: boolean;
+}
+
+export function splitUtf8Bom(raw: string): BomSplitText {
+  const hadBom = raw.startsWith(UTF8_BOM);
+  return { content: hadBom ? raw.slice(UTF8_BOM.length) : raw, hadBom };
 }
 
 export function loadTextFile(
@@ -202,17 +198,14 @@ export function loadTextFile(
     };
   }
   const buffer = readFileSync(path);
-  const binaryByte = findBinaryControlByte(buffer);
-  if (binaryByte !== undefined) {
+  if (containsRawNul(buffer)) {
     return {
       ok: false,
       code: "binary",
-      message: `${path} 是二进制文件（含原始控制字符 ${formatControlCharCode(binaryByte)}），文件工具仅支持文本。若确实需要处理该文件，请用 shell 命令。`,
+      message: `${path} 是二进制文件（含原始 NUL 字节 ${RAW_NUL_LABEL}），文件工具仅支持文本。若确实需要处理该文件，请用 shell 命令。`,
     };
   }
-  const raw = buffer.toString("utf8");
-  const hadBom = raw.startsWith(UTF8_BOM);
-  const content = hadBom ? raw.slice(UTF8_BOM.length) : raw;
+  const { content, hadBom } = splitUtf8Bom(buffer.toString("utf8"));
   return {
     ok: true,
     path,

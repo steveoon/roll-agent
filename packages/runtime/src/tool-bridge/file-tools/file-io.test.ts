@@ -21,6 +21,7 @@ import {
   resolveFilePath,
   revalidateFilePathAdmission,
   saveTextFile,
+  splitUtf8Bom,
 } from "./file-io.ts";
 
 const LIMITS = { maxFileBytes: 1024 * 1024 };
@@ -74,18 +75,52 @@ test("loadTextFile 拒绝超大文件与二进制文件", () => {
   assert.ok(!binary.ok && binary.code === "binary");
 });
 
-test("loadTextFile 拒绝仅含非 NUL 控制字符的文件并指明码点", () => {
+test("loadTextFile 二进制判定消息指明 U+0000", () => {
   const dir = tempDir();
-  const vt = join(dir, "vt.txt");
-  writeFileSync(vt, Buffer.from([0x61, 0x0b, 0x62]));
-  const loaded = loadTextFile(vt, LIMITS);
+  const bin = join(dir, "nul.dat");
+  writeFileSync(bin, Buffer.from([0x61, 0x00, 0x62]));
+  const loaded = loadTextFile(bin, LIMITS);
   assert.ok(!loaded.ok && loaded.code === "binary");
-  assert.match(loaded.message, /U\+000B/u);
-  const del = join(dir, "del.txt");
-  writeFileSync(del, Buffer.from([0x61, 0x7f, 0x62]));
-  const delLoaded = loadTextFile(del, LIMITS);
-  assert.ok(!delLoaded.ok && delLoaded.code === "binary");
-  assert.match(delLoaded.message, /U\+007F/u);
+  assert.match(loaded.message, /U\+0000/u);
+  assert.match(loaded.message, /shell/u);
+});
+
+test("loadTextFile 扫描整个文件：NUL 位于 8192 字节之后仍判定二进制", () => {
+  const dir = tempDir();
+  const path = join(dir, "late-nul.txt");
+  const prefix = Buffer.alloc(8192 + 1, 0x61);
+  writeFileSync(path, Buffer.concat([prefix, Buffer.from([0x00, 0x62])]));
+  const loaded = loadTextFile(path, LIMITS);
+  assert.ok(!loaded.ok && loaded.code === "binary");
+  const lastByte = join(dir, "last-byte-nul.txt");
+  writeFileSync(lastByte, Buffer.concat([Buffer.alloc(20000, 0x61), Buffer.from([0x00])]));
+  const lastLoaded = loadTextFile(lastByte, LIMITS);
+  assert.ok(!lastLoaded.ok && lastLoaded.code === "binary");
+});
+
+test("loadTextFile 放行 ESC/FF/VT/DEL 等非 NUL 控制字符（ANSI 日志可读）", () => {
+  const dir = tempDir();
+  const cases: ReadonlyArray<readonly [string, number]> = [
+    ["esc", 0x1b],
+    ["ff", 0x0c],
+    ["vt", 0x0b],
+    ["del", 0x7f],
+    ["bs", 0x08],
+    ["us", 0x1f],
+  ];
+  for (const [name, code] of cases) {
+    const path = join(dir, `${name}.txt`);
+    writeFileSync(path, Buffer.from([0x61, code, 0x62]));
+    const loaded = loadTextFile(path, LIMITS);
+    assert.ok(loaded.ok, `U+${code.toString(16)} 应可读`);
+    assert.equal(loaded.content, `a${String.fromCharCode(code)}b`);
+  }
+  const ansi = join(dir, "ansi.log");
+  const ansiText = "\u001b[32mok\u001b[0m\npage 2\n";
+  writeFileSync(ansi, ansiText, "utf8");
+  const ansiLoaded = loadTextFile(ansi, LIMITS);
+  assert.ok(ansiLoaded.ok);
+  assert.equal(ansiLoaded.content, ansiText);
 });
 
 test("loadTextFile 放行 TAB 与 CRLF 文本", () => {
@@ -94,6 +129,13 @@ test("loadTextFile 放行 TAB 与 CRLF 文本", () => {
   writeFileSync(path, "a\tb\r\nc\r\n", "utf8");
   const loaded = loadTextFile(path, LIMITS);
   assert.ok(loaded.ok);
+});
+
+test("splitUtf8Bom 剥离首个 BOM 并标记，非首位 BOM 保留", () => {
+  assert.deepEqual(splitUtf8Bom("\uFEFF内容"), { content: "内容", hadBom: true });
+  assert.deepEqual(splitUtf8Bom("内容"), { content: "内容", hadBom: false });
+  assert.deepEqual(splitUtf8Bom("a\uFEFFb"), { content: "a\uFEFFb", hadBom: false });
+  assert.deepEqual(splitUtf8Bom(""), { content: "", hadBom: false });
 });
 
 test("saveTextFile 自动建父目录并按需还原 BOM", () => {

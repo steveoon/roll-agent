@@ -12,10 +12,11 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ToolExecutionOptions } from "ai";
-import { FileStateTracker } from "./file-state-tracker.ts";
+import { FILE_FRESHNESS, FileStateTracker } from "./file-state-tracker.ts";
 import { canonicalFileKey, loadTextFile } from "./file-io.ts";
 import { resolveFileToolsSettings } from "./settings.ts";
 import { buildWriteFileTool, executeWriteFile } from "./write-file-tool.ts";
+import { executeEditFile } from "./edit-file-tool.ts";
 import type { ApprovalRequest } from "../build-tools.ts";
 import { ToolRegistry } from "../naming.ts";
 import { DefaultToolPolicy } from "../../policy/default-policy.ts";
@@ -38,7 +39,7 @@ test("新文件写入成功并自动建父目录", () => {
 
 const ctrl = (code: number): string => String.fromCharCode(code);
 
-test("content 含原始控制字符被拒绝且未创建文件", () => {
+test("content 含原始 NUL 被拒绝且未创建文件", () => {
   const workdir = mkdtempSync(join(tmpdir(), "write-tool-test-"));
   const settings = resolveFileToolsSettings({ workdir });
   const target = join(workdir, "rejected.txt");
@@ -56,17 +57,38 @@ test("content 含原始控制字符被拒绝且未创建文件", () => {
   assert.match(message, /shell/u);
 });
 
-test("content 含 VT/DEL 等其它受管控制字符同样被拒绝", () => {
-  const settings = resolveFileToolsSettings({
-    workdir: mkdtempSync(join(tmpdir(), "write-tool-test-")),
-  });
+test("content 含 ESC/FF/VT/DEL 等非 NUL 控制字符正常写入并可回读", () => {
+  const workdir = mkdtempSync(join(tmpdir(), "write-tool-test-"));
+  const settings = resolveFileToolsSettings({ workdir });
   for (const code of [0x0b, 0x0c, 0x1b, 0x7f]) {
+    const content = `x${ctrl(code)}y\n`;
     const result = executeWriteFile(settings, new FileStateTracker(), {
-      file_path: "rejected.txt",
-      content: `x${ctrl(code)}y`,
+      file_path: `ctrl-${String(code)}.txt`,
+      content,
     });
-    assert.equal(result.outcome.kind, TOOL_OUTCOME_KINDS.invalidInput);
+    assert.equal(result.outcome.kind, TOOL_OUTCOME_KINDS.success);
+    assert.equal(readFileSync(join(workdir, `ctrl-${String(code)}.txt`), "utf8"), content);
+    const loaded = loadTextFile(join(workdir, `ctrl-${String(code)}.txt`), { maxFileBytes: 1024 });
+    assert.ok(loaded.ok);
+    assert.equal(loaded.content, content);
   }
+});
+
+test("content 含 lone surrogate 被拒绝且未创建文件", () => {
+  const workdir = mkdtempSync(join(tmpdir(), "write-tool-test-"));
+  const settings = resolveFileToolsSettings({ workdir });
+  const result = executeWriteFile(settings, new FileStateTracker(), {
+    file_path: "lone.txt",
+    content: "a\uD800b",
+  });
+  assert.equal(result.outcome.kind, TOOL_OUTCOME_KINDS.invalidInput);
+  assert.match(String(result.display), /lone surrogate/u);
+  assert.equal(existsSync(join(workdir, "lone.txt")), false);
+  const paired = executeWriteFile(settings, new FileStateTracker(), {
+    file_path: "paired.txt",
+    content: "emoji \u{1F600} ok",
+  });
+  assert.equal(paired.outcome.kind, TOOL_OUTCOME_KINDS.success);
 });
 
 test("content 含转义序列文本（6 个 ASCII 字符）正常写入", () => {
@@ -82,31 +104,32 @@ test("content 含转义序列文本（6 个 ASCII 字符）正常写入", () => 
   assert.equal(readFileSync(join(workdir, "escape-text.ts"), "utf8"), content);
 });
 
-test("写入侧拒绝集合与读取侧二进制判定一致（round-trip 不变式）", () => {
+test("写入侧拒绝集合与读取侧二进制判定一致（round-trip 不变式，payload 超过 8192 字节）", () => {
   const workdir = mkdtempSync(join(tmpdir(), "write-tool-test-"));
   const settings = resolveFileToolsSettings({ workdir });
-  const rejectedCodes = [0x00, 0x01, 0x08, 0x0b, 0x0c, 0x0e, 0x1f, 0x7f];
-  for (const code of rejectedCodes) {
-    const writeResult = executeWriteFile(settings, new FileStateTracker(), {
-      file_path: "probe.txt",
-      content: `a${ctrl(code)}b`,
-    });
-    assert.equal(writeResult.outcome.kind, TOOL_OUTCOME_KINDS.invalidInput);
-    const probePath = join(workdir, `probe-${String(code)}.bin`);
-    writeFileSync(probePath, Buffer.from([0x61, code, 0x62]));
-    const readResult = loadTextFile(probePath, { maxFileBytes: 1024 });
-    assert.ok(!readResult.ok && readResult.code === "binary");
-  }
-  const allowedCodes = [0x09, 0x0d];
+  const limits = { maxFileBytes: 64 * 1024 };
+  const padding = "a".repeat(8192 + 100);
+  const nulResult = executeWriteFile(settings, new FileStateTracker(), {
+    file_path: "probe-nul.txt",
+    content: `${padding}${ctrl(0x00)}b`,
+  });
+  assert.equal(nulResult.outcome.kind, TOOL_OUTCOME_KINDS.invalidInput);
+  assert.equal(existsSync(join(workdir, "probe-nul.txt")), false);
+  const nulProbe = join(workdir, "probe-nul.bin");
+  writeFileSync(nulProbe, Buffer.concat([Buffer.from(padding, "utf8"), Buffer.from([0x00, 0x62])]));
+  const nulRead = loadTextFile(nulProbe, limits);
+  assert.ok(!nulRead.ok && nulRead.code === "binary");
+  const allowedCodes = [0x01, 0x08, 0x09, 0x0b, 0x0c, 0x0d, 0x0e, 0x1b, 0x1f, 0x7f];
   for (const code of allowedCodes) {
+    const content = `${padding}${ctrl(code)}b`;
     const writeResult = executeWriteFile(settings, new FileStateTracker(), {
       file_path: `allowed-${String(code)}.txt`,
-      content: `a${ctrl(code)}b`,
+      content,
     });
     assert.equal(writeResult.outcome.kind, TOOL_OUTCOME_KINDS.success);
-    const probePath = join(workdir, `allowed-${String(code)}.txt`);
-    const readResult = loadTextFile(probePath, { maxFileBytes: 1024 });
-    assert.ok(readResult.ok);
+    const readResult = loadTextFile(join(workdir, `allowed-${String(code)}.txt`), limits);
+    assert.ok(readResult.ok, `U+${code.toString(16)} 应可回读`);
+    assert.equal(readResult.content, content);
   }
 });
 
@@ -162,6 +185,30 @@ test("写入目标是目录时拒绝", () => {
   });
   assert.equal(result.outcome.kind, TOOL_OUTCOME_KINDS.invalidInput);
   assert.ok(existsSync(workdir));
+});
+
+test("content 以 BOM 开头时按 BOM 文件落盘，tracker 记录去 BOM 内容，后续 edit 不误报 stale", () => {
+  const workdir = mkdtempSync(join(tmpdir(), "write-tool-test-"));
+  const path = join(workdir, "bom-new.txt");
+  const settings = resolveFileToolsSettings({ workdir });
+  const tracker = new FileStateTracker();
+  const written = executeWriteFile(settings, tracker, {
+    file_path: "bom-new.txt",
+    content: "\uFEFFhello\nworld\n",
+  });
+  assert.equal(written.outcome.kind, TOOL_OUTCOME_KINDS.success);
+  assert.match(String(written.display), /（3 行，/u);
+  assert.match(String(written.display), / {4}1→hello/u);
+  assert.equal(readFileSync(path, "utf8"), "\uFEFFhello\nworld\n");
+  const loaded = loadTextFile(path, { maxFileBytes: 1024 });
+  assert.ok(loaded.ok && loaded.hadBom);
+  assert.equal(tracker.checkFreshness(loaded.key, loaded.content), FILE_FRESHNESS.fresh);
+  const edited = executeEditFile(settings, tracker, {
+    file_path: "bom-new.txt",
+    edits: [{ old_string: "world", new_string: "there" }],
+  });
+  assert.equal(edited.outcome.kind, TOOL_OUTCOME_KINDS.success);
+  assert.equal(readFileSync(path, "utf8"), "\uFEFFhello\nthere\n");
 });
 
 test("覆盖带 BOM 的已存在文件后新文件不带 BOM", () => {
@@ -228,7 +275,7 @@ test("缩水覆盖即使记忆已授权仍会弹出确认，explanation 提示�
   assert.match(approvals[0]?.explanation ?? "", /有意删减/u);
 });
 
-test("含控制字符的写入在弹窗前被拒绝，不产生审批请求", async () => {
+test("含 NUL 的写入在弹窗前被拒绝，不产生审批请求", async () => {
   const workdir = mkdtempSync(join(tmpdir(), "write-tool-ctrl-approval-"));
   const approvals: ApprovalRequest[] = [];
   const tools = buildWriteFixture(

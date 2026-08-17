@@ -50,12 +50,12 @@ roll chat 的场景约束加剧了这一点：
 ### `roll__read_file`
 - 输入：`path`（相对 workdir 或绝对）、`offset?`（1-based 起始行）、`limit?`（默认 2000 行）
 - 输出：首行 `文件: <绝对路径> (共 N 行)`，正文每行 `<5位右对齐行号>→<内容>`
-- 行为：UTF-8 BOM 剥离后展示与记录；含 NUL 判定二进制拒绝；超 `maxFileBytes`（默认 2 MiB）拒绝；含 U+FFFD 追加编码警告；单行超 1000 字符截断
+- 行为：UTF-8 BOM 剥离后展示与记录；全文件扫描，任意位置含原始 NUL（U+0000）判定二进制拒绝（ESC/FF/VT/DEL 等其它控制字符视为文本，ANSI 日志可读）；超 `maxFileBytes`（默认 2 MiB）拒绝；含 U+FFFD 追加编码警告；单行超 1000 字符截断
 - 副作用：向 `FileStateTracker` 记录全文内容 hash（分页读取也记录全文——读过任意部分即解锁编辑，stale 检测兜底）
 
 ### `roll__edit_file`
 - 输入：`file_path`、`edits: [{old_string, new_string, replace_all?}]`（≥1 条）
-- 前置门（按序）：文件可读 → `unread` 拒绝（先 read）→ `stale` 拒绝（文件被外部修改，引导 re-read）
+- 前置门（按序）：`old_string`/`new_string` 含原始 NUL（U+0000）或不成对的 UTF-16 代理项 → `invalid_input` 拒绝（在审批弹窗前，与 read 侧二进制判定对称）→ 文件可读 → `unread` 拒绝（先 read）→ `stale` 拒绝（文件被外部修改，引导 re-read）
 - 匹配管线（每条 edit）：精确匹配 → 唯一命中执行；0 命中 → 归一化匹配（仅唯一命中才执行，替换按原文件字节区间切割）；仍失败 → no-match 诊断；多命中 → multi-match 诊断
 - **原子性**：全部 edits 在内存中顺序应用（后条基于前条结果），任何一条失败则整体不落盘，报告失败条目序号 + 诊断
 - 行尾保持：全 CRLF 文件回写时 `new_string` 的 `\n` 转 `\r\n`；混合行尾不转换
@@ -64,7 +64,9 @@ roll chat 的场景约束加剧了这一点：
 
 ### `roll__write_file`
 - 输入：`file_path`、`content`
+- 前置门：`content` 含原始 NUL（U+0000）或不成对的 UTF-16 代理项 → `invalid_input` 拒绝（在审批弹窗前；需要写入转义序列文本时用双反斜杠，需要原始字节时改用 shell）
 - 新文件：允许（自动 `mkdir -p` 父目录）；已存在文件：`unread` 拒绝（先 read 确认再覆盖）、`stale` 拒绝、`fresh` 覆盖
+- BOM：`content` 以 U+FEFF 开头时按 BOM 文件落盘，tracker 记录去 BOM 后的内容（与 read 侧一致，后续 edit 不会误报 stale）；覆盖已有 BOM 文件而 `content` 不带 BOM 时不保留 BOM
 - 成功返回：`已写入 <path>（N 行，M 字节）` + 前 10 行快照；更新 tracker
 
 ### `roll__list_dir`

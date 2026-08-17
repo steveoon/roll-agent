@@ -3,11 +3,16 @@ import assert from "node:assert/strict";
 import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import type { ToolExecutionOptions } from "ai";
 import { FileStateTracker } from "./file-state-tracker.ts";
-import { canonicalFileKey } from "./file-io.ts";
+import { canonicalFileKey, loadTextFile } from "./file-io.ts";
 import { resolveFileToolsSettings, type ResolvedFileToolsSettings } from "./settings.ts";
-import { executeEditFile } from "./edit-file-tool.ts";
-import { TOOL_OUTCOME_KINDS } from "../normalize-result.ts";
+import { buildEditFileTool, executeEditFile } from "./edit-file-tool.ts";
+import type { ApprovalRequest } from "../build-tools.ts";
+import { ToolRegistry } from "../naming.ts";
+import { DefaultToolPolicy } from "../../policy/default-policy.ts";
+import { SessionApprovalMemory } from "../../approval/approval-memory.ts";
+import { TOOL_OUTCOME_KINDS, type NormalizedToolResult } from "../normalize-result.ts";
 
 interface Fixture {
   readonly workdir: string;
@@ -34,7 +39,7 @@ function markRead(f: Fixture): void {
 
 const ctrl = (code: number): string => String.fromCharCode(code);
 
-test("old_string 含原始控制字符被拒绝且不写入", () => {
+test("old_string 含原始 NUL 被拒绝且不写入", () => {
   const f = fixture("abc");
   markRead(f);
   const result = executeEditFile(f.settings, f.tracker, {
@@ -47,19 +52,58 @@ test("old_string 含原始控制字符被拒绝且不写入", () => {
   assert.equal(readFileSync(f.path, "utf8"), "abc");
 });
 
-test("new_string 含原始控制字符被拒绝且不写入，消息指明编辑序号", () => {
+test("new_string 含原始 NUL 被拒绝且不写入，消息指明编辑序号", () => {
   const f = fixture("abc");
   markRead(f);
   const result = executeEditFile(f.settings, f.tracker, {
     file_path: "target.txt",
     edits: [
       { old_string: "abc", new_string: "abd" },
-      { old_string: "abd", new_string: `x${ctrl(0x1b)}y` },
+      { old_string: "abd", new_string: `x${ctrl(0x00)}y` },
     ],
   });
   assert.equal(result.outcome.kind, TOOL_OUTCOME_KINDS.invalidInput);
   assert.match(String(result.display), /第 2 条编辑（共 2 条）的 new_string/u);
-  assert.match(String(result.display), /U\+001B/u);
+  assert.match(String(result.display), /U\+0000/u);
+  assert.equal(readFileSync(f.path, "utf8"), "abc");
+});
+
+test("new_string 含 ESC/FF/VT/DEL 等非 NUL 控制字符可写入并可回读", () => {
+  const f = fixture("plain line\n");
+  markRead(f);
+  const ansi = `${ctrl(0x1b)}[32mgreen${ctrl(0x1b)}[0m${ctrl(0x0c)}${ctrl(0x0b)}${ctrl(0x7f)}`;
+  const result = executeEditFile(f.settings, f.tracker, {
+    file_path: "target.txt",
+    edits: [{ old_string: "plain", new_string: ansi }],
+  });
+  assert.equal(result.outcome.kind, TOOL_OUTCOME_KINDS.success);
+  assert.equal(readFileSync(f.path, "utf8"), `${ansi} line\n`);
+  const loaded = loadTextFile(f.path, { maxFileBytes: 1024 });
+  assert.ok(loaded.ok);
+  assert.equal(loaded.content, `${ansi} line\n`);
+  const again = executeEditFile(f.settings, f.tracker, {
+    file_path: "target.txt",
+    edits: [{ old_string: ansi, new_string: "plain" }],
+  });
+  assert.equal(again.outcome.kind, TOOL_OUTCOME_KINDS.success);
+  assert.equal(readFileSync(f.path, "utf8"), "plain line\n");
+});
+
+test("old_string/new_string 含 lone surrogate 被拒绝且不写入", () => {
+  const f = fixture("abc");
+  markRead(f);
+  const inNew = executeEditFile(f.settings, f.tracker, {
+    file_path: "target.txt",
+    edits: [{ old_string: "abc", new_string: "ab\uDC00" }],
+  });
+  assert.equal(inNew.outcome.kind, TOOL_OUTCOME_KINDS.invalidInput);
+  assert.match(String(inNew.display), /new_string.*lone surrogate/u);
+  const inOld = executeEditFile(f.settings, f.tracker, {
+    file_path: "target.txt",
+    edits: [{ old_string: "a\uD83D", new_string: "x" }],
+  });
+  assert.equal(inOld.outcome.kind, TOOL_OUTCOME_KINDS.invalidInput);
+  assert.match(String(inOld.display), /old_string.*lone surrogate/u);
   assert.equal(readFileSync(f.path, "utf8"), "abc");
 });
 
@@ -271,4 +315,32 @@ test("BOM 文件编辑后 BOM 保留", () => {
   });
   assert.equal(result.outcome.kind, TOOL_OUTCOME_KINDS.success);
   assert.equal(readFileSync(f.path, "utf8"), "\uFEFF新内容");
+});
+
+function executeOptions(): ToolExecutionOptions<unknown> {
+  return { toolCallId: "call-1", messages: [], context: undefined };
+}
+
+test("含 NUL 的编辑在弹窗前被拒绝，不产生审批请求", async () => {
+  const f = fixture("abc");
+  markRead(f);
+  const approvals: ApprovalRequest[] = [];
+  const tools = buildEditFileTool(f.settings, f.tracker, new ToolRegistry(), {
+    policy: new DefaultToolPolicy(),
+    requestApproval: (request) => {
+      approvals.push(request);
+      return Promise.resolve({ approved: true, scope: "session" });
+    },
+    approvalMemory: new SessionApprovalMemory(),
+  });
+  const editTool = tools.roll__edit_file;
+  assert.ok(editTool?.execute !== undefined);
+  const result = (await editTool.execute(
+    { file_path: "target.txt", edits: [{ old_string: "abc", new_string: `x${ctrl(0x00)}y` }] },
+    executeOptions(),
+  )) as NormalizedToolResult;
+  assert.equal(result.outcome.kind, TOOL_OUTCOME_KINDS.invalidInput);
+  assert.match(String(result.display), /U\+0000/u);
+  assert.equal(approvals.length, 0);
+  assert.equal(readFileSync(f.path, "utf8"), "abc");
 });
