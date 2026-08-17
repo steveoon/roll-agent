@@ -2423,4 +2423,3 @@ Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
 - **Spec 覆盖**：设计文档 §4 四工具契约 → Task 4/5/6/7；§5.1 tracker → Task 3；§5.2 归一化 → Task 1；§5.3 诊断 → Task 2；§5.4 policy/capability → Task 8（annotations + roles）；§5.5 prompt → Task 9；§6 组装与默认开关 → Task 8；发布 → Task 10。§7 non-goals 无对应任务（有意）。
 - **类型一致性**：`ResolvedFileToolsSettings` / `FileStateTracker.recordKnownContent/checkFreshness` / `MatchSpan` / `findOldString` / `build*Tool` 签名在 Task 间逐字一致；role 字符串 `"file-read"`/`"file-edit"` 在 Task 8 定义、Task 9 消费。
 - **已知校准点**（执行者需现场核对，均已在对应 Step 标注）：`NormalizedToolResult` 的 outcome/display 字段名（Task 4 Step 3 注）、`ToolExecutionOptions` 测试构造形状（Task 8 Step 2 注）、system-prompt 组装的实际拼接形式（Task 9 Step 2）。
-

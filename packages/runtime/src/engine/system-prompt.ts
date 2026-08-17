@@ -56,11 +56,17 @@ const MAX_SKILL_DESCRIPTION_CHARS = 240;
 
 const IDENTITY_PREFIX = "你是花卷 Roll 的会话助手，运行在 roll chat 里。";
 
-function identitySection(hasShell: boolean): string {
-  const tail = hasShell
-    ? "你通过已注册 Agent 提供的工具（MCP）观察和操作外部世界，并有一个内建 shell 工具可以在本机执行命令。"
-    : "你通过已注册 Agent 提供的工具（MCP）观察和操作外部世界；你没有独立的文件系统或 shell，工具就是你的全部执行手段。";
-  return IDENTITY_PREFIX + tail;
+function identitySection(hasShell: boolean, hasFileTools: boolean): string {
+  if (hasShell && hasFileTools) {
+    return `${IDENTITY_PREFIX}你通过已注册 Agent 提供的工具（MCP）观察和操作外部世界，并有内建的文件工具和 shell 工具可以在本机读写文件、执行命令。`;
+  }
+  if (hasShell) {
+    return `${IDENTITY_PREFIX}你通过已注册 Agent 提供的工具（MCP）观察和操作外部世界，并有一个内建 shell 工具可以在本机执行命令。`;
+  }
+  if (hasFileTools) {
+    return `${IDENTITY_PREFIX}你通过已注册 Agent 提供的工具（MCP）观察和操作外部世界，并有内建的文件工具可以读写当前工作目录中的文件；你没有独立的 shell，工具就是你的全部执行手段。`;
+  }
+  return `${IDENTITY_PREFIX}你通过已注册 Agent 提供的工具（MCP）观察和操作外部世界；你没有独立的文件系统或 shell，工具就是你的全部执行手段。`;
 }
 
 const GROUNDING_SECTION = [
@@ -193,7 +199,7 @@ function buildTranscriptSection(transcriptToolId: string): string {
 export function buildChatSystemPrompt(options: BuildChatSystemPromptOptions = {}): string {
   const shellToolId = options.shellToolId ?? options.bashToolId;
   const sections = [
-    identitySection(shellToolId !== undefined),
+    identitySection(shellToolId !== undefined, options.fileToolIds !== undefined),
     GROUNDING_SECTION,
     PERSISTENCE_SECTION,
   ];

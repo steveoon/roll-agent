@@ -467,6 +467,9 @@ function ChatSessionView(props: ChatSessionViewProps): ReactElement {
             ...(state.pendingConfirm.explanation !== undefined
               ? { explanation: state.pendingConfirm.explanation }
               : {}),
+            ...(state.pendingConfirm.sessionGrantLabel !== undefined
+              ? { sessionGrantLabel: state.pendingConfirm.sessionGrantLabel }
+              : {}),
             width: layout.columns,
             maxRows: layout.promptRows + layout.popupRows,
             onDecide: resolveConfirm,

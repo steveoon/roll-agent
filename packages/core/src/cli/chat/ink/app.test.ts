@@ -427,6 +427,7 @@ test("ChatApp confirm flow remembers approval for the session on 'a'", async () 
       agentName: "browser-use-agent",
       toolName: "click_ref",
       input: { ref: "node-42" },
+      sessionGrantLabel: "本会话内不再询问：修改工作目录内的文件",
     };
     yield { type: "message-finish", text: "done" };
   }

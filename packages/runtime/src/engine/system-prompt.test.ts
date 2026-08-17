@@ -314,6 +314,8 @@ test("提供 fileToolIds 时注入文件工具纪律", () => {
   assert.match(prompt, /不要用 shell 的 grep\/find 代替/u);
   assert.match(prompt, /修改代码文件后用 roll__verify_file 验证（默认 fast 级）/u);
   assert.match(prompt, /验证被跳过时如实说明未验证/u);
+  assert.ok(!prompt.includes("没有独立的文件系统"));
+  assert.ok(prompt.includes("内建的文件工具"));
 });
 
 test("未提供 fileToolIds 时不出现文件工具章节", () => {

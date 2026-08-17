@@ -28,7 +28,7 @@
 
 ### 3.1 `roll__grep`
 
-- 后端：**@vscode/ripgrep**（runtime 新增依赖，postinstall 分发各平台 rg 二进制；不做系统 rg 探测双路径——YAGNI）
+- 后端：**@vscode/ripgrep**（runtime 新增依赖，1.18 通过 optionalDependencies 平台包分发，无 lifecycle script；不做系统 rg 探测双路径——YAGNI）
 - 输入：`pattern`（rg 正则）、`path?`（默认 workdir）、`glob?`（`-g` 过滤）、`context?`（`-C` 行数，默认 0）、`ignore_case?`、`max_results?`（默认 100 命中）
 - 输出契约（与 read/edit 耦合）：按文件分组，命中行渲染为 `行号→内容`（与 read_file 行号前缀同构），文件头一行绝对路径——模型可从结果直接接 `read_file offset` 或复制内容作 `old_string`
 - 0 命中诊断：若 pattern 含归一化折叠表（CHAR_FOLD）中的字符（全角标点/智能引号），提示归一化变体：「pattern 含全角/智能标点，文件中可能是半角形式，试试：<normalizeForMatch(pattern).text>」——归一化资产延伸到检索层，两家都没有
@@ -45,9 +45,9 @@
 ### 3.3 `roll__verify_file`
 
 - 输入：`path`、`level?`（`"fast"` 默认 | `"project"`）
-- **验证器注册表**（`VERIFIER_REGISTRY`）：按扩展名映射候选验证器，每个验证器 = `{ id, level, detect(workdir, filePath), command(filePath), timeoutMs }`。detect 做零配置探测（config 文件存在 + 二进制可达），探测不过则跳过
+- **验证器注册表**（`VERIFIER_REGISTRY`）：按扩展名映射候选验证器，每个验证器 = `{ id, level, executesProjectCode, detect(workdir, filePath), command(filePath), timeoutMs }`。detect 做零配置探测（config 文件存在 + 二进制可达），探测不过则跳过
 
-| 扩展名 | fast（默认，免确认） | project（显式 level，走确认门） |
+| 扩展名 | fast（默认；纯解析免确认，eslint 等会执行项目代码的验证器需确认一次） | project（显式 level，走确认门、不吃记忆） |
 |---|---|---|
 | .ts/.tsx/.mts/.cts | eslint（项目本地 `node_modules/.bin/eslint`，有 eslint 配置才启用） | tsc --noEmit（本地 typescript + tsconfig） |
 | .js/.jsx/.mjs/.cjs | eslint（同上） | — |
@@ -61,7 +61,7 @@
 - **执行安全**：argv 数组 execFile（无 shell 注入面）；cwd=workdir；只跑注册表白名单（**绝不**从 package.json scripts 取命令——那是任意代码）；fast 超时 10s / project 120s；输出截断。project 级走确认门的理由：cargo check 会执行 build.rs、go vet 会触发构建——任意代码执行面，须用户可见
 - **fail-honest**（与 extraction schema 原则同源）：验证器探测不过 → 结果明确写「<id>: 未安装/未配置，跳过」；全部不可用 → 「该文件类型无可用验证器」——**绝不把「没验证」表述成「验证通过」**
 - 返回：逐验证器 `✓ 通过` / `✗ 失败 + 错误输出（截断）` / `– 跳过（原因）`；模型据此决定修复或汇报
-- capability role：新增 `file-verify`（approval mode 走 runtimePolicy——fast 免确认、project 确认）
+- capability role：新增 `file-verify`（approval mode 走 runtimePolicy——fast 级纯解析免确认，eslint 等会执行项目代码的验证器需确认一次；project 走确认门、不吃记忆）
 - **不自动执行**：编辑成功后不自动跑（延迟 + project 级安全面），靠 prompt 纪律引导模型调用。真实场景验证后再评估自动化
 
 ### 3.4 write 导流与缩水防护
@@ -75,9 +75,11 @@
 
 - **内核**（runtime）：`ApprovalDecision` 加可选字段 `scope?: "once" | "session"`（内部类型，零破坏）；新模块 `approval/approval-memory.ts` 的 `SessionApprovalMemory { isGranted(key): boolean; grant(key): void }`
 - **集成点**：`ToolBridgeContext` 加 `approvalMemory?: SessionApprovalMemory`；`gateToolCall` 的 display options 加 `memoryKey?: string`——confirm 决策时先查记忆命中即放行；`requestApproval` 返回 `scope === "session"` 且有 memoryKey 时写入记忆。**不传 memoryKey 的工具（bash、MCP）完全不受影响**
-- **key 粒度**：`${toolName}:${workdir 内 ? "workdir" : "external"}`——「本会话内 workdir 内的 edit_file 不再询问」是开发者自用的甜点粒度；workdir 外逐次确认不吃记忆（read/list 的 external 确认门同样接 memory，key 用 external 段）
-- **UI**（core 包 TUI）：确认组件加第三选项「允许并且本会话内不再询问」→ decision `{approved: true, scope: "session"}`（实施时先探查现有确认组件的选项结构——校准点）
-- **协议**（protocol 包）：`approval.respond` payload 加可选 `scope` 字段。`approvalRespondParamsSchema` 是 `.strict()`（沿用 `reason` 字段的既有模式），兼容性因此是**单向**的：旧客户端不发 `scope` → 新 server 正常解析为 `undefined`（已测）；反过来**新客户端发 `scope` → 旧 server（schema 未升级）会被当未知键拒绝，不是静默忽略**，即前向不兼容。当前零调用方在 wire 上发送 `scope`：Ink TUI（`packages/core/src/cli/chat/ink/use-session.ts`）是进程内直接持有 `AgentSession` 调用 `session.approve()`/`session.reject()`，不经过 JSON-RPC，不受此风险影响；但 Companion 链路（`packages/companion/src/companion-workspace.ts` 的 `handleRemoteRequest → respondApproval`）经 relay 解析同一份 schema 后由 `client-node` 转发本地 Runtime，Companion（独立版本号，如 `0.4.2`）与本地 Runtime（如 `0.15.1`）版本不同步的错配通道**今天已完整存在**，只是尚无调用方往里塞 `scope` 值。`RUNTIME_FEATURES`/`clientApprovalResponses` 只有方法级布尔开关，没有字段级能力声明机制，无法直接探测"对端 schema 是否认识 `scope`"。**首个在 wire 上写 `scope` 的接入方（companion/GUI 方向）落地前必须先评估版本错配处理（能力探测或协议演进），不得沿用「可选字段自动兼容」这一假设**
+- **key 粒度**：
+  - **write 家族**（`edit_file` / `write_file`）：仅 workdir 内传 `memoryKey`（`${tool}:workdir`）；workdir 外逐次确认、不吃记忆
+  - **read 家族**（`read_file` / `list_dir` / `grep` / `glob` / `verify_file` 的 external 门）：external 确认可记，key 为 `${tool}:external`
+- **UI**（core 包 TUI）：仅当本次确认可写入记忆时展示第三选项「允许并且本会话内不再询问」，并显示授权范围文案；无记忆的确认（bash / MCP / project verify / 缩水写入 / external write）只显示 Yes / No
+- **协议**：本轮 session scope 仅进程内（Ink TUI 直接持有 AgentSession 调用 `approve(scope)`）。1.1+ 的 wire 审批通道是 `approval.request` result，当前无 scope；1.0 的 `approval.respond` 也不接受 scope。wire 支持需要协议 1.5（capability 协商，避免新客户端对旧 server 发未知字段被 strict 拒绝）
 - **生命周期**：AgentSession 实例字段，session 结束即失效；**不持久化**（重启后重新确认——保守默认，真实场景验证后再议）
 - **缩水防护强制确认优先于记忆**（见 3.4）
 
@@ -101,11 +103,12 @@
 
 | 决策 | 理由 |
 |---|---|
-| grep/glob 共用 @vscode/ripgrep，不探测系统 rg | 双路径的行为差异（版本/flag）比依赖体积更贵；glob 走 `rg --files` 零额外依赖 |
+| grep/glob 共用 @vscode/ripgrep，不探测系统 rg | 双路径的行为差异（版本/flag）比依赖体积更贵；glob 走 `rg --files` 零额外依赖；1.18 用 optionalDependencies 平台包，无 postinstall |
 | verify 白名单注册表，拒绝 package.json scripts | scripts 是任意代码；注册表 + argv execFile 无 shell 面 |
+| fast 级会执行项目代码的验证器（eslint）需确认一次 | 与 cargo/go vet 相同：会加载项目本地配置/插件 = 任意代码执行面；纯解析类仍免确认 |
 | project 级验证器走确认门 | cargo check/go vet 触发 build 脚本 = 任意代码执行面 |
 | verify 不自动执行 | fast 也有秒级延迟；project 有安全面；先靠 prompt 引导，真实数据说话 |
 | 批准记忆 opt-in（用户在弹窗选）且不持久化 | 保守默认；粒度 `${tool}:${workdir|external}` 是甜点，逐文件太碎、全局太粗 |
 | bash 不接记忆 | 命令 key 语义复杂，误放行面大；留验证反馈 |
 | 缩水防护强制确认不吃记忆 | 整文件覆盖丢内容是最难自救的事故类型 |
-| approval scope 用可选字段附加到 `approval.respond`，不 bump 协议版本 | `.strict()` schema 下仅单向兼容（旧客户端→新 server OK，新客户端→旧 server 拒绝）；P2 唯一调用方 Ink TUI 是进程内调用不上 wire，不受影响；Companion/GUI 的 wire 错配通道已存在但尚无调用方发送 scope，留给该方向接入时先做能力探测或协议演进，不得默认「可选字段即兼容」 |
+| session scope 仅进程内，不改 wire | 1.1+ 审批走 `approval.request` result（无 scope）；1.0 `approval.respond` 保持冻结。wire 支持留给协议 1.5 + capability 协商 |

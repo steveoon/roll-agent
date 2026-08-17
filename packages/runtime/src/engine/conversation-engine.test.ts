@@ -4157,8 +4157,11 @@ test("ConversationEngine 默认注册文件工具并标记 file-read/file-edit c
     const tools = session.getCapabilityManifest().tools;
     assert.ok(tools.some((tool) => tool.role === "file-read" && tool.id === "roll__read_file"));
     assert.ok(tools.some((tool) => tool.role === "file-read" && tool.id === "roll__list_dir"));
+    assert.ok(tools.some((tool) => tool.role === "file-read" && tool.id === "roll__grep"));
+    assert.ok(tools.some((tool) => tool.role === "file-read" && tool.id === "roll__glob"));
     assert.ok(tools.some((tool) => tool.role === "file-edit" && tool.id === "roll__edit_file"));
     assert.ok(tools.some((tool) => tool.role === "file-edit" && tool.id === "roll__write_file"));
+    assert.ok(tools.some((tool) => tool.role === "file-verify" && tool.id === "roll__verify_file"));
 
     await engine.dispose();
     store.close();

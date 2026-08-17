@@ -96,6 +96,7 @@ export interface PendingConfirm {
   readonly prompt: string;
   readonly args: string;
   readonly explanation?: string;
+  readonly sessionGrantLabel?: string;
 }
 
 export interface ConfirmDecision {
@@ -386,6 +387,9 @@ function applySessionEvent(state: ChatUiState, id: string, event: SessionEvent):
           prompt: buildConfirmPrompt(event),
           args: formatApprovalDetails(event.input),
           ...(explanation !== undefined ? { explanation } : {}),
+          ...(event.sessionGrantLabel !== undefined
+            ? { sessionGrantLabel: event.sessionGrantLabel }
+            : {}),
         },
         pendingUserInput: undefined,
       };

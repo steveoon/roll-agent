@@ -8,6 +8,7 @@ export interface ConfirmSelectProps {
   readonly prompt: string;
   readonly args: string;
   readonly explanation?: string;
+  readonly sessionGrantLabel?: string;
   readonly width: number;
   readonly maxRows: number;
   readonly onDecide: (decision: ConfirmDecision) => void;
@@ -15,17 +16,26 @@ export interface ConfirmSelectProps {
 
 type ConfirmOption = "yes" | "session" | "no";
 
-const NEXT_CONFIRM_OPTION: Record<ConfirmOption, ConfirmOption> = {
-  yes: "session",
-  session: "no",
-  no: "yes",
-};
-
 const CONFIRM_OPTION_DECISIONS: Record<ConfirmOption, ConfirmDecision> = {
   yes: { approved: true },
   session: { approved: true, scope: "session" },
   no: { approved: false },
 };
+
+function confirmOptions(hasSession: boolean): readonly ConfirmOption[] {
+  return hasSession ? (["yes", "session", "no"] as const) : (["yes", "no"] as const);
+}
+
+function stepConfirmOption(
+  options: readonly ConfirmOption[],
+  current: ConfirmOption,
+  delta: 1 | -1,
+): ConfirmOption {
+  const index = options.indexOf(current);
+  const from = index === -1 ? options.length - 1 : index;
+  const next = options[(from + delta + options.length) % options.length];
+  return next ?? "no";
+}
 
 const COMPACT_CONFIRM_MAX_ROWS = 11;
 
@@ -79,14 +89,21 @@ export function ConfirmSelect({
   prompt,
   args,
   explanation,
+  sessionGrantLabel,
   width,
   maxRows,
   onDecide,
 }: ConfirmSelectProps): ReactElement {
+  const hasSession = sessionGrantLabel !== undefined;
+  const options = confirmOptions(hasSession);
   const [selected, setSelected] = useState<ConfirmOption>("no");
   useInput((input, key) => {
-    if (key.leftArrow || key.rightArrow || key.upArrow || key.downArrow) {
-      setSelected((current) => NEXT_CONFIRM_OPTION[current]);
+    if (key.leftArrow || key.upArrow) {
+      setSelected((current) => stepConfirmOption(options, current, -1));
+      return;
+    }
+    if (key.rightArrow || key.downArrow) {
+      setSelected((current) => stepConfirmOption(options, current, 1));
       return;
     }
     if (key.return || input.includes("\r") || input.includes("\n")) {
@@ -102,7 +119,7 @@ export function ConfirmSelect({
       onDecide(CONFIRM_OPTION_DECISIONS.yes);
       return;
     }
-    if (lowered === "a") {
+    if (hasSession && lowered === "a") {
       onDecide(CONFIRM_OPTION_DECISIONS.session);
     }
   });
@@ -113,23 +130,25 @@ export function ConfirmSelect({
     Box,
     compact ? { flexShrink: 0 } : { marginTop: 1, flexShrink: 0 },
     h(Text, selected === "yes" ? { color: "green" } : {}, `${selected === "yes" ? "❯ " : "  "}Yes`),
-    h(
-      Text,
-      selected === "session" ? { color: "green" } : {},
-      `   ${selected === "session" ? "❯ " : "  "}Always`,
-    ),
+    hasSession
+      ? h(
+          Text,
+          selected === "session" ? { color: "green" } : {},
+          `   ${selected === "session" ? "❯ " : "  "}Always`,
+        )
+      : null,
     h(Text, selected === "no" ? { color: "green" } : {}, `   ${selected === "no" ? "❯ " : "  "}No`),
   );
+  const compactHelp = hasSession
+    ? "←→/y/a/n 选择 · Enter · Esc · ⇧Tab 自动"
+    : "←→/y/n 选择 · Enter · Esc · ⇧Tab 自动";
+  const expandedHelp = hasSession
+    ? `←→/y/a/n 选择 · Enter 确认 · Esc 取消 · a 允许并且本会话内不再询问 · Shift+Tab 自动批准本次及后续`
+    : "←→/y/n 选择 · Enter 确认 · Esc 取消 · Shift+Tab 自动批准本次及后续";
   const helpRow = h(
     Box,
     { marginLeft: compact ? 0 : 1, height: 1, flexShrink: 0, overflowY: "hidden" },
-    h(
-      Text,
-      { dimColor: true, wrap: "truncate-end" },
-      compact
-        ? "←→/y/a/n 选择 · Enter · Esc · ⇧Tab 自动"
-        : "←→/y/a/n 选择 · Enter 确认 · Esc 取消 · a 允许并且本会话内不再询问 · Shift+Tab 自动批准本次及后续",
-    ),
+    h(Text, { dimColor: true, wrap: "truncate-end" }, compact ? compactHelp : expandedHelp),
   );
   if (compact) {
     const contentWidth = Math.max(1, width);
@@ -146,6 +165,9 @@ export function ConfirmSelect({
       explanation === undefined
         ? null
         : h(Text, { color: "cyan" }, wrapDisplayLines(`AI 说明：${explanation}`, contentWidth, 2)),
+      sessionGrantLabel === undefined
+        ? null
+        : h(Text, { dimColor: true }, truncateDisplayLine(sessionGrantLabel, contentWidth)),
       showArgs ? h(Text, { dimColor: true }, truncateDisplayLine(args, contentWidth)) : null,
       optionRow,
       helpRow,
@@ -176,6 +198,7 @@ export function ConfirmSelect({
       explanation === undefined
         ? null
         : h(Text, { color: "cyan" }, wrapDisplayLines(`AI 说明：${explanation}`, contentWidth, 2)),
+      sessionGrantLabel === undefined ? null : h(Text, { dimColor: true }, sessionGrantLabel),
       showArgs ? h(Text, { dimColor: true }, args) : null,
       optionRow,
     ),
