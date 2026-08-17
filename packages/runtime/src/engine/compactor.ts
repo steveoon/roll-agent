@@ -139,6 +139,15 @@ export function estimateMessagesTokens(messages: readonly ModelMessage[]): numbe
   return messages.reduce((total, message) => total + estimateMessageTokens(message), 0);
 }
 
+function trailingStepStart(messages: readonly ModelMessage[]): number {
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    if (messages[index]?.role === "assistant") {
+      return index + 1;
+    }
+  }
+  return messages.length;
+}
+
 function estimateCompactedTokens(messages: readonly ModelMessage[]): number {
   return estimateMessagesTokens(truncateToolResults(messages).messages);
 }
@@ -494,8 +503,9 @@ function truncateToolResults(messages: readonly ModelMessage[]): {
   truncated: number;
 } {
   let truncated = 0;
-  const out = messages.map((message): ModelMessage => {
-    if (message.role !== "tool") {
+  const protectFrom = trailingStepStart(messages);
+  const out = messages.map((message, index): ModelMessage => {
+    if (message.role !== "tool" || index >= protectFrom) {
       return message;
     }
     const content = message.content.map((part) => {

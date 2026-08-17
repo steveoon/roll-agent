@@ -939,3 +939,25 @@ test("步骤边界切受 maxRemovedTranscriptMessages 约束", async () => {
 
   assert.ok(result.removed <= 4, `removed ${String(result.removed)} exceeds evidence cap`);
 });
+
+test("暂停在工具步骤后的轮内压缩不截断最后一个步骤的工具结果,只截断更早的", async () => {
+  const messages: ModelMessage[] = [
+    { role: "user", content: "big-u" },
+    ...toolStep("s1", 3000),
+    ...toolStep("s2", 3000),
+  ];
+  const result = await compactMessages({
+    messages,
+    strategy: "truncate",
+    keepRecentTurns: 4,
+    keepRecentTokens: 100_000,
+    model: draftModel(),
+  });
+
+  assert.equal(result.removed, 0);
+  assert.equal(result.truncatedTools, 1);
+  const tools = result.messages.filter((message) => message.role === "tool");
+  assert.match(toolOutputValue(tools[0]), /已省略/);
+  assert.doesNotMatch(toolOutputValue(tools[1]), /已省略/);
+  assert.equal(toolOutputValue(tools[1]).length, 3000);
+});
