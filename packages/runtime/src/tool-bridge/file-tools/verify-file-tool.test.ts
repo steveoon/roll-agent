@@ -1,6 +1,13 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, realpathSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  realpathSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ToolExecutionOptions } from "ai";
@@ -195,6 +202,7 @@ test("level: project 触发确认门，explanation 含项目级验证与文件�
   assert.equal(approvals[0]?.toolName, "verify_file");
   assert.ok(approvals[0]?.explanation?.includes("项目级验证 a.json"));
   assert.ok(approvals[0]?.explanation?.includes("将执行"));
+  assert.doesNotMatch(approvals[0]?.explanation ?? "", /\/node_modules\/\.bin\//u);
 });
 
 test("level: project 即使 scope=session 批准，也不写入批准记忆——每次都重新确认", async () => {
@@ -322,6 +330,88 @@ test("workdir 外路径叠加 level: project 时两道确认门各自独立触�
   assert.equal(approvals.length, 2);
   assert.equal(approvals[0]?.reason, "读取工作目录以外的文件");
   assert.ok(approvals[1]?.explanation?.includes("项目级验证"));
+});
+
+test("fast eslint 会执行项目代码：拒绝时无副作用，session 批准后第二次免确认", async () => {
+  const workdir = fixtureWorkdir("verify-eslint-confirm-");
+  mkdirSync(join(workdir, "node_modules", ".bin"), { recursive: true });
+  writeFileSync(join(workdir, "eslint.config.js"), "export default [];\n", "utf8");
+  const marker = join(workdir, "SIDE_EFFECT");
+  const eslintBin = join(workdir, "node_modules", ".bin", "eslint");
+  writeFileSync(eslintBin, `#!/bin/sh\nprintf 'side\\n' >> "${marker}"\nexit 0\n`, "utf8");
+  chmodSync(eslintBin, 0o755);
+  writeFileSync(join(workdir, "a.ts"), "export const a = 1;\n", "utf8");
+
+  const rejected: ApprovalRequest[] = [];
+  const rejectedTools = buildVerifyFixture(workdir, rejected, false);
+  const rejectedResult = (await rejectedTools.roll__verify_file!.execute!(
+    { path: "a.ts" },
+    executeOptions({ toolCallId: "r1" }),
+  )) as NormalizedToolResult;
+  assert.equal(rejectedResult.outcome.kind, TOOL_OUTCOME_KINDS.userRejected);
+  assert.equal(rejected.length, 1);
+  assert.match(
+    rejected[0]?.explanation ?? "",
+    /^验证 a\.ts：将运行项目本地 eslint（会加载并执行项目本地配置\/插件代码）— /u,
+  );
+  assert.match(
+    rejected[0]?.explanation ?? "",
+    /node_modules\/\.bin\/eslint --no-fix --format json a\.ts/u,
+  );
+  assert.doesNotMatch(rejected[0]?.explanation ?? "", /\/node_modules\/\.bin\/eslint/u);
+  assert.equal(existsSync(marker), false);
+
+  const approvals: ApprovalRequest[] = [];
+  const memory = new SessionApprovalMemory();
+  const tools = buildVerifyFixture(workdir, approvals, true, { scope: "session", memory });
+  const first = (await tools.roll__verify_file!.execute!(
+    { path: "a.ts" },
+    executeOptions({ toolCallId: "t1" }),
+  )) as NormalizedToolResult;
+  assert.equal(first.outcome.kind, TOOL_OUTCOME_KINDS.success);
+  assert.equal(approvals.length, 1);
+  const second = (await tools.roll__verify_file!.execute!(
+    { path: "a.ts" },
+    executeOptions({ toolCallId: "t2" }),
+  )) as NormalizedToolResult;
+  assert.equal(second.outcome.kind, TOOL_OUTCOME_KINDS.success);
+  assert.equal(approvals.length, 1);
+});
+
+test("eslint ignore 结果为 skipped 而非 pass", async () => {
+  const workdir = fixtureWorkdir("verify-eslint-ignore-");
+  mkdirSync(join(workdir, "node_modules", ".bin"), { recursive: true });
+  writeFileSync(join(workdir, "eslint.config.js"), "export default [];\n", "utf8");
+  const eslintBin = join(workdir, "node_modules", ".bin", "eslint");
+  writeFileSync(
+    eslintBin,
+    "#!/bin/sh\nprintf '%s\\n' 'File ignored because of a matching ignore pattern. Use --no-ignore to override.'\nexit 0\n",
+    "utf8",
+  );
+  chmodSync(eslintBin, 0o755);
+  writeFileSync(join(workdir, "a.ts"), "export const a = 1;\n", "utf8");
+  const approvals: ApprovalRequest[] = [];
+  const tools = buildVerifyFixture(workdir, approvals, true, { scope: "session" });
+  const result = (await tools.roll__verify_file!.execute!(
+    { path: "a.ts" },
+    executeOptions(),
+  )) as NormalizedToolResult;
+  assert.equal(result.outcome.kind, TOOL_OUTCOME_KINDS.success);
+  assert.match(String(result.display), /eslint 跳过（文件被 eslint 配置忽略，未实际检查）/u);
+  assert.match(String(result.display), /未做任何验证/u);
+});
+
+test("abort 后 verify 返回 cancelled", async () => {
+  const workdir = fixtureWorkdir("verify-abort-");
+  writeFileSync(join(workdir, "a.json"), '{"a":1}', "utf8");
+  const controller = new AbortController();
+  controller.abort();
+  const result = await executeVerifyFile(
+    resolveFileToolsSettings({ workdir }),
+    { path: "a.json" },
+    controller.signal,
+  );
+  assert.equal(result.outcome.kind, TOOL_OUTCOME_KINDS.cancelled);
 });
 
 test("参数校验失败返回 invalid_input", async () => {

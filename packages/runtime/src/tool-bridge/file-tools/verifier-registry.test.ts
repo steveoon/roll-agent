@@ -8,6 +8,7 @@ import {
   verifiersForFile,
   runVerifier,
   outcomeFromExecution,
+  interpretEslintOutcome,
   isBinaryOnPath,
   type Verifier,
 } from "./verifier-registry.ts";
@@ -20,6 +21,7 @@ function fakeVerifier(id: string): Verifier {
   return {
     id,
     level: VERIFIER_LEVELS.fast,
+    executesProjectCode: false,
     detect: () => true,
     command: () => ({ bin: "true", args: [] }),
     timeoutMs: 1000,
@@ -211,6 +213,26 @@ test("eslint detect：本地二进制与 legacy .eslintrc 均存在时返回 tru
   assert.equal(verifier.detect(workdir, join(workdir, "a.ts")), true);
 });
 
+test("eslint detect：仅有 .eslintrc.disabled 时不视为配置", () => {
+  const workdir = fixtureWorkdir("verifier-eslint-disabled-");
+  mkdirSync(join(workdir, "node_modules", ".bin"), { recursive: true });
+  writeFileSync(join(workdir, "node_modules", ".bin", "eslint"), "", "utf8");
+  writeFileSync(join(workdir, ".eslintrc.disabled"), "{}", "utf8");
+  const verifier = verifiersForFile("a.ts").find((v) => v.id === "eslint");
+  assert.ok(verifier);
+  assert.equal(verifier.detect(workdir, join(workdir, "a.ts")), false);
+});
+
+test("eslint detect：package.json 含 eslintConfig 时返回 true", () => {
+  const workdir = fixtureWorkdir("verifier-eslint-pkg-");
+  mkdirSync(join(workdir, "node_modules", ".bin"), { recursive: true });
+  writeFileSync(join(workdir, "node_modules", ".bin", "eslint"), "", "utf8");
+  writeFileSync(join(workdir, "package.json"), '{"eslintConfig":{"rules":{}}}\n', "utf8");
+  const verifier = verifiersForFile("a.ts").find((v) => v.id === "eslint");
+  assert.ok(verifier);
+  assert.equal(verifier.detect(workdir, join(workdir, "a.ts")), true);
+});
+
 test("tsc detect：缺少 tsconfig.json 时返回 false", () => {
   const workdir = fixtureWorkdir("verifier-tsc-nocfg-");
   mkdirSync(join(workdir, "node_modules", ".bin"), { recursive: true });
@@ -317,14 +339,14 @@ test("py-compile 验证器 detect 遵循「ruff 不可用且 python3 可用」�
   assert.equal(verifier.detect("/any/workdir", "/any/a.py"), expected);
 });
 
-test("eslint command 构造使用本地二进制与 --no-fix", () => {
+test("eslint command 构造使用本地二进制与 --no-fix --format json", () => {
   const workdir = "/proj";
   const filePath = "/proj/src/a.ts";
   const verifier = verifiersForFile(filePath).find((v) => v.id === "eslint");
   assert.ok(verifier);
   assert.deepEqual(verifier.command(workdir, filePath), {
     bin: join(workdir, "node_modules", ".bin", "eslint"),
-    args: ["--no-fix", filePath],
+    args: ["--no-fix", "--format", "json", filePath],
   });
 });
 
@@ -349,13 +371,18 @@ test("ruff command 构造为 check --no-fix <filePath>", () => {
   });
 });
 
-test("py-compile command 构造为 -m py_compile <filePath>", () => {
+test("py-compile command 构造为隔离 compile() 且不写盘", () => {
   const filePath = "/proj/a.py";
   const verifier = verifiersForFile(filePath).find((v) => v.id === "py-compile");
   assert.ok(verifier);
   assert.deepEqual(verifier.command("/proj", filePath), {
     bin: "python3",
-    args: ["-m", "py_compile", filePath],
+    args: [
+      "-I",
+      "-c",
+      "import sys; compile(open(sys.argv[1], 'rb').read(), sys.argv[1], 'exec')",
+      filePath,
+    ],
   });
 });
 
@@ -454,6 +481,7 @@ test("runVerifier：外部命令 exit 0 时返回 pass", async () => {
   const verifier: Verifier = {
     id: "fixture-ok",
     level: VERIFIER_LEVELS.fast,
+    executesProjectCode: false,
     detect: () => true,
     command: () => ({ bin: "bash", args: ["-c", "exit 0"] }),
     timeoutMs: 5000,
@@ -469,6 +497,7 @@ test("runVerifier：外部命令非零退出时返回 fail 且带 stderr", async
   const verifier: Verifier = {
     id: "fixture-fail",
     level: VERIFIER_LEVELS.fast,
+    executesProjectCode: false,
     detect: () => true,
     command: () => ({ bin: "bash", args: ["-c", "echo boom 1>&2; exit 1"] }),
     timeoutMs: 5000,
@@ -487,6 +516,7 @@ test("runVerifier：id=gofmt 且 exit 0 stdout 非空时端到端判定为 fail"
   const verifier: Verifier = {
     id: "gofmt",
     level: VERIFIER_LEVELS.fast,
+    executesProjectCode: false,
     detect: () => true,
     command: () => ({ bin: "bash", args: ["-c", "echo main.go; exit 0"] }),
     timeoutMs: 5000,
@@ -502,6 +532,7 @@ test("runVerifier：spawn 失败（二进制不存在）时返回 fail 且 outpu
   const verifier: Verifier = {
     id: "fixture-enoent",
     level: VERIFIER_LEVELS.fast,
+    executesProjectCode: false,
     detect: () => true,
     command: () => ({ bin: "definitely-not-a-real-binary-xyz-123", args: [] }),
     timeoutMs: 5000,
@@ -520,6 +551,7 @@ test("runVerifier：执行超时时返回 fail 且 output 说明超时", async (
   const verifier: Verifier = {
     id: "fixture-timeout",
     level: VERIFIER_LEVELS.fast,
+    executesProjectCode: false,
     detect: () => true,
     command: () => ({ bin: "bash", args: ["-c", "sleep 5"] }),
     timeoutMs: 200,
@@ -531,6 +563,93 @@ test("runVerifier：执行超时时返回 fail 且 output 说明超时", async (
   }
 });
 
+test("interpretEslintOutcome：ignore 文本报 skipped 而非 pass", () => {
+  const verifier = fakeVerifier("eslint");
+  const outcome = interpretEslintOutcome(
+    verifier,
+    0,
+    "",
+    "File ignored because of a matching ignore pattern. Use --no-ignore to override.\n",
+  );
+  assert.deepEqual(outcome, {
+    id: "eslint",
+    status: "skipped",
+    reason: "文件被 eslint 配置忽略，未实际检查",
+  });
+});
+
+test("interpretEslintOutcome：fail 渲染可读诊断且不含 JSON source", () => {
+  const verifier = fakeVerifier("eslint");
+  const stdout = JSON.stringify([
+    {
+      filePath: "/proj/a.ts",
+      source: "const x = 1;\nconst y = 2;\n",
+      messages: [
+        {
+          line: 1,
+          column: 7,
+          severity: 2,
+          message: "'x' is assigned a value but never used.",
+          ruleId: "no-unused-vars",
+        },
+        {
+          line: 2,
+          column: 1,
+          severity: 2,
+          fatal: true,
+          message: "Parsing error: Unexpected token",
+          ruleId: null,
+        },
+      ],
+      errorCount: 2,
+      warningCount: 0,
+    },
+  ]);
+  const outcome = interpretEslintOutcome(verifier, 1, stdout, "");
+  assert.equal(outcome.status, "fail");
+  if (outcome.status !== "fail") {
+    return;
+  }
+  const lines = outcome.output.split("\n");
+  assert.equal(lines.length, 2);
+  assert.equal(lines[0], "1:7 error 'x' is assigned a value but never used. (no-unused-vars)");
+  assert.equal(lines[1], "2:1 error Parsing error: Unexpected token");
+  assert.ok(!outcome.output.includes("source"));
+  assert.ok(!outcome.output.includes("{"));
+});
+
+test("interpretEslintOutcome：json 中 File ignored 报 skipped", () => {
+  const verifier = fakeVerifier("eslint");
+  const stdout = JSON.stringify([
+    {
+      filePath: "/proj/a.ts",
+      messages: [{ message: "File ignored because of a matching ignore pattern." }],
+      warningCount: 1,
+    },
+  ]);
+  const outcome = interpretEslintOutcome(verifier, 0, stdout, "");
+  assert.equal(outcome.status, "skipped");
+});
+
+test("runVerifier：abort 后返回 cancelled", async () => {
+  const workdir = fixtureWorkdir("verifier-abort-");
+  const filePath = join(workdir, "a.txt");
+  writeFileSync(filePath, "x", "utf8");
+  const controller = new AbortController();
+  const verifier: Verifier = {
+    id: "fixture-abort",
+    level: VERIFIER_LEVELS.fast,
+    executesProjectCode: false,
+    detect: () => true,
+    command: () => ({ bin: "bash", args: ["-c", "sleep 30"] }),
+    timeoutMs: 10_000,
+  };
+  const pending = runVerifier(verifier, workdir, filePath, { abortSignal: controller.signal });
+  controller.abort();
+  const outcome = await pending;
+  assert.equal(outcome.status, "cancelled");
+});
+
 test("runVerifier：输出超过 maxBuffer 时返回 fail 而非静默当作 pass", async () => {
   const workdir = fixtureWorkdir("verifier-ext-maxbuffer-");
   const filePath = join(workdir, "a.txt");
@@ -538,6 +657,7 @@ test("runVerifier：输出超过 maxBuffer 时返回 fail 而非静默当作 pas
   const verifier: Verifier = {
     id: "fixture-huge",
     level: VERIFIER_LEVELS.fast,
+    executesProjectCode: false,
     detect: () => true,
     command: () => ({ bin: "bash", args: ["-c", "head -c 700000 /dev/zero"] }),
     timeoutMs: 5000,
