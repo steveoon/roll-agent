@@ -130,7 +130,7 @@ export interface RuntimeApprovalIdentity {
 }
 
 export type RuntimeApprovalDecision =
-  | { readonly decision: "approve" }
+  | { readonly decision: "approve"; readonly scope?: "once" | "session" }
   | { readonly decision: "reject"; readonly reason?: string };
 
 interface ActiveTurnState {
@@ -964,8 +964,8 @@ export class RuntimeService {
   }
 
   async respondApproval(
-    params: RuntimeMethodParams<"approval.respond">,
-  ): Promise<RuntimeMethodResult<"approval.respond">> {
+    params: LatestRuntimeMethodParams<"approval.respond">,
+  ): Promise<LatestRuntimeMethodResult<"approval.respond">> {
     return this.mutationRequests.run(
       params.requestId,
       RUNTIME_METHODS.approvalRespond,
@@ -974,7 +974,9 @@ export class RuntimeService {
         this.resolvePendingApproval(
           params,
           params.decision === "approve"
-            ? { decision: "approve" }
+            ? {
+                decision: "approve",
+              }
             : {
                 decision: "reject",
                 ...(params.reason !== undefined ? { reason: params.reason } : {}),
@@ -991,7 +993,7 @@ export class RuntimeService {
     const pending = this.requirePendingApproval(identity);
     const resolved =
       decision.decision === "approve"
-        ? pending.session.approve(identity.approvalId)
+        ? pending.session.approve(identity.approvalId, decision.scope)
         : pending.session.reject(identity.approvalId, decision.reason);
     this.pendingApprovals.delete(identity.approvalId);
     if (!resolved) {

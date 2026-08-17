@@ -5,6 +5,7 @@ import {
   chatReducer,
   createInitialState,
   type ChatUiState,
+  type ConfirmDecision,
   type HistoryItem,
   type PendingUserInput,
 } from "./state.ts";
@@ -29,7 +30,7 @@ export interface UseSessionResult {
   readonly submit: (text: string, attachments?: readonly UseSessionSubmitAttachment[]) => void;
   readonly compact: () => void;
   readonly cancel: () => void;
-  readonly resolveConfirm: (approved: boolean) => void;
+  readonly resolveConfirm: (decision: ConfirmDecision) => void;
   readonly resolveUserInput: (
     requestId: PendingUserInput["requestId"],
     result: UserInputResult,
@@ -64,7 +65,7 @@ export function useSession(session: AgentSession, options: UseSessionOptions): U
     }),
   );
   const onThinkingChange = options.onThinkingChange;
-  const decisionRef = useRef<((approved: boolean) => void) | null>(null);
+  const decisionRef = useRef<((decision: ConfirmDecision) => void) | null>(null);
   const userInputDecisionRef = useRef<PendingUserInputDecision | null>(null);
   const autoModeRef = useRef(false);
   const busyRef = useRef(false);
@@ -139,14 +140,14 @@ export function useSession(session: AgentSession, options: UseSessionOptions): U
               session.approve(event.approvalId);
               continue;
             }
-            const approvedPromise = new Promise<boolean>((resolve) => {
+            const decisionPromise = new Promise<ConfirmDecision>((resolve) => {
               decisionRef.current = resolve;
             });
             dispatch({ type: "session-event", id: randomUUID(), event });
-            const approved = await approvedPromise;
+            const decision = await decisionPromise;
             decisionRef.current = null;
-            if (approved) {
-              session.approve(event.approvalId);
+            if (decision.approved) {
+              session.approve(event.approvalId, decision.scope);
             } else {
               session.reject(event.approvalId, "用户取消");
             }
@@ -253,8 +254,8 @@ export function useSession(session: AgentSession, options: UseSessionOptions): U
     }
   }, [session]);
 
-  const resolveConfirm = useCallback((approved: boolean) => {
-    decisionRef.current?.(approved);
+  const resolveConfirm = useCallback((decision: ConfirmDecision) => {
+    decisionRef.current?.(decision);
   }, []);
 
   const resolveUserInput = useCallback(
@@ -283,7 +284,7 @@ export function useSession(session: AgentSession, options: UseSessionOptions): U
     autoModeRef.current = value;
     dispatch({ type: "set-auto", value });
     if (value) {
-      decisionRef.current?.(true);
+      decisionRef.current?.({ approved: true });
     }
   }, []);
 

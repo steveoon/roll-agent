@@ -4139,3 +4139,93 @@ test("chat 内重装已接入的同名 agent 时不重复连接并提示重启",
     rmSync(dataDir, { recursive: true, force: true });
   }
 });
+
+test("ConversationEngine 默认注册文件工具并标记 file-read/file-edit capability role", async () => {
+  const dir = tempDir();
+  try {
+    const store = new ThreadStore(dir);
+    const engine = new ConversationEngine({
+      config: installEngineConfig("/tmp/roll-engine-file-tools-default"),
+      model: new MockLanguageModelV4({}),
+      store,
+      sources: [],
+      skillLibrary: null,
+      shellProfile: null,
+    });
+
+    const session = await engine.createSession();
+    const tools = session.getCapabilityManifest().tools;
+    assert.ok(tools.some((tool) => tool.role === "file-read" && tool.id === "roll__read_file"));
+    assert.ok(tools.some((tool) => tool.role === "file-read" && tool.id === "roll__list_dir"));
+    assert.ok(tools.some((tool) => tool.role === "file-read" && tool.id === "roll__grep"));
+    assert.ok(tools.some((tool) => tool.role === "file-read" && tool.id === "roll__glob"));
+    assert.ok(tools.some((tool) => tool.role === "file-edit" && tool.id === "roll__edit_file"));
+    assert.ok(tools.some((tool) => tool.role === "file-edit" && tool.id === "roll__write_file"));
+    assert.ok(tools.some((tool) => tool.role === "file-verify" && tool.id === "roll__verify_file"));
+
+    await engine.dispose();
+    store.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("ConversationEngine fileToolsEnabled: false 时不注册文件工具", async () => {
+  const dir = tempDir();
+  try {
+    const store = new ThreadStore(dir);
+    const engine = new ConversationEngine({
+      config: installEngineConfig("/tmp/roll-engine-file-tools-disabled"),
+      model: new MockLanguageModelV4({}),
+      store,
+      sources: [],
+      skillLibrary: null,
+      shellProfile: null,
+      fileToolsEnabled: false,
+    });
+
+    const session = await engine.createSession();
+    const tools = session.getCapabilityManifest().tools;
+    assert.ok(!tools.some((tool) => tool.role === "file-read"));
+    assert.ok(!tools.some((tool) => tool.role === "file-edit"));
+    assert.ok(!tools.some((tool) => tool.id === "roll__read_file"));
+    assert.ok(!tools.some((tool) => tool.id === "roll__list_dir"));
+    assert.ok(!tools.some((tool) => tool.id === "roll__edit_file"));
+    assert.ok(!tools.some((tool) => tool.id === "roll__write_file"));
+
+    await engine.dispose();
+    store.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("ConversationEngine resumeSession 重建 session 后文件工具行为与 createSession 一致", async () => {
+  const dir = tempDir();
+  try {
+    const store = new ThreadStore(dir);
+    const engine = new ConversationEngine({
+      config: installEngineConfig("/tmp/roll-engine-file-tools-resume"),
+      model: new MockLanguageModelV4({}),
+      store,
+      sources: [],
+      skillLibrary: null,
+      shellProfile: null,
+    });
+
+    const created = await engine.createSession();
+    await created.close();
+    const resumed = await engine.resumeSession(created.id);
+    assert.notEqual(resumed, created);
+    const tools = resumed.getCapabilityManifest().tools;
+    assert.ok(tools.some((tool) => tool.role === "file-read" && tool.id === "roll__read_file"));
+    assert.ok(tools.some((tool) => tool.role === "file-read" && tool.id === "roll__list_dir"));
+    assert.ok(tools.some((tool) => tool.role === "file-edit" && tool.id === "roll__edit_file"));
+    assert.ok(tools.some((tool) => tool.role === "file-edit" && tool.id === "roll__write_file"));
+
+    await engine.dispose();
+    store.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

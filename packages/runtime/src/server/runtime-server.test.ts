@@ -3455,6 +3455,42 @@ test("Runtime Protocol 1.1 handler error 终止 Turn 且不冒充用户拒绝", 
   );
 });
 
+test("Runtime Protocol 1.0 拒绝带 scope 的 approval.respond", async (t) => {
+  const harness = createApprovalProtocolHarness();
+  const client = attachRuntimeProtocolClient(harness.clientConn);
+  t.after(() => harness.close());
+
+  await client.request(1, RUNTIME_METHODS.initialize, {
+    protocolVersions: ["1.0"],
+    client: { name: "v1.0-client", version: "1.0.0" },
+  });
+  const created = (await client.request(2, RUNTIME_METHODS.threadCreate, {
+    requestId: "00000000-0000-4000-8000-000000000411",
+    title: "v1.0 reject scope",
+  })) as { readonly thread: { readonly id: string } };
+  const turnId = "00000000-0000-4000-8000-000000000412";
+  await client.request(3, RUNTIME_METHODS.turnStart, {
+    requestId: "00000000-0000-4000-8000-000000000413",
+    threadId: created.thread.id,
+    turnId,
+    input: { text: "run guarded tool" },
+  });
+  const approvalView = await waitForValue(
+    () => client.events.find((envelope) => envelope.event.type === "approval.required"),
+    "v1.0 未收到 approval.required",
+  );
+  assert.ok(approvalView.event.type === "approval.required");
+  const error = (await client.requestError(4, RUNTIME_METHODS.approvalRespond, {
+    requestId: "00000000-0000-4000-8000-000000000414",
+    threadId: created.thread.id,
+    turnId,
+    approvalId: approvalView.event.approval.id,
+    decision: "approve",
+    scope: "session",
+  })) as { readonly data?: { readonly rollCode?: string }; readonly message?: string };
+  assert.equal(error.data?.rollCode, "INVALID_PARAMS");
+});
+
 test("Runtime Protocol 1.0 保持 approval.required + approval.respond", async (t) => {
   const harness = createApprovalProtocolHarness();
   const client = attachRuntimeProtocolClient(harness.clientConn);

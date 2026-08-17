@@ -411,7 +411,11 @@ export class RuntimeProtocolAdapter {
         );
       case RUNTIME_METHODS.approvalRespond:
         return this.service.respondApproval(
-          runtimeMethodSchemas[RUNTIME_METHODS.approvalRespond].params.parse(request.params),
+          parseRuntimeMethodParamsForVersion(
+            this.protocolVersion,
+            RUNTIME_METHODS.approvalRespond,
+            request.params,
+          ),
         );
       case RUNTIME_METHODS.operationGet:
         return this.service.getOperation(

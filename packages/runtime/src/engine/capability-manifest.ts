@@ -18,6 +18,9 @@ export const CAPABILITY_TOOL_ROLES = {
   agent: "agent",
   skill: "skill",
   shell: "shell",
+  fileRead: "file-read",
+  fileEdit: "file-edit",
+  fileVerify: "file-verify",
   sessionCommand: "session-command",
   sessionPoll: "session-poll",
   sessionList: "session-list",
@@ -334,6 +337,7 @@ const CAPABILITY_APPROVAL_BY_ROLE: Readonly<
   Partial<Record<CapabilityToolRole, CapabilityApprovalMode>>
 > = {
   [CAPABILITY_TOOL_ROLES.skill]: CAPABILITY_APPROVAL_MODES.readOnly,
+  [CAPABILITY_TOOL_ROLES.fileRead]: CAPABILITY_APPROVAL_MODES.readOnly,
   [CAPABILITY_TOOL_ROLES.sessionList]: CAPABILITY_APPROVAL_MODES.readOnly,
   [CAPABILITY_TOOL_ROLES.transcriptRead]: CAPABILITY_APPROVAL_MODES.readOnly,
   [CAPABILITY_TOOL_ROLES.agentInstall]: CAPABILITY_APPROVAL_MODES.alwaysConfirm,

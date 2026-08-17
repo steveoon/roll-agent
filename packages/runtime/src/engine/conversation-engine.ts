@@ -123,6 +123,7 @@ export interface ConversationEngineOptions {
     cwd: string,
   ) => CapabilityVcsSnapshot | undefined | Promise<CapabilityVcsSnapshot | undefined>;
   readonly shellEnv?: NodeJS.ProcessEnv;
+  readonly fileToolsEnabled?: boolean;
 }
 
 export interface CreateSessionInput {
@@ -329,6 +330,7 @@ export class ConversationEngine {
   private readonly clientManager: McpClientManager;
   private readonly store: ThreadStore | undefined;
   private readonly policy: ToolPolicy | undefined;
+  private readonly fileToolsEnabled: boolean;
   private readonly maxSteps: number;
   private providerOptions: SharedV4ProviderOptions | undefined;
   private readonly structuredOutputProviderOptions: SharedV4ProviderOptions | undefined;
@@ -370,6 +372,7 @@ export class ConversationEngine {
     this.clientManager = options.clientManager ?? new McpClientManager();
     this.store = options.store;
     this.policy = options.policy;
+    this.fileToolsEnabled = options.fileToolsEnabled ?? true;
     this.maxSteps = options.maxSteps ?? DEFAULT_MAX_STEPS;
     this.providerOptions = options.providerOptions;
     this.structuredOutputProviderOptions = options.structuredOutputProviderOptions;
@@ -539,6 +542,9 @@ export class ConversationEngine {
     const skillLibrary = skills.length > 0 ? context.skillLibrary : undefined;
     const shellProfile = this.resolveRuntimeShellProfile();
     const bash = shellProfile ? this.resolveShellSettings(shellProfile) : undefined;
+    const fileTools = this.fileToolsEnabled
+      ? { workdir: bash?.workdir ?? process.cwd() }
+      : undefined;
     const bashSession = shellProfile ? this.resolveSessionExecSettings(shellProfile) : undefined;
     const bashClassifier: CommandClassifier | undefined = shellProfile
       ? shellProfile.supportsSafeCommandClassification && this.config.runtime.shell.autoApproveSafe
@@ -564,6 +570,7 @@ export class ConversationEngine {
         };
       },
       ...(skillLibrary ? { skillLibrary } : {}),
+      ...(fileTools ? { fileTools } : {}),
       ...(bash ? { bash } : {}),
       ...(bashClassifier ? { bashClassifier } : {}),
       ...(bashSession ? { bashSession } : {}),

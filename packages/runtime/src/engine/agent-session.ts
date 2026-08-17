@@ -46,6 +46,10 @@ import {
 } from "../tool-bridge/agent-install-tool.ts";
 import { buildSkillToolset } from "../tool-bridge/skill-tool.ts";
 import {
+  buildFileToolset,
+  type SessionFileToolsSettings,
+} from "../tool-bridge/file-tools/index.ts";
+import {
   buildBashToolset,
   type BashToolContext,
   type SessionBashSettings,
@@ -104,6 +108,7 @@ import {
   type ToolResourceAccess,
 } from "../tool-bridge/tool-execution-coordinator.ts";
 import { ApprovalGate, type ApprovalDecision } from "../approval/approval-gate.ts";
+import { SessionApprovalMemory } from "../approval/approval-memory.ts";
 import {
   COMPACTION_DRAFT_FALLBACK_REASONS,
   compactMessages,
@@ -233,6 +238,7 @@ export interface AgentSessionOptions {
     abortSignal: AbortSignal,
   ) => CapabilityExternalDynamicContext | Promise<CapabilityExternalDynamicContext>;
   readonly skillLibrary?: SkillLibrary;
+  readonly fileTools?: SessionFileToolsSettings;
   readonly bash?: SessionBashSettings;
   readonly bashClassifier?: CommandClassifier;
   readonly bashSession?: AgentSessionBashSession;
@@ -889,6 +895,20 @@ export class AgentSession {
     markToolRole(toolRoles, transcriptTools, CAPABILITY_TOOL_ROLES.transcriptRead);
     const skillTools = options.skillLibrary ? this.buildSkillTools(registry) : {};
     markToolRole(toolRoles, skillTools, CAPABILITY_TOOL_ROLES.skill);
+    const fileApprovalMemory = new SessionApprovalMemory();
+    const fileToolset = options.fileTools
+      ? buildFileToolset(options.fileTools, registry, {
+          ...(options.policy ? { policy: options.policy } : {}),
+          requestApproval: (request) => this.requestApproval(request),
+          coordinator: this.toolCoordinator,
+          approvalMemory: fileApprovalMemory,
+        })
+      : undefined;
+    if (fileToolset) {
+      markToolRole(toolRoles, fileToolset.readTools, CAPABILITY_TOOL_ROLES.fileRead);
+      markToolRole(toolRoles, fileToolset.editTools, CAPABILITY_TOOL_ROLES.fileEdit);
+      markToolRole(toolRoles, fileToolset.verifyTools, CAPABILITY_TOOL_ROLES.fileVerify);
+    }
     const bashCtx: BashToolContext = {
       ...(options.policy ? { policy: options.policy } : {}),
       requestApproval: (request) => this.requestApproval(request),
@@ -963,6 +983,9 @@ export class AgentSession {
     this.tools = {
       ...transcriptTools,
       ...skillTools,
+      ...(fileToolset
+        ? { ...fileToolset.readTools, ...fileToolset.editTools, ...fileToolset.verifyTools }
+        : {}),
       ...bashTools,
       ...sessionExecTools,
       ...agentInstallTools,
@@ -2007,12 +2030,18 @@ export class AgentSession {
       ...(expiresAt !== undefined ? { expiresAt } : {}),
       ...(request.reason ? { reason: request.reason } : {}),
       ...(request.explanation !== undefined ? { explanation: request.explanation } : {}),
+      ...(request.sessionGrantLabel !== undefined
+        ? { sessionGrantLabel: request.sessionGrantLabel }
+        : {}),
     });
     return decision;
   }
 
-  approve(approvalId: string): boolean {
-    return this.gate.resolve(approvalId, { approved: true });
+  approve(approvalId: string, scope?: "once" | "session"): boolean {
+    return this.gate.resolve(approvalId, {
+      approved: true,
+      ...(scope !== undefined ? { scope } : {}),
+    });
   }
 
   reject(approvalId: string, reason?: string): boolean {

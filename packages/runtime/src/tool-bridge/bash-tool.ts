@@ -22,6 +22,7 @@ import {
   type NormalizedToolResult,
 } from "./normalize-result.ts";
 import {
+  OPAQUE_SIDE_EFFECT_RESOURCE,
   TOOL_RESOURCE_ACCESS_MODES,
   executeCoordinatedTool,
   type ToolExecutionPlan,
@@ -36,7 +37,6 @@ export const POWERSHELL_TOOL_ID = `${BASH_TOOL_AGENT_NAME}__${POWERSHELL_TOOL_NA
 
 const MAX_DELTA_EVENTS_PER_CALL = 256;
 const MAX_DELTA_CHARS_PER_EVENT = 4_096;
-const OPAQUE_SHELL_SIDE_EFFECT_RESOURCE = "shell:opaque-side-effects";
 
 export interface SessionBashSettings {
   readonly workdir: string;
@@ -210,7 +210,7 @@ export function buildBashToolset(
       const input = parseBashToolInput(rawInput);
       if (input === undefined) {
         return [
-          { key: OPAQUE_SHELL_SIDE_EFFECT_RESOURCE, mode: TOOL_RESOURCE_ACCESS_MODES.write },
+          { key: OPAQUE_SIDE_EFFECT_RESOURCE, mode: TOOL_RESOURCE_ACCESS_MODES.write },
           { key: `shell:${settings.workdir}`, mode: TOOL_RESOURCE_ACCESS_MODES.write },
         ];
       }
@@ -225,7 +225,7 @@ export function buildBashToolset(
       return readOnly
         ? [workdirResource]
         : [
-            { key: OPAQUE_SHELL_SIDE_EFFECT_RESOURCE, mode: TOOL_RESOURCE_ACCESS_MODES.write },
+            { key: OPAQUE_SIDE_EFFECT_RESOURCE, mode: TOOL_RESOURCE_ACCESS_MODES.write },
             workdirResource,
           ];
     },

@@ -2,17 +2,73 @@ import { createElement as h, useState } from "react";
 import type { ReactElement } from "react";
 import { Box, Text, useInput } from "ink";
 import { displayWidth } from "./display-width.ts";
+import type { ConfirmDecision } from "./state.ts";
 
 export interface ConfirmSelectProps {
   readonly prompt: string;
   readonly args: string;
   readonly explanation?: string;
+  readonly sessionGrantLabel?: string;
   readonly width: number;
   readonly maxRows: number;
-  readonly onDecide: (approved: boolean) => void;
+  readonly onDecide: (decision: ConfirmDecision) => void;
+}
+
+type ConfirmOption = "yes" | "session" | "no";
+
+const CONFIRM_OPTION_DECISIONS: Record<ConfirmOption, ConfirmDecision> = {
+  yes: { approved: true },
+  session: { approved: true, scope: "session" },
+  no: { approved: false },
+};
+
+function confirmOptions(hasSession: boolean): readonly ConfirmOption[] {
+  return hasSession ? (["yes", "session", "no"] as const) : (["yes", "no"] as const);
+}
+
+function stepConfirmOption(
+  options: readonly ConfirmOption[],
+  current: ConfirmOption,
+  delta: 1 | -1,
+): ConfirmOption {
+  const index = options.indexOf(current);
+  const from = index === -1 ? options.length - 1 : index;
+  const next = options[(from + delta + options.length) % options.length];
+  return next ?? "no";
 }
 
 const COMPACT_CONFIRM_MAX_ROWS = 11;
+const COMPACT_ESSENTIAL_ROWS = 3;
+
+interface CompactRowPlan {
+  readonly explanationRows: number;
+  readonly showLabel: boolean;
+  readonly showArgs: boolean;
+}
+
+function planCompactRows(
+  boundedRows: number,
+  hasExplanation: boolean,
+  hasLabel: boolean,
+  hasArgs: boolean,
+): CompactRowPlan {
+  let spare = Math.max(0, boundedRows - COMPACT_ESSENTIAL_ROWS);
+  let explanationRows = 0;
+  if (hasExplanation && spare > 0) {
+    explanationRows = 1;
+    spare -= 1;
+  }
+  const showLabel = hasLabel && spare > 0;
+  if (showLabel) {
+    spare -= 1;
+  }
+  if (explanationRows === 1 && spare > 0) {
+    explanationRows = 2;
+    spare -= 1;
+  }
+  const showArgs = hasArgs && spare > 0;
+  return { explanationRows, showLabel, showArgs };
+}
 
 function normalizeInlineText(value: string): string {
   return value.replace(/\s+/gu, " ").trim();
@@ -64,51 +120,84 @@ export function ConfirmSelect({
   prompt,
   args,
   explanation,
+  sessionGrantLabel,
   width,
   maxRows,
   onDecide,
 }: ConfirmSelectProps): ReactElement {
-  const [selected, setSelected] = useState<"yes" | "no">("no");
+  const showArgs = args.length > 0 && args !== "{}";
+  const boundedRows = Math.max(1, Math.floor(maxRows));
+  const compact = boundedRows <= COMPACT_CONFIRM_MAX_ROWS;
+  const compactContentWidth = Math.max(1, width);
+  const compactSessionGrantLabel =
+    sessionGrantLabel === undefined ? undefined : normalizeInlineText(sessionGrantLabel);
+  const compactSessionGrantLabelFits =
+    compactSessionGrantLabel !== undefined &&
+    displayWidth(compactSessionGrantLabel) <= compactContentWidth;
+  const rowPlan = compact
+    ? planCompactRows(
+        boundedRows,
+        explanation !== undefined,
+        compactSessionGrantLabelFits,
+        showArgs,
+      )
+    : undefined;
+  const hasSession =
+    sessionGrantLabel !== undefined && (rowPlan === undefined || rowPlan.showLabel);
+  const options = confirmOptions(hasSession);
+  const [selected, setSelected] = useState<ConfirmOption>("no");
   useInput((input, key) => {
-    if (key.leftArrow || key.rightArrow || key.upArrow || key.downArrow) {
-      setSelected((current) => (current === "yes" ? "no" : "yes"));
+    if (key.leftArrow || key.upArrow) {
+      setSelected((current) => stepConfirmOption(options, current, -1));
+      return;
+    }
+    if (key.rightArrow || key.downArrow) {
+      setSelected((current) => stepConfirmOption(options, current, 1));
       return;
     }
     if (key.return || input.includes("\r") || input.includes("\n")) {
-      onDecide(selected === "yes");
+      onDecide(CONFIRM_OPTION_DECISIONS[selected]);
       return;
     }
     const lowered = input.toLowerCase();
     if (key.escape || lowered === "n") {
-      onDecide(false);
+      onDecide(CONFIRM_OPTION_DECISIONS.no);
       return;
     }
     if (lowered === "y") {
-      onDecide(true);
+      onDecide(CONFIRM_OPTION_DECISIONS.yes);
+      return;
+    }
+    if (hasSession && lowered === "a") {
+      onDecide(CONFIRM_OPTION_DECISIONS.session);
     }
   });
-  const showArgs = args.length > 0 && args !== "{}";
-  const boundedRows = Math.max(1, Math.floor(maxRows));
-  const compact = boundedRows <= COMPACT_CONFIRM_MAX_ROWS;
   const optionRow = h(
     Box,
     compact ? { flexShrink: 0 } : { marginTop: 1, flexShrink: 0 },
     h(Text, selected === "yes" ? { color: "green" } : {}, `${selected === "yes" ? "❯ " : "  "}Yes`),
+    hasSession
+      ? h(
+          Text,
+          selected === "session" ? { color: "green" } : {},
+          `   ${selected === "session" ? "❯ " : "  "}Always`,
+        )
+      : null,
     h(Text, selected === "no" ? { color: "green" } : {}, `   ${selected === "no" ? "❯ " : "  "}No`),
   );
+  const compactHelp = hasSession
+    ? "←→/y/a/n 选择 · Enter · Esc · ⇧Tab 自动"
+    : "←→/y/n 选择 · Enter · Esc · ⇧Tab 自动";
+  const expandedHelp = hasSession
+    ? `←→/y/a/n 选择 · Enter 确认 · Esc 取消 · a 允许并且本会话内不再询问 · Shift+Tab 自动批准本次及后续`
+    : "←→/y/n 选择 · Enter 确认 · Esc 取消 · Shift+Tab 自动批准本次及后续";
   const helpRow = h(
     Box,
     { marginLeft: compact ? 0 : 1, height: 1, flexShrink: 0, overflowY: "hidden" },
-    h(
-      Text,
-      { dimColor: true, wrap: "truncate-end" },
-      compact
-        ? "←→/y/n 选择 · Enter · Esc · ⇧Tab 自动"
-        : "←→/y/n 选择 · Enter 确认 · Esc 取消 · Shift+Tab 自动批准本次及后续",
-    ),
+    h(Text, { dimColor: true, wrap: "truncate-end" }, compact ? compactHelp : expandedHelp),
   );
-  if (compact) {
-    const contentWidth = Math.max(1, width);
+  if (rowPlan !== undefined) {
+    const { explanationRows, showLabel: showLabelRow, showArgs: showArgsRow } = rowPlan;
     return h(
       Box,
       {
@@ -118,11 +207,18 @@ export function ConfirmSelect({
         flexShrink: 0,
         overflowY: "hidden",
       },
-      h(Text, { wrap: "truncate-end" }, truncateDisplayLine(prompt, contentWidth)),
-      explanation === undefined
+      h(Text, { wrap: "truncate-end" }, truncateDisplayLine(prompt, compactContentWidth)),
+      explanationRows === 0
         ? null
-        : h(Text, { color: "cyan" }, wrapDisplayLines(`AI 说明：${explanation}`, contentWidth, 2)),
-      showArgs ? h(Text, { dimColor: true }, truncateDisplayLine(args, contentWidth)) : null,
+        : h(
+            Text,
+            { color: "cyan" },
+            wrapDisplayLines(`AI 说明：${explanation ?? ""}`, compactContentWidth, explanationRows),
+          ),
+      showArgsRow
+        ? h(Text, { dimColor: true }, truncateDisplayLine(args, compactContentWidth))
+        : null,
+      showLabelRow ? h(Text, { dimColor: true }, compactSessionGrantLabel ?? "") : null,
       optionRow,
       helpRow,
     );
@@ -152,6 +248,7 @@ export function ConfirmSelect({
       explanation === undefined
         ? null
         : h(Text, { color: "cyan" }, wrapDisplayLines(`AI 说明：${explanation}`, contentWidth, 2)),
+      sessionGrantLabel === undefined ? null : h(Text, { dimColor: true }, sessionGrantLabel),
       showArgs ? h(Text, { dimColor: true }, args) : null,
       optionRow,
     ),

@@ -20,6 +20,7 @@ const AUTO_BADGE_PATTERN = literalPattern(`${GLYPHS.auto} auto`);
 
 interface Sink {
   approved: string[];
+  approvals?: Array<{ id: string; scope: "once" | "session" | undefined }>;
   rejected: string[];
   cancelled?: number;
   userInputAvailability?: boolean[];
@@ -57,8 +58,10 @@ function makeSession(
       return options?.skills ?? [];
     },
     send,
-    approve(id: string) {
+    approve(id: string, scope?: "once" | "session") {
       sink.approved.push(id);
+      sink.approvals ??= [];
+      sink.approvals.push({ id, scope });
       return true;
     },
     reject(id: string) {
@@ -412,6 +415,41 @@ test("ChatApp confirm flow shows the cleaned AI explanation and tool args, then 
 
   stdin.write("y");
   await waitFor(() => assert.deepEqual(sink.approved, ["a1"]));
+  unmount();
+});
+
+test("ChatApp confirm flow remembers approval for the session on 'a'", async () => {
+  const sink: Sink = { approved: [], rejected: [] };
+  async function* send(): AsyncIterable<SessionEvent> {
+    yield {
+      type: "confirmation-required",
+      approvalId: "a1",
+      agentName: "browser-use-agent",
+      toolName: "click_ref",
+      input: { ref: "node-42" },
+      sessionGrantLabel: "本会话内不再询问：修改工作目录内的文件",
+    };
+    yield { type: "message-finish", text: "done" };
+  }
+  const { stdin, lastFrame, unmount } = render(
+    h(ChatApp, {
+      session: makeSession(send, sink),
+      model: "qwen",
+      onUserSubmit: () => {},
+      onExit: () => {},
+    }),
+  );
+  await delay(10);
+  stdin.write("go");
+  await delay(10);
+  stdin.write("\r");
+  await waitFor(() => assert.match(lastFrame() ?? "", /执行 browser-use-agent\.click_ref/));
+  await delay(100);
+
+  stdin.write("a");
+  await waitFor(() => assert.deepEqual(sink.approved, ["a1"]));
+  assert.deepEqual(sink.approvals, [{ id: "a1", scope: "session" }]);
+  assert.deepEqual(sink.rejected, []);
   unmount();
 });
 

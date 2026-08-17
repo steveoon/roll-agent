@@ -11,6 +11,11 @@ import type { NormalizedToolResult } from "./normalize-result.ts";
 import type { BashToolContext } from "./bash-tool.ts";
 import type { ApprovalRequest } from "./build-tools.ts";
 import {
+  OPAQUE_SIDE_EFFECT_RESOURCE,
+  TOOL_RESOURCE_ACCESS_MODES,
+  ToolExecutionCoordinator,
+} from "./tool-execution-coordinator.ts";
+import {
   RUNTIME_CANCELLATION_ABORT_REASON,
   TURN_TIMEOUT_ABORT_REASON,
   USER_CANCELLATION_ABORT_REASON,
@@ -109,6 +114,22 @@ function build(
       Promise.resolve(listExecute(input, options("list")) as Promise<NormalizedToolResult>),
   };
 }
+
+test("unknown exec_command 使用与文件工具共享的 side-effect write lock", () => {
+  const coordinator = new ToolExecutionCoordinator();
+  build({
+    coordinator,
+    policy: allowPolicy,
+    requestApproval: async () => ({ approved: true }),
+  });
+
+  assert.deepEqual(
+    coordinator
+      .describeResources(EXEC_COMMAND_ID, { command: "printf changed" })
+      .find((resource) => resource.key === OPAQUE_SIDE_EFFECT_RESOURCE),
+    { key: OPAQUE_SIDE_EFFECT_RESOURCE, mode: TOOL_RESOURCE_ACCESS_MODES.write },
+  );
+});
 
 function sessionIdFrom(output: string): number {
   const match = /Session: (\d+)/.exec(output);
