@@ -9,6 +9,7 @@ import {
 } from "react";
 import { Box, Text, useInput, useStdout } from "ink";
 import type { DOMElement } from "ink";
+import type { ChatThinkingDisplay } from "../../../config/schema.ts";
 import type { BannerLine } from "../banner.ts";
 import { BannerHistoryView, BannerLinesView } from "./banner-view.ts";
 import { useDeferredBoxMetrics } from "./deferred-box-metrics.ts";
@@ -39,6 +40,7 @@ export interface TranscriptViewportProps {
   readonly animateBanner: boolean;
   readonly onBannerSettled: () => void;
   readonly navigationBlocked: boolean;
+  readonly thinkingDisplay: ChatThinkingDisplay;
 }
 
 interface VisibleWindow {
@@ -58,7 +60,11 @@ function hasLiveContent(live: LiveState): boolean {
   );
 }
 
-function historyEntry(item: HistoryItem, previous: HistoryItem | undefined): TranscriptEntry {
+function historyEntry(
+  item: HistoryItem,
+  previous: HistoryItem | undefined,
+  thinkingDisplay: ChatThinkingDisplay,
+): TranscriptEntry {
   const spaced =
     item.kind === "user" ||
     item.kind === "assistant" ||
@@ -67,7 +73,7 @@ function historyEntry(item: HistoryItem, previous: HistoryItem | undefined): Tra
   const indented = item.kind === "tool" || item.kind === "denied" || item.kind === "cancelled";
   return {
     key: `history:${item.id}`,
-    element: h(HistoryItemView, { item }),
+    element: h(HistoryItemView, { item, thinkingDisplay }),
     paddingTop: spaced ? 1 : 0,
     marginLeft: indented ? 3 : 1,
   };
@@ -151,7 +157,9 @@ export function TranscriptViewport(props: TranscriptViewportProps): ReactElement
   scrollOffsetRef.current = scrollOffset;
 
   const entries = useMemo(() => {
-    const result = props.history.map((item, index) => historyEntry(item, props.history[index - 1]));
+    const result = props.history.map((item, index) =>
+      historyEntry(item, props.history[index - 1], props.thinkingDisplay),
+    );
     if (props.banner !== undefined) {
       result.unshift({
         key: "animated-banner",
@@ -174,7 +182,14 @@ export function TranscriptViewport(props: TranscriptViewportProps): ReactElement
       });
     }
     return result;
-  }, [props.animateBanner, props.banner, props.history, props.live, props.onBannerSettled]);
+  }, [
+    props.animateBanner,
+    props.banner,
+    props.history,
+    props.live,
+    props.onBannerSettled,
+    props.thinkingDisplay,
+  ]);
 
   useEffect(() => {
     setHeights(new Map());

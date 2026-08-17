@@ -7,6 +7,7 @@ import {
 import { GLYPHS } from "../../utils/glyphs.ts";
 import { endsInsideThink } from "./thinking-text.ts";
 import type { ThinkingLevel } from "../../../llm/providers.ts";
+import type { ChatThinkingDisplay } from "../../../config/schema.ts";
 import type { BannerLine } from "../banner.ts";
 
 export interface ToolRowState {
@@ -29,7 +30,13 @@ export type HistoryItem =
       readonly attachmentLabels?: readonly string[];
     }
   | { readonly kind: "assistant"; readonly id: string; readonly text: string }
-  | { readonly kind: "reasoning"; readonly id: string; readonly text: string }
+  | {
+      readonly kind: "reasoning";
+      readonly id: string;
+      readonly text: string;
+      /** 思考从开始到落盘的墙钟时长，供折叠摘要展示。 */
+      readonly durationMs?: number;
+    }
   | {
       readonly kind: "tool";
       readonly id: string;
@@ -64,6 +71,8 @@ export interface LiveState {
   readonly reasoningId: string | undefined;
   readonly reasoningText: string;
   readonly reasoningActive: boolean;
+  /** 当前 reasoning 段开始时的墙钟时间戳，用于计算折叠摘要中的思考时长。 */
+  readonly reasoningStartedAt: number | undefined;
   readonly thinkTagOpen: boolean;
   readonly activeTools: readonly ToolRowState[];
   readonly compacting: boolean;
@@ -114,6 +123,8 @@ export interface ChatUiState {
   readonly phase: ChatPhase;
   readonly pendingConfirm: PendingConfirm | undefined;
   readonly pendingUserInput: PendingUserInput | undefined;
+  /** 已完成思考内容的展示方式；仅影响已落盘 history 的渲染，不影响思考中的实时展示。 */
+  readonly thinkingDisplay: ChatThinkingDisplay;
 }
 
 export type ChatUiAction =
@@ -125,6 +136,7 @@ export type ChatUiAction =
     }
   | { readonly type: "set-draft"; readonly value: string }
   | { readonly type: "set-thinking"; readonly level: ThinkingLevel }
+  | { readonly type: "set-thinking-display"; readonly value: ChatThinkingDisplay }
   | { readonly type: "set-auto"; readonly value: boolean }
   | { readonly type: "commit-history"; readonly item: HistoryItem }
   | { readonly type: "start-compaction" }
@@ -137,6 +149,7 @@ export type ChatUiAction =
 export interface InitialStateOptions {
   readonly history?: readonly HistoryItem[];
   readonly thinkingLevel?: ThinkingLevel;
+  readonly thinkingDisplay?: ChatThinkingDisplay;
 }
 
 const EMPTY_LIVE: LiveState = {
@@ -144,6 +157,7 @@ const EMPTY_LIVE: LiveState = {
   reasoningId: undefined,
   reasoningText: "",
   reasoningActive: false,
+  reasoningStartedAt: undefined,
   thinkTagOpen: false,
   activeTools: [],
   compacting: false,
@@ -176,6 +190,7 @@ export function createInitialState(
     phase: "idle",
     pendingConfirm: undefined,
     pendingUserInput: undefined,
+    thinkingDisplay: options?.thinkingDisplay ?? "collapsed",
   };
 }
 
@@ -276,9 +291,21 @@ function commitStreamingText(state: ChatUiState, id: string): ChatUiState {
 }
 
 function commitReasoning(state: ChatUiState, id: string): ChatUiState {
+  const durationMs =
+    state.live.reasoningStartedAt === undefined
+      ? undefined
+      : Math.max(0, Date.now() - state.live.reasoningStartedAt);
   const history =
     state.live.reasoningText.trim().length > 0
-      ? [...state.history, { kind: "reasoning", id, text: state.live.reasoningText } as const]
+      ? [
+          ...state.history,
+          {
+            kind: "reasoning",
+            id,
+            text: state.live.reasoningText,
+            ...(durationMs !== undefined ? { durationMs } : {}),
+          } as const,
+        ]
       : state.history;
   return {
     ...state,
@@ -288,6 +315,7 @@ function commitReasoning(state: ChatUiState, id: string): ChatUiState {
       reasoningId: undefined,
       reasoningText: "",
       reasoningActive: false,
+      reasoningStartedAt: undefined,
     },
   };
 }
@@ -302,6 +330,7 @@ function beginReasoning(state: ChatUiState, id: string, reasoningId: string): Ch
       reasoningId,
       reasoningText: "",
       reasoningActive: true,
+      reasoningStartedAt: Date.now(),
     },
   };
 }
@@ -506,6 +535,8 @@ export function chatReducer(state: ChatUiState, action: ChatUiAction): ChatUiSta
       return { ...state, draft: action.value };
     case "set-thinking":
       return { ...state, status: { ...state.status, thinkingLevel: action.level } };
+    case "set-thinking-display":
+      return { ...state, thinkingDisplay: action.value };
     case "set-auto":
       return { ...state, status: { ...state.status, autoApprove: action.value } };
     case "commit-history":

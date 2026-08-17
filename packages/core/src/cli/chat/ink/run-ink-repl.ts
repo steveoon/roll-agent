@@ -2,6 +2,7 @@ import { createElement as h } from "react";
 import { render } from "ink";
 import type { AgentSession } from "@roll-agent/runtime";
 import type { ThinkingLevel } from "../../../llm/providers.ts";
+import type { ChatThinkingDisplay } from "../../../config/schema.ts";
 import { ChatApp, INK_HINTS } from "./app.ts";
 import { messagesToHistory } from "./history-from-messages.ts";
 import { titleFromMessage } from "../title.ts";
@@ -27,6 +28,7 @@ export interface RunInkReplOptions {
   readonly model: string;
   readonly banner?: BannerInfo;
   readonly initialThinkingLevel?: ThinkingLevel;
+  readonly initialThinkingDisplay?: ChatThinkingDisplay;
   readonly onThinkingChange?: (level: ThinkingLevel) => void;
   readonly onStarted?: () => void;
   readonly signal?: AbortSignal;
@@ -105,6 +107,9 @@ export async function runInkRepl(
         ...(options.banner === undefined ? {} : { banner: options.banner }),
         ...(options.initialThinkingLevel
           ? { initialThinkingLevel: options.initialThinkingLevel }
+          : {}),
+        ...(options.initialThinkingDisplay
+          ? { initialThinkingDisplay: options.initialThinkingDisplay }
           : {}),
         ...(options.onThinkingChange ? { onThinkingChange: options.onThinkingChange } : {}),
       }),

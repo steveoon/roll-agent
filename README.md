@@ -213,9 +213,11 @@ CI、非 TTY、`TERM=dumb`、screen reader、Zellij、tmux control mode 或无�
 ```yaml
 chat:
   screen-mode: auto # auto | fullscreen | inline
+  thinking-display: collapsed # collapsed | expanded
 ```
 
 - 临时覆盖：`roll chat --screen-mode fullscreen` 或 `roll chat --screen-mode inline`
+- 思考展示：`thinking-display` 默认 `collapsed`，模型开始正式回复后把已完成的思考折叠为一行痕迹（思考时长与字数）；设为 `expanded` 始终完整显示。思考进行中始终实时展示，会话内可用 `/show-think` 临时切换。基础 REPL 不渲染思考内容，不受此项影响
 - 历史浏览：`PageUp` / `PageDown`，`Ctrl+Home` 跳到最早处，`Ctrl+End` 返回最新内容；全屏模式也支持鼠标滚轮
 - 终端缩放：全屏 TUI 会按最新宽高重排，输入框保持有界，长历史只渲染当前视口附近内容
 - 中文输入法：全屏 TUI 会把真实终端光标锚定到输入位置；受支持终端中的拼音预编辑与候选窗口通常无需额外配置

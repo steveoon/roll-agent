@@ -2,11 +2,12 @@ import { createElement as h } from "react";
 import type { ReactElement } from "react";
 import { Box, Text } from "ink";
 import { GLYPHS } from "../../utils/glyphs.ts";
+import type { ChatThinkingDisplay } from "../../../config/schema.ts";
 import type { HistoryItem } from "./state.ts";
 import { AssistantContent } from "./assistant-content.ts";
 import { ToolLabel } from "./tool-label.ts";
 import { BannerLinesView } from "./banner-view.ts";
-import { ReasoningBlock } from "./reasoning-block.ts";
+import { ReasoningBlock, ReasoningSummary } from "./reasoning-block.ts";
 
 const DENIAL_TEXT_PREFIXES = ["已取消执行", "策略拒绝执行"] as const;
 
@@ -15,7 +16,17 @@ function isDenialText(text: string): boolean {
   return DENIAL_TEXT_PREFIXES.some((prefix) => trimmed.startsWith(prefix));
 }
 
-export function HistoryItemView({ item }: { item: HistoryItem }): ReactElement {
+export interface HistoryItemViewProps {
+  readonly item: HistoryItem;
+  /** 已完成思考内容的展示方式；缺省与产品默认一致（折叠）。 */
+  readonly thinkingDisplay?: ChatThinkingDisplay;
+}
+
+export function HistoryItemView({
+  item,
+  thinkingDisplay = "collapsed",
+}: HistoryItemViewProps): ReactElement {
+  const collapseThinking = thinkingDisplay === "collapsed";
   switch (item.kind) {
     case "banner":
       return h(BannerLinesView, { lines: item.lines });
@@ -47,9 +58,14 @@ export function HistoryItemView({ item }: { item: HistoryItem }): ReactElement {
           h(Text, { dimColor: true }, item.text.trim()),
         );
       }
-      return h(AssistantContent, { text: item.text });
+      return h(AssistantContent, { text: item.text, collapseThinking });
     case "reasoning":
-      return h(ReasoningBlock, { text: item.text });
+      return collapseThinking
+        ? h(ReasoningSummary, {
+            text: item.text,
+            ...(item.durationMs !== undefined ? { durationMs: item.durationMs } : {}),
+          })
+        : h(ReasoningBlock, { text: item.text });
     case "tool": {
       const args = item.args.length > 0 && item.args !== "{}" ? ` ${item.args}` : "";
       return h(

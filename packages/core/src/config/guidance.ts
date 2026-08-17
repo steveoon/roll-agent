@@ -122,6 +122,15 @@ export const CONFIG_GUIDANCE_ENTRIES = [
       "默认值为 `auto`；普通交互终端使用全屏，CI、无 ANSI 能力、screen reader、Zellij 和 tmux control mode 回退基础 REPL。",
     example: `chat:\n  screen-mode: ${DEFAULT_CONFIG.chat.screenMode}`,
   },
+  {
+    path: "chat.thinking-display",
+    title: "思考内容展示",
+    purpose:
+      "控制全屏 TUI 中已完成的思考内容默认折叠为一行摘要（时长与字数），还是始终完整显示；思考进行中始终实时展示。",
+    defaultBehavior:
+      "默认值为 `collapsed`；会话内可用 `/show-think` 临时切换。基础 REPL 不渲染思考内容，不受此项影响。",
+    example: `chat:\n  thinking-display: ${DEFAULT_CONFIG.chat.thinkingDisplay}`,
+  },
 
   // Chat runtime
   {

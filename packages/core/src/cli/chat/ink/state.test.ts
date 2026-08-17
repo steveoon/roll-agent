@@ -15,6 +15,22 @@ test("createInitialState seeds model + idle phase", () => {
   assert.deepEqual(state.history, []);
 });
 
+test("createInitialState defaults thinking display to collapsed and honors overrides", () => {
+  assert.equal(createInitialState("qwen", undefined).thinkingDisplay, "collapsed");
+  assert.equal(
+    createInitialState("qwen", undefined, { thinkingDisplay: "expanded" }).thinkingDisplay,
+    "expanded",
+  );
+});
+
+test("set-thinking-display switches how completed thinking is rendered", () => {
+  let state = createInitialState("qwen", undefined);
+  state = chatReducer(state, { type: "set-thinking-display", value: "expanded" });
+  assert.equal(state.thinkingDisplay, "expanded");
+  state = chatReducer(state, { type: "set-thinking-display", value: "collapsed" });
+  assert.equal(state.thinkingDisplay, "collapsed");
+});
+
 test("submit-user commits a user bubble and goes busy", () => {
   const state = chatReducer(createInitialState("qwen", undefined), {
     type: "submit-user",
@@ -55,9 +71,15 @@ test("reasoning tokens stream separately and flush before a tool call", () => {
     input: { query: "input" },
   });
 
-  assert.deepEqual(state.history, [
-    { kind: "reasoning", id: "tc-reasoning", text: "先定位代码路径" },
-  ]);
+  assert.equal(state.history.length, 1);
+  const committed = state.history[0];
+  assert.equal(committed?.kind, "reasoning");
+  if (committed?.kind === "reasoning") {
+    assert.equal(committed.id, "tc-reasoning");
+    assert.equal(committed.text, "先定位代码路径");
+    assert.equal(typeof committed.durationMs, "number");
+    assert.ok((committed.durationMs ?? Number.NaN) >= 0);
+  }
   assert.equal(state.live.reasoningActive, false);
   assert.equal(state.live.reasoningText, "");
   assert.equal(state.live.activeTools[0]?.name, "roll.search");
@@ -75,10 +97,14 @@ test("reasoning-end commits a dedicated block before the final assistant reply",
   state = event(state, "td", { type: "text-delta", delta: "结论" });
   state = event(state, "mf", { type: "message-finish", text: "结论" });
 
-  assert.deepEqual(state.history, [
-    { kind: "reasoning", id: "re-reasoning", text: "验证边界" },
-    { kind: "assistant", id: "mf", text: "结论" },
-  ]);
+  assert.equal(state.history.length, 2);
+  const reasoning = state.history[0];
+  assert.equal(reasoning?.kind, "reasoning");
+  if (reasoning?.kind === "reasoning") {
+    assert.equal(reasoning.id, "re-reasoning");
+    assert.equal(reasoning.text, "验证边界");
+  }
+  assert.deepEqual(state.history[1], { kind: "assistant", id: "mf", text: "结论" });
 });
 
 test("tool-call adds a live row; tool-result commits it to history", () => {

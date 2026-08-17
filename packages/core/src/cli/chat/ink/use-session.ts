@@ -10,6 +10,7 @@ import {
   type PendingUserInput,
 } from "./state.ts";
 import type { ThinkingLevel } from "../../../llm/providers.ts";
+import type { ChatThinkingDisplay } from "../../../config/schema.ts";
 import { log } from "../../utils/output.ts";
 import { formatDebugEvent } from "../../utils/debug-format.ts";
 
@@ -18,6 +19,7 @@ export interface UseSessionOptions {
   readonly contextWindow: number | undefined;
   readonly initialHistory?: readonly HistoryItem[];
   readonly initialThinkingLevel?: ThinkingLevel;
+  readonly initialThinkingDisplay?: ChatThinkingDisplay;
   readonly onThinkingChange?: (level: ThinkingLevel) => void;
 }
 
@@ -37,6 +39,7 @@ export interface UseSessionResult {
   ) => void;
   readonly setDraft: (value: string) => void;
   readonly setThinking: (level: ThinkingLevel) => void;
+  readonly setThinkingDisplay: (value: ChatThinkingDisplay) => void;
   readonly setAutoMode: (value: boolean) => void;
   readonly toggleAutoMode: () => void;
   readonly commitHistory: (item: HistoryItem) => void;
@@ -62,6 +65,9 @@ export function useSession(session: AgentSession, options: UseSessionOptions): U
     createInitialState(options.model, options.contextWindow, {
       ...(options.initialHistory ? { history: options.initialHistory } : {}),
       ...(options.initialThinkingLevel ? { thinkingLevel: options.initialThinkingLevel } : {}),
+      ...(options.initialThinkingDisplay
+        ? { thinkingDisplay: options.initialThinkingDisplay }
+        : {}),
     }),
   );
   const onThinkingChange = options.onThinkingChange;
@@ -280,6 +286,10 @@ export function useSession(session: AgentSession, options: UseSessionOptions): U
     [onThinkingChange],
   );
 
+  const setThinkingDisplay = useCallback((value: ChatThinkingDisplay) => {
+    dispatch({ type: "set-thinking-display", value });
+  }, []);
+
   const setAutoMode = useCallback((value: boolean) => {
     autoModeRef.current = value;
     dispatch({ type: "set-auto", value });
@@ -305,6 +315,7 @@ export function useSession(session: AgentSession, options: UseSessionOptions): U
     resolveUserInput,
     setDraft,
     setThinking,
+    setThinkingDisplay,
     setAutoMode,
     toggleAutoMode,
     commitHistory,
