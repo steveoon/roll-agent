@@ -6,6 +6,7 @@ import {
   mkdtempSync,
   readFileSync,
   realpathSync,
+  rmSync,
   symlinkSync,
   writeFileSync,
 } from "node:fs";
@@ -100,9 +101,14 @@ test("断链目标判定为 external", () => {
 });
 
 test("lexical workdir 下新建文件判定为 workdir 内", () => {
-  const lexical = mkdtempSync(join(tmpdir(), "file-io-lexical-"));
+  const root = realpathSync(tempDir());
+  const real = join(root, "real");
+  mkdirSync(real);
+  const lexical = join(root, "link");
+  symlinkSync(real, lexical);
   assert.notEqual(lexical, realpathSync(lexical));
   assert.equal(escapesWorkdir(lexical, "new.txt"), false);
+  assert.equal(escapesWorkdir(lexical, join("nested", "new.txt")), false);
 });
 
 test("名为 ..cache 的目录判定为 workdir 内", () => {
@@ -120,7 +126,7 @@ test("准入后父目录换成越界 symlink 时 revalidate 阻止", () => {
   mkdirSync(join(workdir, "out"));
   const captured = captureFilePathAdmission(workdir, join("out", "secret.txt"));
   assert.equal(captured.admittedExternal, false);
-  execFileSync("rm", ["-rf", join(workdir, "out")]);
+  rmSync(join(workdir, "out"), { recursive: true, force: true });
   symlinkSync(outside, join(workdir, "out"));
   const blocked = revalidateFilePathAdmission(workdir, join("out", "secret.txt"), captured);
   assert.ok(blocked !== undefined);
