@@ -623,12 +623,45 @@ test("interpretEslintOutcome：json 中 File ignored 报 skipped", () => {
   const stdout = JSON.stringify([
     {
       filePath: "/proj/a.ts",
-      messages: [{ message: "File ignored because of a matching ignore pattern." }],
+      messages: [{ ruleId: null, message: "File ignored because of a matching ignore pattern." }],
       warningCount: 1,
     },
   ]);
   const outcome = interpretEslintOutcome(verifier, 0, stdout, "");
   assert.equal(outcome.status, "skipped");
+});
+
+test("interpretEslintOutcome：源码或规则消息中出现 File ignored 字样不算跳过", () => {
+  const verifier = fakeVerifier("eslint");
+  const passStdout = JSON.stringify([
+    {
+      filePath: "/proj/verifier.test.ts",
+      messages: [],
+      errorCount: 0,
+      warningCount: 0,
+      source: "assert.match(text, /File ignored because of a matching ignore pattern/u);\n",
+    },
+  ]);
+  assert.equal(interpretEslintOutcome(verifier, 0, passStdout, "").status, "pass");
+  const failStdout = JSON.stringify([
+    {
+      filePath: "/proj/a.ts",
+      messages: [
+        {
+          ruleId: "no-restricted-syntax",
+          severity: 2,
+          line: 3,
+          column: 1,
+          message: "File ignored comments are not allowed",
+        },
+      ],
+      errorCount: 1,
+      warningCount: 0,
+    },
+  ]);
+  const failed = interpretEslintOutcome(verifier, 1, failStdout, "");
+  assert.equal(failed.status, "fail");
+  assert.ok(failed.status === "fail" && failed.output.includes("3:1 error"));
 });
 
 test("runVerifier：abort 后返回 cancelled", async () => {

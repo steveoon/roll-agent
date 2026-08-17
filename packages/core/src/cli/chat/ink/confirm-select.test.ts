@@ -54,6 +54,32 @@ test("compact confirmation stays inside its row budget", () => {
   unmount();
 });
 
+test("compact confirmation keeps options and help visible when a session label is present", () => {
+  for (const maxRows of [6, 4, 3]) {
+    const { lastFrame, unmount } = render(
+      h(ConfirmSelect, {
+        prompt: "执行 roll.write_file？",
+        explanation: "写入 src/a.ts（12 行）",
+        args: `file_path: src/a.ts content: ${"x".repeat(60)}`,
+        sessionGrantLabel: "本会话内不再询问：写入工作目录内的文件",
+        width: 40,
+        maxRows,
+        onDecide: () => {},
+      }),
+    );
+    const frame = (lastFrame() ?? "").replace(ANSI_STYLE_PATTERN, "");
+    const lines = frame.split("\n");
+    const optionLine = lines.find((line) => line.includes("Yes") && line.includes("No")) ?? "";
+    assert.ok(
+      lines.length <= maxRows,
+      `maxRows=${String(maxRows)} rendered ${String(lines.length)}`,
+    );
+    assert.match(optionLine, /Yes\s+Always\s+❯ No/u);
+    assert.match(lines.at(-1) ?? "", /←→\/y\/a\/n 选择 · Enter · Esc · ⇧Tab 自动/u);
+    unmount();
+  }
+});
+
 async function decideAfter(
   inputs: readonly string[],
   sessionGrantLabel?: string,

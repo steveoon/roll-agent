@@ -324,9 +324,19 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 function eslintMessageLooksIgnored(message: unknown): boolean {
   return (
     isRecord(message) &&
+    message.ruleId === null &&
     typeof message.message === "string" &&
-    message.message.includes("File ignored")
+    message.message.startsWith("File ignored")
   );
+}
+
+function parseEslintJson(stdout: string): readonly unknown[] | undefined {
+  try {
+    const parsed: unknown = JSON.parse(stdout);
+    return Array.isArray(parsed) ? parsed : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 function formatEslintMessageLine(message: Record<string, unknown>): string | undefined {
@@ -365,39 +375,38 @@ export function interpretEslintOutcome(
   stdout: string,
   stderr: string,
 ): VerifierOutcome {
-  const combined = combineStreams(stdout, stderr);
-  if (combined.includes("File ignored because of a matching ignore pattern")) {
-    return { id: verifier.id, status: "skipped", reason: ESLINT_IGNORED_REASON };
-  }
-  try {
-    const parsed: unknown = JSON.parse(stdout);
-    if (!Array.isArray(parsed) || parsed.length === 0) {
+  const parsed = parseEslintJson(stdout);
+  if (parsed === undefined) {
+    const combined = combineStreams(stdout, stderr);
+    if (combined.includes("File ignored because of a matching ignore pattern")) {
       return { id: verifier.id, status: "skipped", reason: ESLINT_IGNORED_REASON };
     }
-    const first = parsed[0];
-    if (
-      isRecord(first) &&
-      Array.isArray(first.messages) &&
-      first.messages.some(eslintMessageLooksIgnored)
-    ) {
-      return { id: verifier.id, status: "skipped", reason: ESLINT_IGNORED_REASON };
-    }
-    if (exitCode === 0) {
-      const warningCount =
-        isRecord(first) && typeof first.warningCount === "number" ? first.warningCount : 0;
-      return warningCount > 0
-        ? { id: verifier.id, status: "pass", detail: `${String(warningCount)} 个 warning` }
-        : { id: verifier.id, status: "pass" };
-    }
-    const readable = formatEslintFailOutput(parsed);
-    return {
-      id: verifier.id,
-      status: "fail",
-      output: readable !== undefined ? truncateOutput(readable) : `退出码 ${String(exitCode)}`,
-    };
-  } catch {
     return outcomeFromExecution(verifier, exitCode, stdout, stderr);
   }
+  if (parsed.length === 0) {
+    return { id: verifier.id, status: "skipped", reason: ESLINT_IGNORED_REASON };
+  }
+  const first = parsed[0];
+  if (
+    isRecord(first) &&
+    Array.isArray(first.messages) &&
+    first.messages.some(eslintMessageLooksIgnored)
+  ) {
+    return { id: verifier.id, status: "skipped", reason: ESLINT_IGNORED_REASON };
+  }
+  if (exitCode === 0) {
+    const warningCount =
+      isRecord(first) && typeof first.warningCount === "number" ? first.warningCount : 0;
+    return warningCount > 0
+      ? { id: verifier.id, status: "pass", detail: `${String(warningCount)} 个 warning` }
+      : { id: verifier.id, status: "pass" };
+  }
+  const readable = formatEslintFailOutput(parsed);
+  return {
+    id: verifier.id,
+    status: "fail",
+    output: readable !== undefined ? truncateOutput(readable) : `退出码 ${String(exitCode)}`,
+  };
 }
 
 function spawnErrorOutput(error: ExecFileException, timeoutMs: number): string {

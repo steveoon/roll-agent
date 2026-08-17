@@ -38,6 +38,7 @@ function stepConfirmOption(
 }
 
 const COMPACT_CONFIRM_MAX_ROWS = 11;
+const COMPACT_ESSENTIAL_ROWS = 3;
 
 function normalizeInlineText(value: string): string {
   return value.replace(/\s+/gu, " ").trim();
@@ -152,6 +153,14 @@ export function ConfirmSelect({
   );
   if (compact) {
     const contentWidth = Math.max(1, width);
+    let spareRows = Math.max(0, boundedRows - COMPACT_ESSENTIAL_ROWS);
+    const explanationRows = explanation === undefined ? 0 : Math.min(2, spareRows);
+    spareRows -= explanationRows;
+    const showArgsRow = showArgs && spareRows > 0;
+    if (showArgsRow) {
+      spareRows -= 1;
+    }
+    const showLabelRow = sessionGrantLabel !== undefined && spareRows > 0;
     return h(
       Box,
       {
@@ -162,13 +171,17 @@ export function ConfirmSelect({
         overflowY: "hidden",
       },
       h(Text, { wrap: "truncate-end" }, truncateDisplayLine(prompt, contentWidth)),
-      explanation === undefined
+      explanationRows === 0
         ? null
-        : h(Text, { color: "cyan" }, wrapDisplayLines(`AI 说明：${explanation}`, contentWidth, 2)),
-      sessionGrantLabel === undefined
-        ? null
-        : h(Text, { dimColor: true }, truncateDisplayLine(sessionGrantLabel, contentWidth)),
-      showArgs ? h(Text, { dimColor: true }, truncateDisplayLine(args, contentWidth)) : null,
+        : h(
+            Text,
+            { color: "cyan" },
+            wrapDisplayLines(`AI 说明：${explanation ?? ""}`, contentWidth, explanationRows),
+          ),
+      showArgsRow ? h(Text, { dimColor: true }, truncateDisplayLine(args, contentWidth)) : null,
+      showLabelRow
+        ? h(Text, { dimColor: true }, truncateDisplayLine(sessionGrantLabel ?? "", contentWidth))
+        : null,
       optionRow,
       helpRow,
     );
