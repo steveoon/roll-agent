@@ -34,6 +34,7 @@ export interface CompactionInput {
   readonly maxRemovedTranscriptMessages?: number;
   readonly structuredOutputProviderOptions?: SharedV4ProviderOptions;
   readonly abortSignal?: AbortSignal;
+  readonly targetTokens?: number;
 }
 
 export interface CompactionResult {
@@ -132,6 +133,84 @@ export function findTurnBoundaries(messages: readonly ModelMessage[]): number[] 
 
 function estimateMessageTokens(message: ModelMessage): number {
   return Math.ceil(JSON.stringify(message).length / TOKEN_ESTIMATE_DIVISOR);
+}
+
+export function estimateMessagesTokens(messages: readonly ModelMessage[]): number {
+  return messages.reduce((total, message) => total + estimateMessageTokens(message), 0);
+}
+
+function estimateCompactedTokens(messages: readonly ModelMessage[]): number {
+  return estimateMessagesTokens(truncateToolResults(messages).messages);
+}
+
+function stepBoundaries(messages: readonly ModelMessage[], turnStart: number): number[] {
+  const boundaries: number[] = [];
+  for (let index = turnStart + 1; index < messages.length; index += 1) {
+    if (messages[index]?.role === "assistant") {
+      boundaries.push(index);
+    }
+  }
+  return boundaries;
+}
+
+function countRawMessagesBefore(messages: readonly ModelMessage[], end: number): number {
+  return messages.slice(0, end).filter((message) => !isDerivedCompactionReminderMessage(message))
+    .length;
+}
+
+interface CompactionCutPlan {
+  readonly prefix: readonly ModelMessage[];
+  readonly kept: readonly ModelMessage[];
+}
+
+function planCut(input: CompactionInput): CompactionCutPlan {
+  const { messages, targetTokens, maxRemovedTranscriptMessages } = input;
+  const boundaries = findTurnBoundaries(messages);
+  let cut = capCutByPresentedEvidence(
+    messages,
+    cutIndex(messages, input.keepRecentTurns, input.keepRecentTokens),
+    maxRemovedTranscriptMessages,
+  );
+  const withinTarget = (kept: readonly ModelMessage[]): boolean =>
+    targetTokens === undefined || estimateCompactedTokens(kept) <= targetTokens;
+  if (targetTokens === undefined || withinTarget(messages.slice(cut)) || boundaries.length === 0) {
+    return { prefix: messages.slice(0, cut), kept: messages.slice(cut) };
+  }
+  const budgetCut = capCutByPresentedEvidence(
+    messages,
+    tokenBudgetCut(messages, boundaries, targetTokens),
+    maxRemovedTranscriptMessages,
+  );
+  cut = Math.max(cut, budgetCut);
+  const lastTurnStart = boundaries[boundaries.length - 1] ?? 0;
+  if (withinTarget(messages.slice(cut)) || cut !== lastTurnStart) {
+    return { prefix: messages.slice(0, cut), kept: messages.slice(cut) };
+  }
+  const turnUserMessage = messages[lastTurnStart];
+  const steps = stepBoundaries(messages, lastTurnStart);
+  if (turnUserMessage === undefined || steps.length === 0) {
+    return { prefix: messages.slice(0, cut), kept: messages.slice(cut) };
+  }
+  const allowedByEvidence = (stepCut: number): boolean =>
+    maxRemovedTranscriptMessages === undefined ||
+    countRawMessagesBefore(messages, stepCut) <= maxRemovedTranscriptMessages;
+  let chosen: number | undefined;
+  for (const stepCut of steps) {
+    if (!allowedByEvidence(stepCut)) {
+      break;
+    }
+    chosen = stepCut;
+    if (withinTarget([turnUserMessage, ...messages.slice(stepCut)])) {
+      break;
+    }
+  }
+  if (chosen === undefined) {
+    return { prefix: messages.slice(0, cut), kept: messages.slice(cut) };
+  }
+  return {
+    prefix: messages.slice(0, chosen),
+    kept: [turnUserMessage, ...messages.slice(chosen)],
+  };
 }
 
 function turnFloorCut(boundaries: readonly number[], keepRecentTurns: number): number {
@@ -443,25 +522,20 @@ function truncateToolResults(messages: readonly ModelMessage[]): {
 
 export async function compactMessages(input: CompactionInput): Promise<CompactionResult> {
   throwIfAborted(input.abortSignal);
-  const cut = capCutByPresentedEvidence(
-    input.messages,
-    cutIndex(input.messages, input.keepRecentTurns, input.keepRecentTokens),
-    input.maxRemovedTranscriptMessages,
-  );
-  if (cut === 0) {
+  const plan = planCut(input);
+  const removed = input.messages.length - plan.kept.length;
+  if (removed === 0) {
     const { messages, truncated } = truncateToolResults(input.messages);
     return { messages, removed: 0, kept: messages.length, truncatedTools: truncated };
   }
-  const prefix = input.messages.slice(0, cut);
-  const suffix = input.messages.slice(cut);
-  const { messages: keptSuffix, truncated } = truncateToolResults(suffix);
+  const { messages: keptMessages, truncated } = truncateToolResults(plan.kept);
   const semanticDraft =
-    input.strategy === "summarize" ? await generateCompactionDraft(prefix, input) : undefined;
+    input.strategy === "summarize" ? await generateCompactionDraft(plan.prefix, input) : undefined;
   throwIfAborted(input.abortSignal);
   return {
-    messages: keptSuffix,
-    removed: prefix.length,
-    kept: keptSuffix.length,
+    messages: keptMessages,
+    removed,
+    kept: keptMessages.length,
     truncatedTools: truncated,
     ...(semanticDraft ? { semanticDraft } : {}),
   };

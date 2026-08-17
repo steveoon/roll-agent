@@ -21,7 +21,10 @@ test("lookupContextWindow 按子串匹配已知模型", () => {
   assert.equal(lookupContextWindow("deepseek-v4-flash"), 1_000_000);
   assert.equal(lookupContextWindow("deepseek-chat"), 1_000_000);
   assert.equal(lookupContextWindow("deepseek-v3.1"), 128_000);
+  assert.equal(lookupContextWindow("qwen3.8-max"), 1_000_000);
+  assert.equal(lookupContextWindow("qwen3.8-plus"), 1_000_000);
   assert.equal(lookupContextWindow("qwen3.7-plus"), 1_000_000);
+  assert.equal(lookupContextWindow("qwen3.7-max"), 1_000_000);
   assert.equal(lookupContextWindow("qwen3.6-plus"), 1_000_000);
   assert.equal(lookupContextWindow("qwen-long-latest"), 10_000_000);
   assert.equal(lookupContextWindow("qwen3-max"), 262_144);

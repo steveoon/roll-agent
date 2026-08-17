@@ -2630,6 +2630,86 @@ test("AgentSession 超阈值自动压缩(reactive,truncate)并回调 onReplace",
   assert.equal(events.at(-1)?.type, "message-finish");
 });
 
+test("AgentSession 从历史恢复且尚无实测 usage 时,首轮按估算触发自动压缩", async () => {
+  const model = sequencedModel([textStep("after", 1)]);
+  const longAnswer = "answer-".repeat(40);
+  const initialMessages: ModelMessage[] = [];
+  for (let index = 1; index <= 6; index += 1) {
+    initialMessages.push({ role: "user", content: `old-${String(index)}` });
+    initialMessages.push({ role: "assistant", content: `${String(index)}:${longAnswer}` });
+  }
+  const session = new AgentSession({
+    id: "c1-resume-pressure",
+    model,
+    sources: [],
+    maxSteps: 2,
+    contextWindow: 300,
+    initialMessages,
+    compaction: {
+      enabled: true,
+      strategy: "truncate",
+      threshold: 0.75,
+      keepRecentTurns: 2,
+      keepRecentTokens: 100_000,
+    },
+  });
+
+  const events = await collect(session.send("resume me"));
+  const compacted = events.find((event) => event.type === "context-compacted");
+  assert.ok(compacted && compacted.type === "context-compacted");
+  assert.equal(compacted.reason, "auto");
+  assert.equal(compacted.beforeInputTokens, undefined);
+  assert.ok(compacted.removed >= 8, `removed ${String(compacted.removed)}`);
+  assert.equal(events.at(-1)?.type, "message-finish");
+});
+
+test("AgentSession 轮内步骤后上下文压力超阈值时暂停、压缩并在同一个 send 内自动续跑", async () => {
+  const model = sequencedModel([
+    toolCallStep("echo-agent__echo", { q: "x" }, 170),
+    textStep("continued", 40),
+  ]);
+  const session = new AgentSession({
+    id: "c1-mid-turn-pressure",
+    model,
+    sources: [source("echo-agent", "echo")],
+    maxSteps: 8,
+    contextWindow: 200,
+    initialMessages: [
+      { role: "user", content: "old-1" },
+      { role: "assistant", content: "answer-1" },
+      { role: "user", content: "old-2" },
+      { role: "assistant", content: "answer-2" },
+    ],
+    compaction: {
+      enabled: true,
+      strategy: "truncate",
+      threshold: 0.75,
+      keepRecentTurns: 1,
+      keepRecentTokens: 1,
+    },
+  });
+
+  const events = await collect(session.send("tool loop"));
+  const finishes = events.filter((event) => event.type === "message-finish");
+  assert.equal(finishes.length, 2);
+  const compacted = events.find((event) => event.type === "context-compacted");
+  assert.ok(compacted && compacted.type === "context-compacted");
+  assert.equal(compacted.reason, "auto");
+  assert.ok(compacted.removed >= 4, `removed ${String(compacted.removed)}`);
+  const compactedIndex = events.indexOf(compacted);
+  const firstFinishIndex = events.indexOf(finishes[0] as SessionEvent);
+  assert.ok(compactedIndex > firstFinishIndex);
+  const lastFinish = finishes.at(-1);
+  assert.ok(lastFinish && lastFinish.type === "message-finish");
+  assert.equal(lastFinish.text, "continued");
+  assert.equal(events.at(-1)?.type, "message-finish");
+  const modelCalls = model.doStreamCalls;
+  assert.equal(modelCalls.length, 2);
+  const secondPrompt = modelCalls[1]?.prompt ?? [];
+  assert.equal(secondPrompt.at(-1)?.role, "tool");
+  assert.equal(secondPrompt.filter((message) => message.role === "user").length, 1);
+});
+
 test("AgentSession 累计输入超阈值但上下文输入未超阈值时不自动压缩", async () => {
   const model = sequencedModel([
     toolCallStep("echo-agent__echo", { q: "x" }, 50),
@@ -2641,7 +2721,7 @@ test("AgentSession 累计输入超阈值但上下文输入未超阈值时不自�
     model,
     sources: [source("echo-agent", "echo")],
     maxSteps: 8,
-    contextWindow: 100,
+    contextWindow: 400,
     initialMessages: [
       { role: "user", content: "old-1" },
       { role: "assistant", content: "answer-1" },
@@ -2674,7 +2754,7 @@ test("AgentSession 累计输入超阈值但上下文输入未超阈值时不自�
 test("AgentSession 上下文输入超阈值时下轮自动压缩", async () => {
   const model = sequencedModel([
     toolCallStep("echo-agent__echo", { q: "x" }, 50),
-    textStep("done", 60),
+    textStep("done", 330),
     textStep("after"),
   ]);
   const session = new AgentSession({
@@ -2682,7 +2762,7 @@ test("AgentSession 上下文输入超阈值时下轮自动压缩", async () => {
     model,
     sources: [source("echo-agent", "echo")],
     maxSteps: 8,
-    contextWindow: 70,
+    contextWindow: 400,
     initialMessages: [
       { role: "user", content: "old-1" },
       { role: "assistant", content: "answer-1" },
@@ -2703,15 +2783,19 @@ test("AgentSession 上下文输入超阈值时下轮自动压缩", async () => {
     (event): event is Extract<SessionEvent, { type: "message-finish" }> =>
       event.type === "message-finish",
   );
-  assert.equal(firstFinish?.totalUsage?.inputTokens, 110);
-  assert.equal(firstFinish?.contextInputTokens, 60);
+  assert.equal(firstFinish?.totalUsage?.inputTokens, 380);
+  assert.equal(firstFinish?.contextInputTokens, 330);
+  assert.equal(
+    first.some((event) => event.type === "context-compacted"),
+    false,
+  );
 
   const second = await collect(session.send("next"));
   const compacted = second.find((event) => event.type === "context-compacted");
   assert.ok(compacted && compacted.type === "context-compacted");
   assert.equal(compacted.reason, "auto");
-  assert.equal(compacted.beforeInputTokens, 60);
-  assert.equal(compacted.removed, 4);
+  assert.equal(compacted.beforeInputTokens, 330);
+  assert.ok(compacted.removed >= 4, `removed ${String(compacted.removed)}`);
   assert.equal(second.at(-1)?.type, "message-finish");
 });
 

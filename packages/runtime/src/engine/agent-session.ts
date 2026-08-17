@@ -113,6 +113,7 @@ import {
   COMPACTION_DRAFT_FALLBACK_REASONS,
   compactMessages,
   CompactionDraftFallbackError,
+  estimateMessagesTokens,
   isCompactionSummaryAcknowledgement,
   readCompactionSummaryPayload,
 } from "./compactor.ts";
@@ -303,6 +304,8 @@ interface ActiveTurn {
   cancellationPersistenceAttempted: boolean;
   cancellationPersisted: boolean;
   cancellationReason?: SessionCancellationReason;
+  pausedForContextPressure: boolean;
+  contextPressureContinuations: number;
 }
 
 interface PendingToolCall {
@@ -367,6 +370,8 @@ interface LegacyV1ActiveSnapshot {
 
 const SESSION_CLOSE_TIMEOUT_MS = 6_000;
 const DEFAULT_INTERACTION_TIMEOUT_MS = 5 * 60 * 1_000;
+const MAX_AUTO_COMPACTION_PASSES = 4;
+const MAX_CONTEXT_PRESSURE_CONTINUATIONS = 2;
 const MAX_CONTEXT_RECOVERY_ATTEMPTS = 1;
 const MAX_COMPACTION_RESOURCE_KEY_CHARS = 1_024;
 const SERIALIZED_INVALID_TOOL_INPUT_PREFIX = "AI_InvalidToolInputError:";
@@ -412,6 +417,8 @@ function createActiveTurn(): ActiveTurn {
     cancellationEventEmitted: false,
     cancellationPersistenceAttempted: false,
     cancellationPersisted: false,
+    pausedForContextPressure: false,
+    contextPressureContinuations: 0,
   };
 }
 
@@ -815,6 +822,8 @@ export class AgentSession {
   private closed = false;
   private sessionUsage: SessionTokenUsage = { inputTokens: 0, outputTokens: 0, totalTokens: 0 };
   private lastInputTokens: number | undefined;
+  private lastStepOutputTokens: number | undefined;
+  private measuredMessageCount: number | undefined;
   private needsCompaction = false;
 
   constructor(options: AgentSessionOptions) {
@@ -1258,17 +1267,11 @@ export class AgentSession {
         ...(this.contextWindow !== undefined ? { contextWindow: this.contextWindow } : {}),
         ...(this.lastInputTokens !== undefined ? { lastInputTokens: this.lastInputTokens } : {}),
       });
-      if (this.shouldAutoCompact()) {
-        this.debug(queue, "compaction", "auto requested before turn", turnStartedAt, {
-          messages: this.messages.length,
-          ...(this.lastInputTokens !== undefined ? { lastInputTokens: this.lastInputTokens } : {}),
-        });
-        try {
-          await this.runCompaction(queue, "auto", activeTurn);
-        } catch (error) {
-          queue.push({ type: "error", stage: "plan", message: errorMessage(error) });
-          return;
-        }
+      try {
+        await this.runAutoCompactionPasses(queue, activeTurn, turnStartedAt, userMessageContent);
+      } catch (error) {
+        queue.push({ type: "error", stage: "plan", message: errorMessage(error) });
+        return;
       }
       if (activeTurn.aborted || activeTurn.abortController.signal.aborted) {
         turnStart = this.messages.length;
@@ -1336,9 +1339,13 @@ export class AgentSession {
       });
       this.lastCapabilityTurnContext = capabilityTurnContext;
       const capabilityTurnReminder = buildCapabilityTurnReminder(capabilityTurnContext);
+      let continuation = false;
       while (true) {
         turnStart = this.messages.length;
-        this.messages.push(storedUserMessage);
+        activeTurn.pausedForContextPressure = false;
+        if (!continuation) {
+          this.messages.push(storedUserMessage);
+        }
         const transcriptToolId = findCapabilityToolId(
           this.capabilityManifest,
           CAPABILITY_TOOL_ROLES.transcriptRead,
@@ -1379,7 +1386,11 @@ export class AgentSession {
             prepareStep: ({ messages }) => ({
               messages: relocateToolImagesToUserMessages(messages),
             }),
-            stopWhen: [stepCountIs(this.maxSteps), stopOnUserRejected()],
+            stopWhen: [
+              stepCountIs(this.maxSteps),
+              stopOnUserRejected(),
+              this.stopOnContextPressure(activeTurn),
+            ],
             toolApproval: async ({ toolCall }) => {
               this.trackPendingToolCall(
                 activeTurn,
@@ -1463,6 +1474,7 @@ export class AgentSession {
         let sawToolCall = false;
         let totalUsage: SessionTokenUsage | undefined;
         let contextInputTokens: number | undefined;
+        let lastStepOutputTokens: number | undefined;
         let outputTokensPerSecond: number | undefined;
         let stepCount = 0;
         let lastStepFinishReason: string | undefined;
@@ -1626,6 +1638,7 @@ export class AgentSession {
               case "finish-step": {
                 const stepUsage = toSessionUsage(part.usage);
                 contextInputTokens = maxTokenCount(contextInputTokens, stepUsage.inputTokens);
+                lastStepOutputTokens = stepUsage.outputTokens;
                 stepCount += 1;
                 lastStepFinishReason = part.finishReason;
                 const stepThroughput =
@@ -1859,6 +1872,8 @@ export class AgentSession {
         const pressureInputTokens = contextInputTokens ?? totalUsage?.inputTokens;
         if (pressureInputTokens !== undefined) {
           this.lastInputTokens = pressureInputTokens;
+          this.lastStepOutputTokens = lastStepOutputTokens;
+          this.measuredMessageCount = this.messages.length;
         }
         const stoppedAtStepLimit =
           stepCount >= this.maxSteps && lastStepFinishReason === "tool-calls";
@@ -1871,7 +1886,25 @@ export class AgentSession {
           ...(outputTokensPerSecond !== undefined ? { outputTokensPerSecond } : {}),
           ...(stoppedAtStepLimit ? { stoppedAtStepLimit: true } : {}),
         });
-        return;
+        if (
+          !activeTurn.pausedForContextPressure ||
+          lastStepFinishReason !== "tool-calls" ||
+          activeTurn.contextPressureContinuations >= MAX_CONTEXT_PRESSURE_CONTINUATIONS
+        ) {
+          return;
+        }
+        activeTurn.pausedForContextPressure = false;
+        this.debug(queue, "compaction", "turn paused for context pressure", turnStartedAt, {
+          continuations: activeTurn.contextPressureContinuations,
+          pressureTokens: this.contextPressureTokens(),
+        });
+        const progressed = await this.runAutoCompactionPasses(queue, activeTurn, turnStartedAt);
+        if (!progressed || this.isTurnAborted(activeTurn)) {
+          return;
+        }
+        activeTurn.contextPressureContinuations += 1;
+        continuation = true;
+        queue.push({ type: "message-start", messageId: randomUUID() });
       }
     } catch (error) {
       if (this.isTurnAborted(activeTurn) || isTurnTimeoutAbortReason(error)) {
@@ -2124,15 +2157,118 @@ export class AgentSession {
     this.onProviderOptionsChange?.(providerOptions);
   }
 
-  private shouldAutoCompact(): boolean {
+  private async runAutoCompactionPasses(
+    queue: AsyncEventQueue<SessionEvent>,
+    activeTurn: ActiveTurn,
+    turnStartedAt: number,
+    pendingContent?: UserModelMessage["content"],
+  ): Promise<boolean> {
+    let progressedAny = false;
+    for (
+      let pass = 0;
+      pass < MAX_AUTO_COMPACTION_PASSES && this.shouldAutoCompact(pendingContent);
+      pass += 1
+    ) {
+      this.debug(queue, "compaction", "auto requested", turnStartedAt, {
+        pass,
+        messages: this.messages.length,
+        pressureTokens: this.contextPressureTokens(pendingContent),
+        ...(this.lastInputTokens !== undefined ? { lastInputTokens: this.lastInputTokens } : {}),
+      });
+      const progressed = await this.runCompaction(
+        queue,
+        "auto",
+        activeTurn,
+        false,
+        this.compactionTargetTokens(pendingContent),
+      );
+      if (!progressed) {
+        break;
+      }
+      progressedAny = true;
+    }
+    return progressedAny;
+  }
+
+  private stopOnContextPressure(activeTurn: ActiveTurn): StopCondition<ToolSet> {
+    return ({ steps }) => {
+      const settings = this.compaction;
+      const last = steps.at(-1);
+      if (
+        settings === undefined ||
+        !settings.enabled ||
+        this.contextWindow === undefined ||
+        last === undefined ||
+        last.finishReason !== "tool-calls"
+      ) {
+        return false;
+      }
+      const usage = toSessionUsage(last.usage);
+      if (usage.inputTokens === undefined) {
+        return false;
+      }
+      const pressure =
+        usage.inputTokens +
+        (usage.outputTokens ?? 0) +
+        estimateMessagesTokens(last.response.messages.filter((message) => message.role === "tool"));
+      if (pressure / this.contextWindow < settings.threshold) {
+        return false;
+      }
+      activeTurn.pausedForContextPressure = true;
+      return true;
+    };
+  }
+
+  private contextPressureTokens(pendingContent?: UserModelMessage["content"]): number {
+    const pending =
+      pendingContent === undefined
+        ? 0
+        : estimateMessagesTokens([{ role: "user", content: pendingContent }]);
+    if (this.lastInputTokens !== undefined && this.measuredMessageCount !== undefined) {
+      return (
+        this.lastInputTokens +
+        (this.lastStepOutputTokens ?? 0) +
+        estimateMessagesTokens(this.messages.slice(this.measuredMessageCount)) +
+        pending
+      );
+    }
+    return estimateMessagesTokens(this.messages) + pending;
+  }
+
+  private promptOverheadTokens(): number {
+    if (this.lastInputTokens !== undefined && this.measuredMessageCount !== undefined) {
+      return Math.max(
+        0,
+        this.lastInputTokens -
+          estimateMessagesTokens(this.messages.slice(0, this.measuredMessageCount)),
+      );
+    }
+    return 0;
+  }
+
+  private compactionTargetTokens(pendingContent?: UserModelMessage["content"]): number | undefined {
+    const settings = this.compaction;
+    if (settings === undefined || this.contextWindow === undefined) {
+      return undefined;
+    }
+    const pending =
+      pendingContent === undefined
+        ? 0
+        : estimateMessagesTokens([{ role: "user", content: pendingContent }]);
+    return Math.max(
+      1,
+      Math.floor(this.contextWindow * settings.threshold) - this.promptOverheadTokens() - pending,
+    );
+  }
+
+  private shouldAutoCompact(pendingContent?: UserModelMessage["content"]): boolean {
     const settings = this.compaction;
     return (
       settings !== undefined &&
       settings.enabled &&
       (this.needsCompaction ||
         (this.contextWindow !== undefined &&
-          this.lastInputTokens !== undefined &&
-          this.lastInputTokens / this.contextWindow >= settings.threshold))
+          this.contextPressureTokens(pendingContent) / this.contextWindow >= settings.threshold))
     );
   }
 
@@ -2578,6 +2714,7 @@ export class AgentSession {
     reason: ContextCompactionReason,
     activeTurn?: ActiveTurn,
     emitCancellationOnAbort = false,
+    targetTokens: number | undefined = this.compactionTargetTokens(),
   ): Promise<boolean> {
     const startedAt = Date.now();
     const settings = this.compaction;
@@ -2651,6 +2788,7 @@ export class AgentSession {
           model: this.model,
           semanticEvidencePrompt: evidence.modelContext,
           maxRemovedTranscriptMessages,
+          ...(targetTokens !== undefined ? { targetTokens } : {}),
           ...(settings.timeoutMs !== undefined ? { timeoutMs: settings.timeoutMs } : {}),
           ...(settings.maxOutputTokens !== undefined
             ? { maxOutputTokens: settings.maxOutputTokens }
@@ -2697,6 +2835,7 @@ export class AgentSession {
         keepRecentTokens: settings.keepRecentTokens,
         model: this.model,
         maxRemovedTranscriptMessages,
+        ...(targetTokens !== undefined ? { targetTokens } : {}),
         ...(abortSignal ? { abortSignal } : {}),
       });
       this.debug(queue, "compaction", "truncate fallback finished", fallbackStartedAt);
@@ -2832,6 +2971,8 @@ export class AgentSession {
         this.compactionCheckpoint = checkpoint;
       }
       this.lastInputTokens = undefined;
+      this.lastStepOutputTokens = undefined;
+      this.measuredMessageCount = undefined;
       this.needsCompaction = false;
     }
 

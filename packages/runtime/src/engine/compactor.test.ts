@@ -813,3 +813,129 @@ test("summarize 转写将 typed denied/error 结果标为失败并携带 reason"
   assert.match(transcript, /构建失败: exit 1/u);
   assert.doesNotMatch(transcript, /工具结果·成功/u);
 });
+
+function longTurns(turnCount: number, assistantChars: number): ModelMessage[] {
+  const messages: ModelMessage[] = [];
+  for (let index = 1; index <= turnCount; index += 1) {
+    messages.push({ role: "user", content: `t${String(index)}-u` });
+    messages.push({ role: "assistant", content: `t${String(index)}-`.padEnd(assistantChars, "a") });
+  }
+  return messages;
+}
+
+function toolStep(id: string, resultChars: number): ModelMessage[] {
+  return [
+    {
+      role: "assistant",
+      content: [{ type: "tool-call", toolCallId: id, toolName: "read", input: { id } }],
+    },
+    {
+      role: "tool",
+      content: [
+        {
+          type: "tool-result",
+          toolCallId: id,
+          toolName: "read",
+          output: { type: "text", value: id.padEnd(resultChars, "r") },
+        },
+      ],
+    },
+  ];
+}
+
+function monsterTurn(stepCount: number, resultChars: number): ModelMessage[] {
+  const messages: ModelMessage[] = [
+    { role: "user", content: "old-u" },
+    { role: "assistant", content: "old-a" },
+    { role: "user", content: "big-u" },
+  ];
+  for (let index = 1; index <= stepCount; index += 1) {
+    messages.push(...toolStep(`s${String(index)}`, resultChars));
+  }
+  messages.push({ role: "assistant", content: "big-final" });
+  return messages;
+}
+
+test("targetTokens 超出时放弃 keepRecentTurns 保护,按目标预算保留整轮", async () => {
+  const messages = longTurns(6, 700);
+  const result = await compactMessages({
+    messages,
+    strategy: "truncate",
+    keepRecentTurns: 4,
+    keepRecentTokens: 100_000,
+    targetTokens: 500,
+    model: draftModel(),
+  });
+
+  assert.equal(result.removed, 8);
+  assert.equal(result.messages[0]?.content, "t5-u");
+  assert.equal(result.messages.length, 4);
+});
+
+test("targetTokens 未给出时行为与之前一致(不升级)", async () => {
+  const result = await compactMessages({
+    messages: longTurns(6, 700),
+    strategy: "truncate",
+    keepRecentTurns: 4,
+    keepRecentTokens: 100_000,
+    model: draftModel(),
+  });
+
+  assert.equal(result.removed, 0);
+});
+
+test("最近一轮单独超出 targetTokens 时在步骤边界切,保留该轮 user 与最近步骤且不拆 tool 对", async () => {
+  const messages = monsterTurn(6, 1500);
+  const result = await compactMessages({
+    messages,
+    strategy: "truncate",
+    keepRecentTurns: 4,
+    keepRecentTokens: 100_000,
+    targetTokens: 1500,
+    model: draftModel(),
+  });
+
+  assert.ok(result.removed > 2, `expected intra-turn removal, got ${String(result.removed)}`);
+  assert.equal(result.messages[0]?.content, "big-u");
+  assert.equal(result.messages[1]?.role, "assistant");
+  const kept = result.messages;
+  for (const [index, message] of kept.entries()) {
+    if (message.role === "tool") {
+      assert.equal(kept[index - 1]?.role, "assistant");
+    }
+  }
+  assert.equal(kept.at(-1)?.content, "big-final");
+  assert.ok(kept.length < messages.length - 2);
+});
+
+test("步骤边界切至少保留最后一个步骤", async () => {
+  const messages = monsterTurn(3, 1500);
+  const result = await compactMessages({
+    messages,
+    strategy: "truncate",
+    keepRecentTurns: 1,
+    keepRecentTokens: 1,
+    targetTokens: 1,
+    model: draftModel(),
+  });
+
+  assert.deepEqual(
+    result.messages.map((message) => message.content),
+    ["big-u", "big-final"],
+  );
+});
+
+test("步骤边界切受 maxRemovedTranscriptMessages 约束", async () => {
+  const messages = monsterTurn(6, 1500);
+  const result = await compactMessages({
+    messages,
+    strategy: "truncate",
+    keepRecentTurns: 4,
+    keepRecentTokens: 100_000,
+    targetTokens: 1500,
+    maxRemovedTranscriptMessages: 4,
+    model: draftModel(),
+  });
+
+  assert.ok(result.removed <= 4, `removed ${String(result.removed)} exceeds evidence cap`);
+});
