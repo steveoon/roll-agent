@@ -976,7 +976,6 @@ export class RuntimeService {
           params.decision === "approve"
             ? {
                 decision: "approve",
-                ...(params.scope !== undefined ? { scope: params.scope } : {}),
               }
             : {
                 decision: "reject",

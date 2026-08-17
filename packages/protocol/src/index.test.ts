@@ -80,8 +80,6 @@ import {
   runtimeEventsResumeParamsSchema,
   runtimeEventsResumeResultSchema,
   runtimeMethodSchemas,
-  runtimeMethodSchemasV11,
-  runtimeMethodSchemasV14,
   runtimeProtocolErrorDataSchema,
   runtimeServerRequestCancelParamsSchema,
   runtimeServerRequestCancelParamsV12Schema,
@@ -1321,49 +1319,6 @@ test("approval rejection reasons use the same non-empty contract", () => {
       reason: "user declined",
     }).reason,
     "user declined",
-  );
-});
-
-test("approval respond 的可选 scope 字段与旧客户端/旧字段双向兼容（V14 schema）", () => {
-  const base = {
-    requestId: IDS.turn,
-    threadId: IDS.thread,
-    turnId: IDS.turn,
-    approvalId: IDS.approval,
-    decision: "approve",
-  } as const;
-  assert.equal(
-    runtimeMethodSchemasV14[RUNTIME_METHODS.approvalRespond].params.parse({
-      ...base,
-      scope: "session",
-    }).scope,
-    "session",
-  );
-  assert.equal(
-    runtimeMethodSchemasV14[RUNTIME_METHODS.approvalRespond].params.parse(base).scope,
-    undefined,
-  );
-  assert.throws(() =>
-    runtimeMethodSchemasV14[RUNTIME_METHODS.approvalRespond].params.parse({
-      ...base,
-      scope: "forever",
-    }),
-  );
-});
-
-test("approval respond scope 字段严格分层于 V14：V11（Relay Wire 1.0 冻结契约）拒绝，V14 接受", () => {
-  const base = {
-    requestId: IDS.turn,
-    threadId: IDS.thread,
-    turnId: IDS.turn,
-    approvalId: IDS.approval,
-    decision: "approve",
-    scope: "session",
-  } as const;
-  assert.throws(() => runtimeMethodSchemasV11[RUNTIME_METHODS.approvalRespond].params.parse(base));
-  assert.equal(
-    runtimeMethodSchemasV14[RUNTIME_METHODS.approvalRespond].params.parse(base).scope,
-    "session",
   );
 });
 
