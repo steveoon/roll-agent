@@ -2030,6 +2030,9 @@ export class AgentSession {
       ...(expiresAt !== undefined ? { expiresAt } : {}),
       ...(request.reason ? { reason: request.reason } : {}),
       ...(request.explanation !== undefined ? { explanation: request.explanation } : {}),
+      ...(request.sessionGrantLabel !== undefined
+        ? { sessionGrantLabel: request.sessionGrantLabel }
+        : {}),
     });
     return decision;
   }

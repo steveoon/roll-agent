@@ -1,6 +1,13 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdtempSync,
+  readFileSync,
+  realpathSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ToolExecutionOptions } from "ai";
@@ -144,6 +151,55 @@ test("缩水覆盖即使记忆已授权仍会弹出确认，explanation 提示�
   assert.equal(result.outcome.kind, TOOL_OUTCOME_KINDS.success);
   assert.equal(approvals.length, 1);
   assert.match(approvals[0]?.explanation ?? "", /有意删减/u);
+});
+
+test("symlink 目录写入时 explanation 含 outside 的真实路径", async () => {
+  const workdir = realpathSync(mkdtempSync(join(tmpdir(), "write-tool-symlink-expl-")));
+  const outside = realpathSync(mkdtempSync(join(tmpdir(), "write-tool-symlink-out-")));
+  symlinkSync(outside, join(workdir, "out"));
+  const approvals: ApprovalRequest[] = [];
+  const tools = buildWriteFixture(
+    workdir,
+    new FileStateTracker(),
+    approvals,
+    new SessionApprovalMemory(),
+  );
+  const writeTool = tools.roll__write_file;
+  assert.ok(writeTool?.execute !== undefined);
+  const result = (await writeTool.execute(
+    { file_path: "out/secret.txt", content: "x\n" },
+    executeOptions(),
+  )) as NormalizedToolResult;
+  assert.equal(result.outcome.kind, TOOL_OUTCOME_KINDS.success);
+  assert.equal(approvals.length, 1);
+  assert.match(
+    approvals[0]?.explanation ?? "",
+    new RegExp(outside.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "u"),
+  );
+  assert.match(approvals[0]?.explanation ?? "", /secret\.txt（工作目录外）/u);
+});
+
+test("external write 选 session 后再写另一个 external 路径仍弹窗", async () => {
+  const workdir = mkdtempSync(join(tmpdir(), "write-tool-ext-mem-"));
+  const outsideA = mkdtempSync(join(tmpdir(), "write-tool-ext-a-"));
+  const outsideB = mkdtempSync(join(tmpdir(), "write-tool-ext-b-"));
+  const approvals: ApprovalRequest[] = [];
+  const memory = new SessionApprovalMemory();
+  const tools = buildWriteFixture(workdir, new FileStateTracker(), approvals, memory);
+  const writeTool = tools.roll__write_file;
+  assert.ok(writeTool?.execute !== undefined);
+  const first = (await writeTool.execute(
+    { file_path: join(outsideA, "a.txt"), content: "one\n" },
+    executeOptions({ toolCallId: "e1" }),
+  )) as NormalizedToolResult;
+  assert.equal(first.outcome.kind, TOOL_OUTCOME_KINDS.success);
+  assert.equal(approvals.length, 1);
+  const second = (await writeTool.execute(
+    { file_path: join(outsideB, "b.txt"), content: "two\n" },
+    executeOptions({ toolCallId: "e2" }),
+  )) as NormalizedToolResult;
+  assert.equal(second.outcome.kind, TOOL_OUTCOME_KINDS.success);
+  assert.equal(approvals.length, 2);
 });
 
 test("非缩水覆盖命中已授权记忆，不再弹出确认", async () => {

@@ -1,9 +1,26 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import {
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  realpathSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { loadTextFile, resolveFilePath, saveTextFile } from "./file-io.ts";
+import {
+  FILE_CONTAINMENT_DRIFT_MESSAGE,
+  captureFilePathAdmission,
+  escapesWorkdir,
+  formatPathForApproval,
+  loadTextFile,
+  resolveFilePath,
+  revalidateFilePathAdmission,
+  saveTextFile,
+} from "./file-io.ts";
 
 const LIMITS = { maxFileBytes: 1024 * 1024 };
 
@@ -61,4 +78,65 @@ test("saveTextFile 自动建父目录并按需还原 BOM", () => {
   const nested = join(dir, "sub", "deep", "out.txt");
   saveTextFile(nested, "内容", true);
   assert.equal(readFileSync(nested, "utf8"), "\uFEFF内容");
+});
+
+test("symlink 目录下新建文件判定为 external", () => {
+  const workdir = realpathSync(tempDir());
+  const outside = realpathSync(tempDir());
+  symlinkSync(outside, join(workdir, "out"));
+  assert.equal(escapesWorkdir(workdir, "out/secret.txt"), true);
+  assert.equal(escapesWorkdir(workdir, "inside.txt"), false);
+  assert.equal(
+    formatPathForApproval(workdir, "out/secret.txt"),
+    `${join(outside, "secret.txt")}（工作目录外）`,
+  );
+});
+
+test("断链目标判定为 external", () => {
+  const workdir = realpathSync(tempDir());
+  symlinkSync(join(workdir, "missing-target"), join(workdir, "broken"));
+  assert.equal(escapesWorkdir(workdir, "broken"), true);
+  assert.equal(escapesWorkdir(workdir, "broken/secret.txt"), true);
+});
+
+test("lexical workdir 下新建文件判定为 workdir 内", () => {
+  const lexical = mkdtempSync(join(tmpdir(), "file-io-lexical-"));
+  assert.notEqual(lexical, realpathSync(lexical));
+  assert.equal(escapesWorkdir(lexical, "new.txt"), false);
+});
+
+test("名为 ..cache 的目录判定为 workdir 内", () => {
+  const workdir = realpathSync(tempDir());
+  mkdirSync(join(workdir, "..cache"));
+  writeFileSync(join(workdir, "..cache", "a.txt"), "x", "utf8");
+  assert.equal(escapesWorkdir(workdir, "..cache"), false);
+  assert.equal(escapesWorkdir(workdir, join("..cache", "a.txt")), false);
+  assert.equal(escapesWorkdir(workdir, join("..cache", "new.txt")), false);
+});
+
+test("准入后父目录换成越界 symlink 时 revalidate 阻止", () => {
+  const workdir = realpathSync(tempDir());
+  const outside = realpathSync(tempDir());
+  mkdirSync(join(workdir, "out"));
+  const captured = captureFilePathAdmission(workdir, join("out", "secret.txt"));
+  assert.equal(captured.admittedExternal, false);
+  execFileSync("rm", ["-rf", join(workdir, "out")]);
+  symlinkSync(outside, join(workdir, "out"));
+  const blocked = revalidateFilePathAdmission(workdir, join("out", "secret.txt"), captured);
+  assert.ok(blocked !== undefined);
+  assert.equal(blocked.outcome.kind, "tool_failed");
+  assert.equal(String(blocked.display), FILE_CONTAINMENT_DRIFT_MESSAGE);
+});
+
+test("loadTextFile 拒绝非普通文件", (t) => {
+  const workdir = realpathSync(tempDir());
+  const fifo = join(workdir, "pipe.fifo");
+  try {
+    execFileSync("mkfifo", [fifo]);
+  } catch {
+    t.skip("mkfifo 不可用");
+    return;
+  }
+  const loaded = loadTextFile(fifo, LIMITS);
+  assert.ok(!loaded.ok && loaded.code === "not-regular-file");
 });

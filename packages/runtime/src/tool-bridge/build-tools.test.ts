@@ -60,6 +60,25 @@ test("无 memoryKey 或无 memory 时行为与既有一致", async () => {
   assert.equal(approvals.length, 1);
 });
 
+test("有 memoryKey 且提供 sessionGrantLabel 时写入 ApprovalRequest", async () => {
+  const { ctx, approvals } = confirmPolicyCtx(new SessionApprovalMemory(), [
+    { approved: true, scope: "session" },
+  ]);
+  await gateToolCall(ctx, "roll", "edit_file", {}, undefined, {
+    memoryKey: "edit_file:workdir",
+    sessionGrantLabel: "本会话内不再询问：修改工作目录内的文件",
+  });
+  assert.equal(approvals[0]?.sessionGrantLabel, "本会话内不再询问：修改工作目录内的文件");
+});
+
+test("无 memoryKey 时不带 sessionGrantLabel", async () => {
+  const { ctx, approvals } = confirmPolicyCtx(undefined, [{ approved: true }]);
+  await gateToolCall(ctx, "roll", "edit_file", {}, undefined, {
+    sessionGrantLabel: "不应出现",
+  });
+  assert.equal(approvals[0]?.sessionGrantLabel, undefined);
+});
+
 test("拒绝不写记忆", async () => {
   const memory = new SessionApprovalMemory();
   const { ctx } = confirmPolicyCtx(memory, [{ approved: false, scope: "session" }]);

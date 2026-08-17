@@ -12,16 +12,19 @@ export async function gateExternalPath(
   ctx: ToolBridgeContext,
   toolName: string,
   input: Record<string, unknown>,
+  toolId?: string,
 ): Promise<NormalizedToolResult | undefined> {
   const memoryKey = `${toolName}:external`;
   if (ctx.approvalMemory?.isGranted(memoryKey)) {
     return undefined;
   }
+  const labelName = toolId ?? toolName;
   const approval = await ctx.requestApproval({
     agentName: FILE_TOOLS_AGENT_NAME,
     toolName,
     input,
     reason: EXTERNAL_PATH_APPROVAL_REASON,
+    sessionGrantLabel: `本会话内不再询问：${labelName} 访问工作目录外的任意路径`,
   });
   if (!approval.approved) {
     return failedToolResult(

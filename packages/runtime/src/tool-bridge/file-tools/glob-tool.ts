@@ -17,7 +17,7 @@ import {
   executeCoordinatedTool,
   type ToolExecutionPlan,
 } from "../tool-execution-coordinator.ts";
-import { canonicalFileKey, escapesWorkdir, resolveFilePath } from "./file-io.ts";
+import { canonicalResourcePath, escapesWorkdir, resolveFilePath } from "./file-io.ts";
 import { runRg } from "./rg-exec.ts";
 import { gateExternalPath } from "./external-approval.ts";
 import { FILE_TOOLS_AGENT_NAME, type ResolvedFileToolsSettings } from "./settings.ts";
@@ -85,6 +85,7 @@ function isRegularFile(path: string): boolean {
 export async function executeGlob(
   settings: ResolvedFileToolsSettings,
   input: GlobInput,
+  abortSignal?: AbortSignal,
 ): Promise<NormalizedToolResult> {
   const resolvedPath = resolveFilePath(settings.workdir, input.path ?? ".");
   if (isRegularFile(resolvedPath)) {
@@ -93,7 +94,12 @@ export async function executeGlob(
       `${resolvedPath} 是文件而非目录：读取内容用 roll__read_file，按 pattern 找文件请把 path 设为起始目录`,
     );
   }
-  const result = await runRg(buildRgArgs(input.pattern, resolvedPath), settings.workdir);
+  const result = await runRg(buildRgArgs(input.pattern, resolvedPath), settings.workdir, {
+    ...(abortSignal ? { abortSignal } : {}),
+  });
+  if (result.cancelled === true) {
+    return failedToolResult(TOOL_OUTCOME_KINDS.cancelled, "已取消");
+  }
   if (!result.ok) {
     return failedToolResult(TOOL_OUTCOME_KINDS.toolFailed, result.errorMessage ?? "rg 执行失败");
   }
@@ -130,7 +136,7 @@ export function buildGlobTool(
         );
       }
       if (escapesWorkdir(settings.workdir, parsed.data.path ?? ".")) {
-        const gated = await gateExternalPath(ctx, GLOB_TOOL_NAME, parsed.data);
+        const gated = await gateExternalPath(ctx, GLOB_TOOL_NAME, parsed.data, id);
         if (gated !== undefined) {
           return gated;
         }
@@ -146,7 +152,7 @@ export function buildGlobTool(
     resources: (rawInput) => {
       const parsed = globInputSchema.safeParse(rawInput);
       const key = parsed.success
-        ? `file:${canonicalFileKey(resolveFilePath(settings.workdir, parsed.data.path ?? "."))}`
+        ? `file:${canonicalResourcePath(resolveFilePath(settings.workdir, parsed.data.path ?? "."))}`
         : `file-tools:${settings.workdir}`;
       return [{ key, mode: TOOL_RESOURCE_ACCESS_MODES.read }];
     },
@@ -166,7 +172,7 @@ export function buildGlobTool(
           options.toolCallId,
           input,
           options.abortSignal,
-          () => executeGlob(settings, input),
+          () => executeGlob(settings, input, options.abortSignal),
         ),
     }),
   };

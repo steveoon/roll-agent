@@ -16,7 +16,7 @@ import {
   type ToolExecutionPlan,
 } from "../tool-execution-coordinator.ts";
 import { renderNumberedLines } from "./match-pipeline.ts";
-import { canonicalFileKey, escapesWorkdir, loadTextFile, resolveFilePath } from "./file-io.ts";
+import { canonicalResourcePath, escapesWorkdir, loadTextFile, resolveFilePath } from "./file-io.ts";
 import type { FileStateTracker } from "./file-state-tracker.ts";
 import { gateExternalPath } from "./external-approval.ts";
 import { FILE_TOOLS_AGENT_NAME, type ResolvedFileToolsSettings } from "./settings.ts";
@@ -99,7 +99,7 @@ export function buildReadFileTool(
         );
       }
       if (escapesWorkdir(settings.workdir, parsed.data.path)) {
-        const gated = await gateExternalPath(ctx, READ_FILE_TOOL_NAME, parsed.data);
+        const gated = await gateExternalPath(ctx, READ_FILE_TOOL_NAME, parsed.data, id);
         if (gated !== undefined) {
           return gated;
         }
@@ -115,7 +115,7 @@ export function buildReadFileTool(
     resources: (rawInput) => {
       const parsed = readFileInputSchema.safeParse(rawInput);
       const key = parsed.success
-        ? `file:${canonicalFileKey(resolveFilePath(settings.workdir, parsed.data.path))}`
+        ? `file:${canonicalResourcePath(resolveFilePath(settings.workdir, parsed.data.path))}`
         : `file-tools:${settings.workdir}`;
       return [{ key, mode: TOOL_RESOURCE_ACCESS_MODES.read }];
     },

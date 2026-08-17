@@ -23,6 +23,18 @@ test("非法正则返回 ok:false 与错误信息", async () => {
   assert.ok(result.errorMessage !== undefined && result.errorMessage.length > 0);
 });
 
+test("abort 后返回 cancelled 且不把结果当成功", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "rg-exec-abort-"));
+  writeFileSync(join(dir, "a.txt"), "hello\n", "utf8");
+  const controller = new AbortController();
+  controller.abort();
+  const result = await runRg(["--line-number", "hello", "."], dir, {
+    abortSignal: controller.signal,
+  });
+  assert.equal(result.ok, false);
+  assert.equal(result.cancelled, true);
+});
+
 test("输出超限被截断并标记", async () => {
   const dir = mkdtempSync(join(tmpdir(), "rg-exec-test-"));
   writeFileSync(join(dir, "big.txt"), "line\n".repeat(5000), "utf8");

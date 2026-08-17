@@ -52,6 +52,7 @@ export interface ApprovalRequest {
   readonly input: Record<string, unknown>;
   readonly reason: string | undefined;
   readonly explanation?: string;
+  readonly sessionGrantLabel?: string;
 }
 
 export interface ToolBridgeContext {
@@ -66,6 +67,7 @@ interface ApprovalDisplayOptions {
   /** False when a conservative policy label would overstate the actual user-visible risk. */
   readonly includePolicyReason?: boolean;
   readonly memoryKey?: string;
+  readonly sessionGrantLabel?: string;
 }
 
 export interface BuiltToolset {
@@ -408,6 +410,9 @@ export async function gateToolCall(
       input,
       reason: display?.includePolicyReason === false ? undefined : decision.reason,
       ...(display?.explanation !== undefined ? { explanation: display.explanation } : {}),
+      ...(memoryKey !== undefined && display?.sessionGrantLabel !== undefined
+        ? { sessionGrantLabel: display.sessionGrantLabel }
+        : {}),
     });
     if (!approval.approved) {
       return failedToolResult(

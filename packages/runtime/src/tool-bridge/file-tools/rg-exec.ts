@@ -8,13 +8,28 @@ export interface RgRunResult {
   readonly ok: boolean;
   readonly stdout: string;
   readonly truncated: boolean;
+  readonly cancelled?: boolean;
   readonly errorMessage?: string;
+}
+
+function isAbortError(error: unknown): boolean {
+  return (
+    (error instanceof Error && error.name === "AbortError") ||
+    (typeof error === "object" &&
+      error !== null &&
+      "code" in error &&
+      (error as { code: unknown }).code === "ABORT_ERR")
+  );
 }
 
 export function runRg(
   args: readonly string[],
   cwd: string,
-  options: { readonly timeoutMs?: number; readonly maxOutputBytes?: number } = {},
+  options: {
+    readonly timeoutMs?: number;
+    readonly maxOutputBytes?: number;
+    readonly abortSignal?: AbortSignal;
+  } = {},
 ): Promise<RgRunResult> {
   const maxOutputBytes = options.maxOutputBytes ?? DEFAULT_MAX_OUTPUT_BYTES;
   return new Promise((resolve) => {
@@ -26,8 +41,19 @@ export function runRg(
         timeout: options.timeoutMs ?? DEFAULT_TIMEOUT_MS,
         maxBuffer: maxOutputBytes * 2,
         encoding: "utf8",
+        ...(options.abortSignal ? { signal: options.abortSignal } : {}),
       },
       (error, stdout, stderr) => {
+        if (isAbortError(error) || options.abortSignal?.aborted === true) {
+          resolve({
+            ok: false,
+            stdout: "",
+            truncated: false,
+            cancelled: true,
+            errorMessage: "已取消",
+          });
+          return;
+        }
         const isBufferOverflow = error?.code === "ERR_CHILD_PROCESS_STDIO_MAXBUFFER";
         if (error && !isBufferOverflow && typeof error.code === "number" && error.code > 1) {
           resolve({

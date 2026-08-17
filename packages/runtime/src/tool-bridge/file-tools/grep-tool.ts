@@ -16,7 +16,7 @@ import {
   executeCoordinatedTool,
   type ToolExecutionPlan,
 } from "../tool-execution-coordinator.ts";
-import { canonicalFileKey, escapesWorkdir, resolveFilePath } from "./file-io.ts";
+import { canonicalResourcePath, escapesWorkdir, resolveFilePath } from "./file-io.ts";
 import { normalizeForMatch } from "./text-normalize.ts";
 import { runRg } from "./rg-exec.ts";
 import { gateExternalPath } from "./external-approval.ts";
@@ -160,10 +160,16 @@ function capOutputBody(body: string, maxOutputChars: number): CappedOutput {
 export async function executeGrep(
   settings: ResolvedFileToolsSettings,
   input: GrepInput,
+  abortSignal?: AbortSignal,
 ): Promise<NormalizedToolResult> {
   const resolvedPath = resolveFilePath(settings.workdir, input.path ?? ".");
   const maxResults = input.max_results ?? DEFAULT_MAX_RESULTS;
-  const result = await runRg(buildRgArgs(input, resolvedPath, maxResults), settings.workdir);
+  const result = await runRg(buildRgArgs(input, resolvedPath, maxResults), settings.workdir, {
+    ...(abortSignal ? { abortSignal } : {}),
+  });
+  if (result.cancelled === true) {
+    return failedToolResult(TOOL_OUTCOME_KINDS.cancelled, "已取消");
+  }
   if (!result.ok) {
     return failedToolResult(TOOL_OUTCOME_KINDS.toolFailed, result.errorMessage ?? "rg 执行失败");
   }
@@ -208,7 +214,7 @@ export function buildGrepTool(
         );
       }
       if (escapesWorkdir(settings.workdir, parsed.data.path ?? ".")) {
-        const gated = await gateExternalPath(ctx, GREP_TOOL_NAME, parsed.data);
+        const gated = await gateExternalPath(ctx, GREP_TOOL_NAME, parsed.data, id);
         if (gated !== undefined) {
           return gated;
         }
@@ -224,7 +230,7 @@ export function buildGrepTool(
     resources: (rawInput) => {
       const parsed = grepInputSchema.safeParse(rawInput);
       const key = parsed.success
-        ? `file:${canonicalFileKey(resolveFilePath(settings.workdir, parsed.data.path ?? "."))}`
+        ? `file:${canonicalResourcePath(resolveFilePath(settings.workdir, parsed.data.path ?? "."))}`
         : `file-tools:${settings.workdir}`;
       return [{ key, mode: TOOL_RESOURCE_ACCESS_MODES.read }];
     },
@@ -244,7 +250,7 @@ export function buildGrepTool(
           options.toolCallId,
           input,
           options.abortSignal,
-          () => executeGrep(settings, input),
+          () => executeGrep(settings, input, options.abortSignal),
         ),
     }),
   };

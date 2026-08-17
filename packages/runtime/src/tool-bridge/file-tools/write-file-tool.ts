@@ -1,4 +1,3 @@
-import { basename } from "node:path";
 import { statSync } from "node:fs";
 import { tool, type ToolSet } from "ai";
 import { z } from "zod";
@@ -20,9 +19,13 @@ import {
 import { renderNumberedLines } from "./match-pipeline.ts";
 import {
   canonicalFileKey,
+  canonicalResourcePath,
+  captureFilePathAdmission,
   escapesWorkdir,
+  formatPathForApproval,
   loadTextFile,
   resolveFilePath,
+  revalidateFilePathAdmission,
   saveTextFile,
   type LoadedTextFile,
   type LoadFileFailure,
@@ -137,14 +140,15 @@ export function buildWriteFileTool(
           "参数校验失败: file_path 必须为非空字符串，content 必须为字符串",
         );
       }
-      const path = resolveFilePath(settings.workdir, parsed.data.file_path);
       const newLineCount = parsed.data.content.split("\n").length;
-      const loaded = loadTextFile(path, { maxFileBytes: settings.maxFileBytes });
+      const loaded = loadTextFile(resolveFilePath(settings.workdir, parsed.data.file_path), {
+        maxFileBytes: settings.maxFileBytes,
+      });
       const { shrinking, warning } = detectShrink(newLineCount, loaded);
-      const explanation = `写入 ${basename(path)}（${String(newLineCount)} 行）${warning !== undefined ? `\n${warning}` : ""}`;
-      const memoryKey = shrinking
-        ? undefined
-        : `${WRITE_FILE_TOOL_NAME}:${escapesWorkdir(settings.workdir, parsed.data.file_path) ? "external" : "workdir"}`;
+      const displayPath = formatPathForApproval(settings.workdir, parsed.data.file_path);
+      const explanation = `写入 ${displayPath}（${String(newLineCount)} 行）${warning !== undefined ? `\n${warning}` : ""}`;
+      const external = escapesWorkdir(settings.workdir, parsed.data.file_path);
+      const memoryKey = shrinking || external ? undefined : `${WRITE_FILE_TOOL_NAME}:workdir`;
       return gateToolCall(
         ctx,
         FILE_TOOLS_AGENT_NAME,
@@ -153,16 +157,34 @@ export function buildWriteFileTool(
         WRITE_ANNOTATIONS,
         {
           explanation,
-          ...(memoryKey !== undefined ? { memoryKey } : {}),
+          ...(memoryKey !== undefined
+            ? {
+                memoryKey,
+                sessionGrantLabel: "本会话内不再询问：写入工作目录内的文件",
+              }
+            : {}),
         },
       );
     },
     resources: (rawInput) => {
       const parsed = writeFileInputSchema.safeParse(rawInput);
       const key = parsed.success
-        ? `file:${canonicalFileKey(resolveFilePath(settings.workdir, parsed.data.file_path))}`
+        ? `file:${canonicalResourcePath(resolveFilePath(settings.workdir, parsed.data.file_path))}`
         : `file-tools:${settings.workdir}`;
       return [{ key, mode: TOOL_RESOURCE_ACCESS_MODES.write }];
+    },
+    captureExecutionState: (rawInput) => {
+      const parsed = writeFileInputSchema.safeParse(rawInput);
+      return parsed.success
+        ? captureFilePathAdmission(settings.workdir, parsed.data.file_path)
+        : undefined;
+    },
+    revalidateExecution: (rawInput, capturedState) => {
+      const parsed = writeFileInputSchema.safeParse(rawInput);
+      if (!parsed.success) {
+        return undefined;
+      }
+      return revalidateFilePathAdmission(settings.workdir, parsed.data.file_path, capturedState);
     },
   };
   ctx.coordinator?.register(id, plan);

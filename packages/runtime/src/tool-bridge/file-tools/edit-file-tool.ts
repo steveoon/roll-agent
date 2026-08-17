@@ -1,4 +1,3 @@
-import { basename } from "node:path";
 import { tool, type ToolSet } from "ai";
 import { z } from "zod";
 import type { ToolRegistry } from "../naming.ts";
@@ -26,10 +25,13 @@ import {
   type MatchSpan,
 } from "./match-pipeline.ts";
 import {
-  canonicalFileKey,
+  canonicalResourcePath,
+  captureFilePathAdmission,
   escapesWorkdir,
+  formatPathForApproval,
   loadTextFile,
   resolveFilePath,
+  revalidateFilePathAdmission,
   saveTextFile,
 } from "./file-io.ts";
 import { FILE_FRESHNESS, type FileStateTracker } from "./file-state-tracker.ts";
@@ -222,8 +224,9 @@ export function buildEditFileTool(
           "参数校验失败: file_path 必须为非空字符串，edits 至少一条且每条含非空 old_string 与 new_string",
         );
       }
-      const path = resolveFilePath(settings.workdir, parsed.data.file_path);
-      const memoryKey = `${EDIT_FILE_TOOL_NAME}:${escapesWorkdir(settings.workdir, parsed.data.file_path) ? "external" : "workdir"}`;
+      const displayPath = formatPathForApproval(settings.workdir, parsed.data.file_path);
+      const external = escapesWorkdir(settings.workdir, parsed.data.file_path);
+      const memoryKey = external ? undefined : `${EDIT_FILE_TOOL_NAME}:workdir`;
       return gateToolCall(
         ctx,
         FILE_TOOLS_AGENT_NAME,
@@ -231,17 +234,35 @@ export function buildEditFileTool(
         parsed.data,
         EDIT_ANNOTATIONS,
         {
-          explanation: `修改 ${basename(path)}：${String(parsed.data.edits.length)} 处编辑`,
-          memoryKey,
+          explanation: `修改 ${displayPath}：${String(parsed.data.edits.length)} 处编辑`,
+          ...(memoryKey !== undefined
+            ? {
+                memoryKey,
+                sessionGrantLabel: "本会话内不再询问：修改工作目录内的文件",
+              }
+            : {}),
         },
       );
     },
     resources: (rawInput) => {
       const parsed = editFileInputSchema.safeParse(rawInput);
       const key = parsed.success
-        ? `file:${canonicalFileKey(resolveFilePath(settings.workdir, parsed.data.file_path))}`
+        ? `file:${canonicalResourcePath(resolveFilePath(settings.workdir, parsed.data.file_path))}`
         : `file-tools:${settings.workdir}`;
       return [{ key, mode: TOOL_RESOURCE_ACCESS_MODES.write }];
+    },
+    captureExecutionState: (rawInput) => {
+      const parsed = editFileInputSchema.safeParse(rawInput);
+      return parsed.success
+        ? captureFilePathAdmission(settings.workdir, parsed.data.file_path)
+        : undefined;
+    },
+    revalidateExecution: (rawInput, capturedState) => {
+      const parsed = editFileInputSchema.safeParse(rawInput);
+      if (!parsed.success) {
+        return undefined;
+      }
+      return revalidateFilePathAdmission(settings.workdir, parsed.data.file_path, capturedState);
     },
   };
   ctx.coordinator?.register(id, plan);
