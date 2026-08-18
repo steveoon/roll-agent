@@ -1,3 +1,7 @@
+import { randomUUID } from "node:crypto";
+import { writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
   TOOL_OUTCOME_KINDS,
   failedToolResult,
@@ -56,6 +60,12 @@ function truncationWarning(label: string, stream: CapturedStream): string | unde
   return `Warning: ${label} 输出已截断（原始 ${String(stream.totalBytes)} 字节 / ${String(stream.totalLines)} 行）`;
 }
 
+function dumpFullOutput(text: string): string | undefined {
+  const path = join(tmpdir(), `roll-bash-${randomUUID()}.log`);
+  writeFileSync(path, text, "utf8");
+  return path;
+}
+
 function renderSection(label: string, text: string): string | undefined {
   const trimmed = text.length > 0 ? text : undefined;
   return trimmed !== undefined ? `[${label}]\n${trimmed}` : undefined;
@@ -64,6 +74,7 @@ function renderSection(label: string, text: string): string | undefined {
 export interface FormatBashResultInput {
   readonly result: BashExecResult;
   readonly maxModelOutputChars: number;
+  readonly fullOutputSink?: (text: string) => string | undefined;
 }
 
 export function formatBashResult(input: FormatBashResultInput): NormalizedToolResult {
@@ -103,6 +114,20 @@ export function formatBashResult(input: FormatBashResultInput): NormalizedToolRe
       ? truncationWarning("stderr", result.stderr)
       : undefined,
   ].filter((warning): warning is string => warning !== undefined);
+  const anyTruncated =
+    stdout.truncated || stderr.truncated || result.stdout.truncated || result.stderr.truncated;
+  if (anyTruncated) {
+    const fullSections = [
+      result.stdout.text.length > 0 ? `[stdout]\n${result.stdout.text}` : undefined,
+      result.stderr.text.length > 0 ? `[stderr]\n${result.stderr.text}` : undefined,
+    ].filter((section): section is string => section !== undefined);
+    const dumpedPath = (input.fullOutputSink ?? dumpFullOutput)(fullSections.join("\n\n"));
+    if (dumpedPath !== undefined) {
+      warnings.push(
+        `完整捕获输出已落盘: ${dumpedPath}；用 roll__read_file 以 offset/limit 分页查看被截断的中段，或重跑更窄的命令`,
+      );
+    }
+  }
   lines.push(...warnings);
 
   const sections = [
