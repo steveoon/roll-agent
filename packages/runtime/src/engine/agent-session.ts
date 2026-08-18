@@ -375,6 +375,8 @@ const DEFAULT_INTERACTION_TIMEOUT_MS = 5 * 60 * 1_000;
 const MAX_AUTO_COMPACTION_PASSES = 4;
 const MAX_CONTEXT_PRESSURE_CONTINUATIONS = 2;
 const MAX_CONTEXT_RECOVERY_ATTEMPTS = 1;
+const INTERRUPTED_TURN_RECOVERY_POLICY =
+  "这份恢复记录只描述上一轮的权威历史事实，不授权继续或重试旧任务。下一轮必须以最新真实用户消息的目标和约束为准；如果用户换题、放弃旧任务或禁止工具，不得为了恢复旧任务检查或调用工具。executionState=not_executed 表示工具确定未执行，无需检查；executionState=outcome_unknown 只允许在最新用户明确要求继续或核对上一任务时先检查，检查不等于重试。";
 const MAX_COMPACTION_RESOURCE_KEY_CHARS = 1_024;
 const SERIALIZED_INVALID_TOOL_INPUT_PREFIX = "AI_InvalidToolInputError:";
 const EMPTY_COMPACTION_MODEL_DRAFT = {
@@ -1746,6 +1748,7 @@ export class AgentSession {
             queue.push({ type: "error", stage: "execute", message: `${streamError}${suffix}` });
             return;
           }
+          this.persistFailedTurn(queue, activeTurn, storedUserMessage, turnStartedAt);
           queue.push({ type: "error", stage: "execute", message: streamError });
           return;
         }
@@ -1832,6 +1835,7 @@ export class AgentSession {
             });
             return;
           }
+          this.persistFailedTurn(queue, activeTurn, storedUserMessage, turnStartedAt);
           queue.push({ type: "error", stage: "execute", message: errorMessage(error) });
           return;
         } finally {
@@ -2002,22 +2006,106 @@ export class AgentSession {
     if (hadToolActivity) {
       notes.push("本轮已有操作开始执行，部分结果可能已经生效且不会自动撤销，请先检查实际结果。");
     }
-    const start = this.messages.length;
-    this.messages.push(userMessage);
-    this.messages.push({ role: "assistant", content: notes.join("") });
-    this.debug(queue, "persist", "persisting context-overflow marker", turnStartedAt, {
-      hadToolActivity,
-      producedText,
+    this.appendInterruptedTurnMessages(queue, turnStartedAt, {
+      rollbackTo: this.messages.length,
+      messages: [userMessage, { role: "assistant", content: notes.join("") }],
+      debugLabel: "persisting context-overflow marker",
+      debugDetails: { hadToolActivity, producedText },
+      failureLabel: "上下文溢出记录持久化失败",
     });
+  }
+
+  private persistFailedTurn(
+    queue: AsyncEventQueue<SessionEvent>,
+    activeTurn: ActiveTurn,
+    userMessage: UserModelMessage,
+    turnStartedAt: number,
+  ): void {
+    if (this.closed) {
+      return;
+    }
+    const completedMessages = repairActiveToolProtocol(
+      stripReasoningMessages(completedStepMessages(activeTurn)),
+    ).messages;
+    const hadProgress =
+      completedMessages.length > 0 ||
+      activeTurn.toolExecutions.length > 0 ||
+      activeTurn.pendingToolCalls.size > 0;
+    if (!hadProgress) {
+      return;
+    }
+    this.captureCancellationActivity(activeTurn);
     try {
-      this.persistMessages(this.messages.slice(start));
+      this.persistPendingToolCancellations(activeTurn);
     } catch (error) {
-      this.messages.splice(start);
       queue.push({
         type: "error",
         stage: "execute",
-        message: `上下文溢出记录持久化失败: ${errorMessage(error)}`,
+        message: `取消工具账本持久化失败: ${errorMessage(error)}`,
       });
+      return;
+    }
+    this.appendInterruptedTurnMessages(queue, turnStartedAt, {
+      rollbackTo: this.messages.length,
+      messages: [
+        userMessage,
+        ...completedMessages,
+        createCancelledTurnRecoveryMessage({
+          context: this.failedTurnContextMessage(activeTurn),
+          completedMessages,
+          toolExecutions: activeTurn.toolExecutions,
+        }),
+        { role: "assistant", content: this.failedTurnDisplayMessage(activeTurn) },
+      ],
+      debugLabel: "persisting failed turn",
+      failureLabel: "失败状态持久化失败",
+    });
+  }
+
+  private failedTurnContextMessage(activeTurn: ActiveTurn): string {
+    const execSessionIds = this.cancellationActivity(activeTurn).execSessionIds;
+    const taskNumbers =
+      execSessionIds.length > 0 ? `本轮后台任务编号: ${execSessionIds.join(", ")}。` : "";
+    return `本轮因运行错误中断，未自动重试。${taskNumbers}已完成的步骤和工具记录仍然有效，不要自动重复 outcome=success 的操作。${INTERRUPTED_TURN_RECOVERY_POLICY}`;
+  }
+
+  private failedTurnDisplayMessage(activeTurn: ActiveTurn): string {
+    const activity = this.cancellationActivity(activeTurn);
+    const resultCheck = activity.hadPotentialSideEffects
+      ? "部分操作可能已经生效且不会自动撤销，请先检查实际结果，再决定是否继续。"
+      : activity.hadInFlightWork
+        ? "刚才的任务结果尚未确认，请先检查后再继续。"
+        : "你可以继续输入或重试。";
+    return `本轮因运行错误而中断，未自动重试。之前的对话和已完成进度会保留。${resultCheck}`;
+  }
+
+  private appendInterruptedTurnMessages(
+    queue: AsyncEventQueue<SessionEvent>,
+    turnStartedAt: number,
+    input: {
+      readonly rollbackTo: number;
+      readonly messages: readonly ModelMessage[];
+      readonly debugLabel: string;
+      readonly debugDetails?: Record<string, unknown>;
+      readonly failureLabel: string;
+    },
+  ): boolean {
+    this.messages.push(...input.messages);
+    this.debug(queue, "persist", input.debugLabel, turnStartedAt, {
+      appendedMessages: this.messages.length - input.rollbackTo,
+      ...input.debugDetails,
+    });
+    try {
+      this.persistMessages(this.messages.slice(input.rollbackTo));
+      return true;
+    } catch (error) {
+      this.messages.splice(input.rollbackTo);
+      queue.push({
+        type: "error",
+        stage: "execute",
+        message: `${input.failureLabel}: ${errorMessage(error)}`,
+      });
+      return false;
     }
   }
 
@@ -2300,38 +2388,16 @@ export class AgentSession {
     if (!activeTurn.cancellationPersistenceAttempted && !this.closed) {
       activeTurn.cancellationPersistenceAttempted = true;
       activeTurn.cancellationPersisted = true;
-      const start = this.messages.length;
       const completedMessages = repairActiveToolProtocol(
         stripReasoningMessages(completedStepMessages(activeTurn)),
       ).messages;
-      this.messages.push(
-        createCancelledTurnRecoveryMessage({
-          context: this.cancellationContextMessage(activeTurn),
-          completedMessages,
-          toolExecutions: activeTurn.toolExecutions,
-        }),
-      );
-      this.messages.push(
-        createTurnCancellationMessage(
-          this.cancellationDisplayMessage(activeTurn),
-          activeTurn.cancellationReason ?? SESSION_CANCELLATION_REASONS.runtime,
-        ),
-      );
-      this.debug(queue, "persist", "persisting paused turn cancellation", turnStartedAt, {
-        appendedMessages: this.messages.length - start,
+      const records = this.cancellationRecordMessages(activeTurn, completedMessages);
+      activeTurn.cancellationPersisted = this.appendInterruptedTurnMessages(queue, turnStartedAt, {
+        rollbackTo: this.messages.length,
+        messages: records,
+        debugLabel: "persisting paused turn cancellation",
+        failureLabel: "取消状态持久化失败",
       });
-      try {
-        this.persistMessages(this.messages.slice(start));
-        activeTurn.cancellationPersisted = true;
-      } catch (error) {
-        activeTurn.cancellationPersisted = false;
-        this.messages.splice(start);
-        queue.push({
-          type: "error",
-          stage: "execute",
-          message: `取消状态持久化失败: ${errorMessage(error)}`,
-        });
-      }
     }
     this.emitCancellation(queue, activeTurn);
   }
@@ -3245,8 +3311,7 @@ export class AgentSession {
       this.capabilityManifest,
       CAPABILITY_TOOL_ROLES.sessionList,
     );
-    const recoveryPolicy =
-      "这份恢复记录只描述上一轮的权威历史事实，不授权继续或重试旧任务。下一轮必须以最新真实用户消息的目标和约束为准；如果用户换题、放弃旧任务或禁止工具，不得为了恢复旧任务检查或调用工具。executionState=not_executed 表示工具确定未执行，无需检查；executionState=outcome_unknown 只允许在最新用户明确要求继续或核对上一任务时先检查，检查不等于重试。";
+    const recoveryPolicy = INTERRUPTED_TURN_RECOVERY_POLICY;
     switch (reason) {
       case SESSION_CANCELLATION_REASONS.user:
         return `用户主动停止了本轮。${taskNumbers}这些任务已收到停止请求；已完成的步骤和工具记录仍然有效，不要自动重复 outcome=success 的操作。${recoveryPolicy}`;
@@ -3323,37 +3388,32 @@ export class AgentSession {
         ),
       ).messages;
       activeTurn.cancellationPersisted = true;
-      this.messages.push(...completedMessages);
-      this.messages.push(
-        createCancelledTurnRecoveryMessage({
-          context: this.cancellationContextMessage(activeTurn),
-          completedMessages,
-          toolExecutions: activeTurn.toolExecutions,
-        }),
-      );
-      this.messages.push(
-        createTurnCancellationMessage(
-          this.cancellationDisplayMessage(activeTurn),
-          activeTurn.cancellationReason ?? SESSION_CANCELLATION_REASONS.runtime,
-        ),
-      );
-      this.debug(queue, "persist", "persisting cancelled turn", turnStartedAt, {
-        appendedMessages: this.messages.length - turnStart,
+      const records = this.cancellationRecordMessages(activeTurn, completedMessages);
+      activeTurn.cancellationPersisted = this.appendInterruptedTurnMessages(queue, turnStartedAt, {
+        rollbackTo: turnStart,
+        messages: [...completedMessages, ...records],
+        debugLabel: "persisting cancelled turn",
+        failureLabel: "取消状态持久化失败",
       });
-      try {
-        this.persistMessages(this.messages.slice(turnStart));
-        activeTurn.cancellationPersisted = true;
-      } catch (error) {
-        activeTurn.cancellationPersisted = false;
-        this.messages.splice(turnStart);
-        queue.push({
-          type: "error",
-          stage: "execute",
-          message: `取消状态持久化失败: ${errorMessage(error)}`,
-        });
-      }
     }
     this.emitCancellation(queue, activeTurn);
+  }
+
+  private cancellationRecordMessages(
+    activeTurn: ActiveTurn,
+    completedMessages: readonly ModelMessage[],
+  ): readonly ModelMessage[] {
+    return [
+      createCancelledTurnRecoveryMessage({
+        context: this.cancellationContextMessage(activeTurn),
+        completedMessages,
+        toolExecutions: activeTurn.toolExecutions,
+      }),
+      createTurnCancellationMessage(
+        this.cancellationDisplayMessage(activeTurn),
+        activeTurn.cancellationReason ?? SESSION_CANCELLATION_REASONS.runtime,
+      ),
+    ];
   }
 
   private persistPendingToolCancellations(activeTurn: ActiveTurn): void {

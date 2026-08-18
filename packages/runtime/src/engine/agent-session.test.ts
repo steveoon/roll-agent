@@ -36,6 +36,7 @@ import {
   createCompactionCheckpoint,
   createEmptyCompactionToolState,
 } from "./compaction-checkpoint.ts";
+import { estimateMessagesTokens } from "./compactor.ts";
 
 const STOP: LanguageModelV4FinishReason = { unified: "stop", raw: "stop" };
 const TOOL_CALLS: LanguageModelV4FinishReason = { unified: "tool-calls", raw: "tool-calls" };
@@ -2971,6 +2972,68 @@ test("AgentSession 首步就超压但没有任何可压缩内容时不暂停,同
   assert.equal(events.at(-1)?.type, "message-finish");
 });
 
+test("AgentSession 工具步骤完成后第二次模型调用失败时保留已完成步骤并写入失败恢复记录", async () => {
+  const model = sequencedModel([
+    toolCallStep("echo-agent__echo", { q: "x" }),
+    streamErrorStep("ECONNRESET"),
+    textStep("ok"),
+  ]);
+  const persisted: ModelMessage[][] = [];
+  const session = new AgentSession({
+    id: "c1-second-call-failure-keeps-steps",
+    model,
+    sources: [source("echo-agent", "echo")],
+    maxSteps: 4,
+    onPersist: (messages) => {
+      persisted.push([...messages]);
+    },
+  });
+
+  const events = await collect(session.send("tool loop"));
+  const last = events.at(-1);
+  assert.equal(last?.type, "error");
+  assert.match(last?.type === "error" ? last.message : "", /ECONNRESET/u);
+  assert.equal(model.doStreamCalls.length, 2);
+
+  const messages = session.getMessages();
+  assert.equal(messages[0]?.role, "user");
+  const serialized = JSON.stringify(messages);
+  assert.match(serialized, /"toolCallId":"c1"/u);
+  assert.match(serialized, /result-ok/u);
+  const marker = messages.at(-1);
+  assert.equal(marker?.role, "assistant");
+  assert.match(JSON.stringify(marker), /失败|中断/u);
+  assert.match(JSON.stringify(marker), /不会自动撤销|请先检查/u);
+  const persistedTail = JSON.stringify(persisted.at(-1) ?? []);
+  assert.match(persistedTail, /result-ok/u);
+  assert.match(persistedTail, /roll-recovery/u);
+
+  await collect(session.send("继续"));
+  assert.equal(model.doStreamCalls.length, 3);
+  const nextPrompt = JSON.stringify(model.doStreamCalls[2]?.prompt ?? []);
+  assert.match(nextPrompt, /result-ok/u);
+  assert.match(nextPrompt, /roll__interrupted_turn_recovery/u);
+});
+
+test("AgentSession 首次模型调用失败且没有任何已完成步骤时不写入失败记录,保持干净重试", async () => {
+  const model = sequencedModel([streamErrorStep("ECONNRESET"), textStep("ok")]);
+  const persisted: ModelMessage[][] = [];
+  const session = new AgentSession({
+    id: "c1-first-call-failure-clean-retry",
+    model,
+    sources: [source("echo-agent", "echo")],
+    maxSteps: 4,
+    onPersist: (messages) => {
+      persisted.push([...messages]);
+    },
+  });
+
+  const events = await collect(session.send("hello"));
+  assert.equal(events.at(-1)?.type, "error");
+  assert.deepEqual(session.getMessages(), []);
+  assert.deepEqual(persisted, []);
+});
+
 test("AgentSession 用户拒绝工具后即使压力超阈值也不会压缩续跑,本轮到此结束", async () => {
   const model = sequencedModel([
     toolCallStep("echo-agent__echo", { q: "x" }, 170),
@@ -3016,6 +3079,48 @@ test("AgentSession 用户拒绝工具后即使压力超阈值也不会压缩续�
   assert.doesNotMatch(finishes[0]?.text ?? "", /BUG_CONTINUED/u);
   assert.equal(events.filter((event) => event.type === "context-compacted").length, 0);
   assert.equal(model.doStreamCalls.length, 1);
+});
+
+test("AgentSession 有 compaction checkpoint 时把 reminder 计入首轮压力预算,单靠 reminder 也会触发自动压缩", async () => {
+  const model = sequencedModel([textStep("ok")]);
+  const session = new AgentSession({
+    id: "c1-checkpoint-reminder-counts-toward-pressure",
+    model,
+    sources: [],
+    maxSteps: 2,
+    contextWindow: 400,
+    initialMessages: [
+      { role: "user", content: "old-1" },
+      { role: "assistant", content: "answer-1" },
+      { role: "user", content: "old-2" },
+      { role: "assistant", content: "answer-2" },
+    ],
+    compaction: {
+      enabled: true,
+      strategy: "truncate",
+      threshold: 0.75,
+      keepRecentTurns: 1,
+      keepRecentTokens: 1,
+    },
+  });
+
+  const manual = await collect(session.compact("manual"));
+  const checkpointed = manual.find(
+    (event): event is Extract<SessionEvent, { type: "context-compacted" }> =>
+      event.type === "context-compacted",
+  );
+  assert.equal(checkpointed?.checkpointGeneration, 1);
+  const remainingTokens = estimateMessagesTokens(session.getMessages());
+  assert.ok(remainingTokens * 4 < 400 * 0.75);
+
+  const events = await collect(session.send("hello"));
+  const compactedIndex = events.findIndex((event) => event.type === "context-compacted");
+  const startIndex = events.findIndex((event) => event.type === "message-start");
+  assert.notEqual(compactedIndex, -1);
+  assert.ok(compactedIndex < startIndex);
+  const compacted = events[compactedIndex];
+  assert.equal(compacted?.type === "context-compacted" ? compacted.reason : undefined, "auto");
+  assert.equal(events.at(-1)?.type, "message-finish");
 });
 
 test("AgentSession 累计输入超阈值但上下文输入未超阈值时不自动压缩", async () => {
