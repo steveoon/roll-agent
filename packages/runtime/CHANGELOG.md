@@ -1,5 +1,31 @@
 # @roll-agent/runtime
 
+## 0.16.0
+
+### Minor Changes
+
+- [#225](https://github.com/steveoon/roll-agent/pull/225) [`470e4fc`](https://github.com/steveoon/roll-agent/commit/470e4fcffffb4ed21c0f849cee7c011e7b0b715d) Thanks [@steveoon](https://github.com/steveoon)! - roll**bash 新增 `max_output_chars`（整数，1000-200000，默认继承 `runtime.shell.max-model-output-chars`）按调用控制模型可见输出量。输出被中段截断时，标记只陈述事实（截掉多少、保留前后各多少字符、全文多长）；发生截断时完整输出落盘到 `~/.roll-agent/bash-output-dumps`（目录 0700、文件 0600，按 24 小时 / 32 个文件收敛，exec_command 会话单文件上限 4MB），并由能兑现的层（roll**bash 结果、exec_command 轮询结果）给出「用 roll**read_file 以 offset/limit 分页查看中段，或重跑更窄的命令」的恢复指引；roll**read_file 读取该目录不再触发工作区外审批。
+
+- [#221](https://github.com/steveoon/roll-agent/pull/221) [`d614672`](https://github.com/steveoon/roll-agent/commit/d614672efe38b27e4c7d04b0c5fc6361c43ee6ca) Thanks [@steveoon](https://github.com/steveoon)! - roll chat coding 工具扩展：roll**grep / roll**glob（ripgrep 后端，输出与 read/edit 契约耦合，全角标点归一化提示）、roll\_\_verify_file（多语言验证器注册表，fast/project 分级，fail-honest；会执行项目本地代码的验证器如 eslint 需确认一次）、会话级批准记忆（确认弹窗在可记忆时提供「允许并本会话不再询问」，仅进程内 Ink TUI；不改 wire 协议）、write_file 缩水防护与 edit→write 导流。
+
+- [#221](https://github.com/steveoon/roll-agent/pull/221) [`aa14d16`](https://github.com/steveoon/roll-agent/commit/aa14d16f1c1f5c494f2d8f7a88d5f6b05c290175) Thanks [@steveoon](https://github.com/steveoon)! - roll chat 新增内建文件工具：roll**read_file / roll**edit_file / roll**write_file / roll**list_dir。按状态同步协议设计——read-before-edit 与内容 hash stale 检测、Unicode 归一化容错匹配（全角标点/智能引号/CRLF）、失败返回最近似位置与差异诊断、批量 edits 原子落盘、成功返回编辑点快照免二次读取。默认启用，可用 ConversationEngineOptions.fileToolsEnabled=false 关闭。
+
+- [#225](https://github.com/steveoon/roll-agent/pull/225) [`05d8090`](https://github.com/steveoon/roll-agent/commit/05d80905cb2df6afd56fef70c093cdd1ba8537d3) Thanks [@steveoon](https://github.com/steveoon)! - roll chat 自动压缩触发机制重做（对齐 Codex / grok-build 的做法）：上下文压力 = 上一次真实 usage + 之后追加内容的估算，恢复会话或尚无实测时按历史估算——`/resume` 后第一条 prompt 也会触发压缩；触发后压缩必须真正减少上下文：`targetTokens` 超出时先放弃 `keep-recent-turns` 保护按目标预算保留整轮，最近一轮单独超出时在步骤边界切并保留该轮 user 消息（tool 调用/结果对不拆），最多连续 4 轮压缩直到低于阈值；轮内每个步骤后也检查压力，超阈值时暂停当前轮、压缩、并在同一个 send 内自动续跑（最多 2 次），长编码轮不再一路涨到 provider 报错。内置模型表补 `qwen3.8-max` / `qwen3.8-plus`（1M）。轮内压缩不截断最后一个步骤的工具结果（模型续跑正需要它）；暂停后无论压缩是否有进展都在同一个 send 内续跑，压缩无进展时不再重复暂停。手动 `/compact` 保持原有 `keep-recent-turns` 语义（不按目标预算升级切法）；续跑与首段共享 `runtime.max-steps` 步骤预算；轮内压缩期间被取消会发出 turn-cancelled 并持久化与取消轮一致的恢复记录与取消标记（resume 后知道本轮已停止、哪些工具副作用已发生），压缩报错会以 error 事件收尾且不回滚已持久化的前半段；RuntimeService 不再在首段 message-finish 时锁定 turn.completed，压缩阶段的失败 / 取消如实以 turn.failed / turn.cancelled 收尾。用户拒绝工具的那一步即使压力超阈值也不会暂停压缩后续跑，reject 仍然结束本轮。注入到最后一条 user 消息前的 compaction checkpoint reminder 计入压力与目标预算（学习到的 prompt overhead 剔除它、按当前 reminder 加回），`/resume` 后首轮估算不再漏掉这部分上下文。
+
+### Patch Changes
+
+- [#225](https://github.com/steveoon/roll-agent/pull/225) [`470e4fc`](https://github.com/steveoon/roll-agent/commit/470e4fcffffb4ed21c0f849cee7c011e7b0b715d) Thanks [@steveoon](https://github.com/steveoon)! - roll**bash / exec_command 的管道成败改为逐段退出码判定：末段为 0 且其余各段为 0 或被下游提前关闭（SIGPIPE / 141）才算成功——`git log | head` 型预览不再假失败，`false | true`、`pnpm test | tail` 如实报失败；逐段状态与 shell 退出码不一致时以退出码为准。bash / zsh 通过 EXIT trap 采集逐段状态；拿不到逐段状态的 shell 退回 pipefail（141 标注为上游提前关闭、不视为失败），两者都不支持时保持末段退出码语义。系统提示只陈述运行时探测到的管道能力，不再鼓励自接 head/tail 管道，改为引导使用 `max_output_chars` 或 roll**read_file / roll\_\_grep。
+
+- [#225](https://github.com/steveoon/roll-agent/pull/225) [`3857487`](https://github.com/steveoon/roll-agent/commit/3857487489b741e822f0f8b2892b4d8446f049e0) Thanks [@steveoon](https://github.com/steveoon)! - 数值边界参数统一由 boundedIntParam 从同一份 min/max 派生 JSON schema 边界与描述文字（bash 的 timeout_ms/max_output_chars、exec 的 yield_time_ms/max_output_tokens、grep 的 context/max_results），模型第一次调用即知范围；越界/类型错误在 prepare 与 AI SDK tool-error 归一的唯一入口经 describeZodIssues/friendlyInvalidToolInputMessage 生成一句话友好文案（参数名、允许范围、所传值），不再吐 zod 原文；read_file 等工具的 prepare 参数校验同样走共享友好格式化。
+
+- [#225](https://github.com/steveoon/roll-agent/pull/225) [`bfc7468`](https://github.com/steveoon/roll-agent/commit/bfc746845439284f652fbde04e8179d71e21c46c) Thanks [@steveoon](https://github.com/steveoon)! - 模型调用在多步 turn 中途失败（限流 / 网络中断 / 5xx 等非上下文溢出错误）时不再把整轮从会话历史里抹掉：已完成的工具调用与结果、在途工具的账本记录、一条 runtime 恢复记录（`roll__interrupted_turn_recovery`）和失败说明会像取消路径一样持久化；首次调用就失败、没有任何进展的 turn 仍保持干净重试。取消 / 暂停后取消 / 上下文溢出 / 运行错误四条中断路径共用同一套追加与回滚实现，并以 ActiveTurn 的 segment 水位决定追加范围。已落盘的 user 和工具步骤不会重复；下一轮 prompt 中仍保留的 raw tool-call/result 至多一组且始终成对，被合法压缩裁掉的步骤由 checkpoint 或 recovery evidence 承接。
+
+  工具是否已经开始执行改为按每个模型 batch 的 occurrence 身份跟踪，不再把 provider 的 `toolCallId` 当成整轮唯一键。跨 step 或压力续跑复用同一 ID 时，新宣告但尚未执行的调用会准确记录为 `not_executed`；真正越过准入、锁与执行前复验边界后才记录为 `outcome_unknown`。恢复记录仍按可见 raw 结果的出现次数消费同 ID 账本，第二次执行不会被第一次的结果遮蔽。
+
+  ThreadStore schema v6 将工具账本升级为可恢复的 semantic WAL：每条新 `ToolExecutionRecord.id` 在 ledger 写入后保持 uncovered，直到 raw transcript 或 bounded recovery evidence 与 exact coverage 在同一 SQLite 事务提交。正常 segment、运行错误、取消和上下文溢出都通过同一 coverage 协议关闭窗口；纯溢出也会保留 bounded evidence，但不把可能再次撑爆上下文的 raw 工具结果写回。若 transcript 提交失败或进程在 ledger 与 transcript 之间退出，下一次 send、手动 compact 或重建 session 的 resume 会先原子写入恢复记录再继续；恢复写仍失败时不会调用模型或工具。uncovered ledger 不受 retention 裁剪，旧 schema 的既有记录迁移为已覆盖，连续恢复保持幂等。
+
+- [#225](https://github.com/steveoon/roll-agent/pull/225) [`60d16c4`](https://github.com/steveoon/roll-agent/commit/60d16c419158ed50bf1e64035d6f85ff1f3d6fb3) Thanks [@steveoon](https://github.com/steveoon)! - 文件工具文本协议收敛为「只拒绝原始 NUL（U+0000）」，读写对称：write_file 的 content、edit_file 的 old_string/new_string 含原始 NUL 或不成对的 UTF-16 代理项（lone surrogate）时在审批弹窗前以 invalid_input 拒绝并给出自救指引（JSON 双解码解释、双反斜杠转义文本、shell 生成原始字节）；read_file 的二进制探测改为扫描整个文件（不再只看前 8192 字节），且只以 NUL 判定，ESC/FF/VT/DEL 等控制字符视为文本，ANSI 日志类文件重新可读可写。修复 write_file 写入以 BOM 开头的 content 后 tracker 记录含 BOM 摘要、导致后续 edit_file 误报 stale 的问题（现按 BOM 文件落盘并记录去 BOM 内容）。仓库源码的 CI 控制字符守卫（scripts/check-source-control-chars.mjs）保持更严格的全 C0 规则，与文件工具运行时策略相互独立。
+
 ## 0.15.1
 
 ### Patch Changes
