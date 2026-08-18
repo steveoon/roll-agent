@@ -1,9 +1,10 @@
 import { spawn, type ChildProcess } from "node:child_process";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync, unlinkSync } from "node:fs";
 import { constants } from "node:os";
 import { performance } from "node:perf_hooks";
 import type { Readable } from "node:stream";
 import { OutputSink } from "./output-buffer.ts";
+import { parsePipeSegments } from "./shell-pipe.ts";
 import {
   BASH_TERMINATION_CAUSES,
   EXEC_TIMEOUT_EXIT_CODE,
@@ -99,13 +100,34 @@ export function runBashCommand(
     }
 
     let child: ChildProcess;
+    let segmentFile: string | undefined;
     try {
       const spec = profile.buildSpawn(command, workdir, env ?? process.env);
+      segmentFile = spec.rollSegmentFile;
       child = deps.spawn(spec.file, spec.args, spec.options);
     } catch (error) {
       resolve(spawnErrorResult(errorMessage(error), timeoutMs));
       return;
     }
+
+    const pipeCapability = profile.pipeCapability?.().capability ?? "none";
+    const readPipeSegments = (): readonly number[] | undefined => {
+      if (segmentFile === undefined) {
+        return undefined;
+      }
+      try {
+        const text = readFileSync(segmentFile, "utf8");
+        return parsePipeSegments(text);
+      } catch {
+        return undefined;
+      } finally {
+        try {
+          unlinkSync(segmentFile);
+        } catch {
+          // shell 未写出状态文件时忽略
+        }
+      }
+    };
 
     const start = performance.now();
     const stdoutSink = new OutputSink(maxCaptureBytes);
@@ -155,6 +177,7 @@ export function runBashCommand(
               code: observedExitCode,
               signalNumber,
             });
+      const pipeSegments = readPipeSegments();
       finish({
         exitCode,
         timedOut,
@@ -164,6 +187,8 @@ export function runBashCommand(
         stderr: stderrSink.collect(),
         ...(terminationCause ? { terminationCause } : {}),
         ...(terminationError ? { terminationError } : {}),
+        ...(pipeSegments !== undefined ? { pipeSegments } : {}),
+        pipeCapability,
       });
     };
 
@@ -175,6 +200,7 @@ export function runBashCommand(
         entry.stream.destroy();
       }
       child.unref();
+      const pipeSegments = readPipeSegments();
       finish({
         exitCode: timedOut ? EXEC_TIMEOUT_EXIT_CODE : ABORTED_EXIT_CODE,
         timedOut,
@@ -184,6 +210,8 @@ export function runBashCommand(
         stderr: stderrSink.collect(),
         ...(terminationCause ? { terminationCause } : {}),
         terminationError: `${terminationError ?? "进程树清理未完成"}；根进程在强制终止请求后仍未确认退出`,
+        ...(pipeSegments !== undefined ? { pipeSegments } : {}),
+        pipeCapability,
       });
     };
 

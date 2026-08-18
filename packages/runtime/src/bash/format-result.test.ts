@@ -150,7 +150,7 @@ test("捕获截断时落盘完整捕获输出并给出分页恢复指引", () =>
   const output = String(formatted.output);
   assert.ok(output.includes("Warning: stdout 输出已截断"));
   assert.ok(output.includes("4000 行"));
-  assert.ok(output.includes("完整捕获输出已落盘: /tmp/roll-bash-fake.log"));
+  assert.ok(output.includes("完整输出已落盘: /tmp/roll-bash-fake.log"));
   assert.match(output, /roll__read_file 以 offset\/limit 分页/u);
   assert.equal(dumped, "[stdout]\nkept");
 });
@@ -168,7 +168,7 @@ test("模型预算截断时同样落盘并指引恢复", () => {
   });
   const output = String(formatted.output);
   assert.match(output, /chars truncated（保留前/u);
-  assert.ok(output.includes("完整捕获输出已落盘: /tmp/roll-bash-budget.log"));
+  assert.ok(output.includes("完整输出已落盘: /tmp/roll-bash-budget.log"));
   assert.ok(dumped !== undefined && dumped.includes(big));
 });
 

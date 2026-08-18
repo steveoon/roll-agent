@@ -1,9 +1,9 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
 import type { ChildProcess, SpawnOptions, SpawnSyncReturns } from "node:child_process";
 import { EventEmitter } from "node:events";
 import { runBashCommand } from "./exec.ts";
+import { formatBashResult } from "./format-result.ts";
 import {
   buildPowerShellEncodedCommand,
   POSIX_PIPEFAIL_GUARD,
@@ -78,6 +78,7 @@ test("resolveShellProfile 在非 Windows 返回 POSIX profile", () => {
     platform: "darwin",
     env: { SHELL: "/bin/zsh" },
     fileExists: (path) => path === "/bin/zsh" || path === "/bin/sh",
+    spawnSync: spawnSyncWith("", undefined, 1),
   });
   assert.equal(result.supported, true);
   if (!result.supported) {
@@ -88,6 +89,7 @@ test("resolveShellProfile 在非 Windows 返回 POSIX profile", () => {
   assert.equal(result.profile.supportsSessionExec, true);
   assert.equal(result.profile.supportsSafeCommandClassification, true);
   assert.equal(result.profile.waitForTreeKillAfterRootExit, false);
+  assert.equal(result.profile.pipeCapability?.().capability, "pipefail");
   const spec = result.profile.buildSpawn("echo hi", "/tmp", {});
   assert.equal(spec.file, "/bin/zsh");
   assert.deepEqual(spec.args, ["-c", wrapPosixCommand("echo hi")]);
@@ -95,19 +97,53 @@ test("resolveShellProfile 在非 Windows 返回 POSIX profile", () => {
   assert.equal(safeSpec.file, "/bin/sh");
 });
 
+test("逐段能力 shell 的 buildSpawn 注入状态文件与 EXIT trap wrapper", () => {
+  const result = resolveShellProfile({
+    platform: "darwin",
+    env: { SHELL: "/bin/zsh" },
+    fileExists: (path) => path === "/bin/zsh",
+    spawnSync: spawnSyncWith("1 0|", undefined, 0),
+  });
+  assert.equal(result.supported, true);
+  if (!result.supported) {
+    return;
+  }
+  assert.equal(result.profile.pipeCapability?.().capability, "segments");
+  const spec = result.profile.buildSpawn("echo hi", "/tmp", {});
+  assert.equal(spec.args[0], "-c");
+  assert.match(spec.args[1] ?? "", /^trap /u);
+  assert.ok((spec.args[1] ?? "").endsWith("echo hi"));
+  assert.ok(spec.rollSegmentFile !== undefined);
+  assert.equal(spec.options.env?.ROLL_PIPE_STATUS_FILE, spec.rollSegmentFile);
+});
+
+test("systemPromptHints 只陈述探测到的能力", () => {
+  const segments = resolveShellProfile({
+    platform: "darwin",
+    env: { SHELL: "/bin/zsh" },
+    fileExists: (path) => path === "/bin/zsh",
+    spawnSync: spawnSyncWith("1 0|", undefined, 0),
+  });
+  const none = resolveShellProfile({
+    platform: "darwin",
+    env: { SHELL: "/bin/zsh" },
+    fileExists: (path) => path === "/bin/zsh",
+    spawnSync: spawnSyncWith("", undefined, 0),
+  });
+  if (!segments.supported || !none.supported) {
+    return;
+  }
+  assert.match(segments.profile.systemPromptHints().join("\n"), /逐段退出码/u);
+  assert.match(none.profile.systemPromptHints().join("\n"), /不支持 pipefail/u);
+});
+
 test("wrapPosixCommand 以可降级的 pipefail 守卫开头", () => {
   assert.equal(wrapPosixCommand("echo hi"), `${POSIX_PIPEFAIL_GUARD}echo hi`);
 });
 
 const livePosix = resolveShellProfile({ platform: process.platform, env: process.env });
-const livePosixShell = livePosix.supported
-  ? livePosix.profile.buildSpawn("true", process.cwd(), process.env).file
-  : "";
-const pipefailSupported =
-  process.platform !== "win32" &&
-  spawnSync(livePosixShell, ["-c", `${POSIX_PIPEFAIL_GUARD}false | true`]).status !== 0;
 
-function livePosixRun(command: string) {
+function livePosixFormatted(command: string) {
   assert.equal(livePosix.supported, true);
   if (!livePosix.supported) {
     throw new Error("posix profile unavailable");
@@ -118,29 +154,36 @@ function livePosixRun(command: string) {
     timeoutMs: 5_000,
     maxCaptureBytes: 65_536,
     profile: livePosix.profile,
-  });
+  }).then((result) => formatBashResult({ result, maxModelOutputChars: 1_000 }));
 }
 
 test(
-  "pipefail 生效时管道中间失败如实报告非零退出码",
-  {
-    skip:
-      process.platform === "win32" || !pipefailSupported
-        ? "当前 shell 不支持 pipefail，降级为末端退出码语义"
-        : false,
-  },
+  "管道中间失败如实报告失败",
+  { skip: process.platform === "win32" ? "win32 使用 PowerShell profile" : false },
   async () => {
-    const result = await livePosixRun("false | true");
-    assert.equal(result.exitCode, 1);
+    const formatted = await livePosixFormatted("false | true");
+    assert.equal(formatted.isError, true);
+    assert.match(String(formatted.output), /Exit code: 1/u);
   },
 );
 
 test(
-  "管道全部成功时退出码仍为 0",
+  "…| head 型 SIGPIPE 判成功并附说明",
   { skip: process.platform === "win32" ? "win32 使用 PowerShell profile" : false },
   async () => {
-    const result = await livePosixRun("true | true");
-    assert.equal(result.exitCode, 0);
+    const formatted = await livePosixFormatted("yes | head -1");
+    assert.equal(formatted.isError, false);
+    assert.match(String(formatted.output), /上游|SIGPIPE/u);
+  },
+);
+
+test(
+  "管道全部成功时不附 SIGPIPE 说明",
+  { skip: process.platform === "win32" ? "win32 使用 PowerShell profile" : false },
+  async () => {
+    const formatted = await livePosixFormatted("true | true");
+    assert.equal(formatted.isError, false);
+    assert.doesNotMatch(String(formatted.output), /SIGPIPE/u);
   },
 );
 
@@ -148,8 +191,9 @@ test(
   "无管道命令退出码透传不受守卫影响",
   { skip: process.platform === "win32" ? "win32 使用 PowerShell profile" : false },
   async () => {
-    const result = await livePosixRun("exit 7");
-    assert.equal(result.exitCode, 7);
+    const formatted = await livePosixFormatted("exit 7");
+    assert.equal(formatted.isError, true);
+    assert.match(String(formatted.output), /Exit code: 7/u);
   },
 );
 

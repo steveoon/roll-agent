@@ -1,7 +1,3 @@
-import { randomUUID } from "node:crypto";
-import { writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import {
   TOOL_OUTCOME_KINDS,
   failedToolResult,
@@ -10,6 +6,13 @@ import {
 } from "../tool-bridge/normalize-result.ts";
 import type { CapturedStream } from "./output-buffer.ts";
 import { partitionModelBudget } from "./output-buffer.ts";
+import {
+  allocateOutputDumpFile,
+  describeOutputDumpRecovery,
+  rollOutputDumpDir,
+  writeOutputDump,
+} from "./output-dump.ts";
+import { evaluatePipelineExit, type ShellPipeCapability } from "./shell-pipe.ts";
 import { truncateMiddle } from "./truncate.ts";
 
 export const EXEC_TIMEOUT_EXIT_CODE = 124;
@@ -32,6 +35,8 @@ export interface BashExecResult {
   readonly terminationCause?: BashTerminationCause;
   readonly spawnError?: string;
   readonly terminationError?: string;
+  readonly pipeSegments?: readonly number[];
+  readonly pipeCapability?: ShellPipeCapability;
 }
 
 export interface NormalizeExitCodeParams {
@@ -61,8 +66,8 @@ function truncationWarning(label: string, stream: CapturedStream): string | unde
 }
 
 function dumpFullOutput(text: string): string | undefined {
-  const path = join(tmpdir(), `roll-bash-${randomUUID()}.log`);
-  writeFileSync(path, text, "utf8");
+  const path = allocateOutputDumpFile(rollOutputDumpDir(), "bash");
+  writeOutputDump(path, text);
   return path;
 }
 
@@ -103,7 +108,15 @@ export function formatBashResult(input: FormatBashResultInput): NormalizedToolRe
   if (result.terminationError) {
     lines.push(`终止失败: ${result.terminationError}`);
   }
-  lines.push(`Exit code: ${String(result.exitCode)}`);
+  const verdict = evaluatePipelineExit({
+    exitCode: result.exitCode,
+    ...(result.pipeSegments !== undefined ? { segments: result.pipeSegments } : {}),
+    capability: result.pipeCapability ?? "none",
+  });
+  lines.push(`Exit code: ${String(verdict.effectiveExitCode)}`);
+  if (verdict.note !== undefined) {
+    lines.push(verdict.note);
+  }
   lines.push(`Wall time: ${(result.wallTimeMs / 1000).toFixed(1)} s`);
 
   const warnings = [
@@ -123,9 +136,7 @@ export function formatBashResult(input: FormatBashResultInput): NormalizedToolRe
     ].filter((section): section is string => section !== undefined);
     const dumpedPath = (input.fullOutputSink ?? dumpFullOutput)(fullSections.join("\n\n"));
     if (dumpedPath !== undefined) {
-      warnings.push(
-        `完整捕获输出已落盘: ${dumpedPath}；用 roll__read_file 以 offset/limit 分页查看被截断的中段，或重跑更窄的命令`,
-      );
+      warnings.push(describeOutputDumpRecovery(dumpedPath));
     }
   }
   lines.push(...warnings);
@@ -139,7 +150,7 @@ export function formatBashResult(input: FormatBashResultInput): NormalizedToolRe
   if (result.terminationCause === BASH_TERMINATION_CAUSES.abort) {
     return failedToolResult(TOOL_OUTCOME_KINDS.cancelled, output, { raw: result });
   }
-  if (result.exitCode !== 0 || result.terminationError !== undefined) {
+  if (!verdict.ok || result.terminationError !== undefined) {
     return failedToolResult(TOOL_OUTCOME_KINDS.toolFailed, output, { raw: result });
   }
   return successfulToolResult(output, { raw: result });

@@ -96,6 +96,9 @@ export async function pollUntilDeadline(
         state,
         ...(session.terminationCause ? { terminationCause: session.terminationCause } : {}),
         ...(session.cleanupError ? { cleanupError: session.cleanupError } : {}),
+        ...(session.pipeSegments !== undefined ? { pipeSegments: session.pipeSegments } : {}),
+        ...(session.pipeCapability !== undefined ? { pipeCapability: session.pipeCapability } : {}),
+        ...(session.dumpPath !== undefined ? { dumpPath: session.dumpPath } : {}),
       };
     }
     return {

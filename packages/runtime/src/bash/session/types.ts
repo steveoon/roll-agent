@@ -1,6 +1,7 @@
 import type { ChildProcess } from "node:child_process";
 import type { BashStreamName } from "../exec.ts";
 import type { ShellProfile } from "../profile.ts";
+import type { ShellPipeCapability } from "../shell-pipe.ts";
 import type { HeadTailBuffer } from "./head-tail-buffer.ts";
 
 export type SessionDeltaHandler = (stream: BashStreamName, delta: string) => void;
@@ -42,6 +43,9 @@ export interface ManagedSession {
   terminationCause: SessionTerminationCause | undefined;
   cleanupError: string | undefined;
   lastUsedAt: number;
+  pipeSegments?: readonly number[] | undefined;
+  pipeCapability?: ShellPipeCapability | undefined;
+  dumpPath?: string | undefined;
   beginPoll(onDelta?: SessionDeltaHandler): boolean;
   endPoll(): void;
   markStopping(cause: SessionTerminationCause): void;
@@ -62,6 +66,9 @@ export type SessionPollResult =
       readonly state: TerminalSessionState;
       readonly terminationCause?: SessionTerminationCause;
       readonly cleanupError?: string;
+      readonly pipeSegments?: readonly number[];
+      readonly pipeCapability?: ShellPipeCapability;
+      readonly dumpPath?: string;
     }
   | {
       readonly kind: "running";
