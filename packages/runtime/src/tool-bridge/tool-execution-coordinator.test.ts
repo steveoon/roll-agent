@@ -130,16 +130,45 @@ test("ToolExecutionCoordinator describeResources 复用执行计划且观察失�
 test("ToolExecutionCoordinator 只在准入后单调记录本轮已开始执行", async () => {
   const coordinator = new ToolExecutionCoordinator();
   coordinator.register("write", resourcePlan("file:a", TOOL_RESOURCE_ACCESS_MODES.write));
-  assert.equal(coordinator.hasExecutionStarted("c1"), false);
+  const occurrence = coordinator.captureToolCallOccurrence("c1");
+  assert.equal(coordinator.hasExecutionStarted(occurrence), false);
 
   await coordinator.execute("c1", "write", {}, undefined, async () => {
-    assert.equal(coordinator.hasExecutionStarted("c1"), true);
+    assert.equal(coordinator.hasExecutionStarted(occurrence), true);
     return successfulToolResult("ok");
   });
 
-  assert.equal(coordinator.hasExecutionStarted("c1"), true);
+  assert.equal(coordinator.hasExecutionStarted(occurrence), true);
   coordinator.finishTurn();
-  assert.equal(coordinator.hasExecutionStarted("c1"), false);
+  assert.equal(coordinator.hasExecutionStarted(occurrence), true);
+  assert.equal(coordinator.hasExecutionStarted(coordinator.captureToolCallOccurrence("c1")), false);
+});
+
+test("ToolExecutionCoordinator 同一 turn 的新 batch 复用 toolCallId 时不会继承已启动状态", async () => {
+  const coordinator = new ToolExecutionCoordinator();
+  coordinator.register("tool", { resources: () => [] });
+
+  coordinator.startBatch("shared-sdk-call-id");
+  await coordinator.prepare("c1", "tool", {});
+  const firstOccurrence = coordinator.captureToolCallOccurrence("c1");
+  coordinator.sealBatch("shared-sdk-call-id", [{ toolCallId: "c1", toolId: "tool" }]);
+  await coordinator.execute("c1", "tool", {}, undefined, async () => successfulToolResult("first"));
+  assert.equal(coordinator.hasExecutionStarted(firstOccurrence), true);
+
+  // AI SDK reuses one callId across model steps. startBatch() still represents a fresh
+  // occurrence scope, so this second c1 has only been admitted, not executed.
+  coordinator.startBatch("shared-sdk-call-id");
+  await coordinator.prepare("c1", "tool", {});
+  const secondOccurrence = coordinator.captureToolCallOccurrence("c1");
+  coordinator.sealBatch("shared-sdk-call-id", [{ toolCallId: "c1", toolId: "tool" }]);
+  assert.notEqual(secondOccurrence, firstOccurrence);
+  assert.equal(coordinator.hasExecutionStarted(secondOccurrence), false);
+  assert.equal(coordinator.hasExecutionStarted(firstOccurrence), true);
+
+  await coordinator.execute("c1", "tool", {}, undefined, async () =>
+    successfulToolResult("second"),
+  );
+  assert.equal(coordinator.hasExecutionStarted(secondOccurrence), true);
 });
 
 test("ToolExecutionCoordinator 在准入时封存资源计划，不受执行前动态状态漂移影响", async () => {
@@ -182,6 +211,7 @@ test("ToolExecutionCoordinator 在持锁后复验准入快照，漂移时零副�
   });
 
   await coordinator.prepare("c1", "tool", {});
+  const occurrence = coordinator.captureToolCallOccurrence("c1");
   safetyState = "changed";
   const result = await coordinator.execute("c1", "tool", {}, undefined, async () => {
     sideEffects += 1;
@@ -190,6 +220,7 @@ test("ToolExecutionCoordinator 在持锁后复验准入快照，漂移时零副�
 
   assert.equal(readToolOutcome(result).kind, TOOL_OUTCOME_KINDS.toolFailed);
   assert.equal(sideEffects, 0);
+  assert.equal(coordinator.hasExecutionStarted(occurrence), false);
 });
 
 test("ToolExecutionCoordinator 在准入前捕获一次状态，并贯穿 gate、资源与复验", async () => {

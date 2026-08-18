@@ -21,6 +21,7 @@ import {
   redactSecretText,
   type ToolExecutionPersistenceMetadata,
   type ToolExecutionRecord,
+  type ToolExecutionRecordId,
 } from "../tool-bridge/tool-execution-record.ts";
 import {
   COMPACTION_CHECKPOINT_VERSION,
@@ -49,7 +50,7 @@ import {
 } from "../engine/tool-protocol-repair.ts";
 import { sanitizePersistedExplicitSkillCheckpoint } from "../engine/explicit-skill-context.ts";
 
-const SCHEMA_VERSION = 5;
+const SCHEMA_VERSION = 6;
 const DEFAULT_TOOL_EXECUTION_LIMIT = 100;
 const MAX_TOOL_EXECUTION_LIMIT = 500;
 const DEFAULT_TRANSCRIPT_LIMIT = 50;
@@ -115,6 +116,23 @@ export class RuntimeEventCursorGapError extends Error {
 export const TRANSCRIPT_ENTRY_KINDS = ["message", "tool_execution"] as const;
 export type TranscriptEntryKind = (typeof TRANSCRIPT_ENTRY_KINDS)[number];
 export type TranscriptCompleteness = (typeof COMPACTION_TRANSCRIPT_COMPLETENESS)[number];
+
+export const TOOL_EXECUTION_CONTEXT_REPRESENTATIONS = {
+  rawTranscript: "raw_transcript",
+  recoveryEvidence: "recovery_evidence",
+} as const;
+const LEGACY_TOOL_EXECUTION_CONTEXT_REPRESENTATION = "legacy_assumed";
+export type ToolExecutionContextRepresentation =
+  (typeof TOOL_EXECUTION_CONTEXT_REPRESENTATIONS)[keyof typeof TOOL_EXECUTION_CONTEXT_REPRESENTATIONS];
+
+export interface ToolExecutionContextCoverageInput {
+  readonly executionIds: readonly ToolExecutionRecordId[];
+  readonly representation: ToolExecutionContextRepresentation;
+}
+
+export interface AppendMessagesOptions {
+  readonly toolExecutionCoverage?: ToolExecutionContextCoverageInput;
+}
 
 export interface ThreadRecord {
   readonly id: string;
@@ -556,6 +574,23 @@ export class ThreadStore {
              completeness TEXT NOT NULL CHECK (completeness IN ('complete', 'legacy_snapshot')),
              FOREIGN KEY (thread_id) REFERENCES threads(id) ON DELETE CASCADE
            );
+           CREATE TABLE IF NOT EXISTS tool_execution_context_coverage (
+             thread_id TEXT NOT NULL,
+             execution_id TEXT NOT NULL,
+             representation TEXT NOT NULL
+               CHECK (representation IN ('raw_transcript', 'recovery_evidence', 'legacy_assumed')),
+             transcript_sequence INTEGER,
+             created_at TEXT NOT NULL,
+             PRIMARY KEY (thread_id, execution_id),
+             CHECK (
+               (representation = 'legacy_assumed' AND transcript_sequence IS NULL)
+               OR (representation <> 'legacy_assumed' AND transcript_sequence IS NOT NULL)
+             ),
+             FOREIGN KEY (thread_id, execution_id)
+               REFERENCES tool_executions(thread_id, id) ON DELETE CASCADE,
+             FOREIGN KEY (thread_id, transcript_sequence)
+               REFERENCES transcript_messages(thread_id, sequence) ON DELETE CASCADE
+           );
            CREATE TABLE IF NOT EXISTS compaction_checkpoints (
              id TEXT PRIMARY KEY,
              thread_id TEXT NOT NULL,
@@ -636,6 +671,16 @@ export class ThreadStore {
       if (versionRow.user_version < 4) {
         this.migrateToolExecutionPersistenceInTransaction();
         this.migrateExplicitSkillCheckpointPersistenceInTransaction();
+      }
+      if (versionRow.user_version < 6) {
+        this.db
+          .prepare(
+            `INSERT OR IGNORE INTO tool_execution_context_coverage
+               (thread_id, execution_id, representation, transcript_sequence, created_at)
+             SELECT thread_id, id, ?, NULL, created_at
+               FROM tool_executions`,
+          )
+          .run(LEGACY_TOOL_EXECUTION_CONTEXT_REPRESENTATION);
       }
       this.initializeMissingRuntimeEventStatesInTransaction();
       this.enforceAllToolExecutionRetentionInTransaction(new Date().toISOString());
@@ -1128,17 +1173,90 @@ export class ThreadStore {
       );
   }
 
-  appendMessages(threadId: string, messages: readonly ModelMessage[]): void {
+  appendMessages(
+    threadId: string,
+    messages: readonly ModelMessage[],
+    options: AppendMessagesOptions = {},
+  ): void {
+    const coverage = options.toolExecutionCoverage;
     if (messages.length === 0) {
+      if (coverage !== undefined && coverage.executionIds.length > 0) {
+        throw new Error("Tool execution coverage 必须与至少一条 transcript message 原子写入");
+      }
       return;
     }
     if (!this.hasThread(threadId)) {
       throw new Error(`Thread "${threadId}" 不存在`);
     }
+    if (
+      coverage !== undefined &&
+      coverage.representation !== TOOL_EXECUTION_CONTEXT_REPRESENTATIONS.rawTranscript &&
+      coverage.representation !== TOOL_EXECUTION_CONTEXT_REPRESENTATIONS.recoveryEvidence
+    ) {
+      throw new Error("Tool execution coverage representation 无效");
+    }
+    const coverageIds = coverage?.executionIds ?? [];
+    const uniqueCoverageIds = new Set<string>();
+    for (const executionId of coverageIds) {
+      if (typeof executionId !== "string" || executionId.length === 0) {
+        throw new Error("Tool execution coverage execution id 无效");
+      }
+      if (uniqueCoverageIds.has(executionId)) {
+        throw new Error(`Tool execution coverage execution id 重复: ${executionId}`);
+      }
+      uniqueCoverageIds.add(executionId);
+    }
     const parsedMessages = messages.map((message) =>
       sanitizePersistedExplicitSkillCheckpoint(modelMessageSchema.parse(message)),
     );
     const now = new Date().toISOString();
+
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      this.appendMessagesInTransaction(threadId, parsedMessages, now, coverage);
+      this.db.exec("COMMIT");
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  recoverUncoveredToolExecutions(
+    threadId: string,
+    createMessage: (records: readonly SequencedToolExecutionRecord[]) => ModelMessage,
+  ): ModelMessage | undefined {
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      if (!this.hasThread(threadId)) {
+        throw new Error(`Thread "${threadId}" 不存在`);
+      }
+      const records = this.listAllUncoveredToolExecutionsInTransaction(threadId);
+      if (records.length === 0) {
+        this.db.exec("COMMIT");
+        return undefined;
+      }
+      const message = sanitizePersistedExplicitSkillCheckpoint(
+        modelMessageSchema.parse(createMessage(records)),
+      );
+      const coverage: ToolExecutionContextCoverageInput = {
+        executionIds: records.map((record) => record.id),
+        representation: TOOL_EXECUTION_CONTEXT_REPRESENTATIONS.recoveryEvidence,
+      };
+      this.appendMessagesInTransaction(threadId, [message], new Date().toISOString(), coverage);
+      this.db.exec("COMMIT");
+      return message;
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  private appendMessagesInTransaction(
+    threadId: string,
+    messages: readonly ModelMessage[],
+    now: string,
+    coverage: ToolExecutionContextCoverageInput | undefined,
+  ): void {
     const insertActive = this.db.prepare(
       "INSERT INTO messages (thread_id, idx, role, content_json, created_at) VALUES (?, ?, ?, ?, ?)",
     );
@@ -1147,39 +1265,64 @@ export class ThreadStore {
          (thread_id, sequence, role, message_json, provenance, created_at)
        VALUES (?, ?, ?, ?, ?, ?)`,
     );
-
-    this.db.exec("BEGIN IMMEDIATE");
-    try {
-      const activeStartRow = this.db
-        .prepare("SELECT COALESCE(MAX(idx), -1) AS maxIdx FROM messages WHERE thread_id = ?")
-        .get(threadId) as { readonly maxIdx: number };
-      const transcriptStartRow = this.db
-        .prepare(
-          "SELECT COALESCE(MAX(sequence), -1) AS maxSequence FROM transcript_messages WHERE thread_id = ?",
-        )
-        .get(threadId) as { readonly maxSequence: number };
-      let idx = activeStartRow.maxIdx + 1;
-      let sequence = transcriptStartRow.maxSequence + 1;
-      for (const message of parsedMessages) {
-        const serialized = JSON.stringify(message);
-        insertActive.run(threadId, idx, message.role, serialized, now);
-        insertTranscript.run(
-          threadId,
-          sequence,
-          message.role,
-          serialized,
-          TRANSCRIPT_MESSAGE_PROVENANCES[0],
-          now,
-        );
-        idx += 1;
-        sequence += 1;
-      }
-      this.db.prepare("UPDATE threads SET updated_at = ? WHERE id = ?").run(now, threadId);
-      this.db.exec("COMMIT");
-    } catch (error) {
-      this.db.exec("ROLLBACK");
-      throw error;
+    const insertCoverage = this.db.prepare(
+      `INSERT INTO tool_execution_context_coverage
+         (thread_id, execution_id, representation, transcript_sequence, created_at)
+       SELECT thread_id, id, ?, ?, ?
+         FROM tool_executions
+        WHERE thread_id = ?
+          AND id = ?
+          AND NOT EXISTS (
+            SELECT 1
+              FROM tool_execution_context_coverage
+             WHERE thread_id = ? AND execution_id = ?
+          )`,
+    );
+    const activeStartRow = this.db
+      .prepare("SELECT COALESCE(MAX(idx), -1) AS maxIdx FROM messages WHERE thread_id = ?")
+      .get(threadId) as { readonly maxIdx: number };
+    const transcriptStartRow = this.db
+      .prepare(
+        "SELECT COALESCE(MAX(sequence), -1) AS maxSequence FROM transcript_messages WHERE thread_id = ?",
+      )
+      .get(threadId) as { readonly maxSequence: number };
+    let idx = activeStartRow.maxIdx + 1;
+    let sequence = transcriptStartRow.maxSequence + 1;
+    for (const message of messages) {
+      const serialized = JSON.stringify(message);
+      insertActive.run(threadId, idx, message.role, serialized, now);
+      insertTranscript.run(
+        threadId,
+        sequence,
+        message.role,
+        serialized,
+        TRANSCRIPT_MESSAGE_PROVENANCES[0],
+        now,
+      );
+      idx += 1;
+      sequence += 1;
     }
+    const transcriptSequence = sequence - 1;
+    if (coverage !== undefined) {
+      for (const executionId of coverage.executionIds) {
+        const inserted = insertCoverage.run(
+          coverage.representation,
+          transcriptSequence,
+          now,
+          threadId,
+          executionId,
+          threadId,
+          executionId,
+        );
+        if (Number(inserted.changes) !== 1) {
+          throw new Error(
+            `Tool execution "${executionId}" 不属于 Thread "${threadId}" 或已被 transcript 覆盖`,
+          );
+        }
+      }
+      this.enforceToolExecutionRetentionInTransaction(threadId, now);
+    }
+    this.db.prepare("UPDATE threads SET updated_at = ? WHERE id = ?").run(now, threadId);
   }
 
   replaceMessages(threadId: string, messages: readonly ModelMessage[]): void {
@@ -1276,7 +1419,13 @@ export class ThreadStore {
       .prepare(
         `DELETE FROM tool_executions
           WHERE thread_id = ?
-            AND created_at < ?`,
+            AND created_at < ?
+            AND EXISTS (
+              SELECT 1
+                FROM tool_execution_context_coverage
+               WHERE tool_execution_context_coverage.thread_id = tool_executions.thread_id
+                 AND tool_execution_context_coverage.execution_id = tool_executions.id
+            )`,
       )
       .run(threadId, cutoff);
     pruned = Number(expired.changes) > 0;
@@ -1303,12 +1452,20 @@ export class ThreadStore {
       ) as unknown as ToolExecutionRetentionRow[];
     if (overflowRows.length > 0) {
       const remove = this.db.prepare(
-        "DELETE FROM tool_executions WHERE thread_id = ? AND sequence = ?",
+        `DELETE FROM tool_executions
+          WHERE thread_id = ?
+            AND sequence = ?
+            AND EXISTS (
+              SELECT 1
+                FROM tool_execution_context_coverage
+               WHERE tool_execution_context_coverage.thread_id = tool_executions.thread_id
+                 AND tool_execution_context_coverage.execution_id = tool_executions.id
+            )`,
       );
       for (const row of overflowRows) {
-        remove.run(threadId, row.sequence);
+        const removed = remove.run(threadId, row.sequence);
+        pruned = Number(removed.changes) > 0 || pruned;
       }
-      pruned = true;
     }
 
     if (pruned) {
@@ -1361,6 +1518,75 @@ export class ThreadStore {
         options.toolCallId ?? null,
         limit,
       ) as unknown as ToolExecutionRow[];
+    return rows.map((row) => ({
+      ...parsePersistedToolExecutionRecord(JSON.parse(row.record_json)),
+      sequence: row.sequence,
+    }));
+  }
+
+  listUncoveredToolExecutions(
+    threadId: string,
+    options: ListToolExecutionsOptions = {},
+  ): SequencedToolExecutionRecord[] {
+    const afterSequence = options.afterSequence ?? -1;
+    const throughSequence = options.throughSequence ?? Number.MAX_SAFE_INTEGER;
+    const limit = options.limit ?? DEFAULT_TOOL_EXECUTION_LIMIT;
+    if (!Number.isInteger(afterSequence) || afterSequence < -1) {
+      throw new Error("afterSequence 必须是大于等于 -1 的整数");
+    }
+    if (!Number.isInteger(limit) || limit < 1 || limit > MAX_TOOL_EXECUTION_LIMIT) {
+      throw new Error(`limit 必须是 1-${String(MAX_TOOL_EXECUTION_LIMIT)} 之间的整数`);
+    }
+    if (!Number.isInteger(throughSequence) || throughSequence < -1) {
+      throw new Error("throughSequence 必须是大于等于 -1 的整数");
+    }
+    if (throughSequence <= afterSequence) {
+      return [];
+    }
+    const rows = this.db
+      .prepare(
+        `SELECT tool_executions.sequence, tool_executions.record_json
+           FROM tool_executions
+           LEFT JOIN tool_execution_context_coverage
+             ON tool_execution_context_coverage.thread_id = tool_executions.thread_id
+            AND tool_execution_context_coverage.execution_id = tool_executions.id
+          WHERE tool_executions.thread_id = ?
+            AND tool_executions.sequence > ?
+            AND tool_executions.sequence <= ?
+            AND (? IS NULL OR tool_executions.tool_call_id = ?)
+            AND tool_execution_context_coverage.execution_id IS NULL
+          ORDER BY tool_executions.sequence ASC
+          LIMIT ?`,
+      )
+      .all(
+        threadId,
+        afterSequence,
+        throughSequence,
+        options.toolCallId ?? null,
+        options.toolCallId ?? null,
+        limit,
+      ) as unknown as ToolExecutionRow[];
+    return rows.map((row) => ({
+      ...parsePersistedToolExecutionRecord(JSON.parse(row.record_json)),
+      sequence: row.sequence,
+    }));
+  }
+
+  private listAllUncoveredToolExecutionsInTransaction(
+    threadId: string,
+  ): SequencedToolExecutionRecord[] {
+    const rows = this.db
+      .prepare(
+        `SELECT tool_executions.sequence, tool_executions.record_json
+           FROM tool_executions
+           LEFT JOIN tool_execution_context_coverage
+             ON tool_execution_context_coverage.thread_id = tool_executions.thread_id
+            AND tool_execution_context_coverage.execution_id = tool_executions.id
+          WHERE tool_executions.thread_id = ?
+            AND tool_execution_context_coverage.execution_id IS NULL
+          ORDER BY tool_executions.sequence ASC`,
+      )
+      .all(threadId) as unknown as ToolExecutionRow[];
     return rows.map((row) => ({
       ...parsePersistedToolExecutionRecord(JSON.parse(row.record_json)),
       sequence: row.sequence,

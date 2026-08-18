@@ -3634,6 +3634,280 @@ test("AgentSession 模型流在宣告工具调用后、调用结束前中断时,
   assert.match(nextPrompt, /not_executed/u);
 });
 
+test("AgentSession 同 ID 新调用只宣告便上下文溢出时,以 not_executed 进账本与 bounded recovery", async () => {
+  let toolCalls = 0;
+  const model = sequencedModel([
+    toolCallStep("echo-agent__echo", { q: "first" }),
+    [
+      { type: "stream-start", warnings: [] },
+      {
+        type: "tool-call",
+        toolCallId: "c1",
+        toolName: "echo-agent__echo",
+        input: JSON.stringify({ q: "announced-only" }),
+      },
+      { type: "error", error: "context_length_exceeded" },
+    ],
+    textStep("ok"),
+  ]);
+  const persisted: ModelMessage[][] = [];
+  const session = new AgentSession({
+    id: "same-id-announced-tool-context-overflow",
+    model,
+    sources: [
+      source("echo-agent", "echo", () => {
+        toolCalls += 1;
+      }),
+    ],
+    maxSteps: 4,
+    onPersist: (messages) => {
+      persisted.push([...messages]);
+    },
+  });
+
+  const events = await collect(session.send("tool loop"));
+  assert.equal(events.at(-1)?.type, "error");
+  assert.equal(toolCalls, 1);
+  const executions = session.getToolExecutions({}, true);
+  assert.deepEqual(
+    executions.map((record) => record.toolCallId),
+    ["c1", "c1"],
+  );
+  assert.equal(executions[0]?.outcome.kind, "success");
+  assert.equal(executions[1]?.outcome.kind, "cancelled");
+  assert.match(JSON.stringify(executions[1]?.outcome), /not_executed/u);
+  assert.doesNotMatch(JSON.stringify(executions[1]?.outcome), /outcome_unknown/u);
+  const recovery = (persisted.at(-1) ?? [])
+    .map((message) => readCancelledTurnRecoveryCheckpoint(message))
+    .find((checkpoint) => checkpoint !== undefined);
+  assert.ok(recovery, "bounded recovery record persisted");
+  assert.match(recovery.modelContext, /"kind":"success"/u);
+  assert.match(recovery.modelContext, /"executionState":"not_executed"/u);
+  assert.ok(recovery.modelContext.length <= 12_000);
+  assert.equal(countOccurrences(JSON.stringify(session.getMessages()), '"type":"tool-call"'), 0);
+
+  await collect(session.send("继续"));
+  const nextPrompt = JSON.stringify(model.doStreamCalls.at(-1)?.prompt);
+  assert.match(nextPrompt, /roll__interrupted_turn_recovery/u);
+  assert.match(nextPrompt, /not_executed/u);
+});
+
+test("AgentSession 上下文溢出的 pending Tool 恢复写失败时,下一轮在 Provider 前 fail closed", async () => {
+  let toolCalls = 0;
+  let persistCalls = 0;
+  const model = sequencedModel([
+    [
+      { type: "stream-start", warnings: [] },
+      {
+        type: "tool-call",
+        toolCallId: "c1",
+        toolName: "echo-agent__echo",
+        input: JSON.stringify({ q: "announced-only" }),
+      },
+      { type: "error", error: "context_length_exceeded" },
+    ],
+    textStep("must not run"),
+  ]);
+  const session = new AgentSession({
+    id: "context-overflow-pending-recovery-fail-closed",
+    model,
+    sources: [
+      source("echo-agent", "echo", () => {
+        toolCalls += 1;
+      }),
+    ],
+    maxSteps: 4,
+    onPersist: () => {
+      persistCalls += 1;
+      throw new Error("recovery store unavailable");
+    },
+  });
+
+  const firstEvents = await collect(session.send("tool loop"));
+  assert.equal(firstEvents.at(-1)?.type, "error");
+  assert.equal(toolCalls, 0);
+  assert.equal(model.doStreamCalls.length, 1);
+  const [execution] = session.getToolExecutions();
+  assert.equal(execution?.outcome.kind, "cancelled");
+  assert.match(JSON.stringify(execution?.outcome), /not_executed/u);
+
+  const secondEvents = await collect(session.send("继续"));
+  assert.equal(secondEvents.at(-1)?.type, "error");
+  assert.match(
+    secondEvents.find((event) => event.type === "error")?.message ?? "",
+    /工具执行恢复状态持久化失败/u,
+  );
+  assert.equal(model.doStreamCalls.length, 1, "recovery failure must block the provider");
+  assert.equal(toolCalls, 0);
+  assert.equal(persistCalls, 2);
+});
+
+test("AgentSession 前一模型步骤的同 ID 成功执行不会把新宣告调用误判为已执行", async () => {
+  let toolCalls = 0;
+  const model = sequencedModel([
+    toolCallStep("echo-agent__echo", { q: "first" }),
+    [
+      { type: "stream-start", warnings: [] },
+      {
+        type: "tool-call",
+        toolCallId: "c1",
+        toolName: "echo-agent__echo",
+        input: JSON.stringify({ q: "announced-only" }),
+      },
+      { type: "error", error: "ECONNRESET" },
+    ],
+    textStep("ok"),
+  ]);
+  const session = new AgentSession({
+    id: "same-id-second-occurrence-not-executed",
+    model,
+    sources: [
+      source("echo-agent", "echo", () => {
+        toolCalls += 1;
+      }),
+    ],
+    maxSteps: 4,
+  });
+
+  const events = await collect(session.send("tool loop"));
+  assert.equal(events.at(-1)?.type, "error");
+  assert.equal(toolCalls, 1);
+  const executions = session.getToolExecutions({}, true);
+  assert.equal(executions.length, 2);
+  assert.equal(executions[0]?.outcome.kind, "success");
+  assert.equal(executions[1]?.outcome.kind, "cancelled");
+  assert.deepEqual(
+    executions.map((record) => record.toolCallId),
+    ["c1", "c1"],
+  );
+  assert.match(JSON.stringify(executions[1]?.outcome), /not_executed/u);
+  assert.doesNotMatch(JSON.stringify(executions[1]?.outcome), /outcome_unknown/u);
+});
+
+test("AgentSession 同 ID 的新 occurrence 真正开始后被取消时仍记录 outcome_unknown", async () => {
+  let toolCalls = 0;
+  let cancelled = false;
+  const sessionRef: { current: AgentSession | undefined } = { current: undefined };
+  const sameIdSource: AgentToolSource = {
+    agentName: "same-id-agent",
+    client: {
+      callTool: async (
+        _request: unknown,
+        _resultSchema: unknown,
+        options: { readonly signal?: AbortSignal } | undefined,
+      ) => {
+        toolCalls += 1;
+        if (toolCalls === 1) {
+          return { content: [{ type: "text", text: "first-success" }] };
+        }
+        cancelled = sessionRef.current?.cancel() ?? false;
+        return await new Promise<never>((_resolve, reject) => {
+          const signal = options?.signal;
+          if (signal?.aborted) {
+            reject(signal.reason);
+            return;
+          }
+          signal?.addEventListener("abort", () => reject(signal.reason), { once: true });
+        });
+      },
+    } as unknown as Client,
+    tools: [
+      {
+        tool: {
+          name: "run",
+          inputSchema: {
+            type: "object" as const,
+            properties: { q: { type: "string" } },
+            required: ["q"],
+          },
+        },
+        annotations: { readOnlyHint: true },
+      },
+    ],
+  };
+  const session = new AgentSession({
+    id: "same-id-second-occurrence-started",
+    model: sequencedModel([
+      toolCallStep("same-id-agent__run", { q: "first" }),
+      toolCallStep("same-id-agent__run", { q: "second" }),
+      textStep("must not finish"),
+    ]),
+    sources: [sameIdSource],
+    maxSteps: 4,
+  });
+  sessionRef.current = session;
+
+  const events = await collect(session.send("run twice"));
+  assert.equal(cancelled, true);
+  assert.equal(events.at(-1)?.type, "turn-cancelled");
+  assert.equal(toolCalls, 2);
+  const executions = session.getToolExecutions({}, true);
+  assert.deepEqual(
+    executions.map((record) => record.toolCallId),
+    ["c1", "c1"],
+  );
+  assert.equal(executions[0]?.outcome.kind, "success");
+  assert.equal(executions[1]?.outcome.kind, "cancelled");
+  assert.match(JSON.stringify(executions[1]?.outcome), /outcome_unknown/u);
+});
+
+test("AgentSession 未覆盖 Tool ledger 的恢复写入失败时阻止手动 compaction", async () => {
+  let streamCalls = 0;
+  let generateCalls = 0;
+  let toolCalls = 0;
+  let persistCalls = 0;
+  const steps = [toolCallStep("echo-agent__echo", { q: "once" }), textStep("done")];
+  const model = new MockLanguageModelV4({
+    doStream: async () => {
+      const chunks = steps[streamCalls] ?? steps.at(-1) ?? [];
+      streamCalls += 1;
+      return streamChunks(chunks);
+    },
+    doGenerate: async () => {
+      generateCalls += 1;
+      throw new Error("compactor must not run");
+    },
+  });
+  const session = new AgentSession({
+    id: "uncovered-ledger-blocks-manual-compaction",
+    model,
+    sources: [
+      source("echo-agent", "echo", () => {
+        toolCalls += 1;
+      }),
+    ],
+    maxSteps: 4,
+    compaction: {
+      enabled: true,
+      strategy: "summarize",
+      threshold: 0.75,
+      keepRecentTurns: 1,
+      keepRecentTokens: 1,
+    },
+    onPersist: () => {
+      persistCalls += 1;
+      throw new Error("transcript unavailable");
+    },
+  });
+
+  const failedTurn = await collect(session.send("run once"));
+  assert.equal(failedTurn.at(-1)?.type, "error");
+  assert.equal(toolCalls, 1);
+  assert.equal(streamCalls, 2);
+  assert.equal(persistCalls, 1);
+
+  const compacted = await collect(session.compact("manual"));
+  assert.equal(compacted.at(-1)?.type, "error");
+  assert.match(
+    compacted.find((event) => event.type === "error")?.message ?? "",
+    /transcript unavailable/u,
+  );
+  assert.equal(generateCalls, 0);
+  assert.equal(streamCalls, 2);
+  assert.equal(toolCalls, 1);
+  assert.equal(persistCalls, 2);
+});
+
 test("AgentSession 首次模型调用失败且没有任何已完成步骤时不写入失败记录,保持干净重试", async () => {
   const model = sequencedModel([streamErrorStep("ECONNRESET"), textStep("ok")]);
   const persisted: ModelMessage[][] = [];
@@ -4293,8 +4567,13 @@ test("AgentSession Tool 已执行后下一 Step overflow 不重放副作用", as
   assert.match(error.message, /为避免重复执行，未自动重试/u);
   assert.doesNotMatch(error.message, /副作用|重放/u);
   assert.equal(persisted[0]?.content, "write once");
-  assert.match(String(persisted[1]?.content), /部分结果可能已经生效且不会自动撤销/u);
-  assert.doesNotMatch(String(persisted[1]?.content), /外部副作用|回滚|工具活动/u);
+  const recoveryMessage = persisted[1];
+  assert.ok(recoveryMessage);
+  const recovery = readCancelledTurnRecoveryCheckpoint(recoveryMessage);
+  assert.ok(recovery);
+  assert.match(recovery.modelContext, /"outcome":\{"kind":"success"/u);
+  assert.match(String(persisted[2]?.content), /部分结果可能已经生效且不会自动撤销/u);
+  assert.doesNotMatch(String(persisted[2]?.content), /外部副作用|回滚|工具活动/u);
 });
 
 test("AgentSession summarize 结构化 draft 无效时降级 truncate 且不继续原始历史", async () => {

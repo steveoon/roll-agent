@@ -94,17 +94,21 @@ import {
   toRedactedToolExecutionRecordSummary,
   type RedactedToolExecutionRecordSummary,
   type ToolExecutionRecord,
+  type ToolExecutionRecordId,
 } from "../tool-bridge/tool-execution-record.ts";
 import type {
+  AppendMessagesOptions,
   CompactionEvidenceWatermarks,
   CommitCompactionInput,
   ListToolExecutionsOptions,
   ListTranscriptMessagesOptions,
   SequencedToolExecutionRecord,
+  ToolExecutionContextRepresentation,
 } from "../store/thread-store.ts";
 import {
   TOOL_RESOURCE_ACCESS_MODES,
   ToolExecutionCoordinator,
+  type ToolCallOccurrence,
   type ToolResourceAccess,
 } from "../tool-bridge/tool-execution-coordinator.ts";
 import { ApprovalGate, type ApprovalDecision } from "../approval/approval-gate.ts";
@@ -128,6 +132,7 @@ import {
 } from "./explicit-skill-context.ts";
 import {
   createCancelledTurnRecoveryMessage,
+  createToolLedgerGapRecoveryMessage,
   materializeCancelledTurnRecoveryMessages,
   stripCancelledTurnRecoveryMessages,
 } from "./cancelled-turn-recovery.ts";
@@ -208,13 +213,14 @@ export interface AgentSessionOptions {
   readonly maxSteps: number;
   readonly policy?: ToolPolicy;
   readonly initialMessages?: readonly ModelMessage[];
-  readonly onPersist?: (messages: readonly ModelMessage[]) => void;
+  readonly onPersist?: (messages: readonly ModelMessage[], options?: AppendMessagesOptions) => void;
   readonly onReplace?: (messages: readonly ModelMessage[]) => void;
   readonly onToolExecution?: (record: ToolExecutionRecord) => void;
   readonly listToolExecutions?: (
     options?: ListToolExecutionsOptions,
   ) => readonly SequencedToolExecutionRecord[];
   readonly getToolExecution?: (executionId: string) => SequencedToolExecutionRecord | undefined;
+  readonly recoverUncoveredToolExecutions?: () => readonly ModelMessage[];
   readonly initialCheckpoint?: CompactionCheckpoint;
   readonly listTranscriptMessages?: (
     options?: ListTranscriptMessagesOptions,
@@ -314,6 +320,7 @@ interface ActiveTurn {
 
 interface PendingToolCall {
   readonly toolCallId: string;
+  readonly executionOccurrence: ToolCallOccurrence;
   readonly agentName: string;
   readonly toolName: string;
   readonly input: unknown;
@@ -793,7 +800,9 @@ export class AgentSession {
   private readonly model: LanguageModelV4;
   private readonly maxSteps: number;
   private readonly messages: ModelMessage[];
-  private readonly onPersist: ((messages: readonly ModelMessage[]) => void) | undefined;
+  private readonly onPersist:
+    | ((messages: readonly ModelMessage[], options?: AppendMessagesOptions) => void)
+    | undefined;
   private readonly onReplace: ((messages: readonly ModelMessage[]) => void) | undefined;
   private readonly onToolExecution: ((record: ToolExecutionRecord) => void) | undefined;
   private readonly listPersistedToolExecutions:
@@ -802,6 +811,9 @@ export class AgentSession {
   private readonly getPersistedToolExecution:
     | ((executionId: string) => SequencedToolExecutionRecord | undefined)
     | undefined;
+  private readonly recoverPersistedToolExecutionContext:
+    | (() => readonly ModelMessage[])
+    | undefined;
   private readonly listPersistedTranscriptMessages:
     | ((options?: ListTranscriptMessagesOptions) => readonly ArchivedTranscriptMessage[])
     | undefined;
@@ -809,6 +821,7 @@ export class AgentSession {
     | ((input: CommitCompactionInput) => CompactionCheckpoint)
     | undefined;
   private readonly inMemoryToolExecutions: ToolExecutionRecord[] = [];
+  private readonly uncoveredToolExecutions = new Map<ToolExecutionRecordId, ToolExecutionRecord>();
   private readonly inMemoryTranscript: ArchivedTranscriptMessage[] = [];
   private readonly legacyV1ActiveSnapshot: LegacyV1ActiveSnapshot | undefined;
   private readonly compactionResources = new Map<string, CompactionResource>();
@@ -879,6 +892,7 @@ export class AgentSession {
     this.onToolExecution = options.onToolExecution;
     this.listPersistedToolExecutions = options.listToolExecutions;
     this.getPersistedToolExecution = options.getToolExecution;
+    this.recoverPersistedToolExecutionContext = options.recoverUncoveredToolExecutions;
     this.listPersistedTranscriptMessages = options.listTranscriptMessages;
     this.commitPersistedCompaction = options.commitCompaction;
     this.compactionCheckpoint = options.initialCheckpoint;
@@ -1165,6 +1179,8 @@ export class AgentSession {
     const route = this.registry.resolve(toolName);
     const pending: PendingToolCall = {
       toolCallId,
+      executionOccurrence:
+        existing?.executionOccurrence ?? this.toolCoordinator.captureToolCallOccurrence(toolCallId),
       agentName: route?.agentName ?? toolName,
       toolName: route?.toolName ?? toolName,
       input,
@@ -1303,6 +1319,16 @@ export class AgentSession {
         ...(this.contextWindow !== undefined ? { contextWindow: this.contextWindow } : {}),
         ...(this.lastInputTokens !== undefined ? { lastInputTokens: this.lastInputTokens } : {}),
       });
+      try {
+        this.reconcileUncoveredToolExecutionContext();
+      } catch (error) {
+        queue.push({
+          type: "error",
+          stage: "plan",
+          message: `工具执行恢复状态持久化失败: ${errorMessage(error)}`,
+        });
+        return;
+      }
       try {
         await this.runAutoCompactionPasses(queue, activeTurn, turnStartedAt, userMessageContent);
       } catch (error) {
@@ -1892,8 +1918,9 @@ export class AgentSession {
         this.debug(queue, "persist", "persisting messages", turnStartedAt, {
           appendedMessages: this.messages.length - turnStart,
         });
-        this.persistMessages(this.messages.slice(turnStart));
+        this.persistMessages(this.messages.slice(turnStart), "raw_transcript");
         markTurnSegmentPersisted(activeTurn);
+        turnStart = this.messages.length;
         this.debug(queue, "persist", "messages persisted", turnStartedAt, {
           totalMessages: this.messages.length,
         });
@@ -1936,7 +1963,6 @@ export class AgentSession {
           return;
         }
         activeTurn.pausedForContextPressure = false;
-        turnStart = this.messages.length;
         this.debug(queue, "compaction", "turn paused for context pressure", turnStartedAt, {
           continuations: activeTurn.contextPressureContinuations,
           pressureTokens: this.contextPressureTokens(),
@@ -1993,8 +2019,29 @@ export class AgentSession {
     }
   }
 
-  private persistMessages(messages: readonly ModelMessage[]): void {
-    this.onPersist?.(messages);
+  private persistMessages(
+    messages: readonly ModelMessage[],
+    representation?: ToolExecutionContextRepresentation,
+  ): void {
+    const executionIds =
+      representation === undefined ? [] : [...this.uncoveredToolExecutions.keys()];
+    const options: AppendMessagesOptions | undefined =
+      representation === undefined || executionIds.length === 0
+        ? undefined
+        : {
+            toolExecutionCoverage: {
+              executionIds,
+              representation,
+            },
+          };
+    this.onPersist?.(messages, options);
+    this.recordPersistedMessagesInMemory(messages);
+    for (const executionId of executionIds) {
+      this.uncoveredToolExecutions.delete(executionId);
+    }
+  }
+
+  private recordPersistedMessagesInMemory(messages: readonly ModelMessage[]): void {
     if (this.listPersistedTranscriptMessages !== undefined) {
       return;
     }
@@ -2014,6 +2061,29 @@ export class AgentSession {
     }
   }
 
+  private reconcileUncoveredToolExecutionContext(): void {
+    if (this.recoverPersistedToolExecutionContext !== undefined) {
+      const recoveredMessages = this.recoverPersistedToolExecutionContext();
+      this.messages.push(...recoveredMessages);
+      this.recordPersistedMessagesInMemory(recoveredMessages);
+      this.uncoveredToolExecutions.clear();
+      return;
+    }
+    const records = [...this.uncoveredToolExecutions.values()];
+    if (records.length === 0) {
+      return;
+    }
+    const rollbackTo = this.messages.length;
+    const recovery = createToolLedgerGapRecoveryMessage(records);
+    this.messages.push(recovery);
+    try {
+      this.persistMessages([recovery], "recovery_evidence");
+    } catch (error) {
+      this.messages.splice(rollbackTo);
+      throw error;
+    }
+  }
+
   private persistContextFailure(
     queue: AsyncEventQueue<SessionEvent>,
     activeTurn: ActiveTurn,
@@ -2022,6 +2092,16 @@ export class AgentSession {
     sawToolCall: boolean,
     turnStartedAt: number,
   ): void {
+    this.captureCancellationActivity(activeTurn);
+    try {
+      this.persistPendingToolCancellations(activeTurn);
+    } catch (error) {
+      queue.push({
+        type: "error",
+        stage: "execute",
+        message: `上下文溢出工具状态持久化失败: ${errorMessage(error)}`,
+      });
+    }
     const hadToolActivity = sawToolCall || activeTurn.toolExecutions.length > 0;
     const notes = ["本轮因上下文窗口溢出而中断，未自动重放。"];
     if (producedText) {
@@ -2030,10 +2110,14 @@ export class AgentSession {
     if (hadToolActivity) {
       notes.push("本轮已有操作开始执行，部分结果可能已经生效且不会自动撤销，请先检查实际结果。");
     }
+    const uncoveredRecords = [...this.uncoveredToolExecutions.values()];
     this.appendInterruptedTurnMessages(queue, turnStartedAt, {
       rollbackTo: this.messages.length,
       messages: [
         ...(activeTurn.userMessagePersisted ? [] : [userMessage]),
+        ...(uncoveredRecords.length === 0
+          ? []
+          : [createToolLedgerGapRecoveryMessage(uncoveredRecords)]),
         { role: "assistant", content: notes.join("") },
       ],
       debugLabel: "persisting context-overflow marker",
@@ -2124,7 +2208,7 @@ export class AgentSession {
       ...input.debugDetails,
     });
     try {
-      this.persistMessages(this.messages.slice(input.rollbackTo));
+      this.persistMessages(this.messages.slice(input.rollbackTo), "recovery_evidence");
       return true;
     } catch (error) {
       this.messages.splice(input.rollbackTo);
@@ -2143,6 +2227,7 @@ export class AgentSession {
     this.onToolExecution?.(record);
     this.inMemoryToolExecutions.push(record);
     activeTurn.toolExecutions.push(record);
+    this.uncoveredToolExecutions.set(record.id, record);
   }
 
   private rememberCompactionResources(
@@ -2797,6 +2882,7 @@ export class AgentSession {
     reason: ContextCompactionReason,
   ): Promise<void> {
     try {
+      this.reconcileUncoveredToolExecutionContext();
       await this.runCompaction(queue, reason, activeTurn, true, undefined);
     } catch (error) {
       queue.push({ type: "error", stage: "plan", message: errorMessage(error) });
@@ -3254,7 +3340,7 @@ export class AgentSession {
   private currentCancellationActivity(activeTurn: ActiveTurn): TurnCancellationActivity {
     const execSessionIds = this.activeExecSessionIds(activeTurn);
     const startedToolCalls = [...activeTurn.pendingToolCalls.values()].filter((pending) =>
-      this.toolCoordinator.hasExecutionStarted(pending.toolCallId),
+      this.toolCoordinator.hasExecutionStarted(pending.executionOccurrence),
     );
     return {
       execSessionIds,
@@ -3467,7 +3553,7 @@ export class AgentSession {
     const cancellationReason =
       activeTurn.cancellationReason ?? SESSION_CANCELLATION_REASONS.runtime;
     for (const pending of activeTurn.pendingToolCalls.values()) {
-      const executionState = this.toolCoordinator.hasExecutionStarted(pending.toolCallId)
+      const executionState = this.toolCoordinator.hasExecutionStarted(pending.executionOccurrence)
         ? TOOL_CANCELLATION_EXECUTION_STATES.outcomeUnknown
         : TOOL_CANCELLATION_EXECUTION_STATES.notExecuted;
       const display =

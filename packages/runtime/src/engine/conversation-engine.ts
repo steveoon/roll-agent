@@ -71,6 +71,7 @@ import {
 } from "../bash/profile.ts";
 import { inspectGitVcsContext } from "./vcs-context.ts";
 import { AGENT_BOOTSTRAP_MAX_CONCURRENCY, mapWithBoundedConcurrency } from "./agent-bootstrap.ts";
+import { createToolLedgerGapRecoveryMessage } from "./cancelled-turn-recovery.ts";
 
 const DEFAULT_MAX_STEPS = 80;
 const ENGINE_CLOSING_MESSAGE = "ConversationEngine is closing";
@@ -450,6 +451,7 @@ export class ConversationEngine {
     if (concurrentlyResumedSession !== undefined) {
       return concurrentlyResumedSession;
     }
+    this.recoverUncoveredToolExecutionContext(threadId);
     const state = this.store.loadSessionState(threadId);
     return this.buildSession(context, threadId, state.messages, state.checkpoint);
   }
@@ -593,11 +595,12 @@ export class ConversationEngine {
       ...(initialCheckpoint ? { initialCheckpoint } : {}),
       ...(store
         ? {
-            onPersist: (messages) => store.appendMessages(id, messages),
+            onPersist: (messages, options) => store.appendMessages(id, messages, options),
             onReplace: (messages) => store.replaceMessages(id, messages),
             onToolExecution: (record) => store.appendToolExecution(id, record),
             listToolExecutions: (options) => store.listToolExecutions(id, options),
             getToolExecution: (executionId) => store.getToolExecution(id, executionId),
+            recoverUncoveredToolExecutions: () => this.recoverUncoveredToolExecutionContext(id),
             listTranscriptMessages: (options) => store.listTranscriptMessages(id, options),
             commitCompaction: (input) => store.commitCompaction(id, input),
             readCheckpointTranscript: (options) => store.readCheckpointTranscript(id, options),
@@ -611,6 +614,14 @@ export class ConversationEngine {
     });
     this.liveSessions.set(id, session);
     return session;
+  }
+
+  private recoverUncoveredToolExecutionContext(threadId: string): readonly ModelMessage[] {
+    const recovered = this.store?.recoverUncoveredToolExecutions(
+      threadId,
+      createToolLedgerGapRecoveryMessage,
+    );
+    return recovered === undefined ? [] : [recovered];
   }
 
   private syncProviderOptions(providerOptions: SharedV4ProviderOptions | undefined): void {

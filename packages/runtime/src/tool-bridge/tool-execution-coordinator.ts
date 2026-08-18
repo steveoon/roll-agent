@@ -74,6 +74,7 @@ interface BatchAdmission {
 interface BatchState {
   readonly callId: string;
   readonly toolCallIds: Set<string>;
+  readonly toolCallOccurrences: Map<string, ToolCallOccurrence>;
   readonly preparedToolCallIds: Set<string>;
   readonly completedToolCallIds: Set<string>;
   readonly admission: BatchAdmission;
@@ -85,6 +86,24 @@ interface BatchState {
 export interface ToolBatchCall {
   readonly toolCallId: string;
   readonly toolId: string;
+}
+
+const TOOL_CALL_OCCURRENCE_STATE = Symbol("tool-call-occurrence-state");
+
+interface ToolCallOccurrenceState {
+  started: boolean;
+}
+
+export interface ToolCallOccurrence {
+  readonly toolCallId: string;
+  readonly [TOOL_CALL_OCCURRENCE_STATE]: ToolCallOccurrenceState;
+}
+
+function createToolCallOccurrence(toolCallId: string): ToolCallOccurrence {
+  return {
+    toolCallId,
+    [TOOL_CALL_OCCURRENCE_STATE]: { started: false },
+  };
 }
 
 interface LockWaiter {
@@ -288,7 +307,7 @@ class ResourceLockManager {
 export class ToolExecutionCoordinator {
   private readonly plans = new Map<string, ToolExecutionPlan>();
   private readonly prepared = new Map<string, PreparedToolCall>();
-  private readonly startedToolCallIds = new Set<string>();
+  private readonly unbatchedOccurrences = new Map<string, ToolCallOccurrence>();
   private readonly batches = new Map<string, BatchState>();
   private readonly toolCallBatches = new Map<string, BatchState>();
   private readonly locks = new ResourceLockManager();
@@ -312,8 +331,18 @@ export class ToolExecutionCoordinator {
     }
   }
 
-  hasExecutionStarted(toolCallId: string): boolean {
-    return this.startedToolCallIds.has(toolCallId);
+  captureToolCallOccurrence(toolCallId: string): ToolCallOccurrence {
+    const batch = this.toolCallBatches.get(toolCallId) ?? this.activeBatch;
+    if (batch) {
+      return this.batchOccurrence(batch, toolCallId);
+    }
+    const occurrence = createToolCallOccurrence(toolCallId);
+    this.unbatchedOccurrences.set(toolCallId, occurrence);
+    return occurrence;
+  }
+
+  hasExecutionStarted(occurrence: ToolCallOccurrence): boolean {
+    return occurrence[TOOL_CALL_OCCURRENCE_STATE].started;
   }
 
   startBatch(callId: string): void {
@@ -323,6 +352,7 @@ export class ToolExecutionCoordinator {
     const batch: BatchState = {
       callId,
       toolCallIds: new Set<string>(),
+      toolCallOccurrences: new Map<string, ToolCallOccurrence>(),
       preparedToolCallIds: new Set<string>(),
       completedToolCallIds: new Set<string>(),
       admission: createBatchAdmission(),
@@ -410,7 +440,7 @@ export class ToolExecutionCoordinator {
       this.cancelBatch(batch);
     }
     this.prepared.clear();
-    this.startedToolCallIds.clear();
+    this.unbatchedOccurrences.clear();
     this.batches.clear();
     this.toolCallBatches.clear();
     this.activeBatch = undefined;
@@ -429,6 +459,7 @@ export class ToolExecutionCoordinator {
       this.trackBatchCall(batch, toolCallId);
     }
     let prepared: PreparedToolCall | undefined;
+    let occurrence: ToolCallOccurrence | undefined;
 
     try {
       if (batch) {
@@ -470,12 +501,14 @@ export class ToolExecutionCoordinator {
       }
       const plan = this.plans.get(toolId);
       const admittedCall = prepared;
+      occurrence = this.executionOccurrence(admittedCall.batch ?? batch, toolCallId);
+      const admittedOccurrence = occurrence;
       return await this.locks.run(admittedCall.resources, abortSignal, async () => {
         const invalidated = await plan?.revalidateExecution?.(input, admittedCall.capturedState);
         if (invalidated) {
           return invalidated;
         }
-        this.startedToolCallIds.add(toolCallId);
+        admittedOccurrence[TOOL_CALL_OCCURRENCE_STATE].started = true;
         return operation(admittedCall.capturedState);
       });
     } catch (error) {
@@ -495,6 +528,13 @@ export class ToolExecutionCoordinator {
           currentPrepared?.batch === owningBatch)
       ) {
         this.prepared.delete(toolCallId);
+      }
+      if (
+        occurrence !== undefined &&
+        owningBatch === undefined &&
+        this.unbatchedOccurrences.get(toolCallId) === occurrence
+      ) {
+        this.unbatchedOccurrences.delete(toolCallId);
       }
       this.completeBatchCall(owningBatch, toolCallId);
     }
@@ -536,7 +576,34 @@ export class ToolExecutionCoordinator {
 
   private trackBatchCall(batch: BatchState, toolCallId: string): void {
     batch.toolCallIds.add(toolCallId);
+    this.batchOccurrence(batch, toolCallId);
     this.toolCallBatches.set(toolCallId, batch);
+  }
+
+  private batchOccurrence(batch: BatchState, toolCallId: string): ToolCallOccurrence {
+    const existing = batch.toolCallOccurrences.get(toolCallId);
+    if (existing) {
+      return existing;
+    }
+    const occurrence = createToolCallOccurrence(toolCallId);
+    batch.toolCallOccurrences.set(toolCallId, occurrence);
+    return occurrence;
+  }
+
+  private executionOccurrence(
+    batch: BatchState | undefined,
+    toolCallId: string,
+  ): ToolCallOccurrence {
+    if (batch) {
+      return this.batchOccurrence(batch, toolCallId);
+    }
+    const existing = this.unbatchedOccurrences.get(toolCallId);
+    if (existing) {
+      return existing;
+    }
+    const occurrence = createToolCallOccurrence(toolCallId);
+    this.unbatchedOccurrences.set(toolCallId, occurrence);
+    return occurrence;
   }
 
   private releaseBatchAdmissionIfReady(batch: BatchState): void {

@@ -28,6 +28,8 @@ import {
 import { createEmptyCompactionToolState } from "./compaction-checkpoint.ts";
 import { createEmptyCompactionSemanticState } from "./compaction-semantic-state.ts";
 import { SUMMARY_PREFIX } from "./compactor.ts";
+import { createToolExecutionRecord } from "../tool-bridge/tool-execution-record.ts";
+import { successfulToolResult } from "../tool-bridge/normalize-result.ts";
 
 function tempDir(): string {
   return mkdtempSync(join(tmpdir(), "roll-engine-"));
@@ -1564,10 +1566,10 @@ test("ConversationEngine.getContextSummary 汇总 agent/tool/skill 数量", asyn
 const STOP_REASON = { unified: "stop", raw: "stop" } as const;
 const TOOL_CALLS_REASON = { unified: "tool-calls", raw: "tool-calls" } as const;
 
-function mockUsage() {
+function mockUsage(inputTokens = 1, outputTokens = 1) {
   return {
-    inputTokens: { total: 1, noCache: 1, cacheRead: 0, cacheWrite: 0 },
-    outputTokens: { total: 1, text: 1, reasoning: 0 },
+    inputTokens: { total: inputTokens, noCache: inputTokens, cacheRead: 0, cacheWrite: 0 },
+    outputTokens: { total: outputTokens, text: outputTokens, reasoning: 0 },
   };
 }
 
@@ -1628,11 +1630,12 @@ function engineToolCallStep(
   toolCallId: string,
   toolName: string,
   input: unknown,
+  inputTokens = 1,
 ): LanguageModelV4StreamPart[] {
   return [
     { type: "stream-start", warnings: [] },
     { type: "tool-call", toolCallId, toolName, input: JSON.stringify(input) },
-    { type: "finish", usage: mockUsage(), finishReason: TOOL_CALLS_REASON },
+    { type: "finish", usage: mockUsage(inputTokens), finishReason: TOOL_CALLS_REASON },
   ];
 }
 
@@ -2114,6 +2117,343 @@ test("ConversationEngine 将 ToolExecutionRecord 持久化并可跨进程恢复"
     assert.equal(reopened.listToolExecutions(session.id)[0]?.id, record?.id);
     reopened.close();
   } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("ConversationEngine ledger 已提交但 transcript 失败时在下一次推理前原子恢复并 fail closed", async () => {
+  const dir = tempDir();
+  let database: DatabaseSync | undefined;
+  let store: ThreadStore | undefined;
+  let engine: ConversationEngine | undefined;
+  try {
+    const config = installEngineConfig("/tmp/roll-engine-ledger-gap");
+    const prompts: LanguageModelV4CallOptions[] = [];
+    const steps = [
+      engineToolCallStep("c1", "probe__write", { q: "once" }),
+      engineTextStep("first turn would finish"),
+      engineTextStep("recovered safely"),
+    ];
+    const model = new MockLanguageModelV4({
+      doStream: async (options) => {
+        prompts.push(options);
+        const chunks = steps[prompts.length - 1] ?? steps.at(-1) ?? [];
+        return {
+          stream: simulateReadableStream<LanguageModelV4StreamPart>({
+            chunks,
+            initialDelayInMs: null,
+            chunkDelayInMs: null,
+          }),
+        };
+      },
+    });
+    let toolCalls = 0;
+    store = new ThreadStore(dir);
+    engine = new ConversationEngine({
+      config,
+      model,
+      store,
+      sources: [
+        {
+          agentName: "probe",
+          client: {
+            callTool: async () => {
+              toolCalls += 1;
+              return { content: [{ type: "text", text: "side-effect-complete" }] };
+            },
+          } as never,
+          tools: [
+            {
+              tool: {
+                name: "write",
+                inputSchema: {
+                  type: "object" as const,
+                  properties: { q: { type: "string" } },
+                  required: ["q"],
+                },
+              },
+              annotations: { readOnlyHint: true },
+            },
+          ],
+        },
+      ],
+      skillLibrary: null,
+    });
+    const session = await engine.createSession();
+    database = new DatabaseSync(join(dir, "threads.db"));
+    database.exec(`
+      CREATE TRIGGER reject_turn_transcript
+      BEFORE INSERT ON transcript_messages
+      BEGIN
+        SELECT RAISE(ABORT, 'simulated transcript commit failure');
+      END;
+    `);
+
+    const failedEvents: SessionEvent[] = [];
+    for await (const event of session.send("write once")) {
+      failedEvents.push(event);
+    }
+    assert.equal(failedEvents.at(-1)?.type, "error");
+    assert.equal(toolCalls, 1);
+    assert.equal(prompts.length, 2);
+    assert.equal(store.listUncoveredToolExecutions(session.id).length, 1);
+    assert.deepEqual(store.getMessages(session.id), []);
+
+    const blockedEvents: SessionEvent[] = [];
+    for await (const event of session.send("continue while storage is broken")) {
+      blockedEvents.push(event);
+    }
+    assert.equal(blockedEvents.at(-1)?.type, "error");
+    assert.match(
+      blockedEvents.find((event) => event.type === "error")?.message ?? "",
+      /工具执行恢复状态持久化失败/u,
+    );
+    assert.equal(prompts.length, 2, "recovery persistence failure must block the provider");
+    assert.equal(toolCalls, 1);
+    assert.equal(store.listUncoveredToolExecutions(session.id).length, 1);
+
+    database.exec("DROP TRIGGER reject_turn_transcript;");
+    const recoveredEvents: SessionEvent[] = [];
+    for await (const event of session.send("continue after storage recovery")) {
+      recoveredEvents.push(event);
+    }
+    assert.equal(recoveredEvents.at(-1)?.type, "message-finish");
+    assert.equal(prompts.length, 3);
+    assert.equal(toolCalls, 1);
+    assert.deepEqual(store.listUncoveredToolExecutions(session.id), []);
+    const recoveredPrompt = JSON.stringify(prompts.at(-1)?.prompt);
+    assert.match(recoveredPrompt, /roll__interrupted_turn_recovery/u);
+    assert.match(recoveredPrompt, /side-effect-complete/u);
+    assert.match(recoveredPrompt, /outcome.*kind.*success/u);
+
+    await engine.dispose();
+    engine = undefined;
+    store.close();
+    store = undefined;
+  } finally {
+    await engine?.dispose();
+    store?.close();
+    database?.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("ConversationEngine 续跑 segment 提交失败时只恢复新 execution,不重复已覆盖步骤", async () => {
+  const dir = tempDir();
+  let database: DatabaseSync | undefined;
+  let store: ThreadStore | undefined;
+  let engine: ConversationEngine | undefined;
+  try {
+    const baseConfig = installEngineConfig("/tmp/roll-engine-continuation-gap");
+    const config = {
+      ...baseConfig,
+      runtime: {
+        ...baseConfig.runtime,
+        contextWindow: 200,
+        compaction: {
+          ...baseConfig.runtime.compaction,
+          enabled: true,
+          strategy: "truncate" as const,
+          threshold: 0.75,
+          keepRecentTurns: 1,
+          keepRecentTokens: 1,
+        },
+      },
+    };
+    const prompts: LanguageModelV4CallOptions[] = [];
+    const steps = [
+      engineToolCallStep("c1", "probe__write", { q: "first" }, 170),
+      engineToolCallStep("c2", "probe__write", { q: "second" }),
+      engineTextStep("continuation done"),
+      engineTextStep("after recovery"),
+    ];
+    const model = new MockLanguageModelV4({
+      doStream: async (options) => {
+        prompts.push(options);
+        const chunks = steps[prompts.length - 1] ?? steps.at(-1) ?? [];
+        return {
+          stream: simulateReadableStream<LanguageModelV4StreamPart>({
+            chunks,
+            initialDelayInMs: null,
+            chunkDelayInMs: null,
+          }),
+        };
+      },
+    });
+    let toolCalls = 0;
+    store = new ThreadStore(dir);
+    const threadId = store.createThread({ model: "default-model" });
+    store.appendMessages(threadId, [
+      { role: "user", content: "old-1" },
+      { role: "assistant", content: "answer-1" },
+      { role: "user", content: "old-2" },
+      { role: "assistant", content: "answer-2" },
+    ]);
+    engine = new ConversationEngine({
+      config,
+      model,
+      store,
+      sources: [
+        {
+          agentName: "probe",
+          client: {
+            callTool: async () => {
+              toolCalls += 1;
+              return { content: [{ type: "text", text: `result-${String(toolCalls)}` }] };
+            },
+          } as never,
+          tools: [
+            {
+              tool: {
+                name: "write",
+                inputSchema: {
+                  type: "object" as const,
+                  properties: { q: { type: "string" } },
+                  required: ["q"],
+                },
+              },
+              annotations: { readOnlyHint: true },
+            },
+          ],
+        },
+      ],
+      skillLibrary: null,
+    });
+    const session = await engine.resumeSession(threadId);
+    database = new DatabaseSync(join(dir, "threads.db"));
+    database.exec(`
+      CREATE TRIGGER reject_c2_transcript
+      BEFORE INSERT ON transcript_messages
+      WHEN NEW.message_json LIKE '%"toolCallId":"c2"%'
+      BEGIN
+        SELECT RAISE(ABORT, 'simulated continuation transcript failure');
+      END;
+    `);
+
+    const failedEvents: SessionEvent[] = [];
+    for await (const event of session.send("tool loop")) {
+      failedEvents.push(event);
+    }
+    assert.equal(failedEvents.at(-1)?.type, "error");
+    assert.equal(toolCalls, 2);
+    assert.equal(prompts.length, 3);
+    const ledger = store.listToolExecutions(threadId);
+    assert.deepEqual(
+      ledger.map((record) => record.toolCallId),
+      ["c1", "c2"],
+    );
+    assert.deepEqual(
+      store.listUncoveredToolExecutions(threadId).map((record) => record.id),
+      [ledger[1]?.id],
+    );
+
+    const recoveredEvents: SessionEvent[] = [];
+    for await (const event of session.send("continue safely")) {
+      recoveredEvents.push(event);
+    }
+    assert.equal(recoveredEvents.at(-1)?.type, "message-finish");
+    assert.equal(toolCalls, 2);
+    assert.equal(prompts.length, 4);
+    assert.deepEqual(store.listUncoveredToolExecutions(threadId), []);
+    const recoveredPrompt = JSON.stringify(prompts.at(-1)?.prompt);
+    assert.match(recoveredPrompt, /result-2/u);
+    assert.match(recoveredPrompt, /roll__interrupted_turn_recovery/u);
+    assert.equal(recoveredPrompt.match(/result-2/gu)?.length ?? 0, 1);
+
+    await engine.dispose();
+    engine = undefined;
+    store.close();
+    store = undefined;
+  } finally {
+    await engine?.dispose();
+    store?.close();
+    database?.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("ConversationEngine 重启恢复仅投影未覆盖的 exact execution 且连续 resume 幂等", async () => {
+  const dir = tempDir();
+  let engine: ConversationEngine | undefined;
+  let store: ThreadStore | undefined;
+  try {
+    const config = installEngineConfig("/tmp/roll-engine-ledger-resume");
+    store = new ThreadStore(dir);
+    const threadId = store.createThread({ model: "default-model" });
+    const first = createToolExecutionRecord({
+      id: "0905d35a-78a7-4485-9abc-d60c744c2a38",
+      toolCallId: "shared-call",
+      agentName: "probe",
+      toolName: "write",
+      input: { q: "first" },
+      result: successfulToolResult("first-result"),
+    });
+    const second = createToolExecutionRecord({
+      id: "51c5ef8f-cb7c-4dd6-ab87-90d029022bc0",
+      toolCallId: "shared-call",
+      agentName: "probe",
+      toolName: "write",
+      input: { q: "second" },
+      result: successfulToolResult("second-result"),
+    });
+    store.appendToolExecution(threadId, first);
+    store.appendMessages(threadId, [{ role: "assistant", content: "first already covered" }], {
+      toolExecutionCoverage: {
+        executionIds: [first.id],
+        representation: "recovery_evidence",
+      },
+    });
+    store.appendToolExecution(threadId, second);
+    assert.deepEqual(
+      store.listUncoveredToolExecutions(threadId).map((record) => record.id),
+      [second.id],
+    );
+    store.close();
+    store = undefined;
+
+    const prompts: LanguageModelV4CallOptions[] = [];
+    store = new ThreadStore(dir);
+    engine = new ConversationEngine({
+      config,
+      store,
+      model: textModelCapture((options) => prompts.push(options)),
+      sources: [],
+      skillLibrary: null,
+    });
+    const resumed = await engine.resumeSession(threadId);
+    assert.deepEqual(store.listUncoveredToolExecutions(threadId), []);
+    const recoveredBeforeInference = JSON.stringify(store.getMessages(threadId));
+    assert.equal(recoveredBeforeInference.match(/cancelledTurnRecovery/gu)?.length ?? 0, 1);
+    await drain(resumed.send("continue"));
+    const prompt = JSON.stringify(prompts.at(-1)?.prompt);
+    assert.match(prompt, /second-result/u);
+    assert.doesNotMatch(prompt, /first-result/u);
+    await engine.dispose();
+    engine = undefined;
+    store.close();
+    store = undefined;
+
+    store = new ThreadStore(dir);
+    engine = new ConversationEngine({
+      config,
+      store,
+      model: textModelCapture(() => {}),
+      sources: [],
+      skillLibrary: null,
+    });
+    await engine.resumeSession(threadId);
+    assert.deepEqual(store.listUncoveredToolExecutions(threadId), []);
+    assert.equal(
+      JSON.stringify(store.getMessages(threadId)).match(/cancelledTurnRecovery/gu)?.length ?? 0,
+      1,
+    );
+    await engine.dispose();
+    engine = undefined;
+    store.close();
+    store = undefined;
+  } finally {
+    await engine?.dispose();
+    store?.close();
     rmSync(dir, { recursive: true, force: true });
   }
 });

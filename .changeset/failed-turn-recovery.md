@@ -2,4 +2,8 @@
 "@roll-agent/runtime": patch
 ---
 
-模型调用在多步 turn 中途失败（限流 / 网络中断 / 5xx 等非上下文溢出错误）时不再把整轮从会话历史里抹掉：已完成的工具调用与结果、在途工具的 outcome_unknown 账本记录、一条 runtime 恢复记录（`roll__interrupted_turn_recovery`）和失败说明会像取消路径一样持久化，下一轮模型能看到哪些副作用已经发生，不会因用户重试而重复执行；首次调用就失败、没有任何进展的 turn 仍保持干净重试。取消 / 暂停后取消 / 上下文溢出 / 运行错误四条中断路径共用同一套「追加记录 + 持久化 + 失败回滚」实现，并以 ActiveTurn 上的 segment 落盘水位（已持久化 step 集合 + user 是否已落盘）决定追加范围：压力暂停后的续跑段被取消 / 失败时只追加尚未落盘的步骤与记录，durable transcript、活动历史和下一轮 prompt 里 user 与 tool-call/result 各恰好一次；上下文溢出后不把本段（尚未落盘的）raw 工具步骤写回历史以免立刻再次溢出：溢出失败只保留账本与说明标记；溢出恢复压缩期间被取消时同样不重复 user、不写回 raw，改由恢复记录以 bounded evidence 列出这些步骤的执行结果，模型仍能知道它们已执行；恢复记录按可见 raw 结果的出现次数逐条消费账本记录，跨续跑段复用同一 toolCallId 的第二次执行不会被首次的 raw 结果遮蔽。纯溢出失败路径的 bounded evidence 留作后续增强。
+模型调用在多步 turn 中途失败（限流 / 网络中断 / 5xx 等非上下文溢出错误）时不再把整轮从会话历史里抹掉：已完成的工具调用与结果、在途工具的账本记录、一条 runtime 恢复记录（`roll__interrupted_turn_recovery`）和失败说明会像取消路径一样持久化；首次调用就失败、没有任何进展的 turn 仍保持干净重试。取消 / 暂停后取消 / 上下文溢出 / 运行错误四条中断路径共用同一套追加与回滚实现，并以 ActiveTurn 的 segment 水位决定追加范围。已落盘的 user 和工具步骤不会重复；下一轮 prompt 中仍保留的 raw tool-call/result 至多一组且始终成对，被合法压缩裁掉的步骤由 checkpoint 或 recovery evidence 承接。
+
+工具是否已经开始执行改为按每个模型 batch 的 occurrence 身份跟踪，不再把 provider 的 `toolCallId` 当成整轮唯一键。跨 step 或压力续跑复用同一 ID 时，新宣告但尚未执行的调用会准确记录为 `not_executed`；真正越过准入、锁与执行前复验边界后才记录为 `outcome_unknown`。恢复记录仍按可见 raw 结果的出现次数消费同 ID 账本，第二次执行不会被第一次的结果遮蔽。
+
+ThreadStore schema v6 将工具账本升级为可恢复的 semantic WAL：每条新 `ToolExecutionRecord.id` 在 ledger 写入后保持 uncovered，直到 raw transcript 或 bounded recovery evidence 与 exact coverage 在同一 SQLite 事务提交。正常 segment、运行错误、取消和上下文溢出都通过同一 coverage 协议关闭窗口；纯溢出也会保留 bounded evidence，但不把可能再次撑爆上下文的 raw 工具结果写回。若 transcript 提交失败或进程在 ledger 与 transcript 之间退出，下一次 send、手动 compact 或重建 session 的 resume 会先原子写入恢复记录再继续；恢复写仍失败时不会调用模型或工具。uncovered ledger 不受 retention 裁剪，旧 schema 的既有记录迁移为已覆盖，连续恢复保持幂等。
