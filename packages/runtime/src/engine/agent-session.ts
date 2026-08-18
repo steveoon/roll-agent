@@ -2021,12 +2021,11 @@ export class AgentSession {
 
   private persistMessages(
     messages: readonly ModelMessage[],
-    representation?: ToolExecutionContextRepresentation,
+    representation: ToolExecutionContextRepresentation,
   ): void {
-    const executionIds =
-      representation === undefined ? [] : [...this.uncoveredToolExecutions.keys()];
+    const executionIds = [...this.uncoveredToolExecutions.keys()];
     const options: AppendMessagesOptions | undefined =
-      representation === undefined || executionIds.length === 0
+      executionIds.length === 0
         ? undefined
         : {
             toolExecutionCoverage: {
