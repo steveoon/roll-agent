@@ -2932,6 +2932,34 @@ test("AgentSession 续跑共享 runtime.max-steps 预算,不会绕过单轮步�
   assert.equal(model.doStreamCalls.length, 2);
 });
 
+test("AgentSession 首步就超压但没有任何可压缩内容时不暂停,同一 stream 内继续", async () => {
+  const model = sequencedModel([
+    toolCallStep("big-agent__read", { q: "x" }, 130),
+    textStep("continued", 40),
+  ]);
+  const session = new AgentSession({
+    id: "c1-nothing-to-compact-no-pause",
+    model,
+    sources: [bigResultSource("big-agent", "read", 5000)],
+    maxSteps: 8,
+    contextWindow: 200,
+    compaction: {
+      enabled: true,
+      strategy: "truncate",
+      threshold: 0.75,
+      keepRecentTurns: 1,
+      keepRecentTokens: 1,
+    },
+  });
+
+  const events = await collect(session.send("read it"));
+  assert.equal(events.filter((event) => event.type === "context-compacted").length, 0);
+  assert.equal(events.filter((event) => event.type === "message-finish").length, 1);
+  assert.equal(events.filter((event) => event.type === "message-start").length, 1);
+  assert.equal(model.doStreamCalls.length, 2);
+  assert.equal(events.at(-1)?.type, "message-finish");
+});
+
 test("AgentSession 累计输入超阈值但上下文输入未超阈值时不自动压缩", async () => {
   const model = sequencedModel([
     toolCallStep("echo-agent__echo", { q: "x" }, 50),

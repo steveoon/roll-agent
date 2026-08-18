@@ -2231,7 +2231,8 @@ export class AgentSession {
         this.contextWindow === undefined ||
         activeTurn.contextPressureContinuations >= MAX_CONTEXT_PRESSURE_CONTINUATIONS ||
         last === undefined ||
-        last.finishReason !== "tool-calls"
+        last.finishReason !== "tool-calls" ||
+        (steps.length < 2 && this.messages.length < 2)
       ) {
         return false;
       }
