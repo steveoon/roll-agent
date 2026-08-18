@@ -2091,16 +2091,7 @@ export class AgentSession {
     sawToolCall: boolean,
     turnStartedAt: number,
   ): void {
-    this.captureCancellationActivity(activeTurn);
-    try {
-      this.persistPendingToolCancellations(activeTurn);
-    } catch (error) {
-      queue.push({
-        type: "error",
-        stage: "execute",
-        message: `上下文溢出工具状态持久化失败: ${errorMessage(error)}`,
-      });
-    }
+    this.persistPendingToolCancellationsOrReport(queue, activeTurn, "上下文溢出工具状态持久化失败");
     const hadToolActivity = sawToolCall || activeTurn.toolExecutions.length > 0;
     const notes = ["本轮因上下文窗口溢出而中断，未自动重放。"];
     if (producedText) {
@@ -2145,15 +2136,9 @@ export class AgentSession {
     const unpersistedMessages = repairActiveToolProtocol(
       stripReasoningMessages(unpersistedStepMessages(activeTurn)),
     ).messages;
-    this.captureCancellationActivity(activeTurn);
-    try {
-      this.persistPendingToolCancellations(activeTurn);
-    } catch (error) {
-      queue.push({
-        type: "error",
-        stage: "execute",
-        message: `取消工具账本持久化失败: ${errorMessage(error)}`,
-      });
+    if (
+      !this.persistPendingToolCancellationsOrReport(queue, activeTurn, "取消工具账本持久化失败")
+    ) {
       return;
     }
     this.appendInterruptedTurnMessages(queue, turnStartedAt, {
@@ -3488,17 +3473,11 @@ export class AgentSession {
     turnStartedAt: number,
     stepPolicy: InterruptedStepPolicy = INTERRUPTED_STEP_POLICIES.keepRaw,
   ): void {
-    this.captureCancellationActivity(activeTurn);
-    try {
-      this.persistPendingToolCancellations(activeTurn);
-    } catch (error) {
+    if (
+      !this.persistPendingToolCancellationsOrReport(queue, activeTurn, "取消工具账本持久化失败")
+    ) {
       this.messages.splice(turnStart);
       activeTurn.cancellationPersistenceAttempted = true;
-      queue.push({
-        type: "error",
-        stage: "execute",
-        message: `取消工具账本持久化失败: ${errorMessage(error)}`,
-      });
       this.emitCancellation(queue, activeTurn);
       return;
     }
@@ -3546,6 +3525,25 @@ export class AgentSession {
         activeTurn.cancellationReason ?? SESSION_CANCELLATION_REASONS.runtime,
       ),
     ];
+  }
+
+  private persistPendingToolCancellationsOrReport(
+    queue: AsyncEventQueue<SessionEvent>,
+    activeTurn: ActiveTurn,
+    failureLabel: string,
+  ): boolean {
+    this.captureCancellationActivity(activeTurn);
+    try {
+      this.persistPendingToolCancellations(activeTurn);
+      return true;
+    } catch (error) {
+      queue.push({
+        type: "error",
+        stage: "execute",
+        message: `${failureLabel}: ${errorMessage(error)}`,
+      });
+      return false;
+    }
   }
 
   private persistPendingToolCancellations(activeTurn: ActiveTurn): void {
