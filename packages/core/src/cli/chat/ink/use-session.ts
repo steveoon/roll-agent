@@ -5,10 +5,12 @@ import {
   chatReducer,
   createInitialState,
   type ChatUiState,
+  type ConfirmDecision,
   type HistoryItem,
   type PendingUserInput,
 } from "./state.ts";
 import type { ThinkingLevel } from "../../../llm/providers.ts";
+import type { ChatThinkingDisplay } from "../../../config/schema.ts";
 import { log } from "../../utils/output.ts";
 import { formatDebugEvent } from "../../utils/debug-format.ts";
 
@@ -17,6 +19,7 @@ export interface UseSessionOptions {
   readonly contextWindow: number | undefined;
   readonly initialHistory?: readonly HistoryItem[];
   readonly initialThinkingLevel?: ThinkingLevel;
+  readonly initialThinkingDisplay?: ChatThinkingDisplay;
   readonly onThinkingChange?: (level: ThinkingLevel) => void;
 }
 
@@ -29,13 +32,14 @@ export interface UseSessionResult {
   readonly submit: (text: string, attachments?: readonly UseSessionSubmitAttachment[]) => void;
   readonly compact: () => void;
   readonly cancel: () => void;
-  readonly resolveConfirm: (approved: boolean) => void;
+  readonly resolveConfirm: (decision: ConfirmDecision) => void;
   readonly resolveUserInput: (
     requestId: PendingUserInput["requestId"],
     result: UserInputResult,
   ) => void;
   readonly setDraft: (value: string) => void;
   readonly setThinking: (level: ThinkingLevel) => void;
+  readonly setThinkingDisplay: (value: ChatThinkingDisplay) => void;
   readonly setAutoMode: (value: boolean) => void;
   readonly toggleAutoMode: () => void;
   readonly commitHistory: (item: HistoryItem) => void;
@@ -61,10 +65,13 @@ export function useSession(session: AgentSession, options: UseSessionOptions): U
     createInitialState(options.model, options.contextWindow, {
       ...(options.initialHistory ? { history: options.initialHistory } : {}),
       ...(options.initialThinkingLevel ? { thinkingLevel: options.initialThinkingLevel } : {}),
+      ...(options.initialThinkingDisplay
+        ? { thinkingDisplay: options.initialThinkingDisplay }
+        : {}),
     }),
   );
   const onThinkingChange = options.onThinkingChange;
-  const decisionRef = useRef<((approved: boolean) => void) | null>(null);
+  const decisionRef = useRef<((decision: ConfirmDecision) => void) | null>(null);
   const userInputDecisionRef = useRef<PendingUserInputDecision | null>(null);
   const autoModeRef = useRef(false);
   const busyRef = useRef(false);
@@ -93,11 +100,7 @@ export function useSession(session: AgentSession, options: UseSessionOptions): U
         if (pendingDelta !== undefined) {
           const event = pendingDelta;
           pendingDelta = undefined;
-          dispatch({
-            type: "session-event",
-            id: randomUUID(),
-            event,
-          });
+          dispatch({ type: "session-event", id: randomUUID(), at: Date.now(), event });
         }
       };
       const bufferDelta = (event: StreamDeltaEvent): void => {
@@ -139,14 +142,14 @@ export function useSession(session: AgentSession, options: UseSessionOptions): U
               session.approve(event.approvalId);
               continue;
             }
-            const approvedPromise = new Promise<boolean>((resolve) => {
+            const decisionPromise = new Promise<ConfirmDecision>((resolve) => {
               decisionRef.current = resolve;
             });
-            dispatch({ type: "session-event", id: randomUUID(), event });
-            const approved = await approvedPromise;
+            dispatch({ type: "session-event", id: randomUUID(), at: Date.now(), event });
+            const decision = await decisionPromise;
             decisionRef.current = null;
-            if (approved) {
-              session.approve(event.approvalId);
+            if (decision.approved) {
+              session.approve(event.approvalId, decision.scope);
             } else {
               session.reject(event.approvalId, "用户取消");
             }
@@ -154,7 +157,7 @@ export function useSession(session: AgentSession, options: UseSessionOptions): U
             continue;
           }
           if (event.type === "user-input-required") {
-            dispatch({ type: "session-event", id: randomUUID(), event });
+            dispatch({ type: "session-event", id: randomUUID(), at: Date.now(), event });
             const result = await new Promise<UserInputResult>((resolve) => {
               let settled = false;
               const expiresAt = Date.parse(event.expiresAt);
@@ -188,13 +191,14 @@ export function useSession(session: AgentSession, options: UseSessionOptions): U
             dispatch({ type: "user-input-resolved", requestId: event.requestId });
             continue;
           }
-          dispatch({ type: "session-event", id: randomUUID(), event });
+          dispatch({ type: "session-event", id: randomUUID(), at: Date.now(), event });
         }
       } catch (error) {
         flushPending();
         dispatch({
           type: "session-event",
           id: randomUUID(),
+          at: Date.now(),
           event: { type: "error", stage: "execute", message: errorMessage(error) },
         });
       } finally {
@@ -253,8 +257,8 @@ export function useSession(session: AgentSession, options: UseSessionOptions): U
     }
   }, [session]);
 
-  const resolveConfirm = useCallback((approved: boolean) => {
-    decisionRef.current?.(approved);
+  const resolveConfirm = useCallback((decision: ConfirmDecision) => {
+    decisionRef.current?.(decision);
   }, []);
 
   const resolveUserInput = useCallback(
@@ -279,11 +283,15 @@ export function useSession(session: AgentSession, options: UseSessionOptions): U
     [onThinkingChange],
   );
 
+  const setThinkingDisplay = useCallback((value: ChatThinkingDisplay) => {
+    dispatch({ type: "set-thinking-display", value });
+  }, []);
+
   const setAutoMode = useCallback((value: boolean) => {
     autoModeRef.current = value;
     dispatch({ type: "set-auto", value });
     if (value) {
-      decisionRef.current?.(true);
+      decisionRef.current?.({ approved: true });
     }
   }, []);
 
@@ -304,6 +312,7 @@ export function useSession(session: AgentSession, options: UseSessionOptions): U
     resolveUserInput,
     setDraft,
     setThinking,
+    setThinkingDisplay,
     setAutoMode,
     toggleAutoMode,
     commitHistory,

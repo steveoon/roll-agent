@@ -505,6 +505,375 @@ test("ThreadStore tool execution ledger 跨实例保序且不受 replaceMessages
   }
 });
 
+test("ThreadStore 按 execution id 原子确认 transcript coverage", () => {
+  const dir = tempDir();
+  try {
+    const store = new ThreadStore(dir);
+    const threadId = store.createThread();
+    const firstRecord = execution(
+      "b91cf465-a1a2-4b82-9cc1-7c8a67705700",
+      "reused-call",
+      "secret-1",
+    );
+    const secondRecord = execution(
+      "eb556932-26f2-49c1-bc65-2c18019998f1",
+      "reused-call",
+      "secret-2",
+    );
+    store.appendToolExecution(threadId, firstRecord);
+    store.appendToolExecution(threadId, secondRecord);
+
+    assert.deepEqual(
+      store.listUncoveredToolExecutions(threadId).map((record) => record.id),
+      [firstRecord.id, secondRecord.id],
+    );
+
+    store.appendMessages(
+      threadId,
+      [{ role: "assistant", content: "first execution is represented" }],
+      {
+        toolExecutionCoverage: {
+          executionIds: [firstRecord.id],
+          representation: "raw_transcript",
+        },
+      },
+    );
+
+    assert.deepEqual(
+      store.listUncoveredToolExecutions(threadId).map((record) => record.id),
+      [secondRecord.id],
+    );
+    const database = new DatabaseSync(join(dir, "threads.db"));
+    const coverage = database
+      .prepare(
+        `SELECT execution_id, representation, transcript_sequence
+           FROM tool_execution_context_coverage
+          WHERE thread_id = ?`,
+      )
+      .get(threadId) as {
+      readonly execution_id: string;
+      readonly representation: string;
+      readonly transcript_sequence: number;
+    };
+    assert.deepEqual(
+      { ...coverage },
+      {
+        execution_id: firstRecord.id,
+        representation: "raw_transcript",
+        transcript_sequence: 0,
+      },
+    );
+    database.close();
+    store.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("ThreadStore transcript append 失败会连同 exact coverage 一起回滚", () => {
+  const dir = tempDir();
+  try {
+    const store = new ThreadStore(dir);
+    const threadId = store.createThread();
+    const record = execution("82a36313-95b7-405d-938e-8f31f608fd42", "atomic-coverage", "secret");
+    store.appendToolExecution(threadId, record);
+    const database = new DatabaseSync(join(dir, "threads.db"));
+    database.exec(`
+      CREATE TRIGGER reject_transcript_coverage_insert
+      BEFORE INSERT ON transcript_messages
+      BEGIN
+        SELECT RAISE(ABORT, 'simulated transcript persistence failure');
+      END;
+    `);
+
+    assert.throws(
+      () =>
+        store.appendMessages(threadId, [{ role: "assistant", content: "durable result" }], {
+          toolExecutionCoverage: {
+            executionIds: [record.id],
+            representation: "raw_transcript",
+          },
+        }),
+      /simulated transcript persistence failure/u,
+    );
+    assert.deepEqual(store.getMessages(threadId), []);
+    assert.deepEqual(store.listTranscriptMessages(threadId), []);
+    assert.deepEqual(
+      store.listUncoveredToolExecutions(threadId).map((entry) => entry.id),
+      [record.id],
+    );
+
+    database.exec("DROP TRIGGER reject_transcript_coverage_insert;");
+    store.appendMessages(threadId, [{ role: "assistant", content: "durable result" }], {
+      toolExecutionCoverage: {
+        executionIds: [record.id],
+        representation: "raw_transcript",
+      },
+    });
+    assert.deepEqual(store.listUncoveredToolExecutions(threadId), []);
+    database.close();
+    store.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("ThreadStore exact coverage 冲突不会重复追加 transcript marker", () => {
+  const dir = tempDir();
+  try {
+    const first = new ThreadStore(dir);
+    const threadId = first.createThread();
+    const second = new ThreadStore(dir);
+    const record = execution("ae8e028d-bf2e-436f-a28a-aa6ca0850591", "single-coverage", "secret");
+    first.appendToolExecution(threadId, record);
+    first.appendMessages(threadId, [{ role: "assistant", content: "first recovery marker" }], {
+      toolExecutionCoverage: {
+        executionIds: [record.id],
+        representation: "recovery_evidence",
+      },
+    });
+
+    assert.throws(
+      () =>
+        second.appendMessages(
+          threadId,
+          [{ role: "assistant", content: "duplicate recovery marker" }],
+          {
+            toolExecutionCoverage: {
+              executionIds: [record.id],
+              representation: "recovery_evidence",
+            },
+          },
+        ),
+      /已被 transcript 覆盖/u,
+    );
+    assert.deepEqual(second.getMessages(threadId), [
+      { role: "assistant", content: "first recovery marker" },
+    ]);
+    assert.equal(second.countTranscriptMessages(threadId), 1);
+    second.close();
+    first.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("ThreadStore exact coverage 拒绝跨 thread execution 并回滚消息", () => {
+  const dir = tempDir();
+  try {
+    const store = new ThreadStore(dir);
+    const firstThreadId = store.createThread();
+    const secondThreadId = store.createThread();
+    const record = execution("34bec2b5-e677-4ca6-9c67-2d4a36fd7e1a", "foreign-coverage", "secret");
+    store.appendToolExecution(secondThreadId, record);
+
+    assert.throws(
+      () =>
+        store.appendMessages(firstThreadId, [{ role: "assistant", content: "must roll back" }], {
+          toolExecutionCoverage: {
+            executionIds: [record.id],
+            representation: "recovery_evidence",
+          },
+        }),
+      /execution/u,
+    );
+    assert.deepEqual(store.getMessages(firstThreadId), []);
+    assert.deepEqual(store.listTranscriptMessages(firstThreadId), []);
+    assert.deepEqual(
+      store.listUncoveredToolExecutions(secondThreadId).map((entry) => entry.id),
+      [record.id],
+    );
+    store.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("ThreadStore retention 永不删除 uncovered execution", () => {
+  const dir = tempDir();
+  try {
+    const store = new ThreadStore(dir);
+    const threadId = store.createThread();
+    const expired = {
+      ...execution("17dff1ef-a7d8-47bf-85ae-ae9a9e0f03b9", "expired-uncovered", "secret"),
+      createdAt: "2000-01-01T00:00:00.000Z",
+    };
+    store.appendToolExecution(threadId, expired);
+    assert.deepEqual(
+      store.listUncoveredToolExecutions(threadId).map((entry) => entry.id),
+      [expired.id],
+    );
+    assert.equal(store.getToolExecution(threadId, expired.id)?.id, expired.id);
+
+    store.appendMessages(threadId, [{ role: "assistant", content: "bounded recovery evidence" }], {
+      toolExecutionCoverage: {
+        executionIds: [expired.id],
+        representation: "recovery_evidence",
+      },
+    });
+    assert.equal(store.getToolExecution(threadId, expired.id), undefined);
+    store.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("ThreadStore schema v5 ledger 迁移为 legacy_assumed coverage", () => {
+  const dir = tempDir();
+  try {
+    const initial = new ThreadStore(dir);
+    const threadId = initial.createThread();
+    const legacyRecord = execution(
+      "c494a969-3ee7-4673-a77d-8399ffea0fba",
+      "legacy-covered",
+      "secret",
+    );
+    initial.appendToolExecution(threadId, legacyRecord);
+    initial.close();
+
+    const legacy = new DatabaseSync(join(dir, "threads.db"));
+    legacy.exec(`
+      DROP TABLE tool_execution_context_coverage;
+      PRAGMA user_version = 5;
+    `);
+    legacy.close();
+
+    const migrated = new ThreadStore(dir);
+    assert.deepEqual(migrated.listUncoveredToolExecutions(threadId), []);
+    migrated.close();
+
+    const inspected = new DatabaseSync(join(dir, "threads.db"));
+    const row = inspected
+      .prepare(
+        `SELECT representation, transcript_sequence
+           FROM tool_execution_context_coverage
+          WHERE thread_id = ? AND execution_id = ?`,
+      )
+      .get(threadId, legacyRecord.id) as {
+      readonly representation: string;
+      readonly transcript_sequence: number | null;
+    };
+    const version = inspected.prepare("PRAGMA user_version").get() as {
+      readonly user_version: number;
+    };
+    assert.deepEqual({ ...row }, { representation: "legacy_assumed", transcript_sequence: null });
+    assert.equal(version.user_version, 6);
+    inspected.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("ThreadStore 原子恢复全部 uncovered execution 且跨重启幂等", () => {
+  const dir = tempDir();
+  try {
+    const initial = new ThreadStore(dir);
+    const threadId = initial.createThread();
+    for (let index = 0; index < 101; index += 1) {
+      const suffix = index.toString(16).padStart(12, "0");
+      initial.appendToolExecution(
+        threadId,
+        execution(`00000000-0000-4000-8001-${suffix}`, "reused-recovery-call", "secret"),
+      );
+    }
+    initial.close();
+
+    const resumed = new ThreadStore(dir);
+    let observedRecords = 0;
+    const recovered = resumed.recoverUncoveredToolExecutions(threadId, (records) => {
+      observedRecords = records.length;
+      assert.equal(new Set(records.map((record) => record.id)).size, 101);
+      assert.ok(records.every((record) => record.toolCallId === "reused-recovery-call"));
+      return { role: "assistant", content: `recovered ${String(records.length)} executions` };
+    });
+    assert.equal(observedRecords, 101);
+    assert.deepEqual(recovered, {
+      role: "assistant",
+      content: "recovered 101 executions",
+    });
+    assert.deepEqual(resumed.listUncoveredToolExecutions(threadId, { limit: 500 }), []);
+    resumed.close();
+
+    const inspected = new DatabaseSync(join(dir, "threads.db"));
+    const coverage = inspected
+      .prepare(
+        `SELECT COUNT(*) AS covered_count,
+                COUNT(DISTINCT execution_id) AS distinct_count,
+                COUNT(DISTINCT transcript_sequence) AS transcript_count,
+                MIN(representation) AS representation
+           FROM tool_execution_context_coverage
+          WHERE thread_id = ?`,
+      )
+      .get(threadId) as {
+      readonly covered_count: number;
+      readonly distinct_count: number;
+      readonly transcript_count: number;
+      readonly representation: string;
+    };
+    assert.equal(coverage.covered_count, 101);
+    assert.equal(coverage.distinct_count, 101);
+    assert.equal(coverage.transcript_count, 1);
+    assert.equal(coverage.representation, "recovery_evidence");
+    inspected.close();
+
+    const idempotent = new ThreadStore(dir);
+    const secondRecovery = idempotent.recoverUncoveredToolExecutions(threadId, () => {
+      throw new Error("factory must not run when every execution is covered");
+    });
+    assert.equal(secondRecovery, undefined);
+    assert.deepEqual(idempotent.getMessages(threadId), [recovered]);
+    assert.equal(idempotent.countTranscriptMessages(threadId), 1);
+    idempotent.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("ThreadStore uncovered recovery transcript 失败会回滚 message 与 coverage", () => {
+  const dir = tempDir();
+  try {
+    const store = new ThreadStore(dir);
+    const threadId = store.createThread();
+    const record = execution("f4ac47af-ed48-45a3-be7c-a6a715fef0b1", "failed-recovery", "secret");
+    store.appendToolExecution(threadId, record);
+    const database = new DatabaseSync(join(dir, "threads.db"));
+    database.exec(`
+      CREATE TRIGGER reject_uncovered_recovery_insert
+      BEFORE INSERT ON transcript_messages
+      BEGIN
+        SELECT RAISE(ABORT, 'simulated uncovered recovery failure');
+      END;
+    `);
+
+    assert.throws(
+      () =>
+        store.recoverUncoveredToolExecutions(threadId, (records) => ({
+          role: "assistant",
+          content: `recover ${String(records.length)}`,
+        })),
+      /simulated uncovered recovery failure/u,
+    );
+    assert.deepEqual(store.getMessages(threadId), []);
+    assert.deepEqual(store.listTranscriptMessages(threadId), []);
+    assert.deepEqual(
+      store.listUncoveredToolExecutions(threadId).map((entry) => entry.id),
+      [record.id],
+    );
+
+    database.exec("DROP TRIGGER reject_uncovered_recovery_insert;");
+    const recovered = store.recoverUncoveredToolExecutions(threadId, (records) => ({
+      role: "assistant",
+      content: `recover ${String(records.length)}`,
+    }));
+    assert.deepEqual(recovered, { role: "assistant", content: "recover 1" });
+    assert.deepEqual(store.listUncoveredToolExecutions(threadId), []);
+    database.close();
+    store.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("ThreadStore 从 schema v1 迁移后可持久化 ToolExecutionRecord", () => {
   const dir = tempDir();
   try {
@@ -597,7 +966,7 @@ test("ThreadStore schema v4 迁移会重写旧 ledger 为有界脱敏投影", ()
     assert.equal(
       (inspected.prepare("PRAGMA user_version").get() as { readonly user_version: number })
         .user_version,
-      5,
+      6,
     );
     inspected.close();
     assert.equal(readFileSync(join(dir, "threads.db")).includes("legacy-ledger-secret"), false);
@@ -649,7 +1018,16 @@ test("ThreadStore ledger 按 TTL prune 且 sequence 不复用", () => {
       createdAt: "2000-01-01T00:00:00.000Z",
     };
     assert.equal(store.appendToolExecution(threadId, expired), 0);
-    assert.deepEqual(store.listToolExecutions(threadId), []);
+    assert.deepEqual(
+      store.listUncoveredToolExecutions(threadId).map((record) => record.sequence),
+      [0],
+    );
+    store.appendMessages(threadId, [{ role: "assistant", content: "covered expired result" }], {
+      toolExecutionCoverage: {
+        executionIds: [expired.id],
+        representation: "recovery_evidence",
+      },
+    });
     assert.equal(
       store.appendToolExecution(
         threadId,
@@ -680,14 +1058,16 @@ test("ThreadStore v4 reopen 也会清理已过期的 inactive ledger", () => {
   try {
     const initial = new ThreadStore(dir);
     const threadId = initial.createThread();
-    initial.appendToolExecution(
-      threadId,
-      execution("2b767742-b71a-42bd-ac92-f56af70b9f6f", "inactive-0", "secret"),
-    );
-    initial.appendToolExecution(
-      threadId,
-      execution("c6fdc054-201f-490d-8956-a1a76fd89ba8", "inactive-1", "secret"),
-    );
+    const firstRecord = execution("2b767742-b71a-42bd-ac92-f56af70b9f6f", "inactive-0", "secret");
+    const secondRecord = execution("c6fdc054-201f-490d-8956-a1a76fd89ba8", "inactive-1", "secret");
+    initial.appendToolExecution(threadId, firstRecord);
+    initial.appendToolExecution(threadId, secondRecord);
+    initial.appendMessages(threadId, [{ role: "assistant", content: "covered old records" }], {
+      toolExecutionCoverage: {
+        executionIds: [firstRecord.id, secondRecord.id],
+        representation: "recovery_evidence",
+      },
+    });
     initial.close();
 
     const database = new DatabaseSync(join(dir, "threads.db"));
@@ -718,14 +1098,20 @@ test("ThreadStore retention 后 checkpoint/read/resume 都保守降级并由后�
   try {
     const initial = new ThreadStore(dir);
     const threadId = initial.createThread();
-    initial.appendToolExecution(
-      threadId,
-      execution("ffb38c00-8351-4cc0-803a-fae7ef578f55", "checkpoint-old", "secret"),
+    const oldRecord = execution("ffb38c00-8351-4cc0-803a-fae7ef578f55", "checkpoint-old", "secret");
+    const liveRecord = execution(
+      "22de59cf-b2db-4ce7-af9d-60f942141794",
+      "checkpoint-live",
+      "secret",
     );
-    initial.appendToolExecution(
-      threadId,
-      execution("22de59cf-b2db-4ce7-af9d-60f942141794", "checkpoint-live", "secret"),
-    );
+    initial.appendToolExecution(threadId, oldRecord);
+    initial.appendToolExecution(threadId, liveRecord);
+    initial.appendMessages(threadId, [{ role: "assistant", content: "covered checkpoint tools" }], {
+      toolExecutionCoverage: {
+        executionIds: [oldRecord.id, liveRecord.id],
+        representation: "recovery_evidence",
+      },
+    });
     const checkpoint = initial.commitCompaction(threadId, {
       messages: [{ role: "user", content: "summary-before-retention" }],
       ...currentCompactionGuard(initial, threadId),
@@ -798,6 +1184,12 @@ test("ThreadStore ledger aggregate bytes 超限时保留有界新后缀", () => 
       result: successfulToolResult("ok", { raw: { text: "x".repeat(60 * 1_024) } }),
     });
     store.appendToolExecution(threadId, large);
+    store.appendMessages(threadId, [{ role: "assistant", content: "covered large records" }], {
+      toolExecutionCoverage: {
+        executionIds: [large.id],
+        representation: "recovery_evidence",
+      },
+    });
     const persisted = store.getToolExecution(threadId, large.id);
     assert.ok(persisted);
     store.close();
@@ -807,6 +1199,11 @@ test("ThreadStore ledger aggregate bytes 超限时保留有界新后缀", () => 
       `INSERT INTO tool_executions
          (thread_id, sequence, id, tool_call_id, agent_name, tool_name, record_json, created_at)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    );
+    const insertCoverage = database.prepare(
+      `INSERT INTO tool_execution_context_coverage
+         (thread_id, execution_id, representation, transcript_sequence, created_at)
+       VALUES (?, ?, 'recovery_evidence', 0, ?)`,
     );
     database.exec("BEGIN IMMEDIATE");
     for (let sequence = 1; sequence <= 300; sequence += 1) {
@@ -823,6 +1220,7 @@ test("ThreadStore ledger aggregate bytes 超限时保留有界新后缀", () => 
         JSON.stringify(record),
         record.createdAt,
       );
+      insertCoverage.run(threadId, id, record.createdAt);
     }
     database.exec("COMMIT");
     database.close();
@@ -867,12 +1265,22 @@ test("ThreadStore deleteThread 级联删除 Tool execution ledger", () => {
   try {
     const store = new ThreadStore(dir);
     const threadId = store.createThread();
-    store.appendToolExecution(
-      threadId,
-      execution("079f687b-2ec1-4dc8-852f-221d9c59b8d5", "call-delete", "secret"),
-    );
+    const record = execution("079f687b-2ec1-4dc8-852f-221d9c59b8d5", "call-delete", "secret");
+    store.appendToolExecution(threadId, record);
+    store.appendMessages(threadId, [{ role: "assistant", content: "covered before delete" }], {
+      toolExecutionCoverage: {
+        executionIds: [record.id],
+        representation: "raw_transcript",
+      },
+    });
     store.deleteThread(threadId);
     assert.deepEqual(store.listToolExecutions(threadId), []);
+    const database = new DatabaseSync(join(dir, "threads.db"));
+    const remainingCoverage = database
+      .prepare("SELECT COUNT(*) AS count FROM tool_execution_context_coverage WHERE thread_id = ?")
+      .get(threadId) as { readonly count: number };
+    assert.equal(remainingCoverage.count, 0);
+    database.close();
     store.close();
   } finally {
     rmSync(dir, { recursive: true, force: true });
@@ -1504,7 +1912,7 @@ test("ThreadStore schema v2 迁移跳过无父 thread 的 legacy message", () =>
     const version = migrated.prepare("PRAGMA user_version").get() as {
       readonly user_version: number;
     };
-    assert.equal(version.user_version, 5);
+    assert.equal(version.user_version, 6);
     migrated.close();
 
     const reopened = new ThreadStore(dir);
@@ -2002,7 +2410,7 @@ test("ThreadStore Runtime event resume 会裁剪静默 Thread 的过期前缀", 
   }
 });
 
-test("ThreadStore v4 到 v5 只建立空 Runtime event log，不从旧 transcript 伪造事件", () => {
+test("ThreadStore 从 v4 升级只建立空 Runtime event log，不从旧 transcript 伪造事件", () => {
   const dir = tempDir();
   try {
     const initial = new ThreadStore(dir);
@@ -2035,7 +2443,7 @@ test("ThreadStore v4 到 v5 只建立空 Runtime event log，不从旧 transcrip
       readonly user_version: number;
     };
     assert.equal(stateCount.count, 1);
-    assert.equal(version.user_version, 5);
+    assert.equal(version.user_version, 6);
     inspected.close();
   } finally {
     rmSync(dir, { recursive: true, force: true });

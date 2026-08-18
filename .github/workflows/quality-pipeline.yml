@@ -33,6 +33,9 @@ jobs:
       - name: Lint
         run: pnpm lint
 
+      - name: Source control-char guard
+        run: pnpm check:source-control-chars
+
       - name: Script tests
         run: pnpm test:scripts
 

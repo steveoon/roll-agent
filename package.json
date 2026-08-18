@@ -12,6 +12,7 @@
     "build:example:electron": "node examples/electron-runtime-client/esbuild.mjs",
     "security:audit": "pnpm audit --audit-level high",
     "verify:dependency-denylist": "node scripts/verify-dependency-denylist.mjs",
+    "check:source-control-chars": "node scripts/check-source-control-chars.mjs",
     "verify:example:electron": "pnpm build:example:electron && node examples/electron-runtime-client/verify-build.mjs",
     "verify:published-packages": "pnpm verify:dependency-denylist && node scripts/verify-published-packages.mjs",
     "typecheck": "pnpm -r run typecheck",

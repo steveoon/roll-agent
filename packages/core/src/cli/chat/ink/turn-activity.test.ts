@@ -13,7 +13,7 @@ function busyState(): ChatUiState {
 }
 
 function event(state: ChatUiState, value: SessionEvent): ChatUiState {
-  return chatReducer(state, { type: "session-event", id: "event", event: value });
+  return chatReducer(state, { type: "session-event", id: "event", at: 0, event: value });
 }
 
 test("resolveTurnActivity distinguishes waiting, reasoning, reply, and tool phases", () => {

@@ -33,6 +33,8 @@ const MODEL_CONTEXT_WINDOWS: readonly ContextWindowEntry[] = [
   { match: "deepseek", window: 128_000 },
   { match: "qwen-long", window: 10_000_000 },
   { match: "qwen3-coder", window: 1_000_000 },
+  { match: "qwen3.8-plus", window: 1_000_000 },
+  { match: "qwen3.8-max", window: 1_000_000 },
   { match: "qwen3.7-plus", window: 1_000_000 },
   { match: "qwen3.7-max", window: 1_000_000 },
   { match: "qwen3.6-plus", window: 1_000_000 },

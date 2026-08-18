@@ -1,7 +1,13 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { DEFAULT_CONFIG } from "./defaults.ts";
-import { CHAT_SCREEN_MODES, chatScreenModeSchema, rollConfigSchema } from "./schema.ts";
+import {
+  CHAT_SCREEN_MODES,
+  CHAT_THINKING_DISPLAY_MODES,
+  chatScreenModeSchema,
+  chatThinkingDisplaySchema,
+  rollConfigSchema,
+} from "./schema.ts";
 
 describe("rollConfigSchema", () => {
   it("builds DEFAULT_CONFIG from schema defaults plus the required seed", () => {
@@ -20,6 +26,7 @@ describe("rollConfigSchema", () => {
     assert.equal(DEFAULT_CONFIG.runtime.turnTimeoutMs, 300_000);
     assert.equal(DEFAULT_CONFIG.runtime.agentBootstrap.timeoutMs, 60_000);
     assert.equal(DEFAULT_CONFIG.chat.screenMode, "auto");
+    assert.equal(DEFAULT_CONFIG.chat.thinkingDisplay, "collapsed");
     assert.equal(DEFAULT_CONFIG.install.networkTimeoutMs, 120_000);
     assert.deepEqual(DEFAULT_CONFIG.browser.instances, {});
   });
@@ -42,6 +49,29 @@ describe("rollConfigSchema", () => {
       llm: { defaultProvider: "x", defaultModel: "y", providers: {} },
       ask: {},
       chat: { screenMode: "split" },
+      agents: { dataDir: "/tmp" },
+    });
+    assert.equal(invalid.success, false);
+  });
+
+  it("should validate chat thinking display from one shared runtime enum", () => {
+    assert.deepEqual(chatThinkingDisplaySchema.options, [...CHAT_THINKING_DISPLAY_MODES]);
+
+    for (const thinkingDisplay of CHAT_THINKING_DISPLAY_MODES) {
+      const result = rollConfigSchema.safeParse({
+        llm: { defaultProvider: "x", defaultModel: "y", providers: {} },
+        ask: {},
+        chat: { thinkingDisplay },
+        agents: { dataDir: "/tmp" },
+      });
+      assert.equal(result.success, true, thinkingDisplay);
+      assert.equal(result.success ? result.data.chat.thinkingDisplay : undefined, thinkingDisplay);
+    }
+
+    const invalid = rollConfigSchema.safeParse({
+      llm: { defaultProvider: "x", defaultModel: "y", providers: {} },
+      ask: {},
+      chat: { thinkingDisplay: "hidden" },
       agents: { dataDir: "/tmp" },
     });
     assert.equal(invalid.success, false);

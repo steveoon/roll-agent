@@ -17,7 +17,11 @@ import type { ShellProfile } from "../bash/profile.ts";
 import { ToolRegistry } from "./naming.ts";
 import type { NormalizedToolResult } from "./normalize-result.ts";
 import type { ApprovalRequest } from "./build-tools.ts";
-import { ToolExecutionCoordinator } from "./tool-execution-coordinator.ts";
+import {
+  OPAQUE_SIDE_EFFECT_RESOURCE,
+  TOOL_RESOURCE_ACCESS_MODES,
+  ToolExecutionCoordinator,
+} from "./tool-execution-coordinator.ts";
 import {
   BASH_TOOL_ID,
   POWERSHELL_TOOL_ID,
@@ -131,6 +135,23 @@ test("PowerShell profile 注册为 roll__powershell 且路由到 roll.powershell
     agentName: "roll",
     toolName: "powershell",
   });
+});
+
+test("opaque Shell 使用与文件工具共享的 side-effect write lock", () => {
+  const coordinator = new ToolExecutionCoordinator();
+  buildBashToolset(
+    settings(),
+    new ToolRegistry(),
+    { coordinator, requestApproval: async () => ({ approved: true }) },
+    { classifier: unknownCommandClassifier },
+  );
+
+  assert.deepEqual(
+    coordinator
+      .describeResources(BASH_TOOL_ID, { command: "printf changed" })
+      .find((resource) => resource.key === OPAQUE_SIDE_EFFECT_RESOURCE),
+    { key: OPAQUE_SIDE_EFFECT_RESOURCE, mode: TOOL_RESOURCE_ACCESS_MODES.write },
+  );
 });
 
 test("不同 workdir 的 opaque destructive Shell 调用仍保守串行", async () => {
@@ -346,7 +367,7 @@ test("bash 与 PowerShell 在 explanation 为空白或超过 100 字符时于审
     for (const explanation of ["   ", "x".repeat(101)]) {
       const result = await execute({ command: "printf hello", explanation }, options());
       assert.equal(result.isError, true);
-      assert.match(String(result.output), /参数校验失败/u);
+      assert.match(String(result.output), /explanation 越界/u);
     }
     assert.equal(approvals, 0);
     assert.equal(executions, 0);
@@ -808,4 +829,36 @@ test("P1：不存在的 workdir 不再获得 known-safe 自动批准", async () 
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+test("max_output_chars 覆盖默认模型输出预算", async () => {
+  const big = "x".repeat(20_000);
+  const execute = getExecute(
+    settings(),
+    { policy: allowPolicy, requestApproval: async () => ({ approved: true }) },
+    async () => ({
+      ...okResult,
+      stdout: { text: big, totalBytes: big.length, totalLines: 1, truncated: false },
+    }),
+  );
+  const result = await execute({ command: "big", max_output_chars: 2_000 }, options());
+  assert.equal(result.isError, false);
+  const output = String(result.output);
+  assert.ok(output.length < big.length);
+  assert.match(output, /chars truncated/u);
+});
+
+test("不传 max_output_chars 时沿用 settings.maxModelOutputChars", async () => {
+  const big = "y".repeat(20_000);
+  const execute = getExecute(
+    settings({ maxModelOutputChars: 40_000 }),
+    { policy: allowPolicy, requestApproval: async () => ({ approved: true }) },
+    async () => ({
+      ...okResult,
+      stdout: { text: big, totalBytes: big.length, totalLines: 1, truncated: false },
+    }),
+  );
+  const result = await execute({ command: "big" }, options());
+  assert.equal(result.isError, false);
+  assert.doesNotMatch(String(result.output), /chars truncated/u);
 });

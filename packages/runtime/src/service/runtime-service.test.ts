@@ -101,10 +101,12 @@ function createFixture(store: ThreadStore): {
   readonly engine: RuntimeServiceEngine;
   readonly session: RuntimeServiceSession;
   readonly sendCount: () => number;
+  readonly lastApproveScope: () => string | undefined;
 } {
   let sends = 0;
   let resolveDecision: (() => void) | undefined;
   let cancelled = false;
+  let approveScope: string | undefined;
 
   const session: RuntimeServiceSession = {
     id: IDS.thread,
@@ -156,10 +158,11 @@ function createFixture(store: ThreadStore): {
       yield { type: "text-delta", delta: "completed" };
       yield { type: "message-finish", text: "completed" };
     },
-    approve(approvalId) {
+    approve(approvalId, scope) {
       if (approvalId !== IDS.approval || resolveDecision === undefined) {
         return false;
       }
+      approveScope = scope;
       resolveDecision();
       resolveDecision = undefined;
       return true;
@@ -203,7 +206,7 @@ function createFixture(store: ThreadStore): {
       return session;
     },
   };
-  return { engine, session, sendCount: () => sends };
+  return { engine, session, sendCount: () => sends, lastApproveScope: () => approveScope };
 }
 
 function createImmediateFixture(store: ThreadStore): {
@@ -337,6 +340,49 @@ test("RuntimeService keeps pending approval on decision failure and cancels thro
     const failed = events.find((event) => event.event.type === "turn.failed");
     assert.ok(failed?.event.type === "turn.failed");
     assert.equal(failed.event.message, "GUI approval handler failed");
+  } finally {
+    await service.close();
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("RuntimeService respondApproval 不带 scope 时 session.approve 收到 undefined", async () => {
+  const dir = tempDir();
+  const store = new ThreadStore(dir);
+  const fixture = createFixture(store);
+  const service = new RuntimeService(fixture.engine, store, { runtimeVersion: "0.9.0-test" });
+  try {
+    service.initialize({
+      protocolVersions: [RUNTIME_PROTOCOL_VERSION],
+      client: { name: "scope-omitted-test", version: "1.0.0" },
+    });
+    await service.createThread(
+      runtimeMethodSchemas["thread.create"].params.parse({
+        requestId: IDS.requestCreate,
+        title: "Scope omitted",
+      }),
+    );
+    await service.startTurn(
+      runtimeMethodSchemas["turn.start"].params.parse({
+        requestId: IDS.requestFirstTurn,
+        threadId: IDS.thread,
+        turnId: IDS.firstTurn,
+        input: { text: "trigger approval" },
+      }),
+    );
+    await nextTick();
+
+    await service.respondApproval(
+      runtimeMethodSchemas["approval.respond"].params.parse({
+        requestId: IDS.requestApprove,
+        threadId: IDS.thread,
+        turnId: IDS.firstTurn,
+        approvalId: IDS.approval,
+        decision: "approve",
+      }),
+    );
+    assert.equal(fixture.lastApproveScope(), undefined);
   } finally {
     await service.close();
     store.close();
@@ -483,6 +529,104 @@ test("RuntimeService cancelTurn releases the approval gate when a resolved liste
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+function createMultiStreamFailureFixture(
+  store: ThreadStore,
+  terminal: "error" | "cancel",
+): {
+  readonly engine: RuntimeServiceEngine;
+} {
+  const session: RuntimeServiceSession = {
+    id: IDS.thread,
+    async *send(input) {
+      store.appendMessages(IDS.thread, [
+        { role: "user", content: typeof input === "string" ? input : input.text },
+        { role: "assistant", content: "partial" },
+      ]);
+      yield { type: "message-start", messageId: IDS.message };
+      yield { type: "text-delta", delta: "partial" };
+      yield { type: "message-finish", text: "partial" };
+      yield { type: "compaction-start", reason: "auto" };
+      if (terminal === "error") {
+        yield { type: "error", stage: "plan", message: "continuation failed" };
+      } else {
+        yield { type: "turn-cancelled", reason: "user", message: "用户取消本轮" };
+      }
+    },
+    approve() {
+      return false;
+    },
+    reject() {
+      return false;
+    },
+    cancel() {
+      return false;
+    },
+    async close() {},
+    getCapabilityManifest() {
+      throw new Error("capabilities are not used by this fixture");
+    },
+    getCapabilityTurnContext() {
+      return undefined;
+    },
+  };
+  const engine: RuntimeServiceEngine = {
+    async createSession(input) {
+      store.createThread({
+        id: IDS.thread,
+        ...(input?.title !== undefined ? { title: input.title } : {}),
+        model: "fixture-model",
+      });
+      return session;
+    },
+    async resumeSession(threadId) {
+      assert.equal(threadId, IDS.thread);
+      return session;
+    },
+  };
+  return { engine };
+}
+
+for (const terminal of ["error", "cancel"] as const) {
+  test(`RuntimeService 首段 message-finish 之后压缩阶段 ${terminal} 时以对应终态收尾,而不是沿用首段的 completed`, async () => {
+    const dir = tempDir();
+    const store = new ThreadStore(dir);
+    const fixture = createMultiStreamFailureFixture(store, terminal);
+    const service = new RuntimeService(fixture.engine, store, { runtimeVersion: "0.9.0-test" });
+    const events: RuntimeEventEnvelopeV14[] = [];
+    service.onEvent((event) => events.push(event));
+    try {
+      service.initialize({
+        protocolVersions: [RUNTIME_PROTOCOL_VERSION],
+        client: { name: "multi-stream-failure-test", version: "1.0.0" },
+      });
+      await service.createThread(
+        runtimeMethodSchemas["thread.create"].params.parse({
+          requestId: IDS.requestCreate,
+          title: "Multi stream failure",
+        }),
+      );
+      await service.startTurn(
+        runtimeMethodSchemas["turn.start"].params.parse({
+          requestId: IDS.requestFirstTurn,
+          threadId: IDS.thread,
+          turnId: IDS.firstTurn,
+          input: { text: "continue" },
+        }),
+      );
+      await nextTick();
+
+      const types = events.map((event) => event.event.type);
+      assert.equal(types.filter((type) => type === "message.completed").length, 1);
+      assert.equal(types.at(-1), terminal === "error" ? "turn.failed" : "turn.cancelled");
+      assert.equal(types.includes("turn.completed"), false);
+    } finally {
+      await service.close();
+      store.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+}
 
 test("RuntimeService isolates event listeners before starting and completing a Turn", async () => {
   const dir = tempDir();

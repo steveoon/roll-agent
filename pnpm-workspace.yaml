@@ -10,6 +10,7 @@ overrides:
   "js-yaml@4.1.1": 4.3.1
   "minimatch@3.1.5>brace-expansion": 5.0.9
   "minimatch@10.2.4>brace-expansion": 5.0.9
+  "nanoid@<3.3.18": 3.3.18
   postcss: 8.5.18
 
 shamefullyHoist: false
@@ -23,8 +24,10 @@ minimumReleaseAgeExclude:
   - "fast-uri@3.1.5"
   - "js-yaml@3.15.1"
   - "js-yaml@4.3.1"
+  - "nanoid@3.3.18"
 blockExoticSubdeps: true
 savePrefix: ""
+strictDepBuilds: true
 
 allowBuilds:
   esbuild: false

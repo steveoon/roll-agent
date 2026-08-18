@@ -28,6 +28,16 @@ export interface AgentOnboardingPromptInfo {
   readonly catalog: readonly AgentOnboardingCatalogEntry[];
 }
 
+export interface FileToolPromptIds {
+  readonly read: string;
+  readonly edit: string;
+  readonly write: string;
+  readonly listDir: string;
+  readonly grep: string;
+  readonly glob: string;
+  readonly verify: string;
+}
+
 export interface BuildChatSystemPromptOptions {
   readonly skills?: readonly SkillPromptSummary[];
   readonly skillToolId?: string;
@@ -39,17 +49,24 @@ export interface BuildChatSystemPromptOptions {
   readonly agentCount?: number;
   readonly agentOnboarding?: AgentOnboardingPromptInfo;
   readonly userInputToolId?: string;
+  readonly fileToolIds?: FileToolPromptIds;
 }
 
 const MAX_SKILL_DESCRIPTION_CHARS = 240;
 
 const IDENTITY_PREFIX = "你是花卷 Roll 的会话助手，运行在 roll chat 里。";
 
-function identitySection(hasShell: boolean): string {
-  const tail = hasShell
-    ? "你通过已注册 Agent 提供的工具（MCP）观察和操作外部世界，并有一个内建 shell 工具可以在本机执行命令。"
-    : "你通过已注册 Agent 提供的工具（MCP）观察和操作外部世界；你没有独立的文件系统或 shell，工具就是你的全部执行手段。";
-  return IDENTITY_PREFIX + tail;
+function identitySection(hasShell: boolean, hasFileTools: boolean): string {
+  if (hasShell && hasFileTools) {
+    return `${IDENTITY_PREFIX}你通过已注册 Agent 提供的工具（MCP）观察和操作外部世界，并有内建的文件工具和 shell 工具可以在本机读写文件、执行命令。`;
+  }
+  if (hasShell) {
+    return `${IDENTITY_PREFIX}你通过已注册 Agent 提供的工具（MCP）观察和操作外部世界，并有一个内建 shell 工具可以在本机执行命令。`;
+  }
+  if (hasFileTools) {
+    return `${IDENTITY_PREFIX}你通过已注册 Agent 提供的工具（MCP）观察和操作外部世界，并有内建的文件工具可以读写当前工作目录中的文件；你没有独立的 shell，工具就是你的全部执行手段。`;
+  }
+  return `${IDENTITY_PREFIX}你通过已注册 Agent 提供的工具（MCP）观察和操作外部世界；你没有独立的文件系统或 shell，工具就是你的全部执行手段。`;
 }
 
 const GROUNDING_SECTION = [
@@ -128,6 +145,20 @@ function buildAgentOnboardingSection(info: AgentOnboardingPromptInfo): string {
   ].join("\n");
 }
 
+function buildFileToolsSection(ids: FileToolPromptIds): string {
+  return [
+    "# 文件工具",
+    `- 读文件用 ${ids.read}：输出每行带行号前缀（如 "   12→"），行号前缀不是文件内容，复制内容时必须去掉前缀。`,
+    `- 修改文件前必须先用 ${ids.read} 读取；${ids.edit} 的 old_string 必须逐字复制读到的内容（不含行号前缀），包括缩进与标点。`,
+    `- old_string 必须能唯一定位目标；同一文件的多处修改放进同一次 ${ids.edit} 调用的 edits 数组，一次提交。`,
+    `- 新建文件或整文件重写用 ${ids.write}；浏览目录用 ${ids.listDir}。`,
+    `- ${ids.edit} 与 ${ids.write} 成功的返回已附带修改点最新内容，无需再次读取确认。`,
+    "- 读取和修改文件优先用文件工具，不要用 shell 的 cat/sed/echo 重定向操作文件。",
+    `- 在文件中搜索内容用 ${ids.grep}（结果行号可直接用作 ${ids.read} 的 offset），按文件名找文件用 ${ids.glob}；不要用 shell 的 grep/find 代替。`,
+    `- 修改代码文件后用 ${ids.verify} 验证（默认 fast 级）；验证失败先修复再汇报完成，验证被跳过时如实说明未验证。`,
+  ].join("\n");
+}
+
 function buildShellSection(
   shellToolId: string,
   sessionExec: SessionExecToolIds | undefined,
@@ -168,7 +199,7 @@ function buildTranscriptSection(transcriptToolId: string): string {
 export function buildChatSystemPrompt(options: BuildChatSystemPromptOptions = {}): string {
   const shellToolId = options.shellToolId ?? options.bashToolId;
   const sections = [
-    identitySection(shellToolId !== undefined),
+    identitySection(shellToolId !== undefined, options.fileToolIds !== undefined),
     GROUNDING_SECTION,
     PERSISTENCE_SECTION,
   ];
@@ -182,6 +213,9 @@ export function buildChatSystemPrompt(options: BuildChatSystemPromptOptions = {}
   const skills = options.skills ?? [];
   if (skills.length > 0 && options.skillToolId !== undefined) {
     sections.push(buildSkillsSection(skills, options.skillToolId));
+  }
+  if (options.fileToolIds) {
+    sections.push(buildFileToolsSection(options.fileToolIds));
   }
   if (shellToolId !== undefined) {
     sections.push(
@@ -209,6 +243,39 @@ export function buildChatSystemPromptFromManifest(manifest: EffectiveCapabilityM
   const installToolId = findCapabilityToolId(manifest, CAPABILITY_TOOL_ROLES.agentInstall);
   const transcriptToolId = findCapabilityToolId(manifest, CAPABILITY_TOOL_ROLES.transcriptRead);
   const userInputToolId = findCapabilityToolId(manifest, CAPABILITY_TOOL_ROLES.userInput);
+  const fileRead = manifest.tools.find(
+    (tool) => tool.role === CAPABILITY_TOOL_ROLES.fileRead && tool.id.endsWith("read_file"),
+  );
+  const fileEdit = manifest.tools.find(
+    (tool) => tool.role === CAPABILITY_TOOL_ROLES.fileEdit && tool.id.endsWith("edit_file"),
+  );
+  const fileWrite = manifest.tools.find(
+    (tool) => tool.role === CAPABILITY_TOOL_ROLES.fileEdit && tool.id.endsWith("write_file"),
+  );
+  const fileList = manifest.tools.find(
+    (tool) => tool.role === CAPABILITY_TOOL_ROLES.fileRead && tool.id.endsWith("list_dir"),
+  );
+  const fileGrep = manifest.tools.find(
+    (tool) => tool.role === CAPABILITY_TOOL_ROLES.fileRead && tool.id.endsWith("grep"),
+  );
+  const fileGlob = manifest.tools.find(
+    (tool) => tool.role === CAPABILITY_TOOL_ROLES.fileRead && tool.id.endsWith("glob"),
+  );
+  const fileVerify = manifest.tools.find(
+    (tool) => tool.role === CAPABILITY_TOOL_ROLES.fileVerify && tool.id.endsWith("verify_file"),
+  );
+  const fileToolIds =
+    fileRead && fileEdit && fileWrite && fileList && fileGrep && fileGlob && fileVerify
+      ? {
+          read: fileRead.id,
+          edit: fileEdit.id,
+          write: fileWrite.id,
+          listDir: fileList.id,
+          grep: fileGrep.id,
+          glob: fileGlob.id,
+          verify: fileVerify.id,
+        }
+      : undefined;
   const prompt = buildChatSystemPrompt({
     ...(skillToolId ? { skills: manifest.skills, skillToolId } : {}),
     ...(shellToolId
@@ -229,6 +296,7 @@ export function buildChatSystemPromptFromManifest(manifest: EffectiveCapabilityM
       : {}),
     agentCount: manifest.agentCount,
     ...(userInputToolId ? { userInputToolId } : {}),
+    ...(fileToolIds ? { fileToolIds } : {}),
     ...(installToolId && manifest.agentOnboardingCatalog.length > 0
       ? {
           agentOnboarding: {

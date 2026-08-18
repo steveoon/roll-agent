@@ -4,6 +4,7 @@ import type { ReactElement } from "react";
 import { Box, Text, useInput, useWindowSize } from "ink";
 import type { AgentSession } from "@roll-agent/runtime";
 import type { ThinkingLevel } from "../../../llm/providers.ts";
+import type { ChatThinkingDisplay } from "../../../config/schema.ts";
 import { useSession } from "./use-session.ts";
 import { CHAT_PHASES, type HistoryItem } from "./state.ts";
 import { StatusLine } from "./status-line.ts";
@@ -49,6 +50,7 @@ export interface ChatAppProps {
   readonly initialHistory?: readonly HistoryItem[];
   readonly banner?: BannerInfo;
   readonly initialThinkingLevel?: ThinkingLevel;
+  readonly initialThinkingDisplay?: ChatThinkingDisplay;
   readonly onThinkingChange?: (level: ThinkingLevel) => void;
   readonly onUserSubmit: (text: string) => void;
   readonly onExit: () => void;
@@ -70,6 +72,8 @@ interface ChatSessionViewProps extends Omit<ChatAppProps, "sessionSwitching"> {
 
 export const INK_HINTS =
   "/exit 退出 · Esc 中断 · / 命令 · Shift+Enter/Ctrl+J 换行 · Alt+./Alt+, 调推理 · Shift+Tab 自动批准";
+
+const SHOW_THINK_SCOPE_HINT = "（仅当前会话生效，/resume 切换会话后按配置重置）";
 
 function helpText(): string {
   return SLASH_COMMANDS.map((command) => `${command.name} — ${command.description}`).join("\n");
@@ -145,6 +149,9 @@ export function ChatApp(props: ChatAppProps): ReactElement {
     ...(props.initialThinkingLevel !== undefined
       ? { initialThinkingLevel: props.initialThinkingLevel }
       : {}),
+    ...(props.initialThinkingDisplay !== undefined
+      ? { initialThinkingDisplay: props.initialThinkingDisplay }
+      : {}),
     ...(props.onThinkingChange !== undefined ? { onThinkingChange: props.onThinkingChange } : {}),
     picker,
     onOpenPicker: openPicker,
@@ -177,6 +184,7 @@ function ChatSessionView(props: ChatSessionViewProps): ReactElement {
     resolveUserInput,
     setDraft,
     setThinking,
+    setThinkingDisplay,
     setAutoMode,
     toggleAutoMode,
     commitHistory,
@@ -185,6 +193,9 @@ function ChatSessionView(props: ChatSessionViewProps): ReactElement {
     contextWindow,
     ...(props.initialHistory ? { initialHistory: props.initialHistory } : {}),
     ...(props.initialThinkingLevel ? { initialThinkingLevel: props.initialThinkingLevel } : {}),
+    ...(props.initialThinkingDisplay
+      ? { initialThinkingDisplay: props.initialThinkingDisplay }
+      : {}),
     ...(props.onThinkingChange ? { onThinkingChange: props.onThinkingChange } : {}),
   });
 
@@ -373,6 +384,26 @@ function ChatSessionView(props: ChatSessionViewProps): ReactElement {
       }
       return;
     }
+    if (name === "/show-think") {
+      const next: ChatThinkingDisplay =
+        arg === "on" || arg === "expanded"
+          ? "expanded"
+          : arg === "off" || arg === "collapsed"
+            ? "collapsed"
+            : state.thinkingDisplay === "collapsed"
+              ? "expanded"
+              : "collapsed";
+      setThinkingDisplay(next);
+      commitHistory({
+        kind: "notice",
+        id: randomUUID(),
+        text:
+          next === "expanded"
+            ? `已完成的思考将完整显示${SHOW_THINK_SCOPE_HINT}`
+            : `已完成的思考将折叠为一行摘要，/show-think on 可恢复完整显示${SHOW_THINK_SCOPE_HINT}`,
+      });
+      return;
+    }
     if (name === "/auto") {
       if (arg === "on") {
         setAutoMode(true);
@@ -467,6 +498,9 @@ function ChatSessionView(props: ChatSessionViewProps): ReactElement {
             ...(state.pendingConfirm.explanation !== undefined
               ? { explanation: state.pendingConfirm.explanation }
               : {}),
+            ...(state.pendingConfirm.sessionGrantLabel !== undefined
+              ? { sessionGrantLabel: state.pendingConfirm.sessionGrantLabel }
+              : {}),
             width: layout.columns,
             maxRows: layout.promptRows + layout.popupRows,
             onDecide: resolveConfirm,
@@ -539,6 +573,7 @@ function ChatSessionView(props: ChatSessionViewProps): ReactElement {
       width: layout.columns,
       history: state.history,
       live: state.live,
+      thinkingDisplay: state.thinkingDisplay,
       onBannerSettled: handleBannerSettled,
       animateBanner: animateBanner && !bannerSettled,
       navigationBlocked:

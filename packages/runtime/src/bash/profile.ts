@@ -6,6 +6,13 @@ import type { CommandClassification } from "../types/command-classification.ts";
 import { unknownCommandClassifier } from "../types/command-classification.ts";
 import { ruleBasedClassifier } from "./classifier/index.ts";
 import { DEFAULT_KILL_GRACE_MS, killProcessGroup } from "./kill.ts";
+import { allocateOutputDumpFile, rollOutputDumpDir } from "./output-dump.ts";
+import {
+  buildSegmentCaptureWrapper,
+  PIPE_STATUS_ENV,
+  probeShellPipeCapability,
+  type ShellPipeProbe,
+} from "./shell-pipe.ts";
 import { resolveUserShell } from "./shell.ts";
 
 export const SHELL_PROFILE_IDS = ["posix", "powershell"] as const;
@@ -14,10 +21,17 @@ export type ShellProfileId = (typeof SHELL_PROFILE_IDS)[number];
 export const SHELL_TOOL_NAMES = ["bash", "powershell"] as const;
 export type ShellToolName = (typeof SHELL_TOOL_NAMES)[number];
 
+export const POSIX_PIPEFAIL_GUARD = "( set -o pipefail ) 2>/dev/null && set -o pipefail; ";
+
+export function wrapPosixCommand(command: string): string {
+  return `${POSIX_PIPEFAIL_GUARD}${command}`;
+}
+
 export interface ShellSpawnSpec {
   readonly file: string;
   readonly args: readonly string[];
   readonly options: SpawnOptions;
+  readonly rollSegmentFile?: string;
 }
 
 export interface ShellKillOptions {
@@ -38,6 +52,7 @@ export interface ShellProfile {
     options?: ShellKillOptions,
   ): Promise<void>;
   systemPromptHints(): readonly string[];
+  pipeCapability?: () => ShellPipeProbe;
 }
 
 export interface ShellProfileResolutionDeps {
@@ -97,22 +112,48 @@ function waitForGrace(ms: number, signal: AbortSignal | undefined): Promise<bool
 
 function createPosixShellProfile(deps: ShellProfileResolutionDeps): ShellProfile {
   const fileExists = deps.fileExists ?? existsSync;
+  const spawnSyncImpl = deps.spawnSync ?? spawnSync;
+  const probeCache = new Map<string, ShellPipeProbe>();
+  const probeFor = (shellPath: string): ShellPipeProbe => {
+    const cached = probeCache.get(shellPath);
+    if (cached !== undefined) {
+      return cached;
+    }
+    const probe = probeShellPipeCapability(shellPath, spawnSyncImpl);
+    probeCache.set(shellPath, probe);
+    return probe;
+  };
   return {
     id: "posix",
     toolName: "bash",
     supportsSessionExec: true,
     supportsSafeCommandClassification: true,
     waitForTreeKillAfterRootExit: false,
+    pipeCapability: () =>
+      probeFor(resolveUserShell({ platform: deps.platform, env: deps.env, fileExists })),
     buildSpawn(command, workdir, env) {
+      const shellPath = resolveUserShell({ platform: deps.platform, env, fileExists });
+      const probe = probeFor(shellPath);
+      let wrapped = command;
+      let rollSegmentFile: string | undefined;
+      let nextEnv = env;
+      if (probe.capability === "segments" && probe.segmentArray !== undefined) {
+        rollSegmentFile = allocateOutputDumpFile(rollOutputDumpDir(), "pipestatus");
+        wrapped = buildSegmentCaptureWrapper(command, probe.segmentArray);
+        nextEnv = { ...env, [PIPE_STATUS_ENV]: rollSegmentFile };
+      } else if (probe.capability === "pipefail") {
+        wrapped = wrapPosixCommand(command);
+      }
       return {
-        file: resolveUserShell({ platform: deps.platform, env, fileExists }),
-        args: ["-c", command],
+        file: shellPath,
+        args: ["-c", wrapped],
         options: {
           cwd: workdir,
           detached: true,
           stdio: ["ignore", "pipe", "pipe"],
-          env,
+          env: nextEnv,
         },
+        ...(rollSegmentFile !== undefined ? { rollSegmentFile } : {}),
       };
     },
     classify(command, workdir) {
@@ -132,9 +173,19 @@ function createPosixShellProfile(deps: ShellProfileResolutionDeps): ShellProfile
       }
     },
     systemPromptHints() {
+      const capability = probeFor(
+        resolveUserShell({ platform: deps.platform, env: deps.env, fileExists }),
+      ).capability;
+      const pipeHint =
+        capability === "segments"
+          ? "管道按逐段退出码判定：末段为 0 且其余段为 0 或被下游提前关闭（SIGPIPE/141）才算成功；…| head 型提前关闭会判成功并附说明，其余中段失败如实报告。"
+          : capability === "pipefail"
+            ? "管道已启用 pipefail：任一阶段失败整条管道即失败；退出码 141 表示上游被下游提前关闭，已标注且不视为失败。"
+            : "当前 shell 不支持 pipefail/逐段判定：管道退出码为最后一段的退出码；退出码 141 表示上游被下游提前关闭，已标注且不视为失败。";
       return [
         "当前 shell 后端是 POSIX shell；优先使用 macOS/Linux 常见命令语法。",
-        "过滤和预览输出时可使用 grep、sed、head、tail 等 POSIX 工具。",
+        pipeHint,
+        "仅为控制输出量时请用 roll__bash 的 max_output_chars 参数或 roll__read_file / roll__grep 等工具，不要自接 head/tail 管道；需要过滤时仍可用 grep 等工具。",
       ];
     },
   };

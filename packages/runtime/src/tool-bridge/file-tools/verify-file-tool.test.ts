@@ -1,0 +1,490 @@
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  realpathSync,
+  writeFileSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import type { ToolExecutionOptions } from "ai";
+import { resolveFileToolsSettings } from "./settings.ts";
+import {
+  VERIFY_ADMISSION_DRIFT_MESSAGE,
+  VERIFY_FILE_TOOL_NAME,
+  buildVerifyFileTool,
+  captureVerifyAdmission,
+  executeVerifyFile,
+  renderVerifyReport,
+  revalidateVerifyAdmission,
+} from "./verify-file-tool.ts";
+import type { ApprovalRequest } from "../build-tools.ts";
+import { ToolRegistry } from "../naming.ts";
+import { ToolExecutionCoordinator } from "../tool-execution-coordinator.ts";
+import { DefaultToolPolicy } from "../../policy/default-policy.ts";
+import { SessionApprovalMemory } from "../../approval/approval-memory.ts";
+import { TOOL_OUTCOME_KINDS, type NormalizedToolResult } from "../normalize-result.ts";
+import type { VerifierOutcome } from "./verifier-registry.ts";
+
+function fixtureWorkdir(prefix: string): string {
+  return realpathSync(mkdtempSync(join(tmpdir(), prefix)));
+}
+
+test("合法 JSON：pass 且总结为验证通过", async () => {
+  const workdir = fixtureWorkdir("verify-json-ok-");
+  const filePath = join(workdir, "a.json");
+  writeFileSync(filePath, '{"a":1}', "utf8");
+  const settings = resolveFileToolsSettings({ workdir });
+  const result = await executeVerifyFile(settings, { path: "a.json" });
+  assert.equal(result.outcome.kind, TOOL_OUTCOME_KINDS.success);
+  assert.equal(String(result.display), `验证 ${filePath}：\n✓ json 通过\n\n验证通过（json）`);
+});
+
+test("非法 JSON：fail 且总结为验证发现问题，工具结果如实标记为失败", async () => {
+  const workdir = fixtureWorkdir("verify-json-bad-");
+  const filePath = join(workdir, "a.json");
+  writeFileSync(filePath, "{not valid json", "utf8");
+  const settings = resolveFileToolsSettings({ workdir });
+  const result = await executeVerifyFile(settings, { path: "a.json" });
+  assert.equal(result.outcome.kind, TOOL_OUTCOME_KINDS.toolFailed);
+  const text = String(result.display);
+  assert.match(text, /^验证 .+：\n✗ json 失败：\n {2}.+/u);
+  assert.match(text, /验证发现问题，请修复后重试$/u);
+});
+
+test("文件不存在返回 invalid_input", async () => {
+  const workdir = fixtureWorkdir("verify-missing-");
+  const settings = resolveFileToolsSettings({ workdir });
+  const result = await executeVerifyFile(settings, { path: "no-such-file.json" });
+  assert.equal(result.outcome.kind, TOOL_OUTCOME_KINDS.invalidInput);
+  assert.equal(String(result.display), `文件不存在: ${join(workdir, "no-such-file.json")}`);
+});
+
+test("未注册扩展名（.xyz）无候选验证器：全部跳过文案，不做任何验证", async () => {
+  const workdir = fixtureWorkdir("verify-unknown-ext-");
+  const filePath = join(workdir, "a.xyz");
+  writeFileSync(filePath, "content", "utf8");
+  const settings = resolveFileToolsSettings({ workdir });
+  const result = await executeVerifyFile(settings, { path: "a.xyz" });
+  assert.equal(result.outcome.kind, TOOL_OUTCOME_KINDS.success);
+  assert.equal(
+    String(result.display),
+    `验证 ${filePath}：\n\n该文件类型当前无可用验证器（未安装或未配置），本次未做任何验证`,
+  );
+});
+
+test(".rs 文件在 project 级下因缺少 Cargo.toml 被 detect 判定跳过：全部跳过文案", async () => {
+  const workdir = fixtureWorkdir("verify-rs-nocargo-");
+  const filePath = join(workdir, "main.rs");
+  writeFileSync(filePath, "fn main() {}\n", "utf8");
+  const settings = resolveFileToolsSettings({ workdir });
+  const result = await executeVerifyFile(settings, { path: "main.rs", level: "project" });
+  assert.equal(result.outcome.kind, TOOL_OUTCOME_KINDS.success);
+  const text = String(result.display);
+  assert.ok(text.includes("– cargo-check 跳过（未安装或未配置 cargo-check）"));
+  assert.match(text, /该文件类型当前无可用验证器（未安装或未配置），本次未做任何验证$/u);
+});
+
+test("level=fast 时 .ts 文件展示 detect 未过的 fast 验证器与 project 候选提示行", async () => {
+  const workdir = fixtureWorkdir("verify-ts-fast-");
+  const filePath = join(workdir, "a.ts");
+  writeFileSync(filePath, "export const a = 1;\n", "utf8");
+  const settings = resolveFileToolsSettings({ workdir });
+  const result = await executeVerifyFile(settings, { path: "a.ts" });
+  const text = String(result.display);
+  assert.ok(text.includes("– eslint 跳过（未安装或未配置 eslint）"));
+  assert.ok(text.includes('– tsc 跳过（level=fast 未包含，用 level: "project" 运行）'));
+  assert.match(text, /该文件类型当前无可用验证器（未安装或未配置），本次未做任何验证$/u);
+});
+
+test("renderVerifyReport：至少一个 fail 时总结为验证发现问题", () => {
+  const outcomes: VerifierOutcome[] = [
+    { id: "eslint", status: "pass" },
+    { id: "ruff", status: "fail", output: "line1\nline2" },
+  ];
+  const text = renderVerifyReport("/abs/path.ts", outcomes, []);
+  assert.equal(
+    text,
+    "验证 /abs/path.ts：\n✓ eslint 通过\n✗ ruff 失败：\n  line1\n  line2\n\n验证发现问题，请修复后重试",
+  );
+});
+
+test("renderVerifyReport：全部 skipped（含空数组的真空情形）总结为无可用验证器", () => {
+  assert.equal(
+    renderVerifyReport("/abs/path.xyz", [], []),
+    "验证 /abs/path.xyz：\n\n该文件类型当前无可用验证器（未安装或未配置），本次未做任何验证",
+  );
+  const outcomes: VerifierOutcome[] = [
+    { id: "cargo-check", status: "skipped", reason: "未安装或未配置 cargo-check" },
+  ];
+  assert.equal(
+    renderVerifyReport("/abs/path.rs", outcomes, []),
+    "验证 /abs/path.rs：\n– cargo-check 跳过（未安装或未配置 cargo-check）\n\n该文件类型当前无可用验证器（未安装或未配置），本次未做任何验证",
+  );
+});
+
+test("renderVerifyReport：无 fail 时总结仅列出通过的 id，跳过的 id 不计入", () => {
+  const outcomes: VerifierOutcome[] = [
+    { id: "eslint", status: "pass" },
+    { id: "ruff", status: "skipped", reason: "未安装或未配置 ruff" },
+  ];
+  const text = renderVerifyReport("/abs/path.ts", outcomes, []);
+  assert.ok(text.endsWith("验证通过（eslint）"));
+});
+
+test("renderVerifyReport：project 候选在 fast 级别追加提示行", () => {
+  const text = renderVerifyReport("/abs/a.ts", [], ["tsc"]);
+  assert.equal(
+    text,
+    '验证 /abs/a.ts：\n– tsc 跳过（level=fast 未包含，用 level: "project" 运行）\n\n该文件类型当前无可用验证器（未安装或未配置），本次未做任何验证',
+  );
+});
+
+function executeOptions(
+  overrides: Partial<ToolExecutionOptions<unknown>> = {},
+): ToolExecutionOptions<unknown> {
+  return { toolCallId: "call-1", messages: [], context: undefined, ...overrides };
+}
+
+function buildVerifyFixture(
+  workdir: string,
+  approvals: ApprovalRequest[],
+  approve: boolean,
+  options: { readonly scope?: "once" | "session"; readonly memory?: SessionApprovalMemory } = {},
+) {
+  const registry = new ToolRegistry();
+  const settings = resolveFileToolsSettings({ workdir });
+  return buildVerifyFileTool(settings, registry, {
+    policy: new DefaultToolPolicy(),
+    requestApproval: (request) => {
+      approvals.push(request);
+      return Promise.resolve(
+        options.scope !== undefined
+          ? { approved: approve, scope: options.scope }
+          : { approved: approve },
+      );
+    },
+    ...(options.memory ? { approvalMemory: options.memory } : {}),
+  });
+}
+
+test("VERIFY_FILE_TOOL_NAME 为 verify_file", () => {
+  assert.equal(VERIFY_FILE_TOOL_NAME, "verify_file");
+});
+
+function installFakeEslint(workdir: string, marker: string): void {
+  mkdirSync(join(workdir, "node_modules", ".bin"), { recursive: true });
+  writeFileSync(join(workdir, "eslint.config.js"), "export default [];\n", "utf8");
+  const bin = join(workdir, "node_modules", ".bin", "eslint");
+  writeFileSync(bin, `#!/bin/sh\nprintf 'ran\\n' >> "${marker}"\nprintf '[]'\nexit 0\n`, "utf8");
+  chmodSync(bin, 0o755);
+}
+
+test("准入后新增会执行项目代码的验证器时 revalidate 阻止", () => {
+  const workdir = fixtureWorkdir("verify-admission-drift-");
+  writeFileSync(join(workdir, "a.ts"), "export const a = 1;\n", "utf8");
+  const settings = resolveFileToolsSettings({ workdir });
+  const captured = captureVerifyAdmission(settings, { path: "a.ts" });
+  assert.deepEqual(captured, { external: false, detectedIds: [] });
+  assert.equal(revalidateVerifyAdmission(settings, { path: "a.ts" }, captured), undefined);
+  installFakeEslint(workdir, join(workdir, "MARKER"));
+  const blocked = revalidateVerifyAdmission(settings, { path: "a.ts" }, captured);
+  assert.ok(blocked !== undefined);
+  assert.equal(blocked.outcome.kind, TOOL_OUTCOME_KINDS.toolFailed);
+  assert.equal(String(blocked.display), VERIFY_ADMISSION_DRIFT_MESSAGE);
+});
+
+test("同批次准入后写入的本地 eslint 不会在 execute 阶段免确认执行", async () => {
+  const workdir = fixtureWorkdir("verify-batch-drift-");
+  writeFileSync(join(workdir, "a.ts"), "export const a = 1;\n", "utf8");
+  const marker = join(workdir, "MARKER");
+  const approvals: ApprovalRequest[] = [];
+  const coordinator = new ToolExecutionCoordinator();
+  const registry = new ToolRegistry();
+  const tools = buildVerifyFileTool(resolveFileToolsSettings({ workdir }), registry, {
+    policy: new DefaultToolPolicy(),
+    requestApproval: (request) => {
+      approvals.push(request);
+      return Promise.resolve({ approved: true });
+    },
+    coordinator,
+  });
+  const verifyTool = tools.roll__verify_file;
+  assert.ok(verifyTool?.execute !== undefined);
+  const input = { path: "a.ts" };
+  await coordinator.prepare("verify-batch", "roll__verify_file", input);
+  assert.equal(approvals.length, 0);
+  installFakeEslint(workdir, marker);
+  const result = (await verifyTool.execute(
+    input,
+    executeOptions({ toolCallId: "verify-batch" }),
+  )) as NormalizedToolResult;
+  assert.equal(result.outcome.kind, TOOL_OUTCOME_KINDS.toolFailed);
+  assert.equal(String(result.display), VERIFY_ADMISSION_DRIFT_MESSAGE);
+  assert.equal(existsSync(marker), false);
+  const retry = (await verifyTool.execute(
+    input,
+    executeOptions({ toolCallId: "verify-retry" }),
+  )) as NormalizedToolResult;
+  assert.equal(approvals.length, 1);
+  assert.match(approvals[0]?.explanation ?? "", /将运行项目本地 eslint/u);
+  assert.equal(retry.outcome.kind, TOOL_OUTCOME_KINDS.success);
+  assert.equal(existsSync(marker), true);
+});
+
+test("level 缺省（fast）不触发确认门", async () => {
+  const workdir = fixtureWorkdir("verify-gate-fast-");
+  writeFileSync(join(workdir, "a.json"), '{"a":1}', "utf8");
+  const approvals: ApprovalRequest[] = [];
+  const tools = buildVerifyFixture(workdir, approvals, true);
+  const verifyTool = tools.roll__verify_file;
+  assert.ok(verifyTool?.execute !== undefined);
+  const result = (await verifyTool.execute(
+    { path: "a.json" },
+    executeOptions(),
+  )) as NormalizedToolResult;
+  assert.equal(result.outcome.kind, TOOL_OUTCOME_KINDS.success);
+  assert.equal(approvals.length, 0);
+});
+
+test("level: project 触发确认门，explanation 含项目级验证与文件名", async () => {
+  const workdir = fixtureWorkdir("verify-gate-project-");
+  writeFileSync(join(workdir, "a.json"), '{"a":1}', "utf8");
+  const approvals: ApprovalRequest[] = [];
+  const tools = buildVerifyFixture(workdir, approvals, true);
+  const verifyTool = tools.roll__verify_file;
+  assert.ok(verifyTool?.execute !== undefined);
+  const result = (await verifyTool.execute(
+    { path: "a.json", level: "project" },
+    executeOptions(),
+  )) as NormalizedToolResult;
+  assert.equal(result.outcome.kind, TOOL_OUTCOME_KINDS.success);
+  assert.equal(approvals.length, 1);
+  assert.equal(approvals[0]?.toolName, "verify_file");
+  assert.ok(approvals[0]?.explanation?.includes("项目级验证 a.json"));
+  assert.ok(approvals[0]?.explanation?.includes("将执行"));
+  assert.doesNotMatch(approvals[0]?.explanation ?? "", /\/node_modules\/\.bin\//u);
+});
+
+test("level: project 即使 scope=session 批准，也不写入批准记忆——每次都重新确认", async () => {
+  const workdir = fixtureWorkdir("verify-gate-project-memory-");
+  writeFileSync(join(workdir, "a.json"), '{"a":1}', "utf8");
+  const approvals: ApprovalRequest[] = [];
+  const memory = new SessionApprovalMemory();
+  const tools = buildVerifyFixture(workdir, approvals, true, { scope: "session", memory });
+  const verifyTool = tools.roll__verify_file;
+  assert.ok(verifyTool?.execute !== undefined);
+  const first = (await verifyTool.execute(
+    { path: "a.json", level: "project" },
+    executeOptions({ toolCallId: "t1" }),
+  )) as NormalizedToolResult;
+  assert.equal(first.outcome.kind, TOOL_OUTCOME_KINDS.success);
+  assert.equal(approvals.length, 1);
+  const second = (await verifyTool.execute(
+    { path: "a.json", level: "project" },
+    executeOptions({ toolCallId: "t2" }),
+  )) as NormalizedToolResult;
+  assert.equal(second.outcome.kind, TOOL_OUTCOME_KINDS.success);
+  assert.equal(approvals.length, 2);
+});
+
+test("level: project 被拒绝时返回 user_rejected", async () => {
+  const workdir = fixtureWorkdir("verify-gate-project-reject-");
+  writeFileSync(join(workdir, "a.json"), '{"a":1}', "utf8");
+  const approvals: ApprovalRequest[] = [];
+  const tools = buildVerifyFixture(workdir, approvals, false);
+  const verifyTool = tools.roll__verify_file;
+  assert.ok(verifyTool?.execute !== undefined);
+  const result = (await verifyTool.execute(
+    { path: "a.json", level: "project" },
+    executeOptions(),
+  )) as NormalizedToolResult;
+  assert.equal(result.outcome.kind, TOOL_OUTCOME_KINDS.userRejected);
+  assert.equal(approvals.length, 1);
+});
+
+test("workdir 外路径触发确认门，拒绝时返回 user_rejected", async () => {
+  const workdir = fixtureWorkdir("verify-outside-gate-");
+  const outsideDir = fixtureWorkdir("verify-outside-");
+  writeFileSync(join(outsideDir, "secret.json"), '{"a":1}', "utf8");
+  const approvals: ApprovalRequest[] = [];
+  const tools = buildVerifyFixture(workdir, approvals, false);
+  const verifyTool = tools.roll__verify_file;
+  assert.ok(verifyTool?.execute !== undefined);
+  const result = (await verifyTool.execute(
+    { path: join(outsideDir, "secret.json") },
+    executeOptions(),
+  )) as NormalizedToolResult;
+  assert.equal(result.outcome.kind, TOOL_OUTCOME_KINDS.userRejected);
+  assert.equal(approvals.length, 1);
+  assert.equal(approvals[0]?.toolName, "verify_file");
+  assert.equal(approvals[0]?.reason, "读取工作目录以外的文件");
+});
+
+test("workdir 外路径批准后可正常验证", async () => {
+  const workdir = fixtureWorkdir("verify-outside-gate-");
+  const outsideDir = fixtureWorkdir("verify-outside-");
+  writeFileSync(join(outsideDir, "secret.json"), '{"a":1}', "utf8");
+  const approvals: ApprovalRequest[] = [];
+  const tools = buildVerifyFixture(workdir, approvals, true);
+  const verifyTool = tools.roll__verify_file;
+  assert.ok(verifyTool?.execute !== undefined);
+  const result = (await verifyTool.execute(
+    { path: join(outsideDir, "secret.json") },
+    executeOptions(),
+  )) as NormalizedToolResult;
+  assert.equal(result.outcome.kind, TOOL_OUTCOME_KINDS.success);
+  assert.equal(approvals.length, 1);
+});
+
+test("workdir 内路径不触发确认门", async () => {
+  const workdir = fixtureWorkdir("verify-outside-gate-");
+  writeFileSync(join(workdir, "a.json"), '{"a":1}', "utf8");
+  const approvals: ApprovalRequest[] = [];
+  const tools = buildVerifyFixture(workdir, approvals, true);
+  const verifyTool = tools.roll__verify_file;
+  assert.ok(verifyTool?.execute !== undefined);
+  const result = (await verifyTool.execute(
+    { path: "a.json" },
+    executeOptions(),
+  )) as NormalizedToolResult;
+  assert.equal(result.outcome.kind, TOOL_OUTCOME_KINDS.success);
+  assert.equal(approvals.length, 0);
+});
+
+test("workdir 外路径 scope=session 批准后第二次验证免弹", async () => {
+  const workdir = fixtureWorkdir("verify-outside-gate-");
+  const outsideDir = fixtureWorkdir("verify-outside-");
+  writeFileSync(join(outsideDir, "secret.json"), '{"a":1}', "utf8");
+  const approvals: ApprovalRequest[] = [];
+  const memory = new SessionApprovalMemory();
+  const tools = buildVerifyFixture(workdir, approvals, true, { scope: "session", memory });
+  const verifyTool = tools.roll__verify_file;
+  assert.ok(verifyTool?.execute !== undefined);
+  const first = (await verifyTool.execute(
+    { path: join(outsideDir, "secret.json") },
+    executeOptions({ toolCallId: "t1" }),
+  )) as NormalizedToolResult;
+  assert.equal(first.outcome.kind, TOOL_OUTCOME_KINDS.success);
+  assert.equal(approvals.length, 1);
+  const second = (await verifyTool.execute(
+    { path: join(outsideDir, "secret.json") },
+    executeOptions({ toolCallId: "t2" }),
+  )) as NormalizedToolResult;
+  assert.equal(second.outcome.kind, TOOL_OUTCOME_KINDS.success);
+  assert.equal(approvals.length, 1);
+});
+
+test("workdir 外路径叠加 level: project 时两道确认门各自独立触发一次", async () => {
+  const workdir = fixtureWorkdir("verify-outside-gate-");
+  const outsideDir = fixtureWorkdir("verify-outside-");
+  writeFileSync(join(outsideDir, "secret.json"), '{"a":1}', "utf8");
+  const approvals: ApprovalRequest[] = [];
+  const tools = buildVerifyFixture(workdir, approvals, true);
+  const verifyTool = tools.roll__verify_file;
+  assert.ok(verifyTool?.execute !== undefined);
+  const result = (await verifyTool.execute(
+    { path: join(outsideDir, "secret.json"), level: "project" },
+    executeOptions(),
+  )) as NormalizedToolResult;
+  assert.equal(result.outcome.kind, TOOL_OUTCOME_KINDS.success);
+  assert.equal(approvals.length, 2);
+  assert.equal(approvals[0]?.reason, "读取工作目录以外的文件");
+  assert.ok(approvals[1]?.explanation?.includes("项目级验证"));
+});
+
+test("fast eslint 会执行项目代码：拒绝时无副作用，session 批准后第二次免确认", async () => {
+  const workdir = fixtureWorkdir("verify-eslint-confirm-");
+  mkdirSync(join(workdir, "node_modules", ".bin"), { recursive: true });
+  writeFileSync(join(workdir, "eslint.config.js"), "export default [];\n", "utf8");
+  const marker = join(workdir, "SIDE_EFFECT");
+  const eslintBin = join(workdir, "node_modules", ".bin", "eslint");
+  writeFileSync(eslintBin, `#!/bin/sh\nprintf 'side\\n' >> "${marker}"\nexit 0\n`, "utf8");
+  chmodSync(eslintBin, 0o755);
+  writeFileSync(join(workdir, "a.ts"), "export const a = 1;\n", "utf8");
+
+  const rejected: ApprovalRequest[] = [];
+  const rejectedTools = buildVerifyFixture(workdir, rejected, false);
+  const rejectedResult = (await rejectedTools.roll__verify_file!.execute!(
+    { path: "a.ts" },
+    executeOptions({ toolCallId: "r1" }),
+  )) as NormalizedToolResult;
+  assert.equal(rejectedResult.outcome.kind, TOOL_OUTCOME_KINDS.userRejected);
+  assert.equal(rejected.length, 1);
+  assert.match(
+    rejected[0]?.explanation ?? "",
+    /^验证 a\.ts：将运行项目本地 eslint（会加载并执行项目本地配置\/插件代码）— /u,
+  );
+  assert.match(
+    rejected[0]?.explanation ?? "",
+    /node_modules\/\.bin\/eslint --no-fix --format json a\.ts/u,
+  );
+  assert.doesNotMatch(rejected[0]?.explanation ?? "", /\/node_modules\/\.bin\/eslint/u);
+  assert.equal(existsSync(marker), false);
+
+  const approvals: ApprovalRequest[] = [];
+  const memory = new SessionApprovalMemory();
+  const tools = buildVerifyFixture(workdir, approvals, true, { scope: "session", memory });
+  const first = (await tools.roll__verify_file!.execute!(
+    { path: "a.ts" },
+    executeOptions({ toolCallId: "t1" }),
+  )) as NormalizedToolResult;
+  assert.equal(first.outcome.kind, TOOL_OUTCOME_KINDS.success);
+  assert.equal(approvals.length, 1);
+  const second = (await tools.roll__verify_file!.execute!(
+    { path: "a.ts" },
+    executeOptions({ toolCallId: "t2" }),
+  )) as NormalizedToolResult;
+  assert.equal(second.outcome.kind, TOOL_OUTCOME_KINDS.success);
+  assert.equal(approvals.length, 1);
+});
+
+test("eslint ignore 结果为 skipped 而非 pass", async () => {
+  const workdir = fixtureWorkdir("verify-eslint-ignore-");
+  mkdirSync(join(workdir, "node_modules", ".bin"), { recursive: true });
+  writeFileSync(join(workdir, "eslint.config.js"), "export default [];\n", "utf8");
+  const eslintBin = join(workdir, "node_modules", ".bin", "eslint");
+  writeFileSync(
+    eslintBin,
+    "#!/bin/sh\nprintf '%s\\n' 'File ignored because of a matching ignore pattern. Use --no-ignore to override.'\nexit 0\n",
+    "utf8",
+  );
+  chmodSync(eslintBin, 0o755);
+  writeFileSync(join(workdir, "a.ts"), "export const a = 1;\n", "utf8");
+  const approvals: ApprovalRequest[] = [];
+  const tools = buildVerifyFixture(workdir, approvals, true, { scope: "session" });
+  const result = (await tools.roll__verify_file!.execute!(
+    { path: "a.ts" },
+    executeOptions(),
+  )) as NormalizedToolResult;
+  assert.equal(result.outcome.kind, TOOL_OUTCOME_KINDS.success);
+  assert.match(String(result.display), /eslint 跳过（文件被 eslint 配置忽略，未实际检查）/u);
+  assert.match(String(result.display), /未做任何验证/u);
+});
+
+test("abort 后 verify 返回 cancelled", async () => {
+  const workdir = fixtureWorkdir("verify-abort-");
+  writeFileSync(join(workdir, "a.json"), '{"a":1}', "utf8");
+  const controller = new AbortController();
+  controller.abort();
+  const result = await executeVerifyFile(
+    resolveFileToolsSettings({ workdir }),
+    { path: "a.json" },
+    controller.signal,
+  );
+  assert.equal(result.outcome.kind, TOOL_OUTCOME_KINDS.cancelled);
+});
+
+test("参数校验失败返回 invalid_input", async () => {
+  const workdir = fixtureWorkdir("verify-badinput-");
+  const approvals: ApprovalRequest[] = [];
+  const tools = buildVerifyFixture(workdir, approvals, true);
+  const verifyTool = tools.roll__verify_file;
+  assert.ok(verifyTool?.execute !== undefined);
+  const result = (await verifyTool.execute({ path: "" }, executeOptions())) as NormalizedToolResult;
+  assert.equal(result.outcome.kind, TOOL_OUTCOME_KINDS.invalidInput);
+  assert.equal(approvals.length, 0);
+});

@@ -20,6 +20,7 @@ const AUTO_BADGE_PATTERN = literalPattern(`${GLYPHS.auto} auto`);
 
 interface Sink {
   approved: string[];
+  approvals?: Array<{ id: string; scope: "once" | "session" | undefined }>;
   rejected: string[];
   cancelled?: number;
   userInputAvailability?: boolean[];
@@ -57,8 +58,10 @@ function makeSession(
       return options?.skills ?? [];
     },
     send,
-    approve(id: string) {
+    approve(id: string, scope?: "once" | "session") {
       sink.approved.push(id);
+      sink.approvals ??= [];
+      sink.approvals.push({ id, scope });
       return true;
     },
     reject(id: string) {
@@ -415,6 +418,41 @@ test("ChatApp confirm flow shows the cleaned AI explanation and tool args, then 
   unmount();
 });
 
+test("ChatApp confirm flow remembers approval for the session on 'a'", async () => {
+  const sink: Sink = { approved: [], rejected: [] };
+  async function* send(): AsyncIterable<SessionEvent> {
+    yield {
+      type: "confirmation-required",
+      approvalId: "a1",
+      agentName: "browser-use-agent",
+      toolName: "click_ref",
+      input: { ref: "node-42" },
+      sessionGrantLabel: "本会话内不再询问：修改工作目录内的文件",
+    };
+    yield { type: "message-finish", text: "done" };
+  }
+  const { stdin, lastFrame, unmount } = render(
+    h(ChatApp, {
+      session: makeSession(send, sink),
+      model: "qwen",
+      onUserSubmit: () => {},
+      onExit: () => {},
+    }),
+  );
+  await delay(10);
+  stdin.write("go");
+  await delay(10);
+  stdin.write("\r");
+  await waitFor(() => assert.match(lastFrame() ?? "", /执行 browser-use-agent\.click_ref/));
+  await delay(100);
+
+  stdin.write("a");
+  await waitFor(() => assert.deepEqual(sink.approved, ["a1"]));
+  assert.deepEqual(sink.approvals, [{ id: "a1", scope: "session" }]);
+  assert.deepEqual(sink.rejected, []);
+  unmount();
+});
+
 test("ChatApp Esc cancels a user input form without cancelling the turn", async () => {
   const sink: Sink = {
     approved: [],
@@ -757,7 +795,7 @@ test("/auto slash command toggles auto mode", async () => {
   unmount();
 });
 
-test("ChatApp dims reasoning and never shows literal think tags", async () => {
+test("ChatApp collapses committed inline thinking and never shows literal think tags", async () => {
   const sink: Sink = { approved: [], rejected: [] };
   async function* send(): AsyncIterable<SessionEvent> {
     yield { type: "text-delta", delta: "<think>内部思考</think>最终答案" };
@@ -778,7 +816,36 @@ test("ChatApp dims reasoning and never shows literal think tags", async () => {
   await delay(50);
   const frame = lastFrame() ?? "";
   assert.match(frame, /最终答案/);
+  assert.match(frame, /推理过程 · 4 字 · 已折叠/);
+  assert.doesNotMatch(frame, /内部思考/);
+  assert.doesNotMatch(frame, /<\/think>/);
+  unmount();
+});
+
+test("ChatApp keeps inline thinking visible when thinking display is expanded", async () => {
+  const sink: Sink = { approved: [], rejected: [] };
+  async function* send(): AsyncIterable<SessionEvent> {
+    yield { type: "text-delta", delta: "<think>内部思考</think>最终答案" };
+    yield { type: "message-finish", text: "<think>内部思考</think>最终答案" };
+  }
+  const { stdin, lastFrame, unmount } = render(
+    h(ChatApp, {
+      session: makeSession(send, sink),
+      model: "qwen",
+      initialThinkingDisplay: "expanded",
+      onUserSubmit: () => {},
+      onExit: () => {},
+    }),
+  );
+  await delay(10);
+  stdin.write("q");
+  await delay(10);
+  stdin.write("\r");
+  await delay(50);
+  const frame = lastFrame() ?? "";
+  assert.match(frame, /最终答案/);
   assert.match(frame, /内部思考/);
+  assert.doesNotMatch(frame, /已折叠/);
   assert.doesNotMatch(frame, /<\/think>/);
   unmount();
 });
@@ -849,13 +916,104 @@ test("ChatApp streams provider reasoning separately from tool activity", async (
     const frame = plain(lastFrame() ?? "");
     assert.match(frame, /执行 roll\.search/);
     assert.match(frame, /推理过程/);
-    assert.match(frame, /工具调用边界。\n\n\s+· roll\.search/);
-    assert.doesNotMatch(frame, /工具调用边界。\n\n\n/);
-    assert.ok(frame.indexOf("先检查输入状态") < frame.indexOf("roll.search"));
+    assert.match(frame, /已折叠/);
+    assert.doesNotMatch(frame, /先检查输入状态/);
+    assert.match(frame, /已折叠\n\n\s+· roll\.search/);
+    assert.doesNotMatch(frame, /已折叠\n\n\n/);
+    assert.ok(frame.indexOf("已折叠") < frame.indexOf("roll.search"));
   });
 
   releaseTool?.();
   await waitFor(() => assert.match(plain(lastFrame() ?? ""), /已经定位并修复/));
+  unmount();
+});
+
+test("ChatApp keeps committed reasoning fully visible when thinking display is expanded", async () => {
+  const sink: Sink = { approved: [], rejected: [] };
+  async function* send(): AsyncIterable<SessionEvent> {
+    yield { type: "reasoning-start", reasoningId: "r1" };
+    yield {
+      type: "reasoning-delta",
+      reasoningId: "r1",
+      delta: "先检查输入状态，再定位工具调用边界。",
+    };
+    yield { type: "reasoning-end", reasoningId: "r1" };
+    yield { type: "text-delta", delta: "已经定位并修复。" };
+    yield { type: "message-finish", text: "已经定位并修复。" };
+  }
+  const { stdin, lastFrame, unmount } = render(
+    h(ChatApp, {
+      session: makeSession(send, sink),
+      model: "qwen",
+      initialThinkingDisplay: "expanded",
+      onUserSubmit: () => {},
+      onExit: () => {},
+    }),
+  );
+  await delay(10);
+  stdin.write("debug");
+  await delay(10);
+  stdin.write("\r");
+  await waitFor(() => {
+    const frame = plain(lastFrame() ?? "");
+    assert.match(frame, /已经定位并修复/);
+    assert.match(frame, /先检查输入状态，再定位工具调用边界/);
+    assert.doesNotMatch(frame, /已折叠/);
+  });
+  unmount();
+});
+
+test("/show-think toggles committed reasoning between collapsed and expanded", async () => {
+  const sink: Sink = { approved: [], rejected: [] };
+  async function* send(): AsyncIterable<SessionEvent> {
+    yield { type: "reasoning-start", reasoningId: "r1" };
+    yield { type: "reasoning-delta", reasoningId: "r1", delta: "内部推演过程" };
+    yield { type: "reasoning-end", reasoningId: "r1" };
+    yield { type: "text-delta", delta: "答案" };
+    yield { type: "message-finish", text: "答案" };
+  }
+  const { stdin, lastFrame, unmount } = render(
+    h(ChatApp, {
+      session: makeSession(send, sink),
+      model: "qwen",
+      onUserSubmit: () => {},
+      onExit: () => {},
+    }),
+  );
+  await delay(10);
+  stdin.write("q");
+  await delay(10);
+  stdin.write("\r");
+  await waitFor(() => {
+    const frame = plain(lastFrame() ?? "");
+    assert.match(frame, /已折叠/);
+    assert.doesNotMatch(frame, /内部推演过程/);
+  });
+  // 等待 turn-end 落回 idle，否则 busy 阶段的输入会被禁用的输入框丢弃
+  await delay(50);
+
+  for (const ch of "/show-think on") {
+    stdin.write(ch);
+  }
+  await delay(20);
+  stdin.write("\r");
+  await waitFor(() => {
+    const frame = plain(lastFrame() ?? "");
+    assert.match(frame, /已完成的思考将完整显示/);
+    assert.match(frame, /内部推演过程/);
+    assert.doesNotMatch(frame, /已折叠/);
+  });
+
+  for (const ch of "/show-think off") {
+    stdin.write(ch);
+  }
+  await delay(20);
+  stdin.write("\r");
+  await waitFor(() => {
+    const frame = plain(lastFrame() ?? "");
+    assert.match(frame, /已折叠/);
+    assert.doesNotMatch(frame, /内部推演过程/);
+  });
   unmount();
 });
 

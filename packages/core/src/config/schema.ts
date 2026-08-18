@@ -8,6 +8,7 @@ const runtimeApprovalOverrideActions = ["auto", "confirm", "deny"] as const;
 const runtimeCompactionStrategies = ["summarize", "truncate"] as const;
 export const runtimeThinkingLevels = ["off", "low", "medium", "high"] as const;
 export const CHAT_SCREEN_MODES = ["auto", "fullscreen", "inline"] as const;
+export const CHAT_THINKING_DISPLAY_MODES = ["collapsed", "expanded"] as const;
 
 const browserProfileColorSchema = z
   .string()
@@ -39,9 +40,15 @@ export const askConfigSchema = z.object({
 });
 
 export const chatScreenModeSchema = z.enum(CHAT_SCREEN_MODES);
+export const chatThinkingDisplaySchema = z.enum(CHAT_THINKING_DISPLAY_MODES);
 
 export const chatConfigSchema = z.object({
   screenMode: chatScreenModeSchema.default("auto"),
+  /**
+   * 已完成思考内容的展示方式：`collapsed` 折叠为一行摘要（默认），
+   * `expanded` 始终完整显示。思考进行中始终实时展示，不受此项影响。
+   */
+  thinkingDisplay: chatThinkingDisplaySchema.default("collapsed"),
 });
 
 export const runtimeApprovalConfigSchema = z.object({
@@ -222,6 +229,7 @@ export const rollConfigSchema = z.object({
 export type RollConfig = z.infer<typeof rollConfigSchema>;
 export type ChatConfig = z.infer<typeof chatConfigSchema>;
 export type ChatScreenMode = z.infer<typeof chatScreenModeSchema>;
+export type ChatThinkingDisplay = z.infer<typeof chatThinkingDisplaySchema>;
 export type RuntimeConfig = z.infer<typeof runtimeConfigSchema>;
 export type SkillsConfig = z.infer<typeof skillsConfigSchema>;
 export type RuntimeApprovalConfig = z.infer<typeof runtimeApprovalConfigSchema>;

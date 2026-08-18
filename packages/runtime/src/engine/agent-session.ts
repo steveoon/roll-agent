@@ -46,6 +46,10 @@ import {
 } from "../tool-bridge/agent-install-tool.ts";
 import { buildSkillToolset } from "../tool-bridge/skill-tool.ts";
 import {
+  buildFileToolset,
+  type SessionFileToolsSettings,
+} from "../tool-bridge/file-tools/index.ts";
+import {
   buildBashToolset,
   type BashToolContext,
   type SessionBashSettings,
@@ -83,6 +87,7 @@ import {
   readToolOutcome,
   type ToolCancellationExecutionState,
 } from "../tool-bridge/normalize-result.ts";
+import { friendlyInvalidToolInputMessage } from "../tool-bridge/bounded-param.ts";
 import {
   createToolExecutionRecord,
   prepareToolExecutionRecordForPersistence,
@@ -90,24 +95,31 @@ import {
   toRedactedToolExecutionRecordSummary,
   type RedactedToolExecutionRecordSummary,
   type ToolExecutionRecord,
+  type ToolExecutionRecordId,
 } from "../tool-bridge/tool-execution-record.ts";
 import type {
+  AppendMessagesOptions,
   CompactionEvidenceWatermarks,
   CommitCompactionInput,
   ListToolExecutionsOptions,
   ListTranscriptMessagesOptions,
   SequencedToolExecutionRecord,
+  ToolExecutionContextRepresentation,
 } from "../store/thread-store.ts";
 import {
   TOOL_RESOURCE_ACCESS_MODES,
   ToolExecutionCoordinator,
+  type ToolCallOccurrence,
   type ToolResourceAccess,
 } from "../tool-bridge/tool-execution-coordinator.ts";
 import { ApprovalGate, type ApprovalDecision } from "../approval/approval-gate.ts";
+import { SessionApprovalMemory } from "../approval/approval-memory.ts";
 import {
   COMPACTION_DRAFT_FALLBACK_REASONS,
   compactMessages,
   CompactionDraftFallbackError,
+  estimateMessagesTokens,
+  estimateTextTokens,
   isCompactionSummaryAcknowledgement,
   readCompactionSummaryPayload,
 } from "./compactor.ts";
@@ -121,6 +133,7 @@ import {
 } from "./explicit-skill-context.ts";
 import {
   createCancelledTurnRecoveryMessage,
+  createToolLedgerGapRecoveryMessage,
   materializeCancelledTurnRecoveryMessages,
   stripCancelledTurnRecoveryMessages,
 } from "./cancelled-turn-recovery.ts";
@@ -201,13 +214,14 @@ export interface AgentSessionOptions {
   readonly maxSteps: number;
   readonly policy?: ToolPolicy;
   readonly initialMessages?: readonly ModelMessage[];
-  readonly onPersist?: (messages: readonly ModelMessage[]) => void;
+  readonly onPersist?: (messages: readonly ModelMessage[], options?: AppendMessagesOptions) => void;
   readonly onReplace?: (messages: readonly ModelMessage[]) => void;
   readonly onToolExecution?: (record: ToolExecutionRecord) => void;
   readonly listToolExecutions?: (
     options?: ListToolExecutionsOptions,
   ) => readonly SequencedToolExecutionRecord[];
   readonly getToolExecution?: (executionId: string) => SequencedToolExecutionRecord | undefined;
+  readonly recoverUncoveredToolExecutions?: () => readonly ModelMessage[];
   readonly initialCheckpoint?: CompactionCheckpoint;
   readonly listTranscriptMessages?: (
     options?: ListTranscriptMessagesOptions,
@@ -233,6 +247,7 @@ export interface AgentSessionOptions {
     abortSignal: AbortSignal,
   ) => CapabilityExternalDynamicContext | Promise<CapabilityExternalDynamicContext>;
   readonly skillLibrary?: SkillLibrary;
+  readonly fileTools?: SessionFileToolsSettings;
   readonly bash?: SessionBashSettings;
   readonly bashClassifier?: CommandClassifier;
   readonly bashSession?: AgentSessionBashSession;
@@ -288,8 +303,10 @@ interface ActiveTurn {
   readonly execSessionIds: Set<number>;
   readonly pendingToolCalls: Map<string, PendingToolCall>;
   readonly completedStepResponses: Map<string, readonly ModelMessage[]>;
+  readonly persistedStepKeys: Set<string>;
   readonly toolExecutions: ToolExecutionRecord[];
   expiresAt?: string;
+  userMessagePersisted: boolean;
   hadPotentialSideEffects: boolean;
   aborted: boolean;
   cancellationActivity?: TurnCancellationActivity;
@@ -297,10 +314,14 @@ interface ActiveTurn {
   cancellationPersistenceAttempted: boolean;
   cancellationPersisted: boolean;
   cancellationReason?: SessionCancellationReason;
+  pausedForContextPressure: boolean;
+  contextPressureContinuations: number;
+  completedStepCount: number;
 }
 
 interface PendingToolCall {
   readonly toolCallId: string;
+  readonly executionOccurrence: ToolCallOccurrence;
   readonly agentName: string;
   readonly toolName: string;
   readonly input: unknown;
@@ -361,7 +382,17 @@ interface LegacyV1ActiveSnapshot {
 
 const SESSION_CLOSE_TIMEOUT_MS = 6_000;
 const DEFAULT_INTERACTION_TIMEOUT_MS = 5 * 60 * 1_000;
+const MAX_AUTO_COMPACTION_PASSES = 4;
+const MAX_CONTEXT_PRESSURE_CONTINUATIONS = 2;
 const MAX_CONTEXT_RECOVERY_ATTEMPTS = 1;
+const INTERRUPTED_STEP_POLICIES = {
+  keepRaw: "keep-raw",
+  ledgerOnly: "ledger-only",
+} as const;
+type InterruptedStepPolicy =
+  (typeof INTERRUPTED_STEP_POLICIES)[keyof typeof INTERRUPTED_STEP_POLICIES];
+const INTERRUPTED_TURN_RECOVERY_POLICY =
+  "这份恢复记录只描述上一轮的权威历史事实，不授权继续或重试旧任务。下一轮必须以最新真实用户消息的目标和约束为准；如果用户换题、放弃旧任务或禁止工具，不得为了恢复旧任务检查或调用工具。executionState=not_executed 表示工具确定未执行，无需检查；executionState=outcome_unknown 只允许在最新用户明确要求继续或核对上一任务时先检查，检查不等于重试。";
 const MAX_COMPACTION_RESOURCE_KEY_CHARS = 1_024;
 const SERIALIZED_INVALID_TOOL_INPUT_PREFIX = "AI_InvalidToolInputError:";
 const EMPTY_COMPACTION_MODEL_DRAFT = {
@@ -400,12 +431,17 @@ function createActiveTurn(): ActiveTurn {
     execSessionIds: new Set<number>(),
     pendingToolCalls: new Map<string, PendingToolCall>(),
     completedStepResponses: new Map<string, readonly ModelMessage[]>(),
+    persistedStepKeys: new Set<string>(),
     toolExecutions: [],
+    userMessagePersisted: false,
     hadPotentialSideEffects: false,
     aborted: false,
     cancellationEventEmitted: false,
     cancellationPersistenceAttempted: false,
     cancellationPersisted: false,
+    pausedForContextPressure: false,
+    contextPressureContinuations: 0,
+    completedStepCount: 0,
   };
 }
 
@@ -423,6 +459,25 @@ function rememberCompletedStep(activeTurn: ActiveTurn, step: CompletedModelStep)
 
 function completedStepMessages(activeTurn: ActiveTurn): ModelMessage[] {
   return [...activeTurn.completedStepResponses.values()].flatMap((messages) => [...messages]);
+}
+
+function unpersistedStepMessages(activeTurn: ActiveTurn): ModelMessage[] {
+  return [...activeTurn.completedStepResponses.entries()]
+    .filter(([key]) => !activeTurn.persistedStepKeys.has(key))
+    .flatMap(([, messages]) => [...messages]);
+}
+
+function persistedStepMessages(activeTurn: ActiveTurn): ModelMessage[] {
+  return [...activeTurn.completedStepResponses.entries()]
+    .filter(([key]) => activeTurn.persistedStepKeys.has(key))
+    .flatMap(([, messages]) => [...messages]);
+}
+
+function markTurnSegmentPersisted(activeTurn: ActiveTurn): void {
+  for (const key of activeTurn.completedStepResponses.keys()) {
+    activeTurn.persistedStepKeys.add(key);
+  }
+  activeTurn.userMessagePersisted = true;
 }
 
 function errorMessage(error: unknown): string {
@@ -746,7 +801,9 @@ export class AgentSession {
   private readonly model: LanguageModelV4;
   private readonly maxSteps: number;
   private readonly messages: ModelMessage[];
-  private readonly onPersist: ((messages: readonly ModelMessage[]) => void) | undefined;
+  private readonly onPersist:
+    | ((messages: readonly ModelMessage[], options?: AppendMessagesOptions) => void)
+    | undefined;
   private readonly onReplace: ((messages: readonly ModelMessage[]) => void) | undefined;
   private readonly onToolExecution: ((record: ToolExecutionRecord) => void) | undefined;
   private readonly listPersistedToolExecutions:
@@ -755,6 +812,9 @@ export class AgentSession {
   private readonly getPersistedToolExecution:
     | ((executionId: string) => SequencedToolExecutionRecord | undefined)
     | undefined;
+  private readonly recoverPersistedToolExecutionContext:
+    | (() => readonly ModelMessage[])
+    | undefined;
   private readonly listPersistedTranscriptMessages:
     | ((options?: ListTranscriptMessagesOptions) => readonly ArchivedTranscriptMessage[])
     | undefined;
@@ -762,6 +822,7 @@ export class AgentSession {
     | ((input: CommitCompactionInput) => CompactionCheckpoint)
     | undefined;
   private readonly inMemoryToolExecutions: ToolExecutionRecord[] = [];
+  private readonly uncoveredToolExecutions = new Map<ToolExecutionRecordId, ToolExecutionRecord>();
   private readonly inMemoryTranscript: ArchivedTranscriptMessage[] = [];
   private readonly legacyV1ActiveSnapshot: LegacyV1ActiveSnapshot | undefined;
   private readonly compactionResources = new Map<string, CompactionResource>();
@@ -809,6 +870,10 @@ export class AgentSession {
   private closed = false;
   private sessionUsage: SessionTokenUsage = { inputTokens: 0, outputTokens: 0, totalTokens: 0 };
   private lastInputTokens: number | undefined;
+  private lastStepOutputTokens: number | undefined;
+  private lastStepToolResultTokens: number | undefined;
+  private measuredMessageCount: number | undefined;
+  private promptOverhead: number | undefined;
   private needsCompaction = false;
 
   constructor(options: AgentSessionOptions) {
@@ -828,6 +893,7 @@ export class AgentSession {
     this.onToolExecution = options.onToolExecution;
     this.listPersistedToolExecutions = options.listToolExecutions;
     this.getPersistedToolExecution = options.getToolExecution;
+    this.recoverPersistedToolExecutionContext = options.recoverUncoveredToolExecutions;
     this.listPersistedTranscriptMessages = options.listTranscriptMessages;
     this.commitPersistedCompaction = options.commitCompaction;
     this.compactionCheckpoint = options.initialCheckpoint;
@@ -889,6 +955,20 @@ export class AgentSession {
     markToolRole(toolRoles, transcriptTools, CAPABILITY_TOOL_ROLES.transcriptRead);
     const skillTools = options.skillLibrary ? this.buildSkillTools(registry) : {};
     markToolRole(toolRoles, skillTools, CAPABILITY_TOOL_ROLES.skill);
+    const fileApprovalMemory = new SessionApprovalMemory();
+    const fileToolset = options.fileTools
+      ? buildFileToolset(options.fileTools, registry, {
+          ...(options.policy ? { policy: options.policy } : {}),
+          requestApproval: (request) => this.requestApproval(request),
+          coordinator: this.toolCoordinator,
+          approvalMemory: fileApprovalMemory,
+        })
+      : undefined;
+    if (fileToolset) {
+      markToolRole(toolRoles, fileToolset.readTools, CAPABILITY_TOOL_ROLES.fileRead);
+      markToolRole(toolRoles, fileToolset.editTools, CAPABILITY_TOOL_ROLES.fileEdit);
+      markToolRole(toolRoles, fileToolset.verifyTools, CAPABILITY_TOOL_ROLES.fileVerify);
+    }
     const bashCtx: BashToolContext = {
       ...(options.policy ? { policy: options.policy } : {}),
       requestApproval: (request) => this.requestApproval(request),
@@ -963,6 +1043,9 @@ export class AgentSession {
     this.tools = {
       ...transcriptTools,
       ...skillTools,
+      ...(fileToolset
+        ? { ...fileToolset.readTools, ...fileToolset.editTools, ...fileToolset.verifyTools }
+        : {}),
       ...bashTools,
       ...sessionExecTools,
       ...agentInstallTools,
@@ -1097,6 +1180,8 @@ export class AgentSession {
     const route = this.registry.resolve(toolName);
     const pending: PendingToolCall = {
       toolCallId,
+      executionOccurrence:
+        existing?.executionOccurrence ?? this.toolCoordinator.captureToolCallOccurrence(toolCallId),
       agentName: route?.agentName ?? toolName,
       toolName: route?.toolName ?? toolName,
       input,
@@ -1235,22 +1320,26 @@ export class AgentSession {
         ...(this.contextWindow !== undefined ? { contextWindow: this.contextWindow } : {}),
         ...(this.lastInputTokens !== undefined ? { lastInputTokens: this.lastInputTokens } : {}),
       });
-      if (this.shouldAutoCompact()) {
-        this.debug(queue, "compaction", "auto requested before turn", turnStartedAt, {
-          messages: this.messages.length,
-          ...(this.lastInputTokens !== undefined ? { lastInputTokens: this.lastInputTokens } : {}),
+      try {
+        this.reconcileUncoveredToolExecutionContext();
+      } catch (error) {
+        queue.push({
+          type: "error",
+          stage: "plan",
+          message: `工具执行恢复状态持久化失败: ${errorMessage(error)}`,
         });
-        try {
-          await this.runCompaction(queue, "auto", activeTurn);
-        } catch (error) {
-          queue.push({ type: "error", stage: "plan", message: errorMessage(error) });
-          return;
-        }
+        return;
+      }
+      try {
+        await this.runAutoCompactionPasses(queue, activeTurn, turnStartedAt, userMessageContent);
+      } catch (error) {
+        queue.push({ type: "error", stage: "plan", message: errorMessage(error) });
+        return;
       }
       if (activeTurn.aborted || activeTurn.abortController.signal.aborted) {
         turnStart = this.messages.length;
         this.messages.push({ role: "user", content: userMessageContent });
-        this.persistCancelledTurn(queue, activeTurn, turnStart, [], turnStartedAt);
+        this.persistCancelledTurn(queue, activeTurn, turnStart, turnStartedAt);
         return;
       }
 
@@ -1295,7 +1384,7 @@ export class AgentSession {
             activeTurn.cancellationReason,
             activeTurn.abortController.signal.reason ?? error,
           );
-          this.persistCancelledTurn(queue, activeTurn, turnStart, [], turnStartedAt);
+          this.persistCancelledTurn(queue, activeTurn, turnStart, turnStartedAt);
           return;
         }
         this.debug(queue, "turn", "dynamic capability context unavailable", turnStartedAt, {
@@ -1313,20 +1402,20 @@ export class AgentSession {
       });
       this.lastCapabilityTurnContext = capabilityTurnContext;
       const capabilityTurnReminder = buildCapabilityTurnReminder(capabilityTurnContext);
+      let continuation = false;
       while (true) {
         turnStart = this.messages.length;
-        this.messages.push(storedUserMessage);
+        activeTurn.pausedForContextPressure = false;
+        if (!continuation) {
+          this.messages.push(storedUserMessage);
+        }
         const transcriptToolId = findCapabilityToolId(
           this.capabilityManifest,
           CAPABILITY_TOOL_ROLES.transcriptRead,
         );
-        const checkpointReminder = this.compactionCheckpoint
-          ? buildCompactionCheckpointReminder(
-              this.compactionCheckpoint,
-              this.sessionManagerInstanceId,
-              transcriptToolId,
-            )
-          : undefined;
+        const checkpointReminder = this.currentCheckpointReminder(transcriptToolId);
+        const reminderTokens =
+          checkpointReminder === undefined ? 0 : estimateTextTokens(checkpointReminder);
         // Persist checkpoints for recovery bookkeeping, but only the in-memory snapshot for this
         // ActiveTurn may become model-visible. Completed-turn Skill bodies stay out of history.
         const inferenceHistory = stripExplicitSkillCheckpoints(
@@ -1346,7 +1435,7 @@ export class AgentSession {
           contextRecoveryAttempts,
           ...(this.turnTimeoutMs !== undefined ? { timeoutMs: this.turnTimeoutMs } : {}),
         });
-        let abortedResponseMessages: ModelMessage[] = [];
+        let lastStepToolResultTokens = 0;
         const createStreamResult = () =>
           streamText({
             model: this.model,
@@ -1356,7 +1445,11 @@ export class AgentSession {
             prepareStep: ({ messages }) => ({
               messages: relocateToolImagesToUserMessages(messages),
             }),
-            stopWhen: [stepCountIs(this.maxSteps), stopOnUserRejected()],
+            stopWhen: [
+              stepCountIs(Math.max(1, this.maxSteps - activeTurn.completedStepCount)),
+              stopOnUserRejected(),
+              this.stopOnContextPressure(activeTurn),
+            ],
             toolApproval: async ({ toolCall }) => {
               this.trackPendingToolCall(
                 activeTurn,
@@ -1388,13 +1481,14 @@ export class AgentSession {
             onError: () => undefined,
             onStepEnd: (step) => {
               rememberCompletedStep(activeTurn, step);
-              abortedResponseMessages = completedStepMessages(activeTurn);
+              lastStepToolResultTokens = estimateMessagesTokens(
+                step.response.messages.filter((message) => message.role === "tool"),
+              );
             },
             onAbort: ({ steps }) => {
               for (const step of steps) {
                 rememberCompletedStep(activeTurn, step);
               }
-              abortedResponseMessages = completedStepMessages(activeTurn);
             },
           });
         let result: ReturnType<typeof createStreamResult>;
@@ -1407,7 +1501,7 @@ export class AgentSession {
               activeTurn.cancellationReason,
               error,
             );
-            this.persistCancelledTurn(queue, activeTurn, turnStart, [], turnStartedAt);
+            this.persistCancelledTurn(queue, activeTurn, turnStart, turnStartedAt);
             return;
           }
           if (!isContextWindowError(error)) {
@@ -1420,16 +1514,21 @@ export class AgentSession {
             ? await this.recoverFromContextError(queue, activeTurn)
             : false;
           if (this.isTurnAborted(activeTurn)) {
-            turnStart = this.messages.length;
-            this.messages.push(storedUserMessage);
-            this.persistCancelledTurn(queue, activeTurn, turnStart, [], turnStartedAt);
+            this.persistCancelledRecoveryTurn(queue, activeTurn, storedUserMessage, turnStartedAt);
             return;
           }
           if (compacted && canRetry) {
             contextRecoveryAttempts += 1;
             continue;
           }
-          this.persistContextFailure(queue, storedUserMessage, false, false, turnStartedAt);
+          this.persistContextFailure(
+            queue,
+            activeTurn,
+            storedUserMessage,
+            false,
+            false,
+            turnStartedAt,
+          );
           queue.push({ type: "error", stage: "execute", message: errorMessage(error) });
           return;
         }
@@ -1440,6 +1539,7 @@ export class AgentSession {
         let sawToolCall = false;
         let totalUsage: SessionTokenUsage | undefined;
         let contextInputTokens: number | undefined;
+        let lastStepOutputTokens: number | undefined;
         let outputTokensPerSecond: number | undefined;
         let stepCount = 0;
         let lastStepFinishReason: string | undefined;
@@ -1568,8 +1668,13 @@ export class AgentSession {
               }
               case "tool-error": {
                 const route = this.registry.resolve(part.toolName);
-                const output = toolOutputMessage(part.error);
-                const result = failedToolResult(toolErrorOutcomeKind(part.error), output, {
+                const outcomeKind = toolErrorOutcomeKind(part.error);
+                const friendly =
+                  outcomeKind === TOOL_OUTCOME_KINDS.invalidInput
+                    ? friendlyInvalidToolInputMessage(part.error)
+                    : undefined;
+                const output = friendly ?? toolOutputMessage(part.error);
+                const result = failedToolResult(outcomeKind, output, {
                   raw: part.error,
                 });
                 const record = createToolExecutionRecord({
@@ -1603,6 +1708,7 @@ export class AgentSession {
               case "finish-step": {
                 const stepUsage = toSessionUsage(part.usage);
                 contextInputTokens = maxTokenCount(contextInputTokens, stepUsage.inputTokens);
+                lastStepOutputTokens = stepUsage.outputTokens;
                 stepCount += 1;
                 lastStepFinishReason = part.finishReason;
                 const stepThroughput =
@@ -1683,9 +1789,12 @@ export class AgentSession {
                 ? await this.recoverFromContextError(queue, activeTurn)
                 : false;
             if (this.isTurnAborted(activeTurn)) {
-              turnStart = this.messages.length;
-              this.messages.push(storedUserMessage);
-              this.persistCancelledTurn(queue, activeTurn, turnStart, [], turnStartedAt);
+              this.persistCancelledRecoveryTurn(
+                queue,
+                activeTurn,
+                storedUserMessage,
+                turnStartedAt,
+              );
               return;
             }
             if (retrySafe && compacted && canRetry) {
@@ -1697,6 +1806,7 @@ export class AgentSession {
               : "；本次尝试已有内容或操作开始执行，为避免重复执行，未自动重试";
             this.persistContextFailure(
               queue,
+              activeTurn,
               storedUserMessage,
               text.length > 0,
               sawToolCall,
@@ -1705,6 +1815,7 @@ export class AgentSession {
             queue.push({ type: "error", stage: "execute", message: `${streamError}${suffix}` });
             return;
           }
+          this.persistFailedTurn(queue, activeTurn, storedUserMessage, turnStartedAt);
           queue.push({ type: "error", stage: "execute", message: streamError });
           return;
         }
@@ -1714,13 +1825,7 @@ export class AgentSession {
             activeTurn.cancellationReason,
             activeTurn.abortController.signal.reason,
           );
-          this.persistCancelledTurn(
-            queue,
-            activeTurn,
-            turnStart,
-            abortedResponseMessages,
-            turnStartedAt,
-          );
+          this.persistCancelledTurn(queue, activeTurn, turnStart, turnStartedAt);
           return;
         }
 
@@ -1743,13 +1848,7 @@ export class AgentSession {
               activeTurn.cancellationReason,
               error,
             );
-            this.persistCancelledTurn(
-              queue,
-              activeTurn,
-              turnStart,
-              abortedResponseMessages,
-              turnStartedAt,
-            );
+            this.persistCancelledTurn(queue, activeTurn, turnStart, turnStartedAt);
             return;
           }
           const contextOverflow = isContextWindowError(error);
@@ -1765,9 +1864,12 @@ export class AgentSession {
                 ? await this.recoverFromContextError(queue, activeTurn)
                 : false;
             if (this.isTurnAborted(activeTurn)) {
-              turnStart = this.messages.length;
-              this.messages.push(storedUserMessage);
-              this.persistCancelledTurn(queue, activeTurn, turnStart, [], turnStartedAt);
+              this.persistCancelledRecoveryTurn(
+                queue,
+                activeTurn,
+                storedUserMessage,
+                turnStartedAt,
+              );
               return;
             }
             if (retrySafe && compacted && canRetry) {
@@ -1779,6 +1881,7 @@ export class AgentSession {
               : "；本次尝试已有内容或操作开始执行，为避免重复执行，未自动重试";
             this.persistContextFailure(
               queue,
+              activeTurn,
               storedUserMessage,
               text.length > 0,
               sawToolCall,
@@ -1791,6 +1894,7 @@ export class AgentSession {
             });
             return;
           }
+          this.persistFailedTurn(queue, activeTurn, storedUserMessage, turnStartedAt);
           queue.push({ type: "error", stage: "execute", message: errorMessage(error) });
           return;
         } finally {
@@ -1805,13 +1909,7 @@ export class AgentSession {
             activeTurn.cancellationReason,
             activeTurn.abortController.signal.reason,
           );
-          this.persistCancelledTurn(
-            queue,
-            activeTurn,
-            turnStart,
-            abortedResponseMessages,
-            turnStartedAt,
-          );
+          this.persistCancelledTurn(queue, activeTurn, turnStart, turnStartedAt);
           return;
         }
 
@@ -1826,7 +1924,9 @@ export class AgentSession {
         this.debug(queue, "persist", "persisting messages", turnStartedAt, {
           appendedMessages: this.messages.length - turnStart,
         });
-        this.persistMessages(this.messages.slice(turnStart));
+        this.persistMessages(this.messages.slice(turnStart), "raw_transcript");
+        markTurnSegmentPersisted(activeTurn);
+        turnStart = this.messages.length;
         this.debug(queue, "persist", "messages persisted", turnStartedAt, {
           totalMessages: this.messages.length,
         });
@@ -1836,9 +1936,21 @@ export class AgentSession {
         const pressureInputTokens = contextInputTokens ?? totalUsage?.inputTokens;
         if (pressureInputTokens !== undefined) {
           this.lastInputTokens = pressureInputTokens;
+          this.lastStepOutputTokens = lastStepOutputTokens;
+          this.lastStepToolResultTokens = lastStepToolResultTokens;
+          this.measuredMessageCount = this.messages.length;
+          this.promptOverhead = Math.max(
+            0,
+            pressureInputTokens -
+              estimateMessagesTokens(this.messages) +
+              (lastStepOutputTokens ?? 0) +
+              lastStepToolResultTokens -
+              reminderTokens,
+          );
         }
+        activeTurn.completedStepCount += stepCount;
         const stoppedAtStepLimit =
-          stepCount >= this.maxSteps && lastStepFinishReason === "tool-calls";
+          activeTurn.completedStepCount >= this.maxSteps && lastStepFinishReason === "tool-calls";
         queue.push({
           type: "message-finish",
           text,
@@ -1848,7 +1960,39 @@ export class AgentSession {
           ...(outputTokensPerSecond !== undefined ? { outputTokensPerSecond } : {}),
           ...(stoppedAtStepLimit ? { stoppedAtStepLimit: true } : {}),
         });
-        return;
+        if (
+          !activeTurn.pausedForContextPressure ||
+          lastStepFinishReason !== "tool-calls" ||
+          stoppedAtStepLimit ||
+          userRejectionMessage !== undefined
+        ) {
+          return;
+        }
+        activeTurn.pausedForContextPressure = false;
+        this.debug(queue, "compaction", "turn paused for context pressure", turnStartedAt, {
+          continuations: activeTurn.contextPressureContinuations,
+          pressureTokens: this.contextPressureTokens(),
+        });
+        let progressed: boolean;
+        try {
+          progressed = await this.runAutoCompactionPasses(queue, activeTurn, turnStartedAt);
+        } catch (error) {
+          if (this.isTurnAborted(activeTurn)) {
+            this.persistPausedTurnCancellation(queue, activeTurn, turnStartedAt);
+            return;
+          }
+          queue.push({ type: "error", stage: "plan", message: errorMessage(error) });
+          return;
+        }
+        if (this.isTurnAborted(activeTurn)) {
+          this.persistPausedTurnCancellation(queue, activeTurn, turnStartedAt);
+          return;
+        }
+        activeTurn.contextPressureContinuations = progressed
+          ? activeTurn.contextPressureContinuations + 1
+          : MAX_CONTEXT_PRESSURE_CONTINUATIONS;
+        continuation = true;
+        queue.push({ type: "message-start", messageId: randomUUID() });
       }
     } catch (error) {
       if (this.isTurnAborted(activeTurn) || isTurnTimeoutAbortReason(error)) {
@@ -1858,7 +2002,7 @@ export class AgentSession {
           activeTurn.abortController.signal.reason ?? error,
         );
         if (turnStart !== undefined) {
-          this.persistCancelledTurn(queue, activeTurn, turnStart, [], turnStartedAt);
+          this.persistCancelledTurn(queue, activeTurn, turnStart, turnStartedAt);
         } else {
           this.emitCancellation(queue, activeTurn);
         }
@@ -1881,8 +2025,28 @@ export class AgentSession {
     }
   }
 
-  private persistMessages(messages: readonly ModelMessage[]): void {
-    this.onPersist?.(messages);
+  private persistMessages(
+    messages: readonly ModelMessage[],
+    representation: ToolExecutionContextRepresentation,
+  ): void {
+    const executionIds = [...this.uncoveredToolExecutions.keys()];
+    const options: AppendMessagesOptions | undefined =
+      executionIds.length === 0
+        ? undefined
+        : {
+            toolExecutionCoverage: {
+              executionIds,
+              representation,
+            },
+          };
+    this.onPersist?.(messages, options);
+    this.recordPersistedMessagesInMemory(messages);
+    for (const executionId of executionIds) {
+      this.uncoveredToolExecutions.delete(executionId);
+    }
+  }
+
+  private recordPersistedMessagesInMemory(messages: readonly ModelMessage[]): void {
     if (this.listPersistedTranscriptMessages !== undefined) {
       return;
     }
@@ -1902,13 +2066,39 @@ export class AgentSession {
     }
   }
 
+  private reconcileUncoveredToolExecutionContext(): void {
+    if (this.recoverPersistedToolExecutionContext !== undefined) {
+      const recoveredMessages = this.recoverPersistedToolExecutionContext();
+      this.messages.push(...recoveredMessages);
+      this.recordPersistedMessagesInMemory(recoveredMessages);
+      this.uncoveredToolExecutions.clear();
+      return;
+    }
+    const records = [...this.uncoveredToolExecutions.values()];
+    if (records.length === 0) {
+      return;
+    }
+    const rollbackTo = this.messages.length;
+    const recovery = createToolLedgerGapRecoveryMessage(records);
+    this.messages.push(recovery);
+    try {
+      this.persistMessages([recovery], "recovery_evidence");
+    } catch (error) {
+      this.messages.splice(rollbackTo);
+      throw error;
+    }
+  }
+
   private persistContextFailure(
     queue: AsyncEventQueue<SessionEvent>,
+    activeTurn: ActiveTurn,
     userMessage: UserModelMessage,
     producedText: boolean,
-    hadToolActivity: boolean,
+    sawToolCall: boolean,
     turnStartedAt: number,
   ): void {
+    this.persistPendingToolCancellationsOrReport(queue, activeTurn, "上下文溢出工具状态持久化失败");
+    const hadToolActivity = sawToolCall || activeTurn.toolExecutions.length > 0;
     const notes = ["本轮因上下文窗口溢出而中断，未自动重放。"];
     if (producedText) {
       notes.push("本轮已产生部分文本，持久历史仅保留此中断标记。");
@@ -1916,22 +2106,108 @@ export class AgentSession {
     if (hadToolActivity) {
       notes.push("本轮已有操作开始执行，部分结果可能已经生效且不会自动撤销，请先检查实际结果。");
     }
-    const start = this.messages.length;
-    this.messages.push(userMessage);
-    this.messages.push({ role: "assistant", content: notes.join("") });
-    this.debug(queue, "persist", "persisting context-overflow marker", turnStartedAt, {
-      hadToolActivity,
-      producedText,
+    const uncoveredRecords = [...this.uncoveredToolExecutions.values()];
+    this.appendInterruptedTurnMessages(queue, turnStartedAt, {
+      rollbackTo: this.messages.length,
+      messages: [
+        ...(activeTurn.userMessagePersisted ? [] : [userMessage]),
+        ...(uncoveredRecords.length === 0
+          ? []
+          : [createToolLedgerGapRecoveryMessage(uncoveredRecords)]),
+        { role: "assistant", content: notes.join("") },
+      ],
+      debugLabel: "persisting context-overflow marker",
+      debugDetails: { hadToolActivity, producedText },
+      failureLabel: "上下文溢出记录持久化失败",
+    });
+  }
+
+  private persistFailedTurn(
+    queue: AsyncEventQueue<SessionEvent>,
+    activeTurn: ActiveTurn,
+    userMessage: UserModelMessage,
+    turnStartedAt: number,
+  ): void {
+    if (this.closed) {
+      return;
+    }
+    const completedMessages = completedStepMessages(activeTurn);
+    const hadProgress =
+      completedMessages.length > 0 ||
+      activeTurn.toolExecutions.length > 0 ||
+      activeTurn.pendingToolCalls.size > 0;
+    if (!hadProgress) {
+      return;
+    }
+    const unpersistedMessages = repairActiveToolProtocol(
+      stripReasoningMessages(unpersistedStepMessages(activeTurn)),
+    ).messages;
+    if (
+      !this.persistPendingToolCancellationsOrReport(queue, activeTurn, "取消工具账本持久化失败")
+    ) {
+      return;
+    }
+    this.appendInterruptedTurnMessages(queue, turnStartedAt, {
+      rollbackTo: this.messages.length,
+      messages: [
+        ...(activeTurn.userMessagePersisted ? [] : [userMessage]),
+        ...unpersistedMessages,
+        createCancelledTurnRecoveryMessage({
+          context: this.failedTurnContextMessage(activeTurn),
+          completedMessages,
+          toolExecutions: activeTurn.toolExecutions,
+        }),
+        { role: "assistant", content: this.failedTurnDisplayMessage(activeTurn) },
+      ],
+      debugLabel: "persisting failed turn",
+      failureLabel: "失败状态持久化失败",
+    });
+  }
+
+  private failedTurnContextMessage(activeTurn: ActiveTurn): string {
+    const execSessionIds = this.cancellationActivity(activeTurn).execSessionIds;
+    const taskNumbers =
+      execSessionIds.length > 0 ? `本轮后台任务编号: ${execSessionIds.join(", ")}。` : "";
+    return `本轮因运行错误中断，未自动重试。${taskNumbers}已完成的步骤和工具记录仍然有效，不要自动重复 outcome=success 的操作。${INTERRUPTED_TURN_RECOVERY_POLICY}`;
+  }
+
+  private failedTurnDisplayMessage(activeTurn: ActiveTurn): string {
+    const activity = this.cancellationActivity(activeTurn);
+    const resultCheck = activity.hadPotentialSideEffects
+      ? "部分操作可能已经生效且不会自动撤销，请先检查实际结果，再决定是否继续。"
+      : activity.hadInFlightWork
+        ? "刚才的任务结果尚未确认，请先检查后再继续。"
+        : "你可以继续输入或重试。";
+    return `本轮因运行错误而中断，未自动重试。之前的对话和已完成进度会保留。${resultCheck}`;
+  }
+
+  private appendInterruptedTurnMessages(
+    queue: AsyncEventQueue<SessionEvent>,
+    turnStartedAt: number,
+    input: {
+      readonly rollbackTo: number;
+      readonly messages: readonly ModelMessage[];
+      readonly debugLabel: string;
+      readonly debugDetails?: Record<string, unknown>;
+      readonly failureLabel: string;
+    },
+  ): boolean {
+    this.messages.push(...input.messages);
+    this.debug(queue, "persist", input.debugLabel, turnStartedAt, {
+      appendedMessages: this.messages.length - input.rollbackTo,
+      ...input.debugDetails,
     });
     try {
-      this.persistMessages(this.messages.slice(start));
+      this.persistMessages(this.messages.slice(input.rollbackTo), "recovery_evidence");
+      return true;
     } catch (error) {
-      this.messages.splice(start);
+      this.messages.splice(input.rollbackTo);
       queue.push({
         type: "error",
         stage: "execute",
-        message: `上下文溢出记录持久化失败: ${errorMessage(error)}`,
+        message: `${input.failureLabel}: ${errorMessage(error)}`,
       });
+      return false;
     }
   }
 
@@ -1941,6 +2217,7 @@ export class AgentSession {
     this.onToolExecution?.(record);
     this.inMemoryToolExecutions.push(record);
     activeTurn.toolExecutions.push(record);
+    this.uncoveredToolExecutions.set(record.id, record);
   }
 
   private rememberCompactionResources(
@@ -2007,12 +2284,18 @@ export class AgentSession {
       ...(expiresAt !== undefined ? { expiresAt } : {}),
       ...(request.reason ? { reason: request.reason } : {}),
       ...(request.explanation !== undefined ? { explanation: request.explanation } : {}),
+      ...(request.sessionGrantLabel !== undefined
+        ? { sessionGrantLabel: request.sessionGrantLabel }
+        : {}),
     });
     return decision;
   }
 
-  approve(approvalId: string): boolean {
-    return this.gate.resolve(approvalId, { approved: true });
+  approve(approvalId: string, scope?: "once" | "session"): boolean {
+    return this.gate.resolve(approvalId, {
+      approved: true,
+      ...(scope !== undefined ? { scope } : {}),
+    });
   }
 
   reject(approvalId: string, reason?: string): boolean {
@@ -2095,15 +2378,156 @@ export class AgentSession {
     this.onProviderOptionsChange?.(providerOptions);
   }
 
-  private shouldAutoCompact(): boolean {
+  private async runAutoCompactionPasses(
+    queue: AsyncEventQueue<SessionEvent>,
+    activeTurn: ActiveTurn,
+    turnStartedAt: number,
+    pendingContent?: UserModelMessage["content"],
+  ): Promise<boolean> {
+    let progressedAny = false;
+    for (
+      let pass = 0;
+      pass < MAX_AUTO_COMPACTION_PASSES && this.shouldAutoCompact(pendingContent);
+      pass += 1
+    ) {
+      this.debug(queue, "compaction", "auto requested", turnStartedAt, {
+        pass,
+        messages: this.messages.length,
+        pressureTokens: this.contextPressureTokens(pendingContent),
+        ...(this.lastInputTokens !== undefined ? { lastInputTokens: this.lastInputTokens } : {}),
+      });
+      const progressed = await this.runCompaction(
+        queue,
+        "auto",
+        activeTurn,
+        false,
+        this.compactionTargetTokens(pendingContent),
+      );
+      if (!progressed) {
+        break;
+      }
+      progressedAny = true;
+    }
+    return progressedAny;
+  }
+
+  private stopOnContextPressure(activeTurn: ActiveTurn): StopCondition<ToolSet> {
+    return ({ steps }) => {
+      const settings = this.compaction;
+      const last = steps.at(-1);
+      if (
+        settings === undefined ||
+        !settings.enabled ||
+        this.contextWindow === undefined ||
+        activeTurn.contextPressureContinuations >= MAX_CONTEXT_PRESSURE_CONTINUATIONS ||
+        last === undefined ||
+        last.finishReason !== "tool-calls" ||
+        (steps.length < 2 && this.messages.length < 2) ||
+        last.toolResults.some(
+          (result) => readToolOutcome(result.output).kind === TOOL_OUTCOME_KINDS.userRejected,
+        )
+      ) {
+        return false;
+      }
+      const usage = toSessionUsage(last.usage);
+      const pressure =
+        usage.inputTokens === undefined
+          ? this.promptOverheadTokens() +
+            estimateMessagesTokens(this.messages) +
+            estimateMessagesTokens(steps.flatMap((step) => step.response.messages))
+          : usage.inputTokens +
+            (usage.outputTokens ?? 0) +
+            estimateMessagesTokens(
+              last.response.messages.filter((message) => message.role === "tool"),
+            );
+      if (pressure / this.contextWindow < settings.threshold) {
+        return false;
+      }
+      activeTurn.pausedForContextPressure = true;
+      return true;
+    };
+  }
+
+  private contextPressureTokens(pendingContent?: UserModelMessage["content"]): number {
+    const pending =
+      pendingContent === undefined
+        ? 0
+        : estimateMessagesTokens([{ role: "user", content: pendingContent }]);
+    if (this.lastInputTokens !== undefined && this.measuredMessageCount !== undefined) {
+      return (
+        this.lastInputTokens +
+        (this.lastStepOutputTokens ?? 0) +
+        (this.lastStepToolResultTokens ?? 0) +
+        estimateMessagesTokens(this.messages.slice(this.measuredMessageCount)) +
+        pending
+      );
+    }
+    return this.promptOverheadTokens() + estimateMessagesTokens(this.messages) + pending;
+  }
+
+  private promptOverheadTokens(): number {
+    const reminder = this.currentCheckpointReminder(
+      findCapabilityToolId(this.capabilityManifest, CAPABILITY_TOOL_ROLES.transcriptRead),
+    );
+    return (this.promptOverhead ?? 0) + (reminder === undefined ? 0 : estimateTextTokens(reminder));
+  }
+
+  private currentCheckpointReminder(transcriptToolId: string | undefined): string | undefined {
+    return this.compactionCheckpoint
+      ? buildCompactionCheckpointReminder(
+          this.compactionCheckpoint,
+          this.sessionManagerInstanceId,
+          transcriptToolId,
+        )
+      : undefined;
+  }
+
+  private persistPausedTurnCancellation(
+    queue: AsyncEventQueue<SessionEvent>,
+    activeTurn: ActiveTurn,
+    turnStartedAt: number,
+  ): void {
+    this.captureCancellationActivity(activeTurn);
+    if (!activeTurn.cancellationPersistenceAttempted && !this.closed) {
+      activeTurn.cancellationPersistenceAttempted = true;
+      activeTurn.cancellationPersisted = true;
+      const records = this.cancellationRecordMessages(
+        activeTurn,
+        completedStepMessages(activeTurn),
+      );
+      activeTurn.cancellationPersisted = this.appendInterruptedTurnMessages(queue, turnStartedAt, {
+        rollbackTo: this.messages.length,
+        messages: records,
+        debugLabel: "persisting paused turn cancellation",
+        failureLabel: "取消状态持久化失败",
+      });
+    }
+    this.emitCancellation(queue, activeTurn);
+  }
+
+  private compactionTargetTokens(pendingContent?: UserModelMessage["content"]): number | undefined {
+    const settings = this.compaction;
+    if (settings === undefined || this.contextWindow === undefined) {
+      return undefined;
+    }
+    const pending =
+      pendingContent === undefined
+        ? 0
+        : estimateMessagesTokens([{ role: "user", content: pendingContent }]);
+    return Math.max(
+      1,
+      Math.floor(this.contextWindow * settings.threshold) - this.promptOverheadTokens() - pending,
+    );
+  }
+
+  private shouldAutoCompact(pendingContent?: UserModelMessage["content"]): boolean {
     const settings = this.compaction;
     return (
       settings !== undefined &&
       settings.enabled &&
       (this.needsCompaction ||
         (this.contextWindow !== undefined &&
-          this.lastInputTokens !== undefined &&
-          this.lastInputTokens / this.contextWindow >= settings.threshold))
+          this.contextPressureTokens(pendingContent) / this.contextWindow >= settings.threshold))
     );
   }
 
@@ -2448,7 +2872,8 @@ export class AgentSession {
     reason: ContextCompactionReason,
   ): Promise<void> {
     try {
-      await this.runCompaction(queue, reason, activeTurn, true);
+      this.reconcileUncoveredToolExecutionContext();
+      await this.runCompaction(queue, reason, activeTurn, true, undefined);
     } catch (error) {
       queue.push({ type: "error", stage: "plan", message: errorMessage(error) });
     } finally {
@@ -2547,8 +2972,9 @@ export class AgentSession {
   private async runCompaction(
     queue: AsyncEventQueue<SessionEvent>,
     reason: ContextCompactionReason,
-    activeTurn?: ActiveTurn,
-    emitCancellationOnAbort = false,
+    activeTurn: ActiveTurn | undefined,
+    emitCancellationOnAbort: boolean,
+    targetTokens: number | undefined,
   ): Promise<boolean> {
     const startedAt = Date.now();
     const settings = this.compaction;
@@ -2622,6 +3048,7 @@ export class AgentSession {
           model: this.model,
           semanticEvidencePrompt: evidence.modelContext,
           maxRemovedTranscriptMessages,
+          ...(targetTokens !== undefined ? { targetTokens } : {}),
           ...(settings.timeoutMs !== undefined ? { timeoutMs: settings.timeoutMs } : {}),
           ...(settings.maxOutputTokens !== undefined
             ? { maxOutputTokens: settings.maxOutputTokens }
@@ -2668,6 +3095,7 @@ export class AgentSession {
         keepRecentTokens: settings.keepRecentTokens,
         model: this.model,
         maxRemovedTranscriptMessages,
+        ...(targetTokens !== undefined ? { targetTokens } : {}),
         ...(abortSignal ? { abortSignal } : {}),
       });
       this.debug(queue, "compaction", "truncate fallback finished", fallbackStartedAt);
@@ -2803,6 +3231,9 @@ export class AgentSession {
         this.compactionCheckpoint = checkpoint;
       }
       this.lastInputTokens = undefined;
+      this.lastStepOutputTokens = undefined;
+      this.lastStepToolResultTokens = undefined;
+      this.measuredMessageCount = undefined;
       this.needsCompaction = false;
     }
 
@@ -2841,7 +3272,13 @@ export class AgentSession {
       return false;
     }
     try {
-      return await this.runCompaction(queue, "auto", activeTurn);
+      return await this.runCompaction(
+        queue,
+        "auto",
+        activeTurn,
+        false,
+        this.compactionTargetTokens(),
+      );
     } catch (error) {
       queue.push({ type: "error", stage: "plan", message: errorMessage(error) });
       return false;
@@ -2893,7 +3330,7 @@ export class AgentSession {
   private currentCancellationActivity(activeTurn: ActiveTurn): TurnCancellationActivity {
     const execSessionIds = this.activeExecSessionIds(activeTurn);
     const startedToolCalls = [...activeTurn.pendingToolCalls.values()].filter((pending) =>
-      this.toolCoordinator.hasExecutionStarted(pending.toolCallId),
+      this.toolCoordinator.hasExecutionStarted(pending.executionOccurrence),
     );
     return {
       execSessionIds,
@@ -2978,8 +3415,7 @@ export class AgentSession {
       this.capabilityManifest,
       CAPABILITY_TOOL_ROLES.sessionList,
     );
-    const recoveryPolicy =
-      "这份恢复记录只描述上一轮的权威历史事实，不授权继续或重试旧任务。下一轮必须以最新真实用户消息的目标和约束为准；如果用户换题、放弃旧任务或禁止工具，不得为了恢复旧任务检查或调用工具。executionState=not_executed 表示工具确定未执行，无需检查；executionState=outcome_unknown 只允许在最新用户明确要求继续或核对上一任务时先检查，检查不等于重试。";
+    const recoveryPolicy = INTERRUPTED_TURN_RECOVERY_POLICY;
     switch (reason) {
       case SESSION_CANCELLATION_REASONS.user:
         return `用户主动停止了本轮。${taskNumbers}这些任务已收到停止请求；已完成的步骤和工具记录仍然有效，不要自动重复 outcome=success 的操作。${recoveryPolicy}`;
@@ -3017,24 +3453,37 @@ export class AgentSession {
     });
   }
 
+  private persistCancelledRecoveryTurn(
+    queue: AsyncEventQueue<SessionEvent>,
+    activeTurn: ActiveTurn,
+    userMessage: UserModelMessage,
+    turnStartedAt: number,
+  ): void {
+    const turnStart = this.messages.length;
+    if (!activeTurn.userMessagePersisted) {
+      this.messages.push(userMessage);
+    }
+    this.persistCancelledTurn(
+      queue,
+      activeTurn,
+      turnStart,
+      turnStartedAt,
+      INTERRUPTED_STEP_POLICIES.ledgerOnly,
+    );
+  }
+
   private persistCancelledTurn(
     queue: AsyncEventQueue<SessionEvent>,
     activeTurn: ActiveTurn,
     turnStart: number,
-    completedResponseMessages: readonly ModelMessage[],
     turnStartedAt: number,
+    stepPolicy: InterruptedStepPolicy = INTERRUPTED_STEP_POLICIES.keepRaw,
   ): void {
-    this.captureCancellationActivity(activeTurn);
-    try {
-      this.persistPendingToolCancellations(activeTurn);
-    } catch (error) {
+    if (
+      !this.persistPendingToolCancellationsOrReport(queue, activeTurn, "取消工具账本持久化失败")
+    ) {
       this.messages.splice(turnStart);
       activeTurn.cancellationPersistenceAttempted = true;
-      queue.push({
-        type: "error",
-        stage: "execute",
-        message: `取消工具账本持久化失败: ${errorMessage(error)}`,
-      });
       this.emitCancellation(queue, activeTurn);
       return;
     }
@@ -3047,53 +3496,67 @@ export class AgentSession {
     if (!activeTurn.cancellationPersistenceAttempted) {
       activeTurn.cancellationPersistenceAttempted = true;
       this.messages.splice(turnStart + 1);
-      const rememberedResponseMessages = completedStepMessages(activeTurn);
-      const completedMessages = repairActiveToolProtocol(
-        stripReasoningMessages(
-          rememberedResponseMessages.length > 0
-            ? rememberedResponseMessages
-            : completedResponseMessages,
-        ),
-      ).messages;
+      const keepRaw = stepPolicy === INTERRUPTED_STEP_POLICIES.keepRaw;
+      const appendedStepMessages = keepRaw
+        ? repairActiveToolProtocol(stripReasoningMessages(unpersistedStepMessages(activeTurn)))
+            .messages
+        : [];
+      const visibleStepMessages = keepRaw
+        ? completedStepMessages(activeTurn)
+        : persistedStepMessages(activeTurn);
       activeTurn.cancellationPersisted = true;
-      this.messages.push(...completedMessages);
-      this.messages.push(
-        createCancelledTurnRecoveryMessage({
-          context: this.cancellationContextMessage(activeTurn),
-          completedMessages,
-          toolExecutions: activeTurn.toolExecutions,
-        }),
-      );
-      this.messages.push(
-        createTurnCancellationMessage(
-          this.cancellationDisplayMessage(activeTurn),
-          activeTurn.cancellationReason ?? SESSION_CANCELLATION_REASONS.runtime,
-        ),
-      );
-      this.debug(queue, "persist", "persisting cancelled turn", turnStartedAt, {
-        appendedMessages: this.messages.length - turnStart,
+      const records = this.cancellationRecordMessages(activeTurn, visibleStepMessages);
+      activeTurn.cancellationPersisted = this.appendInterruptedTurnMessages(queue, turnStartedAt, {
+        rollbackTo: turnStart,
+        messages: [...appendedStepMessages, ...records],
+        debugLabel: "persisting cancelled turn",
+        failureLabel: "取消状态持久化失败",
       });
-      try {
-        this.persistMessages(this.messages.slice(turnStart));
-        activeTurn.cancellationPersisted = true;
-      } catch (error) {
-        activeTurn.cancellationPersisted = false;
-        this.messages.splice(turnStart);
-        queue.push({
-          type: "error",
-          stage: "execute",
-          message: `取消状态持久化失败: ${errorMessage(error)}`,
-        });
-      }
     }
     this.emitCancellation(queue, activeTurn);
+  }
+
+  private cancellationRecordMessages(
+    activeTurn: ActiveTurn,
+    completedMessages: readonly ModelMessage[],
+  ): readonly ModelMessage[] {
+    return [
+      createCancelledTurnRecoveryMessage({
+        context: this.cancellationContextMessage(activeTurn),
+        completedMessages,
+        toolExecutions: activeTurn.toolExecutions,
+      }),
+      createTurnCancellationMessage(
+        this.cancellationDisplayMessage(activeTurn),
+        activeTurn.cancellationReason ?? SESSION_CANCELLATION_REASONS.runtime,
+      ),
+    ];
+  }
+
+  private persistPendingToolCancellationsOrReport(
+    queue: AsyncEventQueue<SessionEvent>,
+    activeTurn: ActiveTurn,
+    failureLabel: string,
+  ): boolean {
+    this.captureCancellationActivity(activeTurn);
+    try {
+      this.persistPendingToolCancellations(activeTurn);
+      return true;
+    } catch (error) {
+      queue.push({
+        type: "error",
+        stage: "execute",
+        message: `${failureLabel}: ${errorMessage(error)}`,
+      });
+      return false;
+    }
   }
 
   private persistPendingToolCancellations(activeTurn: ActiveTurn): void {
     const cancellationReason =
       activeTurn.cancellationReason ?? SESSION_CANCELLATION_REASONS.runtime;
     for (const pending of activeTurn.pendingToolCalls.values()) {
-      const executionState = this.toolCoordinator.hasExecutionStarted(pending.toolCallId)
+      const executionState = this.toolCoordinator.hasExecutionStarted(pending.executionOccurrence)
         ? TOOL_CANCELLATION_EXECUTION_STATES.outcomeUnknown
         : TOOL_CANCELLATION_EXECUTION_STATES.notExecuted;
       const display =

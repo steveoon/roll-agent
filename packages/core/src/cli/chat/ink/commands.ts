@@ -36,6 +36,11 @@ export const SLASH_COMMANDS: readonly SlashCommand[] = [
   { kind: "command", name: "/effort", description: "设置推理努力程度 (low | medium | high)" },
   {
     kind: "command",
+    name: "/show-think",
+    description: "完整显示或折叠已完成的思考 (on | off)，不带参数时切换",
+  },
+  {
+    kind: "command",
     name: "/auto",
     description: "开关自动批准工具调用 (on | off)，Shift+Tab 快捷切换",
   },

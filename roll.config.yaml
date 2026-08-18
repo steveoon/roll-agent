@@ -1,6 +1,6 @@
 llm:
-  default-provider: anthropic
-  default-model: claude-sonnet-5
+  default-provider: qwen
+  default-model: qwen3.7-max
   providers:
     openai:
       api-key: ${ANTHROPIC_API_KEY}
@@ -39,6 +39,7 @@ browser:
       sessions-dir: ~/.roll-agent/browser/sessions/boss-c
       tracking-agent-id: zhipin-boss-c
 runtime:
+  model: qwen3.7-plus
   shell:
     enabled: true
     auto-approve-safe: true

@@ -842,6 +842,7 @@ export default defineCommand({
               model: modelName,
               banner,
               initialThinkingLevel: config.runtime.thinkingLevel,
+              initialThinkingDisplay: config.chat.thinkingDisplay,
               onStarted: () => {
                 usedInk = true;
               },

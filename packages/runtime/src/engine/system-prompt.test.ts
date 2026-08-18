@@ -289,3 +289,36 @@ test("manifest prompt only advertises finalized tool ids and keeps dynamic conte
   assert.equal(buildChatSystemPromptFromManifest(manifest), prompt);
   assert.doesNotMatch(prompt, /feature\/checkpoint|42:running|2026-07-17/u);
 });
+
+test("提供 fileToolIds 时注入文件工具纪律", () => {
+  const prompt = buildChatSystemPrompt({
+    fileToolIds: {
+      read: "roll__read_file",
+      edit: "roll__edit_file",
+      write: "roll__write_file",
+      listDir: "roll__list_dir",
+      grep: "roll__grep",
+      glob: "roll__glob",
+      verify: "roll__verify_file",
+    },
+  });
+  assert.match(prompt, /# 文件工具/u);
+  assert.match(prompt, /行号前缀不是文件内容/u);
+  assert.match(prompt, /先用 roll__read_file/u);
+  assert.match(prompt, /edits 数组/u);
+  assert.match(prompt, /无需再次读取确认/u);
+  assert.match(
+    prompt,
+    /在文件中搜索内容用 roll__grep（结果行号可直接用作 roll__read_file 的 offset），按文件名找文件用 roll__glob/u,
+  );
+  assert.match(prompt, /不要用 shell 的 grep\/find 代替/u);
+  assert.match(prompt, /修改代码文件后用 roll__verify_file 验证（默认 fast 级）/u);
+  assert.match(prompt, /验证被跳过时如实说明未验证/u);
+  assert.ok(!prompt.includes("没有独立的文件系统"));
+  assert.ok(prompt.includes("内建的文件工具"));
+});
+
+test("未提供 fileToolIds 时不出现文件工具章节", () => {
+  const prompt = buildChatSystemPrompt({});
+  assert.doesNotMatch(prompt, /# 文件工具/u);
+});

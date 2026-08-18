@@ -135,15 +135,54 @@ test("terminationError 在退出码为 0 时也标记 isError", () => {
   assert.equal(formatted.isError, true);
 });
 
-test("捕获截断时输出警告头含原始行数", () => {
+test("捕获截断时落盘完整捕获输出并给出分页恢复指引", () => {
+  let dumped: string | undefined;
   const formatted = formatBashResult({
     result: result({
       stdout: stream("kept", { truncated: true, totalBytes: 999999, totalLines: 4000 }),
     }),
     maxModelOutputChars: 1000,
+    fullOutputSink: (text) => {
+      dumped = text;
+      return "/tmp/roll-bash-fake.log";
+    },
   });
-  assert.ok(String(formatted.output).includes("Warning: stdout 输出已截断"));
-  assert.ok(String(formatted.output).includes("4000 行"));
+  const output = String(formatted.output);
+  assert.ok(output.includes("Warning: stdout 输出已截断"));
+  assert.ok(output.includes("4000 行"));
+  assert.ok(output.includes("完整输出已落盘: /tmp/roll-bash-fake.log"));
+  assert.match(output, /roll__read_file 以 offset\/limit 分页/u);
+  assert.equal(dumped, "[stdout]\nkept");
+});
+
+test("模型预算截断时同样落盘并指引恢复", () => {
+  const big = "z".repeat(5_000);
+  let dumped: string | undefined;
+  const formatted = formatBashResult({
+    result: result({ stdout: stream(big) }),
+    maxModelOutputChars: 1_000,
+    fullOutputSink: (text) => {
+      dumped = text;
+      return "/tmp/roll-bash-budget.log";
+    },
+  });
+  const output = String(formatted.output);
+  assert.match(output, /chars truncated（保留前/u);
+  assert.ok(output.includes("完整输出已落盘: /tmp/roll-bash-budget.log"));
+  assert.ok(dumped !== undefined && dumped.includes(big));
+});
+
+test("未截断时不触发落盘", () => {
+  let called = false;
+  formatBashResult({
+    result: result({ stdout: stream("hello") }),
+    maxModelOutputChars: 1_000,
+    fullOutputSink: () => {
+      called = true;
+      return undefined;
+    },
+  });
+  assert.equal(called, false);
 });
 
 test("spawnError 直接返回错误", () => {

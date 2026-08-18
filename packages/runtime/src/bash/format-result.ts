@@ -6,6 +6,13 @@ import {
 } from "../tool-bridge/normalize-result.ts";
 import type { CapturedStream } from "./output-buffer.ts";
 import { partitionModelBudget } from "./output-buffer.ts";
+import {
+  allocateOutputDumpFile,
+  describeOutputDumpRecovery,
+  rollOutputDumpDir,
+  writeOutputDump,
+} from "./output-dump.ts";
+import { evaluatePipelineExit, type ShellPipeCapability } from "./shell-pipe.ts";
 import { truncateMiddle } from "./truncate.ts";
 
 export const EXEC_TIMEOUT_EXIT_CODE = 124;
@@ -28,6 +35,8 @@ export interface BashExecResult {
   readonly terminationCause?: BashTerminationCause;
   readonly spawnError?: string;
   readonly terminationError?: string;
+  readonly pipeSegments?: readonly number[];
+  readonly pipeCapability?: ShellPipeCapability;
 }
 
 export interface NormalizeExitCodeParams {
@@ -56,6 +65,12 @@ function truncationWarning(label: string, stream: CapturedStream): string | unde
   return `Warning: ${label} 输出已截断（原始 ${String(stream.totalBytes)} 字节 / ${String(stream.totalLines)} 行）`;
 }
 
+function dumpFullOutput(text: string): string | undefined {
+  const path = allocateOutputDumpFile(rollOutputDumpDir(), "bash");
+  writeOutputDump(path, text);
+  return path;
+}
+
 function renderSection(label: string, text: string): string | undefined {
   const trimmed = text.length > 0 ? text : undefined;
   return trimmed !== undefined ? `[${label}]\n${trimmed}` : undefined;
@@ -64,6 +79,7 @@ function renderSection(label: string, text: string): string | undefined {
 export interface FormatBashResultInput {
   readonly result: BashExecResult;
   readonly maxModelOutputChars: number;
+  readonly fullOutputSink?: (text: string) => string | undefined;
 }
 
 export function formatBashResult(input: FormatBashResultInput): NormalizedToolResult {
@@ -92,7 +108,15 @@ export function formatBashResult(input: FormatBashResultInput): NormalizedToolRe
   if (result.terminationError) {
     lines.push(`终止失败: ${result.terminationError}`);
   }
-  lines.push(`Exit code: ${String(result.exitCode)}`);
+  const verdict = evaluatePipelineExit({
+    exitCode: result.exitCode,
+    ...(result.pipeSegments !== undefined ? { segments: result.pipeSegments } : {}),
+    capability: result.pipeCapability ?? "none",
+  });
+  lines.push(`Exit code: ${String(verdict.effectiveExitCode)}`);
+  if (verdict.note !== undefined) {
+    lines.push(verdict.note);
+  }
   lines.push(`Wall time: ${(result.wallTimeMs / 1000).toFixed(1)} s`);
 
   const warnings = [
@@ -103,6 +127,18 @@ export function formatBashResult(input: FormatBashResultInput): NormalizedToolRe
       ? truncationWarning("stderr", result.stderr)
       : undefined,
   ].filter((warning): warning is string => warning !== undefined);
+  const anyTruncated =
+    stdout.truncated || stderr.truncated || result.stdout.truncated || result.stderr.truncated;
+  if (anyTruncated) {
+    const fullSections = [
+      result.stdout.text.length > 0 ? `[stdout]\n${result.stdout.text}` : undefined,
+      result.stderr.text.length > 0 ? `[stderr]\n${result.stderr.text}` : undefined,
+    ].filter((section): section is string => section !== undefined);
+    const dumpedPath = (input.fullOutputSink ?? dumpFullOutput)(fullSections.join("\n\n"));
+    if (dumpedPath !== undefined) {
+      warnings.push(describeOutputDumpRecovery(dumpedPath));
+    }
+  }
   lines.push(...warnings);
 
   const sections = [
@@ -114,7 +150,7 @@ export function formatBashResult(input: FormatBashResultInput): NormalizedToolRe
   if (result.terminationCause === BASH_TERMINATION_CAUSES.abort) {
     return failedToolResult(TOOL_OUTCOME_KINDS.cancelled, output, { raw: result });
   }
-  if (result.exitCode !== 0 || result.terminationError !== undefined) {
+  if (!verdict.ok || result.terminationError !== undefined) {
     return failedToolResult(TOOL_OUTCOME_KINDS.toolFailed, output, { raw: result });
   }
   return successfulToolResult(output, { raw: result });

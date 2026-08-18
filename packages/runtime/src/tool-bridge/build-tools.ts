@@ -5,6 +5,7 @@ import type { JSONSchema7 } from "@ai-sdk/provider";
 import type { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { preflightToolCall } from "@roll-agent/core/tool-runtime/preflight";
 import type { AgentTool } from "@roll-agent/core/types/agent";
+import type { SessionApprovalMemory } from "../approval/approval-memory.ts";
 import type { ApprovalDecision } from "../approval/approval-gate.ts";
 import type { ToolAnnotations, ToolPolicy } from "../types/policy.ts";
 import { ToolRegistry, type ToolRouteMetadata } from "./naming.ts";
@@ -51,18 +52,22 @@ export interface ApprovalRequest {
   readonly input: Record<string, unknown>;
   readonly reason: string | undefined;
   readonly explanation?: string;
+  readonly sessionGrantLabel?: string;
 }
 
 export interface ToolBridgeContext {
   readonly policy?: ToolPolicy;
   readonly requestApproval: (request: ApprovalRequest) => Promise<ApprovalDecision>;
   readonly coordinator?: ToolExecutionCoordinator;
+  readonly approvalMemory?: SessionApprovalMemory;
 }
 
 interface ApprovalDisplayOptions {
   readonly explanation?: string;
   /** False when a conservative policy label would overstate the actual user-visible risk. */
   readonly includePolicyReason?: boolean;
+  readonly memoryKey?: string;
+  readonly sessionGrantLabel?: string;
 }
 
 export interface BuiltToolset {
@@ -395,12 +400,19 @@ export async function gateToolCall(
     );
   }
   if (decision.action === "confirm") {
+    const memoryKey = display?.memoryKey;
+    if (memoryKey !== undefined && ctx.approvalMemory?.isGranted(memoryKey)) {
+      return undefined;
+    }
     const approval = await ctx.requestApproval({
       agentName,
       toolName,
       input,
       reason: display?.includePolicyReason === false ? undefined : decision.reason,
       ...(display?.explanation !== undefined ? { explanation: display.explanation } : {}),
+      ...(memoryKey !== undefined && display?.sessionGrantLabel !== undefined
+        ? { sessionGrantLabel: display.sessionGrantLabel }
+        : {}),
     });
     if (!approval.approved) {
       return failedToolResult(
@@ -408,6 +420,9 @@ export async function gateToolCall(
         `已取消执行${approval.reason ? `: ${approval.reason}` : ""}`,
         approval.reason ? { reason: approval.reason } : {},
       );
+    }
+    if (memoryKey !== undefined && approval.scope === "session") {
+      ctx.approvalMemory?.grant(memoryKey);
     }
   }
   return undefined;
