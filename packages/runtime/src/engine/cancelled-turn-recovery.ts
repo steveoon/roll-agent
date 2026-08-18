@@ -64,19 +64,34 @@ function clipText(value: string, maxChars: number): string {
   return `${prefix}${marker}`;
 }
 
-function completedToolResultIds(messages: readonly ModelMessage[]): ReadonlySet<string> {
-  const ids = new Set<string>();
+function completedToolResultCounts(messages: readonly ModelMessage[]): Map<string, number> {
+  const counts = new Map<string, number>();
   for (const message of messages) {
     if (!Array.isArray(message.content)) {
       continue;
     }
     for (const part of message.content) {
       if (part.type === "tool-result") {
-        ids.add(part.toolCallId);
+        counts.set(part.toolCallId, (counts.get(part.toolCallId) ?? 0) + 1);
       }
     }
   }
-  return ids;
+  return counts;
+}
+
+function executionsWithoutVisibleResult(
+  toolExecutions: readonly ToolExecutionRecord[],
+  completedMessages: readonly ModelMessage[],
+): ToolExecutionRecord[] {
+  const remaining = completedToolResultCounts(completedMessages);
+  return toolExecutions.filter((record) => {
+    const count = remaining.get(record.toolCallId) ?? 0;
+    if (count === 0) {
+      return true;
+    }
+    remaining.set(record.toolCallId, count - 1);
+    return false;
+  });
 }
 
 function safeIdentity(value: string): string {
@@ -129,8 +144,7 @@ export function buildCancelledTurnRecovery(input: {
   readonly completedMessages: readonly ModelMessage[];
   readonly toolExecutions: readonly ToolExecutionRecord[];
 }): string {
-  const completedIds = completedToolResultIds(input.completedMessages);
-  const missing = input.toolExecutions.filter((record) => !completedIds.has(record.toolCallId));
+  const missing = executionsWithoutVisibleResult(input.toolExecutions, input.completedMessages);
   const selected = missing.slice(-MAX_RECOVERY_RECORDS);
   const omitted = missing.length - selected.length;
   let displayBudget = MAX_RECOVERY_RECORD_CHARS;

@@ -3052,6 +3052,35 @@ function assertTurnRecordedExactlyOnce(
   );
 }
 
+function assertPromptHasNoDuplicateTurnRecords(
+  prompt: LanguageModelV4CallOptions["prompt"] | undefined,
+  toolCallIds: readonly string[],
+): void {
+  const messages = prompt ?? [];
+  const userTurns = messages.filter(
+    (message) =>
+      message.role === "user" &&
+      message.content.some((part) => part.type === "text" && part.text === "tool loop"),
+  );
+  assert.equal(userTurns.length, 1, "next prompt: user");
+  const parts: Array<{ readonly type: string; readonly toolCallId?: string }> = [];
+  for (const message of messages) {
+    if (typeof message.content !== "string") {
+      parts.push(...message.content);
+    }
+  }
+  for (const toolCallId of toolCallIds) {
+    const calls = parts.filter(
+      (part) => part.type === "tool-call" && part.toolCallId === toolCallId,
+    );
+    const results = parts.filter(
+      (part) => part.type === "tool-result" && part.toolCallId === toolCallId,
+    );
+    assert.ok(calls.length <= 1, `next prompt: tool-call ${toolCallId} duplicated`);
+    assert.equal(calls.length, results.length, `next prompt: ${toolCallId} call/result pairing`);
+  }
+}
+
 function assertPromptRecordsTurnOnce(
   prompt: LanguageModelV4CallOptions["prompt"] | undefined,
 ): void {
@@ -3330,6 +3359,226 @@ test("AgentSession 续跑中完成新工具步骤后溢出并在恢复压缩期�
     "next prompt: c2 raw",
   );
 });
+
+test("AgentSession 续跑中复用同一 toolCallId 再次执行后溢出并在恢复压缩期间被取消时,第二次执行进入恢复证据", async () => {
+  const model = sequencedModel([
+    toolCallStep("echo-agent__echo", { q: "x" }, 170),
+    multiToolCallStep([{ toolCallId: "c1", toolName: "echo-agent__echo", input: { q: "again" } }]),
+    streamErrorStep("context_length_exceeded"),
+    textStep("ok"),
+  ]);
+  const persisted: ModelMessage[][] = [];
+  const ledger: ToolExecutionRecord[] = [];
+  const holder: { session?: AgentSession } = {};
+  let cancelled = false;
+  const session = new AgentSession({
+    id: "shared-id-continuation-overflow-cancel",
+    model,
+    sources: [source("echo-agent", "echo")],
+    onPersist: (messages) => {
+      persisted.push([...messages]);
+    },
+    onToolExecution: (record) => {
+      ledger.push(record);
+    },
+    listToolExecutions: (options) => {
+      if (model.doStreamCalls.length >= 3 && !cancelled) {
+        cancelled = true;
+        holder.session?.cancel();
+      }
+      return ledger
+        .map((record, sequence) => ({ ...record, sequence }))
+        .filter((record) => record.sequence > (options?.afterSequence ?? -1))
+        .slice(0, options?.limit ?? 100);
+    },
+    ...PRESSURE_CONTINUATION_SESSION,
+  });
+  holder.session = session;
+
+  const events = await collect(session.send("tool loop"));
+  assert.equal(cancelled, true);
+  assert.equal(events.at(-1)?.type, "turn-cancelled");
+  assertTurnRecordedExactlyOnce("durable", JSON.stringify(persisted.flat()), {
+    user: 1,
+    toolCallIds: 2,
+  });
+  assertTurnRecordedExactlyOnce("active", JSON.stringify(session.getMessages()), {
+    user: 1,
+    toolCallIds: 2,
+  });
+  assert.deepEqual(
+    session.getToolExecutions().map((record) => record.toolCallId),
+    ["c1", "c1"],
+  );
+  const recovery = (persisted.at(-1) ?? [])
+    .map((message) => readCancelledTurnRecoveryCheckpoint(message))
+    .find((checkpoint) => checkpoint !== undefined);
+  assert.ok(recovery, "recovery record persisted");
+  const payload = JSON.parse(
+    recovery.modelContext.slice(recovery.modelContext.lastIndexOf("\n") + 1),
+  ) as {
+    readonly evidence: ReadonlyArray<{ readonly agentName: string; readonly toolName: string }>;
+  };
+  assert.deepEqual(
+    payload.evidence.map((entry) => `${entry.agentName}/${entry.toolName}`),
+    ["echo-agent/echo"],
+  );
+
+  await collect(session.send("继续"));
+  assertPromptRecordsTurnOnce(model.doStreamCalls.at(-1)?.prompt);
+  assert.match(
+    JSON.stringify(model.doStreamCalls.at(-1)?.prompt),
+    /roll__interrupted_turn_recovery/u,
+  );
+});
+
+test("AgentSession 首段执行工具后溢出并在恢复压缩期间被取消时,工具步骤只进账本与恢复证据,不写回 raw", async () => {
+  const model = sequencedModel([
+    toolCallStep("echo-agent__echo", { q: "x" }),
+    streamErrorStep("context_length_exceeded"),
+    textStep("ok"),
+  ]);
+  const persisted: ModelMessage[][] = [];
+  const ledger: ToolExecutionRecord[] = [];
+  const holder: { session?: AgentSession } = {};
+  let cancelled = false;
+  const session = new AgentSession({
+    id: "c1-first-segment-overflow-cancel-ledger-only",
+    model,
+    sources: [source("echo-agent", "echo")],
+    maxSteps: 4,
+    contextWindow: 200,
+    onPersist: (messages) => {
+      persisted.push([...messages]);
+    },
+    onToolExecution: (record) => {
+      ledger.push(record);
+    },
+    listToolExecutions: (options) => {
+      if (!cancelled) {
+        cancelled = true;
+        holder.session?.cancel();
+      }
+      return ledger
+        .map((record, sequence) => ({ ...record, sequence }))
+        .filter((record) => record.sequence > (options?.afterSequence ?? -1))
+        .slice(0, options?.limit ?? 100);
+    },
+    compaction: PRESSURE_CONTINUATION_SESSION.compaction,
+  });
+  holder.session = session;
+
+  const events = await collect(session.send("tool loop"));
+  assert.equal(cancelled, true);
+  assert.equal(events.at(-1)?.type, "turn-cancelled");
+  const durable = JSON.stringify(persisted.flat());
+  assertTurnRecordedExactlyOnce("durable", durable, { user: 1, toolCallIds: 0 });
+  assertTurnRecordedExactlyOnce("active", JSON.stringify(session.getMessages()), {
+    user: 1,
+    toolCallIds: 0,
+  });
+  assert.deepEqual(
+    session.getToolExecutions().map((record) => record.toolCallId),
+    ["c1"],
+  );
+  const recovery = (persisted.at(-1) ?? [])
+    .map((message) => readCancelledTurnRecoveryCheckpoint(message))
+    .find((checkpoint) => checkpoint !== undefined);
+  assert.ok(recovery, "recovery record persisted");
+  assert.match(recovery.modelContext, /"agentName":"echo-agent"/u);
+
+  await collect(session.send("继续"));
+  const nextPrompt = JSON.stringify(model.doStreamCalls.at(-1)?.prompt);
+  assert.equal(countOccurrences(nextPrompt, '"toolCallId":"c1"'), 0, "next prompt: c1 raw");
+  assert.match(nextPrompt, /roll__interrupted_turn_recovery/u);
+});
+
+for (const interruption of ["error", "cancel"] as const) {
+  test(`AgentSession 续跑中完成新工具步骤后遇到 ${interruption} 时,新步骤恰好落盘一次且不重复首段`, async () => {
+    let calls = 0;
+    const model = new MockLanguageModelV4({
+      doStream: async (options) => {
+        calls += 1;
+        if (calls === 1) {
+          return streamChunks(toolCallStep("echo-agent__echo", { q: "x" }, 170));
+        }
+        if (calls === 2) {
+          return streamChunks(
+            multiToolCallStep([
+              { toolCallId: "c2", toolName: "echo-agent__echo", input: { q: "y" } },
+            ]),
+          );
+        }
+        if (calls === 3) {
+          if (interruption === "error") {
+            return streamChunks(streamErrorStep("ECONNRESET"));
+          }
+          return {
+            stream: new ReadableStream<LanguageModelV4StreamPart>({
+              start(controller) {
+                controller.enqueue({ type: "stream-start", warnings: [] });
+                const signal = options.abortSignal;
+                if (signal?.aborted) {
+                  controller.error(signal.reason);
+                  return;
+                }
+                signal?.addEventListener("abort", () => {
+                  controller.error(signal.reason);
+                });
+              },
+            }),
+          };
+        }
+        return streamChunks(textStep("ok", 40));
+      },
+    });
+    const persisted: ModelMessage[][] = [];
+    const session = new AgentSession({
+      id: `c2-continuation-${interruption}-exactly-once`,
+      model,
+      sources: [source("echo-agent", "echo")],
+      onPersist: (messages) => {
+        persisted.push([...messages]);
+      },
+      ...PRESSURE_CONTINUATION_SESSION,
+    });
+
+    const events: SessionEvent[] = [];
+    let toolResults = 0;
+    for await (const event of session.send("tool loop")) {
+      events.push(event);
+      if (event.type === "tool-result") {
+        toolResults += 1;
+        if (toolResults === 2 && interruption === "cancel") {
+          session.cancel();
+        }
+      }
+    }
+    assert.equal(events.at(-1)?.type, interruption === "error" ? "error" : "turn-cancelled");
+    assert.equal(calls, 3);
+    for (const [label, serialized] of [
+      ["durable", JSON.stringify(persisted.flat())],
+      ["active", JSON.stringify(session.getMessages())],
+    ] as const) {
+      assertTurnRecordedExactlyOnce(label, serialized, { user: 1, toolCallIds: 2 });
+      assert.equal(countOccurrences(serialized, '"toolCallId":"c2"'), 2, `${label}: c2`);
+    }
+    assert.deepEqual(
+      session.getToolExecutions().map((record) => record.toolCallId),
+      ["c1", "c2"],
+    );
+
+    const nextEvents = await collect(session.send("继续"));
+    assert.ok(nextEvents.some((event) => event.type === "context-compacted"));
+    const prompt = model.doStreamCalls.at(-1)?.prompt;
+    assertPromptHasNoDuplicateTurnRecords(prompt, ["c1", "c2"]);
+    assert.equal(
+      countOccurrences(JSON.stringify(prompt), '"toolCallId":"c2"'),
+      2,
+      "next prompt: c2",
+    );
+  });
+}
 
 test("AgentSession 首次模型调用失败且没有任何已完成步骤时不写入失败记录,保持干净重试", async () => {
   const model = sequencedModel([streamErrorStep("ECONNRESET"), textStep("ok")]);

@@ -85,6 +85,36 @@ test("cancelled turn recovery 只补充未进入完整 tool protocol 的脱敏�
   assert.match(content, /不可信的历史工具输出/u);
 });
 
+test("cancelled turn recovery 按出现次数消费同 toolCallId 的账本记录,多出的执行仍进入证据", () => {
+  const completed: ModelMessage[] = [
+    {
+      role: "tool",
+      content: [
+        {
+          type: "tool-result",
+          toolCallId: "shared",
+          toolName: "browser-agent__inspect",
+          output: { type: "text", value: "first execution already represented" },
+        },
+      ],
+    },
+  ];
+  const content = buildCancelledTurnRecovery({
+    context: "runtime context",
+    completedMessages: completed,
+    toolExecutions: [
+      record("shared", "first execution must not appear"),
+      record("shared", "second execution must appear"),
+    ],
+  });
+
+  const payload = recoveryPayload(content);
+  const evidence = payload.evidence as ReadonlyArray<{ readonly displayPreview: string }>;
+  assert.equal(evidence.length, 1);
+  assert.match(evidence[0]?.displayPreview ?? "", /second execution must appear/u);
+  assert.doesNotMatch(content, /first execution must not appear/u);
+});
+
 test("cancelled turn recovery 限制记录数量与总长度", () => {
   const content = buildCancelledTurnRecovery({
     context: "runtime context",
