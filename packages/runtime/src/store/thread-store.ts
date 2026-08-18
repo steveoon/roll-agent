@@ -1230,7 +1230,12 @@ export class ThreadStore {
       if (!this.hasThread(threadId)) {
         throw new Error(`Thread "${threadId}" 不存在`);
       }
-      const records = this.listAllUncoveredToolExecutionsInTransaction(threadId);
+      const records = this.uncoveredToolExecutionRecords(threadId, {
+        afterSequence: -1,
+        throughSequence: Number.MAX_SAFE_INTEGER,
+        toolCallId: undefined,
+        limit: Number.MAX_SAFE_INTEGER,
+      });
       if (records.length === 0) {
         this.db.exec("COMMIT");
         return undefined;
@@ -1484,18 +1489,7 @@ export class ThreadStore {
     threadId: string,
     options: ListToolExecutionsOptions = {},
   ): SequencedToolExecutionRecord[] {
-    const afterSequence = options.afterSequence ?? -1;
-    const throughSequence = options.throughSequence ?? Number.MAX_SAFE_INTEGER;
-    const limit = options.limit ?? DEFAULT_TOOL_EXECUTION_LIMIT;
-    if (!Number.isInteger(afterSequence) || afterSequence < -1) {
-      throw new Error("afterSequence 必须是大于等于 -1 的整数");
-    }
-    if (!Number.isInteger(limit) || limit < 1 || limit > MAX_TOOL_EXECUTION_LIMIT) {
-      throw new Error(`limit 必须是 1-${String(MAX_TOOL_EXECUTION_LIMIT)} 之间的整数`);
-    }
-    if (!Number.isInteger(throughSequence) || throughSequence < -1) {
-      throw new Error("throughSequence 必须是大于等于 -1 的整数");
-    }
+    const { afterSequence, throughSequence, limit } = this.resolveToolExecutionListRange(options);
     if (throughSequence <= afterSequence) {
       return [];
     }
@@ -1528,6 +1522,23 @@ export class ThreadStore {
     threadId: string,
     options: ListToolExecutionsOptions = {},
   ): SequencedToolExecutionRecord[] {
+    const { afterSequence, throughSequence, limit } = this.resolveToolExecutionListRange(options);
+    if (throughSequence <= afterSequence) {
+      return [];
+    }
+    return this.uncoveredToolExecutionRecords(threadId, {
+      afterSequence,
+      throughSequence,
+      toolCallId: options.toolCallId,
+      limit,
+    });
+  }
+
+  private resolveToolExecutionListRange(options: ListToolExecutionsOptions): {
+    readonly afterSequence: number;
+    readonly throughSequence: number;
+    readonly limit: number;
+  } {
     const afterSequence = options.afterSequence ?? -1;
     const throughSequence = options.throughSequence ?? Number.MAX_SAFE_INTEGER;
     const limit = options.limit ?? DEFAULT_TOOL_EXECUTION_LIMIT;
@@ -1540,9 +1551,18 @@ export class ThreadStore {
     if (!Number.isInteger(throughSequence) || throughSequence < -1) {
       throw new Error("throughSequence 必须是大于等于 -1 的整数");
     }
-    if (throughSequence <= afterSequence) {
-      return [];
-    }
+    return { afterSequence, throughSequence, limit };
+  }
+
+  private uncoveredToolExecutionRecords(
+    threadId: string,
+    query: {
+      readonly afterSequence: number;
+      readonly throughSequence: number;
+      readonly toolCallId: string | undefined;
+      readonly limit: number;
+    },
+  ): SequencedToolExecutionRecord[] {
     const rows = this.db
       .prepare(
         `SELECT tool_executions.sequence, tool_executions.record_json
@@ -1560,33 +1580,12 @@ export class ThreadStore {
       )
       .all(
         threadId,
-        afterSequence,
-        throughSequence,
-        options.toolCallId ?? null,
-        options.toolCallId ?? null,
-        limit,
+        query.afterSequence,
+        query.throughSequence,
+        query.toolCallId ?? null,
+        query.toolCallId ?? null,
+        query.limit,
       ) as unknown as ToolExecutionRow[];
-    return rows.map((row) => ({
-      ...parsePersistedToolExecutionRecord(JSON.parse(row.record_json)),
-      sequence: row.sequence,
-    }));
-  }
-
-  private listAllUncoveredToolExecutionsInTransaction(
-    threadId: string,
-  ): SequencedToolExecutionRecord[] {
-    const rows = this.db
-      .prepare(
-        `SELECT tool_executions.sequence, tool_executions.record_json
-           FROM tool_executions
-           LEFT JOIN tool_execution_context_coverage
-             ON tool_execution_context_coverage.thread_id = tool_executions.thread_id
-            AND tool_execution_context_coverage.execution_id = tool_executions.id
-          WHERE tool_executions.thread_id = ?
-            AND tool_execution_context_coverage.execution_id IS NULL
-          ORDER BY tool_executions.sequence ASC`,
-      )
-      .all(threadId) as unknown as ToolExecutionRow[];
     return rows.map((row) => ({
       ...parsePersistedToolExecutionRecord(JSON.parse(row.record_json)),
       sequence: row.sequence,
