@@ -530,6 +530,96 @@ test("RuntimeService cancelTurn releases the approval gate when a resolved liste
   }
 });
 
+function createMultiStreamFailureFixture(store: ThreadStore): {
+  readonly engine: RuntimeServiceEngine;
+} {
+  const session: RuntimeServiceSession = {
+    id: IDS.thread,
+    async *send(input) {
+      store.appendMessages(IDS.thread, [
+        { role: "user", content: typeof input === "string" ? input : input.text },
+        { role: "assistant", content: "partial" },
+      ]);
+      yield { type: "message-start", messageId: IDS.message };
+      yield { type: "text-delta", delta: "partial" };
+      yield { type: "message-finish", text: "partial" };
+      yield { type: "compaction-start", reason: "auto" };
+      yield { type: "message-start", messageId: IDS.message };
+      yield { type: "error", stage: "plan", message: "continuation failed" };
+    },
+    approve() {
+      return false;
+    },
+    reject() {
+      return false;
+    },
+    cancel() {
+      return false;
+    },
+    async close() {},
+    getCapabilityManifest() {
+      throw new Error("capabilities are not used by this fixture");
+    },
+    getCapabilityTurnContext() {
+      return undefined;
+    },
+  };
+  const engine: RuntimeServiceEngine = {
+    async createSession(input) {
+      store.createThread({
+        id: IDS.thread,
+        ...(input?.title !== undefined ? { title: input.title } : {}),
+        model: "fixture-model",
+      });
+      return session;
+    },
+    async resumeSession(threadId) {
+      assert.equal(threadId, IDS.thread);
+      return session;
+    },
+  };
+  return { engine };
+}
+
+test("RuntimeService 在同一 Turn 的后续 message stream 失败时以 turn.failed 收尾,而不是沿用首段的 completed", async () => {
+  const dir = tempDir();
+  const store = new ThreadStore(dir);
+  const fixture = createMultiStreamFailureFixture(store);
+  const service = new RuntimeService(fixture.engine, store, { runtimeVersion: "0.9.0-test" });
+  const events: RuntimeEventEnvelopeV14[] = [];
+  service.onEvent((event) => events.push(event));
+  try {
+    service.initialize({
+      protocolVersions: [RUNTIME_PROTOCOL_VERSION],
+      client: { name: "multi-stream-failure-test", version: "1.0.0" },
+    });
+    await service.createThread(
+      runtimeMethodSchemas["thread.create"].params.parse({
+        requestId: IDS.requestCreate,
+        title: "Multi stream failure",
+      }),
+    );
+    await service.startTurn(
+      runtimeMethodSchemas["turn.start"].params.parse({
+        requestId: IDS.requestFirstTurn,
+        threadId: IDS.thread,
+        turnId: IDS.firstTurn,
+        input: { text: "continue" },
+      }),
+    );
+    await nextTick();
+
+    const types = events.map((event) => event.event.type);
+    assert.equal(types.filter((type) => type === "message.completed").length, 1);
+    assert.equal(types.at(-1), "turn.failed");
+    assert.equal(types.includes("turn.completed"), false);
+  } finally {
+    await service.close();
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("RuntimeService isolates event listeners before starting and completing a Turn", async () => {
   const dir = tempDir();
   const store = new ThreadStore(dir);

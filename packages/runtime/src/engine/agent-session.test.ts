@@ -2744,6 +2744,194 @@ test("AgentSession 轮内暂停后即使压缩无进展也续跑完成本轮,且
   assert.equal(model.doStreamCalls.length, 3);
 });
 
+function bigResultSource(agentName: string, toolName: string, chars: number): AgentToolSource {
+  const client = {
+    callTool: async () => ({ content: [{ type: "text", text: "r".repeat(chars) }] }),
+  } as unknown as Client;
+  return {
+    agentName,
+    client,
+    tools: [
+      {
+        tool: {
+          name: toolName,
+          inputSchema: {
+            type: "object" as const,
+            properties: { q: { type: "string" } },
+            required: ["q"],
+          },
+        },
+        annotations: undefined,
+      },
+    ],
+  };
+}
+
+test("AgentSession 仅靠工具结果把压力推过线时,暂停后仍会尝试压缩再续跑", async () => {
+  const model = sequencedModel([
+    toolCallStep("big-agent__read", { q: "x" }, 130),
+    textStep("continued", 40),
+  ]);
+  const session = new AgentSession({
+    id: "c1-tool-result-pressure",
+    model,
+    sources: [bigResultSource("big-agent", "read", 5000)],
+    maxSteps: 8,
+    contextWindow: 200,
+    initialMessages: [
+      { role: "user", content: "old-1" },
+      { role: "assistant", content: "answer-1" },
+      { role: "user", content: "old-2" },
+      { role: "assistant", content: "answer-2" },
+    ],
+    compaction: {
+      enabled: true,
+      strategy: "truncate",
+      threshold: 0.75,
+      keepRecentTurns: 1,
+      keepRecentTokens: 1,
+    },
+  });
+
+  const events = await collect(session.send("read it"));
+  const compacted = events.filter((event) => event.type === "context-compacted");
+  assert.ok(compacted.length >= 1, "pause must at least attempt compaction");
+  const finishes = events.filter((event) => event.type === "message-finish");
+  assert.equal(finishes.length, 2);
+  assert.equal(events.at(-1)?.type, "message-finish");
+  assert.equal(model.doStreamCalls.length, 2);
+});
+
+test("AgentSession 轮内暂停后压缩报错:已持久化的前半段不回滚,并以 error 事件收尾", async () => {
+  const steps = [toolCallStep("echo-agent__echo", { q: "x" }, 170), textStep("never", 40)];
+  let index = 0;
+  const model = new MockLanguageModelV4({
+    doStream: async () => {
+      const chunks = steps[index] ?? steps[steps.length - 1] ?? [];
+      index += 1;
+      return streamChunks(chunks);
+    },
+    doGenerate: async () => {
+      throw new Error("draft provider exploded");
+    },
+  });
+  const persisted: ModelMessage[][] = [];
+  const session = new AgentSession({
+    id: "c1-mid-turn-compaction-error",
+    model,
+    sources: [source("echo-agent", "echo")],
+    maxSteps: 8,
+    contextWindow: 200,
+    initialMessages: [
+      { role: "user", content: "old-1" },
+      { role: "assistant", content: "answer-1" },
+      { role: "user", content: "old-2" },
+      { role: "assistant", content: "answer-2" },
+    ],
+    compaction: {
+      enabled: true,
+      strategy: "summarize",
+      threshold: 0.75,
+      keepRecentTurns: 1,
+      keepRecentTokens: 1,
+    },
+    onPersist: (messages) => {
+      persisted.push([...messages]);
+    },
+  });
+
+  const events = await collect(session.send("tool loop"));
+  assert.equal(events.filter((event) => event.type === "message-finish").length, 1);
+  assert.equal(events.at(-1)?.type, "error");
+  assert.equal(persisted.length, 1);
+  const firstSegment = persisted[0] ?? [];
+  assert.equal(firstSegment[0]?.role, "user");
+  const inMemory = session.getMessages();
+  assert.equal(inMemory.length, 4 + firstSegment.length);
+  assert.equal(inMemory.at(-1)?.role, "tool");
+  assert.equal(model.doStreamCalls.length, 1);
+});
+
+test("AgentSession 轮内压缩期间被取消时发出 turn-cancelled 而不是静默结束", async () => {
+  const steps = [toolCallStep("echo-agent__echo", { q: "x" }, 170), textStep("never", 40)];
+  let index = 0;
+  const holder: { session?: AgentSession } = {};
+  const model = new MockLanguageModelV4({
+    doStream: async () => {
+      const chunks = steps[index] ?? steps[steps.length - 1] ?? [];
+      index += 1;
+      return streamChunks(chunks);
+    },
+    doGenerate: async () => {
+      holder.session?.cancel();
+      throw new Error("aborted while drafting");
+    },
+  });
+  const session = new AgentSession({
+    id: "c1-mid-turn-compaction-cancel",
+    model,
+    sources: [source("echo-agent", "echo")],
+    maxSteps: 8,
+    contextWindow: 200,
+    initialMessages: [
+      { role: "user", content: "old-1" },
+      { role: "assistant", content: "answer-1" },
+      { role: "user", content: "old-2" },
+      { role: "assistant", content: "answer-2" },
+    ],
+    compaction: {
+      enabled: true,
+      strategy: "summarize",
+      threshold: 0.75,
+      keepRecentTurns: 1,
+      keepRecentTokens: 1,
+    },
+  });
+  holder.session = session;
+
+  const events = await collect(session.send("tool loop"));
+  assert.ok(events.some((event) => event.type === "turn-cancelled"));
+  assert.equal(events.filter((event) => event.type === "message-finish").length, 1);
+  assert.equal(model.doStreamCalls.length, 1);
+});
+
+test("AgentSession 续跑共享 runtime.max-steps 预算,不会绕过单轮步骤上限", async () => {
+  const model = sequencedModel([
+    toolCallStep("echo-agent__echo", { q: "x" }, 170),
+    toolCallStep("echo-agent__echo", { q: "y" }, 60),
+    textStep("never", 60),
+  ]);
+  const session = new AgentSession({
+    id: "c1-continuation-step-budget",
+    model,
+    sources: [source("echo-agent", "echo")],
+    maxSteps: 2,
+    contextWindow: 200,
+    initialMessages: [
+      { role: "user", content: "old-1" },
+      { role: "assistant", content: "answer-1" },
+      { role: "user", content: "old-2" },
+      { role: "assistant", content: "answer-2" },
+    ],
+    compaction: {
+      enabled: true,
+      strategy: "truncate",
+      threshold: 0.75,
+      keepRecentTurns: 1,
+      keepRecentTokens: 1,
+    },
+  });
+
+  const events = await collect(session.send("tool loop"));
+  const finishes = events.filter(
+    (event): event is Extract<SessionEvent, { type: "message-finish" }> =>
+      event.type === "message-finish",
+  );
+  assert.equal(finishes.length, 2);
+  assert.equal(finishes.at(-1)?.stoppedAtStepLimit, true);
+  assert.equal(model.doStreamCalls.length, 2);
+});
+
 test("AgentSession 累计输入超阈值但上下文输入未超阈值时不自动压缩", async () => {
   const model = sequencedModel([
     toolCallStep("echo-agent__echo", { q: "x" }, 50),

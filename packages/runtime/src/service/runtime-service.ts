@@ -1458,6 +1458,7 @@ export class RuntimeService {
         const streamId = streamIdSchema.parse(randomUUID());
         projection.streamId = streamId;
         projection.text = "";
+        projection.terminalEvent = undefined;
         this.emit(state.threadId, state.turnId, {
           type: "message.started",
           streamId,
