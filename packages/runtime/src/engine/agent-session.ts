@@ -1475,9 +1475,7 @@ export class AgentSession {
             ? await this.recoverFromContextError(queue, activeTurn)
             : false;
           if (this.isTurnAborted(activeTurn)) {
-            turnStart = this.messages.length;
-            this.messages.push(storedUserMessage);
-            this.persistCancelledTurn(queue, activeTurn, turnStart, turnStartedAt);
+            this.persistCancelledRecoveryTurn(queue, activeTurn, storedUserMessage, turnStartedAt);
             return;
           }
           if (compacted && canRetry) {
@@ -1747,9 +1745,12 @@ export class AgentSession {
                 ? await this.recoverFromContextError(queue, activeTurn)
                 : false;
             if (this.isTurnAborted(activeTurn)) {
-              turnStart = this.messages.length;
-              this.messages.push(storedUserMessage);
-              this.persistCancelledTurn(queue, activeTurn, turnStart, turnStartedAt);
+              this.persistCancelledRecoveryTurn(
+                queue,
+                activeTurn,
+                storedUserMessage,
+                turnStartedAt,
+              );
               return;
             }
             if (retrySafe && compacted && canRetry) {
@@ -1819,9 +1820,12 @@ export class AgentSession {
                 ? await this.recoverFromContextError(queue, activeTurn)
                 : false;
             if (this.isTurnAborted(activeTurn)) {
-              turnStart = this.messages.length;
-              this.messages.push(storedUserMessage);
-              this.persistCancelledTurn(queue, activeTurn, turnStart, turnStartedAt);
+              this.persistCancelledRecoveryTurn(
+                queue,
+                activeTurn,
+                storedUserMessage,
+                turnStartedAt,
+              );
               return;
             }
             if (retrySafe && compacted && canRetry) {
@@ -3359,6 +3363,19 @@ export class AgentSession {
       message: this.cancellationDisplayMessage(activeTurn),
       ...(execSessionIds.length > 0 ? { execSessionIds } : {}),
     });
+  }
+
+  private persistCancelledRecoveryTurn(
+    queue: AsyncEventQueue<SessionEvent>,
+    activeTurn: ActiveTurn,
+    userMessage: UserModelMessage,
+    turnStartedAt: number,
+  ): void {
+    const turnStart = this.messages.length;
+    if (!activeTurn.userMessagePersisted) {
+      this.messages.push(userMessage);
+    }
+    this.persistCancelledTurn(queue, activeTurn, turnStart, turnStartedAt);
   }
 
   private persistCancelledTurn(

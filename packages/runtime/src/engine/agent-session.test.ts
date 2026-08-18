@@ -24,6 +24,7 @@ import { SKILL_TOOL_ID, type SkillLibrary } from "@roll-agent/core/skills/librar
 import { AgentSession } from "./agent-session.ts";
 import type { AgentToolSource } from "../tool-bridge/build-tools.ts";
 import type { ToolResourceHint } from "../tool-bridge/tool-execution-coordinator.ts";
+import type { ToolExecutionRecord } from "../tool-bridge/tool-execution-record.ts";
 import { DefaultToolPolicy } from "../policy/default-policy.ts";
 import { ConfigurableToolPolicy } from "../policy/configurable-policy.ts";
 import type { PolicyDecision, ToolPolicy } from "../types/policy.ts";
@@ -3199,6 +3200,53 @@ test("AgentSession 压力续跑中上下文溢出时不会重复已落盘的 use
 
   const events = await collect(session.send("tool loop"));
   assert.equal(events.at(-1)?.type, "error");
+  assertTurnRecordedExactlyOnce("durable", JSON.stringify(persisted.flat()), {
+    user: 1,
+    toolCallIds: 2,
+  });
+  assertTurnRecordedExactlyOnce("active", JSON.stringify(session.getMessages()), {
+    user: 1,
+    toolCallIds: 2,
+  });
+  assert.equal(session.getToolExecutions().length, 1);
+});
+
+test("AgentSession 压力续跑中溢出且在恢复压缩期间被取消时不会重复已落盘的 user", async () => {
+  const model = sequencedModel([
+    toolCallStep("echo-agent__echo", { q: "x" }, 170),
+    streamErrorStep("context_length_exceeded"),
+  ]);
+  const persisted: ModelMessage[][] = [];
+  const ledger: ToolExecutionRecord[] = [];
+  const holder: { session?: AgentSession } = {};
+  let cancelled = false;
+  const session = new AgentSession({
+    id: "c1-continuation-overflow-cancel-exactly-once",
+    model,
+    sources: [source("echo-agent", "echo")],
+    onPersist: (messages) => {
+      persisted.push([...messages]);
+    },
+    onToolExecution: (record) => {
+      ledger.push(record);
+    },
+    listToolExecutions: (options) => {
+      if (model.doStreamCalls.length === 2 && !cancelled) {
+        cancelled = true;
+        holder.session?.cancel();
+      }
+      return ledger
+        .map((record, sequence) => ({ ...record, sequence }))
+        .filter((record) => record.sequence > (options?.afterSequence ?? -1))
+        .slice(0, options?.limit ?? 100);
+    },
+    ...PRESSURE_CONTINUATION_SESSION,
+  });
+  holder.session = session;
+
+  const events = await collect(session.send("tool loop"));
+  assert.equal(cancelled, true);
+  assert.equal(events.at(-1)?.type, "turn-cancelled");
   assertTurnRecordedExactlyOnce("durable", JSON.stringify(persisted.flat()), {
     user: 1,
     toolCallIds: 2,
