@@ -3580,6 +3580,60 @@ for (const interruption of ["error", "cancel"] as const) {
   });
 }
 
+test("AgentSession 模型流在宣告工具调用后、调用结束前中断时,未执行的调用以 not_executed 进账本与失败恢复记录", async () => {
+  let toolCalls = 0;
+  const model = sequencedModel([
+    [
+      { type: "stream-start", warnings: [] },
+      {
+        type: "tool-call",
+        toolCallId: "c1",
+        toolName: "echo-agent__echo",
+        input: JSON.stringify({ q: "x" }),
+      },
+      { type: "error", error: "ECONNRESET" },
+    ],
+    textStep("ok"),
+  ]);
+  const persisted: ModelMessage[][] = [];
+  const session = new AgentSession({
+    id: "c1-announced-tool-stream-error",
+    model,
+    sources: [
+      source("echo-agent", "echo", () => {
+        toolCalls += 1;
+      }),
+    ],
+    maxSteps: 4,
+    onPersist: (messages) => {
+      persisted.push([...messages]);
+    },
+  });
+
+  const events = await collect(session.send("tool loop"));
+  assert.equal(events.at(-1)?.type, "error");
+  assert.equal(toolCalls, 0);
+  const executions = session.getToolExecutions();
+  assert.equal(executions.length, 1);
+  assert.equal(executions[0]?.toolCallId, "c1");
+  assert.equal(executions[0]?.outcome.kind, "cancelled");
+  assert.match(JSON.stringify(executions[0]?.outcome), /not_executed/u);
+  const tail = persisted.at(-1) ?? [];
+  const recovery = tail
+    .map((message) => readCancelledTurnRecoveryCheckpoint(message))
+    .find((checkpoint) => checkpoint !== undefined);
+  assert.ok(recovery, "recovery record persisted");
+  assert.match(recovery.modelContext, /"agentName":"echo-agent"/u);
+  assert.match(recovery.modelContext, /"executionState":"not_executed"/u);
+  assert.match(JSON.stringify(tail.at(-1)), /继续输入或重试/u);
+  assert.equal(countOccurrences(JSON.stringify(session.getMessages()), '"toolCallId":"c1"'), 0);
+
+  await collect(session.send("继续"));
+  const nextPrompt = JSON.stringify(model.doStreamCalls.at(-1)?.prompt);
+  assert.match(nextPrompt, /roll__interrupted_turn_recovery/u);
+  assert.match(nextPrompt, /not_executed/u);
+});
+
 test("AgentSession 首次模型调用失败且没有任何已完成步骤时不写入失败记录,保持干净重试", async () => {
   const model = sequencedModel([streamErrorStep("ECONNRESET"), textStep("ok")]);
   const persisted: ModelMessage[][] = [];
