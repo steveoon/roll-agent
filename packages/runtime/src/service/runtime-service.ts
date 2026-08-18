@@ -1458,7 +1458,6 @@ export class RuntimeService {
         const streamId = streamIdSchema.parse(randomUUID());
         projection.streamId = streamId;
         projection.text = "";
-        projection.terminalEvent = undefined;
         this.emit(state.threadId, state.turnId, {
           type: "message.started",
           streamId,
@@ -1489,7 +1488,6 @@ export class RuntimeService {
           streamId,
           text: redactSecretText(event.text || projection.text),
         });
-        projection.terminalEvent ??= { type: "turn.completed" };
         return;
       }
       case "reasoning-delta": {

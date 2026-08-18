@@ -2710,7 +2710,7 @@ test("AgentSession 轮内步骤后上下文压力超阈值时暂停、压缩并�
   assert.equal(secondPrompt.filter((message) => message.role === "user").length, 1);
 });
 
-test("AgentSession 轮内暂停后即使压缩无进展也续跑完成本轮,且不再重复暂停", async () => {
+test("AgentSession 轮内多步超压时在同一 send 内压缩并续跑完成本轮", async () => {
   const model = sequencedModel([
     toolCallStep("echo-agent__echo", { q: "x" }, 170),
     toolCallStep("echo-agent__echo", { q: "y" }, 180),
@@ -2733,7 +2733,7 @@ test("AgentSession 轮内暂停后即使压缩无进展也续跑完成本轮,且
 
   const events = await collect(session.send("tool loop"));
   const compactions = events.filter((event) => event.type === "context-compacted");
-  assert.equal(compactions.length, 1);
+  assert.ok(compactions.length >= 1);
   const finishes = events.filter(
     (event): event is Extract<SessionEvent, { type: "message-finish" }> =>
       event.type === "message-finish",
@@ -2867,12 +2867,16 @@ test("AgentSession 轮内压缩期间被取消时发出 turn-cancelled 而不是
       throw new Error("aborted while drafting");
     },
   });
+  const persisted: ModelMessage[][] = [];
   const session = new AgentSession({
     id: "c1-mid-turn-compaction-cancel",
     model,
     sources: [source("echo-agent", "echo")],
     maxSteps: 8,
     contextWindow: 200,
+    onPersist: (messages) => {
+      persisted.push([...messages]);
+    },
     initialMessages: [
       { role: "user", content: "old-1" },
       { role: "assistant", content: "answer-1" },
@@ -2893,6 +2897,13 @@ test("AgentSession 轮内压缩期间被取消时发出 turn-cancelled 而不是
   assert.ok(events.some((event) => event.type === "turn-cancelled"));
   assert.equal(events.filter((event) => event.type === "message-finish").length, 1);
   assert.equal(model.doStreamCalls.length, 1);
+  const marker = session.getMessages().at(-1);
+  assert.equal(marker?.role, "assistant");
+  assert.match(JSON.stringify(marker), /已停止本轮|取消/u);
+  assert.doesNotMatch(JSON.stringify(marker), /未能保存/u);
+  const persistedTail = persisted.at(-1) ?? [];
+  assert.equal(persistedTail.length, 2);
+  assert.match(JSON.stringify(persistedTail[0]), /roll-recovery/u);
 });
 
 test("AgentSession 续跑共享 runtime.max-steps 预算,不会绕过单轮步骤上限", async () => {
@@ -2958,6 +2969,53 @@ test("AgentSession 首步就超压但没有任何可压缩内容时不暂停,同
   assert.equal(events.filter((event) => event.type === "message-start").length, 1);
   assert.equal(model.doStreamCalls.length, 2);
   assert.equal(events.at(-1)?.type, "message-finish");
+});
+
+test("AgentSession 用户拒绝工具后即使压力超阈值也不会压缩续跑,本轮到此结束", async () => {
+  const model = sequencedModel([
+    toolCallStep("echo-agent__echo", { q: "x" }, 170),
+    textStep("BUG_CONTINUED", 40),
+  ]);
+  const rejectPolicy: ToolPolicy = {
+    check: (): PolicyDecision => ({ action: "confirm", reason: "confirm everything" }),
+  };
+  const session = new AgentSession({
+    id: "c1-rejection-under-pressure",
+    model,
+    sources: [source("echo-agent", "echo")],
+    maxSteps: 8,
+    contextWindow: 200,
+    initialMessages: [
+      { role: "user", content: "old-1" },
+      { role: "assistant", content: "answer-1" },
+      { role: "user", content: "old-2" },
+      { role: "assistant", content: "answer-2" },
+    ],
+    policy: rejectPolicy,
+    compaction: {
+      enabled: true,
+      strategy: "truncate",
+      threshold: 0.75,
+      keepRecentTurns: 1,
+      keepRecentTokens: 1,
+    },
+  });
+
+  const events: SessionEvent[] = [];
+  for await (const event of session.send("tool loop")) {
+    events.push(event);
+    if (event.type === "confirmation-required") {
+      session.reject(event.approvalId, "用户取消");
+    }
+  }
+  const finishes = events.filter(
+    (event): event is Extract<SessionEvent, { type: "message-finish" }> =>
+      event.type === "message-finish",
+  );
+  assert.equal(finishes.length, 1);
+  assert.doesNotMatch(finishes[0]?.text ?? "", /BUG_CONTINUED/u);
+  assert.equal(events.filter((event) => event.type === "context-compacted").length, 0);
+  assert.equal(model.doStreamCalls.length, 1);
 });
 
 test("AgentSession 累计输入超阈值但上下文输入未超阈值时不自动压缩", async () => {

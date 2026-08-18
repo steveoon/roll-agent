@@ -135,6 +135,10 @@ function estimateMessageTokens(message: ModelMessage): number {
   return Math.ceil(JSON.stringify(message).length / TOKEN_ESTIMATE_DIVISOR);
 }
 
+export function estimateTextTokens(text: string): number {
+  return Math.ceil(text.length / TOKEN_ESTIMATE_DIVISOR);
+}
+
 export function estimateMessagesTokens(messages: readonly ModelMessage[]): number {
   return messages.reduce((total, message) => total + estimateMessageTokens(message), 0);
 }

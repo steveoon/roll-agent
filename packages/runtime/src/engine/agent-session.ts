@@ -114,6 +114,7 @@ import {
   compactMessages,
   CompactionDraftFallbackError,
   estimateMessagesTokens,
+  estimateTextTokens,
   isCompactionSummaryAcknowledgement,
   readCompactionSummaryPayload,
 } from "./compactor.ts";
@@ -1354,13 +1355,9 @@ export class AgentSession {
           this.capabilityManifest,
           CAPABILITY_TOOL_ROLES.transcriptRead,
         );
-        const checkpointReminder = this.compactionCheckpoint
-          ? buildCompactionCheckpointReminder(
-              this.compactionCheckpoint,
-              this.sessionManagerInstanceId,
-              transcriptToolId,
-            )
-          : undefined;
+        const checkpointReminder = this.currentCheckpointReminder(transcriptToolId);
+        const reminderTokens =
+          checkpointReminder === undefined ? 0 : estimateTextTokens(checkpointReminder);
         // Persist checkpoints for recovery bookkeeping, but only the in-memory snapshot for this
         // ActiveTurn may become model-visible. Completed-turn Skill bodies stay out of history.
         const inferenceHistory = stripExplicitSkillCheckpoints(
@@ -1888,7 +1885,8 @@ export class AgentSession {
             pressureInputTokens -
               estimateMessagesTokens(this.messages) +
               (lastStepOutputTokens ?? 0) +
-              lastStepToolResultTokens,
+              lastStepToolResultTokens -
+              reminderTokens,
           );
         }
         activeTurn.completedStepCount += stepCount;
@@ -1906,7 +1904,8 @@ export class AgentSession {
         if (
           !activeTurn.pausedForContextPressure ||
           lastStepFinishReason !== "tool-calls" ||
-          stoppedAtStepLimit
+          stoppedAtStepLimit ||
+          userRejectionMessage !== undefined
         ) {
           return;
         }
@@ -1921,14 +1920,14 @@ export class AgentSession {
           progressed = await this.runAutoCompactionPasses(queue, activeTurn, turnStartedAt);
         } catch (error) {
           if (this.isTurnAborted(activeTurn)) {
-            this.emitCancellation(queue, activeTurn);
+            this.persistPausedTurnCancellation(queue, activeTurn, turnStartedAt);
             return;
           }
           queue.push({ type: "error", stage: "plan", message: errorMessage(error) });
           return;
         }
         if (this.isTurnAborted(activeTurn)) {
-          this.emitCancellation(queue, activeTurn);
+          this.persistPausedTurnCancellation(queue, activeTurn, turnStartedAt);
           return;
         }
         activeTurn.contextPressureContinuations = progressed
@@ -2232,14 +2231,17 @@ export class AgentSession {
         activeTurn.contextPressureContinuations >= MAX_CONTEXT_PRESSURE_CONTINUATIONS ||
         last === undefined ||
         last.finishReason !== "tool-calls" ||
-        (steps.length < 2 && this.messages.length < 2)
+        (steps.length < 2 && this.messages.length < 2) ||
+        last.toolResults.some(
+          (result) => readToolOutcome(result.output).kind === TOOL_OUTCOME_KINDS.userRejected,
+        )
       ) {
         return false;
       }
       const usage = toSessionUsage(last.usage);
       const pressure =
         usage.inputTokens === undefined
-          ? (this.promptOverhead ?? 0) +
+          ? this.promptOverheadTokens() +
             estimateMessagesTokens(this.messages) +
             estimateMessagesTokens(steps.flatMap((step) => step.response.messages))
           : usage.inputTokens +
@@ -2269,11 +2271,69 @@ export class AgentSession {
         pending
       );
     }
-    return (this.promptOverhead ?? 0) + estimateMessagesTokens(this.messages) + pending;
+    return this.promptOverheadTokens() + estimateMessagesTokens(this.messages) + pending;
   }
 
   private promptOverheadTokens(): number {
-    return this.promptOverhead ?? 0;
+    const reminder = this.currentCheckpointReminder(
+      findCapabilityToolId(this.capabilityManifest, CAPABILITY_TOOL_ROLES.transcriptRead),
+    );
+    return (this.promptOverhead ?? 0) + (reminder === undefined ? 0 : estimateTextTokens(reminder));
+  }
+
+  private currentCheckpointReminder(transcriptToolId: string | undefined): string | undefined {
+    return this.compactionCheckpoint
+      ? buildCompactionCheckpointReminder(
+          this.compactionCheckpoint,
+          this.sessionManagerInstanceId,
+          transcriptToolId,
+        )
+      : undefined;
+  }
+
+  private persistPausedTurnCancellation(
+    queue: AsyncEventQueue<SessionEvent>,
+    activeTurn: ActiveTurn,
+    turnStartedAt: number,
+  ): void {
+    this.captureCancellationActivity(activeTurn);
+    if (!activeTurn.cancellationPersistenceAttempted && !this.closed) {
+      activeTurn.cancellationPersistenceAttempted = true;
+      activeTurn.cancellationPersisted = true;
+      const start = this.messages.length;
+      const completedMessages = repairActiveToolProtocol(
+        stripReasoningMessages(completedStepMessages(activeTurn)),
+      ).messages;
+      this.messages.push(
+        createCancelledTurnRecoveryMessage({
+          context: this.cancellationContextMessage(activeTurn),
+          completedMessages,
+          toolExecutions: activeTurn.toolExecutions,
+        }),
+      );
+      this.messages.push(
+        createTurnCancellationMessage(
+          this.cancellationDisplayMessage(activeTurn),
+          activeTurn.cancellationReason ?? SESSION_CANCELLATION_REASONS.runtime,
+        ),
+      );
+      this.debug(queue, "persist", "persisting paused turn cancellation", turnStartedAt, {
+        appendedMessages: this.messages.length - start,
+      });
+      try {
+        this.persistMessages(this.messages.slice(start));
+        activeTurn.cancellationPersisted = true;
+      } catch (error) {
+        activeTurn.cancellationPersisted = false;
+        this.messages.splice(start);
+        queue.push({
+          type: "error",
+          stage: "execute",
+          message: `取消状态持久化失败: ${errorMessage(error)}`,
+        });
+      }
+    }
+    this.emitCancellation(queue, activeTurn);
   }
 
   private compactionTargetTokens(pendingContent?: UserModelMessage["content"]): number | undefined {
