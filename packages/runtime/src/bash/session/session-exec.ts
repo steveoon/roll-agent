@@ -149,9 +149,7 @@ export function spawnSession(input: SpawnSessionInput): ManagedSession {
     } finally {
       try {
         unlinkSync(segmentFile);
-      } catch {
-        // shell 未写出状态文件时忽略
-      }
+      } catch {}
     }
   };
 

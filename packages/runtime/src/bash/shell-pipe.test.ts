@@ -11,7 +11,10 @@ import {
   SIGPIPE_FALLBACK_NOTE,
 } from "./shell-pipe.ts";
 
-function spawnSyncWith(stdout: string, status: number): typeof import("node:child_process").spawnSync {
+function spawnSyncWith(
+  stdout: string,
+  status: number,
+): typeof import("node:child_process").spawnSync {
   const result = {
     pid: 1,
     output: [null, stdout, ""],
@@ -38,8 +41,22 @@ test("probe 无逐段状态但 pipefail 可用时退回 pipefail", () => {
   const spawnSync = (() => {
     calls += 1;
     return calls === 1
-      ? ({ pid: 1, output: [null, "", ""], stdout: "", stderr: "bad substitution", status: 2, signal: null } as SpawnSyncReturns<string>)
-      : ({ pid: 1, output: [null, "", ""], stdout: "", stderr: "", status: 1, signal: null } as SpawnSyncReturns<string>);
+      ? ({
+          pid: 1,
+          output: [null, "", ""],
+          stdout: "",
+          stderr: "bad substitution",
+          status: 2,
+          signal: null,
+        } as SpawnSyncReturns<string>)
+      : ({
+          pid: 1,
+          output: [null, "", ""],
+          stdout: "",
+          stderr: "",
+          status: 1,
+          signal: null,
+        } as SpawnSyncReturns<string>);
   }) as unknown as typeof import("node:child_process").spawnSync;
   const probe = probeShellPipeCapability("/bin/dash", spawnSync);
   assert.equal(probe.capability, "pipefail");
@@ -87,8 +104,18 @@ test("逐段判定：观测退出码与末段不一致时以观测值为准（ex
   assert.equal(verdict.effectiveExitCode, 7);
 });
 
+test("逐段判定：观测退出码为 0 但末段状态过期非 0 时同样以观测值为准（exit 0 不误判）", () => {
+  const verdict = evaluatePipelineExit({ exitCode: 0, segments: [0, 1], capability: "segments" });
+  assert.equal(verdict.ok, true);
+  assert.equal(verdict.effectiveExitCode, 0);
+});
+
 test("逐段判定：末段非 0 判失败", () => {
-  const verdict = evaluatePipelineExit({ exitCode: 141, segments: [0, 141], capability: "segments" });
+  const verdict = evaluatePipelineExit({
+    exitCode: 141,
+    segments: [0, 141],
+    capability: "segments",
+  });
   assert.equal(verdict.ok, false);
   assert.equal(verdict.effectiveExitCode, 141);
 });

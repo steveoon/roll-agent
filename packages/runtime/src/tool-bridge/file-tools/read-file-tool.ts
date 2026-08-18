@@ -110,7 +110,10 @@ export function buildReadFileTool(
         );
       }
       const resolvedPath = resolveFilePath(settings.workdir, parsed.data.path);
-      if (escapesWorkdir(settings.workdir, parsed.data.path) && !isWithinOutputDumpDir(resolvedPath)) {
+      if (
+        escapesWorkdir(settings.workdir, parsed.data.path) &&
+        !isWithinOutputDumpDir(resolvedPath)
+      ) {
         const gated = await gateExternalPath(ctx, READ_FILE_TOOL_NAME, parsed.data, id);
         if (gated !== undefined) {
           return gated;

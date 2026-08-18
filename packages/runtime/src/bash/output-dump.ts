@@ -1,4 +1,12 @@
-import { closeSync, mkdirSync, openSync, readdirSync, statSync, unlinkSync, writeSync } from "node:fs";
+import {
+  closeSync,
+  mkdirSync,
+  openSync,
+  readdirSync,
+  statSync,
+  unlinkSync,
+  writeSync,
+} from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve, sep } from "node:path";
 import { randomUUID } from "node:crypto";
@@ -38,9 +46,7 @@ export function pruneOutputDumpDir(dir: string, now: number = Date.now()): void 
     if (now - entry.mtime > OUTPUT_DUMP_MAX_AGE_MS) {
       try {
         unlinkSync(join(dir, entry.name));
-      } catch {
-        // 并发清理时忽略
-      }
+      } catch {}
     }
   }
   const remaining = stats.filter((entry) => now - entry.mtime <= OUTPUT_DUMP_MAX_AGE_MS);
@@ -50,9 +56,7 @@ export function pruneOutputDumpDir(dir: string, now: number = Date.now()): void 
     if (oldest !== undefined) {
       try {
         unlinkSync(join(dir, oldest.name));
-      } catch {
-        // 并发清理时忽略
-      }
+      } catch {}
     }
   }
 }

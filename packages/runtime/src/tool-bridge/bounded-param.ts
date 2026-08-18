@@ -108,7 +108,9 @@ export function friendlyInvalidToolInputMessage(error: unknown): string | undefi
   if (error !== null && typeof error === "object") {
     const candidate = error as { toolInput?: unknown; cause?: unknown };
     const rawInput =
-      typeof candidate.toolInput === "string" ? parseJsonObject(candidate.toolInput) : candidate.toolInput;
+      typeof candidate.toolInput === "string"
+        ? parseJsonObject(candidate.toolInput)
+        : candidate.toolInput;
     return describeZodIssues(candidate.cause ?? error, rawInput);
   }
   if (typeof error === "string" && error.startsWith(SERIALIZED_INVALID_PREFIX)) {

@@ -9,8 +9,6 @@ export type ShellPipeCapability = (typeof SHELL_PIPE_CAPABILITIES)[number];
 export const PIPE_SEGMENT_ARRAYS = ["PIPESTATUS", "pipestatus"] as const;
 export type PipeSegmentArray = (typeof PIPE_SEGMENT_ARRAYS)[number];
 
-const SHELL_VAR_OPEN = "$" + "{";
-
 export interface ShellPipeProbe {
   readonly capability: ShellPipeCapability;
   readonly segmentArray?: PipeSegmentArray;
@@ -24,10 +22,7 @@ export function probeShellPipeCapability(
 ): ShellPipeProbe {
   const segmentProbe = spawnSyncImpl(
     shellPath,
-    [
-      "-c",
-      `false | true; printf "%s|%s" "${SHELL_VAR_OPEN}PIPESTATUS[*]:-}" "${SHELL_VAR_OPEN}pipestatus[*]:-}"`,
-    ],
+    ["-c", `false | true; printf "%s|%s" "\${PIPESTATUS[*]:-}" "\${pipestatus[*]:-}"`],
     { encoding: "utf8", timeout: PROBE_TIMEOUT_MS },
   );
   if (!segmentProbe.error && segmentProbe.status === 0) {
@@ -65,8 +60,8 @@ export function buildSegmentCaptureWrapper(
   command: string,
   segmentArray: PipeSegmentArray,
 ): string {
-  const capture = `__roll_pipe_status="${SHELL_VAR_OPEN}${segmentArray}[*]:-}"`;
-  const write = `[ -n "${SHELL_VAR_OPEN}${PIPE_STATUS_ENV}:-}" ] && printf "%s\\n" "$__roll_pipe_status" >"${SHELL_VAR_OPEN}${PIPE_STATUS_ENV}}" 2>/dev/null`;
+  const capture = `__roll_pipe_status="\${${segmentArray}[*]:-}"`;
+  const write = `[ -n "\${${PIPE_STATUS_ENV}:-}" ] && printf "%s\\n" "$__roll_pipe_status" >"\${${PIPE_STATUS_ENV}}" 2>/dev/null`;
   return `trap '${capture}; ${write}' EXIT; ${command}`;
 }
 
@@ -89,8 +84,8 @@ export function evaluatePipelineExit(params: {
   const segments = params.segments;
   if (params.capability === "segments" && segments !== undefined && segments.length > 0) {
     const last = segments[segments.length - 1] ?? params.exitCode;
-    if (last !== params.exitCode && params.exitCode !== 0) {
-      return { ok: false, effectiveExitCode: params.exitCode };
+    if (last !== params.exitCode) {
+      return judgeByExitCode(params.exitCode);
     }
     const others = segments.slice(0, -1);
     const benignOthers = others.every((code) => code === 0 || code === SIGPIPE_EXIT_CODE);
@@ -108,11 +103,15 @@ export function evaluatePipelineExit(params: {
       effectiveExitCode: culprit !== undefined ? culprit : last,
     };
   }
-  if (params.exitCode === 0) {
+  return judgeByExitCode(params.exitCode);
+}
+
+function judgeByExitCode(exitCode: number): PipelineVerdict {
+  if (exitCode === 0) {
     return { ok: true, effectiveExitCode: 0 };
   }
-  if (params.exitCode === SIGPIPE_EXIT_CODE) {
+  if (exitCode === SIGPIPE_EXIT_CODE) {
     return { ok: true, effectiveExitCode: SIGPIPE_EXIT_CODE, note: SIGPIPE_FALLBACK_NOTE };
   }
-  return { ok: false, effectiveExitCode: params.exitCode };
+  return { ok: false, effectiveExitCode: exitCode };
 }
