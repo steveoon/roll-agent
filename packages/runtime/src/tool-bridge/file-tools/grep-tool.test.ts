@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ToolExecutionOptions } from "ai";
 import { resolveFileToolsSettings } from "./settings.ts";
-import { buildGrepTool, executeGrep } from "./grep-tool.ts";
+import { buildGrepTool, executeGrep, grepInputSchema } from "./grep-tool.ts";
 import type { ApprovalRequest } from "../build-tools.ts";
 import { ToolRegistry } from "../naming.ts";
 import { DefaultToolPolicy } from "../../policy/default-policy.ts";
@@ -301,6 +301,43 @@ test(
     assert.equal(String(result.display).includes(outsideDir), false);
   },
 );
+
+test("context 越界在审批前以一句话 invalid_input 拒绝", async () => {
+  const workdir = fixtureWorkdir("grep-bounded-context-");
+  writeFileSync(join(workdir, "a.txt"), "needle\n", "utf8");
+  const approvals: ApprovalRequest[] = [];
+  const tools = buildGrepFixture(workdir, approvals, true);
+  const grepTool = tools.roll__grep;
+  assert.ok(grepTool?.execute !== undefined);
+  const result = (await grepTool.execute(
+    { pattern: "needle", context: 18 },
+    executeOptions(),
+  )) as NormalizedToolResult;
+  assert.equal(result.outcome.kind, TOOL_OUTCOME_KINDS.invalidInput);
+  const message = String(result.display);
+  assert.ok(message.includes("context"));
+  assert.ok(message.includes("范围 0-10"));
+  assert.ok(message.includes("18"));
+  assert.equal(approvals.length, 0);
+});
+
+test("max_results 越界同样一句话拒绝", async () => {
+  const workdir = fixtureWorkdir("grep-bounded-max-");
+  writeFileSync(join(workdir, "a.txt"), "needle\n", "utf8");
+  const settings = resolveFileToolsSettings({ workdir });
+  const result = await executeGrep(settings, { pattern: "needle", max_results: 0 });
+  assert.equal(result.outcome.kind, TOOL_OUTCOME_KINDS.invalidInput);
+  const message = String(result.display);
+  assert.ok(message.includes("max_results"));
+  assert.ok(message.includes("范围 1-500"));
+  assert.ok(message.includes("0"));
+});
+
+test("context 描述携带范围，模型第一次调用即知边界", () => {
+  const shape = grepInputSchema.shape;
+  assert.ok((shape.context.description ?? "").includes("范围 0-10"));
+  assert.ok((shape.max_results.description ?? "").includes("范围 1-500"));
+});
 
 test("workdir 外路径 scope=session 批准后第二次搜索免弹", async () => {
   const workdir = fixtureWorkdir("grep-gate-");

@@ -27,6 +27,7 @@ import {
 import { normalizeForMatch } from "./text-normalize.ts";
 import { runRg } from "./rg-exec.ts";
 import { gateExternalPath } from "./external-approval.ts";
+import { boundedIntParam } from "../bounded-param.ts";
 import { FILE_TOOLS_AGENT_NAME, type ResolvedFileToolsSettings } from "./settings.ts";
 
 export const GREP_TOOL_NAME = "grep";
@@ -36,7 +37,22 @@ const MAX_LINE_CHARS = 500;
 const TRUNCATION_NOTICE = "结果过多已截断，请缩小范围（加 glob 或更精确的 pattern）";
 const OUTPUT_CAP_NOTICE = "（输出达上限已截断，请缩小范围）";
 
-const grepInputSchema = z.object({
+const contextParam = boundedIntParam({
+  name: "context",
+  min: 0,
+  max: 10,
+  description: "每处命中前后附带的行数",
+  defaultNote: "默认 0",
+});
+const maxResultsParam = boundedIntParam({
+  name: "max_results",
+  min: 1,
+  max: 500,
+  description: "最多返回的命中行数",
+  defaultNote: "默认 100",
+});
+
+export const grepInputSchema = z.object({
   pattern: z.string().min(1).describe("搜索正则（ripgrep 语法）"),
   path: z
     .string()
@@ -44,9 +60,9 @@ const grepInputSchema = z.object({
     .optional()
     .describe("搜索目录或文件，相对当前工作目录或绝对路径，默认工作目录"),
   glob: z.string().min(1).optional().describe('按 glob 过滤文件，如 "**/*.ts"'),
-  context: z.number().int().min(0).max(10).optional().describe("每处命中前后附带的行数，默认 0"),
+  context: contextParam.schema,
   ignore_case: z.boolean().optional().describe("忽略大小写，默认 false"),
-  max_results: z.number().int().min(1).max(500).optional().describe("最多返回的命中行数，默认 100"),
+  max_results: maxResultsParam.schema,
 });
 
 export type GrepInput = z.infer<typeof grepInputSchema>;
@@ -169,6 +185,11 @@ export async function executeGrep(
   input: GrepInput,
   abortSignal?: AbortSignal,
 ): Promise<NormalizedToolResult> {
+  const boundedRejected =
+    contextParam.check(input.context) ?? maxResultsParam.check(input.max_results);
+  if (boundedRejected !== undefined) {
+    return boundedRejected;
+  }
   const resolvedPath = resolveFilePath(settings.workdir, input.path ?? ".");
   const maxResults = input.max_results ?? DEFAULT_MAX_RESULTS;
   const result = await runRg(buildRgArgs(input, resolvedPath, maxResults), settings.workdir, {
@@ -219,6 +240,11 @@ export function buildGrepTool(
           TOOL_OUTCOME_KINDS.invalidInput,
           "参数校验失败: pattern 必须为非空字符串，其余参数须符合类型与范围限制",
         );
+      }
+      const boundedRejected =
+        contextParam.check(parsed.data.context) ?? maxResultsParam.check(parsed.data.max_results);
+      if (boundedRejected !== undefined) {
+        return boundedRejected;
       }
       if (escapesWorkdir(settings.workdir, parsed.data.path ?? ".")) {
         const gated = await gateExternalPath(ctx, GREP_TOOL_NAME, parsed.data, id);
