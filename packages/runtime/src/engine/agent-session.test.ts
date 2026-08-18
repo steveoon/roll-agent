@@ -3015,6 +3015,201 @@ test("AgentSession 工具步骤完成后第二次模型调用失败时保留已�
   assert.match(nextPrompt, /roll__interrupted_turn_recovery/u);
 });
 
+function countOccurrences(text: string, needle: string): number {
+  return text.split(needle).length - 1;
+}
+
+const PRESSURE_CONTINUATION_SESSION = {
+  maxSteps: 8,
+  contextWindow: 200,
+  initialMessages: [
+    { role: "user", content: "old-1" },
+    { role: "assistant", content: "answer-1" },
+    { role: "user", content: "old-2" },
+    { role: "assistant", content: "answer-2" },
+  ] satisfies ModelMessage[],
+  compaction: {
+    enabled: true,
+    strategy: "truncate",
+    threshold: 0.75,
+    keepRecentTurns: 1,
+    keepRecentTokens: 1,
+  },
+} as const;
+
+function assertTurnRecordedExactlyOnce(
+  label: string,
+  serialized: string,
+  expected: { readonly user: number; readonly toolCallIds: number },
+): void {
+  assert.equal(countOccurrences(serialized, "tool loop"), expected.user, `${label}: user`);
+  assert.equal(
+    countOccurrences(serialized, '"toolCallId":"c1"'),
+    expected.toolCallIds,
+    `${label}: c1`,
+  );
+}
+
+function assertPromptRecordsTurnOnce(
+  prompt: LanguageModelV4CallOptions["prompt"] | undefined,
+): void {
+  const messages = prompt ?? [];
+  const userTurns = messages.filter(
+    (message) =>
+      message.role === "user" &&
+      message.content.some((part) => part.type === "text" && part.text === "tool loop"),
+  );
+  const parts: Array<{ readonly type: string; readonly toolCallId?: string }> = [];
+  for (const message of messages) {
+    if (typeof message.content !== "string") {
+      parts.push(...message.content);
+    }
+  }
+  assert.equal(userTurns.length, 1, "next prompt: user");
+  assert.equal(
+    parts.filter((part) => part.type === "tool-call" && part.toolCallId === "c1").length,
+    1,
+    "next prompt: tool-call c1",
+  );
+  assert.equal(
+    parts.filter((part) => part.type === "tool-result" && part.toolCallId === "c1").length,
+    1,
+    "next prompt: tool-result c1",
+  );
+}
+
+test("AgentSession 压力续跑中模型调用失败时不会重复已落盘的 user 与工具步骤", async () => {
+  const model = sequencedModel([
+    toolCallStep("echo-agent__echo", { q: "x" }, 170),
+    streamErrorStep("ECONNRESET"),
+    textStep("ok", 40),
+  ]);
+  const persisted: ModelMessage[][] = [];
+  const session = new AgentSession({
+    id: "c1-continuation-failure-exactly-once",
+    model,
+    sources: [source("echo-agent", "echo")],
+    onPersist: (messages) => {
+      persisted.push([...messages]);
+    },
+    ...PRESSURE_CONTINUATION_SESSION,
+  });
+
+  const events = await collect(session.send("tool loop"));
+  assert.equal(events.at(-1)?.type, "error");
+  assert.ok(events.some((event) => event.type === "context-compacted"));
+  assert.equal(model.doStreamCalls.length, 2);
+  assertTurnRecordedExactlyOnce("durable", JSON.stringify(persisted.flat()), {
+    user: 1,
+    toolCallIds: 2,
+  });
+  assertTurnRecordedExactlyOnce("active", JSON.stringify(session.getMessages()), {
+    user: 1,
+    toolCallIds: 2,
+  });
+  assert.equal(session.getToolExecutions().length, 1);
+  assert.match(JSON.stringify(persisted.at(-1) ?? []), /roll-recovery/u);
+
+  await collect(session.send("继续"));
+  assertPromptRecordsTurnOnce(model.doStreamCalls.at(-1)?.prompt);
+});
+
+test("AgentSession 压力续跑中被取消时不会重复已落盘的 user 与工具步骤", async () => {
+  let calls = 0;
+  const model = new MockLanguageModelV4({
+    doStream: async (options) => {
+      calls += 1;
+      if (calls === 1) {
+        return streamChunks(toolCallStep("echo-agent__echo", { q: "x" }, 170));
+      }
+      if (calls === 2) {
+        return {
+          stream: new ReadableStream<LanguageModelV4StreamPart>({
+            start(controller) {
+              controller.enqueue({ type: "stream-start", warnings: [] });
+              const signal = options.abortSignal;
+              if (signal?.aborted) {
+                controller.error(signal.reason);
+                return;
+              }
+              signal?.addEventListener("abort", () => {
+                controller.error(signal.reason);
+              });
+            },
+          }),
+        };
+      }
+      return streamChunks(textStep("ok", 40));
+    },
+  });
+  const persisted: ModelMessage[][] = [];
+  const session = new AgentSession({
+    id: "c1-continuation-cancel-exactly-once",
+    model,
+    sources: [source("echo-agent", "echo")],
+    onPersist: (messages) => {
+      persisted.push([...messages]);
+    },
+    ...PRESSURE_CONTINUATION_SESSION,
+  });
+
+  const events: SessionEvent[] = [];
+  let starts = 0;
+  for await (const event of session.send("tool loop")) {
+    events.push(event);
+    if (event.type === "message-start") {
+      starts += 1;
+      if (starts === 2) {
+        session.cancel();
+      }
+    }
+  }
+  assert.equal(events.at(-1)?.type, "turn-cancelled");
+  assert.equal(calls, 2);
+  assertTurnRecordedExactlyOnce("durable", JSON.stringify(persisted.flat()), {
+    user: 1,
+    toolCallIds: 2,
+  });
+  assertTurnRecordedExactlyOnce("active", JSON.stringify(session.getMessages()), {
+    user: 1,
+    toolCallIds: 2,
+  });
+  assert.equal(session.getToolExecutions().length, 1);
+
+  await collect(session.send("继续"));
+  assertPromptRecordsTurnOnce(model.doStreamCalls.at(-1)?.prompt);
+});
+
+test("AgentSession 压力续跑中上下文溢出时不会重复已落盘的 user", async () => {
+  const model = sequencedModel([
+    toolCallStep("echo-agent__echo", { q: "x" }, 170),
+    streamErrorStep("context_length_exceeded"),
+    streamErrorStep("context_length_exceeded"),
+  ]);
+  const persisted: ModelMessage[][] = [];
+  const session = new AgentSession({
+    id: "c1-continuation-overflow-exactly-once",
+    model,
+    sources: [source("echo-agent", "echo")],
+    onPersist: (messages) => {
+      persisted.push([...messages]);
+    },
+    ...PRESSURE_CONTINUATION_SESSION,
+  });
+
+  const events = await collect(session.send("tool loop"));
+  assert.equal(events.at(-1)?.type, "error");
+  assertTurnRecordedExactlyOnce("durable", JSON.stringify(persisted.flat()), {
+    user: 1,
+    toolCallIds: 2,
+  });
+  assertTurnRecordedExactlyOnce("active", JSON.stringify(session.getMessages()), {
+    user: 1,
+    toolCallIds: 2,
+  });
+  assert.equal(session.getToolExecutions().length, 1);
+});
+
 test("AgentSession 首次模型调用失败且没有任何已完成步骤时不写入失败记录,保持干净重试", async () => {
   const model = sequencedModel([streamErrorStep("ECONNRESET"), textStep("ok")]);
   const persisted: ModelMessage[][] = [];

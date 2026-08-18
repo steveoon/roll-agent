@@ -296,8 +296,10 @@ interface ActiveTurn {
   readonly execSessionIds: Set<number>;
   readonly pendingToolCalls: Map<string, PendingToolCall>;
   readonly completedStepResponses: Map<string, readonly ModelMessage[]>;
+  readonly persistedStepKeys: Set<string>;
   readonly toolExecutions: ToolExecutionRecord[];
   expiresAt?: string;
+  userMessagePersisted: boolean;
   hadPotentialSideEffects: boolean;
   aborted: boolean;
   cancellationActivity?: TurnCancellationActivity;
@@ -415,7 +417,9 @@ function createActiveTurn(): ActiveTurn {
     execSessionIds: new Set<number>(),
     pendingToolCalls: new Map<string, PendingToolCall>(),
     completedStepResponses: new Map<string, readonly ModelMessage[]>(),
+    persistedStepKeys: new Set<string>(),
     toolExecutions: [],
+    userMessagePersisted: false,
     hadPotentialSideEffects: false,
     aborted: false,
     cancellationEventEmitted: false,
@@ -441,6 +445,19 @@ function rememberCompletedStep(activeTurn: ActiveTurn, step: CompletedModelStep)
 
 function completedStepMessages(activeTurn: ActiveTurn): ModelMessage[] {
   return [...activeTurn.completedStepResponses.values()].flatMap((messages) => [...messages]);
+}
+
+function unpersistedStepMessages(activeTurn: ActiveTurn): ModelMessage[] {
+  return [...activeTurn.completedStepResponses.entries()]
+    .filter(([key]) => !activeTurn.persistedStepKeys.has(key))
+    .flatMap(([, messages]) => [...messages]);
+}
+
+function markTurnSegmentPersisted(activeTurn: ActiveTurn): void {
+  for (const key of activeTurn.completedStepResponses.keys()) {
+    activeTurn.persistedStepKeys.add(key);
+  }
+  activeTurn.userMessagePersisted = true;
 }
 
 function errorMessage(error: unknown): string {
@@ -1283,7 +1300,7 @@ export class AgentSession {
       if (activeTurn.aborted || activeTurn.abortController.signal.aborted) {
         turnStart = this.messages.length;
         this.messages.push({ role: "user", content: userMessageContent });
-        this.persistCancelledTurn(queue, activeTurn, turnStart, [], turnStartedAt);
+        this.persistCancelledTurn(queue, activeTurn, turnStart, turnStartedAt);
         return;
       }
 
@@ -1328,7 +1345,7 @@ export class AgentSession {
             activeTurn.cancellationReason,
             activeTurn.abortController.signal.reason ?? error,
           );
-          this.persistCancelledTurn(queue, activeTurn, turnStart, [], turnStartedAt);
+          this.persistCancelledTurn(queue, activeTurn, turnStart, turnStartedAt);
           return;
         }
         this.debug(queue, "turn", "dynamic capability context unavailable", turnStartedAt, {
@@ -1379,7 +1396,6 @@ export class AgentSession {
           contextRecoveryAttempts,
           ...(this.turnTimeoutMs !== undefined ? { timeoutMs: this.turnTimeoutMs } : {}),
         });
-        let abortedResponseMessages: ModelMessage[] = [];
         let lastStepToolResultTokens = 0;
         const createStreamResult = () =>
           streamText({
@@ -1426,7 +1442,6 @@ export class AgentSession {
             onError: () => undefined,
             onStepEnd: (step) => {
               rememberCompletedStep(activeTurn, step);
-              abortedResponseMessages = completedStepMessages(activeTurn);
               lastStepToolResultTokens = estimateMessagesTokens(
                 step.response.messages.filter((message) => message.role === "tool"),
               );
@@ -1435,7 +1450,6 @@ export class AgentSession {
               for (const step of steps) {
                 rememberCompletedStep(activeTurn, step);
               }
-              abortedResponseMessages = completedStepMessages(activeTurn);
             },
           });
         let result: ReturnType<typeof createStreamResult>;
@@ -1448,7 +1462,7 @@ export class AgentSession {
               activeTurn.cancellationReason,
               error,
             );
-            this.persistCancelledTurn(queue, activeTurn, turnStart, [], turnStartedAt);
+            this.persistCancelledTurn(queue, activeTurn, turnStart, turnStartedAt);
             return;
           }
           if (!isContextWindowError(error)) {
@@ -1463,14 +1477,21 @@ export class AgentSession {
           if (this.isTurnAborted(activeTurn)) {
             turnStart = this.messages.length;
             this.messages.push(storedUserMessage);
-            this.persistCancelledTurn(queue, activeTurn, turnStart, [], turnStartedAt);
+            this.persistCancelledTurn(queue, activeTurn, turnStart, turnStartedAt);
             return;
           }
           if (compacted && canRetry) {
             contextRecoveryAttempts += 1;
             continue;
           }
-          this.persistContextFailure(queue, storedUserMessage, false, false, turnStartedAt);
+          this.persistContextFailure(
+            queue,
+            activeTurn,
+            storedUserMessage,
+            false,
+            false,
+            turnStartedAt,
+          );
           queue.push({ type: "error", stage: "execute", message: errorMessage(error) });
           return;
         }
@@ -1728,7 +1749,7 @@ export class AgentSession {
             if (this.isTurnAborted(activeTurn)) {
               turnStart = this.messages.length;
               this.messages.push(storedUserMessage);
-              this.persistCancelledTurn(queue, activeTurn, turnStart, [], turnStartedAt);
+              this.persistCancelledTurn(queue, activeTurn, turnStart, turnStartedAt);
               return;
             }
             if (retrySafe && compacted && canRetry) {
@@ -1740,6 +1761,7 @@ export class AgentSession {
               : "；本次尝试已有内容或操作开始执行，为避免重复执行，未自动重试";
             this.persistContextFailure(
               queue,
+              activeTurn,
               storedUserMessage,
               text.length > 0,
               sawToolCall,
@@ -1758,13 +1780,7 @@ export class AgentSession {
             activeTurn.cancellationReason,
             activeTurn.abortController.signal.reason,
           );
-          this.persistCancelledTurn(
-            queue,
-            activeTurn,
-            turnStart,
-            abortedResponseMessages,
-            turnStartedAt,
-          );
+          this.persistCancelledTurn(queue, activeTurn, turnStart, turnStartedAt);
           return;
         }
 
@@ -1787,13 +1803,7 @@ export class AgentSession {
               activeTurn.cancellationReason,
               error,
             );
-            this.persistCancelledTurn(
-              queue,
-              activeTurn,
-              turnStart,
-              abortedResponseMessages,
-              turnStartedAt,
-            );
+            this.persistCancelledTurn(queue, activeTurn, turnStart, turnStartedAt);
             return;
           }
           const contextOverflow = isContextWindowError(error);
@@ -1811,7 +1821,7 @@ export class AgentSession {
             if (this.isTurnAborted(activeTurn)) {
               turnStart = this.messages.length;
               this.messages.push(storedUserMessage);
-              this.persistCancelledTurn(queue, activeTurn, turnStart, [], turnStartedAt);
+              this.persistCancelledTurn(queue, activeTurn, turnStart, turnStartedAt);
               return;
             }
             if (retrySafe && compacted && canRetry) {
@@ -1823,6 +1833,7 @@ export class AgentSession {
               : "；本次尝试已有内容或操作开始执行，为避免重复执行，未自动重试";
             this.persistContextFailure(
               queue,
+              activeTurn,
               storedUserMessage,
               text.length > 0,
               sawToolCall,
@@ -1850,13 +1861,7 @@ export class AgentSession {
             activeTurn.cancellationReason,
             activeTurn.abortController.signal.reason,
           );
-          this.persistCancelledTurn(
-            queue,
-            activeTurn,
-            turnStart,
-            abortedResponseMessages,
-            turnStartedAt,
-          );
+          this.persistCancelledTurn(queue, activeTurn, turnStart, turnStartedAt);
           return;
         }
 
@@ -1872,6 +1877,7 @@ export class AgentSession {
           appendedMessages: this.messages.length - turnStart,
         });
         this.persistMessages(this.messages.slice(turnStart));
+        markTurnSegmentPersisted(activeTurn);
         this.debug(queue, "persist", "messages persisted", turnStartedAt, {
           totalMessages: this.messages.length,
         });
@@ -1948,7 +1954,7 @@ export class AgentSession {
           activeTurn.abortController.signal.reason ?? error,
         );
         if (turnStart !== undefined) {
-          this.persistCancelledTurn(queue, activeTurn, turnStart, [], turnStartedAt);
+          this.persistCancelledTurn(queue, activeTurn, turnStart, turnStartedAt);
         } else {
           this.emitCancellation(queue, activeTurn);
         }
@@ -1994,11 +2000,13 @@ export class AgentSession {
 
   private persistContextFailure(
     queue: AsyncEventQueue<SessionEvent>,
+    activeTurn: ActiveTurn,
     userMessage: UserModelMessage,
     producedText: boolean,
-    hadToolActivity: boolean,
+    sawToolCall: boolean,
     turnStartedAt: number,
   ): void {
+    const hadToolActivity = sawToolCall || activeTurn.toolExecutions.length > 0;
     const notes = ["本轮因上下文窗口溢出而中断，未自动重放。"];
     if (producedText) {
       notes.push("本轮已产生部分文本，持久历史仅保留此中断标记。");
@@ -2008,7 +2016,10 @@ export class AgentSession {
     }
     this.appendInterruptedTurnMessages(queue, turnStartedAt, {
       rollbackTo: this.messages.length,
-      messages: [userMessage, { role: "assistant", content: notes.join("") }],
+      messages: [
+        ...(activeTurn.userMessagePersisted ? [] : [userMessage]),
+        { role: "assistant", content: notes.join("") },
+      ],
       debugLabel: "persisting context-overflow marker",
       debugDetails: { hadToolActivity, producedText },
       failureLabel: "上下文溢出记录持久化失败",
@@ -2024,9 +2035,7 @@ export class AgentSession {
     if (this.closed) {
       return;
     }
-    const completedMessages = repairActiveToolProtocol(
-      stripReasoningMessages(completedStepMessages(activeTurn)),
-    ).messages;
+    const completedMessages = completedStepMessages(activeTurn);
     const hadProgress =
       completedMessages.length > 0 ||
       activeTurn.toolExecutions.length > 0 ||
@@ -2034,6 +2043,9 @@ export class AgentSession {
     if (!hadProgress) {
       return;
     }
+    const unpersistedMessages = repairActiveToolProtocol(
+      stripReasoningMessages(unpersistedStepMessages(activeTurn)),
+    ).messages;
     this.captureCancellationActivity(activeTurn);
     try {
       this.persistPendingToolCancellations(activeTurn);
@@ -2048,8 +2060,8 @@ export class AgentSession {
     this.appendInterruptedTurnMessages(queue, turnStartedAt, {
       rollbackTo: this.messages.length,
       messages: [
-        userMessage,
-        ...completedMessages,
+        ...(activeTurn.userMessagePersisted ? [] : [userMessage]),
+        ...unpersistedMessages,
         createCancelledTurnRecoveryMessage({
           context: this.failedTurnContextMessage(activeTurn),
           completedMessages,
@@ -2388,10 +2400,10 @@ export class AgentSession {
     if (!activeTurn.cancellationPersistenceAttempted && !this.closed) {
       activeTurn.cancellationPersistenceAttempted = true;
       activeTurn.cancellationPersisted = true;
-      const completedMessages = repairActiveToolProtocol(
-        stripReasoningMessages(completedStepMessages(activeTurn)),
-      ).messages;
-      const records = this.cancellationRecordMessages(activeTurn, completedMessages);
+      const records = this.cancellationRecordMessages(
+        activeTurn,
+        completedStepMessages(activeTurn),
+      );
       activeTurn.cancellationPersisted = this.appendInterruptedTurnMessages(queue, turnStartedAt, {
         rollbackTo: this.messages.length,
         messages: records,
@@ -3353,7 +3365,6 @@ export class AgentSession {
     queue: AsyncEventQueue<SessionEvent>,
     activeTurn: ActiveTurn,
     turnStart: number,
-    completedResponseMessages: readonly ModelMessage[],
     turnStartedAt: number,
   ): void {
     this.captureCancellationActivity(activeTurn);
@@ -3379,19 +3390,17 @@ export class AgentSession {
     if (!activeTurn.cancellationPersistenceAttempted) {
       activeTurn.cancellationPersistenceAttempted = true;
       this.messages.splice(turnStart + 1);
-      const rememberedResponseMessages = completedStepMessages(activeTurn);
-      const completedMessages = repairActiveToolProtocol(
-        stripReasoningMessages(
-          rememberedResponseMessages.length > 0
-            ? rememberedResponseMessages
-            : completedResponseMessages,
-        ),
+      const unpersistedMessages = repairActiveToolProtocol(
+        stripReasoningMessages(unpersistedStepMessages(activeTurn)),
       ).messages;
       activeTurn.cancellationPersisted = true;
-      const records = this.cancellationRecordMessages(activeTurn, completedMessages);
+      const records = this.cancellationRecordMessages(
+        activeTurn,
+        completedStepMessages(activeTurn),
+      );
       activeTurn.cancellationPersisted = this.appendInterruptedTurnMessages(queue, turnStartedAt, {
         rollbackTo: turnStart,
-        messages: [...completedMessages, ...records],
+        messages: [...unpersistedMessages, ...records],
         debugLabel: "persisting cancelled turn",
         failureLabel: "取消状态持久化失败",
       });
