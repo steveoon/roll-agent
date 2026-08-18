@@ -377,6 +377,12 @@ const DEFAULT_INTERACTION_TIMEOUT_MS = 5 * 60 * 1_000;
 const MAX_AUTO_COMPACTION_PASSES = 4;
 const MAX_CONTEXT_PRESSURE_CONTINUATIONS = 2;
 const MAX_CONTEXT_RECOVERY_ATTEMPTS = 1;
+const INTERRUPTED_STEP_POLICIES = {
+  keepRaw: "keep-raw",
+  ledgerOnly: "ledger-only",
+} as const;
+type InterruptedStepPolicy =
+  (typeof INTERRUPTED_STEP_POLICIES)[keyof typeof INTERRUPTED_STEP_POLICIES];
 const INTERRUPTED_TURN_RECOVERY_POLICY =
   "这份恢复记录只描述上一轮的权威历史事实，不授权继续或重试旧任务。下一轮必须以最新真实用户消息的目标和约束为准；如果用户换题、放弃旧任务或禁止工具，不得为了恢复旧任务检查或调用工具。executionState=not_executed 表示工具确定未执行，无需检查；executionState=outcome_unknown 只允许在最新用户明确要求继续或核对上一任务时先检查，检查不等于重试。";
 const MAX_COMPACTION_RESOURCE_KEY_CHARS = 1_024;
@@ -450,6 +456,12 @@ function completedStepMessages(activeTurn: ActiveTurn): ModelMessage[] {
 function unpersistedStepMessages(activeTurn: ActiveTurn): ModelMessage[] {
   return [...activeTurn.completedStepResponses.entries()]
     .filter(([key]) => !activeTurn.persistedStepKeys.has(key))
+    .flatMap(([, messages]) => [...messages]);
+}
+
+function persistedStepMessages(activeTurn: ActiveTurn): ModelMessage[] {
+  return [...activeTurn.completedStepResponses.entries()]
+    .filter(([key]) => activeTurn.persistedStepKeys.has(key))
     .flatMap(([, messages]) => [...messages]);
 }
 
@@ -3375,7 +3387,13 @@ export class AgentSession {
     if (!activeTurn.userMessagePersisted) {
       this.messages.push(userMessage);
     }
-    this.persistCancelledTurn(queue, activeTurn, turnStart, turnStartedAt);
+    this.persistCancelledTurn(
+      queue,
+      activeTurn,
+      turnStart,
+      turnStartedAt,
+      INTERRUPTED_STEP_POLICIES.ledgerOnly,
+    );
   }
 
   private persistCancelledTurn(
@@ -3383,6 +3401,7 @@ export class AgentSession {
     activeTurn: ActiveTurn,
     turnStart: number,
     turnStartedAt: number,
+    stepPolicy: InterruptedStepPolicy = INTERRUPTED_STEP_POLICIES.keepRaw,
   ): void {
     this.captureCancellationActivity(activeTurn);
     try {
@@ -3407,17 +3426,19 @@ export class AgentSession {
     if (!activeTurn.cancellationPersistenceAttempted) {
       activeTurn.cancellationPersistenceAttempted = true;
       this.messages.splice(turnStart + 1);
-      const unpersistedMessages = repairActiveToolProtocol(
-        stripReasoningMessages(unpersistedStepMessages(activeTurn)),
-      ).messages;
+      const keepRaw = stepPolicy === INTERRUPTED_STEP_POLICIES.keepRaw;
+      const appendedStepMessages = keepRaw
+        ? repairActiveToolProtocol(stripReasoningMessages(unpersistedStepMessages(activeTurn)))
+            .messages
+        : [];
+      const visibleStepMessages = keepRaw
+        ? completedStepMessages(activeTurn)
+        : persistedStepMessages(activeTurn);
       activeTurn.cancellationPersisted = true;
-      const records = this.cancellationRecordMessages(
-        activeTurn,
-        completedStepMessages(activeTurn),
-      );
+      const records = this.cancellationRecordMessages(activeTurn, visibleStepMessages);
       activeTurn.cancellationPersisted = this.appendInterruptedTurnMessages(queue, turnStartedAt, {
         rollbackTo: turnStart,
-        messages: [...unpersistedMessages, ...records],
+        messages: [...appendedStepMessages, ...records],
         debugLabel: "persisting cancelled turn",
         failureLabel: "取消状态持久化失败",
       });

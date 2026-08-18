@@ -25,6 +25,7 @@ import { AgentSession } from "./agent-session.ts";
 import type { AgentToolSource } from "../tool-bridge/build-tools.ts";
 import type { ToolResourceHint } from "../tool-bridge/tool-execution-coordinator.ts";
 import type { ToolExecutionRecord } from "../tool-bridge/tool-execution-record.ts";
+import { readCancelledTurnRecoveryCheckpoint } from "./cancelled-turn-recovery.ts";
 import { DefaultToolPolicy } from "../policy/default-policy.ts";
 import { ConfigurableToolPolicy } from "../policy/configurable-policy.ts";
 import type { PolicyDecision, ToolPolicy } from "../types/policy.ts";
@@ -3231,7 +3232,7 @@ test("AgentSession 压力续跑中溢出且在恢复压缩期间被取消时不�
       ledger.push(record);
     },
     listToolExecutions: (options) => {
-      if (model.doStreamCalls.length === 2 && !cancelled) {
+      if (model.doStreamCalls.length >= 2 && !cancelled) {
         cancelled = true;
         holder.session?.cancel();
       }
@@ -3256,6 +3257,78 @@ test("AgentSession 压力续跑中溢出且在恢复压缩期间被取消时不�
     toolCallIds: 2,
   });
   assert.equal(session.getToolExecutions().length, 1);
+});
+
+test("AgentSession 续跑中完成新工具步骤后溢出并在恢复压缩期间被取消时,新步骤只进账本与恢复证据,不写回 raw", async () => {
+  const model = sequencedModel([
+    toolCallStep("echo-agent__echo", { q: "x" }, 170),
+    multiToolCallStep([{ toolCallId: "c2", toolName: "echo-agent__echo", input: { q: "y" } }]),
+    streamErrorStep("context_length_exceeded"),
+    textStep("ok"),
+  ]);
+  const persisted: ModelMessage[][] = [];
+  const ledger: ToolExecutionRecord[] = [];
+  const holder: { session?: AgentSession } = {};
+  let cancelled = false;
+  const session = new AgentSession({
+    id: "c2-continuation-overflow-cancel-ledger-only",
+    model,
+    sources: [source("echo-agent", "echo")],
+    onPersist: (messages) => {
+      persisted.push([...messages]);
+    },
+    onToolExecution: (record) => {
+      ledger.push(record);
+    },
+    listToolExecutions: (options) => {
+      if (model.doStreamCalls.length >= 3 && !cancelled) {
+        cancelled = true;
+        holder.session?.cancel();
+      }
+      return ledger
+        .map((record, sequence) => ({ ...record, sequence }))
+        .filter((record) => record.sequence > (options?.afterSequence ?? -1))
+        .slice(0, options?.limit ?? 100);
+    },
+    ...PRESSURE_CONTINUATION_SESSION,
+  });
+  holder.session = session;
+
+  const events = await collect(session.send("tool loop"));
+  assert.equal(cancelled, true);
+  assert.equal(events.at(-1)?.type, "turn-cancelled");
+  assert.equal(model.doStreamCalls.length, 3);
+  const durable = JSON.stringify(persisted.flat());
+  assertTurnRecordedExactlyOnce("durable", durable, { user: 1, toolCallIds: 2 });
+  assert.equal(countOccurrences(durable, '"toolCallId":"c2"'), 0, "durable: c2 raw");
+  const active = JSON.stringify(session.getMessages());
+  assertTurnRecordedExactlyOnce("active", active, { user: 1, toolCallIds: 2 });
+  assert.equal(countOccurrences(active, '"toolCallId":"c2"'), 0, "active: c2 raw");
+  assert.deepEqual(
+    session.getToolExecutions().map((record) => record.toolCallId),
+    ["c1", "c2"],
+  );
+  const recovery = (persisted.at(-1) ?? [])
+    .map((message) => readCancelledTurnRecoveryCheckpoint(message))
+    .find((checkpoint) => checkpoint !== undefined);
+  assert.ok(recovery, "recovery record persisted");
+  const payload = JSON.parse(
+    recovery.modelContext.slice(recovery.modelContext.lastIndexOf("\n") + 1),
+  ) as {
+    readonly evidence: ReadonlyArray<{ readonly agentName: string; readonly toolName: string }>;
+  };
+  assert.deepEqual(
+    payload.evidence.map((entry) => `${entry.agentName}/${entry.toolName}`),
+    ["echo-agent/echo"],
+  );
+
+  await collect(session.send("继续"));
+  assertPromptRecordsTurnOnce(model.doStreamCalls.at(-1)?.prompt);
+  assert.equal(
+    countOccurrences(JSON.stringify(model.doStreamCalls.at(-1)?.prompt), '"toolCallId":"c2"'),
+    0,
+    "next prompt: c2 raw",
+  );
 });
 
 test("AgentSession 首次模型调用失败且没有任何已完成步骤时不写入失败记录,保持干净重试", async () => {
