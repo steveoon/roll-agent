@@ -1,5 +1,18 @@
 # @roll-agent/core
 
+## 0.31.0
+
+### Minor Changes
+
+- [#225](https://github.com/steveoon/roll-agent/pull/225) [`b9c457e`](https://github.com/steveoon/roll-agent/commit/b9c457e32feb17c1cfa1061cf587ff21026bfbc6) Thanks [@steveoon](https://github.com/steveoon)! - `roll chat` 全屏 TUI 默认把已完成的思考内容折叠为一行痕迹（思考时长与字数），模型开始正式回复后不再让思维链霸占对话记录；思考进行中仍实时展示。新增 `chat.thinking-display`（`collapsed` | `expanded`，默认 `collapsed`）配置控制默认行为，会话内可用 `/show-think [on|off]` 临时切换。基础 REPL 本来就不渲染思考内容，`--json` / `--server` 路径不下发原始 reasoning，均不受影响。
+
+### Patch Changes
+
+- [#221](https://github.com/steveoon/roll-agent/pull/221) [`d614672`](https://github.com/steveoon/roll-agent/commit/d614672efe38b27e4c7d04b0c5fc6361c43ee6ca) Thanks [@steveoon](https://github.com/steveoon)! - roll chat coding 工具扩展：roll**grep / roll**glob（ripgrep 后端，输出与 read/edit 契约耦合，全角标点归一化提示）、roll\_\_verify_file（多语言验证器注册表，fast/project 分级，fail-honest；会执行项目本地代码的验证器如 eslint 需确认一次）、会话级批准记忆（确认弹窗在可记忆时提供「允许并本会话不再询问」，仅进程内 Ink TUI；不改 wire 协议）、write_file 缩水防护与 edit→write 导流。
+
+- Updated dependencies [[`470e4fc`](https://github.com/steveoon/roll-agent/commit/470e4fcffffb4ed21c0f849cee7c011e7b0b715d), [`470e4fc`](https://github.com/steveoon/roll-agent/commit/470e4fcffffb4ed21c0f849cee7c011e7b0b715d), [`3857487`](https://github.com/steveoon/roll-agent/commit/3857487489b741e822f0f8b2892b4d8446f049e0), [`d614672`](https://github.com/steveoon/roll-agent/commit/d614672efe38b27e4c7d04b0c5fc6361c43ee6ca), [`aa14d16`](https://github.com/steveoon/roll-agent/commit/aa14d16f1c1f5c494f2d8f7a88d5f6b05c290175), [`05d8090`](https://github.com/steveoon/roll-agent/commit/05d80905cb2df6afd56fef70c093cdd1ba8537d3), [`bfc7468`](https://github.com/steveoon/roll-agent/commit/bfc746845439284f652fbde04e8179d71e21c46c), [`60d16c4`](https://github.com/steveoon/roll-agent/commit/60d16c419158ed50bf1e64035d6f85ff1f3d6fb3)]:
+  - @roll-agent/runtime@0.16.0
+
 ## 0.30.1
 
 ### Patch Changes
