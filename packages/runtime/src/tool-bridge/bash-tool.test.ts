@@ -367,7 +367,7 @@ test("bash 与 PowerShell 在 explanation 为空白或超过 100 字符时于审
     for (const explanation of ["   ", "x".repeat(101)]) {
       const result = await execute({ command: "printf hello", explanation }, options());
       assert.equal(result.isError, true);
-      assert.match(String(result.output), /参数校验失败/u);
+      assert.match(String(result.output), /explanation 越界/u);
     }
     assert.equal(approvals, 0);
     assert.equal(executions, 0);

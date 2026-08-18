@@ -27,7 +27,7 @@ import {
 import { normalizeForMatch } from "./text-normalize.ts";
 import { runRg } from "./rg-exec.ts";
 import { gateExternalPath } from "./external-approval.ts";
-import { boundedIntParam } from "../bounded-param.ts";
+import { boundedIntParam, describeZodIssues } from "../bounded-param.ts";
 import { FILE_TOOLS_AGENT_NAME, type ResolvedFileToolsSettings } from "./settings.ts";
 
 export const GREP_TOOL_NAME = "grep";
@@ -52,7 +52,7 @@ const maxResultsParam = boundedIntParam({
   defaultNote: "默认 100",
 });
 
-export const grepInputSchema = z.object({
+const grepInputSchema = z.object({
   pattern: z.string().min(1).describe("搜索正则（ripgrep 语法）"),
   path: z
     .string()
@@ -185,10 +185,12 @@ export async function executeGrep(
   input: GrepInput,
   abortSignal?: AbortSignal,
 ): Promise<NormalizedToolResult> {
-  const boundedRejected =
-    contextParam.check(input.context) ?? maxResultsParam.check(input.max_results);
-  if (boundedRejected !== undefined) {
-    return boundedRejected;
+  const bounded = grepInputSchema.safeParse(input);
+  if (!bounded.success) {
+    return failedToolResult(
+      TOOL_OUTCOME_KINDS.invalidInput,
+      describeZodIssues(bounded.error, input) ?? "参数校验失败",
+    );
   }
   const resolvedPath = resolveFilePath(settings.workdir, input.path ?? ".");
   const maxResults = input.max_results ?? DEFAULT_MAX_RESULTS;
@@ -238,13 +240,9 @@ export function buildGrepTool(
       if (!parsed.success) {
         return failedToolResult(
           TOOL_OUTCOME_KINDS.invalidInput,
-          "参数校验失败: pattern 必须为非空字符串，其余参数须符合类型与范围限制",
+          describeZodIssues(parsed.error, rawInput) ??
+            "参数校验失败: pattern 必须为非空字符串，其余参数须符合类型与范围限制",
         );
-      }
-      const boundedRejected =
-        contextParam.check(parsed.data.context) ?? maxResultsParam.check(parsed.data.max_results);
-      if (boundedRejected !== undefined) {
-        return boundedRejected;
       }
       if (escapesWorkdir(settings.workdir, parsed.data.path ?? ".")) {
         const gated = await gateExternalPath(ctx, GREP_TOOL_NAME, parsed.data, id);

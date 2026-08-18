@@ -87,6 +87,7 @@ import {
   readToolOutcome,
   type ToolCancellationExecutionState,
 } from "../tool-bridge/normalize-result.ts";
+import { friendlyInvalidToolInputMessage } from "../tool-bridge/bounded-param.ts";
 import {
   createToolExecutionRecord,
   prepareToolExecutionRecordForPersistence,
@@ -1667,8 +1668,13 @@ export class AgentSession {
               }
               case "tool-error": {
                 const route = this.registry.resolve(part.toolName);
-                const output = toolOutputMessage(part.error);
-                const result = failedToolResult(toolErrorOutcomeKind(part.error), output, {
+                const outcomeKind = toolErrorOutcomeKind(part.error);
+                const friendly =
+                  outcomeKind === TOOL_OUTCOME_KINDS.invalidInput
+                    ? friendlyInvalidToolInputMessage(part.error)
+                    : undefined;
+                const output = friendly ?? toolOutputMessage(part.error);
+                const result = failedToolResult(outcomeKind, output, {
                   raw: part.error,
                 });
                 const record = createToolExecutionRecord({

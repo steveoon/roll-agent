@@ -13,6 +13,9 @@ import {
 } from "../types/command-classification.ts";
 import { isWithinWorkdirRoot } from "../bash/workdir.ts";
 import { withAutoApprovedShellEnv } from "../bash/clean-env.ts";
+import { describeOutputDumpRecovery } from "../bash/output-dump.ts";
+import { evaluatePipelineExit } from "../bash/shell-pipe.ts";
+import { boundedIntParam, describeZodIssues } from "./bounded-param.ts";
 import { SessionCapError, type SessionManager } from "../bash/session/session-manager.ts";
 import { pollUntilDeadline, throwIfSessionExecAborted } from "../bash/session/yield-loop.ts";
 import {
@@ -73,6 +76,27 @@ function capturedClassification(value: unknown): CommandClassification {
   return value === "known-safe" || value === "dangerous" ? value : "unknown";
 }
 
+const execYieldParam = boundedIntParam({
+  name: "yield_time_ms",
+  min: MIN_EXEC_YIELD_MS,
+  max: MAX_EXEC_YIELD_MS,
+  description: "本次等待输出的毫秒数；未结束会返回 session_id 供 exec_poll 续查",
+  defaultNote: "默认 10000",
+});
+const maxOutputTokensParam = boundedIntParam({
+  name: "max_output_tokens",
+  min: 256,
+  max: 50_000,
+  description: "本次返回输出的 token 预算",
+});
+const pollYieldParam = boundedIntParam({
+  name: "yield_time_ms",
+  min: MIN_POLL_YIELD_MS,
+  max: MAX_POLL_YIELD_MS,
+  description: "空轮询等待的毫秒数",
+  defaultNote: "默认 10000",
+});
+
 const execCommandInputSchema = z.object({
   command: z.string().min(1).describe("要在后台会话中执行的 shell 命令（单字符串）"),
   explanation: shellCommandExplanationSchema.optional(),
@@ -81,22 +105,8 @@ const execCommandInputSchema = z.object({
     .min(1)
     .optional()
     .describe("工作目录绝对路径，默认 roll chat 当前目录，不要用 cd"),
-  yield_time_ms: z
-    .number()
-    .int()
-    .min(MIN_EXEC_YIELD_MS)
-    .max(MAX_EXEC_YIELD_MS)
-    .optional()
-    .describe(
-      "本次等待输出的毫秒数（默认 10000，范围 250-30000）；未结束会返回 session_id 供 exec_poll 续查",
-    ),
-  max_output_tokens: z
-    .number()
-    .int()
-    .min(256)
-    .max(50_000)
-    .optional()
-    .describe("本次返回输出的 token 预算"),
+  yield_time_ms: execYieldParam.schema,
+  max_output_tokens: maxOutputTokensParam.schema,
 });
 
 const execPollInputSchema = z.object({
@@ -105,13 +115,7 @@ const execPollInputSchema = z.object({
     .string()
     .default("")
     .describe('留空表示纯轮询进度；"\\u0003"(Ctrl-C) 表示中断该会话；不支持其它交互输入'),
-  yield_time_ms: z
-    .number()
-    .int()
-    .min(MIN_POLL_YIELD_MS)
-    .max(MAX_POLL_YIELD_MS)
-    .optional()
-    .describe("空轮询等待的毫秒数（默认 10000，范围 5000-300000）"),
+  yield_time_ms: pollYieldParam.schema,
 });
 
 const execListInputSchema = z.object({});
@@ -184,13 +188,28 @@ async function gateExecCommand(
 }
 
 function formatPollResult(result: SessionPollResult): NormalizedToolResult {
+  const verdict =
+    result.kind === "exited"
+      ? evaluatePipelineExit({
+          exitCode: result.exitCode,
+          ...(result.pipeSegments !== undefined ? { segments: result.pipeSegments } : {}),
+          capability: result.pipeCapability ?? "none",
+        })
+      : undefined;
   const header =
     result.kind === "running"
       ? `Session: ${String(result.sessionId)} (running)`
-      : `Exit code: ${String(result.exitCode)}`;
-  const lines = [header, `Wall time: ${(result.wallTimeMs / 1_000).toFixed(1)} s`];
+      : `Exit code: ${String(verdict?.effectiveExitCode ?? result.exitCode)}`;
+  const lines = [header];
+  if (verdict?.note !== undefined) {
+    lines.push(verdict.note);
+  }
+  lines.push(`Wall time: ${(result.wallTimeMs / 1_000).toFixed(1)} s`);
   if (result.omitted > 0) {
     lines.push(`（省略中间 ${String(result.omitted)} 字符）`);
+    if (result.kind === "exited" && result.dumpPath !== undefined) {
+      lines.push(describeOutputDumpRecovery(result.dumpPath));
+    }
   }
   if (result.kind === "exited" && result.terminationCause) {
     lines.push(`Termination: ${result.terminationCause}`);
@@ -202,7 +221,7 @@ function formatPollResult(result: SessionPollResult): NormalizedToolResult {
   const output = lines.join("\n") + body;
   const failed =
     result.kind === "exited" &&
-    (result.exitCode !== 0 ||
+    (!(verdict?.ok ?? result.exitCode === 0) ||
       result.state === SESSION_STATES.cleanupFailed ||
       result.terminationCause !== undefined);
   return failed
@@ -297,7 +316,7 @@ export function buildSessionExecToolset(
       if (!parsed.success) {
         return failedToolResult(
           TOOL_OUTCOME_KINDS.invalidInput,
-          `参数校验失败: ${parsed.error.issues.map((issue) => issue.message).join("; ")}`,
+          describeZodIssues(parsed.error, rawInput) ?? "参数校验失败",
           { raw: parsed.error.issues },
         );
       }
@@ -365,7 +384,7 @@ export function buildSessionExecToolset(
       if (!parsed.success) {
         return failedToolResult(
           TOOL_OUTCOME_KINDS.invalidInput,
-          `参数校验失败: ${parsed.error.issues.map((issue) => issue.message).join("; ")}`,
+          describeZodIssues(parsed.error, rawInput) ?? "参数校验失败",
           { raw: parsed.error.issues },
         );
       }

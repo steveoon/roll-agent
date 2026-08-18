@@ -580,7 +580,7 @@ test(
           `invalid-explanation-${String(explanation.length)}`,
         );
         assert.equal(result.isError, true);
-        assert.match(String(result.output), /参数校验失败/u);
+        assert.match(String(result.output), /explanation 越界/u);
       }
       assert.equal(approvals, 0);
       assert.equal(manager.size(), 0);

@@ -26,6 +26,8 @@ import {
   revalidateFilePathAdmission,
 } from "./file-io.ts";
 import type { FileStateTracker } from "./file-state-tracker.ts";
+import { isWithinOutputDumpDir } from "../../bash/output-dump.ts";
+import { describeZodIssues } from "../bounded-param.ts";
 import { gateExternalPath } from "./external-approval.ts";
 import { FILE_TOOLS_AGENT_NAME, type ResolvedFileToolsSettings } from "./settings.ts";
 
@@ -103,10 +105,12 @@ export function buildReadFileTool(
       if (!parsed.success) {
         return failedToolResult(
           TOOL_OUTCOME_KINDS.invalidInput,
-          "参数校验失败: path 必须为非空字符串，offset/limit 须为正整数",
+          describeZodIssues(parsed.error, rawInput) ??
+            "参数校验失败: path 必须为非空字符串，offset/limit 须为正整数",
         );
       }
-      if (escapesWorkdir(settings.workdir, parsed.data.path)) {
+      const resolvedPath = resolveFilePath(settings.workdir, parsed.data.path);
+      if (escapesWorkdir(settings.workdir, parsed.data.path) && !isWithinOutputDumpDir(resolvedPath)) {
         const gated = await gateExternalPath(ctx, READ_FILE_TOOL_NAME, parsed.data, id);
         if (gated !== undefined) {
           return gated;

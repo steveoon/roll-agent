@@ -13,6 +13,7 @@ import { withAutoApprovedShellEnv } from "../bash/clean-env.ts";
 import { formatBashResult } from "../bash/format-result.ts";
 import type { ShellProfile, ShellToolName } from "../bash/profile.ts";
 import { isWithinWorkdirRoot } from "../bash/workdir.ts";
+import { boundedIntParam, describeZodIssues } from "./bounded-param.ts";
 import { gateToolCall, type ToolBridgeContext } from "./build-tools.ts";
 import { ToolRegistry } from "./naming.ts";
 import {
@@ -62,6 +63,21 @@ function capturedClassification(value: unknown): CommandClassification {
   return value === "known-safe" || value === "dangerous" ? value : "unknown";
 }
 
+const timeoutMsParam = boundedIntParam({
+  name: "timeout_ms",
+  min: 1,
+  max: 600_000,
+  description: "超时毫秒数，上限受 maxTimeoutMs 与 turnTimeoutMs 约束；长脚本请显式调大",
+  defaultNote: "默认 10000",
+});
+const maxOutputCharsParam = boundedIntParam({
+  name: "max_output_chars",
+  min: 1_000,
+  max: 200_000,
+  description: "本次返回输出的字符预算；控制输出量请用本参数，不要自接 head/tail 管道",
+  defaultNote: "默认继承配置",
+});
+
 const bashToolInputSchema = z.object({
   command: z.string().min(1).describe("要执行的 shell 命令（单字符串，由当前 shell 后端执行）"),
   explanation: shellCommandExplanationSchema.optional(),
@@ -70,24 +86,8 @@ const bashToolInputSchema = z.object({
     .min(1)
     .optional()
     .describe("工作目录绝对路径，默认为 roll chat 当前目录。不要在 command 里用 cd，改用本字段"),
-  timeout_ms: z
-    .number()
-    .int()
-    .min(1)
-    .max(600_000)
-    .optional()
-    .describe(
-      "超时毫秒数。默认 10000，上限受 maxTimeoutMs 与 turnTimeoutMs 约束；长脚本请显式调大",
-    ),
-  max_output_chars: z
-    .number()
-    .int()
-    .min(1_000)
-    .max(200_000)
-    .optional()
-    .describe(
-      "本次返回输出的字符预算（整数，范围 1000-200000），默认继承配置；控制输出量请用本参数，不要自接 head/tail 管道",
-    ),
+  timeout_ms: timeoutMsParam.schema,
+  max_output_chars: maxOutputCharsParam.schema,
 });
 
 export type BashToolInput = z.infer<typeof bashToolInputSchema>;
@@ -193,14 +193,16 @@ export function buildBashToolset(
   };
   const plan: ToolExecutionPlan = {
     prepare: async (rawInput, capturedState) => {
-      const input = parseBashToolInput(rawInput);
-      if (input === undefined) {
+      const parsed = bashToolInputSchema.safeParse(rawInput);
+      if (!parsed.success) {
         return failedToolResult(
           TOOL_OUTCOME_KINDS.invalidInput,
-          "参数校验失败: command 必须为非空字符串，explanation 最多 100 字符",
+          describeZodIssues(parsed.error, rawInput) ??
+            "参数校验失败: command 必须为非空字符串，explanation 最多 100 字符",
           { raw: rawInput },
         );
       }
+      const input = parsed.data;
       const invocation = resolveInvocation(input, capturedClassification(capturedState));
       return gateBashCall(
         ctx,
