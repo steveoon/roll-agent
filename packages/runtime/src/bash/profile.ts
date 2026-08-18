@@ -14,6 +14,12 @@ export type ShellProfileId = (typeof SHELL_PROFILE_IDS)[number];
 export const SHELL_TOOL_NAMES = ["bash", "powershell"] as const;
 export type ShellToolName = (typeof SHELL_TOOL_NAMES)[number];
 
+export const POSIX_PIPEFAIL_GUARD = "( set -o pipefail ) 2>/dev/null && set -o pipefail; ";
+
+export function wrapPosixCommand(command: string): string {
+  return `${POSIX_PIPEFAIL_GUARD}${command}`;
+}
+
 export interface ShellSpawnSpec {
   readonly file: string;
   readonly args: readonly string[];
@@ -106,7 +112,7 @@ function createPosixShellProfile(deps: ShellProfileResolutionDeps): ShellProfile
     buildSpawn(command, workdir, env) {
       return {
         file: resolveUserShell({ platform: deps.platform, env, fileExists }),
-        args: ["-c", command],
+        args: ["-c", wrapPosixCommand(command)],
         options: {
           cwd: workdir,
           detached: true,
@@ -134,7 +140,8 @@ function createPosixShellProfile(deps: ShellProfileResolutionDeps): ShellProfile
     systemPromptHints() {
       return [
         "当前 shell 后端是 POSIX shell；优先使用 macOS/Linux 常见命令语法。",
-        "过滤和预览输出时可使用 grep、sed、head、tail 等 POSIX 工具。",
+        "管道已启用 pipefail：任一阶段失败整条管道即失败，退出码如实反映，不要依赖「最后一个命令」的退出码。",
+        "仅为控制输出量时请用 roll__bash 的 max_output_chars 参数或 roll__read_file / roll__grep 等工具，不要自接 head/tail 管道；需要过滤时仍可用 grep 等工具，但退出码反映整条管道。",
       ];
     },
   };

@@ -1,10 +1,14 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import type { ChildProcess, SpawnOptions, SpawnSyncReturns } from "node:child_process";
 import { EventEmitter } from "node:events";
+import { runBashCommand } from "./exec.ts";
 import {
   buildPowerShellEncodedCommand,
+  POSIX_PIPEFAIL_GUARD,
   resolveShellProfile,
+  wrapPosixCommand,
   type ShellProfileResolutionDeps,
 } from "./profile.ts";
 
@@ -86,10 +90,68 @@ test("resolveShellProfile 在非 Windows 返回 POSIX profile", () => {
   assert.equal(result.profile.waitForTreeKillAfterRootExit, false);
   const spec = result.profile.buildSpawn("echo hi", "/tmp", {});
   assert.equal(spec.file, "/bin/zsh");
-  assert.deepEqual(spec.args, ["-c", "echo hi"]);
+  assert.deepEqual(spec.args, ["-c", wrapPosixCommand("echo hi")]);
   const safeSpec = result.profile.buildSpawn("echo hi", "/tmp", { SHELL: "/bin/sh" });
   assert.equal(safeSpec.file, "/bin/sh");
 });
+
+test("wrapPosixCommand 以可降级的 pipefail 守卫开头", () => {
+  assert.equal(wrapPosixCommand("echo hi"), `${POSIX_PIPEFAIL_GUARD}echo hi`);
+});
+
+const livePosix = resolveShellProfile({ platform: process.platform, env: process.env });
+const livePosixShell = livePosix.supported
+  ? livePosix.profile.buildSpawn("true", process.cwd(), process.env).file
+  : "";
+const pipefailSupported =
+  process.platform !== "win32" &&
+  spawnSync(livePosixShell, ["-c", `${POSIX_PIPEFAIL_GUARD}false | true`]).status !== 0;
+
+function livePosixRun(command: string) {
+  assert.equal(livePosix.supported, true);
+  if (!livePosix.supported) {
+    throw new Error("posix profile unavailable");
+  }
+  return runBashCommand({
+    command,
+    workdir: process.cwd(),
+    timeoutMs: 5_000,
+    maxCaptureBytes: 65_536,
+    profile: livePosix.profile,
+  });
+}
+
+test(
+  "pipefail 生效时管道中间失败如实报告非零退出码",
+  {
+    skip:
+      process.platform === "win32" || !pipefailSupported
+        ? "当前 shell 不支持 pipefail，降级为末端退出码语义"
+        : false,
+  },
+  async () => {
+    const result = await livePosixRun("false | true");
+    assert.equal(result.exitCode, 1);
+  },
+);
+
+test(
+  "管道全部成功时退出码仍为 0",
+  { skip: process.platform === "win32" ? "win32 使用 PowerShell profile" : false },
+  async () => {
+    const result = await livePosixRun("true | true");
+    assert.equal(result.exitCode, 0);
+  },
+);
+
+test(
+  "无管道命令退出码透传不受守卫影响",
+  { skip: process.platform === "win32" ? "win32 使用 PowerShell profile" : false },
+  async () => {
+    const result = await livePosixRun("exit 7");
+    assert.equal(result.exitCode, 7);
+  },
+);
 
 test("resolveShellProfile 在 win32 + pwsh 7 返回 PowerShell profile", () => {
   const result = resolveWindowsProfile({

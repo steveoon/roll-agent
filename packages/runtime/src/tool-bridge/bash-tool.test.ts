@@ -830,3 +830,35 @@ test("P1：不存在的 workdir 不再获得 known-safe 自动批准", async () 
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+test("max_output_chars 覆盖默认模型输出预算", async () => {
+  const big = "x".repeat(20_000);
+  const execute = getExecute(
+    settings(),
+    { policy: allowPolicy, requestApproval: async () => ({ approved: true }) },
+    async () => ({
+      ...okResult,
+      stdout: { text: big, totalBytes: big.length, totalLines: 1, truncated: false },
+    }),
+  );
+  const result = await execute({ command: "big", max_output_chars: 2_000 }, options());
+  assert.equal(result.isError, false);
+  const output = String(result.output);
+  assert.ok(output.length < big.length);
+  assert.match(output, /chars truncated/u);
+});
+
+test("不传 max_output_chars 时沿用 settings.maxModelOutputChars", async () => {
+  const big = "y".repeat(20_000);
+  const execute = getExecute(
+    settings({ maxModelOutputChars: 40_000 }),
+    { policy: allowPolicy, requestApproval: async () => ({ approved: true }) },
+    async () => ({
+      ...okResult,
+      stdout: { text: big, totalBytes: big.length, totalLines: 1, truncated: false },
+    }),
+  );
+  const result = await execute({ command: "big" }, options());
+  assert.equal(result.isError, false);
+  assert.doesNotMatch(String(result.output), /chars truncated/u);
+});
