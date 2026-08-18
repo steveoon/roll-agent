@@ -18,11 +18,12 @@ test("超预算保头尾并插入截断标记", () => {
   assert.ok(result.text.includes("6 chars truncated"));
 });
 
-test("截断标记携带保留范围与全文长度，模型可定位丢失区间", () => {
+test("截断标记只陈述事实：保留范围与全文长度，不承诺恢复路径", () => {
   const result = truncateMiddle("0123456789", 4);
   assert.ok(result.text.includes("保留前 2 与后 2 字符"));
   assert.ok(result.text.includes("全文 10 字符"));
-  assert.ok(result.text.includes("中段见落盘文件或重跑更窄的命令"));
+  assert.ok(!result.text.includes("落盘"));
+  assert.ok(!result.text.includes("重跑"));
 });
 
 test("maxChars 为 0 时全部截断", () => {

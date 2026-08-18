@@ -18,7 +18,7 @@ export function truncateMiddle(text: string, maxChars: number): TruncationResult
   const head = chars.slice(0, headLen).join("");
   const tail = chars.slice(chars.length - tailLen).join("");
   return {
-    text: `${head}\n…${String(removed)} chars truncated（保留前 ${String(headLen)} 与后 ${String(tailLen)} 字符，全文 ${String(chars.length)} 字符；中段见落盘文件或重跑更窄的命令）…\n${tail}`,
+    text: `${head}\n…${String(removed)} chars truncated（保留前 ${String(headLen)} 与后 ${String(tailLen)} 字符，全文 ${String(chars.length)} 字符）…\n${tail}`,
     truncated: true,
     removed,
   };
