@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import type { ModelMessage } from "ai";
 import {
+  APPROVAL_DIFF_PREVIEW_KEY,
   APPROVAL_EXPLANATION_PREVIEW_KEY,
   RUNTIME_ERROR_CODES,
   RUNTIME_FEATURES_V13,
@@ -496,13 +497,16 @@ function toPendingApproval(
     event.explanation === undefined
       ? undefined
       : approvalExplanationSchema.safeParse(redactSecretText(event.explanation));
-  const preview =
-    parsedExplanation?.success === true && isRecord(safePreview)
-      ? {
-          ...safePreview,
-          [APPROVAL_EXPLANATION_PREVIEW_KEY]: parsedExplanation.data,
-        }
-      : safePreview;
+  const safeDiff = event.diff === undefined ? undefined : safeJson(event.diff, undefined);
+  const preview = isRecord(safePreview)
+    ? {
+        ...safePreview,
+        ...(parsedExplanation?.success === true
+          ? { [APPROVAL_EXPLANATION_PREVIEW_KEY]: parsedExplanation.data }
+          : {}),
+        ...(safeDiff !== undefined ? { [APPROVAL_DIFF_PREVIEW_KEY]: safeDiff } : {}),
+      }
+    : safePreview;
   return {
     id: approvalIdSchema.parse(event.approvalId),
     turnId,

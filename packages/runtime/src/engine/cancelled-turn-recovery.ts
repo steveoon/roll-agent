@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { ModelMessage } from "ai";
 import { z } from "zod";
+import { getFileChangeDisplay } from "@roll-agent/protocol";
 import {
   toRedactedToolExecutionRecordSummary,
   type ToolExecutionRecord,
@@ -115,7 +116,13 @@ function formatOutcome(outcome: ToolOutcome, includeReason: boolean) {
 function formatEvidence(record: ToolExecutionRecord, displayBudget: number) {
   const summary = toRedactedToolExecutionRecordSummary(record);
   const value = summary.display.value;
-  const serialized = typeof value === "string" ? value : JSON.stringify(value);
+  const fileChange = getFileChangeDisplay(value);
+  const serialized =
+    fileChange !== undefined
+      ? fileChange.text
+      : typeof value === "string"
+        ? value
+        : JSON.stringify(value);
   return {
     agentName: safeIdentity(summary.agentName),
     toolName: safeIdentity(summary.toolName),
