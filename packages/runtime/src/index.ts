@@ -11,6 +11,19 @@ export type {
   SessionSkillSummary,
 } from "./engine/agent-session.ts";
 export type { SessionAttachment, SessionSendInput } from "./engine/session-attachments.ts";
+export {
+  WORKSPACE_INSTRUCTION_FILE_NAMES,
+  WORKSPACE_INSTRUCTIONS_MAX_CHARS,
+  WORKSPACE_INSTRUCTIONS_MODES,
+  createWorkspaceInstructionsSource,
+  findWorkspaceInstructionsPath,
+  parseWorkspaceInstructionsSetting,
+} from "./engine/workspace-instructions.ts";
+export type {
+  WorkspaceInstructions,
+  WorkspaceInstructionsSetting,
+  WorkspaceInstructionsSource,
+} from "./engine/workspace-instructions.ts";
 export { resolveContextWindow, lookupContextWindow } from "./engine/context-window.ts";
 export {
   compactMessages,
