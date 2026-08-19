@@ -100,8 +100,8 @@ export function getFileChangeDisplay(display: unknown): FileChangeDisplay | unde
 错误消息与现状逐字一致。`prepare` 与 `execute` 共用。
 
 新增 `file-change-result.ts`：`fileChangeToolResult(text, diff | undefined)` →
-`diff` 存在时 `successfulToolResult({ text, diff }, { model: { type: "text", value: text } })`，
-否则退回 `successfulToolResult(text)`（行为与现状完全一致）。
+`diff` 存在时 `successfulToolResult({ text, diff }, { model: successfulToolResult(text).model })`
+（复用默认的有界模型投影，含 60k 截断），否则退回 `successfulToolResult(text)`（行为与现状完全一致）。
 
 ### 3. runtime：审批路径
 
