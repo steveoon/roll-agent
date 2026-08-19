@@ -226,6 +226,24 @@ chat:
 `--screen-mode` 只适用于没有起始 message 的交互会话，不能与 `--json`、`--server` 或
 `--list` 同用。显式指定 `fullscreen` 但 stdin/stdout 不具备交互能力时会直接报错。
 
+### `roll chat` 工作区工程约定（AGENTS.md / CLAUDE.md）
+
+`roll chat` 启动时从工作目录逐级向上查找最近一层的 `AGENTS.md`（优先）或 `CLAUDE.md`，
+把内容作为独立的「工作区工程约定」段注入 system prompt（标注来源路径）。它不在对话历史里，
+因此不随 compaction 丢失，也无需在提示里手动要求「先读 AGENTS.md」。
+
+```yaml
+chat:
+  instructions: auto # auto | off | <path>
+```
+
+- `auto`（默认）：同目录两者都在取 `AGENTS.md`；只有一个时用存在的那个；都没有时不注入、不提示
+- `off`：关闭注入
+- `<path>`：显式指定约定文件（相对工作目录解析，支持 `~`）；文件缺失时 stderr 提示一次
+- 刷新：每轮开始按文件修改时间 / 大小检查，变化后下一轮生效；恢复会话时按当前工作目录重新发现
+- 上限：超过 32 000 字符会截断并在 stderr 提示一次，请精简约定文件
+- 只注入、不执行：约定内容是给模型的说明，不会被当作命令运行；`roll chat`、`roll chat --server`、全屏 TUI 行为一致，banner 信息行会显示已加载的文件名
+
 ## CLI 命令参考
 
 ```
