@@ -48,7 +48,7 @@ Ink TUI、基础 REPL、`--server`（Runtime Protocol）三条路径都有对应
 
 ```ts
 export const APPROVAL_DIFF_PREVIEW_KEY = "diff" as const;
-export const FILE_CHANGE_DIFF_UNIFIED_MAX_CHARS = 16_000;
+export const FILE_CHANGE_DIFF_UNIFIED_MAX_CHARS = 20_000;
 
 export const fileChangeDiffSchema = z
   .object({
@@ -60,13 +60,11 @@ export const fileChangeDiffSchema = z
     unified: z.string().max(FILE_CHANGE_DIFF_UNIFIED_MAX_CHARS).optional(), // 缺席 = 只有统计
     truncated: z.boolean(),                       // unified 被按上限截断
   })
-  .strict()
-  .readonly();
+  .readonly();                                   // 刻意不 strict：嵌在 JSON 槽位内的约定键，旧 GUI 对未来字段应容忍
 export type FileChangeDiff = z.infer<typeof fileChangeDiffSchema>;
 
 export const fileChangeDisplaySchema = z
   .object({ text: z.string(), diff: fileChangeDiffSchema })
-  .strict()
   .readonly();
 export type FileChangeDisplay = z.infer<typeof fileChangeDisplaySchema>;
 
@@ -77,7 +75,8 @@ export function getFileChangeDisplay(display: unknown): FileChangeDisplay | unde
 - `unified` 为标准 unified diff 文本：`--- a/<path>` / `+++ b/<path>`（新建为 `--- /dev/null`），
   `@@ -a,b +c,d @@` hunk 头，3 行上下文，`\ No newline at end of file` 标记。
 - 生产侧上限 `12_000` 字符（低于 `safeJson` 的 16 000 截断线，保证 wire 上不被二次截断），
-  schema 上限放宽到 16 000 以容忍 `redactSecretText` 替换导致的少量增长。
+  schema 上限放宽到 20 000：即使 `redactSecretText` 把 unified 撑到 16 000 并被 `safeJson` 追加截断
+  标记，accessor 仍能解析。
 - 两个 accessor 用 `safeParse`，形状不符一律返回 `undefined`，供 Ink / REPL / GUI 共用。
 
 ### 2. runtime：纯计算层
@@ -89,8 +88,8 @@ export function getFileChangeDisplay(display: unknown): FileChangeDisplay | unde
   `MAX_EDIT_DISTANCE = 1_000`；超过时退化为「公共前缀 + 公共后缀 + 中间整段替换」——仍是
   **合法**（非最小）diff，保证永远有统计与正文。
 - `buildFileChangeDiff({ before, after, path, change }): FileChangeDiff`：
-  - `before.length + after.length > 1 MiB`（`MAX_DIFF_INPUT_BYTES`）→ 不跑 Myers，用前后缀
-    trim 得到统计（中间段 removed / added），`unified` 缺席（"超大文件只给统计不给正文"）。
+  - `before.length + after.length > 1 MiB`（`MAX_DIFF_INPUT_BYTES`）→ 仍跑有界 Myers（编辑距离
+    上限保证成本可控）得到真实统计，但 `unified` 缺席（"超大文件只给统计不给正文"）。
   - 否则生成 hunk（相邻 hunk 间距 ≤ 6 行合并），拼 unified，按 12 000 字符在**行边界**截断，
     `truncated = true`。
 - 全部纯函数，无 I/O，任何异常由调用方 `try/catch` 吞掉 → 不附 diff，不影响写入。
@@ -110,11 +109,18 @@ export function getFileChangeDisplay(display: unknown): FileChangeDisplay | unde
   `gateToolCall` 透传（镜像 `explanation`，`build-tools.ts:407-416`）→
   `AgentSession.requestApproval` 写入事件（`agent-session.ts:2298-2310`）→
   `SessionEvent confirmation-required.diff?`。
-- `edit_file.prepare` 改为：参数校验 → payload 校验 → `loadTextFile` → freshness
-  （unread / stale）→ `planEdits` → 任一失败**直接返回该失败结果，不再弹审批**（避免「批准后
-  才报未读取 / 匹配失败」的无效确认；写入零风险）→ 成功则 `buildFileChangeDiff` 并随
-  `gateToolCall` 提交。`execute` 重新加载 + freshness + `planEdits`：文件在预览与写入之间被改动
-  时 freshness 返回 stale 直接失败，保证「预览到的就是写入的，否则不写」。
+- `edit_file.prepare` 改为：参数校验 → payload 校验 →（**仅工作目录内路径**）`loadTextFile` →
+  freshness → `planEdits` → `buildFileChangeDiff` → 随 `gateToolCall` 提交。工作目录外路径在
+  策略 / 审批门之前**不触碰文件系统**（与 `read_file` 的外部路径门一致，避免把 `edit_file` 变成
+  无审批的文件存在性 / 大小探测器）。只有输入本身无效（`old_string === new_string`、CRLF 适配后
+  相同、内容无变化）才在审批前短路；未读取 / 已过期 / 不匹配等**内容相关**失败不短路——仍弹审批但
+  不带 diff，交给 `execute` 按原逻辑处理。原因：`ToolExecutionCoordinator` 会把同一批次所有调用的
+  `prepare` 跑完才开始任何 `execute`，链式依赖的多条 `edit_file` 在 prepare 阶段必然不匹配，若短路
+  就回归了既有行为。
+- 预览到的 diff 通过 `captureExecutionState` 返回的可变状态对象带到 `execute`；`execute` 重新加载 +
+  freshness + `planEdits` + 重算 diff，若**增删行序列**与预览不一致（例如同批次 `write_file` 先改写
+  了同一文件），拒绝写入并提示重新读取；行号偏移但增删行相同（同批次独立编辑）照常写入。这保证
+  「用户看到的增删就是写入的增删，否则不写」，且 `write_file` 因整文件内容由输入完全指定而无需此校验。
 - `write_file.prepare`：已加载原文件；`before = loaded.ok ? content : ""`，
   `change = loaded.ok ? "modify" : "create"`；原文件不可读（二进制 / 超大 / 目录）时不附 diff。
 - `--server`：`toPendingApproval` 把 `safeJson(diff)` 并进 `preview[APPROVAL_DIFF_PREVIEW_KEY]`
@@ -126,7 +132,8 @@ export function getFileChangeDisplay(display: unknown): FileChangeDisplay | unde
 - `edit_file` / `write_file` 成功时 `display = { text, diff }`（`text` = 现有快照文本），
   `model` 显式为 `{ type: "text", value: text }`——**模型可见输出逐字不变**。
 - 由于 `display` 已是各跳的 `unknown` / `jsonValue`，该对象自动流经：`SessionEvent`、
-  `ToolExecutionRecord.display`（32 KiB 上限，超限整体 omission——与现状同一规则）、
+  `ToolExecutionRecord.display`（32 KiB 上限，超限整体 omission——与现状同一规则；diff 计入其中，
+  因此文本快照能被完整持久化的阈值从约 32k 字符降到约 20k 字符，属有意取舍）、
   `tool.completed.display` / `operationView.display`（`safeJson`）、legacy `session.event`。
   不需要给任何 strict schema 加字段。
 - `cancelled-turn-recovery.ts` 的证据摘要改用 `getFileChangeDisplay(display)?.text ?? display`，
