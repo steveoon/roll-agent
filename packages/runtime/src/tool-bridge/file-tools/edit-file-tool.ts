@@ -6,7 +6,6 @@ import { gateToolCall } from "../build-tools.ts";
 import {
   TOOL_OUTCOME_KINDS,
   failedToolResult,
-  successfulToolResult,
   toolResultToModelOutput,
   type NormalizedToolResult,
 } from "../normalize-result.ts";
@@ -32,6 +31,7 @@ import { rejectInvalidTextPayload } from "./control-chars.ts";
 import { FILE_FRESHNESS, type FileStateTracker } from "./file-state-tracker.ts";
 import { FILE_TOOLS_AGENT_NAME, type ResolvedFileToolsSettings } from "./settings.ts";
 import { planEdits, type AppliedEdit } from "./edit-plan.ts";
+import { describeFileChange, fileChangeToolResult } from "./file-change-result.ts";
 
 export const EDIT_FILE_TOOL_NAME = "edit_file";
 
@@ -136,10 +136,18 @@ export function executeEditFile(
   if (!plan.ok) {
     return plan.result;
   }
+  const diff = describeFileChange({
+    workdir: settings.workdir,
+    inputPath: input.file_path,
+    change: "modify",
+    before: loaded.content,
+    after: plan.next,
+  });
   saveTextFile(path, plan.next, loaded.hadBom);
   tracker.recordKnownContent(loaded.key, plan.next);
-  return successfulToolResult(
+  return fileChangeToolResult(
     renderEditSuccess(path, plan.next, plan.applied, settings.maxOutputChars),
+    diff,
   );
 }
 
@@ -165,6 +173,26 @@ export function buildEditFileTool(
       if (payloadRejected !== undefined) {
         return payloadRejected;
       }
+      const path = resolveFilePath(settings.workdir, parsed.data.file_path);
+      const loaded = loadTextFile(path, { maxFileBytes: settings.maxFileBytes });
+      if (!loaded.ok) {
+        return failedToolResult(TOOL_OUTCOME_KINDS.invalidInput, loaded.message);
+      }
+      const stale = editFreshnessGuard(tracker, path, loaded);
+      if (stale !== undefined) {
+        return stale;
+      }
+      const plan = planEdits(loaded.content, parsed.data.edits);
+      if (!plan.ok) {
+        return plan.result;
+      }
+      const diff = describeFileChange({
+        workdir: settings.workdir,
+        inputPath: parsed.data.file_path,
+        change: "modify",
+        before: loaded.content,
+        after: plan.next,
+      });
       const displayPath = formatPathForApproval(settings.workdir, parsed.data.file_path);
       const external = escapesWorkdir(settings.workdir, parsed.data.file_path);
       const memoryKey = external ? undefined : `${EDIT_FILE_TOOL_NAME}:workdir`;
@@ -176,6 +204,7 @@ export function buildEditFileTool(
         EDIT_ANNOTATIONS,
         {
           explanation: `修改 ${displayPath}：${String(parsed.data.edits.length)} 处编辑`,
+          ...(diff !== undefined ? { diff } : {}),
           ...(memoryKey !== undefined
             ? {
                 memoryKey,

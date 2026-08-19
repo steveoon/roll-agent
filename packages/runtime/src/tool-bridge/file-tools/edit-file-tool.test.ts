@@ -12,6 +12,7 @@ import type { ApprovalRequest } from "../build-tools.ts";
 import { ToolRegistry } from "../naming.ts";
 import { DefaultToolPolicy } from "../../policy/default-policy.ts";
 import { SessionApprovalMemory } from "../../approval/approval-memory.ts";
+import type { ApprovalDecision } from "../../approval/approval-gate.ts";
 import { TOOL_OUTCOME_KINDS, type NormalizedToolResult } from "../normalize-result.ts";
 
 interface Fixture {
@@ -151,9 +152,9 @@ test("唯一命中成功改写并返回编辑点快照", () => {
   });
   assert.equal(result.outcome.kind, TOOL_OUTCOME_KINDS.success);
   assert.equal(readFileSync(f.path, "utf8"), "第一行\n修改后的行\n第三行");
-  const text = String(result.display);
-  assert.match(text, /已完成 1 处修改/u);
-  assert.match(text, / {4}2→修改后的行/u);
+  const display = result.display as { text: string; diff: unknown };
+  assert.match(display.text, /已完成 1 处修改/u);
+  assert.match(display.text, / {4}2→修改后的行/u);
 });
 
 test("编辑成功后无需重读即可继续编辑", () => {
@@ -343,4 +344,108 @@ test("含 NUL 的编辑在弹窗前被拒绝，不产生审批请求", async () 
   assert.match(String(result.display), /U\+0000/u);
   assert.equal(approvals.length, 0);
   assert.equal(readFileSync(f.path, "utf8"), "abc");
+});
+
+function buildEditFixture(
+  f: Fixture,
+  approvals: ApprovalRequest[],
+  decision: ApprovalDecision = { approved: true },
+) {
+  return buildEditFileTool(f.settings, f.tracker, new ToolRegistry(), {
+    policy: new DefaultToolPolicy(),
+    requestApproval: (request) => {
+      approvals.push(request);
+      return Promise.resolve(decision);
+    },
+    approvalMemory: new SessionApprovalMemory(),
+  });
+}
+
+test("edit_file 审批请求携带 dry-run diff，批准后写入且结果 display 含同一 diff、model 仍为快照文本", async () => {
+  const f = fixture("line1\nline2\nline3\n");
+  markRead(f);
+  const approvals: ApprovalRequest[] = [];
+  const editTool = buildEditFixture(f, approvals).roll__edit_file;
+  assert.ok(editTool?.execute !== undefined);
+  const result = (await editTool.execute(
+    { file_path: "target.txt", edits: [{ old_string: "line2", new_string: "LINE2" }] },
+    executeOptions(),
+  )) as NormalizedToolResult;
+  assert.equal(approvals.length, 1);
+  assert.equal(approvals[0]?.diff?.path, "target.txt");
+  assert.equal(approvals[0]?.diff?.added, 1);
+  assert.equal(approvals[0]?.diff?.removed, 1);
+  assert.match(approvals[0]?.diff?.unified ?? "", /-line2\n\+LINE2\n/u);
+  assert.equal(result.outcome.kind, TOOL_OUTCOME_KINDS.success);
+  assert.equal(readFileSync(f.path, "utf8"), "line1\nLINE2\nline3\n");
+  const display = result.display as { text: string; diff: unknown };
+  assert.match(display.text, /已完成 1 处修改并写入/u);
+  assert.deepEqual(display.diff, approvals[0]?.diff);
+  assert.deepEqual(result.model, { type: "text", value: display.text });
+});
+
+test("edit_file 拒绝审批后文件未写入", async () => {
+  const f = fixture("keep\n");
+  markRead(f);
+  const approvals: ApprovalRequest[] = [];
+  const editTool = buildEditFixture(f, approvals, { approved: false }).roll__edit_file;
+  assert.ok(editTool?.execute !== undefined);
+  const result = (await editTool.execute(
+    { file_path: "target.txt", edits: [{ old_string: "keep", new_string: "gone" }] },
+    executeOptions(),
+  )) as NormalizedToolResult;
+  assert.equal(approvals.length, 1);
+  assert.equal(result.outcome.kind, TOOL_OUTCOME_KINDS.userRejected);
+  assert.equal(readFileSync(f.path, "utf8"), "keep\n");
+});
+
+test("edit_file 未读取过 / old_string 不匹配时在审批前直接失败，不弹审批", async () => {
+  const unread = fixture("abc\n");
+  const approvals: ApprovalRequest[] = [];
+  const unreadTool = buildEditFixture(unread, approvals).roll__edit_file;
+  assert.ok(unreadTool?.execute !== undefined);
+  const unreadResult = (await unreadTool.execute(
+    { file_path: "target.txt", edits: [{ old_string: "abc", new_string: "x" }] },
+    executeOptions(),
+  )) as NormalizedToolResult;
+  assert.equal(unreadResult.outcome.kind, TOOL_OUTCOME_KINDS.toolFailed);
+  assert.match(String(unreadResult.display), /尚未读取过/u);
+  assert.equal(approvals.length, 0);
+
+  const mismatch = fixture("abc\n");
+  markRead(mismatch);
+  const mismatchTool = buildEditFixture(mismatch, approvals).roll__edit_file;
+  assert.ok(mismatchTool?.execute !== undefined);
+  const mismatchResult = (await mismatchTool.execute(
+    { file_path: "target.txt", edits: [{ old_string: "zzz", new_string: "x" }] },
+    executeOptions(),
+  )) as NormalizedToolResult;
+  assert.equal(mismatchResult.outcome.kind, TOOL_OUTCOME_KINDS.toolFailed);
+  assert.equal(approvals.length, 0);
+  assert.equal(readFileSync(mismatch.path, "utf8"), "abc\n");
+});
+
+test("edit_file 审批期间文件被外部改动则不写入", async () => {
+  const f = fixture("v1\n");
+  markRead(f);
+  const approvals: ApprovalRequest[] = [];
+  const tools = buildEditFileTool(f.settings, f.tracker, new ToolRegistry(), {
+    policy: new DefaultToolPolicy(),
+    requestApproval: (request) => {
+      approvals.push(request);
+      writeFileSync(f.path, "v1-external\n", "utf8");
+      return Promise.resolve({ approved: true });
+    },
+    approvalMemory: new SessionApprovalMemory(),
+  });
+  const editTool = tools.roll__edit_file;
+  assert.ok(editTool?.execute !== undefined);
+  const result = (await editTool.execute(
+    { file_path: "target.txt", edits: [{ old_string: "v1", new_string: "v2" }] },
+    executeOptions(),
+  )) as NormalizedToolResult;
+  assert.equal(approvals.length, 1);
+  assert.equal(result.outcome.kind, TOOL_OUTCOME_KINDS.toolFailed);
+  assert.match(String(result.display), /已被修改/u);
+  assert.equal(readFileSync(f.path, "utf8"), "v1-external\n");
 });
