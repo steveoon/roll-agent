@@ -207,7 +207,9 @@ export class ChatRenderer {
           event.diff !== undefined
             ? formatFileChangeDiffLines(event.diff, {
                 color: true,
-                maxBodyLines: DIFF_INLINE_MAX_LINES,
+                ...(this.diffDisplayMode === "expanded"
+                  ? {}
+                  : { maxBodyLines: DIFF_INLINE_MAX_LINES, collapsedHint: "/diff on 展开" }),
               }).join("\n")
             : formatApprovalDetails(event.input);
         const message = [header, explanation, body].filter((line) => line.length > 0).join("\n");

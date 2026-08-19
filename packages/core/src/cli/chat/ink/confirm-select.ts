@@ -304,7 +304,12 @@ export function ConfirmSelect({
           2,
           wrapDisplayLines(`AI 说明：${explanation}`, contentWidth, 2).split("\n").length,
         );
-  const fixedRows = 2 + 1 + explanationRows + (sessionGrantLabel === undefined ? 0 : 1) + 2;
+  const labelRows =
+    sessionGrantLabel === undefined
+      ? 0
+      : Math.max(1, Math.ceil(displayWidth(sessionGrantLabel) / contentWidth));
+  const promptRows = Math.max(1, Math.ceil(displayWidth(prompt) / contentWidth));
+  const fixedRows = 2 + promptRows + explanationRows + labelRows + 2;
   const diffBudget = Math.max(0, boundedRows - 1 - fixedRows);
   const diffRows =
     diff === undefined || diffBudget < 1

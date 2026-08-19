@@ -593,12 +593,14 @@ export async function runRepl(
         }
         session = next;
         session.setUserInputAvailable(true);
+        const previousDiffDisplay = renderer.diffDisplay;
         renderer = new ChatRenderer(
           confirmFn,
           session.getContextWindow(),
           io.signal,
           userInputPrompt,
         );
+        renderer.setDiffDisplay(previousDiffDisplay);
         availableSkills = session.getSkillSummaries();
         const record = store.getThread(session.id);
         titled = record?.title !== undefined;
