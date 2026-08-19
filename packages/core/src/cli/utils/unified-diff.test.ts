@@ -156,6 +156,24 @@ test("annotateIntralineChanges 为配对的删除/新增行标出 token 级差�
   assert.equal(farAdd?.segments, undefined);
 });
 
+test("annotateIntralineChanges 对公共字符过少的改动 token 不做字符级细化", () => {
+  const lines = diffBodyLines({
+    ...DIFF,
+    unified: "--- a/f\n+++ b/f\n@@ -1,1 +1,1 @@\n-对齐测试OKpackages\n+对齐测试DONEpackages\n",
+  });
+  const del = lines[0];
+  const add = lines[1];
+  assert.ok(del?.kind === "del" && add?.kind === "add");
+  assert.deepEqual(
+    del.segments?.filter((segment) => segment.changed).map((segment) => segment.text),
+    ["OK"],
+  );
+  assert.deepEqual(
+    add.segments?.filter((segment) => segment.changed).map((segment) => segment.text),
+    ["DONE"],
+  );
+});
+
 test("formatFileChangeDiffLines 使用单列行号、不输出 @@ 头、多 hunk 之间用 ⋯ 分隔，改动片段反色", () => {
   const lines = formatFileChangeDiffLines(DIFF, { color: false });
   assert.equal(lines[0], "src/a.ts  +2 −1");

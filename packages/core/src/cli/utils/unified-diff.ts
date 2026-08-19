@@ -87,6 +87,7 @@ function tokenize(text: string): string[] {
 function commonTokenFlags(
   left: readonly string[],
   right: readonly string[],
+  minRun = 1,
 ): { readonly left: boolean[]; readonly right: boolean[] } {
   const rows = left.length + 1;
   const cols = right.length + 1;
@@ -100,14 +101,12 @@ function commonTokenFlags(
           : Math.max(table[(i + 1) * cols + j] ?? 0, table[i * cols + j + 1] ?? 0);
     }
   }
-  const leftCommon = left.map(() => false);
-  const rightCommon = right.map(() => false);
+  const pairs: Array<readonly [number, number]> = [];
   let i = 0;
   let j = 0;
   while (i < left.length && j < right.length) {
     if (left[i] === right[j]) {
-      leftCommon[i] = true;
-      rightCommon[j] = true;
+      pairs.push([i, j]);
       i += 1;
       j += 1;
     } else if ((table[(i + 1) * cols + j] ?? 0) >= (table[i * cols + j + 1] ?? 0)) {
@@ -115,6 +114,28 @@ function commonTokenFlags(
     } else {
       j += 1;
     }
+  }
+  const leftCommon = left.map(() => false);
+  const rightCommon = right.map(() => false);
+  let runStart = 0;
+  for (let index = 0; index <= pairs.length; index += 1) {
+    const current = pairs[index];
+    const previous = pairs[index - 1];
+    const continues =
+      current !== undefined &&
+      previous !== undefined &&
+      current[0] === previous[0] + 1 &&
+      current[1] === previous[1] + 1;
+    if (continues) {
+      continue;
+    }
+    if (index - runStart >= minRun) {
+      for (const [li, ri] of pairs.slice(runStart, index)) {
+        leftCommon[li] = true;
+        rightCommon[ri] = true;
+      }
+    }
+    runStart = index;
   }
   return { left: leftCommon, right: rightCommon };
 }
@@ -187,7 +208,11 @@ function refineChangedPairs(
     }
     const leftChars = [...left.text];
     const rightChars = [...right.text];
-    const common = commonTokenFlags(leftChars, rightChars);
+    const common = commonTokenFlags(leftChars, rightChars, 2);
+    const shared = common.left.filter(Boolean).length;
+    if (shared * 2 <= Math.min(leftChars.length, rightChars.length)) {
+      continue;
+    }
     del[delIndex] = toSegments(leftChars, common.left);
     add[addIndex] = toSegments(rightChars, common.right);
   }
