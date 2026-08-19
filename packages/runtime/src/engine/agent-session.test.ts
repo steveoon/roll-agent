@@ -3742,6 +3742,61 @@ test("AgentSession 上下文溢出的 pending Tool 恢复写失败时,下一轮�
   assert.equal(persistCalls, 2);
 });
 
+test("AgentSession 上下文溢出时 Tool 账本写盘失败不落盘终态", async () => {
+  let ledgerCalls = 0;
+  let toolCalls = 0;
+  const persisted: ModelMessage[][] = [];
+  const model = sequencedModel([
+    [
+      { type: "stream-start", warnings: [] },
+      {
+        type: "tool-call",
+        toolCallId: "c1",
+        toolName: "echo-agent__echo",
+        input: JSON.stringify({ q: "announced-only" }),
+      },
+      { type: "error", error: "context_length_exceeded" },
+    ],
+    textStep("must not run"),
+  ]);
+  const session = new AgentSession({
+    id: "context-overflow-ledger-failure",
+    model,
+    sources: [
+      source("echo-agent", "echo", () => {
+        toolCalls += 1;
+      }),
+    ],
+    maxSteps: 4,
+    onToolExecution: () => {
+      ledgerCalls += 1;
+      throw new Error("ledger full");
+    },
+    onPersist: (messages) => {
+      persisted.push([...messages]);
+    },
+  });
+
+  const events = await collect(session.send("tool loop"));
+
+  assert.equal(toolCalls, 0);
+  assert.equal(ledgerCalls, 1);
+  assert.deepEqual(session.getToolExecutions({}, true), []);
+  assert.deepEqual(session.getMessages(), []);
+  assert.deepEqual(persisted, [], "ledger failure must not persist a turn terminal state");
+  assert.ok(
+    events.some(
+      (event) =>
+        event.type === "error" && /上下文溢出工具状态持久化失败: ledger full/u.test(event.message),
+    ),
+  );
+  assert.ok(
+    events.some(
+      (event) => event.type === "error" && /context_length_exceeded/u.test(event.message),
+    ),
+  );
+});
+
 test("AgentSession 前一模型步骤的同 ID 成功执行不会把新宣告调用误判为已执行", async () => {
   let toolCalls = 0;
   const model = sequencedModel([

@@ -2097,7 +2097,15 @@ export class AgentSession {
     sawToolCall: boolean,
     turnStartedAt: number,
   ): void {
-    this.persistPendingToolCancellationsOrReport(queue, activeTurn, "上下文溢出工具状态持久化失败");
+    if (
+      !this.persistPendingToolCancellationsOrReport(
+        queue,
+        activeTurn,
+        "上下文溢出工具状态持久化失败",
+      )
+    ) {
+      return;
+    }
     const hadToolActivity = sawToolCall || activeTurn.toolExecutions.length > 0;
     const notes = ["本轮因上下文窗口溢出而中断，未自动重放。"];
     if (producedText) {
