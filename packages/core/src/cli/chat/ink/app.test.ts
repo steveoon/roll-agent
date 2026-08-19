@@ -1017,6 +1017,44 @@ test("/show-think toggles committed reasoning between collapsed and expanded", a
   unmount();
 });
 
+test("/diff 切换 diff 折叠模式并给出提示", async () => {
+  const sink: Sink = { approved: [], rejected: [] };
+  async function* send(): AsyncIterable<SessionEvent> {
+    yield { type: "text-delta", delta: "好的" };
+    yield { type: "message-finish", text: "好的" };
+  }
+  const { stdin, lastFrame, unmount } = render(
+    h(ChatApp, {
+      session: makeSession(send, sink),
+      model: "qwen",
+      onUserSubmit: () => {},
+      onExit: () => {},
+    }),
+  );
+  await delay(10);
+
+  for (const ch of "/diff") {
+    stdin.write(ch);
+  }
+  await delay(20);
+  stdin.write("\r");
+  await waitFor(() => {
+    const frame = plain(lastFrame() ?? "");
+    assert.match(frame, /完整显示/);
+  });
+
+  for (const ch of "/diff off") {
+    stdin.write(ch);
+  }
+  await delay(20);
+  stdin.write("\r");
+  await waitFor(() => {
+    const frame = plain(lastFrame() ?? "");
+    assert.match(frame, /折叠为一行摘要/);
+  });
+  unmount();
+});
+
 test("ChatApp renders many tool rows in history", async () => {
   const sink: Sink = { approved: [], rejected: [] };
   async function* send(): AsyncIterable<SessionEvent> {

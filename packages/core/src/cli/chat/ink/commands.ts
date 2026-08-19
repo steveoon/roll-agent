@@ -41,6 +41,11 @@ export const SLASH_COMMANDS: readonly SlashCommand[] = [
   },
   {
     kind: "command",
+    name: "/diff",
+    description: "完整显示或折叠大段文件 diff (on | off)，不带参数时切换",
+  },
+  {
+    kind: "command",
     name: "/auto",
     description: "开关自动批准工具调用 (on | off)，Shift+Tab 快捷切换",
   },

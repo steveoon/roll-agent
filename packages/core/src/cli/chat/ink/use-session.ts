@@ -11,6 +11,7 @@ import {
 } from "./state.ts";
 import type { ThinkingLevel } from "../../../llm/providers.ts";
 import type { ChatThinkingDisplay } from "../../../config/schema.ts";
+import type { DiffDisplayMode } from "../diff-display.ts";
 import { log } from "../../utils/output.ts";
 import { formatDebugEvent } from "../../utils/debug-format.ts";
 
@@ -40,6 +41,7 @@ export interface UseSessionResult {
   readonly setDraft: (value: string) => void;
   readonly setThinking: (level: ThinkingLevel) => void;
   readonly setThinkingDisplay: (value: ChatThinkingDisplay) => void;
+  readonly setDiffDisplay: (value: DiffDisplayMode) => void;
   readonly setAutoMode: (value: boolean) => void;
   readonly toggleAutoMode: () => void;
   readonly commitHistory: (item: HistoryItem) => void;
@@ -287,6 +289,10 @@ export function useSession(session: AgentSession, options: UseSessionOptions): U
     dispatch({ type: "set-thinking-display", value });
   }, []);
 
+  const setDiffDisplay = useCallback((value: DiffDisplayMode) => {
+    dispatch({ type: "set-diff-display", value });
+  }, []);
+
   const setAutoMode = useCallback((value: boolean) => {
     autoModeRef.current = value;
     dispatch({ type: "set-auto", value });
@@ -313,6 +319,7 @@ export function useSession(session: AgentSession, options: UseSessionOptions): U
     setDraft,
     setThinking,
     setThinkingDisplay,
+    setDiffDisplay,
     setAutoMode,
     toggleAutoMode,
     commitHistory,

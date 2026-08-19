@@ -3,11 +3,14 @@ import type { ReactElement } from "react";
 import { Box, Text } from "ink";
 import { GLYPHS } from "../../utils/glyphs.ts";
 import type { ChatThinkingDisplay } from "../../../config/schema.ts";
+import type { DiffDisplayMode } from "../diff-display.ts";
+import { shouldExpandDiff } from "../diff-display.ts";
 import type { HistoryItem } from "./state.ts";
 import { AssistantContent } from "./assistant-content.ts";
 import { ToolLabel } from "./tool-label.ts";
 import { BannerLinesView } from "./banner-view.ts";
 import { ReasoningBlock, ReasoningSummary } from "./reasoning-block.ts";
+import { DiffBlock, DiffSummary, diffBodyLineCount } from "./diff-view.ts";
 
 const DENIAL_TEXT_PREFIXES = ["已取消执行", "策略拒绝执行"] as const;
 
@@ -19,11 +22,13 @@ function isDenialText(text: string): boolean {
 export interface HistoryItemViewProps {
   readonly item: HistoryItem;
   readonly thinkingDisplay?: ChatThinkingDisplay;
+  readonly diffDisplay?: DiffDisplayMode;
 }
 
 export function HistoryItemView({
   item,
   thinkingDisplay = "collapsed",
+  diffDisplay = "collapsed",
 }: HistoryItemViewProps): ReactElement {
   const collapseThinking = thinkingDisplay === "collapsed";
   switch (item.kind) {
@@ -67,12 +72,24 @@ export function HistoryItemView({
         : h(ReasoningBlock, { text: item.text });
     case "tool": {
       const args = item.args.length > 0 && item.args !== "{}" ? ` ${item.args}` : "";
-      return h(
+      const line = h(
         Text,
         null,
         h(Text, item.ok ? { color: "green" } : { color: "red" }, item.ok ? "✓ " : "✗ "),
         h(ToolLabel, { name: item.name }),
         args.length > 0 ? h(Text, { dimColor: true }, args) : null,
+      );
+      if (item.diff === undefined) {
+        return line;
+      }
+      const expanded = shouldExpandDiff(diffBodyLineCount(item.diff), diffDisplay);
+      return h(
+        Box,
+        { flexDirection: "column" },
+        line,
+        expanded
+          ? h(DiffBlock, { diff: item.diff })
+          : h(DiffSummary, { diff: item.diff, hint: "/diff 展开" }),
       );
     }
     case "denied":
