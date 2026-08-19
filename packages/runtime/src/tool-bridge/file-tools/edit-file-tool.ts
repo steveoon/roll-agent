@@ -16,15 +16,7 @@ import {
   executeCoordinatedTool,
   type ToolExecutionPlan,
 } from "../tool-execution-coordinator.ts";
-import {
-  findAllExact,
-  findOldString,
-  formatMultiMatchDiagnosis,
-  formatNoMatchDiagnosis,
-  lineNumberAt,
-  renderNumberedLines,
-  type MatchSpan,
-} from "./match-pipeline.ts";
+import { lineNumberAt, renderNumberedLines } from "./match-pipeline.ts";
 import {
   canonicalResourcePath,
   captureFilePathAdmission,
@@ -34,17 +26,16 @@ import {
   resolveFilePath,
   revalidateFilePathAdmission,
   saveTextFile,
+  type LoadedTextFile,
 } from "./file-io.ts";
 import { rejectInvalidTextPayload } from "./control-chars.ts";
 import { FILE_FRESHNESS, type FileStateTracker } from "./file-state-tracker.ts";
 import { FILE_TOOLS_AGENT_NAME, type ResolvedFileToolsSettings } from "./settings.ts";
+import { planEdits, type AppliedEdit } from "./edit-plan.ts";
 
 export const EDIT_FILE_TOOL_NAME = "edit_file";
 
 const SNAPSHOT_RADIUS = 3;
-
-const NO_MATCH_STEERING =
-  "若修改面较大或文件已大幅变化，可改用 roll__write_file 整文件重写（需先 read_file）";
 
 const editEntrySchema = z.object({
   old_string: z
@@ -63,60 +54,6 @@ const editFileInputSchema = z.object({
 export type EditFileInput = z.infer<typeof editFileInputSchema>;
 
 const EDIT_ANNOTATIONS = {} as const;
-
-interface AppliedEdit {
-  position: number;
-  length: number;
-}
-
-function detectCrlfOnly(content: string): boolean {
-  const crlf = (content.match(/\r\n/g) ?? []).length;
-  const bareLf = (content.match(/(?<!\r)\n/g) ?? []).length;
-  return crlf > 0 && bareLf === 0;
-}
-
-function adaptLineEndings(value: string, crlfOnly: boolean): string {
-  return crlfOnly ? value.replace(/\r?\n/g, "\r\n") : value;
-}
-
-function shiftApplied(applied: AppliedEdit[], at: number, delta: number): void {
-  for (const record of applied) {
-    if (record.position > at) {
-      record.position += delta;
-    }
-  }
-}
-
-function applySpan(
-  working: string,
-  span: MatchSpan,
-  replacement: string,
-  applied: AppliedEdit[],
-): string {
-  const next = working.slice(0, span.start) + replacement + working.slice(span.end);
-  shiftApplied(applied, span.start, replacement.length - (span.end - span.start));
-  applied.push({ position: span.start, length: replacement.length });
-  return next;
-}
-
-function applyReplaceAll(
-  working: string,
-  spans: readonly MatchSpan[],
-  replacement: string,
-  applied: AppliedEdit[],
-): string {
-  let next = working;
-  for (let index = spans.length - 1; index >= 0; index -= 1) {
-    const span = spans.at(index);
-    if (span === undefined) {
-      continue;
-    }
-    next = next.slice(0, span.start) + replacement + next.slice(span.end);
-    shiftApplied(applied, span.start, replacement.length - (span.end - span.start));
-    applied.push({ position: span.start, length: replacement.length });
-  }
-  return next;
-}
 
 function renderEditSuccess(
   path: string,
@@ -156,6 +93,27 @@ function rejectInvalidEditPayloads(input: EditFileInput): NormalizedToolResult |
   return undefined;
 }
 
+function editFreshnessGuard(
+  tracker: FileStateTracker,
+  path: string,
+  loaded: LoadedTextFile,
+): NormalizedToolResult | undefined {
+  const freshness = tracker.checkFreshness(loaded.key, loaded.content);
+  if (freshness === FILE_FRESHNESS.unread) {
+    return failedToolResult(
+      TOOL_OUTCOME_KINDS.toolFailed,
+      `尚未读取过 ${path}。请先用 roll__read_file 读取文件，再基于读到的内容编辑。`,
+    );
+  }
+  if (freshness === FILE_FRESHNESS.stale) {
+    return failedToolResult(
+      TOOL_OUTCOME_KINDS.toolFailed,
+      `${path} 在你上次读取后已被修改（可能是用户或其他程序改动）。请重新 roll__read_file 获取最新内容，再基于最新内容编辑，不要用旧内容重试。`,
+    );
+  }
+  return undefined;
+}
+
 export function executeEditFile(
   settings: ResolvedFileToolsSettings,
   tracker: FileStateTracker,
@@ -170,73 +128,19 @@ export function executeEditFile(
   if (!loaded.ok) {
     return failedToolResult(TOOL_OUTCOME_KINDS.invalidInput, loaded.message);
   }
-  const freshness = tracker.checkFreshness(loaded.key, loaded.content);
-  if (freshness === FILE_FRESHNESS.unread) {
-    return failedToolResult(
-      TOOL_OUTCOME_KINDS.toolFailed,
-      `尚未读取过 ${path}。请先用 roll__read_file 读取文件，再基于读到的内容编辑。`,
-    );
+  const stale = editFreshnessGuard(tracker, path, loaded);
+  if (stale !== undefined) {
+    return stale;
   }
-  if (freshness === FILE_FRESHNESS.stale) {
-    return failedToolResult(
-      TOOL_OUTCOME_KINDS.toolFailed,
-      `${path} 在你上次读取后已被修改（可能是用户或其他程序改动）。请重新 roll__read_file 获取最新内容，再基于最新内容编辑，不要用旧内容重试。`,
-    );
+  const plan = planEdits(loaded.content, input.edits);
+  if (!plan.ok) {
+    return plan.result;
   }
-  const crlfOnly = detectCrlfOnly(loaded.content);
-  let working = loaded.content;
-  const applied: AppliedEdit[] = [];
-  for (const [index, edit] of input.edits.entries()) {
-    const label = `第 ${String(index + 1)} 条编辑（共 ${String(input.edits.length)} 条）`;
-    if (edit.old_string === edit.new_string) {
-      return failedToolResult(
-        TOOL_OUTCOME_KINDS.invalidInput,
-        `${label}：new_string 与 old_string 相同，没有可应用的变化。未写入任何修改。`,
-      );
-    }
-    const oldAdapted = adaptLineEndings(edit.old_string, crlfOnly);
-    const newAdapted = adaptLineEndings(edit.new_string, crlfOnly);
-    if (oldAdapted === newAdapted) {
-      return failedToolResult(
-        TOOL_OUTCOME_KINDS.invalidInput,
-        `${label}：该文件使用 CRLF 换行，行尾会自动适配，这条编辑在适配后 new_string 与 old_string 相同（只改换行符不会产生变化）。未写入任何修改。`,
-      );
-    }
-    if (edit.replace_all === true) {
-      const spans = findAllExact(working, oldAdapted);
-      if (spans.length === 0) {
-        return failedToolResult(
-          TOOL_OUTCOME_KINDS.toolFailed,
-          `${label}失败，未写入任何修改。\n${formatNoMatchDiagnosis(working, oldAdapted)}\n${NO_MATCH_STEERING}`,
-        );
-      }
-      working = applyReplaceAll(working, spans, newAdapted, applied);
-      continue;
-    }
-    const match = findOldString(working, oldAdapted);
-    if (match.kind === "none") {
-      return failedToolResult(
-        TOOL_OUTCOME_KINDS.toolFailed,
-        `${label}失败，未写入任何修改。\n${formatNoMatchDiagnosis(working, oldAdapted)}\n${NO_MATCH_STEERING}`,
-      );
-    }
-    if (match.kind === "multiple") {
-      return failedToolResult(
-        TOOL_OUTCOME_KINDS.toolFailed,
-        `${label}失败，未写入任何修改。\n${formatMultiMatchDiagnosis(working, match.spans)}`,
-      );
-    }
-    working = applySpan(working, match.span, newAdapted, applied);
-  }
-  if (working === loaded.content) {
-    return failedToolResult(
-      TOOL_OUTCOME_KINDS.invalidInput,
-      "所有编辑应用后文件内容与原文件完全相同，没有可写入的变化。未写入任何修改。",
-    );
-  }
-  saveTextFile(path, working, loaded.hadBom);
-  tracker.recordKnownContent(loaded.key, working);
-  return successfulToolResult(renderEditSuccess(path, working, applied, settings.maxOutputChars));
+  saveTextFile(path, plan.next, loaded.hadBom);
+  tracker.recordKnownContent(loaded.key, plan.next);
+  return successfulToolResult(
+    renderEditSuccess(path, plan.next, plan.applied, settings.maxOutputChars),
+  );
 }
 
 export function buildEditFileTool(
