@@ -1521,14 +1521,7 @@ export class AgentSession {
             contextRecoveryAttempts += 1;
             continue;
           }
-          this.persistContextFailure(
-            queue,
-            activeTurn,
-            storedUserMessage,
-            false,
-            false,
-            turnStartedAt,
-          );
+          this.persistContextFailure(queue, activeTurn, storedUserMessage, false, turnStartedAt);
           queue.push({ type: "error", stage: "execute", message: errorMessage(error) });
           return;
         }
@@ -1809,7 +1802,6 @@ export class AgentSession {
               activeTurn,
               storedUserMessage,
               text.length > 0,
-              sawToolCall,
               turnStartedAt,
             );
             queue.push({ type: "error", stage: "execute", message: `${streamError}${suffix}` });
@@ -1884,7 +1876,6 @@ export class AgentSession {
               activeTurn,
               storedUserMessage,
               text.length > 0,
-              sawToolCall,
               turnStartedAt,
             );
             queue.push({
@@ -2094,7 +2085,6 @@ export class AgentSession {
     activeTurn: ActiveTurn,
     userMessage: UserModelMessage,
     producedText: boolean,
-    sawToolCall: boolean,
     turnStartedAt: number,
   ): void {
     if (
@@ -2106,7 +2096,19 @@ export class AgentSession {
     ) {
       return;
     }
-    const hadToolActivity = sawToolCall || activeTurn.toolExecutions.length > 0;
+    const hadToolActivity = activeTurn.toolExecutions.some((record) => {
+      if (
+        record.outcome.kind === TOOL_OUTCOME_KINDS.policyDenied ||
+        record.outcome.kind === TOOL_OUTCOME_KINDS.userRejected ||
+        record.outcome.kind === TOOL_OUTCOME_KINDS.invalidInput
+      ) {
+        return false;
+      }
+      if (record.outcome.kind === TOOL_OUTCOME_KINDS.cancelled) {
+        return record.outcome.executionState !== TOOL_CANCELLATION_EXECUTION_STATES.notExecuted;
+      }
+      return true;
+    });
     const notes = ["本轮因上下文窗口溢出而中断，未自动重放。"];
     if (producedText) {
       notes.push("本轮已产生部分文本，持久历史仅保留此中断标记。");

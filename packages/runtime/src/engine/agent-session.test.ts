@@ -3684,6 +3684,7 @@ test("AgentSession 同 ID 新调用只宣告便上下文溢出时,以 not_execut
   assert.match(recovery.modelContext, /"kind":"success"/u);
   assert.match(recovery.modelContext, /"executionState":"not_executed"/u);
   assert.ok(recovery.modelContext.length <= 12_000);
+  assert.match(JSON.stringify(persisted.at(-1)), /已有操作开始执行/u);
   assert.equal(countOccurrences(JSON.stringify(session.getMessages()), '"type":"tool-call"'), 0);
 
   await collect(session.send("继续"));
@@ -5990,4 +5991,44 @@ test("appendInterruptedTurnMessages 在 pending 工具未入账时拒绝写入�
 
   assert.equal(allowed, true);
   assert.equal(persisted.length, 1);
+});
+
+test("AgentSession 上下文溢出时仅宣告未执行的调用不再声称已开始执行", async () => {
+  const persisted: ModelMessage[][] = [];
+  const model = sequencedModel([
+    [
+      { type: "stream-start", warnings: [] },
+      {
+        type: "tool-call",
+        toolCallId: "c1",
+        toolName: "echo-agent__echo",
+        input: JSON.stringify({ q: "announced-only" }),
+      },
+      { type: "error", error: "context_length_exceeded" },
+    ],
+    textStep("must not run"),
+  ]);
+  let toolCalls = 0;
+  const session = new AgentSession({
+    id: "overflow-announced-only-note",
+    model,
+    sources: [
+      source("echo-agent", "echo", () => {
+        toolCalls += 1;
+      }),
+    ],
+    maxSteps: 4,
+    onPersist: (messages) => {
+      persisted.push([...messages]);
+    },
+  });
+
+  const events = await collect(session.send("tool loop"));
+
+  assert.equal(events.at(-1)?.type, "error");
+  assert.equal(toolCalls, 0);
+  const flat = JSON.stringify(persisted);
+  assert.match(flat, /not_executed/u);
+  assert.match(flat, /本轮因上下文窗口溢出而中断/u);
+  assert.doesNotMatch(flat, /已有操作开始执行/u);
 });
