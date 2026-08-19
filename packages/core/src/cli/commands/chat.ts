@@ -42,6 +42,7 @@ import {
 } from "../utils/user-input-prompts.ts";
 import { buildSessionPickerItems, type SessionPickerItem } from "../chat/session-picker-format.ts";
 import { clackSessionPicker } from "../utils/clack-session-picker.ts";
+import { diffDisplayNotice, resolveDiffDisplayToggle } from "../chat/diff-display.ts";
 
 type RuntimeModule = typeof import("@roll-agent/runtime");
 
@@ -541,6 +542,12 @@ export async function runRepl(
           await renderer.handle(event, session);
         }
         log.debug("chat.repl manual compact completed");
+        continue;
+      }
+      if (input === "/diff" || input.startsWith("/diff ")) {
+        const next = resolveDiffDisplayToggle(input.slice("/diff".length), renderer.diffDisplay);
+        renderer.setDiffDisplay(next);
+        log.info(diffDisplayNotice(next));
         continue;
       }
       if (input === "/skills") {
