@@ -1,13 +1,13 @@
 import { statSync } from "node:fs";
 import { tool, type ToolSet } from "ai";
 import { z } from "zod";
+import type { FileChangeKind } from "@roll-agent/protocol";
 import type { ToolRegistry } from "../naming.ts";
 import type { ToolBridgeContext } from "../build-tools.ts";
 import { gateToolCall } from "../build-tools.ts";
 import {
   TOOL_OUTCOME_KINDS,
   failedToolResult,
-  successfulToolResult,
   toolResultToModelOutput,
   type NormalizedToolResult,
 } from "../normalize-result.ts";
@@ -35,6 +35,7 @@ import {
 import { rejectInvalidTextPayload } from "./control-chars.ts";
 import { FILE_FRESHNESS, type FileStateTracker } from "./file-state-tracker.ts";
 import { FILE_TOOLS_AGENT_NAME, type ResolvedFileToolsSettings } from "./settings.ts";
+import { describeFileChange, fileChangeToolResult } from "./file-change-result.ts";
 
 export const WRITE_FILE_TOOL_NAME = "write_file";
 
@@ -117,6 +118,7 @@ export function executeWriteFile(
   if (existing === "directory") {
     return failedToolResult(TOOL_OUTCOME_KINDS.invalidInput, `${path} 是目录，不能作为文件写入`);
   }
+  let before: string | undefined;
   if (existing === true) {
     const loaded = loadTextFile(path, { maxFileBytes: settings.maxFileBytes });
     if (!loaded.ok) {
@@ -126,6 +128,7 @@ export function executeWriteFile(
     if (guarded !== undefined) {
       return guarded;
     }
+    before = loaded.content;
   }
   const { content, hadBom } = splitUtf8Bom(input.content);
   saveTextFile(path, content, hadBom);
@@ -139,7 +142,14 @@ export function executeWriteFile(
   if (lines.length > PREVIEW_LINES) {
     parts.push(`（预览前 ${String(PREVIEW_LINES)} 行）`);
   }
-  return successfulToolResult(parts.join("\n"));
+  const diff = describeFileChange({
+    workdir: settings.workdir,
+    inputPath: input.file_path,
+    change: before === undefined ? "create" : "modify",
+    before: before ?? "",
+    after: content,
+  });
+  return fileChangeToolResult(parts.join("\n"), diff);
 }
 
 export function buildWriteFileTool(
@@ -174,6 +184,22 @@ export function buildWriteFileTool(
         }
       }
       const { shrinking, warning } = detectShrink(newLineCount, loaded);
+      const { content: newContent } = splitUtf8Bom(parsed.data.content);
+      const change: FileChangeKind | undefined = loaded.ok
+        ? "modify"
+        : loaded.code === "not-found"
+          ? "create"
+          : undefined;
+      const diff =
+        change === undefined
+          ? undefined
+          : describeFileChange({
+              workdir: settings.workdir,
+              inputPath: parsed.data.file_path,
+              change,
+              before: loaded.ok ? loaded.content : "",
+              after: newContent,
+            });
       const displayPath = formatPathForApproval(settings.workdir, parsed.data.file_path);
       const explanation = `写入 ${displayPath}（${String(newLineCount)} 行）${warning !== undefined ? `\n${warning}` : ""}`;
       const external = escapesWorkdir(settings.workdir, parsed.data.file_path);
@@ -186,6 +212,7 @@ export function buildWriteFileTool(
         WRITE_ANNOTATIONS,
         {
           explanation,
+          ...(diff !== undefined ? { diff } : {}),
           ...(memoryKey !== undefined
             ? {
                 memoryKey,

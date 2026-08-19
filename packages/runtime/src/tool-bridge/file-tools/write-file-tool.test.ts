@@ -33,8 +33,9 @@ test("新文件写入成功并自动建父目录", () => {
   });
   assert.equal(result.outcome.kind, TOOL_OUTCOME_KINDS.success);
   assert.equal(readFileSync(join(workdir, "sub/dir/new.txt"), "utf8"), "第一行\n第二行");
-  assert.match(String(result.display), /已写入/u);
-  assert.match(String(result.display), / {4}1→第一行/u);
+  const display = result.display as { text: string; diff: unknown };
+  assert.match(display.text, /已写入/u);
+  assert.match(display.text, / {4}1→第一行/u);
 });
 
 const ctrl = (code: number): string => String.fromCharCode(code);
@@ -197,8 +198,9 @@ test("content 以 BOM 开头时按 BOM 文件落盘，tracker 记录去 BOM 内�
     content: "\uFEFFhello\nworld\n",
   });
   assert.equal(written.outcome.kind, TOOL_OUTCOME_KINDS.success);
-  assert.match(String(written.display), /（3 行，/u);
-  assert.match(String(written.display), / {4}1→hello/u);
+  const writtenDisplay = written.display as { text: string; diff: unknown };
+  assert.match(writtenDisplay.text, /（3 行，/u);
+  assert.match(writtenDisplay.text, / {4}1→hello/u);
   assert.equal(readFileSync(path, "utf8"), "\uFEFFhello\nworld\n");
   const loaded = loadTextFile(path, { maxFileBytes: 1024 });
   assert.ok(loaded.ok && loaded.hadBom);
@@ -423,4 +425,51 @@ test("非缩水覆盖命中已授权记忆，不再弹出确认", async () => {
   )) as NormalizedToolResult;
   assert.equal(result.outcome.kind, TOOL_OUTCOME_KINDS.success);
   assert.equal(approvals.length, 0);
+});
+
+test("write_file 新建文件的审批 diff 为 create 且全部新增，写入后 display 含 diff", async () => {
+  const workdir = mkdtempSync(join(tmpdir(), "write-tool-diff-create-"));
+  const approvals: ApprovalRequest[] = [];
+  const tools = buildWriteFixture(
+    workdir,
+    new FileStateTracker(),
+    approvals,
+    new SessionApprovalMemory(),
+  );
+  const writeTool = tools.roll__write_file;
+  assert.ok(writeTool?.execute !== undefined);
+  const result = (await writeTool.execute(
+    { file_path: "fresh.txt", content: "a\nb\n" },
+    executeOptions(),
+  )) as NormalizedToolResult;
+  assert.equal(approvals.length, 1);
+  assert.equal(approvals[0]?.diff?.change, "create");
+  assert.equal(approvals[0]?.diff?.added, 2);
+  assert.equal(approvals[0]?.diff?.removed, 0);
+  assert.match(approvals[0]?.diff?.unified ?? "", /^--- \/dev\/null\n\+\+\+ b\/fresh\.txt\n/u);
+  assert.equal(result.outcome.kind, TOOL_OUTCOME_KINDS.success);
+  const display = result.display as { text: string; diff: { change: string } };
+  assert.match(display.text, /已写入/u);
+  assert.equal(display.diff.change, "create");
+  assert.deepEqual(result.model, { type: "text", value: display.text });
+});
+
+test("write_file 覆盖已读文件时审批 diff 为 modify 并给出增删统计", async () => {
+  const workdir = mkdtempSync(join(tmpdir(), "write-tool-diff-modify-"));
+  const path = join(workdir, "doc.md");
+  writeFileSync(path, "one\ntwo\nthree\n", "utf8");
+  const tracker = new FileStateTracker();
+  tracker.recordKnownContent(canonicalFileKey(path), "one\ntwo\nthree\n");
+  const approvals: ApprovalRequest[] = [];
+  const tools = buildWriteFixture(workdir, tracker, approvals, new SessionApprovalMemory());
+  const writeTool = tools.roll__write_file;
+  assert.ok(writeTool?.execute !== undefined);
+  const result = (await writeTool.execute(
+    { file_path: "doc.md", content: "one\n2\nthree\nfour\n" },
+    executeOptions(),
+  )) as NormalizedToolResult;
+  assert.equal(approvals[0]?.diff?.change, "modify");
+  assert.equal(approvals[0]?.diff?.added, 2);
+  assert.equal(approvals[0]?.diff?.removed, 1);
+  assert.equal(result.outcome.kind, TOOL_OUTCOME_KINDS.success);
 });
