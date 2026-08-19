@@ -125,3 +125,10 @@ test("revealLogoLines progress=1 等于输入", () => {
   assert.deepEqual(revealLogoLines(logo, 1), logo);
   assert.deepEqual(revealLogoLines(logo, 1.5), logo);
 });
+
+test("info 行在提供 instructionsFile 时追加约定文件名，缺省时不显示", () => {
+  const withFile = texts(buildBannerLines({ ...INFO, instructionsFile: "AGENTS.md" }, 120));
+  assert.ok(withFile.includes("26 skills · AGENTS.md"));
+  const without = texts(buildBannerLines(INFO, 120));
+  assert.ok(!without.includes("AGENTS.md"));
+});

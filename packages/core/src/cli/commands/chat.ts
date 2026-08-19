@@ -1,4 +1,4 @@
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { defineCommand } from "citty";
 import type { AgentSession } from "@roll-agent/runtime";
 import { inspectLlmConfigReadiness } from "../../config/helpers.ts";
@@ -127,6 +127,10 @@ function reportSkillLibraryIssue(message: string): void {
   log.warn(`skill 目录加载警告：${message}`);
 }
 
+function reportWorkspaceInstructionsIssue(message: string): void {
+  log.warn(`工作区约定：${message}`);
+}
+
 function shutdownSignalExitCode(signal: ChatEngineShutdownSignal): number {
   return signal === "SIGINT" ? 130 : 143;
 }
@@ -162,6 +166,7 @@ export function createChatEngine(input: CreateChatEngineInput) {
     debugEvents: isDebugLogEnabled(),
     onAgentBootstrapIssue: reportAgentBootstrapIssue,
     onSkillLibraryIssue: reportSkillLibraryIssue,
+    onWorkspaceInstructionsIssue: reportWorkspaceInstructionsIssue,
     ...(input.shellEnv ? { shellEnv: input.shellEnv } : {}),
   });
 }
@@ -827,6 +832,9 @@ export default defineCommand({
           model: modelName,
           agentCount: summary.agentCount,
           skillCount: summary.skillCount,
+          ...(summary.instructionsPath !== undefined
+            ? { instructionsFile: basename(summary.instructionsPath) }
+            : {}),
         };
         let usedInk = false;
         if (presentationDecision?.presentation === CHAT_PRESENTATIONS.fullscreen) {
