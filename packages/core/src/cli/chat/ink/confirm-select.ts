@@ -56,6 +56,7 @@ function planCompactRows(
   hasExplanation: boolean,
   hasLabel: boolean,
   hasArgs: boolean,
+  argsBeforeSecondExplanationRow: boolean,
 ): CompactRowPlan {
   let spare = Math.max(0, boundedRows - COMPACT_ESSENTIAL_ROWS);
   let explanationRows = 0;
@@ -67,11 +68,18 @@ function planCompactRows(
   if (showLabel) {
     spare -= 1;
   }
+  let showArgs = false;
+  if (argsBeforeSecondExplanationRow && hasArgs && spare > 0) {
+    showArgs = true;
+    spare -= 1;
+  }
   if (explanationRows === 1 && spare > 0) {
     explanationRows = 2;
     spare -= 1;
   }
-  const showArgs = hasArgs && spare > 0;
+  if (!showArgs) {
+    showArgs = hasArgs && spare > 0;
+  }
   return { explanationRows, showLabel, showArgs };
 }
 
@@ -207,6 +215,7 @@ export function ConfirmSelect({
         explanation !== undefined,
         compactSessionGrantLabelFits,
         showArgs || diff !== undefined,
+        diff !== undefined,
       )
     : undefined;
   const hasSession =

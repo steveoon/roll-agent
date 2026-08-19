@@ -350,3 +350,41 @@ test("compact 布局只显示 diff 头行", () => {
   assert.doesNotMatch(frame, /\+n1/u);
   assert.ok(frame.split("\n").length <= 6);
 });
+
+test("compact 行预算紧张时 diff 头行优先于说明第二行", () => {
+  const { lastFrame } = render(
+    h(ConfirmSelect, {
+      prompt: "执行 roll.edit_file?",
+      args: "file_path: src/a.ts",
+      explanation: "修改 src/a.ts：1 处编辑，顺便补一句很长的说明文字以确保第二行存在",
+      sessionGrantLabel: "本会话内不再询问：修改工作目录内的文件",
+      diff: CONFIRM_DIFF,
+      width: 80,
+      maxRows: 6,
+      onDecide: () => {},
+    }),
+  );
+  const frame = stripAnsi(lastFrame() ?? "");
+  const lines = frame.split("\n");
+  assert.match(frame, /src\/a\.ts\s+\+3 −1/u);
+  assert.ok(lines.length <= 6);
+  assert.ok(lines.some((line) => line.includes("Yes")));
+});
+
+test("compact 无 diff 时说明第二行 / 标签仍优先于 args 行（现状不变）", () => {
+  const { lastFrame } = render(
+    h(ConfirmSelect, {
+      prompt: "执行 roll.edit_file?",
+      args: "file_path: src/a.ts",
+      explanation: "修改 src/a.ts：1 处编辑，顺便补一句很长的说明文字以确保第二行存在",
+      sessionGrantLabel: "本会话内不再询问：修改工作目录内的文件",
+      width: 80,
+      maxRows: 6,
+      onDecide: () => {},
+    }),
+  );
+  const frame = stripAnsi(lastFrame() ?? "");
+  assert.doesNotMatch(frame, /file_path: src\/a\.ts/u);
+  assert.ok(frame.split("\n").length <= 6);
+  assert.match(frame, /本会话内不再询问：修改工作目录内的文件/u);
+});

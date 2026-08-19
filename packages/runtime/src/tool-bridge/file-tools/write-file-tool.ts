@@ -176,20 +176,29 @@ export function buildWriteFileTool(
       }
       const newLineCount = parsed.data.content.split("\n").length;
       const path = resolveFilePath(settings.workdir, parsed.data.file_path);
-      const loaded = loadTextFile(path, { maxFileBytes: settings.maxFileBytes });
-      if (loaded.ok) {
+      const external = escapesWorkdir(settings.workdir, parsed.data.file_path);
+      const loaded = external
+        ? undefined
+        : loadTextFile(path, { maxFileBytes: settings.maxFileBytes });
+      if (loaded?.ok === true) {
         const guarded = overwriteGuard(tracker, path, loaded);
         if (guarded !== undefined) {
           return guarded;
         }
       }
-      const { shrinking, warning } = detectShrink(newLineCount, loaded);
+      const { shrinking, warning } =
+        loaded !== undefined
+          ? detectShrink(newLineCount, loaded)
+          : { shrinking: false, warning: undefined };
       const { content: newContent } = splitUtf8Bom(parsed.data.content);
-      const change: FileChangeKind | undefined = loaded.ok
-        ? "modify"
-        : loaded.code === "not-found"
-          ? "create"
-          : undefined;
+      const change: FileChangeKind | undefined =
+        loaded === undefined
+          ? undefined
+          : loaded.ok
+            ? "modify"
+            : loaded.code === "not-found"
+              ? "create"
+              : undefined;
       const diff =
         change === undefined
           ? undefined
@@ -197,12 +206,11 @@ export function buildWriteFileTool(
               workdir: settings.workdir,
               inputPath: parsed.data.file_path,
               change,
-              before: loaded.ok ? loaded.content : "",
+              before: loaded?.ok === true ? loaded.content : "",
               after: newContent,
             });
       const displayPath = formatPathForApproval(settings.workdir, parsed.data.file_path);
       const explanation = `写入 ${displayPath}（${String(newLineCount)} 行）${warning !== undefined ? `\n${warning}` : ""}`;
-      const external = escapesWorkdir(settings.workdir, parsed.data.file_path);
       const memoryKey = shrinking || external ? undefined : `${WRITE_FILE_TOOL_NAME}:workdir`;
       return gateToolCall(
         ctx,

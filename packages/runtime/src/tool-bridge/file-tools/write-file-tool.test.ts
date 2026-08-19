@@ -473,3 +473,35 @@ test("write_file 覆盖已读文件时审批 diff 为 modify 并给出增删统�
   assert.equal(approvals[0]?.diff?.removed, 1);
   assert.equal(result.outcome.kind, TOOL_OUTCOME_KINDS.success);
 });
+
+test("write_file 工作目录外路径在策略门之前不触碰文件系统：策略拒绝时只得到 policy_denied", async () => {
+  const workdir = mkdtempSync(join(tmpdir(), "write-tool-external-"));
+  const outside = mkdtempSync(join(tmpdir(), "write-tool-outside-"));
+  writeFileSync(join(outside, "secret.txt"), "top secret\n", "utf8");
+  const approvals: ApprovalRequest[] = [];
+  const tools = buildWriteFileTool(
+    resolveFileToolsSettings({ workdir }),
+    new FileStateTracker(),
+    new ToolRegistry(),
+    {
+      policy: { check: () => ({ action: "deny", reason: "外部路径禁止" }) },
+      requestApproval: (request) => {
+        approvals.push(request);
+        return Promise.resolve({ approved: true });
+      },
+    },
+  );
+  const writeTool = tools.roll__write_file;
+  assert.ok(writeTool?.execute !== undefined);
+  for (const target of [join(outside, "secret.txt"), join(outside, "missing.txt")]) {
+    const result = (await writeTool.execute(
+      { file_path: target, content: "x\n" },
+      executeOptions(),
+    )) as NormalizedToolResult;
+    assert.equal(result.outcome.kind, TOOL_OUTCOME_KINDS.policyDenied);
+    assert.doesNotMatch(String(result.display), /已存在|文件不存在|文件过大|尚未读取过/u);
+  }
+  assert.equal(approvals.length, 0);
+  assert.equal(readFileSync(join(outside, "secret.txt"), "utf8"), "top secret\n");
+  assert.equal(existsSync(join(outside, "missing.txt")), false);
+});

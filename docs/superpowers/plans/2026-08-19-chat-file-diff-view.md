@@ -17,7 +17,7 @@
 - 核心代码零注释（WHAT/WHY 交给命名与 changeset）。
 - if/else 必须加花括号。
 - CLI 参数 kebab-case；stdout 只输出数据，日志/状态/着色一律 stderr。
-- 上限常量（来自 spec §7）：unified 生产上限 `12_000` 字符（行边界截断）；schema 上限 `16_000`；输入合计 > `1_048_576` 字节只给统计；Myers 编辑距离上限 `1_000`；TUI/REPL 折叠阈值正文 > `40` 行。
+- 上限常量（来自 spec §7）：unified 生产上限 `12_000` 字符（行边界截断）；schema 上限 `20_000`；输入合计 > `1_048_576` 字节只给统计；Myers 编辑距离上限 `1_000`；TUI/REPL 折叠阈值正文 > `40` 行。
 - 不引入新 npm 依赖；不 bump Runtime Protocol 版本；不改任何 `.strict()` 协议 schema 的顶层字段。
 - 每个 Task 结束时：`pnpm --filter <pkg> typecheck` + 相关测试文件通过再 commit。全部完成后 `pnpm typecheck && pnpm lint && pnpm test`。
 - 测试运行方式：`node --experimental-strip-types --experimental-sqlite --test <file>`（runtime 需要 `--experimental-sqlite`；core / protocol 不需要）。
@@ -37,7 +37,7 @@
   ```ts
   export const APPROVAL_DIFF_PREVIEW_KEY = "diff" as const;
   export const FILE_CHANGE_DIFF_PATH_MAX_CHARS = 4_096;
-  export const FILE_CHANGE_DIFF_UNIFIED_MAX_CHARS = 16_000;
+  export const FILE_CHANGE_DIFF_UNIFIED_MAX_CHARS = 20_000;
   export const FILE_CHANGE_KINDS = ["create", "modify"] as const;
   export const fileChangeDiffSchema: z.ZodReadonly<z.ZodObject<...>>;
   export const fileChangeDisplaySchema: z.ZodReadonly<z.ZodObject<...>>;
@@ -156,7 +156,7 @@ Expected: FAIL（`APPROVAL_DIFF_PREVIEW_KEY` 等未导出 / 类型报错）
 ```ts
 export const APPROVAL_DIFF_PREVIEW_KEY = "diff" as const;
 export const FILE_CHANGE_DIFF_PATH_MAX_CHARS = 4_096;
-export const FILE_CHANGE_DIFF_UNIFIED_MAX_CHARS = 16_000;
+export const FILE_CHANGE_DIFF_UNIFIED_MAX_CHARS = 20_000;
 export const FILE_CHANGE_KINDS = ["create", "modify"] as const;
 ```
 

@@ -123,6 +123,8 @@ export function getFileChangeDisplay(display: unknown): FileChangeDisplay | unde
   「用户看到的增删就是写入的增删，否则不写」，且 `write_file` 因整文件内容由输入完全指定而无需此校验。
 - `write_file.prepare`：已加载原文件；`before = loaded.ok ? content : ""`，
   `change = loaded.ok ? "modify" : "create"`；原文件不可读（二进制 / 超大 / 目录）时不附 diff。
+  工作目录外路径与 `edit_file` 一样先过策略 / 审批门，不读盘、不给 shrink 告警与 diff，execute
+  照旧做覆盖保护。
 - `--server`：`toPendingApproval` 把 `safeJson(diff)` 并进 `preview[APPROVAL_DIFF_PREVIEW_KEY]`
   （与 `explanation` 同一模式；`safeJson` 会顺带 `redactSecretText`）。协议 1.0–1.4 顶层不变，
   旧客户端把 `preview.diff` 当普通 JSON 忽略。
@@ -177,7 +179,7 @@ export function getFileChangeDisplay(display: unknown): FileChangeDisplay | unde
 | 项 | 值 | 位置 |
 |---|---|---|
 | unified 正文上限 | 12 000 字符，行边界截断 | runtime `text-diff.ts` |
-| schema 上限 | 16 000 字符 | protocol |
+| schema 上限 | 20 000 字符 | protocol |
 | 只给统计不给正文 | 输入合计 > 1 MiB | runtime |
 | Myers 编辑距离上限 | 1 000（超过退化为整段替换） | runtime |
 | TUI / REPL 折叠阈值 | 正文 > 40 行 | core |
@@ -196,9 +198,10 @@ export function getFileChangeDisplay(display: unknown): FileChangeDisplay | unde
 - runtime：`text-diff.test.ts`（空 diff / 纯增 / 纯删 / 多 hunk 合并与分离 / 无尾换行标记 /
   CRLF / 新建 / 字符截断在行边界 / 超大只统计 / 编辑距离退化仍可重放得到 after —— 用
   "把 ops 应用到 before 得到 after" 做性质断言）；`edit-plan.test.ts`；`edit-file-tool.test.ts` /
-  `write-file-tool.test.ts`（prepare 携带 diff；prepare 对未读 / stale / 不匹配直接失败且
-  `requestApproval` 未被调用；拒绝后文件未写；成功 display `{text, diff}`；`model` 与现状逐字
-  相同）；`build-tools.test.ts`（透传）；`agent-session.test.ts`（事件带 diff）；
+  `write-file-tool.test.ts`（prepare 携带 diff；输入本身无效（old/new 相同等）在审批前短路；
+  未读 / stale / 不匹配仍弹审批但不带 diff，执行阶段按原逻辑失败；工作目录外路径在策略门前
+  不碰磁盘；拒绝后文件未写；成功 display `{text, diff}`；`model` 与现状逐字相同）；
+  `build-tools.test.ts`（透传）；`agent-session.test.ts`（事件带 diff）；
   `runtime-service.test.ts`（`preview.diff` 可被 `getApprovalDiffPreview` 读回；`tool.completed`
   display 通过 strict schema）；`runtime-server.test.ts`（1.1 与 1.2+ 的 `approval.request`
   params 都携带 `preview.diff` —— 控制流可达性证明）。
@@ -218,6 +221,8 @@ export function getFileChangeDisplay(display: unknown): FileChangeDisplay | unde
 - relay / 远程 web companion 投影（allowlist 有意剥离 `preview` 与 `display`）。
 - 按 hunk 交互式接受 / 拒绝、编辑器跳转、并排视图、`bash` 通道文件改动的 diff。
 - 协议版本 bump（策略 A 已定；若将来需要顶层字段再走 1.5）。
+- 会话级 Always（`sessionGrantLabel`）授权后，同一会话后续的 `edit_file` / `write_file` 不再弹
+  审批框，因此看不到写前预览；应用后的 diff 仍在对话流显示。这是既有 Always 语义，本次明确接受。
 
 ## 发布
 
