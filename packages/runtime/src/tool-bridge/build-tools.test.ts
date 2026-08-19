@@ -86,3 +86,26 @@ test("拒绝不写记忆", async () => {
   assert.ok(result !== undefined);
   assert.equal(memory.isGranted("k"), false);
 });
+
+test("display.diff 原样透传进 ApprovalRequest，缺席时不带 diff 键", async () => {
+  const { ctx, approvals } = confirmPolicyCtx(undefined, [{ approved: true }, { approved: true }]);
+  const diff = {
+    path: "a.txt",
+    change: "modify",
+    added: 1,
+    removed: 1,
+    hunks: 1,
+    unified: "--- a/a.txt\n+++ b/a.txt\n@@ -1,1 +1,1 @@\n-x\n+y\n",
+    truncated: false,
+  } as const;
+  const gated = await gateToolCall(ctx, "roll", "edit_file", { file_path: "a.txt" }, undefined, {
+    explanation: "修改 a.txt：1 处编辑",
+    diff,
+  });
+  assert.equal(gated, undefined);
+  assert.deepEqual(approvals[0]?.diff, diff);
+  await gateToolCall(ctx, "roll", "edit_file", { file_path: "a.txt" }, undefined, {
+    explanation: "无 diff",
+  });
+  assert.equal(Object.hasOwn(approvals[1] ?? {}, "diff"), false);
+});

@@ -2,6 +2,7 @@ import { lstatSync, readdirSync, readlinkSync, realpathSync, statSync } from "no
 import { basename, dirname, isAbsolute, resolve } from "node:path";
 import { jsonSchema, tool, type ToolExecutionOptions, type ToolSet } from "ai";
 import type { JSONSchema7 } from "@ai-sdk/provider";
+import type { FileChangeDiff } from "@roll-agent/protocol";
 import type { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { preflightToolCall } from "@roll-agent/core/tool-runtime/preflight";
 import type { AgentTool } from "@roll-agent/core/types/agent";
@@ -53,6 +54,7 @@ export interface ApprovalRequest {
   readonly reason: string | undefined;
   readonly explanation?: string;
   readonly sessionGrantLabel?: string;
+  readonly diff?: FileChangeDiff;
 }
 
 export interface ToolBridgeContext {
@@ -68,6 +70,7 @@ interface ApprovalDisplayOptions {
   readonly includePolicyReason?: boolean;
   readonly memoryKey?: string;
   readonly sessionGrantLabel?: string;
+  readonly diff?: FileChangeDiff;
 }
 
 export interface BuiltToolset {
@@ -410,6 +413,7 @@ export async function gateToolCall(
       input,
       reason: display?.includePolicyReason === false ? undefined : decision.reason,
       ...(display?.explanation !== undefined ? { explanation: display.explanation } : {}),
+      ...(display?.diff !== undefined ? { diff: display.diff } : {}),
       ...(memoryKey !== undefined && display?.sessionGrantLabel !== undefined
         ? { sessionGrantLabel: display.sessionGrantLabel }
         : {}),

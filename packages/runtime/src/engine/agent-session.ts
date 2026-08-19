@@ -2332,6 +2332,7 @@ export class AgentSession {
       ...(request.sessionGrantLabel !== undefined
         ? { sessionGrantLabel: request.sessionGrantLabel }
         : {}),
+      ...(request.diff !== undefined ? { diff: request.diff } : {}),
     });
     return decision;
   }

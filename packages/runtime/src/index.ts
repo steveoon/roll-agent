@@ -159,3 +159,11 @@ export {
   USER_CANCELLATION_ABORT_REASON,
 } from "./types/cancellation.ts";
 export type { SessionCancellationReason } from "./types/cancellation.ts";
+export {
+  APPROVAL_DIFF_PREVIEW_KEY,
+  fileChangeDiffSchema,
+  fileChangeDisplaySchema,
+  getApprovalDiffPreview,
+  getFileChangeDisplay,
+} from "@roll-agent/protocol";
+export type { FileChangeDiff, FileChangeDisplay, FileChangeKind } from "@roll-agent/protocol";
