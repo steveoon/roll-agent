@@ -21,6 +21,7 @@ import type {
 } from "@ai-sdk/provider";
 import type { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { SKILL_TOOL_ID, type SkillLibrary } from "@roll-agent/core/skills/library";
+import { getFileChangeDisplay } from "@roll-agent/protocol";
 import { AgentSession } from "./agent-session.ts";
 import type { AgentToolSource } from "../tool-bridge/build-tools.ts";
 import type { ToolResourceHint } from "../tool-bridge/tool-execution-coordinator.ts";
@@ -954,6 +955,48 @@ test("AgentSession.approve 的 scope 透传到批准记忆：workdir 内二次�
       secondEditResult.type === "tool-result" &&
       secondEditResult.isError === false,
   );
+});
+
+test("AgentSession 的 edit_file 确认事件携带 diff，成功后的 tool-result display 为 {text, diff}", async () => {
+  const workdir = mkdtempSync(join(tmpdir(), "agent-session-diff-"));
+  writeFileSync(join(workdir, "a.txt"), "第一行\n第二行\n", "utf8");
+  const model = sequencedModel([
+    toolCallStep("roll__read_file", { path: "a.txt" }),
+    toolCallStep("roll__edit_file", {
+      file_path: "a.txt",
+      edits: [{ old_string: "第一行", new_string: "改后一" }],
+    }),
+    textStep("完成"),
+  ]);
+  const session = new AgentSession({
+    id: "diff-passthrough",
+    model,
+    sources: [],
+    fileTools: { workdir },
+    maxSteps: 8,
+    policy: new DefaultToolPolicy(),
+  });
+  const events: SessionEvent[] = [];
+  for await (const event of session.send("改第一行")) {
+    events.push(event);
+    if (event.type === "confirmation-required") {
+      session.approve(event.approvalId);
+    }
+  }
+  const confirmation = events.find((event) => event.type === "confirmation-required");
+  assert.ok(confirmation && confirmation.type === "confirmation-required");
+  assert.equal(confirmation.diff?.path, "a.txt");
+  assert.equal(confirmation.diff?.added, 1);
+  assert.equal(confirmation.diff?.removed, 1);
+  assert.match(confirmation.diff?.unified ?? "", /-第一行\n\+改后一\n/u);
+  const result = events.find(
+    (event) => event.type === "tool-result" && event.toolName === "edit_file",
+  );
+  assert.ok(result && result.type === "tool-result");
+  const display = getFileChangeDisplay(result.display);
+  assert.ok(display);
+  assert.deepEqual(display.diff, confirmation.diff);
+  assert.match(display.text, /已完成 1 处修改/u);
 });
 
 test("AgentSession 未配置 turnTimeoutMs 时 confirmation 携带默认交互 deadline", async () => {
