@@ -93,3 +93,22 @@ test("列表项与引用块的长文本在固定宽度内换行，不会多出�
     }
   }
 });
+
+test("表格宽于终端时分隔线单行截断而不是折成多行", () => {
+  const text = [
+    "| 命令 | 结果 |",
+    "| --- | --- |",
+    "| node --experimental-strip-types --test packages/core/src/cli/chat/ink/confirm-select.test.ts | 16 pass / 0 fail（含新增 2 条） |",
+  ].join("\n");
+  const { lastFrame, unmount } = render(h(Box, { width: 60 }, h(Markdown, { text })));
+  try {
+    const lines = stripVTControlCharacters(lastFrame() ?? "").split("\n");
+    const separatorLines = lines.filter((line) => /^[\s─]+$/u.test(line) && line.includes("─"));
+    assert.equal(separatorLines.length, 1);
+    for (const line of lines) {
+      assert.ok(displayWidth(line) <= 60, `超宽: ${line}`);
+    }
+  } finally {
+    unmount();
+  }
+});

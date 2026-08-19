@@ -126,8 +126,19 @@ function renderTable(token: Tokens.Table, key: string): ReactElement {
     ...widths.map((width: number, index: number) =>
       h(
         Box,
-        { key: `${key}-sep-${String(index)}`, width: width + 2 },
-        h(Text, { dimColor: true }, "─".repeat(width)),
+        {
+          key: `${key}-sep-${String(index)}`,
+          width: width + 2,
+          paddingRight: 2,
+          flexDirection: "column",
+        },
+        h(Box, {
+          borderStyle: "single",
+          borderTop: false,
+          borderLeft: false,
+          borderRight: false,
+          borderDimColor: true,
+        }),
       ),
     ),
   );
