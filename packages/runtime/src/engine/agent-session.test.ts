@@ -5933,3 +5933,61 @@ test("AgentSession 注册文件工具并按 role 标记 capability", async () =>
     await session.close();
   }
 });
+
+test("appendInterruptedTurnMessages 在 pending 工具未入账时拒绝写入终态", () => {
+  const persisted: ModelMessage[][] = [];
+  const session = new AgentSession({
+    id: "interrupted-write-gate",
+    model: sequencedModel([textStep("unused")]),
+    sources: [],
+    maxSteps: 1,
+    onPersist: (messages) => {
+      persisted.push([...messages]);
+    },
+  });
+  const events: SessionEvent[] = [];
+  const queue = {
+    push: (event: SessionEvent) => {
+      events.push(event);
+    },
+  };
+  const internals = session as unknown as {
+    appendInterruptedTurnMessages(
+      queue: { push(event: SessionEvent): void },
+      activeTurn: { pendingToolCalls: ReadonlyMap<string, unknown> },
+      turnStartedAt: number,
+      input: {
+        rollbackTo: number;
+        messages: readonly ModelMessage[];
+        debugLabel: string;
+        failureLabel: string;
+      },
+    ): boolean;
+  };
+  const marker: ModelMessage = { role: "assistant", content: "终态" };
+
+  const blocked = internals.appendInterruptedTurnMessages(
+    queue,
+    { pendingToolCalls: new Map([["c1", {}]]) },
+    0,
+    { rollbackTo: 0, messages: [marker], debugLabel: "gate test", failureLabel: "终态持久化失败" },
+  );
+
+  assert.equal(blocked, false);
+  assert.deepEqual(session.getMessages(), []);
+  assert.deepEqual(persisted, []);
+  const gateError = events.find(
+    (event): event is Extract<SessionEvent, { type: "error" }> => event.type === "error",
+  );
+  assert.match(gateError?.message ?? "", /终态持久化失败: 存在未写入账本的待处理工具调用/u);
+
+  const allowed = internals.appendInterruptedTurnMessages(
+    queue,
+    { pendingToolCalls: new Map() },
+    0,
+    { rollbackTo: 0, messages: [marker], debugLabel: "gate test", failureLabel: "终态持久化失败" },
+  );
+
+  assert.equal(allowed, true);
+  assert.equal(persisted.length, 1);
+});

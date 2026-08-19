@@ -2115,7 +2115,7 @@ export class AgentSession {
       notes.push("本轮已有操作开始执行，部分结果可能已经生效且不会自动撤销，请先检查实际结果。");
     }
     const uncoveredRecords = [...this.uncoveredToolExecutions.values()];
-    this.appendInterruptedTurnMessages(queue, turnStartedAt, {
+    this.appendInterruptedTurnMessages(queue, activeTurn, turnStartedAt, {
       rollbackTo: this.messages.length,
       messages: [
         ...(activeTurn.userMessagePersisted ? [] : [userMessage]),
@@ -2155,7 +2155,7 @@ export class AgentSession {
     ) {
       return;
     }
-    this.appendInterruptedTurnMessages(queue, turnStartedAt, {
+    this.appendInterruptedTurnMessages(queue, activeTurn, turnStartedAt, {
       rollbackTo: this.messages.length,
       messages: [
         ...(activeTurn.userMessagePersisted ? [] : [userMessage]),
@@ -2191,6 +2191,7 @@ export class AgentSession {
 
   private appendInterruptedTurnMessages(
     queue: AsyncEventQueue<SessionEvent>,
+    activeTurn: ActiveTurn,
     turnStartedAt: number,
     input: {
       readonly rollbackTo: number;
@@ -2200,6 +2201,14 @@ export class AgentSession {
       readonly failureLabel: string;
     },
   ): boolean {
+    if (activeTurn.pendingToolCalls.size > 0) {
+      queue.push({
+        type: "error",
+        stage: "execute",
+        message: `${input.failureLabel}: 存在未写入账本的待处理工具调用，已拒绝持久化中断记录`,
+      });
+      return false;
+    }
     this.messages.push(...input.messages);
     this.debug(queue, "persist", input.debugLabel, turnStartedAt, {
       appendedMessages: this.messages.length - input.rollbackTo,
@@ -2503,7 +2512,7 @@ export class AgentSession {
         activeTurn,
         completedStepMessages(activeTurn),
       );
-      activeTurn.cancellationPersisted = this.appendInterruptedTurnMessages(queue, turnStartedAt, {
+      activeTurn.cancellationPersisted = this.appendInterruptedTurnMessages(queue, activeTurn, turnStartedAt, {
         rollbackTo: this.messages.length,
         messages: records,
         debugLabel: "persisting paused turn cancellation",
@@ -3514,7 +3523,7 @@ export class AgentSession {
         : persistedStepMessages(activeTurn);
       activeTurn.cancellationPersisted = true;
       const records = this.cancellationRecordMessages(activeTurn, visibleStepMessages);
-      activeTurn.cancellationPersisted = this.appendInterruptedTurnMessages(queue, turnStartedAt, {
+      activeTurn.cancellationPersisted = this.appendInterruptedTurnMessages(queue, activeTurn, turnStartedAt, {
         rollbackTo: turnStart,
         messages: [...appendedStepMessages, ...records],
         debugLabel: "persisting cancelled turn",
