@@ -1,14 +1,19 @@
 import { createElement as h, useState } from "react";
 import type { ReactElement } from "react";
 import { Box, Text, useInput } from "ink";
+import type { FileChangeDiff } from "@roll-agent/runtime";
 import { displayWidth } from "./display-width.ts";
+import { DiffHeader } from "./diff-view.ts";
 import type { ConfirmDecision } from "./state.ts";
+import { sanitizeForDisplay } from "../../utils/tool-format.ts";
+import { diffBodyLines, formatDiffGutter, formatDiffHeader } from "../../utils/unified-diff.ts";
 
 export interface ConfirmSelectProps {
   readonly prompt: string;
   readonly args: string;
   readonly explanation?: string;
   readonly sessionGrantLabel?: string;
+  readonly diff?: FileChangeDiff;
   readonly width: number;
   readonly maxRows: number;
   readonly onDecide: (decision: ConfirmDecision) => void;
@@ -91,6 +96,13 @@ function truncateDisplayLine(value: string, width: number): string {
   return addEllipsis(normalized, width);
 }
 
+function clipDisplayLine(value: string, width: number): string {
+  if (displayWidth(value) <= width) {
+    return value;
+  }
+  return addEllipsis(value, width);
+}
+
 function wrapDisplayLines(value: string, width: number, maxLines: number): string {
   const normalized = normalizeInlineText(value);
   const safeWidth = Math.max(1, width);
@@ -116,16 +128,71 @@ function wrapDisplayLines(value: string, width: number, maxLines: number): strin
   return visible.join("\n");
 }
 
+function diffLineTextColor(kind: "meta" | "hunk" | "add" | "del" | "context" | "note"): {
+  color?: "green" | "red" | "cyan";
+} {
+  if (kind === "add") {
+    return { color: "green" };
+  }
+  if (kind === "del") {
+    return { color: "red" };
+  }
+  if (kind === "hunk") {
+    return { color: "cyan" };
+  }
+  return {};
+}
+
+function buildConfirmDiffRows(diff: FileChangeDiff, budget: number, width: number): ReactElement[] {
+  const rows: ReactElement[] = [h(DiffHeader, { key: "diff-header", diff })];
+  const body = diffBodyLines(diff);
+  const gutterWidth = Math.max(
+    1,
+    String(body.reduce((m, l) => Math.max(m, l.oldLine ?? 0, l.newLine ?? 0), 0)).length,
+  );
+  const bodyBudget = budget - 1;
+  const visible = body.length <= bodyBudget ? body : body.slice(0, Math.max(0, bodyBudget - 1));
+  visible.forEach((line, index) => {
+    const gutter =
+      line.kind === "hunk" || line.kind === "note"
+        ? " ".repeat(gutterWidth * 2 + 2)
+        : formatDiffGutter(line, gutterWidth);
+    const prefix =
+      line.kind === "add" ? "+" : line.kind === "del" ? "-" : line.kind === "context" ? " " : "";
+    rows.push(
+      h(
+        Text,
+        { key: `diff-${String(index)}`, wrap: "truncate-end" },
+        h(Text, { dimColor: true }, gutter),
+        h(
+          Text,
+          diffLineTextColor(line.kind),
+          clipDisplayLine(
+            `${prefix}${sanitizeForDisplay(line.text)}`,
+            Math.max(1, width - gutter.length),
+          ),
+        ),
+      ),
+    );
+  });
+  const hidden = body.length - visible.length;
+  if (hidden > 0) {
+    rows.push(h(Text, { key: "diff-more", dimColor: true }, `… 另 ${String(hidden)} 行`));
+  }
+  return rows;
+}
+
 export function ConfirmSelect({
   prompt,
   args,
   explanation,
   sessionGrantLabel,
+  diff,
   width,
   maxRows,
   onDecide,
 }: ConfirmSelectProps): ReactElement {
-  const showArgs = args.length > 0 && args !== "{}";
+  const showArgs = diff === undefined && args.length > 0 && args !== "{}";
   const boundedRows = Math.max(1, Math.floor(maxRows));
   const compact = boundedRows <= COMPACT_CONFIRM_MAX_ROWS;
   const compactContentWidth = Math.max(1, width);
@@ -139,7 +206,7 @@ export function ConfirmSelect({
         boundedRows,
         explanation !== undefined,
         compactSessionGrantLabelFits,
-        showArgs,
+        showArgs || diff !== undefined,
       )
     : undefined;
   const hasSession =
@@ -216,7 +283,13 @@ export function ConfirmSelect({
             wrapDisplayLines(`AI 说明：${explanation ?? ""}`, compactContentWidth, explanationRows),
           ),
       showArgsRow
-        ? h(Text, { dimColor: true }, truncateDisplayLine(args, compactContentWidth))
+        ? diff !== undefined
+          ? h(
+              Text,
+              { wrap: "truncate-end" },
+              truncateDisplayLine(formatDiffHeader(diff), compactContentWidth),
+            )
+          : h(Text, { dimColor: true }, truncateDisplayLine(args, compactContentWidth))
         : null,
       showLabelRow ? h(Text, { dimColor: true }, compactSessionGrantLabel ?? "") : null,
       optionRow,
@@ -224,6 +297,19 @@ export function ConfirmSelect({
     );
   }
   const contentWidth = Math.max(1, width - 6);
+  const explanationRows =
+    explanation === undefined
+      ? 0
+      : Math.min(
+          2,
+          wrapDisplayLines(`AI 说明：${explanation}`, contentWidth, 2).split("\n").length,
+        );
+  const fixedRows = 2 + 1 + explanationRows + (sessionGrantLabel === undefined ? 0 : 1) + 2;
+  const diffBudget = Math.max(0, boundedRows - 1 - fixedRows);
+  const diffRows =
+    diff === undefined || diffBudget < 1
+      ? []
+      : buildConfirmDiffRows(diff, diffBudget, contentWidth);
   return h(
     Box,
     {
@@ -249,6 +335,7 @@ export function ConfirmSelect({
         ? null
         : h(Text, { color: "cyan" }, wrapDisplayLines(`AI 说明：${explanation}`, contentWidth, 2)),
       sessionGrantLabel === undefined ? null : h(Text, { dimColor: true }, sessionGrantLabel),
+      ...diffRows,
       showArgs ? h(Text, { dimColor: true }, args) : null,
       optionRow,
     ),

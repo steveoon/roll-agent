@@ -5,11 +5,36 @@ import { createElement as h } from "react";
 import { render } from "ink-testing-library";
 import { ConfirmSelect } from "./confirm-select.ts";
 import type { ConfirmDecision } from "./state.ts";
+import type { FileChangeDiff } from "@roll-agent/runtime";
 
 const ANSI_STYLE_PATTERN = new RegExp(`${String.fromCharCode(27)}\\[[0-9;]*m`, "g");
 const ESC = "\u001b";
 const SESSION_LABEL = "本会话内不再询问：写入工作目录内的文件";
 const EXTERNAL_SESSION_LABEL = "本会话内不再询问：roll__read_file 访问工作目录外的任意路径";
+
+function stripAnsi(value: string): string {
+  return value.replace(ANSI_STYLE_PATTERN, "");
+}
+
+const CONFIRM_DIFF: FileChangeDiff = {
+  path: "src/a.ts",
+  change: "modify",
+  added: 3,
+  removed: 1,
+  hunks: 1,
+  unified: [
+    "--- a/src/a.ts",
+    "+++ b/src/a.ts",
+    "@@ -1,2 +1,4 @@",
+    " keep",
+    "-old",
+    "+n1",
+    "+n2",
+    "+n3",
+    "",
+  ].join("\n"),
+  truncated: false,
+};
 
 test("confirmation treats its row budget as a ceiling instead of a fixed height", () => {
   const { lastFrame, unmount } = render(
@@ -265,4 +290,63 @@ test("expanded help row explains the session-remember option only with label", (
   );
   assert.match(lastFrame() ?? "", /a 允许并且本会话内不再询问/u);
   unmount();
+});
+
+test("expanded 布局内嵌 diff 头与正文，隐藏原始 args，选项行仍在框内最后一行", () => {
+  const { lastFrame } = render(
+    h(ConfirmSelect, {
+      prompt: "执行 roll.edit_file?",
+      args: 'file_path: src/a.ts\nedits: [{"old_string":"old","new_string":"n1\\nn2\\nn3"}]',
+      explanation: "修改 src/a.ts：1 处编辑",
+      diff: CONFIRM_DIFF,
+      width: 80,
+      maxRows: 20,
+      onDecide: () => {},
+    }),
+  );
+  const frame = stripAnsi(lastFrame() ?? "");
+  assert.match(frame, /src\/a\.ts\s+\+3 −1/u);
+  assert.match(frame, /-old/u);
+  assert.match(frame, /\+n3/u);
+  assert.doesNotMatch(frame, /old_string/u);
+  const lines = frame.split("\n");
+  const optionIndex = lines.findIndex((l) => /❯ No|Yes\s+❯ No/u.test(l) || l.includes("No"));
+  const bottomBorder = lines.findIndex((l) => l.trimStart().startsWith("╰"));
+  assert.ok(optionIndex !== -1 && bottomBorder !== -1 && optionIndex < bottomBorder);
+  assert.ok(lines.length <= 20);
+});
+
+test("expanded 布局行预算不足时截断 diff 正文并提示剩余行数，选项行不被挤出", () => {
+  const { lastFrame } = render(
+    h(ConfirmSelect, {
+      prompt: "执行 roll.edit_file?",
+      args: "",
+      diff: CONFIRM_DIFF,
+      width: 80,
+      maxRows: 12,
+      onDecide: () => {},
+    }),
+  );
+  const frame = stripAnsi(lastFrame() ?? "");
+  const lines = frame.split("\n");
+  assert.ok(lines.length <= 12);
+  assert.match(frame, /另 \d+ 行/u);
+  assert.ok(lines.some((l) => l.includes("Yes")));
+});
+
+test("compact 布局只显示 diff 头行", () => {
+  const { lastFrame } = render(
+    h(ConfirmSelect, {
+      prompt: "执行 roll.edit_file?",
+      args: "file_path: src/a.ts",
+      diff: CONFIRM_DIFF,
+      width: 80,
+      maxRows: 6,
+      onDecide: () => {},
+    }),
+  );
+  const frame = stripAnsi(lastFrame() ?? "");
+  assert.match(frame, /src\/a\.ts\s+\+3 −1/u);
+  assert.doesNotMatch(frame, /\+n1/u);
+  assert.ok(frame.split("\n").length <= 6);
 });
