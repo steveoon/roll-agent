@@ -6032,3 +6032,119 @@ test("AgentSession 上下文溢出时仅宣告未执行的调用不再声称已�
   assert.match(flat, /本轮因上下文窗口溢出而中断/u);
   assert.doesNotMatch(flat, /已有操作开始执行/u);
 });
+
+test("AgentSession 把工作区约定注入 system prompt，文件变化后下一轮重编译", async () => {
+  const captured: string[] = [];
+  const model = new MockLanguageModelV4({
+    doStream: async (options) => {
+      const first = options.prompt[0];
+      captured.push(first && first.role === "system" ? first.content : "");
+      return streamChunks(textStep("ok"));
+    },
+  });
+  let version = 0;
+  let current = { path: "/repo/AGENTS.md", content: "rule v0", truncated: false, totalChars: 7 };
+  const session = new AgentSession({
+    id: "ws-1",
+    model,
+    sources: [],
+    maxSteps: 2,
+    systemPrompt: "EXTRA_PROMPT",
+    workspaceInstructions: {
+      current: () => {
+        if (version === 1 && current.content === "rule v0") {
+          current = {
+            path: "/repo/AGENTS.md",
+            content: "rule v1",
+            truncated: false,
+            totalChars: 7,
+          };
+        }
+        return current;
+      },
+    },
+  });
+
+  await collect(session.send("one"));
+  assert.match(captured[0] ?? "", /# 工作区工程约定/u);
+  assert.match(captured[0] ?? "", /来源：\/repo\/AGENTS\.md/u);
+  assert.match(captured[0] ?? "", /rule v0/u);
+  assert.ok(
+    (captured[0] ?? "").indexOf("# 工作区工程约定") < (captured[0] ?? "").indexOf("# 附加会话指令"),
+  );
+  assert.match(captured[0] ?? "", /EXTRA_PROMPT/u);
+
+  await collect(session.send("two"));
+  assert.match(captured[1] ?? "", /rule v0/u);
+
+  version = 1;
+  await collect(session.send("three"));
+  assert.match(captured[2] ?? "", /rule v1/u);
+  assert.doesNotMatch(captured[2] ?? "", /rule v0/u);
+  assert.match(captured[2] ?? "", /EXTRA_PROMPT/u);
+});
+
+test("AgentSession 工作区约定在自动压缩后的下一轮仍在 system prompt 中", async () => {
+  const captured: string[] = [];
+  let index = 0;
+  const steps = [textStep("a"), textStep("b"), textStep("c"), textStep("d")];
+  const model = new MockLanguageModelV4({
+    doStream: async (options) => {
+      const first = options.prompt[0];
+      captured.push(first && first.role === "system" ? first.content : "");
+      const chunks = steps[index] ?? steps[steps.length - 1] ?? [];
+      index += 1;
+      return streamChunks(chunks);
+    },
+  });
+  const session = new AgentSession({
+    id: "ws-compact",
+    model,
+    sources: [],
+    maxSteps: 2,
+    contextWindow: 1,
+    compaction: {
+      enabled: true,
+      strategy: "truncate",
+      threshold: 0.75,
+      keepRecentTurns: 1,
+      keepRecentTokens: 1,
+    },
+    workspaceInstructions: {
+      current: () => ({
+        path: "/repo/CLAUDE.md",
+        content: "keep me",
+        truncated: false,
+        totalChars: 7,
+      }),
+    },
+  });
+
+  await collect(session.send("t1"));
+  await collect(session.send("t2"));
+  const events = await collect(session.send("t3"));
+  assert.ok(events.some((event) => event.type === "context-compacted"));
+  await collect(session.send("t4"));
+  assert.match(captured.at(-1) ?? "", /# 工作区工程约定/u);
+  assert.match(captured.at(-1) ?? "", /keep me/u);
+});
+
+test("AgentSession 工作区约定源返回 undefined 时不注入该段", async () => {
+  let capturedSystem = "";
+  const model = new MockLanguageModelV4({
+    doStream: async (options) => {
+      const first = options.prompt[0];
+      capturedSystem = first && first.role === "system" ? first.content : "";
+      return streamChunks(textStep("ok"));
+    },
+  });
+  const session = new AgentSession({
+    id: "ws-none",
+    model,
+    sources: [],
+    maxSteps: 2,
+    workspaceInstructions: { current: () => undefined },
+  });
+  await collect(session.send("hi"));
+  assert.doesNotMatch(capturedSystem, /# 工作区工程约定/u);
+});
