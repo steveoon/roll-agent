@@ -2504,7 +2504,13 @@ export class AgentSession {
     activeTurn: ActiveTurn,
     turnStartedAt: number,
   ): void {
-    this.captureCancellationActivity(activeTurn);
+    if (
+      !this.persistPendingToolCancellationsOrReport(queue, activeTurn, "取消工具账本持久化失败")
+    ) {
+      activeTurn.cancellationPersistenceAttempted = true;
+      this.emitCancellation(queue, activeTurn);
+      return;
+    }
     if (!activeTurn.cancellationPersistenceAttempted && !this.closed) {
       activeTurn.cancellationPersistenceAttempted = true;
       activeTurn.cancellationPersisted = true;
