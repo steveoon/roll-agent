@@ -1,6 +1,8 @@
 import { test } from "node:test";
+import { stripVTControlCharacters } from "node:util";
 import assert from "node:assert/strict";
 import { createElement as h } from "react";
+import { Box } from "ink";
 import { render } from "ink-testing-library";
 import { Markdown } from "./markdown.ts";
 import { displayWidth } from "./display-width.ts";
@@ -71,4 +73,23 @@ test("Markdown falls back to plain text on weird input", () => {
   const { lastFrame, unmount } = render(h(Markdown, { text: "纯文本无标记" }));
   assert.match(lastFrame() ?? "", /纯文本无标记/);
   unmount();
+});
+
+test("列表项与引用块的长文本在固定宽度内换行，不会多出一列", () => {
+  const body =
+    "packages/runtime/src/tool-bridge/file-tools/write-file-tool.test.ts：末尾新增镜像用例「write_file 工作目录外路径在策略门之前不触碰文件系统」，deny 策略下对已存在未读的 secret.txt 与 missing.txt 各执行一次";
+  for (const text of [`- ${body}`, `1. ${body}`, `> ${body}`]) {
+    const { lastFrame, unmount } = render(
+      h(Box, { width: 91 }, h(Box, { marginLeft: 1 }, h(Markdown, { text }))),
+    );
+    try {
+      const lines = stripVTControlCharacters(lastFrame() ?? "").split("\n");
+      for (const line of lines) {
+        assert.ok(displayWidth(line) <= 91, `超宽: ${String(displayWidth(line))} ${line}`);
+      }
+      assert.ok(lines.length >= 2);
+    } finally {
+      unmount();
+    }
+  }
 });

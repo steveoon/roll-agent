@@ -10,6 +10,7 @@ import { AssistantContent } from "./assistant-content.ts";
 import { ToolLabel } from "./tool-label.ts";
 import { BannerLinesView } from "./banner-view.ts";
 import { ReasoningBlock, ReasoningSummary } from "./reasoning-block.ts";
+import { PrefixedLine } from "./prefixed-line.ts";
 import { DiffBlock, DiffSummary, diffBodyLineCount } from "./diff-view.ts";
 
 const DENIAL_TEXT_PREFIXES = ["已取消执行", "策略拒绝执行"] as const;
@@ -40,25 +41,27 @@ export function HistoryItemView({
           ? `${GLYPHS.attach} ${item.attachmentLabels.join(" · ")}`
           : undefined;
       return h(
-        Box,
-        null,
-        h(Text, { color: "cyan", bold: true }, "▌ "),
-        item.text.length > 0 ? h(Text, { color: "cyan" }, item.text) : null,
-        attachmentLabel !== undefined
-          ? h(
-              Text,
-              { color: "cyan", dimColor: true },
-              item.text.length > 0 ? `  ${attachmentLabel}` : attachmentLabel,
-            )
-          : null,
+        PrefixedLine,
+        { prefix: h(Text, { color: "cyan", bold: true }, "▌ ") },
+        h(
+          Text,
+          { color: "cyan" },
+          item.text.length > 0 ? item.text : null,
+          attachmentLabel !== undefined
+            ? h(
+                Text,
+                { color: "cyan", dimColor: true },
+                item.text.length > 0 ? `  ${attachmentLabel}` : attachmentLabel,
+              )
+            : null,
+        ),
       );
     }
     case "assistant":
       if (isDenialText(item.text)) {
         return h(
-          Box,
-          null,
-          h(Text, { dimColor: true }, "⊘ "),
+          PrefixedLine,
+          { prefix: h(Text, { dimColor: true }, "⊘ ") },
           h(Text, { dimColor: true }, item.text.trim()),
         );
       }
@@ -141,13 +144,16 @@ export function HistoryItemView({
     }
     case "notice":
       return h(
-        Box,
-        null,
-        h(Text, { color: "yellow" }, "⚠ "),
+        PrefixedLine,
+        { prefix: h(Text, { color: "yellow" }, "⚠ ") },
         h(Text, { color: "yellow" }, item.text),
       );
     case "error":
-      return h(Box, null, h(Text, { color: "red" }, "✗ "), h(Text, { color: "red" }, item.message));
+      return h(
+        PrefixedLine,
+        { prefix: h(Text, { color: "red" }, "✗ ") },
+        h(Text, { color: "red" }, item.message),
+      );
     default:
       return h(Text, null, "");
   }

@@ -1,6 +1,7 @@
 import { createElement as h } from "react";
 import type { ReactElement } from "react";
 import { Box, Text } from "ink";
+import { PrefixedLine } from "./prefixed-line.ts";
 import { marked, type Token, type Tokens } from "marked";
 import { displayWidth } from "./display-width.ts";
 
@@ -151,10 +152,9 @@ function renderBlock(token: Token, key: string): ReactElement | null {
       return h(Text, { key }, ...renderInline(token.tokens, key));
     case "blockquote":
       return h(
-        Box,
-        { key },
-        h(Text, { color: "gray" }, "│ "),
-        h(Box, { flexDirection: "column" }, ...renderBlocks(token.tokens ?? [], key)),
+        PrefixedLine,
+        { key, prefix: h(Text, { color: "gray" }, "│ ") },
+        ...renderBlocks(token.tokens ?? [], key),
       );
     case "code":
       return h(Box, { key, paddingLeft: 2 }, h(Text, { dimColor: true }, token.text));
@@ -166,10 +166,9 @@ function renderBlock(token: Token, key: string): ReactElement | null {
           const itemKey = `${key}-${String(index)}`;
           const marker = token.ordered ? `${String(Number(token.start || 1) + index)}. ` : "• ";
           return h(
-            Box,
-            { key: itemKey },
-            h(Text, { color: "cyan" }, marker),
-            h(Box, { flexDirection: "column" }, ...renderBlocks(item.tokens, itemKey)),
+            PrefixedLine,
+            { key: itemKey, prefix: h(Text, { color: "cyan" }, marker) },
+            ...renderBlocks(item.tokens, itemKey),
           );
         }),
       );

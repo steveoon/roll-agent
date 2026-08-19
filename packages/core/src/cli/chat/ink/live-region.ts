@@ -53,10 +53,19 @@ export function LiveRegion({ live }: { live: LiveState }): ReactElement {
         { key: tool.toolCallId, marginTop: 1, marginLeft: 2, flexDirection: "column" },
         h(
           Box,
-          null,
-          h(Text, { color: "cyan" }, "· "),
-          h(ToolLabel, { name: tool.name }),
-          tool.args.length > 0 ? h(Text, { dimColor: true }, ` ${tool.args}`) : null,
+          { flexDirection: "row" },
+          h(
+            Box,
+            { flexShrink: 0 },
+            h(Text, null, h(Text, { color: "cyan" }, "· "), h(ToolLabel, { name: tool.name })),
+          ),
+          tool.args.length > 0
+            ? h(
+                Box,
+                { flexGrow: 1, flexShrink: 1, marginLeft: 1 },
+                h(Text, { dimColor: true, wrap: "truncate-end" }, tool.args),
+              )
+            : null,
         ),
         ...tailLines(tool.outputTail).map((line, index) =>
           h(

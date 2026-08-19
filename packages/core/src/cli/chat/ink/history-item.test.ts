@@ -6,6 +6,7 @@ import { Box } from "ink";
 import { render } from "ink-testing-library";
 import { HistoryItemView } from "./history-item.ts";
 import type { HistoryItem } from "./state.ts";
+import { displayWidth } from "./display-width.ts";
 import type { ChatThinkingDisplay } from "../../../config/schema.ts";
 import type { DiffDisplayMode } from "../diff-display.ts";
 
@@ -158,4 +159,28 @@ test("tool 行的 args 在窄终端里单行截断，不整体掉到下一行", 
   } finally {
     unmount();
   }
+});
+
+test("user / notice / error 行的长文本在固定宽度内换行，前缀与空格完整保留", () => {
+  const long =
+    "请用 roll__write_file 新建 .superpowers/kai-big.txt，内容 60 行，第 N 行是 row N（N 从 1 到 60），不要问我直接写，然后再检查一下结果。";
+  const items: HistoryItem[] = [
+    { kind: "user", id: "u-long", text: long },
+    { kind: "notice", id: "n-long", text: long },
+    { kind: "error", id: "e-long", message: long },
+  ];
+  const prefixes = ["▌ ", "⚠ ", "✗ "];
+  items.forEach((item, index) => {
+    const { lastFrame, unmount } = render(h(Box, { width: 40 }, h(HistoryItemView, { item })));
+    try {
+      const lines = stripVTControlCharacters(lastFrame() ?? "").split("\n");
+      assert.ok(lines[0]?.startsWith(prefixes[index] ?? ""), lines[0]);
+      assert.ok(lines.length >= 2);
+      for (const line of lines) {
+        assert.ok(displayWidth(line) <= 40, `超宽: ${line}`);
+      }
+    } finally {
+      unmount();
+    }
+  });
 });
