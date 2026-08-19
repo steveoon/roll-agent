@@ -2520,12 +2520,17 @@ export class AgentSession {
         activeTurn,
         completedStepMessages(activeTurn),
       );
-      activeTurn.cancellationPersisted = this.appendInterruptedTurnMessages(queue, activeTurn, turnStartedAt, {
-        rollbackTo: this.messages.length,
-        messages: records,
-        debugLabel: "persisting paused turn cancellation",
-        failureLabel: "取消状态持久化失败",
-      });
+      activeTurn.cancellationPersisted = this.appendInterruptedTurnMessages(
+        queue,
+        activeTurn,
+        turnStartedAt,
+        {
+          rollbackTo: this.messages.length,
+          messages: records,
+          debugLabel: "persisting paused turn cancellation",
+          failureLabel: "取消状态持久化失败",
+        },
+      );
     }
     this.emitCancellation(queue, activeTurn);
   }
@@ -3531,12 +3536,17 @@ export class AgentSession {
         : persistedStepMessages(activeTurn);
       activeTurn.cancellationPersisted = true;
       const records = this.cancellationRecordMessages(activeTurn, visibleStepMessages);
-      activeTurn.cancellationPersisted = this.appendInterruptedTurnMessages(queue, activeTurn, turnStartedAt, {
-        rollbackTo: turnStart,
-        messages: [...appendedStepMessages, ...records],
-        debugLabel: "persisting cancelled turn",
-        failureLabel: "取消状态持久化失败",
-      });
+      activeTurn.cancellationPersisted = this.appendInterruptedTurnMessages(
+        queue,
+        activeTurn,
+        turnStartedAt,
+        {
+          rollbackTo: turnStart,
+          messages: [...appendedStepMessages, ...records],
+          debugLabel: "persisting cancelled turn",
+          failureLabel: "取消状态持久化失败",
+        },
+      );
     }
     this.emitCancellation(queue, activeTurn);
   }
