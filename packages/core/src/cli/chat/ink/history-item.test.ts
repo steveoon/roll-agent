@@ -2,6 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { stripVTControlCharacters } from "node:util";
 import { createElement as h } from "react";
+import { Box } from "ink";
 import { render } from "ink-testing-library";
 import { HistoryItemView } from "./history-item.ts";
 import type { HistoryItem } from "./state.ts";
@@ -131,4 +132,30 @@ test("超过阈值的 diff 在 collapsed 模式折叠为一行摘要，expanded 
     "expanded",
   );
   assert.match(expanded, /\+L49/u);
+});
+
+test("tool 行的 args 在窄终端里单行截断，不整体掉到下一行", () => {
+  const { lastFrame, unmount } = render(
+    h(
+      Box,
+      { width: 40 },
+      h(HistoryItemView, {
+        item: {
+          kind: "tool",
+          id: "t-narrow",
+          name: "roll.write_file",
+          args: '{"file_path":"/Users/someone/very/long/path/to/a/file.txt","content":"…"}',
+          ok: true,
+        },
+      }),
+    ),
+  );
+  try {
+    const out = stripVTControlCharacters(lastFrame() ?? "");
+    const lines = out.split("\n").filter((line) => line.trim().length > 0);
+    assert.equal(lines.length, 1);
+    assert.match(lines[0] ?? "", /^✓ roll\.write_file \{"file_path".*…$/u);
+  } finally {
+    unmount();
+  }
 });

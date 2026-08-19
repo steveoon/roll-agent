@@ -71,13 +71,27 @@ export function HistoryItemView({
           })
         : h(ReasoningBlock, { text: item.text });
     case "tool": {
-      const args = item.args.length > 0 && item.args !== "{}" ? ` ${item.args}` : "";
+      const args = item.args.length > 0 && item.args !== "{}" ? item.args : "";
       const line = h(
-        Text,
-        null,
-        h(Text, item.ok ? { color: "green" } : { color: "red" }, item.ok ? "✓ " : "✗ "),
-        h(ToolLabel, { name: item.name }),
-        args.length > 0 ? h(Text, { dimColor: true }, args) : null,
+        Box,
+        { flexDirection: "row" },
+        h(
+          Box,
+          { flexShrink: 0 },
+          h(
+            Text,
+            null,
+            h(Text, item.ok ? { color: "green" } : { color: "red" }, item.ok ? "✓ " : "✗ "),
+            h(ToolLabel, { name: item.name }),
+          ),
+        ),
+        args.length > 0
+          ? h(
+              Box,
+              { flexGrow: 1, flexShrink: 1, marginLeft: 1 },
+              h(Text, { dimColor: true, wrap: "truncate-end" }, args),
+            )
+          : null,
       );
       if (item.diff === undefined) {
         return line;

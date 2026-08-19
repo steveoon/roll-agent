@@ -81,10 +81,18 @@ function DiffBodyLine({
       ? " ".repeat(width * 2 + 2)
       : formatDiffGutter(line, width);
   return h(
-    Text,
-    { wrap: "wrap" },
-    h(Text, { dimColor: true }, gutter),
-    h(Text, lineColor(line), `${PREFIX[line.kind]}${sanitizeForDisplay(line.text)}`),
+    Box,
+    { flexDirection: "row" },
+    h(Box, { width: gutter.length, flexShrink: 0 }, h(Text, { dimColor: true }, gutter)),
+    h(
+      Box,
+      { flexGrow: 1, flexShrink: 1 },
+      h(
+        Text,
+        { ...lineColor(line), wrap: "wrap" },
+        `${PREFIX[line.kind]}${sanitizeForDisplay(line.text)}`,
+      ),
+    ),
   );
 }
 

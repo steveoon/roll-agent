@@ -2,6 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { stripVTControlCharacters } from "node:util";
 import { createElement as h } from "react";
+import { Box } from "ink";
 import { render } from "ink-testing-library";
 import type { FileChangeDiff } from "@roll-agent/runtime";
 import { DiffBlock, DiffSummary, diffBodyLineCount } from "./diff-view.ts";
@@ -47,4 +48,25 @@ test("DiffSummary 折叠为一行并带提示；正文省略时显示原因", ()
   assert.match(out, /src\/a\.ts\s+\+1 −1 · 已折叠 · \/diff 展开/u);
   const { unified: _u, ...statsOnly } = DIFF;
   assert.match(frame(h(DiffSummary, { diff: statsOnly })), /正文省略（文件过大）/u);
+});
+
+test("DiffBlock 长行换行后的续行与正文列对齐，不顶到边框", () => {
+  const longLine = "x".repeat(70);
+  const diff: FileChangeDiff = {
+    path: "f",
+    change: "modify",
+    added: 1,
+    removed: 0,
+    hunks: 1,
+    unified: `--- a/f\n+++ b/f\n@@ -1,1 +1,2 @@\n a\n+${longLine}\n`,
+    truncated: false,
+  };
+  const out = frame(h(Box, { width: 40 }, h(DiffBlock, { diff })));
+  const lines = out.split("\n");
+  const first = lines.find((line) => line.includes("+xxxx"));
+  const continuation = lines.find((line) => /^│\s+x+$/u.test(line));
+  assert.ok(first !== undefined && continuation !== undefined);
+  const contentColumn = first.indexOf("+");
+  const continuationColumn = continuation.search(/x/u);
+  assert.equal(continuationColumn, contentColumn);
 });
