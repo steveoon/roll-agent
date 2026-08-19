@@ -1383,6 +1383,64 @@ test("RuntimeService v1 supports lifecycle, concurrent approval/cancel and proce
   }
 });
 
+test("RuntimeService operation view keeps {text, diff} inside the persisted display envelope", async () => {
+  const dir = tempDir();
+  const store = new ThreadStore(dir);
+  const fixture = createFixture(store);
+  const service = new RuntimeService(fixture.engine, store);
+  try {
+    await service.createThread(
+      runtimeMethodSchemas["thread.create"].params.parse({
+        requestId: requestIdSchema.parse(IDS.requestCreate),
+        title: "Diff operation",
+      }),
+    );
+    const diff = {
+      path: "a.txt",
+      change: "modify",
+      added: 1,
+      removed: 1,
+      hunks: 1,
+      unified: "--- a/a.txt\n+++ b/a.txt\n@@ -1,1 +1,1 @@\n-old\n+new\n",
+      truncated: false,
+    } as const;
+    store.appendToolExecution(
+      IDS.thread,
+      createToolExecutionRecord({
+        id: IDS.operation,
+        toolCallId: "call-diff",
+        agentName: "roll",
+        toolName: "edit_file",
+        input: { file_path: "a.txt" },
+        result: createToolResult(
+          { kind: TOOL_OUTCOME_KINDS.success },
+          { text: "已完成 1 处修改并写入 a.txt", diff },
+          { model: { type: "text", value: "已完成 1 处修改并写入 a.txt" } },
+        ),
+        createdAt: "2026-08-19T12:00:00.000Z",
+      }),
+    );
+    const snapshot = service.snapshotThread(
+      runtimeMethodSchemas["thread.snapshot"].params.parse({
+        threadId: threadIdSchema.parse(IDS.thread),
+        limit: 10,
+      }),
+    );
+    const operation = snapshot.operations.items[0];
+    assert.ok(operation);
+    assert.equal(getFileChangeDisplay(operation.display), undefined);
+    const envelope = operation.display as { readonly value?: unknown };
+    assert.deepEqual(getFileChangeDisplay(envelope.value), {
+      text: "已完成 1 处修改并写入 a.txt",
+      diff,
+    });
+  } finally {
+    await service.close();
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("RuntimeService snapshot reads append-only transcript and redacted Tool ledger", async () => {
   const dir = tempDir();
   const store = new ThreadStore(dir);
