@@ -24,12 +24,14 @@ export interface HistoryItemViewProps {
   readonly item: HistoryItem;
   readonly thinkingDisplay?: ChatThinkingDisplay;
   readonly diffDisplay?: DiffDisplayMode;
+  readonly width?: number;
 }
 
 export function HistoryItemView({
   item,
   thinkingDisplay = "collapsed",
   diffDisplay = "collapsed",
+  width,
 }: HistoryItemViewProps): ReactElement {
   const collapseThinking = thinkingDisplay === "collapsed";
   switch (item.kind) {
@@ -65,7 +67,11 @@ export function HistoryItemView({
           h(Text, { dimColor: true }, item.text.trim()),
         );
       }
-      return h(AssistantContent, { text: item.text, collapseThinking });
+      return h(AssistantContent, {
+        text: item.text,
+        collapseThinking,
+        ...(width !== undefined ? { width } : {}),
+      });
     case "reasoning":
       return collapseThinking
         ? h(ReasoningSummary, {

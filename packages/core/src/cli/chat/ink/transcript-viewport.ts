@@ -67,6 +67,7 @@ function historyEntry(
   previous: HistoryItem | undefined,
   thinkingDisplay: ChatThinkingDisplay,
   diffDisplay: DiffDisplayMode,
+  width: number,
 ): TranscriptEntry {
   const spaced =
     item.kind === "user" ||
@@ -74,11 +75,17 @@ function historyEntry(
     item.kind === "reasoning" ||
     previous?.kind === "reasoning";
   const indented = item.kind === "tool" || item.kind === "denied" || item.kind === "cancelled";
+  const marginLeft = indented ? 3 : 1;
   return {
     key: `history:${item.id}`,
-    element: h(HistoryItemView, { item, thinkingDisplay, diffDisplay }),
+    element: h(HistoryItemView, {
+      item,
+      thinkingDisplay,
+      diffDisplay,
+      width: Math.max(1, width - marginLeft),
+    }),
     paddingTop: spaced ? 1 : 0,
-    marginLeft: indented ? 3 : 1,
+    marginLeft,
   };
 }
 
@@ -161,7 +168,13 @@ export function TranscriptViewport(props: TranscriptViewportProps): ReactElement
 
   const entries = useMemo(() => {
     const result = props.history.map((item, index) =>
-      historyEntry(item, props.history[index - 1], props.thinkingDisplay, props.diffDisplay),
+      historyEntry(
+        item,
+        props.history[index - 1],
+        props.thinkingDisplay,
+        props.diffDisplay,
+        props.width,
+      ),
     );
     if (props.banner !== undefined) {
       result.unshift({
@@ -179,7 +192,7 @@ export function TranscriptViewport(props: TranscriptViewportProps): ReactElement
     if (hasLiveContent(props.live)) {
       result.push({
         key: "live",
-        element: h(LiveRegion, { live: props.live }),
+        element: h(LiveRegion, { live: props.live, width: Math.max(1, props.width - 1) }),
         paddingTop: 0,
         marginLeft: 1,
       });
@@ -193,6 +206,7 @@ export function TranscriptViewport(props: TranscriptViewportProps): ReactElement
     props.live,
     props.onBannerSettled,
     props.thinkingDisplay,
+    props.width,
   ]);
 
   useEffect(() => {

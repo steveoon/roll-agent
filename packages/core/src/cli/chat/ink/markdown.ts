@@ -109,17 +109,51 @@ function renderTableRow(
   );
 }
 
-function renderTable(token: Tokens.Table, key: string): ReactElement {
-  const widths = token.header.map((cell: Tokens.TableCell, index: number) => {
-    let width = cellWidth(cell);
+const TABLE_CELL_GAP = 2;
+const TABLE_MIN_CELL_WIDTH = 3;
+
+function fitColumnWidths(widths: number[], available: number | undefined): number[] {
+  if (available === undefined) {
+    return widths;
+  }
+  const total = widths.reduce((sum, width) => sum + width + TABLE_CELL_GAP, 0);
+  if (total <= available) {
+    return widths;
+  }
+  const usable = Math.max(
+    widths.length * TABLE_MIN_CELL_WIDTH,
+    available - widths.length * TABLE_CELL_GAP,
+  );
+  const sum = widths.reduce((acc, width) => acc + width, 0);
+  const scaled = widths.map((width) =>
+    Math.max(TABLE_MIN_CELL_WIDTH, Math.floor((width / sum) * usable)),
+  );
+  let remainder = usable - scaled.reduce((acc, width) => acc + width, 0);
+  const byWidth = widths
+    .map((_, index) => index)
+    .sort((a, b) => (widths[b] ?? 0) - (widths[a] ?? 0));
+  for (const index of byWidth) {
+    if (remainder <= 0) {
+      break;
+    }
+    scaled[index] = (scaled[index] ?? 0) + 1;
+    remainder -= 1;
+  }
+  return scaled;
+}
+
+function renderTable(token: Tokens.Table, key: string, width: number | undefined): ReactElement {
+  const naturalWidths = token.header.map((cell: Tokens.TableCell, index: number) => {
+    let cellMax = cellWidth(cell);
     for (const row of token.rows) {
       const rowCell = row[index];
       if (rowCell !== undefined) {
-        width = Math.max(width, cellWidth(rowCell));
+        cellMax = Math.max(cellMax, cellWidth(rowCell));
       }
     }
-    return width;
+    return cellMax;
   });
+  const widths = fitColumnWidths(naturalWidths, width);
   const separator = h(
     Box,
     { key: `${key}-sep` },
@@ -153,7 +187,7 @@ function renderTable(token: Tokens.Table, key: string): ReactElement {
   );
 }
 
-function renderBlock(token: Token, key: string): ReactElement | null {
+function renderBlock(token: Token, key: string, width: number | undefined): ReactElement | null {
   switch (token.type) {
     case "space":
       return null;
@@ -165,7 +199,7 @@ function renderBlock(token: Token, key: string): ReactElement | null {
       return h(
         PrefixedLine,
         { key, prefix: h(Text, { color: "gray" }, "│ ") },
-        ...renderBlocks(token.tokens ?? [], key),
+        ...renderBlocks(token.tokens ?? [], key, narrower(width, 2)),
       );
     case "code":
       return h(Box, { key, paddingLeft: 2 }, h(Text, { dimColor: true }, token.text));
@@ -179,14 +213,14 @@ function renderBlock(token: Token, key: string): ReactElement | null {
           return h(
             PrefixedLine,
             { key: itemKey, prefix: h(Text, { color: "cyan" }, marker) },
-            ...renderBlocks(item.tokens, itemKey),
+            ...renderBlocks(item.tokens, itemKey, narrower(width, displayWidth(marker))),
           );
         }),
       );
     case "hr":
       return h(Text, { key, dimColor: true }, "────────");
     case "table":
-      return renderTable(token as Tokens.Table, key);
+      return renderTable(token as Tokens.Table, key, width);
     case "text":
       return token.tokens !== undefined
         ? h(Text, { key }, ...renderInline(token.tokens, key))
@@ -196,9 +230,17 @@ function renderBlock(token: Token, key: string): ReactElement | null {
   }
 }
 
-function renderBlocks(tokens: Token[], keyPrefix: string): ReactElement[] {
+function narrower(width: number | undefined, by: number): number | undefined {
+  return width === undefined ? undefined : Math.max(1, width - by);
+}
+
+function renderBlocks(
+  tokens: Token[],
+  keyPrefix: string,
+  width: number | undefined,
+): ReactElement[] {
   return tokens
-    .map((token, index) => renderBlock(token, `${keyPrefix}-${String(index)}`))
+    .map((token, index) => renderBlock(token, `${keyPrefix}-${String(index)}`, width))
     .filter((block): block is ReactElement => block !== null)
     .map((block, index) =>
       index === 0
@@ -207,12 +249,17 @@ function renderBlocks(tokens: Token[], keyPrefix: string): ReactElement[] {
     );
 }
 
-export function Markdown({ text }: { text: string }): ReactElement {
+export interface MarkdownProps {
+  readonly text: string;
+  readonly width?: number;
+}
+
+export function Markdown({ text, width }: MarkdownProps): ReactElement {
   let tokens: Token[];
   try {
     tokens = marked.lexer(text);
   } catch {
     return h(Text, null, text);
   }
-  return h(Box, { flexDirection: "column" }, ...renderBlocks(tokens, "md"));
+  return h(Box, { flexDirection: "column" }, ...renderBlocks(tokens, "md", width));
 }

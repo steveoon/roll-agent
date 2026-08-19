@@ -30,7 +30,12 @@ function tailLines(outputTail: string | undefined): string[] {
     .slice(-MAX_TAIL_LINES);
 }
 
-export function LiveRegion({ live }: { live: LiveState }): ReactElement {
+export interface LiveRegionProps {
+  readonly live: LiveState;
+  readonly width?: number;
+}
+
+export function LiveRegion({ live, width }: LiveRegionProps): ReactElement {
   const reasoningPreview = reasoningTail(live.reasoningText);
   return h(
     Box,
@@ -44,6 +49,7 @@ export function LiveRegion({ live }: { live: LiveState }): ReactElement {
           { marginTop: 1 },
           h(AssistantContent, {
             text: live.thinkTagOpen ? `<think>${live.streamingText}` : live.streamingText,
+            ...(width !== undefined ? { width } : {}),
           }),
         )
       : null,

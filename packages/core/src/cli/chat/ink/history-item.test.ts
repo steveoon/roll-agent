@@ -184,3 +184,25 @@ test("user / notice / error 行的长文本在固定宽度内换行，前缀与�
     }
   });
 });
+
+test("assistant 项把可用宽度传给 Markdown，超宽表格不再溢出", () => {
+  const text = [
+    "| 命令 | 结果 |",
+    "| --- | --- |",
+    "| node --experimental-strip-types --experimental-sqlite --test packages/runtime/src/tool-bridge/file-tools/write-file-tool.test.ts | 53 pass / 0 fail（write_file 22 条含新增外部路径用例） |",
+  ].join("\n");
+  const { lastFrame, unmount } = render(
+    h(
+      Box,
+      { width: 70 },
+      h(HistoryItemView, { item: { kind: "assistant", id: "a-table", text }, width: 70 }),
+    ),
+  );
+  try {
+    for (const line of stripVTControlCharacters(lastFrame() ?? "").split("\n")) {
+      assert.ok(displayWidth(line) <= 70, `超宽: ${line}`);
+    }
+  } finally {
+    unmount();
+  }
+});

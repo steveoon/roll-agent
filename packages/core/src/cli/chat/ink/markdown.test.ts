@@ -112,3 +112,23 @@ test("表格宽于终端时分隔线单行截断而不是折成多行", () => {
     unmount();
   }
 });
+
+test("Markdown 知道可用宽度时，超宽表格的列按整数缩放到恰好放下，任何一行都不超宽", () => {
+  const text = [
+    "| 命令 | 结果 |",
+    "| --- | --- |",
+    "| node --experimental-strip-types --experimental-sqlite --test packages/runtime/src/tool-bridge/file-tools/write-file-tool.test.ts packages/runtime/src/tool-bridge/file-tools/edit-file-tool.test.ts | 53 pass / 0 fail（write_file 22 条含新增外部路径用例、edit_file 31 条，duration_ms≈194） |",
+  ].join("\n");
+  for (const width of [91, 80, 60]) {
+    const { lastFrame, unmount } = render(
+      h(Box, { width }, h(Box, { marginLeft: 1 }, h(Markdown, { text, width: width - 1 }))),
+    );
+    try {
+      for (const line of stripVTControlCharacters(lastFrame() ?? "").split("\n")) {
+        assert.ok(displayWidth(line) <= width, `width ${String(width)} 超宽: ${line}`);
+      }
+    } finally {
+      unmount();
+    }
+  }
+});
