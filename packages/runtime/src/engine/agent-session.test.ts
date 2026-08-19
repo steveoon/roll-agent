@@ -21,6 +21,7 @@ import type {
 } from "@ai-sdk/provider";
 import type { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { SKILL_TOOL_ID, type SkillLibrary } from "@roll-agent/core/skills/library";
+import { getFileChangeDisplay } from "@roll-agent/protocol";
 import { AgentSession } from "./agent-session.ts";
 import type { AgentToolSource } from "../tool-bridge/build-tools.ts";
 import type { ToolResourceHint } from "../tool-bridge/tool-execution-coordinator.ts";
@@ -954,6 +955,48 @@ test("AgentSession.approve 的 scope 透传到批准记忆：workdir 内二次�
       secondEditResult.type === "tool-result" &&
       secondEditResult.isError === false,
   );
+});
+
+test("AgentSession 的 edit_file 确认事件携带 diff，成功后的 tool-result display 为 {text, diff}", async () => {
+  const workdir = mkdtempSync(join(tmpdir(), "agent-session-diff-"));
+  writeFileSync(join(workdir, "a.txt"), "第一行\n第二行\n", "utf8");
+  const model = sequencedModel([
+    toolCallStep("roll__read_file", { path: "a.txt" }),
+    toolCallStep("roll__edit_file", {
+      file_path: "a.txt",
+      edits: [{ old_string: "第一行", new_string: "改后一" }],
+    }),
+    textStep("完成"),
+  ]);
+  const session = new AgentSession({
+    id: "diff-passthrough",
+    model,
+    sources: [],
+    fileTools: { workdir },
+    maxSteps: 8,
+    policy: new DefaultToolPolicy(),
+  });
+  const events: SessionEvent[] = [];
+  for await (const event of session.send("改第一行")) {
+    events.push(event);
+    if (event.type === "confirmation-required") {
+      session.approve(event.approvalId);
+    }
+  }
+  const confirmation = events.find((event) => event.type === "confirmation-required");
+  assert.ok(confirmation && confirmation.type === "confirmation-required");
+  assert.equal(confirmation.diff?.path, "a.txt");
+  assert.equal(confirmation.diff?.added, 1);
+  assert.equal(confirmation.diff?.removed, 1);
+  assert.match(confirmation.diff?.unified ?? "", /-第一行\n\+改后一\n/u);
+  const result = events.find(
+    (event) => event.type === "tool-result" && event.toolName === "edit_file",
+  );
+  assert.ok(result && result.type === "tool-result");
+  const display = getFileChangeDisplay(result.display);
+  assert.ok(display);
+  assert.deepEqual(display.diff, confirmation.diff);
+  assert.match(display.text, /已完成 1 处修改/u);
 });
 
 test("AgentSession 未配置 turnTimeoutMs 时 confirmation 携带默认交互 deadline", async () => {
@@ -3684,6 +3727,7 @@ test("AgentSession 同 ID 新调用只宣告便上下文溢出时,以 not_execut
   assert.match(recovery.modelContext, /"kind":"success"/u);
   assert.match(recovery.modelContext, /"executionState":"not_executed"/u);
   assert.ok(recovery.modelContext.length <= 12_000);
+  assert.match(JSON.stringify(persisted.at(-1)), /已有操作开始执行/u);
   assert.equal(countOccurrences(JSON.stringify(session.getMessages()), '"type":"tool-call"'), 0);
 
   await collect(session.send("继续"));
@@ -3740,6 +3784,61 @@ test("AgentSession 上下文溢出的 pending Tool 恢复写失败时,下一轮�
   assert.equal(model.doStreamCalls.length, 1, "recovery failure must block the provider");
   assert.equal(toolCalls, 0);
   assert.equal(persistCalls, 2);
+});
+
+test("AgentSession 上下文溢出时 Tool 账本写盘失败不落盘终态", async () => {
+  let ledgerCalls = 0;
+  let toolCalls = 0;
+  const persisted: ModelMessage[][] = [];
+  const model = sequencedModel([
+    [
+      { type: "stream-start", warnings: [] },
+      {
+        type: "tool-call",
+        toolCallId: "c1",
+        toolName: "echo-agent__echo",
+        input: JSON.stringify({ q: "announced-only" }),
+      },
+      { type: "error", error: "context_length_exceeded" },
+    ],
+    textStep("must not run"),
+  ]);
+  const session = new AgentSession({
+    id: "context-overflow-ledger-failure",
+    model,
+    sources: [
+      source("echo-agent", "echo", () => {
+        toolCalls += 1;
+      }),
+    ],
+    maxSteps: 4,
+    onToolExecution: () => {
+      ledgerCalls += 1;
+      throw new Error("ledger full");
+    },
+    onPersist: (messages) => {
+      persisted.push([...messages]);
+    },
+  });
+
+  const events = await collect(session.send("tool loop"));
+
+  assert.equal(toolCalls, 0);
+  assert.equal(ledgerCalls, 1);
+  assert.deepEqual(session.getToolExecutions({}, true), []);
+  assert.deepEqual(session.getMessages(), []);
+  assert.deepEqual(persisted, [], "ledger failure must not persist a turn terminal state");
+  assert.ok(
+    events.some(
+      (event) =>
+        event.type === "error" && /上下文溢出工具状态持久化失败: ledger full/u.test(event.message),
+    ),
+  );
+  assert.ok(
+    events.some(
+      (event) => event.type === "error" && /context_length_exceeded/u.test(event.message),
+    ),
+  );
 });
 
 test("AgentSession 前一模型步骤的同 ID 成功执行不会把新宣告调用误判为已执行", async () => {
@@ -5877,4 +5976,218 @@ test("AgentSession 注册文件工具并按 role 标记 capability", async () =>
   } finally {
     await session.close();
   }
+});
+
+test("appendInterruptedTurnMessages 在 pending 工具未入账时拒绝写入终态", () => {
+  const persisted: ModelMessage[][] = [];
+  const session = new AgentSession({
+    id: "interrupted-write-gate",
+    model: sequencedModel([textStep("unused")]),
+    sources: [],
+    maxSteps: 1,
+    onPersist: (messages) => {
+      persisted.push([...messages]);
+    },
+  });
+  const events: SessionEvent[] = [];
+  const queue = {
+    push: (event: SessionEvent) => {
+      events.push(event);
+    },
+  };
+  const internals = session as unknown as {
+    appendInterruptedTurnMessages(
+      queue: { push(event: SessionEvent): void },
+      activeTurn: { pendingToolCalls: ReadonlyMap<string, unknown> },
+      turnStartedAt: number,
+      input: {
+        rollbackTo: number;
+        messages: readonly ModelMessage[];
+        debugLabel: string;
+        failureLabel: string;
+      },
+    ): boolean;
+  };
+  const marker: ModelMessage = { role: "assistant", content: "终态" };
+
+  const blocked = internals.appendInterruptedTurnMessages(
+    queue,
+    { pendingToolCalls: new Map([["c1", {}]]) },
+    0,
+    { rollbackTo: 0, messages: [marker], debugLabel: "gate test", failureLabel: "终态持久化失败" },
+  );
+
+  assert.equal(blocked, false);
+  assert.deepEqual(session.getMessages(), []);
+  assert.deepEqual(persisted, []);
+  const gateError = events.find(
+    (event): event is Extract<SessionEvent, { type: "error" }> => event.type === "error",
+  );
+  assert.match(gateError?.message ?? "", /终态持久化失败: 存在未写入账本的待处理工具调用/u);
+
+  const allowed = internals.appendInterruptedTurnMessages(
+    queue,
+    { pendingToolCalls: new Map() },
+    0,
+    { rollbackTo: 0, messages: [marker], debugLabel: "gate test", failureLabel: "终态持久化失败" },
+  );
+
+  assert.equal(allowed, true);
+  assert.equal(persisted.length, 1);
+});
+
+test("AgentSession 上下文溢出时仅宣告未执行的调用不再声称已开始执行", async () => {
+  const persisted: ModelMessage[][] = [];
+  const model = sequencedModel([
+    [
+      { type: "stream-start", warnings: [] },
+      {
+        type: "tool-call",
+        toolCallId: "c1",
+        toolName: "echo-agent__echo",
+        input: JSON.stringify({ q: "announced-only" }),
+      },
+      { type: "error", error: "context_length_exceeded" },
+    ],
+    textStep("must not run"),
+  ]);
+  let toolCalls = 0;
+  const session = new AgentSession({
+    id: "overflow-announced-only-note",
+    model,
+    sources: [
+      source("echo-agent", "echo", () => {
+        toolCalls += 1;
+      }),
+    ],
+    maxSteps: 4,
+    onPersist: (messages) => {
+      persisted.push([...messages]);
+    },
+  });
+
+  const events = await collect(session.send("tool loop"));
+
+  assert.equal(events.at(-1)?.type, "error");
+  assert.equal(toolCalls, 0);
+  const flat = JSON.stringify(persisted);
+  assert.match(flat, /not_executed/u);
+  assert.match(flat, /本轮因上下文窗口溢出而中断/u);
+  assert.doesNotMatch(flat, /已有操作开始执行/u);
+});
+
+test("AgentSession 把工作区约定注入 system prompt，文件变化后下一轮重编译", async () => {
+  const captured: string[] = [];
+  const model = new MockLanguageModelV4({
+    doStream: async (options) => {
+      const first = options.prompt[0];
+      captured.push(first && first.role === "system" ? first.content : "");
+      return streamChunks(textStep("ok"));
+    },
+  });
+  let version = 0;
+  let current = { path: "/repo/AGENTS.md", content: "rule v0", truncated: false, totalChars: 7 };
+  const session = new AgentSession({
+    id: "ws-1",
+    model,
+    sources: [],
+    maxSteps: 2,
+    systemPrompt: "EXTRA_PROMPT",
+    workspaceInstructions: {
+      current: () => {
+        if (version === 1 && current.content === "rule v0") {
+          current = {
+            path: "/repo/AGENTS.md",
+            content: "rule v1",
+            truncated: false,
+            totalChars: 7,
+          };
+        }
+        return current;
+      },
+    },
+  });
+
+  await collect(session.send("one"));
+  assert.match(captured[0] ?? "", /# 工作区工程约定/u);
+  assert.match(captured[0] ?? "", /来源：\/repo\/AGENTS\.md/u);
+  assert.match(captured[0] ?? "", /rule v0/u);
+  assert.ok(
+    (captured[0] ?? "").indexOf("# 工作区工程约定") < (captured[0] ?? "").indexOf("# 附加会话指令"),
+  );
+  assert.match(captured[0] ?? "", /EXTRA_PROMPT/u);
+
+  await collect(session.send("two"));
+  assert.match(captured[1] ?? "", /rule v0/u);
+
+  version = 1;
+  await collect(session.send("three"));
+  assert.match(captured[2] ?? "", /rule v1/u);
+  assert.doesNotMatch(captured[2] ?? "", /rule v0/u);
+  assert.match(captured[2] ?? "", /EXTRA_PROMPT/u);
+});
+
+test("AgentSession 工作区约定在自动压缩后的下一轮仍在 system prompt 中", async () => {
+  const captured: string[] = [];
+  let index = 0;
+  const steps = [textStep("a"), textStep("b"), textStep("c"), textStep("d")];
+  const model = new MockLanguageModelV4({
+    doStream: async (options) => {
+      const first = options.prompt[0];
+      captured.push(first && first.role === "system" ? first.content : "");
+      const chunks = steps[index] ?? steps[steps.length - 1] ?? [];
+      index += 1;
+      return streamChunks(chunks);
+    },
+  });
+  const session = new AgentSession({
+    id: "ws-compact",
+    model,
+    sources: [],
+    maxSteps: 2,
+    contextWindow: 1,
+    compaction: {
+      enabled: true,
+      strategy: "truncate",
+      threshold: 0.75,
+      keepRecentTurns: 1,
+      keepRecentTokens: 1,
+    },
+    workspaceInstructions: {
+      current: () => ({
+        path: "/repo/CLAUDE.md",
+        content: "keep me",
+        truncated: false,
+        totalChars: 7,
+      }),
+    },
+  });
+
+  await collect(session.send("t1"));
+  await collect(session.send("t2"));
+  const events = await collect(session.send("t3"));
+  assert.ok(events.some((event) => event.type === "context-compacted"));
+  await collect(session.send("t4"));
+  assert.match(captured.at(-1) ?? "", /# 工作区工程约定/u);
+  assert.match(captured.at(-1) ?? "", /keep me/u);
+});
+
+test("AgentSession 工作区约定源返回 undefined 时不注入该段", async () => {
+  let capturedSystem = "";
+  const model = new MockLanguageModelV4({
+    doStream: async (options) => {
+      const first = options.prompt[0];
+      capturedSystem = first && first.role === "system" ? first.content : "";
+      return streamChunks(textStep("ok"));
+    },
+  });
+  const session = new AgentSession({
+    id: "ws-none",
+    model,
+    sources: [],
+    maxSteps: 2,
+    workspaceInstructions: { current: () => undefined },
+  });
+  await collect(session.send("hi"));
+  assert.doesNotMatch(capturedSystem, /# 工作区工程约定/u);
 });

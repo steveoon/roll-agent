@@ -116,6 +116,10 @@ export function expandTilde(filePath: string): string {
   return filePath;
 }
 
+function expandChatInstructions(value: string): string {
+  return value === "auto" || value === "off" ? value : expandTilde(value);
+}
+
 /** 对配置中的路径字段做 tilde 展开 */
 function expandPaths(config: RollConfig): RollConfig {
   return {
@@ -123,6 +127,10 @@ function expandPaths(config: RollConfig): RollConfig {
     agents: {
       ...config.agents,
       dataDir: expandTilde(config.agents.dataDir),
+    },
+    chat: {
+      ...config.chat,
+      instructions: expandChatInstructions(config.chat.instructions),
     },
     runtime: {
       ...config.runtime,

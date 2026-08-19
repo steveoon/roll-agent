@@ -131,6 +131,15 @@ export const CONFIG_GUIDANCE_ENTRIES = [
       "默认值为 `collapsed`；会话内可用 `/show-think` 临时切换。基础 REPL 不渲染思考内容，不受此项影响。",
     example: `chat:\n  thinking-display: ${DEFAULT_CONFIG.chat.thinkingDisplay}`,
   },
+  {
+    path: "chat.instructions",
+    title: "工作区工程约定注入",
+    purpose:
+      "控制 `roll chat` 是否把工作区的 AGENTS.md / CLAUDE.md 作为工程约定注入 system prompt：`auto` 从工作目录逐级向上找最近一层（同目录 AGENTS.md 优先），`off` 关闭，其他值视为约定文件路径（相对工作目录，支持 `~`）。",
+    defaultBehavior:
+      "默认值为 `auto`；找不到文件时不注入也不提示。文件超过 32000 字符会被截断并在 stderr 提示一次；每轮开始按修改时间检查变化。",
+    example: `chat:\n  instructions: ${DEFAULT_CONFIG.chat.instructions}`,
+  },
 
   // Chat runtime
   {

@@ -1,6 +1,6 @@
 import type { SessionCancellationReason } from "./cancellation.ts";
 import type { ToolOutcome } from "../tool-bridge/normalize-result.ts";
-import type { UserInputForm } from "@roll-agent/protocol";
+import type { FileChangeDiff, UserInputForm } from "@roll-agent/protocol";
 import type { SessionUserInputRequestId } from "../interaction/user-input-interaction-manager.ts";
 
 export interface SessionTokenUsage {
@@ -74,6 +74,7 @@ export type SessionEvent =
       /** Model-authored display aid. It never changes approval policy or command execution. */
       readonly explanation?: string;
       readonly sessionGrantLabel?: string;
+      readonly diff?: FileChangeDiff;
     }
   | {
       /** Engine-internal request; Runtime Protocol assigns a separate InteractionId. */

@@ -3,11 +3,15 @@ import type { ReactElement } from "react";
 import { Box, Text } from "ink";
 import { GLYPHS } from "../../utils/glyphs.ts";
 import type { ChatThinkingDisplay } from "../../../config/schema.ts";
+import type { DiffDisplayMode } from "../diff-display.ts";
+import { shouldExpandDiff } from "../diff-display.ts";
 import type { HistoryItem } from "./state.ts";
 import { AssistantContent } from "./assistant-content.ts";
 import { ToolLabel } from "./tool-label.ts";
 import { BannerLinesView } from "./banner-view.ts";
 import { ReasoningBlock, ReasoningSummary } from "./reasoning-block.ts";
+import { PrefixedLine } from "./prefixed-line.ts";
+import { DiffBlock, DiffSummary, diffBodyLineCount } from "./diff-view.ts";
 
 const DENIAL_TEXT_PREFIXES = ["已取消执行", "策略拒绝执行"] as const;
 
@@ -19,11 +23,15 @@ function isDenialText(text: string): boolean {
 export interface HistoryItemViewProps {
   readonly item: HistoryItem;
   readonly thinkingDisplay?: ChatThinkingDisplay;
+  readonly diffDisplay?: DiffDisplayMode;
+  readonly width?: number;
 }
 
 export function HistoryItemView({
   item,
   thinkingDisplay = "collapsed",
+  diffDisplay = "collapsed",
+  width,
 }: HistoryItemViewProps): ReactElement {
   const collapseThinking = thinkingDisplay === "collapsed";
   switch (item.kind) {
@@ -35,29 +43,35 @@ export function HistoryItemView({
           ? `${GLYPHS.attach} ${item.attachmentLabels.join(" · ")}`
           : undefined;
       return h(
-        Box,
-        null,
-        h(Text, { color: "cyan", bold: true }, "▌ "),
-        item.text.length > 0 ? h(Text, { color: "cyan" }, item.text) : null,
-        attachmentLabel !== undefined
-          ? h(
-              Text,
-              { color: "cyan", dimColor: true },
-              item.text.length > 0 ? `  ${attachmentLabel}` : attachmentLabel,
-            )
-          : null,
+        PrefixedLine,
+        { prefix: h(Text, { color: "cyan", bold: true }, "▌ ") },
+        h(
+          Text,
+          { color: "cyan" },
+          item.text.length > 0 ? item.text : null,
+          attachmentLabel !== undefined
+            ? h(
+                Text,
+                { color: "cyan", dimColor: true },
+                item.text.length > 0 ? `  ${attachmentLabel}` : attachmentLabel,
+              )
+            : null,
+        ),
       );
     }
     case "assistant":
       if (isDenialText(item.text)) {
         return h(
-          Box,
-          null,
-          h(Text, { dimColor: true }, "⊘ "),
+          PrefixedLine,
+          { prefix: h(Text, { dimColor: true }, "⊘ ") },
           h(Text, { dimColor: true }, item.text.trim()),
         );
       }
-      return h(AssistantContent, { text: item.text, collapseThinking });
+      return h(AssistantContent, {
+        text: item.text,
+        collapseThinking,
+        ...(width !== undefined ? { width } : {}),
+      });
     case "reasoning":
       return collapseThinking
         ? h(ReasoningSummary, {
@@ -66,13 +80,40 @@ export function HistoryItemView({
           })
         : h(ReasoningBlock, { text: item.text });
     case "tool": {
-      const args = item.args.length > 0 && item.args !== "{}" ? ` ${item.args}` : "";
+      const args =
+        item.diff === undefined && item.args.length > 0 && item.args !== "{}" ? item.args : "";
+      const line = h(
+        Box,
+        { flexDirection: "row" },
+        h(
+          Box,
+          { flexShrink: 0 },
+          h(
+            Text,
+            null,
+            h(Text, item.ok ? { color: "green" } : { color: "red" }, item.ok ? "✓ " : "✗ "),
+            h(ToolLabel, { name: item.name }),
+          ),
+        ),
+        args.length > 0
+          ? h(
+              Box,
+              { flexGrow: 1, flexShrink: 1, marginLeft: 1 },
+              h(Text, { dimColor: true, wrap: "truncate-end" }, args),
+            )
+          : null,
+      );
+      if (item.diff === undefined) {
+        return line;
+      }
+      const expanded = shouldExpandDiff(diffBodyLineCount(item.diff), diffDisplay);
       return h(
-        Text,
-        null,
-        h(Text, item.ok ? { color: "green" } : { color: "red" }, item.ok ? "✓ " : "✗ "),
-        h(ToolLabel, { name: item.name }),
-        args.length > 0 ? h(Text, { dimColor: true }, args) : null,
+        Box,
+        { flexDirection: "column" },
+        line,
+        expanded
+          ? h(DiffBlock, { diff: item.diff })
+          : h(DiffSummary, { diff: item.diff, hint: "/diff 展开" }),
       );
     }
     case "denied":
@@ -110,13 +151,16 @@ export function HistoryItemView({
     }
     case "notice":
       return h(
-        Box,
-        null,
-        h(Text, { color: "yellow" }, "⚠ "),
+        PrefixedLine,
+        { prefix: h(Text, { color: "yellow" }, "⚠ ") },
         h(Text, { color: "yellow" }, item.text),
       );
     case "error":
-      return h(Box, null, h(Text, { color: "red" }, "✗ "), h(Text, { color: "red" }, item.message));
+      return h(
+        PrefixedLine,
+        { prefix: h(Text, { color: "red" }, "✗ ") },
+        h(Text, { color: "red" }, item.message),
+      );
     default:
       return h(Text, null, "");
   }

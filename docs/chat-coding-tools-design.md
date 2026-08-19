@@ -1,6 +1,6 @@
 # roll chat coding 工具扩展设计（P2：检索 + 验证 + 批准记忆）
 
-> 状态：已定稿，配套实施计划见 `docs/superpowers/plans/2026-08-14-chat-coding-tools.md`
+> 状态：已定稿并实施
 > 前置：`docs/chat-file-tools-design.md`（第一轮，PR #221）；本轮在 `feat/chat-file-tools` 同分支继续
 > 目标画像（用户已确认）：**开发者自用，多语言并重**
 

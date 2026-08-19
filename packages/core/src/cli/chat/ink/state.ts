@@ -1,4 +1,10 @@
-import { TOOL_OUTCOME_KINDS, type SessionEvent, type SessionTokenUsage } from "@roll-agent/runtime";
+import {
+  TOOL_OUTCOME_KINDS,
+  getFileChangeDisplay,
+  type FileChangeDiff,
+  type SessionEvent,
+  type SessionTokenUsage,
+} from "@roll-agent/runtime";
 import {
   formatApprovalDetails,
   formatApprovalExplanation,
@@ -9,6 +15,7 @@ import { endsInsideThink } from "./thinking-text.ts";
 import type { ThinkingLevel } from "../../../llm/providers.ts";
 import type { ChatThinkingDisplay } from "../../../config/schema.ts";
 import type { BannerLine } from "../banner.ts";
+import type { DiffDisplayMode } from "../diff-display.ts";
 
 export interface ToolRowState {
   readonly toolCallId: string;
@@ -42,6 +49,7 @@ export type HistoryItem =
       readonly name: string;
       readonly args: string;
       readonly ok: boolean;
+      readonly diff?: FileChangeDiff;
     }
   | {
       readonly kind: "denied";
@@ -104,6 +112,7 @@ export interface PendingConfirm {
   readonly args: string;
   readonly explanation?: string;
   readonly sessionGrantLabel?: string;
+  readonly diff?: FileChangeDiff;
 }
 
 export interface ConfirmDecision {
@@ -122,6 +131,7 @@ export interface ChatUiState {
   readonly pendingConfirm: PendingConfirm | undefined;
   readonly pendingUserInput: PendingUserInput | undefined;
   readonly thinkingDisplay: ChatThinkingDisplay;
+  readonly diffDisplay: DiffDisplayMode;
 }
 
 export type ChatUiAction =
@@ -146,12 +156,14 @@ export type ChatUiAction =
   | { readonly type: "confirm-resolved" }
   | { readonly type: "user-input-resolved"; readonly requestId: PendingUserInput["requestId"] }
   | { readonly type: "cancel-requested" }
-  | { readonly type: "turn-end" };
+  | { readonly type: "turn-end" }
+  | { readonly type: "set-diff-display"; readonly value: DiffDisplayMode };
 
 export interface InitialStateOptions {
   readonly history?: readonly HistoryItem[];
   readonly thinkingLevel?: ThinkingLevel;
   readonly thinkingDisplay?: ChatThinkingDisplay;
+  readonly diffDisplay?: DiffDisplayMode;
 }
 
 const EMPTY_LIVE: LiveState = {
@@ -193,6 +205,7 @@ export function createInitialState(
     pendingConfirm: undefined,
     pendingUserInput: undefined,
     thinkingDisplay: options?.thinkingDisplay ?? "collapsed",
+    diffDisplay: options?.diffDisplay ?? "collapsed",
   };
 }
 
@@ -256,10 +269,18 @@ function commitTool(
         : event.outcome === undefined && event.isError
           ? denialLabel(event.output)
           : undefined;
+  const fileChange = event.isError ? undefined : getFileChangeDisplay(event.display);
   const item: HistoryItem =
     denial !== undefined
       ? { kind: "denied", id, name, label: denial }
-      : { kind: "tool", id, name, args, ok: !event.isError };
+      : {
+          kind: "tool",
+          id,
+          name,
+          args,
+          ok: !event.isError,
+          ...(fileChange !== undefined ? { diff: fileChange.diff } : {}),
+        };
   return {
     ...state,
     history: [...state.history, item],
@@ -431,6 +452,7 @@ function applySessionEvent(
           ...(event.sessionGrantLabel !== undefined
             ? { sessionGrantLabel: event.sessionGrantLabel }
             : {}),
+          ...(event.diff !== undefined ? { diff: event.diff } : {}),
         },
         pendingUserInput: undefined,
       };
@@ -584,6 +606,8 @@ export function chatReducer(state: ChatUiState, action: ChatUiAction): ChatUiSta
         pendingConfirm: undefined,
         pendingUserInput: undefined,
       };
+    case "set-diff-display":
+      return { ...state, diffDisplay: action.value };
     default:
       return state;
   }

@@ -26,6 +26,9 @@ VALIDATE_BROWSER_SELECTION="$SCRIPT_DIR/validate-browser-selection.mjs"
 DETECT_EXPIRED="$SCRIPT_DIR/detect-expired-banner.mjs"
 PARSE_PAGE_META="$SCRIPT_DIR/parse-page-meta.mjs"
 DETECT_ACCESS_STOP="$SCRIPT_DIR/detect-access-stop.mjs"
+FIND_RESUME_REF="$SCRIPT_DIR/find-resume-ref.mjs"
+PARSE_RESUME_CAPTURE="$SCRIPT_DIR/parse-resume-capture.mjs"
+APPLY_SCREEN_DECISIONS="$SCRIPT_DIR/apply-screen-decisions.mjs"
 
 AGENT="${ROLL_AGENT:-browser-use-agent}"
 BROWSER_INSTANCE="${ROLL_BROWSER_INSTANCE:-}"
@@ -41,6 +44,9 @@ MAX_CONSECUTIVE_FAILURES=2
 MAX_EMPTY_READS=2
 KEEP_WORKDIR=0
 NO_JUDGE=0
+SCREEN_ONLY=0
+DECISIONS_FILE=""
+SCREEN_MANIFEST_FILE=""
 RESULTS_FILE="${TMPDIR:-/tmp}/roll-zhipin-unread-reply-$(date +%Y%m%d-%H%M%S).jsonl"
 WORK_DIR=""
 
@@ -64,6 +70,11 @@ Options:
   --batch-size N         Sends per batch before long pause (default: 4)
   --batch-pause SEC      Pause after each batch (default: 0, disabled)
   --results-file PATH    JSONL log path
+  --screen-only          Resume-screening phase: open chat + skip rules + capture
+                         resume screenshot into a manifest; never generate/send/exchange
+  --screen-manifest PATH Manifest output for --screen-only / input for --decisions
+  --decisions FILE       Act phase: agent-written JSON/JSONL of
+                         {conversationId, fit, reason}; requires --screen-manifest
   --keep-workdir         Do not delete temp workdir (debug)
   -h, --help
 
@@ -93,6 +104,9 @@ while [[ $# -gt 0 ]]; do
     --batch-pause) need_arg "$1" "${2:-}"; BATCH_PAUSE="$2"; shift 2 ;;
     --results-file) need_arg "$1" "${2:-}"; RESULTS_FILE="$2"; shift 2 ;;
     --keep-workdir) KEEP_WORKDIR=1; shift ;;
+    --screen-only) SCREEN_ONLY=1; shift ;;
+    --screen-manifest) need_arg "$1" "${2:-}"; SCREEN_MANIFEST_FILE="$2"; shift 2 ;;
+    --decisions) need_arg "$1" "${2:-}"; DECISIONS_FILE="$2"; shift 2 ;;
     -h|--help) usage; exit 0 ;;
     *) echo "Unknown option: $1" >&2; usage; exit 1 ;;
   esac
@@ -121,7 +135,7 @@ for helper in \
   "$PARSE_GENERATE_PREVIEW" "$FORMAT_PREVIEW_FAILURE" "$BUILD_SEND_PAYLOAD" "$APPLY_SEND_BUNDLE" \
   "$COMPOSE_RESULT_INPUT" "$FORMAT_CANDIDATE_RESULT" "$PARSE_SEND_RESULT" "$VALIDATE_SEND" \
   "$CHECK_AGENT_HEALTH" "$VALIDATE_BROWSER_SELECTION" "$DETECT_EXPIRED" "$PARSE_PAGE_META" \
-  "$DETECT_ACCESS_STOP"; do
+  "$DETECT_ACCESS_STOP" "$FIND_RESUME_REF" "$PARSE_RESUME_CAPTURE" "$APPLY_SCREEN_DECISIONS"; do
   if [[ ! -f "$helper" ]]; then
     echo "error: missing helper script: $helper" >&2
     exit 1
@@ -356,6 +370,141 @@ check_page_blockers() {
   printf '%s' "$snap" | node "$DETECT_EXPIRED" 2>/dev/null || echo "ok"
 }
 
+append_manifest() {
+  local manifest="$1"
+  local line="$2"
+  printf '%s' "$line" | node "$APPEND_JSONL" "$manifest"
+}
+
+# Screening phase: click right-panel 「在线简历」, capture the canvas resume image,
+# close the dialog, and append a manifest row for the agent to review.
+capture_resume_screening() {
+  local cid="$1"
+  local name="$2"
+  local ts="$3"
+  local manifest="$SCREEN_MANIFEST_FILE"
+
+  write_json "$WORK_DIR/snap-resume.json" '{"interactiveOnly":true,"maxNodes":300}'
+  local snap ref
+  snap=$(roll_json_file browser_snapshot "$WORK_DIR/snap-resume.json")
+  stop_if_risk_page "$snap" "resume_snapshot" "$name" "$cid"
+  ref=$(printf '%s' "$snap" | node "$FIND_RESUME_REF" 2>/dev/null) || ref=""
+  if [[ -z "$ref" ]]; then
+    log "screen $name: 在线简历 entry not found"
+    append_manifest "$manifest" "{\"ts\":\"$ts\",\"name\":\"$name\",\"conversationId\":\"$cid\",\"ok\":false,\"stage\":\"screen\",\"status\":\"resume_entry_missing\"}"
+    return 0
+  fi
+
+  log "screen $name: click 在线简历 $ref"
+  write_json "$WORK_DIR/click-resume.json" "{\"ref\":\"$ref\"}"
+  roll_json_file click_ref "$WORK_DIR/click-resume.json" | extract_json_object >/dev/null || true
+  sleep 1
+
+  local diag diag_json ready
+  write_json "$WORK_DIR/diag.json" '{"phase":"resume-canvas","watchMs":3000}'
+  diag=$(roll_json_file zhipin_diagnose_browser_state "$WORK_DIR/diag.json")
+  stop_if_risk_page "$diag" "resume_canvas" "$name" "$cid"
+  diag_json=$(printf '%s' "$diag" | extract_json_object 2>/dev/null) || diag_json='{}'
+  ready=$(printf '%s' "$diag_json" | node -e 'let j={};try{j=JSON.parse(require("fs").readFileSync(0,"utf8"));}catch{};process.stdout.write(j.resumeCanvas?.canvasReady===true?"1":"0");' 2>/dev/null) || ready="0"
+  if [[ "$ready" != "1" ]]; then
+    log "screen $name: resume canvas not ready"
+    append_manifest "$manifest" "{\"ts\":\"$ts\",\"name\":\"$name\",\"conversationId\":\"$cid\",\"ok\":false,\"stage\":\"screen\",\"status\":\"resume_canvas_not_ready\"}"
+    roll_no_input zhipin_close_resume >/dev/null || true
+    return 0
+  fi
+
+  local cap_out cap_meta image_path
+  write_json "$WORK_DIR/cap.json" '{}'
+  cap_out=$(roll_json_file zhipin_capture_resume "$WORK_DIR/cap.json")
+  stop_if_risk_page "$cap_out" "resume_capture" "$name" "$cid"
+  cap_meta=$(printf '%s' "$cap_out" | node "$PARSE_RESUME_CAPTURE" 2>/dev/null) || cap_meta=""
+  image_path=$(printf '%s' "$cap_meta" | node -e 'let j={};try{j=JSON.parse(require("fs").readFileSync(0,"utf8"));}catch{};process.stdout.write(j.imagePath||"");' 2>/dev/null) || image_path=""
+  roll_no_input zhipin_close_resume >/dev/null || true
+
+  if [[ -z "$image_path" || ! -f "$image_path" ]]; then
+    log "screen $name: resume capture produced no image"
+    append_manifest "$manifest" "{\"ts\":\"$ts\",\"name\":\"$name\",\"conversationId\":\"$cid\",\"ok\":false,\"stage\":\"screen\",\"status\":\"resume_capture_failed\"}"
+    return 0
+  fi
+
+  log "screen $name: resume captured -> $image_path"
+  append_manifest "$manifest" "{\"ts\":\"$ts\",\"name\":\"$name\",\"conversationId\":\"$cid\",\"ok\":true,\"stage\":\"screen\",\"status\":\"screened\",\"resumeImagePath\":\"$image_path\"}"
+  return 0
+}
+
+# Act phase: apply agent resume decisions to a screen manifest; reply only to fit
+# candidates, log resume_mismatch skips for the rest.
+run_act_phase() {
+  if [[ -z "$SCREEN_MANIFEST_FILE" || ! -f "$SCREEN_MANIFEST_FILE" ]]; then
+    log "error: --decisions requires --screen-manifest pointing at a --screen-only manifest"
+    exit 1
+  fi
+  local suitable_tsv unsuitable_jsonl summary
+  suitable_tsv="$WORK_DIR/suitable.tsv"
+  unsuitable_jsonl="$WORK_DIR/unsuitable.jsonl"
+  summary=$(node "$APPLY_SCREEN_DECISIONS" "$SCREEN_MANIFEST_FILE" "$DECISIONS_FILE" "$suitable_tsv" "$unsuitable_jsonl") || {
+    log "error: failed to merge decisions: $summary"
+    exit 1
+  }
+  log "act phase: $summary"
+  if [[ -s "$unsuitable_jsonl" ]]; then
+    while IFS= read -r line; do
+      append_result "$line"
+    done <"$unsuitable_jsonl"
+  fi
+  if [[ ! -s "$suitable_tsv" ]]; then
+    log "no suitable candidates; done"
+    return 0
+  fi
+
+  local processed=0
+  local consecutive_fail=0
+  local batch_count=0
+  while IFS=$'\t' read -r cid name image_path; do
+    [[ -z "$cid" ]] && continue
+    if [[ -n "$LIMIT" && "$processed" -ge "$LIMIT" ]]; then
+      log "reached --limit $LIMIT"
+      break
+    fi
+    log "act [$((processed + 1))] $name ($cid)"
+    set +e
+    process_one "$cid" "$name" ""
+    local rc=$?
+    set -e
+    if [[ "$rc" -eq 2 ]]; then
+      exit 2
+    fi
+    processed=$((processed + 1))
+    if [[ "$rc" -eq 1 ]]; then
+      consecutive_fail=$((consecutive_fail + 1))
+      if [[ "$consecutive_fail" -ge "$MAX_CONSECUTIVE_FAILURES" ]]; then
+        log "STOP: $MAX_CONSECUTIVE_FAILURES consecutive failures"
+        exit 3
+      fi
+    elif [[ "$rc" -eq 10 ]]; then
+      consecutive_fail=0
+      batch_count=$((batch_count + 1))
+      if [[ "$batch_count" -ge "$BATCH_SIZE" ]]; then
+        if [[ "$BATCH_PAUSE" -gt 0 ]]; then
+          log "batch pause ${BATCH_PAUSE}s"
+          sleep "$BATCH_PAUSE"
+        fi
+        batch_count=0
+      else
+        local gap
+        gap=$(random_gap)
+        if [[ "$gap" -gt 0 ]]; then
+          log "sleep ${gap}s"
+          sleep "$gap"
+        fi
+      fi
+    else
+      consecutive_fail=0
+    fi
+  done <"$suitable_tsv"
+  log "act phase done; handled=$processed"
+}
+
 process_one() {
   local cid="$1"
   local name="$2"
@@ -460,6 +609,12 @@ process_one() {
     reason=$(printf '%s' "$skip_result" | node -e "const j=JSON.parse(require('fs').readFileSync(0,'utf8'));console.log(j.reason||'skip');")
     append_result "$(node -e 'const j=JSON.parse(process.argv[1]); console.log(JSON.stringify({ts:process.argv[2],name:process.argv[3],conversationId:process.argv[4],ok:false,stage:"skip",reason:j.reason||"skip"}));' "$skip_result" "$ts" "$name" "$cid")"
     log "skip $name: $reason"
+    back_to_list
+    return 0
+  fi
+
+  if [[ "$SCREEN_ONLY" -eq 1 ]]; then
+    capture_resume_screening "$cid" "$name" "$ts"
     back_to_list
     return 0
   fi
@@ -571,7 +726,31 @@ main() {
   log "workdir -> $WORK_DIR"
   ensure_agent_healthy
   ensure_browser_instance_selection
+
+  if [[ -n "$DECISIONS_FILE" ]]; then
+    # Act phase works on already-read (no longer unread) candidates: never filter 未读.
+    # Screening usually leaves the 未读 filter applied, which hides already-read
+    # candidates from open_chat — force-reload once to drop it back to 全部.
+    CLICK_UNREAD_FILTER=0
+    log "act phase: force reload to drop 未读 filter"
+    write_json "$WORK_DIR/reload-act.json" '{"forceReload":true}'
+    local act_reload
+    act_reload=$(roll_json_file zhipin_open_chat_page "$WORK_DIR/reload-act.json")
+    stop_if_risk_page "$act_reload" "act_reload"
+    ensure_chat_list
+    run_act_phase
+    return 0
+  fi
+
   ensure_unread_list_ready
+
+  if [[ "$SCREEN_ONLY" -eq 1 ]]; then
+    if [[ -z "$SCREEN_MANIFEST_FILE" ]]; then
+      SCREEN_MANIFEST_FILE="${RESULTS_FILE%.jsonl}-screen-manifest.jsonl"
+    fi
+    : >"$SCREEN_MANIFEST_FILE"
+    log "screen manifest -> $SCREEN_MANIFEST_FILE"
+  fi
 
   local processed=0
   local consecutive_fail=0

@@ -162,6 +162,15 @@ Protocol `"1.0"` / `"1.1"` 的 strict 顶层结构不变，旧 GUI 可以继续�
 时才向用户展示风险 `reason`；仅因无法证明安全而复用 `destructiveHint` 的 `unknown`
 命令不会显示“破坏性操作”。GUI 在 `reason` 缺失时应使用中性提示或直接省略。
 
+文件编辑类审批（`edit_file` / `write_file`）的变更预览位于 `approval.preview.diff`，形状为
+`fileChangeDiffSchema`（`path`、`change: "create" | "modify"`、`added`、`removed`、`hunks`、可选的
+`unified` 文本、`truncated`）；`getApprovalDiffPreview()` 完成校验。写入成功后的
+`tool.completed.display` 为 `{ text, diff }` 对象（`fileChangeDisplaySchema`），`getFileChangeDisplay()`
+读取；`text` 是与旧版本一致的人类可读摘要。`operationView.display`（`thread.snapshot` /
+`operation.get`）沿用台账信封 `{ version, encoding, value }`，`value` 才是同一 `{ text, diff }` 对象，
+读取时传 `display.value`。两者同样刻意放在既有 JSON 槽位内：strict 顶层结构不变，旧客户端把它们当
+普通 JSON 忽略；`unified` 缺席表示只有统计（超大文件），`truncated: true` 表示正文按上限截断。
+
 ## 文档
 
 - [Runtime Protocol v1 参考](https://github.com/steveoon/roll-agent/blob/main/docs/runtime-protocol-v1-reference.md)

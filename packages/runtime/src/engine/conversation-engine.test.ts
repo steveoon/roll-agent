@@ -1535,6 +1535,7 @@ test("ConversationEngine.getContextSummary 汇总 agent/tool/skill 数量", asyn
   const engine = new ConversationEngine({
     config,
     model: new MockLanguageModelV4({}),
+    workspaceInstructions: null,
     sources: [
       {
         agentName: "a",
@@ -4565,6 +4566,117 @@ test("ConversationEngine resumeSession 重建 session 后文件工具行为与 c
 
     await engine.dispose();
     store.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+function engineConfigWithInstructions(instructions: string) {
+  return rollConfigSchema.parse({
+    llm: {
+      defaultProvider: "mock",
+      defaultModel: "default-model",
+      providers: { mock: { apiKey: "test" } },
+    },
+    ask: {},
+    agents: { dataDir: "/tmp/roll-engine-test" },
+    chat: { instructions },
+  });
+}
+
+function capturingModel(captured: Array<{ readonly role: string; readonly content: unknown }>) {
+  return new MockLanguageModelV4({
+    doStream: async (options) => {
+      captured.push(...options.prompt);
+      return {
+        stream: simulateReadableStream({
+          chunks: [
+            { type: "stream-start", warnings: [] } as const,
+            { type: "text-start", id: "t" } as const,
+            { type: "text-delta", id: "t", delta: "ok" } as const,
+            { type: "text-end", id: "t" } as const,
+            {
+              type: "finish",
+              usage: {
+                inputTokens: { total: 1, noCache: 1, cacheRead: 0, cacheWrite: 0 },
+                outputTokens: { total: 1, text: 1, reasoning: 0 },
+              },
+              finishReason: { unified: "stop", raw: "stop" },
+            } as const,
+          ],
+          initialDelayInMs: null,
+          chunkDelayInMs: null,
+        }),
+      };
+    },
+  });
+}
+
+test("ConversationEngine 把显式 workspaceInstructions source 注入 session system prompt 并暴露 instructionsPath", async () => {
+  const captured: Array<{ readonly role: string; readonly content: unknown }> = [];
+  const engine = new ConversationEngine({
+    config: engineConfigWithInstructions("auto"),
+    model: capturingModel(captured),
+    sources: [],
+    skillLibrary: null,
+    workspaceInstructions: {
+      current: () => ({
+        path: "/repo/AGENTS.md",
+        content: "engine rules",
+        truncated: false,
+        totalChars: 12,
+      }),
+    },
+  });
+  const summary = await engine.getContextSummary();
+  assert.equal(summary.instructionsPath, "/repo/AGENTS.md");
+  const session = await engine.createSession();
+  await drain(session.send("hi"));
+  const system = captured.find((message) => message.role === "system");
+  assert.ok(system);
+  assert.ok(String(system.content).includes("# 工作区工程约定"));
+  assert.ok(String(system.content).includes("engine rules"));
+  await engine.dispose();
+});
+
+test("ConversationEngine workspaceInstructions 为 null 或 config off 时不注入", async () => {
+  for (const variant of ["null", "off"] as const) {
+    const captured: Array<{ readonly role: string; readonly content: unknown }> = [];
+    const engine = new ConversationEngine({
+      config: engineConfigWithInstructions(variant === "off" ? "off" : "auto"),
+      model: capturingModel(captured),
+      sources: [],
+      skillLibrary: null,
+      ...(variant === "null" ? { workspaceInstructions: null } : {}),
+    });
+    const summary = await engine.getContextSummary();
+    assert.equal(summary.instructionsPath, undefined, variant);
+    const session = await engine.createSession();
+    await drain(session.send("hi"));
+    const system = captured.find((message) => message.role === "system");
+    assert.ok(system, variant);
+    assert.ok(!String(system.content).includes("# 工作区工程约定"), variant);
+    await engine.dispose();
+  }
+});
+
+test("ConversationEngine 按 config 构造 source 时把告警转给 onWorkspaceInstructionsIssue", async () => {
+  const dir = tempDir();
+  try {
+    const missing = join(dir, "nope.md");
+    const issues: string[] = [];
+    const engine = new ConversationEngine({
+      config: engineConfigWithInstructions(missing),
+      model: new MockLanguageModelV4({}),
+      sources: [],
+      skillLibrary: null,
+      onWorkspaceInstructionsIssue: (message) => issues.push(message),
+    });
+    const summary = await engine.getContextSummary();
+    assert.equal(summary.instructionsPath, undefined);
+    assert.equal(issues.length, 1);
+    assert.ok(issues[0]?.includes(missing));
+    await engine.dispose();
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

@@ -4,7 +4,9 @@ description: >-
   Safely batch-replies to unread BOSS Zhipin chats via roll CLI and browser-use-agent using
   reply-unread-safely.sh or reply-unread-safely.ps1 (team skip rules, limit=1 reads, rate limits).
   Use when replying to all unread messages, continuing unread replies, clicking 未读 filter, or
-  automating zhipin chat workflow. Never use ad-hoc roll loops or built-in browser_ tools for Zhipin.
+  automating zhipin chat workflow. Also supports two-phase resume screening (--screen-only then
+  --decisions) so only candidates matching the operator's job requirements get replies. Never use
+  ad-hoc roll loops or built-in browser_ tools for Zhipin.
 ---
 
 # Roll Zhipin Unread Reply
@@ -133,6 +135,9 @@ When parallel full-reply runs misbehave but sequential runs on the same instance
 | `validate-*.mjs` / `check-agent-health.mjs` | Roll output validators |
 | `validate-browser-selection.mjs` | Fail fast when multi-instance config needs explicit `browserInstance` |
 | `detect-expired-banner.mjs` / `parse-page-meta.mjs` | Page guards |
+| `find-resume-ref.mjs` | Locate right-panel 「在线简历」 ref in a snapshot |
+| `parse-resume-capture.mjs` | Extract `imagePath` from `zhipin_capture_resume` output |
+| `apply-screen-decisions.mjs` | Merge screen manifest + agent decisions into act-phase plan |
 
 Quick test (no roll):
 
@@ -156,6 +161,50 @@ node --test scripts/reply-unread-safely.powershell.e2e.test.mjs # Windows runs; 
 | `ProcessStartInfo` on `roll.ps1` | **Not used** — invoke `roll` via PowerShell `& roll` |
 | Huge `browser_snapshot` JSON fails `JSON.parse` | `find-unread-ref.mjs` uses `extract-roll-json` + regex fallback |
 | Temp workdir deleted on exit | `-KeepWorkDir` / `--keep-workdir` keeps files for debugging |
+
+## Resume screening (two-phase mode)
+
+Use this when the operator wants replies only for candidates whose resume matches their job
+requirements. The shell script cannot read images; the **agent** reads resume screenshots and
+writes the decisions. Bash entry only for now (`reply-unread-safely.ps1` does not support these
+flags yet).
+
+**Job requirements config** — `~/.roll-agent/zhipin-job-requirements.json`. If the file is
+missing, the agent must ask the operator (e.g. via `roll__user_input`: age range, location,
+education, extra requirements, unfit handling, save-as-default) and write the file before
+screening. The agent re-reads it every run; it is never auto-overwritten.
+
+**Phase A — screen:**
+
+```bash
+./scripts/reply-unread-safely.sh --screen-only --limit N \
+  --screen-manifest /tmp/screen-manifest.jsonl
+```
+
+Per candidate the script runs the normal unread read + open_chat + team skip rules, then clicks
+the right-panel 「在线简历」, waits for the resume canvas (`zhipin_diagnose_browser_state`
+phase `resume-canvas`), captures the canvas PNG (`zhipin_capture_resume`), closes the dialog, and
+appends a manifest row (`stage:"screen"`, `resumeImagePath`). It never generates, sends, or
+exchanges wechat. Resume failures are recorded with `status` = `resume_entry_missing` /
+`resume_canvas_not_ready` / `resume_capture_failed`.
+
+**Agent review:** read every `resumeImagePath` image, judge fit against the job requirements
+config, and write `decisions.json` (JSON array or JSONL):
+`{"conversationId": "...", "fit": true|false, "reason": "..."}`. Every manifest row with
+`status:"screened"` needs exactly one decision.
+
+**Phase B — act:**
+
+```bash
+./scripts/reply-unread-safely.sh --decisions /tmp/decisions.json \
+  --screen-manifest /tmp/screen-manifest.jsonl
+```
+
+`apply-screen-decisions.mjs` splits the manifest: fit candidates go through the normal reply +
+exchange pipeline (the act phase never clicks 未读 — those chats are already read); unfit or
+undecided candidates are logged as `stage:"skip"` rows with `reason` = `resume_mismatch` /
+`resume_unavailable` / `no_decision` and are never contacted. With `unfitAction: "skipSilent"`
+(the only supported value today) nothing else happens for unfit candidates.
 
 ## Per-candidate workflow (implemented in script)
 
@@ -214,6 +263,8 @@ Skipped candidates are logged in JSONL with `"stage":"skip"` and `"reason":…`:
 | `age_brand_*` | 成都你六姐 18–45; 北京必胜客/Pizza 18–50 |
 | `declined` | 不考虑了, 不合适, … |
 | `position_expired` | 沟通职位已到期 banner |
+| `resume_mismatch` | Agent resume screening judged the candidate unfit for the operator's job requirements (act phase) |
+| `resume_unavailable` / `no_decision` | Screening could not capture the resume, or the agent omitted a decision (act phase) |
 
 Logic: `scripts/evaluate-skip-rules.mjs`
 

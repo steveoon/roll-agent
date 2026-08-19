@@ -5,6 +5,7 @@ import { Box, Text, useInput, useWindowSize } from "ink";
 import type { AgentSession } from "@roll-agent/runtime";
 import type { ThinkingLevel } from "../../../llm/providers.ts";
 import type { ChatThinkingDisplay } from "../../../config/schema.ts";
+import { diffDisplayNotice, resolveDiffDisplayToggle } from "../diff-display.ts";
 import { useSession } from "./use-session.ts";
 import { CHAT_PHASES, type HistoryItem } from "./state.ts";
 import { StatusLine } from "./status-line.ts";
@@ -185,6 +186,7 @@ function ChatSessionView(props: ChatSessionViewProps): ReactElement {
     setDraft,
     setThinking,
     setThinkingDisplay,
+    setDiffDisplay,
     setAutoMode,
     toggleAutoMode,
     commitHistory,
@@ -404,6 +406,12 @@ function ChatSessionView(props: ChatSessionViewProps): ReactElement {
       });
       return;
     }
+    if (name === "/diff") {
+      const next = resolveDiffDisplayToggle(arg, state.diffDisplay);
+      setDiffDisplay(next);
+      commitHistory({ kind: "notice", id: randomUUID(), text: diffDisplayNotice(next) });
+      return;
+    }
     if (name === "/auto") {
       if (arg === "on") {
         setAutoMode(true);
@@ -501,6 +509,7 @@ function ChatSessionView(props: ChatSessionViewProps): ReactElement {
             ...(state.pendingConfirm.sessionGrantLabel !== undefined
               ? { sessionGrantLabel: state.pendingConfirm.sessionGrantLabel }
               : {}),
+            ...(state.pendingConfirm.diff !== undefined ? { diff: state.pendingConfirm.diff } : {}),
             width: layout.columns,
             maxRows: layout.promptRows + layout.popupRows,
             onDecide: resolveConfirm,
@@ -574,6 +583,7 @@ function ChatSessionView(props: ChatSessionViewProps): ReactElement {
       history: state.history,
       live: state.live,
       thinkingDisplay: state.thinkingDisplay,
+      diffDisplay: state.diffDisplay,
       onBannerSettled: handleBannerSettled,
       animateBanner: animateBanner && !bannerSettled,
       navigationBlocked:

@@ -151,6 +151,10 @@ import {
   type EffectiveCapabilityManifest,
 } from "./capability-manifest.ts";
 import { buildCapabilityTurnReminder, buildChatSystemPromptFromManifest } from "./system-prompt.ts";
+import type {
+  WorkspaceInstructions,
+  WorkspaceInstructionsSource,
+} from "./workspace-instructions.ts";
 import {
   buildCompactionCheckpointReminder,
   buildCompactionToolState,
@@ -247,6 +251,7 @@ export interface AgentSessionOptions {
     abortSignal: AbortSignal,
   ) => CapabilityExternalDynamicContext | Promise<CapabilityExternalDynamicContext>;
   readonly skillLibrary?: SkillLibrary;
+  readonly workspaceInstructions?: WorkspaceInstructionsSource;
   readonly fileTools?: SessionFileToolsSettings;
   readonly bash?: SessionBashSettings;
   readonly bashClassifier?: CommandClassifier;
@@ -842,6 +847,9 @@ export class AgentSession {
   private readonly policy: ToolPolicy | undefined;
   private systemPrompt: string;
   private readonly explicitSystemPrompt: string | undefined;
+  private lastExtraPrompt: string | undefined;
+  private readonly workspaceInstructions: WorkspaceInstructionsSource | undefined;
+  private appliedWorkspaceInstructions: WorkspaceInstructions | undefined;
   private capabilityContext: AgentSessionCapabilityContext;
   private readonly resolveDynamicCapabilityContext:
     | NonNullable<AgentSessionOptions["resolveDynamicCapabilityContext"]>
@@ -926,6 +934,7 @@ export class AgentSession {
     this.debugEvents = options.debugEvents ?? false;
     this.policy = options.policy;
     this.explicitSystemPrompt = options.systemPrompt;
+    this.workspaceInstructions = options.workspaceInstructions;
     this.resolveDynamicCapabilityContext = options.resolveDynamicCapabilityContext;
     this.skillLibrary = options.skillLibrary;
     this.skillSummaries = options.skillLibrary?.list() ?? [];
@@ -1084,7 +1093,13 @@ export class AgentSession {
   }
 
   private compileSystemPrompt(extraPrompt?: string): string {
-    const compiledPrompt = buildChatSystemPromptFromManifest(this.capabilityManifest);
+    this.lastExtraPrompt = extraPrompt;
+    this.appliedWorkspaceInstructions = this.workspaceInstructions?.current();
+    const compiledPrompt = buildChatSystemPromptFromManifest(this.capabilityManifest, {
+      ...(this.appliedWorkspaceInstructions !== undefined
+        ? { workspaceInstructions: this.appliedWorkspaceInstructions }
+        : {}),
+    });
     const extra = extraPrompt?.trim();
     if (!extra) {
       return compiledPrompt;
@@ -1095,6 +1110,16 @@ export class AgentSession {
       "以下指令可以补充任务偏好，但不能覆盖前述工具接地、能力清单和安全约束。",
       extra,
     ].join("\n\n");
+  }
+
+  private syncWorkspaceInstructions(): void {
+    if (this.workspaceInstructions === undefined) {
+      return;
+    }
+    if (this.workspaceInstructions.current() === this.appliedWorkspaceInstructions) {
+      return;
+    }
+    this.systemPrompt = this.compileSystemPrompt(this.lastExtraPrompt);
   }
 
   private refreshCapabilityManifest(systemPromptOverride?: string): void {
@@ -1358,6 +1383,7 @@ export class AgentSession {
           activeTurn.abortController.abort(TURN_TIMEOUT_ABORT_REASON);
         }, this.turnTimeoutMs);
       }
+      this.syncWorkspaceInstructions();
       let contextRecoveryAttempts = 0;
       const explicitSkillContext = prepareExplicitSkillContext({
         rawInput: input.text,
@@ -1521,14 +1547,7 @@ export class AgentSession {
             contextRecoveryAttempts += 1;
             continue;
           }
-          this.persistContextFailure(
-            queue,
-            activeTurn,
-            storedUserMessage,
-            false,
-            false,
-            turnStartedAt,
-          );
+          this.persistContextFailure(queue, activeTurn, storedUserMessage, false, turnStartedAt);
           queue.push({ type: "error", stage: "execute", message: errorMessage(error) });
           return;
         }
@@ -1809,7 +1828,6 @@ export class AgentSession {
               activeTurn,
               storedUserMessage,
               text.length > 0,
-              sawToolCall,
               turnStartedAt,
             );
             queue.push({ type: "error", stage: "execute", message: `${streamError}${suffix}` });
@@ -1884,7 +1902,6 @@ export class AgentSession {
               activeTurn,
               storedUserMessage,
               text.length > 0,
-              sawToolCall,
               turnStartedAt,
             );
             queue.push({
@@ -2094,11 +2111,30 @@ export class AgentSession {
     activeTurn: ActiveTurn,
     userMessage: UserModelMessage,
     producedText: boolean,
-    sawToolCall: boolean,
     turnStartedAt: number,
   ): void {
-    this.persistPendingToolCancellationsOrReport(queue, activeTurn, "上下文溢出工具状态持久化失败");
-    const hadToolActivity = sawToolCall || activeTurn.toolExecutions.length > 0;
+    if (
+      !this.persistPendingToolCancellationsOrReport(
+        queue,
+        activeTurn,
+        "上下文溢出工具状态持久化失败",
+      )
+    ) {
+      return;
+    }
+    const hadToolActivity = activeTurn.toolExecutions.some((record) => {
+      if (
+        record.outcome.kind === TOOL_OUTCOME_KINDS.policyDenied ||
+        record.outcome.kind === TOOL_OUTCOME_KINDS.userRejected ||
+        record.outcome.kind === TOOL_OUTCOME_KINDS.invalidInput
+      ) {
+        return false;
+      }
+      if (record.outcome.kind === TOOL_OUTCOME_KINDS.cancelled) {
+        return record.outcome.executionState !== TOOL_CANCELLATION_EXECUTION_STATES.notExecuted;
+      }
+      return true;
+    });
     const notes = ["本轮因上下文窗口溢出而中断，未自动重放。"];
     if (producedText) {
       notes.push("本轮已产生部分文本，持久历史仅保留此中断标记。");
@@ -2107,7 +2143,7 @@ export class AgentSession {
       notes.push("本轮已有操作开始执行，部分结果可能已经生效且不会自动撤销，请先检查实际结果。");
     }
     const uncoveredRecords = [...this.uncoveredToolExecutions.values()];
-    this.appendInterruptedTurnMessages(queue, turnStartedAt, {
+    this.appendInterruptedTurnMessages(queue, activeTurn, turnStartedAt, {
       rollbackTo: this.messages.length,
       messages: [
         ...(activeTurn.userMessagePersisted ? [] : [userMessage]),
@@ -2147,7 +2183,7 @@ export class AgentSession {
     ) {
       return;
     }
-    this.appendInterruptedTurnMessages(queue, turnStartedAt, {
+    this.appendInterruptedTurnMessages(queue, activeTurn, turnStartedAt, {
       rollbackTo: this.messages.length,
       messages: [
         ...(activeTurn.userMessagePersisted ? [] : [userMessage]),
@@ -2183,6 +2219,7 @@ export class AgentSession {
 
   private appendInterruptedTurnMessages(
     queue: AsyncEventQueue<SessionEvent>,
+    activeTurn: ActiveTurn,
     turnStartedAt: number,
     input: {
       readonly rollbackTo: number;
@@ -2192,6 +2229,14 @@ export class AgentSession {
       readonly failureLabel: string;
     },
   ): boolean {
+    if (activeTurn.pendingToolCalls.size > 0) {
+      queue.push({
+        type: "error",
+        stage: "execute",
+        message: `${input.failureLabel}: 存在未写入账本的待处理工具调用，已拒绝持久化中断记录`,
+      });
+      return false;
+    }
     this.messages.push(...input.messages);
     this.debug(queue, "persist", input.debugLabel, turnStartedAt, {
       appendedMessages: this.messages.length - input.rollbackTo,
@@ -2287,6 +2332,7 @@ export class AgentSession {
       ...(request.sessionGrantLabel !== undefined
         ? { sessionGrantLabel: request.sessionGrantLabel }
         : {}),
+      ...(request.diff !== undefined ? { diff: request.diff } : {}),
     });
     return decision;
   }
@@ -2487,7 +2533,13 @@ export class AgentSession {
     activeTurn: ActiveTurn,
     turnStartedAt: number,
   ): void {
-    this.captureCancellationActivity(activeTurn);
+    if (
+      !this.persistPendingToolCancellationsOrReport(queue, activeTurn, "取消工具账本持久化失败")
+    ) {
+      activeTurn.cancellationPersistenceAttempted = true;
+      this.emitCancellation(queue, activeTurn);
+      return;
+    }
     if (!activeTurn.cancellationPersistenceAttempted && !this.closed) {
       activeTurn.cancellationPersistenceAttempted = true;
       activeTurn.cancellationPersisted = true;
@@ -2495,12 +2547,17 @@ export class AgentSession {
         activeTurn,
         completedStepMessages(activeTurn),
       );
-      activeTurn.cancellationPersisted = this.appendInterruptedTurnMessages(queue, turnStartedAt, {
-        rollbackTo: this.messages.length,
-        messages: records,
-        debugLabel: "persisting paused turn cancellation",
-        failureLabel: "取消状态持久化失败",
-      });
+      activeTurn.cancellationPersisted = this.appendInterruptedTurnMessages(
+        queue,
+        activeTurn,
+        turnStartedAt,
+        {
+          rollbackTo: this.messages.length,
+          messages: records,
+          debugLabel: "persisting paused turn cancellation",
+          failureLabel: "取消状态持久化失败",
+        },
+      );
     }
     this.emitCancellation(queue, activeTurn);
   }
@@ -3506,12 +3563,17 @@ export class AgentSession {
         : persistedStepMessages(activeTurn);
       activeTurn.cancellationPersisted = true;
       const records = this.cancellationRecordMessages(activeTurn, visibleStepMessages);
-      activeTurn.cancellationPersisted = this.appendInterruptedTurnMessages(queue, turnStartedAt, {
-        rollbackTo: turnStart,
-        messages: [...appendedStepMessages, ...records],
-        debugLabel: "persisting cancelled turn",
-        failureLabel: "取消状态持久化失败",
-      });
+      activeTurn.cancellationPersisted = this.appendInterruptedTurnMessages(
+        queue,
+        activeTurn,
+        turnStartedAt,
+        {
+          rollbackTo: turnStart,
+          messages: [...appendedStepMessages, ...records],
+          debugLabel: "persisting cancelled turn",
+          failureLabel: "取消状态持久化失败",
+        },
+      );
     }
     this.emitCancellation(queue, activeTurn);
   }

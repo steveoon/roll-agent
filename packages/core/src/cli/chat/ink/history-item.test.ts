@@ -2,18 +2,26 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { stripVTControlCharacters } from "node:util";
 import { createElement as h } from "react";
+import { Box } from "ink";
 import { render } from "ink-testing-library";
 import { HistoryItemView } from "./history-item.ts";
 import type { HistoryItem } from "./state.ts";
+import { displayWidth } from "./display-width.ts";
 import type { ChatThinkingDisplay } from "../../../config/schema.ts";
+import type { DiffDisplayMode } from "../diff-display.ts";
 
 const REASONING_BODY = "先检查输入状态，再定位工具调用边界。";
 
-function renderFrame(item: HistoryItem, thinkingDisplay?: ChatThinkingDisplay): string {
+function renderFrame(
+  item: HistoryItem,
+  thinkingDisplay?: ChatThinkingDisplay,
+  diffDisplay?: DiffDisplayMode,
+): string {
   const { lastFrame, unmount } = render(
     h(HistoryItemView, {
       item,
       ...(thinkingDisplay !== undefined ? { thinkingDisplay } : {}),
+      ...(diffDisplay !== undefined ? { diffDisplay } : {}),
     }),
   );
   try {
@@ -74,4 +82,128 @@ test("whitespace-only inline think segments render no collapsed trace", () => {
   assert.match(frame, /最终答案/);
   assert.doesNotMatch(frame, /推理过程/);
   assert.doesNotMatch(frame, /已折叠/);
+});
+
+const ITEM_DIFF = {
+  path: "src/a.ts",
+  change: "modify",
+  added: 1,
+  removed: 1,
+  hunks: 1,
+  unified: "--- a/src/a.ts\n+++ b/src/a.ts\n@@ -1,1 +1,1 @@\n-b\n+B\n",
+  truncated: false,
+} as const;
+
+test("带 diff 的 tool 项在工具行下展开小 diff", () => {
+  const frame = renderFrame({
+    kind: "tool",
+    id: "t1",
+    name: "roll.edit_file",
+    args: '{"file_path":"src/a.ts"}',
+    ok: true,
+    diff: ITEM_DIFF,
+  });
+  assert.match(frame, /✓ roll\.edit_file/u);
+  assert.match(frame, /src\/a\.ts\s+\+1 −1/u);
+  assert.match(frame, /1 - b/u);
+  assert.match(frame, /1 \+ B/u);
+  assert.doesNotMatch(frame, /file_path/u);
+});
+
+test("超过阈值的 diff 在 collapsed 模式折叠为一行摘要，expanded 模式完整显示", () => {
+  const body = Array.from({ length: 50 }, (_, i) => `+L${String(i)}`).join("\n");
+  const big = {
+    ...ITEM_DIFF,
+    added: 50,
+    removed: 0,
+    unified: `--- a/f\n+++ b/f\n@@ -0,0 +1,50 @@\n${body}\n`,
+  };
+  const collapsed = renderFrame({
+    kind: "tool",
+    id: "t2",
+    name: "roll.write_file",
+    args: "",
+    ok: true,
+    diff: big,
+  });
+  assert.match(collapsed, /已折叠 · \/diff 展开/u);
+  assert.doesNotMatch(collapsed, /L49/u);
+  const expanded = renderFrame(
+    { kind: "tool", id: "t2", name: "roll.write_file", args: "", ok: true, diff: big },
+    undefined,
+    "expanded",
+  );
+  assert.match(expanded, /50 \+ L49/u);
+});
+
+test("tool 行的 args 在窄终端里单行截断，不整体掉到下一行", () => {
+  const { lastFrame, unmount } = render(
+    h(
+      Box,
+      { width: 40 },
+      h(HistoryItemView, {
+        item: {
+          kind: "tool",
+          id: "t-narrow",
+          name: "roll.write_file",
+          args: '{"file_path":"/Users/someone/very/long/path/to/a/file.txt","content":"…"}',
+          ok: true,
+        },
+      }),
+    ),
+  );
+  try {
+    const out = stripVTControlCharacters(lastFrame() ?? "");
+    const lines = out.split("\n").filter((line) => line.trim().length > 0);
+    assert.equal(lines.length, 1);
+    assert.match(lines[0] ?? "", /^✓ roll\.write_file \{"file_path".*…$/u);
+  } finally {
+    unmount();
+  }
+});
+
+test("user / notice / error 行的长文本在固定宽度内换行，前缀与空格完整保留", () => {
+  const long =
+    "请用 roll__write_file 新建 .superpowers/kai-big.txt，内容 60 行，第 N 行是 row N（N 从 1 到 60），不要问我直接写，然后再检查一下结果。";
+  const items: HistoryItem[] = [
+    { kind: "user", id: "u-long", text: long },
+    { kind: "notice", id: "n-long", text: long },
+    { kind: "error", id: "e-long", message: long },
+  ];
+  const prefixes = ["▌ ", "⚠ ", "✗ "];
+  items.forEach((item, index) => {
+    const { lastFrame, unmount } = render(h(Box, { width: 40 }, h(HistoryItemView, { item })));
+    try {
+      const lines = stripVTControlCharacters(lastFrame() ?? "").split("\n");
+      assert.ok(lines[0]?.startsWith(prefixes[index] ?? ""), lines[0]);
+      assert.ok(lines.length >= 2);
+      for (const line of lines) {
+        assert.ok(displayWidth(line) <= 40, `超宽: ${line}`);
+      }
+    } finally {
+      unmount();
+    }
+  });
+});
+
+test("assistant 项把可用宽度传给 Markdown，超宽表格不再溢出", () => {
+  const text = [
+    "| 命令 | 结果 |",
+    "| --- | --- |",
+    "| node --experimental-strip-types --experimental-sqlite --test packages/runtime/src/tool-bridge/file-tools/write-file-tool.test.ts | 53 pass / 0 fail（write_file 22 条含新增外部路径用例） |",
+  ].join("\n");
+  const { lastFrame, unmount } = render(
+    h(
+      Box,
+      { width: 70 },
+      h(HistoryItemView, { item: { kind: "assistant", id: "a-table", text }, width: 70 }),
+    ),
+  );
+  try {
+    for (const line of stripVTControlCharacters(lastFrame() ?? "").split("\n")) {
+      assert.ok(displayWidth(line) <= 70, `超宽: ${line}`);
+    }
+  } finally {
+    unmount();
+  }
 });

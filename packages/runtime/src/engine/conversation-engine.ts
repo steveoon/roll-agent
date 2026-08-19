@@ -54,6 +54,11 @@ import {
 } from "./agent-session.ts";
 import { resolveContextWindow } from "./context-window.ts";
 import {
+  createWorkspaceInstructionsSource,
+  parseWorkspaceInstructionsSetting,
+  type WorkspaceInstructionsSource,
+} from "./workspace-instructions.ts";
+import {
   CAPABILITY_HOST_MODES,
   type CapabilityAgentOnboardingCatalogEntry,
   type CapabilityHostMode,
@@ -113,6 +118,8 @@ export interface ConversationEngineOptions {
   readonly onAgentBootstrapIssue?: (issue: AgentBootstrapIssue) => void;
   readonly skillLibrary?: SkillLibrary | null;
   readonly onSkillLibraryIssue?: (message: string) => void;
+  readonly workspaceInstructions?: WorkspaceInstructionsSource | null;
+  readonly onWorkspaceInstructionsIssue?: (message: string) => void;
   readonly hostMode?: CapabilityHostMode;
   readonly resolveDynamicCapabilityContext?: AgentSessionOptions["resolveDynamicCapabilityContext"];
   readonly sessionExecEnabled?: boolean;
@@ -140,6 +147,7 @@ export interface EngineContextSummary {
   readonly agentCount: number;
   readonly toolCount: number;
   readonly skillCount: number;
+  readonly instructionsPath?: string;
 }
 
 interface EngineContext {
@@ -326,6 +334,25 @@ async function ensureCoreManagedAgentReady(
   await waitForAgentReady(agent, { ...(signal ? { signal } : {}) });
 }
 
+function resolveWorkspaceInstructionsSource(
+  options: ConversationEngineOptions,
+): WorkspaceInstructionsSource | undefined {
+  if (options.workspaceInstructions === null) {
+    return undefined;
+  }
+  if (options.workspaceInstructions !== undefined) {
+    return options.workspaceInstructions;
+  }
+  const cwd = process.cwd();
+  return createWorkspaceInstructionsSource({
+    cwd,
+    setting: parseWorkspaceInstructionsSetting(options.config.chat.instructions, cwd),
+    ...(options.onWorkspaceInstructionsIssue
+      ? { onIssue: options.onWorkspaceInstructionsIssue }
+      : {}),
+  });
+}
+
 export class ConversationEngine {
   private readonly config: RollConfig;
   private readonly clientManager: McpClientManager;
@@ -345,6 +372,7 @@ export class ConversationEngine {
   private readonly explicitSources: readonly AgentToolSource[] | undefined;
   private readonly explicitSkillLibrary: SkillLibrary | null | undefined;
   private readonly onSkillLibraryIssue: ((message: string) => void) | undefined;
+  private readonly workspaceInstructions: WorkspaceInstructionsSource | undefined;
   private readonly onAgentBootstrapIssue: ((issue: AgentBootstrapIssue) => void) | undefined;
   private readonly hostMode: CapabilityHostMode;
   private readonly resolveDynamicCapabilityContext:
@@ -397,6 +425,7 @@ export class ConversationEngine {
     this.explicitSources = options.sources;
     this.explicitSkillLibrary = options.skillLibrary;
     this.onSkillLibraryIssue = options.onSkillLibraryIssue;
+    this.workspaceInstructions = resolveWorkspaceInstructionsSource(options);
     this.onAgentBootstrapIssue = options.onAgentBootstrapIssue;
     this.installAgentFn = options.installAgentFn ?? installAgent;
     this.resolveCatalogFn = options.resolveCatalogFn ?? resolveAgentCatalog;
@@ -572,6 +601,7 @@ export class ConversationEngine {
         };
       },
       ...(skillLibrary ? { skillLibrary } : {}),
+      ...(this.workspaceInstructions ? { workspaceInstructions: this.workspaceInstructions } : {}),
       ...(fileTools ? { fileTools } : {}),
       ...(bash ? { bash } : {}),
       ...(bashClassifier ? { bashClassifier } : {}),
@@ -1096,10 +1126,12 @@ export class ConversationEngine {
   async getContextSummary(): Promise<EngineContextSummary> {
     const context = await this.ensureReady();
     this.assertAcceptingSessions();
+    const instructionsPath = this.workspaceInstructions?.current()?.path;
     return {
       agentCount: context.sources.length,
       toolCount: context.sources.reduce((total, source) => total + source.tools.length, 0),
       skillCount: context.skillLibrary?.list().length ?? 0,
+      ...(instructionsPath !== undefined ? { instructionsPath } : {}),
     };
   }
 

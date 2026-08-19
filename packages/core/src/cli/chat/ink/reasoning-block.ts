@@ -1,12 +1,17 @@
 import { createElement as h } from "react";
 import type { ReactElement } from "react";
 import { Box, Text } from "ink";
+import { PrefixedLine } from "./prefixed-line.ts";
 
 export function ReasoningBlock({ text }: { text: string }): ReactElement {
   return h(
     Box,
     { flexDirection: "column" },
-    h(Box, null, h(Text, { color: "magenta" }, "◇"), h(Text, { dimColor: true }, " 推理过程")),
+    h(
+      PrefixedLine,
+      { prefix: h(Text, { color: "magenta" }, "◇ ") },
+      h(Text, { dimColor: true }, "推理过程"),
+    ),
     h(
       Box,
       {
@@ -47,9 +52,8 @@ export interface ReasoningSummaryProps {
 
 export function ReasoningSummary({ text, durationMs }: ReasoningSummaryProps): ReactElement {
   return h(
-    Box,
-    null,
-    h(Text, { color: "magenta" }, "◇"),
-    h(Text, { dimColor: true }, ` ${formatReasoningSummary(text, durationMs)}`),
+    PrefixedLine,
+    { prefix: h(Text, { color: "magenta" }, "◇ ") },
+    h(Text, { dimColor: true }, formatReasoningSummary(text, durationMs)),
   );
 }

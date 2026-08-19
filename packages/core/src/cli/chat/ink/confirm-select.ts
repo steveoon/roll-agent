@@ -1,14 +1,18 @@
 import { createElement as h, useState } from "react";
 import type { ReactElement } from "react";
 import { Box, Text, useInput } from "ink";
+import type { FileChangeDiff } from "@roll-agent/runtime";
 import { displayWidth } from "./display-width.ts";
+import { DiffHeader, DiffLineView } from "./diff-view.ts";
 import type { ConfirmDecision } from "./state.ts";
+import { diffBodyLines, diffGutterWidth, formatDiffHeader } from "../../utils/unified-diff.ts";
 
 export interface ConfirmSelectProps {
   readonly prompt: string;
   readonly args: string;
   readonly explanation?: string;
   readonly sessionGrantLabel?: string;
+  readonly diff?: FileChangeDiff;
   readonly width: number;
   readonly maxRows: number;
   readonly onDecide: (decision: ConfirmDecision) => void;
@@ -51,6 +55,7 @@ function planCompactRows(
   hasExplanation: boolean,
   hasLabel: boolean,
   hasArgs: boolean,
+  argsBeforeSecondExplanationRow: boolean,
 ): CompactRowPlan {
   let spare = Math.max(0, boundedRows - COMPACT_ESSENTIAL_ROWS);
   let explanationRows = 0;
@@ -62,11 +67,18 @@ function planCompactRows(
   if (showLabel) {
     spare -= 1;
   }
+  let showArgs = false;
+  if (argsBeforeSecondExplanationRow && hasArgs && spare > 0) {
+    showArgs = true;
+    spare -= 1;
+  }
   if (explanationRows === 1 && spare > 0) {
     explanationRows = 2;
     spare -= 1;
   }
-  const showArgs = hasArgs && spare > 0;
+  if (!showArgs) {
+    showArgs = hasArgs && spare > 0;
+  }
   return { explanationRows, showLabel, showArgs };
 }
 
@@ -116,16 +128,35 @@ function wrapDisplayLines(value: string, width: number, maxLines: number): strin
   return visible.join("\n");
 }
 
+function buildConfirmDiffRows(diff: FileChangeDiff, budget: number): ReactElement[] {
+  const rows: ReactElement[] = [h(DiffHeader, { key: "diff-header", diff })];
+  const body = diffBodyLines(diff);
+  const gutterWidth = diffGutterWidth(body);
+  const bodyBudget = budget - 1;
+  const visible = body.length <= bodyBudget ? body : body.slice(0, Math.max(0, bodyBudget - 1));
+  visible.forEach((line, index) => {
+    rows.push(
+      h(DiffLineView, { key: `diff-${String(index)}`, line, gutterWidth, wrap: "truncate-end" }),
+    );
+  });
+  const hidden = body.length - visible.length;
+  if (hidden > 0) {
+    rows.push(h(Text, { key: "diff-more", dimColor: true }, `… 另 ${String(hidden)} 行`));
+  }
+  return rows;
+}
+
 export function ConfirmSelect({
   prompt,
   args,
   explanation,
   sessionGrantLabel,
+  diff,
   width,
   maxRows,
   onDecide,
 }: ConfirmSelectProps): ReactElement {
-  const showArgs = args.length > 0 && args !== "{}";
+  const showArgs = diff === undefined && args.length > 0 && args !== "{}";
   const boundedRows = Math.max(1, Math.floor(maxRows));
   const compact = boundedRows <= COMPACT_CONFIRM_MAX_ROWS;
   const compactContentWidth = Math.max(1, width);
@@ -139,7 +170,8 @@ export function ConfirmSelect({
         boundedRows,
         explanation !== undefined,
         compactSessionGrantLabelFits,
-        showArgs,
+        showArgs || diff !== undefined,
+        diff !== undefined,
       )
     : undefined;
   const hasSession =
@@ -216,7 +248,13 @@ export function ConfirmSelect({
             wrapDisplayLines(`AI 说明：${explanation ?? ""}`, compactContentWidth, explanationRows),
           ),
       showArgsRow
-        ? h(Text, { dimColor: true }, truncateDisplayLine(args, compactContentWidth))
+        ? diff !== undefined
+          ? h(
+              Text,
+              { wrap: "truncate-end" },
+              truncateDisplayLine(formatDiffHeader(diff), compactContentWidth),
+            )
+          : h(Text, { dimColor: true }, truncateDisplayLine(args, compactContentWidth))
         : null,
       showLabelRow ? h(Text, { dimColor: true }, compactSessionGrantLabel ?? "") : null,
       optionRow,
@@ -224,6 +262,22 @@ export function ConfirmSelect({
     );
   }
   const contentWidth = Math.max(1, width - 6);
+  const explanationRows =
+    explanation === undefined
+      ? 0
+      : Math.min(
+          2,
+          wrapDisplayLines(`AI 说明：${explanation}`, contentWidth, 2).split("\n").length,
+        );
+  const labelRows =
+    sessionGrantLabel === undefined
+      ? 0
+      : Math.max(1, Math.ceil(displayWidth(sessionGrantLabel) / contentWidth));
+  const promptRows = Math.max(1, Math.ceil(displayWidth(prompt) / contentWidth));
+  const fixedRows = 2 + promptRows + explanationRows + labelRows + 2;
+  const diffBudget = Math.max(0, boundedRows - 1 - fixedRows);
+  const diffRows =
+    diff === undefined || diffBudget < 1 ? [] : buildConfirmDiffRows(diff, diffBudget);
   return h(
     Box,
     {
@@ -249,6 +303,7 @@ export function ConfirmSelect({
         ? null
         : h(Text, { color: "cyan" }, wrapDisplayLines(`AI 说明：${explanation}`, contentWidth, 2)),
       sessionGrantLabel === undefined ? null : h(Text, { dimColor: true }, sessionGrantLabel),
+      ...diffRows,
       showArgs ? h(Text, { dimColor: true }, args) : null,
       optionRow,
     ),

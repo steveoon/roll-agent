@@ -2,9 +2,11 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { stripVTControlCharacters } from "node:util";
 import { createElement as h } from "react";
+import { Box } from "ink";
 import { render } from "ink-testing-library";
 import { LiveRegion, reasoningTail } from "./live-region.ts";
 import type { LiveState } from "./state.ts";
+import { displayWidth } from "./display-width.ts";
 
 test("reasoningTail keeps short reasoning intact", () => {
   assert.equal(reasoningTail("先定位代码路径"), "先定位代码路径");
@@ -61,4 +63,35 @@ test("LiveRegion keeps thinking dim while previewing visible Markdown", () => {
   assert.match(frame, /最终答案/);
   assert.doesNotMatch(frame, /<\/?think>|\*\*/);
   unmount();
+});
+
+test("LiveRegion 活动工具行在窄宽度内单行截断 args，不会多出一列", () => {
+  const live: LiveState = {
+    streamingText: "",
+    reasoningId: undefined,
+    reasoningText: "",
+    reasoningActive: false,
+    reasoningStartedAt: undefined,
+    thinkTagOpen: false,
+    activeTools: [
+      {
+        toolCallId: "c1",
+        name: "roll.write_file",
+        args: '{"file_path":"/Users/someone/very/long/path/to/a/file.txt","content":"…"}',
+      },
+    ],
+    compacting: false,
+    producedOutput: false,
+  };
+  const { lastFrame, unmount } = render(h(Box, { width: 40 }, h(LiveRegion, { live })));
+  try {
+    const lines = stripVTControlCharacters(lastFrame() ?? "")
+      .split("\n")
+      .filter((line) => line.trim().length > 0);
+    assert.equal(lines.length, 1);
+    assert.match(lines[0] ?? "", /^\s*· roll\.write_file \{"file_path".*…$/u);
+    assert.ok(displayWidth(lines[0] ?? "") <= 40);
+  } finally {
+    unmount();
+  }
 });

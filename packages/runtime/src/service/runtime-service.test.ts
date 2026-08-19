@@ -8,7 +8,9 @@ import { test } from "node:test";
 import {
   RUNTIME_PROTOCOL_VERSION,
   RUNTIME_V13_MIN_CLIENT_FRAME_BYTES,
+  getApprovalDiffPreview,
   getApprovalExplanation,
+  getFileChangeDisplay,
   parseRuntimeMethodResultForVersion,
   requestIdSchema,
   runtimeMethodSchemas,
@@ -130,6 +132,15 @@ function createFixture(store: ThreadStore): {
         expiresAt: "2026-07-28T12:05:00.000Z",
         reason: "requires approval",
         explanation: "写入用户请求的文件，以完成当前任务。",
+        diff: {
+          path: "demo",
+          change: "modify",
+          added: 1,
+          removed: 1,
+          hunks: 1,
+          unified: "--- a/demo\n+++ b/demo\n@@ -1,1 +1,1 @@\n-old\n+new\n",
+          truncated: false,
+        },
       };
       await new Promise<void>((resolve) => {
         resolveDecision = resolve;
@@ -150,7 +161,16 @@ function createFixture(store: ThreadStore): {
         output: "visible",
         isError: false,
         display: {
-          status: "completed",
+          text: "visible",
+          diff: {
+            path: "demo",
+            change: "modify",
+            added: 1,
+            removed: 1,
+            hunks: 1,
+            unified: "--- a/demo\n+++ b/demo\n@@ -1,1 +1,1 @@\n-x\n+y\n",
+            truncated: false,
+          },
           providerOptions: { configuration: TOOL_PROVIDER_OPTIONS_SENTINEL },
         },
       };
@@ -1220,6 +1240,11 @@ test("RuntimeService v1 supports lifecycle, concurrent approval/cancel and proce
     assert.ok(approvalSnapshot);
     assert.equal(getApprovalExplanation(approvalSnapshot), "写入用户请求的文件，以完成当前任务。");
     assert.equal(approvalSnapshot.reason, "requires approval");
+    const previewDiff = getApprovalDiffPreview(approvalEvent.event.approval);
+    assert.equal(previewDiff?.path, "demo");
+    assert.equal(previewDiff?.added, 1);
+    assert.match(previewDiff?.unified ?? "", /-old\n\+new/u);
+    assert.equal(getApprovalDiffPreview(approvalSnapshot)?.removed, 1);
 
     await service.respondApproval(
       runtimeMethodSchemas["approval.respond"].params.parse({
@@ -1248,6 +1273,9 @@ test("RuntimeService v1 supports lifecycle, concurrent approval/cancel and proce
       JSON.stringify(toolCompleted.event.display).includes(TOOL_PROVIDER_OPTIONS_SENTINEL),
       false,
     );
+    const completedDisplay = getFileChangeDisplay(toolCompleted.event.display);
+    assert.equal(completedDisplay?.text, "visible");
+    assert.equal(completedDisplay?.diff.added, 1);
     const completedIndex = events.findIndex((event) => event.event.type === "turn.completed");
     assert.ok(completedIndex > approvalResolvedIndex);
 
@@ -1348,6 +1376,64 @@ test("RuntimeService v1 supports lifecycle, concurrent approval/cancel and proce
     assert.equal((await service.deleteThread(deleteParams)).deleted, true);
     assert.equal((await service.deleteThread(deleteParams)).deleted, true);
     assert.equal(service.listThreads({ limit: 100 }).items.length, 0);
+  } finally {
+    await service.close();
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("RuntimeService operation view keeps {text, diff} inside the persisted display envelope", async () => {
+  const dir = tempDir();
+  const store = new ThreadStore(dir);
+  const fixture = createFixture(store);
+  const service = new RuntimeService(fixture.engine, store);
+  try {
+    await service.createThread(
+      runtimeMethodSchemas["thread.create"].params.parse({
+        requestId: requestIdSchema.parse(IDS.requestCreate),
+        title: "Diff operation",
+      }),
+    );
+    const diff = {
+      path: "a.txt",
+      change: "modify",
+      added: 1,
+      removed: 1,
+      hunks: 1,
+      unified: "--- a/a.txt\n+++ b/a.txt\n@@ -1,1 +1,1 @@\n-old\n+new\n",
+      truncated: false,
+    } as const;
+    store.appendToolExecution(
+      IDS.thread,
+      createToolExecutionRecord({
+        id: IDS.operation,
+        toolCallId: "call-diff",
+        agentName: "roll",
+        toolName: "edit_file",
+        input: { file_path: "a.txt" },
+        result: createToolResult(
+          { kind: TOOL_OUTCOME_KINDS.success },
+          { text: "已完成 1 处修改并写入 a.txt", diff },
+          { model: { type: "text", value: "已完成 1 处修改并写入 a.txt" } },
+        ),
+        createdAt: "2026-08-19T12:00:00.000Z",
+      }),
+    );
+    const snapshot = service.snapshotThread(
+      runtimeMethodSchemas["thread.snapshot"].params.parse({
+        threadId: threadIdSchema.parse(IDS.thread),
+        limit: 10,
+      }),
+    );
+    const operation = snapshot.operations.items[0];
+    assert.ok(operation);
+    assert.equal(getFileChangeDisplay(operation.display), undefined);
+    const envelope = operation.display as { readonly value?: unknown };
+    assert.deepEqual(getFileChangeDisplay(envelope.value), {
+      text: "已完成 1 处修改并写入 a.txt",
+      diff,
+    });
   } finally {
     await service.close();
     store.close();

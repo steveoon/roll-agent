@@ -17,7 +17,7 @@ function isDisplaySafeCodePoint(code: number): boolean {
   return code < 0x7f || code > 0x9f;
 }
 
-function sanitizeForDisplay(value: string): string {
+export function sanitizeForDisplay(value: string): string {
   let out = "";
   for (const ch of value) {
     if (isDisplaySafeCodePoint(ch.codePointAt(0) ?? 0)) {

@@ -8,15 +8,17 @@ import { countReasoningChars, ReasoningSummary } from "./reasoning-block.ts";
 export interface AssistantContentProps {
   readonly text: string;
   readonly collapseThinking?: boolean;
+  readonly width?: number;
 }
 
 function renderSegment(
   segment: TextSegment,
   key: string,
   collapseThinking: boolean,
+  width: number | undefined,
 ): ReactElement | null {
   if (!segment.thinking) {
-    return h(Markdown, { key, text: segment.text });
+    return h(Markdown, { key, text: segment.text, ...(width !== undefined ? { width } : {}) });
   }
   if (!collapseThinking) {
     return h(Text, { key, dimColor: true }, segment.text);
@@ -29,12 +31,13 @@ function renderSegment(
 export function AssistantContent({
   text,
   collapseThinking = false,
+  width,
 }: AssistantContentProps): ReactElement {
   return h(
     Box,
     { flexDirection: "column" },
     ...parseThinking(text).map((segment, index) =>
-      renderSegment(segment, String(index), collapseThinking),
+      renderSegment(segment, String(index), collapseThinking, width),
     ),
   );
 }

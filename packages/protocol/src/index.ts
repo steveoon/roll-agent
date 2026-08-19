@@ -33,6 +33,10 @@ export const RUNTIME_V13_RECOVERY_SNAPSHOT_METADATA_MAX_CHARS = 1_024;
 export const RUNTIME_V13_RECOVERY_SNAPSHOT_TIMESTAMP_MAX_CHARS = 64;
 export const APPROVAL_EXPLANATION_PREVIEW_KEY = "explanation" as const;
 export const APPROVAL_EXPLANATION_MAX_CHARS = 100;
+export const APPROVAL_DIFF_PREVIEW_KEY = "diff" as const;
+export const FILE_CHANGE_DIFF_PATH_MAX_CHARS = 4_096;
+export const FILE_CHANGE_DIFF_UNIFIED_MAX_CHARS = 20_000;
+export const FILE_CHANGE_KINDS = ["create", "modify"] as const;
 export const CLIENT_CAPABILITY_METHOD_MAX_COUNT = 64;
 export const CLIENT_CAPABILITY_METHOD_MAX_CHARS = 100;
 export const USER_INPUT_CONTROL_MAX_COUNT = 16;
@@ -287,6 +291,25 @@ export const approvalExplanationSchema = z
   .trim()
   .min(1)
   .max(APPROVAL_EXPLANATION_MAX_CHARS);
+
+export const fileChangeDiffSchema = z
+  .object({
+    path: z.string().min(1).max(FILE_CHANGE_DIFF_PATH_MAX_CHARS),
+    change: z.enum(FILE_CHANGE_KINDS),
+    added: z.number().int().nonnegative(),
+    removed: z.number().int().nonnegative(),
+    hunks: z.number().int().nonnegative(),
+    unified: z.string().max(FILE_CHANGE_DIFF_UNIFIED_MAX_CHARS).optional(),
+    truncated: z.boolean(),
+  })
+  .readonly();
+
+export const fileChangeDisplaySchema = z
+  .object({
+    text: z.string(),
+    diff: fileChangeDiffSchema,
+  })
+  .readonly();
 
 export type ThreadId = z.infer<typeof threadIdSchema>;
 export type TurnId = z.infer<typeof turnIdSchema>;
@@ -2257,6 +2280,9 @@ export type UserInputResult = z.infer<typeof userInputResultSchema>;
 /** A submitted result whose values were correlated and ordered against the original form. */
 export type NormalizedUserInputResult = UserInputResult;
 export type ApprovalExplanation = z.infer<typeof approvalExplanationSchema>;
+export type FileChangeKind = (typeof FILE_CHANGE_KINDS)[number];
+export type FileChangeDiff = z.infer<typeof fileChangeDiffSchema>;
+export type FileChangeDisplay = z.infer<typeof fileChangeDisplaySchema>;
 export type ActiveTurn = z.infer<typeof activeTurnSchema>;
 export type ActiveTurnV11 = z.infer<typeof activeTurnV11Schema>;
 export type ActiveTurnV12 = z.infer<typeof activeTurnV12Schema>;
@@ -2332,6 +2358,22 @@ export function getApprovalExplanation(
     return undefined;
   }
   const parsed = approvalExplanationSchema.safeParse(preview[APPROVAL_EXPLANATION_PREVIEW_KEY]);
+  return parsed.success ? parsed.data : undefined;
+}
+
+export function getApprovalDiffPreview(
+  approval: Pick<PendingApproval, "preview">,
+): FileChangeDiff | undefined {
+  const preview = approval.preview;
+  if (typeof preview !== "object" || preview === null || Array.isArray(preview)) {
+    return undefined;
+  }
+  const parsed = fileChangeDiffSchema.safeParse(preview[APPROVAL_DIFF_PREVIEW_KEY]);
+  return parsed.success ? parsed.data : undefined;
+}
+
+export function getFileChangeDisplay(display: unknown): FileChangeDisplay | undefined {
+  const parsed = fileChangeDisplaySchema.safeParse(display);
   return parsed.success ? parsed.data : undefined;
 }
 

@@ -1,4 +1,4 @@
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { defineCommand } from "citty";
 import type { AgentSession } from "@roll-agent/runtime";
 import { inspectLlmConfigReadiness } from "../../config/helpers.ts";
@@ -42,6 +42,7 @@ import {
 } from "../utils/user-input-prompts.ts";
 import { buildSessionPickerItems, type SessionPickerItem } from "../chat/session-picker-format.ts";
 import { clackSessionPicker } from "../utils/clack-session-picker.ts";
+import { diffDisplayNotice, resolveDiffDisplayToggle } from "../chat/diff-display.ts";
 
 type RuntimeModule = typeof import("@roll-agent/runtime");
 
@@ -127,6 +128,10 @@ function reportSkillLibraryIssue(message: string): void {
   log.warn(`skill 目录加载警告：${message}`);
 }
 
+function reportWorkspaceInstructionsIssue(message: string): void {
+  log.warn(`工作区约定：${message}`);
+}
+
 function shutdownSignalExitCode(signal: ChatEngineShutdownSignal): number {
   return signal === "SIGINT" ? 130 : 143;
 }
@@ -162,6 +167,7 @@ export function createChatEngine(input: CreateChatEngineInput) {
     debugEvents: isDebugLogEnabled(),
     onAgentBootstrapIssue: reportAgentBootstrapIssue,
     onSkillLibraryIssue: reportSkillLibraryIssue,
+    onWorkspaceInstructionsIssue: reportWorkspaceInstructionsIssue,
     ...(input.shellEnv ? { shellEnv: input.shellEnv } : {}),
   });
 }
@@ -538,6 +544,12 @@ export async function runRepl(
         log.debug("chat.repl manual compact completed");
         continue;
       }
+      if (input === "/diff" || input.startsWith("/diff ")) {
+        const next = resolveDiffDisplayToggle(input.slice("/diff".length), renderer.diffDisplay);
+        renderer.setDiffDisplay(next);
+        log.info(diffDisplayNotice(next));
+        continue;
+      }
       if (input === "/skills") {
         log.info(formatSkillList(availableSkills, (process.stdout.columns || 96) - 2));
         continue;
@@ -581,12 +593,14 @@ export async function runRepl(
         }
         session = next;
         session.setUserInputAvailable(true);
+        const previousDiffDisplay = renderer.diffDisplay;
         renderer = new ChatRenderer(
           confirmFn,
           session.getContextWindow(),
           io.signal,
           userInputPrompt,
         );
+        renderer.setDiffDisplay(previousDiffDisplay);
         availableSkills = session.getSkillSummaries();
         const record = store.getThread(session.id);
         titled = record?.title !== undefined;
@@ -827,6 +841,9 @@ export default defineCommand({
           model: modelName,
           agentCount: summary.agentCount,
           skillCount: summary.skillCount,
+          ...(summary.instructionsPath !== undefined
+            ? { instructionsFile: basename(summary.instructionsPath) }
+            : {}),
         };
         let usedInk = false;
         if (presentationDecision?.presentation === CHAT_PRESENTATIONS.fullscreen) {

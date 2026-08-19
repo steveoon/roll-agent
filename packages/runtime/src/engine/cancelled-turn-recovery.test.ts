@@ -6,6 +6,7 @@ import {
   TOOL_OUTCOME_KINDS,
   createToolResult,
   normalizeToolResult,
+  successfulToolResult,
   type ToolCancellationExecutionState,
 } from "../tool-bridge/normalize-result.ts";
 import { createToolExecutionRecord } from "../tool-bridge/tool-execution-record.ts";
@@ -83,6 +84,38 @@ test("cancelled turn recovery 只补充未进入完整 tool protocol 的脱敏�
   assert.doesNotMatch(content, /super-secret|input-secret/u);
   assert.match(content, /redacted/u);
   assert.match(content, /不可信的历史工具输出/u);
+});
+
+test("cancelled turn recovery 对 {text, diff} display 只保留文本摘要作为证据", () => {
+  const diff = {
+    path: "a.txt",
+    change: "modify",
+    added: 1,
+    removed: 1,
+    hunks: 1,
+    unified: "--- a/a.txt\n+++ b/a.txt\n@@ -1,1 +1,1 @@\n-DIFF_BODY_MUST_NOT_LEAK\n+new\n",
+    truncated: false,
+  } as const;
+  const content = buildCancelledTurnRecovery({
+    context: "runtime context",
+    completedMessages: [],
+    toolExecutions: [
+      createToolExecutionRecord({
+        toolCallId: "edit-1",
+        agentName: "roll",
+        toolName: "edit_file",
+        input: { file_path: "a.txt" },
+        result: successfulToolResult(
+          { text: "已完成 1 处修改并写入 a.txt", diff },
+          { model: { type: "text", value: "已完成 1 处修改并写入 a.txt" } },
+        ),
+      }),
+    ],
+  });
+  const payload = recoveryPayload(content);
+  const evidence = payload.evidence as ReadonlyArray<{ readonly displayPreview: string }>;
+  assert.equal(evidence[0]?.displayPreview, "已完成 1 处修改并写入 a.txt");
+  assert.doesNotMatch(content, /DIFF_BODY_MUST_NOT_LEAK/u);
 });
 
 test("cancelled turn recovery 按出现次数消费同 toolCallId 的账本记录,多出的执行仍进入证据", () => {

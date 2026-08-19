@@ -590,3 +590,77 @@ test("submit-user 携带附件标注时记录到 user 历史项", () => {
     { kind: "user", id: "u1", text: "看下这张截图", attachmentLabels: ["shot.png", "b.jpg"] },
   ]);
 });
+
+const STATE_DIFF = {
+  path: "a.txt",
+  change: "modify",
+  added: 1,
+  removed: 1,
+  hunks: 1,
+  unified: "--- a/a.txt\n+++ b/a.txt\n@@ -1,1 +1,1 @@\n-old\n+new\n",
+  truncated: false,
+} as const;
+
+test("tool-result 的 {text, diff} display 让 tool 历史项携带 diff；纯文本 display 不带", () => {
+  let state = createInitialState("m", undefined);
+  state = event(state, "e1", {
+    type: "tool-call",
+    toolCallId: "c1",
+    agentName: "roll",
+    toolName: "edit_file",
+    input: { file_path: "a.txt" },
+  });
+  state = event(state, "e2", {
+    type: "tool-result",
+    toolCallId: "c1",
+    agentName: "roll",
+    toolName: "edit_file",
+    output: "",
+    isError: false,
+    display: { text: "已完成", diff: STATE_DIFF },
+  });
+  const item = state.history.at(-1);
+  assert.ok(item?.kind === "tool");
+  assert.deepEqual(item.diff, STATE_DIFF);
+
+  let plain = createInitialState("m", undefined);
+  plain = event(plain, "e3", {
+    type: "tool-call",
+    toolCallId: "c2",
+    agentName: "roll",
+    toolName: "bash",
+    input: {},
+  });
+  plain = event(plain, "e4", {
+    type: "tool-result",
+    toolCallId: "c2",
+    agentName: "roll",
+    toolName: "bash",
+    output: "ok",
+    isError: false,
+    display: "ok",
+  });
+  const plainItem = plain.history.at(-1);
+  assert.ok(plainItem?.kind === "tool");
+  assert.equal(Object.hasOwn(plainItem, "diff"), false);
+});
+
+test("confirmation-required 的 diff 进入 pendingConfirm", () => {
+  let state = createInitialState("m", undefined);
+  state = event(state, "e1", {
+    type: "confirmation-required",
+    approvalId: "ap",
+    agentName: "roll",
+    toolName: "edit_file",
+    input: { file_path: "a.txt" },
+    diff: STATE_DIFF,
+  });
+  assert.deepEqual(state.pendingConfirm?.diff, STATE_DIFF);
+});
+
+test("set-diff-display 切换会话级 diff 折叠模式，默认 collapsed", () => {
+  const state = createInitialState("m", undefined);
+  assert.equal(state.diffDisplay, "collapsed");
+  const next = chatReducer(state, { type: "set-diff-display", value: "expanded" });
+  assert.equal(next.diffDisplay, "expanded");
+});

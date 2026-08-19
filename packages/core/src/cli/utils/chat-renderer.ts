@@ -1,7 +1,7 @@
 import type { Ora } from "ora";
 import chalk from "chalk";
 import { isCancel, select } from "@clack/prompts";
-import type { SessionEvent } from "@roll-agent/runtime";
+import { getFileChangeDisplay, type FileChangeDiff, type SessionEvent } from "@roll-agent/runtime";
 import { createSpinner, log } from "./output.ts";
 import { GLYPHS } from "./glyphs.ts";
 import { computeUsageParts, formatUsageLine } from "./token-format.ts";
@@ -11,6 +11,8 @@ import {
   formatToolInput,
 } from "./tool-format.ts";
 import { formatDebugEvent } from "./debug-format.ts";
+import { formatFileChangeDiffLines } from "./unified-diff.ts";
+import { DIFF_INLINE_MAX_LINES, type DiffDisplayMode } from "../chat/diff-display.ts";
 import type { ChatUserInputPrompt, ChatUserInputResult } from "./user-input-prompts.ts";
 
 type UserInputRequiredEvent = Extract<SessionEvent, { readonly type: "user-input-required" }>;
@@ -106,6 +108,7 @@ export class ChatRenderer {
   private compactionSpinner: Ora | undefined;
   private messageSpinner: Ora | undefined;
   private streaming = false;
+  private diffDisplayMode: DiffDisplayMode = "collapsed";
 
   constructor(
     confirm: ChatConfirm,
@@ -117,6 +120,14 @@ export class ChatRenderer {
     this.contextWindow = contextWindow;
     this.signal = signal;
     this.userInputPrompt = userInputPrompt;
+  }
+
+  get diffDisplay(): DiffDisplayMode {
+    return this.diffDisplayMode;
+  }
+
+  setDiffDisplay(mode: DiffDisplayMode): void {
+    this.diffDisplayMode = mode;
   }
 
   async handle(event: SessionEvent, responder: ChatApprover): Promise<void> {
@@ -171,13 +182,20 @@ export class ChatRenderer {
           this.spinners.delete(event.toolCallId);
         }
         this.toolLabels.delete(event.toolCallId);
+        const fileChange = event.isError ? undefined : getFileChangeDisplay(event.display);
+        if (fileChange !== undefined) {
+          this.writeDiff(
+            fileChange.diff,
+            this.diffDisplayMode === "expanded" ? undefined : DIFF_INLINE_MAX_LINES,
+            this.diffDisplayMode === "expanded" ? undefined : "/diff on 展开",
+          );
+        }
         break;
       }
       case "confirmation-required": {
         this.stopMessageSpinner();
         this.flushLine();
         const reason = event.reason ? `（${event.reason}）` : "";
-        const details = formatApprovalDetails(event.input);
         const header = `执行 ${event.agentName}.${event.toolName}${reason}?`;
         const formattedExplanation =
           event.explanation === undefined
@@ -185,7 +203,16 @@ export class ChatRenderer {
             : formatApprovalExplanation(event.explanation);
         const explanation =
           formattedExplanation === undefined ? "" : `AI 说明：${formattedExplanation}`;
-        const message = [header, explanation, details].filter((line) => line.length > 0).join("\n");
+        const body =
+          event.diff !== undefined
+            ? formatFileChangeDiffLines(event.diff, {
+                color: true,
+                ...(this.diffDisplayMode === "expanded"
+                  ? {}
+                  : { maxBodyLines: DIFF_INLINE_MAX_LINES, collapsedHint: "/diff on 展开" }),
+              }).join("\n")
+            : formatApprovalDetails(event.input);
+        const message = [header, explanation, body].filter((line) => line.length > 0).join("\n");
         const approved = await this.confirm(message, this.signal);
         if (approved) {
           responder.approve(event.approvalId);
@@ -325,5 +352,18 @@ export class ChatRenderer {
       process.stdout.write("\n");
       this.streaming = false;
     }
+  }
+
+  private writeDiff(
+    diff: FileChangeDiff,
+    maxBodyLines: number | undefined,
+    hint: string | undefined,
+  ): void {
+    const lines = formatFileChangeDiffLines(diff, {
+      color: true,
+      ...(maxBodyLines !== undefined ? { maxBodyLines } : {}),
+      ...(hint !== undefined ? { collapsedHint: hint } : {}),
+    });
+    process.stderr.write(`${lines.join("\n")}\n`);
   }
 }

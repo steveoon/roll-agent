@@ -6,6 +6,7 @@ export interface BannerInfo {
   readonly model: string;
   readonly agentCount: number;
   readonly skillCount: number;
+  readonly instructionsFile?: string;
 }
 
 export interface BannerSpan {
@@ -76,6 +77,9 @@ function infoLine(info: BannerInfo): BannerLine {
   }
   if (info.skillCount > 0) {
     parts.push(`${String(info.skillCount)} skills`);
+  }
+  if (info.instructionsFile !== undefined) {
+    parts.push(info.instructionsFile);
   }
   return {
     spans: [

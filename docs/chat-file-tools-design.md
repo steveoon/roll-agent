@@ -1,6 +1,6 @@
 # roll chat 内建文件工具设计（File Tools as State-Sync Protocol）
 
-> 状态：已定稿，配套实施计划见 `docs/superpowers/plans/2026-08-13-chat-file-tools.md`
+> 状态：已定稿并实施
 > 调研依据：openai/codex @ fe01054、xai-org/grok-build @ 8adf901（GitNexus 索引 + 源码核读）
 
 ## 1. 背景与问题

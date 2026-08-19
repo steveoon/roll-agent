@@ -998,3 +998,101 @@ test("runRepl keeps current session when picker cancels or resume fails", async 
   assert.equal(first.isClosed(), false);
   assert.deepEqual(first.sent(), ["hi"]);
 });
+
+test("runRepl /diff on 让后续文件变更 diff 完整输出，/diff off 恢复折叠", async () => {
+  const input = new PassThrough();
+  const bigUnified = [
+    "--- a/big.txt",
+    "+++ b/big.txt",
+    "@@ -0,0 +1,50 @@",
+    ...Array.from({ length: 50 }, (_, index) => `+row ${String(index)}`),
+    "",
+  ].join("\n");
+  const session = {
+    id: "session-diff",
+    async *send() {
+      yield {
+        type: "tool-call",
+        toolCallId: "call-diff",
+        agentName: "roll",
+        toolName: "write_file",
+        input: { file_path: "big.txt" },
+      } satisfies SessionEvent;
+      yield {
+        type: "tool-result",
+        toolCallId: "call-diff",
+        agentName: "roll",
+        toolName: "write_file",
+        output: "",
+        isError: false,
+        display: {
+          text: "已写入 big.txt",
+          diff: {
+            path: "big.txt",
+            change: "create",
+            added: 50,
+            removed: 0,
+            hunks: 1,
+            unified: bigUnified,
+            truncated: false,
+          },
+        },
+      } satisfies SessionEvent;
+      yield { type: "message-finish", text: "done" } satisfies SessionEvent;
+    },
+    approve() {
+      return true;
+    },
+    reject() {
+      return true;
+    },
+    getContextWindow() {
+      return undefined;
+    },
+    getSkillSummaries() {
+      return [];
+    },
+    setUserInputAvailable() {},
+  } as unknown as AgentSession;
+  const store = {
+    updateTitle() {},
+    countMessages() {
+      return 1;
+    },
+    deleteThread() {},
+  } as unknown as Parameters<typeof runRepl>[1];
+  const originalWrite = process.stderr.write.bind(process.stderr);
+  let stderr = "";
+  process.stderr.write = ((chunk: string | Uint8Array) => {
+    stderr += typeof chunk === "string" ? chunk : Buffer.from(chunk).toString("utf8");
+    return true;
+  }) as typeof process.stderr.write;
+  try {
+    const done = runRepl(session, store, false, {
+      input,
+      output: sink(),
+      confirm: async () => true,
+    });
+    input.write("/diff on\n");
+    await delay(10);
+    input.write("first\n");
+    await delay(30);
+    const expandedSlice = stderr;
+    input.write("/diff off\n");
+    await delay(10);
+    input.write("second\n");
+    await delay(30);
+    input.write("exit\n");
+    input.end();
+    await done;
+    const collapsedSlice = stderr.slice(expandedSlice.length);
+    assert.match(expandedSlice, /文件变更 diff 将完整显示/u);
+    assert.match(expandedSlice, /50 \+ row 49/u);
+    assert.doesNotMatch(expandedSlice, /另 \d+ 行/u);
+    assert.match(collapsedSlice, /折叠为一行摘要/u);
+    assert.match(collapsedSlice, /另 10 行（\/diff on 展开）/u);
+    assert.doesNotMatch(collapsedSlice, /row 49/u);
+  } finally {
+    process.stderr.write = originalWrite;
+  }
+});
