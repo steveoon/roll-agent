@@ -283,36 +283,47 @@ function joinWithinBudget(
   return { text: kept.map((l) => `${l}\n`).join(""), truncated: false };
 }
 
-function statsOnlyDiff(
-  input: BuildFileChangeDiffInput,
-  before: readonly string[],
-  after: readonly string[],
-): FileChangeDiff {
-  const { prefix, suffix } = trimCommon(before, after);
-  const removed = before.length - prefix - suffix;
-  const added = after.length - prefix - suffix;
-  return {
-    path: input.path,
-    change: input.change,
-    added,
-    removed,
-    hunks: added + removed > 0 ? 1 : 0,
-    truncated: false,
-  };
+function countChanges(ops: readonly LineOp[]): { added: number; removed: number } {
+  let added = 0;
+  let removed = 0;
+  for (const op of ops) {
+    if (op.kind === "insert") {
+      added += 1;
+    } else if (op.kind === "delete") {
+      removed += 1;
+    }
+  }
+  return { added, removed };
+}
+
+export function changedLineSignature(unified: string): string {
+  return unified
+    .split("\n")
+    .slice(2)
+    .filter((line) => line.startsWith("+") || line.startsWith("-"))
+    .join("\n");
 }
 
 export function buildFileChangeDiff(input: BuildFileChangeDiffInput): FileChangeDiff {
   const limits = { ...FILE_CHANGE_DIFF_LIMITS, ...input.limits };
   const before = splitLinesKeepingNewline(input.before);
   const after = splitLinesKeepingNewline(input.after);
+  const ops = diffLines(before, after, limits.maxEditDistance);
+  const hunks = groupHunks(ops, limits.contextLines);
+  const { added, removed } = countChanges(ops);
   if (
     Buffer.byteLength(input.before, "utf8") + Buffer.byteLength(input.after, "utf8") >
     limits.maxInputBytes
   ) {
-    return statsOnlyDiff(input, before, after);
+    return {
+      path: input.path,
+      change: input.change,
+      added,
+      removed,
+      hunks: hunks.length,
+      truncated: false,
+    };
   }
-  const ops = diffLines(before, after, limits.maxEditDistance);
-  const hunks = groupHunks(ops, limits.contextLines);
   const header = [
     input.change === "create" ? "--- /dev/null" : `--- a/${input.path}`,
     `+++ b/${input.path}`,
@@ -322,8 +333,8 @@ export function buildFileChangeDiff(input: BuildFileChangeDiffInput): FileChange
   return {
     path: input.path,
     change: input.change,
-    added: ops.filter((op) => op.kind === "insert").length,
-    removed: ops.filter((op) => op.kind === "delete").length,
+    added,
+    removed,
     hunks: hunks.length,
     unified: text,
     truncated,

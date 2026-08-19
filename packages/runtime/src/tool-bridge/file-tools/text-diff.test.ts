@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import {
   FILE_CHANGE_DIFF_LIMITS,
   buildFileChangeDiff,
+  changedLineSignature,
   diffLines,
   splitLinesKeepingNewline,
   type LineOp,
@@ -187,6 +188,32 @@ test("buildFileChangeDiff 按字符上限在行边界截断并标记 truncated�
   assert.equal(diff.truncated, true);
   assert.ok((diff.unified?.length ?? 0) <= 200);
   assert.ok(diff.unified?.endsWith("\n"));
+});
+
+test("buildFileChangeDiff 只给统计时仍按真实编辑脚本计数（多处改动不会被前后缀 trim 合并）", () => {
+  const lines = Array.from({ length: 200 }, (_, i) => `line ${String(i)}`);
+  const changed = [...lines];
+  changed[10] = "LINE 10";
+  changed[150] = "LINE 150";
+  const diff = buildFileChangeDiff({
+    path: "f",
+    change: "modify",
+    before: lines.join("\n"),
+    after: changed.join("\n"),
+    limits: { maxInputBytes: 10 },
+  });
+  assert.equal(diff.unified, undefined);
+  assert.equal(diff.added, 2);
+  assert.equal(diff.removed, 2);
+  assert.equal(diff.hunks, 2);
+});
+
+test("changedLineSignature 只保留增删行，忽略文件头、hunk 头与上下文", () => {
+  const unified = "--- a/f\n+++ b/f\n@@ -1,3 +1,3 @@\n a\n-b\n+B\n c\n@@ -9,1 +9,2 @@\n x\n+y\n";
+  assert.equal(changedLineSignature(unified), "-b\n+B\n+y");
+  const shifted = "--- a/f\n+++ b/f\n@@ -4,3 +4,3 @@\n a\n-b\n+B\n c\n@@ -12,1 +12,2 @@\n z\n+y\n";
+  assert.equal(changedLineSignature(shifted), changedLineSignature(unified));
+  assert.equal(changedLineSignature("--- a/f\n+++ b/f\n"), "");
 });
 
 test("buildFileChangeDiff 输入超过字节上限时只给统计不给正文", () => {

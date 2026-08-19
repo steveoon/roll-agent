@@ -4,7 +4,7 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describeFileChange, fileChangeToolResult } from "./file-change-result.ts";
-import { TOOL_OUTCOME_KINDS } from "../normalize-result.ts";
+import { TOOL_OUTCOME_KINDS, successfulToolResult } from "../normalize-result.ts";
 
 test("describeFileChange 使用工作目录相对路径并产出 unified", () => {
   const workdir = mkdtempSync(join(tmpdir(), "file-change-"));
@@ -40,4 +40,20 @@ test("fileChangeToolResult 的 display 为 {text, diff}，model 与 raw 保持�
   const plain = fileChangeToolResult("已写入 x.txt", undefined);
   assert.equal(plain.display, "已写入 x.txt");
   assert.deepEqual(plain.model, { type: "text", value: "已写入 x.txt" });
+});
+
+test("fileChangeToolResult 的 model 与 successfulToolResult 完全一致（含 60k 截断）", () => {
+  const diff = describeFileChange({
+    workdir: tmpdir(),
+    inputPath: "big.txt",
+    change: "create",
+    before: "",
+    after: "x\n",
+  });
+  assert.ok(diff);
+  const text = `已写入 big.txt：\n${"x".repeat(200_000)}`;
+  const withDiff = fileChangeToolResult(text, diff);
+  const baseline = successfulToolResult(text);
+  assert.deepEqual(withDiff.model, baseline.model);
+  assert.ok(withDiff.model.type === "text" && withDiff.model.value.length <= 60_100);
 });

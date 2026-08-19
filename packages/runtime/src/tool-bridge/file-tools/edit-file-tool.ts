@@ -1,5 +1,6 @@
 import { tool, type ToolSet } from "ai";
 import { z } from "zod";
+import type { FileChangeDiff } from "@roll-agent/protocol";
 import type { ToolRegistry } from "../naming.ts";
 import type { ToolBridgeContext } from "../build-tools.ts";
 import { gateToolCall } from "../build-tools.ts";
@@ -25,6 +26,7 @@ import {
   resolveFilePath,
   revalidateFilePathAdmission,
   saveTextFile,
+  type FilePathAdmission,
   type LoadedTextFile,
 } from "./file-io.ts";
 import { rejectInvalidTextPayload } from "./control-chars.ts";
@@ -32,6 +34,7 @@ import { FILE_FRESHNESS, type FileStateTracker } from "./file-state-tracker.ts";
 import { FILE_TOOLS_AGENT_NAME, type ResolvedFileToolsSettings } from "./settings.ts";
 import { planEdits, type AppliedEdit } from "./edit-plan.ts";
 import { describeFileChange, fileChangeToolResult } from "./file-change-result.ts";
+import { changedLineSignature } from "./text-diff.ts";
 
 export const EDIT_FILE_TOOL_NAME = "edit_file";
 
@@ -114,10 +117,61 @@ function editFreshnessGuard(
   return undefined;
 }
 
+interface EditExecutionState extends FilePathAdmission {
+  previewed: FileChangeDiff | undefined;
+}
+
+function captureEditExecutionState(workdir: string, inputPath: string): EditExecutionState {
+  return { ...captureFilePathAdmission(workdir, inputPath), previewed: undefined };
+}
+
+function isEditExecutionState(value: unknown): value is EditExecutionState {
+  return typeof value === "object" && value !== null && "previewed" in value;
+}
+
+type EditPreview =
+  | { readonly kind: "diff"; readonly diff: FileChangeDiff }
+  | { readonly kind: "rejected"; readonly result: NormalizedToolResult }
+  | { readonly kind: "unavailable" };
+
+function previewEditFile(
+  settings: ResolvedFileToolsSettings,
+  tracker: FileStateTracker,
+  input: EditFileInput,
+): EditPreview {
+  const path = resolveFilePath(settings.workdir, input.file_path);
+  const loaded = loadTextFile(path, { maxFileBytes: settings.maxFileBytes });
+  if (!loaded.ok || editFreshnessGuard(tracker, path, loaded) !== undefined) {
+    return { kind: "unavailable" };
+  }
+  const plan = planEdits(loaded.content, input.edits);
+  if (!plan.ok) {
+    return plan.result.outcome.kind === TOOL_OUTCOME_KINDS.invalidInput
+      ? { kind: "rejected", result: plan.result }
+      : { kind: "unavailable" };
+  }
+  const diff = describeFileChange({
+    workdir: settings.workdir,
+    inputPath: input.file_path,
+    change: "modify",
+    before: loaded.content,
+    after: plan.next,
+  });
+  return diff === undefined ? { kind: "unavailable" } : { kind: "diff", diff };
+}
+
+function sameFileChange(previewed: FileChangeDiff, actual: FileChangeDiff): boolean {
+  if (previewed.unified !== undefined && actual.unified !== undefined) {
+    return changedLineSignature(previewed.unified) === changedLineSignature(actual.unified);
+  }
+  return previewed.added === actual.added && previewed.removed === actual.removed;
+}
+
 export function executeEditFile(
   settings: ResolvedFileToolsSettings,
   tracker: FileStateTracker,
   input: EditFileInput,
+  previewed?: FileChangeDiff,
 ): NormalizedToolResult {
   const payloadRejected = rejectInvalidEditPayloads(input);
   if (payloadRejected !== undefined) {
@@ -143,6 +197,12 @@ export function executeEditFile(
     before: loaded.content,
     after: plan.next,
   });
+  if (previewed !== undefined && diff !== undefined && !sameFileChange(previewed, diff)) {
+    return failedToolResult(
+      TOOL_OUTCOME_KINDS.toolFailed,
+      `${path} 的内容在确认后已发生变化，实际变更与审批时预览的不一致，已阻止写入。请重新 roll__read_file 获取最新内容后再编辑。`,
+    );
+  }
   saveTextFile(path, plan.next, loaded.hadBom);
   tracker.recordKnownContent(loaded.key, plan.next);
   return fileChangeToolResult(
@@ -161,7 +221,7 @@ export function buildEditFileTool(
     annotations: EDIT_ANNOTATIONS,
   });
   const plan: ToolExecutionPlan = {
-    prepare: async (rawInput) => {
+    prepare: async (rawInput, capturedState) => {
       const parsed = editFileInputSchema.safeParse(rawInput);
       if (!parsed.success) {
         return failedToolResult(
@@ -173,28 +233,16 @@ export function buildEditFileTool(
       if (payloadRejected !== undefined) {
         return payloadRejected;
       }
-      const path = resolveFilePath(settings.workdir, parsed.data.file_path);
-      const loaded = loadTextFile(path, { maxFileBytes: settings.maxFileBytes });
-      if (!loaded.ok) {
-        return failedToolResult(TOOL_OUTCOME_KINDS.invalidInput, loaded.message);
-      }
-      const stale = editFreshnessGuard(tracker, path, loaded);
-      if (stale !== undefined) {
-        return stale;
-      }
-      const plan = planEdits(loaded.content, parsed.data.edits);
-      if (!plan.ok) {
-        return plan.result;
-      }
-      const diff = describeFileChange({
-        workdir: settings.workdir,
-        inputPath: parsed.data.file_path,
-        change: "modify",
-        before: loaded.content,
-        after: plan.next,
-      });
-      const displayPath = formatPathForApproval(settings.workdir, parsed.data.file_path);
       const external = escapesWorkdir(settings.workdir, parsed.data.file_path);
+      const preview = external ? undefined : previewEditFile(settings, tracker, parsed.data);
+      if (preview?.kind === "rejected") {
+        return preview.result;
+      }
+      const diff = preview?.kind === "diff" ? preview.diff : undefined;
+      if (isEditExecutionState(capturedState)) {
+        capturedState.previewed = diff;
+      }
+      const displayPath = formatPathForApproval(settings.workdir, parsed.data.file_path);
       const memoryKey = external ? undefined : `${EDIT_FILE_TOOL_NAME}:workdir`;
       return gateToolCall(
         ctx,
@@ -227,7 +275,7 @@ export function buildEditFileTool(
     captureExecutionState: (rawInput) => {
       const parsed = editFileInputSchema.safeParse(rawInput);
       return parsed.success
-        ? captureFilePathAdmission(settings.workdir, parsed.data.file_path)
+        ? captureEditExecutionState(settings.workdir, parsed.data.file_path)
         : undefined;
     },
     revalidateExecution: (rawInput, capturedState) => {
@@ -253,7 +301,15 @@ export function buildEditFileTool(
           options.toolCallId,
           input,
           options.abortSignal,
-          () => Promise.resolve(executeEditFile(settings, tracker, input)),
+          (capturedState) =>
+            Promise.resolve(
+              executeEditFile(
+                settings,
+                tracker,
+                input,
+                isEditExecutionState(capturedState) ? capturedState.previewed : undefined,
+              ),
+            ),
         ),
     }),
   };

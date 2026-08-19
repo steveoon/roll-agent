@@ -28,8 +28,9 @@ export function fileChangeToolResult(
   text: string,
   diff: FileChangeDiff | undefined,
 ): NormalizedToolResult {
+  const plain = successfulToolResult(text);
   if (diff === undefined) {
-    return successfulToolResult(text);
+    return plain;
   }
-  return successfulToolResult({ text, diff }, { model: { type: "text", value: text } });
+  return successfulToolResult({ text, diff }, { model: plain.model });
 }
