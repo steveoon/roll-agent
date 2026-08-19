@@ -98,7 +98,11 @@ function renderTableRow(
     ...cells.map((cell: Tokens.TableCell, index: number) =>
       h(
         Box,
-        { key: `${key}-${String(index)}`, width: (widths[index] ?? 0) + 2 },
+        {
+          key: `${key}-${String(index)}`,
+          width: (widths[index] ?? 0) + TABLE_CELL_GAP,
+          paddingRight: TABLE_CELL_GAP,
+        },
         h(
           Text,
           bold ? { bold: true } : {},

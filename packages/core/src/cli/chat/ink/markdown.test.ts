@@ -132,3 +132,22 @@ test("Markdown 知道可用宽度时，超宽表格的列按整数缩放到恰�
     }
   }
 });
+
+test("表格单元格折行时列间距仍然保留", () => {
+  const text = [
+    "| 命令 | 结果 |",
+    "| --- | --- |",
+    "| node --experimental-strip-types --test packages/runtime/src/tool-bridge/file-tools/write-file-tool.test.ts | 合计 53 条全部通过，新增的外部路径用例均绿 |",
+  ].join("\n");
+  const { lastFrame, unmount } = render(h(Box, { width: 60 }, h(Markdown, { text, width: 60 })));
+  try {
+    const lines = stripVTControlCharacters(lastFrame() ?? "").split("\n");
+    const bodyLines = lines.filter((line) => /合计|全部通过|均绿|条/u.test(line));
+    assert.ok(bodyLines.length >= 1);
+    for (const line of bodyLines) {
+      assert.match(line, /\S  +\S/u, `列间应有空隙: ${line}`);
+    }
+  } finally {
+    unmount();
+  }
+});
