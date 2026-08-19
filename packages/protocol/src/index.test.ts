@@ -2,8 +2,10 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { readFileSync } from "node:fs";
 import {
+  APPROVAL_DIFF_PREVIEW_KEY,
   APPROVAL_EXPLANATION_MAX_CHARS,
   APPROVAL_EXPLANATION_PREVIEW_KEY,
+  FILE_CHANGE_DIFF_UNIFIED_MAX_CHARS,
   CLIENT_CAPABILITY_METHOD_MAX_COUNT,
   CLIENT_CAPABILITY_METHOD_MAX_CHARS,
   RUNTIME_EVENT_NOTIFICATION,
@@ -40,7 +42,11 @@ import {
   clientCapabilitiesSetParamsSchema,
   clientCapabilitiesSetResultSchema,
   compareRuntimeEventCursors,
+  fileChangeDiffSchema,
+  fileChangeDisplaySchema,
+  getApprovalDiffPreview,
   getApprovalExplanation,
+  getFileChangeDisplay,
   getRuntimeProtocolCapabilities,
   getRuntimeProtocolRegistry,
   initializeParamsSchema,
@@ -70,6 +76,7 @@ import {
   projectRuntimeServerRequestCancelParams,
   projectRuntimeServerRequestParams,
   projectThreadSnapshotForVersion,
+  runtimeDurableEventV13Schema,
   runtimeEventEnvelopeSchema,
   runtimeEventEnvelopeV11Schema,
   runtimeEventEnvelopeV13Schema,
@@ -1919,4 +1926,113 @@ test("v1.4 snapshot projects attachment parts down to text-only for v1.3 clients
 
   const v11 = projectThreadSnapshotForVersion("1.1", snapshotV14);
   assert.deepEqual(v11.messages.items[0]?.parts, [{ type: "text", text: "看下这张图" }]);
+});
+
+const FILE_DIFF_FIXTURE = {
+  path: "src/a.ts",
+  change: "modify",
+  added: 1,
+  removed: 1,
+  hunks: 1,
+  unified: "--- a/src/a.ts\n+++ b/src/a.ts\n@@ -1,1 +1,1 @@\n-old\n+new\n",
+  truncated: false,
+} as const;
+
+test("file change diff rides inside approval preview and tool display without touching strict top-level schemas", () => {
+  const approval = pendingApprovalSchema.parse({
+    id: IDS.approval,
+    turnId: IDS.turn,
+    agentName: "roll",
+    toolName: "edit_file",
+    preview: {
+      file_path: "src/a.ts",
+      explanation: "修改 src/a.ts：1 处编辑",
+      [APPROVAL_DIFF_PREVIEW_KEY]: FILE_DIFF_FIXTURE,
+    },
+  });
+  assert.deepEqual(getApprovalDiffPreview(approval), FILE_DIFF_FIXTURE);
+  assert.equal(getApprovalExplanation(approval), "修改 src/a.ts：1 处编辑");
+  for (const preview of [
+    { file_path: "src/a.ts" },
+    { diff: null },
+    { diff: "not an object" },
+    { diff: { ...FILE_DIFF_FIXTURE, change: "delete" } },
+    { diff: { ...FILE_DIFF_FIXTURE, added: -1 } },
+    { diff: { ...FILE_DIFF_FIXTURE, unified: "x".repeat(FILE_CHANGE_DIFF_UNIFIED_MAX_CHARS + 1) } },
+    [],
+    null,
+  ]) {
+    assert.equal(getApprovalDiffPreview({ ...approval, preview }), undefined);
+  }
+  assert.deepEqual(
+    getApprovalDiffPreview({
+      ...approval,
+      preview: { diff: { ...FILE_DIFF_FIXTURE, futureField: 1 } },
+    }),
+    FILE_DIFF_FIXTURE,
+  );
+  const { unified: _dropped, ...statsOnly } = FILE_DIFF_FIXTURE;
+  assert.deepEqual(
+    getApprovalDiffPreview({ ...approval, preview: { diff: statsOnly } }),
+    statsOnly,
+  );
+  assert.throws(() => pendingApprovalSchema.parse({ ...approval, diff: FILE_DIFF_FIXTURE }));
+
+  for (const protocolVersion of ["1.1", "1.0"] as const) {
+    const parsed = runtimeEventEnvelopeSchema.parse({
+      protocolVersion,
+      runtimeInstanceId: IDS.runtime,
+      sequence: 1,
+      timestamp: "2026-08-19T12:10:00.000Z",
+      threadId: IDS.thread,
+      turnId: IDS.turn,
+      event: { type: "approval.required", approval },
+    });
+    assert.deepEqual(
+      parsed.event.type === "approval.required"
+        ? getApprovalDiffPreview(parsed.event.approval)
+        : undefined,
+      FILE_DIFF_FIXTURE,
+    );
+    const completed = runtimeEventEnvelopeSchema.parse({
+      protocolVersion,
+      runtimeInstanceId: IDS.runtime,
+      sequence: 2,
+      timestamp: "2026-08-19T12:10:01.000Z",
+      threadId: IDS.thread,
+      turnId: IDS.turn,
+      event: {
+        type: "tool.completed",
+        toolCallId: "call-1",
+        agentName: "roll",
+        toolName: "edit_file",
+        display: { text: "已完成 1 处修改并写入 src/a.ts：", diff: FILE_DIFF_FIXTURE },
+      },
+    });
+    assert.deepEqual(
+      completed.event.type === "tool.completed"
+        ? getFileChangeDisplay(completed.event.display)
+        : undefined,
+      { text: "已完成 1 处修改并写入 src/a.ts：", diff: FILE_DIFF_FIXTURE },
+    );
+  }
+  const durable = runtimeDurableEventV13Schema.parse({
+    type: "tool.completed",
+    toolCallId: "call-2",
+    agentName: "roll",
+    toolName: "write_file",
+    display: { text: "已写入", diff: FILE_DIFF_FIXTURE },
+  });
+  assert.deepEqual(
+    durable.type === "tool.completed" ? getFileChangeDisplay(durable.display) : undefined,
+    { text: "已写入", diff: FILE_DIFF_FIXTURE },
+  );
+  assert.equal(getFileChangeDisplay("plain text"), undefined);
+  assert.equal(getFileChangeDisplay({ text: "x" }), undefined);
+  assert.equal(getFileChangeDisplay({ text: 1, diff: FILE_DIFF_FIXTURE }), undefined);
+  assert.equal(fileChangeDiffSchema.safeParse(FILE_DIFF_FIXTURE).success, true);
+  assert.equal(
+    fileChangeDisplaySchema.safeParse({ text: "", diff: FILE_DIFF_FIXTURE }).success,
+    true,
+  );
 });
