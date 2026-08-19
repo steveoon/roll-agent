@@ -81,7 +81,7 @@ describe("buildRollConfigCatalog", () => {
     };
     visit(catalog.root);
 
-    assert.equal(leaves.length, 62);
+    assert.equal(leaves.length, 63);
     for (const leaf of leaves) {
       const path = leaf.path.join(".");
       const guidance = findConfigGuidance(path);

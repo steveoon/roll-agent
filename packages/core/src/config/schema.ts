@@ -9,6 +9,7 @@ const runtimeCompactionStrategies = ["summarize", "truncate"] as const;
 export const runtimeThinkingLevels = ["off", "low", "medium", "high"] as const;
 export const CHAT_SCREEN_MODES = ["auto", "fullscreen", "inline"] as const;
 export const CHAT_THINKING_DISPLAY_MODES = ["collapsed", "expanded"] as const;
+export const CHAT_INSTRUCTIONS_MODES = ["auto", "off"] as const;
 
 const browserProfileColorSchema = z
   .string()
@@ -49,6 +50,11 @@ export const chatConfigSchema = z.object({
    * `expanded` 始终完整显示。思考进行中始终实时展示，不受此项影响。
    */
   thinkingDisplay: chatThinkingDisplaySchema.default("collapsed"),
+  /**
+   * 工作区工程约定注入：`auto` 自动发现 AGENTS.md / CLAUDE.md，`off` 关闭，
+   * 其余值视为约定文件路径（相对 roll chat 工作目录，支持 `~`）。
+   */
+  instructions: z.string().trim().min(1).default("auto"),
 });
 
 export const runtimeApprovalConfigSchema = z.object({

@@ -31,6 +31,27 @@ describe("rollConfigSchema", () => {
     assert.deepEqual(DEFAULT_CONFIG.browser.instances, {});
   });
 
+  it("defaults chat.instructions to auto and accepts off or a path", () => {
+    assert.equal(DEFAULT_CONFIG.chat.instructions, "auto");
+    for (const value of ["auto", "off", "docs/RULES.md", "~/rules.md"]) {
+      const result = rollConfigSchema.safeParse({
+        llm: { defaultProvider: "x", defaultModel: "y", providers: {} },
+        ask: {},
+        agents: { dataDir: "~/.roll-agent/agents" },
+        chat: { instructions: value },
+      });
+      assert.equal(result.success, true, value);
+      assert.equal(result.success ? result.data.chat.instructions : undefined, value);
+    }
+    const empty = rollConfigSchema.safeParse({
+      llm: { defaultProvider: "x", defaultModel: "y", providers: {} },
+      ask: {},
+      agents: { dataDir: "~/.roll-agent/agents" },
+      chat: { instructions: "   " },
+    });
+    assert.equal(empty.success, false);
+  });
+
   it("should validate chat screen mode from one shared runtime enum", () => {
     assert.deepEqual(chatScreenModeSchema.options, [...CHAT_SCREEN_MODES]);
 

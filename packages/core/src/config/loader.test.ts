@@ -398,6 +398,30 @@ agents:
     assert.ok(config.agents.dataDir.includes("my-agents"));
   });
 
+  it("expands tilde in chat.instructions path but keeps auto / off literal", () => {
+    const base = `
+llm:
+  default-provider: anthropic
+  default-model: test
+  providers: {}
+agents:
+  data-dir: ~/my-agents
+`;
+    writeFileSync(
+      resolve(tmpDir, "roll.config.yaml"),
+      `${base}chat:\n  instructions: ~/rules.md\n`,
+    );
+    const expanded = loadConfig({ cwd: tmpDir }).config.chat.instructions;
+    assert.ok(!expanded.startsWith("~"));
+    assert.ok(expanded.endsWith("rules.md"));
+
+    writeFileSync(resolve(tmpDir, "roll.config.yaml"), `${base}chat:\n  instructions: off\n`);
+    assert.equal(loadConfig({ cwd: tmpDir }).config.chat.instructions, "off");
+
+    writeFileSync(resolve(tmpDir, "roll.config.yaml"), base);
+    assert.equal(loadConfig({ cwd: tmpDir }).config.chat.instructions, "auto");
+  });
+
   it("should expand tilde in runtime threadsDir", () => {
     const yaml = `
 llm:
