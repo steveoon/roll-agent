@@ -52,6 +52,17 @@
 
 停止后通知用户手动验证或等待页面标明的解封时间，**不要**刷新、**不要**换 tool 重试。
 
+## 简历筛选扩展（可选两阶段模式）
+
+运营要求「只和符合岗位要求的候选人聊」时，在 skip 检查之后、generate 之前插入简历筛选：
+
+1. **岗位要求**：`~/.roll-agent/zhipin-job-requirements.json`；缺失时 agent 必须先向运营询问（年龄/地点/学历/其它要求/不合适处理方式）并落盘，之后每次运行读取，不自动覆盖。
+2. **Phase A**：`--screen-only --screen-manifest <path>` —— 每人执行完 skip 规则后点击右侧「在线简历」，等 canvas 就绪后 `zhipin_capture_resume` 截图并 `zhipin_close_resume` 关弹窗，写入 manifest；**不** generate/send/换微信。
+3. **Agent 审图**：逐张读取简历截图，对照岗位要求判定 fit，写 `decisions.json`（`{conversationId, fit, reason}`）。
+4. **Phase B**：`--decisions <file> --screen-manifest <path>` —— fit 者走正常回复+换微信链路；不合适者记 `stage:"skip"`、`reason:"resume_mismatch"`，不联系。当前仅支持 `unfitAction: "skipSilent"`。
+
+约束：简历为 canvas 图像，shell 脚本不能读图，判定必须由 agent 完成；BOSS 发送必须走签名回复，**不得**自拟拒绝话术。
+
 ## 相关 tools
 
-`zhipin_read_messages`, `zhipin_open_chat`, `zhipin_open_chat_page`, `zhipin_get_candidate_info`, `zhipin_generate_reply_preview`, `zhipin_send_prepared_reply`, `zhipin_exchange_wechat`, `zhipin_get_username`, `zhipin_scroll_view`, `browser_snapshot`, `click_ref`.
+`zhipin_read_messages`, `zhipin_open_chat`, `zhipin_open_chat_page`, `zhipin_get_candidate_info`, `zhipin_generate_reply_preview`, `zhipin_send_prepared_reply`, `zhipin_exchange_wechat`, `zhipin_get_username`, `zhipin_scroll_view`, `browser_snapshot`, `click_ref`；筛选阶段另用 `zhipin_diagnose_browser_state`（phase `resume-canvas`）、`zhipin_capture_resume`、`zhipin_close_resume`。
