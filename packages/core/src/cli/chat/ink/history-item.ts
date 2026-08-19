@@ -80,7 +80,8 @@ export function HistoryItemView({
           })
         : h(ReasoningBlock, { text: item.text });
     case "tool": {
-      const args = item.args.length > 0 && item.args !== "{}" ? item.args : "";
+      const args =
+        item.diff === undefined && item.args.length > 0 && item.args !== "{}" ? item.args : "";
       const line = h(
         Box,
         { flexDirection: "row" },

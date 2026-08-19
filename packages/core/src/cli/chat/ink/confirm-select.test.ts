@@ -306,8 +306,8 @@ test("expanded 布局内嵌 diff 头与正文，隐藏原始 args，选项行仍
   );
   const frame = stripAnsi(lastFrame() ?? "");
   assert.match(frame, /src\/a\.ts\s+\+3 −1/u);
-  assert.match(frame, /-old/u);
-  assert.match(frame, /\+n3/u);
+  assert.match(frame, /2 - old/u);
+  assert.match(frame, /4 \+ n3/u);
   assert.doesNotMatch(frame, /old_string/u);
   const lines = frame.split("\n");
   const optionIndex = lines.findIndex((l) => /❯ No|Yes\s+❯ No/u.test(l) || l.includes("No"));
@@ -321,7 +321,19 @@ test("expanded 布局行预算不足时截断 diff 正文并提示剩余行数�
     h(ConfirmSelect, {
       prompt: "执行 roll.edit_file?",
       args: "",
-      diff: CONFIRM_DIFF,
+      diff: {
+        ...CONFIRM_DIFF,
+        added: 8,
+        unified: [
+          "--- a/src/a.ts",
+          "+++ b/src/a.ts",
+          "@@ -1,2 +1,9 @@",
+          " keep",
+          "-old",
+          ...Array.from({ length: 8 }, (_, index) => `+n${String(index + 1)}`),
+          "",
+        ].join("\n"),
+      },
       width: 80,
       maxRows: 12,
       onDecide: () => {},

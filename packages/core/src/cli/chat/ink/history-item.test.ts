@@ -105,8 +105,9 @@ test("带 diff 的 tool 项在工具行下展开小 diff", () => {
   });
   assert.match(frame, /✓ roll\.edit_file/u);
   assert.match(frame, /src\/a\.ts\s+\+1 −1/u);
-  assert.match(frame, /-b/u);
-  assert.match(frame, /\+B/u);
+  assert.match(frame, /1 - b/u);
+  assert.match(frame, /1 \+ B/u);
+  assert.doesNotMatch(frame, /file_path/u);
 });
 
 test("超过阈值的 diff 在 collapsed 模式折叠为一行摘要，expanded 模式完整显示", () => {
@@ -126,13 +127,13 @@ test("超过阈值的 diff 在 collapsed 模式折叠为一行摘要，expanded 
     diff: big,
   });
   assert.match(collapsed, /已折叠 · \/diff 展开/u);
-  assert.doesNotMatch(collapsed, /\+L49/u);
+  assert.doesNotMatch(collapsed, /L49/u);
   const expanded = renderFrame(
     { kind: "tool", id: "t2", name: "roll.write_file", args: "", ok: true, diff: big },
     undefined,
     "expanded",
   );
-  assert.match(expanded, /\+L49/u);
+  assert.match(expanded, /50 \+ L49/u);
 });
 
 test("tool 行的 args 在窄终端里单行截断，不整体掉到下一行", () => {

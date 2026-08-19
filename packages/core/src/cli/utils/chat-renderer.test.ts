@@ -151,8 +151,8 @@ test("确认消息在有 diff 时内嵌 diff 头与正文而不是原始 edits J
     plain,
     /^执行 roll\.edit_file\?\nAI 说明：修改 a\.txt：1 处编辑\na\.txt {2}\+1 −1\n/u,
   );
-  assert.match(plain, /-old/u);
-  assert.match(plain, /\+new/u);
+  assert.match(plain, /1 - old/u);
+  assert.match(plain, /1 \+ new/u);
   assert.doesNotMatch(plain, /old_string/u);
 });
 
@@ -187,7 +187,7 @@ test("tool-result 的 {text, diff} display 在 stderr 打印 diff，且受 /diff
   });
   const collapsedPlain = stripVTControlCharacters(collapsed);
   assert.match(collapsedPlain, /b\.txt {2}\+50 −50/u);
-  assert.match(collapsedPlain, /另 \d+ 行（\/diff on 展开）/u);
+  assert.match(collapsedPlain, /另 60 行（\/diff on 展开）/u);
   renderer.setDiffDisplay("expanded");
   assert.equal(renderer.diffDisplay, "expanded");
   const expanded = await captureStderr(async () => {
@@ -209,5 +209,5 @@ test("tool-result 的 {text, diff} display 在 stderr 打印 diff，且受 /diff
     );
   });
   assert.doesNotMatch(stripVTControlCharacters(expanded), /另 \d+ 行/u);
-  assert.match(stripVTControlCharacters(expanded), /\+R49/u);
+  assert.match(stripVTControlCharacters(expanded), /50 \+ R49/u);
 });

@@ -2,7 +2,15 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { stripVTControlCharacters } from "node:util";
 import type { FileChangeDiff } from "@roll-agent/runtime";
-import { formatDiffHeader, formatFileChangeDiffLines, parseUnifiedDiff } from "./unified-diff.ts";
+import {
+  diffBodyLines,
+  formatDiffGutter,
+  formatDiffHeader,
+  formatFileChangeDiffLines,
+  gutterNumber,
+  parseUnifiedDiff,
+  type DiffLine,
+} from "./unified-diff.ts";
 
 const UNIFIED = [
   "--- a/src/a.ts",
@@ -67,7 +75,7 @@ test("formatDiffHeader 含路径、统计与状态标签", () => {
 test("formatFileChangeDiffLines 无色模式输出行号栏与前缀，超过上限时折叠并给提示", () => {
   const lines = formatFileChangeDiffLines(DIFF, { color: false });
   assert.equal(lines[0], "src/a.ts  +2 −1");
-  assert.ok(lines.some((l) => /^\s*4\s+-\s?line 4$/u.test(l) || l.includes("- line 4")));
+  assert.ok(lines.some((l) => l === " 4 - line 4"));
   const collapsed = formatFileChangeDiffLines(DIFF, {
     color: false,
     maxBodyLines: 2,
@@ -89,4 +97,85 @@ test("formatFileChangeDiffLines 着色模式剥掉 ANSI 后与无色一致，且
   const plain = formatFileChangeDiffLines(dirty, { color: false });
   assert.deepEqual(colored, plain);
   assert.ok(plain.every((l) => !l.includes("\x1b")));
+});
+
+test("diffBodyLines 去掉文件头与首个 hunk 头，后续 hunk 头保留为分隔行", () => {
+  const lines = diffBodyLines(DIFF);
+  assert.equal(lines[0]?.kind, "context");
+  assert.equal(lines[0]?.text, "line 3");
+  const hunkLines = lines.filter((line) => line.kind === "hunk");
+  assert.equal(hunkLines.length, 1);
+  assert.equal(lines.filter((line) => line.kind === "meta").length, 0);
+});
+
+test("gutterNumber：上下文与新增行取新行号，删除行取旧行号", () => {
+  const lines = diffBodyLines(DIFF);
+  const context = lines.find((line) => line.kind === "context");
+  const del = lines.find((line) => line.kind === "del");
+  const add = lines.find((line) => line.kind === "add");
+  assert.equal(gutterNumber(context as DiffLine), 3);
+  assert.equal(gutterNumber(del as DiffLine), 4);
+  assert.equal(gutterNumber(add as DiffLine), 4);
+  assert.equal(formatDiffGutter(del as DiffLine, 3), "  4 - ");
+  assert.equal(formatDiffGutter(add as DiffLine, 3), "  4 + ");
+  assert.equal(formatDiffGutter(context as DiffLine, 3), "  3   ");
+  assert.equal(formatDiffGutter({ kind: "hunk", text: "@@ -9 +9 @@" }, 3), "  ⋯   ");
+  assert.equal(formatDiffGutter({ kind: "note", text: "\\ No newline" }, 3), "      ");
+});
+
+test("annotateIntralineChanges 为配对的删除/新增行标出 token 级差异片段", () => {
+  const unified = [
+    "--- a/f",
+    "+++ b/f",
+    "@@ -1,3 +1,3 @@",
+    " keep",
+    "-edit_file预览续行对齐测试packages/runtime 旧值 alpha",
+    "+edit_file预览续行对齐测试OKpackages/runtime 新值 alpha",
+    "@@ -9,1 +9,1 @@",
+    "-完全不同的一行内容 aaa bbb ccc",
+    "+xyz 123 456",
+    "",
+  ].join("\n");
+  const lines = diffBodyLines({ ...DIFF, unified });
+  const del = lines[1];
+  const add = lines[2];
+  assert.ok(del?.kind === "del" && add?.kind === "add");
+  assert.deepEqual(
+    del.segments?.filter((segment) => segment.changed).map((segment) => segment.text),
+    ["旧"],
+  );
+  assert.deepEqual(
+    add.segments?.filter((segment) => segment.changed).map((segment) => segment.text),
+    ["OK", "新"],
+  );
+  assert.equal(del.segments?.map((segment) => segment.text).join(""), del.text);
+  assert.equal(add.segments?.map((segment) => segment.text).join(""), add.text);
+  const farDel = lines.find((line) => line.kind === "del" && line.text.startsWith("完全"));
+  const farAdd = lines.find((line) => line.kind === "add" && line.text.startsWith("xyz"));
+  assert.equal(farDel?.segments, undefined);
+  assert.equal(farAdd?.segments, undefined);
+});
+
+test("formatFileChangeDiffLines 使用单列行号、不输出 @@ 头、多 hunk 之间用 ⋯ 分隔，改动片段反色", () => {
+  const lines = formatFileChangeDiffLines(DIFF, { color: false });
+  assert.equal(lines[0], "src/a.ts  +2 −1");
+  assert.equal(lines[1], " 3   line 3");
+  assert.equal(lines[2], " 4 - line 4");
+  assert.equal(lines[3], " 4 + line four");
+  assert.equal(lines[4], " 5   line 5");
+  assert.equal(lines[5], " ⋯   ");
+  assert.equal(lines[6], "10   x");
+  assert.equal(lines[7], "11 + y");
+  assert.ok(lines.every((line) => !line.includes("@@")));
+  const colored = formatFileChangeDiffLines(
+    {
+      ...DIFF,
+      unified: "--- a/f\n+++ b/f\n@@ -1,1 +1,1 @@\n-foo bar\n+foo baz\n",
+    },
+    { color: true },
+  );
+  assert.deepEqual(
+    colored.map((line) => stripVTControlCharacters(line)),
+    ["src/a.ts  +2 −1", "1 - foo bar", "1 + foo baz"],
+  );
 });

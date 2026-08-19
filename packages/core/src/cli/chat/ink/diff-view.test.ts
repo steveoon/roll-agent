@@ -29,17 +29,17 @@ function frame(element: ReturnType<typeof h>): string {
 test("DiffBlock 渲染头行、hunk 头、行号栏与增删前缀", () => {
   const out = frame(h(DiffBlock, { diff: DIFF }));
   assert.match(out, /src\/a\.ts\s+\+1 −1/u);
-  assert.match(out, /@@ -1,3 \+1,3 @@/u);
-  assert.match(out, /1\s+1\s+ a/u);
-  assert.match(out, /2\s+-b/u);
-  assert.match(out, /2\s+\+B/u);
-  assert.equal(diffBodyLineCount(DIFF), 5);
+  assert.match(out, /1 {3}a/u);
+  assert.match(out, /2 - b/u);
+  assert.match(out, /2 \+ B/u);
+  assert.doesNotMatch(out, /@@/u);
+  assert.equal(diffBodyLineCount(DIFF), 4);
 });
 
 test("DiffBlock 超过 maxBodyLines 时截断并提示剩余行数", () => {
   const out = frame(h(DiffBlock, { diff: DIFF, maxBodyLines: 2, collapsedHint: "/diff on 展开" }));
-  assert.match(out, /另 3 行（\/diff on 展开）/u);
-  assert.doesNotMatch(out, /\+B/u);
+  assert.match(out, /另 2 行（\/diff on 展开）/u);
+  assert.doesNotMatch(out, /\+ B/u);
 });
 
 test("DiffSummary 折叠为一行并带提示；正文省略时显示原因", () => {
@@ -63,10 +63,10 @@ test("DiffBlock 长行换行后的续行与正文列对齐，不顶到边框", (
   };
   const out = frame(h(Box, { width: 40 }, h(DiffBlock, { diff })));
   const lines = out.split("\n");
-  const first = lines.find((line) => line.includes("+xxxx"));
+  const first = lines.find((line) => line.includes("+ xxxx"));
   const continuation = lines.find((line) => /^│\s+x+$/u.test(line));
   assert.ok(first !== undefined && continuation !== undefined);
   const contentColumn = first.indexOf("+");
   const continuationColumn = continuation.search(/x/u);
-  assert.equal(continuationColumn, contentColumn);
+  assert.equal(continuationColumn, contentColumn + 2);
 });

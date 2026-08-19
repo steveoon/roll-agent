@@ -3,7 +3,12 @@ import type { ReactElement } from "react";
 import { Box, Text } from "ink";
 import type { FileChangeDiff } from "@roll-agent/runtime";
 import { sanitizeForDisplay } from "../../utils/tool-format.ts";
-import { diffBodyLines, formatDiffGutter, type DiffLine } from "../../utils/unified-diff.ts";
+import {
+  diffBodyLines,
+  diffGutterWidth,
+  formatDiffGutter,
+  type DiffLine,
+} from "../../utils/unified-diff.ts";
 
 export interface DiffHeaderProps {
   readonly diff: FileChangeDiff;
@@ -60,48 +65,42 @@ function lineColor(line: DiffLine): { color?: "green" | "red" | "cyan"; dimColor
   }
 }
 
-const PREFIX: Record<DiffLine["kind"], string> = {
-  meta: "",
-  hunk: "",
-  add: "+",
-  del: "-",
-  context: " ",
-  note: "",
-};
-
-function DiffBodyLine({
-  line,
-  width,
-}: {
+export interface DiffLineViewProps {
   readonly line: DiffLine;
-  readonly width: number;
-}): ReactElement {
-  const gutter =
-    line.kind === "hunk" || line.kind === "note"
-      ? " ".repeat(width * 2 + 2)
-      : formatDiffGutter(line, width);
+  readonly gutterWidth: number;
+  readonly wrap: "wrap" | "truncate-end";
+}
+
+export function DiffLineView({ line, gutterWidth, wrap }: DiffLineViewProps): ReactElement {
+  const gutter = formatDiffGutter(line, gutterWidth);
+  const segments = line.segments ?? [{ text: line.text, changed: false }];
   return h(
     Box,
     { flexDirection: "row" },
     h(Box, { width: gutter.length, flexShrink: 0 }, h(Text, { dimColor: true }, gutter)),
-    h(
-      Box,
-      { flexGrow: 1, flexShrink: 1 },
-      h(
-        Text,
-        { ...lineColor(line), wrap: "wrap" },
-        `${PREFIX[line.kind]}${sanitizeForDisplay(line.text)}`,
-      ),
-    ),
+    line.kind === "hunk"
+      ? null
+      : h(
+          Box,
+          { flexGrow: 1, flexShrink: 1 },
+          h(
+            Text,
+            { ...lineColor(line), wrap },
+            ...segments.map((segment, index) =>
+              h(
+                Text,
+                { key: String(index), ...(segment.changed ? { inverse: true } : {}) },
+                sanitizeForDisplay(segment.text),
+              ),
+            ),
+          ),
+        ),
   );
 }
 
 export function DiffBlock({ diff, maxBodyLines, collapsedHint }: DiffBlockProps): ReactElement {
   const body = diffBodyLines(diff);
-  const width = Math.max(
-    1,
-    String(body.reduce((m, l) => Math.max(m, l.oldLine ?? 0, l.newLine ?? 0), 0)).length,
-  );
+  const width = diffGutterWidth(body);
   const visible = maxBodyLines === undefined ? body : body.slice(0, Math.max(0, maxBodyLines));
   const hidden = body.length - visible.length;
   return h(
@@ -119,7 +118,9 @@ export function DiffBlock({ diff, maxBodyLines, collapsedHint }: DiffBlockProps)
         borderBottom: false,
         paddingLeft: 1,
       },
-      ...visible.map((line, index) => h(DiffBodyLine, { key: String(index), line, width })),
+      ...visible.map((line, index) =>
+        h(DiffLineView, { key: String(index), line, gutterWidth: width, wrap: "wrap" }),
+      ),
       hidden > 0
         ? h(
             Text,

@@ -1087,11 +1087,11 @@ test("runRepl /diff on 让后续文件变更 diff 完整输出，/diff off 恢�
     await done;
     const collapsedSlice = stderr.slice(expandedSlice.length);
     assert.match(expandedSlice, /文件变更 diff 将完整显示/u);
-    assert.match(expandedSlice, /\+row 49/u);
+    assert.match(expandedSlice, /50 \+ row 49/u);
     assert.doesNotMatch(expandedSlice, /另 \d+ 行/u);
     assert.match(collapsedSlice, /折叠为一行摘要/u);
-    assert.match(collapsedSlice, /另 11 行（\/diff on 展开）/u);
-    assert.doesNotMatch(collapsedSlice, /\+row 49/u);
+    assert.match(collapsedSlice, /另 10 行（\/diff on 展开）/u);
+    assert.doesNotMatch(collapsedSlice, /row 49/u);
   } finally {
     process.stderr.write = originalWrite;
   }
