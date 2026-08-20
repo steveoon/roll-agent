@@ -1,5 +1,35 @@
 # @roll-agent/core
 
+## 0.34.0
+
+### Minor Changes
+
+- [#233](https://github.com/steveoon/roll-agent/pull/233) [`db03699`](https://github.com/steveoon/roll-agent/commit/db03699343acaa8efcb5d08488eb2e0ea83a384a) Thanks [@steveoon](https://github.com/steveoon)! - roll chat 新增 Ctrl+Y 一键复制最后一轮对话（用户消息 + 助手回复）
+  - 复制内容为最近一条用户消息与其后的助手回复正文（不含 thinking 与工具输出），格式 `用户: ...\n\n助手: ...`
+  - 双通道写入：OSC 52（tmux 下自动包 DCS passthrough，SSH 场景可用）+ macOS `pbcopy` 兜底
+  - 复制成功/无可复制内容均有提示；`/help` 增加快捷键说明
+  - 复制内容末尾附一行推广签名（`对话来自 roll-agent · npm i -g @roll-agent/core`）
+
+- [#233](https://github.com/steveoon/roll-agent/pull/233) [`fc65ada`](https://github.com/steveoon/roll-agent/commit/fc65ada57a7e9c22d29842732b171b93999db9c3) Thanks [@steveoon](https://github.com/steveoon)! - roll chat 新增 Ctrl+T 鼠标上报开关，释放后可用终端原生选择复制文本
+  - Ctrl+T 在 Ink TUI 中随时关闭/恢复鼠标上报：关闭后终端原生拖选/复制可用（代价是滚轮翻历史暂停，可用 PgUp/PgDn），输入框提示行常驻黄色提示「鼠标已释放:选中即可复制 · Ctrl+T 恢复滚轮」
+  - 鼠标上报关闭序列升级为全 5 模式 reset（1000/1002/1003/1015/1006），覆盖上一轮异常退出可能残留的模式；退出 TUI 时追加一次兜底 reset
+
+- [#233](https://github.com/steveoon/roll-agent/pull/233) [`6168dfb`](https://github.com/steveoon/roll-agent/commit/6168dfba1f84da516428f6c9e7f740ce67f75fbf) Thanks [@steveoon](https://github.com/steveoon)! - roll chat 快捷键发现性三层改造
+  - 输入框为空时按 `?` 弹出/收起快捷键面板（Ctrl+Y/Ctrl+T/Ctrl+V/Shift+Tab/翻页/历史等全集，一处维护）
+  - 情境提示各一次：首轮回复完成后提示「Ctrl+Y 复制本轮对话」；首次滚轮滚动时提示「Ctrl+T 释放鼠标后可直接选中复制」，下次发送时消失；「已提示过」持久化在 `~/.roll-agent/chat-hints.json`，跨会话真正只出现一次
+  - banner 提示行瘦身为「/exit 退出 · Esc 中断 · / 命令 · ? 快捷键」，不再在窄终端截断；底部提示行加 `? 快捷键` 入口
+
+### Patch Changes
+
+- [#233](https://github.com/steveoon/roll-agent/pull/233) [`a842b51`](https://github.com/steveoon/roll-agent/commit/a842b51e1e5b5a51b21fd0a81f484ad2c319f236) Thanks [@steveoon](https://github.com/steveoon)! - roll chat 输入解析修复：以文件路径等非命令形状开头的消息不再被误判为 slash 命令
+  - 只有命令形状的首 token（`/` + 字母/数字/连字符）才进入 slash 命令/skill 解析；`/Users/...` 这类路径开头的输入按普通消息发送，TUI 层与会话层（explicit skill context）行为一致
+  - skill 前缀后跟路径参数（如 `/some-skill /path/to/file 请求`）不再误报「未知 skill」，路径正确归入 prompt
+  - `/` 弹窗过滤支持子串命中（如 `/zhipin` 命中 `/roll-zhipin-unread-reply`），前缀命中优先排序
+  - 未知命令提示后保留输入草稿，便于修正拼写；输入命令参数时不再渲染空的「无匹配命令」弹窗
+
+- Updated dependencies [[`badfaa0`](https://github.com/steveoon/roll-agent/commit/badfaa0dcd51a4355418a6e0684c4e7be5e2b0d7), [`a842b51`](https://github.com/steveoon/roll-agent/commit/a842b51e1e5b5a51b21fd0a81f484ad2c319f236)]:
+  - @roll-agent/runtime@0.18.0
+
 ## 0.33.0
 
 ### Minor Changes
