@@ -1698,3 +1698,59 @@ test("ChatApp Ctrl+T 释放鼠标上报并显示恢复提示", async () => {
   assert.doesNotMatch(plain(lastFrame() ?? ""), /鼠标已释放/);
   unmount();
 });
+
+test("ChatApp Ctrl+Y 复制最后一轮对话并提示", async () => {
+  const sink: Sink = { approved: [], rejected: [] };
+  const copied: string[] = [];
+  async function* send(): AsyncIterable<SessionEvent> {
+    yield { type: "message-start", messageId: "m1" };
+    yield { type: "text-delta", delta: "你好,我能帮什么?" };
+    yield { type: "message-finish", text: "你好,我能帮什么?" };
+  }
+  const { stdin, lastFrame, unmount } = render(
+    h(ChatApp, {
+      session: makeSession(send, sink),
+      model: "qwen",
+      onUserSubmit: () => {},
+      onExit: () => {},
+      copyToClipboard: (text: string) => {
+        copied.push(text);
+        return Promise.resolve(true);
+      },
+    }),
+  );
+  await delay(10);
+  stdin.write("hi");
+  await delay(10);
+  stdin.write("\r");
+  await waitFor(() => assert.match(plain(lastFrame() ?? ""), /你好,我能帮什么\?/));
+  stdin.write(String.fromCharCode(25));
+  await waitFor(() => assert.match(plain(lastFrame() ?? ""), /已复制本轮对话/));
+  assert.deepEqual(copied, ["用户: hi\n\n助手: 你好,我能帮什么?"]);
+  unmount();
+});
+
+test("ChatApp Ctrl+Y 无历史时提示暂无可复制", async () => {
+  const sink: Sink = { approved: [], rejected: [] };
+  const copied: string[] = [];
+  async function* send(): AsyncIterable<SessionEvent> {
+    yield { type: "message-finish", text: "" };
+  }
+  const { stdin, lastFrame, unmount } = render(
+    h(ChatApp, {
+      session: makeSession(send, sink),
+      model: "qwen",
+      onUserSubmit: () => {},
+      onExit: () => {},
+      copyToClipboard: (text: string) => {
+        copied.push(text);
+        return Promise.resolve(true);
+      },
+    }),
+  );
+  await delay(10);
+  stdin.write(String.fromCharCode(25));
+  await waitFor(() => assert.match(plain(lastFrame() ?? ""), /暂无可复制的消息/));
+  assert.deepEqual(copied, []);
+  unmount();
+});

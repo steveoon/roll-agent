@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { createElement as h, useCallback, useEffect, useRef, useState } from "react";
 import type { ReactElement } from "react";
-import { Box, Text, useInput, useWindowSize } from "ink";
+import { Box, Text, useInput, useStdout, useWindowSize } from "ink";
 import type { AgentSession } from "@roll-agent/runtime";
 import type { ThinkingLevel } from "../../../llm/providers.ts";
 import type { ChatThinkingDisplay } from "../../../config/schema.ts";
@@ -24,6 +24,7 @@ import {
   parseSkillInvocation,
   SLASH_COMMANDS,
 } from "./commands.ts";
+import { copyTextToClipboard, lastRoundCopyText } from "./clipboard-copy.ts";
 import { bannerTextLine, buildBannerLines, type BannerInfo } from "../banner.ts";
 import { cycleThinking } from "./thinking.ts";
 import { appendInputHistory } from "./input-history.ts";
@@ -57,6 +58,7 @@ export interface ChatAppProps {
   readonly onThinkingChange?: (level: ThinkingLevel) => void;
   readonly onUserSubmit: (text: string) => void;
   readonly onExit: () => void;
+  readonly copyToClipboard?: (text: string) => Promise<boolean>;
   readonly sessionSwitching?: ChatSessionSwitching;
 }
 
@@ -79,7 +81,10 @@ export const INK_HINTS =
 const SHOW_THINK_SCOPE_HINT = "（仅当前会话生效，/resume 切换会话后按配置重置）";
 
 function helpText(): string {
-  return SLASH_COMMANDS.map((command) => `${command.name} — ${command.description}`).join("\n");
+  return [
+    ...SLASH_COMMANDS.map((command) => `${command.name} — ${command.description}`),
+    "快捷键: Ctrl+T 释放/恢复鼠标 · Ctrl+Y 复制本轮对话",
+  ].join("\n");
 }
 
 export function ChatApp(props: ChatAppProps): ReactElement {
@@ -156,6 +161,7 @@ export function ChatApp(props: ChatAppProps): ReactElement {
       ? { initialThinkingDisplay: props.initialThinkingDisplay }
       : {}),
     ...(props.onThinkingChange !== undefined ? { onThinkingChange: props.onThinkingChange } : {}),
+    ...(props.copyToClipboard !== undefined ? { copyToClipboard: props.copyToClipboard } : {}),
     picker,
     onOpenPicker: openPicker,
     onPickerSelect: selectSession,
@@ -214,6 +220,22 @@ function ChatSessionView(props: ChatSessionViewProps): ReactElement {
       : buildBannerLines(props.banner, layout.columns, { hints: INK_HINTS });
   const [selected, setSelected] = useState(0);
   const [mouseTracking, setMouseTracking] = useState(true);
+  const { stdout } = useStdout();
+  const copyLastRound = (): void => {
+    const text = lastRoundCopyText(state.history);
+    if (text === undefined) {
+      commitHistory({ kind: "notice", id: randomUUID(), text: "暂无可复制的消息" });
+      return;
+    }
+    const copy = props.copyToClipboard ?? ((value: string) => copyTextToClipboard(value, stdout));
+    copy(text).then((ok) => {
+      commitHistory({
+        kind: "notice",
+        id: randomUUID(),
+        text: ok ? "已复制本轮对话" : "复制失败,请重试",
+      });
+    });
+  };
   const slashActive = state.phase === CHAT_PHASES.idle && isSlashCommandShaped(state.draft);
   const slashPopupActive = slashActive && isSlashCommandToken(state.draft.split(/\s+/).at(-1) ?? "");
   const matches = slashPopupActive ? filterSlashEntries(state.draft, availableSkills) : [];
@@ -243,6 +265,8 @@ function ChatSessionView(props: ChatSessionViewProps): ReactElement {
       setThinking(cycleThinking(state.status.thinkingLevel, -1));
     } else if (key.ctrl && input === "t") {
       setMouseTracking((current) => !current);
+    } else if (key.ctrl && input === "y") {
+      copyLastRound();
     }
   });
 
