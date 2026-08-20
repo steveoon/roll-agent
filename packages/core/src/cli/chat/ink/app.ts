@@ -74,7 +74,7 @@ interface ChatSessionViewProps extends Omit<ChatAppProps, "sessionSwitching"> {
 }
 
 export const INK_HINTS =
-  "/exit 退出 · Esc 中断 · / 命令 · Shift+Enter/Ctrl+J 换行 · Alt+./Alt+, 调推理 · Shift+Tab 自动批准";
+  "/exit 退出 · Esc 中断 · / 命令 · Shift+Enter/Ctrl+J 换行 · Alt+./Alt+, 调推理 · Shift+Tab 自动批准 · Ctrl+T 鼠标选择";
 
 const SHOW_THINK_SCOPE_HINT = "（仅当前会话生效，/resume 切换会话后按配置重置）";
 
@@ -213,6 +213,7 @@ function ChatSessionView(props: ChatSessionViewProps): ReactElement {
       ? undefined
       : buildBannerLines(props.banner, layout.columns, { hints: INK_HINTS });
   const [selected, setSelected] = useState(0);
+  const [mouseTracking, setMouseTracking] = useState(true);
   const slashActive = state.phase === CHAT_PHASES.idle && isSlashCommandShaped(state.draft);
   const slashPopupActive = slashActive && isSlashCommandToken(state.draft.split(/\s+/).at(-1) ?? "");
   const matches = slashPopupActive ? filterSlashEntries(state.draft, availableSkills) : [];
@@ -240,6 +241,8 @@ function ChatSessionView(props: ChatSessionViewProps): ReactElement {
       setThinking(cycleThinking(state.status.thinkingLevel, 1));
     } else if (key.meta && input === ",") {
       setThinking(cycleThinking(state.status.thinkingLevel, -1));
+    } else if (key.ctrl && input === "t") {
+      setMouseTracking((current) => !current);
     }
   });
 
@@ -543,6 +546,7 @@ function ChatSessionView(props: ChatSessionViewProps): ReactElement {
                 : {}),
               slashActive,
               slashPopupActive,
+              mouseTracking,
               autoApprove: state.status.autoApprove,
               attachments,
               attachmentsPending: clipboardPending,
@@ -585,6 +589,7 @@ function ChatSessionView(props: ChatSessionViewProps): ReactElement {
       width: layout.columns,
       history: state.history,
       live: state.live,
+      mouseTracking,
       thinkingDisplay: state.thinkingDisplay,
       diffDisplay: state.diffDisplay,
       onBannerSettled: handleBannerSettled,

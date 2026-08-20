@@ -1,5 +1,6 @@
 export const ENABLE_MOUSE_TRACKING = "\u001B[?1000h\u001B[?1006h";
-export const DISABLE_MOUSE_TRACKING = "\u001B[?1006l\u001B[?1000l";
+export const DISABLE_MOUSE_TRACKING =
+  "\u001B[?1000l\u001B[?1002l\u001B[?1003l\u001B[?1015l\u001B[?1006l";
 
 const SGR_MOUSE_PREFIXES = ["\u001B[<", "\u009B<", "[<"] as const;
 

@@ -366,3 +366,14 @@ test("managed chat output withholds the close across Ink's three-chunk synchroni
   ]);
   managed.dispose();
 });
+
+test("managed chat output lets the full mouse reset through a resize window", async () => {
+  const { DISABLE_MOUSE_TRACKING } = await import("./mouse-input.ts");
+  const source = new TestOutput();
+  const managed = createChatTerminalOutput(asWriteStream(source));
+  source.emit("resize");
+  managed.stdout.write(DISABLE_MOUSE_TRACKING);
+  assert.ok(source.chunks.join("").includes("[?1003l"));
+  await new Promise<void>((resolve) => setTimeout(resolve, 40));
+  managed.dispose();
+});

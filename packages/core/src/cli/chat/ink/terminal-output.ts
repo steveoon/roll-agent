@@ -22,6 +22,9 @@ const CLEANUP_SEQUENCES = [
   "\u001B[?25h",
   "\u001B[?2004l",
   "\u001B[?1000l",
+  "\u001B[?1002l",
+  "\u001B[?1003l",
+  "\u001B[?1015l",
   "\u001B[?1006l",
   "\u001B[<u",
 ] as const;

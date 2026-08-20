@@ -1671,3 +1671,30 @@ test("ChatApp 输入命令参数时不渲染空弹窗", async () => {
   assert.doesNotMatch(plain(lastFrame() ?? ""), /无匹配命令/);
   unmount();
 });
+
+test("ChatApp Ctrl+T 释放鼠标上报并显示恢复提示", async () => {
+  const sink: Sink = { approved: [], rejected: [] };
+  async function* send(): AsyncIterable<SessionEvent> {
+    yield { type: "message-finish", text: "" };
+  }
+  const { stdin, lastFrame, frames, unmount } = render(
+    h(ChatApp, {
+      session: makeSession(send, sink),
+      model: "qwen",
+      onUserSubmit: () => {},
+      onExit: () => {},
+    }),
+  );
+  await delay(10);
+  stdin.write(String.fromCharCode(20));
+  await delay(20);
+  assert.ok(frames.some((item) => plain(item).includes("鼠标已释放:选中即可复制")));
+  assert.ok(frames.some((item) => plain(item).includes("Ctrl+T 恢复滚轮")));
+  assert.ok(frames.some((item) => item.includes("[?1003l")));
+  stdin.write(String.fromCharCode(20));
+  await delay(20);
+  stdin.write("x");
+  await delay(20);
+  assert.doesNotMatch(plain(lastFrame() ?? ""), /鼠标已释放/);
+  unmount();
+});

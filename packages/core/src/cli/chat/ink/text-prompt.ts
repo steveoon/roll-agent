@@ -39,6 +39,7 @@ export interface TextPromptProps {
   readonly disabledHint?: string;
   readonly slashActive: boolean;
   readonly slashPopupActive: boolean;
+  readonly mouseTracking?: boolean;
   readonly autoApprove: boolean;
   readonly attachments?: readonly TextPromptAttachmentChip[];
   readonly attachmentsPending?: boolean;
@@ -352,16 +353,34 @@ export function TextPrompt(props: TextPromptProps): ReactElement {
     disabled && props.disabledHint !== undefined
       ? { color: "yellow", dimColor: true }
       : { dimColor: true };
+  const hintBadges = [
+    ...(autoApprove
+      ? [h(Text, { color: "yellow", wrap: "truncate-end" }, `${GLYPHS.auto} auto`)]
+      : []),
+    ...(props.mouseTracking === false
+      ? [
+          h(
+            Box,
+            { flexShrink: 0 },
+            h(
+              Text,
+              { color: "yellow", wrap: "truncate-end" },
+              `${autoApprove ? " · " : ""}鼠标已释放:选中即可复制 · Ctrl+T 恢复滚轮`,
+            ),
+          ),
+        ]
+      : []),
+  ];
   const hint = showHint
     ? h(
         Box,
         { marginLeft: 1, flexShrink: 0, height: 1, overflowY: "hidden" },
-        ...(autoApprove
-          ? [
-              h(Text, { color: "yellow", wrap: "truncate-end" }, `${GLYPHS.auto} auto`),
-              h(Text, { ...hintProps, wrap: "truncate-end" }, ` · ${hintText}`),
-            ]
-          : [h(Text, { ...hintProps, wrap: "truncate-end" }, hintText)]),
+        ...hintBadges,
+        h(
+          Text,
+          { ...hintProps, wrap: "truncate-end" },
+          `${hintBadges.length > 0 ? " · " : ""}${hintText}`,
+        ),
       )
     : null;
   const attachmentRow =

@@ -42,6 +42,7 @@ export interface TranscriptViewportProps {
   readonly animateBanner: boolean;
   readonly onBannerSettled: () => void;
   readonly navigationBlocked: boolean;
+  readonly mouseTracking?: boolean;
   readonly thinkingDisplay: ChatThinkingDisplay;
   readonly diffDisplay: DiffDisplayMode;
 }
@@ -353,7 +354,7 @@ export function TranscriptViewport(props: TranscriptViewportProps): ReactElement
   );
 
   useEffect(() => {
-    stdout.write(ENABLE_MOUSE_TRACKING);
+    stdout.write(props.mouseTracking === false ? DISABLE_MOUSE_TRACKING : ENABLE_MOUSE_TRACKING);
     return () => {
       if (scrollTimerRef.current !== undefined) {
         clearTimeout(scrollTimerRef.current);
@@ -361,7 +362,7 @@ export function TranscriptViewport(props: TranscriptViewportProps): ReactElement
       }
       stdout.write(DISABLE_MOUSE_TRACKING);
     };
-  }, [stdout]);
+  }, [stdout, props.mouseTracking]);
 
   const shouldWindow = allMeasured && entries.length > WINDOWING_THRESHOLD;
   const visible = shouldWindow

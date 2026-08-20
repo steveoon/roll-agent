@@ -1,6 +1,19 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { isMouseProtocolInput, parseMouseWheelInput } from "./mouse-input.ts";
+import {
+  DISABLE_MOUSE_TRACKING,
+  isMouseProtocolInput,
+  parseMouseWheelInput,
+} from "./mouse-input.ts";
+
+test("disable 序列重置全部五种鼠标上报模式，覆盖崩溃残留", () => {
+  for (const mode of ["1000", "1002", "1003", "1015", "1006"]) {
+    assert.ok(
+      DISABLE_MOUSE_TRACKING.includes(`[?${mode}l`),
+      `missing reset for mode ${mode}`,
+    );
+  }
+});
 
 test("parseMouseWheelInput accepts Ink-normalized and raw SGR wheel input", () => {
   assert.deepEqual(parseMouseWheelInput("[<64;10;5M"), {
