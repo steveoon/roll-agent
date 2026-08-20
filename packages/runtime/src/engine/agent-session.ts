@@ -486,7 +486,27 @@ function markTurnSegmentPersisted(activeTurn: ActiveTurn): void {
 }
 
 function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
+  if (error instanceof Error) {
+    return error.message;
+  }
+  if (typeof error === "object" && error !== null) {
+    if ("message" in error && typeof error.message === "string" && error.message.length > 0) {
+      return error.message;
+    }
+    const serialized = safeJsonStringify(error);
+    if (serialized !== undefined && serialized !== "{}") {
+      return serialized;
+    }
+  }
+  return String(error);
+}
+
+function safeJsonStringify(value: object): string | undefined {
+  try {
+    return JSON.stringify(value) ?? undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 function renderCompactionMessageEvidence(entry: ArchivedTranscriptMessage): string {

@@ -6191,3 +6191,43 @@ test("AgentSession 工作区约定源返回 undefined 时不注入该段", async
   await collect(session.send("hi"));
   assert.doesNotMatch(capturedSystem, /# 工作区工程约定/u);
 });
+
+test("AgentSession 把非 Error 的流错误对象渲染成可读信息而不是 [object Object]", async () => {
+  const withMessage = new MockLanguageModelV4({
+    doStream: async () =>
+      streamChunks([
+        { type: "stream-start", warnings: [] },
+        { type: "error", error: { code: 429, message: "Rate limit exceeded" } },
+      ]),
+  });
+  const first = new AgentSession({
+    id: "plain-object-error-message",
+    model: withMessage,
+    sources: [],
+    maxSteps: 2,
+  });
+  const firstEvents = await collect(first.send("hi"));
+  const firstError = firstEvents.find((event) => event.type === "error");
+  assert.ok(firstError && firstError.type === "error");
+  assert.equal(firstError.message.includes("[object Object]"), false);
+  assert.match(firstError.message, /Rate limit exceeded/u);
+
+  const withoutMessage = new MockLanguageModelV4({
+    doStream: async () =>
+      streamChunks([
+        { type: "stream-start", warnings: [] },
+        { type: "error", error: { code: "overloaded", status: 503 } },
+      ]),
+  });
+  const second = new AgentSession({
+    id: "plain-object-error-json",
+    model: withoutMessage,
+    sources: [],
+    maxSteps: 2,
+  });
+  const secondEvents = await collect(second.send("hi"));
+  const secondError = secondEvents.find((event) => event.type === "error");
+  assert.ok(secondError && secondError.type === "error");
+  assert.equal(secondError.message.includes("[object Object]"), false);
+  assert.match(secondError.message, /overloaded/u);
+});
