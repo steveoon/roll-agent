@@ -1,5 +1,27 @@
 # @roll-agent/core
 
+## 0.33.0
+
+### Minor Changes
+
+- [#230](https://github.com/steveoon/roll-agent/pull/230) [`24d0139`](https://github.com/steveoon/roll-agent/commit/24d0139c39d2c8811805c0dc7cbca690b4601e15) Thanks [@steveoon](https://github.com/steveoon)! - Companion 接通官方生产 Relay host，enroll 与出站长连接可用
+  - 官方 Relay host 定为 `sponge-mcp.duliday.com`（此前为未决 `null`，enroll / 出站长连接全部 fail-closed 不可用）。`isOfficialRelayEndpointDecided()` 与未决文案保留。
+  - 端点解析收敛为 `resolveRelayEndpoint()` 单一数据源：新增 `ROLL_COMPANION_RELAY_HOST` 环境变量覆盖（联调用），仅 loopback 覆盖允许降级 `ws://`/`http://`，非 loopback 一律 `wss://`/`https://`，非法覆盖值（带 scheme / 路径 / 空格 / 凭据）继续 fail-closed 抛错。
+  - Runtime Protocol 校验从硬钉字面量 `"1.3"` 改为跟随 `@roll-agent/protocol` 的 `RUNTIME_PROTOCOL_VERSION`，消除 protocol 升到 1.4 后 companion 会话必然抛错的问题；错误信息带上期望与实际版本。
+  - supervisor 会话失败的 `lastError` 与日志保留底层原因（原先一律折叠为 `Companion session failed`，无法定位根因）。
+  - `roll companion doctor` 的 `relay-endpoint` 检查与前台启动日志区分官方 host 与 `ROLL_COMPANION_RELAY_HOST` 开发覆盖。
+
+### Patch Changes
+
+- [#230](https://github.com/steveoon/roll-agent/pull/230) [`399a36a`](https://github.com/steveoon/roll-agent/commit/399a36a532a2f792aa9b9ee1a8cc78083cc6bb1a) Thanks [@steveoon](https://github.com/steveoon)! - roll chat 滚动时把 hide/show cursor 收进同一帧同步输出，避免输入框光标闪烁，并保持 IME 光标仍锚在输入框
+
+- [#230](https://github.com/steveoon/roll-agent/pull/230) [`1b0936d`](https://github.com/steveoon/roll-agent/commit/1b0936dcf2725bc0909989f4672a886c11f25050) Thanks [@steveoon](https://github.com/steveoon)! - roll chat 状态行左右各留一列 gutter，model 标识与输入框左缘对齐，不再顶到终端边缘
+
+- [#230](https://github.com/steveoon/roll-agent/pull/230) [`f11d50a`](https://github.com/steveoon/roll-agent/commit/f11d50af1fc3a42da8e95c623ced56c5b7efa6d4) Thanks [@steveoon](https://github.com/steveoon)! - roll chat 滚动光标闪烁的真正修复：Ink 的滚动重绘 span 只含隐藏光标（光标恢复在下一个独立 span），此前两个同步块之间光标有一帧隐藏态，每滚一次闪一下。托管输出层现在扣住 hide-only span 的 `?2026l` 关闭符，让终端同步块保持打开直到光标 span 关闭整体，重绘与光标恢复原子应用；100ms 兜底释放避免无光标场景卡帧。附带 `ROLL_CHAT_WRITE_TRACE` 环境变量可抓取 chunk 级写入轨迹用于诊断
+
+- Updated dependencies [[`3327d20`](https://github.com/steveoon/roll-agent/commit/3327d20ff7e1fdedde3e037cb4fc60a1b89c6292), [`d95e872`](https://github.com/steveoon/roll-agent/commit/d95e87230ea77bfd881acefc24496d31df6d89b8)]:
+  - @roll-agent/runtime@0.17.1
+
 ## 0.32.0
 
 ### Minor Changes

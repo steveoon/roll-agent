@@ -1,5 +1,13 @@
 # @roll-agent/runtime
 
+## 0.17.1
+
+### Patch Changes
+
+- [#230](https://github.com/steveoon/roll-agent/pull/230) [`3327d20`](https://github.com/steveoon/roll-agent/commit/3327d20ff7e1fdedde3e037cb4fc60a1b89c6292) Thanks [@steveoon](https://github.com/steveoon)! - 上下文窗口表识别 grok-4.6（500k）；此前该模型查表无命中，引擎拿不到窗口大小
+
+- [#230](https://github.com/steveoon/roll-agent/pull/230) [`d95e872`](https://github.com/steveoon/roll-agent/commit/d95e87230ea77bfd881acefc24496d31df6d89b8) Thanks [@steveoon](https://github.com/steveoon)! - 模型流错误为非 Error 对象（provider 纯 JSON payload）时，错误信息优先取 message 字段、退回 JSON 序列化，不再渲染成 [object Object]
+
 ## 0.17.0
 
 ### Minor Changes
