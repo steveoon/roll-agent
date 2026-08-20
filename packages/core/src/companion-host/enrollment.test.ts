@@ -97,6 +97,33 @@ test("redeem targets the resolved official Relay endpoint", async () => {
   }
 });
 
+test("redeem honors a loopback relay override with a plain http endpoint", async () => {
+  const previousOverride = process.env[RELAY_HOST_OVERRIDE_ENV];
+  process.env[RELAY_HOST_OVERRIDE_ENV] = "127.0.0.1:8787";
+  try {
+    let requestedUrl = "";
+    const client = new OfficialDeviceEnrollmentClient(async (input) => {
+      requestedUrl = String(input);
+      return new Response(
+        JSON.stringify({
+          deviceId: "11111111-1111-4111-8111-111111111111",
+          workspaceId: "22222222-2222-4222-8222-222222222222",
+          deviceCredential: "device-credential-secret-value",
+        }),
+        { status: 200 },
+      );
+    });
+    await client.redeem("pairing-code-secret");
+    assert.equal(requestedUrl, "http://127.0.0.1:8787/v1/device-enrollments/redeem");
+  } finally {
+    if (previousOverride === undefined) {
+      delete process.env[RELAY_HOST_OVERRIDE_ENV];
+    } else {
+      process.env[RELAY_HOST_OVERRIDE_ENV] = previousOverride;
+    }
+  }
+});
+
 test("pairing code stdin reader accepts a small piped value and rejects oversized input", async () => {
   assert.equal(
     await readPairingCodeFromStdin(Readable.from([" code-from-pipe\n"])),

@@ -1,6 +1,7 @@
 import { access } from "node:fs/promises";
 import {
   COMPANION_CONTROL_PROTOCOL_VERSION,
+  OFFICIAL_RELAY_ENDPOINT_UNDECIDED_MESSAGE,
   OFFICIAL_RELAY_PROFILE,
   RELAY_HOST_OVERRIDE_ENV,
   resolveRelayEndpoint,
@@ -227,8 +228,14 @@ export class CompanionApplication {
       relayEndpoint = resolveRelayEndpoint();
     } catch (error: unknown) {
       const reason = error instanceof Error ? error.message : String(error);
-      this.logger.info(`${reason}; exiting cleanly`);
-      return;
+      if (reason === OFFICIAL_RELAY_ENDPOINT_UNDECIDED_MESSAGE) {
+        // An undecided official endpoint is a deliberate kill switch; a malformed override is a
+        // configuration error and must fail the service instead of reading as a clean stop.
+        this.logger.info(`${reason}; exiting cleanly`);
+        return;
+      }
+      this.logger.error(reason);
+      throw error;
     }
     this.logger.info(`Companion Host uses ${describeRelayEndpoint(relayEndpoint)}`);
     const supervisor = new CompanionHostSupervisor({
