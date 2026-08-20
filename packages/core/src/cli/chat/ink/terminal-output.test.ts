@@ -299,3 +299,70 @@ test("managed chat output requests a cursor refresh when a sibling frame hides i
   assert.equal(refreshes, 1);
   managed.dispose();
 });
+
+test("a hide-only synchronized span keeps the terminal block open until the cursor frame closes it", () => {
+  const source = new TestOutput();
+  const managed = createChatTerminalOutput(asWriteStream(source));
+
+  managed.stdout.write("\u001B[?2026h\u001B[?25l\u001B[2Kscrolled history\u001B[?2026l");
+  assert.equal(source.chunks.join(""), "\u001B[?2026h\u001B[?25l\u001B[2Kscrolled history");
+  managed.stdout.write("\u001B[?2026h\u001B[1A\u001B[5G\u001B[?25h\u001B[?2026l");
+
+  assert.equal(
+    source.chunks.join(""),
+    "\u001B[?2026h\u001B[?25l\u001B[2Kscrolled history" +
+      "\u001B[?2026h\u001B[1A\u001B[5G\u001B[?25h\u001B[?2026l",
+  );
+  managed.dispose();
+});
+
+test("a withheld synchronized close is released alone when no cursor frame follows", async () => {
+  const source = new TestOutput();
+  const managed = createChatTerminalOutput(asWriteStream(source));
+
+  managed.stdout.write("\u001B[?2026h\u001B[?25l\u001B[2Kscrolled history\u001B[?2026l");
+  assert.equal(source.chunks.join("").endsWith("\u001B[?2026l"), false);
+  await new Promise((resolve) => setTimeout(resolve, 140));
+
+  assert.equal(
+    source.chunks.join(""),
+    "\u001B[?2026h\u001B[?25l\u001B[2Kscrolled history\u001B[?2026l",
+  );
+  managed.dispose();
+});
+
+test("holding an ink-synchronized hide frame still requests a cursor refresh", async () => {
+  const source = new TestOutput();
+  const managed = createChatTerminalOutput(asWriteStream(source));
+  let refreshes = 0;
+  managed.stdout.on(CHAT_CURSOR_REFRESH_EVENT, () => {
+    refreshes += 1;
+  });
+
+  managed.stdout.write("\u001B[?2026h\u001B[?25l\u001B[2Kscrolled history\u001B[?2026l");
+  await Promise.resolve();
+
+  assert.equal(refreshes, 1);
+  managed.dispose();
+});
+
+test("managed chat output withholds the close across Ink's three-chunk synchronized frames", () => {
+  const source = new TestOutput();
+  const managed = createChatTerminalOutput(asWriteStream(source));
+
+  managed.stdout.write("\u001B[?2026h");
+  managed.stdout.write("\u001B[?25l\u001B[2Kscrolled history");
+  managed.stdout.write("\u001B[?2026l");
+  managed.stdout.write("\u001B[?2026h");
+  managed.stdout.write("\u001B[1A\u001B[5G\u001B[?25h");
+  managed.stdout.write("\u001B[?2026l");
+
+  assert.deepEqual(source.chunks, [
+    "\u001B[?2026h",
+    "\u001B[?25l\u001B[2Kscrolled history",
+    "\u001B[?2026h",
+    "\u001B[1A\u001B[5G\u001B[?25h",
+    "\u001B[?2026l",
+  ]);
+  managed.dispose();
+});

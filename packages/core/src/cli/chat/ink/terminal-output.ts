@@ -1,4 +1,13 @@
+import { appendFileSync } from "node:fs";
 import { Writable } from "node:stream";
+
+const WRITE_TRACE_PATH = process.env["ROLL_CHAT_WRITE_TRACE"];
+
+function trace(direction: string, value: string): void {
+  if (WRITE_TRACE_PATH !== undefined) {
+    appendFileSync(WRITE_TRACE_PATH, `${direction} ${JSON.stringify(value)}\n`);
+  }
+}
 
 const ERASE_SCROLLBACK = "\u001B[3J";
 const CLEAR_VIEWPORT = "\u001B[2J\u001B[H";
@@ -7,6 +16,7 @@ const END_SYNCHRONIZED_UPDATE = "\u001B[?2026l";
 const HIDE_CURSOR = "\u001B[?25l";
 const SHOW_CURSOR = "\u001B[?25h";
 const RESIZE_SETTLE_MS = 16;
+const SYNC_CLOSE_HOLD_MS = 100;
 const CLEANUP_SEQUENCES = [
   "\u001B[?1049l",
   "\u001B[?25h",
@@ -66,6 +76,10 @@ class ManagedChatOutput extends Writable {
   private resizeTimer: NodeJS.Timeout | undefined;
   private cursorRefreshQueued = false;
   private pendingCursorFrame: string | undefined;
+  private spanSawHide = false;
+  private spanSawShow = false;
+  private withheldSyncClose = false;
+  private withheldSyncTimer: NodeJS.Timeout | undefined;
   private readonly handleSourceResize = (): void => {
     if (this.resizeTimer !== undefined) {
       clearTimeout(this.resizeTimer);
@@ -151,6 +165,7 @@ class ManagedChatOutput extends Writable {
       ERASE_SCROLLBACK,
       "",
     );
+    trace("IN ", sanitized);
     if (this.suppressNextResizeClear) {
       // Ink's shrink branch first asks log-update to erase the old frame. We already reset the
       // physical viewport above, so replaying those cursor-relative erase commands from row 1
@@ -172,13 +187,16 @@ class ManagedChatOutput extends Writable {
       return;
     }
     try {
-      if (sanitized.includes(BEGIN_SYNCHRONIZED_UPDATE)) {
+      const arriving = sanitized;
+      if (arriving.includes(BEGIN_SYNCHRONIZED_UPDATE)) {
         // Ink can write BEGIN, the redraw and the cursor suffix as three separate chunks. Track
         // the protocol from BEGIN so a follow-up fixed-viewport redraw gets the same cursor fix.
         this.resizeSynchronizationOpen = true;
         this.resizeFrameNeedsCursorLineAdvance = false;
+        this.spanSawHide = false;
+        this.spanSawShow = false;
       }
-      const outgoing = this.assembleOutgoingWrite(sanitized);
+      const outgoing = this.assembleOutgoingWrite(arriving);
       if (outgoing === undefined) {
         callback();
         return;
@@ -186,6 +204,9 @@ class ManagedChatOutput extends Writable {
       // A proxy-level backpressure queue would decide whether a frame is stale only when it later
       // drains, after the resize suppression flag may already be gone. Let the real stdout own
       // buffering and keep this adapter's classification synchronous with Ink's write call.
+      this.spanSawHide ||= outgoing.includes(HIDE_CURSOR);
+      this.spanSawShow ||= outgoing.includes(SHOW_CURSOR);
+      const payload = this.applySyncCloseHold(outgoing);
       const cursorLineAdvance =
         this.resizeSynchronizationOpen &&
         this.resizeFrameNeedsCursorLineAdvance &&
@@ -193,9 +214,12 @@ class ManagedChatOutput extends Writable {
         !hasVisibleContent(outgoing)
           ? "\r\n"
           : "";
-      this.source.write(
-        cursorLineAdvance + wrapCursorRewrite(outgoing, this.resizeSynchronizationOpen),
-      );
+      if (cursorLineAdvance.length > 0 || payload.length > 0) {
+        const written =
+          cursorLineAdvance + wrapCursorRewrite(payload, this.resizeSynchronizationOpen);
+        trace("OUT", written);
+        this.source.write(written);
+      }
       if (cursorLineAdvance.length > 0) {
         this.resizeFrameNeedsCursorLineAdvance = false;
       }
@@ -213,6 +237,41 @@ class ManagedChatOutput extends Writable {
     } catch (error) {
       callback(error instanceof Error ? error : new Error(String(error)));
     }
+  }
+
+  private applySyncCloseHold(outgoing: string): string {
+    if (!outgoing.includes(END_SYNCHRONIZED_UPDATE)) {
+      return outgoing;
+    }
+    this.clearWithheldSyncTimer();
+    if (this.spanSawHide && !this.spanSawShow) {
+      // Ink hides the cursor inside the redraw span and restores it in a separate cursor-only
+      // span one render later. Closing the first span would blink the input cursor on every
+      // history scroll, so the terminal block stays open until the cursor span closes both.
+      this.withheldSyncClose = true;
+      this.withheldSyncTimer = setTimeout(() => {
+        this.withheldSyncTimer = undefined;
+        this.releaseWithheldSyncClose();
+      }, SYNC_CLOSE_HOLD_MS);
+      return outgoing.replace(END_SYNCHRONIZED_UPDATE, "");
+    }
+    this.withheldSyncClose = false;
+    return outgoing;
+  }
+
+  private clearWithheldSyncTimer(): void {
+    if (this.withheldSyncTimer !== undefined) {
+      clearTimeout(this.withheldSyncTimer);
+      this.withheldSyncTimer = undefined;
+    }
+  }
+
+  private releaseWithheldSyncClose(): void {
+    if (!this.withheldSyncClose) {
+      return;
+    }
+    this.withheldSyncClose = false;
+    this.source.write(END_SYNCHRONIZED_UPDATE);
   }
 
   private assembleOutgoingWrite(value: string): string | undefined {
@@ -260,6 +319,8 @@ class ManagedChatOutput extends Writable {
       this.resizeTimer = undefined;
     }
     this.source.off("resize", this.handleSourceResize);
+    this.clearWithheldSyncTimer();
+    this.releaseWithheldSyncClose();
     this.flushPendingCursorFrame();
     if (this.resizeSynchronizationOpen) {
       this.source.write(END_SYNCHRONIZED_UPDATE);
