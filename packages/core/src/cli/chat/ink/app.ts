@@ -24,7 +24,7 @@ import {
   parseSkillInvocation,
   SLASH_COMMANDS,
 } from "./commands.ts";
-import { copyTextToClipboard, lastRoundCopyText } from "./clipboard-copy.ts";
+import { COPY_PROMO_FOOTER, copyTextToClipboard, lastRoundCopyText } from "./clipboard-copy.ts";
 import { bannerTextLine, buildBannerLines, type BannerInfo } from "../banner.ts";
 import { cycleThinking } from "./thinking.ts";
 import { appendInputHistory } from "./input-history.ts";
@@ -228,7 +228,7 @@ function ChatSessionView(props: ChatSessionViewProps): ReactElement {
       return;
     }
     const copy = props.copyToClipboard ?? ((value: string) => copyTextToClipboard(value, stdout));
-    copy(text).then((ok) => {
+    copy(`${text}\n\n${COPY_PROMO_FOOTER}`).then((ok) => {
       commitHistory({
         kind: "notice",
         id: randomUUID(),

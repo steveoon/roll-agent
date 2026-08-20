@@ -1726,7 +1726,9 @@ test("ChatApp Ctrl+Y 复制最后一轮对话并提示", async () => {
   await waitFor(() => assert.match(plain(lastFrame() ?? ""), /你好,我能帮什么\?/));
   stdin.write(String.fromCharCode(25));
   await waitFor(() => assert.match(plain(lastFrame() ?? ""), /已复制本轮对话/));
-  assert.deepEqual(copied, ["用户: hi\n\n助手: 你好,我能帮什么?"]);
+  assert.deepEqual(copied, [
+    "用户: hi\n\n助手: 你好,我能帮什么?\n\n---\n对话来自 roll-agent · npm i -g @roll-agent/core",
+  ]);
   unmount();
 });
 
