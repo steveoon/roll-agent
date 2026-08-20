@@ -26,6 +26,16 @@ export type SkillInvocationParseResult =
       readonly token: string;
     };
 
+const SLASH_COMMAND_TOKEN_RE = /^\/[\w-]*$/;
+
+export function isSlashCommandToken(token: string): boolean {
+  return SLASH_COMMAND_TOKEN_RE.test(token);
+}
+
+export function isSlashCommandShaped(input: string): boolean {
+  return isSlashCommandToken(input.split(/\s+/, 1)[0] ?? "");
+}
+
 export function findSkillBySlashName(
   token: string,
   skills: readonly SkillInvocationSummary[],
@@ -47,9 +57,13 @@ export function parseSkillInvocationResult(
     if (!match) {
       break;
     }
-    const skill = findSkillBySlashName(match[1] ?? "", skills);
+    const token = match[1] ?? "";
+    if (!isSlashCommandToken(token)) {
+      break;
+    }
+    const skill = findSkillBySlashName(token, skills);
     if (!skill) {
-      return { kind: SKILL_INVOCATION_PARSE_KINDS.unknown, token: match[1] ?? "" };
+      return { kind: SKILL_INVOCATION_PARSE_KINDS.unknown, token };
     }
     const key = skill.name.toLowerCase();
     if (!seen.has(key)) {

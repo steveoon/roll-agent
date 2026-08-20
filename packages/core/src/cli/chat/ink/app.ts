@@ -19,6 +19,8 @@ import type { SessionPickerItem } from "../session-picker-format.ts";
 import {
   buildSkillListLines,
   filterSlashEntries,
+  isSlashCommandShaped,
+  isSlashCommandToken,
   parseSkillInvocation,
   SLASH_COMMANDS,
 } from "./commands.ts";
@@ -211,8 +213,8 @@ function ChatSessionView(props: ChatSessionViewProps): ReactElement {
       ? undefined
       : buildBannerLines(props.banner, layout.columns, { hints: INK_HINTS });
   const [selected, setSelected] = useState(0);
-  const slashActive = state.phase === CHAT_PHASES.idle && state.draft.startsWith("/");
-  const slashPopupActive = slashActive && state.draft.split(/\s+/).at(-1)?.startsWith("/") === true;
+  const slashActive = state.phase === CHAT_PHASES.idle && isSlashCommandShaped(state.draft);
+  const slashPopupActive = slashActive && isSlashCommandToken(state.draft.split(/\s+/).at(-1) ?? "");
   const matches = slashPopupActive ? filterSlashEntries(state.draft, availableSkills) : [];
   const maxIndex = Math.max(matches.length - 1, 0);
   const selectedIndex = Math.min(selected, maxIndex);
@@ -458,6 +460,7 @@ function ChatSessionView(props: ChatSessionViewProps): ReactElement {
       return;
     }
     commitHistory({ kind: "notice", id: randomUUID(), text: `未知命令 ${name}` });
+    setDraft(text);
   };
 
   const onSlashMove = (direction: 1 | -1): void => {
@@ -600,7 +603,7 @@ function ChatSessionView(props: ChatSessionViewProps): ReactElement {
         ? h(StatusLine, { status: state.status, width: layout.columns })
         : h(TurnStatusLine, { activity: turnActivity, width: layout.columns }),
     ),
-    slashActive
+    slashPopupActive
       ? h(SlashPopup, {
           matches,
           selected: selectedIndex,

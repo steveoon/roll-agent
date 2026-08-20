@@ -1581,3 +1581,93 @@ test("ChatApp reports notice when session switching is unavailable", async () =>
   assert.match(lastFrame() ?? "", /当前界面不支持会话切换/);
   unmount();
 });
+
+test("ChatApp 以绝对路径开头的输入按普通消息提交", async () => {
+  const sink: Sink = { approved: [], rejected: [] };
+  const submitted: string[] = [];
+  async function* send(): AsyncIterable<SessionEvent> {
+    yield { type: "message-finish", text: "" };
+  }
+  const { stdin, lastFrame, unmount } = render(
+    h(ChatApp, {
+      session: makeSession(send, sink),
+      model: "qwen",
+      onUserSubmit: (text: string) => submitted.push(text),
+      onExit: () => {},
+    }),
+  );
+  await delay(10);
+  stdin.write("/Users/gt/yc/supplier2.0/AGENTS.md 依据规则审核仓库代码质量");
+  await delay(20);
+  assert.doesNotMatch(plain(lastFrame() ?? ""), /无匹配命令/);
+  stdin.write("\r");
+  await waitFor(() =>
+    assert.deepEqual(submitted, ["/Users/gt/yc/supplier2.0/AGENTS.md 依据规则审核仓库代码质量"]),
+  );
+  assert.doesNotMatch(plain(lastFrame() ?? ""), /未知命令/);
+  unmount();
+});
+
+test("ChatApp PTY 整串投递的路径输入也按普通消息提交", async () => {
+  const sink: Sink = { approved: [], rejected: [] };
+  const submitted: string[] = [];
+  async function* send(): AsyncIterable<SessionEvent> {
+    yield { type: "message-finish", text: "" };
+  }
+  const { stdin, unmount } = render(
+    h(ChatApp, {
+      session: makeSession(send, sink),
+      model: "qwen",
+      onUserSubmit: (text: string) => submitted.push(text),
+      onExit: () => {},
+    }),
+  );
+  await delay(10);
+  stdin.write("/Users/gt/yc/AGENTS.md 审核\r");
+  await waitFor(() => assert.deepEqual(submitted, ["/Users/gt/yc/AGENTS.md 审核"]));
+  unmount();
+});
+
+test("ChatApp 未知命令提示后保留草稿", async () => {
+  const sink: Sink = { approved: [], rejected: [] };
+  const submitted: string[] = [];
+  async function* send(): AsyncIterable<SessionEvent> {
+    yield { type: "message-finish", text: "" };
+  }
+  const { stdin, lastFrame, unmount } = render(
+    h(ChatApp, {
+      session: makeSession(send, sink),
+      model: "qwen",
+      onUserSubmit: (text: string) => submitted.push(text),
+      onExit: () => {},
+    }),
+  );
+  await delay(10);
+  stdin.write("/thnik on");
+  await delay(20);
+  stdin.write("\r");
+  await waitFor(() => assert.match(plain(lastFrame() ?? ""), /未知命令 \/thnik/));
+  assert.match(plain(lastFrame() ?? ""), /\/thnik on/);
+  assert.deepEqual(submitted, []);
+  unmount();
+});
+
+test("ChatApp 输入命令参数时不渲染空弹窗", async () => {
+  const sink: Sink = { approved: [], rejected: [] };
+  async function* send(): AsyncIterable<SessionEvent> {
+    yield { type: "message-finish", text: "" };
+  }
+  const { stdin, lastFrame, unmount } = render(
+    h(ChatApp, {
+      session: makeSession(send, sink),
+      model: "qwen",
+      onUserSubmit: () => {},
+      onExit: () => {},
+    }),
+  );
+  await delay(10);
+  stdin.write("/think o");
+  await delay(20);
+  assert.doesNotMatch(plain(lastFrame() ?? ""), /无匹配命令/);
+  unmount();
+});

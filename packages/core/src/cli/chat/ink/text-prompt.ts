@@ -12,6 +12,7 @@ import {
 } from "./line-buffer.ts";
 import type { LineBufferState } from "./line-buffer.ts";
 import { isMouseProtocolInput } from "./mouse-input.ts";
+import { isSlashCommandShaped } from "./commands.ts";
 import { CHAT_CURSOR_REFRESH_EVENT } from "./terminal-output.ts";
 
 const PROMPT_BORDER_WIDTH = 2;
@@ -189,7 +190,7 @@ export function TextPrompt(props: TextPromptProps): ReactElement {
         const before = input.split("\r", 1)[0] ?? "";
         const submitted =
           before.length > 0 ? insertText(editorRef.current, before) : editorRef.current;
-        if (slashActive || submitted.value.startsWith("/")) {
+        if (isSlashCommandShaped(submitted.value)) {
           props.onSlashRun(submitted.value);
           return;
         }

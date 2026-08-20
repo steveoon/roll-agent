@@ -366,3 +366,14 @@ test("applyExplicitSkillContext 替换文本时保留用户消息的附件 parts
   assert.equal(materialized[0]?.content, "earlier");
   assert.doesNotThrow(() => modelMessageSchema.parse(materialized[2]));
 });
+
+test("prepareExplicitSkillContext 对路径开头的输入原样透传", () => {
+  const snapshot = prepareExplicitSkillContext({
+    rawInput: "/Users/gt/yc/supplier2.0/AGENTS.md 依据规则审核",
+    skillSummaries: [],
+    skillLibrary: undefined,
+  });
+  assert.equal(snapshot.userPrompt, "/Users/gt/yc/supplier2.0/AGENTS.md 依据规则审核");
+  assert.equal(snapshot.modelUserContent, "/Users/gt/yc/supplier2.0/AGENTS.md 依据规则审核");
+  assert.deepEqual(snapshot.skillNames, []);
+});

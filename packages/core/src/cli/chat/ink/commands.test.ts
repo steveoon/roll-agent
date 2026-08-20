@@ -6,14 +6,14 @@ test("filterCommands returns all on a bare slash", () => {
   assert.equal(filterCommands("/").length, SLASH_COMMANDS.length);
 });
 
-test("filterCommands prefix-filters by the command token", () => {
+test("filterCommands 前缀命中优先，子串命中兜底", () => {
   assert.deepEqual(
     filterCommands("/th").map((c) => c.name),
-    ["/think"],
+    ["/think", "/show-think"],
   );
   assert.deepEqual(
     filterCommands("/e").map((c) => c.name),
-    ["/effort", "/exit"],
+    ["/effort", "/exit", "/resume", "/help"],
   );
   assert.deepEqual(
     filterCommands("/ex").map((c) => c.name),
@@ -24,7 +24,7 @@ test("filterCommands prefix-filters by the command token", () => {
 test("filterCommands ignores args after the command and is case-insensitive", () => {
   assert.deepEqual(
     filterCommands("/THINK on").map((c) => c.name),
-    ["/think"],
+    ["/think", "/show-think"],
   );
 });
 
@@ -110,4 +110,33 @@ test("filterSlashEntries matches /resume", () => {
     entries.map((entry) => entry.name),
     ["/resume"],
   );
+});
+
+test("filterSlashEntries 子串命中 skill 名称中间的单词", () => {
+  const skills = [{ name: "roll-zhipin-unread-reply", description: "回复未读消息", source: "user" }];
+  assert.deepEqual(
+    filterSlashEntries("/zhipin", skills).map((entry) => entry.name),
+    ["/roll-zhipin-unread-reply"],
+  );
+});
+
+test("filterSlashEntries 前缀命中排在子串命中之前", () => {
+  const skills = [{ name: "think-harder", description: "深度思考", source: "user" }];
+  assert.deepEqual(
+    filterSlashEntries("/think", skills).map((entry) => entry.name),
+    ["/think", "/think-harder", "/show-think"],
+  );
+});
+
+test("isSlashCommandShaped 只认命令形状的首 token", async () => {
+  const { isSlashCommandShaped } = await import("./commands.ts");
+  assert.equal(isSlashCommandShaped("/"), true);
+  assert.equal(isSlashCommandShaped("/think"), true);
+  assert.equal(isSlashCommandShaped("/think on"), true);
+  assert.equal(isSlashCommandShaped("/roll-zhipin-unread-reply 回复未读"), true);
+  assert.equal(isSlashCommandShaped(""), false);
+  assert.equal(isSlashCommandShaped("普通消息"), false);
+  assert.equal(isSlashCommandShaped(" /think"), false);
+  assert.equal(isSlashCommandShaped("/Users/gt/yc/supplier2.0/AGENTS.md 依据规则审核"), false);
+  assert.equal(isSlashCommandShaped("/AGENTS.md 审核"), false);
 });
