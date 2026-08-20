@@ -16,6 +16,8 @@ test("lookupContextWindow 按子串匹配已知模型", () => {
   assert.equal(lookupContextWindow("gpt-4o-mini"), 128_000);
   assert.equal(lookupContextWindow("o1-mini"), 128_000);
   assert.equal(lookupContextWindow("o3"), 200_000);
+  assert.equal(lookupContextWindow("grok-4.6"), 500_000);
+  assert.equal(lookupContextWindow("xai/grok-4.6"), 500_000);
   assert.equal(lookupContextWindow("grok-4.5"), 500_000);
   assert.equal(lookupContextWindow("xai/grok-4.5"), 500_000);
   assert.equal(lookupContextWindow("deepseek-v4-flash"), 1_000_000);
