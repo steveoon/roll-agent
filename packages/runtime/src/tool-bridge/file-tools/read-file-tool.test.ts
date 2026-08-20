@@ -3,7 +3,8 @@ import assert from "node:assert/strict";
 import { mkdtempSync, realpathSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { ToolExecutionOptions } from "ai";
+import type { ModelMessage, ToolExecutionOptions } from "ai";
+import { relocateToolImagesToUserMessages } from "../../engine/relocate-tool-images.ts";
 import { FILE_FRESHNESS, FileStateTracker } from "./file-state-tracker.ts";
 import { canonicalFileKey } from "./file-io.ts";
 import { resolveFileToolsSettings } from "./settings.ts";
@@ -82,6 +83,105 @@ test("超长单行被截断标注", () => {
   const settings = resolveFileToolsSettings({ workdir });
   const text = String(executeReadFile(settings, tracker, { path: "d.txt" }).display);
   assert.match(text, /\[行截断\]/u);
+});
+
+const PNG_1X1_BASE64 =
+  "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
+
+test("读取 PNG 图片以图像内容进入 model output，offset/limit 被忽略", () => {
+  const { workdir, tracker } = fixture();
+  const path = join(workdir, "shot.png");
+  writeFileSync(path, Buffer.from(PNG_1X1_BASE64, "base64"));
+  const settings = resolveFileToolsSettings({ workdir });
+  const result = executeReadFile(settings, tracker, { path: "shot.png", offset: 5, limit: 1 });
+  assert.equal(result.outcome.kind, TOOL_OUTCOME_KINDS.success);
+  assert.match(String(result.display), /图像文件/u);
+  assert.equal(result.model.type, "content");
+  const parts = result.model.type === "content" ? result.model.value : [];
+  const filePart = parts.find((part) => part.type === "file");
+  assert.ok(filePart !== undefined && filePart.type === "file");
+  assert.equal(filePart.mediaType, "image/png");
+  assert.equal(filePart.data.data, PNG_1X1_BASE64);
+});
+
+test("read_file 图像输出可被 relocateToolImagesToUserMessages 搬进 user message", () => {
+  const { workdir, tracker } = fixture();
+  writeFileSync(join(workdir, "shot.png"), Buffer.from(PNG_1X1_BASE64, "base64"));
+  const settings = resolveFileToolsSettings({ workdir });
+  const result = executeReadFile(settings, tracker, { path: "shot.png" });
+  const messages = [
+    {
+      role: "tool",
+      content: [
+        {
+          type: "tool-result",
+          toolCallId: "call-1",
+          toolName: "roll__read_file",
+          output: result.model,
+        },
+      ],
+    },
+  ] as unknown as ModelMessage[];
+  const relocated = relocateToolImagesToUserMessages(messages);
+  assert.equal(relocated.length, 2);
+  const userMessage = relocated[1];
+  assert.ok(userMessage !== undefined && userMessage.role === "user");
+  const userParts = userMessage.content as unknown as Array<Record<string, unknown>>;
+  const filePart = userParts.find((part) => part["type"] === "file");
+  assert.ok(filePart !== undefined);
+  assert.equal(filePart["data"], PNG_1X1_BASE64);
+  assert.equal(filePart["mediaType"], "image/png");
+});
+
+test("图片超出 maxImageFileBytes 返回 invalid_input 并说明过大", () => {
+  const { workdir, tracker } = fixture();
+  writeFileSync(join(workdir, "big.png"), Buffer.from(PNG_1X1_BASE64, "base64"));
+  const settings = resolveFileToolsSettings({ workdir, maxImageFileBytes: 16 });
+  const result = executeReadFile(settings, tracker, { path: "big.png" });
+  assert.equal(result.outcome.kind, TOOL_OUTCOME_KINDS.invalidInput);
+  assert.match(String(result.display), /过大/u);
+});
+
+test("以 GIF89a 开头的 UTF-8 文本走文本路径且可解锁编辑", () => {
+  const { workdir, tracker } = fixture();
+  const path = join(workdir, "gif-notes.md");
+  const content = "GIF89a 是 GIF 格式的版本标识\n第二行说明";
+  writeFileSync(path, content, "utf8");
+  const settings = resolveFileToolsSettings({ workdir });
+  const result = executeReadFile(settings, tracker, { path: "gif-notes.md" });
+  assert.equal(result.outcome.kind, TOOL_OUTCOME_KINDS.success);
+  assert.notEqual(result.model.type, "content");
+  assert.match(String(result.display), / {4}1→GIF89a/u);
+  assert.equal(tracker.checkFreshness(canonicalFileKey(path), content), FILE_FRESHNESS.fresh);
+});
+
+test("截断的 PNG 返回 invalid_input 并提示损坏", () => {
+  const { workdir, tracker } = fixture();
+  const fullPng = Buffer.from(PNG_1X1_BASE64, "base64");
+  writeFileSync(join(workdir, "half.png"), fullPng.subarray(0, fullPng.length - 8));
+  const settings = resolveFileToolsSettings({ workdir });
+  const result = executeReadFile(settings, tracker, { path: "half.png" });
+  assert.equal(result.outcome.kind, TOOL_OUTCOME_KINDS.invalidInput);
+  assert.match(String(result.display), /截断|损坏/u);
+});
+
+test("伪装成 .png 的文本文件仍走文本路径", () => {
+  const { workdir, tracker } = fixture();
+  writeFileSync(join(workdir, "fake.png"), "第一行\n第二行", "utf8");
+  const settings = resolveFileToolsSettings({ workdir });
+  const result = executeReadFile(settings, tracker, { path: "fake.png" });
+  assert.equal(result.outcome.kind, TOOL_OUTCOME_KINDS.success);
+  assert.match(String(result.display), / {4}1→第一行/u);
+  assert.notEqual(result.model.type, "content");
+});
+
+test("无图像签名的二进制文件仍被拒绝", () => {
+  const { workdir, tracker } = fixture();
+  writeFileSync(join(workdir, "blob.bin"), Buffer.from([0x00, 0x01, 0x02, 0x03, 0xff]));
+  const settings = resolveFileToolsSettings({ workdir });
+  const result = executeReadFile(settings, tracker, { path: "blob.bin" });
+  assert.equal(result.outcome.kind, TOOL_OUTCOME_KINDS.invalidInput);
+  assert.match(String(result.display), /二进制/u);
 });
 
 function executeOptions(

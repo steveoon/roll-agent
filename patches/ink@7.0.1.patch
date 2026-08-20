@@ -1,0 +1,19 @@
+diff --git a/build/ink.js b/build/ink.js
+index 98ba6eff90db503fbd82fca6a19ef8d82d07ed8e..556b90ee0a7c5d7b68cb017188e1ad7eeaf85b36 100644
+--- a/build/ink.js
++++ b/build/ink.js
+@@ -776,7 +776,13 @@ export default class Ink {
+             // Clear responseBuffer afterwards to make cleanup idempotent.
+             const remaining = stripKittyQueryResponsesAndTrailingPartial(responseBuffer);
+             responseBuffer = [];
+-            if (remaining.length > 0) {
++            // Patched (roll-agent): when a 'readable' consumer is attached, chunks
++            // seen by this 'data' listener are mirrors of stdin.read() calls made by
++            // Ink's own input pipeline (Node emits 'data' for every read() while both
++            // listener kinds coexist). Unshifting the stripped remainder would deliver
++            // those bytes to the pipeline a second time, duplicating the first
++            // keystroke that lands inside the kitty handshake window.
++            if (remaining.length > 0 && stdin.listenerCount('readable') === 0) {
+                 stdin.unshift(Uint8Array.from(remaining));
+             }
+         };

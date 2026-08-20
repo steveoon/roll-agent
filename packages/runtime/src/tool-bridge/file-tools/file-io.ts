@@ -1,4 +1,14 @@
-import { lstatSync, mkdirSync, readFileSync, realpathSync, statSync, writeFileSync } from "node:fs";
+import {
+  closeSync,
+  lstatSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  readSync,
+  realpathSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
 import { basename, dirname, isAbsolute, relative, resolve, sep } from "node:path";
 import {
   TOOL_OUTCOME_KINDS,
@@ -14,7 +24,13 @@ export const FILE_CONTAINMENT_DRIFT_MESSAGE =
 
 export type LoadFileFailure = {
   readonly ok: false;
-  readonly code: "not-found" | "is-directory" | "not-regular-file" | "too-large" | "binary";
+  readonly code:
+    | "not-found"
+    | "is-directory"
+    | "not-regular-file"
+    | "too-large"
+    | "binary"
+    | "corrupt-image";
   readonly message: string;
 };
 
@@ -214,6 +230,138 @@ export function loadTextFile(
     hadBom,
     suspectEncoding: content.includes("�"),
   };
+}
+
+const IMAGE_SIGNATURE_SNIFF_BYTES = 12;
+
+export interface LoadedImageFile {
+  readonly ok: true;
+  readonly path: string;
+  readonly base64: string;
+  readonly mediaType: string;
+  readonly bytes: number;
+}
+
+export function sniffImageMediaType(header: Buffer): string | undefined {
+  if (
+    header.length >= 8 &&
+    header[0] === 0x89 &&
+    header[1] === 0x50 &&
+    header[2] === 0x4e &&
+    header[3] === 0x47 &&
+    header[4] === 0x0d &&
+    header[5] === 0x0a &&
+    header[6] === 0x1a &&
+    header[7] === 0x0a
+  ) {
+    return "image/png";
+  }
+  if (header.length >= 3 && header[0] === 0xff && header[1] === 0xd8 && header[2] === 0xff) {
+    return "image/jpeg";
+  }
+  if (header.length >= 6) {
+    const gifSignature = header.toString("latin1", 0, 6);
+    if (gifSignature === "GIF87a" || gifSignature === "GIF89a") {
+      return "image/gif";
+    }
+  }
+  if (
+    header.length >= 12 &&
+    header.toString("latin1", 0, 4) === "RIFF" &&
+    header.toString("latin1", 8, 12) === "WEBP"
+  ) {
+    return "image/webp";
+  }
+  return undefined;
+}
+
+function readFileHeader(path: string, length: number): Buffer | undefined {
+  let fd: number;
+  try {
+    fd = openSync(path, "r");
+  } catch {
+    return undefined;
+  }
+  try {
+    const header = Buffer.alloc(length);
+    const bytesRead = readSync(fd, header, 0, length, 0);
+    return header.subarray(0, bytesRead);
+  } catch {
+    return undefined;
+  } finally {
+    closeSync(fd);
+  }
+}
+
+export function loadImageFile(
+  path: string,
+  limits: { readonly maxImageBytes: number },
+): LoadedImageFile | LoadFileFailure | undefined {
+  let size: number;
+  try {
+    const stats = statSync(path);
+    if (!stats.isFile()) {
+      return undefined;
+    }
+    size = stats.size;
+  } catch {
+    return undefined;
+  }
+  const header = readFileHeader(path, IMAGE_SIGNATURE_SNIFF_BYTES);
+  if (header === undefined) {
+    return undefined;
+  }
+  const mediaType = sniffImageMediaType(header);
+  if (mediaType === undefined) {
+    return undefined;
+  }
+  if (size > limits.maxImageBytes) {
+    return {
+      ok: false,
+      code: "too-large",
+      message: `${path} 是图像文件（${mediaType}）但过大（${String(size)} 字节，上限 ${String(limits.maxImageBytes)} 字节），无法载入上下文`,
+    };
+  }
+  const buffer = readFileSync(path);
+  if (!containsRawNul(buffer)) {
+    return undefined;
+  }
+  if (!imageLooksComplete(buffer, mediaType)) {
+    return {
+      ok: false,
+      code: "corrupt-image",
+      message: `${path} 图像文件（${mediaType}）疑似截断或损坏，无法载入上下文。若确实需要处理该文件，请用 shell 命令检查。`,
+    };
+  }
+  return {
+    ok: true,
+    path,
+    base64: buffer.toString("base64"),
+    mediaType,
+    bytes: size,
+  };
+}
+
+const PNG_IEND_TAIL = Buffer.from([0x49, 0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82]);
+
+function imageLooksComplete(buffer: Buffer, mediaType: string): boolean {
+  if (mediaType === "image/png") {
+    return buffer.length >= 8 && buffer.subarray(buffer.length - 8).equals(PNG_IEND_TAIL);
+  }
+  if (mediaType === "image/jpeg") {
+    return (
+      buffer.length >= 2 &&
+      buffer[buffer.length - 2] === 0xff &&
+      buffer[buffer.length - 1] === 0xd9
+    );
+  }
+  if (mediaType === "image/gif") {
+    return buffer.length >= 1 && buffer[buffer.length - 1] === 0x3b;
+  }
+  if (mediaType === "image/webp") {
+    return buffer.length >= 12 && buffer.readUInt32LE(4) + 8 <= buffer.length;
+  }
+  return false;
 }
 
 export function saveTextFile(path: string, content: string, hadBom: boolean): void {

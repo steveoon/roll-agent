@@ -17,10 +17,12 @@ import {
   captureFilePathAdmission,
   escapesWorkdir,
   formatPathForApproval,
+  loadImageFile,
   loadTextFile,
   resolveFilePath,
   revalidateFilePathAdmission,
   saveTextFile,
+  sniffImageMediaType,
   splitUtf8Bom,
 } from "./file-io.ts";
 
@@ -241,4 +243,128 @@ test("loadTextFile 拒绝非普通文件", (t) => {
   }
   const loaded = loadTextFile(fifo, LIMITS);
   assert.ok(!loaded.ok && loaded.code === "not-regular-file");
+});
+
+const PNG_HEADER = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00]);
+
+test("sniffImageMediaType 通过 magic bytes 识别四种图像格式", () => {
+  assert.equal(sniffImageMediaType(PNG_HEADER), "image/png");
+  assert.equal(sniffImageMediaType(Buffer.from([0xff, 0xd8, 0xff, 0xe0])), "image/jpeg");
+  assert.equal(sniffImageMediaType(Buffer.from("GIF89a")), "image/gif");
+  assert.equal(sniffImageMediaType(Buffer.from("GIF87a")), "image/gif");
+  assert.equal(sniffImageMediaType(Buffer.from("RIFF\x10\x00\x00\x00WEBP")), "image/webp");
+});
+
+test("sniffImageMediaType 对非图像内容返回 undefined", () => {
+  assert.equal(sniffImageMediaType(Buffer.from("hello world")), undefined);
+  assert.equal(sniffImageMediaType(Buffer.from("GIF9")), undefined);
+  assert.equal(sniffImageMediaType(Buffer.from("RIFF\x10\x00\x00\x00WAVE")), undefined);
+  assert.equal(sniffImageMediaType(Buffer.alloc(0)), undefined);
+  assert.equal(sniffImageMediaType(PNG_HEADER.subarray(0, 4)), undefined);
+});
+
+test("loadImageFile 读取真实 PNG 返回 base64 与 mediaType", () => {
+  const dir = mkdtempSync(join(tmpdir(), "file-io-image-"));
+  const pngBase64 =
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
+  const path = join(dir, "one.png");
+  writeFileSync(path, Buffer.from(pngBase64, "base64"));
+  const loaded = loadImageFile(path, { maxImageBytes: 1024 });
+  assert.ok(loaded !== undefined && loaded.ok);
+  assert.equal(loaded.mediaType, "image/png");
+  assert.equal(loaded.base64, pngBase64);
+});
+
+test("loadImageFile 对不含 NUL 的图像签名文本返回 undefined（不劫持文本文件）", () => {
+  const dir = mkdtempSync(join(tmpdir(), "file-io-image-"));
+  const path = join(dir, "gif-notes.txt");
+  writeFileSync(path, "GIF89a 是 GIF 格式的版本标识\n第二行说明", "utf8");
+  assert.equal(loadImageFile(path, { maxImageBytes: 1024 }), undefined);
+});
+
+test("loadImageFile 拒绝缺少格式结尾标记的截断图像", () => {
+  const dir = mkdtempSync(join(tmpdir(), "file-io-image-"));
+  const pngBase64 =
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
+  const fullPng = Buffer.from(pngBase64, "base64");
+  const truncatedPng = join(dir, "truncated.png");
+  writeFileSync(truncatedPng, fullPng.subarray(0, fullPng.length - 8));
+  const pngResult = loadImageFile(truncatedPng, { maxImageBytes: 1024 });
+  assert.ok(pngResult !== undefined && !pngResult.ok);
+  assert.equal(pngResult.code, "corrupt-image");
+
+  const truncatedJpeg = join(dir, "truncated.jpg");
+  writeFileSync(truncatedJpeg, Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10, 0xaa, 0xbb]));
+  const jpegResult = loadImageFile(truncatedJpeg, { maxImageBytes: 1024 });
+  assert.ok(jpegResult !== undefined && !jpegResult.ok);
+  assert.equal(jpegResult.code, "corrupt-image");
+
+  const truncatedGif = join(dir, "truncated.gif");
+  writeFileSync(
+    truncatedGif,
+    Buffer.concat([Buffer.from("GIF89a"), Buffer.from([0x01, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00])]),
+  );
+  const gifResult = loadImageFile(truncatedGif, { maxImageBytes: 1024 });
+  assert.ok(gifResult !== undefined && !gifResult.ok);
+  assert.equal(gifResult.code, "corrupt-image");
+
+  const truncatedWebp = join(dir, "truncated.webp");
+  const webpHeader = Buffer.concat([Buffer.from("RIFF"), Buffer.alloc(4), Buffer.from("WEBP")]);
+  webpHeader.writeUInt32LE(200, 4);
+  writeFileSync(truncatedWebp, Buffer.concat([webpHeader, Buffer.from([0x00, 0x01])]));
+  const webpResult = loadImageFile(truncatedWebp, { maxImageBytes: 1024 });
+  assert.ok(webpResult !== undefined && !webpResult.ok);
+  assert.equal(webpResult.code, "corrupt-image");
+});
+
+test("loadImageFile 接受结构完整的 JPEG/GIF/WebP 最小样例", () => {
+  const dir = mkdtempSync(join(tmpdir(), "file-io-image-"));
+  const jpegPath = join(dir, "ok.jpg");
+  writeFileSync(
+    jpegPath,
+    Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10, 0xaa, 0xbb, 0xff, 0xd9]),
+  );
+  const jpeg = loadImageFile(jpegPath, { maxImageBytes: 1024 });
+  assert.ok(jpeg !== undefined && jpeg.ok);
+  assert.equal(jpeg.mediaType, "image/jpeg");
+
+  const gifPath = join(dir, "ok.gif");
+  writeFileSync(
+    gifPath,
+    Buffer.concat([
+      Buffer.from("GIF89a"),
+      Buffer.from([0x01, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x3b]),
+    ]),
+  );
+  const gif = loadImageFile(gifPath, { maxImageBytes: 1024 });
+  assert.ok(gif !== undefined && gif.ok);
+  assert.equal(gif.mediaType, "image/gif");
+
+  const webpPath = join(dir, "ok.webp");
+  const webpBody = Buffer.from([0x00, 0x01, 0x02, 0x03]);
+  const webpHeader = Buffer.concat([Buffer.from("RIFF"), Buffer.alloc(4), Buffer.from("WEBP")]);
+  webpHeader.writeUInt32LE(4 + webpBody.length, 4);
+  writeFileSync(webpPath, Buffer.concat([webpHeader, webpBody]));
+  const webp = loadImageFile(webpPath, { maxImageBytes: 1024 });
+  assert.ok(webp !== undefined && webp.ok);
+  assert.equal(webp.mediaType, "image/webp");
+});
+
+test("loadImageFile 对非图像文件返回 undefined，对超限图像返回 too-large", () => {
+  const dir = mkdtempSync(join(tmpdir(), "file-io-image-"));
+  const textPath = join(dir, "plain.txt");
+  writeFileSync(textPath, "not an image", "utf8");
+  assert.equal(loadImageFile(textPath, { maxImageBytes: 1024 }), undefined);
+  assert.equal(loadImageFile(join(dir, "missing.png"), { maxImageBytes: 1024 }), undefined);
+  const pngPath = join(dir, "big.png");
+  writeFileSync(
+    pngPath,
+    Buffer.from(
+      "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==",
+      "base64",
+    ),
+  );
+  const tooLarge = loadImageFile(pngPath, { maxImageBytes: 16 });
+  assert.ok(tooLarge !== undefined && !tooLarge.ok);
+  assert.equal(tooLarge.code, "too-large");
 });

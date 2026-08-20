@@ -8,6 +8,7 @@ import {
   COMPACTION_DRAFT_FALLBACK_REASONS,
   compactMessages,
   CompactionDraftFallbackError,
+  estimateMessagesTokens,
   findTurnBoundaries,
 } from "./compactor.ts";
 import type { CompactionModelDraft } from "./compaction-semantic-state.ts";
@@ -960,4 +961,35 @@ test("暂停在工具步骤后的轮内压缩不截断最后一个步骤的工�
   assert.match(toolOutputValue(tools[0]), /已省略/);
   assert.doesNotMatch(toolOutputValue(tools[1]), /已省略/);
   assert.equal(toolOutputValue(tools[1]).length, 3000);
+});
+
+test("estimateMessagesTokens 对 file part 按固定图像常数估算而非 base64 长度", () => {
+  const base64 = "A".repeat(1_400_000);
+  const toolMessage = {
+    role: "tool",
+    content: [
+      {
+        type: "tool-result",
+        toolCallId: "call-1",
+        toolName: "roll__read_file",
+        output: {
+          type: "content",
+          value: [
+            { type: "text", text: "图像文件" },
+            { type: "file", data: { type: "data", data: base64 }, mediaType: "image/png" },
+          ],
+        },
+      },
+    ],
+  } as unknown as ModelMessage;
+  const userMessage = {
+    role: "user",
+    content: [
+      { type: "text", text: "看这张图" },
+      { type: "file", data: base64, mediaType: "image/png" },
+    ],
+  } as unknown as ModelMessage;
+  const estimate = estimateMessagesTokens([toolMessage, userMessage]);
+  assert.ok(estimate < 10_000, `估算应为常数级，实际 ${String(estimate)}`);
+  assert.ok(estimate > 2_000, `估算不应丢失 file part 本身的成本，实际 ${String(estimate)}`);
 });

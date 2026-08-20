@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { createElement as h, useCallback, useEffect, useRef, useState } from "react";
 import type { ReactElement } from "react";
-import { Box, Text, useInput, useWindowSize } from "ink";
+import { Box, Text, useInput, useStdout, useWindowSize } from "ink";
 import type { AgentSession } from "@roll-agent/runtime";
 import type { ThinkingLevel } from "../../../llm/providers.ts";
 import type { ChatThinkingDisplay } from "../../../config/schema.ts";
@@ -13,15 +13,20 @@ import { TextPrompt } from "./text-prompt.ts";
 import { ConfirmSelect } from "./confirm-select.ts";
 import { UserInputForm } from "./user-input-form.ts";
 import { SlashPopup } from "./slash-popup.ts";
+import { ShortcutsPanel } from "./shortcuts-panel.ts";
 import { SessionPicker } from "./session-picker.ts";
 import { messagesToHistory } from "./history-from-messages.ts";
 import type { SessionPickerItem } from "../session-picker-format.ts";
 import {
   buildSkillListLines,
   filterSlashEntries,
+  isSlashCommandShaped,
+  isSlashCommandToken,
   parseSkillInvocation,
   SLASH_COMMANDS,
 } from "./commands.ts";
+import { COPY_PROMO_FOOTER, copyTextToClipboard, lastRoundCopyText } from "./clipboard-copy.ts";
+import { createInMemoryHintFlagStore, type HintFlagStore } from "./hint-flags.ts";
 import { bannerTextLine, buildBannerLines, type BannerInfo } from "../banner.ts";
 import { cycleThinking } from "./thinking.ts";
 import { appendInputHistory } from "./input-history.ts";
@@ -55,6 +60,8 @@ export interface ChatAppProps {
   readonly onThinkingChange?: (level: ThinkingLevel) => void;
   readonly onUserSubmit: (text: string) => void;
   readonly onExit: () => void;
+  readonly copyToClipboard?: (text: string) => Promise<boolean>;
+  readonly hintFlags?: HintFlagStore;
   readonly sessionSwitching?: ChatSessionSwitching;
 }
 
@@ -71,13 +78,15 @@ interface ChatSessionViewProps extends Omit<ChatAppProps, "sessionSwitching"> {
   readonly onPickerCancel: () => void;
 }
 
-export const INK_HINTS =
-  "/exit 退出 · Esc 中断 · / 命令 · Shift+Enter/Ctrl+J 换行 · Alt+./Alt+, 调推理 · Shift+Tab 自动批准";
+export const INK_HINTS = "/exit 退出 · Esc 中断 · / 命令 · ? 快捷键";
 
 const SHOW_THINK_SCOPE_HINT = "（仅当前会话生效，/resume 切换会话后按配置重置）";
 
 function helpText(): string {
-  return SLASH_COMMANDS.map((command) => `${command.name} — ${command.description}`).join("\n");
+  return [
+    ...SLASH_COMMANDS.map((command) => `${command.name} — ${command.description}`),
+    "快捷键: Ctrl+T 释放/恢复鼠标 · Ctrl+Y 复制本轮对话",
+  ].join("\n");
 }
 
 export function ChatApp(props: ChatAppProps): ReactElement {
@@ -154,6 +163,8 @@ export function ChatApp(props: ChatAppProps): ReactElement {
       ? { initialThinkingDisplay: props.initialThinkingDisplay }
       : {}),
     ...(props.onThinkingChange !== undefined ? { onThinkingChange: props.onThinkingChange } : {}),
+    ...(props.copyToClipboard !== undefined ? { copyToClipboard: props.copyToClipboard } : {}),
+    ...(props.hintFlags !== undefined ? { hintFlags: props.hintFlags } : {}),
     picker,
     onOpenPicker: openPicker,
     onPickerSelect: selectSession,
@@ -211,8 +222,56 @@ function ChatSessionView(props: ChatSessionViewProps): ReactElement {
       ? undefined
       : buildBannerLines(props.banner, layout.columns, { hints: INK_HINTS });
   const [selected, setSelected] = useState(0);
-  const slashActive = state.phase === CHAT_PHASES.idle && state.draft.startsWith("/");
-  const slashPopupActive = slashActive && state.draft.split(/\s+/).at(-1)?.startsWith("/") === true;
+  const [mouseTracking, setMouseTracking] = useState(true);
+  const [shortcutsOpen, setShortcutsOpen] = useState(false);
+  const [tip, setTip] = useState<string | undefined>(undefined);
+  const fallbackHintFlagsRef = useRef<HintFlagStore | undefined>(undefined);
+  fallbackHintFlagsRef.current ??= createInMemoryHintFlagStore();
+  const hintFlags = props.hintFlags ?? fallbackHintFlagsRef.current;
+  const { stdout } = useStdout();
+  const copyLastRound = (): void => {
+    const text = lastRoundCopyText(state.history);
+    if (text === undefined) {
+      commitHistory({ kind: "notice", id: randomUUID(), text: "暂无可复制的消息" });
+      return;
+    }
+    const copy = props.copyToClipboard ?? ((value: string) => copyTextToClipboard(value, stdout));
+    copy(`${text}\n\n${COPY_PROMO_FOOTER}`).then((ok) => {
+      commitHistory({
+        kind: "notice",
+        id: randomUUID(),
+        text: ok ? "已复制本轮对话" : "复制失败,请重试",
+      });
+    });
+  };
+  const slashActive = state.phase === CHAT_PHASES.idle && isSlashCommandShaped(state.draft);
+  const slashPopupActive = slashActive && isSlashCommandToken(state.draft.split(/\s+/).at(-1) ?? "");
+  const shortcutsVisible =
+    shortcutsOpen && state.phase === CHAT_PHASES.idle && state.draft.length === 0;
+
+  useEffect(() => {
+    if (state.draft.length > 0 || state.phase !== CHAT_PHASES.idle) {
+      setShortcutsOpen(false);
+    }
+  }, [state.draft, state.phase]);
+
+  useEffect(() => {
+    if (
+      !hintFlags.isShown("copy-round") &&
+      state.phase === CHAT_PHASES.idle &&
+      state.history.some((item) => item.kind === "assistant")
+    ) {
+      hintFlags.markShown("copy-round");
+      setTip("Ctrl+Y 复制本轮对话");
+    }
+  }, [state.phase, state.history, hintFlags]);
+
+  const handleWheelScroll = useCallback(() => {
+    if (!hintFlags.isShown("mouse-release")) {
+      hintFlags.markShown("mouse-release");
+      setTip("Ctrl+T 释放鼠标后可直接选中复制");
+    }
+  }, [hintFlags]);
   const matches = slashPopupActive ? filterSlashEntries(state.draft, availableSkills) : [];
   const maxIndex = Math.max(matches.length - 1, 0);
   const selectedIndex = Math.min(selected, maxIndex);
@@ -238,6 +297,12 @@ function ChatSessionView(props: ChatSessionViewProps): ReactElement {
       setThinking(cycleThinking(state.status.thinkingLevel, 1));
     } else if (key.meta && input === ",") {
       setThinking(cycleThinking(state.status.thinkingLevel, -1));
+    } else if (key.ctrl && input === "t") {
+      setMouseTracking((current) => !current);
+    } else if (key.ctrl && input === "y") {
+      copyLastRound();
+    } else if (key.escape && !key.meta && shortcutsOpen) {
+      setShortcutsOpen(false);
     }
   });
 
@@ -336,6 +401,7 @@ function ChatSessionView(props: ChatSessionViewProps): ReactElement {
 
   const handleSubmit = (raw: string): void => {
     const text = raw.trim();
+    setTip(undefined);
     if (text.length === 0 && attachments.length === 0) {
       setDraft("");
       return;
@@ -353,6 +419,7 @@ function ChatSessionView(props: ChatSessionViewProps): ReactElement {
 
   const runSlash = (raw: string): void => {
     handleBannerSettled();
+    setTip(undefined);
     setDraft("");
     const text = raw.trim();
     rememberInput(text);
@@ -458,6 +525,7 @@ function ChatSessionView(props: ChatSessionViewProps): ReactElement {
       return;
     }
     commitHistory({ kind: "notice", id: randomUUID(), text: `未知命令 ${name}` });
+    setDraft(text);
   };
 
   const onSlashMove = (direction: 1 | -1): void => {
@@ -540,6 +608,11 @@ function ChatSessionView(props: ChatSessionViewProps): ReactElement {
                 : {}),
               slashActive,
               slashPopupActive,
+              mouseTracking,
+              ...(tip === undefined ? {} : { tip }),
+              onShortcutsToggle: () => {
+                setShortcutsOpen((current) => !current);
+              },
               autoApprove: state.status.autoApprove,
               attachments,
               attachmentsPending: clipboardPending,
@@ -582,6 +655,8 @@ function ChatSessionView(props: ChatSessionViewProps): ReactElement {
       width: layout.columns,
       history: state.history,
       live: state.live,
+      mouseTracking,
+      onWheelScroll: handleWheelScroll,
       thinkingDisplay: state.thinkingDisplay,
       diffDisplay: state.diffDisplay,
       onBannerSettled: handleBannerSettled,
@@ -600,14 +675,16 @@ function ChatSessionView(props: ChatSessionViewProps): ReactElement {
         ? h(StatusLine, { status: state.status, width: layout.columns })
         : h(TurnStatusLine, { activity: turnActivity, width: layout.columns }),
     ),
-    slashActive
+    slashPopupActive
       ? h(SlashPopup, {
           matches,
           selected: selectedIndex,
           width: layout.columns,
           maxRows: layout.popupRows,
         })
-      : null,
+      : shortcutsVisible
+        ? h(ShortcutsPanel, { width: layout.columns, maxRows: layout.popupRows })
+        : null,
     footer,
   );
 }

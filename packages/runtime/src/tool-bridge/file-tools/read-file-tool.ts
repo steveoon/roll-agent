@@ -21,6 +21,7 @@ import {
   canonicalResourcePath,
   captureFilePathAdmission,
   escapesWorkdir,
+  loadImageFile,
   loadTextFile,
   resolveFilePath,
   revalidateFilePathAdmission,
@@ -56,6 +57,22 @@ export function executeReadFile(
   input: ReadFileInput,
 ): NormalizedToolResult {
   const path = resolveFilePath(settings.workdir, input.path);
+  const image = loadImageFile(path, { maxImageBytes: settings.maxImageFileBytes });
+  if (image !== undefined) {
+    if (!image.ok) {
+      return failedToolResult(TOOL_OUTCOME_KINDS.invalidInput, image.message);
+    }
+    const summary = `图像文件: ${image.path}（${image.mediaType}，${String(image.bytes)} 字节），已作为图像内容载入上下文`;
+    return successfulToolResult(summary, {
+      model: {
+        type: "content",
+        value: [
+          { type: "text", text: summary },
+          { type: "file", data: { type: "data", data: image.base64 }, mediaType: image.mediaType },
+        ],
+      },
+    });
+  }
   const loaded = loadTextFile(path, { maxFileBytes: settings.maxFileBytes });
   if (!loaded.ok) {
     return failedToolResult(TOOL_OUTCOME_KINDS.invalidInput, loaded.message);
@@ -155,7 +172,7 @@ export function buildReadFileTool(
   return {
     [id]: tool({
       description:
-        '读取文本文件内容。输出每行带行号前缀（如 "   12→"），前缀不是文件内容。编辑文件前必须先用本工具读取。',
+        '读取文本文件内容。输出每行带行号前缀（如 "   12→"），前缀不是文件内容。编辑文件前必须先用本工具读取。也可读取图片文件（png/jpeg/gif/webp），图片将作为图像内容进入上下文，此时 offset/limit 不生效。',
       inputSchema: readFileInputSchema,
       toModelOutput: ({ output }) => toolResultToModelOutput(output),
       execute: (input: ReadFileInput, options): Promise<NormalizedToolResult> =>

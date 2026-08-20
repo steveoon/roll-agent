@@ -1,12 +1,14 @@
 import {
   findSkillBySlashName,
+  isSlashCommandShaped,
+  isSlashCommandToken,
   parseSkillInvocation,
   type SkillInvocation,
   type SkillInvocationSummary,
 } from "../../../skills/invocation.ts";
 import { displayWidth } from "./display-width.ts";
 
-export { findSkillBySlashName, parseSkillInvocation };
+export { findSkillBySlashName, isSlashCommandShaped, isSlashCommandToken, parseSkillInvocation };
 export type { SkillInvocation };
 
 const graphemeSegmenter = new Intl.Segmenter(undefined, { granularity: "grapheme" });
@@ -111,19 +113,33 @@ export function currentSlashToken(input: string): string {
   return tokens[0] ?? "";
 }
 
+function rankSlashMatches<T extends { readonly name: string }>(
+  input: string,
+  entries: readonly T[],
+): T[] {
+  const token = currentSlashToken(input).toLowerCase().replace(/^\//, "");
+  const prefixMatches: T[] = [];
+  const substringMatches: T[] = [];
+  for (const entry of entries) {
+    const name = entry.name.toLowerCase().slice(1);
+    if (name.startsWith(token)) {
+      prefixMatches.push(entry);
+    } else if (token.length > 0 && name.includes(token)) {
+      substringMatches.push(entry);
+    }
+  }
+  return [...prefixMatches, ...substringMatches];
+}
+
 export function filterSlashEntries(
   input: string,
   skills: readonly SlashSkillSummary[] = [],
 ): SlashEntry[] {
-  const token = currentSlashToken(input).toLowerCase();
-  return [...SLASH_COMMANDS, ...buildSkillEntries(skills)].filter((entry) =>
-    entry.name.toLowerCase().startsWith(token),
-  );
+  return rankSlashMatches(input, [...SLASH_COMMANDS, ...buildSkillEntries(skills)]);
 }
 
 export function filterCommands(input: string): SlashCommand[] {
-  const token = currentSlashToken(input).toLowerCase();
-  return SLASH_COMMANDS.filter((command) => command.name.toLowerCase().startsWith(token));
+  return rankSlashMatches(input, SLASH_COMMANDS);
 }
 
 const SKILL_LIST_DEFAULT_WIDTH = 96;

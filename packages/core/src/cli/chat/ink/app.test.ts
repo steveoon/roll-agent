@@ -1581,3 +1581,307 @@ test("ChatApp reports notice when session switching is unavailable", async () =>
   assert.match(lastFrame() ?? "", /当前界面不支持会话切换/);
   unmount();
 });
+
+test("ChatApp 以绝对路径开头的输入按普通消息提交", async () => {
+  const sink: Sink = { approved: [], rejected: [] };
+  const submitted: string[] = [];
+  async function* send(): AsyncIterable<SessionEvent> {
+    yield { type: "message-finish", text: "" };
+  }
+  const { stdin, lastFrame, unmount } = render(
+    h(ChatApp, {
+      session: makeSession(send, sink),
+      model: "qwen",
+      onUserSubmit: (text: string) => submitted.push(text),
+      onExit: () => {},
+    }),
+  );
+  await delay(10);
+  stdin.write("/Users/gt/yc/supplier2.0/AGENTS.md 依据规则审核仓库代码质量");
+  await delay(20);
+  assert.doesNotMatch(plain(lastFrame() ?? ""), /无匹配命令/);
+  stdin.write("\r");
+  await waitFor(() =>
+    assert.deepEqual(submitted, ["/Users/gt/yc/supplier2.0/AGENTS.md 依据规则审核仓库代码质量"]),
+  );
+  assert.doesNotMatch(plain(lastFrame() ?? ""), /未知命令/);
+  unmount();
+});
+
+test("ChatApp PTY 整串投递的路径输入也按普通消息提交", async () => {
+  const sink: Sink = { approved: [], rejected: [] };
+  const submitted: string[] = [];
+  async function* send(): AsyncIterable<SessionEvent> {
+    yield { type: "message-finish", text: "" };
+  }
+  const { stdin, unmount } = render(
+    h(ChatApp, {
+      session: makeSession(send, sink),
+      model: "qwen",
+      onUserSubmit: (text: string) => submitted.push(text),
+      onExit: () => {},
+    }),
+  );
+  await delay(10);
+  stdin.write("/Users/gt/yc/AGENTS.md 审核\r");
+  await waitFor(() => assert.deepEqual(submitted, ["/Users/gt/yc/AGENTS.md 审核"]));
+  unmount();
+});
+
+test("ChatApp 未知命令提示后保留草稿", async () => {
+  const sink: Sink = { approved: [], rejected: [] };
+  const submitted: string[] = [];
+  async function* send(): AsyncIterable<SessionEvent> {
+    yield { type: "message-finish", text: "" };
+  }
+  const { stdin, lastFrame, unmount } = render(
+    h(ChatApp, {
+      session: makeSession(send, sink),
+      model: "qwen",
+      onUserSubmit: (text: string) => submitted.push(text),
+      onExit: () => {},
+    }),
+  );
+  await delay(10);
+  stdin.write("/thnik on");
+  await delay(20);
+  stdin.write("\r");
+  await waitFor(() => assert.match(plain(lastFrame() ?? ""), /未知命令 \/thnik/));
+  assert.match(plain(lastFrame() ?? ""), /\/thnik on/);
+  assert.deepEqual(submitted, []);
+  unmount();
+});
+
+test("ChatApp 输入命令参数时不渲染空弹窗", async () => {
+  const sink: Sink = { approved: [], rejected: [] };
+  async function* send(): AsyncIterable<SessionEvent> {
+    yield { type: "message-finish", text: "" };
+  }
+  const { stdin, lastFrame, unmount } = render(
+    h(ChatApp, {
+      session: makeSession(send, sink),
+      model: "qwen",
+      onUserSubmit: () => {},
+      onExit: () => {},
+    }),
+  );
+  await delay(10);
+  stdin.write("/think o");
+  await delay(20);
+  assert.doesNotMatch(plain(lastFrame() ?? ""), /无匹配命令/);
+  unmount();
+});
+
+test("ChatApp Ctrl+T 释放鼠标上报并显示恢复提示", async () => {
+  const sink: Sink = { approved: [], rejected: [] };
+  async function* send(): AsyncIterable<SessionEvent> {
+    yield { type: "message-finish", text: "" };
+  }
+  const { stdin, lastFrame, frames, unmount } = render(
+    h(ChatApp, {
+      session: makeSession(send, sink),
+      model: "qwen",
+      onUserSubmit: () => {},
+      onExit: () => {},
+    }),
+  );
+  await delay(10);
+  stdin.write(String.fromCharCode(20));
+  await delay(20);
+  assert.ok(frames.some((item) => plain(item).includes("鼠标已释放:选中即可复制")));
+  assert.ok(frames.some((item) => plain(item).includes("Ctrl+T 恢复滚轮")));
+  assert.ok(frames.some((item) => item.includes("[?1003l")));
+  stdin.write(String.fromCharCode(20));
+  await delay(20);
+  stdin.write("x");
+  await delay(20);
+  assert.doesNotMatch(plain(lastFrame() ?? ""), /鼠标已释放/);
+  unmount();
+});
+
+test("ChatApp Ctrl+Y 复制最后一轮对话并提示", async () => {
+  const sink: Sink = { approved: [], rejected: [] };
+  const copied: string[] = [];
+  async function* send(): AsyncIterable<SessionEvent> {
+    yield { type: "message-start", messageId: "m1" };
+    yield { type: "text-delta", delta: "你好,我能帮什么?" };
+    yield { type: "message-finish", text: "你好,我能帮什么?" };
+  }
+  const { stdin, lastFrame, unmount } = render(
+    h(ChatApp, {
+      session: makeSession(send, sink),
+      model: "qwen",
+      onUserSubmit: () => {},
+      onExit: () => {},
+      copyToClipboard: (text: string) => {
+        copied.push(text);
+        return Promise.resolve(true);
+      },
+    }),
+  );
+  await delay(10);
+  stdin.write("hi");
+  await delay(10);
+  stdin.write("\r");
+  await waitFor(() => assert.match(plain(lastFrame() ?? ""), /你好,我能帮什么\?/));
+  stdin.write(String.fromCharCode(25));
+  await waitFor(() => assert.match(plain(lastFrame() ?? ""), /已复制本轮对话/));
+  assert.deepEqual(copied, [
+    "用户: hi\n\n助手: 你好,我能帮什么?\n\n---\n对话来自 roll-agent · npm i -g @roll-agent/core",
+  ]);
+  unmount();
+});
+
+test("ChatApp Ctrl+Y 无历史时提示暂无可复制", async () => {
+  const sink: Sink = { approved: [], rejected: [] };
+  const copied: string[] = [];
+  async function* send(): AsyncIterable<SessionEvent> {
+    yield { type: "message-finish", text: "" };
+  }
+  const { stdin, lastFrame, unmount } = render(
+    h(ChatApp, {
+      session: makeSession(send, sink),
+      model: "qwen",
+      onUserSubmit: () => {},
+      onExit: () => {},
+      copyToClipboard: (text: string) => {
+        copied.push(text);
+        return Promise.resolve(true);
+      },
+    }),
+  );
+  await delay(10);
+  stdin.write(String.fromCharCode(25));
+  await waitFor(() => assert.match(plain(lastFrame() ?? ""), /暂无可复制的消息/));
+  assert.deepEqual(copied, []);
+  unmount();
+});
+
+test("ChatApp 空输入按 ? 打开快捷键面板,再按 ? 关闭", async () => {
+  const sink: Sink = { approved: [], rejected: [] };
+  async function* send(): AsyncIterable<SessionEvent> {
+    yield { type: "message-finish", text: "" };
+  }
+  const { stdin, lastFrame, unmount } = render(
+    h(ChatApp, {
+      session: makeSession(send, sink),
+      model: "qwen",
+      onUserSubmit: () => {},
+      onExit: () => {},
+    }),
+  );
+  await delay(10);
+  stdin.write("?");
+  await delay(20);
+  let frame = plain(lastFrame() ?? "");
+  assert.match(frame, /Ctrl\+Y {2}复制本轮对话/);
+  assert.match(frame, /Ctrl\+T {2}释放\/恢复鼠标/);
+  stdin.write("?");
+  await delay(20);
+  frame = plain(lastFrame() ?? "");
+  assert.doesNotMatch(frame, /释放\/恢复鼠标/);
+  unmount();
+});
+
+test("ChatApp 输入非空时 ? 作为普通字符进入草稿", async () => {
+  const sink: Sink = { approved: [], rejected: [] };
+  async function* send(): AsyncIterable<SessionEvent> {
+    yield { type: "message-finish", text: "" };
+  }
+  const { stdin, lastFrame, unmount } = render(
+    h(ChatApp, {
+      session: makeSession(send, sink),
+      model: "qwen",
+      onUserSubmit: () => {},
+      onExit: () => {},
+    }),
+  );
+  await delay(10);
+  stdin.write("a");
+  await delay(10);
+  stdin.write("?");
+  await delay(20);
+  const frame = plain(lastFrame() ?? "");
+  assert.match(frame, /› a\?/);
+  assert.doesNotMatch(frame, /释放\/恢复鼠标/);
+  unmount();
+});
+
+test("ChatApp 首轮回复完成后提示 Ctrl+Y 复制", async () => {
+  const sink: Sink = { approved: [], rejected: [] };
+  async function* send(): AsyncIterable<SessionEvent> {
+    yield { type: "message-start", messageId: "m1" };
+    yield { type: "text-delta", delta: "回答完毕" };
+    yield { type: "message-finish", text: "回答完毕" };
+  }
+  const { stdin, lastFrame, unmount } = render(
+    h(ChatApp, {
+      session: makeSession(send, sink),
+      model: "qwen",
+      onUserSubmit: () => {},
+      onExit: () => {},
+    }),
+  );
+  await delay(10);
+  stdin.write("问题");
+  await delay(10);
+  stdin.write("\r");
+  await waitFor(() => assert.match(plain(lastFrame() ?? ""), /Ctrl\+Y 复制本轮对话/));
+  unmount();
+});
+
+test("ChatApp 滚轮滚动后提示 Ctrl+T 释放鼠标", async () => {
+  const sink: Sink = { approved: [], rejected: [] };
+  async function* send(): AsyncIterable<SessionEvent> {
+    yield { type: "message-finish", text: "" };
+  }
+  const { stdin, lastFrame, unmount } = render(
+    h(ChatApp, {
+      session: makeSession(send, sink),
+      model: "qwen",
+      initialHistory: [
+        { kind: "user", id: "u1", text: "旧消息" },
+        { kind: "notice", id: "n1", text: "占位" },
+      ],
+      onUserSubmit: () => {},
+      onExit: () => {},
+    }),
+  );
+  await delay(10);
+  stdin.write(`${String.fromCharCode(27)}[<64;10;5M`);
+  await delay(20);
+  assert.match(plain(lastFrame() ?? ""), /Ctrl\+T 释放鼠标后可直接选中复制/);
+  unmount();
+});
+
+test("ChatApp 已持久化的提示不再重复出现", async () => {
+  const sink: Sink = { approved: [], rejected: [] };
+  async function* send(): AsyncIterable<SessionEvent> {
+    yield { type: "message-finish", text: "" };
+  }
+  const shownAll = {
+    isShown: () => true,
+    markShown: () => {},
+  };
+  const { stdin, lastFrame, unmount } = render(
+    h(ChatApp, {
+      session: makeSession(send, sink),
+      model: "qwen",
+      initialHistory: [
+        { kind: "user", id: "u1", text: "旧问题" },
+        { kind: "assistant", id: "a1", text: "旧回答" },
+      ],
+      hintFlags: shownAll,
+      onUserSubmit: () => {},
+      onExit: () => {},
+    }),
+  );
+  await delay(30);
+  let frame = plain(lastFrame() ?? "");
+  assert.doesNotMatch(frame, /Ctrl\+Y 复制本轮对话/);
+  stdin.write(`${String.fromCharCode(27)}[<64;10;5M`);
+  await delay(20);
+  frame = plain(lastFrame() ?? "");
+  assert.doesNotMatch(frame, /Ctrl\+T 释放鼠标/);
+  unmount();
+});

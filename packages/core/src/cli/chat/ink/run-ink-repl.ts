@@ -10,6 +10,8 @@ import { buildSessionPickerItems } from "../session-picker-format.ts";
 import type { BannerInfo } from "../banner.ts";
 import { log } from "../../utils/output.ts";
 import { createChatTerminalOutput } from "./terminal-output.ts";
+import { DISABLE_MOUSE_TRACKING } from "./mouse-input.ts";
+import { createFileHintFlagStore } from "./hint-flags.ts";
 
 export interface InkReplThreadSummary {
   readonly id: string;
@@ -102,6 +104,7 @@ export async function runInkRepl(
         onExit: () => {
           instance.unmount();
         },
+        hintFlags: createFileHintFlagStore(),
         initialHistory: priorHistory,
         ...(sessionSwitching === undefined ? {} : { sessionSwitching }),
         ...(options.banner === undefined ? {} : { banner: options.banner }),
@@ -138,6 +141,7 @@ export async function runInkRepl(
     }
   } finally {
     terminalOutput.dispose();
+    process.stdout.write(DISABLE_MOUSE_TRACKING);
   }
   await active.close();
 
