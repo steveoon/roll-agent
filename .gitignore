@@ -13,16 +13,22 @@ __pycache__/
 .env.*
 !.env.example
 
-# Claude Code skills（本地 symlink，不随仓库分发）
+# 本地 skill symlink / 生成物（不随仓库分发）
 .claude/skills/roll-core
 .claude/skills/gitnexus/
 .claude/skills/generated/
 .claude/scheduled_tasks.lock
 .agents/skills/roll-zhipin-unread-reply
+.agents/skills/benchmark-code-review
 
 # Smart Reply Agent 业务数据（含敏感信息）
 agents/smart-reply/data/brand-config.json
 agents/smart-reply/data/reply-policy.json
 
-# roll config setup/migrate 自动备份（本地产物，可能含敏感配置）
+# 本地 roll 配置与 migrate 备份（dev 会频繁改，可能含环境与业务参数）
+/roll.config.yaml
+/roll.config.yml
 roll.config.yaml.bak.*
+
+# 本地机制说明页（mechanism-explainer 单文件 HTML，不随仓库分发）
+docs/*-explained.html
