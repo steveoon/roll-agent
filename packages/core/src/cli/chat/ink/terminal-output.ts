@@ -38,6 +38,18 @@ function endsAtNextLine(value: string): boolean {
   return /[\r\n]$/.test(value.replace(TRAILING_CSI_SEQUENCES, ""));
 }
 
+function wrapCursorRewrite(value: string, alreadySynchronized: boolean): string {
+  if (
+    alreadySynchronized ||
+    !value.includes(HIDE_CURSOR) ||
+    !value.includes(SHOW_CURSOR) ||
+    value.includes(BEGIN_SYNCHRONIZED_UPDATE)
+  ) {
+    return value;
+  }
+  return BEGIN_SYNCHRONIZED_UPDATE + value + END_SYNCHRONIZED_UPDATE;
+}
+
 export interface ChatTerminalOutput {
   readonly stdout: NodeJS.WriteStream;
   dispose(): void;
@@ -53,6 +65,7 @@ class ManagedChatOutput extends Writable {
   private resizeFrameNeedsCursorLineAdvance = false;
   private resizeTimer: NodeJS.Timeout | undefined;
   private cursorRefreshQueued = false;
+  private pendingCursorFrame: string | undefined;
   private readonly handleSourceResize = (): void => {
     if (this.resizeTimer !== undefined) {
       clearTimeout(this.resizeTimer);
@@ -165,34 +178,67 @@ class ManagedChatOutput extends Writable {
         this.resizeSynchronizationOpen = true;
         this.resizeFrameNeedsCursorLineAdvance = false;
       }
+      const outgoing = this.assembleOutgoingWrite(sanitized);
+      if (outgoing === undefined) {
+        callback();
+        return;
+      }
       // A proxy-level backpressure queue would decide whether a frame is stale only when it later
       // drains, after the resize suppression flag may already be gone. Let the real stdout own
       // buffering and keep this adapter's classification synchronous with Ink's write call.
       const cursorLineAdvance =
         this.resizeSynchronizationOpen &&
         this.resizeFrameNeedsCursorLineAdvance &&
-        sanitized.includes(SHOW_CURSOR) &&
-        !hasVisibleContent(sanitized)
+        outgoing.includes(SHOW_CURSOR) &&
+        !hasVisibleContent(outgoing)
           ? "\r\n"
           : "";
-      this.source.write(cursorLineAdvance + sanitized);
+      this.source.write(
+        cursorLineAdvance + wrapCursorRewrite(outgoing, this.resizeSynchronizationOpen),
+      );
       if (cursorLineAdvance.length > 0) {
         this.resizeFrameNeedsCursorLineAdvance = false;
       }
-      if (this.resizeSynchronizationOpen && hasVisibleContent(sanitized)) {
-        this.resizeFrameNeedsCursorLineAdvance = !endsAtNextLine(sanitized);
+      if (this.resizeSynchronizationOpen && hasVisibleContent(outgoing)) {
+        this.resizeFrameNeedsCursorLineAdvance = !endsAtNextLine(outgoing);
       }
-      if (sanitized.includes(END_SYNCHRONIZED_UPDATE)) {
+      if (outgoing.includes(END_SYNCHRONIZED_UPDATE)) {
         this.resizeSynchronizationOpen = false;
         this.resizeFrameNeedsCursorLineAdvance = false;
       }
-      if (sanitized.includes(HIDE_CURSOR) && !sanitized.includes(SHOW_CURSOR)) {
+      if (outgoing.includes(HIDE_CURSOR) && !outgoing.includes(SHOW_CURSOR)) {
         this.queueCursorRefresh();
       }
       callback();
     } catch (error) {
       callback(error instanceof Error ? error : new Error(String(error)));
     }
+  }
+
+  private assembleOutgoingWrite(value: string): string | undefined {
+    if (this.resizeSynchronizationOpen || value.includes(BEGIN_SYNCHRONIZED_UPDATE)) {
+      return value;
+    }
+    const pending = this.pendingCursorFrame;
+    if (pending !== undefined) {
+      this.pendingCursorFrame = undefined;
+      return pending + value;
+    }
+    if (value.includes(HIDE_CURSOR) && !value.includes(SHOW_CURSOR)) {
+      this.pendingCursorFrame = value;
+      this.queueCursorRefresh();
+      return undefined;
+    }
+    return value;
+  }
+
+  private flushPendingCursorFrame(): void {
+    const pending = this.pendingCursorFrame;
+    if (pending === undefined) {
+      return;
+    }
+    this.pendingCursorFrame = undefined;
+    this.source.write(wrapCursorRewrite(pending, false));
   }
 
   private queueCursorRefresh(): void {
@@ -214,6 +260,7 @@ class ManagedChatOutput extends Writable {
       this.resizeTimer = undefined;
     }
     this.source.off("resize", this.handleSourceResize);
+    this.flushPendingCursorFrame();
     if (this.resizeSynchronizationOpen) {
       this.source.write(END_SYNCHRONIZED_UPDATE);
       this.resizeSynchronizationOpen = false;

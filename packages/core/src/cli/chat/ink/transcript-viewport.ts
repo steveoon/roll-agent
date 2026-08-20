@@ -25,6 +25,7 @@ import type { HistoryItem, LiveState } from "./state.ts";
 
 const WINDOWING_THRESHOLD = 20;
 const MOUSE_SCROLL_ROWS = 3;
+const SCROLL_COALESCE_MS = 16;
 
 interface TranscriptEntry {
   readonly key: string;
@@ -87,6 +88,10 @@ function historyEntry(
     paddingTop: spaced ? 1 : 0,
     marginLeft,
   };
+}
+
+export function coalesceScrollOffset(next: number, maxScroll: number): number {
+  return Math.min(Math.max(0, next), Math.max(0, maxScroll));
 }
 
 export function computeVisibleWindow(
@@ -164,6 +169,8 @@ export function TranscriptViewport(props: TranscriptViewportProps): ReactElement
   const [unseenHistory, setUnseenHistory] = useState(0);
   const [unseenLive, setUnseenLive] = useState(false);
   const scrollOffsetRef = useRef(0);
+  const pendingScrollRef = useRef<number | undefined>(undefined);
+  const scrollTimerRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   scrollOffsetRef.current = scrollOffset;
 
   const entries = useMemo(() => {
@@ -282,19 +289,33 @@ export function TranscriptViewport(props: TranscriptViewportProps): ReactElement
     setUnseenHistory(0);
     setUnseenLive(false);
   }, []);
+  const flushPendingScroll = useCallback((): void => {
+    scrollTimerRef.current = undefined;
+    const pending = pendingScrollRef.current;
+    pendingScrollRef.current = undefined;
+    if (pending === undefined) {
+      return;
+    }
+    const clamped = coalesceScrollOffset(pending, maxScroll);
+    setScrollOffset(clamped);
+    if (clamped === 0) {
+      clearUnseen();
+    }
+  }, [clearUnseen, maxScroll]);
   const scrollTo = useCallback(
     (next: number): void => {
-      const clamped = Math.min(Math.max(0, next), maxScroll);
-      setScrollOffset(clamped);
-      if (clamped === 0) {
-        clearUnseen();
+      pendingScrollRef.current = next;
+      if (scrollTimerRef.current !== undefined) {
+        return;
       }
+      scrollTimerRef.current = setTimeout(flushPendingScroll, SCROLL_COALESCE_MS);
     },
-    [clearUnseen, maxScroll],
+    [flushPendingScroll],
   );
   const scrollBy = useCallback(
     (delta: number): void => {
-      scrollTo(scrollOffsetRef.current + delta);
+      const base = pendingScrollRef.current ?? scrollOffsetRef.current;
+      scrollTo(base + delta);
     },
     [scrollTo],
   );
@@ -334,6 +355,10 @@ export function TranscriptViewport(props: TranscriptViewportProps): ReactElement
   useEffect(() => {
     stdout.write(ENABLE_MOUSE_TRACKING);
     return () => {
+      if (scrollTimerRef.current !== undefined) {
+        clearTimeout(scrollTimerRef.current);
+        scrollTimerRef.current = undefined;
+      }
       stdout.write(DISABLE_MOUSE_TRACKING);
     };
   }, [stdout]);
