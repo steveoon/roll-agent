@@ -131,8 +131,31 @@ export function findTurnBoundaries(messages: readonly ModelMessage[]): number[] 
   return boundaries;
 }
 
+const FILE_PART_TOKEN_ESTIMATE = 1600;
+const FILE_PART_DATA_PLACEHOLDER = "[file-data]";
+
+function isFilePartLike(value: unknown): value is { readonly type: "file"; readonly data: unknown } {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    !Array.isArray(value) &&
+    (value as { type?: unknown }).type === "file" &&
+    "data" in value
+  );
+}
+
 function estimateMessageTokens(message: ModelMessage): number {
-  return Math.ceil(JSON.stringify(message).length / TOKEN_ESTIMATE_DIVISOR);
+  let fileParts = 0;
+  const serialized = JSON.stringify(message, (_key: string, value: unknown): unknown => {
+    if (isFilePartLike(value)) {
+      fileParts += 1;
+      return { ...value, data: FILE_PART_DATA_PLACEHOLDER };
+    }
+    return value;
+  });
+  return (
+    Math.ceil(serialized.length / TOKEN_ESTIMATE_DIVISOR) + fileParts * FILE_PART_TOKEN_ESTIMATE
+  );
 }
 
 export function estimateTextTokens(text: string): number {
