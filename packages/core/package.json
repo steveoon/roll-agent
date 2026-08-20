@@ -119,6 +119,7 @@
     "@modelcontextprotocol/sdk": "^1.12.0",
     "@roll-agent/client-node": "workspace:*",
     "@roll-agent/companion": "workspace:*",
+    "@roll-agent/protocol": "workspace:*",
     "@roll-agent/relay-protocol": "workspace:*",
     "@roll-agent/runtime": "workspace:*",
     "ai": "^7.0.9",

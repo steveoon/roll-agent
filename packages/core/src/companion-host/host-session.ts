@@ -9,9 +9,10 @@ import {
   type RelayTransportV11,
   type WebSocketLikeV11,
 } from "@roll-agent/companion";
+import { RUNTIME_PROTOCOL_VERSION } from "@roll-agent/protocol";
 import type { CompanionConfig } from "./schema.ts";
 import type { BundledRollInvocation } from "./invocation.ts";
-import { requireOfficialRelayCompanionUrl } from "./constants.ts";
+import { resolveRelayEndpoint } from "./constants.ts";
 import {
   createOfficialRelayResponderContext,
   createOfficialRelayResponderPolicy,
@@ -64,9 +65,7 @@ export class DefaultCompanionSessionFactory implements CompanionSessionFactory {
       serverRequestHandlers: createRuntimeServerRequestHandlers(interactionBroker),
     });
     try {
-      if (client.getInitializationResult().protocolVersion !== "1.3") {
-        throw new Error("Bundled Companion Runtime must negotiate Runtime Protocol 1.3");
-      }
+      assertBundledRuntimeProtocolVersion(client.getInitializationResult().protocolVersion);
       const workspace = new CompanionWorkspace({
         client,
         workspaceId: config.workspaceId,
@@ -88,7 +87,7 @@ export class DefaultCompanionSessionFactory implements CompanionSessionFactory {
         bridge,
         connectTransport: async () => ({
           transport: await openRelayTransport(
-            requireOfficialRelayCompanionUrl(),
+            resolveRelayEndpoint().companionUrl,
             this.createWebSocket,
           ),
           requestPolicy,
@@ -115,6 +114,14 @@ export class DefaultCompanionSessionFactory implements CompanionSessionFactory {
       await client.shutdown().catch(() => undefined);
       throw error;
     }
+  }
+}
+
+export function assertBundledRuntimeProtocolVersion(negotiated: string): void {
+  if (negotiated !== RUNTIME_PROTOCOL_VERSION) {
+    throw new Error(
+      `Bundled Companion Runtime must negotiate Runtime Protocol ${RUNTIME_PROTOCOL_VERSION}; negotiated ${negotiated}`,
+    );
   }
 }
 

@@ -1,9 +1,10 @@
 import { access } from "node:fs/promises";
 import {
   COMPANION_CONTROL_PROTOCOL_VERSION,
-  OFFICIAL_RELAY_ENDPOINT_UNDECIDED_MESSAGE,
   OFFICIAL_RELAY_PROFILE,
-  isOfficialRelayEndpointDecided,
+  RELAY_HOST_OVERRIDE_ENV,
+  resolveRelayEndpoint,
+  type RelayEndpoint,
 } from "./constants.ts";
 import { FileCompanionConfigStore, type CompanionConfigStore } from "./config-store.ts";
 import { createPlatformCredentialStore, type CompanionCredentialStore } from "./credentials.ts";
@@ -221,10 +222,15 @@ export class CompanionApplication {
       this.logger.info("Companion Host is disabled; exiting cleanly");
       return;
     }
-    if (!isOfficialRelayEndpointDecided()) {
-      this.logger.info(`${OFFICIAL_RELAY_ENDPOINT_UNDECIDED_MESSAGE}; exiting cleanly`);
+    let relayEndpoint: RelayEndpoint;
+    try {
+      relayEndpoint = resolveRelayEndpoint();
+    } catch (error: unknown) {
+      const reason = error instanceof Error ? error.message : String(error);
+      this.logger.info(`${reason}; exiting cleanly`);
       return;
     }
+    this.logger.info(`Companion Host uses ${describeRelayEndpoint(relayEndpoint)}`);
     const supervisor = new CompanionHostSupervisor({
       config,
       credentialStore: this.credentialStore,
@@ -259,15 +265,20 @@ export class CompanionApplication {
           ? `Supported per-user service platform: ${this.platform}`
           : `Unsupported Companion platform: ${this.platform}`,
     });
-    const relayHost = OFFICIAL_RELAY_PROFILE.host;
-    checks.push({
-      name: "relay-endpoint",
-      ok: relayHost !== null,
-      detail:
-        relayHost === null
-          ? OFFICIAL_RELAY_ENDPOINT_UNDECIDED_MESSAGE
-          : `Official Relay host: ${relayHost}`,
-    });
+    try {
+      const endpoint = resolveRelayEndpoint();
+      checks.push({
+        name: "relay-endpoint",
+        ok: true,
+        detail: describeRelayEndpoint(endpoint),
+      });
+    } catch (error: unknown) {
+      checks.push({
+        name: "relay-endpoint",
+        ok: false,
+        detail: error instanceof Error ? error.message : String(error),
+      });
+    }
     checks.push({
       name: "bundled-runtime",
       ok:
@@ -389,6 +400,12 @@ async function pathExists(path: string): Promise<boolean> {
   } catch {
     return false;
   }
+}
+
+function describeRelayEndpoint(endpoint: RelayEndpoint): string {
+  return endpoint.source === "official"
+    ? `the official Relay host ${endpoint.host}`
+    : `a ${RELAY_HOST_OVERRIDE_ENV} override targeting ${endpoint.companionUrl}`;
 }
 
 function describeService(service: CompanionServiceStatus): string {

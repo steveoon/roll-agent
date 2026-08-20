@@ -172,6 +172,9 @@ importers:
       '@roll-agent/companion':
         specifier: workspace:*
         version: link:../companion
+      '@roll-agent/protocol':
+        specifier: workspace:*
+        version: link:../protocol
       '@roll-agent/relay-protocol':
         specifier: workspace:*
         version: link:../relay-protocol

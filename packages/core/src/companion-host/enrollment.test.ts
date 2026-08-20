@@ -11,12 +11,7 @@ import {
   OfficialDeviceEnrollmentClient,
   readPairingCodeFromStdin,
 } from "./enrollment.ts";
-import {
-  OFFICIAL_RELAY_ENDPOINT_UNDECIDED_MESSAGE,
-  isOfficialRelayEndpointDecided,
-  requireOfficialRelayCompanionUrl,
-  requireOfficialRelayEnrollmentUrl,
-} from "./constants.ts";
+import { RELAY_HOST_OVERRIDE_ENV, resolveRelayEndpoint } from "./constants.ts";
 import { FileCompanionLogger } from "./logger.ts";
 import type { ProcessInvocation, ProcessResult, ProcessRunner } from "./process-runner.ts";
 import { Readable } from "node:stream";
@@ -74,22 +69,32 @@ test("enrollment never persists or logs pairing code and device credential", asy
   }
 });
 
-test("redeeming a pairing code fails closed while the official Relay host is undecided", async () => {
-  let fetched = false;
-  const client = new OfficialDeviceEnrollmentClient(async () => {
-    fetched = true;
-    return new Response("{}", { status: 200 });
-  });
-  if (isOfficialRelayEndpointDecided()) {
-    assert.equal(requireOfficialRelayEnrollmentUrl().startsWith("https://"), true);
-    return;
+test("redeem targets the resolved official Relay endpoint", async () => {
+  const previousOverride = process.env[RELAY_HOST_OVERRIDE_ENV];
+  delete process.env[RELAY_HOST_OVERRIDE_ENV];
+  try {
+    const endpoint = resolveRelayEndpoint();
+    assert.equal(endpoint.source, "official");
+    assert.equal(endpoint.enrollmentUrl.startsWith("https://"), true);
+    let requestedUrl = "";
+    const client = new OfficialDeviceEnrollmentClient(async (input) => {
+      requestedUrl = String(input);
+      return new Response(
+        JSON.stringify({
+          deviceId: "11111111-1111-4111-8111-111111111111",
+          workspaceId: "22222222-2222-4222-8222-222222222222",
+          deviceCredential: "device-credential-secret-value",
+        }),
+        { status: 200 },
+      );
+    });
+    await client.redeem("pairing-code-secret");
+    assert.equal(requestedUrl, endpoint.enrollmentUrl);
+  } finally {
+    if (previousOverride !== undefined) {
+      process.env[RELAY_HOST_OVERRIDE_ENV] = previousOverride;
+    }
   }
-  await assert.rejects(
-    () => client.redeem("pairing-code-secret"),
-    new RegExp(OFFICIAL_RELAY_ENDPOINT_UNDECIDED_MESSAGE),
-  );
-  assert.equal(fetched, false);
-  assert.throws(() => requireOfficialRelayCompanionUrl(), /not decided yet/u);
 });
 
 test("pairing code stdin reader accepts a small piped value and rejects oversized input", async () => {

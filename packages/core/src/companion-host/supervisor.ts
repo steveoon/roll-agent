@@ -167,5 +167,6 @@ function classifySessionError(error: unknown): string {
   if (error instanceof Error && error.name === "AbortError") {
     return "Companion session was interrupted";
   }
-  return "Companion session failed";
+  const reason = error instanceof Error ? error.message : String(error);
+  return `Companion session failed: ${reason}`;
 }
