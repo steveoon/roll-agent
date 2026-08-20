@@ -9,7 +9,7 @@ import {
 test("disable 序列重置全部五种鼠标上报模式，覆盖崩溃残留", () => {
   for (const mode of ["1000", "1002", "1003", "1015", "1006"]) {
     assert.ok(
-      DISABLE_MOUSE_TRACKING.includes(`[?${mode}l`),
+      DISABLE_MOUSE_TRACKING.includes(`[?${mode}l`),
       `missing reset for mode ${mode}`,
     );
   }

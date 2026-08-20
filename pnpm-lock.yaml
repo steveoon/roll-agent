@@ -16,6 +16,7 @@ overrides:
   postcss: 8.5.18
 
 patchedDependencies:
+  ink@7.0.1: 5d97ea5f4fc8109ee33bd529f9feccd34676946a6b7e38ce7e418aa18c29dbc3
   minimatch@3.1.5: 17cdab99cb781e786f874b89dde33381a6e581b7321e4270c004237eaa17a41a
 
 importers:
@@ -201,7 +202,7 @@ importers:
         version: 4.0.3
       ink:
         specifier: 7.0.1
-        version: 7.0.1(@types/react@19.2.17)(react@19.2.7)
+        version: 7.0.1(patch_hash=5d97ea5f4fc8109ee33bd529f9feccd34676946a6b7e38ce7e418aa18c29dbc3)(@types/react@19.2.17)(react@19.2.7)
       is-unicode-supported:
         specifier: 2.1.0
         version: 2.1.0
@@ -5627,7 +5628,7 @@ snapshots:
     optionalDependencies:
       '@types/react': 19.2.17
 
-  ink@7.0.1(@types/react@19.2.17)(react@19.2.7):
+  ink@7.0.1(patch_hash=5d97ea5f4fc8109ee33bd529f9feccd34676946a6b7e38ce7e418aa18c29dbc3)(@types/react@19.2.17)(react@19.2.7):
     dependencies:
       '@alcalzone/ansi-tokenize': 0.3.0
       ansi-escapes: 7.3.0
