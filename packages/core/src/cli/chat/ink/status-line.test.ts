@@ -1,6 +1,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { composeStatusSegments } from "./status-line.ts";
+import { createElement as h } from "react";
+import { render } from "ink-testing-library";
+import { composeStatusSegments, StatusLine } from "./status-line.ts";
 import type { StatusState } from "./state.ts";
 
 const BUSY_STATUS: StatusState = {
@@ -88,4 +90,11 @@ test("composeStatusSegments omits usage segments before the first turn", () => {
   };
   const keys = composeStatusSegments(idle, 200).map((segment) => segment.key);
   assert.deepEqual(keys, ["model", "think"]);
+});
+
+test("StatusLine keeps a one-column gutter so the model id lines up with the prompt", () => {
+  const { lastFrame, unmount } = render(h(StatusLine, { status: BUSY_STATUS, width: 40 }));
+  const frame = lastFrame() ?? "";
+  assert.match(frame, /^ qwen3\.7-plus/u);
+  unmount();
 });

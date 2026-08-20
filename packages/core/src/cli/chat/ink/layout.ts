@@ -15,8 +15,8 @@ export const MIN_CHAT_ROWS = 10;
 export function resolveChatLayout(columns: number, rows: number): ChatLayout {
   const safeColumns = Math.max(1, Math.floor(columns));
   const safeRows = Math.max(1, Math.floor(rows));
-  // Leave the physical bottom row untouched. Writing into the last cell can make terminals
-  // scroll during reflow, and it also makes Ink treat teardown as a full-terminal clear.
+  // Leave the physical bottom row untouched. Filling that last cell wraps the terminal on
+  // each keystroke, so Ink's IME cursor walks upward. One empty row is the smallest safe inset.
   const renderRows = Math.max(1, safeRows - 1);
   const showHelp = renderRows >= 13;
   const promptRows = Math.min(12, Math.max(showHelp ? 4 : 3, Math.floor(renderRows * 0.4)));
