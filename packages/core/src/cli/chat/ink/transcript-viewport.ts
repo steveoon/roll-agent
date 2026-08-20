@@ -43,6 +43,7 @@ export interface TranscriptViewportProps {
   readonly onBannerSettled: () => void;
   readonly navigationBlocked: boolean;
   readonly mouseTracking?: boolean;
+  readonly onWheelScroll?: () => void;
   readonly thinkingDisplay: ChatThinkingDisplay;
   readonly diffDisplay: DiffDisplayMode;
 }
@@ -330,6 +331,7 @@ export function TranscriptViewport(props: TranscriptViewportProps): ReactElement
     (input, key) => {
       const mouse = parseMouseWheelInput(input);
       if (mouse !== undefined) {
+        props.onWheelScroll?.();
         const row = mouse.row - 1;
         if (
           viewportMetrics.hasMeasured &&

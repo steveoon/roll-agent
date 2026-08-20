@@ -13,6 +13,7 @@ import { TextPrompt } from "./text-prompt.ts";
 import { ConfirmSelect } from "./confirm-select.ts";
 import { UserInputForm } from "./user-input-form.ts";
 import { SlashPopup } from "./slash-popup.ts";
+import { ShortcutsPanel } from "./shortcuts-panel.ts";
 import { SessionPicker } from "./session-picker.ts";
 import { messagesToHistory } from "./history-from-messages.ts";
 import type { SessionPickerItem } from "../session-picker-format.ts";
@@ -75,8 +76,7 @@ interface ChatSessionViewProps extends Omit<ChatAppProps, "sessionSwitching"> {
   readonly onPickerCancel: () => void;
 }
 
-export const INK_HINTS =
-  "/exit 退出 · Esc 中断 · / 命令 · Shift+Enter/Ctrl+J 换行 · Alt+./Alt+, 调推理 · Shift+Tab 自动批准 · Ctrl+T 鼠标选择";
+export const INK_HINTS = "/exit 退出 · Esc 中断 · / 命令 · ? 快捷键";
 
 const SHOW_THINK_SCOPE_HINT = "（仅当前会话生效，/resume 切换会话后按配置重置）";
 
@@ -220,6 +220,10 @@ function ChatSessionView(props: ChatSessionViewProps): ReactElement {
       : buildBannerLines(props.banner, layout.columns, { hints: INK_HINTS });
   const [selected, setSelected] = useState(0);
   const [mouseTracking, setMouseTracking] = useState(true);
+  const [shortcutsOpen, setShortcutsOpen] = useState(false);
+  const [tip, setTip] = useState<string | undefined>(undefined);
+  const copyTipShownRef = useRef(false);
+  const mouseTipShownRef = useRef(false);
   const { stdout } = useStdout();
   const copyLastRound = (): void => {
     const text = lastRoundCopyText(state.history);
@@ -238,6 +242,32 @@ function ChatSessionView(props: ChatSessionViewProps): ReactElement {
   };
   const slashActive = state.phase === CHAT_PHASES.idle && isSlashCommandShaped(state.draft);
   const slashPopupActive = slashActive && isSlashCommandToken(state.draft.split(/\s+/).at(-1) ?? "");
+  const shortcutsVisible =
+    shortcutsOpen && state.phase === CHAT_PHASES.idle && state.draft.length === 0;
+
+  useEffect(() => {
+    if (state.draft.length > 0 || state.phase !== CHAT_PHASES.idle) {
+      setShortcutsOpen(false);
+    }
+  }, [state.draft, state.phase]);
+
+  useEffect(() => {
+    if (
+      !copyTipShownRef.current &&
+      state.phase === CHAT_PHASES.idle &&
+      state.history.some((item) => item.kind === "assistant")
+    ) {
+      copyTipShownRef.current = true;
+      setTip("Ctrl+Y 复制本轮对话");
+    }
+  }, [state.phase, state.history]);
+
+  const handleWheelScroll = useCallback(() => {
+    if (!mouseTipShownRef.current) {
+      mouseTipShownRef.current = true;
+      setTip("Ctrl+T 释放鼠标后可直接选中复制");
+    }
+  }, []);
   const matches = slashPopupActive ? filterSlashEntries(state.draft, availableSkills) : [];
   const maxIndex = Math.max(matches.length - 1, 0);
   const selectedIndex = Math.min(selected, maxIndex);
@@ -267,6 +297,8 @@ function ChatSessionView(props: ChatSessionViewProps): ReactElement {
       setMouseTracking((current) => !current);
     } else if (key.ctrl && input === "y") {
       copyLastRound();
+    } else if (key.escape && !key.meta && shortcutsOpen) {
+      setShortcutsOpen(false);
     }
   });
 
@@ -365,6 +397,7 @@ function ChatSessionView(props: ChatSessionViewProps): ReactElement {
 
   const handleSubmit = (raw: string): void => {
     const text = raw.trim();
+    setTip(undefined);
     if (text.length === 0 && attachments.length === 0) {
       setDraft("");
       return;
@@ -382,6 +415,7 @@ function ChatSessionView(props: ChatSessionViewProps): ReactElement {
 
   const runSlash = (raw: string): void => {
     handleBannerSettled();
+    setTip(undefined);
     setDraft("");
     const text = raw.trim();
     rememberInput(text);
@@ -571,6 +605,10 @@ function ChatSessionView(props: ChatSessionViewProps): ReactElement {
               slashActive,
               slashPopupActive,
               mouseTracking,
+              ...(tip === undefined ? {} : { tip }),
+              onShortcutsToggle: () => {
+                setShortcutsOpen((current) => !current);
+              },
               autoApprove: state.status.autoApprove,
               attachments,
               attachmentsPending: clipboardPending,
@@ -614,6 +652,7 @@ function ChatSessionView(props: ChatSessionViewProps): ReactElement {
       history: state.history,
       live: state.live,
       mouseTracking,
+      onWheelScroll: handleWheelScroll,
       thinkingDisplay: state.thinkingDisplay,
       diffDisplay: state.diffDisplay,
       onBannerSettled: handleBannerSettled,
@@ -639,7 +678,9 @@ function ChatSessionView(props: ChatSessionViewProps): ReactElement {
           width: layout.columns,
           maxRows: layout.popupRows,
         })
-      : null,
+      : shortcutsVisible
+        ? h(ShortcutsPanel, { width: layout.columns, maxRows: layout.popupRows })
+        : null,
     footer,
   );
 }

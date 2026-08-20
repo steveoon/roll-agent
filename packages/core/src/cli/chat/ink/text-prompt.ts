@@ -40,6 +40,8 @@ export interface TextPromptProps {
   readonly slashActive: boolean;
   readonly slashPopupActive: boolean;
   readonly mouseTracking?: boolean;
+  readonly tip?: string;
+  readonly onShortcutsToggle?: () => void;
   readonly autoApprove: boolean;
   readonly attachments?: readonly TextPromptAttachmentChip[];
   readonly attachmentsPending?: boolean;
@@ -176,6 +178,16 @@ export function TextPrompt(props: TextPromptProps): ReactElement {
         return;
       }
       if (isMouseProtocolInput(input)) {
+        return;
+      }
+      if (
+        input === "?" &&
+        !key.ctrl &&
+        !key.meta &&
+        editorRef.current.value.length === 0 &&
+        props.onShortcutsToggle !== undefined
+      ) {
+        props.onShortcutsToggle();
         return;
       }
       const newlineKey =
@@ -346,8 +358,8 @@ export function TextPrompt(props: TextPromptProps): ReactElement {
     : slashActive
       ? "↑↓ 选择 · Tab 补全 · Enter 执行 · Esc 取消"
       : autoApprove
-        ? "Shift+Tab 关闭 · Enter 发送 · 空输入 ↑ 历史 · Shift+Enter/Ctrl+J 换行 · / 命令"
-        : "Enter 发送 · 空输入 ↑ 历史 · Shift+Enter/Ctrl+J 换行 · / 命令 · Shift+Tab 自动批准";
+        ? "Shift+Tab 关闭 · Enter 发送 · 空输入 ↑ 历史 · Shift+Enter/Ctrl+J 换行 · / 命令 · ? 快捷键"
+        : "Enter 发送 · 空输入 ↑ 历史 · Shift+Enter/Ctrl+J 换行 · / 命令 · Shift+Tab 自动批准 · ? 快捷键";
   // 自定义 disabled 提示是状态变更通知（如中断确认），用暗黄色让反馈落在视线焦点处
   const hintProps =
     disabled && props.disabledHint !== undefined
@@ -371,6 +383,19 @@ export function TextPrompt(props: TextPromptProps): ReactElement {
         ]
       : []),
   ];
+  if (props.tip !== undefined && !disabled && !slashActive) {
+    hintBadges.push(
+      h(
+        Box,
+        { flexShrink: 0 },
+        h(
+          Text,
+          { color: "cyan", wrap: "truncate-end" },
+          `${hintBadges.length > 0 ? " · " : ""}${props.tip}`,
+        ),
+      ),
+    );
+  }
   const hint = showHint
     ? h(
         Box,

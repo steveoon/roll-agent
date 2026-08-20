@@ -1756,3 +1756,100 @@ test("ChatApp Ctrl+Y 无历史时提示暂无可复制", async () => {
   assert.deepEqual(copied, []);
   unmount();
 });
+
+test("ChatApp 空输入按 ? 打开快捷键面板,再按 ? 关闭", async () => {
+  const sink: Sink = { approved: [], rejected: [] };
+  async function* send(): AsyncIterable<SessionEvent> {
+    yield { type: "message-finish", text: "" };
+  }
+  const { stdin, lastFrame, unmount } = render(
+    h(ChatApp, {
+      session: makeSession(send, sink),
+      model: "qwen",
+      onUserSubmit: () => {},
+      onExit: () => {},
+    }),
+  );
+  await delay(10);
+  stdin.write("?");
+  await delay(20);
+  let frame = plain(lastFrame() ?? "");
+  assert.match(frame, /Ctrl\+Y {2}复制本轮对话/);
+  assert.match(frame, /Ctrl\+T {2}释放\/恢复鼠标/);
+  stdin.write("?");
+  await delay(20);
+  frame = plain(lastFrame() ?? "");
+  assert.doesNotMatch(frame, /释放\/恢复鼠标/);
+  unmount();
+});
+
+test("ChatApp 输入非空时 ? 作为普通字符进入草稿", async () => {
+  const sink: Sink = { approved: [], rejected: [] };
+  async function* send(): AsyncIterable<SessionEvent> {
+    yield { type: "message-finish", text: "" };
+  }
+  const { stdin, lastFrame, unmount } = render(
+    h(ChatApp, {
+      session: makeSession(send, sink),
+      model: "qwen",
+      onUserSubmit: () => {},
+      onExit: () => {},
+    }),
+  );
+  await delay(10);
+  stdin.write("a");
+  await delay(10);
+  stdin.write("?");
+  await delay(20);
+  const frame = plain(lastFrame() ?? "");
+  assert.match(frame, /› a\?/);
+  assert.doesNotMatch(frame, /释放\/恢复鼠标/);
+  unmount();
+});
+
+test("ChatApp 首轮回复完成后提示 Ctrl+Y 复制", async () => {
+  const sink: Sink = { approved: [], rejected: [] };
+  async function* send(): AsyncIterable<SessionEvent> {
+    yield { type: "message-start", messageId: "m1" };
+    yield { type: "text-delta", delta: "回答完毕" };
+    yield { type: "message-finish", text: "回答完毕" };
+  }
+  const { stdin, lastFrame, unmount } = render(
+    h(ChatApp, {
+      session: makeSession(send, sink),
+      model: "qwen",
+      onUserSubmit: () => {},
+      onExit: () => {},
+    }),
+  );
+  await delay(10);
+  stdin.write("问题");
+  await delay(10);
+  stdin.write("\r");
+  await waitFor(() => assert.match(plain(lastFrame() ?? ""), /Ctrl\+Y 复制本轮对话/));
+  unmount();
+});
+
+test("ChatApp 滚轮滚动后提示 Ctrl+T 释放鼠标", async () => {
+  const sink: Sink = { approved: [], rejected: [] };
+  async function* send(): AsyncIterable<SessionEvent> {
+    yield { type: "message-finish", text: "" };
+  }
+  const { stdin, lastFrame, unmount } = render(
+    h(ChatApp, {
+      session: makeSession(send, sink),
+      model: "qwen",
+      initialHistory: [
+        { kind: "user", id: "u1", text: "旧消息" },
+        { kind: "notice", id: "n1", text: "占位" },
+      ],
+      onUserSubmit: () => {},
+      onExit: () => {},
+    }),
+  );
+  await delay(10);
+  stdin.write(`${String.fromCharCode(27)}[<64;10;5M`);
+  await delay(20);
+  assert.match(plain(lastFrame() ?? ""), /Ctrl\+T 释放鼠标后可直接选中复制/);
+  unmount();
+});
