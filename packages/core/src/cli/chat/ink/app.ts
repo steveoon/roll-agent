@@ -26,6 +26,7 @@ import {
   SLASH_COMMANDS,
 } from "./commands.ts";
 import { COPY_PROMO_FOOTER, copyTextToClipboard, lastRoundCopyText } from "./clipboard-copy.ts";
+import { createInMemoryHintFlagStore, type HintFlagStore } from "./hint-flags.ts";
 import { bannerTextLine, buildBannerLines, type BannerInfo } from "../banner.ts";
 import { cycleThinking } from "./thinking.ts";
 import { appendInputHistory } from "./input-history.ts";
@@ -60,6 +61,7 @@ export interface ChatAppProps {
   readonly onUserSubmit: (text: string) => void;
   readonly onExit: () => void;
   readonly copyToClipboard?: (text: string) => Promise<boolean>;
+  readonly hintFlags?: HintFlagStore;
   readonly sessionSwitching?: ChatSessionSwitching;
 }
 
@@ -162,6 +164,7 @@ export function ChatApp(props: ChatAppProps): ReactElement {
       : {}),
     ...(props.onThinkingChange !== undefined ? { onThinkingChange: props.onThinkingChange } : {}),
     ...(props.copyToClipboard !== undefined ? { copyToClipboard: props.copyToClipboard } : {}),
+    ...(props.hintFlags !== undefined ? { hintFlags: props.hintFlags } : {}),
     picker,
     onOpenPicker: openPicker,
     onPickerSelect: selectSession,
@@ -222,8 +225,9 @@ function ChatSessionView(props: ChatSessionViewProps): ReactElement {
   const [mouseTracking, setMouseTracking] = useState(true);
   const [shortcutsOpen, setShortcutsOpen] = useState(false);
   const [tip, setTip] = useState<string | undefined>(undefined);
-  const copyTipShownRef = useRef(false);
-  const mouseTipShownRef = useRef(false);
+  const fallbackHintFlagsRef = useRef<HintFlagStore | undefined>(undefined);
+  fallbackHintFlagsRef.current ??= createInMemoryHintFlagStore();
+  const hintFlags = props.hintFlags ?? fallbackHintFlagsRef.current;
   const { stdout } = useStdout();
   const copyLastRound = (): void => {
     const text = lastRoundCopyText(state.history);
@@ -253,21 +257,21 @@ function ChatSessionView(props: ChatSessionViewProps): ReactElement {
 
   useEffect(() => {
     if (
-      !copyTipShownRef.current &&
+      !hintFlags.isShown("copy-round") &&
       state.phase === CHAT_PHASES.idle &&
       state.history.some((item) => item.kind === "assistant")
     ) {
-      copyTipShownRef.current = true;
+      hintFlags.markShown("copy-round");
       setTip("Ctrl+Y 复制本轮对话");
     }
-  }, [state.phase, state.history]);
+  }, [state.phase, state.history, hintFlags]);
 
   const handleWheelScroll = useCallback(() => {
-    if (!mouseTipShownRef.current) {
-      mouseTipShownRef.current = true;
+    if (!hintFlags.isShown("mouse-release")) {
+      hintFlags.markShown("mouse-release");
       setTip("Ctrl+T 释放鼠标后可直接选中复制");
     }
-  }, []);
+  }, [hintFlags]);
   const matches = slashPopupActive ? filterSlashEntries(state.draft, availableSkills) : [];
   const maxIndex = Math.max(matches.length - 1, 0);
   const selectedIndex = Math.min(selected, maxIndex);

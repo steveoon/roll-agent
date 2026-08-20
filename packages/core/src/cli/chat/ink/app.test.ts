@@ -1853,3 +1853,35 @@ test("ChatApp 滚轮滚动后提示 Ctrl+T 释放鼠标", async () => {
   assert.match(plain(lastFrame() ?? ""), /Ctrl\+T 释放鼠标后可直接选中复制/);
   unmount();
 });
+
+test("ChatApp 已持久化的提示不再重复出现", async () => {
+  const sink: Sink = { approved: [], rejected: [] };
+  async function* send(): AsyncIterable<SessionEvent> {
+    yield { type: "message-finish", text: "" };
+  }
+  const shownAll = {
+    isShown: () => true,
+    markShown: () => {},
+  };
+  const { stdin, lastFrame, unmount } = render(
+    h(ChatApp, {
+      session: makeSession(send, sink),
+      model: "qwen",
+      initialHistory: [
+        { kind: "user", id: "u1", text: "旧问题" },
+        { kind: "assistant", id: "a1", text: "旧回答" },
+      ],
+      hintFlags: shownAll,
+      onUserSubmit: () => {},
+      onExit: () => {},
+    }),
+  );
+  await delay(30);
+  let frame = plain(lastFrame() ?? "");
+  assert.doesNotMatch(frame, /Ctrl\+Y 复制本轮对话/);
+  stdin.write(`${String.fromCharCode(27)}[<64;10;5M`);
+  await delay(20);
+  frame = plain(lastFrame() ?? "");
+  assert.doesNotMatch(frame, /Ctrl\+T 释放鼠标/);
+  unmount();
+});
