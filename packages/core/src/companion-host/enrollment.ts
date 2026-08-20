@@ -7,7 +7,7 @@ import {
 import type { CompanionConfigStore } from "./config-store.ts";
 import type { CompanionCredentialStore } from "./credentials.ts";
 import { canonicalizeCompanionWorkspace } from "./workspace.ts";
-import { COMPANION_CONFIG_VERSION, requireOfficialRelayEnrollmentUrl } from "./constants.ts";
+import { COMPANION_CONFIG_VERSION, resolveRelayEndpoint } from "./constants.ts";
 
 const MAX_PAIRING_CODE_BYTES = 4 * 1024;
 const ENROLLMENT_TIMEOUT_MS = 30_000;
@@ -32,7 +32,7 @@ export class OfficialDeviceEnrollmentClient implements DeviceEnrollmentClient {
     if (pairingCode.length === 0) {
       throw new Error("Pairing code must not be empty");
     }
-    const enrollmentUrl = requireOfficialRelayEnrollmentUrl();
+    const enrollmentUrl = resolveRelayEndpoint().enrollmentUrl;
     const timeoutSignal = AbortSignal.timeout(ENROLLMENT_TIMEOUT_MS);
     const requestSignal =
       signal === undefined ? timeoutSignal : AbortSignal.any([signal, timeoutSignal]);

@@ -118,6 +118,33 @@ test("supervisor memoizes a session shutdown failure instead of hiding it with a
   assert.notEqual(supervisor.getStatus().phase, "stopped");
 });
 
+test("session failures keep the underlying reason in status and logs", async () => {
+  const logger = new RecordingLogger();
+  const supervisor = new CompanionHostSupervisor({
+    config,
+    credentialStore: new FakeCredentialStore(),
+    sessionFactory: {
+      async create(): Promise<never> {
+        throw new Error("Bundled Companion Runtime must negotiate Runtime Protocol 1.4");
+      },
+    },
+    logger,
+  });
+  const running = supervisor.run();
+  try {
+    await waitUntil(() => supervisor.getStatus().lastError !== undefined);
+    const lastError = supervisor.getStatus().lastError ?? "";
+    assert.match(lastError, /Companion session failed: .*negotiate Runtime Protocol/u);
+    assert.equal(
+      logger.entries.some((entry) => entry.includes("negotiate Runtime Protocol")),
+      true,
+    );
+  } finally {
+    await supervisor.stop();
+    await running;
+  }
+});
+
 async function waitUntil(predicate: () => boolean, timeoutMs = 500): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   while (!predicate()) {

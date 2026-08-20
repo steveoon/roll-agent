@@ -29,6 +29,7 @@ const COMPACT_THINKING: Record<ThinkingLevel, string> = {
 };
 
 const DROP_ORDER = ["tps", "session", "turn", "think"] as const;
+const STATUS_HORIZONTAL_PADDING = 2;
 
 const SEPARATOR = " · ";
 
@@ -144,10 +145,10 @@ export function StatusLine({
   readonly status: StatusState;
   readonly width: number;
 }): ReactElement {
-  const segments = composeStatusSegments(status, width);
+  const segments = composeStatusSegments(status, Math.max(1, width - STATUS_HORIZONTAL_PADDING));
   return h(
     Box,
-    { width },
+    { width, paddingX: 1 },
     h(
       Text,
       { wrap: "truncate-end" },

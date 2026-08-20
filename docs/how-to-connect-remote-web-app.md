@@ -4,10 +4,11 @@
 Relay Session，前端使用 Browser-safe 的 `@roll-agent/relay-client`。应用不启动 Runtime、
 不解析 Relay frame，也不接触设备凭据或本机路径。
 
-> 当前状态：本仓库已经定义客户端与跨仓合同；`roll-cloud-relay` 的现有实现尚未更新。
-> 在 Relay 仓库实现并部署
-> [`roll-cloud-relay-openapi.yaml`](./contracts/roll-cloud-relay-openapi.yaml) 前，下面的生产链路
-> 不能被视为已上线。
+> 当前状态：生产 Relay 已部署于 `sponge-mcp.duliday.com`，实现本仓库的
+> [`roll-cloud-relay-openapi.yaml`](./contracts/roll-cloud-relay-openapi.yaml) 合同
+> （2026-08 实测：redeem 返回合同错误体，`/v1/companion` WSS 握手 101）。
+> Companion 默认指向该官方 host；开发调试可用 `ROLL_COMPANION_RELAY_HOST`
+> 环境变量覆盖，仅 loopback 覆盖允许降级 `ws://`/`http://`，非法覆盖值 fail-closed。
 
 ## 1. 应用后端：签发 Browser Session
 
@@ -125,6 +126,11 @@ if (pending?.request.method === "userInput.request") {
    `roll companion enroll --code-stdin --workspace <absolute-path>`。
 3. 调用 `roll companion service install`，以后在当前用户登录时自动启动。
 
+服务化部署前提（launchd / 计划任务环境不继承用户 shell 的环境变量）：
+
+- LLM API key 需以字面值写入 `roll.config.yaml`，不要依赖 `${ENV_VAR}` 引用。
+- 建议 Node ≥22.13，使 `node:sqlite` 无需 `--experimental-sqlite` 旗标。
+
 开发和受控 OEM 环境也可以直接使用 CLI，但 pairing code 必须由受保护的上游进程写入
 stdin，不能放进命令行参数、配置或日志：
 
@@ -135,7 +141,8 @@ roll companion service install
 roll companion status --json
 ```
 
-绑定后，日常用户只打开第三方 Web App 并聊天。Companion 自动连接内置的官方 Relay，
+绑定后，日常用户只打开第三方 Web App 并聊天。Companion 自动连接内置的官方 Relay
+（`sponge-mcp.duliday.com`），
 管理 `roll runtime serve --stdio`，并固定使用本机已绑定的 Workspace；用户不需要理解
 Companion、Runtime、Wire 或 cwd。IT/开发人员可用 `roll companion doctor --json` 和
 `roll companion logs --follow` 做诊断。

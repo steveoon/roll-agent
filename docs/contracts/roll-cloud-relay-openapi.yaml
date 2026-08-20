@@ -3,13 +3,12 @@ info:
   title: Roll Cloud Relay control-plane contract
   version: 1.0.0
   description: >-
-    Cross-repository contract consumed by roll-cloud-relay and Roll clients. The current
-    roll-cloud-relay implementation has not yet been updated to this contract.
+    Cross-repository contract consumed by roll-cloud-relay and Roll clients.
 servers:
-  - url: https://RELAY_HOST_NOT_DECIDED_YET
+  - url: https://sponge-mcp.duliday.com
     description: >-
-      The official Relay host is not decided yet. Only the paths below are frozen; the host is
-      filled in once the domain is registered, and Companion fails closed until then.
+      The official production Relay host. Companion targets it by default and still fails
+      closed when an endpoint override is invalid.
 paths:
   /v1/browser-sessions:
     post:

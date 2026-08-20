@@ -1,4 +1,5 @@
 import { defineCommand } from "citty";
+import { RELAY_HOST_OVERRIDE_ENV, resolveRelayEndpoint } from "../../companion-host/constants.ts";
 import { readPairingCodeFromStdin } from "../../companion-host/enrollment.ts";
 import { log } from "../utils/output.ts";
 import { createCompanionCliApplication, runCompanionCommand } from "./companion-command-utils.ts";
@@ -24,6 +25,12 @@ export default defineCommand({
       }
       if (process.stdin.isTTY) {
         throw new Error("Pipe the one-time pairing code to stdin; interactive echo is not allowed");
+      }
+      const endpoint = resolveRelayEndpoint();
+      if (endpoint.source === "override") {
+        log.warn(`配对码将发送到 ${RELAY_HOST_OVERRIDE_ENV} 覆盖端点：${endpoint.enrollmentUrl}`);
+      } else {
+        log.info(`配对码将发送到官方 Relay：${endpoint.host}`);
       }
       const pairingCode = await readPairingCodeFromStdin(process.stdin);
       const app = createCompanionCliApplication();

@@ -10,6 +10,7 @@ import {
   type CompanionControlClient,
 } from "./application.ts";
 import type { CompanionConfigStore } from "./config-store.ts";
+import { RELAY_HOST_OVERRIDE_ENV } from "./constants.ts";
 import type { CompanionCredentialStore } from "./credentials.ts";
 import type { CompanionSessionFactory } from "./host-session.ts";
 import { createBundledRollInvocation } from "./invocation.ts";
@@ -226,6 +227,39 @@ test("unenrolled installed service exits cleanly instead of entering a launchd r
   });
   await app.runForeground();
   assert.deepEqual(logger.entries, ["Companion Host is not enrolled; exiting cleanly"]);
+});
+
+test("invalid relay endpoint override fails foreground startup instead of exiting cleanly", async () => {
+  const previousOverride = process.env[RELAY_HOST_OVERRIDE_ENV];
+  process.env[RELAY_HOST_OVERRIDE_ENV] = "https://127.0.0.1";
+  try {
+    const logger = new RecordingLogger();
+    let sessionCreates = 0;
+    const app = createTestApplication({
+      configStore: new MemoryConfigStore(initialConfig),
+      service: new FakeServiceController([]),
+      control: missingControlClient,
+      logger,
+      sessionFactory: {
+        async create() {
+          sessionCreates += 1;
+          throw new Error("must not create");
+        },
+      },
+    });
+    await assert.rejects(app.runForeground(), /ROLL_COMPANION_RELAY_HOST/u);
+    assert.equal(sessionCreates, 0);
+    assert.equal(
+      logger.entries.some((entry) => entry.includes(RELAY_HOST_OVERRIDE_ENV)),
+      true,
+    );
+  } finally {
+    if (previousOverride === undefined) {
+      delete process.env[RELAY_HOST_OVERRIDE_ENV];
+    } else {
+      process.env[RELAY_HOST_OVERRIDE_ENV] = previousOverride;
+    }
+  }
 });
 
 test("foreground Companion refuses an elevated OS identity before starting Runtime", async () => {

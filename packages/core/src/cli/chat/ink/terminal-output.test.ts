@@ -234,6 +234,54 @@ test("managed chat output does not treat an IME cursor frame as resize cleanup",
   managed.dispose();
 });
 
+test("managed chat output wraps a cursor rewrite so show-cursor follows the input-box move", () => {
+  const source = new TestOutput();
+  const managed = createChatTerminalOutput(asWriteStream(source));
+
+  managed.stdout.write("\u001B[?25l\u001B[2Kline one\nline two\u001B[1A\u001B[5G\u001B[?25h");
+
+  const frame = source.chunks.join("");
+  assert.equal(frame.startsWith("\u001B[?2026h"), true);
+  assert.equal(frame.endsWith("\u001B[?2026l"), true);
+  const hideAt = frame.indexOf("\u001B[?25l");
+  const moveAt = frame.indexOf("\u001B[1A\u001B[5G");
+  const showAt = frame.indexOf("\u001B[?25h");
+  assert.ok(hideAt >= 0 && moveAt > hideAt && showAt > moveAt);
+  assert.equal(frame.indexOf("\u001B[?25h", showAt + 1), -1);
+  managed.dispose();
+});
+
+test("managed chat output coalesces a hide-then-show pair into one synchronized frame", () => {
+  const source = new TestOutput();
+  const managed = createChatTerminalOutput(asWriteStream(source));
+
+  managed.stdout.write("\u001B[?25l\u001B[2Kline one\nline two");
+  managed.stdout.write("\u001B[1A\u001B[5G\u001B[?25h");
+
+  const frame = source.chunks.join("");
+  assert.equal(
+    frame,
+    "\u001B[?2026h\u001B[?25l\u001B[2Kline one\nline two\u001B[1A\u001B[5G\u001B[?25h\u001B[?2026l",
+  );
+  managed.dispose();
+});
+
+test("managed chat output keeps a split Ink cursor rewrite inside one synchronized frame", () => {
+  const source = new TestOutput();
+  const managed = createChatTerminalOutput(asWriteStream(source));
+
+  managed.stdout.write("\u001B[?2026h");
+  managed.stdout.write("\u001B[?25lrewritten history\u001B[1A\u001B[5G\u001B[?25h");
+  managed.stdout.write("\u001B[?2026l");
+
+  const frame = source.chunks.join("");
+  assert.equal(
+    frame,
+    "\u001B[?2026h\u001B[?25lrewritten history\u001B[1A\u001B[5G\u001B[?25h\u001B[?2026l",
+  );
+  managed.dispose();
+});
+
 test("managed chat output requests a cursor refresh when a sibling frame hides it", async () => {
   const source = new TestOutput();
   const managed = createChatTerminalOutput(asWriteStream(source));
@@ -249,5 +297,72 @@ test("managed chat output requests a cursor refresh when a sibling frame hides i
   managed.stdout.write("\u001B[?25lframe with restored cursor\u001B[?25h");
   await Promise.resolve();
   assert.equal(refreshes, 1);
+  managed.dispose();
+});
+
+test("a hide-only synchronized span keeps the terminal block open until the cursor frame closes it", () => {
+  const source = new TestOutput();
+  const managed = createChatTerminalOutput(asWriteStream(source));
+
+  managed.stdout.write("\u001B[?2026h\u001B[?25l\u001B[2Kscrolled history\u001B[?2026l");
+  assert.equal(source.chunks.join(""), "\u001B[?2026h\u001B[?25l\u001B[2Kscrolled history");
+  managed.stdout.write("\u001B[?2026h\u001B[1A\u001B[5G\u001B[?25h\u001B[?2026l");
+
+  assert.equal(
+    source.chunks.join(""),
+    "\u001B[?2026h\u001B[?25l\u001B[2Kscrolled history" +
+      "\u001B[?2026h\u001B[1A\u001B[5G\u001B[?25h\u001B[?2026l",
+  );
+  managed.dispose();
+});
+
+test("a withheld synchronized close is released alone when no cursor frame follows", async () => {
+  const source = new TestOutput();
+  const managed = createChatTerminalOutput(asWriteStream(source));
+
+  managed.stdout.write("\u001B[?2026h\u001B[?25l\u001B[2Kscrolled history\u001B[?2026l");
+  assert.equal(source.chunks.join("").endsWith("\u001B[?2026l"), false);
+  await new Promise((resolve) => setTimeout(resolve, 140));
+
+  assert.equal(
+    source.chunks.join(""),
+    "\u001B[?2026h\u001B[?25l\u001B[2Kscrolled history\u001B[?2026l",
+  );
+  managed.dispose();
+});
+
+test("holding an ink-synchronized hide frame still requests a cursor refresh", async () => {
+  const source = new TestOutput();
+  const managed = createChatTerminalOutput(asWriteStream(source));
+  let refreshes = 0;
+  managed.stdout.on(CHAT_CURSOR_REFRESH_EVENT, () => {
+    refreshes += 1;
+  });
+
+  managed.stdout.write("\u001B[?2026h\u001B[?25l\u001B[2Kscrolled history\u001B[?2026l");
+  await Promise.resolve();
+
+  assert.equal(refreshes, 1);
+  managed.dispose();
+});
+
+test("managed chat output withholds the close across Ink's three-chunk synchronized frames", () => {
+  const source = new TestOutput();
+  const managed = createChatTerminalOutput(asWriteStream(source));
+
+  managed.stdout.write("\u001B[?2026h");
+  managed.stdout.write("\u001B[?25l\u001B[2Kscrolled history");
+  managed.stdout.write("\u001B[?2026l");
+  managed.stdout.write("\u001B[?2026h");
+  managed.stdout.write("\u001B[1A\u001B[5G\u001B[?25h");
+  managed.stdout.write("\u001B[?2026l");
+
+  assert.deepEqual(source.chunks, [
+    "\u001B[?2026h",
+    "\u001B[?25l\u001B[2Kscrolled history",
+    "\u001B[?2026h",
+    "\u001B[1A\u001B[5G\u001B[?25h",
+    "\u001B[?2026l",
+  ]);
   managed.dispose();
 });

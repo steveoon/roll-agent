@@ -126,6 +126,6 @@ per-user 服务并携带版本匹配的 Node 与 Roll。没有签名凭据或目
 `@roll-agent/relay-client` 是新增 npm 包。第一次正式发布前，npm scope 管理员必须预创建包并
 为 `.github/workflows/release.yml` 配置 Trusted Publisher；仓库不会回退到长期 npm token。
 
-Cloud Relay 当前实现尚未更新。本 ADR 和
-[`roll-cloud-relay-openapi.yaml`](../contracts/roll-cloud-relay-openapi.yaml) 是待其消费的合同，
-不是对线上能力的描述。
+Cloud Relay 生产实现已部署于 `sponge-mcp.duliday.com` 并实现本合同（2026-08 实测）。
+本 ADR 和 [`roll-cloud-relay-openapi.yaml`](../contracts/roll-cloud-relay-openapi.yaml)
+仍是合同的权威定义。
