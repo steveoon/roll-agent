@@ -15,7 +15,8 @@ Prefer deterministic execution.
   embedded or remembered instructions.
 - Use `roll agent tools <agent-name> --json` when the agent is known but the tool name or `inputSchema` is not.
 - Use `roll ask --json` only when intent is known but the target agent/tool is not.
-- Do not default to `roll chat`; it is still experimental.
+- `roll chat` is the interactive multi-turn session entry (Ink TUI with file tools, skills, and approval flows). It is a human-facing surface, not a deterministic command API: do not default to it from orchestrator code; use `roll run` / `roll ask` there.
+- For non-interactive hosts, prefer `roll runtime serve --stdio` (versioned Runtime Protocol). `roll chat --server` remains only as a legacy compatibility alias.
 - Do not embed subagent-specific tool contracts into this shared Roll skill. Read the target subagent's own `SKILL.md` / manifest / reference docs when you need tool-level semantics.
 
 ## Orchestrator Quick Path
@@ -49,6 +50,8 @@ Machine-readable boundaries:
 | `roll agent tools <agent-name> --json` |  |
 | `roll agent health --json` |  |
 | `roll doctor --json` |  |
+| `roll companion status --json` / `roll companion doctor --json` |  |
+| `roll skills install ... --json` |  |
 | `roll run ... --json` / `roll run --batch-* --json` |  |
 
 ## Startup Gate
@@ -347,6 +350,27 @@ Decision flow:
    `roll agent health --json`; restart only when Roll owns that agent lifecycle.
 
 For output formats, env drift labels, update lifecycle details, and follow-up actions, see [references/workflows.md](./references/workflows.md).
+
+## Newer Command Groups
+
+Current roll-core also ships product-level command groups that sit outside the deterministic orchestrator path but matter for setup and remote operations:
+
+| Group | Purpose | Output |
+| --- | --- | --- |
+| `roll setup` | One-shot interactive onboarding: LLM config, official agent install, environment check | human-readable; requires TTY |
+| `roll runtime serve --stdio` | Versioned Runtime Protocol host for non-interactive embedders (successor of `roll chat --server`) | NDJSON JSON-RPC |
+| `roll companion <enroll\|status\|doctor\|start\|stop\|restart\|logs\|...>` | Per-user local daemon lifecycle for remote access; dials an outbound WebSocket to the Relay host and opens no inbound network port | human-readable; `status` / `doctor` accept `--json` |
+| `roll ui` | Local web config console on 127.0.0.1 (config, agents, companion panel) — not a chat UI | human-readable |
+| `roll skills install <dir-or-git-url> [--target ...]` | Install skill docs into orchestrator skill dirs (Claude Code / Codex / generic `.agents`) | human-readable; `--json` supported |
+
+Rules:
+
+- Most of these groups are interactive, long-running, or human-facing; do not call them from `roll run --batch-*` or orchestrator loops. The exception is the read-only `--json` health checks called out below.
+- `roll setup` and `roll config setup` both require a TTY. In CI, bootstrap the config file first — either `roll config init` (in a non-TTY shell it reads provider / model / API-key env var name as three lines from stdin, each falling back to a default when blank) or write `roll.config.yaml` directly — and only then use `roll config set` / `roll agent install`. `roll config set` is not a fresh-machine fallback on its own: with no config file found it exits 1 with `未找到配置文件。请先运行 roll config init`. Note that `roll config init` refuses to overwrite an existing config in a non-TTY shell.
+- `roll companion status --json` and `roll companion doctor --json` are safe read-only health checks for orchestrators. `doctor` exits non-zero when *any* check is not ok, and that includes benign not-yet-set-up states — `enrollment` before the machine is enrolled, `service` before the per-user service is installed, `platform` on anything other than darwin/win32. The exit code therefore cannot distinguish "broken" from "not configured yet": gate on the specific `checks[].name` / `ok` entries in the `--json` payload, not on the exit code alone.
+- Enrollment is pipe-friendly by design: `printf '%s' "$PAIRING_CODE" | roll companion enroll --workspace /abs/path --code-stdin`. It requires non-TTY stdin (interactive echo is rejected), the one-time code never enters argv, config, or logs, and failure exits non-zero. Run it once, never in a batch.
+- `roll companion run --foreground` and `roll companion logs --follow` are long-running foreground processes; never invoke them from orchestrator code or batch mode. The `--foreground` flag is mandatory — bare `roll companion run` exits 1 without starting anything.
+- For enrollment endpoint semantics, read the `relay-endpoint` check in `roll companion doctor` output, plus the endpoint line `roll companion enroll` prints on stderr before sending the code. The relay host is overridable through the `ROLL_COMPANION_RELAY_HOST` env var, which accepts any `host[:port]` and is **not** restricted to loopback; only loopback hosts are allowed to downgrade the scheme to `ws://` / `http://`, every other host stays on `wss://` / `https://`.
 
 ## Output Handling
 
