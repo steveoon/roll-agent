@@ -6,7 +6,7 @@ import {
   RUNTIME_METHODS,
   RUNTIME_PROTOCOL_VERSION,
   SUPPORTED_RUNTIME_PROTOCOL_VERSIONS,
-  runtimeLimitsV14Schema,
+  parseRuntimeMethodResultForVersion,
 } from "./index.ts";
 
 function readRepoFile(relativePath: string): string {
@@ -94,7 +94,18 @@ test("reference doc lists every method, rollCode and latest limits field", () =>
   const probe = Object.fromEntries(
     RUNTIME_LIMIT_KEYS.map((key) => [key, key === "eventReplay" ? true : 1]),
   );
-  assert.equal(runtimeLimitsV14Schema.safeParse(probe).success, true);
+  const initialized = parseRuntimeMethodResultForVersion(
+    RUNTIME_PROTOCOL_VERSION,
+    RUNTIME_METHODS.initialize,
+    {
+      protocolVersion: RUNTIME_PROTOCOL_VERSION,
+      runtimeInstanceId: "00000000-0000-4000-8000-000000000001",
+      server: { name: "docs-sync", version: "0.0.0", runtimeVersion: "0.0.0" },
+      features: [],
+      limits: probe,
+    },
+  );
+  assert.deepEqual(Object.keys(initialized.limits).sort(), [...RUNTIME_LIMIT_KEYS].sort());
   for (const key of RUNTIME_LIMIT_KEYS) {
     assert.ok(reference.includes(`\`${key}\``), key);
   }
