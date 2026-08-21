@@ -1,5 +1,15 @@
 # @roll-agent/protocol
 
+## 0.6.1
+
+### Patch Changes
+
+- [#235](https://github.com/steveoon/roll-agent/pull/235) [`c84bc83`](https://github.com/steveoon/roll-agent/commit/c84bc833c3abc095540ebfbb2d27610b538778f1) Thanks [@steveoon](https://github.com/steveoon)! - Runtime Protocol 1.4 对齐修复
+  - protocol：`projectRuntimeServerRequestCancelParams` / `projectRuntimeServerRequestParams` 改按 `RUNTIME_PROTOCOL_CAPABILITIES` 派生 wire 形状，修复 1.4 会话上 `runtime.serverRequest.cancel` 投影抛错、取消通知从未送达（待处理 `approval.request` / `userInput.request` 到期或取消后客户端得不到通知）；新增全版本矩阵回归测试
+  - protocol：补齐 `@roll-agent/protocol/schema/1.4` 子路径导出（产物已存在但未导出）；新增 `fixtures/v1.4/*` 跨语言 golden fixture；新增 docs-sync 测试把协议文档钉到 `RUNTIME_PROTOCOL_VERSION`
+  - runtime：`RuntimeClientRequestCoordinator` 取消通知投影失败时通过 `onDiagnostic` 上报而不再静默吞掉；补 1.4 取消通知回归测试
+  - core：`roll runtime serve --stdio` / `roll chat --server` 构造 coordinator 时接上 `onDiagnostic` → stderr 告警；此前所有 coordinator 诊断（错 responder / 错 scope / 过期响应 / 无法投影的 interaction / 投影失败）在生产里都是静默的
+
 ## 0.6.0
 
 ### Minor Changes
