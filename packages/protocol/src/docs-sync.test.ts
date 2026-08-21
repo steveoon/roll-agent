@@ -46,7 +46,8 @@ const LATEST_VERSION_CLAIMS: ReadonlyArray<{ readonly doc: DocName; readonly pat
 ];
 
 const LEGACY_LIST_HEADS: ReadonlySet<string> = new Set(["1.1", "1.0"]);
-const VERSION_LIST_LITERAL = /\[\s*"1\.\d"(?:\s*,\s*"1\.\d")*\s*\]/gu;
+const VERSION_LIST_LITERAL = /\[\s*['"]1\.\d+['"](?:\s*,\s*['"]1\.\d+['"])*\s*\]/gu;
+const VERSION_COMPARISON = /(?:!==|===)\s*['"](1\.\d+)['"]/gu;
 const RUNTIME_LIMIT_KEYS = [
   "maxFrameBytes",
   "maxPageSize",
@@ -69,7 +70,7 @@ test("docs declare RUNTIME_PROTOCOL_VERSION as the latest wire version", () => {
 test("docs version list literals start with the latest version unless they depict a legacy client", () => {
   for (const [doc, text] of Object.entries(DOCS)) {
     for (const literal of text.match(VERSION_LIST_LITERAL) ?? []) {
-      const head = (literal.match(/1\.\d/u) ?? [])[0];
+      const head = (literal.match(/1\.\d+/u) ?? [])[0];
       if (head !== undefined && !LEGACY_LIST_HEADS.has(head)) {
         assert.equal(head, RUNTIME_PROTOCOL_VERSION, `${doc}: ${literal}`);
       }
@@ -96,5 +97,32 @@ test("reference doc lists every method, rollCode and latest limits field", () =>
   assert.equal(runtimeLimitsV14Schema.safeParse(probe).success, true);
   for (const key of RUNTIME_LIMIT_KEYS) {
     assert.ok(reference.includes(`\`${key}\``), key);
+  }
+});
+
+test("reference doc compat row lists every non-latest supported version in order", () => {
+  const compat = SUPPORTED_RUNTIME_PROTOCOL_VERSIONS.slice(1)
+    .map((version) => `\`"${version}"\``)
+    .join("、");
+  assert.ok(
+    DOCS["docs/runtime-protocol-v1-reference.md"].includes(`| 兼容 Wire protocol | ${compat} |`),
+    compat,
+  );
+});
+
+test("docs never gate on a hand-written version comparison chain that excludes the latest version", () => {
+  for (const [doc, text] of Object.entries(DOCS)) {
+    for (const [index, line] of text.split("\n").entries()) {
+      const compared = [...line.matchAll(VERSION_COMPARISON)]
+        .map((match) => match[1])
+        .filter((version): version is string => version !== undefined);
+      const modern = compared.filter((version) => !LEGACY_LIST_HEADS.has(version));
+      if (modern.length > 0) {
+        assert.ok(
+          modern.includes(RUNTIME_PROTOCOL_VERSION),
+          `${doc}:${String(index + 1)} compares against ${modern.join(", ")} but not ${RUNTIME_PROTOCOL_VERSION}: ${line.trim()}`,
+        );
+      }
+    }
   }
 });
