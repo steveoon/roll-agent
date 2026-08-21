@@ -276,7 +276,9 @@ async function createWindow(): Promise<void> {
   if (!isElectronRuntimeProtocolVersion(protocolVersion)) {
     await client.shutdown();
     client = undefined;
-    throw new Error("This Electron reference requires Runtime Protocol 1.3, 1.2 or 1.1");
+    throw new Error(
+      "This Electron reference requires a Runtime Protocol version with Server Request support (1.1 or newer)",
+    );
   }
   client.onEvent((event) => {
     sendToRenderer(window, "roll:event", event);

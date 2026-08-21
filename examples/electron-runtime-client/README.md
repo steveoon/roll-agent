@@ -57,8 +57,10 @@ sender, blocks navigation/new windows, and supplies a restrictive CSP. Do not
 expose API keys, environment variables, arbitrary process spawning, a generic
 Runtime request method, or a raw `ipcRenderer` object to the renderer.
 
-This reference accepts Runtime Protocol `"1.3"`, `"1.2"`, and the N-2 `"1.1"` fallback. Its startup
-`approval.request` and named `userInput.request` handlers are included in the 1.3/1.2
+This reference accepts every Runtime Protocol version with Server Request support — currently `"1.4"`,
+`"1.3"`, `"1.2"`, and the `"1.1"` fallback — derived from `SUPPORTED_RUNTIME_PROTOCOL_VERSIONS` so it
+tracks `@roll-agent/protocol` automatically. Its startup
+`approval.request` and named `userInput.request` handlers are included in the 1.4/1.3/1.2
 `client.capabilities.set` handshake, so `RollNodeClient.start()` does not resolve until Runtime has
 acknowledged those capabilities. When negotiation falls back to 1.1, Approval remains available
 and User Input is not advertised or delivered.
@@ -67,10 +69,10 @@ Main owns each renderer-local request token and binds it to the exact method, `w
 main-document generation. Main-frame navigation/reload, renderer exit, destroyed/closed windows,
 and Runtime cancellation invalidate the token through one settlement registry. Wrong-window,
 wrong-method, old-generation, duplicate, and late responses cannot consume another valid pending
-interaction. The renderer token is never treated as a Runtime JSON-RPC `id`, 1.3/1.2 `interactionId`,
+interaction. The renderer token is never treated as a Runtime JSON-RPC `id`, 1.4/1.3/1.2 `interactionId`,
 or mutation `requestId`.
 
-The User Input dialog renders all five 1.3/1.2 controls (`text`, `multiline`, `number`, `boolean`, and
+The User Input dialog renders all five 1.4/1.3/1.2 controls (`text`, `multiline`, `number`, `boolean`, and
 `choice`) with DOM `createElement()`/`textContent` APIs. Escape and Cancel return a normal
 `{ status: "cancelled" }` result. Submitted values travel only over the named result IPC and are
 validated again against the original request in Main; they are not copied into logs or Runtime
