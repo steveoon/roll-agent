@@ -1,0 +1,12 @@
+{
+  "jsonrpc": "2.0",
+  "id": 21,
+  "method": "attachment.chunk",
+  "params": {
+    "requestId": "00000000-0000-4000-8000-0000000000b2",
+    "threadId": "00000000-0000-4000-8000-000000000002",
+    "attachmentId": "00000000-0000-4000-8000-0000000000a1",
+    "sequence": 0,
+    "dataBase64": "iVBORw0KGgo="
+  }
+}

@@ -1621,3 +1621,53 @@ test("id:null failure is isolated from another responder", async () => {
   );
   assert.deepEqual(await secondPending.result, { decision: "approve" });
 });
+
+test("Protocol 1.4 cancellation is delivered with the interaction shape", async () => {
+  const responder = new MemoryResponder();
+  const responderId = createRuntimeClientResponderId();
+  const diagnostics: string[] = [];
+  const coordinator = new RuntimeClientRequestCoordinator({
+    onDiagnostic: (message) => {
+      diagnostics.push(message);
+    },
+  });
+  coordinator.attachResponder(
+    {
+      id: responderId,
+      scopeId,
+      send: (message) => responder.send(message),
+      close: () => responder.close(),
+    },
+    {
+      acceptedServerRequestMethods: [RUNTIME_SERVER_REQUEST_METHODS.approvalRequest],
+      capabilitiesAcknowledged: true,
+    },
+  );
+  const pending = coordinator.request(
+    RUNTIME_SERVER_REQUEST_METHODS.approvalRequest,
+    approvalRequestInputV12(),
+    {
+      key: approvalId,
+      scopeId,
+      eligibleResponderId: responderId,
+      approvalId,
+      expiresAt: approvalRequestInputV12().expiresAt,
+      protocolVersion: "1.4",
+    },
+  );
+  assert.equal(requestMessages(responder).length, 1);
+
+  assert.equal(coordinator.cancel(approvalId, "turn cancelled"), true);
+  await assert.rejects(
+    pending.result,
+    (error: unknown) =>
+      error instanceof RuntimeClientRequestCancelledError && error.reason === "turn cancelled",
+  );
+  const cancellation = responder.sent.find(
+    (message) =>
+      "method" in message && message.method === RUNTIME_SERVER_REQUEST_CANCEL_NOTIFICATION,
+  );
+  assert.ok(cancellation && "params" in cancellation);
+  assert.deepEqual(cancellation.params, { interactionId, reason: "turn cancelled" });
+  assert.deepEqual(diagnostics, []);
+});

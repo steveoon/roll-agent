@@ -1,0 +1,34 @@
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "result": {
+    "protocolVersion": "1.4",
+    "runtimeInstanceId": "00000000-0000-4000-8000-000000000001",
+    "server": {
+      "name": "roll-runtime",
+      "version": "0.18.0",
+      "runtimeVersion": "0.18.0"
+    },
+    "features": [
+      "thread-management",
+      "snapshots",
+      "turns",
+      "approvals",
+      "tool-streaming",
+      "reasoning-summary",
+      "operation-projection",
+      "process-local-sequence",
+      "attachments"
+    ],
+    "limits": {
+      "maxFrameBytes": 4194304,
+      "maxPageSize": 500,
+      "eventReplay": true,
+      "idempotencyCacheEntries": 10000,
+      "maxAttachmentBytes": 16777216,
+      "maxAttachmentChunkBytes": 2097152,
+      "maxTurnAttachments": 8,
+      "maxStagedAttachments": 16
+    }
+  }
+}

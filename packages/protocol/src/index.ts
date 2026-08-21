@@ -155,6 +155,26 @@ export function getRuntimeProtocolCapabilities(
   return RUNTIME_PROTOCOL_CAPABILITIES[version];
 }
 
+const RUNTIME_SERVER_REQUEST_WIRE_SHAPES = {
+  interaction: "interaction",
+  legacy: "legacy",
+} as const;
+
+type RuntimeServerRequestWireShape =
+  (typeof RUNTIME_SERVER_REQUEST_WIRE_SHAPES)[keyof typeof RUNTIME_SERVER_REQUEST_WIRE_SHAPES];
+
+function resolveRuntimeServerRequestWireShape(
+  version: RuntimeProtocolVersion,
+): RuntimeServerRequestWireShape | null {
+  const capabilities = getRuntimeProtocolCapabilities(version);
+  if (!capabilities.serverRequests) {
+    return null;
+  }
+  return capabilities.serverRequestCapabilityNegotiation
+    ? RUNTIME_SERVER_REQUEST_WIRE_SHAPES.interaction
+    : RUNTIME_SERVER_REQUEST_WIRE_SHAPES.legacy;
+}
+
 export function isRuntimeServerRequestMethodRequired(
   version: RuntimeProtocolVersion,
   method: RuntimeServerRequestMethod,
@@ -2860,10 +2880,14 @@ export function projectRuntimeServerRequestParams<
   value: RuntimeServerRequestInputForVersion<"1.3", TMethod>,
 ): ProjectedRuntimeServerRequestParams<TVersion, TMethod> {
   const latest = parseRuntimeServerRequestParamsForVersion("1.3", method, value);
-  if (version === "1.3" || version === "1.2") {
+  const shape = resolveRuntimeServerRequestWireShape(version);
+  if (shape === RUNTIME_SERVER_REQUEST_WIRE_SHAPES.interaction) {
     return latest as ProjectedRuntimeServerRequestParams<TVersion, TMethod>;
   }
-  if (version === "1.1" && method === RUNTIME_SERVER_REQUEST_METHODS.approvalRequest) {
+  if (
+    shape === RUNTIME_SERVER_REQUEST_WIRE_SHAPES.legacy &&
+    method === RUNTIME_SERVER_REQUEST_METHODS.approvalRequest
+  ) {
     const approval = approvalRequestParamsV12Schema.parse(latest);
     return approvalRequestParamsV11Schema.parse({
       threadId: approval.threadId,
@@ -2879,13 +2903,14 @@ export function projectRuntimeServerRequestCancelParams<TVersion extends Runtime
   value: RuntimeServerRequestCancelProjectionInput,
 ): RuntimeServerRequestCancelParamsForVersion<TVersion> {
   const input = runtimeServerRequestCancelProjectionInputSchema.parse(value);
-  if (version === "1.3" || version === "1.2") {
+  const shape = resolveRuntimeServerRequestWireShape(version);
+  if (shape === RUNTIME_SERVER_REQUEST_WIRE_SHAPES.interaction) {
     return runtimeServerRequestCancelParamsV12Schema.parse({
       interactionId: input.interactionId,
       reason: input.reason,
     }) as RuntimeServerRequestCancelParamsForVersion<TVersion>;
   }
-  if (version === "1.1") {
+  if (shape === RUNTIME_SERVER_REQUEST_WIRE_SHAPES.legacy) {
     return runtimeServerRequestCancelParamsV11Schema.parse({
       serverRequestId: input.serverRequestId,
       ...(input.approvalId === undefined ? {} : { approvalId: input.approvalId }),

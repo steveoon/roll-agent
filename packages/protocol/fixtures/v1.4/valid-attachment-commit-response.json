@@ -1,0 +1,16 @@
+{
+  "jsonrpc": "2.0",
+  "id": 22,
+  "result": {
+    "descriptor": {
+      "attachmentId": "00000000-0000-4000-8000-0000000000a1",
+      "fileName": "diagram.png",
+      "displayName": "diagram.png",
+      "mediaType": "image/png",
+      "bytes": 2048,
+      "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+      "source": "chunks",
+      "createdAt": "2026-08-21T12:00:00.000Z"
+    }
+  }
+}

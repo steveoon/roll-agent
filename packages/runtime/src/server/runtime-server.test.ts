@@ -3841,3 +3841,59 @@ test("Runtime Protocol 1.4 sessions receive the bounded recovery snapshot projec
   assert.equal(recovery.recoveryProjection, true);
   assert.deepEqual(recovery.messages.items, []);
 });
+
+for (const protocolVersion of ["1.3", "1.4"] as const) {
+  test(`Runtime Protocol ${protocolVersion} 在 Turn cancel 时以 interaction 形状取消未决 server request`, async (t) => {
+    const harness = createApprovalProtocolHarness();
+    const client = attachRuntimeProtocolClient(harness.clientConn);
+    t.after(() => harness.close());
+
+    await client.request(1, RUNTIME_METHODS.initialize, {
+      protocolVersions: [protocolVersion],
+      client: { name: "cancel-client", version: "1.4.0" },
+    });
+    await client.request(2, RUNTIME_METHODS.clientCapabilitiesSet, {
+      revision: 1,
+      serverRequestMethods: [RUNTIME_SERVER_REQUEST_METHODS.approvalRequest],
+    });
+    const created = (await client.request(3, RUNTIME_METHODS.threadCreate, {
+      requestId: "00000000-0000-4000-8000-000000000341",
+      title: "cancel approval",
+    })) as { readonly thread: { readonly id: string } };
+    const turnId = "00000000-0000-4000-8000-000000000342";
+    await client.request(4, RUNTIME_METHODS.turnStart, {
+      requestId: "00000000-0000-4000-8000-000000000343",
+      threadId: created.thread.id,
+      turnId,
+      input: { text: "cancel guarded tool" },
+    });
+    const approvalRequest = await waitForValue(
+      () =>
+        client.wire.find(
+          (message): message is JsonRpcRequest =>
+            isRequest(message) && message.method === RUNTIME_SERVER_REQUEST_METHODS.approvalRequest,
+        ),
+      "取消测试未收到 approval.request",
+    );
+    const interactionId = (approvalRequest.params as ApprovalRequestParamsV12).interactionId;
+    const cancelled = (await client.request(5, RUNTIME_METHODS.turnCancel, {
+      requestId: "00000000-0000-4000-8000-000000000344",
+      threadId: created.thread.id,
+      turnId,
+    })) as { readonly cancelling: boolean };
+    assert.equal(cancelled.cancelling, true);
+    const cancelNotification = await waitForValue(
+      () =>
+        client.wire.find(
+          (message): message is JsonRpcNotification =>
+            isNotification(message) &&
+            message.method === RUNTIME_SERVER_REQUEST_CANCEL_NOTIFICATION,
+        ),
+      "未收到 runtime.serverRequest.cancel",
+    );
+    assert.deepEqual(cancelNotification.params, {
+      interactionId,
+      reason: "Turn 已由客户端取消",
+    });
+  });
+}

@@ -185,6 +185,12 @@ function fixtureV13(name: string): Record<string, unknown> {
   ) as Record<string, unknown>;
 }
 
+function fixtureV14(name: string): Record<string, unknown> {
+  return JSON.parse(
+    readFileSync(new URL(`../fixtures/v1.4/${name}`, import.meta.url), "utf8"),
+  ) as Record<string, unknown>;
+}
+
 function parseNegotiatedCancel(
   version: RuntimeProtocolVersion,
   value: unknown,
@@ -2035,4 +2041,198 @@ test("file change diff rides inside approval preview and tool display without to
     fileChangeDisplaySchema.safeParse({ text: "", diff: FILE_DIFF_FIXTURE }).success,
     true,
   );
+});
+
+test("server request projections cover every wire version that supports server requests", () => {
+  const cancelInput = {
+    interactionId: interactionIdSchema.parse(IDS.interaction),
+    serverRequestId: "rpc-7",
+    approvalId: approvalIdSchema.parse(IDS.approval),
+    reason: "turn-cancelled",
+  } as const;
+  const approvalInput = {
+    interactionId: IDS.interaction,
+    threadId: IDS.thread,
+    turnId: IDS.turn,
+    expiresAt: "2026-07-29T12:10:00.000Z",
+    sensitivity: "normal",
+    approval: {
+      id: IDS.approval,
+      turnId: IDS.turn,
+      agentName: "browser-use-agent",
+      toolName: "click",
+      preview: { selector: "#submit" },
+    },
+  } as const;
+  const userInputInput = userInputRequestParams([
+    { type: "boolean", id: "dry-run", label: "仅预演", required: true },
+  ]);
+
+  for (const version of SUPPORTED_RUNTIME_PROTOCOL_VERSIONS) {
+    const capabilities = getRuntimeProtocolCapabilities(version);
+    if (!capabilities.serverRequests) {
+      assert.throws(() => projectRuntimeServerRequestCancelParams(version, cancelInput), version);
+      assert.throws(
+        () =>
+          projectRuntimeServerRequestParams(
+            version,
+            RUNTIME_SERVER_REQUEST_METHODS.approvalRequest,
+            approvalInput,
+          ),
+        version,
+      );
+      continue;
+    }
+
+    const cancel = projectRuntimeServerRequestCancelParams(version, cancelInput);
+    assert.deepEqual(
+      parseRuntimeServerRequestCancelParamsForVersion(version, cancel),
+      cancel,
+      version,
+    );
+    assert.equal(
+      "interactionId" in cancel,
+      capabilities.serverRequestCapabilityNegotiation,
+      version,
+    );
+
+    const approval = projectRuntimeServerRequestParams(
+      version,
+      RUNTIME_SERVER_REQUEST_METHODS.approvalRequest,
+      approvalInput,
+    );
+    assert.deepEqual(
+      parseRuntimeServerRequestParamsForVersion(
+        version,
+        RUNTIME_SERVER_REQUEST_METHODS.approvalRequest,
+        approval,
+      ),
+      approval,
+      version,
+    );
+
+    if (
+      isRuntimeServerRequestMethodAvailable(
+        version,
+        RUNTIME_SERVER_REQUEST_METHODS.userInputRequest,
+      )
+    ) {
+      const userInput = projectRuntimeServerRequestParams(
+        version,
+        RUNTIME_SERVER_REQUEST_METHODS.userInputRequest,
+        userInputInput,
+      );
+      assert.deepEqual(
+        parseRuntimeServerRequestParamsForVersion(
+          version,
+          RUNTIME_SERVER_REQUEST_METHODS.userInputRequest,
+          userInput,
+        ),
+        userInput,
+        version,
+      );
+    } else {
+      assert.throws(
+        () =>
+          projectRuntimeServerRequestParams(
+            version,
+            RUNTIME_SERVER_REQUEST_METHODS.userInputRequest,
+            userInputInput,
+          ),
+        version,
+      );
+    }
+  }
+});
+
+test("Protocol 1.4 golden fixtures keep attachment requests, responses and snapshots compatible", () => {
+  const initialized = parseRuntimeMethodResultForVersion(
+    "1.4",
+    RUNTIME_METHODS.initialize,
+    fixtureV14("valid-initialize-response.json").result,
+  );
+  assert.equal(initialized.protocolVersion, "1.4");
+  assert.equal(initialized.features.includes("attachments"), true);
+  assert.equal(initialized.limits.maxTurnAttachments, 8);
+
+  const stage = fixtureV14("valid-attachment-stage-request.json");
+  assert.equal(
+    parseRuntimeMethodParamsForVersion("1.4", RUNTIME_METHODS.attachmentStage, stage.params).source,
+    "chunks",
+  );
+  assert.equal(isRuntimeMethodAvailable("1.3", RUNTIME_METHODS.attachmentStage), false);
+  assert.throws(() =>
+    parseRuntimeMethodParamsForVersion(
+      "1.4",
+      RUNTIME_METHODS.attachmentStage,
+      fixtureV14("invalid-attachment-stage-sha256-request.json").params,
+    ),
+  );
+  assert.equal(
+    parseRuntimeMethodResultForVersion(
+      "1.4",
+      RUNTIME_METHODS.attachmentStage,
+      fixtureV14("valid-attachment-stage-response.json").result,
+    ).state,
+    "staged",
+  );
+  assert.equal(
+    parseRuntimeMethodParamsForVersion(
+      "1.4",
+      RUNTIME_METHODS.attachmentChunk,
+      fixtureV14("valid-attachment-chunk-request.json").params,
+    ).sequence,
+    0,
+  );
+  assert.equal(
+    parseRuntimeMethodResultForVersion(
+      "1.4",
+      RUNTIME_METHODS.attachmentCommit,
+      fixtureV14("valid-attachment-commit-response.json").result,
+    ).descriptor.displayName,
+    "diagram.png",
+  );
+  for (const name of [
+    "valid-attachment-commit-request.json",
+    "valid-attachment-release-request.json",
+  ] as const) {
+    const request = fixtureV14(name);
+    assert.equal(
+      typeof request.method === "string" && isRuntimeMethodAvailable("1.4", request.method),
+      true,
+      name,
+    );
+  }
+
+  const turn = fixtureV14("valid-turn-start-with-attachments-request.json");
+  const turnParams = parseRuntimeMethodParamsForVersion(
+    "1.4",
+    RUNTIME_METHODS.turnStart,
+    turn.params,
+  );
+  assert.equal(turnParams.input.text, "");
+  assert.equal(turnParams.input.attachments?.length, 1);
+  assert.throws(() =>
+    parseRuntimeMethodParamsForVersion("1.3", RUNTIME_METHODS.turnStart, turn.params),
+  );
+  assert.throws(() =>
+    parseRuntimeMethodParamsForVersion(
+      "1.4",
+      RUNTIME_METHODS.turnStart,
+      fixtureV14("invalid-turn-start-too-many-attachments-request.json").params,
+    ),
+  );
+
+  const snapshot = fixtureV14("valid-thread-snapshot-attachment-part-response.json");
+  assert.equal(
+    projectThreadSnapshotForVersion("1.4", snapshot.result).messages.items[0]?.parts.length,
+    2,
+  );
+  assert.deepEqual(
+    projectThreadSnapshotForVersion("1.3", snapshot.result).messages.items[0]?.parts,
+    [{ type: "text", text: "看看这张图" }],
+  );
+
+  const event = fixtureV14("valid-runtime-durable-event-notification.json");
+  assert.equal(projectRuntimeEventEnvelopeForVersion("1.4", event.params).protocolVersion, "1.4");
 });

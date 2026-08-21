@@ -13,7 +13,11 @@ node --version
 npm install -g @roll-agent/core
 roll --version
 
-# 3. Initialize config
+# 3. Initialize config (TTY required) — run ONE of the two paths below
+# One-shot onboarding wizard (LLM config + official agents + env check):
+roll setup
+
+# OR step by step:
 roll config init
 # `init` creates a minimal skeleton; prefer `roll config setup llm` for provider/model/API key.
 roll config setup llm
@@ -75,6 +79,8 @@ roll config setup agent <agent-name>
 
 Rules:
 
+- `roll setup` — one-shot interactive onboarding for a fresh machine (LLM config, official agent install, environment check); **requires a TTY**.
+  - In non-interactive shells, bootstrap the config file first: `roll config init` (non-TTY form reads provider / model / API-key env var name as three lines from stdin, each defaulting when blank) or write `roll.config.yaml` directly. Only then use `roll config set` + `roll agent install` — `roll config set` on its own exits 1 with `未找到配置文件。请先运行 roll config init` when no config file exists anywhere in the discovery chain.
 - `roll config explain [path]` — shows purpose, default behavior, examples, and the matching `roll config setup` command when available.
 - `roll config setup [llm|install|agent] [agent-name]` — interactive wizard; **requires a TTY**.
   - In CI, pipes, or other non-interactive shells: use `roll config set <key> <value>` or edit `roll.config.yaml` directly; use `roll config explain <path>` for guidance.
