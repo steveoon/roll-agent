@@ -35,7 +35,7 @@ assert.match(main, /preload\.cjs/);
 assert.match(main, /sandbox:\s*true/);
 assert.match(main, /nodeIntegration:\s*false/);
 assert.match(main, /contextIsolation:\s*true/);
-assert.match(main, /SUPPORTED_RUNTIME_PROTOCOL_VERSIONS/);
+assert.match(main, /getRuntimeProtocolCapabilities/);
 assert.doesNotMatch(main, /\[\s*"1\.\d"(?:\s*,\s*"1\.\d")*\s*\]/);
 assert.match(main, /isElectronRuntimeProtocolVersion/);
 assert.match(main, /normalizeUserInputResult/);
@@ -48,10 +48,6 @@ assert.match(preload, /require\(["']electron["']\)/);
 assert.doesNotMatch(preload, /^\s*import\s/m);
 assert.match(preloadSource, /RuntimeMethodResultForVersion/);
 assert.match(preloadSource, /ElectronRuntimeProtocolVersion/);
-assert.match(
-  supportedProtocolsSource,
-  /SUPPORTED_RUNTIME_PROTOCOL_VERSIONS\.filter\(isElectronRuntimeProtocolVersion\)/,
-);
 assert.match(supportedProtocolsSource, /getRuntimeProtocolCapabilities\(value\)\.serverRequests/);
 assert.match(preloadSource, /onUserInputRequest/);
 assert.doesNotMatch(preloadSource, /snapshotThread[\s\S]*?RuntimeMethodResult<"thread\.snapshot">/);

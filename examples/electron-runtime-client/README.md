@@ -58,8 +58,9 @@ expose API keys, environment variables, arbitrary process spawning, a generic
 Runtime request method, or a raw `ipcRenderer` object to the renderer.
 
 This reference accepts every Runtime Protocol version with Server Request support — currently `"1.4"`,
-`"1.3"`, `"1.2"`, and the `"1.1"` fallback — derived from `SUPPORTED_RUNTIME_PROTOCOL_VERSIONS` so it
-tracks `@roll-agent/protocol` automatically. Its startup
+`"1.3"`, `"1.2"`, and the `"1.1"` fallback. `@roll-agent/client-node` advertises every version it
+supports and the guard only reads `getRuntimeProtocolCapabilities(version).serverRequests`, so the
+example tracks `@roll-agent/protocol` automatically. Its startup
 `approval.request` and named `userInput.request` handlers are included in the 1.4/1.3/1.2
 `client.capabilities.set` handshake, so `RollNodeClient.start()` does not resolve until Runtime has
 acknowledged those capabilities. When negotiation falls back to 1.1, Approval remains available
