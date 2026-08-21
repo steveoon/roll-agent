@@ -2036,3 +2036,105 @@ test("file change diff rides inside approval preview and tool display without to
     true,
   );
 });
+
+test("server request projections cover every wire version that supports server requests", () => {
+  const cancelInput = {
+    interactionId: interactionIdSchema.parse(IDS.interaction),
+    serverRequestId: "rpc-7",
+    approvalId: approvalIdSchema.parse(IDS.approval),
+    reason: "turn-cancelled",
+  } as const;
+  const approvalInput = {
+    interactionId: IDS.interaction,
+    threadId: IDS.thread,
+    turnId: IDS.turn,
+    expiresAt: "2026-07-29T12:10:00.000Z",
+    sensitivity: "normal",
+    approval: {
+      id: IDS.approval,
+      turnId: IDS.turn,
+      agentName: "browser-use-agent",
+      toolName: "click",
+      preview: { selector: "#submit" },
+    },
+  } as const;
+  const userInputInput = userInputRequestParams([
+    { type: "boolean", id: "dry-run", label: "仅预演", required: true },
+  ]);
+
+  for (const version of SUPPORTED_RUNTIME_PROTOCOL_VERSIONS) {
+    const capabilities = getRuntimeProtocolCapabilities(version);
+    if (!capabilities.serverRequests) {
+      assert.throws(() => projectRuntimeServerRequestCancelParams(version, cancelInput), version);
+      assert.throws(
+        () =>
+          projectRuntimeServerRequestParams(
+            version,
+            RUNTIME_SERVER_REQUEST_METHODS.approvalRequest,
+            approvalInput,
+          ),
+        version,
+      );
+      continue;
+    }
+
+    const cancel = projectRuntimeServerRequestCancelParams(version, cancelInput);
+    assert.deepEqual(
+      parseRuntimeServerRequestCancelParamsForVersion(version, cancel),
+      cancel,
+      version,
+    );
+    assert.equal(
+      "interactionId" in cancel,
+      capabilities.serverRequestCapabilityNegotiation,
+      version,
+    );
+
+    const approval = projectRuntimeServerRequestParams(
+      version,
+      RUNTIME_SERVER_REQUEST_METHODS.approvalRequest,
+      approvalInput,
+    );
+    assert.deepEqual(
+      parseRuntimeServerRequestParamsForVersion(
+        version,
+        RUNTIME_SERVER_REQUEST_METHODS.approvalRequest,
+        approval,
+      ),
+      approval,
+      version,
+    );
+
+    if (
+      isRuntimeServerRequestMethodAvailable(
+        version,
+        RUNTIME_SERVER_REQUEST_METHODS.userInputRequest,
+      )
+    ) {
+      const userInput = projectRuntimeServerRequestParams(
+        version,
+        RUNTIME_SERVER_REQUEST_METHODS.userInputRequest,
+        userInputInput,
+      );
+      assert.deepEqual(
+        parseRuntimeServerRequestParamsForVersion(
+          version,
+          RUNTIME_SERVER_REQUEST_METHODS.userInputRequest,
+          userInput,
+        ),
+        userInput,
+        version,
+      );
+    } else {
+      assert.throws(
+        () =>
+          projectRuntimeServerRequestParams(
+            version,
+            RUNTIME_SERVER_REQUEST_METHODS.userInputRequest,
+            userInputInput,
+          ),
+        version,
+      );
+    }
+  }
+});
