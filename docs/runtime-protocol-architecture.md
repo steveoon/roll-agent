@@ -50,7 +50,7 @@ Embedded Runtime SDK 仍可用于 Roll 第一方或版本锁定的高级宿主�
 | 分帧 | 一行一个 JSON（NDJSON） | stdio Adapter 契约 |
 | Transport | stdio | v1 正式入口 |
 
-协议版本从 `"1.0"` 开始，当前最新版本为 `"1.3"`，与 npm 包版本独立。未来增加
+协议版本从 `"1.0"` 开始，当前最新版本为 `"1.4"`，与 npm 包版本独立。未来增加
 Transport 时，不需要改变 Thread、Turn 或事件语义。
 
 `RUNTIME_PROTOCOL_VERSION` 只表示协议包中的最新 wire schema，不代表每个 Client 自动拥有

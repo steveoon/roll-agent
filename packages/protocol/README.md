@@ -86,15 +86,16 @@ function handleEvent(event: RuntimeEventEnvelopeV13): void {
 
 - `@roll-agent/protocol/schema` 与 `@roll-agent/protocol/schema/latest`：最新版本
   JSON Schema Draft 2020-12 根 Schema；
-- `@roll-agent/protocol/schema/1.3`、`/1.2`、`/1.1`、`/1.0`：严格按协商版本隔离的 Schema；
+- `@roll-agent/protocol/schema/1.4`、`/1.3`、`/1.2`、`/1.1`、`/1.0`：严格按协商版本隔离的 Schema；
+- `@roll-agent/protocol/fixtures/v1.4/*`：Protocol 1.4 attachment / turn.start / snapshot fixtures；
 - `@roll-agent/protocol/fixtures/v1.3/*`：Protocol 1.3 durable event/replay fixtures；
 - `@roll-agent/protocol/fixtures/v1/*`：冻结的 1.1/1.0 跨语言有效/无效消息 fixtures。
 - `@roll-agent/protocol/fixtures/v1.2/*`：Protocol 1.2 capability/interaction fixtures。
 
 协议版本与 npm 包版本相互独立。`RUNTIME_PROTOCOL_VERSION` 表示这个包提供的最新 wire
 schema，并不代表调用方已实现对应 Client 能力。当前支持顺序为
-`["1.3", "1.2", "1.1", "1.0"]`。`initialize` 请求保持旧 strict 形状；协商到 `"1.2"`
-或 `"1.3"` 后，
+`["1.4", "1.3", "1.2", "1.1", "1.0"]`。`initialize` 请求保持旧 strict 形状；协商到 `"1.2"`、
+`"1.3"` 或 `"1.4"` 后，
 Client 必须用 `client.capabilities.set` 提交单调 `revision` 与当前 Handler methods，Runtime
 返回 registry 交集后才进入 interaction-ready。ACK 可以为空或为请求集的任意子集，顺序按
 Runtime registry；Client 必须按集合语义处理。未知的未来 method 名可安全发送但不会被接受。

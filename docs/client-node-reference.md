@@ -6,8 +6,8 @@
 |---|---|
 | Node.js | `>=22.6.0` |
 | 默认命令 | `roll runtime serve --stdio` |
-| 最新协议 | Roll Runtime Protocol `"1.3"` |
-| 无 Server Request handler 时 | 默认帧预算下广告 `["1.3","1.2","1.0"]`；1.3/1.2 capability 集合为空 |
+| 最新协议 | Roll Runtime Protocol `"1.4"` |
+| 无 Server Request handler 时 | 默认帧预算下广告 `["1.4","1.3","1.2","1.0"]`；1.4/1.3/1.2 capability 集合为空 |
 | 默认请求超时 | `30,000 ms` |
 | 默认本地帧上限 | `17 MiB` |
 | 默认读取重试 | 最多 `1` 次，间隔 `100 ms` |
@@ -155,10 +155,10 @@ Handler 必须返回符合 `@roll-agent/protocol` Schema 的结果。用户拒�
 
 | 构造时 handlers | Client 广告 | 可能协商结果 |
 |---|---|---|
-| 注册 `approval.request` | `["1.3","1.2","1.1","1.0"]` | 新 Runtime 为 `"1.3"`；旧 Runtime 可逐级回退 |
-| 仅注册 `userInput.request` | `["1.3","1.2","1.0"]` | 新 Runtime 为 `"1.3"`；旧 Runtime 可回退 1.2/1.0 |
-| 无 handler / 空对象 | `["1.3","1.2","1.0"]` | 新 Runtime 为 `"1.3"` 且 ACK 空 capability；旧 Runtime 可回退 1.2/1.0 |
-| 任意 handlers，`maxFrameBytes < 17 MiB` | 上述列表移除 `"1.3"` | 不会协商 1.3；按 handler 规则回落到旧版本 |
+| 注册 `approval.request` | `["1.4","1.3","1.2","1.1","1.0"]` | 新 Runtime 为 `"1.4"`；旧 Runtime 可逐级回退 |
+| 仅注册 `userInput.request` | `["1.4","1.3","1.2","1.0"]` | 新 Runtime 为 `"1.4"`；旧 Runtime 可回退 1.3/1.2/1.0 |
+| 无 handler / 空对象 | `["1.4","1.3","1.2","1.0"]` | 新 Runtime 为 `"1.4"` 且 ACK 空 capability；旧 Runtime 可回退 1.3/1.2/1.0 |
+| 任意 handlers，`maxFrameBytes < 17 MiB` | 上述列表移除 `"1.4"` 与 `"1.3"` | 不会协商 1.4/1.3；按 handler 规则回落到旧版本 |
 
 `"1.3"` 与 `"1.2"` 没有强制 handler；所有 Server Request 都由初始化后的
 `client.capabilities.set` 协商。`"1.1"` 当前唯一必需 handler 是
@@ -236,7 +236,7 @@ Response。
 `30s` timeout。
 1.3/1.2 cancel 使用逻辑 `interactionId`，1.1 cancel 使用当前投递的 JSON-RPC
 `serverRequestId`；Client 都映射到同一个 handler `AbortSignal`。当前 `stdio` 连接
-不支持持久 Server Request replay/resume：1.3 只恢复 durable View Event，不恢复控制请求。
+不支持持久 Server Request replay/resume：1.4/1.3 只恢复 durable View Event，不恢复控制请求。
 断线会 abort 全部 handler，重启后应读取 Snapshot 收敛，不能自动重放旧审批、旧 User
 Input 或旧 Turn。
 
