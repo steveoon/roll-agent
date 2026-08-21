@@ -18,6 +18,7 @@ import {
   type RuntimeServerRequestMethod,
   type RuntimeServerRequestResultForSupportedVersions,
   type RuntimeProtocolVersion,
+  type RuntimeServerRequestCancelParamsForVersion,
   type ThreadId,
   type TurnId,
 } from "@roll-agent/protocol";
@@ -602,8 +603,9 @@ export class RuntimeClientRequestCoordinator {
     if (delivery === undefined) {
       return;
     }
+    let params: RuntimeServerRequestCancelParamsForVersion<RuntimeProtocolVersion>;
     try {
-      const params = projectRuntimeServerRequestCancelParams(interaction.protocolVersion, {
+      params = projectRuntimeServerRequestCancelParams(interaction.protocolVersion, {
         interactionId: interaction.interactionId,
         serverRequestId: delivery.id,
         ...(interaction.legacyApprovalId !== undefined
@@ -611,6 +613,15 @@ export class RuntimeClientRequestCoordinator {
           : {}),
         reason,
       });
+    } catch (error: unknown) {
+      this.diagnose(
+        `Runtime Protocol ${interaction.protocolVersion} 取消通知投影失败：${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+      return;
+    }
+    try {
       delivery.attachment.responder.send({
         jsonrpc: "2.0",
         method: RUNTIME_SERVER_REQUEST_CANCEL_NOTIFICATION,
