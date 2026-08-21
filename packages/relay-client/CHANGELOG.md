@@ -1,5 +1,12 @@
 # @roll-agent/relay-client
 
+## 0.1.3
+
+### Patch Changes
+
+- Updated dependencies []:
+  - @roll-agent/relay-protocol@0.3.3
+
 ## 0.1.2
 
 ### Patch Changes
