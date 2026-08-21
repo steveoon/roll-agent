@@ -113,7 +113,7 @@ Runtime→Client NDJSON 帧。本地入站预算低于该值的 Client 必须同
 | `maxAttachmentBytes` | `16 * 1024 * 1024` | 1.4：单个附件原始字节上限 |
 | `maxAttachmentChunkBytes` | `2 * 1024 * 1024` | 1.4：`attachment.chunk` 单片原始字节上限 |
 | `maxTurnAttachments` | `8` | 1.4：单个 `turn.start` 可引用的附件数 |
-| `maxStagedAttachments` | `16` | 1.4：同时处于 staged 状态的附件数 |
+| `maxStagedAttachments` | `16` | 1.4：同一 Runtime 实例内同时保留的附件数，staged 与已 `commit` 未 `release`、未过 TTL 的都计入 |
 
 这些值是协商结果，不应在客户端写死。旧 `session.*` RPC 在兼容期内不要求 v1 初始化。
 
@@ -647,12 +647,12 @@ Runtime 领域错误的外层 JSON-RPC `error.code` 为 `-32000`；参数 Schema
 | `CAPABILITY_REVISION_CONFLICT` | 1.4/1.3/1.2 capability revision 过旧，或同 revision 配不同集合 |
 | `EVENT_CURSOR_EXPIRED` | 1.4/1.3 checkpoint 已被连续前缀裁剪；重新读取 Snapshot |
 | `EVENT_CURSOR_GAP` | 1.4/1.3 cursor 不属于可连续恢复的 Thread 日志；重新读取 Snapshot |
-| `ATTACHMENT_NOT_FOUND` | 1.4：`attachmentId` 不存在、已释放或已过期回收 |
+| `ATTACHMENT_NOT_FOUND` | 1.4：`attachmentId` 不存在、已释放、已过期回收，或不属于请求的 `threadId` |
 | `ATTACHMENT_NOT_COMMITTED` | 1.4：`turn.start` 引用了尚未 `commit` 的附件 |
 | `ATTACHMENT_TOO_LARGE` | 1.4：声明或实际字节数超过 `maxAttachmentBytes`，或 chunks 累计超过声明字节数 |
 | `ATTACHMENT_TYPE_UNSUPPORTED` | 1.4：`mediaType` 不在支持列表，或文件扩展名与 `mediaType` 不匹配 |
-| `ATTACHMENT_HASH_MISMATCH` | 1.4：`commit` 时实际内容 sha256 与声明不符，附件被回收 |
-| `ATTACHMENT_QUOTA_EXCEEDED` | 1.4：staged 附件数已达 `maxStagedAttachments` |
+| `ATTACHMENT_HASH_MISMATCH` | 1.4：实际内容 sha256 与声明不符；chunks 来源在 `commit` 时触发并回收已上传数据，local-path 来源在 `stage` 时触发、不产生附件记录 |
+| `ATTACHMENT_QUOTA_EXCEEDED` | 1.4：保留中的附件数（含已 `commit` 未 `release`）已达 `maxStagedAttachments`；先 `attachment.release` 或等待 TTL 回收 |
 | `ATTACHMENT_UPLOAD_INCOMPLETE` | 1.4：chunks 来源 `commit` 时累计字节数不等于声明值 |
 | `ATTACHMENT_PATH_REJECTED` | 1.4：local-path 来源不是绝对路径、不可 `lstat`、是 symlink 或不是普通文件 |
 | `RUNTIME_CLOSING` | Runtime 正在关闭 |

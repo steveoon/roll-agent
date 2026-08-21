@@ -100,9 +100,9 @@ Client 必须用 `client.capabilities.set` 提交单调 `revision` 与当前 Han
 返回 registry 交集后才进入 interaction-ready。ACK 可以为空或为请求集的任意子集，顺序按
 Runtime registry；Client 必须按集合语义处理。未知的未来 method 名可安全发送但不会被接受。
 
-广告 `"1.3"` 同时声明 Client 能接收至少 `17 MiB` 的单个 Runtime→Client NDJSON 帧：
+广告 `"1.4"` 或 `"1.3"` 同时声明 Client 能接收至少 `17 MiB` 的单个 Runtime→Client NDJSON 帧：
 durable record 的绝对上限为 `16 MiB`，额外 1 MiB 留给 envelope 与 JSON-RPC 元数据。本地
-入站预算低于 17 MiB 的 Client 必须省略 `"1.3"`。这不会扩大 Client→Runtime 出站额度；
+入站预算低于 17 MiB 的 Client 必须同时省略 `"1.4"` 与 `"1.3"`。这不会扩大 Client→Runtime 出站额度；
 初始化后的出站上限仍取本地预算与 Runtime 返回的 `limits.maxFrameBytes` 的较小值。
 官方 Node 恢复管理器的默认 replay 暂存窗口为 10,000 条 / 32 MiB。
 

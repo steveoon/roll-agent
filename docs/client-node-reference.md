@@ -34,7 +34,7 @@
 | `clientVersion` | `string` | 当前 `@roll-agent/client-node` 包版本 | 初始化客户端版本 |
 | `onStderr` | `(line) => void` | 无 | 逐行接收 Runtime 日志 |
 | `onTurnOutcomeUnknown` | `(turnId) => void` | 无 | Turn 结果无法确认时调用 |
-| `maxFrameBytes` | `number` | `17 MiB` | 本地入站与初始出站上限；低于 17 MiB 时不广告 1.3 |
+| `maxFrameBytes` | `number` | `17 MiB` | 本地入站与初始出站上限；低于 17 MiB 时不广告 1.4/1.3 |
 | `requestTimeoutMs` | `number` | `30,000` | 单次请求超时 |
 | `maxReadRetries` | `number` | `1` | 明确可重试读取的最大重试次数 |
 | `readRetryDelayMs` | `number` | `100` | 读取重试间隔 |
@@ -44,7 +44,7 @@
 客户端构造成功后的 `initialize` 协商失败会进入有界关闭，不会把未完成初始化的子进程交给
 调用方。
 
-`start()` / `connect()` 会自动且仅发送一次 `initialize`。若协商到 `"1.3"` 或 `"1.2"`，
+`start()` / `connect()` 会自动且仅发送一次 `initialize`。若协商到 `"1.4"`、`"1.3"` 或 `"1.2"`，
 还会发送首个 `client.capabilities.set` 并等待 Runtime ACK；因此返回的 Client 已经可以
 安全接收当前声明的 Server Request，ACK 前不会向调用方暴露连接。连接成功后再次通过
 `request("initialize", ...)` 初始化会被客户端拒绝，既不会写入 Transport，也不会改变
@@ -324,8 +324,8 @@ UI 收到未知结果后必须：
 
 ## 帧限制
 
-- 广告 `"1.3"` 等同声明本地入站上限至少为 `17 MiB`；显式配置更低预算时 Client 会从
-  初始化版本列表移除 `"1.3"`；
+- 广告 `"1.4"` 或 `"1.3"` 等同声明本地入站上限至少为 `17 MiB`；显式配置更低预算时 Client 会从
+  初始化版本列表移除 `"1.4"` 与 `"1.3"`；
 - 入站 Runtime 帧超过本地 `maxFrameBytes`：`RollProtocolViolationError`，连接关闭；
 - 初始化完成后的出站上限：
   `min(client.maxFrameBytes, initialize.limits.maxFrameBytes)`；
