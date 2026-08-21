@@ -1,0 +1,14 @@
+{
+  "jsonrpc": "2.0",
+  "id": 20,
+  "method": "attachment.stage",
+  "params": {
+    "requestId": "00000000-0000-4000-8000-0000000000b1",
+    "threadId": "00000000-0000-4000-8000-000000000002",
+    "fileName": "diagram.png",
+    "mediaType": "image/png",
+    "bytes": 2048,
+    "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+    "source": "chunks"
+  }
+}

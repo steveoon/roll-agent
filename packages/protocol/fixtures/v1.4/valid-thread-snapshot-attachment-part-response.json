@@ -1,0 +1,44 @@
+{
+  "jsonrpc": "2.0",
+  "id": 27,
+  "result": {
+    "thread": {
+      "id": "00000000-0000-4000-8000-000000000002",
+      "title": "Attachment transcript",
+      "model": "fixture-model",
+      "createdAt": "2026-08-21T12:00:00.000Z",
+      "updatedAt": "2026-08-21T12:00:00.000Z",
+      "messageCount": 1
+    },
+    "messages": {
+      "items": [
+        {
+          "sequence": 0,
+          "role": "user",
+          "createdAt": "2026-08-21T12:00:00.000Z",
+          "parts": [
+            {
+              "type": "text",
+              "text": "看看这张图"
+            },
+            {
+              "type": "attachment",
+              "mediaType": "image/png",
+              "bytes": 2048,
+              "displayName": "diagram.png"
+            }
+          ]
+        }
+      ],
+      "nextBeforeSequence": null
+    },
+    "operations": {
+      "items": [],
+      "nextBeforeSequence": null
+    },
+    "pendingApprovals": [],
+    "pendingInteractions": [],
+    "transcriptCompleteness": "complete",
+    "eventCursor": null
+  }
+}
