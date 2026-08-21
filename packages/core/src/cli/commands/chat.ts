@@ -305,7 +305,11 @@ export async function runServer(config: RollConfig): Promise<void> {
         dir: join(config.runtime.threadsDir, "attachments"),
       }),
     });
-    const runtimeClientRequests = new RuntimeClientRequestCoordinator();
+    const runtimeClientRequests = new RuntimeClientRequestCoordinator({
+      onDiagnostic: (message) => {
+        log.warn(message);
+      },
+    });
     const server = new RuntimeServer(activeEngine, connection, {
       runtimeService,
       runtimeClientRequests,
