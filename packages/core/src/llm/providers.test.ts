@@ -1,5 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
+import { generateText } from "ai";
 import { createProviderModel, resolveLLMCall, thinkingProviderOptions } from "./providers.ts";
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -23,6 +24,65 @@ describe("createProviderModel", () => {
     const model = createProviderModel("deepseek", "deepseek-v4-flash", "test-key");
     assert.ok(model);
     assert.equal(model.modelId, "deepseek-v4-flash");
+  });
+
+  it("forwards DeepSeek vision attachments as image_url content", async () => {
+    const originalFetch = globalThis.fetch;
+    let capturedBody: unknown;
+
+    try {
+      globalThis.fetch = async (_input: string | URL | Request, init?: RequestInit) => {
+        if (typeof init?.body !== "string") {
+          throw new Error("Expected a JSON request body");
+        }
+        capturedBody = JSON.parse(init.body);
+
+        return new Response(
+          JSON.stringify({
+            id: "vision-response",
+            created: 0,
+            model: "deepseek-v4-flash-vision-exp",
+            choices: [
+              {
+                message: { role: "assistant", content: "ok" },
+                finish_reason: "stop",
+              },
+            ],
+            usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      };
+
+      await generateText({
+        model: createProviderModel("deepseek", "deepseek-v4-flash-vision-exp", "test-key"),
+        messages: [
+          {
+            role: "user",
+            content: [
+              { type: "text", text: "描述图片" },
+              { type: "file", data: "aGVsbG8=", mediaType: "image/png" },
+            ],
+          },
+        ],
+      });
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+
+    assert.ok(isRecord(capturedBody));
+    assert.deepEqual(capturedBody.messages, [
+      {
+        role: "user",
+        content: [
+          { type: "text", text: "描述图片" },
+          {
+            type: "image_url",
+            image_url: { url: "data:image/png;base64,aGVsbG8=" },
+          },
+        ],
+      },
+    ]);
   });
 
   it("should create a qwen model", () => {
