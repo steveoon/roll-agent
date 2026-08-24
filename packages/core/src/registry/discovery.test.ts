@@ -482,3 +482,108 @@ metadata:
     );
   });
 });
+
+describe("discoverAgent stdio maxBufferSize", () => {
+  let tmpDir: string;
+
+  beforeEach(() => {
+    tmpDir = makeTmpDir();
+  });
+
+  afterEach(() => {
+    rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  function writeStdioManifest(maxBufferSize: unknown): void {
+    writeFileSync(
+      resolve(tmpDir, "SKILL.md"),
+      "---\nname: big-output\ndescription: Big output agent\n---\n",
+    );
+    writeFileSync(
+      resolve(tmpDir, "package.json"),
+      JSON.stringify({
+        name: "big-output",
+        version: "0.1.0",
+        rollAgent: {
+          runtime: { ownership: "on-demand", transport: "stdio" },
+          start: { command: "node", args: ["dist/index.js"], maxBufferSize },
+        },
+      }),
+      "utf-8",
+    );
+  }
+
+  it("reads start.maxBufferSize from package.json#rollAgent into the stdio transport", () => {
+    writeStdioManifest(33_554_432);
+
+    const result = discoverAgent(tmpDir);
+
+    assert.deepEqual(result.transport, {
+      type: "stdio",
+      command: "node",
+      args: ["dist/index.js"],
+      maxBufferSize: 33_554_432,
+    });
+  });
+
+  it("leaves maxBufferSize unset when package.json#rollAgent does not declare it", () => {
+    writeStdioManifest(undefined);
+
+    const result = discoverAgent(tmpDir);
+
+    assert.deepEqual(result.transport, { type: "stdio", command: "node", args: ["dist/index.js"] });
+  });
+
+  for (const invalid of ["32MiB", 0, -1, 1.5]) {
+    it(`rejects package.json#rollAgent start.maxBufferSize ${JSON.stringify(invalid)}`, () => {
+      writeStdioManifest(invalid);
+
+      assert.throws(
+        () => discoverAgent(tmpDir),
+        (err: Error) => err.message.includes("start.maxBufferSize"),
+      );
+    });
+  }
+
+  it("reads roll-max-buffer-size from SKILL.md metadata into the stdio transport", () => {
+    writeFileSync(
+      resolve(tmpDir, "SKILL.md"),
+      '---\nname: big-output\ndescription: Big output agent\nmetadata:\n  roll-command: python3 agent.py\n  roll-max-buffer-size: "33554432"\n---\n',
+    );
+
+    const result = discoverAgent(tmpDir);
+
+    assert.deepEqual(result.transport, {
+      type: "stdio",
+      command: "python3",
+      args: ["agent.py"],
+      maxBufferSize: 33_554_432,
+    });
+  });
+
+  it("rejects a non-integer roll-max-buffer-size in SKILL.md metadata", () => {
+    writeFileSync(
+      resolve(tmpDir, "SKILL.md"),
+      "---\nname: big-output\ndescription: Big output agent\nmetadata:\n  roll-command: python3 agent.py\n  roll-max-buffer-size: lots\n---\n",
+    );
+
+    assert.throws(
+      () => discoverAgent(tmpDir),
+      (err: Error) => err.message.includes("roll-max-buffer-size"),
+    );
+  });
+
+  it("ignores roll-max-buffer-size for streamable-http transports", () => {
+    writeFileSync(
+      resolve(tmpDir, "SKILL.md"),
+      '---\nname: big-output\ndescription: Big output agent\nmetadata:\n  roll-transport: streamable-http\n  roll-endpoint: http://127.0.0.1:8100/mcp\n  roll-max-buffer-size: "33554432"\n---\n',
+    );
+
+    const result = discoverAgent(tmpDir);
+
+    assert.deepEqual(result.transport, {
+      type: "streamable-http",
+      endpoint: "http://127.0.0.1:8100/mcp",
+    });
+  });
+});

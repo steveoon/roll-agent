@@ -56,10 +56,12 @@ export function resolveTransportWithDevSpawnSpec(agent: RegisteredAgent): AgentT
     return agent.transport;
   }
 
+  const { maxBufferSize } = agent.transport;
   return {
     type: "stdio",
     command: fallbackSpec.command,
     ...(fallbackSpec.args ? { args: fallbackSpec.args } : {}),
+    ...(maxBufferSize !== undefined ? { maxBufferSize } : {}),
   };
 }
 
