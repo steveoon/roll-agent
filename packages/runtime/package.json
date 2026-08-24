@@ -38,11 +38,11 @@
     "clean": "rm -rf dist"
   },
   "dependencies": {
-    "@ai-sdk/provider": "^4.0.1",
-    "@modelcontextprotocol/sdk": "^1.12.0",
+    "@ai-sdk/provider": "^4.0.7",
+    "@modelcontextprotocol/sdk": "^1.30.0",
     "@roll-agent/protocol": "workspace:*",
     "@vscode/ripgrep": "1.18.0",
-    "ai": "^7.0.9",
+    "ai": "^7.0.65",
     "yaml": "2.8.3",
     "zod": "^3.25.76"
   },
