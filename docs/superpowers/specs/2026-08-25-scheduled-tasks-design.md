@@ -147,6 +147,7 @@ schema 升到 v2（`schedules.authority_digest`、`invocations.max_attempts / ex
 - 单例门禁进账本事务：`claimPendingInvocation` 的 UPDATE 带 `NOT EXISTS 其他 claimed/running`；`claimDue` 对 pending / retry / 过期行同样检查 `hasOtherLiveRunInTransaction`。manual 触发在运行中排队，`run-now --inline` 被挡时删掉刚入队的行并退出 1；不提供 `--force`
 - 人工出口：`roll schedule cancel <invocation-id>`。kai 三审指出首版对 running 行 fail-open（先置终态再可选 kill）。改为：pending / retry / 未 begin 的 claimed 直接取消；running 行由 `cancelInvocation` 在事务内探活，alive → `executor-alive`（CLI 要求 `--kill`，kill 后轮询确认 dead 再取消），unknown → `executor-unknown`（只能显式 `--abandon`，命名与文案标明危险），dead → 取消。单例只在确认退出或显式放弃时释放
 - exec 以进程组运行（POSIX `detached` + `kill(-pid)`），`maxRunMs` / 孤儿终止覆盖后代进程；文档改口：保证「不会同时运行两个可验证存活的 exec 进程」，不承诺 exactly-once
+- kai 四审（High：PATH shadow）：僵尸判定曾调用 PATH 上的裸 `ps`，伪造输出 `Z` 的 `ps` 可让存活 executor 被判 dead 而释放单例。改为只信任 `/bin/ps` / `/usr/bin/ps` 绝对路径（找不到 → 状态未知 → 维持 alive，fail-closed），并加 PATH-shadow 回归；Windows 终止改用 `%SystemRoot%\\System32\\taskkill.exe /T /F`（复用 bash profile 先例，未在 Windows 主机实测）；`--kill` 与 `--abandon` 参数层互斥
 - 待拍板（产品取舍，未改）：authority digest 只覆盖 `runtime.approval` / `runtime.shell`，不覆盖 Agent / tool metadata；scheduled run 创建的 Thread 不随账本清理
 
 ## 不覆盖（v2）

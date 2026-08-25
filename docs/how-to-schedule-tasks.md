@@ -47,11 +47,11 @@
 - **无人值守**：每次触发起一个新 thread，以 `background` 模式运行。需要人工确认的工具调用会被策略直接拒绝，模型会跳过并在结尾说明；这样的运行记为 `needs_confirmation`，调度照常推进。
 - **失败与重试**：exec 子进程抛错或非零退出 → 10 秒后重试，每次触发最多尝试 3 次（首次 + 2 次重试）；用完后任务自动 `paused`，`roll schedule list` 会显示原因。修好后 `roll schedule resume <id>`。`pause` 会立即放弃该任务尚未开始的重试。
 - **权限边界漂移即停**：每次执行前会把当前 `runtime.approval` / `runtime.shell` 配置的摘要与登记时对比，不一致（无论放宽还是收紧）都不会运行，任务直接 `paused` 并给出原因。摘要只覆盖审批策略与 shell 开关，不覆盖已注册 Agent / skills 的变化。`roll schedule resume <id>` 同时是「重新授权」：它总会以 `--cwd` 目录当前的配置重新记录摘要（对 active 任务也一样），摘要变化时会打印提示。
-- **不会重复执行同一次触发**：exec 子进程会把自己的 PID 与 OS 启动身份写进账本；即使 daemon 被强杀、机器休眠后 lease 过期，只有在证实旧子进程已经退出后才会重新执行，无法证实时一直等待（`roll schedule runs` 里可以看到它仍是 `running`）。单次运行超过 1 小时会被 daemon 强制终止（POSIX 上终止 exec 进程组，Windows 只终止 exec 根进程）并按失败重试——包括上一个 daemon 留下的孤儿子进程。这套机制保证的是「不会同时运行两个可验证存活的 exec 进程」，不是严格的 exactly-once：被强杀的 turn 里已经发出的消息、写过的文件不会回滚。
+- **不会重复执行同一次触发**：exec 子进程会把自己的 PID 与 OS 启动身份写进账本；即使 daemon 被强杀、机器休眠后 lease 过期，只有在证实旧子进程已经退出后才会重新执行，无法证实时一直等待（`roll schedule runs` 里可以看到它仍是 `running`）。单次运行超过 1 小时会被 daemon 强制终止（POSIX 上终止 exec 进程组，Windows 上用 `taskkill /T /F` 终止进程树）并按失败重试——包括上一个 daemon 留下的孤儿子进程。这套机制保证的是「不会同时运行两个可验证存活的 exec 进程」，不是严格的 exactly-once：被强杀的 turn 里已经发出的消息、写过的文件不会回滚。
 - **错过的触发只补一次**：机器睡眠后醒来，不会把错过的周期一次性补跑；下次运行时间从「现在」重新计算。
 - **同一任务同一时刻只运行一次**：无论 scheduled 还是 manual 触发，账本事务里都会拒绝在已有 `claimed` / `running` 记录时再启动一次。周期触发遇到上一轮未结束会跳过并重新计算下次时间；`run-now` 入队的记录会等上一轮结束后由 daemon 执行；`run-now --inline` 遇到运行中的任务直接退出 1。
 - **手动触发**：`roll schedule run-now <id>` 入队交给 daemon；`--inline` 在当前进程内执行并等待结果，不依赖 daemon，**只尝试一次**，非 `completed` / `needs_confirmation` 时退出码为 1（Ctrl+C 会转发给 exec 子进程）。手动触发的失败不会暂停任务；对 `paused` 的任务也可以 `run-now`（权限漂移检查照常生效），便于修好后先试跑再 `resume`。
-- **取消一次运行**：`roll schedule cancel <invocation-id>` 对排队中（`pending` / `retry`）和尚未启动（`claimed`）的记录直接置终态并作废 token。对 `running` 的记录，取消必须加 `--kill`：向 exec 进程组发送 SIGKILL 并**确认进程已退出**后才置终态，确认不了就保持 `running`、不释放单例。探活永远是 unknown 的记录（例如平台读不到进程身份）只能用 `--abandon` 放弃追踪——这是危险操作，旧进程若还活着，其副作用不会被阻止。
+- **取消一次运行**：`roll schedule cancel <invocation-id>` 对排队中（`pending` / `retry`）和尚未启动（`claimed`）的记录直接置终态并作废 token。对 `running` 的记录，取消必须加 `--kill`：终止 exec 进程树（POSIX 进程组 / Windows `taskkill /T`）并**确认根进程已退出**后才置终态；`--kill` 与 `--abandon` 互斥，确认不了就保持 `running`、不释放单例。探活永远是 unknown 的记录（例如平台读不到进程身份）只能用 `--abandon` 放弃追踪——这是危险操作，旧进程若还活着，其副作用不会被阻止。
 - **暂停 / 恢复不改相位**：`pause` 后 `resume`，仍按原来的下次运行时间执行。
 - **停止 daemon**：收到 SIGTERM 后先给子进程 SIGTERM，10 秒内未退出则 SIGKILL；仍未确认退出的运行由上面的探活规则决定是否重跑。
 - **运行记录保留**：每个任务最多保留最近 100 条终态记录、最长 30 天，daemon 每轮自动清理。每次运行创建的 chat 线程不随账本清理，仍可用 `roll chat --session <threadId>` 打开。

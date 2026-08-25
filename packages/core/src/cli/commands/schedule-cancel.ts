@@ -41,7 +41,8 @@ export default defineCommand({
     invocation: { type: "positional", description: "invocation ID", required: true },
     kill: {
       type: "boolean",
-      description: "向仍存活的 exec 进程组发送 SIGKILL，并等待其退出后再取消",
+      description:
+        "终止仍存活的 exec 进程树（POSIX 进程组 / Windows taskkill /T），确认退出后再取消",
       default: false,
     },
     abandon: {
@@ -53,6 +54,9 @@ export default defineCommand({
   },
   async run({ args }) {
     await runScheduleCommand(async () => {
+      if (args.kill && args.abandon) {
+        throw new Error("--kill 与 --abandon 互斥：--kill 要求确认进程退出，--abandon 放弃确认");
+      }
       const { config } = loadConfig();
       const runtime = await loadRuntime();
       const store = openScheduleStore(config, runtime);
@@ -104,7 +108,7 @@ export default defineCommand({
         }
         log.success(`已取消 invocation ${after.id}（原状态 ${before.status}）`);
         if (killed) {
-          log.info(`exec 进程组 (pid ${String(before.executor?.pid ?? "?")}) 已终止并确认退出`);
+          log.info(`exec 进程树 (pid ${String(before.executor?.pid ?? "?")}) 已终止并确认退出`);
         }
         if (args.abandon) {
           log.warn("已按 --abandon 释放单例；若旧 exec 进程仍在运行，其副作用不会被阻止");

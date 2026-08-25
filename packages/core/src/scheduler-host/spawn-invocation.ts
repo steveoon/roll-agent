@@ -2,6 +2,7 @@ import { spawn } from "node:child_process";
 import { closeSync, openSync } from "node:fs";
 import type { ClaimedInvocation } from "@roll-agent/runtime";
 import type { BundledRollInvocation } from "../companion-host/invocation.ts";
+import { killProcessTree } from "./executor-liveness.ts";
 import { SCHEDULE_DATA_DIR_ENV, SCHEDULE_TOKEN_ENV } from "./paths.ts";
 
 export type SpawnedInvocationSignal = "SIGTERM" | "SIGKILL";
@@ -67,16 +68,9 @@ export function createInvocationSpawner(
     return {
       exited,
       kill: (signal: SpawnedInvocationSignal = "SIGTERM") => {
-        if (process.platform !== "win32" && child.pid !== undefined) {
-          try {
-            process.kill(-child.pid, signal);
-            return;
-          } catch {
-            child.kill(signal);
-            return;
-          }
+        if (child.pid === undefined || !killProcessTree(child.pid, signal)) {
+          child.kill(signal);
         }
-        child.kill(signal);
       },
     };
   };

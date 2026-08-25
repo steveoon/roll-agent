@@ -78,3 +78,47 @@ test("父进程未回收的僵尸子进程探活为 dead（POSIX）", async (t) 
   assert.equal(probedWhileBlocked.stdout.trim(), "dead", probedWhileBlocked.stderr);
   await reaped;
 });
+
+test("PATH 上伪造的 ps 不能把存活的 executor 判成 zombie（探活只信任绝对路径的 ps）", async (t) => {
+  if (process.platform === "win32") {
+    t.skip("Windows 没有 ps");
+    return;
+  }
+  const identity = currentExecutorIdentity();
+  if (identity === undefined) {
+    t.skip("当前平台无法读取进程启动身份");
+    return;
+  }
+  const { mkdtempSync, writeFileSync, chmodSync, rmSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const { spawnSync } = await import("node:child_process");
+  const shadowDir = mkdtempSync(join(tmpdir(), "roll-ps-shadow-"));
+  try {
+    const fakePs = join(shadowDir, "ps");
+    writeFileSync(fakePs, "#!/bin/sh\necho Z\n", { mode: 0o700 });
+    chmodSync(fakePs, 0o700);
+    const probed = spawnSync(
+      process.execPath,
+      [
+        "--experimental-strip-types",
+        "--input-type=module",
+        "-e",
+        `import { probeExecutorLiveness } from ${JSON.stringify(new URL("./executor-liveness.ts", import.meta.url).pathname)};
+         console.log(probeExecutorLiveness({ pid: ${String(process.pid)}, startToken: ${JSON.stringify(identity.startToken)} }));`,
+      ],
+      {
+        encoding: "utf-8",
+        env: { ...process.env, PATH: `${shadowDir}:${process.env.PATH ?? ""}` },
+      },
+    );
+    assert.equal(probed.stdout.trim(), EXECUTOR_LIVENESS.alive, probed.stderr);
+    const shadowWorks = spawnSync("ps", ["-p", String(process.pid), "-o", "stat="], {
+      encoding: "utf-8",
+      env: { ...process.env, PATH: `${shadowDir}:${process.env.PATH ?? ""}` },
+    });
+    assert.equal(shadowWorks.stdout.trim(), "Z", "fake ps should shadow PATH lookups");
+  } finally {
+    rmSync(shadowDir, { recursive: true, force: true });
+  }
+});
