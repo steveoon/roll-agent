@@ -319,7 +319,10 @@ test("e2e: roll schedule cancel 对排队/运行/不可验证三种状态分别�
     assert.equal(again.status, 1);
     assert.match(again.stderr, /终态/u);
 
-    sleeper = spawn(process.execPath, ["-e", "setTimeout(() => {}, 60000)"], { stdio: "ignore" });
+    sleeper = spawn(process.execPath, ["-e", "setTimeout(() => {}, 60000)"], {
+      stdio: "ignore",
+      detached: process.platform !== "win32",
+    });
     await delay(300);
     const sleeperPid = sleeper.pid;
     assert.ok(sleeperPid);

@@ -2,14 +2,18 @@ import { spawn } from "node:child_process";
 import { closeSync, openSync } from "node:fs";
 import type { ClaimedInvocation } from "@roll-agent/runtime";
 import type { BundledRollInvocation } from "../companion-host/invocation.ts";
-import { killProcessTree } from "./executor-liveness.ts";
+import {
+  KILL_PROCESS_TREE_OUTCOMES,
+  killProcessTree,
+  type KillProcessTreeOutcome,
+} from "./executor-liveness.ts";
 import { SCHEDULE_DATA_DIR_ENV, SCHEDULE_TOKEN_ENV } from "./paths.ts";
 
 export type SpawnedInvocationSignal = "SIGTERM" | "SIGKILL";
 
 export interface SpawnedInvocation {
   readonly exited: Promise<number | null>;
-  kill(signal?: SpawnedInvocationSignal): void;
+  kill(signal?: SpawnedInvocationSignal): KillProcessTreeOutcome | void;
 }
 
 export type InvocationSpawner = (claim: ClaimedInvocation) => SpawnedInvocation;
@@ -68,9 +72,15 @@ export function createInvocationSpawner(
     return {
       exited,
       kill: (signal: SpawnedInvocationSignal = "SIGTERM") => {
-        if (child.pid === undefined || !killProcessTree(child.pid, signal)) {
-          child.kill(signal);
+        if (child.pid !== undefined) {
+          const outcome = killProcessTree(child.pid, signal);
+          if (outcome === KILL_PROCESS_TREE_OUTCOMES.tree) {
+            return outcome;
+          }
         }
+        return child.kill(signal)
+          ? KILL_PROCESS_TREE_OUTCOMES.rootOnly
+          : KILL_PROCESS_TREE_OUTCOMES.failed;
       },
     };
   };

@@ -271,8 +271,13 @@ export class SchedulerDaemon {
   }
 
   private async terminateChildren(): Promise<void> {
-    for (const entry of this.running.values()) {
-      entry.handle.kill("SIGTERM");
+    for (const [id, entry] of this.running) {
+      const outcome = entry.handle.kill("SIGTERM");
+      if (typeof outcome === "string" && outcome !== "tree-terminated") {
+        this.logger.error(
+          `invocation ${id} 的 exec 进程树未能整体终止（${outcome}），仅根进程收到信号`,
+        );
+      }
     }
     await settleWithin(
       [...this.running.values()].map((entry) => entry.handle.exited),

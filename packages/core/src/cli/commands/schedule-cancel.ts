@@ -3,6 +3,7 @@ import type { ExecutorIdentity } from "@roll-agent/runtime";
 import { defineCommand } from "citty";
 import { loadConfig } from "../../config/loader.ts";
 import {
+  KILL_PROCESS_TREE_OUTCOMES,
   probeExecutorLiveness,
   terminateExecutor,
 } from "../../scheduler-host/executor-liveness.ts";
@@ -18,18 +19,35 @@ import {
 const KILL_CONFIRM_TIMEOUT_MS = 5_000;
 const KILL_CONFIRM_POLL_MS = 100;
 
-async function killAndConfirmExit(executor: ExecutorIdentity): Promise<boolean> {
-  if (!terminateExecutor(executor)) {
-    return probeExecutorLiveness(executor) === EXECUTOR_LIVENESS.dead;
+const KILL_RESULTS = {
+  confirmed: "confirmed",
+  treeKillFailed: "tree-kill-failed",
+  stillAlive: "still-alive",
+  unverifiable: "unverifiable",
+} as const;
+type KillResult = (typeof KILL_RESULTS)[keyof typeof KILL_RESULTS];
+
+async function killAndConfirmExit(executor: ExecutorIdentity): Promise<KillResult> {
+  const outcome = terminateExecutor(executor);
+  if (outcome !== KILL_PROCESS_TREE_OUTCOMES.tree) {
+    const liveness = probeExecutorLiveness(executor);
+    if (liveness === EXECUTOR_LIVENESS.dead) {
+      return KILL_RESULTS.confirmed;
+    }
+    return liveness === EXECUTOR_LIVENESS.unknown
+      ? KILL_RESULTS.unverifiable
+      : KILL_RESULTS.treeKillFailed;
   }
   const deadline = Date.now() + KILL_CONFIRM_TIMEOUT_MS;
   while (Date.now() < deadline) {
     if (probeExecutorLiveness(executor) === EXECUTOR_LIVENESS.dead) {
-      return true;
+      return KILL_RESULTS.confirmed;
     }
     await new Promise((resolve) => setTimeout(resolve, KILL_CONFIRM_POLL_MS));
   }
-  return probeExecutorLiveness(executor) === EXECUTOR_LIVENESS.dead;
+  return probeExecutorLiveness(executor) === EXECUTOR_LIVENESS.dead
+    ? KILL_RESULTS.confirmed
+    : KILL_RESULTS.stillAlive;
 }
 
 export default defineCommand({
@@ -71,7 +89,13 @@ export default defineCommand({
           before.status === runtime.INVOCATION_STATUSES.running &&
           before.executor !== undefined
         ) {
-          killed = await killAndConfirmExit(before.executor);
+          const result = await killAndConfirmExit(before.executor);
+          if (result === KILL_RESULTS.treeKillFailed) {
+            throw new Error(
+              `无法整体终止 invocation ${args.invocation} 的 exec 进程树（pid ${String(before.executor.pid)}；Windows 上 taskkill 失败或进程不是进程组首领），未取消、未释放单例`,
+            );
+          }
+          killed = result === KILL_RESULTS.confirmed;
         }
         const outcome = store.cancelInvocation(
           args.invocation,

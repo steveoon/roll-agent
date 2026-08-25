@@ -2,7 +2,12 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { EXECUTOR_LIVENESS } from "@roll-agent/runtime";
-import { currentExecutorIdentity, probeExecutorLiveness } from "./executor-liveness.ts";
+import {
+  KILL_PROCESS_TREE_OUTCOMES,
+  currentExecutorIdentity,
+  killProcessTree,
+  probeExecutorLiveness,
+} from "./executor-liveness.ts";
 
 test("当前进程的 executor identity 探活为 alive", (t) => {
   const identity = currentExecutorIdentity();
@@ -121,4 +126,60 @@ test("PATH 上伪造的 ps 不能把存活的 executor 判成 zombie（探活只
   } finally {
     rmSync(shadowDir, { recursive: true, force: true });
   }
+});
+
+test("killProcessTree：Windows taskkill 非零/缺失时返回 failed 且不退回根 PID；成功返回 tree；SIGTERM 不带 /F", () => {
+  const killed: Array<[number, string]> = [];
+  const calls: string[][] = [];
+  const fakeSpawn = (status: number | null, error?: Error) =>
+    ((_file: string, args: readonly string[]) => {
+      calls.push([...args]);
+      return { status, error, stdout: "", stderr: "", pid: 1, output: [], signal: null } as never;
+    }) as unknown as typeof spawnSync;
+  const deps = (status: number | null, error?: Error) => ({
+    platform: "win32" as const,
+    env: { SystemRoot: "C:\\Windows" },
+    spawnSync: fakeSpawn(status, error),
+    kill: (pid: number, signal: NodeJS.Signals) => {
+      killed.push([pid, signal]);
+    },
+  });
+  assert.equal(killProcessTree(4242, "SIGKILL", deps(1)), KILL_PROCESS_TREE_OUTCOMES.failed);
+  assert.equal(
+    killProcessTree(4242, "SIGKILL", deps(null, new Error("spawn failed"))),
+    KILL_PROCESS_TREE_OUTCOMES.failed,
+  );
+  assert.equal(killProcessTree(4242, "SIGKILL", deps(0)), KILL_PROCESS_TREE_OUTCOMES.tree);
+  assert.equal(killProcessTree(4242, "SIGTERM", deps(0)), KILL_PROCESS_TREE_OUTCOMES.tree);
+  assert.deepEqual(calls[0], ["/T", "/F", "/PID", "4242"]);
+  assert.deepEqual(calls[3], ["/T", "/PID", "4242"]);
+  assert.deepEqual(killed, []);
+  assert.equal(
+    killProcessTree(4242, "SIGKILL", { ...deps(0), env: {} }),
+    KILL_PROCESS_TREE_OUTCOMES.failed,
+  );
+  assert.equal(calls.length, 4);
+});
+
+test("killProcessTree：POSIX 进程组信号失败时返回 failed，不单独杀根进程", () => {
+  const killed: Array<[number, string]> = [];
+  const outcome = killProcessTree(4242, "SIGKILL", {
+    platform: "darwin",
+    kill: (pid, signal) => {
+      killed.push([pid, signal]);
+      if (pid < 0) {
+        throw Object.assign(new Error("ESRCH"), { code: "ESRCH" });
+      }
+    },
+  });
+  assert.equal(outcome, KILL_PROCESS_TREE_OUTCOMES.failed);
+  assert.deepEqual(killed, [[-4242, "SIGKILL"]]);
+  const ok = killProcessTree(4242, "SIGTERM", {
+    platform: "linux",
+    kill: (pid, signal) => {
+      killed.push([pid, signal]);
+    },
+  });
+  assert.equal(ok, KILL_PROCESS_TREE_OUTCOMES.tree);
+  assert.deepEqual(killed[1], [-4242, "SIGTERM"]);
 });

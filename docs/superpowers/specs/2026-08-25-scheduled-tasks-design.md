@@ -148,6 +148,7 @@ schema 升到 v2（`schedules.authority_digest`、`invocations.max_attempts / ex
 - 人工出口：`roll schedule cancel <invocation-id>`。kai 三审指出首版对 running 行 fail-open（先置终态再可选 kill）。改为：pending / retry / 未 begin 的 claimed 直接取消；running 行由 `cancelInvocation` 在事务内探活，alive → `executor-alive`（CLI 要求 `--kill`，kill 后轮询确认 dead 再取消），unknown → `executor-unknown`（只能显式 `--abandon`，命名与文案标明危险），dead → 取消。单例只在确认退出或显式放弃时释放
 - exec 以进程组运行（POSIX `detached` + `kill(-pid)`），`maxRunMs` / 孤儿终止覆盖后代进程；文档改口：保证「不会同时运行两个可验证存活的 exec 进程」，不承诺 exactly-once
 - kai 四审（High：PATH shadow）：僵尸判定曾调用 PATH 上的裸 `ps`，伪造输出 `Z` 的 `ps` 可让存活 executor 被判 dead 而释放单例。改为只信任 `/bin/ps` / `/usr/bin/ps` 绝对路径（找不到 → 状态未知 → 维持 alive，fail-closed），并加 PATH-shadow 回归；Windows 终止改用 `%SystemRoot%\\System32\\taskkill.exe /T /F`（复用 bash profile 先例，未在 Windows 主机实测）；`--kill` 与 `--abandon` 参数层互斥
+- kai 五审（Medium · PLAUSIBLE：Windows `taskkill` 失败后退回只杀根进程却报告树终止成功）：`killProcessTree` 改为返回 `tree-terminated | root-only | failed` 判别联合，helper 内不再退回根 PID（POSIX 进程组信号失败同样返回 failed）；`terminateExecutor` 同样返回联合；`cancel --kill` 在树终止失败时拒绝取消、不释放单例，executor 不可验证时仍走 `--abandon` 路径；daemon/spawner 的 best-effort 根进程终止由调用方执行并记日志「未整体终止」；Windows SIGTERM 阶段用不带 `/F` 的 `taskkill /T`。可注入 platform / spawnSync / kill 的失败分支单测覆盖 taskkill 非零、启动失败、缺 SystemRoot、POSIX 非组首领
 - 待拍板（产品取舍，未改）：authority digest 只覆盖 `runtime.approval` / `runtime.shell`，不覆盖 Agent / tool metadata；scheduled run 创建的 Thread 不随账本清理
 
 ## 不覆盖（v2）

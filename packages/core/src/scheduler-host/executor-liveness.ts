@@ -83,49 +83,68 @@ export function currentExecutorIdentity(pid: number = process.pid): ExecutorIden
 
 const TASKKILL_TIMEOUT_MS = 5_000;
 
-function resolveWindowsTaskkill(): string | undefined {
-  const systemRoot = process.env.SystemRoot ?? process.env.SYSTEMROOT;
+export const KILL_PROCESS_TREE_OUTCOMES = {
+  tree: "tree-terminated",
+  rootOnly: "root-only",
+  failed: "failed",
+} as const;
+export type KillProcessTreeOutcome =
+  (typeof KILL_PROCESS_TREE_OUTCOMES)[keyof typeof KILL_PROCESS_TREE_OUTCOMES];
+
+export interface KillProcessTreeDeps {
+  readonly platform?: NodeJS.Platform;
+  readonly env?: NodeJS.ProcessEnv;
+  readonly spawnSync?: typeof spawnSync;
+  readonly kill?: (pid: number, signal: NodeJS.Signals) => void;
+}
+
+function resolveWindowsTaskkill(env: NodeJS.ProcessEnv): string | undefined {
+  const systemRoot = env.SystemRoot ?? env.SYSTEMROOT;
   if (systemRoot === undefined || !/^[A-Za-z]:[\\/]/u.test(systemRoot)) {
     return undefined;
   }
   return win32Path.join(systemRoot, "System32", "taskkill.exe");
 }
 
-export function killProcessTree(pid: number, signal: NodeJS.Signals = "SIGKILL"): boolean {
-  if (process.platform === "win32") {
-    const taskkill = resolveWindowsTaskkill();
-    if (taskkill !== undefined) {
-      const result = spawnSync(taskkill, ["/T", "/F", "/PID", String(pid)], {
-        encoding: "utf-8",
-        timeout: TASKKILL_TIMEOUT_MS,
-        windowsHide: true,
-      });
-      if (result.status === 0 && result.error === undefined) {
-        return true;
-      }
+export function killProcessTree(
+  pid: number,
+  signal: NodeJS.Signals = "SIGKILL",
+  deps: KillProcessTreeDeps = {},
+): KillProcessTreeOutcome {
+  const platform = deps.platform ?? process.platform;
+  if (platform === "win32") {
+    const taskkill = resolveWindowsTaskkill(deps.env ?? process.env);
+    if (taskkill === undefined) {
+      return KILL_PROCESS_TREE_OUTCOMES.failed;
     }
-  } else {
-    try {
-      process.kill(-pid, signal);
-      return true;
-    } catch {
-      // not a process-group leader; fall back to the single pid
-    }
+    const run = deps.spawnSync ?? spawnSync;
+    const args =
+      signal === "SIGKILL" ? ["/T", "/F", "/PID", String(pid)] : ["/T", "/PID", String(pid)];
+    const result = run(taskkill, args, {
+      encoding: "utf-8",
+      timeout: TASKKILL_TIMEOUT_MS,
+      windowsHide: true,
+    });
+    return result.status === 0 && result.error === undefined
+      ? KILL_PROCESS_TREE_OUTCOMES.tree
+      : KILL_PROCESS_TREE_OUTCOMES.failed;
   }
+  const kill = deps.kill ?? ((target: number, sig: NodeJS.Signals) => process.kill(target, sig));
   try {
-    process.kill(pid, signal);
-    return true;
+    kill(-pid, signal);
+    return KILL_PROCESS_TREE_OUTCOMES.tree;
   } catch {
-    return false;
+    return KILL_PROCESS_TREE_OUTCOMES.failed;
   }
 }
 
 export function terminateExecutor(
   executor: ExecutorIdentity,
   signal: NodeJS.Signals = "SIGKILL",
-): boolean {
+  deps: KillProcessTreeDeps = {},
+): KillProcessTreeOutcome {
   if (probeExecutorLiveness(executor) !== EXECUTOR_LIVENESS.alive) {
-    return false;
+    return KILL_PROCESS_TREE_OUTCOMES.failed;
   }
-  return killProcessTree(executor.pid, signal);
+  return killProcessTree(executor.pid, signal, deps);
 }
