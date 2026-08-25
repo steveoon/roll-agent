@@ -15,6 +15,7 @@ const baseConfig: RollConfig = {
   ask: {},
   chat: DEFAULT_CONFIG.chat,
   runtime: DEFAULT_CONFIG.runtime,
+  scheduler: DEFAULT_CONFIG.scheduler,
   skills: DEFAULT_CONFIG.skills,
   agents: { dataDir: "/tmp/agents" },
   install: DEFAULT_CONFIG.install,

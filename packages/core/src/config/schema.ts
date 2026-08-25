@@ -108,6 +108,12 @@ export const runtimeConfigSchema = z.object({
   shell: runtimeShellConfigSchema.default({}),
 });
 
+export const schedulerConfigSchema = z.object({
+  dataDir: z.string().default("~/.roll-agent/scheduler"),
+  maxSchedules: z.number().int().min(1).max(500).default(50),
+  maxConcurrentRuns: z.number().int().min(1).max(8).default(2),
+});
+
 export const skillsConfigSchema = z.object({
   /** 额外的 skill 目录（canonical `.agents/skills` 之外的补充来源）。 */
   dirs: z.array(z.string().trim().min(1)).default([]),
@@ -226,6 +232,7 @@ export const rollConfigSchema = z.object({
   ask: askConfigSchema,
   chat: chatConfigSchema.default({}),
   runtime: runtimeConfigSchema.default({}),
+  scheduler: schedulerConfigSchema.default({}),
   skills: skillsConfigSchema.default({}),
   agents: agentsConfigSchema,
   install: installConfigSchema.default({}),
@@ -237,6 +244,7 @@ export type ChatConfig = z.infer<typeof chatConfigSchema>;
 export type ChatScreenMode = z.infer<typeof chatScreenModeSchema>;
 export type ChatThinkingDisplay = z.infer<typeof chatThinkingDisplaySchema>;
 export type RuntimeConfig = z.infer<typeof runtimeConfigSchema>;
+export type SchedulerConfig = z.infer<typeof schedulerConfigSchema>;
 export type SkillsConfig = z.infer<typeof skillsConfigSchema>;
 export type RuntimeApprovalConfig = z.infer<typeof runtimeApprovalConfigSchema>;
 export type BrowserConfig = z.infer<typeof browserConfigSchema>;

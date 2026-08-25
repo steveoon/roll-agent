@@ -136,6 +136,10 @@ function expandPaths(config: RollConfig): RollConfig {
       ...config.runtime,
       threadsDir: expandTilde(config.runtime.threadsDir),
     },
+    scheduler: {
+      ...config.scheduler,
+      dataDir: expandTilde(config.scheduler.dataDir),
+    },
     skills: {
       ...config.skills,
       dirs: config.skills.dirs.map(expandTilde),
