@@ -14,9 +14,14 @@ import {
   type SchedulerPaths,
 } from "./paths.ts";
 
+export interface SchedulerServiceSettings {
+  readonly maxConcurrentRuns: number;
+}
+
 export function schedulerServiceIdentity(
   paths: SchedulerPaths,
   invocation: BundledRollInvocation,
+  settings: SchedulerServiceSettings,
 ): ServicePlanIdentity {
   return {
     label: SCHEDULER_SERVICE_LABEL,
@@ -30,12 +35,17 @@ export function schedulerServiceIdentity(
       "schedule",
       "daemon",
       "--foreground",
+      "--data-dir",
+      paths.dataDir,
+      "--max-concurrent-runs",
+      String(settings.maxConcurrentRuns),
     ],
   };
 }
 
 export function createSchedulerServiceController(options: {
   readonly dataDir: string;
+  readonly maxConcurrentRuns: number;
   readonly invocation?: BundledRollInvocation;
   readonly platform?: NodeJS.Platform;
   readonly homeDir?: string;
@@ -43,7 +53,9 @@ export function createSchedulerServiceController(options: {
   const paths = createSchedulerPaths(options.dataDir, options.homeDir);
   const invocation = options.invocation ?? createBundledRollInvocation();
   return createPlatformServiceController({
-    identity: schedulerServiceIdentity(paths, invocation),
+    identity: schedulerServiceIdentity(paths, invocation, {
+      maxConcurrentRuns: options.maxConcurrentRuns,
+    }),
     ...(options.platform ? { platform: options.platform } : {}),
   });
 }

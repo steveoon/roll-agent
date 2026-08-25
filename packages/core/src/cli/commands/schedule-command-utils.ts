@@ -3,16 +3,27 @@ import { describeTrigger } from "@roll-agent/runtime";
 import type { RollConfig } from "../../config/schema.ts";
 import { log } from "../utils/output.ts";
 import { loadRuntime, type RuntimeModule } from "../../runtime-host/engine-factory.ts";
+import { probeExecutorLiveness } from "../../scheduler-host/executor-liveness.ts";
 import { SCHEDULE_TOKEN_ENV } from "../../scheduler-host/paths.ts";
 
 export type ScheduleStoreInstance = InstanceType<RuntimeModule["ScheduleStore"]>;
 
+export interface OpenScheduleStoreOptions {
+  readonly dataDir?: string;
+}
+
 export function openScheduleStore(
-  config: RollConfig,
+  config: RollConfig | undefined,
   runtime: RuntimeModule,
+  options: OpenScheduleStoreOptions = {},
 ): ScheduleStoreInstance {
-  return new runtime.ScheduleStore(config.scheduler.dataDir, {
-    maxSchedules: config.scheduler.maxSchedules,
+  const dataDir = options.dataDir ?? config?.scheduler.dataDir;
+  if (dataDir === undefined) {
+    throw new Error("无法确定 scheduler data-dir");
+  }
+  return new runtime.ScheduleStore(dataDir, {
+    ...(config ? { maxSchedules: config.scheduler.maxSchedules } : {}),
+    executorLiveness: probeExecutorLiveness,
   });
 }
 
@@ -46,6 +57,7 @@ export function serializeSchedule(record: ScheduleRecord) {
     nextRunAt: isoOrUndefined(record.nextRunAtMs),
     lastRunAt: isoOrUndefined(record.lastRunAtMs),
     lastError: record.lastError,
+    authorityDigest: record.authorityDigest,
     createdAt: new Date(record.createdAtMs).toISOString(),
   };
 }
@@ -58,6 +70,8 @@ export function serializeInvocation(record: InvocationRecord) {
     status: record.status,
     scheduledFor: new Date(record.scheduledForMs).toISOString(),
     attempt: record.attempt,
+    maxAttempts: record.maxAttempts,
+    executorPid: record.executor?.pid,
     threadId: record.threadId,
     error: record.error,
     pendingActions: record.pendingActions,

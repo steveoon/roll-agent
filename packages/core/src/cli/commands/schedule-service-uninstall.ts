@@ -9,7 +9,10 @@ export default defineCommand({
   async run() {
     await runScheduleCommand(async () => {
       const { config } = loadConfig();
-      await createSchedulerServiceController({ dataDir: config.scheduler.dataDir }).uninstall();
+      await createSchedulerServiceController({
+        dataDir: config.scheduler.dataDir,
+        maxConcurrentRuns: config.scheduler.maxConcurrentRuns,
+      }).uninstall();
       log.success("roll schedule daemon 用户服务已卸载。");
     });
   },

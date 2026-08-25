@@ -142,3 +142,34 @@ test("token 不匹配返回 lost-claim 且不调用 runner", async () => {
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test("executeInvocation 把 executor 身份写进 invocation，终态失败直接 failed 并 pause", async () => {
+  const dir = tempDir();
+  try {
+    const store = new ScheduleStore(dir, { retryBudget: 3 });
+    const claim = claimOne(store);
+    const result = await executeInvocation({
+      store,
+      invocationId: claim.invocation.id,
+      ownershipToken: claim.ownershipToken,
+      executor: { pid: 4321, startToken: "pst-v2:test" },
+      runTurn: (_schedule, invocation) => {
+        assert.deepEqual(invocation.executor, { pid: 4321, startToken: "pst-v2:test" });
+        return Promise.resolve({ status: "failed", error: "权限边界已变化", terminal: true });
+      },
+    });
+    assert.deepEqual(result, {
+      kind: "failed",
+      invocationId: claim.invocation.id,
+      error: "权限边界已变化",
+      outcome: INVOCATION_FAILURE_OUTCOMES.terminalPaused,
+    });
+    const stored = store.getInvocation(claim.invocation.id);
+    assert.equal(stored?.status, INVOCATION_STATUSES.failed);
+    assert.equal(stored?.attempt, 1);
+    assert.equal(store.getSchedule(claim.schedule.id)?.status, "paused");
+    store.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

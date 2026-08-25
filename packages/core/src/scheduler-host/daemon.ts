@@ -18,17 +18,32 @@ export interface SchedulerDaemonOptions {
   readonly pollIntervalMs?: number;
   readonly leaseRenewIntervalMs?: number;
   readonly maxTimerDelayMs?: number;
+  readonly maxRunMs?: number;
+  readonly childTerminateGraceMs?: number;
 }
 
 interface RunningInvocation {
   readonly ownershipToken: string;
   readonly handle: SpawnedInvocation;
+  readonly runTimer: ReturnType<typeof setTimeout>;
 }
 
 const MAX_TIMER_DELAY_MS = 2_147_483_647;
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function settleWithin(promises: readonly Promise<unknown>[], timeoutMs: number): Promise<void> {
+  if (promises.length === 0) {
+    return Promise.resolve();
+  }
+  return Promise.race([
+    Promise.allSettled(promises).then(() => undefined),
+    new Promise<void>((resolve) => {
+      setTimeout(resolve, timeoutMs).unref();
+    }),
+  ]);
 }
 
 export class SchedulerDaemon {
@@ -41,6 +56,8 @@ export class SchedulerDaemon {
   private readonly pollIntervalMs: number;
   private readonly leaseRenewIntervalMs: number;
   private readonly maxTimerDelayMs: number;
+  private readonly maxRunMs: number;
+  private readonly childTerminateGraceMs: number;
   private readonly running = new Map<string, RunningInvocation>();
   private wake = Promise.withResolvers<void>();
   private stopped = false;
@@ -56,6 +73,9 @@ export class SchedulerDaemon {
     this.leaseRenewIntervalMs =
       options.leaseRenewIntervalMs ?? SCHEDULER_LIMITS.leaseRenewIntervalMs;
     this.maxTimerDelayMs = options.maxTimerDelayMs ?? MAX_TIMER_DELAY_MS;
+    this.maxRunMs = options.maxRunMs ?? SCHEDULER_LIMITS.maxRunMs;
+    this.childTerminateGraceMs =
+      options.childTerminateGraceMs ?? SCHEDULER_LIMITS.childTerminateGraceMs;
   }
 
   get runningCount(): number {
@@ -63,6 +83,14 @@ export class SchedulerDaemon {
   }
 
   tick(): number {
+    try {
+      const pruned = this.store.pruneInvocations(this.now());
+      if (pruned > 0) {
+        this.logger.info(`已清理 ${String(pruned)} 条过期运行记录`);
+      }
+    } catch (error) {
+      this.logger.error(`清理运行记录失败：${errorMessage(error)}`);
+    }
     const capacity = this.maxConcurrentRuns - this.running.size;
     if (capacity <= 0) {
       return 0;
@@ -118,7 +146,17 @@ export class SchedulerDaemon {
       this.store.failInvocation(id, claim.ownershipToken, message, this.now());
       return;
     }
-    this.running.set(id, { ownershipToken: claim.ownershipToken, handle });
+    const runTimer = setTimeout(
+      () => {
+        this.logger.error(
+          `invocation ${id} 运行超过 ${String(this.maxRunMs)} ms，强制终止 exec 子进程`,
+        );
+        handle.kill("SIGKILL");
+      },
+      Math.min(this.maxRunMs, this.maxTimerDelayMs),
+    );
+    runTimer.unref();
+    this.running.set(id, { ownershipToken: claim.ownershipToken, handle, runTimer });
     handle.exited
       .then((code) => {
         this.onExit(claim, code);
@@ -131,6 +169,10 @@ export class SchedulerDaemon {
 
   private onExit(claim: ClaimedInvocation, code: number | null): void {
     const id = claim.invocation.id;
+    const entry = this.running.get(id);
+    if (entry !== undefined) {
+      clearTimeout(entry.runTimer);
+    }
     this.running.delete(id);
     const outcome = this.store.failInvocation(
       id,
@@ -174,8 +216,30 @@ export class SchedulerDaemon {
 
   private async terminateChildren(): Promise<void> {
     for (const entry of this.running.values()) {
-      entry.handle.kill();
+      entry.handle.kill("SIGTERM");
     }
-    await Promise.allSettled([...this.running.values()].map((entry) => entry.handle.exited));
+    await settleWithin(
+      [...this.running.values()].map((entry) => entry.handle.exited),
+      this.childTerminateGraceMs,
+    );
+    if (this.running.size === 0) {
+      return;
+    }
+    for (const [id, entry] of this.running) {
+      this.logger.error(
+        `invocation ${id} 的 exec 子进程在 ${String(this.childTerminateGraceMs)} ms 内未退出，发送 SIGKILL`,
+      );
+      entry.handle.kill("SIGKILL");
+    }
+    await settleWithin(
+      [...this.running.values()].map((entry) => entry.handle.exited),
+      this.childTerminateGraceMs,
+    );
+    for (const [id, entry] of this.running) {
+      clearTimeout(entry.runTimer);
+      this.logger.error(
+        `invocation ${id} 的 exec 子进程退出未确认，lease 到期后由探活决定是否重跑`,
+      );
+    }
   }
 }

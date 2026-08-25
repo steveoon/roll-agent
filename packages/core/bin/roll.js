@@ -32,8 +32,10 @@ function resolveCommandName(argv) {
   return argv.find((arg) => !arg.startsWith("-"));
 }
 
+const SQLITE_COMMANDS = new Set(["chat", "schedule"]);
+
 const commandName = resolveCommandName(process.argv.slice(2));
-const shouldEnableSqlite = commandName === "chat";
+const shouldEnableSqlite = SQLITE_COMMANDS.has(commandName);
 const hasSqliteFlag = hasExecFlag("--experimental-sqlite");
 const needsSqliteFlag = shouldEnableSqlite && !hasSqliteFlag && !(await sqliteAvailable());
 const needsTypeStripFlag = sourceTreeAvailable() && !hasExecFlag("--experimental-strip-types");

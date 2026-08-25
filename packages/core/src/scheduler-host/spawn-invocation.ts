@@ -2,17 +2,20 @@ import { spawn } from "node:child_process";
 import { closeSync, openSync } from "node:fs";
 import type { ClaimedInvocation } from "@roll-agent/runtime";
 import type { BundledRollInvocation } from "../companion-host/invocation.ts";
-import { SCHEDULE_TOKEN_ENV } from "./paths.ts";
+import { SCHEDULE_DATA_DIR_ENV, SCHEDULE_TOKEN_ENV } from "./paths.ts";
+
+export type SpawnedInvocationSignal = "SIGTERM" | "SIGKILL";
 
 export interface SpawnedInvocation {
   readonly exited: Promise<number | null>;
-  kill(): void;
+  kill(signal?: SpawnedInvocationSignal): void;
 }
 
 export type InvocationSpawner = (claim: ClaimedInvocation) => SpawnedInvocation;
 
 export interface CreateInvocationSpawnerOptions {
   readonly invocation: BundledRollInvocation;
+  readonly dataDir: string;
   readonly logPath: string;
   readonly env?: NodeJS.ProcessEnv;
 }
@@ -41,7 +44,11 @@ export function createInvocationSpawner(
       ],
       {
         cwd: claim.schedule.cwd,
-        env: { ...(options.env ?? process.env), [SCHEDULE_TOKEN_ENV]: claim.ownershipToken },
+        env: {
+          ...(options.env ?? process.env),
+          [SCHEDULE_TOKEN_ENV]: claim.ownershipToken,
+          [SCHEDULE_DATA_DIR_ENV]: options.dataDir,
+        },
         stdio: ["ignore", "ignore", logFd],
         windowsHide: true,
       },
@@ -58,8 +65,8 @@ export function createInvocationSpawner(
     });
     return {
       exited,
-      kill: () => {
-        child.kill("SIGTERM");
+      kill: (signal: SpawnedInvocationSignal = "SIGTERM") => {
+        child.kill(signal);
       },
     };
   };

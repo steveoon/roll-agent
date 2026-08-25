@@ -14,6 +14,7 @@ test("scheduler service identity 指向 roll schedule daemon --foreground", () =
   const identity = schedulerServiceIdentity(
     createSchedulerPaths("/Users/tester/.roll-agent/scheduler", "/Users/tester"),
     invocation,
+    { maxConcurrentRuns: 3 },
   );
   assert.equal(identity.label, SCHEDULER_SERVICE_LABEL);
   assert.equal(
@@ -28,6 +29,10 @@ test("scheduler service identity 指向 roll schedule daemon --foreground", () =
     "schedule",
     "daemon",
     "--foreground",
+    "--data-dir",
+    "/Users/tester/.roll-agent/scheduler",
+    "--max-concurrent-runs",
+    "3",
   ]);
   const plan = createMacOsLaunchAgentPlanForIdentity(identity, 501);
   assert.equal(plan.serviceTarget, `gui/501/${SCHEDULER_SERVICE_LABEL}`);

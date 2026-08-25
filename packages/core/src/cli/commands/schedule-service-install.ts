@@ -13,7 +13,10 @@ export default defineCommand({
     await runScheduleCommand(async () => {
       const { config } = loadConfig();
       mkdirSync(config.scheduler.dataDir, { recursive: true, mode: 0o700 });
-      await createSchedulerServiceController({ dataDir: config.scheduler.dataDir }).install();
+      await createSchedulerServiceController({
+        dataDir: config.scheduler.dataDir,
+        maxConcurrentRuns: config.scheduler.maxConcurrentRuns,
+      }).install();
       log.success("roll schedule daemon 用户服务已安装并启动。");
     });
   },

@@ -1,5 +1,6 @@
 import { SCHEDULER_LIMITS } from "@roll-agent/runtime";
 import type {
+  ExecutorIdentity,
   InvocationFailureOutcome,
   InvocationRecord,
   ScheduleRecord,
@@ -28,6 +29,7 @@ export type ScheduledTurnOutcome =
       readonly status: typeof SCHEDULED_TURN_STATUSES.failed;
       readonly threadId?: string;
       readonly error: string;
+      readonly terminal?: boolean;
     };
 
 export type ScheduledTurnRunner = (
@@ -63,6 +65,7 @@ export interface ExecuteInvocationOptions {
   readonly invocationId: string;
   readonly ownershipToken: string;
   readonly runTurn: ScheduledTurnRunner;
+  readonly executor?: ExecutorIdentity;
   readonly now?: () => number;
   readonly maxOutputExcerptChars?: number;
 }
@@ -76,7 +79,12 @@ export async function executeInvocation(
 ): Promise<ExecuteInvocationResult> {
   const now = options.now ?? Date.now;
   const maxChars = options.maxOutputExcerptChars ?? SCHEDULER_LIMITS.maxOutputExcerptChars;
-  const begun = options.store.beginInvocation(options.invocationId, options.ownershipToken, now());
+  const begun = options.store.beginInvocation(
+    options.invocationId,
+    options.ownershipToken,
+    now(),
+    options.executor,
+  );
   if (begun === undefined) {
     return { kind: EXECUTE_INVOCATION_KINDS.lostClaim, invocationId: options.invocationId };
   }
@@ -104,6 +112,7 @@ export async function executeInvocation(
       options.ownershipToken,
       outcome.error,
       now(),
+      { terminal: outcome.terminal === true },
     );
     return {
       kind: EXECUTE_INVOCATION_KINDS.failed,

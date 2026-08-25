@@ -297,8 +297,9 @@ roll doctor --json              JSON 诊断结果（配置损坏时返回非零�
 | `roll chat` | `--screen-mode <auto\|fullscreen\|inline>` | 选择全屏 TUI、基础 REPL 或自动检测 |
 | `roll ui` | `--no-open` | 不自动打开浏览器，打印一次性认证链接 |
 | `roll ui` | `--config <path>` | 显式指定要编辑的配置文件 |
-| `roll schedule add` | `--every <Ns\|Nm\|Nh\|Nd>` | 运行周期，最短 60s |
-| `roll schedule run-now` | `--inline` | 当前进程内执行并等待结果 |
+| `roll schedule add` | `--every <Ns\|Nm\|Nh\|Nd>` | 运行周期，最短 60s、最长 365d |
+| `roll schedule run-now` | `--inline` | 当前进程内单次执行并等待结果，失败退出码 1 |
+| `roll schedule daemon` | `--data-dir <dir>` / `--max-concurrent-runs <n>` | 固化调度目录与并发数（service install 自动写入） |
 | 支持 JSON 输出的命令 | `--json` | 输出结构化 JSON |
 
 说明：`--verbose` 可用于全局或 `roll run` / `roll ask` 输出调试日志；`--config <path>`

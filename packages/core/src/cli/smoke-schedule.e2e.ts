@@ -1,10 +1,17 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 import { randomUUID } from "node:crypto";
-import { buildConfigYaml, runRoll } from "./smoke.e2e-harness.ts";
+import {
+  buildConfigYaml,
+  formatSpawnedRollProcess,
+  runRoll,
+  spawnRollProcess,
+  waitForSmokeCondition,
+  waitForSpawnedRollExit,
+} from "./smoke.e2e-harness.ts";
 
 function setupWorkspace(): { readonly workspace: string; readonly env: Record<string, string> } {
   const workspace = mkdtempSync(resolve(tmpdir(), `roll-schedule-${randomUUID()}-`));
@@ -107,6 +114,122 @@ test("e2e smoke: roll --help 列出 schedule", () => {
     assert.equal(result.status, 0);
     assert.match(result.stdout, /\bschedule\b/u);
   } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+interface InvocationJson {
+  readonly id: string;
+  readonly status: string;
+  readonly attempt: number;
+  readonly maxAttempts: number;
+  readonly executorPid?: number;
+  readonly error?: string;
+}
+
+test("e2e: run-now --inline 在其他 cwd 的配置下执行，结果仍写回登记时的账本且失败退出码为 1", () => {
+  const { workspace, env } = setupWorkspace();
+  try {
+    const other = resolve(workspace, "other-project");
+    mkdirSync(resolve(other, "agents"), { recursive: true });
+    writeFileSync(
+      resolve(other, "roll.config.yaml"),
+      `${buildConfigYaml(resolve(other, "agents"))}
+scheduler:
+  data-dir: ${resolve(other, "scheduler")}
+`,
+    );
+    const added = runRoll(
+      ["schedule", "add", "汇总", "--name", "跨目录", "--every", "1h", "--cwd", other, "--json"],
+      workspace,
+      { env },
+    );
+    assert.equal(added.status, 0, added.stderr);
+    const created = JSON.parse(added.stdout) as { id: string; authorityDigest?: string };
+    assert.match(created.authorityDigest ?? "", /^v1:[a-f0-9]{64}$/u);
+
+    const ran = runRoll(["schedule", "run-now", created.id, "--inline", "--json"], workspace, {
+      env,
+    });
+    assert.equal(ran.status, 1, `${ran.stdout}\n${ran.stderr}`);
+    const invocation = JSON.parse(ran.stdout) as InvocationJson;
+    assert.equal(invocation.status, "failed");
+    assert.equal(invocation.attempt, 1);
+    assert.equal(invocation.maxAttempts, 1);
+    assert.equal(typeof invocation.executorPid, "number");
+    assert.ok((invocation.error ?? "").length > 0, "error should explain the failure");
+    assert.doesNotMatch(invocation.error ?? "", /未写入执行结果/u);
+
+    const runs = runRoll(["schedule", "runs", created.id, "--json"], workspace, { env });
+    assert.equal(runs.status, 0, runs.stderr);
+    const rows = JSON.parse(runs.stdout) as InvocationJson[];
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0]?.id, invocation.id);
+    assert.equal(existsSync(resolve(other, "scheduler", "schedules.db")), false);
+
+    const shown = runRoll(["schedule", "show", created.id, "--json"], workspace, { env });
+    assert.equal((JSON.parse(shown.stdout) as { status: string }).status, "active");
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("e2e: daemon 拉起 exec 子进程并把结果写回账本，SIGTERM 后干净退出", async () => {
+  const { workspace, env } = setupWorkspace();
+  const schedulerDir = resolve(workspace, "scheduler");
+  let daemon: ReturnType<typeof spawnRollProcess> | undefined;
+  try {
+    const added = runRoll(
+      [
+        "schedule",
+        "add",
+        "巡检",
+        "--name",
+        "daemon-e2e",
+        "--every",
+        "1h",
+        "--now",
+        "--cwd",
+        workspace,
+        "--json",
+      ],
+      workspace,
+      { env },
+    );
+    assert.equal(added.status, 0, added.stderr);
+    const created = JSON.parse(added.stdout) as { id: string };
+    daemon = spawnRollProcess(["schedule", "daemon", "--foreground"], workspace, env);
+    const handle = daemon;
+    let rows: InvocationJson[] = [];
+    await waitForSmokeCondition(
+      "daemon to run the invocation through a spawned exec child",
+      () => {
+        const runs = runRoll(["schedule", "runs", created.id, "--json"], workspace, { env });
+        rows = runs.status === 0 ? (JSON.parse(runs.stdout) as InvocationJson[]) : [];
+        return rows.some((row) => row.status === "retry" || row.status === "failed");
+      },
+      () => formatSpawnedRollProcess("daemon", handle),
+      40_000,
+    );
+    const settled = rows.find((row) => row.status === "retry" || row.status === "failed");
+    assert.ok(settled);
+    assert.ok(settled.attempt >= 1);
+    assert.equal(typeof settled.executorPid, "number");
+    assert.ok((settled.error ?? "").length > 0);
+    assert.doesNotMatch(settled.error ?? "", /未写入执行结果/u);
+    assert.equal(existsSync(resolve(schedulerDir, "daemon.json")), true);
+    const status = runRoll(["schedule", "status", "--json"], workspace, { env });
+    assert.equal(
+      (JSON.parse(status.stdout) as { daemon: { liveness: string } }).daemon.liveness,
+      "running",
+    );
+  } finally {
+    if (daemon !== undefined) {
+      daemon.child.kill("SIGTERM");
+      const exit = await waitForSpawnedRollExit(daemon, "daemon", 20_000);
+      assert.equal(exit.code, 0, formatSpawnedRollProcess("daemon", daemon));
+      assert.equal(existsSync(resolve(schedulerDir, "daemon.json")), false);
+    }
     rmSync(workspace, { recursive: true, force: true });
   }
 });

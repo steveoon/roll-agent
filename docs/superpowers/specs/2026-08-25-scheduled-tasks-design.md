@@ -116,6 +116,23 @@ scheduler:
 - core：config 默认值与 tilde 展开；`executeInvocation` 三种结果；`SchedulerDaemon` 用假 spawn + `t.mock.timers`；service plan 参数化（label / plist / task name）；e2e：`roll schedule add/list/pause/remove --json`（隔离 HOME，无需 LLM）、`roll --help` 含 `schedule`。
 - 手动验证（需真实 LLM 配置）：`roll schedule add --now` + `roll schedule daemon --foreground` 观察 exec 子进程、`roll schedule runs <id>` 里的 `completed` 与 thread id；`roll chat --session <threadId>` 打开该线程确认用户消息里**没有** `[Harness runtime context]`。
 
+## 评审修订（2026-08-25，kai/codex review 后）
+
+| 评审发现 | 修订后的决策 |
+|---|---|
+| Node 22.6–22.12 缺 `--experimental-sqlite` | `bin/roll.js` 对 `chat` 与 `schedule` 都自动附加该 flag；engines 保持 ≥ 22.6 |
+| exec 子进程按 `schedule.cwd` 重新发现配置导致账本错位 | 账本位置成为进程身份：daemon → child 走 `ROLL_SCHEDULE_DATA_DIR`；`roll schedule daemon --data-dir/--max-concurrent-runs` 由 `service install` 固化进服务定义；child 只用 cwd 配置解析 LLM / Agent / 审批 |
+| lease 过期 reclaim 会重复执行仍在运行的 turn | invocation 记录 `executor_pid` + `executor_start_token`（`beginInvocation` 写入）；`claimDue` 对 `running` 行先探活：dead → reclaim，alive/unknown → 续 lease 不动（fail-closed）。没注入探针的 Store 视为 unknown。daemon 对超过 `maxRunMs`（1 h）的子进程 SIGKILL，避免「活着但卡死」永久占位 |
+| 权限在创建后漂移 | 不采用 codex 式冻结快照（用户收紧配置后旧任务仍按旧边界跑）。改为：登记时记录 `authority_digest`（`runtime.approval` + `runtime.shell` 摘要），执行前比对，**任何**漂移 → 终态失败 + 暂停；`resume` 以当前配置重新记录 |
+| `run-now --inline` 失败退出码 0 且遗留 retry | invocation 增加 `max_attempts`；inline 入队为 1 次尝试，失败直接终态；非 completed/needs_confirmation 退出码 1 |
+| ownership token 泄漏到 shell / stdio Agent env | `takeScheduleExecEnv` 读取后立即 `delete process.env[...]`，早于 runtime / engine 加载 |
+| 运行账本无保留策略 | `pruneInvocations`：每任务保留 100 条终态记录、最长 30 天；daemon 每轮 tick 清理 |
+| interval 无上界 | `maxIntervalMs = 365d`，schema 与 `parseIntervalText` 同时约束 |
+| daemon stop 无限等待子进程 | SIGTERM → 10 s grace → SIGKILL → 再等 10 s，仍未退出记「退出未确认」交给探活规则 |
+| 缺跨进程 E2E | 新增两条无 LLM 的 E2E：`run-now --inline` 跨 cwd 配置写回登记账本并退出 1；daemon → spawn exec → 账本落 `retry` → SIGTERM 干净退出 |
+
+schema 升到 v2（`schedules.authority_digest`、`invocations.max_attempts / executor_pid / executor_start_token`），打开 v1 库时就地补列。
+
 ## 不覆盖（v2）
 
 日历触发 + 时区、`/loop` 与模型可调用 `roll__schedule` 工具、有界上下文链复用线程、主动通知、`roll doctor` 检查项、Linux systemd 用户服务。

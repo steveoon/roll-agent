@@ -1,10 +1,14 @@
 import { defineCommand } from "citty";
 import { loadConfig } from "../../config/loader.ts";
-import { executeInvocation } from "../../scheduler-host/execute-invocation.ts";
+import { takeScheduleExecEnv } from "../../scheduler-host/exec-env.ts";
+import {
+  EXECUTE_INVOCATION_KINDS,
+  executeInvocation,
+} from "../../scheduler-host/execute-invocation.ts";
+import { currentExecutorIdentity } from "../../scheduler-host/executor-liveness.ts";
 import { createScheduledTurnRunner } from "../../scheduler-host/run-scheduled-turn.ts";
 import { log } from "../utils/output.ts";
 import {
-  SCHEDULE_TOKEN_ENV,
   loadRuntime,
   openScheduleStore,
   printJson,
@@ -18,22 +22,31 @@ export default defineCommand({
   },
   async run({ args }) {
     await runScheduleCommand(async () => {
-      const ownershipToken = process.env[SCHEDULE_TOKEN_ENV];
-      if (ownershipToken === undefined || ownershipToken.length === 0) {
-        throw new Error(`缺少 ${SCHEDULE_TOKEN_ENV}；该命令只应由 roll schedule daemon 调用`);
-      }
-      const { config } = loadConfig();
+      const execEnv = takeScheduleExecEnv(process.env);
       const runtime = await loadRuntime();
-      const store = openScheduleStore(config, runtime);
+      const store = openScheduleStore(undefined, runtime, { dataDir: execEnv.dataDir });
       try {
+        const executor = currentExecutorIdentity();
+        if (executor === undefined) {
+          store.failInvocation(
+            args.invocation,
+            execEnv.ownershipToken,
+            `无法验证 exec 进程 (PID: ${String(process.pid)}) 的 OS 启动身份，拒绝无人值守执行`,
+            Date.now(),
+            { terminal: true },
+          );
+          throw new Error("无法验证 exec 进程的 OS 启动身份");
+        }
+        const { config } = loadConfig();
         const result = await executeInvocation({
           store,
           invocationId: args.invocation,
-          ownershipToken,
+          ownershipToken: execEnv.ownershipToken,
+          executor,
           runTurn: createScheduledTurnRunner({ config, runtime }),
         });
         printJson(result);
-        if (result.kind === "failed") {
+        if (result.kind === EXECUTE_INVOCATION_KINDS.failed) {
           log.warn(`invocation ${args.invocation} 执行失败：${result.error}`);
           process.exitCode = 1;
         }

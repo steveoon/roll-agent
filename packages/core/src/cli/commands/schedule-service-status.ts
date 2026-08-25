@@ -14,6 +14,7 @@ export default defineCommand({
       const { config } = loadConfig();
       const status = await createSchedulerServiceController({
         dataDir: config.scheduler.dataDir,
+        maxConcurrentRuns: config.scheduler.maxConcurrentRuns,
       }).status();
       if (args.json) {
         printJson(status);

@@ -9,6 +9,7 @@ import {
   type RuntimeModule,
 } from "../runtime-host/engine-factory.ts";
 import { runJsonTurn } from "../runtime-host/json-turn.ts";
+import { computeAuthorityDigest, describeAuthorityDrift } from "./authority.ts";
 import {
   SCHEDULED_TURN_STATUSES,
   type ScheduledTurnOutcome,
@@ -64,6 +65,14 @@ export function createScheduledTurnRunner(
   input: CreateScheduledTurnRunnerInput,
 ): ScheduledTurnRunner {
   return async (schedule, invocation) => {
+    const currentAuthority = computeAuthorityDigest(input.config);
+    if (schedule.authorityDigest !== currentAuthority) {
+      return {
+        status: SCHEDULED_TURN_STATUSES.failed,
+        error: describeAuthorityDrift(schedule.id, schedule.authorityDigest, currentAuthority),
+        terminal: true,
+      };
+    }
     const readiness = resolveChatLlmReadiness(input.config);
     if (!readiness.configured || !readiness.providerConfig) {
       return { status: SCHEDULED_TURN_STATUSES.failed, error: readiness.message };

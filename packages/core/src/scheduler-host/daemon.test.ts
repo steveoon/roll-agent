@@ -221,3 +221,122 @@ test("run 在 abort 后终止子进程并退出", async () => {
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test("停止时先 SIGTERM，超过 grace 仍未退出则 SIGKILL", async () => {
+  const dir = tempDir();
+  try {
+    const store = new ScheduleStore(dir);
+    addDueSchedule(store, "a", Date.now());
+    const { logger, lines } = silentLogger();
+    const signals: string[] = [];
+    const controller = new AbortController();
+    const daemon = new SchedulerDaemon({
+      store,
+      workerId: "w1",
+      maxConcurrentRuns: 1,
+      logger,
+      pollIntervalMs: 50,
+      childTerminateGraceMs: 30,
+      spawnInvocation: (claim): SpawnedInvocation => {
+        store.beginInvocation(claim.invocation.id, claim.ownershipToken, Date.now());
+        const exit = Promise.withResolvers<number | null>();
+        return {
+          exited: exit.promise,
+          kill: (signal = "SIGTERM") => {
+            signals.push(signal);
+            if (signal === "SIGKILL") {
+              exit.resolve(null);
+            }
+          },
+        };
+      },
+    });
+    const running = daemon.run(controller.signal);
+    try {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      assert.equal(daemon.runningCount, 1);
+    } finally {
+      controller.abort();
+      await running;
+    }
+    assert.deepEqual(signals, ["SIGTERM", "SIGKILL"]);
+    assert.ok(lines.some((line) => /SIGKILL/u.test(line)));
+    store.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("子进程运行超过 maxRunMs 时被 SIGKILL 并记为失败", async () => {
+  const dir = tempDir();
+  try {
+    const store = new ScheduleStore(dir);
+    const schedule = addDueSchedule(store, "a", Date.now());
+    const { logger, lines } = silentLogger();
+    const signals: string[] = [];
+    const daemon = new SchedulerDaemon({
+      store,
+      workerId: "w1",
+      maxConcurrentRuns: 1,
+      logger,
+      maxRunMs: 20,
+      spawnInvocation: (claim): SpawnedInvocation => {
+        store.beginInvocation(claim.invocation.id, claim.ownershipToken, Date.now());
+        const exit = Promise.withResolvers<number | null>();
+        return {
+          exited: exit.promise,
+          kill: (signal = "SIGTERM") => {
+            signals.push(signal);
+            exit.resolve(null);
+          },
+        };
+      },
+    });
+    assert.equal(daemon.tick(), 1);
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    assert.deepEqual(signals, ["SIGKILL"]);
+    assert.equal(daemon.runningCount, 0);
+    assert.equal(store.listInvocations(schedule.id)[0]?.status, INVOCATION_STATUSES.retry);
+    assert.ok(lines.some((line) => /运行超过/u.test(line)));
+    store.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("tick 会按保留策略清理终态运行记录", () => {
+  const dir = tempDir();
+  try {
+    const store = new ScheduleStore(dir, { invocationRetentionPerSchedule: 1 });
+    const schedule = store.createSchedule(
+      { name: "a", prompt: "p", cwd: "/workspace", trigger: createIntervalTrigger("30m") },
+      NOW,
+    );
+    for (const offset of [0, 1, 2]) {
+      const queued = store.enqueueManualInvocation(schedule.id, NOW + offset);
+      const claim = store.claimPendingInvocation(queued.id, "w", NOW + offset);
+      assert.ok(claim);
+      store.completeInvocation({
+        id: queued.id,
+        ownershipToken: claim.ownershipToken,
+        status: INVOCATION_STATUSES.completed,
+        nowMs: NOW + offset,
+      });
+    }
+    const { logger, lines } = silentLogger();
+    const daemon = new SchedulerDaemon({
+      store,
+      workerId: "w1",
+      maxConcurrentRuns: 1,
+      logger,
+      now: () => NOW + 10,
+      spawnInvocation: () => ({ exited: Promise.resolve(0), kill: () => undefined }),
+    });
+    assert.equal(daemon.tick(), 0);
+    assert.equal(store.listInvocations(schedule.id).length, 1);
+    assert.ok(lines.some((line) => /已清理 2 条/u.test(line)));
+    store.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

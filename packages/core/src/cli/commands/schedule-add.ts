@@ -2,6 +2,7 @@ import { statSync } from "node:fs";
 import { resolve } from "node:path";
 import { defineCommand } from "citty";
 import { loadConfig } from "../../config/loader.ts";
+import { computeAuthorityDigest } from "../../scheduler-host/authority.ts";
 import { log } from "../utils/output.ts";
 import {
   loadRuntime,
@@ -38,6 +39,7 @@ export default defineCommand({
         throw new Error(`cwd 不存在或不是目录：${cwd}`);
       }
       const { config } = loadConfig();
+      const authorityDigest = computeAuthorityDigest(loadConfig({ cwd }).config);
       const runtime = await loadRuntime();
       const store = openScheduleStore(config, runtime);
       try {
@@ -47,6 +49,7 @@ export default defineCommand({
           cwd,
           trigger: runtime.createIntervalTrigger(args.every),
           fireImmediately: args.now,
+          authorityDigest,
         });
         const serialized = serializeSchedule(record);
         if (args.json) {
