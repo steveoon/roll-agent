@@ -5,6 +5,7 @@ import {
   type CapabilityHostMode,
   type EffectiveCapabilityTurnContext,
   type EffectiveCapabilityManifest,
+  isProcessBoundHostMode,
 } from "./capability-manifest.ts";
 import type { WorkspaceInstructions } from "./workspace-instructions.ts";
 
@@ -47,6 +48,7 @@ export interface BuildChatSystemPromptOptions {
   readonly shellHints?: readonly string[];
   readonly sessionExecToolIds?: SessionExecToolIds;
   readonly sessionHostMode?: CapabilityHostMode;
+  readonly hostMode?: CapabilityHostMode;
   readonly agentCount?: number;
   readonly agentOnboarding?: AgentOnboardingPromptInfo;
   readonly userInputToolId?: string;
@@ -59,6 +61,15 @@ export interface BuildChatSystemPromptFromManifestOptions {
 }
 
 const MAX_SKILL_DESCRIPTION_CHARS = 240;
+
+export const UNATTENDED_SECTION_HEADING = "# 无人值守运行";
+
+const UNATTENDED_SECTION = [
+  UNATTENDED_SECTION_HEADING,
+  "- 本轮由定时任务自动触发，没有人在终端旁：不要向用户提问、不要等待确认、不要请求补充信息。",
+  "- 需要人工确认的操作会被策略直接拒绝；遇到拒绝就跳过该步骤，继续完成其余可以完成的部分。",
+  "- 结尾用简短状态汇报：做了什么、哪些步骤因需要确认而未执行、有什么需要人工关注。",
+].join("\n");
 
 const IDENTITY_PREFIX = "你是花卷 Roll 的会话助手，运行在 roll chat 里。";
 
@@ -175,7 +186,7 @@ function buildShellSection(
     ? [
         `- 预计跑几十秒以上的命令（构建、批处理脚本）不要用 ${shellToolId}（会被单轮超时杀掉），改用 ${sessionExec.command} 后台执行。`,
         `- ${sessionExec.command} 未结束时会返回 session_id；用 ${sessionExec.poll}（chars 留空）轮询进度直到拿到退出码，需要中断时 chars 传 "\\u0003"。`,
-        ...(sessionHostMode === CAPABILITY_HOST_MODES.oneShot
+        ...(sessionHostMode !== undefined && isProcessBoundHostMode(sessionHostMode)
           ? [
               `- 后台会话只在本次 one-shot 进程内存在；启动后必须在本次调用内持续用 ${sessionExec.poll} 等到退出码。${sessionExec.list} 只能找回当前进程内的会话，后续 CLI 调用不能跨进程恢复。`,
             ]
@@ -250,6 +261,9 @@ export function buildChatSystemPrompt(options: BuildChatSystemPromptOptions = {}
   if (options.userInputToolId !== undefined) {
     sections.push(buildUserInputSection(options.userInputToolId));
   }
+  if (options.hostMode === CAPABILITY_HOST_MODES.background) {
+    sections.push(UNATTENDED_SECTION);
+  }
   sections.push(OUTPUT_SECTION);
   if (options.workspaceInstructions !== undefined) {
     sections.push(buildWorkspaceInstructionsSection(options.workspaceInstructions));
@@ -321,6 +335,7 @@ export function buildChatSystemPromptFromManifest(
         }
       : {}),
     agentCount: manifest.agentCount,
+    hostMode: manifest.lifecycle.hostMode,
     ...(userInputToolId ? { userInputToolId } : {}),
     ...(fileToolIds ? { fileToolIds } : {}),
     ...(installToolId && manifest.agentOnboardingCatalog.length > 0

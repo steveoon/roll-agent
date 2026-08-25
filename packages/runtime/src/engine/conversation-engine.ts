@@ -60,6 +60,7 @@ import {
 } from "./workspace-instructions.ts";
 import {
   CAPABILITY_HOST_MODES,
+  shouldOfferAgentInstall,
   type CapabilityAgentOnboardingCatalogEntry,
   type CapabilityHostMode,
   type CapabilityVcsSnapshot,
@@ -582,7 +583,9 @@ export class ConversationEngine {
         ? shellProfile
         : unknownCommandClassifier
       : undefined;
-    const agentInstall = this.resolveAgentInstallBinding();
+    const agentInstall = shouldOfferAgentInstall(this.hostMode)
+      ? this.resolveAgentInstallBinding()
+      : undefined;
     const capabilityContext = this.composeCapabilityContext(context.sources.length, shellProfile);
     const session = new AgentSession({
       id,

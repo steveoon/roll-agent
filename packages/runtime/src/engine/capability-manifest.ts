@@ -59,9 +59,18 @@ export const CAPABILITY_HOST_MODES = {
   interactive: "interactive",
   oneShot: "one-shot",
   server: "server",
+  background: "background",
 } as const;
 
 export type CapabilityHostMode = (typeof CAPABILITY_HOST_MODES)[keyof typeof CAPABILITY_HOST_MODES];
+
+export function isProcessBoundHostMode(mode: CapabilityHostMode): boolean {
+  return mode === CAPABILITY_HOST_MODES.oneShot || mode === CAPABILITY_HOST_MODES.background;
+}
+
+export function shouldOfferAgentInstall(mode: CapabilityHostMode): boolean {
+  return mode !== CAPABILITY_HOST_MODES.background;
+}
 
 export const CAPABILITY_SESSION_EXEC_LIFECYCLES = {
   resumable: "resumable",

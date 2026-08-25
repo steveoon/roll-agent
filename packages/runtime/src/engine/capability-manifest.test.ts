@@ -14,7 +14,9 @@ import {
   buildEffectiveCapabilityManifest,
   createSafeCapabilitySnapshot,
   findCapabilityToolId,
+  isProcessBoundHostMode,
   listCapabilityToolIds,
+  shouldOfferAgentInstall,
 } from "./capability-manifest.ts";
 
 test("effective capability manifest derives names and schemas from the final toolset", () => {
@@ -455,4 +457,13 @@ test("safe capability snapshot redacts structured CJK secret keys without hiding
     description: "preserve token budget",
     type: "integer",
   });
+});
+
+test("background host mode 与 one-shot 同属进程绑定，且不提供 agent-install", () => {
+  assert.equal(CAPABILITY_HOST_MODES.background, "background");
+  assert.equal(isProcessBoundHostMode(CAPABILITY_HOST_MODES.background), true);
+  assert.equal(isProcessBoundHostMode(CAPABILITY_HOST_MODES.oneShot), true);
+  assert.equal(isProcessBoundHostMode(CAPABILITY_HOST_MODES.interactive), false);
+  assert.equal(shouldOfferAgentInstall(CAPABILITY_HOST_MODES.background), false);
+  assert.equal(shouldOfferAgentInstall(CAPABILITY_HOST_MODES.interactive), true);
 });

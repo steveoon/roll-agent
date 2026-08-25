@@ -397,3 +397,12 @@ test("buildChatSystemPromptFromManifest 透传 workspaceInstructions 且压缩�
   assert.ok(prompt.indexOf("# 工作区工程约定") < prompt.indexOf("# 压缩历史回查"));
   assert.ok(!buildChatSystemPromptFromManifest(manifest).includes("# 工作区工程约定"));
 });
+
+test("background host mode 注入无人值守段，其余模式不注入", () => {
+  const background = buildChatSystemPrompt({ hostMode: CAPABILITY_HOST_MODES.background });
+  assert.match(background, /# 无人值守运行/u);
+  assert.match(background, /不要向用户提问/u);
+  const interactive = buildChatSystemPrompt({ hostMode: CAPABILITY_HOST_MODES.interactive });
+  assert.doesNotMatch(interactive, /# 无人值守运行/u);
+  assert.doesNotMatch(buildChatSystemPrompt(), /# 无人值守运行/u);
+});
