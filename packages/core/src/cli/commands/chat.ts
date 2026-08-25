@@ -1,25 +1,16 @@
 import { basename, join } from "node:path";
 import { defineCommand } from "citty";
 import type { AgentSession } from "@roll-agent/runtime";
-import { inspectLlmConfigReadiness } from "../../config/helpers.ts";
 import { loadConfig } from "../../config/loader.ts";
-import { resolveLLMCall, thinkingProviderOptions } from "../../llm/providers.ts";
+import { thinkingProviderOptions } from "../../llm/providers.ts";
 import { createInterface, type Interface as ReadlineInterface } from "node:readline/promises";
 import type { Readable, Writable } from "node:stream";
 import chalk from "chalk";
 import Table from "cli-table3";
-import { isDebugLogEnabled, log } from "../utils/output.ts";
+import { log } from "../utils/output.ts";
 import { ChatRenderer, clackConfirm, type ChatConfirm } from "../utils/chat-renderer.ts";
-import type {
-  ChatCommandResult,
-  ChatCompactionSummary,
-  ChatPendingAction,
-  ChatStepSummary,
-  ChatStepUsage,
-  ChatTokenUsage,
-} from "../../types/chat.ts";
+import type { ChatCommandResult } from "../../types/chat.ts";
 import { CHAT_SCREEN_MODES, type RollConfig } from "../../config/schema.ts";
-import type { LlmConfigReadiness } from "../../config/helpers.ts";
 import { titleFromMessage } from "../chat/title.ts";
 import { buildBannerLines, renderBannerText, type BannerInfo } from "../chat/banner.ts";
 import {
@@ -44,58 +35,30 @@ import { buildSessionPickerItems, type SessionPickerItem } from "../chat/session
 import { clackSessionPicker } from "../utils/clack-session-picker.ts";
 import { diffDisplayNotice, resolveDiffDisplayToggle } from "../chat/diff-display.ts";
 
-type RuntimeModule = typeof import("@roll-agent/runtime");
+import {
+  CHAT_ENGINE_SURFACES,
+  chatHostModeForSurface,
+  createChatEngine,
+  loadRuntime,
+  resolveChatLlmCalls,
+  resolveChatLlmReadiness,
+  type ChatEngineSurface,
+  type ConversationEngineInstance,
+  type ThreadStoreInstance,
+} from "../../runtime-host/engine-factory.ts";
+import { runJsonTurn } from "../../runtime-host/json-turn.ts";
+
+export {
+  CHAT_ENGINE_SURFACES,
+  chatHostModeForSurface,
+  createChatEngine,
+  resolveChatLlmCalls,
+  resolveChatLlmReadiness,
+  runJsonTurn,
+};
+export type { ChatEngineSurface };
 
 const moduleExtension = import.meta.url.endsWith(".ts") ? "ts" : "js";
-
-function createToolPolicy(runtime: RuntimeModule, config: RollConfig) {
-  return new runtime.ConfigurableToolPolicy({
-    defaultMode: config.runtime.approval.default,
-    overrides: config.runtime.approval.overrides,
-  });
-}
-
-type ThreadStoreInstance = InstanceType<RuntimeModule["ThreadStore"]>;
-type ConversationEngineInstance = InstanceType<RuntimeModule["ConversationEngine"]>;
-type ChatEngineOptions = ConstructorParameters<RuntimeModule["ConversationEngine"]>[0];
-
-export const CHAT_ENGINE_SURFACES = {
-  ink: "ink",
-  basicRepl: "basic-repl",
-  oneShot: "one-shot",
-  json: "json",
-  server: "server",
-} as const;
-
-export type ChatEngineSurface = (typeof CHAT_ENGINE_SURFACES)[keyof typeof CHAT_ENGINE_SURFACES];
-
-const CHAT_HOST_MODE_BY_SURFACE = {
-  [CHAT_ENGINE_SURFACES.ink]: "interactive",
-  [CHAT_ENGINE_SURFACES.basicRepl]: "interactive",
-  [CHAT_ENGINE_SURFACES.oneShot]: "one-shot",
-  [CHAT_ENGINE_SURFACES.json]: "one-shot",
-  [CHAT_ENGINE_SURFACES.server]: "server",
-} as const satisfies Record<ChatEngineSurface, NonNullable<ChatEngineOptions["hostMode"]>>;
-
-export function chatHostModeForSurface(
-  surface: ChatEngineSurface,
-): NonNullable<ChatEngineOptions["hostMode"]> {
-  return CHAT_HOST_MODE_BY_SURFACE[surface];
-}
-
-interface CreateChatEngineInput {
-  readonly runtime: RuntimeModule;
-  readonly config: RollConfig;
-  readonly model: NonNullable<ChatEngineOptions["model"]>;
-  readonly store: ThreadStoreInstance;
-  readonly surface: ChatEngineSurface;
-  readonly providerOptions?: NonNullable<ChatEngineOptions["providerOptions"]>;
-  readonly structuredOutputProviderOptions?: NonNullable<
-    ChatEngineOptions["structuredOutputProviderOptions"]
-  >;
-  readonly structuredOutputReasoning?: NonNullable<ChatEngineOptions["structuredOutputReasoning"]>;
-  readonly shellEnv?: NodeJS.ProcessEnv;
-}
 
 interface ChatCliScope {
   readonly env: NodeJS.ProcessEnv;
@@ -117,21 +80,6 @@ function printChatJson(result: ChatCommandResult): void {
   console.log(JSON.stringify(result, null, 2));
 }
 
-function reportAgentBootstrapIssue(issue: {
-  readonly agentName: string;
-  readonly message: string;
-}): void {
-  log.warn(`Agent "${issue.agentName}" 启动失败：${issue.message}`);
-}
-
-function reportSkillLibraryIssue(message: string): void {
-  log.warn(`skill 目录加载警告：${message}`);
-}
-
-function reportWorkspaceInstructionsIssue(message: string): void {
-  log.warn(`工作区约定：${message}`);
-}
-
 function shutdownSignalExitCode(signal: ChatEngineShutdownSignal): number {
   return signal === "SIGINT" ? 130 : 143;
 }
@@ -147,29 +95,6 @@ function createChatCliScope(): ChatCliScope {
     );
     return { env, dispose: () => undefined };
   }
-}
-
-export function createChatEngine(input: CreateChatEngineInput) {
-  return new input.runtime.ConversationEngine({
-    config: input.config,
-    model: input.model,
-    store: input.store,
-    hostMode: chatHostModeForSurface(input.surface),
-    policy: createToolPolicy(input.runtime, input.config),
-    maxSteps: input.config.runtime.maxSteps,
-    ...(input.providerOptions ? { providerOptions: input.providerOptions } : {}),
-    ...(input.structuredOutputProviderOptions
-      ? { structuredOutputProviderOptions: input.structuredOutputProviderOptions }
-      : {}),
-    ...(input.structuredOutputReasoning
-      ? { structuredOutputReasoning: input.structuredOutputReasoning }
-      : {}),
-    debugEvents: isDebugLogEnabled(),
-    onAgentBootstrapIssue: reportAgentBootstrapIssue,
-    onSkillLibraryIssue: reportSkillLibraryIssue,
-    onWorkspaceInstructionsIssue: reportWorkspaceInstructionsIssue,
-    ...(input.shellEnv ? { shellEnv: input.shellEnv } : {}),
-  });
 }
 
 async function readReplLine(
@@ -194,60 +119,10 @@ async function readReplLine(
   }
 }
 
-async function loadRuntime(): Promise<RuntimeModule> {
-  return import("@roll-agent/runtime");
-}
-
 async function runChatOnboardingFlow(provider: string, model: string): Promise<boolean> {
   const specifier = new URL(`./setup.${moduleExtension}`, import.meta.url).href;
   const setupModule = (await import(specifier)) as typeof import("./setup.ts");
   return setupModule.runChatOnboarding({}, { provider, model });
-}
-
-export function resolveChatLlmReadiness(config: RollConfig): LlmConfigReadiness {
-  return inspectLlmConfigReadiness(config, {
-    provider: config.runtime.provider ?? config.llm.defaultProvider,
-    model: config.runtime.model ?? config.llm.defaultModel,
-  });
-}
-
-export function resolveChatLlmCalls(
-  provider: string,
-  modelName: string,
-  apiKey: string,
-  baseUrl: string | undefined,
-  thinkingLevel: RollConfig["runtime"]["thinkingLevel"],
-  compactionThinkingLevel: RollConfig["runtime"]["compaction"]["thinkingLevel"] = undefined,
-  compactionUsesStructuredOutput = true,
-): {
-  readonly model: NonNullable<ChatEngineOptions["model"]>;
-  readonly providerOptions?: NonNullable<ChatEngineOptions["providerOptions"]>;
-  readonly structuredOutputProviderOptions?: NonNullable<
-    ChatEngineOptions["structuredOutputProviderOptions"]
-  >;
-  readonly structuredOutputReasoning?: NonNullable<ChatEngineOptions["structuredOutputReasoning"]>;
-} {
-  const chat = resolveLLMCall(provider, modelName, apiKey, "chat", baseUrl, thinkingLevel);
-  const structuredOutput = compactionUsesStructuredOutput
-    ? resolveLLMCall(
-        provider,
-        modelName,
-        apiKey,
-        "structured-output",
-        baseUrl,
-        compactionThinkingLevel ?? thinkingLevel,
-      )
-    : undefined;
-  return {
-    model: chat.model,
-    ...(chat.providerOptions ? { providerOptions: chat.providerOptions } : {}),
-    ...(structuredOutput?.providerOptions
-      ? { structuredOutputProviderOptions: structuredOutput.providerOptions }
-      : {}),
-    ...(structuredOutput?.reasoning
-      ? { structuredOutputReasoning: structuredOutput.reasoning }
-      : {}),
-  };
 }
 
 export async function runServer(config: RollConfig): Promise<void> {
@@ -383,108 +258,6 @@ async function listSessions(config: RollConfig, asJson: boolean): Promise<void> 
   } finally {
     store.close();
   }
-}
-
-export async function runJsonTurn(
-  session: AgentSession,
-  message: string,
-): Promise<ChatCommandResult> {
-  const steps: ChatStepSummary[] = [];
-  const stepUsages: ChatStepUsage[] = [];
-  const compactions: ChatCompactionSummary[] = [];
-  const pendingActions: ChatPendingAction[] = [];
-  let output = "";
-  let failure: string | undefined;
-  let totalUsage: ChatTokenUsage | undefined;
-  let sessionUsage: ChatTokenUsage | undefined;
-  let contextInputTokens: number | undefined;
-
-  for await (const event of session.send(message)) {
-    switch (event.type) {
-      case "text-delta":
-        output += event.delta;
-        break;
-      case "tool-call":
-        steps.push({
-          summary: `${event.agentName}.${event.toolName}`,
-          agentName: event.agentName,
-          toolName: event.toolName,
-        });
-        break;
-      case "confirmation-required":
-        pendingActions.push({
-          summary: `${event.agentName}.${event.toolName}`,
-          agentName: event.agentName,
-          toolName: event.toolName,
-        });
-        session.reject(event.approvalId, "json 模式不支持交互确认");
-        break;
-      case "step-finish":
-        stepUsages.push({
-          finishReason: event.finishReason,
-          ...(event.usage ? { usage: event.usage } : {}),
-        });
-        break;
-      case "message-finish":
-        totalUsage = event.totalUsage;
-        sessionUsage = event.sessionUsage;
-        contextInputTokens = event.contextInputTokens;
-        break;
-      case "context-compacted":
-        compactions.push({
-          reason: event.reason,
-          strategy: event.strategy,
-          removed: event.removed,
-          kept: event.kept,
-          ...(event.truncatedTools !== undefined ? { truncatedTools: event.truncatedTools } : {}),
-          ...(event.beforeInputTokens !== undefined
-            ? { beforeInputTokens: event.beforeInputTokens }
-            : {}),
-          ...(event.checkpointId !== undefined ? { checkpointId: event.checkpointId } : {}),
-          ...(event.checkpointGeneration !== undefined
-            ? { checkpointGeneration: event.checkpointGeneration }
-            : {}),
-          ...(event.checkpointSummaryStatus !== undefined
-            ? { checkpointSummaryStatus: event.checkpointSummaryStatus }
-            : {}),
-        });
-        break;
-      case "turn-cancelled":
-        failure = event.message;
-        break;
-      case "error":
-        failure = event.message;
-        break;
-      default:
-        break;
-    }
-  }
-
-  const contextWindow = session.getContextWindow();
-
-  if (failure !== undefined) {
-    return { status: "failed", stage: "execute", message: failure, sessionId: session.id };
-  }
-  if (pendingActions.length > 0) {
-    return {
-      status: "needs_confirmation",
-      sessionId: session.id,
-      message: "存在需要确认的工具调用，请在交互模式下执行或显式批准",
-      pendingActions,
-    };
-  }
-  return {
-    status: "completed",
-    sessionId: session.id,
-    output,
-    steps,
-    ...(stepUsages.length > 0 ? { stepUsages } : {}),
-    ...(totalUsage ? { totalUsage } : {}),
-    ...(sessionUsage ? { sessionUsage } : {}),
-    ...(contextWindow !== undefined ? { contextWindow } : {}),
-    ...(contextInputTokens !== undefined ? { contextInputTokens } : {}),
-    ...(compactions.length > 0 ? { compactions } : {}),
-  };
 }
 
 export async function runRepl(
