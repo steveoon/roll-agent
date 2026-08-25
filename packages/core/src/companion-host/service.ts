@@ -58,6 +58,27 @@ export interface CompanionServiceController {
   status(): Promise<CompanionServiceStatus>;
 }
 
+export interface ServicePlanIdentity {
+  readonly label: string;
+  readonly plistPath: string;
+  readonly logPath: string;
+  readonly windowsTaskName: string;
+  readonly programArguments: readonly string[];
+}
+
+export function companionServiceIdentity(
+  paths: CompanionPaths,
+  invocation: BundledRollInvocation,
+): ServicePlanIdentity {
+  return {
+    label: COMPANION_SERVICE_LABEL,
+    plistPath: paths.launchAgentPath,
+    logPath: paths.logPath,
+    windowsTaskName: WINDOWS_COMPANION_TASK_NAME,
+    programArguments: [invocation.command, ...invocation.companionArgs],
+  };
+}
+
 export interface MacOsLaunchAgentPlan {
   readonly label: string;
   readonly plistPath: string;
@@ -66,12 +87,11 @@ export interface MacOsLaunchAgentPlan {
   readonly serviceTarget: string;
 }
 
-export function createMacOsLaunchAgentPlan(input: {
-  readonly paths: CompanionPaths;
-  readonly invocation: BundledRollInvocation;
-  readonly uid: number;
-}): MacOsLaunchAgentPlan {
-  const programArguments = [input.invocation.command, ...input.invocation.companionArgs]
+export function createMacOsLaunchAgentPlanForIdentity(
+  identity: ServicePlanIdentity,
+  uid: number,
+): MacOsLaunchAgentPlan {
+  const programArguments = identity.programArguments
     .map((argument) => `      <string>${escapeXml(argument)}</string>`)
     .join("\n");
   const plist = `<?xml version="1.0" encoding="UTF-8"?>
@@ -79,7 +99,7 @@ export function createMacOsLaunchAgentPlan(input: {
 <plist version="1.0">
   <dict>
     <key>Label</key>
-    <string>${COMPANION_SERVICE_LABEL}</string>
+    <string>${escapeXml(identity.label)}</string>
     <key>ProgramArguments</key>
     <array>
 ${programArguments}
@@ -94,20 +114,31 @@ ${programArguments}
     <key>ProcessType</key>
     <string>Background</string>
     <key>StandardOutPath</key>
-    <string>${escapeXml(input.paths.logPath)}</string>
+    <string>${escapeXml(identity.logPath)}</string>
     <key>StandardErrorPath</key>
-    <string>${escapeXml(input.paths.logPath)}</string>
+    <string>${escapeXml(identity.logPath)}</string>
   </dict>
 </plist>
 `;
-  const domainTarget = `gui/${String(input.uid)}`;
+  const domainTarget = `gui/${String(uid)}`;
   return {
-    label: COMPANION_SERVICE_LABEL,
-    plistPath: input.paths.launchAgentPath,
+    label: identity.label,
+    plistPath: identity.plistPath,
     plist,
     domainTarget,
-    serviceTarget: `${domainTarget}/${COMPANION_SERVICE_LABEL}`,
+    serviceTarget: `${domainTarget}/${identity.label}`,
   };
+}
+
+export function createMacOsLaunchAgentPlan(input: {
+  readonly paths: CompanionPaths;
+  readonly invocation: BundledRollInvocation;
+  readonly uid: number;
+}): MacOsLaunchAgentPlan {
+  return createMacOsLaunchAgentPlanForIdentity(
+    companionServiceIdentity(input.paths, input.invocation),
+    input.uid,
+  );
 }
 
 export interface WindowsScheduledTaskPlan {
@@ -120,18 +151,16 @@ export interface WindowsScheduledTaskPlan {
   readonly query: ProcessInvocation;
 }
 
-export function createWindowsScheduledTaskPlan(
-  invocation: BundledRollInvocation,
+export function createWindowsScheduledTaskPlanForIdentity(
+  identity: Pick<ServicePlanIdentity, "windowsTaskName" | "programArguments">,
   windowsDirectory?: string,
 ): WindowsScheduledTaskPlan {
-  const taskCommand = [invocation.command, ...invocation.companionArgs]
-    .map(quoteWindowsCommandArgument)
-    .join(" ");
+  const taskCommand = identity.programArguments.map(quoteWindowsCommandArgument).join(" ");
   const taskSchedulerExecutable = resolveWindowsScheduledTasksExecutable(windowsDirectory);
   const powershellExecutable = resolveWindowsPowerShellExecutable(windowsDirectory);
-  const queryScript = `$taskName = ${createPowerShellUtf8StringExpression(WINDOWS_COMPANION_TASK_NAME)}\n${WINDOWS_TASK_STATE_QUERY_SCRIPT}`;
+  const queryScript = `$taskName = ${createPowerShellUtf8StringExpression(identity.windowsTaskName)}\n${WINDOWS_TASK_STATE_QUERY_SCRIPT}`;
   return {
-    taskName: WINDOWS_COMPANION_TASK_NAME,
+    taskName: identity.windowsTaskName,
     taskCommand,
     create: {
       command: taskSchedulerExecutable,
@@ -143,28 +172,41 @@ export function createWindowsScheduledTaskPlan(
         "/RL",
         "LIMITED",
         "/TN",
-        WINDOWS_COMPANION_TASK_NAME,
+        identity.windowsTaskName,
         "/TR",
         taskCommand,
       ],
     },
     remove: {
       command: taskSchedulerExecutable,
-      args: ["/Delete", "/F", "/TN", WINDOWS_COMPANION_TASK_NAME],
+      args: ["/Delete", "/F", "/TN", identity.windowsTaskName],
     },
     start: {
       command: taskSchedulerExecutable,
-      args: ["/Run", "/TN", WINDOWS_COMPANION_TASK_NAME],
+      args: ["/Run", "/TN", identity.windowsTaskName],
     },
     stop: {
       command: taskSchedulerExecutable,
-      args: ["/End", "/TN", WINDOWS_COMPANION_TASK_NAME],
+      args: ["/End", "/TN", identity.windowsTaskName],
     },
     query: {
       command: powershellExecutable,
       args: ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", queryScript],
     },
   };
+}
+
+export function createWindowsScheduledTaskPlan(
+  invocation: BundledRollInvocation,
+  windowsDirectory?: string,
+): WindowsScheduledTaskPlan {
+  return createWindowsScheduledTaskPlanForIdentity(
+    {
+      windowsTaskName: WINDOWS_COMPANION_TASK_NAME,
+      programArguments: [invocation.command, ...invocation.companionArgs],
+    },
+    windowsDirectory,
+  );
 }
 
 export class MacOsLaunchAgentController implements CompanionServiceController {
@@ -357,8 +399,7 @@ function isWindowsTaskState(value: number): value is WindowsTaskState {
 }
 
 export function createPlatformServiceController(options: {
-  readonly paths: CompanionPaths;
-  readonly invocation: BundledRollInvocation;
+  readonly identity: ServicePlanIdentity;
   readonly platform?: NodeJS.Platform;
   readonly uid?: number;
   readonly runner?: ProcessRunner;
@@ -372,17 +413,17 @@ export function createPlatformServiceController(options: {
       throw new Error("Unable to identify the current macOS user for LaunchAgent installation");
     }
     return new MacOsLaunchAgentController(
-      createMacOsLaunchAgentPlan({ paths: options.paths, invocation: options.invocation, uid }),
+      createMacOsLaunchAgentPlanForIdentity(options.identity, uid),
       runner,
     );
   }
   if (platform === "win32") {
     return new WindowsScheduledTaskController(
-      createWindowsScheduledTaskPlan(options.invocation, options.windowsDirectory),
+      createWindowsScheduledTaskPlanForIdentity(options.identity, options.windowsDirectory),
       runner,
     );
   }
-  throw new Error("roll companion service supports macOS and Windows only");
+  throw new Error("roll service supports macOS and Windows only");
 }
 
 async function atomicWritePrivate(path: string, contents: string): Promise<void> {

@@ -21,5 +21,6 @@ export default defineCommand({
     "run-now": () => loadScheduleCommand("schedule-run-now"),
     status: () => loadScheduleCommand("schedule-status"),
     daemon: () => loadScheduleCommand("schedule-daemon"),
+    service: () => loadScheduleCommand("schedule-service"),
   },
 });

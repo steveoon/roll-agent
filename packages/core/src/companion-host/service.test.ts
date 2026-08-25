@@ -4,8 +4,11 @@ import { createBundledRollInvocation } from "./invocation.ts";
 import { createCompanionPaths } from "./paths.ts";
 import type { ProcessInvocation, ProcessResult, ProcessRunner } from "./process-runner.ts";
 import {
+  companionServiceIdentity,
   createMacOsLaunchAgentPlan,
+  createMacOsLaunchAgentPlanForIdentity,
   createWindowsScheduledTaskPlan,
+  createWindowsScheduledTaskPlanForIdentity,
   WindowsScheduledTaskController,
 } from "./service.ts";
 
@@ -132,3 +135,39 @@ class QueueRunner implements ProcessRunner {
     return result;
   }
 }
+
+test("identity-based plans keep companion defaults and accept other daemons", () => {
+  const companion = createMacOsLaunchAgentPlan({
+    paths: createCompanionPaths("/Users/tester", "darwin"),
+    invocation,
+    uid: 501,
+  });
+  const viaIdentity = createMacOsLaunchAgentPlanForIdentity(
+    companionServiceIdentity(createCompanionPaths("/Users/tester", "darwin"), invocation),
+    501,
+  );
+  assert.deepEqual(viaIdentity, companion);
+  const other = createMacOsLaunchAgentPlanForIdentity(
+    {
+      label: "dev.roll-agent.other",
+      plistPath: "/Users/tester/Library/LaunchAgents/dev.roll-agent.other.plist",
+      logPath: "/Users/tester/.roll-agent/other/other.log",
+      windowsTaskName: "Roll Agent Other",
+      programArguments: ["/bundle/node", "/bundle/roll.js", "other", "--foreground"],
+    },
+    501,
+  );
+  assert.equal(other.label, "dev.roll-agent.other");
+  assert.equal(other.serviceTarget, "gui/501/dev.roll-agent.other");
+  assert.match(other.plist, /<string>dev\.roll-agent\.other<\/string>/u);
+  assert.match(other.plist, /other\.log/u);
+  const windows = createWindowsScheduledTaskPlanForIdentity(
+    {
+      windowsTaskName: "Roll Agent Other",
+      programArguments: ["C:\\node.exe", "C:\\roll.js", "other"],
+    },
+    "D:\\Windows",
+  );
+  assert.equal(windows.taskName, "Roll Agent Other");
+  assert.ok(windows.create.args.includes("Roll Agent Other"));
+});
