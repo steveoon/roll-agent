@@ -136,6 +136,11 @@ export type {
 } from "./scheduler/types.ts";
 export { DefaultToolPolicy } from "./policy/default-policy.ts";
 export { ConfigurableToolPolicy } from "./policy/configurable-policy.ts";
+export {
+  UNATTENDED_CONFIRMATION_DENIED_REASON,
+  UnattendedToolPolicy,
+} from "./policy/unattended-policy.ts";
+export type { UnattendedDeniedConfirmation } from "./policy/unattended-policy.ts";
 export type {
   ConfigurableToolPolicyOptions,
   ToolApprovalDefault,
