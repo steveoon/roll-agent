@@ -233,3 +233,53 @@ test("e2e: daemon 拉起 exec 子进程并把结果写回账本，SIGTERM 后干
     rmSync(workspace, { recursive: true, force: true });
   }
 });
+
+test("e2e: 登记后修改 runtime.approval 会让下一次执行终态失败并提示 resume；resume 重新授权", () => {
+  const { workspace, env } = setupWorkspace();
+  try {
+    const project = resolve(workspace, "drift-project");
+    mkdirSync(resolve(project, "agents"), { recursive: true });
+    const baseConfig = buildConfigYaml(resolve(project, "agents"));
+    writeFileSync(resolve(project, "roll.config.yaml"), baseConfig);
+    const added = runRoll(
+      ["schedule", "add", "汇总", "--name", "漂移", "--every", "1h", "--cwd", project, "--json"],
+      workspace,
+      { env },
+    );
+    assert.equal(added.status, 0, added.stderr);
+    const created = JSON.parse(added.stdout) as { id: string; authorityDigest: string };
+
+    writeFileSync(
+      resolve(project, "roll.config.yaml"),
+      `${baseConfig}
+runtime:
+  approval:
+    default: auto
+`,
+    );
+    const ran = runRoll(["schedule", "run-now", created.id, "--inline", "--json"], workspace, {
+      env,
+    });
+    assert.equal(ran.status, 1, `${ran.stdout}\n${ran.stderr}`);
+    const invocation = JSON.parse(ran.stdout) as InvocationJson;
+    assert.equal(invocation.status, "failed");
+    assert.match(invocation.error ?? "", /权限边界已变化/u);
+    assert.match(invocation.error ?? "", new RegExp(`roll schedule resume ${created.id}`, "u"));
+
+    const resumed = runRoll(["schedule", "resume", created.id], workspace, { env });
+    assert.equal(resumed.status, 0, resumed.stderr);
+    const shown = runRoll(["schedule", "show", created.id, "--json"], workspace, { env });
+    const record = JSON.parse(shown.stdout) as { status: string; authorityDigest: string };
+    assert.equal(record.status, "active");
+    assert.notEqual(record.authorityDigest, created.authorityDigest);
+
+    const rerun = runRoll(["schedule", "run-now", created.id, "--inline", "--json"], workspace, {
+      env,
+    });
+    const second = JSON.parse(rerun.stdout) as InvocationJson;
+    assert.doesNotMatch(second.error ?? "", /权限边界已变化/u);
+    assert.match(second.error ?? "", /LLM provider/u);
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
