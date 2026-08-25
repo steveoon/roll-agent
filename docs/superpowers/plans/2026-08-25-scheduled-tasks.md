@@ -3742,7 +3742,7 @@ Run: `node --experimental-strip-types --experimental-sqlite --test packages/core
 - [ ] **Step 3: 实现 daemon-record.ts**
 
 ```ts
-import { mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { randomUUID } from "node:crypto";
 import {
@@ -3833,11 +3833,7 @@ export function removeDaemonRecord(path: string, expected: SchedulerDaemonRecord
   ) {
     return;
   }
-  try {
-    unlinkSync(path);
-  } catch {
-    return;
-  }
+  rmSync(path, { force: true });
 }
 
 function isPidAlive(pid: number): boolean {

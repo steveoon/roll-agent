@@ -18,5 +18,8 @@ export default defineCommand({
     resume: () => loadScheduleCommand("schedule-resume"),
     runs: () => loadScheduleCommand("schedule-runs"),
     exec: () => loadScheduleCommand("schedule-exec"),
+    "run-now": () => loadScheduleCommand("schedule-run-now"),
+    status: () => loadScheduleCommand("schedule-status"),
+    daemon: () => loadScheduleCommand("schedule-daemon"),
   },
 });
