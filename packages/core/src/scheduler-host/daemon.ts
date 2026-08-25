@@ -32,6 +32,7 @@ interface RunningInvocation {
   readonly ownershipToken: string;
   readonly handle: SpawnedInvocation;
   readonly runTimer: ReturnType<typeof setTimeout>;
+  treeKillUnconfirmed: boolean;
 }
 
 const MAX_TIMER_DELAY_MS = 2_147_483_647;
@@ -167,12 +168,17 @@ export class SchedulerDaemon {
         this.logger.error(
           `invocation ${id} 运行超过 ${String(this.maxRunMs)} ms，强制终止 exec 子进程`,
         );
-        handle.kill("SIGKILL");
+        this.signalChild(id, "SIGKILL");
       },
       Math.min(this.maxRunMs, this.maxTimerDelayMs),
     );
     runTimer.unref();
-    this.running.set(id, { ownershipToken: claim.ownershipToken, handle, runTimer });
+    this.running.set(id, {
+      ownershipToken: claim.ownershipToken,
+      handle,
+      runTimer,
+      treeKillUnconfirmed: false,
+    });
     handle.exited
       .then((code) => {
         this.onExit(claim, code);
@@ -191,6 +197,20 @@ export class SchedulerDaemon {
     }
     clearTimeout(entry.runTimer);
     this.running.delete(id);
+    if (entry.treeKillUnconfirmed) {
+      this.logger.error(
+        `invocation ${id} 的 exec 根进程已退出，但此前对其进程树的终止未被确认；保留 running，交给探活与 maxRunMs 处理`,
+      );
+      this.wake.resolve();
+      return;
+    }
+    if (this.executorTreeStillAlive(id)) {
+      this.logger.error(
+        `invocation ${id} 的 exec 根进程已退出，但其进程树仍有存活成员；保留 running，交给探活与 maxRunMs 处理`,
+      );
+      this.wake.resolve();
+      return;
+    }
     let outcome: ReturnType<ScheduleStore["failInvocation"]>;
     try {
       outcome = this.store.failInvocation(
@@ -214,6 +234,34 @@ export class SchedulerDaemon {
       this.logger.info(`invocation ${id} 完成`);
     }
     this.wake.resolve();
+  }
+
+  private signalChild(id: string, signal: "SIGTERM" | "SIGKILL"): void {
+    const entry = this.running.get(id);
+    if (entry === undefined) {
+      return;
+    }
+    const outcome = entry.handle.kill(signal);
+    if (typeof outcome === "string" && outcome !== "tree-terminated") {
+      entry.treeKillUnconfirmed = true;
+      this.logger.error(
+        `invocation ${id} 的 exec 进程树未能整体终止（${outcome}）；退出后将保留 running 而不重试`,
+      );
+    }
+  }
+
+  private executorTreeStillAlive(id: string): boolean {
+    let record: ReturnType<ScheduleStore["getInvocation"]>;
+    try {
+      record = this.store.getInvocation(id);
+    } catch (error) {
+      this.logger.error(`invocation ${id} 退出后读取账本失败：${errorMessage(error)}`);
+      return false;
+    }
+    if (record?.status !== "running" || record.executor === undefined) {
+      return false;
+    }
+    return this.store.probeExecutor(record.executor) !== "dead";
   }
 
   private renewLeases(): void {
@@ -271,13 +319,8 @@ export class SchedulerDaemon {
   }
 
   private async terminateChildren(): Promise<void> {
-    for (const [id, entry] of this.running) {
-      const outcome = entry.handle.kill("SIGTERM");
-      if (typeof outcome === "string" && outcome !== "tree-terminated") {
-        this.logger.error(
-          `invocation ${id} 的 exec 进程树未能整体终止（${outcome}），仅根进程收到信号`,
-        );
-      }
+    for (const id of this.running.keys()) {
+      this.signalChild(id, "SIGTERM");
     }
     await settleWithin(
       [...this.running.values()].map((entry) => entry.handle.exited),
@@ -286,11 +329,11 @@ export class SchedulerDaemon {
     if (this.running.size === 0) {
       return;
     }
-    for (const [id, entry] of this.running) {
+    for (const id of this.running.keys()) {
       this.logger.error(
         `invocation ${id} 的 exec 子进程在 ${String(this.childTerminateGraceMs)} ms 内未退出，发送 SIGKILL`,
       );
-      entry.handle.kill("SIGKILL");
+      this.signalChild(id, "SIGKILL");
     }
     await settleWithin(
       [...this.running.values()].map((entry) => entry.handle.exited),

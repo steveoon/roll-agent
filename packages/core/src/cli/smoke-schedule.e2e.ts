@@ -333,13 +333,19 @@ test("e2e: roll schedule cancel 对排队/运行/不可验证三种状态分别�
     const store = new ScheduleStore(resolve(workspace, "scheduler"), {
       executorLiveness: probeExecutorLiveness,
     });
-    const seedRunning = (scheduleId: string, executor: { pid: number; startToken: string }) => {
-      const manual = store.enqueueManualInvocation(scheduleId);
-      const claim = store.claimPendingInvocation(manual.id, "e2e");
+    const seedRunningIn = (
+      target: ScheduleStore,
+      scheduleId: string,
+      executor: { pid: number; startToken: string },
+    ) => {
+      const manual = target.enqueueManualInvocation(scheduleId);
+      const claim = target.claimPendingInvocation(manual.id, "e2e");
       assert.ok(claim);
-      store.beginInvocation(manual.id, claim.ownershipToken, Date.now(), executor);
+      target.beginInvocation(manual.id, claim.ownershipToken, Date.now(), executor);
       return manual.id;
     };
+    const seedRunning = (scheduleId: string, executor: { pid: number; startToken: string }) =>
+      seedRunningIn(store, scheduleId, executor);
     const runningId = seedRunning(runningScheduleId, { pid: sleeperPid, startToken: sleeperToken });
     const unknownId = seedRunning(unknownScheduleId, {
       pid: process.pid,
@@ -361,6 +367,46 @@ test("e2e: roll schedule cancel 对排队/运行/不可验证三种状态分别�
     assert.equal(killedJson.killed, true);
     await once(sleeper, "exit");
     assert.equal(isProcessAlive(sleeperPid), false);
+
+    if (process.platform !== "win32") {
+      const orphanRoot = spawn(
+        process.execPath,
+        [
+          "-e",
+          'const { spawn } = require("node:child_process"); spawn(process.execPath, ["-e", "setTimeout(() => {}, 60000)"], { stdio: "ignore" }); setTimeout(() => process.exit(0), 700);',
+        ],
+        { stdio: "ignore", detached: true },
+      );
+      const orphanRootPid = orphanRoot.pid;
+      assert.ok(orphanRootPid);
+      await delay(150);
+      const orphanToken = readProcessStartToken(orphanRootPid);
+      assert.ok(orphanToken);
+      await once(orphanRoot, "exit");
+      await delay(100);
+      const orphanScheduleId = addSchedule("根已退出");
+      const orphanStore = new ScheduleStore(resolve(workspace, "scheduler"), {
+        executorLiveness: probeExecutorLiveness,
+      });
+      const orphanId = seedRunningIn(orphanStore, orphanScheduleId, {
+        pid: orphanRootPid,
+        startToken: orphanToken,
+      });
+      orphanStore.close();
+      const orphanRefused = runRoll(["schedule", "cancel", orphanId], workspace, { env });
+      assert.equal(orphanRefused.status, 1, orphanRefused.stderr);
+      assert.match(orphanRefused.stderr, /--kill/u);
+      const orphanKilled = runRoll(
+        ["schedule", "cancel", orphanId, "--kill", "--json"],
+        workspace,
+        {
+          env,
+        },
+      );
+      assert.equal(orphanKilled.status, 0, orphanKilled.stderr);
+      assert.equal((JSON.parse(orphanKilled.stdout) as InvocationJson).status, "failed");
+      assert.equal(probeExecutorLiveness({ pid: orphanRootPid, startToken: orphanToken }), "dead");
+    }
 
     const unknownRefused = runRoll(["schedule", "cancel", unknownId, "--kill"], workspace, { env });
     assert.equal(unknownRefused.status, 1);

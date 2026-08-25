@@ -833,3 +833,29 @@ test("cancelInvocation：pending/claimed 直接取消；running 必须探活 dea
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test("探活为 descendants-alive 时视同存活：不 reclaim、cancel 要求 --kill", () => {
+  const dir = tempDir();
+  try {
+    const store = new ScheduleStore(dir, {
+      claimLeaseMs: 1_000,
+      executorLiveness: () => "descendants-alive",
+    });
+    store.createSchedule(sampleInput({ fireImmediately: true }), NOW);
+    const claim = store.claimDue({ workerId: "d", nowMs: NOW, limit: 1 })[0];
+    assert.ok(claim);
+    store.beginInvocation(claim.invocation.id, claim.ownershipToken, NOW + 1, {
+      pid: 4242,
+      startToken: "pst-v2:root-gone",
+    });
+    assert.deepEqual(store.claimDue({ workerId: "d2", nowMs: NOW + 5_000, limit: 5 }), []);
+    assert.equal(store.getInvocation(claim.invocation.id)?.status, INVOCATION_STATUSES.running);
+    assert.equal(
+      store.cancelInvocation(claim.invocation.id, "cancel", NOW + 6_000),
+      CANCEL_INVOCATION_OUTCOMES.executorAlive,
+    );
+    store.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

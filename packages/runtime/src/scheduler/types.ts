@@ -57,7 +57,12 @@ export interface CancelInvocationOptions {
   readonly abandon?: boolean;
 }
 
-export const EXECUTOR_LIVENESS = { alive: "alive", dead: "dead", unknown: "unknown" } as const;
+export const EXECUTOR_LIVENESS = {
+  alive: "alive",
+  descendants: "descendants-alive",
+  dead: "dead",
+  unknown: "unknown",
+} as const;
 export type ExecutorLiveness = (typeof EXECUTOR_LIVENESS)[keyof typeof EXECUTOR_LIVENESS];
 
 export interface ExecutorIdentity {

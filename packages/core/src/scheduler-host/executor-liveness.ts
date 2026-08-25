@@ -64,14 +64,72 @@ function isZombie(pid: number): boolean {
   return readProcessState(pid) === "Z";
 }
 
+function isErrnoCode(error: unknown, code: string): boolean {
+  return typeof error === "object" && error !== null && "code" in error && error.code === code;
+}
+
+function countLiveProcessGroupMembers(pgid: number): number | undefined {
+  if (process.platform === "win32") {
+    return undefined;
+  }
+  const psExecutable = TRUSTED_PS_PATHS.find((candidate) => existsSync(candidate));
+  if (psExecutable === undefined) {
+    return undefined;
+  }
+  try {
+    const result = spawnSync(psExecutable, ["-A", "-o", "pid=,pgid=,stat="], {
+      encoding: "utf-8",
+      env: { ...process.env, LC_ALL: "C", LANG: "C" },
+      timeout: PROCESS_STATE_TIMEOUT_MS,
+      windowsHide: true,
+    });
+    if (result.status !== 0 || result.error !== undefined) {
+      return undefined;
+    }
+    let live = 0;
+    for (const line of result.stdout.split("\n")) {
+      const [pid, groupId, state] = line.trim().split(/\s+/u);
+      if (pid === undefined || groupId === undefined) {
+        continue;
+      }
+      if (Number.parseInt(groupId, 10) === pgid && !(state ?? "").startsWith("Z")) {
+        live += 1;
+      }
+    }
+    return live;
+  } catch {
+    return undefined;
+  }
+}
+
+function hasLiveDescendants(pid: number): boolean {
+  if (process.platform === "win32") {
+    return false;
+  }
+  const members = countLiveProcessGroupMembers(pid);
+  if (members !== undefined) {
+    return members > 0;
+  }
+  try {
+    process.kill(-pid, 0);
+    return true;
+  } catch (error) {
+    return isErrnoCode(error, "EPERM");
+  }
+}
+
 export function probeExecutorLiveness(executor: ExecutorIdentity): ExecutorLiveness {
   if (!isProcessStartToken(executor.startToken)) {
     return EXECUTOR_LIVENESS.unknown;
   }
-  const liveness =
+  const rootLiveness =
     LIVENESS_BY_VERIFICATION[verifyProcessStartToken(executor.pid, executor.startToken).status];
-  if (liveness === EXECUTOR_LIVENESS.alive && isZombie(executor.pid)) {
-    return EXECUTOR_LIVENESS.dead;
+  const liveness =
+    rootLiveness === EXECUTOR_LIVENESS.alive && isZombie(executor.pid)
+      ? EXECUTOR_LIVENESS.dead
+      : rootLiveness;
+  if (liveness === EXECUTOR_LIVENESS.dead && hasLiveDescendants(executor.pid)) {
+    return EXECUTOR_LIVENESS.descendants;
   }
   return liveness;
 }
@@ -143,7 +201,8 @@ export function terminateExecutor(
   signal: NodeJS.Signals = "SIGKILL",
   deps: KillProcessTreeDeps = {},
 ): KillProcessTreeOutcome {
-  if (probeExecutorLiveness(executor) !== EXECUTOR_LIVENESS.alive) {
+  const liveness = probeExecutorLiveness(executor);
+  if (liveness !== EXECUTOR_LIVENESS.alive && liveness !== EXECUTOR_LIVENESS.descendants) {
     return KILL_PROCESS_TREE_OUTCOMES.failed;
   }
   return killProcessTree(executor.pid, signal, deps);

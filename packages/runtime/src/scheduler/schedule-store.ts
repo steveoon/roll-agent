@@ -29,6 +29,7 @@ import {
   type CreateScheduleInput,
   type EnqueueManualInvocationOptions,
   type ExecutorIdentity,
+  type ExecutorLiveness,
   type ExecutorLivenessProbe,
   type FailInvocationOptions,
   type InvocationFailureOutcome,
@@ -478,6 +479,10 @@ export class ScheduleStore {
     });
   }
 
+  probeExecutor(executor: ExecutorIdentity): ExecutorLiveness {
+    return this.executorLiveness(executor);
+  }
+
   listRunningInvocations(): InvocationRecord[] {
     const rows = this.db
       .prepare("SELECT * FROM invocations WHERE status = ? ORDER BY started_at ASC")
@@ -599,7 +604,7 @@ export class ScheduleStore {
         const executor = toExecutorIdentity(row);
         const liveness =
           executor === undefined ? EXECUTOR_LIVENESS.unknown : this.executorLiveness(executor);
-        if (liveness === EXECUTOR_LIVENESS.alive) {
+        if (liveness === EXECUTOR_LIVENESS.alive || liveness === EXECUTOR_LIVENESS.descendants) {
           return CANCEL_INVOCATION_OUTCOMES.executorAlive;
         }
         if (liveness === EXECUTOR_LIVENESS.unknown) {

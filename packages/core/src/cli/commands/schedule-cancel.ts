@@ -32,7 +32,7 @@ async function killAndConfirmExit(executor: ExecutorIdentity): Promise<KillResul
   if (outcome !== KILL_PROCESS_TREE_OUTCOMES.tree) {
     const liveness = probeExecutorLiveness(executor);
     if (liveness === EXECUTOR_LIVENESS.dead) {
-      return KILL_RESULTS.confirmed;
+      return process.platform === "win32" ? KILL_RESULTS.unverifiable : KILL_RESULTS.confirmed;
     }
     return liveness === EXECUTOR_LIVENESS.unknown
       ? KILL_RESULTS.unverifiable
@@ -113,8 +113,8 @@ export default defineCommand({
         if (outcome === outcomes.executorAlive) {
           throw new Error(
             args.kill
-              ? `exec 进程 (pid ${String(before.executor?.pid ?? "?")}) 在 ${String(KILL_CONFIRM_TIMEOUT_MS)} ms 内未退出，未取消；请稍后重试`
-              : `invocation ${args.invocation} 正在运行（pid ${String(before.executor?.pid ?? "?")}），取消需要加 --kill`,
+              ? `exec 进程树 (pid ${String(before.executor?.pid ?? "?")}) 在 ${String(KILL_CONFIRM_TIMEOUT_MS)} ms 内未全部退出，未取消；请稍后重试`
+              : `invocation ${args.invocation} 的 exec 进程或其进程树仍有存活成员（pid ${String(before.executor?.pid ?? "?")}），取消需要加 --kill`,
           );
         }
         if (outcome === outcomes.executorUnknown) {

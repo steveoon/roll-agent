@@ -71,17 +71,10 @@ export function createInvocationSpawner(
     });
     return {
       exited,
-      kill: (signal: SpawnedInvocationSignal = "SIGTERM") => {
-        if (child.pid !== undefined) {
-          const outcome = killProcessTree(child.pid, signal);
-          if (outcome === KILL_PROCESS_TREE_OUTCOMES.tree) {
-            return outcome;
-          }
-        }
-        return child.kill(signal)
-          ? KILL_PROCESS_TREE_OUTCOMES.rootOnly
-          : KILL_PROCESS_TREE_OUTCOMES.failed;
-      },
+      kill: (signal: SpawnedInvocationSignal = "SIGTERM") =>
+        child.pid === undefined
+          ? KILL_PROCESS_TREE_OUTCOMES.failed
+          : killProcessTree(child.pid, signal),
     };
   };
 }

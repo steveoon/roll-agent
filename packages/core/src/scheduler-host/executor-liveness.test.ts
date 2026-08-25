@@ -1,12 +1,14 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
+import { once } from "node:events";
 import { EXECUTOR_LIVENESS } from "@roll-agent/runtime";
 import {
   KILL_PROCESS_TREE_OUTCOMES,
   currentExecutorIdentity,
   killProcessTree,
   probeExecutorLiveness,
+  terminateExecutor,
 } from "./executor-liveness.ts";
 
 test("当前进程的 executor identity 探活为 alive", (t) => {
@@ -182,4 +184,61 @@ test("killProcessTree：POSIX 进程组信号失败时返回 failed，不单独�
   });
   assert.equal(ok, KILL_PROCESS_TREE_OUTCOMES.tree);
   assert.deepEqual(killed[1], [-4242, "SIGTERM"]);
+});
+
+test("根进程退出但同进程组后代仍存活 → descendants-alive；整组终止后 → dead（POSIX）", async (t) => {
+  if (process.platform === "win32") {
+    t.skip("Windows 没有进程组语义");
+    return;
+  }
+  const identity = currentExecutorIdentity();
+  if (identity === undefined) {
+    t.skip("当前平台无法读取进程启动身份");
+    return;
+  }
+  const { spawn } = await import("node:child_process");
+  const { setTimeout: delay } = await import("node:timers/promises");
+  const { readProcessStartToken } = await import("../registry/process-identity.ts");
+  const root = spawn(
+    process.execPath,
+    [
+      "-e",
+      'const { spawn } = require("node:child_process"); spawn(process.execPath, ["-e", "setTimeout(() => {}, 60000)"], { stdio: "ignore" }); setTimeout(() => process.exit(0), 700);',
+    ],
+    { stdio: "ignore", detached: true },
+  );
+  const rootPid = root.pid;
+  assert.ok(rootPid);
+  try {
+    await delay(150);
+    const token = readProcessStartToken(rootPid);
+    assert.ok(token);
+    assert.equal(
+      probeExecutorLiveness({ pid: rootPid, startToken: token }),
+      EXECUTOR_LIVENESS.alive,
+    );
+    await once(root, "exit");
+    await delay(100);
+    assert.equal(
+      probeExecutorLiveness({ pid: rootPid, startToken: token }),
+      EXECUTOR_LIVENESS.descendants,
+    );
+    assert.equal(
+      terminateExecutor({ pid: rootPid, startToken: token }),
+      KILL_PROCESS_TREE_OUTCOMES.tree,
+    );
+    const deadline = Date.now() + 3_000;
+    let liveness = probeExecutorLiveness({ pid: rootPid, startToken: token });
+    while (liveness !== EXECUTOR_LIVENESS.dead && Date.now() < deadline) {
+      await delay(50);
+      liveness = probeExecutorLiveness({ pid: rootPid, startToken: token });
+    }
+    assert.equal(liveness, EXECUTOR_LIVENESS.dead);
+  } finally {
+    try {
+      process.kill(-rootPid, "SIGKILL");
+    } catch {
+      // group already gone
+    }
+  }
 });
