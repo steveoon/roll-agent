@@ -142,6 +142,13 @@ schema 升到 v2（`schedules.authority_digest`、`invocations.max_attempts / ex
 - `bin/roll`：内层进程被信号杀死时透传信号 / 退出码 1；进入子进程前清掉 `ROLL_SQLITE_RESPAWNED`，嵌套 `roll schedule …` 仍能自行加 flag；`service install` 先探测 `node:sqlite` 可加载；`--max-concurrent-runs` 复用 schema 上界 1..8
 - 不改并记录：同 uid 可经 `ps -E` 看到 token（同 uid 本就能读 0600 的账本）；探活在 `BEGIN IMMEDIATE` 内执行（仅 lease 过期行）；macOS 启动身份秒级粒度；Windows `schtasks /TR` 261 字符上限需 Windows 主机实测
 
+第三轮（kai 二审，High · confirmed：manual run-now 绕过同 schedule 单例约束）：
+
+- 单例门禁进账本事务：`claimPendingInvocation` 的 UPDATE 带 `NOT EXISTS 其他 claimed/running`；`claimDue` 对 pending / retry / 过期行同样检查 `hasOtherLiveRunInTransaction`。manual 触发在运行中排队，`run-now --inline` 被挡时删掉刚入队的行并退出 1；不提供 `--force`
+- 人工出口：`roll schedule cancel <invocation-id> [--kill]`（`cancelInvocation` 置终态并作废 token；`--kill` 经身份校验后向进程组 SIGKILL），用于 liveness 永久 unknown 的吸收态
+- exec 以进程组运行（POSIX `detached` + `kill(-pid)`），`maxRunMs` / 孤儿终止覆盖后代进程；文档改口：保证「不会同时运行两个可验证存活的 exec 进程」，不承诺 exactly-once
+- 待拍板（产品取舍，未改）：authority digest 只覆盖 `runtime.approval` / `runtime.shell`，不覆盖 Agent / tool metadata；scheduled run 创建的 Thread 不随账本清理
+
 ## 不覆盖（v2）
 
 日历触发 + 时区、`/loop` 与模型可调用 `roll__schedule` 工具、有界上下文链复用线程、主动通知、`roll doctor` 检查项、Linux systemd 用户服务。

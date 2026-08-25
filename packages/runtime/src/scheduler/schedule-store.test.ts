@@ -704,3 +704,80 @@ test("listRunningInvocations 只返回 running 行", () => {
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test("同一 schedule 同一时刻只有一次运行：manual 触发在运行中排队，inline claim 被拒绝", () => {
+  const dir = tempDir();
+  try {
+    const store = new ScheduleStore(dir);
+    const created = store.createSchedule(sampleInput({ fireImmediately: true }), NOW);
+    const scheduled = store.claimDue({ workerId: "d", nowMs: NOW, limit: 5 })[0];
+    assert.ok(scheduled);
+    store.beginInvocation(scheduled.invocation.id, scheduled.ownershipToken, NOW + 1, {
+      pid: 1,
+      startToken: "pst-v2:a",
+    });
+    const first = store.enqueueManualInvocation(created.id, NOW + 2);
+    const second = store.enqueueManualInvocation(created.id, NOW + 3);
+    assert.equal(store.claimPendingInvocation(first.id, "inline", NOW + 4), undefined);
+    assert.equal(store.getInvocation(first.id)?.status, INVOCATION_STATUSES.pending);
+    assert.equal(store.findLiveRun(created.id)?.id, scheduled.invocation.id);
+    assert.deepEqual(store.claimDue({ workerId: "d", nowMs: NOW + 5, limit: 5 }), []);
+    assert.equal(store.discardPendingInvocation(first.id), true);
+    assert.equal(store.discardPendingInvocation(first.id), false);
+    store.completeInvocation({
+      id: scheduled.invocation.id,
+      ownershipToken: scheduled.ownershipToken,
+      status: INVOCATION_STATUSES.completed,
+      nowMs: NOW + 6,
+    });
+    assert.equal(store.findLiveRun(created.id), undefined);
+    const claimedManual = store.claimDue({ workerId: "d", nowMs: NOW + 7, limit: 5 });
+    assert.deepEqual(
+      claimedManual.map((claim) => claim.invocation.id),
+      [second.id],
+    );
+    const third = store.enqueueManualInvocation(created.id, NOW + 8);
+    assert.equal(store.claimPendingInvocation(third.id, "inline", NOW + 9), undefined);
+    assert.deepEqual(store.claimDue({ workerId: "d", nowMs: NOW + 10, limit: 5 }), []);
+    store.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("cancelInvocation 把 live 行置为终态并作废 token，终态行不能再取消", () => {
+  const dir = tempDir();
+  try {
+    const store = new ScheduleStore(dir);
+    const created = store.createSchedule(sampleInput({ fireImmediately: true }), NOW);
+    const claim = store.claimDue({ workerId: "d", nowMs: NOW, limit: 1 })[0];
+    assert.ok(claim);
+    store.beginInvocation(claim.invocation.id, claim.ownershipToken, NOW + 1, {
+      pid: 1,
+      startToken: "pst-v2:a",
+    });
+    assert.equal(store.cancelInvocation(claim.invocation.id, "已由用户取消", NOW + 2), true);
+    const cancelled = store.getInvocation(claim.invocation.id);
+    assert.equal(cancelled?.status, INVOCATION_STATUSES.failed);
+    assert.equal(cancelled?.error, "已由用户取消");
+    assert.equal(store.getSchedule(created.id)?.status, SCHEDULE_STATUSES.active);
+    assert.equal(store.getSchedule(created.id)?.lastError, undefined);
+    assert.equal(
+      store.completeInvocation({
+        id: claim.invocation.id,
+        ownershipToken: claim.ownershipToken,
+        status: INVOCATION_STATUSES.completed,
+        nowMs: NOW + 3,
+      }),
+      false,
+    );
+    assert.equal(store.cancelInvocation(claim.invocation.id, "again", NOW + 4), false);
+    assert.equal(store.cancelInvocation("missing", "x", NOW + 4), false);
+    const queued = store.enqueueManualInvocation(created.id, NOW + 5);
+    assert.equal(store.cancelInvocation(queued.id, "取消排队", NOW + 6), true);
+    assert.equal(store.getInvocation(queued.id)?.status, INVOCATION_STATUSES.failed);
+    store.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

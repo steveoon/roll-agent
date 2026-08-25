@@ -53,6 +53,12 @@ export default defineCommand({
         const queued = store.enqueueManualInvocation(args.id, Date.now(), { maxAttempts: 1 });
         const claim = store.claimPendingInvocation(queued.id, `inline-${String(process.pid)}`);
         if (claim === undefined) {
+          const live = store.findLiveRun(args.id);
+          if (store.discardPendingInvocation(queued.id) && live !== undefined) {
+            throw new Error(
+              `任务正在运行中（invocation ${live.id}，${live.status}），同一任务同一时刻只运行一次；请等待完成，或不加 --inline 入队等待`,
+            );
+          }
           throw new Error(
             `invocation ${queued.id} 已被 daemon 接管，请用 roll schedule runs ${args.id} 查看`,
           );
@@ -62,6 +68,11 @@ export default defineCommand({
           dataDir: paths.dataDir,
           logPath: paths.logPath,
         })(claim);
+        const forwardStop = () => {
+          handle.kill("SIGTERM");
+        };
+        process.once("SIGINT", forwardStop);
+        process.once("SIGTERM", forwardStop);
         const renew = setInterval(() => {
           store.renewLease(claim.invocation.id, claim.ownershipToken);
         }, runtime.SCHEDULER_LIMITS.leaseRenewIntervalMs);
@@ -70,6 +81,8 @@ export default defineCommand({
           code = await handle.exited;
         } finally {
           clearInterval(renew);
+          process.off("SIGINT", forwardStop);
+          process.off("SIGTERM", forwardStop);
         }
         store.failInvocation(
           claim.invocation.id,

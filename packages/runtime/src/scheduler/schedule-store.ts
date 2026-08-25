@@ -14,6 +14,7 @@ import {
 import {
   EXECUTOR_LIVENESS,
   INVOCATION_FAILURE_OUTCOMES,
+  INVOCATION_LIVE_STATUSES,
   INVOCATION_MODES,
   INVOCATION_STATUSES,
   INVOCATION_TERMINAL_STATUSES,
@@ -534,7 +535,11 @@ export class ScheduleStore {
           `UPDATE invocations
              SET status = ?, claimed_by = ?, ownership_token = ?, lease_until = ?, attempt = 1,
                  retry_at = NULL
-           WHERE id = ? AND status = ?`,
+           WHERE id = ? AND status = ?
+             AND NOT EXISTS (
+               SELECT 1 FROM invocations o
+                WHERE o.schedule_id = (SELECT schedule_id FROM invocations WHERE id = ?)
+                  AND o.id != ? AND o.status IN (?, ?))`,
         )
         .run(
           INVOCATION_STATUSES.claimed,
@@ -543,9 +548,58 @@ export class ScheduleStore {
           nowMs + this.claimLeaseMs,
           id,
           INVOCATION_STATUSES.pending,
+          id,
+          id,
+          INVOCATION_STATUSES.claimed,
+          INVOCATION_STATUSES.running,
         );
       return result.changes === 1 ? this.loadClaim(id, token) : undefined;
     });
+  }
+
+  findLiveRun(scheduleId: string): InvocationRecord | undefined {
+    const row = this.db
+      .prepare(
+        `SELECT * FROM invocations WHERE schedule_id = ? AND status IN (?, ?)
+          ORDER BY started_at ASC, created_at ASC LIMIT 1`,
+      )
+      .get(scheduleId, INVOCATION_STATUSES.claimed, INVOCATION_STATUSES.running) as
+      | InvocationRow
+      | undefined;
+    return row ? toInvocationRecord(row) : undefined;
+  }
+
+  discardPendingInvocation(id: string): boolean {
+    const result = this.db
+      .prepare("DELETE FROM invocations WHERE id = ? AND status = ?")
+      .run(id, INVOCATION_STATUSES.pending);
+    return result.changes === 1;
+  }
+
+  cancelInvocation(id: string, reason: string, nowMs: number = Date.now()): boolean {
+    return this.transaction(() => {
+      const row = this.db.prepare("SELECT status FROM invocations WHERE id = ?").get(id) as
+        | { readonly status: string }
+        | undefined;
+      if (row === undefined || !isInvocationStatus(row.status)) {
+        return false;
+      }
+      if (!(INVOCATION_LIVE_STATUSES as readonly InvocationStatus[]).includes(row.status)) {
+        return false;
+      }
+      this.finishInvocationAsFailedInTransaction(id, reason, nowMs);
+      return true;
+    });
+  }
+
+  private hasOtherLiveRunInTransaction(scheduleId: string, exceptId: string): boolean {
+    const row = this.db
+      .prepare(
+        `SELECT 1 AS present FROM invocations
+          WHERE schedule_id = ? AND id != ? AND status IN (?, ?) LIMIT 1`,
+      )
+      .get(scheduleId, exceptId, INVOCATION_STATUSES.claimed, INVOCATION_STATUSES.running);
+    return row !== undefined;
   }
 
   claimDue(input: ClaimDueInput): ClaimedInvocation[] {
@@ -604,6 +658,9 @@ export class ScheduleStore {
             "任务已暂停，放弃本次运行",
             input.nowMs,
           );
+          continue;
+        }
+        if (this.hasOtherLiveRunInTransaction(row.schedule_id, row.id)) {
           continue;
         }
         const attempt = row.status === INVOCATION_STATUSES.pending ? 1 : row.attempt + 1;

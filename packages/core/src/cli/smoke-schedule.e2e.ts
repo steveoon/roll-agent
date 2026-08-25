@@ -283,3 +283,36 @@ runtime:
     rmSync(workspace, { recursive: true, force: true });
   }
 });
+
+test("e2e: roll schedule cancel 把排队中的 invocation 置为终态，终态后再取消返回 1", () => {
+  const { workspace, env } = setupWorkspace();
+  try {
+    const added = runRoll(
+      ["schedule", "add", "汇总", "--name", "取消", "--every", "1h", "--cwd", workspace, "--json"],
+      workspace,
+      { env },
+    );
+    assert.equal(added.status, 0, added.stderr);
+    const created = JSON.parse(added.stdout) as { id: string };
+    const queued = runRoll(["schedule", "run-now", created.id, "--json"], workspace, { env });
+    assert.equal(queued.status, 0, queued.stderr);
+    const invocation = JSON.parse(queued.stdout) as InvocationJson;
+    assert.equal(invocation.status, "pending");
+
+    const cancelled = runRoll(["schedule", "cancel", invocation.id, "--json"], workspace, { env });
+    assert.equal(cancelled.status, 0, cancelled.stderr);
+    const after = JSON.parse(cancelled.stdout) as InvocationJson & { killed: boolean };
+    assert.equal(after.status, "failed");
+    assert.match(after.error ?? "", /已由用户取消/u);
+    assert.equal(after.killed, false);
+
+    const again = runRoll(["schedule", "cancel", invocation.id], workspace, { env });
+    assert.equal(again.status, 1);
+    assert.match(again.stderr, /终态/u);
+
+    const shown = runRoll(["schedule", "show", created.id, "--json"], workspace, { env });
+    assert.equal((JSON.parse(shown.stdout) as { status: string }).status, "active");
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});

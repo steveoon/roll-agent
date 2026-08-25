@@ -51,6 +51,7 @@ export function createInvocationSpawner(
         },
         stdio: ["ignore", "ignore", logFd],
         windowsHide: true,
+        detached: process.platform !== "win32",
       },
     );
     const exited = new Promise<number | null>((resolve) => {
@@ -66,6 +67,15 @@ export function createInvocationSpawner(
     return {
       exited,
       kill: (signal: SpawnedInvocationSignal = "SIGTERM") => {
+        if (process.platform !== "win32" && child.pid !== undefined) {
+          try {
+            process.kill(-child.pid, signal);
+            return;
+          } catch {
+            child.kill(signal);
+            return;
+          }
+        }
         child.kill(signal);
       },
     };

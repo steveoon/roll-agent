@@ -37,6 +37,14 @@ export function terminateExecutor(
   if (probeExecutorLiveness(executor) !== EXECUTOR_LIVENESS.alive) {
     return false;
   }
+  if (process.platform !== "win32") {
+    try {
+      process.kill(-executor.pid, signal);
+      return true;
+    } catch {
+      // not a process-group leader; fall back to the single pid
+    }
+  }
   try {
     process.kill(executor.pid, signal);
     return true;
