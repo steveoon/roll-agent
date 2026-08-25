@@ -1,0 +1,718 @@
+import { chmodSync, existsSync, mkdirSync } from "node:fs";
+import { isAbsolute, resolve } from "node:path";
+import { randomUUID } from "node:crypto";
+import { DatabaseSync } from "node:sqlite";
+import { expandTilde } from "../store/thread-store.ts";
+import { SCHEDULER_LIMITS } from "./limits.ts";
+import {
+  computeNextRunAtMs,
+  parseTriggerJson,
+  triggerSpecSchema,
+  type TriggerSpec,
+} from "./trigger.ts";
+import {
+  INVOCATION_FAILURE_OUTCOMES,
+  INVOCATION_MODES,
+  INVOCATION_STATUSES,
+  SCHEDULE_STATUSES,
+  SCHEDULE_STORE_ERROR_CODES,
+  ScheduleStoreError,
+  type ClaimedInvocation,
+  type CompleteInvocationInput,
+  type CreateScheduleInput,
+  type InvocationFailureOutcome,
+  type InvocationMode,
+  type InvocationRecord,
+  type InvocationStatus,
+  type ScheduleRecord,
+  type ScheduleStatus,
+} from "./types.ts";
+
+const SCHEMA_VERSION = 1;
+const BUSY_TIMEOUT_MS = 15_000;
+
+export interface ScheduleStoreOptions {
+  readonly maxSchedules?: number;
+  readonly claimLeaseMs?: number;
+  readonly retryBudget?: number;
+  readonly retryBackoffMs?: number;
+}
+
+interface ScheduleRow {
+  readonly id: string;
+  readonly name: string;
+  readonly prompt: string;
+  readonly cwd: string;
+  readonly trigger_json: string;
+  readonly status: string;
+  readonly next_run_at: number | null;
+  readonly last_run_at: number | null;
+  readonly last_error: string | null;
+  readonly created_at: number;
+  readonly updated_at: number;
+}
+
+interface InvocationRow {
+  readonly id: string;
+  readonly schedule_id: string;
+  readonly mode: string;
+  readonly status: string;
+  readonly scheduled_for: number;
+  readonly attempt: number;
+  readonly claimed_by: string | null;
+  readonly ownership_token: string | null;
+  readonly lease_until: number | null;
+  readonly retry_at: number | null;
+  readonly thread_id: string | null;
+  readonly output_excerpt: string | null;
+  readonly error: string | null;
+  readonly pending_actions_json: string;
+  readonly created_at: number;
+  readonly started_at: number | null;
+  readonly finished_at: number | null;
+}
+
+const INVOCATION_MODE_VALUES: readonly string[] = Object.values(INVOCATION_MODES);
+const INVOCATION_STATUS_VALUES: readonly string[] = Object.values(INVOCATION_STATUSES);
+
+function isInvocationMode(value: string): value is InvocationMode {
+  return INVOCATION_MODE_VALUES.includes(value);
+}
+
+function isInvocationStatus(value: string): value is InvocationStatus {
+  return INVOCATION_STATUS_VALUES.includes(value);
+}
+
+function parsePendingActions(json: string): readonly string[] {
+  try {
+    const parsed = JSON.parse(json) as unknown;
+    return Array.isArray(parsed)
+      ? parsed.filter((item): item is string => typeof item === "string")
+      : [];
+  } catch {
+    return [];
+  }
+}
+
+function toInvocationRecord(row: InvocationRow): InvocationRecord {
+  if (!isInvocationMode(row.mode) || !isInvocationStatus(row.status)) {
+    throw new ScheduleStoreError(
+      SCHEDULE_STORE_ERROR_CODES.invalid,
+      `invocation ${row.id} 的 mode/status 非法: ${row.mode}/${row.status}`,
+    );
+  }
+  return {
+    id: row.id,
+    scheduleId: row.schedule_id,
+    mode: row.mode,
+    status: row.status,
+    scheduledForMs: row.scheduled_for,
+    attempt: row.attempt,
+    claimedBy: row.claimed_by ?? undefined,
+    leaseUntilMs: row.lease_until ?? undefined,
+    retryAtMs: row.retry_at ?? undefined,
+    threadId: row.thread_id ?? undefined,
+    outputExcerpt: row.output_excerpt ?? undefined,
+    error: row.error ?? undefined,
+    pendingActions: parsePendingActions(row.pending_actions_json),
+    createdAtMs: row.created_at,
+    startedAtMs: row.started_at ?? undefined,
+    finishedAtMs: row.finished_at ?? undefined,
+  };
+}
+
+export interface ClaimDueInput {
+  readonly workerId: string;
+  readonly nowMs: number;
+  readonly limit: number;
+}
+
+function isScheduleStatus(value: string): value is ScheduleStatus {
+  return value === SCHEDULE_STATUSES.active || value === SCHEDULE_STATUSES.paused;
+}
+
+function toScheduleRecord(row: ScheduleRow): ScheduleRecord {
+  if (!isScheduleStatus(row.status)) {
+    throw new ScheduleStoreError(
+      SCHEDULE_STORE_ERROR_CODES.invalid,
+      `schedule ${row.id} 的 status 非法: ${row.status}`,
+    );
+  }
+  return {
+    id: row.id,
+    name: row.name,
+    prompt: row.prompt,
+    cwd: row.cwd,
+    trigger: parseTriggerJson(row.trigger_json),
+    status: row.status,
+    nextRunAtMs: row.next_run_at ?? undefined,
+    lastRunAtMs: row.last_run_at ?? undefined,
+    lastError: row.last_error ?? undefined,
+    createdAtMs: row.created_at,
+    updatedAtMs: row.updated_at,
+  };
+}
+
+function validateCreateInput(input: CreateScheduleInput): {
+  readonly name: string;
+  readonly prompt: string;
+  readonly cwd: string;
+  readonly trigger: TriggerSpec;
+} {
+  const name = input.name.trim();
+  if (name.length === 0 || name.length > SCHEDULER_LIMITS.maxNameChars) {
+    throw new ScheduleStoreError(
+      SCHEDULE_STORE_ERROR_CODES.invalid,
+      `name 必须为 1..${String(SCHEDULER_LIMITS.maxNameChars)} 个字符`,
+    );
+  }
+  const prompt = input.prompt.trim();
+  if (prompt.length === 0 || prompt.length > SCHEDULER_LIMITS.maxPromptChars) {
+    throw new ScheduleStoreError(
+      SCHEDULE_STORE_ERROR_CODES.invalid,
+      `prompt 必须为 1..${String(SCHEDULER_LIMITS.maxPromptChars)} 个字符`,
+    );
+  }
+  if (!isAbsolute(input.cwd)) {
+    throw new ScheduleStoreError(SCHEDULE_STORE_ERROR_CODES.invalid, "cwd 必须是绝对路径");
+  }
+  const trigger = triggerSpecSchema.safeParse(input.trigger);
+  if (!trigger.success) {
+    throw new ScheduleStoreError(SCHEDULE_STORE_ERROR_CODES.invalid, "trigger 不合法");
+  }
+  return { name, prompt, cwd: input.cwd, trigger: trigger.data };
+}
+
+export class ScheduleStore {
+  private readonly db: DatabaseSync;
+  private readonly maxSchedules: number;
+  private readonly claimLeaseMs: number;
+  private readonly retryBudget: number;
+  private readonly retryBackoffMs: number;
+
+  constructor(dir: string, options: ScheduleStoreOptions = {}) {
+    this.maxSchedules = options.maxSchedules ?? 50;
+    this.claimLeaseMs = options.claimLeaseMs ?? SCHEDULER_LIMITS.claimLeaseMs;
+    this.retryBudget = options.retryBudget ?? SCHEDULER_LIMITS.retryBudget;
+    this.retryBackoffMs = options.retryBackoffMs ?? SCHEDULER_LIMITS.retryBackoffMs;
+    const resolved = expandTilde(dir);
+    if (!existsSync(resolved)) {
+      mkdirSync(resolved, { recursive: true, mode: 0o700 });
+    }
+    if (process.platform !== "win32") {
+      chmodSync(resolved, 0o700);
+    }
+    const databasePath = resolve(resolved, "schedules.db");
+    this.db = new DatabaseSync(databasePath);
+    if (process.platform !== "win32") {
+      try {
+        chmodSync(databasePath, 0o600);
+      } catch (error) {
+        this.db.close();
+        throw error;
+      }
+    }
+    this.init();
+  }
+
+  private init(): void {
+    this.db.exec(
+      `PRAGMA busy_timeout = ${String(BUSY_TIMEOUT_MS)};
+       PRAGMA foreign_keys = ON;
+       PRAGMA secure_delete = ON;`,
+    );
+    const versionRow = this.db.prepare("PRAGMA user_version").get() as {
+      readonly user_version: number;
+    };
+    if (versionRow.user_version > SCHEMA_VERSION) {
+      throw new Error(
+        `ScheduleStore schema v${String(versionRow.user_version)} 高于当前支持的 v${String(SCHEMA_VERSION)}`,
+      );
+    }
+    this.transaction(() => {
+      this.db.exec(
+        `CREATE TABLE IF NOT EXISTS schedules (
+           id TEXT PRIMARY KEY,
+           name TEXT NOT NULL,
+           prompt TEXT NOT NULL,
+           cwd TEXT NOT NULL,
+           trigger_json TEXT NOT NULL,
+           status TEXT NOT NULL CHECK (status IN ('active', 'paused')),
+           next_run_at INTEGER,
+           last_run_at INTEGER,
+           last_error TEXT,
+           created_at INTEGER NOT NULL,
+           updated_at INTEGER NOT NULL
+         );
+         CREATE TABLE IF NOT EXISTS invocations (
+           id TEXT PRIMARY KEY,
+           schedule_id TEXT NOT NULL REFERENCES schedules(id) ON DELETE CASCADE,
+           mode TEXT NOT NULL CHECK (mode IN ('scheduled', 'manual')),
+           status TEXT NOT NULL CHECK (status IN ('pending', 'claimed', 'running', 'retry', 'completed', 'needs_confirmation', 'failed')),
+           scheduled_for INTEGER NOT NULL,
+           attempt INTEGER NOT NULL DEFAULT 0,
+           claimed_by TEXT,
+           ownership_token TEXT,
+           lease_until INTEGER,
+           retry_at INTEGER,
+           thread_id TEXT,
+           output_excerpt TEXT,
+           error TEXT,
+           pending_actions_json TEXT NOT NULL DEFAULT '[]',
+           created_at INTEGER NOT NULL,
+           started_at INTEGER,
+           finished_at INTEGER,
+           UNIQUE (schedule_id, mode, scheduled_for)
+         );
+         CREATE INDEX IF NOT EXISTS idx_schedules_due
+           ON schedules (next_run_at) WHERE status = 'active' AND next_run_at IS NOT NULL;
+         CREATE INDEX IF NOT EXISTS idx_invocations_live
+           ON invocations (schedule_id) WHERE status IN ('pending', 'claimed', 'running', 'retry');`,
+      );
+      this.db.exec(`PRAGMA user_version = ${String(SCHEMA_VERSION)};`);
+    });
+  }
+
+  private transaction<T>(work: () => T): T {
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const result = work();
+      this.db.exec("COMMIT");
+      return result;
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  createSchedule(input: CreateScheduleInput, nowMs: number = Date.now()): ScheduleRecord {
+    const valid = validateCreateInput(input);
+    return this.transaction(() => {
+      const countRow = this.db.prepare("SELECT COUNT(*) AS count FROM schedules").get() as {
+        readonly count: number;
+      };
+      if (countRow.count >= this.maxSchedules) {
+        throw new ScheduleStoreError(
+          SCHEDULE_STORE_ERROR_CODES.limitReached,
+          `已达到定时任务上限 ${String(this.maxSchedules)}，请先删除不再需要的任务`,
+        );
+      }
+      const id = randomUUID();
+      const nextRunAt =
+        input.fireImmediately === true ? nowMs : computeNextRunAtMs(valid.trigger, nowMs);
+      this.db
+        .prepare(
+          `INSERT INTO schedules
+             (id, name, prompt, cwd, trigger_json, status, next_run_at, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          id,
+          valid.name,
+          valid.prompt,
+          valid.cwd,
+          JSON.stringify(valid.trigger),
+          SCHEDULE_STATUSES.active,
+          nextRunAt,
+          nowMs,
+          nowMs,
+        );
+      return this.requireSchedule(id);
+    });
+  }
+
+  getSchedule(id: string): ScheduleRecord | undefined {
+    const row = this.db.prepare("SELECT * FROM schedules WHERE id = ?").get(id) as
+      | ScheduleRow
+      | undefined;
+    return row ? toScheduleRecord(row) : undefined;
+  }
+
+  listSchedules(): ScheduleRecord[] {
+    const rows = this.db
+      .prepare("SELECT * FROM schedules ORDER BY created_at ASC, rowid ASC")
+      .all() as unknown as ScheduleRow[];
+    return rows.map(toScheduleRecord);
+  }
+
+  setScheduleStatus(id: string, status: ScheduleStatus, nowMs: number = Date.now()): boolean {
+    const result = this.db
+      .prepare("UPDATE schedules SET status = ?, updated_at = ? WHERE id = ?")
+      .run(status, nowMs, id);
+    return result.changes === 1;
+  }
+
+  removeSchedule(id: string): boolean {
+    const result = this.db.prepare("DELETE FROM schedules WHERE id = ?").run(id);
+    return result.changes === 1;
+  }
+
+  enqueueManualInvocation(scheduleId: string, nowMs: number = Date.now()): InvocationRecord {
+    return this.transaction(() => {
+      this.requireSchedule(scheduleId);
+      const id = randomUUID();
+      for (let offset = 0; offset < 1_000; offset += 1) {
+        const inserted = this.db
+          .prepare(
+            `INSERT OR IGNORE INTO invocations
+               (id, schedule_id, mode, status, scheduled_for, attempt, created_at)
+             VALUES (?, ?, ?, ?, ?, 0, ?)`,
+          )
+          .run(
+            id,
+            scheduleId,
+            INVOCATION_MODES.manual,
+            INVOCATION_STATUSES.pending,
+            nowMs + offset,
+            nowMs,
+          );
+        if (inserted.changes === 1) {
+          return this.requireInvocation(id);
+        }
+      }
+      throw new ScheduleStoreError(
+        SCHEDULE_STORE_ERROR_CODES.invalid,
+        `schedule ${scheduleId} 的手动触发入队失败`,
+      );
+    });
+  }
+
+  claimPendingInvocation(
+    id: string,
+    workerId: string,
+    nowMs: number = Date.now(),
+  ): ClaimedInvocation | undefined {
+    return this.transaction(() => {
+      const token = randomUUID();
+      const result = this.db
+        .prepare(
+          `UPDATE invocations
+             SET status = ?, claimed_by = ?, ownership_token = ?, lease_until = ?, attempt = 1,
+                 retry_at = NULL
+           WHERE id = ? AND status = ?`,
+        )
+        .run(
+          INVOCATION_STATUSES.claimed,
+          workerId,
+          token,
+          nowMs + this.claimLeaseMs,
+          id,
+          INVOCATION_STATUSES.pending,
+        );
+      return result.changes === 1 ? this.loadClaim(id, token) : undefined;
+    });
+  }
+
+  claimDue(input: ClaimDueInput): ClaimedInvocation[] {
+    if (input.limit <= 0) {
+      return [];
+    }
+    return this.transaction(() => {
+      const claimed: ClaimedInvocation[] = [];
+      const liveRows = this.db
+        .prepare(
+          `SELECT * FROM invocations
+            WHERE status = ?
+               OR (status = ? AND retry_at IS NOT NULL AND retry_at <= ?)
+               OR (status IN (?, ?) AND lease_until IS NOT NULL AND lease_until <= ?)
+            ORDER BY scheduled_for ASC, created_at ASC`,
+        )
+        .all(
+          INVOCATION_STATUSES.pending,
+          INVOCATION_STATUSES.retry,
+          input.nowMs,
+          INVOCATION_STATUSES.claimed,
+          INVOCATION_STATUSES.running,
+          input.nowMs,
+        ) as unknown as InvocationRow[];
+      for (const row of liveRows) {
+        if (claimed.length >= input.limit) {
+          break;
+        }
+        const attempt = row.status === INVOCATION_STATUSES.pending ? 1 : row.attempt + 1;
+        if (attempt > this.retryBudget) {
+          this.markTerminalFailureInTransaction(
+            row,
+            `重试预算耗尽（${String(this.retryBudget)} 次）：${row.error ?? "exec 未成功完成"}`,
+            input.nowMs,
+          );
+          continue;
+        }
+        const token = randomUUID();
+        this.db
+          .prepare(
+            `UPDATE invocations
+               SET status = ?, claimed_by = ?, ownership_token = ?, lease_until = ?,
+                   attempt = ?, retry_at = NULL
+             WHERE id = ?`,
+          )
+          .run(
+            INVOCATION_STATUSES.claimed,
+            input.workerId,
+            token,
+            input.nowMs + this.claimLeaseMs,
+            attempt,
+            row.id,
+          );
+        const claim = this.loadClaim(row.id, token);
+        if (claim !== undefined) {
+          claimed.push(claim);
+        }
+      }
+      if (claimed.length >= input.limit) {
+        return claimed;
+      }
+      const dueRows = this.db
+        .prepare(
+          `SELECT s.* FROM schedules s
+            WHERE s.status = ? AND s.next_run_at IS NOT NULL AND s.next_run_at <= ?
+              AND NOT EXISTS (
+                SELECT 1 FROM invocations i
+                 WHERE i.schedule_id = s.id AND i.status IN (?, ?, ?, ?))
+            ORDER BY s.next_run_at ASC, s.created_at ASC
+            LIMIT ?`,
+        )
+        .all(
+          SCHEDULE_STATUSES.active,
+          input.nowMs,
+          INVOCATION_STATUSES.pending,
+          INVOCATION_STATUSES.claimed,
+          INVOCATION_STATUSES.running,
+          INVOCATION_STATUSES.retry,
+          input.limit - claimed.length,
+        ) as unknown as ScheduleRow[];
+      for (const row of dueRows) {
+        const trigger = parseTriggerJson(row.trigger_json);
+        const id = randomUUID();
+        const token = randomUUID();
+        const inserted = this.db
+          .prepare(
+            `INSERT OR IGNORE INTO invocations
+               (id, schedule_id, mode, status, scheduled_for, attempt, claimed_by,
+                ownership_token, lease_until, created_at)
+             VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?, ?)`,
+          )
+          .run(
+            id,
+            row.id,
+            INVOCATION_MODES.scheduled,
+            INVOCATION_STATUSES.claimed,
+            row.next_run_at ?? input.nowMs,
+            input.workerId,
+            token,
+            input.nowMs + this.claimLeaseMs,
+            input.nowMs,
+          );
+        this.db
+          .prepare("UPDATE schedules SET next_run_at = ?, updated_at = ? WHERE id = ?")
+          .run(computeNextRunAtMs(trigger, input.nowMs), input.nowMs, row.id);
+        if (inserted.changes === 1) {
+          const claim = this.loadClaim(id, token);
+          if (claim !== undefined) {
+            claimed.push(claim);
+          }
+        }
+      }
+      return claimed;
+    });
+  }
+
+  beginInvocation(
+    id: string,
+    ownershipToken: string,
+    nowMs: number = Date.now(),
+  ): ClaimedInvocation | undefined {
+    const result = this.db
+      .prepare(
+        `UPDATE invocations
+           SET status = ?, started_at = ?, lease_until = ?
+         WHERE id = ? AND ownership_token = ? AND status = ?`,
+      )
+      .run(
+        INVOCATION_STATUSES.running,
+        nowMs,
+        nowMs + this.claimLeaseMs,
+        id,
+        ownershipToken,
+        INVOCATION_STATUSES.claimed,
+      );
+    return result.changes === 1 ? this.loadClaim(id, ownershipToken) : undefined;
+  }
+
+  renewLease(id: string, ownershipToken: string, nowMs: number = Date.now()): boolean {
+    const result = this.db
+      .prepare(
+        `UPDATE invocations SET lease_until = ?
+         WHERE id = ? AND ownership_token = ? AND status IN (?, ?)`,
+      )
+      .run(
+        nowMs + this.claimLeaseMs,
+        id,
+        ownershipToken,
+        INVOCATION_STATUSES.claimed,
+        INVOCATION_STATUSES.running,
+      );
+    return result.changes === 1;
+  }
+
+  completeInvocation(input: CompleteInvocationInput): boolean {
+    return this.transaction(() => {
+      const result = this.db
+        .prepare(
+          `UPDATE invocations
+             SET status = ?, thread_id = ?, output_excerpt = ?, pending_actions_json = ?,
+                 error = NULL, finished_at = ?, claimed_by = NULL, ownership_token = NULL,
+                 lease_until = NULL, retry_at = NULL
+           WHERE id = ? AND ownership_token = ? AND status IN (?, ?)`,
+        )
+        .run(
+          input.status,
+          input.threadId ?? null,
+          input.outputExcerpt ?? null,
+          JSON.stringify(input.pendingActions ?? []),
+          input.nowMs,
+          input.id,
+          input.ownershipToken,
+          INVOCATION_STATUSES.claimed,
+          INVOCATION_STATUSES.running,
+        );
+      if (result.changes !== 1) {
+        return false;
+      }
+      this.db
+        .prepare(
+          `UPDATE schedules SET last_run_at = ?, last_error = NULL, updated_at = ?
+           WHERE id = (SELECT schedule_id FROM invocations WHERE id = ?)`,
+        )
+        .run(input.nowMs, input.nowMs, input.id);
+      return true;
+    });
+  }
+
+  failInvocation(
+    id: string,
+    ownershipToken: string,
+    error: string,
+    nowMs: number = Date.now(),
+  ): InvocationFailureOutcome {
+    return this.transaction(() => {
+      const row = this.db.prepare("SELECT * FROM invocations WHERE id = ?").get(id) as
+        | InvocationRow
+        | undefined;
+      if (
+        row === undefined ||
+        row.ownership_token !== ownershipToken ||
+        (row.status !== INVOCATION_STATUSES.claimed && row.status !== INVOCATION_STATUSES.running)
+      ) {
+        return INVOCATION_FAILURE_OUTCOMES.lostClaim;
+      }
+      if (row.attempt >= this.retryBudget) {
+        this.markTerminalFailureInTransaction(row, error, nowMs);
+        return row.mode === INVOCATION_MODES.scheduled
+          ? INVOCATION_FAILURE_OUTCOMES.terminalPaused
+          : INVOCATION_FAILURE_OUTCOMES.terminal;
+      }
+      this.db
+        .prepare(
+          `UPDATE invocations
+             SET status = ?, retry_at = ?, error = ?, claimed_by = NULL, ownership_token = NULL,
+                 lease_until = NULL
+           WHERE id = ?`,
+        )
+        .run(INVOCATION_STATUSES.retry, nowMs + this.retryBackoffMs, error, id);
+      return INVOCATION_FAILURE_OUTCOMES.retryScheduled;
+    });
+  }
+
+  getInvocation(id: string): InvocationRecord | undefined {
+    const row = this.db.prepare("SELECT * FROM invocations WHERE id = ?").get(id) as
+      | InvocationRow
+      | undefined;
+    return row ? toInvocationRecord(row) : undefined;
+  }
+
+  listInvocations(scheduleId: string, limit = 20): InvocationRecord[] {
+    if (limit <= 0) {
+      return [];
+    }
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM invocations WHERE schedule_id = ?
+          ORDER BY created_at DESC, rowid DESC LIMIT ?`,
+      )
+      .all(scheduleId, limit) as unknown as InvocationRow[];
+    return rows.map(toInvocationRecord);
+  }
+
+  nextWakeAtMs(): number | undefined {
+    const row = this.db
+      .prepare(
+        `SELECT MIN(t) AS wake FROM (
+           SELECT MIN(next_run_at) AS t FROM schedules
+            WHERE status = ? AND next_run_at IS NOT NULL
+           UNION ALL SELECT MIN(retry_at) FROM invocations WHERE status = ?
+           UNION ALL SELECT MIN(lease_until) FROM invocations WHERE status IN (?, ?)
+           UNION ALL SELECT MIN(scheduled_for) FROM invocations WHERE status = ?)`,
+      )
+      .get(
+        SCHEDULE_STATUSES.active,
+        INVOCATION_STATUSES.retry,
+        INVOCATION_STATUSES.claimed,
+        INVOCATION_STATUSES.running,
+        INVOCATION_STATUSES.pending,
+      ) as { readonly wake: number | null };
+    return row.wake ?? undefined;
+  }
+
+  private markTerminalFailureInTransaction(row: InvocationRow, error: string, nowMs: number): void {
+    this.db
+      .prepare(
+        `UPDATE invocations
+           SET status = ?, error = ?, finished_at = ?, claimed_by = NULL, ownership_token = NULL,
+               lease_until = NULL, retry_at = NULL
+         WHERE id = ?`,
+      )
+      .run(INVOCATION_STATUSES.failed, error, nowMs, row.id);
+    if (row.mode === INVOCATION_MODES.scheduled) {
+      this.db
+        .prepare("UPDATE schedules SET status = ?, last_error = ?, updated_at = ? WHERE id = ?")
+        .run(SCHEDULE_STATUSES.paused, error, nowMs, row.schedule_id);
+    } else {
+      this.db
+        .prepare("UPDATE schedules SET last_error = ?, updated_at = ? WHERE id = ?")
+        .run(error, nowMs, row.schedule_id);
+    }
+  }
+
+  private loadClaim(id: string, ownershipToken: string): ClaimedInvocation | undefined {
+    const invocation = this.getInvocation(id);
+    if (invocation === undefined) {
+      return undefined;
+    }
+    const schedule = this.getSchedule(invocation.scheduleId);
+    if (schedule === undefined) {
+      return undefined;
+    }
+    return { invocation, schedule, ownershipToken };
+  }
+
+  private requireInvocation(id: string): InvocationRecord {
+    const record = this.getInvocation(id);
+    if (record === undefined) {
+      throw new ScheduleStoreError(SCHEDULE_STORE_ERROR_CODES.notFound, `invocation ${id} 不存在`);
+    }
+    return record;
+  }
+
+  close(): void {
+    this.db.close();
+  }
+
+  private requireSchedule(id: string): ScheduleRecord {
+    const record = this.getSchedule(id);
+    if (record === undefined) {
+      throw new ScheduleStoreError(SCHEDULE_STORE_ERROR_CODES.notFound, `schedule ${id} 不存在`);
+    }
+    return record;
+  }
+}

@@ -1058,7 +1058,7 @@ test("failInvocation 走退避重试，预算耗尽后终态并 pause scheduled 
     );
     const afterFirst = store.getInvocation(first.invocation.id);
     assert.equal(afterFirst?.status, INVOCATION_STATUSES.retry);
-    assert.equal(afterFirst?.retryAtMs, NOW + 11_000);
+    assert.equal(afterFirst?.retryAtMs, NOW + 10_001);
     assert.equal(afterFirst?.error, "boom");
     assert.deepEqual(store.claimDue({ workerId: "w1", nowMs: NOW + 5_000, limit: 5 }), []);
     const second = store.claimDue({ workerId: "w1", nowMs: NOW + 11_000, limit: 5 })[0];

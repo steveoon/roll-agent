@@ -97,6 +97,43 @@ export type {
 } from "./tool-bridge/normalize-result.ts";
 export { ThreadStore, defaultThreadsDir, expandTilde } from "./store/thread-store.ts";
 export type { ThreadRecord, CreateThreadInput } from "./store/thread-store.ts";
+export { ScheduleStore } from "./scheduler/schedule-store.ts";
+export type { ScheduleStoreOptions, ClaimDueInput } from "./scheduler/schedule-store.ts";
+export { SCHEDULER_LIMITS } from "./scheduler/limits.ts";
+export {
+  TRIGGER_KINDS,
+  ScheduleTriggerError,
+  computeNextRunAtMs,
+  createIntervalTrigger,
+  describeTrigger,
+  formatInterval,
+  parseIntervalText,
+  parseTriggerJson,
+  triggerSpecSchema,
+} from "./scheduler/trigger.ts";
+export type { TriggerKind, TriggerSpec } from "./scheduler/trigger.ts";
+export {
+  INVOCATION_FAILURE_OUTCOMES,
+  INVOCATION_LIVE_STATUSES,
+  INVOCATION_MODES,
+  INVOCATION_STATUSES,
+  SCHEDULE_STATUSES,
+  SCHEDULE_STORE_ERROR_CODES,
+  ScheduleStoreError,
+} from "./scheduler/types.ts";
+export type {
+  ClaimedInvocation,
+  CompleteInvocationInput,
+  CompleteInvocationStatus,
+  CreateScheduleInput,
+  InvocationFailureOutcome,
+  InvocationMode,
+  InvocationRecord,
+  InvocationStatus,
+  ScheduleRecord,
+  ScheduleStatus,
+  ScheduleStoreErrorCode,
+} from "./scheduler/types.ts";
 export { DefaultToolPolicy } from "./policy/default-policy.ts";
 export { ConfigurableToolPolicy } from "./policy/configurable-policy.ts";
 export type {
