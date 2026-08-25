@@ -1442,6 +1442,7 @@ export class AgentSession {
         explicitSkillNames: explicitSkillContext.skillNames,
         ...(externalDynamicContext.ruleIds ? { ruleIds: externalDynamicContext.ruleIds } : {}),
         ...(externalDynamicContext.vcs ? { vcs: externalDynamicContext.vcs } : {}),
+        ...(externalDynamicContext.origin ? { origin: externalDynamicContext.origin } : {}),
         sessions: (this.sessionManager?.list() ?? []).map((session) => ({
           sessionId: session.sessionId,
           state: session.state,

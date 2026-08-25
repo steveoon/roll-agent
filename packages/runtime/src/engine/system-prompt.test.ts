@@ -14,6 +14,7 @@ import {
   CAPABILITY_SESSION_EXEC_LIFECYCLES,
   CAPABILITY_TOOL_ROLES,
   CAPABILITY_TOOL_SOURCE_KINDS,
+  buildEffectiveCapabilityManifest,
   buildEffectiveCapabilityTurnContext,
   type EffectiveCapabilityManifest,
 } from "./capability-manifest.ts";
@@ -405,4 +406,36 @@ test("background host mode 注入无人值守段，其余模式不注入", () =>
   const interactive = buildChatSystemPrompt({ hostMode: CAPABILITY_HOST_MODES.interactive });
   assert.doesNotMatch(interactive, /# 无人值守运行/u);
   assert.doesNotMatch(buildChatSystemPrompt(), /# 无人值守运行/u);
+});
+
+test("reminder 渲染 turn origin 行", () => {
+  const manifest = buildEffectiveCapabilityManifest({
+    tools: {},
+    toolRoles: {},
+    resolveRoute: () => undefined,
+    skills: [],
+    agentCount: 0,
+    profile: "posix",
+    cwd: "/workspace",
+    platform: "linux",
+  });
+  const reminder = buildCapabilityTurnReminder(
+    buildEffectiveCapabilityTurnContext(manifest, {
+      now: new Date("2026-08-25T09:00:00Z"),
+      origin: {
+        kind: "scheduled",
+        scheduleId: "sched-1",
+        invocationId: "inv-1",
+        scheduledFor: "2026-08-25T09:00:00.000Z",
+        unattended: true,
+      },
+    }),
+  );
+  assert.match(reminder, /turnOrigin=scheduled/u);
+  assert.match(reminder, /scheduleId=sched-1/u);
+  assert.match(reminder, /invocationId=inv-1/u);
+  assert.match(reminder, /scheduledFor=2026-08-25T09:00:00\.000Z/u);
+  assert.match(reminder, /unattended=true/u);
+  const plain = buildCapabilityTurnReminder(buildEffectiveCapabilityTurnContext(manifest));
+  assert.doesNotMatch(plain, /turnOrigin=/u);
 });

@@ -141,6 +141,15 @@ export {
   UnattendedToolPolicy,
 } from "./policy/unattended-policy.ts";
 export type { UnattendedDeniedConfirmation } from "./policy/unattended-policy.ts";
+export {
+  CAPABILITY_HOST_MODES,
+  CAPABILITY_TURN_ORIGIN_KINDS,
+} from "./engine/capability-manifest.ts";
+export type {
+  CapabilityHostMode,
+  CapabilityTurnOrigin,
+  CapabilityExternalDynamicContext,
+} from "./engine/capability-manifest.ts";
 export type {
   ConfigurableToolPolicyOptions,
   ToolApprovalDefault,

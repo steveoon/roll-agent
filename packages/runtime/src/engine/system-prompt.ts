@@ -366,6 +366,15 @@ export function buildCapabilityTurnReminder(context: EffectiveCapabilityTurnCont
     `cwd=${context.cwd}`,
     `platform=${context.platform}`,
     `date=${context.date}`,
+    ...(context.dynamic.origin
+      ? [
+          `turnOrigin=${context.dynamic.origin.kind}`,
+          `scheduleId=${context.dynamic.origin.scheduleId}`,
+          `invocationId=${context.dynamic.origin.invocationId}`,
+          `scheduledFor=${context.dynamic.origin.scheduledFor}`,
+          `unattended=${String(context.dynamic.origin.unattended)}`,
+        ]
+      : []),
     `ruleIds=${context.dynamic.ruleIds.join(",") || "none"}`,
     ...(context.dynamic.vcs
       ? [

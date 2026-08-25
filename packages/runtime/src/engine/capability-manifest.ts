@@ -12,7 +12,7 @@ import { isSensitiveFieldName, redactSecretText } from "../tool-bridge/tool-exec
 import type { SessionState } from "../bash/session/types.ts";
 
 export const CAPABILITY_MANIFEST_VERSION = 1 as const;
-export const CAPABILITY_TURN_CONTEXT_VERSION = 1 as const;
+export const CAPABILITY_TURN_CONTEXT_VERSION = 2 as const;
 
 export const CAPABILITY_TOOL_ROLES = {
   agent: "agent",
@@ -112,11 +112,25 @@ export interface CapabilityDynamicTurnSnapshot {
   readonly ruleIds: readonly string[];
   readonly sessions: readonly CapabilitySessionSnapshot[];
   readonly vcs?: CapabilityVcsSnapshot;
+  readonly origin?: CapabilityTurnOrigin;
+}
+
+export const CAPABILITY_TURN_ORIGIN_KINDS = { scheduled: "scheduled" } as const;
+export type CapabilityTurnOriginKind =
+  (typeof CAPABILITY_TURN_ORIGIN_KINDS)[keyof typeof CAPABILITY_TURN_ORIGIN_KINDS];
+
+export interface CapabilityTurnOrigin {
+  readonly kind: CapabilityTurnOriginKind;
+  readonly scheduleId: string;
+  readonly invocationId: string;
+  readonly scheduledFor: string;
+  readonly unattended: boolean;
 }
 
 export interface CapabilityExternalDynamicContext {
   readonly ruleIds?: readonly string[];
   readonly vcs?: CapabilityVcsSnapshot;
+  readonly origin?: CapabilityTurnOrigin;
 }
 
 export interface EffectiveToolCapability {
@@ -173,6 +187,7 @@ export interface BuildCapabilityTurnContextInput {
   readonly ruleIds?: readonly string[];
   readonly sessions?: readonly CapabilitySessionSnapshot[];
   readonly vcs?: CapabilityVcsSnapshot;
+  readonly origin?: CapabilityTurnOrigin;
 }
 
 export interface CapabilityAgentOnboardingCatalogEntry {
@@ -477,6 +492,7 @@ export function buildEffectiveCapabilityTurnContext(
       ruleIds: [...(input.ruleIds ?? manifest.stableContext.rules)],
       sessions: (input.sessions ?? []).map((session) => ({ ...session })),
       ...(input.vcs ? { vcs: { ...input.vcs } } : {}),
+      ...(input.origin ? { origin: { ...input.origin } } : {}),
     },
     effectiveToolIds: manifest.tools.map((tool) => tool.id),
     explicitSkillNames: [...(input.explicitSkillNames ?? [])],
@@ -568,6 +584,17 @@ function sanitizeCapabilityTurnContext(
               ...(context.dynamic.vcs.branch
                 ? { branch: sanitizeSnapshotString(context.dynamic.vcs.branch) }
                 : {}),
+            },
+          }
+        : {}),
+      ...(context.dynamic.origin
+        ? {
+            origin: {
+              kind: context.dynamic.origin.kind,
+              scheduleId: sanitizeSnapshotString(context.dynamic.origin.scheduleId),
+              invocationId: sanitizeSnapshotString(context.dynamic.origin.invocationId),
+              scheduledFor: sanitizeSnapshotString(context.dynamic.origin.scheduledFor),
+              unattended: context.dynamic.origin.unattended,
             },
           }
         : {}),

@@ -601,6 +601,7 @@ export class ConversationEngine {
         return {
           ...(dynamic.ruleIds ? { ruleIds: dynamic.ruleIds } : {}),
           ...(effectiveVcs ? { vcs: effectiveVcs } : {}),
+          ...(dynamic.origin ? { origin: dynamic.origin } : {}),
         };
       },
       ...(skillLibrary ? { skillLibrary } : {}),

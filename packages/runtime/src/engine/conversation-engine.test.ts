@@ -18,6 +18,7 @@ import { ThreadStore } from "../store/thread-store.ts";
 import { DefaultToolPolicy } from "../policy/default-policy.ts";
 import type { SessionEvent } from "../types/events.ts";
 import { ConversationEngine, type AgentBootstrapIssue } from "./conversation-engine.ts";
+import { CAPABILITY_HOST_MODES } from "./capability-manifest.ts";
 import type { ShellProfile } from "../bash/profile.ts";
 import { killProcessGroup } from "../bash/kill.ts";
 import { executeTranscriptTool } from "../tool-bridge/transcript-tool.ts";
@@ -4679,5 +4680,52 @@ test("ConversationEngine 按 config 构造 source 时把告警转给 onWorkspace
     await engine.dispose();
   } finally {
     rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("resolveDynamicCapabilityContext 的 origin 会透传到 turn context", async () => {
+  const config = rollConfigSchema.parse({
+    llm: {
+      defaultProvider: "mock",
+      defaultModel: "default-model",
+      providers: { mock: { apiKey: "test" } },
+    },
+    ask: {},
+    agents: { dataDir: "/tmp/roll-engine-test" },
+  });
+  const engine = new ConversationEngine({
+    config,
+    model: new MockLanguageModelV4({
+      doStream: async () => ({
+        stream: simulateReadableStream<LanguageModelV4StreamPart>({
+          chunks: engineTextStep("ok"),
+          initialDelayInMs: null,
+          chunkDelayInMs: null,
+        }),
+      }),
+    }),
+    sources: [],
+    skillLibrary: null,
+    workspaceInstructions: null,
+    hostMode: CAPABILITY_HOST_MODES.background,
+    resolveDynamicCapabilityContext: () => ({
+      origin: {
+        kind: "scheduled",
+        scheduleId: "sched-1",
+        invocationId: "inv-1",
+        scheduledFor: "2026-08-25T09:00:00.000Z",
+        unattended: true,
+      },
+    }),
+  });
+  try {
+    const session = await engine.createSession();
+    await drain(session.send("hi"));
+    const context = session.getCapabilityTurnContext();
+    assert.equal(context?.version, 2);
+    assert.equal(context?.dynamic.origin?.invocationId, "inv-1");
+    assert.equal(context?.lifecycle.hostMode, CAPABILITY_HOST_MODES.background);
+  } finally {
+    await engine.dispose();
   }
 });
