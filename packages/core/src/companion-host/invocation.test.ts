@@ -23,3 +23,12 @@ test("bundled invocation is absolute, PATH-independent and strips inspector flag
   );
   assert.deepEqual(invocation.companionArgs.slice(-3), ["companion", "run", "--foreground"]);
 });
+
+test("bundled invocation exposes the filtered execArgv for other daemons", () => {
+  const invocation = createBundledRollInvocation({
+    command: "/bundle/node",
+    cliEntrypoint: "/bundle/roll.js",
+    execArgv: ["--experimental-strip-types", "--inspect"],
+  });
+  assert.deepEqual(invocation.execArgv, ["--experimental-strip-types"]);
+});

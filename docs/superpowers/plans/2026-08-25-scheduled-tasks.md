@@ -3210,10 +3210,10 @@ function silentLogger() {
   };
 }
 
-function addDueSchedule(store: ScheduleStore, name: string) {
+function addDueSchedule(store: ScheduleStore, name: string, nowMs: number = NOW) {
   return store.createSchedule(
     { name, prompt: "p", cwd: "/workspace", trigger: createIntervalTrigger("30m"), fireImmediately: true },
-    NOW,
+    nowMs,
   );
 }
 
@@ -3356,7 +3356,7 @@ test("run 在 abort 后终止子进程并退出", async () => {
   const dir = tempDir();
   try {
     const store = new ScheduleStore(dir);
-    addDueSchedule(store, "a");
+    addDueSchedule(store, "a", Date.now());
     const { logger } = silentLogger();
     let killed = false;
     const controller = new AbortController();
@@ -3368,21 +3368,24 @@ test("run 在 abort 后终止子进程并退出", async () => {
       pollIntervalMs: 50,
       spawnInvocation: (claim): SpawnedInvocation => {
         store.beginInvocation(claim.invocation.id, claim.ownershipToken, Date.now());
+        const exit = Promise.withResolvers<number | null>();
         return {
-          exited: new Promise<number | null>((resolve) => {
-            controller.signal.addEventListener("abort", () => resolve(null), { once: true });
-          }),
+          exited: exit.promise,
           kill: () => {
             killed = true;
+            exit.resolve(null);
           },
         };
       },
     });
     const running = daemon.run(controller.signal);
-    await new Promise((resolve) => setTimeout(resolve, 20));
-    assert.equal(daemon.runningCount, 1);
-    controller.abort();
-    await running;
+    try {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      assert.equal(daemon.runningCount, 1);
+    } finally {
+      controller.abort();
+      await running;
+    }
     assert.equal(killed, true);
     store.close();
   } finally {

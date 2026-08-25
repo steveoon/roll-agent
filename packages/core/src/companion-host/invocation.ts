@@ -5,6 +5,7 @@ export interface BundledRollInvocation {
   readonly cliEntrypoint: string;
   readonly runtimeArgs: readonly string[];
   readonly companionArgs: readonly string[];
+  readonly execArgv: readonly string[];
 }
 
 /**
@@ -29,6 +30,7 @@ export function createBundledRollInvocation(
   return {
     command,
     cliEntrypoint,
+    execArgv: safeExecArgv,
     runtimeArgs: [...safeExecArgv, cliEntrypoint, "runtime", "serve", "--stdio"],
     companionArgs: [...safeExecArgv, cliEntrypoint, "companion", "run", "--foreground"],
   };
