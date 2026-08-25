@@ -1,0 +1,121 @@
+# roll 定时任务（Scheduled Tasks）v1 设计
+
+调研报告：https://claude.ai/code/artifact/91477e7c-7f84-4104-8cb3-e280f8ac82e3（codex automations + grok-build scheduler 的点金之笔与反模式）。架构评审：Claude + kai（codex）三方一致。
+
+## 背景与目标
+
+roll 目前没有「让 agent 按时醒来干活」的能力。用户只能用 crontab 拉起 `roll chat --json --session <id> "…"`，拿不到：来源标记（模型不知道这是无人值守触发）、持久去重（睡眠唤醒 / 双 daemon 会重复触发）、失败可见性（`roll schedule list` 里看不到上次为什么挂）、以及无人值守时的审批语义（`ApprovalGate` 没有过期计时，卡住会烧完整个 `turnTimeoutMs`）。
+
+v1 目标：用户能用 `roll schedule add --name … --every 30m --prompt "…"` 登记一个重复任务；`roll schedule daemon` 常驻进程按时把它变成一轮无人值守的 chat turn（新 thread、后台 host mode、审批一律拒绝、来源标记只进推理副本不进历史）；每次触发都有持久的 invocation 账本可查；异常有重试预算，耗尽后任务自动 PAUSE 并把原因显示出来。
+
+## 已确认的决策
+
+| 决策 | 结论 |
+|---|---|
+| 放哪 | core 内独立模块，不做 MCP 子 agent。调度不是业务工具，是「何时运行」的运行时属性，与 approval / thread store 同层（web-search RFC §2.1 排斥的是业务工具进 Core） |
+| 分层 | `packages/runtime/src/scheduler/`（trigger、ScheduleStore、claim/lease、状态机；只依赖 zod + node:sqlite）；`packages/core/src/runtime-host/`（从 chat.ts 抽出的 Engine factory + `runJsonTurn`，不懂 Ink）；`packages/core/src/scheduler-host/`（daemon 循环、exec 子进程、OS service）。暂不新建 `packages/scheduler` |
+| 常驻宿主 | **sibling daemon**（`dev.roll-agent.scheduler`），不塞进 CompanionApplication——它未 enrollment / disabled / 无 relay 就干净退出且只绑一个 cwd（`companion-host/application.ts:213-245`、`schema.ts:13-23`）。只复用 `service.ts` 的 LaunchAgent / schtasks 控制器形状 |
+| 执行隔离 | daemon 不在进程内跑 turn。每次触发 **spawn 子进程** `roll schedule exec --invocation <id>`，`cwd = schedule.cwd`，于是引擎现有的 `process.cwd()` 绑定（`conversation-engine.ts:345, 576, 978`）天然正确，引擎无需 `workspaceRoot` 重构；一次 run 崩溃不影响 daemon；lease 只覆盖「spawn + 提交」 |
+| 触发表达 v1 | 仅 `interval`：`"30m" / "2h" / "1d" / "90s"`，下限 60 秒，**低于下限报错不 clamp**（grok 静默抬到 60s 是反模式）。日历触发（`daily`，含 IANA `timeZone`）留 v2；`TriggerSpec` 已是 `kind` 判别联合，加种类不需要迁移 |
+| 不补课 | `next_run_at` 在 **claim 时** 从 `now + everyMs` 重算；错过多少次只补一次 |
+| 相位 | `--now` 创建即触发（`next_run_at = now`）；pause/resume 不改相位；v1 没有 edit 命令（v2 改 trigger 时 `next_run_at = now + everyMs`） |
+| 一次性任务 | 不属于调度器（两家共识）。`roll schedule run-now <id>` 是「手动触发一次已有任务」，不是延时任务 |
+| 每次触发的线程 | **新 thread**，标题 `[定时] <name>`；不复用交互线程；有界上下文链（grok 每 10 轮重开）留 v2 |
+| 无人值守审批 | 双保险：① `UnattendedToolPolicy` 包装 `ConfigurableToolPolicy`，把 `confirm` 在**调用前**转成 `deny` 并记录；② exec 循环仍像 `runJsonTurn` 一样对 `confirmation-required` 事件立即 `session.reject()`（覆盖绕过 policy 的 `gateExternalPath`）。任一发生 → run 状态 `needs_confirmation`，调度照常推进 |
+| 来源标记 | 走现有 `resolveDynamicCapabilityContext` 钩子：`CapabilityExternalDynamicContext.origin = { kind: "scheduled", scheduleId, invocationId, scheduledFor, unattended: true }` → `[Harness runtime context]` 多四行 `turnOrigin/scheduleId/invocationId/scheduledFor`。只贴在推理副本（`prependLastUserContext`），**不进 `this.messages`**。`CAPABILITY_TURN_CONTEXT_VERSION` 1→2 |
+| host mode | 新增 `CAPABILITY_HOST_MODES.background`。system prompt 追加「无人值守运行」段；超时文案与 one-shot 同款（任务随进程结束）；后台不构建 `agent-install` 工具、不启用 `user-input` |
+| 派发协议 | invocation 行持有 `claimed_by / ownership_token / lease_until`，claim 后每次写都 `WHERE ownership_token = ?`；lease 120 s，daemon 每 30 s 续租；lease 过期的 claimed/running 行被下一轮 tick **重新 claim 为同一次触发**（attempt+1），不是再发一次 |
+| 失败处理 | exec 抛错 / 子进程非零退出 → `retry`，10 s 退避；`attempt > 3` → `failed` 终态，且 **scheduled 模式** 把 schedule 置 `paused` + `last_error`；manual 模式的失败永不暂停计划。`last_error` 是 `roll schedule list/show` 的一等字段（codex 不暴露是反模式） |
+| 去重 | `invocations(schedule_id, mode, scheduled_for)` UNIQUE；同一 schedule 存在 live invocation（pending/claimed/running/retry）时不再产生新的 scheduled invocation |
+| 配额 | `scheduler.max-schedules`（默认 50）、`scheduler.max-concurrent-runs`（默认 2）；name ≤ 120、prompt ≤ 4000 字符；输出摘录 ≤ 4000 字符。数值集中在 `SCHEDULER_LIMITS` 单一来源 |
+| 存储 | `~/.roll-agent/scheduler/schedules.db`（配置 `scheduler.data-dir`），`node:sqlite`，0700/0600，`PRAGMA user_version`，`BEGIN IMMEDIATE`，时间列一律 epoch ms |
+| 单例 | daemon 用 `acquireAgentLifecycleLock(schedulerDataDir, " roll-scheduler-daemon")`（NUL 前缀保留名，与 `agent-registry-lock.ts` 同法）；`daemon.json` 记 `{pid, processStartToken, startedAt, workerId}`，`roll schedule status` 用 `verifyProcessStartToken` 核实，`unavailable` 不当作死 |
+| 模型可调用工具 / `/loop` | v2。v1 只有 CLI 管理面 |
+| 通知 | v1 无主动通知；状态经 `roll schedule list/runs` 与 daemon 日志（stderr → `scheduler.log`）查看 |
+
+## 架构
+
+```
+roll schedule add/list/show/remove/pause/resume/run-now/runs/status   ──┐
+                                                                         ├──> ScheduleStore (runtime/scheduler, schedules.db)
+roll schedule daemon --foreground  ── tick: claimDue → spawn ────────────┤            ▲
+        │  (lease renew 30s, maxConcurrentRuns, bounded wake timer)       │            │ beginInvocation / completeInvocation
+        └──> child: roll schedule exec --invocation <id>  (cwd=schedule.cwd)          │
+                  └─ runtime-host engine factory (surface=background)                 │
+                       ├─ UnattendedToolPolicy(ConfigurableToolPolicy)                │
+                       ├─ resolveDynamicCapabilityContext → origin                    │
+                       └─ engine.createSession → runJsonTurn ─────────────────────────┘
+roll schedule service install/uninstall/status  ── LaunchAgent / schtasks（复用 companion service 控制器形状）
+```
+
+### runtime：`packages/runtime/src/scheduler/`
+
+- `limits.ts`：`SCHEDULER_LIMITS`（minIntervalMs 60_000、claimLeaseMs 120_000、leaseRenewIntervalMs 30_000、retryBudget 3、retryBackoffMs 10_000、pollIntervalMs 15_000、maxNameChars 120、maxPromptChars 4_000、maxOutputExcerptChars 4_000）。
+- `trigger.ts`：`TRIGGER_KINDS`、`triggerSpecSchema`（zod discriminated union，v1 仅 `interval { everyMs }`）、`parseIntervalText`、`createIntervalTrigger`、`formatInterval`、`describeTrigger`、`computeNextRunAtMs`、`parseTriggerJson`、`ScheduleTriggerError`。
+- `types.ts`：`SCHEDULE_STATUSES`、`INVOCATION_MODES`、`INVOCATION_STATUSES`、`ScheduleRecord`、`InvocationRecord`、`ClaimedInvocation`、`CreateScheduleInput`、`CompleteInvocationInput`、`INVOCATION_FAILURE_OUTCOMES`、`ScheduleStoreError`。
+- `schedule-store.ts`：`ScheduleStore`。
+
+`schedules` 表：`id, name, prompt, cwd, trigger_json, status ∈ {active,paused}, next_run_at, last_run_at, last_error, created_at, updated_at`。
+`invocations` 表：`id, schedule_id (FK CASCADE), mode ∈ {scheduled,manual}, status ∈ {pending,claimed,running,retry,completed,needs_confirmation,failed}, scheduled_for, attempt, claimed_by, ownership_token, lease_until, retry_at, thread_id, output_excerpt, error, pending_actions_json, created_at, started_at, finished_at, UNIQUE(schedule_id, mode, scheduled_for)`。
+
+`claimDue({ workerId, nowMs, limit })` 在一个 `BEGIN IMMEDIATE` 内按序做四支：
+1. `pending`（manual）→ claim，attempt = 1；
+2. `retry` 且 `retry_at <= now` → 重新 claim，attempt + 1；
+3. `claimed|running` 且 `lease_until <= now`（孤儿）→ 重新 claim，attempt + 1；
+4. `active` 且 `next_run_at <= now` 且无 live invocation 的 schedule → INSERT scheduled invocation（`scheduled_for = next_run_at`）并 `next_run_at = now + everyMs`。
+2/3 中 `attempt > retryBudget` 的行直接终态 `failed`（scheduled 模式同时 pause schedule），不返回给调用方。每支都受 `limit` 约束。
+
+其余方法：`createSchedule`（超过 maxSchedules 抛 `schedule_limit_reached`）、`getSchedule`、`listSchedules`、`setScheduleStatus`、`removeSchedule`、`enqueueManualInvocation`、`claimPendingInvocation(id)`（run-now --inline 用）、`beginInvocation(id, token, now)`（claimed→running）、`renewLease`、`completeInvocation`、`failInvocation` → `retry-scheduled | terminal | terminal-paused | lost-claim`、`getInvocation`、`listInvocations(scheduleId, limit)`、`nextWakeAtMs(now)`、`close`。
+
+### runtime：引擎改动（四处，均小）
+
+1. `capability-manifest.ts`：`CAPABILITY_HOST_MODES.background`；`isProcessBoundHostMode(mode)`（one-shot | background）；`CapabilityTurnOrigin` + `origin?` 贯穿 `CapabilityExternalDynamicContext / BuildCapabilityTurnContextInput / CapabilityDynamicTurnSnapshot / sanitizeCapabilityTurnContext`；`CAPABILITY_TURN_CONTEXT_VERSION = 2`。
+2. `system-prompt.ts`：`buildCapabilityTurnReminder` 追加 origin 四行；`BuildChatSystemPromptOptions.hostMode`，background 时追加 `# 无人值守运行` 段；shell 段的 one-shot 分支改用 `isProcessBoundHostMode`。
+3. `agent-session.ts`：两处 `hostMode === oneShot` 改 `isProcessBoundHostMode`；`runTurn` 把 `externalDynamicContext.origin` 传给 `buildEffectiveCapabilityTurnContext`。
+4. `conversation-engine.ts`：`buildSession` 的钩子包装透传 `origin`；`background` 不构建 agentInstall（`shouldOfferAgentInstall(hostMode)`）。
+5. `policy/unattended-policy.ts`：`UnattendedToolPolicy`。
+
+### core：`runtime-host/`
+
+从 `cli/commands/chat.ts` **搬出**（chat.ts 改为 import + re-export，既有调用方零改动）：`engine-factory.ts`（`CHAT_ENGINE_SURFACES` + 新增 `background`、`chatHostModeForSurface`、`createToolPolicy`、`createChatEngine`（`CreateChatEngineInput` 新增可选 `policy`、`resolveDynamicCapabilityContext`）、`resolveChatLlmReadiness`、`resolveChatLlmCalls`、`loadRuntime`）与 `json-turn.ts`（`runJsonTurn`）。
+
+### core：`scheduler-host/`
+
+- `paths.ts`：`SCHEDULER_SERVICE_LABEL = "dev.roll-agent.scheduler"`、`WINDOWS_SCHEDULER_TASK_NAME`、`createSchedulerPaths(dataDir, homeDir?)` → `{ dataDir, logPath, daemonRecordPath, launchAgentPath }`。
+- `execute-invocation.ts`：`executeInvocation({ store, invocationId, ownershipToken, runTurn, now? })`——beginInvocation → runTurn → completeInvocation / failInvocation；`runTurn` 可注入，测试不需要 LLM。
+- `run-scheduled-turn.ts`：真实 runner——engine factory（surface `background`，`UnattendedToolPolicy`，origin 钩子）→ `createSession({ title })` → `runJsonTurn` → 合并 `policy.deniedConfirmations` 得到 `ScheduledTurnOutcome`。
+- `spawn-invocation.ts`：用 `createBundledRollInvocation()` 的 `command / cliEntrypoint / execArgv` 拼 `schedule exec --invocation <id>`，`cwd = schedule.cwd`，token 经环境变量 `ROLL_SCHEDULE_OWNERSHIP_TOKEN`，stderr 追加到 `scheduler.log`。
+- `daemon.ts`：`SchedulerDaemon`（可注入 `spawnInvocation / now / logger`）：tick → `claimDue(limit = maxConcurrentRuns - running)` → spawn；子进程退出后若 invocation 仍持有本 token → `failInvocation("exec 进程退出 code=…")`；每 30 s `renewLease`；`min(nextWakeAtMs, now + pollIntervalMs)` 有界定时器；abort 时 SIGTERM 子进程。
+- `daemon-record.ts`：`writeDaemonRecord / readDaemonRecord / inspectDaemon`（pid + processStartToken 校验）。
+
+### core：CLI `roll schedule …`
+
+`schedule.ts`（组，懒加载）+ `schedule-add / list / show / remove / pause / resume / run-now / runs / status / daemon / exec / service(-install|-uninstall|-status)`。数据走 stdout（`--json`），日志走 stderr。`exec` 是 daemon 的内部入口，描述里注明。
+
+### 配置
+
+```yaml
+scheduler:
+  data-dir: ~/.roll-agent/scheduler   # 默认
+  max-schedules: 50
+  max-concurrent-runs: 2
+```
+`loader.ts` 的 `expandPaths` 必须显式展开 `scheduler.dataDir`。
+
+## 错误处理与边界
+
+- 间隔 < 60 s、name/prompt 超长、cwd 非绝对路径或不存在 → `roll schedule add` 退出码 1，错误说明限制值。
+- daemon 未运行时 `run-now` 只入队并 warn；`run-now --inline` 在当前进程 claim 并同步等子进程结束，打印 invocation JSON。
+- exec 子进程启动时 token 不匹配 / invocation 不是 claimed → 打印 `lost-claim` 并退出 0（不算失败，说明已被别的 worker 接管）。
+- daemon 拿不到 OS 进程身份（`readProcessStartToken` undefined）→ 拒绝启动（与 lifecycle lock 同策略）。
+- LLM 未配置 → exec 记 `failed` + `last_error`，走重试预算 → PAUSE；daemon 本身不退出。
+
+## 测试计划
+
+- runtime：trigger 解析/格式化/下次触发；store 的 CRUD、配额、claim 四支、UNIQUE 去重、lease 过期重新 claim、预算耗尽 PAUSE、token 失配写入无效、`nextWakeAtMs`；`UnattendedToolPolicy`；host mode / system prompt 段 / 超时文案；turn context origin 进 reminder 与 safe snapshot。
+- core：config 默认值与 tilde 展开；`executeInvocation` 三种结果；`SchedulerDaemon` 用假 spawn + `t.mock.timers`；service plan 参数化（label / plist / task name）；e2e：`roll schedule add/list/pause/remove --json`（隔离 HOME，无需 LLM）、`roll --help` 含 `schedule`。
+- 手动验证（需真实 LLM 配置）：`roll schedule add --now` + `roll schedule daemon --foreground` 观察 exec 子进程、`roll schedule runs <id>` 里的 `completed` 与 thread id；`roll chat --session <threadId>` 打开该线程确认用户消息里**没有** `[Harness runtime context]`。
+
+## 不覆盖（v2）
+
+日历触发 + 时区、`/loop` 与模型可调用 `roll__schedule` 工具、有界上下文链复用线程、主动通知、`roll doctor` 检查项、Linux systemd 用户服务。
