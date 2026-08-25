@@ -34,6 +34,9 @@ function resolveCommandName(argv) {
 
 const SQLITE_COMMANDS = new Set(["chat", "schedule"]);
 
+const alreadyRespawned = process.env.ROLL_SQLITE_RESPAWNED === "1";
+delete process.env.ROLL_SQLITE_RESPAWNED;
+
 const commandName = resolveCommandName(process.argv.slice(2));
 const shouldEnableSqlite = SQLITE_COMMANDS.has(commandName);
 const hasSqliteFlag = hasExecFlag("--experimental-sqlite");
@@ -42,7 +45,7 @@ const needsTypeStripFlag = sourceTreeAvailable() && !hasExecFlag("--experimental
 const needsExperimentalWarningSuppression =
   shouldEnableSqlite && (needsSqliteFlag || hasSqliteFlag) && !hasWarningSuppression();
 
-if (!process.env.ROLL_SQLITE_RESPAWNED && (needsSqliteFlag || needsTypeStripFlag)) {
+if (!alreadyRespawned && (needsSqliteFlag || needsTypeStripFlag)) {
   const nodeFlags = [
     ...(needsExperimentalWarningSuppression ? ["--disable-warning=ExperimentalWarning"] : []),
     ...(needsSqliteFlag ? ["--experimental-sqlite"] : []),
@@ -53,7 +56,10 @@ if (!process.env.ROLL_SQLITE_RESPAWNED && (needsSqliteFlag || needsTypeStripFlag
     [...nodeFlags, process.argv[1], ...process.argv.slice(2)],
     { stdio: "inherit", env: { ...process.env, ROLL_SQLITE_RESPAWNED: "1" } },
   );
-  process.exit(result.status ?? 0);
+  if (result.signal) {
+    process.kill(process.pid, result.signal);
+  }
+  process.exit(result.status ?? 1);
 }
 
 await import("../dist/cli/index.js");

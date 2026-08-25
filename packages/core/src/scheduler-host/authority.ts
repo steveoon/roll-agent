@@ -22,7 +22,7 @@ export function createAuthoritySnapshot(config: RollConfig): AuthoritySnapshot {
     approval: {
       default: config.runtime.approval.default,
       overrides: Object.entries(config.runtime.approval.overrides).sort(([a], [b]) =>
-        a.localeCompare(b),
+        a < b ? -1 : a > b ? 1 : 0,
       ),
     },
     shell: {

@@ -29,3 +29,18 @@ export function currentExecutorIdentity(pid: number = process.pid): ExecutorIden
   const startToken = readProcessStartToken(pid);
   return startToken === undefined ? undefined : { pid, startToken };
 }
+
+export function terminateExecutor(
+  executor: ExecutorIdentity,
+  signal: NodeJS.Signals = "SIGKILL",
+): boolean {
+  if (probeExecutorLiveness(executor) !== EXECUTOR_LIVENESS.alive) {
+    return false;
+  }
+  try {
+    process.kill(executor.pid, signal);
+    return true;
+  } catch {
+    return false;
+  }
+}

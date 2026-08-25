@@ -26,7 +26,9 @@ export default defineCommand({
         store.setAuthorityDigest(schedule.id, authorityDigest, now);
         store.setScheduleStatus(schedule.id, runtime.SCHEDULE_STATUSES.active, now);
         if (schedule.authorityDigest !== authorityDigest) {
-          log.info("已按当前 runtime.approval / runtime.shell 配置重新记录权限边界。");
+          log.warn(
+            `权限边界摘要已变化（${schedule.authorityDigest?.slice(0, 15) ?? "未记录"} → ${authorityDigest.slice(0, 15)}），已按 ${schedule.cwd} 当前的 runtime.approval / runtime.shell 配置重新授权。`,
+          );
         }
         log.success(`已恢复定时任务 ${args.id}`);
       } finally {

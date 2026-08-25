@@ -5,6 +5,7 @@ import { DatabaseSync } from "node:sqlite";
 import { expandTilde } from "../store/thread-store.ts";
 import { SCHEDULER_LIMITS } from "./limits.ts";
 import {
+  TRIGGER_KINDS,
   computeNextRunAtMs,
   parseTriggerJson,
   triggerSpecSchema,
@@ -147,6 +148,11 @@ export interface ClaimDueInput {
   readonly workerId: string;
   readonly nowMs: number;
   readonly limit: number;
+  readonly heldInvocationIds?: ReadonlySet<string>;
+}
+
+interface LiveInvocationRow extends InvocationRow {
+  readonly schedule_status: string;
 }
 
 function isScheduleStatus(value: string): value is ScheduleStatus {
@@ -334,6 +340,45 @@ export class ScheduleStore {
         );
       }
     }
+    this.clampOversizedIntervals();
+  }
+
+  private clampOversizedIntervals(): void {
+    const rows = this.db.prepare("SELECT id, trigger_json FROM schedules").all() as Array<{
+      readonly id: string;
+      readonly trigger_json: string;
+    }>;
+    for (const row of rows) {
+      let raw: unknown;
+      try {
+        raw = JSON.parse(row.trigger_json) as unknown;
+      } catch {
+        continue;
+      }
+      if (
+        typeof raw !== "object" ||
+        raw === null ||
+        !("kind" in raw) ||
+        raw.kind !== TRIGGER_KINDS.interval ||
+        !("everyMs" in raw) ||
+        typeof raw.everyMs !== "number" ||
+        raw.everyMs <= SCHEDULER_LIMITS.maxIntervalMs
+      ) {
+        continue;
+      }
+      this.db
+        .prepare(
+          `UPDATE schedules SET trigger_json = ?, status = ?, last_error = ?, updated_at = ?
+           WHERE id = ?`,
+        )
+        .run(
+          JSON.stringify({ kind: TRIGGER_KINDS.interval, everyMs: SCHEDULER_LIMITS.maxIntervalMs }),
+          SCHEDULE_STATUSES.paused,
+          `原间隔 ${String(raw.everyMs)} ms 超过上限 365 天，已按 365 天登记并暂停；确认后 roll schedule resume`,
+          Date.now(),
+          row.id,
+        );
+    }
   }
 
   private transaction<T>(work: () => T): T {
@@ -408,10 +453,32 @@ export class ScheduleStore {
   }
 
   setScheduleStatus(id: string, status: ScheduleStatus, nowMs: number = Date.now()): boolean {
-    const result = this.db
-      .prepare("UPDATE schedules SET status = ?, updated_at = ? WHERE id = ?")
-      .run(status, nowMs, id);
-    return result.changes === 1;
+    return this.transaction(() => {
+      const result = this.db
+        .prepare("UPDATE schedules SET status = ?, updated_at = ? WHERE id = ?")
+        .run(status, nowMs, id);
+      if (result.changes !== 1) {
+        return false;
+      }
+      if (status === SCHEDULE_STATUSES.paused) {
+        const retrying = this.db
+          .prepare("SELECT id FROM invocations WHERE schedule_id = ? AND mode = ? AND status = ?")
+          .all(id, INVOCATION_MODES.scheduled, INVOCATION_STATUSES.retry) as Array<{
+          readonly id: string;
+        }>;
+        for (const row of retrying) {
+          this.finishInvocationAsFailedInTransaction(row.id, "任务已暂停，放弃重试", nowMs);
+        }
+      }
+      return true;
+    });
+  }
+
+  listRunningInvocations(): InvocationRecord[] {
+    const rows = this.db
+      .prepare("SELECT * FROM invocations WHERE status = ? ORDER BY started_at ASC")
+      .all(INVOCATION_STATUSES.running) as unknown as InvocationRow[];
+    return rows.map(toInvocationRecord);
   }
 
   removeSchedule(id: string): boolean {
@@ -482,18 +549,17 @@ export class ScheduleStore {
   }
 
   claimDue(input: ClaimDueInput): ClaimedInvocation[] {
-    if (input.limit <= 0) {
-      return [];
-    }
+    const held = input.heldInvocationIds ?? new Set<string>();
     return this.transaction(() => {
       const claimed: ClaimedInvocation[] = [];
       const liveRows = this.db
         .prepare(
-          `SELECT * FROM invocations
-            WHERE status = ?
-               OR (status = ? AND retry_at IS NOT NULL AND retry_at <= ?)
-               OR (status IN (?, ?) AND lease_until IS NOT NULL AND lease_until <= ?)
-            ORDER BY scheduled_for ASC, created_at ASC`,
+          `SELECT i.*, s.status AS schedule_status FROM invocations i
+             JOIN schedules s ON s.id = i.schedule_id
+            WHERE i.status = ?
+               OR (i.status = ? AND i.retry_at IS NOT NULL AND i.retry_at <= ?)
+               OR (i.status IN (?, ?) AND i.lease_until IS NOT NULL AND i.lease_until <= ?)
+            ORDER BY i.scheduled_for ASC, i.created_at ASC`,
         )
         .all(
           INVOCATION_STATUSES.pending,
@@ -502,27 +568,49 @@ export class ScheduleStore {
           INVOCATION_STATUSES.claimed,
           INVOCATION_STATUSES.running,
           input.nowMs,
-        ) as unknown as InvocationRow[];
+        ) as unknown as LiveInvocationRow[];
+      const reclaimable: LiveInvocationRow[] = [];
       for (const row of liveRows) {
-        if (claimed.length >= input.limit) {
-          break;
-        }
+        const inFlight =
+          row.status === INVOCATION_STATUSES.claimed || row.status === INVOCATION_STATUSES.running;
         const executor = toExecutorIdentity(row);
         if (
-          row.status === INVOCATION_STATUSES.running &&
-          executor !== undefined &&
-          this.executorLiveness(executor) !== EXECUTOR_LIVENESS.dead
+          inFlight &&
+          (held.has(row.id) ||
+            (row.status === INVOCATION_STATUSES.running &&
+              executor !== undefined &&
+              this.executorLiveness(executor) !== EXECUTOR_LIVENESS.dead))
         ) {
           this.db
             .prepare("UPDATE invocations SET lease_until = ? WHERE id = ?")
             .run(input.nowMs + this.claimLeaseMs, row.id);
           continue;
         }
+        reclaimable.push(row);
+      }
+      if (input.limit <= 0) {
+        return claimed;
+      }
+      for (const row of reclaimable) {
+        if (claimed.length >= input.limit) {
+          break;
+        }
+        if (
+          row.mode === INVOCATION_MODES.scheduled &&
+          row.schedule_status === SCHEDULE_STATUSES.paused
+        ) {
+          this.finishInvocationAsFailedInTransaction(
+            row.id,
+            "任务已暂停，放弃本次运行",
+            input.nowMs,
+          );
+          continue;
+        }
         const attempt = row.status === INVOCATION_STATUSES.pending ? 1 : row.attempt + 1;
         if (attempt > row.max_attempts) {
           this.markTerminalFailureInTransaction(
             row,
-            `重试预算耗尽（${String(row.max_attempts)} 次）：${row.error ?? "exec 未成功完成"}`,
+            `重试预算耗尽（共 ${String(row.max_attempts)} 次尝试）：${row.error ?? "exec 未成功完成"}`,
             input.nowMs,
           );
           continue;
@@ -571,7 +659,20 @@ export class ScheduleStore {
           input.limit - claimed.length,
         ) as unknown as ScheduleRow[];
       for (const row of dueRows) {
-        const trigger = parseTriggerJson(row.trigger_json);
+        let trigger: TriggerSpec;
+        try {
+          trigger = parseTriggerJson(row.trigger_json);
+        } catch (error) {
+          this.db
+            .prepare("UPDATE schedules SET status = ?, last_error = ?, updated_at = ? WHERE id = ?")
+            .run(
+              SCHEDULE_STATUSES.paused,
+              `触发配置无法解析，已暂停：${error instanceof Error ? error.message : String(error)}`,
+              input.nowMs,
+              row.id,
+            );
+          continue;
+        }
         const id = randomUUID();
         const token = randomUUID();
         const inserted = this.db
@@ -753,7 +854,8 @@ export class ScheduleStore {
           `DELETE FROM invocations WHERE id IN (
              SELECT id FROM (
                SELECT id, ROW_NUMBER() OVER (
-                 PARTITION BY schedule_id ORDER BY created_at DESC, rowid DESC) AS rn
+                 PARTITION BY schedule_id
+                 ORDER BY COALESCE(finished_at, created_at) DESC, rowid DESC) AS rn
                  FROM invocations WHERE status IN (${TERMINAL_STATUS_PLACEHOLDERS}))
               WHERE rn > ?)`,
         )
@@ -782,7 +884,7 @@ export class ScheduleStore {
     return row.wake ?? undefined;
   }
 
-  private markTerminalFailureInTransaction(row: InvocationRow, error: string, nowMs: number): void {
+  private finishInvocationAsFailedInTransaction(id: string, error: string, nowMs: number): void {
     this.db
       .prepare(
         `UPDATE invocations
@@ -790,7 +892,11 @@ export class ScheduleStore {
                lease_until = NULL, retry_at = NULL
          WHERE id = ?`,
       )
-      .run(INVOCATION_STATUSES.failed, error, nowMs, row.id);
+      .run(INVOCATION_STATUSES.failed, error, nowMs, id);
+  }
+
+  private markTerminalFailureInTransaction(row: InvocationRow, error: string, nowMs: number): void {
+    this.finishInvocationAsFailedInTransaction(row.id, error, nowMs);
     if (row.mode === INVOCATION_MODES.scheduled) {
       this.db
         .prepare("UPDATE schedules SET status = ?, last_error = ?, updated_at = ? WHERE id = ?")

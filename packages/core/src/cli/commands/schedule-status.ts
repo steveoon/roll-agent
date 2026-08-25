@@ -26,6 +26,7 @@ export default defineCommand({
         const schedules = store.listSchedules();
         const nextWakeAtMs = store.nextWakeAtMs();
         const status = {
+          dataDir: paths.dataDir,
           daemon: {
             liveness: daemon.liveness,
             pid: daemon.record?.pid,
@@ -43,6 +44,7 @@ export default defineCommand({
           printJson(status);
           return;
         }
+        log.info(`data-dir: ${status.dataDir}`);
         log.info(
           `daemon: ${status.daemon.liveness}${status.daemon.pid ? ` (pid ${String(status.daemon.pid)})` : ""}`,
         );

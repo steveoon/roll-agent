@@ -340,3 +340,106 @@ test("tick 会按保留策略清理终态运行记录", () => {
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test("时钟跳变让自己的 claim lease 过期后，tick 不会重复拉起同一个 invocation", async () => {
+  const dir = tempDir();
+  try {
+    let now = NOW;
+    const store = new ScheduleStore(dir, { claimLeaseMs: 1_000 });
+    const schedule = addDueSchedule(store, "a");
+    const { logger } = silentLogger();
+    let spawnCount = 0;
+    const daemon = new SchedulerDaemon({
+      store,
+      workerId: "w1",
+      maxConcurrentRuns: 2,
+      logger,
+      now: () => now,
+      spawnInvocation: (): SpawnedInvocation => {
+        spawnCount += 1;
+        return { exited: new Promise(() => undefined), kill: () => undefined };
+      },
+    });
+    assert.equal(daemon.tick(), 1);
+    now = NOW + 60_000;
+    assert.equal(daemon.tick(), 0);
+    assert.equal(spawnCount, 1);
+    assert.equal(daemon.runningCount, 1);
+    const rows = store.listInvocations(schedule.id);
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0]?.attempt, 1);
+    assert.ok((rows[0]?.leaseUntilMs ?? 0) > now);
+    store.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("不属于本 daemon 且运行超过 maxRunMs 的孤儿 exec 进程会被 terminateExecutor 处理", () => {
+  const dir = tempDir();
+  try {
+    const store = new ScheduleStore(dir, { executorLiveness: () => "alive" });
+    const schedule = addDueSchedule(store, "a");
+    const claim = store.claimDue({ workerId: "old-daemon", nowMs: NOW, limit: 1 })[0];
+    assert.ok(claim);
+    store.beginInvocation(claim.invocation.id, claim.ownershipToken, NOW, {
+      pid: 4242,
+      startToken: "pst-v2:orphan",
+    });
+    const { logger, lines } = silentLogger();
+    const terminated: number[] = [];
+    const daemon = new SchedulerDaemon({
+      store,
+      workerId: "w1",
+      maxConcurrentRuns: 1,
+      logger,
+      now: () => NOW + 120_000,
+      maxRunMs: 60_000,
+      terminateExecutor: (executor) => {
+        terminated.push(executor.pid);
+        return true;
+      },
+      spawnInvocation: () => ({ exited: Promise.resolve(0), kill: () => undefined }),
+    });
+    assert.equal(daemon.tick(), 0);
+    assert.deepEqual(terminated, [4242]);
+    assert.ok(lines.some((line) => /不属于本 daemon/u.test(line)));
+    assert.equal(store.listInvocations(schedule.id)[0]?.status, INVOCATION_STATUSES.running);
+    store.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("停止后才退出的子进程不会再触碰已关闭的账本", async () => {
+  const dir = tempDir();
+  try {
+    const store = new ScheduleStore(dir);
+    addDueSchedule(store, "a", Date.now());
+    const { logger } = silentLogger();
+    const controller = new AbortController();
+    const exit = Promise.withResolvers<number | null>();
+    const daemon = new SchedulerDaemon({
+      store,
+      workerId: "w1",
+      maxConcurrentRuns: 1,
+      logger,
+      pollIntervalMs: 50,
+      childTerminateGraceMs: 10,
+      spawnInvocation: (claim): SpawnedInvocation => {
+        store.beginInvocation(claim.invocation.id, claim.ownershipToken, Date.now());
+        return { exited: exit.promise, kill: () => undefined };
+      },
+    });
+    const running = daemon.run(controller.signal);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    controller.abort();
+    await running;
+    assert.equal(daemon.runningCount, 0);
+    store.close();
+    exit.resolve(null);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

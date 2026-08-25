@@ -2,6 +2,7 @@ import { mkdirSync } from "node:fs";
 import { resolve } from "node:path";
 import { defineCommand } from "citty";
 import { loadConfig } from "../../config/loader.ts";
+import { schedulerConfigSchema } from "../../config/schema.ts";
 import { createBundledRollInvocation } from "../../companion-host/invocation.ts";
 import { FileCompanionLogger } from "../../companion-host/logger.ts";
 import {
@@ -14,10 +15,10 @@ import {
   removeDaemonRecord,
   writeDaemonRecord,
 } from "../../scheduler-host/daemon-record.ts";
+import { terminateExecutor } from "../../scheduler-host/executor-liveness.ts";
 import { SCHEDULER_DAEMON_LOCK_NAME, createSchedulerPaths } from "../../scheduler-host/paths.ts";
 import { createInvocationSpawner } from "../../scheduler-host/spawn-invocation.ts";
 import { log } from "../utils/output.ts";
-import { createProcessAbortController } from "./companion-command-utils.ts";
 import { loadRuntime, openScheduleStore, runScheduleCommand } from "./schedule-command-utils.ts";
 
 function parseMaxConcurrentRuns(value: string | undefined): number | undefined {
@@ -25,10 +26,35 @@ function parseMaxConcurrentRuns(value: string | undefined): number | undefined {
     return undefined;
   }
   const parsed = Number.parseInt(value, 10);
-  if (!Number.isInteger(parsed) || parsed < 1 || String(parsed) !== value.trim()) {
-    throw new Error(`--max-concurrent-runs 必须是 ≥ 1 的整数（收到 ${value}）`);
+  const checked = schedulerConfigSchema.shape.maxConcurrentRuns.safeParse(parsed);
+  if (!checked.success || String(parsed) !== value.trim()) {
+    throw new Error(`--max-concurrent-runs 必须是 1..8 的整数（收到 ${value}）`);
   }
-  return parsed;
+  return checked.data;
+}
+
+function installStopSignals(
+  onStop: () => void,
+  onRepeat: () => void,
+): { readonly controller: AbortController; readonly release: () => void } {
+  const controller = new AbortController();
+  const handler = () => {
+    if (controller.signal.aborted) {
+      onRepeat();
+      return;
+    }
+    onStop();
+    controller.abort(new Error("scheduler daemon was asked to stop"));
+  };
+  process.on("SIGINT", handler);
+  process.on("SIGTERM", handler);
+  return {
+    controller,
+    release: () => {
+      process.off("SIGINT", handler);
+      process.off("SIGTERM", handler);
+    },
+  };
 }
 
 export default defineCommand({
@@ -41,7 +67,7 @@ export default defineCommand({
     },
     "max-concurrent-runs": {
       type: "string",
-      description: "同时运行的任务数上限（服务安装时固化；缺省按配置解析）",
+      description: "同时运行的任务数上限 1..8（服务安装时固化；缺省按配置解析）",
     },
   },
   async run({ args }) {
@@ -75,14 +101,19 @@ export default defineCommand({
       const record = createDaemonRecord(`daemon-${String(process.pid)}`);
       writeDaemonRecord(paths.daemonRecordPath, record);
       const fileLogger = new FileCompanionLogger(paths.logPath);
+      const mirrorToStderr = process.stderr.isTTY === true;
       const logger = {
         info: (message: string) => {
           fileLogger.info(message);
-          log.info(message);
+          if (mirrorToStderr) {
+            log.info(message);
+          }
         },
         error: (message: string) => {
           fileLogger.error(message);
-          log.error(message);
+          if (mirrorToStderr) {
+            log.error(message);
+          }
         },
       };
       const runtime = await loadRuntime();
@@ -96,16 +127,20 @@ export default defineCommand({
           dataDir: paths.dataDir,
           logPath: paths.logPath,
         }),
+        terminateExecutor,
         logger,
       });
       logger.info(
         `data-dir=${paths.dataDir} max-concurrent-runs=${String(maxConcurrentRuns)}（${config === undefined ? "由启动参数固化" : "由配置解析"}）`,
       );
-      const processSignal = createProcessAbortController();
+      const stop = installStopSignals(
+        () => logger.info("收到停止信号，等待 exec 子进程退出…"),
+        () => logger.info("仍在等待 exec 子进程退出；grace 结束后会 SIGKILL"),
+      );
       try {
-        await daemon.run(processSignal.controller.signal);
+        await daemon.run(stop.controller.signal);
       } finally {
-        processSignal.release();
+        stop.release();
         store.close();
         removeDaemonRecord(paths.daemonRecordPath, record);
         lock.release();

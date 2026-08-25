@@ -1,4 +1,9 @@
-import { SCHEDULER_LIMITS, type ClaimedInvocation, type ScheduleStore } from "@roll-agent/runtime";
+import {
+  SCHEDULER_LIMITS,
+  type ClaimedInvocation,
+  type ExecutorIdentity,
+  type ScheduleStore,
+} from "@roll-agent/runtime";
 import type { InvocationSpawner, SpawnedInvocation } from "./spawn-invocation.ts";
 
 export type { SpawnedInvocation } from "./spawn-invocation.ts";
@@ -20,6 +25,7 @@ export interface SchedulerDaemonOptions {
   readonly maxTimerDelayMs?: number;
   readonly maxRunMs?: number;
   readonly childTerminateGraceMs?: number;
+  readonly terminateExecutor?: (executor: ExecutorIdentity) => boolean;
 }
 
 interface RunningInvocation {
@@ -58,6 +64,7 @@ export class SchedulerDaemon {
   private readonly maxTimerDelayMs: number;
   private readonly maxRunMs: number;
   private readonly childTerminateGraceMs: number;
+  private readonly terminateExecutor: ((executor: ExecutorIdentity) => boolean) | undefined;
   private readonly running = new Map<string, RunningInvocation>();
   private wake = Promise.withResolvers<void>();
   private stopped = false;
@@ -76,6 +83,7 @@ export class SchedulerDaemon {
     this.maxRunMs = options.maxRunMs ?? SCHEDULER_LIMITS.maxRunMs;
     this.childTerminateGraceMs =
       options.childTerminateGraceMs ?? SCHEDULER_LIMITS.childTerminateGraceMs;
+    this.terminateExecutor = options.terminateExecutor;
   }
 
   get runningCount(): number {
@@ -91,13 +99,17 @@ export class SchedulerDaemon {
     } catch (error) {
       this.logger.error(`清理运行记录失败：${errorMessage(error)}`);
     }
+    this.renewLeases();
+    this.boundOrphans();
     const capacity = this.maxConcurrentRuns - this.running.size;
-    if (capacity <= 0) {
-      return 0;
-    }
     let claims: ClaimedInvocation[];
     try {
-      claims = this.store.claimDue({ workerId: this.workerId, nowMs: this.now(), limit: capacity });
+      claims = this.store.claimDue({
+        workerId: this.workerId,
+        nowMs: this.now(),
+        limit: Math.max(capacity, 0),
+        heldInvocationIds: new Set(this.running.keys()),
+      });
     } catch (error) {
       this.logger.error(`claimDue 失败：${errorMessage(error)}`);
       return 0;
@@ -121,8 +133,8 @@ export class SchedulerDaemon {
     this.logger.info(`scheduler daemon 启动，workerId=${this.workerId}`);
     try {
       while (!this.stopped) {
-        this.tick();
-        await this.sleepUntilWake();
+        const launched = this.tick();
+        await this.sleepUntilWake(launched > 0);
       }
     } finally {
       clearInterval(renewTimer);
@@ -134,6 +146,10 @@ export class SchedulerDaemon {
 
   private launch(claim: ClaimedInvocation): void {
     const id = claim.invocation.id;
+    if (this.running.has(id)) {
+      this.logger.error(`invocation ${id} 仍在本 daemon 运行中，拒绝重复启动`);
+      return;
+    }
     this.logger.info(
       `触发 ${claim.schedule.name}（schedule=${claim.schedule.id} invocation=${id} attempt=${String(claim.invocation.attempt)}）`,
     );
@@ -170,16 +186,24 @@ export class SchedulerDaemon {
   private onExit(claim: ClaimedInvocation, code: number | null): void {
     const id = claim.invocation.id;
     const entry = this.running.get(id);
-    if (entry !== undefined) {
-      clearTimeout(entry.runTimer);
+    if (entry === undefined || entry.ownershipToken !== claim.ownershipToken) {
+      return;
     }
+    clearTimeout(entry.runTimer);
     this.running.delete(id);
-    const outcome = this.store.failInvocation(
-      id,
-      claim.ownershipToken,
-      `exec 进程退出 code=${code === null ? "null" : String(code)}，未写入执行结果`,
-      this.now(),
-    );
+    let outcome: ReturnType<ScheduleStore["failInvocation"]>;
+    try {
+      outcome = this.store.failInvocation(
+        id,
+        claim.ownershipToken,
+        `exec 进程退出 code=${code === null ? "null" : String(code)}，未写入执行结果`,
+        this.now(),
+      );
+    } catch (error) {
+      this.logger.error(`invocation ${id} 退出后写账本失败：${errorMessage(error)}`);
+      this.wake.resolve();
+      return;
+    }
     if (outcome !== "lost-claim") {
       this.logger.error(
         `invocation ${id} 未正常完成（code=${String(code)}），处理结果：${outcome}`,
@@ -200,11 +224,43 @@ export class SchedulerDaemon {
     }
   }
 
-  private async sleepUntilWake(): Promise<void> {
+  private boundOrphans(): void {
+    if (this.terminateExecutor === undefined) {
+      return;
+    }
+    const cutoff = this.now() - this.maxRunMs;
+    let rows: ReturnType<ScheduleStore["listRunningInvocations"]>;
+    try {
+      rows = this.store.listRunningInvocations();
+    } catch (error) {
+      this.logger.error(`读取运行中记录失败：${errorMessage(error)}`);
+      return;
+    }
+    for (const row of rows) {
+      if (
+        this.running.has(row.id) ||
+        row.executor === undefined ||
+        row.startedAtMs === undefined ||
+        row.startedAtMs > cutoff
+      ) {
+        continue;
+      }
+      const killed = this.terminateExecutor(row.executor);
+      this.logger.error(
+        `invocation ${row.id} 的 exec 进程 (pid ${String(row.executor.pid)}) 不属于本 daemon 且运行超过 ${String(this.maxRunMs)} ms，${killed ? "已发送 SIGKILL" : "身份无法确认，未处理"}`,
+      );
+    }
+  }
+
+  private async sleepUntilWake(progressed: boolean): Promise<void> {
     const nowMs = this.now();
     const wakeAt = this.store.nextWakeAtMs();
     const target = Math.min(wakeAt ?? Number.POSITIVE_INFINITY, nowMs + this.pollIntervalMs);
-    const delay = Math.min(Math.max(target - nowMs, 0), this.maxTimerDelayMs);
+    const rawDelay = target - nowMs;
+    const delay =
+      rawDelay <= 0 && !progressed
+        ? this.pollIntervalMs
+        : Math.min(Math.max(rawDelay, 0), this.maxTimerDelayMs);
     this.wake = Promise.withResolvers<void>();
     const timer = setTimeout(() => this.wake.resolve(), delay);
     try {
@@ -237,6 +293,7 @@ export class SchedulerDaemon {
     );
     for (const [id, entry] of this.running) {
       clearTimeout(entry.runTimer);
+      this.running.delete(id);
       this.logger.error(
         `invocation ${id} 的 exec 子进程退出未确认，lease 到期后由探活决定是否重跑`,
       );

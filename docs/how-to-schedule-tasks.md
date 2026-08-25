@@ -45,11 +45,11 @@
 ## 运行时的行为
 
 - **无人值守**：每次触发起一个新 thread，以 `background` 模式运行。需要人工确认的工具调用会被策略直接拒绝，模型会跳过并在结尾说明；这样的运行记为 `needs_confirmation`，调度照常推进。
-- **失败与重试**：exec 子进程抛错或非零退出 → 10 秒后重试，最多 3 次；用完后任务自动 `paused`，`roll schedule list` 会显示原因。修好后 `roll schedule resume <id>`。
-- **权限边界漂移即停**：每次执行前会把当前 `runtime.approval` / `runtime.shell` 配置的摘要与登记时对比，不一致（无论放宽还是收紧）都不会运行，任务直接 `paused` 并给出原因；确认配置后 `roll schedule resume <id>` 会以当前配置重新授权。
-- **不会重复执行同一次触发**：exec 子进程会把自己的 PID 与 OS 启动身份写进账本；即使 daemon 被强杀、机器休眠后 lease 过期，只有在证实旧子进程已经退出后才会重新执行，无法证实时一直等待（`roll schedule runs` 里可以看到它仍是 `running`）。单次运行超过 1 小时会被 daemon 强制终止并按失败重试。
+- **失败与重试**：exec 子进程抛错或非零退出 → 10 秒后重试，每次触发最多尝试 3 次（首次 + 2 次重试）；用完后任务自动 `paused`，`roll schedule list` 会显示原因。修好后 `roll schedule resume <id>`。`pause` 会立即放弃该任务尚未开始的重试。
+- **权限边界漂移即停**：每次执行前会把当前 `runtime.approval` / `runtime.shell` 配置的摘要与登记时对比，不一致（无论放宽还是收紧）都不会运行，任务直接 `paused` 并给出原因。摘要只覆盖审批策略与 shell 开关，不覆盖已注册 Agent / skills 的变化。`roll schedule resume <id>` 同时是「重新授权」：它总会以 `--cwd` 目录当前的配置重新记录摘要（对 active 任务也一样），摘要变化时会打印提示。
+- **不会重复执行同一次触发**：exec 子进程会把自己的 PID 与 OS 启动身份写进账本；即使 daemon 被强杀、机器休眠后 lease 过期，只有在证实旧子进程已经退出后才会重新执行，无法证实时一直等待（`roll schedule runs` 里可以看到它仍是 `running`）。单次运行超过 1 小时会被 daemon 强制终止并按失败重试——包括上一个 daemon 留下的孤儿子进程。
 - **错过的触发只补一次**：机器睡眠后醒来，不会把错过的周期一次性补跑；下次运行时间从「现在」重新计算。
-- **手动触发**：`roll schedule run-now <id>` 入队交给 daemon；`--inline` 在当前进程内执行并等待结果，不依赖 daemon，**只尝试一次**，非 `completed` / `needs_confirmation` 时退出码为 1。手动触发的失败不会暂停任务。
+- **手动触发**：`roll schedule run-now <id>` 入队交给 daemon；`--inline` 在当前进程内执行并等待结果，不依赖 daemon，**只尝试一次**，非 `completed` / `needs_confirmation` 时退出码为 1。手动触发的失败不会暂停任务；对 `paused` 的任务也可以 `run-now`（权限漂移检查照常生效），便于修好后先试跑再 `resume`。
 - **暂停 / 恢复不改相位**：`pause` 后 `resume`，仍按原来的下次运行时间执行。
 - **停止 daemon**：收到 SIGTERM 后先给子进程 SIGTERM，10 秒内未退出则 SIGKILL；仍未确认退出的运行由上面的探活规则决定是否重跑。
 - **运行记录保留**：每个任务最多保留最近 100 条终态记录、最长 30 天，daemon 每轮自动清理。
@@ -63,7 +63,7 @@ scheduler:
   max-concurrent-runs: 2               # daemon 同时运行的 exec 子进程数
 ```
 
-`roll schedule service install` 会把安装时解析出的 `data-dir` 与 `max-concurrent-runs` 固化进服务定义（`roll schedule daemon --foreground --data-dir … --max-concurrent-runs …`），之后修改配置需要重新 `install`。daemon 传给 exec 子进程的账本位置同样是显式指定的，不会因 `--cwd` 目录里另有一份配置而写错账本。
+`data-dir` 写相对路径时以配置文件所在目录为基准（不随执行命令的目录变化）。`roll schedule service install` 会把安装时解析出的 `data-dir` 与 `max-concurrent-runs` 固化进服务定义（`roll schedule daemon --foreground --data-dir … --max-concurrent-runs …`），之后修改配置需要重新 `install`。daemon 传给 exec 子进程的账本位置同样是显式指定的，不会因 `--cwd` 目录里另有一份配置而写错账本。`add / list / runs / status / run-now` 这些管理命令按当前目录的配置解析账本位置，要和 daemon 看同一个账本，请在同一配置范围内执行（`roll schedule status` 会打印它使用的 `data-dir`）。
 
 ## 目前的限制
 

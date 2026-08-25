@@ -1,5 +1,5 @@
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 
 export const SCHEDULER_SERVICE_LABEL = "dev.roll-agent.scheduler" as const;
 export const WINDOWS_SCHEDULER_TASK_NAME = "Roll Agent Scheduler" as const;
@@ -15,10 +15,11 @@ export interface SchedulerPaths {
 }
 
 export function createSchedulerPaths(dataDir: string, homeDir: string = homedir()): SchedulerPaths {
+  const resolvedDataDir = resolve(dataDir);
   return {
-    dataDir,
-    logPath: join(dataDir, "scheduler.log"),
-    daemonRecordPath: join(dataDir, "daemon.json"),
+    dataDir: resolvedDataDir,
+    logPath: join(resolvedDataDir, "scheduler.log"),
+    daemonRecordPath: join(resolvedDataDir, "daemon.json"),
     launchAgentPath: join(homeDir, "Library", "LaunchAgents", `${SCHEDULER_SERVICE_LABEL}.plist`),
   };
 }

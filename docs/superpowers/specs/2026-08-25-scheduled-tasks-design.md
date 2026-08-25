@@ -131,7 +131,16 @@ scheduler:
 | daemon stop 无限等待子进程 | SIGTERM → 10 s grace → SIGKILL → 再等 10 s，仍未退出记「退出未确认」交给探活规则 |
 | 缺跨进程 E2E | 新增两条无 LLM 的 E2E：`run-now --inline` 跨 cwd 配置写回登记账本并退出 1；daemon → spawn exec → 账本落 `retry` → SIGTERM 干净退出 |
 
-schema 升到 v2（`schedules.authority_digest`、`invocations.max_attempts / executor_pid / executor_start_token`），打开 v1 库时就地补列。
+schema 升到 v2（`schedules.authority_digest`、`invocations.max_attempts / executor_pid / executor_start_token`），打开 v1 库时就地补列，并把超过 365 天的旧 interval 钳位到上限且暂停。
+
+第二轮（对抗性验证后补修）：
+
+- `scheduler.data-dir` 相对路径以配置文件所在目录为基准解析（`loader.ts` `resolveSchedulerDataDir`），`createSchedulerPaths` 一律 `resolve()`；`roll schedule status` 打印实际 data-dir
+- `--cwd` 登记时 `realpathSync`，避免 symlink 让 add 与 exec 读到不同配置从而永远「权限漂移」；digest 的 overrides 排序改为 code unit，不依赖 locale
+- daemon：tick 先续租再 claim，并把自己持有的 invocation id 作为 `heldInvocationIds` 传给 `claimDue`，杜绝休眠/时钟跳变后重复拉起；`claimDue` 的续租预扫描不受 `limit` 约束，`sleepUntilWake` 在「无进展且目标已过期」时退避一个 poll 间隔，消除 busy loop；孤儿 exec 进程（上一个 daemon 留下、运行超过 `maxRunMs`）由 `terminateExecutor` 校验身份后 SIGKILL；停止后才退出的子进程不再触碰已关闭的账本；二次 SIGTERM 只记日志不打断 grace；非 TTY 下只写文件日志
+- `pause` 立即放弃 scheduled 模式的 retry 行；暂停任务的过期 claim 终态化而不重跑；trigger 无法解析的行只暂停自己
+- `bin/roll`：内层进程被信号杀死时透传信号 / 退出码 1；进入子进程前清掉 `ROLL_SQLITE_RESPAWNED`，嵌套 `roll schedule …` 仍能自行加 flag；`service install` 先探测 `node:sqlite` 可加载；`--max-concurrent-runs` 复用 schema 上界 1..8
+- 不改并记录：同 uid 可经 `ps -E` 看到 token（同 uid 本就能读 0600 的账本）；探活在 `BEGIN IMMEDIATE` 内执行（仅 lease 过期行）；macOS 启动身份秒级粒度；Windows `schtasks /TR` 261 字符上限需 Windows 主机实测
 
 ## 不覆盖（v2）
 

@@ -11,6 +11,13 @@ export default defineCommand({
   },
   async run() {
     await runScheduleCommand(async () => {
+      try {
+        await import("node:sqlite");
+      } catch {
+        throw new Error(
+          "当前 Node 进程无法加载 node:sqlite（Node < 22.13 需要 --experimental-sqlite）；请通过 roll 命令安装，或升级 Node",
+        );
+      }
       const { config } = loadConfig();
       mkdirSync(config.scheduler.dataDir, { recursive: true, mode: 0o700 });
       await createSchedulerServiceController({

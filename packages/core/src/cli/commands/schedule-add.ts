@@ -1,4 +1,4 @@
-import { statSync } from "node:fs";
+import { realpathSync, statSync } from "node:fs";
 import { resolve } from "node:path";
 import { defineCommand } from "citty";
 import { loadConfig } from "../../config/loader.ts";
@@ -28,15 +28,16 @@ export default defineCommand({
   },
   async run({ args }) {
     await runScheduleCommand(async () => {
-      const cwd = resolve(args.cwd ?? process.cwd());
-      let isDirectory = false;
+      const requestedCwd = resolve(args.cwd ?? process.cwd());
+      let cwd: string | undefined;
       try {
-        isDirectory = statSync(cwd).isDirectory();
+        const real = realpathSync(requestedCwd);
+        cwd = statSync(real).isDirectory() ? real : undefined;
       } catch {
-        isDirectory = false;
+        cwd = undefined;
       }
-      if (!isDirectory) {
-        throw new Error(`cwd 不存在或不是目录：${cwd}`);
+      if (cwd === undefined) {
+        throw new Error(`cwd 不存在或不是目录：${requestedCwd}`);
       }
       const { config } = loadConfig();
       const authorityDigest = computeAuthorityDigest(loadConfig({ cwd }).config);

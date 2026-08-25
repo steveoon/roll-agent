@@ -554,3 +554,153 @@ test("打开 schema v1 数据库时自动补齐新列并升级 user_version", ()
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test("heldInvocationIds 里的 claimed/running 行 lease 过期只续租；limit<=0 时预扫描仍然续租", () => {
+  const dir = tempDir();
+  try {
+    const store = new ScheduleStore(dir, { claimLeaseMs: 1_000 });
+    store.createSchedule(sampleInput({ fireImmediately: true }), NOW);
+    const first = store.claimDue({ workerId: "A", nowMs: NOW, limit: 1 })[0];
+    assert.ok(first);
+    const held = new Set([first.invocation.id]);
+    assert.deepEqual(
+      store.claimDue({ workerId: "A", nowMs: NOW + 5_000, limit: 5, heldInvocationIds: held }),
+      [],
+    );
+    assert.equal(store.getInvocation(first.invocation.id)?.leaseUntilMs, NOW + 6_000);
+    assert.equal(store.getInvocation(first.invocation.id)?.attempt, 1);
+    assert.deepEqual(
+      store.claimDue({ workerId: "A", nowMs: NOW + 9_000, limit: 0, heldInvocationIds: held }),
+      [],
+    );
+    assert.equal(store.getInvocation(first.invocation.id)?.leaseUntilMs, NOW + 10_000);
+    assert.equal(store.renewLease(first.invocation.id, first.ownershipToken, NOW + 9_001), true);
+    const reclaimed = store.claimDue({ workerId: "B", nowMs: NOW + 12_000, limit: 5 });
+    assert.equal(reclaimed[0]?.invocation.attempt, 2);
+    store.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("pause 会放弃 scheduled 模式的 retry 行，manual 行不受影响；暂停任务的过期 claim 不再重跑", () => {
+  const dir = tempDir();
+  try {
+    const store = new ScheduleStore(dir, { claimLeaseMs: 1_000, retryBudget: 3 });
+    const created = store.createSchedule(sampleInput({ fireImmediately: true }), NOW);
+    const scheduled = store.claimDue({ workerId: "w", nowMs: NOW, limit: 1 })[0];
+    assert.ok(scheduled);
+    assert.equal(
+      store.failInvocation(scheduled.invocation.id, scheduled.ownershipToken, "boom", NOW + 1),
+      INVOCATION_FAILURE_OUTCOMES.retryScheduled,
+    );
+    const manual = store.enqueueManualInvocation(created.id, NOW + 2);
+    const manualClaim = store.claimPendingInvocation(manual.id, "w", NOW + 3);
+    assert.ok(manualClaim);
+    store.failInvocation(manual.id, manualClaim.ownershipToken, "manual boom", NOW + 4);
+    assert.equal(store.setScheduleStatus(created.id, SCHEDULE_STATUSES.paused, NOW + 5), true);
+    assert.equal(store.getInvocation(scheduled.invocation.id)?.status, INVOCATION_STATUSES.failed);
+    assert.match(store.getInvocation(scheduled.invocation.id)?.error ?? "", /任务已暂停/u);
+    assert.equal(store.getInvocation(manual.id)?.status, INVOCATION_STATUSES.retry);
+    assert.equal(store.getSchedule(created.id)?.lastError, undefined);
+    const second = store.claimDue({ workerId: "w", nowMs: NOW + 20_000, limit: 5 });
+    assert.deepEqual(
+      second.map((claim) => claim.invocation.id),
+      [manual.id],
+    );
+    const manualAgain = second[0];
+    assert.ok(manualAgain);
+    assert.equal(
+      store.failInvocation(manual.id, manualAgain.ownershipToken, "manual boom 2", NOW + 20_001, {
+        terminal: true,
+      }),
+      INVOCATION_FAILURE_OUTCOMES.terminal,
+    );
+    store.setScheduleStatus(created.id, SCHEDULE_STATUSES.active, NOW + 20_002);
+    const again = store.claimDue({ workerId: "w", nowMs: NOW + 1_900_000, limit: 5 })[0];
+    assert.ok(again);
+    assert.equal(again.invocation.mode, INVOCATION_MODES.scheduled);
+    store.setScheduleStatus(created.id, SCHEDULE_STATUSES.paused, NOW + 1_900_001);
+    assert.deepEqual(store.claimDue({ workerId: "w2", nowMs: NOW + 1_902_000, limit: 5 }), []);
+    assert.equal(store.getInvocation(again.invocation.id)?.status, INVOCATION_STATUSES.failed);
+    assert.match(store.getInvocation(again.invocation.id)?.error ?? "", /任务已暂停/u);
+    assert.equal(store.getSchedule(created.id)?.lastError, "manual boom 2");
+    assert.equal(store.nextWakeAtMs(), undefined);
+    store.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("v1 库中超过 365 天的 interval 在迁移时被钳位并暂停；损坏的 trigger 行只暂停自己", () => {
+  const dir = tempDir();
+  try {
+    const legacy = new DatabaseSync(join(dir, "schedules.db"));
+    legacy.exec(
+      `CREATE TABLE schedules (
+         id TEXT PRIMARY KEY, name TEXT NOT NULL, prompt TEXT NOT NULL, cwd TEXT NOT NULL,
+         trigger_json TEXT NOT NULL, status TEXT NOT NULL CHECK (status IN ('active', 'paused')),
+         next_run_at INTEGER, last_run_at INTEGER, last_error TEXT,
+         created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL);
+       CREATE TABLE invocations (
+         id TEXT PRIMARY KEY,
+         schedule_id TEXT NOT NULL REFERENCES schedules(id) ON DELETE CASCADE,
+         mode TEXT NOT NULL, status TEXT NOT NULL, scheduled_for INTEGER NOT NULL,
+         attempt INTEGER NOT NULL DEFAULT 0, claimed_by TEXT, ownership_token TEXT,
+         lease_until INTEGER, retry_at INTEGER, thread_id TEXT, output_excerpt TEXT, error TEXT,
+         pending_actions_json TEXT NOT NULL DEFAULT '[]', created_at INTEGER NOT NULL,
+         started_at INTEGER, finished_at INTEGER, UNIQUE (schedule_id, mode, scheduled_for));
+       INSERT INTO schedules VALUES ('big', 'n', 'p', '/w', '{"kind":"interval","everyMs":86400000000000000}',
+         'active', 1, NULL, NULL, 1, 1);
+       INSERT INTO schedules VALUES ('ok', 'n', 'p', '/w', '{"kind":"interval","everyMs":60000}',
+         'active', 1, NULL, NULL, 1, 1);
+       PRAGMA user_version = 1;`,
+    );
+    legacy.close();
+    const store = new ScheduleStore(dir);
+    const big = store.getSchedule("big");
+    assert.equal(big?.status, SCHEDULE_STATUSES.paused);
+    assert.equal(big?.trigger.everyMs, 31_536_000_000);
+    assert.match(big?.lastError ?? "", /365/u);
+    assert.equal(store.listSchedules().length, 2);
+    store.close();
+    const corrupt = new DatabaseSync(join(dir, "schedules.db"));
+    corrupt.exec(`UPDATE schedules SET trigger_json = '{"kind":"daily"}' WHERE id = 'ok';`);
+    corrupt.close();
+    const reopened = new ScheduleStore(dir);
+    assert.deepEqual(reopened.claimDue({ workerId: "w", nowMs: NOW, limit: 5 }), []);
+    reopened.close();
+    const check = new DatabaseSync(join(dir, "schedules.db"));
+    const row = check.prepare("SELECT status, last_error FROM schedules WHERE id = 'ok'").get() as {
+      status: string;
+      last_error: string;
+    };
+    assert.equal(row.status, "paused");
+    assert.match(row.last_error, /无法解析/u);
+    check.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("listRunningInvocations 只返回 running 行", () => {
+  const dir = tempDir();
+  try {
+    const store = new ScheduleStore(dir);
+    store.createSchedule(sampleInput({ fireImmediately: true }), NOW);
+    const claim = store.claimDue({ workerId: "w", nowMs: NOW, limit: 1 })[0];
+    assert.ok(claim);
+    assert.deepEqual(store.listRunningInvocations(), []);
+    store.beginInvocation(claim.invocation.id, claim.ownershipToken, NOW + 1, {
+      pid: 99,
+      startToken: "pst-v2:x",
+    });
+    assert.deepEqual(
+      store.listRunningInvocations().map((row) => [row.id, row.executor?.pid]),
+      [[claim.invocation.id, 99]],
+    );
+    store.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

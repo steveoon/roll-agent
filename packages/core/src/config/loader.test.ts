@@ -720,3 +720,27 @@ scheduler:
     assert.equal(config.scheduler.dataDir, resolve(homedir(), "custom-scheduler"));
   });
 });
+
+describe("scheduler.data-dir 相对路径", () => {
+  it("以配置文件所在目录为基准解析，不随 cwd 变化", () => {
+    const dir = makeTmpDir();
+    try {
+      writeFileSync(
+        resolve(dir, "roll.config.yaml"),
+        `llm:
+  default-provider: anthropic
+  default-model: claude-sonnet-4-6
+  providers: {}
+scheduler:
+  data-dir: ./sched
+`,
+      );
+      const sub = resolve(dir, "sub");
+      mkdirSync(sub, { recursive: true });
+      assert.equal(loadConfig({ cwd: sub }).config.scheduler.dataDir, resolve(dir, "sched"));
+      assert.equal(loadConfig({ cwd: dir }).config.scheduler.dataDir, resolve(dir, "sched"));
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
