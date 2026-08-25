@@ -81,6 +81,7 @@ roll ask "<message>"                         LLM 智能路由
 roll chat [message]                          会话式入口（Ink TUI；--server 为旧兼容入口）
 roll config set|get|init|migrate             配置管理
 roll update [--check]                        更新 roll 及已注册 Agent
+roll schedule add|list|show|remove|pause|resume|run-now|runs|status|daemon|service   定时任务
 roll doctor                                  系统诊断
 ```
 

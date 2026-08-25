@@ -271,6 +271,14 @@ roll config set <key> <value>   修改配置（key 用英文句点分隔，如 a
 roll config migrate             自动迁移旧版配置（备份原文件 + 写回新格式）
 roll ui                         启动按需本地 Web 配置台（127.0.0.1 随机端口）
 
+roll schedule add <prompt> --name <n> --every <30m>   登记定时任务（--cwd 指定目录，--now 立即触发）
+roll schedule list|show|remove|pause|resume <id>      管理定时任务
+roll schedule run-now <id> [--inline]                 手动触发一次
+roll schedule runs <id>                               查看历次运行与失败原因
+roll schedule status                                  daemon 状态与任务统计
+roll schedule daemon --foreground                     前台运行 daemon
+roll schedule service install|uninstall|status        安装为用户级常驻服务
+
 roll doctor                     诊断 Roll 配置、Agent 注册表和运行时状态
 roll doctor --json              JSON 诊断结果（配置损坏时返回非零退出码）
 ```
@@ -289,6 +297,8 @@ roll doctor --json              JSON 诊断结果（配置损坏时返回非零�
 | `roll chat` | `--screen-mode <auto\|fullscreen\|inline>` | 选择全屏 TUI、基础 REPL 或自动检测 |
 | `roll ui` | `--no-open` | 不自动打开浏览器，打印一次性认证链接 |
 | `roll ui` | `--config <path>` | 显式指定要编辑的配置文件 |
+| `roll schedule add` | `--every <Ns\|Nm\|Nh\|Nd>` | 运行周期，最短 60s |
+| `roll schedule run-now` | `--inline` | 当前进程内执行并等待结果 |
 | 支持 JSON 输出的命令 | `--json` | 输出结构化 JSON |
 
 说明：`--verbose` 可用于全局或 `roll run` / `roll ask` 输出调试日志；`--config <path>`
