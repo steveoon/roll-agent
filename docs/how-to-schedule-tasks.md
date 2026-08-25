@@ -51,7 +51,7 @@
 - **错过的触发只补一次**：机器睡眠后醒来，不会把错过的周期一次性补跑；下次运行时间从「现在」重新计算。
 - **同一任务同一时刻只运行一次**：无论 scheduled 还是 manual 触发，账本事务里都会拒绝在已有 `claimed` / `running` 记录时再启动一次。周期触发遇到上一轮未结束会跳过并重新计算下次时间；`run-now` 入队的记录会等上一轮结束后由 daemon 执行；`run-now --inline` 遇到运行中的任务直接退出 1。
 - **手动触发**：`roll schedule run-now <id>` 入队交给 daemon；`--inline` 在当前进程内执行并等待结果，不依赖 daemon，**只尝试一次**，非 `completed` / `needs_confirmation` 时退出码为 1（Ctrl+C 会转发给 exec 子进程）。手动触发的失败不会暂停任务；对 `paused` 的任务也可以 `run-now`（权限漂移检查照常生效），便于修好后先试跑再 `resume`。
-- **取消一次运行**：`roll schedule cancel <invocation-id>` 把排队中 / 运行中的记录置为终态并作废其 token（之后 exec 的写入会被忽略）；加 `--kill` 会向仍可验证存活的 exec 进程组发送 SIGKILL。用于 `runs` 里长期停在 `running` 且探活无法确认的记录。
+- **取消一次运行**：`roll schedule cancel <invocation-id>` 对排队中（`pending` / `retry`）和尚未启动（`claimed`）的记录直接置终态并作废 token。对 `running` 的记录，取消必须加 `--kill`：向 exec 进程组发送 SIGKILL 并**确认进程已退出**后才置终态，确认不了就保持 `running`、不释放单例。探活永远是 unknown 的记录（例如平台读不到进程身份）只能用 `--abandon` 放弃追踪——这是危险操作，旧进程若还活着，其副作用不会被阻止。
 - **暂停 / 恢复不改相位**：`pause` 后 `resume`，仍按原来的下次运行时间执行。
 - **停止 daemon**：收到 SIGTERM 后先给子进程 SIGTERM，10 秒内未退出则 SIGKILL；仍未确认退出的运行由上面的探活规则决定是否重跑。
 - **运行记录保留**：每个任务最多保留最近 100 条终态记录、最长 30 天，daemon 每轮自动清理。每次运行创建的 chat 线程不随账本清理，仍可用 `roll chat --session <threadId>` 打开。

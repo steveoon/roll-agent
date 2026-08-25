@@ -4,9 +4,16 @@ import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 import { randomUUID } from "node:crypto";
+import { spawn, type ChildProcess } from "node:child_process";
+import { once } from "node:events";
+import { setTimeout as delay } from "node:timers/promises";
+import { ScheduleStore } from "@roll-agent/runtime";
+import { readProcessStartToken } from "../registry/process-identity.ts";
+import { probeExecutorLiveness } from "../scheduler-host/executor-liveness.ts";
 import {
   buildConfigYaml,
   formatSpawnedRollProcess,
+  isProcessAlive,
   runRoll,
   spawnRollProcess,
   waitForSmokeCondition,
@@ -284,35 +291,94 @@ runtime:
   }
 });
 
-test("e2e: roll schedule cancel 把排队中的 invocation 置为终态，终态后再取消返回 1", () => {
+test("e2e: roll schedule cancel 对排队/运行/不可验证三种状态分别拒绝或取消", async () => {
   const { workspace, env } = setupWorkspace();
+  let sleeper: ChildProcess | undefined;
   try {
-    const added = runRoll(
-      ["schedule", "add", "汇总", "--name", "取消", "--every", "1h", "--cwd", workspace, "--json"],
-      workspace,
-      { env },
-    );
-    assert.equal(added.status, 0, added.stderr);
-    const created = JSON.parse(added.stdout) as { id: string };
-    const queued = runRoll(["schedule", "run-now", created.id, "--json"], workspace, { env });
+    const addSchedule = (name: string) => {
+      const added = runRoll(
+        ["schedule", "add", "汇总", "--name", name, "--every", "1h", "--cwd", workspace, "--json"],
+        workspace,
+        { env },
+      );
+      assert.equal(added.status, 0, added.stderr);
+      return (JSON.parse(added.stdout) as { id: string }).id;
+    };
+    const queuedScheduleId = addSchedule("排队");
+    const queued = runRoll(["schedule", "run-now", queuedScheduleId, "--json"], workspace, { env });
     assert.equal(queued.status, 0, queued.stderr);
-    const invocation = JSON.parse(queued.stdout) as InvocationJson;
-    assert.equal(invocation.status, "pending");
-
-    const cancelled = runRoll(["schedule", "cancel", invocation.id, "--json"], workspace, { env });
+    const pending = JSON.parse(queued.stdout) as InvocationJson;
+    assert.equal(pending.status, "pending");
+    const cancelled = runRoll(["schedule", "cancel", pending.id, "--json"], workspace, { env });
     assert.equal(cancelled.status, 0, cancelled.stderr);
     const after = JSON.parse(cancelled.stdout) as InvocationJson & { killed: boolean };
     assert.equal(after.status, "failed");
     assert.match(after.error ?? "", /已由用户取消/u);
     assert.equal(after.killed, false);
-
-    const again = runRoll(["schedule", "cancel", invocation.id], workspace, { env });
+    const again = runRoll(["schedule", "cancel", pending.id], workspace, { env });
     assert.equal(again.status, 1);
     assert.match(again.stderr, /终态/u);
 
-    const shown = runRoll(["schedule", "show", created.id, "--json"], workspace, { env });
-    assert.equal((JSON.parse(shown.stdout) as { status: string }).status, "active");
+    sleeper = spawn(process.execPath, ["-e", "setTimeout(() => {}, 60000)"], { stdio: "ignore" });
+    await delay(300);
+    const sleeperPid = sleeper.pid;
+    assert.ok(sleeperPid);
+    const sleeperToken = readProcessStartToken(sleeperPid);
+    assert.ok(sleeperToken, "需要能读取子进程的 OS 启动身份");
+    const runningScheduleId = addSchedule("运行中");
+    const unknownScheduleId = addSchedule("不可验证");
+    const store = new ScheduleStore(resolve(workspace, "scheduler"), {
+      executorLiveness: probeExecutorLiveness,
+    });
+    const seedRunning = (scheduleId: string, executor: { pid: number; startToken: string }) => {
+      const manual = store.enqueueManualInvocation(scheduleId);
+      const claim = store.claimPendingInvocation(manual.id, "e2e");
+      assert.ok(claim);
+      store.beginInvocation(manual.id, claim.ownershipToken, Date.now(), executor);
+      return manual.id;
+    };
+    const runningId = seedRunning(runningScheduleId, { pid: sleeperPid, startToken: sleeperToken });
+    const unknownId = seedRunning(unknownScheduleId, {
+      pid: process.pid,
+      startToken: "not-a-token",
+    });
+    store.close();
+
+    const refused = runRoll(["schedule", "cancel", runningId], workspace, { env });
+    assert.equal(refused.status, 1);
+    assert.match(refused.stderr, /--kill/u);
+    assert.equal(isProcessAlive(sleeperPid), true);
+
+    const killedRun = runRoll(["schedule", "cancel", runningId, "--kill", "--json"], workspace, {
+      env,
+    });
+    assert.equal(killedRun.status, 0, killedRun.stderr);
+    const killedJson = JSON.parse(killedRun.stdout) as InvocationJson & { killed: boolean };
+    assert.equal(killedJson.status, "failed");
+    assert.equal(killedJson.killed, true);
+    await once(sleeper, "exit");
+    assert.equal(isProcessAlive(sleeperPid), false);
+
+    const unknownRefused = runRoll(["schedule", "cancel", unknownId, "--kill"], workspace, { env });
+    assert.equal(unknownRefused.status, 1);
+    assert.match(unknownRefused.stderr, /--abandon/u);
+    const stillRunning = runRoll(["schedule", "runs", unknownScheduleId, "--json"], workspace, {
+      env,
+    });
+    assert.equal((JSON.parse(stillRunning.stdout) as InvocationJson[])[0]?.status, "running");
+
+    const abandoned = runRoll(["schedule", "cancel", unknownId, "--abandon", "--json"], workspace, {
+      env,
+    });
+    assert.equal(abandoned.status, 0, abandoned.stderr);
+    const abandonedJson = JSON.parse(abandoned.stdout) as InvocationJson & { abandoned: boolean };
+    assert.equal(abandonedJson.status, "failed");
+    assert.equal(abandonedJson.abandoned, true);
+    assert.match(abandonedJson.error ?? "", /--abandon/u);
   } finally {
+    if (sleeper !== undefined && sleeper.exitCode === null && sleeper.signalCode === null) {
+      sleeper.kill("SIGKILL");
+    }
     rmSync(workspace, { recursive: true, force: true });
   }
 });

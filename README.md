@@ -275,7 +275,7 @@ roll schedule add <prompt> --name <n> --every <30m>   登记定时任务（--cwd
 roll schedule list|show|remove|pause|resume <id>      管理定时任务
 roll schedule run-now <id> [--inline]                 手动触发一次
 roll schedule runs <id>                               查看历次运行与失败原因
-roll schedule cancel <invocation-id> [--kill]         取消排队中/运行中的一次运行
+roll schedule cancel <invocation-id> [--kill|--abandon]  取消排队中的一次运行；运行中的需 --kill 并确认退出
 roll schedule status                                  daemon 状态与任务统计
 roll schedule daemon --foreground                     前台运行 daemon
 roll schedule service install|uninstall|status        安装为用户级常驻服务

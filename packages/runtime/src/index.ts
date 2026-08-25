@@ -113,6 +113,7 @@ export {
 } from "./scheduler/trigger.ts";
 export type { TriggerKind, TriggerSpec } from "./scheduler/trigger.ts";
 export {
+  CANCEL_INVOCATION_OUTCOMES,
   EXECUTOR_LIVENESS,
   INVOCATION_FAILURE_OUTCOMES,
   INVOCATION_LIVE_STATUSES,
@@ -124,6 +125,8 @@ export {
   ScheduleStoreError,
 } from "./scheduler/types.ts";
 export type {
+  CancelInvocationOptions,
+  CancelInvocationOutcome,
   ClaimedInvocation,
   CompleteInvocationInput,
   CompleteInvocationStatus,

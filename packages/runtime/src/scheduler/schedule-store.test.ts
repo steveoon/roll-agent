@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { ScheduleStore } from "./schedule-store.ts";
 import {
+  CANCEL_INVOCATION_OUTCOMES,
   INVOCATION_FAILURE_OUTCOMES,
   INVOCATION_MODES,
   INVOCATION_STATUSES,
@@ -745,37 +746,88 @@ test("同一 schedule 同一时刻只有一次运行：manual 触发在运行中
   }
 });
 
-test("cancelInvocation 把 live 行置为终态并作废 token，终态行不能再取消", () => {
+test("cancelInvocation：pending/claimed 直接取消；running 必须探活 dead，alive/unknown 拒绝，abandon 强制", () => {
   const dir = tempDir();
   try {
-    const store = new ScheduleStore(dir);
+    let liveness: "alive" | "dead" | "unknown" = "alive";
+    const store = new ScheduleStore(dir, { executorLiveness: () => liveness });
     const created = store.createSchedule(sampleInput({ fireImmediately: true }), NOW);
     const claim = store.claimDue({ workerId: "d", nowMs: NOW, limit: 1 })[0];
     assert.ok(claim);
-    store.beginInvocation(claim.invocation.id, claim.ownershipToken, NOW + 1, {
-      pid: 1,
-      startToken: "pst-v2:a",
+    assert.equal(
+      store.cancelInvocation(claim.invocation.id, "取消未启动的 claim", NOW + 1),
+      CANCEL_INVOCATION_OUTCOMES.cancelled,
+    );
+    assert.equal(
+      store.beginInvocation(claim.invocation.id, claim.ownershipToken, NOW + 2, {
+        pid: 1,
+        startToken: "pst-v2:a",
+      }),
+      undefined,
+    );
+    assert.equal(
+      store.cancelInvocation(claim.invocation.id, "again", NOW + 3),
+      CANCEL_INVOCATION_OUTCOMES.terminal,
+    );
+    assert.equal(
+      store.cancelInvocation("missing", "x", NOW + 3),
+      CANCEL_INVOCATION_OUTCOMES.notFound,
+    );
+
+    const queued = store.enqueueManualInvocation(created.id, NOW + 4);
+    assert.equal(
+      store.cancelInvocation(queued.id, "取消排队", NOW + 5),
+      CANCEL_INVOCATION_OUTCOMES.cancelled,
+    );
+    assert.equal(store.getInvocation(queued.id)?.status, INVOCATION_STATUSES.failed);
+
+    const running = store.enqueueManualInvocation(created.id, NOW + 6);
+    const runningClaim = store.claimPendingInvocation(running.id, "inline", NOW + 7);
+    assert.ok(runningClaim);
+    store.beginInvocation(running.id, runningClaim.ownershipToken, NOW + 8, {
+      pid: 4242,
+      startToken: "pst-v2:b",
     });
-    assert.equal(store.cancelInvocation(claim.invocation.id, "已由用户取消", NOW + 2), true);
-    const cancelled = store.getInvocation(claim.invocation.id);
-    assert.equal(cancelled?.status, INVOCATION_STATUSES.failed);
-    assert.equal(cancelled?.error, "已由用户取消");
-    assert.equal(store.getSchedule(created.id)?.status, SCHEDULE_STATUSES.active);
-    assert.equal(store.getSchedule(created.id)?.lastError, undefined);
+    assert.equal(
+      store.cancelInvocation(running.id, "cancel", NOW + 9),
+      CANCEL_INVOCATION_OUTCOMES.executorAlive,
+    );
+    assert.equal(store.getInvocation(running.id)?.status, INVOCATION_STATUSES.running);
+    liveness = "unknown";
+    assert.equal(
+      store.cancelInvocation(running.id, "cancel", NOW + 10),
+      CANCEL_INVOCATION_OUTCOMES.executorUnknown,
+    );
+    assert.equal(store.findLiveRun(created.id)?.id, running.id);
+    liveness = "dead";
+    assert.equal(
+      store.cancelInvocation(running.id, "已确认退出", NOW + 11),
+      CANCEL_INVOCATION_OUTCOMES.cancelled,
+    );
     assert.equal(
       store.completeInvocation({
-        id: claim.invocation.id,
-        ownershipToken: claim.ownershipToken,
+        id: running.id,
+        ownershipToken: runningClaim.ownershipToken,
         status: INVOCATION_STATUSES.completed,
-        nowMs: NOW + 3,
+        nowMs: NOW + 12,
       }),
       false,
     );
-    assert.equal(store.cancelInvocation(claim.invocation.id, "again", NOW + 4), false);
-    assert.equal(store.cancelInvocation("missing", "x", NOW + 4), false);
-    const queued = store.enqueueManualInvocation(created.id, NOW + 5);
-    assert.equal(store.cancelInvocation(queued.id, "取消排队", NOW + 6), true);
-    assert.equal(store.getInvocation(queued.id)?.status, INVOCATION_STATUSES.failed);
+    assert.equal(store.getSchedule(created.id)?.status, SCHEDULE_STATUSES.active);
+    assert.equal(store.getSchedule(created.id)?.lastError, undefined);
+
+    const abandoned = store.enqueueManualInvocation(created.id, NOW + 13);
+    const abandonedClaim = store.claimPendingInvocation(abandoned.id, "inline", NOW + 14);
+    assert.ok(abandonedClaim);
+    store.beginInvocation(abandoned.id, abandonedClaim.ownershipToken, NOW + 15, {
+      pid: 4343,
+      startToken: "pst-v2:c",
+    });
+    liveness = "unknown";
+    assert.equal(
+      store.cancelInvocation(abandoned.id, "abandon", NOW + 16, { abandon: true }),
+      CANCEL_INVOCATION_OUTCOMES.cancelled,
+    );
     store.close();
   } finally {
     rmSync(dir, { recursive: true, force: true });

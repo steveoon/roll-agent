@@ -145,7 +145,7 @@ schema 升到 v2（`schedules.authority_digest`、`invocations.max_attempts / ex
 第三轮（kai 二审，High · confirmed：manual run-now 绕过同 schedule 单例约束）：
 
 - 单例门禁进账本事务：`claimPendingInvocation` 的 UPDATE 带 `NOT EXISTS 其他 claimed/running`；`claimDue` 对 pending / retry / 过期行同样检查 `hasOtherLiveRunInTransaction`。manual 触发在运行中排队，`run-now --inline` 被挡时删掉刚入队的行并退出 1；不提供 `--force`
-- 人工出口：`roll schedule cancel <invocation-id> [--kill]`（`cancelInvocation` 置终态并作废 token；`--kill` 经身份校验后向进程组 SIGKILL），用于 liveness 永久 unknown 的吸收态
+- 人工出口：`roll schedule cancel <invocation-id>`。kai 三审指出首版对 running 行 fail-open（先置终态再可选 kill）。改为：pending / retry / 未 begin 的 claimed 直接取消；running 行由 `cancelInvocation` 在事务内探活，alive → `executor-alive`（CLI 要求 `--kill`，kill 后轮询确认 dead 再取消），unknown → `executor-unknown`（只能显式 `--abandon`，命名与文案标明危险），dead → 取消。单例只在确认退出或显式放弃时释放
 - exec 以进程组运行（POSIX `detached` + `kill(-pid)`），`maxRunMs` / 孤儿终止覆盖后代进程；文档改口：保证「不会同时运行两个可验证存活的 exec 进程」，不承诺 exactly-once
 - 待拍板（产品取舍，未改）：authority digest 只覆盖 `runtime.approval` / `runtime.shell`，不覆盖 Agent / tool metadata；scheduled run 创建的 Thread 不随账本清理
 

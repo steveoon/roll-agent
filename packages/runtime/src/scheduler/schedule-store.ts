@@ -12,6 +12,7 @@ import {
   type TriggerSpec,
 } from "./trigger.ts";
 import {
+  CANCEL_INVOCATION_OUTCOMES,
   EXECUTOR_LIVENESS,
   INVOCATION_FAILURE_OUTCOMES,
   INVOCATION_LIVE_STATUSES,
@@ -21,6 +22,8 @@ import {
   SCHEDULE_STATUSES,
   SCHEDULE_STORE_ERROR_CODES,
   ScheduleStoreError,
+  type CancelInvocationOptions,
+  type CancelInvocationOutcome,
   type ClaimedInvocation,
   type CompleteInvocationInput,
   type CreateScheduleInput,
@@ -576,19 +579,35 @@ export class ScheduleStore {
     return result.changes === 1;
   }
 
-  cancelInvocation(id: string, reason: string, nowMs: number = Date.now()): boolean {
+  cancelInvocation(
+    id: string,
+    reason: string,
+    nowMs: number = Date.now(),
+    options: CancelInvocationOptions = {},
+  ): CancelInvocationOutcome {
     return this.transaction(() => {
-      const row = this.db.prepare("SELECT status FROM invocations WHERE id = ?").get(id) as
-        | { readonly status: string }
+      const row = this.db.prepare("SELECT * FROM invocations WHERE id = ?").get(id) as
+        | InvocationRow
         | undefined;
       if (row === undefined || !isInvocationStatus(row.status)) {
-        return false;
+        return CANCEL_INVOCATION_OUTCOMES.notFound;
       }
       if (!(INVOCATION_LIVE_STATUSES as readonly InvocationStatus[]).includes(row.status)) {
-        return false;
+        return CANCEL_INVOCATION_OUTCOMES.terminal;
+      }
+      if (row.status === INVOCATION_STATUSES.running && options.abandon !== true) {
+        const executor = toExecutorIdentity(row);
+        const liveness =
+          executor === undefined ? EXECUTOR_LIVENESS.unknown : this.executorLiveness(executor);
+        if (liveness === EXECUTOR_LIVENESS.alive) {
+          return CANCEL_INVOCATION_OUTCOMES.executorAlive;
+        }
+        if (liveness === EXECUTOR_LIVENESS.unknown) {
+          return CANCEL_INVOCATION_OUTCOMES.executorUnknown;
+        }
       }
       this.finishInvocationAsFailedInTransaction(id, reason, nowMs);
-      return true;
+      return CANCEL_INVOCATION_OUTCOMES.cancelled;
     });
   }
 

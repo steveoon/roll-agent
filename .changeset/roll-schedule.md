@@ -10,4 +10,4 @@
 - 配置新增 `scheduler.data-dir` / `max-schedules` / `max-concurrent-runs`
 - 安全边界：exec 子进程记录 PID + OS 启动身份，lease 过期只在证实旧进程已退出后才重跑；登记时记录 `runtime.approval` / `runtime.shell` 权限摘要，漂移即暂停并要求 `resume` 重新授权；ownership token 与账本路径读取后立即从子进程 env 清除
 - 运维：daemon / service 显式固化 `--data-dir` 与 `--max-concurrent-runs`；停止时 10 秒 grace 后 SIGKILL；单次运行超过 1 小时强制终止；运行记录按每任务 100 条 / 30 天保留；`--every` 上限 365 天；`run-now --inline` 单次尝试、失败退出码 1；`bin/roll` 对 `schedule` 自动启用 `node:sqlite`
-- 单例约束：同一任务同一时刻只运行一次（scheduled 与 manual 触发共用账本事务内门禁）；`roll schedule cancel <invocation-id> [--kill]` 提供人工终态出口；exec 以进程组运行，强制终止覆盖其后代进程（POSIX）
+- 单例约束：同一任务同一时刻只运行一次（scheduled 与 manual 触发共用账本事务内门禁）；`roll schedule cancel <invocation-id>` 提供人工终态出口（运行中的记录必须 `--kill` 并确认 exec 进程退出后才释放单例，不可验证时只能显式 `--abandon`）；exec 以进程组运行，强制终止覆盖其后代进程（POSIX）
