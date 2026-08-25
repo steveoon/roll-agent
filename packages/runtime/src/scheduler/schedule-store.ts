@@ -11,15 +11,21 @@ import {
   type TriggerSpec,
 } from "./trigger.ts";
 import {
+  EXECUTOR_LIVENESS,
   INVOCATION_FAILURE_OUTCOMES,
   INVOCATION_MODES,
   INVOCATION_STATUSES,
+  INVOCATION_TERMINAL_STATUSES,
   SCHEDULE_STATUSES,
   SCHEDULE_STORE_ERROR_CODES,
   ScheduleStoreError,
   type ClaimedInvocation,
   type CompleteInvocationInput,
   type CreateScheduleInput,
+  type EnqueueManualInvocationOptions,
+  type ExecutorIdentity,
+  type ExecutorLivenessProbe,
+  type FailInvocationOptions,
   type InvocationFailureOutcome,
   type InvocationMode,
   type InvocationRecord,
@@ -28,14 +34,18 @@ import {
   type ScheduleStatus,
 } from "./types.ts";
 
-const SCHEMA_VERSION = 1;
+const SCHEMA_VERSION = 2;
 const BUSY_TIMEOUT_MS = 15_000;
+const TERMINAL_STATUS_PLACEHOLDERS = INVOCATION_TERMINAL_STATUSES.map(() => "?").join(", ");
 
 export interface ScheduleStoreOptions {
   readonly maxSchedules?: number;
   readonly claimLeaseMs?: number;
   readonly retryBudget?: number;
   readonly retryBackoffMs?: number;
+  readonly executorLiveness?: ExecutorLivenessProbe;
+  readonly invocationRetentionPerSchedule?: number;
+  readonly invocationRetentionMs?: number;
 }
 
 interface ScheduleRow {
@@ -45,6 +55,7 @@ interface ScheduleRow {
   readonly cwd: string;
   readonly trigger_json: string;
   readonly status: string;
+  readonly authority_digest: string | null;
   readonly next_run_at: number | null;
   readonly last_run_at: number | null;
   readonly last_error: string | null;
@@ -59,6 +70,9 @@ interface InvocationRow {
   readonly status: string;
   readonly scheduled_for: number;
   readonly attempt: number;
+  readonly max_attempts: number;
+  readonly executor_pid: number | null;
+  readonly executor_start_token: string | null;
   readonly claimed_by: string | null;
   readonly ownership_token: string | null;
   readonly lease_until: number | null;
@@ -94,6 +108,12 @@ function parsePendingActions(json: string): readonly string[] {
   }
 }
 
+function toExecutorIdentity(row: InvocationRow): ExecutorIdentity | undefined {
+  return row.executor_pid !== null && row.executor_start_token !== null
+    ? { pid: row.executor_pid, startToken: row.executor_start_token }
+    : undefined;
+}
+
 function toInvocationRecord(row: InvocationRow): InvocationRecord {
   if (!isInvocationMode(row.mode) || !isInvocationStatus(row.status)) {
     throw new ScheduleStoreError(
@@ -108,6 +128,8 @@ function toInvocationRecord(row: InvocationRow): InvocationRecord {
     status: row.status,
     scheduledForMs: row.scheduled_for,
     attempt: row.attempt,
+    maxAttempts: row.max_attempts,
+    executor: toExecutorIdentity(row),
     claimedBy: row.claimed_by ?? undefined,
     leaseUntilMs: row.lease_until ?? undefined,
     retryAtMs: row.retry_at ?? undefined,
@@ -145,6 +167,7 @@ function toScheduleRecord(row: ScheduleRow): ScheduleRecord {
     cwd: row.cwd,
     trigger: parseTriggerJson(row.trigger_json),
     status: row.status,
+    authorityDigest: row.authority_digest ?? undefined,
     nextRunAtMs: row.next_run_at ?? undefined,
     lastRunAtMs: row.last_run_at ?? undefined,
     lastError: row.last_error ?? undefined,
@@ -189,12 +212,20 @@ export class ScheduleStore {
   private readonly claimLeaseMs: number;
   private readonly retryBudget: number;
   private readonly retryBackoffMs: number;
+  private readonly executorLiveness: ExecutorLivenessProbe;
+  private readonly invocationRetentionPerSchedule: number;
+  private readonly invocationRetentionMs: number;
 
   constructor(dir: string, options: ScheduleStoreOptions = {}) {
     this.maxSchedules = options.maxSchedules ?? 50;
     this.claimLeaseMs = options.claimLeaseMs ?? SCHEDULER_LIMITS.claimLeaseMs;
     this.retryBudget = options.retryBudget ?? SCHEDULER_LIMITS.retryBudget;
     this.retryBackoffMs = options.retryBackoffMs ?? SCHEDULER_LIMITS.retryBackoffMs;
+    this.executorLiveness = options.executorLiveness ?? (() => EXECUTOR_LIVENESS.unknown);
+    this.invocationRetentionPerSchedule =
+      options.invocationRetentionPerSchedule ?? SCHEDULER_LIMITS.invocationRetentionPerSchedule;
+    this.invocationRetentionMs =
+      options.invocationRetentionMs ?? SCHEDULER_LIMITS.invocationRetentionMs;
     const resolved = expandTilde(dir);
     if (!existsSync(resolved)) {
       mkdirSync(resolved, { recursive: true, mode: 0o700 });
@@ -238,6 +269,7 @@ export class ScheduleStore {
            cwd TEXT NOT NULL,
            trigger_json TEXT NOT NULL,
            status TEXT NOT NULL CHECK (status IN ('active', 'paused')),
+           authority_digest TEXT,
            next_run_at INTEGER,
            last_run_at INTEGER,
            last_error TEXT,
@@ -251,6 +283,9 @@ export class ScheduleStore {
            status TEXT NOT NULL CHECK (status IN ('pending', 'claimed', 'running', 'retry', 'completed', 'needs_confirmation', 'failed')),
            scheduled_for INTEGER NOT NULL,
            attempt INTEGER NOT NULL DEFAULT 0,
+           max_attempts INTEGER NOT NULL DEFAULT ${String(SCHEDULER_LIMITS.retryBudget)},
+           executor_pid INTEGER,
+           executor_start_token TEXT,
            claimed_by TEXT,
            ownership_token TEXT,
            lease_until INTEGER,
@@ -269,8 +304,36 @@ export class ScheduleStore {
          CREATE INDEX IF NOT EXISTS idx_invocations_live
            ON invocations (schedule_id) WHERE status IN ('pending', 'claimed', 'running', 'retry');`,
       );
+      if (versionRow.user_version < SCHEMA_VERSION) {
+        this.addMissingColumns();
+      }
       this.db.exec(`PRAGMA user_version = ${String(SCHEMA_VERSION)};`);
     });
+  }
+
+  private addMissingColumns(): void {
+    const additions = [
+      { table: "schedules", column: "authority_digest", definition: "TEXT" },
+      {
+        table: "invocations",
+        column: "max_attempts",
+        definition: `INTEGER NOT NULL DEFAULT ${String(SCHEDULER_LIMITS.retryBudget)}`,
+      },
+      { table: "invocations", column: "executor_pid", definition: "INTEGER" },
+      { table: "invocations", column: "executor_start_token", definition: "TEXT" },
+    ] as const;
+    for (const addition of additions) {
+      const existing = (
+        this.db.prepare(`PRAGMA table_info(${addition.table})`).all() as Array<{
+          readonly name: string;
+        }>
+      ).map((column) => column.name);
+      if (!existing.includes(addition.column)) {
+        this.db.exec(
+          `ALTER TABLE ${addition.table} ADD COLUMN ${addition.column} ${addition.definition}`,
+        );
+      }
+    }
   }
 
   private transaction<T>(work: () => T): T {
@@ -303,8 +366,9 @@ export class ScheduleStore {
       this.db
         .prepare(
           `INSERT INTO schedules
-             (id, name, prompt, cwd, trigger_json, status, next_run_at, created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+             (id, name, prompt, cwd, trigger_json, status, authority_digest, next_run_at,
+              created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         )
         .run(
           id,
@@ -313,12 +377,20 @@ export class ScheduleStore {
           valid.cwd,
           JSON.stringify(valid.trigger),
           SCHEDULE_STATUSES.active,
+          input.authorityDigest ?? null,
           nextRunAt,
           nowMs,
           nowMs,
         );
       return this.requireSchedule(id);
     });
+  }
+
+  setAuthorityDigest(id: string, digest: string, nowMs: number = Date.now()): boolean {
+    const result = this.db
+      .prepare("UPDATE schedules SET authority_digest = ?, updated_at = ? WHERE id = ?")
+      .run(digest, nowMs, id);
+    return result.changes === 1;
   }
 
   getSchedule(id: string): ScheduleRecord | undefined {
@@ -347,7 +419,12 @@ export class ScheduleStore {
     return result.changes === 1;
   }
 
-  enqueueManualInvocation(scheduleId: string, nowMs: number = Date.now()): InvocationRecord {
+  enqueueManualInvocation(
+    scheduleId: string,
+    nowMs: number = Date.now(),
+    options: EnqueueManualInvocationOptions = {},
+  ): InvocationRecord {
+    const maxAttempts = Math.max(1, Math.floor(options.maxAttempts ?? this.retryBudget));
     return this.transaction(() => {
       this.requireSchedule(scheduleId);
       const id = randomUUID();
@@ -355,8 +432,8 @@ export class ScheduleStore {
         const inserted = this.db
           .prepare(
             `INSERT OR IGNORE INTO invocations
-               (id, schedule_id, mode, status, scheduled_for, attempt, created_at)
-             VALUES (?, ?, ?, ?, ?, 0, ?)`,
+               (id, schedule_id, mode, status, scheduled_for, attempt, max_attempts, created_at)
+             VALUES (?, ?, ?, ?, ?, 0, ?, ?)`,
           )
           .run(
             id,
@@ -364,6 +441,7 @@ export class ScheduleStore {
             INVOCATION_MODES.manual,
             INVOCATION_STATUSES.pending,
             nowMs + offset,
+            maxAttempts,
             nowMs,
           );
         if (inserted.changes === 1) {
@@ -429,11 +507,22 @@ export class ScheduleStore {
         if (claimed.length >= input.limit) {
           break;
         }
+        const executor = toExecutorIdentity(row);
+        if (
+          row.status === INVOCATION_STATUSES.running &&
+          executor !== undefined &&
+          this.executorLiveness(executor) !== EXECUTOR_LIVENESS.dead
+        ) {
+          this.db
+            .prepare("UPDATE invocations SET lease_until = ? WHERE id = ?")
+            .run(input.nowMs + this.claimLeaseMs, row.id);
+          continue;
+        }
         const attempt = row.status === INVOCATION_STATUSES.pending ? 1 : row.attempt + 1;
-        if (attempt > this.retryBudget) {
+        if (attempt > row.max_attempts) {
           this.markTerminalFailureInTransaction(
             row,
-            `重试预算耗尽（${String(this.retryBudget)} 次）：${row.error ?? "exec 未成功完成"}`,
+            `重试预算耗尽（${String(row.max_attempts)} 次）：${row.error ?? "exec 未成功完成"}`,
             input.nowMs,
           );
           continue;
@@ -488,9 +577,9 @@ export class ScheduleStore {
         const inserted = this.db
           .prepare(
             `INSERT OR IGNORE INTO invocations
-               (id, schedule_id, mode, status, scheduled_for, attempt, claimed_by,
+               (id, schedule_id, mode, status, scheduled_for, attempt, max_attempts, claimed_by,
                 ownership_token, lease_until, created_at)
-             VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?, ?)`,
+             VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?)`,
           )
           .run(
             id,
@@ -498,6 +587,7 @@ export class ScheduleStore {
             INVOCATION_MODES.scheduled,
             INVOCATION_STATUSES.claimed,
             row.next_run_at ?? input.nowMs,
+            this.retryBudget,
             input.workerId,
             token,
             input.nowMs + this.claimLeaseMs,
@@ -521,17 +611,21 @@ export class ScheduleStore {
     id: string,
     ownershipToken: string,
     nowMs: number = Date.now(),
+    executor?: ExecutorIdentity,
   ): ClaimedInvocation | undefined {
     const result = this.db
       .prepare(
         `UPDATE invocations
-           SET status = ?, started_at = ?, lease_until = ?
+           SET status = ?, started_at = ?, lease_until = ?, executor_pid = ?,
+               executor_start_token = ?
          WHERE id = ? AND ownership_token = ? AND status = ?`,
       )
       .run(
         INVOCATION_STATUSES.running,
         nowMs,
         nowMs + this.claimLeaseMs,
+        executor?.pid ?? null,
+        executor?.startToken ?? null,
         id,
         ownershipToken,
         INVOCATION_STATUSES.claimed,
@@ -594,6 +688,7 @@ export class ScheduleStore {
     ownershipToken: string,
     error: string,
     nowMs: number = Date.now(),
+    options: FailInvocationOptions = {},
   ): InvocationFailureOutcome {
     return this.transaction(() => {
       const row = this.db.prepare("SELECT * FROM invocations WHERE id = ?").get(id) as
@@ -606,7 +701,7 @@ export class ScheduleStore {
       ) {
         return INVOCATION_FAILURE_OUTCOMES.lostClaim;
       }
-      if (row.attempt >= this.retryBudget) {
+      if (options.terminal === true || row.attempt >= row.max_attempts) {
         this.markTerminalFailureInTransaction(row, error, nowMs);
         return row.mode === INVOCATION_MODES.scheduled
           ? INVOCATION_FAILURE_OUTCOMES.terminalPaused
@@ -642,6 +737,29 @@ export class ScheduleStore {
       )
       .all(scheduleId, limit) as unknown as InvocationRow[];
     return rows.map(toInvocationRecord);
+  }
+
+  pruneInvocations(nowMs: number = Date.now()): number {
+    return this.transaction(() => {
+      const aged = this.db
+        .prepare(
+          `DELETE FROM invocations
+            WHERE status IN (${TERMINAL_STATUS_PLACEHOLDERS})
+              AND finished_at IS NOT NULL AND finished_at < ?`,
+        )
+        .run(...INVOCATION_TERMINAL_STATUSES, nowMs - this.invocationRetentionMs);
+      const excess = this.db
+        .prepare(
+          `DELETE FROM invocations WHERE id IN (
+             SELECT id FROM (
+               SELECT id, ROW_NUMBER() OVER (
+                 PARTITION BY schedule_id ORDER BY created_at DESC, rowid DESC) AS rn
+                 FROM invocations WHERE status IN (${TERMINAL_STATUS_PLACEHOLDERS}))
+              WHERE rn > ?)`,
+        )
+        .run(...INVOCATION_TERMINAL_STATUSES, this.invocationRetentionPerSchedule);
+      return Number(aged.changes) + Number(excess.changes);
+    });
   }
 
   nextWakeAtMs(): number | undefined {

@@ -113,10 +113,12 @@ export {
 } from "./scheduler/trigger.ts";
 export type { TriggerKind, TriggerSpec } from "./scheduler/trigger.ts";
 export {
+  EXECUTOR_LIVENESS,
   INVOCATION_FAILURE_OUTCOMES,
   INVOCATION_LIVE_STATUSES,
   INVOCATION_MODES,
   INVOCATION_STATUSES,
+  INVOCATION_TERMINAL_STATUSES,
   SCHEDULE_STATUSES,
   SCHEDULE_STORE_ERROR_CODES,
   ScheduleStoreError,
@@ -126,6 +128,11 @@ export type {
   CompleteInvocationInput,
   CompleteInvocationStatus,
   CreateScheduleInput,
+  EnqueueManualInvocationOptions,
+  ExecutorIdentity,
+  ExecutorLiveness,
+  ExecutorLivenessProbe,
+  FailInvocationOptions,
   InvocationFailureOutcome,
   InvocationMode,
   InvocationRecord,

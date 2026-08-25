@@ -37,6 +37,22 @@ export const INVOCATION_FAILURE_OUTCOMES = {
 export type InvocationFailureOutcome =
   (typeof INVOCATION_FAILURE_OUTCOMES)[keyof typeof INVOCATION_FAILURE_OUTCOMES];
 
+export const INVOCATION_TERMINAL_STATUSES = [
+  INVOCATION_STATUSES.completed,
+  INVOCATION_STATUSES.needsConfirmation,
+  INVOCATION_STATUSES.failed,
+] as const;
+
+export const EXECUTOR_LIVENESS = { alive: "alive", dead: "dead", unknown: "unknown" } as const;
+export type ExecutorLiveness = (typeof EXECUTOR_LIVENESS)[keyof typeof EXECUTOR_LIVENESS];
+
+export interface ExecutorIdentity {
+  readonly pid: number;
+  readonly startToken: string;
+}
+
+export type ExecutorLivenessProbe = (executor: ExecutorIdentity) => ExecutorLiveness;
+
 export interface ScheduleRecord {
   readonly id: string;
   readonly name: string;
@@ -44,6 +60,7 @@ export interface ScheduleRecord {
   readonly cwd: string;
   readonly trigger: TriggerSpec;
   readonly status: ScheduleStatus;
+  readonly authorityDigest: string | undefined;
   readonly nextRunAtMs: number | undefined;
   readonly lastRunAtMs: number | undefined;
   readonly lastError: string | undefined;
@@ -58,6 +75,8 @@ export interface InvocationRecord {
   readonly status: InvocationStatus;
   readonly scheduledForMs: number;
   readonly attempt: number;
+  readonly maxAttempts: number;
+  readonly executor: ExecutorIdentity | undefined;
   readonly claimedBy: string | undefined;
   readonly leaseUntilMs: number | undefined;
   readonly retryAtMs: number | undefined;
@@ -82,6 +101,15 @@ export interface CreateScheduleInput {
   readonly cwd: string;
   readonly trigger: TriggerSpec;
   readonly fireImmediately?: boolean;
+  readonly authorityDigest?: string;
+}
+
+export interface EnqueueManualInvocationOptions {
+  readonly maxAttempts?: number;
+}
+
+export interface FailInvocationOptions {
+  readonly terminal?: boolean;
 }
 
 export interface CompleteInvocationInput {

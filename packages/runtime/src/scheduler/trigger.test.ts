@@ -26,6 +26,20 @@ test("parseIntervalText 低于下限报错而不是 clamp", () => {
   assert.equal(SCHEDULER_LIMITS.minIntervalMs, 60_000);
 });
 
+test("parseIntervalText 高于上限报错，schema 同样拒绝超出安全整数的 everyMs", () => {
+  assert.equal(parseIntervalText("365d"), SCHEDULER_LIMITS.maxIntervalMs);
+  assert.throws(
+    () => parseIntervalText("366d"),
+    (error: unknown) => error instanceof ScheduleTriggerError && /365/u.test(error.message),
+  );
+  assert.throws(() => parseIntervalText("999999999d"), ScheduleTriggerError);
+  assert.throws(
+    () => parseTriggerJson('{"kind":"interval","everyMs":86400000000000000}'),
+    ScheduleTriggerError,
+  );
+  assert.ok(Number.isSafeInteger(Date.now() + SCHEDULER_LIMITS.maxIntervalMs));
+});
+
 test("parseIntervalText 拒绝无法识别的格式", () => {
   for (const text of ["", "abc", "0m", "2H", "1.5h", "10"]) {
     assert.throws(() => parseIntervalText(text), ScheduleTriggerError);

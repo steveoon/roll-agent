@@ -7,7 +7,11 @@ export type TriggerKind = (typeof TRIGGER_KINDS)[keyof typeof TRIGGER_KINDS];
 export const intervalTriggerSchema = z
   .object({
     kind: z.literal(TRIGGER_KINDS.interval),
-    everyMs: z.number().int().min(SCHEDULER_LIMITS.minIntervalMs),
+    everyMs: z
+      .number()
+      .int()
+      .min(SCHEDULER_LIMITS.minIntervalMs)
+      .max(SCHEDULER_LIMITS.maxIntervalMs),
   })
   .strict();
 
@@ -62,6 +66,11 @@ export function parseIntervalText(text: string): number {
   if (ms < SCHEDULER_LIMITS.minIntervalMs) {
     throw new ScheduleTriggerError(
       `间隔不能小于 ${String(SCHEDULER_LIMITS.minIntervalMs / INTERVAL_UNIT_MS.s)} 秒（收到 ${trimmed}）`,
+    );
+  }
+  if (ms > SCHEDULER_LIMITS.maxIntervalMs) {
+    throw new ScheduleTriggerError(
+      `间隔不能大于 ${String(SCHEDULER_LIMITS.maxIntervalMs / INTERVAL_UNIT_MS.d)} 天（收到 ${trimmed}）`,
     );
   }
   return ms;
