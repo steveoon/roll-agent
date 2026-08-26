@@ -13,7 +13,7 @@ export type SpawnedInvocationSignal = "SIGTERM" | "SIGKILL";
 
 export interface SpawnedInvocation {
   readonly exited: Promise<number | null>;
-  kill(signal?: SpawnedInvocationSignal): KillProcessTreeOutcome | void;
+  kill(signal: SpawnedInvocationSignal): KillProcessTreeOutcome | void;
 }
 
 export type InvocationSpawner = (claim: ClaimedInvocation) => SpawnedInvocation;
@@ -71,7 +71,7 @@ export function createInvocationSpawner(
     });
     return {
       exited,
-      kill: (signal: SpawnedInvocationSignal = "SIGTERM") =>
+      kill: (signal: SpawnedInvocationSignal) =>
         child.pid === undefined
           ? KILL_PROCESS_TREE_OUTCOMES.failed
           : killProcessTree(child.pid, signal),

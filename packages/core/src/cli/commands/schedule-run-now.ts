@@ -2,8 +2,11 @@ import { defineCommand } from "citty";
 import { loadConfig } from "../../config/loader.ts";
 import { createBundledRollInvocation } from "../../companion-host/invocation.ts";
 import { inspectDaemon, DAEMON_LIVENESS } from "../../scheduler-host/daemon-record.ts";
+import type { KillProcessTreeOutcome } from "../../scheduler-host/executor-liveness.ts";
+import { INLINE_EXIT_DECISIONS, decideInlineExit } from "../../scheduler-host/inline-exit.ts";
 import { createSchedulerPaths } from "../../scheduler-host/paths.ts";
 import { createInvocationSpawner } from "../../scheduler-host/spawn-invocation.ts";
+import { installStopSignals } from "../../scheduler-host/stop-signals.ts";
 import { log } from "../utils/output.ts";
 import {
   loadRuntime,
@@ -68,11 +71,14 @@ export default defineCommand({
           dataDir: paths.dataDir,
           logPath: paths.logPath,
         })(claim);
+        let killOutcome: KillProcessTreeOutcome | undefined;
         const forwardStop = () => {
-          handle.kill(process.platform === "win32" ? "SIGKILL" : "SIGTERM");
+          const outcome = handle.kill(process.platform === "win32" ? "SIGKILL" : "SIGTERM");
+          if (typeof outcome === "string") {
+            killOutcome = outcome;
+          }
         };
-        process.once("SIGINT", forwardStop);
-        process.once("SIGTERM", forwardStop);
+        const stop = installStopSignals(forwardStop, forwardStop);
         const renew = setInterval(() => {
           store.renewLease(claim.invocation.id, claim.ownershipToken);
         }, runtime.SCHEDULER_LIMITS.leaseRenewIntervalMs);
@@ -81,14 +87,28 @@ export default defineCommand({
           code = await handle.exited;
         } finally {
           clearInterval(renew);
-          process.off("SIGINT", forwardStop);
-          process.off("SIGTERM", forwardStop);
+          stop.release();
         }
-        store.failInvocation(
-          claim.invocation.id,
-          claim.ownershipToken,
-          `exec 进程退出 code=${code === null ? "null" : String(code)}，未写入执行结果`,
-        );
+        const afterExit = store.getInvocation(claim.invocation.id);
+        const liveness =
+          afterExit?.status === runtime.INVOCATION_STATUSES.running &&
+          afterExit.executor !== undefined
+            ? store.probeExecutor(afterExit.executor)
+            : undefined;
+        const decision = decideInlineExit({ killOutcome, liveness });
+        if (decision === INLINE_EXIT_DECISIONS.fail) {
+          store.failInvocation(
+            claim.invocation.id,
+            claim.ownershipToken,
+            `exec 进程退出 code=${code === null ? "null" : String(code)}，未写入执行结果`,
+          );
+        } else {
+          log.warn(
+            decision === INLINE_EXIT_DECISIONS.holdUnconfirmedKill
+              ? "exec 根进程已退出，但对其进程树的终止未被确认；保留 running，不释放单例（可用 roll schedule cancel --kill 收尾）"
+              : "exec 根进程已退出，但其进程树仍有存活成员或无法探活；保留 running，不释放单例（可用 roll schedule cancel --kill 收尾）",
+          );
+        }
         const final = store.getInvocation(queued.id);
         if (final === undefined) {
           throw new Error(`invocation ${queued.id} 不存在`);
