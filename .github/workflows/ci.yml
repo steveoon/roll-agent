@@ -102,9 +102,12 @@ jobs:
           packages/core/src/scheduler-host/stop-signals.test.ts
           packages/core/src/companion-host/service.test.ts
           packages/core/src/companion-host/identity.test.ts
+          packages/core/src/companion-host/windows-system.test.ts
+          packages/core/src/companion-host/windows-powershell.test.ts
 
       - name: Scheduler E2E smoke (diagnostic, non-blocking)
         continue-on-error: true
+        timeout-minutes: 5
         run: >
           node --experimental-strip-types --experimental-sqlite --test
           packages/core/src/cli/smoke-schedule.e2e.ts
