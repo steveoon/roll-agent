@@ -73,4 +73,4 @@ scheduler:
 - 模型不能自己创建定时任务（没有 `/loop` 或 `roll__schedule` 工具），只有 CLI 管理面。
 - 每次触发都是新线程，不会续接上一次的上下文。
 - 常驻服务仅支持 macOS 与 Windows；Linux 请用 systemd user unit 运行 `roll schedule daemon --foreground`。
-- Windows：exec 子进程与 daemon 的启动身份通过 `%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe`（或 `%ProgramFiles%\PowerShell\7\pwsh.exe`）读取，单次超时 8 秒；Node 22.6–22.12 下手动运行 `roll schedule daemon --foreground` 会经启动器再起一个进程（服务安装路径不受影响，flag 已固化进任务定义），建议 Windows 使用 Node ≥ 22.13。
+- Windows：exec 子进程与 daemon 的启动身份通过 `%SystemRoot%`（或 `%WINDIR%`）`\System32\WindowsPowerShell\v1.0\powershell.exe`（或 `%ProgramFiles%\PowerShell\7\pwsh.exe`）读取，单次超时 8 秒；Node 22.6–22.12 下手动运行 `roll schedule daemon --foreground` 会经启动器再起一个进程（服务安装路径不受影响，flag 已固化进任务定义），建议 Windows 使用 Node ≥ 22.13。

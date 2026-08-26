@@ -274,60 +274,61 @@ test("identity command timeout is 8 s on Windows and 2 s elsewhere", () => {
   );
 });
 
-test("Windows identity ignores a PATH-resolved powershell.exe and runs the trusted SystemRoot executable", () => {
-  if (process.platform === "win32") {
-    return;
-  }
-  const dir = mkdtempSync(join(tmpdir(), "roll-trusted-powershell-"));
-  const shadowDir = join(dir, "shadow");
-  mkdirSync(shadowDir);
-  const trustedName = [
-    "C:\\Windows",
-    "System32",
-    "WindowsPowerShell",
-    "v1.0",
-    "powershell.exe",
-  ].join("\\");
-  const script = (ticks: string) => `#!/bin/sh\necho ${ticks}\n`;
-  writeFileSync(join(shadowDir, "powershell.exe"), script("111111111111111111"), { mode: 0o755 });
-  writeFileSync(join(shadowDir, "pwsh.exe"), script("222222222222222222"), { mode: 0o755 });
-  writeFileSync(join(dir, trustedName), script("637000000000000000"), { mode: 0o755 });
-  const originalCwd = process.cwd();
-  const platformDescriptor = Object.getOwnPropertyDescriptor(process, "platform");
-  const envKeys = [
-    "PATH",
-    "SystemRoot",
-    "SYSTEMROOT",
-    "WINDIR",
-    "ProgramFiles",
-    "PROGRAMFILES",
-  ] as const;
-  const originalEnv = Object.fromEntries(envKeys.map((key) => [key, process.env[key]]));
-  try {
-    process.chdir(dir);
-    for (const key of envKeys) {
-      delete process.env[key];
-    }
-    process.env.PATH = `${shadowDir}:${dir}:${originalEnv.PATH ?? ""}`;
-    process.env.SystemRoot = "C:\\Windows";
-    Object.defineProperty(process, "platform", { configurable: true, value: "win32" });
-    assert.equal(
-      readProcessStartToken(process.pid),
-      `pst-v2:${createHash("sha256").update("win32-v2:637000000000000000").digest("hex")}`,
-    );
-  } finally {
-    if (platformDescriptor !== undefined) {
-      Object.defineProperty(process, "platform", platformDescriptor);
-    }
-    process.chdir(originalCwd);
-    for (const key of envKeys) {
-      const value = originalEnv[key];
-      if (value === undefined) {
+test(
+  "Windows identity ignores a PATH-resolved powershell.exe and runs the trusted SystemRoot executable",
+  { skip: process.platform === "win32" },
+  () => {
+    const dir = mkdtempSync(join(tmpdir(), "roll-trusted-powershell-"));
+    const shadowDir = join(dir, "shadow");
+    mkdirSync(shadowDir);
+    const trustedName = [
+      "C:\\Windows",
+      "System32",
+      "WindowsPowerShell",
+      "v1.0",
+      "powershell.exe",
+    ].join("\\");
+    const script = (ticks: string) => `#!/bin/sh\necho ${ticks}\n`;
+    writeFileSync(join(shadowDir, "powershell.exe"), script("111111111111111111"), { mode: 0o755 });
+    writeFileSync(join(shadowDir, "pwsh.exe"), script("222222222222222222"), { mode: 0o755 });
+    writeFileSync(join(dir, trustedName), script("637000000000000000"), { mode: 0o755 });
+    const originalCwd = process.cwd();
+    const platformDescriptor = Object.getOwnPropertyDescriptor(process, "platform");
+    const envKeys = [
+      "PATH",
+      "SystemRoot",
+      "SYSTEMROOT",
+      "WINDIR",
+      "ProgramFiles",
+      "PROGRAMFILES",
+    ] as const;
+    const originalEnv = Object.fromEntries(envKeys.map((key) => [key, process.env[key]]));
+    try {
+      process.chdir(dir);
+      for (const key of envKeys) {
         delete process.env[key];
-      } else {
-        process.env[key] = value;
       }
+      process.env.PATH = `${shadowDir}:${dir}:${originalEnv.PATH ?? ""}`;
+      process.env.SystemRoot = "C:\\Windows";
+      Object.defineProperty(process, "platform", { configurable: true, value: "win32" });
+      assert.equal(
+        readProcessStartToken(process.pid),
+        `pst-v2:${createHash("sha256").update("win32-v2:637000000000000000").digest("hex")}`,
+      );
+    } finally {
+      if (platformDescriptor !== undefined) {
+        Object.defineProperty(process, "platform", platformDescriptor);
+      }
+      process.chdir(originalCwd);
+      for (const key of envKeys) {
+        const value = originalEnv[key];
+        if (value === undefined) {
+          delete process.env[key];
+        } else {
+          process.env[key] = value;
+        }
+      }
+      rmSync(dir, { recursive: true, force: true });
     }
-    rmSync(dir, { recursive: true, force: true });
-  }
-});
+  },
+);
