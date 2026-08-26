@@ -276,3 +276,73 @@ test("已是 v2 的旧账本（无 executor_probed_at 列）打开时会补列�
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test("daemon 满载（limit ≤ 0）时不花探活名额，也不改变轮转顺序", () => {
+  const dir = mkdtempSync(join(tmpdir(), "roll-probe-budget-"));
+  try {
+    let probes = 0;
+    const store = new ScheduleStore(dir, {
+      executorLiveness: () => {
+        probes += 1;
+        return "dead";
+      },
+    });
+    const dead = seedExpiredRunning(store, "dead", 9999);
+    const expiredAt = NOW + SCHEDULER_LIMITS.claimLeaseMs + 1;
+    assert.deepEqual(store.claimDue({ workerId: "busy", nowMs: expiredAt, limit: 0 }), []);
+    assert.equal(probes, 0);
+    const inspect = new DatabaseSync(join(dir, "schedules.db"));
+    const row = inspect
+      .prepare("SELECT executor_probed_at, lease_until FROM invocations WHERE id = ?")
+      .get(dead) as { executor_probed_at: number | null; lease_until: number };
+    inspect.close();
+    assert.equal(row.executor_probed_at, null);
+    assert.equal(row.lease_until, expiredAt + SCHEDULER_LIMITS.livenessProbeDeferralMs);
+    const claims = store.claimDue({
+      workerId: "free",
+      nowMs: expiredAt + SCHEDULER_LIMITS.livenessProbeDeferralMs + 1,
+      limit: 5,
+    });
+    assert.equal(probes, 1);
+    assert.deepEqual(
+      claims.map((claim) => claim.invocation.id),
+      [dead],
+    );
+    store.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("beginInvocation 写入新 executor 时清零 executor_probed_at，重新崩溃的行不会排在轮转队尾", () => {
+  const dir = mkdtempSync(join(tmpdir(), "roll-probe-budget-"));
+  try {
+    const store = new ScheduleStore(dir, { executorLiveness: () => "dead" });
+    const dead = seedExpiredRunning(store, "crash-twice", 2222);
+    const expiredAt = NOW + SCHEDULER_LIMITS.claimLeaseMs + 1;
+    const reclaimed = store.claimDue({ workerId: "d", nowMs: expiredAt, limit: 5 });
+    assert.deepEqual(
+      reclaimed.map((claim) => claim.invocation.id),
+      [dead],
+    );
+    const read = () => {
+      const inspect = new DatabaseSync(join(dir, "schedules.db"));
+      const row = inspect
+        .prepare("SELECT executor_probed_at FROM invocations WHERE id = ?")
+        .get(dead) as { executor_probed_at: number | null };
+      inspect.close();
+      return row.executor_probed_at;
+    };
+    assert.equal(read(), expiredAt);
+    const claim = reclaimed[0];
+    assert.ok(claim);
+    store.beginInvocation(dead, claim.ownershipToken, expiredAt, {
+      pid: 3333,
+      startToken: "pst-v2:again",
+    });
+    assert.equal(read(), null);
+    store.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

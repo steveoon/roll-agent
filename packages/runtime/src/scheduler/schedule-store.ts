@@ -674,7 +674,7 @@ export class ScheduleStore {
       );
       probeCandidates.sort((a, b) => (a.executor_probed_at ?? -1) - (b.executor_probed_at ?? -1));
       const probeResults = new Map<string, LivenessProbeResult>();
-      let probesLeft = this.maxLivenessProbesPerClaim;
+      let probesLeft = input.limit <= 0 ? 0 : this.maxLivenessProbesPerClaim;
       for (const row of probeCandidates) {
         const executor = toExecutorIdentity(row);
         if (executor === undefined) {
