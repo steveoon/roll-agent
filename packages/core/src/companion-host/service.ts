@@ -3,7 +3,7 @@ import { access, chmod, mkdir, rename, unlink, writeFile } from "node:fs/promise
 import { dirname } from "node:path";
 import { randomUUID } from "node:crypto";
 import { COMPANION_SERVICE_LABEL, WINDOWS_COMPANION_TASK_NAME } from "./constants.ts";
-import { parseWindowsUserSid } from "./identity.ts";
+import { isWindowsServiceAccountSid, parseWindowsUserSid } from "./identity.ts";
 import type { CompanionPaths } from "./paths.ts";
 import type { BundledRollInvocation } from "./invocation.ts";
 import {
@@ -485,6 +485,9 @@ export class WindowsScheduledTaskController implements CompanionServiceControlle
       throw new Error(
         `Unable to identify the current Windows user for the ${this.plan.displayName} task`,
       );
+    }
+    if (isWindowsServiceAccountSid(sid)) {
+      throw new Error(`${this.plan.displayName} must not run as a Windows service account`);
     }
     return sid;
   }

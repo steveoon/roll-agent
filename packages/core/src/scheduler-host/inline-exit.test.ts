@@ -70,6 +70,39 @@ test("inline 信号转发：首个信号按平台转发，重复信号升级为 
   assert.deepEqual(signals, ["SIGTERM", "SIGKILL", "SIGKILL", "SIGKILL"]);
 });
 
+test("inline POSIX 首次停止会在 grace 后自动 SIGKILL，seal 会取消迟到升级", async () => {
+  const escalatedSignals: string[] = [];
+  const escalated = createInlineStopForwarder(
+    {
+      kill: (signal) => {
+        escalatedSignals.push(signal);
+        return "tree-terminated";
+      },
+    },
+    "linux",
+    10,
+  );
+  escalated.forward();
+  await new Promise((resolve) => setTimeout(resolve, 30));
+  assert.deepEqual(escalatedSignals, ["SIGTERM", "SIGKILL"]);
+
+  const sealedSignals: string[] = [];
+  const sealed = createInlineStopForwarder(
+    {
+      kill: (signal) => {
+        sealedSignals.push(signal);
+        return "tree-terminated";
+      },
+    },
+    "darwin",
+    10,
+  );
+  sealed.forward();
+  sealed.seal();
+  await new Promise((resolve) => setTimeout(resolve, 30));
+  assert.deepEqual(sealedSignals, ["SIGTERM"]);
+});
+
 function seedRunningInvocation(store: ScheduleStore): {
   readonly id: string;
   readonly ownershipToken: string;

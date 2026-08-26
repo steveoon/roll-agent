@@ -1,4 +1,4 @@
-import { EXECUTOR_LIVENESS, INVOCATION_STATUSES } from "@roll-agent/runtime";
+import { EXECUTOR_LIVENESS, INVOCATION_STATUSES, SCHEDULER_LIMITS } from "@roll-agent/runtime";
 import type { ExecutorLiveness, ScheduleStore } from "@roll-agent/runtime";
 import { KILL_PROCESS_TREE_OUTCOMES, type KillProcessTreeOutcome } from "./executor-liveness.ts";
 import type { SpawnedInvocation, SpawnedInvocationSignal } from "./spawn-invocation.ts";
@@ -33,9 +33,17 @@ export interface InlineStopForwarder {
 export function createInlineStopForwarder(
   handle: Pick<SpawnedInvocation, "kill">,
   platform: NodeJS.Platform = process.platform,
+  graceMs: number = SCHEDULER_LIMITS.childTerminateGraceMs,
 ): InlineStopForwarder {
   let latest: KillProcessTreeOutcome | undefined;
   let sealed = false;
+  let forceKillTimer: ReturnType<typeof setTimeout> | undefined;
+  const clearForceKill = () => {
+    if (forceKillTimer !== undefined) {
+      clearTimeout(forceKillTimer);
+      forceKillTimer = undefined;
+    }
+  };
   const send = (signal: SpawnedInvocationSignal) => {
     if (sealed) {
       return;
@@ -50,12 +58,24 @@ export function createInlineStopForwarder(
   };
   return {
     forward: () => {
-      send(platform === "win32" ? "SIGKILL" : "SIGTERM");
+      if (platform === "win32") {
+        send("SIGKILL");
+        return;
+      }
+      send("SIGTERM");
+      clearForceKill();
+      forceKillTimer = setTimeout(() => {
+        forceKillTimer = undefined;
+        send("SIGKILL");
+      }, graceMs);
+      forceKillTimer.unref();
     },
     escalate: () => {
+      clearForceKill();
       send("SIGKILL");
     },
     seal: () => {
+      clearForceKill();
       sealed = true;
     },
     killOutcome: () => latest,

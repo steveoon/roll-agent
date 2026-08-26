@@ -15,10 +15,7 @@ import {
   removeDaemonRecord,
   writeDaemonRecord,
 } from "../../scheduler-host/daemon-record.ts";
-import {
-  KILL_PROCESS_TREE_OUTCOMES,
-  terminateExecutor,
-} from "../../scheduler-host/executor-liveness.ts";
+import { terminateExecutor } from "../../scheduler-host/executor-liveness.ts";
 import { SCHEDULER_DAEMON_LOCK_NAME, createSchedulerPaths } from "../../scheduler-host/paths.ts";
 import { createInvocationSpawner } from "../../scheduler-host/spawn-invocation.ts";
 import { installStopSignals } from "../../scheduler-host/stop-signals.ts";
@@ -107,8 +104,7 @@ export default defineCommand({
           dataDir: paths.dataDir,
           logPath: paths.logPath,
         }),
-        terminateExecutor: (executor) =>
-          terminateExecutor(executor) === KILL_PROCESS_TREE_OUTCOMES.tree,
+        terminateExecutor,
         logger,
       });
       logger.info(

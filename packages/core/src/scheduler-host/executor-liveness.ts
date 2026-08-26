@@ -1,9 +1,10 @@
 import { spawnSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { win32 as win32Path } from "node:path";
-import { EXECUTOR_LIVENESS } from "@roll-agent/runtime";
+import { EXECUTOR_LIVENESS, SCHEDULER_LIMITS } from "@roll-agent/runtime";
 import type { ExecutorIdentity, ExecutorLiveness } from "@roll-agent/runtime";
 import {
+  PROCESS_START_TOKEN_VERIFICATION_REASONS,
   PROCESS_START_TOKEN_VERIFICATION_STATUSES,
   isProcessStartToken,
   readProcessStartToken,
@@ -122,8 +123,14 @@ export function probeExecutorLiveness(executor: ExecutorIdentity): ExecutorLiven
   if (!isProcessStartToken(executor.startToken)) {
     return EXECUTOR_LIVENESS.unknown;
   }
-  const rootLiveness =
-    LIVENESS_BY_VERIFICATION[verifyProcessStartToken(executor.pid, executor.startToken).status];
+  const verification = verifyProcessStartToken(executor.pid, executor.startToken);
+  if (
+    verification.status === PROCESS_START_TOKEN_VERIFICATION_STATUSES.MISMATCH &&
+    verification.reason === PROCESS_START_TOKEN_VERIFICATION_REASONS.TOKEN_MISMATCH
+  ) {
+    return EXECUTOR_LIVENESS.dead;
+  }
+  const rootLiveness = LIVENESS_BY_VERIFICATION[verification.status];
   const liveness =
     rootLiveness === EXECUTOR_LIVENESS.alive && isZombie(executor.pid)
       ? EXECUTOR_LIVENESS.dead
@@ -155,6 +162,7 @@ export function readExecutorIdentityWithRetry(
 }
 
 const TASKKILL_TIMEOUT_MS = 5_000;
+const EXECUTOR_EXIT_POLL_MS = 100;
 
 export const KILL_PROCESS_TREE_OUTCOMES = {
   tree: "tree-terminated",
@@ -169,6 +177,20 @@ export interface KillProcessTreeDeps {
   readonly env?: NodeJS.ProcessEnv;
   readonly spawnSync?: typeof spawnSync;
   readonly kill?: (pid: number, signal: NodeJS.Signals) => void;
+}
+
+export interface TerminateExecutorWithGraceOptions {
+  readonly platform?: NodeJS.Platform;
+  readonly graceMs?: number;
+  readonly unrefWait?: boolean;
+  readonly terminate?: (
+    executor: ExecutorIdentity,
+    signal: NodeJS.Signals,
+  ) => KillProcessTreeOutcome;
+  readonly waitForExit?: (
+    executor: ExecutorIdentity,
+    timeoutMs: number,
+  ) => Promise<ExecutorLiveness>;
 }
 
 function resolveWindowsTaskkill(env: NodeJS.ProcessEnv): string | undefined {
@@ -221,4 +243,55 @@ export function terminateExecutor(
     return KILL_PROCESS_TREE_OUTCOMES.failed;
   }
   return killProcessTree(executor.pid, signal, deps);
+}
+
+async function waitForExecutorExit(
+  executor: ExecutorIdentity,
+  timeoutMs: number,
+  unrefWait: boolean,
+): Promise<ExecutorLiveness> {
+  const deadline = Date.now() + timeoutMs;
+  let liveness = probeExecutorLiveness(executor);
+  while (liveness !== EXECUTOR_LIVENESS.dead && Date.now() < deadline) {
+    await new Promise((resolve) => {
+      const timer = setTimeout(
+        resolve,
+        Math.min(EXECUTOR_EXIT_POLL_MS, Math.max(deadline - Date.now(), 0)),
+      );
+      if (unrefWait) {
+        timer.unref();
+      }
+    });
+    liveness = probeExecutorLiveness(executor);
+  }
+  return liveness;
+}
+
+export async function terminateExecutorWithGrace(
+  executor: ExecutorIdentity,
+  options: TerminateExecutorWithGraceOptions = {},
+): Promise<KillProcessTreeOutcome> {
+  const platform = options.platform ?? process.platform;
+  const terminate =
+    options.terminate ??
+    ((target: ExecutorIdentity, signal: NodeJS.Signals) =>
+      terminateExecutor(target, signal, { platform }));
+  if (platform === "win32") {
+    return terminate(executor, "SIGKILL");
+  }
+  const graceful = terminate(executor, "SIGTERM");
+  if (graceful !== KILL_PROCESS_TREE_OUTCOMES.tree) {
+    return terminate(executor, "SIGKILL");
+  }
+  const waitForExit =
+    options.waitForExit ??
+    ((target: ExecutorIdentity, timeoutMs: number) =>
+      waitForExecutorExit(target, timeoutMs, options.unrefWait === true));
+  const liveness = await waitForExit(
+    executor,
+    options.graceMs ?? SCHEDULER_LIMITS.childTerminateGraceMs,
+  );
+  return liveness === EXECUTOR_LIVENESS.dead
+    ? KILL_PROCESS_TREE_OUTCOMES.tree
+    : terminate(executor, "SIGKILL");
 }

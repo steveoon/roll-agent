@@ -10,7 +10,7 @@ import {
 import {
   KILL_PROCESS_TREE_OUTCOMES,
   probeExecutorLiveness,
-  terminateExecutor,
+  terminateExecutorWithGrace,
 } from "../../scheduler-host/executor-liveness.ts";
 import { log } from "../utils/output.ts";
 import {
@@ -25,7 +25,7 @@ const KILL_CONFIRM_TIMEOUT_MS = 5_000;
 const KILL_CONFIRM_POLL_MS = 100;
 
 async function killAndConfirmExit(executor: ExecutorIdentity): Promise<KillResult> {
-  const outcome = terminateExecutor(executor);
+  const outcome = await terminateExecutorWithGrace(executor);
   if (outcome !== KILL_PROCESS_TREE_OUTCOMES.tree) {
     const liveness = probeExecutorLiveness(executor);
     if (liveness === EXECUTOR_LIVENESS.dead) {

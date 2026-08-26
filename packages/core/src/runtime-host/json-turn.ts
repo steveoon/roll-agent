@@ -11,7 +11,17 @@ import type {
 export async function runJsonTurn(
   session: AgentSession,
   message: string,
+  stopSignal?: AbortSignal,
 ): Promise<ChatCommandResult> {
+  const shouldStop = () => stopSignal?.aborted === true;
+  if (shouldStop()) {
+    return {
+      status: "failed",
+      stage: "execute",
+      message: "本轮执行已收到停止请求",
+      sessionId: session.id,
+    };
+  }
   const steps: ChatStepSummary[] = [];
   const stepUsages: ChatStepUsage[] = [];
   const compactions: ChatCompactionSummary[] = [];
@@ -21,66 +31,80 @@ export async function runJsonTurn(
   let totalUsage: ChatTokenUsage | undefined;
   let sessionUsage: ChatTokenUsage | undefined;
   let contextInputTokens: number | undefined;
-
-  for await (const event of session.send(message)) {
-    switch (event.type) {
-      case "text-delta":
-        output += event.delta;
-        break;
-      case "tool-call":
-        steps.push({
-          summary: `${event.agentName}.${event.toolName}`,
-          agentName: event.agentName,
-          toolName: event.toolName,
-        });
-        break;
-      case "confirmation-required":
-        pendingActions.push({
-          summary: `${event.agentName}.${event.toolName}`,
-          agentName: event.agentName,
-          toolName: event.toolName,
-        });
-        session.reject(event.approvalId, "json 模式不支持交互确认");
-        break;
-      case "step-finish":
-        stepUsages.push({
-          finishReason: event.finishReason,
-          ...(event.usage ? { usage: event.usage } : {}),
-        });
-        break;
-      case "message-finish":
-        totalUsage = event.totalUsage;
-        sessionUsage = event.sessionUsage;
-        contextInputTokens = event.contextInputTokens;
-        break;
-      case "context-compacted":
-        compactions.push({
-          reason: event.reason,
-          strategy: event.strategy,
-          removed: event.removed,
-          kept: event.kept,
-          ...(event.truncatedTools !== undefined ? { truncatedTools: event.truncatedTools } : {}),
-          ...(event.beforeInputTokens !== undefined
-            ? { beforeInputTokens: event.beforeInputTokens }
-            : {}),
-          ...(event.checkpointId !== undefined ? { checkpointId: event.checkpointId } : {}),
-          ...(event.checkpointGeneration !== undefined
-            ? { checkpointGeneration: event.checkpointGeneration }
-            : {}),
-          ...(event.checkpointSummaryStatus !== undefined
-            ? { checkpointSummaryStatus: event.checkpointSummaryStatus }
-            : {}),
-        });
-        break;
-      case "turn-cancelled":
-        failure = event.message;
-        break;
-      case "error":
-        failure = event.message;
-        break;
-      default:
-        break;
+  let cancelled = false;
+  const cancel = () => {
+    if (!cancelled) {
+      cancelled = session.cancel();
     }
+  };
+  stopSignal?.addEventListener("abort", cancel, { once: true });
+
+  try {
+    for await (const event of session.send(message)) {
+      switch (event.type) {
+        case "text-delta":
+          output += event.delta;
+          break;
+        case "tool-call":
+          steps.push({
+            summary: `${event.agentName}.${event.toolName}`,
+            agentName: event.agentName,
+            toolName: event.toolName,
+          });
+          break;
+        case "confirmation-required":
+          pendingActions.push({
+            summary: `${event.agentName}.${event.toolName}`,
+            agentName: event.agentName,
+            toolName: event.toolName,
+          });
+          session.reject(event.approvalId, "json 模式不支持交互确认");
+          break;
+        case "step-finish":
+          stepUsages.push({
+            finishReason: event.finishReason,
+            ...(event.usage ? { usage: event.usage } : {}),
+          });
+          break;
+        case "message-finish":
+          totalUsage = event.totalUsage;
+          sessionUsage = event.sessionUsage;
+          contextInputTokens = event.contextInputTokens;
+          break;
+        case "context-compacted":
+          compactions.push({
+            reason: event.reason,
+            strategy: event.strategy,
+            removed: event.removed,
+            kept: event.kept,
+            ...(event.truncatedTools !== undefined ? { truncatedTools: event.truncatedTools } : {}),
+            ...(event.beforeInputTokens !== undefined
+              ? { beforeInputTokens: event.beforeInputTokens }
+              : {}),
+            ...(event.checkpointId !== undefined ? { checkpointId: event.checkpointId } : {}),
+            ...(event.checkpointGeneration !== undefined
+              ? { checkpointGeneration: event.checkpointGeneration }
+              : {}),
+            ...(event.checkpointSummaryStatus !== undefined
+              ? { checkpointSummaryStatus: event.checkpointSummaryStatus }
+              : {}),
+          });
+          break;
+        case "turn-cancelled":
+          failure = event.message;
+          break;
+        case "error":
+          failure = event.message;
+          break;
+        default:
+          break;
+      }
+      if (shouldStop()) {
+        cancel();
+      }
+    }
+  } finally {
+    stopSignal?.removeEventListener("abort", cancel);
   }
 
   const contextWindow = session.getContextWindow();

@@ -28,7 +28,7 @@
 | 文件 | 职责 | 任务 |
 |---|---|---|
 | `packages/core/src/companion-host/service.ts` | 共享服务控制器：新增 XML 渲染 / 编码、`install` 先解析当前用户 SID 再写 XML 并 `/Create /XML`、`uninstall` 清理 XML、错误文案取 `displayName` | T1 |
-| `packages/core/src/companion-host/identity.ts` | 抽出纯函数 `parseWindowsUserSid(stdout)`，供身份检查与服务控制器共用 | T1 |
+| `packages/core/src/companion-host/identity.ts` | 抽出 SID 解析与 service-account 判定，供身份检查与服务控制器共用 | T1 |
 | `packages/core/src/companion-host/paths.ts` / `packages/core/src/scheduler-host/paths.ts` | 各自新增 `windowsTaskXmlPath` | T1 |
 | `packages/core/src/scheduler-host/service.ts` | identity 补 `displayName` / `windowsTaskXmlPath` | T1 |
 | `packages/core/src/registry/process-identity.ts` | Windows 身份：可信绝对路径 PowerShell 列表、平台化超时 | T2 |
@@ -74,6 +74,7 @@ Expected: `status` 只显示 ` M .gitignore`、` M AGENTS.md`、` M CLAUDE.md`�
 - Consumes: `ProcessRunner` / `ProcessInvocation`（`companion-host/process-runner.ts`），`resolveWindowsWhoAmIExecutable`（`windows-system.ts`），`escapeXml`（service.ts 已有）
 - Produces:
   - `parseWindowsUserSid(stdout: string): string | undefined`（identity.ts）
+  - `isWindowsServiceAccountSid(sid: string): boolean`（identity.ts）
   - `ServicePlanIdentity` 新增 `displayName: string`、`windowsTaskXmlPath: string`
   - `WindowsScheduledTaskPlan` 新增 `displayName`、`taskXmlPath`、`whoAmI: ProcessInvocation`、`renderTaskXml(principal: WindowsTaskPrincipal): string`；`create.args` 变为 `["/Create", "/F", "/XML", taskXmlPath, "/TN", taskName]`
   - `encodeWindowsTaskXml(xml: string): Buffer`（UTF-16LE + BOM）
@@ -121,6 +122,10 @@ export function parseWindowsUserSid(stdout: string): string | undefined {
   return WINDOWS_SID_PATTERN.exec(stdout)?.[0]?.toUpperCase();
 }
 
+export function isWindowsServiceAccountSid(sid: string): boolean {
+  return WINDOWS_SERVICE_ACCOUNT_SIDS.has(sid.toUpperCase());
+}
+
 export function createCompanionUserIdentityCheck(
   options: {
     readonly platform?: NodeJS.Platform;
@@ -153,7 +158,7 @@ export function createCompanionUserIdentityCheck(
       if (sid === undefined) {
         throw new Error("Unable to identify the current Windows Companion user");
       }
-      if (WINDOWS_SERVICE_ACCOUNT_SIDS.has(sid)) {
+      if (isWindowsServiceAccountSid(sid)) {
         throw new Error("Roll Companion must not run as a Windows service account");
       }
     };
@@ -374,7 +379,7 @@ Expected: FAIL（类型/导出缺失：`windowsTaskXmlPath`、`renderTaskXml`、
 
 在 `packages/core/src/companion-host/service.ts`：
 
-1. import 增加 `resolveWindowsWhoAmIExecutable`（来自 `./windows-system.ts`）、`parseWindowsUserSid`（来自 `./identity.ts`）、`Buffer`（`node:buffer`）；`ServicePlanIdentity` 增加 `readonly displayName: string;` 与 `readonly windowsTaskXmlPath: string;`；`companionServiceIdentity` 返回对象加 `displayName: "Roll Companion"`、`windowsTaskXmlPath: paths.windowsTaskXmlPath`。
+1. import 增加 `resolveWindowsWhoAmIExecutable`（来自 `./windows-system.ts`）、`parseWindowsUserSid` / `isWindowsServiceAccountSid`（来自 `./identity.ts`）、`Buffer`（`node:buffer`）；`ServicePlanIdentity` 增加 `readonly displayName: string;` 与 `readonly windowsTaskXmlPath: string;`；`companionServiceIdentity` 返回对象加 `displayName: "Roll Companion"`、`windowsTaskXmlPath: paths.windowsTaskXmlPath`。
 2. `MacOsLaunchAgentPlan` 增加 `readonly displayName: string;`，`createMacOsLaunchAgentPlanForIdentity` 返回时带上 `displayName: identity.displayName`；`MacOsLaunchAgentController.runRequired` 的文案改为 `` `Unable to update the per-user macOS ${this.plan.displayName} service` ``。
 3. 替换 Windows plan 部分：
 
@@ -616,6 +621,9 @@ export class WindowsScheduledTaskController implements CompanionServiceControlle
     if (sid === undefined) {
       throw new Error(`Unable to identify the current Windows user for the ${this.plan.displayName} task`);
     }
+    if (isWindowsServiceAccountSid(sid)) {
+      throw new Error(`${this.plan.displayName} must not run as a Windows service account`);
+    }
     return sid;
   }
 
@@ -677,7 +685,7 @@ git commit -m "fix(service): register Windows tasks from XML with restart-on-fai
 
 **Interfaces:**
 - Produces:
-  - `resolveTrustedWindowsPowerShellExecutables(env?: NodeJS.ProcessEnv, exists?: (path: string) => boolean): string[]`（process-identity.ts）
+  - `resolveTrustedWindowsPowerShellExecutables(env?: NodeJS.ProcessEnv, exists?: (path: string) => boolean): readonly string[]`（process-identity.ts）
   - `readExecutorIdentityWithRetry(read?: () => ExecutorIdentity | undefined, attempts?: number): ExecutorIdentity | undefined`（executor-liveness.ts）
 
 影响面提示：`readProcessStartToken` 是 CRITICAL 级 hub（61 个符号、agent lifecycle / install / doctor / update / schedule 共 10 条执行流依赖）。本任务只改 win32 分支与超时常量，macOS / Linux 行为不变；改完必须跑 `packages/core/src/registry/*.test.ts` 全量。
@@ -730,7 +738,7 @@ Expected: FAIL，`resolveTrustedWindowsPowerShellExecutables` 未导出。
 
 `packages/core/src/registry/process-identity.ts`：
 
-1. import 增加 `existsSync`（已有 `readFileSync`，合并为 `import { existsSync, readFileSync } from "node:fs";`）与 `import { win32 } from "node:path";`
+1. import 增加 `existsSync`（已有 `readFileSync`，合并为 `import { existsSync, readFileSync } from "node:fs";`）、`import { win32 } from "node:path";` 与 `import { performance } from "node:perf_hooks";`
 2. 常量改为：
 ```ts
 const PROCESS_IDENTITY_COMMAND_TIMEOUT_MS = 2_000;
@@ -742,9 +750,9 @@ const WINDOWS_DRIVE_PATH_PATTERN = /^[A-Za-z]:[\\/]/u;
 export function resolveTrustedWindowsPowerShellExecutables(
   env: NodeJS.ProcessEnv = process.env,
   exists: (path: string) => boolean = existsSync,
-): string[] {
+): readonly string[] {
   const candidates: string[] = [];
-  const systemRoot = env.SystemRoot ?? env.SYSTEMROOT;
+  const systemRoot = env.SystemRoot ?? env.SYSTEMROOT ?? env.WINDIR;
   if (systemRoot !== undefined && WINDOWS_DRIVE_PATH_PATTERN.test(systemRoot)) {
     candidates.push(
       win32.join(systemRoot, "System32", "WindowsPowerShell", "v1.0", "powershell.exe"),
@@ -764,16 +772,23 @@ function readWindowsProcessStartIdentity(pid: number, version: "v1" | "v2"): str
     `$p = Get-Process -Id ${String(pid)} -ErrorAction Stop; ` +
     "$p.StartTime.ToUniversalTime().Ticks";
   const args = ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", script];
-  const executable = resolveTrustedWindowsPowerShellExecutables()[0];
-  if (executable === undefined) return undefined;
-  const startedAt = runIdentityCommand(executable, args, true);
-  if (startedAt === undefined || !/^\d+$/u.test(startedAt)) return undefined;
-  return version === "v1" ? `win32:${startedAt}` : `win32-v2:${startedAt}`;
+  const deadline = performance.now() + identityCommandTimeoutMs("win32");
+  for (const executable of resolveTrustedWindowsPowerShellExecutables()) {
+    const remainingMs = Math.ceil(deadline - performance.now());
+    if (remainingMs <= 0) {
+      break;
+    }
+    const startedAt = runIdentityCommand(executable, args, true, remainingMs);
+    if (startedAt !== undefined && /^\d+$/u.test(startedAt)) {
+      return version === "v1" ? `win32:${startedAt}` : `win32-v2:${startedAt}`;
+    }
+  }
+  return undefined;
 }
 ```
-（只用第一个存在的候选：探活会在 `claimDue` 的 `BEGIN IMMEDIATE` 事务内执行，`busy_timeout` 是 15 s，两个候选各 8 s 的串行超时会突破这个窗口；`exists` 已经保证了文件存在，不需要第二次回退。）
+（多个可信候选共享单次 8 s 总预算：首个存在但被策略阻止或启动失败时可回退 PowerShell 7，同时不会让 `claimDue` 的 `BEGIN IMMEDIATE` 事务超过原定探活上限。）
 
-5. `runIdentityCommand` 的 `timeout` 改为 `process.platform === "win32" ? WINDOWS_PROCESS_IDENTITY_COMMAND_TIMEOUT_MS : PROCESS_IDENTITY_COMMAND_TIMEOUT_MS`。
+5. `runIdentityCommand` 增加可选 `timeoutMs` 参数；默认仍按平台取值，Windows 候选循环传入剩余总预算。
 
 - [ ] **Step 4: 跑 registry 全量测试**
 
@@ -1333,12 +1348,12 @@ git branch -d fix/schedule-windows
 
 ## 执行偏差记录（2026-08-26，实施后）
 
-- Task 1：`escapeXmlText` 只转义 `& < >`（计划初稿用了会把引号转成 `&quot;` 的 `escapeXml`）；scheduler 侧 Windows plan 测试中 `<Command>` 断言改为平台无关写法（macOS 上 `createBundledRollInvocation` 会用 POSIX `resolve` 处理 Windows 路径）
-- Task 2：`resolveTrustedWindowsPowerShellExecutables` 额外接受 `WINDIR`，只用第一个存在的候选；新增 `identityCommandTimeoutMs(platform)` seam；exec 侧 `readExecutorIdentityWithRetry`。`packages/core/src/config/document-store.test.ts` 原本靠 PATH 上的假 `powershell.exe` 模拟 Windows，正是本轮移除的行为，已改为直接测 `atomicTextFileWriter.write` 的 win32 分支（commit() 路径在模拟 win32 下不再覆盖）；接线回归测试用「cwd 下反斜杠命名的可信文件 + PATH 影子」证明不再走 PATH
+- Task 1：`escapeXmlText` 只转义 `& < >`（计划初稿用了会把引号转成 `&quot;` 的 `escapeXml`）；scheduler 侧 Windows plan 测试中 `<Command>` 断言改为平台无关写法（macOS 上 `createBundledRollInvocation` 会用 POSIX `resolve` 处理 Windows 路径）；Windows controller 在写 XML / 注册任务前复用 service-account SID 门禁
+- Task 2：`resolveTrustedWindowsPowerShellExecutables` 额外接受 `WINDIR`；多个可信候选共享单次 8 s 总预算，首个候选存在但运行失败时回退 PowerShell 7；新增 `identityCommandTimeoutMs(platform)` seam；exec 侧 `readExecutorIdentityWithRetry`。`packages/core/src/config/document-store.test.ts` 原本靠 PATH 上的假 `powershell.exe` 模拟 Windows，正是本轮移除的行为，已改为直接测 `atomicTextFileWriter.write` 的 win32 分支（commit() 路径在模拟 win32 下不再覆盖）；接线回归测试用「cwd 下反斜杠命名的可信文件 + PATH 影子」证明不再走 PATH
 - Task 3：超出计划的部分——`inline-exit.ts`（`decideInlineExit` / `createInlineStopForwarder` / `settleInlineInvocation`）、`SpawnedInvocation.kill(signal)` 改为必填、`installStopSignals(onStop(signal) → abort reason, onRepeat(signal))`、daemon `URGENT_STOP_REASON`（Windows SIGHUP 跳过 grace）、`treeKillUnconfirmed` 最近结果语义之外 inline 侧 `tree-terminated` 粘性 + 退出后封口
 - 计划文件表之外：`packages/runtime/src/scheduler/schedule-store.ts` / `limits.ts` 新增 `maxLivenessProbesPerClaim`（默认 1）与 `livenessProbeDeferralMs`（15 s），`claimDue` 每事务最多探活 1 个过期 running 行；`companion-host/identity.ts` SID 改为取 `whoami` CSV 最后一列
 - Task 5：windows-latest 单测清单扩到 12 个文件（含 `windows-system` / `windows-powershell` / `inline-exit` / `schedule-store-probe-budget`），诊断性 e2e 加 `timeout-minutes: 5`；`process-identity.test.ts` 的 PATH 影子用例在 win32 用 `skip` 而非静默 return
 - Task 6：`pnpm format:check` 在 `dev` 上本来就有 64 个文件不合格（`.gitnexus/` 缓存、`agents/browser-use/src`、`.claude/skills/.../*.mjs` 等，均早于本分支），本分支全部改动文件单独 `prettier --check` 通过；`detect_changes({scope:"compare", base_ref:"dev"})` 两次结果均只触及 Companion-host / Scheduler-host / Registry(win32) / Commands(schedule-*) / runtime scheduler，风险 high 来自 `ScheduleStore.claimDue` 与 `SchedulerDaemon.run`
 - 终审两轮追加：probe 名额按 `executor_probed_at`（新增持久化列）「最久未探活」轮转，`livenessProbeDeferralMs` 15 s 续租跳过行；`cancel --kill` 的 Windows 告警与 SIGHUP → 紧急停止映射分别抽成 `descendantsUnverified`（`scheduler-host/cancel-descendants.ts`）与 `stopReasonFor`（`daemon.ts`）并覆盖平台矩阵；`--json` 输出增加 `unverifiedDescendants`；daemon 增加 `urgentStopSettleMs` 选项并测试「子进程在 settle 窗口内不退出」分支；`schedule-store.test.ts` 的 POSIX 权限用例改用 `{ skip }`；windows-latest 清单再加 `cancel-descendants.test.ts`
-- 未做（记入 spec 待拍板）：W7 登录黑窗（待真机评估 S4U）、W8 后代探测、bash 工具命令自成 session 不在 exec 进程组内、Windows `service stop` 对 detached exec 的补偿终止
-
+- W14 追加：保留 Bash 独立 PGID，由 scheduled exec 的停止信号取消 active turn；daemon maxRun / orphan、cancel 与 inline 都在 POSIX 先 SIGTERM，grace 后自动升级 SIGKILL，避免 exec 被杀后遗留 Bash 与重试并行；PID 启动 token mismatch 不再提升为 descendants，阻断 PID 复用后的误杀
+- 未做（记入 spec 待拍板）：W7 登录黑窗（待真机评估 S4U）、W8 后代探测、Windows `service stop` 对 detached exec 的补偿终止

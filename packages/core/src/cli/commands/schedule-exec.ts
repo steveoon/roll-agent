@@ -7,6 +7,7 @@ import {
 } from "../../scheduler-host/execute-invocation.ts";
 import { readExecutorIdentityWithRetry } from "../../scheduler-host/executor-liveness.ts";
 import { createScheduledTurnRunner } from "../../scheduler-host/run-scheduled-turn.ts";
+import { installStopSignals } from "../../scheduler-host/stop-signals.ts";
 import { log } from "../utils/output.ts";
 import {
   loadRuntime,
@@ -25,6 +26,13 @@ export default defineCommand({
       const execEnv = takeScheduleExecEnv(process.env);
       const runtime = await loadRuntime();
       const store = openScheduleStore(undefined, runtime, { dataDir: execEnv.dataDir });
+      const stop = installStopSignals(
+        (signal) => {
+          log.warn(`收到 ${signal}，正在取消 scheduled turn 并清理工具进程…`);
+          return new Error(`schedule exec received ${signal}`);
+        },
+        (signal) => log.warn(`再次收到 ${signal}，等待父进程在 grace 后强制终止`),
+      );
       try {
         const executor = readExecutorIdentityWithRetry();
         if (executor === undefined) {
@@ -43,7 +51,11 @@ export default defineCommand({
           invocationId: args.invocation,
           ownershipToken: execEnv.ownershipToken,
           executor,
-          runTurn: createScheduledTurnRunner({ config, runtime }),
+          runTurn: createScheduledTurnRunner({
+            config,
+            runtime,
+            stopSignal: stop.controller.signal,
+          }),
         });
         printJson(result);
         if (result.kind === EXECUTE_INVOCATION_KINDS.failed) {
@@ -51,6 +63,7 @@ export default defineCommand({
           process.exitCode = 1;
         }
       } finally {
+        stop.release();
         store.close();
       }
     });

@@ -10,6 +10,7 @@ import {
   probeExecutorLiveness,
   readExecutorIdentityWithRetry,
   terminateExecutor,
+  terminateExecutorWithGrace,
 } from "./executor-liveness.ts";
 
 test("当前进程的 executor identity 探活为 alive", (t) => {
@@ -39,6 +40,50 @@ test("已退出进程的 executor identity 探活为 dead；非法 token 为 unk
     probeExecutorLiveness({ pid: process.pid, startToken: "not-a-token" }),
     EXECUTOR_LIVENESS.unknown,
   );
+});
+
+test("PID 被新进程组复用且启动 token mismatch 时绝不提升为 descendants 或发送信号", async (t) => {
+  if (process.platform === "win32") {
+    t.skip("Windows 没有 POSIX 进程组语义");
+    return;
+  }
+  const { spawn } = await import("node:child_process");
+  const { setTimeout: delay } = await import("node:timers/promises");
+  const { readProcessStartToken } = await import("../registry/process-identity.ts");
+  const child = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], {
+    detached: true,
+    stdio: "ignore",
+  });
+  const pid = child.pid;
+  assert.ok(pid);
+  try {
+    await delay(100);
+    const currentToken = readProcessStartToken(pid);
+    if (currentToken === undefined) {
+      t.skip("当前平台无法读取进程启动身份");
+      return;
+    }
+    const replacement = currentToken.endsWith("0") ? "1" : "0";
+    const staleToken = `${currentToken.slice(0, -1)}${replacement}`;
+    const staleExecutor = { pid, startToken: staleToken };
+    const killed: Array<{ readonly pid: number; readonly signal: NodeJS.Signals }> = [];
+
+    assert.equal(probeExecutorLiveness(staleExecutor), EXECUTOR_LIVENESS.dead);
+    assert.equal(
+      terminateExecutor(staleExecutor, "SIGKILL", {
+        platform: process.platform,
+        kill: (target, signal) => killed.push({ pid: target, signal }),
+      }),
+      KILL_PROCESS_TREE_OUTCOMES.failed,
+    );
+    assert.deepEqual(killed, []);
+    assert.equal(probeExecutorLiveness({ pid, startToken: currentToken }), EXECUTOR_LIVENESS.alive);
+  } finally {
+    try {
+      process.kill(-pid, "SIGKILL");
+    } catch {}
+    await once(child, "exit");
+  }
 });
 
 test("父进程未回收的僵尸子进程探活为 dead（POSIX）", async (t) => {
@@ -185,6 +230,90 @@ test("killProcessTree：POSIX 进程组信号失败时返回 failed，不单独�
   });
   assert.equal(ok, KILL_PROCESS_TREE_OUTCOMES.tree);
   assert.deepEqual(killed[1], [-4242, "SIGTERM"]);
+});
+
+test("terminateExecutorWithGrace：POSIX 先 SIGTERM，grace 内证实退出就不再 SIGKILL", async () => {
+  const signals: NodeJS.Signals[] = [];
+  let waits = 0;
+  const outcome = await terminateExecutorWithGrace(
+    { pid: 4242, startToken: "pst-v2:root" },
+    {
+      platform: "linux",
+      graceMs: 1_000,
+      terminate: (_executor, signal) => {
+        signals.push(signal);
+        return KILL_PROCESS_TREE_OUTCOMES.tree;
+      },
+      waitForExit: async (_executor, timeoutMs) => {
+        waits += 1;
+        assert.equal(timeoutMs, 1_000);
+        return EXECUTOR_LIVENESS.dead;
+      },
+    },
+  );
+
+  assert.equal(outcome, KILL_PROCESS_TREE_OUTCOMES.tree);
+  assert.deepEqual(signals, ["SIGTERM"]);
+  assert.equal(waits, 1);
+});
+
+test("terminateExecutorWithGrace：POSIX grace 后仍存活才重新验身份并升级 SIGKILL", async () => {
+  const signals: NodeJS.Signals[] = [];
+  const outcome = await terminateExecutorWithGrace(
+    { pid: 4242, startToken: "pst-v2:root" },
+    {
+      platform: "darwin",
+      graceMs: 20,
+      terminate: (_executor, signal) => {
+        signals.push(signal);
+        return KILL_PROCESS_TREE_OUTCOMES.tree;
+      },
+      waitForExit: async () => EXECUTOR_LIVENESS.alive,
+    },
+  );
+
+  assert.equal(outcome, KILL_PROCESS_TREE_OUTCOMES.tree);
+  assert.deepEqual(signals, ["SIGTERM", "SIGKILL"]);
+});
+
+test("terminateExecutorWithGrace：SIGTERM 未确认投递时跳过无意义 grace 并立即升级", async () => {
+  const signals: NodeJS.Signals[] = [];
+  const outcome = await terminateExecutorWithGrace(
+    { pid: 4242, startToken: "pst-v2:unknown" },
+    {
+      platform: "linux",
+      terminate: (_executor, signal) => {
+        signals.push(signal);
+        return KILL_PROCESS_TREE_OUTCOMES.failed;
+      },
+      waitForExit: async () => {
+        assert.fail("failed SIGTERM must not consume the cooperative grace window");
+      },
+    },
+  );
+
+  assert.equal(outcome, KILL_PROCESS_TREE_OUTCOMES.failed);
+  assert.deepEqual(signals, ["SIGTERM", "SIGKILL"]);
+});
+
+test("terminateExecutorWithGrace：Windows 保持立即 SIGKILL，不进入 POSIX grace", async () => {
+  const signals: NodeJS.Signals[] = [];
+  const outcome = await terminateExecutorWithGrace(
+    { pid: 4242, startToken: "pst-v2:root" },
+    {
+      platform: "win32",
+      terminate: (_executor, signal) => {
+        signals.push(signal);
+        return KILL_PROCESS_TREE_OUTCOMES.tree;
+      },
+      waitForExit: async () => {
+        assert.fail("Windows termination must not wait for POSIX grace");
+      },
+    },
+  );
+
+  assert.equal(outcome, KILL_PROCESS_TREE_OUTCOMES.tree);
+  assert.deepEqual(signals, ["SIGKILL"]);
 });
 
 test("根进程退出但同进程组后代仍存活 → descendants-alive；整组终止后 → dead（POSIX）", async (t) => {

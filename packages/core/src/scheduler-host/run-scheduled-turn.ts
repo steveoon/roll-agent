@@ -20,6 +20,7 @@ export interface CreateScheduledTurnRunnerInput {
   readonly config: RollConfig;
   readonly runtime: RuntimeModule;
   readonly shellEnv?: NodeJS.ProcessEnv;
+  readonly stopSignal?: AbortSignal;
 }
 
 function mapTurnResult(result: ChatCommandResult, denied: readonly string[]): ScheduledTurnOutcome {
@@ -65,6 +66,9 @@ export function createScheduledTurnRunner(
   input: CreateScheduledTurnRunnerInput,
 ): ScheduledTurnRunner {
   return async (schedule, invocation) => {
+    if (input.stopSignal?.aborted === true) {
+      return { status: SCHEDULED_TURN_STATUSES.failed, error: "本轮执行已收到停止请求" };
+    }
     const currentAuthority = computeAuthorityDigest(input.config);
     if (schedule.authorityDigest !== currentAuthority) {
       return {
@@ -118,7 +122,7 @@ export function createScheduledTurnRunner(
     let session: Awaited<ReturnType<typeof engine.createSession>> | undefined;
     try {
       session = await engine.createSession({ title: `[定时] ${schedule.name}` });
-      const result = await runJsonTurn(session, schedule.prompt);
+      const result = await runJsonTurn(session, schedule.prompt, input.stopSignal);
       const denied = policy.deniedConfirmations.map((item) => `${item.agentName}.${item.toolName}`);
       return mapTurnResult(result, denied);
     } finally {

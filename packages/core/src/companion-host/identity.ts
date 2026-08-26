@@ -21,6 +21,10 @@ export function parseWindowsUserSid(stdout: string): string | undefined {
   return lastField.toUpperCase();
 }
 
+export function isWindowsServiceAccountSid(sid: string): boolean {
+  return WINDOWS_SERVICE_ACCOUNT_SIDS.has(sid.toUpperCase());
+}
+
 export function createCompanionUserIdentityCheck(
   options: {
     readonly platform?: NodeJS.Platform;
@@ -53,7 +57,7 @@ export function createCompanionUserIdentityCheck(
       if (sid === undefined) {
         throw new Error("Unable to identify the current Windows Companion user");
       }
-      if (WINDOWS_SERVICE_ACCOUNT_SIDS.has(sid)) {
+      if (isWindowsServiceAccountSid(sid)) {
         throw new Error("Roll Companion must not run as a Windows service account");
       }
     };

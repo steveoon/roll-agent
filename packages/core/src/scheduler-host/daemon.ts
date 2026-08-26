@@ -4,7 +4,11 @@ import {
   type ExecutorIdentity,
   type ScheduleStore,
 } from "@roll-agent/runtime";
-import { KILL_PROCESS_TREE_OUTCOMES } from "./executor-liveness.ts";
+import {
+  KILL_PROCESS_TREE_OUTCOMES,
+  terminateExecutorWithGrace,
+  type KillProcessTreeOutcome,
+} from "./executor-liveness.ts";
 import type { InvocationSpawner, SpawnedInvocation } from "./spawn-invocation.ts";
 
 export type { SpawnedInvocation } from "./spawn-invocation.ts";
@@ -27,7 +31,10 @@ export interface SchedulerDaemonOptions {
   readonly maxRunMs?: number;
   readonly childTerminateGraceMs?: number;
   readonly urgentStopSettleMs?: number;
-  readonly terminateExecutor?: (executor: ExecutorIdentity) => boolean;
+  readonly terminateExecutor?: (
+    executor: ExecutorIdentity,
+    signal: NodeJS.Signals,
+  ) => KillProcessTreeOutcome;
   readonly platform?: NodeJS.Platform;
 }
 
@@ -35,6 +42,7 @@ interface RunningInvocation {
   readonly ownershipToken: string;
   readonly handle: SpawnedInvocation;
   readonly runTimer: ReturnType<typeof setTimeout>;
+  forceKillTimer: ReturnType<typeof setTimeout> | undefined;
   treeKillUnconfirmed: boolean;
 }
 
@@ -79,9 +87,12 @@ export class SchedulerDaemon {
   private readonly maxRunMs: number;
   private readonly childTerminateGraceMs: number;
   private readonly urgentStopSettleMs: number;
-  private readonly terminateExecutor: ((executor: ExecutorIdentity) => boolean) | undefined;
+  private readonly terminateExecutor:
+    | ((executor: ExecutorIdentity, signal: NodeJS.Signals) => KillProcessTreeOutcome)
+    | undefined;
   private readonly platform: NodeJS.Platform;
   private readonly running = new Map<string, RunningInvocation>();
+  private readonly terminatingOrphans = new Set<string>();
   private wake = Promise.withResolvers<void>();
   private stopped = false;
   private urgentStop = false;
@@ -184,10 +195,32 @@ export class SchedulerDaemon {
     }
     const runTimer = setTimeout(
       () => {
+        if (this.platform === "win32") {
+          this.logger.error(
+            `invocation ${id} 运行超过 ${String(this.maxRunMs)} ms，强制终止 exec 子进程树`,
+          );
+          this.signalChild(id, "SIGKILL");
+          return;
+        }
         this.logger.error(
-          `invocation ${id} 运行超过 ${String(this.maxRunMs)} ms，强制终止 exec 子进程`,
+          `invocation ${id} 运行超过 ${String(this.maxRunMs)} ms，请求 exec 协作停止并清理工具进程`,
         );
-        this.signalChild(id, "SIGKILL");
+        this.signalChild(id, "SIGTERM");
+        const entry = this.running.get(id);
+        if (entry === undefined) {
+          return;
+        }
+        entry.forceKillTimer = setTimeout(() => {
+          if (this.running.get(id) !== entry) {
+            return;
+          }
+          entry.forceKillTimer = undefined;
+          this.logger.error(
+            `invocation ${id} 在 ${String(this.childTerminateGraceMs)} ms grace 内未退出，发送 SIGKILL`,
+          );
+          this.signalChild(id, "SIGKILL");
+        }, this.childTerminateGraceMs);
+        entry.forceKillTimer.unref();
       },
       Math.min(this.maxRunMs, this.maxTimerDelayMs),
     );
@@ -196,6 +229,7 @@ export class SchedulerDaemon {
       ownershipToken: claim.ownershipToken,
       handle,
       runTimer,
+      forceKillTimer: undefined,
       treeKillUnconfirmed: false,
     });
     handle.exited
@@ -215,6 +249,9 @@ export class SchedulerDaemon {
       return;
     }
     clearTimeout(entry.runTimer);
+    if (entry.forceKillTimer !== undefined) {
+      clearTimeout(entry.forceKillTimer);
+    }
     this.running.delete(id);
     if (entry.treeKillUnconfirmed) {
       this.logger.error(
@@ -300,7 +337,8 @@ export class SchedulerDaemon {
   }
 
   private boundOrphans(): void {
-    if (this.terminateExecutor === undefined) {
+    const terminateExecutor = this.terminateExecutor;
+    if (terminateExecutor === undefined) {
       return;
     }
     const cutoff = this.now() - this.maxRunMs;
@@ -314,16 +352,32 @@ export class SchedulerDaemon {
     for (const row of rows) {
       if (
         this.running.has(row.id) ||
+        this.terminatingOrphans.has(row.id) ||
         row.executor === undefined ||
         row.startedAtMs === undefined ||
         row.startedAtMs > cutoff
       ) {
         continue;
       }
-      const killed = this.terminateExecutor(row.executor);
-      this.logger.error(
-        `invocation ${row.id} 的 exec 进程 (pid ${String(row.executor.pid)}) 不属于本 daemon 且运行超过 ${String(this.maxRunMs)} ms，${killed ? "已发送 SIGKILL" : "身份无法确认，未处理"}`,
-      );
+      this.terminatingOrphans.add(row.id);
+      const executor = row.executor;
+      terminateExecutorWithGrace(executor, {
+        platform: this.platform,
+        graceMs: this.childTerminateGraceMs,
+        unrefWait: true,
+        terminate: terminateExecutor,
+      })
+        .then((outcome) => {
+          this.logger.error(
+            `invocation ${row.id} 的 exec 进程 (pid ${String(executor.pid)}) 不属于本 daemon 且运行超过 ${String(this.maxRunMs)} ms，终止结果：${outcome}`,
+          );
+        })
+        .catch((error: unknown) => {
+          this.logger.error(`invocation ${row.id} 的超时孤儿清理失败：${errorMessage(error)}`);
+        })
+        .finally(() => {
+          this.terminatingOrphans.delete(row.id);
+        });
     }
   }
 
@@ -392,6 +446,9 @@ export class SchedulerDaemon {
   private releaseUnconfirmed(): void {
     for (const [id, entry] of this.running) {
       clearTimeout(entry.runTimer);
+      if (entry.forceKillTimer !== undefined) {
+        clearTimeout(entry.forceKillTimer);
+      }
       this.running.delete(id);
       this.logger.error(
         `invocation ${id} 的 exec 子进程退出未确认，lease 到期后由探活决定是否重跑`,

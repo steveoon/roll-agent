@@ -272,7 +272,7 @@ test("停止时先 SIGTERM，超过 grace 仍未退出则 SIGKILL", async () => 
   }
 });
 
-test("子进程运行超过 maxRunMs 时被 SIGKILL 并记为失败", async () => {
+test("POSIX 子进程运行超过 maxRunMs 时先 SIGTERM，grace 后才 SIGKILL", async () => {
   const dir = tempDir();
   try {
     const store = new ScheduleStore(dir);
@@ -285,6 +285,88 @@ test("子进程运行超过 maxRunMs 时被 SIGKILL 并记为失败", async () =
       maxConcurrentRuns: 1,
       logger,
       maxRunMs: 20,
+      childTerminateGraceMs: 20,
+      spawnInvocation: (claim): SpawnedInvocation => {
+        store.beginInvocation(claim.invocation.id, claim.ownershipToken, Date.now());
+        const exit = Promise.withResolvers<number | null>();
+        return {
+          exited: exit.promise,
+          kill: (signal = "SIGTERM") => {
+            signals.push(signal);
+            if (signal === "SIGKILL") {
+              exit.resolve(null);
+            }
+          },
+        };
+      },
+    });
+    assert.equal(daemon.tick(), 1);
+    await new Promise((resolve) => setTimeout(resolve, 80));
+    assert.deepEqual(signals, ["SIGTERM", "SIGKILL"]);
+    assert.equal(daemon.runningCount, 0);
+    assert.equal(store.listInvocations(schedule.id)[0]?.status, INVOCATION_STATUSES.retry);
+    assert.ok(lines.some((line) => /运行超过/u.test(line)));
+    store.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("POSIX maxRun SIGTERM 期间完成协作清理时取消迟到的 SIGKILL", async () => {
+  const dir = tempDir();
+  try {
+    const store = new ScheduleStore(dir);
+    addDueSchedule(store, "a", Date.now());
+    const { logger } = silentLogger();
+    const signals: string[] = [];
+    const daemon = new SchedulerDaemon({
+      store,
+      workerId: "w1",
+      maxConcurrentRuns: 1,
+      logger,
+      maxRunMs: 20,
+      childTerminateGraceMs: 30,
+      spawnInvocation: (claim): SpawnedInvocation => {
+        store.beginInvocation(claim.invocation.id, claim.ownershipToken, Date.now());
+        const exit = Promise.withResolvers<number | null>();
+        return {
+          exited: exit.promise,
+          kill: (signal = "SIGTERM") => {
+            signals.push(signal);
+            if (signal === "SIGTERM") {
+              exit.resolve(null);
+            }
+          },
+        };
+      },
+    });
+
+    assert.equal(daemon.tick(), 1);
+    await new Promise((resolve) => setTimeout(resolve, 80));
+
+    assert.deepEqual(signals, ["SIGTERM"]);
+    assert.equal(daemon.runningCount, 0);
+    store.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("Windows maxRun 保持立即 SIGKILL，不发送无效 SIGTERM", async () => {
+  const dir = tempDir();
+  try {
+    const store = new ScheduleStore(dir);
+    addDueSchedule(store, "a", Date.now());
+    const { logger } = silentLogger();
+    const signals: string[] = [];
+    const daemon = new SchedulerDaemon({
+      store,
+      workerId: "w1",
+      maxConcurrentRuns: 1,
+      logger,
+      platform: "win32",
+      maxRunMs: 20,
+      childTerminateGraceMs: 30,
       spawnInvocation: (claim): SpawnedInvocation => {
         store.beginInvocation(claim.invocation.id, claim.ownershipToken, Date.now());
         const exit = Promise.withResolvers<number | null>();
@@ -297,12 +379,11 @@ test("子进程运行超过 maxRunMs 时被 SIGKILL 并记为失败", async () =
         };
       },
     });
+
     assert.equal(daemon.tick(), 1);
     await new Promise((resolve) => setTimeout(resolve, 60));
+
     assert.deepEqual(signals, ["SIGKILL"]);
-    assert.equal(daemon.runningCount, 0);
-    assert.equal(store.listInvocations(schedule.id)[0]?.status, INVOCATION_STATUSES.retry);
-    assert.ok(lines.some((line) => /运行超过/u.test(line)));
     store.close();
   } finally {
     rmSync(dir, { recursive: true, force: true });
@@ -380,7 +461,7 @@ test("时钟跳变让自己的 claim lease 过期后，tick 不会重复拉起�
   }
 });
 
-test("不属于本 daemon 且运行超过 maxRunMs 的孤儿 exec 进程会被 terminateExecutor 处理", () => {
+test("超时孤儿 exec 只启动一次 SIGTERM → grace → SIGKILL 清理", async () => {
   const dir = tempDir();
   try {
     const store = new ScheduleStore(dir, { executorLiveness: () => "alive" });
@@ -392,7 +473,7 @@ test("不属于本 daemon 且运行超过 maxRunMs 的孤儿 exec 进程会被 t
       startToken: "pst-v2:orphan",
     });
     const { logger, lines } = silentLogger();
-    const terminated: number[] = [];
+    const signals: Array<{ readonly pid: number; readonly signal: NodeJS.Signals }> = [];
     const daemon = new SchedulerDaemon({
       store,
       workerId: "w1",
@@ -400,14 +481,21 @@ test("不属于本 daemon 且运行超过 maxRunMs 的孤儿 exec 进程会被 t
       logger,
       now: () => NOW + 120_000,
       maxRunMs: 60_000,
-      terminateExecutor: (executor) => {
-        terminated.push(executor.pid);
-        return true;
+      childTerminateGraceMs: 10,
+      terminateExecutor: (executor, signal) => {
+        signals.push({ pid: executor.pid, signal });
+        return "tree-terminated";
       },
       spawnInvocation: () => ({ exited: Promise.resolve(0), kill: () => undefined }),
     });
     assert.equal(daemon.tick(), 0);
-    assert.deepEqual(terminated, [4242]);
+    assert.equal(daemon.tick(), 0);
+    assert.deepEqual(signals, [{ pid: 4242, signal: "SIGTERM" }]);
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    assert.deepEqual(signals, [
+      { pid: 4242, signal: "SIGTERM" },
+      { pid: 4242, signal: "SIGKILL" },
+    ]);
     assert.ok(lines.some((line) => /不属于本 daemon/u.test(line)));
     assert.equal(store.listInvocations(schedule.id)[0]?.status, INVOCATION_STATUSES.running);
     store.close();

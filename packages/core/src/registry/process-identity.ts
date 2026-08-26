@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { win32 } from "node:path";
+import { performance } from "node:perf_hooks";
 
 declare const PROCESS_START_TOKEN_BRAND: unique symbol;
 
@@ -247,13 +248,18 @@ function readWindowsProcessStartIdentity(pid: number, version: "v1" | "v2"): str
     `$p = Get-Process -Id ${String(pid)} -ErrorAction Stop; ` +
     "$p.StartTime.ToUniversalTime().Ticks";
   const args = ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", script];
-  const executable = resolveTrustedWindowsPowerShellExecutables()[0];
-  if (executable === undefined) {
-    return undefined;
+  const deadline = performance.now() + identityCommandTimeoutMs("win32");
+  for (const executable of resolveTrustedWindowsPowerShellExecutables()) {
+    const remainingMs = Math.ceil(deadline - performance.now());
+    if (remainingMs <= 0) {
+      break;
+    }
+    const startedAt = runIdentityCommand(executable, args, true, remainingMs);
+    if (startedAt !== undefined && /^\d+$/u.test(startedAt)) {
+      return version === "v1" ? `win32:${startedAt}` : `win32-v2:${startedAt}`;
+    }
   }
-  const startedAt = runIdentityCommand(executable, args, true);
-  if (startedAt === undefined || !/^\d+$/u.test(startedAt)) return undefined;
-  return version === "v1" ? `win32:${startedAt}` : `win32-v2:${startedAt}`;
+  return undefined;
 }
 
 function readPosixProcessStartIdentity(pid: number): string | undefined {
@@ -385,6 +391,7 @@ function runIdentityCommand(
   command: string,
   args: readonly string[],
   useCanonicalTimeZone: boolean,
+  timeoutMs: number = identityCommandTimeoutMs(),
 ): string | undefined {
   try {
     const result = spawnSync(command, [...args], {
@@ -396,7 +403,7 @@ function runIdentityCommand(
         ...(useCanonicalTimeZone ? { TZ: "UTC" } : {}),
       },
       shell: false,
-      timeout: identityCommandTimeoutMs(),
+      timeout: timeoutMs,
       windowsHide: true,
     });
     const stdout = result.stdout.trim();

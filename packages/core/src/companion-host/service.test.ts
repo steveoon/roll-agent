@@ -128,6 +128,32 @@ test("Windows install fails closed when the user SID cannot be read", async () =
   assert.equal(runner.invocations.length, 1);
 });
 
+test("Windows install rejects service-account SIDs before writing or registering the task", async () => {
+  for (const sid of ["S-1-5-18", "S-1-5-19", "S-1-5-20"]) {
+    const dir = mkdtempSync(join(tmpdir(), "roll-win-task-service-account-"));
+    try {
+      const paths = { ...windowsPaths, windowsTaskXmlPath: join(dir, "companion-task.xml") };
+      const plan = createWindowsScheduledTaskPlan({
+        paths,
+        invocation,
+        windowsDirectory: "D:\\Windows",
+      });
+      const runner = new QueueRunner([
+        { code: 0, stdout: `"NT AUTHORITY\\service","${sid}"\r\n`, stderr: "" },
+      ]);
+
+      await assert.rejects(
+        new WindowsScheduledTaskController(plan, runner).install(),
+        /must not run as a Windows service account/u,
+      );
+      assert.deepEqual(runner.invocations, [plan.whoAmI]);
+      assert.equal(existsSync(paths.windowsTaskXmlPath), false);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+});
+
 test("Windows uninstall removes the task and its XML definition", async () => {
   const dir = mkdtempSync(join(tmpdir(), "roll-win-task-"));
   try {
