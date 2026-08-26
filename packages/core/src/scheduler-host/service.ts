@@ -28,6 +28,8 @@ export function schedulerServiceIdentity(
     plistPath: paths.launchAgentPath,
     logPath: paths.logPath,
     windowsTaskName: WINDOWS_SCHEDULER_TASK_NAME,
+    displayName: "roll schedule daemon",
+    windowsTaskXmlPath: paths.windowsTaskXmlPath,
     programArguments: [
       invocation.command,
       ...invocation.execArgv,

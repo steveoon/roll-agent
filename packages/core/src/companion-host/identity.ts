@@ -2,8 +2,13 @@ import { SpawnProcessRunner, type ProcessRunner } from "./process-runner.ts";
 import { resolveWindowsWhoAmIExecutable } from "./windows-system.ts";
 
 const WINDOWS_SERVICE_ACCOUNT_SIDS = new Set(["S-1-5-18", "S-1-5-19", "S-1-5-20"]);
+const WINDOWS_SID_PATTERN = /\bS-\d+(?:-\d+)+\b/iu;
 
 export type CompanionUserIdentityCheck = () => Promise<void>;
+
+export function parseWindowsUserSid(stdout: string): string | undefined {
+  return WINDOWS_SID_PATTERN.exec(stdout)?.[0]?.toUpperCase();
+}
 
 export function createCompanionUserIdentityCheck(
   options: {
@@ -33,10 +38,7 @@ export function createCompanionUserIdentityCheck(
         command: whoAmIExecutable,
         args: ["/user", "/fo", "csv", "/nh"],
       });
-      if (result.code !== 0) {
-        throw new Error("Unable to identify the current Windows Companion user");
-      }
-      const sid = /\bS-\d+(?:-\d+)+\b/iu.exec(result.stdout)?.[0]?.toUpperCase();
+      const sid = result.code === 0 ? parseWindowsUserSid(result.stdout) : undefined;
       if (sid === undefined) {
         throw new Error("Unable to identify the current Windows Companion user");
       }

@@ -12,6 +12,7 @@ export interface SchedulerPaths {
   readonly logPath: string;
   readonly daemonRecordPath: string;
   readonly launchAgentPath: string;
+  readonly windowsTaskXmlPath: string;
 }
 
 export function createSchedulerPaths(dataDir: string, homeDir: string = homedir()): SchedulerPaths {
@@ -21,5 +22,6 @@ export function createSchedulerPaths(dataDir: string, homeDir: string = homedir(
     logPath: join(resolvedDataDir, "scheduler.log"),
     daemonRecordPath: join(resolvedDataDir, "daemon.json"),
     launchAgentPath: join(homeDir, "Library", "LaunchAgents", `${SCHEDULER_SERVICE_LABEL}.plist`),
+    windowsTaskXmlPath: join(resolvedDataDir, "scheduler-task.xml"),
   };
 }

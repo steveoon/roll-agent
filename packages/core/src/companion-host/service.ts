@@ -1,7 +1,9 @@
+import { Buffer } from "node:buffer";
 import { access, chmod, mkdir, rename, unlink, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 import { randomUUID } from "node:crypto";
 import { COMPANION_SERVICE_LABEL, WINDOWS_COMPANION_TASK_NAME } from "./constants.ts";
+import { parseWindowsUserSid } from "./identity.ts";
 import type { CompanionPaths } from "./paths.ts";
 import type { BundledRollInvocation } from "./invocation.ts";
 import {
@@ -13,6 +15,7 @@ import { createPowerShellUtf8StringExpression } from "./windows-powershell.ts";
 import {
   resolveWindowsPowerShellExecutable,
   resolveWindowsScheduledTasksExecutable,
+  resolveWindowsWhoAmIExecutable,
 } from "./windows-system.ts";
 
 const WINDOWS_TASK_STATES = {
@@ -60,9 +63,11 @@ export interface CompanionServiceController {
 
 export interface ServicePlanIdentity {
   readonly label: string;
+  readonly displayName: string;
   readonly plistPath: string;
   readonly logPath: string;
   readonly windowsTaskName: string;
+  readonly windowsTaskXmlPath: string;
   readonly programArguments: readonly string[];
 }
 
@@ -72,15 +77,18 @@ export function companionServiceIdentity(
 ): ServicePlanIdentity {
   return {
     label: COMPANION_SERVICE_LABEL,
+    displayName: "Roll Companion",
     plistPath: paths.launchAgentPath,
     logPath: paths.logPath,
     windowsTaskName: WINDOWS_COMPANION_TASK_NAME,
+    windowsTaskXmlPath: paths.windowsTaskXmlPath,
     programArguments: [invocation.command, ...invocation.companionArgs],
   };
 }
 
 export interface MacOsLaunchAgentPlan {
   readonly label: string;
+  readonly displayName: string;
   readonly plistPath: string;
   readonly plist: string;
   readonly domainTarget: string;
@@ -123,6 +131,7 @@ ${programArguments}
   const domainTarget = `gui/${String(uid)}`;
   return {
     label: identity.label,
+    displayName: identity.displayName,
     plistPath: identity.plistPath,
     plist,
     domainTarget,
@@ -141,41 +150,122 @@ export function createMacOsLaunchAgentPlan(input: {
   );
 }
 
+const WINDOWS_TASK_XML_NAMESPACE = "http://schemas.microsoft.com/windows/2004/02/mit/task";
+const WINDOWS_TASK_RESTART_INTERVAL = "PT1M";
+const WINDOWS_TASK_RESTART_COUNT = 3;
+const WINDOWS_TASK_LOGON_TYPE = "InteractiveToken";
+
+export interface WindowsTaskPrincipal {
+  readonly userId: string;
+}
+
 export interface WindowsScheduledTaskPlan {
   readonly taskName: string;
+  readonly displayName: string;
   readonly taskCommand: string;
+  readonly taskXmlPath: string;
+  readonly whoAmI: ProcessInvocation;
   readonly create: ProcessInvocation;
   readonly remove: ProcessInvocation;
   readonly start: ProcessInvocation;
   readonly stop: ProcessInvocation;
   readonly query: ProcessInvocation;
+  renderTaskXml(principal: WindowsTaskPrincipal): string;
+}
+
+export function encodeWindowsTaskXml(xml: string): Buffer {
+  return Buffer.from(`${String.fromCharCode(0xfeff)}${xml}`, "utf16le");
+}
+
+function escapeXmlText(value: string): string {
+  return value.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
+}
+
+function renderWindowsTaskXml(input: {
+  readonly displayName: string;
+  readonly userId: string;
+  readonly command: string;
+  readonly commandArguments: string;
+}): string {
+  return `<?xml version="1.0" encoding="UTF-16"?>
+<Task version="1.2" xmlns="${WINDOWS_TASK_XML_NAMESPACE}">
+  <RegistrationInfo>
+    <Description>${escapeXmlText(input.displayName)}</Description>
+  </RegistrationInfo>
+  <Triggers>
+    <LogonTrigger>
+      <Enabled>true</Enabled>
+      <UserId>${escapeXmlText(input.userId)}</UserId>
+    </LogonTrigger>
+  </Triggers>
+  <Principals>
+    <Principal id="Author">
+      <UserId>${escapeXmlText(input.userId)}</UserId>
+      <LogonType>${WINDOWS_TASK_LOGON_TYPE}</LogonType>
+      <RunLevel>LeastPrivilege</RunLevel>
+    </Principal>
+  </Principals>
+  <Settings>
+    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
+    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
+    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
+    <AllowHardTerminate>true</AllowHardTerminate>
+    <StartWhenAvailable>true</StartWhenAvailable>
+    <RunOnlyIfNetworkAvailable>false</RunOnlyIfNetworkAvailable>
+    <IdleSettings>
+      <StopOnIdleEnd>false</StopOnIdleEnd>
+      <RestartOnIdle>false</RestartOnIdle>
+    </IdleSettings>
+    <AllowStartOnDemand>true</AllowStartOnDemand>
+    <Enabled>true</Enabled>
+    <Hidden>false</Hidden>
+    <RunOnlyIfIdle>false</RunOnlyIfIdle>
+    <WakeToRun>false</WakeToRun>
+    <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>
+    <Priority>7</Priority>
+    <RestartOnFailure>
+      <Interval>${WINDOWS_TASK_RESTART_INTERVAL}</Interval>
+      <Count>${String(WINDOWS_TASK_RESTART_COUNT)}</Count>
+    </RestartOnFailure>
+  </Settings>
+  <Actions Context="Author">
+    <Exec>
+      <Command>${escapeXmlText(input.command)}</Command>
+      <Arguments>${escapeXmlText(input.commandArguments)}</Arguments>
+    </Exec>
+  </Actions>
+</Task>
+`;
 }
 
 export function createWindowsScheduledTaskPlanForIdentity(
-  identity: Pick<ServicePlanIdentity, "windowsTaskName" | "programArguments">,
+  identity: Pick<
+    ServicePlanIdentity,
+    "windowsTaskName" | "windowsTaskXmlPath" | "displayName" | "programArguments"
+  >,
   windowsDirectory?: string,
 ): WindowsScheduledTaskPlan {
+  const [command, ...commandArguments] = identity.programArguments;
+  if (command === undefined) {
+    throw new Error("Windows task definition requires a program to run");
+  }
   const taskCommand = identity.programArguments.map(quoteWindowsCommandArgument).join(" ");
+  const quotedArguments = commandArguments.map(quoteWindowsCommandArgument).join(" ");
   const taskSchedulerExecutable = resolveWindowsScheduledTasksExecutable(windowsDirectory);
   const powershellExecutable = resolveWindowsPowerShellExecutable(windowsDirectory);
   const queryScript = `$taskName = ${createPowerShellUtf8StringExpression(identity.windowsTaskName)}\n${WINDOWS_TASK_STATE_QUERY_SCRIPT}`;
   return {
     taskName: identity.windowsTaskName,
+    displayName: identity.displayName,
     taskCommand,
+    taskXmlPath: identity.windowsTaskXmlPath,
+    whoAmI: {
+      command: resolveWindowsWhoAmIExecutable(windowsDirectory),
+      args: ["/user", "/fo", "csv", "/nh"],
+    },
     create: {
       command: taskSchedulerExecutable,
-      args: [
-        "/Create",
-        "/F",
-        "/SC",
-        "ONLOGON",
-        "/RL",
-        "LIMITED",
-        "/TN",
-        identity.windowsTaskName,
-        "/TR",
-        taskCommand,
-      ],
+      args: ["/Create", "/F", "/XML", identity.windowsTaskXmlPath, "/TN", identity.windowsTaskName],
     },
     remove: {
       command: taskSchedulerExecutable,
@@ -193,19 +283,24 @@ export function createWindowsScheduledTaskPlanForIdentity(
       command: powershellExecutable,
       args: ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", queryScript],
     },
+    renderTaskXml: (principal) =>
+      renderWindowsTaskXml({
+        displayName: identity.displayName,
+        userId: principal.userId,
+        command,
+        commandArguments: quotedArguments,
+      }),
   };
 }
 
-export function createWindowsScheduledTaskPlan(
-  invocation: BundledRollInvocation,
-  windowsDirectory?: string,
-): WindowsScheduledTaskPlan {
+export function createWindowsScheduledTaskPlan(input: {
+  readonly paths: CompanionPaths;
+  readonly invocation: BundledRollInvocation;
+  readonly windowsDirectory?: string;
+}): WindowsScheduledTaskPlan {
   return createWindowsScheduledTaskPlanForIdentity(
-    {
-      windowsTaskName: WINDOWS_COMPANION_TASK_NAME,
-      programArguments: [invocation.command, ...invocation.companionArgs],
-    },
-    windowsDirectory,
+    companionServiceIdentity(input.paths, input.invocation),
+    input.windowsDirectory,
   );
 }
 
@@ -246,7 +341,7 @@ export class MacOsLaunchAgentController implements CompanionServiceController {
   async start(): Promise<void> {
     const status = await this.inspectLaunchd();
     if (!status.installed) {
-      throw new Error("Roll Companion service is not installed");
+      throw new Error(`${this.plan.displayName} service is not installed`);
     }
     if (!status.loaded) {
       await this.runRequired({
@@ -296,7 +391,7 @@ export class MacOsLaunchAgentController implements CompanionServiceController {
   private async runRequired(invocation: ProcessInvocation): Promise<void> {
     const result = await this.runner.run(invocation);
     if (result.code !== 0) {
-      throw new Error("Unable to update the per-user macOS Companion service");
+      throw new Error(`Unable to update the per-user macOS ${this.plan.displayName} service`);
     }
   }
 }
@@ -311,7 +406,15 @@ export class WindowsScheduledTaskController implements CompanionServiceControlle
   }
 
   async install(): Promise<void> {
-    await this.runRequired(this.plan.create, "Unable to install the current-user Companion task");
+    const userId = await this.resolveUserId();
+    await atomicWritePrivate(
+      this.plan.taskXmlPath,
+      encodeWindowsTaskXml(this.plan.renderTaskXml({ userId })),
+    );
+    await this.runRequired(
+      this.plan.create,
+      `Unable to install the current-user ${this.plan.displayName} task`,
+    );
     await this.start();
   }
 
@@ -321,17 +424,25 @@ export class WindowsScheduledTaskController implements CompanionServiceControlle
     if (status.installed) {
       await this.runRequired(
         this.plan.remove,
-        "Unable to uninstall the current-user Companion task",
+        `Unable to uninstall the current-user ${this.plan.displayName} task`,
       );
     }
+    await unlink(this.plan.taskXmlPath).catch((error: unknown) => {
+      if (!isFileSystemError(error, "ENOENT")) {
+        throw error;
+      }
+    });
   }
 
   async start(): Promise<void> {
     const status = await this.status();
     if (!status.installed) {
-      throw new Error("Roll Companion service is not installed");
+      throw new Error(`${this.plan.displayName} service is not installed`);
     }
-    await this.runRequired(this.plan.start, "Unable to start the current-user Companion task");
+    await this.runRequired(
+      this.plan.start,
+      `Unable to start the current-user ${this.plan.displayName} task`,
+    );
   }
 
   async stop(): Promise<void> {
@@ -346,10 +457,8 @@ export class WindowsScheduledTaskController implements CompanionServiceControlle
       finalStatus.state !== WINDOWS_TASK_STATES.disabled &&
       finalStatus.state !== WINDOWS_TASK_STATES.ready
     ) {
-      throw new Error("Unable to stop the current-user Companion task");
+      throw new Error(`Unable to stop the current-user ${this.plan.displayName} task`);
     }
-    // `/End` may race with a task that has just stopped, so only the invariant state query above is
-    // authoritative. Its result confirms that the task is no longer running.
   }
 
   async status(): Promise<CompanionServiceStatus> {
@@ -361,7 +470,7 @@ export class WindowsScheduledTaskController implements CompanionServiceControlle
       status.state === WINDOWS_TASK_STATES.unknown ||
       status.state === WINDOWS_TASK_STATES.queued
     ) {
-      throw new Error("The current-user Companion task state is indeterminate");
+      throw new Error(`The current-user ${this.plan.displayName} task state is indeterminate`);
     }
     return {
       installed: true,
@@ -369,10 +478,21 @@ export class WindowsScheduledTaskController implements CompanionServiceControlle
     };
   }
 
+  private async resolveUserId(): Promise<string> {
+    const result = await this.runner.run(this.plan.whoAmI);
+    const sid = result.code === 0 ? parseWindowsUserSid(result.stdout) : undefined;
+    if (sid === undefined) {
+      throw new Error(
+        `Unable to identify the current Windows user for the ${this.plan.displayName} task`,
+      );
+    }
+    return sid;
+  }
+
   private async inspectTaskState(): Promise<{ readonly state: WindowsTaskState | undefined }> {
     const result = await this.runner.run(this.plan.query);
     if (result.code !== 0) {
-      throw new Error("Unable to inspect the current-user Companion task");
+      throw new Error(`Unable to inspect the current-user ${this.plan.displayName} task`);
     }
     const output = result.stdout.trim();
     if (output === "missing") {
@@ -381,7 +501,7 @@ export class WindowsScheduledTaskController implements CompanionServiceControlle
     const stateMatch = /^state:([0-4])$/u.exec(output);
     const state = Number(stateMatch?.[1]);
     if (!isWindowsTaskState(state)) {
-      throw new Error("The current-user Companion task returned an invalid state");
+      throw new Error(`The current-user ${this.plan.displayName} task returned an invalid state`);
     }
     return { state };
   }
@@ -426,11 +546,11 @@ export function createPlatformServiceController(options: {
   throw new Error("roll service supports macOS and Windows only");
 }
 
-async function atomicWritePrivate(path: string, contents: string): Promise<void> {
+async function atomicWritePrivate(path: string, contents: string | Uint8Array): Promise<void> {
   await mkdir(dirname(path), { recursive: true, mode: 0o700 });
   const temporaryPath = `${path}.${randomUUID()}.tmp`;
   try {
-    await writeFile(temporaryPath, contents, { encoding: "utf8", mode: 0o600, flag: "wx" });
+    await writeFile(temporaryPath, contents, { mode: 0o600, flag: "wx" });
     await chmod(temporaryPath, 0o600);
     await rename(temporaryPath, path);
   } catch (error: unknown) {

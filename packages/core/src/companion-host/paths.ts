@@ -10,6 +10,7 @@ export interface CompanionPaths {
   readonly controlEndpoint: string;
   readonly secretsDir: string;
   readonly launchAgentPath: string;
+  readonly windowsTaskXmlPath: string;
 }
 
 export function createCompanionPaths(
@@ -29,5 +30,6 @@ export function createCompanionPaths(
         : join(dataDir, "control.sock"),
     secretsDir: join(dataDir, "credentials"),
     launchAgentPath: join(homeDir, "Library", "LaunchAgents", "dev.roll-agent.companion.plist"),
+    windowsTaskXmlPath: join(dataDir, "companion-task.xml"),
   };
 }
