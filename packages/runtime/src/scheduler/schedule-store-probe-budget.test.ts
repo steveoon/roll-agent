@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
+import { DatabaseSync } from "node:sqlite";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createIntervalTrigger } from "./trigger.ts";
@@ -238,6 +239,39 @@ test("轮换状态持久化在账本里：换一个 ScheduleStore 实例（daemo
       [dead],
     );
     second.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("已是 v2 的旧账本（无 executor_probed_at 列）打开时会补列，claimDue 的探活轮转照常工作", () => {
+  const dir = mkdtempSync(join(tmpdir(), "roll-probe-budget-"));
+  try {
+    const seeded = new ScheduleStore(dir, { executorLiveness: () => "dead" });
+    const dead = seedExpiredRunning(seeded, "legacy", 2222);
+    seeded.close();
+    const raw = new DatabaseSync(join(dir, "schedules.db"));
+    raw.exec("ALTER TABLE invocations DROP COLUMN executor_probed_at; PRAGMA user_version = 2;");
+    raw.close();
+    const reopened = new ScheduleStore(dir, { executorLiveness: () => "dead" });
+    const inspect = new DatabaseSync(join(dir, "schedules.db"));
+    const columns = (
+      inspect.prepare("PRAGMA table_info(invocations)").all() as Array<{ readonly name: string }>
+    ).map((column) => column.name);
+    const version = inspect.prepare("PRAGMA user_version").get() as { user_version: number };
+    inspect.close();
+    assert.ok(columns.includes("executor_probed_at"));
+    assert.equal(version.user_version, 3);
+    const claims = reopened.claimDue({
+      workerId: "new-daemon",
+      nowMs: NOW + SCHEDULER_LIMITS.claimLeaseMs + 1,
+      limit: 5,
+    });
+    assert.deepEqual(
+      claims.map((claim) => claim.invocation.id),
+      [dead],
+    );
+    reopened.close();
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

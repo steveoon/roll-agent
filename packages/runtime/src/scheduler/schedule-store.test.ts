@@ -550,7 +550,7 @@ test("打开 schema v1 数据库时自动补齐新列并升级 user_version", ()
     store.close();
     const reopened = new DatabaseSync(join(dir, "schedules.db"));
     const version = reopened.prepare("PRAGMA user_version").get() as { user_version: number };
-    assert.equal(version.user_version, 2);
+    assert.equal(version.user_version, 3);
     reopened.close();
   } finally {
     rmSync(dir, { recursive: true, force: true });

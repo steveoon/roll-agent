@@ -40,7 +40,7 @@ import {
   type ScheduleStatus,
 } from "./types.ts";
 
-const SCHEMA_VERSION = 2;
+const SCHEMA_VERSION = 3;
 const BUSY_TIMEOUT_MS = 15_000;
 const TERMINAL_STATUS_PLACEHOLDERS = INVOCATION_TERMINAL_STATUSES.map(() => "?").join(", ");
 
