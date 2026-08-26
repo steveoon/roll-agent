@@ -8,6 +8,7 @@ import {
   currentExecutorIdentity,
   killProcessTree,
   probeExecutorLiveness,
+  readExecutorIdentityWithRetry,
   terminateExecutor,
 } from "./executor-liveness.ts";
 
@@ -241,4 +242,23 @@ test("根进程退出但同进程组后代仍存活 → descendants-alive；整�
       // group already gone
     }
   }
+});
+
+test("readExecutorIdentityWithRetry：首次失败后重读一次，连续失败才返回 undefined", () => {
+  let calls = 0;
+  const flaky = () => {
+    calls += 1;
+    return calls === 1 ? undefined : { pid: 7, startToken: "pst-v2:x" };
+  };
+  assert.deepEqual(readExecutorIdentityWithRetry(flaky), { pid: 7, startToken: "pst-v2:x" });
+  assert.equal(calls, 2);
+  let failures = 0;
+  assert.equal(
+    readExecutorIdentityWithRetry(() => {
+      failures += 1;
+      return undefined;
+    }),
+    undefined,
+  );
+  assert.equal(failures, 2);
 });

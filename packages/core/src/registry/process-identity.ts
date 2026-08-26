@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
+import { win32 } from "node:path";
 
 declare const PROCESS_START_TOKEN_BRAND: unique symbol;
 
@@ -66,6 +67,26 @@ type ProcessStartTokenPrefix =
   (typeof PROCESS_START_TOKEN_PREFIXES)[keyof typeof PROCESS_START_TOKEN_PREFIXES];
 
 const PROCESS_IDENTITY_COMMAND_TIMEOUT_MS = 2_000;
+const WINDOWS_PROCESS_IDENTITY_COMMAND_TIMEOUT_MS = 8_000;
+const WINDOWS_DRIVE_PATH_PATTERN = /^[A-Za-z]:[\\/]/u;
+
+export function resolveTrustedWindowsPowerShellExecutables(
+  env: NodeJS.ProcessEnv = process.env,
+  exists: (path: string) => boolean = existsSync,
+): string[] {
+  const candidates: string[] = [];
+  const systemRoot = env.SystemRoot ?? env.SYSTEMROOT;
+  if (systemRoot !== undefined && WINDOWS_DRIVE_PATH_PATTERN.test(systemRoot)) {
+    candidates.push(
+      win32.join(systemRoot, "System32", "WindowsPowerShell", "v1.0", "powershell.exe"),
+    );
+  }
+  const programFiles = env.ProgramFiles ?? env.PROGRAMFILES;
+  if (programFiles !== undefined && WINDOWS_DRIVE_PATH_PATTERN.test(programFiles)) {
+    candidates.push(win32.join(programFiles, "PowerShell", "7", "pwsh.exe"));
+  }
+  return candidates.filter((candidate) => exists(candidate));
+}
 
 export function isProcessStartToken(value: unknown): value is ProcessStartToken {
   return (
@@ -220,8 +241,9 @@ function readWindowsProcessStartIdentity(pid: number, version: "v1" | "v2"): str
     `$p = Get-Process -Id ${String(pid)} -ErrorAction Stop; ` +
     "$p.StartTime.ToUniversalTime().Ticks";
   const args = ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", script];
-  const startedAt =
-    runIdentityCommand("powershell.exe", args, true) ?? runIdentityCommand("pwsh.exe", args, true);
+  const executable = resolveTrustedWindowsPowerShellExecutables()[0];
+  if (executable === undefined) return undefined;
+  const startedAt = runIdentityCommand(executable, args, true);
   if (startedAt === undefined || !/^\d+$/u.test(startedAt)) return undefined;
   return version === "v1" ? `win32:${startedAt}` : `win32-v2:${startedAt}`;
 }
@@ -366,7 +388,10 @@ function runIdentityCommand(
         ...(useCanonicalTimeZone ? { TZ: "UTC" } : {}),
       },
       shell: false,
-      timeout: PROCESS_IDENTITY_COMMAND_TIMEOUT_MS,
+      timeout:
+        process.platform === "win32"
+          ? WINDOWS_PROCESS_IDENTITY_COMMAND_TIMEOUT_MS
+          : PROCESS_IDENTITY_COMMAND_TIMEOUT_MS,
       windowsHide: true,
     });
     const stdout = result.stdout.trim();

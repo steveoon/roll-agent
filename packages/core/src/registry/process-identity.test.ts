@@ -9,6 +9,7 @@ import {
   PROCESS_START_TOKEN_VERIFICATION_REASONS,
   PROCESS_START_TOKEN_VERIFICATION_STATUSES,
   readProcessStartToken,
+  resolveTrustedWindowsPowerShellExecutables,
   verifyProcessStartToken,
 } from "./process-identity.ts";
 import type { ProcessStartToken } from "./process-identity.ts";
@@ -225,3 +226,37 @@ function restoreTimeZone(timeZone: string | undefined): void {
     process.env.TZ = timeZone;
   }
 }
+
+test("Windows identity only uses absolute PowerShell paths under SystemRoot / ProgramFiles", () => {
+  const seen: string[] = [];
+  const exists = (path: string) => {
+    seen.push(path);
+    return true;
+  };
+  assert.deepEqual(
+    resolveTrustedWindowsPowerShellExecutables(
+      { SystemRoot: "C:\\Windows", ProgramFiles: "C:\\Program Files" },
+      exists,
+    ),
+    [
+      "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+      "C:\\Program Files\\PowerShell\\7\\pwsh.exe",
+    ],
+  );
+  assert.deepEqual(seen, [
+    "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+    "C:\\Program Files\\PowerShell\\7\\pwsh.exe",
+  ]);
+  assert.deepEqual(
+    resolveTrustedWindowsPowerShellExecutables({ SystemRoot: "Windows" }, () => true),
+    [],
+  );
+  assert.deepEqual(
+    resolveTrustedWindowsPowerShellExecutables({ SystemRoot: "C:\\Windows" }, () => false),
+    [],
+  );
+  assert.deepEqual(
+    resolveTrustedWindowsPowerShellExecutables({ PATH: "C:\\evil" }, () => true),
+    [],
+  );
+});

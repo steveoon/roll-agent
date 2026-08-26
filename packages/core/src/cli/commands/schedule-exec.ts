@@ -5,7 +5,7 @@ import {
   EXECUTE_INVOCATION_KINDS,
   executeInvocation,
 } from "../../scheduler-host/execute-invocation.ts";
-import { currentExecutorIdentity } from "../../scheduler-host/executor-liveness.ts";
+import { readExecutorIdentityWithRetry } from "../../scheduler-host/executor-liveness.ts";
 import { createScheduledTurnRunner } from "../../scheduler-host/run-scheduled-turn.ts";
 import { log } from "../utils/output.ts";
 import {
@@ -26,7 +26,7 @@ export default defineCommand({
       const runtime = await loadRuntime();
       const store = openScheduleStore(undefined, runtime, { dataDir: execEnv.dataDir });
       try {
-        const executor = currentExecutorIdentity();
+        const executor = readExecutorIdentityWithRetry();
         if (executor === undefined) {
           store.failInvocation(
             args.invocation,

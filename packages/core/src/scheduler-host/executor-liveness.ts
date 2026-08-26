@@ -139,6 +139,21 @@ export function currentExecutorIdentity(pid: number = process.pid): ExecutorIden
   return startToken === undefined ? undefined : { pid, startToken };
 }
 
+const EXECUTOR_IDENTITY_ATTEMPTS = 2;
+
+export function readExecutorIdentityWithRetry(
+  read: () => ExecutorIdentity | undefined = currentExecutorIdentity,
+  attempts: number = EXECUTOR_IDENTITY_ATTEMPTS,
+): ExecutorIdentity | undefined {
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    const identity = read();
+    if (identity !== undefined) {
+      return identity;
+    }
+  }
+  return undefined;
+}
+
 const TASKKILL_TIMEOUT_MS = 5_000;
 
 export const KILL_PROCESS_TREE_OUTCOMES = {
