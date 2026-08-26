@@ -10,7 +10,7 @@ import {
   createIntervalTrigger,
   type ClaimedInvocation,
 } from "@roll-agent/runtime";
-import { SchedulerDaemon, type SpawnedInvocation } from "./daemon.ts";
+import { SchedulerDaemon, URGENT_STOP_REASON, type SpawnedInvocation } from "./daemon.ts";
 
 const NOW = Date.parse("2026-08-25T09:00:00.000Z");
 
@@ -643,6 +643,53 @@ test("win32 停止时不发无效的 SIGTERM，grace 后直接整体终止", asy
     assert.deepEqual(signals, ["SIGKILL"]);
     assert.ok(Date.now() - startedAt >= 15);
     assert.ok(lines.some((line) => /Windows 没有优雅终止信号/u.test(line)));
+    store.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("紧急停止（Windows 控制台关闭）不等待 grace，立即整体终止并释放 daemon", async () => {
+  const dir = tempDir();
+  try {
+    const store = new ScheduleStore(dir, { executorLiveness: () => "dead" });
+    addDueSchedule(store, "a");
+    const { logger, lines } = silentLogger();
+    const exit = Promise.withResolvers<number | null>();
+    const signals: string[] = [];
+    const daemon = new SchedulerDaemon({
+      store,
+      workerId: "w1",
+      maxConcurrentRuns: 1,
+      logger,
+      now: () => NOW,
+      platform: "win32",
+      childTerminateGraceMs: 5_000,
+      spawnInvocation: (claim): SpawnedInvocation => {
+        store.beginInvocation(claim.invocation.id, claim.ownershipToken, NOW, {
+          pid: 4242,
+          startToken: "pst-v2:root",
+        });
+        return {
+          exited: exit.promise,
+          kill: (signal) => {
+            signals.push(signal);
+            exit.resolve(null);
+            return "tree-terminated";
+          },
+        };
+      },
+    });
+    const controller = new AbortController();
+    const running = daemon.run(controller.signal);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    const startedAt = Date.now();
+    controller.abort(URGENT_STOP_REASON);
+    await running;
+    assert.ok(Date.now() - startedAt < 1_000);
+    assert.deepEqual(signals, ["SIGKILL"]);
+    assert.ok(lines.some((line) => /紧急停止/u.test(line)));
+    assert.equal(daemon.runningCount, 0);
     store.close();
   } finally {
     rmSync(dir, { recursive: true, force: true });

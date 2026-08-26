@@ -26,6 +26,7 @@ export function decideInlineExit(input: {
 export interface InlineStopForwarder {
   readonly forward: () => void;
   readonly escalate: () => void;
+  readonly seal: () => void;
   readonly killOutcome: () => KillProcessTreeOutcome | undefined;
 }
 
@@ -34,9 +35,16 @@ export function createInlineStopForwarder(
   platform: NodeJS.Platform = process.platform,
 ): InlineStopForwarder {
   let latest: KillProcessTreeOutcome | undefined;
+  let sealed = false;
   const send = (signal: SpawnedInvocationSignal) => {
+    if (sealed) {
+      return;
+    }
     const outcome = handle.kill(signal);
-    if (typeof outcome === "string") {
+    if (typeof outcome !== "string") {
+      return;
+    }
+    if (latest !== KILL_PROCESS_TREE_OUTCOMES.tree || outcome === KILL_PROCESS_TREE_OUTCOMES.tree) {
       latest = outcome;
     }
   };
@@ -46,6 +54,9 @@ export function createInlineStopForwarder(
     },
     escalate: () => {
       send("SIGKILL");
+    },
+    seal: () => {
+      sealed = true;
     },
     killOutcome: () => latest,
   };

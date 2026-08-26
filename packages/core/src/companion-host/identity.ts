@@ -2,12 +2,23 @@ import { SpawnProcessRunner, type ProcessRunner } from "./process-runner.ts";
 import { resolveWindowsWhoAmIExecutable } from "./windows-system.ts";
 
 const WINDOWS_SERVICE_ACCOUNT_SIDS = new Set(["S-1-5-18", "S-1-5-19", "S-1-5-20"]);
-const WINDOWS_SID_PATTERN = /\bS-\d+(?:-\d+)+\b/iu;
+const WINDOWS_SID_PATTERN = /^S-\d+(?:-\d+)+$/iu;
+const WHOAMI_CSV_LAST_FIELD_PATTERN = /"([^"]*)"\s*$/u;
 
 export type CompanionUserIdentityCheck = () => Promise<void>;
 
 export function parseWindowsUserSid(stdout: string): string | undefined {
-  return WINDOWS_SID_PATTERN.exec(stdout)?.[0]?.toUpperCase();
+  const lastLine = stdout
+    .split(/\r?\n/u)
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0)
+    .at(-1);
+  const lastField =
+    lastLine === undefined ? undefined : WHOAMI_CSV_LAST_FIELD_PATTERN.exec(lastLine)?.[1];
+  if (lastField === undefined || !WINDOWS_SID_PATTERN.test(lastField)) {
+    return undefined;
+  }
+  return lastField.toUpperCase();
 }
 
 export function createCompanionUserIdentityCheck(

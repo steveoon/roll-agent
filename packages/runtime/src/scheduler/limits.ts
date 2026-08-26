@@ -2,6 +2,7 @@ export const SCHEDULER_LIMITS = {
   minIntervalMs: 60_000,
   maxIntervalMs: 31_536_000_000,
   claimLeaseMs: 120_000,
+  maxLivenessProbesPerClaim: 1,
   leaseRenewIntervalMs: 30_000,
   retryBudget: 3,
   retryBackoffMs: 10_000,

@@ -10,27 +10,30 @@ export interface StopSignalHandle {
   readonly release: () => void;
 }
 
+export type StopSignal = (typeof STOP_SIGNALS)[number];
+
 export function installStopSignals(
-  onStop: () => void,
-  onRepeat: () => void,
+  onStop: (signal: StopSignal) => unknown,
+  onRepeat: (signal: StopSignal) => void,
   target: Pick<NodeJS.Process, "on" | "off"> = process,
 ): StopSignalHandle {
   const controller = new AbortController();
-  const handler = () => {
+  const handlerFor = (signal: StopSignal) => () => {
     if (controller.signal.aborted) {
-      onRepeat();
+      onRepeat(signal);
       return;
     }
-    onStop();
-    controller.abort(new Error("scheduler daemon was asked to stop"));
+    const reason = onStop(signal);
+    controller.abort(reason ?? new Error("scheduler daemon was asked to stop"));
   };
-  for (const signal of STOP_SIGNALS) {
+  const handlers = STOP_SIGNALS.map((signal) => [signal, handlerFor(signal)] as const);
+  for (const [signal, handler] of handlers) {
     target.on(signal, handler);
   }
   return {
     controller,
     release: () => {
-      for (const signal of STOP_SIGNALS) {
+      for (const [signal, handler] of handlers) {
         target.off(signal, handler);
       }
     },

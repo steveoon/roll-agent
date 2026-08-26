@@ -58,9 +58,16 @@ test("inline 信号转发：首个信号按平台转发，重复信号升级为 
   posix.escalate();
   assert.equal(posix.killOutcome(), "tree-terminated");
   assert.deepEqual(signals, ["SIGTERM", "SIGKILL"]);
+  outcomes.push("failed");
+  posix.escalate();
+  assert.equal(posix.killOutcome(), "tree-terminated");
+  posix.seal();
+  posix.forward();
+  posix.escalate();
+  assert.deepEqual(signals, ["SIGTERM", "SIGKILL", "SIGKILL"]);
   const windows = createInlineStopForwarder(handle, "win32");
   windows.forward();
-  assert.deepEqual(signals, ["SIGTERM", "SIGKILL", "SIGKILL"]);
+  assert.deepEqual(signals, ["SIGTERM", "SIGKILL", "SIGKILL", "SIGKILL"]);
 });
 
 function seedRunningInvocation(store: ScheduleStore): {

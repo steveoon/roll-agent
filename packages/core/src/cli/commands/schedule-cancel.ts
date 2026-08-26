@@ -136,7 +136,7 @@ export default defineCommand({
         if (killed) {
           log.info(`exec 进程树 (pid ${String(before.executor?.pid ?? "?")}) 已终止并确认退出`);
         }
-        if (killResult === KILL_RESULTS.unverifiable) {
+        if (killResult === KILL_RESULTS.unverifiable || (killed && process.platform === "win32")) {
           log.warn(
             "Windows 无法验证 exec 后代进程是否退出；已按根进程退出取消，若有残留子进程请手动检查",
           );

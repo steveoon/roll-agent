@@ -50,6 +50,7 @@ export interface ScheduleStoreOptions {
   readonly retryBudget?: number;
   readonly retryBackoffMs?: number;
   readonly executorLiveness?: ExecutorLivenessProbe;
+  readonly maxLivenessProbesPerClaim?: number;
   readonly invocationRetentionPerSchedule?: number;
   readonly invocationRetentionMs?: number;
 }
@@ -224,6 +225,7 @@ export class ScheduleStore {
   private readonly retryBudget: number;
   private readonly retryBackoffMs: number;
   private readonly executorLiveness: ExecutorLivenessProbe;
+  private readonly maxLivenessProbesPerClaim: number;
   private readonly invocationRetentionPerSchedule: number;
   private readonly invocationRetentionMs: number;
 
@@ -233,6 +235,8 @@ export class ScheduleStore {
     this.retryBudget = options.retryBudget ?? SCHEDULER_LIMITS.retryBudget;
     this.retryBackoffMs = options.retryBackoffMs ?? SCHEDULER_LIMITS.retryBackoffMs;
     this.executorLiveness = options.executorLiveness ?? (() => EXECUTOR_LIVENESS.unknown);
+    this.maxLivenessProbesPerClaim =
+      options.maxLivenessProbesPerClaim ?? SCHEDULER_LIMITS.maxLivenessProbesPerClaim;
     this.invocationRetentionPerSchedule =
       options.invocationRetentionPerSchedule ?? SCHEDULER_LIMITS.invocationRetentionPerSchedule;
     this.invocationRetentionMs =
@@ -648,6 +652,14 @@ export class ScheduleStore {
           input.nowMs,
         ) as unknown as LiveInvocationRow[];
       const reclaimable: LiveInvocationRow[] = [];
+      let probesLeft = this.maxLivenessProbesPerClaim;
+      const executorMayBeAlive = (executor: ExecutorIdentity): boolean => {
+        if (probesLeft <= 0) {
+          return true;
+        }
+        probesLeft -= 1;
+        return this.executorLiveness(executor) !== EXECUTOR_LIVENESS.dead;
+      };
       for (const row of liveRows) {
         const inFlight =
           row.status === INVOCATION_STATUSES.claimed || row.status === INVOCATION_STATUSES.running;
@@ -657,7 +669,7 @@ export class ScheduleStore {
           (held.has(row.id) ||
             (row.status === INVOCATION_STATUSES.running &&
               executor !== undefined &&
-              this.executorLiveness(executor) !== EXECUTOR_LIVENESS.dead))
+              executorMayBeAlive(executor)))
         ) {
           this.db
             .prepare("UPDATE invocations SET lease_until = ? WHERE id = ?")

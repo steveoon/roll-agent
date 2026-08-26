@@ -14,24 +14,27 @@ test("installStopSignals 监听 SIGINT/SIGTERM/SIGHUP/SIGBREAK，首个信号 ab
       return target;
     },
   } as unknown as Pick<NodeJS.Process, "on" | "off">;
-  let stops = 0;
-  let repeats = 0;
+  const stops: string[] = [];
+  const repeats: string[] = [];
   const handle = installStopSignals(
-    () => {
-      stops += 1;
+    (signal) => {
+      stops.push(signal);
+      return signal === "SIGHUP" ? "urgent" : undefined;
     },
-    () => {
-      repeats += 1;
+    (signal) => {
+      repeats.push(signal);
     },
     target,
   );
-  assert.deepEqual([...listeners.keys()].sort(), [...STOP_SIGNALS].sort());
+  assert.deepEqual([...listeners.keys()].sort(), ["SIGBREAK", "SIGHUP", "SIGINT", "SIGTERM"]);
+  assert.deepEqual([...STOP_SIGNALS].sort(), ["SIGBREAK", "SIGHUP", "SIGINT", "SIGTERM"]);
   listeners.get("SIGHUP")?.();
   assert.equal(handle.controller.signal.aborted, true);
-  assert.equal(stops, 1);
+  assert.equal(handle.controller.signal.reason, "urgent");
+  assert.deepEqual(stops, ["SIGHUP"]);
   listeners.get("SIGBREAK")?.();
-  assert.equal(stops, 1);
-  assert.equal(repeats, 1);
+  assert.deepEqual(stops, ["SIGHUP"]);
+  assert.deepEqual(repeats, ["SIGBREAK"]);
   handle.release();
   assert.equal(listeners.size, 0);
 });

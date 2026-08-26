@@ -38,6 +38,9 @@ interface RunningInvocation {
 }
 
 const MAX_TIMER_DELAY_MS = 2_147_483_647;
+const URGENT_STOP_SETTLE_MS = 2_000;
+
+export const URGENT_STOP_REASON = "scheduler-daemon-urgent-stop" as const;
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
@@ -72,6 +75,7 @@ export class SchedulerDaemon {
   private readonly running = new Map<string, RunningInvocation>();
   private wake = Promise.withResolvers<void>();
   private stopped = false;
+  private urgentStop = false;
 
   constructor(options: SchedulerDaemonOptions) {
     this.store = options.store;
@@ -131,6 +135,7 @@ export class SchedulerDaemon {
     }
     const onAbort = () => {
       this.stopped = true;
+      this.urgentStop = signal?.reason === URGENT_STOP_REASON;
       this.wake.resolve();
     };
     signal?.addEventListener("abort", onAbort, { once: true });
@@ -331,6 +336,18 @@ export class SchedulerDaemon {
   }
 
   private async terminateChildren(): Promise<void> {
+    if (this.urgentStop) {
+      for (const id of this.running.keys()) {
+        this.logger.error(`invocation ${id}：紧急停止，不等待 grace，立即强制终止 exec 进程树`);
+        this.signalChild(id, "SIGKILL");
+      }
+      await settleWithin(
+        [...this.running.values()].map((entry) => entry.handle.exited),
+        URGENT_STOP_SETTLE_MS,
+      );
+      this.releaseUnconfirmed();
+      return;
+    }
     if (this.platform === "win32") {
       if (this.running.size > 0) {
         this.logger.info(
@@ -359,6 +376,10 @@ export class SchedulerDaemon {
       [...this.running.values()].map((entry) => entry.handle.exited),
       this.childTerminateGraceMs,
     );
+    this.releaseUnconfirmed();
+  }
+
+  private releaseUnconfirmed(): void {
     for (const [id, entry] of this.running) {
       clearTimeout(entry.runTimer);
       this.running.delete(id);

@@ -9,7 +9,7 @@ import {
   AgentLifecycleBusyError,
   acquireAgentLifecycleLock,
 } from "../../registry/process-manager.ts";
-import { SchedulerDaemon } from "../../scheduler-host/daemon.ts";
+import { SchedulerDaemon, URGENT_STOP_REASON } from "../../scheduler-host/daemon.ts";
 import {
   createDaemonRecord,
   removeDaemonRecord,
@@ -115,7 +115,14 @@ export default defineCommand({
         `data-dir=${paths.dataDir} max-concurrent-runs=${String(maxConcurrentRuns)}（${config === undefined ? "由启动参数固化" : "由配置解析"}）`,
       );
       const stop = installStopSignals(
-        () => logger.info("收到停止信号，等待 exec 子进程退出…"),
+        (signal) => {
+          if (process.platform === "win32" && signal === "SIGHUP") {
+            logger.info("控制台窗口关闭，Windows 只给数秒；立即强制终止 exec 子进程树");
+            return URGENT_STOP_REASON;
+          }
+          logger.info(`收到 ${signal}，等待 exec 子进程退出…`);
+          return undefined;
+        },
         () => logger.info("仍在等待 exec 子进程退出；grace 结束后会 SIGKILL"),
       );
       try {

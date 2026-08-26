@@ -79,20 +79,25 @@ export default defineCommand({
         const renew = setInterval(() => {
           store.renewLease(claim.invocation.id, claim.ownershipToken);
         }, runtime.SCHEDULER_LIMITS.leaseRenewIntervalMs);
-        let code: number | null;
+        let decision;
         try {
-          code = await handle.exited;
+          let code: number | null;
+          try {
+            code = await handle.exited;
+          } finally {
+            clearInterval(renew);
+            forwarder.seal();
+          }
+          decision = settleInlineInvocation({
+            store,
+            invocationId: claim.invocation.id,
+            ownershipToken: claim.ownershipToken,
+            killOutcome: forwarder.killOutcome(),
+            exitCode: code,
+          });
         } finally {
-          clearInterval(renew);
           stop.release();
         }
-        const decision = settleInlineInvocation({
-          store,
-          invocationId: claim.invocation.id,
-          ownershipToken: claim.ownershipToken,
-          killOutcome: forwarder.killOutcome(),
-          exitCode: code,
-        });
         if (decision !== INLINE_EXIT_DECISIONS.fail) {
           log.warn(
             decision === INLINE_EXIT_DECISIONS.holdUnconfirmedKill

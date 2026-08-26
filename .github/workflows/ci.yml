@@ -95,9 +95,11 @@ jobs:
         run: >
           node --experimental-strip-types --experimental-sqlite --test
           packages/runtime/src/scheduler/schedule-store.test.ts
+          packages/runtime/src/scheduler/schedule-store-probe-budget.test.ts
           packages/core/src/registry/process-identity.test.ts
           packages/core/src/scheduler-host/daemon.test.ts
           packages/core/src/scheduler-host/executor-liveness.test.ts
+          packages/core/src/scheduler-host/inline-exit.test.ts
           packages/core/src/scheduler-host/service.test.ts
           packages/core/src/scheduler-host/stop-signals.test.ts
           packages/core/src/companion-host/service.test.ts
