@@ -70,12 +70,18 @@ const PROCESS_IDENTITY_COMMAND_TIMEOUT_MS = 2_000;
 const WINDOWS_PROCESS_IDENTITY_COMMAND_TIMEOUT_MS = 8_000;
 const WINDOWS_DRIVE_PATH_PATTERN = /^[A-Za-z]:[\\/]/u;
 
+export function identityCommandTimeoutMs(platform: NodeJS.Platform = process.platform): number {
+  return platform === "win32"
+    ? WINDOWS_PROCESS_IDENTITY_COMMAND_TIMEOUT_MS
+    : PROCESS_IDENTITY_COMMAND_TIMEOUT_MS;
+}
+
 export function resolveTrustedWindowsPowerShellExecutables(
   env: NodeJS.ProcessEnv = process.env,
   exists: (path: string) => boolean = existsSync,
-): string[] {
+): readonly string[] {
   const candidates: string[] = [];
-  const systemRoot = env.SystemRoot ?? env.SYSTEMROOT;
+  const systemRoot = env.SystemRoot ?? env.SYSTEMROOT ?? env.WINDIR;
   if (systemRoot !== undefined && WINDOWS_DRIVE_PATH_PATTERN.test(systemRoot)) {
     candidates.push(
       win32.join(systemRoot, "System32", "WindowsPowerShell", "v1.0", "powershell.exe"),
@@ -242,7 +248,9 @@ function readWindowsProcessStartIdentity(pid: number, version: "v1" | "v2"): str
     "$p.StartTime.ToUniversalTime().Ticks";
   const args = ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", script];
   const executable = resolveTrustedWindowsPowerShellExecutables()[0];
-  if (executable === undefined) return undefined;
+  if (executable === undefined) {
+    return undefined;
+  }
   const startedAt = runIdentityCommand(executable, args, true);
   if (startedAt === undefined || !/^\d+$/u.test(startedAt)) return undefined;
   return version === "v1" ? `win32:${startedAt}` : `win32-v2:${startedAt}`;
@@ -388,10 +396,7 @@ function runIdentityCommand(
         ...(useCanonicalTimeZone ? { TZ: "UTC" } : {}),
       },
       shell: false,
-      timeout:
-        process.platform === "win32"
-          ? WINDOWS_PROCESS_IDENTITY_COMMAND_TIMEOUT_MS
-          : PROCESS_IDENTITY_COMMAND_TIMEOUT_MS,
+      timeout: identityCommandTimeoutMs(),
       windowsHide: true,
     });
     const stdout = result.stdout.trim();
