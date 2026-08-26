@@ -550,3 +550,101 @@ test("daemon 发出的进程树终止未被确认时，子进程退出后不记�
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test("SIGTERM 阶段树终止失败但随后的 SIGKILL 整体终止成功时，退出后照常记失败并重试", async () => {
+  const dir = tempDir();
+  try {
+    const store = new ScheduleStore(dir, { executorLiveness: () => "dead" });
+    const schedule = addDueSchedule(store, "a");
+    const { logger, lines } = silentLogger();
+    const exit = Promise.withResolvers<number | null>();
+    const signals: string[] = [];
+    const daemon = new SchedulerDaemon({
+      store,
+      workerId: "w1",
+      maxConcurrentRuns: 1,
+      logger,
+      now: () => NOW,
+      childTerminateGraceMs: 20,
+      spawnInvocation: (claim): SpawnedInvocation => {
+        store.beginInvocation(claim.invocation.id, claim.ownershipToken, NOW, {
+          pid: 4242,
+          startToken: "pst-v2:root",
+        });
+        return {
+          exited: exit.promise,
+          kill: (signal) => {
+            signals.push(signal ?? "SIGTERM");
+            if (signal === "SIGKILL") {
+              exit.resolve(null);
+              return "tree-terminated";
+            }
+            return "failed";
+          },
+        };
+      },
+    });
+    const controller = new AbortController();
+    const running = daemon.run(controller.signal);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    controller.abort();
+    await running;
+    assert.deepEqual(signals, ["SIGTERM", "SIGKILL"]);
+    assert.equal(store.listInvocations(schedule.id)[0]?.status, INVOCATION_STATUSES.retry);
+    assert.ok(lines.some((line) => /未能整体终止（failed）/u.test(line)));
+    assert.ok(lines.some((line) => /已在后续 SIGKILL 中整体终止/u.test(line)));
+    assert.equal(
+      lines.some((line) => /终止未被确认/u.test(line)),
+      false,
+    );
+    store.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("win32 停止时不发无效的 SIGTERM，grace 后直接整体终止", async () => {
+  const dir = tempDir();
+  try {
+    const store = new ScheduleStore(dir, { executorLiveness: () => "dead" });
+    addDueSchedule(store, "a");
+    const { logger, lines } = silentLogger();
+    const exit = Promise.withResolvers<number | null>();
+    const signals: string[] = [];
+    const daemon = new SchedulerDaemon({
+      store,
+      workerId: "w1",
+      maxConcurrentRuns: 1,
+      logger,
+      now: () => NOW,
+      platform: "win32",
+      childTerminateGraceMs: 20,
+      spawnInvocation: (claim): SpawnedInvocation => {
+        store.beginInvocation(claim.invocation.id, claim.ownershipToken, NOW, {
+          pid: 4242,
+          startToken: "pst-v2:root",
+        });
+        return {
+          exited: exit.promise,
+          kill: (signal) => {
+            signals.push(signal ?? "SIGTERM");
+            exit.resolve(null);
+            return "tree-terminated";
+          },
+        };
+      },
+    });
+    const controller = new AbortController();
+    const running = daemon.run(controller.signal);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    const startedAt = Date.now();
+    controller.abort();
+    await running;
+    assert.deepEqual(signals, ["SIGKILL"]);
+    assert.ok(Date.now() - startedAt >= 15);
+    assert.ok(lines.some((line) => /Windows 没有优雅终止信号/u.test(line)));
+    store.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

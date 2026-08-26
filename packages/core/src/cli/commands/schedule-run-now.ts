@@ -69,7 +69,7 @@ export default defineCommand({
           logPath: paths.logPath,
         })(claim);
         const forwardStop = () => {
-          handle.kill("SIGTERM");
+          handle.kill(process.platform === "win32" ? "SIGKILL" : "SIGTERM");
         };
         process.once("SIGINT", forwardStop);
         process.once("SIGTERM", forwardStop);

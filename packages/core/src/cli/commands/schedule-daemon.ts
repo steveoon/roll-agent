@@ -21,6 +21,7 @@ import {
 } from "../../scheduler-host/executor-liveness.ts";
 import { SCHEDULER_DAEMON_LOCK_NAME, createSchedulerPaths } from "../../scheduler-host/paths.ts";
 import { createInvocationSpawner } from "../../scheduler-host/spawn-invocation.ts";
+import { installStopSignals } from "../../scheduler-host/stop-signals.ts";
 import { log } from "../utils/output.ts";
 import { loadRuntime, openScheduleStore, runScheduleCommand } from "./schedule-command-utils.ts";
 
@@ -34,30 +35,6 @@ function parseMaxConcurrentRuns(value: string | undefined): number | undefined {
     throw new Error(`--max-concurrent-runs 必须是 1..8 的整数（收到 ${value}）`);
   }
   return checked.data;
-}
-
-function installStopSignals(
-  onStop: () => void,
-  onRepeat: () => void,
-): { readonly controller: AbortController; readonly release: () => void } {
-  const controller = new AbortController();
-  const handler = () => {
-    if (controller.signal.aborted) {
-      onRepeat();
-      return;
-    }
-    onStop();
-    controller.abort(new Error("scheduler daemon was asked to stop"));
-  };
-  process.on("SIGINT", handler);
-  process.on("SIGTERM", handler);
-  return {
-    controller,
-    release: () => {
-      process.off("SIGINT", handler);
-      process.off("SIGTERM", handler);
-    },
-  };
 }
 
 export default defineCommand({

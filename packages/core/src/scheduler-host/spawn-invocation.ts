@@ -56,7 +56,7 @@ export function createInvocationSpawner(
         },
         stdio: ["ignore", "ignore", logFd],
         windowsHide: true,
-        detached: process.platform !== "win32",
+        detached: true,
       },
     );
     const exited = new Promise<number | null>((resolve) => {

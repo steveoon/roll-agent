@@ -4,6 +4,7 @@ import {
   type ExecutorIdentity,
   type ScheduleStore,
 } from "@roll-agent/runtime";
+import { KILL_PROCESS_TREE_OUTCOMES } from "./executor-liveness.ts";
 import type { InvocationSpawner, SpawnedInvocation } from "./spawn-invocation.ts";
 
 export type { SpawnedInvocation } from "./spawn-invocation.ts";
@@ -26,6 +27,7 @@ export interface SchedulerDaemonOptions {
   readonly maxRunMs?: number;
   readonly childTerminateGraceMs?: number;
   readonly terminateExecutor?: (executor: ExecutorIdentity) => boolean;
+  readonly platform?: NodeJS.Platform;
 }
 
 interface RunningInvocation {
@@ -66,6 +68,7 @@ export class SchedulerDaemon {
   private readonly maxRunMs: number;
   private readonly childTerminateGraceMs: number;
   private readonly terminateExecutor: ((executor: ExecutorIdentity) => boolean) | undefined;
+  private readonly platform: NodeJS.Platform;
   private readonly running = new Map<string, RunningInvocation>();
   private wake = Promise.withResolvers<void>();
   private stopped = false;
@@ -85,6 +88,7 @@ export class SchedulerDaemon {
     this.childTerminateGraceMs =
       options.childTerminateGraceMs ?? SCHEDULER_LIMITS.childTerminateGraceMs;
     this.terminateExecutor = options.terminateExecutor;
+    this.platform = options.platform ?? process.platform;
   }
 
   get runningCount(): number {
@@ -242,11 +246,19 @@ export class SchedulerDaemon {
       return;
     }
     const outcome = entry.handle.kill(signal);
-    if (typeof outcome === "string" && outcome !== "tree-terminated") {
+    if (typeof outcome !== "string") {
+      return;
+    }
+    if (outcome !== KILL_PROCESS_TREE_OUTCOMES.tree) {
       entry.treeKillUnconfirmed = true;
       this.logger.error(
         `invocation ${id} 的 exec 进程树未能整体终止（${outcome}）；退出后将保留 running 而不重试`,
       );
+      return;
+    }
+    if (entry.treeKillUnconfirmed) {
+      entry.treeKillUnconfirmed = false;
+      this.logger.info(`invocation ${id} 的 exec 进程树已在后续 ${signal} 中整体终止`);
     }
   }
 
@@ -319,8 +331,16 @@ export class SchedulerDaemon {
   }
 
   private async terminateChildren(): Promise<void> {
-    for (const id of this.running.keys()) {
-      this.signalChild(id, "SIGTERM");
+    if (this.platform === "win32") {
+      if (this.running.size > 0) {
+        this.logger.info(
+          `Windows 没有优雅终止信号，等待 ${String(this.childTerminateGraceMs)} ms grace 后强制终止 exec 进程树`,
+        );
+      }
+    } else {
+      for (const id of this.running.keys()) {
+        this.signalChild(id, "SIGTERM");
+      }
     }
     await settleWithin(
       [...this.running.values()].map((entry) => entry.handle.exited),
