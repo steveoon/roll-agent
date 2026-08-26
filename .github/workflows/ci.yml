@@ -90,3 +90,21 @@ jobs:
           packages/core/src/cli/chat/ink/app.test.ts
           packages/core/src/cli/utils/current-cli-shim.test.ts
           packages/core/src/skills/library.test.ts
+
+      - name: Scheduler unit tests
+        run: >
+          node --experimental-strip-types --experimental-sqlite --test
+          packages/runtime/src/scheduler/schedule-store.test.ts
+          packages/core/src/registry/process-identity.test.ts
+          packages/core/src/scheduler-host/daemon.test.ts
+          packages/core/src/scheduler-host/executor-liveness.test.ts
+          packages/core/src/scheduler-host/service.test.ts
+          packages/core/src/scheduler-host/stop-signals.test.ts
+          packages/core/src/companion-host/service.test.ts
+          packages/core/src/companion-host/identity.test.ts
+
+      - name: Scheduler E2E smoke (diagnostic, non-blocking)
+        continue-on-error: true
+        run: >
+          node --experimental-strip-types --experimental-sqlite --test
+          packages/core/src/cli/smoke-schedule.e2e.ts
