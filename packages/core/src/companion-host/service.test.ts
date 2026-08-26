@@ -31,7 +31,7 @@ test("macOS plan is a per-user LaunchAgent using only absolute bundled paths", (
     uid: 501,
   });
   assert.equal(plan.domainTarget, "gui/501");
-  assert.match(plan.plistPath, /Library\/LaunchAgents/);
+  assert.match(plan.plistPath, /Library[\\/]LaunchAgents/u);
   assert.match(plan.plist, /<key>RunAtLoad<\/key>/);
   assert.match(plan.plist, /\/Applications\/Roll Companion\.app/);
   assert.doesNotMatch(plan.plist, /ProgramArguments>[\s\S]*<string>roll<\/string>/);

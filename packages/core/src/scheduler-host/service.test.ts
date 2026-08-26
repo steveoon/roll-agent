@@ -1,5 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { join, resolve } from "node:path";
 import { createBundledRollInvocation } from "../companion-host/invocation.ts";
 import {
   createMacOsLaunchAgentPlanForIdentity,
@@ -14,17 +15,17 @@ test("scheduler service identity 指向 roll schedule daemon --foreground", () =
     cliEntrypoint: "/bundle/roll.js",
     execArgv: ["--experimental-strip-types", "--inspect"],
   });
-  const identity = schedulerServiceIdentity(
-    createSchedulerPaths("/Users/tester/.roll-agent/scheduler", "/Users/tester"),
-    invocation,
-    { maxConcurrentRuns: 3 },
-  );
+  const home = "/Users/tester";
+  const dataDir = resolve(home, ".roll-agent", "scheduler");
+  const identity = schedulerServiceIdentity(createSchedulerPaths(dataDir, home), invocation, {
+    maxConcurrentRuns: 3,
+  });
   assert.equal(identity.label, SCHEDULER_SERVICE_LABEL);
   assert.equal(
     identity.plistPath,
-    "/Users/tester/Library/LaunchAgents/dev.roll-agent.scheduler.plist",
+    join(home, "Library", "LaunchAgents", "dev.roll-agent.scheduler.plist"),
   );
-  assert.equal(identity.logPath, "/Users/tester/.roll-agent/scheduler/scheduler.log");
+  assert.equal(identity.logPath, join(dataDir, "scheduler.log"));
   assert.deepEqual(identity.programArguments, [
     "/bundle/node",
     "--experimental-strip-types",
@@ -33,7 +34,7 @@ test("scheduler service identity 指向 roll schedule daemon --foreground", () =
     "daemon",
     "--foreground",
     "--data-dir",
-    "/Users/tester/.roll-agent/scheduler",
+    dataDir,
     "--max-concurrent-runs",
     "3",
   ]);
@@ -47,16 +48,13 @@ test("scheduler identity 携带 Windows XML 路径与显示名", () => {
     cliEntrypoint: "/bundle/roll.js",
     execArgv: [],
   });
-  const identity = schedulerServiceIdentity(
-    createSchedulerPaths("/Users/tester/.roll-agent/scheduler", "/Users/tester"),
-    invocation,
-    { maxConcurrentRuns: 2 },
-  );
+  const home = "/Users/tester";
+  const dataDir = resolve(home, ".roll-agent", "scheduler");
+  const identity = schedulerServiceIdentity(createSchedulerPaths(dataDir, home), invocation, {
+    maxConcurrentRuns: 2,
+  });
   assert.equal(identity.displayName, "roll schedule daemon");
-  assert.equal(
-    identity.windowsTaskXmlPath,
-    "/Users/tester/.roll-agent/scheduler/scheduler-task.xml",
-  );
+  assert.equal(identity.windowsTaskXmlPath, join(dataDir, "scheduler-task.xml"));
 });
 
 test("Windows plan 不再把命令行塞进 /TR，长路径也能注册", () => {

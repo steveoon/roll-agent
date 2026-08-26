@@ -210,7 +210,7 @@ function runLegacyIdentityCommand(command: string, args: readonly string[]): str
       encoding: "utf-8",
       env: { ...process.env, LC_ALL: "C", LANG: "C" },
       shell: false,
-      timeout: 2_000,
+      timeout: identityCommandTimeoutMs(),
       windowsHide: true,
     });
     const stdout = result.stdout.trim();
