@@ -174,3 +174,71 @@ test("多个 alive 孤儿错开到期时，dead 行仍在有限轮内被回收",
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test("alive 孤儿数达到 claimLeaseMs / livenessProbeDeferralMs 时，最久未探活轮换仍保证 dead 行被回收", () => {
+  const dir = mkdtempSync(join(tmpdir(), "roll-probe-budget-"));
+  try {
+    const parked = Math.ceil(
+      SCHEDULER_LIMITS.claimLeaseMs / SCHEDULER_LIMITS.livenessProbeDeferralMs,
+    );
+    const store = new ScheduleStore(dir, {
+      executorLiveness: (executor) => (executor.pid === 9999 ? "dead" : "alive"),
+    });
+    for (let index = 0; index < parked; index += 1) {
+      seedExpiredRunning(store, `alive${String(index)}`, 100 + index);
+    }
+    const dead = seedExpiredRunning(store, "dead-last", 9999);
+    const expiredAt = NOW + SCHEDULER_LIMITS.claimLeaseMs + 1;
+    const tick = SCHEDULER_LIMITS.livenessProbeDeferralMs;
+    let reclaimedAtTick: number | undefined;
+    for (let round = 0; round < parked * 4 && reclaimedAtTick === undefined; round += 1) {
+      const claims = store.claimDue({
+        workerId: "new-daemon",
+        nowMs: expiredAt + round * tick + (round === 0 ? 0 : 1),
+        limit: 5,
+      });
+      if (claims.some((claim) => claim.invocation.id === dead)) {
+        reclaimedAtTick = round;
+      }
+    }
+    assert.equal(reclaimedAtTick, parked);
+    store.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("轮换状态持久化在账本里：换一个 ScheduleStore 实例（daemon 重启）后 dead 行仍优先于刚探过的 alive 行", () => {
+  const dir = mkdtempSync(join(tmpdir(), "roll-probe-budget-"));
+  try {
+    const probedPids: number[] = [];
+    const options = {
+      claimLeaseMs: 20_000,
+      executorLiveness: (executor: { readonly pid: number }) => {
+        probedPids.push(executor.pid);
+        return executor.pid === 1111 ? ("alive" as const) : ("dead" as const);
+      },
+    };
+    const first = new ScheduleStore(dir, options);
+    seedExpiredRunning(first, "alive-first", 1111);
+    const dead = seedExpiredRunning(first, "dead-second", 2222);
+    const expiredAt = NOW + options.claimLeaseMs + 1;
+    assert.deepEqual(first.claimDue({ workerId: "old-daemon", nowMs: expiredAt, limit: 5 }), []);
+    assert.deepEqual(probedPids, [1111]);
+    first.close();
+    const second = new ScheduleStore(dir, options);
+    const claims = second.claimDue({
+      workerId: "new-daemon",
+      nowMs: expiredAt + options.claimLeaseMs + 1,
+      limit: 5,
+    });
+    assert.deepEqual(probedPids, [1111, 2222]);
+    assert.deepEqual(
+      claims.map((claim) => claim.invocation.id),
+      [dead],
+    );
+    second.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

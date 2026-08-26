@@ -88,6 +88,7 @@ interface InvocationRow {
   readonly max_attempts: number;
   readonly executor_pid: number | null;
   readonly executor_start_token: string | null;
+  readonly executor_probed_at: number | null;
   readonly claimed_by: string | null;
   readonly ownership_token: string | null;
   readonly lease_until: number | null;
@@ -234,7 +235,6 @@ export class ScheduleStore {
   private readonly retryBackoffMs: number;
   private readonly executorLiveness: ExecutorLivenessProbe;
   private readonly maxLivenessProbesPerClaim: number;
-  private readonly lastProbedAtMs = new Map<string, number>();
   private readonly livenessProbeDeferralMs: number;
   private readonly invocationRetentionPerSchedule: number;
   private readonly invocationRetentionMs: number;
@@ -313,6 +313,7 @@ export class ScheduleStore {
            max_attempts INTEGER NOT NULL DEFAULT ${String(SCHEDULER_LIMITS.retryBudget)},
            executor_pid INTEGER,
            executor_start_token TEXT,
+           executor_probed_at INTEGER,
            claimed_by TEXT,
            ownership_token TEXT,
            lease_until INTEGER,
@@ -348,6 +349,7 @@ export class ScheduleStore {
       },
       { table: "invocations", column: "executor_pid", definition: "INTEGER" },
       { table: "invocations", column: "executor_start_token", definition: "TEXT" },
+      { table: "invocations", column: "executor_probed_at", definition: "INTEGER" },
     ] as const;
     for (const addition of additions) {
       const existing = (
@@ -670,9 +672,7 @@ export class ScheduleStore {
           !held.has(row.id) &&
           toExecutorIdentity(row) !== undefined,
       );
-      probeCandidates.sort(
-        (a, b) => (this.lastProbedAtMs.get(a.id) ?? -1) - (this.lastProbedAtMs.get(b.id) ?? -1),
-      );
+      probeCandidates.sort((a, b) => (a.executor_probed_at ?? -1) - (b.executor_probed_at ?? -1));
       const probeResults = new Map<string, LivenessProbeResult>();
       let probesLeft = this.maxLivenessProbesPerClaim;
       for (const row of probeCandidates) {
@@ -685,7 +685,9 @@ export class ScheduleStore {
           continue;
         }
         probesLeft -= 1;
-        this.lastProbedAtMs.set(row.id, input.nowMs);
+        this.db
+          .prepare("UPDATE invocations SET executor_probed_at = ? WHERE id = ?")
+          .run(input.nowMs, row.id);
         probeResults.set(
           row.id,
           this.executorLiveness(executor) === EXECUTOR_LIVENESS.dead
@@ -709,7 +711,6 @@ export class ScheduleStore {
             .run(input.nowMs + this.livenessProbeDeferralMs, row.id);
           continue;
         }
-        this.lastProbedAtMs.delete(row.id);
         reclaimable.push(row);
       }
       if (input.limit <= 0) {
@@ -845,7 +846,7 @@ export class ScheduleStore {
       .prepare(
         `UPDATE invocations
            SET status = ?, started_at = ?, lease_until = ?, executor_pid = ?,
-               executor_start_token = ?
+               executor_start_token = ?, executor_probed_at = NULL
          WHERE id = ? AND ownership_token = ? AND status = ?`,
       )
       .run(

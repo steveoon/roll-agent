@@ -100,6 +100,7 @@ jobs:
           packages/core/src/scheduler-host/daemon.test.ts
           packages/core/src/scheduler-host/executor-liveness.test.ts
           packages/core/src/scheduler-host/inline-exit.test.ts
+          packages/core/src/scheduler-host/cancel-descendants.test.ts
           packages/core/src/scheduler-host/service.test.ts
           packages/core/src/scheduler-host/stop-signals.test.ts
           packages/core/src/companion-host/service.test.ts
