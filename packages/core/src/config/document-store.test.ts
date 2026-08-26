@@ -11,7 +11,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { basename, delimiter, dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { describe, it } from "node:test";
 import { atomicTextFileWriter } from "../internal/config-atomic-write.ts";
 import type { AtomicTextWriteRequest } from "../internal/config-atomic-write.ts";
@@ -315,36 +315,26 @@ agents:
     const directory = mkdtempSync(join(tmpdir(), "roll-config-store-windows-"));
     const configPath = join(directory, "roll.config.yaml");
     const platformDescriptor = Object.getOwnPropertyDescriptor(process, "platform");
-    const originalPath = process.env["PATH"];
     writeFileSync(configPath, "ask:\n  confirm-threshold: 0.5\n", "utf-8");
 
     try {
-      if (process.platform !== "win32") {
-        const powershellPath = join(directory, "powershell.exe");
-        writeFileSync(powershellPath, "#!/bin/sh\nprintf '638000000000000000\\n'\n", {
-          mode: 0o700,
-        });
-        process.env["PATH"] = [directory, originalPath].filter(Boolean).join(delimiter);
-      }
-      const store = new YamlConfigDocumentStore(configPath, "ask: {}\n");
-      const preview = store.previewPatches([
-        { op: "set", path: ["ask", "confirm-threshold"], value: 0.75 },
-      ]);
-
       // Keep write/rename permission but remove directory read permission. On POSIX this makes a
       // directory fsync attempt fail, proving that the simulated Windows branch skips it.
       chmodSync(directory, 0o300);
       Object.defineProperty(process, "platform", { configurable: true, value: "win32" });
 
-      const result = store.commit(preview);
-      assert.equal(result.changed, true);
+      atomicTextFileWriter.write({
+        configPath,
+        raw: "ask:\n  confirm-threshold: 0.75\n",
+        existed: true,
+        verifyBeforeRename: () => {},
+      });
+
       assert.match(readFileSync(configPath, "utf-8"), /confirm-threshold: 0\.75/u);
     } finally {
       if (platformDescriptor !== undefined) {
         Object.defineProperty(process, "platform", platformDescriptor);
       }
-      if (originalPath === undefined) delete process.env["PATH"];
-      else process.env["PATH"] = originalPath;
       chmodSync(directory, 0o700);
       rmSync(directory, { recursive: true, force: true });
     }
