@@ -67,4 +67,8 @@ test("parseWindowsUserSid 从 whoami csv 输出提取并大写 SID", () => {
     parseWindowsUserSid('"DESKTOP\\tester","S-1-5-21-1-2-3-1001"\r\n\r\n'),
     "S-1-5-21-1-2-3-1001",
   );
+  assert.equal(
+    parseWindowsUserSid('"User Name","SID"\r\n"DESKTOP\\t","S-1-5-21-7"\r\n'),
+    "S-1-5-21-7",
+  );
 });

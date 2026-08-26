@@ -6,6 +6,7 @@ import {
   INLINE_EXIT_DECISIONS,
   createInlineStopForwarder,
   settleInlineInvocation,
+  type InlineExitDecision,
 } from "../../scheduler-host/inline-exit.ts";
 import { createSchedulerPaths } from "../../scheduler-host/paths.ts";
 import { createInvocationSpawner } from "../../scheduler-host/spawn-invocation.ts";
@@ -79,7 +80,7 @@ export default defineCommand({
         const renew = setInterval(() => {
           store.renewLease(claim.invocation.id, claim.ownershipToken);
         }, runtime.SCHEDULER_LIMITS.leaseRenewIntervalMs);
-        let decision;
+        let decision: InlineExitDecision | undefined;
         try {
           let code: number | null;
           try {
@@ -98,7 +99,7 @@ export default defineCommand({
         } finally {
           stop.release();
         }
-        if (decision !== INLINE_EXIT_DECISIONS.fail) {
+        if (decision !== undefined && decision !== INLINE_EXIT_DECISIONS.fail) {
           log.warn(
             decision === INLINE_EXIT_DECISIONS.holdUnconfirmedKill
               ? "exec 根进程已退出，但对其进程树的终止未被确认；保留 running，不释放单例（可用 roll schedule cancel --kill 收尾）"

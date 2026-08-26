@@ -26,6 +26,7 @@ export interface SchedulerDaemonOptions {
   readonly maxTimerDelayMs?: number;
   readonly maxRunMs?: number;
   readonly childTerminateGraceMs?: number;
+  readonly urgentStopSettleMs?: number;
   readonly terminateExecutor?: (executor: ExecutorIdentity) => boolean;
   readonly platform?: NodeJS.Platform;
 }
@@ -41,6 +42,13 @@ const MAX_TIMER_DELAY_MS = 2_147_483_647;
 const URGENT_STOP_SETTLE_MS = 2_000;
 
 export const URGENT_STOP_REASON = "scheduler-daemon-urgent-stop" as const;
+
+export function stopReasonFor(
+  signal: NodeJS.Signals,
+  platform: NodeJS.Platform = process.platform,
+): typeof URGENT_STOP_REASON | undefined {
+  return platform === "win32" && signal === "SIGHUP" ? URGENT_STOP_REASON : undefined;
+}
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
@@ -70,6 +78,7 @@ export class SchedulerDaemon {
   private readonly maxTimerDelayMs: number;
   private readonly maxRunMs: number;
   private readonly childTerminateGraceMs: number;
+  private readonly urgentStopSettleMs: number;
   private readonly terminateExecutor: ((executor: ExecutorIdentity) => boolean) | undefined;
   private readonly platform: NodeJS.Platform;
   private readonly running = new Map<string, RunningInvocation>();
@@ -91,6 +100,7 @@ export class SchedulerDaemon {
     this.maxRunMs = options.maxRunMs ?? SCHEDULER_LIMITS.maxRunMs;
     this.childTerminateGraceMs =
       options.childTerminateGraceMs ?? SCHEDULER_LIMITS.childTerminateGraceMs;
+    this.urgentStopSettleMs = options.urgentStopSettleMs ?? URGENT_STOP_SETTLE_MS;
     this.terminateExecutor = options.terminateExecutor;
     this.platform = options.platform ?? process.platform;
   }
@@ -343,7 +353,7 @@ export class SchedulerDaemon {
       }
       await settleWithin(
         [...this.running.values()].map((entry) => entry.handle.exited),
-        URGENT_STOP_SETTLE_MS,
+        this.urgentStopSettleMs,
       );
       this.releaseUnconfirmed();
       return;

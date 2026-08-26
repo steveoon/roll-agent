@@ -3,6 +3,11 @@ import type { ExecutorIdentity } from "@roll-agent/runtime";
 import { defineCommand } from "citty";
 import { loadConfig } from "../../config/loader.ts";
 import {
+  KILL_RESULTS,
+  descendantsUnverified,
+  type KillResult,
+} from "../../scheduler-host/cancel-descendants.ts";
+import {
   KILL_PROCESS_TREE_OUTCOMES,
   probeExecutorLiveness,
   terminateExecutor,
@@ -18,14 +23,6 @@ import {
 
 const KILL_CONFIRM_TIMEOUT_MS = 5_000;
 const KILL_CONFIRM_POLL_MS = 100;
-
-const KILL_RESULTS = {
-  confirmed: "confirmed",
-  treeKillFailed: "tree-kill-failed",
-  stillAlive: "still-alive",
-  unverifiable: "unverifiable",
-} as const;
-type KillResult = (typeof KILL_RESULTS)[keyof typeof KILL_RESULTS];
 
 async function killAndConfirmExit(executor: ExecutorIdentity): Promise<KillResult> {
   const outcome = terminateExecutor(executor);
@@ -128,15 +125,25 @@ export default defineCommand({
         if (after === undefined) {
           throw new Error(`invocation ${args.invocation} 不存在`);
         }
+        const unverifiedDescendants = descendantsUnverified({
+          killResult,
+          killed,
+          platform: process.platform,
+        });
         if (args.json) {
-          printJson({ ...serializeInvocation(after), killed, abandoned: args.abandon });
+          printJson({
+            ...serializeInvocation(after),
+            killed,
+            abandoned: args.abandon,
+            unverifiedDescendants,
+          });
           return;
         }
         log.success(`已取消 invocation ${after.id}（原状态 ${before.status}）`);
         if (killed) {
           log.info(`exec 进程树 (pid ${String(before.executor?.pid ?? "?")}) 已终止并确认退出`);
         }
-        if (killResult === KILL_RESULTS.unverifiable || (killed && process.platform === "win32")) {
+        if (unverifiedDescendants) {
           log.warn(
             "Windows 无法验证 exec 后代进程是否退出；已按根进程退出取消，若有残留子进程请手动检查",
           );

@@ -9,7 +9,7 @@ import {
   AgentLifecycleBusyError,
   acquireAgentLifecycleLock,
 } from "../../registry/process-manager.ts";
-import { SchedulerDaemon, URGENT_STOP_REASON } from "../../scheduler-host/daemon.ts";
+import { SchedulerDaemon, stopReasonFor } from "../../scheduler-host/daemon.ts";
 import {
   createDaemonRecord,
   removeDaemonRecord,
@@ -116,9 +116,10 @@ export default defineCommand({
       );
       const stop = installStopSignals(
         (signal) => {
-          if (process.platform === "win32" && signal === "SIGHUP") {
+          const reason = stopReasonFor(signal);
+          if (reason !== undefined) {
             logger.info("控制台窗口关闭，Windows 只给数秒；立即强制终止 exec 子进程树");
-            return URGENT_STOP_REASON;
+            return reason;
           }
           logger.info(`收到 ${signal}，等待 exec 子进程退出…`);
           return undefined;

@@ -112,23 +112,24 @@ test("超过 maxSchedules、非法 name/prompt/cwd 都被拒绝", () => {
   }
 });
 
-test("ScheduleStore 在 POSIX 上收紧目录与数据库权限", () => {
-  if (process.platform === "win32") {
-    return;
-  }
-  const parent = tempDir();
-  const dir = join(parent, "nested", "scheduler");
-  try {
-    chmodSync(parent, 0o755);
-    mkdirSync(dir, { recursive: true, mode: 0o755 });
-    const store = new ScheduleStore(dir);
-    assert.equal(statSync(dir).mode & 0o777, 0o700);
-    assert.equal(statSync(join(dir, "schedules.db")).mode & 0o777, 0o600);
-    store.close();
-  } finally {
-    rmSync(parent, { recursive: true, force: true });
-  }
-});
+test(
+  "ScheduleStore 在 POSIX 上收紧目录与数据库权限",
+  { skip: process.platform === "win32" },
+  () => {
+    const parent = tempDir();
+    const dir = join(parent, "nested", "scheduler");
+    try {
+      chmodSync(parent, 0o755);
+      mkdirSync(dir, { recursive: true, mode: 0o755 });
+      const store = new ScheduleStore(dir);
+      assert.equal(statSync(dir).mode & 0o777, 0o700);
+      assert.equal(statSync(join(dir, "schedules.db")).mode & 0o777, 0o600);
+      store.close();
+    } finally {
+      rmSync(parent, { recursive: true, force: true });
+    }
+  },
+);
 
 test("claimDue 为到期 schedule 生成 invocation 并把 nextRunAt 从 now 重锚", () => {
   const dir = tempDir();

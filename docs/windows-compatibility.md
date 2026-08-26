@@ -151,7 +151,7 @@ Chat 模式要点：
 | 🔴 | Windows 任务无失败重启、默认 72 小时运行上限、电池供电不启动 | `companion-host/service.ts` | ✅ 已修复：XML 声明 `RestartOnFailure PT1M×3`、`ExecutionTimeLimit PT0S`、`DisallowStartIfOnBatteries=false` |
 | 🟠 | 进程启动身份经 PATH 上的 `powershell.exe` 读取，超时 2 s，exec 侧失败直接把任务 `paused` | `registry/process-identity.ts` | ✅ 已修复：只信任 SystemRoot / ProgramFiles 绝对路径，Windows 超时 8 s，exec 先重试一次 |
 | 🟠 | `taskkill /T`（无 `/F`）对控制台进程恒失败，daemon 每次停止都把在跑记录留成 `running` | `scheduler-host/daemon.ts` | ✅ 已修复：树终止标志采用最近一次结果；win32 跳过 SIGTERM 阶段 |
-| 🟠 | exec 子进程与 daemon 共享控制台，Ctrl+C 直接杀 exec | `scheduler-host/spawn-invocation.ts` | ✅ 已修复：win32 也 `detached`（🔬 真机确认 DETACHED_PROCESS 隔离 Ctrl+C）；代价：exec 脱离 libuv job object，daemon 死亡不再由它连带结束 exec（Task Scheduler 自身 job 是否仍覆盖需真机确认），由探活规则与 1 小时上限收尾 |
+| 🟠 | exec 子进程与 daemon 共享控制台，Ctrl+C 直接杀 exec | `scheduler-host/spawn-invocation.ts` | ✅ 已修复：win32 也 `detached`（🔬 真机确认 DETACHED_PROCESS 隔离 Ctrl+C）；代价：exec 脱离 libuv job object，daemon 死亡不再由它连带结束 exec（🔬 需真机确认，含 Task Scheduler 自身 job 是否仍覆盖），由探活规则与 1 小时上限收尾 |
 | 🟠 | `schtasks /End` = TerminateProcess，无优雅停止 | Task Scheduler 语义 | ⚠️ 平台限制：`/End` 不投递任何信号，文档分平台说明；在跑的 exec 不随 daemon 结束，自己写结果或由探活规则收尾 |
 | 🟡 | 关闭 daemon 控制台窗口（SIGHUP）后 Windows 只给数秒，10 s grace 走不完 | `scheduler-host/daemon.ts` | ✅ 已修复：SIGHUP 触发紧急停止，跳过 grace 立即 `taskkill /T /F`（Ctrl+Break 走常规 grace） |
 | 🟡 | 登录后出现常驻控制台窗口，关窗 10 s 后 daemon 被杀 | `InteractiveToken` 登录类型 | 🔬 待真机评估 `S4U` 登录类型（无窗口，但需确认用户环境变量可用） |

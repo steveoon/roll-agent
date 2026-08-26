@@ -234,6 +234,7 @@ export class ScheduleStore {
   private readonly retryBackoffMs: number;
   private readonly executorLiveness: ExecutorLivenessProbe;
   private readonly maxLivenessProbesPerClaim: number;
+  private readonly lastProbedAtMs = new Map<string, number>();
   private readonly livenessProbeDeferralMs: number;
   private readonly invocationRetentionPerSchedule: number;
   private readonly invocationRetentionMs: number;
@@ -663,27 +664,39 @@ export class ScheduleStore {
           input.nowMs,
         ) as unknown as LiveInvocationRow[];
       const reclaimable: LiveInvocationRow[] = [];
+      const probeCandidates = liveRows.filter(
+        (row) =>
+          row.status === INVOCATION_STATUSES.running &&
+          !held.has(row.id) &&
+          toExecutorIdentity(row) !== undefined,
+      );
+      probeCandidates.sort(
+        (a, b) => (this.lastProbedAtMs.get(a.id) ?? -1) - (this.lastProbedAtMs.get(b.id) ?? -1),
+      );
+      const probeResults = new Map<string, LivenessProbeResult>();
       let probesLeft = this.maxLivenessProbesPerClaim;
-      const probeExecutor = (executor: ExecutorIdentity): LivenessProbeResult => {
+      for (const row of probeCandidates) {
+        const executor = toExecutorIdentity(row);
+        if (executor === undefined) {
+          continue;
+        }
         if (probesLeft <= 0) {
-          return LIVENESS_PROBE_RESULTS.deferred;
+          probeResults.set(row.id, LIVENESS_PROBE_RESULTS.deferred);
+          continue;
         }
         probesLeft -= 1;
-        return this.executorLiveness(executor) === EXECUTOR_LIVENESS.dead
-          ? LIVENESS_PROBE_RESULTS.dead
-          : LIVENESS_PROBE_RESULTS.notDead;
-      };
+        this.lastProbedAtMs.set(row.id, input.nowMs);
+        probeResults.set(
+          row.id,
+          this.executorLiveness(executor) === EXECUTOR_LIVENESS.dead
+            ? LIVENESS_PROBE_RESULTS.dead
+            : LIVENESS_PROBE_RESULTS.notDead,
+        );
+      }
       for (const row of liveRows) {
         const inFlight =
           row.status === INVOCATION_STATUSES.claimed || row.status === INVOCATION_STATUSES.running;
-        const executor = toExecutorIdentity(row);
-        const probe =
-          inFlight &&
-          !held.has(row.id) &&
-          row.status === INVOCATION_STATUSES.running &&
-          executor !== undefined
-            ? probeExecutor(executor)
-            : undefined;
+        const probe = probeResults.get(row.id);
         if (inFlight && (held.has(row.id) || probe === LIVENESS_PROBE_RESULTS.notDead)) {
           this.db
             .prepare("UPDATE invocations SET lease_until = ? WHERE id = ?")
@@ -696,6 +709,7 @@ export class ScheduleStore {
             .run(input.nowMs + this.livenessProbeDeferralMs, row.id);
           continue;
         }
+        this.lastProbedAtMs.delete(row.id);
         reclaimable.push(row);
       }
       if (input.limit <= 0) {

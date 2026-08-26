@@ -10,7 +10,12 @@ import {
   createIntervalTrigger,
   type ClaimedInvocation,
 } from "@roll-agent/runtime";
-import { SchedulerDaemon, URGENT_STOP_REASON, type SpawnedInvocation } from "./daemon.ts";
+import {
+  SchedulerDaemon,
+  URGENT_STOP_REASON,
+  stopReasonFor,
+  type SpawnedInvocation,
+} from "./daemon.ts";
 
 const NOW = Date.parse("2026-08-25T09:00:00.000Z");
 
@@ -690,6 +695,62 @@ test("紧急停止（Windows 控制台关闭）不等待 grace，立即整体终
     assert.deepEqual(signals, ["SIGKILL"]);
     assert.ok(lines.some((line) => /紧急停止/u.test(line)));
     assert.equal(daemon.runningCount, 0);
+    store.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("stopReasonFor：只有 Windows 上的 SIGHUP 触发紧急停止", () => {
+  assert.equal(stopReasonFor("SIGHUP", "win32"), URGENT_STOP_REASON);
+  assert.equal(stopReasonFor("SIGBREAK", "win32"), undefined);
+  assert.equal(stopReasonFor("SIGINT", "win32"), undefined);
+  assert.equal(stopReasonFor("SIGTERM", "win32"), undefined);
+  assert.equal(stopReasonFor("SIGHUP", "darwin"), undefined);
+  assert.equal(stopReasonFor("SIGHUP", "linux"), undefined);
+});
+
+test("紧急停止时子进程在 settle 窗口内未退出：释放 daemon 但记录保持 running", async () => {
+  const dir = tempDir();
+  try {
+    const store = new ScheduleStore(dir, { executorLiveness: () => "unknown" });
+    const schedule = addDueSchedule(store, "a");
+    const { logger, lines } = silentLogger();
+    const signals: string[] = [];
+    const daemon = new SchedulerDaemon({
+      store,
+      workerId: "w1",
+      maxConcurrentRuns: 1,
+      logger,
+      now: () => NOW,
+      platform: "win32",
+      childTerminateGraceMs: 5_000,
+      urgentStopSettleMs: 20,
+      spawnInvocation: (claim): SpawnedInvocation => {
+        store.beginInvocation(claim.invocation.id, claim.ownershipToken, NOW, {
+          pid: 4242,
+          startToken: "pst-v2:root",
+        });
+        return {
+          exited: new Promise(() => {}),
+          kill: (signal) => {
+            signals.push(signal);
+            return "tree-terminated";
+          },
+        };
+      },
+    });
+    const controller = new AbortController();
+    const running = daemon.run(controller.signal);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    const startedAt = Date.now();
+    controller.abort(URGENT_STOP_REASON);
+    await running;
+    assert.ok(Date.now() - startedAt < 1_000);
+    assert.deepEqual(signals, ["SIGKILL"]);
+    assert.equal(daemon.runningCount, 0);
+    assert.equal(store.listInvocations(schedule.id)[0]?.status, INVOCATION_STATUSES.running);
+    assert.ok(lines.some((line) => /退出未确认/u.test(line)));
     store.close();
   } finally {
     rmSync(dir, { recursive: true, force: true });
