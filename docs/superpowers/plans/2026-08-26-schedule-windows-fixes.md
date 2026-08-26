@@ -1328,3 +1328,16 @@ git branch -d fix/schedule-windows
 - **Spec coverage**：W1 W2 W11 W13 → T1；W3 → T2；W4 W5 W6（daemon 侧）→ T3；W6（文档）W9 W10 → T4；W12 → T5；W7（登录黑窗）W8（后代探测）明确不在本轮，记入 windows-compatibility.md 待真机 / 可选项。
 - **Placeholder scan**：所有代码步骤均给出完整代码；无 TBD。
 - **Type consistency**：`WindowsTaskPrincipal { userId }` 在 T1 定义并在测试中使用；`SchedulerDaemonOptions.platform` 在 T3 定义与测试一致；`installStopSignals` 的 `target` 参数类型 `Pick<NodeJS.Process, "on" | "off">` 与测试的 fake 一致；`KILL_RESULTS.unverifiable` 已存在于 schedule-cancel.ts。
+
+---
+
+## 执行偏差记录（2026-08-26，实施后）
+
+- Task 1：`escapeXmlText` 只转义 `& < >`（计划初稿用了会把引号转成 `&quot;` 的 `escapeXml`）；scheduler 侧 Windows plan 测试中 `<Command>` 断言改为平台无关写法（macOS 上 `createBundledRollInvocation` 会用 POSIX `resolve` 处理 Windows 路径）
+- Task 2：`resolveTrustedWindowsPowerShellExecutables` 额外接受 `WINDIR`，只用第一个存在的候选；新增 `identityCommandTimeoutMs(platform)` seam；exec 侧 `readExecutorIdentityWithRetry`。`packages/core/src/config/document-store.test.ts` 原本靠 PATH 上的假 `powershell.exe` 模拟 Windows，正是本轮移除的行为，已改为直接测 `atomicTextFileWriter.write` 的 win32 分支（commit() 路径在模拟 win32 下不再覆盖）；接线回归测试用「cwd 下反斜杠命名的可信文件 + PATH 影子」证明不再走 PATH
+- Task 3：超出计划的部分——`inline-exit.ts`（`decideInlineExit` / `createInlineStopForwarder` / `settleInlineInvocation`）、`SpawnedInvocation.kill(signal)` 改为必填、`installStopSignals(onStop(signal) → abort reason, onRepeat(signal))`、daemon `URGENT_STOP_REASON`（Windows SIGHUP 跳过 grace）、`treeKillUnconfirmed` 最近结果语义之外 inline 侧 `tree-terminated` 粘性 + 退出后封口
+- 计划文件表之外：`packages/runtime/src/scheduler/schedule-store.ts` / `limits.ts` 新增 `maxLivenessProbesPerClaim`（默认 1）与 `livenessProbeDeferralMs`（15 s），`claimDue` 每事务最多探活 1 个过期 running 行；`companion-host/identity.ts` SID 改为取 `whoami` CSV 最后一列
+- Task 5：windows-latest 单测清单扩到 12 个文件（含 `windows-system` / `windows-powershell` / `inline-exit` / `schedule-store-probe-budget`），诊断性 e2e 加 `timeout-minutes: 5`；`process-identity.test.ts` 的 PATH 影子用例在 win32 用 `skip` 而非静默 return
+- Task 6：`pnpm format:check` 在 `dev` 上本来就有 64 个文件不合格（`.gitnexus/` 缓存、`agents/browser-use/src`、`.claude/skills/.../*.mjs` 等，均早于本分支），本分支全部改动文件单独 `prettier --check` 通过；`detect_changes({scope:"compare", base_ref:"dev"})` 两次结果均只触及 Companion-host / Scheduler-host / Registry(win32) / Commands(schedule-*) / runtime scheduler，风险 high 来自 `ScheduleStore.claimDue` 与 `SchedulerDaemon.run`
+- 未做（记入 spec 待拍板）：W7 登录黑窗（待真机评估 S4U）、W8 后代探测、bash 工具命令自成 session 不在 exec 进程组内、Windows `service stop` 对 detached exec 的补偿终止
+

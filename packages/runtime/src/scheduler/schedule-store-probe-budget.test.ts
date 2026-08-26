@@ -51,9 +51,19 @@ test("claimDue 每个事务最多探活 maxLivenessProbesPerClaim 个过期 runn
       [first],
     );
     assert.equal(store.getInvocation(second)?.status, "running");
+    assert.deepEqual(
+      store.claimDue({
+        workerId: "new-daemon",
+        nowMs: expiredAt + SCHEDULER_LIMITS.livenessProbeDeferralMs - 1,
+        limit: 5,
+        heldInvocationIds: new Set([first]),
+      }),
+      [],
+    );
+    assert.equal(probes, 1);
     const round2 = store.claimDue({
       workerId: "new-daemon",
-      nowMs: expiredAt + SCHEDULER_LIMITS.claimLeaseMs + 1,
+      nowMs: expiredAt + SCHEDULER_LIMITS.livenessProbeDeferralMs + 1,
       limit: 5,
       heldInvocationIds: new Set([first]),
     });

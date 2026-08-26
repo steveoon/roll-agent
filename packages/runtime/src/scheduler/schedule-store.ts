@@ -44,6 +44,13 @@ const SCHEMA_VERSION = 2;
 const BUSY_TIMEOUT_MS = 15_000;
 const TERMINAL_STATUS_PLACEHOLDERS = INVOCATION_TERMINAL_STATUSES.map(() => "?").join(", ");
 
+const LIVENESS_PROBE_RESULTS = {
+  dead: "dead",
+  notDead: "not-dead",
+  deferred: "deferred",
+} as const;
+type LivenessProbeResult = (typeof LIVENESS_PROBE_RESULTS)[keyof typeof LIVENESS_PROBE_RESULTS];
+
 export interface ScheduleStoreOptions {
   readonly maxSchedules?: number;
   readonly claimLeaseMs?: number;
@@ -51,6 +58,7 @@ export interface ScheduleStoreOptions {
   readonly retryBackoffMs?: number;
   readonly executorLiveness?: ExecutorLivenessProbe;
   readonly maxLivenessProbesPerClaim?: number;
+  readonly livenessProbeDeferralMs?: number;
   readonly invocationRetentionPerSchedule?: number;
   readonly invocationRetentionMs?: number;
 }
@@ -226,6 +234,7 @@ export class ScheduleStore {
   private readonly retryBackoffMs: number;
   private readonly executorLiveness: ExecutorLivenessProbe;
   private readonly maxLivenessProbesPerClaim: number;
+  private readonly livenessProbeDeferralMs: number;
   private readonly invocationRetentionPerSchedule: number;
   private readonly invocationRetentionMs: number;
 
@@ -237,6 +246,8 @@ export class ScheduleStore {
     this.executorLiveness = options.executorLiveness ?? (() => EXECUTOR_LIVENESS.unknown);
     this.maxLivenessProbesPerClaim =
       options.maxLivenessProbesPerClaim ?? SCHEDULER_LIMITS.maxLivenessProbesPerClaim;
+    this.livenessProbeDeferralMs =
+      options.livenessProbeDeferralMs ?? SCHEDULER_LIMITS.livenessProbeDeferralMs;
     this.invocationRetentionPerSchedule =
       options.invocationRetentionPerSchedule ?? SCHEDULER_LIMITS.invocationRetentionPerSchedule;
     this.invocationRetentionMs =
@@ -653,27 +664,36 @@ export class ScheduleStore {
         ) as unknown as LiveInvocationRow[];
       const reclaimable: LiveInvocationRow[] = [];
       let probesLeft = this.maxLivenessProbesPerClaim;
-      const executorMayBeAlive = (executor: ExecutorIdentity): boolean => {
+      const probeExecutor = (executor: ExecutorIdentity): LivenessProbeResult => {
         if (probesLeft <= 0) {
-          return true;
+          return LIVENESS_PROBE_RESULTS.deferred;
         }
         probesLeft -= 1;
-        return this.executorLiveness(executor) !== EXECUTOR_LIVENESS.dead;
+        return this.executorLiveness(executor) === EXECUTOR_LIVENESS.dead
+          ? LIVENESS_PROBE_RESULTS.dead
+          : LIVENESS_PROBE_RESULTS.notDead;
       };
       for (const row of liveRows) {
         const inFlight =
           row.status === INVOCATION_STATUSES.claimed || row.status === INVOCATION_STATUSES.running;
         const executor = toExecutorIdentity(row);
-        if (
+        const probe =
           inFlight &&
-          (held.has(row.id) ||
-            (row.status === INVOCATION_STATUSES.running &&
-              executor !== undefined &&
-              executorMayBeAlive(executor)))
-        ) {
+          !held.has(row.id) &&
+          row.status === INVOCATION_STATUSES.running &&
+          executor !== undefined
+            ? probeExecutor(executor)
+            : undefined;
+        if (inFlight && (held.has(row.id) || probe === LIVENESS_PROBE_RESULTS.notDead)) {
           this.db
             .prepare("UPDATE invocations SET lease_until = ? WHERE id = ?")
             .run(input.nowMs + this.claimLeaseMs, row.id);
+          continue;
+        }
+        if (probe === LIVENESS_PROBE_RESULTS.deferred) {
+          this.db
+            .prepare("UPDATE invocations SET lease_until = ? WHERE id = ?")
+            .run(input.nowMs + this.livenessProbeDeferralMs, row.id);
           continue;
         }
         reclaimable.push(row);
