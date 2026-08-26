@@ -84,12 +84,14 @@ export default defineCommand({
           throw new Error(`invocation ${args.invocation} 不存在`);
         }
         let killed = false;
+        let killResult: KillResult | undefined;
         if (
           args.kill &&
           before.status === runtime.INVOCATION_STATUSES.running &&
           before.executor !== undefined
         ) {
           const result = await killAndConfirmExit(before.executor);
+          killResult = result;
           if (result === KILL_RESULTS.treeKillFailed) {
             throw new Error(
               `无法整体终止 invocation ${args.invocation} 的 exec 进程树（pid ${String(before.executor.pid)}；Windows 上 taskkill 失败或进程不是进程组首领），未取消、未释放单例`,
@@ -133,6 +135,11 @@ export default defineCommand({
         log.success(`已取消 invocation ${after.id}（原状态 ${before.status}）`);
         if (killed) {
           log.info(`exec 进程树 (pid ${String(before.executor?.pid ?? "?")}) 已终止并确认退出`);
+        }
+        if (killResult === KILL_RESULTS.unverifiable) {
+          log.warn(
+            "Windows 无法验证 exec 后代进程是否退出；已按根进程退出取消，若有残留子进程请手动检查",
+          );
         }
         if (args.abandon) {
           log.warn("已按 --abandon 释放单例；若旧 exec 进程仍在运行，其副作用不会被阻止");
