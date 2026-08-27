@@ -286,6 +286,7 @@ const OCCUPYING_RUN_PARAMS = [
   INVOCATION_STATUSES.running,
   INVOCATION_STATUSES.retry,
 ] as const;
+const TREE_BEARING_STATUSES: readonly string[] = OCCUPYING_RUN_PARAMS;
 
 function toExecutorIdentity(row: InvocationRow): ExecutorIdentity | undefined {
   return row.executor_pid !== null && row.executor_start_token !== null
@@ -895,7 +896,11 @@ export class ScheduleStore {
       ) {
         return CANCEL_INVOCATION_OUTCOMES.treeUnsettled;
       }
-      if (input.tree !== undefined) {
+      if (
+        input.tree !== undefined &&
+        row !== undefined &&
+        TREE_BEARING_STATUSES.includes(row.status)
+      ) {
         const written = this.writeInvocationTreeInTransaction({
           id: input.id,
           unsettled: input.tree.unsettled,

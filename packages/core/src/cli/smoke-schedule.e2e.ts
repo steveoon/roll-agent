@@ -319,6 +319,27 @@ test("e2e: roll schedule cancel 对排队/运行/不可验证三种状态分别�
     const again = runRoll(["schedule", "cancel", pending.id], workspace, { env });
     assert.equal(again.status, 1);
     assert.match(again.stderr, /终态/u);
+    const againKill = runRoll(["schedule", "cancel", pending.id, "--kill"], workspace, { env });
+    assert.equal(againKill.status, 1);
+    assert.match(againKill.stderr, /终态/u);
+
+    const queuedKillScheduleId = addSchedule("排队后 --kill");
+    const queuedKill = runRoll(["schedule", "run-now", queuedKillScheduleId, "--json"], workspace, {
+      env,
+    });
+    assert.equal(queuedKill.status, 0, queuedKill.stderr);
+    const pendingKill = JSON.parse(queuedKill.stdout) as InvocationJson;
+    assert.equal(pendingKill.status, "pending");
+    const cancelledKill = runRoll(
+      ["schedule", "cancel", pendingKill.id, "--kill", "--json"],
+      workspace,
+      { env },
+    );
+    assert.equal(cancelledKill.status, 0, cancelledKill.stderr);
+    const afterKill = JSON.parse(cancelledKill.stdout) as InvocationJson & { killed: boolean };
+    assert.equal(afterKill.status, "failed");
+    assert.match(afterKill.error ?? "", /已由用户取消/u);
+    assert.equal(afterKill.killed, false);
 
     sleeper = spawn(process.execPath, ["-e", "setTimeout(() => {}, 60000)"], {
       stdio: "ignore",

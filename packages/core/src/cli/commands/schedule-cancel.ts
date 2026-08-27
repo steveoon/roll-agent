@@ -152,9 +152,14 @@ export default defineCommand({
             }
           | undefined;
         let teardownError: string | undefined;
+        const treeBearing =
+          before.status === runtime.INVOCATION_STATUSES.claimed ||
+          before.status === runtime.INVOCATION_STATUSES.running ||
+          before.status === runtime.INVOCATION_STATUSES.retry;
         if (
           args.kill &&
           !args.abandon &&
+          treeBearing &&
           (before.status !== runtime.INVOCATION_STATUSES.running ||
             before.executor === undefined ||
             killed)

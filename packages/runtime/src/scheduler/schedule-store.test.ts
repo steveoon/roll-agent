@@ -1786,6 +1786,30 @@ test("无 ownership/revision 的 tree write 不能覆盖 claimed/running；stale
   }
 });
 
+test("finalizeCancellation：pending 行不持有进程树，带 tree 的取消直接置终态；终态行返回 terminal", () => {
+  const dir = tempDir();
+  try {
+    const store = new ScheduleStore(dir, { treeLiveness: () => "settled" });
+    const schedule = store.createSchedule(sampleInput(), NOW);
+    const pending = store.enqueueManualInvocation(schedule.id, NOW);
+    assert.equal(pending.status, INVOCATION_STATUSES.pending);
+    const finalize = () =>
+      store.finalizeCancellation({
+        id: pending.id,
+        reason: "已由用户取消",
+        nowMs: NOW + 1,
+        expectedAttempt: pending.attempt,
+        tree: { trackedGroups: [], unsettled: false, survivorPids: [] },
+      });
+    assert.equal(finalize(), CANCEL_INVOCATION_OUTCOMES.cancelled);
+    assert.equal(store.getInvocation(pending.id)?.status, INVOCATION_STATUSES.failed);
+    assert.equal(finalize(), CANCEL_INVOCATION_OUTCOMES.terminal);
+    store.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("prepareWorkerShutdown 对带未清树的 claimed 行不写终态", () => {
   const dir = tempDir();
   try {
