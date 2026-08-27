@@ -448,7 +448,9 @@ test("teardownTree 抛异常按 unavailable 处理：preflight 时 failInvocatio
     });
     assert.ok(result.kind === EXECUTE_INVOCATION_KINDS.failed);
     assert.match(result.error, /无法枚举/u);
+    assert.match(result.error, /ENOENT: \/proc/u);
     assert.equal(reports[0]?.outcome, INVOCATION_TREE_TEARDOWN_OUTCOMES.unavailable);
+    assert.equal(reports[0]?.error, "ENOENT: /proc");
     assert.equal(store.getInvocation(claim.invocation.id)?.status, INVOCATION_STATUSES.retry);
     store.close();
   } finally {

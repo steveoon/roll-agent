@@ -9,6 +9,7 @@ import {
 } from "../../scheduler-host/execute-invocation.ts";
 import { readExecutorIdentityWithRetry } from "../../scheduler-host/executor-liveness.ts";
 import {
+  INVOCATION_TREE_TEARDOWN_OUTCOMES,
   ProcessGroupLedger,
   terminateInvocationTree,
   type InvocationTreeTeardown,
@@ -41,6 +42,11 @@ function reportTeardown(
   if (report.skippedReusedGroups.length > 0) {
     log.warn(
       `invocation ${invocationId} 登记的进程组 ${report.skippedReusedGroups.map(String).join(", ")} 首领 PID 已被复用，跳过`,
+    );
+  }
+  if (report.outcome === INVOCATION_TREE_TEARDOWN_OUTCOMES.unavailable) {
+    log.error(
+      `invocation ${invocationId} ${PHASE_LABELS[phase]}无法枚举进程树${report.error === undefined ? "" : `：${report.error}`}`,
     );
   }
 }

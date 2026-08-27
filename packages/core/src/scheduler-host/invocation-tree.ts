@@ -248,6 +248,7 @@ export interface InvocationTreeTeardown {
   readonly terminatedPids: readonly number[];
   readonly survivorPids: readonly number[];
   readonly skippedReusedGroups: readonly number[];
+  readonly error?: string;
 }
 
 export interface TerminateInvocationTreeDeps {
@@ -284,7 +285,13 @@ export async function terminateInvocationTree(
     return emptyTeardown(INVOCATION_TREE_TEARDOWN_OUTCOMES.unsupported);
   }
   const marker = invocationMarker(scope.invocationId);
-  const snapshot = deps.snapshot ?? ((value: string) => snapshotProcesses(value, platform));
+  const rawSnapshot = deps.snapshot ?? ((value: string) => snapshotProcesses(value, platform));
+  const snapshot = (value: string): ProcessSnapshot | undefined => {
+    const current = rawSnapshot(value);
+    return current !== undefined && current.some((entry) => entry.pid === scope.selfPid)
+      ? current
+      : undefined;
+  };
   const kill = deps.kill ?? ((pid: number, signal: NodeJS.Signals) => process.kill(pid, signal));
   const wait = deps.sleep ?? ((ms: number) => sleep(ms));
   const now = deps.now ?? (() => performance.now());

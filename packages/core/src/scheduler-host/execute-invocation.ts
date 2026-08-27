@@ -116,16 +116,20 @@ function describeSurvivors(report: InvocationTreeTeardown): string {
   return report.survivorPids.map(String).join(", ");
 }
 
+function describeUnavailable(report: InvocationTreeTeardown): string {
+  return report.error === undefined ? "" : `（${report.error}）`;
+}
+
 function describeUnsettled(report: InvocationTreeTeardown): string {
   if (report.outcome === INVOCATION_TREE_TEARDOWN_OUTCOMES.unavailable) {
-    return "无法枚举本次运行拉起的进程，拒绝在无法验证进程树已退出时写入结果";
+    return `无法枚举本次运行拉起的进程${describeUnavailable(report)}，拒绝在无法验证进程树已退出时写入结果`;
   }
   return `本次运行拉起的进程在强制终止后仍存活（pid ${describeSurvivors(report)}），拒绝在其仍存活时写入结果`;
 }
 
 function describePreflightFailure(report: InvocationTreeTeardown): string {
   if (report.outcome === INVOCATION_TREE_TEARDOWN_OUTCOMES.unavailable) {
-    return "无法枚举上一次尝试的残留进程，拒绝在无法验证时运行";
+    return `无法枚举上一次尝试的残留进程${describeUnavailable(report)}，拒绝在无法验证时运行`;
   }
   return `上一次尝试的残留进程无法终止（pid ${describeSurvivors(report)}），拒绝在其仍存活时再次运行`;
 }
@@ -148,12 +152,13 @@ export async function executeInvocation(
     let report: InvocationTreeTeardown;
     try {
       report = await options.teardownTree(phase);
-    } catch {
+    } catch (error) {
       report = {
         outcome: INVOCATION_TREE_TEARDOWN_OUTCOMES.unavailable,
         terminatedPids: [],
         survivorPids: [],
         skippedReusedGroups: [],
+        error: errorMessage(error),
       };
     }
     options.onTeardown?.(phase, report);

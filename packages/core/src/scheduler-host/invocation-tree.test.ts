@@ -327,6 +327,25 @@ test("terminateInvocationTree：ESRCH 忽略；快照不可用返回 unavailable
     snapshot: () => undefined,
   });
   assert.equal(unavailable.outcome, INVOCATION_TREE_TEARDOWN_OUTCOMES.unavailable);
+  const selfMissing = await terminateInvocationTree(
+    SCOPE,
+    scriptedDeps([snapshot([[501, 501, true]])], killed),
+  );
+  assert.equal(selfMissing.outcome, INVOCATION_TREE_TEARDOWN_OUTCOMES.unavailable);
+  const selfVanishes = await terminateInvocationTree(
+    SCOPE,
+    scriptedDeps(
+      [
+        snapshot([
+          [500, 500],
+          [501, 501, true],
+        ]),
+        snapshot([]),
+      ],
+      killed,
+    ),
+  );
+  assert.equal(selfVanishes.outcome, INVOCATION_TREE_TEARDOWN_OUTCOMES.unavailable);
   const unsupported = await terminateInvocationTree(SCOPE, { platform: "win32" });
   assert.equal(unsupported.outcome, INVOCATION_TREE_TEARDOWN_OUTCOMES.unsupported);
 });
