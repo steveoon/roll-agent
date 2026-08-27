@@ -1,3 +1,4 @@
+import type { ChildProcess } from "node:child_process";
 import { inspectLlmConfigReadiness, type LlmConfigReadiness } from "../config/helpers.ts";
 import type { RollConfig } from "../config/schema.ts";
 import { resolveLLMCall } from "../llm/providers.ts";
@@ -58,6 +59,7 @@ export interface CreateChatEngineInput {
   >;
   readonly structuredOutputReasoning?: NonNullable<ChatEngineOptions["structuredOutputReasoning"]>;
   readonly shellEnv?: NodeJS.ProcessEnv;
+  readonly onShellCommandSpawn?: (child: ChildProcess) => void;
 }
 
 function reportAgentBootstrapIssue(issue: {
@@ -98,6 +100,7 @@ export function createChatEngine(input: CreateChatEngineInput) {
     onSkillLibraryIssue: reportSkillLibraryIssue,
     onWorkspaceInstructionsIssue: reportWorkspaceInstructionsIssue,
     ...(input.shellEnv ? { shellEnv: input.shellEnv } : {}),
+    ...(input.onShellCommandSpawn ? { onShellCommandSpawn: input.onShellCommandSpawn } : {}),
   });
 }
 

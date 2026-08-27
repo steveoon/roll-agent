@@ -1,3 +1,4 @@
+import type { ChildProcess } from "node:child_process";
 import type { RollConfig } from "../config/schema.ts";
 import type { ChatCommandResult } from "../types/chat.ts";
 import {
@@ -21,6 +22,7 @@ export interface CreateScheduledTurnRunnerInput {
   readonly runtime: RuntimeModule;
   readonly shellEnv?: NodeJS.ProcessEnv;
   readonly stopSignal?: AbortSignal;
+  readonly onShellCommandSpawn?: (child: ChildProcess) => void;
 }
 
 function mapTurnResult(result: ChatCommandResult, denied: readonly string[]): ScheduledTurnOutcome {
@@ -118,6 +120,7 @@ export function createScheduledTurnRunner(
         ? { structuredOutputReasoning: llm.structuredOutputReasoning }
         : {}),
       ...(input.shellEnv ? { shellEnv: input.shellEnv } : {}),
+      ...(input.onShellCommandSpawn ? { onShellCommandSpawn: input.onShellCommandSpawn } : {}),
     });
     let session: Awaited<ReturnType<typeof engine.createSession>> | undefined;
     try {
