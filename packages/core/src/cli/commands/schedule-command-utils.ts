@@ -10,6 +10,7 @@ export type ScheduleStoreInstance = InstanceType<RuntimeModule["ScheduleStore"]>
 
 export interface OpenScheduleStoreOptions {
   readonly dataDir?: string;
+  readonly requireExistingDatabase?: boolean;
 }
 
 export function openScheduleStore(
@@ -24,6 +25,7 @@ export function openScheduleStore(
   return new runtime.ScheduleStore(dataDir, {
     ...(config ? { maxSchedules: config.scheduler.maxSchedules } : {}),
     executorLiveness: probeExecutorLiveness,
+    ...(options.requireExistingDatabase === true ? { requireExistingDatabase: true } : {}),
   });
 }
 

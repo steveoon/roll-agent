@@ -6,7 +6,10 @@ import { join } from "node:path";
 import {
   DAEMON_LIVENESS,
   createDaemonRecord,
+  createDaemonWorkerId,
   inspectDaemon,
+  isDaemonWorkerId,
+  isInlineWorkerId,
   readDaemonRecord,
   removeDaemonRecord,
   writeDaemonRecord,
@@ -15,6 +18,46 @@ import {
 function tempDir(): string {
   return mkdtempSync(join(tmpdir(), "roll-daemon-record-"));
 }
+
+test("daemon worker id includes a per-generation nonce beyond the PID", () => {
+  const first = createDaemonWorkerId(4321);
+  const second = createDaemonWorkerId(4321);
+  assert.match(first, /^daemon-4321-[0-9a-f-]{36}$/u);
+  assert.match(second, /^daemon-4321-[0-9a-f-]{36}$/u);
+  assert.notEqual(first, second);
+});
+
+test("daemon worker id classifier accepts only legacy PID or PID + UUID generations", () => {
+  for (const value of [
+    "daemon-1",
+    "daemon-4321",
+    "daemon-4321-11111111-1111-4111-8111-111111111111",
+  ]) {
+    assert.equal(isDaemonWorkerId(value), true, value);
+  }
+  for (const value of [
+    undefined,
+    "",
+    "daemon-",
+    "daemon-0",
+    "daemon-owned",
+    "inline-4321",
+    " daemon-4321",
+    "DAEMON-4321",
+    "daemon-4321\n",
+    "daemon-4321\nextra",
+  ]) {
+    assert.equal(isDaemonWorkerId(value), false, String(value));
+  }
+});
+
+test("inline worker id classifier accepts only the process PID form", () => {
+  assert.equal(isInlineWorkerId("inline-1"), true);
+  assert.equal(isInlineWorkerId("inline-4321"), true);
+  for (const value of [undefined, "", "inline-", "inline-0", "inline-other", "inline-1\n"]) {
+    assert.equal(isInlineWorkerId(value), false, String(value));
+  }
+});
 
 test("daemon 记录写入、读回、按 pid+token 删除", () => {
   const dir = tempDir();

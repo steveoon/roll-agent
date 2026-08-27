@@ -51,6 +51,28 @@ const LIVENESS_PROBE_RESULTS = {
 } as const;
 type LivenessProbeResult = (typeof LIVENESS_PROBE_RESULTS)[keyof typeof LIVENESS_PROBE_RESULTS];
 
+function unsupportedSchemaVersionError(version: number): Error {
+  return new Error(
+    `ScheduleStore schema v${String(version)} 高于当前支持的 v${String(SCHEMA_VERSION)}`,
+  );
+}
+
+function validateAuthoritativeSchedulerDatabase(db: DatabaseSync): void {
+  const version = db.prepare("PRAGMA user_version").get() as { readonly user_version: number };
+  if (version.user_version > SCHEMA_VERSION) {
+    throw unsupportedSchemaVersionError(version.user_version);
+  }
+  const tables = db
+    .prepare(
+      "SELECT name FROM sqlite_schema WHERE type = 'table' AND name IN ('schedules', 'invocations')",
+    )
+    .all() as Array<{ readonly name: string }>;
+  const names = new Set(tables.map((row) => row.name));
+  if (version.user_version < 1 || !names.has("schedules") || !names.has("invocations")) {
+    throw new Error("not a valid authoritative scheduler database");
+  }
+}
+
 export interface ScheduleStoreOptions {
   readonly maxSchedules?: number;
   readonly claimLeaseMs?: number;
@@ -61,6 +83,7 @@ export interface ScheduleStoreOptions {
   readonly livenessProbeDeferralMs?: number;
   readonly invocationRetentionPerSchedule?: number;
   readonly invocationRetentionMs?: number;
+  readonly requireExistingDatabase?: boolean;
 }
 
 interface ScheduleRow {
@@ -254,6 +277,9 @@ export class ScheduleStore {
     this.invocationRetentionMs =
       options.invocationRetentionMs ?? SCHEDULER_LIMITS.invocationRetentionMs;
     const resolved = expandTilde(dir);
+    if (options.requireExistingDatabase === true && !existsSync(resolved)) {
+      throw new Error("authoritative scheduler database does not exist");
+    }
     if (!existsSync(resolved)) {
       mkdirSync(resolved, { recursive: true, mode: 0o700 });
     }
@@ -261,7 +287,19 @@ export class ScheduleStore {
       chmodSync(resolved, 0o700);
     }
     const databasePath = resolve(resolved, "schedules.db");
+    if (options.requireExistingDatabase === true && !existsSync(databasePath)) {
+      throw new Error("authoritative scheduler database does not exist");
+    }
     this.db = new DatabaseSync(databasePath);
+    if (options.requireExistingDatabase === true) {
+      try {
+        this.db.exec(`PRAGMA busy_timeout = ${String(BUSY_TIMEOUT_MS)}`);
+        validateAuthoritativeSchedulerDatabase(this.db);
+      } catch (error) {
+        this.db.close();
+        throw error;
+      }
+    }
     if (process.platform !== "win32") {
       try {
         chmodSync(databasePath, 0o600);
@@ -283,9 +321,7 @@ export class ScheduleStore {
       readonly user_version: number;
     };
     if (versionRow.user_version > SCHEMA_VERSION) {
-      throw new Error(
-        `ScheduleStore schema v${String(versionRow.user_version)} 高于当前支持的 v${String(SCHEMA_VERSION)}`,
-      );
+      throw unsupportedSchemaVersionError(versionRow.user_version);
     }
     this.transaction(() => {
       this.db.exec(
@@ -508,6 +544,53 @@ export class ScheduleStore {
     return rows.map(toInvocationRecord);
   }
 
+  listActiveWorkerInvocations(): InvocationRecord[] {
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM invocations WHERE status IN (?, ?)
+          ORDER BY COALESCE(started_at, created_at) ASC, created_at ASC`,
+      )
+      .all(INVOCATION_STATUSES.claimed, INVOCATION_STATUSES.running) as unknown as InvocationRow[];
+    return rows.map(toInvocationRecord);
+  }
+
+  prepareWorkerShutdown(
+    workerId: string,
+    reason: string,
+    nowMs: number = Date.now(),
+  ): ClaimedInvocation[] {
+    return this.transaction(() => {
+      const claimed = this.db
+        .prepare("SELECT id FROM invocations WHERE claimed_by = ? AND status = ?")
+        .all(workerId, INVOCATION_STATUSES.claimed) as Array<{ readonly id: string }>;
+      for (const row of claimed) {
+        this.finishInvocationAsFailedInTransaction(row.id, reason, nowMs);
+      }
+      const running = this.db
+        .prepare(
+          `SELECT * FROM invocations WHERE claimed_by = ? AND status = ?
+            ORDER BY started_at ASC, created_at ASC`,
+        )
+        .all(workerId, INVOCATION_STATUSES.running) as unknown as InvocationRow[];
+      return running.map((row) => {
+        if (row.ownership_token === null) {
+          throw new ScheduleStoreError(
+            SCHEDULE_STORE_ERROR_CODES.invalid,
+            `running invocation ${row.id} 缺少 ownership token`,
+          );
+        }
+        const claim = this.loadClaim(row.id, row.ownership_token);
+        if (claim === undefined) {
+          throw new ScheduleStoreError(
+            SCHEDULE_STORE_ERROR_CODES.invalid,
+            `running invocation ${row.id} 无法加载 worker claim`,
+          );
+        }
+        return claim;
+      });
+    });
+  }
+
   removeSchedule(id: string): boolean {
     const result = this.db.prepare("DELETE FROM schedules WHERE id = ?").run(id);
     return result.changes === 1;
@@ -617,6 +700,12 @@ export class ScheduleStore {
       }
       if (!(INVOCATION_LIVE_STATUSES as readonly InvocationStatus[]).includes(row.status)) {
         return CANCEL_INVOCATION_OUTCOMES.terminal;
+      }
+      if (
+        options.expectedOwnershipToken !== undefined &&
+        row.ownership_token !== options.expectedOwnershipToken
+      ) {
+        return CANCEL_INVOCATION_OUTCOMES.ownershipChanged;
       }
       if (row.status === INVOCATION_STATUSES.running && options.abandon !== true) {
         const executor = toExecutorIdentity(row);

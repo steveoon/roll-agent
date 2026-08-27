@@ -42,6 +42,7 @@ export const EXECUTE_INVOCATION_KINDS = {
   needsConfirmation: "needs_confirmation",
   failed: "failed",
   lostClaim: "lost-claim",
+  interrupted: "interrupted",
 } as const;
 
 export type ExecuteInvocationResult =
@@ -58,7 +59,12 @@ export type ExecuteInvocationResult =
       readonly error: string;
       readonly outcome: InvocationFailureOutcome;
     }
-  | { readonly kind: typeof EXECUTE_INVOCATION_KINDS.lostClaim; readonly invocationId: string };
+  | { readonly kind: typeof EXECUTE_INVOCATION_KINDS.lostClaim; readonly invocationId: string }
+  | {
+      readonly kind: typeof EXECUTE_INVOCATION_KINDS.interrupted;
+      readonly invocationId: string;
+      readonly error: string;
+    };
 
 export interface ExecuteInvocationOptions {
   readonly store: ScheduleStore;
@@ -68,6 +74,7 @@ export interface ExecuteInvocationOptions {
   readonly executor?: ExecutorIdentity;
   readonly now?: () => number;
   readonly maxOutputExcerptChars?: number;
+  readonly stopSignal?: AbortSignal;
 }
 
 function errorMessage(error: unknown): string {
@@ -88,11 +95,19 @@ export async function executeInvocation(
   if (begun === undefined) {
     return { kind: EXECUTE_INVOCATION_KINDS.lostClaim, invocationId: options.invocationId };
   }
+  const interruptedBy = (error: string): ExecuteInvocationResult | undefined =>
+    options.stopSignal?.aborted === true
+      ? { kind: EXECUTE_INVOCATION_KINDS.interrupted, invocationId: options.invocationId, error }
+      : undefined;
   let outcome: ScheduledTurnOutcome;
   try {
     outcome = await options.runTurn(begun.schedule, begun.invocation);
   } catch (error) {
     const message = errorMessage(error);
+    const interrupted = interruptedBy(message);
+    if (interrupted !== undefined) {
+      return interrupted;
+    }
     const failure = options.store.failInvocation(
       options.invocationId,
       options.ownershipToken,
@@ -107,6 +122,10 @@ export async function executeInvocation(
     };
   }
   if (outcome.status === SCHEDULED_TURN_STATUSES.failed) {
+    const interrupted = interruptedBy(outcome.error);
+    if (interrupted !== undefined) {
+      return interrupted;
+    }
     const failure = options.store.failInvocation(
       options.invocationId,
       options.ownershipToken,

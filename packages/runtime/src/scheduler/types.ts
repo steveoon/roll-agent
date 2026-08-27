@@ -47,6 +47,7 @@ export const CANCEL_INVOCATION_OUTCOMES = {
   cancelled: "cancelled",
   notFound: "not-found",
   terminal: "terminal",
+  ownershipChanged: "ownership-changed",
   executorAlive: "executor-alive",
   executorUnknown: "executor-unknown",
 } as const;
@@ -55,6 +56,7 @@ export type CancelInvocationOutcome =
 
 export interface CancelInvocationOptions {
   readonly abandon?: boolean;
+  readonly expectedOwnershipToken?: string;
 }
 
 export const EXECUTOR_LIVENESS = {

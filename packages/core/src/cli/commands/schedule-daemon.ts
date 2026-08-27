@@ -12,6 +12,7 @@ import {
 import { SchedulerDaemon, stopReasonFor } from "../../scheduler-host/daemon.ts";
 import {
   createDaemonRecord,
+  createDaemonWorkerId,
   removeDaemonRecord,
   writeDaemonRecord,
 } from "../../scheduler-host/daemon-record.ts";
@@ -75,7 +76,7 @@ export default defineCommand({
         }
         throw error;
       }
-      const record = createDaemonRecord(`daemon-${String(process.pid)}`);
+      const record = createDaemonRecord(createDaemonWorkerId());
       writeDaemonRecord(paths.daemonRecordPath, record);
       const fileLogger = new FileCompanionLogger(paths.logPath);
       const mirrorToStderr = process.stderr.isTTY === true;

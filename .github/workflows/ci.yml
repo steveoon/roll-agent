@@ -101,7 +101,12 @@ jobs:
           packages/core/src/scheduler-host/executor-liveness.test.ts
           packages/core/src/scheduler-host/inline-exit.test.ts
           packages/core/src/scheduler-host/cancel-descendants.test.ts
+          packages/core/src/scheduler-host/daemon-record.test.ts
           packages/core/src/scheduler-host/service.test.ts
+          packages/core/src/scheduler-host/service-state.test.ts
+          packages/core/src/scheduler-host/service-stop.test.ts
+          packages/core/src/scheduler-host/service-plan.test.ts
+          packages/core/src/scheduler-host/execute-invocation.test.ts
           packages/core/src/scheduler-host/stop-signals.test.ts
           packages/core/src/companion-host/service.test.ts
           packages/core/src/companion-host/identity.test.ts

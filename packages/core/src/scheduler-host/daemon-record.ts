@@ -27,6 +27,32 @@ export interface DaemonInspection {
   readonly record: SchedulerDaemonRecord | undefined;
 }
 
+export type DaemonWorkerId = `daemon-${string}`;
+export type InlineWorkerId = `inline-${string}`;
+const DAEMON_WORKER_ID_PATTERN =
+  /^daemon-[1-9]\d*(?:-[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12})?$/u;
+const INLINE_WORKER_ID_PATTERN = /^inline-[1-9]\d*$/u;
+
+export function createDaemonWorkerId(pid: number = process.pid): DaemonWorkerId {
+  return `daemon-${String(pid)}-${randomUUID()}`;
+}
+
+export function isDaemonWorkerId(value: string | undefined): value is DaemonWorkerId {
+  if (value === undefined) {
+    return false;
+  }
+  const match = DAEMON_WORKER_ID_PATTERN.exec(value);
+  return match?.[0] === value;
+}
+
+export function isInlineWorkerId(value: string | undefined): value is InlineWorkerId {
+  if (value === undefined) {
+    return false;
+  }
+  const match = INLINE_WORKER_ID_PATTERN.exec(value);
+  return match?.[0] === value;
+}
+
 function isRecordObject(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }

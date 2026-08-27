@@ -48,9 +48,15 @@ if ($null -eq $task) {
 [Console]::Out.Write('state:' + [int]$task.State)
 `;
 
+const MACOS_BOOTOUT_TIMEOUT_MS = 30_000;
+const MACOS_BOOTOUT_POLL_MS = 100;
+
 export interface CompanionServiceStatus {
   readonly installed: boolean;
   readonly running: boolean;
+  readonly enabled?: boolean;
+  readonly queued?: boolean;
+  readonly indeterminate?: boolean;
 }
 
 export interface CompanionServiceController {
@@ -59,6 +65,7 @@ export interface CompanionServiceController {
   start(): Promise<void>;
   stop(): Promise<void>;
   status(): Promise<CompanionServiceStatus>;
+  disable?(): Promise<void>;
 }
 
 export interface ServicePlanIdentity {
@@ -167,6 +174,7 @@ export interface WindowsScheduledTaskPlan {
   readonly whoAmI: ProcessInvocation;
   readonly create: ProcessInvocation;
   readonly remove: ProcessInvocation;
+  readonly disable: ProcessInvocation;
   readonly start: ProcessInvocation;
   readonly stop: ProcessInvocation;
   readonly query: ProcessInvocation;
@@ -271,6 +279,10 @@ export function createWindowsScheduledTaskPlanForIdentity(
       command: taskSchedulerExecutable,
       args: ["/Delete", "/F", "/TN", identity.windowsTaskName],
     },
+    disable: {
+      command: taskSchedulerExecutable,
+      args: ["/Change", "/TN", identity.windowsTaskName, "/Disable"],
+    },
     start: {
       command: taskSchedulerExecutable,
       args: ["/Run", "/TN", identity.windowsTaskName],
@@ -358,17 +370,27 @@ export class MacOsLaunchAgentController implements CompanionServiceController {
 
   async stop(): Promise<void> {
     const status = await this.inspectLaunchd();
-    if (status.loaded) {
-      await this.runRequired({
-        command: "/bin/launchctl",
-        args: ["bootout", this.plan.serviceTarget],
-      });
+    if (!status.loaded) {
+      return;
+    }
+    await this.runRequired({
+      command: "/bin/launchctl",
+      args: ["bootout", this.plan.serviceTarget],
+    });
+    const deadline = Date.now() + MACOS_BOOTOUT_TIMEOUT_MS;
+    while ((await this.inspectLaunchd()).loaded) {
+      if (Date.now() >= deadline) {
+        throw new Error(
+          `The per-user macOS ${this.plan.displayName} service did not unload within ${String(MACOS_BOOTOUT_TIMEOUT_MS)} ms`,
+        );
+      }
+      await new Promise((resolve) => setTimeout(resolve, MACOS_BOOTOUT_POLL_MS));
     }
   }
 
   async status(): Promise<CompanionServiceStatus> {
     const status = await this.inspectLaunchd();
-    return { installed: status.installed, running: status.running };
+    return { installed: status.installed || status.loaded, running: status.running };
   }
 
   private async inspectLaunchd(): Promise<{
@@ -461,20 +483,28 @@ export class WindowsScheduledTaskController implements CompanionServiceControlle
     }
   }
 
+  async disable(): Promise<void> {
+    await this.runRequired(
+      this.plan.disable,
+      `Unable to disable the current-user ${this.plan.displayName} task`,
+    );
+  }
+
   async status(): Promise<CompanionServiceStatus> {
     const status = await this.inspectTaskState();
     if (status.state === undefined) {
-      return { installed: false, running: false };
+      return { installed: false, running: false, enabled: false };
     }
-    if (
-      status.state === WINDOWS_TASK_STATES.unknown ||
-      status.state === WINDOWS_TASK_STATES.queued
-    ) {
-      throw new Error(`The current-user ${this.plan.displayName} task state is indeterminate`);
+    if (status.state === WINDOWS_TASK_STATES.unknown) {
+      return { installed: true, running: false, indeterminate: true };
+    }
+    if (status.state === WINDOWS_TASK_STATES.queued) {
+      return { installed: true, running: false, enabled: true, queued: true };
     }
     return {
       installed: true,
       running: status.state === WINDOWS_TASK_STATES.running,
+      enabled: status.state !== WINDOWS_TASK_STATES.disabled,
     };
   }
 

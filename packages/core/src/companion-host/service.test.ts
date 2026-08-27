@@ -13,6 +13,7 @@ import {
   createWindowsScheduledTaskPlan,
   createWindowsScheduledTaskPlanForIdentity,
   encodeWindowsTaskXml,
+  MacOsLaunchAgentController,
   WindowsScheduledTaskController,
 } from "./service.ts";
 
@@ -37,6 +38,45 @@ test("macOS plan is a per-user LaunchAgent using only absolute bundled paths", (
   assert.doesNotMatch(plan.plist, /ProgramArguments>[\s\S]*<string>roll<\/string>/);
 });
 
+test("macOS service stop waits until launchd has actually unloaded the agent", async () => {
+  const plan = createMacOsLaunchAgentPlan({
+    paths: createCompanionPaths("/Users/tester", "darwin"),
+    invocation,
+    uid: 501,
+  });
+  const runner = new QueueRunner([
+    { code: 0, stdout: "state = running", stderr: "" },
+    { code: 0, stdout: "", stderr: "" },
+    { code: 0, stdout: "state = SIGTERMed", stderr: "" },
+    { code: 113, stdout: "", stderr: "Could not find service" },
+  ]);
+
+  await new MacOsLaunchAgentController(plan, runner).stop();
+
+  assert.deepEqual(
+    runner.invocations.map((invocation) => invocation.args[0]),
+    ["print", "bootout", "print", "print"],
+  );
+});
+
+test("macOS service status treats a label launchd still has loaded as installed even without its plist", async () => {
+  const plan = createMacOsLaunchAgentPlan({
+    paths: createCompanionPaths("/Users/tester", "darwin"),
+    invocation,
+    uid: 501,
+  });
+  const loaded = new MacOsLaunchAgentController(
+    plan,
+    new QueueRunner([{ code: 0, stdout: "state = running", stderr: "" }]),
+  );
+  assert.deepEqual(await loaded.status(), { installed: true, running: true });
+  const unloaded = new MacOsLaunchAgentController(
+    plan,
+    new QueueRunner([{ code: 113, stdout: "", stderr: "Could not find service" }]),
+  );
+  assert.deepEqual(await unloaded.status(), { installed: false, running: false });
+});
+
 test("Windows plan registers through an XML task definition, never through /TR", () => {
   const plan = createWindowsScheduledTaskPlan({
     paths: windowsPaths,
@@ -54,6 +94,7 @@ test("Windows plan registers through an XML task definition, never through /TR",
   assert.equal(plan.create.command, "D:\\Windows\\System32\\schtasks.exe");
   assert.equal(plan.whoAmI.command, "D:\\Windows\\System32\\whoami.exe");
   assert.deepEqual(plan.whoAmI.args, ["/user", "/fo", "csv", "/nh"]);
+  assert.deepEqual(plan.disable.args, ["/Change", "/TN", "Roll Agent Companion", "/Disable"]);
   assert.equal(
     plan.query.command,
     "D:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
@@ -217,7 +258,7 @@ test("Windows service status uses locale-independent Task Scheduler state values
     }),
     runner,
   );
-  assert.deepEqual(await controller.status(), { installed: true, running: true });
+  assert.deepEqual(await controller.status(), { installed: true, running: true, enabled: true });
   assert.match(runner.invocations[0]?.args.join(" ") ?? "", /Schedule\.Service/u);
 });
 
@@ -230,7 +271,7 @@ test("Windows service status distinguishes a missing task and fails closed on in
     }),
     new QueueRunner([{ code: 0, stdout: "missing", stderr: "" }]),
   );
-  assert.deepEqual(await missing.status(), { installed: false, running: false });
+  assert.deepEqual(await missing.status(), { installed: false, running: false, enabled: false });
 
   const invalid = new WindowsScheduledTaskController(
     createWindowsScheduledTaskPlan({
@@ -243,18 +284,53 @@ test("Windows service status distinguishes a missing task and fails closed on in
   await assert.rejects(invalid.status(), /invalid state/u);
 });
 
-test("Windows service status fails closed for unknown and queued task states", async () => {
-  for (const state of ["state:0", "state:2"]) {
-    const controller = new WindowsScheduledTaskController(
-      createWindowsScheduledTaskPlan({
-        paths: windowsPaths,
-        invocation,
-        windowsDirectory: "D:\\Windows",
-      }),
-      new QueueRunner([{ code: 0, stdout: state, stderr: "" }]),
-    );
-    await assert.rejects(controller.status(), /state is indeterminate/u);
-  }
+test("Windows service status exposes a disabled task for cleanup recovery", async () => {
+  const controller = new WindowsScheduledTaskController(
+    createWindowsScheduledTaskPlan({
+      paths: windowsPaths,
+      invocation,
+      windowsDirectory: "D:\\Windows",
+    }),
+    new QueueRunner([{ code: 0, stdout: "state:1", stderr: "" }]),
+  );
+  assert.deepEqual(await controller.status(), {
+    installed: true,
+    running: false,
+    enabled: false,
+  });
+});
+
+test("Windows service status exposes an unknown task state so teardown can still disable it", async () => {
+  const controller = new WindowsScheduledTaskController(
+    createWindowsScheduledTaskPlan({
+      paths: windowsPaths,
+      invocation,
+      windowsDirectory: "D:\\Windows",
+    }),
+    new QueueRunner([{ code: 0, stdout: "state:0", stderr: "" }]),
+  );
+  assert.deepEqual(await controller.status(), {
+    installed: true,
+    running: false,
+    indeterminate: true,
+  });
+});
+
+test("Windows service status exposes a queued task so uninstall can disable it", async () => {
+  const controller = new WindowsScheduledTaskController(
+    createWindowsScheduledTaskPlan({
+      paths: windowsPaths,
+      invocation,
+      windowsDirectory: "D:\\Windows",
+    }),
+    new QueueRunner([{ code: 0, stdout: "state:2", stderr: "" }]),
+  );
+  assert.deepEqual(await controller.status(), {
+    installed: true,
+    running: false,
+    enabled: true,
+    queued: true,
+  });
 });
 
 test("Windows service stop verifies the task is no longer running", async () => {
@@ -302,6 +378,17 @@ test("Windows service stop ends a queued task and requires a safe final state", 
   });
   await new WindowsScheduledTaskController(plan, runner).stop();
   assert.deepEqual(runner.invocations, [plan.query, plan.stop, plan.query]);
+});
+
+test("Windows service disable blocks future task starts before explicit cleanup", async () => {
+  const runner = new QueueRunner([{ code: 0, stdout: "SUCCESS", stderr: "" }]);
+  const plan = createWindowsScheduledTaskPlan({
+    paths: windowsPaths,
+    invocation,
+    windowsDirectory: "D:\\Windows",
+  });
+  await new WindowsScheduledTaskController(plan, runner).disable();
+  assert.deepEqual(runner.invocations, [plan.disable]);
 });
 
 class QueueRunner implements ProcessRunner {

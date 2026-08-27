@@ -56,10 +56,17 @@ export default defineCommand({
             runtime,
             stopSignal: stop.controller.signal,
           }),
+          stopSignal: stop.controller.signal,
         });
         printJson(result);
         if (result.kind === EXECUTE_INVOCATION_KINDS.failed) {
           log.warn(`invocation ${args.invocation} 执行失败：${result.error}`);
+          process.exitCode = 1;
+        }
+        if (result.kind === EXECUTE_INVOCATION_KINDS.interrupted) {
+          log.warn(
+            `invocation ${args.invocation} 被停止信号中断，未写入结果，交由发起方收尾：${result.error}`,
+          );
           process.exitCode = 1;
         }
       } finally {

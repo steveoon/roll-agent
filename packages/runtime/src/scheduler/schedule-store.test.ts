@@ -1,6 +1,17 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, statSync } from "node:fs";
+import { spawn } from "node:child_process";
+import { once } from "node:events";
+import {
+  chmodSync,
+  copyFileSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -48,6 +59,197 @@ test("ScheduleStore 创建、查询、列出与删除 schedule", () => {
     assert.equal(store.removeSchedule(created.id), true);
     assert.equal(store.removeSchedule(created.id), false);
     assert.equal(store.getSchedule(created.id), undefined);
+    store.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("requireExistingDatabase refuses to create a missing authoritative ledger", () => {
+  const dir = tempDir();
+  try {
+    const missingDir = join(dir, "missing");
+    assert.throws(
+      () => new ScheduleStore(missingDir, { requireExistingDatabase: true }),
+      /authoritative scheduler database does not exist/u,
+    );
+    assert.equal(existsSync(missingDir), false);
+    assert.throws(
+      () => new ScheduleStore(dir, { requireExistingDatabase: true }),
+      /authoritative scheduler database does not exist/u,
+    );
+    assert.equal(existsSync(join(dir, "schedules.db")), false);
+    const created = new ScheduleStore(dir);
+    created.close();
+    const reopened = new ScheduleStore(dir, { requireExistingDatabase: true });
+    reopened.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("requireExistingDatabase rejects empty and unrelated SQLite files without initializing them", () => {
+  for (const fixture of ["empty", "unrelated"] as const) {
+    const dir = tempDir();
+    const databasePath = join(dir, "schedules.db");
+    try {
+      if (fixture === "empty") {
+        writeFileSync(databasePath, "");
+      } else {
+        const unrelated = new DatabaseSync(databasePath);
+        unrelated.exec("CREATE TABLE unrelated (id INTEGER PRIMARY KEY); PRAGMA user_version = 1;");
+        unrelated.close();
+      }
+
+      assert.throws(
+        () => new ScheduleStore(dir, { requireExistingDatabase: true }),
+        /not a valid authoritative scheduler database/u,
+      );
+
+      const check = new DatabaseSync(databasePath, { readOnly: true });
+      const tables = check
+        .prepare("SELECT name FROM sqlite_schema WHERE type = 'table' ORDER BY name")
+        .all() as Array<{ readonly name: string }>;
+      check.close();
+      assert.deepEqual(
+        tables.map((row) => row.name),
+        fixture === "empty" ? [] : ["unrelated"],
+      );
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+});
+
+test("requireExistingDatabase rejects unversioned scheduler tables and ledgers newer than this build", () => {
+  const dir = tempDir();
+  try {
+    const databasePath = join(dir, "schedules.db");
+    const unversioned = new DatabaseSync(databasePath);
+    unversioned.exec(
+      "CREATE TABLE schedules (id TEXT PRIMARY KEY); CREATE TABLE invocations (id TEXT PRIMARY KEY);",
+    );
+    unversioned.close();
+    assert.throws(
+      () => new ScheduleStore(dir, { requireExistingDatabase: true }),
+      /not a valid authoritative scheduler database/u,
+    );
+    rmSync(databasePath, { force: true });
+
+    const created = new ScheduleStore(dir);
+    created.close();
+    const bump = new DatabaseSync(databasePath);
+    const current = bump.prepare("PRAGMA user_version").get() as { readonly user_version: number };
+    bump.exec(`PRAGMA user_version = ${String(current.user_version + 1)}`);
+    bump.close();
+    assert.throws(() => new ScheduleStore(dir, { requireExistingDatabase: true }), /高于当前支持/u);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("requireExistingDatabase recovers a hot rollback journal left by a killed writer", () => {
+  const source = tempDir();
+  const copy = tempDir();
+  try {
+    const seed = new ScheduleStore(source);
+    for (let index = 0; index < 40; index += 1) {
+      seed.createSchedule(
+        sampleInput({ name: `journal ${String(index)}`, prompt: "p".repeat(2_000) }),
+        NOW,
+      );
+    }
+    seed.close();
+    const writer = new DatabaseSync(join(source, "schedules.db"));
+    writer.exec("PRAGMA cache_size = 1; BEGIN IMMEDIATE;");
+    writer.exec("UPDATE schedules SET prompt = prompt || 'x'");
+    const journalPath = join(source, "schedules.db-journal");
+    assert.equal(existsSync(journalPath), true);
+    copyFileSync(join(source, "schedules.db"), join(copy, "schedules.db"));
+    copyFileSync(journalPath, join(copy, "schedules.db-journal"));
+    writer.exec("ROLLBACK");
+    writer.close();
+
+    const recovered = new ScheduleStore(copy, { requireExistingDatabase: true });
+    const prompts = recovered.listSchedules().map((schedule) => schedule.prompt);
+    assert.equal(prompts.length, 40);
+    assert.equal(
+      prompts.every((prompt) => prompt === "p".repeat(2_000)),
+      true,
+    );
+    recovered.close();
+    assert.equal(existsSync(join(copy, "schedules.db-journal")), false);
+  } finally {
+    rmSync(source, { recursive: true, force: true });
+    rmSync(copy, { recursive: true, force: true });
+  }
+});
+
+test("requireExistingDatabase waits for a writer holding an exclusive lock instead of failing fast", async () => {
+  const dir = tempDir();
+  try {
+    const seed = new ScheduleStore(dir);
+    seed.close();
+    const holder = [
+      'import("node:sqlite").then(({ DatabaseSync }) => {',
+      "  const db = new DatabaseSync(process.argv[1]);",
+      '  db.exec("BEGIN EXCLUSIVE");',
+      '  process.stdout.write("locked" + String.fromCharCode(10));',
+      '  setTimeout(() => { db.exec("COMMIT"); db.close(); }, 700);',
+      "});",
+    ].join("");
+    const child = spawn(
+      process.execPath,
+      ["--experimental-sqlite", "-e", holder, join(dir, "schedules.db")],
+      { stdio: ["ignore", "pipe", "inherit"] },
+    );
+    const exited = once(child, "exit");
+    try {
+      await new Promise<void>((resolve, reject) => {
+        child.stdout.on("data", (chunk: Buffer) => {
+          if (chunk.toString().includes("locked")) {
+            resolve();
+          }
+        });
+        child.once("error", reject);
+        child.once("exit", (code) =>
+          reject(new Error(`lock holder exited early (${String(code)})`)),
+        );
+      });
+      const store = new ScheduleStore(dir, { requireExistingDatabase: true });
+      try {
+        assert.equal(store.listSchedules().length, 0);
+      } finally {
+        store.close();
+      }
+    } finally {
+      await exited;
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("cancelInvocation 带正确 ownership token 时仍要求 running 行探活为 dead", () => {
+  const dir = tempDir();
+  try {
+    const store = new ScheduleStore(dir, { executorLiveness: () => "alive" });
+    store.createSchedule(sampleInput({ fireImmediately: true }), NOW);
+    const claim = store.claimDue({ workerId: "daemon-1", nowMs: NOW, limit: 1 })[0];
+    assert.ok(claim);
+    assert.ok(
+      store.beginInvocation(claim.invocation.id, claim.ownershipToken, NOW + 1, {
+        pid: 5151,
+        startToken: "pst-v2:alive",
+      }),
+    );
+    assert.equal(
+      store.cancelInvocation(claim.invocation.id, "still alive", NOW + 2, {
+        expectedOwnershipToken: claim.ownershipToken,
+      }),
+      CANCEL_INVOCATION_OUTCOMES.executorAlive,
+    );
+    assert.equal(store.getInvocation(claim.invocation.id)?.status, INVOCATION_STATUSES.running);
     store.close();
   } finally {
     rmSync(dir, { recursive: true, force: true });
@@ -707,6 +909,60 @@ test("listRunningInvocations 只返回 running 行", () => {
   }
 });
 
+test("prepareWorkerShutdown 原子取消该 worker 的 claimed 并返回 running", () => {
+  const dir = tempDir();
+  try {
+    const store = new ScheduleStore(dir);
+    store.createSchedule(sampleInput({ name: "worker claimed", fireImmediately: true }), NOW);
+    store.createSchedule(sampleInput({ name: "worker running", fireImmediately: true }), NOW + 1);
+    store.createSchedule(sampleInput({ name: "other worker", fireImmediately: true }), NOW + 2);
+    const owned = store.claimDue({ workerId: "daemon-owned", nowMs: NOW + 2, limit: 2 });
+    assert.equal(owned.length, 2);
+    const [claimed, running] = owned;
+    assert.ok(claimed);
+    assert.ok(running);
+    assert.ok(
+      store.beginInvocation(running.invocation.id, running.ownershipToken, NOW + 3, {
+        pid: 4242,
+        startToken: "pst-v2:owned",
+      }),
+    );
+    const other = store.claimDue({ workerId: "daemon-other", nowMs: NOW + 3, limit: 1 })[0];
+    assert.ok(other);
+
+    const liveRunning = store.prepareWorkerShutdown(
+      "daemon-owned",
+      "scheduler service stopped",
+      NOW + 4,
+    );
+
+    assert.deepEqual(
+      liveRunning.map((claim) => [
+        claim.invocation.id,
+        claim.invocation.executor?.pid,
+        claim.ownershipToken,
+      ]),
+      [[running.invocation.id, 4242, running.ownershipToken]],
+    );
+    assert.equal(store.getInvocation(claimed.invocation.id)?.status, INVOCATION_STATUSES.failed);
+    assert.equal(store.getInvocation(claimed.invocation.id)?.claimedBy, undefined);
+    assert.equal(store.getInvocation(claimed.invocation.id)?.leaseUntilMs, undefined);
+    assert.equal(store.getInvocation(claimed.invocation.id)?.error, "scheduler service stopped");
+    assert.equal(
+      store.beginInvocation(claimed.invocation.id, claimed.ownershipToken, NOW + 5, {
+        pid: 4343,
+        startToken: "pst-v2:late",
+      }),
+      undefined,
+    );
+    assert.equal(store.getInvocation(running.invocation.id)?.status, INVOCATION_STATUSES.running);
+    assert.equal(store.getInvocation(other.invocation.id)?.status, INVOCATION_STATUSES.claimed);
+    store.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("同一 schedule 同一时刻只有一次运行：manual 触发在运行中排队，inline claim 被拒绝", () => {
   const dir = tempDir();
   try {
@@ -802,7 +1058,16 @@ test("cancelInvocation：pending/claimed 直接取消；running 必须探活 dea
     assert.equal(store.findLiveRun(created.id)?.id, running.id);
     liveness = "dead";
     assert.equal(
-      store.cancelInvocation(running.id, "已确认退出", NOW + 11),
+      store.cancelInvocation(running.id, "stale worker cleanup", NOW + 11, {
+        expectedOwnershipToken: "stale-token",
+      }),
+      CANCEL_INVOCATION_OUTCOMES.ownershipChanged,
+    );
+    assert.equal(store.getInvocation(running.id)?.status, INVOCATION_STATUSES.running);
+    assert.equal(
+      store.cancelInvocation(running.id, "已确认退出", NOW + 12, {
+        expectedOwnershipToken: runningClaim.ownershipToken,
+      }),
       CANCEL_INVOCATION_OUTCOMES.cancelled,
     );
     assert.equal(
@@ -810,7 +1075,7 @@ test("cancelInvocation：pending/claimed 直接取消；running 必须探活 dea
         id: running.id,
         ownershipToken: runningClaim.ownershipToken,
         status: INVOCATION_STATUSES.completed,
-        nowMs: NOW + 12,
+        nowMs: NOW + 13,
       }),
       false,
     );
@@ -855,6 +1120,50 @@ test("探活为 descendants-alive 时视同存活：不 reclaim、cancel 要求 
       store.cancelInvocation(claim.invocation.id, "cancel", NOW + 6_000),
       CANCEL_INVOCATION_OUTCOMES.executorAlive,
     );
+    store.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("conditional cancel 拒绝收尾已被新 worker reclaim 的 invocation", () => {
+  const dir = tempDir();
+  try {
+    let liveness: "alive" | "dead" = "dead";
+    const store = new ScheduleStore(dir, {
+      claimLeaseMs: 1,
+      executorLiveness: () => liveness,
+    });
+    store.createSchedule(sampleInput({ fireImmediately: true }), NOW);
+    const oldClaim = store.claimDue({ workerId: "daemon-old", nowMs: NOW, limit: 1 })[0];
+    assert.ok(oldClaim);
+    assert.ok(
+      store.beginInvocation(oldClaim.invocation.id, oldClaim.ownershipToken, NOW, {
+        pid: 4747,
+        startToken: "pst-v2:old",
+      }),
+    );
+    const newClaim = store.claimDue({ workerId: "daemon-new", nowMs: NOW + 2, limit: 1 })[0];
+    assert.ok(newClaim);
+    assert.notEqual(newClaim.ownershipToken, oldClaim.ownershipToken);
+    liveness = "alive";
+    assert.ok(
+      store.beginInvocation(newClaim.invocation.id, newClaim.ownershipToken, NOW + 3, {
+        pid: 4848,
+        startToken: "pst-v2:new",
+      }),
+    );
+
+    assert.equal(
+      store.cancelInvocation(oldClaim.invocation.id, "stale shutdown", NOW + 4, {
+        expectedOwnershipToken: oldClaim.ownershipToken,
+      }),
+      CANCEL_INVOCATION_OUTCOMES.ownershipChanged,
+    );
+    const current = store.getInvocation(oldClaim.invocation.id);
+    assert.equal(current?.status, INVOCATION_STATUSES.running);
+    assert.equal(current?.claimedBy, "daemon-new");
+    assert.deepEqual(current?.executor, { pid: 4848, startToken: "pst-v2:new" });
     store.close();
   } finally {
     rmSync(dir, { recursive: true, force: true });

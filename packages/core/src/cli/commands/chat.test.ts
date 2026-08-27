@@ -374,7 +374,7 @@ test("runJsonTurn forwards an in-flight stop signal to AgentSession cancellation
 
 test(
   "runJsonTurn stop signal cancels a real AgentSession direct Bash process tree",
-  { skip: process.platform === "win32" },
+  { skip: process.platform === "win32", timeout: 20_000 },
   async () => {
     const runtime = await import("@roll-agent/runtime");
     const bashStarted = Promise.withResolvers<void>();

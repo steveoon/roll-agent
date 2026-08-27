@@ -5595,7 +5595,7 @@ test(
 
 test(
   "AgentSession cancel 等待 direct Bash 进程树清理完成后才结束 turn",
-  { skip: process.platform === "win32" },
+  { skip: process.platform === "win32", timeout: 20_000 },
   async () => {
     const killStarted = Promise.withResolvers<void>();
     const allowKill = Promise.withResolvers<void>();

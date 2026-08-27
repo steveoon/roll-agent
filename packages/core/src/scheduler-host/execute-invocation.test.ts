@@ -173,3 +173,67 @@ test("executeInvocation 把 executor 身份写进 invocation，终态失败直�
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test("executeInvocation 收到停止信号后不写账本，行保持 running 交由发起方收尾", async () => {
+  const dir = tempDir();
+  try {
+    const store = new ScheduleStore(dir);
+    const claim = claimOne(store);
+    const controller = new AbortController();
+    const runTurn: ScheduledTurnRunner = () => {
+      controller.abort(new Error("scheduled exec stopping"));
+      return Promise.resolve({ status: "failed", error: "本轮执行已收到停止请求" });
+    };
+    const result = await executeInvocation({
+      store,
+      invocationId: claim.invocation.id,
+      ownershipToken: claim.ownershipToken,
+      runTurn,
+      stopSignal: controller.signal,
+      now: () => NOW + 10,
+    });
+    assert.deepEqual(result, {
+      kind: "interrupted",
+      invocationId: claim.invocation.id,
+      error: "本轮执行已收到停止请求",
+    });
+    const record = store.getInvocation(claim.invocation.id);
+    assert.equal(record?.status, INVOCATION_STATUSES.running);
+    assert.equal(record?.claimedBy, "w1");
+    assert.equal(record?.attempt, claim.invocation.attempt);
+    assert.equal(store.getSchedule(claim.schedule.id)?.status, "active");
+    store.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("executeInvocation 的 turn 在停止信号后抛错时同样不消耗 attempt", async () => {
+  const dir = tempDir();
+  try {
+    const store = new ScheduleStore(dir);
+    const claim = claimOne(store);
+    const controller = new AbortController();
+    const runTurn: ScheduledTurnRunner = () => {
+      controller.abort(new Error("scheduled exec stopping"));
+      return Promise.reject(new Error("session torn down"));
+    };
+    const result = await executeInvocation({
+      store,
+      invocationId: claim.invocation.id,
+      ownershipToken: claim.ownershipToken,
+      runTurn,
+      stopSignal: controller.signal,
+      now: () => NOW + 10,
+    });
+    assert.equal(result.kind, "interrupted");
+    assert.equal(store.getInvocation(claim.invocation.id)?.status, INVOCATION_STATUSES.running);
+    assert.equal(
+      store.failInvocation(claim.invocation.id, claim.ownershipToken, "daemon 收尾", NOW + 11),
+      INVOCATION_FAILURE_OUTCOMES.retryScheduled,
+    );
+    store.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
