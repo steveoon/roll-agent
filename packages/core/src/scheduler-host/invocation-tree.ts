@@ -1,11 +1,14 @@
 import { spawnSync } from "node:child_process";
 import type { ChildProcess } from "node:child_process";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
+import { setTimeout as sleep } from "node:timers/promises";
 import { TRUSTED_PS_PATHS } from "./executor-liveness.ts";
 import { SCHEDULE_INVOCATION_ENV } from "./paths.ts";
 
 const SNAPSHOT_TIMEOUT_MS = 5_000;
 const SNAPSHOT_MAX_BUFFER_BYTES = 64 * 1024 * 1024;
+const TEARDOWN_GRACE_MS = 2_000;
+const TEARDOWN_POLL_MS = 250;
 const PS_LINE = /^\s*(\d+)\s+(\d+)\s+(\S+)\s*(.*)$/u;
 
 export interface ProcessSnapshotEntry {
@@ -214,4 +217,130 @@ export function collectTreeMembers(
     .filter((entry) => entry.marked || groups.has(entry.pgid))
     .map((entry) => entry.pid);
   return { pids, skippedReusedGroups: skipped };
+}
+
+export const INVOCATION_TREE_TEARDOWN_OUTCOMES = {
+  clean: "clean",
+  survivors: "survivors",
+  unavailable: "unavailable",
+  unsupported: "unsupported",
+} as const;
+
+export type InvocationTreeTeardownOutcome =
+  (typeof INVOCATION_TREE_TEARDOWN_OUTCOMES)[keyof typeof INVOCATION_TREE_TEARDOWN_OUTCOMES];
+
+export interface InvocationTreeTeardown {
+  readonly outcome: InvocationTreeTeardownOutcome;
+  readonly terminatedPids: readonly number[];
+  readonly survivorPids: readonly number[];
+  readonly skippedReusedGroups: readonly number[];
+}
+
+export interface TerminateInvocationTreeDeps {
+  readonly platform?: NodeJS.Platform;
+  readonly snapshot?: (marker: string) => ProcessSnapshot | undefined;
+  readonly kill?: (pid: number, signal: NodeJS.Signals) => void;
+  readonly sleep?: (ms: number) => Promise<void>;
+  readonly now?: () => number;
+  readonly graceMs?: number;
+  readonly pollMs?: number;
+}
+
+function isErrnoCode(error: unknown, code: string): boolean {
+  return typeof error === "object" && error !== null && "code" in error && error.code === code;
+}
+
+function emptyTeardown(
+  outcome: InvocationTreeTeardownOutcome,
+  skipped: readonly number[] = [],
+): InvocationTreeTeardown {
+  return { outcome, terminatedPids: [], survivorPids: [], skippedReusedGroups: skipped };
+}
+
+function ascending(values: Iterable<number>): number[] {
+  return [...values].sort((a, b) => a - b);
+}
+
+export async function terminateInvocationTree(
+  scope: InvocationTreeScope,
+  deps: TerminateInvocationTreeDeps = {},
+): Promise<InvocationTreeTeardown> {
+  const platform = deps.platform ?? process.platform;
+  if (platform === "win32") {
+    return emptyTeardown(INVOCATION_TREE_TEARDOWN_OUTCOMES.unsupported);
+  }
+  const marker = invocationMarker(scope.invocationId);
+  const snapshot = deps.snapshot ?? ((value: string) => snapshotProcesses(value, platform));
+  const kill = deps.kill ?? ((pid: number, signal: NodeJS.Signals) => process.kill(pid, signal));
+  const wait = deps.sleep ?? ((ms: number) => sleep(ms));
+  const now = deps.now ?? Date.now;
+  const graceMs = deps.graceMs ?? TEARDOWN_GRACE_MS;
+  const pollMs = deps.pollMs ?? TEARDOWN_POLL_MS;
+  const first = snapshot(marker);
+  if (first === undefined) {
+    return emptyTeardown(INVOCATION_TREE_TEARDOWN_OUTCOMES.unavailable);
+  }
+  const initial = collectTreeMembers(first, scope);
+  if (initial.pids.length === 0) {
+    return emptyTeardown(INVOCATION_TREE_TEARDOWN_OUTCOMES.clean, initial.skippedReusedGroups);
+  }
+  const seen = new Set<number>(initial.pids);
+  const unkillable = new Set<number>();
+  const signalAll = (pids: readonly number[], signal: NodeJS.Signals): void => {
+    for (const pid of pids) {
+      try {
+        kill(pid, signal);
+      } catch (error) {
+        if (isErrnoCode(error, "EPERM")) {
+          unkillable.add(pid);
+        }
+      }
+    }
+  };
+  const settle = async (): Promise<readonly number[] | undefined> => {
+    const deadline = now() + graceMs;
+    for (;;) {
+      await wait(pollMs);
+      const current = snapshot(marker);
+      if (current === undefined) {
+        return undefined;
+      }
+      const members = collectTreeMembers(current, scope).pids;
+      for (const pid of members) {
+        seen.add(pid);
+      }
+      if (members.length === 0 || now() >= deadline) {
+        return members;
+      }
+    }
+  };
+  signalAll(initial.pids, "SIGTERM");
+  let remaining = await settle();
+  if (remaining === undefined) {
+    return emptyTeardown(
+      INVOCATION_TREE_TEARDOWN_OUTCOMES.unavailable,
+      initial.skippedReusedGroups,
+    );
+  }
+  if (remaining.length > 0) {
+    signalAll(remaining, "SIGKILL");
+    remaining = await settle();
+    if (remaining === undefined) {
+      return emptyTeardown(
+        INVOCATION_TREE_TEARDOWN_OUTCOMES.unavailable,
+        initial.skippedReusedGroups,
+      );
+    }
+  }
+  const survivors = new Set<number>([...remaining, ...unkillable]);
+  const terminated = ascending([...seen].filter((pid) => !survivors.has(pid)));
+  return {
+    outcome:
+      survivors.size === 0
+        ? INVOCATION_TREE_TEARDOWN_OUTCOMES.clean
+        : INVOCATION_TREE_TEARDOWN_OUTCOMES.survivors,
+    terminatedPids: terminated,
+    survivorPids: ascending(survivors),
+    skippedReusedGroups: initial.skippedReusedGroups,
+  };
 }

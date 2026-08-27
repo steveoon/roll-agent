@@ -1,11 +1,16 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
+import { once } from "node:events";
 import {
+  INVOCATION_TREE_TEARDOWN_OUTCOMES,
   ProcessGroupLedger,
   collectTreeMembers,
   invocationMarker,
   parseProcStat,
   parsePsSnapshot,
+  snapshotProcesses,
+  terminateInvocationTree,
   type ProcessSnapshot,
 } from "./invocation-tree.ts";
 
@@ -163,3 +168,274 @@ test("ProcessGroupLedger 只登记拿到 pid 的子进程，leaderExited 跟随 
   child.exitCode = 0;
   assert.equal(ledger.groups()[0]?.leaderExited(), true);
 });
+
+function scriptedDeps(
+  frames: readonly ProcessSnapshot[],
+  killed: Array<[number, string]>,
+  extra: {
+    readonly graceMs?: number;
+    readonly kill?: (pid: number, signal: NodeJS.Signals) => void;
+  } = {},
+) {
+  let index = 0;
+  let clock = 0;
+  return {
+    platform: "darwin" as const,
+    snapshot: () => frames[Math.min(index++, frames.length - 1)],
+    kill:
+      extra.kill ??
+      ((pid: number, signal: NodeJS.Signals) => {
+        killed.push([pid, signal]);
+      }),
+    sleep: async (ms: number) => {
+      clock += ms;
+    },
+    now: () => clock,
+    graceMs: extra.graceMs ?? 0,
+    pollMs: 10,
+  };
+}
+
+const SCOPE = { invocationId: ID, selfPid: 500, trackedGroups: [] as const };
+
+test("terminateInvocationTree：没有成员直接 clean，不发信号", async () => {
+  const killed: Array<[number, string]> = [];
+  const report = await terminateInvocationTree(
+    SCOPE,
+    scriptedDeps([snapshot([[500, 500]])], killed),
+  );
+  assert.deepEqual(report, {
+    outcome: INVOCATION_TREE_TEARDOWN_OUTCOMES.clean,
+    terminatedPids: [],
+    survivorPids: [],
+    skippedReusedGroups: [],
+  });
+  assert.deepEqual(killed, []);
+});
+
+test("terminateInvocationTree：SIGTERM 后成员消失即 clean，不再 SIGKILL", async () => {
+  const killed: Array<[number, string]> = [];
+  const report = await terminateInvocationTree(
+    SCOPE,
+    scriptedDeps(
+      [
+        snapshot([
+          [500, 500],
+          [501, 501, true],
+        ]),
+        snapshot([[500, 500]]),
+      ],
+      killed,
+    ),
+  );
+  assert.equal(report.outcome, INVOCATION_TREE_TEARDOWN_OUTCOMES.clean);
+  assert.deepEqual(report.terminatedPids, [501]);
+  assert.deepEqual(killed, [[501, "SIGTERM"]]);
+});
+
+test("terminateInvocationTree：grace 后仍在则 SIGKILL，随后消失为 clean", async () => {
+  const killed: Array<[number, string]> = [];
+  const alive = snapshot([
+    [500, 500],
+    [501, 501, true],
+  ]);
+  const report = await terminateInvocationTree(
+    SCOPE,
+    scriptedDeps([alive, alive, snapshot([[500, 500]])], killed),
+  );
+  assert.equal(report.outcome, INVOCATION_TREE_TEARDOWN_OUTCOMES.clean);
+  assert.deepEqual(killed, [
+    [501, "SIGTERM"],
+    [501, "SIGKILL"],
+  ]);
+});
+
+test("terminateInvocationTree：SIGKILL 后仍在或 EPERM 的进程记为 survivors", async () => {
+  const killed: Array<[number, string]> = [];
+  const stuck = snapshot([
+    [500, 500],
+    [501, 501, true],
+    [502, 500],
+  ]);
+  const report = await terminateInvocationTree(
+    SCOPE,
+    scriptedDeps([stuck, stuck, stuck], killed, {
+      kill: (pid, signal) => {
+        killed.push([pid, signal]);
+        if (pid === 502) {
+          throw Object.assign(new Error("EPERM"), { code: "EPERM" });
+        }
+      },
+    }),
+  );
+  assert.equal(report.outcome, INVOCATION_TREE_TEARDOWN_OUTCOMES.survivors);
+  assert.deepEqual(report.survivorPids, [501, 502]);
+  assert.deepEqual(report.terminatedPids, []);
+});
+
+test("terminateInvocationTree：ESRCH 忽略；快照不可用返回 unavailable；win32 返回 unsupported", async () => {
+  const killed: Array<[number, string]> = [];
+  const esrch = await terminateInvocationTree(
+    SCOPE,
+    scriptedDeps(
+      [
+        snapshot([
+          [500, 500],
+          [501, 501, true],
+        ]),
+        snapshot([[500, 500]]),
+      ],
+      killed,
+      {
+        kill: () => {
+          throw Object.assign(new Error("ESRCH"), { code: "ESRCH" });
+        },
+      },
+    ),
+  );
+  assert.equal(esrch.outcome, INVOCATION_TREE_TEARDOWN_OUTCOMES.clean);
+  const unavailable = await terminateInvocationTree(SCOPE, {
+    ...scriptedDeps([], killed),
+    snapshot: () => undefined,
+  });
+  assert.equal(unavailable.outcome, INVOCATION_TREE_TEARDOWN_OUTCOMES.unavailable);
+  const unsupported = await terminateInvocationTree(SCOPE, { platform: "win32" });
+  assert.equal(unsupported.outcome, INVOCATION_TREE_TEARDOWN_OUTCOMES.unsupported);
+});
+
+test("terminateInvocationTree：清场途中新出现的成员也会被处理并计入 terminatedPids", async () => {
+  const killed: Array<[number, string]> = [];
+  const frames = [
+    snapshot([
+      [500, 500],
+      [501, 501, true],
+    ]),
+    snapshot([
+      [500, 500],
+      [503, 503, true],
+    ]),
+    snapshot([[500, 500]]),
+  ];
+  const report = await terminateInvocationTree(SCOPE, scriptedDeps(frames, killed));
+  assert.equal(report.outcome, INVOCATION_TREE_TEARDOWN_OUTCOMES.clean);
+  assert.deepEqual(report.terminatedPids, [501, 503]);
+  assert.deepEqual(killed, [
+    [501, "SIGTERM"],
+    [503, "SIGKILL"],
+  ]);
+});
+
+const posixOnly = { skip: process.platform === "win32" };
+
+test(
+  "真实进程：带标记的 detached 子进程被找到并终止，不同标记的对照进程不受影响",
+  posixOnly,
+  async () => {
+    const otherId = "99999999-8888-4777-8666-555555555555";
+    const target = spawn(process.execPath, ["-e", "setTimeout(() => {}, 60000)"], {
+      detached: true,
+      stdio: "ignore",
+      env: { ...process.env, ROLL_SCHEDULE_INVOCATION: ID },
+    });
+    const control = spawn(process.execPath, ["-e", "setTimeout(() => {}, 60000)"], {
+      detached: true,
+      stdio: "ignore",
+      env: { ...process.env, ROLL_SCHEDULE_INVOCATION: otherId },
+    });
+    try {
+      await Promise.all([once(target, "spawn"), once(control, "spawn")]);
+      const targetExit = once(target, "exit");
+      const report = await terminateInvocationTree({
+        invocationId: ID,
+        selfPid: process.pid,
+        trackedGroups: [],
+      });
+      await targetExit;
+      assert.equal(report.outcome, INVOCATION_TREE_TEARDOWN_OUTCOMES.clean);
+      assert.ok(report.terminatedPids.includes(target.pid ?? -1));
+      assert.equal(control.exitCode, null);
+      assert.equal(control.signalCode, null);
+    } finally {
+      control.kill("SIGKILL");
+      await once(control, "exit").catch(() => undefined);
+      if (target.exitCode === null && target.signalCode === null) {
+        target.kill("SIGKILL");
+      }
+    }
+  },
+);
+
+test(
+  "真实进程：bash 工具形状的孤儿（sh 退出后留在其进程组的 /bin/sleep）经登记组被找到并终止",
+  posixOnly,
+  async () => {
+    const ledger = new ProcessGroupLedger();
+    const shell = spawn("/bin/sh", ["-c", "/bin/sleep 60 & exit 0"], {
+      detached: true,
+      stdio: "ignore",
+    });
+    ledger.track(shell);
+    await once(shell, "exit");
+    const scope = { invocationId: ID, selfPid: process.pid, trackedGroups: ledger.groups() };
+    const before = collectTreeMembers(snapshotProcesses(invocationMarker(ID)) ?? [], scope);
+    assert.equal(before.pids.length, 1, "sh 退出后应留下一个孤儿 sleep");
+    const report = await terminateInvocationTree(scope);
+    assert.equal(report.outcome, INVOCATION_TREE_TEARDOWN_OUTCOMES.clean);
+    assert.deepEqual(report.terminatedPids, before.pids);
+    const after = collectTreeMembers(snapshotProcesses(invocationMarker(ID)) ?? [], scope);
+    assert.deepEqual(after.pids, []);
+  },
+);
+
+test("真实进程：测试进程不是组首领时不会误杀同组进程", posixOnly, async () => {
+  const sibling = spawn("/bin/sleep", ["60"], { stdio: "ignore" });
+  try {
+    await once(sibling, "spawn");
+    const snap = snapshotProcesses(invocationMarker(ID));
+    assert.ok(snap);
+    const self = snap.find((entry) => entry.pid === process.pid);
+    assert.ok(self);
+    if (self.pgid === process.pid) {
+      return;
+    }
+    const report = await terminateInvocationTree({
+      invocationId: ID,
+      selfPid: process.pid,
+      trackedGroups: [],
+    });
+    assert.equal(report.outcome, INVOCATION_TREE_TEARDOWN_OUTCOMES.clean);
+    assert.equal(report.terminatedPids.includes(sibling.pid ?? -1), false);
+    assert.equal(sibling.exitCode, null);
+  } finally {
+    sibling.kill("SIGKILL");
+    await once(sibling, "exit").catch(() => undefined);
+  }
+});
+
+test(
+  "真实进程：快照里带标记的只有那个子进程，不含做快照的 ps，测试进程自身在快照里",
+  posixOnly,
+  async () => {
+    const child = spawn(process.execPath, ["-e", "setTimeout(() => {}, 60000)"], {
+      detached: true,
+      stdio: "ignore",
+      env: { ...process.env, ROLL_SCHEDULE_INVOCATION: ID },
+    });
+    try {
+      await once(child, "spawn");
+      const snap = snapshotProcesses(invocationMarker(ID));
+      assert.ok(snap);
+      assert.deepEqual(
+        snap.filter((entry) => entry.marked).map((entry) => entry.pid),
+        [child.pid],
+      );
+      assert.equal(
+        snap.some((entry) => entry.pid === process.pid),
+        true,
+      );
+    } finally {
+      child.kill("SIGKILL");
+      await once(child, "exit").catch(() => undefined);
+    }
+  },
+);
