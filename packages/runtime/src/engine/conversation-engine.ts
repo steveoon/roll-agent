@@ -137,6 +137,25 @@ export interface ConversationEngineOptions {
   readonly fileToolsEnabled?: boolean;
 }
 
+export function buildSessionExecSettings(input: {
+  readonly config: RollConfig;
+  readonly profile: ShellProfile;
+  readonly env: NodeJS.ProcessEnv;
+  readonly onCommandSpawn?: (child: ChildProcess) => void;
+}): AgentSessionBashSession {
+  const shell = input.config.runtime.shell;
+  return {
+    workdir: process.cwd(),
+    profile: input.profile,
+    maxSessions: shell.session.maxSessions,
+    defaultYieldMs: shell.session.defaultYieldMs,
+    maxOutputTokens: shell.session.maxOutputTokens,
+    bufferCapacity: shell.maxCaptureBytes,
+    env: input.env,
+    ...(input.onCommandSpawn ? { onCommandSpawn: input.onCommandSpawn } : {}),
+  };
+}
+
 export function buildSessionBashSettings(input: {
   readonly config: RollConfig;
   readonly profile: ShellProfile;
@@ -567,15 +586,12 @@ export class ConversationEngine {
     if (!profile.supportsSessionExec) {
       return undefined;
     }
-    return {
-      workdir: process.cwd(),
+    return buildSessionExecSettings({
+      config: this.config,
       profile,
-      maxSessions: shell.session.maxSessions,
-      defaultYieldMs: shell.session.defaultYieldMs,
-      maxOutputTokens: shell.session.maxOutputTokens,
-      bufferCapacity: shell.maxCaptureBytes,
       env: this.shellEnv,
-    };
+      ...(this.onShellCommandSpawn ? { onCommandSpawn: this.onShellCommandSpawn } : {}),
+    });
   }
 
   private buildSession(

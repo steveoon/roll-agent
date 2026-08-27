@@ -429,3 +429,29 @@ test("teardown 顺序为 preflight → settle；interrupted 也做 settle 清场
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test("teardownTree 抛异常按 unavailable 处理：preflight 时 failInvocation，settle 时 unsettled", async () => {
+  const dir = tempDir();
+  try {
+    const store = new ScheduleStore(dir, { retryBudget: 3 });
+    const claim = claimOne(store);
+    const reports: InvocationTreeTeardown[] = [];
+    const result = await executeInvocation({
+      store,
+      invocationId: claim.invocation.id,
+      ownershipToken: claim.ownershipToken,
+      runTurn: () => Promise.resolve({ status: "completed", threadId: "t", output: "ok" }),
+      teardownTree: () => Promise.reject(new Error("ENOENT: /proc")),
+      onTeardown: (_phase, report) => {
+        reports.push(report);
+      },
+    });
+    assert.ok(result.kind === EXECUTE_INVOCATION_KINDS.failed);
+    assert.match(result.error, /无法枚举/u);
+    assert.equal(reports[0]?.outcome, INVOCATION_TREE_TEARDOWN_OUTCOMES.unavailable);
+    assert.equal(store.getInvocation(claim.invocation.id)?.status, INVOCATION_STATUSES.retry);
+    store.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

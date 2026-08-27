@@ -21,6 +21,7 @@ import {
   ConversationEngine,
   type AgentBootstrapIssue,
   buildSessionBashSettings,
+  buildSessionExecSettings,
 } from "./conversation-engine.ts";
 import { CAPABILITY_HOST_MODES } from "./capability-manifest.ts";
 import type { ShellProfile } from "../bash/profile.ts";
@@ -4757,6 +4758,35 @@ test("buildSessionBashSettings 只在提供 onCommandSpawn 时写入该字段", 
   assert.deepEqual(withHook.env, { PATH: "/usr/bin" });
   assert.equal(withHook.turnTimeoutMs, config.runtime.turnTimeoutMs);
   const without = buildSessionBashSettings({
+    config,
+    profile: powershellProfile,
+    env: { PATH: "/usr/bin" },
+  });
+  assert.equal("onCommandSpawn" in without, false);
+});
+
+test("buildSessionExecSettings 只在提供 onCommandSpawn 时写入该字段", () => {
+  const config = rollConfigSchema.parse({
+    llm: {
+      defaultProvider: "mock",
+      defaultModel: "default-model",
+      providers: { mock: { apiKey: "test" } },
+    },
+    runtime: { model: "runtime-model" },
+    ask: {},
+    agents: { dataDir: "/tmp/roll-engine-test" },
+  });
+  const onCommandSpawn = () => {};
+  const withHook = buildSessionExecSettings({
+    config,
+    profile: powershellProfile,
+    env: { PATH: "/usr/bin" },
+    onCommandSpawn,
+  });
+  assert.equal(withHook.onCommandSpawn, onCommandSpawn);
+  assert.equal(withHook.maxSessions, config.runtime.shell.session.maxSessions);
+  assert.equal(withHook.bufferCapacity, config.runtime.shell.maxCaptureBytes);
+  const without = buildSessionExecSettings({
     config,
     profile: powershellProfile,
     env: { PATH: "/usr/bin" },

@@ -145,7 +145,17 @@ export async function executeInvocation(
     return { kind: EXECUTE_INVOCATION_KINDS.lostClaim, invocationId: options.invocationId };
   }
   const teardown = async (phase: InvocationTreeTeardownPhase): Promise<InvocationTreeTeardown> => {
-    const report = await options.teardownTree(phase);
+    let report: InvocationTreeTeardown;
+    try {
+      report = await options.teardownTree(phase);
+    } catch {
+      report = {
+        outcome: INVOCATION_TREE_TEARDOWN_OUTCOMES.unavailable,
+        terminatedPids: [],
+        survivorPids: [],
+        skippedReusedGroups: [],
+      };
+    }
     options.onTeardown?.(phase, report);
     return report;
   };

@@ -1,6 +1,7 @@
 import { spawnSync } from "node:child_process";
 import type { ChildProcess } from "node:child_process";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
+import { performance } from "node:perf_hooks";
 import { setTimeout as sleep } from "node:timers/promises";
 import { TRUSTED_PS_PATHS } from "./executor-liveness.ts";
 import { SCHEDULE_INVOCATION_ENV } from "./paths.ts";
@@ -89,9 +90,23 @@ export function parseProcStat(
   return { pgid, zombie: (fields[0] ?? "").startsWith("Z") };
 }
 
-function snapshotFromProc(marker: string): ProcessSnapshot {
+function hasLiveThreads(name: string): boolean {
+  try {
+    return readdirSync(`/proc/${name}/task`).length > 1;
+  } catch {
+    return false;
+  }
+}
+
+function snapshotFromProc(marker: string): ProcessSnapshot | undefined {
+  let names: readonly string[];
+  try {
+    names = readdirSync("/proc");
+  } catch {
+    return undefined;
+  }
   const entries: ProcessSnapshotEntry[] = [];
-  for (const name of readdirSync("/proc")) {
+  for (const name of names) {
     if (!/^\d+$/u.test(name)) {
       continue;
     }
@@ -113,7 +128,7 @@ function snapshotFromProc(marker: string): ProcessSnapshot {
     entries.push({
       pid: Number.parseInt(name, 10),
       pgid: parsed.pgid,
-      zombie: parsed.zombie,
+      zombie: parsed.zombie && !hasLiveThreads(name),
       marked,
     });
   }
@@ -199,8 +214,7 @@ export function collectTreeMembers(
     groups.add(scope.selfPid);
   }
   const consider = (pgid: number, leaderExited: boolean): void => {
-    const leader = byPid.get(pgid);
-    if (leaderExited && leader !== undefined && !leader.zombie) {
+    if (leaderExited && byPid.has(pgid)) {
       skipped.push(pgid);
       return;
     }
@@ -273,7 +287,7 @@ export async function terminateInvocationTree(
   const snapshot = deps.snapshot ?? ((value: string) => snapshotProcesses(value, platform));
   const kill = deps.kill ?? ((pid: number, signal: NodeJS.Signals) => process.kill(pid, signal));
   const wait = deps.sleep ?? ((ms: number) => sleep(ms));
-  const now = deps.now ?? Date.now;
+  const now = deps.now ?? (() => performance.now());
   const graceMs = deps.graceMs ?? TEARDOWN_GRACE_MS;
   const pollMs = deps.pollMs ?? TEARDOWN_POLL_MS;
   const first = snapshot(marker);
@@ -285,21 +299,21 @@ export async function terminateInvocationTree(
     return emptyTeardown(INVOCATION_TREE_TEARDOWN_OUTCOMES.clean, initial.skippedReusedGroups);
   }
   const seen = new Set<number>(initial.pids);
-  const unkillable = new Set<number>();
   const signalAll = (pids: readonly number[], signal: NodeJS.Signals): void => {
     for (const pid of pids) {
       try {
         kill(pid, signal);
       } catch (error) {
-        if (isErrnoCode(error, "EPERM")) {
-          unkillable.add(pid);
+        if (!isErrnoCode(error, "ESRCH") && !isErrnoCode(error, "EPERM")) {
+          throw error;
         }
       }
     }
   };
+  const maxPolls = Math.max(1, Math.ceil(graceMs / pollMs));
   const settle = async (): Promise<readonly number[] | undefined> => {
     const deadline = now() + graceMs;
-    for (;;) {
+    for (let poll = 1; ; poll += 1) {
       await wait(pollMs);
       const current = snapshot(marker);
       if (current === undefined) {
@@ -309,7 +323,7 @@ export async function terminateInvocationTree(
       for (const pid of members) {
         seen.add(pid);
       }
-      if (members.length === 0 || now() >= deadline) {
+      if (members.length === 0 || now() >= deadline || poll >= maxPolls) {
         return members;
       }
     }
@@ -332,7 +346,7 @@ export async function terminateInvocationTree(
       );
     }
   }
-  const survivors = new Set<number>([...remaining, ...unkillable]);
+  const survivors = new Set<number>(remaining);
   const terminated = ascending([...seen].filter((pid) => !survivors.has(pid)));
   return {
     outcome:

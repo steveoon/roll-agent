@@ -1,3 +1,4 @@
+import type { ChildProcess } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { waitForPromiseSettlement } from "../bounded-wait.ts";
 import { relocateToolImagesToUserMessages } from "./relocate-tool-images.ts";
@@ -300,6 +301,7 @@ export interface AgentSessionBashSession {
   readonly maxOutputTokens: number;
   readonly bufferCapacity: number;
   readonly env?: NodeJS.ProcessEnv;
+  readonly onCommandSpawn?: (child: ChildProcess) => void;
 }
 
 export type SessionSkillSummary = SkillSummary;
@@ -1016,6 +1018,9 @@ export class AgentSession {
         profile: options.bashSession.profile,
         env: withCleanEnv(options.bashSession.env ?? process.env),
         bufferCapacity: options.bashSession.bufferCapacity,
+        ...(options.bashSession.onCommandSpawn
+          ? { onSpawn: options.bashSession.onCommandSpawn }
+          : {}),
       });
     }
     const sessionExecTools =

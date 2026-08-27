@@ -129,7 +129,7 @@ test("collectTreeMembers：登记组首领存活或已退出且 pid 未复用时
     ]),
     { invocationId: ID, selfPid: 500, trackedGroups: [{ pgid: 600, leaderExited: () => true }] },
   );
-  assert.deepEqual(zombieLeader.pids, [601]);
+  assert.deepEqual(zombieLeader, { pids: [], skippedReusedGroups: [600] });
 });
 
 test("collectTreeMembers：上一任 executor pid 当作已退出的登记组处理", () => {
@@ -250,27 +250,55 @@ test("terminateInvocationTree：grace 后仍在则 SIGKILL，随后消失为 cle
   ]);
 });
 
-test("terminateInvocationTree：SIGKILL 后仍在或 EPERM 的进程记为 survivors", async () => {
+test("terminateInvocationTree：SIGKILL 后仍在的进程记为 survivors，EPERM 的进程以最终快照为准", async () => {
   const killed: Array<[number, string]> = [];
   const stuck = snapshot([
     [500, 500],
     [501, 501, true],
     [502, 500],
   ]);
+  const epermKill = (pid: number, signal: NodeJS.Signals) => {
+    killed.push([pid, signal]);
+    if (pid === 502) {
+      throw Object.assign(new Error("EPERM"), { code: "EPERM" });
+    }
+  };
   const report = await terminateInvocationTree(
     SCOPE,
-    scriptedDeps([stuck, stuck, stuck], killed, {
-      kill: (pid, signal) => {
-        killed.push([pid, signal]);
-        if (pid === 502) {
-          throw Object.assign(new Error("EPERM"), { code: "EPERM" });
-        }
-      },
-    }),
+    scriptedDeps([stuck, stuck, stuck], killed, { kill: epermKill }),
   );
   assert.equal(report.outcome, INVOCATION_TREE_TEARDOWN_OUTCOMES.survivors);
   assert.deepEqual(report.survivorPids, [501, 502]);
   assert.deepEqual(report.terminatedPids, []);
+  const gone = await terminateInvocationTree(
+    SCOPE,
+    scriptedDeps([stuck, snapshot([[500, 500]])], [], { kill: epermKill }),
+  );
+  assert.equal(gone.outcome, INVOCATION_TREE_TEARDOWN_OUTCOMES.clean);
+  assert.deepEqual(gone.terminatedPids, [501, 502]);
+});
+
+test("terminateInvocationTree：kill 抛出 ESRCH/EPERM 之外的错误会向上抛", async () => {
+  await assert.rejects(
+    terminateInvocationTree(
+      SCOPE,
+      scriptedDeps(
+        [
+          snapshot([
+            [500, 500],
+            [501, 501, true],
+          ]),
+        ],
+        [],
+        {
+          kill: () => {
+            throw Object.assign(new Error("EINVAL"), { code: "EINVAL" });
+          },
+        },
+      ),
+    ),
+    /EINVAL/u,
+  );
 });
 
 test("terminateInvocationTree：ESRCH 忽略；快照不可用返回 unavailable；win32 返回 unsupported", async () => {
