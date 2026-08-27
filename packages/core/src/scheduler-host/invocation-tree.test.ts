@@ -10,6 +10,7 @@ import {
   parseProcStat,
   parsePsSnapshot,
   probeInvocationTreeSettled,
+  resolveStartTokenReader,
   snapshotProcesses,
   terminateInvocationTree,
   trackedGroupsFromPersisted,
@@ -336,6 +337,12 @@ test("ProcessGroupLedger 只登记拿到 pid 的子进程，leaderExited 跟随 
   assert.equal(ledger.groups()[0]?.leaderExited(), false);
   child.exitCode = 0;
   assert.equal(ledger.groups()[0]?.leaderExited(), true);
+});
+
+test("resolveStartTokenReader：win32 不读 OS 启动身份（teardown/probe 在 win32 永不消费），POSIX 用真实读取器", () => {
+  assert.equal(resolveStartTokenReader("win32")(process.pid), undefined);
+  assert.equal(resolveStartTokenReader("darwin"), readProcessStartToken);
+  assert.equal(resolveStartTokenReader("linux"), readProcessStartToken);
 });
 
 function scriptedDeps(

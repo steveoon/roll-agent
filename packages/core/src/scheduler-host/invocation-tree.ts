@@ -195,11 +195,19 @@ export interface TrackedProcessGroup {
   readonly leaderState?: TrackedLeaderState;
 }
 
+export type StartTokenReader = (pid: number) => string | undefined;
+
+const NO_START_TOKEN: StartTokenReader = () => undefined;
+
+export function resolveStartTokenReader(platform: NodeJS.Platform): StartTokenReader {
+  return platform === "win32" ? NO_START_TOKEN : readProcessStartToken;
+}
+
 export class ProcessGroupLedger {
   private readonly tracked: TrackedProcessGroup[] = [];
-  private readonly readStartToken: (pid: number) => string | undefined;
+  private readonly readStartToken: StartTokenReader;
 
-  constructor(readStartToken: (pid: number) => string | undefined = readProcessStartToken) {
+  constructor(readStartToken: StartTokenReader = resolveStartTokenReader(process.platform)) {
     this.readStartToken = readStartToken;
   }
 
