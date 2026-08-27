@@ -1,6 +1,6 @@
 # Scheduler「先清场、再落终态」设计
 
-日期：2026-08-27 · 基线：`ebf3093`（dev，codex W15 + review 修复之后）· 状态：已实现（本轮增量：持久化树所有权）
+日期：2026-08-27 · 基线：`ebf3093`（dev，codex W15 + review 修复之后）· 状态：已实现（本轮增量：持久化树所有权；review 修复见 §8 末尾）
 
 ## 1. 问题（使用者视角）
 
@@ -82,7 +82,7 @@ export const INVOCATION_TREE_TEARDOWN_OUTCOMES = { clean, survivors, unavailable
 export async function terminateInvocationTree(scope, deps?): Promise<InvocationTreeTeardown>
 ```
 
-`terminateInvocationTree`：快照 → **恢复组身份不可验证（缺 start token、验证 `unavailable`、或 `leaderState: unknown` 的 live leader）⇒ `unavailable`，不发任何信号**；**每一轮轮询都必须检查 `unverifiableGroups`**，中途变 unavailable 立即返回、不升级 SIGKILL；成员为空 ⇒ `clean`；否则对每个成员 `SIGTERM` → 每 250 ms 重新快照，≤ 2 s 内为空 ⇒ `clean`（附 `terminatedPids`）→ 否则 `SIGKILL` → 再等 ≤ 2 s → **以最终快照为准**：仍有成员 ⇒ `survivors`（附 `survivorPids`）。`kill` 的 `ESRCH` / `EPERM` 只是忽略——`EPERM` 的进程若在 grace 内自行退出，不能算 survivor（否则把 fail-closed 变成无谓的重跑）；其他错误向上抛。deadline 用 `performance.now()`（单调时钟，墙钟回拨不会把轮询变成无界）。快照失败（`/bin/ps` 缺失 / 超时 / `/proc` 不可读）或**快照里没有 exec 自己的 pid**（自身必然存活，缺席即快照不完整——例如 `/proc` 被空 tmpfs 覆盖）⇒ `unavailable`；测试注入的 `snapshot` 返回 `undefined` 不得回退真实 `ps`/`/proc`。`teardownTree` 抛异常由 `executeInvocation` 按 `unavailable` 处理，异常原文进 `report.error`、账本失败文案与 exec 日志。win32 ⇒ `unsupported`。总耗时上限约 4.5 s，远小于 daemon 的 10 s grace。
+`terminateInvocationTree`：快照 → **恢复组身份不可验证（缺 start token、验证 `unavailable`、或 `leaderState: unknown` 的 live leader）⇒ `unavailable`**：首帧即不可验证时不发任何信号；**每一轮轮询都必须检查 `unverifiableGroups`**，中途变 unavailable 立即返回、不升级 SIGKILL（已发出的 SIGTERM 不撤回，报告仍为 `unavailable`）。start token 验证的 `process-not-found`（首领在 `ps -A` 采样之后、逐组 `ps -p` 之前退出）是独立 verdict `gone`，**不是 PID 复用**：pid 仍是非空组的 pgid 时内核不会复用它，所以无首领的组按 pgid 归本次运行、照常发信号，不进 quarantine；只有 `leaderState: exited` 的持久化组遇到同号 live pid 才按复用跳过；成员为空 ⇒ `clean`；否则对每个成员 `SIGTERM` → 每 250 ms 重新快照，≤ 2 s 内为空 ⇒ `clean`（附 `terminatedPids`）→ 否则 `SIGKILL` → 再等 ≤ 2 s → **以最终快照为准**：仍有成员 ⇒ `survivors`（附 `survivorPids`）。`kill` 的 `ESRCH` / `EPERM` 只是忽略——`EPERM` 的进程若在 grace 内自行退出，不能算 survivor（否则把 fail-closed 变成无谓的重跑）；其他错误向上抛。deadline 用 `performance.now()`（单调时钟，墙钟回拨不会把轮询变成无界）。快照失败（`/bin/ps` 缺失 / 超时 / `/proc` 不可读）或**快照里没有 exec 自己的 pid**（自身必然存活，缺席即快照不完整——例如 `/proc` 被空 tmpfs 覆盖）⇒ `unavailable`；测试注入的 `snapshot` 返回 `undefined` 不得回退真实 `ps`/`/proc`。`teardownTree` 抛异常由 `executeInvocation` 按 `unavailable` 处理，异常原文进 `report.error`、账本失败文案与 exec 日志。win32 ⇒ `unsupported`。总耗时上限约 4.5 s，远小于 daemon 的 10 s grace。
 
 **跨帧隔离**：token mismatch 的 PGID 进入本次 teardown 的单调 quarantine；后续帧即使 leader 退出，也不能重新通过组判据进入 signal 集合。精确 invocation marker 仍可单独证明某个成员属于本次运行。
 
@@ -92,7 +92,7 @@ export async function terminateInvocationTree(scope, deps?): Promise<InvocationT
 
 | 时机 | 树已清 | 有残留 / 无法枚举 |
 |---|---|---|
-| **preflight**（`beginInvocation` 之后、`runTurn` 之前） | 继续 | 先 `recordInvocationTree`；若仍有 retry 预算则 `failInvocation` → retry（带走登记组），**不跑 turn**。预算耗尽时 **不** 写 `failed` / 不 pause，返回 `unsettled`，行保持 `running` |
+| **preflight**（`beginInvocation` 之后、`runTurn` 之前） | 继续（清空 tree 列） | 先 `recordInvocationTree`（登记组 + survivors + 原因文案写进 `invocations.error`）；若仍有 retry 预算则 `failInvocation` → retry（带走登记组），**不跑 turn**。预算耗尽时 **不** 写 `failed` / 不 pause，返回 `unsettled`，行保持 `running` |
 | **settle**（turn 成功 / 失败之后、写终态之前） | 用既有 Store API 写终态；`completeInvocation` 返回 `written` / `lost-claim` / `tree-unsettled` | **不写终态**，返回 kind `unsettled`（附 `survivorPids`），exec 非零退出；行保持 `running` |
 | **interrupted**（停止信号） | best-effort teardown 并 persist，仍返回 `interrupted` 不写账本 | 同左 |
 
@@ -101,7 +101,7 @@ Windows：`unsupported` 视同已清（root-only 边界，与今天一致）。
 ### 5.4 接线
 
 - `spawn-invocation.ts`：env 加 `[SCHEDULE_INVOCATION_ENV]: claim.invocation.id`（daemon 与 inline 共用入口；`takeScheduleExecEnv` 不删它——它就是要被继承的；bash `clean-env.ts` 与 MCP `buildStdioChildEnv` 均透传未知 key）。
-- `runtime-host/engine-factory.ts` `CreateChatEngineInput.onShellCommandSpawn?` → `run-scheduled-turn.ts` → `schedule-exec.ts`：创建 `ProcessGroupLedger`，读取 `store.getInvocation(id)?.executor?.pid` 作为 `previousExecutorPid`，`teardownTree` 每次以最新 `ledger.groups()` 构造 scope；`unsettled` 打 error 日志并 `exitCode = 1`；`terminatedPids` / `skippedReusedGroups` 打 warn。
+- `runtime-host/engine-factory.ts` `CreateChatEngineInput.onShellCommandSpawn?` → `run-scheduled-turn.ts` → `schedule-exec.ts`：创建 `ProcessGroupLedger`，读取 `store.getInvocation(id)?.executor?.pid` 作为 `previousExecutorPid`，`teardownTree` 每次以持久化组 ∪ 最新 `ledger.groups()` 构造 scope；`trackedGroups(report)` 用 `mergeTrackedGroups` 合并持久化组与 `ledger.persisted()`，并剔除本次 teardown 已判复用的 `skippedReusedGroups`；`unsettled` 打 error 日志并 `exitCode = 1`；`terminatedPids` / `skippedReusedGroups` 打 warn。`ProcessGroupLedger` 的 start token 读取按平台解析：win32 不读（teardown `unsupported`、probe 恒 `settled`，token 永不消费，省掉每条 shell 命令一次 PowerShell）。
 
 ## 6. 状态矩阵
 
@@ -113,7 +113,8 @@ Windows：`unsupported` 视同已清（root-only 边界，与今天一致）。
 | turn 失败（非中断） | `failInvocation` | 清掉后 `failInvocation` | `unsettled` | 同左 |
 | interrupted | persist 已清，不写终态 | 清掉，不写 | persist 未清，不写 | persist unavailable，不写 |
 | cancel（无 `--kill`） | 置终态 | — | `treeUnsettled`，提示加 `--kill` | `treeUnsettled` |
-| cancel `--kill` | 杀 exec 后再 teardown 持久化树，`finalizeCancellation(expectedAttempt)` 置终态 | 清掉后置终态 | 拒绝 cancel，单例不释放 | 拒绝 cancel |
+| cancel `--kill`（`claimed` / `running` / `retry`） | 杀 exec 后再 teardown 持久化树，`finalizeCancellation(expectedAttempt)` 置终态；exec 仍存活时先按 `executorAlive` 拒绝，不写 tree 列 | 清掉后置终态 | 拒绝 cancel，单例不释放 | 拒绝 cancel |
+| cancel `--kill`（`pending` / 终态） | pending 直接置终态（不持有树，不做 teardown）；终态报 `terminal` | — | — | — |
 | cancel `--abandon` | 强制终态 | 强制终态 | 强制终态 | 强制终态 |
 | stale cancel（attempt 已变） | — | — | `ownershipChanged`，不改写新 owner | 同左 |
 | pause | 停后续触发；空树 scheduled retry 放弃 | — | 未清树的 retry/running **保持**，不清 tree 列 | 同左 |
@@ -128,7 +129,9 @@ exec `unsettled` 退出后：daemon `onExit` → 先看 exec 进程树探活，�
 - 残留在 **组外** 且已持久化登记组 ⇒ 探活 dead 但 `failInvocation` 返回 `treeUnsettled` ⇒ 同样 hold，**不会**把组外 survivor 当成「exec 已死可重试耗尽」。`cancel --kill` 会按持久化 scope 再 teardown；清不掉只能 `--abandon`。
 - 无持久化树且组外不可见 ⇒ 仍可 retry；下次 preflight 用账本 pgids。
 
-`openScheduleStore` 注入 `treeLiveness`：用账本 invocation id / pgids / executor.pid 调 `probeInvocationTreeSettled`。probe 的 `selfPid` 必须是 executor.pid（exec 已死时用 0），不能用 cancel/daemon 的 `process.pid`。列为空且 `unsettled=0` 不调 probe；列非空或 `unsettled=1` 必须 probe，缺省 probe fail-closed。win32 恒 settled。
+`openScheduleStore` 注入 `treeLiveness`：`invocationTreeScopeFor(record)` 用账本 invocation id / 持久化组 / `executor.pid` 调 `probeInvocationTreeSettled`，**`selfPid` 恒为 0**（store 侧永远不是 exec 自身），`executor.pid` 只作为 `previousExecutorPid` 走复用守卫；exec 自己的写终态路径在清场成功后已清空 tree 列，不会走到这里。列为空且 `unsettled=0` 不调 probe；列非空或 `unsettled=1` 必须 probe，缺省 probe fail-closed。win32 恒 settled。`claimDue` 里被树门禁挡住的行按状态推迟：`retry` 行推 `retry_at`、`claimed` / `running` 行推 `lease_until`（各一个 lease 周期），不会每 15 s 重探。`tree_survivor_pids` 只是展示信息，损坏时读作 `[]`；`tree_tracked_pgids` 损坏才 fail-closed，错误文案带 invocation id。
+
+**可观测性**：被门禁 hold 的行 `error` 列带清场原因（`runs` 行尾 `tree=unsettled(pid …)`），`roll schedule list` 查该任务的占用运行（`findLiveRun`），有未清树时在行尾提示 `⚠ 运行 <id>（<status>）进程树未清…用 roll schedule cancel <id> --kill 清场`；daemon 日志同样点名。
 
 ## 7. 平台边界与残余（写进用户文档）
 
@@ -136,7 +139,7 @@ exec `unsettled` 退出后：daemon `onExit` → 先看 exec 进程树探活，�
 - Linux：`/proc/<pid>/environ` 对 setuid / 不同 uid / 非 dumpable 进程 `EACCES`，这类进程只能靠 B、C。
 - `env -i` 清空环境后 exec 的子进程不带标记，只能靠 B、C。
 - Windows：无法读其他进程 env，树退化为根进程（沿用启动身份），settle 不清场直接写终态，与今天一致；Job Object 留 v2。
-- `ps -E` 会读到同 uid 其他进程的 env，只在内存里匹配标记后丢弃（spec 2026-08-25 已记录同 uid 本就能读 0600 账本）。
+- Linux `/proc/<pid>/environ` 会读到同 uid 其他进程的 env，只在内存里匹配标记后丢弃（spec 2026-08-25 已记录同 uid 本就能读 0600 账本）。darwin 目前仍执行 `ps -E`，但 command 列不当 env 用（见下一条），输出只用 pid / pgid / stat。
 - macOS 的 `ps -o command= -E` 把 argv 与 env 打在同一列、仅以空格分隔，无法区分：**darwin 上不再用 command 列给 `marked`**。argv 里碰巧含 `ROLL_SCHEDULE_INVOCATION=<uuid>` 的无关进程不会被杀；相应地，darwin 上 source A（env 标记）关闭，已 `setsid` 离开 B/C 的 MCP Chromium 是文档化残余。Linux 继续读 `/proc/*/environ`。不解析 `kern.procargs2`。
 - Linux 上 `readdirSync("/proc")` 与 `readFileSync(environ)` 没有超时；若系统里有持 mmap 锁的 D 态进程，settle 可能阻塞而不是 `unavailable`（macOS 的 `ps` 有 5 s 超时兜底）。需 Linux 实测，v1 记录为边界。
 
@@ -150,13 +153,15 @@ exec `unsettled` 退出后：daemon `onExit` → 先看 exec 进程树探活，�
 - **durable group identity 不能只存数字 PGID**：persist 必须带 `leaderState`（`alive` / `exited` / `unknown`）和 spawn 时的 start token。内部数字数组只证明曾登记过 pgid，解析为 `unknown`；旧 `{ leaderExited }` 对象和损坏 JSON 不再兼容，均作为无效 ownership 元数据 fail-closed，只能显式 `--abandon`。
 - **恢复组与 in-process 组的所有权不同**：`ProcessGroupLedger` 持有 `ChildProcess` 的 live 组可以在无 token 时清场；从账本 `trackedGroupsFromPersisted` 恢复的组，live leader 只允许 start token **正向 match** 进入 signal 集合。token 缺失、验证 `unavailable`、或 `leaderState: unknown` 时整次 teardown / probe 返回 `unavailable`，保持 `treeUnsettled` 与单例占用，**不发送任何信号**（轮询中途变 unavailable 同样立即停，不升级 SIGKILL）。
 - **底层终态 writer 必须先过 tree gate**：`finishInvocationAsFailedInTransaction` 在非 `force` 时拒绝未清树；pause / worker shutdown 走同一条路。`--abandon` 是唯一 force。
+- **review 修复（8/27 晚，六 agent 审查后）**：`process-not-found` 不算复用（否则首领在 `ps -A` 采样期间退出会把整组隔离、报 `clean` 而孤儿存活，真实进程 13/30 复现）；`cancel --kill` 对 pending / 终态行不做 teardown、不写 tree 列（否则 attempt CAS 匹配 0 行误报 ownership-changed）；hold 住的行必须在 `list` / `runs` 可见；win32 不读 start token；store 探针 `selfPid` 恒 0；`claimDue` 按状态推迟被挡住的行；survivors 列宽松解析、tracked 列错误带 id；`recordInvocationTree` 必须带 ownership token（删除无 CAS 的 retry-only 写入）；`finalizeCancellation` 先查 exec 存活再写 tree。
 
 ## 9. 测试策略
 
 - 纯函数：`parsePsSnapshot` / `parseProcStat` / `collectTreeMembers`（自身排除、B 首领守卫、C 复用守卫、previousExecutorPid、僵尸排除、**live-leader vs PID-reuse 双向**、**恢复组缺 token / 验证 unavailable 不进 signal 集合**）。
 - Store：`retry + tree` 占单例；pause 保留 unsettled retry；remove 拒绝 live/tree-owned；tokenless tree write 不能覆盖 claimed/running；`finalizeCancellation` 的 attempt CAS；shutdown 不终态未清树的 claimed。
 - 注入 `snapshot` / `kill` / `sleep` / `now` 的 `terminateInvocationTree` 矩阵：SIGTERM 即清、需 SIGKILL、survivors、unavailable、EPERM、win32 unsupported。
-- 真实进程（POSIX；`node --test` 子进程不是组首领，据此验证 B 的守卫不会误杀同组进程）：① 带标记的 detached node 子进程被找到并终止，不同标记的对照进程不受影响；② `sh -c "/bin/sleep 60 & exit 0"` 留下的孤儿 `sleep`（bash 工具残留的真实形状，平台二进制）经 C 被找到并终止；③ 标记设在测试进程自身时快照恰好只含自身、不含 `ps`。
+- 真实进程（POSIX；`node --test` 子进程不是组首领，据此验证 B 的守卫不会误杀同组进程）：① 带 environ 标记的 detached node 子进程被找到并终止，不同标记的对照进程不受影响（**Linux only**，darwin 不读 env）；② `sh -c "/bin/sleep 60 & exit 0"` 留下的孤儿 `sleep`（bash 工具残留的真实形状，平台二进制）经 C 被找到并终止；③ 标记设在测试进程自身时快照恰好只含自身、不含 `ps`（Linux only）；④ 持久化 live leader 的 token 正向匹配 / 不匹配；⑤ argv 含标记但 env 无标记的进程不进 `terminatedPids`；⑥ 恢复组首领在 `ps` 快照之后退出（过期首帧 + 真实后续帧 + 真实 matcher），孤儿仍被终止、不进隔离。
+- CLI / 展示：`finalizeCancellation` 对 pending 行直接 cancelled、终态行 terminal（store）+ 真实 `roll schedule cancel <pending> --kill` e2e；`formatInvocationLine` / `formatScheduleLine` / `liveRunHint` / `invocationTreeScopeFor` 纯函数；`recordInvocationTree` 的 `error` 文案；paused 任务未清树 retry 行只探一次；损坏 survivors 列不阻塞其他任务 claim；exec 存活时 `finalizeCancellation` 不写 tree 列；旧 token 的 tree write 在 reclaim 后失效；`resolveStartTokenReader("win32")` 不读；`mergeTrackedGroups` 剔除已判复用组。
 - `executeInvocation` 矩阵：preflight 拦截不跑 turn、settle survivors → `unsettled` 且行保持 running、unavailable → `unsettled`、unsupported → completed、interrupted 仍 teardown 且不写、phase 顺序。
 - `createInvocationSpawner` 真实 spawn 断言子进程 env 含标记与 token。
 - 对抗验证（完成前必做）：3 个独立反驳者（内核 / PID 复用与竞态；账本状态机与 daemon 交接；跨平台与 macOS 平台二进制），重跑本会话两个探针，以及有真实 LLM 配置时 `run-now --inline` 跑一条会 `nohup sleep &` 的提示词，断言 `ps` 无残留且行为 completed。
