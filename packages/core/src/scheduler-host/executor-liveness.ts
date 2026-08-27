@@ -12,7 +12,7 @@ import {
 } from "../registry/process-identity.ts";
 
 const PROCESS_STATE_TIMEOUT_MS = 2_000;
-const TRUSTED_PS_PATHS = ["/bin/ps", "/usr/bin/ps"] as const;
+export const TRUSTED_PS_PATHS = ["/bin/ps", "/usr/bin/ps"] as const;
 
 const LIVENESS_BY_VERIFICATION = {
   [PROCESS_START_TOKEN_VERIFICATION_STATUSES.MATCH]: EXECUTOR_LIVENESS.alive,
