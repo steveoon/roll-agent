@@ -283,7 +283,7 @@ export class SchedulerDaemon {
     }
     if (outcome === INVOCATION_FAILURE_OUTCOMES.treeUnsettled) {
       this.logger.error(
-        `invocation ${id} 的 exec 已退出，但登记的进程树未清干净；保留 running，交给探活与 maxRunMs 处理`,
+        `invocation ${id} 的 exec 已退出，但登记的进程树未清干净；保留 running、不再触发，lease 到期后按树门禁复核，可用 roll schedule cancel ${id} --kill 清场`,
       );
       this.wake.resolve();
       return;

@@ -179,6 +179,14 @@ export async function executeInvocation(
       ...(pgids.length > 0 ? { trackedPgids: pgids } : {}),
       unsettled: !settled,
       survivorPids: report.survivorPids,
+      ...(settled
+        ? {}
+        : {
+            error:
+              phase === INVOCATION_TREE_TEARDOWN_PHASES.preflight
+                ? describePreflightFailure(report)
+                : describeUnsettled(report),
+          }),
     });
     return report;
   };

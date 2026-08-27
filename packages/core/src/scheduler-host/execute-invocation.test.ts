@@ -332,6 +332,7 @@ test("preflight 残留在 retryBudget 耗尽时返回 unsettled，行保持 runn
     assert.equal(record?.treeUnsettled, true);
     assert.deepEqual(record?.treeTrackedPgids, [4242]);
     assert.deepEqual(record?.treeSurvivorPids, [4242]);
+    assert.match(record?.error ?? "", /上一次尝试的残留进程无法终止（pid 4242）/u);
     assert.equal(store.getSchedule(claim.schedule.id)?.status, "active");
     store.close();
   } finally {
@@ -369,6 +370,7 @@ test("settle 有残留时不写终态、返回 unsettled、行保持 running", a
     const record = store.getInvocation(claim.invocation.id);
     assert.equal(record?.status, INVOCATION_STATUSES.running);
     assert.deepEqual(record?.executor, { pid: 4321, startToken: "pst-v2:test" });
+    assert.match(record?.error ?? "", /强制终止后仍存活（pid 7, 9）/u);
     assert.equal(record?.threadId, undefined);
     assert.equal(record?.treeUnsettled, true);
     assert.deepEqual(record?.treeSurvivorPids, [7, 9]);

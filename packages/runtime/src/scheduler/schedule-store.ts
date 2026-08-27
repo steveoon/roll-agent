@@ -1332,6 +1332,7 @@ export class ScheduleStore {
       ...(input.trackedGroups !== undefined ? { trackedGroups: input.trackedGroups } : {}),
       ...(input.trackedPgids !== undefined ? { trackedPgids: input.trackedPgids } : {}),
       ...(input.survivorPids !== undefined ? { survivorPids: input.survivorPids } : {}),
+      ...(input.error !== undefined ? { error: input.error } : {}),
       retryOnly: true,
     });
   }
@@ -1345,6 +1346,7 @@ export class ScheduleStore {
     readonly ownershipToken?: string;
     readonly expectedAttempt?: number;
     readonly retryOnly?: boolean;
+    readonly error?: string;
   }): boolean {
     const groups = input.unsettled
       ? resolveTrackedGroups(input.trackedGroups, input.trackedPgids)
@@ -1352,17 +1354,20 @@ export class ScheduleStore {
     const tracked = groups.length > 0 ? encodeTrackedGroups(groups) : null;
     const survivors = encodePidList(input.unsettled ? (input.survivorPids ?? []) : []);
     const unsettled = input.unsettled ? 1 : 0;
+    const errorText = input.error ?? null;
     if (input.ownershipToken !== undefined) {
       const result = this.db
         .prepare(
           `UPDATE invocations
-             SET tree_tracked_pgids = ?, tree_unsettled = ?, tree_survivor_pids = ?
+             SET tree_tracked_pgids = ?, tree_unsettled = ?, tree_survivor_pids = ?,
+                 error = COALESCE(?, error)
            WHERE id = ? AND ownership_token = ? AND status IN (?, ?)`,
         )
         .run(
           tracked,
           unsettled,
           survivors,
+          errorText,
           input.id,
           input.ownershipToken,
           INVOCATION_STATUSES.claimed,
@@ -1374,13 +1379,15 @@ export class ScheduleStore {
       const result = this.db
         .prepare(
           `UPDATE invocations
-             SET tree_tracked_pgids = ?, tree_unsettled = ?, tree_survivor_pids = ?
+             SET tree_tracked_pgids = ?, tree_unsettled = ?, tree_survivor_pids = ?,
+                 error = COALESCE(?, error)
            WHERE id = ? AND attempt = ? AND status IN (?, ?, ?)`,
         )
         .run(
           tracked,
           unsettled,
           survivors,
+          errorText,
           input.id,
           input.expectedAttempt,
           INVOCATION_STATUSES.claimed,
@@ -1393,10 +1400,11 @@ export class ScheduleStore {
       const result = this.db
         .prepare(
           `UPDATE invocations
-             SET tree_tracked_pgids = ?, tree_unsettled = ?, tree_survivor_pids = ?
+             SET tree_tracked_pgids = ?, tree_unsettled = ?, tree_survivor_pids = ?,
+                 error = COALESCE(?, error)
            WHERE id = ? AND status = ?`,
         )
-        .run(tracked, unsettled, survivors, input.id, INVOCATION_STATUSES.retry);
+        .run(tracked, unsettled, survivors, errorText, input.id, INVOCATION_STATUSES.retry);
       return result.changes === 1;
     }
     return false;

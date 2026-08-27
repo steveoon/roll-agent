@@ -1810,6 +1810,49 @@ test("finalizeCancellation：pending 行不持有进程树，带 tree 的取消�
   }
 });
 
+test("recordInvocationTree 可附带 error 文案写进 running 行；不传时保留原 error", () => {
+  const dir = tempDir();
+  try {
+    const store = new ScheduleStore(dir);
+    store.createSchedule(sampleInput({ fireImmediately: true }), NOW);
+    const claim = store.claimDue({ workerId: "w", nowMs: NOW, limit: 1 })[0];
+    assert.ok(claim);
+    store.beginInvocation(claim.invocation.id, claim.ownershipToken, NOW + 1, {
+      pid: 4747,
+      startToken: "pst-v2:x",
+    });
+    assert.equal(
+      store.recordInvocationTree({
+        id: claim.invocation.id,
+        ownershipToken: claim.ownershipToken,
+        trackedGroups: [{ pgid: 600, leaderState: "alive", startToken: "pst-v2:l" }],
+        unsettled: true,
+        survivorPids: [601],
+        error: "本次运行拉起的进程在强制终止后仍存活（pid 601）",
+      }),
+      true,
+    );
+    let record = store.getInvocation(claim.invocation.id);
+    assert.equal(record?.status, INVOCATION_STATUSES.running);
+    assert.equal(record?.error, "本次运行拉起的进程在强制终止后仍存活（pid 601）");
+    assert.equal(
+      store.recordInvocationTree({
+        id: claim.invocation.id,
+        ownershipToken: claim.ownershipToken,
+        trackedGroups: [{ pgid: 600, leaderState: "alive", startToken: "pst-v2:l" }],
+        unsettled: true,
+        survivorPids: [601],
+      }),
+      true,
+    );
+    record = store.getInvocation(claim.invocation.id);
+    assert.equal(record?.error, "本次运行拉起的进程在强制终止后仍存活（pid 601）");
+    store.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("prepareWorkerShutdown 对带未清树的 claimed 行不写终态", () => {
   const dir = tempDir();
   try {

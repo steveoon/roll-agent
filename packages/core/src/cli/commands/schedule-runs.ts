@@ -1,6 +1,7 @@
 import { defineCommand } from "citty";
 import { loadConfig } from "../../config/loader.ts";
 import {
+  formatInvocationLine,
   loadRuntime,
   openScheduleStore,
   printJson,
@@ -37,9 +38,7 @@ export default defineCommand({
           return;
         }
         for (const row of rows) {
-          console.log(
-            `${row.status.padEnd(19)} ${row.scheduledFor}  attempt=${String(row.attempt)}  thread=${row.threadId ?? "-"}${row.error ? `  ${row.error}` : ""}`,
-          );
+          console.log(formatInvocationLine(row));
         }
       } finally {
         store.close();

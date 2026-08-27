@@ -97,6 +97,66 @@ export function serializeInvocation(record: InvocationRecord) {
   };
 }
 
+export type SerializedSchedule = ReturnType<typeof serializeSchedule>;
+export type SerializedInvocation = ReturnType<typeof serializeInvocation>;
+
+export function describeUnsettledTree(
+  row: Pick<SerializedInvocation, "treeUnsettled" | "treeSurvivorPids">,
+): string | undefined {
+  if (!row.treeUnsettled) {
+    return undefined;
+  }
+  return row.treeSurvivorPids.length > 0
+    ? `tree=unsettled(pid ${row.treeSurvivorPids.join(", ")})`
+    : "tree=unsettled";
+}
+
+export function formatInvocationLine(row: SerializedInvocation): string {
+  const tree = describeUnsettledTree(row);
+  return `${row.status.padEnd(19)} ${row.scheduledFor}  attempt=${String(row.attempt)}  thread=${row.threadId ?? "-"}${tree === undefined ? "" : `  ${tree}`}${row.error ? `  ${row.error}` : ""}`;
+}
+
+export type ScheduleLiveRunHint =
+  | {
+      readonly kind: "held";
+      readonly invocationId: string;
+      readonly status: string;
+      readonly survivorPids: readonly number[];
+    }
+  | { readonly kind: "unreadable"; readonly message: string };
+
+export function liveRunHint(
+  store: Pick<ScheduleStoreInstance, "findLiveRun">,
+  scheduleId: string,
+): ScheduleLiveRunHint | undefined {
+  try {
+    const live = store.findLiveRun(scheduleId);
+    if (live === undefined || !live.treeUnsettled) {
+      return undefined;
+    }
+    return {
+      kind: "held",
+      invocationId: live.id,
+      status: live.status,
+      survivorPids: live.treeSurvivorPids,
+    };
+  } catch (error) {
+    return { kind: "unreadable", message: error instanceof Error ? error.message : String(error) };
+  }
+}
+
+export function formatScheduleLine(row: SerializedSchedule, hint?: ScheduleLiveRunHint): string {
+  const base = `${row.id}  ${row.status.padEnd(6)}  ${row.trigger.padEnd(10)}  next=${row.nextRunAt ?? "-"}  ${row.name}${row.lastError ? `  ⚠ ${row.lastError}` : ""}`;
+  if (hint === undefined) {
+    return base;
+  }
+  if (hint.kind === "unreadable") {
+    return `${base}  ⚠ ${hint.message}`;
+  }
+  const pids = hint.survivorPids.length > 0 ? `，残留 pid ${hint.survivorPids.join(", ")}` : "";
+  return `${base}  ⚠ 运行 ${hint.invocationId}（${hint.status}）进程树未清${pids}；任务不再触发，用 roll schedule cancel ${hint.invocationId} --kill 清场`;
+}
+
 export function requireSchedule(store: ScheduleStoreInstance, id: string): ScheduleRecord {
   const record = store.getSchedule(id);
   if (record === undefined) {

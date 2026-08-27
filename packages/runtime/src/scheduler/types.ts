@@ -211,6 +211,7 @@ export interface RecordInvocationTreeInput {
   readonly unsettled: boolean;
   readonly survivorPids?: readonly number[];
   readonly ownershipToken?: string;
+  readonly error?: string;
 }
 
 export const SCHEDULE_STORE_ERROR_CODES = {

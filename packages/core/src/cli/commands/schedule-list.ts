@@ -1,6 +1,8 @@
 import { defineCommand } from "citty";
 import { loadConfig } from "../../config/loader.ts";
 import {
+  formatScheduleLine,
+  liveRunHint,
   loadRuntime,
   openScheduleStore,
   printJson,
@@ -31,9 +33,7 @@ export default defineCommand({
           return;
         }
         for (const row of rows) {
-          console.log(
-            `${row.id}  ${row.status.padEnd(6)}  ${row.trigger.padEnd(10)}  next=${row.nextRunAt ?? "-"}  ${row.name}${row.lastError ? `  ⚠ ${row.lastError}` : ""}`,
-          );
+          console.log(formatScheduleLine(row, liveRunHint(store, row.id)));
         }
       } finally {
         store.close();
