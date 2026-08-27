@@ -78,7 +78,7 @@ export const INVOCATION_TREE_TEARDOWN_OUTCOMES = { clean, survivors, unavailable
 export async function terminateInvocationTree(scope, deps?): Promise<InvocationTreeTeardown>
 ```
 
-`terminateInvocationTree`：快照 → 成员为空 ⇒ `clean`；否则对每个成员 `SIGTERM` → 每 250 ms 重新快照，≤ 2 s 内为空 ⇒ `clean`（附 `terminatedPids`）→ 否则 `SIGKILL` → 再等 ≤ 2 s → **以最终快照为准**：仍有成员 ⇒ `survivors`（附 `survivorPids`）。`kill` 的 `ESRCH` / `EPERM` 只是忽略——`EPERM` 的进程若在 grace 内自行退出，不能算 survivor（否则把 fail-closed 变成无谓的重跑）；其他错误向上抛。deadline 用 `performance.now()`（单调时钟，墙钟回拨不会把轮询变成无界）。快照失败（`/bin/ps` 缺失 / 超时 / `/proc` 不可读）⇒ `unavailable`；`teardownTree` 抛异常由 `executeInvocation` 按 `unavailable` 处理。win32 ⇒ `unsupported`。总耗时上限约 4.5 s，远小于 daemon 的 10 s grace。
+`terminateInvocationTree`：快照 → 成员为空 ⇒ `clean`；否则对每个成员 `SIGTERM` → 每 250 ms 重新快照，≤ 2 s 内为空 ⇒ `clean`（附 `terminatedPids`）→ 否则 `SIGKILL` → 再等 ≤ 2 s → **以最终快照为准**：仍有成员 ⇒ `survivors`（附 `survivorPids`）。`kill` 的 `ESRCH` / `EPERM` 只是忽略——`EPERM` 的进程若在 grace 内自行退出，不能算 survivor（否则把 fail-closed 变成无谓的重跑）；其他错误向上抛。deadline 用 `performance.now()`（单调时钟，墙钟回拨不会把轮询变成无界）。快照失败（`/bin/ps` 缺失 / 超时 / `/proc` 不可读）或**快照里没有 exec 自己的 pid**（自身必然存活，缺席即快照不完整——例如 `/proc` 被空 tmpfs 覆盖）⇒ `unavailable`；`teardownTree` 抛异常由 `executeInvocation` 按 `unavailable` 处理，异常原文进 `report.error`、账本失败文案与 exec 日志。win32 ⇒ `unsupported`。总耗时上限约 4.5 s，远小于 daemon 的 10 s grace。
 
 ### 5.3 core：`execute-invocation.ts` 的两个 choke point
 
