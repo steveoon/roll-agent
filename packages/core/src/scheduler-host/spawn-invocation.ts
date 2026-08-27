@@ -7,7 +7,7 @@ import {
   killProcessTree,
   type KillProcessTreeOutcome,
 } from "./executor-liveness.ts";
-import { SCHEDULE_DATA_DIR_ENV, SCHEDULE_TOKEN_ENV } from "./paths.ts";
+import { SCHEDULE_DATA_DIR_ENV, SCHEDULE_INVOCATION_ENV, SCHEDULE_TOKEN_ENV } from "./paths.ts";
 
 export type SpawnedInvocationSignal = "SIGTERM" | "SIGKILL";
 
@@ -53,6 +53,7 @@ export function createInvocationSpawner(
           ...(options.env ?? process.env),
           [SCHEDULE_TOKEN_ENV]: claim.ownershipToken,
           [SCHEDULE_DATA_DIR_ENV]: options.dataDir,
+          [SCHEDULE_INVOCATION_ENV]: claim.invocation.id,
         },
         stdio: ["ignore", "ignore", logFd],
         windowsHide: true,
