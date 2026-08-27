@@ -632,7 +632,7 @@ test("exec 已死但登记树未清时 daemon onExit 不 pause、行保持 runni
         store.recordInvocationTree({
           id: claim.invocation.id,
           ownershipToken: claim.ownershipToken,
-          trackedPgids: [9001],
+          trackedGroups: [{ pgid: 9001, leaderState: "unknown" }],
           unsettled: true,
           survivorPids: [9002],
         });

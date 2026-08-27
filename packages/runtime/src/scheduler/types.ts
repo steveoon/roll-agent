@@ -77,7 +77,6 @@ export interface PersistedTrackedGroup {
 }
 
 export interface FinalizeCancellationTree {
-  readonly trackedPgids?: readonly number[];
   readonly trackedGroups?: readonly PersistedTrackedGroup[];
   readonly unsettled: boolean;
   readonly survivorPids?: readonly number[];
@@ -206,11 +205,10 @@ export interface CompleteInvocationInput {
 
 export interface RecordInvocationTreeInput {
   readonly id: string;
-  readonly trackedPgids?: readonly number[];
+  readonly ownershipToken: string;
   readonly trackedGroups?: readonly PersistedTrackedGroup[];
   readonly unsettled: boolean;
   readonly survivorPids?: readonly number[];
-  readonly ownershipToken?: string;
   readonly error?: string;
 }
 

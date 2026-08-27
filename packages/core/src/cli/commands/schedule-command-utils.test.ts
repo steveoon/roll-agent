@@ -4,6 +4,7 @@ import {
   describeUnsettledTree,
   formatInvocationLine,
   formatScheduleLine,
+  invocationTreeScopeFor,
   liveRunHint,
   type SerializedInvocation,
   type SerializedSchedule,
@@ -42,6 +43,33 @@ const schedule: SerializedSchedule = {
   authorityDigest: undefined,
   createdAt: "2026-08-27T08:00:00.000Z",
 };
+
+test("invocationTreeScopeFor：store 侧探针永远不是 exec 自身，selfPid 为 0，上一任 exec pid 走复用守卫", () => {
+  const scope = invocationTreeScopeFor({
+    id: "inv-1",
+    executor: { pid: 4242, startToken: "pst-v2:dead" },
+    treeTrackedGroups: [{ pgid: 600, leaderState: "alive", startToken: "pst-v2:l" }],
+  });
+  assert.equal(scope.invocationId, "inv-1");
+  assert.equal(scope.selfPid, 0);
+  assert.equal(scope.previousExecutorPid, 4242);
+  assert.deepEqual(
+    scope.trackedGroups.map((group) => [
+      group.pgid,
+      group.origin,
+      group.leaderState,
+      group.startToken,
+    ]),
+    [[600, "restored", "alive", "pst-v2:l"]],
+  );
+  const noExecutor = invocationTreeScopeFor({
+    id: "inv-2",
+    executor: undefined,
+    treeTrackedGroups: [],
+  });
+  assert.equal(noExecutor.selfPid, 0);
+  assert.equal("previousExecutorPid" in noExecutor, false);
+});
 
 test("describeUnsettledTree：只有 treeUnsettled 才有输出，带 survivor pid", () => {
   assert.equal(describeUnsettledTree(invocation), undefined);

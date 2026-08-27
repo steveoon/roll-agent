@@ -317,7 +317,7 @@ test("preflight 残留在 retryBudget 耗尽时返回 unsettled，行保持 runn
       store,
       invocationId: claim.invocation.id,
       ownershipToken: claim.ownershipToken,
-      trackedPgids: () => [4242],
+      trackedGroups: () => [{ pgid: 4242, leaderState: "unknown" }],
       runTurn: () => Promise.resolve({ status: "completed", threadId: "t", output: "" }),
       teardownTree: teardownReturning({
         ...CLEAN,
@@ -507,7 +507,7 @@ test("ScheduleStore：旧数字 PGID 的 live leader 经 probe 不得写终态�
       store.recordInvocationTree({
         id: claim.invocation.id,
         ownershipToken: claim.ownershipToken,
-        trackedPgids: [700],
+        trackedGroups: [{ pgid: 700, leaderState: "unknown" }],
         unsettled: true,
       }),
       true,

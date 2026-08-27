@@ -167,7 +167,7 @@ test("inline 结算：failInvocation 因树未清返回 treeUnsettled 时改为 
       store.recordInvocationTree({
         id: running.id,
         ownershipToken: running.ownershipToken,
-        trackedPgids: [9001],
+        trackedGroups: [{ pgid: 9001, leaderState: "unknown" }],
         unsettled: true,
         survivorPids: [9002],
       }),

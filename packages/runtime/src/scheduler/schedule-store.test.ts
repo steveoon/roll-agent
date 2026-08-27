@@ -1197,7 +1197,10 @@ test("recordInvocationTree 在 retry 时保留登记组；终态出口在树未 
       store.recordInvocationTree({
         id: first.invocation.id,
         ownershipToken: first.ownershipToken,
-        trackedPgids: [600, 601],
+        trackedGroups: [
+          { pgid: 600, leaderState: "unknown" },
+          { pgid: 601, leaderState: "unknown" },
+        ],
         unsettled: true,
         survivorPids: [701],
       }),
@@ -1222,7 +1225,7 @@ test("recordInvocationTree 在 retry 时保留登记组；终态出口在树未 
       store.recordInvocationTree({
         id: second.invocation.id,
         ownershipToken: second.ownershipToken,
-        trackedPgids: [600],
+        trackedGroups: [{ pgid: 600, leaderState: "unknown" }],
         unsettled: true,
         survivorPids: [701],
       }),
@@ -1279,7 +1282,7 @@ test("cancel：exec 已死但持久化树未清时拒绝；probe settled 后才�
       store.recordInvocationTree({
         id: claim.invocation.id,
         ownershipToken: claim.ownershipToken,
-        trackedPgids: [9001],
+        trackedGroups: [{ pgid: 9001, leaderState: "unknown" }],
         unsettled: true,
         survivorPids: [9002],
       }),
@@ -1321,7 +1324,6 @@ test("ScheduleStore：treeLiveness unavailable 时终态写入失败，行保持
       store.recordInvocationTree({
         id: claim.invocation.id,
         ownershipToken: claim.ownershipToken,
-        trackedPgids: [600],
         trackedGroups: [{ pgid: 600, leaderState: "alive" }],
         unsettled: true,
         survivorPids: [600],
@@ -1396,7 +1398,7 @@ test("缺省 treeLiveness 时非空树 fail-closed；空列不调用 probe", () 
       blocked.recordInvocationTree({
         id: nextClaim.invocation.id,
         ownershipToken: nextClaim.ownershipToken,
-        trackedPgids: [42],
+        trackedGroups: [{ pgid: 42, leaderState: "unknown" }],
         unsettled: true,
       }),
       true,
@@ -1418,7 +1420,7 @@ test("缺省 treeLiveness 时非空树 fail-closed；空列不调用 probe", () 
   }
 });
 
-test("ScheduleStore：trackedPgids 与账本数字数组不得把未知身份写成 leader 已退出", () => {
+test("ScheduleStore：身份未知的登记组与账本数字数组不得写成 leader 已退出", () => {
   const dir = tempDir();
   try {
     const store = new ScheduleStore(dir);
@@ -1430,7 +1432,7 @@ test("ScheduleStore：trackedPgids 与账本数字数组不得把未知身份写
       store.recordInvocationTree({
         id: claim.invocation.id,
         ownershipToken: claim.ownershipToken,
-        trackedPgids: [700],
+        trackedGroups: [{ pgid: 700, leaderState: "unknown" }],
         unsettled: true,
       }),
       true,
@@ -1632,7 +1634,6 @@ function occupyRetryWithTree(store: ScheduleStore, nowMs: number) {
     store.recordInvocationTree({
       id: claim.invocation.id,
       ownershipToken: claim.ownershipToken,
-      trackedPgids: [600],
       trackedGroups: [{ pgid: 600, leaderState: "alive", startToken: "pst-v2:live-leader" }],
       unsettled: true,
       survivorPids: [600],
@@ -1724,7 +1725,7 @@ test("remove 拒绝 live/未清树的 schedule，除非显式 abandon", () => {
   }
 });
 
-test("无 ownership/revision 的 tree write 不能覆盖 claimed/running；stale cancel 不能取消新 owner", () => {
+test("旧 token 的 tree write 在 reclaim 后失效；stale cancel 不能取消新 owner", () => {
   const dir = tempDir();
   try {
     const store = new ScheduleStore(dir, {
@@ -1743,19 +1744,11 @@ test("无 ownership/revision 的 tree write 不能覆盖 claimed/running；stale
       store.recordInvocationTree({
         id: oldClaim.invocation.id,
         ownershipToken: oldClaim.ownershipToken,
-        trackedPgids: [600],
+        trackedGroups: [{ pgid: 600, leaderState: "unknown" }],
         unsettled: true,
         survivorPids: [600],
       }),
       true,
-    );
-    assert.equal(
-      store.recordInvocationTree({
-        id: oldClaim.invocation.id,
-        trackedPgids: [],
-        unsettled: false,
-      }),
-      false,
     );
     const beforeReclaim = store.getInvocation(oldClaim.invocation.id);
     assert.equal(beforeReclaim?.treeUnsettled, true);
@@ -1766,13 +1759,23 @@ test("无 ownership/revision 的 tree write 不能覆盖 claimed/running；stale
     assert.notEqual(newClaim.ownershipToken, oldClaim.ownershipToken);
     assert.equal(newClaim.invocation.attempt, 2);
     assert.equal(
+      store.recordInvocationTree({
+        id: oldClaim.invocation.id,
+        ownershipToken: oldClaim.ownershipToken,
+        trackedGroups: [],
+        unsettled: false,
+      }),
+      false,
+    );
+    assert.equal(store.getInvocation(oldClaim.invocation.id)?.treeUnsettled, true);
+    assert.equal(
       store.finalizeCancellation({
         id: oldClaim.invocation.id,
         reason: "stale cancel",
         nowMs: NOW + 4,
         expectedAttempt: oldClaim.invocation.attempt,
         expectedClaimedBy: "A",
-        tree: { trackedPgids: [], unsettled: false, survivorPids: [] },
+        tree: { trackedGroups: [], unsettled: false, survivorPids: [] },
       }),
       CANCEL_INVOCATION_OUTCOMES.ownershipChanged,
     );
@@ -1847,6 +1850,127 @@ test("recordInvocationTree 可附带 error 文案写进 running 行；不传时�
     );
     record = store.getInvocation(claim.invocation.id);
     assert.equal(record?.error, "本次运行拉起的进程在强制终止后仍存活（pid 601）");
+    store.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("claimDue：paused 任务的未清树 retry 行只探一次就推迟 retry_at，不再每轮重探", () => {
+  const dir = tempDir();
+  try {
+    let probes = 0;
+    const store = new ScheduleStore(dir, {
+      retryBudget: 3,
+      retryBackoffMs: 1,
+      claimLeaseMs: 1_000,
+      treeLiveness: () => {
+        probes += 1;
+        return INVOCATION_TREE_LIVENESS.unsettled;
+      },
+    });
+    const { created, claim } = occupyRetryWithTree(store, NOW);
+    assert.equal(store.setScheduleStatus(created.id, SCHEDULE_STATUSES.paused, NOW + 3), true);
+    const afterPause = probes;
+    assert.equal(store.getInvocation(claim.invocation.id)?.status, INVOCATION_STATUSES.retry);
+    assert.deepEqual(store.claimDue({ workerId: "w2", nowMs: NOW + 10, limit: 5 }), []);
+    assert.equal(probes, afterPause + 1);
+    assert.deepEqual(store.claimDue({ workerId: "w2", nowMs: NOW + 20, limit: 5 }), []);
+    assert.deepEqual(store.claimDue({ workerId: "w2", nowMs: NOW + 30, limit: 5 }), []);
+    assert.equal(probes, afterPause + 1, "retry_at 推迟后到期前不得重探");
+    const held = store.getInvocation(claim.invocation.id);
+    assert.equal(held?.status, INVOCATION_STATUSES.retry);
+    assert.equal(held?.treeUnsettled, true);
+    assert.deepEqual(store.claimDue({ workerId: "w2", nowMs: NOW + 10 + 1_001, limit: 5 }), []);
+    assert.equal(probes, afterPause + 2, "推迟到期后再探一次");
+    store.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("损坏的 tree_survivor_pids 只当空列表，不阻塞其他任务 claim；损坏的 tree_tracked_pgids 错误里带 invocation id", () => {
+  const dir = tempDir();
+  try {
+    const store = new ScheduleStore(dir, {
+      retryBudget: 3,
+      retryBackoffMs: 1,
+      treeLiveness: () => INVOCATION_TREE_LIVENESS.unsettled,
+    });
+    const { claim } = occupyRetryWithTree(store, NOW);
+    const healthy = store.createSchedule(
+      sampleInput({ name: "healthy", fireImmediately: true }),
+      NOW + 5,
+    );
+    const raw = new DatabaseSync(join(dir, "schedules.db"));
+    raw
+      .prepare("UPDATE invocations SET tree_survivor_pids = 'oops' WHERE id = ?")
+      .run(claim.invocation.id);
+    raw.close();
+    const claimed = store.claimDue({ workerId: "w2", nowMs: NOW + 10, limit: 5 });
+    assert.ok(
+      claimed.some((entry) => entry.schedule.id === healthy.id),
+      "健康任务必须照常被 claim",
+    );
+    assert.deepEqual(store.getInvocation(claim.invocation.id)?.treeSurvivorPids, []);
+    const corrupt = new DatabaseSync(join(dir, "schedules.db"));
+    corrupt
+      .prepare("UPDATE invocations SET tree_tracked_pgids = 'not-json' WHERE id = ?")
+      .run(claim.invocation.id);
+    corrupt.close();
+    assert.throws(
+      () => store.getInvocation(claim.invocation.id),
+      (error: unknown) =>
+        error instanceof ScheduleStoreError &&
+        error.code === SCHEDULE_STORE_ERROR_CODES.invalid &&
+        error.message.includes(claim.invocation.id),
+    );
+    store.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("finalizeCancellation：exec 仍存活时先拒绝，不把 CLI 的空树写到 exec 拥有的行上", () => {
+  const dir = tempDir();
+  try {
+    const store = new ScheduleStore(dir, {
+      executorLiveness: () => "alive",
+      treeLiveness: () => INVOCATION_TREE_LIVENESS.settled,
+    });
+    store.createSchedule(sampleInput({ fireImmediately: true }), NOW);
+    const claim = store.claimDue({ workerId: "w1", nowMs: NOW, limit: 1 })[0];
+    assert.ok(claim);
+    store.beginInvocation(claim.invocation.id, claim.ownershipToken, NOW + 1, {
+      pid: 4242,
+      startToken: "pst-v2:alive",
+    });
+    const groups = [{ pgid: 600, leaderState: "alive" as const, startToken: "pst-v2:leader" }];
+    assert.equal(
+      store.recordInvocationTree({
+        id: claim.invocation.id,
+        ownershipToken: claim.ownershipToken,
+        trackedGroups: groups,
+        unsettled: true,
+        survivorPids: [601],
+      }),
+      true,
+    );
+    assert.equal(
+      store.finalizeCancellation({
+        id: claim.invocation.id,
+        reason: "已由用户取消",
+        nowMs: NOW + 2,
+        expectedAttempt: claim.invocation.attempt,
+        tree: { trackedGroups: [], unsettled: false, survivorPids: [] },
+      }),
+      CANCEL_INVOCATION_OUTCOMES.executorAlive,
+    );
+    const record = store.getInvocation(claim.invocation.id);
+    assert.equal(record?.status, INVOCATION_STATUSES.running);
+    assert.equal(record?.treeUnsettled, true);
+    assert.deepEqual(record?.treeSurvivorPids, [601]);
+    assert.deepEqual(record?.treeTrackedGroups, groups);
     store.close();
   } finally {
     rmSync(dir, { recursive: true, force: true });
