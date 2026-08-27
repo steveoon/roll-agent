@@ -4,6 +4,10 @@ import type { RollConfig } from "../../config/schema.ts";
 import { log } from "../utils/output.ts";
 import { loadRuntime, type RuntimeModule } from "../../runtime-host/engine-factory.ts";
 import { probeExecutorLiveness } from "../../scheduler-host/executor-liveness.ts";
+import {
+  probeInvocationTreeSettled,
+  trackedGroupsFromPersisted,
+} from "../../scheduler-host/invocation-tree.ts";
 import { SCHEDULE_TOKEN_ENV } from "../../scheduler-host/paths.ts";
 
 export type ScheduleStoreInstance = InstanceType<RuntimeModule["ScheduleStore"]>;
@@ -25,6 +29,13 @@ export function openScheduleStore(
   return new runtime.ScheduleStore(dataDir, {
     ...(config ? { maxSchedules: config.scheduler.maxSchedules } : {}),
     executorLiveness: probeExecutorLiveness,
+    treeLiveness: (record) =>
+      probeInvocationTreeSettled({
+        invocationId: record.id,
+        selfPid: record.executor?.pid ?? 0,
+        trackedGroups: trackedGroupsFromPersisted(record.treeTrackedGroups),
+        ...(record.executor !== undefined ? { previousExecutorPid: record.executor.pid } : {}),
+      }),
     ...(options.requireExistingDatabase === true ? { requireExistingDatabase: true } : {}),
   });
 }
@@ -78,6 +89,9 @@ export function serializeInvocation(record: InvocationRecord) {
     error: record.error,
     pendingActions: record.pendingActions,
     outputExcerpt: record.outputExcerpt,
+    treeUnsettled: record.treeUnsettled,
+    treeSurvivorPids: record.treeSurvivorPids,
+    treeTrackedGroups: record.treeTrackedGroups,
     startedAt: isoOrUndefined(record.startedAtMs),
     finishedAt: isoOrUndefined(record.finishedAtMs),
   };

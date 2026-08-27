@@ -608,6 +608,50 @@ test("Store 未注入探针时 daemon 对已记录 executor 的退出保持 fail
   }
 });
 
+test("exec 已死但登记树未清时 daemon onExit 不 pause、行保持 running", async () => {
+  const dir = tempDir();
+  try {
+    const store = new ScheduleStore(dir, {
+      retryBudget: 1,
+      executorLiveness: () => "dead",
+    });
+    const schedule = addDueSchedule(store, "a");
+    const { logger, lines } = silentLogger();
+    const exit = Promise.withResolvers<number | null>();
+    const daemon = new SchedulerDaemon({
+      store,
+      workerId: "w1",
+      maxConcurrentRuns: 1,
+      logger,
+      now: () => NOW,
+      spawnInvocation: (claim): SpawnedInvocation => {
+        store.beginInvocation(claim.invocation.id, claim.ownershipToken, NOW, {
+          pid: 4242,
+          startToken: "pst-v2:root",
+        });
+        store.recordInvocationTree({
+          id: claim.invocation.id,
+          ownershipToken: claim.ownershipToken,
+          trackedPgids: [9001],
+          unsettled: true,
+          survivorPids: [9002],
+        });
+        return { exited: exit.promise, kill: () => undefined };
+      },
+    });
+    assert.equal(daemon.tick(), 1);
+    exit.resolve(1);
+    await new Promise((resolve) => setImmediate(resolve));
+    const row = store.listInvocations(schedule.id)[0];
+    assert.equal(row?.status, INVOCATION_STATUSES.running);
+    assert.equal(store.getSchedule(schedule.id)?.status, SCHEDULE_STATUSES.active);
+    assert.ok(lines.some((line) => /登记的进程树未清干净/u.test(line)));
+    store.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("daemon 发出的进程树终止未被确认时，子进程退出后不记失败、不重试", async () => {
   const dir = tempDir();
   try {

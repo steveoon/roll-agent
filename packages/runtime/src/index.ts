@@ -114,12 +114,15 @@ export {
 export type { TriggerKind, TriggerSpec } from "./scheduler/trigger.ts";
 export {
   CANCEL_INVOCATION_OUTCOMES,
+  COMPLETE_INVOCATION_OUTCOMES,
   EXECUTOR_LIVENESS,
   INVOCATION_FAILURE_OUTCOMES,
   INVOCATION_LIVE_STATUSES,
   INVOCATION_MODES,
   INVOCATION_STATUSES,
   INVOCATION_TERMINAL_STATUSES,
+  INVOCATION_TREE_LIVENESS,
+  TRACKED_LEADER_STATES,
   SCHEDULE_STATUSES,
   SCHEDULE_STORE_ERROR_CODES,
   ScheduleStoreError,
@@ -129,6 +132,7 @@ export type {
   CancelInvocationOutcome,
   ClaimedInvocation,
   CompleteInvocationInput,
+  CompleteInvocationOutcome,
   CompleteInvocationStatus,
   CreateScheduleInput,
   EnqueueManualInvocationOptions,
@@ -140,9 +144,16 @@ export type {
   InvocationMode,
   InvocationRecord,
   InvocationStatus,
+  InvocationTreeLiveness,
+  InvocationTreeLivenessProbe,
+  FinalizeCancellationInput,
+  PersistedTrackedGroup,
+  RecordInvocationTreeInput,
+  RemoveScheduleOptions,
   ScheduleRecord,
   ScheduleStatus,
   ScheduleStoreErrorCode,
+  TrackedLeaderState,
 } from "./scheduler/types.ts";
 export { DefaultToolPolicy } from "./policy/default-policy.ts";
 export { ConfigurableToolPolicy } from "./policy/configurable-policy.ts";

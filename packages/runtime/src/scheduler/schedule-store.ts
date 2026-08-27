@@ -13,12 +13,15 @@ import {
 } from "./trigger.ts";
 import {
   CANCEL_INVOCATION_OUTCOMES,
+  COMPLETE_INVOCATION_OUTCOMES,
   EXECUTOR_LIVENESS,
   INVOCATION_FAILURE_OUTCOMES,
   INVOCATION_LIVE_STATUSES,
   INVOCATION_MODES,
   INVOCATION_STATUSES,
   INVOCATION_TERMINAL_STATUSES,
+  INVOCATION_TREE_LIVENESS,
+  TRACKED_LEADER_STATES,
   SCHEDULE_STATUSES,
   SCHEDULE_STORE_ERROR_CODES,
   ScheduleStoreError,
@@ -26,21 +29,27 @@ import {
   type CancelInvocationOutcome,
   type ClaimedInvocation,
   type CompleteInvocationInput,
+  type CompleteInvocationOutcome,
   type CreateScheduleInput,
   type EnqueueManualInvocationOptions,
   type ExecutorIdentity,
   type ExecutorLiveness,
   type ExecutorLivenessProbe,
   type FailInvocationOptions,
+  type FinalizeCancellationInput,
   type InvocationFailureOutcome,
   type InvocationMode,
   type InvocationRecord,
   type InvocationStatus,
+  type InvocationTreeLivenessProbe,
+  type PersistedTrackedGroup,
+  type RecordInvocationTreeInput,
+  type RemoveScheduleOptions,
   type ScheduleRecord,
   type ScheduleStatus,
 } from "./types.ts";
 
-const SCHEMA_VERSION = 3;
+const SCHEMA_VERSION = 4;
 const BUSY_TIMEOUT_MS = 15_000;
 const TERMINAL_STATUS_PLACEHOLDERS = INVOCATION_TERMINAL_STATUSES.map(() => "?").join(", ");
 
@@ -50,6 +59,17 @@ const LIVENESS_PROBE_RESULTS = {
   deferred: "deferred",
 } as const;
 type LivenessProbeResult = (typeof LIVENESS_PROBE_RESULTS)[keyof typeof LIVENESS_PROBE_RESULTS];
+
+const TRACKED_GROUP_PARSE_RESULTS = {
+  valid: "valid",
+  invalid: "invalid",
+} as const;
+type TrackedGroupParseResult =
+  | {
+      readonly kind: typeof TRACKED_GROUP_PARSE_RESULTS.valid;
+      readonly groups: readonly PersistedTrackedGroup[];
+    }
+  | { readonly kind: typeof TRACKED_GROUP_PARSE_RESULTS.invalid };
 
 function unsupportedSchemaVersionError(version: number): Error {
   return new Error(
@@ -79,6 +99,7 @@ export interface ScheduleStoreOptions {
   readonly retryBudget?: number;
   readonly retryBackoffMs?: number;
   readonly executorLiveness?: ExecutorLivenessProbe;
+  readonly treeLiveness?: InvocationTreeLivenessProbe;
   readonly maxLivenessProbesPerClaim?: number;
   readonly livenessProbeDeferralMs?: number;
   readonly invocationRetentionPerSchedule?: number;
@@ -123,6 +144,9 @@ interface InvocationRow {
   readonly created_at: number;
   readonly started_at: number | null;
   readonly finished_at: number | null;
+  readonly tree_tracked_pgids: string | null;
+  readonly tree_unsettled: number | null;
+  readonly tree_survivor_pids: string | null;
 }
 
 const INVOCATION_MODE_VALUES: readonly string[] = Object.values(INVOCATION_MODES);
@@ -147,6 +171,122 @@ function parsePendingActions(json: string): readonly string[] {
   }
 }
 
+function parsePidList(json: string | null): readonly number[] {
+  return parseTrackedGroups(json).map((group) => group.pgid);
+}
+
+function isPositivePid(value: unknown): value is number {
+  return typeof value === "number" && Number.isInteger(value) && value > 0;
+}
+
+function isTrackedLeaderState(value: unknown): value is PersistedTrackedGroup["leaderState"] {
+  return (
+    value === TRACKED_LEADER_STATES.alive ||
+    value === TRACKED_LEADER_STATES.exited ||
+    value === TRACKED_LEADER_STATES.unknown
+  );
+}
+
+function parseTrackedGroup(value: unknown): PersistedTrackedGroup | undefined {
+  if (isPositivePid(value)) {
+    return { pgid: value, leaderState: TRACKED_LEADER_STATES.unknown };
+  }
+  if (
+    typeof value !== "object" ||
+    value === null ||
+    !("pgid" in value) ||
+    !isPositivePid(value.pgid) ||
+    !("leaderState" in value) ||
+    !isTrackedLeaderState(value.leaderState)
+  ) {
+    return undefined;
+  }
+  if (!("startToken" in value)) {
+    return { pgid: value.pgid, leaderState: value.leaderState };
+  }
+  return typeof value.startToken === "string" && value.startToken.length > 0
+    ? { pgid: value.pgid, leaderState: value.leaderState, startToken: value.startToken }
+    : undefined;
+}
+
+function parseTrackedGroupsResult(json: string | null): TrackedGroupParseResult {
+  if (json === null) {
+    return { kind: TRACKED_GROUP_PARSE_RESULTS.valid, groups: [] };
+  }
+  try {
+    const parsed = JSON.parse(json) as unknown;
+    if (!Array.isArray(parsed)) {
+      return { kind: TRACKED_GROUP_PARSE_RESULTS.invalid };
+    }
+    const byPgid = new Map<number, PersistedTrackedGroup>();
+    for (const item of parsed) {
+      const group = parseTrackedGroup(item);
+      if (group === undefined) {
+        return { kind: TRACKED_GROUP_PARSE_RESULTS.invalid };
+      }
+      byPgid.set(group.pgid, group);
+    }
+    return { kind: TRACKED_GROUP_PARSE_RESULTS.valid, groups: [...byPgid.values()] };
+  } catch {
+    return { kind: TRACKED_GROUP_PARSE_RESULTS.invalid };
+  }
+}
+
+function invalidTreeOwnershipMetadataError(): ScheduleStoreError {
+  return new ScheduleStoreError(
+    SCHEDULE_STORE_ERROR_CODES.invalid,
+    "进程树所有权元数据无效；拒绝按空树继续，仅可显式 --abandon 放弃追踪",
+  );
+}
+
+function parseTrackedGroups(json: string | null): readonly PersistedTrackedGroup[] {
+  const result = parseTrackedGroupsResult(json);
+  if (result.kind === TRACKED_GROUP_PARSE_RESULTS.invalid) {
+    throw invalidTreeOwnershipMetadataError();
+  }
+  return result.groups;
+}
+
+function encodeTrackedGroups(groups: readonly PersistedTrackedGroup[]): string {
+  const byPgid = new Map<number, PersistedTrackedGroup>();
+  for (const group of groups) {
+    if (!Number.isInteger(group.pgid) || group.pgid <= 0) {
+      continue;
+    }
+    byPgid.set(
+      group.pgid,
+      group.startToken !== undefined && group.startToken.length > 0
+        ? { pgid: group.pgid, leaderState: group.leaderState, startToken: group.startToken }
+        : { pgid: group.pgid, leaderState: group.leaderState },
+    );
+  }
+  return JSON.stringify([...byPgid.values()]);
+}
+
+function resolveTrackedGroups(
+  trackedGroups: readonly PersistedTrackedGroup[] | undefined,
+  trackedPgids: readonly number[] | undefined,
+): readonly PersistedTrackedGroup[] {
+  if (trackedGroups !== undefined) {
+    return trackedGroups;
+  }
+  return (trackedPgids ?? []).map((pgid) => ({
+    pgid,
+    leaderState: TRACKED_LEADER_STATES.unknown,
+  }));
+}
+
+function encodePidList(pids: readonly number[]): string {
+  return JSON.stringify([...new Set(pids.filter((pid) => Number.isInteger(pid) && pid > 0))]);
+}
+
+const OCCUPYING_RUN_SQL = `(status IN (?, ?) OR (status = ? AND (tree_unsettled = 1 OR (tree_tracked_pgids IS NOT NULL AND trim(tree_tracked_pgids) != '[]'))))`;
+const OCCUPYING_RUN_PARAMS = [
+  INVOCATION_STATUSES.claimed,
+  INVOCATION_STATUSES.running,
+  INVOCATION_STATUSES.retry,
+] as const;
+
 function toExecutorIdentity(row: InvocationRow): ExecutorIdentity | undefined {
   return row.executor_pid !== null && row.executor_start_token !== null
     ? { pid: row.executor_pid, startToken: row.executor_start_token }
@@ -160,6 +300,7 @@ function toInvocationRecord(row: InvocationRow): InvocationRecord {
       `invocation ${row.id} 的 mode/status 非法: ${row.mode}/${row.status}`,
     );
   }
+  const treeTrackedGroups = parseTrackedGroups(row.tree_tracked_pgids);
   return {
     id: row.id,
     scheduleId: row.schedule_id,
@@ -176,6 +317,10 @@ function toInvocationRecord(row: InvocationRow): InvocationRecord {
     outputExcerpt: row.output_excerpt ?? undefined,
     error: row.error ?? undefined,
     pendingActions: parsePendingActions(row.pending_actions_json),
+    treeTrackedPgids: treeTrackedGroups.map((group) => group.pgid),
+    treeTrackedGroups,
+    treeUnsettled: row.tree_unsettled === 1,
+    treeSurvivorPids: parsePidList(row.tree_survivor_pids),
     createdAtMs: row.created_at,
     startedAtMs: row.started_at ?? undefined,
     finishedAtMs: row.finished_at ?? undefined,
@@ -257,6 +402,7 @@ export class ScheduleStore {
   private readonly retryBudget: number;
   private readonly retryBackoffMs: number;
   private readonly executorLiveness: ExecutorLivenessProbe;
+  private readonly treeLiveness: InvocationTreeLivenessProbe | undefined;
   private readonly maxLivenessProbesPerClaim: number;
   private readonly livenessProbeDeferralMs: number;
   private readonly invocationRetentionPerSchedule: number;
@@ -268,6 +414,7 @@ export class ScheduleStore {
     this.retryBudget = options.retryBudget ?? SCHEDULER_LIMITS.retryBudget;
     this.retryBackoffMs = options.retryBackoffMs ?? SCHEDULER_LIMITS.retryBackoffMs;
     this.executorLiveness = options.executorLiveness ?? (() => EXECUTOR_LIVENESS.unknown);
+    this.treeLiveness = options.treeLiveness;
     this.maxLivenessProbesPerClaim =
       options.maxLivenessProbesPerClaim ?? SCHEDULER_LIMITS.maxLivenessProbesPerClaim;
     this.livenessProbeDeferralMs =
@@ -361,6 +508,9 @@ export class ScheduleStore {
            created_at INTEGER NOT NULL,
            started_at INTEGER,
            finished_at INTEGER,
+           tree_tracked_pgids TEXT,
+           tree_unsettled INTEGER NOT NULL DEFAULT 0,
+           tree_survivor_pids TEXT,
            UNIQUE (schedule_id, mode, scheduled_for)
          );
          CREATE INDEX IF NOT EXISTS idx_schedules_due
@@ -386,6 +536,13 @@ export class ScheduleStore {
       { table: "invocations", column: "executor_pid", definition: "INTEGER" },
       { table: "invocations", column: "executor_start_token", definition: "TEXT" },
       { table: "invocations", column: "executor_probed_at", definition: "INTEGER" },
+      { table: "invocations", column: "tree_tracked_pgids", definition: "TEXT" },
+      {
+        table: "invocations",
+        column: "tree_unsettled",
+        definition: "INTEGER NOT NULL DEFAULT 0",
+      },
+      { table: "invocations", column: "tree_survivor_pids", definition: "TEXT" },
     ] as const;
     for (const addition of additions) {
       const existing = (
@@ -591,9 +748,26 @@ export class ScheduleStore {
     });
   }
 
-  removeSchedule(id: string): boolean {
-    const result = this.db.prepare("DELETE FROM schedules WHERE id = ?").run(id);
-    return result.changes === 1;
+  removeSchedule(id: string, options: RemoveScheduleOptions = {}): boolean {
+    return this.transaction(() => {
+      if (options.abandon !== true) {
+        const occupying = this.db
+          .prepare(
+            `SELECT id, status FROM invocations WHERE schedule_id = ? AND ${OCCUPYING_RUN_SQL} LIMIT 1`,
+          )
+          .get(id, ...OCCUPYING_RUN_PARAMS) as
+          | { readonly id: string; readonly status: string }
+          | undefined;
+        if (occupying !== undefined) {
+          throw new ScheduleStoreError(
+            SCHEDULE_STORE_ERROR_CODES.invalid,
+            `定时任务 ${id} 仍有未结束的运行（invocation ${occupying.id}，${occupying.status}）；先 cancel --kill 清场，或显式 --abandon 放弃追踪`,
+          );
+        }
+      }
+      const result = this.db.prepare("DELETE FROM schedules WHERE id = ?").run(id);
+      return result.changes === 1;
+    });
   }
 
   enqueueManualInvocation(
@@ -648,7 +822,7 @@ export class ScheduleStore {
              AND NOT EXISTS (
                SELECT 1 FROM invocations o
                 WHERE o.schedule_id = (SELECT schedule_id FROM invocations WHERE id = ?)
-                  AND o.id != ? AND o.status IN (?, ?))`,
+                  AND o.id != ? AND ${OCCUPYING_RUN_SQL})`,
         )
         .run(
           INVOCATION_STATUSES.claimed,
@@ -659,8 +833,7 @@ export class ScheduleStore {
           INVOCATION_STATUSES.pending,
           id,
           id,
-          INVOCATION_STATUSES.claimed,
-          INVOCATION_STATUSES.running,
+          ...OCCUPYING_RUN_PARAMS,
         );
       return result.changes === 1 ? this.loadClaim(id, token) : undefined;
     });
@@ -669,12 +842,10 @@ export class ScheduleStore {
   findLiveRun(scheduleId: string): InvocationRecord | undefined {
     const row = this.db
       .prepare(
-        `SELECT * FROM invocations WHERE schedule_id = ? AND status IN (?, ?)
+        `SELECT * FROM invocations WHERE schedule_id = ? AND ${OCCUPYING_RUN_SQL}
           ORDER BY started_at ASC, created_at ASC LIMIT 1`,
       )
-      .get(scheduleId, INVOCATION_STATUSES.claimed, INVOCATION_STATUSES.running) as
-      | InvocationRow
-      | undefined;
+      .get(scheduleId, ...OCCUPYING_RUN_PARAMS) as InvocationRow | undefined;
     return row ? toInvocationRecord(row) : undefined;
   }
 
@@ -695,41 +866,139 @@ export class ScheduleStore {
       const row = this.db.prepare("SELECT * FROM invocations WHERE id = ?").get(id) as
         | InvocationRow
         | undefined;
-      if (row === undefined || !isInvocationStatus(row.status)) {
-        return CANCEL_INVOCATION_OUTCOMES.notFound;
-      }
-      if (!(INVOCATION_LIVE_STATUSES as readonly InvocationStatus[]).includes(row.status)) {
-        return CANCEL_INVOCATION_OUTCOMES.terminal;
+      return this.cancelInvocationInTransaction(row, reason, nowMs, options);
+    });
+  }
+
+  finalizeCancellation(input: FinalizeCancellationInput): CancelInvocationOutcome {
+    return this.transaction(() => {
+      const row = this.db.prepare("SELECT * FROM invocations WHERE id = ?").get(input.id) as
+        | InvocationRow
+        | undefined;
+      const mismatch = this.revisionMismatch(row, {
+        ...(input.expectedOwnershipToken !== undefined
+          ? { expectedOwnershipToken: input.expectedOwnershipToken }
+          : {}),
+        expectedAttempt: input.expectedAttempt,
+        ...(input.expectedClaimedBy !== undefined
+          ? { expectedClaimedBy: input.expectedClaimedBy }
+          : {}),
+      });
+      if (mismatch !== undefined) {
+        return mismatch;
       }
       if (
-        options.expectedOwnershipToken !== undefined &&
-        row.ownership_token !== options.expectedOwnershipToken
+        input.abandon !== true &&
+        row !== undefined &&
+        parseTrackedGroupsResult(row.tree_tracked_pgids).kind ===
+          TRACKED_GROUP_PARSE_RESULTS.invalid
       ) {
-        return CANCEL_INVOCATION_OUTCOMES.ownershipChanged;
+        return CANCEL_INVOCATION_OUTCOMES.treeUnsettled;
       }
-      if (row.status === INVOCATION_STATUSES.running && options.abandon !== true) {
-        const executor = toExecutorIdentity(row);
-        const liveness =
-          executor === undefined ? EXECUTOR_LIVENESS.unknown : this.executorLiveness(executor);
-        if (liveness === EXECUTOR_LIVENESS.alive || liveness === EXECUTOR_LIVENESS.descendants) {
-          return CANCEL_INVOCATION_OUTCOMES.executorAlive;
-        }
-        if (liveness === EXECUTOR_LIVENESS.unknown) {
-          return CANCEL_INVOCATION_OUTCOMES.executorUnknown;
+      if (input.tree !== undefined) {
+        const written = this.writeInvocationTreeInTransaction({
+          id: input.id,
+          unsettled: input.tree.unsettled,
+          ...(input.tree.trackedGroups !== undefined
+            ? { trackedGroups: input.tree.trackedGroups }
+            : {}),
+          ...(input.tree.trackedPgids !== undefined
+            ? { trackedPgids: input.tree.trackedPgids }
+            : {}),
+          ...(input.tree.survivorPids !== undefined
+            ? { survivorPids: input.tree.survivorPids }
+            : {}),
+          expectedAttempt: input.expectedAttempt,
+        });
+        if (!written) {
+          return CANCEL_INVOCATION_OUTCOMES.ownershipChanged;
         }
       }
-      this.finishInvocationAsFailedInTransaction(id, reason, nowMs);
-      return CANCEL_INVOCATION_OUTCOMES.cancelled;
+      const current = this.db.prepare("SELECT * FROM invocations WHERE id = ?").get(input.id) as
+        | InvocationRow
+        | undefined;
+      return this.cancelInvocationInTransaction(current, input.reason, input.nowMs, {
+        ...(input.abandon === true ? { abandon: true } : {}),
+        expectedAttempt: input.expectedAttempt,
+        ...(input.expectedOwnershipToken !== undefined
+          ? { expectedOwnershipToken: input.expectedOwnershipToken }
+          : {}),
+        ...(input.expectedClaimedBy !== undefined
+          ? { expectedClaimedBy: input.expectedClaimedBy }
+          : {}),
+      });
     });
+  }
+
+  private revisionMismatch(
+    row: InvocationRow | undefined,
+    options: CancelInvocationOptions,
+  ): CancelInvocationOutcome | undefined {
+    if (row === undefined || !isInvocationStatus(row.status)) {
+      return CANCEL_INVOCATION_OUTCOMES.notFound;
+    }
+    if (
+      options.expectedOwnershipToken !== undefined &&
+      row.ownership_token !== options.expectedOwnershipToken
+    ) {
+      return CANCEL_INVOCATION_OUTCOMES.ownershipChanged;
+    }
+    if (options.expectedAttempt !== undefined && row.attempt !== options.expectedAttempt) {
+      return CANCEL_INVOCATION_OUTCOMES.ownershipChanged;
+    }
+    if (
+      options.expectedClaimedBy !== undefined &&
+      (row.claimed_by ?? undefined) !== options.expectedClaimedBy
+    ) {
+      return CANCEL_INVOCATION_OUTCOMES.ownershipChanged;
+    }
+    return undefined;
+  }
+
+  private cancelInvocationInTransaction(
+    row: InvocationRow | undefined,
+    reason: string,
+    nowMs: number,
+    options: CancelInvocationOptions,
+  ): CancelInvocationOutcome {
+    const mismatch = this.revisionMismatch(row, options);
+    if (mismatch !== undefined) {
+      return mismatch;
+    }
+    if (row === undefined || !isInvocationStatus(row.status)) {
+      return CANCEL_INVOCATION_OUTCOMES.notFound;
+    }
+    if (!(INVOCATION_LIVE_STATUSES as readonly InvocationStatus[]).includes(row.status)) {
+      return CANCEL_INVOCATION_OUTCOMES.terminal;
+    }
+    if (row.status === INVOCATION_STATUSES.running && options.abandon !== true) {
+      const executor = toExecutorIdentity(row);
+      const liveness =
+        executor === undefined ? EXECUTOR_LIVENESS.unknown : this.executorLiveness(executor);
+      if (liveness === EXECUTOR_LIVENESS.alive || liveness === EXECUTOR_LIVENESS.descendants) {
+        return CANCEL_INVOCATION_OUTCOMES.executorAlive;
+      }
+      if (liveness === EXECUTOR_LIVENESS.unknown) {
+        return CANCEL_INVOCATION_OUTCOMES.executorUnknown;
+      }
+    }
+    const force = options.abandon === true;
+    if (!force && this.treeBlocksTerminal(row)) {
+      return CANCEL_INVOCATION_OUTCOMES.treeUnsettled;
+    }
+    if (!this.finishInvocationAsFailedInTransaction(row.id, reason, nowMs, { force })) {
+      return CANCEL_INVOCATION_OUTCOMES.treeUnsettled;
+    }
+    return CANCEL_INVOCATION_OUTCOMES.cancelled;
   }
 
   private hasOtherLiveRunInTransaction(scheduleId: string, exceptId: string): boolean {
     const row = this.db
       .prepare(
         `SELECT 1 AS present FROM invocations
-          WHERE schedule_id = ? AND id != ? AND status IN (?, ?) LIMIT 1`,
+          WHERE schedule_id = ? AND id != ? AND ${OCCUPYING_RUN_SQL} LIMIT 1`,
       )
-      .get(scheduleId, exceptId, INVOCATION_STATUSES.claimed, INVOCATION_STATUSES.running);
+      .get(scheduleId, exceptId, ...OCCUPYING_RUN_PARAMS);
     return row !== undefined;
   }
 
@@ -810,9 +1079,33 @@ export class ScheduleStore {
           break;
         }
         if (
+          parseTrackedGroupsResult(row.tree_tracked_pgids).kind ===
+          TRACKED_GROUP_PARSE_RESULTS.invalid
+        ) {
+          if (row.status === INVOCATION_STATUSES.retry) {
+            this.db
+              .prepare("UPDATE invocations SET retry_at = ? WHERE id = ?")
+              .run(input.nowMs + this.claimLeaseMs, row.id);
+          } else if (
+            row.status === INVOCATION_STATUSES.claimed ||
+            row.status === INVOCATION_STATUSES.running
+          ) {
+            this.db
+              .prepare("UPDATE invocations SET lease_until = ? WHERE id = ?")
+              .run(input.nowMs + this.claimLeaseMs, row.id);
+          }
+          continue;
+        }
+        if (
           row.mode === INVOCATION_MODES.scheduled &&
           row.schedule_status === SCHEDULE_STATUSES.paused
         ) {
+          if (this.treeBlocksTerminal(row)) {
+            this.db
+              .prepare("UPDATE invocations SET lease_until = ? WHERE id = ?")
+              .run(input.nowMs + this.claimLeaseMs, row.id);
+            continue;
+          }
           this.finishInvocationAsFailedInTransaction(
             row.id,
             "任务已暂停，放弃本次运行",
@@ -825,6 +1118,12 @@ export class ScheduleStore {
         }
         const attempt = row.status === INVOCATION_STATUSES.pending ? 1 : row.attempt + 1;
         if (attempt > row.max_attempts) {
+          if (this.treeBlocksTerminal(row)) {
+            this.db
+              .prepare("UPDATE invocations SET lease_until = ? WHERE id = ?")
+              .run(input.nowMs + this.claimLeaseMs, row.id);
+            continue;
+          }
           this.markTerminalFailureInTransaction(
             row,
             `重试预算耗尽（共 ${String(row.max_attempts)} 次尝试）：${row.error ?? "exec 未成功完成"}`,
@@ -967,14 +1266,28 @@ export class ScheduleStore {
     return result.changes === 1;
   }
 
-  completeInvocation(input: CompleteInvocationInput): boolean {
+  completeInvocation(input: CompleteInvocationInput): CompleteInvocationOutcome {
     return this.transaction(() => {
+      const row = this.db.prepare("SELECT * FROM invocations WHERE id = ?").get(input.id) as
+        | InvocationRow
+        | undefined;
+      if (
+        row === undefined ||
+        row.ownership_token !== input.ownershipToken ||
+        (row.status !== INVOCATION_STATUSES.claimed && row.status !== INVOCATION_STATUSES.running)
+      ) {
+        return COMPLETE_INVOCATION_OUTCOMES.lostClaim;
+      }
+      if (this.treeBlocksTerminal(row)) {
+        return COMPLETE_INVOCATION_OUTCOMES.treeUnsettled;
+      }
       const result = this.db
         .prepare(
           `UPDATE invocations
              SET status = ?, thread_id = ?, output_excerpt = ?, pending_actions_json = ?,
                  error = NULL, finished_at = ?, claimed_by = NULL, ownership_token = NULL,
-                 lease_until = NULL, retry_at = NULL
+                 lease_until = NULL, retry_at = NULL, tree_tracked_pgids = NULL,
+                 tree_unsettled = 0, tree_survivor_pids = NULL
            WHERE id = ? AND ownership_token = ? AND status IN (?, ?)`,
         )
         .run(
@@ -989,7 +1302,7 @@ export class ScheduleStore {
           INVOCATION_STATUSES.running,
         );
       if (result.changes !== 1) {
-        return false;
+        return COMPLETE_INVOCATION_OUTCOMES.lostClaim;
       }
       this.db
         .prepare(
@@ -997,8 +1310,91 @@ export class ScheduleStore {
            WHERE id = (SELECT schedule_id FROM invocations WHERE id = ?)`,
         )
         .run(input.nowMs, input.nowMs, input.id);
-      return true;
+      return COMPLETE_INVOCATION_OUTCOMES.written;
     });
+  }
+
+  recordInvocationTree(input: RecordInvocationTreeInput): boolean {
+    if (input.ownershipToken !== undefined) {
+      return this.writeInvocationTreeInTransaction({
+        ...input,
+        ownershipToken: input.ownershipToken,
+      });
+    }
+    return this.writeInvocationTreeInTransaction({
+      id: input.id,
+      unsettled: input.unsettled,
+      ...(input.trackedGroups !== undefined ? { trackedGroups: input.trackedGroups } : {}),
+      ...(input.trackedPgids !== undefined ? { trackedPgids: input.trackedPgids } : {}),
+      ...(input.survivorPids !== undefined ? { survivorPids: input.survivorPids } : {}),
+      retryOnly: true,
+    });
+  }
+
+  private writeInvocationTreeInTransaction(input: {
+    readonly id: string;
+    readonly unsettled: boolean;
+    readonly trackedGroups?: readonly PersistedTrackedGroup[];
+    readonly trackedPgids?: readonly number[];
+    readonly survivorPids?: readonly number[];
+    readonly ownershipToken?: string;
+    readonly expectedAttempt?: number;
+    readonly retryOnly?: boolean;
+  }): boolean {
+    const groups = input.unsettled
+      ? resolveTrackedGroups(input.trackedGroups, input.trackedPgids)
+      : [];
+    const tracked = groups.length > 0 ? encodeTrackedGroups(groups) : null;
+    const survivors = encodePidList(input.unsettled ? (input.survivorPids ?? []) : []);
+    const unsettled = input.unsettled ? 1 : 0;
+    if (input.ownershipToken !== undefined) {
+      const result = this.db
+        .prepare(
+          `UPDATE invocations
+             SET tree_tracked_pgids = ?, tree_unsettled = ?, tree_survivor_pids = ?
+           WHERE id = ? AND ownership_token = ? AND status IN (?, ?)`,
+        )
+        .run(
+          tracked,
+          unsettled,
+          survivors,
+          input.id,
+          input.ownershipToken,
+          INVOCATION_STATUSES.claimed,
+          INVOCATION_STATUSES.running,
+        );
+      return result.changes === 1;
+    }
+    if (input.expectedAttempt !== undefined) {
+      const result = this.db
+        .prepare(
+          `UPDATE invocations
+             SET tree_tracked_pgids = ?, tree_unsettled = ?, tree_survivor_pids = ?
+           WHERE id = ? AND attempt = ? AND status IN (?, ?, ?)`,
+        )
+        .run(
+          tracked,
+          unsettled,
+          survivors,
+          input.id,
+          input.expectedAttempt,
+          INVOCATION_STATUSES.claimed,
+          INVOCATION_STATUSES.running,
+          INVOCATION_STATUSES.retry,
+        );
+      return result.changes === 1;
+    }
+    if (input.retryOnly === true) {
+      const result = this.db
+        .prepare(
+          `UPDATE invocations
+             SET tree_tracked_pgids = ?, tree_unsettled = ?, tree_survivor_pids = ?
+           WHERE id = ? AND status = ?`,
+        )
+        .run(tracked, unsettled, survivors, input.id, INVOCATION_STATUSES.retry);
+      return result.changes === 1;
+    }
+    return false;
   }
 
   failInvocation(
@@ -1020,6 +1416,9 @@ export class ScheduleStore {
         return INVOCATION_FAILURE_OUTCOMES.lostClaim;
       }
       if (options.terminal === true || row.attempt >= row.max_attempts) {
+        if (this.treeBlocksTerminal(row)) {
+          return INVOCATION_FAILURE_OUTCOMES.treeUnsettled;
+        }
         this.markTerminalFailureInTransaction(row, error, nowMs);
         return row.mode === INVOCATION_MODES.scheduled
           ? INVOCATION_FAILURE_OUTCOMES.terminalPaused
@@ -1101,19 +1500,51 @@ export class ScheduleStore {
     return row.wake ?? undefined;
   }
 
-  private finishInvocationAsFailedInTransaction(id: string, error: string, nowMs: number): void {
+  private treeBlocksTerminal(row: InvocationRow): boolean {
+    const parsed = parseTrackedGroupsResult(row.tree_tracked_pgids);
+    if (parsed.kind === TRACKED_GROUP_PARSE_RESULTS.invalid) {
+      return true;
+    }
+    if (row.tree_unsettled !== 1 && parsed.groups.length === 0) {
+      return false;
+    }
+    if (this.treeLiveness === undefined) {
+      return true;
+    }
+    return this.treeLiveness(toInvocationRecord(row)) !== INVOCATION_TREE_LIVENESS.settled;
+  }
+
+  private finishInvocationAsFailedInTransaction(
+    id: string,
+    error: string,
+    nowMs: number,
+    options: { readonly force?: boolean } = {},
+  ): boolean {
+    const row = this.db.prepare("SELECT * FROM invocations WHERE id = ?").get(id) as
+      | InvocationRow
+      | undefined;
+    if (row === undefined) {
+      return false;
+    }
+    if (options.force !== true && this.treeBlocksTerminal(row)) {
+      return false;
+    }
     this.db
       .prepare(
         `UPDATE invocations
            SET status = ?, error = ?, finished_at = ?, claimed_by = NULL, ownership_token = NULL,
-               lease_until = NULL, retry_at = NULL
+               lease_until = NULL, retry_at = NULL, tree_tracked_pgids = NULL,
+               tree_unsettled = 0, tree_survivor_pids = NULL
          WHERE id = ?`,
       )
       .run(INVOCATION_STATUSES.failed, error, nowMs, id);
+    return true;
   }
 
   private markTerminalFailureInTransaction(row: InvocationRow, error: string, nowMs: number): void {
-    this.finishInvocationAsFailedInTransaction(row.id, error, nowMs);
+    if (!this.finishInvocationAsFailedInTransaction(row.id, error, nowMs)) {
+      return;
+    }
     if (row.mode === INVOCATION_MODES.scheduled) {
       this.db
         .prepare("UPDATE schedules SET status = ?, last_error = ?, updated_at = ? WHERE id = ?")

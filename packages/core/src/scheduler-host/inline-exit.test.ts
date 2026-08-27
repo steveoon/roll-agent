@@ -155,6 +155,41 @@ test("inline 结算：后代存活或探活 unknown 时保留 running；树终�
   }
 });
 
+test("inline 结算：failInvocation 因树未清返回 treeUnsettled 时改为 hold，不 pause", () => {
+  const dir = mkdtempSync(join(tmpdir(), "roll-inline-exit-"));
+  try {
+    const store = new ScheduleStore(dir, {
+      retryBudget: 1,
+      executorLiveness: () => "dead",
+    });
+    const running = seedRunningInvocation(store);
+    assert.equal(
+      store.recordInvocationTree({
+        id: running.id,
+        ownershipToken: running.ownershipToken,
+        trackedPgids: [9001],
+        unsettled: true,
+        survivorPids: [9002],
+      }),
+      true,
+    );
+    assert.equal(
+      settleInlineInvocation({
+        store,
+        invocationId: running.id,
+        ownershipToken: running.ownershipToken,
+        killOutcome: "tree-terminated",
+        exitCode: 1,
+      }),
+      INLINE_EXIT_DECISIONS.holdDescendants,
+    );
+    assert.equal(store.getInvocation(running.id)?.status, INVOCATION_STATUSES.running);
+    store.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("inline 结算：exec 自己已写入终态时不探活、不改写结果", () => {
   const dir = mkdtempSync(join(tmpdir(), "roll-inline-exit-"));
   try {

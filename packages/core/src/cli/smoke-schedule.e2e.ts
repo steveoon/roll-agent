@@ -7,6 +7,7 @@ import { randomUUID } from "node:crypto";
 import { spawn, type ChildProcess } from "node:child_process";
 import { once } from "node:events";
 import { setTimeout as delay } from "node:timers/promises";
+import { DatabaseSync } from "node:sqlite";
 import { ScheduleStore } from "@roll-agent/runtime";
 import { readProcessStartToken } from "../registry/process-identity.ts";
 import { probeExecutorLiveness } from "../scheduler-host/executor-liveness.ts";
@@ -424,6 +425,36 @@ test("e2e: roll schedule cancel 对排队/运行/不可验证三种状态分别�
     assert.equal(abandonedJson.status, "failed");
     assert.equal(abandonedJson.abandoned, true);
     assert.match(abandonedJson.error ?? "", /--abandon/u);
+
+    const invalidScheduleId = addSchedule("损坏树账本");
+    const invalidStore = new ScheduleStore(resolve(workspace, "scheduler"));
+    const invalidId = seedRunningIn(invalidStore, invalidScheduleId, {
+      pid: process.pid,
+      startToken: "not-a-token",
+    });
+    invalidStore.close();
+    const raw = new DatabaseSync(resolve(workspace, "scheduler", "schedules.db"));
+    raw
+      .prepare(
+        `UPDATE invocations
+            SET tree_tracked_pgids = 'not-json', tree_unsettled = 1
+          WHERE id = ?`,
+      )
+      .run(invalidId);
+    raw.close();
+
+    const invalidAbandoned = runRoll(
+      ["schedule", "cancel", invalidId, "--abandon", "--json"],
+      workspace,
+      { env },
+    );
+    assert.equal(invalidAbandoned.status, 0, invalidAbandoned.stderr);
+    const invalidAbandonedJson = JSON.parse(invalidAbandoned.stdout) as InvocationJson & {
+      abandoned: boolean;
+    };
+    assert.equal(invalidAbandonedJson.status, "failed");
+    assert.equal(invalidAbandonedJson.abandoned, true);
+    assert.match(invalidAbandonedJson.error ?? "", /--abandon/u);
   } finally {
     if (sleeper !== undefined && sleeper.exitCode === null && sleeper.signalCode === null) {
       sleeper.kill("SIGKILL");

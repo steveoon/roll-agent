@@ -1,4 +1,9 @@
-import { EXECUTOR_LIVENESS, INVOCATION_STATUSES, SCHEDULER_LIMITS } from "@roll-agent/runtime";
+import {
+  EXECUTOR_LIVENESS,
+  INVOCATION_FAILURE_OUTCOMES,
+  INVOCATION_STATUSES,
+  SCHEDULER_LIMITS,
+} from "@roll-agent/runtime";
 import type { ExecutorLiveness, ScheduleStore } from "@roll-agent/runtime";
 import { KILL_PROCESS_TREE_OUTCOMES, type KillProcessTreeOutcome } from "./executor-liveness.ts";
 import type { SpawnedInvocation, SpawnedInvocationSignal } from "./spawn-invocation.ts";
@@ -96,11 +101,14 @@ export function settleInlineInvocation(input: {
       : undefined;
   const decision = decideInlineExit({ killOutcome: input.killOutcome, liveness });
   if (decision === INLINE_EXIT_DECISIONS.fail) {
-    input.store.failInvocation(
+    const outcome = input.store.failInvocation(
       input.invocationId,
       input.ownershipToken,
       `exec 进程退出 code=${input.exitCode === null ? "null" : String(input.exitCode)}，未写入执行结果`,
     );
+    if (outcome === INVOCATION_FAILURE_OUTCOMES.treeUnsettled) {
+      return INLINE_EXIT_DECISIONS.holdDescendants;
+    }
   }
   return decision;
 }

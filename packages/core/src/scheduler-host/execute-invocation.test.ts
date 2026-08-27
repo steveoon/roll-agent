@@ -4,6 +4,8 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  CANCEL_INVOCATION_OUTCOMES,
+  COMPLETE_INVOCATION_OUTCOMES,
   INVOCATION_FAILURE_OUTCOMES,
   INVOCATION_STATUSES,
   ScheduleStore,
@@ -11,6 +13,9 @@ import {
 } from "@roll-agent/runtime";
 import {
   INVOCATION_TREE_TEARDOWN_OUTCOMES,
+  probeInvocationTreeSettled,
+  terminateInvocationTree,
+  trackedGroupsFromPersisted,
   type InvocationTreeTeardown,
 } from "./invocation-tree.ts";
 import {
@@ -293,7 +298,41 @@ test("preflight 有残留时 failInvocation 进入 retry 且不跑 turn", async 
     assert.match(result.error, /4242/u);
     assert.equal(turns, 0);
     assert.deepEqual(phases, [INVOCATION_TREE_TEARDOWN_PHASES.preflight]);
-    assert.equal(store.getInvocation(claim.invocation.id)?.status, INVOCATION_STATUSES.retry);
+    const retried = store.getInvocation(claim.invocation.id);
+    assert.equal(retried?.status, INVOCATION_STATUSES.retry);
+    assert.equal(retried?.treeUnsettled, true);
+    assert.deepEqual(retried?.treeSurvivorPids, [4242]);
+    store.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("preflight 残留在 retryBudget 耗尽时返回 unsettled，行保持 running，不 pause", async () => {
+  const dir = tempDir();
+  try {
+    const store = new ScheduleStore(dir, { retryBudget: 1 });
+    const claim = claimOne(store);
+    const result = await executeInvocation({
+      store,
+      invocationId: claim.invocation.id,
+      ownershipToken: claim.ownershipToken,
+      trackedPgids: () => [4242],
+      runTurn: () => Promise.resolve({ status: "completed", threadId: "t", output: "" }),
+      teardownTree: teardownReturning({
+        ...CLEAN,
+        outcome: INVOCATION_TREE_TEARDOWN_OUTCOMES.survivors,
+        survivorPids: [4242],
+      }),
+    });
+    assert.ok(result.kind === EXECUTE_INVOCATION_KINDS.unsettled);
+    assert.deepEqual(result.survivorPids, [4242]);
+    const record = store.getInvocation(claim.invocation.id);
+    assert.equal(record?.status, INVOCATION_STATUSES.running);
+    assert.equal(record?.treeUnsettled, true);
+    assert.deepEqual(record?.treeTrackedPgids, [4242]);
+    assert.deepEqual(record?.treeSurvivorPids, [4242]);
+    assert.equal(store.getSchedule(claim.schedule.id)?.status, "active");
     store.close();
   } finally {
     rmSync(dir, { recursive: true, force: true });
@@ -331,6 +370,8 @@ test("settle 有残留时不写终态、返回 unsettled、行保持 running", a
     assert.equal(record?.status, INVOCATION_STATUSES.running);
     assert.deepEqual(record?.executor, { pid: 4321, startToken: "pst-v2:test" });
     assert.equal(record?.threadId, undefined);
+    assert.equal(record?.treeUnsettled, true);
+    assert.deepEqual(record?.treeSurvivorPids, [7, 9]);
     assert.equal(
       store.failInvocation(claim.invocation.id, claim.ownershipToken, "daemon 收尾", NOW + 11),
       INVOCATION_FAILURE_OUTCOMES.retryScheduled,
@@ -364,6 +405,127 @@ test("settle 无法枚举时同样 unsettled；turn 失败时也先清场再决�
     assert.equal(unavailable.kind, EXECUTE_INVOCATION_KINDS.unsettled);
     assert.equal(calls, 2);
     assert.equal(store.getInvocation(claim.invocation.id)?.status, INVOCATION_STATUSES.running);
+    store.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("executeInvocation：teardown 轮询中 token 变 unavailable 时不得写终态", async () => {
+  const dir = tempDir();
+  try {
+    const store = new ScheduleStore(dir, { retryBudget: 1 });
+    const claim = claimOne(store);
+    const alive = [
+      { pid: 600, pgid: 600, marked: false, zombie: false },
+      { pid: 601, pgid: 600, marked: false, zombie: false },
+    ];
+    let clock = 0;
+    const killed: Array<[number, string]> = [];
+    const result = await executeInvocation({
+      store,
+      invocationId: claim.invocation.id,
+      ownershipToken: claim.ownershipToken,
+      trackedGroups: () => [{ pgid: 600, leaderState: "alive", startToken: "pst-v2:live" }],
+      runTurn: () => Promise.resolve({ status: "completed", threadId: "t", output: "done" }),
+      teardownTree: (phase) => {
+        if (phase === INVOCATION_TREE_TEARDOWN_PHASES.preflight) {
+          return Promise.resolve(CLEAN);
+        }
+        let checks = 0;
+        return terminateInvocationTree(
+          {
+            invocationId: claim.invocation.id,
+            selfPid: 0,
+            trackedGroups: trackedGroupsFromPersisted([
+              { pgid: 600, leaderState: "alive", startToken: "pst-v2:live" },
+            ]),
+          },
+          {
+            platform: "darwin",
+            snapshot: () => alive,
+            matchStartToken: () => {
+              checks += 1;
+              return checks === 1 ? "match" : "unavailable";
+            },
+            kill: (pid, signal) => {
+              killed.push([pid, signal]);
+            },
+            sleep: async (ms) => {
+              clock += ms;
+            },
+            now: () => clock,
+            graceMs: 0,
+            pollMs: 10,
+          },
+        );
+      },
+    });
+    assert.equal(result.kind, EXECUTE_INVOCATION_KINDS.unsettled);
+    assert.equal(store.getInvocation(claim.invocation.id)?.status, INVOCATION_STATUSES.running);
+    assert.equal(store.getInvocation(claim.invocation.id)?.treeUnsettled, true);
+    assert.equal(store.getInvocation(claim.invocation.id)?.threadId, undefined);
+    assert.deepEqual(
+      killed.filter(([, signal]) => signal === "SIGKILL"),
+      [],
+    );
+    store.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("ScheduleStore：旧数字 PGID 的 live leader 经 probe 不得写终态、不得新 claim", async () => {
+  const dir = tempDir();
+  try {
+    const store = new ScheduleStore(dir, {
+      executorLiveness: () => "dead",
+      treeLiveness: (record) =>
+        probeInvocationTreeSettled(
+          {
+            invocationId: record.id,
+            selfPid: 0,
+            trackedGroups: trackedGroupsFromPersisted(record.treeTrackedGroups),
+          },
+          {
+            platform: "darwin",
+            snapshot: () => [
+              { pid: 700, pgid: 700, marked: false, zombie: false },
+              { pid: 701, pgid: 700, marked: false, zombie: false },
+            ],
+          },
+        ),
+    });
+    const claim = claimOne(store);
+    store.beginInvocation(claim.invocation.id, claim.ownershipToken, NOW + 1, {
+      pid: 4242,
+      startToken: "pst-v2:legacy",
+    });
+    assert.equal(
+      store.recordInvocationTree({
+        id: claim.invocation.id,
+        ownershipToken: claim.ownershipToken,
+        trackedPgids: [700],
+        unsettled: true,
+      }),
+      true,
+    );
+    assert.equal(
+      store.completeInvocation({
+        id: claim.invocation.id,
+        ownershipToken: claim.ownershipToken,
+        status: INVOCATION_STATUSES.completed,
+        nowMs: NOW + 2,
+      }),
+      COMPLETE_INVOCATION_OUTCOMES.treeUnsettled,
+    );
+    assert.equal(
+      store.cancelInvocation(claim.invocation.id, "cancel", NOW + 3),
+      CANCEL_INVOCATION_OUTCOMES.treeUnsettled,
+    );
+    assert.equal(store.getInvocation(claim.invocation.id)?.status, INVOCATION_STATUSES.running);
+    assert.equal(store.getInvocation(claim.invocation.id)?.treeUnsettled, true);
+    assert.deepEqual(store.claimDue({ workerId: "w2", nowMs: NOW + 4, limit: 5 }), []);
     store.close();
   } finally {
     rmSync(dir, { recursive: true, force: true });
@@ -451,7 +613,9 @@ test("teardownTree 抛异常按 unavailable 处理：preflight 时 failInvocatio
     assert.match(result.error, /ENOENT: \/proc/u);
     assert.equal(reports[0]?.outcome, INVOCATION_TREE_TEARDOWN_OUTCOMES.unavailable);
     assert.equal(reports[0]?.error, "ENOENT: /proc");
-    assert.equal(store.getInvocation(claim.invocation.id)?.status, INVOCATION_STATUSES.retry);
+    const retried = store.getInvocation(claim.invocation.id);
+    assert.equal(retried?.status, INVOCATION_STATUSES.retry);
+    assert.equal(retried?.treeUnsettled, true);
     store.close();
   } finally {
     rmSync(dir, { recursive: true, force: true });

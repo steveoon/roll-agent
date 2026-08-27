@@ -1,4 +1,5 @@
 import {
+  INVOCATION_FAILURE_OUTCOMES,
   SCHEDULER_LIMITS,
   type ClaimedInvocation,
   type ExecutorIdentity,
@@ -277,6 +278,13 @@ export class SchedulerDaemon {
       );
     } catch (error) {
       this.logger.error(`invocation ${id} 退出后写账本失败：${errorMessage(error)}`);
+      this.wake.resolve();
+      return;
+    }
+    if (outcome === INVOCATION_FAILURE_OUTCOMES.treeUnsettled) {
+      this.logger.error(
+        `invocation ${id} 的 exec 已退出，但登记的进程树未清干净；保留 running，交给探活与 maxRunMs 处理`,
+      );
       this.wake.resolve();
       return;
     }

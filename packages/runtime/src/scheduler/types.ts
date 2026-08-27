@@ -33,6 +33,7 @@ export const INVOCATION_FAILURE_OUTCOMES = {
   terminal: "terminal",
   terminalPaused: "terminal-paused",
   lostClaim: "lost-claim",
+  treeUnsettled: "tree-unsettled",
 } as const;
 export type InvocationFailureOutcome =
   (typeof INVOCATION_FAILURE_OUTCOMES)[keyof typeof INVOCATION_FAILURE_OUTCOMES];
@@ -50,6 +51,7 @@ export const CANCEL_INVOCATION_OUTCOMES = {
   ownershipChanged: "ownership-changed",
   executorAlive: "executor-alive",
   executorUnknown: "executor-unknown",
+  treeUnsettled: "tree-unsettled",
 } as const;
 export type CancelInvocationOutcome =
   (typeof CANCEL_INVOCATION_OUTCOMES)[keyof typeof CANCEL_INVOCATION_OUTCOMES];
@@ -57,6 +59,43 @@ export type CancelInvocationOutcome =
 export interface CancelInvocationOptions {
   readonly abandon?: boolean;
   readonly expectedOwnershipToken?: string;
+  readonly expectedAttempt?: number;
+  readonly expectedClaimedBy?: string;
+}
+
+export const TRACKED_LEADER_STATES = {
+  alive: "alive",
+  exited: "exited",
+  unknown: "unknown",
+} as const;
+export type TrackedLeaderState = (typeof TRACKED_LEADER_STATES)[keyof typeof TRACKED_LEADER_STATES];
+
+export interface PersistedTrackedGroup {
+  readonly pgid: number;
+  readonly leaderState: TrackedLeaderState;
+  readonly startToken?: string;
+}
+
+export interface FinalizeCancellationTree {
+  readonly trackedPgids?: readonly number[];
+  readonly trackedGroups?: readonly PersistedTrackedGroup[];
+  readonly unsettled: boolean;
+  readonly survivorPids?: readonly number[];
+}
+
+export interface FinalizeCancellationInput {
+  readonly id: string;
+  readonly reason: string;
+  readonly nowMs: number;
+  readonly expectedAttempt: number;
+  readonly expectedClaimedBy?: string;
+  readonly expectedOwnershipToken?: string;
+  readonly tree?: FinalizeCancellationTree;
+  readonly abandon?: boolean;
+}
+
+export interface RemoveScheduleOptions {
+  readonly abandon?: boolean;
 }
 
 export const EXECUTOR_LIVENESS = {
@@ -73,6 +112,22 @@ export interface ExecutorIdentity {
 }
 
 export type ExecutorLivenessProbe = (executor: ExecutorIdentity) => ExecutorLiveness;
+
+export const COMPLETE_INVOCATION_OUTCOMES = {
+  written: "written",
+  lostClaim: "lost-claim",
+  treeUnsettled: "tree-unsettled",
+} as const;
+export type CompleteInvocationOutcome =
+  (typeof COMPLETE_INVOCATION_OUTCOMES)[keyof typeof COMPLETE_INVOCATION_OUTCOMES];
+
+export const INVOCATION_TREE_LIVENESS = {
+  settled: "settled",
+  unsettled: "unsettled",
+  unavailable: "unavailable",
+} as const;
+export type InvocationTreeLiveness =
+  (typeof INVOCATION_TREE_LIVENESS)[keyof typeof INVOCATION_TREE_LIVENESS];
 
 export interface ScheduleRecord {
   readonly id: string;
@@ -105,10 +160,16 @@ export interface InvocationRecord {
   readonly outputExcerpt: string | undefined;
   readonly error: string | undefined;
   readonly pendingActions: readonly string[];
+  readonly treeTrackedPgids: readonly number[];
+  readonly treeTrackedGroups: readonly PersistedTrackedGroup[];
+  readonly treeUnsettled: boolean;
+  readonly treeSurvivorPids: readonly number[];
   readonly createdAtMs: number;
   readonly startedAtMs: number | undefined;
   readonly finishedAtMs: number | undefined;
 }
+
+export type InvocationTreeLivenessProbe = (record: InvocationRecord) => InvocationTreeLiveness;
 
 export interface ClaimedInvocation {
   readonly invocation: InvocationRecord;
@@ -141,6 +202,15 @@ export interface CompleteInvocationInput {
   readonly threadId?: string;
   readonly outputExcerpt?: string;
   readonly pendingActions?: readonly string[];
+}
+
+export interface RecordInvocationTreeInput {
+  readonly id: string;
+  readonly trackedPgids?: readonly number[];
+  readonly trackedGroups?: readonly PersistedTrackedGroup[];
+  readonly unsettled: boolean;
+  readonly survivorPids?: readonly number[];
+  readonly ownershipToken?: string;
 }
 
 export const SCHEDULE_STORE_ERROR_CODES = {

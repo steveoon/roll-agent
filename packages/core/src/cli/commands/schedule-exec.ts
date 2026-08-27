@@ -12,6 +12,7 @@ import {
   INVOCATION_TREE_TEARDOWN_OUTCOMES,
   ProcessGroupLedger,
   terminateInvocationTree,
+  trackedGroupsFromPersisted,
   type InvocationTreeTeardown,
 } from "../../scheduler-host/invocation-tree.ts";
 import { createScheduledTurnRunner } from "../../scheduler-host/run-scheduled-turn.ts";
@@ -80,7 +81,9 @@ export default defineCommand({
           );
           throw new Error("无法验证 exec 进程的 OS 启动身份");
         }
-        const previousExecutorPid = store.getInvocation(args.invocation)?.executor?.pid;
+        const previous = store.getInvocation(args.invocation);
+        const previousExecutorPid = previous?.executor?.pid;
+        const persistedGroups = previous?.treeTrackedGroups ?? [];
         const ledger = new ProcessGroupLedger();
         const { config } = loadConfig();
         const result = await executeInvocation({
@@ -95,13 +98,29 @@ export default defineCommand({
             onShellCommandSpawn: (child) => ledger.track(child),
           }),
           stopSignal: stop.controller.signal,
-          teardownTree: () =>
-            terminateInvocationTree({
+          trackedGroups: () => {
+            const byPgid = new Map(persistedGroups.map((group) => [group.pgid, group] as const));
+            for (const group of ledger.persisted()) {
+              byPgid.set(group.pgid, group);
+            }
+            return [...byPgid.values()];
+          },
+          teardownTree: () => {
+            const byPgid = new Map(
+              trackedGroupsFromPersisted(persistedGroups).map(
+                (group) => [group.pgid, group] as const,
+              ),
+            );
+            for (const group of ledger.groups()) {
+              byPgid.set(group.pgid, group);
+            }
+            return terminateInvocationTree({
               invocationId: args.invocation,
               selfPid: process.pid,
-              trackedGroups: ledger.groups(),
+              trackedGroups: [...byPgid.values()],
               ...(previousExecutorPid !== undefined ? { previousExecutorPid } : {}),
-            }),
+            });
+          },
           onTeardown: (phase, report) => reportTeardown(args.invocation, phase, report),
         });
         printJson(result);

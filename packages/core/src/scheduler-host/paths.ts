@@ -8,6 +8,15 @@ export const SCHEDULE_TOKEN_ENV = "ROLL_SCHEDULE_OWNERSHIP_TOKEN";
 export const SCHEDULE_DATA_DIR_ENV = "ROLL_SCHEDULE_DATA_DIR";
 export const SCHEDULE_INVOCATION_ENV = "ROLL_SCHEDULE_INVOCATION";
 
+export function omitScheduleInvocationEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  if (!(SCHEDULE_INVOCATION_ENV in env)) {
+    return { ...env };
+  }
+  const next: NodeJS.ProcessEnv = { ...env };
+  delete next[SCHEDULE_INVOCATION_ENV];
+  return next;
+}
+
 export interface SchedulerPaths {
   readonly dataDir: string;
   readonly logPath: string;

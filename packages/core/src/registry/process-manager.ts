@@ -22,6 +22,7 @@ import {
 import { resolveDevSpawnSpec } from "./dev-spawn.ts";
 import { inferAgentSourceType } from "./source.ts";
 import type { RegisteredAgent } from "../types/agent.ts";
+import { omitScheduleInvocationEnv } from "../scheduler-host/paths.ts";
 
 const LEGACY_RUNTIME_SIDECAR_SCHEMA_VERSION = 2 as const;
 const RUNTIME_SIDECAR_SCHEMA_VERSION = 3 as const;
@@ -551,7 +552,7 @@ function startAgentUnlocked(
     detached: true,
     windowsHide: true,
     stdio: ["ignore", logFd, logFd],
-    ...(env ? { env: { ...process.env, ...env } } : {}),
+    env: omitScheduleInvocationEnv({ ...process.env, ...(env ?? {}) }),
   });
   closeSync(logFd);
 

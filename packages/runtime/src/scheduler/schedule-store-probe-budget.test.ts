@@ -261,7 +261,10 @@ test("已是 v2 的旧账本（无 executor_probed_at 列）打开时会补列�
     const version = inspect.prepare("PRAGMA user_version").get() as { user_version: number };
     inspect.close();
     assert.ok(columns.includes("executor_probed_at"));
-    assert.equal(version.user_version, 3);
+    assert.ok(columns.includes("tree_tracked_pgids"));
+    assert.ok(columns.includes("tree_unsettled"));
+    assert.ok(columns.includes("tree_survivor_pids"));
+    assert.equal(version.user_version, 4);
     const claims = reopened.claimDue({
       workerId: "new-daemon",
       nowMs: NOW + SCHEDULER_LIMITS.claimLeaseMs + 1,

@@ -1,8 +1,13 @@
-import { SCHEDULER_LIMITS } from "@roll-agent/runtime";
+import {
+  COMPLETE_INVOCATION_OUTCOMES,
+  INVOCATION_FAILURE_OUTCOMES,
+  SCHEDULER_LIMITS,
+} from "@roll-agent/runtime";
 import type {
   ExecutorIdentity,
   InvocationFailureOutcome,
   InvocationRecord,
+  PersistedTrackedGroup,
   ScheduleRecord,
   ScheduleStore,
 } from "@roll-agent/runtime";
@@ -91,6 +96,8 @@ export interface ExecuteInvocationOptions {
   readonly ownershipToken: string;
   readonly runTurn: ScheduledTurnRunner;
   readonly teardownTree: (phase: InvocationTreeTeardownPhase) => Promise<InvocationTreeTeardown>;
+  readonly trackedPgids?: () => readonly number[];
+  readonly trackedGroups?: () => readonly PersistedTrackedGroup[];
   readonly onTeardown?: (
     phase: InvocationTreeTeardownPhase,
     report: InvocationTreeTeardown,
@@ -162,6 +169,17 @@ export async function executeInvocation(
       };
     }
     options.onTeardown?.(phase, report);
+    const settled = isTreeSettled(report);
+    const groups = settled ? [] : (options.trackedGroups?.() ?? []);
+    const pgids = settled ? [] : (options.trackedPgids?.() ?? []);
+    options.store.recordInvocationTree({
+      id: options.invocationId,
+      ownershipToken: options.ownershipToken,
+      ...(groups.length > 0 ? { trackedGroups: groups } : {}),
+      ...(pgids.length > 0 ? { trackedPgids: pgids } : {}),
+      unsettled: !settled,
+      survivorPids: report.survivorPids,
+    });
     return report;
   };
   const preflight = await teardown(INVOCATION_TREE_TEARDOWN_PHASES.preflight);
@@ -173,6 +191,14 @@ export async function executeInvocation(
       message,
       now(),
     );
+    if (failure === INVOCATION_FAILURE_OUTCOMES.treeUnsettled) {
+      return {
+        kind: EXECUTE_INVOCATION_KINDS.unsettled,
+        invocationId: options.invocationId,
+        survivorPids: preflight.survivorPids,
+        error: message,
+      };
+    }
     return {
       kind: EXECUTE_INVOCATION_KINDS.failed,
       invocationId: options.invocationId,
@@ -209,6 +235,9 @@ export async function executeInvocation(
       message,
       now(),
     );
+    if (failure === INVOCATION_FAILURE_OUTCOMES.treeUnsettled) {
+      return unsettledBy(settled);
+    }
     return {
       kind: EXECUTE_INVOCATION_KINDS.failed,
       invocationId: options.invocationId,
@@ -232,6 +261,9 @@ export async function executeInvocation(
       now(),
       { terminal: outcome.terminal === true },
     );
+    if (failure === INVOCATION_FAILURE_OUTCOMES.treeUnsettled) {
+      return unsettledBy(settled);
+    }
     return {
       kind: EXECUTE_INVOCATION_KINDS.failed,
       invocationId: options.invocationId,
@@ -253,7 +285,10 @@ export async function executeInvocation(
       ? { pendingActions: outcome.pendingActions }
       : {}),
   });
-  if (!written) {
+  if (written === COMPLETE_INVOCATION_OUTCOMES.treeUnsettled) {
+    return unsettledBy(settled);
+  }
+  if (written !== COMPLETE_INVOCATION_OUTCOMES.written) {
     return { kind: EXECUTE_INVOCATION_KINDS.lostClaim, invocationId: options.invocationId };
   }
   return { kind: outcome.status, invocationId: options.invocationId, threadId: outcome.threadId };
