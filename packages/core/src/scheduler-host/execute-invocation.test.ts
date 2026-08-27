@@ -317,7 +317,10 @@ test("preflight 残留在 retryBudget 耗尽时返回 unsettled，行保持 runn
       store,
       invocationId: claim.invocation.id,
       ownershipToken: claim.ownershipToken,
-      trackedGroups: () => [{ pgid: 4242, leaderState: "unknown" }],
+      trackedGroups: (report) => {
+        assert.deepEqual(report.survivorPids, [4242]);
+        return [{ pgid: 4242, leaderState: "unknown" }];
+      },
       runTurn: () => Promise.resolve({ status: "completed", threadId: "t", output: "" }),
       teardownTree: teardownReturning({
         ...CLEAN,

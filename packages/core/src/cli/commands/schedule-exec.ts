@@ -11,6 +11,7 @@ import { readExecutorIdentityWithRetry } from "../../scheduler-host/executor-liv
 import {
   INVOCATION_TREE_TEARDOWN_OUTCOMES,
   ProcessGroupLedger,
+  mergeTrackedGroups,
   terminateInvocationTree,
   trackedGroupsFromPersisted,
   type InvocationTreeTeardown,
@@ -98,13 +99,8 @@ export default defineCommand({
             onShellCommandSpawn: (child) => ledger.track(child),
           }),
           stopSignal: stop.controller.signal,
-          trackedGroups: () => {
-            const byPgid = new Map(persistedGroups.map((group) => [group.pgid, group] as const));
-            for (const group of ledger.persisted()) {
-              byPgid.set(group.pgid, group);
-            }
-            return [...byPgid.values()];
-          },
+          trackedGroups: (report) =>
+            mergeTrackedGroups(persistedGroups, ledger.persisted(), report.skippedReusedGroups),
           teardownTree: () => {
             const byPgid = new Map(
               trackedGroupsFromPersisted(persistedGroups).map(

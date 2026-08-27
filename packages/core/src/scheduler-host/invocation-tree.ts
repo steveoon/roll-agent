@@ -258,6 +258,19 @@ function persistLeaderState(group: TrackedProcessGroup): TrackedLeaderState {
       : TRACKED_LEADER_STATES.alive;
 }
 
+export function mergeTrackedGroups(
+  persisted: readonly PersistedTrackedGroup[],
+  live: readonly PersistedTrackedGroup[],
+  excludedPgids: readonly number[] = [],
+): PersistedTrackedGroup[] {
+  const excluded = new Set(excludedPgids);
+  const byPgid = new Map<number, PersistedTrackedGroup>();
+  for (const group of [...persisted, ...live]) {
+    byPgid.set(group.pgid, group);
+  }
+  return [...byPgid.values()].filter((group) => !excluded.has(group.pgid));
+}
+
 export function trackedGroupsFromPersisted(
   groups: readonly PersistedTrackedGroup[],
 ): TrackedProcessGroup[] {
@@ -368,7 +381,7 @@ export function collectTreeMembers(
   const groups = new Set<number>();
   const skipped: number[] = [];
   const unverifiable: number[] = [];
-  const self = byPid.get(scope.selfPid);
+  const self = scope.selfPid > 0 ? byPid.get(scope.selfPid) : undefined;
   if (self !== undefined && self.pgid === scope.selfPid) {
     groups.add(scope.selfPid);
   }

@@ -158,7 +158,6 @@ export default defineCommand({
           before.status === runtime.INVOCATION_STATUSES.retry;
         if (
           args.kill &&
-          !args.abandon &&
           treeBearing &&
           (before.status !== runtime.INVOCATION_STATUSES.running ||
             before.executor === undefined ||
@@ -183,11 +182,10 @@ export default defineCommand({
         }
         const outcome = store.finalizeCancellation({
           id: args.invocation,
-          reason: args.abandon ? "已由用户放弃追踪（--abandon）" : "已由用户取消",
+          reason: "已由用户取消",
           nowMs: Date.now(),
           expectedAttempt: before.attempt,
           ...(tree !== undefined ? { tree } : {}),
-          ...(args.abandon ? { abandon: true } : {}),
         });
         const outcomes = runtime.CANCEL_INVOCATION_OUTCOMES;
         if (outcome === outcomes.ownershipChanged) {
@@ -236,7 +234,7 @@ export default defineCommand({
           printJson({
             ...serializeInvocation(after),
             killed,
-            abandoned: args.abandon,
+            abandoned: false,
             unverifiedDescendants,
           });
           return;
@@ -249,9 +247,6 @@ export default defineCommand({
           log.warn(
             "Windows 无法验证 exec 后代进程是否退出；已按根进程退出取消，若有残留子进程请手动检查",
           );
-        }
-        if (args.abandon) {
-          log.warn("已按 --abandon 释放单例；若旧 exec 进程仍在运行，其副作用不会被阻止");
         }
       } finally {
         store.close();

@@ -96,7 +96,7 @@ export interface ExecuteInvocationOptions {
   readonly ownershipToken: string;
   readonly runTurn: ScheduledTurnRunner;
   readonly teardownTree: (phase: InvocationTreeTeardownPhase) => Promise<InvocationTreeTeardown>;
-  readonly trackedGroups?: () => readonly PersistedTrackedGroup[];
+  readonly trackedGroups?: (report: InvocationTreeTeardown) => readonly PersistedTrackedGroup[];
   readonly onTeardown?: (
     phase: InvocationTreeTeardownPhase,
     report: InvocationTreeTeardown,
@@ -169,7 +169,7 @@ export async function executeInvocation(
     }
     options.onTeardown?.(phase, report);
     const settled = isTreeSettled(report);
-    const groups = settled ? [] : (options.trackedGroups?.() ?? []);
+    const groups = settled ? [] : (options.trackedGroups?.(report) ?? []);
     options.store.recordInvocationTree({
       id: options.invocationId,
       ownershipToken: options.ownershipToken,

@@ -7,6 +7,7 @@ import {
   ProcessGroupLedger,
   collectTreeMembers,
   invocationMarker,
+  mergeTrackedGroups,
   parseProcStat,
   parsePsSnapshot,
   probeInvocationTreeSettled,
@@ -299,6 +300,33 @@ test("trackedGroupsFromPersisted 保留 leaderState；纯 pgid 视为身份未�
   assert.equal(legacy[0]?.leaderExited(), false);
   assert.equal(legacy[0]?.leaderState, "unknown");
   assert.equal(legacy[0]?.origin, "restored");
+});
+
+test("collectTreeMembers：selfPid 为 0 时不把快照里的 pid 0 / pgid 0 行当成自己的组", () => {
+  const members = collectTreeMembers(
+    snapshot([
+      [0, 0],
+      [5, 0],
+      [900, 900],
+    ]),
+    { invocationId: ID, selfPid: 0, trackedGroups: [] },
+  );
+  assert.deepEqual(members, { pids: [], skippedReusedGroups: [], unverifiableGroups: [] });
+});
+
+test("mergeTrackedGroups：live 登记组覆盖同号持久化组，已判复用的组不再带走", () => {
+  const merged = mergeTrackedGroups(
+    [
+      { pgid: 600, leaderState: "alive", startToken: "pst-v2:old" },
+      { pgid: 700, leaderState: "alive", startToken: "pst-v2:reused" },
+    ],
+    [{ pgid: 600, leaderState: "exited", startToken: "pst-v2:old" }],
+    [700],
+  );
+  assert.deepEqual(merged, [{ pgid: 600, leaderState: "exited", startToken: "pst-v2:old" }]);
+  assert.deepEqual(mergeTrackedGroups([], [{ pgid: 800, leaderState: "alive" }]), [
+    { pgid: 800, leaderState: "alive" },
+  ]);
 });
 
 test("collectTreeMembers：上一任 executor pid 当作已退出的登记组处理", () => {
@@ -835,7 +863,6 @@ test("trackedGroupsFromPersistedPgids 身份未知；leader 不在时仍可枚�
   );
   assert.equal(groups[0]?.leaderExited(), false);
   assert.equal(groups[0]?.leaderState, "unknown");
-  const killed: Array<[number, string]> = [];
   const liveness = probeInvocationTreeSettled(
     { invocationId: ID, selfPid: 0, trackedGroups: groups },
     {
@@ -848,7 +875,6 @@ test("trackedGroupsFromPersistedPgids 身份未知；leader 不在时仍可枚�
     },
   );
   assert.equal(liveness, "unsettled");
-  assert.deepEqual(killed, []);
   assert.equal(
     probeInvocationTreeSettled(
       { invocationId: ID, selfPid: 0, trackedGroups: groups },
