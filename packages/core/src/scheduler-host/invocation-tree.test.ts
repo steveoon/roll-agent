@@ -17,6 +17,7 @@ import {
   type ProcessSnapshot,
 } from "./invocation-tree.ts";
 import { omitScheduleInvocationEnv } from "./paths.ts";
+import { readProcessStartToken } from "../registry/process-identity.ts";
 
 const ID = "11111111-2222-4333-8444-555555555555";
 const MARKER = invocationMarker(ID);
@@ -243,6 +244,46 @@ test("collectTreeMembers：恢复组 start token 验证 unavailable 时不把 li
   assert.deepEqual(members.pids, []);
   assert.deepEqual(members.skippedReusedGroups, []);
   assert.deepEqual(members.unverifiableGroups, [600]);
+});
+
+test("collectTreeMembers：恢复组 live leader 在快照后刚退出（gone）时整组仍算成员，不进隔离", () => {
+  const members = collectTreeMembers(
+    snapshot([
+      [500, 500],
+      [600, 600],
+      [601, 600],
+    ]),
+    {
+      invocationId: ID,
+      selfPid: 500,
+      trackedGroups: trackedGroupsFromPersisted([
+        { pgid: 600, leaderState: "alive", startToken: "pst-v2:live" },
+      ]),
+    },
+    { matchStartToken: () => "gone" },
+  );
+  assert.deepEqual(members.pids, [600, 601]);
+  assert.deepEqual(members.skippedReusedGroups, []);
+  assert.deepEqual(members.unverifiableGroups, []);
+});
+
+test("collectTreeMembers：恢复组 leader 已退出而同号 pid 刚消失（gone）仍按复用跳过", () => {
+  const members = collectTreeMembers(
+    snapshot([
+      [500, 500],
+      [600, 600],
+      [601, 600],
+    ]),
+    {
+      invocationId: ID,
+      selfPid: 500,
+      trackedGroups: trackedGroupsFromPersisted([
+        { pgid: 600, leaderState: "exited", startToken: "pst-v2:old" },
+      ]),
+    },
+    { matchStartToken: () => "gone" },
+  );
+  assert.deepEqual(members, { pids: [], skippedReusedGroups: [600], unverifiableGroups: [] });
 });
 
 test("trackedGroupsFromPersisted 保留 leaderState；纯 pgid 视为身份未知", () => {
@@ -640,6 +681,42 @@ test("terminateInvocationTree：首帧 mismatch 的组在 leader 退出后仍保
   );
 });
 
+test("terminateInvocationTree：首帧 leader 刚退出（gone）不得隔离整组，孤儿在后续帧被终止", async () => {
+  const killed: Array<[number, string]> = [];
+  const report = await terminateInvocationTree(
+    {
+      invocationId: ID,
+      selfPid: 0,
+      trackedGroups: trackedGroupsFromPersisted([
+        { pgid: 600, leaderState: "alive", startToken: "pst-v2:owned" },
+      ]),
+    },
+    {
+      ...scriptedDeps(
+        [
+          snapshot([
+            [600, 600],
+            [601, 600],
+          ]),
+          snapshot([[601, 600]]),
+          snapshot([]),
+        ],
+        killed,
+      ),
+      matchStartToken: () => "gone",
+    },
+  );
+
+  assert.equal(report.outcome, INVOCATION_TREE_TEARDOWN_OUTCOMES.clean);
+  assert.deepEqual(report.terminatedPids, [600, 601]);
+  assert.deepEqual(report.skippedReusedGroups, []);
+  assert.equal(
+    killed.some(([pid]) => pid === 601),
+    true,
+    "leader 在快照后退出的组仍是本次运行的组，孤儿必须收到信号",
+  );
+});
+
 test("terminateInvocationTree：当前 live 登记组与 previous executor 同号时以当前所有权为准", async () => {
   const ledger = new ProcessGroupLedger(() => undefined);
   ledger.track({ pid: 700, exitCode: null, signalCode: null });
@@ -944,6 +1021,67 @@ test("真实进程：持久化 live leader 不得当成 PID 复用；token 不�
     await once(child, "exit").catch(() => undefined);
   }
 });
+
+test(
+  "真实进程：恢复组 leader 在 ps 快照之后退出，孤儿仍被找到并终止（process-not-found 不算 PID 复用）",
+  posixOnly,
+  async () => {
+    const leader = spawn("/bin/sh", ["-c", "/bin/sleep 60 & /bin/sleep 0.6; exit 0"], {
+      detached: true,
+      stdio: "ignore",
+    });
+    let orphan: number | undefined;
+    try {
+      await once(leader, "spawn");
+      const pgid = leader.pid;
+      assert.ok(pgid);
+      const token = readProcessStartToken(pgid);
+      assert.ok(token, "leader 存活时必须能读到 start token");
+      let stale: ProcessSnapshot = [];
+      for (let attempt = 0; attempt < 20 && orphan === undefined; attempt += 1) {
+        stale = snapshotProcesses(MARKER) ?? [];
+        orphan = stale.find((entry) => entry.pgid === pgid && entry.pid !== pgid)?.pid;
+        if (orphan === undefined) {
+          await new Promise((resolve) => setTimeout(resolve, 20));
+        }
+      }
+      assert.ok(orphan, "过期快照里必须已经有 leader 组的孤儿");
+      assert.ok(stale.some((entry) => entry.pid === pgid && !entry.zombie));
+      await once(leader, "exit");
+      let frames = 0;
+      const report = await terminateInvocationTree(
+        {
+          invocationId: ID,
+          selfPid: 0,
+          trackedGroups: trackedGroupsFromPersisted([
+            { pgid, leaderState: "alive", startToken: token },
+          ]),
+        },
+        {
+          snapshot: (marker) => (frames++ === 0 ? stale : snapshotProcesses(marker)),
+        },
+      );
+      assert.equal(report.outcome, INVOCATION_TREE_TEARDOWN_OUTCOMES.clean);
+      assert.ok(report.terminatedPids.includes(orphan), JSON.stringify(report));
+      assert.deepEqual(report.skippedReusedGroups, []);
+      const after = (snapshotProcesses(MARKER) ?? []).filter(
+        (entry) => entry.pgid === pgid && !entry.zombie,
+      );
+      assert.deepEqual(after, []);
+    } finally {
+      if (orphan !== undefined) {
+        try {
+          process.kill(orphan, "SIGKILL");
+        } catch {
+          // already gone
+        }
+      }
+      if (leader.exitCode === null && leader.signalCode === null) {
+        leader.kill("SIGKILL");
+      }
+    }
+  },
+);
 
 test("真实进程：argv 含标记但 env 无标记时不得进入 terminatedPids", posixOnly, async () => {
   const child = spawn(process.execPath, ["-e", "setTimeout(() => {}, 60000)", MARKER], {

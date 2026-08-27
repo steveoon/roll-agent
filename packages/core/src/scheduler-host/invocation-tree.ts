@@ -11,6 +11,7 @@ import {
   type TrackedLeaderState,
 } from "@roll-agent/runtime";
 import {
+  PROCESS_START_TOKEN_VERIFICATION_REASONS,
   PROCESS_START_TOKEN_VERIFICATION_STATUSES,
   isProcessStartToken,
   readProcessStartToken,
@@ -288,6 +289,7 @@ export interface TreeMembers {
 export const START_TOKEN_MATCH_RESULTS = {
   match: "match",
   mismatch: "mismatch",
+  gone: "gone",
   unavailable: "unavailable",
 } as const;
 export type StartTokenMatchResult =
@@ -301,6 +303,7 @@ export interface CollectTreeMembersDeps {
 const RESTORED_LIVE_LEADER_BY_VERDICT = {
   [START_TOKEN_MATCH_RESULTS.match]: "own",
   [START_TOKEN_MATCH_RESULTS.mismatch]: "skip",
+  [START_TOKEN_MATCH_RESULTS.gone]: "own",
   [START_TOKEN_MATCH_RESULTS.unavailable]: "unverifiable",
 } as const;
 
@@ -341,7 +344,9 @@ function matchPersistedStartToken(pid: number, startToken: string): StartTokenMa
     return START_TOKEN_MATCH_RESULTS.match;
   }
   if (result.status === PROCESS_START_TOKEN_VERIFICATION_STATUSES.MISMATCH) {
-    return START_TOKEN_MATCH_RESULTS.mismatch;
+    return result.reason === PROCESS_START_TOKEN_VERIFICATION_REASONS.PROCESS_NOT_FOUND
+      ? START_TOKEN_MATCH_RESULTS.gone
+      : START_TOKEN_MATCH_RESULTS.mismatch;
   }
   return START_TOKEN_MATCH_RESULTS.unavailable;
 }
