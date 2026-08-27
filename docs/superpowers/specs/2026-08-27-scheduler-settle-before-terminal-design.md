@@ -29,7 +29,7 @@
 
 - 持久化成功 turn 的输出到影子列（仍只在 thread 里；树不清就不落账）。
 - cgroup / Windows Job Object；不把 `unsupported` 改成视同已清之外的语义。
-- 解析 darwin `kern.procargs2`。
+- 解析 darwin `kern.procargs2`（后续任务 #238：优先做 SDK / runtime 显式登记外部子进程，只有必须扫描任意第三方进程时再考虑）。
 - 改 bash 工具的 `detached: true` 或 MCP SDK 的 close 语义。
 
 ## 3. 不变量
@@ -42,7 +42,7 @@
 
 | 来源 | 覆盖 | 枚举手段 | 平台 |
 |---|---|---|---|
-| **A. env 标记** `ROLL_SCHEDULE_INVOCATION=<invocation.id>` | 所有继承了 exec 环境的进程，不论 session / pgid 怎么变：MCP 子进程及其孙进程（Chromium）、bash 里起的 node / python 守护进程 | Linux：`/proc/<pid>/environ`。macOS：**不再**用 `ps -E` 的 `command=` 列当 env（argv 与 env 无法区分）；MCP Chromium 若已 `setsid` 离开 B/C，在 darwin 上是文档化残余 | POSIX（Linux 有 A；darwin 仅 B/C） |
+| **A. env 标记** `ROLL_SCHEDULE_INVOCATION=<invocation.id>` | 所有继承了 exec 环境的进程，不论 session / pgid 怎么变：MCP 子进程及其孙进程（Chromium）、bash 里起的 node / python 守护进程 | Linux：`/proc/<pid>/environ`。macOS：`ps` 只取 `pid=,pgid=,stat=`，**不读 env 也不读 argv**（`-E` 的 argv/env 无法区分，且会把同 uid 全部进程的环境变量拉进内存）；已 `setsid` 离开 B/C 的进程在 darwin 上是文档化残余，收回方案见 #238 | POSIX（Linux 有 A；darwin 仅 B/C） |
 | **B. exec 自己的进程组** | 直接子进程（stdio MCP server）及未换组的孙进程 | 同一次 `ps` 的 `pgid` 列 / `/proc/<pid>/stat` 第 5 字段 | POSIX |
 | **C. bash 工具登记的进程组** | 每条 bash 命令自成的 session（`&` 后台、`nohup`），含平台二进制 | runtime 在 spawn 时把 `ChildProcess` 交给 core 的 `ProcessGroupLedger`；按 `pgid = child.pid` 枚举 | POSIX |
 
@@ -139,8 +139,8 @@ exec `unsettled` 退出后：daemon `onExit` → 先看 exec 进程树探活，�
 - Linux：`/proc/<pid>/environ` 对 setuid / 不同 uid / 非 dumpable 进程 `EACCES`，这类进程只能靠 B、C。
 - `env -i` 清空环境后 exec 的子进程不带标记，只能靠 B、C。
 - Windows：无法读其他进程 env，树退化为根进程（沿用启动身份），settle 不清场直接写终态，与今天一致；Job Object 留 v2。
-- Linux `/proc/<pid>/environ` 会读到同 uid 其他进程的 env，只在内存里匹配标记后丢弃（spec 2026-08-25 已记录同 uid 本就能读 0600 账本）。darwin 目前仍执行 `ps -E`，但 command 列不当 env 用（见下一条），输出只用 pid / pgid / stat。
-- macOS 的 `ps -o command= -E` 把 argv 与 env 打在同一列、仅以空格分隔，无法区分：**darwin 上不再用 command 列给 `marked`**。argv 里碰巧含 `ROLL_SCHEDULE_INVOCATION=<uuid>` 的无关进程不会被杀；相应地，darwin 上 source A（env 标记）关闭，已 `setsid` 离开 B/C 的 MCP Chromium 是文档化残余。Linux 继续读 `/proc/*/environ`。不解析 `kern.procargs2`。
+- Linux `/proc/<pid>/environ` 会读到同 uid 其他进程的 env，只在内存里匹配标记后丢弃（spec 2026-08-25 已记录同 uid 本就能读 0600 账本）。darwin 的 `ps` 不带 `-E`、不取 `command=`，其他进程的 env 与 argv 都不进内存（`maxBuffer` 相应降到 16 MiB）。
+- macOS 的 `ps -o command= -E` 把 argv 与 env 打在同一列、仅以空格分隔，无法区分：darwin 上 source A（env 标记）**关闭**（决策：接受 setsid / daemonize 边界，不做两次 `ps` 的 argv 前缀切分）。argv 里碰巧含 `ROLL_SCHEDULE_INVOCATION=<uuid>` 的无关进程不会被杀；已 `setsid` 离开 B/C 的 MCP Chromium / 守护进程是文档化残余。Linux 继续读 `/proc/*/environ`。收回方案见 #238（优先 SDK / runtime 显式登记外部子进程；必须扫描任意第三方进程时再做 `KERN_PROCARGS2`）。
 - Linux 上 `readdirSync("/proc")` 与 `readFileSync(environ)` 没有超时；若系统里有持 mmap 锁的 D 态进程，settle 可能阻塞而不是 `unavailable`（macOS 的 `ps` 有 5 s 超时兜底）。需 Linux 实测，v1 记录为边界。
 
 ## 8. 决策记录

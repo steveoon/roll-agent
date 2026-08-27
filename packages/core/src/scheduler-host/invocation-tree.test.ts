@@ -24,25 +24,19 @@ import { readProcessStartToken } from "../registry/process-identity.ts";
 const ID = "11111111-2222-4333-8444-555555555555";
 const MARKER = invocationMarker(ID);
 
-test("parsePsSnapshot 解析 pid/pgid/stat/command；默认不把 command 列当 env", () => {
+test("parsePsSnapshot 只解析 pid/pgid/stat，ps 输出里不再有 command / env，永不标记", () => {
   const output = [
-    "  100   100 Ss   /bin/bash -c sleep",
-    `  101   100 S    /opt/homebrew/bin/node -e x PATH=/usr/bin ${MARKER} HOME=/Users/x`,
-    `  102   102 Z    (node) ${MARKER}`,
-    `  103   103 S    /usr/bin/python3 ${MARKER}0`,
-    "  104   104 R+   /bin/ps -A -ww -o pid=,pgid=,stat=,command= -E",
+    "  100   100 Ss",
+    "  101   100 S  ",
+    "  102   102 Z",
+    `  103   103 S    /usr/bin/python3 ${MARKER}`,
+    "  104   104 R+",
     "garbage line",
   ].join("\n");
-  assert.deepEqual(parsePsSnapshot(output, MARKER, 104), [
+  assert.deepEqual(parsePsSnapshot(output, 104), [
     { pid: 100, pgid: 100, zombie: false, marked: false },
     { pid: 101, pgid: 100, zombie: false, marked: false },
     { pid: 102, pgid: 102, zombie: true, marked: false },
-    { pid: 103, pgid: 103, zombie: false, marked: false },
-  ]);
-  assert.deepEqual(parsePsSnapshot(output, MARKER, 104, true), [
-    { pid: 100, pgid: 100, zombie: false, marked: false },
-    { pid: 101, pgid: 100, zombie: false, marked: true },
-    { pid: 102, pgid: 102, zombie: true, marked: true },
     { pid: 103, pgid: 103, zombie: false, marked: false },
   ]);
 });

@@ -21,10 +21,10 @@ import { TRUSTED_PS_PATHS } from "./executor-liveness.ts";
 import { SCHEDULE_INVOCATION_ENV } from "./paths.ts";
 
 const SNAPSHOT_TIMEOUT_MS = 5_000;
-const SNAPSHOT_MAX_BUFFER_BYTES = 64 * 1024 * 1024;
+const SNAPSHOT_MAX_BUFFER_BYTES = 16 * 1024 * 1024;
 const TEARDOWN_GRACE_MS = 2_000;
 const TEARDOWN_POLL_MS = 250;
-const PS_LINE = /^\s*(\d+)\s+(\d+)\s+(\S+)\s*(.*)$/u;
+const PS_LINE = /^\s*(\d+)\s+(\d+)\s+(\S+)(?:\s.*)?$/u;
 
 export interface ProcessSnapshotEntry {
   readonly pid: number;
@@ -39,33 +39,7 @@ export function invocationMarker(invocationId: string): string {
   return `${SCHEDULE_INVOCATION_ENV}=${invocationId}`;
 }
 
-function isBoundary(char: string): boolean {
-  return char === "" || /\s/u.test(char);
-}
-
-function containsMarker(commandLine: string, marker: string): boolean {
-  let from = 0;
-  while (from <= commandLine.length) {
-    const at = commandLine.indexOf(marker, from);
-    if (at < 0) {
-      return false;
-    }
-    const before = at === 0 ? "" : commandLine.charAt(at - 1);
-    const after = commandLine.charAt(at + marker.length);
-    if (isBoundary(before) && isBoundary(after)) {
-      return true;
-    }
-    from = at + marker.length;
-  }
-  return false;
-}
-
-export function parsePsSnapshot(
-  output: string,
-  marker: string,
-  excludePid?: number,
-  matchCommandAsEnv = false,
-): ProcessSnapshot {
+export function parsePsSnapshot(output: string, excludePid?: number): ProcessSnapshot {
   const entries: ProcessSnapshotEntry[] = [];
   for (const line of output.split("\n")) {
     const match = PS_LINE.exec(line);
@@ -81,7 +55,7 @@ export function parsePsSnapshot(
       pid,
       pgid,
       zombie: (match[3] ?? "").startsWith("Z"),
-      marked: matchCommandAsEnv && containsMarker(match[4] ?? "", marker),
+      marked: false,
     });
   }
   return entries;
@@ -150,12 +124,12 @@ function snapshotFromProc(marker: string): ProcessSnapshot | undefined {
   return entries;
 }
 
-function snapshotFromPs(marker: string): ProcessSnapshot | undefined {
+function snapshotFromPs(): ProcessSnapshot | undefined {
   const psExecutable = TRUSTED_PS_PATHS.find((candidate) => existsSync(candidate));
   if (psExecutable === undefined) {
     return undefined;
   }
-  const result = spawnSync(psExecutable, ["-A", "-ww", "-o", "pid=,pgid=,stat=,command=", "-E"], {
+  const result = spawnSync(psExecutable, ["-A", "-ww", "-o", "pid=,pgid=,stat="], {
     encoding: "utf-8",
     env: { LC_ALL: "C", LANG: "C" },
     timeout: SNAPSHOT_TIMEOUT_MS,
@@ -165,7 +139,7 @@ function snapshotFromPs(marker: string): ProcessSnapshot | undefined {
   if (result.status !== 0 || result.error !== undefined) {
     return undefined;
   }
-  return parsePsSnapshot(result.stdout, marker, result.pid);
+  return parsePsSnapshot(result.stdout, result.pid);
 }
 
 export function snapshotProcesses(
@@ -178,7 +152,7 @@ export function snapshotProcesses(
   if (platform === "linux" || platform === "android") {
     return snapshotFromProc(marker);
   }
-  return snapshotFromPs(marker);
+  return snapshotFromPs();
 }
 
 export const TRACKED_GROUP_ORIGINS = {
