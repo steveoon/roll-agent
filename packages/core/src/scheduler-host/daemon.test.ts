@@ -200,6 +200,7 @@ test("run 在 abort 后终止子进程并退出", async () => {
       maxConcurrentRuns: 1,
       logger,
       pollIntervalMs: 50,
+      childTerminateGraceMs: 30,
       spawnInvocation: (claim): SpawnedInvocation => {
         store.beginInvocation(claim.invocation.id, claim.ownershipToken, Date.now());
         const exit = Promise.withResolvers<number | null>();

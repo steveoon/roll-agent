@@ -67,12 +67,13 @@ function settleWithin(promises: readonly Promise<unknown>[], timeoutMs: number):
   if (promises.length === 0) {
     return Promise.resolve();
   }
-  return Promise.race([
-    Promise.allSettled(promises).then(() => undefined),
-    new Promise<void>((resolve) => {
-      setTimeout(resolve, timeoutMs).unref();
-    }),
-  ]);
+  return new Promise<void>((resolve) => {
+    const timer = setTimeout(resolve, timeoutMs);
+    Promise.allSettled(promises).then(() => {
+      clearTimeout(timer);
+      resolve();
+    });
+  });
 }
 
 export class SchedulerDaemon {
