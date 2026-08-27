@@ -47,7 +47,7 @@
 
 **为什么不能只用 A**（实测，macOS 26.7）：`ps -E` 只对**非平台二进制**展示 env。`/opt/homebrew/bin/node`、`/usr/bin/python3`（execs 到 CommandLineTools）可见；`/bin/bash`、`/bin/sleep` 这类 Apple 平台签名（`Platform identifier=26`）的进程不可见。bash 工具的 shell 正是平台二进制，所以需要 C。Linux 上 `/proc/*/environ` 对同 uid 可读，A 就覆盖 C（C 仍生效，无害）。
 
-**为什么 B、C 按 pgid 枚举是安全的**（高概率，XNU `forkproc` 检查 `pgfind` / `session_find`；Linux `struct pid` 被 pgid 引用计数保活）：一个 pid 号只要还是某个非空进程组的 pgid 就不会被复用。因此「首领已退出但组非空 ⇒ 组里都是我们的」。反向守卫：登记的首领已退出（`child.exitCode !== null || child.signalCode !== null`）而快照里又出现同号且非僵尸的进程 ⇒ pid 已被复用 ⇒ 整组跳过并记日志。
+**为什么 B、C 按 pgid 枚举是安全的**（高概率，XNU `forkproc` 检查 `pgfind` / `session_find`；Linux `struct pid` 被 pgid 引用计数保活）：一个 pid 号只要还是某个非空进程组的 pgid 就不会被复用。因此「首领已退出但组非空 ⇒ 组里都是我们的」。反向守卫：登记的首领已退出（`child.exitCode !== null || child.signalCode !== null`，即 Node 已 `waitpid` 回收）而快照里又出现同号进程 ⇒ pid 已被复用 ⇒ 整组跳过并记日志。**同号僵尸也算复用**：被回收的首领不可能再以僵尸形态出现，所以同号僵尸必然属于别的父进程（反驳者在真机上用 pid 空间回绕复现过「僵尸豁免」会误杀无关进程）。Linux 上 `/proc/<pid>/stat` 的 `Z` 只有在 `/proc/<pid>/task` 仅剩一项时才算死亡——主线程已退出、其他线程仍在跑的进程状态也是 `Z`，但它活着且可被信号终止（容器实测）。
 
 **自身排除**：exec 自己的 pid 永远排除；做快照的 `ps` 子进程（在 exec 组内）按 `spawnSync().pid` 排除；`ps` 以只含 `LC_ALL=C` 的干净 env 启动，不带标记。
 
@@ -62,7 +62,8 @@
 - `bash/exec.ts` `RunBashOptions.onSpawn?: (child: ChildProcess) => void`，`deps.spawn` 成功且 `child.pid !== undefined` 时回调。
 - `tool-bridge/bash-tool.ts` `SessionBashSettings.onCommandSpawn?: (child: ChildProcess) => void`，透传给 `exec({ onSpawn })`。
 - `engine/conversation-engine.ts` `ConversationEngineOptions.onShellCommandSpawn?`，由 `resolveShellSettings` 放进 `SessionBashSettings.onCommandSpawn`。抽成导出的纯函数 `buildSessionBashSettings()` 便于测试。
-- 不按 hostMode 判断：只有 scheduler host 传这个回调，`roll chat` 不受影响。session-exec（持久 shell）已由 `SessionManager.close()` 的 `killTree` 收尾，不登记。
+- session-exec（`roll__exec`，`runtime.shell.session.enabled` 开启时）的 shell 由 `SessionManager.spawn` 拉起，同样经 `SessionManagerOptions.onSpawn` 登记：`close()` 只收尾未终态的会话，已完成的会话留在其进程组里的孤儿必须靠登记组才找得到（反驳者在 macOS 上复现过不登记时 settle 返回 `clean` 而 `/bin/sleep` 仍存活）。
+- 不按 hostMode 判断：只有 scheduler host 传这个回调，`roll chat` 不受影响。
 
 ### 5.2 core：`scheduler-host/invocation-tree.ts`（新）
 
@@ -77,7 +78,7 @@ export const INVOCATION_TREE_TEARDOWN_OUTCOMES = { clean, survivors, unavailable
 export async function terminateInvocationTree(scope, deps?): Promise<InvocationTreeTeardown>
 ```
 
-`terminateInvocationTree`：快照 → 成员为空 ⇒ `clean`；否则对每个成员 `SIGTERM` → 每 250 ms 重新快照，≤ 2 s 内为空 ⇒ `clean`（附 `terminatedPids`）→ 否则 `SIGKILL` → 再等 ≤ 2 s → 仍有成员或 `EPERM` ⇒ `survivors`（附 `survivorPids`）。快照失败（`/bin/ps` 缺失 / 超时）⇒ `unavailable`。win32 ⇒ `unsupported`。总耗时上限约 4.5 s，远小于 daemon 的 10 s grace。
+`terminateInvocationTree`：快照 → 成员为空 ⇒ `clean`；否则对每个成员 `SIGTERM` → 每 250 ms 重新快照，≤ 2 s 内为空 ⇒ `clean`（附 `terminatedPids`）→ 否则 `SIGKILL` → 再等 ≤ 2 s → **以最终快照为准**：仍有成员 ⇒ `survivors`（附 `survivorPids`）。`kill` 的 `ESRCH` / `EPERM` 只是忽略——`EPERM` 的进程若在 grace 内自行退出，不能算 survivor（否则把 fail-closed 变成无谓的重跑）；其他错误向上抛。deadline 用 `performance.now()`（单调时钟，墙钟回拨不会把轮询变成无界）。快照失败（`/bin/ps` 缺失 / 超时 / `/proc` 不可读）⇒ `unavailable`；`teardownTree` 抛异常由 `executeInvocation` 按 `unavailable` 处理。win32 ⇒ `unsupported`。总耗时上限约 4.5 s，远小于 daemon 的 10 s grace。
 
 ### 5.3 core：`execute-invocation.ts` 的两个 choke point
 
@@ -106,7 +107,12 @@ Windows：`unsupported` 视同已清（root-only 边界，与今天一致）。
 | interrupted | 不写 | 清掉，不写 | 不写，日志 | 不写 |
 | win32 任一 | 写（unsupported） | — | — | — |
 
-exec `unsettled` 退出后：daemon `onExit` → `probeExecutor`（pgid 探针）：残留在 exec 组内 ⇒ `descendants-alive` 保持 running（maxRunMs 处理）；在组外 ⇒ dead ⇒ `failInvocation` ⇒ retry ⇒ preflight 拦截 ⇒ 耗尽 ⇒ paused 并附原因。无一格需要 daemon / inline / cancel 改动。
+exec `unsettled` 退出后：daemon `onExit` → `probeExecutor`（pgid 探针）：
+
+- 残留在 **exec 自身进程组内**（例如 MCP server 的 D 态 / 异 uid 子进程）⇒ `descendants-alive` ⇒ 行保持 `running`，lease 持续续约，该任务不再触发，`maxRunMs` 后 daemon 只再强杀不落账；`cancel --kill` 会以 executorAlive / treeKillFailed 拒绝，**只能 `cancel --abandon` 放弃**。这是第七轮既有的 fail-closed hold，本设计只是把原本会写 `completed` 的成功 turn 也路由进去；残留 pid 只在 exec 日志里。
+- 残留在 **组外** ⇒ 探活 dead ⇒ `failInvocation` ⇒ retry ⇒ preflight：能再次发现的只有 env 可见的进程和上一任 exec 进程组里的进程；bash 工具登记的进程组是 exec 进程内的内存对象，不跨 attempt——macOS 上纯平台二进制、任何平台上的异 uid 残留在重试时不可见，turn 会重跑（最多 `retryBudget` 次），耗尽后 paused 的原因是 daemon 的通用「exec 进程退出 code=1」而不含 pid。
+
+无一格需要 daemon / inline / cancel 改动。
 
 ## 7. 平台边界与残余（写进用户文档）
 
@@ -115,10 +121,12 @@ exec `unsettled` 退出后：daemon `onExit` → `probeExecutor`（pgid 探针�
 - `env -i` 清空环境后 exec 的子进程不带标记，只能靠 B、C。
 - Windows：无法读其他进程 env，树退化为根进程（沿用启动身份），settle 不清场直接写终态，与今天一致；Job Object 留 v2。
 - `ps -E` 会读到同 uid 其他进程的 env，只在内存里匹配标记后丢弃（spec 2026-08-25 已记录同 uid 本就能读 0600 账本）。
+- macOS 的 `ps -o command= -E` 把 argv 与 env 打在同一列、仅以空格分隔，无法区分：任何同 uid 进程只要 argv 里含精确的 `ROLL_SCHEDULE_INVOCATION=<uuid>` 串（典型是操作员在 preflight/settle 窗口内 `grep` 该标记）就会被当作树成员终止。Linux 用 `/proc/<pid>/environ` 整条精确匹配，不受影响。若要收紧可再跑一次不带 `-E` 的 `ps` 剔除 argv 前缀，v1 记录为边界。
+- Linux 上 `readdirSync("/proc")` 与 `readFileSync(environ)` 没有超时；若系统里有持 mmap 锁的 D 态进程，settle 可能阻塞而不是 `unavailable`（macOS 的 `ps` 有 5 s 超时兜底）。需 Linux 实测，v1 记录为边界。
 
 ## 8. 决策记录
 
-- **fail-closed 而不是「写终态 + 告警」**：SIGKILL 后仍存活只剩 D 态 / 无权限两种，重试也杀不掉；preflight 拦截保证不会因此重跑 turn，任务最终 paused 并附 pid，操作员介入。代价：这种极罕见情况下成功的 turn 结果只在 thread 里、不在账本。
+- **fail-closed 而不是「写终态 + 告警」**：SIGKILL 后仍存活只剩 D 态 / 无权限两种，重试也杀不掉。终局取决于残留在哪（见 §6）：exec 自身组内 ⇒ 保持 running 直到操作员 `cancel --abandon`；组外且重试时可见 ⇒ preflight 拦截、耗尽后 paused；组外且不可见（macOS 平台二进制 / 异 uid）⇒ 最多重跑 `retryBudget` 次后 paused。代价：这些极罕见情况下成功的 turn 结果只在 thread 里、不在账本。
 - **grace 2 s 而非 `childTerminateGraceMs` 10 s**：残留物是后台进程，2 s 足够关 socket；总时长必须压在 daemon 的 10 s grace 之内。
 - **不删 `descendants-alive` / pgid 探针**：HEAD 上有 8 处刚过三轮反驳的用例围绕它；本设计是纯增量，探针语义不变。
 - **`teardownTree` 必填**：唯一调用方是 `schedule-exec.ts`，必填让遗漏在类型层暴露。
