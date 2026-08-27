@@ -720,3 +720,43 @@ test("工作目录不存在返回 spawnError", { skip }, async () => {
   );
   assert.ok(result.spawnError !== undefined);
 });
+
+test("runBashCommand 在 spawn 成功后把子进程交给 onSpawn", async () => {
+  const child = fakeExecChild({ exitOnKill: false });
+  const seen: ChildProcess[] = [];
+  const command = runBashCommand(
+    opts({
+      command: "true",
+      timeoutMs: 1_000,
+      onSpawn: (spawned) => {
+        seen.push(spawned);
+      },
+    }),
+    { spawn: spawnReturning(child), killTreeDeadlineMs: 50, rootKillSettleTimeoutMs: 10 },
+  );
+  queueMicrotask(() => child.emit("exit", 0, null));
+  await command;
+  assert.equal(seen.length, 1);
+  assert.equal(seen[0], child);
+});
+
+test("runBashCommand 在 spawn 未拿到 pid 时不回调 onSpawn", async () => {
+  const child = fakeExecChild({
+    exitOnKill: false,
+    started: false,
+    initialError: new Error("ENOENT"),
+  });
+  let called = 0;
+  const result = await runBashCommand(
+    opts({
+      command: "missing",
+      timeoutMs: 1_000,
+      onSpawn: () => {
+        called += 1;
+      },
+    }),
+    { spawn: spawnReturning(child), killTreeDeadlineMs: 50, rootKillSettleTimeoutMs: 10 },
+  );
+  assert.equal(called, 0);
+  assert.equal(result.spawnError, "ENOENT");
+});

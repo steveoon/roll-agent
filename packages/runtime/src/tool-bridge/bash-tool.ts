@@ -1,3 +1,4 @@
+import type { ChildProcess } from "node:child_process";
 import { resolve } from "node:path";
 import { tool, type ToolExecutionOptions, type ToolSet } from "ai";
 import { z } from "zod";
@@ -48,6 +49,7 @@ export interface SessionBashSettings {
   readonly maxModelOutputChars: number;
   readonly profile: ShellProfile;
   readonly env?: NodeJS.ProcessEnv;
+  readonly onCommandSpawn?: (child: ChildProcess) => void;
 }
 
 export interface BashToolContext extends ToolBridgeContext {
@@ -288,6 +290,7 @@ export function buildBashToolset(
               env: capturedState === "known-safe" ? withAutoApprovedShellEnv(shellEnv) : shellEnv,
               ...(options.abortSignal ? { abortSignal: options.abortSignal } : {}),
               ...(onDelta ? { onDelta } : {}),
+              ...(settings.onCommandSpawn ? { onSpawn: settings.onCommandSpawn } : {}),
             });
 
             return formatBashResult({

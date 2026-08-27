@@ -17,7 +17,11 @@ import type { LanguageModelV4CallOptions, LanguageModelV4StreamPart } from "@ai-
 import { ThreadStore } from "../store/thread-store.ts";
 import { DefaultToolPolicy } from "../policy/default-policy.ts";
 import type { SessionEvent } from "../types/events.ts";
-import { ConversationEngine, type AgentBootstrapIssue } from "./conversation-engine.ts";
+import {
+  ConversationEngine,
+  type AgentBootstrapIssue,
+  buildSessionBashSettings,
+} from "./conversation-engine.ts";
 import { CAPABILITY_HOST_MODES } from "./capability-manifest.ts";
 import type { ShellProfile } from "../bash/profile.ts";
 import { killProcessGroup } from "../bash/kill.ts";
@@ -4728,4 +4732,34 @@ test("resolveDynamicCapabilityContext 的 origin 会透传到 turn context", asy
   } finally {
     await engine.dispose();
   }
+});
+
+test("buildSessionBashSettings 只在提供 onCommandSpawn 时写入该字段", () => {
+  const config = rollConfigSchema.parse({
+    llm: {
+      defaultProvider: "mock",
+      defaultModel: "default-model",
+      providers: { mock: { apiKey: "test" } },
+    },
+    runtime: { model: "runtime-model" },
+    ask: {},
+    agents: { dataDir: "/tmp/roll-engine-test" },
+  });
+  const onCommandSpawn = () => {};
+  const withHook = buildSessionBashSettings({
+    config,
+    profile: powershellProfile,
+    env: { PATH: "/usr/bin" },
+    onCommandSpawn,
+  });
+  assert.equal(withHook.onCommandSpawn, onCommandSpawn);
+  assert.equal(withHook.profile, powershellProfile);
+  assert.deepEqual(withHook.env, { PATH: "/usr/bin" });
+  assert.equal(withHook.turnTimeoutMs, config.runtime.turnTimeoutMs);
+  const without = buildSessionBashSettings({
+    config,
+    profile: powershellProfile,
+    env: { PATH: "/usr/bin" },
+  });
+  assert.equal("onCommandSpawn" in without, false);
 });

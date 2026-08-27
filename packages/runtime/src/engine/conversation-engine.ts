@@ -1,3 +1,4 @@
+import type { ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import type { ModelMessage } from "ai";
 import type {
@@ -132,7 +133,28 @@ export interface ConversationEngineOptions {
     cwd: string,
   ) => CapabilityVcsSnapshot | undefined | Promise<CapabilityVcsSnapshot | undefined>;
   readonly shellEnv?: NodeJS.ProcessEnv;
+  readonly onShellCommandSpawn?: (child: ChildProcess) => void;
   readonly fileToolsEnabled?: boolean;
+}
+
+export function buildSessionBashSettings(input: {
+  readonly config: RollConfig;
+  readonly profile: ShellProfile;
+  readonly env: NodeJS.ProcessEnv;
+  readonly onCommandSpawn?: (child: ChildProcess) => void;
+}): SessionBashSettings {
+  const shell = input.config.runtime.shell;
+  return {
+    workdir: process.cwd(),
+    defaultTimeoutMs: shell.defaultTimeoutMs,
+    maxTimeoutMs: shell.maxTimeoutMs,
+    turnTimeoutMs: input.config.runtime.turnTimeoutMs,
+    maxCaptureBytes: shell.maxCaptureBytes,
+    maxModelOutputChars: shell.maxModelOutputChars,
+    profile: input.profile,
+    env: input.env,
+    ...(input.onCommandSpawn ? { onCommandSpawn: input.onCommandSpawn } : {}),
+  };
 }
 
 export interface CreateSessionInput {
@@ -386,6 +408,7 @@ export class ConversationEngine {
   private readonly resolveCatalogFn: typeof resolveAgentCatalog;
   private readonly inspectVcsContext: NonNullable<ConversationEngineOptions["inspectVcsContext"]>;
   private readonly shellEnv: NodeJS.ProcessEnv;
+  private readonly onShellCommandSpawn: ((child: ChildProcess) => void) | undefined;
   private ready: Promise<EngineContext> | undefined;
   private refreshChain: Promise<void> = Promise.resolve();
   private resolvedCatalog: readonly AgentCatalogEntry[] | undefined;
@@ -432,6 +455,7 @@ export class ConversationEngine {
     this.resolveCatalogFn = options.resolveCatalogFn ?? resolveAgentCatalog;
     this.inspectVcsContext = options.inspectVcsContext ?? inspectGitVcsContext;
     this.shellEnv = { ...(options.shellEnv ?? process.env) };
+    this.onShellCommandSpawn = options.onShellCommandSpawn;
   }
 
   private async acquireDefaultAgentUsage(
@@ -524,17 +548,12 @@ export class ConversationEngine {
   }
 
   private resolveShellSettings(profile: ShellProfile): SessionBashSettings {
-    const shell = this.config.runtime.shell;
-    return {
-      workdir: process.cwd(),
-      defaultTimeoutMs: shell.defaultTimeoutMs,
-      maxTimeoutMs: shell.maxTimeoutMs,
-      turnTimeoutMs: this.config.runtime.turnTimeoutMs,
-      maxCaptureBytes: shell.maxCaptureBytes,
-      maxModelOutputChars: shell.maxModelOutputChars,
+    return buildSessionBashSettings({
+      config: this.config,
       profile,
       env: this.shellEnv,
-    };
+      ...(this.onShellCommandSpawn ? { onCommandSpawn: this.onShellCommandSpawn } : {}),
+    });
   }
 
   private resolveSessionExecSettings(profile: ShellProfile): AgentSessionBashSession | undefined {
