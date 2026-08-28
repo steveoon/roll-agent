@@ -335,6 +335,7 @@ test("停止时 exec 根进程先退出但后代仍活，仍对捕获的进程�
     const daemon = new SchedulerDaemon({
       store,
       workerId: "w1",
+      platform: "linux",
       maxConcurrentRuns: 1,
       logger,
       childTerminateGraceMs: 20,
@@ -394,6 +395,7 @@ test("停止时无法读取 executor 账本则按 unknown fail-closed，不对 n
     const daemon = new SchedulerDaemon({
       store,
       workerId: "w1",
+      platform: "linux",
       maxConcurrentRuns: 1,
       logger,
       childTerminateGraceMs: 20,
@@ -444,6 +446,7 @@ test("停止时 root 已退出但 executor 探活仍报 alive，不对可能复�
     const daemon = new SchedulerDaemon({
       store,
       workerId: "w1",
+      platform: "linux",
       maxConcurrentRuns: 1,
       logger,
       childTerminateGraceMs: 20,
