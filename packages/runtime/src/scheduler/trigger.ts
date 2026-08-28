@@ -35,45 +35,71 @@ function isIntervalUnit(value: string): value is IntervalUnit {
   return Object.hasOwn(INTERVAL_UNIT_MS, value);
 }
 
-export function formatInterval(ms: number): string {
+export function formatDuration(ms: number): string {
   if (ms % INTERVAL_UNIT_MS.d === 0) {
-    return `每 ${String(ms / INTERVAL_UNIT_MS.d)} 天`;
+    return `${String(ms / INTERVAL_UNIT_MS.d)} 天`;
   }
   if (ms % INTERVAL_UNIT_MS.h === 0) {
-    return `每 ${String(ms / INTERVAL_UNIT_MS.h)} 小时`;
+    return `${String(ms / INTERVAL_UNIT_MS.h)} 小时`;
   }
   if (ms % INTERVAL_UNIT_MS.m === 0) {
-    return `每 ${String(ms / INTERVAL_UNIT_MS.m)} 分钟`;
+    return `${String(ms / INTERVAL_UNIT_MS.m)} 分钟`;
   }
-  return `每 ${String(Math.round(ms / INTERVAL_UNIT_MS.s))} 秒`;
+  return `${String(Math.round(ms / INTERVAL_UNIT_MS.s))} 秒`;
 }
 
-export function parseIntervalText(text: string): number {
+export function formatInterval(ms: number): string {
+  return `每 ${formatDuration(ms)}`;
+}
+
+interface DurationBounds {
+  readonly label: string;
+  readonly minMs: number;
+  readonly maxMs: number;
+}
+
+function parseDurationText(text: string, bounds: DurationBounds): number {
   const trimmed = text.trim();
   const match = INTERVAL_PATTERN.exec(trimmed);
   const digits = match?.[1];
   const unit = match?.[2];
   if (digits === undefined || unit === undefined || !isIntervalUnit(unit)) {
     throw new ScheduleTriggerError(
-      `无法识别的间隔 "${trimmed}"：格式为 <数字><s|m|h|d>，例如 30m、2h、1d`,
+      `无法识别的${bounds.label} "${trimmed}"：格式为 <数字><s|m|h|d>，例如 30m、2h、1d`,
     );
   }
   const value = Number.parseInt(digits, 10);
   if (value <= 0) {
-    throw new ScheduleTriggerError("间隔必须大于 0");
+    throw new ScheduleTriggerError(`${bounds.label}必须大于 0`);
   }
   const ms = value * INTERVAL_UNIT_MS[unit];
-  if (ms < SCHEDULER_LIMITS.minIntervalMs) {
+  if (ms < bounds.minMs) {
     throw new ScheduleTriggerError(
-      `间隔不能小于 ${String(SCHEDULER_LIMITS.minIntervalMs / INTERVAL_UNIT_MS.s)} 秒（收到 ${trimmed}）`,
+      `${bounds.label}不能小于 ${String(bounds.minMs / INTERVAL_UNIT_MS.s)} 秒（收到 ${trimmed}）`,
     );
   }
-  if (ms > SCHEDULER_LIMITS.maxIntervalMs) {
+  if (ms > bounds.maxMs) {
     throw new ScheduleTriggerError(
-      `间隔不能大于 ${String(SCHEDULER_LIMITS.maxIntervalMs / INTERVAL_UNIT_MS.d)} 天（收到 ${trimmed}）`,
+      `${bounds.label}不能大于 ${formatDuration(bounds.maxMs)}（收到 ${trimmed}）`,
     );
   }
   return ms;
+}
+
+export function parseIntervalText(text: string): number {
+  return parseDurationText(text, {
+    label: "间隔",
+    minMs: SCHEDULER_LIMITS.minIntervalMs,
+    maxMs: SCHEDULER_LIMITS.maxIntervalMs,
+  });
+}
+
+export function parseMaxRunText(text: string): number {
+  return parseDurationText(text, {
+    label: "单次运行上限",
+    minMs: SCHEDULER_LIMITS.minMaxRunMs,
+    maxMs: SCHEDULER_LIMITS.maxRunCeilingMs,
+  });
 }
 
 export function createIntervalTrigger(text: string): TriggerSpec {

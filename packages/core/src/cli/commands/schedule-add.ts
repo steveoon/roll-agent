@@ -23,6 +23,11 @@ export default defineCommand({
     name: { type: "string", description: "任务名称", required: true },
     every: { type: "string", description: "运行周期，如 30m、2h、1d（最短 60s）", required: true },
     cwd: { type: "string", description: "任务运行的工作目录（默认当前目录）" },
+    "max-run": {
+      type: "string",
+      description:
+        "单次运行时长上限，如 90m、6h（60s..24h；缺省 1h，超过后由 daemon 终止并按失败重试）",
+    },
     now: { type: "boolean", description: "登记后立即触发一次", default: false },
     json: { type: "boolean", description: "JSON 格式输出", default: false },
   },
@@ -51,6 +56,9 @@ export default defineCommand({
           trigger: runtime.createIntervalTrigger(args.every),
           fireImmediately: args.now,
           authorityDigest,
+          ...(args["max-run"] === undefined
+            ? {}
+            : { maxRunMs: runtime.parseMaxRunText(args["max-run"]) }),
         });
         const serialized = serializeSchedule(record);
         if (args.json) {
@@ -58,7 +66,7 @@ export default defineCommand({
           return;
         }
         log.success(
-          `已登记定时任务 ${record.name}（${serialized.trigger}），ID ${record.id}，下次运行 ${serialized.nextRunAt ?? "-"}`,
+          `已登记定时任务 ${record.name}（${serialized.trigger}${serialized.maxRun === undefined ? "" : `，单次上限 ${serialized.maxRun}`}），ID ${record.id}，下次运行 ${serialized.nextRunAt ?? "-"}`,
         );
         log.info("需要 roll schedule daemon 在运行才会触发；用 roll schedule status 查看。");
       } finally {

@@ -4,12 +4,16 @@ import { createBundledRollInvocation } from "../../companion-host/invocation.ts"
 import { inspectDaemon, DAEMON_LIVENESS } from "../../scheduler-host/daemon-record.ts";
 import {
   INLINE_EXIT_DECISIONS,
+  armInlineRunTimeout,
   createInlineStopForwarder,
-  settleInlineInvocation,
+  inlineProcessExitCode,
+  settleInlineAfterExit,
+  waitForInlineRootExit,
   type InlineExitDecision,
 } from "../../scheduler-host/inline-exit.ts";
 import { createSchedulerPaths } from "../../scheduler-host/paths.ts";
 import { createInvocationSpawner } from "../../scheduler-host/spawn-invocation.ts";
+import { tryWithSchedulerAdmissionLock } from "../../scheduler-host/scheduler-admission.ts";
 import { installStopSignals } from "../../scheduler-host/stop-signals.ts";
 import { log } from "../utils/output.ts";
 import {
@@ -21,8 +25,6 @@ import {
   serializeInvocation,
 } from "./schedule-command-utils.ts";
 
-const INLINE_SUCCESS_STATUSES: ReadonlySet<string> = new Set(["completed", "needs_confirmation"]);
-
 export default defineCommand({
   meta: {
     description:
@@ -32,7 +34,7 @@ export default defineCommand({
     id: { type: "positional", description: "定时任务 ID", required: true },
     inline: {
       type: "boolean",
-      description: "在当前进程内执行并等待结果（只尝试一次，不依赖 daemon）",
+      description: "在当前进程内执行并等待结果（只尝试一次，受任务 --max-run 限制，不依赖 daemon）",
       default: false,
     },
     json: { type: "boolean", description: "JSON 格式输出", default: false },
@@ -58,7 +60,18 @@ export default defineCommand({
           return;
         }
         const queued = store.enqueueManualInvocation(args.id, Date.now(), { maxAttempts: 1 });
-        const claim = store.claimPendingInvocation(queued.id, `inline-${String(process.pid)}`);
+        const admission = tryWithSchedulerAdmissionLock(paths.dataDir, () =>
+          store.claimPendingInvocation(queued.id, `inline-${String(process.pid)}`),
+        );
+        if (!admission.acquired) {
+          if (store.discardPendingInvocation(queued.id)) {
+            throw new Error("scheduler service 正在维护，未启动 inline invocation；请稍后重试");
+          }
+          throw new Error(
+            `invocation ${queued.id} 已被 daemon 接管，请用 roll schedule runs ${args.id} 查看`,
+          );
+        }
+        const claim = admission.value;
         if (claim === undefined) {
           const live = store.findLiveRun(args.id);
           if (store.discardPendingInvocation(queued.id) && live !== undefined) {
@@ -76,39 +89,59 @@ export default defineCommand({
           logPath: paths.logPath,
         })(claim);
         const forwarder = createInlineStopForwarder(handle);
+        const maxRunMs = claim.schedule.maxRunMs ?? runtime.SCHEDULER_LIMITS.maxRunMs;
+        let timeoutError: string | undefined;
+        let timedOutAtMs: number | undefined;
+        const clearRunTimeout = armInlineRunTimeout(maxRunMs, () => {
+          timedOutAtMs = Date.now();
+          timeoutError = `invocation ${claim.invocation.id} 运行超过 ${String(maxRunMs)} ms`;
+          log.warn(`${timeoutError}，请求 exec 停止并清理进程树`);
+          forwarder.forward();
+        });
         const stop = installStopSignals(forwarder.forward, forwarder.escalate);
         const renew = setInterval(() => {
           store.renewLease(claim.invocation.id, claim.ownershipToken);
         }, runtime.SCHEDULER_LIMITS.leaseRenewIntervalMs);
         let decision: InlineExitDecision | undefined;
         try {
-          let code: number | null;
           try {
-            code = await handle.exited;
+            const code = await waitForInlineRootExit(handle.exited, forwarder);
+            clearRunTimeout();
+            decision = await settleInlineAfterExit({
+              store,
+              forwarder,
+              invocationId: claim.invocation.id,
+              ownershipToken: claim.ownershipToken,
+              expectedAttempt: claim.invocation.attempt,
+              exitCode: code,
+              ...(timeoutError === undefined || timedOutAtMs === undefined
+                ? {}
+                : { timeoutError, timedOutAtMs }),
+            });
+          } catch (error) {
+            forwarder.seal();
+            throw error;
           } finally {
             clearInterval(renew);
-            forwarder.seal();
+            clearRunTimeout();
           }
-          decision = settleInlineInvocation({
-            store,
-            invocationId: claim.invocation.id,
-            ownershipToken: claim.ownershipToken,
-            killOutcome: forwarder.killOutcome(),
-            exitCode: code,
-          });
         } finally {
           stop.release();
         }
-        if (decision !== undefined && decision !== INLINE_EXIT_DECISIONS.fail) {
+        const final = store.getInvocation(queued.id);
+        if (final === undefined) {
+          throw new Error(`invocation ${queued.id} 不存在`);
+        }
+        if (
+          decision !== undefined &&
+          decision !== INLINE_EXIT_DECISIONS.fail &&
+          final.status === runtime.INVOCATION_STATUSES.running
+        ) {
           log.warn(
             decision === INLINE_EXIT_DECISIONS.holdUnconfirmedKill
               ? "exec 根进程已退出，但对其进程树的终止未被确认；保留 running，不释放单例（可用 roll schedule cancel --kill 收尾）"
               : "exec 根进程已退出，但其进程树仍有存活成员或无法探活；保留 running，不释放单例（可用 roll schedule cancel --kill 收尾）",
           );
-        }
-        const final = store.getInvocation(queued.id);
-        if (final === undefined) {
-          throw new Error(`invocation ${queued.id} 不存在`);
         }
         if (args.json) {
           printJson(serializeInvocation(final));
@@ -120,8 +153,9 @@ export default defineCommand({
         if (final.status === runtime.INVOCATION_STATUSES.needsConfirmation) {
           log.warn("本次执行有工具调用因无人值守被拒绝，详见 pendingActions。");
         }
-        if (!INLINE_SUCCESS_STATUSES.has(final.status)) {
-          process.exitCode = 1;
+        const exitCode = inlineProcessExitCode(final.status);
+        if (exitCode === 1) {
+          process.exitCode = exitCode;
         }
       } finally {
         store.close();

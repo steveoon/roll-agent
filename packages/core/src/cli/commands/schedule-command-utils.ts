@@ -1,5 +1,5 @@
 import type { InvocationRecord, ScheduleRecord } from "@roll-agent/runtime";
-import { describeTrigger } from "@roll-agent/runtime";
+import { describeTrigger, formatDuration } from "@roll-agent/runtime";
 import type { RollConfig } from "../../config/schema.ts";
 import { log } from "../utils/output.ts";
 import { loadRuntime, type RuntimeModule } from "../../runtime-host/engine-factory.ts";
@@ -77,6 +77,8 @@ export function serializeSchedule(record: ScheduleRecord) {
     lastRunAt: isoOrUndefined(record.lastRunAtMs),
     lastError: record.lastError,
     authorityDigest: record.authorityDigest,
+    maxRun: record.maxRunMs === undefined ? undefined : formatDuration(record.maxRunMs),
+    maxRunMs: record.maxRunMs,
     createdAt: new Date(record.createdAtMs).toISOString(),
   };
 }
@@ -152,7 +154,8 @@ export function liveRunHint(
 }
 
 export function formatScheduleLine(row: SerializedSchedule, hint?: ScheduleLiveRunHint): string {
-  const base = `${row.id}  ${row.status.padEnd(6)}  ${row.trigger.padEnd(10)}  next=${row.nextRunAt ?? "-"}  ${row.name}${row.lastError ? `  ⚠ ${row.lastError}` : ""}`;
+  const maxRun = row.maxRun === undefined ? "" : `max-run=${row.maxRun}  `;
+  const base = `${row.id}  ${row.status.padEnd(6)}  ${row.trigger.padEnd(10)}  next=${row.nextRunAt ?? "-"}  ${maxRun}${row.name}${row.lastError ? `  ⚠ ${row.lastError}` : ""}`;
   if (hint === undefined) {
     return base;
   }

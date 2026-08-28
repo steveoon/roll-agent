@@ -3,6 +3,7 @@ import { spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { resolveCommandName, shouldEnableSqliteForCommand } from "./roll-bootstrap.mjs";
 
 async function sqliteAvailable() {
   try {
@@ -28,17 +29,11 @@ function hasWarningSuppression() {
   );
 }
 
-function resolveCommandName(argv) {
-  return argv.find((arg) => !arg.startsWith("-"));
-}
-
-const SQLITE_COMMANDS = new Set(["chat", "schedule"]);
-
 const alreadyRespawned = process.env.ROLL_SQLITE_RESPAWNED === "1";
 delete process.env.ROLL_SQLITE_RESPAWNED;
 
 const commandName = resolveCommandName(process.argv.slice(2));
-const shouldEnableSqlite = SQLITE_COMMANDS.has(commandName);
+const shouldEnableSqlite = shouldEnableSqliteForCommand(commandName);
 const hasSqliteFlag = hasExecFlag("--experimental-sqlite");
 const needsSqliteFlag = shouldEnableSqlite && !hasSqliteFlag && !(await sqliteAvailable());
 const needsTypeStripFlag = sourceTreeAvailable() && !hasExecFlag("--experimental-strip-types");

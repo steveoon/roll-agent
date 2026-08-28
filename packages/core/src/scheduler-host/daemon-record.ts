@@ -13,6 +13,7 @@ export interface SchedulerDaemonRecord {
   readonly processStartToken: ProcessStartToken;
   readonly startedAt: string;
   readonly workerId: string;
+  readonly serviceGeneration?: string;
 }
 
 export const DAEMON_LIVENESS = {
@@ -57,14 +58,23 @@ function isRecordObject(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-export function createDaemonRecord(workerId: string): SchedulerDaemonRecord {
+export function createDaemonRecord(
+  workerId: string,
+  serviceGeneration?: string,
+): SchedulerDaemonRecord {
   const processStartToken = readProcessStartToken(process.pid);
   if (processStartToken === undefined) {
     throw new Error(
       `无法验证当前 Roll 进程 (PID: ${String(process.pid)}) 的 OS 启动身份，拒绝启动 scheduler daemon。`,
     );
   }
-  return { pid: process.pid, processStartToken, startedAt: new Date().toISOString(), workerId };
+  return {
+    pid: process.pid,
+    processStartToken,
+    startedAt: new Date().toISOString(),
+    workerId,
+    ...(serviceGeneration === undefined ? {} : { serviceGeneration }),
+  };
 }
 
 export function writeDaemonRecord(path: string, record: SchedulerDaemonRecord): void {
@@ -94,7 +104,9 @@ export function readDaemonRecord(path: string): SchedulerDaemonRecord | undefine
     value.pid <= 0 ||
     !isProcessStartToken(value.processStartToken) ||
     typeof value.startedAt !== "string" ||
-    typeof value.workerId !== "string"
+    typeof value.workerId !== "string" ||
+    (value.serviceGeneration !== undefined &&
+      (typeof value.serviceGeneration !== "string" || value.serviceGeneration.length === 0))
   ) {
     return undefined;
   }
@@ -103,6 +115,9 @@ export function readDaemonRecord(path: string): SchedulerDaemonRecord | undefine
     processStartToken: value.processStartToken,
     startedAt: value.startedAt,
     workerId: value.workerId,
+    ...(value.serviceGeneration === undefined
+      ? {}
+      : { serviceGeneration: value.serviceGeneration }),
   };
 }
 
@@ -143,4 +158,29 @@ export function inspectDaemon(path: string): DaemonInspection {
     return { liveness: DAEMON_LIVENESS.stopped, record };
   }
   return { liveness: DAEMON_LIVENESS.unverifiable, record };
+}
+
+export async function waitForDaemonGeneration(
+  path: string,
+  expectedGeneration: string,
+  options: { readonly timeoutMs?: number; readonly pollMs?: number } = {},
+): Promise<SchedulerDaemonRecord> {
+  const timeoutMs = options.timeoutMs ?? 15_000;
+  const pollMs = options.pollMs ?? 50;
+  const deadline = Date.now() + timeoutMs;
+  while (true) {
+    const inspection = inspectDaemon(path);
+    if (
+      inspection.liveness === DAEMON_LIVENESS.running &&
+      inspection.record?.serviceGeneration === expectedGeneration
+    ) {
+      return inspection.record;
+    }
+    if (Date.now() >= deadline) {
+      throw new Error(
+        `scheduler service daemon generation ${expectedGeneration} did not become ready within ${String(timeoutMs)} ms`,
+      );
+    }
+    await new Promise((resolve) => setTimeout(resolve, Math.min(pollMs, deadline - Date.now())));
+  }
 }

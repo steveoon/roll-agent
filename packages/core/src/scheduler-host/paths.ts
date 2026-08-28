@@ -4,6 +4,7 @@ import { join, resolve } from "node:path";
 export const SCHEDULER_SERVICE_LABEL = "dev.roll-agent.scheduler" as const;
 export const WINDOWS_SCHEDULER_TASK_NAME = "Roll Agent Scheduler" as const;
 export const SCHEDULER_DAEMON_LOCK_NAME = `${String.fromCharCode(0)}roll-scheduler-daemon`;
+export const SCHEDULER_ADMISSION_LOCK_NAME = `${String.fromCharCode(0)}roll-scheduler-admission`;
 export const SCHEDULE_TOKEN_ENV = "ROLL_SCHEDULE_OWNERSHIP_TOKEN";
 export const SCHEDULE_DATA_DIR_ENV = "ROLL_SCHEDULE_DATA_DIR";
 export const SCHEDULE_INVOCATION_ENV = "ROLL_SCHEDULE_INVOCATION";

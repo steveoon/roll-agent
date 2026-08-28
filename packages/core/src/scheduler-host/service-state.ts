@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, resolve } from "node:path";
+import { schedulerConfigSchema } from "../config/schema.ts";
 import { WINDOWS_SCHEDULER_TASK_NAME } from "./paths.ts";
 
 export const SCHEDULER_SERVICE_STATE_SCHEMA_VERSION = 1 as const;
@@ -12,11 +13,23 @@ export const SCHEDULER_SERVICE_STATE_PHASES = {
 export type SchedulerServiceStatePhase =
   (typeof SCHEDULER_SERVICE_STATE_PHASES)[keyof typeof SCHEDULER_SERVICE_STATE_PHASES];
 
-export interface SchedulerServiceState {
+export interface SchedulerServiceBinary {
+  readonly command: string;
+  readonly cliEntrypoint: string;
+  readonly rollVersion: string;
+}
+
+export interface SchedulerServiceStateSnapshot {
   readonly schemaVersion: typeof SCHEDULER_SERVICE_STATE_SCHEMA_VERSION;
   readonly phase: SchedulerServiceStatePhase;
   readonly dataDir: string;
   readonly maxConcurrentRuns: number;
+  readonly generation?: string;
+  readonly binary?: SchedulerServiceBinary;
+}
+
+export interface SchedulerServiceState extends SchedulerServiceStateSnapshot {
+  readonly replacementFrom?: SchedulerServiceStateSnapshot;
 }
 
 export type SchedulerServiceStateInspection =
@@ -36,25 +49,78 @@ function isRecordObject(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-function parseSchedulerServiceState(value: unknown): SchedulerServiceState | undefined {
+function isNonEmptyString(value: unknown): value is string {
+  return typeof value === "string" && value.trim().length > 0;
+}
+
+function parseSchedulerServiceBinary(
+  value: unknown,
+): { readonly binary?: SchedulerServiceBinary } | undefined {
+  if (value === undefined) {
+    return {};
+  }
+  if (
+    !isRecordObject(value) ||
+    !isNonEmptyString(value.command) ||
+    !isNonEmptyString(value.cliEntrypoint) ||
+    !isNonEmptyString(value.rollVersion) ||
+    !isAbsolute(value.command) ||
+    !isAbsolute(value.cliEntrypoint)
+  ) {
+    return undefined;
+  }
+  return {
+    binary: {
+      command: value.command.trim(),
+      cliEntrypoint: value.cliEntrypoint.trim(),
+      rollVersion: value.rollVersion.trim(),
+    },
+  };
+}
+
+function parseSchedulerServiceStateSnapshot(
+  value: unknown,
+): SchedulerServiceStateSnapshot | undefined {
   if (!isRecordObject(value)) {
     return undefined;
   }
+  const binary = parseSchedulerServiceBinary(value.binary);
+  const generation = value.generation;
+  const maxConcurrentRuns = schedulerConfigSchema.shape.maxConcurrentRuns.safeParse(
+    value.maxConcurrentRuns,
+  );
   return value.schemaVersion === SCHEDULER_SERVICE_STATE_SCHEMA_VERSION &&
     (value.phase === SCHEDULER_SERVICE_STATE_PHASES.installing ||
       value.phase === SCHEDULER_SERVICE_STATE_PHASES.installed) &&
     typeof value.dataDir === "string" &&
     isAbsolute(value.dataDir) &&
-    typeof value.maxConcurrentRuns === "number" &&
-    Number.isInteger(value.maxConcurrentRuns) &&
-    value.maxConcurrentRuns > 0
+    maxConcurrentRuns.success &&
+    (generation === undefined || isNonEmptyString(generation)) &&
+    binary !== undefined
     ? {
         schemaVersion: SCHEDULER_SERVICE_STATE_SCHEMA_VERSION,
         phase: value.phase,
         dataDir: resolve(value.dataDir),
-        maxConcurrentRuns: value.maxConcurrentRuns,
+        maxConcurrentRuns: maxConcurrentRuns.data,
+        ...(generation === undefined ? {} : { generation }),
+        ...binary,
       }
     : undefined;
+}
+
+function parseSchedulerServiceState(value: unknown): SchedulerServiceState | undefined {
+  const snapshot = parseSchedulerServiceStateSnapshot(value);
+  if (snapshot === undefined || !isRecordObject(value)) {
+    return undefined;
+  }
+  if (!("replacementFrom" in value) || value.replacementFrom === undefined) {
+    return snapshot;
+  }
+  if (snapshot.phase !== SCHEDULER_SERVICE_STATE_PHASES.installing) {
+    return undefined;
+  }
+  const replacementFrom = parseSchedulerServiceStateSnapshot(value.replacementFrom);
+  return replacementFrom === undefined ? undefined : { ...snapshot, replacementFrom };
 }
 
 export function windowsSchedulerServiceRecoveryHint(statePath: string): string {
@@ -134,13 +200,24 @@ export function writeSchedulerServiceState(path: string, state: SchedulerService
 
 export async function installSchedulerServiceWithState(
   path: string,
-  state: Omit<SchedulerServiceState, "phase">,
-  install: () => Promise<void>,
+  state: Omit<SchedulerServiceStateSnapshot, "phase" | "generation">,
+  install: (installing: SchedulerServiceState) => Promise<void>,
+  options: { readonly replacementFrom?: SchedulerServiceStateSnapshot } = {},
 ): Promise<SchedulerServiceState> {
-  const installing = { ...state, phase: SCHEDULER_SERVICE_STATE_PHASES.installing } as const;
+  const generation = randomUUID();
+  const installing = {
+    ...state,
+    phase: SCHEDULER_SERVICE_STATE_PHASES.installing,
+    generation,
+    ...(options.replacementFrom === undefined ? {} : { replacementFrom: options.replacementFrom }),
+  } as const;
   writeSchedulerServiceState(path, installing);
-  await install();
-  const installed = { ...state, phase: SCHEDULER_SERVICE_STATE_PHASES.installed } as const;
+  await install(installing);
+  const installed = {
+    ...state,
+    phase: SCHEDULER_SERVICE_STATE_PHASES.installed,
+    generation,
+  } as const;
   writeSchedulerServiceState(path, installed);
   return installed;
 }
@@ -155,7 +232,12 @@ export function removeSchedulerServiceState(
     current.state.schemaVersion !== expected.schemaVersion ||
     current.state.phase !== expected.phase ||
     current.state.dataDir !== resolve(expected.dataDir) ||
-    current.state.maxConcurrentRuns !== expected.maxConcurrentRuns
+    current.state.maxConcurrentRuns !== expected.maxConcurrentRuns ||
+    current.state.generation !== expected.generation ||
+    current.state.binary?.command !== expected.binary?.command ||
+    current.state.binary?.cliEntrypoint !== expected.binary?.cliEntrypoint ||
+    current.state.binary?.rollVersion !== expected.binary?.rollVersion ||
+    current.state.replacementFrom?.generation !== expected.replacementFrom?.generation
   ) {
     return false;
   }

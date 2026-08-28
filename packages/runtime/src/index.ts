@@ -106,8 +106,10 @@ export {
   computeNextRunAtMs,
   createIntervalTrigger,
   describeTrigger,
+  formatDuration,
   formatInterval,
   parseIntervalText,
+  parseMaxRunText,
   parseTriggerJson,
   triggerSpecSchema,
 } from "./scheduler/trigger.ts";

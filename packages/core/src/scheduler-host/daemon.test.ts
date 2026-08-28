@@ -3,8 +3,11 @@ import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import {
+  INVOCATION_FAILURE_OUTCOMES,
   INVOCATION_STATUSES,
+  INVOCATION_TREE_LIVENESS,
   SCHEDULE_STATUSES,
   ScheduleStore,
   createIntervalTrigger,
@@ -49,7 +52,12 @@ function silentLogger() {
   };
 }
 
-function addDueSchedule(store: ScheduleStore, name: string, nowMs: number = NOW) {
+function addDueSchedule(
+  store: ScheduleStore,
+  name: string,
+  nowMs: number = NOW,
+  options: { readonly maxRunMs?: number } = {},
+) {
   return store.createSchedule(
     {
       name,
@@ -57,6 +65,7 @@ function addDueSchedule(store: ScheduleStore, name: string, nowMs: number = NOW)
       cwd: "/workspace",
       trigger: createIntervalTrigger("30m"),
       fireImmediately: true,
+      ...(options.maxRunMs === undefined ? {} : { maxRunMs: options.maxRunMs }),
     },
     nowMs,
   );
@@ -94,6 +103,35 @@ test("tick 为到期任务 spawn 子进程，子进程完成后 invocation 完�
     assert.equal(daemon.runningCount, 0);
     assert.equal(store.listInvocations(schedule.id)[0]?.status, INVOCATION_STATUSES.completed);
     assert.equal(daemon.tick(), 0);
+    store.close();
+  } finally {
+    removeTempDir(dir);
+  }
+});
+
+test("tick 在 claim admission 被 service maintenance 挡住时不领取到期任务", () => {
+  const dir = tempDir();
+  try {
+    const store = new ScheduleStore(dir);
+    addDueSchedule(store, "blocked");
+    const { logger } = silentLogger();
+    let spawned = false;
+    const daemon = new SchedulerDaemon({
+      store,
+      workerId: "w1",
+      maxConcurrentRuns: 1,
+      logger,
+      now: () => NOW,
+      claimDue: () => undefined,
+      spawnInvocation: () => {
+        spawned = true;
+        return { exited: Promise.resolve(0), kill: () => undefined };
+      },
+    });
+
+    assert.equal(daemon.tick(), 0);
+    assert.equal(spawned, false);
+    assert.equal(store.listActiveWorkerInvocations().length, 0);
     store.close();
   } finally {
     removeTempDir(dir);
@@ -285,10 +323,169 @@ test("停止时先 SIGTERM，超过 grace 仍未退出则 SIGKILL", async () => 
   }
 });
 
-test("POSIX 子进程运行超过 maxRunMs 时先 SIGTERM，grace 后才 SIGKILL", async () => {
+test("停止时 exec 根进程先退出但后代仍活，仍对捕获的进程树升级 SIGKILL", async () => {
+  const dir = tempDir();
+  try {
+    let liveness: "alive" | "descendants-alive" | "dead" = "alive";
+    const store = new ScheduleStore(dir, { executorLiveness: () => liveness });
+    const schedule = addDueSchedule(store, "descendants");
+    const { logger } = silentLogger();
+    const signals: string[] = [];
+    const exit = Promise.withResolvers<number | null>();
+    const daemon = new SchedulerDaemon({
+      store,
+      workerId: "w1",
+      maxConcurrentRuns: 1,
+      logger,
+      childTerminateGraceMs: 20,
+      spawnInvocation: (claim) => {
+        store.beginInvocation(claim.invocation.id, claim.ownershipToken, Date.now(), {
+          pid: 4242,
+          startToken: "pst-v2:descendants",
+        });
+        return {
+          exited: exit.promise,
+          kill: (signal) => {
+            signals.push(signal);
+            if (signal === "SIGTERM") {
+              liveness = "descendants-alive";
+              exit.resolve(null);
+            } else {
+              liveness = "dead";
+            }
+            return "tree-terminated";
+          },
+        };
+      },
+    });
+    const stop = new AbortController();
+    const running = daemon.run(stop.signal);
+    const deadline = Date.now() + 1_000;
+    while (daemon.runningCount === 0 && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+    stop.abort();
+    await running;
+    assert.deepEqual(signals, ["SIGTERM", "SIGKILL"]);
+    assert.equal(store.listActiveWorkerInvocations().length, 0);
+    assert.equal(store.listInvocations(schedule.id)[0]?.status, "retry");
+    store.close();
+  } finally {
+    removeTempDir(dir);
+  }
+});
+
+test("停止时无法读取 executor 账本则按 unknown fail-closed，不对 numeric PGID 发 SIGKILL", async () => {
   const dir = tempDir();
   try {
     const store = new ScheduleStore(dir);
+    const schedule = addDueSchedule(store, "unreadable-tree");
+    const { logger } = silentLogger();
+    const signals: string[] = [];
+    const exit = Promise.withResolvers<number | null>();
+    const originalGetInvocation = store.getInvocation.bind(store);
+    let readsFail = false;
+    store.getInvocation = (id) => {
+      if (readsFail) {
+        throw new Error("ledger temporarily unavailable");
+      }
+      return originalGetInvocation(id);
+    };
+    const daemon = new SchedulerDaemon({
+      store,
+      workerId: "w1",
+      maxConcurrentRuns: 1,
+      logger,
+      childTerminateGraceMs: 20,
+      spawnInvocation: (claim) => {
+        store.beginInvocation(claim.invocation.id, claim.ownershipToken, Date.now(), {
+          pid: 4242,
+          startToken: "pst-v2:unreadable",
+        });
+        return {
+          exited: exit.promise,
+          kill: (signal) => {
+            signals.push(signal);
+            if (signal === "SIGTERM") {
+              readsFail = true;
+              exit.resolve(null);
+            }
+            return "tree-terminated";
+          },
+        };
+      },
+    });
+    const stop = new AbortController();
+    const running = daemon.run(stop.signal);
+    const deadline = Date.now() + 1_000;
+    while (daemon.runningCount === 0 && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+    stop.abort();
+    await running;
+    readsFail = false;
+
+    assert.deepEqual(signals, ["SIGTERM"]);
+    assert.equal(store.listInvocations(schedule.id)[0]?.status, INVOCATION_STATUSES.running);
+    store.close();
+  } finally {
+    removeTempDir(dir);
+  }
+});
+
+test("停止时 root 已退出但 executor 探活仍报 alive，不对可能复用的 numeric PGID 发 SIGKILL", async () => {
+  const dir = tempDir();
+  try {
+    const store = new ScheduleStore(dir, { executorLiveness: () => "alive" });
+    const schedule = addDueSchedule(store, "alive-after-root-exit");
+    const { logger } = silentLogger();
+    const signals: string[] = [];
+    const exit = Promise.withResolvers<number | null>();
+    const daemon = new SchedulerDaemon({
+      store,
+      workerId: "w1",
+      maxConcurrentRuns: 1,
+      logger,
+      childTerminateGraceMs: 20,
+      spawnInvocation: (claim) => {
+        store.beginInvocation(claim.invocation.id, claim.ownershipToken, Date.now(), {
+          pid: 4242,
+          startToken: "pst-v2:alive-after-exit",
+        });
+        return {
+          exited: exit.promise,
+          kill: (signal) => {
+            signals.push(signal);
+            if (signal === "SIGTERM") {
+              exit.resolve(null);
+            }
+            return "tree-terminated";
+          },
+        };
+      },
+    });
+    const stop = new AbortController();
+    const running = daemon.run(stop.signal);
+    const deadline = Date.now() + 1_000;
+    while (daemon.runningCount === 0 && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+    stop.abort();
+    await running;
+
+    assert.deepEqual(signals, ["SIGTERM"]);
+    assert.equal(store.listInvocations(schedule.id)[0]?.status, INVOCATION_STATUSES.running);
+    store.close();
+  } finally {
+    removeTempDir(dir);
+  }
+});
+
+test("POSIX 子进程运行超过 maxRunMs 时先 SIGTERM，grace 后才 SIGKILL", async () => {
+  const dir = tempDir();
+  try {
+    let liveness: "alive" | "dead" = "alive";
+    const store = new ScheduleStore(dir, { executorLiveness: () => liveness });
     const schedule = addDueSchedule(store, "a", Date.now());
     const { logger, lines } = silentLogger();
     const signals: string[] = [];
@@ -301,13 +498,17 @@ test("POSIX 子进程运行超过 maxRunMs 时先 SIGTERM，grace 后才 SIGKILL
       maxRunMs: 20,
       childTerminateGraceMs: 20,
       spawnInvocation: (claim): SpawnedInvocation => {
-        store.beginInvocation(claim.invocation.id, claim.ownershipToken, Date.now());
+        store.beginInvocation(claim.invocation.id, claim.ownershipToken, Date.now(), {
+          pid: 4242,
+          startToken: "pst-v2:max-run",
+        });
         const exit = Promise.withResolvers<number | null>();
         return {
           exited: exit.promise,
           kill: (signal = "SIGTERM") => {
             signals.push(signal);
             if (signal === "SIGKILL") {
+              liveness = "dead";
               exit.resolve(null);
             }
           },
@@ -315,10 +516,14 @@ test("POSIX 子进程运行超过 maxRunMs 时先 SIGTERM，grace 后才 SIGKILL
       },
     });
     assert.equal(daemon.tick(), 1);
-    await new Promise((resolve) => setTimeout(resolve, 80));
+    const deadline = Date.now() + 1_000;
+    while ((signals.length < 2 || daemon.runningCount !== 0) && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
     assert.deepEqual(signals, ["SIGTERM", "SIGKILL"]);
     assert.equal(daemon.runningCount, 0);
     assert.equal(store.listInvocations(schedule.id)[0]?.status, INVOCATION_STATUSES.retry);
+    assert.match(store.listInvocations(schedule.id)[0]?.error ?? "", /运行超过/u);
     assert.ok(lines.some((line) => /运行超过/u.test(line)));
     store.close();
   } finally {
@@ -361,6 +566,329 @@ test("POSIX maxRun SIGTERM 期间完成协作清理时取消迟到的 SIGKILL", 
 
     assert.deepEqual(signals, ["SIGTERM"]);
     assert.equal(daemon.runningCount, 0);
+    store.close();
+  } finally {
+    removeTempDir(dir);
+  }
+});
+
+test("POSIX maxRun 后 root 先退出但明确 descendants-alive，仍对捕获树升级 SIGKILL 后结算", async () => {
+  const dir = tempDir();
+  try {
+    let liveness: "alive" | "descendants-alive" | "dead" = "alive";
+    const store = new ScheduleStore(dir, { retryBudget: 1, executorLiveness: () => liveness });
+    const schedule = addDueSchedule(store, "max-run-descendants", Date.now());
+    const { logger } = silentLogger();
+    const signals: string[] = [];
+    const daemon = new SchedulerDaemon({
+      store,
+      workerId: "w1",
+      maxConcurrentRuns: 1,
+      logger,
+      platform: "linux",
+      maxRunMs: 20,
+      childTerminateGraceMs: 20,
+      spawnInvocation: (claim): SpawnedInvocation => {
+        store.beginInvocation(claim.invocation.id, claim.ownershipToken, Date.now(), {
+          pid: 4242,
+          startToken: "pst-v2:max-run-descendants",
+        });
+        const exit = Promise.withResolvers<number | null>();
+        return {
+          exited: exit.promise,
+          kill: (signal = "SIGTERM") => {
+            signals.push(signal);
+            if (signal === "SIGTERM") {
+              liveness = "descendants-alive";
+              exit.resolve(null);
+            } else {
+              liveness = "dead";
+            }
+            return "tree-terminated";
+          },
+        };
+      },
+    });
+
+    assert.equal(daemon.tick(), 1);
+    const deadline = Date.now() + 1_000;
+    while (
+      (signals.length < 2 ||
+        store.listInvocations(schedule.id)[0]?.status === INVOCATION_STATUSES.running) &&
+      Date.now() < deadline
+    ) {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+
+    assert.deepEqual(signals, ["SIGTERM", "SIGKILL"]);
+    assert.equal(store.listInvocations(schedule.id)[0]?.status, INVOCATION_STATUSES.failed);
+    store.close();
+  } finally {
+    removeTempDir(dir);
+  }
+});
+
+test("daemon max-run 后 exec 迟到写 completed，scheduled 仍按预算转 retry", async () => {
+  const dir = tempDir();
+  try {
+    const store = new ScheduleStore(dir, { retryBudget: 2, retryBackoffMs: 1 });
+    const schedule = addDueSchedule(store, "late-completed", Date.now());
+    const { logger } = silentLogger();
+    const signals: string[] = [];
+    const daemon = new SchedulerDaemon({
+      store,
+      workerId: "w1",
+      maxConcurrentRuns: 1,
+      logger,
+      platform: "linux",
+      maxRunMs: 20,
+      childTerminateGraceMs: 30,
+      spawnInvocation: (claim): SpawnedInvocation => {
+        store.beginInvocation(claim.invocation.id, claim.ownershipToken, Date.now());
+        const exit = Promise.withResolvers<number | null>();
+        return {
+          exited: exit.promise,
+          kill: (signal = "SIGTERM") => {
+            signals.push(signal);
+            if (signal === "SIGTERM") {
+              store.completeInvocation({
+                id: claim.invocation.id,
+                ownershipToken: claim.ownershipToken,
+                status: INVOCATION_STATUSES.completed,
+                nowMs: Date.now(),
+              });
+              exit.resolve(0);
+            }
+            return "tree-terminated";
+          },
+        };
+      },
+    });
+
+    assert.equal(daemon.tick(), 1);
+    const deadline = Date.now() + 1_000;
+    while (daemon.runningCount !== 0 && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+
+    assert.deepEqual(signals, ["SIGTERM"]);
+    assert.equal(store.listInvocations(schedule.id)[0]?.status, INVOCATION_STATUSES.retry);
+    assert.equal(store.getSchedule(schedule.id)?.status, SCHEDULE_STATUSES.active);
+    store.close();
+  } finally {
+    removeTempDir(dir);
+  }
+});
+
+test("daemon timeout 回调后迟到收到退出事件时保留超时前写入的 completed", async () => {
+  const dir = tempDir();
+  try {
+    const store = new ScheduleStore(dir, { retryBudget: 1 });
+    const schedule = addDueSchedule(store, "on-time-completed", Date.now());
+    const { logger } = silentLogger();
+    const signals: string[] = [];
+    const daemon = new SchedulerDaemon({
+      store,
+      workerId: "w1",
+      maxConcurrentRuns: 1,
+      logger,
+      platform: "linux",
+      maxRunMs: 20,
+      childTerminateGraceMs: 30,
+      spawnInvocation: (claim): SpawnedInvocation => {
+        store.beginInvocation(claim.invocation.id, claim.ownershipToken, Date.now());
+        const exit = Promise.withResolvers<number | null>();
+        setTimeout(() => {
+          store.completeInvocation({
+            id: claim.invocation.id,
+            ownershipToken: claim.ownershipToken,
+            status: INVOCATION_STATUSES.completed,
+            nowMs: Date.now(),
+            threadId: "on-time-thread",
+          });
+        }, 5);
+        return {
+          exited: exit.promise,
+          kill: (signal = "SIGTERM") => {
+            signals.push(signal);
+            if (signal === "SIGTERM") {
+              exit.resolve(0);
+            }
+            return "tree-terminated";
+          },
+        };
+      },
+    });
+
+    assert.equal(daemon.tick(), 1);
+    const deadline = Date.now() + 1_000;
+    while (daemon.runningCount !== 0 && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+
+    assert.deepEqual(signals, ["SIGTERM"]);
+    assert.equal(store.listInvocations(schedule.id)[0]?.status, INVOCATION_STATUSES.completed);
+    assert.equal(store.listInvocations(schedule.id)[0]?.threadId, "on-time-thread");
+    assert.equal(store.getSchedule(schedule.id)?.status, SCHEDULE_STATUSES.active);
+    store.close();
+  } finally {
+    removeTempDir(dir);
+  }
+});
+
+test("daemon max-run 后 exec 迟到写 needs_confirmation，scheduled 预算耗尽仍 failed 并 pause", async () => {
+  const dir = tempDir();
+  try {
+    const store = new ScheduleStore(dir, { retryBudget: 1 });
+    const schedule = addDueSchedule(store, "late-confirmation", Date.now());
+    const { logger } = silentLogger();
+    const daemon = new SchedulerDaemon({
+      store,
+      workerId: "w1",
+      maxConcurrentRuns: 1,
+      logger,
+      platform: "linux",
+      maxRunMs: 20,
+      childTerminateGraceMs: 30,
+      spawnInvocation: (claim): SpawnedInvocation => {
+        store.beginInvocation(claim.invocation.id, claim.ownershipToken, Date.now());
+        const exit = Promise.withResolvers<number | null>();
+        return {
+          exited: exit.promise,
+          kill: (signal = "SIGTERM") => {
+            if (signal === "SIGTERM") {
+              store.completeInvocation({
+                id: claim.invocation.id,
+                ownershipToken: claim.ownershipToken,
+                status: INVOCATION_STATUSES.needsConfirmation,
+                pendingActions: ["agent.tool"],
+                nowMs: Date.now(),
+              });
+              exit.resolve(0);
+            }
+            return "tree-terminated";
+          },
+        };
+      },
+    });
+
+    assert.equal(daemon.tick(), 1);
+    const deadline = Date.now() + 1_000;
+    while (daemon.runningCount !== 0 && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+
+    assert.equal(store.listInvocations(schedule.id)[0]?.status, INVOCATION_STATUSES.failed);
+    assert.equal(store.getSchedule(schedule.id)?.status, SCHEDULE_STATUSES.paused);
+    store.close();
+  } finally {
+    removeTempDir(dir);
+  }
+});
+
+test("daemon max-run 后 manual 迟到成功按自身 maxAttempts 失败，不 pause schedule", async () => {
+  const dir = tempDir();
+  try {
+    const store = new ScheduleStore(dir);
+    const schedule = store.createSchedule(
+      {
+        name: "manual-late-success",
+        prompt: "p",
+        cwd: "/workspace",
+        trigger: createIntervalTrigger("30m"),
+      },
+      Date.now(),
+    );
+    store.enqueueManualInvocation(schedule.id, Date.now(), { maxAttempts: 1 });
+    const { logger } = silentLogger();
+    const daemon = new SchedulerDaemon({
+      store,
+      workerId: "w1",
+      maxConcurrentRuns: 1,
+      logger,
+      platform: "linux",
+      maxRunMs: 20,
+      childTerminateGraceMs: 30,
+      spawnInvocation: (claim): SpawnedInvocation => {
+        store.beginInvocation(claim.invocation.id, claim.ownershipToken, Date.now());
+        const exit = Promise.withResolvers<number | null>();
+        return {
+          exited: exit.promise,
+          kill: (signal = "SIGTERM") => {
+            if (signal === "SIGTERM") {
+              store.completeInvocation({
+                id: claim.invocation.id,
+                ownershipToken: claim.ownershipToken,
+                status: INVOCATION_STATUSES.completed,
+                nowMs: Date.now(),
+              });
+              exit.resolve(0);
+            }
+            return "tree-terminated";
+          },
+        };
+      },
+    });
+
+    assert.equal(daemon.tick(), 1);
+    const deadline = Date.now() + 1_000;
+    while (daemon.runningCount !== 0 && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+
+    assert.equal(store.listInvocations(schedule.id)[0]?.status, INVOCATION_STATUSES.failed);
+    assert.equal(store.getSchedule(schedule.id)?.status, SCHEDULE_STATUSES.active);
+    store.close();
+  } finally {
+    removeTempDir(dir);
+  }
+});
+
+test("daemon timeout CAS 返回 tree-unsettled 时释放 host entry，保留 running 账本", async () => {
+  const dir = tempDir();
+  try {
+    const store = new ScheduleStore(dir, { executorLiveness: () => "unknown" });
+    const schedule = addDueSchedule(store, "timeout-tree-unsettled", Date.now());
+    store.reclassifyTimedOutInvocation = () => INVOCATION_FAILURE_OUTCOMES.treeUnsettled;
+    const { logger, lines } = silentLogger();
+    const signals: string[] = [];
+    const daemon = new SchedulerDaemon({
+      store,
+      workerId: "w1",
+      maxConcurrentRuns: 1,
+      logger,
+      platform: "linux",
+      maxRunMs: 20,
+      childTerminateGraceMs: 20,
+      spawnInvocation: (claim): SpawnedInvocation => {
+        store.beginInvocation(claim.invocation.id, claim.ownershipToken, Date.now(), {
+          pid: 4242,
+          startToken: "pst-v2:timeout-tree-unsettled",
+        });
+        const exit = Promise.withResolvers<number | null>();
+        return {
+          exited: exit.promise,
+          kill: (signal = "SIGTERM") => {
+            signals.push(signal);
+            if (signal === "SIGTERM") {
+              exit.resolve(null);
+            }
+            return "tree-terminated";
+          },
+        };
+      },
+    });
+
+    assert.equal(daemon.tick(), 1);
+    await new Promise((resolve) => setTimeout(resolve, 80));
+
+    assert.deepEqual(signals, ["SIGTERM"]);
+    assert.equal(daemon.runningCount, 0, lines.join("\n"));
+    assert.equal(store.listInvocations(schedule.id)[0]?.status, INVOCATION_STATUSES.running);
+    assert.equal(
+      lines.some((line) => /已按失败重分类/u.test(line)),
+      false,
+    );
     store.close();
   } finally {
     removeTempDir(dir);
@@ -624,12 +1152,17 @@ test("Store 未注入探针时 daemon 对已记录 executor 的退出保持 fail
   }
 });
 
-test("exec 已死但登记树未清时 daemon onExit 不 pause、行保持 running", async () => {
+test("exec 已死但登记树未清时 daemon onExit 释放 host entry，停止续租后 Store 可复核并结算", async () => {
   const dir = tempDir();
   try {
+    let now = NOW;
+    let treeLiveness:
+      | typeof INVOCATION_TREE_LIVENESS.unsettled
+      | typeof INVOCATION_TREE_LIVENESS.settled = INVOCATION_TREE_LIVENESS.unsettled;
     const store = new ScheduleStore(dir, {
       retryBudget: 1,
       executorLiveness: () => "dead",
+      treeLiveness: () => treeLiveness,
     });
     const schedule = addDueSchedule(store, "a");
     const { logger, lines } = silentLogger();
@@ -639,7 +1172,7 @@ test("exec 已死但登记树未清时 daemon onExit 不 pause、行保持 runni
       workerId: "w1",
       maxConcurrentRuns: 1,
       logger,
-      now: () => NOW,
+      now: () => now,
       spawnInvocation: (claim): SpawnedInvocation => {
         store.beginInvocation(claim.invocation.id, claim.ownershipToken, NOW, {
           pid: 4242,
@@ -662,6 +1195,17 @@ test("exec 已死但登记树未清时 daemon onExit 不 pause、行保持 runni
     assert.equal(row?.status, INVOCATION_STATUSES.running);
     assert.equal(store.getSchedule(schedule.id)?.status, SCHEDULE_STATUSES.active);
     assert.ok(lines.some((line) => /登记的进程树未清干净/u.test(line)));
+    assert.equal(daemon.runningCount, 0);
+    const leaseUntilMs = row?.leaseUntilMs;
+    assert.ok(leaseUntilMs !== undefined);
+    now = leaseUntilMs - 1;
+    assert.equal(daemon.tick(), 0);
+    assert.equal(store.getInvocation(row?.id ?? "")?.leaseUntilMs, leaseUntilMs);
+    now = leaseUntilMs + 1;
+    treeLiveness = INVOCATION_TREE_LIVENESS.settled;
+    const reclaimed = store.claimDue({ workerId: "w2", nowMs: now, limit: 1 });
+    assert.deepEqual(reclaimed, []);
+    assert.equal(store.getInvocation(row?.id ?? "")?.status, INVOCATION_STATUSES.failed);
     store.close();
   } finally {
     removeTempDir(dir);
@@ -900,6 +1444,220 @@ test("紧急停止时子进程在 settle 窗口内未退出：释放 daemon 但�
     assert.equal(daemon.runningCount, 0);
     assert.equal(store.listInvocations(schedule.id)[0]?.status, INVOCATION_STATUSES.running);
     assert.ok(lines.some((line) => /退出未确认/u.test(line)));
+    store.close();
+  } finally {
+    removeTempDir(dir);
+  }
+});
+
+test("任务自带 maxRunMs 时按任务上限而不是 daemon 全局上限触发超时", async () => {
+  const dir = tempDir();
+  try {
+    let liveness: "alive" | "dead" = "alive";
+    const store = new ScheduleStore(dir, { executorLiveness: () => liveness });
+    const schedule = addDueSchedule(store, "long", Date.now(), { maxRunMs: 60_000 });
+    const { logger, lines } = silentLogger();
+    const signals: string[] = [];
+    const daemon = new SchedulerDaemon({
+      store,
+      workerId: "w1",
+      maxConcurrentRuns: 1,
+      logger,
+      platform: "linux",
+      maxRunMs: 120_000,
+      maxTimerDelayMs: 20,
+      childTerminateGraceMs: 20,
+      spawnInvocation: (claim): SpawnedInvocation => {
+        store.beginInvocation(claim.invocation.id, claim.ownershipToken, Date.now(), {
+          pid: 4242,
+          startToken: "pst-v2:task-max-run",
+        });
+        const exit = Promise.withResolvers<number | null>();
+        return {
+          exited: exit.promise,
+          kill: (signal = "SIGTERM") => {
+            signals.push(signal);
+            if (signal === "SIGKILL") {
+              liveness = "dead";
+              exit.resolve(null);
+            }
+          },
+        };
+      },
+    });
+    assert.equal(daemon.tick(), 1);
+    assert.ok(lines.some((line) => /触发 long/u.test(line) && /max-run=60000 ms/u.test(line)));
+    await new Promise((resolve) => setTimeout(resolve, 80));
+    assert.deepEqual(signals, ["SIGTERM", "SIGKILL"]);
+    assert.equal(daemon.runningCount, 0);
+    assert.equal(store.listInvocations(schedule.id)[0]?.status, INVOCATION_STATUSES.retry);
+    assert.ok(lines.some((line) => /运行超过 60000 ms/u.test(line)));
+    store.close();
+  } finally {
+    removeTempDir(dir);
+  }
+});
+
+test("超时孤儿清理同样按任务 maxRunMs 判断，未超过任务上限的孤儿不动", () => {
+  const dir = tempDir();
+  try {
+    const store = new ScheduleStore(dir, { executorLiveness: () => "alive" });
+    addDueSchedule(store, "long", NOW, { maxRunMs: 300_000 });
+    const claim = store.claimDue({ workerId: "old-daemon", nowMs: NOW, limit: 1 })[0];
+    assert.ok(claim);
+    store.beginInvocation(claim.invocation.id, claim.ownershipToken, NOW, {
+      pid: 4242,
+      startToken: "pst-v2:orphan",
+    });
+    const { logger } = silentLogger();
+    const signals: NodeJS.Signals[] = [];
+    const daemon = new SchedulerDaemon({
+      store,
+      workerId: "w1",
+      maxConcurrentRuns: 1,
+      logger,
+      platform: "linux",
+      now: () => NOW + 120_000,
+      maxRunMs: 60_000,
+      childTerminateGraceMs: 10,
+      terminateExecutor: (_executor, signal) => {
+        signals.push(signal);
+        return "tree-terminated";
+      },
+      spawnInvocation: () => ({ exited: Promise.resolve(0), kill: () => undefined }),
+    });
+    assert.equal(daemon.tick(), 0);
+    assert.deepEqual(signals, []);
+    store.close();
+  } finally {
+    removeTempDir(dir);
+  }
+});
+
+test("读取任务 cap 失败时孤儿清理 fail-closed，不用 daemon 默认值提前终止", () => {
+  const dir = tempDir();
+  try {
+    const store = new ScheduleStore(dir, { executorLiveness: () => "alive" });
+    const schedule = addDueSchedule(store, "long", NOW, { maxRunMs: 21_600_000 });
+    const claim = store.claimDue({ workerId: "old-daemon", nowMs: NOW, limit: 1 })[0];
+    assert.ok(claim);
+    store.beginInvocation(claim.invocation.id, claim.ownershipToken, NOW, {
+      pid: 4242,
+      startToken: "pst-v2:orphan",
+    });
+
+    const corrupt = new DatabaseSync(join(dir, "schedules.db"));
+    corrupt
+      .prepare("UPDATE schedules SET trigger_json = ? WHERE id = ?")
+      .run('{"kind":"interval","everyMs":"broken"}', schedule.id);
+    corrupt.close();
+
+    const { logger, lines } = silentLogger();
+    const signals: NodeJS.Signals[] = [];
+    const daemon = new SchedulerDaemon({
+      store,
+      workerId: "w1",
+      maxConcurrentRuns: 1,
+      logger,
+      platform: "linux",
+      now: () => NOW + 7_200_000,
+      maxRunMs: 3_600_000,
+      childTerminateGraceMs: 10,
+      terminateExecutor: (_executor, signal) => {
+        signals.push(signal);
+        return "tree-terminated";
+      },
+      spawnInvocation: () => ({ exited: Promise.resolve(0), kill: () => undefined }),
+    });
+
+    assert.equal(daemon.tick(), 0);
+    assert.equal(daemon.tick(), 0);
+    assert.deepEqual(signals, []);
+    assert.equal(
+      lines.filter(
+        (line) =>
+          /\u8bfb\u53d6 schedule/u.test(line) &&
+          /\u8fd0\u884c\u4e0a\u9650\u5931\u8d25/u.test(line) &&
+          /\u8df3\u8fc7\u5b64\u513f\u6e05\u7406/u.test(line),
+      ).length,
+      1,
+    );
+    assert.equal(store.getInvocation(claim.invocation.id)?.status, INVOCATION_STATUSES.running);
+    store.close();
+  } finally {
+    removeTempDir(dir);
+  }
+});
+
+test("orphan 对应的 schedule 缺失时 cap 未知，fail-closed 不回退 daemon 默认值", () => {
+  const dir = tempDir();
+  try {
+    const store = new ScheduleStore(dir, { executorLiveness: () => "alive" });
+    const schedule = addDueSchedule(store, "missing", NOW, { maxRunMs: 21_600_000 });
+    const claim = store.claimDue({ workerId: "old-daemon", nowMs: NOW, limit: 1 })[0];
+    assert.ok(claim);
+    store.beginInvocation(claim.invocation.id, claim.ownershipToken, NOW, {
+      pid: 4242,
+      startToken: "pst-v2:orphan",
+    });
+    const corrupt = new DatabaseSync(join(dir, "schedules.db"));
+    corrupt.exec("PRAGMA foreign_keys = OFF");
+    corrupt.prepare("DELETE FROM schedules WHERE id = ?").run(schedule.id);
+    corrupt.close();
+
+    const { logger, lines } = silentLogger();
+    const signals: NodeJS.Signals[] = [];
+    const daemon = new SchedulerDaemon({
+      store,
+      workerId: "w1",
+      maxConcurrentRuns: 1,
+      logger,
+      platform: "linux",
+      now: () => NOW + 7_200_000,
+      maxRunMs: 3_600_000,
+      childTerminateGraceMs: 10,
+      terminateExecutor: (_executor, signal) => {
+        signals.push(signal);
+        return "tree-terminated";
+      },
+      spawnInvocation: () => ({ exited: Promise.resolve(0), kill: () => undefined }),
+    });
+
+    assert.equal(daemon.tick(), 0);
+    assert.deepEqual(signals, []);
+    assert.ok(lines.some((line) => /schedule .* 不存在/u.test(line) && /跳过孤儿清理/u.test(line)));
+    assert.equal(store.getInvocation(claim.invocation.id)?.status, INVOCATION_STATUSES.running);
+    store.close();
+  } finally {
+    removeTempDir(dir);
+  }
+});
+
+test("admission 拒绝领取时 daemon 记一条可操作日志，恢复后再记一条，且不会每 tick 重复", () => {
+  const dir = tempDir();
+  try {
+    const store = new ScheduleStore(dir);
+    addDueSchedule(store, "a");
+    const { logger, lines } = silentLogger();
+    let blocked = true;
+    const daemon = new SchedulerDaemon({
+      store,
+      workerId: "w1",
+      maxConcurrentRuns: 1,
+      logger,
+      platform: "linux",
+      now: () => NOW,
+      claimDue: (input) => (blocked ? undefined : store.claimDue(input)),
+      spawnInvocation: () => ({ exited: new Promise(() => undefined), kill: () => undefined }),
+    });
+    assert.equal(daemon.tick(), 0);
+    assert.equal(daemon.tick(), 0);
+    const refused = lines.filter((line) => /admission 拒绝领取/u.test(line));
+    assert.equal(refused.length, 1);
+    assert.match(refused[0] ?? "", /roll schedule service status/u);
+    blocked = false;
+    assert.equal(daemon.tick(), 1);
+    assert.equal(lines.filter((line) => /admission 已恢复/u.test(line)).length, 1);
     store.close();
   } finally {
     removeTempDir(dir);

@@ -10,13 +10,26 @@ import {
   inspectSchedulerServiceState,
   schedulerServiceStatePath,
 } from "../../scheduler-host/service-state.ts";
+import {
+  SCHEDULER_SERVICE_BINARY_STATUSES,
+  type SchedulerServiceBinaryStatus,
+} from "../../scheduler-host/service-binary.ts";
 import { log } from "../utils/output.ts";
+import { describeInstalledSchedulerServiceBinary } from "./schedule-service-utils.ts";
+
 import {
   loadRuntime,
   openScheduleStore,
   printJson,
   runScheduleCommand,
 } from "./schedule-command-utils.ts";
+
+const BINARY_STATUS_LOGGERS = {
+  [SCHEDULER_SERVICE_BINARY_STATUSES.current]: (message: string) => log.info(message),
+  [SCHEDULER_SERVICE_BINARY_STATUSES.unknown]: (message: string) => log.warn(message),
+  [SCHEDULER_SERVICE_BINARY_STATUSES.outdated]: (message: string) => log.warn(message),
+  [SCHEDULER_SERVICE_BINARY_STATUSES.broken]: (message: string) => log.error(message),
+} as const satisfies Record<SchedulerServiceBinaryStatus, (message: string) => void>;
 
 export default defineCommand({
   meta: { description: "查看定时任务 daemon 用户服务的安装与运行状态" },
@@ -89,6 +102,10 @@ export default defineCommand({
         liveDaemonInvocations,
         cleanupRequired: status.enabled === false && (liveDaemonInvocations ?? 0) > 0,
         metadataError: state.status === "invalid" ? state.error : undefined,
+        binary:
+          state.status === "valid"
+            ? describeInstalledSchedulerServiceBinary(state.state)
+            : undefined,
         ledgerError,
         configError,
       };
@@ -125,6 +142,13 @@ export default defineCommand({
       }
       if (details.metadataError !== undefined) {
         log.warn(details.metadataError);
+      }
+      if (details.binary !== undefined) {
+        const binaryLogger = BINARY_STATUS_LOGGERS[details.binary.status];
+        binaryLogger(
+          details.binary.reason ??
+            `binary: roll v${details.binary.current.rollVersion}（${details.binary.current.command} ${details.binary.current.cliEntrypoint}）`,
+        );
       }
       if (details.ledgerError !== undefined) {
         log.warn(`ledger: ${details.ledgerError}`);

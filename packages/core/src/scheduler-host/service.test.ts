@@ -48,6 +48,25 @@ test("scheduler service identity 指向 roll schedule daemon --foreground", () =
   assert.equal(plan.serviceTarget, `gui/501/${SCHEDULER_SERVICE_LABEL}`);
 });
 
+test("scheduler service identity 把 metadata generation 传给 daemon 启动握手", () => {
+  const invocation = createBundledRollInvocation({
+    command: "/bundle/node",
+    cliEntrypoint: "/bundle/roll.js",
+    execArgv: [],
+  });
+  const dataDir = "/Users/tester/.roll-agent/scheduler";
+  const identity = schedulerServiceIdentity(
+    createSchedulerPaths(dataDir, "/Users/tester"),
+    invocation,
+    { maxConcurrentRuns: 2, generation: "service-generation" },
+  );
+
+  assert.deepEqual(identity.programArguments.slice(-2), [
+    "--service-generation",
+    "service-generation",
+  ]);
+});
+
 test("scheduler service management lock serializes install and uninstall across data-dir changes", async () => {
   const home = mkdtempSync(join(tmpdir(), "roll-scheduler-service-lock-"));
   let releaseFirst: (() => void) | undefined;
@@ -128,6 +147,32 @@ test("failed scheduler service install still disables when Task status is unread
   assert.deepEqual(events, ["install", "status-error", "disable", "stop"]);
 });
 
+test("service 注册成功但 daemon generation 未就绪时仍清理半安装服务", async () => {
+  const events: string[] = [];
+  const controller = {
+    install: async () => {
+      events.push("install");
+    },
+    uninstall: async () => undefined,
+    start: async () => undefined,
+    status: async () => ({ installed: true, running: false, enabled: true }),
+    disable: async () => {
+      events.push("disable");
+    },
+    stop: async () => {
+      events.push("stop");
+    },
+  };
+
+  await assert.rejects(
+    installSchedulerServiceControllerSafely(controller, async () => {
+      throw new Error("daemon generation did not become ready");
+    }),
+    /generation did not become ready/u,
+  );
+  assert.deepEqual(events, ["install", "disable", "stop"]);
+});
+
 test("scheduler identity 携带 Windows XML 路径与显示名", () => {
   const invocation = createBundledRollInvocation({
     command: "/bundle/node",
@@ -163,4 +208,28 @@ test("Windows plan 不再把命令行塞进 /TR，长路径也能注册", () => 
   assert.ok(xml.includes(`<Command>${invocation.command}</Command>`));
   assert.match(xml, /"--max-concurrent-runs" "2"<\/Arguments>/u);
   assert.match(xml, /<Description>roll schedule daemon<\/Description>/u);
+});
+
+test("POSIX 半安装的 LaunchAgent 在 readiness 失败时直接卸载，避免下次登录拉起一个不领任务的 daemon", async () => {
+  const events: string[] = [];
+  const controller = {
+    install: async () => {
+      events.push("install");
+    },
+    uninstall: async () => {
+      events.push("uninstall");
+    },
+    start: async () => undefined,
+    stop: async () => {
+      events.push("stop");
+    },
+    status: async () => ({ installed: true, running: false }),
+  };
+  await assert.rejects(
+    installSchedulerServiceControllerSafely(controller, async () => {
+      throw new Error("generation not ready");
+    }),
+    /generation not ready/u,
+  );
+  assert.deepEqual(events, ["install", "uninstall"]);
 });

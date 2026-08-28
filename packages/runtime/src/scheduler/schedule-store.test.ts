@@ -757,7 +757,7 @@ test("打开 schema v1 数据库时自动补齐新列并升级 user_version", ()
     store.close();
     const reopened = new DatabaseSync(join(dir, "schedules.db"));
     const version = reopened.prepare("PRAGMA user_version").get() as { user_version: number };
-    assert.equal(version.user_version, 4);
+    assert.equal(version.user_version, 5);
     const columns = reopened.prepare("PRAGMA table_info(invocations)").all() as Array<{
       readonly name: string;
     }>;
@@ -914,6 +914,66 @@ test("listRunningInvocations 只返回 running 行", () => {
     assert.deepEqual(
       store.listRunningInvocations().map((row) => [row.id, row.executor?.pid]),
       [[claim.invocation.id, 99]],
+    );
+    store.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("listOccupyingInvocations 与单例门禁一致：包含 claimed/running 和带未清树的 retry", () => {
+  const dir = tempDir();
+  try {
+    const store = new ScheduleStore(dir, { retryBackoffMs: 10_000 });
+    const createManual = (name: string) => {
+      const schedule = store.createSchedule(sampleInput({ name }), NOW);
+      const queued = store.enqueueManualInvocation(schedule.id, NOW);
+      return { schedule, queued };
+    };
+
+    const claimedSeed = createManual("claimed");
+    const claimed = store.claimPendingInvocation(claimedSeed.queued.id, "w", NOW);
+    assert.ok(claimed);
+
+    const runningSeed = createManual("running");
+    const running = store.claimPendingInvocation(runningSeed.queued.id, "w", NOW);
+    assert.ok(running);
+    store.beginInvocation(runningSeed.queued.id, running.ownershipToken, NOW, {
+      pid: 4201,
+      startToken: "pst-v2:running",
+    });
+
+    const treeRetrySeed = createManual("tree-retry");
+    const treeRetry = store.claimPendingInvocation(treeRetrySeed.queued.id, "w", NOW);
+    assert.ok(treeRetry);
+    store.beginInvocation(treeRetrySeed.queued.id, treeRetry.ownershipToken, NOW, {
+      pid: 4202,
+      startToken: "pst-v2:tree-retry",
+    });
+    store.recordInvocationTree({
+      id: treeRetrySeed.queued.id,
+      ownershipToken: treeRetry.ownershipToken,
+      trackedGroups: [{ pgid: 4202, leaderState: "alive", startToken: "pst-v2:tree-retry" }],
+      unsettled: true,
+      survivorPids: [4202],
+    });
+    store.failInvocation(treeRetrySeed.queued.id, treeRetry.ownershipToken, "tree retry", NOW);
+
+    const plainRetrySeed = createManual("plain-retry");
+    const plainRetry = store.claimPendingInvocation(plainRetrySeed.queued.id, "w", NOW);
+    assert.ok(plainRetry);
+    store.beginInvocation(plainRetrySeed.queued.id, plainRetry.ownershipToken, NOW);
+    store.failInvocation(plainRetrySeed.queued.id, plainRetry.ownershipToken, "plain retry", NOW);
+
+    createManual("pending");
+
+    assert.equal(typeof store.listOccupyingInvocations, "function");
+    assert.deepEqual(
+      store
+        .listOccupyingInvocations()
+        .map((row) => row.id)
+        .sort(),
+      [claimedSeed.queued.id, runningSeed.queued.id, treeRetrySeed.queued.id].sort(),
     );
     store.close();
   } finally {
@@ -2003,6 +2063,545 @@ test("prepareWorkerShutdown 对带未清树的 claimed 行不写终态", () => {
     assert.equal(held?.treeUnsettled, true);
     assert.equal(held?.claimedBy, "daemon-owned");
     store.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("createSchedule 记录按任务的单次运行上限 maxRunMs，缺省为 undefined", () => {
+  const dir = tempDir();
+  try {
+    const store = new ScheduleStore(dir);
+    const capped = store.createSchedule(sampleInput({ maxRunMs: 7_200_000 }), NOW);
+    assert.equal(capped.maxRunMs, 7_200_000);
+    assert.equal(store.getSchedule(capped.id)?.maxRunMs, 7_200_000);
+    const plain = store.createSchedule(sampleInput({ name: "plain" }), NOW);
+    assert.equal(plain.maxRunMs, undefined);
+    assert.equal(store.listSchedules().find((row) => row.id === capped.id)?.maxRunMs, 7_200_000);
+    store.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("createSchedule 只接受 60s..24h 的整数 maxRunMs", () => {
+  const dir = tempDir();
+  try {
+    const store = new ScheduleStore(dir);
+    for (const maxRunMs of [0, -1, 1.5, 59_999, 86_400_001, Number.NaN]) {
+      assert.throws(
+        () => store.createSchedule(sampleInput({ maxRunMs }), NOW),
+        (error: unknown) =>
+          error instanceof ScheduleStoreError &&
+          error.code === SCHEDULE_STORE_ERROR_CODES.invalid &&
+          /maxRunMs/u.test(error.message),
+        `maxRunMs=${String(maxRunMs)} 应被拒绝`,
+      );
+    }
+    assert.equal(store.listSchedules().length, 0);
+    assert.equal(
+      store.createSchedule(sampleInput({ name: "min", maxRunMs: 60_000 }), NOW).maxRunMs,
+      60_000,
+    );
+    assert.equal(
+      store.createSchedule(sampleInput({ name: "max", maxRunMs: 86_400_000 }), NOW).maxRunMs,
+      86_400_000,
+    );
+    store.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("读取持久化 schedule 时对越界、非整数和非数字 max_run_ms fail-closed", () => {
+  for (const corruptValue of [59_999, 86_400_001, 60_000.5, "oops"] as const) {
+    for (const reader of ["get", "list"] as const) {
+      const dir = tempDir();
+      try {
+        const seed = new ScheduleStore(dir);
+        const schedule = seed.createSchedule(sampleInput({ maxRunMs: 60_000 }), NOW);
+        seed.close();
+
+        const raw = new DatabaseSync(join(dir, "schedules.db"));
+        raw
+          .prepare("UPDATE schedules SET max_run_ms = ? WHERE id = ?")
+          .run(corruptValue, schedule.id);
+        raw.close();
+
+        const store = new ScheduleStore(dir);
+        assert.throws(
+          () => (reader === "get" ? store.getSchedule(schedule.id) : store.listSchedules()),
+          (error: unknown) =>
+            error instanceof ScheduleStoreError &&
+            error.code === SCHEDULE_STORE_ERROR_CODES.invalid &&
+            /maxRunMs/u.test(error.message),
+          `${reader} 应拒绝 max_run_ms=${String(corruptValue)}`,
+        );
+        store.close();
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    }
+  }
+});
+
+test("到期 schedule 的 max_run_ms 损坏时只暂停坏任务，健康任务仍可 claim", () => {
+  const dir = tempDir();
+  try {
+    const store = new ScheduleStore(dir);
+    const bad = store.createSchedule(sampleInput({ name: "bad", fireImmediately: true }), NOW);
+    const healthy = store.createSchedule(
+      sampleInput({ name: "healthy", fireImmediately: true }),
+      NOW + 1,
+    );
+    const raw = new DatabaseSync(join(dir, "schedules.db"));
+    raw.prepare("UPDATE schedules SET max_run_ms = ? WHERE id = ?").run("oops", bad.id);
+    raw.close();
+
+    const claims = store.claimDue({ workerId: "daemon", nowMs: NOW + 1, limit: 1 });
+    assert.deepEqual(
+      claims.map((claim) => claim.schedule.id),
+      [healthy.id],
+    );
+    const check = new DatabaseSync(join(dir, "schedules.db"));
+    const badRow = check
+      .prepare("SELECT status, last_error FROM schedules WHERE id = ?")
+      .get(bad.id) as { readonly status: string; readonly last_error: string };
+    check.close();
+    assert.equal(badRow.status, SCHEDULE_STATUSES.paused);
+    assert.match(badRow.last_error, /maxRunMs/u);
+    store.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("损坏 max_run_ms 的 pending manual 不回滚整个 claim 事务，健康任务不饥饿", () => {
+  const dir = tempDir();
+  try {
+    const store = new ScheduleStore(dir);
+    const bad = store.createSchedule(sampleInput({ name: "bad-pending" }), NOW);
+    const pending = store.enqueueManualInvocation(bad.id, NOW);
+    const healthy = store.createSchedule(
+      sampleInput({ name: "healthy", fireImmediately: true }),
+      NOW + 1,
+    );
+    const raw = new DatabaseSync(join(dir, "schedules.db"));
+    raw.prepare("UPDATE schedules SET max_run_ms = ? WHERE id = ?").run(59_999, bad.id);
+    raw.close();
+
+    const claims = store.claimDue({ workerId: "daemon", nowMs: NOW + 1, limit: 2 });
+    assert.deepEqual(
+      claims.map((claim) => claim.schedule.id),
+      [healthy.id],
+    );
+    assert.equal(store.getInvocation(pending.id)?.status, INVOCATION_STATUSES.pending);
+    store.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("损坏 max_run_ms 的 retry 行被推迟，不阻塞健康 schedule claim", () => {
+  const dir = tempDir();
+  try {
+    const store = new ScheduleStore(dir, { retryBackoffMs: 1 });
+    const bad = store.createSchedule(sampleInput({ name: "bad-retry" }), NOW);
+    const queued = store.enqueueManualInvocation(bad.id, NOW);
+    const first = store.claimPendingInvocation(queued.id, "daemon", NOW);
+    assert.ok(first);
+    store.failInvocation(queued.id, first.ownershipToken, "first failure", NOW);
+    const healthy = store.createSchedule(
+      sampleInput({ name: "healthy", fireImmediately: true }),
+      NOW + 2,
+    );
+    const raw = new DatabaseSync(join(dir, "schedules.db"));
+    raw.prepare("UPDATE schedules SET max_run_ms = ? WHERE id = ?").run("oops", bad.id);
+    raw.close();
+
+    const claims = store.claimDue({ workerId: "daemon", nowMs: NOW + 2, limit: 2 });
+    assert.deepEqual(
+      claims.map((claim) => claim.schedule.id),
+      [healthy.id],
+    );
+    const deferred = store.getInvocation(queued.id);
+    assert.equal(deferred?.status, INVOCATION_STATUSES.retry);
+    assert.ok((deferred?.retryAtMs ?? 0) > NOW + 2);
+    store.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("损坏 max_run_ms 的 dead-running 行保持 running 并续租，健康 schedule 仍可 claim", () => {
+  const dir = tempDir();
+  try {
+    const store = new ScheduleStore(dir, { executorLiveness: () => "dead" });
+    const bad = store.createSchedule(sampleInput({ name: "bad-running" }), NOW);
+    const queued = store.enqueueManualInvocation(bad.id, NOW);
+    const first = store.claimPendingInvocation(queued.id, "old-daemon", NOW);
+    assert.ok(first);
+    store.beginInvocation(queued.id, first.ownershipToken, NOW, {
+      pid: 4242,
+      startToken: "pst-v2:bad-running",
+    });
+    const healthy = store.createSchedule(
+      sampleInput({ name: "healthy", fireImmediately: true }),
+      NOW + 200_000,
+    );
+    const raw = new DatabaseSync(join(dir, "schedules.db"));
+    raw.prepare("UPDATE schedules SET max_run_ms = ? WHERE id = ?").run("oops", bad.id);
+    raw.close();
+
+    const claims = store.claimDue({ workerId: "daemon", nowMs: NOW + 200_000, limit: 2 });
+    assert.deepEqual(
+      claims.map((claim) => claim.schedule.id),
+      [healthy.id],
+    );
+    const deferred = store.getInvocation(queued.id);
+    assert.equal(deferred?.status, INVOCATION_STATUSES.running);
+    assert.ok((deferred?.leaseUntilMs ?? 0) > NOW + 200_000);
+    store.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("timeout late terminal CAS：finishedAt >= timedOutAt 时 scheduled 未耗尽预算把 completed 重分类为 retry", () => {
+  const dir = tempDir();
+  try {
+    const store = new ScheduleStore(dir, { retryBudget: 3, retryBackoffMs: 10 });
+    const schedule = store.createSchedule(sampleInput({ fireImmediately: true }), NOW);
+    const claim = store.claimDue({ workerId: "daemon", nowMs: NOW, limit: 1 })[0];
+    assert.ok(claim);
+    assert.equal(
+      store.completeInvocation({
+        id: claim.invocation.id,
+        ownershipToken: claim.ownershipToken,
+        status: INVOCATION_STATUSES.completed,
+        nowMs: NOW + 1,
+        threadId: "late-thread",
+        outputExcerpt: "late-output",
+      }),
+      COMPLETE_INVOCATION_OUTCOMES.written,
+    );
+
+    assert.equal(typeof store.reclassifyTimedOutInvocation, "function");
+    assert.equal(
+      store.reclassifyTimedOutInvocation({
+        id: claim.invocation.id,
+        expectedAttempt: 1,
+        error: "max-run timeout",
+        timedOutAtMs: NOW,
+        nowMs: NOW + 2,
+      }),
+      INVOCATION_FAILURE_OUTCOMES.retryScheduled,
+    );
+    const reclassified = store.getInvocation(claim.invocation.id);
+    assert.equal(reclassified?.status, INVOCATION_STATUSES.retry);
+    assert.equal(reclassified?.finishedAtMs, undefined);
+    assert.equal(reclassified?.threadId, undefined);
+    assert.equal(reclassified?.outputExcerpt, undefined);
+    assert.deepEqual(reclassified?.pendingActions, []);
+    assert.equal(store.getSchedule(schedule.id)?.status, SCHEDULE_STATUSES.active);
+    assert.equal(store.getSchedule(schedule.id)?.lastRunAtMs, NOW + 1);
+    assert.equal(store.getSchedule(schedule.id)?.lastError, "max-run timeout");
+    const retried = store.claimDue({ workerId: "daemon-2", nowMs: NOW + 12, limit: 1 })[0];
+    assert.ok(retried);
+    assert.equal(retried.invocation.id, claim.invocation.id);
+    assert.equal(retried.invocation.attempt, 2);
+    assert.equal(retried.invocation.threadId, undefined);
+    assert.equal(retried.invocation.outputExcerpt, undefined);
+    store.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("timeout late terminal CAS：finishedAt < timedOutAt 时保留 completed", () => {
+  const dir = tempDir();
+  try {
+    const store = new ScheduleStore(dir, { retryBudget: 1 });
+    const schedule = store.createSchedule(sampleInput({ fireImmediately: true }), NOW);
+    const claim = store.claimDue({ workerId: "daemon", nowMs: NOW, limit: 1 })[0];
+    assert.ok(claim);
+    assert.equal(
+      store.completeInvocation({
+        id: claim.invocation.id,
+        ownershipToken: claim.ownershipToken,
+        status: INVOCATION_STATUSES.completed,
+        nowMs: NOW + 1,
+        threadId: "on-time-thread",
+        outputExcerpt: "on-time-output",
+      }),
+      COMPLETE_INVOCATION_OUTCOMES.written,
+    );
+
+    assert.equal(
+      store.reclassifyTimedOutInvocation({
+        id: claim.invocation.id,
+        expectedAttempt: 1,
+        error: "max-run timeout",
+        timedOutAtMs: NOW + 2,
+        nowMs: NOW + 3,
+      }),
+      INVOCATION_FAILURE_OUTCOMES.lostClaim,
+    );
+    const completed = store.getInvocation(claim.invocation.id);
+    assert.equal(completed?.status, INVOCATION_STATUSES.completed);
+    assert.equal(completed?.finishedAtMs, NOW + 1);
+    assert.equal(completed?.threadId, "on-time-thread");
+    assert.equal(completed?.outputExcerpt, "on-time-output");
+    assert.equal(store.getSchedule(schedule.id)?.status, SCHEDULE_STATUSES.active);
+    assert.equal(store.getSchedule(schedule.id)?.lastError, undefined);
+    store.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("timeout late terminal CAS：finishedAt === timedOutAt 时仍重分类", () => {
+  const dir = tempDir();
+  try {
+    const store = new ScheduleStore(dir, { retryBudget: 2, retryBackoffMs: 10 });
+    const schedule = store.createSchedule(sampleInput({ fireImmediately: true }), NOW);
+    const claim = store.claimDue({ workerId: "daemon", nowMs: NOW, limit: 1 })[0];
+    assert.ok(claim);
+    assert.equal(
+      store.completeInvocation({
+        id: claim.invocation.id,
+        ownershipToken: claim.ownershipToken,
+        status: INVOCATION_STATUSES.completed,
+        nowMs: NOW + 2,
+      }),
+      COMPLETE_INVOCATION_OUTCOMES.written,
+    );
+
+    assert.equal(
+      store.reclassifyTimedOutInvocation({
+        id: claim.invocation.id,
+        expectedAttempt: 1,
+        error: "max-run timeout",
+        timedOutAtMs: NOW + 2,
+        nowMs: NOW + 3,
+      }),
+      INVOCATION_FAILURE_OUTCOMES.retryScheduled,
+    );
+    assert.equal(store.getInvocation(claim.invocation.id)?.status, INVOCATION_STATUSES.retry);
+    assert.equal(store.getSchedule(schedule.id)?.status, SCHEDULE_STATUSES.active);
+    store.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("timeout late terminal CAS：finishedAt 缺失时保守重分类", () => {
+  const dir = tempDir();
+  try {
+    const store = new ScheduleStore(dir, { retryBudget: 2, retryBackoffMs: 10 });
+    const schedule = store.createSchedule(sampleInput({ fireImmediately: true }), NOW);
+    const claim = store.claimDue({ workerId: "daemon", nowMs: NOW, limit: 1 })[0];
+    assert.ok(claim);
+    assert.equal(
+      store.completeInvocation({
+        id: claim.invocation.id,
+        ownershipToken: claim.ownershipToken,
+        status: INVOCATION_STATUSES.completed,
+        nowMs: NOW + 1,
+      }),
+      COMPLETE_INVOCATION_OUTCOMES.written,
+    );
+    const raw = new DatabaseSync(join(dir, "schedules.db"));
+    raw.prepare("UPDATE invocations SET finished_at = NULL WHERE id = ?").run(claim.invocation.id);
+    raw.close();
+
+    assert.equal(
+      store.reclassifyTimedOutInvocation({
+        id: claim.invocation.id,
+        expectedAttempt: 1,
+        error: "max-run timeout",
+        timedOutAtMs: NOW + 2,
+        nowMs: NOW + 3,
+      }),
+      INVOCATION_FAILURE_OUTCOMES.retryScheduled,
+    );
+    assert.equal(store.getInvocation(claim.invocation.id)?.status, INVOCATION_STATUSES.retry);
+    assert.equal(store.getSchedule(schedule.id)?.status, SCHEDULE_STATUSES.active);
+    store.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("timeout late terminal CAS：scheduled 预算耗尽时把 needs_confirmation 重分类为 failed 并 pause", () => {
+  const dir = tempDir();
+  try {
+    const store = new ScheduleStore(dir, { retryBudget: 1 });
+    const schedule = store.createSchedule(sampleInput({ fireImmediately: true }), NOW);
+    const claim = store.claimDue({ workerId: "daemon", nowMs: NOW, limit: 1 })[0];
+    assert.ok(claim);
+    assert.equal(
+      store.completeInvocation({
+        id: claim.invocation.id,
+        ownershipToken: claim.ownershipToken,
+        status: INVOCATION_STATUSES.needsConfirmation,
+        pendingActions: ["agent.tool"],
+        nowMs: NOW + 1,
+        threadId: "late-confirmation-thread",
+        outputExcerpt: "late-confirmation-output",
+      }),
+      COMPLETE_INVOCATION_OUTCOMES.written,
+    );
+
+    assert.equal(typeof store.reclassifyTimedOutInvocation, "function");
+    assert.equal(
+      store.reclassifyTimedOutInvocation({
+        id: claim.invocation.id,
+        expectedAttempt: 1,
+        error: "max-run timeout",
+        timedOutAtMs: NOW,
+        nowMs: NOW + 2,
+      }),
+      INVOCATION_FAILURE_OUTCOMES.terminalPaused,
+    );
+    const failed = store.getInvocation(claim.invocation.id);
+    assert.equal(failed?.status, INVOCATION_STATUSES.failed);
+    assert.equal(failed?.error, "max-run timeout");
+    assert.equal(failed?.threadId, undefined);
+    assert.equal(failed?.outputExcerpt, undefined);
+    assert.deepEqual(failed?.pendingActions, []);
+    assert.equal(store.getSchedule(schedule.id)?.status, SCHEDULE_STATUSES.paused);
+    store.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("timeout late terminal CAS：manual 按自身 maxAttempts 重试和终止，永不 pause schedule", () => {
+  const dir = tempDir();
+  try {
+    const store = new ScheduleStore(dir, { retryBackoffMs: 10 });
+    const schedule = store.createSchedule(sampleInput(), NOW);
+    const queued = store.enqueueManualInvocation(schedule.id, NOW, { maxAttempts: 2 });
+    const first = store.claimPendingInvocation(queued.id, "inline", NOW);
+    assert.ok(first);
+    store.completeInvocation({
+      id: queued.id,
+      ownershipToken: first.ownershipToken,
+      status: INVOCATION_STATUSES.completed,
+      nowMs: NOW + 1,
+    });
+
+    assert.equal(typeof store.reclassifyTimedOutInvocation, "function");
+    assert.equal(
+      store.reclassifyTimedOutInvocation({
+        id: queued.id,
+        expectedAttempt: 1,
+        error: "attempt 1 timeout",
+        timedOutAtMs: NOW,
+        nowMs: NOW + 2,
+      }),
+      INVOCATION_FAILURE_OUTCOMES.retryScheduled,
+    );
+    const second = store.claimDue({ workerId: "daemon", nowMs: NOW + 12, limit: 1 })[0];
+    assert.ok(second);
+    assert.equal(second.invocation.attempt, 2);
+    store.completeInvocation({
+      id: queued.id,
+      ownershipToken: second.ownershipToken,
+      status: INVOCATION_STATUSES.needsConfirmation,
+      pendingActions: ["agent.tool"],
+      nowMs: NOW + 13,
+    });
+    assert.equal(
+      store.reclassifyTimedOutInvocation({
+        id: queued.id,
+        expectedAttempt: 2,
+        error: "attempt 2 timeout",
+        timedOutAtMs: NOW + 12,
+        nowMs: NOW + 14,
+      }),
+      INVOCATION_FAILURE_OUTCOMES.terminal,
+    );
+    assert.equal(store.getInvocation(queued.id)?.status, INVOCATION_STATUSES.failed);
+    assert.equal(store.getSchedule(schedule.id)?.status, SCHEDULE_STATUSES.active);
+    store.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("timeout late terminal CAS 拒绝错误 expectedAttempt，不改写已完成结果", () => {
+  const dir = tempDir();
+  try {
+    const store = new ScheduleStore(dir);
+    const schedule = store.createSchedule(sampleInput(), NOW);
+    const queued = store.enqueueManualInvocation(schedule.id, NOW, { maxAttempts: 1 });
+    const claim = store.claimPendingInvocation(queued.id, "inline", NOW);
+    assert.ok(claim);
+    store.completeInvocation({
+      id: queued.id,
+      ownershipToken: claim.ownershipToken,
+      status: INVOCATION_STATUSES.completed,
+      nowMs: NOW + 1,
+    });
+
+    assert.equal(typeof store.reclassifyTimedOutInvocation, "function");
+    assert.equal(
+      store.reclassifyTimedOutInvocation({
+        id: queued.id,
+        expectedAttempt: 2,
+        error: "wrong attempt timeout",
+        timedOutAtMs: NOW,
+        nowMs: NOW + 2,
+      }),
+      INVOCATION_FAILURE_OUTCOMES.lostClaim,
+    );
+    assert.equal(store.getInvocation(queued.id)?.status, INVOCATION_STATUSES.completed);
+    store.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("打开 schema v4 数据库时补齐 schedules.max_run_ms 并升级到 v5", () => {
+  const dir = tempDir();
+  try {
+    const legacy = new DatabaseSync(join(dir, "schedules.db"));
+    legacy.exec(
+      `CREATE TABLE schedules (
+         id TEXT PRIMARY KEY, name TEXT NOT NULL, prompt TEXT NOT NULL, cwd TEXT NOT NULL,
+         trigger_json TEXT NOT NULL, status TEXT NOT NULL CHECK (status IN ('active', 'paused')),
+         authority_digest TEXT, next_run_at INTEGER, last_run_at INTEGER, last_error TEXT,
+         created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL);
+       CREATE TABLE invocations (
+         id TEXT PRIMARY KEY,
+         schedule_id TEXT NOT NULL REFERENCES schedules(id) ON DELETE CASCADE,
+         mode TEXT NOT NULL, status TEXT NOT NULL, scheduled_for INTEGER NOT NULL,
+         attempt INTEGER NOT NULL DEFAULT 0, max_attempts INTEGER NOT NULL DEFAULT 3,
+         executor_pid INTEGER, executor_start_token TEXT, executor_probed_at INTEGER,
+         claimed_by TEXT, ownership_token TEXT, lease_until INTEGER, retry_at INTEGER,
+         thread_id TEXT, output_excerpt TEXT, error TEXT,
+         pending_actions_json TEXT NOT NULL DEFAULT '[]', created_at INTEGER NOT NULL,
+         started_at INTEGER, finished_at INTEGER, tree_tracked_pgids TEXT,
+         tree_unsettled INTEGER NOT NULL DEFAULT 0, tree_survivor_pids TEXT,
+         UNIQUE (schedule_id, mode, scheduled_for));
+       INSERT INTO schedules VALUES ('s1', 'n', 'p', '/w', '{"kind":"interval","everyMs":60000}',
+         'active', NULL, 1, NULL, NULL, 1, 1);
+       PRAGMA user_version = 4;`,
+    );
+    legacy.close();
+    const store = new ScheduleStore(dir);
+    assert.equal(store.getSchedule("s1")?.maxRunMs, undefined);
+    store.close();
+    const reopened = new DatabaseSync(join(dir, "schedules.db"));
+    const version = reopened.prepare("PRAGMA user_version").get() as { user_version: number };
+    assert.equal(version.user_version, 5);
+    const columns = reopened.prepare("PRAGMA table_info(schedules)").all() as Array<{
+      readonly name: string;
+    }>;
+    assert.ok(columns.some((column) => column.name === "max_run_ms"));
+    reopened.close();
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

@@ -36,6 +36,7 @@ import {
 
 export interface SchedulerServiceSettings {
   readonly maxConcurrentRuns: number;
+  readonly generation?: string;
 }
 
 export interface SchedulerServiceInstallSettings {
@@ -79,7 +80,7 @@ export async function withSchedulerServiceManagementLock<T>(
   const lock = acquireSchedulerLock(
     resolve(homeDir, ".roll-agent"),
     SCHEDULER_SERVICE_MANAGEMENT_LOCK_NAME,
-    "另一个 roll schedule service install / uninstall 正在执行，请稍后重试",
+    "另一个 roll schedule service install / uninstall / restart / update 正在执行，请稍后重试",
   );
   try {
     return await work();
@@ -111,6 +112,7 @@ export function schedulerServiceIdentity(
       paths.dataDir,
       "--max-concurrent-runs",
       String(settings.maxConcurrentRuns),
+      ...(settings.generation === undefined ? [] : ["--service-generation", settings.generation]),
     ],
   };
 }
@@ -118,6 +120,7 @@ export function schedulerServiceIdentity(
 export function createSchedulerServiceController(options: {
   readonly dataDir: string;
   readonly maxConcurrentRuns: number;
+  readonly generation?: string;
   readonly invocation?: BundledRollInvocation;
   readonly platform?: NodeJS.Platform;
   readonly homeDir?: string;
@@ -127,6 +130,7 @@ export function createSchedulerServiceController(options: {
   return createPlatformServiceController({
     identity: schedulerServiceIdentity(paths, invocation, {
       maxConcurrentRuns: options.maxConcurrentRuns,
+      ...(options.generation === undefined ? {} : { generation: options.generation }),
     }),
     ...(options.platform ? { platform: options.platform } : {}),
   });
@@ -134,9 +138,11 @@ export function createSchedulerServiceController(options: {
 
 export async function installSchedulerServiceControllerSafely(
   controller: CompanionServiceController,
+  verifyReady?: () => Promise<void>,
 ): Promise<void> {
   try {
     await controller.install();
+    await verifyReady?.();
   } catch (installError) {
     let installed: boolean | undefined;
     let statusError: unknown;
@@ -152,8 +158,10 @@ export async function installSchedulerServiceControllerSafely(
     try {
       if (controller.disable !== undefined) {
         await controller.disable();
+        await controller.stop();
+      } else {
+        await controller.uninstall();
       }
-      await controller.stop();
     } catch (cleanupError) {
       throw new AggregateError(
         statusError === undefined
@@ -171,6 +179,7 @@ type WindowsSchedulerServiceStore = Pick<
   | "cancelInvocation"
   | "getInvocation"
   | "listActiveWorkerInvocations"
+  | "listOccupyingInvocations"
   | "prepareWorkerShutdown"
   | "probeExecutor"
 >;
@@ -216,7 +225,7 @@ async function cleanupWindowsSchedulerService(
   options: UninstallWindowsSchedulerServiceOptions,
   store: WindowsSchedulerServiceStore,
 ): Promise<void> {
-  const active = store.listActiveWorkerInvocations();
+  const active = store.listOccupyingInvocations();
   const workerIds = new Set(active.map((row) => row.claimedBy).filter(isDaemonWorkerId));
   const unattributed = active.filter(
     (row) =>
@@ -288,8 +297,8 @@ async function cleanupWindowsSchedulerService(
     }
   }
   const remainingDaemonWork = store
-    .listActiveWorkerInvocations()
-    .filter((row) => isDaemonWorkerId(row.claimedBy));
+    .listOccupyingInvocations()
+    .filter((row) => !isInlineWorkerId(row.claimedBy));
   if (remainingDaemonWork.length > 0) {
     failures.push(`${String(remainingDaemonWork.length)} 个 daemon invocation 在收尾后仍为 live`);
   }

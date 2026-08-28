@@ -278,7 +278,7 @@ roll schedule runs <id>                               查看历次运行与失�
 roll schedule cancel <invocation-id> [--kill|--abandon]  取消排队中的一次运行；运行中的需 --kill 并确认退出
 roll schedule status                                  daemon 状态与任务统计
 roll schedule daemon --foreground                     前台运行 daemon
-roll schedule service install|uninstall|status        安装为用户级常驻服务
+roll schedule service install|uninstall|restart|status  安装、重启或检查用户级常驻服务
 
 roll doctor                     诊断 Roll 配置、Agent 注册表和运行时状态
 roll doctor --json              JSON 诊断结果（配置损坏时返回非零退出码）

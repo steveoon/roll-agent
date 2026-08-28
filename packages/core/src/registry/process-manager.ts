@@ -805,12 +805,19 @@ export function sameManagedAgentRuntimeIdentity(
   );
 }
 
+let ownProcessStartToken: ProcessStartToken | undefined;
+
+function readOwnProcessStartToken(): ProcessStartToken | undefined {
+  ownProcessStartToken ??= readProcessStartToken(process.pid);
+  return ownProcessStartToken;
+}
+
 export function acquireAgentLifecycleLock(dataDir: string, agentName: string): AgentLifecycleLock {
   const resolvedDataDir = resolve(dataDir);
   const lockPath = lifecycleLockPath(resolvedDataDir, agentName);
   mkdirSync(dirname(lockPath), { recursive: true });
   const token = randomUUID();
-  const processStartToken = readProcessStartToken(process.pid);
+  const processStartToken = readOwnProcessStartToken();
   if (processStartToken === undefined) {
     throw new Error(
       `无法验证当前 Roll 进程 (PID: ${String(process.pid)}) 的 OS 启动身份，拒绝获取 Agent lifecycle lock。`,

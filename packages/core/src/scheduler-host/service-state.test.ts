@@ -81,16 +81,27 @@ test("partial install keeps the new data-dir metadata instead of a stale previou
     writeSchedulerServiceState(path, previous);
 
     await assert.rejects(
-      installSchedulerServiceWithState(path, next, async () => {
-        throw new Error("task start failed");
-      }),
+      installSchedulerServiceWithState(
+        path,
+        next,
+        async () => {
+          throw new Error("task start failed");
+        },
+        { replacementFrom: previous },
+      ),
       /task start failed/u,
     );
 
-    assert.deepEqual(inspectSchedulerServiceState(path), {
-      status: "valid",
-      state: { ...next, phase: SCHEDULER_SERVICE_STATE_PHASES.installing },
-    });
+    const partial = inspectSchedulerServiceState(path);
+    assert.equal(partial.status, "valid");
+    if (partial.status === "valid") {
+      assert.equal(partial.state.phase, SCHEDULER_SERVICE_STATE_PHASES.installing);
+      assert.equal(partial.state.dataDir, next.dataDir);
+      assert.equal(partial.state.maxConcurrentRuns, next.maxConcurrentRuns);
+      assert.equal(typeof partial.state.generation, "string");
+      assert.ok((partial.state.generation?.length ?? 0) > 0);
+      assert.deepEqual(partial.state.replacementFrom, previous);
+    }
   } finally {
     rmSync(home, { recursive: true, force: true });
   }
@@ -135,4 +146,194 @@ test("scheduler service state problems append the caller's recovery hint", () =>
     () => requireSchedulerServiceState({ status: "invalid", error: "bad schema" }, "hint"),
     /bad schema；hint/u,
   );
+});
+
+test("scheduler service state 记录安装时固化的 node、CLI 入口与 roll 版本", () => {
+  const home = mkdtempSync(join(tmpdir(), "roll-scheduler-service-state-"));
+  try {
+    const path = schedulerServiceStatePath(home);
+    const state = {
+      schemaVersion: SCHEDULER_SERVICE_STATE_SCHEMA_VERSION,
+      phase: SCHEDULER_SERVICE_STATE_PHASES.installed,
+      dataDir: join(home, "ledger"),
+      maxConcurrentRuns: 2,
+      binary: {
+        command: "/opt/node/bin/node",
+        cliEntrypoint: "/opt/roll/dist/cli/index.js",
+        rollVersion: "0.9.0",
+      },
+    };
+    writeSchedulerServiceState(path, state);
+    assert.deepEqual(inspectSchedulerServiceState(path), { status: "valid", state });
+    assert.equal(removeSchedulerServiceState(path, state), true);
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("没有 binary 字段的旧 metadata 仍然有效，binary 读为 undefined", () => {
+  const home = mkdtempSync(join(tmpdir(), "roll-scheduler-service-state-"));
+  try {
+    const path = schedulerServiceStatePath(home);
+    mkdirSync(dirname(path), { recursive: true });
+    writeFileSync(
+      path,
+      JSON.stringify({
+        schemaVersion: SCHEDULER_SERVICE_STATE_SCHEMA_VERSION,
+        phase: "installed",
+        dataDir: join(home, "ledger"),
+        maxConcurrentRuns: 2,
+      }),
+      { encoding: "utf-8", mode: 0o600 },
+    );
+    const inspection = inspectSchedulerServiceState(path);
+    assert.equal(inspection.status, "valid");
+    if (inspection.status === "valid") {
+      assert.equal(inspection.state.binary, undefined);
+    }
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("binary 字段残缺的 metadata 视为无效而不是静默丢弃", () => {
+  const home = mkdtempSync(join(tmpdir(), "roll-scheduler-service-state-"));
+  try {
+    const path = schedulerServiceStatePath(home);
+    mkdirSync(dirname(path), { recursive: true });
+    writeFileSync(
+      path,
+      JSON.stringify({
+        schemaVersion: SCHEDULER_SERVICE_STATE_SCHEMA_VERSION,
+        phase: "installed",
+        dataDir: join(home, "ledger"),
+        maxConcurrentRuns: 2,
+        binary: { command: "/opt/node/bin/node" },
+      }),
+      { encoding: "utf-8", mode: 0o600 },
+    );
+    assert.equal(inspectSchedulerServiceState(path).status, "invalid");
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("binary command 与 CLI 入口必须是绝对路径", () => {
+  const home = mkdtempSync(join(tmpdir(), "roll-scheduler-service-state-"));
+  try {
+    const path = schedulerServiceStatePath(home);
+    mkdirSync(dirname(path), { recursive: true });
+    writeFileSync(
+      path,
+      JSON.stringify({
+        schemaVersion: SCHEDULER_SERVICE_STATE_SCHEMA_VERSION,
+        phase: "installed",
+        dataDir: join(home, "ledger"),
+        maxConcurrentRuns: 2,
+        binary: {
+          command: "relative-node",
+          cliEntrypoint: "relative-roll.js",
+          rollVersion: "1.0.0",
+        },
+      }),
+    );
+    assert.equal(inspectSchedulerServiceState(path).status, "invalid");
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("removeSchedulerServiceState 把 binary 纳入 CAS，不删除新的 replacement intent", () => {
+  const home = mkdtempSync(join(tmpdir(), "roll-scheduler-service-state-"));
+  try {
+    const path = schedulerServiceStatePath(home);
+    const current = {
+      schemaVersion: SCHEDULER_SERVICE_STATE_SCHEMA_VERSION,
+      phase: SCHEDULER_SERVICE_STATE_PHASES.installing,
+      dataDir: join(home, "ledger"),
+      maxConcurrentRuns: 2,
+      generation: "replacement-new",
+      binary: {
+        command: "/new/node",
+        cliEntrypoint: "/new/roll.js",
+        rollVersion: "2.0.0",
+      },
+    } as const;
+    writeSchedulerServiceState(path, current);
+    assert.equal(
+      removeSchedulerServiceState(path, {
+        ...current,
+        generation: "replacement-old",
+      }),
+      false,
+    );
+    assert.deepEqual(inspectSchedulerServiceState(path), { status: "valid", state: current });
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("replacement teardown 不能删除刚写入的同设置 installing intent", async () => {
+  const home = mkdtempSync(join(tmpdir(), "roll-scheduler-service-state-"));
+  try {
+    const path = schedulerServiceStatePath(home);
+    const settings = {
+      schemaVersion: SCHEDULER_SERVICE_STATE_SCHEMA_VERSION,
+      dataDir: join(home, "ledger"),
+      maxConcurrentRuns: 2,
+      binary: {
+        command: "/node",
+        cliEntrypoint: "/roll.js",
+        rollVersion: "2.0.0",
+      },
+    } as const;
+    const previous = {
+      ...settings,
+      phase: SCHEDULER_SERVICE_STATE_PHASES.installing,
+      generation: "previous-generation",
+    } as const;
+    writeSchedulerServiceState(path, previous);
+
+    await assert.rejects(
+      installSchedulerServiceWithState(path, settings, async () => {
+        assert.equal(removeSchedulerServiceState(path, previous), false);
+        throw new Error("new install failed");
+      }),
+      /new install failed/u,
+    );
+
+    const after = inspectSchedulerServiceState(path);
+    assert.equal(after.status, "valid");
+    if (after.status === "valid") {
+      assert.equal(after.state.phase, SCHEDULER_SERVICE_STATE_PHASES.installing);
+      assert.notEqual(after.state.generation, previous.generation);
+    }
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("install callback 使用与 installing metadata 相同的 generation", async () => {
+  const home = mkdtempSync(join(tmpdir(), "roll-scheduler-service-state-"));
+  try {
+    const path = schedulerServiceStatePath(home);
+    let observedGeneration: string | undefined;
+    const installed = await installSchedulerServiceWithState(
+      path,
+      {
+        schemaVersion: SCHEDULER_SERVICE_STATE_SCHEMA_VERSION,
+        dataDir: join(home, "ledger"),
+        maxConcurrentRuns: 2,
+      },
+      async (installing) => {
+        observedGeneration = installing.generation;
+        assert.equal(installing.phase, SCHEDULER_SERVICE_STATE_PHASES.installing);
+      },
+    );
+
+    assert.equal(typeof observedGeneration, "string");
+    assert.equal(installed.generation, observedGeneration);
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
 });

@@ -49,7 +49,7 @@ import {
   type ScheduleStatus,
 } from "./types.ts";
 
-const SCHEMA_VERSION = 4;
+const SCHEMA_VERSION = 5;
 const BUSY_TIMEOUT_MS = 15_000;
 const TERMINAL_STATUS_PLACEHOLDERS = INVOCATION_TERMINAL_STATUSES.map(() => "?").join(", ");
 
@@ -115,6 +115,7 @@ interface ScheduleRow {
   readonly trigger_json: string;
   readonly status: string;
   readonly authority_digest: string | null;
+  readonly max_run_ms: unknown;
   readonly next_run_at: number | null;
   readonly last_run_at: number | null;
   readonly last_error: string | null;
@@ -356,6 +357,7 @@ function toScheduleRecord(row: ScheduleRow): ScheduleRecord {
     trigger: parseTriggerJson(row.trigger_json),
     status: row.status,
     authorityDigest: row.authority_digest ?? undefined,
+    maxRunMs: validateMaxRunMs(row.max_run_ms),
     nextRunAtMs: row.next_run_at ?? undefined,
     lastRunAtMs: row.last_run_at ?? undefined,
     lastError: row.last_error ?? undefined,
@@ -364,11 +366,30 @@ function toScheduleRecord(row: ScheduleRow): ScheduleRecord {
   };
 }
 
+function validateMaxRunMs(value: unknown): number | undefined {
+  if (value === undefined || value === null) {
+    return undefined;
+  }
+  if (
+    typeof value !== "number" ||
+    !Number.isInteger(value) ||
+    value < SCHEDULER_LIMITS.minMaxRunMs ||
+    value > SCHEDULER_LIMITS.maxRunCeilingMs
+  ) {
+    throw new ScheduleStoreError(
+      SCHEDULE_STORE_ERROR_CODES.invalid,
+      `maxRunMs 必须是 ${String(SCHEDULER_LIMITS.minMaxRunMs)}..${String(SCHEDULER_LIMITS.maxRunCeilingMs)} 的整数毫秒`,
+    );
+  }
+  return value;
+}
+
 function validateCreateInput(input: CreateScheduleInput): {
   readonly name: string;
   readonly prompt: string;
   readonly cwd: string;
   readonly trigger: TriggerSpec;
+  readonly maxRunMs: number | undefined;
 } {
   const name = input.name.trim();
   if (name.length === 0 || name.length > SCHEDULER_LIMITS.maxNameChars) {
@@ -391,7 +412,13 @@ function validateCreateInput(input: CreateScheduleInput): {
   if (!trigger.success) {
     throw new ScheduleStoreError(SCHEDULE_STORE_ERROR_CODES.invalid, "trigger 不合法");
   }
-  return { name, prompt, cwd: input.cwd, trigger: trigger.data };
+  return {
+    name,
+    prompt,
+    cwd: input.cwd,
+    trigger: trigger.data,
+    maxRunMs: validateMaxRunMs(input.maxRunMs),
+  };
 }
 
 export class ScheduleStore {
@@ -479,6 +506,7 @@ export class ScheduleStore {
            trigger_json TEXT NOT NULL,
            status TEXT NOT NULL CHECK (status IN ('active', 'paused')),
            authority_digest TEXT,
+           max_run_ms INTEGER,
            next_run_at INTEGER,
            last_run_at INTEGER,
            last_error TEXT,
@@ -527,6 +555,7 @@ export class ScheduleStore {
   private addMissingColumns(): void {
     const additions = [
       { table: "schedules", column: "authority_digest", definition: "TEXT" },
+      { table: "schedules", column: "max_run_ms", definition: "INTEGER" },
       {
         table: "invocations",
         column: "max_attempts",
@@ -626,9 +655,9 @@ export class ScheduleStore {
       this.db
         .prepare(
           `INSERT INTO schedules
-             (id, name, prompt, cwd, trigger_json, status, authority_digest, next_run_at,
-              created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+             (id, name, prompt, cwd, trigger_json, status, authority_digest, max_run_ms,
+              next_run_at, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         )
         .run(
           id,
@@ -638,6 +667,7 @@ export class ScheduleStore {
           JSON.stringify(valid.trigger),
           SCHEDULE_STATUSES.active,
           input.authorityDigest ?? null,
+          valid.maxRunMs ?? null,
           nextRunAt,
           nowMs,
           nowMs,
@@ -707,6 +737,16 @@ export class ScheduleStore {
           ORDER BY COALESCE(started_at, created_at) ASC, created_at ASC`,
       )
       .all(INVOCATION_STATUSES.claimed, INVOCATION_STATUSES.running) as unknown as InvocationRow[];
+    return rows.map(toInvocationRecord);
+  }
+
+  listOccupyingInvocations(): InvocationRecord[] {
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM invocations WHERE ${OCCUPYING_RUN_SQL}
+          ORDER BY COALESCE(started_at, created_at) ASC, created_at ASC`,
+      )
+      .all(...OCCUPYING_RUN_PARAMS) as unknown as InvocationRow[];
     return rows.map(toInvocationRecord);
   }
 
@@ -1026,6 +1066,36 @@ export class ScheduleStore {
       .run(nowMs + this.claimLeaseMs, row.id);
   }
 
+  private pauseInvalidScheduleInTransaction(id: string, error: unknown, nowMs: number): void {
+    this.db
+      .prepare("UPDATE schedules SET status = ?, last_error = ?, updated_at = ? WHERE id = ?")
+      .run(
+        SCHEDULE_STATUSES.paused,
+        `任务配置无法解析，已暂停：${error instanceof Error ? error.message : String(error)}`,
+        nowMs,
+        id,
+      );
+  }
+
+  private decodeScheduleForClaimInTransaction(
+    row: ScheduleRow,
+    nowMs: number,
+  ): ScheduleRecord | undefined {
+    try {
+      return toScheduleRecord(row);
+    } catch (error) {
+      this.pauseInvalidScheduleInTransaction(row.id, error, nowMs);
+      return undefined;
+    }
+  }
+
+  private loadScheduleForClaimInTransaction(id: string, nowMs: number): ScheduleRecord | undefined {
+    const row = this.db.prepare("SELECT * FROM schedules WHERE id = ?").get(id) as
+      | ScheduleRow
+      | undefined;
+    return row === undefined ? undefined : this.decodeScheduleForClaimInTransaction(row, nowMs);
+  }
+
   private hasOtherLiveRunInTransaction(scheduleId: string, exceptId: string): boolean {
     const row = this.db
       .prepare(
@@ -1119,9 +1189,16 @@ export class ScheduleStore {
           this.deferLiveRowInTransaction(row, input.nowMs);
           continue;
         }
+        const schedule = this.loadScheduleForClaimInTransaction(row.schedule_id, input.nowMs);
+        if (schedule === undefined) {
+          if (row.status !== INVOCATION_STATUSES.pending) {
+            this.deferLiveRowInTransaction(row, input.nowMs);
+          }
+          continue;
+        }
         if (
           row.mode === INVOCATION_MODES.scheduled &&
-          row.schedule_status === SCHEDULE_STATUSES.paused
+          schedule.status === SCHEDULE_STATUSES.paused
         ) {
           if (this.treeBlocksTerminal(row)) {
             this.deferLiveRowInTransaction(row, input.nowMs);
@@ -1191,21 +1268,14 @@ export class ScheduleStore {
           INVOCATION_STATUSES.claimed,
           INVOCATION_STATUSES.running,
           INVOCATION_STATUSES.retry,
-          input.limit - claimed.length,
+          this.maxSchedules,
         ) as unknown as ScheduleRow[];
       for (const row of dueRows) {
-        let trigger: TriggerSpec;
-        try {
-          trigger = parseTriggerJson(row.trigger_json);
-        } catch (error) {
-          this.db
-            .prepare("UPDATE schedules SET status = ?, last_error = ?, updated_at = ? WHERE id = ?")
-            .run(
-              SCHEDULE_STATUSES.paused,
-              `触发配置无法解析，已暂停：${error instanceof Error ? error.message : String(error)}`,
-              input.nowMs,
-              row.id,
-            );
+        if (claimed.length >= input.limit) {
+          break;
+        }
+        const schedule = this.decodeScheduleForClaimInTransaction(row, input.nowMs);
+        if (schedule === undefined) {
           continue;
         }
         const id = randomUUID();
@@ -1231,7 +1301,7 @@ export class ScheduleStore {
           );
         this.db
           .prepare("UPDATE schedules SET next_run_at = ?, updated_at = ? WHERE id = ?")
-          .run(computeNextRunAtMs(trigger, input.nowMs), input.nowMs, row.id);
+          .run(computeNextRunAtMs(schedule.trigger, input.nowMs), input.nowMs, row.id);
         if (inserted.changes === 1) {
           const claim = this.loadClaim(id, token);
           if (claim !== undefined) {
@@ -1330,6 +1400,77 @@ export class ScheduleStore {
         )
         .run(input.nowMs, input.nowMs, input.id);
       return COMPLETE_INVOCATION_OUTCOMES.written;
+    });
+  }
+
+  reclassifyTimedOutInvocation(input: {
+    readonly id: string;
+    readonly expectedAttempt: number;
+    readonly error: string;
+    readonly timedOutAtMs: number;
+    readonly nowMs: number;
+  }): InvocationFailureOutcome {
+    return this.transaction(() => {
+      const row = this.db.prepare("SELECT * FROM invocations WHERE id = ?").get(input.id) as
+        | InvocationRow
+        | undefined;
+      if (
+        row === undefined ||
+        row.attempt !== input.expectedAttempt ||
+        (row.finished_at !== null && row.finished_at < input.timedOutAtMs) ||
+        (row.status !== INVOCATION_STATUSES.completed &&
+          row.status !== INVOCATION_STATUSES.needsConfirmation)
+      ) {
+        return INVOCATION_FAILURE_OUTCOMES.lostClaim;
+      }
+      if (this.treeBlocksTerminal(row)) {
+        return INVOCATION_FAILURE_OUTCOMES.treeUnsettled;
+      }
+      if (row.attempt >= row.max_attempts) {
+        const cleared = this.db
+          .prepare(
+            `UPDATE invocations
+                SET thread_id = NULL, output_excerpt = NULL, pending_actions_json = '[]'
+              WHERE id = ? AND attempt = ? AND status IN (?, ?)`,
+          )
+          .run(
+            input.id,
+            input.expectedAttempt,
+            INVOCATION_STATUSES.completed,
+            INVOCATION_STATUSES.needsConfirmation,
+          );
+        if (cleared.changes !== 1) {
+          return INVOCATION_FAILURE_OUTCOMES.lostClaim;
+        }
+        this.markTerminalFailureInTransaction(row, input.error, input.nowMs);
+        return row.mode === INVOCATION_MODES.scheduled
+          ? INVOCATION_FAILURE_OUTCOMES.terminalPaused
+          : INVOCATION_FAILURE_OUTCOMES.terminal;
+      }
+      const result = this.db
+        .prepare(
+          `UPDATE invocations
+             SET status = ?, retry_at = ?, error = ?, finished_at = NULL,
+                 claimed_by = NULL, ownership_token = NULL, lease_until = NULL,
+                 thread_id = NULL, output_excerpt = NULL, pending_actions_json = '[]'
+           WHERE id = ? AND attempt = ? AND status IN (?, ?)`,
+        )
+        .run(
+          INVOCATION_STATUSES.retry,
+          input.nowMs + this.retryBackoffMs,
+          input.error,
+          input.id,
+          input.expectedAttempt,
+          INVOCATION_STATUSES.completed,
+          INVOCATION_STATUSES.needsConfirmation,
+        );
+      if (result.changes !== 1) {
+        return INVOCATION_FAILURE_OUTCOMES.lostClaim;
+      }
+      this.db
+        .prepare("UPDATE schedules SET last_error = ?, updated_at = ? WHERE id = ?")
+        .run(input.error, input.nowMs, row.schedule_id);
+      return INVOCATION_FAILURE_OUTCOMES.retryScheduled;
     });
   }
 

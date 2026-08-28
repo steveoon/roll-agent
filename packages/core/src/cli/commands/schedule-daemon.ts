@@ -18,6 +18,10 @@ import {
 } from "../../scheduler-host/daemon-record.ts";
 import { terminateExecutor } from "../../scheduler-host/executor-liveness.ts";
 import { SCHEDULER_DAEMON_LOCK_NAME, createSchedulerPaths } from "../../scheduler-host/paths.ts";
+import {
+  admitSchedulerDaemonStart,
+  createSchedulerClaimDue,
+} from "../../scheduler-host/scheduler-admission.ts";
 import { createInvocationSpawner } from "../../scheduler-host/spawn-invocation.ts";
 import { installStopSignals } from "../../scheduler-host/stop-signals.ts";
 import { log } from "../utils/output.ts";
@@ -47,6 +51,10 @@ export default defineCommand({
       type: "string",
       description: "同时运行的任务数上限 1..8（服务安装时固化；缺省按配置解析）",
     },
+    "service-generation": {
+      type: "string",
+      description: "用户服务启动握手 generation（由 service manager 固化）",
+    },
   },
   async run({ args }) {
     await runScheduleCommand(async () => {
@@ -67,17 +75,22 @@ export default defineCommand({
       }
       const paths = createSchedulerPaths(dataDir);
       mkdirSync(paths.dataDir, { recursive: true, mode: 0o700 });
+      const serviceGeneration = args["service-generation"]?.trim();
+      if (args["service-generation"] !== undefined && serviceGeneration?.length === 0) {
+        throw new Error("--service-generation 不能为空");
+      }
       let lock;
       try {
-        lock = acquireAgentLifecycleLock(paths.dataDir, SCHEDULER_DAEMON_LOCK_NAME);
+        lock = admitSchedulerDaemonStart(paths.dataDir, serviceGeneration, () =>
+          acquireAgentLifecycleLock(paths.dataDir, SCHEDULER_DAEMON_LOCK_NAME),
+        );
       } catch (error) {
         if (error instanceof AgentLifecycleBusyError) {
           throw new Error("已有 roll schedule daemon 在运行；用 roll schedule status 查看");
         }
         throw error;
       }
-      const record = createDaemonRecord(createDaemonWorkerId());
-      writeDaemonRecord(paths.daemonRecordPath, record);
+      const record = createDaemonRecord(createDaemonWorkerId(), serviceGeneration);
       const fileLogger = new FileCompanionLogger(paths.logPath);
       const mirrorToStderr = process.stderr.isTTY === true;
       const logger = {
@@ -100,6 +113,7 @@ export default defineCommand({
         store,
         workerId: record.workerId,
         maxConcurrentRuns,
+        claimDue: createSchedulerClaimDue(paths.dataDir, (input) => store.claimDue(input)),
         spawnInvocation: createInvocationSpawner({
           invocation: createBundledRollInvocation(),
           dataDir: paths.dataDir,
@@ -108,6 +122,7 @@ export default defineCommand({
         terminateExecutor,
         logger,
       });
+      writeDaemonRecord(paths.daemonRecordPath, record);
       logger.info(
         `data-dir=${paths.dataDir} max-concurrent-runs=${String(maxConcurrentRuns)}（${config === undefined ? "由启动参数固化" : "由配置解析"}）`,
       );

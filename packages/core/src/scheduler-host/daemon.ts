@@ -1,8 +1,11 @@
 import {
+  EXECUTOR_LIVENESS,
   INVOCATION_FAILURE_OUTCOMES,
   SCHEDULER_LIMITS,
+  type ClaimDueInput,
   type ClaimedInvocation,
   type ExecutorIdentity,
+  type ExecutorLiveness,
   type ScheduleStore,
 } from "@roll-agent/runtime";
 import {
@@ -25,6 +28,7 @@ export interface SchedulerDaemonOptions {
   readonly maxConcurrentRuns: number;
   readonly spawnInvocation: InvocationSpawner;
   readonly logger: SchedulerDaemonLogger;
+  readonly claimDue?: (input: ClaimDueInput) => ClaimedInvocation[] | undefined;
   readonly now?: () => number;
   readonly pollIntervalMs?: number;
   readonly leaseRenewIntervalMs?: number;
@@ -45,6 +49,9 @@ interface RunningInvocation {
   readonly runTimer: ReturnType<typeof setTimeout>;
   forceKillTimer: ReturnType<typeof setTimeout> | undefined;
   treeKillUnconfirmed: boolean;
+  timeoutError: string | undefined;
+  timedOutAtMs: number | undefined;
+  rootExited: boolean;
 }
 
 const MAX_TIMER_DELAY_MS = 2_147_483_647;
@@ -82,6 +89,7 @@ export class SchedulerDaemon {
   private readonly maxConcurrentRuns: number;
   private readonly spawnInvocation: InvocationSpawner;
   private readonly logger: SchedulerDaemonLogger;
+  private readonly claimDue: (input: ClaimDueInput) => ClaimedInvocation[] | undefined;
   private readonly now: () => number;
   private readonly pollIntervalMs: number;
   private readonly leaseRenewIntervalMs: number;
@@ -94,7 +102,9 @@ export class SchedulerDaemon {
     | undefined;
   private readonly platform: NodeJS.Platform;
   private readonly running = new Map<string, RunningInvocation>();
+  private admissionRefused = false;
   private readonly terminatingOrphans = new Set<string>();
+  private readonly scheduleCapLookupErrors = new Set<string>();
   private wake = Promise.withResolvers<void>();
   private stopped = false;
   private urgentStop = false;
@@ -105,6 +115,7 @@ export class SchedulerDaemon {
     this.maxConcurrentRuns = options.maxConcurrentRuns;
     this.spawnInvocation = options.spawnInvocation;
     this.logger = options.logger;
+    this.claimDue = options.claimDue ?? ((input) => this.store.claimDue(input));
     this.now = options.now ?? Date.now;
     this.pollIntervalMs = options.pollIntervalMs ?? SCHEDULER_LIMITS.pollIntervalMs;
     this.leaseRenewIntervalMs =
@@ -134,9 +145,9 @@ export class SchedulerDaemon {
     this.renewLeases();
     this.boundOrphans();
     const capacity = this.maxConcurrentRuns - this.running.size;
-    let claims: ClaimedInvocation[];
+    let claimed: ClaimedInvocation[] | undefined;
     try {
-      claims = this.store.claimDue({
+      claimed = this.claimDue({
         workerId: this.workerId,
         nowMs: this.now(),
         limit: Math.max(capacity, 0),
@@ -146,6 +157,8 @@ export class SchedulerDaemon {
       this.logger.error(`claimDue 失败：${errorMessage(error)}`);
       return 0;
     }
+    this.noteAdmission(claimed === undefined);
+    const claims = claimed ?? [];
     for (const claim of claims) {
       this.launch(claim);
     }
@@ -183,8 +196,9 @@ export class SchedulerDaemon {
       this.logger.error(`invocation ${id} 仍在本 daemon 运行中，拒绝重复启动`);
       return;
     }
+    const maxRunMs = claim.schedule.maxRunMs ?? this.maxRunMs;
     this.logger.info(
-      `触发 ${claim.schedule.name}（schedule=${claim.schedule.id} invocation=${id} attempt=${String(claim.invocation.attempt)}）`,
+      `触发 ${claim.schedule.name}（schedule=${claim.schedule.id} invocation=${id} attempt=${String(claim.invocation.attempt)} max-run=${String(maxRunMs)} ms）`,
     );
     let handle: SpawnedInvocation;
     try {
@@ -197,34 +211,51 @@ export class SchedulerDaemon {
     }
     const runTimer = setTimeout(
       () => {
+        const entry = this.running.get(id);
+        if (entry === undefined) {
+          return;
+        }
+        entry.timedOutAtMs = this.now();
+        entry.timeoutError = `invocation ${id} 运行超过 ${String(maxRunMs)} ms`;
         if (this.platform === "win32") {
           this.logger.error(
-            `invocation ${id} 运行超过 ${String(this.maxRunMs)} ms，强制终止 exec 子进程树`,
+            `invocation ${id} 运行超过 ${String(maxRunMs)} ms，强制终止 exec 子进程树`,
           );
           this.signalChild(id, "SIGKILL");
           return;
         }
         this.logger.error(
-          `invocation ${id} 运行超过 ${String(this.maxRunMs)} ms，请求 exec 协作停止并清理工具进程`,
+          `invocation ${id} 运行超过 ${String(maxRunMs)} ms，请求 exec 协作停止并清理工具进程`,
         );
         this.signalChild(id, "SIGTERM");
-        const entry = this.running.get(id);
-        if (entry === undefined) {
-          return;
-        }
         entry.forceKillTimer = setTimeout(() => {
-          if (this.running.get(id) !== entry) {
+          entry.forceKillTimer = undefined;
+          const current = this.running.get(id);
+          if (current === entry && !entry.rootExited) {
+            this.logger.error(
+              `invocation ${id} 在 ${String(this.childTerminateGraceMs)} ms grace 内未退出，发送 SIGKILL`,
+            );
+            this.signalEntry(id, entry, "SIGKILL");
             return;
           }
-          entry.forceKillTimer = undefined;
+          const liveness = this.executorLivenessAfterRootExit(id);
+          if (liveness !== EXECUTOR_LIVENESS.descendants) {
+            return;
+          }
           this.logger.error(
-            `invocation ${id} 在 ${String(this.childTerminateGraceMs)} ms grace 内未退出，发送 SIGKILL`,
+            `invocation ${id} 的 exec root 已退出但后代仍存活，在 ${String(this.childTerminateGraceMs)} ms grace 后对捕获进程树发送 SIGKILL`,
           );
-          this.signalChild(id, "SIGKILL");
+          this.signalEntry(id, entry, "SIGKILL");
+          this.settleStoppedInvocation(
+            id,
+            entry,
+            entry.timeoutError ?? "daemon max-run 已终止 exec 进程树",
+          );
+          this.wake.resolve();
         }, this.childTerminateGraceMs);
         entry.forceKillTimer.unref();
       },
-      Math.min(this.maxRunMs, this.maxTimerDelayMs),
+      Math.min(maxRunMs, this.maxTimerDelayMs),
     );
     runTimer.unref();
     this.running.set(id, {
@@ -233,6 +264,9 @@ export class SchedulerDaemon {
       runTimer,
       forceKillTimer: undefined,
       treeKillUnconfirmed: false,
+      timeoutError: undefined,
+      timedOutAtMs: undefined,
+      rootExited: false,
     });
     handle.exited
       .then((code) => {
@@ -251,20 +285,67 @@ export class SchedulerDaemon {
       return;
     }
     clearTimeout(entry.runTimer);
-    if (entry.forceKillTimer !== undefined) {
-      clearTimeout(entry.forceKillTimer);
+    entry.rootExited = true;
+    let timeoutTreeUnsettled = false;
+    if (entry.timeoutError !== undefined && entry.timedOutAtMs !== undefined) {
+      try {
+        const timeoutOutcome = this.store.reclassifyTimedOutInvocation({
+          id,
+          expectedAttempt: claim.invocation.attempt,
+          error: entry.timeoutError,
+          timedOutAtMs: entry.timedOutAtMs,
+          nowMs: this.now(),
+        });
+        if (
+          timeoutOutcome === INVOCATION_FAILURE_OUTCOMES.retryScheduled ||
+          timeoutOutcome === INVOCATION_FAILURE_OUTCOMES.terminal ||
+          timeoutOutcome === INVOCATION_FAILURE_OUTCOMES.terminalPaused
+        ) {
+          if (entry.forceKillTimer !== undefined) {
+            clearTimeout(entry.forceKillTimer);
+            entry.forceKillTimer = undefined;
+          }
+          this.running.delete(id);
+          this.logger.error(
+            `invocation ${id} 超时后迟到写入成功结果，已按失败重分类：${timeoutOutcome}`,
+          );
+          this.wake.resolve();
+          return;
+        }
+        if (timeoutOutcome === INVOCATION_FAILURE_OUTCOMES.treeUnsettled) {
+          timeoutTreeUnsettled = true;
+          if (entry.forceKillTimer !== undefined) {
+            clearTimeout(entry.forceKillTimer);
+            entry.forceKillTimer = undefined;
+          }
+          this.running.delete(id);
+          this.logger.error(
+            `invocation ${id} 超时结果因进程树未清无法重分类；释放 host entry，running 账本等待 lease 到期后按树门禁复核`,
+          );
+        }
+      } catch (error) {
+        this.logger.error(`invocation ${id} 超时结果重分类失败：${errorMessage(error)}`);
+      }
     }
-    this.running.delete(id);
-    if (entry.treeKillUnconfirmed) {
-      this.logger.error(
-        `invocation ${id} 的 exec 根进程已退出，但此前对其进程树的终止未被确认；保留 running，交给探活与 maxRunMs 处理`,
-      );
+    const liveness = this.executorLivenessAfterRootExit(id);
+    if (liveness !== EXECUTOR_LIVENESS.descendants && entry.forceKillTimer !== undefined) {
+      clearTimeout(entry.forceKillTimer);
+      entry.forceKillTimer = undefined;
+    }
+    if (timeoutTreeUnsettled) {
       this.wake.resolve();
       return;
     }
-    if (this.executorTreeStillAlive(id)) {
+    if (liveness !== EXECUTOR_LIVENESS.dead) {
+      this.running.delete(id);
       this.logger.error(
-        `invocation ${id} 的 exec 根进程已退出，但其进程树仍有存活成员；保留 running，交给探活与 maxRunMs 处理`,
+        liveness === EXECUTOR_LIVENESS.descendants
+          ? entry.forceKillTimer !== undefined
+            ? `invocation ${id} 的 exec root 已退出，但进程树仍有存活成员；保留 running，等待已排定的进程树升级`
+            : `invocation ${id} 的 exec root 已退出，但进程树仍有存活成员；释放 host entry，保留 running，达到运行上限后由孤儿清理按树门禁复核`
+          : entry.treeKillUnconfirmed
+            ? `invocation ${id} 的 exec root 已退出，但此前进程树终止未被确认，executor 探活为 ${liveness}；不对 numeric PGID 发信号，账本保持 running`
+            : `invocation ${id} 的 exec root 已退出，但 executor 探活为 ${liveness}；不对 numeric PGID 发信号，账本保持 running`,
       );
       this.wake.resolve();
       return;
@@ -274,7 +355,8 @@ export class SchedulerDaemon {
       outcome = this.store.failInvocation(
         id,
         claim.ownershipToken,
-        `exec 进程退出 code=${code === null ? "null" : String(code)}，未写入执行结果`,
+        entry.timeoutError ??
+          `exec 进程退出 code=${code === null ? "null" : String(code)}，未写入执行结果`,
         this.now(),
       );
     } catch (error) {
@@ -283,12 +365,14 @@ export class SchedulerDaemon {
       return;
     }
     if (outcome === INVOCATION_FAILURE_OUTCOMES.treeUnsettled) {
+      this.running.delete(id);
       this.logger.error(
-        `invocation ${id} 的 exec 已退出，但登记的进程树未清干净；保留 running、不再触发，lease 到期后按树门禁复核，可用 roll schedule cancel ${id} --kill 清场`,
+        `invocation ${id} 的 exec 已退出，但登记的进程树未清干净；释放 host entry，running 账本不再续租，lease 到期后按树门禁复核，可用 roll schedule cancel ${id} --kill 清场`,
       );
       this.wake.resolve();
       return;
     }
+    this.running.delete(id);
     if (outcome !== "lost-claim") {
       this.logger.error(
         `invocation ${id} 未正常完成（code=${String(code)}），处理结果：${outcome}`,
@@ -306,6 +390,10 @@ export class SchedulerDaemon {
     if (entry === undefined) {
       return;
     }
+    this.signalEntry(id, entry, signal);
+  }
+
+  private signalEntry(id: string, entry: RunningInvocation, signal: "SIGTERM" | "SIGKILL"): void {
     const outcome = entry.handle.kill(signal);
     if (typeof outcome !== "string") {
       return;
@@ -323,18 +411,58 @@ export class SchedulerDaemon {
     }
   }
 
-  private executorTreeStillAlive(id: string): boolean {
+  private executorLivenessAfterRootExit(id: string): ExecutorLiveness {
     let record: ReturnType<ScheduleStore["getInvocation"]>;
     try {
       record = this.store.getInvocation(id);
     } catch (error) {
       this.logger.error(`invocation ${id} 退出后读取账本失败：${errorMessage(error)}`);
-      return false;
+      return EXECUTOR_LIVENESS.unknown;
     }
-    if (record?.status !== "running" || record.executor === undefined) {
-      return false;
+    if (record === undefined || record.status !== "running") {
+      return EXECUTOR_LIVENESS.dead;
     }
-    return this.store.probeExecutor(record.executor) !== "dead";
+    if (record.executor === undefined) {
+      return EXECUTOR_LIVENESS.unknown;
+    }
+    try {
+      return this.store.probeExecutor(record.executor);
+    } catch (error) {
+      this.logger.error(`invocation ${id} 的 executor 探活失败：${errorMessage(error)}`);
+      return EXECUTOR_LIVENESS.unknown;
+    }
+  }
+
+  private settleStoppedInvocation(
+    id: string,
+    entry: RunningInvocation,
+    reason: string = "daemon 停止时已终止 exec 进程树",
+  ): void {
+    let record: ReturnType<ScheduleStore["getInvocation"]>;
+    try {
+      record = this.store.getInvocation(id);
+    } catch (error) {
+      this.logger.error(`invocation ${id} 停止后读取账本失败：${errorMessage(error)}`);
+      return;
+    }
+    if (
+      record?.status !== "running" ||
+      this.executorLivenessAfterRootExit(id) !== EXECUTOR_LIVENESS.dead
+    ) {
+      return;
+    }
+    let outcome: ReturnType<ScheduleStore["failInvocation"]>;
+    try {
+      outcome = this.store.failInvocation(id, entry.ownershipToken, reason, this.now());
+    } catch (error) {
+      this.logger.error(`invocation ${id} 停止后写账本失败：${errorMessage(error)}`);
+      return;
+    }
+    if (outcome === INVOCATION_FAILURE_OUTCOMES.treeUnsettled) {
+      this.logger.error(`invocation ${id} 的 exec 已停止但登记进程树未清，继续保持 running`);
+      return;
+    }
+    this.running.delete(id);
   }
 
   private renewLeases(): void {
@@ -350,7 +478,7 @@ export class SchedulerDaemon {
     if (terminateExecutor === undefined) {
       return;
     }
-    const cutoff = this.now() - this.maxRunMs;
+    const nowMs = this.now();
     let rows: ReturnType<ScheduleStore["listRunningInvocations"]>;
     try {
       rows = this.store.listRunningInvocations();
@@ -363,9 +491,15 @@ export class SchedulerDaemon {
         this.running.has(row.id) ||
         this.terminatingOrphans.has(row.id) ||
         row.executor === undefined ||
-        row.startedAtMs === undefined ||
-        row.startedAtMs > cutoff
+        row.startedAtMs === undefined
       ) {
+        continue;
+      }
+      const maxRunMs = this.resolveMaxRunMs(row.scheduleId);
+      if (maxRunMs === undefined) {
+        continue;
+      }
+      if (row.startedAtMs > nowMs - maxRunMs) {
         continue;
       }
       this.terminatingOrphans.add(row.id);
@@ -378,7 +512,7 @@ export class SchedulerDaemon {
       })
         .then((outcome) => {
           this.logger.error(
-            `invocation ${row.id} 的 exec 进程 (pid ${String(executor.pid)}) 不属于本 daemon 且运行超过 ${String(this.maxRunMs)} ms，终止结果：${outcome}`,
+            `invocation ${row.id} 的 exec 进程 (pid ${String(executor.pid)}) 不属于本 daemon 且运行超过 ${String(maxRunMs)} ms，终止结果：${outcome}`,
           );
         })
         .catch((error: unknown) => {
@@ -388,6 +522,49 @@ export class SchedulerDaemon {
           this.terminatingOrphans.delete(row.id);
         });
     }
+  }
+
+  private noteAdmission(refused: boolean): void {
+    if (refused === this.admissionRefused) {
+      return;
+    }
+    this.admissionRefused = refused;
+    if (refused) {
+      this.logger.error(
+        "scheduler admission 拒绝领取新任务：service metadata 处于 installing 或无法解析，或另一个 scheduler 维护操作持有锁；在恢复前不会触发任何任务。用 roll schedule service status 查看原因，必要时 roll schedule service restart",
+      );
+      return;
+    }
+    this.logger.info("scheduler admission 已恢复，继续领取到期任务");
+  }
+
+  private resolveMaxRunMs(scheduleId: string): number | undefined {
+    try {
+      const schedule = this.store.getSchedule(scheduleId);
+      if (schedule === undefined) {
+        this.noteScheduleCapLookupError(
+          scheduleId,
+          `schedule ${scheduleId} 不存在，运行上限未知；跳过孤儿清理`,
+        );
+        return undefined;
+      }
+      this.scheduleCapLookupErrors.delete(scheduleId);
+      return schedule.maxRunMs ?? this.maxRunMs;
+    } catch (error) {
+      this.noteScheduleCapLookupError(
+        scheduleId,
+        `读取 schedule ${scheduleId} 的运行上限失败：${errorMessage(error)}；跳过孤儿清理`,
+      );
+      return undefined;
+    }
+  }
+
+  private noteScheduleCapLookupError(scheduleId: string, message: string): void {
+    if (this.scheduleCapLookupErrors.has(scheduleId)) {
+      return;
+    }
+    this.scheduleCapLookupErrors.add(scheduleId);
+    this.logger.error(message);
   }
 
   private async sleepUntilWake(progressed: boolean): Promise<void> {
@@ -409,46 +586,60 @@ export class SchedulerDaemon {
   }
 
   private async terminateChildren(): Promise<void> {
+    const targets = [...this.running.entries()];
     if (this.urgentStop) {
-      for (const id of this.running.keys()) {
+      for (const [id, entry] of targets) {
         this.logger.error(`invocation ${id}：紧急停止，不等待 grace，立即强制终止 exec 进程树`);
-        this.signalChild(id, "SIGKILL");
+        this.signalEntry(id, entry, "SIGKILL");
       }
       await settleWithin(
-        [...this.running.values()].map((entry) => entry.handle.exited),
+        targets.map(([, entry]) => entry.handle.exited),
         this.urgentStopSettleMs,
       );
+      for (const [id, entry] of targets) {
+        this.settleStoppedInvocation(id, entry);
+      }
       this.releaseUnconfirmed();
       return;
     }
     if (this.platform === "win32") {
-      if (this.running.size > 0) {
+      if (targets.length > 0) {
         this.logger.info(
           `Windows 没有优雅终止信号，等待 ${String(this.childTerminateGraceMs)} ms grace 后强制终止 exec 进程树`,
         );
       }
     } else {
-      for (const id of this.running.keys()) {
-        this.signalChild(id, "SIGTERM");
+      for (const [id, entry] of targets) {
+        this.signalEntry(id, entry, "SIGTERM");
       }
     }
     await settleWithin(
-      [...this.running.values()].map((entry) => entry.handle.exited),
+      targets.map(([, entry]) => entry.handle.exited),
       this.childTerminateGraceMs,
     );
-    if (this.running.size === 0) {
+    const forceTargets = targets.filter(([id, entry]) => {
+      const current = this.running.get(id);
+      return (
+        (current === entry && !entry.rootExited) ||
+        this.executorLivenessAfterRootExit(id) === EXECUTOR_LIVENESS.descendants
+      );
+    });
+    if (forceTargets.length === 0) {
       return;
     }
-    for (const id of this.running.keys()) {
+    for (const [id, entry] of forceTargets) {
       this.logger.error(
         `invocation ${id} 的 exec 子进程在 ${String(this.childTerminateGraceMs)} ms 内未退出，发送 SIGKILL`,
       );
-      this.signalChild(id, "SIGKILL");
+      this.signalEntry(id, entry, "SIGKILL");
     }
     await settleWithin(
-      [...this.running.values()].map((entry) => entry.handle.exited),
+      forceTargets.map(([, entry]) => entry.handle.exited),
       this.childTerminateGraceMs,
     );
+    for (const [id, entry] of forceTargets) {
+      this.settleStoppedInvocation(id, entry);
+    }
     this.releaseUnconfirmed();
   }
 

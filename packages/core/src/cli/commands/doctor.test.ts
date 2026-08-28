@@ -7,6 +7,7 @@ import {
   formatDoctorFixLines,
   formatDoctorJsonOutput,
   isNodeVersionSupported,
+  formatSchedulerServiceCheck,
 } from "./doctor.ts";
 
 describe("isNodeVersionSupported", () => {
@@ -164,5 +165,152 @@ describe("formatAgentUsageRecoveryCheck", () => {
     assert.equal(check.status, "warn");
     assert.match(check.message, /无法安全自动恢复/u);
     assert.doesNotMatch(check.fix ?? "", /--recover/u);
+  });
+});
+
+describe("formatSchedulerServiceCheck", () => {
+  const current = {
+    command: "/n/v24/bin/node",
+    cliEntrypoint: "/n/v24/roll.js",
+    rollVersion: "1.0.1",
+  };
+
+  it("reports ok when the service is not installed", () => {
+    const check = formatSchedulerServiceCheck({
+      metadataStatus: "missing",
+      installed: false,
+      running: false,
+    });
+    assert.equal(check.status, "ok");
+    assert.match(check.message, /未安装/u);
+  });
+
+  it("fails when the pinned node or entrypoint no longer exists", () => {
+    const check = formatSchedulerServiceCheck({
+      metadataStatus: "valid",
+      installed: true,
+      running: false,
+      binary: {
+        status: "broken",
+        recorded: { ...current, command: "/n/v22/bin/node" },
+        current,
+        commandExists: false,
+        entrypointExists: true,
+        versionMismatch: false,
+        reason: "服务定义指向的 node 已不存在：/n/v22/bin/node",
+      },
+    });
+    assert.equal(check.status, "fail");
+    assert.match(check.message, /\/n\/v22\/bin\/node/u);
+    assert.match(check.fix ?? "", /roll schedule service restart/u);
+    assert.deepEqual(check.details, {
+      type: "scheduler-service",
+      binary: "broken",
+      running: false,
+    });
+  });
+
+  it("warns when the daemon still runs an older roll than the current install", () => {
+    const check = formatSchedulerServiceCheck({
+      metadataStatus: "valid",
+      installed: true,
+      running: true,
+      binary: {
+        status: "outdated",
+        recorded: { ...current, rollVersion: "1.0.0" },
+        current,
+        commandExists: true,
+        entrypointExists: true,
+        versionMismatch: true,
+        reason: "服务定义指向 roll v1.0.0，当前为 v1.0.1",
+      },
+    });
+    assert.equal(check.status, "warn");
+    assert.match(check.message, /v1\.0\.0/u);
+    assert.match(check.fix ?? "", /roll schedule service restart/u);
+  });
+
+  it("warns when installed but the daemon is not running even though the binary is current", () => {
+    const check = formatSchedulerServiceCheck({
+      metadataStatus: "valid",
+      installed: true,
+      running: false,
+      binary: {
+        status: "current",
+        recorded: current,
+        current,
+        commandExists: true,
+        entrypointExists: true,
+        versionMismatch: false,
+        reason: undefined,
+      },
+    });
+    assert.equal(check.status, "warn");
+    assert.match(check.message, /daemon 未运行/u);
+    assert.match(check.fix ?? "", /roll schedule service status/u);
+  });
+
+  it("is ok when installed, running and current", () => {
+    const check = formatSchedulerServiceCheck({
+      metadataStatus: "valid",
+      installed: true,
+      running: true,
+      binary: {
+        status: "current",
+        recorded: current,
+        current,
+        commandExists: true,
+        entrypointExists: true,
+        versionMismatch: false,
+        reason: undefined,
+      },
+    });
+    assert.equal(check.status, "ok");
+    assert.match(check.message, /v1\.0\.1/u);
+  });
+
+  it("warns while service metadata is still installing even if the OS job is running", () => {
+    const check = formatSchedulerServiceCheck({
+      metadataStatus: "valid",
+      metadataPhase: "installing",
+      installed: true,
+      running: true,
+      binary: {
+        status: "current",
+        recorded: current,
+        current,
+        commandExists: true,
+        entrypointExists: true,
+        versionMismatch: false,
+        reason: undefined,
+      },
+    });
+    assert.equal(check.status, "warn");
+    assert.match(check.message, /installing/u);
+    assert.match(check.fix ?? "", /roll schedule service restart/u);
+  });
+
+  it("warns when the probe itself failed", () => {
+    const check = formatSchedulerServiceCheck({
+      metadataStatus: "missing",
+      installed: false,
+      running: false,
+      error: "launchctl unavailable",
+    });
+    assert.equal(check.status, "warn");
+    assert.match(check.message, /launchctl unavailable/u);
+  });
+
+  it("fails on unparseable metadata because every claim is blocked until it is cleared", () => {
+    const check = formatSchedulerServiceCheck({
+      metadataStatus: "invalid",
+      installed: false,
+      running: false,
+      error: "metadata 损坏",
+    });
+    assert.equal(check.status, "fail");
+    assert.match(check.message, /metadata 损坏/u);
+    assert.match(check.message, /阻塞/u);
+    assert.match(check.fix ?? "", /roll schedule service uninstall/u);
   });
 });

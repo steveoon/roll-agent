@@ -136,6 +136,7 @@ export interface ScheduleRecord {
   readonly trigger: TriggerSpec;
   readonly status: ScheduleStatus;
   readonly authorityDigest: string | undefined;
+  readonly maxRunMs: number | undefined;
   readonly nextRunAtMs: number | undefined;
   readonly lastRunAtMs: number | undefined;
   readonly lastError: string | undefined;
@@ -183,6 +184,7 @@ export interface CreateScheduleInput {
   readonly trigger: TriggerSpec;
   readonly fireImmediately?: boolean;
   readonly authorityDigest?: string;
+  readonly maxRunMs?: number;
 }
 
 export interface EnqueueManualInvocationOptions {

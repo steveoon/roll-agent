@@ -12,6 +12,7 @@ export default defineCommand({
   subCommands: {
     install: () => loadScheduleServiceCommand("schedule-service-install"),
     uninstall: () => loadScheduleServiceCommand("schedule-service-uninstall"),
+    restart: () => loadScheduleServiceCommand("schedule-service-restart"),
     status: () => loadScheduleServiceCommand("schedule-service-status"),
   },
 });

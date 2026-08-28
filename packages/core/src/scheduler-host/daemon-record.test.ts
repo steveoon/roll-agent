@@ -12,6 +12,7 @@ import {
   isInlineWorkerId,
   readDaemonRecord,
   removeDaemonRecord,
+  waitForDaemonGeneration,
   writeDaemonRecord,
 } from "./daemon-record.ts";
 
@@ -71,6 +72,26 @@ test("daemon 记录写入、读回、按 pid+token 删除", () => {
     assert.deepEqual(readDaemonRecord(path), record);
     removeDaemonRecord(path, record);
     assert.equal(readDaemonRecord(path), undefined);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("service generation 随 daemon record 持久化，并作为启动就绪门禁", async () => {
+  const dir = tempDir();
+  const path = join(dir, "daemon.json");
+  try {
+    const record = createDaemonRecord("w-service", "service-generation");
+    writeDaemonRecord(path, record);
+    assert.equal(readDaemonRecord(path)?.serviceGeneration, "service-generation");
+    assert.deepEqual(
+      await waitForDaemonGeneration(path, "service-generation", { timeoutMs: 0 }),
+      record,
+    );
+    await assert.rejects(
+      waitForDaemonGeneration(path, "different-generation", { timeoutMs: 0 }),
+      /different-generation/u,
+    );
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

@@ -721,6 +721,7 @@ function passthroughStore(
 ): OpenedWindowsSchedulerServiceStore["store"] {
   return {
     listActiveWorkerInvocations: () => store.listActiveWorkerInvocations(),
+    listOccupyingInvocations: () => store.listOccupyingInvocations(),
     prepareWorkerShutdown: (workerId, reason, nowMs) =>
       store.prepareWorkerShutdown(workerId, reason, nowMs),
     probeExecutor,

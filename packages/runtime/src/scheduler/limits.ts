@@ -9,6 +9,8 @@ export const SCHEDULER_LIMITS = {
   retryBackoffMs: 10_000,
   pollIntervalMs: 15_000,
   maxRunMs: 3_600_000,
+  minMaxRunMs: 60_000,
+  maxRunCeilingMs: 86_400_000,
   childTerminateGraceMs: 10_000,
   invocationRetentionPerSchedule: 100,
   invocationRetentionMs: 2_592_000_000,

@@ -19,6 +19,7 @@ import {
   startAgent,
   stopAgentGracefully,
   waitForAgentReady,
+  type AgentLifecycleLock,
   type ManagedAgentRuntimeRetention,
 } from "../../registry/process-manager.ts";
 import {
@@ -70,6 +71,13 @@ import {
 } from "../utils/package-manager.ts";
 import type { AgentSourceType, RegisteredAgent } from "../../types/agent.ts";
 import type { RollConfig } from "../../config/schema.ts";
+import { createBundledRollInvocation } from "../../companion-host/invocation.ts";
+import { acquireSchedulerAdmissionLockWithRetry } from "../../scheduler-host/scheduler-admission.ts";
+import {
+  SCHEDULER_UPDATE_RECONCILE_OUTCOMES,
+  reconcileSchedulerServiceAfterUpdate,
+  type SchedulerServiceRestartRun,
+} from "./update-scheduler-service.ts";
 
 type InstallConfig = RollConfig["install"];
 
@@ -537,6 +545,9 @@ export default defineCommand({
     } else {
       log.info(`roll 已是最新版本 (v${info.current})`);
     }
+    if (isCheckOnly) {
+      await reportSchedulerServiceBinaryDrift();
+    }
 
     // === 2. 检查已注册 Agent ===
     let agentsConfig: ReturnType<typeof loadAgentsConfig>["agentsConfig"] | undefined;
@@ -642,6 +653,16 @@ export default defineCommand({
     let registryLock: AgentRegistryLock | undefined;
     let maintenanceGuards: readonly AgentUsageMaintenanceGuard[] = [];
     let managedRuntimeBaselines = new Map<string, UpdateManagedRuntimeBaseline>();
+    let schedulerAdmissionLock: AgentLifecycleLock | undefined;
+    try {
+      schedulerAdmissionLock = await acquireSchedulerAdmissionLockWithRetry();
+    } catch (error) {
+      log.error(
+        `更新前无法暂停 scheduler 领取新任务，尚未修改软件包：${error instanceof Error ? error.message : String(error)}`,
+      );
+      process.exitCode = 1;
+      return;
+    }
     if (agentsConfig !== undefined && store !== undefined) {
       try {
         registryLock = await acquireAgentRegistryLockAsync(agentsConfig.dataDir);
@@ -658,6 +679,8 @@ export default defineCommand({
       } catch (error) {
         releaseUpdateMaintenanceGuards(maintenanceGuards);
         registryLock?.release();
+        schedulerAdmissionLock?.release();
+        schedulerAdmissionLock = undefined;
         log.error(
           `更新前 Agent 使用状态检查失败，尚未修改软件包或注册数据：${error instanceof Error ? error.message : String(error)}`,
         );
@@ -666,9 +689,9 @@ export default defineCommand({
       }
     }
 
+    let selfUpdated = false;
     try {
       // 3a. 更新 roll-core
-      let selfUpdated = false;
       let selfUpdateFailed = false;
       if (info.hasUpdate) {
         selfUpdated = await updateSelf(info.latest, false, installConfig);
@@ -682,7 +705,6 @@ export default defineCommand({
         log.info("");
         logConfigInspectionNotice(configInspection, "post-update");
       }
-
       if (agentsConfig === undefined || store === undefined) {
         log.warn("无法可靠读取 Agent 注册表，已跳过已注册 Agent 更新。");
       }
@@ -962,9 +984,40 @@ export default defineCommand({
         );
       }
 
+      releaseUpdateMaintenanceGuards(maintenanceGuards);
+      maintenanceGuards = [];
+      registryLock?.release();
+      registryLock = undefined;
+      schedulerAdmissionLock?.release();
+      schedulerAdmissionLock = undefined;
+
+      let schedulerReconcileFailed = false;
+      if (selfUpdated) {
+        const schedulerResult = await reconcileSchedulerServiceAfterUpdate(
+          runSchedulerServiceRestartInFreshProcess,
+        );
+        switch (schedulerResult.outcome) {
+          case SCHEDULER_UPDATE_RECONCILE_OUTCOMES.restarted:
+            log.success("roll schedule daemon 用户服务已按新版本重装并重启。");
+            break;
+          case SCHEDULER_UPDATE_RECONCILE_OUTCOMES.deferred:
+            log.warn(`roll schedule daemon 用户服务仍在运行旧版本：${schedulerResult.reason}`);
+            break;
+          case SCHEDULER_UPDATE_RECONCILE_OUTCOMES.failed:
+            schedulerReconcileFailed = true;
+            log.warn(
+              `roll schedule daemon 用户服务自动重启失败：${schedulerResult.error}；请手动执行 roll schedule service restart`,
+            );
+            break;
+          case SCHEDULER_UPDATE_RECONCILE_OUTCOMES.notInstalled:
+            break;
+        }
+      }
+
       // === 4. 总结 ===
       log.info("");
-      const totalFailed = failedCount + (selfUpdateFailed ? 1 : 0);
+      const totalFailed =
+        failedCount + (selfUpdateFailed ? 1 : 0) + (schedulerReconcileFailed ? 1 : 0);
       if (totalFailed > 0) {
         process.exitCode = 1;
         const rollStatus = selfUpdateFailed
@@ -975,7 +1028,7 @@ export default defineCommand({
         log.warn(
           `更新完成但有失败：${rollStatus}${
             failedCount > 0 ? `，${failedCount} 个 Agent 更新失败` : ""
-          }${updatedCount > 0 ? `，${updatedCount} 个 Agent 已更新` : ""}`,
+          }${schedulerReconcileFailed ? "，scheduler service 重启失败" : ""}${updatedCount > 0 ? `，${updatedCount} 个 Agent 已更新` : ""}`,
         );
         return;
       }
@@ -1004,6 +1057,7 @@ export default defineCommand({
     } finally {
       releaseUpdateMaintenanceGuards(maintenanceGuards);
       registryLock?.release();
+      schedulerAdmissionLock?.release();
     }
   },
 });
@@ -1047,5 +1101,65 @@ async function startManagedAgentAndWait(
       }).catch(() => {});
     }
     throw err;
+  }
+}
+
+const commandExtension = import.meta.url.endsWith(".ts") ? "ts" : "js";
+
+async function loadScheduleServiceUtils(): Promise<typeof import("./schedule-service-utils.ts")> {
+  const specifier = new URL(`./schedule-service-utils.${commandExtension}`, import.meta.url).href;
+  const utils: typeof import("./schedule-service-utils.ts") = await import(specifier);
+  return utils;
+}
+
+function runSchedulerServiceRestartInFreshProcess(): Promise<SchedulerServiceRestartRun> {
+  const invocation = createBundledRollInvocation();
+  return new Promise((resolve, reject) => {
+    execFile(
+      invocation.command,
+      [
+        ...invocation.execArgv,
+        invocation.cliEntrypoint,
+        "schedule",
+        "service",
+        "restart",
+        "--json",
+      ],
+      { timeout: 180_000, maxBuffer: 4 * 1024 * 1024 },
+      (error, stdout, stderr) => {
+        if (error === null) {
+          resolve({ exitCode: 0, stdout, stderr });
+          return;
+        }
+        if (typeof error.code === "number") {
+          resolve({ exitCode: error.code, stdout, stderr });
+          return;
+        }
+        if (error.killed === true) {
+          resolve({ exitCode: null, stdout, stderr: `${stderr}\n子进程超时被终止` });
+          return;
+        }
+        reject(error);
+      },
+    );
+  });
+}
+
+async function reportSchedulerServiceBinaryDrift(): Promise<void> {
+  try {
+    const utils = await loadScheduleServiceUtils();
+    const probe = await utils.probeSchedulerService();
+    if (probe.error !== undefined) {
+      log.warn(`无法检查 scheduler service 二进制状态：${probe.error}`);
+      return;
+    }
+    if (!probe.installed || probe.binary === undefined || probe.binary.reason === undefined) {
+      return;
+    }
+    log.warn(`scheduler service: ${probe.binary.reason}`);
+  } catch (error) {
+    log.warn(
+      `无法检查 scheduler service 二进制状态：${error instanceof Error ? error.message : String(error)}`,
+    );
   }
 }

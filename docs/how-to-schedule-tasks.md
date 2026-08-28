@@ -1,77 +1,446 @@
-# 如何用 roll schedule 定时运行一轮 chat
+# 使用 `roll schedule` 定时运行 Chat 任务
 
-目标：让 roll 在没人盯着终端的时候，按固定周期无人值守地跑一轮 `roll chat`，并把每次运行的结果和失败原因留在本地账本里。
+`roll schedule` 可以按固定间隔，在没有人守着终端时自动运行一轮 `roll chat`。
+每次运行都会创建一个新线程，并把状态、结果摘要和失败原因写入本地账本。
+
+本文中的两个术语：
+
+- **任务（schedule）**：长期保存的定时规则，例如“每 30 分钟检查一次未读消息”。
+- **运行（invocation）**：任务的一次具体执行。排查问题或取消运行时使用 invocation ID。
+
+## 快速导航
+
+- [快速开始](#快速开始)
+- [常用命令](#常用命令)
+- [理解运行状态](#理解运行状态)
+- [重试、补跑和单例](#重试补跑和单例)
+- [安全地取消运行](#安全地取消运行)
+- [进程清理与平台差异](#进程清理与平台差异)
+- [配置](#配置)
+- [升级 roll / 切换 Node 之后](#升级-roll--切换-node-之后)
+- [排查问题](#排查问题)
 
 ## 前置条件
 
-- 已配置 LLM（`roll doctor` 通过，`roll chat "hi" --json` 能返回 `completed`）。
-- Node.js ≥ 22.6，`roll` 已安装（`roll --version`）。22.6–22.12 上 `roll` 启动器会自动为 `schedule` 子命令附加 `--experimental-sqlite`。
+- Node.js 版本不低于 22.6。
+- 已安装 `roll`，并且 `roll --version` 可以正常运行。
+- LLM 已配置；建议先确认 `roll doctor` 通过，且 `roll chat "hi" --json` 能返回
+  `completed`。
 
-## 步骤
+> **Node.js 22.6–22.12**
+>
+> 已安装的 `roll` 启动器会为 `chat` 和 `schedule` 自动启用实验性的 `node:sqlite`。
+> Windows 用户仍建议使用 Node.js 22.13 或更高版本。
 
-1. 登记任务（`--now` 让它登记后立刻触发一次）：
+## 快速开始
 
-   ```bash
-   roll schedule add "检查未读消息并汇总，不要调用需要确认的工具" \
-     --name 巡检 --every 30m --cwd ~/work --now
-   ```
+### 1. 登记任务
 
-   `--every` 接受 `Ns` / `Nm` / `Nh` / `Nd`，最短 60 秒、最长 365 天；`--cwd` 决定运行时的工作目录（默认当前目录），运行时的 LLM / Agent / 审批配置按该目录解析，而任务账本始终写在登记时解析出的 `scheduler.data-dir`。登记时会记录该目录下 `runtime.approval` / `runtime.shell` 的权限边界摘要。
+下面的任务每 30 分钟运行一次。`--now` 表示把首次运行设为立即到期；真正执行仍需要
+daemon。
 
-2. 前台试跑 daemon，观察第一次触发：
+```bash
+roll schedule add "检查未读消息并汇总，不要调用需要确认的工具" \
+  --name "未读消息巡检" \
+  --every 30m \
+  --cwd ~/work \
+  --now
+```
 
-   ```bash
-   roll schedule daemon --foreground
-   ```
+`--every` 支持 `s`、`m`、`h`、`d` 四种单位，例如 `60s`、`30m`、`2h`、`1d`。
+间隔最短 60 秒，最长 365 天。
 
-   15 秒内应看到 `触发 巡检（schedule=… invocation=…）` 和 `invocation … 完成`。Ctrl+C 退出。
+`--max-run` 设定这个任务单次运行的时长上限，语法与 `--every` 相同，范围 60 秒到 24 小时，
+缺省 1 小时。daemon 和 `run-now --inline` 都会在超过上限时终止本次运行；daemon 按失败
+重试，`--inline` 只尝试一次并退出 1。需要跑几个小时的任务写
+`--max-run 6h`；但更推荐把长任务拆成多轮短任务（每轮只处理固定数量，其余留给下一轮），
+因为每次触发都是新线程，中途失败会整轮重来。`roll schedule list` 行尾和 `show --json` 的
+`maxRun` / `maxRunMs` 会显示显式设置的值；字段缺省表示使用 1 小时默认上限。
 
-3. 安装为用户级常驻服务（macOS LaunchAgent / Windows 当前用户 Scheduled Task，随登录启动；Windows 任务通过 XML 注册，不受 `schtasks /TR` 261 字符限制，无运行时长上限，失败后每分钟重启最多 3 次，电池供电不影响启动）：
+`--cwd` 是任务实际运行时的工作目录，默认使用登记命令的当前目录。Roll 会保存该目录的
+真实绝对路径，并在这里加载 LLM、Agent、Skill、Shell 和审批配置。
 
-   ```bash
-   roll schedule service install
-   roll schedule service status
-   ```
+### 2. 前台试跑 daemon
 
-4. 查看结果：
+首次使用时，建议先在前台运行 daemon：
 
-   ```bash
-   roll schedule list                # 每个任务的状态、周期、下次运行、上次失败原因
-   roll schedule runs <id>           # 历次运行：completed / needs_confirmation / failed、thread id
-   roll schedule status              # daemon 是否存活、任务统计、下次唤醒时间
-   roll chat --session <threadId>    # 打开某次运行的线程继续对话
-   ```
+```bash
+roll schedule daemon --foreground
+```
 
-## 运行时的行为
+daemon 启动后会立即检查到期任务；空闲时最长每 15 秒检查一次。你应该很快看到类似下面的
+触发日志：
 
-- **无人值守**：每次触发起一个新 thread，以 `background` 模式运行。需要人工确认的工具调用会被策略直接拒绝，模型会跳过并在结尾说明；这样的运行记为 `needs_confirmation`，调度照常推进。
-- **失败与重试**：exec 子进程抛错或非零退出 → 10 秒后重试，每次触发最多尝试 3 次（首次 + 2 次重试）；用完后任务自动 `paused`，`roll schedule list` 会显示原因。修好后 `roll schedule resume <id>`。`pause` 会立即放弃该任务**尚未开始且进程树已清**的 scheduled 重试；若账本仍登记着未清进程树，pause 只停后续触发，那次 invocation 保持 `retry` / `running`，直到 `cancel --kill` 清场。
-- **同一任务同一时刻只运行一次**：无论 scheduled 还是 manual 触发，账本事务里都会拒绝在已有 `claimed` / `running`、或 `retry` 且仍有未清进程树时再启动一次。周期触发遇到上一轮未结束会跳过并重新计算下次时间；`run-now` 入队的记录会等上一轮结束后由 daemon 执行；`run-now --inline` 遇到运行中的任务直接退出 1。
-- **取消一次运行**：`roll schedule cancel <invocation-id>` 对排队中（`pending` / `retry`）和尚未启动（`claimed`）的记录，若没有未清的持久化进程树则直接置终态并作废 token；若账本里仍登记着未清树，需要 `--kill` 才能取消（`pending` 记录不会持有进程树，带不带 `--kill` 都直接取消）。对 `running` 的记录，取消必须加 `--kill`：POSIX 先 SIGTERM 请求 active turn 与 Bash 协作清理，grace 后仍存活才 SIGKILL，确认 exec 退出后再按账本里的登记组清场。Windows 直接 `taskkill /T /F`。`cancel` 用 attempt 做 CAS：读快照到写账本之间若已被其他 worker 接管，拒绝改写新 owner。exec 被停止信号中断后不会自行写入失败结果（行保持 `running`，由 cancel / daemon / `--inline` 发起方决定终态），所以最后一次 attempt 上的 `--kill` 不会把任务记成失败并暂停。只有确认 exec 进程组已退出且可枚举树为空后才置终态（Windows 只能确认根进程：`--kill` 取消总会打印「后代不可验证」告警，`--json` 时体现为 `unverifiedDescendants: true`，只有探活为 unknown 时才需要 `--abandon`）；进程树无法整体终止时不会退回只杀根进程，取消被拒绝、单例不释放；`--kill` 与 `--abandon` 互斥。探活永远是 unknown 的记录（例如平台读不到进程身份）只能用 `--abandon` 放弃追踪——这是危险操作，旧进程若还活着，其副作用不会被阻止。
-- **暂停 / 恢复不改相位**：`pause` 后 `resume`，仍按原来的下次运行时间执行。
-- **删除任务**：`roll schedule remove <id>` 在仍有 `claimed` / `running`、或 `retry` 且未清进程树时会拒绝；确认要丢弃账本（残留进程不会被停止）时用 `remove --abandon`。
-- **权限边界漂移即停**：每次执行前会把当前 `runtime.approval` / `runtime.shell` 配置的摘要与登记时对比，不一致（无论放宽还是收紧）都不会运行，任务直接 `paused` 并给出原因。摘要只覆盖审批策略与 shell 开关，不覆盖已注册 Agent / skills 的变化。`roll schedule resume <id>` 同时是「重新授权」：它总会以 `--cwd` 目录当前的配置重新记录摘要（对 active 任务也一样），摘要变化时会打印提示。
-- **不会重复执行同一次触发**：exec 子进程会把自己的 PID 与 OS 启动身份写进账本；即使 daemon 被强杀、机器休眠后 lease 过期，只有在证实旧子进程**整个进程组**已经退出后才会重新执行（根进程已退出但 MCP 等留在 exec 进程组里的后代仍存活时同样算「还在运行」）。POSIX 内建 shell 工具仍在自己的独立进程组中；Roll 主动取消、单次运行超时、daemon 停止或孤儿清理时，会先用 SIGTERM 让 exec 取消 active turn，由 Bash 自己终止其进程组，grace 内未退出才升级 SIGKILL。**运行结束先清场再落账**（POSIX）：每次运行开始前和写入结果前，exec 会枚举并终止自己拉起的整棵进程树——Linux 上带 `ROLL_SCHEDULE_INVOCATION` 环境标记的进程、exec 自己进程组里的进程、以及内建 shell 工具每条命令各自的进程组（`&` / `nohup` 留下的后台进程也在内）——先 SIGTERM，2 秒后仍在则 SIGKILL。清干净才写 `completed` / `needs_confirmation` / 失败结果；强制终止后仍有进程存活时不写结果、退出码 1，登记组与原因写入账本，记录保持 `running`：`roll schedule runs <id>` 该行会带 `tree=unsettled(pid …)` 与原因，`roll schedule list` 在该任务行尾提示 `⚠ 运行 <invocation-id> 进程树未清…用 roll schedule cancel <invocation-id> --kill 清场`——这种任务不会再触发，直到清场或 `--abandon`。组外残留不再靠「重试耗尽后 paused」释放单例；`cancel --kill` 会在确认 exec 退出后再清持久化树，清不掉就拒绝取消。从账本恢复的进程组必须用 OS 启动身份正向匹配才能发信号；token 缺失、当时无法验证、或旧账本只有数字 PGID（身份未知）且 leader 仍活时不清场、不写终态，单例保持占用；组首领恰好在枚举瞬间退出不算「PID 被复用」，留下的孤儿照常清理。账本里的进程树元数据若损坏，相关命令会报错并点名 invocation id，只能 `roll schedule cancel <invocation-id> --abandon` 放弃追踪。清场轮询中途如果身份变得不可验证，同样停止并拒绝写终态，不会把仍存活的进程记成已终止。macOS 上不读取其他进程的环境变量与命令行（`ps` 只取 pid / pgid / stat），因此 darwin 只能靠进程组发现残留：已 `setsid` / daemonize 离开进程组的 Chromium、node / python 守护进程是平台残余边界，运行结束后会留下且账本照常记 `completed`（收回方案见 #238）。core-managed Agent 启动时会剔离调度标记，避免和定时任务共享进程时被误杀。Windows 不做清场（沿用只确认根进程的边界）。命令若自行再次 `setsid` / daemonize，或 exec 遭外部 SIGKILL / 系统崩溃，仍可能逃离这条协作清理链。Windows 的 PowerShell 后端不 detached，仍在 exec 进程树内。无法证实时一直等待（`roll schedule runs` 里可以看到它仍是 `running`）。Windows 没有进程组语义，只能确认根进程（exec 派生的 MCP 子进程若在根退出后仍存活，不会阻止下一轮）。单次运行超过 1 小时会被 daemon 终止并按失败重试——包括上一个 daemon 留下的孤儿子进程。这套机制保证的是「不会同时运行两个由 Roll 管理且可验证存活的执行进程树」，不是严格的 exactly-once：已经发出的消息、写过的文件不会回滚。
-- **错过的触发只补一次**：机器睡眠后醒来，不会把错过的周期一次性补跑；下次运行时间从「现在」重新计算。
-- **手动触发**：`roll schedule run-now <id>` 入队交给 daemon；`--inline` 在当前进程内执行并等待结果，不依赖 daemon，**只尝试一次**，非 `completed` / `needs_confirmation` 时退出码为 1（Ctrl+C 会转发给 exec 子进程）。手动触发的失败不会暂停任务；对 `paused` 的任务也可以 `run-now`（权限漂移检查照常生效），便于修好后先试跑再 `resume`。 `--inline` 遇到 exec 根进程退出但进程树终止未被确认、或进程组仍有存活成员的情况，与 daemon 一样保留 `running`、不释放单例（退出码 1），可用 `roll schedule cancel --kill` 收尾。
-- **停止 daemon**：POSIX 收到 SIGTERM / SIGINT / SIGHUP 后先给子进程树 SIGTERM，10 秒内未退出则 SIGKILL；Windows 没有可投递给控制台进程的优雅信号，daemon 收到 Ctrl+C / Ctrl+Break 后直接等待 10 秒 grace 再 `taskkill /T /F`。显式执行 `roll schedule service uninstall` 时，Windows 会先禁用 Scheduled Task（阻止 `RestartOnFailure` 拉起新 daemon），再 `/End` 并确认任务实例已停止；随后持有 daemon lifecycle lock，保证 service/manual daemon 都不能继续 claim，并按账本中带唯一 generation 的 `daemon-*` worker 收尾（`inline-*` 不受影响）：未 begin 的 claim 按 daemon generation 逐个在事务内作废，running exec 按 PID + OS 启动身份执行 `taskkill /T /F`，确认根进程退出并复核 ownership token 后才置终态和删除服务（exec 在这个窗口里自行把行写成 retry / completed 视为已交接，不算失败）。metadata 为 `installed` 但账本文件从未生成时直接删除任务；没有 metadata 也没有任务时，uninstall 是幂等的空操作。任何 daemon 仍存活、exec 无法验证、树终止失败或 ownership 已变化时，命令失败，Scheduled Task 保持 disabled，相关 `running` 单例不释放。daemon **意外崩溃**时仍不走这条显式卸载补偿：detached exec 会继续运行，卡住的由下一个 daemon 在 1 小时后收拾。Windows 仍无法独立枚举并确认已经脱离根进程的后代。
-- **运行记录保留**：每个任务最多保留最近 100 条终态记录、最长 30 天，daemon 每轮自动清理。每次运行创建的 chat 线程不随账本清理，仍可用 `roll chat --session <threadId>` 打开。
+```text
+触发 未读消息巡检（schedule=… invocation=… attempt=1 max-run=3600000 ms）
+```
+
+任务何时完成取决于模型和工具的执行时间，并不保证在 15 秒内完成。按 Ctrl+C 可以停止
+前台 daemon。
+
+### 3. 安装用户服务
+
+确认试跑正常后，可以把 daemon 安装成当前用户的常驻服务：
+
+```bash
+roll schedule service install
+roll schedule service status
+```
+
+- macOS 使用 LaunchAgent。
+- Windows 使用当前用户的 Scheduled Task，并在登录时启动。
+- Linux 暂不提供内建安装命令；请用 systemd user unit 运行
+  `roll schedule daemon --foreground`。
+
+安装前请先退出同一 `data-dir` 上的前台 daemon。Roll 会等待这次安装对应的 daemon 真正启动；
+仅仅完成 LaunchAgent / Scheduled Task 注册不算成功。如果启动握手失败，安装状态会保留为
+`installing`，新触发不会被领取。处理报错原因后重新运行 `roll schedule service install` 或
+`roll schedule service restart` 即可继续恢复。
+
+### 4. 查看任务和结果
+
+```bash
+roll schedule list
+roll schedule runs <schedule-id>
+roll schedule status
+```
+
+如果某次运行已经创建线程，可以继续打开它：
+
+```bash
+roll chat --session <thread-id>
+```
+
+## 常用命令
+
+| 目的 | 命令 |
+| --- | --- |
+| 登记任务 | `roll schedule add <prompt> --name <name> --every 30m` |
+| 列出任务 | `roll schedule list` |
+| 查看任务详情 | `roll schedule show <schedule-id>` |
+| 手动入队一次 | `roll schedule run-now <schedule-id>` |
+| 前台执行并等待结果 | `roll schedule run-now <schedule-id> --inline` |
+| 查看运行记录 | `roll schedule runs <schedule-id>` |
+| 暂停任务 | `roll schedule pause <schedule-id>` |
+| 恢复并重新授权 | `roll schedule resume <schedule-id>` |
+| 取消一次运行 | `roll schedule cancel <invocation-id>` |
+| 删除任务及其运行记录 | `roll schedule remove <schedule-id>` |
+| 查看 daemon 状态 | `roll schedule status` |
+| 查看用户服务状态 | `roll schedule service status` |
+| 停止并卸载用户服务 | `roll schedule service uninstall` |
+| 重启用户服务（升级 roll / 切换 Node 后） | `roll schedule service restart` |
+
+大多数查询命令支持 `--json`。`roll schedule runs` 默认返回最近 20 条记录，也可以用
+`--limit <n>` 调整数量。
+
+## 理解运行状态
+
+`roll schedule runs <schedule-id>` 可能显示以下状态：
+
+| 状态 | 含义 |
+| --- | --- |
+| `pending` | 已入队，等待 daemon 接管 |
+| `claimed` | daemon 已取得本次运行的所有权，exec 尚未正式开始 |
+| `running` | exec 正在运行，或因退出/进程树状态无法确认而继续占用单例 |
+| `retry` | 本次尝试失败，等待退避后重试 |
+| `completed` | 已成功完成 |
+| `needs_confirmation` | 任务已结束，但有工具调用因无人值守无法确认而被拒绝 |
+| `failed` | 已终止，不会再自动重试 |
+
+每次 invocation 都会创建一个标题为 `[定时] <任务名>` 的新 Chat 线程，不会自动继承上一轮
+的上下文。
+
+## 无人值守策略
+
+定时任务使用与普通 `roll chat` 相同的 Agent 和工具，但不会等待人工输入：
+
+- 原策略为 `allow` 或 `deny` 的工具调用保持不变。
+- 原策略需要 `confirm` 的调用会直接改为 `deny`。
+- 只要本轮出现这类拒绝，结果就会记录为 `needs_confirmation`，不会因此重试或暂停任务。
+- 如果模型明确需要用户输入，本次尝试按普通失败处理，并进入下文所述的重试流程。
+
+## 重试、补跑和单例
+
+### 失败重试
+
+普通执行失败后，Roll 会等待 10 秒再重试。默认最多尝试 3 次，即首次执行加两次重试。
+
+- scheduled invocation 用完重试次数后会记录为 `failed`，并自动暂停任务。
+- `run-now` 创建的 manual invocation 即使用完重试次数，也不会自动暂停任务。
+- `run-now --inline` 只尝试一次；结果不是 `completed` 或 `needs_confirmation` 时，命令退出码
+  为 1。
+- 单次运行超过该任务的 `--max-run`（缺省 1 小时）时，daemon 会终止 exec 子进程并按失败重试；
+  `run-now --inline` 也会按同一上限终止，但不重试。上一个 daemon 留下的孤儿 exec 也按各自任务的上限清理。
+
+### 同一任务不会并行运行
+
+同一个 schedule 同一时刻只允许一条 invocation 进入 `claimed` 或 `running`。仍持有未清进程树
+的 `retry` 也会继续占用这个单例。
+
+如果周期到期时上一轮仍未结束，Roll 不会为每个错过的周期分别排队。上一轮结束后，最多补
+一次到期运行，然后从补跑时刻重新计算下次时间。
+
+`run-now` 默认只负责入队：
+
+- daemon 正在运行时，由 daemon 接管。
+- daemon 未运行时，记录保持 `pending`，直到 daemon 启动。
+- `--inline` 会由当前命令启动一个独立的 `roll schedule exec` 子进程，等待它结束并返回结果。
+  它不依赖 daemon，但仍遵守该任务的 `--max-run`。如果同一任务已有运行，`--inline` 会退出 1；
+  不加 `--inline` 则继续排队。
+
+### 暂停与恢复
+
+`pause` 只停止新的周期触发，不修改原来的 `nextRunAt`：
+
+```bash
+roll schedule pause <schedule-id>
+roll schedule resume <schedule-id>
+```
+
+恢复时如果原定时间已经过去，任务会按“最多补一次”的规则执行。
+
+暂停还会放弃尚未开始、进程树已清的 scheduled retry。manual invocation 不受影响；如果某条
+运行仍持有未清进程树，它会继续保持 `retry` 或 `running`，直到完成清场或被显式放弃。
+
+暂停状态下仍可以使用 `run-now` 手动试跑。若任务是因为权限摘要变化而暂停，应先执行
+`resume` 完成重新授权，否则手动试跑也会因摘要不一致而失败。
+
+## 权限配置变化
+
+登记任务时，Roll 会保存以下配置的摘要：
+
+- `runtime.approval.default`
+- `runtime.approval.overrides`
+- `runtime.shell.enabled`
+- `runtime.shell.auto-approve-safe`
+- `runtime.shell.session.enabled`
+
+每次执行前都会重新计算摘要。无论配置变得更宽松还是更严格，只要与登记时不一致，就不会
+执行模型：
+
+- scheduled invocation 会失败并自动暂停任务。
+- manual invocation 会失败，但不会自动暂停任务。
+
+确认新配置后，用下面的命令重新授权：
+
+```bash
+roll schedule resume <schedule-id>
+```
+
+`resume` 会按任务 `--cwd` 中的当前配置更新摘要，即使任务原本已经是 `active` 也一样。
+
+> 权限摘要目前不包含已注册 Agent 和 Skill 的变化。修改这些能力不会自动触发权限漂移保护。
+
+## 安全地取消运行
+
+先查出 invocation ID：
+
+```bash
+roll schedule runs <schedule-id>
+```
+
+### 取消尚未运行的记录
+
+没有存活 exec 或未清进程树时，可以直接取消：
+
+```bash
+roll schedule cancel <invocation-id>
+```
+
+这通常适用于 `pending`、尚未开始的 `claimed`，以及不再持有进程树的 `retry`。
+
+### 终止运行中的记录
+
+`running` 或仍持有进程树的记录需要 `--kill`：
+
+```bash
+roll schedule cancel <invocation-id> --kill
+```
+
+在 POSIX 上，Roll 会先发送 SIGTERM，让 active turn 和 Bash 协作清理；grace 结束后仍未退出
+才升级为 SIGKILL。只有确认 exec 已退出、且可枚举进程树已经清空，账本才会写入终态并释放
+单例。
+
+如果进程仍存活、身份无法验证、进程树无法枚举，或者这条 invocation 已被另一个 worker
+接管，取消会失败并保持原状态。
+
+### 最后的人工出口：`--abandon`
+
+只有在进程身份或持久化树状态无法验证时，才考虑：
+
+```bash
+roll schedule cancel <invocation-id> --abandon
+```
+
+> **危险**
+>
+> `--abandon` 不会确认或终止旧进程，只是放弃追踪并释放单例。旧进程如果仍在运行，可能继续
+> 发送消息、修改文件或产生其他副作用。
+
+`--kill` 与 `--abandon` 互斥。
+
+删除任务也遵循同样的保护：存在 live invocation 或未清进程树时，普通 `remove` 会失败。
+`remove --abandon` 会直接删除任务和账本记录，但不会停止残留进程。
+
+## 进程清理与平台差异
+
+POSIX 上，scheduled exec 会在开始运行前和写入最终结果前清理自己负责的残留进程。清理不
+成功时，invocation 保持 `running`，不会释放单例或启动下一轮。
+
+| 平台 | Roll 能识别和清理的范围 | 已知边界 |
+| --- | --- | --- |
+| Linux | invocation 环境标记、exec 进程组、每条内建 Shell 命令的进程组 | 再次 `setsid`/daemonize，或系统崩溃时，仍可能逃离协作清理链 |
+| macOS | exec 进程组、每条内建 Shell 命令的进程组 | 不读取其他进程的环境和命令行；已离开进程组的 Chromium、Node/Python 守护进程不可见 |
+| Windows | 取消和超时时通过 `taskkill /T /F` 终止 exec 进程树 | 不执行 POSIX 式结束前枚举；只能独立确认 exec 根进程，无法证明所有脱离根进程的后代都已退出 |
+
+Linux 和 macOS 的结束前清场先发送 SIGTERM，2 秒后仍存活才发送 SIGKILL。系统会通过 PID
+和 OS 启动身份避免把已经复用同一 PID/进程组编号的新进程当成旧成员。
+
+在 Windows 上，`cancel --kill` 成功后仍会提示“后代不可验证”；JSON 输出中的
+`unverifiedDescendants` 会是 `true`。这表示 Roll 已确认 exec 根进程退出，但不能独立证明
+所有后代都已退出。
+
+如果账本显示 `tree=unsettled(pid …)`，先尝试：
+
+```bash
+roll schedule cancel <invocation-id> --kill
+```
+
+只有无法验证或元数据损坏时才使用 `--abandon`。更多 Windows 平台细节见
+[Windows 兼容性说明](./windows-compatibility.md)。
+
+> `roll schedule` 防止的是两个由 Roll 管理、且仍可验证存活的执行进程树同时运行。它不是
+> 严格的 exactly-once 系统：已经发送的消息和已经写入的文件不会因重试或取消自动回滚。
+
+## 停止 daemon
+
+前台 daemon 可用 Ctrl+C 停止；用户服务请使用：
+
+```bash
+roll schedule service uninstall
+```
+
+- POSIX：先向 exec 进程树发送 SIGTERM，等待 10 秒；仍未退出再发送 SIGKILL。
+- Windows：正常 Ctrl+C/Ctrl+Break 会先等待 10 秒，再通过 `taskkill /T /F` 强制终止；直接
+  关闭控制台窗口时可用时间很短，因此会跳过 grace，立即强制终止。
+
+如果无法确认某个 exec 已退出，相关 invocation 会继续保持 `running`。下次 daemon 启动后会
+按照进程身份和 lease 状态复核，不会直接释放单例。
 
 ## 配置
 
 ```yaml
 scheduler:
-  data-dir: ~/.roll-agent/scheduler   # schedules.db、scheduler.log、daemon.json 所在目录
+  data-dir: ~/.roll-agent/scheduler
   max-schedules: 50
-  max-concurrent-runs: 2               # daemon 同时运行的 exec 子进程数
+  max-concurrent-runs: 2
 ```
 
-`data-dir` 写相对路径时以配置文件所在目录为基准（不随执行命令的目录变化）。`roll schedule service install` 会把安装时解析出的 `data-dir` 与 `max-concurrent-runs` 固化进服务定义（`roll schedule daemon --foreground --data-dir … --max-concurrent-runs …`），并在 `~/.roll-agent/scheduler-service.json` 以 `installing → installed` 两阶段保存实际安装值；因此之后即使当前配置改了 data-dir，`service uninstall` 也只会打开已安装服务的原账本。安装与卸载共用一个独立于 data-dir 的管理锁；`data-dir` / `max-concurrent-runs` 与已安装 metadata 一致时，重复 `install` 只刷新服务定义并确保运行，不会卸载重装、也不会重启正在运行的 daemon（升级 roll 后要让新二进制生效需 `uninstall` + `install`；Windows 上 `/Create /F` 覆盖运行中任务定义的行为 🔬 待真机确认；Windows 任务处于 disabled 时说明上次卸载未完成，`install` 会先完成收尾再重装）；不一致时先按旧 metadata 完整卸载（Windows 会终止该 daemon 在跑的 exec；macOS `bootout` 后会等待 launchd 真正卸载，最长 30 s），再安装新定义。partial install 会主动 Disable/Stop，若尚未生成账本，下次操作在拿到 daemon lock 后可安全回滚，若账本已出现则切换到完整收尾。Windows 上 metadata 缺失或损坏但任务仍存在时，会先禁用/停止任务再 fail-closed，并在错误里打印人工恢复步骤（确认无 scheduler daemon / exec 存活 → `schtasks /Delete /F /TN "Roll Agent Scheduler"` → 删除 `~/.roll-agent/scheduler-service.json` → 重新 `install`）；macOS / Linux 没有 metadata 时不 fail-closed：`install` 若发现 LaunchAgent 已加载会先 `bootout`（中断在跑的 exec）再按当前配置重装，`uninstall` 按固定 label 卸载、不依赖配置文件（launchd 仍加载着该 label 时同样视为已安装；什么都没装时提示未发现服务）。metadata 为 `installed` 但整个 data-dir 已不存在时直接删除任务，不会重建目录；账本文件存在但不是有效的 scheduler 账本（零字节、无关 SQLite）时，错误里会提示移走或删除该文件后重试。metadata 指向的权威 `schedules.db` 必须已存在、版本受支持且包含 scheduler 表；缺失、空文件或其他 SQLite 数据库不会被初始化成“已清空”的新账本。`service status` 会显示 metadata phase、配置漂移，Windows 上还会显示 Task enabled/queued/unknown 状态、live daemon invocation 数和 ledger 诊断；metadata 有效时即使当前配置加载失败也照常输出（附 `configError`），退出码为 0。daemon 传给 exec 子进程的账本位置同样是显式指定的，不会因 `--cwd` 目录里另有一份配置而写错账本。
+| 配置项 | 默认值 | 有效范围 | 说明 |
+| --- | --- | --- | --- |
+| `scheduler.data-dir` | `~/.roll-agent/scheduler` | 路径 | 存放 `schedules.db`、`scheduler.log` 和 `daemon.json` |
+| `scheduler.max-schedules` | `50` | 1–500 | 可登记的任务数上限 |
+| `scheduler.max-concurrent-runs` | `2` | 1–8 | daemon 可同时运行的不同任务数量 |
 
-## 目前的限制
+相对 `data-dir` 以配置文件所在目录为基准；如果没有配置文件，则以当前工作目录为基准。
 
-- v1 只有间隔触发；「每个工作日 9 点」这类日历触发和时区支持在后续版本。
-- 模型不能自己创建定时任务（没有 `/loop` 或 `roll__schedule` 工具），只有 CLI 管理面。
-- 每次触发都是新线程，不会续接上一次的上下文。
-- 常驻服务仅支持 macOS 与 Windows；Linux 请用 systemd user unit 运行 `roll schedule daemon --foreground`。
-- Windows：exec 子进程与 daemon 的启动身份通过 `%SystemRoot%`（或 `%WINDIR%`）`\System32\WindowsPowerShell\v1.0\powershell.exe`（或 `%ProgramFiles%\PowerShell\7\pwsh.exe`）读取，单次超时 8 秒；Node 22.6–22.12 下手动运行 `roll schedule daemon --foreground` 会经启动器再起一个进程（服务安装路径不受影响，flag 已固化进任务定义），建议 Windows 使用 Node ≥ 22.13。
+`service install` 会把当时解析出的 `data-dir` 和 `max-concurrent-runs` 固化进服务定义，并把
+安装状态保存到 `~/.roll-agent/scheduler-service.json`：
+
+- metadata 同时记录安装当时的 node 绝对路径、roll CLI 入口路径和 roll 版本（`binary`）。
+- 每次安装还会生成一个启动 generation。只有服务进程回写同一个 generation 并取得 daemon
+  lifecycle lock 后，metadata 才会从 `installing` 变为 `installed`。
+- 配置未变化、固化的二进制也仍是当前 roll 时，再次 install 只刷新服务定义，不重启正在运行的
+  daemon。
+- 配置发生变化，或固化的 roll 版本 / node / 入口路径与当前不同时，install 会先按旧设置完成
+  卸载，再安装新定义（daemon 随之切换到新二进制）。如果此时有 `claimed` / `running`
+  invocation，或 `retry` 记录仍持有未清进程树，install 会拒绝替换；等待完成或先完成清场。
+  替换已安装的服务时，也可以显式执行 `service restart --force`。
+- 升级 `roll` 或切换 Node 之后请直接运行 `roll schedule service restart`，见下一节。
+
+## 数据保留
+
+daemon 会自动清理终态 invocation：
+
+- 每个任务最多保留最近 100 条终态记录。
+- 终态记录最长保留 30 天。
+- `pending`、`claimed`、`running`、`retry` 不会被保留策略删除。
+
+Chat 线程不随 invocation 账本一起清理，仍可通过 `roll chat --session <thread-id>` 打开。
+
+## 升级 roll / 切换 Node 之后
+
+服务定义固化的是安装当时的 node 绝对路径与 roll CLI 入口路径，正在运行的 daemon 也是安装
+当时的代码：
+
+- `roll update` 在更新 Agent 期间会暂停 scheduler 领取新任务。自更新成功后，如果没有
+  `claimed` / `running` invocation 或持有未清进程树的重试，会保留 service metadata 中已经安装的
+  `data-dir` 和并发设置，只按新二进制重装并重启；有任务正在运行时只提示，等空闲后手动执行
+  `roll schedule service restart`。`roll update --check` 发现服务固化的版本或路径与当前不同时也会
+  提示。即使上次替换已停在 `installing` 且 OS 服务暂时不存在，`roll update` 也会继续恢复，而不是
+  把它当成“从未安装”。
+- `roll schedule service restart`：卸载后按当前 roll 与配置重装（`--json` 输出 `action` / `liveInvocations` / `reason`，供脚本判断）。有占用中的 invocation 时拒绝
+  （退出码 1）；`--force` 会中断 daemon-owned invocation，但 `run-now --inline` 不受 service
+  teardown 影响。未安装时同样退出 1；上次重装停在 `installing` 时可用同一命令继续恢复。若同一
+  `data-dir` 仍有前台 daemon，先在它的终端按 Ctrl+C，再重试。
+- 用 nvm 切换或删除 Node 版本后，固化的 node 路径会失效，LaunchAgent / Scheduled Task 起不来
+  daemon。`roll schedule service status` 会报「服务定义指向的 node 已不存在」，`roll doctor` 的
+  「Scheduler service」检查记为 fail 并给出 `roll schedule service restart`；`roll schedule status`
+  在「已装服务但 daemon 未运行」时也会提示去看 `service status`。metadata 由旧版本安装、没有
+  `binary` 记录时这些检查报 unknown，重装一次即可开始检测。
+
+## 当前限制
+
+- 仅支持固定间隔触发，不支持 Cron、日历时间或时区；“每个工作日 9 点”尚不可用。
+- 模型不能自行创建或管理定时任务；当前只有 CLI 管理面。
+- 每次 invocation 都创建新线程，不会续接上一轮上下文。
+- 内建用户服务只支持 macOS 和 Windows；Linux 需自行配置 systemd user unit。
+- macOS 无法发现已经离开受管进程组的后台进程。
+- Windows 无法独立确认已经脱离 exec 根进程的后代是否退出。
+- `max-run` 的超时判定由当轮 daemon 持有。如果 daemon 恰在发出超时停止信号后自身崩溃，
+  exec 又随后迟到写入成功结果，新 daemon 无法还原那次尚未落账的超时判定。
+- `roll update` 的 scheduler admission lock 只覆盖 update 进程存活期间；如果进程在包替换中途被
+  强制结束，请重新运行 `roll update`，再用 `roll schedule service status` / `restart` 完成恢复。
+
+## 排查问题
+
+### 任务一直没有运行
+
+```bash
+roll schedule status
+```
+
+确认 daemon 为 `running`，并核对输出中的 `data-dir` 是否与登记任务时使用的配置一致。daemon
+在运行但日志里出现「scheduler admission 拒绝领取新任务」时，说明 service metadata 停在
+`installing` 或无法解析（或另一个 service 维护命令正持锁），此时不会触发任何任务，按
+`roll schedule service status` 的提示恢复。
+macOS 或 Windows 如果安装了用户服务，再运行 `roll schedule service status` 检查服务状态；
+输出里的 `binary` 一行会指出固化的 node / roll 入口是否已失效或版本过期，`roll doctor` 的
+「Scheduler service」检查给出同样结论。失效时执行 `roll schedule service restart`。
+
+### 查看 daemon 日志
+
+```bash
+roll schedule status
+```
+
+输出中的“日志”字段指向 `scheduler.log`。
+
+### 任务因权限变化暂停
+
+确认任务工作目录里的 `runtime.approval` 和 `runtime.shell` 配置，然后运行：
+
+```bash
+roll schedule resume <schedule-id>
+```
+
+### 运行一直停在 `running`
+
+先查看记录中的错误和进程树提示：
+
+```bash
+roll schedule runs <schedule-id>
+```
+
+如果提示进程树未清，使用 `cancel --kill`。只有无法验证且你愿意承担残留进程风险时，才使用
+`cancel --abandon`。

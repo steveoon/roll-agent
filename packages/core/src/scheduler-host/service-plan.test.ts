@@ -2,8 +2,10 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   SCHEDULER_SERVICE_INSTALL_ACTIONS,
+  SCHEDULER_SERVICE_RESTART_ACTIONS,
   SCHEDULER_SERVICE_UNINSTALL_ACTIONS,
   planSchedulerServiceInstall,
+  planSchedulerServiceRestart,
   planSchedulerServiceUninstall,
 } from "./service-plan.ts";
 import {
@@ -98,7 +100,7 @@ test("install plan: without usable metadata Windows fails closed only when a tas
     );
     assert.equal(
       planSchedulerServiceInstall({ platform: "darwin", inspection, next, status: running }),
-      SCHEDULER_SERVICE_INSTALL_ACTIONS.adopt,
+      SCHEDULER_SERVICE_INSTALL_ACTIONS.failClosed,
     );
     assert.equal(
       planSchedulerServiceInstall({ platform: "darwin", inspection, next, status: absent }),
@@ -141,4 +143,116 @@ test("uninstall plan: metadata drives the teardown, POSIX never needs it, only W
       SCHEDULER_SERVICE_UNINSTALL_ACTIONS.nothingInstalled,
     );
   }
+});
+
+test("install：设置未变但固化的二进制已过期时，POSIX 走 replace、Windows 走 retire 以重启 daemon", () => {
+  const status = { installed: true, running: true };
+  assert.equal(
+    planSchedulerServiceInstall({
+      platform: "darwin",
+      inspection: valid(),
+      next,
+      status,
+      binaryStale: false,
+    }),
+    SCHEDULER_SERVICE_INSTALL_ACTIONS.refresh,
+  );
+  assert.equal(
+    planSchedulerServiceInstall({
+      platform: "darwin",
+      inspection: valid(),
+      next,
+      status,
+      binaryStale: true,
+    }),
+    SCHEDULER_SERVICE_INSTALL_ACTIONS.replace,
+  );
+  assert.equal(
+    planSchedulerServiceInstall({
+      platform: "win32",
+      inspection: valid(),
+      next,
+      status,
+      binaryStale: true,
+    }),
+    SCHEDULER_SERVICE_INSTALL_ACTIONS.retire,
+  );
+});
+
+test("install：需要替换服务且仍有 live invocation 时拒绝，不得绕过 restart 门禁", () => {
+  for (const platform of ["darwin", "win32"] as const) {
+    assert.equal(
+      planSchedulerServiceInstall({
+        platform,
+        inspection: valid(),
+        next,
+        status: running,
+        binaryStale: true,
+        liveInvocations: 1,
+      }),
+      SCHEDULER_SERVICE_INSTALL_ACTIONS.refuseLiveRuns,
+    );
+  }
+});
+
+test("install：disabled cleanup / installing recovery 即使账本有 live 也继续收尾", () => {
+  assert.equal(
+    planSchedulerServiceInstall({
+      platform: "win32",
+      inspection: valid(),
+      next,
+      status: disabled,
+      liveInvocations: 1,
+    }),
+    SCHEDULER_SERVICE_INSTALL_ACTIONS.retire,
+  );
+  assert.equal(
+    planSchedulerServiceInstall({
+      platform: "darwin",
+      inspection: valid({ phase: "installing" }),
+      next,
+      status: running,
+      liveInvocations: 1,
+    }),
+    SCHEDULER_SERVICE_INSTALL_ACTIONS.replace,
+  );
+});
+
+test("restart：未安装或 metadata 无效时拒绝，有 live invocation 时除非 --force 否则拒绝", () => {
+  assert.equal(
+    planSchedulerServiceRestart({
+      inspection: { status: "missing" },
+      liveInvocations: 0,
+      force: false,
+    }),
+    SCHEDULER_SERVICE_RESTART_ACTIONS.notInstalled,
+  );
+  assert.equal(
+    planSchedulerServiceRestart({
+      inspection: { status: "invalid", error: "bad" },
+      liveInvocations: 0,
+      force: false,
+    }),
+    SCHEDULER_SERVICE_RESTART_ACTIONS.notInstalled,
+  );
+  assert.equal(
+    planSchedulerServiceRestart({
+      inspection: valid({ phase: "installing" }),
+      liveInvocations: 0,
+      force: false,
+    }),
+    SCHEDULER_SERVICE_RESTART_ACTIONS.restart,
+  );
+  assert.equal(
+    planSchedulerServiceRestart({ inspection: valid(), liveInvocations: 2, force: false }),
+    SCHEDULER_SERVICE_RESTART_ACTIONS.refuseLiveRuns,
+  );
+  assert.equal(
+    planSchedulerServiceRestart({ inspection: valid(), liveInvocations: 2, force: true }),
+    SCHEDULER_SERVICE_RESTART_ACTIONS.restart,
+  );
+  assert.equal(
+    planSchedulerServiceRestart({ inspection: valid(), liveInvocations: 0, force: false }),
+    SCHEDULER_SERVICE_RESTART_ACTIONS.restart,
+  );
 });

@@ -1,11 +1,14 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import type { ScheduleRecord } from "@roll-agent/runtime";
+import { createIntervalTrigger } from "@roll-agent/runtime";
 import {
   describeUnsettledTree,
   formatInvocationLine,
   formatScheduleLine,
   invocationTreeScopeFor,
   liveRunHint,
+  serializeSchedule,
   type SerializedInvocation,
   type SerializedSchedule,
 } from "./schedule-command-utils.ts";
@@ -41,7 +44,25 @@ const schedule: SerializedSchedule = {
   lastRunAt: undefined,
   lastError: undefined,
   authorityDigest: undefined,
+  maxRun: undefined,
+  maxRunMs: undefined,
   createdAt: "2026-08-27T08:00:00.000Z",
+};
+
+const record: ScheduleRecord = {
+  id: "s-1",
+  name: "汇总",
+  prompt: "p",
+  cwd: "/tmp/x",
+  trigger: createIntervalTrigger("1h"),
+  status: "active",
+  authorityDigest: undefined,
+  maxRunMs: undefined,
+  nextRunAtMs: Date.parse("2026-08-27T10:00:00.000Z"),
+  lastRunAtMs: undefined,
+  lastError: undefined,
+  createdAtMs: Date.parse("2026-08-27T08:00:00.000Z"),
+  updatedAtMs: Date.parse("2026-08-27T08:00:00.000Z"),
 };
 
 test("invocationTreeScopeFor：store 侧探针永远不是 exec 自身，selfPid 为 0，上一任 exec pid 走复用守卫", () => {
@@ -143,4 +164,25 @@ test("formatScheduleLine：hold 住的任务在 list 里给出 invocation id 与
   assert.equal(unreadable, `${base}  ⚠ 坏了`);
   const paused = formatScheduleLine({ ...schedule, status: "paused", lastError: "权限漂移" });
   assert.match(paused, /paused .*⚠ 权限漂移$/u);
+});
+
+test("serializeSchedule：maxRunMs 同时给出机器可读毫秒与人读时长，缺省都为 undefined", () => {
+  const capped = serializeSchedule({ ...record, maxRunMs: 21_600_000 });
+  assert.equal(capped.maxRunMs, 21_600_000);
+  assert.equal(capped.maxRun, "6 小时");
+  const plain = serializeSchedule(record);
+  assert.equal(plain.maxRunMs, undefined);
+  assert.equal(plain.maxRun, undefined);
+});
+
+test("formatScheduleLine：设置了单次运行上限的任务在 list 行里显示 max-run", () => {
+  const line = formatScheduleLine({ ...schedule, maxRun: "6 小时", maxRunMs: 21_600_000 });
+  assert.equal(
+    line,
+    "s-1  active  每 1 小时      next=2026-08-27T10:00:00.000Z  max-run=6 小时  汇总",
+  );
+  assert.equal(
+    formatScheduleLine(schedule),
+    "s-1  active  每 1 小时      next=2026-08-27T10:00:00.000Z  汇总",
+  );
 });

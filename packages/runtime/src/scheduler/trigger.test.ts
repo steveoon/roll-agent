@@ -6,8 +6,10 @@ import {
   computeNextRunAtMs,
   createIntervalTrigger,
   describeTrigger,
+  formatDuration,
   formatInterval,
   parseIntervalText,
+  parseMaxRunText,
   parseTriggerJson,
 } from "./trigger.ts";
 
@@ -68,4 +70,31 @@ test("parseTriggerJson 拒绝未知 kind 与低于下限的 everyMs", () => {
   assert.throws(() => parseTriggerJson('{"kind":"daily","hour":9}'), ScheduleTriggerError);
   assert.throws(() => parseTriggerJson('{"kind":"interval","everyMs":1000}'), ScheduleTriggerError);
   assert.throws(() => parseTriggerJson("not json"), ScheduleTriggerError);
+});
+
+test("parseMaxRunText 解析单次运行上限", () => {
+  assert.equal(parseMaxRunText("6h"), 21_600_000);
+  assert.equal(parseMaxRunText(" 90m "), 5_400_000);
+  assert.equal(parseMaxRunText("1d"), SCHEDULER_LIMITS.maxRunCeilingMs);
+});
+
+test("parseMaxRunText 低于 60s 或高于 24h 报错而不是 clamp", () => {
+  assert.throws(
+    () => parseMaxRunText("30s"),
+    (error: unknown) => error instanceof ScheduleTriggerError && /60/u.test(error.message),
+  );
+  assert.throws(
+    () => parseMaxRunText("25h"),
+    (error: unknown) => error instanceof ScheduleTriggerError && /1 天/u.test(error.message),
+  );
+  assert.throws(() => parseMaxRunText("1.5h"), ScheduleTriggerError);
+  assert.equal(SCHEDULER_LIMITS.minMaxRunMs, 60_000);
+  assert.equal(SCHEDULER_LIMITS.maxRunCeilingMs, 86_400_000);
+});
+
+test("formatDuration 与 formatInterval 共用单位折算", () => {
+  assert.equal(formatDuration(5_400_000), "90 分钟");
+  assert.equal(formatDuration(21_600_000), "6 小时");
+  assert.equal(formatDuration(86_400_000), "1 天");
+  assert.equal(formatInterval(5_400_000), "每 90 分钟");
 });
