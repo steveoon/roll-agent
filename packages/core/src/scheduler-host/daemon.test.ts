@@ -23,6 +23,17 @@ function tempDir(): string {
   return mkdtempSync(join(tmpdir(), "roll-daemon-"));
 }
 
+function removeTempDir(dir: string): void {
+  try {
+    rmSync(dir, { recursive: true, force: true, maxRetries: 3, retryDelay: 20 });
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code !== "EBUSY" && code !== "EPERM") {
+      throw error;
+    }
+  }
+}
+
 function silentLogger() {
   const lines: string[] = [];
   return {
@@ -85,7 +96,7 @@ test("tick 为到期任务 spawn 子进程，子进程完成后 invocation 完�
     assert.equal(daemon.tick(), 0);
     store.close();
   } finally {
-    rmSync(dir, { recursive: true, force: true });
+    removeTempDir(dir);
   }
 });
 
@@ -130,7 +141,7 @@ test("tick 受 maxConcurrentRuns 约束，子进程退出后才继续 claim", as
     assert.equal(daemon.tick(), 1);
     store.close();
   } finally {
-    rmSync(dir, { recursive: true, force: true });
+    removeTempDir(dir);
   }
 });
 
@@ -156,7 +167,7 @@ test("子进程非零退出且未写结果时记为失败并进入重试", async
     assert.ok(lines.some((line) => line.startsWith("error")));
     store.close();
   } finally {
-    rmSync(dir, { recursive: true, force: true });
+    removeTempDir(dir);
   }
 });
 
@@ -182,7 +193,7 @@ test("spawn 抛错时 invocation 立即记失败", () => {
     assert.equal(store.getSchedule(schedule.id)?.status, SCHEDULE_STATUSES.paused);
     store.close();
   } finally {
-    rmSync(dir, { recursive: true, force: true });
+    removeTempDir(dir);
   }
 });
 
@@ -224,7 +235,7 @@ test("run 在 abort 后终止子进程并退出", async () => {
     assert.equal(killed, true);
     store.close();
   } finally {
-    rmSync(dir, { recursive: true, force: true });
+    removeTempDir(dir);
   }
 });
 
@@ -242,6 +253,7 @@ test("停止时先 SIGTERM，超过 grace 仍未退出则 SIGKILL", async () => 
       maxConcurrentRuns: 1,
       logger,
       pollIntervalMs: 50,
+      platform: "linux",
       childTerminateGraceMs: 30,
       spawnInvocation: (claim): SpawnedInvocation => {
         store.beginInvocation(claim.invocation.id, claim.ownershipToken, Date.now());
@@ -269,7 +281,7 @@ test("停止时先 SIGTERM，超过 grace 仍未退出则 SIGKILL", async () => 
     assert.ok(lines.some((line) => /SIGKILL/u.test(line)));
     store.close();
   } finally {
-    rmSync(dir, { recursive: true, force: true });
+    removeTempDir(dir);
   }
 });
 
@@ -285,6 +297,7 @@ test("POSIX 子进程运行超过 maxRunMs 时先 SIGTERM，grace 后才 SIGKILL
       workerId: "w1",
       maxConcurrentRuns: 1,
       logger,
+      platform: "linux",
       maxRunMs: 20,
       childTerminateGraceMs: 20,
       spawnInvocation: (claim): SpawnedInvocation => {
@@ -309,7 +322,7 @@ test("POSIX 子进程运行超过 maxRunMs 时先 SIGTERM，grace 后才 SIGKILL
     assert.ok(lines.some((line) => /运行超过/u.test(line)));
     store.close();
   } finally {
-    rmSync(dir, { recursive: true, force: true });
+    removeTempDir(dir);
   }
 });
 
@@ -325,6 +338,7 @@ test("POSIX maxRun SIGTERM 期间完成协作清理时取消迟到的 SIGKILL", 
       workerId: "w1",
       maxConcurrentRuns: 1,
       logger,
+      platform: "linux",
       maxRunMs: 20,
       childTerminateGraceMs: 30,
       spawnInvocation: (claim): SpawnedInvocation => {
@@ -349,7 +363,7 @@ test("POSIX maxRun SIGTERM 期间完成协作清理时取消迟到的 SIGKILL", 
     assert.equal(daemon.runningCount, 0);
     store.close();
   } finally {
-    rmSync(dir, { recursive: true, force: true });
+    removeTempDir(dir);
   }
 });
 
@@ -387,7 +401,7 @@ test("Windows maxRun 保持立即 SIGKILL，不发送无效 SIGTERM", async () =
     assert.deepEqual(signals, ["SIGKILL"]);
     store.close();
   } finally {
-    rmSync(dir, { recursive: true, force: true });
+    removeTempDir(dir);
   }
 });
 
@@ -424,7 +438,7 @@ test("tick 会按保留策略清理终态运行记录", () => {
     assert.ok(lines.some((line) => /已清理 2 条/u.test(line)));
     store.close();
   } finally {
-    rmSync(dir, { recursive: true, force: true });
+    removeTempDir(dir);
   }
 });
 
@@ -458,7 +472,7 @@ test("时钟跳变让自己的 claim lease 过期后，tick 不会重复拉起�
     assert.ok((rows[0]?.leaseUntilMs ?? 0) > now);
     store.close();
   } finally {
-    rmSync(dir, { recursive: true, force: true });
+    removeTempDir(dir);
   }
 });
 
@@ -480,6 +494,7 @@ test("超时孤儿 exec 只启动一次 SIGTERM → grace → SIGKILL 清理", a
       workerId: "w1",
       maxConcurrentRuns: 1,
       logger,
+      platform: "linux",
       now: () => NOW + 120_000,
       maxRunMs: 60_000,
       childTerminateGraceMs: 10,
@@ -501,7 +516,7 @@ test("超时孤儿 exec 只启动一次 SIGTERM → grace → SIGKILL 清理", a
     assert.equal(store.listInvocations(schedule.id)[0]?.status, INVOCATION_STATUSES.running);
     store.close();
   } finally {
-    rmSync(dir, { recursive: true, force: true });
+    removeTempDir(dir);
   }
 });
 
@@ -534,7 +549,7 @@ test("停止后才退出的子进程不会再触碰已关闭的账本", async ()
     exit.resolve(null);
     await new Promise((resolve) => setTimeout(resolve, 10));
   } finally {
-    rmSync(dir, { recursive: true, force: true });
+    removeTempDir(dir);
   }
 });
 
@@ -574,7 +589,7 @@ test("exec 根进程退出但进程树仍有存活成员时，daemon 不把 invo
     assert.equal(reclaimed[0]?.invocation.attempt, 2);
     store.close();
   } finally {
-    rmSync(dir, { recursive: true, force: true });
+    removeTempDir(dir);
   }
 });
 
@@ -605,7 +620,7 @@ test("Store 未注入探针时 daemon 对已记录 executor 的退出保持 fail
     assert.equal(store.listInvocations(schedule.id)[0]?.status, INVOCATION_STATUSES.running);
     store.close();
   } finally {
-    rmSync(dir, { recursive: true, force: true });
+    removeTempDir(dir);
   }
 });
 
@@ -649,7 +664,7 @@ test("exec 已死但登记树未清时 daemon onExit 不 pause、行保持 runni
     assert.ok(lines.some((line) => /登记的进程树未清干净/u.test(line)));
     store.close();
   } finally {
-    rmSync(dir, { recursive: true, force: true });
+    removeTempDir(dir);
   }
 });
 
@@ -685,7 +700,7 @@ test("daemon 发出的进程树终止未被确认时，子进程退出后不记�
     assert.ok(lines.some((line) => /终止未被确认/u.test(line)));
     store.close();
   } finally {
-    rmSync(dir, { recursive: true, force: true });
+    removeTempDir(dir);
   }
 });
 
@@ -702,6 +717,7 @@ test("SIGTERM 阶段树终止失败但随后的 SIGKILL 整体终止成功时，
       workerId: "w1",
       maxConcurrentRuns: 1,
       logger,
+      platform: "linux",
       now: () => NOW,
       childTerminateGraceMs: 20,
       spawnInvocation: (claim): SpawnedInvocation => {
@@ -737,7 +753,7 @@ test("SIGTERM 阶段树终止失败但随后的 SIGKILL 整体终止成功时，
     );
     store.close();
   } finally {
-    rmSync(dir, { recursive: true, force: true });
+    removeTempDir(dir);
   }
 });
 
@@ -783,7 +799,7 @@ test("win32 停止时不发无效的 SIGTERM，grace 后直接整体终止", asy
     assert.ok(lines.some((line) => /Windows 没有优雅终止信号/u.test(line)));
     store.close();
   } finally {
-    rmSync(dir, { recursive: true, force: true });
+    removeTempDir(dir);
   }
 });
 
@@ -830,7 +846,7 @@ test("紧急停止（Windows 控制台关闭）不等待 grace，立即整体终
     assert.equal(daemon.runningCount, 0);
     store.close();
   } finally {
-    rmSync(dir, { recursive: true, force: true });
+    removeTempDir(dir);
   }
 });
 
@@ -886,6 +902,6 @@ test("紧急停止时子进程在 settle 窗口内未退出：释放 daemon 但�
     assert.ok(lines.some((line) => /退出未确认/u.test(line)));
     store.close();
   } finally {
-    rmSync(dir, { recursive: true, force: true });
+    removeTempDir(dir);
   }
 });
