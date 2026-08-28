@@ -14,6 +14,7 @@ import {
 import {
   OFFICIAL_RELAY_ENDPOINT_UNDECIDED_MESSAGE,
   isOfficialRelayEndpointDecided,
+  requireCompanionRelayEndpoint,
   requireOfficialRelayCompanionUrl,
   requireOfficialRelayEnrollmentUrl,
 } from "./constants.ts";
@@ -81,7 +82,12 @@ test("redeeming a pairing code fails closed while the official Relay host is und
     return new Response("{}", { status: 200 });
   });
   if (isOfficialRelayEndpointDecided()) {
-    assert.equal(requireOfficialRelayEnrollmentUrl().startsWith("https://"), true);
+    // A decided endpoint keeps TLS unless it is the loopback development override.
+    const endpoint = requireCompanionRelayEndpoint();
+    assert.equal(
+      requireOfficialRelayEnrollmentUrl().startsWith(endpoint.loopback ? "http://" : "https://"),
+      true,
+    );
     return;
   }
   await assert.rejects(

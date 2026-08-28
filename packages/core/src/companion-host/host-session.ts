@@ -20,6 +20,15 @@ import {
 
 const RELAY_OPEN_TIMEOUT_MS = 15_000;
 
+/**
+ * Runtime Protocol versions the Companion Host is known to bridge.
+ *
+ * 1.3 is the floor because the Relay bridge requires a Runtime that routes Interactions through the
+ * server-request channel. The list is explicit rather than derived from the Client's advertised set
+ * so a newer Runtime cannot be bridged before this Host has been reviewed against it.
+ */
+export const COMPANION_RUNTIME_PROTOCOL_VERSIONS = ["1.3", "1.4"] as const;
+
 export type OpenableCompanionWebSocket = WebSocketLikeV11 & {
   readonly addEventListener: {
     (type: "open", listener: () => void): void;
@@ -64,8 +73,11 @@ export class DefaultCompanionSessionFactory implements CompanionSessionFactory {
       serverRequestHandlers: createRuntimeServerRequestHandlers(interactionBroker),
     });
     try {
-      if (client.getInitializationResult().protocolVersion !== "1.3") {
-        throw new Error("Bundled Companion Runtime must negotiate Runtime Protocol 1.3");
+      const negotiated = client.getInitializationResult().protocolVersion;
+      if (!isBridgeableRuntimeProtocolVersion(negotiated)) {
+        throw new Error(
+          `Bundled Companion Runtime must negotiate Runtime Protocol ${COMPANION_RUNTIME_PROTOCOL_VERSIONS.join(" or ")}, not ${negotiated}`,
+        );
       }
       const workspace = new CompanionWorkspace({
         client,
@@ -116,6 +128,12 @@ export class DefaultCompanionSessionFactory implements CompanionSessionFactory {
       throw error;
     }
   }
+}
+
+export function isBridgeableRuntimeProtocolVersion(
+  version: string,
+): version is (typeof COMPANION_RUNTIME_PROTOCOL_VERSIONS)[number] {
+  return COMPANION_RUNTIME_PROTOCOL_VERSIONS.some((candidate) => candidate === version);
 }
 
 export async function stopRelayBeforeRuntime(

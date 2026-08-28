@@ -1,9 +1,10 @@
 import { access } from "node:fs/promises";
 import {
   COMPANION_CONTROL_PROTOCOL_VERSION,
+  COMPANION_RELAY_HOST_OVERRIDE_ENV,
   OFFICIAL_RELAY_ENDPOINT_UNDECIDED_MESSAGE,
   OFFICIAL_RELAY_PROFILE,
-  isOfficialRelayEndpointDecided,
+  resolveCompanionRelayEndpoint,
 } from "./constants.ts";
 import { FileCompanionConfigStore, type CompanionConfigStore } from "./config-store.ts";
 import { createPlatformCredentialStore, type CompanionCredentialStore } from "./credentials.ts";
@@ -221,9 +222,17 @@ export class CompanionApplication {
       this.logger.info("Companion Host is disabled; exiting cleanly");
       return;
     }
-    if (!isOfficialRelayEndpointDecided()) {
+    const relayEndpoint = resolveCompanionRelayEndpoint();
+    if (relayEndpoint === null) {
       this.logger.info(`${OFFICIAL_RELAY_ENDPOINT_UNDECIDED_MESSAGE}; exiting cleanly`);
       return;
+    }
+    if (relayEndpoint.overridden) {
+      // An override is a development affordance, so it is stated once per foreground run instead of
+      // being discoverable only through `roll companion doctor`.
+      this.logger.info(
+        `Using the development Relay override from ${COMPANION_RELAY_HOST_OVERRIDE_ENV}: ${relayEndpoint.companionUrl}`,
+      );
     }
     const supervisor = new CompanionHostSupervisor({
       config,
@@ -259,14 +268,16 @@ export class CompanionApplication {
           ? `Supported per-user service platform: ${this.platform}`
           : `Unsupported Companion platform: ${this.platform}`,
     });
-    const relayHost = OFFICIAL_RELAY_PROFILE.host;
+    const relayEndpoint = resolveCompanionRelayEndpoint();
     checks.push({
       name: "relay-endpoint",
-      ok: relayHost !== null,
+      ok: relayEndpoint !== null,
       detail:
-        relayHost === null
+        relayEndpoint === null
           ? OFFICIAL_RELAY_ENDPOINT_UNDECIDED_MESSAGE
-          : `Official Relay host: ${relayHost}`,
+          : relayEndpoint.overridden
+            ? `Development Relay override (${COMPANION_RELAY_HOST_OVERRIDE_ENV}): ${relayEndpoint.companionUrl}`
+            : `Official Relay host: ${relayEndpoint.host}`,
     });
     checks.push({
       name: "bundled-runtime",
