@@ -55,6 +55,7 @@ interface RunningInvocation {
 }
 
 const MAX_TIMER_DELAY_MS = 2_147_483_647;
+const ADMISSION_REFUSAL_LOG_THRESHOLD = 2;
 const URGENT_STOP_SETTLE_MS = 2_000;
 
 export const URGENT_STOP_REASON = "scheduler-daemon-urgent-stop" as const;
@@ -102,7 +103,8 @@ export class SchedulerDaemon {
     | undefined;
   private readonly platform: NodeJS.Platform;
   private readonly running = new Map<string, RunningInvocation>();
-  private admissionRefused = false;
+  private admissionRefusedTicks = 0;
+  private admissionRefusalLogged = false;
   private readonly terminatingOrphans = new Set<string>();
   private readonly scheduleCapLookupErrors = new Set<string>();
   private wake = Promise.withResolvers<void>();
@@ -525,17 +527,25 @@ export class SchedulerDaemon {
   }
 
   private noteAdmission(refused: boolean): void {
-    if (refused === this.admissionRefused) {
+    if (!refused) {
+      this.admissionRefusedTicks = 0;
+      if (this.admissionRefusalLogged) {
+        this.admissionRefusalLogged = false;
+        this.logger.info("scheduler admission 已恢复，继续领取到期任务");
+      }
       return;
     }
-    this.admissionRefused = refused;
-    if (refused) {
-      this.logger.error(
-        "scheduler admission 拒绝领取新任务：service metadata 处于 installing 或无法解析，或另一个 scheduler 维护操作持有锁；在恢复前不会触发任何任务。用 roll schedule service status 查看原因，必要时 roll schedule service restart",
-      );
+    this.admissionRefusedTicks += 1;
+    if (
+      this.admissionRefusedTicks < ADMISSION_REFUSAL_LOG_THRESHOLD ||
+      this.admissionRefusalLogged
+    ) {
       return;
     }
-    this.logger.info("scheduler admission 已恢复，继续领取到期任务");
+    this.admissionRefusalLogged = true;
+    this.logger.error(
+      "scheduler admission 连续拒绝领取新任务：service metadata 处于 installing 或无法解析，或另一个 scheduler 维护操作持有锁；在恢复前不会触发任何任务。用 roll schedule service status 查看原因，必要时 roll schedule service restart",
+    );
   }
 
   private resolveMaxRunMs(scheduleId: string): number | undefined {

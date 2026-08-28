@@ -411,7 +411,7 @@ roll schedule status
 ```
 
 确认 daemon 为 `running`，并核对输出中的 `data-dir` 是否与登记任务时使用的配置一致。daemon
-在运行但日志里出现「scheduler admission 拒绝领取新任务」时，说明 service metadata 停在
+在运行但日志里出现「scheduler admission 连续拒绝领取新任务」时，说明 service metadata 停在
 `installing` 或无法解析（或另一个 service 维护命令正持锁），此时不会触发任何任务，按
 `roll schedule service status` 的提示恢复。
 macOS 或 Windows 如果安装了用户服务，再运行 `roll schedule service status` 检查服务状态；

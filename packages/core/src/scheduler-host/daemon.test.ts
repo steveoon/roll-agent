@@ -1654,12 +1654,19 @@ test("admission 拒绝领取时 daemon 记一条可操作日志，恢复后再�
       spawnInvocation: () => ({ exited: new Promise(() => undefined), kill: () => undefined }),
     });
     assert.equal(daemon.tick(), 0);
+    assert.equal(lines.filter((line) => /admission 连续拒绝领取/u.test(line)).length, 0);
     assert.equal(daemon.tick(), 0);
-    const refused = lines.filter((line) => /admission 拒绝领取/u.test(line));
+    assert.equal(daemon.tick(), 0);
+    const refused = lines.filter((line) => /admission 连续拒绝领取/u.test(line));
     assert.equal(refused.length, 1);
     assert.match(refused[0] ?? "", /roll schedule service status/u);
     blocked = false;
     assert.equal(daemon.tick(), 1);
+    assert.equal(lines.filter((line) => /admission 已恢复/u.test(line)).length, 1);
+    blocked = true;
+    assert.equal(daemon.tick(), 0);
+    blocked = false;
+    assert.equal(daemon.tick(), 0);
     assert.equal(lines.filter((line) => /admission 已恢复/u.test(line)).length, 1);
     store.close();
   } finally {
