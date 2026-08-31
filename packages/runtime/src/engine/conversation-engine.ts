@@ -32,6 +32,7 @@ import type { InstallAgentEvent } from "@roll-agent/core/registry/install";
 import type { RollConfig } from "@roll-agent/core/config/schema";
 import type { RegisteredAgent } from "@roll-agent/core/types/agent";
 import { createSkillLibrary, type SkillLibrary } from "@roll-agent/core/skills/library";
+import type { ScheduleToolPort } from "@roll-agent/core/scheduler-host/schedule-tool-binding";
 import {
   ROLL_RESOURCE_HINTS_META_KEY,
   type AgentToolSource,
@@ -62,6 +63,7 @@ import {
 import {
   CAPABILITY_HOST_MODES,
   shouldOfferAgentInstall,
+  shouldOfferScheduleCreate,
   type CapabilityAgentOnboardingCatalogEntry,
   type CapabilityHostMode,
   type CapabilityVcsSnapshot,
@@ -120,6 +122,7 @@ export interface ConversationEngineOptions {
   readonly onAgentBootstrapIssue?: (issue: AgentBootstrapIssue) => void;
   readonly skillLibrary?: SkillLibrary | null;
   readonly onSkillLibraryIssue?: (message: string) => void;
+  readonly scheduleTools?: ScheduleToolPort | null;
   readonly workspaceInstructions?: WorkspaceInstructionsSource | null;
   readonly onWorkspaceInstructionsIssue?: (message: string) => void;
   readonly hostMode?: CapabilityHostMode;
@@ -417,6 +420,7 @@ export class ConversationEngine {
   private readonly workspaceInstructions: WorkspaceInstructionsSource | undefined;
   private readonly onAgentBootstrapIssue: ((issue: AgentBootstrapIssue) => void) | undefined;
   private readonly hostMode: CapabilityHostMode;
+  private readonly scheduleTools: ScheduleToolPort | undefined;
   private readonly resolveDynamicCapabilityContext:
     | NonNullable<ConversationEngineOptions["resolveDynamicCapabilityContext"]>
     | undefined;
@@ -459,6 +463,7 @@ export class ConversationEngine {
         : (agent, env, signal) => this.acquireDefaultAgentUsage(agent, env, signal));
     this.debugEvents = options.debugEvents ?? false;
     this.hostMode = options.hostMode ?? CAPABILITY_HOST_MODES.embedded;
+    this.scheduleTools = options.scheduleTools ?? undefined;
     this.resolveDynamicCapabilityContext = options.resolveDynamicCapabilityContext;
     this.sessionExecEnabled = options.sessionExecEnabled ?? true;
     this.explicitShellProfile = options.shellProfile;
@@ -621,6 +626,7 @@ export class ConversationEngine {
     const agentInstall = shouldOfferAgentInstall(this.hostMode)
       ? this.resolveAgentInstallBinding()
       : undefined;
+    const schedulePort = this.scheduleTools;
     const capabilityContext = this.composeCapabilityContext(context.sources.length, shellProfile);
     const session = new AgentSession({
       id,
@@ -646,6 +652,15 @@ export class ConversationEngine {
       ...(bashClassifier ? { bashClassifier } : {}),
       ...(bashSession ? { bashSession } : {}),
       ...(agentInstall ? { agentInstall } : {}),
+      ...(schedulePort
+        ? {
+            schedules: {
+              port: schedulePort,
+              sessionCwd: capabilityContext.cwd,
+              includeCreate: shouldOfferScheduleCreate(this.hostMode),
+            },
+          }
+        : {}),
       maxSteps: this.maxSteps,
       compaction: this.config.runtime.compaction,
       turnTimeoutMs: this.config.runtime.turnTimeoutMs,

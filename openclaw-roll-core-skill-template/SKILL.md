@@ -377,7 +377,7 @@ Rules:
 
 ## Scheduled Tasks
 
-`roll schedule` runs one unattended `roll chat` turn per trigger on a fixed interval and keeps every run in a local SQLite ledger. It is a CLI-only management surface (the chat model has no `roll__schedule` tool) and has no TTY prompts, so orchestrators may drive it directly.
+`roll schedule` runs one unattended `roll chat` turn per trigger on a fixed interval and keeps every run in a local SQLite ledger. The CLI has no TTY prompts, so orchestrators may drive it directly, and it remains the complete management surface (`pause` / `resume` / `cancel` / `remove` / `service` exist only here and in `roll ui`). Interactive `roll chat` additionally exposes built-in `roll__schedule_create` / `roll__schedule_list` tools (create requires an in-chat human confirmation; unattended scheduled turns get only `schedule_list`), so a ledger you inspect may contain schedules a human created conversationally — treat `roll schedule list --json` as the authoritative view either way.
 
 Quick path:
 

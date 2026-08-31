@@ -439,3 +439,28 @@ test("reminder 渲染 turn origin 行", () => {
   const plain = buildCapabilityTurnReminder(buildEffectiveCapabilityTurnContext(manifest));
   assert.doesNotMatch(plain, /turnOrigin=/u);
 });
+
+test("buildChatSystemPrompt 注入 # 定时任务 段并按 create 可用性裁剪", () => {
+  const plain = buildChatSystemPrompt();
+  assert.doesNotMatch(plain, /# 定时任务/u);
+
+  const full = buildChatSystemPrompt({
+    scheduleToolIds: { create: "roll__schedule_create", list: "roll__schedule_list" },
+  });
+  assert.match(full, /# 定时任务/u);
+  assert.match(full, /roll__schedule_create/u);
+  assert.match(full, /roll__schedule_list/u);
+  assert.match(full, /不要通过 Shell 执行 roll schedule add/u);
+  assert.match(full, /不支持一次性时间点、cron 表达式或时区/u);
+
+  const listOnly = buildChatSystemPrompt({
+    scheduleToolIds: { list: "roll__schedule_list" },
+  });
+  assert.match(listOnly, /# 定时任务/u);
+  assert.doesNotMatch(listOnly, /roll__schedule_create/u);
+});
+
+test("无人值守段声明定时轮次不能创建调度", () => {
+  const prompt = buildChatSystemPrompt({ hostMode: "background" });
+  assert.match(prompt, /不能创建或修改调度定义/u);
+});

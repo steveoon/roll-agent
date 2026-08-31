@@ -66,3 +66,30 @@ test("formatApprovalExplanation 按 Unicode 字符限制为 100 字", () => {
 test("formatApprovalExplanation 对清洗后的空说明返回 undefined", () => {
   assert.equal(formatApprovalExplanation("\u0000\u001b \n\t"), undefined);
 });
+
+test("schedule_create 的规范化确认对象逐行完整渲染，不被截断", () => {
+  const details = {
+    name: "检查BOSS未读消息",
+    prompt: `使用 browser-use-agent 检查 BOSS直聘的未读消息：${"细节".repeat(60)}`,
+    every: "每 30 分钟",
+    cwd: "/very/long/workspace/path/that/should/stay/visible/project-b",
+    maxRun: "1 小时",
+    firstRunAt: "8/31/2026, 5:46:04 PM",
+    lifecycle: "会持续运行，直到暂停或删除；创建时记录当前权限边界",
+    serviceStatus: "尚未安装调度服务且 daemon 未运行：任务已登记但不会自动执行",
+  };
+  const rendered = formatApprovalDetails(details);
+  assert.match(
+    rendered,
+    /cwd: \/very\/long\/workspace\/path\/that\/should\/stay\/visible\/project-b/u,
+  );
+  assert.match(rendered, /maxRun: 1 小时/u);
+  assert.match(rendered, /firstRunAt: 8\/31\/2026/u);
+  assert.match(rendered, /lifecycle: 会持续运行/u);
+  assert.match(rendered, /serviceStatus: 尚未安装调度服务/u);
+  assert.ok(rendered.includes(details.prompt));
+
+  const explanation = formatApprovalExplanation("将登记定时任务「检查BOSS未读消息」（每 30 分钟）");
+  assert.ok(explanation !== undefined);
+  assert.ok(explanation.length <= 100);
+});

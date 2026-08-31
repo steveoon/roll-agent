@@ -25,6 +25,8 @@ export const CAPABILITY_TOOL_ROLES = {
   sessionPoll: "session-poll",
   sessionList: "session-list",
   agentInstall: "agent-install",
+  scheduleCreate: "schedule-create",
+  scheduleList: "schedule-list",
   transcriptRead: "transcript-read",
   userInput: "user-input",
 } as const;
@@ -69,6 +71,10 @@ export function isProcessBoundHostMode(mode: CapabilityHostMode): boolean {
 }
 
 export function shouldOfferAgentInstall(mode: CapabilityHostMode): boolean {
+  return mode !== CAPABILITY_HOST_MODES.background;
+}
+
+export function shouldOfferScheduleCreate(mode: CapabilityHostMode): boolean {
   return mode !== CAPABILITY_HOST_MODES.background;
 }
 
@@ -365,6 +371,7 @@ const CAPABILITY_APPROVAL_BY_ROLE: Readonly<
   [CAPABILITY_TOOL_ROLES.sessionList]: CAPABILITY_APPROVAL_MODES.readOnly,
   [CAPABILITY_TOOL_ROLES.transcriptRead]: CAPABILITY_APPROVAL_MODES.readOnly,
   [CAPABILITY_TOOL_ROLES.agentInstall]: CAPABILITY_APPROVAL_MODES.alwaysConfirm,
+  [CAPABILITY_TOOL_ROLES.scheduleList]: CAPABILITY_APPROVAL_MODES.readOnly,
   [CAPABILITY_TOOL_ROLES.userInput]: CAPABILITY_APPROVAL_MODES.readOnly,
 };
 

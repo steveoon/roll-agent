@@ -1,4 +1,5 @@
 import type { ChildProcess } from "node:child_process";
+import { createScheduleToolBinding } from "../scheduler-host/schedule-tool-binding.ts";
 import { inspectLlmConfigReadiness, type LlmConfigReadiness } from "../config/helpers.ts";
 import type { RollConfig } from "../config/schema.ts";
 import { resolveLLMCall } from "../llm/providers.ts";
@@ -95,6 +96,7 @@ export function createChatEngine(input: CreateChatEngineInput) {
     ...(input.resolveDynamicCapabilityContext
       ? { resolveDynamicCapabilityContext: input.resolveDynamicCapabilityContext }
       : {}),
+    scheduleTools: createScheduleToolBinding(),
     debugEvents: isDebugLogEnabled(),
     onAgentBootstrapIssue: reportAgentBootstrapIssue,
     onSkillLibraryIssue: reportSkillLibraryIssue,

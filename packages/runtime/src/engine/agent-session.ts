@@ -46,6 +46,7 @@ import {
   type AgentInstallToolOutcome,
 } from "../tool-bridge/agent-install-tool.ts";
 import { buildSkillToolset } from "../tool-bridge/skill-tool.ts";
+import { buildScheduleToolset, type ScheduleToolDeps } from "../tool-bridge/schedule-tool.ts";
 import {
   buildFileToolset,
   type SessionFileToolsSettings,
@@ -259,6 +260,7 @@ export interface AgentSessionOptions {
   readonly bashClassifier?: CommandClassifier;
   readonly bashSession?: AgentSessionBashSession;
   readonly agentInstall?: AgentSessionAgentInstall;
+  readonly schedules?: ScheduleToolDeps;
   readonly onClose?: () => void;
 }
 
@@ -1065,6 +1067,15 @@ export class AgentSession {
         )
       : {};
     markToolRole(toolRoles, agentInstallTools, CAPABILITY_TOOL_ROLES.agentInstall);
+    const scheduleToolset = options.schedules
+      ? buildScheduleToolset(options.schedules, registry, {
+          ...(options.policy ? { policy: options.policy } : {}),
+          requestApproval: (request) => this.requestApproval(request),
+          coordinator: this.toolCoordinator,
+        })
+      : { createTools: {}, listTools: {} };
+    markToolRole(toolRoles, scheduleToolset.createTools, CAPABILITY_TOOL_ROLES.scheduleCreate);
+    markToolRole(toolRoles, scheduleToolset.listTools, CAPABILITY_TOOL_ROLES.scheduleList);
     const built = buildAgentToolset(
       options.sources,
       {
@@ -1084,6 +1095,8 @@ export class AgentSession {
       ...bashTools,
       ...sessionExecTools,
       ...agentInstallTools,
+      ...scheduleToolset.createTools,
+      ...scheduleToolset.listTools,
       ...built.tools,
     };
     this.registry = built.registry;

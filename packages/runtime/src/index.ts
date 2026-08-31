@@ -97,8 +97,17 @@ export type {
 } from "./tool-bridge/normalize-result.ts";
 export { ThreadStore, defaultThreadsDir, expandTilde } from "./store/thread-store.ts";
 export type { ThreadRecord, CreateThreadInput } from "./store/thread-store.ts";
-export { ScheduleStore } from "./scheduler/schedule-store.ts";
-export type { ScheduleStoreOptions, ClaimDueInput } from "./scheduler/schedule-store.ts";
+export {
+  SCHEDULE_LEDGER_READ_STATUSES,
+  ScheduleStore,
+  readScheduleLedger,
+} from "./scheduler/schedule-store.ts";
+export type {
+  ScheduleStoreOptions,
+  ClaimDueInput,
+  ScheduleLedgerReadResult,
+  ScheduleLedgerReadStatus,
+} from "./scheduler/schedule-store.ts";
 export { SCHEDULER_LIMITS } from "./scheduler/limits.ts";
 export {
   TRIGGER_KINDS,

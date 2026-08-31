@@ -639,41 +639,93 @@ export class ScheduleStore {
 
   createSchedule(input: CreateScheduleInput, nowMs: number = Date.now()): ScheduleRecord {
     const valid = validateCreateInput(input);
+    return this.transaction(() => this.insertScheduleInTransaction(valid, input, nowMs));
+  }
+
+  createScheduleIdempotent(
+    input: CreateScheduleInput,
+    nowMs: number = Date.now(),
+  ): {
+    readonly created: boolean;
+    readonly reauthorized: boolean;
+    readonly schedule: ScheduleRecord;
+  } {
+    const valid = validateCreateInput(input);
+    const defaultMaxRunMs = String(SCHEDULER_LIMITS.maxRunMs);
     return this.transaction(() => {
-      const countRow = this.db.prepare("SELECT COUNT(*) AS count FROM schedules").get() as {
-        readonly count: number;
-      };
-      if (countRow.count >= this.maxSchedules) {
-        throw new ScheduleStoreError(
-          SCHEDULE_STORE_ERROR_CODES.limitReached,
-          `已达到定时任务上限 ${String(this.maxSchedules)}，请先删除不再需要的任务`,
-        );
-      }
-      const id = randomUUID();
-      const nextRunAt =
-        input.fireImmediately === true ? nowMs : computeNextRunAtMs(valid.trigger, nowMs);
-      this.db
+      const existing = this.db
         .prepare(
-          `INSERT INTO schedules
-             (id, name, prompt, cwd, trigger_json, status, authority_digest, max_run_ms,
-              next_run_at, created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          `SELECT * FROM schedules
+            WHERE status = ? AND prompt = ? AND cwd = ? AND trigger_json = ?
+              AND COALESCE(max_run_ms, ${defaultMaxRunMs}) = COALESCE(?, ${defaultMaxRunMs})`,
         )
-        .run(
-          id,
-          valid.name,
+        .get(
+          SCHEDULE_STATUSES.active,
           valid.prompt,
           valid.cwd,
           JSON.stringify(valid.trigger),
-          SCHEDULE_STATUSES.active,
-          input.authorityDigest ?? null,
           valid.maxRunMs ?? null,
-          nextRunAt,
-          nowMs,
-          nowMs,
-        );
-      return this.requireSchedule(id);
+        ) as ScheduleRow | undefined;
+      if (existing !== undefined) {
+        const nextDigest = input.authorityDigest ?? null;
+        if ((existing.authority_digest ?? null) !== nextDigest) {
+          this.db
+            .prepare("UPDATE schedules SET authority_digest = ?, updated_at = ? WHERE id = ?")
+            .run(nextDigest, nowMs, existing.id);
+          return {
+            created: false,
+            reauthorized: true,
+            schedule: this.requireSchedule(existing.id),
+          };
+        }
+        return { created: false, reauthorized: false, schedule: toScheduleRecord(existing) };
+      }
+      return {
+        created: true,
+        reauthorized: false,
+        schedule: this.insertScheduleInTransaction(valid, input, nowMs),
+      };
     });
+  }
+
+  private insertScheduleInTransaction(
+    valid: ReturnType<typeof validateCreateInput>,
+    input: CreateScheduleInput,
+    nowMs: number,
+  ): ScheduleRecord {
+    const countRow = this.db.prepare("SELECT COUNT(*) AS count FROM schedules").get() as {
+      readonly count: number;
+    };
+    if (countRow.count >= this.maxSchedules) {
+      throw new ScheduleStoreError(
+        SCHEDULE_STORE_ERROR_CODES.limitReached,
+        `已达到定时任务上限 ${String(this.maxSchedules)}，请先删除不再需要的任务`,
+      );
+    }
+    const id = randomUUID();
+    const nextRunAt =
+      input.fireImmediately === true ? nowMs : computeNextRunAtMs(valid.trigger, nowMs);
+    this.db
+      .prepare(
+        `INSERT INTO schedules
+           (id, name, prompt, cwd, trigger_json, status, authority_digest, max_run_ms,
+            next_run_at, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        id,
+        valid.name,
+        valid.prompt,
+        valid.cwd,
+        JSON.stringify(valid.trigger),
+        SCHEDULE_STATUSES.active,
+        input.authorityDigest ?? null,
+        valid.maxRunMs ?? null,
+        nextRunAt,
+        nowMs,
+        nowMs,
+      );
+    return this.requireSchedule(id);
   }
 
   setAuthorityDigest(id: string, digest: string, nowMs: number = Date.now()): boolean {
@@ -1736,5 +1788,49 @@ export class ScheduleStore {
       throw new ScheduleStoreError(SCHEDULE_STORE_ERROR_CODES.notFound, `schedule ${id} 不存在`);
     }
     return record;
+  }
+}
+
+export const SCHEDULE_LEDGER_READ_STATUSES = {
+  ok: "ok",
+  empty: "empty",
+  migrationRequired: "migration-required",
+} as const;
+export type ScheduleLedgerReadStatus =
+  (typeof SCHEDULE_LEDGER_READ_STATUSES)[keyof typeof SCHEDULE_LEDGER_READ_STATUSES];
+
+export type ScheduleLedgerReadResult =
+  | { readonly status: "ok"; readonly schedules: readonly ScheduleRecord[] }
+  | { readonly status: "empty"; readonly schedules: readonly ScheduleRecord[] }
+  | {
+      readonly status: "migration-required";
+      readonly schemaVersion: number;
+      readonly schedules: readonly ScheduleRecord[];
+    };
+
+export function readScheduleLedger(dir: string): ScheduleLedgerReadResult {
+  const databasePath = resolve(expandTilde(dir), "schedules.db");
+  if (!existsSync(databasePath)) {
+    return { status: SCHEDULE_LEDGER_READ_STATUSES.empty, schedules: [] };
+  }
+  const db = new DatabaseSync(databasePath, { readOnly: true });
+  try {
+    db.exec(`PRAGMA busy_timeout = ${String(BUSY_TIMEOUT_MS)}`);
+    const versionRow = db.prepare("PRAGMA user_version").get() as {
+      readonly user_version: number;
+    };
+    if (versionRow.user_version !== SCHEMA_VERSION) {
+      return {
+        status: SCHEDULE_LEDGER_READ_STATUSES.migrationRequired,
+        schemaVersion: versionRow.user_version,
+        schedules: [],
+      };
+    }
+    const rows = db
+      .prepare("SELECT * FROM schedules ORDER BY created_at ASC, rowid ASC")
+      .all() as unknown as ScheduleRow[];
+    return { status: SCHEDULE_LEDGER_READ_STATUSES.ok, schedules: rows.map(toScheduleRecord) };
+  } finally {
+    db.close();
   }
 }

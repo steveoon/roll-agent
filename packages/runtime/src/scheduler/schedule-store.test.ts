@@ -15,7 +15,7 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import { ScheduleStore } from "./schedule-store.ts";
+import { ScheduleStore, readScheduleLedger } from "./schedule-store.ts";
 import {
   CANCEL_INVOCATION_OUTCOMES,
   COMPLETE_INVOCATION_OUTCOMES,
@@ -281,6 +281,121 @@ test("pause/resume 只改状态不改相位", () => {
     assert.equal(store.setScheduleStatus(created.id, SCHEDULE_STATUSES.active, NOW + 2), true);
     assert.equal(store.getSchedule(created.id)?.nextRunAtMs, NOW + 1_800_000);
     assert.equal(store.setScheduleStatus("missing", SCHEDULE_STATUSES.paused, NOW), false);
+    store.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("readScheduleLedger 只读三分支：不存在为空、版本不符拒读、正常返回列表且零写入", () => {
+  const dir = tempDir();
+  try {
+    const missing = readScheduleLedger(join(dir, "missing"));
+    assert.equal(missing.status, "empty");
+    assert.deepEqual(missing.schedules, []);
+    assert.equal(existsSync(join(dir, "missing")), false);
+
+    const store = new ScheduleStore(dir);
+    const created = store.createSchedule(sampleInput(), NOW);
+    store.close();
+
+    const ok = readScheduleLedger(dir);
+    assert.equal(ok.status, "ok");
+    assert.equal(ok.schedules.length, 1);
+    assert.equal(ok.schedules[0]?.id, created.id);
+
+    const raw = new DatabaseSync(join(dir, "schedules.db"));
+    raw.exec("PRAGMA user_version = 99");
+    raw.close();
+    const drifted = readScheduleLedger(dir);
+    assert.equal(drifted.status, "migration-required");
+    assert.equal(drifted.status === "migration-required" && drifted.schemaVersion, 99);
+    assert.deepEqual(drifted.schedules, []);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("createScheduleIdempotent 事务内语义查重：相同 active 定义返回既有任务", () => {
+  const dir = tempDir();
+  try {
+    const store = new ScheduleStore(dir);
+    const first = store.createScheduleIdempotent(sampleInput(), NOW);
+    assert.equal(first.created, true);
+    assert.equal(first.reauthorized, false);
+
+    const replay = store.createScheduleIdempotent(sampleInput({ name: "另一个名字" }), NOW + 1);
+    assert.equal(replay.created, false);
+    assert.equal(replay.reauthorized, false);
+    assert.equal(replay.schedule.id, first.schedule.id);
+    assert.equal(store.listSchedules().length, 1);
+
+    const differentTrigger = store.createScheduleIdempotent(
+      sampleInput({ trigger: createIntervalTrigger("2h") }),
+      NOW + 2,
+    );
+    assert.equal(differentTrigger.created, true);
+
+    const differentMaxRun = store.createScheduleIdempotent(
+      sampleInput({ maxRunMs: 120_000 }),
+      NOW + 3,
+    );
+    assert.equal(differentMaxRun.created, true);
+
+    store.setScheduleStatus(first.schedule.id, SCHEDULE_STATUSES.paused, NOW + 4);
+    const afterPause = store.createScheduleIdempotent(sampleInput(), NOW + 5);
+    assert.equal(afterPause.created, true);
+    store.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("createScheduleIdempotent 按有效 maxRun 查重：缺省与显式 1h 视为同一定义", () => {
+  const dir = tempDir();
+  try {
+    const store = new ScheduleStore(dir);
+    const implicit = store.createScheduleIdempotent(sampleInput(), NOW);
+    assert.equal(implicit.created, true);
+
+    const explicitOneHour = store.createScheduleIdempotent(
+      sampleInput({ maxRunMs: 3_600_000 }),
+      NOW + 1,
+    );
+    assert.equal(explicitOneHour.created, false);
+    assert.equal(explicitOneHour.schedule.id, implicit.schedule.id);
+    assert.equal(store.listSchedules().length, 1);
+    store.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("createScheduleIdempotent 命中既有任务但权限摘要不同时按新摘要重新授权", () => {
+  const dir = tempDir();
+  try {
+    const store = new ScheduleStore(dir);
+    const first = store.createScheduleIdempotent(
+      { ...sampleInput(), authorityDigest: "v1:old" },
+      NOW,
+    );
+    assert.equal(first.created, true);
+
+    const replay = store.createScheduleIdempotent(
+      { ...sampleInput(), authorityDigest: "v1:new" },
+      NOW + 1,
+    );
+    assert.equal(replay.created, false);
+    assert.equal(replay.reauthorized, true);
+    assert.equal(replay.schedule.id, first.schedule.id);
+    assert.equal(replay.schedule.authorityDigest, "v1:new");
+    assert.equal(store.getSchedule(first.schedule.id)?.authorityDigest, "v1:new");
+
+    const same = store.createScheduleIdempotent(
+      { ...sampleInput(), authorityDigest: "v1:new" },
+      NOW + 2,
+    );
+    assert.equal(same.reauthorized, false);
     store.close();
   } finally {
     rmSync(dir, { recursive: true, force: true });

@@ -31,6 +31,10 @@
       "types": "./src/skills/*.ts",
       "default": "./src/skills/*.ts"
     },
+    "./scheduler-host/schedule-tool-binding": {
+      "types": "./src/scheduler-host/schedule-tool-binding.ts",
+      "default": "./src/scheduler-host/schedule-tool-binding.ts"
+    },
     "./tool-runtime/*": {
       "types": "./src/tool-runtime/*.ts",
       "default": "./src/tool-runtime/*.ts"
@@ -73,6 +77,10 @@
       "./skills/*": {
         "types": "./dist/skills/*.d.ts",
         "default": "./dist/skills/*.js"
+      },
+      "./scheduler-host/schedule-tool-binding": {
+        "types": "./dist/scheduler-host/schedule-tool-binding.d.ts",
+        "default": "./dist/scheduler-host/schedule-tool-binding.js"
       },
       "./tool-runtime/*": {
         "types": "./dist/tool-runtime/*.d.ts",

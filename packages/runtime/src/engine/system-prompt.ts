@@ -40,9 +40,15 @@ export interface FileToolPromptIds {
   readonly verify: string;
 }
 
+export interface ScheduleToolPromptIds {
+  readonly create?: string | undefined;
+  readonly list: string;
+}
+
 export interface BuildChatSystemPromptOptions {
   readonly skills?: readonly SkillPromptSummary[];
   readonly skillToolId?: string;
+  readonly scheduleToolIds?: ScheduleToolPromptIds;
   readonly bashToolId?: string;
   readonly shellToolId?: string;
   readonly shellHints?: readonly string[];
@@ -68,8 +74,24 @@ const UNATTENDED_SECTION = [
   UNATTENDED_SECTION_HEADING,
   "- 本轮由定时任务自动触发，没有人在终端旁：不要向用户提问、不要等待确认、不要请求补充信息。",
   "- 需要人工确认的操作会被策略直接拒绝；遇到拒绝就跳过该步骤，继续完成其余可以完成的部分。",
+  "- 定时轮次中不能创建或修改调度定义，也不要把其他任务的内容复制进本轮输出。",
   "- 结尾用简短状态汇报：做了什么、哪些步骤因需要确认而未执行、有什么需要人工关注。",
 ].join("\n");
+
+function buildScheduleSection(ids: ScheduleToolPromptIds): string {
+  const lines = ["# 定时任务"];
+  if (ids.create !== undefined) {
+    lines.push(
+      `- 用户明确提出周期性、持续性的任务（如"每隔 30 分钟…""每天…"）时，用 ${ids.create} 工具登记定时任务；不要通过 Shell 执行 roll schedule add。`,
+      "- every 只描述触发频率，prompt 描述每次触发要做的工作；缺少频率、工作内容或目标工作区时先向用户澄清。",
+      `- ${ids.create} 自带确认步骤，会向用户展示完整参数；调用前不要再重复口头确认。`,
+      "- 仅支持固定间隔，不支持一次性时间点、cron 表达式或时区；用户提出这类需求时明说不支持，不要伪装成间隔任务。",
+      "- 不要替用户安装调度服务；创建结果里的就绪警告要如实转告用户。",
+    );
+  }
+  lines.push(`- 用 ${ids.list} 查看已登记的任务；创建前先确认是否已有同类任务，避免重复。`);
+  return lines.join("\n");
+}
 
 const IDENTITY_PREFIX = "你是花卷 Roll 的会话助手，运行在 roll chat 里。";
 
@@ -258,6 +280,9 @@ export function buildChatSystemPrompt(options: BuildChatSystemPromptOptions = {}
       ),
     );
   }
+  if (options.scheduleToolIds !== undefined) {
+    sections.push(buildScheduleSection(options.scheduleToolIds));
+  }
   if (options.userInputToolId !== undefined) {
     sections.push(buildUserInputSection(options.userInputToolId));
   }
@@ -283,6 +308,8 @@ export function buildChatSystemPromptFromManifest(
   const installToolId = findCapabilityToolId(manifest, CAPABILITY_TOOL_ROLES.agentInstall);
   const transcriptToolId = findCapabilityToolId(manifest, CAPABILITY_TOOL_ROLES.transcriptRead);
   const userInputToolId = findCapabilityToolId(manifest, CAPABILITY_TOOL_ROLES.userInput);
+  const scheduleCreateToolId = findCapabilityToolId(manifest, CAPABILITY_TOOL_ROLES.scheduleCreate);
+  const scheduleListToolId = findCapabilityToolId(manifest, CAPABILITY_TOOL_ROLES.scheduleList);
   const fileRead = manifest.tools.find(
     (tool) => tool.role === CAPABILITY_TOOL_ROLES.fileRead && tool.id.endsWith("read_file"),
   );
@@ -337,6 +364,14 @@ export function buildChatSystemPromptFromManifest(
     agentCount: manifest.agentCount,
     hostMode: manifest.lifecycle.hostMode,
     ...(userInputToolId ? { userInputToolId } : {}),
+    ...(scheduleListToolId
+      ? {
+          scheduleToolIds: {
+            ...(scheduleCreateToolId ? { create: scheduleCreateToolId } : {}),
+            list: scheduleListToolId,
+          },
+        }
+      : {}),
     ...(fileToolIds ? { fileToolIds } : {}),
     ...(installToolId && manifest.agentOnboardingCatalog.length > 0
       ? {
