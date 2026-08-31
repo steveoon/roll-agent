@@ -20,6 +20,7 @@ __pycache__/
 .claude/scheduled_tasks.lock
 .agents/skills/roll-zhipin-unread-reply
 .agents/skills/benchmark-code-review
+.agents/skills/roll-release-changelog
 
 # Smart Reply Agent 业务数据（含敏感信息）
 agents/smart-reply/data/brand-config.json
