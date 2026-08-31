@@ -1,5 +1,46 @@
 # @roll-agent/runtime
 
+## 0.19.0
+
+### Minor Changes
+
+- [#239](https://github.com/steveoon/roll-agent/pull/239) [`63be2a8`](https://github.com/steveoon/roll-agent/commit/63be2a8c26d94aa0d200b6cbcb49fb4a0258649b) Thanks [@steveoon](https://github.com/steveoon)! - roll chat 新增内建定时任务工具，自然语言即可创建定时任务：
+  - `roll__schedule_create`：登记按固定间隔运行的任务；创建前以规范化对象展示完整参数与权限边界确认（批准一次只授权这一个任务），确认到创建之间配置 / 权限漂移则 fail-closed 放弃；相同定义（按有效单次上限比较）的 active 任务幂等返回既有记录，权限摘要不同时按新摘要重新授权并明示
+  - `roll__schedule_list`：只读列出任务（分页、prompt 有界摘要、附调度服务就绪状态）；账本以真正只读方式打开（`readScheduleLedger`：不存在返回空、schema 不符拒读且绝不自动迁移）
+  - 无人值守（定时任务触发的）轮次只注册 list、不注册 create——定时任务不能繁殖定时任务；system prompt 新增 `# 定时任务` 段与无人值守说明
+  - `ScheduleStore` 新增 `createScheduleIdempotent`（事务内语义查重）；core 新增 `scheduler-host/schedule-tool-binding.ts` 端口——账本随会话配置、authority digest 按任务目录配置（与 `roll schedule add` 语义一致）、daemon/service 就绪探测——engine-factory 一处接线覆盖 chat / server / schedule-exec 三入口；core exports 仅新增 `./scheduler-host/schedule-tool-binding` 单条子路径
+
+- [#239](https://github.com/steveoon/roll-agent/pull/239) [`185e363`](https://github.com/steveoon/roll-agent/commit/185e3634500c9c8c0313f11542be1354c3593a39) Thanks [@steveoon](https://github.com/steveoon)! - 新增 `roll schedule` 定时任务：按周期无人值守地运行一轮 chat。
+  - runtime：`ScheduleStore`（SQLite，claim/lease/重试账本）、间隔触发解析、`UnattendedToolPolicy`（无人值守时 confirm 一律 deny）、`background` host mode 与来源标记（只进推理副本，不进历史）
+  - core：`roll schedule add|list|show|remove|pause|resume|run-now|runs|cancel|status|daemon|service`；daemon 按触发 spawn `roll schedule exec` 子进程，每次触发最多尝试 3 次（首次 + 2 次重试），耗尽后自动 PAUSE 并在列表显示原因
+  - 配置新增 `scheduler.data-dir` / `max-schedules` / `max-concurrent-runs`
+  - 安全边界：exec 子进程记录 PID + OS 启动身份，lease 过期只在证实旧进程已退出后才重跑；登记时记录 `runtime.approval` / `runtime.shell` 权限摘要，漂移即暂停并要求 `resume` 重新授权；ownership token 与账本路径读取后立即从子进程 env 清除
+  - 运维：daemon / service 显式固化 `--data-dir` 与 `--max-concurrent-runs`；停止时 10 秒 grace 后 SIGKILL（Windows 关闭控制台窗口时跳过 grace 立即强制终止）；单次运行超过 1 小时强制终止；运行记录按每任务 100 条 / 30 天保留；`--every` 上限 365 天；`run-now --inline` 单次尝试、失败退出码 1；`bin/roll` 对 `schedule` 自动启用 `node:sqlite`
+  - 单例约束：同一任务同一时刻只运行一次（scheduled 与 manual 触发共用账本事务内门禁）；`roll schedule cancel <invocation-id>` 提供人工终态出口（运行中的记录必须 `--kill` 并确认 exec 进程退出后才释放单例，不可验证时只能显式 `--abandon`）；exec 以进程组运行，强制终止覆盖其后代进程（POSIX）
+  - Windows：服务改为 XML 注册（不受 `schtasks /TR` 261 字符限制，无 72 小时运行上限，失败后自动重启，电池供电不影响），进程身份只走 SystemRoot / ProgramFiles 下的 PowerShell 绝对路径且超时放宽到 8 秒，daemon 停止时不再发送对控制台进程无效的 `taskkill /T`，exec 子进程在 Windows 也脱离 daemon 控制台；安装把实际 `data-dir` 以 `installing → installed` 两阶段写入用户目录下的稳定 service metadata，安装/卸载由跨 data-dir 文件锁串行化，设置未变化的重复 install 只刷新定义不卸载重装也不重启 daemon（任务处于 disabled 时先完成上次收尾），partial install 会 Disable/Stop；显式 `service uninstall` 先禁用 Scheduled Task，再持有 daemon lifecycle lock，按账本中的 daemon generation 原子作废未 begin 的 claim，并以 PID + 启动身份校验后 `taskkill /T /F` 收尾 running exec，任何未确认退出都保留 disabled 服务与 running 单例，inline worker 不受影响；权威账本必须含受支持 schema（空文件、无关 SQLite、更高版本都拒绝，热 journal 正常回滚），metadata 为 installed 但账本文件从未生成时直接删除任务，无 metadata 且无任务时 uninstall 幂等，metadata 缺失但任务仍在时错误里附人工恢复步骤；`run-now --inline` 在进程树终止未确认或后代仍存活时保留 `running` 而不释放单例；账本每个 claim 事务最多探活 1 个过期 running 行（名额按「最久未探活」轮转，探活时间持久化在账本列 `executor_probed_at` 里（schema 升到 v3，打开旧账本时就地补列），daemon 重启不丢；其余按 15 s 轮询间隔续租、下一轮再探），避免探活超时撑破 SQLite busy_timeout
+  - POSIX：scheduled exec 收到取消、超时或 daemon 停止时先取消 active turn，让 Bash 自己清理独立进程组；grace 内未退出才升级 SIGKILL，避免遗留 shell 命令与重试并行；PID 启动身份不匹配时不会把新进程组误判为旧后代并终止；exec 被停止信号中断后不再自行写入失败结果，终态由 cancel / daemon / inline 发起方决定，`cancel --kill` 不会把最后一次 attempt 记成失败并暂停任务；macOS / Linux 没有 service metadata 时 install 会先 bootout 已加载的 LaunchAgent 再按当前配置重装、uninstall 按固定 label 卸载不依赖配置，macOS `service stop` / `uninstall` 在 `bootout` 后等待 launchd 真正卸载（最长 30 s）；`service status` 在 metadata 有效时容忍配置加载失败（附 `configError`，退出 0）；账本 schema 升到 v4（`tree_tracked_pgids` 存 `{ pgid, leaderState, startToken? }`，内部数字数组读成 `unknown`，旧 `{ leaderExited }` 对象与损坏 JSON 直接 fail-closed / `tree_unsettled` / `tree_survivor_pids`）；scheduled exec 在运行前与写入结果前会清理自己拉起的整棵进程树（Linux environ 标记 `ROLL_SCHEDULE_INVOCATION`、exec 进程组、内建 shell 每条命令的进程组，含 `&` / `nohup` 后台进程），SIGTERM 2 秒后升级 SIGKILL，清不干净则不写结果并保持 `running`，登记组写入账本随 retry 带走；macOS 的 `ps` 只取 pid / pgid / stat（不带 `-E`、不取 command），不读其他进程的 env 与 argv，已 setsid 离开进程组的进程是文档化边界（[#238](https://github.com/steveoon/roll-agent/issues/238)）；`cancel --kill` 会再清持久化树并以 attempt CAS 写账本，避免 stale cancel 覆盖新 owner；组外 survivor 不会因重试耗尽而 pause 并释放单例；`retry` + 未清树占同 schedule 单例；`pause` 不清空未清树的 invocation；`remove` 拒绝 live/未清树任务除非 `--abandon`；core-managed Agent 启动 env 剔离调度标记；从账本恢复的进程组必须用 start token 正向匹配才能发信号，token 缺失、验证不可用、或数字 PGID 的未知身份在 live leader 时不清场、不写终态；清场轮询中途身份不可验证时立即停止、不升级 SIGKILL，token mismatch 的 PGID 在整次 teardown 内保持隔离（首领恰在枚举瞬间退出不算复用，孤儿照常清理）；被未清进程树 hold 的运行在 `roll schedule runs` 带 `tree=unsettled(pid …)` 与原因、`roll schedule list` 行尾提示 `cancel --kill`；`cancel --kill` 对 pending 记录直接取消；账本树元数据损坏的错误点名 invocation id，survivors 列损坏只当空；Windows 不再为每条 shell 命令读取 OS 启动身份
+  - 单次运行上限按任务设置：`roll schedule add --max-run <时长>`（60 秒 ～ 24 小时，缺省仍为 1 小时）写入账本 `schedules.max_run_ms`（schema 升到 v5，旧账本就地补列），daemon 的超时定时器与孤儿清理阈值都按任务上限判断；`list` 行尾与 `show / --json` 的 `maxRun` / `maxRunMs` 显示该值，触发日志带 `max-run=… ms`
+  - 服务二进制过期检测：service metadata 记录安装时的 node 路径、roll CLI 入口与 roll 版本；`roll schedule service status` 新增 `binary` 段并在 node / 入口不存在（nvm 切换后常见）或版本不一致时告警；`roll doctor` 新增「Scheduler service」检查（路径失效 fail、版本过期 warn、未安装 ok）；`roll schedule status` 在已装服务但 daemon 未运行时提示去看 `service status`；旧 metadata 没有 `binary` 时报 unknown，重装后开始检测
+  - `roll schedule service restart`：用用户级 admission lock 原子阻止新 claim、复核 `claimed` / `running` 与持树 retry，再按当前 roll 与配置重装；`--force` 中断 daemon-owned、允许 inline 继续。daemon 被 admission 拒绝领取时记一条可操作日志（恢复时再记一条，不逐 tick 重复），foreground 启动被拒的提示指向 `service status` / `service restart`。admission 拒绝区分「service metadata 阻塞」与「锁短暂忙」，后者不记日志也不算阻塞；`installing` 恢复路径同样尊重 live 门禁（只有 `--force` 才中断在跑任务）；`restart --force` 在旧服务停止后发现残留占用时改为告警并继续安装（非 force 时报错附 invocation id 与 cancel 命令）；`restart --json` 输出 `{ action, liveInvocations, reason? }`；POSIX 上 readiness 失败直接卸载半安装的 LaunchAgent；全新 install 不再被 inline 运行挡住；握手超时错误附 daemon 日志路径；`roll schedule status` 对 `installing` 也提示；`roll doctor` 对无法解析的 metadata 记 fail 并给出 uninstall/install 恢复步骤。替换意图持久化 old/target data-dir，claim 在拿锁后再次复核，metadata 损坏时 fail-closed；foreground daemon 启动与 replacement 使用同一锁顺序。新服务只有携带匹配 generation、取得 daemon lifecycle lock 并回写就绪记录后，metadata 才从 `installing` 进入 `installed`，OS 注册成功但进程未启动不再误报成功
+  - `roll update` 更新 Agent 期间持有 scheduler admission lock（拿锁最多重试 10 次 × 250 ms，避免与 daemon 一次 tick 撞上就整个中止）；自更新后的服务重启改为 spawn 一个新进程执行 `roll schedule service restart --installed-settings --json`（沿用已安装 metadata 的设置、不读取当前配置，配置损坏也不影响自更新；`restart` 未安装时不再读取配置），避免旧进程内新旧模块混跑；自更新后释放 Agent maintenance guards，再保留已安装 metadata 中的 data-dir / 并发设置重启服务，不会按当前 cwd 配置改绑；有效的 `installing` intent 即使 OS service 已缺失也会继续恢复。重启失败计入 update 失败与退出码；有任务运行时只提示；`roll update --check` 报告服务固化的版本 / 路径漂移。Node 22.6–22.12 的 `doctor` / `update` 由启动器自动补 `--experimental-sqlite`
+
+### Patch Changes
+
+- [#239](https://github.com/steveoon/roll-agent/pull/239) [`af2dd3f`](https://github.com/steveoon/roll-agent/commit/af2dd3f021d2f8efaaf3745e7487db9fb833e6d0) Thanks [@steveoon](https://github.com/steveoon)! - roll ui 新增「定时任务管理」面板（与 Companion 分区平级）：
+  - 服务卡片：安装 / 重启 / 卸载开机自启调度服务，显示 daemon 存活、数据目录、下次唤醒与固化二进制是否过期；未安装但有 active 任务、上次安装未完成（fail-closed）、binary 过期等状态给出警示
+  - 任务列表：间隔、下次运行、上次错误、运行中标记；逐任务暂停 / 恢复（恢复按当前配置重新授权）
+  - 最近运行：跨任务合并的运行记录，含状态、尝试次数、耗时与可展开的失败原因；排队中可取消，运行中提供「终止并取消」（等价 `cancel --kill`，需确认）；`--force` / `--abandon` 只在 CLI 提供
+  - 新增 `/api/schedule/*` 路由（session + CSRF 约束与其余 API 一致）与 `RollUiScheduleController` 契约；`roll schedule cancel` 的核心取消逻辑提炼为 `scheduler-host/cancel-invocation.ts` 供 CLI 与 Web 共用，CLI 行为不变
+  - 已安装 service 固化的 data-dir 与当前配置不一致时，面板顶部给出阻断性警告（旧目录任务仍会执行、下方列表与操作不涉及它们）
+  - `ScheduleStore` 新增事务化 `resumeSchedule(id, digest)`；Web 与 CLI 的恢复操作改用它，任务被并发删除时如实报错而非假成功
+  - 取消/恢复的结果提示保留 CLI 同款警告：Windows 后代进程无法验证时提示人工检查，恢复时提示权限已重新授权
+
+- [#239](https://github.com/steveoon/roll-agent/pull/239) [`90abbe5`](https://github.com/steveoon/roll-agent/commit/90abbe5dce3928202d62ece03a68661254d7c947) Thanks [@steveoon](https://github.com/steveoon)! - 升级 AI SDK 生态依赖到当前 7.x 线的最新 patch 版本，并同步 MCP SDK。
+  - `ai` ^7.0.9→^7.0.65、`@ai-sdk/provider` ^4.0.1→^4.0.7、`@ai-sdk/anthropic` ^4.0.4→^4.0.38、`@ai-sdk/openai` ^4.0.4→^4.0.41、`@ai-sdk/deepseek` ^3.0.2→^3.0.31、`@ai-sdk/alibaba` ^2.0.3→^2.0.32、`@ai-sdk/xai` 4.0.12→4.0.38
+  - `@modelcontextprotocol/sdk` ^1.12.0→^1.30.0（core / runtime / sdk 三包同步）
+  - lockfile 中 `@ai-sdk/provider` / `provider-utils` / `openai-compatible` 的重复传递版本收敛为单一版本；`zod` 保持 v3 不变
+  - 随依赖带来的行为变化：`@ai-sdk/anthropic` 4.0.8 起 thinking-level=off 发送的 `thinking: { type: "disabled" }` 会真正下发给 API（旧版静默丢弃）；4.0.21 起 Anthropic 的 thinking tokens 计入 `reasoningTokens` 用量；`@ai-sdk/deepseek` 3.0.30 起支持 DeepSeek V4 Flash Vision Exp 的图片输入；`@modelcontextprotocol/sdk` 1.30.0 起 stdio 传输单条消息默认上限 10 MiB，超限会断开连接（streamable-http 不受影响）
+
 ## 0.18.1
 
 ### Patch Changes
