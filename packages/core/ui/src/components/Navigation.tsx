@@ -9,9 +9,12 @@ interface NavigationProps {
   readonly disabled: boolean;
   readonly companionAvailable: boolean;
   readonly companionActive: boolean;
+  readonly scheduleAvailable: boolean;
+  readonly scheduleActive: boolean;
   readonly onQueryChange: (query: string) => void;
   readonly onNavigate: (target: NavigationTarget, focusPath?: readonly string[]) => void;
   readonly onOpenCompanion: () => void;
+  readonly onOpenSchedule: () => void;
 }
 
 export function Navigation({
@@ -21,13 +24,17 @@ export function Navigation({
   disabled,
   companionAvailable,
   companionActive,
+  scheduleAvailable,
+  scheduleActive,
   onQueryChange,
   onNavigate,
   onOpenCompanion,
+  onOpenSchedule,
 }: NavigationProps) {
   const { rollModules, agents: agentModules } = getCatalogSearchMatches(catalog, query);
   const searchResults = getCatalogSearchResults(catalog, query);
   const searching = query.trim().length > 0;
+  const overlayActive = companionActive || scheduleActive;
   return (
     <nav className="side-navigation" aria-label="配置模块">
       <div className="search-box">
@@ -85,7 +92,7 @@ export function Navigation({
             <div className="nav-list">
               {rollModules.map(([key, node], index) => {
                 const target: NavigationTarget = { type: "roll", key };
-                const targetActive = isConfigTargetHighlighted(active, target, companionActive);
+                const targetActive = isConfigTargetHighlighted(active, target, overlayActive);
                 return (
                   <button
                     key={key}
@@ -112,7 +119,7 @@ export function Navigation({
             <div className="nav-list agent-nav-list">
               {agentModules.map((agent, index) => {
                 const target: NavigationTarget = { type: "agent", name: agent.name };
-                const targetActive = isConfigTargetHighlighted(active, target, companionActive);
+                const targetActive = isConfigTargetHighlighted(active, target, overlayActive);
                 return (
                   <button
                     key={agent.name}
@@ -153,6 +160,28 @@ export function Navigation({
                     <span>
                       <strong>Companion 管理</strong>
                       <small>绑定 / 服务 / 日志</small>
+                    </span>
+                    <span className="nav-arrow" aria-hidden="true">
+                      →
+                    </span>
+                  </button>
+                </div>
+              </>
+            )}
+            {scheduleAvailable && (
+              <>
+                <NavSectionLabel label="SCHEDULER" count={1} />
+                <div className="nav-list">
+                  <button
+                    className={scheduleActive ? "active" : ""}
+                    type="button"
+                    aria-current={scheduleActive ? "page" : undefined}
+                    onClick={onOpenSchedule}
+                  >
+                    <span className="nav-index">S1</span>
+                    <span>
+                      <strong>定时任务管理</strong>
+                      <small>任务 / 运行 / 服务</small>
                     </span>
                     <span className="nav-arrow" aria-hidden="true">
                       →

@@ -412,6 +412,24 @@ function describeActivation(path: ConfigPath): Omit<ConfigActivationEffect, "pat
       requiresConfirmation: true,
     };
   }
+  if (section === "scheduler" && second === "dataDir") {
+    return {
+      kind: "manual",
+      title: "定时任务数据目录需要人工迁移",
+      description:
+        "保存不会搬迁账本与日志，已安装的 scheduler service 仍指向旧目录。请先用 CLI 处理旧目录中的任务，再运行 roll schedule service restart 以新目录重建服务。",
+      requiresConfirmation: true,
+    };
+  }
+  if (section === "scheduler" && second === "maxConcurrentRuns") {
+    return {
+      kind: "manual",
+      title: "定时任务服务需要重启",
+      description:
+        "已安装的 scheduler service 把并发数固化在启动参数里，运行 roll schedule service restart 后生效；未安装则下次 daemon 启动生效。重启不会重置任何任务的间隔计时，重启窗口内到期的任务会补跑一次；有任务正在执行时 restart 会拒绝，可等待完成或用 --force 中断。",
+      requiresConfirmation: false,
+    };
+  }
   if (section === "chat" || section === "runtime" || section === "skills") {
     return {
       kind: "next-chat",

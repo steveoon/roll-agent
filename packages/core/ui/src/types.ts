@@ -39,6 +39,7 @@ interface ConfigCatalogNodeBase {
   readonly defaultValue?: unknown;
   readonly widget: ConfigFieldWidget;
   readonly secret: boolean;
+  readonly readOnly: boolean;
 }
 
 export interface ConfigNumberConstraints {
@@ -242,6 +243,61 @@ export interface CompanionDoctorCheck {
 export interface CompanionDoctorResult {
   readonly ok: boolean;
   readonly checks: readonly CompanionDoctorCheck[];
+}
+
+export interface ScheduleStatusSummary {
+  readonly dataDir: string;
+  readonly logPath: string;
+  readonly daemon: {
+    readonly liveness: string;
+    readonly pid?: number;
+    readonly startedAt?: string;
+  };
+  readonly service: {
+    readonly metadataStatus: string;
+    readonly metadataPhase?: string;
+    readonly installed: boolean;
+    readonly running: boolean;
+    readonly installedDataDir?: string;
+    readonly binary?: { readonly status: string; readonly reason?: string };
+    readonly error?: string;
+  };
+  readonly schedules: {
+    readonly total: number;
+    readonly active: number;
+    readonly paused: number;
+  };
+  readonly nextWakeAt?: string;
+}
+
+export interface ScheduleRow {
+  readonly id: string;
+  readonly name: string;
+  readonly status: string;
+  readonly trigger: string;
+  readonly cwd: string;
+  readonly prompt: string;
+  readonly nextRunAt?: string;
+  readonly lastRunAt?: string;
+  readonly lastError?: string;
+  readonly maxRun?: string;
+  readonly createdAt: string;
+  readonly liveRun?: { readonly id: string; readonly status: string };
+}
+
+export interface ScheduleRunRow {
+  readonly id: string;
+  readonly scheduleId: string;
+  readonly scheduleName: string;
+  readonly mode: string;
+  readonly status: string;
+  readonly scheduledFor: string;
+  readonly attempt: number;
+  readonly maxAttempts: number;
+  readonly error?: string;
+  readonly outputExcerpt?: string;
+  readonly startedAt?: string;
+  readonly finishedAt?: string;
 }
 
 export type EditorMode = "form" | "yaml";

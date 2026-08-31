@@ -287,6 +287,26 @@ test("pause/resume 只改状态不改相位", () => {
   }
 });
 
+test("resumeSchedule 原子写入状态与授权摘要，任务不存在时返回 false", () => {
+  const dir = tempDir();
+  try {
+    const store = new ScheduleStore(dir);
+    const created = store.createSchedule(sampleInput(), NOW);
+    store.setScheduleStatus(created.id, SCHEDULE_STATUSES.paused, NOW + 1);
+
+    assert.equal(store.resumeSchedule(created.id, "v1:digest-next", NOW + 2), true);
+    const resumed = store.getSchedule(created.id);
+    assert.equal(resumed?.status, SCHEDULE_STATUSES.active);
+    assert.equal(resumed?.authorityDigest, "v1:digest-next");
+    assert.equal(resumed?.nextRunAtMs, NOW + 1_800_000);
+
+    assert.equal(store.resumeSchedule("missing", "v1:digest-next", NOW + 3), false);
+    store.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("超过 maxSchedules、非法 name/prompt/cwd 都被拒绝", () => {
   const dir = tempDir();
   try {

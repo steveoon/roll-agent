@@ -82,6 +82,23 @@ export interface RollUiCompanionController {
   restart(): Awaitable<unknown>;
 }
 
+/**
+ * Scheduler management boundary. Reads stay concurrent while mutations are serialized
+ * by the implementation. Mutation request bodies arrive as untrusted client input and are
+ * validated by the controller, never by the transport.
+ */
+export interface RollUiScheduleController {
+  getStatus(): Awaitable<unknown>;
+  listSchedules(): Awaitable<unknown>;
+  listRuns(request: unknown): Awaitable<unknown>;
+  installService(): Awaitable<unknown>;
+  restartService(): Awaitable<unknown>;
+  uninstallService(): Awaitable<unknown>;
+  pauseSchedule(request: unknown): Awaitable<unknown>;
+  resumeSchedule(request: unknown): Awaitable<unknown>;
+  cancelInvocation(request: unknown): Awaitable<unknown>;
+}
+
 export interface RollUiStaticAsset {
   readonly body: Uint8Array | string;
   readonly contentType: string;

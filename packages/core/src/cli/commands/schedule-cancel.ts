@@ -1,22 +1,6 @@
-import { EXECUTOR_LIVENESS } from "@roll-agent/runtime";
-import type { ExecutorIdentity } from "@roll-agent/runtime";
 import { defineCommand } from "citty";
 import { loadConfig } from "../../config/loader.ts";
-import {
-  KILL_RESULTS,
-  descendantsUnverified,
-  type KillResult,
-} from "../../scheduler-host/cancel-descendants.ts";
-import { isTreeSettled } from "../../scheduler-host/execute-invocation.ts";
-import {
-  KILL_PROCESS_TREE_OUTCOMES,
-  probeExecutorLiveness,
-  terminateExecutorWithGrace,
-} from "../../scheduler-host/executor-liveness.ts";
-import {
-  terminateInvocationTree,
-  trackedGroupsFromPersisted,
-} from "../../scheduler-host/invocation-tree.ts";
+import { cancelScheduledInvocation } from "../../scheduler-host/cancel-invocation.ts";
 import { log } from "../utils/output.ts";
 import {
   loadRuntime,
@@ -25,32 +9,6 @@ import {
   runScheduleCommand,
   serializeInvocation,
 } from "./schedule-command-utils.ts";
-
-const KILL_CONFIRM_TIMEOUT_MS = 5_000;
-const KILL_CONFIRM_POLL_MS = 100;
-
-async function killAndConfirmExit(executor: ExecutorIdentity): Promise<KillResult> {
-  const outcome = await terminateExecutorWithGrace(executor);
-  if (outcome !== KILL_PROCESS_TREE_OUTCOMES.tree) {
-    const liveness = probeExecutorLiveness(executor);
-    if (liveness === EXECUTOR_LIVENESS.dead) {
-      return process.platform === "win32" ? KILL_RESULTS.unverifiable : KILL_RESULTS.confirmed;
-    }
-    return liveness === EXECUTOR_LIVENESS.unknown
-      ? KILL_RESULTS.unverifiable
-      : KILL_RESULTS.treeKillFailed;
-  }
-  const deadline = Date.now() + KILL_CONFIRM_TIMEOUT_MS;
-  while (Date.now() < deadline) {
-    if (probeExecutorLiveness(executor) === EXECUTOR_LIVENESS.dead) {
-      return KILL_RESULTS.confirmed;
-    }
-    await new Promise((resolve) => setTimeout(resolve, KILL_CONFIRM_POLL_MS));
-  }
-  return probeExecutorLiveness(executor) === EXECUTOR_LIVENESS.dead
-    ? KILL_RESULTS.confirmed
-    : KILL_RESULTS.stillAlive;
-}
 
 export default defineCommand({
   meta: {
@@ -115,135 +73,27 @@ export default defineCommand({
           log.warn("已释放单例；若旧 exec 进程仍在运行，其副作用不会被阻止");
           return;
         }
-        const before = store.getInvocation(args.invocation);
-        if (before === undefined) {
-          throw new Error(`invocation ${args.invocation} 不存在`);
-        }
-        let killed = false;
-        let killResult: KillResult | undefined;
-        if (
-          args.kill &&
-          before.status === runtime.INVOCATION_STATUSES.running &&
-          before.executor !== undefined
-        ) {
-          const result = await killAndConfirmExit(before.executor);
-          killResult = result;
-          if (result === KILL_RESULTS.treeKillFailed) {
-            throw new Error(
-              `无法整体终止 invocation ${args.invocation} 的 exec 进程树（pid ${String(before.executor.pid)}；Windows 上 taskkill 失败或进程不是进程组首领），未取消、未释放单例`,
-            );
-          }
-          killed = result === KILL_RESULTS.confirmed;
-        }
-        const current = store.getInvocation(args.invocation);
-        if (current === undefined) {
-          throw new Error(`invocation ${args.invocation} 不存在`);
-        }
-        if (current.attempt !== before.attempt) {
-          throw new Error(
-            `invocation ${args.invocation} 已被其他 worker 接管（attempt ${String(before.attempt)} → ${String(current.attempt)}），未取消、未改写新 owner 的账本`,
-          );
-        }
-        let tree:
-          | {
-              readonly trackedGroups: typeof current.treeTrackedGroups;
-              readonly unsettled: boolean;
-              readonly survivorPids: readonly number[];
-            }
-          | undefined;
-        let teardownError: string | undefined;
-        const treeBearing =
-          before.status === runtime.INVOCATION_STATUSES.claimed ||
-          before.status === runtime.INVOCATION_STATUSES.running ||
-          before.status === runtime.INVOCATION_STATUSES.retry;
-        if (
-          args.kill &&
-          treeBearing &&
-          (before.status !== runtime.INVOCATION_STATUSES.running ||
-            before.executor === undefined ||
-            killed)
-        ) {
-          const report = await terminateInvocationTree({
-            invocationId: args.invocation,
-            selfPid: 0,
-            trackedGroups: trackedGroupsFromPersisted(current.treeTrackedGroups),
-            ...(current.executor !== undefined
-              ? { previousExecutorPid: current.executor.pid }
-              : before.executor !== undefined
-                ? { previousExecutorPid: before.executor.pid }
-                : {}),
-          });
-          tree = {
-            trackedGroups: isTreeSettled(report) ? [] : current.treeTrackedGroups,
-            unsettled: !isTreeSettled(report),
-            survivorPids: report.survivorPids,
-          };
-          teardownError = report.error;
-        }
-        const outcome = store.finalizeCancellation({
-          id: args.invocation,
-          reason: "已由用户取消",
-          nowMs: Date.now(),
-          expectedAttempt: before.attempt,
-          ...(tree !== undefined ? { tree } : {}),
-        });
-        const outcomes = runtime.CANCEL_INVOCATION_OUTCOMES;
-        if (outcome === outcomes.ownershipChanged) {
-          throw new Error(
-            `invocation ${args.invocation} 已被其他 worker 接管，未取消、未改写新 owner 的账本`,
-          );
-        }
-        if (outcome === outcomes.terminal) {
-          throw new Error(`invocation ${args.invocation} 已是终态（${before.status}），无需取消`);
-        }
-        if (outcome === outcomes.notFound) {
-          throw new Error(`invocation ${args.invocation} 不存在`);
-        }
-        if (outcome === outcomes.executorAlive) {
-          throw new Error(
-            args.kill
-              ? `exec 进程树 (pid ${String(before.executor?.pid ?? "?")}) 在 ${String(KILL_CONFIRM_TIMEOUT_MS)} ms 内未全部退出，未取消；请稍后重试`
-              : `invocation ${args.invocation} 的 exec 进程或其进程树仍有存活成员（pid ${String(before.executor?.pid ?? "?")}），取消需要加 --kill`,
-          );
-        }
-        if (outcome === outcomes.executorUnknown) {
-          throw new Error(
-            `无法确认 invocation ${args.invocation} 的 exec 进程已退出，未取消；确认进程已不存在后可用 --abandon（危险：会释放单例）`,
-          );
-        }
-        if (outcome === outcomes.treeUnsettled) {
-          const survivors = (tree?.survivorPids ?? current.treeSurvivorPids).map(String).join(", ");
-          throw new Error(
-            args.kill
-              ? survivors.length > 0
-                ? `invocation ${args.invocation} 的进程树在终止后仍有存活成员（pid ${survivors}），未取消、未释放单例`
-                : `无法枚举 invocation ${args.invocation} 的进程树${teardownError === undefined ? "" : `：${teardownError}`}，未取消、未释放单例`
-              : `invocation ${args.invocation} 仍有未清干净的进程树，取消需要加 --kill`,
-          );
-        }
-        const after = store.getInvocation(args.invocation);
-        if (after === undefined) {
-          throw new Error(`invocation ${args.invocation} 不存在`);
-        }
-        const unverifiedDescendants = descendantsUnverified({
-          killResult,
-          killed,
-          platform: process.platform,
+        const result = await cancelScheduledInvocation({
+          store,
+          invocationId: args.invocation,
+          kill: args.kill,
         });
         if (args.json) {
           printJson({
-            ...serializeInvocation(after),
-            killed,
+            ...serializeInvocation(result.invocation),
+            killed: result.killed,
             abandoned: false,
-            unverifiedDescendants,
+            unverifiedDescendants: result.unverifiedDescendants,
           });
           return;
         }
-        log.success(`已取消 invocation ${after.id}（原状态 ${before.status}）`);
-        if (killed) {
-          log.info(`exec 进程树 (pid ${String(before.executor?.pid ?? "?")}) 已终止并确认退出`);
+        log.success(`已取消 invocation ${result.invocation.id}（原状态 ${result.previousStatus}）`);
+        if (result.killed) {
+          log.info(
+            `exec 进程树 (pid ${String(result.previousExecutorPid ?? "?")}) 已终止并确认退出`,
+          );
         }
-        if (unverifiedDescendants) {
+        if (result.unverifiedDescendants) {
           log.warn(
             "Windows 无法验证 exec 后代进程是否退出；已按根进程退出取消，若有残留子进程请手动检查",
           );

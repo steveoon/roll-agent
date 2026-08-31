@@ -15,9 +15,9 @@ export function matchesNavigationTarget(
 export function isConfigTargetHighlighted(
   current: NavigationTarget,
   target: NavigationTarget,
-  companionActive: boolean,
+  overlayActive: boolean,
 ): boolean {
-  if (companionActive) {
+  if (overlayActive) {
     return false;
   }
   return matchesNavigationTarget(current, target);

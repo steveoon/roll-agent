@@ -187,7 +187,8 @@ export const CONFIG_GUIDANCE_ENTRIES = [
   {
     path: "scheduler",
     title: "定时任务",
-    purpose: "控制 `roll schedule` 定时任务的存储目录、数量上限与并发运行数。",
+    purpose:
+      "控制 `roll schedule` 定时任务的存储目录、数量上限与并发运行数。任务本身与运行结果在 `roll ui` 左侧「定时任务管理」面板查看和管理。",
     defaultBehavior: "所有子项都有默认值；只有需要覆盖默认行为时才写入配置。",
     example: `scheduler:\n  max-concurrent-runs: ${DEFAULT_CONFIG.scheduler.maxConcurrentRuns}`,
   },

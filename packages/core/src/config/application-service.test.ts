@@ -615,6 +615,38 @@ agents:
     ]);
     assert.ok(effects.some((effect) => effect.kind === "next-command"));
   });
+
+  it("plans scheduler effects that point at service restart", () => {
+    const effects = planConfigActivation([
+      ["scheduler", "dataDir"],
+      ["scheduler", "maxConcurrentRuns"],
+      ["scheduler", "maxSchedules"],
+    ]);
+
+    const dataDir = effects.find((effect) =>
+      effect.paths.some((path) => path[0] === "scheduler" && path[1] === "dataDir"),
+    );
+    assert.ok(dataDir);
+    assert.equal(dataDir.kind, "manual");
+    assert.equal(dataDir.requiresConfirmation, true);
+    assert.match(dataDir.description, /不会搬迁/u);
+    assert.match(dataDir.description, /roll schedule service restart/u);
+
+    const concurrent = effects.find((effect) =>
+      effect.paths.some((path) => path[0] === "scheduler" && path[1] === "maxConcurrentRuns"),
+    );
+    assert.ok(concurrent);
+    assert.equal(concurrent.kind, "manual");
+    assert.notEqual(concurrent.title, dataDir.title);
+    assert.match(concurrent.description, /roll schedule service restart/u);
+    assert.match(concurrent.description, /不会重置/u);
+
+    const maxSchedules = effects.find((effect) =>
+      effect.paths.some((path) => path[0] === "scheduler" && path[1] === "maxSchedules"),
+    );
+    assert.ok(maxSchedules);
+    assert.equal(maxSchedules.kind, "next-command");
+  });
 });
 
 function withConfig(

@@ -7,6 +7,18 @@ export type {
   CompanionApplicationPort,
   RollUiCompanionControllerOptions,
 } from "./companion-controller.ts";
+export {
+  createRollUiScheduleController,
+  RollUiScheduleBusyError,
+  RollUiScheduleRequestError,
+} from "./schedule-controller.ts";
+export type {
+  RollUiScheduleControllerOptions,
+  ScheduleHostPort,
+  ScheduleHostStatus,
+  ScheduleLedger,
+  ScheduleLedgerPort,
+} from "./schedule-controller.ts";
 export { createConfigApplicationUiController } from "./config-controller.ts";
 export type { ConfigApplicationUiControllerOptions } from "./config-controller.ts";
 export {
@@ -18,6 +30,7 @@ export {
   type RollUiConfigEditMode,
   type RollUiConfigRequest,
   type RollUiController,
+  type RollUiScheduleController,
   type RollUiSaveConfigRequest,
   type RollUiStaticAsset,
   type RollUiStaticAssetProvider,

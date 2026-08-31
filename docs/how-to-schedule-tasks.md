@@ -111,6 +111,8 @@ roll schedule status
 roll chat --session <thread-id>
 ```
 
+不想记命令的话，`roll ui` 左侧的「定时任务管理」面板提供同样的视图：任务列表、最近运行（含失败原因）、service 安装 / 重启 / 卸载、任务暂停 / 恢复与取消运行。新建任务仍需 `roll schedule add`。
+
 ## 常用命令
 
 | 目的 | 命令 |

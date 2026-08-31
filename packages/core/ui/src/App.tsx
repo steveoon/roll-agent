@@ -13,6 +13,7 @@ import { AgentEnvironmentEditor } from "./components/AgentEnvironmentEditor.tsx"
 import { ApplyDialog } from "./components/ApplyDialog.tsx";
 import { CatalogEditor } from "./components/CatalogEditor.tsx";
 import { CompanionPanel } from "./components/CompanionPanel.tsx";
+import { SchedulePanel } from "./components/SchedulePanel.tsx";
 import { Navigation } from "./components/Navigation.tsx";
 import { ReviewPanel } from "./components/ReviewPanel.tsx";
 import { YamlEditor } from "./components/YamlEditor.tsx";
@@ -22,6 +23,7 @@ import {
   resolveVisibleNavigationTarget,
 } from "./lib/catalog-search.ts";
 import { isCompanionUnavailableError } from "./lib/companion-state.ts";
+import { isScheduleUnavailableError } from "./lib/schedule-state.ts";
 import { createConfiguredSecretPathKeys } from "./lib/config-secret.ts";
 import { cloneObject, deleteAtPath, setAtPath } from "./lib/config-value.ts";
 import type {
@@ -51,7 +53,7 @@ type LoadState =
 
 type Toast = { readonly tone: "success" | "warning"; readonly message: string };
 type BusyAction = "preview" | "save" | "apply";
-type WorkspaceView = "config" | "companion";
+type WorkspaceView = "config" | "companion" | "schedule";
 
 const api = new RollUiApi();
 
@@ -80,6 +82,7 @@ export function App() {
   const [toast, setToast] = useState<Toast>();
   const [view, setView] = useState<WorkspaceView>("config");
   const [companionAvailable, setCompanionAvailable] = useState(false);
+  const [scheduleAvailable, setScheduleAvailable] = useState(false);
   const draftGenerationRef = useRef(0);
   const activeActionRef = useRef<BusyAction | null>(null);
 
@@ -130,6 +133,12 @@ export function App() {
     setToast({ tone: "warning", message: "当前 roll ui 未启用 Companion 管理。" });
   }, []);
 
+  const handleScheduleUnavailable = useCallback(() => {
+    setScheduleAvailable(false);
+    setView("config");
+    setToast({ tone: "warning", message: "当前 roll ui 未启用定时任务管理。" });
+  }, []);
+
   const loadAgentStatus = useCallback(async () => {
     setAgentsLoading(true);
     setAgentStatusError(undefined);
@@ -151,22 +160,28 @@ export function App() {
     async function initialize(): Promise<void> {
       try {
         const bootstrap = await api.bootstrap();
-        const [catalog, loadedSnapshot, statusResult, companionSupported] = await Promise.all([
-          api.getCatalog(),
-          api.getConfig(),
-          api.getAgentStatus().then(
-            (status) => ({ status: "success" as const, value: status }),
-            (error: unknown) => ({ status: "error" as const, message: describeError(error) }),
-          ),
-          api.getCompanionStatus().then(
-            () => true,
-            (error: unknown) => !isCompanionUnavailableError(error),
-          ),
-        ]);
+        const [catalog, loadedSnapshot, statusResult, companionSupported, scheduleSupported] =
+          await Promise.all([
+            api.getCatalog(),
+            api.getConfig(),
+            api.getAgentStatus().then(
+              (status) => ({ status: "success" as const, value: status }),
+              (error: unknown) => ({ status: "error" as const, message: describeError(error) }),
+            ),
+            api.getCompanionStatus().then(
+              () => true,
+              (error: unknown) => !isCompanionUnavailableError(error),
+            ),
+            api.getScheduleStatus().then(
+              () => true,
+              (error: unknown) => !isScheduleUnavailableError(error),
+            ),
+          ]);
         if (!activeRequest) {
           return;
         }
         setCompanionAvailable(companionSupported);
+        setScheduleAvailable(scheduleSupported);
         setPersistedDraft(cloneObject(loadedSnapshot.persisted));
         setYamlDraft(loadedSnapshot.yaml);
         if (loadedSnapshot.repairMode === true) {
@@ -515,9 +530,11 @@ export function App() {
   };
 
   const companionView = view === "companion" && companionAvailable;
+  const scheduleView = view === "schedule" && scheduleAvailable;
+  const overlayView = companionView || scheduleView;
 
   return (
-    <div className={companionView ? "app-shell companion-view" : "app-shell"}>
+    <div className={overlayView ? "app-shell companion-view" : "app-shell"}>
       <a className="skip-link" href="#config-editor-main">
         跳到配置编辑区
       </a>
@@ -596,9 +613,12 @@ export function App() {
         disabled={mode === "yaml"}
         companionAvailable={companionAvailable}
         companionActive={companionView}
+        scheduleAvailable={scheduleAvailable}
+        scheduleActive={scheduleView}
         onQueryChange={setQuery}
         onNavigate={navigateTo}
         onOpenCompanion={() => setView("companion")}
+        onOpenSchedule={() => setView("schedule")}
       />
 
       <main id="config-editor-main" className="editor-main" tabIndex={-1}>
@@ -609,6 +629,8 @@ export function App() {
               onToast={setToast}
               onUnavailable={handleCompanionUnavailable}
             />
+          ) : scheduleView ? (
+            <SchedulePanel api={api} onToast={setToast} onUnavailable={handleScheduleUnavailable} />
           ) : (
             <>
               {currentSnapshot.repairMode === true && (
@@ -668,7 +690,7 @@ export function App() {
         </footer>
       </main>
 
-      {!companionView && (
+      {!overlayView && (
         <ReviewPanel
           dirty={dirty}
           preview={preview}

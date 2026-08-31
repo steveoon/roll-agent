@@ -683,6 +683,17 @@ export class ScheduleStore {
     return result.changes === 1;
   }
 
+  resumeSchedule(id: string, authorityDigest: string, nowMs: number = Date.now()): boolean {
+    return this.transaction(() => {
+      const result = this.db
+        .prepare(
+          "UPDATE schedules SET status = ?, authority_digest = ?, updated_at = ? WHERE id = ?",
+        )
+        .run(SCHEDULE_STATUSES.active, authorityDigest, nowMs, id);
+      return result.changes === 1;
+    });
+  }
+
   getSchedule(id: string): ScheduleRecord | undefined {
     const row = this.db.prepare("SELECT * FROM schedules WHERE id = ?").get(id) as
       | ScheduleRow

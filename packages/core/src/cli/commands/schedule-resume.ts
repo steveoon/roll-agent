@@ -22,9 +22,9 @@ export default defineCommand({
       try {
         const schedule = requireSchedule(store, args.id);
         const authorityDigest = computeAuthorityDigest(loadConfig({ cwd: schedule.cwd }).config);
-        const now = Date.now();
-        store.setAuthorityDigest(schedule.id, authorityDigest, now);
-        store.setScheduleStatus(schedule.id, runtime.SCHEDULE_STATUSES.active, now);
+        if (!store.resumeSchedule(schedule.id, authorityDigest, Date.now())) {
+          throw new Error(`定时任务 ${args.id} 已被删除；用 roll schedule list 查看`);
+        }
         if (schedule.authorityDigest !== authorityDigest) {
           log.warn(
             `权限边界摘要已变化（${schedule.authorityDigest?.slice(0, 15) ?? "未记录"} → ${authorityDigest.slice(0, 15)}），已按 ${schedule.cwd} 当前的 runtime.approval / runtime.shell 配置重新授权。`,

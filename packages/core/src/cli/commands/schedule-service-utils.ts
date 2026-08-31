@@ -153,6 +153,7 @@ export interface SchedulerServiceProbe {
   readonly metadataPhase?: SchedulerServiceStatePhase;
   readonly installed: boolean;
   readonly running: boolean;
+  readonly installedDataDir?: string;
   readonly binary?: SchedulerServiceBinaryReport;
   readonly error?: string;
 }
@@ -167,7 +168,9 @@ export async function probeSchedulerService(
       ? { metadataStatus: inspection.status, installed: false, running: false }
       : {
           metadataStatus: inspection.status,
-          ...(inspection.status === "valid" ? { metadataPhase: inspection.state.phase } : {}),
+          ...(inspection.status === "valid"
+            ? { metadataPhase: inspection.state.phase, installedDataDir: inspection.state.dataDir }
+            : {}),
           installed: false,
           running: false,
           error: `当前平台 ${platform} 不支持内建 scheduler service，但发现了 ${inspection.status} metadata`,
@@ -180,7 +183,9 @@ export async function probeSchedulerService(
     }).status();
     return {
       metadataStatus: inspection.status,
-      ...(inspection.status === "valid" ? { metadataPhase: inspection.state.phase } : {}),
+      ...(inspection.status === "valid"
+        ? { metadataPhase: inspection.state.phase, installedDataDir: inspection.state.dataDir }
+        : {}),
       installed: status.installed,
       running: status.running,
       ...(inspection.status === "valid"
@@ -191,7 +196,9 @@ export async function probeSchedulerService(
   } catch (error) {
     return {
       metadataStatus: inspection.status,
-      ...(inspection.status === "valid" ? { metadataPhase: inspection.state.phase } : {}),
+      ...(inspection.status === "valid"
+        ? { metadataPhase: inspection.state.phase, installedDataDir: inspection.state.dataDir }
+        : {}),
       installed: false,
       running: false,
       error: errorMessage(error),

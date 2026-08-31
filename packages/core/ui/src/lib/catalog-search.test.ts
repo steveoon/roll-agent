@@ -15,6 +15,7 @@ const base = {
   persistedRequired: false,
   widget: "text",
   secret: false,
+  readOnly: false,
 } as const;
 
 const catalog: RollConfigCatalog = {

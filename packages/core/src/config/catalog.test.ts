@@ -256,6 +256,33 @@ describe("buildRollConfigCatalog", () => {
     assert.equal(cdpUrl.widget, "password");
   });
 
+  it("marks scheduler.dataDir as the only read-only web form field", () => {
+    const catalog = buildRollConfigCatalog();
+
+    const dataDir = findNode(catalog.root, ["scheduler", "dataDir"]);
+    assert.equal(dataDir.readOnly, true);
+
+    const readOnlyPaths: string[] = [];
+    const visit = (node: ConfigCatalogNode): void => {
+      if (node.readOnly) {
+        readOnlyPaths.push(node.path.join("."));
+      }
+      if (node.kind === "object") {
+        Object.values(node.fields).forEach(visit);
+        return;
+      }
+      if (node.kind === "record") {
+        visit(node.value);
+        return;
+      }
+      if (node.kind === "array") {
+        visit(node.item);
+      }
+    };
+    visit(catalog.root);
+    assert.deepEqual(readOnlyPaths, ["scheduler.dataDir"]);
+  });
+
   it("derives agent environment fields and marks generated values as read-only", () => {
     const catalog = buildRollConfigCatalog([makeAgent()]);
     const agent = catalog.agents[0];
