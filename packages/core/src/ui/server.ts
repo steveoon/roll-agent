@@ -19,12 +19,14 @@ import {
   type ConfigRevision,
 } from "../config/document-store.ts";
 import { RollUiCompanionBusyError, RollUiCompanionRequestError } from "./companion-controller.ts";
+import { RollUiScheduleBusyError, RollUiScheduleRequestError } from "./schedule-controller.ts";
 import type {
   RollUiApplyEffectsRequest,
   RollUiCompanionController,
   RollUiConfigRequest,
   RollUiController,
   RollUiSaveConfigRequest,
+  RollUiScheduleController,
   RollUiStaticAsset,
   RollUiStaticAssetProvider,
 } from "./contracts.ts";
@@ -46,6 +48,9 @@ const COMPANION_LOG_STREAM_PATH = "/api/companion/logs/stream";
 const COMPANION_LOG_STREAM_RETRY_MS = 3_000;
 const COMPANION_LOG_STREAM_FAILURE_CODE = "companion_log_stream_failed";
 const COMPANION_ERROR_MESSAGE_LIMIT = 500;
+const SCHEDULE_API_PREFIX = "/api/schedule/";
+const SCHEDULE_RUNS_PATH = "/api/schedule/runs";
+const SCHEDULE_ERROR_MESSAGE_LIMIT = 500;
 const CONTENT_SECURITY_POLICY = [
   "default-src 'self'",
   "base-uri 'none'",
@@ -110,6 +115,44 @@ const COMPANION_MUTATIONS: Readonly<Record<string, CompanionMutation>> = {
   "/api/companion/restart": { requiresBody: false, run: (controller) => controller.restart() },
 };
 
+interface ScheduleMutation {
+  readonly requiresBody: boolean;
+  readonly run: (controller: RollUiScheduleController, body: unknown) => unknown;
+}
+
+const SCHEDULE_READS: Readonly<Record<string, (controller: RollUiScheduleController) => unknown>> =
+  {
+    "/api/schedule/status": (controller) => controller.getStatus(),
+    "/api/schedule/schedules": (controller) => controller.listSchedules(),
+  };
+
+const SCHEDULE_MUTATIONS: Readonly<Record<string, ScheduleMutation>> = {
+  "/api/schedule/service/install": {
+    requiresBody: false,
+    run: (controller) => controller.installService(),
+  },
+  "/api/schedule/service/restart": {
+    requiresBody: false,
+    run: (controller) => controller.restartService(),
+  },
+  "/api/schedule/service/uninstall": {
+    requiresBody: false,
+    run: (controller) => controller.uninstallService(),
+  },
+  "/api/schedule/pause": {
+    requiresBody: true,
+    run: (controller, body) => controller.pauseSchedule(body),
+  },
+  "/api/schedule/resume": {
+    requiresBody: true,
+    run: (controller, body) => controller.resumeSchedule(body),
+  },
+  "/api/schedule/cancel": {
+    requiresBody: true,
+    run: (controller, body) => controller.cancelInvocation(body),
+  },
+};
+
 interface RequestRuntime {
   readonly origin: string;
   readonly expectedHost: string;
@@ -125,6 +168,7 @@ export interface StartRollUiServerOptions {
   readonly controller: RollUiController;
   readonly staticAssets: RollUiStaticAssetProvider;
   readonly companionController?: RollUiCompanionController;
+  readonly scheduleController?: RollUiScheduleController;
   readonly signal?: AbortSignal;
   readonly onError?: (error: unknown) => void;
   readonly bodyLimitBytes?: number;
@@ -340,9 +384,80 @@ async function handleApiRequest(
     await handleCompanionRequest(request, response, pathname, method, runtime, session, options);
     return;
   }
+  if (pathname.startsWith(SCHEDULE_API_PREFIX)) {
+    await handleScheduleRequest(request, response, pathname, method, runtime, session, options);
+    return;
+  }
 
   if (isKnownApiPath(pathname)) throw methodNotAllowed(allowedMethods(pathname));
   throw new RollUiHttpError(404, "not_found", "Not found.");
+}
+
+async function handleScheduleRequest(
+  request: IncomingMessage,
+  response: ServerResponse,
+  pathname: string,
+  method: string,
+  runtime: RequestRuntime,
+  session: SessionState,
+  options: StartRollUiServerOptions,
+): Promise<void> {
+  const controller = options.scheduleController;
+  if (controller === undefined) {
+    throw new RollUiHttpError(404, "schedule_unavailable", "当前 roll ui 未启用定时任务管理。");
+  }
+  if (pathname === SCHEDULE_RUNS_PATH) {
+    if (method !== "GET") throw methodNotAllowed("GET");
+    const query = new URL(request.url ?? "/", runtime.origin).searchParams;
+    const scheduleId = query.get("scheduleId");
+    const limit = query.get("limit");
+    const runsRequest = {
+      ...(scheduleId === null ? {} : { scheduleId }),
+      ...(limit === null ? {} : { limit: Number(limit) }),
+    };
+    sendData(response, await runScheduleOperation(() => controller.listRuns(runsRequest)));
+    return;
+  }
+  const read = SCHEDULE_READS[pathname];
+  if (read !== undefined) {
+    if (method !== "GET") throw methodNotAllowed("GET");
+    sendData(response, await runScheduleOperation(() => read(controller)));
+    return;
+  }
+  const mutation = SCHEDULE_MUTATIONS[pathname];
+  if (mutation === undefined) throw new RollUiHttpError(404, "not_found", "Not found.");
+  if (method !== "POST") throw methodNotAllowed("POST");
+  requireCsrf(request.headers, session);
+  const body = mutation.requiresBody
+    ? await readJsonBody(request, runtime.bodyLimitBytes)
+    : undefined;
+  sendData(response, await runScheduleOperation(() => mutation.run(controller, body)));
+}
+
+async function runScheduleOperation(work: () => unknown): Promise<unknown> {
+  try {
+    return await work();
+  } catch (error) {
+    throw toScheduleHttpError(error);
+  }
+}
+
+function toScheduleHttpError(error: unknown): unknown {
+  if (error instanceof RollUiHttpError) return error;
+  if (error instanceof RollUiScheduleBusyError) {
+    return new RollUiHttpError(409, error.code, error.message);
+  }
+  if (error instanceof RollUiScheduleRequestError) {
+    return new RollUiHttpError(400, error.code, error.message);
+  }
+  if (error instanceof Error && error.message.length > 0) {
+    return new RollUiHttpError(
+      422,
+      "schedule_operation_failed",
+      error.message.slice(0, SCHEDULE_ERROR_MESSAGE_LIMIT),
+    );
+  }
+  return error;
 }
 
 async function handleCompanionRequest(

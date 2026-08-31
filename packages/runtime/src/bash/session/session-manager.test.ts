@@ -1,5 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import type { ChildProcess } from "node:child_process";
 import { performance } from "node:perf_hooks";
 import { SessionManager, SessionCapError } from "./session-manager.ts";
 import { pollUntilDeadline } from "./yield-loop.ts";
@@ -453,3 +454,25 @@ async function waitForState(
   }
   assert.equal(session.state, expected);
 }
+
+test("spawn 成功后把会话子进程交给 onSpawn", { skip }, async () => {
+  const seen: ChildProcess[] = [];
+  const mgr = new SessionManager({
+    maxSessions: 1,
+    profile,
+    env: process.env,
+    bufferCapacity: 100_000,
+    onSpawn: (child) => {
+      seen.push(child);
+    },
+  });
+  const session = mgr.spawn({ command: "exit 0", workdir: process.cwd() });
+  try {
+    assert.equal(seen.length, 1);
+    assert.equal(seen[0], session.child);
+    assert.equal(seen[0]?.pid, session.child.pid);
+  } finally {
+    await pollUntilDeadline(session, performance.now() + 2_000, 100);
+    await mgr.terminateAll();
+  }
+});

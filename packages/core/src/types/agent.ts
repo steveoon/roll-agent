@@ -1,6 +1,11 @@
 /** Agent 传输模式 */
 export type AgentTransport =
-  | { readonly type: "stdio"; readonly command: string; readonly args?: readonly string[] }
+  | {
+      readonly type: "stdio";
+      readonly command: string;
+      readonly args?: readonly string[];
+      readonly maxBufferSize?: number;
+    }
   | { readonly type: "streamable-http"; readonly endpoint: string };
 
 /** SKILL.md frontmatter 解析结果 */

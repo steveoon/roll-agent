@@ -97,8 +97,91 @@ export type {
 } from "./tool-bridge/normalize-result.ts";
 export { ThreadStore, defaultThreadsDir, expandTilde } from "./store/thread-store.ts";
 export type { ThreadRecord, CreateThreadInput } from "./store/thread-store.ts";
+export {
+  SCHEDULE_LEDGER_READ_STATUSES,
+  ScheduleStore,
+  readScheduleLedger,
+} from "./scheduler/schedule-store.ts";
+export type {
+  ScheduleStoreOptions,
+  ClaimDueInput,
+  ScheduleLedgerReadResult,
+  ScheduleLedgerReadStatus,
+} from "./scheduler/schedule-store.ts";
+export { SCHEDULER_LIMITS } from "./scheduler/limits.ts";
+export {
+  TRIGGER_KINDS,
+  ScheduleTriggerError,
+  computeNextRunAtMs,
+  createIntervalTrigger,
+  describeTrigger,
+  formatDuration,
+  formatInterval,
+  parseIntervalText,
+  parseMaxRunText,
+  parseTriggerJson,
+  triggerSpecSchema,
+} from "./scheduler/trigger.ts";
+export type { TriggerKind, TriggerSpec } from "./scheduler/trigger.ts";
+export {
+  CANCEL_INVOCATION_OUTCOMES,
+  COMPLETE_INVOCATION_OUTCOMES,
+  EXECUTOR_LIVENESS,
+  INVOCATION_FAILURE_OUTCOMES,
+  INVOCATION_LIVE_STATUSES,
+  INVOCATION_MODES,
+  INVOCATION_STATUSES,
+  INVOCATION_TERMINAL_STATUSES,
+  INVOCATION_TREE_LIVENESS,
+  TRACKED_LEADER_STATES,
+  SCHEDULE_STATUSES,
+  SCHEDULE_STORE_ERROR_CODES,
+  ScheduleStoreError,
+} from "./scheduler/types.ts";
+export type {
+  CancelInvocationOptions,
+  CancelInvocationOutcome,
+  ClaimedInvocation,
+  CompleteInvocationInput,
+  CompleteInvocationOutcome,
+  CompleteInvocationStatus,
+  CreateScheduleInput,
+  EnqueueManualInvocationOptions,
+  ExecutorIdentity,
+  ExecutorLiveness,
+  ExecutorLivenessProbe,
+  FailInvocationOptions,
+  InvocationFailureOutcome,
+  InvocationMode,
+  InvocationRecord,
+  InvocationStatus,
+  InvocationTreeLiveness,
+  InvocationTreeLivenessProbe,
+  FinalizeCancellationInput,
+  PersistedTrackedGroup,
+  RecordInvocationTreeInput,
+  RemoveScheduleOptions,
+  ScheduleRecord,
+  ScheduleStatus,
+  ScheduleStoreErrorCode,
+  TrackedLeaderState,
+} from "./scheduler/types.ts";
 export { DefaultToolPolicy } from "./policy/default-policy.ts";
 export { ConfigurableToolPolicy } from "./policy/configurable-policy.ts";
+export {
+  UNATTENDED_CONFIRMATION_DENIED_REASON,
+  UnattendedToolPolicy,
+} from "./policy/unattended-policy.ts";
+export type { UnattendedDeniedConfirmation } from "./policy/unattended-policy.ts";
+export {
+  CAPABILITY_HOST_MODES,
+  CAPABILITY_TURN_ORIGIN_KINDS,
+} from "./engine/capability-manifest.ts";
+export type {
+  CapabilityHostMode,
+  CapabilityTurnOrigin,
+  CapabilityExternalDynamicContext,
+} from "./engine/capability-manifest.ts";
 export type {
   ConfigurableToolPolicyOptions,
   ToolApprovalDefault,

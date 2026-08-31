@@ -81,7 +81,7 @@ export function ApplyDialog({
       </div>
       {manualEffects.length > 0 && (
         <div className="manual-warning">
-          人工步骤不会由 Web UI 自动执行；保存后请按提示完成迁移。
+          人工步骤不会由 Web UI 自动执行；保存后请按提示完成对应操作。
         </div>
       )}
       <div className="dialog-actions">

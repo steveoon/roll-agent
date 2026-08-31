@@ -2,7 +2,7 @@ import { describe, it, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import { writeFileSync, mkdirSync, rmSync } from "node:fs";
 import { resolve } from "node:path";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { randomUUID } from "node:crypto";
 import {
   inspectConfigFile,
@@ -699,5 +699,48 @@ install:
     // 全局配置处于待迁移状态，但安装链路仍应可读取 install 段。
     const { installConfig } = loadInstallConfig({ cwd: tmpDir });
     assert.equal(installConfig.registry, "https://registry.npmmirror.com");
+  });
+});
+
+describe("scheduler config", () => {
+  it("scheduler.data-dir 展开 ~", () => {
+    const config = validateConfigText(
+      `llm:
+  default-provider: anthropic
+  default-model: claude-test
+  providers: {}
+ask: {}
+agents:
+  data-dir: /tmp/agents
+scheduler:
+  data-dir: ~/custom-scheduler
+`,
+      "/virtual/roll.config.yaml",
+    );
+    assert.equal(config.scheduler.dataDir, resolve(homedir(), "custom-scheduler"));
+  });
+});
+
+describe("scheduler.data-dir 相对路径", () => {
+  it("以配置文件所在目录为基准解析，不随 cwd 变化", () => {
+    const dir = makeTmpDir();
+    try {
+      writeFileSync(
+        resolve(dir, "roll.config.yaml"),
+        `llm:
+  default-provider: anthropic
+  default-model: claude-sonnet-4-6
+  providers: {}
+scheduler:
+  data-dir: ./sched
+`,
+      );
+      const sub = resolve(dir, "sub");
+      mkdirSync(sub, { recursive: true });
+      assert.equal(loadConfig({ cwd: sub }).config.scheduler.dataDir, resolve(dir, "sched"));
+      assert.equal(loadConfig({ cwd: dir }).config.scheduler.dataDir, resolve(dir, "sched"));
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

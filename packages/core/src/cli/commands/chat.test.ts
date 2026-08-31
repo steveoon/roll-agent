@@ -8,7 +8,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import { simulateReadableStream } from "ai";
 import { MockLanguageModelV4 } from "ai/test";
 import type { LanguageModelV4StreamPart } from "@ai-sdk/provider";
-import type { AgentSession, SessionEvent } from "@roll-agent/runtime";
+import type { AgentSession, SessionEvent, ShellProfile } from "@roll-agent/runtime";
 import type { ChatUserInputPrompt, ChatUserInputResult } from "../utils/user-input-prompts.ts";
 import { rollConfigSchema } from "../../config/schema.ts";
 import {
@@ -293,6 +293,196 @@ test("runJsonTurn exposes step and total token usage", async () => {
   assert.deepEqual(result.totalUsage, { inputTokens: 4, outputTokens: 5, totalTokens: 9 });
   assert.equal(result.status === "completed" ? result.contextInputTokens : undefined, 3);
 });
+
+test("runJsonTurn does not start a turn after its stop signal is already aborted", async () => {
+  const controller = new AbortController();
+  controller.abort(new Error("scheduled exec stopping"));
+  let sends = 0;
+  const session = {
+    id: "pre-aborted-json-turn",
+    async *send() {
+      sends += 1;
+      yield { type: "message-finish", text: "should not run" } satisfies SessionEvent;
+    },
+    cancel() {
+      return false;
+    },
+    reject() {
+      return true;
+    },
+    getContextWindow() {
+      return undefined;
+    },
+  } as unknown as AgentSession;
+
+  const result = await runJsonTurn(session, "do not start", controller.signal);
+
+  assert.equal(sends, 0);
+  assert.equal(result.status, "failed");
+  assert.match(result.status === "failed" ? result.message : "", /停止请求/u);
+});
+
+test("runJsonTurn forwards an in-flight stop signal to AgentSession cancellation", async () => {
+  const controller = new AbortController();
+  const started = Promise.withResolvers<void>();
+  const cancelled = Promise.withResolvers<void>();
+  let cancellations = 0;
+  const session = {
+    id: "cancelled-json-turn",
+    async *send() {
+      started.resolve();
+      await cancelled.promise;
+      yield {
+        type: "turn-cancelled",
+        reason: "user",
+        message: "scheduled turn stopped",
+      } satisfies SessionEvent;
+    },
+    cancel() {
+      cancellations += 1;
+      cancelled.resolve();
+      return true;
+    },
+    reject() {
+      return true;
+    },
+    getContextWindow() {
+      return undefined;
+    },
+  } as unknown as AgentSession;
+
+  const running = runJsonTurn(session, "start work", controller.signal);
+  await started.promise;
+  controller.abort(new Error("scheduled exec stopping"));
+  let result;
+  try {
+    result = await Promise.race([
+      running,
+      delay(100).then(() => {
+        throw new Error("runJsonTurn did not cancel the active session");
+      }),
+    ]);
+  } finally {
+    cancelled.resolve();
+    await running;
+  }
+
+  assert.equal(cancellations, 1);
+  assert.equal(result.status, "failed");
+  assert.equal(result.status === "failed" ? result.message : "", "scheduled turn stopped");
+});
+
+test(
+  "runJsonTurn stop signal cancels a real AgentSession direct Bash process tree",
+  { skip: process.platform === "win32", timeout: 20_000 },
+  async () => {
+    const runtime = await import("@roll-agent/runtime");
+    const bashStarted = Promise.withResolvers<void>();
+    const killIntents: string[] = [];
+    const profile: ShellProfile = {
+      id: "posix",
+      toolName: "bash",
+      supportsSessionExec: true,
+      supportsSafeCommandClassification: true,
+      waitForTreeKillAfterRootExit: false,
+      buildSpawn: (command, workdir, env) => {
+        bashStarted.resolve();
+        return {
+          file: "/bin/sh",
+          args: ["-c", command],
+          options: { cwd: workdir, detached: true, stdio: ["ignore", "pipe", "pipe"], env },
+        };
+      },
+      classify: () => "known-safe",
+      killTree: async (pid, intent) => {
+        killIntents.push(intent);
+        if (pid !== undefined) {
+          try {
+            process.kill(-pid, "SIGKILL");
+          } catch {}
+        }
+      },
+      systemPromptHints: () => [],
+    };
+    let modelCall = 0;
+    const model = new MockLanguageModelV4({
+      doStream: async () => {
+        modelCall += 1;
+        const chunks: LanguageModelV4StreamPart[] =
+          modelCall === 1
+            ? [
+                { type: "stream-start", warnings: [] },
+                {
+                  type: "tool-call",
+                  toolCallId: "w14-bash",
+                  toolName: "roll__bash",
+                  input: JSON.stringify({ command: "printf w14-running; sleep 30" }),
+                },
+                {
+                  type: "finish",
+                  usage: {
+                    inputTokens: { total: 1, noCache: 1, cacheRead: 0, cacheWrite: 0 },
+                    outputTokens: { total: 1, text: 1, reasoning: 0 },
+                  },
+                  finishReason: { unified: "tool-calls", raw: "tool-calls" },
+                },
+              ]
+            : [
+                { type: "stream-start", warnings: [] },
+                { type: "text-start", id: "t" },
+                { type: "text-delta", id: "t", delta: "should not finish" },
+                { type: "text-end", id: "t" },
+                {
+                  type: "finish",
+                  usage: {
+                    inputTokens: { total: 1, noCache: 1, cacheRead: 0, cacheWrite: 0 },
+                    outputTokens: { total: 1, text: 1, reasoning: 0 },
+                  },
+                  finishReason: { unified: "stop", raw: "stop" },
+                },
+              ];
+        return {
+          stream: simulateReadableStream<LanguageModelV4StreamPart>({
+            chunks,
+            initialDelayInMs: null,
+            chunkDelayInMs: null,
+          }),
+        };
+      },
+    });
+    const session = new runtime.AgentSession({
+      id: "scheduled-w14-integration",
+      model,
+      sources: [],
+      maxSteps: 4,
+      policy: new runtime.ConfigurableToolPolicy({
+        defaultMode: "auto",
+        overrides: { "roll.bash": "auto" },
+      }),
+      bash: {
+        profile,
+        workdir: tmpdir(),
+        defaultTimeoutMs: 60_000,
+        maxTimeoutMs: 60_000,
+        turnTimeoutMs: 60_000,
+        maxCaptureBytes: 1_048_576,
+        maxModelOutputChars: 16_000,
+      },
+    });
+    const controller = new AbortController();
+
+    try {
+      const running = runJsonTurn(session, "run Bash", controller.signal);
+      await bashStarted.promise;
+      controller.abort(new Error("scheduled exec stopping"));
+      const result = await running;
+      assert.equal(result.status, "failed");
+      assert.deepEqual(killIntents, ["terminate"]);
+    } finally {
+      await session.close();
+    }
+  },
+);
 
 test("runJsonTurn exposes session usage and context window", async () => {
   const result = await runJsonTurn(

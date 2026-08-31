@@ -147,6 +147,15 @@ Chat 模式要点：
 | 🟡 | `unlinkSync` 删被占用 PID/日志文件抛 EPERM 无兜底 | `process-manager.ts` | 📋 待办 |
 | 🟡 | `truncateMiddle` 按码点计宽，CJK 对齐错位 | `cli/utils/terminal.ts` | 📋 待办（显示层） |
 | 🟡 | pnpm 深层 node_modules 可能触及 MAX_PATH 260 | 安装层 | 🔬 需实测（建议引导启用长路径） |
+| 🔴 | `roll schedule service install` 用 `schtasks /TR` 注册，pnpm 全局 / Node 22.6–22.12 路径 272–298 字符超过 261 上限 | `companion-host/service.ts` | ✅ 已修复：改为 `/Create /XML` 注册（companion 同步受益） |
+| 🔴 | Windows 任务无失败重启、默认 72 小时运行上限、电池供电不启动 | `companion-host/service.ts` | ✅ 已修复：XML 声明 `RestartOnFailure PT1M×3`、`ExecutionTimeLimit PT0S`、`DisallowStartIfOnBatteries=false` |
+| 🟠 | 进程启动身份经 PATH 上的 `powershell.exe` 读取，超时 2 s，exec 侧失败直接把任务 `paused` | `registry/process-identity.ts` | ✅ 已修复：只信任 SystemRoot / ProgramFiles 绝对路径，Windows 超时 8 s，exec 先重试一次 |
+| 🟠 | `taskkill /T`（无 `/F`）对控制台进程恒失败，daemon 每次停止都把在跑记录留成 `running` | `scheduler-host/daemon.ts` | ✅ 已修复：树终止标志采用最近一次结果；win32 跳过 SIGTERM 阶段 |
+| 🟠 | exec 子进程与 daemon 共享控制台，Ctrl+C 直接杀 exec | `scheduler-host/spawn-invocation.ts` | ✅ 已修复：win32 也 `detached`（🔬 真机确认 DETACHED_PROCESS 隔离 Ctrl+C）；daemon 意外死亡不再由 libuv job 连带结束 exec，由探活规则与 1 小时上限收尾；显式 service uninstall 另走补偿终止 |
+| 🟠 | `schtasks /End` 只保证停止任务直接启动的程序，detached exec 可能存活 | `scheduler-host/service.ts` | ✅ 已修复：service install 以两阶段 metadata 持久化实际 data-dir；install/uninstall 用跨 data-dir 管理锁串行化。uninstall 先 `/Disable`、再 `/End`，随后持有 daemon lifecycle lock，按账本中的唯一 daemon generation 作废 claimed token 并对 running exec 走身份校验 + `taskkill /T /F` + 条件终态；inline worker 不受影响。权威 DB 缺失/空/非 scheduler schema 以及任何收尾失败都不删 task、不释放单例；反驳者补充：metadata=installed 但账本缺失时直接 /Delete，设置未变的 re-install 不再卸载重装，无 metadata 且无任务时 uninstall 幂等，lock busy 与 metadata 缺失的错误附人工恢复步骤（🔬 仍需真机确认：Task Scheduler job 与 taskkill 权限；设置未变的 refresh 在 daemon 运行时 `/Create /F` 是否会结束实例、`/Run` 被 IgnoreNew 忽略时退出码是否为 0） |
+| 🟡 | 关闭 daemon 控制台窗口（SIGHUP）后 Windows 只给数秒，10 s grace 走不完 | `scheduler-host/daemon.ts` | ✅ 已修复：SIGHUP 触发紧急停止，跳过 grace 立即 `taskkill /T /F`（Ctrl+Break 走常规 grace） |
+| 🟡 | 登录后出现常驻控制台窗口，关窗 10 s 后 daemon 被杀 | `InteractiveToken` 登录类型 | 🔬 待真机评估 `S4U` 登录类型（无窗口，但需确认用户环境变量可用） |
+| 🟡 | CI 对 scheduler 零 Windows 覆盖 | `.github/workflows/ci.yml` | ✅ 已修复：windows-latest 增加 scheduler 单测与诊断性 e2e |
 
 已验证安全（静态可证）：denial 前缀协议匹配同进程无编码边界；stdio NDJSON 两端剥 `\r`；
 配置备份名 `YYYYMMDD-HHMMSS` 无冒号；懒加载 `file://` URL；yaml / gray-matter 容忍或剥离 BOM；
@@ -161,3 +170,4 @@ LLM HTTP 与 MCP JSON 全程 UTF-8；`--json` stdout 无 ANSI 混入；npm bin s
 4. TUI 渲染：三种终端下边框/emoji/spinner 与 `displayWidth` 计算宽度的偏差
 5. `windows-latest` 已覆盖 PowerShell one-shot、中文增量输出、session poll/退出、进程树取消、
    turn timeout 恢复与容量回收；下一步补终端 TUI 与托管 agent 生命周期 smoke
+6. 定时任务：`roll schedule service install`（npm 与 pnpm 全局各一次）后 `schtasks /Query /TN "Roll Agent Scheduler" /XML` 核对 XML；`Measure-Command` 冷启动 PowerShell 身份读取时延；前台 daemon Ctrl+C 时在跑 exec 是否存活到 grace 结束；注销再登录是否弹出控制台窗口

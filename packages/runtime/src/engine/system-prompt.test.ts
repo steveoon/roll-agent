@@ -14,6 +14,7 @@ import {
   CAPABILITY_SESSION_EXEC_LIFECYCLES,
   CAPABILITY_TOOL_ROLES,
   CAPABILITY_TOOL_SOURCE_KINDS,
+  buildEffectiveCapabilityManifest,
   buildEffectiveCapabilityTurnContext,
   type EffectiveCapabilityManifest,
 } from "./capability-manifest.ts";
@@ -396,4 +397,70 @@ test("buildChatSystemPromptFromManifest 透传 workspaceInstructions 且压缩�
   assert.ok(prompt.includes("# 工作区工程约定"));
   assert.ok(prompt.indexOf("# 工作区工程约定") < prompt.indexOf("# 压缩历史回查"));
   assert.ok(!buildChatSystemPromptFromManifest(manifest).includes("# 工作区工程约定"));
+});
+
+test("background host mode 注入无人值守段，其余模式不注入", () => {
+  const background = buildChatSystemPrompt({ hostMode: CAPABILITY_HOST_MODES.background });
+  assert.match(background, /# 无人值守运行/u);
+  assert.match(background, /不要向用户提问/u);
+  const interactive = buildChatSystemPrompt({ hostMode: CAPABILITY_HOST_MODES.interactive });
+  assert.doesNotMatch(interactive, /# 无人值守运行/u);
+  assert.doesNotMatch(buildChatSystemPrompt(), /# 无人值守运行/u);
+});
+
+test("reminder 渲染 turn origin 行", () => {
+  const manifest = buildEffectiveCapabilityManifest({
+    tools: {},
+    toolRoles: {},
+    resolveRoute: () => undefined,
+    skills: [],
+    agentCount: 0,
+    profile: "posix",
+    cwd: "/workspace",
+    platform: "linux",
+  });
+  const reminder = buildCapabilityTurnReminder(
+    buildEffectiveCapabilityTurnContext(manifest, {
+      now: new Date("2026-08-25T09:00:00Z"),
+      origin: {
+        kind: "scheduled",
+        scheduleId: "sched-1",
+        invocationId: "inv-1",
+        scheduledFor: "2026-08-25T09:00:00.000Z",
+        unattended: true,
+      },
+    }),
+  );
+  assert.match(reminder, /turnOrigin=scheduled/u);
+  assert.match(reminder, /scheduleId=sched-1/u);
+  assert.match(reminder, /invocationId=inv-1/u);
+  assert.match(reminder, /scheduledFor=2026-08-25T09:00:00\.000Z/u);
+  assert.match(reminder, /unattended=true/u);
+  const plain = buildCapabilityTurnReminder(buildEffectiveCapabilityTurnContext(manifest));
+  assert.doesNotMatch(plain, /turnOrigin=/u);
+});
+
+test("buildChatSystemPrompt 注入 # 定时任务 段并按 create 可用性裁剪", () => {
+  const plain = buildChatSystemPrompt();
+  assert.doesNotMatch(plain, /# 定时任务/u);
+
+  const full = buildChatSystemPrompt({
+    scheduleToolIds: { create: "roll__schedule_create", list: "roll__schedule_list" },
+  });
+  assert.match(full, /# 定时任务/u);
+  assert.match(full, /roll__schedule_create/u);
+  assert.match(full, /roll__schedule_list/u);
+  assert.match(full, /不要通过 Shell 执行 roll schedule add/u);
+  assert.match(full, /不支持一次性时间点、cron 表达式或时区/u);
+
+  const listOnly = buildChatSystemPrompt({
+    scheduleToolIds: { list: "roll__schedule_list" },
+  });
+  assert.match(listOnly, /# 定时任务/u);
+  assert.doesNotMatch(listOnly, /roll__schedule_create/u);
+});
+
+test("无人值守段声明定时轮次不能创建调度", () => {
+  const prompt = buildChatSystemPrompt({ hostMode: "background" });
+  assert.match(prompt, /不能创建或修改调度定义/u);
 });

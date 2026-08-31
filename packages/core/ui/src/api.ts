@@ -1,4 +1,5 @@
 import { COMPANION_ACTION_PATHS, type CompanionAction } from "./lib/companion-state.ts";
+import { SCHEDULE_ACTION_PATHS, type ScheduleAction } from "./lib/schedule-state.ts";
 import { isRecord } from "./lib/config-value.ts";
 import {
   COMPANION_PHASES,
@@ -23,6 +24,9 @@ import {
   type ConfigValidationIssue,
   type RollConfigCatalog,
   type SaveDraft,
+  type ScheduleRow,
+  type ScheduleRunRow,
+  type ScheduleStatusSummary,
 } from "./types.ts";
 
 export interface CompanionLogStreamHandlers {
@@ -199,6 +203,47 @@ export class RollUiApi {
       method: "POST",
       ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
     });
+  }
+
+  async getScheduleStatus(): Promise<ScheduleStatusSummary> {
+    const candidate = unwrapData(await this.request("/api/schedule/status"));
+    if (!isScheduleStatusSummary(candidate)) throw apiShapeError("定时任务状态响应格式无效");
+    return candidate;
+  }
+
+  async listSchedules(): Promise<readonly ScheduleRow[]> {
+    const candidate = unwrapData(await this.request("/api/schedule/schedules"));
+    if (!Array.isArray(candidate) || !candidate.every(isScheduleRow)) {
+      throw apiShapeError("定时任务列表响应格式无效");
+    }
+    return candidate;
+  }
+
+  async listScheduleRuns(
+    query: { readonly scheduleId?: string; readonly limit?: number } = {},
+  ): Promise<readonly ScheduleRunRow[]> {
+    const params = new URLSearchParams();
+    if (query.scheduleId !== undefined) params.set("scheduleId", query.scheduleId);
+    if (query.limit !== undefined) params.set("limit", String(query.limit));
+    const suffix = params.size > 0 ? `?${params.toString()}` : "";
+    const candidate = unwrapData(await this.request(`/api/schedule/runs${suffix}`));
+    if (!Array.isArray(candidate) || !candidate.every(isScheduleRunRow)) {
+      throw apiShapeError("定时任务运行记录响应格式无效");
+    }
+    return candidate;
+  }
+
+  async runScheduleAction(
+    action: ScheduleAction,
+    body?: unknown,
+  ): Promise<Readonly<Record<string, unknown>> | undefined> {
+    const candidate = unwrapData(
+      await this.request(SCHEDULE_ACTION_PATHS[action], {
+        method: "POST",
+        ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
+      }),
+    );
+    return isRecord(candidate) ? candidate : undefined;
   }
 
   openCompanionLogStream(handlers: CompanionLogStreamHandlers): () => void {
@@ -477,6 +522,7 @@ function isCatalogNodeBase(value: unknown): value is ConfigCatalogNode {
     typeof value.persistedRequired === "boolean" &&
     typeof value.widget === "string" &&
     typeof value.secret === "boolean" &&
+    typeof value.readOnly === "boolean" &&
     optionalString(value.description) &&
     optionalString(value.defaultBehavior) &&
     optionalString(value.example) &&
@@ -542,6 +588,65 @@ function isCompanionStatus(value: unknown): value is CompanionStatus {
     optionalString(value.workspaceId) &&
     optionalString(value.cwd) &&
     optionalString(value.lastError)
+  );
+}
+
+function isScheduleStatusSummary(value: unknown): value is ScheduleStatusSummary {
+  return (
+    isRecord(value) &&
+    typeof value.dataDir === "string" &&
+    typeof value.logPath === "string" &&
+    isRecord(value.daemon) &&
+    typeof value.daemon.liveness === "string" &&
+    isRecord(value.service) &&
+    typeof value.service.metadataStatus === "string" &&
+    typeof value.service.installed === "boolean" &&
+    typeof value.service.running === "boolean" &&
+    optionalString(value.service.installedDataDir) &&
+    isRecord(value.schedules) &&
+    typeof value.schedules.total === "number" &&
+    typeof value.schedules.active === "number" &&
+    typeof value.schedules.paused === "number" &&
+    optionalString(value.nextWakeAt)
+  );
+}
+
+function isScheduleRow(value: unknown): value is ScheduleRow {
+  return (
+    isRecord(value) &&
+    typeof value.id === "string" &&
+    typeof value.name === "string" &&
+    typeof value.status === "string" &&
+    typeof value.trigger === "string" &&
+    typeof value.cwd === "string" &&
+    typeof value.prompt === "string" &&
+    typeof value.createdAt === "string" &&
+    optionalString(value.nextRunAt) &&
+    optionalString(value.lastRunAt) &&
+    optionalString(value.lastError) &&
+    optionalString(value.maxRun) &&
+    (value.liveRun === undefined ||
+      (isRecord(value.liveRun) &&
+        typeof value.liveRun.id === "string" &&
+        typeof value.liveRun.status === "string"))
+  );
+}
+
+function isScheduleRunRow(value: unknown): value is ScheduleRunRow {
+  return (
+    isRecord(value) &&
+    typeof value.id === "string" &&
+    typeof value.scheduleId === "string" &&
+    typeof value.scheduleName === "string" &&
+    typeof value.mode === "string" &&
+    typeof value.status === "string" &&
+    typeof value.scheduledFor === "string" &&
+    typeof value.attempt === "number" &&
+    typeof value.maxAttempts === "number" &&
+    optionalString(value.error) &&
+    optionalString(value.outputExcerpt) &&
+    optionalString(value.startedAt) &&
+    optionalString(value.finishedAt)
   );
 }
 

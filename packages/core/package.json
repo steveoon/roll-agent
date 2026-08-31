@@ -31,6 +31,10 @@
       "types": "./src/skills/*.ts",
       "default": "./src/skills/*.ts"
     },
+    "./scheduler-host/schedule-tool-binding": {
+      "types": "./src/scheduler-host/schedule-tool-binding.ts",
+      "default": "./src/scheduler-host/schedule-tool-binding.ts"
+    },
     "./tool-runtime/*": {
       "types": "./src/tool-runtime/*.ts",
       "default": "./src/tool-runtime/*.ts"
@@ -74,6 +78,10 @@
         "types": "./dist/skills/*.d.ts",
         "default": "./dist/skills/*.js"
       },
+      "./scheduler-host/schedule-tool-binding": {
+        "types": "./dist/scheduler-host/schedule-tool-binding.d.ts",
+        "default": "./dist/scheduler-host/schedule-tool-binding.js"
+      },
       "./tool-runtime/*": {
         "types": "./dist/tool-runtime/*.d.ts",
         "default": "./dist/tool-runtime/*.js"
@@ -109,20 +117,20 @@
     "clean": "rm -rf dist"
   },
   "dependencies": {
-    "@ai-sdk/alibaba": "^2.0.3",
-    "@ai-sdk/anthropic": "^4.0.4",
-    "@ai-sdk/deepseek": "^3.0.2",
-    "@ai-sdk/openai": "^4.0.4",
-    "@ai-sdk/provider": "^4.0.1",
-    "@ai-sdk/xai": "4.0.12",
+    "@ai-sdk/alibaba": "^2.0.32",
+    "@ai-sdk/anthropic": "^4.0.38",
+    "@ai-sdk/deepseek": "^3.0.31",
+    "@ai-sdk/openai": "^4.0.41",
+    "@ai-sdk/provider": "^4.0.7",
+    "@ai-sdk/xai": "4.0.38",
     "@clack/prompts": "1.4.0",
-    "@modelcontextprotocol/sdk": "^1.12.0",
+    "@modelcontextprotocol/sdk": "^1.30.0",
     "@roll-agent/client-node": "workspace:*",
     "@roll-agent/companion": "workspace:*",
     "@roll-agent/protocol": "workspace:*",
     "@roll-agent/relay-protocol": "workspace:*",
     "@roll-agent/runtime": "workspace:*",
-    "ai": "^7.0.9",
+    "ai": "^7.0.65",
     "chalk": "^5.4.0",
     "citty": "^0.1.6",
     "cli-table3": "^0.6.5",

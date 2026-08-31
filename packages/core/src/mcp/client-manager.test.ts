@@ -909,3 +909,75 @@ function buildUnresponsiveFixtureAgentScript(): string {
 process.stdin.resume();
 `;
 }
+
+describe("McpClientManager stdio maxBufferSize", () => {
+  it("passes the declared maxBufferSize to the SDK so a tool result above 10 MiB survives", async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "roll-mcp-buffer-"));
+    const scriptPath = join(tempDir, "large-output-agent.mjs");
+    writeFileSync(scriptPath, buildLargeOutputFixtureAgentScript(11 * 1024 * 1024));
+    const manager = new McpClientManager();
+
+    try {
+      const client = await manager.connect(
+        "large-output-agent",
+        {
+          type: "stdio",
+          command: process.execPath,
+          args: [scriptPath],
+          maxBufferSize: 16 * 1024 * 1024,
+        },
+        process.cwd(),
+      );
+
+      const result = await client.callTool({ name: "blob", arguments: {} });
+
+      const content = result["content"] as Array<{ type: string; text: string }>;
+      assert.equal(content[0]?.type, "text");
+      assert.equal(content[0]?.text.length, 11 * 1024 * 1024);
+    } finally {
+      await manager.disconnectAll();
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+});
+
+function buildLargeOutputFixtureAgentScript(payloadBytes: number): string {
+  return `
+process.stdin.setEncoding("utf8");
+let buffer = "";
+
+process.stdin.on("data", (chunk) => {
+  buffer += chunk;
+  const lines = buffer.split(/\\r?\\n/);
+  buffer = lines.pop() ?? "";
+  for (const line of lines) {
+    if (line.length === 0) continue;
+    handleMessage(JSON.parse(line));
+  }
+});
+
+function handleMessage(message) {
+  if (message.method === "initialize") {
+    writeResult(message.id, {
+      protocolVersion: message.params.protocolVersion,
+      capabilities: { tools: {} },
+      serverInfo: { name: "large-output-agent", version: "0.0.0" },
+    });
+    return;
+  }
+  if (message.method === "tools/list") {
+    writeResult(message.id, {
+      tools: [{ name: "blob", description: "large text", inputSchema: { type: "object" } }],
+    });
+    return;
+  }
+  if (message.method === "tools/call") {
+    writeResult(message.id, { content: [{ type: "text", text: "x".repeat(${payloadBytes}) }] });
+  }
+}
+
+function writeResult(id, result) {
+  process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id, result }) + "\\n");
+}
+`;
+}

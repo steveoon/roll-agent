@@ -156,3 +156,33 @@ describe("resolveTransportWithDevSpawnSpec", () => {
     }
   });
 });
+
+describe("resolveTransportWithDevSpawnSpec maxBufferSize", () => {
+  it("keeps the declared maxBufferSize when rewriting to the source entry", () => {
+    const installPath = makeTmpDir();
+    try {
+      writeSourceEntry(installPath);
+      const agent = makeRegisteredAgent({
+        installPath,
+        source: { type: "local-path", path: installPath },
+        transport: {
+          type: "stdio",
+          command: "node",
+          args: ["dist/index.js"],
+          maxBufferSize: 33_554_432,
+        },
+      });
+
+      const transport = resolveTransportWithDevSpawnSpec(agent);
+
+      assert.deepEqual(transport, {
+        type: "stdio",
+        command: "node",
+        args: ["--experimental-strip-types", "src/index.ts"],
+        maxBufferSize: 33_554_432,
+      });
+    } finally {
+      rmSync(installPath, { recursive: true, force: true });
+    }
+  });
+});

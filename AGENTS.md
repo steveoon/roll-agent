@@ -6,7 +6,9 @@ This file provides guidance to Codex (Codex.ai/code) when working with code in t
 
 **花卷 Agent (Roll)** — 轻量级 Agent 编排系统。CLI 命令：`roll`，npm 组织：`@roll-agent`。
 
-指挥官（roll-core）提供 LLM 基座 + Agent 发现/调度 + CLI 交互，子 Agent 通过 MCP 协议接入。
+`@roll-agent/core` 负责 CLI、配置、Agent/MCP 接线与宿主集成；
+`@roll-agent/runtime` 负责 ConversationEngine、ThreadStore、策略、Tool Bridge 与 scheduler 账本。
+子 Agent 通过 MCP 协议接入。
 
 ## Development Commands
 
@@ -16,7 +18,7 @@ pnpm dev                          # 运行 CLI 入口
 pnpm dev -- agent list            # 运行子命令
 
 # 构建与检查
-pnpm build                        # tsc 构建 + terser 混淆所有包（输出 dist/）
+pnpm build                        # 构建/混淆各包，并构建 Core React 配置台（输出 dist/）
 pnpm typecheck                    # tsc --noEmit 类型检查
 pnpm lint                         # ESLint 9 + neostandard
 pnpm format                       # Prettier 格式化
@@ -24,27 +26,39 @@ pnpm format:check                 # 检查格式
 
 # 测试（node:test + node:assert/strict）
 pnpm test                         # 运行所有包的测试
-node --experimental-strip-types --test packages/core/src/config/schema.test.ts  # 单个测试文件
+pnpm test:scripts                 # 根级发布/供应链脚本测试
+pnpm test:e2e                     # Core E2E
+node --experimental-strip-types --experimental-sqlite --test packages/core/src/config/schema.test.ts  # 单文件
 
 # 单包操作
 pnpm --filter @roll-agent/core typecheck
 pnpm --filter @roll-agent/sdk build
-pnpm --filter smart-reply-agent dev
+pnpm --filter @roll-agent/smart-reply-agent dev
 ```
 
-**环境要求**：Node.js ≥22.6.0，pnpm 10+
+**仓库开发环境**：Node.js ≥22.13.0，pnpm 11.13.0（以根 `package.json#engines` / `packageManager` 为准）。
+发布包大多保持 Node.js ≥22.6.0；Core 启动器会为 Node 22.6–22.12 的 SQLite 命令补
+`--experimental-sqlite`。
 
 ## Architecture
 
 ### Monorepo 结构（pnpm workspace）
 
 | 包 | 作用 |
-|------|------|
-| `packages/core` | 指挥官：CLI (citty) + Agent Registry + Router + MCP Client + LLM Engine |
+| --- | --- |
+| `packages/core` | CLI（citty）、配置、Registry/Router、MCP/LLM 接线、Runtime/Scheduler/Companion host、React 配置台 |
+| `packages/runtime` | ConversationEngine、AgentSession、ThreadStore、审批策略、Tool Bridge、Runtime Service、scheduler 账本 |
+| `packages/protocol` | Runtime JSON-RPC 协议版本、Schema、事件与交互契约 |
+| `packages/client-node` | Node/Electron Main 使用的 Runtime Client 与 stdio 子进程传输 |
+| `packages/companion` | Local Companion 的 Relay bridge、buffer、Workspace lease 与加密低层库 |
+| `packages/relay-protocol` | Cloud Relay Wire/Control 契约、Schema 与 conformance fixtures |
+| `packages/relay-client` | Browser-safe Relay Client 与短期 session 接入 |
 | `packages/sdk` | 子 Agent 开发 SDK：`defineAgent()` + `defineTool()` |
 | `packages/browser` | 浏览器运行时抽象层：BrowserRuntime + ContextManager + SessionStore |
+| `packages/reply-authority-client` | Reply Authority 签名 envelope 客户端 |
 | `agents/browser-use` | 浏览器操控 Agent（streamable-http 常驻服务） |
 | `agents/smart-reply` | 智能回复 Agent（stdio 按需模式） |
+| `agents/notify` | 私有通知 Agent（stdio 按需模式） |
 
 ### Agent 三层模型
 
@@ -79,8 +93,16 @@ roll agent add|install|remove|list|start|stop|info|health   Agent 管理
 roll run <agent> <tool> [args]               声明式调用
 roll ask "<message>"                         LLM 智能路由
 roll chat [message]                          会话式入口（Ink TUI；--server 为旧兼容入口）
+roll runtime serve --stdio                   Runtime Protocol stdio 服务
+roll skills list|get|path|install            Skill 发现、读取与安装
+roll browser stop|clear-data                 Browser Runtime 运维
+roll companion <enable|disable|status|...>   Companion daemon / relay 管理
 roll config set|get|init|migrate             配置管理
+roll setup                                   交互式初始配置
+roll ui                                      React 配置台
 roll update [--check]                        更新 roll 及已注册 Agent
+roll schedule add|list|show|remove|pause|resume|run-now|runs|cancel|status|daemon           定时任务
+roll schedule service install|uninstall|restart|status                                      用户级调度服务
 roll doctor                                  系统诊断
 ```
 
@@ -90,8 +112,23 @@ roll doctor                                  系统诊断
 - `registry/` — SKILL.md 解析（gray-matter）、Agent 发现、注册持久化（~/.roll-agent/）
 - `router/` — 声明式路由 + LLM 智能路由
 - `mcp/` — MCP Client 连接池（stdio/HTTP 传输）、Sampling 处理
-- `llm/` — 统一 LLM 引擎（AI SDK v6 + 多 Provider）
+- `llm/` — AI SDK v6 Provider 接线与统一模型调用
 - `config/` — roll.config.yaml 加载、Zod 校验、breaking schema migration 检测
+- `runtime-host/` — 动态加载 `@roll-agent/runtime`，把 config/registry/MCP 依赖注入 Runtime
+- `scheduler-host/` — daemon、exec 子进程、进程树探活、用户服务与 admission lock
+- `companion-host/` — Companion daemon、Relay 与本机 Runtime bridge
+- `skills/` — Skill 发现、优先级、渐进式加载与告警
+- `tool-runtime/` — 声明式 Tool 调用、preflight 与参数提取
+- `ui/`、`packages/core/ui/` — 配置台服务端接线与 React 前端
+
+### Runtime / Protocol ownership
+
+- **Runtime 行为与持久化**放在 `packages/runtime`：Engine、Session、Tool execution、ThreadStore、
+  scheduler state machine。
+- **OS/CLI 集成**放在 `packages/core`：配置解析、Agent Registry、MCP connection、daemon/service、
+  process identity 与终端交互。
+- **跨进程公开契约**放在 `packages/protocol`；Node/Electron 消费者优先使用
+  `packages/client-node`，不要直接复刻 JSON-RPC payload。
 
 ### SDK 公开 API
 
@@ -136,6 +173,22 @@ import { defineAgent, defineTool } from "@roll-agent/sdk";
 - 各包 `tsconfig.json` extends base，`tsconfig.build.json` extends root build
 
 ## 关键架构洞察
+
+### `roll schedule` 分层与安全边界
+
+- `packages/runtime/src/scheduler/` 持有 `ScheduleStore`（`schedules.db`）、trigger、claim/lease、
+  retry、单例与终态状态机；不要把业务能力或 OS 进程管理放进 Store。
+- `packages/core/src/scheduler-host/` 持有 daemon、exec spawn、PID/start-token 探活、进程树清场、
+  service metadata 与用户级 admission lock；CLI 命令只做参数/展示与 host 编排。
+- scheduler 不补齐所有错过周期：最多触发一次并从 claim 时刻重新锚定；同一 schedule 的 scheduled
+  与 manual invocation 共用单例门禁。
+- 终态与单例释放必须 fail-closed：executor/tree 为 `alive`、`descendants-alive`、`unknown` 或
+  metadata 无法解析时保持占用；只有证明 tree dead/settled 或显式 `--abandon` 才释放。
+- `retry + 未清进程树` 仍占单例。Service restart/update 必须通过用户级 admission 阻止新 claim，
+  replacement 以 `installing + replacementFrom + generation` 持久化恢复身份。
+- `roll schedule add --max-run` 是每任务上限（60s–24h，缺省 1h）；timeout 终态重分类必须使用
+  original attempt + `timedOutAtMs` CAS，避免覆盖时限内成功或后续 attempt。
+- Scheduler 的完整操作与平台边界见 `docs/how-to-schedule-tasks.md`。
 
 ### Sampling Handler（子 Agent 借用指挥官 LLM）
 
@@ -293,7 +346,7 @@ pnpm release-github-releases
 
 | 层级 | 必查点 | 代码/配置位置 | 失败处理 |
 |------|------|------|------|
-| 声明层 | 发布包必须属于当前 npm scope，权威白名单由 `scripts/published-packages.mjs` 统一维护；当前包含 `@roll-agent/core`、`@roll-agent/runtime`、`@roll-agent/protocol`、`@roll-agent/client-node`、`@roll-agent/companion`、`@roll-agent/sdk`、`@roll-agent/browser`、`@roll-agent/reply-authority-client`、`@roll-agent/browser-use-agent`、`@roll-agent/smart-reply-agent` | `scripts/published-packages.mjs`、`scripts/verify-published-packages.mjs` | 不把未知包加入发布清单；新增发布包必须同步 tarball 审计 |
+| 声明层 | 发布包必须属于当前 npm scope，权威白名单由 `scripts/published-packages.mjs` 统一维护；当前包含 `@roll-agent/core`、`@roll-agent/runtime`、`@roll-agent/protocol`、`@roll-agent/relay-protocol`、`@roll-agent/relay-client`、`@roll-agent/client-node`、`@roll-agent/companion`、`@roll-agent/sdk`、`@roll-agent/browser`、`@roll-agent/reply-authority-client`、`@roll-agent/browser-use-agent`、`@roll-agent/smart-reply-agent` | `scripts/published-packages.mjs`、`scripts/verify-published-packages.mjs` | 不把未知包加入发布清单；新增发布包必须同步 tarball 审计 |
 | CI 权限层 | GitHub Actions 必须使用 full SHA pin，不能使用 tag；PR CI 和 release workflow 都要满足仓库级 SHA pin 规则 | `.github/workflows/ci.yml`、`.github/workflows/release.yml` | CI 会在下载 action 前失败；先 pin SHA 再重跑 |
 | CI 权限层 | workflow 顶层保持 `permissions: {}`；`quality` 只给 `contents: read`；`release_pr` 只给 `contents: write` + `pull-requests: write`；`npm_publish` 只给 `contents: read` + `id-token: write`；`github_releases` 只给 `contents: write` | `.github/workflows/release.yml` | 不扩大默认 `GITHUB_TOKEN` 权限；不要把 OIDC 与 GitHub 写权限塞进同一 job |
 | CI 权限层 | npm 发布使用 Trusted Publishing（OIDC），`npm_publish` 必须持有 `id-token: write`；workflow 不得注入 `NPM_TOKEN` / `NODE_AUTH_TOKEN` | `.github/workflows/release.yml`、`scripts/release-packages.mjs` | publish job 禁止 `setup-node` 的 `registry-url`（会写入空 `_authToken` 并短路 OIDC） |
@@ -349,7 +402,7 @@ node scripts/create-github-releases.mjs --dry-run
 <!-- gitnexus:start -->
 # GitNexus — Code Intelligence
 
-This project is indexed by GitNexus as **roll-agent** (15752 symbols, 44053 relationships, 300 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
+This project is indexed by GitNexus as **roll-agent** (17094 symbols, 49010 relationships, 300 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
 
 > Index stale? Run `node .gitnexus/run.cjs analyze` from the project root — it auto-selects an available runner. No `.gitnexus/run.cjs` yet? `npx gitnexus analyze` (npm 11 crash → `npm i -g gitnexus`; #1939).
 

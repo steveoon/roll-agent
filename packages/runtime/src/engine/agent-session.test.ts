@@ -5594,6 +5594,75 @@ test(
 );
 
 test(
+  "AgentSession cancel 等待 direct Bash 进程树清理完成后才结束 turn",
+  { skip: process.platform === "win32", timeout: 20_000 },
+  async () => {
+    const killStarted = Promise.withResolvers<void>();
+    const allowKill = Promise.withResolvers<void>();
+    const killIntents: string[] = [];
+    const profile: ShellProfile = {
+      ...posixProfile,
+      killTree: async (pid, intent) => {
+        killIntents.push(intent);
+        killStarted.resolve();
+        await allowKill.promise;
+        killProcessGroup(pid, "SIGKILL");
+      },
+    };
+    const session = new AgentSession({
+      id: "scheduled-direct-bash-cancel",
+      model: sequencedModel([
+        toolCallStep("roll__bash", { command: "printf w14-ready; sleep 30" }),
+        textStep("不应到达"),
+      ]),
+      sources: [],
+      maxSteps: 5,
+      policy: new ConfigurableToolPolicy({
+        defaultMode: "auto",
+        overrides: { "roll.bash": "auto" },
+      }),
+      bash: {
+        profile,
+        workdir: tmpdir(),
+        defaultTimeoutMs: 60_000,
+        maxTimeoutMs: 60_000,
+        turnTimeoutMs: 60_000,
+        maxCaptureBytes: 1_048_576,
+        maxModelOutputChars: 16_000,
+      },
+    });
+    const events: SessionEvent[] = [];
+    let turnSettled = false;
+    const running = (async () => {
+      for await (const event of session.send("运行长 Bash 并取消")) {
+        events.push(event);
+        if (event.type === "tool-output-delta" && event.delta.includes("w14-ready")) {
+          session.cancel();
+        }
+      }
+      turnSettled = true;
+    })();
+
+    try {
+      await killStarted.promise;
+      assert.equal(turnSettled, false);
+      allowKill.resolve();
+      await running;
+      assert.deepEqual(killIntents, ["terminate"]);
+      assert.equal(turnSettled, true);
+      assert.equal(
+        events.some((event) => event.type === "turn-cancelled"),
+        true,
+      );
+    } finally {
+      allowKill.resolve();
+      await running.catch(() => undefined);
+      await session.close();
+    }
+  },
+);
+
+test(
   "bash 工具 E2E：工作区外 pattern 文件触发确认，工作区内 pattern 文件自动执行",
   { skip: process.platform === "win32" },
   async () => {

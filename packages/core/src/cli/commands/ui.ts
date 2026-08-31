@@ -12,8 +12,10 @@ import {
   createRollUiRuntimeController,
   startRollUiServer,
   type RollUiCompanionController,
+  type RollUiScheduleController,
   type RollUiServerHandle,
 } from "../../ui/index.ts";
+import { createDefaultScheduleController } from "./ui-schedule-controller.ts";
 import { log } from "../utils/output.ts";
 
 interface RunRollUiOptions {
@@ -67,11 +69,13 @@ export async function runRollUi(
   const assetsDirectory = dependencies.assetsDirectory ?? resolveRollUiAssetsDirectory();
   assertRollUiAssetsAvailable(assetsDirectory);
   const companionController = resolveCompanionController();
+  const scheduleController = await resolveScheduleController();
 
   const server = await startRollUiServer({
     controller: createRollUiRuntimeController({ configPath }),
     staticAssets: createFileSystemStaticAssetProvider(assetsDirectory),
     ...(companionController !== undefined ? { companionController } : {}),
+    ...(scheduleController !== undefined ? { scheduleController } : {}),
     onError: (error) => {
       log.error(`配置台请求失败：${error instanceof Error ? error.message : String(error)}`);
     },
@@ -103,6 +107,15 @@ export function resolveCompanionController(
     return createRollUiCompanionController({ application: createDefaultCompanionApplication() });
   } catch (error) {
     log.warn(`Companion 管理面板不可用：${error instanceof Error ? error.message : String(error)}`);
+    return undefined;
+  }
+}
+
+export async function resolveScheduleController(): Promise<RollUiScheduleController | undefined> {
+  try {
+    return await createDefaultScheduleController();
+  } catch (error) {
+    log.warn(`定时任务管理面板不可用：${error instanceof Error ? error.message : String(error)}`);
     return undefined;
   }
 }

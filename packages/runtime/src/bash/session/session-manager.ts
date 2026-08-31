@@ -1,3 +1,4 @@
+import type { ChildProcess } from "node:child_process";
 import { performance } from "node:perf_hooks";
 import { waitForPromiseSettlement } from "../../bounded-wait.ts";
 import type { BashStreamName } from "../exec.ts";
@@ -37,6 +38,7 @@ export interface SessionManagerOptions {
   readonly killTreeTimeoutMs?: number;
   readonly closeDrainTimeoutMs?: number;
   readonly rootSettleTimeoutMs?: number;
+  readonly onSpawn?: (child: ChildProcess) => void;
 }
 
 export interface SpawnRequest {
@@ -111,6 +113,9 @@ export class SessionManager {
       ...(request.onDelta ? { onDelta: request.onDelta } : {}),
     });
     this.sessions.set(id, session);
+    if (session.child.pid !== undefined) {
+      this.options.onSpawn?.(session.child);
+    }
     this.observeLifecycle(session);
     return session;
   }

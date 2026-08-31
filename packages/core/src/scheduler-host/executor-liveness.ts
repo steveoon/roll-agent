@@ -1,0 +1,297 @@
+import { spawnSync } from "node:child_process";
+import { existsSync, readFileSync } from "node:fs";
+import { win32 as win32Path } from "node:path";
+import { EXECUTOR_LIVENESS, SCHEDULER_LIMITS } from "@roll-agent/runtime";
+import type { ExecutorIdentity, ExecutorLiveness } from "@roll-agent/runtime";
+import {
+  PROCESS_START_TOKEN_VERIFICATION_REASONS,
+  PROCESS_START_TOKEN_VERIFICATION_STATUSES,
+  isProcessStartToken,
+  readProcessStartToken,
+  verifyProcessStartToken,
+} from "../registry/process-identity.ts";
+
+const PROCESS_STATE_TIMEOUT_MS = 2_000;
+export const TRUSTED_PS_PATHS = ["/bin/ps", "/usr/bin/ps"] as const;
+
+const LIVENESS_BY_VERIFICATION = {
+  [PROCESS_START_TOKEN_VERIFICATION_STATUSES.MATCH]: EXECUTOR_LIVENESS.alive,
+  [PROCESS_START_TOKEN_VERIFICATION_STATUSES.MISMATCH]: EXECUTOR_LIVENESS.dead,
+  [PROCESS_START_TOKEN_VERIFICATION_STATUSES.UNAVAILABLE]: EXECUTOR_LIVENESS.unknown,
+} as const satisfies Record<
+  (typeof PROCESS_START_TOKEN_VERIFICATION_STATUSES)[keyof typeof PROCESS_START_TOKEN_VERIFICATION_STATUSES],
+  ExecutorLiveness
+>;
+
+function readProcessState(pid: number): string | undefined {
+  if (process.platform === "win32") {
+    return undefined;
+  }
+  if (process.platform === "linux" || process.platform === "android") {
+    try {
+      const stat = readFileSync(`/proc/${String(pid)}/stat`, "utf-8");
+      const commandEnd = stat.lastIndexOf(")");
+      return commandEnd < 0
+        ? undefined
+        : stat
+            .slice(commandEnd + 1)
+            .trim()
+            .charAt(0);
+    } catch {
+      return undefined;
+    }
+  }
+  const psExecutable = TRUSTED_PS_PATHS.find((candidate) => existsSync(candidate));
+  if (psExecutable === undefined) {
+    return undefined;
+  }
+  try {
+    const result = spawnSync(psExecutable, ["-p", String(pid), "-o", "stat="], {
+      encoding: "utf-8",
+      env: { ...process.env, LC_ALL: "C", LANG: "C" },
+      timeout: PROCESS_STATE_TIMEOUT_MS,
+      windowsHide: true,
+    });
+    const state = result.stdout.trim();
+    return result.status === 0 && result.error === undefined && state.length > 0
+      ? state.charAt(0)
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function isZombie(pid: number): boolean {
+  return readProcessState(pid) === "Z";
+}
+
+function isErrnoCode(error: unknown, code: string): boolean {
+  return typeof error === "object" && error !== null && "code" in error && error.code === code;
+}
+
+function countLiveProcessGroupMembers(pgid: number): number | undefined {
+  if (process.platform === "win32") {
+    return undefined;
+  }
+  const psExecutable = TRUSTED_PS_PATHS.find((candidate) => existsSync(candidate));
+  if (psExecutable === undefined) {
+    return undefined;
+  }
+  try {
+    const result = spawnSync(psExecutable, ["-A", "-o", "pid=,pgid=,stat="], {
+      encoding: "utf-8",
+      env: { ...process.env, LC_ALL: "C", LANG: "C" },
+      timeout: PROCESS_STATE_TIMEOUT_MS,
+      windowsHide: true,
+    });
+    if (result.status !== 0 || result.error !== undefined) {
+      return undefined;
+    }
+    let live = 0;
+    for (const line of result.stdout.split("\n")) {
+      const [pid, groupId, state] = line.trim().split(/\s+/u);
+      if (pid === undefined || groupId === undefined) {
+        continue;
+      }
+      if (Number.parseInt(groupId, 10) === pgid && !(state ?? "").startsWith("Z")) {
+        live += 1;
+      }
+    }
+    return live;
+  } catch {
+    return undefined;
+  }
+}
+
+function hasLiveDescendants(pid: number): boolean {
+  if (process.platform === "win32") {
+    return false;
+  }
+  const members = countLiveProcessGroupMembers(pid);
+  if (members !== undefined) {
+    return members > 0;
+  }
+  try {
+    process.kill(-pid, 0);
+    return true;
+  } catch (error) {
+    return isErrnoCode(error, "EPERM");
+  }
+}
+
+export function probeExecutorLiveness(executor: ExecutorIdentity): ExecutorLiveness {
+  if (!isProcessStartToken(executor.startToken)) {
+    return EXECUTOR_LIVENESS.unknown;
+  }
+  const verification = verifyProcessStartToken(executor.pid, executor.startToken);
+  if (
+    verification.status === PROCESS_START_TOKEN_VERIFICATION_STATUSES.MISMATCH &&
+    verification.reason === PROCESS_START_TOKEN_VERIFICATION_REASONS.TOKEN_MISMATCH
+  ) {
+    return EXECUTOR_LIVENESS.dead;
+  }
+  const rootLiveness = LIVENESS_BY_VERIFICATION[verification.status];
+  const liveness =
+    rootLiveness === EXECUTOR_LIVENESS.alive && isZombie(executor.pid)
+      ? EXECUTOR_LIVENESS.dead
+      : rootLiveness;
+  if (liveness === EXECUTOR_LIVENESS.dead && hasLiveDescendants(executor.pid)) {
+    return EXECUTOR_LIVENESS.descendants;
+  }
+  return liveness;
+}
+
+export function currentExecutorIdentity(pid: number = process.pid): ExecutorIdentity | undefined {
+  const startToken = readProcessStartToken(pid);
+  return startToken === undefined ? undefined : { pid, startToken };
+}
+
+const EXECUTOR_IDENTITY_ATTEMPTS = 2;
+
+export function readExecutorIdentityWithRetry(
+  read: () => ExecutorIdentity | undefined = currentExecutorIdentity,
+  attempts: number = EXECUTOR_IDENTITY_ATTEMPTS,
+): ExecutorIdentity | undefined {
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    const identity = read();
+    if (identity !== undefined) {
+      return identity;
+    }
+  }
+  return undefined;
+}
+
+const TASKKILL_TIMEOUT_MS = 5_000;
+const EXECUTOR_EXIT_POLL_MS = 100;
+
+export const KILL_PROCESS_TREE_OUTCOMES = {
+  tree: "tree-terminated",
+  rootOnly: "root-only",
+  failed: "failed",
+} as const;
+export type KillProcessTreeOutcome =
+  (typeof KILL_PROCESS_TREE_OUTCOMES)[keyof typeof KILL_PROCESS_TREE_OUTCOMES];
+
+export interface KillProcessTreeDeps {
+  readonly platform?: NodeJS.Platform;
+  readonly env?: NodeJS.ProcessEnv;
+  readonly spawnSync?: typeof spawnSync;
+  readonly kill?: (pid: number, signal: NodeJS.Signals) => void;
+}
+
+export interface TerminateExecutorWithGraceOptions {
+  readonly platform?: NodeJS.Platform;
+  readonly graceMs?: number;
+  readonly unrefWait?: boolean;
+  readonly terminate?: (
+    executor: ExecutorIdentity,
+    signal: NodeJS.Signals,
+  ) => KillProcessTreeOutcome;
+  readonly waitForExit?: (
+    executor: ExecutorIdentity,
+    timeoutMs: number,
+  ) => Promise<ExecutorLiveness>;
+}
+
+function resolveWindowsTaskkill(env: NodeJS.ProcessEnv): string | undefined {
+  const systemRoot = env.SystemRoot ?? env.SYSTEMROOT;
+  if (systemRoot === undefined || !/^[A-Za-z]:[\\/]/u.test(systemRoot)) {
+    return undefined;
+  }
+  return win32Path.join(systemRoot, "System32", "taskkill.exe");
+}
+
+export function killProcessTree(
+  pid: number,
+  signal: NodeJS.Signals = "SIGKILL",
+  deps: KillProcessTreeDeps = {},
+): KillProcessTreeOutcome {
+  const platform = deps.platform ?? process.platform;
+  if (platform === "win32") {
+    const taskkill = resolveWindowsTaskkill(deps.env ?? process.env);
+    if (taskkill === undefined) {
+      return KILL_PROCESS_TREE_OUTCOMES.failed;
+    }
+    const run = deps.spawnSync ?? spawnSync;
+    const args =
+      signal === "SIGKILL" ? ["/T", "/F", "/PID", String(pid)] : ["/T", "/PID", String(pid)];
+    const result = run(taskkill, args, {
+      encoding: "utf-8",
+      timeout: TASKKILL_TIMEOUT_MS,
+      windowsHide: true,
+    });
+    return result.status === 0 && result.error === undefined
+      ? KILL_PROCESS_TREE_OUTCOMES.tree
+      : KILL_PROCESS_TREE_OUTCOMES.failed;
+  }
+  const kill = deps.kill ?? ((target: number, sig: NodeJS.Signals) => process.kill(target, sig));
+  try {
+    kill(-pid, signal);
+    return KILL_PROCESS_TREE_OUTCOMES.tree;
+  } catch {
+    return KILL_PROCESS_TREE_OUTCOMES.failed;
+  }
+}
+
+export function terminateExecutor(
+  executor: ExecutorIdentity,
+  signal: NodeJS.Signals = "SIGKILL",
+  deps: KillProcessTreeDeps = {},
+): KillProcessTreeOutcome {
+  const liveness = probeExecutorLiveness(executor);
+  if (liveness !== EXECUTOR_LIVENESS.alive && liveness !== EXECUTOR_LIVENESS.descendants) {
+    return KILL_PROCESS_TREE_OUTCOMES.failed;
+  }
+  return killProcessTree(executor.pid, signal, deps);
+}
+
+async function waitForExecutorExit(
+  executor: ExecutorIdentity,
+  timeoutMs: number,
+  unrefWait: boolean,
+): Promise<ExecutorLiveness> {
+  const deadline = Date.now() + timeoutMs;
+  let liveness = probeExecutorLiveness(executor);
+  while (liveness !== EXECUTOR_LIVENESS.dead && Date.now() < deadline) {
+    await new Promise((resolve) => {
+      const timer = setTimeout(
+        resolve,
+        Math.min(EXECUTOR_EXIT_POLL_MS, Math.max(deadline - Date.now(), 0)),
+      );
+      if (unrefWait) {
+        timer.unref();
+      }
+    });
+    liveness = probeExecutorLiveness(executor);
+  }
+  return liveness;
+}
+
+export async function terminateExecutorWithGrace(
+  executor: ExecutorIdentity,
+  options: TerminateExecutorWithGraceOptions = {},
+): Promise<KillProcessTreeOutcome> {
+  const platform = options.platform ?? process.platform;
+  const terminate =
+    options.terminate ??
+    ((target: ExecutorIdentity, signal: NodeJS.Signals) =>
+      terminateExecutor(target, signal, { platform }));
+  if (platform === "win32") {
+    return terminate(executor, "SIGKILL");
+  }
+  const graceful = terminate(executor, "SIGTERM");
+  if (graceful !== KILL_PROCESS_TREE_OUTCOMES.tree) {
+    return terminate(executor, "SIGKILL");
+  }
+  const waitForExit =
+    options.waitForExit ??
+    ((target: ExecutorIdentity, timeoutMs: number) =>
+      waitForExecutorExit(target, timeoutMs, options.unrefWait === true));
+  const liveness = await waitForExit(
+    executor,
+    options.graceMs ?? SCHEDULER_LIMITS.childTerminateGraceMs,
+  );
+  return liveness === EXECUTOR_LIVENESS.dead
+    ? KILL_PROCESS_TREE_OUTCOMES.tree
+    : terminate(executor, "SIGKILL");
+}

@@ -12,7 +12,7 @@ import { isSensitiveFieldName, redactSecretText } from "../tool-bridge/tool-exec
 import type { SessionState } from "../bash/session/types.ts";
 
 export const CAPABILITY_MANIFEST_VERSION = 1 as const;
-export const CAPABILITY_TURN_CONTEXT_VERSION = 1 as const;
+export const CAPABILITY_TURN_CONTEXT_VERSION = 2 as const;
 
 export const CAPABILITY_TOOL_ROLES = {
   agent: "agent",
@@ -25,6 +25,8 @@ export const CAPABILITY_TOOL_ROLES = {
   sessionPoll: "session-poll",
   sessionList: "session-list",
   agentInstall: "agent-install",
+  scheduleCreate: "schedule-create",
+  scheduleList: "schedule-list",
   transcriptRead: "transcript-read",
   userInput: "user-input",
 } as const;
@@ -59,9 +61,22 @@ export const CAPABILITY_HOST_MODES = {
   interactive: "interactive",
   oneShot: "one-shot",
   server: "server",
+  background: "background",
 } as const;
 
 export type CapabilityHostMode = (typeof CAPABILITY_HOST_MODES)[keyof typeof CAPABILITY_HOST_MODES];
+
+export function isProcessBoundHostMode(mode: CapabilityHostMode): boolean {
+  return mode === CAPABILITY_HOST_MODES.oneShot || mode === CAPABILITY_HOST_MODES.background;
+}
+
+export function shouldOfferAgentInstall(mode: CapabilityHostMode): boolean {
+  return mode !== CAPABILITY_HOST_MODES.background;
+}
+
+export function shouldOfferScheduleCreate(mode: CapabilityHostMode): boolean {
+  return mode !== CAPABILITY_HOST_MODES.background;
+}
 
 export const CAPABILITY_SESSION_EXEC_LIFECYCLES = {
   resumable: "resumable",
@@ -103,11 +118,25 @@ export interface CapabilityDynamicTurnSnapshot {
   readonly ruleIds: readonly string[];
   readonly sessions: readonly CapabilitySessionSnapshot[];
   readonly vcs?: CapabilityVcsSnapshot;
+  readonly origin?: CapabilityTurnOrigin;
+}
+
+export const CAPABILITY_TURN_ORIGIN_KINDS = { scheduled: "scheduled" } as const;
+export type CapabilityTurnOriginKind =
+  (typeof CAPABILITY_TURN_ORIGIN_KINDS)[keyof typeof CAPABILITY_TURN_ORIGIN_KINDS];
+
+export interface CapabilityTurnOrigin {
+  readonly kind: CapabilityTurnOriginKind;
+  readonly scheduleId: string;
+  readonly invocationId: string;
+  readonly scheduledFor: string;
+  readonly unattended: boolean;
 }
 
 export interface CapabilityExternalDynamicContext {
   readonly ruleIds?: readonly string[];
   readonly vcs?: CapabilityVcsSnapshot;
+  readonly origin?: CapabilityTurnOrigin;
 }
 
 export interface EffectiveToolCapability {
@@ -164,6 +193,7 @@ export interface BuildCapabilityTurnContextInput {
   readonly ruleIds?: readonly string[];
   readonly sessions?: readonly CapabilitySessionSnapshot[];
   readonly vcs?: CapabilityVcsSnapshot;
+  readonly origin?: CapabilityTurnOrigin;
 }
 
 export interface CapabilityAgentOnboardingCatalogEntry {
@@ -341,6 +371,7 @@ const CAPABILITY_APPROVAL_BY_ROLE: Readonly<
   [CAPABILITY_TOOL_ROLES.sessionList]: CAPABILITY_APPROVAL_MODES.readOnly,
   [CAPABILITY_TOOL_ROLES.transcriptRead]: CAPABILITY_APPROVAL_MODES.readOnly,
   [CAPABILITY_TOOL_ROLES.agentInstall]: CAPABILITY_APPROVAL_MODES.alwaysConfirm,
+  [CAPABILITY_TOOL_ROLES.scheduleList]: CAPABILITY_APPROVAL_MODES.readOnly,
   [CAPABILITY_TOOL_ROLES.userInput]: CAPABILITY_APPROVAL_MODES.readOnly,
 };
 
@@ -468,6 +499,7 @@ export function buildEffectiveCapabilityTurnContext(
       ruleIds: [...(input.ruleIds ?? manifest.stableContext.rules)],
       sessions: (input.sessions ?? []).map((session) => ({ ...session })),
       ...(input.vcs ? { vcs: { ...input.vcs } } : {}),
+      ...(input.origin ? { origin: { ...input.origin } } : {}),
     },
     effectiveToolIds: manifest.tools.map((tool) => tool.id),
     explicitSkillNames: [...(input.explicitSkillNames ?? [])],
@@ -559,6 +591,17 @@ function sanitizeCapabilityTurnContext(
               ...(context.dynamic.vcs.branch
                 ? { branch: sanitizeSnapshotString(context.dynamic.vcs.branch) }
                 : {}),
+            },
+          }
+        : {}),
+      ...(context.dynamic.origin
+        ? {
+            origin: {
+              kind: context.dynamic.origin.kind,
+              scheduleId: sanitizeSnapshotString(context.dynamic.origin.scheduleId),
+              invocationId: sanitizeSnapshotString(context.dynamic.origin.invocationId),
+              scheduledFor: sanitizeSnapshotString(context.dynamic.origin.scheduledFor),
+              unattended: context.dynamic.origin.unattended,
             },
           }
         : {}),

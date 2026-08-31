@@ -1,5 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import type { ChildProcess } from "node:child_process";
 import { mkdirSync, mkdtempSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -861,4 +862,37 @@ test("不传 max_output_chars 时沿用 settings.maxModelOutputChars", async () 
   const result = await execute({ command: "big" }, options());
   assert.equal(result.isError, false);
   assert.doesNotMatch(String(result.output), /chars truncated/u);
+});
+
+test("settings.onCommandSpawn 透传为 exec 的 onSpawn", async () => {
+  const seen: ChildProcess[] = [];
+  const sentinel = { pid: 4321 } as unknown as ChildProcess;
+  const execute = getExecute(
+    settings({
+      onCommandSpawn: (child) => {
+        seen.push(child);
+      },
+    }),
+    { policy: allowPolicy, requestApproval: async () => ({ approved: true }) },
+    async (o) => {
+      o.onSpawn?.(sentinel);
+      return okResult;
+    },
+  );
+  await execute({ command: "echo ok" }, options());
+  assert.deepEqual(seen, [sentinel]);
+});
+
+test("未设置 onCommandSpawn 时 exec 选项里没有 onSpawn 键", async () => {
+  let keys: readonly string[] = [];
+  const execute = getExecute(
+    settings(),
+    { policy: allowPolicy, requestApproval: async () => ({ approved: true }) },
+    async (o) => {
+      keys = Object.keys(o);
+      return okResult;
+    },
+  );
+  await execute({ command: "echo ok" }, options());
+  assert.equal(keys.includes("onSpawn"), false);
 });

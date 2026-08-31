@@ -1,6 +1,6 @@
 import { readFileSync, existsSync } from "node:fs";
 import { homedir } from "node:os";
-import { resolve } from "node:path";
+import { dirname, isAbsolute, resolve } from "node:path";
 import { parse as parseYaml } from "yaml";
 import { agentsConfigSchema, installConfigSchema, rollConfigSchema } from "./schema.ts";
 import type { RollConfig } from "./schema.ts";
@@ -120,8 +120,16 @@ function expandChatInstructions(value: string): string {
   return value === "auto" || value === "off" ? value : expandTilde(value);
 }
 
-/** 对配置中的路径字段做 tilde 展开 */
-function expandPaths(config: RollConfig): RollConfig {
+function resolveSchedulerDataDir(value: string, configPath: string | undefined): string {
+  const expanded = expandTilde(value);
+  if (isAbsolute(expanded)) {
+    return expanded;
+  }
+  return resolve(configPath === undefined ? process.cwd() : dirname(configPath), expanded);
+}
+
+/** 对配置中的路径字段做 tilde 展开；scheduler.data-dir 额外锚定到配置文件所在目录 */
+function expandPaths(config: RollConfig, configPath?: string): RollConfig {
   return {
     ...config,
     agents: {
@@ -135,6 +143,10 @@ function expandPaths(config: RollConfig): RollConfig {
     runtime: {
       ...config.runtime,
       threadsDir: expandTilde(config.runtime.threadsDir),
+    },
+    scheduler: {
+      ...config.scheduler,
+      dataDir: resolveSchedulerDataDir(config.scheduler.dataDir, configPath),
     },
     skills: {
       ...config.skills,
@@ -276,7 +288,7 @@ export function validateConfigText(raw: string, configPath: string): RollConfig 
     throw new Error(`Config validation failed (${configPath}):\n${issues}`);
   }
 
-  return expandPaths(result.data);
+  return expandPaths(result.data, configPath);
 }
 
 function validateAgentsConfigText(raw: string, configPath: string): RollConfig["agents"] {

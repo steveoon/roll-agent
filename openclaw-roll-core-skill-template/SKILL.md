@@ -53,6 +53,8 @@ Machine-readable boundaries:
 | `roll companion status --json` / `roll companion doctor --json` |  |
 | `roll skills install ... --json` |  |
 | `roll run ... --json` / `roll run --batch-* --json` |  |
+| `roll schedule add\|list\|show\|runs\|status\|cancel\|run-now ... --json` | `roll schedule pause\|resume\|remove` (exit 0 + stderr line) |
+| `roll schedule service status --json`, `roll schedule service restart --json` | `roll schedule service install\|uninstall`, `roll schedule daemon --foreground` |
 
 ## Startup Gate
 
@@ -362,6 +364,7 @@ Current roll-core also ships product-level command groups that sit outside the d
 | `roll companion <enroll\|status\|doctor\|start\|stop\|restart\|logs\|...>` | Per-user local daemon lifecycle for remote access; dials an outbound WebSocket to the Relay host and opens no inbound network port | human-readable; `status` / `doctor` accept `--json` |
 | `roll ui` | Local web config console on 127.0.0.1 (config, agents, companion panel) — not a chat UI | human-readable |
 | `roll skills install <dir-or-git-url> [--target ...]` | Install skill docs into orchestrator skill dirs (Claude Code / Codex / generic `.agents`) | human-readable; `--json` supported |
+| `roll schedule <add\|list\|show\|runs\|status\|run-now\|cancel\|pause\|resume\|remove\|daemon\|service install\|uninstall\|restart\|status>` | Interval-triggered unattended `roll chat` rounds with a local ledger; see [Scheduled Tasks](#scheduled-tasks) | non-interactive; `--json` on the read/mutate commands listed above |
 
 Rules:
 
@@ -371,6 +374,38 @@ Rules:
 - Enrollment is pipe-friendly by design: `printf '%s' "$PAIRING_CODE" | roll companion enroll --workspace /abs/path --code-stdin`. It requires non-TTY stdin (interactive echo is rejected), the one-time code never enters argv, config, or logs, and failure exits non-zero. Run it once, never in a batch.
 - `roll companion run --foreground` and `roll companion logs --follow` are long-running foreground processes; never invoke them from orchestrator code or batch mode. The `--foreground` flag is mandatory — bare `roll companion run` exits 1 without starting anything.
 - For enrollment endpoint semantics, read the `relay-endpoint` check in `roll companion doctor` output, plus the endpoint line `roll companion enroll` prints on stderr before sending the code. The relay host is overridable through the `ROLL_COMPANION_RELAY_HOST` env var, which accepts any `host[:port]` and is **not** restricted to loopback; only loopback hosts are allowed to downgrade the scheme to `ws://` / `http://`, every other host stays on `wss://` / `https://`.
+
+## Scheduled Tasks
+
+`roll schedule` runs one unattended `roll chat` turn per trigger on a fixed interval and keeps every run in a local SQLite ledger. The CLI has no TTY prompts, so orchestrators may drive it directly, and it remains the complete management surface (`pause` / `resume` / `cancel` / `remove` / `service` exist only here and in `roll ui`). Interactive `roll chat` additionally exposes built-in `roll__schedule_create` / `roll__schedule_list` tools (create requires an in-chat human confirmation; unattended scheduled turns get only `schedule_list`), so a ledger you inspect may contain schedules a human created conversationally — treat `roll schedule list --json` as the authoritative view either way.
+
+Quick path:
+
+```bash
+roll schedule add "<prompt>" --name <name> --every 30m --cwd /abs/path --json   # -> { id, status, trigger, nextRunAt, maxRun?, maxRunMs?, ... }
+roll schedule run-now <id> --inline --json                                      # one synchronous attempt; exit 1 unless completed / needs_confirmation
+roll schedule status --json                                                     # { daemon: { liveness, pid }, schedules: { total, active, paused }, nextWakeAt }
+roll schedule runs <id> --json                                                  # [{ status, threadId, error, pendingActions, outputExcerpt, attempt, ... }]
+```
+
+Facts an orchestrator must respect:
+
+- **Interval only.** `--every <integer><s|m|h|d>`, 60 s to 365 d (`90m`, not `1.5h`). There is no calendar or run-once-at-time trigger. First run = registration time + interval, or immediately with `--now`; after each trigger the next run is rebased to claim time + interval, so wall-clock phase drifts. Missed triggers (sleep, daemon down) are caught up once, never replayed.
+- **Unattended approval.** Any tool call the approval policy would `confirm` is denied instead; the run ends with `status: needs_confirmation` and lists denied `agent.tool` names in `pendingActions`. Under the default `runtime.approval.default: guarded` only read-only tools execute. To let a schedule write or send, set `runtime.approval.overrides["<agent>.<tool>"]: auto` in the config resolved from the schedule's `--cwd` **before** `add`, and keep that list minimal. `default: auto` still denies tools annotated `destructiveHint`.
+- **Authority snapshot.** `add` records a digest of `runtime.approval` + `runtime.shell` from `--cwd`. If either changes later, the next run does not execute and the schedule flips to `paused` with the reason in `lastError`. `roll schedule resume <id>` re-records the digest (it is a re-authorization) — run it only after a human confirmed the new boundary. Model, agent, and skill changes are not covered by the digest.
+- **Retries and the run cap.** Exec crash or non-zero exit -> retry after 10 s, 3 attempts per trigger, then `paused`. `needs_confirmation` is not a failure. Both daemon execution and `run-now --inline` kill a run that exceeds the schedule's cap; daemon execution counts it as failed and may retry, while inline makes one attempt and exits 1. The cap defaults to 1 hour and is set per schedule with `--max-run <integer><s|m|h|d>` (60 s to 24 h, e.g. `--max-run 6h`). Prefer short bounded rounds ("handle at most N items, leave the rest for the next round") over raising the cap: every round is a fresh thread and a failed round restarts from zero.
+- **A daemon must be running for anything to fire.** `roll schedule daemon --foreground` is a long-running process (never call it from batch mode); `roll schedule service install` registers a macOS LaunchAgent / Windows Scheduled Task that starts at login. Without the service nothing fires after reboot until a daemon starts.
+- **The service pins the Node binary, CLI entrypoint and roll version at install time.** Stop a foreground daemon on the same data-dir before install/restart. Roll reports success only after the managed daemon returns the matching install generation; an interrupted install remains `installing` and blocks new claims until `service install` / `service restart` recovers it. After `roll update` (which preserves the installed scheduler data-dir and restarts only after Agent maintenance finishes when no run is live), after a manual npm upgrade, or after switching / removing the Node version via nvm, run `roll schedule service restart`; it refuses while an invocation is `claimed` / `running` or a retry still owns an unsettled tree unless `--force`. Force interrupts daemon-owned invocations; `run-now --inline` is not owned by the service and continues. `roll schedule service status --json` exposes `binary.status` (`current` / `outdated` / `broken` / `unknown`) with a `reason`, and `roll doctor --json` carries the same verdict in the `Scheduler service` check (`fail` when the pinned node or entrypoint no longer exists). Treat `broken` as "nothing will fire after reboot" and restart before relying on the schedule.
+- **Every run is a fresh thread.** `threadId` in the run record can be reopened with `roll chat --session <threadId>` for human follow-up; the ledger keeps the last 100 terminal runs per schedule for 30 days.
+
+Boundary rules:
+
+- `remove` refuses while a run is `claimed` / `running`; stop it first with `roll schedule cancel <invocation-id> --kill`.
+- `remove --abandon` and `cancel --abandon` drop ledger tracking without stopping processes. Treat them as destructive and require explicit human intent.
+- `run-now` without `--inline` only enqueues; parse `status --json` to confirm a daemon is `running` before expecting execution.
+- Parse `schedules[].lastError` / `runs[].error` to decide recovery: an authority-drift message means "confirm boundary, then `resume`"; retry exhaustion means "fix the cause, verify with `run-now --inline --json`, then `resume`".
+
+For the full lifecycle recipe (preflight, authorize, register, test, install, monitor, recover), see [references/workflows.md](./references/workflows.md#scheduled-tasks).
 
 ## Output Handling
 
@@ -385,6 +420,7 @@ Rules:
 
 - For first-time machine setup, `roll config setup/explain`, config migration, npm install network config, and **the difference between `roll agent add` (local source) vs `roll agent install` (published package)**, read [references/setup.md](./references/setup.md).
 - For multi-step Roll CLI recipes and troubleshooting sequences, read [references/workflows.md](./references/workflows.md).
+- For the scheduled-task lifecycle (authorize, register, inline test, install service, monitor, recover from `paused`), read the [Scheduled Tasks](./references/workflows.md#scheduled-tasks) recipe in workflows.md.
 - For common Roll-layer failures and recovery paths, read [references/errors.md](./references/errors.md).
 - For cross-agent sequencing, verification patterns, and shared orchestration pitfalls, read [references/cross-agent-orchestration.md](./references/cross-agent-orchestration.md).
 - For tool input/output details, env declarations, and capability boundaries, read the target subagent's own `SKILL.md` or runtime metadata.

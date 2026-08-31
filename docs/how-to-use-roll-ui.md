@@ -56,7 +56,8 @@ CLI 与 Web UI 共用 key 编码、Zod 校验、乐观并发检查和无损写�
 | 语义 | 维护位置 | 何时需要修改 |
 |---|---|---|
 | secret 判定 | `config/secret-policy.ts` 的 `isRollConfigSecretPath()` | 新字段包含 token、密码、认证 URL 等敏感值 |
-| 生效方式 / effect | `config/application-service.ts` 的 `describeActivation()` | 保存后需要重启 Agent、新会话或人工迁移 |
+| Web 表单只读 | `config/edit-policy.ts` 的 `isRollConfigReadOnlyPath()` | 字段改动需要人工迁移数据（如 `scheduler.data-dir`），表单只展示当前值并引导走 CLI；YAML 编辑与 CLI 不受限，由生效提示兜底 |
+| 生效方式 / effect | `config/application-service.ts` 的 `describeActivation()` | 保存后需要重启 Agent、重启 scheduler service、新会话或人工迁移 |
 | `~/` 路径展开 | `config/loader.ts` 的 `expandPaths()` | 新字段在 effective config 中应展开用户目录 |
 | breaking migration | `config/migration.ts` 的迁移规则 | 删除、重命名或改变已有字段语义 |
 | 友好说明 | `config/guidance.ts` | 新增或重命名配置叶子时必须补标题、用途、默认行为和 YAML 示例；Web UI 与 `roll config explain` 共用，完整性由 catalog 测试守护 |
@@ -83,6 +84,16 @@ CLI 与 Web UI 共用 key 编码、Zod 校验、乐观并发检查和无损写�
 写回采用 revision 乐观并发控制；文件在预览与保存之间被其他程序修改时，保存会被拒绝。修改已存在的文件时会先创建备份，并通过临时文件、`fsync`、原子替换完成提交，同时保留注释、字段顺序、引号和 `${ENV_VAR}` 引用。新建文件不产生备份。
 
 自动重启不会只信任 PID。Roll 启动 core-managed Agent 时会把 OS 进程启动身份写入 runtime sidecar；停止前会同时核对 `PID + processStartToken + startedAt`，身份缺失、来自旧版 sidecar 或发生变化时一律拒绝发送信号，并转为人工处理。Linux 使用 boot ID 与 `/proc` starttime，macOS 使用固定 locale 的进程启动时间与 boot time，Windows 使用进程启动时间 ticks。
+
+## 定时任务管理面板
+
+除了配置编辑，配置台左侧还有与 Companion 平级的「定时任务管理」分区（S1），对应 `roll schedule` 的三个层级：
+
+- **服务卡片**：显示开机自启服务的安装 / daemon 运行状态、数据目录、下次唤醒时间与固化二进制是否过期，可直接安装、重启（有任务在执行时会拒绝并显示原因；`--force` 只在 CLI 提供）与卸载（需确认）。
+- **任务列表**：每个任务的间隔、下次运行时间、上次错误与运行中标记，可逐个暂停 / 恢复（恢复会按当前配置重新授权）。
+- **最近运行**：跨任务合并的最近运行记录，含状态、尝试次数、耗时与可展开的失败原因；排队中的记录可直接取消，运行中的记录提供「终止并取消」（等价 `roll schedule cancel --kill`，需确认；`--abandon` 只在 CLI 提供）。
+
+面板顶部会针对需要行动的状态给出警示：未安装服务但存在 active 任务、上次安装 / 更新未完成（fail-closed）、二进制过期、daemon 未运行等。新建 / 编辑 / 删除任务仍走 CLI（`roll schedule add / remove`）；面板数据手动刷新，不做轮询。schedule 面板通过 `/api/schedule/*` 路由访问，鉴权与 CSRF 约束和其余 API 一致；构造 controller 失败时该分区自动隐藏（stderr 有警告）。
 
 ## 安全边界
 

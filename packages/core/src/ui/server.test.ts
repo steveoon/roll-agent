@@ -13,9 +13,11 @@ import {
   RollUiCompanionBusyError,
   type CompanionApplicationPort,
 } from "./companion-controller.ts";
+import { RollUiScheduleBusyError, RollUiScheduleRequestError } from "./schedule-controller.ts";
 import type {
   RollUiCompanionController,
   RollUiController,
+  RollUiScheduleController,
   RollUiStaticAssetProvider,
 } from "./contracts.ts";
 import {
@@ -684,6 +686,172 @@ interface BootstrapResult {
   readonly payload: Readonly<Record<string, unknown>>;
 }
 
+describe("startRollUiServer schedule routes", () => {
+  it("hides the schedule API when no schedule controller is injected", async (t) => {
+    const server = await startRollUiServer({
+      controller: createController(),
+      staticAssets: STATIC_ASSETS,
+    });
+    t.after(() => server.close());
+    const session = await bootstrapSession(server, readLaunchToken(server));
+
+    const status = await apiFetch(server, "/api/schedule/status", session.cookie);
+    assert.equal(status.status, 404);
+    assert.equal((await readError(status)).code, "schedule_unavailable");
+
+    const mutation = await mutate(
+      server,
+      "/api/schedule/service/restart",
+      session.cookie,
+      session.csrfToken,
+      undefined,
+    );
+    assert.equal(mutation.status, 404);
+    assert.equal((await readError(mutation)).code, "schedule_unavailable");
+  });
+
+  it("requires a session and CSRF before reaching the schedule controller", async (t) => {
+    const schedule = createFakeScheduleController();
+    const server = await startRollUiServer({
+      controller: createController(),
+      staticAssets: STATIC_ASSETS,
+      scheduleController: schedule.controller,
+    });
+    t.after(() => server.close());
+    const session = await bootstrapSession(server, readLaunchToken(server));
+
+    const unauthenticated = await fetch(appUrl(server, "/api/schedule/status"));
+    assert.equal(unauthenticated.status, 401);
+
+    const missingCsrf = await mutate(server, "/api/schedule/pause", session.cookie, undefined, {
+      id: "s1",
+    });
+    assert.equal(missingCsrf.status, 403);
+
+    const wrongMethod = await apiFetch(server, "/api/schedule/pause", session.cookie);
+    assert.equal(wrongMethod.status, 405);
+    assert.equal(wrongMethod.headers.get("allow"), "POST");
+
+    const unknownRoute = await apiFetch(server, "/api/schedule/nope", session.cookie);
+    assert.equal(unknownRoute.status, 404);
+    assert.equal((await readError(unknownRoute)).code, "not_found");
+    assert.deepEqual(schedule.calls, []);
+  });
+
+  it("forwards every schedule read and mutation route", async (t) => {
+    const schedule = createFakeScheduleController();
+    const server = await startRollUiServer({
+      controller: createController(),
+      staticAssets: STATIC_ASSETS,
+      scheduleController: schedule.controller,
+    });
+    t.after(() => server.close());
+    const session = await bootstrapSession(server, readLaunchToken(server));
+
+    for (const path of ["/api/schedule/status", "/api/schedule/schedules"]) {
+      const response = await apiFetch(server, path, session.cookie);
+      assert.equal(response.status, 200);
+    }
+
+    const runs = await apiFetch(
+      server,
+      "/api/schedule/runs?scheduleId=sched-1&limit=5",
+      session.cookie,
+    );
+    assert.equal(runs.status, 200);
+
+    const bare = await apiFetch(server, "/api/schedule/runs", session.cookie);
+    assert.equal(bare.status, 200);
+
+    for (const path of [
+      "/api/schedule/service/install",
+      "/api/schedule/service/restart",
+      "/api/schedule/service/uninstall",
+    ]) {
+      const response = await mutate(server, path, session.cookie, session.csrfToken, undefined);
+      assert.equal(response.status, 200);
+    }
+    const pause = await mutate(server, "/api/schedule/pause", session.cookie, session.csrfToken, {
+      id: "sched-1",
+    });
+    assert.equal(pause.status, 200);
+    const cancel = await mutate(server, "/api/schedule/cancel", session.cookie, session.csrfToken, {
+      id: "inv-1",
+      kill: true,
+    });
+    assert.equal(cancel.status, 200);
+
+    assert.deepEqual(schedule.calls, [
+      "getStatus",
+      "listSchedules",
+      "listRuns",
+      "listRuns",
+      "installService",
+      "restartService",
+      "uninstallService",
+      "pauseSchedule",
+      "cancelInvocation",
+    ]);
+    assert.deepEqual(schedule.requests, [
+      { scheduleId: "sched-1", limit: 5 },
+      {},
+      { id: "sched-1" },
+      { id: "inv-1", kill: true },
+    ]);
+  });
+
+  it("maps schedule controller failures onto stable HTTP codes", async (t) => {
+    const schedule = createFakeScheduleController({
+      restartService: () => {
+        throw new RollUiScheduleBusyError();
+      },
+      pauseSchedule: () => {
+        throw new RollUiScheduleRequestError("请求需要合法的 定时任务 id。");
+      },
+      cancelInvocation: () => {
+        throw new Error(
+          "invocation inv-1 的 exec 进程或其进程树仍有存活成员（pid 42），取消需要加 --kill",
+        );
+      },
+    });
+    const server = await startRollUiServer({
+      controller: createController(),
+      staticAssets: STATIC_ASSETS,
+      scheduleController: schedule.controller,
+    });
+    t.after(() => server.close());
+    const session = await bootstrapSession(server, readLaunchToken(server));
+
+    const busy = await mutate(
+      server,
+      "/api/schedule/service/restart",
+      session.cookie,
+      session.csrfToken,
+      undefined,
+    );
+    assert.equal(busy.status, 409);
+    assert.equal((await readError(busy)).code, "schedule_busy");
+
+    const invalid = await mutate(server, "/api/schedule/pause", session.cookie, session.csrfToken, {
+      id: 1,
+    });
+    assert.equal(invalid.status, 400);
+    assert.equal((await readError(invalid)).code, "invalid_request");
+
+    const refused = await mutate(
+      server,
+      "/api/schedule/cancel",
+      session.cookie,
+      session.csrfToken,
+      { id: "inv-1" },
+    );
+    assert.equal(refused.status, 422);
+    const refusedError = await readError(refused);
+    assert.equal(refusedError.code, "schedule_operation_failed");
+    assert.match(String(refusedError.message), /取消需要加 --kill/u);
+  });
+});
+
 async function bootstrapSession(
   server: RollUiServerHandle,
   token: string,
@@ -711,6 +879,47 @@ async function bootstrapSession(
     csrfToken,
     payload,
   };
+}
+
+interface FakeScheduleController {
+  readonly controller: RollUiScheduleController;
+  readonly calls: string[];
+  readonly requests: unknown[];
+}
+
+function createFakeScheduleController(
+  overrides: Partial<RollUiScheduleController> = {},
+): FakeScheduleController {
+  const calls: string[] = [];
+  const requests: unknown[] = [];
+  const record = <T>(name: string, value: T): T => {
+    calls.push(name);
+    return value;
+  };
+  const base: RollUiScheduleController = {
+    getStatus: () => record("getStatus", { dataDir: "/tmp/sched", schedules: { total: 0 } }),
+    listSchedules: () => record("listSchedules", []),
+    listRuns: (request) => {
+      requests.push(request);
+      return record("listRuns", []);
+    },
+    installService: () => record("installService", { ok: true }),
+    restartService: () => record("restartService", { ok: true }),
+    uninstallService: () => record("uninstallService", { ok: true }),
+    pauseSchedule: (request) => {
+      requests.push(request);
+      return record("pauseSchedule", { ok: true });
+    },
+    resumeSchedule: (request) => {
+      requests.push(request);
+      return record("resumeSchedule", { ok: true });
+    },
+    cancelInvocation: (request) => {
+      requests.push(request);
+      return record("cancelInvocation", { ok: true });
+    },
+  };
+  return { controller: { ...base, ...overrides }, calls, requests };
 }
 
 function readLaunchToken(server: RollUiServerHandle): string {

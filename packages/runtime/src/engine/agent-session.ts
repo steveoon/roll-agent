@@ -1,3 +1,4 @@
+import type { ChildProcess } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { waitForPromiseSettlement } from "../bounded-wait.ts";
 import { relocateToolImagesToUserMessages } from "./relocate-tool-images.ts";
@@ -45,6 +46,7 @@ import {
   type AgentInstallToolOutcome,
 } from "../tool-bridge/agent-install-tool.ts";
 import { buildSkillToolset } from "../tool-bridge/skill-tool.ts";
+import { buildScheduleToolset, type ScheduleToolDeps } from "../tool-bridge/schedule-tool.ts";
 import {
   buildFileToolset,
   type SessionFileToolsSettings,
@@ -143,6 +145,7 @@ import {
   buildEffectiveCapabilityTurnContext,
   buildEffectiveCapabilityManifest,
   findCapabilityToolId,
+  isProcessBoundHostMode,
   type CapabilityAgentOnboardingCatalogEntry,
   type CapabilityExternalDynamicContext,
   type CapabilityHostMode,
@@ -257,6 +260,7 @@ export interface AgentSessionOptions {
   readonly bashClassifier?: CommandClassifier;
   readonly bashSession?: AgentSessionBashSession;
   readonly agentInstall?: AgentSessionAgentInstall;
+  readonly schedules?: ScheduleToolDeps;
   readonly onClose?: () => void;
 }
 
@@ -299,6 +303,7 @@ export interface AgentSessionBashSession {
   readonly maxOutputTokens: number;
   readonly bufferCapacity: number;
   readonly env?: NodeJS.ProcessEnv;
+  readonly onCommandSpawn?: (child: ChildProcess) => void;
 }
 
 export type SessionSkillSummary = SkillSummary;
@@ -1015,6 +1020,9 @@ export class AgentSession {
         profile: options.bashSession.profile,
         env: withCleanEnv(options.bashSession.env ?? process.env),
         bufferCapacity: options.bashSession.bufferCapacity,
+        ...(options.bashSession.onCommandSpawn
+          ? { onSpawn: options.bashSession.onCommandSpawn }
+          : {}),
       });
     }
     const sessionExecTools =
@@ -1059,6 +1067,15 @@ export class AgentSession {
         )
       : {};
     markToolRole(toolRoles, agentInstallTools, CAPABILITY_TOOL_ROLES.agentInstall);
+    const scheduleToolset = options.schedules
+      ? buildScheduleToolset(options.schedules, registry, {
+          ...(options.policy ? { policy: options.policy } : {}),
+          requestApproval: (request) => this.requestApproval(request),
+          coordinator: this.toolCoordinator,
+        })
+      : { createTools: {}, listTools: {} };
+    markToolRole(toolRoles, scheduleToolset.createTools, CAPABILITY_TOOL_ROLES.scheduleCreate);
+    markToolRole(toolRoles, scheduleToolset.listTools, CAPABILITY_TOOL_ROLES.scheduleList);
     const built = buildAgentToolset(
       options.sources,
       {
@@ -1078,6 +1095,8 @@ export class AgentSession {
       ...bashTools,
       ...sessionExecTools,
       ...agentInstallTools,
+      ...scheduleToolset.createTools,
+      ...scheduleToolset.listTools,
       ...built.tools,
     };
     this.registry = built.registry;
@@ -1441,6 +1460,7 @@ export class AgentSession {
         explicitSkillNames: explicitSkillContext.skillNames,
         ...(externalDynamicContext.ruleIds ? { ruleIds: externalDynamicContext.ruleIds } : {}),
         ...(externalDynamicContext.vcs ? { vcs: externalDynamicContext.vcs } : {}),
+        ...(externalDynamicContext.origin ? { origin: externalDynamicContext.origin } : {}),
         sessions: (this.sessionManager?.list() ?? []).map((session) => ({
           sessionId: session.sessionId,
           state: session.state,
@@ -3465,7 +3485,7 @@ export class AgentSession {
         if (execSessionIds.length === 0) {
           return "本轮等待时间过长，已自动停止。之前的对话和已完成进度会保留，你可以继续输入或重试。";
         }
-        if (this.capabilityManifest.lifecycle.hostMode === CAPABILITY_HOST_MODES.oneShot) {
+        if (isProcessBoundHostMode(this.capabilityManifest.lifecycle.hostMode)) {
           return "本轮等待时间过长，已自动停止。正在进行的任务会随本次命令结束而停止，之后无法继续查看；请先确认实际结果，再决定是否重试。";
         }
         if (sessionListToolId) {
@@ -3502,7 +3522,7 @@ export class AgentSession {
         if (execSessionIds.length === 0) {
           return `本轮因超时${duration}停止。已完成的步骤和工具记录仍然有效。${recoveryPolicy}`;
         }
-        if (this.capabilityManifest.lifecycle.hostMode === CAPABILITY_HOST_MODES.oneShot) {
+        if (isProcessBoundHostMode(this.capabilityManifest.lifecycle.hostMode)) {
           return `本轮因超时${duration}停止。${taskNumbers}当前 one-shot 进程结束时会清理这些任务，后续 CLI 进程无法恢复。${recoveryPolicy}`;
         }
         if (sessionListToolId) {

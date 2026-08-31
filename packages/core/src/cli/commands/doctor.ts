@@ -38,6 +38,15 @@ import {
 } from "../../registry/process-manager.ts";
 import { AgentStore } from "../../registry/store.ts";
 import type { BrowserConfig } from "../../config/schema.ts";
+import {
+  SCHEDULER_SERVICE_BINARY_STATUSES,
+  SCHEDULER_SERVICE_RESTART_COMMAND,
+  type SchedulerServiceBinaryReport,
+} from "../../scheduler-host/service-binary.ts";
+import type {
+  SchedulerServiceStateInspection,
+  SchedulerServiceStatePhase,
+} from "../../scheduler-host/service-state.ts";
 
 export interface CheckResult {
   readonly name: string;
@@ -562,6 +571,9 @@ export default defineCommand({
       }
     }
 
+    // 7. Scheduler service
+    checks.push(formatSchedulerServiceCheck(await probeSchedulerServiceForDoctor()));
+
     const hasFailure = checks.some((c) => c.status === "fail");
     const hasFailedFix = fixResults.some((fix) => fix.status === "failed");
     const hasWarning = checks.some((c) => c.status === "warn");
@@ -793,4 +805,122 @@ function formatMigrationIssues(issues: readonly { readonly message: string }[]):
 
 function uniqueFixes(fixes: readonly string[]): string[] {
   return [...new Set(fixes)];
+}
+
+export interface SchedulerServiceCheckInput {
+  readonly metadataStatus: SchedulerServiceStateInspection["status"];
+  readonly metadataPhase?: SchedulerServiceStatePhase;
+  readonly installed: boolean;
+  readonly running: boolean;
+  readonly binary?: SchedulerServiceBinaryReport;
+  readonly error?: string;
+}
+
+const commandExtension = import.meta.url.endsWith(".ts") ? "ts" : "js";
+
+async function probeSchedulerServiceForDoctor(): Promise<SchedulerServiceCheckInput> {
+  try {
+    const specifier = new URL(`./schedule-service-utils.${commandExtension}`, import.meta.url).href;
+    const utils: typeof import("./schedule-service-utils.ts") = await import(specifier);
+    return await utils.probeSchedulerService();
+  } catch (error) {
+    return {
+      metadataStatus: "missing",
+      installed: false,
+      running: false,
+      error: `无法加载 scheduler 模块：${error instanceof Error ? error.message : String(error)}`,
+    };
+  }
+}
+
+export function formatSchedulerServiceCheck(input: SchedulerServiceCheckInput): CheckResult {
+  const name = "Scheduler service";
+  if (input.metadataStatus === "invalid") {
+    return {
+      name,
+      status: "fail",
+      message: `service metadata 无法解析：${input.error ?? "unknown"}；修复前所有 scheduler 领取都会被阻塞（fail-closed）`,
+      fix: "确认没有 scheduler daemon / exec 存活后运行 `roll schedule service uninstall` 清除无效 metadata，再 `roll schedule service install`",
+      details: { type: "scheduler-service", metadata: "invalid" },
+    };
+  }
+  if (input.error !== undefined) {
+    return {
+      name,
+      status: "warn",
+      message: `检查失败：${input.error}`,
+      fix: "运行 `roll schedule service status` 查看详情",
+    };
+  }
+  if (input.metadataPhase === "installing") {
+    return {
+      name,
+      status: "warn",
+      message: "service metadata 仍为 installing，安装或替换尚未完成，新触发会保持阻塞",
+      fix: `处理 service status 报告的原因后运行 \`${SCHEDULER_SERVICE_RESTART_COMMAND}\` 继续恢复`,
+      details: { type: "scheduler-service", phase: input.metadataPhase },
+    };
+  }
+  if (!input.installed) {
+    return input.metadataStatus === "missing"
+      ? {
+          name,
+          status: "ok",
+          message: "未安装（定时任务需要 `roll schedule service install` 才会随登录启动）",
+        }
+      : {
+          name,
+          status: "warn",
+          message: `service metadata 为 ${input.metadataStatus}，但服务管理器里没有该服务`,
+          fix: "运行 `roll schedule service install` 重装",
+        };
+  }
+  const binary = input.binary;
+  const details = {
+    type: "scheduler-service",
+    binary: binary?.status ?? SCHEDULER_SERVICE_BINARY_STATUSES.unknown,
+    running: input.running,
+  };
+  if (binary?.status === SCHEDULER_SERVICE_BINARY_STATUSES.broken) {
+    return {
+      name,
+      status: "fail",
+      message: binary.reason ?? "服务定义指向的 node / roll 入口已不存在",
+      fix: `运行 \`${SCHEDULER_SERVICE_RESTART_COMMAND}\` 用当前 node / roll 重装`,
+      details,
+    };
+  }
+  if (binary?.status === SCHEDULER_SERVICE_BINARY_STATUSES.outdated) {
+    return {
+      name,
+      status: "warn",
+      message: binary.reason ?? "服务定义与当前 roll 不一致",
+      fix: `运行 \`${SCHEDULER_SERVICE_RESTART_COMMAND}\`（有定时任务运行时会拒绝，可等待或加 --force）`,
+      details,
+    };
+  }
+  if (binary === undefined || binary.status === SCHEDULER_SERVICE_BINARY_STATUSES.unknown) {
+    return {
+      name,
+      status: "warn",
+      message: binary?.reason ?? "service metadata 未记录安装时的 node / roll 入口",
+      fix: `运行 \`${SCHEDULER_SERVICE_RESTART_COMMAND}\` 重装以记录并检测二进制`,
+      details,
+    };
+  }
+  if (!input.running) {
+    return {
+      name,
+      status: "warn",
+      message: `已安装（roll v${binary.current.rollVersion}）但 daemon 未运行`,
+      fix: "运行 `roll schedule service status` 查看服务状态与日志",
+      details,
+    };
+  }
+  return {
+    name,
+    status: "ok",
+    message: `已安装并运行（roll v${binary.recorded?.rollVersion ?? binary.current.rollVersion}）`,
+    details,
+  };
 }

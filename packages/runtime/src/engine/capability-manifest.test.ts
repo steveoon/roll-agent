@@ -10,11 +10,14 @@ import {
   CAPABILITY_SESSION_EXEC_LIFECYCLES,
   CAPABILITY_TOOL_ROLES,
   CAPABILITY_TOOL_SOURCE_KINDS,
+  CAPABILITY_TURN_ORIGIN_KINDS,
   buildEffectiveCapabilityTurnContext,
   buildEffectiveCapabilityManifest,
   createSafeCapabilitySnapshot,
   findCapabilityToolId,
+  isProcessBoundHostMode,
   listCapabilityToolIds,
+  shouldOfferAgentInstall,
 } from "./capability-manifest.ts";
 
 test("effective capability manifest derives names and schemas from the final toolset", () => {
@@ -455,4 +458,45 @@ test("safe capability snapshot redacts structured CJK secret keys without hiding
     description: "preserve token budget",
     type: "integer",
   });
+});
+
+test("background host mode 与 one-shot 同属进程绑定，且不提供 agent-install", () => {
+  assert.equal(CAPABILITY_HOST_MODES.background, "background");
+  assert.equal(isProcessBoundHostMode(CAPABILITY_HOST_MODES.background), true);
+  assert.equal(isProcessBoundHostMode(CAPABILITY_HOST_MODES.oneShot), true);
+  assert.equal(isProcessBoundHostMode(CAPABILITY_HOST_MODES.interactive), false);
+  assert.equal(shouldOfferAgentInstall(CAPABILITY_HOST_MODES.background), false);
+  assert.equal(shouldOfferAgentInstall(CAPABILITY_HOST_MODES.interactive), true);
+});
+
+test("turn origin 进入 turn context 与 safe snapshot，并截断超长字符串", () => {
+  const manifest = buildEffectiveCapabilityManifest({
+    tools: {},
+    toolRoles: {},
+    resolveRoute: () => undefined,
+    skills: [],
+    agentCount: 0,
+    profile: "posix",
+    cwd: "/workspace",
+    platform: "linux",
+    hostMode: CAPABILITY_HOST_MODES.background,
+  });
+  const origin = {
+    kind: CAPABILITY_TURN_ORIGIN_KINDS.scheduled,
+    scheduleId: "sched-1",
+    invocationId: "inv-1",
+    scheduledFor: "2026-08-25T09:00:00.000Z",
+    unattended: true,
+  } as const;
+  const context = buildEffectiveCapabilityTurnContext(manifest, { origin });
+  assert.equal(context.version, 2);
+  assert.deepEqual(context.dynamic.origin, origin);
+  const snapshot = createSafeCapabilitySnapshot(manifest, context);
+  assert.deepEqual(snapshot.turnContext?.dynamic.origin, origin);
+  const long = buildEffectiveCapabilityTurnContext(manifest, {
+    origin: { ...origin, scheduleId: "x".repeat(600) },
+  });
+  const longSnapshot = createSafeCapabilitySnapshot(manifest, long);
+  assert.ok((longSnapshot.turnContext?.dynamic.origin?.scheduleId.length ?? 0) < 600);
+  assert.equal(buildEffectiveCapabilityTurnContext(manifest).dynamic.origin, undefined);
 });

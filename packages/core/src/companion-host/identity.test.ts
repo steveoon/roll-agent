@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { createCompanionUserIdentityCheck } from "./identity.ts";
+import { createCompanionUserIdentityCheck, parseWindowsUserSid } from "./identity.ts";
 import type { ProcessInvocation, ProcessResult, ProcessRunner } from "./process-runner.ts";
 
 test("macOS Companion identity rejects root", async () => {
@@ -46,3 +46,29 @@ class IdentityRunner implements ProcessRunner {
     return { code: 0, stdout: this.stdout, stderr: "" };
   }
 }
+
+test("parseWindowsUserSid 从 whoami csv 输出提取并大写 SID", () => {
+  assert.equal(
+    parseWindowsUserSid('"DESKTOP\\tester","s-1-5-21-1111-2222-3333-1001"\r\n'),
+    "S-1-5-21-1111-2222-3333-1001",
+  );
+  assert.equal(parseWindowsUserSid("garbage"), undefined);
+  assert.equal(parseWindowsUserSid(""), undefined);
+  assert.equal(
+    parseWindowsUserSid('"S-1-2-3\\tester","S-1-5-21-1111-2222-3333-1001"\r\n'),
+    "S-1-5-21-1111-2222-3333-1001",
+  );
+  assert.equal(
+    parseWindowsUserSid('"DESKTOP\\s-1-5-x","S-1-5-21-1111-2222-3333-1001"\r\n'),
+    "S-1-5-21-1111-2222-3333-1001",
+  );
+  assert.equal(parseWindowsUserSid('"S-1-5-21-1-2-3-1001","DESKTOP\\tester"'), undefined);
+  assert.equal(
+    parseWindowsUserSid('"DESKTOP\\tester","S-1-5-21-1-2-3-1001"\r\n\r\n'),
+    "S-1-5-21-1-2-3-1001",
+  );
+  assert.equal(
+    parseWindowsUserSid('"User Name","SID"\r\n"DESKTOP\\t","S-1-5-21-7"\r\n'),
+    "S-1-5-21-7",
+  );
+});

@@ -67,6 +67,7 @@ interface RollAgentManifest {
   start?: {
     command?: string;
     args?: readonly string[];
+    maxBufferSize?: number;
   };
   endpoint?: {
     url?: string;
@@ -314,10 +315,16 @@ function resolveTransport(meta: Readonly<Record<string, string>>): AgentTranspor
     throw new Error(`Invalid roll-command in SKILL.md`);
   }
 
-  if (args.length > 0) {
-    return { type: "stdio", command: executable, args };
-  }
-  return { type: "stdio", command: executable };
+  const maxBufferSize = parseMaxBufferSize(
+    meta["roll-max-buffer-size"],
+    `SKILL.md metadata "roll-max-buffer-size"`,
+  );
+  return {
+    type: "stdio",
+    command: executable,
+    ...(args.length > 0 ? { args } : {}),
+    ...(maxBufferSize !== undefined ? { maxBufferSize } : {}),
+  };
 }
 
 function readRollAgentManifest(agentDir: string): RollAgentManifest | undefined {
@@ -353,10 +360,15 @@ function readRollAgentManifest(agentDir: string): RollAgentManifest | undefined 
   if (isJsonRecord(rollAgent["start"])) {
     const command = readString(rollAgent["start"]["command"]);
     const args = normalizeStringArray(rollAgent["start"]["args"]);
-    if (command || args) {
+    const maxBufferSize = parseMaxBufferSize(
+      rollAgent["start"]["maxBufferSize"],
+      "package.json#rollAgent.start.maxBufferSize",
+    );
+    if (command || args || maxBufferSize !== undefined) {
       manifest.start = {
         ...(command ? { command } : {}),
         ...(args ? { args } : {}),
+        ...(maxBufferSize !== undefined ? { maxBufferSize } : {}),
       };
     }
   }
@@ -402,8 +414,14 @@ function resolveRuntimeFromManifest(manifest: RollAgentManifest): {
     }
 
     const args = manifest.start?.args;
+    const maxBufferSize = manifest.start?.maxBufferSize;
     return {
-      transport: args ? { type: "stdio", command, args } : { type: "stdio", command },
+      transport: {
+        type: "stdio",
+        command,
+        ...(args ? { args } : {}),
+        ...(maxBufferSize !== undefined ? { maxBufferSize } : {}),
+      },
       runtime: { ownership: "on-demand" },
     };
   }
@@ -502,6 +520,22 @@ function sameTransport(left: AgentTransport, right: AgentTransport): boolean {
 
 function readString(value: unknown): string | undefined {
   return typeof value === "string" && value.length > 0 ? value : undefined;
+}
+
+function isPositiveInteger(value: unknown): value is number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value > 0;
+}
+
+function parseMaxBufferSize(value: unknown, label: string): number | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+
+  const candidate = typeof value === "string" && /^\d+$/.test(value) ? Number(value) : value;
+  if (!isPositiveInteger(candidate)) {
+    throw new Error(`${label} must be a positive integer number of bytes`);
+  }
+  return candidate;
 }
 
 function normalizeStringArray(value: unknown): readonly string[] | undefined {

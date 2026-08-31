@@ -44,6 +44,7 @@ export interface RunBashOptions {
   readonly env?: NodeJS.ProcessEnv;
   readonly abortSignal?: AbortSignal;
   readonly onDelta?: (stream: BashStreamName, delta: string) => void;
+  readonly onSpawn?: (child: ChildProcess) => void;
 }
 
 function errorMessage(error: unknown): string {
@@ -86,8 +87,17 @@ export function runBashCommand(
   options: RunBashOptions,
   deps: RunBashCommandDeps = DEFAULT_RUN_BASH_COMMAND_DEPS,
 ): Promise<BashExecResult> {
-  const { command, workdir, timeoutMs, maxCaptureBytes, profile, env, abortSignal, onDelta } =
-    options;
+  const {
+    command,
+    workdir,
+    timeoutMs,
+    maxCaptureBytes,
+    profile,
+    env,
+    abortSignal,
+    onDelta,
+    onSpawn,
+  } = options;
 
   return new Promise<BashExecResult>((resolve) => {
     if (abortSignal?.aborted) {
@@ -108,6 +118,9 @@ export function runBashCommand(
     } catch (error) {
       resolve(spawnErrorResult(errorMessage(error), timeoutMs));
       return;
+    }
+    if (child.pid !== undefined) {
+      onSpawn?.(child);
     }
 
     const pipeCapability = profile.pipeCapability?.().capability ?? "none";

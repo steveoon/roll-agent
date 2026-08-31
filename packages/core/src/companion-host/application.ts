@@ -26,6 +26,7 @@ import {
 import { createCompanionUserIdentityCheck, type CompanionUserIdentityCheck } from "./identity.ts";
 import { createCompanionPaths, type CompanionPaths } from "./paths.ts";
 import {
+  companionServiceIdentity,
   createPlatformServiceController,
   type CompanionServiceController,
   type CompanionServiceStatus,
@@ -380,7 +381,10 @@ export function createDefaultCompanionApplication(
     configStore: new FileCompanionConfigStore(paths.configPath),
     credentialStore,
     enrollmentClient: new OfficialDeviceEnrollmentClient(),
-    serviceController: createPlatformServiceController({ paths, invocation, platform }),
+    serviceController: createPlatformServiceController({
+      identity: companionServiceIdentity(paths, invocation),
+      platform,
+    }),
     invocation,
     logger,
     sessionFactory: new DefaultCompanionSessionFactory({ invocation }),

@@ -20,6 +20,7 @@ __pycache__/
 .claude/scheduled_tasks.lock
 .agents/skills/roll-zhipin-unread-reply
 .agents/skills/benchmark-code-review
+.agents/skills/roll-release-changelog
 
 # Smart Reply Agent 业务数据（含敏感信息）
 agents/smart-reply/data/brand-config.json
@@ -32,3 +33,6 @@ roll.config.yaml.bak.*
 
 # 本地机制说明页（mechanism-explainer 单文件 HTML，不随仓库分发）
 docs/*-explained.html
+
+# Superpowers 过程文档（spec / plan）只留本地，不进仓库
+docs/superpowers/

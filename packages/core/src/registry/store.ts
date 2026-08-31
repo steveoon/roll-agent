@@ -347,7 +347,13 @@ function normalizeTransport(value: unknown): AgentTransport | undefined {
     }
 
     const args = normalizeStringArray(value["args"]);
-    return args ? { type, command, args } : { type, command };
+    const maxBufferSize = value["maxBufferSize"];
+    return {
+      type,
+      command,
+      ...(args ? { args } : {}),
+      ...(isPositiveInteger(maxBufferSize) ? { maxBufferSize } : {}),
+    };
   }
 
   if (type === "streamable-http") {
@@ -544,6 +550,10 @@ function normalizeStringArray(value: unknown): readonly string[] | undefined {
 
 function readString(value: unknown): string | undefined {
   return typeof value === "string" && value.length > 0 ? value : undefined;
+}
+
+function isPositiveInteger(value: unknown): value is number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value > 0;
 }
 
 function readBoolean(value: unknown): boolean | undefined {

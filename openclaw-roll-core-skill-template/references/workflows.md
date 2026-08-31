@@ -16,6 +16,7 @@
 - [System Diagnostics](#system-diagnostics)
 - [Env Drift Detection](#env-drift-detection)
 - [Tool Call Failure Triage](#tool-call-failure-triage)
+- [Scheduled Tasks](#scheduled-tasks)
 
 ## Inventory And Preflight
 
@@ -516,3 +517,92 @@ Diagnose in this order:
 2. Does `roll agent info` report missing env?
 3. Is the agent a persistent service that must be healthy before tool calls?
 4. Does the target subagent's own doc still advertise the same tool name and input schema?
+
+## Scheduled Tasks
+
+Goal: run a bounded unattended `roll chat` round on a fixed interval and keep the ledger healthy.
+
+1. Preflight (same machine and `--cwd` the schedule will use):
+
+   ```bash
+   roll doctor --json
+   roll chat "hi" --json          # must return completed
+   ```
+
+2. Authorize before registering. Decide which tools the round may call without a human and put them in the config that `--cwd` resolves to:
+
+   ```yaml
+   runtime:
+     approval:
+       default: guarded
+       overrides:
+         browser-use-agent.zhipin_send_reply: auto   # example key format: <agent>.<tool>
+   ```
+
+   Anything left at `confirm` is denied during the run and reported in `pendingActions`; it does not block the schedule.
+
+3. Register with a bounded prompt and capture the id:
+
+   ```bash
+   roll schedule add "回复最多 20 条未读消息，其余留到下一轮；不要调用需要确认的工具" \
+     --name unread-reply --every 30m --cwd /abs/workspace --json
+   ```
+
+   Keep each round well under the run cap (1 hour by default); use the interval, not one long run, to drain a backlog. If a round genuinely needs longer, set the cap per schedule with `--max-run 6h` (60 s to 24 h) instead of asking for a global change.
+
+4. Test synchronously before trusting the daemon:
+
+   ```bash
+   roll schedule run-now <id> --inline --json
+   ```
+
+   - `status: completed` -> proceed.
+   - `status: needs_confirmation` -> read `pendingActions`; either add overrides (then `roll schedule resume <id>` to re-record the authority digest) or rewrite the prompt to avoid those tools.
+   - exit 1 with `error` -> fix the cause; a manual failure does not pause the schedule.
+   - This inline attempt obeys the schedule's `--max-run` even without a daemon. On timeout it uses the same process-tree stop sequence as the daemon and exits 1.
+
+5. Make triggers fire without a terminal:
+
+   ```bash
+   roll schedule service install
+   roll schedule service status --json      # phase installed, daemon running
+   ```
+
+   Stop any `roll schedule daemon --foreground` process using the same data-dir before installing.
+   Install is successful only after the managed daemon reports the matching service generation;
+   `phase: installing` means startup or cleanup is incomplete and new claims remain blocked. Fix the
+   reported cause, then rerun `service install` or `service restart` to recover.
+
+   Use `roll schedule daemon --foreground` only for interactive debugging.
+
+6. Monitor:
+
+   ```bash
+   roll schedule status --json              # daemon.liveness, active/paused counts, nextWakeAt
+   roll schedule list --json                # per-schedule status, nextRunAt, lastError
+   roll schedule runs <id> --json           # recent invocations; threadId reopens with roll chat --session
+   ```
+
+7. Recover a `paused` schedule by reading `lastError`:
+
+   | `lastError` says | Meaning | Action |
+   | --- | --- | --- |
+   | 权限边界已变化 / authority drift | `runtime.approval` or `runtime.shell` changed since `add` | Confirm the new boundary with a human, then `roll schedule resume <id>` (re-authorizes with current config) |
+   | retry budget exhausted / exec error | 3 consecutive failed attempts on one trigger | Fix the cause, verify with `run-now --inline --json`, then `resume` |
+   | `invocation … 运行超过 … ms` | The round exceeded the schedule's run cap | Shrink the prompt's per-round scope or re-register with a larger `--max-run`, verify with `run-now --inline --json`, then `resume` |
+   | `exec 进程退出 code=…，未写入执行结果` | Exec was killed or crashed before writing a result | Fix the crash or external stop, verify with `run-now --inline --json`, then `resume` |
+   | tree unsettled (`treeUnsettled: true`) | Exec finished but child processes survived | `roll schedule cancel <invocation-id> --kill`; use `--abandon` only if liveness is `unknown` and a human accepts the risk |
+
+8. Teardown:
+
+   ```bash
+   roll schedule cancel <invocation-id> --kill   # only if a run is live
+   roll schedule remove <id>
+   roll schedule service uninstall               # stops the daemon; do it while no run is live
+   ```
+
+Rules:
+
+- Never start `daemon --foreground` or `service install` from batch mode or a tool loop.
+- After upgrading roll or changing the Node install, run `roll schedule service restart` (refuses while a run is live; `--force` interrupts daemon-owned runs, while `run-now --inline` continues). `roll update` does this automatically after Agent maintenance when no run is live, preserves the installed scheduler data-dir, and prints a hint otherwise. Check `roll schedule service status --json` -> `binary.status` or the `Scheduler service` line of `roll doctor --json` when a schedule stops firing after a reboot.
+- Do not use `--abandon` as a shortcut for `remove` or `cancel`; it leaves processes running.

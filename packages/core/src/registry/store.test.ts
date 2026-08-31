@@ -305,3 +305,43 @@ describe("AgentStore", () => {
     assert.equal(agent?.runtime.ownership, "external-managed");
   });
 });
+
+describe("AgentStore stdio maxBufferSize persistence", () => {
+  let tmpDir: string;
+
+  beforeEach(() => {
+    tmpDir = makeTmpDir();
+  });
+
+  afterEach(() => {
+    rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it("round-trips a declared maxBufferSize through the store file", () => {
+    const transport = { type: "stdio", command: "node", maxBufferSize: 33_554_432 } as const;
+    new AgentStore(tmpDir).add({
+      ...makeAgent("big-output"),
+      transport,
+      runtime: createDefaultRuntimeForTransport(transport),
+    });
+
+    const reloaded = new AgentStore(tmpDir).findByName("big-output");
+
+    assert.deepEqual(reloaded?.transport, transport);
+  });
+
+  it("drops a malformed maxBufferSize when reading the store file", () => {
+    const store = new AgentStore(tmpDir);
+    store.add(makeAgent("big-output"));
+    const storePath = resolve(tmpDir, "agents.json");
+    const raw = JSON.parse(readFileSync(storePath, "utf-8")) as {
+      agents: Array<{ transport: Record<string, unknown> }>;
+    };
+    raw.agents[0]!.transport["maxBufferSize"] = "lots";
+    writeFileSync(storePath, JSON.stringify(raw), "utf-8");
+
+    const reloaded = new AgentStore(tmpDir).findByName("big-output");
+
+    assert.deepEqual(reloaded?.transport, { type: "stdio", command: "node" });
+  });
+});

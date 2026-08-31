@@ -134,6 +134,7 @@ function createStdioTransport(
     cwd,
     env: buildStdioChildEnv(env),
     stderr: "pipe",
+    ...(transport.maxBufferSize !== undefined ? { maxBufferSize: transport.maxBufferSize } : {}),
   });
   pipeFilteredStdioChildStderr(stdioTransport);
   return stdioTransport as Transport;

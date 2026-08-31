@@ -17,7 +17,13 @@ import type { LanguageModelV4CallOptions, LanguageModelV4StreamPart } from "@ai-
 import { ThreadStore } from "../store/thread-store.ts";
 import { DefaultToolPolicy } from "../policy/default-policy.ts";
 import type { SessionEvent } from "../types/events.ts";
-import { ConversationEngine, type AgentBootstrapIssue } from "./conversation-engine.ts";
+import {
+  ConversationEngine,
+  type AgentBootstrapIssue,
+  buildSessionBashSettings,
+  buildSessionExecSettings,
+} from "./conversation-engine.ts";
+import { CAPABILITY_HOST_MODES } from "./capability-manifest.ts";
 import type { ShellProfile } from "../bash/profile.ts";
 import { killProcessGroup } from "../bash/kill.ts";
 import { executeTranscriptTool } from "../tool-bridge/transcript-tool.ts";
@@ -4680,4 +4686,110 @@ test("ConversationEngine 按 config 构造 source 时把告警转给 onWorkspace
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test("resolveDynamicCapabilityContext 的 origin 会透传到 turn context", async () => {
+  const config = rollConfigSchema.parse({
+    llm: {
+      defaultProvider: "mock",
+      defaultModel: "default-model",
+      providers: { mock: { apiKey: "test" } },
+    },
+    ask: {},
+    agents: { dataDir: "/tmp/roll-engine-test" },
+  });
+  const engine = new ConversationEngine({
+    config,
+    model: new MockLanguageModelV4({
+      doStream: async () => ({
+        stream: simulateReadableStream<LanguageModelV4StreamPart>({
+          chunks: engineTextStep("ok"),
+          initialDelayInMs: null,
+          chunkDelayInMs: null,
+        }),
+      }),
+    }),
+    sources: [],
+    skillLibrary: null,
+    workspaceInstructions: null,
+    hostMode: CAPABILITY_HOST_MODES.background,
+    resolveDynamicCapabilityContext: () => ({
+      origin: {
+        kind: "scheduled",
+        scheduleId: "sched-1",
+        invocationId: "inv-1",
+        scheduledFor: "2026-08-25T09:00:00.000Z",
+        unattended: true,
+      },
+    }),
+  });
+  try {
+    const session = await engine.createSession();
+    await drain(session.send("hi"));
+    const context = session.getCapabilityTurnContext();
+    assert.equal(context?.version, 2);
+    assert.equal(context?.dynamic.origin?.invocationId, "inv-1");
+    assert.equal(context?.lifecycle.hostMode, CAPABILITY_HOST_MODES.background);
+  } finally {
+    await engine.dispose();
+  }
+});
+
+test("buildSessionBashSettings 只在提供 onCommandSpawn 时写入该字段", () => {
+  const config = rollConfigSchema.parse({
+    llm: {
+      defaultProvider: "mock",
+      defaultModel: "default-model",
+      providers: { mock: { apiKey: "test" } },
+    },
+    runtime: { model: "runtime-model" },
+    ask: {},
+    agents: { dataDir: "/tmp/roll-engine-test" },
+  });
+  const onCommandSpawn = () => {};
+  const withHook = buildSessionBashSettings({
+    config,
+    profile: powershellProfile,
+    env: { PATH: "/usr/bin" },
+    onCommandSpawn,
+  });
+  assert.equal(withHook.onCommandSpawn, onCommandSpawn);
+  assert.equal(withHook.profile, powershellProfile);
+  assert.deepEqual(withHook.env, { PATH: "/usr/bin" });
+  assert.equal(withHook.turnTimeoutMs, config.runtime.turnTimeoutMs);
+  const without = buildSessionBashSettings({
+    config,
+    profile: powershellProfile,
+    env: { PATH: "/usr/bin" },
+  });
+  assert.equal("onCommandSpawn" in without, false);
+});
+
+test("buildSessionExecSettings 只在提供 onCommandSpawn 时写入该字段", () => {
+  const config = rollConfigSchema.parse({
+    llm: {
+      defaultProvider: "mock",
+      defaultModel: "default-model",
+      providers: { mock: { apiKey: "test" } },
+    },
+    runtime: { model: "runtime-model" },
+    ask: {},
+    agents: { dataDir: "/tmp/roll-engine-test" },
+  });
+  const onCommandSpawn = () => {};
+  const withHook = buildSessionExecSettings({
+    config,
+    profile: powershellProfile,
+    env: { PATH: "/usr/bin" },
+    onCommandSpawn,
+  });
+  assert.equal(withHook.onCommandSpawn, onCommandSpawn);
+  assert.equal(withHook.maxSessions, config.runtime.shell.session.maxSessions);
+  assert.equal(withHook.bufferCapacity, config.runtime.shell.maxCaptureBytes);
+  const without = buildSessionExecSettings({
+    config,
+    profile: powershellProfile,
+    env: { PATH: "/usr/bin" },
+  });
+  assert.equal("onCommandSpawn" in without, false);
 });

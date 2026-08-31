@@ -294,4 +294,28 @@ describe("rollConfigSchema", () => {
     assert.equal(insufficientAgentBootstrapTimeout.success, false);
     assert.equal(excessiveAgentBootstrapTimeout.success, false);
   });
+  it("should default scheduler section", () => {
+    const result = rollConfigSchema.safeParse({
+      llm: { defaultProvider: "x", defaultModel: "y", providers: {} },
+      ask: {},
+      agents: { dataDir: "/tmp" },
+    });
+    assert.equal(result.success, true);
+    if (!result.success) {
+      return;
+    }
+    assert.equal(result.data.scheduler.dataDir, "~/.roll-agent/scheduler");
+    assert.equal(result.data.scheduler.maxSchedules, 50);
+    assert.equal(result.data.scheduler.maxConcurrentRuns, 2);
+  });
+
+  it("should reject scheduler max-concurrent-runs above 8", () => {
+    const result = rollConfigSchema.safeParse({
+      llm: { defaultProvider: "x", defaultModel: "y", providers: {} },
+      ask: {},
+      agents: { dataDir: "/tmp" },
+      scheduler: { maxConcurrentRuns: 9 },
+    });
+    assert.equal(result.success, false);
+  });
 });

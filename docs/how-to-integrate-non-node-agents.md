@@ -69,6 +69,7 @@ metadata:
 - `roll-command` 会被直接按空白拆分，不经过 shell 解释
 - 如果启动命令很复杂，建议写一个包装脚本，再把 `roll-command` 指向那个脚本
 - 非 Node Agent 的 `local-path` 场景，当前**最简单**的做法仍然是用 `SKILL.md metadata`
+- 单条 tool 结果可能超过 10 MiB 时，用 `roll-max-buffer-size`（字节，正整数）调高 stdio 读缓冲上限，例如 `roll-max-buffer-size: "33554432"`；未声明时沿用 MCP SDK 默认的 10 MiB，超限会直接断开连接。该字段只对 stdio 生效
 
 ### 注册与调用
 
@@ -170,6 +171,8 @@ roll agent add ./python-http-agent
   }
 }
 ```
+
+`start` 下可选 `"maxBufferSize": 33554432`（字节，正整数），语义与 SKILL.md 的 `roll-max-buffer-size` 相同。
 
 ### `external-managed streamable-http` 示例
 

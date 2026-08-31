@@ -72,6 +72,7 @@ export function CatalogEditor(props: CatalogEditorProps) {
           value={value}
           baselineValue={baselineValue}
           present={value !== undefined}
+          disabled={props.node.readOnly}
           onValue={(next) => props.onSet(props.path, next)}
           onUnset={() => props.onDelete(props.path)}
           onUndo={() =>
@@ -474,7 +475,7 @@ export function PrimitiveField({
       : `输入${node.title}`;
   return (
     <article
-      className={`primitive-field${present ? " is-persisted" : " is-inherited"}`}
+      className={`primitive-field${present ? " is-persisted" : " is-inherited"}${disabled ? " is-derived" : ""}`}
       data-config-path={validationPath(path)}
     >
       <div className="primitive-copy">
@@ -506,10 +507,16 @@ export function PrimitiveField({
           {...(invalidJsonDraft !== undefined ? { invalidJsonDraft } : {})}
           onInvalidJsonDraftChange={onInvalidJsonDraftChange}
         />
-        <small className="field-input-note">当前生效：{state.currentLabel}</small>
+        <small className="field-input-note">
+          {disabled
+            ? `当前生效：${state.currentLabel} · Web UI 不提供修改，请使用 roll config set 并按生效提示完成人工步骤`
+            : `当前生效：${state.currentLabel}`}
+        </small>
         <div className="field-meta-row">
-          <span className={`source-chip ${changed || present ? "persisted" : "default"}`}>
-            {changed ? "本轮已修改" : state.sourceLabel}
+          <span
+            className={`source-chip ${disabled ? "derived" : changed || present ? "persisted" : "default"}`}
+          >
+            {disabled ? "仅支持 CLI 修改" : changed ? "本轮已修改" : state.sourceLabel}
           </span>
           {(changed || present) && !disabled && (
             <button className="text-button" type="button" onClick={changed ? onUndo : onUnset}>

@@ -3,6 +3,7 @@ import { listConfigGuidanceEntries, type ConfigGuidanceEntry } from "./guidance.
 import type { RegisteredAgent } from "../types/agent.ts";
 import { DEFAULT_CONFIG } from "./defaults.ts";
 import { normalizeUserPath } from "./key-codec.ts";
+import { isRollConfigReadOnlyPath } from "./edit-policy.ts";
 import { rollConfigSchema } from "./schema.ts";
 import { isRollConfigSecretPath } from "./secret-policy.ts";
 
@@ -47,6 +48,7 @@ interface ConfigCatalogNodeBase {
   readonly defaultValue?: unknown;
   readonly widget: ConfigFieldWidget;
   readonly secret: boolean;
+  readonly readOnly: boolean;
 }
 
 export interface ConfigNumberConstraints {
@@ -258,6 +260,7 @@ function buildNodeBase(
     ...resolvedDefault,
     widget: "text",
     secret: isRollConfigSecretPath(path),
+    readOnly: isRollConfigReadOnlyPath(path),
   };
 }
 

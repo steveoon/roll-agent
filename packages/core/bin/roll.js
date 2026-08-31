@@ -3,6 +3,7 @@ import { spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { resolveCommandName, shouldEnableSqliteForCommand } from "./roll-bootstrap.mjs";
 
 async function sqliteAvailable() {
   try {
@@ -28,19 +29,18 @@ function hasWarningSuppression() {
   );
 }
 
-function resolveCommandName(argv) {
-  return argv.find((arg) => !arg.startsWith("-"));
-}
+const alreadyRespawned = process.env.ROLL_SQLITE_RESPAWNED === "1";
+delete process.env.ROLL_SQLITE_RESPAWNED;
 
 const commandName = resolveCommandName(process.argv.slice(2));
-const shouldEnableSqlite = commandName === "chat";
+const shouldEnableSqlite = shouldEnableSqliteForCommand(commandName);
 const hasSqliteFlag = hasExecFlag("--experimental-sqlite");
 const needsSqliteFlag = shouldEnableSqlite && !hasSqliteFlag && !(await sqliteAvailable());
 const needsTypeStripFlag = sourceTreeAvailable() && !hasExecFlag("--experimental-strip-types");
 const needsExperimentalWarningSuppression =
   shouldEnableSqlite && (needsSqliteFlag || hasSqliteFlag) && !hasWarningSuppression();
 
-if (!process.env.ROLL_SQLITE_RESPAWNED && (needsSqliteFlag || needsTypeStripFlag)) {
+if (!alreadyRespawned && (needsSqliteFlag || needsTypeStripFlag)) {
   const nodeFlags = [
     ...(needsExperimentalWarningSuppression ? ["--disable-warning=ExperimentalWarning"] : []),
     ...(needsSqliteFlag ? ["--experimental-sqlite"] : []),
@@ -51,7 +51,10 @@ if (!process.env.ROLL_SQLITE_RESPAWNED && (needsSqliteFlag || needsTypeStripFlag
     [...nodeFlags, process.argv[1], ...process.argv.slice(2)],
     { stdio: "inherit", env: { ...process.env, ROLL_SQLITE_RESPAWNED: "1" } },
   );
-  process.exit(result.status ?? 0);
+  if (result.signal) {
+    process.kill(process.pid, result.signal);
+  }
+  process.exit(result.status ?? 1);
 }
 
 await import("../dist/cli/index.js");

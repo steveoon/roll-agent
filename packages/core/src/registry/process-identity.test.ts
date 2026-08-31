@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { readFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { performance } from "node:perf_hooks";
 import test from "node:test";
 
 import {
@@ -9,6 +12,8 @@ import {
   PROCESS_START_TOKEN_VERIFICATION_REASONS,
   PROCESS_START_TOKEN_VERIFICATION_STATUSES,
   readProcessStartToken,
+  identityCommandTimeoutMs,
+  resolveTrustedWindowsPowerShellExecutables,
   verifyProcessStartToken,
 } from "./process-identity.ts";
 import type { ProcessStartToken } from "./process-identity.ts";
@@ -206,7 +211,7 @@ function runLegacyIdentityCommand(command: string, args: readonly string[]): str
       encoding: "utf-8",
       env: { ...process.env, LC_ALL: "C", LANG: "C" },
       shell: false,
-      timeout: 2_000,
+      timeout: identityCommandTimeoutMs(),
       windowsHide: true,
     });
     const stdout = result.stdout.trim();
@@ -225,3 +230,230 @@ function restoreTimeZone(timeZone: string | undefined): void {
     process.env.TZ = timeZone;
   }
 }
+
+test("Windows identity only uses absolute PowerShell paths under SystemRoot / ProgramFiles", () => {
+  const seen: string[] = [];
+  const exists = (path: string) => {
+    seen.push(path);
+    return true;
+  };
+  assert.deepEqual(
+    resolveTrustedWindowsPowerShellExecutables(
+      { SystemRoot: "C:\\Windows", ProgramFiles: "C:\\Program Files" },
+      exists,
+    ),
+    [
+      "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+      "C:\\Program Files\\PowerShell\\7\\pwsh.exe",
+    ],
+  );
+  assert.deepEqual(seen, [
+    "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+    "C:\\Program Files\\PowerShell\\7\\pwsh.exe",
+  ]);
+  assert.deepEqual(
+    resolveTrustedWindowsPowerShellExecutables({ SystemRoot: "Windows" }, () => true),
+    [],
+  );
+  assert.deepEqual(
+    resolveTrustedWindowsPowerShellExecutables({ SystemRoot: "C:\\Windows" }, () => false),
+    [],
+  );
+  assert.deepEqual(
+    resolveTrustedWindowsPowerShellExecutables({ PATH: "C:\\evil" }, () => true),
+    [],
+  );
+});
+
+test("identity command timeout is 8 s on Windows and 2 s elsewhere", () => {
+  assert.equal(identityCommandTimeoutMs("win32"), 8_000);
+  assert.equal(identityCommandTimeoutMs("darwin"), 2_000);
+  assert.equal(identityCommandTimeoutMs("linux"), 2_000);
+  assert.deepEqual(
+    resolveTrustedWindowsPowerShellExecutables({ WINDIR: "D:\\Win" }, () => true),
+    ["D:\\Win\\System32\\WindowsPowerShell\\v1.0\\powershell.exe"],
+  );
+});
+
+test(
+  "Windows identity ignores a PATH-resolved powershell.exe and runs the trusted SystemRoot executable",
+  { skip: process.platform === "win32" },
+  () => {
+    const dir = mkdtempSync(join(tmpdir(), "roll-trusted-powershell-"));
+    const shadowDir = join(dir, "shadow");
+    mkdirSync(shadowDir);
+    const trustedName = [
+      "C:\\Windows",
+      "System32",
+      "WindowsPowerShell",
+      "v1.0",
+      "powershell.exe",
+    ].join("\\");
+    const script = (ticks: string) => `#!/bin/sh\necho ${ticks}\n`;
+    writeFileSync(join(shadowDir, "powershell.exe"), script("111111111111111111"), { mode: 0o755 });
+    writeFileSync(join(shadowDir, "pwsh.exe"), script("222222222222222222"), { mode: 0o755 });
+    writeFileSync(join(dir, trustedName), script("637000000000000000"), { mode: 0o755 });
+    const originalCwd = process.cwd();
+    const platformDescriptor = Object.getOwnPropertyDescriptor(process, "platform");
+    const envKeys = [
+      "PATH",
+      "SystemRoot",
+      "SYSTEMROOT",
+      "WINDIR",
+      "ProgramFiles",
+      "PROGRAMFILES",
+    ] as const;
+    const originalEnv = Object.fromEntries(envKeys.map((key) => [key, process.env[key]]));
+    try {
+      process.chdir(dir);
+      for (const key of envKeys) {
+        delete process.env[key];
+      }
+      process.env.PATH = `${shadowDir}:${dir}:${originalEnv.PATH ?? ""}`;
+      process.env.SystemRoot = "C:\\Windows";
+      Object.defineProperty(process, "platform", { configurable: true, value: "win32" });
+      assert.equal(
+        readProcessStartToken(process.pid),
+        `pst-v2:${createHash("sha256").update("win32-v2:637000000000000000").digest("hex")}`,
+      );
+    } finally {
+      if (platformDescriptor !== undefined) {
+        Object.defineProperty(process, "platform", platformDescriptor);
+      }
+      process.chdir(originalCwd);
+      for (const key of envKeys) {
+        const value = originalEnv[key];
+        if (value === undefined) {
+          delete process.env[key];
+        } else {
+          process.env[key] = value;
+        }
+      }
+      rmSync(dir, { recursive: true, force: true });
+    }
+  },
+);
+
+test(
+  "Windows identity falls back to trusted PowerShell 7 when Windows PowerShell cannot run",
+  { skip: process.platform === "win32" },
+  () => {
+    const dir = mkdtempSync(join(tmpdir(), "roll-trusted-powershell-fallback-"));
+    const windowsPowerShell = [
+      "C:\\Windows",
+      "System32",
+      "WindowsPowerShell",
+      "v1.0",
+      "powershell.exe",
+    ].join("\\");
+    const powerShell7 = ["C:\\Program Files", "PowerShell", "7", "pwsh.exe"].join("\\");
+    writeFileSync(join(dir, windowsPowerShell), "#!/bin/sh\nexit 1\n", { mode: 0o755 });
+    writeFileSync(join(dir, powerShell7), "#!/bin/sh\necho 637000000000000000\n", {
+      mode: 0o755,
+    });
+    const originalCwd = process.cwd();
+    const platformDescriptor = Object.getOwnPropertyDescriptor(process, "platform");
+    const envKeys = [
+      "PATH",
+      "SystemRoot",
+      "SYSTEMROOT",
+      "WINDIR",
+      "ProgramFiles",
+      "PROGRAMFILES",
+    ] as const;
+    const originalEnv = Object.fromEntries(envKeys.map((key) => [key, process.env[key]]));
+    try {
+      process.chdir(dir);
+      for (const key of envKeys) {
+        delete process.env[key];
+      }
+      process.env.PATH = `${dir}:${originalEnv.PATH ?? ""}`;
+      process.env.SystemRoot = "C:\\Windows";
+      process.env.ProgramFiles = "C:\\Program Files";
+      Object.defineProperty(process, "platform", { configurable: true, value: "win32" });
+
+      assert.equal(
+        readProcessStartToken(process.pid),
+        `pst-v2:${createHash("sha256").update("win32-v2:637000000000000000").digest("hex")}`,
+      );
+    } finally {
+      if (platformDescriptor !== undefined) {
+        Object.defineProperty(process, "platform", platformDescriptor);
+      }
+      process.chdir(originalCwd);
+      for (const key of envKeys) {
+        const value = originalEnv[key];
+        if (value === undefined) {
+          delete process.env[key];
+        } else {
+          process.env[key] = value;
+        }
+      }
+      rmSync(dir, { recursive: true, force: true });
+    }
+  },
+);
+
+test(
+  "Windows identity shares one 8 s deadline across trusted PowerShell candidates",
+  { skip: process.platform === "win32" },
+  (t) => {
+    const dir = mkdtempSync(join(tmpdir(), "roll-trusted-powershell-deadline-"));
+    const windowsPowerShell = [
+      "C:\\Windows",
+      "System32",
+      "WindowsPowerShell",
+      "v1.0",
+      "powershell.exe",
+    ].join("\\");
+    const powerShell7 = ["C:\\Program Files", "PowerShell", "7", "pwsh.exe"].join("\\");
+    writeFileSync(join(dir, windowsPowerShell), "#!/bin/sh\nexit 1\n", { mode: 0o755 });
+    writeFileSync(join(dir, powerShell7), "#!/bin/sh\necho 637000000000000000\n", {
+      mode: 0o755,
+    });
+    const originalCwd = process.cwd();
+    const platformDescriptor = Object.getOwnPropertyDescriptor(process, "platform");
+    const envKeys = [
+      "PATH",
+      "SystemRoot",
+      "SYSTEMROOT",
+      "WINDIR",
+      "ProgramFiles",
+      "PROGRAMFILES",
+    ] as const;
+    const originalEnv = Object.fromEntries(envKeys.map((key) => [key, process.env[key]]));
+    let clockRead = 0;
+    t.mock.method(performance, "now", () => {
+      const readings = [0, 1, 8_001] as const;
+      const reading = readings[Math.min(clockRead, readings.length - 1)];
+      clockRead += 1;
+      return reading ?? 8_001;
+    });
+    try {
+      process.chdir(dir);
+      for (const key of envKeys) {
+        delete process.env[key];
+      }
+      process.env.PATH = `${dir}:${originalEnv.PATH ?? ""}`;
+      process.env.SystemRoot = "C:\\Windows";
+      process.env.ProgramFiles = "C:\\Program Files";
+      Object.defineProperty(process, "platform", { configurable: true, value: "win32" });
+
+      assert.equal(readProcessStartToken(process.pid), undefined);
+    } finally {
+      if (platformDescriptor !== undefined) {
+        Object.defineProperty(process, "platform", platformDescriptor);
+      }
+      process.chdir(originalCwd);
+      for (const key of envKeys) {
+        const value = originalEnv[key];
+        if (value === undefined) {
+          delete process.env[key];
+        } else {
+          process.env[key] = value;
+        }
+      }
+      rmSync(dir, { recursive: true, force: true });
+    }
+  },
+);
