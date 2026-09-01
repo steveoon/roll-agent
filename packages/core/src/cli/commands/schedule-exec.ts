@@ -1,6 +1,10 @@
 import { defineCommand } from "citty";
 import { loadConfig } from "../../config/loader.ts";
-import { takeScheduleExecEnv } from "../../scheduler-host/exec-env.ts";
+import {
+  applySchedulerConfigEnv,
+  prependExecDirToPath,
+  takeScheduleExecEnv,
+} from "../../scheduler-host/exec-env.ts";
 import {
   EXECUTE_INVOCATION_KINDS,
   INVOCATION_TREE_TEARDOWN_PHASES,
@@ -61,6 +65,7 @@ export default defineCommand({
   async run({ args }) {
     await runScheduleCommand(async () => {
       const execEnv = takeScheduleExecEnv(process.env);
+      prependExecDirToPath(process.env, process.execPath, process.platform);
       const runtime = await loadRuntime();
       const store = openScheduleStore(undefined, runtime, { dataDir: execEnv.dataDir });
       const stop = installStopSignals(
@@ -87,6 +92,7 @@ export default defineCommand({
         const persistedGroups = previous?.treeTrackedGroups ?? [];
         const ledger = new ProcessGroupLedger();
         const { config } = loadConfig();
+        applySchedulerConfigEnv(process.env, config.scheduler.env);
         const result = await executeInvocation({
           store,
           invocationId: args.invocation,

@@ -339,6 +339,60 @@ agents:
     delete process.env["ROLL_TEST_API_KEY"];
   });
 
+  it("falls back to secrets.env when process.env lacks the placeholder variable", () => {
+    delete process.env["ROLL_SECRETS_FB_KEY"];
+    const secretsDir = resolve(homeDir, ".roll-agent");
+    mkdirSync(secretsDir, { recursive: true });
+    writeFileSync(resolve(secretsDir, "secrets.env"), "ROLL_SECRETS_FB_KEY=secret-value\n");
+    const yaml = `
+llm:
+  providers:
+    qwen:
+      api-key: \${ROLL_SECRETS_FB_KEY}
+ask: {}
+`;
+    writeFileSync(resolve(tmpDir, "roll.config.yaml"), yaml);
+    const { config } = loadConfig({ cwd: tmpDir });
+    assert.equal(config.llm.providers["qwen"]?.apiKey, "secret-value");
+    delete process.env["ROLL_SECRETS_FB_KEY"];
+  });
+
+  it("process.env non-empty value wins over secrets.env", () => {
+    process.env["ROLL_SECRETS_FB_KEY"] = "from-process";
+    const secretsDir = resolve(homeDir, ".roll-agent");
+    mkdirSync(secretsDir, { recursive: true });
+    writeFileSync(resolve(secretsDir, "secrets.env"), "ROLL_SECRETS_FB_KEY=secret-value\n");
+    const yaml = `
+llm:
+  providers:
+    qwen:
+      api-key: \${ROLL_SECRETS_FB_KEY}
+ask: {}
+`;
+    writeFileSync(resolve(tmpDir, "roll.config.yaml"), yaml);
+    const { config } = loadConfig({ cwd: tmpDir });
+    assert.equal(config.llm.providers["qwen"]?.apiKey, "from-process");
+    delete process.env["ROLL_SECRETS_FB_KEY"];
+  });
+
+  it("empty process.env value falls back to secrets.env", () => {
+    process.env["ROLL_SECRETS_FB_KEY"] = "";
+    const secretsDir = resolve(homeDir, ".roll-agent");
+    mkdirSync(secretsDir, { recursive: true });
+    writeFileSync(resolve(secretsDir, "secrets.env"), "ROLL_SECRETS_FB_KEY=secret-value\n");
+    const yaml = `
+llm:
+  providers:
+    qwen:
+      api-key: \${ROLL_SECRETS_FB_KEY}
+ask: {}
+`;
+    writeFileSync(resolve(tmpDir, "roll.config.yaml"), yaml);
+    const { config } = loadConfig({ cwd: tmpDir });
+    assert.equal(config.llm.providers["qwen"]?.apiKey, "secret-value");
+    delete process.env["ROLL_SECRETS_FB_KEY"];
+  });
+
   it("should find config in parent directory", () => {
     const childDir = resolve(tmpDir, "sub", "deep");
     mkdirSync(childDir, { recursive: true });

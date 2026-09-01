@@ -214,6 +214,20 @@ export const CONFIG_GUIDANCE_ENTRIES = [
     example: `scheduler:\n  max-concurrent-runs: ${DEFAULT_CONFIG.scheduler.maxConcurrentRuns}`,
   },
   {
+    path: "scheduler.env",
+    title: "定时任务运行环境变量",
+    purpose: `为定时任务的运行环境补充环境变量（代理、额外 PATH 等）。调度服务由 launchd / 计划任务启动，不会加载交互终端的环境变量；roll 已自动把自身 node 所在目录加进 PATH，其余缺失变量在这里声明。值支持 \`\${ENV_VAR}\` 占位符（含 secrets.env 回退）。`,
+    defaultBehavior: "默认为空；声明的变量在每次任务运行前合入进程环境，同名覆盖。",
+    example: "scheduler:\n  env:\n    HTTP_PROXY: http://127.0.0.1:7890",
+  },
+  {
+    path: "scheduler.env.<var-name>",
+    title: "定时任务环境变量条目",
+    purpose: "单个注入到定时任务运行环境的变量，键为变量名、值为变量值。",
+    defaultBehavior: "默认没有条目；声明后在每次任务运行前合入进程环境，同名覆盖。",
+    example: "scheduler:\n  env:\n    HTTP_PROXY: http://127.0.0.1:7890",
+  },
+  {
     path: "runtime.context-window",
     title: "上下文窗口",
     purpose: "手动声明当前 Chat 模型的上下文 token 容量，用于计算自动压缩触发点。",

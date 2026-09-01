@@ -438,6 +438,42 @@ roll schedule status
 
 输出中的“日志”字段指向 `scheduler.log`。
 
+### 定时任务报「apiKey 仍是未解析的环境变量占位符」
+
+调度服务由 launchd（macOS）/ schtasks（Windows）启动，不会加载你的 `.zshrc`，
+因此 `roll.config.yaml` 里的 `${ENV_VAR}` 占位符在交互终端里能解析、在定时任务里却解析失败。
+
+1. 运行 `roll doctor`，查看「Secrets 与占位符解析」检查项列出的未解析变量清单；
+2. 把缺失的值写入 `~/.roll-agent/secrets.env`（`chmod 600`，每行 `KEY=VALUE`）；
+3. 占位符解析发生在每次 invocation 子进程启动时，下一次触发即生效，无需重启服务；
+   on-demand Agent 的下一次调用也会直接读取新值；core-managed Agent 持有长进程配置，轮换后需要依次执行
+   `roll agent stop <name>` 与 `roll agent start <name>`；external-managed Agent 则需要在外部管理系统中重启
+   （`streamable-http` 只是 transport，不决定由谁管理进程）；
+4. 修复后如果任务处于暂停状态，运行 `roll schedule resume <schedule-id>`。
+
+`roll schedule service install` 会在安装前预检并警告未解析占位符；
+用 `--skip-env-check` 可以跳过该预检。解析优先级：`process.env` 的非空值优先，
+空串视为未设置，随后回退 `secrets.env`。
+
+### 定时任务里 Agent 启动失败「spawn xxx ENOENT」
+
+调度服务（launchd / 计划任务）启动的进程只有系统最小 PATH（如 `/usr/bin:/bin:/usr/sbin:/sbin`），
+不含 Homebrew 等用户安装目录。定时任务运行时若某个 Agent 的启动命令（或任务中 Shell 工具执行的命令）
+不在这个 PATH 里，就会报 `spawn xxx ENOENT`，该 Agent 的工具在无人值守轮次中直接缺席。
+
+- **`node` 已自动修复**：exec 子进程会把自身 node 所在目录前置进 PATH，`node` 系 Agent 无需配置；
+- **其他命令**（python、专有 CLI 等）在 `roll.config.yaml` 的 `scheduler.env` 里补 PATH：
+
+  ```yaml
+  scheduler:
+    env:
+      PATH: /opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin
+  ```
+
+  `scheduler.env` 也可声明代理等任意环境变量（值支持 `${ENV_VAR}` 占位符与 `secrets.env` 回退），
+  在每次任务运行前合入进程环境；
+- 运行 `roll doctor`，「定时任务 Agent 命令可达性」检查项会列出调度环境下找不到的 Agent 启动命令。
+
 ### 任务因权限变化暂停
 
 确认任务工作目录里的 `runtime.approval` 和 `runtime.shell` 配置，然后运行：

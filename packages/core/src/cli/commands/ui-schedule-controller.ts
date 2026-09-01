@@ -1,4 +1,5 @@
 import { loadConfig } from "../../config/loader.ts";
+import { auditScheduledServicePlaceholders } from "../../config/placeholder-audit.ts";
 import { computeAuthorityDigest } from "../../scheduler-host/authority.ts";
 import { inspectDaemon } from "../../scheduler-host/daemon-record.ts";
 import { createSchedulerPaths } from "../../scheduler-host/paths.ts";
@@ -43,6 +44,7 @@ export async function createDefaultScheduleController(): Promise<RollUiScheduleC
         const paths = createSchedulerPaths(config.scheduler.dataDir);
         const daemon = inspectDaemon(paths.daemonRecordPath);
         const service = await probeSchedulerService();
+        const audit = auditScheduledServicePlaceholders();
         return {
           dataDir: paths.dataDir,
           logPath: paths.logPath,
@@ -53,6 +55,7 @@ export async function createDefaultScheduleController(): Promise<RollUiScheduleC
               : {}),
           },
           service,
+          unresolvedPlaceholders: audit?.unresolved.map((item) => item.name) ?? [],
         };
       },
       installService: async () => {

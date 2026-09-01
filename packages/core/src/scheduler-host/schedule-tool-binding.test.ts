@@ -237,3 +237,46 @@ test("schedule-tool-binding 幂等命中且权限漂移时重新授权并透传�
     ws.close();
   }
 });
+
+test("schedule-tool-binding readiness 报告调度服务环境下无法解析的占位符", () => {
+  const ws = createWorkspace();
+  try {
+    writeFileSync(
+      join(ws.cwd, "roll.config.yaml"),
+      [
+        "scheduler:",
+        `  data-dir: ${ws.dataDir}`,
+        "llm:",
+        "  providers:",
+        "    qwen:",
+        `      api-key: \${BINDING_PROBE_KEY}`,
+        "",
+      ].join("\n"),
+    );
+    const secretsPath = join(ws.cwd, "secrets.env");
+    const binding = createScheduleToolBinding({
+      serviceStatePath: ws.serviceStatePath,
+      secretsPath,
+    });
+    const admission = requireAdmission(
+      binding.captureCreate({ name: "巡检", prompt: "检查未读", every: "30m" }, ws.cwd),
+    );
+    const warning = admission.readiness.warnings.find(
+      (item) => item.code === "unresolved-placeholders",
+    );
+    assert.ok(warning !== undefined);
+    assert.match(warning.message, /BINDING_PROBE_KEY/);
+    assert.match(warning.message, /secrets\.env/);
+
+    writeFileSync(secretsPath, "BINDING_PROBE_KEY=resolved\n");
+    const resolved = requireAdmission(
+      binding.captureCreate({ name: "巡检", prompt: "检查未读", every: "30m" }, ws.cwd),
+    );
+    assert.equal(
+      resolved.readiness.warnings.some((item) => item.code === "unresolved-placeholders"),
+      false,
+    );
+  } finally {
+    ws.close();
+  }
+});

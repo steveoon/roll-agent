@@ -242,6 +242,47 @@ test("create 在 confirm 策略下展示完整预览并在批准后创建", asyn
   assert.match(String(result.output), /不会自动执行/u);
 });
 
+test("create 即使 automaticRunsReady 为 true 也保留 readiness warnings", async () => {
+  const harness = makeHarness({
+    create: async (admission) => ({
+      ok: true,
+      created: true,
+      reauthorized: false,
+      schedule: {
+        id: "sched-ready-warning",
+        name: admission.name,
+        prompt: admission.prompt,
+        cwd: admission.cwd,
+        status: "active",
+        trigger: { everyMs: admission.everyMs, display: admission.everyDisplay },
+        maxRun: { explicit: false, effectiveMs: 3_600_000, display: "1 小时" },
+        nextRunAt: admission.firstRunAt,
+        createdAt: "2026-08-31T09:30:00.000Z",
+      },
+      readiness: {
+        daemonRunning: true,
+        serviceInstalled: true,
+        automaticRunsReady: true,
+        warnings: [
+          {
+            code: "unresolved-placeholders",
+            message: `配置占位符 \${DASHSCOPE_API_KEY} 无法解析`,
+          },
+        ],
+      },
+    }),
+  });
+
+  const result = await harness.execute(SCHEDULE_CREATE_TOOL_ID, {
+    name: "巡检",
+    prompt: "检查未读消息",
+    every: "30m",
+  });
+
+  assert.equal(result.isError, false);
+  assert.match(String(result.output), /DASHSCOPE_API_KEY/u);
+});
+
 test("create 在 policy deny 时不请求确认也不创建", async () => {
   const harness = makeHarness({ policy: fixedPolicy({ action: "deny", reason: "禁止" }) });
   const result = await harness.execute(SCHEDULE_CREATE_TOOL_ID, {

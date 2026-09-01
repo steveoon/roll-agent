@@ -20,6 +20,7 @@ const HOST_STATUS: ScheduleHostStatus = {
   logPath: "/tmp/roll-sched/scheduler.log",
   daemon: { liveness: "stopped" },
   service: { metadataStatus: "missing", installed: false, running: false },
+  unresolvedPlaceholders: [],
 };
 
 interface FakeHost extends ScheduleHostPort {

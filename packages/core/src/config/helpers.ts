@@ -84,7 +84,7 @@ export function inspectLlmConfigReadiness(
       provider,
       model,
       summary,
-      message: `LLM provider "${provider}" 的 apiKey 仍是未解析的环境变量占位符。请设置对应环境变量，或运行 roll setup / roll config setup llm`,
+      message: `LLM provider "${provider}" 的 apiKey 仍是未解析的环境变量占位符。请把值写入 ~/.roll-agent/secrets.env（chmod 600）或设置对应环境变量；运行 roll doctor 可检查占位符解析状态`,
       providerConfig,
     };
   }

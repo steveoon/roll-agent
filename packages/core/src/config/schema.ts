@@ -112,6 +112,7 @@ export const schedulerConfigSchema = z.object({
   dataDir: z.string().default("~/.roll-agent/scheduler"),
   maxSchedules: z.number().int().min(1).max(500).default(50),
   maxConcurrentRuns: z.number().int().min(1).max(8).default(2),
+  env: z.record(z.string(), z.string()).default({}),
 });
 
 export const skillsConfigSchema = z.object({
