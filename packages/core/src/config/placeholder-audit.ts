@@ -58,6 +58,33 @@ function makeResolver(
     });
 }
 
+/** 调度服务（launchd/schtasks）通常提供的基线变量；刻意不含用户 .zshrc 里的变量 */
+const SCHEDULED_SERVICE_BASELINE_ENV_KEYS = [
+  "HOME",
+  "USER",
+  "LOGNAME",
+  "PATH",
+  "SHELL",
+  "TMPDIR",
+] as const;
+
+/**
+ * 构造"调度服务环境"的近似：只保留服务管理器通常提供的基线变量，
+ * 用于审计占位符在定时任务进程里能否解析（交互 shell 的变量不会漏报）。
+ */
+export function buildScheduledServiceBaselineEnv(
+  env: Readonly<Record<string, string | undefined>> = process.env,
+): Record<string, string> {
+  const baseline: Record<string, string> = {};
+  for (const key of SCHEDULED_SERVICE_BASELINE_ENV_KEYS) {
+    const value = env[key];
+    if (value !== undefined) {
+      baseline[key] = value;
+    }
+  }
+  return baseline;
+}
+
 /**
  * 审计（未做 `resolveEnvVars` 的）配置对象里所有 `${ENV_VAR}` 占位符的解析状态。
  * 判定顺序：`processEnv`（默认 `process.env`）非空 → 已解析；否则

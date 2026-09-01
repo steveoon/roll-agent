@@ -1,6 +1,10 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { auditPlaceholderResolution, collectConfigPlaceholders } from "./placeholder-audit.ts";
+import {
+  auditPlaceholderResolution,
+  buildScheduledServiceBaselineEnv,
+  collectConfigPlaceholders,
+} from "./placeholder-audit.ts";
 
 const sample = {
   llm: { providers: { qwen: { "api-key": "${DASHSCOPE_API_KEY}" } } },
@@ -38,4 +42,15 @@ test("extraEnv participates in resolution", () => {
     { processEnv: {}, extraEnv: { PLIST_VAR: "from-plist" } },
   );
   assert.deepEqual(report.unresolved, []);
+});
+
+test("buildScheduledServiceBaselineEnv keeps only baseline keys", () => {
+  const baseline = buildScheduledServiceBaselineEnv({
+    HOME: "/home/u",
+    PATH: "/usr/bin",
+    DASHSCOPE_API_KEY: "user-shell-key",
+    USER: "tester",
+  });
+  assert.deepEqual(baseline, { HOME: "/home/u", PATH: "/usr/bin", USER: "tester" });
+  assert.equal(baseline["DASHSCOPE_API_KEY"], undefined);
 });

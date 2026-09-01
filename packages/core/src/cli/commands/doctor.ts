@@ -16,7 +16,10 @@ import {
   type ConfigInspectionNeedsMigration,
 } from "../../config/loader.ts";
 import { decodeFromYaml } from "../../config/key-codec.ts";
-import { auditPlaceholderResolution } from "../../config/placeholder-audit.ts";
+import {
+  auditPlaceholderResolution,
+  buildScheduledServiceBaselineEnv,
+} from "../../config/placeholder-audit.ts";
 import {
   defaultSecretsEnvPath,
   inspectSecretsFilePermission,
@@ -842,16 +845,6 @@ async function probeSchedulerServiceForDoctor(): Promise<SchedulerServiceCheckIn
   }
 }
 
-/** 调度服务（launchd/schtasks）通常提供的基线变量；刻意不含用户 .zshrc 里的变量 */
-const SCHEDULED_SERVICE_BASELINE_ENV_KEYS = [
-  "HOME",
-  "USER",
-  "LOGNAME",
-  "PATH",
-  "SHELL",
-  "TMPDIR",
-] as const;
-
 function buildSecretsAndPlaceholderCheck(
   configInspection: ReturnType<typeof inspectConfigFile>,
 ): CheckResult {
@@ -876,15 +869,8 @@ function buildSecretsAndPlaceholderCheck(
     if (configRaw !== undefined && configPathForRaw !== undefined) {
       const parsed = parseConfigDocument(configRaw, configPathForRaw);
       // 模拟调度服务环境：只有基线变量 + secrets.env，没有交互 shell 的变量。
-      const serviceBaselineEnv: Record<string, string> = {};
-      for (const key of SCHEDULED_SERVICE_BASELINE_ENV_KEYS) {
-        const value = process.env[key];
-        if (value !== undefined) {
-          serviceBaselineEnv[key] = value;
-        }
-      }
       const report = auditPlaceholderResolution(parsed, {
-        processEnv: serviceBaselineEnv,
+        processEnv: buildScheduledServiceBaselineEnv(),
         secretsEnv: secrets?.variables ?? {},
       });
       unresolved = report.unresolved;
