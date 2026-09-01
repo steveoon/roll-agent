@@ -1,5 +1,5 @@
 import { defineCommand } from "citty";
-import { existsSync, mkdirSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync } from "node:fs";
 import { ConfigApplicationService } from "../../config/application-service.ts";
 import { createConfigRevision } from "../../config/document-store.ts";
 import {
@@ -17,13 +17,17 @@ import {
 } from "../../config/loader.ts";
 import { decodeFromYaml } from "../../config/key-codec.ts";
 import {
-  auditPlaceholderResolution,
+  auditScheduledServicePlaceholders,
   buildScheduledServiceBaselineEnv,
 } from "../../config/placeholder-audit.ts";
 import {
+  auditScheduledAgentCommands,
+  type ScheduledCommandAuditItem,
+} from "../../scheduler-host/command-audit.ts";
+import {
   defaultSecretsEnvPath,
   inspectSecretsFilePermission,
-  loadSecretsEnv,
+  readSecretsEnvVariables,
 } from "../../config/secrets-env.ts";
 import { applyKnownConfigMigrations } from "../../config/migration.ts";
 import {
@@ -581,7 +585,10 @@ export default defineCommand({
     }
 
     // 6.5 Secrets 文件与占位符解析（覆盖"chat 好的、定时任务坏的"场景）
-    checks.push(buildSecretsAndPlaceholderCheck(configInspection));
+    checks.push(buildSecretsAndPlaceholderCheck());
+
+    // 6.6 Agent 启动命令在调度服务环境下的可达性
+    checks.push(buildScheduledCommandCheck());
 
     // 7. Scheduler service
     checks.push(formatSchedulerServiceCheck(await probeSchedulerServiceForDoctor()));
@@ -845,47 +852,21 @@ async function probeSchedulerServiceForDoctor(): Promise<SchedulerServiceCheckIn
   }
 }
 
-function buildSecretsAndPlaceholderCheck(
-  configInspection: ReturnType<typeof inspectConfigFile>,
-): CheckResult {
+function buildSecretsAndPlaceholderCheck(): CheckResult {
   const secretsPath = defaultSecretsEnvPath();
   const permission = inspectSecretsFilePermission(secretsPath);
-  const secrets = loadSecretsEnv(secretsPath);
-  let unresolved: SecretsPlaceholderCheckInput["unresolved"] = [];
-  let placeholderTotal = 0;
-  try {
-    let configRaw: string | undefined;
-    let configPathForRaw: string | undefined;
-    if (configInspection.status === "valid" && configInspection.configPath !== undefined) {
-      configRaw = readFileSync(configInspection.configPath, "utf-8");
-      configPathForRaw = configInspection.configPath;
-    } else if (
-      (configInspection.status === "needs-migration" || configInspection.status === "invalid") &&
-      "raw" in configInspection
-    ) {
-      configRaw = configInspection.raw;
-      configPathForRaw = configInspection.configPath;
-    }
-    if (configRaw !== undefined && configPathForRaw !== undefined) {
-      const parsed = parseConfigDocument(configRaw, configPathForRaw);
-      // 模拟调度服务环境：只有基线变量 + secrets.env，没有交互 shell 的变量。
-      const report = auditPlaceholderResolution(parsed, {
-        processEnv: buildScheduledServiceBaselineEnv(),
-        secretsEnv: secrets?.variables ?? {},
-      });
-      unresolved = report.unresolved;
-      placeholderTotal = report.placeholders.length;
-    }
-  } catch {
-    // 配置解析问题由"配置文件"检查项负责报告，这里不重复报错。
-  }
+  const secrets = readSecretsEnvVariables(secretsPath);
+  // 配置不可用（audit 返回 undefined）时由"配置文件"检查项负责报告，这里只报 secrets 状态。
+  const audit = auditScheduledServicePlaceholders({ secretsPath });
   return formatSecretsAndPlaceholderCheck({
     secretsPath,
     secretsExists: permission.exists,
     secretsIsPrivate: permission.isPrivate,
-    secretsVariableCount: Object.keys(secrets?.variables ?? {}).length,
-    unresolved,
-    placeholderTotal,
+    ...(permission.error === undefined ? {} : { secretsPermissionError: permission.error }),
+    secretsReadable: secrets.readable,
+    secretsVariableCount: Object.keys(secrets.variables).length,
+    unresolved: audit?.unresolved ?? [],
+    placeholderTotal: audit?.placeholderTotal ?? 0,
   });
 }
 
@@ -893,17 +874,22 @@ export interface SecretsPlaceholderCheckInput {
   readonly secretsPath: string;
   readonly secretsExists: boolean;
   readonly secretsIsPrivate: boolean | undefined;
+  readonly secretsPermissionError?: string;
+  readonly secretsReadable: boolean;
   readonly secretsVariableCount: number;
   readonly unresolved: ReadonlyArray<{ readonly name: string; readonly paths: readonly string[] }>;
   readonly placeholderTotal: number;
 }
 
-export function formatSecretsAndPlaceholderCheck(
-  input: SecretsPlaceholderCheckInput,
-): CheckResult {
+export function formatSecretsAndPlaceholderCheck(input: SecretsPlaceholderCheckInput): CheckResult {
   const name = "Secrets 与占位符解析";
   const problems: string[] = [];
   const fixes: string[] = [];
+
+  if (input.secretsPermissionError !== undefined) {
+    problems.push(`无法检查 ${input.secretsPath} 的文件权限：${input.secretsPermissionError}`);
+    fixes.push(`确认父目录可访问且文件属主正确后重新运行 roll doctor`);
+  }
 
   if (input.unresolved.length > 0) {
     const list = input.unresolved.map((item) => `\${${item.name}}`).join("、");
@@ -913,6 +899,11 @@ export function formatSecretsAndPlaceholderCheck(
     fixes.push(
       `把对应值写入 \`${input.secretsPath}\`（chmod 600，每行 KEY=VALUE）；运行 \`roll doctor\` 可复查`,
     );
+  }
+
+  if (input.secretsExists && !input.secretsReadable) {
+    problems.push(`${input.secretsPath} 存在但无法读取，其中的值不会参与占位符解析`);
+    fixes.push(`确认文件属主与权限（chmod 600 ${input.secretsPath}）后重新运行 roll doctor`);
   }
 
   if (input.secretsExists && input.secretsIsPrivate === false) {
@@ -943,6 +934,65 @@ export function formatSecretsAndPlaceholderCheck(
     status: "ok",
     message: `${input.placeholderTotal} 个占位符均可解析（secrets.env 提供 ${input.secretsVariableCount} 个值）`,
     details: { type: "secrets-placeholder", placeholderTotal: input.placeholderTotal },
+  };
+}
+
+function buildScheduledCommandCheck(): CheckResult {
+  try {
+    const { config } = loadConfig();
+    const store = new AgentStore(config.agents.dataDir);
+    const stdioAgents = store
+      .list()
+      .flatMap((agent) =>
+        agent.transport.type === "stdio"
+          ? [{ name: agent.skill.name, command: agent.transport.command }]
+          : [],
+      );
+    const baseline = buildScheduledServiceBaselineEnv();
+    const items = auditScheduledAgentCommands({
+      agents: stdioAgents,
+      baselinePath: baseline["PATH"] ?? "",
+      execPath: process.execPath,
+      schedulerEnv: config.scheduler.env,
+      platform: process.platform,
+    });
+    return formatScheduledCommandCheck({ items });
+  } catch {
+    return {
+      name: "定时任务 Agent 命令可达性",
+      status: "ok",
+      message: "跳过（配置或 Agent 注册表不可用，由对应检查项负责报告）",
+    };
+  }
+}
+
+export interface ScheduledCommandCheckInput {
+  readonly items: readonly ScheduledCommandAuditItem[];
+}
+
+export function formatScheduledCommandCheck(input: ScheduledCommandCheckInput): CheckResult {
+  const name = "定时任务 Agent 命令可达性";
+  if (input.items.length === 0) {
+    return { name, status: "ok", message: "无已注册的 stdio Agent，跳过检查" };
+  }
+  const unreachable = input.items.filter((item) => !item.reachable);
+  if (unreachable.length === 0) {
+    return {
+      name,
+      status: "ok",
+      message: `${String(input.items.length)} 个 Agent 的启动命令在调度服务环境下均可找到`,
+    };
+  }
+  const list = unreachable.map((item) => `${item.agentName}（${item.command}）`).join("、");
+  return {
+    name,
+    status: "warn",
+    message: `${String(unreachable.length)} 个 Agent 的启动命令在调度服务（launchd/schtasks）环境下找不到：${list}；定时任务运行时这些 Agent 将无法启动`,
+    fix: "在 roll.config.yaml 的 scheduler.env 里声明 PATH 补上命令所在目录（调度服务不会加载交互 shell 的环境变量）",
+    details: {
+      type: "scheduled-command",
+      unreachable: unreachable.map((item) => ({ agent: item.agentName, command: item.command })),
+    },
   };
 }
 

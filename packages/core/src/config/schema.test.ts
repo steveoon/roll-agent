@@ -307,6 +307,30 @@ describe("rollConfigSchema", () => {
     assert.equal(result.data.scheduler.dataDir, "~/.roll-agent/scheduler");
     assert.equal(result.data.scheduler.maxSchedules, 50);
     assert.equal(result.data.scheduler.maxConcurrentRuns, 2);
+    assert.deepEqual(result.data.scheduler.env, {});
+  });
+
+  it("should accept scheduler env record and reject non-string values", () => {
+    const accepted = rollConfigSchema.safeParse({
+      llm: { defaultProvider: "x", defaultModel: "y", providers: {} },
+      ask: {},
+      agents: { dataDir: "/tmp" },
+      scheduler: { env: { HTTP_PROXY: "http://127.0.0.1:7890", PATH: "/custom/bin" } },
+    });
+    assert.equal(accepted.success, true);
+    if (accepted.success) {
+      assert.deepEqual(accepted.data.scheduler.env, {
+        HTTP_PROXY: "http://127.0.0.1:7890",
+        PATH: "/custom/bin",
+      });
+    }
+    const rejected = rollConfigSchema.safeParse({
+      llm: { defaultProvider: "x", defaultModel: "y", providers: {} },
+      ask: {},
+      agents: { dataDir: "/tmp" },
+      scheduler: { env: { COUNT: 3 } },
+    });
+    assert.equal(rejected.success, false);
   });
 
   it("should reject scheduler max-concurrent-runs above 8", () => {
