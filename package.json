@@ -5,7 +5,7 @@
   "engines": {
     "node": ">=22.13.0"
   },
-  "packageManager": "pnpm@11.13.0",
+  "packageManager": "pnpm@11.24.0",
   "scripts": {
     "dev": "node --disable-warning=ExperimentalWarning --experimental-strip-types --experimental-sqlite packages/core/src/cli/index.ts",
     "build": "pnpm -r run build",
