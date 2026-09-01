@@ -13,6 +13,7 @@ import {
   type ScheduleRecord,
 } from "@roll-agent/runtime";
 import { loadConfig } from "../config/loader.ts";
+import { auditScheduledServicePlaceholders } from "../config/placeholder-audit.ts";
 import { computeAuthorityDigest } from "./authority.ts";
 import { DAEMON_LIVENESS, inspectDaemon } from "./daemon-record.ts";
 import { probeExecutorLiveness } from "./executor-liveness.ts";
@@ -38,7 +39,11 @@ export interface ScheduleToolError {
 }
 
 export interface ScheduleReadinessWarning {
-  readonly code: "service-not-installed" | "daemon-not-running" | "data-dir-mismatch";
+  readonly code:
+    | "service-not-installed"
+    | "daemon-not-running"
+    | "data-dir-mismatch"
+    | "unresolved-placeholders";
   readonly message: string;
 }
 
@@ -175,7 +180,30 @@ function canonicalizeCwd(
   }
 }
 
-function probeReadiness(dataDir: string, serviceStatePath: string): ScheduleExecutionReadiness {
+function probeUnresolvedPlaceholders(
+  configCwd: string,
+  secretsPath: string | undefined,
+): ScheduleReadinessWarning | undefined {
+  const audit = auditScheduledServicePlaceholders({
+    loadOptions: { cwd: configCwd },
+    ...(secretsPath === undefined ? {} : { secretsPath }),
+  });
+  if (audit === undefined || audit.unresolved.length === 0) {
+    return undefined;
+  }
+  const names = audit.unresolved.map((item) => `\${${item.name}}`).join("、");
+  return {
+    code: "unresolved-placeholders",
+    message: `配置占位符 ${names} 在调度服务环境下无法解析（调度服务不会加载交互 shell 的环境变量），任务运行时会因此失败；把值写入 ~/.roll-agent/secrets.env（chmod 600）或运行 roll doctor 查看详情`,
+  };
+}
+
+function probeReadiness(
+  dataDir: string,
+  serviceStatePath: string,
+  configCwd: string,
+  secretsPath: string | undefined,
+): ScheduleExecutionReadiness {
   const paths = createSchedulerPaths(dataDir);
   const daemonRunning = inspectDaemon(paths.daemonRecordPath).liveness === DAEMON_LIVENESS.running;
   const inspection = inspectSchedulerServiceState(serviceStatePath);
@@ -203,6 +231,10 @@ function probeReadiness(dataDir: string, serviceStatePath: string): ScheduleExec
       code: "data-dir-mismatch",
       message: `已安装的调度服务固定在数据目录 ${installedDataDir ?? ""}，与当前配置 ${paths.dataDir} 不一致；该任务不会被现有服务执行`,
     });
+  }
+  const placeholderWarning = probeUnresolvedPlaceholders(configCwd, secretsPath);
+  if (placeholderWarning !== undefined) {
+    warnings.push(placeholderWarning);
   }
   return {
     daemonRunning,
@@ -271,6 +303,7 @@ function resolveAuthorityDigest(taskCwd: string): string {
 
 export interface ScheduleToolBindingOptions {
   readonly serviceStatePath?: string;
+  readonly secretsPath?: string;
 }
 
 export function createScheduleToolBinding(
@@ -303,7 +336,7 @@ export function createScheduleToolBinding(
           dataDir: ledger.dataDir,
           authorityDigest: resolveAuthorityDigest(cwd),
           firstRunAt: new Date(Date.now() + trigger.everyMs).toISOString(),
-          readiness: probeReadiness(ledger.dataDir, serviceStatePath),
+          readiness: probeReadiness(ledger.dataDir, serviceStatePath, cwd, options.secretsPath),
         };
       } catch (error) {
         return fromKnownError(error);
@@ -357,7 +390,12 @@ export function createScheduleToolBinding(
           created: result.created,
           reauthorized: result.reauthorized,
           schedule: toScheduleView(result.schedule),
-          readiness: probeReadiness(ledger.dataDir, serviceStatePath),
+          readiness: probeReadiness(
+            ledger.dataDir,
+            serviceStatePath,
+            admission.cwd,
+            options.secretsPath,
+          ),
         };
       } catch (error) {
         return fromKnownError(error);
@@ -397,7 +435,7 @@ export function createScheduleToolBinding(
         offset,
         hasMore: offset + page.length < filtered.length,
         schedules: page.map(toListItem),
-        readiness: probeReadiness(dataDir, serviceStatePath),
+        readiness: probeReadiness(dataDir, serviceStatePath, sessionCwd, options.secretsPath),
       };
     },
   };

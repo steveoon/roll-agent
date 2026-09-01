@@ -55,6 +55,7 @@ export interface ScheduleHostStatus {
     readonly startedAt?: string;
   };
   readonly service: SchedulerServiceProbe;
+  readonly unresolvedPlaceholders: readonly string[];
 }
 
 export interface ScheduleHostPort {

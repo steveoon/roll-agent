@@ -1,11 +1,6 @@
 import { defineCommand } from "citty";
-import { readFileSync } from "node:fs";
-import { inspectConfigFile, loadConfig, parseConfigDocument } from "../../config/loader.ts";
-import {
-  auditPlaceholderResolution,
-  buildScheduledServiceBaselineEnv,
-} from "../../config/placeholder-audit.ts";
-import { loadSecretsEnv } from "../../config/secrets-env.ts";
+import { loadConfig } from "../../config/loader.ts";
+import { auditScheduledServicePlaceholders } from "../../config/placeholder-audit.ts";
 import { withSchedulerServiceManagementLock } from "../../scheduler-host/service.ts";
 import { log } from "../utils/output.ts";
 import { runScheduleCommand } from "./schedule-command-utils.ts";
@@ -59,39 +54,13 @@ export default defineCommand({
 });
 
 function warnUnresolvedConfigPlaceholders(): void {
-  try {
-    const inspection = inspectConfigFile();
-    if (
-      inspection.status !== "valid" &&
-      inspection.status !== "needs-migration" &&
-      inspection.status !== "invalid"
-    ) {
-      return;
-    }
-    let raw: string | undefined;
-    let path: string | undefined;
-    if (inspection.status === "valid") {
-      path = inspection.configPath;
-    } else if ("raw" in inspection) {
-      raw = inspection.raw;
-      path = inspection.configPath;
-    }
-    if (path === undefined) return;
-    if (raw === undefined) {
-      raw = readFileSync(path, "utf-8");
-    }
-    const parsed = parseConfigDocument(raw, path);
-    const secrets = loadSecretsEnv();
-    // 模拟调度服务环境（基线变量 + secrets.env），避免用当前交互 shell 的变量漏报。
-    const report = auditPlaceholderResolution(parsed, {
-      processEnv: buildScheduledServiceBaselineEnv(),
-      secretsEnv: secrets?.variables ?? {},
-    });
-    const warning = formatInstallEnvPreflight(report);
-    if (warning !== undefined) {
-      log.warn(warning);
-    }
-  } catch {
-    // 配置解析问题由 loadConfig / doctor 负责，这里不阻断安装。
+  // 配置不可用时由 loadConfig / doctor 负责，这里不阻断安装。
+  const audit = auditScheduledServicePlaceholders();
+  if (audit === undefined) {
+    return;
+  }
+  const warning = formatInstallEnvPreflight(audit);
+  if (warning !== undefined) {
+    log.warn(warning);
   }
 }

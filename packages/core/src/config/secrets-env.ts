@@ -47,18 +47,49 @@ export function loadSecretsEnv(path: string = defaultSecretsEnvPath()): SecretsE
   return { path, variables: parseSecretsEnvText(text) };
 }
 
-export interface SecretsFilePermission {
-  readonly exists: boolean;
-  /** 文件存在时给出是否仅属主可读写；无法 stat 时为 undefined */
-  readonly isPrivate: boolean | undefined;
+export interface SecretsEnvVariablesResult {
+  readonly variables: Readonly<Record<string, string>>;
+  /** 文件不存在视为可读（无秘密可加载）；存在但读取失败时为 false */
+  readonly readable: boolean;
 }
 
-export function inspectSecretsFilePermission(path: string): SecretsFilePermission {
+export function readSecretsEnvVariables(
+  path: string = defaultSecretsEnvPath(),
+): SecretsEnvVariablesResult {
+  try {
+    return { variables: loadSecretsEnv(path)?.variables ?? {}, readable: true };
+  } catch {
+    return { variables: {}, readable: false };
+  }
+}
+
+export interface SecretsFilePermission {
+  readonly exists: boolean;
+  /** 文件存在时给出是否仅属主可读写；win32（POSIX mode 位无意义）或无法 stat 时为 undefined */
+  readonly isPrivate: boolean | undefined;
+  /** 非 ENOENT 的 stat 失败；调用方应把它作为诊断问题，而不是当作文件不存在 */
+  readonly error?: string;
+}
+
+export function inspectSecretsFilePermission(
+  path: string,
+  platform: NodeJS.Platform = process.platform,
+): SecretsFilePermission {
   let mode: number;
   try {
     mode = statSync(path).mode;
-  } catch {
-    return { exists: false, isPrivate: undefined };
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+      return { exists: false, isPrivate: undefined };
+    }
+    return {
+      exists: false,
+      isPrivate: undefined,
+      error: error instanceof Error ? error.message : String(error),
+    };
+  }
+  if (platform === "win32") {
+    return { exists: true, isPrivate: undefined };
   }
   return { exists: true, isPrivate: (mode & 0o077) === 0 };
 }

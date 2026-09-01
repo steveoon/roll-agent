@@ -111,7 +111,8 @@ export function SchedulePanel({ api, onToast, onUnavailable }: SchedulePanelProp
         </button>
       </div>
       <p className="section-description">
-        查看任务与运行结果，管理开机自启的调度服务。新建任务请使用 CLI：
+        查看任务与运行结果，管理开机自启的调度服务。新建任务可以在 roll chat 里直接说（例如「每 30
+        分钟帮我检查一次未读消息」），也可以使用 CLI：
         <code>roll schedule add</code>；全局参数（数据目录、并发数）在「定时任务」配置分区调整。
       </p>
 

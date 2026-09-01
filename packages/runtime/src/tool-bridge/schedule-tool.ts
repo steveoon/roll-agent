@@ -231,10 +231,11 @@ export function buildScheduleToolset(
                     schedule.nextRunAt === undefined
                       ? ""
                       : `下次运行约 ${formatLocalTime(schedule.nextRunAt)}。`;
-                  const readinessNote = outcome.readiness.automaticRunsReady
-                    ? ""
-                    : renderReadiness(outcome.readiness) ||
-                      "\n注意：调度服务未就绪，任务不会自动执行。";
+                  const readinessNote =
+                    renderReadiness(outcome.readiness) ||
+                    (outcome.readiness.automaticRunsReady
+                      ? ""
+                      : "\n注意：调度服务未就绪，任务不会自动执行。");
                   return successfulToolResult(`${header}${nextNote}${readinessNote}`, {
                     raw: outcome,
                   });

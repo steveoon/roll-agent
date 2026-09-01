@@ -607,6 +607,9 @@ function isScheduleStatusSummary(value: unknown): value is ScheduleStatusSummary
     typeof value.schedules.total === "number" &&
     typeof value.schedules.active === "number" &&
     typeof value.schedules.paused === "number" &&
+    (value.unresolvedPlaceholders === undefined ||
+      (Array.isArray(value.unresolvedPlaceholders) &&
+        value.unresolvedPlaceholders.every((item) => typeof item === "string"))) &&
     optionalString(value.nextWakeAt)
   );
 }

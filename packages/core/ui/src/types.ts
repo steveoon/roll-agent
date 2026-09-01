@@ -262,6 +262,7 @@ export interface ScheduleStatusSummary {
     readonly binary?: { readonly status: string; readonly reason?: string };
     readonly error?: string;
   };
+  readonly unresolvedPlaceholders?: readonly string[];
   readonly schedules: {
     readonly total: number;
     readonly active: number;

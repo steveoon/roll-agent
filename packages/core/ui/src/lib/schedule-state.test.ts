@@ -23,6 +23,7 @@ function statusFixture(overrides: {
   metadataPhase?: string;
   binary?: { status: string; reason?: string };
   installedDataDir?: string;
+  unresolvedPlaceholders?: readonly string[];
 }): ScheduleStatusSummary {
   return {
     dataDir: "/tmp/sched",
@@ -39,6 +40,9 @@ function statusFixture(overrides: {
         : {}),
     },
     schedules: { total: 2, active: overrides.active ?? 2, paused: 0 },
+    ...(overrides.unresolvedPlaceholders !== undefined
+      ? { unresolvedPlaceholders: overrides.unresolvedPlaceholders }
+      : {}),
   };
 }
 
@@ -107,17 +111,41 @@ describe("schedule-state", () => {
       statusFixture({ binary: { status: "outdated", reason: "roll 版本已更新" } }),
     );
     assert.equal(outdated.length, 1);
-    assert.match(outdated[0] ?? "", /过期（roll 版本已更新）/u);
+    assert.match(outdated[0] ?? "", /旧版本/u);
+    assert.match(outdated[0] ?? "", /「重启服务」/u);
+    assert.doesNotMatch(outdated[0] ?? "", /roll schedule service restart/u);
 
     const stoppedDaemon = deriveScheduleWarnings(statusFixture({ liveness: "stopped" }));
     assert.equal(stoppedDaemon.length, 1);
-    assert.match(stoppedDaemon[0] ?? "", /daemon 未运行/u);
+    assert.match(stoppedDaemon[0] ?? "", /后台进程未在运行/u);
+    assert.match(stoppedDaemon[0] ?? "", /「重启服务」/u);
 
     const installing = deriveScheduleWarnings(statusFixture({ metadataPhase: "installing" }));
     assert.ok(installing.some((w) => w.includes("未完成")));
 
     const invalid = deriveScheduleWarnings(statusFixture({ metadataStatus: "invalid" }));
     assert.ok(invalid.some((w) => w.includes("fail-closed")));
+  });
+
+  it("warns when config placeholders cannot resolve in the scheduled-service environment", () => {
+    const unresolved = deriveScheduleWarnings(
+      statusFixture({ unresolvedPlaceholders: ["DASHSCOPE_API_KEY", "REPLY_TOKEN"] }),
+    );
+    assert.equal(unresolved.length, 1);
+    assert.match(unresolved[0] ?? "", /2 个密钥/u);
+    assert.match(unresolved[0] ?? "", /DASHSCOPE_API_KEY/u);
+    assert.match(unresolved[0] ?? "", /secrets\.env/u);
+    assert.match(unresolved[0] ?? "", /终端/u);
+    assert.doesNotMatch(unresolved[0] ?? "", /占位符|shell|chmod|KEY=VALUE/u);
+
+    const many = deriveScheduleWarnings(
+      statusFixture({ unresolvedPlaceholders: ["A_KEY", "B_KEY", "C_KEY", "D_KEY", "E_KEY"] }),
+    );
+    assert.match(many[0] ?? "", /5 个密钥/u);
+    assert.match(many[0] ?? "", /A_KEY、B_KEY、C_KEY 等/u);
+    assert.doesNotMatch(many[0] ?? "", /E_KEY/u);
+
+    assert.deepEqual(deriveScheduleWarnings(statusFixture({ unresolvedPlaceholders: [] })), []);
   });
 
   it("warns loudly when the installed service pins a different data-dir", () => {

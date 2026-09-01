@@ -112,6 +112,13 @@ export function deriveScheduleWarnings(status: ScheduleStatusSummary): readonly 
       `已安装的调度服务仍固定在旧数据目录 ${status.service.installedDataDir}，当前配置与下方列表读取的是 ${status.dataDir}。旧目录中的任务仍会被执行，但不在下方显示，下方操作也不影响它们；重启服务可切换到当前目录（账本不会自动搬迁）。`,
     );
   }
+  if (status.unresolvedPlaceholders !== undefined && status.unresolvedPlaceholders.length > 0) {
+    const keys = status.unresolvedPlaceholders;
+    const preview = keys.length > 3 ? `${keys.slice(0, 3).join("、")} 等` : keys.join("、");
+    warnings.push(
+      `有 ${keys.length} 个密钥（${preview}）目前只在你的终端里配置过，后台自动运行的定时任务读取不到它们，运行会因此失败。修复方法：把这些密钥写入文件 ~/.roll-agent/secrets.env（每行一条，格式「名称=值」，并把文件权限设为仅本人可读），保存后下次运行自动生效。`,
+    );
+  }
   if (status.service.metadataStatus === "invalid") {
     warnings.push(
       "定时任务服务 metadata 无效（fail-closed）：修复前所有任务领取都会被阻塞；先卸载再重新安装服务。",
@@ -125,11 +132,13 @@ export function deriveScheduleWarnings(status: ScheduleStatusSummary): readonly 
   }
   if (status.service.binary?.status === "outdated" || status.service.binary?.status === "broken") {
     warnings.push(
-      `服务固化的 roll / Node 已${status.service.binary.status === "broken" ? "失效" : "过期"}${status.service.binary.reason === undefined ? "" : `（${status.service.binary.reason}）`}；重启服务以按当前版本重装。`,
+      status.service.binary.status === "broken"
+        ? "定时服务安装时引用的程序已失效，任务无法运行。点击下方「重启服务」即可修复。"
+        : "定时服务还在使用安装时的旧版本运行（详见下方「二进制」一栏）。点击下方「重启服务」即可更新到当前版本。",
     );
   }
   if (status.service.installed && status.daemon.liveness !== "running") {
-    warnings.push("已安装服务但 daemon 未运行；重启服务，或查看 daemon 日志排查。");
+    warnings.push("定时服务已安装，但它的后台进程未在运行。点击下方「重启服务」，或查看日志排查。");
   }
   return warnings;
 }
