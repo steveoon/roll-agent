@@ -12,12 +12,12 @@ import {
 
 test("parseSecretsEnvText parses KEY=VALUE, ignores comments and blanks", () => {
   const parsed = parseSecretsEnvText(
-    ["# comment", "", "FOO=bar", 'QUOTED="hello world"', "SINGLE='value with ${NOT_EXPANDED}'", "WITH_EQUALS=a=b=c"].join("\n"),
+    ["# comment", "", "FOO=bar", 'QUOTED="hello world"', `SINGLE='value with \${NOT_EXPANDED}'`, "WITH_EQUALS=a=b=c"].join("\n"),
   );
   assert.deepEqual(parsed, {
     FOO: "bar",
     QUOTED: "hello world",
-    SINGLE: "value with ${NOT_EXPANDED}",
+    SINGLE: `value with \${NOT_EXPANDED}`,
     WITH_EQUALS: "a=b=c",
   });
 });

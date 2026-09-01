@@ -438,6 +438,21 @@ roll schedule status
 
 输出中的“日志”字段指向 `scheduler.log`。
 
+### 定时任务报「apiKey 仍是未解析的环境变量占位符」
+
+调度服务由 launchd（macOS）/ schtasks（Windows）启动，不会加载你的 `.zshrc`，
+因此 `roll.config.yaml` 里的 `${ENV_VAR}` 占位符在交互终端里能解析、在定时任务里却解析失败。
+
+1. 运行 `roll doctor`，查看「Secrets 与占位符解析」检查项列出的未解析变量清单；
+2. 把缺失的值写入 `~/.roll-agent/secrets.env`（`chmod 600`，每行 `KEY=VALUE`）；
+3. 占位符解析发生在每次 invocation 子进程启动时，下一次触发即生效，无需重启服务；
+   但常驻型（core-managed / streamable-http）Agent 持有长进程配置，轮换后需要 `roll agent restart <name>`；
+4. 修复后如果任务处于暂停状态，运行 `roll schedule resume <schedule-id>`。
+
+`roll schedule service install` 会在安装前预检并警告未解析占位符；
+用 `--skip-env-check` 可以跳过该预检。解析优先级：`process.env` 的非空值优先，
+空串视为未设置，随后回退 `secrets.env`。
+
 ### 任务因权限变化暂停
 
 确认任务工作目录里的 `runtime.approval` 和 `runtime.shell` 配置，然后运行：

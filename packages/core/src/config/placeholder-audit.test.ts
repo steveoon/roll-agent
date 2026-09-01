@@ -7,9 +7,9 @@ import {
 } from "./placeholder-audit.ts";
 
 const sample = {
-  llm: { providers: { qwen: { "api-key": "${DASHSCOPE_API_KEY}" } } },
-  agents: { env: { "smart-reply-agent": { TOKEN: "${REPLY_TOKEN}" } } },
-  registry: "${ROLL_REGISTRY}",
+  llm: { providers: { qwen: { "api-key": `\${DASHSCOPE_API_KEY}` } } },
+  agents: { env: { "smart-reply-agent": { TOKEN: `\${REPLY_TOKEN}` } } },
+  registry: `\${ROLL_REGISTRY}`,
   plain: "no-placeholder",
 };
 
@@ -32,25 +32,25 @@ test("auditPlaceholderResolution resolves from secretsEnv when process env lacks
 });
 
 test("empty-string env values count as unset", () => {
-  const report = auditPlaceholderResolution({ key: "${X}" }, { processEnv: { X: "" } });
+  const report = auditPlaceholderResolution({ key: `\${X}` }, { processEnv: { X: "" } });
   assert.deepEqual(report.unresolved.map((p) => p.name), ["X"]);
 });
 
 test("extraEnv participates in resolution", () => {
   const report = auditPlaceholderResolution(
-    { key: "${PLIST_VAR}" },
+    { key: `\${PLIST_VAR}` },
     { processEnv: {}, extraEnv: { PLIST_VAR: "from-plist" } },
   );
   assert.deepEqual(report.unresolved, []);
 });
 
 test("buildScheduledServiceBaselineEnv keeps only baseline keys", () => {
-  const baseline = buildScheduledServiceBaselineEnv({
+  const baseline: Record<string, string> = buildScheduledServiceBaselineEnv({
     HOME: "/home/u",
     PATH: "/usr/bin",
     DASHSCOPE_API_KEY: "user-shell-key",
     USER: "tester",
   });
   assert.deepEqual(baseline, { HOME: "/home/u", PATH: "/usr/bin", USER: "tester" });
-  assert.equal(baseline["DASHSCOPE_API_KEY"], undefined);
+  assert.equal(Object.hasOwn(baseline, "DASHSCOPE_API_KEY"), false);
 });

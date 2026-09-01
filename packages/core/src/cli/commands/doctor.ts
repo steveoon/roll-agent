@@ -936,7 +936,7 @@ export function formatSecretsAndPlaceholderCheck(
   }
 
   if (input.placeholderTotal === 0) {
-    return { name, status: "ok", message: "配置中未检测到 ${ENV_VAR} 占位符" };
+    return { name, status: "ok", message: "配置中未检测到环境变量占位符" };
   }
   return {
     name,
