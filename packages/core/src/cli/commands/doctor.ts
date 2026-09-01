@@ -1,5 +1,5 @@
 import { defineCommand } from "citty";
-import { existsSync, mkdirSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { ConfigApplicationService } from "../../config/application-service.ts";
 import { createConfigRevision } from "../../config/document-store.ts";
 import {
@@ -16,6 +16,12 @@ import {
   type ConfigInspectionNeedsMigration,
 } from "../../config/loader.ts";
 import { decodeFromYaml } from "../../config/key-codec.ts";
+import { auditPlaceholderResolution } from "../../config/placeholder-audit.ts";
+import {
+  defaultSecretsEnvPath,
+  inspectSecretsFilePermission,
+  loadSecretsEnv,
+} from "../../config/secrets-env.ts";
 import { applyKnownConfigMigrations } from "../../config/migration.ts";
 import {
   inspectAgentRuntimeEnvRequirements,
@@ -571,6 +577,9 @@ export default defineCommand({
       }
     }
 
+    // 6.5 Secrets 文件与占位符解析（覆盖"chat 好的、定时任务坏的"场景）
+    checks.push(buildSecretsAndPlaceholderCheck(configInspection));
+
     // 7. Scheduler service
     checks.push(formatSchedulerServiceCheck(await probeSchedulerServiceForDoctor()));
 
@@ -831,6 +840,124 @@ async function probeSchedulerServiceForDoctor(): Promise<SchedulerServiceCheckIn
       error: `无法加载 scheduler 模块：${error instanceof Error ? error.message : String(error)}`,
     };
   }
+}
+
+/** 调度服务（launchd/schtasks）通常提供的基线变量；刻意不含用户 .zshrc 里的变量 */
+const SCHEDULED_SERVICE_BASELINE_ENV_KEYS = [
+  "HOME",
+  "USER",
+  "LOGNAME",
+  "PATH",
+  "SHELL",
+  "TMPDIR",
+] as const;
+
+function buildSecretsAndPlaceholderCheck(
+  configInspection: ReturnType<typeof inspectConfigFile>,
+): CheckResult {
+  const secretsPath = defaultSecretsEnvPath();
+  const permission = inspectSecretsFilePermission(secretsPath);
+  const secrets = loadSecretsEnv(secretsPath);
+  let unresolved: SecretsPlaceholderCheckInput["unresolved"] = [];
+  let placeholderTotal = 0;
+  try {
+    let configRaw: string | undefined;
+    let configPathForRaw: string | undefined;
+    if (configInspection.status === "valid" && configInspection.configPath !== undefined) {
+      configRaw = readFileSync(configInspection.configPath, "utf-8");
+      configPathForRaw = configInspection.configPath;
+    } else if (
+      (configInspection.status === "needs-migration" || configInspection.status === "invalid") &&
+      "raw" in configInspection
+    ) {
+      configRaw = configInspection.raw;
+      configPathForRaw = configInspection.configPath;
+    }
+    if (configRaw !== undefined && configPathForRaw !== undefined) {
+      const parsed = parseConfigDocument(configRaw, configPathForRaw);
+      // 模拟调度服务环境：只有基线变量 + secrets.env，没有交互 shell 的变量。
+      const serviceBaselineEnv: Record<string, string> = {};
+      for (const key of SCHEDULED_SERVICE_BASELINE_ENV_KEYS) {
+        const value = process.env[key];
+        if (value !== undefined) {
+          serviceBaselineEnv[key] = value;
+        }
+      }
+      const report = auditPlaceholderResolution(parsed, {
+        processEnv: serviceBaselineEnv,
+        secretsEnv: secrets?.variables ?? {},
+      });
+      unresolved = report.unresolved;
+      placeholderTotal = report.placeholders.length;
+    }
+  } catch {
+    // 配置解析问题由"配置文件"检查项负责报告，这里不重复报错。
+  }
+  return formatSecretsAndPlaceholderCheck({
+    secretsPath,
+    secretsExists: permission.exists,
+    secretsIsPrivate: permission.isPrivate,
+    secretsVariableCount: Object.keys(secrets?.variables ?? {}).length,
+    unresolved,
+    placeholderTotal,
+  });
+}
+
+export interface SecretsPlaceholderCheckInput {
+  readonly secretsPath: string;
+  readonly secretsExists: boolean;
+  readonly secretsIsPrivate: boolean | undefined;
+  readonly secretsVariableCount: number;
+  readonly unresolved: ReadonlyArray<{ readonly name: string; readonly paths: readonly string[] }>;
+  readonly placeholderTotal: number;
+}
+
+export function formatSecretsAndPlaceholderCheck(
+  input: SecretsPlaceholderCheckInput,
+): CheckResult {
+  const name = "Secrets 与占位符解析";
+  const problems: string[] = [];
+  const fixes: string[] = [];
+
+  if (input.unresolved.length > 0) {
+    const list = input.unresolved.map((item) => `\${${item.name}}`).join("、");
+    problems.push(
+      `${input.unresolved.length} 个占位符在调度服务（launchd/schtasks）环境下无法解析：${list}（调度服务不会加载你的 .zshrc）`,
+    );
+    fixes.push(
+      `把对应值写入 \`${input.secretsPath}\`（chmod 600，每行 KEY=VALUE）；运行 \`roll doctor\` 可复查`,
+    );
+  }
+
+  if (input.secretsExists && input.secretsIsPrivate === false) {
+    problems.push(`${input.secretsPath} 权限过宽（非 600），其他用户可能读取密钥`);
+    fixes.push(`运行 \`chmod 600 ${input.secretsPath}\` 收紧权限`);
+  }
+
+  if (problems.length > 0) {
+    return {
+      name,
+      status: "warn",
+      message: problems.join("；"),
+      fix: fixes.join("；"),
+      details: {
+        type: "secrets-placeholder",
+        unresolved: input.unresolved.map((item) => item.name),
+        secretsExists: input.secretsExists,
+        secretsIsPrivate: input.secretsIsPrivate,
+      },
+    };
+  }
+
+  if (input.placeholderTotal === 0) {
+    return { name, status: "ok", message: "配置中未检测到 ${ENV_VAR} 占位符" };
+  }
+  return {
+    name,
+    status: "ok",
+    message: `${input.placeholderTotal} 个占位符均可解析（secrets.env 提供 ${input.secretsVariableCount} 个值）`,
+    details: { type: "secrets-placeholder", placeholderTotal: input.placeholderTotal },
+  };
 }
 
 export function formatSchedulerServiceCheck(input: SchedulerServiceCheckInput): CheckResult {
