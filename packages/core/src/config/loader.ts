@@ -6,6 +6,7 @@ import { agentsConfigSchema, installConfigSchema, rollConfigSchema } from "./sch
 import type { RollConfig } from "./schema.ts";
 import { DEFAULT_CONFIG, CONFIG_FILE_NAMES } from "./defaults.ts";
 import { decodeFromYaml } from "./key-codec.ts";
+import { loadSecretsEnv } from "./secrets-env.ts";
 import {
   detectKnownConfigMigrations,
   formatConfigMigrationError,
@@ -20,26 +21,50 @@ interface YamlLinePosition {
 
 /**
  * 替换字符串中的 `${ENV_VAR}` 为对应环境变量值。
- * 未设置的环境变量保留原始占位符。
+ * 优先取 `process.env` 的非空值；空串视为未设置，回退 `fallbackEnv`（secrets.env）；
+ * 两者都缺失时保留原始占位符。
  */
-function resolveEnvVars(obj: unknown): unknown {
+function resolveEnvVars(
+  obj: unknown,
+  fallbackEnv: Readonly<Record<string, string>> = {},
+): unknown {
   if (typeof obj === "string") {
     return obj.replace(/\$\{([^}]+)\}/g, (original, varName: string) => {
-      const value = process.env[varName];
-      return value ?? original;
+      const fromProcess = process.env[varName];
+      if (fromProcess !== undefined && fromProcess.length > 0) {
+        return fromProcess;
+      }
+      const fromFallback = fallbackEnv[varName];
+      if (fromFallback !== undefined && fromFallback.length > 0) {
+        return fromFallback;
+      }
+      return original;
     });
   }
   if (Array.isArray(obj)) {
-    return obj.map(resolveEnvVars);
+    return obj.map((item) => resolveEnvVars(item, fallbackEnv));
   }
   if (isRecord(obj)) {
     const result: Record<string, unknown> = {};
     for (const [key, value] of Object.entries(obj)) {
-      result[key] = resolveEnvVars(value);
+      result[key] = resolveEnvVars(value, fallbackEnv);
     }
     return result;
   }
   return obj;
+}
+
+/**
+ * 加载 `~/.roll-agent/secrets.env` 作为 `${ENV_VAR}` 占位符的二级解析源，
+ * 覆盖 launchd / schtasks 等不加载交互 shell 环境的进程。
+ */
+function loadFallbackEnv(): Readonly<Record<string, string>> {
+  try {
+    return loadSecretsEnv()?.variables ?? {};
+  } catch {
+    // secrets.env 不可读时不阻断配置加载，未解析占位符由既有校验报告。
+    return {};
+  }
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -273,7 +298,7 @@ function parseAndCheckMigrations(
 export function validateConfigText(raw: string, configPath: string): RollConfig {
   const parsed = parseAndCheckMigrations(raw, configPath);
 
-  const transformed = resolveEnvVars(decodeFromYaml(parsed));
+  const transformed = resolveEnvVars(decodeFromYaml(parsed), loadFallbackEnv());
   if (!isRecord(transformed)) {
     throw new Error(`Invalid config file: ${configPath} (expected YAML object)`);
   }
@@ -294,7 +319,7 @@ export function validateConfigText(raw: string, configPath: string): RollConfig 
 function validateAgentsConfigText(raw: string, configPath: string): RollConfig["agents"] {
   const parsed = parseAndCheckMigrations(raw, configPath, { scope: "agents" });
 
-  const transformed = resolveEnvVars(decodeFromYaml(parsed));
+  const transformed = resolveEnvVars(decodeFromYaml(parsed), loadFallbackEnv());
   if (!isRecord(transformed)) {
     throw new Error(`Invalid config file: ${configPath} (expected YAML object)`);
   }
@@ -329,7 +354,7 @@ function validateAgentsConfigText(raw: string, configPath: string): RollConfig["
 function validateInstallConfigText(raw: string, configPath: string): RollConfig["install"] {
   const parsed = parseConfigDocument(raw, configPath);
 
-  const transformed = resolveEnvVars(decodeFromYaml(parsed));
+  const transformed = resolveEnvVars(decodeFromYaml(parsed), loadFallbackEnv());
   if (!isRecord(transformed)) {
     throw new Error(`Invalid config file: ${configPath} (expected YAML object)`);
   }
