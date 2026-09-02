@@ -172,6 +172,10 @@ chat 走独立的 skill 通道（对齐 `npx skills add` 标准生态，非 roll
 - **工作区工程约定**：`packages/runtime/src/engine/workspace-instructions.ts` 从 cwd 向上找最近一层 `AGENTS.md`（优先）/ `CLAUDE.md`，每轮按 mtime/size 缓存刷新；`system-prompt.ts` 的 `# 工作区工程约定` 段在 `# 输出` 之后；`ConversationEngine` 按 `chat.instructions`（auto | off | path）构造 source，三入口共用；告警走 `onWorkspaceInstructionsIssue` → stderr
 - **测试封闭性**：引擎/会话测试需传 `skillLibrary: null`（引擎）或不传 `skillLibrary`（会话）避免读取真实 `~/.agents/skills`；需要隔离工作区约定时引擎传 `workspaceInstructions: null`（会话不传 `workspaceInstructions`）
 
+### React / Ink 必须以 production 构建运行
+
+`packages/core/src/cli/index.ts` 的首个 import 是 `./default-node-env.ts`，把 `NODE_ENV` 默认为 `production`（已显式设置时保持不变）。不要把它移后或删除：React 19.2 的 development 构建会在每次组件渲染时调用 `performance.measure()` 并把变更前后的 `children` 文本放进 `detail`，Node 会把所有 measure 条目永久留在 user-timing 缓冲区，流式 thinking 每 32ms 刷新一次预览，几十分钟就会撞上 V8 堆上限（issue #242）。改动 chat 渲染或流式路径后，用 `pnpm bench:chat-heap` 验证堆增长斜率（见 `docs/how-to-benchmark-chat-memory.md`）。
+
 ### 日志输出约定
 
 - **stdout** — 仅输出数据（供管道和 `--json` 结构化输出）

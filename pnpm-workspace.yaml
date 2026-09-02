@@ -3,6 +3,7 @@ packages:
   - "agents/*"
 
 overrides:
+  "browserslist@4.28.5": 4.28.8
   "fast-uri@3.1.2": 3.1.5
   hono: 4.12.25
   "ip-address@10.2.0": 10.3.1
