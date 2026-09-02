@@ -1,3 +1,4 @@
+import "./default-node-env.ts";
 import { defineCommand, runMain } from "citty";
 import chalk from "chalk";
 import { checkForUpdate, getCurrentVersion } from "./utils/update-checker.ts";
