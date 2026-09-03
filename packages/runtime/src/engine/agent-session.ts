@@ -214,6 +214,14 @@ export interface SessionCompactionSettings {
   readonly keepRecentTokens: number;
 }
 
+export interface SessionModelSwitch {
+  readonly model: LanguageModelV4;
+  readonly contextWindow?: number;
+  readonly providerOptions?: SharedV4ProviderOptions;
+  readonly structuredOutputProviderOptions?: SharedV4ProviderOptions;
+  readonly structuredOutputReasoning?: NonNullable<LanguageModelV4CallOptions["reasoning"]>;
+}
+
 export interface AgentSessionOptions {
   readonly id: string;
   readonly model: LanguageModelV4;
@@ -828,7 +836,7 @@ function prependLastUserContext(
 
 export class AgentSession {
   readonly id: string;
-  private readonly model: LanguageModelV4;
+  private model: LanguageModelV4;
   private readonly maxSteps: number;
   private readonly messages: ModelMessage[];
   private readonly onPersist:
@@ -856,13 +864,13 @@ export class AgentSession {
   private readonly inMemoryTranscript: ArchivedTranscriptMessage[] = [];
   private readonly legacyV1ActiveSnapshot: LegacyV1ActiveSnapshot | undefined;
   private readonly compactionResources = new Map<string, CompactionResource>();
-  private readonly contextWindow: number | undefined;
+  private contextWindow: number | undefined;
   private readonly compaction: SessionCompactionSettings | undefined;
   private readonly turnTimeoutMs: number | undefined;
   private readonly onClose: (() => void) | undefined;
   private providerOptions: SharedV4ProviderOptions | undefined;
-  private readonly structuredOutputProviderOptions: SharedV4ProviderOptions | undefined;
-  private readonly structuredOutputReasoning:
+  private structuredOutputProviderOptions: SharedV4ProviderOptions | undefined;
+  private structuredOutputReasoning:
     | NonNullable<LanguageModelV4CallOptions["reasoning"]>
     | undefined;
   private readonly onProviderOptionsChange:
@@ -2462,6 +2470,20 @@ export class AgentSession {
   setProviderOptions(providerOptions: SharedV4ProviderOptions | undefined): void {
     this.providerOptions = providerOptions;
     this.onProviderOptionsChange?.(providerOptions);
+  }
+
+  switchModel(input: SessionModelSwitch): void {
+    if (this.activeTurn !== undefined) {
+      throw new Error("会话正在生成回复，稍后再切换模型");
+    }
+    this.model = input.model;
+    this.contextWindow = input.contextWindow;
+    this.providerOptions = input.providerOptions;
+    this.structuredOutputProviderOptions = input.structuredOutputProviderOptions;
+    this.structuredOutputReasoning = input.structuredOutputReasoning;
+    this.lastInputTokens = undefined;
+    this.measuredMessageCount = undefined;
+    this.promptOverhead = undefined;
   }
 
   private async runAutoCompactionPasses(

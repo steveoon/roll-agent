@@ -5,6 +5,7 @@ export type {
   CreateSessionInput,
 } from "./engine/conversation-engine.ts";
 export { AgentSession } from "./engine/agent-session.ts";
+export type { SessionModelSwitch } from "./engine/agent-session.ts";
 export type {
   AgentSessionOptions,
   SessionCompactionSettings,
