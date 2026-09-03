@@ -1,7 +1,12 @@
 import { z } from "zod";
 import { listConfigGuidanceEntries, type ConfigGuidanceEntry } from "./guidance.ts";
 import type { RegisteredAgent } from "../types/agent.ts";
-import { DEFAULT_CONFIG } from "./defaults.ts";
+import {
+  DEFAULT_CONFIG,
+  DEFAULT_LLM_MODELS,
+  LLM_PROVIDER_LABELS,
+  LLM_PROVIDER_OPTIONS,
+} from "./defaults.ts";
 import { normalizeUserPath } from "./key-codec.ts";
 import { isRollConfigReadOnlyPath } from "./edit-policy.ts";
 import { rollConfigSchema } from "./schema.ts";
@@ -64,9 +69,16 @@ export interface ConfigObjectCatalogNode extends ConfigCatalogNodeBase {
   readonly fields: Readonly<Record<string, ConfigCatalogNode>>;
 }
 
+export interface ConfigRecordKeyOption {
+  readonly value: string;
+  readonly label: string;
+  readonly hint?: string;
+}
+
 export interface ConfigRecordCatalogNode extends ConfigCatalogNodeBase {
   readonly kind: "record";
   readonly value: ConfigCatalogNode;
+  readonly keyOptions?: readonly ConfigRecordKeyOption[];
 }
 
 export interface ConfigArrayCatalogNode extends ConfigCatalogNodeBase {
@@ -123,6 +135,23 @@ export interface RollConfigCatalog {
   readonly agents: readonly AgentConfigCatalog[];
 }
 
+const LLM_PROVIDER_KEY_OPTIONS: readonly ConfigRecordKeyOption[] = LLM_PROVIDER_OPTIONS.map(
+  (value) => ({
+    value,
+    label: LLM_PROVIDER_LABELS[value],
+    hint: `默认模型 ${DEFAULT_LLM_MODELS[value]}`,
+  }),
+);
+
+const RECORD_KEY_OPTIONS_BY_PATH: Readonly<Record<string, readonly ConfigRecordKeyOption[]>> = {
+  "llm.providers": LLM_PROVIDER_KEY_OPTIONS,
+};
+
+const PROVIDER_SELECT_PATHS: ReadonlySet<string> = new Set([
+  "llm.defaultProvider",
+  "runtime.provider",
+]);
+
 export function buildRollConfigCatalog(agents: readonly RegisteredAgent[] = []): RollConfigCatalog {
   const root = buildCatalogNode(rollConfigSchema, [], DEFAULT_CONFIG);
   if (root.kind !== "object") {
@@ -159,11 +188,13 @@ function buildCatalogNode(
   }
 
   if (unwrapped instanceof z.ZodRecord) {
+    const keyOptions = RECORD_KEY_OPTIONS_BY_PATH[path.join(".")];
     return {
       ...base,
       kind: "record",
       widget: "record",
       value: buildCatalogNode(unwrapped.valueSchema, [...path, "*"], undefined),
+      ...(keyOptions ? { keyOptions } : {}),
     };
   }
 
@@ -186,6 +217,9 @@ function buildCatalogNode(
   }
 
   if (unwrapped instanceof z.ZodString) {
+    if (PROVIDER_SELECT_PATHS.has(path.join("."))) {
+      return { ...base, kind: "enum", widget: "select", options: [...LLM_PROVIDER_OPTIONS] };
+    }
     return { ...base, kind: "string", widget: inferStringWidget(path) };
   }
   if (unwrapped instanceof z.ZodNumber) {

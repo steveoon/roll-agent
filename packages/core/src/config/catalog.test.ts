@@ -3,6 +3,7 @@ import { describe, it } from "node:test";
 import { parse as parseYaml } from "yaml";
 import type { RegisteredAgent } from "../types/agent.ts";
 import { buildRollConfigCatalog, type ConfigCatalogNode } from "./catalog.ts";
+import { DEFAULT_LLM_MODELS, LLM_PROVIDER_OPTIONS } from "./defaults.ts";
 import { findConfigGuidance, listConfigGuidanceEntries } from "./guidance.ts";
 
 function findNode(root: ConfigCatalogNode, path: readonly string[]): ConfigCatalogNode {
@@ -236,6 +237,34 @@ describe("buildRollConfigCatalog", () => {
     const browserDataDir = findNode(catalog.root, ["browser", "instances", "*", "userDataDir"]);
     assert.equal(browserDataDir.defaultValue, undefined);
     assert.equal(browserDataDir.persistedRequired, true);
+  });
+
+  it("offers the supported LLM provider names as record keys and select options", () => {
+    const catalog = buildRollConfigCatalog();
+
+    const providers = findNode(catalog.root, ["llm", "providers"]);
+    assert.ok(providers.kind === "record");
+    assert.deepEqual(
+      providers.keyOptions?.map((option) => option.value),
+      [...LLM_PROVIDER_OPTIONS],
+    );
+    const google = providers.keyOptions?.find((option) => option.value === "google");
+    assert.equal(google?.label, "Google Gemini");
+    assert.equal(google?.hint, `默认模型 ${DEFAULT_LLM_MODELS.google}`);
+
+    const defaultProvider = findNode(catalog.root, ["llm", "defaultProvider"]);
+    assert.ok(defaultProvider.kind === "enum");
+    assert.equal(defaultProvider.widget, "select");
+    assert.deepEqual(defaultProvider.options, [...LLM_PROVIDER_OPTIONS]);
+    assert.equal(defaultProvider.defaultValue, "anthropic");
+
+    const runtimeProvider = findNode(catalog.root, ["runtime", "provider"]);
+    assert.ok(runtimeProvider.kind === "enum");
+    assert.deepEqual(runtimeProvider.options, [...LLM_PROVIDER_OPTIONS]);
+
+    const approvalOverrides = findNode(catalog.root, ["runtime", "approval", "overrides"]);
+    assert.ok(approvalOverrides.kind === "record");
+    assert.equal(approvalOverrides.keyOptions, undefined);
   });
 
   it("represents dynamic record keys without flattening dotted names", () => {
