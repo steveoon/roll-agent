@@ -70,7 +70,11 @@ function itemRow(item: SessionPickerItem, active: boolean, contentWidth: number)
 export function SessionPicker(props: SessionPickerProps): ReactElement {
   const { items, busy, onSelect, onCancel } = props;
   const labels = props.labels ?? DEFAULT_LABELS;
-  const [cursor, setCursor] = useState(0);
+  const [cursorState, setCursorState] = useState<{
+    readonly items: readonly SessionPickerItem[];
+    readonly cursor: number;
+  }>({ items, cursor: 0 });
+  const cursor = cursorState.items === items ? cursorState.cursor : 0;
   const boundedCursor = Math.min(cursor, Math.max(0, items.length - 1));
 
   useInput((input, key) => {
@@ -85,11 +89,17 @@ export function SessionPicker(props: SessionPickerProps): ReactElement {
       return;
     }
     if (key.upArrow) {
-      setCursor((current) => Math.max(0, Math.min(current, items.length - 1) - 1));
+      setCursorState((current) => {
+        const base = current.items === items ? Math.min(current.cursor, items.length - 1) : 0;
+        return { items, cursor: Math.max(0, base - 1) };
+      });
       return;
     }
     if (key.downArrow) {
-      setCursor((current) => Math.min(items.length - 1, current + 1));
+      setCursorState((current) => {
+        const base = current.items === items ? current.cursor : 0;
+        return { items, cursor: Math.min(items.length - 1, base + 1) };
+      });
       return;
     }
     if (key.return || input.includes("\r") || input.includes("\n")) {

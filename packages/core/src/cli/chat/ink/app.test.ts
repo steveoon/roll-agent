@@ -1963,3 +1963,47 @@ test("ChatApp /model with an argument switches directly and reports failures", a
   assert.match(plain(lastFrame() ?? ""), /qwen3\.8-max/);
   unmount();
 });
+
+test("ChatApp set-as-default prompt starts on keep even after moving the model cursor", async () => {
+  const session = switchableFakeSession("s1");
+  const defaults: string[] = [];
+  const { stdin, lastFrame, unmount } = render(
+    h(ChatApp, {
+      session: session.session,
+      model: "qwen3.8-max",
+      onUserSubmit: () => {},
+      onExit: () => {},
+      modelSwitching: {
+        loadItems: () => [
+          { id: "qwen/qwen3.8-max", title: "qwen/qwen3.8-max", meta: "配置默认 · 当前" },
+          { id: "google/gemini-3.8-flash", title: "google/gemini-3.8-flash", meta: "内置默认" },
+        ],
+        switchTo: async (input: string) => ({
+          id: input,
+          model: "gemini-3.8-flash",
+          contextWindow: 1_000_000,
+        }),
+        setAsDefault: async (id: string) => {
+          defaults.push(id);
+          return "已写入";
+        },
+      },
+    }),
+  );
+  await delay(20);
+  stdin.write("/model");
+  await delay(20);
+  stdin.write("\r");
+  await delay(20);
+  stdin.write("\x1b[B");
+  await delay(10);
+  stdin.write("\r");
+  await waitFor(() => {
+    assert.match(lastFrame() ?? "", /❯ 仅本次 roll chat 生效/);
+  });
+  stdin.write("\r");
+  await delay(30);
+  assert.deepEqual(defaults, []);
+  assert.doesNotMatch(lastFrame() ?? "", /是否设为默认 LLM/);
+  unmount();
+});
