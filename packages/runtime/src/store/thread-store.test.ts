@@ -431,6 +431,20 @@ test("ThreadStore updateTitle 更新标题", () => {
   }
 });
 
+test("ThreadStore updateModel 更新线程模型", () => {
+  const dir = tempDir();
+  try {
+    const store = new ThreadStore(dir);
+    const id = store.createThread({ model: "qwen3.8-max" });
+    assert.equal(store.getThread(id)?.model, "qwen3.8-max");
+    store.updateModel(id, "gemini-3.8-flash");
+    assert.equal(store.getThread(id)?.model, "gemini-3.8-flash");
+    store.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("ThreadStore deleteThread 删除 thread 并级联消息", () => {
   const dir = tempDir();
   try {

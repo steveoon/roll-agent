@@ -858,6 +858,10 @@ export class ThreadStore {
     this.db.prepare("UPDATE threads SET title = ? WHERE id = ?").run(title, threadId);
   }
 
+  updateModel(threadId: string, model: string): void {
+    this.db.prepare("UPDATE threads SET model = ? WHERE id = ?").run(model, threadId);
+  }
+
   deleteThread(threadId: string): void {
     this.db.prepare("DELETE FROM threads WHERE id = ?").run(threadId);
   }
