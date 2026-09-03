@@ -7,11 +7,13 @@ import { createAlibaba } from "@ai-sdk/alibaba";
 import { createAnthropic } from "@ai-sdk/anthropic";
 import { createOpenAI } from "@ai-sdk/openai";
 import { createDeepSeek } from "@ai-sdk/deepseek";
+import { createGoogle, type GoogleGenerativeAIProviderOptions } from "@ai-sdk/google";
 import { createXai } from "@ai-sdk/xai";
 import { runtimeThinkingLevels } from "../config/schema.ts";
 
 export type ThinkingLevel = (typeof runtimeThinkingLevels)[number];
 export type UnifiedReasoning = NonNullable<LanguageModelV4CallOptions["reasoning"]>;
+type GoogleThinkingConfig = NonNullable<GoogleGenerativeAIProviderOptions["thinkingConfig"]>;
 
 const THINKING_BUDGETS = { low: 2048, medium: 8192, high: 16384 } as const;
 const OPENAI_NONE_REASONING_PREFIXES = [
@@ -24,6 +26,9 @@ const OPENAI_NONE_REASONING_PREFIXES = [
 const OPENAI_REASONING_MODEL_PREFIXES = ["o1", "o3", "o4-mini"] as const;
 const XAI_GROK_420_PREFIX = "grok-4.20";
 const XAI_MULTI_AGENT_MARKER = "-multi-agent";
+const GEMINI_25_PRO_MIN_THINKING_BUDGET = 128;
+const GEMINI_PRE_3_MODEL_PATTERN = /^gemini-(?:[12](?:[.-]|$)|pro(?:-vision)?$)/;
+const GEMINI_FLASH_VERSION_PATTERN = /^gemini-(\d+)\.(\d+)-flash(?:$|-(?!lite(?:-|$)))/;
 
 function supportsOpenAINoneReasoningEffort(modelName: string): boolean {
   return OPENAI_NONE_REASONING_PREFIXES.some((prefix) => modelName.startsWith(prefix));
@@ -69,6 +74,43 @@ function isXaiRequiredReasoningModel(modelName: string): boolean {
   );
 }
 
+function isGemini3OrLater(modelName: string): boolean {
+  const name = modelName.toLowerCase();
+  return name.startsWith("gemini-") && !GEMINI_PRE_3_MODEL_PATTERN.test(name);
+}
+
+function minimalGemini3ThinkingLevel(modelName: string): "minimal" | "low" {
+  const name = modelName.toLowerCase();
+  if (name === "gemini-flash-latest") {
+    return "low";
+  }
+  const match = GEMINI_FLASH_VERSION_PATTERN.exec(name);
+  const majorText = match?.[1];
+  const minorText = match?.[2];
+  if (!majorText || !minorText) {
+    return "minimal";
+  }
+  const major = Number(majorText);
+  const minor = Number(minorText);
+  return major > 3 || (major === 3 && minor >= 7) ? "low" : "minimal";
+}
+
+function isGemini25Pro(modelName: string): boolean {
+  return modelName.toLowerCase().includes("gemini-2.5-pro");
+}
+
+function googleThinkingConfig(modelName: string, level: ThinkingLevel): GoogleThinkingConfig {
+  if (isGemini3OrLater(modelName)) {
+    return level === "off"
+      ? { thinkingLevel: minimalGemini3ThinkingLevel(modelName) }
+      : { thinkingLevel: level, includeThoughts: true };
+  }
+  if (level === "off") {
+    return { thinkingBudget: isGemini25Pro(modelName) ? GEMINI_25_PRO_MIN_THINKING_BUDGET : 0 };
+  }
+  return { thinkingBudget: THINKING_BUDGETS[level], includeThoughts: true };
+}
+
 export function thinkingProviderOptions(
   providerName: string,
   modelName: string,
@@ -109,6 +151,9 @@ export function thinkingProviderOptions(
   }
   if (providerName === "deepseek") {
     return { deepseek: { thinking: { type: level === "off" ? "disabled" : "enabled" } } };
+  }
+  if (providerName === "google") {
+    return { google: { thinkingConfig: googleThinkingConfig(modelName, level) } };
   }
   return undefined;
 }
@@ -151,12 +196,16 @@ const PROVIDER_FACTORIES: Record<string, ProviderFactory> = {
     const provider = createXai({ apiKey, ...(baseURL ? { baseURL } : {}) });
     return provider(modelName);
   },
+  google: (modelName, { apiKey, baseURL }) => {
+    const provider = createGoogle({ apiKey, ...(baseURL ? { baseURL } : {}) });
+    return provider(modelName);
+  },
 };
 
 /**
  * 根据 provider 名称创建 AI SDK LanguageModel 实例。
  *
- * 支持: anthropic, openai, deepseek, qwen, xai
+ * 支持: anthropic, openai, deepseek, qwen, xai, google
  */
 export function createProviderModel(
   providerName: string,
@@ -224,6 +273,11 @@ function resolveStructuredOutputReasoning(
         `xAI model "${modelName}" cannot disable reasoning for structured output; set runtime.compaction.thinking-level to low or higher`,
       );
     }
+  }
+  if (providerName === "google" && level === "off" && isGemini25Pro(modelName)) {
+    throw new Error(
+      `Google model "${modelName}" cannot disable reasoning for structured output; set runtime.compaction.thinking-level to low or higher`,
+    );
   }
   return unifiedReasoningForThinkingLevel(level);
 }

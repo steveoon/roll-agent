@@ -100,6 +100,7 @@ const INIT_API_KEY_ENV_BY_PROVIDER = {
   qwen: "DASHSCOPE_API_KEY",
   deepseek: "DEEPSEEK_API_KEY",
   xai: "XAI_API_KEY",
+  google: "GOOGLE_GENERATIVE_AI_API_KEY",
 } as const satisfies Record<LlmProviderOption, string>;
 
 function normalizeAnswer(value: string | undefined, fallback: string): string {

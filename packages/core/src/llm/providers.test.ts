@@ -98,6 +98,13 @@ describe("createProviderModel", () => {
     assert.equal(model.provider, "xai.responses");
   });
 
+  it("should create a google gemini model", () => {
+    const model = createProviderModel("google", "gemini-3.7-flash", "test-key");
+    assert.ok(model);
+    assert.equal(model.modelId, "gemini-3.7-flash");
+    assert.equal(model.provider, "google.generative-ai");
+  });
+
   it("should accept custom baseURL", () => {
     const model = createProviderModel(
       "openai",
@@ -179,6 +186,7 @@ describe("resolveLLMCall", () => {
       { provider: "anthropic", model: "claude-sonnet-4-6" },
       { provider: "deepseek", model: "deepseek-v4-flash" },
       { provider: "xai", model: "grok-4.5" },
+      { provider: "google", model: "gemini-3.7-flash" },
     ] as const;
 
     for (const { provider, model } of providers) {
@@ -208,6 +216,8 @@ describe("resolveLLMCall", () => {
       { provider: "anthropic", model: "claude-sonnet-4-6" },
       { provider: "deepseek", model: "deepseek-v4-flash" },
       { provider: "xai", model: "grok-4.3" },
+      { provider: "google", model: "gemini-3.7-flash" },
+      { provider: "google", model: "gemini-2.5-flash" },
     ] as const;
 
     for (const { provider, model } of supported) {
@@ -261,6 +271,22 @@ describe("resolveLLMCall", () => {
         (error: Error) => error.message.includes(`xAI model "${model}" cannot disable reasoning`),
       );
     }
+  });
+
+  it("fails fast when Gemini 2.5 Pro structured output cannot disable reasoning", () => {
+    assert.throws(
+      () =>
+        resolveLLMCall(
+          "google",
+          "gemini-2.5-pro",
+          "test-key",
+          "structured-output",
+          undefined,
+          "off",
+        ),
+      (error: Error) =>
+        error.message.includes('Google model "gemini-2.5-pro" cannot disable reasoning'),
+    );
   });
 
   it("omits effort for fixed xAI grok-4.20 aliases", () => {
@@ -330,6 +356,11 @@ describe("resolveLLMCall", () => {
         provider: "xai",
         model: "grok-4.5",
         expected: { xai: { reasoningEffort: "high", reasoningSummary: "auto" } },
+      },
+      {
+        provider: "google",
+        model: "gemini-3.7-flash",
+        expected: { google: { thinkingConfig: { thinkingLevel: "high", includeThoughts: true } } },
       },
     ] as const;
 
@@ -492,6 +523,44 @@ describe("resolveLLMCall", () => {
     assert.deepEqual(capturedBody.reasoning, { effort: "medium", summary: "auto" });
   });
 
+  it("serializes Gemini thinking config through generateContent", async () => {
+    const originalFetch = globalThis.fetch;
+    let capturedUrl: string | undefined;
+    let capturedBody: unknown;
+
+    try {
+      globalThis.fetch = async (input: string | URL | Request, init?: RequestInit) => {
+        capturedUrl = input instanceof Request ? input.url : String(input);
+        if (typeof init?.body !== "string") {
+          throw new Error("Expected a JSON request body");
+        }
+        capturedBody = JSON.parse(init.body);
+
+        return new Response("", {
+          status: 200,
+          headers: { "content-type": "text/event-stream" },
+        });
+      };
+
+      const resolved = resolveLLMCall("google", "gemini-3.7-flash", "test-key", "chat");
+      const result = await resolved.model.doStream({
+        prompt: [{ role: "user", content: [{ type: "text", text: "test" }] }],
+        ...(resolved.providerOptions ? { providerOptions: resolved.providerOptions } : {}),
+      });
+      await result.stream.cancel();
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+
+    assert.ok(capturedUrl?.includes("/models/gemini-3.7-flash:streamGenerateContent"), capturedUrl);
+    assert.ok(isRecord(capturedBody));
+    assert.ok(isRecord(capturedBody.generationConfig));
+    assert.deepEqual(capturedBody.generationConfig.thinkingConfig, {
+      thinkingLevel: "medium",
+      includeThoughts: true,
+    });
+  });
+
   it("applies the same thinking mapping to sampling calls as chat calls", () => {
     const chatOff = resolveLLMCall("qwen", "qwen3.7-plus", "k", "chat", undefined, "off");
     const samplingOff = resolveLLMCall("qwen", "qwen3.7-plus", "k", "sampling", undefined, "off");
@@ -616,6 +685,54 @@ describe("thinkingProviderOptions", () => {
     assert.deepEqual(thinkingProviderOptions("deepseek", "deepseek-reasoner", "low"), enabled);
     assert.deepEqual(thinkingProviderOptions("deepseek", "deepseek-reasoner", "medium"), enabled);
     assert.deepEqual(thinkingProviderOptions("deepseek", "deepseek-reasoner", "high"), enabled);
+  });
+
+  it("maps Gemini 3 thinking levels and surfaces thought summaries", () => {
+    assert.deepEqual(thinkingProviderOptions("google", "gemini-3.7-flash", "low"), {
+      google: { thinkingConfig: { thinkingLevel: "low", includeThoughts: true } },
+    });
+    assert.deepEqual(thinkingProviderOptions("google", "gemini-3.7-flash", "medium"), {
+      google: { thinkingConfig: { thinkingLevel: "medium", includeThoughts: true } },
+    });
+    assert.deepEqual(thinkingProviderOptions("google", "gemini-3.1-pro-preview", "high"), {
+      google: { thinkingConfig: { thinkingLevel: "high", includeThoughts: true } },
+    });
+  });
+
+  it("maps Gemini 3 off to the lowest thinking level each model accepts", () => {
+    assert.deepEqual(thinkingProviderOptions("google", "gemini-3.1-pro-preview", "off"), {
+      google: { thinkingConfig: { thinkingLevel: "minimal" } },
+    });
+    assert.deepEqual(thinkingProviderOptions("google", "gemini-3.5-flash", "off"), {
+      google: { thinkingConfig: { thinkingLevel: "minimal" } },
+    });
+    assert.deepEqual(thinkingProviderOptions("google", "gemini-3.7-flash-lite", "off"), {
+      google: { thinkingConfig: { thinkingLevel: "minimal" } },
+    });
+    assert.deepEqual(thinkingProviderOptions("google", "gemini-3.7-flash", "off"), {
+      google: { thinkingConfig: { thinkingLevel: "low" } },
+    });
+    assert.deepEqual(thinkingProviderOptions("google", "gemini-3.8-flash-preview", "off"), {
+      google: { thinkingConfig: { thinkingLevel: "low" } },
+    });
+    assert.deepEqual(thinkingProviderOptions("google", "gemini-flash-latest", "off"), {
+      google: { thinkingConfig: { thinkingLevel: "low" } },
+    });
+  });
+
+  it("maps Gemini 2.5 thinking to token budgets", () => {
+    assert.deepEqual(thinkingProviderOptions("google", "gemini-2.5-flash", "medium"), {
+      google: { thinkingConfig: { thinkingBudget: 8192, includeThoughts: true } },
+    });
+    assert.deepEqual(thinkingProviderOptions("google", "gemini-2.5-pro", "high"), {
+      google: { thinkingConfig: { thinkingBudget: 16_384, includeThoughts: true } },
+    });
+    assert.deepEqual(thinkingProviderOptions("google", "gemini-2.5-flash", "off"), {
+      google: { thinkingConfig: { thinkingBudget: 0 } },
+    });
+    assert.deepEqual(thinkingProviderOptions("google", "gemini-2.5-pro", "off"), {
+      google: { thinkingConfig: { thinkingBudget: 128 } },
+    });
   });
 
   it("returns undefined for unknown providers", () => {

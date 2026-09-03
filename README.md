@@ -100,9 +100,10 @@ agents:
   data-dir: ~/.roll-agent/agents
 ```
 
-支持的 provider：`anthropic`、`openai`、`deepseek`、`qwen`、`xai`。每个 provider 可配置
-`base-url` 用于自定义 API 端点；xAI 默认模型为 `grok-4.5`（500k context window），API key 可通过
-`XAI_API_KEY` 注入。
+支持的 provider：`anthropic`、`openai`、`deepseek`、`qwen`、`xai`、`google`（Gemini）。每个 provider
+可配置 `base-url` 用于自定义 API 端点；xAI 默认模型为 `grok-4.5`（500k context window），API key 可通过
+`XAI_API_KEY` 注入；Google Gemini 默认模型为 `gemini-3.8-flash`（1M context window），API key 可通过
+`GOOGLE_GENERATIVE_AI_API_KEY` 注入。
 `ask.llm-model` 可选；未设置时会回退到 `llm.default-model`。
 
 如果本地还留着旧版 `router:` 配置段：
@@ -574,7 +575,7 @@ roll --help
 | 运行时 | Node.js 22.6+（原生 Type Stripping） |
 | CLI | citty（类型安全命令定义） |
 | MCP | @modelcontextprotocol/sdk |
-| LLM | AI SDK v6 + Anthropic/OpenAI/DeepSeek/Qwen |
+| LLM | AI SDK v7 + Anthropic/OpenAI/DeepSeek/Qwen/xAI/Google Gemini |
 | 配置 | YAML + Zod 校验 |
 | 测试 | node:test + node:assert（零外部依赖） |
 | Web 配置台 | React + Tailwind CSS |
