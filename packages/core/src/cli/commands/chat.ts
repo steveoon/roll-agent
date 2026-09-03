@@ -42,6 +42,7 @@ import {
   loadRuntime,
   resolveChatLlmCalls,
   resolveChatLlmReadiness,
+  resolveChatLlmSwitch,
   type ChatEngineSurface,
   type ConversationEngineInstance,
   type ThreadStoreInstance,
@@ -54,6 +55,7 @@ export {
   createChatEngine,
   resolveChatLlmCalls,
   resolveChatLlmReadiness,
+  resolveChatLlmSwitch,
   runJsonTurn,
 };
 export type { ChatEngineSurface };

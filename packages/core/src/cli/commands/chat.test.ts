@@ -17,6 +17,7 @@ import {
   createChatEngine,
   resolveChatLlmCalls,
   resolveChatLlmReadiness,
+  resolveChatLlmSwitch,
   runJsonTurn,
   runRepl,
 } from "./chat.ts";
@@ -186,6 +187,32 @@ test("resolveChatLlmCalls skips structured reasoning for truncate compaction", (
 
   assert.equal(resolved.structuredOutputReasoning, undefined);
   assert.equal(resolved.structuredOutputProviderOptions, undefined);
+});
+
+test("resolveChatLlmSwitch builds an engine switch from config for the chosen provider", () => {
+  const config = parseChatConfig({
+    llm: {
+      defaultProvider: "qwen",
+      defaultModel: "qwen3.8-max",
+      providers: { qwen: { apiKey: "k" }, google: { apiKey: "g" } },
+    },
+    agents: { dataDir: "/tmp/agents" },
+  });
+  const next = resolveChatLlmSwitch(
+    config,
+    { provider: "google", model: "gemini-3.8-flash" },
+    "high",
+  );
+  assert.equal(next.modelName, "gemini-3.8-flash");
+  assert.equal(next.model.modelId, "gemini-3.8-flash");
+  assert.deepEqual(next.providerOptions, {
+    google: { thinkingConfig: { thinkingLevel: "high", includeThoughts: true } },
+  });
+  assert.equal(next.structuredOutputReasoning, "high");
+  assert.throws(
+    () => resolveChatLlmSwitch(config, { provider: "xai", model: "grok-4.5" }, "medium"),
+    /未配置/u,
+  );
 });
 
 test("createChatEngine forwards structured output controls to the session", async () => {
