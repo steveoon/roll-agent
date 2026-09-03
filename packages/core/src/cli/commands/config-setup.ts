@@ -13,6 +13,7 @@ import {
   DEFAULT_CONFIG,
   DEFAULT_LLM_MODELS,
   DEFAULT_LLM_PROVIDER,
+  LLM_PROVIDER_LABELS,
   LLM_PROVIDER_OPTIONS,
   type LlmProviderOption,
 } from "../../config/defaults.ts";
@@ -139,8 +140,8 @@ export async function setupLlm(prompts: ConfigPromptAdapter): Promise<string> {
     message: "选择默认 LLM provider",
     options: LLM_PROVIDER_OPTIONS.map((value) => ({
       value,
-      label: value,
-      hint: DEFAULT_LLM_MODELS[value],
+      label: `${value} · ${LLM_PROVIDER_LABELS[value]}`,
+      hint: `默认模型 ${DEFAULT_LLM_MODELS[value]}`,
     })),
     initialValue: DEFAULT_LLM_PROVIDER,
   });

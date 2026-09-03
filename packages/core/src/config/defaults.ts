@@ -21,6 +21,15 @@ export const DEFAULT_LLM_MODELS = {
   google: "gemini-3.8-flash",
 } as const satisfies Record<LlmProviderOption, string>;
 
+export const LLM_PROVIDER_LABELS = {
+  anthropic: "Anthropic Claude",
+  openai: "OpenAI GPT",
+  qwen: "阿里云通义千问 Qwen",
+  deepseek: "DeepSeek",
+  xai: "xAI Grok",
+  google: "Google Gemini",
+} as const satisfies Record<LlmProviderOption, string>;
+
 /** 仅为 schema 中没有默认值、但根配置要求存在的字段提供种子。 */
 const DEFAULT_CONFIG_SEED = {
   llm: {
