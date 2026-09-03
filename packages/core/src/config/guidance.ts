@@ -93,6 +93,14 @@ export const CONFIG_GUIDANCE_ENTRIES = [
       "llm:\n  providers:\n    google:\n      models:\n        - gemini-3.8-flash\n        - gemini-3.1-pro-preview",
     setupCommand: "roll config setup llm",
   },
+  {
+    path: "llm.providers.<provider>.models.<item>",
+    title: "可选模型 ID",
+    purpose: "单个模型 ID，需与该 provider API 接受的模型名一致。",
+    defaultBehavior: "列表为空时不产生额外候选。",
+    example: "llm:\n  providers:\n    google:\n      models:\n        - gemini-3.8-flash",
+    setupCommand: "roll config setup llm",
+  },
 
   // Ask
   {
