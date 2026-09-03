@@ -103,3 +103,53 @@ it("registerSamplingHandler applies updated providerOptions to subsequent reques
   assert.deepEqual(model.doGenerateCalls[0]?.providerOptions, initialOptions);
   assert.deepEqual(model.doGenerateCalls[1]?.providerOptions, nextOptions);
 });
+
+it("registerSamplingHandler routes subsequent requests to a swapped model", async () => {
+  type SamplingRequestHandler = (request: {
+    readonly params: {
+      readonly messages: ReadonlyArray<{
+        readonly role: string;
+        readonly content: unknown;
+      }>;
+      readonly maxTokens: number;
+    };
+  }) => Promise<unknown>;
+
+  let requestHandler: SamplingRequestHandler = async () => undefined;
+  const client = {
+    setRequestHandler: (_schema: unknown, handler: SamplingRequestHandler) => {
+      requestHandler = handler;
+    },
+  } as unknown as Client;
+  const generateResult = () => ({
+    content: [{ type: "text" as const, text: "ok" }],
+    finishReason: { unified: "stop" as const, raw: undefined },
+    usage: {
+      inputTokens: { total: 1, noCache: 1, cacheRead: undefined, cacheWrite: undefined },
+      outputTokens: { total: 1, text: 1, reasoning: undefined },
+    },
+    warnings: [],
+  });
+  const first = new MockLanguageModelV4({
+    modelId: "first",
+    doGenerate: async (_options: LanguageModelV4CallOptions) => generateResult(),
+  });
+  const second = new MockLanguageModelV4({
+    modelId: "second",
+    doGenerate: async (_options: LanguageModelV4CallOptions) => generateResult(),
+  });
+  const controller = registerSamplingHandler(client, first);
+  const request = {
+    params: {
+      messages: [{ role: "user", content: { type: "text", text: "hi" } }],
+      maxTokens: 128,
+    },
+  };
+
+  await requestHandler(request);
+  controller.setModel(second);
+  await requestHandler(request);
+
+  assert.equal(first.doGenerateCalls.length, 1);
+  assert.equal(second.doGenerateCalls.length, 1);
+});

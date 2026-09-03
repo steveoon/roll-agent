@@ -8,6 +8,8 @@ import type { LanguageModelV4, SharedV4ProviderOptions } from "@ai-sdk/provider"
 export interface SamplingHandlerController {
   /** 更新后续 Sampling 请求使用的 provider 参数；不影响已经发出的请求。 */
   setProviderOptions(providerOptions: SharedV4ProviderOptions | undefined): void;
+  /** 更新后续 Sampling 请求使用的模型；不影响已经发出的请求。 */
+  setModel(model: LanguageModelV4): void;
 }
 
 /** 组装传给 AI SDK generateText() 的调用参数（供单测复用，不依赖真实网络请求） */
@@ -38,6 +40,7 @@ export function registerSamplingHandler(
   model: LanguageModelV4,
   providerOptions?: SharedV4ProviderOptions,
 ): SamplingHandlerController {
+  let currentModel = model;
   let currentProviderOptions = providerOptions;
 
   client.setRequestHandler(
@@ -49,7 +52,12 @@ export function registerSamplingHandler(
       let result;
       try {
         result = await generateText(
-          buildSamplingGenerateTextParams(model, messages, maxTokens, currentProviderOptions),
+          buildSamplingGenerateTextParams(
+            currentModel,
+            messages,
+            maxTokens,
+            currentProviderOptions,
+          ),
         );
       } catch (error) {
         throw new Error("Sampling handler: LLM generation failed", { cause: error });
@@ -69,6 +77,9 @@ export function registerSamplingHandler(
   return {
     setProviderOptions(nextProviderOptions) {
       currentProviderOptions = nextProviderOptions;
+    },
+    setModel(nextModel) {
+      currentModel = nextModel;
     },
   };
 }

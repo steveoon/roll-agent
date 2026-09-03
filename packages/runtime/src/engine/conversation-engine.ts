@@ -53,6 +53,7 @@ import {
   type AgentSessionCapabilityContext,
   type AgentSessionOptions,
   type SessionAgentRefresh,
+  type SessionModelSwitch,
 } from "./agent-session.ts";
 import { resolveContextWindow } from "./context-window.ts";
 import {
@@ -103,6 +104,10 @@ export type AcquireAgentUsage = (
   env: Readonly<Record<string, string>> | undefined,
   signal?: AbortSignal,
 ) => Promise<AgentUsageLease | undefined>;
+
+export interface EngineModelSwitch extends Omit<SessionModelSwitch, "contextWindow"> {
+  readonly modelName: string;
+}
 
 export interface ConversationEngineOptions {
   readonly config: RollConfig;
@@ -406,8 +411,10 @@ export class ConversationEngine {
   private readonly fileToolsEnabled: boolean;
   private readonly maxSteps: number;
   private providerOptions: SharedV4ProviderOptions | undefined;
-  private readonly structuredOutputProviderOptions: SharedV4ProviderOptions | undefined;
-  private readonly structuredOutputReasoning:
+  private modelOverride: LanguageModelV4 | undefined;
+  private modelNameOverride: string | undefined;
+  private structuredOutputProviderOptions: SharedV4ProviderOptions | undefined;
+  private structuredOutputReasoning:
     | NonNullable<LanguageModelV4CallOptions["reasoning"]>
     | undefined;
   private readonly acquireAgentUsage: AcquireAgentUsage;
@@ -630,7 +637,7 @@ export class ConversationEngine {
     const capabilityContext = this.composeCapabilityContext(context.sources.length, shellProfile);
     const session = new AgentSession({
       id,
-      model: context.model,
+      model: this.activeModel(context),
       sources: context.sources,
       capabilityContext,
       resolveDynamicCapabilityContext: async (abortSignal) => {
@@ -711,6 +718,35 @@ export class ConversationEngine {
   private syncProviderOptions(providerOptions: SharedV4ProviderOptions | undefined): void {
     this.providerOptions = providerOptions;
     this.clientManager.setSamplingProviderOptions(providerOptions);
+  }
+
+  switchModel(input: EngineModelSwitch): void {
+    this.assertAcceptingSessions();
+    const contextWindow = resolveContextWindow(input.modelName, this.config.runtime.contextWindow);
+    const sessionSwitch = {
+      model: input.model,
+      ...(contextWindow !== undefined ? { contextWindow } : {}),
+      ...(input.providerOptions ? { providerOptions: input.providerOptions } : {}),
+      ...(input.structuredOutputProviderOptions
+        ? { structuredOutputProviderOptions: input.structuredOutputProviderOptions }
+        : {}),
+      ...(input.structuredOutputReasoning
+        ? { structuredOutputReasoning: input.structuredOutputReasoning }
+        : {}),
+    } satisfies SessionModelSwitch;
+    for (const session of this.liveSessions.values()) {
+      session.switchModel(sessionSwitch);
+    }
+    this.modelOverride = input.model;
+    this.modelNameOverride = input.modelName;
+    this.providerOptions = input.providerOptions;
+    this.structuredOutputProviderOptions = input.structuredOutputProviderOptions;
+    this.structuredOutputReasoning = input.structuredOutputReasoning;
+    this.clientManager.setSamplingModel(input.model);
+    this.clientManager.setSamplingProviderOptions(input.providerOptions);
+    for (const id of this.liveSessions.keys()) {
+      this.store?.updateModel(id, input.modelName);
+    }
   }
 
   private ensureReady(): Promise<EngineContext> {
@@ -998,7 +1034,7 @@ export class ConversationEngine {
 
   private async runAgentRefresh(agent: RegisteredAgent): Promise<SessionAgentRefresh> {
     const context = await this.ensureReady();
-    const source = await this.connectAgentSource(agent, context.model, undefined, {
+    const source = await this.connectAgentSource(agent, this.activeModel(context), undefined, {
       signal: this.shutdownController.signal,
     });
     const sources = [
@@ -1008,7 +1044,7 @@ export class ConversationEngine {
     const agents = this.explicitAgents ?? new AgentStore(this.config.agents.dataDir).list();
     const skillLibrary = this.resolveSkillLibrary(agents);
     this.ready = Promise.resolve({
-      model: context.model,
+      model: this.activeModel(context),
       sources,
       ...(skillLibrary ? { skillLibrary } : {}),
     });
@@ -1174,7 +1210,11 @@ export class ConversationEngine {
   }
 
   private resolveModelName(): string {
-    return this.config.runtime.model ?? this.config.llm.defaultModel;
+    return this.modelNameOverride ?? this.config.runtime.model ?? this.config.llm.defaultModel;
+  }
+
+  private activeModel(context: EngineContext): LanguageModelV4 {
+    return this.modelOverride ?? context.model;
   }
 
   async getContextSummary(): Promise<EngineContextSummary> {

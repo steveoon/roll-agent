@@ -1432,6 +1432,82 @@ test("ConversationEngine threads its providerOptions into sub-agent sampling con
   await engine.dispose();
 });
 
+test("ConversationEngine.switchModel updates live sessions, sampling and thread model", async () => {
+  const config = rollConfigSchema.parse({
+    llm: {
+      defaultProvider: "mock",
+      defaultModel: "default-model",
+      providers: { mock: { apiKey: "test" } },
+    },
+    ask: {},
+    agents: { dataDir: "/tmp/roll-engine-test" },
+  });
+  const agent: RegisteredAgent = {
+    skill: { name: "sampling-agent", description: "sampling", metadata: {} },
+    transport: { type: "stdio", command: "node", args: ["dist/index.js"] },
+    runtime: { ownership: "on-demand" },
+    installPath: "/tmp/sampling-agent",
+    registeredAt: "2026-06-17T00:00:00.000Z",
+    status: "idle",
+  };
+  const samplingModels: unknown[] = [];
+  const samplingOptions: unknown[] = [];
+  const connectOptionsCalls: Array<{ readonly samplingModel?: unknown }> = [];
+  const clientManager = {
+    connect: async (
+      _agentName: string,
+      _transport: unknown,
+      _cwd: string,
+      options: { readonly samplingModel?: unknown },
+    ) => {
+      connectOptionsCalls.push(options);
+      return { listTools: async () => ({ tools: [] }) };
+    },
+    setSamplingProviderOptions: (options: unknown) => samplingOptions.push(options),
+    setSamplingModel: (model: unknown) => samplingModels.push(model),
+    disconnectAll: async () => {},
+  } as unknown as McpClientManager;
+  const dir = tempDir();
+  const store = new ThreadStore(dir);
+  const initial = new MockLanguageModelV4({ modelId: "initial" });
+  const engine = new ConversationEngine({
+    config,
+    model: initial,
+    agents: [agent],
+    skillLibrary: null,
+    clientManager,
+    store,
+  });
+  try {
+    const session = await engine.createSession();
+    assert.equal(store.getThread(session.id)?.model, "default-model");
+
+    const next = new MockLanguageModelV4({ modelId: "gemini-3.8-flash" });
+    engine.switchModel({
+      modelName: "gemini-3.8-flash",
+      model: next,
+      providerOptions: { google: { thinkingConfig: { thinkingLevel: "medium" } } },
+    });
+
+    assert.deepEqual(samplingModels, [next]);
+    assert.deepEqual(samplingOptions, [
+      { google: { thinkingConfig: { thinkingLevel: "medium" } } },
+    ]);
+    assert.equal(store.getThread(session.id)?.model, "gemini-3.8-flash");
+    assert.equal(session.getContextWindow(), 1_000_000);
+
+    const created = await engine.createSession();
+    assert.equal(store.getThread(created.id)?.model, "gemini-3.8-flash");
+
+    await engine.prepareAgentRefresh(agent);
+    assert.equal(connectOptionsCalls.at(-1)?.samplingModel, next);
+  } finally {
+    await engine.dispose();
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("ConversationEngine threads structured output controls into AgentSession", async () => {
   const config = rollConfigSchema.parse({
     llm: {

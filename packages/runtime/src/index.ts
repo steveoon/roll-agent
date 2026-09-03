@@ -1,4 +1,5 @@
 export { ConversationEngine } from "./engine/conversation-engine.ts";
+export type { EngineModelSwitch } from "./engine/conversation-engine.ts";
 export type {
   AgentBootstrapIssue,
   ConversationEngineOptions,
