@@ -82,6 +82,17 @@ export const CONFIG_GUIDANCE_ENTRIES = [
     example: "llm:\n  providers:\n    openai:\n      base-url: https://api.openai.com/v1",
     setupCommand: "roll config setup llm",
   },
+  {
+    path: "llm.providers.<provider>.models",
+    title: "Provider 可选模型",
+    purpose:
+      "列出该 provider 下可在 roll chat 里用 /model 切换的模型 ID。定时任务等无人值守场景不受影响，始终使用默认模型。",
+    defaultBehavior:
+      "不配置时 /model 只显示该 provider 的内置默认模型，以及它作为 llm.default-provider 时的 llm.default-model。",
+    example:
+      "llm:\n  providers:\n    google:\n      models:\n        - gemini-3.8-flash\n        - gemini-3.1-pro-preview",
+    setupCommand: "roll config setup llm",
+  },
 
   // Ask
   {

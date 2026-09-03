@@ -82,7 +82,7 @@ describe("buildRollConfigCatalog", () => {
     };
     visit(catalog.root);
 
-    assert.equal(leaves.length, 67);
+    assert.equal(leaves.length, 68);
     for (const leaf of leaves) {
       const path = leaf.path.join(".");
       const guidance = findConfigGuidance(path);
@@ -265,6 +265,14 @@ describe("buildRollConfigCatalog", () => {
     const approvalOverrides = findNode(catalog.root, ["runtime", "approval", "overrides"]);
     assert.ok(approvalOverrides.kind === "record");
     assert.equal(approvalOverrides.keyOptions, undefined);
+  });
+
+  it("exposes provider model lists as string-list fields with guidance", () => {
+    const catalog = buildRollConfigCatalog();
+    const models = findNode(catalog.root, ["llm", "providers", "*", "models"]);
+    assert.equal(models.kind, "array");
+    assert.equal(models.widget, "string-list");
+    assert.match(models.description ?? "", /\/model/u);
   });
 
   it("represents dynamic record keys without flattening dotted names", () => {
