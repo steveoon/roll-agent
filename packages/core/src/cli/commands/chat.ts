@@ -3,6 +3,10 @@ import { defineCommand } from "citty";
 import type { AgentSession } from "@roll-agent/runtime";
 import { loadConfig } from "../../config/loader.ts";
 import { thinkingProviderOptions } from "../../llm/providers.ts";
+import { findLlmModelChoice, listLlmModelChoices } from "../../llm/model-choices.ts";
+import { writeDefaultLlm } from "../../config/default-llm-writer.ts";
+import { buildModelPickerItems } from "../chat/model-picker-format.ts";
+import type { ChatModelSwitching } from "../chat/ink/app.ts";
 import { createInterface, type Interface as ReadlineInterface } from "node:readline/promises";
 import type { Readable, Writable } from "node:stream";
 import chalk from "chalk";
@@ -333,6 +337,10 @@ export async function runRepl(
         log.info(formatSkillList(availableSkills, (process.stdout.columns || 96) - 2));
         continue;
       }
+      if (input === "/model" || input.startsWith("/model ")) {
+        log.info("基础模式不支持 /model，请在全屏模式（roll chat）中使用");
+        continue;
+      }
       if (input === "/resume") {
         if (io.resumeSession === undefined) {
           log.info("当前模式不支持会话切换");
@@ -487,6 +495,9 @@ export default defineCommand({
     const providerConfig = llmStatus.providerConfig;
     const provider = llmStatus.provider;
     const modelName = llmStatus.model;
+    let currentProvider = provider;
+    let currentModel = modelName;
+    let currentThinkingLevel = config.runtime.thinkingLevel;
 
     if (args.json && !args.message) {
       log.error('--json 模式需要消息：roll chat "<message>" --json');
@@ -643,13 +654,44 @@ export default defineCommand({
                 usedInk = true;
               },
               signal: signalScope.signal,
-              onThinkingChange: (level) =>
-                session.setProviderOptions(thinkingProviderOptions(provider, modelName, level)),
+              onThinkingChange: (level) => {
+                currentThinkingLevel = level;
+                session.setProviderOptions(
+                  thinkingProviderOptions(currentProvider, currentModel, level),
+                );
+              },
               resumeSession: (threadId) => chatEngine.resumeSession(threadId),
               onActiveSessionChange: (next) => {
                 session = next;
                 sessionForCleanup = next;
               },
+              modelSwitching: {
+                loadItems: (current) => buildModelPickerItems(listLlmModelChoices(config), current),
+                switchTo: async (input) => {
+                  const choice = findLlmModelChoice(listLlmModelChoices(config), input);
+                  if (!choice) {
+                    throw new Error(`未知模型 "${input}"，输入 /model 查看可选项`);
+                  }
+                  chatEngine.switchModel(
+                    resolveChatLlmSwitch(config, choice, currentThinkingLevel),
+                  );
+                  currentProvider = choice.provider;
+                  currentModel = choice.model;
+                  return {
+                    id: choice.id,
+                    model: choice.model,
+                    contextWindow: session.getContextWindow(),
+                  };
+                },
+                setAsDefault: async (id) => {
+                  const choice = findLlmModelChoice(listLlmModelChoices(config), id);
+                  if (!choice) {
+                    throw new Error(`未知模型 "${id}"`);
+                  }
+                  const written = writeDefaultLlm(choice);
+                  return `已将默认 LLM 设为 ${choice.id}（写入 ${written.configPath}）`;
+                },
+              } satisfies ChatModelSwitching,
             });
           } catch (inkError) {
             if (usedInk) {
