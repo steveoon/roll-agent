@@ -3,7 +3,7 @@ import { render } from "ink";
 import type { AgentSession } from "@roll-agent/runtime";
 import type { ThinkingLevel } from "../../../llm/providers.ts";
 import type { ChatThinkingDisplay } from "../../../config/schema.ts";
-import { ChatApp, INK_HINTS } from "./app.ts";
+import { ChatApp, INK_HINTS, type ChatModelSwitching } from "./app.ts";
 import { messagesToHistory } from "./history-from-messages.ts";
 import { titleFromMessage } from "../title.ts";
 import { buildSessionPickerItems } from "../session-picker-format.ts";
@@ -36,6 +36,7 @@ export interface RunInkReplOptions {
   readonly signal?: AbortSignal;
   readonly resumeSession?: (threadId: string) => Promise<AgentSession>;
   readonly onActiveSessionChange?: (session: AgentSession) => void;
+  readonly modelSwitching?: ChatModelSwitching;
 }
 
 export async function runInkRepl(
@@ -115,6 +116,7 @@ export async function runInkRepl(
           ? { initialThinkingDisplay: options.initialThinkingDisplay }
           : {}),
         ...(options.onThinkingChange ? { onThinkingChange: options.onThinkingChange } : {}),
+        ...(options.modelSwitching ? { modelSwitching: options.modelSwitching } : {}),
       }),
       {
         stdout: terminalOutput.stdout,

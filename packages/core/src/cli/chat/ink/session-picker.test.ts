@@ -120,3 +120,29 @@ test("SessionPicker ignores input while busy and surfaces errors", async () => {
   assert.match(second.lastFrame() ?? "", /切换失败：线程不存在/);
   second.unmount();
 });
+
+test("SessionPicker renders custom labels for other pickers", async () => {
+  const { lastFrame, unmount } = render(
+    h(SessionPicker, {
+      items: [
+        { id: "google/gemini-3.8-flash", title: "google/gemini-3.8-flash", meta: "内置默认" },
+      ],
+      width: 80,
+      maxRows: 10,
+      busy: false,
+      labels: {
+        title: "切换模型",
+        summary: (count: number) => `共 ${String(count)} 个模型`,
+        empty: "没有可切换的模型",
+        select: "Enter 切换",
+        busy: "切换中…",
+      },
+      onSelect: () => {},
+      onCancel: () => {},
+    }),
+  );
+  await delay(10);
+  assert.match(lastFrame() ?? "", /切换模型/);
+  assert.match(lastFrame() ?? "", /共 1 个模型/);
+  unmount();
+});

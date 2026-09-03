@@ -664,3 +664,20 @@ test("set-diff-display 切换会话级 diff 折叠模式，默认 collapsed", ()
   const next = chatReducer(state, { type: "set-diff-display", value: "expanded" });
   assert.equal(next.diffDisplay, "expanded");
 });
+
+test("set-model updates the status model and context window", () => {
+  const state = createInitialState("qwen3.8-max", 100);
+  const next = chatReducer(state, {
+    type: "set-model",
+    model: "gemini-3.8-flash",
+    contextWindow: 200,
+  });
+  assert.equal(next.status.model, "gemini-3.8-flash");
+  assert.equal(next.status.contextWindow, 200);
+  const cleared = chatReducer(next, {
+    type: "set-model",
+    model: "custom",
+    contextWindow: undefined,
+  });
+  assert.equal(cleared.status.contextWindow, undefined);
+});

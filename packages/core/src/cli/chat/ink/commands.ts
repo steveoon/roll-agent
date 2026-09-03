@@ -38,6 +38,11 @@ export const SLASH_COMMANDS: readonly SlashCommand[] = [
   { kind: "command", name: "/effort", description: "设置推理努力程度 (low | medium | high)" },
   {
     kind: "command",
+    name: "/model",
+    description: "切换本次对话的 LLM（provider/model），可选设为默认",
+  },
+  {
+    kind: "command",
     name: "/show-think",
     description: "完整显示或折叠已完成的思考 (on | off)，不带参数时切换",
   },
