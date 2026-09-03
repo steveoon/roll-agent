@@ -20,6 +20,7 @@ import {
   formatConfigValue,
   sameConfigValue,
 } from "../lib/field-presentation.ts";
+import { availableRecordKeyOptions, formatRecordKeyOption } from "../lib/record-key-options.ts";
 import { useRestorableSecretInput } from "../lib/restorable-secret.ts";
 import { InlineCode } from "./InlineCode.tsx";
 import type {
@@ -178,6 +179,14 @@ function RecordEditor({
   const [newKey, setNewKey] = useState("");
   const normalizedNewKey = newKey.trim();
   const canAdd = normalizedNewKey.length > 0 && !entries.some(([key]) => key === normalizedNewKey);
+  const keyOptions = node.keyOptions;
+  const selectableKeys =
+    keyOptions === undefined
+      ? undefined
+      : availableRecordKeyOptions(
+          keyOptions,
+          entries.map(([key]) => key),
+        );
 
   function addEntry(): void {
     if (!canAdd) return;
@@ -262,25 +271,46 @@ function RecordEditor({
           </div>
         ))}
       </div>
-      <div className="record-add-row">
-        <label>
-          <span className="sr-only">新条目名称</span>
-          <input
-            value={newKey}
-            placeholder={`输入${node.title}的名称`}
-            onChange={(event) => setNewKey(event.target.value)}
-            onKeyDown={(event) => {
-              if (event.key === "Enter") {
-                event.preventDefault();
-                addEntry();
-              }
-            }}
-          />
-        </label>
-        <button className="secondary-button" type="button" disabled={!canAdd} onClick={addEntry}>
-          ＋ 添加命名配置
-        </button>
-      </div>
+      {selectableKeys === undefined ? (
+        <div className="record-add-row">
+          <label>
+            <span className="sr-only">新条目名称</span>
+            <input
+              value={newKey}
+              placeholder={`输入${node.title}的名称`}
+              onChange={(event) => setNewKey(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === "Enter") {
+                  event.preventDefault();
+                  addEntry();
+                }
+              }}
+            />
+          </label>
+          <button className="secondary-button" type="button" disabled={!canAdd} onClick={addEntry}>
+            ＋ 添加命名配置
+          </button>
+        </div>
+      ) : selectableKeys.length === 0 ? (
+        <small className="field-input-note">可选的{node.title}已全部添加</small>
+      ) : (
+        <div className="record-add-row">
+          <label>
+            <span className="sr-only">选择要添加的{node.title}</span>
+            <select value={newKey} onChange={(event) => setNewKey(event.target.value)}>
+              <option value="">选择要添加的{node.title}…</option>
+              {selectableKeys.map((option) => (
+                <option key={option.value} value={option.value}>
+                  {formatRecordKeyOption(option)}
+                </option>
+              ))}
+            </select>
+          </label>
+          <button className="secondary-button" type="button" disabled={!canAdd} onClick={addEntry}>
+            ＋ 添加
+          </button>
+        </div>
+      )}
     </article>
   );
 }
