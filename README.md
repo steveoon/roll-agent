@@ -104,6 +104,20 @@ agents:
 可配置 `base-url` 用于自定义 API 端点；xAI 默认模型为 `grok-4.5`（500k context window），API key 可通过
 `XAI_API_KEY` 注入；Google Gemini 默认模型为 `gemini-3.8-flash`（1M context window），API key 可通过
 `GOOGLE_GENERATIVE_AI_API_KEY` 注入。
+
+每个 provider 还可用 `models` 列出可切换的模型 ID；`roll chat` 里输入 `/model` 会列出所有已配置 key 的
+provider 及其模型，选中后仅本次 roll chat 生效（含 `/resume` 切到的会话），并可顺手设为默认写回
+`roll.config.yaml`。定时任务等无人值守场景始终使用 `llm.default-provider` / `llm.default-model`。
+
+```yaml
+llm:
+  providers:
+    google:
+      api-key: ${GOOGLE_GENERATIVE_AI_API_KEY}
+      models:
+        - gemini-3.8-flash
+        - gemini-3.1-pro-preview
+```
 `ask.llm-model` 可选；未设置时会回退到 `llm.default-model`。
 
 如果本地还留着旧版 `router:` 配置段：
