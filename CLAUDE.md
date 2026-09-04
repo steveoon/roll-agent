@@ -176,6 +176,10 @@ chat 走独立的 skill 通道（对齐 `npx skills add` 标准生态，非 roll
 
 `packages/core/src/cli/index.ts` 的首个 import 是 `./default-node-env.ts`，把 `NODE_ENV` 默认为 `production`（已显式设置时保持不变）。不要把它移后或删除：React 19.2 的 development 构建会在每次组件渲染时调用 `performance.measure()` 并把变更前后的 `children` 文本放进 `detail`，Node 会把所有 measure 条目永久留在 user-timing 缓冲区，流式 thinking 每 32ms 刷新一次预览，几十分钟就会撞上 V8 堆上限（issue #242）。改动 chat 渲染或流式路径后，用 `pnpm bench:chat-heap` 验证堆增长斜率（见 `docs/how-to-benchmark-chat-memory.md`）。
 
+### 模型 context window 目录
+
+`packages/runtime/src/engine/model-catalog.ts` 打包了 models.dev 官方 provider（openai/anthropic/google/deepseek/xai/alibaba-cn/alibaba）的裁剪快照，`resolveModelContextWindow()` 按「配置覆盖 → 目录（`limit.input ?? limit.context`）→ 内置家族规则」解析并带来源。引擎默认只读快照；chat 入口传入 `defaultModelCatalogCachePath()` 并后台 `refreshIfStale()`。新模型上线后 `pnpm catalog:refresh` 重新生成 `model-catalog-snapshot.ts`（生成物，勿手改）。
+
 ### 日志输出约定
 
 - **stdout** — 仅输出数据（供管道和 `--json` 结构化输出）

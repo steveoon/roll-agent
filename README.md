@@ -119,6 +119,10 @@ llm:
         - gemini-3.8-flash
         - gemini-3.1-pro-preview
 ```
+
+模型的 context window 按「`runtime.context-window` 覆盖 → models.dev 官方 provider 条目（随包内置快照，
+`~/.roll-agent/cache/model-catalog.json` 每天后台刷新）→ 内置家族规则」解析；`/model` 切换提示里会显示
+`ctx` 与来源。发版前可运行 `pnpm catalog:refresh` 更新内置快照。
 `ask.llm-model` 可选；未设置时会回退到 `llm.default-model`。
 
 如果本地还留着旧版 `router:` 配置段：
