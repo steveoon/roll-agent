@@ -203,6 +203,7 @@ test("resolveChatLlmSwitch builds an engine switch from config for the chosen pr
     { provider: "google", model: "gemini-3.8-flash" },
     "high",
   );
+  assert.equal(next.provider, "google");
   assert.equal(next.modelName, "gemini-3.8-flash");
   assert.equal(next.model.modelId, "gemini-3.8-flash");
   assert.deepEqual(next.providerOptions, {

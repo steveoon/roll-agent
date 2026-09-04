@@ -60,6 +60,7 @@ export interface CreateChatEngineInput {
     ChatEngineOptions["structuredOutputProviderOptions"]
   >;
   readonly structuredOutputReasoning?: NonNullable<ChatEngineOptions["structuredOutputReasoning"]>;
+  readonly modelCatalog?: NonNullable<ChatEngineOptions["modelCatalog"]>;
   readonly shellEnv?: NodeJS.ProcessEnv;
   readonly onShellCommandSpawn?: (child: ChildProcess) => void;
 }
@@ -97,6 +98,7 @@ export function createChatEngine(input: CreateChatEngineInput) {
     ...(input.resolveDynamicCapabilityContext
       ? { resolveDynamicCapabilityContext: input.resolveDynamicCapabilityContext }
       : {}),
+    ...(input.modelCatalog ? { modelCatalog: input.modelCatalog } : {}),
     scheduleTools: createScheduleToolBinding(),
     debugEvents: isDebugLogEnabled(),
     onAgentBootstrapIssue: reportAgentBootstrapIssue,

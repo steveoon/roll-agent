@@ -103,6 +103,9 @@ export function createScheduledTurnRunner(
       store,
       surface: CHAT_ENGINE_SURFACES.background,
       policy,
+      modelCatalog: input.runtime.createDefaultModelCatalog(
+        input.runtime.defaultModelCatalogCachePath(),
+      ),
       resolveDynamicCapabilityContext: () => ({
         origin: {
           kind: "scheduled",

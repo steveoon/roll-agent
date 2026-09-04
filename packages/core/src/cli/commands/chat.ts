@@ -544,6 +544,7 @@ export default defineCommand({
         config.runtime.compaction.strategy === "summarize",
       );
     const store = new ThreadStore(config.runtime.threadsDir);
+    const modelCatalog = runtime.createDefaultModelCatalog(runtime.defaultModelCatalogCachePath());
     const surface = args.message
       ? args.json
         ? CHAT_ENGINE_SURFACES.json
@@ -556,12 +557,23 @@ export default defineCommand({
     let sessionForCleanup: AgentSession | undefined;
     let signalScope: ChatEngineSignalScope | undefined;
     try {
+      if (surface === CHAT_ENGINE_SURFACES.ink || surface === CHAT_ENGINE_SURFACES.basicRepl) {
+        modelCatalog.refreshIfStale().then(
+          (result) => {
+            log.debug(`model catalog refresh: ${result}`);
+          },
+          (error: unknown) => {
+            log.debug(`model catalog refresh failed: ${String(error)}`);
+          },
+        );
+      }
       engine = createChatEngine({
         runtime,
         config,
         model,
         store,
         surface,
+        modelCatalog,
         shellEnv: chatCliScope.env,
         ...(providerOptions ? { providerOptions } : {}),
         ...(structuredOutputProviderOptions ? { structuredOutputProviderOptions } : {}),
@@ -611,7 +623,7 @@ export default defineCommand({
       }
       if (config.runtime.compaction.enabled && session.getContextWindow() === undefined) {
         log.warn(
-          `未知模型 "${modelName}" 的 context window，阈值自动压缩不可用。可在 roll.config.yaml 设置 runtime.context-window`,
+          `未知模型 "${provider}/${modelName}" 的 context window，阈值自动压缩不可用。模型目录会每天自动刷新；也可在 roll.config.yaml 设置 runtime.context-window`,
         );
       }
       if (args.message) {
@@ -672,7 +684,7 @@ export default defineCommand({
                   if (!choice) {
                     throw new Error(`未知模型 "${input}"，输入 /model 查看可选项`);
                   }
-                  chatEngine.switchModel(
+                  const resolution = chatEngine.switchModel(
                     resolveChatLlmSwitch(config, choice, currentThinkingLevel),
                   );
                   currentProvider = choice.provider;
@@ -680,7 +692,8 @@ export default defineCommand({
                   return {
                     id: choice.id,
                     model: choice.model,
-                    contextWindow: session.getContextWindow(),
+                    contextWindow: resolution?.window,
+                    ...(resolution ? { contextWindowSource: resolution.source } : {}),
                   };
                 },
                 setAsDefault: async (id) => {

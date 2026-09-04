@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { createElement as h, useCallback, useEffect, useRef, useState } from "react";
 import type { ReactElement } from "react";
 import { Box, Text, useInput, useStdout, useWindowSize } from "ink";
-import type { AgentSession } from "@roll-agent/runtime";
+import type { AgentSession, ContextWindowSource } from "@roll-agent/runtime";
 import type { ThinkingLevel } from "../../../llm/providers.ts";
 import type { ChatThinkingDisplay } from "../../../config/schema.ts";
 import { diffDisplayNotice, resolveDiffDisplayToggle } from "../diff-display.ts";
@@ -16,6 +16,7 @@ import { SlashPopup } from "./slash-popup.ts";
 import { ShortcutsPanel } from "./shortcuts-panel.ts";
 import { SessionPicker, type SessionPickerLabels } from "./session-picker.ts";
 import { DEFAULT_CHOICE_ITEMS } from "../model-picker-format.ts";
+import { formatTokens } from "../../utils/token-format.ts";
 import { messagesToHistory } from "./history-from-messages.ts";
 import type { SessionPickerItem } from "../session-picker-format.ts";
 import {
@@ -55,6 +56,23 @@ export interface ChatModelSwitchResult {
   readonly id: string;
   readonly model: string;
   readonly contextWindow: number | undefined;
+  readonly contextWindowSource?: ContextWindowSource;
+}
+
+const CONTEXT_WINDOW_SOURCE_LABELS: Record<ContextWindowSource, string> = {
+  override: "配置覆盖",
+  catalog: "模型目录",
+  rule: "内置规则",
+};
+
+export function formatContextWindowNotice(
+  window: number | undefined,
+  source: ContextWindowSource | undefined,
+): string {
+  if (window === undefined || source === undefined) {
+    return "ctx 未知";
+  }
+  return `ctx ${formatTokens(window)} · ${CONTEXT_WINDOW_SOURCE_LABELS[source]}`;
 }
 
 export interface ChatModelSwitching {
@@ -291,7 +309,9 @@ function ChatSessionView(props: ChatSessionViewProps): ReactElement {
       (result) => {
         setModel(result.model, result.contextWindow);
         props.onModelChanged(result.model);
-        notice(`已切换到 ${result.id}（仅本次 roll chat 生效）`);
+        notice(
+          `已切换到 ${result.id}（${formatContextWindowNotice(result.contextWindow, result.contextWindowSource)}，仅本次 roll chat 生效）`,
+        );
         setModelPicker({
           stage: MODEL_PICKER_STAGES.confirmDefault,
           items: DEFAULT_CHOICE_ITEMS,

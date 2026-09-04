@@ -1948,7 +1948,12 @@ test("ChatApp switches model via /model picker and offers set-as-default", async
         ],
         switchTo: async (input: string) => {
           switched.push(input);
-          return { id: input, model: "gemini-3.8-flash", contextWindow: 1_000_000 };
+          return {
+            id: input,
+            model: "gemini-3.8-flash",
+            contextWindow: 1_000_000,
+            contextWindowSource: "catalog" as const,
+          };
         },
         setAsDefault: async (id: string) => {
           defaults.push(id);
@@ -1977,6 +1982,7 @@ test("ChatApp switches model via /model picker and offers set-as-default", async
     assert.deepEqual(defaults, ["google/gemini-3.8-flash"]);
     assert.match(plain(lastFrame() ?? ""), /已写入 roll\.config\.yaml/);
     assert.match(plain(lastFrame() ?? ""), /gemini-3\.8-flash/);
+    assert.match(plain(lastFrame() ?? ""), /ctx 1M · 模型目录/);
   });
   unmount();
 });
@@ -2051,4 +2057,12 @@ test("ChatApp set-as-default prompt starts on keep even after moving the model c
   assert.deepEqual(defaults, []);
   assert.doesNotMatch(lastFrame() ?? "", /是否设为默认 LLM/);
   unmount();
+});
+
+test("formatContextWindowNotice renders window with its source", async () => {
+  const { formatContextWindowNotice } = await import("./app.ts");
+  assert.equal(formatContextWindowNotice(922_000, "catalog"), "ctx 922k · 模型目录");
+  assert.equal(formatContextWindowNotice(1_000_000, "rule"), "ctx 1M · 内置规则");
+  assert.equal(formatContextWindowNotice(8_000, "override"), "ctx 8k · 配置覆盖");
+  assert.equal(formatContextWindowNotice(undefined, undefined), "ctx 未知");
 });
