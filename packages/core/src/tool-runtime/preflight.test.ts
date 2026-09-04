@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import type { AgentTool } from "../types/agent.ts";
 import { formatValidationIssuesMessage } from "./messages.ts";
 import { getInputValidationIssues, preflightToolCall } from "./preflight.ts";
+import { normalizeListedTools } from "../cli/utils/agent-tools.ts";
 
 const generateReplyTool: AgentTool = {
   name: "generate_reply",
@@ -343,5 +344,45 @@ describe("tool-runtime preflight", () => {
         },
       ],
     });
+  });
+});
+
+describe("preflightToolCall with MCP schemas that reuse zod instances", () => {
+  const listed = {
+    name: "zhipin_filter_recommend_candidates",
+    inputSchema: {
+      type: "object",
+      properties: {
+        locationCity: { type: "string", minLength: 1, description: "城市" },
+        locationDistrict: { $ref: "#/properties/locationCity", description: "区" },
+        major: { type: "array", items: { $ref: "#/properties/locationCity" }, minItems: 1 },
+        candidateKeywords: { $ref: "#/properties/major", description: "关键词" },
+        school: { $ref: "#/properties/major" },
+        callPhone: { type: "boolean" },
+      },
+    },
+  } as const;
+
+  it("rejects wrong types once the schema is normalized", () => {
+    const [tool] = normalizeListedTools([listed]);
+    assert.ok(tool);
+    const result = preflightToolCall(tool, {
+      locationDistrict: 123,
+      major: [123],
+      candidateKeywords: 123,
+      school: false,
+      callPhone: [],
+    });
+    assert.equal(result.ok, false);
+    if (result.ok) {
+      return;
+    }
+    assert.deepEqual(result.issues.map((issue) => issue.path).sort(), [
+      "callPhone",
+      "candidateKeywords",
+      "locationDistrict",
+      "major[0]",
+      "school",
+    ]);
   });
 });
