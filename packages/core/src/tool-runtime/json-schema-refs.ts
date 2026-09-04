@@ -34,8 +34,32 @@ const ANNOTATION_KEYWORDS: ReadonlySet<string> = new Set([
   "writeOnly",
   "$comment",
 ]);
-const DEFINITION_CONTAINER_KEYS: ReadonlySet<string> = new Set(["$defs", "definitions"]);
-const ROOT_DEFINITION_REF_PATTERN = /^#\/(?:\$defs|definitions)\/[^/]+$/u;
+const DEFINITION_CONTAINER_KEYWORDS: ReadonlySet<string> = new Set(["$defs", "definitions"]);
+const ROOT_DEFINITION_PREFIXES = ["#/$defs/", "#/definitions/"] as const;
+const SCHEMA_CHILD_KEYWORDS: ReadonlySet<string> = new Set([
+  "additionalItems",
+  "additionalProperties",
+  "allOf",
+  "anyOf",
+  "contains",
+  "contentSchema",
+  "else",
+  "if",
+  "items",
+  "not",
+  "oneOf",
+  "prefixItems",
+  "propertyNames",
+  "then",
+  "unevaluatedItems",
+  "unevaluatedProperties",
+]);
+const SCHEMA_MAP_KEYWORDS: ReadonlySet<string> = new Set([
+  "dependencies",
+  "dependentSchemas",
+  "patternProperties",
+  "properties",
+]);
 const ARRAY_INDEX_PATTERN = /^(?:0|[1-9]\d*)$/u;
 
 class InlineLimitExceeded extends Error {}
@@ -51,20 +75,25 @@ function isSchemaValue(value: unknown): value is JsonObject | boolean {
 }
 
 export function isRootDefinitionReference(ref: string): boolean {
-  return ROOT_DEFINITION_REF_PATTERN.test(ref);
+  const prefix = ROOT_DEFINITION_PREFIXES.find((candidate) => ref.startsWith(candidate));
+  const encodedName = prefix === undefined ? undefined : ref.slice(prefix.length);
+  if (encodedName === undefined || encodedName.length === 0 || encodedName.includes("/")) {
+    return false;
+  }
+  let decodedName: string;
+  try {
+    decodedName = decodeURIComponent(encodedName);
+  } catch {
+    return false;
+  }
+  return !decodedName.includes("/") && !/~(?![01])/u.test(decodedName);
 }
 
 function decodePointerSegment(segment: string): string | undefined {
-  let decoded: string;
-  try {
-    decoded = decodeURIComponent(segment);
-  } catch {
+  if (/~(?![01])/u.test(segment)) {
     return undefined;
   }
-  if (/~(?![01])/u.test(decoded)) {
-    return undefined;
-  }
-  return decoded.replace(/~1/gu, "/").replace(/~0/gu, "~");
+  return segment.replace(/~1/gu, "/").replace(/~0/gu, "~");
 }
 
 function encodePointerSegment(segment: string): string {
@@ -72,7 +101,12 @@ function encodePointerSegment(segment: string): string {
 }
 
 function resolvePointer(root: unknown, ref: string): unknown {
-  const pointer = ref.slice(1);
+  let pointer: string;
+  try {
+    pointer = decodeURIComponent(ref.slice(1));
+  } catch {
+    return undefined;
+  }
   if (pointer.length === 0) {
     return root;
   }
@@ -145,12 +179,24 @@ function inlineObjectEntries(
   state: InlineState,
 ): JsonObject {
   return Object.fromEntries(
-    Object.entries(node).map(([key, value]) => [
-      key,
-      DEFINITION_CONTAINER_KEYS.has(key)
-        ? value
-        : inlineNode(value, `${path}/${encodePointerSegment(key)}`, context, state),
-    ]),
+    Object.entries(node).map(([key, value]) => {
+      const childPath = `${path}/${encodePointerSegment(key)}`;
+      if (SCHEMA_CHILD_KEYWORDS.has(key)) {
+        return [key, inlineNode(value, childPath, context, state)];
+      }
+      if (SCHEMA_MAP_KEYWORDS.has(key) && isJsonObject(value)) {
+        return [
+          key,
+          Object.fromEntries(
+            Object.entries(value).map(([name, child]) => [
+              name,
+              inlineNode(child, `${childPath}/${encodePointerSegment(name)}`, context, state),
+            ]),
+          ),
+        ];
+      }
+      return [key, value];
+    }),
   );
 }
 
@@ -176,7 +222,11 @@ function inlineNode(
   if (typeof ref !== "string") {
     return inlineObjectEntries(node, path, context, state);
   }
-  if (Object.keys(siblings).some((key) => !ANNOTATION_KEYWORDS.has(key))) {
+  if (
+    Object.keys(siblings).some(
+      (key) => !ANNOTATION_KEYWORDS.has(key) && !DEFINITION_CONTAINER_KEYWORDS.has(key),
+    )
+  ) {
     state.unresolved.push({ path, ref, reason: JSON_SCHEMA_REF_ISSUE_REASONS.siblingKeywords });
     return node;
   }

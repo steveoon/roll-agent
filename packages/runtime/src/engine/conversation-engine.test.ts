@@ -1714,7 +1714,12 @@ test("ConversationEngine excludes tools whose leftover refs the provider rejects
       model: new MockLanguageModelV4({ modelId: "gemini" }),
     });
     assert.ok(!has(toolIds(session), "broken"), "stale toolset is re-validated on switch");
-    assert.ok(openai.issues.some((message) => message.includes('"broken"')));
+    assert.ok(
+      openai.issues.some(
+        (message) => message.includes('"broken"') && message.includes('provider "google"'),
+      ),
+      "switch warnings name the target provider",
+    );
   } finally {
     await openai.engine.dispose();
   }

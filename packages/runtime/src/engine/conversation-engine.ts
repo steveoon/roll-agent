@@ -425,6 +425,7 @@ export class ConversationEngine {
   private modelOverride: LanguageModelV4 | undefined;
   private modelNameOverride: string | undefined;
   private providerNameOverride: string | undefined;
+  private switchingProviderName: string | undefined;
   private readonly modelCatalog: ModelCatalog;
   private structuredOutputProviderOptions: SharedV4ProviderOptions | undefined;
   private structuredOutputReasoning:
@@ -657,7 +658,7 @@ export class ConversationEngine {
       onToolExcluded: (exclusion) =>
         this.onAgentBootstrapIssue?.({
           agentName: exclusion.agentName,
-          message: `工具 "${exclusion.toolName}" 的参数 schema 含当前 provider "${this.resolveProviderName()}" 无法接受的引用（${exclusion.issues.map((issue) => issue.ref).join("、")}），已从本会话工具集移除`,
+          message: `工具 "${exclusion.toolName}" 的参数 schema 含当前 provider "${this.resolveToolSchemaProviderName()}" 无法接受的引用（${exclusion.issues.map((issue) => issue.ref).join("、")}），已从本会话工具集移除`,
         }),
       capabilityContext,
       resolveDynamicCapabilityContext: async (abortSignal) => {
@@ -761,8 +762,13 @@ export class ConversationEngine {
         throw new Error("存在正在生成回复的会话，稍后再切换模型");
       }
     }
-    for (const session of this.liveSessions.values()) {
-      session.switchModel(sessionSwitch);
+    this.switchingProviderName = input.provider;
+    try {
+      for (const session of this.liveSessions.values()) {
+        session.switchModel(sessionSwitch);
+      }
+    } finally {
+      this.switchingProviderName = undefined;
     }
     this.modelOverride = input.model;
     this.modelNameOverride = input.modelName;
@@ -1266,6 +1272,10 @@ export class ConversationEngine {
 
   private toolSchemaPolicyFor(provider: string): ToolSchemaPolicy {
     return (issues) => providerAcceptsToolSchemaIssues(provider, issues);
+  }
+
+  private resolveToolSchemaProviderName(): string {
+    return this.switchingProviderName ?? this.resolveProviderName();
   }
 
   private activeModel(context: EngineContext): LanguageModelV4 {

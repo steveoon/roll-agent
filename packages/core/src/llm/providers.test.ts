@@ -758,6 +758,11 @@ describe("providerAcceptsToolSchemaIssues", () => {
     ref: "#/properties/node",
     reason: "recursive",
   } as const;
+  const recursiveViaEncodedPath = {
+    path: "/properties/node",
+    ref: "#/$defs/a%2Fb",
+    reason: "recursive",
+  } as const;
   const unresolvable = {
     path: "/properties/x",
     ref: "#/properties/nope",
@@ -773,6 +778,7 @@ describe("providerAcceptsToolSchemaIssues", () => {
     assert.equal(providerAcceptsToolSchemaIssues("google", []), true);
     assert.equal(providerAcceptsToolSchemaIssues("google", [recursiveRootDef]), true);
     assert.equal(providerAcceptsToolSchemaIssues("google", [recursiveViaProperties]), false);
+    assert.equal(providerAcceptsToolSchemaIssues("google", [recursiveViaEncodedPath]), false);
     assert.equal(providerAcceptsToolSchemaIssues("google", [unresolvable]), false);
     assert.equal(providerAcceptsToolSchemaIssues("google", [external]), false);
     assert.equal(
@@ -841,6 +847,31 @@ describe("tool schema compatibility after local ref inlining", () => {
     const body = await captureToolRequest(model, inlined);
     assert.ok(isRecord(body));
     assert.match(JSON.stringify(body), /locationDistrict/u);
+  });
+
+  it("keeps root recursive schemas that google sends through parametersJsonSchema", async () => {
+    const recursiveSchema = {
+      $ref: "#/$defs/node",
+      $defs: {
+        node: {
+          type: "object",
+          properties: { child: { $ref: "#/$defs/node" } },
+        },
+      },
+    };
+    const normalized = inlineAcyclicLocalJsonSchemaReferences(recursiveSchema);
+    assert.deepEqual(normalized.unresolved, [
+      { path: "", ref: "#/$defs/node", reason: "recursive" },
+    ]);
+    assert.equal(providerAcceptsToolSchemaIssues("google", normalized.unresolved), true);
+
+    const body = await captureToolRequest(
+      createProviderModel("google", "gemini-3.8-flash", "k"),
+      normalized.schema,
+    );
+    const serialized = JSON.stringify(body);
+    assert.match(serialized, /"parametersJsonSchema"/u);
+    assert.doesNotMatch(serialized, /"parameters":/u);
   });
 
   it("openai and anthropic receive the inlined schema verbatim", async () => {

@@ -138,6 +138,26 @@ describe("inlineAcyclicLocalJsonSchemaReferences", () => {
     assert.deepEqual(out.properties.b, { not: {} });
   });
 
+  it("treats ref-shaped values inside data keywords as opaque JSON", () => {
+    const refShapedValue = { $ref: "#/properties/source" };
+    const schema = {
+      type: "object",
+      properties: {
+        source: { type: "string" },
+        marker: {
+          const: refShapedValue,
+          enum: [refShapedValue],
+          default: refShapedValue,
+          examples: [refShapedValue],
+          "x-example": refShapedValue,
+        },
+      },
+    };
+    const { schema: out, unresolved } = inlineAcyclicLocalJsonSchemaReferences(schema);
+    assert.deepEqual(unresolved, []);
+    assert.deepEqual(out.properties.marker, schema.properties.marker);
+  });
+
   it("only accepts canonical array indexes in pointers", () => {
     const schema = {
       type: "object",
@@ -195,8 +215,20 @@ describe("inlineAcyclicLocalJsonSchemaReferences", () => {
   it("recognises root-level definition references", () => {
     assert.equal(isRootDefinitionReference("#/$defs/node"), true);
     assert.equal(isRootDefinitionReference("#/definitions/a~1b"), true);
+    assert.equal(isRootDefinitionReference("#/$defs/a%2Fb"), false);
     assert.equal(isRootDefinitionReference("#/$defs/a/b"), false);
     assert.equal(isRootDefinitionReference("#/properties/x"), false);
     assert.equal(isRootDefinitionReference("https://example.com/s.json#/$defs/x"), false);
+  });
+
+  it("decodes a URI fragment before splitting its JSON Pointer", () => {
+    const schema = {
+      type: "object",
+      $defs: { a: { b: { type: "string" } } },
+      properties: { value: { $ref: "#/$defs/a%2Fb" } },
+    };
+    const { schema: out, unresolved } = inlineAcyclicLocalJsonSchemaReferences(schema);
+    assert.deepEqual(unresolved, []);
+    assert.deepEqual(out.properties.value, { type: "string" });
   });
 });
