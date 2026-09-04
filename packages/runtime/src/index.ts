@@ -26,7 +26,17 @@ export type {
   WorkspaceInstructionsSetting,
   WorkspaceInstructionsSource,
 } from "./engine/workspace-instructions.ts";
-export { resolveContextWindow, lookupContextWindow } from "./engine/context-window.ts";
+export {
+  resolveContextWindow,
+  lookupContextWindow,
+  resolveModelContextWindow,
+  CONTEXT_WINDOW_SOURCES,
+} from "./engine/context-window.ts";
+export type {
+  ContextWindowResolution,
+  ContextWindowSource,
+  ResolveModelContextWindowInput,
+} from "./engine/context-window.ts";
 export { createDefaultModelCatalog } from "./engine/model-catalog-default.ts";
 export {
   ModelCatalog,
