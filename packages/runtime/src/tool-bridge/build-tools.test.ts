@@ -1,7 +1,13 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { SessionApprovalMemory } from "../approval/approval-memory.ts";
-import { gateToolCall, type ApprovalRequest, type ToolBridgeContext } from "./build-tools.ts";
+import type { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import {
+  buildAgentToolset,
+  gateToolCall,
+  type ApprovalRequest,
+  type ToolBridgeContext,
+} from "./build-tools.ts";
 
 function confirmPolicyCtx(
   memory: SessionApprovalMemory | undefined,
@@ -108,4 +114,40 @@ test("display.diff 原样透传进 ApprovalRequest，缺席时不带 diff 键", 
     explanation: "无 diff",
   });
   assert.equal(Object.hasOwn(approvals[1] ?? {}, "diff"), false);
+});
+
+test("buildAgentToolset inlines local $ref defensively even when a source bypassed normalizeListedTools", () => {
+  const { ctx } = confirmPolicyCtx(undefined, []);
+  const built = buildAgentToolset(
+    [
+      {
+        agentName: "raw-agent",
+        client: { callTool: async () => ({ content: [] }) } as unknown as Client,
+        tools: [
+          {
+            tool: {
+              name: "filter",
+              inputSchema: {
+                type: "object",
+                properties: {
+                  city: { type: "string" },
+                  district: { $ref: "#/properties/city", description: "区" },
+                },
+              },
+            },
+            annotations: undefined,
+          },
+        ],
+      },
+    ],
+    ctx,
+  );
+  const id = Object.keys(built.tools).find((key) => key.endsWith("filter"));
+  assert.ok(id);
+  const tool = built.tools[id];
+  assert.ok(tool);
+  const schema = (
+    tool.inputSchema as { readonly jsonSchema: { readonly properties: Record<string, unknown> } }
+  ).jsonSchema;
+  assert.deepEqual(schema.properties.district, { type: "string", description: "区" });
 });

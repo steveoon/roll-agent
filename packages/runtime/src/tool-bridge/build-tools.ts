@@ -1,4 +1,5 @@
 import { lstatSync, readdirSync, readlinkSync, realpathSync, statSync } from "node:fs";
+import { inlineAcyclicLocalJsonSchemaReferences } from "@roll-agent/core/tool-runtime/json-schema-refs";
 import { basename, dirname, isAbsolute, resolve } from "node:path";
 import { jsonSchema, tool, type ToolExecutionOptions, type ToolSet } from "ai";
 import type { JSONSchema7 } from "@ai-sdk/provider";
@@ -441,7 +442,11 @@ export function buildAgentToolset(
 
   for (const source of sources) {
     const { client, agentName, agentSource, transport, runtimeOwnership, resourceBaseDir } = source;
-    for (const { tool: agentTool, annotations, resourceHints } of source.tools) {
+    for (const { tool: listedTool, annotations, resourceHints } of source.tools) {
+      const agentTool: AgentTool = {
+        ...listedTool,
+        inputSchema: inlineAcyclicLocalJsonSchemaReferences(listedTool.inputSchema).schema,
+      };
       const id = registry.register(agentName, agentTool.name, {
         ...(agentSource ? { agentSource } : {}),
         ...(transport ? { transport } : {}),

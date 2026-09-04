@@ -172,7 +172,10 @@ describe("createExtractionSchema", () => {
     const result = createExtractionSchema(tool.inputSchema) as JsonSchemaLike;
     assert.equal(result.properties?.locationDistrict?.type, "string");
     assert.equal(result.properties?.candidateKeywords?.type, "array");
-    assert.equal(result.properties?.candidateKeywords?.items?.type, "string");
+    const keywordItems = result.properties?.candidateKeywords?.items as
+      | { readonly type?: string }
+      | undefined;
+    assert.equal(keywordItems?.type, "string");
   });
 
   it("drops z.record()-like fields (object without properties) from extraction schema", () => {

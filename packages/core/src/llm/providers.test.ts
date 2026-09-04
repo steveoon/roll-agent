@@ -1,7 +1,12 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { generateText } from "ai";
-import { createProviderModel, resolveLLMCall, thinkingProviderOptions } from "./providers.ts";
+import {
+  createProviderModel,
+  providerSchemaCapabilities,
+  resolveLLMCall,
+  thinkingProviderOptions,
+} from "./providers.ts";
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -737,5 +742,14 @@ describe("thinkingProviderOptions", () => {
 
   it("returns undefined for unknown providers", () => {
     assert.equal(thinkingProviderOptions("mystery", "model", "high"), undefined);
+  });
+});
+
+describe("providerSchemaCapabilities", () => {
+  it("flags google as unable to accept recursive JSON Schema refs", () => {
+    assert.deepEqual(providerSchemaCapabilities("google"), { supportsRecursiveRefs: false });
+    assert.deepEqual(providerSchemaCapabilities("openai"), { supportsRecursiveRefs: true });
+    assert.deepEqual(providerSchemaCapabilities("anthropic"), { supportsRecursiveRefs: true });
+    assert.deepEqual(providerSchemaCapabilities("unknown"), { supportsRecursiveRefs: true });
   });
 });

@@ -10,7 +10,7 @@ import {
   McpClientManager,
   type McpConnectionAcquisition,
 } from "@roll-agent/core/mcp/client-manager";
-import { createProviderModel } from "@roll-agent/core/llm/providers";
+import { createProviderModel, providerSchemaCapabilities } from "@roll-agent/core/llm/providers";
 import { AgentStore } from "@roll-agent/core/registry/store";
 import { resolveTransportWithDevSpawnSpec } from "@roll-agent/core/registry/dev-spawn";
 import {
@@ -22,7 +22,10 @@ import {
   acquireAgentUsageLease,
   type AgentUsageLease,
 } from "@roll-agent/core/registry/agent-usage-lease";
-import { normalizeListedTools } from "@roll-agent/core/cli/utils/agent-tools";
+import {
+  formatToolSchemaIssue,
+  normalizeListedTools,
+} from "@roll-agent/core/cli/utils/agent-tools";
 import { getAgentEnv } from "@roll-agent/core/config/helpers";
 import { catalogPackageSpec, getAgentCatalog } from "@roll-agent/core/registry/catalog";
 import { resolveAgentCatalog } from "@roll-agent/core/registry/catalog-discovery";
@@ -645,7 +648,7 @@ export class ConversationEngine {
     const session = new AgentSession({
       id,
       model: this.activeModel(context),
-      sources: context.sources,
+      sources: this.sourcesForProvider(context.sources),
       capabilityContext,
       resolveDynamicCapabilityContext: async (abortSignal) => {
         const [vcs, dynamic] = await Promise.all([
@@ -988,7 +991,13 @@ export class ConversationEngine {
       this.assertAcceptingSessions();
       throwIfAborted(options.signal);
       throwIfDeadlineExpired(options.deadlineAt);
-      const normalized = normalizeListedTools(listed);
+      const normalized = normalizeListedTools(listed, {
+        onSchemaIssue: (issue) =>
+          reportIssue({
+            agentName: agent.skill.name,
+            message: formatToolSchemaIssue(agent.skill.name, issue),
+          }),
+      });
       const sourceTools: SourceTool[] = normalized.map((agentTool, index) => {
         const resourceHintExtraction = extractResourceHints(listed[index]);
         if (resourceHintExtraction.issue !== undefined) {
@@ -1242,6 +1251,26 @@ export class ConversationEngine {
 
   private resolveModelName(): string {
     return this.modelNameOverride ?? this.config.runtime.model ?? this.config.llm.defaultModel;
+  }
+
+  private sourcesForProvider(sources: readonly AgentToolSource[]): readonly AgentToolSource[] {
+    const provider = this.resolveProviderName();
+    if (providerSchemaCapabilities(provider).supportsRecursiveRefs) {
+      return sources;
+    }
+    return sources.map((source) => ({
+      ...source,
+      tools: source.tools.filter(({ tool }) => {
+        const blocked = (tool.schemaIssues?.length ?? 0) > 0;
+        if (blocked) {
+          this.onAgentBootstrapIssue?.({
+            agentName: source.agentName,
+            message: `工具 "${tool.name}" 的参数 schema 含无法内联的引用，当前 provider "${provider}" 不支持，已从本会话工具集移除`,
+          });
+        }
+        return !blocked;
+      }),
+    }));
   }
 
   private activeModel(context: EngineContext): LanguageModelV4 {

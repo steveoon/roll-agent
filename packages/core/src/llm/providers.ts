@@ -353,3 +353,13 @@ export function resolveLLMCall(
 
   return { model };
 }
+
+export interface ProviderSchemaCapabilities {
+  readonly supportsRecursiveRefs: boolean;
+}
+
+const PROVIDERS_WITHOUT_RECURSIVE_REFS: ReadonlySet<string> = new Set(["google"]);
+
+export function providerSchemaCapabilities(providerName: string): ProviderSchemaCapabilities {
+  return { supportsRecursiveRefs: !PROVIDERS_WITHOUT_RECURSIVE_REFS.has(providerName) };
+}

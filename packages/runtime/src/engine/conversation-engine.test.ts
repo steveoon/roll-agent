@@ -1603,6 +1603,73 @@ test("ConversationEngine resolves context window from the model catalog by provi
   }
 });
 
+test("ConversationEngine drops tools with unresolved refs for providers that reject them and keeps them otherwise", async () => {
+  const agent: RegisteredAgent = {
+    skill: { name: "schema-agent", description: "schema", metadata: {} },
+    transport: { type: "stdio", command: "node", args: ["dist/index.js"] },
+    runtime: { ownership: "on-demand" },
+    installPath: "/tmp/schema-agent",
+    registeredAt: "2026-06-17T00:00:00.000Z",
+    status: "idle",
+  };
+  const recursiveTool = {
+    name: "tree",
+    inputSchema: {
+      type: "object",
+      $defs: { node: { type: "object", properties: { child: { $ref: "#/$defs/node" } } } },
+      properties: { root: { $ref: "#/$defs/node" } },
+    },
+  };
+  const plainTool = { name: "ping", inputSchema: { type: "object", properties: {} } };
+  const makeEngine = (provider: string) => {
+    const issues: string[] = [];
+    const engine = new ConversationEngine({
+      config: rollConfigSchema.parse({
+        llm: {
+          defaultProvider: provider,
+          defaultModel: "m",
+          providers: { [provider]: { apiKey: "k" } },
+        },
+        ask: {},
+        agents: { dataDir: "/tmp/roll-engine-test" },
+      }),
+      model: new MockLanguageModelV4({}),
+      agents: [agent],
+      skillLibrary: null,
+      clientManager: {
+        connect: async () => ({ listTools: async () => ({ tools: [recursiveTool, plainTool] }) }),
+        setSamplingProviderOptions: () => {},
+        setSamplingModel: () => {},
+        disconnectAll: async () => {},
+      } as unknown as McpClientManager,
+      onAgentBootstrapIssue: (issue) => issues.push(issue.message),
+    });
+    return { engine, issues };
+  };
+
+  const google = makeEngine("google");
+  try {
+    const session = await google.engine.createSession();
+    const ids = session.getCapabilityManifest().tools.map((tool) => tool.id);
+    assert.ok(ids.some((id) => id.endsWith("ping")));
+    assert.ok(!ids.some((id) => id.endsWith("tree")));
+    assert.ok(google.issues.some((message) => message.includes("递归引用")));
+    assert.ok(google.issues.some((message) => message.includes("已从本会话工具集移除")));
+  } finally {
+    await google.engine.dispose();
+  }
+
+  const openai = makeEngine("openai");
+  try {
+    const session = await openai.engine.createSession();
+    const ids = session.getCapabilityManifest().tools.map((tool) => tool.id);
+    assert.ok(ids.some((id) => id.endsWith("tree")));
+    assert.ok(openai.issues.some((message) => message.includes("递归引用")));
+  } finally {
+    await openai.engine.dispose();
+  }
+});
+
 test("ConversationEngine threads structured output controls into AgentSession", async () => {
   const config = rollConfigSchema.parse({
     llm: {
