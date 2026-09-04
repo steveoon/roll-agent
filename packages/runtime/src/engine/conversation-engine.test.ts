@@ -15,6 +15,7 @@ import type { AgentUsageLease } from "@roll-agent/core/registry/agent-usage-leas
 import type { RegisteredAgent } from "@roll-agent/core/types/agent";
 import type { LanguageModelV4CallOptions, LanguageModelV4StreamPart } from "@ai-sdk/provider";
 import { ThreadStore } from "../store/thread-store.ts";
+import type { AgentSession } from "./agent-session.ts";
 import { ModelCatalog } from "./model-catalog.ts";
 import { DefaultToolPolicy } from "../policy/default-policy.ts";
 import type { SessionEvent } from "../types/events.ts";
@@ -1603,16 +1604,16 @@ test("ConversationEngine resolves context window from the model catalog by provi
   }
 });
 
-test("ConversationEngine drops tools with unresolved refs for providers that reject them and keeps them otherwise", async () => {
-  const agent: RegisteredAgent = {
-    skill: { name: "schema-agent", description: "schema", metadata: {} },
+test("ConversationEngine excludes tools whose leftover refs the provider rejects and re-evaluates on model switch and agent refresh", async () => {
+  const makeAgent = (name: string): RegisteredAgent => ({
+    skill: { name, description: name, metadata: {} },
     transport: { type: "stdio", command: "node", args: ["dist/index.js"] },
     runtime: { ownership: "on-demand" },
-    installPath: "/tmp/schema-agent",
+    installPath: `/tmp/${name}`,
     registeredAt: "2026-06-17T00:00:00.000Z",
     status: "idle",
-  };
-  const recursiveTool = {
+  });
+  const recursiveRootTool = {
     name: "tree",
     inputSchema: {
       type: "object",
@@ -1620,7 +1621,19 @@ test("ConversationEngine drops tools with unresolved refs for providers that rej
       properties: { root: { $ref: "#/$defs/node" } },
     },
   };
+  const brokenTool = {
+    name: "broken",
+    inputSchema: { type: "object", properties: { x: { $ref: "#/properties/nope" } } },
+  };
   const plainTool = { name: "ping", inputSchema: { type: "object", properties: {} } };
+  const lateTool = {
+    name: "late",
+    inputSchema: { type: "object", properties: { y: { $ref: "#/properties/missing" } } },
+  };
+  const toolsByAgent: Record<string, readonly object[]> = {
+    "schema-agent": [recursiveRootTool, brokenTool, plainTool],
+    "late-agent": [lateTool],
+  };
   const makeEngine = (provider: string) => {
     const issues: string[] = [];
     const engine = new ConversationEngine({
@@ -1634,10 +1647,12 @@ test("ConversationEngine drops tools with unresolved refs for providers that rej
         agents: { dataDir: "/tmp/roll-engine-test" },
       }),
       model: new MockLanguageModelV4({}),
-      agents: [agent],
+      agents: [makeAgent("schema-agent")],
       skillLibrary: null,
       clientManager: {
-        connect: async () => ({ listTools: async () => ({ tools: [recursiveTool, plainTool] }) }),
+        connect: async (agentName: string) => ({
+          listTools: async () => ({ tools: toolsByAgent[agentName] ?? [] }),
+        }),
         setSamplingProviderOptions: () => {},
         setSamplingModel: () => {},
         disconnectAll: async () => {},
@@ -1646,15 +1661,45 @@ test("ConversationEngine drops tools with unresolved refs for providers that rej
     });
     return { engine, issues };
   };
+  const toolIds = (session: AgentSession): readonly string[] =>
+    session.getCapabilityManifest().tools.map((tool) => tool.id);
+  const has = (ids: readonly string[], suffix: string): boolean =>
+    ids.some((id) => id.endsWith(suffix));
 
   const google = makeEngine("google");
   try {
     const session = await google.engine.createSession();
-    const ids = session.getCapabilityManifest().tools.map((tool) => tool.id);
-    assert.ok(ids.some((id) => id.endsWith("ping")));
-    assert.ok(!ids.some((id) => id.endsWith("tree")));
-    assert.ok(google.issues.some((message) => message.includes("递归引用")));
-    assert.ok(google.issues.some((message) => message.includes("已从本会话工具集移除")));
+    let ids = toolIds(session);
+    assert.ok(has(ids, "ping"));
+    assert.ok(has(ids, "tree"), "root-level recursive $defs stay usable on google");
+    assert.ok(!has(ids, "broken"), "unresolvable #/properties ref is excluded on google");
+    assert.ok(
+      google.issues.some(
+        (message) => message.includes('"broken"') && message.includes("已从本会话工具集移除"),
+      ),
+    );
+
+    google.engine.switchModel({
+      provider: "openai",
+      modelName: "gpt",
+      model: new MockLanguageModelV4({ modelId: "gpt" }),
+    });
+    ids = toolIds(session);
+    assert.ok(has(ids, "broken"), "switching to a pass-through provider restores the tool");
+
+    google.engine.switchModel({
+      provider: "google",
+      modelName: "gemini",
+      model: new MockLanguageModelV4({ modelId: "gemini" }),
+    });
+    ids = toolIds(session);
+    assert.ok(!has(ids, "broken"), "switching back to google excludes it again");
+
+    const refresh = await google.engine.prepareAgentRefresh(makeAgent("late-agent"));
+    session.applyAgentRefresh(refresh);
+    ids = toolIds(session);
+    assert.ok(!has(ids, "late"), "tools installed mid-session go through the same policy");
+    assert.ok(google.issues.some((message) => message.includes('"late"')));
   } finally {
     await google.engine.dispose();
   }
@@ -1662,9 +1707,14 @@ test("ConversationEngine drops tools with unresolved refs for providers that rej
   const openai = makeEngine("openai");
   try {
     const session = await openai.engine.createSession();
-    const ids = session.getCapabilityManifest().tools.map((tool) => tool.id);
-    assert.ok(ids.some((id) => id.endsWith("tree")));
-    assert.ok(openai.issues.some((message) => message.includes("递归引用")));
+    assert.ok(has(toolIds(session), "broken"));
+    openai.engine.switchModel({
+      provider: "google",
+      modelName: "gemini",
+      model: new MockLanguageModelV4({ modelId: "gemini" }),
+    });
+    assert.ok(!has(toolIds(session), "broken"), "stale toolset is re-validated on switch");
+    assert.ok(openai.issues.some((message) => message.includes('"broken"')));
   } finally {
     await openai.engine.dispose();
   }

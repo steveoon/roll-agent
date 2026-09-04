@@ -150,4 +150,39 @@ test("buildAgentToolset inlines local $ref defensively even when a source bypass
     tool.inputSchema as { readonly jsonSchema: { readonly properties: Record<string, unknown> } }
   ).jsonSchema;
   assert.deepEqual(schema.properties.district, { type: "string", description: "区" });
+  assert.deepEqual(built.schemaIssuesByToolId, {});
+});
+
+test("buildAgentToolset records unresolved refs per tool id, merging issues already attached", () => {
+  const { ctx } = confirmPolicyCtx(undefined, []);
+  const built = buildAgentToolset(
+    [
+      {
+        agentName: "raw-agent",
+        client: { callTool: async () => ({ content: [] }) } as unknown as Client,
+        tools: [
+          {
+            tool: {
+              name: "broken",
+              inputSchema: {
+                type: "object",
+                properties: { x: { $ref: "#/properties/nope" } },
+              },
+              schemaIssues: [
+                { path: "/properties/y", ref: "#/properties/gone", reason: "unresolvable" },
+              ],
+            },
+            annotations: undefined,
+          },
+        ],
+      },
+    ],
+    ctx,
+  );
+  const id = Object.keys(built.tools).find((key) => key.endsWith("broken"));
+  assert.ok(id);
+  assert.deepEqual(built.schemaIssuesByToolId[id], [
+    { path: "/properties/y", ref: "#/properties/gone", reason: "unresolvable" },
+    { path: "/properties/x", ref: "#/properties/nope", reason: "unresolvable" },
+  ]);
 });

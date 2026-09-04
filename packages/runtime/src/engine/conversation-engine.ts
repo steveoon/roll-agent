@@ -10,7 +10,10 @@ import {
   McpClientManager,
   type McpConnectionAcquisition,
 } from "@roll-agent/core/mcp/client-manager";
-import { createProviderModel, providerSchemaCapabilities } from "@roll-agent/core/llm/providers";
+import {
+  createProviderModel,
+  providerAcceptsToolSchemaIssues,
+} from "@roll-agent/core/llm/providers";
 import { AgentStore } from "@roll-agent/core/registry/store";
 import { resolveTransportWithDevSpawnSpec } from "@roll-agent/core/registry/dev-spawn";
 import {
@@ -57,6 +60,7 @@ import {
   type AgentSessionOptions,
   type SessionAgentRefresh,
   type SessionModelSwitch,
+  type ToolSchemaPolicy,
 } from "./agent-session.ts";
 import { resolveModelContextWindow, type ContextWindowResolution } from "./context-window.ts";
 import { createDefaultModelCatalog } from "./model-catalog-default.ts";
@@ -648,7 +652,13 @@ export class ConversationEngine {
     const session = new AgentSession({
       id,
       model: this.activeModel(context),
-      sources: this.sourcesForProvider(context.sources),
+      sources: context.sources,
+      toolSchemaPolicy: this.toolSchemaPolicyFor(this.resolveProviderName()),
+      onToolExcluded: (exclusion) =>
+        this.onAgentBootstrapIssue?.({
+          agentName: exclusion.agentName,
+          message: `工具 "${exclusion.toolName}" 的参数 schema 含当前 provider "${this.resolveProviderName()}" 无法接受的引用（${exclusion.issues.map((issue) => issue.ref).join("、")}），已从本会话工具集移除`,
+        }),
       capabilityContext,
       resolveDynamicCapabilityContext: async (abortSignal) => {
         const [vcs, dynamic] = await Promise.all([
@@ -744,6 +754,7 @@ export class ConversationEngine {
       ...(input.structuredOutputReasoning
         ? { structuredOutputReasoning: input.structuredOutputReasoning }
         : {}),
+      toolSchemaPolicy: this.toolSchemaPolicyFor(input.provider),
     } satisfies SessionModelSwitch;
     for (const session of this.liveSessions.values()) {
       if (!session.canSwitchModel()) {
@@ -1253,24 +1264,8 @@ export class ConversationEngine {
     return this.modelNameOverride ?? this.config.runtime.model ?? this.config.llm.defaultModel;
   }
 
-  private sourcesForProvider(sources: readonly AgentToolSource[]): readonly AgentToolSource[] {
-    const provider = this.resolveProviderName();
-    if (providerSchemaCapabilities(provider).supportsRecursiveRefs) {
-      return sources;
-    }
-    return sources.map((source) => ({
-      ...source,
-      tools: source.tools.filter(({ tool }) => {
-        const blocked = (tool.schemaIssues?.length ?? 0) > 0;
-        if (blocked) {
-          this.onAgentBootstrapIssue?.({
-            agentName: source.agentName,
-            message: `工具 "${tool.name}" 的参数 schema 含无法内联的引用，当前 provider "${provider}" 不支持，已从本会话工具集移除`,
-          });
-        }
-        return !blocked;
-      }),
-    }));
+  private toolSchemaPolicyFor(provider: string): ToolSchemaPolicy {
+    return (issues) => providerAcceptsToolSchemaIssues(provider, issues);
   }
 
   private activeModel(context: EngineContext): LanguageModelV4 {

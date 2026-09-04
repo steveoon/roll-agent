@@ -1,5 +1,8 @@
 import { lstatSync, readdirSync, readlinkSync, realpathSync, statSync } from "node:fs";
-import { inlineAcyclicLocalJsonSchemaReferences } from "@roll-agent/core/tool-runtime/json-schema-refs";
+import {
+  inlineAcyclicLocalJsonSchemaReferences,
+  type JsonSchemaRefIssue,
+} from "@roll-agent/core/tool-runtime/json-schema-refs";
 import { basename, dirname, isAbsolute, resolve } from "node:path";
 import { jsonSchema, tool, type ToolExecutionOptions, type ToolSet } from "ai";
 import type { JSONSchema7 } from "@ai-sdk/provider";
@@ -77,6 +80,18 @@ interface ApprovalDisplayOptions {
 export interface BuiltToolset {
   readonly tools: ToolSet;
   readonly registry: ToolRegistry;
+  readonly schemaIssuesByToolId: Readonly<Record<string, readonly JsonSchemaRefIssue[]>>;
+}
+
+function mergeSchemaIssues(
+  attached: readonly JsonSchemaRefIssue[] | undefined,
+  detected: readonly JsonSchemaRefIssue[],
+): readonly JsonSchemaRefIssue[] {
+  const merged = new Map<string, JsonSchemaRefIssue>();
+  for (const issue of [...(attached ?? []), ...detected]) {
+    merged.set(`${issue.path}\u0000${issue.ref}`, issue);
+  }
+  return [...merged.values()];
 }
 
 function asRecord(input: unknown): Record<string, unknown> {
@@ -439,13 +454,17 @@ export function buildAgentToolset(
   registry: ToolRegistry = new ToolRegistry(),
 ): BuiltToolset {
   const tools: ToolSet = {};
+  const schemaIssuesByToolId: Record<string, readonly JsonSchemaRefIssue[]> = {};
 
   for (const source of sources) {
     const { client, agentName, agentSource, transport, runtimeOwnership, resourceBaseDir } = source;
     for (const { tool: listedTool, annotations, resourceHints } of source.tools) {
+      const inlined = inlineAcyclicLocalJsonSchemaReferences(listedTool.inputSchema);
+      const schemaIssues = mergeSchemaIssues(listedTool.schemaIssues, inlined.unresolved);
       const agentTool: AgentTool = {
         ...listedTool,
-        inputSchema: inlineAcyclicLocalJsonSchemaReferences(listedTool.inputSchema).schema,
+        inputSchema: inlined.schema,
+        ...(schemaIssues.length > 0 ? { schemaIssues } : {}),
       };
       const id = registry.register(agentName, agentTool.name, {
         ...(agentSource ? { agentSource } : {}),
@@ -453,6 +472,9 @@ export function buildAgentToolset(
         ...(runtimeOwnership ? { runtimeOwnership } : {}),
         ...(annotations ? { annotations } : {}),
       });
+      if (schemaIssues.length > 0) {
+        schemaIssuesByToolId[id] = schemaIssues;
+      }
       const plan: ToolExecutionPlan = {
         prepare: async (input) => {
           const args = asRecord(input);
@@ -503,5 +525,5 @@ export function buildAgentToolset(
     }
   }
 
-  return { tools, registry };
+  return { tools, registry, schemaIssuesByToolId };
 }
