@@ -1,3 +1,6 @@
+import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { dirname, resolve } from "node:path";
 import { z } from "zod";
 
 export const MODEL_CATALOG_SOURCE_URL = "https://models.dev/api.json";
@@ -103,4 +106,102 @@ export function lookupCatalogContextWindow(
     }
   }
   return undefined;
+}
+
+export const MODEL_CATALOG_REFRESH_RESULTS = {
+  skipped: "skipped",
+  refreshed: "refreshed",
+  failed: "failed",
+} as const;
+
+export type ModelCatalogRefreshResult =
+  (typeof MODEL_CATALOG_REFRESH_RESULTS)[keyof typeof MODEL_CATALOG_REFRESH_RESULTS];
+
+const DEFAULT_TTL_MS = 24 * 60 * 60 * 1000;
+const DEFAULT_TIMEOUT_MS = 10_000;
+
+export interface ModelCatalogOptions {
+  readonly snapshot: ModelCatalogData;
+  readonly cachePath?: string;
+  readonly ttlMs?: number;
+  readonly fetchImpl?: typeof fetch;
+  readonly now?: () => number;
+  readonly timeoutMs?: number;
+}
+
+export function defaultModelCatalogCachePath(): string {
+  return resolve(homedir(), ".roll-agent", "cache", "model-catalog.json");
+}
+
+function readCachedCatalog(cachePath: string): ModelCatalogData | undefined {
+  try {
+    const parsed: unknown = JSON.parse(readFileSync(cachePath, "utf8"));
+    const result = modelCatalogDataSchema.safeParse(parsed);
+    return result.success ? result.data : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+export class ModelCatalog {
+  private readonly snapshot: ModelCatalogData;
+  private readonly cachePath: string | undefined;
+  private readonly ttlMs: number;
+  private readonly fetchImpl: typeof fetch;
+  private readonly now: () => number;
+  private readonly timeoutMs: number;
+  private current: ModelCatalogData | undefined;
+
+  constructor(options: ModelCatalogOptions) {
+    this.snapshot = options.snapshot;
+    this.cachePath = options.cachePath;
+    this.ttlMs = options.ttlMs ?? DEFAULT_TTL_MS;
+    this.fetchImpl = options.fetchImpl ?? fetch;
+    this.now = options.now ?? Date.now;
+    this.timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+  }
+
+  data(): ModelCatalogData {
+    if (this.current) {
+      return this.current;
+    }
+    const cached = this.cachePath === undefined ? undefined : readCachedCatalog(this.cachePath);
+    this.current =
+      cached && Date.parse(cached.fetchedAt) > Date.parse(this.snapshot.fetchedAt)
+        ? cached
+        : this.snapshot;
+    return this.current;
+  }
+
+  lookup(provider: string, modelName: string): number | undefined {
+    return lookupCatalogContextWindow(this.data(), provider, modelName);
+  }
+
+  async refreshIfStale(): Promise<ModelCatalogRefreshResult> {
+    const cachePath = this.cachePath;
+    if (cachePath === undefined) {
+      return MODEL_CATALOG_REFRESH_RESULTS.skipped;
+    }
+    const nowMs = this.now();
+    if (nowMs - Date.parse(this.data().fetchedAt) < this.ttlMs) {
+      return MODEL_CATALOG_REFRESH_RESULTS.skipped;
+    }
+    try {
+      const response = await this.fetchImpl(MODEL_CATALOG_SOURCE_URL, {
+        signal: AbortSignal.timeout(this.timeoutMs),
+      });
+      if (!response.ok) {
+        return MODEL_CATALOG_REFRESH_RESULTS.failed;
+      }
+      const next = trimModelCatalog(await response.json(), new Date(nowMs).toISOString());
+      mkdirSync(dirname(cachePath), { recursive: true });
+      const tempPath = `${cachePath}.tmp`;
+      writeFileSync(tempPath, JSON.stringify(next));
+      renameSync(tempPath, cachePath);
+      this.current = next;
+      return MODEL_CATALOG_REFRESH_RESULTS.refreshed;
+    } catch {
+      return MODEL_CATALOG_REFRESH_RESULTS.failed;
+    }
+  }
 }

@@ -1,8 +1,14 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
+  defaultModelCatalogCachePath,
   lookupCatalogContextWindow,
   MODEL_CATALOG_PROVIDER_IDS,
+  MODEL_CATALOG_REFRESH_RESULTS,
+  ModelCatalog,
   trimModelCatalog,
   type ModelCatalogData,
 } from "./model-catalog.ts";
@@ -64,4 +70,100 @@ test("trimModelCatalog keeps only official providers and positive limits", () =>
   assert.equal(trimmed.fetchedAt, "2026-09-04T00:00:00.000Z");
   assert.throws(() => trimModelCatalog("nope", "2026-09-04T00:00:00.000Z"));
   assert.ok(MODEL_CATALOG_PROVIDER_IDS.includes("alibaba-cn"));
+});
+
+const SNAPSHOT: ModelCatalogData = {
+  fetchedAt: "2026-09-01T00:00:00.000Z",
+  providers: { openai: { "gpt-5.5": { context: 1_050_000, input: 922_000 } } },
+};
+
+function fakeFetch(body: unknown, status = 200): typeof fetch {
+  return (async () =>
+    new Response(JSON.stringify(body), {
+      status,
+      headers: { "content-type": "application/json" },
+    })) as unknown as typeof fetch;
+}
+
+test("ModelCatalog falls back to the bundled snapshot without a cache path", () => {
+  const catalog = new ModelCatalog({ snapshot: SNAPSHOT });
+  assert.equal(catalog.lookup("openai", "gpt-5.5"), 922_000);
+  assert.equal(catalog.data().fetchedAt, SNAPSHOT.fetchedAt);
+});
+
+test("ModelCatalog prefers a newer on-disk cache and ignores a corrupt one", () => {
+  const dir = mkdtempSync(join(tmpdir(), "roll-model-catalog-"));
+  try {
+    const cachePath = join(dir, "model-catalog.json");
+    writeFileSync(
+      cachePath,
+      JSON.stringify({
+        fetchedAt: "2026-09-03T00:00:00.000Z",
+        providers: { openai: { "gpt-5.6-terra": { context: 1_050_000, input: 922_000 } } },
+      }),
+    );
+    const fresh = new ModelCatalog({ snapshot: SNAPSHOT, cachePath });
+    assert.equal(fresh.lookup("openai", "gpt-5.6-terra"), 922_000);
+    assert.equal(fresh.lookup("openai", "gpt-5.5"), undefined);
+
+    writeFileSync(cachePath, "{not json");
+    const corrupt = new ModelCatalog({ snapshot: SNAPSHOT, cachePath });
+    assert.equal(corrupt.lookup("openai", "gpt-5.5"), 922_000);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("ModelCatalog.refreshIfStale skips within ttl, refreshes when stale, and survives failures", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "roll-model-catalog-"));
+  try {
+    const cachePath = join(dir, "model-catalog.json");
+    const dayMs = 24 * 60 * 60 * 1000;
+    const now = Date.parse("2026-09-04T00:00:00.000Z");
+    const raw = {
+      openai: { models: { "gpt-5.6-terra": { limit: { context: 1_050_000, input: 922_000 } } } },
+    };
+
+    const withinTtl = new ModelCatalog({
+      snapshot: { ...SNAPSHOT, fetchedAt: "2026-09-03T12:00:00.000Z" },
+      cachePath,
+      fetchImpl: fakeFetch(raw),
+      now: () => now,
+    });
+    assert.equal(await withinTtl.refreshIfStale(), MODEL_CATALOG_REFRESH_RESULTS.skipped);
+
+    const stale = new ModelCatalog({
+      snapshot: SNAPSHOT,
+      cachePath,
+      ttlMs: dayMs,
+      fetchImpl: fakeFetch(raw),
+      now: () => now,
+    });
+    assert.equal(await stale.refreshIfStale(), MODEL_CATALOG_REFRESH_RESULTS.refreshed);
+    assert.equal(stale.lookup("openai", "gpt-5.6-terra"), 922_000);
+    const written = JSON.parse(readFileSync(cachePath, "utf8")) as ModelCatalogData;
+    assert.equal(written.fetchedAt, new Date(now).toISOString());
+
+    const failing = new ModelCatalog({
+      snapshot: SNAPSHOT,
+      cachePath: join(dir, "other.json"),
+      fetchImpl: fakeFetch({ error: true }, 500),
+      now: () => now,
+    });
+    assert.equal(await failing.refreshIfStale(), MODEL_CATALOG_REFRESH_RESULTS.failed);
+    assert.equal(failing.lookup("openai", "gpt-5.5"), 922_000);
+
+    const noCache = new ModelCatalog({
+      snapshot: SNAPSHOT,
+      fetchImpl: fakeFetch(raw),
+      now: () => now,
+    });
+    assert.equal(await noCache.refreshIfStale(), MODEL_CATALOG_REFRESH_RESULTS.skipped);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("defaultModelCatalogCachePath lives under ~/.roll-agent/cache", () => {
+  assert.match(defaultModelCatalogCachePath(), /\.roll-agent[\\/]cache[\\/]model-catalog\.json$/u);
 });
