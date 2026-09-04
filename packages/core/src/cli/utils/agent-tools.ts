@@ -1,5 +1,11 @@
 import type { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { isJsonSchemaObject, isPlainObject } from "../../tool-runtime/schema.ts";
+import {
+  inlineAcyclicLocalJsonSchemaReferences,
+  JSON_SCHEMA_REF_ISSUE_REASONS,
+  type JsonSchemaRefIssue,
+  type JsonSchemaRefIssueReason,
+} from "../../tool-runtime/json-schema-refs.ts";
 import type { AgentTool } from "../../types/agent.ts";
 
 type ListedTool = Awaited<ReturnType<Client["listTools"]>>["tools"][number];
@@ -133,20 +139,55 @@ function compareSuggestionCandidates(
   return left.name.localeCompare(right.name);
 }
 
-function normalizeInputSchema(schema: unknown): AgentTool["inputSchema"] {
-  if (isPlainObject(schema) && isJsonSchemaObject(schema)) {
-    return schema;
-  }
-
-  return { type: "object" };
+export interface ToolSchemaIssue extends JsonSchemaRefIssue {
+  readonly toolName: string;
 }
 
-export function normalizeListedTools(tools: readonly ListedTool[]): AgentTool[] {
-  return tools.map((tool) => ({
-    name: tool.name,
-    ...(typeof tool.description === "string" ? { description: tool.description } : {}),
-    inputSchema: normalizeInputSchema(tool.inputSchema),
-  }));
+export interface NormalizeListedToolsOptions {
+  readonly onSchemaIssue?: (issue: ToolSchemaIssue) => void;
+}
+
+const SCHEMA_ISSUE_REASON_LABELS: Record<JsonSchemaRefIssueReason, string> = {
+  [JSON_SCHEMA_REF_ISSUE_REASONS.recursive]: "递归引用",
+  [JSON_SCHEMA_REF_ISSUE_REASONS.external]: "外部引用",
+  [JSON_SCHEMA_REF_ISSUE_REASONS.unresolvable]: "目标不存在",
+  [JSON_SCHEMA_REF_ISSUE_REASONS.limit]: "超出展开上限",
+};
+
+export function formatToolSchemaIssue(agentName: string, issue: ToolSchemaIssue): string {
+  return `Agent "${agentName}" 的工具 "${issue.toolName}" 参数 schema 引用 "${issue.ref}"（位置 ${issue.path || "/"}）无法内联：${SCHEMA_ISSUE_REASON_LABELS[issue.reason]}，模型可能无法调用该工具`;
+}
+
+interface NormalizedInputSchema {
+  readonly inputSchema: AgentTool["inputSchema"];
+  readonly unresolved: readonly JsonSchemaRefIssue[];
+}
+
+function normalizeInputSchema(schema: unknown): NormalizedInputSchema {
+  if (isPlainObject(schema) && isJsonSchemaObject(schema)) {
+    const inlined = inlineAcyclicLocalJsonSchemaReferences(schema);
+    return { inputSchema: inlined.schema, unresolved: inlined.unresolved };
+  }
+
+  return { inputSchema: { type: "object" }, unresolved: [] };
+}
+
+export function normalizeListedTools(
+  tools: readonly ListedTool[],
+  options: NormalizeListedToolsOptions = {},
+): AgentTool[] {
+  return tools.map((tool) => {
+    const { inputSchema, unresolved } = normalizeInputSchema(tool.inputSchema);
+    for (const issue of unresolved) {
+      options.onSchemaIssue?.({ toolName: tool.name, ...issue });
+    }
+    return {
+      name: tool.name,
+      ...(typeof tool.description === "string" ? { description: tool.description } : {}),
+      inputSchema,
+      ...(unresolved.length > 0 ? { schemaIssues: unresolved } : {}),
+    };
+  });
 }
 
 export function getToolNameSuggestions(

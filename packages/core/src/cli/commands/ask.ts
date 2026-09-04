@@ -20,7 +20,11 @@ import type {
   AskNeedsInputResult,
   AskSuccessResult,
 } from "../../types/ask.ts";
-import { formatMissingToolMessage, normalizeListedTools } from "../utils/agent-tools.ts";
+import {
+  formatMissingToolMessage,
+  formatToolSchemaIssue,
+  normalizeListedTools,
+} from "../utils/agent-tools.ts";
 import { log, redactToolArgsForLog } from "../utils/output.ts";
 import { extractTextContent, isToolErrorResult } from "../utils/tool-results.ts";
 
@@ -164,7 +168,9 @@ export default defineCommand({
         ...toSamplingConnectOptions(samplingCall),
         ...(agentEnv ? { env: agentEnv } : {}),
       });
-      const tools = normalizeListedTools((await client.listTools()).tools);
+      const tools = normalizeListedTools((await client.listTools()).tools, {
+        onSchemaIssue: (issue) => log.warn(formatToolSchemaIssue(agent.skill.name, issue)),
+      });
       const targetTool = tools.find((tool) => tool.name === decision.toolName);
 
       if (!targetTool) {
