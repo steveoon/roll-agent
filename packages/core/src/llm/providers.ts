@@ -10,6 +10,11 @@ import { createDeepSeek } from "@ai-sdk/deepseek";
 import { createGoogle, type GoogleGenerativeAIProviderOptions } from "@ai-sdk/google";
 import { createXai } from "@ai-sdk/xai";
 import { runtimeThinkingLevels } from "../config/schema.ts";
+import {
+  isRootDefinitionReference,
+  JSON_SCHEMA_REF_ISSUE_REASONS,
+  type JsonSchemaRefIssue,
+} from "../tool-runtime/json-schema-refs.ts";
 
 export type ThinkingLevel = (typeof runtimeThinkingLevels)[number];
 export type UnifiedReasoning = NonNullable<LanguageModelV4CallOptions["reasoning"]>;
@@ -354,12 +359,18 @@ export function resolveLLMCall(
   return { model };
 }
 
-export interface ProviderSchemaCapabilities {
-  readonly supportsRecursiveRefs: boolean;
-}
+const PROVIDERS_CONVERTING_TOOL_SCHEMAS: ReadonlySet<string> = new Set(["google"]);
 
-const PROVIDERS_WITHOUT_RECURSIVE_REFS: ReadonlySet<string> = new Set(["google"]);
-
-export function providerSchemaCapabilities(providerName: string): ProviderSchemaCapabilities {
-  return { supportsRecursiveRefs: !PROVIDERS_WITHOUT_RECURSIVE_REFS.has(providerName) };
+export function providerAcceptsToolSchemaIssues(
+  providerName: string,
+  issues: readonly JsonSchemaRefIssue[],
+): boolean {
+  if (!PROVIDERS_CONVERTING_TOOL_SCHEMAS.has(providerName)) {
+    return true;
+  }
+  return issues.every(
+    (issue) =>
+      issue.reason === JSON_SCHEMA_REF_ISSUE_REASONS.recursive &&
+      isRootDefinitionReference(issue.ref),
+  );
 }

@@ -151,6 +151,7 @@ const SCHEMA_ISSUE_REASON_LABELS: Record<JsonSchemaRefIssueReason, string> = {
   [JSON_SCHEMA_REF_ISSUE_REASONS.recursive]: "递归引用",
   [JSON_SCHEMA_REF_ISSUE_REASONS.external]: "外部引用",
   [JSON_SCHEMA_REF_ISSUE_REASONS.unresolvable]: "目标不存在",
+  [JSON_SCHEMA_REF_ISSUE_REASONS.siblingKeywords]: "引用旁带有校验关键字",
   [JSON_SCHEMA_REF_ISSUE_REASONS.limit]: "超出展开上限",
 };
 

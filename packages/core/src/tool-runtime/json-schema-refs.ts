@@ -2,6 +2,7 @@ export const JSON_SCHEMA_REF_ISSUE_REASONS = {
   recursive: "recursive",
   external: "external",
   unresolvable: "unresolvable",
+  siblingKeywords: "sibling-keywords",
   limit: "limit",
 } as const;
 
@@ -19,18 +20,38 @@ export interface InlineJsonSchemaRefsResult<T> {
   readonly unresolved: readonly JsonSchemaRefIssue[];
 }
 
-const MAX_INLINE_DEPTH = 32;
-const MAX_VISITED_NODES = 10_000;
+const MAX_EXPANSION_DEPTH = 32;
+const MAX_EXPANDED_NODES = 10_000;
 const MAX_OUTPUT_BYTES = 262_144;
+
+const ANNOTATION_KEYWORDS: ReadonlySet<string> = new Set([
+  "description",
+  "title",
+  "default",
+  "examples",
+  "deprecated",
+  "readOnly",
+  "writeOnly",
+  "$comment",
+]);
+const DEFINITION_CONTAINER_KEYS: ReadonlySet<string> = new Set(["$defs", "definitions"]);
+const ROOT_DEFINITION_REF_PATTERN = /^#\/(?:\$defs|definitions)\/[^/]+$/u;
+const ARRAY_INDEX_PATTERN = /^(?:0|[1-9]\d*)$/u;
 
 class InlineLimitExceeded extends Error {}
 
 type JsonObject = Readonly<Record<string, unknown>>;
 
-const DEFINITION_CONTAINER_KEYS: ReadonlySet<string> = new Set(["$defs", "definitions"]);
-
 function isJsonObject(value: unknown): value is JsonObject {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isSchemaValue(value: unknown): value is JsonObject | boolean {
+  return typeof value === "boolean" || isJsonObject(value);
+}
+
+export function isRootDefinitionReference(ref: string): boolean {
+  return ROOT_DEFINITION_REF_PATTERN.test(ref);
 }
 
 function decodePointerSegment(segment: string): string | undefined {
@@ -65,8 +86,7 @@ function resolvePointer(root: unknown, ref: string): unknown {
       return undefined;
     }
     if (Array.isArray(current)) {
-      const index = Number(segment);
-      current = Number.isInteger(index) ? current[index] : undefined;
+      current = ARRAY_INDEX_PATTERN.test(segment) ? current[Number(segment)] : undefined;
     } else if (isJsonObject(current)) {
       current = Object.prototype.hasOwnProperty.call(current, segment)
         ? current[segment]
@@ -84,30 +104,44 @@ function resolvePointer(root: unknown, ref: string): unknown {
 interface InlineState {
   readonly root: unknown;
   readonly unresolved: JsonSchemaRefIssue[];
-  visited: number;
+  expandedNodes: number;
+}
+
+interface InlineContext {
+  readonly activeRefs: readonly string[];
+  readonly expansionDepth: number;
 }
 
 function classifyRef(
   ref: string,
-  activeRefs: readonly string[],
+  context: InlineContext,
   root: unknown,
 ): JsonSchemaRefIssueReason | undefined {
   if (!ref.startsWith("#")) {
     return JSON_SCHEMA_REF_ISSUE_REASONS.external;
   }
-  if (activeRefs.includes(ref)) {
+  if (context.activeRefs.includes(ref)) {
     return JSON_SCHEMA_REF_ISSUE_REASONS.recursive;
   }
-  return isJsonObject(resolvePointer(root, ref))
+  return isSchemaValue(resolvePointer(root, ref))
     ? undefined
     : JSON_SCHEMA_REF_ISSUE_REASONS.unresolvable;
+}
+
+function mergeAnnotations(target: JsonObject | boolean, annotations: JsonObject): JsonObject {
+  if (target === true) {
+    return { ...annotations };
+  }
+  if (target === false) {
+    return { not: {}, ...annotations };
+  }
+  return { ...target, ...annotations };
 }
 
 function inlineObjectEntries(
   node: JsonObject,
   path: string,
-  activeRefs: readonly string[],
-  depth: number,
+  context: InlineContext,
   state: InlineState,
 ): JsonObject {
   return Object.fromEntries(
@@ -115,7 +149,7 @@ function inlineObjectEntries(
       key,
       DEFINITION_CONTAINER_KEYS.has(key)
         ? value
-        : inlineNode(value, `${path}/${encodePointerSegment(key)}`, activeRefs, depth + 1, state),
+        : inlineNode(value, `${path}/${encodePointerSegment(key)}`, context, state),
     ]),
   );
 }
@@ -123,59 +157,74 @@ function inlineObjectEntries(
 function inlineNode(
   node: unknown,
   path: string,
-  activeRefs: readonly string[],
-  depth: number,
+  context: InlineContext,
   state: InlineState,
 ): unknown {
-  state.visited += 1;
-  if (state.visited > MAX_VISITED_NODES || depth > MAX_INLINE_DEPTH) {
-    throw new InlineLimitExceeded();
+  if (context.activeRefs.length > 0) {
+    state.expandedNodes += 1;
+    if (state.expandedNodes > MAX_EXPANDED_NODES || context.expansionDepth > MAX_EXPANSION_DEPTH) {
+      throw new InlineLimitExceeded();
+    }
   }
   if (Array.isArray(node)) {
-    return node.map((item, index) =>
-      inlineNode(item, `${path}/${String(index)}`, activeRefs, depth + 1, state),
-    );
+    return node.map((item, index) => inlineNode(item, `${path}/${String(index)}`, context, state));
   }
   if (!isJsonObject(node)) {
     return node;
   }
   const { $ref: ref, ...siblings } = node;
   if (typeof ref !== "string") {
-    return inlineObjectEntries(node, path, activeRefs, depth, state);
+    return inlineObjectEntries(node, path, context, state);
   }
-  const issue = classifyRef(ref, activeRefs, state.root);
+  if (Object.keys(siblings).some((key) => !ANNOTATION_KEYWORDS.has(key))) {
+    state.unresolved.push({ path, ref, reason: JSON_SCHEMA_REF_ISSUE_REASONS.siblingKeywords });
+    return node;
+  }
+  const issue = classifyRef(ref, context, state.root);
   if (issue !== undefined) {
     state.unresolved.push({ path, ref, reason: issue });
-    return { $ref: ref, ...inlineObjectEntries(siblings, path, activeRefs, depth, state) };
+    return node;
   }
-  const expansion: InlineState = { root: state.root, unresolved: [], visited: state.visited };
+  const expansion: InlineState = {
+    root: state.root,
+    unresolved: [],
+    expandedNodes: state.expandedNodes,
+  };
   const target = inlineNode(
     resolvePointer(state.root, ref),
     path,
-    [...activeRefs, ref],
-    depth + 1,
+    { activeRefs: [...context.activeRefs, ref], expansionDepth: context.expansionDepth + 1 },
     expansion,
   );
-  state.visited = expansion.visited;
-  const inlinedSiblings = inlineObjectEntries(siblings, path, activeRefs, depth, state);
+  state.expandedNodes = expansion.expandedNodes;
   const recursesIntoItself = expansion.unresolved.some(
-    (issue) => issue.reason === JSON_SCHEMA_REF_ISSUE_REASONS.recursive && issue.ref === ref,
+    (candidate) =>
+      candidate.reason === JSON_SCHEMA_REF_ISSUE_REASONS.recursive && candidate.ref === ref,
   );
   if (recursesIntoItself) {
     state.unresolved.push({ path, ref, reason: JSON_SCHEMA_REF_ISSUE_REASONS.recursive });
-    return { $ref: ref, ...inlinedSiblings };
+    return node;
   }
   state.unresolved.push(...expansion.unresolved);
-  return isJsonObject(target) ? { ...target, ...inlinedSiblings } : inlinedSiblings;
+  return isSchemaValue(target) ? mergeAnnotations(target, siblings) : node;
+}
+
+function utf8Bytes(value: unknown): number {
+  return Buffer.byteLength(JSON.stringify(value), "utf8");
 }
 
 export function inlineAcyclicLocalJsonSchemaReferences<T extends object>(
   schema: T,
 ): InlineJsonSchemaRefsResult<T> {
-  const state: InlineState = { root: schema, unresolved: [], visited: 0 };
+  const serialized = JSON.stringify(schema);
+  if (!serialized.includes('"$ref"')) {
+    return { schema, unresolved: [] };
+  }
+  const state: InlineState = { root: schema, unresolved: [], expandedNodes: 0 };
   try {
-    const inlined = inlineNode(schema, "", [], 0, state) as T;
-    if (JSON.stringify(inlined).length > MAX_OUTPUT_BYTES) {
+    const inlined = inlineNode(schema, "", { activeRefs: [], expansionDepth: 0 }, state) as T;
+    const expandedBytes = utf8Bytes(inlined);
+    if (expandedBytes > MAX_OUTPUT_BYTES && expandedBytes > Buffer.byteLength(serialized, "utf8")) {
       throw new InlineLimitExceeded();
     }
     return { schema: inlined, unresolved: state.unresolved };

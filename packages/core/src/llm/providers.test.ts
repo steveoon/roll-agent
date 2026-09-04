@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { generateText } from "ai";
 import {
   createProviderModel,
-  providerSchemaCapabilities,
+  providerAcceptsToolSchemaIssues,
   resolveLLMCall,
   thinkingProviderOptions,
 } from "./providers.ts";
@@ -747,12 +747,48 @@ describe("thinkingProviderOptions", () => {
   });
 });
 
-describe("providerSchemaCapabilities", () => {
-  it("flags google as unable to accept recursive JSON Schema refs", () => {
-    assert.deepEqual(providerSchemaCapabilities("google"), { supportsRecursiveRefs: false });
-    assert.deepEqual(providerSchemaCapabilities("openai"), { supportsRecursiveRefs: true });
-    assert.deepEqual(providerSchemaCapabilities("anthropic"), { supportsRecursiveRefs: true });
-    assert.deepEqual(providerSchemaCapabilities("unknown"), { supportsRecursiveRefs: true });
+describe("providerAcceptsToolSchemaIssues", () => {
+  const recursiveRootDef = {
+    path: "/properties/tree",
+    ref: "#/$defs/node",
+    reason: "recursive",
+  } as const;
+  const recursiveViaProperties = {
+    path: "/properties/node",
+    ref: "#/properties/node",
+    reason: "recursive",
+  } as const;
+  const unresolvable = {
+    path: "/properties/x",
+    ref: "#/properties/nope",
+    reason: "unresolvable",
+  } as const;
+  const external = {
+    path: "/properties/y",
+    ref: "https://example.com/s.json#/x",
+    reason: "external",
+  } as const;
+
+  it("lets google keep only leftovers it can pass through as root-level definition refs", () => {
+    assert.equal(providerAcceptsToolSchemaIssues("google", []), true);
+    assert.equal(providerAcceptsToolSchemaIssues("google", [recursiveRootDef]), true);
+    assert.equal(providerAcceptsToolSchemaIssues("google", [recursiveViaProperties]), false);
+    assert.equal(providerAcceptsToolSchemaIssues("google", [unresolvable]), false);
+    assert.equal(providerAcceptsToolSchemaIssues("google", [external]), false);
+    assert.equal(
+      providerAcceptsToolSchemaIssues("google", [recursiveRootDef, unresolvable]),
+      false,
+    );
+  });
+
+  it("does not filter tools for providers that pass JSON Schema through", () => {
+    for (const provider of ["openai", "anthropic", "deepseek", "qwen", "xai", "unknown"]) {
+      assert.equal(
+        providerAcceptsToolSchemaIssues(provider, [recursiveViaProperties, unresolvable, external]),
+        true,
+        provider,
+      );
+    }
   });
 });
 
