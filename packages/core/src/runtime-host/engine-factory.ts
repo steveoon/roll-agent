@@ -126,6 +126,7 @@ export function resolveChatLlmSwitch(
     config.runtime.compaction.strategy === "summarize",
   );
   return {
+    provider: choice.provider,
     modelName: choice.model,
     model: calls.model,
     ...(calls.providerOptions ? { providerOptions: calls.providerOptions } : {}),

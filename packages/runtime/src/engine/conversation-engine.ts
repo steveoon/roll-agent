@@ -55,7 +55,9 @@ import {
   type SessionAgentRefresh,
   type SessionModelSwitch,
 } from "./agent-session.ts";
-import { resolveContextWindow } from "./context-window.ts";
+import { resolveModelContextWindow, type ContextWindowResolution } from "./context-window.ts";
+import { createDefaultModelCatalog } from "./model-catalog-default.ts";
+import type { ModelCatalog } from "./model-catalog.ts";
 import {
   createWorkspaceInstructionsSource,
   parseWorkspaceInstructionsSetting,
@@ -106,6 +108,7 @@ export type AcquireAgentUsage = (
 ) => Promise<AgentUsageLease | undefined>;
 
 export interface EngineModelSwitch extends Omit<SessionModelSwitch, "contextWindow"> {
+  readonly provider: string;
   readonly modelName: string;
 }
 
@@ -116,6 +119,7 @@ export interface ConversationEngineOptions {
   readonly sources?: readonly AgentToolSource[];
   readonly clientManager?: McpClientManager;
   readonly store?: ThreadStore;
+  readonly modelCatalog?: ModelCatalog;
   readonly policy?: ToolPolicy;
   readonly maxSteps?: number;
   readonly providerOptions?: SharedV4ProviderOptions;
@@ -413,6 +417,8 @@ export class ConversationEngine {
   private providerOptions: SharedV4ProviderOptions | undefined;
   private modelOverride: LanguageModelV4 | undefined;
   private modelNameOverride: string | undefined;
+  private providerNameOverride: string | undefined;
+  private readonly modelCatalog: ModelCatalog;
   private structuredOutputProviderOptions: SharedV4ProviderOptions | undefined;
   private structuredOutputReasoning:
     | NonNullable<LanguageModelV4CallOptions["reasoning"]>
@@ -454,6 +460,7 @@ export class ConversationEngine {
     this.config = options.config;
     this.clientManager = options.clientManager ?? new McpClientManager();
     this.store = options.store;
+    this.modelCatalog = options.modelCatalog ?? createDefaultModelCatalog();
     this.policy = options.policy;
     this.fileToolsEnabled = options.fileToolsEnabled ?? true;
     this.maxSteps = options.maxSteps ?? DEFAULT_MAX_STEPS;
@@ -613,10 +620,10 @@ export class ConversationEngine {
     initialCheckpoint?: ReturnType<ThreadStore["getLatestCheckpoint"]>,
   ): AgentSession {
     const store = this.store;
-    const contextWindow = resolveContextWindow(
+    const contextWindow = this.resolveContextWindowFor(
+      this.resolveProviderName(),
       this.resolveModelName(),
-      this.config.runtime.contextWindow,
-    );
+    )?.window;
     const skills = context.skillLibrary?.list() ?? [];
     const skillLibrary = skills.length > 0 ? context.skillLibrary : undefined;
     const shellProfile = this.resolveRuntimeShellProfile();
@@ -720,9 +727,10 @@ export class ConversationEngine {
     this.clientManager.setSamplingProviderOptions(providerOptions);
   }
 
-  switchModel(input: EngineModelSwitch): void {
+  switchModel(input: EngineModelSwitch): ContextWindowResolution | undefined {
     this.assertAcceptingSessions();
-    const contextWindow = resolveContextWindow(input.modelName, this.config.runtime.contextWindow);
+    const resolution = this.resolveContextWindowFor(input.provider, input.modelName);
+    const contextWindow = resolution?.window;
     const sessionSwitch = {
       model: input.model,
       ...(contextWindow !== undefined ? { contextWindow } : {}),
@@ -744,6 +752,7 @@ export class ConversationEngine {
     }
     this.modelOverride = input.model;
     this.modelNameOverride = input.modelName;
+    this.providerNameOverride = input.provider;
     this.providerOptions = input.providerOptions;
     this.structuredOutputProviderOptions = input.structuredOutputProviderOptions;
     this.structuredOutputReasoning = input.structuredOutputReasoning;
@@ -752,6 +761,7 @@ export class ConversationEngine {
     for (const id of this.liveSessions.keys()) {
       this.store?.updateModel(id, input.modelName);
     }
+    return resolution;
   }
 
   private ensureReady(): Promise<EngineContext> {
@@ -1211,7 +1221,23 @@ export class ConversationEngine {
   }
 
   private resolveProviderName(): string {
-    return this.config.runtime.provider ?? this.config.llm.defaultProvider;
+    return (
+      this.providerNameOverride ?? this.config.runtime.provider ?? this.config.llm.defaultProvider
+    );
+  }
+
+  private resolveContextWindowFor(
+    provider: string,
+    model: string,
+  ): ContextWindowResolution | undefined {
+    return resolveModelContextWindow({
+      provider,
+      model,
+      ...(this.config.runtime.contextWindow !== undefined
+        ? { override: this.config.runtime.contextWindow }
+        : {}),
+      catalog: this.modelCatalog,
+    });
   }
 
   private resolveModelName(): string {

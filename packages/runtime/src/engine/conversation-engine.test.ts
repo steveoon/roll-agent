@@ -15,6 +15,7 @@ import type { AgentUsageLease } from "@roll-agent/core/registry/agent-usage-leas
 import type { RegisteredAgent } from "@roll-agent/core/types/agent";
 import type { LanguageModelV4CallOptions, LanguageModelV4StreamPart } from "@ai-sdk/provider";
 import { ThreadStore } from "../store/thread-store.ts";
+import { ModelCatalog } from "./model-catalog.ts";
 import { DefaultToolPolicy } from "../policy/default-policy.ts";
 import type { SessionEvent } from "../types/events.ts";
 import {
@@ -1484,6 +1485,7 @@ test("ConversationEngine.switchModel updates live sessions, sampling and thread 
 
     const next = new MockLanguageModelV4({ modelId: "gemini-3.8-flash" });
     engine.switchModel({
+      provider: "mock",
       modelName: "gemini-3.8-flash",
       model: next,
       providerOptions: { google: { thinkingConfig: { thinkingLevel: "medium" } } },
@@ -1538,13 +1540,65 @@ test("ConversationEngine.switchModel preflights live sessions before mutating an
   const busy = await engine.createSession();
   Reflect.set(busy, "activeTurn", {});
   try {
-    assert.throws(() => engine.switchModel({ modelName: "next", model: next }), /正在生成回复/u);
+    assert.throws(
+      () => engine.switchModel({ provider: "mock", modelName: "next", model: next }),
+      /正在生成回复/u,
+    );
     assert.equal(Reflect.get(idle, "model"), initial);
     assert.equal(Reflect.get(engine, "modelOverride"), undefined);
     assert.deepEqual(samplingModels, []);
     assert.deepEqual(samplingOptions, []);
   } finally {
     Reflect.set(busy, "activeTurn", undefined);
+    await engine.dispose();
+  }
+});
+
+test("ConversationEngine resolves context window from the model catalog by provider and reports the source", async () => {
+  const config = rollConfigSchema.parse({
+    llm: {
+      defaultProvider: "openai",
+      defaultModel: "gpt-5.6-terra",
+      providers: { openai: { apiKey: "test" }, google: { apiKey: "test" } },
+    },
+    ask: {},
+    agents: { dataDir: "/tmp/roll-engine-test" },
+  });
+  const catalog = new ModelCatalog({
+    snapshot: {
+      fetchedAt: "2026-09-04T00:00:00.000Z",
+      providers: {
+        openai: { "gpt-5.6-terra": { context: 1_050_000, input: 922_000 } },
+        google: { "gemini-3.8-flash": { context: 1_048_576 } },
+      },
+    },
+  });
+  const engine = new ConversationEngine({
+    config,
+    model: new MockLanguageModelV4({ modelId: "gpt-5.6-terra" }),
+    sources: [],
+    skillLibrary: null,
+    modelCatalog: catalog,
+  });
+  try {
+    const session = await engine.createSession();
+    assert.equal(session.getContextWindow(), 922_000);
+
+    const switched = engine.switchModel({
+      provider: "google",
+      modelName: "gemini-3.8-flash",
+      model: new MockLanguageModelV4({ modelId: "gemini-3.8-flash" }),
+    });
+    assert.deepEqual(switched, { window: 1_048_576, source: "catalog" });
+    assert.equal(session.getContextWindow(), 1_048_576);
+
+    const ruled = engine.switchModel({
+      provider: "xai",
+      modelName: "grok-4.5",
+      model: new MockLanguageModelV4({ modelId: "grok-4.5" }),
+    });
+    assert.deepEqual(ruled, { window: 500_000, source: "rule" });
+  } finally {
     await engine.dispose();
   }
 });
