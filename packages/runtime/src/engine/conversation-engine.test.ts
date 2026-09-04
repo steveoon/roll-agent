@@ -1508,6 +1508,47 @@ test("ConversationEngine.switchModel updates live sessions, sampling and thread 
   }
 });
 
+test("ConversationEngine.switchModel preflights live sessions before mutating any state", async () => {
+  const config = rollConfigSchema.parse({
+    llm: {
+      defaultProvider: "mock",
+      defaultModel: "default-model",
+      providers: { mock: { apiKey: "test" } },
+    },
+    ask: {},
+    agents: { dataDir: "/tmp/roll-engine-test" },
+  });
+  const samplingModels: unknown[] = [];
+  const samplingOptions: unknown[] = [];
+  const clientManager = {
+    setSamplingProviderOptions: (options: unknown) => samplingOptions.push(options),
+    setSamplingModel: (model: unknown) => samplingModels.push(model),
+    disconnectAll: async () => {},
+  } as unknown as McpClientManager;
+  const initial = new MockLanguageModelV4({ modelId: "initial" });
+  const next = new MockLanguageModelV4({ modelId: "next" });
+  const engine = new ConversationEngine({
+    config,
+    model: initial,
+    sources: [],
+    skillLibrary: null,
+    clientManager,
+  });
+  const idle = await engine.createSession();
+  const busy = await engine.createSession();
+  Reflect.set(busy, "activeTurn", {});
+  try {
+    assert.throws(() => engine.switchModel({ modelName: "next", model: next }), /正在生成回复/u);
+    assert.equal(Reflect.get(idle, "model"), initial);
+    assert.equal(Reflect.get(engine, "modelOverride"), undefined);
+    assert.deepEqual(samplingModels, []);
+    assert.deepEqual(samplingOptions, []);
+  } finally {
+    Reflect.set(busy, "activeTurn", undefined);
+    await engine.dispose();
+  }
+});
+
 test("ConversationEngine threads structured output controls into AgentSession", async () => {
   const config = rollConfigSchema.parse({
     llm: {

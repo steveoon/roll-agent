@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { loadConfig } from "./loader.ts";
 import { writeDefaultLlm } from "./default-llm-writer.ts";
 
 describe("writeDefaultLlm", () => {
@@ -20,6 +21,10 @@ describe("writeDefaultLlm", () => {
         "      api-key: $" + "{DASHSCOPE_API_KEY}",
         "    google:",
         "      api-key: $" + "{GOOGLE_GENERATIVE_AI_API_KEY}",
+        "runtime:",
+        "  provider: qwen",
+        "  model: qwen3.8-max",
+        "  thinking-level: low",
         "agents:",
         "  data-dir: ~/.roll-agent/agents",
         "",
@@ -36,6 +41,13 @@ describe("writeDefaultLlm", () => {
       assert.match(written, /default-model: gemini-3\.8-flash/u);
       assert.match(written, /api-key: \$\{DASHSCOPE_API_KEY\}/u);
       assert.doesNotMatch(written, /qwen3\.8-max/u);
+      assert.match(written, /thinking-level: low/u);
+      const config = loadConfig({ cwd: dir }).config;
+      assert.equal(config.runtime.provider, undefined);
+      assert.equal(config.runtime.model, undefined);
+      assert.equal(config.runtime.thinkingLevel, "low");
+      assert.equal(config.llm.defaultProvider, "google");
+      assert.equal(config.llm.defaultModel, "gemini-3.8-flash");
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

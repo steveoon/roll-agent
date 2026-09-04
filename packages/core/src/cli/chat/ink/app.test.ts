@@ -1526,6 +1526,51 @@ test("ChatApp switches sessions via /resume picker", async () => {
   unmount();
 });
 
+test("ChatApp keeps the switched model in its status after /resume", async () => {
+  const first = switchableFakeSession("s1");
+  const second = switchableFakeSession("s2", [{ role: "user", content: "旧消息" }]);
+  const { stdin, lastFrame, unmount } = render(
+    h(ChatApp, {
+      session: first.session,
+      model: "old-model",
+      onUserSubmit: () => {},
+      onExit: () => {},
+      sessionSwitching: {
+        loadItems: () => [{ id: "s2", title: "历史会话", meta: "刚刚 · 1 条消息" }],
+        resume: async () => second.session,
+        onRetired: () => {},
+      },
+      modelSwitching: {
+        loadItems: () => [{ id: "google/new-model", title: "google/new-model", meta: "已配置" }],
+        switchTo: async () => ({
+          id: "google/new-model",
+          model: "new-model",
+          contextWindow: undefined,
+        }),
+        setAsDefault: async () => "",
+      },
+    }),
+  );
+  await delay(20);
+  stdin.write("/model");
+  await delay(20);
+  stdin.write("\r");
+  await delay(20);
+  stdin.write("\r");
+  await waitFor(() => assert.match(lastFrame() ?? "", /仅本次 roll chat 生效/));
+  stdin.write("\r");
+  await delay(20);
+  stdin.write("/resume");
+  await delay(20);
+  stdin.write("\r");
+  await delay(20);
+  stdin.write("\r");
+  await waitFor(() => assert.match(lastFrame() ?? "", /旧消息/));
+  assert.match(lastFrame() ?? "", /new-model/);
+  assert.doesNotMatch(lastFrame() ?? "", /old-model/);
+  unmount();
+});
+
 test("ChatApp keeps current session when resume fails", async () => {
   const first = switchableFakeSession("s1");
   const { stdin, lastFrame, unmount } = render(

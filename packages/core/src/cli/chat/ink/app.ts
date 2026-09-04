@@ -120,6 +120,7 @@ interface ChatSessionViewProps extends Omit<ChatAppProps, "sessionSwitching"> {
   readonly onOpenPicker: () => boolean;
   readonly onPickerSelect: (threadId: string) => void;
   readonly onPickerCancel: () => void;
+  readonly onModelChanged: (model: string) => void;
 }
 
 export const INK_HINTS = "/exit 退出 · Esc 中断 · / 命令 · ? 快捷键";
@@ -135,6 +136,7 @@ function helpText(): string {
 
 export function ChatApp(props: ChatAppProps): ReactElement {
   const [activeSession, setActiveSession] = useState(props.session);
+  const [activeModel, setActiveModel] = useState(props.model);
   const [sessionHistory, setSessionHistory] = useState<readonly HistoryItem[] | undefined>(
     props.initialHistory,
   );
@@ -195,7 +197,7 @@ export function ChatApp(props: ChatAppProps): ReactElement {
   return h(ChatSessionView, {
     key: activeSession.id,
     session: activeSession,
-    model: props.model,
+    model: activeModel,
     onUserSubmit: props.onUserSubmit,
     onExit: props.onExit,
     ...(sessionHistory !== undefined ? { initialHistory: sessionHistory } : {}),
@@ -214,6 +216,7 @@ export function ChatApp(props: ChatAppProps): ReactElement {
     onOpenPicker: openPicker,
     onPickerSelect: selectSession,
     onPickerCancel: cancelPicker,
+    onModelChanged: setActiveModel,
   });
 }
 
@@ -287,6 +290,7 @@ function ChatSessionView(props: ChatSessionViewProps): ReactElement {
     modelSwitching.switchTo(input).then(
       (result) => {
         setModel(result.model, result.contextWindow);
+        props.onModelChanged(result.model);
         notice(`已切换到 ${result.id}（仅本次 roll chat 生效）`);
         setModelPicker({
           stage: MODEL_PICKER_STAGES.confirmDefault,

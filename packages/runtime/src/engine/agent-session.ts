@@ -2472,8 +2472,12 @@ export class AgentSession {
     this.onProviderOptionsChange?.(providerOptions);
   }
 
+  canSwitchModel(): boolean {
+    return this.activeTurn === undefined;
+  }
+
   switchModel(input: SessionModelSwitch): void {
-    if (this.activeTurn !== undefined) {
+    if (!this.canSwitchModel()) {
       throw new Error("会话正在生成回复，稍后再切换模型");
     }
     this.model = input.model;

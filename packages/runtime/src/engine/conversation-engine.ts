@@ -735,6 +735,11 @@ export class ConversationEngine {
         : {}),
     } satisfies SessionModelSwitch;
     for (const session of this.liveSessions.values()) {
+      if (!session.canSwitchModel()) {
+        throw new Error("存在正在生成回复的会话，稍后再切换模型");
+      }
+    }
+    for (const session of this.liveSessions.values()) {
       session.switchModel(sessionSwitch);
     }
     this.modelOverride = input.model;

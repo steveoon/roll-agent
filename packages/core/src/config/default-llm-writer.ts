@@ -16,9 +16,15 @@ export function writeDefaultLlm(
   const snapshot = service.readForRepair();
   const current = snapshot.persisted;
   const llm = isPlainRecord(current.llm) ? current.llm : {};
+  const runtime = isPlainRecord(current.runtime) ? { ...current.runtime } : {};
+  delete runtime.provider;
+  delete runtime.model;
+  const withoutRuntime = { ...current };
+  delete withoutRuntime.runtime;
   const next = {
-    ...current,
+    ...withoutRuntime,
     llm: { ...llm, defaultProvider: choice.provider, defaultModel: choice.model },
+    ...(Object.keys(runtime).length > 0 ? { runtime } : {}),
   };
   service.savePatches(createConfigPatches(current, next), snapshot.revision);
   return { configPath: snapshot.configPath };

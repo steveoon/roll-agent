@@ -374,5 +374,26 @@ describe("providerConfigSchema models", () => {
         agents: { dataDir: "/tmp/agents" },
       }),
     );
+    assert.throws(() =>
+      rollConfigSchema.parse({
+        llm: {
+          defaultProvider: "x",
+          defaultModel: "y",
+          providers: { x: { apiKey: "k", models: ["   "] } },
+        },
+        ask: {},
+        agents: { dataDir: "/tmp/agents" },
+      }),
+    );
+    const trimmed = rollConfigSchema.parse({
+      llm: {
+        defaultProvider: "x",
+        defaultModel: "y",
+        providers: { x: { apiKey: "k", models: [" model-a "] } },
+      },
+      ask: {},
+      agents: { dataDir: "/tmp/agents" },
+    });
+    assert.deepEqual(trimmed.llm.providers.x?.models, ["model-a"]);
   });
 });

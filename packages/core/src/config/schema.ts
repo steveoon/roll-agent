@@ -27,7 +27,7 @@ export const browserWindowBoundsSchema = z.object({
 export const providerConfigSchema = z.object({
   apiKey: z.string(),
   baseUrl: z.string().optional(),
-  models: z.array(z.string().min(1)).optional(),
+  models: z.array(z.string().trim().min(1)).optional(),
 });
 
 export const llmConfigSchema = z.object({
