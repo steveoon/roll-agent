@@ -454,10 +454,16 @@ function parseRuntimeEventRow(
   };
 }
 
+export interface ThreadStoreOptions {
+  readonly now?: () => Date;
+}
+
 export class ThreadStore {
   private readonly db: DatabaseSync;
+  private readonly now: () => Date;
 
-  constructor(dir: string = defaultThreadsDir()) {
+  constructor(dir: string = defaultThreadsDir(), options: ThreadStoreOptions = {}) {
+    this.now = options.now ?? (() => new Date());
     const resolved = expandTilde(dir);
     if (!existsSync(resolved)) {
       mkdirSync(resolved, { recursive: true, mode: 0o700 });
@@ -683,8 +689,9 @@ export class ThreadStore {
           .run(LEGACY_TOOL_EXECUTION_CONTEXT_REPRESENTATION);
       }
       this.initializeMissingRuntimeEventStatesInTransaction();
-      this.enforceAllToolExecutionRetentionInTransaction(new Date().toISOString());
-      this.enforceAllRuntimeEventRetentionInTransaction(new Date().toISOString());
+      const retentionNow = this.now().toISOString();
+      this.enforceAllToolExecutionRetentionInTransaction(retentionNow);
+      this.enforceAllRuntimeEventRetentionInTransaction(retentionNow);
       this.db.exec(`PRAGMA user_version = ${String(SCHEMA_VERSION)};`);
       this.db.exec("COMMIT");
     } catch (error) {
@@ -972,7 +979,7 @@ export class ThreadStore {
 
     this.db.exec("BEGIN IMMEDIATE");
     try {
-      this.enforceRuntimeEventRetentionInTransaction(threadId, new Date().toISOString());
+      this.enforceRuntimeEventRetentionInTransaction(threadId, this.now().toISOString());
       const state = this.db
         .prepare(
           `SELECT event_log_id, next_sequence, retained_from_sequence,

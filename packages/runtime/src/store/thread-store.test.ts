@@ -2116,10 +2116,12 @@ test("ThreadStore 两个连接追加 ToolExecutionRecord 时 sequence 单调且�
   }
 });
 
+const RETENTION_CLOCK = { now: () => new Date("2026-08-20T00:00:00.000Z") } as const;
+
 test("ThreadStore Runtime event log 跨重启保留 cursor 并从 null 或 cursor 恢复", () => {
   const dir = tempDir();
   try {
-    const first = new ThreadStore(dir);
+    const first = new ThreadStore(dir, RETENTION_CLOCK);
     const threadId = first.createThread();
     assert.equal(first.getRuntimeEventCursor(threadId), null);
     assert.deepEqual(first.resumeRuntimeEvents(threadId, null), {
@@ -2161,7 +2163,7 @@ test("ThreadStore Runtime event log 跨重启保留 cursor 并从 null 或 curso
     );
     first.close();
 
-    const reopened = new ThreadStore(dir);
+    const reopened = new ThreadStore(dir, RETENTION_CLOCK);
     assert.equal(reopened.getRuntimeEventCursor(threadId), completed.cursor);
     const replay = reopened.resumeRuntimeEvents(threadId, null);
     assert.deepEqual(
@@ -2179,10 +2181,10 @@ test("ThreadStore Runtime event log 跨重启保留 cursor 并从 null 或 curso
 test("ThreadStore Runtime event sequence 在两个连接间单调且 cursor 不混用", () => {
   const dir = tempDir();
   try {
-    const first = new ThreadStore(dir);
+    const first = new ThreadStore(dir, RETENTION_CLOCK);
     const firstThread = first.createThread();
     const secondThread = first.createThread();
-    const second = new ThreadStore(dir);
+    const second = new ThreadStore(dir, RETENTION_CLOCK);
     const firstEvent = first.appendRuntimeEvent({
       threadId: firstThread,
       timestamp: "2026-08-04T04:00:00.000Z",
@@ -2235,7 +2237,7 @@ test(
   () => {
     const dir = tempDir();
     try {
-      const store = new ThreadStore(dir);
+      const store = new ThreadStore(dir, RETENTION_CLOCK);
       const threadId = store.createThread();
       const first = store.appendRuntimeEvent({
         threadId,
@@ -2285,7 +2287,7 @@ test(
 test("ThreadStore Runtime event byte retention 保留不超过 16 MiB 的最新连续后缀", () => {
   const dir = tempDir();
   try {
-    const store = new ThreadStore(dir);
+    const store = new ThreadStore(dir, RETENTION_CLOCK);
     const threadId = store.createThread();
     const payload = "x".repeat(9 * 1_024 * 1_024);
     const first = store.appendRuntimeEvent({
@@ -2326,7 +2328,7 @@ test("ThreadStore Runtime event byte retention 保留不超过 16 MiB 的最新�
 test("ThreadStore 拒绝单条超过 Runtime event byte retention 上限的记录", () => {
   const dir = tempDir();
   try {
-    const store = new ThreadStore(dir);
+    const store = new ThreadStore(dir, RETENTION_CLOCK);
     const threadId = store.createThread();
     assert.throws(
       () =>
@@ -2354,7 +2356,7 @@ test("ThreadStore 拒绝单条超过 Runtime event byte retention 上限的记�
 test("ThreadStore Runtime event age retention 遇到未过期记录后不在中间打洞", () => {
   const dir = tempDir();
   try {
-    const store = new ThreadStore(dir);
+    const store = new ThreadStore(dir, RETENTION_CLOCK);
     const threadId = store.createThread();
     const events = [0, 1, 2].map(() =>
       store.appendRuntimeEvent({
@@ -2467,7 +2469,7 @@ test("ThreadStore 从 v4 升级只建立空 Runtime event log，不从旧 transc
 test("ThreadStore deleteThread 级联删除 Runtime event state 与 ledger", () => {
   const dir = tempDir();
   try {
-    const store = new ThreadStore(dir);
+    const store = new ThreadStore(dir, RETENTION_CLOCK);
     const threadId = store.createThread();
     store.appendRuntimeEvent({
       threadId,
@@ -2493,7 +2495,7 @@ test("ThreadStore deleteThread 级联删除 Runtime event state 与 ledger", () 
 test("ThreadStore Runtime event append 失败会回滚 sequence 且不产生 cursor", () => {
   const dir = tempDir();
   try {
-    const store = new ThreadStore(dir);
+    const store = new ThreadStore(dir, RETENTION_CLOCK);
     const threadId = store.createThread();
     const database = new DatabaseSync(join(dir, "threads.db"));
     database.exec(`

@@ -122,6 +122,7 @@ export type {
   ToolOutcomeKind,
 } from "./tool-bridge/normalize-result.ts";
 export { ThreadStore, defaultThreadsDir, expandTilde } from "./store/thread-store.ts";
+export type { ThreadStoreOptions } from "./store/thread-store.ts";
 export type { ThreadRecord, CreateThreadInput } from "./store/thread-store.ts";
 export {
   SCHEDULE_LEDGER_READ_STATUSES,
