@@ -7,6 +7,8 @@ import {
   resolveLLMCall,
   thinkingProviderOptions,
 } from "./providers.ts";
+import { inlineAcyclicLocalJsonSchemaReferences } from "../tool-runtime/json-schema-refs.ts";
+import type { LanguageModelV4 } from "@ai-sdk/provider";
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -751,5 +753,73 @@ describe("providerSchemaCapabilities", () => {
     assert.deepEqual(providerSchemaCapabilities("openai"), { supportsRecursiveRefs: true });
     assert.deepEqual(providerSchemaCapabilities("anthropic"), { supportsRecursiveRefs: true });
     assert.deepEqual(providerSchemaCapabilities("unknown"), { supportsRecursiveRefs: true });
+  });
+});
+
+describe("tool schema compatibility after local ref inlining", () => {
+  const rawSchema = {
+    type: "object",
+    properties: {
+      locationCity: { type: "string", minLength: 1, description: "城市" },
+      locationDistrict: { $ref: "#/properties/locationCity", description: "区" },
+      major: { type: "array", items: { $ref: "#/properties/locationCity" }, minItems: 1 },
+    },
+  } as const;
+  const inlined = inlineAcyclicLocalJsonSchemaReferences(rawSchema).schema;
+
+  async function captureToolRequest(model: LanguageModelV4, schema: object): Promise<unknown> {
+    const originalFetch = globalThis.fetch;
+    let body: unknown;
+    try {
+      globalThis.fetch = async (_input: string | URL | Request, init?: RequestInit) => {
+        body = typeof init?.body === "string" ? JSON.parse(init.body) : undefined;
+        return new Response("", {
+          status: 200,
+          headers: { "content-type": "text/event-stream" },
+        });
+      };
+      const result = await model.doStream({
+        prompt: [{ role: "user", content: [{ type: "text", text: "hi" }] }],
+        tools: [
+          {
+            type: "function",
+            name: "filter",
+            description: "f",
+            inputSchema: schema as never,
+          },
+        ],
+      });
+      await result.stream.cancel();
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+    return body;
+  }
+
+  it("google rejects the raw schema but accepts the inlined one", async () => {
+    const model = createProviderModel("google", "gemini-3.8-flash", "k");
+    await assert.rejects(
+      () => captureToolRequest(model, rawSchema),
+      /direct children of root-level/u,
+    );
+    const body = await captureToolRequest(model, inlined);
+    assert.ok(isRecord(body));
+    assert.match(JSON.stringify(body), /locationDistrict/u);
+  });
+
+  it("openai and anthropic receive the inlined schema verbatim", async () => {
+    for (const [provider, modelName] of [
+      ["openai", "gpt-5.5"],
+      ["anthropic", "claude-sonnet-4-6"],
+    ] as const) {
+      const body = await captureToolRequest(createProviderModel(provider, modelName, "k"), inlined);
+      const text = JSON.stringify(body);
+      assert.match(
+        text,
+        /"locationDistrict":\{"type":"string","minLength":1,"description":"区"\}/u,
+        provider,
+      );
+      assert.doesNotMatch(text, /\$ref/u, provider);
+    }
   });
 });
