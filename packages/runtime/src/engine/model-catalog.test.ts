@@ -43,6 +43,10 @@ test("lookupCatalogContextWindow tolerates -latest and date suffixes", () => {
     lookupCatalogContextWindow(DATA, "anthropic", "claude-sonnet-4-6-20260217"),
     1_000_000,
   );
+  assert.equal(
+    lookupCatalogContextWindow(DATA, "anthropic", "claude-sonnet-4-6-latest-20260217"),
+    1_000_000,
+  );
 });
 
 test("lookupCatalogContextWindow returns undefined for unknown provider or model", () => {
@@ -109,6 +113,61 @@ test("ModelCatalog prefers a newer on-disk cache and ignores a corrupt one", () 
     writeFileSync(cachePath, "{not json");
     const corrupt = new ModelCatalog({ snapshot: SNAPSHOT, cachePath });
     assert.equal(corrupt.lookup("openai", "gpt-5.5"), 922_000);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("ModelCatalog ignores a future-dated cache and refreshes it", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "roll-model-catalog-"));
+  try {
+    const cachePath = join(dir, "model-catalog.json");
+    writeFileSync(
+      cachePath,
+      JSON.stringify({
+        fetchedAt: "9999-01-01T00:00:00.000Z",
+        providers: { openai: { poisoned: { context: 999_999_999 } } },
+      }),
+    );
+    let fetchCount = 0;
+    const fetchImpl: typeof fetch = async () => {
+      fetchCount += 1;
+      return new Response(
+        JSON.stringify({
+          openai: { models: { "gpt-5.6-terra": { limit: { context: 1_050_000 } } } },
+        }),
+      );
+    };
+    const catalog = new ModelCatalog({
+      snapshot: SNAPSHOT,
+      cachePath,
+      now: () => Date.parse("2026-09-04T00:00:00.000Z"),
+      fetchImpl,
+    });
+    assert.equal(catalog.lookup("openai", "gpt-5.5"), 922_000);
+    assert.equal(await catalog.refreshIfStale(), MODEL_CATALOG_REFRESH_RESULTS.refreshed);
+    assert.equal(fetchCount, 1);
+    assert.equal(catalog.lookup("openai", "poisoned"), undefined);
+    assert.equal(catalog.lookup("openai", "gpt-5.6-terra"), 1_050_000);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("ModelCatalog rejects an empty official refresh and preserves current data", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "roll-model-catalog-"));
+  try {
+    const cachePath = join(dir, "model-catalog.json");
+    const catalog = new ModelCatalog({
+      snapshot: SNAPSHOT,
+      cachePath,
+      now: () => Date.parse("2026-09-04T00:00:00.000Z"),
+      fetchImpl: fakeFetch({ unofficial: { models: { fake: { limit: { context: 123 } } } } }),
+    });
+    const before = catalog.data();
+    assert.equal(await catalog.refreshIfStale(), MODEL_CATALOG_REFRESH_RESULTS.failed);
+    assert.equal(catalog.data(), before);
+    assert.equal(catalog.lookup("openai", "gpt-5.5"), 922_000);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

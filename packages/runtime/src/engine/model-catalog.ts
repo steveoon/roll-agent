@@ -69,7 +69,22 @@ export function trimModelCatalog(raw: unknown, fetchedAt: string): ModelCatalogD
       providers[providerId] = models;
     }
   }
-  return modelCatalogDataSchema.parse({ fetchedAt, providers });
+  const data = modelCatalogDataSchema.parse({ fetchedAt, providers });
+  if (!hasCatalogModels(data)) {
+    throw new Error("model catalog contains no supported models");
+  }
+  return data;
+}
+
+function catalogModelCount(data: ModelCatalogData): number {
+  return Object.values(data.providers).reduce(
+    (count, models) => count + Object.keys(models).length,
+    0,
+  );
+}
+
+function hasCatalogModels(data: ModelCatalogData): boolean {
+  return catalogModelCount(data) > 0;
 }
 
 const DATE_SUFFIX_PATTERN = /-\d{8}$/u;
@@ -77,13 +92,19 @@ const LATEST_SUFFIX = "-latest";
 
 function modelNameCandidates(modelName: string): readonly string[] {
   const candidates = [modelName];
-  if (modelName.endsWith(LATEST_SUFFIX)) {
-    candidates.push(modelName.slice(0, -LATEST_SUFFIX.length));
+  let current = modelName;
+  while (true) {
+    const next = current.endsWith(LATEST_SUFFIX)
+      ? current.slice(0, -LATEST_SUFFIX.length)
+      : DATE_SUFFIX_PATTERN.test(current)
+        ? current.replace(DATE_SUFFIX_PATTERN, "")
+        : undefined;
+    if (next === undefined || next.length === 0) {
+      return candidates;
+    }
+    candidates.push(next);
+    current = next;
   }
-  if (DATE_SUFFIX_PATTERN.test(modelName)) {
-    candidates.push(modelName.replace(DATE_SUFFIX_PATTERN, ""));
-  }
-  return candidates;
 }
 
 export function lookupCatalogContextWindow(
@@ -137,10 +158,19 @@ function readCachedCatalog(cachePath: string): ModelCatalogData | undefined {
   try {
     const parsed: unknown = JSON.parse(readFileSync(cachePath, "utf8"));
     const result = modelCatalogDataSchema.safeParse(parsed);
-    return result.success ? result.data : undefined;
+    return result.success && hasCatalogModels(result.data) ? result.data : undefined;
   } catch {
     return undefined;
   }
+}
+
+function isUsableCachedCatalog(
+  cached: ModelCatalogData,
+  snapshot: ModelCatalogData,
+  nowMs: number,
+): boolean {
+  const fetchedAtMs = Date.parse(cached.fetchedAt);
+  return fetchedAtMs <= nowMs && fetchedAtMs > Date.parse(snapshot.fetchedAt);
 }
 
 export class ModelCatalog {
@@ -167,9 +197,7 @@ export class ModelCatalog {
     }
     const cached = this.cachePath === undefined ? undefined : readCachedCatalog(this.cachePath);
     this.current =
-      cached && Date.parse(cached.fetchedAt) > Date.parse(this.snapshot.fetchedAt)
-        ? cached
-        : this.snapshot;
+      cached && isUsableCachedCatalog(cached, this.snapshot, this.now()) ? cached : this.snapshot;
     return this.current;
   }
 
@@ -183,7 +211,8 @@ export class ModelCatalog {
       return MODEL_CATALOG_REFRESH_RESULTS.skipped;
     }
     const nowMs = this.now();
-    if (nowMs - Date.parse(this.data().fetchedAt) < this.ttlMs) {
+    const ageMs = nowMs - Date.parse(this.data().fetchedAt);
+    if (ageMs >= 0 && ageMs < this.ttlMs) {
       return MODEL_CATALOG_REFRESH_RESULTS.skipped;
     }
     try {
