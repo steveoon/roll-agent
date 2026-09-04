@@ -27,6 +27,20 @@ export type {
   WorkspaceInstructionsSource,
 } from "./engine/workspace-instructions.ts";
 export { resolveContextWindow, lookupContextWindow } from "./engine/context-window.ts";
+export { createDefaultModelCatalog } from "./engine/model-catalog-default.ts";
+export {
+  ModelCatalog,
+  defaultModelCatalogCachePath,
+  lookupCatalogContextWindow,
+  trimModelCatalog,
+  MODEL_CATALOG_REFRESH_RESULTS,
+} from "./engine/model-catalog.ts";
+export type {
+  ModelCatalogData,
+  ModelCatalogLimit,
+  ModelCatalogOptions,
+  ModelCatalogRefreshResult,
+} from "./engine/model-catalog.ts";
 export {
   compactMessages,
   findTurnBoundaries,
