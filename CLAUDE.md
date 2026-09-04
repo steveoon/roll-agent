@@ -217,6 +217,8 @@ Agent 管理命令（start/stop/health/list 等）使用 `loadAgentsConfig()` �
 
 **判断标准：** 如果一个 schema 变换使得 `createExtractionSchema(s)` 产出的某字段类型与 `s` 中对应字段的原始类型不同，这个变换就是有问题的。
 
+**边界归一化（允许）：** `normalizeListedTools()` 在消费 MCP `tools/list` 时会把非递归的本地 `$ref` 就地内联（`tool-runtime/json-schema-refs.ts`），这是写法变换不是语义变换：内联结果等于被引用 schema 与兄弟键合并（兄弟键优先，保留各字段自己的 description）。递归 / 外部 / 目标不存在 / 超限的引用保留原样并挂在 `AgentTool.schemaIssues`，引擎按 `providerSchemaCapabilities()` 决定是否把该工具从本会话模型工具集剔除（目前只有 google 不接受递归引用）。原因：MCP SDK 对 Zod v3 用 `zod-to-json-schema` 默认会把复用的 schema 实例折叠成 `#/properties/...` 引用，而 Gemini 只认根级 `$defs`，preflight 与提参 schema 也不认 `$ref`；`buildAgentToolset()` 对直接构造的 `AgentToolSource` 会再做一次幂等内联。
+
 ### CLI 懒加载
 
 citty 子命令通过动态 `import()` 懒加载，CLI 启动不会加载所有命令模块。
