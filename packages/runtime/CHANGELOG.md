@@ -1,5 +1,48 @@
 # @roll-agent/runtime
 
+## 0.20.0
+
+### Minor Changes
+
+- [#249](https://github.com/steveoon/roll-agent/pull/249) [`937dc42`](https://github.com/steveoon/roll-agent/commit/937dc423fc47cc5ea5bc69fb0e6382c849695467) Thanks [@steveoon](https://github.com/steveoon)! - `roll chat` 新增 `/model`，在配置里声明的 provider/model 间实时切换
+  - 配置新增 `llm.providers.<provider>.models`（可选）；`/model` 列出所有已配置 key 的 provider：默认模型、`models` 列表、以及无列表时的内置默认模型；支持 `/model provider/model` 直达
+  - 切换作用于本次 roll chat 进程（含 `/resume` 切到的会话），同步 thinking providerOptions、compaction 结构化输出参数、context window、子 Agent sampling 模型与线程 `model` 字段；任一会话正在生成回复时整体拒绝切换，不会留下半切换状态
+  - 切换后可选「同时设为默认 LLM」写回 `roll.config.yaml`：写入 `llm.default-provider` / `llm.default-model`，并清除会覆盖它们的 `runtime.provider` / `runtime.model`，保证下次 `roll chat` 与定时任务真的用上新默认
+  - 定时任务与 `roll ask` 等不受影响，始终使用配置默认值
+  - runtime 新增 `AgentSession.switchModel()` / `canSwitchModel()`、`ConversationEngine.switchModel()`、`ThreadStore.updateModel()`；core 的 `McpClientManager.setSamplingModel()`
+  - 基础 REPL（非全屏）暂不支持 `/model`，会给出提示
+
+- [#249](https://github.com/steveoon/roll-agent/pull/249) [`c1dcf28`](https://github.com/steveoon/roll-agent/commit/c1dcf28584b76879be53e6831f723b14fbe64b3c) Thanks [@steveoon](https://github.com/steveoon)! - 模型 context window 改为按 models.dev 官方目录解析，不再依赖内置子串表
+  - runtime 新增 `ModelCatalog` / `resolveModelContextWindow()`：`runtime.context-window` 覆盖 → 目录官方 provider 条目（`limit.input ?? limit.context`，随包内置快照 + `~/.roll-agent/cache/model-catalog.json` 每日后台刷新）→ 内置家族规则；`ConversationEngine.switchModel()` 需要 `provider` 并返回解析结果与来源
+  - `/model` 切换提示显示 `ctx` 与来源（模型目录 / 内置规则 / 配置覆盖）；gpt-5.6 系列、gemini-3.8 等新模型不再被识别成 400k
+  - 新增 `pnpm catalog:refresh` 重新生成内置快照
+
+- [#249](https://github.com/steveoon/roll-agent/pull/249) [`25561ef`](https://github.com/steveoon/roll-agent/commit/25561efb115c3b3897246f9f3ec0de45650d7750) Thanks [@steveoon](https://github.com/steveoon)! - Separate scheduled execution conversations from ordinary chat history. Add `/schedule` browsing,
+  `roll schedule inspect`, and `roll chat --from-run` to inspect execution records and start a separate
+  discussion from a committed snapshot using the current workspace configuration. Preserve run-to-thread
+  associations across retries, task removal, and ledger retention, and conservatively classify legacy
+  conversations with verified ledger links. Runtime conversation lists now exclude scheduled originals,
+  which remain readable by ID and reject interactive continuation.
+
+  Make snapshot continuation a prominent, labeled keyboard action that remains visible while scrolling
+  and in narrow terminals, with explicit progress and unavailable states.
+
+  Keep chat initialization read-only toward the scheduler and other workspaces. Scheduler-owned
+  entrypoints backfill durable references; chat only classifies threads in its own store. Rebuild snapshot
+  provenance as model-only system context, preserving genuine user history. Return raw status/mode enums
+  from inspection JSON, with null and explicit reason codes when historical state is unavailable.
+
+### Patch Changes
+
+- [#249](https://github.com/steveoon/roll-agent/pull/249) [`b07f134`](https://github.com/steveoon/roll-agent/commit/b07f1348c86a809d7ec9105d5724e85607206a29) Thanks [@steveoon](https://github.com/steveoon)! - MCP 工具 schema 的本地 `$ref` 在消费边界统一内联，修复 Gemini 报「only supports references to direct children of root-level $defs」以及 preflight / `roll ask` 提参对 `$ref` 字段静默放行、丢类型的问题
+  - `normalizeListedTools()`（chat / ask / run 共用）把非递归本地引用内联成语义等价的完整 schema：只遍历承载子 schema 的标准关键字，`const` / `enum` / `default` / `examples` 与扩展字段中的 ref-shaped 数据保持不透明；只合并注解型及 `$defs` / `definitions` 容器兄弟键，`$ref` 旁带校验关键字时不内联；递归、外部、目标不存在、带校验兄弟键、展开超限的引用保留原样并告警，挂在 `AgentTool.schemaIssues`；限额只针对引用展开，无 `$ref` 的 schema 不受影响
+  - 会话层按 provider 判断残留引用能否接受（google 只接受根级 `#/$defs/<名>` 的递归引用，其余 provider 直接透传），不可接受的工具对模型不可见并告警；该判断在建会话、`/model` 切换 provider、会话中动态安装 Agent 三处统一重算
+  - `buildAgentToolset()` 对直接构造的 `AgentToolSource` 做幂等防御内联，并保留 `schemaIssues` 供策略使用
+  - `roll agent tools --json` 现在输出内联后的 schema（即模型与 preflight 实际看到的版本），不再原样透出 wire schema 里的 `$ref`
+  - 新增公开 API：core `tool-runtime/json-schema-refs`（`inlineAcyclicLocalJsonSchemaReferences()`、`isRootDefinitionReference()`、`JSON_SCHEMA_REF_ISSUE_REASONS`）、`AgentTool.schemaIssues`、`normalizeListedTools(tools, { onSchemaIssue })` 与 `formatToolSchemaIssue()`、`providerAcceptsToolSchemaIssues()`；runtime `AgentSessionOptions.toolSchemaPolicy` / `onToolExcluded`、`SessionModelSwitch.toolSchemaPolicy`、`BuiltToolset.schemaIssuesByToolId`，以及导出的 `ToolSchemaPolicy`、`SessionToolExclusion` 类型
+
+- [#249](https://github.com/steveoon/roll-agent/pull/249) [`15c8e59`](https://github.com/steveoon/roll-agent/commit/15c8e596f358130a4b55a41c4f5bf303f8c5d724) Thanks [@steveoon](https://github.com/steveoon)! - `ThreadStore` 构造函数新增可选 `{ now }` 时钟，仅用于 Runtime event / tool execution 保留策略的截止时间计算；修复一批以固定日期为 fixture 的保留策略测试随日历过期失败的问题
+
 ## 0.19.1
 
 ### Patch Changes
