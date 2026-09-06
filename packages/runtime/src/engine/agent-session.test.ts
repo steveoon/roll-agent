@@ -10,6 +10,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
+import { setTimeout as delay } from "node:timers/promises";
 import { join, resolve } from "node:path";
 import { performance } from "node:perf_hooks";
 import { APICallError, simulateReadableStream, type ModelMessage } from "ai";
@@ -480,6 +481,63 @@ test("setProviderOptions only affects the next turn's streamText", async () => {
   assert.deepEqual(seen[0], { alibaba: { enableThinking: false } });
   assert.deepEqual(seen[1], { alibaba: { enableThinking: true, thinkingBudget: 8192 } });
   assert.deepEqual(changes, [{ alibaba: { enableThinking: true, thinkingBudget: 8192 } }]);
+});
+
+test("switchModel routes the next turn to the new model and updates context window", async () => {
+  const seenModels: string[] = [];
+  const first = new MockLanguageModelV4({
+    modelId: "first-model",
+    doStream: async () => {
+      seenModels.push("first-model");
+      return streamChunks(textStep("one"));
+    },
+  });
+  const second = new MockLanguageModelV4({
+    modelId: "second-model",
+    doStream: async (options: LanguageModelV4CallOptions) => {
+      seenModels.push(`second-model:${JSON.stringify(options.providerOptions)}`);
+      return streamChunks(textStep("two"));
+    },
+  });
+  const session = new AgentSession({
+    id: "s-switch",
+    model: first,
+    sources: [],
+    maxSteps: 2,
+    contextWindow: 1_000,
+  });
+  await collect(session.send("a"));
+  session.switchModel({
+    model: second,
+    contextWindow: 2_000,
+    providerOptions: { google: { thinkingConfig: { thinkingLevel: "low" } } },
+  });
+  await collect(session.send("b"));
+
+  assert.deepEqual(seenModels, [
+    "first-model",
+    'second-model:{"google":{"thinkingConfig":{"thinkingLevel":"low"}}}',
+  ]);
+  assert.equal(session.getContextWindow(), 2_000);
+});
+
+test("switchModel is rejected while a turn is active", async () => {
+  let release: (() => void) | undefined;
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const model = new MockLanguageModelV4({
+    doStream: async () => {
+      await gate;
+      return streamChunks(textStep("ok"));
+    },
+  });
+  const session = new AgentSession({ id: "s-busy", model, sources: [], maxSteps: 2 });
+  const turn = collect(session.send("a"));
+  await delay(5);
+  assert.throws(() => session.switchModel({ model: new MockLanguageModelV4({}) }), /正在生成回复/u);
+  release?.();
+  await turn;
 });
 
 test("AgentSession 达到 maxSteps 上限且仍在调工具时标记 stoppedAtStepLimit", async () => {

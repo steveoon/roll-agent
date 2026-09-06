@@ -10,7 +10,10 @@ import {
   McpClientManager,
   type McpConnectionAcquisition,
 } from "@roll-agent/core/mcp/client-manager";
-import { createProviderModel } from "@roll-agent/core/llm/providers";
+import {
+  createProviderModel,
+  providerAcceptsToolSchemaIssues,
+} from "@roll-agent/core/llm/providers";
 import { AgentStore } from "@roll-agent/core/registry/store";
 import { resolveTransportWithDevSpawnSpec } from "@roll-agent/core/registry/dev-spawn";
 import {
@@ -22,7 +25,10 @@ import {
   acquireAgentUsageLease,
   type AgentUsageLease,
 } from "@roll-agent/core/registry/agent-usage-lease";
-import { normalizeListedTools } from "@roll-agent/core/cli/utils/agent-tools";
+import {
+  formatToolSchemaIssue,
+  normalizeListedTools,
+} from "@roll-agent/core/cli/utils/agent-tools";
 import { getAgentEnv } from "@roll-agent/core/config/helpers";
 import { catalogPackageSpec, getAgentCatalog } from "@roll-agent/core/registry/catalog";
 import { resolveAgentCatalog } from "@roll-agent/core/registry/catalog-discovery";
@@ -44,7 +50,8 @@ import {
   type ToolResourceHint,
 } from "../tool-bridge/tool-execution-coordinator.ts";
 import type { ToolAnnotations, ToolPolicy } from "../types/policy.ts";
-import type { ThreadStore } from "../store/thread-store.ts";
+import type { ThreadStore, ThreadSnapshot } from "../store/thread-store.ts";
+import type { ThreadOrigin } from "../store/thread-origin.ts";
 import {
   AgentSession,
   type AgentInstallSessionResult,
@@ -53,8 +60,12 @@ import {
   type AgentSessionCapabilityContext,
   type AgentSessionOptions,
   type SessionAgentRefresh,
+  type SessionModelSwitch,
+  type ToolSchemaPolicy,
 } from "./agent-session.ts";
-import { resolveContextWindow } from "./context-window.ts";
+import { resolveModelContextWindow, type ContextWindowResolution } from "./context-window.ts";
+import { createDefaultModelCatalog } from "./model-catalog-default.ts";
+import type { ModelCatalog } from "./model-catalog.ts";
 import {
   createWorkspaceInstructionsSource,
   parseWorkspaceInstructionsSetting,
@@ -104,6 +115,11 @@ export type AcquireAgentUsage = (
   signal?: AbortSignal,
 ) => Promise<AgentUsageLease | undefined>;
 
+export interface EngineModelSwitch extends Omit<SessionModelSwitch, "contextWindow"> {
+  readonly provider: string;
+  readonly modelName: string;
+}
+
 export interface ConversationEngineOptions {
   readonly config: RollConfig;
   readonly agents?: readonly RegisteredAgent[];
@@ -111,6 +127,7 @@ export interface ConversationEngineOptions {
   readonly sources?: readonly AgentToolSource[];
   readonly clientManager?: McpClientManager;
   readonly store?: ThreadStore;
+  readonly modelCatalog?: ModelCatalog;
   readonly policy?: ToolPolicy;
   readonly maxSteps?: number;
   readonly providerOptions?: SharedV4ProviderOptions;
@@ -180,6 +197,12 @@ export function buildSessionBashSettings(input: {
 }
 
 export interface CreateSessionInput {
+  readonly id?: string;
+  readonly title?: string;
+  readonly origin?: ThreadOrigin;
+}
+
+export interface ForkSessionInput {
   readonly title?: string;
 }
 
@@ -406,8 +429,13 @@ export class ConversationEngine {
   private readonly fileToolsEnabled: boolean;
   private readonly maxSteps: number;
   private providerOptions: SharedV4ProviderOptions | undefined;
-  private readonly structuredOutputProviderOptions: SharedV4ProviderOptions | undefined;
-  private readonly structuredOutputReasoning:
+  private modelOverride: LanguageModelV4 | undefined;
+  private modelNameOverride: string | undefined;
+  private providerNameOverride: string | undefined;
+  private switchingProviderName: string | undefined;
+  private readonly modelCatalog: ModelCatalog;
+  private structuredOutputProviderOptions: SharedV4ProviderOptions | undefined;
+  private structuredOutputReasoning:
     | NonNullable<LanguageModelV4CallOptions["reasoning"]>
     | undefined;
   private readonly acquireAgentUsage: AcquireAgentUsage;
@@ -447,6 +475,7 @@ export class ConversationEngine {
     this.config = options.config;
     this.clientManager = options.clientManager ?? new McpClientManager();
     this.store = options.store;
+    this.modelCatalog = options.modelCatalog ?? createDefaultModelCatalog();
     this.policy = options.policy;
     this.fileToolsEnabled = options.fileToolsEnabled ?? true;
     this.maxSteps = options.maxSteps ?? DEFAULT_MAX_STEPS;
@@ -504,10 +533,12 @@ export class ConversationEngine {
     this.assertAcceptingSessions();
     const id = this.store
       ? this.store.createThread({
+          ...(input.id === undefined ? {} : { id: input.id }),
+          ...(input.origin === undefined ? {} : { origin: input.origin }),
           ...(input.title ? { title: input.title } : {}),
           model: this.resolveModelName(),
         })
-      : randomUUID();
+      : (input.id ?? randomUUID());
     return this.buildSession(context, id, []);
   }
 
@@ -515,6 +546,9 @@ export class ConversationEngine {
     this.assertAcceptingSessions();
     if (!this.store) {
       throw new Error("resumeSession requires a ThreadStore");
+    }
+    if (this.store.getThread(threadId)?.origin.kind === "scheduled") {
+      throw new Error("定时执行会话是只读记录；请基于该次运行创建新对话");
     }
     const liveSession = this.liveSessions.get(threadId);
     if (liveSession !== undefined) {
@@ -532,6 +566,22 @@ export class ConversationEngine {
     this.recoverUncoveredToolExecutionContext(threadId);
     const state = this.store.loadSessionState(threadId);
     return this.buildSession(context, threadId, state.messages, state.checkpoint);
+  }
+
+  async forkSession(snapshot: ThreadSnapshot, input: ForkSessionInput = {}): Promise<AgentSession> {
+    this.assertAcceptingSessions();
+    if (!this.store) throw new Error("forkSession requires a ThreadStore");
+    const context = await this.ensureReady();
+    this.assertAcceptingSessions();
+    const id = this.store.forkSnapshot(snapshot, { ...input, model: this.resolveModelName() });
+    try {
+      this.recoverUncoveredToolExecutionContext(id);
+      const state = this.store.loadSessionState(id);
+      return this.buildSession(context, id, state.messages, state.checkpoint);
+    } catch (error) {
+      this.store.deleteThread(id);
+      throw error;
+    }
   }
 
   private assertAcceptingSessions(): void {
@@ -606,10 +656,11 @@ export class ConversationEngine {
     initialCheckpoint?: ReturnType<ThreadStore["getLatestCheckpoint"]>,
   ): AgentSession {
     const store = this.store;
-    const contextWindow = resolveContextWindow(
+    const derivedFrom = store?.getThread(id)?.derivedFrom;
+    const contextWindow = this.resolveContextWindowFor(
+      this.resolveProviderName(),
       this.resolveModelName(),
-      this.config.runtime.contextWindow,
-    );
+    )?.window;
     const skills = context.skillLibrary?.list() ?? [];
     const skillLibrary = skills.length > 0 ? context.skillLibrary : undefined;
     const shellProfile = this.resolveRuntimeShellProfile();
@@ -630,8 +681,14 @@ export class ConversationEngine {
     const capabilityContext = this.composeCapabilityContext(context.sources.length, shellProfile);
     const session = new AgentSession({
       id,
-      model: context.model,
+      model: this.activeModel(context),
       sources: context.sources,
+      toolSchemaPolicy: this.toolSchemaPolicyFor(this.resolveProviderName()),
+      onToolExcluded: (exclusion) =>
+        this.onAgentBootstrapIssue?.({
+          agentName: exclusion.agentName,
+          message: `工具 "${exclusion.toolName}" 的参数 schema 含当前 provider "${this.resolveToolSchemaProviderName()}" 无法接受的引用（${exclusion.issues.map((issue) => issue.ref).join("、")}），已从本会话工具集移除`,
+        }),
       capabilityContext,
       resolveDynamicCapabilityContext: async (abortSignal) => {
         const [vcs, dynamic] = await Promise.all([
@@ -676,6 +733,7 @@ export class ConversationEngine {
       ...(contextWindow !== undefined ? { contextWindow } : {}),
       ...(this.policy ? { policy: this.policy } : {}),
       initialMessages,
+      ...(derivedFrom !== undefined ? { derivedFrom } : {}),
       ...(initialCheckpoint ? { initialCheckpoint } : {}),
       ...(store
         ? {
@@ -711,6 +769,49 @@ export class ConversationEngine {
   private syncProviderOptions(providerOptions: SharedV4ProviderOptions | undefined): void {
     this.providerOptions = providerOptions;
     this.clientManager.setSamplingProviderOptions(providerOptions);
+  }
+
+  switchModel(input: EngineModelSwitch): ContextWindowResolution | undefined {
+    this.assertAcceptingSessions();
+    const resolution = this.resolveContextWindowFor(input.provider, input.modelName);
+    const contextWindow = resolution?.window;
+    const sessionSwitch = {
+      model: input.model,
+      ...(contextWindow !== undefined ? { contextWindow } : {}),
+      ...(input.providerOptions ? { providerOptions: input.providerOptions } : {}),
+      ...(input.structuredOutputProviderOptions
+        ? { structuredOutputProviderOptions: input.structuredOutputProviderOptions }
+        : {}),
+      ...(input.structuredOutputReasoning
+        ? { structuredOutputReasoning: input.structuredOutputReasoning }
+        : {}),
+      toolSchemaPolicy: this.toolSchemaPolicyFor(input.provider),
+    } satisfies SessionModelSwitch;
+    for (const session of this.liveSessions.values()) {
+      if (!session.canSwitchModel()) {
+        throw new Error("存在正在生成回复的会话，稍后再切换模型");
+      }
+    }
+    this.switchingProviderName = input.provider;
+    try {
+      for (const session of this.liveSessions.values()) {
+        session.switchModel(sessionSwitch);
+      }
+    } finally {
+      this.switchingProviderName = undefined;
+    }
+    this.modelOverride = input.model;
+    this.modelNameOverride = input.modelName;
+    this.providerNameOverride = input.provider;
+    this.providerOptions = input.providerOptions;
+    this.structuredOutputProviderOptions = input.structuredOutputProviderOptions;
+    this.structuredOutputReasoning = input.structuredOutputReasoning;
+    this.clientManager.setSamplingModel(input.model);
+    this.clientManager.setSamplingProviderOptions(input.providerOptions);
+    for (const id of this.liveSessions.keys()) {
+      this.store?.updateModel(id, input.modelName);
+    }
+    return resolution;
   }
 
   private ensureReady(): Promise<EngineContext> {
@@ -937,7 +1038,13 @@ export class ConversationEngine {
       this.assertAcceptingSessions();
       throwIfAborted(options.signal);
       throwIfDeadlineExpired(options.deadlineAt);
-      const normalized = normalizeListedTools(listed);
+      const normalized = normalizeListedTools(listed, {
+        onSchemaIssue: (issue) =>
+          reportIssue({
+            agentName: agent.skill.name,
+            message: formatToolSchemaIssue(agent.skill.name, issue),
+          }),
+      });
       const sourceTools: SourceTool[] = normalized.map((agentTool, index) => {
         const resourceHintExtraction = extractResourceHints(listed[index]);
         if (resourceHintExtraction.issue !== undefined) {
@@ -998,7 +1105,7 @@ export class ConversationEngine {
 
   private async runAgentRefresh(agent: RegisteredAgent): Promise<SessionAgentRefresh> {
     const context = await this.ensureReady();
-    const source = await this.connectAgentSource(agent, context.model, undefined, {
+    const source = await this.connectAgentSource(agent, this.activeModel(context), undefined, {
       signal: this.shutdownController.signal,
     });
     const sources = [
@@ -1008,7 +1115,7 @@ export class ConversationEngine {
     const agents = this.explicitAgents ?? new AgentStore(this.config.agents.dataDir).list();
     const skillLibrary = this.resolveSkillLibrary(agents);
     this.ready = Promise.resolve({
-      model: context.model,
+      model: this.activeModel(context),
       sources,
       ...(skillLibrary ? { skillLibrary } : {}),
     });
@@ -1170,11 +1277,39 @@ export class ConversationEngine {
   }
 
   private resolveProviderName(): string {
-    return this.config.runtime.provider ?? this.config.llm.defaultProvider;
+    return (
+      this.providerNameOverride ?? this.config.runtime.provider ?? this.config.llm.defaultProvider
+    );
+  }
+
+  private resolveContextWindowFor(
+    provider: string,
+    model: string,
+  ): ContextWindowResolution | undefined {
+    return resolveModelContextWindow({
+      provider,
+      model,
+      ...(this.config.runtime.contextWindow !== undefined
+        ? { override: this.config.runtime.contextWindow }
+        : {}),
+      catalog: this.modelCatalog,
+    });
   }
 
   private resolveModelName(): string {
-    return this.config.runtime.model ?? this.config.llm.defaultModel;
+    return this.modelNameOverride ?? this.config.runtime.model ?? this.config.llm.defaultModel;
+  }
+
+  private toolSchemaPolicyFor(provider: string): ToolSchemaPolicy {
+    return (issues) => providerAcceptsToolSchemaIssues(provider, issues);
+  }
+
+  private resolveToolSchemaProviderName(): string {
+    return this.switchingProviderName ?? this.resolveProviderName();
+  }
+
+  private activeModel(context: EngineContext): LanguageModelV4 {
+    return this.modelOverride ?? context.model;
   }
 
   async getContextSummary(): Promise<EngineContextSummary> {

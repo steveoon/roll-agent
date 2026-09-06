@@ -10,6 +10,7 @@ import {
   type InvocationTreeScope,
 } from "../../scheduler-host/invocation-tree.ts";
 import { SCHEDULE_TOKEN_ENV } from "../../scheduler-host/paths.ts";
+import { backfillScheduleThreadReferences } from "../../scheduler-host/schedule-history.ts";
 
 export type ScheduleStoreInstance = InstanceType<RuntimeModule["ScheduleStore"]>;
 
@@ -27,12 +28,19 @@ export function openScheduleStore(
   if (dataDir === undefined) {
     throw new Error("无法确定 scheduler data-dir");
   }
-  return new runtime.ScheduleStore(dataDir, {
+  const store = new runtime.ScheduleStore(dataDir, {
     ...(config ? { maxSchedules: config.scheduler.maxSchedules } : {}),
     executorLiveness: probeExecutorLiveness,
     treeLiveness: (record) => probeInvocationTreeSettled(invocationTreeScopeFor(record)),
     ...(options.requireExistingDatabase === true ? { requireExistingDatabase: true } : {}),
   });
+  try {
+    backfillScheduleThreadReferences(config, runtime, store, dataDir);
+    return store;
+  } catch (error) {
+    store.close();
+    throw error;
+  }
 }
 
 export async function runScheduleCommand(work: () => Promise<void>): Promise<void> {

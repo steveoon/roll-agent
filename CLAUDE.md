@@ -176,6 +176,10 @@ chat 走独立的 skill 通道（对齐 `npx skills add` 标准生态，非 roll
 
 `packages/core/src/cli/index.ts` 的首个 import 是 `./default-node-env.ts`，把 `NODE_ENV` 默认为 `production`（已显式设置时保持不变）。不要把它移后或删除：React 19.2 的 development 构建会在每次组件渲染时调用 `performance.measure()` 并把变更前后的 `children` 文本放进 `detail`，Node 会把所有 measure 条目永久留在 user-timing 缓冲区，流式 thinking 每 32ms 刷新一次预览，几十分钟就会撞上 V8 堆上限（issue #242）。改动 chat 渲染或流式路径后，用 `pnpm bench:chat-heap` 验证堆增长斜率（见 `docs/how-to-benchmark-chat-memory.md`）。
 
+### 模型 context window 目录
+
+`packages/runtime/src/engine/model-catalog.ts` 打包了 models.dev 官方 provider（openai/anthropic/google/deepseek/xai/alibaba-cn/alibaba）的裁剪快照，`resolveModelContextWindow()` 按「配置覆盖 → 目录（`limit.input ?? limit.context`）→ 内置家族规则」解析并带来源。引擎默认只读快照；chat 入口传入 `defaultModelCatalogCachePath()` 并后台 `refreshIfStale()`。新模型上线后 `pnpm catalog:refresh` 重新生成 `model-catalog-snapshot.ts`（生成物，勿手改）。
+
 ### 日志输出约定
 
 - **stdout** — 仅输出数据（供管道和 `--json` 结构化输出）
@@ -212,6 +216,8 @@ Agent 管理命令（start/stop/health/list 等）使用 `loadAgentsConfig()` �
 **反模式（禁止）：** 为兼容某个 provider 的 structured output 限制，把合法 tool 输入的 schema 类型从 object 改成 string。这会导致 extraction 产出的类型与 preflight 期望的类型前后不一致，让一整类合法 MCP tool 在 `roll ask` 下直接不可用。
 
 **判断标准：** 如果一个 schema 变换使得 `createExtractionSchema(s)` 产出的某字段类型与 `s` 中对应字段的原始类型不同，这个变换就是有问题的。
+
+**边界归一化（允许）：** `normalizeListedTools()` 在消费 MCP `tools/list` 时会把非递归的本地 `$ref` 就地内联（`tool-runtime/json-schema-refs.ts`），这是写法变换不是语义变换：遍历器只进入承载子 schema 的标准关键字，`const` / `enum` / `default` / `examples` 与扩展字段中的 ref-shaped 数据保持不透明；只合并 `description` / `title` / `default` 等注解型兄弟键以及 `$defs` / `definitions` 定义容器，`$ref` 旁带校验关键字（如 `type`）时不内联并记为 `sibling-keywords`。递归 / 外部 / 目标不存在 / 带校验兄弟键 / 展开超限的引用保留原样并挂在 `AgentTool.schemaIssues`；限额只针对引用展开，无 `$ref` 的 schema 原样通过。会话层按 `providerAcceptsToolSchemaIssues(provider, issues)` 决定哪些工具对模型不可见：google 只接受能原样透传的根级 `#/$defs/<名>` 递归引用（provider 有 `parametersJsonSchema` 回退），其余残留引用都会让它的 schema 转换抛错；其他 provider 直接透传 JSON Schema 不过滤。这个策略在建会话、`/model` 切换 provider 和会话中动态安装 Agent 三处统一重算，并通过 `onAgentBootstrapIssue` 告警。原因：MCP SDK 对 Zod v3 用 `zod-to-json-schema` 默认会把复用的 schema 实例折叠成 `#/properties/...` 引用，而 Gemini 的转换器只认根级 `$defs`，preflight 与提参 schema 也不认 `$ref`；`buildAgentToolset()` 对直接构造的 `AgentToolSource` 会再做一次幂等内联并保留 `schemaIssues`。
 
 ### CLI 懒加载
 

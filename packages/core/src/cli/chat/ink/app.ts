@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { createElement as h, useCallback, useEffect, useRef, useState } from "react";
 import type { ReactElement } from "react";
 import { Box, Text, useInput, useStdout, useWindowSize } from "ink";
-import type { AgentSession } from "@roll-agent/runtime";
+import type { AgentSession, ContextWindowSource } from "@roll-agent/runtime";
 import type { ThinkingLevel } from "../../../llm/providers.ts";
 import type { ChatThinkingDisplay } from "../../../config/schema.ts";
 import { diffDisplayNotice, resolveDiffDisplayToggle } from "../diff-display.ts";
@@ -14,7 +14,9 @@ import { ConfirmSelect } from "./confirm-select.ts";
 import { UserInputForm } from "./user-input-form.ts";
 import { SlashPopup } from "./slash-popup.ts";
 import { ShortcutsPanel } from "./shortcuts-panel.ts";
-import { SessionPicker } from "./session-picker.ts";
+import { SessionPicker, type SessionPickerLabels } from "./session-picker.ts";
+import { DEFAULT_CHOICE_ITEMS } from "../model-picker-format.ts";
+import { formatTokens } from "../../utils/token-format.ts";
 import { messagesToHistory } from "./history-from-messages.ts";
 import type { SessionPickerItem } from "../session-picker-format.ts";
 import {
@@ -43,11 +45,42 @@ import { resolveTurnActivity } from "./turn-activity.ts";
 import { TurnStatusLine } from "./turn-status-line.ts";
 import { resolveChatLayout } from "./layout.ts";
 import { TranscriptViewport } from "./transcript-viewport.ts";
+import { ScheduleBrowser } from "./schedule-browser.ts";
+import type { ScheduleBrowserPort } from "../schedule-browser.ts";
 
 export interface ChatSessionSwitching {
   readonly loadItems: (currentSessionId: string) => readonly SessionPickerItem[];
   readonly resume: (threadId: string) => Promise<AgentSession>;
   readonly onRetired: (threadId: string) => void;
+}
+
+export interface ChatModelSwitchResult {
+  readonly id: string;
+  readonly model: string;
+  readonly contextWindow: number | undefined;
+  readonly contextWindowSource?: ContextWindowSource;
+}
+
+const CONTEXT_WINDOW_SOURCE_LABELS: Record<ContextWindowSource, string> = {
+  override: "配置覆盖",
+  catalog: "模型目录",
+  rule: "内置规则",
+};
+
+export function formatContextWindowNotice(
+  window: number | undefined,
+  source: ContextWindowSource | undefined,
+): string {
+  if (window === undefined || source === undefined) {
+    return "ctx 未知";
+  }
+  return `ctx ${formatTokens(window)} · ${CONTEXT_WINDOW_SOURCE_LABELS[source]}`;
+}
+
+export interface ChatModelSwitching {
+  readonly loadItems: (currentModel: string) => readonly SessionPickerItem[];
+  readonly switchTo: (input: string) => Promise<ChatModelSwitchResult>;
+  readonly setAsDefault: (id: string) => Promise<string>;
 }
 
 export interface ChatAppProps {
@@ -63,6 +96,8 @@ export interface ChatAppProps {
   readonly copyToClipboard?: (text: string) => Promise<boolean>;
   readonly hintFlags?: HintFlagStore;
   readonly sessionSwitching?: ChatSessionSwitching;
+  readonly modelSwitching?: ChatModelSwitching;
+  readonly scheduleBrowser?: ScheduleBrowserPort;
 }
 
 interface SessionPickerState {
@@ -71,11 +106,43 @@ interface SessionPickerState {
   readonly error?: string;
 }
 
+const MODEL_PICKER_STAGES = { choose: "choose", confirmDefault: "confirm-default" } as const;
+type ModelPickerStage = (typeof MODEL_PICKER_STAGES)[keyof typeof MODEL_PICKER_STAGES];
+
+interface ModelPickerState {
+  readonly stage: ModelPickerStage;
+  readonly items: readonly SessionPickerItem[];
+  readonly busy: boolean;
+  readonly chosenId?: string;
+}
+
+const MODEL_PICKER_LABELS: SessionPickerLabels = {
+  title: "切换模型",
+  summary: (count) => `共 ${String(count)} 个模型`,
+  empty: "没有可切换的模型：先在 roll.config.yaml 配置 provider 的 api-key / models",
+  select: "Enter 切换",
+  busy: "切换中…",
+};
+
+const DEFAULT_CHOICE_LABELS: SessionPickerLabels = {
+  title: "是否设为默认 LLM？",
+  summary: () => "",
+  empty: "",
+  select: "Enter 确认",
+  busy: "写入中…",
+};
+
+function errorText(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
 interface ChatSessionViewProps extends Omit<ChatAppProps, "sessionSwitching"> {
   readonly picker: SessionPickerState | undefined;
   readonly onOpenPicker: () => boolean;
   readonly onPickerSelect: (threadId: string) => void;
   readonly onPickerCancel: () => void;
+  readonly onModelChanged: (model: string) => void;
+  readonly onScheduleContinue: (session: AgentSession) => void;
 }
 
 export const INK_HINTS = "/exit 退出 · Esc 中断 · / 命令 · ? 快捷键";
@@ -91,6 +158,7 @@ function helpText(): string {
 
 export function ChatApp(props: ChatAppProps): ReactElement {
   const [activeSession, setActiveSession] = useState(props.session);
+  const [activeModel, setActiveModel] = useState(props.model);
   const [sessionHistory, setSessionHistory] = useState<readonly HistoryItem[] | undefined>(
     props.initialHistory,
   );
@@ -151,7 +219,7 @@ export function ChatApp(props: ChatAppProps): ReactElement {
   return h(ChatSessionView, {
     key: activeSession.id,
     session: activeSession,
-    model: props.model,
+    model: activeModel,
     onUserSubmit: props.onUserSubmit,
     onExit: props.onExit,
     ...(sessionHistory !== undefined ? { initialHistory: sessionHistory } : {}),
@@ -165,10 +233,18 @@ export function ChatApp(props: ChatAppProps): ReactElement {
     ...(props.onThinkingChange !== undefined ? { onThinkingChange: props.onThinkingChange } : {}),
     ...(props.copyToClipboard !== undefined ? { copyToClipboard: props.copyToClipboard } : {}),
     ...(props.hintFlags !== undefined ? { hintFlags: props.hintFlags } : {}),
+    ...(props.modelSwitching !== undefined ? { modelSwitching: props.modelSwitching } : {}),
+    ...(props.scheduleBrowser !== undefined ? { scheduleBrowser: props.scheduleBrowser } : {}),
     picker,
     onOpenPicker: openPicker,
     onPickerSelect: selectSession,
     onPickerCancel: cancelPicker,
+    onModelChanged: setActiveModel,
+    onScheduleContinue: (next: AgentSession) => {
+      retiringRef.current = activeSession;
+      setSessionHistory(messagesToHistory(next.getMessages()));
+      setActiveSession(next);
+    },
   });
 }
 
@@ -196,6 +272,7 @@ function ChatSessionView(props: ChatSessionViewProps): ReactElement {
     resolveUserInput,
     setDraft,
     setThinking,
+    setModel,
     setThinkingDisplay,
     setDiffDisplay,
     setAutoMode,
@@ -211,6 +288,79 @@ function ChatSessionView(props: ChatSessionViewProps): ReactElement {
       : {}),
     ...(props.onThinkingChange ? { onThinkingChange: props.onThinkingChange } : {}),
   });
+
+  const [modelPicker, setModelPicker] = useState<ModelPickerState | undefined>(undefined);
+  const [scheduleOpen, setScheduleOpen] = useState(false);
+  const modelSwitching = props.modelSwitching;
+  const notice = (text: string): void => {
+    commitHistory({ kind: "notice", id: randomUUID(), text });
+  };
+  const openModelPicker = (): boolean => {
+    if (!modelSwitching) {
+      return false;
+    }
+    setModelPicker({
+      stage: MODEL_PICKER_STAGES.choose,
+      items: modelSwitching.loadItems(state.status.model),
+      busy: false,
+    });
+    return true;
+  };
+  const switchModelTo = (input: string): void => {
+    if (!modelSwitching) {
+      notice("当前界面不支持切换模型");
+      return;
+    }
+    setModelPicker((current) => ({
+      stage: MODEL_PICKER_STAGES.choose,
+      items: current?.items ?? [],
+      busy: true,
+    }));
+    modelSwitching.switchTo(input).then(
+      (result) => {
+        setModel(result.model, result.contextWindow);
+        props.onModelChanged(result.model);
+        notice(
+          `已切换到 ${result.id}（${formatContextWindowNotice(result.contextWindow, result.contextWindowSource)}，仅本次 roll chat 生效）`,
+        );
+        setModelPicker({
+          stage: MODEL_PICKER_STAGES.confirmDefault,
+          items: DEFAULT_CHOICE_ITEMS,
+          busy: false,
+          chosenId: result.id,
+        });
+      },
+      (error: unknown) => {
+        setModelPicker(undefined);
+        notice(`切换模型失败：${errorText(error)}`);
+      },
+    );
+  };
+  const onModelPickerSelect = (id: string): void => {
+    if (!modelSwitching || modelPicker === undefined) {
+      return;
+    }
+    if (modelPicker.stage === MODEL_PICKER_STAGES.choose) {
+      switchModelTo(id);
+      return;
+    }
+    const chosenId = modelPicker.chosenId;
+    if (id !== "set-default" || chosenId === undefined) {
+      setModelPicker(undefined);
+      return;
+    }
+    setModelPicker({ ...modelPicker, busy: true });
+    modelSwitching.setAsDefault(chosenId).then(
+      (text) => {
+        setModelPicker(undefined);
+        notice(text);
+      },
+      (error: unknown) => {
+        setModelPicker(undefined);
+        notice(`写入默认 LLM 失败：${errorText(error)}`);
+      },
+    );
+  };
 
   const animateBanner = props.banner !== undefined && (props.initialHistory?.length ?? 0) === 0;
   const [bannerSettled, setBannerSettled] = useState(!animateBanner);
@@ -245,7 +395,8 @@ function ChatSessionView(props: ChatSessionViewProps): ReactElement {
     });
   };
   const slashActive = state.phase === CHAT_PHASES.idle && isSlashCommandShaped(state.draft);
-  const slashPopupActive = slashActive && isSlashCommandToken(state.draft.split(/\s+/).at(-1) ?? "");
+  const slashPopupActive =
+    slashActive && isSlashCommandToken(state.draft.split(/\s+/).at(-1) ?? "");
   const shortcutsVisible =
     shortcutsOpen && state.phase === CHAT_PHASES.idle && state.draft.length === 0;
 
@@ -277,7 +428,7 @@ function ChatSessionView(props: ChatSessionViewProps): ReactElement {
   const selectedIndex = Math.min(selected, maxIndex);
 
   useInput((input, key) => {
-    if (props.picker !== undefined) {
+    if (props.picker !== undefined || modelPicker !== undefined || scheduleOpen) {
       return;
     }
     if (state.phase === CHAT_PHASES.userInput) {
@@ -453,6 +604,17 @@ function ChatSessionView(props: ChatSessionViewProps): ReactElement {
       }
       return;
     }
+    if (name === "/model") {
+      const target = parts.slice(1).join(" ").trim();
+      if (target.length === 0) {
+        if (!openModelPicker()) {
+          notice("当前界面不支持切换模型");
+        }
+        return;
+      }
+      switchModelTo(target);
+      return;
+    }
     if (name === "/show-think") {
       const next: ChatThinkingDisplay =
         arg === "on" || arg === "expanded"
@@ -504,6 +666,14 @@ function ChatSessionView(props: ChatSessionViewProps): ReactElement {
     if (name === "/resume") {
       if (!props.onOpenPicker()) {
         commitHistory({ kind: "notice", id: randomUUID(), text: "当前界面不支持会话切换" });
+      }
+      return;
+    }
+    if (name === "/schedule") {
+      if (props.scheduleBrowser === undefined) {
+        notice("当前界面不支持查看定时任务");
+      } else {
+        setScheduleOpen(true);
       }
       return;
     }
@@ -567,65 +737,90 @@ function ChatSessionView(props: ChatSessionViewProps): ReactElement {
           onSelect: props.onPickerSelect,
           onCancel: props.onPickerCancel,
         })
-      : state.phase === CHAT_PHASES.confirm && state.pendingConfirm !== undefined
-        ? h(ConfirmSelect, {
-            prompt: state.pendingConfirm.prompt,
-            args: state.pendingConfirm.args,
-            ...(state.pendingConfirm.explanation !== undefined
-              ? { explanation: state.pendingConfirm.explanation }
-              : {}),
-            ...(state.pendingConfirm.sessionGrantLabel !== undefined
-              ? { sessionGrantLabel: state.pendingConfirm.sessionGrantLabel }
-              : {}),
-            ...(state.pendingConfirm.diff !== undefined ? { diff: state.pendingConfirm.diff } : {}),
+      : modelPicker !== undefined
+        ? h(SessionPicker, {
+            items: modelPicker.items,
+            busy: modelPicker.busy,
             width: layout.columns,
             maxRows: layout.promptRows + layout.popupRows,
-            onDecide: resolveConfirm,
+            labels:
+              modelPicker.stage === MODEL_PICKER_STAGES.choose
+                ? MODEL_PICKER_LABELS
+                : DEFAULT_CHOICE_LABELS,
+            onSelect: onModelPickerSelect,
+            onCancel: () => setModelPicker(undefined),
           })
-        : state.phase === CHAT_PHASES.userInput && state.pendingUserInput !== undefined
-          ? h(UserInputForm, {
-              key: state.pendingUserInput.requestId,
-              request: state.pendingUserInput,
-              width: layout.columns,
-              viewportRows: layout.renderRows,
-              maxRows: layout.promptRows + layout.popupRows,
-              onResolve: (result) => {
-                if (state.pendingUserInput !== undefined) {
-                  resolveUserInput(state.pendingUserInput.requestId, result);
-                }
-              },
-            })
-          : h(TextPrompt, {
-              value: state.draft,
-              width: layout.columns,
-              viewportRows: layout.renderRows,
-              maxRows: layout.promptRows,
-              showHint: layout.showHelp,
-              inputHistory,
-              disabled: state.phase !== CHAT_PHASES.idle,
-              ...(state.phase === CHAT_PHASES.cancelling
-                ? { disabledHint: "中断请求已发送，等待当前活动退出…" }
+        : state.phase === CHAT_PHASES.confirm && state.pendingConfirm !== undefined
+          ? h(ConfirmSelect, {
+              prompt: state.pendingConfirm.prompt,
+              args: state.pendingConfirm.args,
+              ...(state.pendingConfirm.explanation !== undefined
+                ? { explanation: state.pendingConfirm.explanation }
                 : {}),
-              slashActive,
-              slashPopupActive,
-              mouseTracking,
-              ...(tip === undefined ? {} : { tip }),
-              onShortcutsToggle: () => {
-                setShortcutsOpen((current) => !current);
-              },
-              autoApprove: state.status.autoApprove,
-              attachments,
-              attachmentsPending: clipboardPending,
-              onChange: setDraft,
-              onSubmit: handleSubmit,
-              onSlashMove,
-              onSlashComplete,
-              onSlashRun,
-              onPasteText: handlePasteText,
-              onRemoveLastAttachment: removeLastAttachment,
-              onRequestClipboardImage: handleClipboardImage,
-            });
+              ...(state.pendingConfirm.sessionGrantLabel !== undefined
+                ? { sessionGrantLabel: state.pendingConfirm.sessionGrantLabel }
+                : {}),
+              ...(state.pendingConfirm.diff !== undefined
+                ? { diff: state.pendingConfirm.diff }
+                : {}),
+              width: layout.columns,
+              maxRows: layout.promptRows + layout.popupRows,
+              onDecide: resolveConfirm,
+            })
+          : state.phase === CHAT_PHASES.userInput && state.pendingUserInput !== undefined
+            ? h(UserInputForm, {
+                key: state.pendingUserInput.requestId,
+                request: state.pendingUserInput,
+                width: layout.columns,
+                viewportRows: layout.renderRows,
+                maxRows: layout.promptRows + layout.popupRows,
+                onResolve: (result) => {
+                  if (state.pendingUserInput !== undefined) {
+                    resolveUserInput(state.pendingUserInput.requestId, result);
+                  }
+                },
+              })
+            : h(TextPrompt, {
+                value: state.draft,
+                width: layout.columns,
+                viewportRows: layout.renderRows,
+                maxRows: layout.promptRows,
+                showHint: layout.showHelp,
+                inputHistory,
+                disabled: state.phase !== CHAT_PHASES.idle,
+                ...(state.phase === CHAT_PHASES.cancelling
+                  ? { disabledHint: "中断请求已发送，等待当前活动退出…" }
+                  : {}),
+                slashActive,
+                slashPopupActive,
+                mouseTracking,
+                ...(tip === undefined ? {} : { tip }),
+                onShortcutsToggle: () => {
+                  setShortcutsOpen((current) => !current);
+                },
+                autoApprove: state.status.autoApprove,
+                attachments,
+                attachmentsPending: clipboardPending,
+                onChange: setDraft,
+                onSubmit: handleSubmit,
+                onSlashMove,
+                onSlashComplete,
+                onSlashRun,
+                onPasteText: handlePasteText,
+                onRemoveLastAttachment: removeLastAttachment,
+                onRequestClipboardImage: handleClipboardImage,
+              });
   const turnActivity = resolveTurnActivity(state);
+
+  if (scheduleOpen && props.scheduleBrowser !== undefined) {
+    return h(ScheduleBrowser, {
+      port: props.scheduleBrowser,
+      width: layout.columns,
+      height: layout.renderRows,
+      onClose: () => setScheduleOpen(false),
+      onContinue: props.onScheduleContinue,
+    });
+  }
 
   if (layout.tooSmall) {
     return h(

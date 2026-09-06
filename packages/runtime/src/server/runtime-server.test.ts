@@ -2114,7 +2114,9 @@ test("RuntimeServer 未知 session 返回错误响应", async () => {
 
 test("Runtime Protocol 1.3 replay 在 response barrier 后发布并发 live 且无副作用", async (t) => {
   const storeDir = mkdtempSync(join(tmpdir(), "roll-runtime-replay-v13-"));
-  const store = new ThreadStore(storeDir);
+  const store = new ThreadStore(storeDir, {
+    now: () => new Date("2026-08-20T00:00:00.000Z"),
+  });
   const threadId = threadIdSchema.parse("00000000-0000-4000-8000-000000000291");
   const turnId = turnIdSchema.parse("00000000-0000-4000-8000-000000000292");
   const approvalId = approvalIdSchema.parse("00000000-0000-4000-8000-000000000293");

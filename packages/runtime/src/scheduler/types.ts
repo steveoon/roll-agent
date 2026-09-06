@@ -169,6 +169,49 @@ export interface InvocationRecord {
   readonly finishedAtMs: number | undefined;
 }
 
+/** Durable provenance; intentionally survives invocation retention and schedule removal. */
+export interface ScheduleThreadReference {
+  readonly invocationId: string;
+  readonly attempt: number;
+  readonly scheduleId: string;
+  readonly threadId: string;
+  readonly threadsDir: string;
+  readonly name: string;
+  readonly cwd: string;
+  readonly scheduledForMs: number;
+  readonly mode: InvocationMode;
+  readonly createdAtMs: number;
+}
+
+export interface BackfillThreadReferenceInput {
+  readonly invocationId: string;
+  readonly expectedAttempt: number;
+  readonly threadId: string;
+  readonly threadsDir: string;
+}
+
+export interface RegisterThreadReferenceInput extends BackfillThreadReferenceInput {
+  readonly ownershipToken: string;
+}
+
+export interface ScheduleRunHistoryEntry {
+  readonly invocationId: string;
+  readonly scheduleId: string;
+  readonly scheduledForMs: number;
+  readonly mode: InvocationMode;
+  /** Absent after ledger retention/removal; never infer a terminal status from a thread. */
+  readonly invocation: InvocationRecord | undefined;
+  readonly references: readonly ScheduleThreadReference[];
+}
+
+export interface ScheduleHistoryTask {
+  readonly scheduleId: string;
+  readonly name: string;
+  readonly cwd: string;
+  readonly schedule: ScheduleRecord | undefined;
+  readonly latestRun: ScheduleRunHistoryEntry | undefined;
+}
+
 export type InvocationTreeLivenessProbe = (record: InvocationRecord) => InvocationTreeLiveness;
 
 export interface ClaimedInvocation {

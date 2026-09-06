@@ -13,7 +13,7 @@ test("filterCommands 前缀命中优先，子串命中兜底", () => {
   );
   assert.deepEqual(
     filterCommands("/e").map((c) => c.name),
-    ["/effort", "/exit", "/resume", "/help"],
+    ["/effort", "/exit", "/model", "/resume", "/schedule", "/help"],
   );
   assert.deepEqual(
     filterCommands("/ex").map((c) => c.name),
@@ -113,7 +113,9 @@ test("filterSlashEntries matches /resume", () => {
 });
 
 test("filterSlashEntries 子串命中 skill 名称中间的单词", () => {
-  const skills = [{ name: "roll-zhipin-unread-reply", description: "回复未读消息", source: "user" }];
+  const skills = [
+    { name: "roll-zhipin-unread-reply", description: "回复未读消息", source: "user" },
+  ];
   assert.deepEqual(
     filterSlashEntries("/zhipin", skills).map((entry) => entry.name),
     ["/roll-zhipin-unread-reply"],

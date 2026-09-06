@@ -537,6 +537,13 @@ export class McpClientManager {
     }
   }
 
+  /** 更新全部已连接 Agent 后续 Sampling 请求使用的模型。 */
+  setSamplingModel(model: LanguageModelV4): void {
+    for (const connection of this.connections.values()) {
+      connection.samplingController?.setModel(model);
+    }
+  }
+
   /** 断开指定 Agent 的连接 */
   async disconnect(agentName: string, expectedClient?: Client): Promise<void> {
     if (expectedClient === undefined) {

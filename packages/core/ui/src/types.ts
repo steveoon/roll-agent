@@ -55,9 +55,16 @@ export interface ConfigObjectCatalogNode extends ConfigCatalogNodeBase {
   readonly fields: Readonly<Record<string, ConfigCatalogNode>>;
 }
 
+export interface ConfigRecordKeyOption {
+  readonly value: string;
+  readonly label: string;
+  readonly hint?: string;
+}
+
 export interface ConfigRecordCatalogNode extends ConfigCatalogNodeBase {
   readonly kind: "record";
   readonly value: ConfigCatalogNode;
+  readonly keyOptions?: readonly ConfigRecordKeyOption[];
 }
 
 export interface ConfigArrayCatalogNode extends ConfigCatalogNodeBase {

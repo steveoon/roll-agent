@@ -17,7 +17,11 @@ import {
 } from "../../llm/providers.ts";
 import { formatValidationIssuesMessage } from "../../tool-runtime/messages.ts";
 import { preflightToolCall } from "../../tool-runtime/preflight.ts";
-import { formatMissingToolMessage, normalizeListedTools } from "../utils/agent-tools.ts";
+import {
+  formatMissingToolMessage,
+  formatToolSchemaIssue,
+  normalizeListedTools,
+} from "../utils/agent-tools.ts";
 import {
   extractTextContent,
   formatToolResultForJsonOutput,
@@ -576,7 +580,9 @@ async function getConnectedAgent(options: RunToolCallOptions): Promise<Connected
     ...toSamplingConnectOptions(options.samplingCall),
     ...(agentEnv ? { env: agentEnv } : {}),
   });
-  const tools = normalizeListedTools((await client.listTools()).tools);
+  const tools = normalizeListedTools((await client.listTools()).tools, {
+    onSchemaIssue: (issue) => log.warn(formatToolSchemaIssue(agent.skill.name, issue)),
+  });
   const envReport = inspectAgentEnvRequirements(
     agent.skill.name,
     agent.skill.env,

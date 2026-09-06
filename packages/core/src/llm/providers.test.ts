@@ -1,7 +1,14 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { generateText } from "ai";
-import { createProviderModel, resolveLLMCall, thinkingProviderOptions } from "./providers.ts";
+import {
+  createProviderModel,
+  providerAcceptsToolSchemaIssues,
+  resolveLLMCall,
+  thinkingProviderOptions,
+} from "./providers.ts";
+import { inlineAcyclicLocalJsonSchemaReferences } from "../tool-runtime/json-schema-refs.ts";
+import type { LanguageModelV4 } from "@ai-sdk/provider";
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -98,6 +105,13 @@ describe("createProviderModel", () => {
     assert.equal(model.provider, "xai.responses");
   });
 
+  it("should create a google gemini model", () => {
+    const model = createProviderModel("google", "gemini-3.7-flash", "test-key");
+    assert.ok(model);
+    assert.equal(model.modelId, "gemini-3.7-flash");
+    assert.equal(model.provider, "google.generative-ai");
+  });
+
   it("should accept custom baseURL", () => {
     const model = createProviderModel(
       "openai",
@@ -179,6 +193,7 @@ describe("resolveLLMCall", () => {
       { provider: "anthropic", model: "claude-sonnet-4-6" },
       { provider: "deepseek", model: "deepseek-v4-flash" },
       { provider: "xai", model: "grok-4.5" },
+      { provider: "google", model: "gemini-3.7-flash" },
     ] as const;
 
     for (const { provider, model } of providers) {
@@ -208,6 +223,8 @@ describe("resolveLLMCall", () => {
       { provider: "anthropic", model: "claude-sonnet-4-6" },
       { provider: "deepseek", model: "deepseek-v4-flash" },
       { provider: "xai", model: "grok-4.3" },
+      { provider: "google", model: "gemini-3.7-flash" },
+      { provider: "google", model: "gemini-2.5-flash" },
     ] as const;
 
     for (const { provider, model } of supported) {
@@ -261,6 +278,22 @@ describe("resolveLLMCall", () => {
         (error: Error) => error.message.includes(`xAI model "${model}" cannot disable reasoning`),
       );
     }
+  });
+
+  it("fails fast when Gemini 2.5 Pro structured output cannot disable reasoning", () => {
+    assert.throws(
+      () =>
+        resolveLLMCall(
+          "google",
+          "gemini-2.5-pro",
+          "test-key",
+          "structured-output",
+          undefined,
+          "off",
+        ),
+      (error: Error) =>
+        error.message.includes('Google model "gemini-2.5-pro" cannot disable reasoning'),
+    );
   });
 
   it("omits effort for fixed xAI grok-4.20 aliases", () => {
@@ -330,6 +363,11 @@ describe("resolveLLMCall", () => {
         provider: "xai",
         model: "grok-4.5",
         expected: { xai: { reasoningEffort: "high", reasoningSummary: "auto" } },
+      },
+      {
+        provider: "google",
+        model: "gemini-3.7-flash",
+        expected: { google: { thinkingConfig: { thinkingLevel: "high", includeThoughts: true } } },
       },
     ] as const;
 
@@ -492,6 +530,44 @@ describe("resolveLLMCall", () => {
     assert.deepEqual(capturedBody.reasoning, { effort: "medium", summary: "auto" });
   });
 
+  it("serializes Gemini thinking config through generateContent", async () => {
+    const originalFetch = globalThis.fetch;
+    let capturedUrl: string | undefined;
+    let capturedBody: unknown;
+
+    try {
+      globalThis.fetch = async (input: string | URL | Request, init?: RequestInit) => {
+        capturedUrl = input instanceof Request ? input.url : String(input);
+        if (typeof init?.body !== "string") {
+          throw new Error("Expected a JSON request body");
+        }
+        capturedBody = JSON.parse(init.body);
+
+        return new Response("", {
+          status: 200,
+          headers: { "content-type": "text/event-stream" },
+        });
+      };
+
+      const resolved = resolveLLMCall("google", "gemini-3.7-flash", "test-key", "chat");
+      const result = await resolved.model.doStream({
+        prompt: [{ role: "user", content: [{ type: "text", text: "test" }] }],
+        ...(resolved.providerOptions ? { providerOptions: resolved.providerOptions } : {}),
+      });
+      await result.stream.cancel();
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+
+    assert.ok(capturedUrl?.includes("/models/gemini-3.7-flash:streamGenerateContent"), capturedUrl);
+    assert.ok(isRecord(capturedBody));
+    assert.ok(isRecord(capturedBody.generationConfig));
+    assert.deepEqual(capturedBody.generationConfig.thinkingConfig, {
+      thinkingLevel: "medium",
+      includeThoughts: true,
+    });
+  });
+
   it("applies the same thinking mapping to sampling calls as chat calls", () => {
     const chatOff = resolveLLMCall("qwen", "qwen3.7-plus", "k", "chat", undefined, "off");
     const samplingOff = resolveLLMCall("qwen", "qwen3.7-plus", "k", "sampling", undefined, "off");
@@ -618,7 +694,199 @@ describe("thinkingProviderOptions", () => {
     assert.deepEqual(thinkingProviderOptions("deepseek", "deepseek-reasoner", "high"), enabled);
   });
 
+  it("maps Gemini 3 thinking levels and surfaces thought summaries", () => {
+    assert.deepEqual(thinkingProviderOptions("google", "gemini-3.7-flash", "low"), {
+      google: { thinkingConfig: { thinkingLevel: "low", includeThoughts: true } },
+    });
+    assert.deepEqual(thinkingProviderOptions("google", "gemini-3.7-flash", "medium"), {
+      google: { thinkingConfig: { thinkingLevel: "medium", includeThoughts: true } },
+    });
+    assert.deepEqual(thinkingProviderOptions("google", "gemini-3.1-pro-preview", "high"), {
+      google: { thinkingConfig: { thinkingLevel: "high", includeThoughts: true } },
+    });
+  });
+
+  it("maps Gemini 3 off to the lowest thinking level each model accepts", () => {
+    assert.deepEqual(thinkingProviderOptions("google", "gemini-3.1-pro-preview", "off"), {
+      google: { thinkingConfig: { thinkingLevel: "minimal" } },
+    });
+    assert.deepEqual(thinkingProviderOptions("google", "gemini-3.5-flash", "off"), {
+      google: { thinkingConfig: { thinkingLevel: "minimal" } },
+    });
+    assert.deepEqual(thinkingProviderOptions("google", "gemini-3.7-flash-lite", "off"), {
+      google: { thinkingConfig: { thinkingLevel: "minimal" } },
+    });
+    assert.deepEqual(thinkingProviderOptions("google", "gemini-3.7-flash", "off"), {
+      google: { thinkingConfig: { thinkingLevel: "low" } },
+    });
+    assert.deepEqual(thinkingProviderOptions("google", "gemini-3.8-flash-preview", "off"), {
+      google: { thinkingConfig: { thinkingLevel: "low" } },
+    });
+    assert.deepEqual(thinkingProviderOptions("google", "gemini-flash-latest", "off"), {
+      google: { thinkingConfig: { thinkingLevel: "low" } },
+    });
+  });
+
+  it("maps Gemini 2.5 thinking to token budgets", () => {
+    assert.deepEqual(thinkingProviderOptions("google", "gemini-2.5-flash", "medium"), {
+      google: { thinkingConfig: { thinkingBudget: 8192, includeThoughts: true } },
+    });
+    assert.deepEqual(thinkingProviderOptions("google", "gemini-2.5-pro", "high"), {
+      google: { thinkingConfig: { thinkingBudget: 16_384, includeThoughts: true } },
+    });
+    assert.deepEqual(thinkingProviderOptions("google", "gemini-2.5-flash", "off"), {
+      google: { thinkingConfig: { thinkingBudget: 0 } },
+    });
+    assert.deepEqual(thinkingProviderOptions("google", "gemini-2.5-pro", "off"), {
+      google: { thinkingConfig: { thinkingBudget: 128 } },
+    });
+  });
+
   it("returns undefined for unknown providers", () => {
     assert.equal(thinkingProviderOptions("mystery", "model", "high"), undefined);
+  });
+});
+
+describe("providerAcceptsToolSchemaIssues", () => {
+  const recursiveRootDef = {
+    path: "/properties/tree",
+    ref: "#/$defs/node",
+    reason: "recursive",
+  } as const;
+  const recursiveViaProperties = {
+    path: "/properties/node",
+    ref: "#/properties/node",
+    reason: "recursive",
+  } as const;
+  const recursiveViaEncodedPath = {
+    path: "/properties/node",
+    ref: "#/$defs/a%2Fb",
+    reason: "recursive",
+  } as const;
+  const unresolvable = {
+    path: "/properties/x",
+    ref: "#/properties/nope",
+    reason: "unresolvable",
+  } as const;
+  const external = {
+    path: "/properties/y",
+    ref: "https://example.com/s.json#/x",
+    reason: "external",
+  } as const;
+
+  it("lets google keep only leftovers it can pass through as root-level definition refs", () => {
+    assert.equal(providerAcceptsToolSchemaIssues("google", []), true);
+    assert.equal(providerAcceptsToolSchemaIssues("google", [recursiveRootDef]), true);
+    assert.equal(providerAcceptsToolSchemaIssues("google", [recursiveViaProperties]), false);
+    assert.equal(providerAcceptsToolSchemaIssues("google", [recursiveViaEncodedPath]), false);
+    assert.equal(providerAcceptsToolSchemaIssues("google", [unresolvable]), false);
+    assert.equal(providerAcceptsToolSchemaIssues("google", [external]), false);
+    assert.equal(
+      providerAcceptsToolSchemaIssues("google", [recursiveRootDef, unresolvable]),
+      false,
+    );
+  });
+
+  it("does not filter tools for providers that pass JSON Schema through", () => {
+    for (const provider of ["openai", "anthropic", "deepseek", "qwen", "xai", "unknown"]) {
+      assert.equal(
+        providerAcceptsToolSchemaIssues(provider, [recursiveViaProperties, unresolvable, external]),
+        true,
+        provider,
+      );
+    }
+  });
+});
+
+describe("tool schema compatibility after local ref inlining", () => {
+  const rawSchema = {
+    type: "object",
+    properties: {
+      locationCity: { type: "string", minLength: 1, description: "城市" },
+      locationDistrict: { $ref: "#/properties/locationCity", description: "区" },
+      major: { type: "array", items: { $ref: "#/properties/locationCity" }, minItems: 1 },
+    },
+  } as const;
+  const inlined = inlineAcyclicLocalJsonSchemaReferences(rawSchema).schema;
+
+  async function captureToolRequest(model: LanguageModelV4, schema: object): Promise<unknown> {
+    const originalFetch = globalThis.fetch;
+    let body: unknown;
+    try {
+      globalThis.fetch = async (_input: string | URL | Request, init?: RequestInit) => {
+        body = typeof init?.body === "string" ? JSON.parse(init.body) : undefined;
+        return new Response("", {
+          status: 200,
+          headers: { "content-type": "text/event-stream" },
+        });
+      };
+      const result = await model.doStream({
+        prompt: [{ role: "user", content: [{ type: "text", text: "hi" }] }],
+        tools: [
+          {
+            type: "function",
+            name: "filter",
+            description: "f",
+            inputSchema: schema as never,
+          },
+        ],
+      });
+      await result.stream.cancel();
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+    return body;
+  }
+
+  it("google rejects the raw schema but accepts the inlined one", async () => {
+    const model = createProviderModel("google", "gemini-3.8-flash", "k");
+    await assert.rejects(
+      () => captureToolRequest(model, rawSchema),
+      /direct children of root-level/u,
+    );
+    const body = await captureToolRequest(model, inlined);
+    assert.ok(isRecord(body));
+    assert.match(JSON.stringify(body), /locationDistrict/u);
+  });
+
+  it("keeps root recursive schemas that google sends through parametersJsonSchema", async () => {
+    const recursiveSchema = {
+      $ref: "#/$defs/node",
+      $defs: {
+        node: {
+          type: "object",
+          properties: { child: { $ref: "#/$defs/node" } },
+        },
+      },
+    };
+    const normalized = inlineAcyclicLocalJsonSchemaReferences(recursiveSchema);
+    assert.deepEqual(normalized.unresolved, [
+      { path: "", ref: "#/$defs/node", reason: "recursive" },
+    ]);
+    assert.equal(providerAcceptsToolSchemaIssues("google", normalized.unresolved), true);
+
+    const body = await captureToolRequest(
+      createProviderModel("google", "gemini-3.8-flash", "k"),
+      normalized.schema,
+    );
+    const serialized = JSON.stringify(body);
+    assert.match(serialized, /"parametersJsonSchema"/u);
+    assert.doesNotMatch(serialized, /"parameters":/u);
+  });
+
+  it("openai and anthropic receive the inlined schema verbatim", async () => {
+    for (const [provider, modelName] of [
+      ["openai", "gpt-5.5"],
+      ["anthropic", "claude-sonnet-4-6"],
+    ] as const) {
+      const body = await captureToolRequest(createProviderModel(provider, modelName, "k"), inlined);
+      const text = JSON.stringify(body);
+      assert.match(
+        text,
+        /"locationDistrict":\{"type":"string","minLength":1,"description":"区"\}/u,
+        provider,
+      );
+      assert.doesNotMatch(text, /\$ref/u, provider);
+    }
   });
 });

@@ -4,6 +4,7 @@ import { MockLanguageModelV4 } from "ai/test";
 import type { AgentTool } from "../types/agent.ts";
 import { extractToolInput } from "./argument-extractor.ts";
 import { createExtractionSchema } from "./extraction-schema.ts";
+import { normalizeListedTools } from "../cli/utils/agent-tools.ts";
 
 function makeMockModel(jsonText: string): MockLanguageModelV4 {
   return new MockLanguageModelV4({
@@ -147,6 +148,34 @@ describe("createExtractionSchema", () => {
     assert.equal(nestedProp?.type, "object");
     assert.equal(nestedProp?.additionalProperties, false);
     assert.deepEqual(result.required, ["name"]);
+  });
+
+  it("keeps field types after local refs are inlined at the MCP boundary", () => {
+    const [tool] = normalizeListedTools([
+      {
+        name: "filter",
+        inputSchema: {
+          type: "object",
+          properties: {
+            locationCity: { type: "string", minLength: 1 },
+            locationDistrict: { $ref: "#/properties/locationCity", description: "区" },
+            candidateKeywords: {
+              type: "array",
+              items: { $ref: "#/properties/locationCity" },
+              description: "关键词",
+            },
+          },
+        },
+      },
+    ]);
+    assert.ok(tool);
+    const result = createExtractionSchema(tool.inputSchema) as JsonSchemaLike;
+    assert.equal(result.properties?.locationDistrict?.type, "string");
+    assert.equal(result.properties?.candidateKeywords?.type, "array");
+    const keywordItems = result.properties?.candidateKeywords?.items as
+      | { readonly type?: string }
+      | undefined;
+    assert.equal(keywordItems?.type, "string");
   });
 
   it("drops z.record()-like fields (object without properties) from extraction schema", () => {

@@ -343,3 +343,57 @@ describe("rollConfigSchema", () => {
     assert.equal(result.success, false);
   });
 });
+
+describe("providerConfigSchema models", () => {
+  it("accepts an optional per-provider model list", () => {
+    const parsed = rollConfigSchema.parse({
+      llm: {
+        defaultProvider: "google",
+        defaultModel: "gemini-3.8-flash",
+        providers: {
+          google: { apiKey: "k", models: ["gemini-3.8-flash", "gemini-3.1-pro-preview"] },
+          xai: { apiKey: "k" },
+        },
+      },
+      ask: {},
+      agents: { dataDir: "/tmp/agents" },
+    });
+    assert.deepEqual(parsed.llm.providers.google?.models, [
+      "gemini-3.8-flash",
+      "gemini-3.1-pro-preview",
+    ]);
+    assert.equal(parsed.llm.providers.xai?.models, undefined);
+    assert.throws(() =>
+      rollConfigSchema.parse({
+        llm: {
+          defaultProvider: "x",
+          defaultModel: "y",
+          providers: { x: { apiKey: "k", models: [""] } },
+        },
+        ask: {},
+        agents: { dataDir: "/tmp/agents" },
+      }),
+    );
+    assert.throws(() =>
+      rollConfigSchema.parse({
+        llm: {
+          defaultProvider: "x",
+          defaultModel: "y",
+          providers: { x: { apiKey: "k", models: ["   "] } },
+        },
+        ask: {},
+        agents: { dataDir: "/tmp/agents" },
+      }),
+    );
+    const trimmed = rollConfigSchema.parse({
+      llm: {
+        defaultProvider: "x",
+        defaultModel: "y",
+        providers: { x: { apiKey: "k", models: [" model-a "] } },
+      },
+      ask: {},
+      agents: { dataDir: "/tmp/agents" },
+    });
+    assert.deepEqual(trimmed.llm.providers.x?.models, ["model-a"]);
+  });
+});

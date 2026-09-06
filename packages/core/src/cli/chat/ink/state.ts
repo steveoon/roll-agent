@@ -143,6 +143,11 @@ export type ChatUiAction =
     }
   | { readonly type: "set-draft"; readonly value: string }
   | { readonly type: "set-thinking"; readonly level: ThinkingLevel }
+  | {
+      readonly type: "set-model";
+      readonly model: string;
+      readonly contextWindow: number | undefined;
+    }
   | { readonly type: "set-thinking-display"; readonly value: ChatThinkingDisplay }
   | { readonly type: "set-auto"; readonly value: boolean }
   | { readonly type: "commit-history"; readonly item: HistoryItem }
@@ -569,6 +574,11 @@ export function chatReducer(state: ChatUiState, action: ChatUiAction): ChatUiSta
       return { ...state, draft: action.value };
     case "set-thinking":
       return { ...state, status: { ...state.status, thinkingLevel: action.level } };
+    case "set-model":
+      return {
+        ...state,
+        status: { ...state.status, model: action.model, contextWindow: action.contextWindow },
+      };
     case "set-thinking-display":
       return { ...state, thinkingDisplay: action.value };
     case "set-auto":

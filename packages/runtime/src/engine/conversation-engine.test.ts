@@ -15,6 +15,8 @@ import type { AgentUsageLease } from "@roll-agent/core/registry/agent-usage-leas
 import type { RegisteredAgent } from "@roll-agent/core/types/agent";
 import type { LanguageModelV4CallOptions, LanguageModelV4StreamPart } from "@ai-sdk/provider";
 import { ThreadStore } from "../store/thread-store.ts";
+import type { AgentSession } from "./agent-session.ts";
+import { ModelCatalog } from "./model-catalog.ts";
 import { DefaultToolPolicy } from "../policy/default-policy.ts";
 import type { SessionEvent } from "../types/events.ts";
 import {
@@ -1430,6 +1432,297 @@ test("ConversationEngine threads its providerOptions into sub-agent sampling con
   await engine.prepareAgentRefresh(agent);
   assert.deepEqual(connectOptionsCalls[1]?.samplingProviderOptions, nextProviderOptions);
   await engine.dispose();
+});
+
+test("ConversationEngine.switchModel updates live sessions, sampling and thread model", async () => {
+  const config = rollConfigSchema.parse({
+    llm: {
+      defaultProvider: "mock",
+      defaultModel: "default-model",
+      providers: { mock: { apiKey: "test" } },
+    },
+    ask: {},
+    agents: { dataDir: "/tmp/roll-engine-test" },
+  });
+  const agent: RegisteredAgent = {
+    skill: { name: "sampling-agent", description: "sampling", metadata: {} },
+    transport: { type: "stdio", command: "node", args: ["dist/index.js"] },
+    runtime: { ownership: "on-demand" },
+    installPath: "/tmp/sampling-agent",
+    registeredAt: "2026-06-17T00:00:00.000Z",
+    status: "idle",
+  };
+  const samplingModels: unknown[] = [];
+  const samplingOptions: unknown[] = [];
+  const connectOptionsCalls: Array<{ readonly samplingModel?: unknown }> = [];
+  const clientManager = {
+    connect: async (
+      _agentName: string,
+      _transport: unknown,
+      _cwd: string,
+      options: { readonly samplingModel?: unknown },
+    ) => {
+      connectOptionsCalls.push(options);
+      return { listTools: async () => ({ tools: [] }) };
+    },
+    setSamplingProviderOptions: (options: unknown) => samplingOptions.push(options),
+    setSamplingModel: (model: unknown) => samplingModels.push(model),
+    disconnectAll: async () => {},
+  } as unknown as McpClientManager;
+  const dir = tempDir();
+  const store = new ThreadStore(dir);
+  const initial = new MockLanguageModelV4({ modelId: "initial" });
+  const engine = new ConversationEngine({
+    config,
+    model: initial,
+    agents: [agent],
+    skillLibrary: null,
+    clientManager,
+    store,
+  });
+  try {
+    const session = await engine.createSession();
+    assert.equal(store.getThread(session.id)?.model, "default-model");
+
+    const next = new MockLanguageModelV4({ modelId: "gemini-3.8-flash" });
+    engine.switchModel({
+      provider: "mock",
+      modelName: "gemini-3.8-flash",
+      model: next,
+      providerOptions: { google: { thinkingConfig: { thinkingLevel: "medium" } } },
+    });
+
+    assert.deepEqual(samplingModels, [next]);
+    assert.deepEqual(samplingOptions, [
+      { google: { thinkingConfig: { thinkingLevel: "medium" } } },
+    ]);
+    assert.equal(store.getThread(session.id)?.model, "gemini-3.8-flash");
+    assert.equal(session.getContextWindow(), 1_000_000);
+
+    const created = await engine.createSession();
+    assert.equal(store.getThread(created.id)?.model, "gemini-3.8-flash");
+
+    await engine.prepareAgentRefresh(agent);
+    assert.equal(connectOptionsCalls.at(-1)?.samplingModel, next);
+  } finally {
+    await engine.dispose();
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("ConversationEngine.switchModel preflights live sessions before mutating any state", async () => {
+  const config = rollConfigSchema.parse({
+    llm: {
+      defaultProvider: "mock",
+      defaultModel: "default-model",
+      providers: { mock: { apiKey: "test" } },
+    },
+    ask: {},
+    agents: { dataDir: "/tmp/roll-engine-test" },
+  });
+  const samplingModels: unknown[] = [];
+  const samplingOptions: unknown[] = [];
+  const clientManager = {
+    setSamplingProviderOptions: (options: unknown) => samplingOptions.push(options),
+    setSamplingModel: (model: unknown) => samplingModels.push(model),
+    disconnectAll: async () => {},
+  } as unknown as McpClientManager;
+  const initial = new MockLanguageModelV4({ modelId: "initial" });
+  const next = new MockLanguageModelV4({ modelId: "next" });
+  const engine = new ConversationEngine({
+    config,
+    model: initial,
+    sources: [],
+    skillLibrary: null,
+    clientManager,
+  });
+  const idle = await engine.createSession();
+  const busy = await engine.createSession();
+  Reflect.set(busy, "activeTurn", {});
+  try {
+    assert.throws(
+      () => engine.switchModel({ provider: "mock", modelName: "next", model: next }),
+      /正在生成回复/u,
+    );
+    assert.equal(Reflect.get(idle, "model"), initial);
+    assert.equal(Reflect.get(engine, "modelOverride"), undefined);
+    assert.deepEqual(samplingModels, []);
+    assert.deepEqual(samplingOptions, []);
+  } finally {
+    Reflect.set(busy, "activeTurn", undefined);
+    await engine.dispose();
+  }
+});
+
+test("ConversationEngine resolves context window from the model catalog by provider and reports the source", async () => {
+  const config = rollConfigSchema.parse({
+    llm: {
+      defaultProvider: "openai",
+      defaultModel: "gpt-5.6-terra",
+      providers: { openai: { apiKey: "test" }, google: { apiKey: "test" } },
+    },
+    ask: {},
+    agents: { dataDir: "/tmp/roll-engine-test" },
+  });
+  const catalog = new ModelCatalog({
+    snapshot: {
+      fetchedAt: "2026-09-04T00:00:00.000Z",
+      providers: {
+        openai: { "gpt-5.6-terra": { context: 1_050_000, input: 922_000 } },
+        google: { "gemini-3.8-flash": { context: 1_048_576 } },
+      },
+    },
+  });
+  const engine = new ConversationEngine({
+    config,
+    model: new MockLanguageModelV4({ modelId: "gpt-5.6-terra" }),
+    sources: [],
+    skillLibrary: null,
+    modelCatalog: catalog,
+  });
+  try {
+    const session = await engine.createSession();
+    assert.equal(session.getContextWindow(), 922_000);
+
+    const switched = engine.switchModel({
+      provider: "google",
+      modelName: "gemini-3.8-flash",
+      model: new MockLanguageModelV4({ modelId: "gemini-3.8-flash" }),
+    });
+    assert.deepEqual(switched, { window: 1_048_576, source: "catalog" });
+    assert.equal(session.getContextWindow(), 1_048_576);
+
+    const ruled = engine.switchModel({
+      provider: "xai",
+      modelName: "grok-4.5",
+      model: new MockLanguageModelV4({ modelId: "grok-4.5" }),
+    });
+    assert.deepEqual(ruled, { window: 500_000, source: "rule" });
+  } finally {
+    await engine.dispose();
+  }
+});
+
+test("ConversationEngine excludes tools whose leftover refs the provider rejects and re-evaluates on model switch and agent refresh", async () => {
+  const makeAgent = (name: string): RegisteredAgent => ({
+    skill: { name, description: name, metadata: {} },
+    transport: { type: "stdio", command: "node", args: ["dist/index.js"] },
+    runtime: { ownership: "on-demand" },
+    installPath: `/tmp/${name}`,
+    registeredAt: "2026-06-17T00:00:00.000Z",
+    status: "idle",
+  });
+  const recursiveRootTool = {
+    name: "tree",
+    inputSchema: {
+      type: "object",
+      $defs: { node: { type: "object", properties: { child: { $ref: "#/$defs/node" } } } },
+      properties: { root: { $ref: "#/$defs/node" } },
+    },
+  };
+  const brokenTool = {
+    name: "broken",
+    inputSchema: { type: "object", properties: { x: { $ref: "#/properties/nope" } } },
+  };
+  const plainTool = { name: "ping", inputSchema: { type: "object", properties: {} } };
+  const lateTool = {
+    name: "late",
+    inputSchema: { type: "object", properties: { y: { $ref: "#/properties/missing" } } },
+  };
+  const toolsByAgent: Record<string, readonly object[]> = {
+    "schema-agent": [recursiveRootTool, brokenTool, plainTool],
+    "late-agent": [lateTool],
+  };
+  const makeEngine = (provider: string) => {
+    const issues: string[] = [];
+    const engine = new ConversationEngine({
+      config: rollConfigSchema.parse({
+        llm: {
+          defaultProvider: provider,
+          defaultModel: "m",
+          providers: { [provider]: { apiKey: "k" } },
+        },
+        ask: {},
+        agents: { dataDir: "/tmp/roll-engine-test" },
+      }),
+      model: new MockLanguageModelV4({}),
+      agents: [makeAgent("schema-agent")],
+      skillLibrary: null,
+      clientManager: {
+        connect: async (agentName: string) => ({
+          listTools: async () => ({ tools: toolsByAgent[agentName] ?? [] }),
+        }),
+        setSamplingProviderOptions: () => {},
+        setSamplingModel: () => {},
+        disconnectAll: async () => {},
+      } as unknown as McpClientManager,
+      onAgentBootstrapIssue: (issue) => issues.push(issue.message),
+    });
+    return { engine, issues };
+  };
+  const toolIds = (session: AgentSession): readonly string[] =>
+    session.getCapabilityManifest().tools.map((tool) => tool.id);
+  const has = (ids: readonly string[], suffix: string): boolean =>
+    ids.some((id) => id.endsWith(suffix));
+
+  const google = makeEngine("google");
+  try {
+    const session = await google.engine.createSession();
+    let ids = toolIds(session);
+    assert.ok(has(ids, "ping"));
+    assert.ok(has(ids, "tree"), "root-level recursive $defs stay usable on google");
+    assert.ok(!has(ids, "broken"), "unresolvable #/properties ref is excluded on google");
+    assert.ok(
+      google.issues.some(
+        (message) => message.includes('"broken"') && message.includes("已从本会话工具集移除"),
+      ),
+    );
+
+    google.engine.switchModel({
+      provider: "openai",
+      modelName: "gpt",
+      model: new MockLanguageModelV4({ modelId: "gpt" }),
+    });
+    ids = toolIds(session);
+    assert.ok(has(ids, "broken"), "switching to a pass-through provider restores the tool");
+
+    google.engine.switchModel({
+      provider: "google",
+      modelName: "gemini",
+      model: new MockLanguageModelV4({ modelId: "gemini" }),
+    });
+    ids = toolIds(session);
+    assert.ok(!has(ids, "broken"), "switching back to google excludes it again");
+
+    const refresh = await google.engine.prepareAgentRefresh(makeAgent("late-agent"));
+    session.applyAgentRefresh(refresh);
+    ids = toolIds(session);
+    assert.ok(!has(ids, "late"), "tools installed mid-session go through the same policy");
+    assert.ok(google.issues.some((message) => message.includes('"late"')));
+  } finally {
+    await google.engine.dispose();
+  }
+
+  const openai = makeEngine("openai");
+  try {
+    const session = await openai.engine.createSession();
+    assert.ok(has(toolIds(session), "broken"));
+    openai.engine.switchModel({
+      provider: "google",
+      modelName: "gemini",
+      model: new MockLanguageModelV4({ modelId: "gemini" }),
+    });
+    assert.ok(!has(toolIds(session), "broken"), "stale toolset is re-validated on switch");
+    assert.ok(
+      openai.issues.some(
+        (message) => message.includes('"broken"') && message.includes('provider "google"'),
+      ),
+      "switch warnings name the target provider",
+    );
+  } finally {
+    await openai.engine.dispose();
+  }
 });
 
 test("ConversationEngine threads structured output controls into AgentSession", async () => {

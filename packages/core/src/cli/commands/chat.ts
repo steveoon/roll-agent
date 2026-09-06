@@ -3,6 +3,10 @@ import { defineCommand } from "citty";
 import type { AgentSession } from "@roll-agent/runtime";
 import { loadConfig } from "../../config/loader.ts";
 import { thinkingProviderOptions } from "../../llm/providers.ts";
+import { findLlmModelChoice, listLlmModelChoices } from "../../llm/model-choices.ts";
+import { writeDefaultLlm } from "../../config/default-llm-writer.ts";
+import { buildModelPickerItems } from "../chat/model-picker-format.ts";
+import type { ChatModelSwitching } from "../chat/ink/app.ts";
 import { createInterface, type Interface as ReadlineInterface } from "node:readline/promises";
 import type { Readable, Writable } from "node:stream";
 import chalk from "chalk";
@@ -34,6 +38,14 @@ import {
 import { buildSessionPickerItems, type SessionPickerItem } from "../chat/session-picker-format.ts";
 import { clackSessionPicker } from "../utils/clack-session-picker.ts";
 import { diffDisplayNotice, resolveDiffDisplayToggle } from "../chat/diff-display.ts";
+import { runBasicScheduleBrowser } from "../chat/basic-schedule-browser.ts";
+import type { ScheduleBrowserPort } from "../chat/schedule-browser.ts";
+import {
+  backfillScheduledThreads,
+  continueScheduledThread,
+  createScheduleBrowserPort,
+  parseScheduleAttempt,
+} from "../../scheduler-host/schedule-history.ts";
 
 import {
   CHAT_ENGINE_SURFACES,
@@ -42,6 +54,7 @@ import {
   loadRuntime,
   resolveChatLlmCalls,
   resolveChatLlmReadiness,
+  resolveChatLlmSwitch,
   type ChatEngineSurface,
   type ConversationEngineInstance,
   type ThreadStoreInstance,
@@ -54,6 +67,7 @@ export {
   createChatEngine,
   resolveChatLlmCalls,
   resolveChatLlmReadiness,
+  resolveChatLlmSwitch,
   runJsonTurn,
 };
 export type { ChatEngineSurface };
@@ -74,6 +88,7 @@ interface ReplIo {
   readonly resumeSession?: (threadId: string) => Promise<AgentSession>;
   readonly sessionPicker?: (items: readonly SessionPickerItem[]) => Promise<string | undefined>;
   readonly onActiveSessionChange?: (session: AgentSession) => void;
+  readonly scheduleBrowser?: ScheduleBrowserPort;
 }
 
 function printChatJson(result: ChatCommandResult): void {
@@ -160,6 +175,7 @@ export async function runServer(config: RollConfig): Promise<void> {
   let engine: ConversationEngineInstance | undefined;
   let signalScope: ChatEngineSignalScope | undefined;
   try {
+    backfillScheduledThreads(config, runtime, store);
     engine = createChatEngine({
       runtime,
       config,
@@ -226,10 +242,12 @@ export async function runServer(config: RollConfig): Promise<void> {
 }
 
 async function listSessions(config: RollConfig, asJson: boolean): Promise<void> {
-  const { ThreadStore } = await loadRuntime();
+  const runtime = await loadRuntime();
+  const { ThreadStore } = runtime;
   const store = new ThreadStore(config.runtime.threadsDir);
   try {
-    const threads = store.listThreads();
+    backfillScheduledThreads(config, runtime, store);
+    const threads = store.listThreads({ origin: "interactive" });
     if (asJson) {
       const data = threads.map((thread) => ({
         ...thread,
@@ -331,12 +349,63 @@ export async function runRepl(
         log.info(formatSkillList(availableSkills, (process.stdout.columns || 96) - 2));
         continue;
       }
+      if (input === "/model" || input.startsWith("/model ")) {
+        log.info("基础模式不支持 /model，请在全屏模式（roll chat）中使用");
+        continue;
+      }
+      if (input === "/schedule") {
+        if (io.scheduleBrowser === undefined) {
+          log.info("当前入口不支持定时任务浏览");
+          continue;
+        }
+        rl.pause();
+        let next: AgentSession | undefined;
+        try {
+          next = await runBasicScheduleBrowser(io.scheduleBrowser, {
+            input: io.input,
+            output: io.output,
+            ...(io.signal ? { signal: io.signal } : {}),
+          });
+        } catch (error) {
+          log.error(`查看失败：${error instanceof Error ? error.message : String(error)}`);
+        }
+        if (next !== undefined) {
+          const previous = session;
+          session = next;
+          io.onActiveSessionChange?.(session);
+          previous.setUserInputAvailable(false);
+          await previous.close().catch((error: unknown) => {
+            log.warn(`原会话清理未完成：${error instanceof Error ? error.message : String(error)}`);
+          });
+          if (
+            initial.isNew &&
+            previous.id === initial.id &&
+            !initial.submitted &&
+            store.countMessages(previous.id) === 0
+          ) {
+            store.deleteThread(previous.id);
+          }
+          session.setUserInputAvailable(true);
+          const previousDiffDisplay = renderer.diffDisplay;
+          renderer = new ChatRenderer(
+            confirmFn,
+            session.getContextWindow(),
+            io.signal,
+            userInputPrompt,
+          );
+          renderer.setDiffDisplay(previousDiffDisplay);
+          availableSkills = session.getSkillSummaries();
+          titled = true;
+          log.info(`已基于执行快照创建讨论 ${session.id}；当前工作目录：${process.cwd()}`);
+        }
+        continue;
+      }
       if (input === "/resume") {
         if (io.resumeSession === undefined) {
           log.info("当前模式不支持会话切换");
           continue;
         }
-        const items = buildSessionPickerItems(store.listThreads(), {
+        const items = buildSessionPickerItems(store.listThreads({ origin: "interactive" }), {
           currentSessionId: session.id,
           countMessages: (threadId) => store.countMessages(threadId),
           now: new Date(),
@@ -429,6 +498,8 @@ export default defineCommand({
   args: {
     message: { type: "positional", description: "起始消息", required: false },
     session: { type: "string", description: "继续已有会话的 session ID" },
+    "from-run": { type: "string", description: "基于指定定时运行的快照开始普通对话" },
+    attempt: { type: "string", description: "--from-run 的尝试序号（默认最新有关联的尝试）" },
     last: { type: "boolean", description: "继续最近一个会话", default: false },
     list: { type: "boolean", description: "列出已有会话", default: false },
     json: { type: "boolean", description: "JSON 格式输出", default: false },
@@ -444,6 +515,24 @@ export default defineCommand({
   },
   async run({ args }) {
     let { config } = loadConfig();
+    const fromRun = args["from-run"];
+    let requestedAttempt: number | undefined;
+    try {
+      requestedAttempt = parseScheduleAttempt(args.attempt);
+      if ([Boolean(args.session), args.last, Boolean(fromRun)].filter(Boolean).length > 1) {
+        throw new Error("--session、--last、--from-run 不能同时使用");
+      }
+      if (requestedAttempt !== undefined && fromRun === undefined) {
+        throw new Error("--attempt 只能与 --from-run 一起使用");
+      }
+      if (fromRun !== undefined && (args.list || args.server)) {
+        throw new Error("--from-run 不能与 --list 或 --server 一起使用");
+      }
+    } catch (error) {
+      log.error(error instanceof Error ? error.message : String(error));
+      process.exitCode = 1;
+      return;
+    }
 
     const screenModeRequest = resolveChatScreenModeRequest({
       configMode: config.chat.screenMode,
@@ -485,6 +574,9 @@ export default defineCommand({
     const providerConfig = llmStatus.providerConfig;
     const provider = llmStatus.provider;
     const modelName = llmStatus.model;
+    let currentProvider = provider;
+    let currentModel = modelName;
+    let currentThinkingLevel = config.runtime.thinkingLevel;
 
     if (args.json && !args.message) {
       log.error('--json 模式需要消息：roll chat "<message>" --json');
@@ -531,6 +623,7 @@ export default defineCommand({
         config.runtime.compaction.strategy === "summarize",
       );
     const store = new ThreadStore(config.runtime.threadsDir);
+    const modelCatalog = runtime.createDefaultModelCatalog(runtime.defaultModelCatalogCachePath());
     const surface = args.message
       ? args.json
         ? CHAT_ENGINE_SURFACES.json
@@ -543,12 +636,24 @@ export default defineCommand({
     let sessionForCleanup: AgentSession | undefined;
     let signalScope: ChatEngineSignalScope | undefined;
     try {
+      backfillScheduledThreads(config, runtime, store);
+      if (surface === CHAT_ENGINE_SURFACES.ink || surface === CHAT_ENGINE_SURFACES.basicRepl) {
+        modelCatalog.refreshIfStale().then(
+          (result) => {
+            log.debug(`model catalog refresh: ${result}`);
+          },
+          (error: unknown) => {
+            log.debug(`model catalog refresh failed: ${String(error)}`);
+          },
+        );
+      }
       engine = createChatEngine({
         runtime,
         config,
         model,
         store,
         surface,
+        modelCatalog,
         shellEnv: chatCliScope.env,
         ...(providerOptions ? { providerOptions } : {}),
         ...(structuredOutputProviderOptions ? { structuredOutputProviderOptions } : {}),
@@ -566,11 +671,31 @@ export default defineCommand({
       });
       signalScope.setEngine(engine);
       const chatEngine = engine;
+      const scheduleBrowser = createScheduleBrowserPort({ config, runtime, engine: chatEngine });
+      const resumeSession = async (threadId: string): Promise<AgentSession> => {
+        if (store.getThread(threadId)?.origin.kind === "scheduled") {
+          const next = await continueScheduledThread(
+            { config, runtime, engine: chatEngine },
+            threadId,
+          );
+          log.info(
+            `已基于执行快照创建讨论 ${next.id}；原执行会话 ${threadId} 保留；当前工作目录：${process.cwd()}`,
+          );
+          return next;
+        }
+        return chatEngine.resumeSession(threadId);
+      };
       let session: AgentSession;
-      if (args.session) {
-        session = await engine.resumeSession(args.session);
+      if (fromRun !== undefined) {
+        const detail = await scheduleBrowser.inspect(fromRun, requestedAttempt);
+        session = await scheduleBrowser.continueRun(fromRun, detail.attempt);
+        log.info(
+          `已创建讨论 ${session.id}；原任务目录：${detail.cwd}；当前工作目录：${process.cwd()}`,
+        );
+      } else if (args.session) {
+        session = await resumeSession(args.session);
       } else if (args.last) {
-        const latest = store.listThreads()[0];
+        const latest = store.listThreads({ origin: "interactive" })[0];
         if (!latest) {
           log.error('暂无可继续的会话，先用 `roll chat "<message>"` 开始一个');
           process.exitCode = 1;
@@ -598,7 +723,7 @@ export default defineCommand({
       }
       if (config.runtime.compaction.enabled && session.getContextWindow() === undefined) {
         log.warn(
-          `未知模型 "${modelName}" 的 context window，阈值自动压缩不可用。可在 roll.config.yaml 设置 runtime.context-window`,
+          `未知模型 "${provider}/${modelName}" 的 context window，阈值自动压缩不可用。模型目录会每天自动刷新；也可在 roll.config.yaml 设置 runtime.context-window`,
         );
       }
       if (args.message) {
@@ -611,7 +736,7 @@ export default defineCommand({
           await renderer.handle(event, session);
         }
       } else {
-        const isNewSession = !args.session && !args.last;
+        const isNewSession = !args.session && !args.last && fromRun === undefined;
         const summary = await engine.getContextSummary();
         const banner: BannerInfo = {
           version: getCurrentVersion(),
@@ -641,13 +766,46 @@ export default defineCommand({
                 usedInk = true;
               },
               signal: signalScope.signal,
-              onThinkingChange: (level) =>
-                session.setProviderOptions(thinkingProviderOptions(provider, modelName, level)),
-              resumeSession: (threadId) => chatEngine.resumeSession(threadId),
+              onThinkingChange: (level) => {
+                currentThinkingLevel = level;
+                session.setProviderOptions(
+                  thinkingProviderOptions(currentProvider, currentModel, level),
+                );
+              },
+              resumeSession,
+              scheduleBrowser,
               onActiveSessionChange: (next) => {
                 session = next;
                 sessionForCleanup = next;
               },
+              modelSwitching: {
+                loadItems: (current) => buildModelPickerItems(listLlmModelChoices(config), current),
+                switchTo: async (input) => {
+                  const choice = findLlmModelChoice(listLlmModelChoices(config), input);
+                  if (!choice) {
+                    throw new Error(`未知模型 "${input}"，输入 /model 查看可选项`);
+                  }
+                  const resolution = chatEngine.switchModel(
+                    resolveChatLlmSwitch(config, choice, currentThinkingLevel),
+                  );
+                  currentProvider = choice.provider;
+                  currentModel = choice.model;
+                  return {
+                    id: choice.id,
+                    model: choice.model,
+                    contextWindow: resolution?.window,
+                    ...(resolution ? { contextWindowSource: resolution.source } : {}),
+                  };
+                },
+                setAsDefault: async (id) => {
+                  const choice = findLlmModelChoice(listLlmModelChoices(config), id);
+                  if (!choice) {
+                    throw new Error(`未知模型 "${id}"`);
+                  }
+                  const written = writeDefaultLlm(choice);
+                  return `已将默认 LLM 设为 ${choice.id}（写入 ${written.configPath}）`;
+                },
+              } satisfies ChatModelSwitching,
             });
           } catch (inkError) {
             if (usedInk) {
@@ -667,7 +825,8 @@ export default defineCommand({
             input: process.stdin,
             output: process.stdout,
             signal: signalScope.signal,
-            resumeSession: (threadId) => chatEngine.resumeSession(threadId),
+            resumeSession,
+            scheduleBrowser,
             onActiveSessionChange: (next) => {
               session = next;
               sessionForCleanup = next;
@@ -682,10 +841,19 @@ export default defineCommand({
       }
     } finally {
       signalScope?.dispose();
-      await sessionForCleanup?.close();
-      await engine?.dispose();
-      store.close();
-      chatCliScope.dispose();
+      try {
+        await sessionForCleanup?.close();
+      } finally {
+        try {
+          await engine?.dispose();
+        } finally {
+          try {
+            store.close();
+          } finally {
+            chatCliScope.dispose();
+          }
+        }
+      }
     }
   },
 });

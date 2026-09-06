@@ -1,10 +1,17 @@
 export { ConversationEngine } from "./engine/conversation-engine.ts";
+export type { EngineModelSwitch } from "./engine/conversation-engine.ts";
 export type {
   AgentBootstrapIssue,
   ConversationEngineOptions,
   CreateSessionInput,
+  ForkSessionInput,
 } from "./engine/conversation-engine.ts";
 export { AgentSession } from "./engine/agent-session.ts";
+export type {
+  SessionModelSwitch,
+  SessionToolExclusion,
+  ToolSchemaPolicy,
+} from "./engine/agent-session.ts";
 export type {
   AgentSessionOptions,
   SessionCompactionSettings,
@@ -24,7 +31,31 @@ export type {
   WorkspaceInstructionsSetting,
   WorkspaceInstructionsSource,
 } from "./engine/workspace-instructions.ts";
-export { resolveContextWindow, lookupContextWindow } from "./engine/context-window.ts";
+export {
+  resolveContextWindow,
+  lookupContextWindow,
+  resolveModelContextWindow,
+  CONTEXT_WINDOW_SOURCES,
+} from "./engine/context-window.ts";
+export type {
+  ContextWindowResolution,
+  ContextWindowSource,
+  ResolveModelContextWindowInput,
+} from "./engine/context-window.ts";
+export { createDefaultModelCatalog } from "./engine/model-catalog-default.ts";
+export {
+  ModelCatalog,
+  defaultModelCatalogCachePath,
+  lookupCatalogContextWindow,
+  trimModelCatalog,
+  MODEL_CATALOG_REFRESH_RESULTS,
+} from "./engine/model-catalog.ts";
+export type {
+  ModelCatalogData,
+  ModelCatalogLimit,
+  ModelCatalogOptions,
+  ModelCatalogRefreshResult,
+} from "./engine/model-catalog.ts";
 export {
   compactMessages,
   findTurnBoundaries,
@@ -96,7 +127,25 @@ export type {
   ToolOutcomeKind,
 } from "./tool-bridge/normalize-result.ts";
 export { ThreadStore, defaultThreadsDir, expandTilde } from "./store/thread-store.ts";
-export type { ThreadRecord, CreateThreadInput } from "./store/thread-store.ts";
+export type { ThreadStoreOptions } from "./store/thread-store.ts";
+export type {
+  ThreadRecord,
+  CreateThreadInput,
+  ListThreadsOptions,
+  ThreadSnapshot,
+  ForkThreadSnapshotInput,
+} from "./store/thread-store.ts";
+export {
+  THREAD_ORIGIN_KINDS,
+  threadOriginSchema,
+  scheduledThreadOriginSchema,
+  threadDerivedFromSchema,
+} from "./store/thread-origin.ts";
+export type {
+  ThreadOrigin,
+  ScheduledThreadOrigin,
+  ThreadDerivedFrom,
+} from "./store/thread-origin.ts";
 export {
   SCHEDULE_LEDGER_READ_STATUSES,
   ScheduleStore,
@@ -250,3 +299,17 @@ export {
   getFileChangeDisplay,
 } from "@roll-agent/protocol";
 export type { FileChangeDiff, FileChangeDisplay, FileChangeKind } from "@roll-agent/protocol";
+
+export { readScheduleHistory, readScheduleRun } from "./scheduler/schedule-store.ts";
+export type {
+  ReadScheduleHistoryOptions,
+  ScheduleHistoryReadResult,
+  ScheduleRunReadResult,
+} from "./scheduler/schedule-store.ts";
+export type {
+  BackfillThreadReferenceInput,
+  RegisterThreadReferenceInput,
+  ScheduleThreadReference,
+  ScheduleRunHistoryEntry,
+  ScheduleHistoryTask,
+} from "./scheduler/types.ts";

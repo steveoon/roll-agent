@@ -431,6 +431,20 @@ test("ThreadStore updateTitle 更新标题", () => {
   }
 });
 
+test("ThreadStore updateModel 更新线程模型", () => {
+  const dir = tempDir();
+  try {
+    const store = new ThreadStore(dir);
+    const id = store.createThread({ model: "qwen3.8-max" });
+    assert.equal(store.getThread(id)?.model, "qwen3.8-max");
+    store.updateModel(id, "gemini-3.8-flash");
+    assert.equal(store.getThread(id)?.model, "gemini-3.8-flash");
+    store.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("ThreadStore deleteThread 删除 thread 并级联消息", () => {
   const dir = tempDir();
   try {
@@ -757,7 +771,7 @@ test("ThreadStore schema v5 ledger 迁移为 legacy_assumed coverage", () => {
       readonly user_version: number;
     };
     assert.deepEqual({ ...row }, { representation: "legacy_assumed", transcript_sequence: null });
-    assert.equal(version.user_version, 6);
+    assert.equal(version.user_version, 7);
     inspected.close();
   } finally {
     rmSync(dir, { recursive: true, force: true });
@@ -966,7 +980,7 @@ test("ThreadStore schema v4 迁移会重写旧 ledger 为有界脱敏投影", ()
     assert.equal(
       (inspected.prepare("PRAGMA user_version").get() as { readonly user_version: number })
         .user_version,
-      6,
+      7,
     );
     inspected.close();
     assert.equal(readFileSync(join(dir, "threads.db")).includes("legacy-ledger-secret"), false);
@@ -1912,7 +1926,7 @@ test("ThreadStore schema v2 迁移跳过无父 thread 的 legacy message", () =>
     const version = migrated.prepare("PRAGMA user_version").get() as {
       readonly user_version: number;
     };
-    assert.equal(version.user_version, 6);
+    assert.equal(version.user_version, 7);
     migrated.close();
 
     const reopened = new ThreadStore(dir);
@@ -2102,10 +2116,12 @@ test("ThreadStore 两个连接追加 ToolExecutionRecord 时 sequence 单调且�
   }
 });
 
+const RETENTION_CLOCK = { now: () => new Date("2026-08-20T00:00:00.000Z") } as const;
+
 test("ThreadStore Runtime event log 跨重启保留 cursor 并从 null 或 cursor 恢复", () => {
   const dir = tempDir();
   try {
-    const first = new ThreadStore(dir);
+    const first = new ThreadStore(dir, RETENTION_CLOCK);
     const threadId = first.createThread();
     assert.equal(first.getRuntimeEventCursor(threadId), null);
     assert.deepEqual(first.resumeRuntimeEvents(threadId, null), {
@@ -2147,7 +2163,7 @@ test("ThreadStore Runtime event log 跨重启保留 cursor 并从 null 或 curso
     );
     first.close();
 
-    const reopened = new ThreadStore(dir);
+    const reopened = new ThreadStore(dir, RETENTION_CLOCK);
     assert.equal(reopened.getRuntimeEventCursor(threadId), completed.cursor);
     const replay = reopened.resumeRuntimeEvents(threadId, null);
     assert.deepEqual(
@@ -2165,10 +2181,10 @@ test("ThreadStore Runtime event log 跨重启保留 cursor 并从 null 或 curso
 test("ThreadStore Runtime event sequence 在两个连接间单调且 cursor 不混用", () => {
   const dir = tempDir();
   try {
-    const first = new ThreadStore(dir);
+    const first = new ThreadStore(dir, RETENTION_CLOCK);
     const firstThread = first.createThread();
     const secondThread = first.createThread();
-    const second = new ThreadStore(dir);
+    const second = new ThreadStore(dir, RETENTION_CLOCK);
     const firstEvent = first.appendRuntimeEvent({
       threadId: firstThread,
       timestamp: "2026-08-04T04:00:00.000Z",
@@ -2221,7 +2237,7 @@ test(
   () => {
     const dir = tempDir();
     try {
-      const store = new ThreadStore(dir);
+      const store = new ThreadStore(dir, RETENTION_CLOCK);
       const threadId = store.createThread();
       const first = store.appendRuntimeEvent({
         threadId,
@@ -2271,7 +2287,7 @@ test(
 test("ThreadStore Runtime event byte retention 保留不超过 16 MiB 的最新连续后缀", () => {
   const dir = tempDir();
   try {
-    const store = new ThreadStore(dir);
+    const store = new ThreadStore(dir, RETENTION_CLOCK);
     const threadId = store.createThread();
     const payload = "x".repeat(9 * 1_024 * 1_024);
     const first = store.appendRuntimeEvent({
@@ -2312,7 +2328,7 @@ test("ThreadStore Runtime event byte retention 保留不超过 16 MiB 的最新�
 test("ThreadStore 拒绝单条超过 Runtime event byte retention 上限的记录", () => {
   const dir = tempDir();
   try {
-    const store = new ThreadStore(dir);
+    const store = new ThreadStore(dir, RETENTION_CLOCK);
     const threadId = store.createThread();
     assert.throws(
       () =>
@@ -2340,7 +2356,7 @@ test("ThreadStore 拒绝单条超过 Runtime event byte retention 上限的记�
 test("ThreadStore Runtime event age retention 遇到未过期记录后不在中间打洞", () => {
   const dir = tempDir();
   try {
-    const store = new ThreadStore(dir);
+    const store = new ThreadStore(dir, RETENTION_CLOCK);
     const threadId = store.createThread();
     const events = [0, 1, 2].map(() =>
       store.appendRuntimeEvent({
@@ -2443,7 +2459,7 @@ test("ThreadStore 从 v4 升级只建立空 Runtime event log，不从旧 transc
       readonly user_version: number;
     };
     assert.equal(stateCount.count, 1);
-    assert.equal(version.user_version, 6);
+    assert.equal(version.user_version, 7);
     inspected.close();
   } finally {
     rmSync(dir, { recursive: true, force: true });
@@ -2453,7 +2469,7 @@ test("ThreadStore 从 v4 升级只建立空 Runtime event log，不从旧 transc
 test("ThreadStore deleteThread 级联删除 Runtime event state 与 ledger", () => {
   const dir = tempDir();
   try {
-    const store = new ThreadStore(dir);
+    const store = new ThreadStore(dir, RETENTION_CLOCK);
     const threadId = store.createThread();
     store.appendRuntimeEvent({
       threadId,
@@ -2479,7 +2495,7 @@ test("ThreadStore deleteThread 级联删除 Runtime event state 与 ledger", () 
 test("ThreadStore Runtime event append 失败会回滚 sequence 且不产生 cursor", () => {
   const dir = tempDir();
   try {
-    const store = new ThreadStore(dir);
+    const store = new ThreadStore(dir, RETENTION_CLOCK);
     const threadId = store.createThread();
     const database = new DatabaseSync(join(dir, "threads.db"));
     database.exec(`

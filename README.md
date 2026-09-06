@@ -100,9 +100,29 @@ agents:
   data-dir: ~/.roll-agent/agents
 ```
 
-支持的 provider：`anthropic`、`openai`、`deepseek`、`qwen`、`xai`。每个 provider 可配置
-`base-url` 用于自定义 API 端点；xAI 默认模型为 `grok-4.5`（500k context window），API key 可通过
-`XAI_API_KEY` 注入。
+支持的 provider：`anthropic`、`openai`、`deepseek`、`qwen`、`xai`、`google`（Gemini）。每个 provider
+可配置 `base-url` 用于自定义 API 端点；xAI 默认模型为 `grok-4.5`（500k context window），API key 可通过
+`XAI_API_KEY` 注入；Google Gemini 默认模型为 `gemini-3.8-flash`（1M context window），API key 可通过
+`GOOGLE_GENERATIVE_AI_API_KEY` 注入。
+
+每个 provider 还可用 `models` 列出可切换的模型 ID；`roll chat` 里输入 `/model` 会列出所有已配置 key 的
+provider 及其模型，选中后仅本次 roll chat 生效（含 `/resume` 切到的会话），并可顺手设为默认写回
+`roll.config.yaml`。选择设为默认时会清除 `runtime.provider` / `runtime.model` 覆盖，确保后续 `roll chat`
+使用新的 `llm.default-provider` / `llm.default-model`；定时任务等无人值守场景同样使用这对默认值。
+
+```yaml
+llm:
+  providers:
+    google:
+      api-key: ${GOOGLE_GENERATIVE_AI_API_KEY}
+      models:
+        - gemini-3.8-flash
+        - gemini-3.1-pro-preview
+```
+
+模型的 context window 按「`runtime.context-window` 覆盖 → models.dev 官方 provider 条目（随包内置快照，
+`~/.roll-agent/cache/model-catalog.json` 每天后台刷新）→ 内置家族规则」解析；`/model` 切换提示里会显示
+`ctx` 与来源。发版前可运行 `pnpm catalog:refresh` 更新内置快照。
 `ask.llm-model` 可选；未设置时会回退到 `llm.default-model`。
 
 如果本地还留着旧版 `router:` 配置段：
@@ -574,7 +594,7 @@ roll --help
 | 运行时 | Node.js 22.6+（原生 Type Stripping） |
 | CLI | citty（类型安全命令定义） |
 | MCP | @modelcontextprotocol/sdk |
-| LLM | AI SDK v6 + Anthropic/OpenAI/DeepSeek/Qwen |
+| LLM | AI SDK v7 + Anthropic/OpenAI/DeepSeek/Qwen/xAI/Google Gemini |
 | 配置 | YAML + Zod 校验 |
 | 测试 | node:test + node:assert（零外部依赖） |
 | Web 配置台 | React + Tailwind CSS |

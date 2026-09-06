@@ -40,6 +40,7 @@ export interface UseSessionResult {
   ) => void;
   readonly setDraft: (value: string) => void;
   readonly setThinking: (level: ThinkingLevel) => void;
+  readonly setModel: (model: string, contextWindow: number | undefined) => void;
   readonly setThinkingDisplay: (value: ChatThinkingDisplay) => void;
   readonly setDiffDisplay: (value: DiffDisplayMode) => void;
   readonly setAutoMode: (value: boolean) => void;
@@ -285,6 +286,10 @@ export function useSession(session: AgentSession, options: UseSessionOptions): U
     [onThinkingChange],
   );
 
+  const setModel = useCallback((model: string, contextWindow: number | undefined) => {
+    dispatch({ type: "set-model", model, contextWindow });
+  }, []);
+
   const setThinkingDisplay = useCallback((value: ChatThinkingDisplay) => {
     dispatch({ type: "set-thinking-display", value });
   }, []);
@@ -318,6 +323,7 @@ export function useSession(session: AgentSession, options: UseSessionOptions): U
     resolveUserInput,
     setDraft,
     setThinking,
+    setModel,
     setThinkingDisplay,
     setDiffDisplay,
     setAutoMode,

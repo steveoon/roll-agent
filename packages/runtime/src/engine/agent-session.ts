@@ -26,6 +26,7 @@ import type {
 } from "@ai-sdk/provider";
 import type { UserInputForm, UserInputResult } from "@roll-agent/protocol";
 import type { SkillLibrary, SkillSummary } from "@roll-agent/core/skills/library";
+import type { JsonSchemaRefIssue } from "@roll-agent/core/tool-runtime/json-schema-refs";
 import type {
   ContextCompactionReason,
   ContextCompactionStrategy,
@@ -154,6 +155,7 @@ import {
   type EffectiveCapabilityManifest,
 } from "./capability-manifest.ts";
 import { buildCapabilityTurnReminder, buildChatSystemPromptFromManifest } from "./system-prompt.ts";
+import { threadDerivedFromSchema, type ThreadDerivedFrom } from "../store/thread-origin.ts";
 import type {
   WorkspaceInstructions,
   WorkspaceInstructionsSource,
@@ -214,6 +216,24 @@ export interface SessionCompactionSettings {
   readonly keepRecentTokens: number;
 }
 
+export type ToolSchemaPolicy = (issues: readonly JsonSchemaRefIssue[]) => boolean;
+
+export interface SessionToolExclusion {
+  readonly toolId: string;
+  readonly agentName: string;
+  readonly toolName: string;
+  readonly issues: readonly JsonSchemaRefIssue[];
+}
+
+export interface SessionModelSwitch {
+  readonly model: LanguageModelV4;
+  readonly contextWindow?: number;
+  readonly providerOptions?: SharedV4ProviderOptions;
+  readonly structuredOutputProviderOptions?: SharedV4ProviderOptions;
+  readonly structuredOutputReasoning?: NonNullable<LanguageModelV4CallOptions["reasoning"]>;
+  readonly toolSchemaPolicy?: ToolSchemaPolicy;
+}
+
 export interface AgentSessionOptions {
   readonly id: string;
   readonly model: LanguageModelV4;
@@ -230,6 +250,8 @@ export interface AgentSessionOptions {
   readonly getToolExecution?: (executionId: string) => SequencedToolExecutionRecord | undefined;
   readonly recoverUncoveredToolExecutions?: () => readonly ModelMessage[];
   readonly initialCheckpoint?: CompactionCheckpoint;
+  /** Persisted lineage rendered only in the model's system context, never user history. */
+  readonly derivedFrom?: ThreadDerivedFrom;
   readonly listTranscriptMessages?: (
     options?: ListTranscriptMessagesOptions,
   ) => readonly ArchivedTranscriptMessage[];
@@ -243,6 +265,8 @@ export interface AgentSessionOptions {
   readonly structuredOutputReasoning?: NonNullable<LanguageModelV4CallOptions["reasoning"]>;
   /** `setProviderOptions()` 生效后触发；ConversationEngine 用它同步子 Agent Sampling。 */
   readonly onProviderOptionsChange?: (providerOptions: SharedV4ProviderOptions | undefined) => void;
+  readonly toolSchemaPolicy?: ToolSchemaPolicy;
+  readonly onToolExcluded?: (exclusion: SessionToolExclusion) => void;
   readonly debugEvents?: boolean;
   /**
    * 追加到 capability-driven 基础 prompt 之后的会话指令。
@@ -828,7 +852,7 @@ function prependLastUserContext(
 
 export class AgentSession {
   readonly id: string;
-  private readonly model: LanguageModelV4;
+  private model: LanguageModelV4;
   private readonly maxSteps: number;
   private readonly messages: ModelMessage[];
   private readonly onPersist:
@@ -856,13 +880,13 @@ export class AgentSession {
   private readonly inMemoryTranscript: ArchivedTranscriptMessage[] = [];
   private readonly legacyV1ActiveSnapshot: LegacyV1ActiveSnapshot | undefined;
   private readonly compactionResources = new Map<string, CompactionResource>();
-  private readonly contextWindow: number | undefined;
+  private contextWindow: number | undefined;
   private readonly compaction: SessionCompactionSettings | undefined;
   private readonly turnTimeoutMs: number | undefined;
   private readonly onClose: (() => void) | undefined;
   private providerOptions: SharedV4ProviderOptions | undefined;
-  private readonly structuredOutputProviderOptions: SharedV4ProviderOptions | undefined;
-  private readonly structuredOutputReasoning:
+  private structuredOutputProviderOptions: SharedV4ProviderOptions | undefined;
+  private structuredOutputReasoning:
     | NonNullable<LanguageModelV4CallOptions["reasoning"]>
     | undefined;
   private readonly onProviderOptionsChange:
@@ -872,6 +896,7 @@ export class AgentSession {
   private readonly policy: ToolPolicy | undefined;
   private systemPrompt: string;
   private readonly explicitSystemPrompt: string | undefined;
+  private readonly derivedFrom: ThreadDerivedFrom | undefined;
   private lastExtraPrompt: string | undefined;
   private readonly workspaceInstructions: WorkspaceInstructionsSource | undefined;
   private appliedWorkspaceInstructions: WorkspaceInstructions | undefined;
@@ -886,6 +911,10 @@ export class AgentSession {
   private skillLibrary: SkillLibrary | undefined;
   private skillToolBuilt = false;
   private readonly toolSourceAgentNames: Set<string>;
+  private toolSchemaPolicy: ToolSchemaPolicy | undefined;
+  private readonly onToolExcluded: ((exclusion: SessionToolExclusion) => void) | undefined;
+  private readonly agentToolSchemaIssues = new Map<string, readonly JsonSchemaRefIssue[]>();
+  private excludedToolIds: ReadonlySet<string> = new Set();
   private readonly gate = new ApprovalGate();
   private readonly userInputInteractions = new UserInputInteractionManager();
   private readonly toolCoordinator = new ToolExecutionCoordinator();
@@ -959,11 +988,17 @@ export class AgentSession {
     this.debugEvents = options.debugEvents ?? false;
     this.policy = options.policy;
     this.explicitSystemPrompt = options.systemPrompt;
+    this.derivedFrom =
+      options.derivedFrom === undefined
+        ? undefined
+        : threadDerivedFromSchema.parse(options.derivedFrom);
     this.workspaceInstructions = options.workspaceInstructions;
     this.resolveDynamicCapabilityContext = options.resolveDynamicCapabilityContext;
     this.skillLibrary = options.skillLibrary;
     this.skillSummaries = options.skillLibrary?.list() ?? [];
     this.toolSourceAgentNames = new Set(options.sources.map((source) => source.agentName));
+    this.toolSchemaPolicy = options.toolSchemaPolicy;
+    this.onToolExcluded = options.onToolExcluded;
     const registry = new ToolRegistry();
     const toolRoles: Record<string, CapabilityToolRole> = {};
     const userInputTool = buildUserInputTool(
@@ -1101,6 +1136,8 @@ export class AgentSession {
     };
     this.registry = built.registry;
     this.toolRoles = toolRoles;
+    this.recordToolSchemaIssues(built.schemaIssuesByToolId);
+    this.applyToolSchemaPolicy();
     this.capabilityContext =
       options.capabilityContext ??
       ({
@@ -1117,7 +1154,7 @@ export class AgentSession {
 
   private compileCapabilityManifest(): EffectiveCapabilityManifest {
     return buildEffectiveCapabilityManifest({
-      tools: this.tools,
+      tools: this.modelTools(),
       toolRoles: this.toolRoles,
       resolveRoute: (id) => this.registry.resolve(id),
       skills: this.skillSummaries,
@@ -1135,6 +1172,7 @@ export class AgentSession {
     this.lastExtraPrompt = extraPrompt;
     this.appliedWorkspaceInstructions = this.workspaceInstructions?.current();
     const compiledPrompt = buildChatSystemPromptFromManifest(this.capabilityManifest, {
+      ...(this.derivedFrom !== undefined ? { derivedFrom: this.derivedFrom } : {}),
       ...(this.appliedWorkspaceInstructions !== undefined
         ? { workspaceInstructions: this.appliedWorkspaceInstructions }
         : {}),
@@ -1284,6 +1322,8 @@ export class AgentSession {
       );
       markToolRole(this.toolRoles, built.tools, CAPABILITY_TOOL_ROLES.agent);
       this.tools = { ...this.tools, ...built.tools };
+      this.recordToolSchemaIssues(built.schemaIssuesByToolId);
+      this.applyToolSchemaPolicy();
       this.toolSourceAgentNames.add(refresh.source.agentName);
     }
     if (refresh.skillLibrary) {
@@ -1378,7 +1418,7 @@ export class AgentSession {
     try {
       this.debug(queue, "turn", "start", turnStartedAt, {
         messages: this.messages.length,
-        tools: Object.keys(this.tools).length,
+        tools: Object.keys(this.modelTools()).length,
         maxSteps: this.maxSteps,
         ...(input.attachments.length > 0 ? { attachments: input.attachments.length } : {}),
         ...(this.contextWindow !== undefined ? { contextWindow: this.contextWindow } : {}),
@@ -1497,7 +1537,7 @@ export class AgentSession {
         );
         this.debug(queue, "model", "calling streamText", turnStartedAt, {
           messages: this.messages.length,
-          tools: Object.keys(this.tools).length,
+          tools: Object.keys(this.modelTools()).length,
           contextRecoveryAttempts,
           ...(this.turnTimeoutMs !== undefined ? { timeoutMs: this.turnTimeoutMs } : {}),
         });
@@ -1507,7 +1547,7 @@ export class AgentSession {
             model: this.model,
             system: this.systemPrompt,
             messages: inferenceMessages,
-            tools: this.tools,
+            tools: this.modelTools(),
             prepareStep: ({ messages }) => ({
               messages: relocateToolImagesToUserMessages(messages),
             }),
@@ -2462,6 +2502,73 @@ export class AgentSession {
   setProviderOptions(providerOptions: SharedV4ProviderOptions | undefined): void {
     this.providerOptions = providerOptions;
     this.onProviderOptionsChange?.(providerOptions);
+  }
+
+  canSwitchModel(): boolean {
+    return this.activeTurn === undefined;
+  }
+
+  switchModel(input: SessionModelSwitch): void {
+    if (!this.canSwitchModel()) {
+      throw new Error("会话正在生成回复，稍后再切换模型");
+    }
+    this.model = input.model;
+    this.contextWindow = input.contextWindow;
+    this.providerOptions = input.providerOptions;
+    this.structuredOutputProviderOptions = input.structuredOutputProviderOptions;
+    this.structuredOutputReasoning = input.structuredOutputReasoning;
+    this.lastInputTokens = undefined;
+    this.measuredMessageCount = undefined;
+    this.promptOverhead = undefined;
+    if (input.toolSchemaPolicy !== undefined) {
+      this.toolSchemaPolicy = input.toolSchemaPolicy;
+      if (this.applyToolSchemaPolicy()) {
+        this.refreshCapabilityManifest();
+      }
+    }
+  }
+
+  private modelTools(): ToolSet {
+    if (this.excludedToolIds.size === 0) {
+      return this.tools;
+    }
+    const excluded = this.excludedToolIds;
+    return Object.fromEntries(Object.entries(this.tools).filter(([id]) => !excluded.has(id)));
+  }
+
+  private recordToolSchemaIssues(
+    issuesByToolId: Readonly<Record<string, readonly JsonSchemaRefIssue[]>>,
+  ): void {
+    for (const [id, issues] of Object.entries(issuesByToolId)) {
+      this.agentToolSchemaIssues.set(id, issues);
+    }
+  }
+
+  private applyToolSchemaPolicy(): boolean {
+    const policy = this.toolSchemaPolicy;
+    const next = new Set<string>();
+    if (policy) {
+      for (const [id, issues] of this.agentToolSchemaIssues) {
+        if (!policy(issues)) {
+          next.add(id);
+        }
+      }
+    }
+    const previous = this.excludedToolIds;
+    const changed = next.size !== previous.size || [...next].some((id) => !previous.has(id));
+    for (const id of next) {
+      if (!previous.has(id)) {
+        const route = this.registry.resolve(id);
+        this.onToolExcluded?.({
+          toolId: id,
+          agentName: route?.agentName ?? "",
+          toolName: route?.toolName ?? id,
+          issues: this.agentToolSchemaIssues.get(id) ?? [],
+        });
+      }
+    }
+    this.excludedToolIds = next;
+    return changed;
   }
 
   private async runAutoCompactionPasses(

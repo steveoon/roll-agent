@@ -2,11 +2,56 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import {
   formatMissingToolMessage,
+  formatToolSchemaIssue,
   getToolNameSuggestions,
   normalizeListedTools,
+  type ToolSchemaIssue,
 } from "./agent-tools.ts";
 
 describe("cli/utils/agent-tools", () => {
+  it("inlines local $ref before exposing tools and reports unresolved refs", () => {
+    const issues: ToolSchemaIssue[] = [];
+    const [tool] = normalizeListedTools(
+      [
+        {
+          name: "filter",
+          inputSchema: {
+            type: "object",
+            properties: {
+              city: { type: "string", minLength: 1 },
+              district: { $ref: "#/properties/city", description: "区" },
+              tree: { $ref: "#/$defs/node" },
+            },
+            $defs: { node: { type: "object", properties: { child: { $ref: "#/$defs/node" } } } },
+          },
+        },
+      ],
+      { onSchemaIssue: (issue) => issues.push(issue) },
+    );
+    assert.ok(tool);
+    assert.deepEqual(tool.inputSchema.properties?.district, {
+      type: "string",
+      minLength: 1,
+      description: "区",
+    });
+    assert.deepEqual(tool.schemaIssues, [
+      { path: "/properties/tree", ref: "#/$defs/node", reason: "recursive" },
+    ]);
+    assert.deepEqual(issues, [
+      { toolName: "filter", path: "/properties/tree", ref: "#/$defs/node", reason: "recursive" },
+    ]);
+    const [first] = issues;
+    assert.ok(first);
+    assert.match(formatToolSchemaIssue("browser-use-agent", first), /递归引用/u);
+  });
+
+  it("omits schemaIssues when every ref was inlined", () => {
+    const [tool] = normalizeListedTools([
+      { name: "plain", inputSchema: { type: "object", properties: { a: { type: "string" } } } },
+    ]);
+    assert.equal(tool?.schemaIssues, undefined);
+  });
+
   it("normalizes MCP listed tools into AgentTool-compatible objects", () => {
     const normalized = normalizeListedTools([
       {

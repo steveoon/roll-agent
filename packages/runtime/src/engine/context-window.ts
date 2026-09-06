@@ -1,3 +1,5 @@
+import type { ModelCatalog } from "./model-catalog.ts";
+
 interface ContextWindowEntry {
   readonly match: string;
   readonly window: number;
@@ -62,4 +64,41 @@ export function resolveContextWindow(modelName: string, override?: number): numb
     return override;
   }
   return lookupContextWindow(modelName);
+}
+
+export const CONTEXT_WINDOW_SOURCES = {
+  override: "override",
+  catalog: "catalog",
+  rule: "rule",
+} as const;
+
+export type ContextWindowSource =
+  (typeof CONTEXT_WINDOW_SOURCES)[keyof typeof CONTEXT_WINDOW_SOURCES];
+
+export interface ContextWindowResolution {
+  readonly window: number;
+  readonly source: ContextWindowSource;
+}
+
+export interface ResolveModelContextWindowInput {
+  readonly provider: string;
+  readonly model: string;
+  readonly override?: number;
+  readonly catalog?: ModelCatalog;
+}
+
+export function resolveModelContextWindow(
+  input: ResolveModelContextWindowInput,
+): ContextWindowResolution | undefined {
+  if (input.override !== undefined) {
+    return { window: input.override, source: CONTEXT_WINDOW_SOURCES.override };
+  }
+  const fromCatalog = input.catalog?.lookup(input.provider, input.model);
+  if (fromCatalog !== undefined) {
+    return { window: fromCatalog, source: CONTEXT_WINDOW_SOURCES.catalog };
+  }
+  const fromRule = lookupContextWindow(input.model);
+  return fromRule === undefined
+    ? undefined
+    : { window: fromRule, source: CONTEXT_WINDOW_SOURCES.rule };
 }

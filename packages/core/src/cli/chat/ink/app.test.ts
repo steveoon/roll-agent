@@ -1526,6 +1526,51 @@ test("ChatApp switches sessions via /resume picker", async () => {
   unmount();
 });
 
+test("ChatApp keeps the switched model in its status after /resume", async () => {
+  const first = switchableFakeSession("s1");
+  const second = switchableFakeSession("s2", [{ role: "user", content: "旧消息" }]);
+  const { stdin, lastFrame, unmount } = render(
+    h(ChatApp, {
+      session: first.session,
+      model: "old-model",
+      onUserSubmit: () => {},
+      onExit: () => {},
+      sessionSwitching: {
+        loadItems: () => [{ id: "s2", title: "历史会话", meta: "刚刚 · 1 条消息" }],
+        resume: async () => second.session,
+        onRetired: () => {},
+      },
+      modelSwitching: {
+        loadItems: () => [{ id: "google/new-model", title: "google/new-model", meta: "已配置" }],
+        switchTo: async () => ({
+          id: "google/new-model",
+          model: "new-model",
+          contextWindow: undefined,
+        }),
+        setAsDefault: async () => "",
+      },
+    }),
+  );
+  await delay(20);
+  stdin.write("/model");
+  await delay(20);
+  stdin.write("\r");
+  await delay(20);
+  stdin.write("\r");
+  await waitFor(() => assert.match(lastFrame() ?? "", /仅本次 roll chat 生效/));
+  stdin.write("\r");
+  await delay(20);
+  stdin.write("/resume");
+  await delay(20);
+  stdin.write("\r");
+  await delay(20);
+  stdin.write("\r");
+  await waitFor(() => assert.match(lastFrame() ?? "", /旧消息/));
+  assert.match(lastFrame() ?? "", /new-model/);
+  assert.doesNotMatch(lastFrame() ?? "", /old-model/);
+  unmount();
+});
+
 test("ChatApp keeps current session when resume fails", async () => {
   const first = switchableFakeSession("s1");
   const { stdin, lastFrame, unmount } = render(
@@ -1884,4 +1929,140 @@ test("ChatApp 已持久化的提示不再重复出现", async () => {
   frame = plain(lastFrame() ?? "");
   assert.doesNotMatch(frame, /Ctrl\+T 释放鼠标/);
   unmount();
+});
+
+test("ChatApp switches model via /model picker and offers set-as-default", async () => {
+  const session = switchableFakeSession("s1");
+  const switched: string[] = [];
+  const defaults: string[] = [];
+  const { stdin, lastFrame, unmount } = render(
+    h(ChatApp, {
+      session: session.session,
+      model: "qwen3.8-max",
+      onUserSubmit: () => {},
+      onExit: () => {},
+      modelSwitching: {
+        loadItems: () => [
+          { id: "qwen/qwen3.8-max", title: "qwen/qwen3.8-max", meta: "配置默认 · 当前" },
+          { id: "google/gemini-3.8-flash", title: "google/gemini-3.8-flash", meta: "内置默认" },
+        ],
+        switchTo: async (input: string) => {
+          switched.push(input);
+          return {
+            id: input,
+            model: "gemini-3.8-flash",
+            contextWindow: 1_000_000,
+            contextWindowSource: "catalog" as const,
+          };
+        },
+        setAsDefault: async (id: string) => {
+          defaults.push(id);
+          return "已写入 roll.config.yaml";
+        },
+      },
+    }),
+  );
+  await delay(20);
+  stdin.write("/model");
+  await delay(20);
+  stdin.write("\r");
+  await delay(20);
+  assert.match(lastFrame() ?? "", /切换模型/);
+  stdin.write("\x1b[B");
+  await delay(10);
+  stdin.write("\r");
+  await waitFor(() => {
+    assert.deepEqual(switched, ["google/gemini-3.8-flash"]);
+    assert.match(lastFrame() ?? "", /同时设为默认 LLM/);
+  });
+  stdin.write("\x1b[B");
+  await delay(10);
+  stdin.write("\r");
+  await waitFor(() => {
+    assert.deepEqual(defaults, ["google/gemini-3.8-flash"]);
+    assert.match(plain(lastFrame() ?? ""), /已写入 roll\.config\.yaml/);
+    assert.match(plain(lastFrame() ?? ""), /gemini-3\.8-flash/);
+    assert.match(plain(lastFrame() ?? ""), /ctx 1M · 模型目录/);
+  });
+  unmount();
+});
+
+test("ChatApp /model with an argument switches directly and reports failures", async () => {
+  const session = switchableFakeSession("s1");
+  const { stdin, lastFrame, unmount } = render(
+    h(ChatApp, {
+      session: session.session,
+      model: "qwen3.8-max",
+      onUserSubmit: () => {},
+      onExit: () => {},
+      modelSwitching: {
+        loadItems: () => [],
+        switchTo: async (input: string) => {
+          throw new Error(`未知模型 "${input}"`);
+        },
+        setAsDefault: async () => "",
+      },
+    }),
+  );
+  await delay(20);
+  stdin.write("/model nope");
+  await delay(20);
+  stdin.write("\r");
+  await waitFor(() => {
+    assert.match(plain(lastFrame() ?? ""), /未知模型 "nope"/);
+  });
+  assert.match(plain(lastFrame() ?? ""), /qwen3\.8-max/);
+  unmount();
+});
+
+test("ChatApp set-as-default prompt starts on keep even after moving the model cursor", async () => {
+  const session = switchableFakeSession("s1");
+  const defaults: string[] = [];
+  const { stdin, lastFrame, unmount } = render(
+    h(ChatApp, {
+      session: session.session,
+      model: "qwen3.8-max",
+      onUserSubmit: () => {},
+      onExit: () => {},
+      modelSwitching: {
+        loadItems: () => [
+          { id: "qwen/qwen3.8-max", title: "qwen/qwen3.8-max", meta: "配置默认 · 当前" },
+          { id: "google/gemini-3.8-flash", title: "google/gemini-3.8-flash", meta: "内置默认" },
+        ],
+        switchTo: async (input: string) => ({
+          id: input,
+          model: "gemini-3.8-flash",
+          contextWindow: 1_000_000,
+        }),
+        setAsDefault: async (id: string) => {
+          defaults.push(id);
+          return "已写入";
+        },
+      },
+    }),
+  );
+  await delay(20);
+  stdin.write("/model");
+  await delay(20);
+  stdin.write("\r");
+  await delay(20);
+  stdin.write("\x1b[B");
+  await delay(10);
+  stdin.write("\r");
+  await waitFor(() => {
+    assert.match(lastFrame() ?? "", /❯ 仅本次 roll chat 生效/);
+  });
+  stdin.write("\r");
+  await delay(30);
+  assert.deepEqual(defaults, []);
+  assert.doesNotMatch(lastFrame() ?? "", /是否设为默认 LLM/);
+  unmount();
+});
+
+test("formatContextWindowNotice renders window with its source", async () => {
+  const { formatContextWindowNotice } = await import("./app.ts");
+  assert.equal(formatContextWindowNotice(922_000, "catalog"), "ctx 922k · 模型目录");
+  assert.equal(formatContextWindowNotice(1_000_000, "rule"), "ctx 1M · 内置规则");
+  assert.equal(formatContextWindowNotice(8_000, "override"), "ctx 8k · 配置覆盖");
+  assert.equal(formatContextWindowNotice(undefined, undefined), "ctx 未知");
 });
