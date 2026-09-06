@@ -335,23 +335,22 @@ test("readSnapshot pins all tables before a concurrent WAL writer commits", () =
   }
 });
 
-test("migration open requires an existing database using SQLite mode=rw, including escaped paths", () => {
+test("read-only opening handles escaped paths and never recreates a missing database", () => {
   const dir = mkdtempSync(join(tmpdir(), "roll-existing-"));
   const existing = join(dir, "spaces ? # 中文");
   const writer = new ThreadStore(existing);
   const id = writer.createThread();
   writer.close();
   try {
-    const reopened = new ThreadStore(existing, { requireExistingDatabase: true });
+    const reopened = new ThreadStore(existing, { readOnly: true });
     assert.equal(reopened.hasThread(id), true);
+    assert.throws(() => reopened.updateTitle(id, "must remain unchanged"), /readonly|read-only/iu);
     reopened.close();
-    assert.throws(
-      () => new ThreadStore(join(dir, "missing-directory"), { requireExistingDatabase: true }),
-    );
+    assert.throws(() => new ThreadStore(join(dir, "missing-directory"), { readOnly: true }));
     assert.equal(existsSync(join(dir, "missing-directory")), false);
     const path = join(existing, "threads.db");
     rmSync(path);
-    assert.throws(() => new ThreadStore(existing, { requireExistingDatabase: true }));
+    assert.throws(() => new ThreadStore(existing, { readOnly: true }));
     assert.equal(existsSync(path), false);
   } finally {
     rmSync(dir, { recursive: true, force: true });

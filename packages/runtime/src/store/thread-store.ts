@@ -3,7 +3,6 @@ import { homedir } from "node:os";
 import { resolve } from "node:path";
 import { randomUUID } from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
-import { pathToFileURL } from "node:url";
 import { modelMessageSchema, type ModelMessage } from "ai";
 import {
   RUNTIME_V13_MAX_DURABLE_EVENT_RECORD_BYTES,
@@ -517,8 +516,6 @@ function parseRuntimeEventRow(
 export interface ThreadStoreOptions {
   readonly now?: () => Date;
   readonly readOnly?: boolean;
-  /** SQLite mode=rw forbids creation even if the source disappears during migration. */
-  readonly requireExistingDatabase?: boolean;
 }
 
 export class ThreadStore {
@@ -546,7 +543,7 @@ export class ThreadStore {
       }
       return;
     }
-    if (!options.requireExistingDatabase && !existsSync(resolved)) {
+    if (!existsSync(resolved)) {
       mkdirSync(resolved, { recursive: true, mode: 0o700 });
     }
     if (process.platform !== "win32") {
@@ -555,11 +552,7 @@ export class ThreadStore {
       chmodSync(resolved, 0o700);
     }
     const databasePath = resolve(resolved, "threads.db");
-    const existingDatabaseUrl = pathToFileURL(databasePath);
-    existingDatabaseUrl.searchParams.set("mode", "rw");
-    this.db = new DatabaseSync(
-      options.requireExistingDatabase ? existingDatabaseUrl.href : databasePath,
-    );
+    this.db = new DatabaseSync(databasePath);
     if (process.platform !== "win32") {
       try {
         chmodSync(databasePath, 0o600);
