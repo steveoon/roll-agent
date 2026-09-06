@@ -771,7 +771,7 @@ test("ThreadStore schema v5 ledger 迁移为 legacy_assumed coverage", () => {
       readonly user_version: number;
     };
     assert.deepEqual({ ...row }, { representation: "legacy_assumed", transcript_sequence: null });
-    assert.equal(version.user_version, 6);
+    assert.equal(version.user_version, 7);
     inspected.close();
   } finally {
     rmSync(dir, { recursive: true, force: true });
@@ -980,7 +980,7 @@ test("ThreadStore schema v4 迁移会重写旧 ledger 为有界脱敏投影", ()
     assert.equal(
       (inspected.prepare("PRAGMA user_version").get() as { readonly user_version: number })
         .user_version,
-      6,
+      7,
     );
     inspected.close();
     assert.equal(readFileSync(join(dir, "threads.db")).includes("legacy-ledger-secret"), false);
@@ -1926,7 +1926,7 @@ test("ThreadStore schema v2 迁移跳过无父 thread 的 legacy message", () =>
     const version = migrated.prepare("PRAGMA user_version").get() as {
       readonly user_version: number;
     };
-    assert.equal(version.user_version, 6);
+    assert.equal(version.user_version, 7);
     migrated.close();
 
     const reopened = new ThreadStore(dir);
@@ -2459,7 +2459,7 @@ test("ThreadStore 从 v4 升级只建立空 Runtime event log，不从旧 transc
       readonly user_version: number;
     };
     assert.equal(stateCount.count, 1);
-    assert.equal(version.user_version, 6);
+    assert.equal(version.user_version, 7);
     inspected.close();
   } finally {
     rmSync(dir, { recursive: true, force: true });

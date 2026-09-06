@@ -101,6 +101,12 @@ export default defineCommand({
           runTurn: createScheduledTurnRunner({
             config,
             runtime,
+            ledgerDir: execEnv.dataDir,
+            registerThreadReference: (reference) =>
+              store.registerThreadReference({
+                ...reference,
+                ownershipToken: execEnv.ownershipToken,
+              }) !== undefined,
             stopSignal: stop.controller.signal,
             onShellCommandSpawn: (child) => ledger.track(child),
           }),

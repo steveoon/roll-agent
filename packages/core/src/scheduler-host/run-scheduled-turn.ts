@@ -1,4 +1,7 @@
 import type { ChildProcess } from "node:child_process";
+import { randomUUID } from "node:crypto";
+import { resolve } from "node:path";
+import type { BackfillThreadReferenceInput } from "@roll-agent/runtime";
 import type { RollConfig } from "../config/schema.ts";
 import type { ChatCommandResult } from "../types/chat.ts";
 import {
@@ -20,6 +23,8 @@ import {
 export interface CreateScheduledTurnRunnerInput {
   readonly config: RollConfig;
   readonly runtime: RuntimeModule;
+  readonly ledgerDir: string;
+  readonly registerThreadReference: (reference: BackfillThreadReferenceInput) => boolean;
   readonly shellEnv?: NodeJS.ProcessEnv;
   readonly stopSignal?: AbortSignal;
   readonly onShellCommandSpawn?: (child: ChildProcess) => void;
@@ -92,49 +97,86 @@ export function createScheduledTurnRunner(
       input.config.runtime.compaction.thinkingLevel,
       input.config.runtime.compaction.strategy === "summarize",
     );
-    const store = new input.runtime.ThreadStore(input.config.runtime.threadsDir);
-    const policy = new input.runtime.UnattendedToolPolicy(
-      createToolPolicy(input.runtime, input.config),
-    );
-    const engine = createChatEngine({
-      runtime: input.runtime,
-      config: input.config,
-      model: llm.model,
-      store,
-      surface: CHAT_ENGINE_SURFACES.background,
-      policy,
-      modelCatalog: input.runtime.createDefaultModelCatalog(
-        input.runtime.defaultModelCatalogCachePath(),
-      ),
-      resolveDynamicCapabilityContext: () => ({
+    const threadId = randomUUID();
+    const threadsDir = resolve(input.runtime.expandTilde(input.config.runtime.threadsDir));
+    if (
+      !input.registerThreadReference({
+        invocationId: invocation.id,
+        expectedAttempt: invocation.attempt,
+        threadId,
+        threadsDir,
+      })
+    ) {
+      return {
+        status: SCHEDULED_TURN_STATUSES.failed,
+        error: "运行会话登记失败：执行所有权已变化",
+      };
+    }
+    const store = new input.runtime.ThreadStore(threadsDir);
+    let engine: ReturnType<typeof createChatEngine> | undefined;
+    let session:
+      | Awaited<ReturnType<ReturnType<typeof createChatEngine>["createSession"]>>
+      | undefined;
+    try {
+      const policy = new input.runtime.UnattendedToolPolicy(
+        createToolPolicy(input.runtime, input.config),
+      );
+      engine = createChatEngine({
+        runtime: input.runtime,
+        config: input.config,
+        model: llm.model,
+        store,
+        surface: CHAT_ENGINE_SURFACES.background,
+        policy,
+        modelCatalog: input.runtime.createDefaultModelCatalog(
+          input.runtime.defaultModelCatalogCachePath(),
+        ),
+        resolveDynamicCapabilityContext: () => ({
+          origin: {
+            kind: "scheduled",
+            scheduleId: schedule.id,
+            invocationId: invocation.id,
+            scheduledFor: new Date(invocation.scheduledForMs).toISOString(),
+            unattended: true,
+          },
+        }),
+        ...(llm.providerOptions ? { providerOptions: llm.providerOptions } : {}),
+        ...(llm.structuredOutputProviderOptions
+          ? { structuredOutputProviderOptions: llm.structuredOutputProviderOptions }
+          : {}),
+        ...(llm.structuredOutputReasoning
+          ? { structuredOutputReasoning: llm.structuredOutputReasoning }
+          : {}),
+        ...(input.shellEnv ? { shellEnv: input.shellEnv } : {}),
+        ...(input.onShellCommandSpawn ? { onShellCommandSpawn: input.onShellCommandSpawn } : {}),
+      });
+      session = await engine.createSession({
+        id: threadId,
+        title: `[定时] ${schedule.name}`,
         origin: {
           kind: "scheduled",
           scheduleId: schedule.id,
           invocationId: invocation.id,
+          attempt: invocation.attempt,
+          name: schedule.name,
+          cwd: schedule.cwd,
           scheduledFor: new Date(invocation.scheduledForMs).toISOString(),
-          unattended: true,
+          ledgerDir: resolve(input.runtime.expandTilde(input.ledgerDir)),
         },
-      }),
-      ...(llm.providerOptions ? { providerOptions: llm.providerOptions } : {}),
-      ...(llm.structuredOutputProviderOptions
-        ? { structuredOutputProviderOptions: llm.structuredOutputProviderOptions }
-        : {}),
-      ...(llm.structuredOutputReasoning
-        ? { structuredOutputReasoning: llm.structuredOutputReasoning }
-        : {}),
-      ...(input.shellEnv ? { shellEnv: input.shellEnv } : {}),
-      ...(input.onShellCommandSpawn ? { onShellCommandSpawn: input.onShellCommandSpawn } : {}),
-    });
-    let session: Awaited<ReturnType<typeof engine.createSession>> | undefined;
-    try {
-      session = await engine.createSession({ title: `[定时] ${schedule.name}` });
+      });
       const result = await runJsonTurn(session, schedule.prompt, input.stopSignal);
       const denied = policy.deniedConfirmations.map((item) => `${item.agentName}.${item.toolName}`);
       return mapTurnResult(result, denied);
     } finally {
-      await session?.close();
-      await engine.dispose();
-      store.close();
+      try {
+        await session?.close();
+      } finally {
+        try {
+          await engine?.dispose();
+        } finally {
+          store.close();
+        }
+      }
     }
   };
 }

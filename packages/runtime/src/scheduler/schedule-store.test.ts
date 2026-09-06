@@ -892,7 +892,7 @@ test("打开 schema v1 数据库时自动补齐新列并升级 user_version", ()
     store.close();
     const reopened = new DatabaseSync(join(dir, "schedules.db"));
     const version = reopened.prepare("PRAGMA user_version").get() as { user_version: number };
-    assert.equal(version.user_version, 5);
+    assert.equal(version.user_version, 6);
     const columns = reopened.prepare("PRAGMA table_info(invocations)").all() as Array<{
       readonly name: string;
     }>;
@@ -2699,7 +2699,7 @@ test("timeout late terminal CAS 拒绝错误 expectedAttempt，不改写已完�
   }
 });
 
-test("打开 schema v4 数据库时补齐 schedules.max_run_ms 并升级到 v5", () => {
+test("打开 schema v4 数据库时补齐 schedules.max_run_ms 并升级到 v6", () => {
   const dir = tempDir();
   try {
     const legacy = new DatabaseSync(join(dir, "schedules.db"));
@@ -2731,7 +2731,7 @@ test("打开 schema v4 数据库时补齐 schedules.max_run_ms 并升级到 v5",
     store.close();
     const reopened = new DatabaseSync(join(dir, "schedules.db"));
     const version = reopened.prepare("PRAGMA user_version").get() as { user_version: number };
-    assert.equal(version.user_version, 5);
+    assert.equal(version.user_version, 6);
     const columns = reopened.prepare("PRAGMA table_info(schedules)").all() as Array<{
       readonly name: string;
     }>;

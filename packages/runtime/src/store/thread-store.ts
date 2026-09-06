@@ -3,6 +3,7 @@ import { homedir } from "node:os";
 import { resolve } from "node:path";
 import { randomUUID } from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
+import { pathToFileURL } from "node:url";
 import { modelMessageSchema, type ModelMessage } from "ai";
 import {
   RUNTIME_V13_MAX_DURABLE_EVENT_RECORD_BYTES,
@@ -49,8 +50,16 @@ import {
   repairActiveToolProtocol,
 } from "../engine/tool-protocol-repair.ts";
 import { sanitizePersistedExplicitSkillCheckpoint } from "../engine/explicit-skill-context.ts";
+import {
+  threadOriginSchema,
+  threadDerivedFromSchema,
+  scheduledThreadOriginSchema,
+  type ThreadOrigin,
+  type ScheduledThreadOrigin,
+  type ThreadDerivedFrom,
+} from "./thread-origin.ts";
 
-const SCHEMA_VERSION = 6;
+const SCHEMA_VERSION = 7;
 const DEFAULT_TOOL_EXECUTION_LIMIT = 100;
 const MAX_TOOL_EXECUTION_LIMIT = 500;
 const DEFAULT_TRANSCRIPT_LIMIT = 50;
@@ -140,12 +149,43 @@ export interface ThreadRecord {
   readonly model: string | undefined;
   readonly createdAt: string;
   readonly updatedAt: string;
+  readonly origin: ThreadOrigin;
+  readonly derivedFrom?: ThreadDerivedFrom;
 }
 
 export interface CreateThreadInput {
   readonly id?: string;
   readonly title?: string;
   readonly model?: string;
+  readonly origin?: ThreadOrigin;
+  readonly derivedFrom?: ThreadDerivedFrom;
+}
+
+export interface ListThreadsOptions {
+  readonly origin?: ThreadOrigin["kind"];
+}
+
+export interface ForkThreadSnapshotInput {
+  readonly id?: string;
+  readonly title?: string;
+  readonly model?: string;
+}
+
+export interface ThreadSnapshot {
+  readonly thread: ThreadRecord;
+  readonly capturedAt: string;
+  readonly messages: readonly ModelMessage[];
+  readonly transcript: readonly ArchivedTranscriptMessage[];
+  readonly toolExecutions: readonly SequencedToolExecutionRecord[];
+  readonly checkpoints: readonly CompactionCheckpoint[];
+  readonly transcriptCompleteness: TranscriptCompleteness;
+  readonly nextToolExecutionSequence: number;
+  readonly toolExecutionCoverage: readonly {
+    readonly executionId: string;
+    readonly representation: ToolExecutionContextRepresentation | "legacy_assumed";
+    readonly transcriptSequence: number | null;
+    readonly createdAt: string;
+  }[];
 }
 
 interface ThreadRow {
@@ -154,6 +194,8 @@ interface ThreadRow {
   readonly model: string | null;
   readonly created_at: string;
   readonly updated_at: string;
+  readonly origin_json?: string | null;
+  readonly derived_from_json?: string | null;
 }
 
 interface ForeignKeyRow {
@@ -395,7 +437,25 @@ function toRecord(row: ThreadRow): ThreadRecord {
     model: row.model ?? undefined,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
+    origin: threadOriginSchema.parse(
+      row.origin_json ? JSON.parse(row.origin_json) : { kind: "interactive" },
+    ),
+    ...(row.derived_from_json
+      ? { derivedFrom: threadDerivedFromSchema.parse(JSON.parse(row.derived_from_json)) }
+      : {}),
   };
+}
+
+/** Only structured checkpoint references are rewritten; archived prose remains evidence. */
+function remapSnapshotReferences(value: unknown, ids: ReadonlyMap<string, string>): unknown {
+  if (typeof value === "string") return ids.get(value) ?? value;
+  if (Array.isArray(value)) return value.map((item: unknown) => remapSnapshotReferences(item, ids));
+  if (typeof value === "object" && value !== null) {
+    return Object.fromEntries(
+      Object.entries(value).map(([key, item]) => [key, remapSnapshotReferences(item, ids)]),
+    );
+  }
+  return value;
 }
 
 function createStoredRuntimeEventId(): RuntimeEventId {
@@ -456,16 +516,37 @@ function parseRuntimeEventRow(
 
 export interface ThreadStoreOptions {
   readonly now?: () => Date;
+  readonly readOnly?: boolean;
+  /** SQLite mode=rw forbids creation even if the source disappears during migration. */
+  readonly requireExistingDatabase?: boolean;
 }
 
 export class ThreadStore {
   private readonly db: DatabaseSync;
   private readonly now: () => Date;
+  private readonly readOnly: boolean;
 
   constructor(dir: string = defaultThreadsDir(), options: ThreadStoreOptions = {}) {
     this.now = options.now ?? (() => new Date());
+    this.readOnly = options.readOnly ?? false;
     const resolved = expandTilde(dir);
-    if (!existsSync(resolved)) {
+    if (options.readOnly) {
+      this.db = new DatabaseSync(resolve(resolved, "threads.db"), { readOnly: true });
+      try {
+        this.db.exec(
+          `PRAGMA busy_timeout = ${String(THREAD_STORE_BUSY_TIMEOUT_MS)}; PRAGMA query_only = ON;`,
+        );
+        const version = this.db.prepare("PRAGMA user_version").get() as { user_version: number };
+        if (version.user_version > SCHEMA_VERSION) {
+          throw new Error(`Unsupported ThreadStore schema v${String(version.user_version)}`);
+        }
+      } catch (error) {
+        this.db.close();
+        throw error;
+      }
+      return;
+    }
+    if (!options.requireExistingDatabase && !existsSync(resolved)) {
       mkdirSync(resolved, { recursive: true, mode: 0o700 });
     }
     if (process.platform !== "win32") {
@@ -474,7 +555,11 @@ export class ThreadStore {
       chmodSync(resolved, 0o700);
     }
     const databasePath = resolve(resolved, "threads.db");
-    this.db = new DatabaseSync(databasePath);
+    const existingDatabaseUrl = pathToFileURL(databasePath);
+    existingDatabaseUrl.searchParams.set("mode", "rw");
+    this.db = new DatabaseSync(
+      options.requireExistingDatabase ? existingDatabaseUrl.href : databasePath,
+    );
     if (process.platform !== "win32") {
       try {
         chmodSync(databasePath, 0o600);
@@ -521,8 +606,16 @@ export class ThreadStore {
          created_at TEXT NOT NULL,
          PRIMARY KEY (thread_id, idx),
          FOREIGN KEY (thread_id) REFERENCES threads(id) ON DELETE CASCADE
-       );`,
+      );`,
       );
+      if (versionRow.user_version < 7) {
+        const columns = this.db.prepare("PRAGMA table_info(threads)").all();
+        for (const column of ["origin_json", "derived_from_json"] as const) {
+          if (!columns.some((existing) => existing.name === column)) {
+            this.db.exec(`ALTER TABLE threads ADD COLUMN ${column} TEXT`);
+          }
+        }
+      }
       if (!messagesHaveThreadDeleteCascade(this.db)) {
         this.db.exec(
           `CREATE TABLE messages_with_thread_fk (
@@ -798,15 +891,29 @@ export class ThreadStore {
   }
 
   createThread(input: CreateThreadInput = {}): string {
+    if (this.readOnly) throw new Error("ThreadStore is read-only");
     const id = input.id ?? randomUUID();
-    const now = new Date().toISOString();
-    this.db.exec("BEGIN IMMEDIATE");
+    const now = this.now().toISOString();
+    const origin = threadOriginSchema.parse(input.origin ?? { kind: "interactive" });
+    const derivedFrom =
+      input.derivedFrom === undefined
+        ? undefined
+        : threadDerivedFromSchema.parse(input.derivedFrom);
+    this.db.exec("SAVEPOINT create_thread");
     try {
       this.db
         .prepare(
-          "INSERT INTO threads (id, title, model, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
+          "INSERT INTO threads (id, title, model, created_at, updated_at, origin_json, derived_from_json) VALUES (?, ?, ?, ?, ?, ?, ?)",
         )
-        .run(id, input.title ?? null, input.model ?? null, now, now);
+        .run(
+          id,
+          input.title ?? null,
+          input.model ?? null,
+          now,
+          now,
+          JSON.stringify(origin),
+          derivedFrom === undefined ? null : JSON.stringify(derivedFrom),
+        );
       this.db
         .prepare("INSERT INTO thread_transcript_state (thread_id, completeness) VALUES (?, ?)")
         .run(id, COMPACTION_TRANSCRIPT_COMPLETENESS[0]);
@@ -821,10 +928,10 @@ export class ThreadStore {
            VALUES (?, ?, 0, 0, NULL, NULL, 0, 0)`,
         )
         .run(id, randomUUID());
-      this.db.exec("COMMIT");
+      this.db.exec("RELEASE create_thread");
       return id;
     } catch (error) {
-      this.db.exec("ROLLBACK");
+      this.db.exec("ROLLBACK TO create_thread; RELEASE create_thread");
       throw error;
     }
   }
@@ -840,11 +947,228 @@ export class ThreadStore {
     return row ? toRecord(row) : undefined;
   }
 
-  listThreads(): ThreadRecord[] {
+  listThreads(options: ListThreadsOptions = {}): ThreadRecord[] {
     const rows = this.db
       .prepare("SELECT * FROM threads ORDER BY updated_at DESC, rowid DESC")
       .all() as unknown as ThreadRow[];
-    return rows.map(toRecord);
+    return rows
+      .map(toRecord)
+      .filter((record) => options.origin === undefined || record.origin.kind === options.origin);
+  }
+
+  /** Backfill only legacy rows; an explicit source is immutable, including interactive. */
+  backfillScheduledOrigin(threadId: string, origin: ScheduledThreadOrigin): boolean {
+    if (this.readOnly) throw new Error("ThreadStore is read-only");
+    const parsed = scheduledThreadOriginSchema.parse(origin);
+    return (
+      this.db
+        .prepare("UPDATE threads SET origin_json = ? WHERE id = ? AND origin_json IS NULL")
+        .run(JSON.stringify(parsed), threadId).changes > 0
+    );
+  }
+
+  /** A single SQLite read transaction pins every part of the committed snapshot. */
+  readSnapshot(threadId: string): ThreadSnapshot {
+    this.db.exec("BEGIN");
+    try {
+      const thread = this.getThread(threadId);
+      if (thread === undefined) throw new Error(`Thread "${threadId}" 不存在`);
+      const capturedAt = this.now().toISOString();
+      const messages = this.getMessages(threadId);
+      const hasTable = (table: string): boolean =>
+        this.db
+          .prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?")
+          .get(table) !== undefined;
+      const transcript = hasTable("transcript_messages")
+        ? (
+            this.db
+              .prepare(
+                "SELECT sequence, provenance, created_at, message_json FROM transcript_messages WHERE thread_id = ? ORDER BY sequence",
+              )
+              .all(threadId) as unknown as TranscriptMessageRow[]
+          ).map((row) =>
+            archivedTranscriptMessageSchema.parse({
+              sequence: row.sequence,
+              provenance: row.provenance,
+              createdAt: row.created_at,
+              message: JSON.parse(row.message_json),
+            }),
+          )
+        : messages.map((message, sequence) =>
+            archivedTranscriptMessageSchema.parse({
+              sequence,
+              message,
+              provenance: "legacy_snapshot",
+              createdAt: thread.createdAt,
+            }),
+          );
+      const toolExecutions = hasTable("tool_executions")
+        ? (
+            this.db
+              .prepare(
+                "SELECT sequence, record_json FROM tool_executions WHERE thread_id = ? ORDER BY sequence",
+              )
+              .all(threadId) as unknown as ToolExecutionRow[]
+          ).map((row) => ({
+            ...parsePersistedToolExecutionRecord(JSON.parse(row.record_json)),
+            sequence: row.sequence,
+          }))
+        : [];
+      const checkpoints = hasTable("compaction_checkpoints")
+        ? (
+            this.db
+              .prepare(
+                "SELECT schema_version, checkpoint_json FROM compaction_checkpoints WHERE thread_id = ? ORDER BY generation",
+              )
+              .all(threadId) as unknown as CompactionCheckpointRow[]
+          ).map(parseCompactionCheckpointRow)
+        : [];
+      const toolExecutionCoverage = hasTable("tool_execution_context_coverage")
+        ? (this.db
+            .prepare(
+              "SELECT execution_id AS executionId, representation, transcript_sequence AS transcriptSequence, created_at AS createdAt FROM tool_execution_context_coverage WHERE thread_id = ?",
+            )
+            .all(threadId) as unknown as ThreadSnapshot["toolExecutionCoverage"])
+        : toolExecutions.map((record) => ({
+            executionId: record.id,
+            representation: "legacy_assumed" as const,
+            transcriptSequence: null,
+            createdAt: capturedAt,
+          }));
+      const sequenceState = hasTable("thread_tool_execution_state")
+        ? (this.db
+            .prepare("SELECT next_sequence FROM thread_tool_execution_state WHERE thread_id = ?")
+            .get(threadId) as ToolExecutionSequenceStateRow | undefined)
+        : undefined;
+      const snapshot: ThreadSnapshot = {
+        thread,
+        capturedAt,
+        messages,
+        transcript,
+        toolExecutions,
+        checkpoints,
+        toolExecutionCoverage,
+        nextToolExecutionSequence:
+          sequenceState?.next_sequence ?? (toolExecutions.at(-1)?.sequence ?? -1) + 1,
+        transcriptCompleteness: hasTable("thread_transcript_state")
+          ? this.getTranscriptCompleteness(threadId)
+          : "legacy_snapshot",
+      };
+      this.db.exec("COMMIT");
+      return snapshot;
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  /** Copies durable evidence atomically; Runtime events and live authority are never copied. */
+  forkSnapshot(snapshot: ThreadSnapshot, input: ForkThreadSnapshotInput = {}): string {
+    if (this.readOnly) throw new Error("ThreadStore is read-only");
+    const ids = new Map(snapshot.checkpoints.map((checkpoint) => [checkpoint.id, randomUUID()]));
+    const checkpoints = snapshot.checkpoints.map((checkpoint) => {
+      const remapped = parseCompactionCheckpoint(remapSnapshotReferences(checkpoint, ids));
+      return parseCompactionCheckpoint({
+        ...remapped,
+        runningWork: remapped.runningWork.map((work) => ({
+          ...work,
+          recoverability: "unavailable",
+        })),
+      });
+    });
+    const messages = snapshot.messages.map((message) =>
+      modelMessageSchema.parse(remapSnapshotReferences(message, ids)),
+    );
+    const now = this.now().toISOString();
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const id = this.createThread({
+        ...(input.id === undefined ? {} : { id: input.id }),
+        ...(input.title === undefined
+          ? snapshot.thread.title === undefined
+            ? {}
+            : { title: snapshot.thread.title }
+          : { title: input.title }),
+        ...(input.model === undefined ? {} : { model: input.model }),
+        origin: { kind: "interactive" },
+        derivedFrom: {
+          threadId: snapshot.thread.id,
+          origin: snapshot.thread.origin,
+          capturedAt: snapshot.capturedAt,
+        },
+      });
+      this.replaceMessagesInTransaction(id, repairActiveToolProtocol(messages).messages, now);
+      const insertTranscript = this.db.prepare(
+        "INSERT INTO transcript_messages (thread_id, sequence, role, message_json, provenance, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+      );
+      for (const entry of snapshot.transcript) {
+        const parsed = archivedTranscriptMessageSchema.parse(entry);
+        insertTranscript.run(
+          id,
+          parsed.sequence,
+          parsed.message.role,
+          JSON.stringify(parsed.message),
+          parsed.provenance,
+          parsed.createdAt,
+        );
+      }
+      this.db
+        .prepare("UPDATE thread_transcript_state SET completeness = ? WHERE thread_id = ?")
+        .run(snapshot.transcriptCompleteness, id);
+      const insertTool = this.db.prepare(
+        "INSERT INTO tool_executions (thread_id, sequence, id, tool_call_id, agent_name, tool_name, record_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+      );
+      for (const { sequence, ...record } of snapshot.toolExecutions) {
+        const parsed = parsePersistedToolExecutionRecord(record);
+        insertTool.run(
+          id,
+          sequence,
+          parsed.id,
+          parsed.toolCallId,
+          parsed.agentName,
+          parsed.toolName,
+          JSON.stringify(parsed),
+          parsed.createdAt,
+        );
+      }
+      this.db
+        .prepare("UPDATE thread_tool_execution_state SET next_sequence = ? WHERE thread_id = ?")
+        .run(snapshot.nextToolExecutionSequence, id);
+      const insertCoverage = this.db.prepare(
+        "INSERT INTO tool_execution_context_coverage (thread_id, execution_id, representation, transcript_sequence, created_at) VALUES (?, ?, ?, ?, ?)",
+      );
+      for (const coverage of snapshot.toolExecutionCoverage) {
+        insertCoverage.run(
+          id,
+          coverage.executionId,
+          coverage.representation,
+          coverage.transcriptSequence,
+          coverage.createdAt,
+        );
+      }
+      const insertCheckpoint = this.db.prepare(
+        "INSERT INTO compaction_checkpoints (id, thread_id, generation, schema_version, message_from_sequence, message_through_sequence, tool_from_sequence, tool_through_sequence, checkpoint_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+      );
+      for (const checkpoint of checkpoints) {
+        insertCheckpoint.run(
+          checkpoint.id,
+          id,
+          checkpoint.generation,
+          checkpoint.version,
+          checkpoint.transcript.messages.fromSequenceExclusive,
+          checkpoint.transcript.messages.throughSequence,
+          checkpoint.transcript.toolExecutions.fromSequenceExclusive,
+          checkpoint.transcript.toolExecutions.throughSequence,
+          JSON.stringify(checkpoint),
+          checkpoint.createdAt,
+        );
+      }
+      this.db.exec("COMMIT");
+      return id;
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
   }
 
   countMessages(threadId: string): number {

@@ -155,6 +155,7 @@ import {
   type EffectiveCapabilityManifest,
 } from "./capability-manifest.ts";
 import { buildCapabilityTurnReminder, buildChatSystemPromptFromManifest } from "./system-prompt.ts";
+import { threadDerivedFromSchema, type ThreadDerivedFrom } from "../store/thread-origin.ts";
 import type {
   WorkspaceInstructions,
   WorkspaceInstructionsSource,
@@ -249,6 +250,8 @@ export interface AgentSessionOptions {
   readonly getToolExecution?: (executionId: string) => SequencedToolExecutionRecord | undefined;
   readonly recoverUncoveredToolExecutions?: () => readonly ModelMessage[];
   readonly initialCheckpoint?: CompactionCheckpoint;
+  /** Persisted lineage rendered only in the model's system context, never user history. */
+  readonly derivedFrom?: ThreadDerivedFrom;
   readonly listTranscriptMessages?: (
     options?: ListTranscriptMessagesOptions,
   ) => readonly ArchivedTranscriptMessage[];
@@ -893,6 +896,7 @@ export class AgentSession {
   private readonly policy: ToolPolicy | undefined;
   private systemPrompt: string;
   private readonly explicitSystemPrompt: string | undefined;
+  private readonly derivedFrom: ThreadDerivedFrom | undefined;
   private lastExtraPrompt: string | undefined;
   private readonly workspaceInstructions: WorkspaceInstructionsSource | undefined;
   private appliedWorkspaceInstructions: WorkspaceInstructions | undefined;
@@ -984,6 +988,10 @@ export class AgentSession {
     this.debugEvents = options.debugEvents ?? false;
     this.policy = options.policy;
     this.explicitSystemPrompt = options.systemPrompt;
+    this.derivedFrom =
+      options.derivedFrom === undefined
+        ? undefined
+        : threadDerivedFromSchema.parse(options.derivedFrom);
     this.workspaceInstructions = options.workspaceInstructions;
     this.resolveDynamicCapabilityContext = options.resolveDynamicCapabilityContext;
     this.skillLibrary = options.skillLibrary;
@@ -1164,6 +1172,7 @@ export class AgentSession {
     this.lastExtraPrompt = extraPrompt;
     this.appliedWorkspaceInstructions = this.workspaceInstructions?.current();
     const compiledPrompt = buildChatSystemPromptFromManifest(this.capabilityManifest, {
+      ...(this.derivedFrom !== undefined ? { derivedFrom: this.derivedFrom } : {}),
       ...(this.appliedWorkspaceInstructions !== undefined
         ? { workspaceInstructions: this.appliedWorkspaceInstructions }
         : {}),

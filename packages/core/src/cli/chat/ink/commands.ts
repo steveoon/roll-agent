@@ -58,6 +58,7 @@ export const SLASH_COMMANDS: readonly SlashCommand[] = [
   },
   { kind: "command", name: "/skills", description: "列出可加载的 SKILL" },
   { kind: "command", name: "/resume", description: "切换到已有会话" },
+  { kind: "command", name: "/schedule", description: "查看定时任务及历次执行记录" },
   { kind: "command", name: "/help", description: "列出可用命令" },
   { kind: "command", name: "/exit", description: "退出对话" },
 ];

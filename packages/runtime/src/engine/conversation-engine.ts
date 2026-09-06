@@ -50,7 +50,8 @@ import {
   type ToolResourceHint,
 } from "../tool-bridge/tool-execution-coordinator.ts";
 import type { ToolAnnotations, ToolPolicy } from "../types/policy.ts";
-import type { ThreadStore } from "../store/thread-store.ts";
+import type { ThreadStore, ThreadSnapshot } from "../store/thread-store.ts";
+import type { ThreadOrigin } from "../store/thread-origin.ts";
 import {
   AgentSession,
   type AgentInstallSessionResult,
@@ -196,6 +197,12 @@ export function buildSessionBashSettings(input: {
 }
 
 export interface CreateSessionInput {
+  readonly id?: string;
+  readonly title?: string;
+  readonly origin?: ThreadOrigin;
+}
+
+export interface ForkSessionInput {
   readonly title?: string;
 }
 
@@ -526,10 +533,12 @@ export class ConversationEngine {
     this.assertAcceptingSessions();
     const id = this.store
       ? this.store.createThread({
+          ...(input.id === undefined ? {} : { id: input.id }),
+          ...(input.origin === undefined ? {} : { origin: input.origin }),
           ...(input.title ? { title: input.title } : {}),
           model: this.resolveModelName(),
         })
-      : randomUUID();
+      : (input.id ?? randomUUID());
     return this.buildSession(context, id, []);
   }
 
@@ -537,6 +546,9 @@ export class ConversationEngine {
     this.assertAcceptingSessions();
     if (!this.store) {
       throw new Error("resumeSession requires a ThreadStore");
+    }
+    if (this.store.getThread(threadId)?.origin.kind === "scheduled") {
+      throw new Error("定时执行会话是只读记录；请基于该次运行创建新对话");
     }
     const liveSession = this.liveSessions.get(threadId);
     if (liveSession !== undefined) {
@@ -554,6 +566,22 @@ export class ConversationEngine {
     this.recoverUncoveredToolExecutionContext(threadId);
     const state = this.store.loadSessionState(threadId);
     return this.buildSession(context, threadId, state.messages, state.checkpoint);
+  }
+
+  async forkSession(snapshot: ThreadSnapshot, input: ForkSessionInput = {}): Promise<AgentSession> {
+    this.assertAcceptingSessions();
+    if (!this.store) throw new Error("forkSession requires a ThreadStore");
+    const context = await this.ensureReady();
+    this.assertAcceptingSessions();
+    const id = this.store.forkSnapshot(snapshot, { ...input, model: this.resolveModelName() });
+    try {
+      this.recoverUncoveredToolExecutionContext(id);
+      const state = this.store.loadSessionState(id);
+      return this.buildSession(context, id, state.messages, state.checkpoint);
+    } catch (error) {
+      this.store.deleteThread(id);
+      throw error;
+    }
   }
 
   private assertAcceptingSessions(): void {
@@ -628,6 +656,7 @@ export class ConversationEngine {
     initialCheckpoint?: ReturnType<ThreadStore["getLatestCheckpoint"]>,
   ): AgentSession {
     const store = this.store;
+    const derivedFrom = store?.getThread(id)?.derivedFrom;
     const contextWindow = this.resolveContextWindowFor(
       this.resolveProviderName(),
       this.resolveModelName(),
@@ -704,6 +733,7 @@ export class ConversationEngine {
       ...(contextWindow !== undefined ? { contextWindow } : {}),
       ...(this.policy ? { policy: this.policy } : {}),
       initialMessages,
+      ...(derivedFrom !== undefined ? { derivedFrom } : {}),
       ...(initialCheckpoint ? { initialCheckpoint } : {}),
       ...(store
         ? {

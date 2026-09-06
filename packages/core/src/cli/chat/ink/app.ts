@@ -45,6 +45,8 @@ import { resolveTurnActivity } from "./turn-activity.ts";
 import { TurnStatusLine } from "./turn-status-line.ts";
 import { resolveChatLayout } from "./layout.ts";
 import { TranscriptViewport } from "./transcript-viewport.ts";
+import { ScheduleBrowser } from "./schedule-browser.ts";
+import type { ScheduleBrowserPort } from "../schedule-browser.ts";
 
 export interface ChatSessionSwitching {
   readonly loadItems: (currentSessionId: string) => readonly SessionPickerItem[];
@@ -95,6 +97,7 @@ export interface ChatAppProps {
   readonly hintFlags?: HintFlagStore;
   readonly sessionSwitching?: ChatSessionSwitching;
   readonly modelSwitching?: ChatModelSwitching;
+  readonly scheduleBrowser?: ScheduleBrowserPort;
 }
 
 interface SessionPickerState {
@@ -139,6 +142,7 @@ interface ChatSessionViewProps extends Omit<ChatAppProps, "sessionSwitching"> {
   readonly onPickerSelect: (threadId: string) => void;
   readonly onPickerCancel: () => void;
   readonly onModelChanged: (model: string) => void;
+  readonly onScheduleContinue: (session: AgentSession) => void;
 }
 
 export const INK_HINTS = "/exit 退出 · Esc 中断 · / 命令 · ? 快捷键";
@@ -230,11 +234,17 @@ export function ChatApp(props: ChatAppProps): ReactElement {
     ...(props.copyToClipboard !== undefined ? { copyToClipboard: props.copyToClipboard } : {}),
     ...(props.hintFlags !== undefined ? { hintFlags: props.hintFlags } : {}),
     ...(props.modelSwitching !== undefined ? { modelSwitching: props.modelSwitching } : {}),
+    ...(props.scheduleBrowser !== undefined ? { scheduleBrowser: props.scheduleBrowser } : {}),
     picker,
     onOpenPicker: openPicker,
     onPickerSelect: selectSession,
     onPickerCancel: cancelPicker,
     onModelChanged: setActiveModel,
+    onScheduleContinue: (next: AgentSession) => {
+      retiringRef.current = activeSession;
+      setSessionHistory(messagesToHistory(next.getMessages()));
+      setActiveSession(next);
+    },
   });
 }
 
@@ -280,6 +290,7 @@ function ChatSessionView(props: ChatSessionViewProps): ReactElement {
   });
 
   const [modelPicker, setModelPicker] = useState<ModelPickerState | undefined>(undefined);
+  const [scheduleOpen, setScheduleOpen] = useState(false);
   const modelSwitching = props.modelSwitching;
   const notice = (text: string): void => {
     commitHistory({ kind: "notice", id: randomUUID(), text });
@@ -417,7 +428,7 @@ function ChatSessionView(props: ChatSessionViewProps): ReactElement {
   const selectedIndex = Math.min(selected, maxIndex);
 
   useInput((input, key) => {
-    if (props.picker !== undefined || modelPicker !== undefined) {
+    if (props.picker !== undefined || modelPicker !== undefined || scheduleOpen) {
       return;
     }
     if (state.phase === CHAT_PHASES.userInput) {
@@ -658,6 +669,14 @@ function ChatSessionView(props: ChatSessionViewProps): ReactElement {
       }
       return;
     }
+    if (name === "/schedule") {
+      if (props.scheduleBrowser === undefined) {
+        notice("当前界面不支持查看定时任务");
+      } else {
+        setScheduleOpen(true);
+      }
+      return;
+    }
     if (name === "/help") {
       commitHistory({ kind: "notice", id: randomUUID(), text: helpText() });
       return;
@@ -792,6 +811,16 @@ function ChatSessionView(props: ChatSessionViewProps): ReactElement {
                 onRequestClipboardImage: handleClipboardImage,
               });
   const turnActivity = resolveTurnActivity(state);
+
+  if (scheduleOpen && props.scheduleBrowser !== undefined) {
+    return h(ScheduleBrowser, {
+      port: props.scheduleBrowser,
+      width: layout.columns,
+      height: layout.renderRows,
+      onClose: () => setScheduleOpen(false),
+      onContinue: props.onScheduleContinue,
+    });
+  }
 
   if (layout.tooSmall) {
     return h(

@@ -264,7 +264,7 @@ test("已是 v2 的旧账本（无 executor_probed_at 列）打开时会补列�
     assert.ok(columns.includes("tree_tracked_pgids"));
     assert.ok(columns.includes("tree_unsettled"));
     assert.ok(columns.includes("tree_survivor_pids"));
-    assert.equal(version.user_version, 5);
+    assert.equal(version.user_version, 6);
     const claims = reopened.claimDue({
       workerId: "new-daemon",
       nowMs: NOW + SCHEDULER_LIMITS.claimLeaseMs + 1,

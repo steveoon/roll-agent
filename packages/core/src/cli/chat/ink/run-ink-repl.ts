@@ -12,6 +12,7 @@ import { log } from "../../utils/output.ts";
 import { createChatTerminalOutput } from "./terminal-output.ts";
 import { DISABLE_MOUSE_TRACKING } from "./mouse-input.ts";
 import { createFileHintFlagStore } from "./hint-flags.ts";
+import type { ScheduleBrowserPort } from "../schedule-browser.ts";
 
 export interface InkReplThreadSummary {
   readonly id: string;
@@ -23,7 +24,7 @@ export interface InkReplStore {
   updateTitle(threadId: string, title: string): void;
   countMessages(threadId: string): number;
   deleteThread(threadId: string): void;
-  listThreads(): readonly InkReplThreadSummary[];
+  listThreads(options?: { readonly origin?: "interactive" }): readonly InkReplThreadSummary[];
 }
 
 export interface RunInkReplOptions {
@@ -37,6 +38,7 @@ export interface RunInkReplOptions {
   readonly resumeSession?: (threadId: string) => Promise<AgentSession>;
   readonly onActiveSessionChange?: (session: AgentSession) => void;
   readonly modelSwitching?: ChatModelSwitching;
+  readonly scheduleBrowser?: ScheduleBrowserPort;
 }
 
 export async function runInkRepl(
@@ -65,7 +67,7 @@ export async function runInkRepl(
       ? undefined
       : {
           loadItems: (currentSessionId: string) =>
-            buildSessionPickerItems(store.listThreads(), {
+            buildSessionPickerItems(store.listThreads({ origin: "interactive" }), {
               currentSessionId,
               countMessages: (threadId: string) => store.countMessages(threadId),
               now: new Date(),
@@ -87,6 +89,29 @@ export async function runInkRepl(
             ) {
               store.deleteThread(threadId);
             }
+          },
+        };
+
+  const browserPort = options.scheduleBrowser;
+  const scheduleBrowser =
+    browserPort === undefined
+      ? undefined
+      : {
+          listTasks: () => browserPort.listTasks(),
+          listRuns: (...args: Parameters<ScheduleBrowserPort["listRuns"]>) =>
+            browserPort.listRuns(...args),
+          inspect: (...args: Parameters<ScheduleBrowserPort["inspect"]>) =>
+            browserPort.inspect(...args),
+          readTranscript: (...args: Parameters<ScheduleBrowserPort["readTranscript"]>) =>
+            browserPort.readTranscript(...args),
+          continueRun: async (invocationId: string, attempt: number): Promise<AgentSession> => {
+            const next = await browserPort.continueRun(invocationId, attempt);
+            active = next;
+            titled =
+              store.listThreads({ origin: "interactive" }).find((thread) => thread.id === next.id)
+                ?.title !== undefined;
+            options.onActiveSessionChange?.(next);
+            return next;
           },
         };
 
@@ -117,6 +142,7 @@ export async function runInkRepl(
           : {}),
         ...(options.onThinkingChange ? { onThinkingChange: options.onThinkingChange } : {}),
         ...(options.modelSwitching ? { modelSwitching: options.modelSwitching } : {}),
+        ...(scheduleBrowser === undefined ? {} : { scheduleBrowser }),
       }),
       {
         stdout: terminalOutput.stdout,

@@ -4,6 +4,7 @@ export type {
   AgentBootstrapIssue,
   ConversationEngineOptions,
   CreateSessionInput,
+  ForkSessionInput,
 } from "./engine/conversation-engine.ts";
 export { AgentSession } from "./engine/agent-session.ts";
 export type {
@@ -127,7 +128,24 @@ export type {
 } from "./tool-bridge/normalize-result.ts";
 export { ThreadStore, defaultThreadsDir, expandTilde } from "./store/thread-store.ts";
 export type { ThreadStoreOptions } from "./store/thread-store.ts";
-export type { ThreadRecord, CreateThreadInput } from "./store/thread-store.ts";
+export type {
+  ThreadRecord,
+  CreateThreadInput,
+  ListThreadsOptions,
+  ThreadSnapshot,
+  ForkThreadSnapshotInput,
+} from "./store/thread-store.ts";
+export {
+  THREAD_ORIGIN_KINDS,
+  threadOriginSchema,
+  scheduledThreadOriginSchema,
+  threadDerivedFromSchema,
+} from "./store/thread-origin.ts";
+export type {
+  ThreadOrigin,
+  ScheduledThreadOrigin,
+  ThreadDerivedFrom,
+} from "./store/thread-origin.ts";
 export {
   SCHEDULE_LEDGER_READ_STATUSES,
   ScheduleStore,
@@ -281,3 +299,17 @@ export {
   getFileChangeDisplay,
 } from "@roll-agent/protocol";
 export type { FileChangeDiff, FileChangeDisplay, FileChangeKind } from "@roll-agent/protocol";
+
+export { readScheduleHistory, readScheduleRun } from "./scheduler/schedule-store.ts";
+export type {
+  ReadScheduleHistoryOptions,
+  ScheduleHistoryReadResult,
+  ScheduleRunReadResult,
+} from "./scheduler/schedule-store.ts";
+export type {
+  BackfillThreadReferenceInput,
+  RegisterThreadReferenceInput,
+  ScheduleThreadReference,
+  ScheduleRunHistoryEntry,
+  ScheduleHistoryTask,
+} from "./scheduler/types.ts";

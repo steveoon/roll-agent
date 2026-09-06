@@ -25,6 +25,7 @@ import {
   SCHEDULE_STATUSES,
   SCHEDULE_STORE_ERROR_CODES,
   ScheduleStoreError,
+  type BackfillThreadReferenceInput,
   type CancelInvocationOptions,
   type CancelInvocationOutcome,
   type ClaimedInvocation,
@@ -44,12 +45,16 @@ import {
   type InvocationTreeLivenessProbe,
   type PersistedTrackedGroup,
   type RecordInvocationTreeInput,
+  type RegisterThreadReferenceInput,
   type RemoveScheduleOptions,
   type ScheduleRecord,
   type ScheduleStatus,
+  type ScheduleThreadReference,
+  type ScheduleHistoryTask,
+  type ScheduleRunHistoryEntry,
 } from "./types.ts";
 
-const SCHEMA_VERSION = 5;
+const SCHEMA_VERSION = 6;
 const BUSY_TIMEOUT_MS = 15_000;
 const TERMINAL_STATUS_PLACEHOLDERS = INVOCATION_TERMINAL_STATUSES.map(() => "?").join(", ");
 
@@ -148,6 +153,51 @@ interface InvocationRow {
   readonly tree_tracked_pgids: string | null;
   readonly tree_unsettled: number | null;
   readonly tree_survivor_pids: string | null;
+}
+
+interface ScheduleThreadReferenceRow {
+  readonly invocation_id: string;
+  readonly attempt: number;
+  readonly schedule_id: string;
+  readonly thread_id: string;
+  readonly threads_dir: string;
+  readonly name: string;
+  readonly cwd: string;
+  readonly scheduled_for: number;
+  readonly mode: string;
+  readonly created_at: number;
+}
+
+function toThreadReference(row: ScheduleThreadReferenceRow): ScheduleThreadReference {
+  if (!isInvocationMode(row.mode)) {
+    throw new ScheduleStoreError(SCHEDULE_STORE_ERROR_CODES.invalid, "Invalid reference mode");
+  }
+  return {
+    invocationId: row.invocation_id,
+    attempt: row.attempt,
+    scheduleId: row.schedule_id,
+    threadId: row.thread_id,
+    threadsDir: row.threads_dir,
+    name: row.name,
+    cwd: row.cwd,
+    scheduledForMs: row.scheduled_for,
+    mode: row.mode,
+    createdAtMs: row.created_at,
+  };
+}
+
+function validateThreadReferenceInput(input: BackfillThreadReferenceInput): void {
+  if (
+    !Number.isSafeInteger(input.expectedAttempt) ||
+    input.expectedAttempt < 1 ||
+    input.threadId.trim().length === 0 ||
+    !isAbsolute(input.threadsDir)
+  ) {
+    throw new ScheduleStoreError(
+      SCHEDULE_STORE_ERROR_CODES.invalid,
+      "会话关联需要有效的 attempt、会话 ID 和绝对存储路径",
+    );
+  }
 }
 
 const INVOCATION_MODE_VALUES: readonly string[] = Object.values(INVOCATION_MODES);
@@ -543,7 +593,22 @@ export class ScheduleStore {
          CREATE INDEX IF NOT EXISTS idx_schedules_due
            ON schedules (next_run_at) WHERE status = 'active' AND next_run_at IS NOT NULL;
          CREATE INDEX IF NOT EXISTS idx_invocations_live
-           ON invocations (schedule_id) WHERE status IN ('pending', 'claimed', 'running', 'retry');`,
+           ON invocations (schedule_id) WHERE status IN ('pending', 'claimed', 'running', 'retry');
+         CREATE TABLE IF NOT EXISTS schedule_thread_refs (
+           invocation_id TEXT NOT NULL,
+           attempt INTEGER NOT NULL CHECK (attempt > 0),
+           schedule_id TEXT NOT NULL,
+           thread_id TEXT NOT NULL,
+           threads_dir TEXT NOT NULL,
+           name TEXT NOT NULL,
+           cwd TEXT NOT NULL,
+           scheduled_for INTEGER NOT NULL,
+           mode TEXT NOT NULL CHECK (mode IN ('scheduled', 'manual')),
+           created_at INTEGER NOT NULL,
+           PRIMARY KEY (invocation_id, attempt)
+         );
+         CREATE INDEX IF NOT EXISTS idx_schedule_thread_refs_history
+           ON schedule_thread_refs (schedule_id, scheduled_for DESC, invocation_id, attempt DESC);`,
       );
       if (versionRow.user_version < SCHEMA_VERSION) {
         this.addMissingColumns();
@@ -1638,6 +1703,97 @@ export class ScheduleStore {
     });
   }
 
+  registerThreadReference(
+    input: RegisterThreadReferenceInput,
+    nowMs: number = Date.now(),
+  ): ScheduleThreadReference | undefined {
+    validateThreadReferenceInput(input);
+    return this.transaction(() => {
+      const row = this.db
+        .prepare(
+          `SELECT * FROM invocations
+           WHERE id = ? AND attempt = ? AND ownership_token = ? AND status = ?`,
+        )
+        .get(
+          input.invocationId,
+          input.expectedAttempt,
+          input.ownershipToken,
+          INVOCATION_STATUSES.running,
+        ) as InvocationRow | undefined;
+      return row === undefined ? undefined : this.insertThreadReference(row, input, nowMs);
+    });
+  }
+
+  /** Core must first verify the thread exists at this path; the ledger proves its identity. */
+  backfillThreadReference(
+    input: BackfillThreadReferenceInput,
+    nowMs: number = Date.now(),
+  ): ScheduleThreadReference | undefined {
+    validateThreadReferenceInput(input);
+    return this.transaction(() => {
+      const row = this.db
+        .prepare("SELECT * FROM invocations WHERE id = ? AND attempt = ? AND thread_id = ?")
+        .get(input.invocationId, input.expectedAttempt, input.threadId) as
+        | InvocationRow
+        | undefined;
+      return row === undefined ? undefined : this.insertThreadReference(row, input, nowMs);
+    });
+  }
+
+  private insertThreadReference(
+    invocation: InvocationRow,
+    input: BackfillThreadReferenceInput,
+    nowMs: number,
+  ): ScheduleThreadReference | undefined {
+    const previous = this.db
+      .prepare("SELECT * FROM schedule_thread_refs WHERE invocation_id = ? AND attempt = ?")
+      .get(input.invocationId, input.expectedAttempt) as ScheduleThreadReferenceRow | undefined;
+    if (previous !== undefined) {
+      if (previous.thread_id !== input.threadId || previous.threads_dir !== input.threadsDir) {
+        throw new ScheduleStoreError(
+          SCHEDULE_STORE_ERROR_CODES.invalid,
+          `invocation ${input.invocationId} attempt ${String(input.expectedAttempt)} 已关联其他会话`,
+        );
+      }
+      return toThreadReference(previous);
+    }
+    const schedule = this.getSchedule(invocation.schedule_id);
+    if (schedule === undefined) return undefined;
+    if (!isInvocationMode(invocation.mode)) {
+      throw new ScheduleStoreError(SCHEDULE_STORE_ERROR_CODES.invalid, "Invalid invocation mode");
+    }
+    this.db
+      .prepare(
+        `INSERT INTO schedule_thread_refs
+       (invocation_id, attempt, schedule_id, thread_id, threads_dir, name, cwd,
+        scheduled_for, mode, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        input.invocationId,
+        input.expectedAttempt,
+        schedule.id,
+        input.threadId,
+        input.threadsDir,
+        schedule.name,
+        schedule.cwd,
+        invocation.scheduled_for,
+        invocation.mode,
+        nowMs,
+      );
+    return {
+      invocationId: input.invocationId,
+      attempt: input.expectedAttempt,
+      scheduleId: schedule.id,
+      threadId: input.threadId,
+      threadsDir: input.threadsDir,
+      name: schedule.name,
+      cwd: schedule.cwd,
+      scheduledForMs: invocation.scheduled_for,
+      mode: invocation.mode,
+      createdAtMs: nowMs,
+    };
+  }
+
   getInvocation(id: string): InvocationRecord | undefined {
     const row = this.db.prepare("SELECT * FROM invocations WHERE id = ?").get(id) as
       | InvocationRow
@@ -1833,4 +1989,184 @@ export function readScheduleLedger(dir: string): ScheduleLedgerReadResult {
   } finally {
     db.close();
   }
+}
+
+export interface ReadScheduleHistoryOptions {
+  readonly scheduleId?: string;
+  readonly limit?: number;
+  readonly offset?: number;
+}
+
+export interface ScheduleHistoryReadResult {
+  readonly status: ScheduleLedgerReadStatus;
+  readonly schemaVersion?: number;
+  readonly tasks: readonly ScheduleHistoryTask[];
+  readonly runs: readonly ScheduleRunHistoryEntry[];
+  readonly hasMore: boolean;
+}
+
+export interface ScheduleRunReadResult {
+  readonly status: ScheduleLedgerReadStatus;
+  readonly schemaVersion?: number;
+  readonly run: ScheduleRunHistoryEntry | undefined;
+}
+
+interface ReadSchedulerSnapshotResult<T> {
+  readonly status: ScheduleLedgerReadStatus;
+  readonly schemaVersion?: number;
+  readonly value?: T;
+}
+
+/** A read transaction never creates, migrates, changes modes, or prunes the ledger. */
+function readSchedulerSnapshot<T>(
+  dir: string,
+  read: (db: DatabaseSync, hasReferences: boolean) => T,
+): ReadSchedulerSnapshotResult<T> {
+  const databasePath = resolve(expandTilde(dir), "schedules.db");
+  if (!existsSync(databasePath)) return { status: SCHEDULE_LEDGER_READ_STATUSES.empty };
+  const db = new DatabaseSync(databasePath, { readOnly: true });
+  try {
+    db.exec(`PRAGMA busy_timeout = ${String(BUSY_TIMEOUT_MS)}; BEGIN;`);
+    const version = db.prepare("PRAGMA user_version").get() as { readonly user_version: number };
+    // v5 has all invocation columns used by the reader; its reference table is simply absent.
+    if (version.user_version !== 5 && version.user_version !== SCHEMA_VERSION) {
+      return {
+        status: SCHEDULE_LEDGER_READ_STATUSES.migrationRequired,
+        schemaVersion: version.user_version,
+      };
+    }
+    return {
+      status: SCHEDULE_LEDGER_READ_STATUSES.ok,
+      value: read(db, version.user_version === SCHEMA_VERSION),
+    };
+  } finally {
+    db.close();
+  }
+}
+
+function readRunInSnapshot(
+  db: DatabaseSync,
+  invocationId: string,
+  hasReferences: boolean,
+): ScheduleRunHistoryEntry | undefined {
+  const row = db.prepare("SELECT * FROM invocations WHERE id = ?").get(invocationId) as
+    | InvocationRow
+    | undefined;
+  const references = hasReferences
+    ? (
+        db
+          .prepare(
+            "SELECT * FROM schedule_thread_refs WHERE invocation_id = ? ORDER BY attempt ASC",
+          )
+          .all(invocationId) as unknown as ScheduleThreadReferenceRow[]
+      ).map(toThreadReference)
+    : [];
+  const invocation = row === undefined ? undefined : toInvocationRecord(row);
+  const identity = invocation ?? references[0];
+  return identity === undefined
+    ? undefined
+    : {
+        invocationId,
+        scheduleId: identity.scheduleId,
+        scheduledForMs: identity.scheduledForMs,
+        mode: identity.mode,
+        invocation,
+        references,
+      };
+}
+
+function historyRunSql(hasReferences: boolean): string {
+  return `SELECT id, schedule_id, scheduled_for FROM invocations${
+    hasReferences
+      ? " UNION SELECT invocation_id AS id, schedule_id, scheduled_for FROM schedule_thread_refs"
+      : ""
+  }`;
+}
+
+function readTasksInSnapshot(db: DatabaseSync, hasReferences: boolean): ScheduleHistoryTask[] {
+  const schedules = (db.prepare("SELECT * FROM schedules").all() as unknown as ScheduleRow[]).map(
+    toScheduleRecord,
+  );
+  const byId = new Map(schedules.map((schedule) => [schedule.id, schedule]));
+  const ids = db
+    .prepare(
+      `SELECT id FROM schedules${
+        hasReferences ? " UNION SELECT schedule_id AS id FROM schedule_thread_refs" : ""
+      }`,
+    )
+    .all() as Array<{ id: string }>;
+  const tasks: ScheduleHistoryTask[] = [];
+  for (const { id } of ids) {
+    const latest = db
+      .prepare(
+        `SELECT id FROM (${historyRunSql(hasReferences)})
+      WHERE schedule_id = ? ORDER BY scheduled_for DESC, id DESC LIMIT 1`,
+      )
+      .get(id) as { readonly id: string } | undefined;
+    const latestRun =
+      latest === undefined ? undefined : readRunInSnapshot(db, latest.id, hasReferences);
+    const schedule = byId.get(id);
+    const reference = latestRun?.references.at(-1);
+    const identity = schedule ?? reference;
+    if (identity === undefined) continue;
+    tasks.push({ scheduleId: id, name: identity.name, cwd: identity.cwd, schedule, latestRun });
+  }
+  return tasks.sort(
+    (a, b) =>
+      Number(a.schedule === undefined) - Number(b.schedule === undefined) ||
+      (b.latestRun?.scheduledForMs ?? b.schedule?.createdAtMs ?? 0) -
+        (a.latestRun?.scheduledForMs ?? a.schedule?.createdAtMs ?? 0) ||
+      a.scheduleId.localeCompare(b.scheduleId),
+  );
+}
+
+export function readScheduleHistory(
+  dir: string,
+  options: ReadScheduleHistoryOptions = {},
+): ScheduleHistoryReadResult {
+  const limit = options.limit ?? 20;
+  const offset = options.offset ?? 0;
+  if (
+    !Number.isSafeInteger(limit) ||
+    limit < 1 ||
+    limit > 100 ||
+    !Number.isSafeInteger(offset) ||
+    offset < 0
+  ) {
+    throw new RangeError("History limit must be 1..100 and offset must be nonnegative integers");
+  }
+  const snapshot = readSchedulerSnapshot(dir, (db, hasReferences) => {
+    const predicate = options.scheduleId === undefined ? "" : "WHERE schedule_id = ?";
+    const statement = db.prepare(`SELECT id FROM (${historyRunSql(hasReferences)}) ${predicate}
+      ORDER BY scheduled_for DESC, id DESC LIMIT ? OFFSET ?`);
+    const args =
+      options.scheduleId === undefined
+        ? [limit + 1, offset]
+        : [options.scheduleId, limit + 1, offset];
+    const ids = statement.all(...args) as Array<{ readonly id: string }>;
+    const runs: ScheduleRunHistoryEntry[] = [];
+    for (const { id } of ids.slice(0, limit)) {
+      const run = readRunInSnapshot(db, id, hasReferences);
+      if (run !== undefined) runs.push(run);
+    }
+    return { tasks: readTasksInSnapshot(db, hasReferences), runs, hasMore: ids.length > limit };
+  });
+  return {
+    status: snapshot.status,
+    ...(snapshot.schemaVersion === undefined ? {} : { schemaVersion: snapshot.schemaVersion }),
+    tasks: snapshot.value?.tasks ?? [],
+    runs: snapshot.value?.runs ?? [],
+    hasMore: snapshot.value?.hasMore ?? false,
+  };
+}
+
+export function readScheduleRun(dir: string, invocationId: string): ScheduleRunReadResult {
+  const snapshot = readSchedulerSnapshot(dir, (db, hasReferences) =>
+    readRunInSnapshot(db, invocationId, hasReferences),
+  );
+  return {
+    status: snapshot.status,
+    ...(snapshot.schemaVersion === undefined ? {} : { schemaVersion: snapshot.schemaVersion }),
+    run: snapshot.value,
+  };
 }

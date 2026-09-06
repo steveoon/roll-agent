@@ -682,7 +682,7 @@ export class RuntimeService {
         "thread.list cursor 超出安全整数范围",
       );
     }
-    const records = this.store.listThreads();
+    const records = this.store.listThreads({ origin: "interactive" });
     const items = records
       .slice(offset, offset + params.limit)
       .map((record) => toThreadSummary(this.store, record));
@@ -714,7 +714,10 @@ export class RuntimeService {
   }
 
   async openThread(params: RuntimeMethodParams<"thread.open">): Promise<RuntimeThreadSnapshot> {
-    await this.requireSession(params.threadId);
+    this.assertOpen();
+    if (this.requireThread(params.threadId).origin.kind !== "scheduled") {
+      await this.requireSession(params.threadId);
+    }
     return this.snapshotThread({
       threadId: params.threadId,
       limit: 100,
@@ -881,6 +884,12 @@ export class RuntimeService {
       params,
       async () => {
         this.assertOpen();
+        if (this.requireThread(params.threadId).origin.kind === "scheduled") {
+          throw new RuntimeServiceError(
+            RUNTIME_ERROR_CODES.invalidParams,
+            "定时执行会话是只读记录；请基于该次运行创建新对话",
+          );
+        }
         const existingOwner = this.findTurnOwner(params.turnId, params.threadId);
         if (existingOwner !== undefined) {
           if (existingOwner === params.threadId) {
