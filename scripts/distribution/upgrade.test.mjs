@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { execFile, spawn, spawnSync } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
+import { gunzipSync } from "node:zlib";
 import { promisify } from "node:util";
 import { createServer } from "node:http";
 import {
@@ -21,6 +22,8 @@ import { test } from "node:test";
 import { assetFilename, NODE_VERSION, sha256 } from "./metadata.mjs";
 
 const execFileAsync = promisify(execFile);
+const python = process.platform === "win32" ? "python" : "python3";
+const archiveScript = join(import.meta.dirname, "archive.py");
 async function prepareWithTool(command, args, signal) {
   const pending = execFileAsync(command, args, {
     signal,
@@ -48,6 +51,19 @@ test("native fixture preparation remains cancellable while a child tool runs", a
   } finally {
     clearTimeout(timer);
   }
+});
+
+test("npm fixture archives accept native absolute paths with spaces and Unicode", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "roll npm fixture 中文 "));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const source = join(root, "source");
+  await mkdir(join(source, "package"), { recursive: true });
+  await writeFile(join(source, "package/package.json"), '{"name":"fixture","version":"1.0.0"}');
+  const archive = join(root, "agent.tgz");
+  await prepareWithTool(python, [archiveScript, source, archive], t.signal);
+  const contents = gunzipSync(await readFile(archive)).toString();
+  assert.ok(contents.includes("package/package.json"));
+  assert.ok(contents.includes('"name":"fixture"'));
 });
 
 async function mirrorImmutableFixture(source, target, relative = "") {
@@ -90,14 +106,20 @@ test(
   "native standalone A to B update preserves data and uses B for npm Agent execution",
   {
     skip: !process.env.ROLL_TEST_DISTRIBUTION_ARCHIVE,
-    // Includes extraction and compression of two full distributions on slower native runners.
-    // Individual Roll command deadlines and all behavior assertions remain unchanged.
-    timeout: 600_000,
+    // Windows fixture preparation alone takes about 330s on native CI. The update separately
+    // downloads, validates, extracts, preflights, reinstalls the Agent and reconciles services.
+    timeout: 900_000,
   },
   async (t) => {
     const startedAt = Date.now();
-    const phase = (name) =>
+    let currentPhase = "extracting archive A";
+    const phase = (name) => {
+      currentPhase = name;
       console.log(`[standalone upgrade] ${name} (+${Date.now() - startedAt}ms)`);
+    };
+    const heartbeat = setInterval(() => phase(currentPhase), 30_000);
+    t.after(() => clearInterval(heartbeat));
+    phase(currentPhase);
     const archive = resolve(process.env.ROLL_TEST_DISTRIBUTION_ARCHIVE);
     const home = await mkdtemp(join(tmpdir(), "roll native upgrade 中文 "));
     t.after(() => rm(home, { recursive: true, force: true }));
@@ -120,6 +142,7 @@ test(
       await prepareWithTool("tar", ["-xzf", archive, "-C", source], t.signal);
     }
     phase("archive A extracted");
+    phase("preparing archive B");
     const platform = `${process.platform}-${process.arch}`;
     const pkg = JSON.parse(await readFile(join(source, "app/package.json"), "utf8"));
     const a = pkg.version;
@@ -141,11 +164,7 @@ test(
     metadata.version = b;
     await writeFile(join(source, "distribution.json"), JSON.stringify(metadata));
     const bArchive = join(home, assetFilename(b, platform));
-    await prepareWithTool(
-      process.platform === "win32" ? "python" : "python3",
-      [join(import.meta.dirname, "archive.py"), source, bArchive],
-      t.signal,
-    );
+    await prepareWithTool(python, [archiveScript, source, bArchive], t.signal);
     phase("archive B prepared");
     const bBytes = await readFile(bArchive);
     const manifest = {
@@ -202,12 +221,9 @@ createInterface({input:process.stdin}).on('line',line=>{
 `,
     );
     const agentTar = join(home, "agent.tgz");
-    const agentPacked = spawnSync(
-      "tar",
-      ["-czf", agentTar, "-C", join(home, "agent-package"), "package"],
-      { encoding: "utf8" },
-    );
-    assert.equal(agentPacked.status, 0, agentPacked.stderr);
+    // Git Bash tar interprets an absolute C:\\ path as a remote archive host. Use the
+    // same native archive writer as distribution builds, including on Windows.
+    await prepareWithTool(python, [archiveScript, join(home, "agent-package"), agentTar], t.signal);
     const agentBytes = await readFile(agentTar);
     const requests = [];
     const server = createServer((request, response) => {
@@ -275,7 +291,9 @@ createInterface({input:process.stdin}).on('line',line=>{
       npm_config_cache: join(home, "npm-cache"),
       PATH: `${bait}${process.platform === "win32" ? ";" : ":"}${process.env.PATH ?? ""}`,
     };
-    async function run(version, args) {
+    async function run(version, args, timeout = 180_000) {
+      const label = `Roll ${version}: ${args.join(" ")}`;
+      phase(`running ${label}`);
       const versionRoot = join(root, "versions", version);
       const cli = join(versionRoot, "app/dist/cli/index.js");
       const wrapper = join(home, `entry-${version}.mjs`);
@@ -297,7 +315,8 @@ await import(${JSON.stringify(pathToFileURL(cli).href)});
           cwd: home,
           env,
           stdio: ["ignore", "pipe", "pipe"],
-          timeout: 180_000,
+          timeout,
+          signal: t.signal,
         });
         let stdout = "";
         let stderr = "";
@@ -306,9 +325,18 @@ await import(${JSON.stringify(pathToFileURL(cli).href)});
         });
         child.stderr.on("data", (bytes) => {
           stderr += bytes;
+          // Fixture-only output: show the actual CLI stage while retaining it for assertions.
+          process.stderr.write(bytes);
         });
-        child.on("error", reject);
-        child.on("close", (status) => resolve({ status, stdout, stderr }));
+        let childError;
+        child.on("error", (error) => {
+          childError = error;
+        });
+        child.on("close", (status, signal) => {
+          phase(`finished ${label} (exit ${status}, signal ${signal})`);
+          if (childError) return reject(childError);
+          resolve({ status, stdout, stderr: `${stderr}\nexit=${status}, signal=${signal}` });
+        });
       });
     }
     const install = await run(a, ["agent", "install", packageName]);
@@ -323,7 +351,9 @@ await import(${JSON.stringify(pathToFileURL(cli).href)});
     assert.equal(lifecycleBefore.node, lifecycleBefore.child);
     assert.ok(lifecycleBefore.node.includes(a));
     await writeFile(join(home, "user-data-marker"), "keep");
-    const update = await run(a, ["update"]);
+    // The production extractor alone permits 180s per tool; a deadline for the complete
+    // transaction must also allow hashing, preflight, npm lifecycle and service reconciliation.
+    const update = await run(a, ["update"], 360_000);
     assert.equal(update.status, 0, update.stderr);
     phase("Roll and Agent updated to B");
     assert.equal((await readFile(join(root, "current.txt"), "utf8")).trim(), b);
