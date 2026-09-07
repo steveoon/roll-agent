@@ -11,7 +11,8 @@ test("archive output is deterministic and contains no links", async (t) => {
   t.after(() => rm(root, { recursive: true, force: true }));
   const source = join(root, "source");
   await mkdir(source);
-  await writeFile(join(source, "hello.txt"), "hello");
+  await mkdir(join(source, "nested"));
+  await writeFile(join(source, "nested/hello.txt"), "hello");
   for (const extension of ["zip", "tar.gz"]) {
     const files = [join(root, `one.${extension}`), join(root, `two.${extension}`)];
     for (const path of files) {
@@ -23,6 +24,18 @@ test("archive output is deterministic and contains no links", async (t) => {
       assert.equal(result.status, 0, result.stderr);
     }
     assert.equal(await sha256(files[0]), await sha256(files[1]));
+    if (extension === "zip") {
+      const names = spawnSync(
+        process.platform === "win32" ? "python" : "python3",
+        [
+          "-c",
+          'import sys,zipfile; names=zipfile.ZipFile(sys.argv[1]).namelist(); assert names==["nested/hello.txt"], names',
+          files[0],
+        ],
+        { encoding: "utf8" },
+      );
+      assert.equal(names.status, 0, names.stderr);
+    }
   }
 });
 

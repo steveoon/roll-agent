@@ -271,9 +271,11 @@ test(
       );
       writeFileSync(join(tree, "app/bin/roll.js"), `console.log(${JSON.stringify(version)});`);
       const zipPath = join(temporary, "archive.zip");
-      const zipped = run(
-        `Compress-Archive -Path ${psQuote(join(tree, "*"))} -DestinationPath ${psQuote(zipPath)}`,
-      );
+      // Use the production writer: legacy Compress-Archive emits backslash entry names,
+      // which our intentionally strict portable-archive validation rejects.
+      const zipped = spawnSync("python", [join(import.meta.dirname, "archive.py"), tree, zipPath], {
+        encoding: "utf8",
+      });
       assert.equal(zipped.status, 0, zipped.stderr);
       const bytes = readFileSync(zipPath);
       const sha = createHash("sha256").update(bytes).digest("hex");
