@@ -3,6 +3,7 @@ import type { ExecFileOptions } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { promisify } from "node:util";
+import { getExecutionEnvironment } from "../../execution-environment/index.ts";
 
 const execFileAsync = promisify(execFile);
 
@@ -91,11 +92,19 @@ export async function runPackageManager(
   options: PackageManagerRunOptions = {},
 ): Promise<PackageManagerRunResult> {
   const { platform, ...execOptions } = options;
-  const invocation = createPackageManagerExecInvocation(spec, platform ?? process.platform);
+  const environment = getExecutionEnvironment();
+  const resolved =
+    spec.command === "npm"
+      ? environment.resolveCommand(spec.command, spec.args, execOptions.env ?? process.env)
+      : undefined;
+  const invocation = resolved
+    ? { file: resolved.command, args: resolved.args, shell: false }
+    : createPackageManagerExecInvocation(spec, platform ?? process.platform);
 
   const result = await execFileAsync(invocation.file, [...invocation.args], {
     maxBuffer: PACKAGE_MANAGER_MAX_BUFFER,
     ...execOptions,
+    ...(resolved ? { env: resolved.env } : {}),
     encoding: "utf-8",
     ...(invocation.shell ? { shell: invocation.shell } : {}),
   });

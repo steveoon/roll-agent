@@ -114,3 +114,37 @@ jobs:
         run: node scripts/create-github-releases.mjs
         env:
           GITHUB_TOKEN: ${{ github.token }}
+
+  standalone_distribution_gate:
+    needs: npm_publish
+    if: needs.npm_publish.result == 'success'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      build: ${{ steps.check.outputs.build }}
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        with:
+          fetch-depth: 2
+          persist-credentials: false
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
+        with:
+          node-version: 24.18.0
+          package-manager-cache: false
+      - id: check
+        name: Skip unchanged or already published Core distributions
+        run: node scripts/distribution/check-release.mjs
+
+  standalone_distribution:
+    needs: [npm_publish, standalone_distribution_gate]
+    if: needs.standalone_distribution_gate.outputs.build == 'true'
+    uses: ./.github/workflows/distribution.yml
+    permissions:
+      contents: read
+    secrets:
+      ROLL_DIST_SSH_HOST: ${{ secrets.ROLL_DIST_SSH_HOST }}
+      ROLL_DIST_SSH_USER: ${{ secrets.ROLL_DIST_SSH_USER }}
+      ROLL_DIST_SSH_KEY: ${{ secrets.ROLL_DIST_SSH_KEY }}
+      ROLL_DIST_SSH_KNOWN_HOSTS: ${{ secrets.ROLL_DIST_SSH_KNOWN_HOSTS }}
+      ROLL_DIST_SSH_PORT: ${{ secrets.ROLL_DIST_SSH_PORT }}

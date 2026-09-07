@@ -4,6 +4,10 @@ import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import {
+  resolveExecutionEnvironment,
+  withExecutionEnvironment,
+} from "../../execution-environment/index.ts";
+import {
   checkForUpdate,
   checkPublishedPackageUpdate,
   fetchLatestPublishedVersion,
@@ -70,6 +74,91 @@ function writePackageCache(fakeHome: string, packageName: string, latestVersion:
 }
 
 describe("update-checker", () => {
+  test("npm and standalone lookup failures both report unavailable without requesting an update", async (t) => {
+    await withFakeHome(async () => {
+      const host = resolveExecutionEnvironment();
+      const failedNpm = {
+        ...host,
+        resolveCommand() {
+          return {
+            command: process.execPath,
+            args: ["-e", "process.exit(1)"],
+            env: host.createEnv(process.env),
+          };
+        },
+      };
+      const npm = await withExecutionEnvironment(failedNpm, () =>
+        checkForUpdate({ forceRefresh: true }),
+      );
+      assert.equal(npm.unavailable, true);
+      assert.equal(npm.hasUpdate, false);
+      t.mock.method(globalThis, "fetch", async () => new Response("unavailable", { status: 503 }));
+      const standalone = await withExecutionEnvironment(
+        {
+          ...host,
+          mode: "bundled",
+          installation: { ...host.installation, channel: "standalone", platform: "darwin-arm64" },
+        },
+        () => checkForUpdate({ forceRefresh: true }),
+      );
+      assert.equal(standalone.unavailable, true);
+      assert.equal(standalone.hasUpdate, false);
+    });
+  });
+
+  test("an npm lookup failure does not turn a stale cache into an install request", async () => {
+    await withFakeHome(async (home) => {
+      const host = resolveExecutionEnvironment();
+      writePackageCache(home, "@roll-agent/core", "99.0.0");
+      const failedNpm = {
+        ...host,
+        resolveCommand() {
+          return {
+            command: process.execPath,
+            args: ["-e", "process.exit(1)"],
+            env: host.createEnv(process.env),
+          };
+        },
+      };
+      const result = await withExecutionEnvironment(failedNpm, () =>
+        checkForUpdate({ forceRefresh: true }),
+      );
+      assert.equal(result.latest, "99.0.0");
+      assert.equal(result.unavailable, true);
+      assert.equal(result.hasUpdate, false);
+    });
+  });
+  test("standalone cache is separated from npm and from other platforms", async () => {
+    await withFakeHome(async (fakeHome) => {
+      const host = resolveExecutionEnvironment();
+      const current = host.installation.version;
+      const latest = nextPatchVersion(current);
+      writePackageCache(fakeHome, "@roll-agent/core", "99.0.0");
+      const environment = {
+        ...host,
+        mode: "bundled" as const,
+        installation: {
+          ...host.installation,
+          channel: "standalone" as const,
+          platform: "darwin-arm64",
+        },
+      };
+      const npmOnly = await withExecutionEnvironment(environment, () =>
+        checkForUpdate({ allowNetwork: false }),
+      );
+      assert.equal(npmOnly.hasUpdate, false);
+      writePackageCache(fakeHome, "standalone:https://roll.duliday.com:darwin-arm64", latest);
+      const matching = await withExecutionEnvironment(environment, () =>
+        checkForUpdate({ allowNetwork: false }),
+      );
+      assert.equal(matching.latest, latest);
+      const other = await withExecutionEnvironment(
+        { ...environment, installation: { ...environment.installation, platform: "linux-x64" } },
+        () => checkForUpdate({ allowNetwork: false }),
+      );
+      assert.equal(other.hasUpdate, false);
+    });
+  });
   test("getCurrentVersion returns a valid semver string", () => {
     const version = getCurrentVersion();
     assert.match(version, /^\d+\.\d+\.\d+/);

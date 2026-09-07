@@ -1,4 +1,5 @@
 import spawn from "cross-spawn";
+import { getExecutionEnvironment } from "../execution-environment/index.ts";
 import { createHash, randomUUID } from "node:crypto";
 import {
   closeSync,
@@ -540,6 +541,11 @@ function startAgentUnlocked(
   }
 
   const spawnSpec = resolveSpawnSpec(agent);
+  const invocation = getExecutionEnvironment().resolveCommand(
+    spawnSpec.command,
+    spawnSpec.args ?? [],
+    omitScheduleInvocationEnv({ ...process.env, ...(env ?? {}) }),
+  );
   const logPath = getAgentLogPath(dataDir, agent.skill.name);
   const logDir = dirname(logPath);
   if (!existsSync(logDir)) {
@@ -547,12 +553,12 @@ function startAgentUnlocked(
   }
 
   const logFd = openSync(logPath, "a");
-  const child = spawn(spawnSpec.command, [...(spawnSpec.args ?? [])], {
+  const child = spawn(invocation.command, [...invocation.args], {
     cwd: agent.installPath,
     detached: true,
     windowsHide: true,
     stdio: ["ignore", logFd, logFd],
-    env: omitScheduleInvocationEnv({ ...process.env, ...(env ?? {}) }),
+    env: invocation.env,
   });
   closeSync(logFd);
 

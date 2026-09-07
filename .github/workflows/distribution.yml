@@ -1,0 +1,136 @@
+name: Standalone distribution
+
+on:
+  push:
+    branches-ignore: [main]
+    paths:
+      - .github/workflows/distribution.yml
+      - scripts/distribution/**
+      - packages/core/src/execution-environment/**
+      - pnpm-lock.yaml
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: Publish to roll.duliday.com after all native checks pass
+        type: boolean
+        default: false
+  workflow_call:
+    secrets:
+      ROLL_DIST_SSH_HOST:
+        required: false
+      ROLL_DIST_SSH_USER:
+        required: false
+      ROLL_DIST_SSH_KEY:
+        required: false
+      ROLL_DIST_SSH_KNOWN_HOSTS:
+        required: false
+      ROLL_DIST_SSH_PORT:
+        required: false
+
+permissions: {}
+
+jobs:
+  build:
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: darwin-x64
+            runner: macos-15-intel
+          - platform: darwin-arm64
+            runner: macos-15
+          - platform: linux-x64
+            runner: ubuntu-24.04
+          - platform: linux-arm64
+            runner: ubuntu-24.04-arm
+          - platform: win32-x64
+            runner: windows-2025
+          - platform: win32-arm64
+            runner: windows-11-arm
+    runs-on: ${{ matrix.runner }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v5
+        env:
+          FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
+        with:
+          node-version: 24.18.0
+          package-manager-cache: false
+      - name: Install frozen dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Build production packages
+        run: pnpm --config.verify-deps-before-run=false --config.script-shell=bash --filter '@roll-agent/core...' run build
+      - name: Check distribution scripts
+        run: node --test 'scripts/distribution/*.test.mjs'
+      - name: Build and test detached native distribution
+        run: node scripts/distribution/build.mjs distribution-assets
+      - name: Verify native A to B upgrade and npm Agent lifecycle
+        run: |
+          archive=$(find distribution-assets -maxdepth 1 -type f | head -n 1)
+          ROLL_TEST_DISTRIBUTION_ARCHIVE="$archive" node --test scripts/distribution/upgrade.test.mjs
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: roll-${{ matrix.platform }}
+          path: distribution-assets/*
+          if-no-files-found: error
+          compression-level: 0
+
+  assemble:
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
+        with:
+          node-version: 24.18.0
+          package-manager-cache: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: roll-*
+          merge-multiple: true
+          path: publication
+      - name: Validate all six assets and generate publication metadata
+        run: |
+          version=$(node -p "JSON.parse(require('fs').readFileSync('packages/core/package.json')).version")
+          node scripts/distribution/prepare-publication.mjs publication "$version"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: standalone-publication
+          path: publication/*
+          if-no-files-found: error
+          compression-level: 0
+
+  deploy:
+    needs: assemble
+    if: github.ref == 'refs/heads/main' && vars.ROLL_DISTRIBUTION_ENABLED == 'true' && (github.event_name != 'workflow_dispatch' || inputs.publish == true)
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: standalone-publication
+          path: publication
+      - name: Upload verified artifacts and atomically publish stable
+        env:
+          ROLL_DIST_SSH_HOST: ${{ secrets.ROLL_DIST_SSH_HOST }}
+          ROLL_DIST_SSH_USER: ${{ secrets.ROLL_DIST_SSH_USER }}
+          ROLL_DIST_SSH_KEY: ${{ secrets.ROLL_DIST_SSH_KEY }}
+          ROLL_DIST_SSH_KNOWN_HOSTS: ${{ secrets.ROLL_DIST_SSH_KNOWN_HOSTS }}
+          ROLL_DIST_SSH_PORT: ${{ secrets.ROLL_DIST_SSH_PORT }}
+        run: bash scripts/distribution/upload.sh publication

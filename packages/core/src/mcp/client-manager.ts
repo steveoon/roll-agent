@@ -1,4 +1,5 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { getExecutionEnvironment } from "../execution-environment/index.ts";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
@@ -128,11 +129,16 @@ function createStdioTransport(
   cwd: string,
   env?: Readonly<Record<string, string>>,
 ): Transport {
+  const invocation = getExecutionEnvironment().resolveCommand(
+    transport.command,
+    transport.args ?? [],
+    buildStdioChildEnv(env),
+  );
   const stdioTransport = new CloseOnceStdioClientTransport({
-    command: transport.command,
-    args: [...(transport.args ?? [])],
+    command: invocation.command,
+    args: [...invocation.args],
     cwd,
-    env: buildStdioChildEnv(env),
+    env: invocation.env,
     stderr: "pipe",
     ...(transport.maxBufferSize !== undefined ? { maxBufferSize: transport.maxBufferSize } : {}),
   });

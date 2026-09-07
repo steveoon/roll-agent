@@ -2,6 +2,12 @@ import { readFileSync, writeFileSync, mkdirSync, existsSync } from "node:fs";
 import { resolve, dirname } from "node:path";
 import { homedir } from "node:os";
 import { npmViewNetworkArgs, runPackageManager } from "./package-manager.ts";
+import { getExecutionEnvironment } from "../../execution-environment/index.ts";
+import {
+  DISTRIBUTION_ORIGIN,
+  fetchDistributionManifest,
+  selectDistributionAsset,
+} from "../../execution-environment/distribution.ts";
 
 const CACHE_TTL_MS = 24 * 60 * 60 * 1000;
 const CORE_PACKAGE_NAME = "@roll-agent/core";
@@ -52,6 +58,7 @@ export interface UpdateInfo {
   readonly current: string;
   readonly latest: string;
   readonly hasUpdate: boolean;
+  readonly unavailable?: boolean;
 }
 
 function getCachePath(): string {
@@ -176,25 +183,24 @@ export async function fetchLatestPublishedVersion(
   packageName: string,
   options: PackageVersionQueryOptions = {},
 ): Promise<string | undefined> {
-  const forceRefresh = options.forceRefresh ?? false;
-  const allowNetwork = options.allowNetwork ?? true;
+  return (await queryPublishedVersion(packageName, options)).latest;
+}
+
+async function queryPublishedVersion(
+  packageName: string,
+  options: PackageVersionQueryOptions,
+): Promise<{ latest: string | undefined; unavailable: boolean }> {
   const cache = readPackageCacheEntry(packageName);
-
-  if (!forceRefresh && cache && Date.now() - cache.checkedAt < CACHE_TTL_MS) {
-    return cache.latestVersion;
+  if (!options.forceRefresh && cache && Date.now() - cache.checkedAt < CACHE_TTL_MS) {
+    return { latest: cache.latestVersion, unavailable: false };
   }
-
-  if (!allowNetwork) {
-    return cache?.latestVersion;
-  }
-
+  if (options.allowNetwork === false) return { latest: cache?.latestVersion, unavailable: false };
   const latest = await fetchLatestPublishedVersionFromRegistry(packageName, options);
   if (latest) {
     writePackageCacheEntry(packageName, latest);
-    return latest;
+    return { latest, unavailable: false };
   }
-
-  return cache?.latestVersion;
+  return { latest: cache?.latestVersion, unavailable: true };
 }
 
 export function getCurrentVersion(): string {
@@ -337,12 +343,41 @@ export async function checkPublishedPackageUpdate(
 export async function checkForUpdate(
   options: PackageVersionQueryOptions = {},
 ): Promise<UpdateInfo> {
-  const current = getCurrentVersion();
-  const latest = (await fetchLatestPublishedVersion(CORE_PACKAGE_NAME, options)) ?? current;
+  const environment = getExecutionEnvironment();
+  const current = environment.installation.version;
+  if (environment.mode === "bundled") {
+    const platform = environment.installation.platform!;
+    const cacheKey = `standalone:${DISTRIBUTION_ORIGIN}:${platform}`;
+    const cache = readPackageCacheEntry(cacheKey);
+    let latest = cache?.latestVersion;
+    if (
+      options.allowNetwork !== false &&
+      (options.forceRefresh || !cache || Date.now() - cache.checkedAt >= CACHE_TTL_MS)
+    ) {
+      try {
+        const manifest = await fetchDistributionManifest({
+          ...(options.timeoutMs === undefined ? {} : { timeoutMs: options.timeoutMs }),
+        });
+        selectDistributionAsset(manifest, platform);
+        latest = manifest.version;
+        writePackageCacheEntry(cacheKey, latest);
+      } catch {
+        return { current, latest: latest ?? current, hasUpdate: false, unavailable: true };
+      }
+    }
+    return {
+      current,
+      latest: latest ?? current,
+      hasUpdate: latest !== undefined && isNewerVersion(latest, current),
+    };
+  }
+  const result = await queryPublishedVersion(CORE_PACKAGE_NAME, options);
+  const latest = result.latest ?? current;
 
   return {
     current,
     latest,
-    hasUpdate: isNewerVersion(latest, current),
+    hasUpdate: !result.unavailable && isNewerVersion(latest, current),
+    ...(result.unavailable ? { unavailable: true } : {}),
   };
 }

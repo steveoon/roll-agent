@@ -5,9 +5,11 @@ import {
   mkdirSync,
   readdirSync,
   readFileSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs";
-import { resolve } from "node:path";
+import { delimiter, resolve } from "node:path";
+import { pathToFileURL } from "node:url";
 import { createHash, randomUUID } from "node:crypto";
 import { spawn, spawnSync, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { createServer } from "node:net";
@@ -47,12 +49,61 @@ export interface AgentRuntimeSnapshot {
 export const CURRENT_CORE_VERSION = readCurrentCoreVersion();
 export const NEXT_PATCH_CORE_VERSION = bumpPatchVersion(CURRENT_CORE_VERSION);
 
+const fakeNpmEntries = new Map<string, string>();
+
+/** Only fixtures explicitly created by this test process can replace npm. */
+function cliTestEntrypoint(env: Readonly<Record<string, string>> | undefined): string {
+  for (const bin of (env?.["PATH"] ?? "").split(delimiter)) {
+    const wrapper = fakeNpmEntries.get(resolve(bin));
+    if (wrapper !== undefined) return wrapper;
+  }
+  return resolve(import.meta.dirname, "index.ts");
+}
+
+function registerFakeNpm(binDir: string): void {
+  const npmPath = resolve(binDir, "npm");
+  const wrapper = resolve(binDir, "roll-test-entry.mts");
+  const prefix = resolve(binDir, "global-prefix");
+  const globalRoot = resolve(prefix, "node_modules");
+  const scopedRoot = resolve(globalRoot, "@roll-agent");
+  mkdirSync(scopedRoot, { recursive: true });
+  const packageRoot = resolve(import.meta.dirname, "../..");
+  const coreLink = resolve(scopedRoot, "core");
+  if (!existsSync(coreLink)) {
+    symlinkSync(packageRoot, coreLink, process.platform === "win32" ? "junction" : "dir");
+  }
+  const envModule = pathToFileURL(
+    resolve(import.meta.dirname, "../execution-environment/index.ts"),
+  ).href;
+  const cliEntry = resolve(import.meta.dirname, "index.ts");
+  writeFileSync(
+    wrapper,
+    `import {resolveExecutionEnvironment,withExecutionEnvironment} from ${JSON.stringify(envModule)};
+const host = resolveExecutionEnvironment();
+const npmPath = ${JSON.stringify(npmPath)};
+const environment = {
+  ...host,
+  npmCliPath: npmPath,
+  installation: {...host.installation, channel: 'host'},
+  resolveCommand(command,args,base) {
+    if (command !== 'npm') return host.resolveCommand(command,args,base);
+    const metadata = args[0] === 'prefix' ? ${JSON.stringify(prefix)} : args[0] === 'root' ? ${JSON.stringify(globalRoot)} : undefined;
+    return {command:host.nodePath, args:metadata === undefined ? [npmPath,...args] : ['-e','process.stdout.write('+JSON.stringify(metadata)+'+"\\\\n")'], env:host.createEnv(base)};
+  }
+};
+process.argv[1] = ${JSON.stringify(cliEntry)};
+await withExecutionEnvironment(environment, () => import(${JSON.stringify(pathToFileURL(cliEntry).href)}));
+`,
+  );
+  fakeNpmEntries.set(resolve(binDir), wrapper);
+}
+
 export function runRoll(
   args: readonly string[],
   cwd: string,
   options: RunRollOptions = {},
 ): CliResult {
-  const cliEntry = resolve(import.meta.dirname, "index.ts");
+  const cliEntry = cliTestEntrypoint(options.env);
   const result = spawnSync(
     process.execPath,
     ["--experimental-strip-types", "--experimental-sqlite", cliEntry, ...args],
@@ -76,7 +127,7 @@ export function spawnRollProcess(
   cwd: string,
   env: Readonly<Record<string, string>>,
 ): SpawnedRollProcess {
-  const cliEntry = resolve(import.meta.dirname, "index.ts");
+  const cliEntry = cliTestEntrypoint(env);
   const child = spawn(
     process.execPath,
     ["--experimental-strip-types", "--experimental-sqlite", cliEntry, ...args],
@@ -446,6 +497,7 @@ process.exit(0);
     "utf-8",
   );
   chmodSync(npmPath, 0o755);
+  registerFakeNpm(binDir);
 }
 
 export function createDefaultRegistryBait(workspace: string): {
@@ -592,6 +644,7 @@ process.exit(0);
     "utf-8",
   );
   chmodSync(npmPath, 0o755);
+  registerFakeNpm(binDir);
 }
 
 export function createCoreManagedHttpFixtureAgent(

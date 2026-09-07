@@ -18,6 +18,34 @@ import {
   createCoreManagedHttpFixtureAgent,
 } from "./smoke.e2e-harness.ts";
 
+test("e2e smoke: failed version lookup skips self-update without claiming installation failure", () => {
+  const workspace = mkdtempSync(resolve(tmpdir(), "roll-update-unavailable-"));
+  try {
+    const bin = resolve(workspace, "fake-bin");
+    createFakeNpm(bin, CURRENT_CORE_VERSION);
+    const marker = resolve(workspace, "unexpected-install");
+    writeFileSync(
+      resolve(bin, "npm"),
+      `#!/usr/bin/env node\nif(process.argv[2]==='install')require('node:fs').writeFileSync(${JSON.stringify(marker)},'called');process.exit(1);\n`,
+    );
+    writeFileSync(resolve(workspace, "roll.config.yaml"), "{}\n");
+    for (const args of [["update", "--check"], ["update"]]) {
+      const result = runRoll(args, workspace, {
+        env: {
+          HOME: workspace,
+          PATH: `${bin}${process.platform === "win32" ? ";" : ":"}${process.env.PATH ?? ""}`,
+        },
+      });
+      assert.equal(result.status, 0, result.stderr);
+      assert.match(result.stderr, /本体更新已跳过/);
+      assert.doesNotMatch(result.stderr, /roll 更新失败|已是最新版本/);
+      assert.equal(existsSync(marker), false);
+    }
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
 test("e2e smoke: installed-package rename is rejected and its directory is rolled back", () => {
   const workspace = mkdtempSync(resolve(tmpdir(), `roll-update-package-rename-${randomUUID()}-`));
   const fakeBinDir = resolve(workspace, "fake-bin");

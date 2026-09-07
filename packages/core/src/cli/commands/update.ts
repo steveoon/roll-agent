@@ -72,6 +72,20 @@ import {
 import type { AgentSourceType, RegisteredAgent } from "../../types/agent.ts";
 import type { RollConfig } from "../../config/schema.ts";
 import { createBundledRollInvocation } from "../../companion-host/invocation.ts";
+import {
+  getExecutionEnvironment,
+  withExecutionEnvironment,
+} from "../../execution-environment/index.ts";
+import {
+  resolveSelfUpdateTarget,
+  type SelfUpdateTarget,
+} from "../../execution-environment/self-update.ts";
+import {
+  DistributionUpdateInterruptedError,
+  fetchDistributionManifest,
+  prepareDistributionUpdate,
+  type PreparedDistribution,
+} from "../../execution-environment/distribution.ts";
 import { acquireSchedulerAdmissionLockWithRetry } from "../../scheduler-host/scheduler-admission.ts";
 import {
   SCHEDULER_UPDATE_RECONCILE_OUTCOMES,
@@ -278,6 +292,7 @@ async function updateSelf(
   latest: string,
   dryRun: boolean,
   install: InstallConfig,
+  target: Extract<SelfUpdateTarget, { channel: "npm" }>,
 ): Promise<boolean> {
   const current = getCurrentVersion();
   if (current === latest) {
@@ -294,7 +309,14 @@ async function updateSelf(
   const spinner = createSpinner("正在更新 @roll-agent/core...").start();
   const installSpec: PackageManagerRunSpec = {
     command: "npm",
-    args: ["install", "-g", `@roll-agent/core@${latest}`, ...buildInstallNetworkArgs(install)],
+    args: [
+      "install",
+      "-g",
+      "--prefix",
+      target.prefix,
+      `@roll-agent/core@${latest}`,
+      ...buildInstallNetworkArgs(install),
+    ],
   };
   try {
     await runPackageManagerWithRetry(
@@ -512,6 +534,8 @@ export default defineCommand({
   },
   async run({ args }) {
     const isCheckOnly = args.check;
+    let executionEnvironment = getExecutionEnvironment();
+    const selfUpdateTarget = await resolveSelfUpdateTarget(executionEnvironment);
     const configInspection = inspectConfigFile();
 
     let installConfig: InstallConfig;
@@ -540,7 +564,11 @@ export default defineCommand({
     log.info("检查 roll 更新...");
     const info = await checkForUpdate(versionQuery);
 
-    if (info.hasUpdate) {
+    if (selfUpdateTarget.channel === "unmanaged") {
+      log.info(selfUpdateTarget.reason);
+    } else if (info.unavailable) {
+      log.warn("暂时无法检查 roll 更新，本体更新已跳过；当前版本继续可用。");
+    } else if (info.hasUpdate) {
       log.success(`roll 有新版本: v${info.current} → v${info.latest}`);
     } else {
       log.info(`roll 已是最新版本 (v${info.current})`);
@@ -650,6 +678,25 @@ export default defineCommand({
 
     // === 3. 执行更新 ===
     log.info("");
+    let preparedDistribution: PreparedDistribution | undefined;
+    if (selfUpdateTarget.channel === "standalone" && info.hasUpdate) {
+      const spinner = createSpinner(`下载并验证 Roll v${info.latest}...`).start();
+      try {
+        const manifest = await fetchDistributionManifest({
+          version: info.latest,
+          timeoutMs: installConfig.networkTimeoutMs,
+        });
+        preparedDistribution = await prepareDistributionUpdate(executionEnvironment, manifest, {
+          timeoutMs: installConfig.networkTimeoutMs,
+        });
+        spinner.succeed(`Roll v${info.latest} 已验证，准备进入更新维护阶段`);
+      } catch (error) {
+        spinner.fail("独立发行包下载或验证失败，当前版本与 Agent 保持原状");
+        log.error(error instanceof Error ? error.message : String(error));
+        process.exitCode = error instanceof DistributionUpdateInterruptedError ? error.exitCode : 1;
+        return;
+      }
+    }
     let registryLock: AgentRegistryLock | undefined;
     let maintenanceGuards: readonly AgentUsageMaintenanceGuard[] = [];
     let managedRuntimeBaselines = new Map<string, UpdateManagedRuntimeBaseline>();
@@ -657,6 +704,7 @@ export default defineCommand({
     try {
       schedulerAdmissionLock = await acquireSchedulerAdmissionLockWithRetry();
     } catch (error) {
+      await preparedDistribution?.dispose();
       log.error(
         `更新前无法暂停 scheduler 领取新任务，尚未修改软件包：${error instanceof Error ? error.message : String(error)}`,
       );
@@ -677,6 +725,7 @@ export default defineCommand({
           await stopManagedAgentsForUpdate(agents, maintenanceGuards, agentsConfig.dataDir),
         );
       } catch (error) {
+        await preparedDistribution?.dispose();
         releaseUpdateMaintenanceGuards(maintenanceGuards);
         registryLock?.release();
         schedulerAdmissionLock?.release();
@@ -693,46 +742,259 @@ export default defineCommand({
     try {
       // 3a. 更新 roll-core
       let selfUpdateFailed = false;
-      if (info.hasUpdate) {
-        selfUpdated = await updateSelf(info.latest, false, installConfig);
-        if (!selfUpdated) selfUpdateFailed = true;
-      }
-
-      if (
-        selfUpdated &&
-        (configInspection.status === "needs-migration" || configInspection.status === "invalid")
-      ) {
-        log.info("");
-        logConfigInspectionNotice(configInspection, "post-update");
-      }
-      if (agentsConfig === undefined || store === undefined) {
-        log.warn("无法可靠读取 Agent 注册表，已跳过已注册 Agent 更新。");
-      }
-
-      // 3b. 更新 Agent
-      let updatedCount = 0;
-      let failedCount = 0;
-
-      for (const agent of agents) {
-        if (!store || !agentsConfig) {
-          break;
+      if (info.hasUpdate && selfUpdateTarget.channel !== "unmanaged") {
+        if (preparedDistribution) {
+          executionEnvironment = await preparedDistribution.activate();
+          selfUpdated = true;
+          log.success(`roll 已更新到 v${info.latest}`);
+        } else if (selfUpdateTarget.channel === "npm") {
+          selfUpdated = await updateSelf(info.latest, false, installConfig, selfUpdateTarget);
+          if (!selfUpdated) selfUpdateFailed = true;
         }
-        const sourceType = inferAgentSourceType(agent);
-        const managedBaseline = managedRuntimeBaselines.get(agent.skill.name);
-        const wasRunning =
-          managedBaseline !== undefined ||
-          (agent.runtime.ownership === "core-managed" &&
-            getAgentPid(agentsConfig.dataDir, agent.skill.name) !== undefined);
-        const shouldRestart =
-          managedBaseline === undefined
-            ? wasRunning
-            : managedBaseline.retention === MANAGED_AGENT_RUNTIME_RETENTIONS.persistent;
+      }
 
-        switch (sourceType) {
-          case "git": {
-            const ok = await updateGitAgent(agent);
-            if (ok) {
-              // 重新解析 SKILL.md 并更新 store
+      await withExecutionEnvironment(executionEnvironment, async () => {
+        if (
+          selfUpdated &&
+          (configInspection.status === "needs-migration" || configInspection.status === "invalid")
+        ) {
+          log.info("");
+          logConfigInspectionNotice(configInspection, "post-update");
+        }
+        if (agentsConfig === undefined || store === undefined) {
+          log.warn("无法可靠读取 Agent 注册表，已跳过已注册 Agent 更新。");
+        }
+
+        // 3b. 更新 Agent
+        let updatedCount = 0;
+        let failedCount = 0;
+
+        for (const agent of agents) {
+          if (!store || !agentsConfig) {
+            break;
+          }
+          const sourceType = inferAgentSourceType(agent);
+          const managedBaseline = managedRuntimeBaselines.get(agent.skill.name);
+          const wasRunning =
+            managedBaseline !== undefined ||
+            (agent.runtime.ownership === "core-managed" &&
+              getAgentPid(agentsConfig.dataDir, agent.skill.name) !== undefined);
+          const shouldRestart =
+            managedBaseline === undefined
+              ? wasRunning
+              : managedBaseline.retention === MANAGED_AGENT_RUNTIME_RETENTIONS.persistent;
+
+          switch (sourceType) {
+            case "git": {
+              const ok = await updateGitAgent(agent);
+              if (ok) {
+                // 重新解析 SKILL.md 并更新 store
+                try {
+                  const discovered = discoverUpdatedAgent(agent, agent.installPath);
+                  const updated: RegisteredAgent = {
+                    ...agent,
+                    skill: discovered.skill,
+                    transport: discovered.transport,
+                    runtime: discovered.runtime,
+                    ...(discovered.skillBody.length > 0 ? { skillBody: discovered.skillBody } : {}),
+                  };
+                  const replaced = store.replace(agent.skill.name, updated);
+                  if (!replaced) {
+                    log.warn(`${agent.skill.name} 已从注册表中移除，跳过元数据刷新`);
+                    failedCount++;
+                  } else {
+                    await maybeRestartManagedAgent(
+                      updated,
+                      wasRunning,
+                      shouldRestart,
+                      agentsConfig.dataDir,
+                      managedBaseline?.guard,
+                    );
+                    updatedCount++;
+                  }
+                } catch (err) {
+                  managedRuntimeBaselines.delete(agent.skill.name);
+                  store.updateStatus(agent.skill.name, "error");
+                  log.warn(
+                    `${agent.skill.name} metadata 刷新或重启失败，未自动恢复常驻进程: ${err instanceof Error ? err.message : String(err)}`,
+                  );
+                  failedCount++;
+                }
+              } else {
+                managedRuntimeBaselines.delete(agent.skill.name);
+                store.updateStatus(agent.skill.name, "error");
+                log.warn(
+                  `${agent.skill.name} 的 Git 工作目录可能已部分更新，已保持停止状态；请检查目录后手动执行 \`roll agent start ${agent.skill.name}\`。`,
+                );
+                failedCount++;
+              }
+              break;
+            }
+            case "installed-package": {
+              if (wasRunning && managedBaseline === undefined) {
+                try {
+                  await stopAgentGracefully(agentsConfig.dataDir, agent.skill.name);
+                } catch (err) {
+                  store.updateStatus(agent.skill.name, "error");
+                  log.warn(
+                    `${agent.skill.name} 停止失败，无法继续升级: ${err instanceof Error ? err.message : String(err)}`,
+                  );
+                  failedCount++;
+                  break;
+                }
+              }
+
+              let updateSpinner: ReturnType<typeof createSpinner> | undefined;
+              const reportInstalledPackageUpdate = (event: InstalledPackageUpdateEvent): void => {
+                switch (event.type) {
+                  case "install-start":
+                    updateSpinner = createSpinner(
+                      `更新 ${event.agentName} (npm install)...`,
+                    ).start();
+                    break;
+                  case "install-retry":
+                    if (updateSpinner !== undefined) {
+                      updateSpinner.text =
+                        `更新 ${event.agentName} 遇到网络问题，` +
+                        `${Math.round(event.delayMs / 1000)}s 后重试` +
+                        `（第 ${event.attempt + 1} 次）...`;
+                    }
+                    break;
+                  case "install-succeeded":
+                    updateSpinner?.succeed(`${event.agentName} 已重新安装`);
+                    break;
+                  case "install-failed":
+                    updateSpinner?.fail(`${event.agentName} 更新失败`);
+                    break;
+                }
+              };
+              const stoppedPersistentAgent =
+                managedBaseline?.retention === MANAGED_AGENT_RUNTIME_RETENTIONS.persistent
+                  ? managedBaseline.agent
+                  : undefined;
+              const updateResult = await updateInstalledPackage({
+                agent,
+                install: installConfig,
+                store,
+                shouldRestart,
+                resolvePackageSpec: getInstalledPackageUpdateSpec,
+                ...(args["skip-browser-setup"] !== undefined
+                  ? { skipBrowserSetup: args["skip-browser-setup"] }
+                  : {}),
+                ...(stoppedPersistentAgent !== undefined ? { stoppedPersistentAgent } : {}),
+                ...(shouldRestart
+                  ? {
+                      restartUpdatedAgent: (updated) =>
+                        startManagedAgentAndWait(
+                          updated,
+                          agentsConfig.dataDir,
+                          managedBaseline?.guard,
+                        ),
+                    }
+                  : {}),
+                report: reportInstalledPackageUpdate,
+              });
+              if (updateResult.ok) {
+                if (
+                  updateResult.commit.kind ===
+                  INSTALLED_PACKAGE_REPLACEMENT_COMMIT_KINDS.cleanupFailed
+                ) {
+                  const backupPath = getInstallDirectoryBackupPath(updateResult.commit.backup);
+                  log.warn(
+                    `${updateResult.agent.skill.name} 已更新，但旧安装目录副本清理失败：` +
+                      `${updateResult.commit.error instanceof Error ? updateResult.commit.error.message : String(updateResult.commit.error)}` +
+                      `；请检查 ${backupPath ?? updateResult.commit.backup.installDir}`,
+                  );
+                }
+                updatedCount++;
+              } else {
+                if (updateResult.retryCommand !== undefined) {
+                  log.info(`重试命令: ${updateResult.retryCommand}`);
+                }
+                for (const failure of updateResult.rollback.kind === "partial"
+                  ? updateResult.rollback.failures
+                  : []) {
+                  if (failure.step === INSTALLED_PACKAGE_REPLACEMENT_FAILURE_STEPS.registration) {
+                    log.warn(
+                      `${agent.skill.name} 注册表回滚失败：${
+                        failure.error instanceof Error
+                          ? failure.error.message
+                          : String(failure.error)
+                      }`,
+                    );
+                    continue;
+                  }
+                  const backupPath = getInstallDirectoryBackupPath(failure.backup);
+                  const message =
+                    `${agent.skill.name} 安装目录回滚失败：${
+                      failure.error instanceof Error ? failure.error.message : String(failure.error)
+                    }` +
+                    (backupPath === undefined
+                      ? `；请检查未清理的新安装目录 ${failure.backup.installDir}`
+                      : `；回滚副本保留在 ${backupPath}`);
+                  if (updateResult.phase === INSTALLED_PACKAGE_UPDATE_PHASES.install) {
+                    log.error(message);
+                  } else {
+                    log.warn(message);
+                  }
+                }
+                const runtimeRecoveryBlocked =
+                  updateResult.rollback.runtimeRecovery.kind ===
+                  INSTALLED_PACKAGE_REPLACEMENT_RUNTIME_RECOVERY_KINDS.blocked;
+                if (runtimeRecoveryBlocked) {
+                  managedRuntimeBaselines.delete(agent.skill.name);
+                }
+                store.updateStatus(agent.skill.name, "error");
+                if (updateResult.phase === INSTALLED_PACKAGE_UPDATE_PHASES.install) {
+                  log.error(updateResult.message);
+                } else {
+                  log.warn(
+                    `${agent.skill.name} metadata 刷新、setup 或重启失败${
+                      runtimeRecoveryBlocked ? "，未自动恢复常驻进程" : "，已恢复更新前安装目录状态"
+                    }: ${updateResult.message}`,
+                  );
+                }
+                failedCount++;
+              }
+              break;
+            }
+            case "remote-manifest": {
+              try {
+                const discovered = discoverUpdatedAgent(agent, agent.installPath);
+                const updated: RegisteredAgent = {
+                  ...agent,
+                  skill: discovered.skill,
+                  transport: discovered.transport,
+                  runtime: discovered.runtime,
+                  ...(discovered.skillBody.length > 0 ? { skillBody: discovered.skillBody } : {}),
+                };
+                const replaced = store.replace(agent.skill.name, updated);
+                if (!replaced) {
+                  log.warn(`${agent.skill.name} 已从注册表中移除，跳过元数据刷新`);
+                  failedCount++;
+                  break;
+                }
+                const ok = await refreshRemoteAgent(updated);
+                if (ok) {
+                  updatedCount++;
+                } else {
+                  failedCount++;
+                }
+              } catch (err) {
+                const nameChanged = err instanceof AgentUpdateNameChangedError;
+                if (nameChanged) {
+                  managedRuntimeBaselines.delete(agent.skill.name);
+                }
+                log.warn(
+                  `${agent.skill.name} manifest 刷新失败${
+                    nameChanged ? "，未自动恢复常驻进程" : ""
+                  }: ${err instanceof Error ? err.message : String(err)}`,
+                );
+                failedCount++;
+              }
+              break;
+            }
+            case "local-path": {
               try {
                 const discovered = discoverUpdatedAgent(agent, agent.installPath);
                 const updated: RegisteredAgent = {
@@ -757,299 +1019,99 @@ export default defineCommand({
                   updatedCount++;
                 }
               } catch (err) {
-                managedRuntimeBaselines.delete(agent.skill.name);
+                const nameChanged = err instanceof AgentUpdateNameChangedError;
+                if (nameChanged) {
+                  managedRuntimeBaselines.delete(agent.skill.name);
+                }
                 store.updateStatus(agent.skill.name, "error");
                 log.warn(
-                  `${agent.skill.name} metadata 刷新或重启失败，未自动恢复常驻进程: ${err instanceof Error ? err.message : String(err)}`,
+                  `${agent.skill.name} 本地 metadata 刷新或重启失败${
+                    nameChanged ? "，未自动恢复常驻进程" : ""
+                  }: ${err instanceof Error ? err.message : String(err)}`,
                 );
                 failedCount++;
               }
-            } else {
-              managedRuntimeBaselines.delete(agent.skill.name);
-              store.updateStatus(agent.skill.name, "error");
-              log.warn(
-                `${agent.skill.name} 的 Git 工作目录可能已部分更新，已保持停止状态；请检查目录后手动执行 \`roll agent start ${agent.skill.name}\`。`,
-              );
-              failedCount++;
+              break;
             }
-            break;
-          }
-          case "installed-package": {
-            if (wasRunning && managedBaseline === undefined) {
-              try {
-                await stopAgentGracefully(agentsConfig.dataDir, agent.skill.name);
-              } catch (err) {
-                store.updateStatus(agent.skill.name, "error");
-                log.warn(
-                  `${agent.skill.name} 停止失败，无法继续升级: ${err instanceof Error ? err.message : String(err)}`,
-                );
-                failedCount++;
-                break;
-              }
-            }
-
-            let updateSpinner: ReturnType<typeof createSpinner> | undefined;
-            const reportInstalledPackageUpdate = (event: InstalledPackageUpdateEvent): void => {
-              switch (event.type) {
-                case "install-start":
-                  updateSpinner = createSpinner(`更新 ${event.agentName} (npm install)...`).start();
-                  break;
-                case "install-retry":
-                  if (updateSpinner !== undefined) {
-                    updateSpinner.text =
-                      `更新 ${event.agentName} 遇到网络问题，` +
-                      `${Math.round(event.delayMs / 1000)}s 后重试` +
-                      `（第 ${event.attempt + 1} 次）...`;
-                  }
-                  break;
-                case "install-succeeded":
-                  updateSpinner?.succeed(`${event.agentName} 已重新安装`);
-                  break;
-                case "install-failed":
-                  updateSpinner?.fail(`${event.agentName} 更新失败`);
-                  break;
-              }
-            };
-            const stoppedPersistentAgent =
-              managedBaseline?.retention === MANAGED_AGENT_RUNTIME_RETENTIONS.persistent
-                ? managedBaseline.agent
-                : undefined;
-            const updateResult = await updateInstalledPackage({
-              agent,
-              install: installConfig,
-              store,
-              shouldRestart,
-              resolvePackageSpec: getInstalledPackageUpdateSpec,
-              ...(args["skip-browser-setup"] !== undefined
-                ? { skipBrowserSetup: args["skip-browser-setup"] }
-                : {}),
-              ...(stoppedPersistentAgent !== undefined ? { stoppedPersistentAgent } : {}),
-              ...(shouldRestart
-                ? {
-                    restartUpdatedAgent: (updated) =>
-                      startManagedAgentAndWait(
-                        updated,
-                        agentsConfig.dataDir,
-                        managedBaseline?.guard,
-                      ),
-                  }
-                : {}),
-              report: reportInstalledPackageUpdate,
-            });
-            if (updateResult.ok) {
-              if (
-                updateResult.commit.kind ===
-                INSTALLED_PACKAGE_REPLACEMENT_COMMIT_KINDS.cleanupFailed
-              ) {
-                const backupPath = getInstallDirectoryBackupPath(updateResult.commit.backup);
-                log.warn(
-                  `${updateResult.agent.skill.name} 已更新，但旧安装目录副本清理失败：` +
-                    `${updateResult.commit.error instanceof Error ? updateResult.commit.error.message : String(updateResult.commit.error)}` +
-                    `；请检查 ${backupPath ?? updateResult.commit.backup.installDir}`,
-                );
-              }
-              updatedCount++;
-            } else {
-              if (updateResult.retryCommand !== undefined) {
-                log.info(`重试命令: ${updateResult.retryCommand}`);
-              }
-              for (const failure of updateResult.rollback.kind === "partial"
-                ? updateResult.rollback.failures
-                : []) {
-                if (failure.step === INSTALLED_PACKAGE_REPLACEMENT_FAILURE_STEPS.registration) {
-                  log.warn(
-                    `${agent.skill.name} 注册表回滚失败：${
-                      failure.error instanceof Error ? failure.error.message : String(failure.error)
-                    }`,
-                  );
-                  continue;
-                }
-                const backupPath = getInstallDirectoryBackupPath(failure.backup);
-                const message =
-                  `${agent.skill.name} 安装目录回滚失败：${
-                    failure.error instanceof Error ? failure.error.message : String(failure.error)
-                  }` +
-                  (backupPath === undefined
-                    ? `；请检查未清理的新安装目录 ${failure.backup.installDir}`
-                    : `；回滚副本保留在 ${backupPath}`);
-                if (updateResult.phase === INSTALLED_PACKAGE_UPDATE_PHASES.install) {
-                  log.error(message);
-                } else {
-                  log.warn(message);
-                }
-              }
-              const runtimeRecoveryBlocked =
-                updateResult.rollback.runtimeRecovery.kind ===
-                INSTALLED_PACKAGE_REPLACEMENT_RUNTIME_RECOVERY_KINDS.blocked;
-              if (runtimeRecoveryBlocked) {
-                managedRuntimeBaselines.delete(agent.skill.name);
-              }
-              store.updateStatus(agent.skill.name, "error");
-              if (updateResult.phase === INSTALLED_PACKAGE_UPDATE_PHASES.install) {
-                log.error(updateResult.message);
-              } else {
-                log.warn(
-                  `${agent.skill.name} metadata 刷新、setup 或重启失败${
-                    runtimeRecoveryBlocked ? "，未自动恢复常驻进程" : "，已恢复更新前安装目录状态"
-                  }: ${updateResult.message}`,
-                );
-              }
-              failedCount++;
-            }
-            break;
-          }
-          case "remote-manifest": {
-            try {
-              const discovered = discoverUpdatedAgent(agent, agent.installPath);
-              const updated: RegisteredAgent = {
-                ...agent,
-                skill: discovered.skill,
-                transport: discovered.transport,
-                runtime: discovered.runtime,
-                ...(discovered.skillBody.length > 0 ? { skillBody: discovered.skillBody } : {}),
-              };
-              const replaced = store.replace(agent.skill.name, updated);
-              if (!replaced) {
-                log.warn(`${agent.skill.name} 已从注册表中移除，跳过元数据刷新`);
-                failedCount++;
-                break;
-              }
-              const ok = await refreshRemoteAgent(updated);
-              if (ok) {
-                updatedCount++;
-              } else {
-                failedCount++;
-              }
-            } catch (err) {
-              const nameChanged = err instanceof AgentUpdateNameChangedError;
-              if (nameChanged) {
-                managedRuntimeBaselines.delete(agent.skill.name);
-              }
-              log.warn(
-                `${agent.skill.name} manifest 刷新失败${
-                  nameChanged ? "，未自动恢复常驻进程" : ""
-                }: ${err instanceof Error ? err.message : String(err)}`,
-              );
-              failedCount++;
-            }
-            break;
-          }
-          case "local-path": {
-            try {
-              const discovered = discoverUpdatedAgent(agent, agent.installPath);
-              const updated: RegisteredAgent = {
-                ...agent,
-                skill: discovered.skill,
-                transport: discovered.transport,
-                runtime: discovered.runtime,
-                ...(discovered.skillBody.length > 0 ? { skillBody: discovered.skillBody } : {}),
-              };
-              const replaced = store.replace(agent.skill.name, updated);
-              if (!replaced) {
-                log.warn(`${agent.skill.name} 已从注册表中移除，跳过元数据刷新`);
-                failedCount++;
-              } else {
-                await maybeRestartManagedAgent(
-                  updated,
-                  wasRunning,
-                  shouldRestart,
-                  agentsConfig.dataDir,
-                  managedBaseline?.guard,
-                );
-                updatedCount++;
-              }
-            } catch (err) {
-              const nameChanged = err instanceof AgentUpdateNameChangedError;
-              if (nameChanged) {
-                managedRuntimeBaselines.delete(agent.skill.name);
-              }
-              store.updateStatus(agent.skill.name, "error");
-              log.warn(
-                `${agent.skill.name} 本地 metadata 刷新或重启失败${
-                  nameChanged ? "，未自动恢复常驻进程" : ""
-                }: ${err instanceof Error ? err.message : String(err)}`,
-              );
-              failedCount++;
-            }
-            break;
           }
         }
-      }
 
-      if (store !== undefined && agentsConfig !== undefined) {
-        failedCount += await restorePersistentManagedAgents(
-          managedRuntimeBaselines,
-          store,
-          agentsConfig.dataDir,
-        );
-      }
-
-      releaseUpdateMaintenanceGuards(maintenanceGuards);
-      maintenanceGuards = [];
-      registryLock?.release();
-      registryLock = undefined;
-      schedulerAdmissionLock?.release();
-      schedulerAdmissionLock = undefined;
-
-      let schedulerReconcileFailed = false;
-      if (selfUpdated) {
-        const schedulerResult = await reconcileSchedulerServiceAfterUpdate(
-          runSchedulerServiceRestartInFreshProcess,
-        );
-        switch (schedulerResult.outcome) {
-          case SCHEDULER_UPDATE_RECONCILE_OUTCOMES.restarted:
-            log.success("roll schedule daemon 用户服务已按新版本重装并重启。");
-            break;
-          case SCHEDULER_UPDATE_RECONCILE_OUTCOMES.deferred:
-            log.warn(`roll schedule daemon 用户服务仍在运行旧版本：${schedulerResult.reason}`);
-            break;
-          case SCHEDULER_UPDATE_RECONCILE_OUTCOMES.failed:
-            schedulerReconcileFailed = true;
-            log.warn(
-              `roll schedule daemon 用户服务自动重启失败：${schedulerResult.error}；请手动执行 roll schedule service restart`,
-            );
-            break;
-          case SCHEDULER_UPDATE_RECONCILE_OUTCOMES.notInstalled:
-            break;
+        if (store !== undefined && agentsConfig !== undefined) {
+          failedCount += await restorePersistentManagedAgents(
+            managedRuntimeBaselines,
+            store,
+            agentsConfig.dataDir,
+          );
         }
-      }
 
-      // === 4. 总结 ===
-      log.info("");
-      const totalFailed =
-        failedCount + (selfUpdateFailed ? 1 : 0) + (schedulerReconcileFailed ? 1 : 0);
-      if (totalFailed > 0) {
-        process.exitCode = 1;
+        releaseUpdateMaintenanceGuards(maintenanceGuards);
+        maintenanceGuards = [];
+        registryLock?.release();
+        registryLock = undefined;
+        schedulerAdmissionLock?.release();
+        schedulerAdmissionLock = undefined;
+
+        let schedulerReconcileFailed = false;
+        if (selfUpdated && (process.platform === "darwin" || process.platform === "win32")) {
+          const schedulerResult = await reconcileSchedulerServiceAfterUpdate(
+            runSchedulerServiceRestartInFreshProcess,
+          );
+          switch (schedulerResult.outcome) {
+            case SCHEDULER_UPDATE_RECONCILE_OUTCOMES.restarted:
+              log.success("roll schedule daemon 用户服务已按新版本重装并重启。");
+              break;
+            case SCHEDULER_UPDATE_RECONCILE_OUTCOMES.deferred:
+              log.warn(`roll schedule daemon 用户服务仍在运行旧版本：${schedulerResult.reason}`);
+              break;
+            case SCHEDULER_UPDATE_RECONCILE_OUTCOMES.failed:
+              schedulerReconcileFailed = true;
+              log.warn(
+                `roll schedule daemon 用户服务自动重启失败：${schedulerResult.error}；请手动执行 roll schedule service restart`,
+              );
+              break;
+            case SCHEDULER_UPDATE_RECONCILE_OUTCOMES.notInstalled:
+              break;
+          }
+          await reportCompanionServiceAfterUpdate();
+        }
+
+        // === 4. 总结 ===
+        log.info("");
+        const totalFailed =
+          failedCount + (selfUpdateFailed ? 1 : 0) + (schedulerReconcileFailed ? 1 : 0);
         const rollStatus = selfUpdateFailed
           ? "roll 更新失败"
           : selfUpdated
             ? "roll ✓"
-            : "roll 无更新";
-        log.warn(
-          `更新完成但有失败：${rollStatus}${
-            failedCount > 0 ? `，${failedCount} 个 Agent 更新失败` : ""
-          }${schedulerReconcileFailed ? "，scheduler service 重启失败" : ""}${updatedCount > 0 ? `，${updatedCount} 个 Agent 已更新` : ""}`,
-        );
-        return;
-      }
+            : info.unavailable
+              ? "roll 本体更新已跳过（版本检查不可用）"
+              : "roll 无更新";
+        if (totalFailed > 0) {
+          process.exitCode = 1;
+          log.warn(
+            `更新完成但有失败：${rollStatus}${
+              failedCount > 0 ? `，${failedCount} 个 Agent 更新失败` : ""
+            }${schedulerReconcileFailed ? "，scheduler service 重启失败" : ""}${updatedCount > 0 ? `，${updatedCount} 个 Agent 已更新` : ""}`,
+          );
+          return;
+        }
 
-      if (selfUpdated || updatedCount > 0) {
-        log.success(
-          `更新完成：${selfUpdated ? "roll ✓" : "roll 无更新"}${
-            updatedCount > 0 ? `，${updatedCount} 个 Agent 已更新` : ""
-          }`,
-        );
-      } else if (agentsConfig === undefined || store === undefined) {
-        log.success("roll 已是最新版本；Agent 更新已跳过");
-      } else {
-        log.success("一切都已是最新版本");
-      }
+        if (selfUpdated || updatedCount > 0) {
+          log.success(
+            `更新完成：${rollStatus}${updatedCount > 0 ? `，${updatedCount} 个 Agent 已更新` : ""}`,
+          );
+        } else if (info.unavailable) {
+          log.info(`${rollStatus}；Agent 更新检查已完成`);
+        } else if (agentsConfig === undefined || store === undefined) {
+          log.success("roll 已是最新版本；Agent 更新已跳过");
+        } else {
+          log.success("一切都已是最新版本");
+        }
+      });
     } catch (error) {
       if (store !== undefined && agentsConfig !== undefined) {
-        await restorePersistentManagedAgents(
-          managedRuntimeBaselines,
-          store,
-          agentsConfig.dataDir,
+        await withExecutionEnvironment(executionEnvironment, () =>
+          restorePersistentManagedAgents(managedRuntimeBaselines, store!, agentsConfig!.dataDir),
         ).catch(() => {});
       }
       log.error(`更新流程异常中止：${error instanceof Error ? error.message : String(error)}`);
@@ -1058,6 +1120,7 @@ export default defineCommand({
       releaseUpdateMaintenanceGuards(maintenanceGuards);
       registryLock?.release();
       schedulerAdmissionLock?.release();
+      await preparedDistribution?.dispose();
     }
   },
 });
@@ -1105,6 +1168,35 @@ async function startManagedAgentAndWait(
 }
 
 const commandExtension = import.meta.url.endsWith(".ts") ? "ts" : "js";
+
+async function reportCompanionServiceAfterUpdate(): Promise<void> {
+  try {
+    const serviceModule = (await import(
+      new URL(`../../companion-host/service.${commandExtension}`, import.meta.url).href
+    )) as typeof import("../../companion-host/service.ts");
+    const pathsModule = (await import(
+      new URL(`../../companion-host/paths.${commandExtension}`, import.meta.url).href
+    )) as typeof import("../../companion-host/paths.ts");
+    const service = serviceModule.createPlatformServiceController({
+      identity: serviceModule.companionServiceIdentity(
+        pathsModule.createCompanionPaths(),
+        createBundledRollInvocation(),
+      ),
+    });
+    const status = await service.status();
+    if (status.installed) {
+      // Companion currently has no atomic admission/idle handshake. A status snapshot cannot
+      // authorize stopping remote sessions, so keep its old immutable distribution available.
+      log.warn(
+        "Companion 服务暂保留原版本（无法原子确认会话空闲）；会话结束后运行 roll companion service install 切换到新版本。",
+      );
+    }
+  } catch (error) {
+    log.warn(
+      `无法确认 Companion 服务状态，未重启服务：${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+}
 
 async function loadScheduleServiceUtils(): Promise<typeof import("./schedule-service-utils.ts")> {
   const specifier = new URL(`./schedule-service-utils.${commandExtension}`, import.meta.url).href;
