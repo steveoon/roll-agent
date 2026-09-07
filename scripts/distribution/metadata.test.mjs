@@ -1,11 +1,73 @@
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, rm, symlink, writeFile, access } from "node:fs/promises";
+import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import test from "node:test";
 import { assetFilename, createManifest, PLATFORMS, writeManifest } from "./metadata.mjs";
 import { assertNoLinks, materializePackage, createCoreSelfReference } from "./build.mjs";
+
+test("materialized siblings share modules while nested versions and peer contexts keep their identity", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "roll-sibling-resolution-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const source = join(root, "source");
+  async function pkg(path, name, version, dependencies, code) {
+    await mkdir(path, { recursive: true });
+    await writeFile(
+      join(path, "package.json"),
+      JSON.stringify({ name, version, main: "index.cjs", dependencies }),
+    );
+    await writeFile(join(path, "index.cjs"), code);
+  }
+  await pkg(source, "root", "1", { a: "1", b: "1", c: "1", shared: "1" }, "");
+  const modules = join(source, "node_modules");
+  await pkg(join(modules, "shared"), "shared", "1", {}, "module.exports={tag:'root'};");
+  await pkg(
+    join(modules, "a"),
+    "a",
+    "1",
+    { b: "1", shared: "1" },
+    "exports.shared=require('shared'); exports.b=()=>require('b');",
+  );
+  await pkg(
+    join(modules, "b"),
+    "b",
+    "1",
+    { a: "1", shared: "2" },
+    "exports.shared=require('shared'); exports.a=()=>require('a');",
+  );
+  await pkg(
+    join(modules, "b/node_modules/shared"),
+    "shared",
+    "2",
+    {},
+    "module.exports={tag:'nested-v2'};",
+  );
+  await pkg(join(modules, "c"), "c", "1", { shared: "1" }, "module.exports=require('shared');");
+  // Same name and version, different physical source: represents a separate pnpm peer context.
+  await pkg(
+    join(modules, "c/node_modules/shared"),
+    "shared",
+    "1",
+    {},
+    "module.exports={tag:'peer-context'};",
+  );
+  const output = join(root, "output");
+  await materializePackage(source, output);
+  const require = createRequire(join(output, "index.cjs"));
+  const a = require("a");
+  const b = require("b");
+  assert.equal(a.b(), b);
+  assert.equal(b.a(), a);
+  assert.equal(a.shared, require("shared"));
+  assert.equal(b.shared.tag, "nested-v2");
+  assert.equal(require("c").tag, "peer-context");
+  assert.notEqual(require("c"), a.shared);
+  await assert.rejects(access(join(output, "node_modules/a/node_modules/shared")));
+  await assert.rejects(access(join(output, "node_modules/a/node_modules/b")));
+  await assertNoLinks(output);
+});
 
 test("six-platform manifest requires all nonempty assets and refuses altered retries", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "roll-metadata-"));

@@ -55,6 +55,7 @@ export async function materializePackage(source, target, ancestors = new Map(), 
   delete manifest.devDependencies;
   const required = manifest.dependencies ?? {};
   const optional = manifest.optionalDependencies ?? {};
+  const localDependencies = new Map();
   for (const name of Object.keys({ ...required, ...optional, ...manifest.peerDependencies })) {
     let cursor = sourceRoot;
     let dependency;
@@ -79,7 +80,21 @@ export async function materializePackage(source, target, ancestors = new Map(), 
       if (manifest[field]?.[name] !== undefined) manifest[field][name] = dependencyManifest.version;
     }
     if (visible.get(name) === dependency) continue;
-    await materializePackage(dependency, join(target, "node_modules", name), visible, depth + 1);
+    localDependencies.set(name, dependency);
+  }
+  // Node can resolve every sibling from the parent's node_modules, even when that sibling
+  // has not been copied yet. Plan the entire level before descending; expanding one branch
+  // at a time duplicates shared dependency diamonds exponentially. Compare real paths,
+  // not name/version alone, so pnpm peer contexts and shadowed versions remain distinct.
+  const childVisible = new Map(visible);
+  for (const [name, dependency] of localDependencies) childVisible.set(name, dependency);
+  for (const [name, dependency] of localDependencies) {
+    await materializePackage(
+      dependency,
+      join(target, "node_modules", name),
+      childVisible,
+      depth + 1,
+    );
   }
   await writeFile(join(target, "package.json"), `${JSON.stringify(manifest, null, 2)}\n`);
 }

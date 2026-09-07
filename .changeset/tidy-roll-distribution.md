@@ -9,3 +9,5 @@ Preserve npm installations and refuse self-updates when the running installation
 Clean up interrupted standalone downloads and preflight operations on SIGINT/SIGTERM, and retain lock ownership details for uncatchable termination. Treat unavailable version checks consistently as a skipped self-update for npm and standalone installations, while keeping actual installation failures nonzero. Allow doctor to diagnose damaged installations when global flags precede the command.
 
 Retry transient Windows sharing errors during version activation within a bounded budget, retaining the active version when activation fails. Avoid redundant file-content hashing after extraction while preserving archive checksums, extracted file-type checks, and immutable-version comparisons.
+
+Reduce duplicated files in standalone distributions by sharing dependencies resolvable from the same parent directory, while preserving nested versions and distinct pnpm peer contexts.
