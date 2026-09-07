@@ -9,6 +9,9 @@ ROLL_DIST_SSH_PORT=${ROLL_DIST_SSH_PORT:-22}
 [[ "$ROLL_DIST_SSH_PORT" =~ ^[0-9]{1,5}$ ]] || { echo 'Invalid ROLL_DIST_SSH_PORT' >&2; exit 1; }
 ROLL_DIST_SSH_PORT=$((10#$ROLL_DIST_SSH_PORT))
 (( ROLL_DIST_SSH_PORT >= 1 && ROLL_DIST_SSH_PORT <= 65535 )) || { echo 'Invalid ROLL_DIST_SSH_PORT' >&2; exit 1; }
+: "${ROLL_DIST_ROOT:?}"
+case "$ROLL_DIST_ROOT" in /*/*) ;; *) echo 'Invalid ROLL_DIST_ROOT' >&2; exit 1;; esac
+case "$ROLL_DIST_ROOT" in *[!a-zA-Z0-9/._-]*|*/|*//*|*/.*) echo 'Invalid ROLL_DIST_ROOT' >&2; exit 1;; esac
 VERSION=$(cut -f1 "$ASSETS/linux-x64.txt")
 [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
 STAGE_ID="${GITHUB_RUN_ID:?}-${GITHUB_RUN_ATTEMPT:?}"
@@ -26,10 +29,10 @@ chmod 600 "$KEY_DIR/key" "$KEY_DIR/known_hosts"
 unset ROLL_DIST_SSH_KEY ROLL_DIST_SSH_KNOWN_HOSTS
 SSH_ARGS=(-i "$KEY_DIR/key" -o "Port=$ROLL_DIST_SSH_PORT" -o "UserKnownHostsFile=$KEY_DIR/known_hosts" -o StrictHostKeyChecking=yes -o BatchMode=yes -o IdentitiesOnly=yes)
 REMOTE="$ROLL_DIST_SSH_USER@$ROLL_DIST_SSH_HOST"
-STAGE="/var/www/roll-distribution/staging/$STAGE_ID"
-# The fixed root and strictly validated numeric identifiers intentionally expand on the client.
+STAGE="$ROLL_DIST_ROOT/staging/$STAGE_ID"
+# The canonical ASCII root and numeric identifiers are validated before shell interpolation.
 # shellcheck disable=SC2029
-ssh "${SSH_ARGS[@]}" "$REMOTE" "mkdir -p /var/www/roll-distribution/staging && mkdir '$STAGE'"
+ssh "${SSH_ARGS[@]}" "$REMOTE" "set -eu; test \"\$(cd '$ROLL_DIST_ROOT' && pwd -P)\" = '$ROLL_DIST_ROOT'; test \"\$(cat '$ROLL_DIST_ROOT/.roll-distribution-root')\" = roll-distribution-v1; test -d '$ROLL_DIST_ROOT/staging'; test ! -L '$ROLL_DIST_ROOT/staging'; test -d '$ROLL_DIST_ROOT/releases'; test ! -L '$ROLL_DIST_ROOT/releases'; mkdir '$STAGE'"
 scp "${SSH_ARGS[@]}" "$ASSETS"/* "$REMOTE:$STAGE/"
 # shellcheck disable=SC2029
-ssh "${SSH_ARGS[@]}" "$REMOTE" "sh -s -- '$VERSION' '$STAGE_ID'" < "$(dirname "$0")/finalize.sh"
+ssh "${SSH_ARGS[@]}" "$REMOTE" "sh -s -- '$VERSION' '$STAGE_ID' '$ROLL_DIST_ROOT'" < "$(dirname "$0")/finalize.sh"

@@ -23,9 +23,17 @@ node scripts/distribution/build.mjs /tmp/roll-assets
 
 ## 首次配置服务器
 
-服务器为现有 Nginx/Next.js 所在的 Linux 主机。先核对 `nginx -T` 的实际 `roll.duliday.com` HTTPS server，不依据截图改写站点配置。为专用非 root 用户准备 `/var/www/roll-distribution/{staging,releases}`，只授予该目录的写权限；Nginx 用户需要读取及目录遍历权限。该用户不需要网站目录、证书或 sudo 权限。服务器需要 SSH/SFTP、POSIX shell、GNU coreutils、find、diff、awk；没有 Node/npm/Python 运行前提。
+在管理员会话中核对目标 HTTPS server，保留现有网站反向代理、证书和安全响应头。服务器主机名、SSH 别名、端口、用户名、真实目录及备份位置只记录在仓库之外的私有运维记录中，不写入公开文档、测试或 PR 正文。
 
-将 `scripts/distribution/nginx.conf` 内容加入既有 HTTPS server，保留 `/` 的 Next.js 反向代理与证书。安装脚本采用精确 location，`/releases/` 使用独立静态目录，避免缺失资产退回 Next.js。管理员先执行 `nginx -t` 再 reload；CI 的发布用户不执行 Nginx 管理命令。
+由管理员选择专用发行根目录，并通过私有配置提供 `ROLL_DIST_ROOT`。它必须是规范的绝对路径，至少包含两级目录，路径组件只能含 ASCII 字母、数字、下划线、连字符和非前导点；不接受空格、相对路径、`.` / `..`、重复斜杠或符号链接路径。根目录内预先创建 `staging` 和 `releases`，并写入内容为 `roll-distribution-v1` 的 `.roll-distribution-root` 标记文件。专用非 root 用户只需该发行区域的写权限，不需要网站配置、证书或 sudo 权限。Nginx 用户需要读取发行文件及遍历目录的权限；staging 不应公开。服务器运行发布脚本只需 SSH/SFTP、POSIX shell 及 GNU coreutils/find/diff/awk。
+
+`scripts/distribution/nginx.conf` 是模板，不能直接 include。先在有 Node 的管理员工作站从私有配置加载 `ROLL_DIST_ROOT`，然后生成仓库之外的配置文件：
+
+```sh
+node scripts/distribution/render-nginx.mjs /path/outside/checkout/distribution.conf
+```
+
+生成器拒绝不安全的根路径、仓库内输出（包括经目录链接指向仓库）和覆盖现有文件，并将输出权限设为 0600。管理员通过安全通道将文件安装到自行选择的 Nginx 配置位置，在既有 HTTPS server 中 include；先执行 `nginx -t`，通过后再 reload。具体安装与备份路径保存在私有运维记录中。CI 发布用户不执行 Nginx 管理命令。
 
 在仓库 Actions secrets 配置：
 
@@ -35,7 +43,8 @@ node scripts/distribution/build.mjs /tmp/roll-assets
 | `ROLL_DIST_SSH_USER` | 只能写发行目录的专用用户 |
 | `ROLL_DIST_SSH_KEY` | 对应该用户的 SSH 私钥 |
 | `ROLL_DIST_SSH_KNOWN_HOSTS` | 从可信运维渠道核对的服务器 host key 行 |
-| `ROLL_DIST_SSH_PORT` | 可选 SSH 端口，默认 22；aliyun-server 使用 63452 |
+| `ROLL_DIST_SSH_PORT` | 可选 SSH 端口，默认 22；实际值保存在 Secret 中 |
+| `ROLL_DIST_ROOT` | 必填；管理员预先创建并标记的规范发行根目录 |
 
 配置就绪后，将仓库 Actions variable `ROLL_DISTRIBUTION_ENABLED` 设为 `true` 才会执行服务器发布。未启用时仍运行六平台构建验收，保留原有 npm 发布流程。`distribution.yml` 也支持手动运行，默认只验证；手动发布还需选择 `publish=true`。
 

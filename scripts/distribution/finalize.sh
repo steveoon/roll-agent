@@ -2,7 +2,13 @@
 # Run only as the restricted distribution user on the Linux publishing host.
 set -eu
 umask 022
-ROOT=/var/www/roll-distribution
+ROOT=${3:?distribution root required}
+case "$ROOT" in /*/*) ;; *) echo 'Invalid ROLL_DIST_ROOT' >&2; exit 1;; esac
+case "$ROOT" in *[!a-zA-Z0-9/._-]*|*/|*//*|*/.*) echo 'Invalid ROLL_DIST_ROOT' >&2; exit 1;; esac
+test "$(cd "$ROOT" && pwd -P)" = "$ROOT"
+test "$(cat "$ROOT/.roll-distribution-root")" = roll-distribution-v1
+test -d "$ROOT/staging" && test ! -L "$ROOT/staging"
+test -d "$ROOT/releases" && test ! -L "$ROOT/releases"
 VERSION=${1:?version required}
 STAGE_ID=${2:?staging id required}
 case "$VERSION" in *[!0-9.]*|'') echo 'Invalid version' >&2; exit 1;; esac
