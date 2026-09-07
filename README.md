@@ -36,10 +36,16 @@ roll ask "帮我查看boss直聘上有多少未读消息"
 
 ## 安装
 
+普通用户可以选择自带 Node/npm 的独立发行包，或继续使用 npm 全局安装。
+安装命令、平台要求、Agent 安装及双渠道更新见 [安装和更新 Roll](docs/how-to-install-roll.md)。
+独立发行 URL 需在六平台产物通过验证并上线后使用。
+
 ### 环境要求
 
-- Node.js >= 22.6.0
-- pnpm >= 10
+以下要求适用于源码开发；独立发行版自带运行环境：
+
+- Node.js >= 22.13.0
+- pnpm 版本以根 `package.json` 的 `packageManager` 为准
 
 ### 从源码安装
 

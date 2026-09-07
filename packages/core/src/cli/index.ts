@@ -3,11 +3,15 @@ import { defineCommand, runMain } from "citty";
 import chalk from "chalk";
 import { checkForUpdate, getCurrentVersion } from "./utils/update-checker.ts";
 import { resolveLogLevelFromArgv, setLogLevel } from "./utils/output.ts";
+import { getExecutionEnvironment } from "../execution-environment/index.ts";
 
 const CLI_VERSION = getCurrentVersion();
 const commandExtension = import.meta.url.endsWith(".ts") ? "ts" : "js";
 
 function loadMainCommand(commandName: string) {
+  // Validate the command selected by citty, not a raw argv slot that may hold global flags.
+  // Help/version do not execute operations; doctor must be able to diagnose a broken install.
+  if (commandName !== "doctor") getExecutionEnvironment();
   const specifier = new URL(`./commands/${commandName}.${commandExtension}`, import.meta.url).href;
   return import(specifier).then((m) => m.default);
 }

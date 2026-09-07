@@ -1,4 +1,5 @@
 import { isAbsolute, resolve } from "node:path";
+import { getExecutionEnvironment } from "../execution-environment/index.ts";
 
 export interface BundledRollInvocation {
   readonly command: string;
@@ -19,8 +20,13 @@ export function createBundledRollInvocation(
     readonly execArgv?: readonly string[];
   } = {},
 ): BundledRollInvocation {
-  const commandInput = options.command ?? process.execPath;
-  const entrypointInput = options.cliEntrypoint ?? process.argv[1];
+  const environment = getExecutionEnvironment();
+  const commandInput = options.command ?? environment.nodePath;
+  const entrypointInput =
+    options.cliEntrypoint ??
+    (environment.installation.channel === "standalone"
+      ? resolve(environment.installation.packageRoot, "dist/cli/index.js")
+      : process.argv[1]);
   if (entrypointInput === undefined || entrypointInput.trim().length === 0) {
     throw new Error("Unable to locate the bundled Roll CLI entrypoint");
   }

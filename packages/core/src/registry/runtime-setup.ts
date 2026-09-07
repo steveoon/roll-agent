@@ -3,6 +3,7 @@ import { existsSync } from "node:fs";
 import { createRequire } from "node:module";
 import { resolve } from "node:path";
 import { promisify } from "node:util";
+import { getExecutionEnvironment } from "../execution-environment/index.ts";
 import type { RegisteredAgent } from "../types/agent.ts";
 
 const execFileAsync = promisify(execFile);
@@ -52,9 +53,11 @@ export async function runAgentSetup(
     };
   }
 
+  const environment = getExecutionEnvironment();
   try {
-    await execFileAsync(process.execPath, [cliPath, "install", ...browsers], {
+    await execFileAsync(environment.nodePath, [cliPath, "install", ...browsers], {
       cwd: agent.installPath,
+      env: environment.createEnv(process.env),
       timeout: 300_000,
       // 浏览器下载日志可能超过 execFile 默认 1MB 上限，放大避免误判失败。
       maxBuffer: 64 * 1024 * 1024,
@@ -63,14 +66,14 @@ export async function runAgentSetup(
       ok: true,
       skipped: false,
       message: `浏览器运行时安装完成 (${browsers.join(", ")})`,
-      retryCommand: `${process.execPath} ${cliPath} install ${browsers.join(" ")}`,
+      retryCommand: `${environment.nodePath} ${cliPath} install ${browsers.join(" ")}`,
     };
   } catch (err) {
     return {
       ok: false,
       skipped: false,
       message: err instanceof Error ? err.message : String(err),
-      retryCommand: `${process.execPath} ${cliPath} install ${browsers.join(" ")}`,
+      retryCommand: `${environment.nodePath} ${cliPath} install ${browsers.join(" ")}`,
     };
   }
 }

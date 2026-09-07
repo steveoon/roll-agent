@@ -1,0 +1,2 @@
+# Preserve byte-locked fixtures and reproducible release inputs on Windows checkouts.
+* text=auto eol=lf

@@ -1,4 +1,6 @@
 import { defineCommand } from "citty";
+import { getExecutionEnvironment } from "../../execution-environment/index.ts";
+import { resolveSelfUpdateTarget } from "../../execution-environment/self-update.ts";
 import { existsSync, mkdirSync } from "node:fs";
 import { ConfigApplicationService } from "../../config/application-service.ts";
 import { createConfigRevision } from "../../config/document-store.ts";
@@ -312,6 +314,35 @@ export default defineCommand({
     const fixResults: DoctorFixResult[] = [];
     const shouldFix = args.fix === true;
     let effectiveConfig: ReturnType<typeof loadConfig>["config"] | undefined;
+
+    try {
+      const environment = getExecutionEnvironment();
+      const installation = await resolveSelfUpdateTarget(environment);
+      checks.push({
+        name: "Roll 安装与执行环境",
+        status: environment.npmCliPath ? "ok" : "warn",
+        message: `${installation.channel} / ${environment.mode} / Node: ${environment.nodePath}`,
+        details: {
+          channel: installation.channel,
+          mode: environment.mode,
+          packageRoot: environment.installation.packageRoot,
+          version: environment.installation.version,
+          nodePath: environment.nodePath,
+          npmCliPath: environment.npmCliPath,
+          ...(installation.channel === "unmanaged" ? { reason: installation.reason } : {}),
+        },
+        ...(!environment.npmCliPath
+          ? { fix: "宿主 Node 缺少 npm；请补齐宿主 npm，或通过独立安装器安装 Roll" }
+          : {}),
+      });
+    } catch (error) {
+      checks.push({
+        name: "Roll 安装与执行环境",
+        status: "fail",
+        message: error instanceof Error ? error.message : String(error),
+        fix: "独立安装元数据或私有运行时损坏，请使用安装器重新安装",
+      });
+    }
 
     // 1. Node.js 版本
     const nodeVersion = process.versions.node;
@@ -949,10 +980,14 @@ function buildScheduledCommandCheck(): CheckResult {
           : [],
       );
     const baseline = buildScheduledServiceBaselineEnv();
+    const environment = getExecutionEnvironment();
     const items = auditScheduledAgentCommands({
-      agents: stdioAgents,
+      agents: stdioAgents.map((agent) => ({
+        ...agent,
+        command: environment.resolveCommand(agent.command, [], baseline).command,
+      })),
       baselinePath: baseline["PATH"] ?? "",
-      execPath: process.execPath,
+      execPath: environment.nodePath,
       schedulerEnv: config.scheduler.env,
       platform: process.platform,
     });
