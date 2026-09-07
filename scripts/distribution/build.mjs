@@ -152,6 +152,9 @@ export async function createCoreSelfReference(app) {
 }
 
 export async function build(outputDirectory) {
+  const startedAt = Date.now();
+  const phase = (name) =>
+    console.log(`[distribution build] ${name} (+${Date.now() - startedAt}ms)`);
   const platform = `${process.platform}-${process.arch}`;
   const core = JSON.parse(await readFile(join(REPO, "packages/core/package.json"), "utf8"));
   const filename = assetFilename(core.version, platform);
@@ -172,6 +175,7 @@ export async function build(outputDirectory) {
     // pnpm deploy may prepare workspace injection metadata. Never do that in the developer's
     // checkout: snapshot only build inputs, preserving the already built dist/UI directories.
     const workspace = join(temp, "workspace");
+    phase("snapshotting build inputs");
     await mkdir(workspace);
     for (const name of [
       "package.json",
@@ -190,12 +194,14 @@ export async function build(outputDirectory) {
             .some((part) => ["node_modules", ".git", ".env", ".roll-agent"].includes(part)),
       });
     }
+    phase("installing snapshot dependencies");
     run(pnpm, ["install", "--frozen-lockfile"], {
       cwd: workspace,
       shell: process.platform === "win32",
       env: { ...process.env, NODE_ENV: "development" },
     });
     const deployed = join(temp, "deployed");
+    phase("deploying production dependencies");
     run(
       pnpm,
       [
@@ -213,9 +219,11 @@ export async function build(outputDirectory) {
       },
     );
     const bundle = join(temp, "bundle");
+    phase("materializing dependency tree");
     await mkdir(bundle);
     await materializePackage(deployed, join(bundle, "app"));
     await createCoreSelfReference(join(bundle, "app"));
+    phase("downloading and validating Node");
     const checksums = JSON.parse(
       await readFile(join(import.meta.dirname, "node-checksums.json"), "utf8"),
     );
@@ -230,6 +238,7 @@ export async function build(outputDirectory) {
     if ((await sha256(nodeArchive)) !== checksums.files[nodeFilename]) {
       throw new Error("Node checksum mismatch");
     }
+    phase("extracting Node");
     if (process.platform === "win32") {
       run(
         "powershell.exe",
@@ -245,6 +254,7 @@ export async function build(outputDirectory) {
       );
     } else run("tar", ["-xzf", nodeArchive, "-C", temp]);
     await cp(join(temp, nodeName), join(bundle, "runtime"), { recursive: true, dereference: true });
+    phase("validating bundle and running smoke checks");
     if (process.platform !== "win32") {
       // Dereferenced npm symlinks cannot retain their relative JS imports at bin/npm.
       for (const tool of ["npm", "npx"]) {
@@ -275,6 +285,7 @@ export async function build(outputDirectory) {
     } catch (error) {
       if (error.code !== "ENOENT") throw error;
     }
+    phase("compressing release archive");
     run(process.platform === "win32" ? "python" : "python3", [
       join(import.meta.dirname, "archive.py"),
       bundle,
@@ -284,7 +295,9 @@ export async function build(outputDirectory) {
       JSON.stringify({ platform, filename: basename(output), sha256: await sha256(output) }),
     );
   } finally {
+    phase("cleaning build directories");
     await rm(temp, { recursive: true, force: true });
+    phase("build cleanup complete");
   }
 }
 

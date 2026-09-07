@@ -2,6 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { execFile } from "node:child_process";
 import type { ExecFileOptions } from "node:child_process";
 import { promisify } from "node:util";
+import { setTimeout as delay } from "node:timers/promises";
 import { join, posix } from "node:path";
 import {
   mkdir,
@@ -74,6 +75,38 @@ async function execFileAsync(command: string, args: string[], options: ExecFileO
     return await pending;
   } finally {
     await closed;
+  }
+}
+
+/** Windows can retain sharing locks briefly after preflight exits. Retry only those errors;
+ * callers recheck their installation invariants on every attempt. Never delete the destination.
+ */
+export async function retryWindowsFileOperation(
+  operation: () => Promise<void>,
+  options: {
+    readonly platform?: NodeJS.Platform;
+    readonly wait?: (ms: number) => Promise<void>;
+  } = {},
+): Promise<void> {
+  const waits = [250, 500, 1000, 2000, 2000, 2000];
+  for (let attempt = 0; ; attempt++) {
+    try {
+      await operation();
+      return;
+    } catch (error) {
+      const wait = waits[attempt];
+      if (
+        (options.platform ?? process.platform) !== "win32" ||
+        wait === undefined ||
+        typeof error !== "object" ||
+        error === null ||
+        !("code" in error) ||
+        !["EPERM", "EACCES", "EBUSY"].includes(String(error.code))
+      ) {
+        throw error;
+      }
+      await (options.wait ?? delay)(wait);
+    }
   }
 }
 
@@ -157,6 +190,7 @@ export async function prepareDistributionUpdate(
   options: {
     readonly timeoutMs?: number;
     readonly fetch?: typeof globalThis.fetch;
+    readonly rename?: typeof rename;
     readonly smoke?: (
       environment: ExecutionEnvironment,
       home: string,
@@ -261,13 +295,35 @@ export async function prepareDistributionUpdate(
           }
         } catch (error) {
           if (!isMissing(error)) throw error;
-          await rename(candidate, target);
+          try {
+            await retryWindowsFileOperation(async () => {
+              await assertCurrentVersion(installRoot, oldVersion);
+              // A destination created while waiting must go through immutable verification,
+              // never be overwritten by a retry (even if it is an empty directory).
+              try {
+                await lstat(target);
+              } catch (error) {
+                if (!isMissing(error)) throw error;
+                await (options.rename ?? rename)(candidate, target);
+                return;
+              }
+              throw new Error(`Roll version destination appeared while activating: ${target}`);
+            });
+          } catch (error) {
+            throw new Error(
+              `Cannot activate Roll ${manifest.version}: ${candidate} -> ${target}; current version remains ${oldVersion}. Close programs holding the candidate directory and retry. ${error instanceof Error ? error.message : String(error)}`,
+              { cause: error },
+            );
+          }
         }
         const next = resolveExecutionEnvironment({ packageRoot: join(target, "app") });
         const pointer = join(installRoot, `.current-${randomUUID()}.tmp`);
         try {
           await writeFile(pointer, `${manifest.version}\n`, { flag: "wx", mode: 0o600 });
-          await rename(pointer, join(installRoot, "current.txt"));
+          await retryWindowsFileOperation(async () => {
+            await assertCurrentVersion(installRoot, oldVersion);
+            await (options.rename ?? rename)(pointer, join(installRoot, "current.txt"));
+          });
         } finally {
           await rm(pointer, { force: true });
         }
@@ -467,7 +523,21 @@ try {
     await execFileAsync("tar", ["-xzf", archive, "-C", destination, "--no-same-owner"], options);
   }
   // Validate actual extracted types too, including Windows reparse/symlink entries.
-  await distributionTreeDigest(destination, signal);
+  await validateDistributionTree(destination, signal);
+}
+
+/** The downloaded archive already has a verified checksum. Here we only need to reject
+ * unsafe extracted types; content hashing is reserved for immutable-version comparisons.
+ */
+export async function validateDistributionTree(root: string, signal?: AbortSignal): Promise<void> {
+  signal?.throwIfAborted();
+  const info = await lstat(root);
+  if (info.isSymbolicLink()) throw new Error("Distribution contains a symbolic link");
+  if (info.isDirectory()) {
+    for (const name of await readdir(root)) {
+      await validateDistributionTree(join(root, name), signal);
+    }
+  } else if (!info.isFile()) throw new Error("Distribution contains a special file");
 }
 
 async function distributionTreeDigest(root: string, signal?: AbortSignal): Promise<string> {

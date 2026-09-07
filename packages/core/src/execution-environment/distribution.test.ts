@@ -12,6 +12,8 @@ import {
   access,
   readdir,
   watch,
+  rename,
+  chmod,
 } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -26,10 +28,78 @@ import {
   prepareDistributionUpdate,
   acquireDistributionLock,
   smokeDistribution,
+  retryWindowsFileOperation,
+  validateDistributionTree,
   type DistributionManifest,
 } from "./distribution.ts";
 
 const platform = `${process.platform}-${process.arch}`;
+
+test("Windows sharing failures retry with a bounded budget; other errors fail immediately", async () => {
+  for (const code of ["EPERM", "EACCES", "EBUSY"]) {
+    let attempts = 0;
+    const waits: number[] = [];
+    await retryWindowsFileOperation(
+      async () => {
+        if (++attempts < 3) throw Object.assign(new Error("busy"), { code });
+      },
+      {
+        platform: "win32",
+        wait: async (ms) => {
+          waits.push(ms);
+        },
+      },
+    );
+    assert.equal(attempts, 3);
+    assert.deepEqual(waits, [250, 500]);
+  }
+  for (const [platform, code, expected] of [
+    ["win32", "EPERM", 7],
+    ["win32", "ENOENT", 1],
+    ["darwin", "EPERM", 1],
+  ] as const) {
+    let attempts = 0;
+    let totalWait = 0;
+    const failure = Object.assign(new Error("persistent failure"), { code });
+    await assert.rejects(
+      retryWindowsFileOperation(
+        async () => {
+          attempts++;
+          throw failure;
+        },
+        {
+          platform,
+          wait: async (ms) => {
+            totalWait += ms;
+          },
+        },
+      ),
+      (error) => error === failure,
+    );
+    assert.equal(attempts, expected);
+    assert.ok(totalWait <= 7750);
+  }
+});
+
+test(
+  "extracted tree validation checks types without reading contents",
+  { skip: process.platform === "win32" },
+  async (t) => {
+    const root = await mkdtemp(join(tmpdir(), "roll-tree-check-"));
+    const file = join(root, "content");
+    t.after(() => rm(root, { recursive: true, force: true }));
+    await writeFile(file, "content already covered by the archive checksum");
+    await chmod(file, 0);
+    await validateDistributionTree(root);
+    await chmod(file, 0o600);
+    await symlink(file, join(root, "link"));
+    await assert.rejects(validateDistributionTree(root), /symbolic link/);
+    await rm(join(root, "link"));
+    execFileSync("mkfifo", [join(root, "pipe")]);
+    await assert.rejects(validateDistributionTree(root), /special file/);
+    await assert.rejects(validateDistributionTree(root, AbortSignal.abort()), /aborted/i);
+  },
+);
 
 test(
   "aborted preflight waits for the Node child to close before returning",
@@ -360,17 +430,41 @@ test(
       const bytes = await readFile(archive);
       const environment = resolveExecutionEnvironment({ packageRoot: join(old, "app") });
       let smoked = false;
-      const prepared = await prepareDistributionUpdate(environment, manifestFor(bytes), {
+      let failure: "candidate" | "pointer" = "candidate";
+      let prepared = await prepareDistributionUpdate(environment, manifestFor(bytes), {
         fetch: async () => new Response(new Uint8Array(bytes)),
         smoke: async (env) => {
           smoked = true;
           assert.equal(env.installation.version, "1.0.1");
+        },
+        rename: async (source, target) => {
+          if (failure === "candidate" || String(target).endsWith("current.txt")) {
+            throw Object.assign(new Error(`${failure} still in use`), { code: "EPERM" });
+          }
+          await rename(source, target);
         },
       });
       try {
         assert.equal(smoked, true);
         assert.equal(await readFile(join(home, "current.txt"), "utf8"), "1.0.0\n");
         await assert.rejects(acquireDistributionLock(home), /Another Roll/);
+        await assert.rejects(prepared.activate(), /Cannot activate Roll.*candidate still in use/);
+        assert.equal(await readFile(join(home, "current.txt"), "utf8"), "1.0.0\n");
+        await assert.rejects(access(join(home, "versions/1.0.1")));
+        failure = "pointer";
+        await assert.rejects(prepared.activate(), /pointer still in use/);
+        assert.equal(await readFile(join(home, "current.txt"), "utf8"), "1.0.0\n");
+        await access(join(home, "versions/1.0.1"));
+        await prepared.dispose();
+        prepared = await prepareDistributionUpdate(environment, manifestFor(bytes), {
+          fetch: async () => new Response(new Uint8Array(bytes)),
+          smoke: async () => {},
+        });
+        const changed = join(home, "versions/1.0.1/app/changed");
+        await writeFile(changed, "different immutable contents");
+        await assert.rejects(prepared.activate(), /different immutable/);
+        assert.equal(await readFile(join(home, "current.txt"), "utf8"), "1.0.0\n");
+        await rm(changed);
         const next = await prepared.activate();
         assert.equal(next.installation.version, "1.0.1");
         assert.match(next.nodePath, /versions\/1\.0\.1\/runtime\/bin\/node$/);

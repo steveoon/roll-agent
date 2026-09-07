@@ -72,6 +72,8 @@ jobs:
         run: pnpm install --frozen-lockfile
       - name: Check distribution scripts
         run: node --test 'scripts/distribution/*.test.mjs'
+      - name: Check activation and archive safety regressions
+        run: node --experimental-strip-types --test packages/core/src/execution-environment/distribution.test.ts
       - name: Build production packages
         run: pnpm --config.verify-deps-before-run=false --config.script-shell=bash --filter '@roll-agent/core...' run build
       - name: Build and test detached native distribution

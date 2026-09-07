@@ -122,7 +122,11 @@ test(
     phase(currentPhase);
     const archive = resolve(process.env.ROLL_TEST_DISTRIBUTION_ARCHIVE);
     const home = await mkdtemp(join(tmpdir(), "roll native upgrade 中文 "));
-    t.after(() => rm(home, { recursive: true, force: true }));
+    t.after(async () => {
+      phase("cleaning fixture directories");
+      await rm(home, { recursive: true, force: true });
+      phase("fixture cleanup complete");
+    });
     const source = join(home, "source");
     await mkdir(source);
     if (process.platform === "win32") {
@@ -164,7 +168,7 @@ test(
     metadata.version = b;
     await writeFile(join(source, "distribution.json"), JSON.stringify(metadata));
     const bArchive = join(home, assetFilename(b, platform));
-    await prepareWithTool(python, [archiveScript, source, bArchive], t.signal);
+    await prepareWithTool(python, [archiveScript, source, bArchive, "--fast"], t.signal);
     phase("archive B prepared");
     const bBytes = await readFile(bArchive);
     const manifest = {

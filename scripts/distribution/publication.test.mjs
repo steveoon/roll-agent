@@ -13,23 +13,28 @@ test("archive output is deterministic and contains no links", async (t) => {
   await mkdir(source);
   await mkdir(join(source, "nested"));
   await writeFile(join(source, "nested/hello.txt"), "hello");
-  for (const extension of ["zip", "tar.gz"]) {
-    const files = [join(root, `one.${extension}`), join(root, `two.${extension}`)];
-    for (const path of files) {
-      const result = spawnSync(
-        process.platform === "win32" ? "python" : "python3",
-        [join(import.meta.dirname, "archive.py"), source, path],
-        { encoding: "utf8" },
-      );
-      assert.equal(result.status, 0, result.stderr);
-    }
-    assert.equal(await sha256(files[0]), await sha256(files[1]));
-    if (extension === "zip") {
+  for (const fast of [false, true]) {
+    for (const extension of ["zip", "tar.gz"]) {
+      const files = [
+        join(root, `one-${fast}.${extension}`),
+        join(root, `two-${fast}.${extension}`),
+      ];
+      for (const path of files) {
+        const result = spawnSync(
+          process.platform === "win32" ? "python" : "python3",
+          [join(import.meta.dirname, "archive.py"), source, path, ...(fast ? ["--fast"] : [])],
+          { encoding: "utf8" },
+        );
+        assert.equal(result.status, 0, result.stderr);
+      }
+      assert.equal(await sha256(files[0]), await sha256(files[1]));
       const names = spawnSync(
         process.platform === "win32" ? "python" : "python3",
         [
           "-c",
-          'import sys,zipfile; names=zipfile.ZipFile(sys.argv[1]).namelist(); assert names==["nested/hello.txt"], names',
+          extension === "zip"
+            ? 'import sys,zipfile; z=zipfile.ZipFile(sys.argv[1]); assert z.namelist()==["nested/hello.txt"]; assert z.read("nested/hello.txt")==b"hello"'
+            : 'import sys,tarfile; t=tarfile.open(sys.argv[1]); assert t.getnames()==["nested/hello.txt"]; assert all(m.isfile() for m in t.getmembers()); assert t.extractfile("nested/hello.txt").read()==b"hello"',
           files[0],
         ],
         { encoding: "utf8" },
