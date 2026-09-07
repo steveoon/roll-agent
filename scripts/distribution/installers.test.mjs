@@ -299,7 +299,26 @@ test(
         const result = run(
           `${installScript}\n& ${psQuote(join(root, "bin/roll.cmd"))} --version\nif ($LASTEXITCODE -ne 0) { throw 'launcher failed' }`,
         );
-        assert.equal(result.status, 0, result.stderr);
+        if (result.status !== 0) {
+          const launcher = join(root, "bin/roll.cmd");
+          let diagnostic = "";
+          if (existsSync(launcher)) {
+            const debug = join(root, "bin/roll-debug.cmd");
+            const inspect = `"${process.execPath}" -e "console.log('pointer-codepoints',process.env.version?.split('').map(c=>c.charCodeAt(0).toString(16)))"`;
+            writeFileSync(
+              debug,
+              readFileSync(launcher, "utf8")
+                .replace("@echo off", "@echo on")
+                .replace(
+                  "if not defined version goto invalid",
+                  `${inspect}\r\nif not defined version goto invalid`,
+                ),
+            );
+            const traced = run(`& ${psQuote(debug)} --version`);
+            diagnostic = `\nrepeat=${repeat}; pointer hex=${readFileSync(join(root, "current.txt")).toString("hex")}\n${traced.stdout}\n${traced.stderr}`;
+          }
+          assert.fail(`${result.stdout}\n${result.stderr}${diagnostic}`);
+        }
         assert.equal(readFileSync(join(root, "current.txt"), "utf8"), `${version}\n`);
       }
       const injected = join(temporary, "pointer-injection-marker");
