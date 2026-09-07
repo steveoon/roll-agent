@@ -149,8 +149,9 @@ rem Roll standalone launcher v1
 setlocal DisableDelayedExpansion
 set "ROLL_ROOT=%~dp0.."
 if not exist "%ROLL_ROOT%\current.txt" goto invalid
-findstr /r "[^0-9A-Za-z.+-]" "%ROLL_ROOT%\current.txt" >nul && goto invalid
-findstr /r /x "[0-9][0-9A-Za-z.+-]*" "%ROLL_ROOT%\current.txt" >nul || goto invalid
+rem CMD opens Unicode paths correctly; FINDSTR must read the ASCII pointer via stdin.
+findstr /r "[^0-9A-Za-z.+-]" < "%ROLL_ROOT%\current.txt" >nul && goto invalid
+findstr /r /x "[0-9][0-9A-Za-z.+-]*" < "%ROLL_ROOT%\current.txt" >nul || goto invalid
 set "version="
 set /p "version=" < "%ROLL_ROOT%\current.txt"
 if not defined version goto invalid

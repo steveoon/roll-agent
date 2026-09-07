@@ -1,12 +1,57 @@
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
 import { createServer } from "node:http";
-import { mkdtemp, mkdir, readFile, writeFile, rm, cp, stat } from "node:fs/promises";
+import {
+  mkdtemp,
+  mkdir,
+  readFile,
+  writeFile,
+  rm,
+  copyFile,
+  link,
+  readdir,
+  rename,
+  stat,
+} from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { pathToFileURL } from "node:url";
 import { test } from "node:test";
 import { assetFilename, NODE_VERSION, sha256 } from "./metadata.mjs";
+
+async function mirrorImmutableFixture(source, target, relative = "") {
+  await mkdir(target, { recursive: true });
+  await Promise.all(
+    (await readdir(source, { withFileTypes: true })).map(async (entry) => {
+      const name = relative ? `${relative}/${entry.name}` : entry.name;
+      const from = join(source, entry.name);
+      const to = join(target, entry.name);
+      if (entry.isDirectory()) return mirrorImmutableFixture(from, to, name);
+      if (!entry.isFile()) throw new Error(`Unexpected fixture file: ${name}`);
+      // Only these files change when synthesizing version B. Other immutable bytes may be
+      // hardlinked in the test setup; the downloaded/extracted B archive remains independent.
+      if (name === "app/package.json" || name === "distribution.json") return copyFile(from, to);
+      await link(from, to);
+    }),
+  );
+}
+
+test("synthetic upgrade versions keep independently writable version metadata", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "roll-upgrade-fixture-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const a = join(root, "a");
+  const b = join(root, "b");
+  await mkdir(join(a, "app"), { recursive: true });
+  await writeFile(join(a, "app/package.json"), '{"version":"1.0.0"}');
+  await writeFile(join(a, "distribution.json"), '{"version":"1.0.0"}');
+  await writeFile(join(a, "app/main.js"), "immutable code");
+  await mirrorImmutableFixture(a, b);
+  await writeFile(join(b, "app/package.json"), '{"version":"1.0.1"}');
+  await writeFile(join(b, "distribution.json"), '{"version":"1.0.1"}');
+  assert.equal(JSON.parse(await readFile(join(a, "app/package.json"), "utf8")).version, "1.0.0");
+  assert.equal(JSON.parse(await readFile(join(a, "distribution.json"), "utf8")).version, "1.0.0");
+  assert.equal(await readFile(join(b, "app/main.js"), "utf8"), "immutable code");
+});
 
 // Native artifact acceptance, enabled by the distribution workflow after building the archive.
 // The fetch redirect exists only in this fixture entrypoint, never in shipped Roll code.
@@ -14,9 +59,14 @@ test(
   "native standalone A to B update preserves data and uses B for npm Agent execution",
   {
     skip: !process.env.ROLL_TEST_DISTRIBUTION_ARCHIVE,
-    timeout: 300_000,
+    // Includes extraction and compression of two full distributions on slower native runners.
+    // Individual Roll command deadlines and all behavior assertions remain unchanged.
+    timeout: 600_000,
   },
   async (t) => {
+    const startedAt = Date.now();
+    const phase = (name) =>
+      console.log(`[standalone upgrade] ${name} (+${Date.now() - startedAt}ms)`);
     const archive = resolve(process.env.ROLL_TEST_DISTRIBUTION_ARCHIVE);
     const home = await mkdtemp(join(tmpdir(), "roll native upgrade 中文 "));
     t.after(() => rm(home, { recursive: true, force: true }));
@@ -39,6 +89,7 @@ test(
           )
         : spawnSync("tar", ["-xzf", archive, "-C", source], { encoding: "utf8" });
     assert.equal(extract.status, 0, extract.stderr);
+    phase("archive A extracted");
     const platform = `${process.platform}-${process.arch}`;
     const pkg = JSON.parse(await readFile(join(source, "app/package.json"), "utf8"));
     const a = pkg.version;
@@ -47,7 +98,8 @@ test(
     const root = join(home, "installation");
     const aRoot = join(root, "versions", a);
     await mkdir(join(root, "versions"), { recursive: true });
-    await cp(source, aRoot, { recursive: true });
+    await rename(source, aRoot);
+    await mirrorImmutableFixture(aRoot, source);
     await writeFile(
       join(root, "installation.json"),
       '{"schemaVersion":1,"channel":"standalone"}\n',
@@ -65,6 +117,7 @@ test(
       { encoding: "utf8" },
     );
     assert.equal(archived.status, 0, archived.stderr);
+    phase("archive B prepared");
     const bBytes = await readFile(bArchive);
     const manifest = {
       schemaVersion: 1,
@@ -231,6 +284,7 @@ await import(${JSON.stringify(pathToFileURL(cli).href)});
     }
     const install = await run(a, ["agent", "install", packageName]);
     assert.equal(install.status, 0, install.stderr);
+    phase("Agent installed under A");
     const registry = JSON.parse(await readFile(join(home, "agents/agents.json"), "utf8"));
     const installedAgent = registry.agents.find((item) => item.skill.name === "standalone-probe");
     assert.ok(installedAgent);
@@ -242,6 +296,7 @@ await import(${JSON.stringify(pathToFileURL(cli).href)});
     await writeFile(join(home, "user-data-marker"), "keep");
     const update = await run(a, ["update"]);
     assert.equal(update.status, 0, update.stderr);
+    phase("Roll and Agent updated to B");
     assert.equal((await readFile(join(root, "current.txt"), "utf8")).trim(), b);
     assert.equal(await readFile(join(home, "user-data-marker"), "utf8"), "keep");
     const lifecycleAfter = JSON.parse(
