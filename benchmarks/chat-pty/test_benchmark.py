@@ -779,6 +779,77 @@ class ProcessCleanupTests(unittest.TestCase):
             with self.assertRaisesRegex(AssertionError, "TERM/KILL fallback"):
                 fixture.exit_cleanly()
 
+    def test_interactive_exit_waits_for_editor_acknowledgements(self) -> None:
+        for draft in ("", "leftover draft"):
+            with self.subTest(draft=draft):
+                fixture = self.server_fixture()
+                fixture.scenario = "fixture-ink-cold-start"
+                screen = [f"│  › {draft}   │"]
+                pending = [None]
+                sent = []
+
+                def send(value: str) -> None:
+                    sent.append(value)
+                    if value == "\x15":
+                        self.assertNotEqual(benchmark.editor_value(screen[0]), "")
+                        pending[0] = ""
+                    elif value == "/exit":
+                        self.assertEqual(benchmark.editor_value(screen[0]), "")
+                        pending[0] = "/exit"
+                    elif value == "\r":
+                        self.assertEqual(benchmark.editor_value(screen[0]), "/exit")
+                        self.assertIn("❯ /exit", screen[0])
+
+                def wait_for(predicate, _timeout, _label) -> float:
+                    if not predicate(screen[0]):
+                        self.assertIsNotNone(pending[0])
+                        value = pending[0]
+                        screen[0] = f"│  › {value}   │"
+                        if value == "/exit":
+                            screen[0] += "\n│ ❯ /exit 退出对话 │"
+                        pending[0] = None
+                    self.assertTrue(predicate(screen[0]))
+                    return 0
+
+                with (
+                    mock.patch.object(fixture, "observable_screen", side_effect=lambda: screen[0]),
+                    mock.patch.object(fixture, "send", side_effect=send),
+                    mock.patch.object(fixture, "wait_for", side_effect=wait_for),
+                    mock.patch.object(fixture, "_wait_for_process_exit", return_value=True),
+                    mock.patch.object(fixture, "drain_for"),
+                    mock.patch.object(benchmark.os, "close"),
+                ):
+                    fixture.exit_cleanly()
+                self.assertEqual(sent, (["\x15"] if draft else []) + ["/exit", "\r"])
+                self.assertFalse(fixture.forced_cleanup)
+
+    def test_exit_does_not_submit_text_without_command_readiness(self) -> None:
+        fixture = self.server_fixture()
+        fixture.scenario = "fixture-ink-cold-start"
+        sent = []
+
+        def wait_for(predicate, _timeout, label) -> float:
+            if label == "exit slash command ready":
+                # A literal control-prefix can look like /exit, but has no slash menu.
+                self.assertFalse(predicate("│  › /exit   │\nEnter 发送"))
+                raise AssertionError("exit command not ready")
+            self.assertTrue(predicate("│  ›    │"))
+            return 0
+
+        with (
+            mock.patch.object(fixture, "observable_screen", return_value="│  ›    │"),
+            mock.patch.object(fixture, "send", side_effect=sent.append),
+            mock.patch.object(fixture, "wait_for", side_effect=wait_for),
+            mock.patch.object(fixture, "_force_process_cleanup") as cleanup,
+            mock.patch.object(fixture, "drain_for"),
+            mock.patch.object(benchmark.os, "close"),
+        ):
+            with self.assertRaisesRegex(AssertionError, "exit command not ready"):
+                fixture.exit_cleanly()
+        self.assertEqual(sent, ["/exit"])
+        cleanup.assert_called_once_with()
+        self.assertTrue(fixture.closed)
+
 
 class RealInkSignalShutdownTests(unittest.TestCase):
     @staticmethod

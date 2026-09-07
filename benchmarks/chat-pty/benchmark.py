@@ -1192,6 +1192,7 @@ class PtyFixture:
             self.process.wait(timeout=1)
 
     def exit_cleanly(self) -> None:
+        input_error: Exception | None = None
         if self.process.poll() is None and self.scenario in CLI_SERVER_SCENARIOS:
             if self._server_stdin is None:
                 raise AssertionError("runtime-server stdin pipe is unavailable for clean EOF")
@@ -1201,22 +1202,34 @@ class PtyFixture:
                 self._force_process_cleanup()
         elif self.process.poll() is None:
             try:
-                # Clear any draft left by the keypress scenario before invoking the
-                # real slash command. Ink handles input per render, so type the
-                # command incrementally instead of delivering `/exit<Enter>` in one
-                # read (which can observe stale `slashActive` React state).
-                self.send("\x15")
-                self.drain_for(0.04)
-                for char in "/exit":
-                    self.send(char)
-                    self.drain_for(0.015)
+                # PTY writes are not key-event boundaries. A redundant Ctrl+U can
+                # coalesce with /exit and become literal input. Synchronize each
+                # state transition with the rendered editor instead of sleeping.
+                self.wait_for(
+                    lambda screen: editor_value(screen) is not None,
+                    2,
+                    "exit editor",
+                )
+                if editor_value(self.observable_screen()) != "":
+                    self.send("\x15")
+                    self.wait_for(
+                        lambda screen: editor_value(screen) == "",
+                        2,
+                        "cleared editor before exit",
+                    )
+                self.send("/exit")
+                self.wait_for(
+                    lambda screen: editor_value(screen) == "/exit"
+                    and re.search(r"^[ \t]*│[ \t]*❯[ \t]+/exit(?:[ \t]|$)", screen, re.MULTILINE)
+                    is not None,
+                    2,
+                    "exit slash command ready",
+                )
                 self.send("\r")
-                deadline = time.monotonic() + 2
-                while self.process.poll() is None and time.monotonic() < deadline:
-                    self.pump(0.03)
-                if self.process.poll() is None:
+                if not self._wait_for_process_exit(2):
                     raise subprocess.TimeoutExpired(self.process.args, 2)
-            except (OSError, subprocess.TimeoutExpired):
+            except (OSError, subprocess.TimeoutExpired, AssertionError) as error:
+                input_error = error
                 self._force_process_cleanup()
         try:
             self.drain_for(0.05)
@@ -1225,6 +1238,8 @@ class PtyFixture:
             if not self.closed:
                 os.close(self.master)
                 self.closed = True
+            if input_error is not None:
+                raise input_error
             if self.process.returncode != 0:
                 raise AssertionError(f"fixture exited with status {self.process.returncode}")
             if self.forced_cleanup:
@@ -1286,6 +1301,11 @@ def assert_complete_sequence(label: str, observation: MarkerObservation, count: 
         f"{label} sequence mismatch: missing={missing}, unexpected={unexpected}, "
         f"observed={observed}"
     )
+
+
+def editor_value(screen: str) -> str | None:
+    rows = re.findall(r"^[ \t]*│[ \t]*› ([^\n]*)│[ \t]*$", screen, re.MULTILINE)
+    return rows[-1].rstrip() if rows else None
 
 
 def assert_prompt(screen: str) -> None:
