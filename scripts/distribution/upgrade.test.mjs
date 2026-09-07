@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { spawn, spawnSync } from "node:child_process";
+import { execFile, spawn, spawnSync } from "node:child_process";
+import { promisify } from "node:util";
 import { createServer } from "node:http";
 import {
   mkdtemp,
@@ -18,6 +19,36 @@ import { tmpdir } from "node:os";
 import { pathToFileURL } from "node:url";
 import { test } from "node:test";
 import { assetFilename, NODE_VERSION, sha256 } from "./metadata.mjs";
+
+const execFileAsync = promisify(execFile);
+async function prepareWithTool(command, args, signal) {
+  const pending = execFileAsync(command, args, {
+    signal,
+    timeout: 300_000,
+    maxBuffer: 4 * 1024 * 1024,
+  });
+  const closed = new Promise((resolve) => pending.child.once("close", resolve));
+  try {
+    await pending;
+  } finally {
+    await closed;
+  }
+}
+
+test("native fixture preparation remains cancellable while a child tool runs", async () => {
+  const controller = new AbortController();
+  const pending = prepareWithTool(
+    process.execPath,
+    ["-e", "setTimeout(()=>{},10000)"],
+    controller.signal,
+  );
+  const timer = setTimeout(() => controller.abort(), 50);
+  try {
+    await assert.rejects(pending, /aborted/i);
+  } finally {
+    clearTimeout(timer);
+  }
+});
 
 async function mirrorImmutableFixture(source, target, relative = "") {
   await mkdir(target, { recursive: true });
@@ -72,23 +103,22 @@ test(
     t.after(() => rm(home, { recursive: true, force: true }));
     const source = join(home, "source");
     await mkdir(source);
-    const extract =
-      process.platform === "win32"
-        ? spawnSync(
-            "powershell.exe",
-            [
-              "-NoProfile",
-              "-NonInteractive",
-              "-Command",
-              "Expand-Archive -LiteralPath $env:TEST_ARCHIVE -DestinationPath $env:TEST_SOURCE",
-            ],
-            {
-              env: { ...process.env, TEST_ARCHIVE: archive, TEST_SOURCE: source },
-              encoding: "utf8",
-            },
-          )
-        : spawnSync("tar", ["-xzf", archive, "-C", source], { encoding: "utf8" });
-    assert.equal(extract.status, 0, extract.stderr);
+    if (process.platform === "win32") {
+      // Exercise the same bounded, validated extractor used by roll update. Expand-Archive
+      // is a different (and much slower) implementation and spawnSync defeats test cancellation.
+      const { extractDistributionArchive } = await import(
+        new URL("../../packages/core/dist/execution-environment/distribution.js", import.meta.url)
+          .href
+      );
+      await extractDistributionArchive(
+        archive,
+        source,
+        `${process.platform}-${process.arch}`,
+        t.signal,
+      );
+    } else {
+      await prepareWithTool("tar", ["-xzf", archive, "-C", source], t.signal);
+    }
     phase("archive A extracted");
     const platform = `${process.platform}-${process.arch}`;
     const pkg = JSON.parse(await readFile(join(source, "app/package.json"), "utf8"));
@@ -111,12 +141,11 @@ test(
     metadata.version = b;
     await writeFile(join(source, "distribution.json"), JSON.stringify(metadata));
     const bArchive = join(home, assetFilename(b, platform));
-    const archived = spawnSync(
+    await prepareWithTool(
       process.platform === "win32" ? "python" : "python3",
       [join(import.meta.dirname, "archive.py"), source, bArchive],
-      { encoding: "utf8" },
+      t.signal,
     );
-    assert.equal(archived.status, 0, archived.stderr);
     phase("archive B prepared");
     const bBytes = await readFile(bArchive);
     const manifest = {
