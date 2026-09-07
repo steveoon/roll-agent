@@ -29,6 +29,10 @@ on:
 
 permissions: {}
 
+concurrency:
+  group: standalone-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
 jobs:
   build:
     permissions:
@@ -66,10 +70,10 @@ jobs:
           package-manager-cache: false
       - name: Install frozen dependencies
         run: pnpm install --frozen-lockfile
-      - name: Build production packages
-        run: pnpm --config.verify-deps-before-run=false --config.script-shell=bash --filter '@roll-agent/core...' run build
       - name: Check distribution scripts
         run: node --test 'scripts/distribution/*.test.mjs'
+      - name: Build production packages
+        run: pnpm --config.verify-deps-before-run=false --config.script-shell=bash --filter '@roll-agent/core...' run build
       - name: Build and test detached native distribution
         run: node scripts/distribution/build.mjs distribution-assets
       - name: Verify native A to B upgrade and npm Agent lifecycle

@@ -149,12 +149,18 @@ rem Roll standalone launcher v1
 setlocal DisableDelayedExpansion
 set "ROLL_ROOT=%~dp0.."
 if not exist "%ROLL_ROOT%\current.txt" goto invalid
-rem CMD opens Unicode paths correctly; FINDSTR must read the ASCII pointer via stdin.
-findstr /r "[^0-9A-Za-z.+-]" < "%ROLL_ROOT%\current.txt" >nul && goto invalid
-findstr /r /x "[0-9][0-9A-Za-z.+-]*" < "%ROLL_ROOT%\current.txt" >nul || goto invalid
 set "version="
 set /p "version=" < "%ROLL_ROOT%\current.txt"
 if not defined version goto invalid
+rem Validate data using delayed expansion; never interpolate unchecked file contents into CMD syntax.
+setlocal EnableDelayedExpansion
+set "ROLL_UNSAFE_VERSION=!version!"
+for %%C in (0 1 2 3 4 5 6 7 8 9 A B C D E F G H I J K L M N O P Q R S T U V W X Y Z a b c d e f g h i j k l m n o p q r s t u v w x y z . + -) do set "ROLL_UNSAFE_VERSION=!ROLL_UNSAFE_VERSION:%%C=!"
+if defined ROLL_UNSAFE_VERSION goto invalid
+set "ROLL_VERSION_VALID="
+for %%D in (0 1 2 3 4 5 6 7 8 9) do if "!version:~0,1!"=="%%D" set "ROLL_VERSION_VALID=1"
+if not defined ROLL_VERSION_VALID goto invalid
+endlocal
 "%ROLL_ROOT%\versions\%version%\runtime\node.exe" "%ROLL_ROOT%\versions\%version%\app\bin\roll.js" %*
 exit /b %errorlevel%
 :invalid

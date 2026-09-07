@@ -302,6 +302,22 @@ test(
         assert.equal(result.status, 0, result.stderr);
         assert.equal(readFileSync(join(root, "current.txt"), "utf8"), `${version}\n`);
       }
+      const injected = join(temporary, "pointer-injection-marker");
+      for (const pointer of [
+        "..",
+        "abc",
+        `1.2.3" & echo injected > "${injected}" & rem "`,
+        "1.2.3%PATH%",
+        "1.2.3!BANG!",
+      ]) {
+        writeFileSync(join(root, "current.txt"), `${pointer}\n`);
+        const rejected = run(
+          `& ${psQuote(join(root, "bin/roll.cmd"))} --version\nexit $LASTEXITCODE`,
+        );
+        assert.notEqual(rejected.status, 0, rejected.stdout);
+        assert.equal(existsSync(injected), false);
+      }
+      writeFileSync(join(root, "current.txt"), `${version}\n`);
       writeFileSync(
         indexPath,
         `${version}\t${"0".repeat(64)}\t${bytes.length}\troll-${version}-${platform}.zip\n`,
