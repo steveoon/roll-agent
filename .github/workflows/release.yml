@@ -148,3 +148,4 @@ jobs:
       ROLL_DIST_SSH_KEY: ${{ secrets.ROLL_DIST_SSH_KEY }}
       ROLL_DIST_SSH_KNOWN_HOSTS: ${{ secrets.ROLL_DIST_SSH_KNOWN_HOSTS }}
       ROLL_DIST_SSH_PORT: ${{ secrets.ROLL_DIST_SSH_PORT }}
+      ROLL_DIST_ROOT: ${{ secrets.ROLL_DIST_ROOT }}

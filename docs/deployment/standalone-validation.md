@@ -22,20 +22,18 @@
 
 上述表格记录最初的本机检查。后续六个平台的构建、安装器回归、原生 A→B 升级和产物汇总均已通过，见 [独立发行 CI](https://github.com/steveoon/roll-agent/actions/runs/34102293433)。Artifact Actions 已升级到固定 SHA 的 Node 24 版本；Node 20 弃用警告已消失。依赖布局优化后，本机 macOS arm64 发行包从 77,546 个文件降至 18,706 个文件，压缩大小从约 104.1 MiB 降至 64.7 MiB。
 
-服务器准备已通过 `ssh aliyun-server` 完成：
+服务器预检结果仅记录可公开的验收结论：
 
-- 新建 `/var/www/roll-distribution`，由专用 `roll-dist` 用户管理。`staging` 为 0700，`releases` 为 0755；未创建 stable 指针或发布任何发行版本。
-- 既有 HTTPS server 新增 `/etc/nginx/snippets/roll-distribution.conf` include；原 Next.js 反向代理、证书和日志配置保留。原站点配置备份位于服务器 `/root/roll-distribution-backups/20260907-TB7ieS8X/roll-website.conf`。
-- `nginx -t`、reload、网站首页和现有静态资源检查通过。使用专用账号 SFTP 上传的临时文本经真实 HTTPS 读取后内容一致；版本资源返回一年缓存头，并保留既有安全响应头。探针随后清理，重新请求返回 404。
-- 部署公钥及其父目录由 root 管理，公钥带 `restrict` 限制；已验证专用账号可以写发行目录，但不能修改 Nginx 或公钥限制文件、不能读取 TLS 私钥，PTY 请求被拒绝。CI 不使用管理员密钥。
-- 五项 `ROLL_DIST_SSH_*` secrets 已配置，host key 通过既有可信 SSH 连接核对；本地临时私钥已删除。`ROLL_DISTRIBUTION_ENABLED` 明确设为 `false`。
-- 首个正式发行版尚未发布，`/install.sh`、`/install.ps1`、`/releases/stable/manifest.json` 当前预期返回 Nginx 404。
+- 已配置专用部署身份、静态路由和发行区域，原网站及静态资源检查通过。
+- 临时 SFTP/HTTPS 探针内容一致，缓存和安全响应头符合预期；探针随后清理。
+- 已验证部署身份的文件访问限制及 SSH 限制。凭据通过 Secrets 提供，具体连接参数、根目录和备份记录保存在仓库之外。
+- 当前未发布正式发行版本。首次部署、真实域名安装及后续正式版本升级仍需独立验收。
 
-服务器只接收 Nginx 配置、运维引导脚本、公钥和临时文本探针；未上传 Roll 应用源码，也未在服务器运行源码构建或 Linux 测试。
+公开验证记录不包含实例 SSH 参数、部署用户名、真实配置目录或备份位置。Linux 原生构建及回归在 CI 中完成，不向部署服务器上传应用源码进行验证。
 
 ## 尚未完成的线上步骤
 
-- 合并功能 PR，创建或更新 Release PR；确认首发条件后开启部署开关，再通过正式 release 流程发布完整版本 A。
+- 确认 Release PR 和首发条件后开启部署开关，再通过正式 release 流程发布完整版本 A。
 - 在无 Node/npm 环境从真实域名安装版本 A，安装并调用真实 npm Agent，核对私有解释器与所需外部依赖。
 - 发布不同的正式版本 B，验证 `roll update`、数据保留、故障恢复及已配置后台服务的版本切换。CI 的合成版本和 fixture Agent 不能替代这项线上验收。
 

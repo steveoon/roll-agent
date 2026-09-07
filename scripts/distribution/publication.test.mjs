@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { cp, mkdir, mkdtemp, readFile, readlink, readdir, rm, writeFile } from "node:fs/promises";
+import { cp, mkdir, mkdtemp, readlink, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -51,12 +51,9 @@ test(
     const root = await mkdtemp(join(tmpdir(), "roll-finalize-"));
     t.after(() => rm(root, { recursive: true, force: true }));
     await mkdir(join(root, "staging"));
-    const script = (await readFile(join(import.meta.dirname, "finalize.sh"), "utf8")).replace(
-      "ROOT=/var/www/roll-distribution",
-      `ROOT='${root}'`,
-    );
-    const scriptPath = join(root, "finalize.sh");
-    await writeFile(scriptPath, script);
+    await mkdir(join(root, "releases"));
+    await writeFile(join(root, ".roll-distribution-root"), "roll-distribution-v1\n");
+    const scriptPath = join(import.meta.dirname, "finalize.sh");
     async function stage(version, id) {
       const directory = join(root, "staging", id);
       await mkdir(directory);
@@ -74,7 +71,7 @@ test(
       return directory;
     }
     function finalize(version, id) {
-      return spawnSync("sh", [scriptPath, version, id], { encoding: "utf8" });
+      return spawnSync("sh", [scriptPath, version, id, root], { encoding: "utf8" });
     }
     await stage("1.2.3", "first");
     const first = finalize("1.2.3", "first");
