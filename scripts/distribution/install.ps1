@@ -31,7 +31,9 @@ function Write-Utf8([string]$Path, [string]$Content) {
     [IO.File]::WriteAllText($Path, $Content, (New-Object Text.UTF8Encoding($false)))
 }
 function Set-AtomicFile([string]$Source, [string]$Destination) {
-    if (Test-Path -LiteralPath $Destination) { [IO.File]::Replace($Source, $Destination, $null) }
+    # PowerShell 5.1 coerces $null to an empty string for this overload; File.Replace
+    # requires a genuine null backup path when no backup is requested.
+    if (Test-Path -LiteralPath $Destination) { [IO.File]::Replace($Source, $Destination, [NullString]::Value) }
     else { [IO.File]::Move($Source, $Destination) }
 }
 try {
