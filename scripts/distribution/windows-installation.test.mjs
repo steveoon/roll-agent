@@ -1,6 +1,16 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { access, mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
+import {
+  access,
+  mkdir,
+  mkdtemp,
+  readFile,
+  readdir,
+  realpath,
+  rm,
+  stat,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { test } from "node:test";
@@ -69,7 +79,7 @@ test(
     const version = name.match(/^roll-(\d+\.\d+\.\d+)-win32-(?:x64|arm64)\.zip$/)?.[1];
     assert.ok(version, `Unexpected archive name: ${name}`);
     assert.equal(name, assetFilename(version, platform));
-    const home = await mkdtemp(join(tmpdir(), "Roll Windows 用户's installation "));
+    const home = await realpath(await mkdtemp(join(tmpdir(), "Roll Windows 用户's installation ")));
     let handedOff = false;
     const phase = (label) => console.log(`[Windows installation] ${label}`);
     const heartbeat = setInterval(() => phase("acceptance test still running"), 30_000);
@@ -158,12 +168,14 @@ if ($Policy -eq 1) { throw 'Acceptance requires LongPathsEnabled disabled; confi
     );
     await access(longest);
     assert.ok(dirname(longest).length >= 248, "fixture must exceed the legacy directory limit");
-    // Reproduce the old System.IO API's failure on this package without creating any directory.
+    // The directory exists (verified by Node above); legacy System.IO may report either
+    // PathTooLongException or DirectoryNotFoundException for the same inaccessible long path.
     success(
       await ps(`
 $Failed = $false
 try { [IO.Directory]::CreateDirectory(${psQuote(dirname(longest))}) | Out-Null }
 catch [IO.PathTooLongException] { $Failed = $true }
+catch [IO.DirectoryNotFoundException] { $Failed = $true }
 if (!$Failed) { throw 'Legacy MAX_PATH counterexample did not reproduce in this process' }
 `),
     );
