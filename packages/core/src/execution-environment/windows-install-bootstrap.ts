@@ -99,7 +99,11 @@ async function atomicText(path: string, value: string): Promise<void> {
 /** Bootstrap must execute outside the version directory that it may move. */
 export async function installWindowsDistribution(
   input: unknown,
-  options: { readonly signal?: AbortSignal; readonly smoke?: typeof smokeDistribution } = {},
+  options: {
+    readonly signal?: AbortSignal;
+    readonly smoke?: typeof smokeDistribution;
+    readonly acquireLock?: typeof acquireDistributionLock;
+  } = {},
 ): Promise<{
   schemaVersion: 1;
   version: string;
@@ -117,11 +121,11 @@ export async function installWindowsDistribution(
   await assertParents(root);
   await mkdir(root, { recursive: true });
   const markerPath = join(root, "installation.json");
-  const hasMarker = await existing(markerPath);
+  let hasMarker = await existing(markerPath);
   if (!hasMarker && (await readdir(root)).length !== 0) {
     throw new Error("InstallDir is not empty and is not a Roll standalone installation");
   }
-  const releaseLock = await acquireDistributionLock(root);
+  const releaseLock = await (options.acquireLock ?? acquireDistributionLock)(root);
   let scratch: string | undefined;
   let createdTarget: string | undefined;
   let createdVersions = false;
@@ -143,6 +147,14 @@ export async function installWindowsDistribution(
     if (!rollbackFailed) await releaseLock();
   };
   try {
+    // Another installer may have completed between the initial inspection and lock acquisition.
+    // Only observations made while holding our lock may choose fresh vs. maintenance activation.
+    hasMarker = await existing(markerPath);
+    if (!hasMarker && (await readdir(root)).some((name) => name !== ".install-lock")) {
+      throw new Error(
+        "InstallDir changed before lock acquisition; refusing an unknown installation",
+      );
+    }
     let oldVersion: string | undefined;
     if (hasMarker) {
       if (!(await lstat(markerPath)).isFile()) throw new Error("Invalid installation metadata");

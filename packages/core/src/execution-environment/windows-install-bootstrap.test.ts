@@ -17,6 +17,7 @@ import {
   installWindowsDistribution,
   windowsInstallRequestSchema,
 } from "./windows-install-bootstrap.ts";
+import { acquireDistributionLock } from "./distribution.ts";
 
 async function fixture(t: { after: (fn: () => Promise<void>) => void }) {
   const temporary = await realpath(await mkdtemp(join(tmpdir(), "roll-bootstrap-test-")));
@@ -65,6 +66,32 @@ test("installer preserves unknown nonempty directories", async (t) => {
   await assert.rejects(installWindowsDistribution(request), /not empty/);
   assert.equal(await readFile(document, "utf8"), "user file");
   assert.deepEqual(await readdir(request.installRoot), ["keep.txt"]);
+});
+
+test("installation identity is re-read after acquiring the lock", async (t) => {
+  const { request } = await fixture(t);
+  await assert.rejects(
+    installWindowsDistribution(request, {
+      acquireLock: async (root) => {
+        // Another installer finishes after the initial empty-directory observation.
+        await writeFile(
+          join(root, "installation.json"),
+          '{"schemaVersion":1,"channel":"standalone"}',
+        );
+        await writeFile(join(root, "current.txt"), "../invalid-pointer\n");
+        return acquireDistributionLock(root);
+      },
+    }),
+    (error: unknown) => error instanceof Error && error.name === "ZodError",
+  );
+  assert.equal(
+    await readFile(join(request.installRoot, "current.txt"), "utf8"),
+    "../invalid-pointer\n",
+  );
+  assert.deepEqual((await readdir(request.installRoot)).sort(), [
+    "current.txt",
+    "installation.json",
+  ]);
 });
 
 test("installer leaves another installer lock intact", async (t) => {
