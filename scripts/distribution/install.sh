@@ -8,6 +8,7 @@ MODIFY_PATH=1
 LOCKED=0
 
 fail() { printf 'roll install: %s\n' "$*" >&2; exit 1; }
+status() { printf 'roll install: %s\n' "$*" >&2; }
 usage() { printf '%s\n' 'Usage: install.sh [--version VERSION] [--install-dir ABSOLUTE_PATH] [--no-modify-path]'; }
 version_valid() {
   printf '%s\n' "$1" | LC_ALL=C awk '
@@ -16,7 +17,13 @@ version_valid() {
     { sub(/\+.*/, ""); if (match($0, /-/)) { n=split(substr($0,RSTART+1),p,"."); for(i=1;i<=n;i++) if(p[i] ~ /^0[0-9]+$/) exit 1 } }'
 }
 quote() { printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"; }
-download() { curl --fail --silent --show-error --proto '=https' --tlsv1.2 --max-redirs 0 --connect-timeout 30 --max-time 900 "$1" -o "$2"; }
+download() {
+  set -- "$1" -o "$2"
+  # Piped installation has non-TTY stdin; curl draws its progress on stderr.
+  if [ -t 2 ]; then set -- --progress-bar "$@"
+  else set -- --silent "$@"; fi
+  curl --fail --show-error --proto '=https' --tlsv1.2 --max-redirs 0 --connect-timeout 30 --max-time 900 "$@"
+}
 cleanup() { if [ "$LOCKED" = 1 ]; then rm -rf "$INSTALL_DIR/.install-lock"; fi; }
 trap cleanup EXIT
 trap 'exit 130' INT
@@ -31,6 +38,7 @@ while [ "$#" -gt 0 ]; do
     *) fail "Unknown argument: $1" ;;
   esac
 done
+status 'Checking system requirements...'
 [ "$VERSION" = stable ] || version_valid "$VERSION" || fail 'Invalid version'
 [ -n "${HOME:-}" ] || fail 'HOME is required'
 for tool in curl tar awk sed tr wc cmp diff mktemp cut grep find; do command -v "$tool" >/dev/null 2>&1 || fail "Required tool missing: $tool"; done
@@ -63,6 +71,7 @@ elif [ -n "$(ls -A "$INSTALL_DIR")" ]; then fail 'Installation directory is not 
 mkdir "$INSTALL_DIR/.install-lock" 2>/dev/null || fail 'Another install or update owns .install-lock; no files were replaced'
 LOCKED=1
 STAGE=$(mktemp -d "$INSTALL_DIR/.install-lock/stage.XXXXXXXX")
+status "Fetching $VERSION release information for $PLATFORM..."
 download "$ORIGIN/releases/$VERSION/$PLATFORM.txt" "$STAGE/index"
 # Exactly one TSV record with a required terminal newline; no permissive shell field parsing.
 awk -F '\t' 'NR!=1 || NF!=4 || $3 !~ /^[1-9][0-9]*$/ { exit 1 } END { if(NR!=1) exit 1 }' "$STAGE/index" || fail 'Invalid release index'
@@ -76,7 +85,10 @@ version_valid "$RELEASE" || fail 'Invalid release version'
 [ "${#SHA}" -eq 64 ] || fail 'Invalid release checksum'
 printf '%s\n' "$SHA" | LC_ALL=C grep -Eq '^[0-9a-f]+$' || fail 'Invalid release checksum'
 [ "$ASSET" = "roll-$RELEASE-$PLATFORM.tar.gz" ] || fail 'Invalid asset filename'
+SIZE_MIB=$(LC_ALL=C awk -v bytes="$SIZE" 'BEGIN { printf "%.1f", bytes / 1048576 }')
+status "Downloading Roll $RELEASE for $PLATFORM ($SIZE_MIB MiB)..."
 download "$ORIGIN/releases/$RELEASE/$ASSET" "$STAGE/archive.tar.gz"
+status 'Verifying download...'
 [ "$(wc -c < "$STAGE/archive.tar.gz" | tr -d '[:space:]')" = "$SIZE" ] || fail 'Asset size mismatch'
 if [ "$HASH_TOOL" = sha256sum ]; then ACTUAL=$(sha256sum "$STAGE/archive.tar.gz" | cut -d ' ' -f1)
 else ACTUAL=$(shasum -a 256 "$STAGE/archive.tar.gz" | cut -d ' ' -f1); fi
@@ -92,11 +104,13 @@ LC_ALL=C awk 'substr($0,1,1)!="-" && substr($0,1,1)!="d" { exit 1 }' "$STAGE/typ
 mkdir "$STAGE/candidate" "$STAGE/home"
 # Stop config discovery before it can walk upward into the user's actual home/workspace.
 printf '{}\n' > "$STAGE/home/roll.config.yaml"
+status 'Extracting installation...'
 tar -xzf "$STAGE/archive.tar.gz" -C "$STAGE/candidate" || fail 'Cannot extract archive'
 CANDIDATE=$STAGE/candidate
 NODE=$CANDIDATE/runtime/bin/node
 [ -x "$NODE" ] && [ -f "$CANDIDATE/app/bin/roll.js" ] && [ -f "$CANDIDATE/runtime/lib/node_modules/npm/bin/npm-cli.js" ] && [ -f "$CANDIDATE/runtime/lib/node_modules/npm/bin/npx-cli.js" ] || fail 'Archive is missing runtime files'
 # Use only the downloaded private runtime to verify metadata, then smoke in an isolated home/cwd.
+status 'Checking installation...'
 env -u NODE_OPTIONS -u NODE_PATH "$NODE" -e '
 const fs=require("node:fs"); const [root,version,platform]=process.argv.slice(1);
 const d=JSON.parse(fs.readFileSync(root+"/distribution.json","utf8"));
@@ -113,7 +127,7 @@ if(d.schemaVersion!==1 || d.channel!=="standalone" || d.version!==version || d.p
   }
   smoke --version
   smoke agent health
-) || fail 'Candidate startup check failed'
+) >&2 || fail 'Candidate startup check failed'
 mkdir -p "$BIN_DIR"
 BIN_DIR=$(cd "$BIN_DIR" && pwd -P)
 LAUNCHER=$BIN_DIR/roll
@@ -131,6 +145,7 @@ if [ -e "$LAUNCHER" ] || [ -L "$LAUNCHER" ]; then
   cmp -s "$STAGE/launcher" "$LAUNCHER" || fail "Existing launcher is owned by another installation: $LAUNCHER"
 fi
 DEST=$INSTALL_DIR/versions/$RELEASE
+status 'Finishing installation...'
 [ ! -L "$INSTALL_DIR/versions" ] && [ ! -L "$DEST" ] || fail 'Version directory must not be a symbolic link'
 mkdir -p "$INSTALL_DIR/versions"
 if [ -e "$DEST" ]; then
@@ -150,8 +165,8 @@ if [ "$MODIFY_PATH" = 1 ]; then
     if ! printf '\n%s\n' "$LINE" >> "$PROFILE"; then printf 'Could not update %s; use the PATH command below.\n' "$PROFILE" >&2; fi
   fi
 fi
-printf '\nRoll %s installed: %s\n' "$RELEASE" "$LAUNCHER"
+printf '\nRoll %s installed: %s\n' "$RELEASE" "$LAUNCHER" >&2
 CURRENT=$(command -v roll 2>/dev/null || true)
-if [ -n "$CURRENT" ] && [ "$CURRENT" != "$LAUNCHER" ]; then printf 'Your current PATH selects another Roll: %s\n' "$CURRENT"; fi
-printf '%s\n' "For this terminal: export PATH=$(quote "$BIN_DIR"):\$PATH"
-printf 'Update with roll update; install subagents with roll agent install <package>.\n'
+if [ -n "$CURRENT" ] && [ "$CURRENT" != "$LAUNCHER" ]; then printf 'Your current PATH selects another Roll: %s\n' "$CURRENT" >&2; fi
+printf '%s\n' "For this terminal: export PATH=$(quote "$BIN_DIR"):\$PATH" >&2
+printf 'Update with roll update; install subagents with roll agent install <package>.\n' >&2
