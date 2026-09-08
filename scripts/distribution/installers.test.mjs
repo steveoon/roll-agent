@@ -214,21 +214,23 @@ test(
   },
 );
 
-test("PowerShell installer validates ZIP paths, private runtime, and atomic activation", () => {
+test("PowerShell installer limits itself to verified private-runtime bootstrap", () => {
   const source = readFileSync(join(import.meta.dirname, "install.ps1"), "utf8");
   assert.match(source, /\$Origin = 'https:\/\/roll\.duliday\.com'/);
   assert.match(source, /-MaximumRedirection 0/);
-  assert.match(source, /Archive contains links or special files/);
-  assert.match(source, /\[IO\.File\]::Replace/);
-  assert.match(source, /DisableDelayedExpansion/);
-  assert.match(source, /runtime\\node_modules\\npm\\bin\\npm-cli\.js/);
+  assert.match(source, /runtime\/node\.exe/);
+  assert.match(source, /app\/bin\/install-bootstrap\.cjs/);
+  assert.doesNotMatch(source, /Get-ChildItem[^\n]*-Recurse/);
+  assert.doesNotMatch(source, /Join-Path \$Candidate \$Entry\.FullName/);
 });
 
 test(
-  "Windows installs, launches Unicode paths, repeats and rejects a corrupted release",
+  "Windows bootstrap transports Unicode request data and rejects missing helpers and corruption",
   { skip: process.platform !== "win32" || process.version !== "v24.18.0" },
   () => {
-    const temporary = mkdtempSync(join(tmpdir(), "roll-installer-win-"));
+    // A deliberately tiny bootstrap contract fixture. Full installation behavior is exercised
+    // by windows-installation.test.mjs against the actual built ZIP, not by this stub.
+    const temporary = mkdtempSync(join(tmpdir(), "roll-installer-contract-"));
     const psQuote = (value) => `'${value.replaceAll("'", "''")}'`;
     const powershell = join(
       process.env.SystemRoot,
@@ -236,115 +238,92 @@ test(
     );
     const run = (script) => {
       const scriptPath = join(temporary, "test.ps1");
-      // BOM lets Windows PowerShell 5.1 decode Unicode test paths correctly.
       writeFileSync(scriptPath, `\uFEFF$ErrorActionPreference = 'Stop'\n${script}`);
       return spawnSync(
         powershell,
         ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", scriptPath],
         {
           encoding: "utf8",
+          timeout: 120_000,
         },
       );
     };
     try {
       const tree = join(temporary, "tree");
-      for (const dir of ["app/bin", "runtime/node_modules/npm/bin"]) {
-        mkdirSync(join(tree, dir), { recursive: true });
-      }
+      mkdirSync(join(tree, "runtime"), { recursive: true });
+      mkdirSync(join(tree, "app/bin"), { recursive: true });
       copyFileSync(process.execPath, join(tree, "runtime/node.exe"));
-      for (const cli of ["npm", "npx"]) {
-        writeFileSync(join(tree, `runtime/node_modules/npm/bin/${cli}-cli.js`), "// fixture\n");
-      }
+      const record = join(temporary, "request.json");
+      const helper = join(tree, "app/bin/install-bootstrap.cjs");
       writeFileSync(
-        join(tree, "distribution.json"),
-        JSON.stringify({
-          schemaVersion: 1,
-          channel: "standalone",
-          version,
-          platform,
-          nodeVersion: "24.18.0",
-        }),
+        helper,
+        `
+const fs = require('node:fs');
+const request = JSON.parse(fs.readFileSync(process.argv[2], 'utf8').replace(/^\\uFEFF/, ''));
+fs.writeFileSync(${JSON.stringify(record)}, JSON.stringify({ request, node: process.execPath }));
+fs.writeFileSync(request.resultPath, JSON.stringify({schemaVersion:1, version:request.version, installRoot:request.installRoot, launcher:request.installRoot + '/bin/roll.cmd'}));
+`,
       );
-      writeFileSync(
-        join(tree, "app/package.json"),
-        JSON.stringify({ version, rollDistribution: { schemaVersion: 1, channel: "standalone" } }),
-      );
-      writeFileSync(join(tree, "app/bin/roll.js"), `console.log(${JSON.stringify(version)});`);
       const zipPath = join(temporary, "archive.zip");
-      // Use the production writer: legacy Compress-Archive emits backslash entry names,
-      // which our intentionally strict portable-archive validation rejects.
-      const zipped = spawnSync("python", [join(import.meta.dirname, "archive.py"), tree, zipPath], {
-        encoding: "utf8",
-      });
-      assert.equal(zipped.status, 0, zipped.stderr);
-      const bytes = readFileSync(zipPath);
-      const sha = createHash("sha256").update(bytes).digest("hex");
       const indexPath = join(temporary, "index");
-      writeFileSync(
-        indexPath,
-        `${version}\t${sha}\t${bytes.length}\troll-${version}-${platform}.zip\n`,
-      );
+      const publishZip = () => {
+        command("python", [join(import.meta.dirname, "archive.py"), tree, zipPath]);
+        const bytes = readFileSync(zipPath);
+        const sha = createHash("sha256").update(bytes).digest("hex");
+        writeFileSync(
+          indexPath,
+          `${version}\t${sha}\t${bytes.length}\troll-${version}-${platform}.zip\n`,
+        );
+      };
+      publishZip();
       const source = readFileSync(join(import.meta.dirname, "install.ps1"), "utf8");
+      const download =
+        "Invoke-WebRequest -Uri $Url -OutFile $Destination -UseBasicParsing -MaximumRedirection 0 -TimeoutSec 900";
+      assert.equal(source.split(download).length, 2);
       const localInstaller = join(temporary, "install.ps1");
       writeFileSync(
         localInstaller,
         `\uFEFF${source.replace(
-          "Invoke-WebRequest -Uri $Url -OutFile $Destination -UseBasicParsing -MaximumRedirection 0 -TimeoutSec 900",
-          `if ($Url.EndsWith('.txt')) { Copy-Item -LiteralPath ${psQuote(indexPath)} -Destination $Destination } else { Copy-Item -LiteralPath ${psQuote(zipPath)} -Destination $Destination }`,
+          download,
+          `if ($Url.EndsWith('.txt')) { [IO.File]::Copy(${psQuote(indexPath)}, $Destination, $true) } else { [IO.File]::Copy(${psQuote(zipPath)}, $Destination, $true) }`,
         )}`,
       );
       const root = join(temporary, "Roll 用户's install");
       const installScript = `& ${psQuote(localInstaller)} -InstallDir ${psQuote(root)} -NoModifyPath`;
-      for (let repeat = 0; repeat < 2; repeat++) {
-        const result = run(
-          `${installScript}\n& ${psQuote(join(root, "bin/roll.cmd"))} --version\nif ($LASTEXITCODE -ne 0) { throw 'launcher failed' }`,
-        );
-        if (result.status !== 0) {
-          const launcher = join(root, "bin/roll.cmd");
-          let diagnostic = "";
-          if (existsSync(launcher)) {
-            const debug = join(root, "bin/roll-debug.cmd");
-            const inspect = `"${process.execPath}" -e "console.log('pointer-codepoints',process.env.version?.split('').map(c=>c.charCodeAt(0).toString(16)))"`;
-            writeFileSync(
-              debug,
-              readFileSync(launcher, "utf8")
-                .replace("@echo off", "@echo on")
-                .replace(
-                  "if not defined version goto invalid",
-                  `${inspect}\r\nif not defined version goto invalid`,
-                ),
-            );
-            const traced = run(`& ${psQuote(debug)} --version`);
-            diagnostic = `\nrepeat=${repeat}; pointer hex=${readFileSync(join(root, "current.txt")).toString("hex")}\n${traced.stdout}\n${traced.stderr}`;
-          }
-          assert.fail(`${result.stdout}\n${result.stderr}${diagnostic}`);
-        }
-        assert.equal(readFileSync(join(root, "current.txt"), "utf8"), `${version}\n`);
-      }
-      const injected = join(temporary, "pointer-injection-marker");
-      for (const pointer of [
-        "..",
-        "abc",
-        `1.2.3" & echo injected > "${injected}" & rem "`,
-        "1.2.3%PATH%",
-        "1.2.3!BANG!",
-      ]) {
-        writeFileSync(join(root, "current.txt"), `${pointer}\n`);
-        const rejected = run(
-          `& ${psQuote(join(root, "bin/roll.cmd"))} --version\nexit $LASTEXITCODE`,
-        );
-        assert.notEqual(rejected.status, 0, rejected.stdout);
-        assert.equal(existsSync(injected), false);
-      }
-      writeFileSync(join(root, "current.txt"), `${version}\n`);
+      const result = run(installScript);
+      assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
+      const captured = JSON.parse(readFileSync(record, "utf8"));
+      assert.equal(captured.request.schemaVersion, 1);
+      assert.equal(captured.request.installRoot, root);
+      assert.equal(captured.request.version, version);
+      assert.equal(captured.request.platform, platform);
+      assert.equal(captured.request.size, readFileSync(zipPath).length);
+      assert.match(captured.request.sha256, /^[a-f0-9]{64}$/);
+      assert.notEqual(
+        captured.node,
+        process.execPath,
+        "the installer must extract and use its own Node",
+      );
+      assert.equal(
+        existsSync(captured.node),
+        false,
+        "bootstrap cleanup must wait for Node to exit",
+      );
+      rmSync(helper);
+      // The production writer exclusively creates immutable archives. Replace only this
+      // test-owned transport fixture before generating the missing-helper counterexample.
+      rmSync(zipPath);
+      publishZip();
+      const missing = run(installScript);
+      assert.notEqual(missing.status, 0);
+      assert.match(missing.stderr + missing.stdout, /bootstrap|helper|unsupported|compatible/i);
       writeFileSync(
         indexPath,
-        `${version}\t${"0".repeat(64)}\t${bytes.length}\troll-${version}-${platform}.zip\n`,
+        readFileSync(indexPath, "utf8").replace(/[a-f0-9]{64}/, "0".repeat(64)),
       );
       const corrupt = run(installScript);
       assert.notEqual(corrupt.status, 0);
-      assert.match(corrupt.stderr, /checksum mismatch/);
-      assert.equal(readFileSync(join(root, "current.txt"), "utf8"), `${version}\n`);
+      assert.match(corrupt.stderr + corrupt.stdout, /checksum mismatch/i);
     } finally {
       rmSync(temporary, { recursive: true, force: true });
     }

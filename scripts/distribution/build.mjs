@@ -15,6 +15,7 @@ import { basename, dirname, join, relative, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import ts from "typescript";
 import { assetFilename, NODE_VERSION, sha256 } from "./metadata.mjs";
+import { buildInstallBootstrap } from "./build-bootstrap.mjs";
 
 const REPO = resolve(import.meta.dirname, "../..");
 
@@ -238,6 +239,9 @@ export async function build(outputDirectory) {
     await mkdir(bundle);
     await materializePackage(deployed, join(bundle, "app"));
     await createCoreSelfReference(join(bundle, "app"));
+    if (process.platform === "win32") {
+      await buildInstallBootstrap(join(bundle, "app/bin/install-bootstrap.cjs"));
+    }
     phase("downloading and validating Node");
     const checksums = JSON.parse(
       await readFile(join(import.meta.dirname, "node-checksums.json"), "utf8"),
@@ -306,6 +310,12 @@ export async function build(outputDirectory) {
       bundle,
       output,
     ]);
+    if (process.platform === "win32") {
+      const { validateWindowsZip } = await import(
+        pathToFileURL(join(REPO, "packages/core/dist/execution-environment/windows-zip.js")).href
+      );
+      await validateWindowsZip(output);
+    }
     console.log(
       JSON.stringify({ platform, filename: basename(output), sha256: await sha256(output) }),
     );

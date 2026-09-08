@@ -19,6 +19,7 @@ import {
 } from "node:fs/promises";
 import { z } from "zod";
 import { resolveExecutionEnvironment, type ExecutionEnvironment } from "./index.ts";
+import { extractWindowsZip } from "./windows-zip.ts";
 
 export const DISTRIBUTION_ORIGIN = "https://roll.duliday.com";
 export const distributionVersionSchema = z
@@ -229,11 +230,9 @@ export async function prepareDistributionUpdate(
   const dispose = () => {
     disposed = true;
     disposal ??= (async () => {
-      try {
-        if (scratch) await rm(scratch, { recursive: true, force: true });
-      } finally {
-        await release?.();
-      }
+      // Retain ownership when scratch cleanup fails: another installer must not race it.
+      if (scratch) await rm(scratch, { recursive: true, force: true });
+      await release?.();
     })();
     return disposal;
   };
@@ -473,38 +472,7 @@ export async function extractDistributionArchive(
   signal?: AbortSignal,
 ): Promise<void> {
   if (platform.startsWith("win32-")) {
-    const script = `
-$ErrorActionPreference = 'Stop'
-Add-Type -AssemblyName System.IO.Compression.FileSystem
-$zip = [IO.Compression.ZipFile]::OpenRead($env:ROLL_EXTRACT_ARCHIVE)
-try {
-  foreach ($entry in $zip.Entries) {
-    $n = $entry.FullName
-    $kind = ($entry.ExternalAttributes -shr 16) -band 61440
-    if (!$n -or $n -match '[\\\\:\\x00-\\x1f\\x7f]' -or $n.StartsWith('/') -or ($n.Split('/') -contains '..') -or ($kind -ne 0 -and $kind -ne 32768 -and $kind -ne 16384)) { throw 'Unsafe archive entry' }
-    if ($n -ne 'distribution.json' -and $n -notmatch '^(app|runtime)(/|$)') { throw 'Unexpected archive entry' }
-  }
-} finally { $zip.Dispose() }
-[IO.Compression.ZipFile]::ExtractToDirectory($env:ROLL_EXTRACT_ARCHIVE, $env:ROLL_EXTRACT_DESTINATION)
-`;
-    await execFileAsync(
-      "powershell.exe",
-      [
-        "-NoProfile",
-        "-NonInteractive",
-        "-EncodedCommand",
-        Buffer.from(script, "utf16le").toString("base64"),
-      ],
-      {
-        env: {
-          ...process.env,
-          ROLL_EXTRACT_ARCHIVE: archive,
-          ROLL_EXTRACT_DESTINATION: destination,
-        },
-        timeout: 180_000,
-        ...(signal ? { signal } : {}),
-      },
-    );
+    await extractWindowsZip(archive, destination, signal);
   } else {
     const options = {
       timeout: 180_000,
@@ -540,7 +508,7 @@ export async function validateDistributionTree(root: string, signal?: AbortSigna
   } else if (!info.isFile()) throw new Error("Distribution contains a special file");
 }
 
-async function distributionTreeDigest(root: string, signal?: AbortSignal): Promise<string> {
+export async function distributionTreeDigest(root: string, signal?: AbortSignal): Promise<string> {
   const hash = createHash("sha256");
   async function walk(path: string, rel: string): Promise<void> {
     signal?.throwIfAborted();

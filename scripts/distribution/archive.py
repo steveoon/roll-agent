@@ -10,7 +10,24 @@ import tarfile
 import zipfile
 
 
+def windows_extended_path(value: str) -> str:
+    """The build tool must work with long-path policy disabled too; ZIP names stay relative."""
+    if value.startswith("\\\\?\\"):
+        return value
+    if value.startswith("\\\\"):
+        return "\\\\?\\UNC\\" + value[2:]
+    return "\\\\?\\" + value
+
+
+def filesystem_path(path: Path) -> Path:
+    if os.name == "nt":
+        return Path(windows_extended_path(os.path.abspath(path)))
+    return path
+
+
 def archive(source: Path, destination: Path, fast: bool = False) -> None:
+    source = filesystem_path(source)
+    destination = filesystem_path(destination)
     paths = sorted(source.rglob("*"))
     if any(path.is_symlink() for path in paths):
         raise ValueError("Distribution archives cannot contain symbolic links")

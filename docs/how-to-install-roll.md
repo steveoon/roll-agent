@@ -27,6 +27,16 @@ irm https://roll.duliday.com/install.ps1 | iex
 
 如需参数，先下载脚本，再使用 `-Version`、`-InstallDir`、`-NoModifyPath`。脚本仅配置当前用户，不要求管理员身份，也不全局改变 PowerShell 执行策略。
 
+Windows 安装脚本先校验发行包，再用包内 Node 和单文件安装助手处理完整目录。它支持 Windows PowerShell 5.1，不需要开启系统长路径策略或预装 Node/npm。安装、重复安装及更新都使用同一套 Node ZIP 安全校验；PowerShell 仅处理短路径引导文件及用户 PATH。
+
+### Windows 0.38.0 的一次性过渡升级
+
+修复版发布后，如果旧版安装或 `roll update` 报 `PathTooLongException`，重新运行上面的在线安装命令即可安装当前 stable。已有安装使用自定义位置时，必须继续传入原来的 `-InstallDir`；脚本不会自动查找其他安装位置。
+
+脚本只更新 Roll 本体，保留配置、会话和 Agent 包。更新前检查使用锁和服务状态；有活动任务、Agent 使用中或身份无法确认时会停止，按提示结束相关工作后重试。以后正常使用 `roll update`。新版引导脚本不支持用 `-Version` 安装缺少引导助手的旧 ZIP；不会回退到存在长路径问题的解压方式。
+
+失败清理若受文件占用阻碍，安装器会显示保留的临时目录与锁。先确认原安装进程已退出并解除占用，再处理该明确标识的残留；不要清空配置或整个安装目录。
+
 支持 macOS 13.5+、Linux kernel 4.18+/glibc 2.28+、Windows 10/Server 2016 对应支持范围，架构为 x64/arm64。首版不提供 musl/Alpine 包。POSIX 需要 curl、tar、SHA-256 校验工具等系统工具；Windows 使用系统 PowerShell。无需本地编译 Roll。
 
 ## npm 安装
