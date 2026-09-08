@@ -310,6 +310,9 @@ fs.writeFileSync(request.resultPath, JSON.stringify({schemaVersion:1, version:re
         "bootstrap cleanup must wait for Node to exit",
       );
       rmSync(helper);
+      // The production writer exclusively creates immutable archives. Replace only this
+      // test-owned transport fixture before generating the missing-helper counterexample.
+      rmSync(zipPath);
       publishZip();
       const missing = run(installScript);
       assert.notEqual(missing.status, 0);
