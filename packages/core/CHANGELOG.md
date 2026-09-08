@@ -1,5 +1,16 @@
 # @roll-agent/core
 
+## 0.38.1
+
+### Patch Changes
+
+- [#255](https://github.com/steveoon/roll-agent/pull/255) [`1e81814`](https://github.com/steveoon/roll-agent/commit/1e818149ba98d52d76da9fd78c21a1d1f3dd6be9) Thanks [@steveoon](https://github.com/steveoon)! - Fix Windows standalone installation and updates for deeply nested package paths without requiring system long-path policy changes or a preinstalled Node.js. The PowerShell installer bootstraps the bundled Node and a self-contained installation helper; installation and updates share bounded ZIP validation and extraction, including CRC checks and Windows path collision protection.
+
+  Allow existing standalone users to upgrade through the online installer while preserving Agent usage locks, scheduler admission and target-runtime service coordination. Older Windows installations whose updater hits the legacy path limit can use the updated stable installer once, then resume using `roll update`.
+
+- Updated dependencies []:
+  - @roll-agent/runtime@0.20.0
+
 ## 0.38.0
 
 ### Minor Changes
