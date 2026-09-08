@@ -84,6 +84,15 @@ jobs:
         run: pnpm --config.verify-deps-before-run=false --config.script-shell=bash --filter '@roll-agent/core...' run build
       - name: Build and test detached native distribution
         run: node scripts/distribution/build.mjs distribution-assets
+      # Keep a candidate for diagnosis if native acceptance fails. Assembly/deployment still
+      # requires every build job, including its acceptance steps, to finish successfully.
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: roll-${{ matrix.platform }}
+          path: distribution-assets/*
+          retention-days: 1
+          if-no-files-found: error
+          compression-level: 0
       - name: Verify native A to B upgrade and npm Agent lifecycle
         if: runner.os != 'Windows'
         run: |
@@ -119,13 +128,6 @@ jobs:
             & $Node -e 'const fs=require("node:fs");const p=process.argv[1];if(fs.existsSync(p)){const r=JSON.parse(fs.readFileSync(p,"utf8"));fs.rmSync(r.home,{recursive:true,force:true});fs.rmSync(p);}' $env:ROLL_TEST_WINDOWS_INSTALLATION_RESULT
             if ($LASTEXITCODE -ne 0) { throw 'Windows fixture cleanup failed' }
           }
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: roll-${{ matrix.platform }}
-          path: distribution-assets/*
-          retention-days: 1
-          if-no-files-found: error
-          compression-level: 0
 
   assemble:
     needs: build

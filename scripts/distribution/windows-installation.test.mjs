@@ -91,10 +91,12 @@ test(
       await writeFile(join(bait, `${tool}.cmd`), "@echo HOST_RUNTIME_USED 1>&2\r\n@exit /b 99\r\n");
     }
     // Avoid inheriting a runner's duplicate Path/PATH key or configured user data directories.
+    // A pwsh 7 parent exports its own PSModulePath. Let Windows PowerShell 5.1 rebuild its
+    // default module search path so built-in commands such as Get-FileHash remain available.
     const env = Object.fromEntries(
       Object.entries(process.env).filter(
         ([name]) =>
-          !/^(path|node_options|node_path|roll_config|roll_config_path|home|userprofile|localappdata|appdata|xdg_.*)$/i.test(
+          !/^(path|psmodulepath|node_options|node_path|roll_config|roll_config_path|home|userprofile|localappdata|appdata|xdg_.*)$/i.test(
             name,
           ),
       ),
@@ -128,7 +130,7 @@ test(
       const file = join(home, "invoke.ps1");
       await writeFile(
         file,
-        `\uFEFF$ErrorActionPreference = 'Stop'\nif ($PSVersionTable.PSVersion.Major -ne 5 -or $PSVersionTable.PSVersion.Minor -ne 1) { throw 'Expected Windows PowerShell 5.1' }\n${script}\n`,
+        `\uFEFF$ErrorActionPreference = 'Stop'\nif ($PSVersionTable.PSVersion.Major -ne 5 -or $PSVersionTable.PSVersion.Minor -ne 1) { throw 'Expected Windows PowerShell 5.1' }\nGet-Command Get-FileHash -ErrorAction Stop | Out-Null\n${script}\n`,
       );
       return run(powershell, ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", file], {
         cwd: home,
