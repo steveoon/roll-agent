@@ -110,18 +110,33 @@ console.log(${JSON.stringify(version)});
     join(fakeBin, "curl"),
     `#!/bin/sh
 set -eu
-url= out=
+url= out= progress=0 silent=0
 while [ "$#" -gt 0 ]; do
  case "$1" in
   https://roll.duliday.com/*) url=$1; shift ;;
   -o) out=$2; shift 2 ;;
+  --progress-bar) progress=1; shift ;;
+  --silent) silent=1; shift ;;
   *) shift ;;
  esac
 done
 [ -n "$url" ] && [ -n "$out" ] || exit 91
+if [ -t 2 ]; then
+ [ "$progress" = 1 ] && [ "$silent" = 0 ] || exit 94
+else
+ [ "$progress" = 0 ] && [ "$silent" = 1 ] || exit 95
+fi
+if [ "\${ROLL_INSTALLER_TEST_PIPE:-}" = 1 ]; then
+ [ ! -t 0 ] && [ -t 2 ] || exit 96
+fi
 case "$url" in
  */${platform}.txt) cp ${quote(join(fixture, "index"))} "$out" ;;
- */roll-${version}-${platform}.tar.gz) cp ${quote(join(fixture, "asset"))} "$out" ;;
+ */roll-${version}-${platform}.tar.gz)
+  if [ "\${ROLL_INSTALLER_TEST_FAIL_ASSET:-}" = 1 ]; then
+   printf 'curl: (28) fixture download timed out\\n' >&2
+   exit 28
+  fi
+  cp ${quote(join(fixture, "asset"))} "$out" ;;
  *) exit 92 ;;
 esac
 `,
@@ -157,6 +172,12 @@ test(
     const root = join(fixture, "Roll 用户's install");
     const first = install(root);
     assert.equal(first.status, 0, first.stderr);
+    assert.equal(first.stdout, "");
+    assert.doesNotMatch(first.stderr, /\r/);
+    assert.match(
+      first.stderr,
+      /Checking system requirements[\s\S]*Fetching stable release information[\s\S]*Downloading Roll 1\.2\.3[^\n]*\([\d.]+ MiB\)[\s\S]*Verifying download[\s\S]*Extracting installation[\s\S]*Checking installation[\s\S]*Finishing installation[\s\S]*Roll 1\.2\.3 installed:/,
+    );
     assert.equal(readFileSync(join(root, "current.txt"), "utf8"), `${version}\n`);
     assert.equal(existsSync(join(fixture, "smoke-parent-home/health-fixture")), false);
     const result = command(join(root, "bin/roll"), ["--version"], {
@@ -171,6 +192,52 @@ test(
     assert.notEqual(modified.status, 0);
     assert.match(modified.stderr, /differs from the verified release/);
     assert.equal(readFileSync(join(root, "current.txt"), "utf8"), `${version}\n`);
+  },
+);
+
+test(
+  "piped installer enables curl progress on terminal stderr despite non-terminal stdin",
+  { skip: !supported || !existsSync("/usr/bin/script") },
+  () => {
+    publish(archive);
+    const root = join(fixture, "piped-install");
+    const home = join(fixture, "piped-home");
+    mkdirSync(home);
+    const pipeline = `cat ${quote(installer)} | /bin/sh -s -- --install-dir ${quote(root)} --no-modify-path`;
+    const args =
+      process.platform === "darwin"
+        ? ["-q", "/dev/null", "/bin/sh", "-c", pipeline]
+        : ["-q", "-e", "-c", pipeline, "/dev/null"];
+    const result = spawnSync("/usr/bin/script", args, {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+      timeout: 30_000,
+      env: {
+        ...process.env,
+        HOME: home,
+        PATH: `${fakeBin}:/usr/bin:/bin:/usr/sbin:/sbin`,
+        ROLL_INSTALLER_TEST_PIPE: "1",
+      },
+    });
+    assert.equal(result.status, 0, result.stderr || result.stdout || result.error?.message);
+    assert.match(result.stdout, /Roll 1\.2\.3 installed:/);
+    assert.equal(readFileSync(join(root, "current.txt"), "utf8"), `${version}\n`);
+  },
+);
+
+test(
+  "download failure preserves its error and does not announce later stages",
+  { skip: !supported },
+  () => {
+    publish(archive);
+    const root = join(fixture, "download-failure");
+    const result = install(root, [], { ROLL_INSTALLER_TEST_FAIL_ASSET: "1" });
+    assert.equal(result.status, 28);
+    assert.equal(result.stdout, "");
+    assert.match(result.stderr, /Downloading Roll[\s\S]*curl: \(28\) fixture download timed out/);
+    assert.doesNotMatch(result.stderr, /Verifying download|Extracting installation|installed:/);
+    assert.equal(existsSync(join(root, "current.txt")), false);
+    assert.equal(existsSync(join(root, ".install-lock")), false);
   },
 );
 
