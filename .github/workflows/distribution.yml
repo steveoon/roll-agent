@@ -75,19 +75,55 @@ jobs:
       - name: Check distribution scripts
         run: node --test 'scripts/distribution/*.test.mjs'
       - name: Check activation and archive safety regressions
-        run: node --experimental-strip-types --test packages/core/src/execution-environment/distribution.test.ts
+        run: >-
+          node --experimental-strip-types --test
+          packages/core/src/execution-environment/distribution.test.ts
+          packages/core/src/execution-environment/windows-zip.test.ts
+          packages/core/src/execution-environment/windows-install-bootstrap.test.ts packages/core/src/cli/commands/update-installer.test.ts
       - name: Build production packages
         run: pnpm --config.verify-deps-before-run=false --config.script-shell=bash --filter '@roll-agent/core...' run build
       - name: Build and test detached native distribution
         run: node scripts/distribution/build.mjs distribution-assets
       - name: Verify native A to B upgrade and npm Agent lifecycle
+        if: runner.os != 'Windows'
         run: |
           archive=$(find distribution-assets -maxdepth 1 -type f | head -n 1)
           ROLL_TEST_DISTRIBUTION_ARCHIVE="$archive" node --test scripts/distribution/upgrade.test.mjs
+      - name: Verify Windows PowerShell 5.1 installation and upgrade without long-path policy
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PolicyPath = 'HKLM:\SYSTEM\CurrentControlSet\Control\FileSystem'
+          $OriginalPolicy = Get-ItemPropertyValue -LiteralPath $PolicyPath -Name LongPathsEnabled -ErrorAction SilentlyContinue
+          $Node = (Get-Command node).Source
+          $Archives = @(Get-ChildItem -LiteralPath distribution-assets -Filter '*.zip')
+          if ($Archives.Count -ne 1) { throw 'Expected one native ZIP' }
+          $env:ROLL_TEST_DISTRIBUTION_ARCHIVE = $Archives[0].FullName
+          $env:ROLL_TEST_WINDOWS_INSTALLATION_RESULT = Join-Path $env:RUNNER_TEMP ('roll-install-' + [Guid]::NewGuid().ToString('N') + '.json')
+          try {
+            # Only this ephemeral CI runner changes policy. Each test starts fresh Node and
+            # system Windows PowerShell 5.1 processes after the change; no cached policy applies.
+            Set-ItemProperty -LiteralPath $PolicyPath -Name LongPathsEnabled -Type DWord -Value 0
+            & $Node --test scripts/distribution/windows-installation.test.mjs
+            if ($LASTEXITCODE -ne 0) { throw 'Windows first-install acceptance failed' }
+            & $Node --test scripts/distribution/upgrade.test.mjs
+            if ($LASTEXITCODE -ne 0) { throw 'Windows upgrade acceptance failed' }
+          } finally {
+            if ($null -eq $OriginalPolicy) {
+              Remove-ItemProperty -LiteralPath $PolicyPath -Name LongPathsEnabled -ErrorAction SilentlyContinue
+            } else {
+              Set-ItemProperty -LiteralPath $PolicyPath -Name LongPathsEnabled -Type DWord -Value $OriginalPolicy
+            }
+            # Deep fixture cleanup also uses Node, never PowerShell's legacy recursive APIs.
+            & $Node -e 'const fs=require("node:fs");const p=process.argv[1];if(fs.existsSync(p)){const r=JSON.parse(fs.readFileSync(p,"utf8"));fs.rmSync(r.home,{recursive:true,force:true});fs.rmSync(p);}' $env:ROLL_TEST_WINDOWS_INSTALLATION_RESULT
+            if ($LASTEXITCODE -ne 0) { throw 'Windows fixture cleanup failed' }
+          }
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: roll-${{ matrix.platform }}
           path: distribution-assets/*
+          retention-days: 1
           if-no-files-found: error
           compression-level: 0
 
@@ -117,6 +153,7 @@ jobs:
         with:
           name: standalone-publication
           path: publication/*
+          retention-days: 3
           if-no-files-found: error
           compression-level: 0
 

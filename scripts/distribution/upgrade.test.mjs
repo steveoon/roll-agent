@@ -128,8 +128,23 @@ test(
       phase("fixture cleanup complete");
     });
     const source = join(home, "source");
+    let installed;
+    if (process.platform === "win32" && process.env.ROLL_TEST_WINDOWS_INSTALLATION_RESULT) {
+      installed = JSON.parse(
+        await readFile(process.env.ROLL_TEST_WINDOWS_INSTALLATION_RESULT, "utf8"),
+      );
+      assert.equal(installed.archive, archive, "first-install archive must match upgrade fixture");
+      assert.equal(installed.sha256, await sha256(archive), "first-install archive bytes changed");
+      assert.equal(installed.root, join(installed.home, "AppData/Local/Roll"));
+      t.after(() => rm(installed.home, { recursive: true, force: true }));
+      const installedVersion = (await readFile(join(installed.root, "current.txt"), "utf8")).trim();
+      assert.equal(installedVersion, installed.version);
+      phase("reusing the actual PowerShell-installed version A");
+    }
     await mkdir(source);
-    if (process.platform === "win32") {
+    if (installed) {
+      // Version B is prepared below using immutable hardlinks from the actual first installation.
+    } else if (process.platform === "win32") {
       // Exercise the same bounded, validated extractor used by roll update. Expand-Archive
       // is a different (and much slower) implementation and spawnSync defeats test cancellation.
       const { extractDistributionArchive } = await import(
@@ -148,20 +163,23 @@ test(
     phase("archive A extracted");
     phase("preparing archive B");
     const platform = `${process.platform}-${process.arch}`;
-    const pkg = JSON.parse(await readFile(join(source, "app/package.json"), "utf8"));
+    const initialRoot = installed ? join(installed.root, "versions", installed.version) : source;
+    const pkg = JSON.parse(await readFile(join(initialRoot, "app/package.json"), "utf8"));
     const a = pkg.version;
     const parts = a.split(".").map(Number);
     const b = `${parts[0]}.${parts[1]}.${parts[2] + 1}`;
-    const root = join(home, "installation");
+    const root = installed?.root ?? join(home, "installation");
     const aRoot = join(root, "versions", a);
     await mkdir(join(root, "versions"), { recursive: true });
-    await rename(source, aRoot);
+    if (!installed) {
+      await rename(source, aRoot);
+      await writeFile(
+        join(root, "installation.json"),
+        '{"schemaVersion":1,"channel":"standalone"}\n',
+      );
+      await writeFile(join(root, "current.txt"), `${a}\n`);
+    }
     await mirrorImmutableFixture(aRoot, source);
-    await writeFile(
-      join(root, "installation.json"),
-      '{"schemaVersion":1,"channel":"standalone"}\n',
-    );
-    await writeFile(join(root, "current.txt"), `${a}\n`);
     pkg.version = b;
     await writeFile(join(source, "app/package.json"), JSON.stringify(pkg));
     const metadata = JSON.parse(await readFile(join(source, "distribution.json"), "utf8"));

@@ -144,6 +144,7 @@
     "react": "19.2.7",
     "string-width": "8.2.1",
     "yaml": "^2.7.0",
+    "yauzl": "3.4.0",
     "zod": "^3.25.76"
   },
   "devDependencies": {
@@ -152,6 +153,7 @@
     "@types/node": "^22.0.0",
     "@types/react": "19.2.17",
     "@types/react-dom": "19.2.3",
+    "@types/yauzl": "3.4.0",
     "@vitejs/plugin-react": "4.7.0",
     "ink-testing-library": "4.0.0",
     "react-dom": "19.2.7",

@@ -75,6 +75,7 @@ import { createBundledRollInvocation } from "../../companion-host/invocation.ts"
 import {
   getExecutionEnvironment,
   withExecutionEnvironment,
+  type ExecutionEnvironment,
 } from "../../execution-environment/index.ts";
 import {
   resolveSelfUpdateTarget,
@@ -87,6 +88,13 @@ import {
   type PreparedDistribution,
 } from "../../execution-environment/distribution.ts";
 import { acquireSchedulerAdmissionLockWithRetry } from "../../scheduler-host/scheduler-admission.ts";
+import { DAEMON_LIVENESS, inspectDaemon } from "../../scheduler-host/daemon-record.ts";
+import { createSchedulerPaths } from "../../scheduler-host/paths.ts";
+import {
+  inspectSchedulerServiceState,
+  schedulerServiceStatePath,
+  SCHEDULER_SERVICE_STATE_PHASES,
+} from "../../scheduler-host/service-state.ts";
 import {
   SCHEDULER_UPDATE_RECONCILE_OUTCOMES,
   reconcileSchedulerServiceAfterUpdate,
@@ -480,6 +488,7 @@ async function restorePersistentManagedAgents(
   baselines: ReadonlyMap<string, UpdateManagedRuntimeBaseline>,
   store: AgentStore,
   dataDir: string,
+  warn: (message: string) => void = log.warn,
 ): Promise<number> {
   let failures = 0;
   for (const baseline of baselines.values()) {
@@ -492,7 +501,7 @@ async function restorePersistentManagedAgents(
         continue;
       }
     } catch (error) {
-      log.warn(
+      warn(
         `${baseline.agent.skill.name} 恢复前发现不可验证 runtime：${error instanceof Error ? error.message : String(error)}`,
       );
       failures += 1;
@@ -501,7 +510,7 @@ async function restorePersistentManagedAgents(
 
     const currentAgent = store.findByName(baseline.agent.skill.name) ?? baseline.agent;
     if (currentAgent.runtime.ownership !== "core-managed") {
-      log.warn(`${baseline.agent.skill.name} 更新后不再是 core-managed，未恢复旧常驻进程。`);
+      warn(`${baseline.agent.skill.name} 更新后不再是 core-managed，未恢复旧常驻进程。`);
       continue;
     }
     try {
@@ -509,13 +518,182 @@ async function restorePersistentManagedAgents(
       store.updateStatus(currentAgent.skill.name, "online");
     } catch (error) {
       store.updateStatus(currentAgent.skill.name, "error");
-      log.warn(
+      warn(
         `${currentAgent.skill.name} 更新失败后的常驻恢复也失败：${error instanceof Error ? error.message : String(error)}`,
       );
       failures += 1;
     }
   }
   return failures;
+}
+
+/** Called under scheduler admission: existing work must settle before any Agent is stopped. */
+async function assertInstallerSchedulerIdle(config: RollConfig): Promise<void> {
+  const inspection = inspectSchedulerServiceState(schedulerServiceStatePath());
+  if (inspection.status === "invalid") {
+    throw new Error(`无法验证 scheduler service metadata，拒绝激活：${inspection.error}`);
+  }
+  if (
+    inspection.status === "valid" &&
+    inspection.state.phase !== SCHEDULER_SERVICE_STATE_PHASES.installed
+  ) {
+    throw new Error("scheduler service 正在安装或恢复，拒绝激活 Roll 新版本。");
+  }
+  const installedDataDir = inspection.status === "valid" ? inspection.state.dataDir : undefined;
+  const dataDirs = new Set([
+    resolve(config.scheduler.dataDir),
+    ...(installedDataDir === undefined ? [] : [resolve(installedDataDir)]),
+  ]);
+  for (const dataDir of dataDirs) {
+    const paths = createSchedulerPaths(dataDir);
+    const daemon = inspectDaemon(paths.daemonRecordPath);
+    if (
+      (existsSync(paths.daemonRecordPath) && daemon.record === undefined) ||
+      daemon.liveness === DAEMON_LIVENESS.unverifiable
+    ) {
+      throw new Error("无法验证 scheduler daemon 身份，拒绝激活 Roll 新版本。");
+    }
+    if (!existsSync(resolve(dataDir, "schedules.db"))) {
+      if (dataDir === installedDataDir || daemon.liveness === DAEMON_LIVENESS.running) {
+        throw new Error("scheduler service/daemon 的任务账本缺失，拒绝激活 Roll 新版本。");
+      }
+      continue;
+    }
+    const runtime = await import("@roll-agent/runtime");
+    if (runtime.readScheduleLedger(dataDir).status === "migration-required") {
+      throw new Error("scheduler 任务账本需要迁移，安装器不会迁移用户数据库，拒绝激活。");
+    }
+    const utils = await loadScheduleServiceUtils();
+    const blockers = await utils.listSchedulerServiceBlockerIds(dataDir);
+    if (blockers.length > 0) {
+      throw new Error(
+        `scheduler 仍有 ${blockers.length} 个活跃或尚未确认结束的任务，拒绝激活：${utils.describeSchedulerServiceBlockers(blockers)}`,
+      );
+    }
+  }
+}
+
+/**
+ * Activate an already verified installer payload without updating any Agent package. The caller
+ * owns the distribution lock and disposal; this boundary owns runtime admission and recovery.
+ */
+export async function activateInstallerDistribution(
+  current: ExecutionEnvironment,
+  prepared: PreparedDistribution,
+): Promise<{ readonly environment: ExecutionEnvironment; readonly warnings: readonly string[] }> {
+  const warnings: string[] = [];
+  const warn = (message: string): void => {
+    warnings.push(message);
+  };
+  let environment = current;
+  await withExecutionEnvironment(current, async () => {
+    // Unlike the interactive updater's explicit skip mode, an installer must never activate
+    // while an unreadable configuration could conceal an Agent data directory or ownership.
+    const { config } = loadConfig();
+    const { agentsConfig } = loadAgentsConfig();
+    let admission: AgentLifecycleLock | undefined;
+    let registry: AgentRegistryLock | undefined;
+    let guards: readonly AgentUsageMaintenanceGuard[] = [];
+    let baselines: ReadonlyMap<string, UpdateManagedRuntimeBaseline> = new Map();
+    let failure: unknown;
+    let failed = false;
+    const releaseErrors: unknown[] = [];
+    try {
+      admission = await acquireSchedulerAdmissionLockWithRetry();
+      await assertInstallerSchedulerIdle(config);
+      registry = await acquireAgentRegistryLockAsync(agentsConfig.dataDir);
+      const loaded = loadStrictAgentStore(agentsConfig.dataDir, registry);
+      const store = loaded.store;
+      const agents = loaded.agents.map((agent) =>
+        inferAgentSourceType(agent) === "installed-package"
+          ? hydrateInstalledPackageAgent(agent)
+          : agent,
+      );
+      guards = await acquireUpdateMaintenanceGuards(agents, agentsConfig.dataDir);
+      baselines = await stopManagedAgentsForUpdate(agents, guards, agentsConfig.dataDir);
+      try {
+        environment = await prepared.activate();
+      } catch (error) {
+        const failures = await restorePersistentManagedAgents(
+          baselines,
+          store,
+          agentsConfig.dataDir,
+          warn,
+        );
+        if (failures > 0) {
+          throw new AggregateError(
+            [error],
+            `激活失败，且 ${failures} 个常驻 Agent 未能恢复：${warnings.join("；")}`,
+          );
+        }
+        throw error;
+      }
+      // The old process.execPath must not choose the interpreter for restored runtimes.
+      await withExecutionEnvironment(environment, async () => {
+        try {
+          const failures = await restorePersistentManagedAgents(
+            baselines,
+            store,
+            agentsConfig.dataDir,
+            warn,
+          );
+          if (failures > 0) warn(`${failures} 个常驻 Agent 恢复失败；Roll 新版本已激活。`);
+        } catch (error) {
+          warn(
+            `Roll 新版本已激活，但常驻 Agent 恢复失败：${error instanceof Error ? error.message : String(error)}`,
+          );
+        }
+      });
+    } catch (error) {
+      failed = true;
+      failure = error;
+    } finally {
+      for (const lock of [...guards].reverse()) {
+        try {
+          lock.release();
+        } catch (error) {
+          releaseErrors.push(error);
+        }
+      }
+      for (const lock of [registry, admission]) {
+        try {
+          lock?.release();
+        } catch (error) {
+          releaseErrors.push(error);
+        }
+      }
+    }
+    if (failed) {
+      if (releaseErrors.length > 0) {
+        throw new AggregateError([failure, ...releaseErrors], "安装失败，且部分维护锁未能释放");
+      }
+      throw failure;
+    }
+    if (releaseErrors.length > 0) {
+      warn("Roll 新版本已激活，但部分维护锁未能释放；请检查 Agent 和 scheduler 状态。");
+    }
+  });
+  try {
+    await withExecutionEnvironment(environment, async () => {
+      if (process.platform !== "darwin" && process.platform !== "win32") return;
+      const result = await reconcileSchedulerServiceAfterUpdate(
+        runSchedulerServiceRestartInFreshProcess,
+      );
+      if (result.outcome === SCHEDULER_UPDATE_RECONCILE_OUTCOMES.deferred) {
+        warn(`roll schedule daemon 用户服务仍在运行旧版本：${result.reason}`);
+      } else if (result.outcome === SCHEDULER_UPDATE_RECONCILE_OUTCOMES.failed) {
+        warn(
+          `roll schedule daemon 用户服务自动重启失败：${result.error}；请手动执行 roll schedule service restart`,
+        );
+      }
+      await reportCompanionServiceAfterUpdate(warn);
+    });
+  } catch (error) {
+    warn(
+      `Roll 新版本已激活，但后台服务协调失败：${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+  return { environment, warnings };
 }
 
 export default defineCommand({
@@ -1169,7 +1347,9 @@ async function startManagedAgentAndWait(
 
 const commandExtension = import.meta.url.endsWith(".ts") ? "ts" : "js";
 
-async function reportCompanionServiceAfterUpdate(): Promise<void> {
+async function reportCompanionServiceAfterUpdate(
+  warn: (message: string) => void = log.warn,
+): Promise<void> {
   try {
     const serviceModule = (await import(
       new URL(`../../companion-host/service.${commandExtension}`, import.meta.url).href
@@ -1187,12 +1367,12 @@ async function reportCompanionServiceAfterUpdate(): Promise<void> {
     if (status.installed) {
       // Companion currently has no atomic admission/idle handshake. A status snapshot cannot
       // authorize stopping remote sessions, so keep its old immutable distribution available.
-      log.warn(
+      warn(
         "Companion 服务暂保留原版本（无法原子确认会话空闲）；会话结束后运行 roll companion service install 切换到新版本。",
       );
     }
   } catch (error) {
-    log.warn(
+    warn(
       `无法确认 Companion 服务状态，未重启服务：${error instanceof Error ? error.message : String(error)}`,
     );
   }
