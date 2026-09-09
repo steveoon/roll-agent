@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { DOM_CHOICE_UTILS } from "@roll-agent/browser";
 import type {
   BrowserDomActionHint,
   BrowserDomActionKind,
@@ -30,6 +31,7 @@ const DOM_ACTION_MARKER_ATTR_PREFIX = "data-roll-browser-action-";
 const MAX_DOM_ACTION_CANDIDATES = 120;
 
 type DomActionCandidateOptions = {
+  readonly scope?: string;
   readonly frameId?: string;
   readonly maxCandidates?: number;
 };
@@ -238,10 +240,17 @@ function createBackendNodeIdByMarkerFromDomTree(
   return backendNodeIdByMarker;
 }
 
-function buildDomActionCandidateExpression(markerAttribute: string, maxCandidates: number): string {
+function buildDomActionCandidateExpression(
+  markerAttribute: string,
+  maxCandidates: number,
+  scope?: string,
+): string {
   return `(() => {
     const markerAttribute = ${JSON.stringify(markerAttribute)};
     const maxCandidates = ${JSON.stringify(maxCandidates)};
+    const choices = (${DOM_CHOICE_UTILS})(document);
+    const choiceRows = new Set();
+    const choiceContainers = new Set();
     const normalize = (value) => String(value ?? "").replace(/\\s+/g, " ").trim();
     const classTextOf = (element) => String(element.getAttribute("class") ?? "");
     const directTextOf = (element) => normalize(Array.from(element.childNodes)
@@ -251,33 +260,18 @@ function buildDomActionCandidateExpression(markerAttribute: string, maxCandidate
     const visibleTextOf = (element) => normalize(
       element instanceof HTMLElement ? element.innerText : element.textContent
     );
-    const hasCompositeOptionHint = (element) => {
-      const pattern = /dropdown|menu|option|select|item/i;
-      let current = element;
-      for (let depth = 0; current && depth < 4; depth += 1) {
-        if (pattern.test(classTextOf(current))) return true;
-        current = current.parentElement;
-      }
-      return false;
-    };
     const domActionNameOf = (element) => {
+      if (choiceRows.has(element)) return choices.text(element);
       const direct = directTextOf(element);
       if (direct) return direct;
       if (element.childElementCount === 0) return visibleTextOf(element);
-      if (hasCompositeOptionHint(element)) return visibleTextOf(element);
+      if (element.hasAttribute("onclick") || element.onclick !== null || window.getComputedStyle(element).cursor === "pointer") return visibleTextOf(element);
       return "";
     };
-    const isVisible = (element) => {
-      if (element.closest("[hidden], [aria-hidden=\\"true\\"]")) return false;
-      const style = window.getComputedStyle(element);
-      if (style.visibility === "hidden" || style.display === "none") return false;
-      const rect = element.getBoundingClientRect();
-      return rect.width > 0 && rect.height > 0;
-    };
+    const isVisible = choices.visible;
     const isDisabled = (element) =>
       element.matches(":disabled") ||
-      element.getAttribute("aria-disabled") === "true" ||
-      element.getAttribute("disabled") !== null;
+      element.closest('[aria-disabled="true"], [disabled], [inert]') !== null;
     const isNativeSemantic = (element) => {
       const tag = element.tagName.toLowerCase();
       return (
@@ -301,7 +295,9 @@ function buildDomActionCandidateExpression(markerAttribute: string, maxCandidate
       return false;
     };
     const isCandidate = (element) => {
-      if (!isVisible(element) || isNativeSemantic(element)) return false;
+      if (!isVisible(element) || choiceContainers.has(element)) return false;
+      if (choiceRows.has(element)) return true;
+      if (isNativeSemantic(element)) return false;
       const tag = element.tagName.toLowerCase();
       if (!["span", "div", "li", "label", "em", "i", "b", "strong"].includes(tag)) return false;
       const name = domActionNameOf(element);
@@ -325,7 +321,32 @@ function buildDomActionCandidateExpression(markerAttribute: string, maxCandidate
       return true;
     };
     const output = [];
-    for (const element of document.querySelectorAll("body *")) {
+    const scopeSelector = ${JSON.stringify(scope ?? null)};
+    const roots = scopeSelector === null ? [document.body] : Array.from(document.querySelectorAll(scopeSelector));
+    if (roots.length !== 1 || !roots[0]) return [];
+    const elements = scopeSelector === null ? roots[0].querySelectorAll("*") : [roots[0], ...roots[0].querySelectorAll("*")];
+    // Resolve atomic rows before assigning markers: a short panel must not swallow its children.
+    let inspected = 0;
+    for (const element of [roots[0], ...elements]) {
+      if (++inspected > 10000) break;
+      if (element.childElementCount < 1) continue;
+      const rows = choices.rows(element);
+      if (!rows.length) continue;
+      const semantic = element.matches('select,[role="listbox"],[role="menu"],[role="tree"]');
+      const actionable = semantic || rows.some((row) =>
+        window.getComputedStyle(row).cursor === "pointer" || row.hasAttribute("onclick") ||
+        row.onclick !== null || row.hasAttribute("tabindex") || row.hasAttribute("aria-selected"));
+      if (!actionable) continue;
+      for (const row of rows) {
+        // Native SELECT options are exposed by AX; their DOM popup boxes are not in-page hit targets.
+        if (row.tagName === "OPTION") continue;
+        choiceRows.add(row);
+        for (let parent = row.parentElement; parent && roots[0].contains(parent); parent = parent.parentElement) {
+          choiceContainers.add(parent);
+        }
+      }
+    }
+    for (const element of elements) {
       if (!isCandidate(element)) continue;
       if (element.closest("[" + markerAttribute + "]")) continue;
       const marker = String(output.length);
@@ -336,7 +357,7 @@ function buildDomActionCandidateExpression(markerAttribute: string, maxCandidate
         marker,
         name: domActionNameOf(element),
         disabled: isDisabled(element),
-        hasClassHint: hasNearbyClassHint(element),
+        hasClassHint: choiceRows.has(element) || hasNearbyClassHint(element),
         hasCursorPointer: style.cursor === "pointer",
         hasOnClick: element.hasAttribute("onclick") || element.onclick !== null,
         hasTabIndex: element.getAttribute("tabindex") !== null && element.getAttribute("tabindex") !== "-1",
@@ -423,7 +444,7 @@ export async function collectDomActionHints(
   const candidates = toRawDomActionCandidates(
     await controller
       .evaluateJson(
-        buildDomActionCandidateExpression(markerAttribute, candidateLimit),
+        buildDomActionCandidateExpression(markerAttribute, candidateLimit, options.scope),
         evaluateOptions,
       )
       .catch(() => []),

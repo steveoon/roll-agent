@@ -244,3 +244,61 @@ test("clickElementRef falls back inside frame by re-querying frame AX tree", asy
   assert.deepEqual(controller.scrolledBackendNodeIds, [77, 99]);
   assert.deepEqual(controller.evaluatedExpressions, []);
 });
+
+test("strict refs never silently rebind a detached node to a same-name replacement", async () => {
+  const controller = new FakeElementRefController();
+  controller.fallbackTarget = {
+    found: true,
+    x: 20,
+    y: 30,
+    role: "button",
+    name: "Save",
+    disabled: false,
+  };
+  await assert.rejects(
+    clickElementRef({ controller, elementRef: { ...SAVE_BUTTON_REF, strict: true } }),
+    /stale/,
+  );
+  assert.deepEqual(controller.mouseEvents, []);
+  assert.deepEqual(controller.evaluatedExpressions, []);
+});
+
+test("scoped refs bind instance, page, latest snapshot and document without changing legacy reads", () => {
+  const store = new BrowserElementRefStore();
+  const snapshot = {
+    nodes: [],
+    refs: [SAVE_BUTTON_REF],
+    nodeCount: 0,
+    truncated: false,
+    maxNodes: 10,
+    interactiveOnly: true,
+    browserInstance: "a",
+    pageId: "p",
+    snapshotId: "s1",
+    documentId: "d1",
+  };
+  store.saveSnapshot("p", snapshot);
+  const binding = {
+    browserInstance: "a",
+    pageId: "p",
+    snapshotId: "s1",
+    documentId: "d1",
+    ref: "@e1",
+  };
+  assert.equal(store.getScopedRef(binding)?.strict, true);
+  assert.equal(store.getRef("p", "@e1"), SAVE_BUTTON_REF);
+  for (const mismatch of [
+    { browserInstance: "b" },
+    { pageId: "q" },
+    { snapshotId: "s2" },
+    { documentId: "d2" },
+  ]) {
+    assert.equal(store.getScopedRef({ ...binding, ...mismatch }), undefined);
+  }
+  store.saveSnapshot("p", { ...snapshot, snapshotId: "s2" });
+  assert.equal(store.getScopedRef(binding), undefined);
+  store.saveSnapshot("p", { ...snapshot, browserInstance: "b" });
+  assert.ok(store.getScopedRef({ ...binding, snapshotId: "s2" }));
+  store.clear("p");
+  assert.equal(store.getScopedRef({ ...binding, snapshotId: "s2" }), undefined);
+});

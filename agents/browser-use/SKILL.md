@@ -1,6 +1,6 @@
 ---
 name: browser-use-agent
-description: 浏览器操控 Agent。控制浏览器操作招聘平台：读取消息、打开聊天、发送签名回复、换微信、滚动动态列表、查看推荐列表、筛选候选人、打招呼、打开简历弹窗并截取完整简历长图（供多模态识图）；也提供通用 AX snapshot、@eN element ref 点击/输入，以及 BOSS直聘 native CDP / Playwright attach 风控诊断。
+description: 浏览器操控 Agent。提供招聘平台预编排、通用 AX snapshot/ref 操作、受控 JavaScript 组合执行及显式启用的站点经验复用；BOSS 使用 native CDP，可读取消息、打开聊天、发送签名回复、筛选候选人和截取简历。
 metadata:
   roll-env-file: references/env.yaml
 ---
@@ -9,12 +9,27 @@ metadata:
 
 浏览器自动化执行层。BOSS 直聘链路（含简历弹窗与简历截图工具）全部使用 native CDP backend；Playwright attach 仅保留在显式诊断工具中。
 
+## 通用探索与站点经验
+
+按 **平台专用工具 → 已启用站点经验 → 通用探索** 的顺序选择能力。已经覆盖的 BOSS 操作继续使用 `zhipin_*`，不要改写成脚本或视觉循环。
+
+- 未建模页面先观察，必要时用 `browser_workflow_list({url})` 查找适用的已启用经验，再调用 `browser_workflow_run`。
+- 已明确的一组步骤使用 `browser_execute` 合并执行。JS 只可使用 `page` helpers 和 `args`，没有 Node、fetch、任意页面 evaluate 或裸 CDP。
+- 遇到陌生下拉，先用 `page.inspectControl(field)` 查看触发器、面板关联与当前选项，再用 `page.choose(field,{label:"目标文案"})` 选择并验证。field 优先使用严格 ref，或带正确 `frameId` 的 locator；门户面板无明确关联时需指定唯一的 `panel` CSS 区域，不全页面搜索后选择第一个同名项。
+- Snapshot 会按原生/ARIA/列表结构识别独立选项行，避免父容器聚合所有选项文案；普通文章列表不自动变成控件。跨 iframe 操作会检查祖先遮挡和焦点，无法可靠检查时返回覆盖缺口。
+- 表单操作失配后保留现场并重新观察；不要通过 reload 自动恢复未保存的表单。级联菜单逐级声明预期，虚拟列表只承诺当前渲染的选项，不盲目递归点击。
+- 对结果声明 `expect` 或 `postconditions`；`status:completed` 只表示脚本结束，业务结果是否验证要看 `verification`。失败后检查已执行步骤，不重放整段。
+- `actionPolicy=confirm` 时，整段批准绑定脚本、参数、browserInstance、页面 document、站点、能力和限制。必须先获得用户明确批准；Runtime 会通过现有确认通道续接一次，直接 CLI 调用则在用户批准后原样补入 `approvalRequest.retryInput`。收到凭据不代表已经批准，不修改已批准内容，也不重复使用凭据。
+- 有复用价值的成功探索可整理为参数化草稿；保存草稿不自动启用。验证可能真实操作页面，按正常任务授权执行；启用具体版本必须由用户明确批准。
+- 纯经验列表、保存草稿和状态管理不启动浏览器；执行/验证工具仍需明确页面和正确的 browserInstance。
+- 详细接口、示例和边界见 [通用页面探索](references/browser-exploration.md)。
+
 ## 使用前提
 
 - 先启动 `browser-use-agent` HTTP 常驻服务；浏览器 session 跨调用持久。
 - 通过 Roll 调用本 Agent 时，先用 `roll skills get browser-use-agent --include-references --json` 读取当前说明和 `references/*`，再用 `roll agent tools browser-use-agent --json` 读取真实 schema。
 - 完整 `inputSchema` 以 `roll agent tools browser-use-agent --json` 为准。
-- 多账号/多 profile 场景下，Roll 会从 `browser.instances` 注入 `BROWSER_INSTANCES_JSON`；所有 browser-use tool 都支持可选 `browserInstance` 输入，用于选择目标 `profile/userDataDir + cdpPort + sessionsDir`。未传时按 `browser.defaultInstance`，再按单实例自动选择；多实例且无默认值时会返回 `needs_input`。
+- 多账号/多 profile 场景下，Roll 会从 `browser.instances` 注入 `BROWSER_INSTANCES_JSON`；页面操作工具支持可选 `browserInstance` 输入，用于选择目标 `profile/userDataDir + cdpPort + sessionsDir`。未传时按 `browser.defaultInstance`，再按单实例自动选择；多实例且无默认值时会返回 `needs_input`。经验列表、草稿保存和状态管理使用当前用户的全局经验库，不选择浏览器实例。
 - 多个 `managed-cdp` 实例首次启动时会自动把 Chrome profile 展示名设为实例 ID，并按声明顺序分配 profile 颜色和自适应平铺窗口：2–3 个实例横向并列并撑满桌面可用高度；4 个实例 2×2 铺满屏幕；5 个及以上按「最多 4 列、每行撑满宽度」均衡排列（5→3+2、6→3+3、8→4+4、10→4+3+3）。macOS 使用只读 `system_profiler SPDisplaysDataType` 探测逻辑分辨率；Windows 使用只读 PowerShell/.NET `PrimaryScreen.WorkingArea` 探测扣除任务栏后的工作区；探测不到时回退默认工作区；也可通过 `ROLL_BROWSER_WORK_AREA=x,y,width,height` 覆盖。需要固定展示时在实例上配置 `profile-name` / `profile-color` / `window-bounds`。
 - 浏览器实例采用 **lazy start**：agent 启动不会立刻拉起全部 Chrome，首次访问某个 `browserInstance` 时才启动对应 profile/CDP runtime。
 - Roll 启动的 `managed-cdp` Chrome 默认关闭后台定时器节流、occluded-window backgrounding 和 renderer backgrounding，避免窗口被完全遮挡或切换到其他 macOS Space 时触发 Chromium 后台降级；该行为需重启对应 browser instance 后生效，不影响 `remote-cdp`、`existing-session` 或其他手动启动的 Chrome。
@@ -74,7 +89,7 @@ browser:
 
 orchestrator 规则：
 
-1. 多账号托管时，把 `browserInstance` 当作账号路由键；同一个任务线程中的每一次 browser-use tool call 都必须传同一个 `browserInstance`。
+1. 多账号托管时，把 `browserInstance` 当作账号路由键；操作同一账号的页面工具调用必须传同一个 `browserInstance`。经验列表、保存草稿和状态管理使用全局经验库，不传该参数。
 2. 不要把 `boss-a` 产生的 `pageId`、`@eN`、`@cN`、`@jN`、`preparedReplyId` 或当前页面状态传给 `boss-b`。
 3. `browserInstance` 只标识浏览器/profile；业务归因使用该实例的 `trackingAgentId`，缺失时才 fallback 到 `RECRUITMENT_EVENTS_DEFAULT_AGENT_ID`，仍缺失则跳过招聘事件上报并 warn。
 4. `platform` 与实例配置不一致时会返回 `platform_mismatch`。例如 `browserInstance:"boss-a"` 声明为 `zhipin`，就不要调用 `yupao_*` 工具或 `open_platform({ platform:"yupao" })`。
@@ -154,50 +169,63 @@ zhipin_read_messages({ browserInstance, onlyUnread:true, limit:N })
 | `select_page(platform, pageId)` | 将指定页面绑定为平台活跃页；登录前优先走 native target 激活。 |
 | `navigate_active_tab(url)` | 通过 native CDP 打开/导航页面；不触发 Playwright attach，不支持直接跳转 BOSS `/web/chat/*` 后台路径。 |
 | `browser_reload_active_tab(ignoreCache?, browserActionApproval?)` | 对当前 tracked native page 执行 CDP `Page.reload`，清空页面内 DOM 与 SPA 状态后等待文档换页；不触发 Playwright attach，走现有 actionPolicy / domainAllowlist 边界。reload 后所有 `@eN` / `candidateRef` 失效，必须重新 snapshot / 读列表。 |
-| `browser_snapshot(pageId?, maxDepth?, maxNodes?, interactiveOnly?)` | 读取当前或指定页面的 Accessibility Tree；默认只返回可交互节点，并为可交互节点生成 `@eN`；也会补充有限的非语义 DOM 可操作短文本，例如 `span` 渲染的 tab/filter 标签，并递归内联同 target iframe 中的可操作 AX 节点。 |
-| `click_ref(ref, pageId?, browserActionApproval?)` | 点击 `browser_snapshot` 返回的 `@eN`；优先用 `backendNodeId`，失效时用 `role/name/nth` fallback；iframe 子节点会携带并复用 `frameId`。 |
-| `type_ref(ref, text, clear?, pageId?, browserActionApproval?)` | 向 `browser_snapshot` 返回的 `@eN` 输入文本；`clear:true` 会先清空当前控件；iframe 子节点会携带并复用 `frameId`。 |
+| `browser_snapshot(pageId?, scope?, maxDepth?, maxNodes?, interactiveOnly?)` | 读取 AX 快照及有限非语义可操作节点，返回 `@eN`、`snapshotId`、表单/弹窗上下文、定位提示和覆盖缺口；`scope` 为唯一匹配的 CSS 区域。沿用同 target iframe 能力。 |
+| `click_ref(ref, pageId?, snapshotId?, browserActionApproval?)` | 点击快照 ref；推荐携带 `snapshotId`，严格校验实例、页面、document 和最新快照，过期时停止。只有未传 `snapshotId` 的兼容调用保留 `role/name/nth` fallback。 |
+| `type_ref(ref, text, clear?, pageId?, snapshotId?, browserActionApproval?)` | 向快照 ref 输入；`clear:true` 先清空控件，`snapshotId` 启用相同严格绑定；iframe ref 复用原 `frameId`。 |
+| `browser_execute(pageId, source, args?, capabilities, allowedOrigins, preconditions?, postconditions?, timeoutMs?, maxCalls?, scriptApproval?)` | 单页受控 JS 组合执行；默认上限 30 秒、100 次 helper、32MiB 脚本堆、64KiB 文本输出，截图为独立产物。返回动作记录、验证、观察变化和耗时，不自动重放。 |
+| `browser_workflow_list(url)` | 按 URL 发现适用的已启用经验，返回简短签名与适用条件；不启动浏览器。 |
+| `browser_workflow_save_draft(draft)` | 保存参数化的不可变版本草稿并检查语法；不执行、不启用，不自动保存本次参数或页面正文。 |
+| `browser_workflow_validate(id, version, pageId, args?, scriptApproval?)` | 显式实际执行该版本；只有执行成功且结果验证通过才记录验证凭据，遵守正常页面操作策略。 |
+| `browser_workflow_set_status(id, version, status, toolActionApproval?)` | 启用或停用具体版本；`active` 要求成功验证和用户明确批准，`disabled` 停止后续 helper。修改内容产生新版本，不继承批准。 |
+| `browser_workflow_run(id, version, pageId, args?, scriptApproval?)` | 执行适用且已启用的经验，复用组合执行内核；定位或断言失效时暂停推荐并返回需要重新探索。 |
 
 ## 通用页面操作编排
 
-这组三个通用工具用于“没有专用业务 tool 的可访问控件操作”，不是 BOSS 专用工具的替代品。
+通用工具用于没有平台专用方法覆盖的页面操作。依次选择平台专用工具、已启用的适用经验、通用探索；未知目标先观察，已明确的连续步骤再组合执行。
 
 工具选择优先级：
 
 | 场景 | 首选 | 兜底 |
 | --- | --- | --- |
 | BOSS 已建模业务链路，例如读消息、打开聊天、换微信、打招呼、筛选候选人 | `zhipin_*` 专用 tool | 只有专用 tool 缺失或无法覆盖新按钮时，才使用 `browser_snapshot` + `click_ref` / `type_ref` |
-| 通用网页上点击语义明确的按钮、链接、输入框 | `browser_snapshot` 找 `role/name`，再用 `click_ref` / `type_ref` | 操作后重新 `browser_snapshot` 或用业务 read tool 验证 |
+| 已有已启用经验覆盖当前 URL 与任务 | `browser_workflow_list` + `browser_workflow_run` | 适用条件或定位/断言失效后重新探索，不反复重放 |
+| 通用网页上的确定性连续步骤 | `browser_execute`，使用唯一 locator 并声明结果断言 | 未知目标或覆盖缺口处再请求区域快照或截图 |
+| 尚需探索的按钮、链接、输入框 | `browser_snapshot` 找上下文与 `role/name`，再用严格 ref 单步操作 | 用业务读取或有期限的断言验证；仅在需要重新定位时刷新快照 |
 | 页面、tab、平台选择 | `list_pages` + `select_page` 或平台专用 opener | 不要直接猜内部 URL |
 | 风控或底层行为诊断 | `zhipin_diagnose_browser_state` | 正常业务路径不要默认诊断 |
 
-两阶段流程：
+单步探索流程：
 
 ```text
 观察阶段:
 list_pages/select_page  # 仅多页面或目标页不明确时
-  -> browser_snapshot(interactiveOnly=true)
+  -> browser_snapshot(pageId, scope?, interactiveOnly=true)
   -> orchestrator 按 role/name/disabled 选择 @eN
 
 动作阶段:
-click_ref(@eN) 或 type_ref(@eN, text, clear?)
-  -> 若 actionPolicy=confirm，原样带回 browserActionApproval 重试
-  -> 重新 browser_snapshot 或调用业务 read tool 验证页面状态
+click_ref(ref, pageId, snapshotId) 或 type_ref(ref, text, clear?, pageId, snapshotId)
+  -> 若 actionPolicy=confirm，先获得用户批准，再原样补入 browserActionApproval
+  -> 用业务 read tool / 结果断言验证；需要重新定位时再 snapshot
+
+步骤明确后:
+browser_execute(pageId, source, args, capabilities, allowedOrigins, postconditions)
+  -> 检查 status、verification 和已执行动作
+  -> 有复用价值且验证成功时，整理草稿 → 显式验证 → 用户批准具体版本 → 启用
 ```
 
 关键规则：
 
-1. `@eN` 只来自最近一次 `browser_snapshot`，只能用于同一 `pageId` 的后续 `click_ref` / `type_ref`。
+1. `@eN` 只来自最近一次 Snapshot。单步工具推荐同时传 `pageId` / `snapshotId`；脚本中的 `page.ref(ref, snapshotId)` 必须绑定同一 browserInstance、页面、document 和最新快照，不能跨页面或跨实例使用。
 2. `@eN` 不等同于 BOSS 推荐页的 `@cN` / `@jN`；`@cN`、`@jN` 只服务对应 `zhipin_*` 工具。
 3. 不要自行构造 `@eN`；只能传 `browser_snapshot.snapshot.refs[].ref`。
 4. 选择目标时优先匹配 `role + name`，并排除 `disabled:true` 的节点；若目标是非语义短文本控件，使用 `role:"clickable"` / `role:"focusable"` / `role:"editable"`、可见文案和 `properties.domActionable:true` 判断。
 5. 如果 `refs[]` 或 `nodes[]` 中出现 `frameId`，说明该 ref 来自 iframe 子 frame；orchestrator 只需要继续传 `ref` 和必要的 `pageId`，不要手工传或改写 `frameId`。
-6. `snapshot.truncated:true` 表示节点达到 `maxNodes` 上限；先缩小 `maxDepth`、指定 `pageId` 或切到更明确页面后再决策。
+6. `snapshot.truncated:true` 表示观察被截断；优先用 `scope` 限定相关表单、弹窗或区域，再按需调整 `maxDepth` / `maxNodes`。同时检查 `coverageWarnings`，不要把未覆盖区域当成空页面。
 7. 页面导航、刷新、弹窗出现、列表重排、筛选变化后，先重新 `browser_snapshot`，不要复用旧 `@eN`。
 8. `browser_snapshot` 是 AX 语义快照，不是完整 HTML、截图或网络状态；需要业务数据时仍应使用对应 read tool。
 9. 当前 iframe 支持是同 target / 同 CDP session 内递归内联；递归受 `maxNodes`、frame 去重和 CDP frame 可解析性限制。跨 target / OOPIF iframe 需要 Native CDP session multiplexing，当前不承诺覆盖。
 
-通用页面操作细节见 `references/generic-browser-refs.md`。
+单步兼容接口细节见 `references/generic-browser-refs.md`；组合执行、严格定位、审批与经验管理见 [通用页面探索](references/browser-exploration.md)。
 
 ## 调试 Tools
 
@@ -347,6 +375,7 @@ zhipin_get_candidate_list
 
 ## 参考资料
 
+- [通用页面探索](references/browser-exploration.md)：受控 JS helpers、结果断言、严格定位、整段审批、站点经验管理和 SDK 示例。
 - `references/zhipin-diagnostics.md`：BOSS native CDP / attach 诊断阶段、推进顺序和返回字段。
 - `references/zhipin-workflows.md`：聊天主键、动态列表、`preferredBrand` / `preferredBrandId`、服务端地点解析（`location.resolved`）、Reply Authority 编排细节。
 - `references/generic-browser-refs.md`：通用 AX snapshot、`@eN` ref、点击/输入闭环和边界条件。

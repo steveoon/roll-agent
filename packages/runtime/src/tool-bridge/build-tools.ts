@@ -17,7 +17,6 @@ import { ToolRegistry, type ToolRouteMetadata } from "./naming.ts";
 import {
   TOOL_OUTCOME_KINDS,
   failedToolResult,
-  normalizeToolResult,
   toolResultToModelOutput,
   type NormalizedToolResult,
 } from "./normalize-result.ts";
@@ -31,6 +30,7 @@ import {
   type ToolResourceAccessMode,
   type ToolResourceHint,
 } from "./tool-execution-coordinator.ts";
+import { executeWithToolApproval } from "./tool-approval-continuation.ts";
 
 export const ROLL_RESOURCE_HINTS_META_KEY = "roll/resourceHints";
 
@@ -512,12 +512,20 @@ export function buildAgentToolset(
               const requestOptions = options.abortSignal
                 ? { signal: options.abortSignal }
                 : undefined;
-              const result = await client.callTool(
-                { name: agentTool.name, arguments: args },
-                undefined,
-                requestOptions,
-              );
-              return normalizeToolResult(result);
+              return executeWithToolApproval({
+                input: args,
+                agentName,
+                agentTool,
+                annotations,
+                ctx,
+                signal: options.abortSignal,
+                call: async (callArgs) =>
+                  await client.callTool(
+                    { name: agentTool.name, arguments: callArgs },
+                    undefined,
+                    requestOptions,
+                  ),
+              });
             },
           );
         },

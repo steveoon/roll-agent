@@ -228,3 +228,91 @@ test("createBrowserAxSnapshot carries frame context and ref offsets", async () =
   assert.equal(snapshot.nodes[0]?.frameId, "payment-frame");
   assert.equal(snapshot.nodes[0]?.depth, 4);
 });
+
+test("scoped AX budget excludes earlier unrelated controls and applies depth relative to scope", async () => {
+  const calls: unknown[] = [];
+  const controller = {
+    getFullAccessibilityTree: async (options?: unknown) => {
+      calls.push(options);
+      return [
+        { nodeId: "root", role: axValue("RootWebArea"), childIds: ["outside", "form"] },
+        {
+          nodeId: "outside",
+          role: axValue("button"),
+          name: axValue("Unrelated"),
+          backendDOMNodeId: 11,
+        },
+        {
+          nodeId: "form",
+          role: axValue("form"),
+          name: axValue("Requested scope"),
+          backendDOMNodeId: 20,
+          childIds: ["wanted"],
+        },
+        {
+          nodeId: "wanted",
+          role: axValue("button"),
+          name: axValue("Wanted"),
+          backendDOMNodeId: 21,
+        },
+      ];
+    },
+  };
+  const snapshot = await createBrowserAxSnapshot(controller, {
+    maxNodes: 1,
+    maxDepth: 1,
+    backendNodeIds: [20, 21],
+  });
+  assert.equal(snapshot.refs[0]?.name, "Wanted");
+  assert.equal(snapshot.nodeCount, 1);
+  assert.equal(snapshot.truncated, false);
+  assert.deepEqual(
+    calls,
+    [{}],
+    "Scope depth is applied after filtering, not as full-document CDP depth",
+  );
+});
+
+test("DOM choice enrichment preserves semantic AX roles and ignored-row fallback", async () => {
+  const roles = ["option", "menuitem", "menuitemcheckbox", "menuitemradio", "treeitem", "button"];
+  const snapshot = await createBrowserAxSnapshot(
+    {
+      getFullAccessibilityTree: async () => [
+        ...roles.map((role, index) => ({
+          nodeId: String(index + 1),
+          ignored: false,
+          role: axValue(role),
+          name: axValue(index === 0 ? "" : `Accessible ${role}`),
+          backendDOMNodeId: index + 100,
+        })),
+        { nodeId: "ignored", ignored: true, role: axValue("none"), backendDOMNodeId: 200 },
+      ],
+    },
+    {
+      domActionHints: [
+        ...roles.map((role, index) => ({
+          backendNodeId: index + 100,
+          kind: "clickable" as const,
+          name: `Composite ${role}`,
+          hints: ["cursor:pointer"],
+          disabled: false,
+        })),
+        {
+          backendNodeId: 200,
+          kind: "clickable",
+          name: "Ignored choice",
+          hints: ["cursor:pointer"],
+          disabled: false,
+        },
+      ],
+      interactiveOnly: true,
+    },
+  );
+  assert.deepEqual(
+    snapshot.refs.map((ref) => ref.role),
+    [...roles, "clickable"],
+  );
+  assert.equal(snapshot.refs[0]?.name, "Composite option");
+  assert.equal(snapshot.refs[1]?.name, "Accessible menuitem");
+  assert.equal(snapshot.refs.at(-1)?.name, "Ignored choice");
+});

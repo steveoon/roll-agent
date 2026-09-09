@@ -1,13 +1,16 @@
-import { test } from "node:test";
+import { afterEach, test } from "node:test";
 import assert from "node:assert/strict";
 import { setTimeout as delay } from "node:timers/promises";
 import { createElement as h } from "react";
 import { Box } from "ink";
-import { render } from "ink-testing-library";
+import { cleanup, render } from "ink-testing-library";
 import type { AgentSession, SessionEvent } from "@roll-agent/runtime";
 import { ChatApp } from "./app.ts";
 import { HistoryItemView } from "./history-item.ts";
 import { GLYPHS } from "../../utils/glyphs.ts";
+
+// A failed assertion must not leave Ink mounts/timers alive and hang the test worker.
+afterEach(() => cleanup());
 
 type PendingUserInput = Extract<SessionEvent, { readonly type: "user-input-required" }>;
 type UserInputResult = Parameters<AgentSession["resolveUserInput"]>[1];
@@ -20,6 +23,7 @@ const AUTO_BADGE_PATTERN = literalPattern(`${GLYPHS.auto} auto`);
 
 interface Sink {
   approved: string[];
+  sentInputs?: unknown[];
   approvals?: Array<{ id: string; scope: "once" | "session" | undefined }>;
   rejected: string[];
   cancelled?: number;
@@ -57,7 +61,11 @@ function makeSession(
     getSkillSummaries() {
       return options?.skills ?? [];
     },
-    send,
+    send(input: string) {
+      sink.sentInputs ??= [];
+      sink.sentInputs.push(input);
+      return send(input);
+    },
     approve(id: string, scope?: "once" | "session") {
       sink.approved.push(id);
       sink.approvals ??= [];
@@ -119,6 +127,24 @@ async function waitFor(assertion: () => void, timeoutMs = 1000): Promise<void> {
     throw lastError;
   }
   assert.fail("Timed out waiting for assertion");
+}
+
+async function submitDraft(
+  view: Pick<ReturnType<typeof render>, "stdin" | "lastFrame">,
+  sink: Sink,
+  text: string,
+): Promise<void> {
+  await waitFor(() =>
+    assert.equal(sink.userInputAvailability?.at(-1), true, "ChatApp not mounted"),
+  );
+  view.stdin.write(text);
+  await waitFor(() =>
+    assert.match(plain(view.lastFrame() ?? ""), literalPattern(text), "Draft not rendered"),
+  );
+  view.stdin.write("\r");
+  await waitFor(() =>
+    assert.equal(sink.sentInputs?.at(-1), text, "Enter did not reach session.send"),
+  );
 }
 
 test("ChatApp streams an assistant reply into history and shows status", async () => {
@@ -265,12 +291,13 @@ for (const [label, escapeSequence] of [
   ["legacy VT", "\x1b"],
   ["kitty keyboard", "\x1b[27u"],
 ] as const) {
-  test(`ChatApp ${label} Esc 中断执行中的工具`, async () => {
+  test(`ChatApp ${label} Esc 中断执行中的工具`, async (t) => {
     const sink: Sink = { approved: [], rejected: [], cancelled: 0 };
     let releaseCancellation: (() => void) | undefined;
     const cancellation = new Promise<void>((resolve) => {
       releaseCancellation = resolve;
     });
+    t.after(() => releaseCancellation?.());
     async function* send(): AsyncIterable<SessionEvent> {
       yield { type: "message-start", messageId: "m" };
       yield {
@@ -295,10 +322,7 @@ for (const [label, escapeSequence] of [
         onExit: () => {},
       }),
     );
-    await delay(10);
-    stdin.write("run");
-    await delay(10);
-    stdin.write("\r");
+    await submitDraft({ stdin, lastFrame }, sink, "run");
     await waitFor(() => assert.match(plain(lastFrame() ?? ""), /Esc 中断本轮/));
 
     stdin.write(escapeSequence);
@@ -309,17 +333,25 @@ for (const [label, escapeSequence] of [
   });
 }
 
-test("ChatApp Esc 中断 token streaming", async () => {
+test("ChatApp Esc 中断 token streaming", async (t) => {
   const sink: Sink = { approved: [], rejected: [], cancelled: 0 };
   let releaseCancellation: (() => void) | undefined;
   const cancellation = new Promise<void>((resolve) => {
     releaseCancellation = resolve;
   });
+  let releaseFinish: (() => void) | undefined;
+  const finish = new Promise<void>((resolve) => {
+    releaseFinish = resolve;
+  });
+  t.after(() => {
+    releaseCancellation?.();
+    releaseFinish?.();
+  });
   async function* send(): AsyncIterable<SessionEvent> {
     yield { type: "message-start", messageId: "m" };
     yield { type: "text-delta", delta: "尚未完成的输出" };
     await cancellation;
-    await delay(80);
+    await finish;
     yield {
       type: "turn-cancelled",
       reason: "user",
@@ -334,15 +366,13 @@ test("ChatApp Esc 中断 token streaming", async () => {
       onExit: () => {},
     }),
   );
-  await delay(10);
-  stdin.write("stream");
-  await delay(10);
-  stdin.write("\r");
+  await submitDraft({ stdin, lastFrame }, sink, "stream");
   await waitFor(() => assert.match(plain(lastFrame() ?? ""), /尚未完成的输出/));
 
   stdin.write("\x1b");
   await waitFor(() => assert.equal(sink.cancelled, 1));
   await waitFor(() => assert.match(plain(lastFrame() ?? ""), /正在中断…/));
+  releaseFinish?.();
   await waitFor(() => assert.match(plain(lastFrame() ?? ""), /已停止本轮回复/));
   assert.doesNotMatch(plain(lastFrame() ?? ""), /尚未完成的输出/);
   unmount();
@@ -850,7 +880,7 @@ test("ChatApp keeps inline thinking visible when thinking display is expanded", 
   unmount();
 });
 
-test("ChatApp streams provider reasoning separately from tool activity", async () => {
+test("ChatApp streams provider reasoning separately from tool activity", async (t) => {
   const sink: Sink = { approved: [], rejected: [] };
   let releaseReasoning: (() => void) | undefined;
   let releaseTool: (() => void) | undefined;
@@ -859,6 +889,10 @@ test("ChatApp streams provider reasoning separately from tool activity", async (
   });
   const toolDone = new Promise<void>((resolve) => {
     releaseTool = resolve;
+  });
+  t.after(() => {
+    releaseReasoning?.();
+    releaseTool?.();
   });
   async function* send(): AsyncIterable<SessionEvent> {
     yield { type: "message-start", messageId: "m" };
@@ -897,10 +931,7 @@ test("ChatApp streams provider reasoning separately from tool activity", async (
       onExit: () => {},
     }),
   );
-  await delay(10);
-  stdin.write("debug");
-  await delay(10);
-  stdin.write("\r");
+  await submitDraft({ stdin, lastFrame }, sink, "debug");
 
   await waitFor(() => {
     const frame = plain(lastFrame() ?? "");

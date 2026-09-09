@@ -266,11 +266,20 @@ const PACKAGE_CHECKS = [
   {
     name: "@roll-agent/browser",
     cwd: resolve(repoRoot, "packages/browser"),
-    expectedFiles: ["package/dist/index.js", "package/dist/index.d.ts"],
-    expectedJavaScriptFiles: ["package/dist/index.js"],
+    expectedFiles: [
+      "package/dist/index.js",
+      "package/dist/index.d.ts",
+      "package/dist/exploration/script-worker.js",
+      "package/dist/exploration/script-worker.d.ts",
+    ],
+    expectedJavaScriptFiles: ["package/dist/index.js", "package/dist/exploration/script-worker.js"],
     verifyManifest(manifest) {
       assert.equal(manifest.exports?.["."].default, "./dist/index.js");
       assert.equal(manifest.exports?.["."].types, "./dist/index.d.ts");
+      assert.equal(
+        manifest.exports?.["./exploration/script-worker"].default,
+        "./dist/exploration/script-worker.js",
+      );
     },
   },
   {

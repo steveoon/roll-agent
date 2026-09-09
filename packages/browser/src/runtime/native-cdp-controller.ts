@@ -9,6 +9,9 @@ const DEFAULT_NATIVE_CDP_COMMAND_TIMEOUT_MS = 5_000;
 const NORMAL_NATIVE_CDP_METHODS = [
   "Accessibility.getFullAXTree",
   "DOM.describeNode",
+  "DOM.resolveNode",
+  "Runtime.callFunctionOn",
+  "Runtime.releaseObject",
   "DOM.getBoxModel",
   "Runtime.evaluate",
   "DOM.getDocument",
@@ -159,6 +162,7 @@ export type NativeCdpKeyEventInput = {
 
 export type NativeCdpFrame = {
   readonly id: string;
+  readonly loaderId?: string;
   readonly parentId?: string;
   readonly name?: string;
   readonly url: string;
@@ -332,6 +336,7 @@ function toNativeCdpFrame(value: unknown): NativeCdpFrame | undefined {
   }
 
   const id = value["id"];
+  const loaderId = value["loaderId"];
   const parentId = value["parentId"];
   const name = value["name"];
   const url = value["url"];
@@ -341,6 +346,7 @@ function toNativeCdpFrame(value: unknown): NativeCdpFrame | undefined {
 
   return {
     id,
+    ...(typeof loaderId === "string" ? { loaderId } : {}),
     ...(typeof parentId === "string" ? { parentId } : {}),
     ...(typeof name === "string" ? { name } : {}),
     url,
@@ -639,6 +645,48 @@ export class NativeCdpController {
     }
 
     return response.result?.value as T;
+  }
+
+  /** Resolve a known DOM node without enabling the Runtime event domain. */
+  async resolveBackendNode(input: {
+    backendNodeId: number;
+    executionContextId?: number;
+  }): Promise<string> {
+    const response = await this.sendNormal("DOM.resolveNode", input);
+    if (
+      !isRecord(response) ||
+      !isRecord(response["object"]) ||
+      typeof response["object"]["objectId"] !== "string"
+    ) {
+      throw new Error("Native CDP could not resolve DOM node object.");
+    }
+    return response["object"]["objectId"];
+  }
+
+  /** Host-owned fixed functions only; never expose this method to script input. */
+  async callFunctionOnObject(input: {
+    objectId: string;
+    functionDeclaration: string;
+    args?: readonly unknown[];
+  }): Promise<unknown> {
+    const response = toRuntimeEvaluateResponse(
+      await this.sendNormal("Runtime.callFunctionOn", {
+        objectId: input.objectId,
+        functionDeclaration: input.functionDeclaration,
+        arguments: (input.args ?? []).map((value) => ({ value })),
+        returnByValue: true,
+        generatePreview: false,
+        awaitPromise: false,
+      }),
+    );
+    if (response.exceptionDetails !== undefined) {
+      throw new Error("Native CDP object inspection failed.");
+    }
+    return response.result?.value;
+  }
+
+  async releaseObject(objectId: string): Promise<void> {
+    await this.sendNormal("Runtime.releaseObject", { objectId });
   }
 
   async getDocument(options: NativeCdpGetDocumentOptions = {}): Promise<unknown> {

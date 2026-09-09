@@ -82,12 +82,19 @@ type AxFallbackMatch = {
 type Quad = readonly [number, number, number, number, number, number, number, number];
 
 export class BrowserElementRefStore {
+  private readonly scopedSnapshots = new Map<string, BrowserAxSnapshot>();
   private readonly refsByPage = new Map<
     string,
     ReadonlyMap<BrowserElementRefHandle, BrowserElementRef>
   >();
 
   saveSnapshot(pageKey: string, snapshot: BrowserAxSnapshot): void {
+    if (snapshot.browserInstance !== undefined && snapshot.pageId !== undefined) {
+      this.scopedSnapshots.set(
+        JSON.stringify([snapshot.browserInstance, snapshot.pageId]),
+        snapshot,
+      );
+    }
     this.refsByPage.set(
       pageKey,
       new Map(snapshot.refs.map((elementRef) => [elementRef.ref, elementRef])),
@@ -98,12 +105,33 @@ export class BrowserElementRefStore {
     return this.refsByPage.get(pageKey)?.get(ref);
   }
 
+  getScopedRef(input: {
+    readonly browserInstance: string;
+    readonly pageId: string;
+    readonly snapshotId: string;
+    readonly documentId: string;
+    readonly ref: BrowserElementRefHandle;
+  }): BrowserElementRef | undefined {
+    const snapshot = this.scopedSnapshots.get(
+      JSON.stringify([input.browserInstance, input.pageId]),
+    );
+    if (snapshot?.snapshotId !== input.snapshotId || snapshot.documentId !== input.documentId) {
+      return undefined;
+    }
+    const ref = snapshot.refs.find((candidate) => candidate.ref === input.ref);
+    return ref === undefined ? undefined : { ...ref, strict: true };
+  }
+
   clear(pageKey?: string): void {
     if (pageKey === undefined) {
       this.refsByPage.clear();
+      this.scopedSnapshots.clear();
       return;
     }
     this.refsByPage.delete(pageKey);
+    for (const [key, snapshot] of this.scopedSnapshots) {
+      if (snapshot.pageId === pageKey) this.scopedSnapshots.delete(key);
+    }
   }
 }
 
@@ -380,6 +408,10 @@ async function resolveElementRef(input: {
       ...(input.elementRef.frameId !== undefined ? { frameId: input.elementRef.frameId } : {}),
       disabled: input.elementRef.disabled,
     };
+  }
+
+  if (input.elementRef.strict === true) {
+    throw new Error(`Element ref ${input.elementRef.ref} is stale. Take a new snapshot.`);
   }
 
   const fallbackTarget = await resolveByRoleNameNth(
