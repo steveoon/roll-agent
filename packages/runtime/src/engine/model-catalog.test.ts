@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -219,6 +219,45 @@ test("ModelCatalog.refreshIfStale skips within ttl, refreshes when stale, and su
     });
     assert.equal(await noCache.refreshIfStale(), MODEL_CATALOG_REFRESH_RESULTS.skipped);
   } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("ModelCatalog cancels background refresh on shutdown without writing a cache", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "roll-model-catalog-abort-"));
+  const controller = new AbortController();
+  const started = Promise.withResolvers<void>();
+  let receivedSignal: AbortSignal | undefined;
+  const cachePath = join(dir, "catalog.json");
+  const catalog = new ModelCatalog({
+    snapshot: SNAPSHOT,
+    cachePath,
+    ttlMs: 0,
+    now: () => Date.parse("2030-01-01T00:00:00Z"),
+    fetchImpl: async (_input, init) => {
+      receivedSignal = init?.signal ?? undefined;
+      assert.ok(receivedSignal);
+      started.resolve();
+      return await new Promise<Response>((_resolve, reject) => {
+        receivedSignal?.addEventListener("abort", () => reject(receivedSignal?.reason), {
+          once: true,
+        });
+      });
+    },
+  });
+  try {
+    const refreshing = catalog.refreshIfStale(controller.signal);
+    await started.promise;
+    controller.abort(new Error("chat exited"));
+    assert.equal(await refreshing, MODEL_CATALOG_REFRESH_RESULTS.failed);
+    assert.equal(receivedSignal?.aborted, true);
+    assert.equal(existsSync(cachePath), false);
+    assert.equal(
+      await catalog.refreshIfStale(controller.signal),
+      MODEL_CATALOG_REFRESH_RESULTS.skipped,
+    );
+  } finally {
+    controller.abort();
     rmSync(dir, { recursive: true, force: true });
   }
 });

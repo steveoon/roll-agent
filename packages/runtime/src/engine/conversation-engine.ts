@@ -23,6 +23,7 @@ import {
 } from "@roll-agent/core/registry/process-manager";
 import {
   acquireAgentUsageLease,
+  getExitedAgentUsageNames,
   type AgentUsageLease,
 } from "@roll-agent/core/registry/agent-usage-lease";
 import {
@@ -1373,7 +1374,9 @@ export class ConversationEngine {
         | { readonly failed: false }
         | { readonly failed: true; readonly error: unknown } = { failed: false };
       try {
-        await this.clientManager.disconnectAll();
+        await this.clientManager.disconnectAll(
+          getExitedAgentUsageNames(this.agentUsageLeases.values()),
+        );
       } catch (error) {
         disconnectFailure = { failed: true, error };
       }

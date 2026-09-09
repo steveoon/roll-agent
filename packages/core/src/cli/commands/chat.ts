@@ -624,6 +624,7 @@ export default defineCommand({
       );
     const store = new ThreadStore(config.runtime.threadsDir);
     const modelCatalog = runtime.createDefaultModelCatalog(runtime.defaultModelCatalogCachePath());
+    const catalogRefreshController = new AbortController();
     const surface = args.message
       ? args.json
         ? CHAT_ENGINE_SURFACES.json
@@ -638,7 +639,7 @@ export default defineCommand({
     try {
       backfillScheduledThreads(config, runtime, store);
       if (surface === CHAT_ENGINE_SURFACES.ink || surface === CHAT_ENGINE_SURFACES.basicRepl) {
-        modelCatalog.refreshIfStale().then(
+        modelCatalog.refreshIfStale(catalogRefreshController.signal).then(
           (result) => {
             log.debug(`model catalog refresh: ${result}`);
           },
@@ -840,6 +841,7 @@ export default defineCommand({
         process.exitCode = 1;
       }
     } finally {
+      catalogRefreshController.abort();
       signalScope?.dispose();
       try {
         await sessionForCleanup?.close();

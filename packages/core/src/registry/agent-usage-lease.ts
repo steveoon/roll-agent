@@ -725,6 +725,25 @@ function sameAgentUsageLeaseRecord(
   );
 }
 
+/** Names whose held local runtime is proven absent; errors and live/reused PIDs stay unknown. */
+export function getExitedAgentUsageNames(leases: Iterable<AgentUsageLease>): ReadonlySet<string> {
+  const exited = new Set<string>();
+  for (const lease of leases) {
+    const state = agentUsageLeaseStates.get(lease);
+    if (state === undefined || state.released) continue;
+    try {
+      // Signal 0 is an OS existence probe, not termination. Avoid launching PowerShell on
+      // Windows just to establish that a PID no longer exists. A reused PID stays fail-closed.
+      process.kill(state.record.runtimeIdentity.pid, 0);
+    } catch (error) {
+      if (error instanceof Error && "code" in error && error.code === "ESRCH") {
+        exited.add(state.agent.skill.name);
+      }
+    }
+  }
+  return exited;
+}
+
 async function releaseAgentUsageLease(lease: AgentUsageLease): Promise<void> {
   const state = agentUsageLeaseStates.get(lease);
   if (state === undefined || state.released) return;

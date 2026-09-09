@@ -513,10 +513,14 @@ export class McpClientManager {
     }
   }
 
-  private closeManagedConnection(agentName: string, connection: ManagedConnection): Promise<void> {
+  private closeManagedConnection(
+    agentName: string,
+    connection: ManagedConnection,
+    serverExited = false,
+  ): Promise<void> {
     connection.closePromise ??= (async () => {
       const errors: unknown[] = [];
-      if (connection.httpTransport?.sessionId !== undefined) {
+      if (!serverExited && connection.httpTransport?.sessionId !== undefined) {
         try {
           await this.terminateHttpSession(agentName, connection.httpTransport);
         } catch (error) {
@@ -572,8 +576,8 @@ export class McpClientManager {
     await this.closeManagedConnection(agentName, conn);
   }
 
-  /** 断开所有连接 */
-  async disconnectAll(): Promise<void> {
+  /** 断开所有连接；只有持有本机 runtime 已退出证据的调用方才可跳过 HTTP DELETE。 */
+  async disconnectAll(knownExitedHttpAgents: ReadonlySet<string> = new Set()): Promise<void> {
     const pendingEntries = [...this.pendingConnections.entries()];
     for (const [agentName, pending] of pendingEntries) {
       pending.generation.closing = true;
@@ -592,7 +596,7 @@ export class McpClientManager {
     }
     const results = await Promise.allSettled(
       connectionEntries.map(([agentName, connection]) =>
-        this.closeManagedConnection(agentName, connection),
+        this.closeManagedConnection(agentName, connection, knownExitedHttpAgents.has(agentName)),
       ),
     );
     const errors = results.flatMap((result) =>

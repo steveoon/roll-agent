@@ -1,6 +1,7 @@
 import type { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import {
   acquireAgentUsageLease,
+  getExitedAgentUsageNames,
   type AgentUsageHolderKind,
   type AgentUsageLease,
 } from "../registry/agent-usage-lease.ts";
@@ -89,7 +90,7 @@ export class ManagedAgentConnectionScope {
       | { readonly failed: false }
       | { readonly failed: true; readonly error: unknown } = { failed: false };
     try {
-      await this.clientManager.disconnectAll();
+      await this.clientManager.disconnectAll(getExitedAgentUsageNames(this.leases.values()));
     } catch (error) {
       disconnectFailure = { failed: true, error };
     }

@@ -26,6 +26,7 @@ import {
   AgentUsageStopRecoveryError,
   acquireAgentUsageLease,
   acquireAgentUsageMaintenanceGuard,
+  getExitedAgentUsageNames,
   inspectAgentUsageStopRecovery,
   recoverInterruptedAgentStop,
 } from "./agent-usage-lease.ts";
@@ -41,6 +42,38 @@ import {
 import type { RegisteredAgent } from "../types/agent.ts";
 
 describe("Agent usage leases", () => {
+  it("only reports a held runtime as exited on OS-confirmed absence", async () => {
+    const fixture = await createRuntimeFixture(MANAGED_AGENT_RUNTIME_RETENTIONS.persistent);
+    const lease = await acquireAgentUsageLease(fixture.agent, fixture.dataDir, undefined, {
+      holderKind: "chat",
+      startIfStopped: false,
+      waitUntilReady: false,
+    });
+    assert.ok(lease);
+    try {
+      assert.deepEqual([...getExitedAgentUsageNames([lease])], []);
+      const denied = mock.method(process, "kill", () => {
+        throw Object.assign(new Error("permission denied"), { code: "EPERM" });
+      });
+      try {
+        assert.deepEqual([...getExitedAgentUsageNames([lease])], []);
+      } finally {
+        denied.mock.restore();
+      }
+      const exited = once(fixture.child, "exit");
+      fixture.child.kill("SIGKILL");
+      await exited;
+      assert.deepEqual([...getExitedAgentUsageNames([lease])], [fixture.agent.skill.name]);
+      // Plain objects cannot assert the death of a runtime this process never acquired.
+      assert.deepEqual([...getExitedAgentUsageNames([{ ...lease }])], []);
+      await lease.release();
+      assert.deepEqual([...getExitedAgentUsageNames([lease])], []);
+    } finally {
+      await lease.release().catch(() => {});
+      await cleanupRuntimeFixture(fixture);
+    }
+  });
+
   it("cancels lifecycle-lock retry before creating a lease", async () => {
     const fixture = await createRuntimeFixture(MANAGED_AGENT_RUNTIME_RETENTIONS.persistent);
     const lifecycleLock = acquireAgentLifecycleLock(fixture.dataDir, fixture.agent.skill.name);
