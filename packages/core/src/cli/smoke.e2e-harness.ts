@@ -656,11 +656,12 @@ export function createCoreManagedHttpFixtureAgent(
     readonly createBrokenDistEntry?: boolean;
   } = {},
 ): void {
-  const sdkEntry = resolve(import.meta.dirname, "../../../../packages/sdk/src/index.ts");
-  const zodEntry = resolve(
-    import.meta.dirname,
-    "../../../../packages/sdk/node_modules/zod/index.js",
-  );
+  const sdkEntry = pathToFileURL(
+    resolve(import.meta.dirname, "../../../../packages/sdk/src/index.ts"),
+  ).href;
+  const zodEntry = pathToFileURL(
+    resolve(import.meta.dirname, "../../../../packages/sdk/node_modules/zod/index.js"),
+  ).href;
   const startupDelayMs = options.startupDelayMs ?? 0;
   const shutdownDelayMs = options.shutdownDelayMs ?? 0;
 
