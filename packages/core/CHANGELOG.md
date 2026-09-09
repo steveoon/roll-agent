@@ -1,5 +1,12 @@
 # @roll-agent/core
 
+## 0.38.3
+
+### Patch Changes
+
+- Updated dependencies [[`bd256ff`](https://github.com/steveoon/roll-agent/commit/bd256ff241517015aa08636c0159c3d5a20b8076)]:
+  - @roll-agent/runtime@0.21.0
+
 ## 0.38.2
 
 ### Patch Changes
