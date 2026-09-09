@@ -1,5 +1,18 @@
 # @roll-agent/core
 
+## 0.38.2
+
+### Patch Changes
+
+- [#258](https://github.com/steveoon/roll-agent/pull/258) [`b16143a`](https://github.com/steveoon/roll-agent/commit/b16143ae808b610fd6e60d1371e01e194c36a67c) Thanks [@steveoon](https://github.com/steveoon)! - Allow chat to exit cleanly after a managed local HTTP Agent crashes while preserving errors for live or unverifiable servers. Cancel background model catalog refresh on chat exit so pending network activity does not delay returning control to the shell. Stabilize the crashed-Agent lifecycle test by waiting for chat readiness and cover shell input recovery in Windows CI.
+
+- [#257](https://github.com/steveoon/roll-agent/pull/257) [`3881d47`](https://github.com/steveoon/roll-agent/commit/3881d477ed25ec1ff960ebcdf371517c5bda5925) Thanks [@steveoon](https://github.com/steveoon)! - Show download progress and installation stages in the macOS and Linux standalone installer, including piped URL installation. Redirected logs retain concise stage messages without terminal progress updates.
+
+- [#258](https://github.com/steveoon/roll-agent/pull/258) [`a6181e4`](https://github.com/steveoon/roll-agent/commit/a6181e45d47c9a71cc85e52c9e5316dca923c0d0) Thanks [@steveoon](https://github.com/steveoon)! - Update transitive js-yaml dependencies to 3.15.2 and 4.3.2 to fix excessive CPU consumption when merging empty mappings (GHSA-2883-xcg3-v3hh). Both versions satisfy the existing seven-day release age policy, so the old version-specific exceptions are removed.
+
+- Updated dependencies [[`b16143a`](https://github.com/steveoon/roll-agent/commit/b16143ae808b610fd6e60d1371e01e194c36a67c)]:
+  - @roll-agent/runtime@0.20.1
+
 ## 0.38.1
 
 ### Patch Changes
