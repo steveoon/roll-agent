@@ -1,5 +1,11 @@
 # @roll-agent/runtime
 
+## 0.20.1
+
+### Patch Changes
+
+- [#258](https://github.com/steveoon/roll-agent/pull/258) [`b16143a`](https://github.com/steveoon/roll-agent/commit/b16143ae808b610fd6e60d1371e01e194c36a67c) Thanks [@steveoon](https://github.com/steveoon)! - Allow chat to exit cleanly after a managed local HTTP Agent crashes while preserving errors for live or unverifiable servers. Cancel background model catalog refresh on chat exit so pending network activity does not delay returning control to the shell. Stabilize the crashed-Agent lifecycle test by waiting for chat readiness and cover shell input recovery in Windows CI.
+
 ## 0.20.0
 
 ### Minor Changes
