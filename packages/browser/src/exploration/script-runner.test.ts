@@ -90,7 +90,8 @@ test("infinite loops are interrupted by the parent deadline", async () => {
 
 test("QuickJS heap exhaustion stops the run without crashing the host", async () => {
   const result = await runBrowserScript({
-    source: 'const rows = []; while (true) rows.push(new Array(10000).fill("data"));',
+    // One allocation exceeds the heap cap deterministically; do not race GC churn against the deadline.
+    source: "return new Array(1_000_000).fill(1);",
     memoryLimitBytes: 2 * 1024 * 1024,
     timeoutMs: 5000,
     invoke: async () => null,
