@@ -10,6 +10,14 @@ import { selectPage } from "./tools/select-page.ts";
 import { browserSnapshot } from "./tools/browser-snapshot.ts";
 import { clickRef } from "./tools/click-ref.ts";
 import { typeRef } from "./tools/type-ref.ts";
+import { browserExecute } from "./tools/browser-execute.ts";
+import {
+  browserWorkflowList,
+  browserWorkflowSaveDraft,
+  browserWorkflowValidate,
+  browserWorkflowSetStatus,
+  browserWorkflowRun,
+} from "./tools/browser-workflows.ts";
 import { zhipinDiagnoseBrowserState } from "./tools/zhipin-diagnose-browser-state.ts";
 // Zhipin — 聊天
 import { zhipinReadMessages } from "./tools/zhipin-read-messages.ts";
@@ -59,7 +67,13 @@ async function shutdownAgent(): Promise<void> {
 }
 
 function isGlobalBrowserRuntimeTool(toolName: string): boolean {
-  return toolName === "browser_stop" || toolName === "zhipin_judge_prepared_reply";
+  return (
+    toolName === "browser_stop" ||
+    toolName === "zhipin_judge_prepared_reply" ||
+    toolName === "browser_workflow_list" ||
+    toolName === "browser_workflow_save_draft" ||
+    toolName === "browser_workflow_set_status"
+  );
 }
 
 /**
@@ -80,7 +94,11 @@ function withBrowserInstanceRuntimeSelection(tool: AnyToolDefinition): AnyToolDe
   }
 
   return withBrowserInstanceInput(tool, {
-    startRuntime: tool.name !== "browser_status",
+    // Exploration resolves native targets itself: existing-session must not
+    // eagerly attach Playwright merely to run a native script.
+    startRuntime:
+      tool.name !== "browser_status" &&
+      !["browser_execute", "browser_workflow_validate", "browser_workflow_run"].includes(tool.name),
     serializePageOps: !PAGE_FREE_TOOL_NAMES.has(tool.name),
   });
 }
@@ -99,6 +117,12 @@ const agent = defineAgent(
       browserSnapshot,
       clickRef,
       typeRef,
+      browserExecute,
+      browserWorkflowList,
+      browserWorkflowSaveDraft,
+      browserWorkflowValidate,
+      browserWorkflowSetStatus,
+      browserWorkflowRun,
       zhipinDiagnoseBrowserState,
       // Zhipin 聊天
       zhipinReadMessages,

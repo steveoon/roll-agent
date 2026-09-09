@@ -44,6 +44,7 @@ export type BrowserDomActionHint = {
 };
 
 export type BrowserAxSnapshotOptions = {
+  readonly backendNodeIds?: readonly number[];
   readonly domActionHints?: readonly BrowserDomActionHint[];
   readonly depthOffset?: number;
   readonly frameId?: string;
@@ -207,7 +208,8 @@ function applyDomActionHints(
     matchedBackendNodeIds.add(hint.backendNodeId);
     return {
       ...node,
-      role: hint.kind,
+      // DOM enrichment supplies missing action evidence; it must not erase an explicit AX role.
+      role: INTERACTIVE_AX_ROLES.has(node.role.toLowerCase()) ? node.role : hint.kind,
       name: node.name.length > 0 ? node.name : hint.name,
       properties: toDomActionProperties(node, hint),
     };
@@ -471,10 +473,14 @@ export async function createBrowserAxSnapshot(
   const maxNodes = options.maxNodes ?? DEFAULT_BROWSER_AX_SNAPSHOT_MAX_NODES;
   const interactiveOnly = options.interactiveOnly ?? true;
   const frameId = options.frameId;
+  const scopeIds =
+    options.backendNodeIds === undefined ? undefined : new Set(options.backendNodeIds);
   const rawNodes = applyDomActionHints(
     (
       await controller.getFullAccessibilityTree({
-        ...(options.maxDepth !== undefined ? { depth: options.maxDepth } : {}),
+        ...(options.maxDepth !== undefined && scopeIds === undefined
+          ? { depth: options.maxDepth }
+          : {}),
         ...(frameId !== undefined ? { frameId } : {}),
         ...(options.timeoutMs !== undefined ? { timeoutMs: options.timeoutMs } : {}),
       })
@@ -483,6 +489,10 @@ export async function createBrowserAxSnapshot(
       return parsed === undefined ? [] : [parsed];
     }),
     createDomActionHintMap(options.domActionHints),
+  ).filter(
+    (node) =>
+      scopeIds === undefined ||
+      (node.backendNodeId !== undefined && scopeIds.has(node.backendNodeId)),
   );
   const depths = calculateDepths(rawNodes);
   const state = createBuildState({

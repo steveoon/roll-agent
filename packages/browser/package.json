@@ -10,6 +10,10 @@
     ".": {
       "types": "./src/index.ts",
       "default": "./src/index.ts"
+    },
+    "./exploration/script-worker": {
+      "types": "./src/exploration/script-worker.ts",
+      "default": "./src/exploration/script-worker.ts"
     }
   },
   "publishConfig": {
@@ -18,6 +22,10 @@
       ".": {
         "types": "./dist/index.d.ts",
         "default": "./dist/index.js"
+      },
+      "./exploration/script-worker": {
+        "types": "./dist/exploration/script-worker.d.ts",
+        "default": "./dist/exploration/script-worker.js"
       }
     }
   },
@@ -36,6 +44,7 @@
   },
   "dependencies": {
     "playwright-core": "^1.52.0",
+    "quickjs-emscripten": "0.32.0",
     "zod": "^3.25.76"
   },
   "devDependencies": {

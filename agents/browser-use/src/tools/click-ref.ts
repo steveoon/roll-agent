@@ -6,7 +6,11 @@ import {
 } from "@roll-agent/browser";
 import { z } from "zod";
 import { browserElementRefStore } from "../element-ref-store.ts";
-import { getContextManager, getRuntime } from "../runtime-holder.ts";
+import {
+  getContextManager,
+  getRuntime,
+  getBrowserInstancePoolOrUndefined,
+} from "../runtime-holder.ts";
 import {
   assertBrowserActionAllowed,
   createBrowserActionPolicyOptions,
@@ -18,10 +22,13 @@ import {
   clickBrowserRefVisualTarget,
   createBrowserRefVisualSession,
 } from "./browser-ref-visual.ts";
+import { readBrowserDocumentIdentity } from "../browser-observation.ts";
 import { maybeBringToFront } from "../browser-foreground.ts";
+import { createBrowserRefFrameGuard } from "./browser-ref-frame-guard.ts";
 
 const ClickRefInputSchema = z.object({
   ref: BrowserElementRefHandleSchema.describe("browser_snapshot 返回的 @eN element ref"),
+  snapshotId: z.string().optional().describe("严格绑定 browser_snapshot；过期快照或文档变更时停止"),
   pageId: z.string().optional().describe("可选：通过 list_pages 返回的 pageId/native targetId"),
   browserActionApproval: BrowserActionApprovalSchema.optional().describe(
     "当 actionPolicy=confirm 返回 needs_confirmation 后，由 orchestrator 原样带回的批准 ID。",
@@ -42,7 +49,7 @@ export const clickRef = defineTool({
       ctxManager,
       ...(input.pageId !== undefined ? { pageId: input.pageId } : {}),
     });
-    const elementRef = browserElementRefStore.getRef(page.targetId, input.ref);
+    let elementRef = browserElementRefStore.getRef(page.targetId, input.ref);
     if (elementRef === undefined) {
       throw new StructuredToolError({
         code: "not_found",
@@ -70,6 +77,22 @@ export const clickRef = defineTool({
       }),
     });
     try {
+      if (input.snapshotId !== undefined) {
+        elementRef = browserElementRefStore.getScopedRef({
+          browserInstance: getBrowserInstancePoolOrUndefined()?.getBundle().id ?? "default",
+          pageId: page.targetId,
+          snapshotId: input.snapshotId,
+          documentId: await readBrowserDocumentIdentity(controller),
+          ref: input.ref,
+        });
+        if (elementRef === undefined) {
+          throw new StructuredToolError({
+            code: "not_found",
+            message:
+              "Snapshot ref is stale or belongs to another page/instance. Run browser_snapshot again.",
+          });
+        }
+      }
       await maybeBringToFront(
         {
           targetId: page.targetId,
@@ -80,13 +103,19 @@ export const clickRef = defineTool({
         { runtime },
       );
       const session = createBrowserRefVisualSession(controller);
+      const actionController = createBrowserRefFrameGuard(controller, {
+        ...(elementRef.frameId === undefined ? {} : { frameId: elementRef.frameId }),
+        runtime,
+        approvedByConfirmation: guard.approvedByConfirmation,
+        ...(ctx.signal === undefined ? {} : { signal: ctx.signal }),
+      });
       await session.begin(`正在点击 ${input.ref}`);
       const result = await clickElementRef({
-        controller,
+        controller: actionController,
         elementRef,
         options: {
           clickTarget: async (target) => {
-            await clickBrowserRefVisualTarget(controller, session, target);
+            await clickBrowserRefVisualTarget(actionController, session, target);
           },
         },
       });

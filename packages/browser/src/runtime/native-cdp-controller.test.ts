@@ -684,3 +684,49 @@ test("Runtime.enable is blocked unless explicitly enabled for diagnostics", asyn
   await pending;
   unsafeController.close();
 });
+
+test("frame tree retains loaderId from CDP for strict document identity", async () => {
+  const socket = new FakeNativeCdpWebSocket();
+  const controller = await createController(socket);
+  const result = controller.getFrameTree();
+  const command = socket.takeSentCommand();
+  socket.respond(command.id, {
+    frameTree: { frame: { id: "main", loaderId: "loader-2", url: "https://example.com" } },
+  });
+  assert.equal((await result).frame.loaderId, "loader-2");
+  controller.close();
+});
+
+test("exact DOM node inspection resolves objects without Runtime events or previews", async () => {
+  const socket = new FakeNativeCdpWebSocket();
+  const controller = await createController(socket);
+  const resolved = controller.resolveBackendNode({ backendNodeId: 42, executionContextId: 7 });
+  const resolve = socket.takeSentCommand();
+  assert.equal(resolve.method, "DOM.resolveNode");
+  assert.deepEqual(resolve.params, { backendNodeId: 42, executionContextId: 7 });
+  socket.respond(resolve.id, { object: { objectId: "node-object" } });
+  assert.equal(await resolved, "node-object");
+  const inspected = controller.callFunctionOnObject({
+    objectId: "node-object",
+    functionDeclaration: "function(name) { return this.getAttribute(name); }",
+    args: ["role"],
+  });
+  const call = socket.takeSentCommand();
+  assert.equal(call.method, "Runtime.callFunctionOn");
+  assert.deepEqual(call.params, {
+    objectId: "node-object",
+    functionDeclaration: "function(name) { return this.getAttribute(name); }",
+    arguments: [{ value: "role" }],
+    returnByValue: true,
+    generatePreview: false,
+    awaitPromise: false,
+  });
+  socket.respond(call.id, { result: { value: "button" } });
+  assert.equal(await inspected, "button");
+  const release = controller.releaseObject("node-object");
+  const command = socket.takeSentCommand();
+  assert.equal(command.method, "Runtime.releaseObject");
+  socket.respond(command.id, {});
+  await release;
+  controller.close();
+});

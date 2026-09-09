@@ -1,0 +1,116 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Roll exploration fixture</title>
+    <style>
+      body {
+        font: 16px system-ui;
+        margin: 40px;
+      }
+      section,
+      form {
+        padding: 20px;
+        border: 1px solid #bbb;
+        margin: 12px;
+      }
+      button,
+      input {
+        padding: 10px;
+        margin: 5px;
+      }
+      #items {
+        height: 120px;
+        overflow: auto;
+      }
+      canvas {
+        border: 1px solid #555;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>Exploration fixture</h1>
+    <form id="profile" aria-label="Profile">
+      <label for="name">Display name</label><input id="name" name="name" /><label
+        ><input id="subscribed" type="checkbox" />Subscribe</label
+      ><button type="submit" id="save-profile">Save</button><output id="profile-result"></output>
+    </form>
+    <form id="billing" aria-label="Billing">
+      <label for="city">City</label><input id="city" /><button type="submit">Save</button
+      ><output id="billing-result"></output>
+    </form>
+    <button id="open-dialog">Open delayed dialog</button>
+    <dialog id="filter-dialog" aria-label="Filters">
+      <label for="filter">Search</label><input id="filter" /><button id="apply-filter">Apply</button
+      ><button id="close-dialog">Close</button>
+    </dialog>
+    <output id="filter-result"></output>
+    <section aria-label="Dynamic content">
+      <button id="replace">Replace action node</button>
+      <div id="replace-target"><button id="dynamic-action">Dynamic action</button></div>
+      <output id="dynamic-result"></output>
+    </section>
+    <section aria-label="Pagination">
+      <div id="items"></div>
+      <button id="next-page">Next page</button><output id="page-number">1</output>
+    </section>
+    <iframe
+      title="Embedded form"
+      srcdoc="<!doctype html><label for='embedded'>Embedded field</label><input id='embedded'><button id='embedded-save'>Save embedded</button>"
+    ></iframe>
+    <canvas id="chart" width="300" height="120" aria-label="Canvas chart"></canvas>
+    <script>
+      let submissions = 0;
+      document.querySelector("#profile").addEventListener("submit", (event) => {
+        event.preventDefault();
+        submissions++;
+        document.querySelector("#profile-result").textContent =
+          "Saved " + document.querySelector("#name").value + " (" + submissions + ")";
+      });
+      document.querySelector("#billing").addEventListener("submit", (event) => {
+        event.preventDefault();
+        document.querySelector("#billing-result").textContent = "Billing saved";
+      });
+      document.querySelector("#open-dialog").onclick = () =>
+        setTimeout(() => document.querySelector("#filter-dialog").showModal(), 150);
+      document.querySelector("#close-dialog").onclick = () =>
+        document.querySelector("#filter-dialog").close();
+      document.querySelector("#apply-filter").onclick = () => {
+        document.querySelector("#filter-result").textContent =
+          document.querySelector("#filter").value;
+        document.querySelector("#filter-dialog").close();
+      };
+      document.querySelector("#replace").onclick = () => {
+        document.querySelector("#replace-target").innerHTML =
+          '<button id="dynamic-action">Dynamic action</button>';
+      };
+      document.querySelector("#replace-target").onclick = (event) => {
+        if (event.target.id === "dynamic-action")
+          document.querySelector("#dynamic-result").textContent = "Clicked";
+      };
+      let page = 1;
+      function renderItems() {
+        document.querySelector("#items").replaceChildren(
+          ...Array.from({ length: 10 }, (_, i) => {
+            const item = document.createElement("p");
+            item.textContent = "Item " + ((page - 1) * 10 + i + 1);
+            return item;
+          }),
+        );
+        document.querySelector("#page-number").textContent = String(page);
+      }
+      renderItems();
+      document.querySelector("#next-page").onclick = () => {
+        page++;
+        renderItems();
+      };
+      const canvas = document.querySelector("#chart");
+      const context = canvas.getContext("2d");
+      context.fillStyle = "#18324a";
+      context.fillRect(0, 0, 300, 120);
+      context.fillStyle = "white";
+      context.font = "20px system-ui";
+      context.fillText("Canvas: visual only", 20, 65);
+    </script>
+  </body>
+</html>

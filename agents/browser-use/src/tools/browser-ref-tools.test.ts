@@ -25,11 +25,15 @@ type FakeNativeController = Pick<
   | "describeNode"
   | "evaluateJson"
   | "getBoxModelByBackendNodeId"
+  | "getFrameTree"
   | "getDocument"
   | "getFullAccessibilityTree"
   | "insertText"
   | "preflightAction"
   | "querySelectorAllByNodeId"
+  | "resolveBackendNode"
+  | "callFunctionOnObject"
+  | "releaseObject"
   | "scrollIntoViewByBackendNodeId"
 >;
 
@@ -311,17 +315,48 @@ function createFakeController(): FakeNativeController & {
       }
       return true as T;
     },
+    async getFrameTree() {
+      return {
+        frame: { id: "main", loaderId: "load1", url: "https://example.com" },
+        ...(includeIframe
+          ? {
+              childFrames: [
+                {
+                  frame: { id: "payment-frame", url: "https://example.com/payment" },
+                  ...(includeNestedIframe
+                    ? {
+                        childFrames: [
+                          { frame: { id: "security-frame", url: "https://example.com/security" } },
+                        ],
+                      }
+                    : {}),
+                },
+              ],
+            }
+          : {}),
+      };
+    },
+    async resolveBackendNode({ backendNodeId }) {
+      return `document-${backendNodeId}`;
+    },
+    async callFunctionOnObject() {
+      return "clear";
+    },
+    async releaseObject() {},
     async getDocument(input: { readonly pierce?: boolean } = {}) {
       if (input.pierce === true && lastFrameDomActionFrameId !== undefined) {
         return {
           root: {
             nodeId: 1,
+            backendNodeId: 1000,
             children: [
               {
                 nodeId: 2,
                 nodeName: "IFRAME",
+                frameId: lastFrameDomActionFrameId,
                 contentDocument: {
                   nodeId: 3,
+                  backendNodeId: 2000,
                   children: [
                     {
                       nodeId: 4,
@@ -339,6 +374,29 @@ function createFakeController(): FakeNativeController & {
       return {
         root: {
           nodeId: 1,
+          backendNodeId: 1000,
+          ...(includeIframe
+            ? {
+                children: [
+                  {
+                    frameId: "payment-frame",
+                    contentDocument: {
+                      backendNodeId: 2000,
+                      ...(includeNestedIframe
+                        ? {
+                            children: [
+                              {
+                                frameId: "security-frame",
+                                contentDocument: { backendNodeId: 3000 },
+                              },
+                            ],
+                          }
+                        : {}),
+                    },
+                  },
+                ],
+              }
+            : {}),
         },
       };
     },
@@ -725,6 +783,31 @@ describe("browser generic ref tools", () => {
     assert.deepEqual(controller.scrollCalls, [88]);
   });
 
+  it("click_ref stops before native press when an iframe ancestor is obscured", async () => {
+    const page = createNativePage("target-1");
+    const controller = createFakeController();
+    controller.includeIframe = true;
+    controller.callFunctionOnObject = async () => "target_obscured";
+    setRuntimeStateForTests({
+      runtime: createFakeRuntime({ page, controller }),
+      contextManager: createFakeContextManager(),
+    });
+    const snapshot = await browserSnapshot.execute(
+      { pageId: "target-1", interactiveOnly: true },
+      createTestContext(),
+    );
+    const ref = snapshot.snapshot.refs.find((entry) => entry.frameId === "payment-frame");
+    assert.ok(ref);
+    await assert.rejects(
+      clickRef.execute({ pageId: "target-1", ref: ref.ref }, createTestContext()),
+      (error: unknown) => error instanceof Error && error.message.includes("frame ancestor"),
+    );
+    assert.equal(
+      controller.mouseEvents.some((event) => event.type === "mousePressed"),
+      false,
+    );
+  });
+
   it("browser_snapshot adds DOM actionable refs inside same-target iframes", async () => {
     const page = createNativePage("target-1");
     const controller = createFakeController();
@@ -889,5 +972,43 @@ describe("browser generic ref tools", () => {
     assert.equal(clickResult.target.frameId, "security-frame");
     assert.equal(clickResult.target.backendNodeId, 89);
     assert.deepEqual(controller.scrollCalls, [89]);
+  });
+  it("strict click and type accept current snapshot and reject replaced snapshots before input", async () => {
+    const page = createNativePage("target-1");
+    const controller = createFakeController();
+    setRuntimeStateForTests({
+      runtime: createFakeRuntime({ page, controller }),
+      contextManager: createFakeContextManager(),
+    });
+    const first = await browserSnapshot.execute(
+      { pageId: "target-1", interactiveOnly: true },
+      createTestContext(),
+    );
+    const snapshotId = first.snapshot.snapshotId;
+    assert.ok(snapshotId);
+    await clickRef.execute({ pageId: "target-1", ref: "@e1", snapshotId }, createTestContext());
+    await typeRef.execute(
+      { pageId: "target-1", ref: "@e1", snapshotId, text: "hello", clear: false },
+      createTestContext(),
+    );
+    assert.deepEqual(controller.insertedTexts, ["hello"]);
+    await browserSnapshot.execute(
+      { pageId: "target-1", interactiveOnly: true },
+      createTestContext(),
+    );
+    const mouseCount = controller.mouseEvents.length;
+    await assert.rejects(
+      clickRef.execute({ pageId: "target-1", ref: "@e1", snapshotId }, createTestContext()),
+      /stale/,
+    );
+    await assert.rejects(
+      typeRef.execute(
+        { pageId: "target-1", ref: "@e1", snapshotId, text: "bad", clear: false },
+        createTestContext(),
+      ),
+      /stale/,
+    );
+    assert.equal(controller.mouseEvents.length, mouseCount);
+    assert.deepEqual(controller.insertedTexts, ["hello"]);
   });
 });

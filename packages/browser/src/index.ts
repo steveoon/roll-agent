@@ -128,6 +128,38 @@ export type {
   BrowserDomActionKind,
 } from "./runtime/ax-snapshot.ts";
 export { BrowserElementRefStore, clickElementRef, typeElementRef } from "./runtime/element-ref.ts";
+export {
+  enrichBrowserSnapshot,
+  readBrowserDocumentIdentity,
+  resolveBrowserSnapshotScope,
+} from "./runtime/snapshot-context.ts";
+export {
+  BROWSER_SCRIPT_CAPABILITIES,
+  BrowserScriptCapabilitySchema,
+  BrowserScriptLocatorSchema,
+  BrowserScriptConditionSchema,
+  BrowserChooseOptionsSchema,
+  BrowserScriptOriginSchema,
+  BrowserExecuteInputSchema,
+  BrowserExecuteResultSchema,
+  BrowserScriptError,
+  normalizeBrowserOrigin,
+} from "./exploration/contracts.ts";
+export { executeBrowserProgram } from "./exploration/execution.ts";
+export { DOM_CHOICE_UTILS } from "./runtime/dom-choice-structure.ts";
+export { assertFramePointUnoccluded } from "./exploration/frame-occlusion.ts";
+export type { ControlInspection } from "./exploration/control-inspector.ts";
+export type { BrowserProgramDriver } from "./exploration/execution.ts";
+export { runBrowserScript, compileBrowserScript } from "./exploration/script-runner.ts";
+export type { BrowserScriptResult, BrowserScriptOptions } from "./exploration/script-runner.ts";
+export { BrowserScriptPageDriver } from "./exploration/native-driver.ts";
+export type {
+  BrowserScriptCapability,
+  BrowserScriptLocator,
+  BrowserScriptCondition,
+  BrowserExecuteInput,
+  BrowserExecuteResult,
+} from "./exploration/contracts.ts";
 export type {
   BrowserElementRefActionResult,
   BrowserElementRefClickDispatcher,

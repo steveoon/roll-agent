@@ -234,6 +234,20 @@ export type BrowserElementRefHandle = z.infer<typeof BrowserElementRefHandleSche
 export const BrowserAxPropertyValueSchema = z.union([z.string(), z.number(), z.boolean()]);
 export type BrowserAxPropertyValue = z.infer<typeof BrowserAxPropertyValueSchema>;
 
+export const BrowserElementContextSchema = z.object({
+  form: z.string().optional(),
+  dialog: z.string().optional(),
+  label: z.string().optional(),
+});
+
+export const BrowserLocatorHintSchema = z.object({
+  css: z.string().optional(),
+  role: z.string().optional(),
+  name: z.string().optional(),
+  scope: z.string().optional(),
+  unique: z.literal(true),
+});
+
 export const BrowserElementRefSchema = z.object({
   ref: BrowserElementRefHandleSchema,
   backendNodeId: z.number().int().positive().optional(),
@@ -242,6 +256,9 @@ export const BrowserElementRefSchema = z.object({
   name: z.string(),
   nth: z.number().int().nonnegative(),
   disabled: z.boolean(),
+  context: BrowserElementContextSchema.optional(),
+  locator: BrowserLocatorHintSchema.optional(),
+  strict: z.boolean().optional(),
 });
 export type BrowserElementRef = z.infer<typeof BrowserElementRefSchema>;
 
@@ -267,6 +284,12 @@ export const BrowserAxNodeSchema: z.ZodType<BrowserAxNode> = BrowserAxNodeBaseSc
 });
 
 export const BrowserAxSnapshotSchema = z.object({
+  snapshotId: z.string().optional(),
+  browserInstance: z.string().optional(),
+  pageId: z.string().optional(),
+  documentId: z.string().optional(),
+  scope: z.string().optional(),
+  coverageWarnings: z.array(z.string()).optional(),
   nodes: z.array(BrowserAxNodeSchema),
   refs: z.array(BrowserElementRefSchema),
   nodeCount: z.number().int().nonnegative(),
