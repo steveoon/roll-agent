@@ -88,7 +88,8 @@ chat:
           }
           return (
             countAgentUsageLeaseFiles(dataDir, "http-fixture-agent") === 1 &&
-            readAgentPidFile(dataDir, "http-fixture-agent") !== undefined
+            readAgentPidFile(dataDir, "http-fixture-agent") !== undefined &&
+            spawnedChat.output.stdout.includes("› ")
           );
         },
         diagnostics,

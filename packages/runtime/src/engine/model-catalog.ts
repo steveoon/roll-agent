@@ -205,7 +205,8 @@ export class ModelCatalog {
     return lookupCatalogContextWindow(this.data(), provider, modelName);
   }
 
-  async refreshIfStale(): Promise<ModelCatalogRefreshResult> {
+  async refreshIfStale(signal?: AbortSignal): Promise<ModelCatalogRefreshResult> {
+    if (signal?.aborted) return MODEL_CATALOG_REFRESH_RESULTS.skipped;
     const cachePath = this.cachePath;
     if (cachePath === undefined) {
       return MODEL_CATALOG_REFRESH_RESULTS.skipped;
@@ -217,12 +218,15 @@ export class ModelCatalog {
     }
     try {
       const response = await this.fetchImpl(MODEL_CATALOG_SOURCE_URL, {
-        signal: AbortSignal.timeout(this.timeoutMs),
+        signal: signal
+          ? AbortSignal.any([signal, AbortSignal.timeout(this.timeoutMs)])
+          : AbortSignal.timeout(this.timeoutMs),
       });
       if (!response.ok) {
         return MODEL_CATALOG_REFRESH_RESULTS.failed;
       }
       const next = trimModelCatalog(await response.json(), new Date(nowMs).toISOString());
+      signal?.throwIfAborted();
       mkdirSync(dirname(cachePath), { recursive: true });
       const tempPath = `${cachePath}.tmp`;
       writeFileSync(tempPath, JSON.stringify(next));

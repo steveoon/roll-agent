@@ -760,6 +760,39 @@ describe("McpClientManager HTTP disconnect", () => {
     assert.equal(manager.isConnected("http-agent"), false);
   });
 
+  it("skips DELETE for known exited local servers but still closes clients and surfaces close errors", async () => {
+    for (const failClose of [false, true]) {
+      const manager = new McpClientManager();
+      const calls: string[] = [];
+      const internals = manager as unknown as {
+        readonly connections: Map<string, ManagedConnectionDouble>;
+      };
+      internals.connections.set("exited-agent", {
+        client: {
+          close: async () => {
+            calls.push("close");
+            if (failClose) throw new Error("client close failed");
+          },
+        } as unknown as Client,
+        transportType: "streamable-http",
+        httpTransport: {
+          sessionId: "exited-session",
+          terminateSession: async () => {
+            calls.push("DELETE");
+            throw new Error("server unreachable");
+          },
+          close: async () => {},
+        },
+        generation: connectionGeneration(),
+      });
+      const closing = manager.disconnectAll(new Set(["exited-agent"]));
+      if (failClose) await assert.rejects(closing, /client close failed/);
+      else await closing;
+      assert.deepEqual(calls, ["close"]);
+      assert.equal(manager.isConnected("exited-agent"), false);
+    }
+  });
+
   it("bounds a stalled HTTP DELETE, forces transport close, then closes the client", async () => {
     const order: string[] = [];
     const termination = Promise.withResolvers<void>();

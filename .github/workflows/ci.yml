@@ -65,8 +65,9 @@ jobs:
           }
 
       - name: Targeted shell tests
+        # PowerShell-heavy files share a runner; bound contention without relaxing test deadlines.
         run: >
-          node --experimental-strip-types --experimental-sqlite --test
+          node --experimental-strip-types --experimental-sqlite --test --test-concurrency=2
           packages/runtime/src/bash/profile.test.ts
           packages/runtime/src/bash/powershell-smoke.test.ts
           packages/runtime/src/bash/powershell-session-smoke.test.ts
@@ -91,9 +92,19 @@ jobs:
           packages/core/src/cli/utils/current-cli-shim.test.ts
           packages/core/src/skills/library.test.ts
 
+      - name: Chat exit and managed Agent lifecycle regressions
+        run: >
+          node --experimental-strip-types --experimental-sqlite --test --test-concurrency=2
+          packages/core/src/mcp/client-manager.test.ts
+          packages/core/src/mcp/managed-agent-connection.test.ts
+          packages/core/src/registry/agent-usage-lease.test.ts
+          packages/core/src/cli/smoke-chat-exit.e2e.ts
+          packages/core/src/cli/smoke-runtime-replace.e2e.ts
+          packages/core/src/cli/smoke-runtime-lease.e2e.ts
+
       - name: Scheduler unit tests
         run: >
-          node --experimental-strip-types --experimental-sqlite --test
+          node --experimental-strip-types --experimental-sqlite --test --test-concurrency=2
           packages/runtime/src/scheduler/schedule-store.test.ts
           packages/runtime/src/scheduler/schedule-store-probe-budget.test.ts
           packages/core/src/registry/process-identity.test.ts
