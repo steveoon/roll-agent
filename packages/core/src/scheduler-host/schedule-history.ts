@@ -10,6 +10,7 @@ import type {
 import type { RollConfig } from "../config/schema.ts";
 import { loadConfig } from "../config/loader.ts";
 import { log } from "../cli/utils/output.ts";
+import { describeScheduleRounds } from "./schedule-rounds.ts";
 import type {
   RuntimeModule,
   ConversationEngineInstance,
@@ -264,7 +265,15 @@ export function createScheduleBrowserPort(input: HistoryInput): ScheduleBrowserP
             ? "历史任务"
             : input.runtime.describeTrigger(task.schedule.trigger),
         status: task.schedule?.status ?? null,
-        ...(task.latestRun ? { lastRunStatus: task.latestRun.invocation?.status ?? null } : {}),
+        ...(task.schedule === undefined
+          ? {}
+          : { roundsDisplay: describeScheduleRounds(task.schedule) }),
+        ...(task.latestRun
+          ? {
+              lastRunStatus: task.latestRun.invocation?.status ?? null,
+              lastRunMode: task.latestRun.mode,
+            }
+          : {}),
       }));
     },
     async listRuns(taskId, page) {

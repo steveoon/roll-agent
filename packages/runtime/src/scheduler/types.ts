@@ -1,6 +1,10 @@
 import type { TriggerSpec } from "./trigger.ts";
 
-export const SCHEDULE_STATUSES = { active: "active", paused: "paused" } as const;
+export const SCHEDULE_STATUSES = {
+  active: "active",
+  paused: "paused",
+  completed: "completed",
+} as const;
 export type ScheduleStatus = (typeof SCHEDULE_STATUSES)[keyof typeof SCHEDULE_STATUSES];
 
 export const INVOCATION_MODES = { scheduled: "scheduled", manual: "manual" } as const;
@@ -137,6 +141,10 @@ export interface ScheduleRecord {
   readonly status: ScheduleStatus;
   readonly authorityDigest: string | undefined;
   readonly maxRunMs: number | undefined;
+  readonly maxRounds: number | undefined;
+  readonly roundsStarted: number;
+  /** Latest automatic invocation, never a manual run; absent after history retention. */
+  readonly lastScheduledRun?: Pick<InvocationRecord, "status" | "treeUnsettled">;
   readonly nextRunAtMs: number | undefined;
   readonly lastRunAtMs: number | undefined;
   readonly lastError: string | undefined;
@@ -228,10 +236,34 @@ export interface CreateScheduleInput {
   readonly fireImmediately?: boolean;
   readonly authorityDigest?: string;
   readonly maxRunMs?: number;
+  readonly maxRounds?: number;
 }
 
 export interface EnqueueManualInvocationOptions {
   readonly maxAttempts?: number;
+}
+
+/** A caller must reuse requestId and the original expectedMaxRounds when retrying. */
+export interface ExtendScheduleInput {
+  readonly scheduleId: string;
+  readonly additionalRounds: number;
+  readonly expectedMaxRounds: number;
+  readonly requestId: string;
+  readonly authorityDigest: string;
+}
+
+export interface ScheduleExtensionRecord {
+  readonly requestId: string;
+  readonly scheduleId: string;
+  readonly expectedMaxRounds: number;
+  readonly additionalRounds: number;
+  readonly authorityDigest: string;
+  readonly createdAtMs: number;
+}
+
+export interface ScheduleExtensionResult {
+  readonly extended: boolean;
+  readonly schedule: ScheduleRecord;
 }
 
 export interface FailInvocationOptions {

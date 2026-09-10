@@ -147,6 +147,10 @@ const SCHEDULE_MUTATIONS: Readonly<Record<string, ScheduleMutation>> = {
     requiresBody: true,
     run: (controller, body) => controller.resumeSchedule(body),
   },
+  "/api/schedule/extend": {
+    requiresBody: true,
+    run: (controller, body) => controller.extendSchedule(body),
+  },
   "/api/schedule/cancel": {
     requiresBody: true,
     run: (controller, body) => controller.cancelInvocation(body),

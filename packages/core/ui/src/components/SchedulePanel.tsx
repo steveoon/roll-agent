@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { ScheduleExtensionDialog } from "./ScheduleExtensionDialog.tsx";
 import type { RollUiApi } from "../api.ts";
 import {
   SCHEDULE_ADD_EXAMPLE,
@@ -12,6 +13,10 @@ import {
   type ScheduleAction,
 } from "../lib/schedule-state.ts";
 import type { ScheduleRow, ScheduleRunRow, ScheduleStatusSummary } from "../types.ts";
+import {
+  prepareScheduleExtension,
+  type ScheduleExtensionSubmission,
+} from "../lib/schedule-extension.ts";
 
 export interface SchedulePanelProps {
   readonly api: RollUiApi;
@@ -33,6 +38,24 @@ export function SchedulePanel({ api, onToast, onUnavailable }: SchedulePanelProp
   const [busyTarget, setBusyTarget] = useState<string>();
   const [expandedRun, setExpandedRun] = useState<string>();
   const busyRef = useRef<ScheduleAction>(undefined);
+  const [extensionConfirmation, setExtensionConfirmation] = useState<string>();
+  const extensionDecision = useRef<((approved: boolean) => void) | undefined>(undefined);
+
+  useEffect(
+    () => () => {
+      // Leaving the panel while a confirmation is open must never submit the request.
+      extensionDecision.current?.(false);
+      extensionDecision.current = undefined;
+    },
+    [],
+  );
+
+  function finishExtensionConfirmation(approved: boolean): void {
+    const resolve = extensionDecision.current;
+    extensionDecision.current = undefined;
+    setExtensionConfirmation(undefined);
+    resolve?.(approved);
+  }
 
   const refresh = useCallback(async (): Promise<void> => {
     try {
@@ -62,23 +85,34 @@ export function SchedulePanel({ api, onToast, onUnavailable }: SchedulePanelProp
     action: ScheduleAction,
     body?: unknown,
     options: { readonly target?: string; readonly confirm?: string } = {},
-  ): Promise<void> {
-    if (busyRef.current !== undefined) return;
+  ): Promise<boolean> {
+    if (busyRef.current !== undefined || extensionDecision.current !== undefined) return false;
     const presentation = describeScheduleAction(action);
     const confirmText = options.confirm ?? presentation.confirm;
-    if (confirmText !== undefined && !window.confirm(confirmText)) return;
+    if (confirmText !== undefined) {
+      const approved =
+        action === "extend"
+          ? await new Promise<boolean>((resolve) => {
+              extensionDecision.current = resolve;
+              setExtensionConfirmation(confirmText);
+            })
+          : window.confirm(confirmText);
+      if (!approved) return false;
+    }
     busyRef.current = action;
     setBusy(action);
     setBusyTarget(options.target);
     try {
       const result = await api.runScheduleAction(action, body);
       onToast(describeScheduleActionResult(action, result));
+      return true;
     } catch (error) {
       if (isScheduleUnavailableError(error)) {
         onUnavailable();
-        return;
+        return false;
       }
       onToast({ tone: "warning", message: describeError(error) });
+      return false;
     } finally {
       busyRef.current = undefined;
       setBusy(undefined);
@@ -92,6 +126,11 @@ export function SchedulePanel({ api, onToast, onUnavailable }: SchedulePanelProp
 
   return (
     <section className="companion-panel schedule-panel" aria-labelledby="schedule-title">
+      <ScheduleExtensionDialog
+        open={extensionConfirmation !== undefined}
+        description={extensionConfirmation ?? ""}
+        onDecision={finishExtensionConfirmation}
+      />
       <div className="section-heading">
         <div>
           <p className="eyebrow">SCHEDULER</p>
@@ -112,7 +151,7 @@ export function SchedulePanel({ api, onToast, onUnavailable }: SchedulePanelProp
       </div>
       <p className="section-description">
         查看任务与运行结果，管理开机自启的调度服务。新建任务可以在 roll chat 里直接说（例如「每 30
-        分钟帮我检查一次未读消息」），也可以使用 CLI：
+        分钟帮我检查一次未读消息，执行 20 轮后停止」），也可以使用 CLI：
         <code>roll schedule add</code>；全局参数（数据目录、并发数）在「定时任务」配置分区调整。
       </p>
 
@@ -137,7 +176,13 @@ export function SchedulePanel({ api, onToast, onUnavailable }: SchedulePanelProp
         </div>
       ))}
 
-      <ServiceCard status={status} acting={acting} onAction={runAction} />
+      <ServiceCard
+        status={status}
+        acting={acting}
+        onAction={async (action) => {
+          await runAction(action);
+        }}
+      />
 
       <section className="schedule-block" aria-labelledby="schedule-tasks-title">
         <div className="panel-heading-row">
@@ -164,7 +209,14 @@ export function SchedulePanel({ api, onToast, onUnavailable }: SchedulePanelProp
                 schedule={schedule}
                 busy={acting}
                 pending={busyTarget === schedule.id}
+                onExtend={(submission) =>
+                  runAction("extend", submission.request, {
+                    target: schedule.id,
+                    confirm: submission.confirmation,
+                  })
+                }
                 onToggle={() => {
+                  if (schedule.status === "completed") return;
                   const action = schedule.status === "active" ? "pause" : "resume";
                   runAction(action, { id: schedule.id }, { target: schedule.id }).catch(
                     () => undefined,
@@ -259,6 +311,11 @@ function ServiceCard({ status, acting, onAction }: ServiceCardProps) {
           {status.daemon.liveness}
           {status.daemon.pid !== undefined ? ` · pid ${String(status.daemon.pid)}` : ""}
         </code>
+        <span>任务统计</span>
+        <code>
+          启用 {status.schedules.active} · 暂停 {status.schedules.paused} · 已结束{" "}
+          {status.schedules.completed}
+        </code>
         <span>下次唤醒</span>
         <code>{status.nextWakeAt === undefined ? "—" : formatTime(status.nextWakeAt)}</code>
         {service.binary !== undefined && (
@@ -318,9 +375,11 @@ interface ScheduleItemProps {
   readonly busy: boolean;
   readonly pending: boolean;
   readonly onToggle: () => void;
+  readonly onExtend: (submission: ScheduleExtensionSubmission) => Promise<boolean>;
 }
 
-function ScheduleItem({ schedule, busy, pending, onToggle }: ScheduleItemProps) {
+function ScheduleItem({ schedule, busy, pending, onToggle, onExtend }: ScheduleItemProps) {
+  const [extensionOpen, setExtensionOpen] = useState(false);
   const active = schedule.status === "active";
   return (
     <li className={pending ? "is-pending" : undefined}>
@@ -332,22 +391,112 @@ function ScheduleItem({ schedule, busy, pending, onToggle }: ScheduleItemProps) 
           {schedule.maxRun !== undefined && (
             <span className="schedule-pill neutral">单次 ≤ {schedule.maxRun}</span>
           )}
-          {schedule.liveRun !== undefined && <span className="schedule-pill active">正在运行</span>}
+          {schedule.liveRun !== undefined && (
+            <span className="schedule-pill active">
+              {schedule.liveRun.mode === "manual" ? "手动运行" : "自动运行"} ·{" "}
+              {describeRunStatus(schedule.liveRun.status).label}
+            </span>
+          )}
         </div>
+        <small>{schedule.roundsDisplay}</small>
         <small>
-          {active
-            ? `下次运行 ${schedule.nextRunAt === undefined ? "—" : formatTime(schedule.nextRunAt)}`
-            : "已暂停 · 恢复后按当前配置重新授权"}
+          {schedule.status === "completed"
+            ? "自动周期已结束，运行历史保留"
+            : active
+              ? schedule.rounds.max !== null && schedule.rounds.started >= schedule.rounds.max
+                ? "自动轮数已用尽，等待本轮结算"
+                : `下次运行 ${schedule.nextRunAt === undefined ? "—" : formatTime(schedule.nextRunAt)}`
+              : "已暂停 · 恢复后按当前配置重新授权"}
           {schedule.lastRunAt !== undefined ? ` · 上次 ${formatTime(schedule.lastRunAt)}` : ""}
         </small>
         {schedule.lastError !== undefined && (
           <small className="schedule-item-error">{schedule.lastError}</small>
         )}
+        {extensionOpen && (
+          <ScheduleExtensionForm
+            schedule={schedule}
+            busy={busy}
+            onExtend={onExtend}
+            onComplete={() => setExtensionOpen(false)}
+          />
+        )}
       </div>
-      <button type="button" className="text-button" disabled={busy} onClick={onToggle}>
-        {active ? "暂停" : "恢复"}
-      </button>
+      {schedule.status === "completed" ? (
+        <button
+          type="button"
+          className="text-button"
+          disabled={busy || extensionOpen}
+          onClick={() => setExtensionOpen(true)}
+        >
+          追加轮数
+        </button>
+      ) : (
+        <button type="button" className="text-button" disabled={busy} onClick={onToggle}>
+          {active ? "暂停" : "恢复"}
+        </button>
+      )}
     </li>
+  );
+}
+
+interface ScheduleExtensionFormProps {
+  readonly schedule: ScheduleRow;
+  readonly busy: boolean;
+  readonly onExtend: (submission: ScheduleExtensionSubmission) => Promise<boolean>;
+  readonly onComplete: () => void;
+}
+
+function ScheduleExtensionForm({
+  schedule,
+  busy,
+  onExtend,
+  onComplete,
+}: ScheduleExtensionFormProps) {
+  const [amount, setAmount] = useState("");
+  const [submission, setSubmission] = useState<ScheduleExtensionSubmission>();
+  const [error, setError] = useState<string>();
+  const submit = async (): Promise<void> => {
+    try {
+      const prepared = prepareScheduleExtension(schedule, amount, submission, () =>
+        crypto.randomUUID(),
+      );
+      setSubmission(prepared);
+      setError(undefined);
+      if (await onExtend(prepared)) onComplete();
+    } catch (error) {
+      setError(describeError(error));
+    }
+  };
+  return (
+    <form
+      className="schedule-extension-form"
+      onSubmit={(event) => {
+        event.preventDefault();
+        submit().catch(() => undefined);
+      }}
+    >
+      <label>
+        追加轮数
+        <input
+          aria-label={`为${schedule.name}追加轮数`}
+          inputMode="numeric"
+          value={amount}
+          disabled={busy}
+          onChange={(event) => setAmount(event.target.value)}
+          placeholder="例如 30"
+        />
+      </label>
+      <button type="submit" className="text-button" disabled={busy}>
+        确认追加
+      </button>
+      <small>保留累计轮数和历史；成功后等待一个周期再执行。</small>
+      {submission !== undefined && <small>结果不明确时，保留原轮数重试可避免重复追加。</small>}
+      {error !== undefined && (
+        <small role="alert" className="schedule-item-error">
+          {error}
+        </small>
+      )}
+    </form>
   );
 }
 
@@ -371,6 +520,9 @@ function RunItem({ run, busy, pending, expanded, onToggleDetail, onCancel }: Run
       <div className="schedule-item-main">
         <div className="schedule-item-title">
           <strong>{run.scheduleName}</strong>
+          <span className="schedule-pill neutral">
+            {run.mode === "manual" ? "手动触发" : "定时触发"}
+          </span>
           {run.attempt > 1 && (
             <span className="schedule-pill neutral">
               第 {String(run.attempt)}/{String(run.maxAttempts)} 次尝试

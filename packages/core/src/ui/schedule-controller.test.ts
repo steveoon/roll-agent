@@ -80,12 +80,12 @@ test("schedule-controller getStatus 合并 host 探测与账本统计", async ()
     harness.store.setScheduleStatus(paused.id, "paused", NOW);
     const status = (await harness.controller.getStatus()) as {
       dataDir: string;
-      schedules: { total: number; active: number; paused: number };
+      schedules: { total: number; active: number; paused: number; completed: number };
       service: { installed: boolean };
       nextWakeAt: string | undefined;
     };
     assert.equal(status.dataDir, HOST_STATUS.dataDir);
-    assert.deepEqual(status.schedules, { total: 2, active: 1, paused: 1 });
+    assert.deepEqual(status.schedules, { total: 2, active: 1, paused: 1, completed: 0 });
     assert.equal(status.service.installed, false);
     assert.equal(status.nextWakeAt, new Date(DUE).toISOString());
   } finally {
@@ -117,7 +117,11 @@ test("schedule-controller listSchedules 输出序列化行与 live run 标记", 
     const claimedRows = (await harness.controller.listSchedules()) as Array<{
       liveRun: { id: string; status: string } | undefined;
     }>;
-    assert.deepEqual(claimedRows[0]?.liveRun, { id: claim.invocation.id, status: "claimed" });
+    assert.deepEqual(claimedRows[0]?.liveRun, {
+      id: claim.invocation.id,
+      status: "claimed",
+      mode: "scheduled",
+    });
   } finally {
     harness.close();
     rmSync(dir, { recursive: true, force: true });
@@ -295,6 +299,115 @@ test("schedule-controller 写操作互斥且非法请求不占用互斥槽", asy
     };
     assert.equal(pauseResult.ok, true);
     assert.deepEqual(host.calls, ["install"]);
+  } finally {
+    harness.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("schedule-controller reports exhausted automatic retries separately from manual runs and blocks completed resume", async () => {
+  const dir = mkdtempSync(join(realpathSync(tmpdir()), "roll-schedule-controller-rounds-"));
+  const harness = createHarness(dir);
+  try {
+    const schedule = harness.store.createSchedule(
+      {
+        name: "有限巡检",
+        prompt: "检查",
+        cwd: "/workspace/demo",
+        trigger: createIntervalTrigger("30m"),
+        maxRounds: 1,
+      },
+      NOW,
+    );
+    const [claim] = harness.store.claimDue({ workerId: "worker", nowMs: DUE, limit: 1 });
+    assert.ok(claim);
+    harness.store.failInvocation(claim.invocation.id, claim.ownershipToken, "temporary", DUE + 1);
+    harness.store.enqueueManualInvocation(schedule.id, DUE + 2);
+    const rows = (await harness.controller.listSchedules()) as Array<{
+      status: string;
+      rounds: { max: number | null; started: number };
+      roundsDisplay: string;
+    }>;
+    assert.deepEqual(rows[0]?.rounds, { max: 1, started: 1 });
+    assert.match(rows[0]?.roundsDisplay ?? "", /最后一轮等待重试/u);
+    assert.equal(rows[0]?.status, "active");
+
+    // Pausing abandons the settled automatic retry; a newer manual run must not keep it open.
+    await harness.controller.pauseSchedule({ id: schedule.id });
+    assert.equal(harness.store.getSchedule(schedule.id)?.status, "completed");
+    await harness.controller.pauseSchedule({ id: schedule.id });
+    assert.equal(harness.store.getSchedule(schedule.id)?.status, "completed");
+    await assert.rejects(
+      async () => harness.controller.resumeSchedule({ id: schedule.id }),
+      /结束|上限/u,
+    );
+    const status = (await harness.controller.getStatus()) as {
+      schedules: { completed: number; paused: number };
+    };
+    assert.equal(status.schedules.completed, 1);
+    assert.equal(status.schedules.paused, 0);
+    const completed = (await harness.controller.listSchedules()) as Array<{
+      roundsDisplay: string;
+    }>;
+    assert.match(completed[0]?.roundsDisplay ?? "", /已结束.*1\/1/u);
+  } finally {
+    harness.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("schedule-controller validates extension requests and replays one request without double counting", async () => {
+  const dir = mkdtempSync(join(realpathSync(tmpdir()), "roll-schedule-controller-extend-"));
+  const harness = createHarness(dir);
+  try {
+    const schedule = harness.store.createSchedule(
+      {
+        name: "追加巡检",
+        prompt: "检查",
+        cwd: "/workspace/demo",
+        trigger: createIntervalTrigger("30m"),
+        maxRounds: 1,
+        authorityDigest: "digest-a",
+      },
+      NOW,
+    );
+    const claim = harness.store.claimDue({ workerId: "worker", nowMs: DUE, limit: 1 })[0];
+    assert.ok(claim);
+    harness.store.failInvocation(claim.invocation.id, claim.ownershipToken, "final", DUE + 1, {
+      terminal: true,
+    });
+    const request = { id: schedule.id, rounds: 30, expectedMaxRounds: 1, requestId: "request-1" };
+    for (const invalid of [
+      null,
+      { ...request, rounds: "30" },
+      { ...request, rounds: 0 },
+      { ...request, rounds: 1.5 },
+      { ...request, expectedMaxRounds: null },
+      { ...request, requestId: "" },
+      { ...request, requestId: "a".repeat(129) },
+      { ...request, rounds: Number.MAX_SAFE_INTEGER },
+    ]) {
+      await assert.rejects(
+        async () => harness.controller.extendSchedule(invalid),
+        RollUiScheduleRequestError,
+      );
+    }
+    const before = Date.now();
+    const first = (await harness.controller.extendSchedule(request)) as {
+      extended: boolean;
+      authorityChanged: boolean;
+    };
+    assert.equal(first.extended, true);
+    assert.equal(first.authorityChanged, true);
+    const saved = harness.store.getSchedule(schedule.id);
+    assert.equal(saved?.maxRounds, 31);
+    assert.equal(saved?.roundsStarted, 1);
+    assert.equal(saved?.authorityDigest, "digest-b");
+    assert.ok(saved?.nextRunAtMs !== undefined && saved.nextRunAtMs >= before + 1_800_000);
+    const replay = (await harness.controller.extendSchedule(request)) as { extended: boolean };
+    assert.equal(replay.extended, false);
+    assert.deepEqual(harness.store.getSchedule(schedule.id), saved);
+    await assert.rejects(async () => harness.controller.extendSchedule({ ...request, rounds: 31 }));
   } finally {
     harness.close();
     rmSync(dir, { recursive: true, force: true });

@@ -46,6 +46,7 @@ function admissionFixture(): ScheduleCreateAdmission {
     everyMs: 1_800_000,
     everyDisplay: "每 30 分钟",
     maxRunMs: undefined,
+    maxRounds: undefined,
     maxRunDisplay: "1 小时",
     dataDir: "/tmp/sched-data",
     authorityDigest: "v1:abc",
@@ -106,6 +107,11 @@ function makeHarness(options: {
           cwd: admission.cwd,
           status: "active",
           trigger: { everyMs: admission.everyMs, display: admission.everyDisplay },
+          rounds: { max: admission.maxRounds ?? null, started: 0 },
+          roundsDisplay:
+            admission.maxRounds === undefined
+              ? "不限轮数"
+              : `已触发 0/${String(admission.maxRounds)} 轮`,
           maxRun: { explicit: false, effectiveMs: 3_600_000, display: "1 小时" },
           nextRunAt: admission.firstRunAt,
           createdAt: "2026-08-31T09:30:00.000Z",
@@ -132,6 +138,8 @@ function makeHarness(options: {
             cwd: SESSION_CWD,
             promptExcerpt: "检查未读消息并汇总",
             maxRun: "1 小时",
+            rounds: { max: null, started: 0 },
+            roundsDisplay: "不限轮数",
             nextRunAt: "2026-08-31T10:00:00.000Z",
             lastRunAt: undefined,
             lastError: undefined,
@@ -239,6 +247,7 @@ test("create 在 confirm 策略下展示完整预览并在批准后创建", asyn
   assert.equal(harness.createCalls.length, 1);
   assert.equal(harness.createCalls[0]?.authorityDigest, "v1:abc");
   assert.match(String(result.output), /已登记定时任务/u);
+  assert.equal(String(result.output).match(/不限轮数/gu)?.length, 1);
   assert.match(String(result.output), /不会自动执行/u);
 });
 
@@ -255,6 +264,8 @@ test("create 即使 automaticRunsReady 为 true 也保留 readiness warnings", a
         cwd: admission.cwd,
         status: "active",
         trigger: { everyMs: admission.everyMs, display: admission.everyDisplay },
+        rounds: { max: admission.maxRounds ?? null, started: 0 },
+        roundsDisplay: "已触发 0/20 轮",
         maxRun: { explicit: false, effectiveMs: 3_600_000, display: "1 小时" },
         nextRunAt: admission.firstRunAt,
         createdAt: "2026-08-31T09:30:00.000Z",
@@ -341,6 +352,8 @@ test("create 重复定义时提示已存在而不是失败", async () => {
         cwd: admission.cwd,
         status: "active",
         trigger: { everyMs: admission.everyMs, display: admission.everyDisplay },
+        rounds: { max: admission.maxRounds ?? null, started: 0 },
+        roundsDisplay: "已触发 0/20 轮",
         maxRun: { explicit: false, effectiveMs: 3_600_000, display: "1 小时" },
         nextRunAt: admission.firstRunAt,
         createdAt: "2026-08-31T09:00:00.000Z",
@@ -372,6 +385,8 @@ test("create 幂等命中且重新授权时在结果中明示", async () => {
         cwd: admission.cwd,
         status: "active",
         trigger: { everyMs: admission.everyMs, display: admission.everyDisplay },
+        rounds: { max: admission.maxRounds ?? null, started: 0 },
+        roundsDisplay: "已触发 0/20 轮",
         maxRun: { explicit: false, effectiveMs: 3_600_000, display: "1 小时" },
         nextRunAt: admission.firstRunAt,
         createdAt: "2026-08-31T09:00:00.000Z",
@@ -480,6 +495,8 @@ test("AgentSession 集成：create 触发确认，批准后写入并注入 # 定
           cwd: admission.cwd,
           status: "active",
           trigger: { everyMs: admission.everyMs, display: admission.everyDisplay },
+          rounds: { max: admission.maxRounds ?? null, started: 0 },
+          roundsDisplay: "已触发 0/20 轮",
           maxRun: { explicit: false, effectiveMs: 3_600_000, display: "1 小时" },
           nextRunAt: admission.firstRunAt,
           createdAt: "2026-08-31T09:30:00.000Z",
@@ -528,4 +545,80 @@ test("AgentSession 集成：create 触发确认，批准后写入并注入 # 定
   assert.match(system.content, /# 定时任务/u);
   assert.match(system.content, new RegExp(SCHEDULE_CREATE_TOOL_ID, "u"));
   assert.match(system.content, new RegExp(SCHEDULE_LIST_TOOL_ID, "u"));
+});
+
+test("finite rounds survive admission capture and confirmation, and are shown in create output", async () => {
+  const admission = { ...admissionFixture(), maxRounds: 20 };
+  const harness = makeHarness({
+    policy: fixedPolicy({ action: "confirm", reason: "确认" }),
+    capture: () => admission,
+  });
+  const result = await harness.execute(SCHEDULE_CREATE_TOOL_ID, {
+    name: "未读巡检",
+    prompt: "检查未读消息并回复",
+    every: "30m",
+    rounds: 20,
+  });
+  assert.equal(result.isError, false);
+  assert.deepEqual(harness.captureCalls[0], {
+    name: "未读巡检",
+    prompt: "检查未读消息并回复",
+    every: "30m",
+    rounds: 20,
+  });
+  assert.equal(harness.approvalRequests[0]?.input.rounds, "最多自动执行 20 轮");
+  assert.match(String(harness.approvalRequests[0]?.input.lifecycle), /结算完毕自动结束/u);
+  assert.equal(harness.createCalls[0]?.maxRounds, 20);
+  assert.match(String(result.output), /最多自动执行 20 轮/u);
+});
+
+test("invalid rounds are rejected before admission, approval or writes", async () => {
+  for (const rounds of [0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1, Infinity, "20"]) {
+    const harness = makeHarness({ policy: fixedPolicy({ action: "confirm", reason: "确认" }) });
+    const result = await harness.execute(SCHEDULE_CREATE_TOOL_ID, {
+      name: "巡检",
+      prompt: "检查",
+      every: "30m",
+      rounds,
+    });
+    assert.equal(result.isError, true, String(rounds));
+    assert.equal(harness.captureCalls.length, 0);
+    assert.equal(harness.approvalRequests.length, 0);
+    assert.equal(harness.createCalls.length, 0);
+  }
+});
+
+test("list accepts completed filter and reports final round progress", async () => {
+  const harness = makeHarness({
+    list: async () => ({
+      ok: true,
+      total: 1,
+      offset: 0,
+      hasMore: false,
+      readiness: READY,
+      schedules: [
+        {
+          id: "finite",
+          name: "巡检",
+          status: "completed",
+          trigger: "每 30 分钟",
+          cwd: SESSION_CWD,
+          promptExcerpt: "检查",
+          maxRun: "1 小时",
+          rounds: { max: 20, started: 20 },
+          roundsDisplay: "已结束 · 达到轮数上限 · 20/20 轮",
+          nextRunAt: undefined,
+          lastRunAt: undefined,
+          lastError: undefined,
+        },
+      ],
+    }),
+  });
+  const result = await harness.execute(SCHEDULE_LIST_TOOL_ID, { status: "completed" });
+  assert.equal(result.isError, false);
+  assert.deepEqual(harness.listCalls[0], {
+    query: { status: "completed" },
+    sessionCwd: SESSION_CWD,
+  });
+  assert.match(String(result.output), /已结束 · 达到轮数上限 · 20\/20 轮/u);
 });

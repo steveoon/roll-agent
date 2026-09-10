@@ -15,6 +15,7 @@ export default defineCommand({
     show: () => loadScheduleCommand("schedule-show"),
     remove: () => loadScheduleCommand("schedule-remove"),
     pause: () => loadScheduleCommand("schedule-pause"),
+    extend: () => loadScheduleCommand("schedule-extend"),
     resume: () => loadScheduleCommand("schedule-resume"),
     runs: () => loadScheduleCommand("schedule-runs"),
     inspect: () => loadScheduleCommand("schedule-inspect"),

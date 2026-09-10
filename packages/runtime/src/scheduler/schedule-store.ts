@@ -33,6 +33,9 @@ import {
   type CompleteInvocationOutcome,
   type CreateScheduleInput,
   type EnqueueManualInvocationOptions,
+  type ExtendScheduleInput,
+  type ScheduleExtensionRecord,
+  type ScheduleExtensionResult,
   type ExecutorIdentity,
   type ExecutorLiveness,
   type ExecutorLivenessProbe,
@@ -54,7 +57,7 @@ import {
   type ScheduleRunHistoryEntry,
 } from "./types.ts";
 
-const SCHEMA_VERSION = 6;
+const SCHEMA_VERSION = 8;
 const BUSY_TIMEOUT_MS = 15_000;
 const TERMINAL_STATUS_PLACEHOLDERS = INVOCATION_TERMINAL_STATUSES.map(() => "?").join(", ");
 
@@ -121,6 +124,8 @@ interface ScheduleRow {
   readonly status: string;
   readonly authority_digest: string | null;
   readonly max_run_ms: unknown;
+  readonly max_rounds?: unknown;
+  readonly rounds_started?: unknown;
   readonly next_run_at: number | null;
   readonly last_run_at: number | null;
   readonly last_error: string | null;
@@ -389,16 +394,45 @@ interface LiveInvocationRow extends InvocationRow {
 }
 
 function isScheduleStatus(value: string): value is ScheduleStatus {
-  return value === SCHEDULE_STATUSES.active || value === SCHEDULE_STATUSES.paused;
+  return Object.values(SCHEDULE_STATUSES).some((status) => status === value);
 }
 
-function toScheduleRecord(row: ScheduleRow): ScheduleRecord {
+function toScheduleRecord(row: ScheduleRow, db: DatabaseSync): ScheduleRecord {
   if (!isScheduleStatus(row.status)) {
     throw new ScheduleStoreError(
       SCHEDULE_STORE_ERROR_CODES.invalid,
       `schedule ${row.id} 的 status 非法: ${row.status}`,
     );
   }
+  const maxRounds = validateMaxRounds(row.max_rounds ?? undefined);
+  const roundsStarted = row.rounds_started ?? 0;
+  if (
+    typeof roundsStarted !== "number" ||
+    !Number.isSafeInteger(roundsStarted) ||
+    roundsStarted < 0
+  ) {
+    throw new ScheduleStoreError(
+      SCHEDULE_STORE_ERROR_CODES.invalid,
+      `schedule ${row.id} 的 roundsStarted 非法`,
+    );
+  }
+  const latest =
+    maxRounds === undefined
+      ? undefined
+      : (db
+          .prepare(
+            "SELECT * FROM invocations WHERE schedule_id = ? AND mode = ? ORDER BY scheduled_for DESC, rowid DESC LIMIT 1",
+          )
+          .get(row.id, INVOCATION_MODES.scheduled) as InvocationRow | undefined);
+  const lastScheduledRun =
+    latest === undefined
+      ? undefined
+      : {
+          status: toInvocationRecord(latest).status,
+          treeUnsettled:
+            latest.tree_unsettled === 1 ||
+            (latest.tree_tracked_pgids !== null && latest.tree_tracked_pgids.trim() !== "[]"),
+        };
   return {
     id: row.id,
     name: row.name,
@@ -408,6 +442,9 @@ function toScheduleRecord(row: ScheduleRow): ScheduleRecord {
     status: row.status,
     authorityDigest: row.authority_digest ?? undefined,
     maxRunMs: validateMaxRunMs(row.max_run_ms),
+    maxRounds,
+    roundsStarted,
+    ...(lastScheduledRun === undefined ? {} : { lastScheduledRun }),
     nextRunAtMs: row.next_run_at ?? undefined,
     lastRunAtMs: row.last_run_at ?? undefined,
     lastError: row.last_error ?? undefined,
@@ -434,12 +471,21 @@ function validateMaxRunMs(value: unknown): number | undefined {
   return value;
 }
 
+function validateMaxRounds(value: unknown): number | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 1) {
+    throw new ScheduleStoreError(SCHEDULE_STORE_ERROR_CODES.invalid, "maxRounds 必须是正安全整数");
+  }
+  return value;
+}
+
 function validateCreateInput(input: CreateScheduleInput): {
   readonly name: string;
   readonly prompt: string;
   readonly cwd: string;
   readonly trigger: TriggerSpec;
   readonly maxRunMs: number | undefined;
+  readonly maxRounds: number | undefined;
 } {
   const name = input.name.trim();
   if (name.length === 0 || name.length > SCHEDULER_LIMITS.maxNameChars) {
@@ -468,6 +514,7 @@ function validateCreateInput(input: CreateScheduleInput): {
     cwd: input.cwd,
     trigger: trigger.data,
     maxRunMs: validateMaxRunMs(input.maxRunMs),
+    maxRounds: validateMaxRounds(input.maxRounds),
   };
 }
 
@@ -531,7 +578,12 @@ export class ScheduleStore {
         throw error;
       }
     }
-    this.init();
+    try {
+      this.init();
+    } catch (error) {
+      this.db.close();
+      throw error;
+    }
   }
 
   private init(): void {
@@ -546,17 +598,32 @@ export class ScheduleStore {
     if (versionRow.user_version > SCHEMA_VERSION) {
       throw unsupportedSchemaVersionError(versionRow.user_version);
     }
-    this.transaction(() => {
-      this.db.exec(
-        `CREATE TABLE IF NOT EXISTS schedules (
+    const mayUpgrade = versionRow.user_version < 7;
+    if (mayUpgrade) this.db.exec("PRAGMA foreign_keys = OFF;");
+    try {
+      this.transaction(() => {
+        // Another opener may have migrated while BEGIN IMMEDIATE waited for its lock.
+        const lockedVersion = (
+          this.db.prepare("PRAGMA user_version").get() as { user_version: number }
+        ).user_version;
+        if (lockedVersion > SCHEMA_VERSION) throw unsupportedSchemaVersionError(lockedVersion);
+        const rebuildSchedules =
+          lockedVersion < 7 &&
+          this.db
+            .prepare("SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'schedules'")
+            .get() !== undefined;
+        this.db.exec(
+          `CREATE TABLE IF NOT EXISTS schedules (
            id TEXT PRIMARY KEY,
            name TEXT NOT NULL,
            prompt TEXT NOT NULL,
            cwd TEXT NOT NULL,
            trigger_json TEXT NOT NULL,
-           status TEXT NOT NULL CHECK (status IN ('active', 'paused')),
+           status TEXT NOT NULL CHECK (status IN ('active', 'paused', 'completed')),
            authority_digest TEXT,
            max_run_ms INTEGER,
+           max_rounds INTEGER CHECK (max_rounds IS NULL OR (typeof(max_rounds) = 'integer' AND max_rounds BETWEEN 1 AND 9007199254740991)),
+           rounds_started INTEGER NOT NULL DEFAULT 0 CHECK (typeof(rounds_started) = 'integer' AND rounds_started BETWEEN 0 AND 9007199254740991),
            next_run_at INTEGER,
            last_run_at INTEGER,
            last_error TEXT,
@@ -609,12 +676,61 @@ export class ScheduleStore {
          );
          CREATE INDEX IF NOT EXISTS idx_schedule_thread_refs_history
            ON schedule_thread_refs (schedule_id, scheduled_for DESC, invocation_id, attempt DESC);`,
-      );
-      if (versionRow.user_version < SCHEMA_VERSION) {
-        this.addMissingColumns();
-      }
-      this.db.exec(`PRAGMA user_version = ${String(SCHEMA_VERSION)};`);
-    });
+        );
+        if (lockedVersion < 7) {
+          this.addMissingColumns();
+        }
+        if (rebuildSchedules) this.migrateRoundsInTransaction();
+        this.db.exec(`CREATE TABLE IF NOT EXISTS schedule_extensions (
+          request_id TEXT PRIMARY KEY CHECK (length(request_id) BETWEEN 1 AND 128),
+          schedule_id TEXT NOT NULL REFERENCES schedules(id) ON DELETE CASCADE,
+          expected_max_rounds INTEGER NOT NULL CHECK (typeof(expected_max_rounds) = 'integer' AND expected_max_rounds BETWEEN 1 AND 9007199254740991),
+          additional_rounds INTEGER NOT NULL CHECK (typeof(additional_rounds) = 'integer' AND additional_rounds BETWEEN 1 AND 9007199254740991),
+          authority_digest TEXT NOT NULL,
+          created_at INTEGER NOT NULL,
+          UNIQUE (schedule_id, expected_max_rounds)
+        );`);
+        if (rebuildSchedules && this.db.prepare("PRAGMA foreign_key_check").all().length !== 0) {
+          throw new ScheduleStoreError(
+            SCHEDULE_STORE_ERROR_CODES.invalid,
+            "scheduler 迁移失败：外键关联不完整",
+          );
+        }
+        this.db.exec(`PRAGMA user_version = ${String(SCHEMA_VERSION)};`);
+      });
+    } finally {
+      if (mayUpgrade) this.db.exec("PRAGMA foreign_keys = ON;");
+    }
+  }
+
+  private migrateRoundsInTransaction(): void {
+    // Copy rowid to preserve stable list ordering; never rename the old parent table,
+    // which would rewrite invocation foreign keys to the temporary name.
+    this.db.exec(`CREATE TABLE schedules_v7 (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      prompt TEXT NOT NULL,
+      cwd TEXT NOT NULL,
+      trigger_json TEXT NOT NULL,
+      status TEXT NOT NULL CHECK (status IN ('active', 'paused', 'completed')),
+      authority_digest TEXT,
+      max_run_ms INTEGER,
+      max_rounds INTEGER CHECK (max_rounds IS NULL OR (typeof(max_rounds) = 'integer' AND max_rounds BETWEEN 1 AND 9007199254740991)),
+      rounds_started INTEGER NOT NULL DEFAULT 0 CHECK (typeof(rounds_started) = 'integer' AND rounds_started BETWEEN 0 AND 9007199254740991),
+      next_run_at INTEGER,
+      last_run_at INTEGER,
+      last_error TEXT,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL
+    );
+    INSERT INTO schedules_v7 (rowid, id, name, prompt, cwd, trigger_json, status,
+      authority_digest, max_run_ms, next_run_at, last_run_at, last_error, created_at, updated_at)
+    SELECT rowid, id, name, prompt, cwd, trigger_json, status,
+      authority_digest, max_run_ms, next_run_at, last_run_at, last_error, created_at, updated_at FROM schedules;
+    DROP TABLE schedules;
+    ALTER TABLE schedules_v7 RENAME TO schedules;
+    CREATE INDEX idx_schedules_due ON schedules (next_run_at)
+      WHERE status = 'active' AND next_run_at IS NOT NULL;`);
   }
 
   private addMissingColumns(): void {
@@ -722,7 +838,8 @@ export class ScheduleStore {
         .prepare(
           `SELECT * FROM schedules
             WHERE status = ? AND prompt = ? AND cwd = ? AND trigger_json = ?
-              AND COALESCE(max_run_ms, ${defaultMaxRunMs}) = COALESCE(?, ${defaultMaxRunMs})`,
+              AND COALESCE(max_run_ms, ${defaultMaxRunMs}) = COALESCE(?, ${defaultMaxRunMs})
+              AND max_rounds IS ?`,
         )
         .get(
           SCHEDULE_STATUSES.active,
@@ -730,6 +847,7 @@ export class ScheduleStore {
           valid.cwd,
           JSON.stringify(valid.trigger),
           valid.maxRunMs ?? null,
+          valid.maxRounds ?? null,
         ) as ScheduleRow | undefined;
       if (existing !== undefined) {
         const nextDigest = input.authorityDigest ?? null;
@@ -743,7 +861,11 @@ export class ScheduleStore {
             schedule: this.requireSchedule(existing.id),
           };
         }
-        return { created: false, reauthorized: false, schedule: toScheduleRecord(existing) };
+        return {
+          created: false,
+          reauthorized: false,
+          schedule: toScheduleRecord(existing, this.db),
+        };
       }
       return {
         created: true,
@@ -774,8 +896,8 @@ export class ScheduleStore {
       .prepare(
         `INSERT INTO schedules
            (id, name, prompt, cwd, trigger_json, status, authority_digest, max_run_ms,
-            next_run_at, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            next_run_at, created_at, updated_at, max_rounds)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         id,
@@ -789,6 +911,7 @@ export class ScheduleStore {
         nextRunAt,
         nowMs,
         nowMs,
+        valid.maxRounds ?? null,
       );
     return this.requireSchedule(id);
   }
@@ -802,12 +925,159 @@ export class ScheduleStore {
 
   resumeSchedule(id: string, authorityDigest: string, nowMs: number = Date.now()): boolean {
     return this.transaction(() => {
+      const schedule = this.db.prepare("SELECT status FROM schedules WHERE id = ?").get(id);
+      if (schedule?.status === SCHEDULE_STATUSES.completed) {
+        throw new ScheduleStoreError(
+          SCHEDULE_STORE_ERROR_CODES.invalid,
+          "任务已结束，轮数已用尽；请用 roll schedule extend <id> --rounds N 追加轮数",
+        );
+      }
       const result = this.db
         .prepare(
           "UPDATE schedules SET status = ?, authority_digest = ?, updated_at = ? WHERE id = ?",
         )
         .run(SCHEDULE_STATUSES.active, authorityDigest, nowMs, id);
+      this.reconcileRoundsInTransaction(id, nowMs);
       return result.changes === 1;
+    });
+  }
+
+  getScheduleExtension(requestId: string): ScheduleExtensionRecord | undefined {
+    const row = this.db
+      .prepare("SELECT * FROM schedule_extensions WHERE request_id = ?")
+      .get(requestId) as
+      | {
+          readonly request_id: string;
+          readonly schedule_id: string;
+          readonly expected_max_rounds: number;
+          readonly additional_rounds: number;
+          readonly authority_digest: string;
+          readonly created_at: number;
+        }
+      | undefined;
+    return row === undefined
+      ? undefined
+      : {
+          requestId: row.request_id,
+          scheduleId: row.schedule_id,
+          expectedMaxRounds: row.expected_max_rounds,
+          additionalRounds: row.additional_rounds,
+          authorityDigest: row.authority_digest,
+          createdAtMs: row.created_at,
+        };
+  }
+
+  extendSchedule(input: ExtendScheduleInput, nowMs: number = Date.now()): ScheduleExtensionResult {
+    const additional = validateMaxRounds(input.additionalRounds);
+    const expected = validateMaxRounds(input.expectedMaxRounds);
+    if (
+      additional === undefined ||
+      expected === undefined ||
+      !Number.isSafeInteger(expected + additional)
+    ) {
+      throw new ScheduleStoreError(
+        SCHEDULE_STORE_ERROR_CODES.invalid,
+        "追加轮数及原上限必须为正安全整数，追加后的总轮数不得溢出",
+      );
+    }
+    if (
+      typeof input.requestId !== "string" ||
+      input.requestId.trim().length === 0 ||
+      input.requestId.length > 128
+    ) {
+      throw new ScheduleStoreError(
+        SCHEDULE_STORE_ERROR_CODES.invalid,
+        "requestId 必须为 1..128 字符的非空请求标识；重试时复用原标识",
+      );
+    }
+    if (typeof input.authorityDigest !== "string" || input.authorityDigest.trim().length === 0) {
+      throw new ScheduleStoreError(
+        SCHEDULE_STORE_ERROR_CODES.invalid,
+        "追加轮数必须重新核验工作区权限",
+      );
+    }
+    return this.transaction(() => {
+      const receipt = this.getScheduleExtension(input.requestId);
+      if (receipt !== undefined) {
+        if (
+          receipt.scheduleId !== input.scheduleId ||
+          receipt.expectedMaxRounds !== expected ||
+          receipt.additionalRounds !== additional
+        ) {
+          throw new ScheduleStoreError(
+            SCHEDULE_STORE_ERROR_CODES.invalid,
+            "requestId 已用于不同的追加请求；请检查原请求参数",
+          );
+        }
+        // A replay never reauthorizes or moves the next run, even after later extensions.
+        return { extended: false, schedule: this.requireSchedule(input.scheduleId) };
+      }
+      const schedule = this.requireSchedule(input.scheduleId);
+      if (schedule.maxRounds === undefined) {
+        throw new ScheduleStoreError(
+          SCHEDULE_STORE_ERROR_CODES.invalid,
+          "不限轮数的任务不需要追加额度",
+        );
+      }
+      if (schedule.maxRounds !== expected) {
+        throw new ScheduleStoreError(
+          SCHEDULE_STORE_ERROR_CODES.invalid,
+          "任务轮数上限已变化，追加请求已过期；请刷新任务并核对原请求结果",
+        );
+      }
+      if (
+        schedule.status !== SCHEDULE_STATUSES.completed ||
+        schedule.roundsStarted !== schedule.maxRounds
+      ) {
+        throw new ScheduleStoreError(
+          SCHEDULE_STORE_ERROR_CODES.invalid,
+          "仅能为已结束且轮数用尽的有限任务追加轮数",
+        );
+      }
+      const unsettled = this.db
+        .prepare(
+          `SELECT id FROM invocations WHERE schedule_id = ? AND
+          (status IN ('pending', 'claimed', 'running', 'retry') OR tree_unsettled = 1
+           OR (tree_tracked_pgids IS NOT NULL AND trim(tree_tracked_pgids) != '[]')) LIMIT 1`,
+        )
+        .get(schedule.id);
+      if (unsettled !== undefined) {
+        throw new ScheduleStoreError(
+          SCHEDULE_STORE_ERROR_CODES.invalid,
+          "任务仍有待执行、运行中或未清场的记录，暂不能追加轮数；请先完成运行收尾",
+        );
+      }
+      const nextRunAtMs = computeNextRunAtMs(schedule.trigger, nowMs);
+      if (
+        !Number.isSafeInteger(nowMs) ||
+        !Number.isSafeInteger(nextRunAtMs) ||
+        !Number.isFinite(new Date(nextRunAtMs).getTime())
+      ) {
+        throw new ScheduleStoreError(
+          SCHEDULE_STORE_ERROR_CODES.invalid,
+          "追加时间或下次执行时间超出有效范围",
+        );
+      }
+      this.db
+        .prepare(
+          `INSERT INTO schedule_extensions (request_id, schedule_id, expected_max_rounds,
+          additional_rounds, authority_digest, created_at) VALUES (?, ?, ?, ?, ?, ?)`,
+        )
+        .run(input.requestId, schedule.id, expected, additional, input.authorityDigest, nowMs);
+      this.db
+        .prepare(
+          `UPDATE schedules SET max_rounds = ?, authority_digest = ?, status = ?,
+          next_run_at = ?, updated_at = ? WHERE id = ?`,
+        )
+        .run(
+          expected + additional,
+          input.authorityDigest,
+          SCHEDULE_STATUSES.active,
+          nextRunAtMs,
+          nowMs,
+          schedule.id,
+        );
+      return { extended: true, schedule: this.requireSchedule(schedule.id) };
     });
   }
 
@@ -815,18 +1085,35 @@ export class ScheduleStore {
     const row = this.db.prepare("SELECT * FROM schedules WHERE id = ?").get(id) as
       | ScheduleRow
       | undefined;
-    return row ? toScheduleRecord(row) : undefined;
+    return row ? toScheduleRecord(row, this.db) : undefined;
   }
 
   listSchedules(): ScheduleRecord[] {
     const rows = this.db
       .prepare("SELECT * FROM schedules ORDER BY created_at ASC, rowid ASC")
       .all() as unknown as ScheduleRow[];
-    return rows.map(toScheduleRecord);
+    return rows.map((row) => toScheduleRecord(row, this.db));
   }
 
   setScheduleStatus(id: string, status: ScheduleStatus, nowMs: number = Date.now()): boolean {
     return this.transaction(() => {
+      const schedule = this.db.prepare("SELECT status FROM schedules WHERE id = ?").get(id);
+      if (schedule === undefined) return false;
+      if (schedule.status === SCHEDULE_STATUSES.completed) {
+        if (status === SCHEDULE_STATUSES.active) {
+          throw new ScheduleStoreError(
+            SCHEDULE_STORE_ERROR_CODES.invalid,
+            "任务已结束，轮数已用尽；请用 roll schedule extend <id> --rounds N 追加轮数",
+          );
+        }
+        return true;
+      }
+      if (status === SCHEDULE_STATUSES.completed) {
+        throw new ScheduleStoreError(
+          SCHEDULE_STORE_ERROR_CODES.invalid,
+          "结束状态由调度器在轮数用尽且运行结算后设置",
+        );
+      }
       const result = this.db
         .prepare("UPDATE schedules SET status = ?, updated_at = ? WHERE id = ?")
         .run(status, nowMs, id);
@@ -843,6 +1130,7 @@ export class ScheduleStore {
           this.finishInvocationAsFailedInTransaction(row.id, "任务已暂停，放弃重试", nowMs);
         }
       }
+      this.reconcileRoundsInTransaction(id, nowMs);
       return true;
     });
   }
@@ -1210,7 +1498,7 @@ export class ScheduleStore {
     nowMs: number,
   ): ScheduleRecord | undefined {
     try {
-      return toScheduleRecord(row);
+      return toScheduleRecord(row, this.db);
     } catch (error) {
       this.pauseInvalidScheduleInTransaction(row.id, error, nowMs);
       return undefined;
@@ -1383,6 +1671,7 @@ export class ScheduleStore {
         .prepare(
           `SELECT s.* FROM schedules s
             WHERE s.status = ? AND s.next_run_at IS NOT NULL AND s.next_run_at <= ?
+              AND (s.max_rounds IS NULL OR s.rounds_started < s.max_rounds)
               AND NOT EXISTS (
                 SELECT 1 FROM invocations i
                  WHERE i.schedule_id = s.id AND i.status IN (?, ?, ?, ?))
@@ -1427,9 +1716,22 @@ export class ScheduleStore {
             input.nowMs + this.claimLeaseMs,
             input.nowMs,
           );
+        // An extension after clock rollback can revisit a slot already in the ledger.
+        // Skip that slot without spending quota, but always move the trigger forward.
+        const roundsDelta = Number(inserted.changes);
         this.db
-          .prepare("UPDATE schedules SET next_run_at = ?, updated_at = ? WHERE id = ?")
-          .run(computeNextRunAtMs(schedule.trigger, input.nowMs), input.nowMs, row.id);
+          .prepare(
+            `UPDATE schedules SET rounds_started = rounds_started + ?,
+             next_run_at = CASE WHEN max_rounds IS NOT NULL AND rounds_started + ? >= max_rounds
+               THEN NULL ELSE ? END, updated_at = ? WHERE id = ?`,
+          )
+          .run(
+            roundsDelta,
+            roundsDelta,
+            computeNextRunAtMs(schedule.trigger, input.nowMs),
+            input.nowMs,
+            row.id,
+          );
         if (inserted.changes === 1) {
           const claim = this.loadClaim(id, token);
           if (claim !== undefined) {
@@ -1527,6 +1829,9 @@ export class ScheduleStore {
            WHERE id = (SELECT schedule_id FROM invocations WHERE id = ?)`,
         )
         .run(input.nowMs, input.nowMs, input.id);
+      if (row.mode === INVOCATION_MODES.scheduled) {
+        this.reconcileRoundsInTransaction(row.schedule_id, input.nowMs);
+      }
       return COMPLETE_INVOCATION_OUTCOMES.written;
     });
   }
@@ -1571,7 +1876,8 @@ export class ScheduleStore {
           return INVOCATION_FAILURE_OUTCOMES.lostClaim;
         }
         this.markTerminalFailureInTransaction(row, input.error, input.nowMs);
-        return row.mode === INVOCATION_MODES.scheduled
+        return row.mode === INVOCATION_MODES.scheduled &&
+          this.getSchedule(row.schedule_id)?.status === SCHEDULE_STATUSES.paused
           ? INVOCATION_FAILURE_OUTCOMES.terminalPaused
           : INVOCATION_FAILURE_OUTCOMES.terminal;
       }
@@ -1598,6 +1904,9 @@ export class ScheduleStore {
       this.db
         .prepare("UPDATE schedules SET last_error = ?, updated_at = ? WHERE id = ?")
         .run(input.error, input.nowMs, row.schedule_id);
+      if (row.mode === INVOCATION_MODES.scheduled) {
+        this.reconcileRoundsInTransaction(row.schedule_id, input.nowMs);
+      }
       return INVOCATION_FAILURE_OUTCOMES.retryScheduled;
     });
   }
@@ -1687,7 +1996,8 @@ export class ScheduleStore {
           return INVOCATION_FAILURE_OUTCOMES.treeUnsettled;
         }
         this.markTerminalFailureInTransaction(row, error, nowMs);
-        return row.mode === INVOCATION_MODES.scheduled
+        return row.mode === INVOCATION_MODES.scheduled &&
+          this.getSchedule(row.schedule_id)?.status === SCHEDULE_STATUSES.paused
           ? INVOCATION_FAILURE_OUTCOMES.terminalPaused
           : INVOCATION_FAILURE_OUTCOMES.terminal;
       }
@@ -1844,6 +2154,7 @@ export class ScheduleStore {
         `SELECT MIN(t) AS wake FROM (
            SELECT MIN(next_run_at) AS t FROM schedules
             WHERE status = ? AND next_run_at IS NOT NULL
+              AND (max_rounds IS NULL OR rounds_started < max_rounds)
            UNION ALL SELECT MIN(retry_at) FROM invocations WHERE status = ?
            UNION ALL SELECT MIN(lease_until) FROM invocations WHERE status IN (?, ?)
            UNION ALL SELECT MIN(scheduled_for) FROM invocations WHERE status = ?)`,
@@ -1872,6 +2183,24 @@ export class ScheduleStore {
     return this.treeLiveness(toInvocationRecord(row)) !== INVOCATION_TREE_LIVENESS.settled;
   }
 
+  /** Reconcile within the owning write transaction; reads and manual runs never settle a schedule. */
+  private reconcileRoundsInTransaction(scheduleId: string, nowMs: number): void {
+    this.db
+      .prepare(
+        `UPDATE schedules
+      SET status = CASE
+        WHEN NOT EXISTS (SELECT 1 FROM invocations i WHERE i.schedule_id = schedules.id AND i.mode = 'scheduled'
+          AND (i.status IN ('pending', 'claimed', 'running', 'retry') OR i.tree_unsettled = 1
+            OR (i.tree_tracked_pgids IS NOT NULL AND trim(i.tree_tracked_pgids) != '[]')))
+          THEN 'completed'
+        WHEN status = 'completed' THEN 'active'
+        ELSE status END,
+        next_run_at = NULL, updated_at = ?
+      WHERE id = ? AND max_rounds IS NOT NULL AND rounds_started >= max_rounds`,
+      )
+      .run(nowMs, scheduleId);
+  }
+
   private finishInvocationAsFailedInTransaction(
     id: string,
     error: string,
@@ -1896,6 +2225,9 @@ export class ScheduleStore {
          WHERE id = ?`,
       )
       .run(INVOCATION_STATUSES.failed, error, nowMs, id);
+    if (row.mode === INVOCATION_MODES.scheduled) {
+      this.reconcileRoundsInTransaction(row.schedule_id, nowMs);
+    }
     return true;
   }
 
@@ -1905,7 +2237,9 @@ export class ScheduleStore {
     }
     if (row.mode === INVOCATION_MODES.scheduled) {
       this.db
-        .prepare("UPDATE schedules SET status = ?, last_error = ?, updated_at = ? WHERE id = ?")
+        .prepare(
+          "UPDATE schedules SET status = CASE WHEN status = 'completed' THEN status ELSE ? END, last_error = ?, updated_at = ? WHERE id = ?",
+        )
         .run(SCHEDULE_STATUSES.paused, error, nowMs, row.schedule_id);
     } else {
       this.db
@@ -1971,11 +2305,11 @@ export function readScheduleLedger(dir: string): ScheduleLedgerReadResult {
   }
   const db = new DatabaseSync(databasePath, { readOnly: true });
   try {
-    db.exec(`PRAGMA busy_timeout = ${String(BUSY_TIMEOUT_MS)}`);
+    db.exec(`PRAGMA busy_timeout = ${String(BUSY_TIMEOUT_MS)}; BEGIN;`);
     const versionRow = db.prepare("PRAGMA user_version").get() as {
       readonly user_version: number;
     };
-    if (versionRow.user_version !== SCHEMA_VERSION) {
+    if (![5, 6, 7, SCHEMA_VERSION].includes(versionRow.user_version)) {
       return {
         status: SCHEDULE_LEDGER_READ_STATUSES.migrationRequired,
         schemaVersion: versionRow.user_version,
@@ -1985,7 +2319,10 @@ export function readScheduleLedger(dir: string): ScheduleLedgerReadResult {
     const rows = db
       .prepare("SELECT * FROM schedules ORDER BY created_at ASC, rowid ASC")
       .all() as unknown as ScheduleRow[];
-    return { status: SCHEDULE_LEDGER_READ_STATUSES.ok, schedules: rows.map(toScheduleRecord) };
+    return {
+      status: SCHEDULE_LEDGER_READ_STATUSES.ok,
+      schedules: rows.map((row) => toScheduleRecord(row, db)),
+    };
   } finally {
     db.close();
   }
@@ -2029,7 +2366,7 @@ function readSchedulerSnapshot<T>(
     db.exec(`PRAGMA busy_timeout = ${String(BUSY_TIMEOUT_MS)}; BEGIN;`);
     const version = db.prepare("PRAGMA user_version").get() as { readonly user_version: number };
     // v5 has all invocation columns used by the reader; its reference table is simply absent.
-    if (version.user_version !== 5 && version.user_version !== SCHEMA_VERSION) {
+    if (![5, 6, 7, SCHEMA_VERSION].includes(version.user_version)) {
       return {
         status: SCHEDULE_LEDGER_READ_STATUSES.migrationRequired,
         schemaVersion: version.user_version,
@@ -2037,7 +2374,7 @@ function readSchedulerSnapshot<T>(
     }
     return {
       status: SCHEDULE_LEDGER_READ_STATUSES.ok,
-      value: read(db, version.user_version === SCHEMA_VERSION),
+      value: read(db, version.user_version >= 6),
     };
   } finally {
     db.close();
@@ -2085,7 +2422,7 @@ function historyRunSql(hasReferences: boolean): string {
 
 function readTasksInSnapshot(db: DatabaseSync, hasReferences: boolean): ScheduleHistoryTask[] {
   const schedules = (db.prepare("SELECT * FROM schedules").all() as unknown as ScheduleRow[]).map(
-    toScheduleRecord,
+    (row) => toScheduleRecord(row, db),
   );
   const byId = new Map(schedules.map((schedule) => [schedule.id, schedule]));
   const ids = db

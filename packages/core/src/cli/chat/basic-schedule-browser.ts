@@ -5,7 +5,7 @@ import {
   ScheduleBrowserController,
   formatInvocationMode,
   formatInvocationStatus,
-  formatScheduleStatus,
+  scheduleTaskMetadata,
   scheduleDetailText,
   type ScheduleBrowserPort,
 } from "./schedule-browser.ts";
@@ -35,7 +35,7 @@ export async function runBasicScheduleBrowser(
         choices.push({
           value: { action: "choose", id: task.id },
           label: `${task.removed ? "历史任务 · " : ""}${task.name}`,
-          hint: `${task.trigger} · ${formatScheduleStatus(task.status)}${task.lastRunStatus === undefined ? "" : ` · 最近${formatInvocationStatus(task.lastRunStatus)}`}`,
+          hint: scheduleTaskMetadata(task),
         });
       }
       if (view.tasks.length === 0) output.write("暂无定时任务或保留的历史任务\n");

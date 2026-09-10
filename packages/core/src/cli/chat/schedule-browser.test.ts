@@ -2,6 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
   ScheduleBrowserController,
+  scheduleTaskMetadata,
   type ScheduleBrowserPort,
   type ScheduleTaskItem,
 } from "./schedule-browser.ts";
@@ -178,4 +179,18 @@ test("missing execution session remains inspectable and cannot be continued", as
     calls.some((call) => call.startsWith("transcript") || call === "continue"),
     false,
   );
+});
+
+test("task metadata distinguishes ended plans, automatic rounds, and the latest manual result", () => {
+  const text = scheduleTaskMetadata({
+    ...TASK,
+    status: "completed",
+    roundsDisplay: "已结束 · 达到轮数上限 · 20/20 轮",
+    lastRunMode: "manual",
+    lastRunStatus: "failed",
+  });
+  assert.match(text, /已结束/u);
+  assert.match(text, /20\/20 轮/u);
+  assert.match(text, /最近手动触发：失败/u);
+  assert.doesNotMatch(text, /最近定时触发/u);
 });

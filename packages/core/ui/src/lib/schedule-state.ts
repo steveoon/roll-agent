@@ -6,6 +6,7 @@ export const SCHEDULE_ACTION_PATHS = {
   "service-uninstall": "/api/schedule/service/uninstall",
   pause: "/api/schedule/pause",
   resume: "/api/schedule/resume",
+  extend: "/api/schedule/extend",
   cancel: "/api/schedule/cancel",
 } as const;
 
@@ -34,6 +35,7 @@ const SCHEDULE_ACTION_PRESENTATIONS: Readonly<Record<ScheduleAction, ScheduleAct
     },
     pause: { label: "暂停", progress: "正在暂停任务…" },
     resume: { label: "恢复", progress: "正在恢复任务并按当前配置重新授权…" },
+    extend: { label: "追加轮数", progress: "正在追加轮数并按当前配置重新授权…" },
     cancel: { label: "取消", progress: "正在取消这次运行…" },
   };
 
@@ -54,6 +56,9 @@ export function describeScheduleActionResult(
   result: Readonly<Record<string, unknown>> | undefined,
 ): ScheduleActionResultPresentation {
   const label = describeScheduleAction(action).label;
+  if (action === "extend" && result?.extended === false) {
+    return { tone: "success", message: "这次追加轮数已处理，未重复增加额度。" };
+  }
   if (result?.unverifiedDescendants === true) {
     return {
       tone: "warning",
@@ -67,7 +72,7 @@ export function describeScheduleActionResult(
 }
 
 export const SCHEDULE_KILL_CONFIRM =
-  "终止并取消这次正在执行的运行？会向整个 exec 进程树发送终止信号，并在 5 秒内确认全部退出后才写入取消；确认失败则不会取消。任务本身不受影响，下个周期仍会触发。";
+  "终止并取消这次正在执行的运行？会向整个 exec 进程树发送终止信号，并在 5 秒内确认全部退出后才写入取消；确认失败则不会取消。取消不会返还已占用的自动轮数；任务只有在仍启用且有剩余额度时才会继续触发。";
 
 export type ScheduleRunTone = "ok" | "error" | "warn" | "active" | "neutral";
 

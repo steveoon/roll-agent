@@ -274,11 +274,14 @@ export interface ScheduleStatusSummary {
     readonly total: number;
     readonly active: number;
     readonly paused: number;
+    readonly completed: number;
   };
   readonly nextWakeAt?: string;
 }
 
 export interface ScheduleRow {
+  readonly rounds: { readonly max: number | null; readonly started: number };
+  readonly roundsDisplay: string;
   readonly id: string;
   readonly name: string;
   readonly status: string;
@@ -290,7 +293,7 @@ export interface ScheduleRow {
   readonly lastError?: string;
   readonly maxRun?: string;
   readonly createdAt: string;
-  readonly liveRun?: { readonly id: string; readonly status: string };
+  readonly liveRun?: { readonly id: string; readonly status: string; readonly mode: string };
 }
 
 export interface ScheduleRunRow {

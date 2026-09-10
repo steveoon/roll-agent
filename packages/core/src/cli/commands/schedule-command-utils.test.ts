@@ -46,6 +46,8 @@ const schedule: SerializedSchedule = {
   authorityDigest: undefined,
   maxRun: undefined,
   maxRunMs: undefined,
+  rounds: { max: null, started: 0 },
+  roundsDisplay: "不限轮数（已触发 0 轮）",
   createdAt: "2026-08-27T08:00:00.000Z",
 };
 
@@ -58,6 +60,8 @@ const record: ScheduleRecord = {
   status: "active",
   authorityDigest: undefined,
   maxRunMs: undefined,
+  maxRounds: undefined,
+  roundsStarted: 0,
   nextRunAtMs: Date.parse("2026-08-27T10:00:00.000Z"),
   lastRunAtMs: undefined,
   lastError: undefined,
@@ -150,7 +154,10 @@ test("liveRunHint：无 live run / 树已清返回 undefined；未清树返回 h
 
 test("formatScheduleLine：hold 住的任务在 list 里给出 invocation id 与 cancel --kill 提示", () => {
   const base = formatScheduleLine(schedule);
-  assert.equal(base, "s-1  active  每 1 小时      next=2026-08-27T10:00:00.000Z  汇总");
+  assert.equal(
+    base,
+    "s-1  active  每 1 小时      next=2026-08-27T10:00:00.000Z  不限轮数（已触发 0 轮）  汇总",
+  );
   const held = formatScheduleLine(schedule, {
     kind: "held",
     invocationId: "inv-1",
@@ -179,10 +186,10 @@ test("formatScheduleLine：设置了单次运行上限的任务在 list 行里�
   const line = formatScheduleLine({ ...schedule, maxRun: "6 小时", maxRunMs: 21_600_000 });
   assert.equal(
     line,
-    "s-1  active  每 1 小时      next=2026-08-27T10:00:00.000Z  max-run=6 小时  汇总",
+    "s-1  active  每 1 小时      next=2026-08-27T10:00:00.000Z  max-run=6 小时  不限轮数（已触发 0 轮）  汇总",
   );
   assert.equal(
     formatScheduleLine(schedule),
-    "s-1  active  每 1 小时      next=2026-08-27T10:00:00.000Z  汇总",
+    "s-1  active  每 1 小时      next=2026-08-27T10:00:00.000Z  不限轮数（已触发 0 轮）  汇总",
   );
 });

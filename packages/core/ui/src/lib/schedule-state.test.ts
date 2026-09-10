@@ -39,7 +39,7 @@ function statusFixture(overrides: {
         ? { installedDataDir: overrides.installedDataDir }
         : {}),
     },
-    schedules: { total: 2, active: overrides.active ?? 2, paused: 0 },
+    schedules: { total: 2, active: overrides.active ?? 2, paused: 0, completed: 0 },
     ...(overrides.unresolvedPlaceholders !== undefined
       ? { unresolvedPlaceholders: overrides.unresolvedPlaceholders }
       : {}),
@@ -51,6 +51,7 @@ describe("schedule-state", () => {
     const actions = Object.keys(SCHEDULE_ACTION_PATHS) as ScheduleAction[];
     assert.deepEqual(actions.sort(), [
       "cancel",
+      "extend",
       "pause",
       "resume",
       "service-install",

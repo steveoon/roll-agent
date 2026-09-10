@@ -541,12 +541,24 @@ Goal: run a bounded unattended `roll chat` round on a fixed interval and keep th
 
    Anything left at `confirm` is denied during the run and reported in `pendingActions`; it does not block the schedule.
 
-3. Register with a bounded prompt and capture the id:
+3. Register with a bounded prompt and capture the id. If the user asks for 20 automatic rounds:
 
    ```bash
    roll schedule add "回复最多 20 条未读消息，其余留到下一轮；不要调用需要确认的工具" \
-     --name unread-reply --every 30m --cwd /abs/workspace --json
+     --name unread-reply --every 30m --rounds 20 --cwd /abs/workspace --json
    ```
+
+   The prompt's “20 messages” limits work per round; `--rounds 20` separately limits the total
+   automatic rounds. Match each limit to the user's request; omit `--rounds` for an unlimited task.
+   Check `roll schedule add --help` when the installed version is uncertain: if `--rounds` is absent,
+   report the need to upgrade instead of silently creating an unlimited task.
+
+   One successful automatic invocation insertion consumes one round even if startup fails, the
+   run fails or is cancelled, or no unread messages exist. Retries keep the same round; `add --now`
+   consumes a round and manual `run-now` does not. Pause/resume, daemon restart and history cleanup
+   retain the counter. Missed periods consume nothing, so 20 rounds every 30 minutes need not finish
+   within 10 hours. Repeating an in-chat create request with the same active definition and limit
+   reuses the task without resetting its count; an unlimited task is a different definition.
 
    Keep each round well under the run cap (1 hour by default); use the interval, not one long run, to drain a backlog. If a round genuinely needs longer, set the cap per schedule with `--max-run 6h` (60 s to 24 h) instead of asking for a global change.
 
@@ -559,6 +571,7 @@ Goal: run a bounded unattended `roll chat` round on a fixed interval and keep th
    - `status: completed` -> proceed.
    - `status: needs_confirmation` -> read `pendingActions`; either add overrides (then `roll schedule resume <id>` to re-record the authority digest) or rewrite the prompt to avoid those tools.
    - exit 1 with `error` -> fix the cause; a manual failure does not pause the schedule.
+   - This manual test does not consume the automatic round quota.
    - This inline attempt obeys the schedule's `--max-run` even without a daemon. On timeout it uses the same process-tree stop sequence as the daemon and exits 1.
 
 5. Make triggers fire without a terminal:
@@ -578,10 +591,32 @@ Goal: run a bounded unattended `roll chat` round on a fixed interval and keep th
 6. Monitor:
 
    ```bash
-   roll schedule status --json              # daemon.liveness, active/paused counts, nextWakeAt
-   roll schedule list --json                # per-schedule status, nextRunAt, lastError
-   roll schedule runs <id> --json           # recent invocations; threadId reopens with roll chat --session
+   roll schedule status --json              # daemon.liveness, active/paused/completed counts, nextWakeAt
+   roll schedule list --json                # per-schedule status, rounds, roundsDisplay, nextRunAt, lastError
+   roll schedule runs <id> --json           # recent invocations and their results
+   roll schedule list --status completed --json
+   roll schedule inspect <invocation-id> --json
+   # Human follow-up in a separate discussion:
+   roll chat --from-run <invocation-id>     # optional --attempt N
    ```
+
+   `rounds: { max: 20, started: 7 }` means seven automatic rounds have been consumed;
+   `max: null` means unlimited. Use `roundsDisplay` to distinguish the last automatic round's
+   execution, retry and cleanup from a newer manual run. Reaching `started == max` blocks the next
+   round but does not prove the current run has settled. Wait for schedule `status: completed`,
+   then inspect the invocation result separately: the plan may have ended with a failed last round.
+   Preserve the completed task and history. Do not retry `resume`, reset the count, or automatically
+   recreate a completed task. If the user explicitly requests more rounds on the same task, use
+   `roll schedule extend <id> --rounds 30 --expected-max-rounds 20 --request-id <stable-id> --json`.
+   A 20/20 task becomes 20/50 and waits one full interval from extension before the next round.
+   Confirm current-config re-authorization, the preserved task/cwd and before/after limits.
+   Every unfinished invocation, including manual runs, must settle first. Retry ambiguous results
+   with the same request ID, expected maximum and rounds; replay is a no-op, not extra quota. Manual
+   `run-now` remains available under the existing authority and singleton rules.
+   Changing only the request ID while keeping the original expected maximum makes a successful
+   request's retry fail the state/maximum check; it does not add quota again. Reuse the original ID
+   to receive the already-applied receipt. Use a new ID and a newly read maximum only for a new
+   user-requested extension.
 
 7. Recover a `paused` schedule by reading `lastError`:
 
@@ -604,5 +639,6 @@ Goal: run a bounded unattended `roll chat` round on a fixed interval and keep th
 Rules:
 
 - Never start `daemon --foreground` or `service install` from batch mode or a tool loop.
+- Before upgrading a pre-v8 scheduler ledger, stop the old daemon and settle active runs and process trees. Then migrate through the new writable CLI entrypoint and start the new service; do not run old and new scheduler versions against the same ledger. Migration retains tasks, runs, thread references and tree metadata; tasks from pre-v7 ledgers stay unlimited and their new counter starts at zero. v7 to v8 retains configured limits and current counters and adds durable extension receipts that survive run-history cleanup. Read-only history supports v5/v6/v7/v8 without migrating the database.
 - After upgrading roll or changing the Node install, run `roll schedule service restart` (refuses while a run is live; `--force` interrupts daemon-owned runs, while `run-now --inline` continues). `roll update` does this automatically after Agent maintenance when no run is live, preserves the installed scheduler data-dir, and prints a hint otherwise. Check `roll schedule service status --json` -> `binary.status` or the `Scheduler service` line of `roll doctor --json` when a schedule stops firing after a reboot.
 - Do not use `--abandon` as a shortcut for `remove` or `cancel`; it leaves processes running.

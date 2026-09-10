@@ -1108,8 +1108,9 @@ export class AgentSession {
           requestApproval: (request) => this.requestApproval(request),
           coordinator: this.toolCoordinator,
         })
-      : { createTools: {}, listTools: {} };
+      : { createTools: {}, extendTools: {}, listTools: {} };
     markToolRole(toolRoles, scheduleToolset.createTools, CAPABILITY_TOOL_ROLES.scheduleCreate);
+    markToolRole(toolRoles, scheduleToolset.extendTools, CAPABILITY_TOOL_ROLES.scheduleExtend);
     markToolRole(toolRoles, scheduleToolset.listTools, CAPABILITY_TOOL_ROLES.scheduleList);
     const built = buildAgentToolset(
       options.sources,
@@ -1131,6 +1132,7 @@ export class AgentSession {
       ...sessionExecTools,
       ...agentInstallTools,
       ...scheduleToolset.createTools,
+      ...scheduleToolset.extendTools,
       ...scheduleToolset.listTools,
       ...built.tools,
     };

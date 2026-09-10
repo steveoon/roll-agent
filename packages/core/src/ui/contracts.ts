@@ -96,6 +96,7 @@ export interface RollUiScheduleController {
   uninstallService(): Awaitable<unknown>;
   pauseSchedule(request: unknown): Awaitable<unknown>;
   resumeSchedule(request: unknown): Awaitable<unknown>;
+  extendSchedule(request: unknown): Awaitable<unknown>;
   cancelInvocation(request: unknown): Awaitable<unknown>;
 }
 

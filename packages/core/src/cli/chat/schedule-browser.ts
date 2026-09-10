@@ -30,6 +30,7 @@ const INVOCATION_MODE_LABELS: Readonly<Record<InvocationMode, string>> = {
 const SCHEDULE_STATUS_LABELS: Readonly<Record<ScheduleStatus, string>> = {
   active: "已启用",
   paused: "已暂停",
+  completed: "已结束",
 };
 const STATUS_UNAVAILABLE_LABELS: Readonly<Record<StatusUnavailableReason, string>> = {
   ledger_missing: "运行账本记录已不可用",
@@ -54,7 +55,22 @@ export interface ScheduleTaskItem {
   readonly trigger: string;
   readonly status: ScheduleStatus | null;
   readonly lastRunStatus?: InvocationStatus | null;
+  readonly lastRunMode?: InvocationMode;
+  readonly roundsDisplay?: string;
   readonly removed: boolean;
+}
+
+export function scheduleTaskMetadata(task: ScheduleTaskItem): string {
+  return [
+    task.trigger,
+    formatScheduleStatus(task.status),
+    ...(task.roundsDisplay === undefined ? [] : [task.roundsDisplay]),
+    ...(task.lastRunStatus === undefined
+      ? []
+      : [
+          `最近${task.lastRunMode === undefined ? "" : `${INVOCATION_MODE_LABELS[task.lastRunMode]}：`}${formatInvocationStatus(task.lastRunStatus)}`,
+        ]),
+  ].join(" · ");
 }
 
 export interface ScheduleRunItem {

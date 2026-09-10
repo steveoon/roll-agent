@@ -13,6 +13,11 @@ import {
 export default defineCommand({
   meta: { description: "列出所有定时任务" },
   args: {
+    status: {
+      type: "string",
+      description: "按状态过滤：all、active、paused、completed",
+      default: "all",
+    },
     json: { type: "boolean", description: "JSON 格式输出", default: false },
   },
   async run({ args }) {
@@ -21,7 +26,16 @@ export default defineCommand({
       const runtime = await loadRuntime();
       const store = openScheduleStore(config, runtime);
       try {
-        const rows = store.listSchedules().map(serializeSchedule);
+        if (
+          args.status !== "all" &&
+          !Object.values(runtime.SCHEDULE_STATUSES).some((status) => status === args.status)
+        ) {
+          throw new Error("status 必须是 all、active、paused 或 completed");
+        }
+        const rows = store
+          .listSchedules()
+          .filter((record) => args.status === "all" || record.status === args.status)
+          .map(serializeSchedule);
         if (args.json) {
           printJson(rows);
           return;

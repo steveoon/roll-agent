@@ -36,6 +36,7 @@ export type ScheduleLedger = Pick<
   | "getSchedule"
   | "setScheduleStatus"
   | "resumeSchedule"
+  | "extendSchedule"
   | "finalizeCancellation"
   | "findLiveRun"
   | "nextWakeAtMs"
@@ -138,6 +139,30 @@ function parseCancelRequest(request: unknown): CancelRequest {
   return { id, kill };
 }
 
+function parseExtendRequest(request: unknown) {
+  if (!isRecord(request)) {
+    throw new RollUiScheduleRequestError("请求需要包含追加轮数参数的 JSON 对象。");
+  }
+  const id = parseId(request.id, "定时任务 id");
+  const requestId = parseId(request.requestId, "requestId");
+  const rounds = request.rounds;
+  const expectedMaxRounds = request.expectedMaxRounds;
+  if (typeof rounds !== "number" || !Number.isSafeInteger(rounds) || rounds <= 0) {
+    throw new RollUiScheduleRequestError("rounds 必须是正安全整数。");
+  }
+  if (
+    typeof expectedMaxRounds !== "number" ||
+    !Number.isSafeInteger(expectedMaxRounds) ||
+    expectedMaxRounds <= 0
+  ) {
+    throw new RollUiScheduleRequestError("expectedMaxRounds 必须是正安全整数。");
+  }
+  if (!Number.isSafeInteger(expectedMaxRounds + rounds)) {
+    throw new RollUiScheduleRequestError("追加后的总轮数超出安全整数范围。");
+  }
+  return { id, requestId, rounds, expectedMaxRounds };
+}
+
 export type SerializedScheduleRun = SerializedInvocation & { readonly scheduleName: string };
 
 export function createRollUiScheduleController(
@@ -179,6 +204,7 @@ export function createRollUiScheduleController(
             total: schedules.length,
             active: schedules.filter((s) => s.status === SCHEDULE_STATUSES.active).length,
             paused: schedules.filter((s) => s.status === SCHEDULE_STATUSES.paused).length,
+            completed: schedules.filter((s) => s.status === SCHEDULE_STATUSES.completed).length,
           },
           nextWakeAt: nextWakeAtMs === undefined ? undefined : new Date(nextWakeAtMs).toISOString(),
         };
@@ -190,7 +216,10 @@ export function createRollUiScheduleController(
           const live = ledger.findLiveRun(schedule.id);
           return {
             ...serializeSchedule(schedule),
-            liveRun: live === undefined ? undefined : { id: live.id, status: live.status },
+            liveRun:
+              live === undefined
+                ? undefined
+                : { id: live.id, status: live.status, mode: live.mode },
           };
         }),
       ),
@@ -246,6 +275,35 @@ export function createRollUiScheduleController(
             throw new Error(`定时任务 ${id} 已被删除；刷新列表后重试`);
           }
           return { ok: true as const, authorityChanged: schedule.authorityDigest !== digest };
+        }),
+      );
+    },
+    extendSchedule: async (request) => {
+      const parsed = parseExtendRequest(request);
+      return mutate(() =>
+        withLedger((ledger) => {
+          const schedule = ledger.getSchedule(parsed.id);
+          if (schedule === undefined) {
+            throw new Error(`定时任务 ${parsed.id} 不存在；刷新列表后重试`);
+          }
+          const digest = options.authorityDigestFor(schedule.cwd);
+          const result = ledger.extendSchedule(
+            {
+              scheduleId: schedule.id,
+              additionalRounds: parsed.rounds,
+              expectedMaxRounds: parsed.expectedMaxRounds,
+              requestId: parsed.requestId,
+              authorityDigest: digest,
+            },
+            Date.now(),
+          );
+          return {
+            ok: true as const,
+            extended: result.extended,
+            requestId: parsed.requestId,
+            authorityChanged: result.extended && schedule.authorityDigest !== digest,
+            schedule: serializeSchedule(result.schedule),
+          };
         }),
       );
     },

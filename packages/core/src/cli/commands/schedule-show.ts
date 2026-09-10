@@ -27,7 +27,9 @@ export default defineCommand({
           return;
         }
         for (const [key, value] of Object.entries(record)) {
-          console.log(`${key}: ${value === undefined ? "-" : String(value)}`);
+          console.log(
+            `${key}: ${value === undefined ? "-" : typeof value === "object" ? JSON.stringify(value) : String(value)}`,
+          );
         }
       } finally {
         store.close();

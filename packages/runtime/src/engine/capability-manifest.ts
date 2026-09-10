@@ -26,6 +26,7 @@ export const CAPABILITY_TOOL_ROLES = {
   sessionList: "session-list",
   agentInstall: "agent-install",
   scheduleCreate: "schedule-create",
+  scheduleExtend: "schedule-extend",
   scheduleList: "schedule-list",
   transcriptRead: "transcript-read",
   userInput: "user-input",

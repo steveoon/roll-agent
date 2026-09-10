@@ -186,3 +186,31 @@ test("previous-attempt detail does not borrow a later failure status", async () 
     f.close();
   }
 });
+
+test("history task rounds follow automatic retry while the latest invocation is manual", async () => {
+  const f = fixture();
+  try {
+    const limited = f.schedules.createSchedule(
+      {
+        name: "有限巡检",
+        prompt: "检查",
+        cwd: f.root,
+        trigger: runtime.createIntervalTrigger("1m"),
+        maxRounds: 1,
+      },
+      0,
+    );
+    const claim = f.schedules.claimDue({ workerId: "finite", nowMs: 60_000, limit: 1 })[0];
+    assert.ok(claim);
+    assert.equal(claim.schedule.id, limited.id);
+    f.schedules.failInvocation(claim.invocation.id, claim.ownershipToken, "retry", 60_001);
+    f.schedules.enqueueManualInvocation(limited.id, 60_002);
+    const port = createScheduleBrowserPort({ config: f.config, runtime });
+    const task = (await port.listTasks()).find((item) => item.id === limited.id);
+    assert.equal(task?.lastRunMode, "manual");
+    assert.equal(task?.lastRunStatus, "pending");
+    assert.match(task?.roundsDisplay ?? "", /1\/1.*最后一轮等待重试/u);
+  } finally {
+    f.close();
+  }
+});
