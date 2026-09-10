@@ -1,5 +1,26 @@
 # @roll-agent/browser-use-agent
 
+## 0.26.0
+
+### Minor Changes
+
+- [#260](https://github.com/steveoon/roll-agent/pull/260) [`bd256ff`](https://github.com/steveoon/roll-agent/commit/bd256ff241517015aa08636c0159c3d5a20b8076) Thanks [@steveoon](https://github.com/steveoon)! - 新增通用页面受控 JavaScript 组合执行、结果断言、严格 Snapshot/ref 绑定和有界观察。脚本仅通过受控浏览器 helpers 执行，支持整段审批、取消和资源限制；已有 BOSS 预编排保持独立。
+
+  新增版本化站点经验草稿、显式验证/启用、按 URL 发现及执行入口。草稿不自动执行或启用，失效版本暂停推荐。
+
+  Runtime 对明确标记未执行的工具审批请求使用现有客户端确认通道，批准后仅携带绑定凭据续接一次；取消或部分完成不会自动重放。
+
+- [#260](https://github.com/steveoon/roll-agent/pull/260) [`bd256ff`](https://github.com/steveoon/roll-agent/commit/bd256ff241517015aa08636c0159c3d5a20b8076) Thanks [@steveoon](https://github.com/steveoon)! - 改进通用 Snapshot 的结构化选项识别，避免短下拉被父容器吞并，并保留已有 AX 语义角色。
+
+  新增受控 page.inspectControl / page.choose helpers，支持字段与面板关联、明确作用域、原生及自定义单选控件和结果验证；关联不明、重复选项或未产生预期状态时停止。已有 BOSS 预编排不增加执行步骤。
+
+  通用输入增加同源 iframe 祖先遮挡与焦点检查；跨源或无法可靠检查的坐标变换停止输入，并返回域名边界或覆盖缺口信息。
+
+### Patch Changes
+
+- Updated dependencies [[`bd256ff`](https://github.com/steveoon/roll-agent/commit/bd256ff241517015aa08636c0159c3d5a20b8076), [`bd256ff`](https://github.com/steveoon/roll-agent/commit/bd256ff241517015aa08636c0159c3d5a20b8076)]:
+  - @roll-agent/browser@0.11.0
+
 ## 0.25.2
 
 ### Patch Changes
