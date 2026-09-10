@@ -49,6 +49,8 @@ export default defineCommand({
             total: schedules.length,
             active: schedules.filter((s) => s.status === runtime.SCHEDULE_STATUSES.active).length,
             paused: schedules.filter((s) => s.status === runtime.SCHEDULE_STATUSES.paused).length,
+            completed: schedules.filter((s) => s.status === runtime.SCHEDULE_STATUSES.completed)
+              .length,
           },
           nextWakeAt: nextWakeAtMs === undefined ? undefined : new Date(nextWakeAtMs).toISOString(),
           serviceInstalled,
@@ -73,7 +75,7 @@ export default defineCommand({
           );
         }
         log.info(
-          `任务: ${String(status.schedules.total)} 个（active ${String(status.schedules.active)} / paused ${String(status.schedules.paused)}）`,
+          `任务: ${String(status.schedules.total)} 个（active ${String(status.schedules.active)} / paused ${String(status.schedules.paused)} / 已结束 ${String(status.schedules.completed)}）`,
         );
         log.info(`下次唤醒: ${status.nextWakeAt ?? "-"}`);
         log.info(`日志: ${paths.logPath}`);

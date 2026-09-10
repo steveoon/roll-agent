@@ -3732,3 +3732,37 @@ kbd,
     flex: 1 1 46%;
   }
 }
+
+.schedule-extension-form {
+  display: grid;
+  justify-items: start;
+  gap: var(--space-sm);
+  margin-top: var(--space-md);
+  font-size: var(--font-sm);
+}
+
+.schedule-extension-form label {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-sm);
+}
+
+.schedule-extension-form input {
+  width: 8rem;
+  padding: 6px 8px;
+  color: var(--fg);
+  background: var(--panel-bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+}
+
+.schedule-extension-form > small {
+  display: block;
+  overflow-wrap: anywhere;
+}
+
+.schedule-extension-dialog .schedule-extension-details {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}

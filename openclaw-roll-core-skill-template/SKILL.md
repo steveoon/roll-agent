@@ -53,7 +53,7 @@ Machine-readable boundaries:
 | `roll companion status --json` / `roll companion doctor --json` |  |
 | `roll skills install ... --json` |  |
 | `roll run ... --json` / `roll run --batch-* --json` |  |
-| `roll schedule add\|list\|show\|runs\|status\|cancel\|run-now ... --json` | `roll schedule pause\|resume\|remove` (exit 0 + stderr line) |
+| `roll schedule add\|list\|show\|runs\|inspect\|status\|cancel\|run-now ... --json` | `roll schedule pause\|resume\|remove` (exit 0 + stderr line) |
 | `roll schedule service status --json`, `roll schedule service restart --json` | `roll schedule service install\|uninstall`, `roll schedule daemon --foreground` |
 
 ## Startup Gate
@@ -364,7 +364,7 @@ Current roll-core also ships product-level command groups that sit outside the d
 | `roll companion <enroll\|status\|doctor\|start\|stop\|restart\|logs\|...>` | Per-user local daemon lifecycle for remote access; dials an outbound WebSocket to the Relay host and opens no inbound network port | human-readable; `status` / `doctor` accept `--json` |
 | `roll ui` | Local web config console on 127.0.0.1 (config, agents, companion panel) — not a chat UI | human-readable |
 | `roll skills install <dir-or-git-url> [--target ...]` | Install skill docs into orchestrator skill dirs (Claude Code / Codex / generic `.agents`) | human-readable; `--json` supported |
-| `roll schedule <add\|list\|show\|runs\|status\|run-now\|cancel\|pause\|resume\|remove\|daemon\|service install\|uninstall\|restart\|status>` | Interval-triggered unattended `roll chat` rounds with a local ledger; see [Scheduled Tasks](#scheduled-tasks) | non-interactive; `--json` on the read/mutate commands listed above |
+| `roll schedule <add\|list\|show\|runs\|inspect\|status\|run-now\|cancel\|pause\|resume\|remove\|daemon\|service install\|uninstall\|restart\|status>` | Interval-triggered unattended `roll chat` rounds with a local ledger; see [Scheduled Tasks](#scheduled-tasks) | non-interactive; `--json` on the read/mutate commands listed above |
 
 Rules:
 
@@ -382,28 +382,31 @@ Rules:
 Quick path:
 
 ```bash
-roll schedule add "<prompt>" --name <name> --every 30m --cwd /abs/path --json   # -> { id, status, trigger, nextRunAt, maxRun?, maxRunMs?, ... }
+roll schedule add "<prompt>" --name <name> --every 30m --cwd /abs/path --json   # -> { id, status, trigger, nextRunAt?, rounds: { max, started }, roundsDisplay, ... }
 roll schedule run-now <id> --inline --json                                      # one synchronous attempt; exit 1 unless completed / needs_confirmation
-roll schedule status --json                                                     # { daemon: { liveness, pid }, schedules: { total, active, paused }, nextWakeAt }
-roll schedule runs <id> --json                                                  # [{ status, threadId, error, pendingActions, outputExcerpt, attempt, ... }]
+roll schedule extend <id> --rounds 30 --expected-max-rounds 20 --request-id <stable-id> --json # explicitly add quota to a completed finite task
+roll schedule status --json                                                     # { daemon: { liveness, pid }, schedules: { total, active, paused, completed }, nextWakeAt }
+roll schedule runs <id> --json                                                  # [{ id, status, threadId, error, pendingActions, outputExcerpt, attempt, ... }]
 ```
 
 Facts an orchestrator must respect:
 
 - **Interval only.** `--every <integer><s|m|h|d>`, 60 s to 365 d (`90m`, not `1.5h`). There is no calendar or run-once-at-time trigger. First run = registration time + interval, or immediately with `--now`; after each trigger the next run is rebased to claim time + interval, so wall-clock phase drifts. Missed triggers (sleep, daemon down) are caught up once, never replayed.
+- **Finite automatic rounds.** When the user requests a total limit, pass `--rounds N` (a positive safe integer) to `schedule add`, or `rounds: N` to the in-chat creation tool; do not encode the stopping condition only in the prompt. Omission means unlimited. Each newly claimed automatic invocation consumes one round, including `add --now`; retries and manual `run-now` do not consume extra rounds. `rounds.started` counts consumed automatic rounds, not successes. At the limit no new round is created, but the last round still executes, retries and settles; schedule `completed` means the plan has ended, whereas invocation `completed` means that run succeeded. For detailed progress and recovery, read the [scheduled-task recipe](./references/workflows.md#scheduled-tasks).
 - **Unattended approval.** Any tool call the approval policy would `confirm` is denied instead; the run ends with `status: needs_confirmation` and lists denied `agent.tool` names in `pendingActions`. Under the default `runtime.approval.default: guarded` only read-only tools execute. To let a schedule write or send, set `runtime.approval.overrides["<agent>.<tool>"]: auto` in the config resolved from the schedule's `--cwd` **before** `add`, and keep that list minimal. `default: auto` still denies tools annotated `destructiveHint`.
-- **Authority snapshot.** `add` records a digest of `runtime.approval` + `runtime.shell` from `--cwd`. If either changes later, the next run does not execute and the schedule flips to `paused` with the reason in `lastError`. `roll schedule resume <id>` re-records the digest (it is a re-authorization) — run it only after a human confirmed the new boundary. Model, agent, and skill changes are not covered by the digest.
-- **Retries and the run cap.** Exec crash or non-zero exit -> retry after 10 s, 3 attempts per trigger, then `paused`. `needs_confirmation` is not a failure. Both daemon execution and `run-now --inline` kill a run that exceeds the schedule's cap; daemon execution counts it as failed and may retry, while inline makes one attempt and exits 1. The cap defaults to 1 hour and is set per schedule with `--max-run <integer><s|m|h|d>` (60 s to 24 h, e.g. `--max-run 6h`). Prefer short bounded rounds ("handle at most N items, leave the rest for the next round") over raising the cap: every round is a fresh thread and a failed round restarts from zero.
+- **Authority snapshot.** `add` records a digest of `runtime.approval` + `runtime.shell` from `--cwd`. If either changes later, the next run does not execute and the reason is recorded in `lastError`; the schedule pauses if automatic quota remains, otherwise it ends after settlement. `roll schedule resume <id>` re-records the digest (it is a re-authorization) — run it only after a human confirmed the new boundary. Model, agent, and skill changes are not covered by the digest.
+- **Retries and the run cap.** Exec crash or non-zero exit -> retry after 10 s, 3 attempts per trigger; exhaustion pauses the schedule if automatic quota remains, otherwise the settled schedule ends. `needs_confirmation` is not a failure. Both daemon execution and `run-now --inline` kill a run that exceeds the schedule's cap; daemon execution counts it as failed and may retry, while inline makes one attempt and exits 1. The cap defaults to 1 hour and is set per schedule with `--max-run <integer><s|m|h|d>` (60 s to 24 h, e.g. `--max-run 6h`). Prefer short bounded rounds ("handle at most N items, leave the rest for the next round") over raising the cap: every round is a fresh thread and a failed round restarts from zero.
 - **A daemon must be running for anything to fire.** `roll schedule daemon --foreground` is a long-running process (never call it from batch mode); `roll schedule service install` registers a macOS LaunchAgent / Windows Scheduled Task that starts at login. Without the service nothing fires after reboot until a daemon starts.
 - **The service pins the Node binary, CLI entrypoint and roll version at install time.** Stop a foreground daemon on the same data-dir before install/restart. Roll reports success only after the managed daemon returns the matching install generation; an interrupted install remains `installing` and blocks new claims until `service install` / `service restart` recovers it. After `roll update` (which preserves the installed scheduler data-dir and restarts only after Agent maintenance finishes when no run is live), after a manual npm upgrade, or after switching / removing the Node version via nvm, run `roll schedule service restart`; it refuses while an invocation is `claimed` / `running` or a retry still owns an unsettled tree unless `--force`. Force interrupts daemon-owned invocations; `run-now --inline` is not owned by the service and continues. `roll schedule service status --json` exposes `binary.status` (`current` / `outdated` / `broken` / `unknown`) with a `reason`, and `roll doctor --json` carries the same verdict in the `Scheduler service` check (`fail` when the pinned node or entrypoint no longer exists). Treat `broken` as "nothing will fire after reboot" and restart before relying on the schedule.
-- **Every run is a fresh thread.** `threadId` in the run record can be reopened with `roll chat --session <threadId>` for human follow-up; the ledger keeps the last 100 terminal runs per schedule for 30 days.
+- **Every run is a fresh execution thread.** Inspect it with `roll schedule inspect <invocation-id> --json`; for human follow-up use `roll chat --from-run <invocation-id> [--attempt N]`, which creates a separate discussion. Do not use ordinary `--session` to continue an execution thread. The ledger keeps the last 100 terminal runs per schedule for 30 days; pruning these records does not reset the durable round counter.
 
 Boundary rules:
 
 - `remove` refuses while a run is `claimed` / `running`; stop it first with `roll schedule cancel <invocation-id> --kill`.
 - `remove --abandon` and `cancel --abandon` drop ledger tracking without stopping processes. Treat them as destructive and require explicit human intent.
 - `run-now` without `--inline` only enqueues; parse `status --json` to confirm a daemon is `running` before expecting execution.
-- Parse `schedules[].lastError` / `runs[].error` to decide recovery: an authority-drift message means "confirm boundary, then `resume`"; retry exhaustion means "fix the cause, verify with `run-now --inline --json`, then `resume`".
+- A schedule with `status: completed` has reached its automatic round limit: preserve its history and do not call `resume`. Only when the user explicitly requests more rounds, use `schedule extend` with additional rounds and a stable request ID; confirm the old/new total, consumed/remaining rounds, full task, cwd and re-authorization. All unfinished runs, including manual runs, must settle first. Reuse the same ID and expected prior maximum for retries; never silently invent another extension. `pause` leaves it completed; manual `run-now` remains an extra run and does not reopen the plan.
+- For a `paused` schedule, parse `lastError` from `list --json` and `error` from `runs --json` to decide recovery: an authority-drift message means "confirm boundary, then `resume`"; retry exhaustion means "fix the cause, verify with `run-now --inline --json`, then `resume`".
 
 For the full lifecycle recipe (preflight, authorize, register, test, install, monitor, recover), see [references/workflows.md](./references/workflows.md#scheduled-tasks).
 

@@ -3,6 +3,7 @@ import { resolve } from "node:path";
 import { defineCommand } from "citty";
 import { loadConfig } from "../../config/loader.ts";
 import { computeAuthorityDigest } from "../../scheduler-host/authority.ts";
+import { parseScheduleRounds } from "../../scheduler-host/schedule-rounds.ts";
 import { log } from "../utils/output.ts";
 import {
   loadRuntime,
@@ -28,11 +29,13 @@ export default defineCommand({
       description:
         "单次运行时长上限，如 90m、6h（60s..24h；缺省 1h，超过后由 daemon 终止并按失败重试）",
     },
+    rounds: { type: "string", description: "最多自动执行轮数（正安全整数；省略不限轮数）" },
     now: { type: "boolean", description: "登记后立即触发一次", default: false },
     json: { type: "boolean", description: "JSON 格式输出", default: false },
   },
   async run({ args }) {
     await runScheduleCommand(async () => {
+      const maxRounds = args.rounds === undefined ? undefined : parseScheduleRounds(args.rounds);
       const requestedCwd = resolve(args.cwd ?? process.cwd());
       let cwd: string | undefined;
       try {
@@ -56,6 +59,7 @@ export default defineCommand({
           trigger: runtime.createIntervalTrigger(args.every),
           fireImmediately: args.now,
           authorityDigest,
+          ...(maxRounds === undefined ? {} : { maxRounds }),
           ...(args["max-run"] === undefined
             ? {}
             : { maxRunMs: runtime.parseMaxRunText(args["max-run"]) }),
@@ -66,7 +70,7 @@ export default defineCommand({
           return;
         }
         log.success(
-          `已登记定时任务 ${record.name}（${serialized.trigger}${serialized.maxRun === undefined ? "" : `，单次上限 ${serialized.maxRun}`}），ID ${record.id}，下次运行 ${serialized.nextRunAt ?? "-"}`,
+          `已登记定时任务 ${record.name}（${serialized.trigger}${serialized.maxRun === undefined ? "" : `，单次上限 ${serialized.maxRun}`}），${record.maxRounds === undefined ? "不限轮数" : `最多自动执行 ${String(record.maxRounds)} 轮`}，ID ${record.id}，下次运行 ${serialized.nextRunAt ?? "-"}`,
         );
         log.info("需要 roll schedule daemon 在运行才会触发；用 roll schedule status 查看。");
       } finally {

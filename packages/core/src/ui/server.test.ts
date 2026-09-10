@@ -914,6 +914,10 @@ function createFakeScheduleController(
       requests.push(request);
       return record("resumeSchedule", { ok: true });
     },
+    extendSchedule: (request) => {
+      requests.push(request);
+      return record("extendSchedule", { ok: true });
+    },
     cancelInvocation: (request) => {
       requests.push(request);
       return record("cancelInvocation", { ok: true });
@@ -1207,3 +1211,30 @@ function appUrl(server: RollUiServerHandle, pathname: string): string {
 function isRecord(value: unknown): value is Readonly<Record<string, unknown>> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
+
+it("schedule extend uses POST session/CSRF gates and forwards its exact idempotent request", async (t) => {
+  const schedule = createFakeScheduleController();
+  const server = await startRollUiServer({
+    controller: createController(),
+    staticAssets: STATIC_ASSETS,
+    scheduleController: schedule.controller,
+  });
+  t.after(() => server.close());
+  const session = await bootstrapSession(server, readLaunchToken(server));
+  const body = { id: "task", rounds: 30, expectedMaxRounds: 20, requestId: "stable-request" };
+  const wrongMethod = await apiFetch(server, "/api/schedule/extend", session.cookie);
+  assert.equal(wrongMethod.status, 405);
+  const missingCsrf = await mutate(server, "/api/schedule/extend", session.cookie, undefined, body);
+  assert.equal(missingCsrf.status, 403);
+  assert.deepEqual(schedule.calls, []);
+  const response = await mutate(
+    server,
+    "/api/schedule/extend",
+    session.cookie,
+    session.csrfToken,
+    body,
+  );
+  assert.equal(response.status, 200);
+  assert.deepEqual(schedule.calls, ["extendSchedule"]);
+  assert.deepEqual(schedule.requests, [body]);
+});

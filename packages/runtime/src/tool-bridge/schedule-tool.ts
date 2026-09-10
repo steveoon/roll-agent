@@ -6,6 +6,8 @@ import type {
   ScheduleToolError,
   ScheduleToolPort,
 } from "@roll-agent/core/scheduler-host/schedule-tool-binding";
+import { buildScheduleExtendTools } from "./schedule-extend-tool.ts";
+import { SCHEDULE_STATUSES } from "../scheduler/types.ts";
 import { gateToolCall, type ToolBridgeContext } from "./build-tools.ts";
 import type { ToolRegistry } from "./naming.ts";
 import {
@@ -35,6 +37,7 @@ export interface ScheduleToolDeps {
 
 export interface ScheduleToolset {
   readonly createTools: ToolSet;
+  readonly extendTools: ToolSet;
   readonly listTools: ToolSet;
 }
 
@@ -55,6 +58,13 @@ const scheduleCreateInputSchema = z.object({
     .string()
     .optional()
     .describe("任务运行的工作目录；省略时使用当前会话工作目录，相对路径相对会话目录解析"),
+  rounds: z
+    .number()
+    .int()
+    .positive()
+    .max(Number.MAX_SAFE_INTEGER)
+    .optional()
+    .describe("最多自动执行轮数；省略不限轮数。重试和手动运行不额外计数"),
   maxRun: z
     .string()
     .optional()
@@ -62,7 +72,10 @@ const scheduleCreateInputSchema = z.object({
 });
 
 const scheduleListInputSchema = z.object({
-  status: z.enum(["all", "active", "paused"]).optional().describe("按状态过滤，省略时返回全部"),
+  status: z
+    .enum(["all", ...Object.values(SCHEDULE_STATUSES)])
+    .optional()
+    .describe("按状态过滤，省略时返回全部"),
   offset: z.number().int().min(0).optional().describe("分页偏移，默认 0"),
   limit: z.number().int().min(1).max(100).optional().describe("最多返回条数，默认 50"),
 });
@@ -115,7 +128,14 @@ function buildCreateConfirmationDetails(
     cwd: admission.cwd,
     maxRun: admission.maxRunDisplay,
     firstRunAt: formatLocalTime(admission.firstRunAt),
-    lifecycle: "会持续运行，直到暂停或删除；创建时记录当前权限边界",
+    rounds:
+      admission.maxRounds === undefined
+        ? "不限轮数"
+        : `最多自动执行 ${String(admission.maxRounds)} 轮`,
+    lifecycle:
+      admission.maxRounds === undefined
+        ? "会持续运行，直到暂停或删除；创建时记录当前权限边界"
+        : "达到轮数上限后，最后一轮执行、重试及清场结算完毕自动结束；创建时记录当前权限边界",
     ...(admission.readiness.warnings.length > 0
       ? {
           serviceStatus: admission.readiness.warnings.map((warning) => warning.message).join("；"),
@@ -195,7 +215,7 @@ export function buildScheduleToolset(
       : {
           [createId]: tool({
             description:
-              "登记一个按固定间隔重复运行的定时任务：到点后由 roll 调度器发起新一轮无人值守 chat 执行 prompt。创建前会向用户展示完整参数并请求确认，不要在调用前重复询问。仅支持固定间隔（every），不支持一次性时间点、cron 表达式或时区。",
+              "登记一个按固定间隔重复运行的定时任务：到点后由 roll 调度器发起新一轮无人值守 chat 执行 prompt。创建前会向用户展示完整参数并请求确认，不要在调用前重复询问。可用 rounds 限制自动执行轮数，省略不限轮数。仅支持固定间隔（every），不支持一次性时间点、cron 表达式或时区。",
             inputSchema: scheduleCreateInputSchema,
             toModelOutput: ({ output }) => toolResultToModelOutput(output),
             execute: async (
@@ -236,9 +256,12 @@ export function buildScheduleToolset(
                     (outcome.readiness.automaticRunsReady
                       ? ""
                       : "\n注意：调度服务未就绪，任务不会自动执行。");
-                  return successfulToolResult(`${header}${nextNote}${readinessNote}`, {
-                    raw: outcome,
-                  });
+                  return successfulToolResult(
+                    `${header}${schedule.rounds.max === null ? "" : `最多自动执行 ${String(schedule.rounds.max)} 轮。`}${schedule.roundsDisplay}。${nextNote}${readinessNote}`,
+                    {
+                      raw: outcome,
+                    },
+                  );
                 },
               ),
           }),
@@ -285,7 +308,7 @@ export function buildScheduleToolset(
                   ? `，下次 ${formatLocalTime(item.nextRunAt)}`
                   : "";
               const errorNote = item.lastError === undefined ? "" : `，最近错误：${item.lastError}`;
-              return `- ${item.name}（${item.status}，${item.trigger}${nextNote}）id=${item.id}\n  内容：${item.promptExcerpt}${errorNote}`;
+              return `- ${item.name}（${item.status}，${item.trigger}，${item.roundsDisplay}${nextNote}）id=${item.id}\n  内容：${item.promptExcerpt}${errorNote}`;
             });
             const pagingNote = outcome.hasMore
               ? `\n共 ${String(outcome.total)} 个，仅显示 ${String(outcome.schedules.length)} 个；用 offset/limit 翻页。`
@@ -298,5 +321,6 @@ export function buildScheduleToolset(
         ),
     }),
   };
-  return { createTools, listTools };
+  const extendTools = includeCreate ? buildScheduleExtendTools(deps, registry, ctx) : {};
+  return { createTools, extendTools, listTools };
 }

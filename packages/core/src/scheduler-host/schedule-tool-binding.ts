@@ -17,7 +17,8 @@ import { auditScheduledServicePlaceholders } from "../config/placeholder-audit.t
 import { computeAuthorityDigest } from "./authority.ts";
 import { DAEMON_LIVENESS, inspectDaemon } from "./daemon-record.ts";
 import { probeExecutorLiveness } from "./executor-liveness.ts";
-import { probeInvocationTreeSettled } from "./invocation-tree.ts";
+import { probeInvocationTreeSettled, trackedGroupsFromPersisted } from "./invocation-tree.ts";
+import { describeScheduleRounds } from "./schedule-rounds.ts";
 import { createSchedulerPaths } from "./paths.ts";
 import {
   SCHEDULER_SERVICE_STATE_PHASES,
@@ -60,6 +61,7 @@ export interface ScheduleToolCreateRequest {
   readonly every: string;
   readonly cwd?: string | undefined;
   readonly maxRun?: string | undefined;
+  readonly rounds?: number | undefined;
 }
 
 export interface ScheduleCreateAdmission {
@@ -71,6 +73,7 @@ export interface ScheduleCreateAdmission {
   readonly everyMs: number;
   readonly everyDisplay: string;
   readonly maxRunMs: number | undefined;
+  readonly maxRounds: ScheduleRecord["maxRounds"];
   readonly maxRunDisplay: string;
   readonly dataDir: string;
   readonly authorityDigest: string;
@@ -83,7 +86,9 @@ export interface ScheduleToolScheduleView {
   readonly name: string;
   readonly prompt: string;
   readonly cwd: string;
-  readonly status: string;
+  readonly status: ScheduleRecord["status"];
+  readonly rounds: { readonly max: number | null; readonly started: number };
+  readonly roundsDisplay: string;
   readonly trigger: { readonly everyMs: number; readonly display: string };
   readonly maxRun: {
     readonly explicit: boolean;
@@ -103,7 +108,7 @@ export interface ScheduleToolCreateOutcome {
 }
 
 export interface ScheduleToolListQuery {
-  readonly status?: "all" | "active" | "paused" | undefined;
+  readonly status?: "all" | ScheduleRecord["status"] | undefined;
   readonly offset?: number | undefined;
   readonly limit?: number | undefined;
 }
@@ -111,7 +116,9 @@ export interface ScheduleToolListQuery {
 export interface ScheduleToolListItem {
   readonly id: string;
   readonly name: string;
-  readonly status: string;
+  readonly status: ScheduleRecord["status"];
+  readonly rounds: { readonly max: number | null; readonly started: number };
+  readonly roundsDisplay: string;
   readonly trigger: string;
   readonly cwd: string;
   readonly promptExcerpt: string;
@@ -130,7 +137,38 @@ export interface ScheduleToolListOutcome {
   readonly readiness: ScheduleExecutionReadiness;
 }
 
+export interface ScheduleToolExtendRequest {
+  readonly scheduleId: string;
+  readonly rounds: number;
+  readonly expectedMaxRounds: number;
+  readonly requestId: string;
+}
+
+export interface ScheduleExtendAdmission {
+  readonly ok: true;
+  readonly request: ScheduleToolExtendRequest;
+  readonly sessionCwd: string;
+  readonly dataDir: string;
+  readonly authorityDigest: string;
+  readonly schedule: ScheduleRecord;
+}
+
+export interface ScheduleToolExtendOutcome {
+  readonly ok: true;
+  readonly extended: boolean;
+  readonly requestId: string;
+  readonly schedule: ScheduleToolScheduleView;
+  readonly readiness: ScheduleExecutionReadiness;
+}
+
 export interface ScheduleToolPort {
+  captureExtend?(
+    request: ScheduleToolExtendRequest,
+    sessionCwd: string,
+  ): ScheduleExtendAdmission | ScheduleToolError;
+  extend?(
+    admission: ScheduleExtendAdmission,
+  ): Promise<ScheduleToolExtendOutcome | ScheduleToolError>;
   captureCreate(
     request: ScheduleToolCreateRequest,
     sessionCwd: string,
@@ -251,6 +289,8 @@ function toScheduleView(record: ScheduleRecord): ScheduleToolScheduleView {
     prompt: record.prompt,
     cwd: record.cwd,
     status: record.status,
+    rounds: { max: record.maxRounds ?? null, started: record.roundsStarted },
+    roundsDisplay: describeScheduleRounds(record),
     trigger: { everyMs: record.trigger.everyMs, display: describeTrigger(record.trigger) },
     maxRun: {
       explicit: record.maxRunMs !== undefined,
@@ -272,6 +312,8 @@ function toListItem(record: ScheduleRecord): ScheduleToolListItem {
     id: record.id,
     name: record.name,
     status: record.status,
+    rounds: { max: record.maxRounds ?? null, started: record.roundsStarted },
+    roundsDisplay: describeScheduleRounds(record),
     trigger: describeTrigger(record.trigger),
     cwd: record.cwd,
     promptExcerpt: excerpt,
@@ -311,12 +353,133 @@ export function createScheduleToolBinding(
 ): ScheduleToolPort {
   const serviceStatePath = options.serviceStatePath ?? schedulerServiceStatePath();
   return {
+    captureExtend: (request, sessionCwd) => {
+      if (
+        !Number.isSafeInteger(request.rounds) ||
+        request.rounds < 1 ||
+        !Number.isSafeInteger(request.expectedMaxRounds) ||
+        request.expectedMaxRounds < 1 ||
+        !Number.isSafeInteger(request.rounds + request.expectedMaxRounds) ||
+        request.requestId.length < 1 ||
+        request.requestId.length > 128
+      ) {
+        return toolError(
+          SCHEDULE_TOOL_ERROR_CODES.invalidInput,
+          "追加轮数和原额度必须为正安全整数且总额度不能溢出；requestId 长度为 1..128",
+        );
+      }
+      try {
+        const ledger = resolveLedgerContext(sessionCwd);
+        const snapshot = readScheduleLedger(ledger.dataDir);
+        if (snapshot.status === "migration-required") {
+          return toolError(
+            SCHEDULE_TOOL_ERROR_CODES.migrationRequired,
+            "定时任务账本需要迁移，请先在终端运行 roll schedule list",
+          );
+        }
+        const schedule = snapshot.schedules.find((record) => record.id === request.scheduleId);
+        if (schedule === undefined) {
+          return toolError(SCHEDULE_TOOL_ERROR_CODES.invalidInput, "定时任务不存在");
+        }
+        if (schedule.maxRounds === undefined) {
+          return toolError(SCHEDULE_TOOL_ERROR_CODES.invalidInput, "不限轮数的任务不能追加轮数");
+        }
+        const cwd = canonicalizeCwd(schedule.cwd, sessionCwd);
+        if (typeof cwd !== "string" || cwd !== schedule.cwd) {
+          return toolError(SCHEDULE_TOOL_ERROR_CODES.admissionStale, "任务工作目录已变化或不可用");
+        }
+        return {
+          ok: true,
+          request: { ...request },
+          sessionCwd,
+          dataDir: ledger.dataDir,
+          authorityDigest: resolveAuthorityDigest(schedule.cwd),
+          schedule,
+        };
+      } catch (error) {
+        return fromKnownError(error);
+      }
+    },
+    extend: async (admission) => {
+      try {
+        const ledger = resolveLedgerContext(admission.sessionCwd);
+        const cwd = canonicalizeCwd(admission.schedule.cwd, admission.sessionCwd);
+        if (
+          ledger.dataDir !== admission.dataDir ||
+          typeof cwd !== "string" ||
+          cwd !== admission.schedule.cwd ||
+          resolveAuthorityDigest(cwd) !== admission.authorityDigest
+        ) {
+          return toolError(
+            SCHEDULE_TOOL_ERROR_CODES.admissionStale,
+            "调度账本、工作目录或权限边界在确认期间发生变化，请重新发起确认",
+          );
+        }
+        const store = new ScheduleStore(ledger.dataDir, {
+          maxSchedules: ledger.maxSchedules,
+          executorLiveness: probeExecutorLiveness,
+          treeLiveness: (record) =>
+            probeInvocationTreeSettled({
+              invocationId: record.id,
+              selfPid: 0,
+              trackedGroups: trackedGroupsFromPersisted(record.treeTrackedGroups),
+              ...(record.executor === undefined
+                ? {}
+                : { previousExecutorPid: record.executor.pid }),
+            }),
+        });
+        try {
+          const current = store.getSchedule(admission.request.scheduleId);
+          const captured = admission.schedule;
+          if (
+            current === undefined ||
+            current.id !== captured.id ||
+            current.name !== captured.name ||
+            current.prompt !== captured.prompt ||
+            current.cwd !== captured.cwd ||
+            current.trigger.kind !== captured.trigger.kind ||
+            current.trigger.everyMs !== captured.trigger.everyMs ||
+            current.maxRunMs !== captured.maxRunMs ||
+            current.createdAtMs !== captured.createdAtMs
+          ) {
+            return toolError(
+              SCHEDULE_TOOL_ERROR_CODES.admissionStale,
+              "任务定义在确认期间发生变化，请重新发起确认",
+            );
+          }
+          const result = store.extendSchedule({
+            scheduleId: admission.request.scheduleId,
+            additionalRounds: admission.request.rounds,
+            expectedMaxRounds: admission.request.expectedMaxRounds,
+            requestId: admission.request.requestId,
+            authorityDigest: admission.authorityDigest,
+          });
+          return {
+            ok: true,
+            extended: result.extended,
+            requestId: admission.request.requestId,
+            schedule: toScheduleView(result.schedule),
+            readiness: probeReadiness(ledger.dataDir, serviceStatePath, cwd, options.secretsPath),
+          };
+        } finally {
+          store.close();
+        }
+      } catch (error) {
+        return fromKnownError(error);
+      }
+    },
     captureCreate: (request, sessionCwd) => {
       const cwd = canonicalizeCwd(request.cwd, sessionCwd);
       if (typeof cwd !== "string") {
         return cwd;
       }
       try {
+        if (
+          request.rounds !== undefined &&
+          (!Number.isSafeInteger(request.rounds) || request.rounds < 1)
+        ) {
+          return toolError(SCHEDULE_TOOL_ERROR_CODES.invalidInput, "rounds 必须是正安全整数");
+        }
         const trigger = createIntervalTrigger(request.every);
         const maxRunMs =
           request.maxRun === undefined || request.maxRun.length === 0
@@ -332,6 +495,7 @@ export function createScheduleToolBinding(
           everyMs: trigger.everyMs,
           everyDisplay: describeTrigger(trigger),
           maxRunMs,
+          maxRounds: request.rounds,
           maxRunDisplay: formatDuration(maxRunMs ?? SCHEDULER_LIMITS.maxRunMs),
           dataDir: ledger.dataDir,
           authorityDigest: resolveAuthorityDigest(cwd),
@@ -383,6 +547,7 @@ export function createScheduleToolBinding(
           cwd: admission.cwd,
           trigger: { kind: "interval", everyMs: admission.everyMs },
           authorityDigest: admission.authorityDigest,
+          ...(admission.maxRounds === undefined ? {} : { maxRounds: admission.maxRounds }),
           ...(admission.maxRunMs !== undefined ? { maxRunMs: admission.maxRunMs } : {}),
         });
         return {

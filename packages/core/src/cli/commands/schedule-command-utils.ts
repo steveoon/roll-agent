@@ -9,6 +9,7 @@ import {
   trackedGroupsFromPersisted,
   type InvocationTreeScope,
 } from "../../scheduler-host/invocation-tree.ts";
+import { describeScheduleRounds } from "../../scheduler-host/schedule-rounds.ts";
 import { SCHEDULE_TOKEN_ENV } from "../../scheduler-host/paths.ts";
 import { backfillScheduleThreadReferences } from "../../scheduler-host/schedule-history.ts";
 
@@ -87,6 +88,8 @@ export function serializeSchedule(record: ScheduleRecord) {
     authorityDigest: record.authorityDigest,
     maxRun: record.maxRunMs === undefined ? undefined : formatDuration(record.maxRunMs),
     maxRunMs: record.maxRunMs,
+    rounds: { max: record.maxRounds ?? null, started: record.roundsStarted },
+    roundsDisplay: describeScheduleRounds(record),
     createdAt: new Date(record.createdAtMs).toISOString(),
   };
 }
@@ -163,7 +166,7 @@ export function liveRunHint(
 
 export function formatScheduleLine(row: SerializedSchedule, hint?: ScheduleLiveRunHint): string {
   const maxRun = row.maxRun === undefined ? "" : `max-run=${row.maxRun}  `;
-  const base = `${row.id}  ${row.status.padEnd(6)}  ${row.trigger.padEnd(10)}  next=${row.nextRunAt ?? "-"}  ${maxRun}${row.name}${row.lastError ? `  ⚠ ${row.lastError}` : ""}`;
+  const base = `${row.id}  ${row.status.padEnd(6)}  ${row.trigger.padEnd(10)}  next=${row.nextRunAt ?? "-"}  ${maxRun}${row.roundsDisplay}  ${row.name}${row.lastError ? `  ⚠ ${row.lastError}` : ""}`;
   if (hint === undefined) {
     return base;
   }

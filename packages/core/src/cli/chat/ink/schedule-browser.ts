@@ -6,7 +6,7 @@ import {
   ScheduleBrowserController,
   formatInvocationMode,
   formatInvocationStatus,
-  formatScheduleStatus,
+  scheduleTaskMetadata,
   scheduleDetailText,
   type ScheduleBrowserPort,
 } from "../schedule-browser.ts";
@@ -165,7 +165,7 @@ export function ScheduleBrowser(props: ScheduleBrowserProps): ReactElement {
       ? view.tasks.map((task) => ({
           id: task.id,
           title: `${task.removed ? "历史任务 · " : ""}${task.name}`,
-          meta: `${task.trigger} · ${formatScheduleStatus(task.status)}${task.lastRunStatus === undefined ? "" : ` · 最近${formatInvocationStatus(task.lastRunStatus)}`}`,
+          meta: scheduleTaskMetadata(task),
         }))
       : view.page.items.map((run) => ({
           id: run.id,

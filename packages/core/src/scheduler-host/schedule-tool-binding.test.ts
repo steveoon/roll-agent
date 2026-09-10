@@ -280,3 +280,66 @@ test("schedule-tool-binding readiness 报告调度服务环境下无法解析的
     ws.close();
   }
 });
+
+test("finite rounds flow through admission, ledger, idempotent create and read-only list", async () => {
+  const ws = createWorkspace();
+  try {
+    const binding = createScheduleToolBinding({ serviceStatePath: ws.serviceStatePath });
+    const request = { name: "巡检", prompt: "检查未读消息并回复", every: "30m", rounds: 20 };
+    const admission = requireAdmission(binding.captureCreate(request, ws.cwd));
+    assert.equal(admission.maxRounds, 20);
+    const created = await binding.create(admission);
+    assert.ok(created.ok);
+    assert.deepEqual(created.schedule.rounds, { max: 20, started: 0 });
+    assert.equal(created.schedule.roundsDisplay, "已触发 0/20 轮");
+    const replay = await binding.create(admission);
+    assert.ok(replay.ok);
+    assert.equal(replay.created, false);
+    assert.equal(replay.schedule.id, created.schedule.id);
+    const unlimited = await binding.create(
+      requireAdmission(
+        binding.captureCreate(
+          {
+            name: request.name,
+            prompt: request.prompt,
+            every: request.every,
+          },
+          ws.cwd,
+        ),
+      ),
+    );
+    assert.ok(unlimited.ok);
+    assert.equal(unlimited.created, true);
+    assert.notEqual(unlimited.schedule.id, created.schedule.id);
+    const list = await binding.list({}, ws.cwd);
+    assert.ok(list.ok);
+    assert.deepEqual(list.schedules.find((item) => item.id === created.schedule.id)?.rounds, {
+      max: 20,
+      started: 0,
+    });
+    const stored = readScheduleLedger(ws.dataDir).schedules.find(
+      (item) => item.id === created.schedule.id,
+    );
+    assert.equal(stored?.maxRounds, 20);
+    assert.equal(stored.roundsStarted, 0);
+  } finally {
+    ws.close();
+  }
+});
+
+test("capture rejects invalid rounds even for direct binding callers", () => {
+  const ws = createWorkspace();
+  try {
+    const binding = createScheduleToolBinding({ serviceStatePath: ws.serviceStatePath });
+    for (const rounds of [0, -1, 0.5, Number.MAX_SAFE_INTEGER + 1, Infinity, NaN]) {
+      const result = binding.captureCreate(
+        { name: "巡检", prompt: "检查", every: "30m", rounds },
+        ws.cwd,
+      );
+      assert.equal(result.ok, false, String(rounds));
+    }
+    assert.equal(readScheduleLedger(ws.dataDir).schedules.length, 0);
+  } finally {
+    ws.close();
+  }
+});

@@ -43,6 +43,7 @@ export interface FileToolPromptIds {
 
 export interface ScheduleToolPromptIds {
   readonly create?: string | undefined;
+  readonly extend?: string | undefined;
   readonly list: string;
 }
 
@@ -111,9 +112,17 @@ function buildScheduleSection(ids: ScheduleToolPromptIds): string {
     lines.push(
       `- 用户明确提出周期性、持续性的任务（如"每隔 30 分钟…""每天…"）时，用 ${ids.create} 工具登记定时任务；不要通过 Shell 执行 roll schedule add。`,
       "- every 只描述触发频率，prompt 描述每次触发要做的工作；缺少频率、工作内容或目标工作区时先向用户澄清。",
+      "- 用户指定执行轮数时，将上限传入 rounds，不要仅写进 prompt；rounds 限制自动触发次数，同轮重试不多计，手动运行不计，省略则不限轮数。",
       `- ${ids.create} 自带确认步骤，会向用户展示完整参数；调用前不要再重复口头确认。`,
       "- 仅支持固定间隔，不支持一次性时间点、cron 表达式或时区；用户提出这类需求时明说不支持，不要伪装成间隔任务。",
       "- 不要替用户安装调度服务；创建结果里的就绪警告要如实转告用户。",
+    );
+  }
+  if (ids.extend !== undefined) {
+    lines.push(
+      `- 用户明确要求给已结束的有限任务追加轮数时，用 ${ids.extend}，保留原任务和历史；不要用 resume、创建重复任务或 Shell 代替。`,
+      "- 先读取任务当前总额度作为 expectedMaxRounds；rounds 是追加量。每次新的追加请求生成唯一 requestId，同一逻辑请求重试必须复用原 requestId、expectedMaxRounds 和 rounds，不得因超时换新 ID。",
+      "- 追加工具自带确认，显示前后额度和按当前任务目录配置重新授权；最后一轮仍在执行、重试或清场时不能追加。",
     );
   }
   lines.push(`- 用 ${ids.list} 查看已登记的任务；创建前先确认是否已有同类任务，避免重复。`);
@@ -336,6 +345,7 @@ export function buildChatSystemPromptFromManifest(
   const transcriptToolId = findCapabilityToolId(manifest, CAPABILITY_TOOL_ROLES.transcriptRead);
   const userInputToolId = findCapabilityToolId(manifest, CAPABILITY_TOOL_ROLES.userInput);
   const scheduleCreateToolId = findCapabilityToolId(manifest, CAPABILITY_TOOL_ROLES.scheduleCreate);
+  const scheduleExtendToolId = findCapabilityToolId(manifest, CAPABILITY_TOOL_ROLES.scheduleExtend);
   const scheduleListToolId = findCapabilityToolId(manifest, CAPABILITY_TOOL_ROLES.scheduleList);
   const fileRead = manifest.tools.find(
     (tool) => tool.role === CAPABILITY_TOOL_ROLES.fileRead && tool.id.endsWith("read_file"),
@@ -395,6 +405,7 @@ export function buildChatSystemPromptFromManifest(
       ? {
           scheduleToolIds: {
             ...(scheduleCreateToolId ? { create: scheduleCreateToolId } : {}),
+            ...(scheduleExtendToolId ? { extend: scheduleExtendToolId } : {}),
             list: scheduleListToolId,
           },
         }

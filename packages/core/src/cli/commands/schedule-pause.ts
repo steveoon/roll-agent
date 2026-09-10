@@ -17,7 +17,11 @@ export default defineCommand({
         if (!store.setScheduleStatus(args.id, runtime.SCHEDULE_STATUSES.paused)) {
           throw new Error(`定时任务 ${args.id} 不存在；用 roll schedule list 查看`);
         }
-        log.success(`已暂停定时任务 ${args.id}`);
+        log.success(
+          store.getSchedule(args.id)?.status === runtime.SCHEDULE_STATUSES.completed
+            ? `定时任务 ${args.id} 已结束 · 达到轮数上限`
+            : `已暂停定时任务 ${args.id}`,
+        );
       } finally {
         store.close();
       }
