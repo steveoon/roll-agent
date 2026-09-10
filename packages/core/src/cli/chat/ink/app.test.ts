@@ -1803,7 +1803,7 @@ test("ChatApp Ctrl+Y 复制最后一轮对话并提示", async () => {
   stdin.write(String.fromCharCode(25));
   await waitFor(() => assert.match(plain(lastFrame() ?? ""), /已复制本轮对话/));
   assert.deepEqual(copied, [
-    "用户: hi\n\n助手: 你好,我能帮什么?\n\n---\n对话来自 roll-agent · npm i -g @roll-agent/core",
+    "用户: hi\n\n助手: 你好,我能帮什么?\n\n---\n对话来自 roll-agent\n安装：curl -fsSL https://roll.duliday.com/install.sh | sh\nWindows：irm https://roll.duliday.com/install.ps1 | iex",
   ]);
   unmount();
 });

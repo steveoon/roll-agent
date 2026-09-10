@@ -4,7 +4,8 @@ const ESC = String.fromCharCode(27);
 const BEL = String.fromCharCode(7);
 const BACKSLASH = String.fromCharCode(92);
 
-export const COPY_PROMO_FOOTER = "---\n对话来自 roll-agent · npm i -g @roll-agent/core";
+export const COPY_PROMO_FOOTER =
+  "---\n对话来自 roll-agent\n安装：curl -fsSL https://roll.duliday.com/install.sh | sh\nWindows：irm https://roll.duliday.com/install.ps1 | iex";
 
 export function lastRoundCopyText(history: readonly HistoryItem[]): string | undefined {
   const lastUserIndex = history.findLastIndex((item) => item.kind === "user");
