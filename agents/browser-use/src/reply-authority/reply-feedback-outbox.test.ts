@@ -196,7 +196,8 @@ test("marks permanent client failures dead without retrying", async () => {
   assert.equal(attempts, 1);
 });
 
-test("queues 401 and 403 failures on the longer authentication retry interval", async () => {
+test("queues 401 and 403 failures on the longer authentication retry interval", async (t) => {
+  t.mock.timers.enable({ apis: ["Date", "setInterval"], now: 0 });
   for (const statusCode of [401, 403]) {
     const dbPath = await createDbPath();
     let attempts = 0;
@@ -207,8 +208,20 @@ test("queues 401 and 403 failures on the longer authentication retry interval", 
     initializeForTest(dbPath, deliver, { authRetryDelayMs: 100 });
 
     assert.equal((await submitReplyFeedback(baseBody, deliver, logger)).status, "queued");
-    await delay(30);
     assert.equal(attempts, 1);
+    // Wall-clock sleeps can resume after the retry deadline on a busy CI runner.
+    // Advance both the clock and the flusher, then drain its promise queue.
+    t.mock.timers.tick(99);
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(attempts, 1);
+
+    t.mock.timers.tick(1);
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(attempts, 2);
+
+    t.mock.timers.tick(99);
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(attempts, 2);
     await shutdownReplyFeedbackOutbox();
   }
 });
