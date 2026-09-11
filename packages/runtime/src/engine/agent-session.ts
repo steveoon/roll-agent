@@ -181,6 +181,7 @@ import {
 import {
   buildCompactionSemanticModelContext,
   buildCompactionSemanticEvidenceRegistry,
+  CompactionSemanticCandidateError,
   mergeCompactionSemanticState,
   replaceCompactionSemanticConstraints,
   replaceCompactionSemanticGoal,
@@ -3243,6 +3244,44 @@ export class AgentSession {
     }
     const maxRemovedTranscriptMessages = this.countContiguousPresentedMessageEvidence(evidence);
     let result: Awaited<ReturnType<typeof compactMessages>>;
+    let snapshot: CompactionDraftSnapshot | undefined;
+    const prepareSnapshot = (
+      candidate: Awaited<ReturnType<typeof compactMessages>>,
+    ): CompactionDraftSnapshot | undefined => {
+      if (
+        this.isTurnAborted(activeTurn) ||
+        (candidate.removed === 0 && candidate.truncatedTools === 0)
+      ) {
+        return undefined;
+      }
+      const validationStartedAt = Date.now();
+      try {
+        const prepared = this.buildCompactionDraft(
+          evidence,
+          candidate.semanticDraft,
+          strategy === "summarize" && candidate.removed > 0,
+          summaryFailureReason,
+        );
+        this.debug(queue, "compaction", "checkpoint validation finished", validationStartedAt, {
+          semanticRejections: prepared.semanticRejectionCount,
+        });
+        return prepared;
+      } catch (error) {
+        // Only a new model candidate can be discarded. Previous state, deterministic
+        // fallback, and durable commit errors must not be mistaken for bad model output.
+        if (
+          candidate.semanticDraft !== undefined &&
+          error instanceof CompactionSemanticCandidateError
+        ) {
+          throw new CompactionDraftFallbackError(
+            COMPACTION_DRAFT_FALLBACK_REASONS.invalidStructuredOutput,
+            "semantic checkpoint validation failed",
+            { cause: error },
+          );
+        }
+        throw error;
+      }
+    };
     try {
       const draftStartedAt = Date.now();
       try {
@@ -3278,6 +3317,7 @@ export class AgentSession {
           "structured compaction draft is missing",
         );
       }
+      snapshot = prepareSnapshot(result);
     } catch (error) {
       if (this.isTurnAborted(activeTurn)) {
         if (emitCancellationOnAbort && activeTurn !== undefined) {
@@ -3305,6 +3345,7 @@ export class AgentSession {
         ...(abortSignal ? { abortSignal } : {}),
       });
       this.debug(queue, "compaction", "truncate fallback finished", fallbackStartedAt);
+      snapshot = prepareSnapshot(result);
     }
 
     if (this.isTurnAborted(activeTurn)) {
@@ -3315,18 +3356,6 @@ export class AgentSession {
     }
 
     const attemptedReduction = result.removed > 0 || result.truncatedTools > 0;
-    const validationStartedAt = Date.now();
-    const snapshot = attemptedReduction
-      ? this.buildCompactionDraft(
-          evidence,
-          result.semanticDraft,
-          strategy === "summarize" && result.removed > 0,
-          summaryFailureReason,
-        )
-      : undefined;
-    this.debug(queue, "compaction", "checkpoint validation finished", validationStartedAt, {
-      semanticRejections: snapshot?.semanticRejectionCount ?? 0,
-    });
     if (snapshot !== undefined && snapshot.semanticRejectionCount > 0) {
       this.debug(queue, "compaction", "rejected ungrounded semantic claims", startedAt, {
         count: snapshot.semanticRejectionCount,

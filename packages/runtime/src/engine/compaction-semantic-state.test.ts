@@ -7,6 +7,8 @@ import {
   compactionSemanticStateSchema,
   createCompactionSemanticReminderProjection,
   createEmptyCompactionSemanticState,
+  CompactionSemanticCandidateError,
+  normalizeCompactionSemanticItems,
   mergeCompactionSemanticState,
   renderCompactionSemanticModelContext,
   renderCompactionSemanticSummary,
@@ -83,6 +85,179 @@ function evidenceSummary(
   assert.ok(value);
   return value;
 }
+
+test("重复 grounded 候选先按 ID 归并，最终语义状态仍强制唯一性", () => {
+  const registry = evidenceRegistry();
+  const entry = registry.find((entry) => entry.messageRole === "user");
+  assert.ok(entry);
+  const items = Array.from({ length: 4 }, (_, index) => ({
+    priorItemId: null,
+    text: `同一约束的模型表述 ${String(index)}`,
+    sourceEvidenceIds: [entry.evidenceId],
+    sourceQuotes: [entry.summary],
+  }));
+  const validated = validateCompactionModelDraft({
+    evidenceRegistry: registry,
+    draft: emptyDraft({
+      constraints: items,
+      decisions: items,
+      pendingWork: items,
+      uncertainties: items,
+    }),
+  });
+  for (const items of [
+    validated.state.constraints,
+    validated.state.decisions,
+    validated.state.pendingWork,
+    validated.state.uncertainties,
+  ]) {
+    assert.equal(items.length, 1);
+    assert.equal(items[0]?.text, entry.summary);
+    assert.deepEqual(items[0]?.sourceQuotes, [entry.summary]);
+    assert.deepEqual(items[0]?.provenance, [entry.provenance]);
+  }
+  assert.equal(validated.state.prunedItemCounts.constraint, 0);
+  assert.ok(validated.coveredEvidenceIds.includes(entry.evidenceId));
+  const invalid = {
+    ...validated.state,
+    constraints: [...validated.state.constraints, ...validated.state.constraints],
+  };
+  assert.throws(() => compactionSemanticStateSchema.parse(invalid), /duplicate semantic item ID/u);
+  assert.throws(
+    () =>
+      validateCompactionModelDraft({
+        evidenceRegistry: registry,
+        draft: emptyDraft(),
+        previousState: invalid,
+      }),
+    /duplicate semantic item ID/u,
+  );
+});
+
+test("重复资源、运行会话、完成项和 evidence review 都在候选内归并", () => {
+  const registry = evidenceRegistry();
+  const success = registry.find((entry) => entry.toolOutcomeKind === "success");
+  const resource = registry.find((entry) => entry.provenance.kind === "resource");
+  const running = registry.find((entry) => entry.provenance.kind === "running_session");
+  const failed = registry.find((entry) => entry.toolOutcomeKind === "tool_failed");
+  assert.ok(success && resource && running && failed);
+  const completed = {
+    priorItemId: null,
+    text: "done",
+    sourceEvidenceIds: [success.evidenceId],
+    sourceQuotes: [success.summary],
+  };
+  const invalid = {
+    ...completed,
+    sourceEvidenceIds: [failed.evidenceId],
+    sourceQuotes: [failed.summary],
+  };
+  const review = {
+    evidenceId: failed.evidenceId,
+    disposition: "uncertain" as const,
+    reason: "failed",
+  };
+  const candidate = validateCompactionModelDraft({
+    evidenceRegistry: registry,
+    draft: emptyDraft({
+      completedWork: [completed, invalid, completed],
+      resources: Array.from({ length: 3 }, () => ({
+        priorItemId: null,
+        sourceEvidenceIds: [resource.evidenceId],
+      })),
+      runningSessions: Array.from({ length: 3 }, () => ({
+        priorItemId: null,
+        sourceEvidenceIds: [running.evidenceId],
+      })),
+      evidenceReviews: [review, review],
+    }),
+  });
+  assert.equal(candidate.state.completedWork.length, 1);
+  assert.equal(candidate.state.resources.length, 1);
+  assert.equal(candidate.state.runningSessions.length, 1);
+  assert.equal(candidate.state.uncertainties.length, 1);
+  assert.ok(
+    candidate.rejections.some((item) => item.reason === "completed_work_without_success_evidence"),
+  );
+  const completedItem = candidate.state.completedWork[0];
+  assert.ok(completedItem);
+  const carried = { ...completed, priorItemId: completedItem.id, text: completedItem.text };
+  const next = validateCompactionModelDraft({
+    evidenceRegistry: [],
+    previousState: candidate.state,
+    draft: emptyDraft({ completedWork: [carried, carried] }),
+  });
+  assert.deepEqual(next.state.completedWork, [completedItem]);
+});
+
+test("同 prior ID 的相同事实合并所有证据，并拒绝实质冲突及证据溢出", () => {
+  const registry = buildCompactionSemanticEvidenceRegistry({
+    messages: Array.from({ length: 9 }, (_, sequence) => ({
+      sequence,
+      role: "user",
+      summary: `message ${String(sequence)} user: 不要发送消息`,
+    })),
+    toolExecutions: [],
+    resources: [],
+    runningSessions: [],
+  });
+  const first = registry[0];
+  assert.ok(first);
+  const initial = validateCompactionModelDraft({
+    evidenceRegistry: registry,
+    draft: emptyDraft({
+      constraints: [
+        {
+          priorItemId: null,
+          text: "不要发送消息",
+          sourceEvidenceIds: [first.evidenceId],
+          sourceQuotes: [first.summary],
+        },
+      ],
+    }),
+  }).state;
+  const original = initial.constraints[0];
+  assert.ok(original);
+  const constraints = registry.map((entry) => ({
+    priorItemId: original.id,
+    text: "不要发送消息",
+    sourceEvidenceIds: [entry.evidenceId],
+    sourceQuotes: [entry.summary],
+  }));
+  const candidate = validateCompactionModelDraft({
+    evidenceRegistry: registry,
+    previousState: initial,
+    draft: emptyDraft({ constraints: constraints.slice(0, 8) }),
+  });
+  assert.equal(candidate.state.constraints.length, 1);
+  const merged = candidate.state.constraints[0];
+  assert.ok(merged);
+  assert.equal(merged.id, original.id);
+  assert.equal(merged.provenance.length, 8);
+  assert.deepEqual(
+    merged.sourceQuotes,
+    registry.slice(0, 8).map((entry) => entry.summary),
+  );
+  assert.deepEqual(normalizeCompactionSemanticItems([merged, merged]), [merged]);
+  assert.equal(original.provenance.length, 1, "normalization must not mutate previous state");
+  assert.throws(
+    () => normalizeCompactionSemanticItems([original, { ...original, text: "允许发送消息" }]),
+    (error: unknown) =>
+      error instanceof CompactionSemanticCandidateError &&
+      /conflicting semantic item ID/u.test(error.message),
+  );
+  assert.throws(
+    () =>
+      validateCompactionModelDraft({
+        evidenceRegistry: registry,
+        previousState: initial,
+        draft: emptyDraft({ constraints }),
+      }),
+    (error: unknown) =>
+      error instanceof CompactionSemanticCandidateError &&
+      /evidence limit exceeded/u.test(error.message),
+  );
+});
 
 test("模型 draft 只接受 provider-portable opaque evidence IDs，所有顶层字段必填", () => {
   const parsed = compactionModelDraftSchema.parse({
