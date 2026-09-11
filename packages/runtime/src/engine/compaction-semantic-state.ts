@@ -868,6 +868,70 @@ function uniqueProvenance(
   return [...unique.values()];
 }
 
+/** Only failures in a newly assembled candidate are eligible for draft recovery. */
+export class CompactionSemanticCandidateError extends Error {
+  constructor(message: string, options?: ErrorOptions) {
+    super(message, options);
+    this.name = "CompactionSemanticCandidateError";
+  }
+}
+
+type CompactionSemanticItem =
+  | CompactionSemanticTextItem
+  | CompactionSemanticResource
+  | CompactionSemanticRunningSession;
+
+function semanticItemIdentity(item: CompactionSemanticItem): string {
+  if ("text" in item) {
+    return JSON.stringify(["text", normalizedText(item.text)]);
+  }
+  if ("resourceKey" in item) {
+    return JSON.stringify(["resource", item.resourceKey]);
+  }
+  return JSON.stringify(["running_session", item.managerInstanceId, item.sessionId]);
+}
+
+/** Coalesce grounded candidates before limits/uniqueness checks, never persisted state. */
+export function normalizeCompactionSemanticItems<T extends CompactionSemanticItem>(
+  items: readonly T[],
+): T[] {
+  const unique = new Map<CompactionSemanticItemId, T>();
+  for (const item of items) {
+    const previous = unique.get(item.id);
+    if (previous === undefined) {
+      unique.set(item.id, item);
+      continue;
+    }
+    if (semanticItemIdentity(previous) !== semanticItemIdentity(item)) {
+      throw new CompactionSemanticCandidateError(`conflicting semantic item ID: ${item.id}`);
+    }
+    const provenance = [
+      ...new Map(
+        [...previous.provenance, ...item.provenance].map((ref) => [provenanceIdentity(ref), ref]),
+      ).values(),
+    ];
+    const sourceQuotes =
+      "sourceQuotes" in previous && "sourceQuotes" in item
+        ? [...new Set([...previous.sourceQuotes, ...item.sourceQuotes])]
+        : undefined;
+    // Never discard evidence to make a merged item fit the persisted schema.
+    if (
+      provenance.length > MAX_PROVENANCE_REFS ||
+      (sourceQuotes?.length ?? 0) > MAX_SOURCE_QUOTES
+    ) {
+      throw new CompactionSemanticCandidateError(
+        `semantic item evidence limit exceeded: ${item.id}`,
+      );
+    }
+    unique.set(item.id, {
+      ...previous,
+      provenance,
+      ...(sourceQuotes === undefined ? {} : { sourceQuotes }),
+    });
+  }
+  return [...unique.values()];
+}
+
 function evidenceSupportsQuotes(
   entries: readonly CompactionSemanticEvidenceRegistryEntry[],
   quotes: readonly string[],
@@ -1344,38 +1408,62 @@ export function validateCompactionModelDraft(
     coveredEvidenceIds.add(evidenceId);
   }
 
-  const boundedConstraints = takeNewestWithinLimit(candidateConstraints, MAX_CONSTRAINTS);
-  const boundedDecisions = takeNewestWithinLimit(candidateDecisions, MAX_DECISIONS);
-  const boundedCompletedWork = takeNewestWithinLimit(candidateCompletedWork, MAX_COMPLETED_WORK);
-  const boundedPendingWork = takeNewestWithinLimit(candidatePendingWork, MAX_PENDING_WORK);
-  const boundedResources = takeNewestWithinLimit(resources, MAX_RESOURCES);
-  const boundedRunningSessions = takeNewestWithinLimit(runningSessions, MAX_RUNNING_SESSIONS);
+  const boundedConstraints = takeNewestWithinLimit(
+    normalizeCompactionSemanticItems(candidateConstraints),
+    MAX_CONSTRAINTS,
+  );
+  const boundedDecisions = takeNewestWithinLimit(
+    normalizeCompactionSemanticItems(candidateDecisions),
+    MAX_DECISIONS,
+  );
+  const boundedCompletedWork = takeNewestWithinLimit(
+    normalizeCompactionSemanticItems(candidateCompletedWork),
+    MAX_COMPLETED_WORK,
+  );
+  const boundedPendingWork = takeNewestWithinLimit(
+    normalizeCompactionSemanticItems(candidatePendingWork),
+    MAX_PENDING_WORK,
+  );
+  const boundedResources = takeNewestWithinLimit(
+    normalizeCompactionSemanticItems(resources),
+    MAX_RESOURCES,
+  );
+  const boundedRunningSessions = takeNewestWithinLimit(
+    normalizeCompactionSemanticItems(runningSessions),
+    MAX_RUNNING_SESSIONS,
+  );
   const boundedUncertainties = takeNewestWithinLimit(
-    [...candidateUncertainties, ...reviewedUncertainties],
+    normalizeCompactionSemanticItems([...candidateUncertainties, ...reviewedUncertainties]),
     MAX_UNCERTAINTIES,
   );
 
+  const state = compactionSemanticStateSchema.safeParse({
+    version: COMPACTION_SEMANTIC_STATE_VERSION,
+    goal,
+    constraints: boundedConstraints.items,
+    decisions: boundedDecisions.items,
+    completedWork: boundedCompletedWork.items,
+    pendingWork: boundedPendingWork.items,
+    resources: boundedResources.items,
+    runningSessions: boundedRunningSessions.items,
+    uncertainties: boundedUncertainties.items,
+    prunedItemCounts: {
+      constraint: boundedConstraints.prunedCount,
+      decision: boundedDecisions.prunedCount,
+      completed_work: boundedCompletedWork.prunedCount,
+      pending_work: boundedPendingWork.prunedCount,
+      resource: boundedResources.prunedCount,
+      running_session: boundedRunningSessions.prunedCount,
+      uncertainty: boundedUncertainties.prunedCount,
+    },
+  });
+  if (!state.success) {
+    throw new CompactionSemanticCandidateError("invalid semantic candidate state", {
+      cause: state.error,
+    });
+  }
   return {
-    state: compactionSemanticStateSchema.parse({
-      version: COMPACTION_SEMANTIC_STATE_VERSION,
-      goal,
-      constraints: boundedConstraints.items,
-      decisions: boundedDecisions.items,
-      completedWork: boundedCompletedWork.items,
-      pendingWork: boundedPendingWork.items,
-      resources: boundedResources.items,
-      runningSessions: boundedRunningSessions.items,
-      uncertainties: boundedUncertainties.items,
-      prunedItemCounts: {
-        constraint: boundedConstraints.prunedCount,
-        decision: boundedDecisions.prunedCount,
-        completed_work: boundedCompletedWork.prunedCount,
-        pending_work: boundedPendingWork.prunedCount,
-        resource: boundedResources.prunedCount,
-        running_session: boundedRunningSessions.prunedCount,
-        uncertainty: boundedUncertainties.prunedCount,
-      },
-    }),
+    state: state.data,
     resolutions,
     rejections,
     coveredEvidenceIds: [...coveredEvidenceIds],

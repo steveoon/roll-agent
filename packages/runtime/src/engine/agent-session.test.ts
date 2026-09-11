@@ -41,6 +41,10 @@ import {
   createEmptyCompactionToolState,
 } from "./compaction-checkpoint.ts";
 import { estimateMessagesTokens } from "./compactor.ts";
+import {
+  buildCompactionSemanticEvidenceRegistry,
+  createEmptyCompactionModelDraft,
+} from "./compaction-semantic-state.ts";
 
 const STOP: LanguageModelV4FinishReason = { unified: "stop", raw: "stop" };
 const TOOL_CALLS: LanguageModelV4FinishReason = { unified: "tool-calls", raw: "tool-calls" };
@@ -4731,6 +4735,87 @@ test("AgentSession Tool 已执行后下一 Step overflow 不重放副作用", as
   assert.match(recovery.modelContext, /"outcome":\{"kind":"success"/u);
   assert.match(String(persisted[2]?.content), /部分结果可能已经生效且不会自动撤销/u);
   assert.doesNotMatch(String(persisted[2]?.content), /外部副作用|回滚|工具活动/u);
+});
+
+test("AgentSession 自动压缩重复候选后继续聊天且不重放已执行 Tool", async () => {
+  let toolExecutions = 0;
+  let streamCalls = 0;
+  let draftCalls = 0;
+  const [entry] = buildCompactionSemanticEvidenceRegistry({
+    messages: [{ sequence: 0, role: "user", summary: "message 0 user: 不要重复执行工具" }],
+    toolExecutions: [],
+    resources: [],
+    runningSessions: [],
+  });
+  assert.ok(entry);
+  const model = new MockLanguageModelV4({
+    doStream: async () => {
+      streamCalls += 1;
+      return streamChunks(
+        streamCalls === 1 ? toolCallStep("probe__write", { q: "once" }) : textStep("继续处理"),
+      );
+    },
+    doGenerate: async (options) => {
+      draftCalls += 1;
+      if (draftCalls === 1) {
+        assert.ok(JSON.stringify(options.prompt).includes(entry.evidenceId));
+        assert.ok(JSON.stringify(options.prompt).includes(entry.summary));
+      }
+      const draft = {
+        ...createEmptyCompactionModelDraft(),
+        constraints:
+          draftCalls > 1
+            ? []
+            : Array.from({ length: 4 }, () => ({
+                priorItemId: null,
+                text: "不要重复执行工具",
+                sourceEvidenceIds: [entry.evidenceId],
+                sourceQuotes: [entry.summary],
+              })),
+      };
+      return {
+        content: [{ type: "text", text: JSON.stringify(draft) }],
+        finishReason: STOP,
+        usage: usage(5, 3),
+        warnings: [],
+      };
+    },
+  });
+  const session = new AgentSession({
+    id: "auto-compaction-duplicate-candidates",
+    model,
+    sources: [source("probe", "write", () => (toolExecutions += 1))],
+    maxSteps: 4,
+    contextWindow: 1,
+    compaction: {
+      enabled: true,
+      strategy: "summarize",
+      threshold: 0.75,
+      keepRecentTurns: 1,
+      keepRecentTokens: 1,
+    },
+  });
+  try {
+    const first = await collect(session.send("不要重复执行工具"));
+    const second = await collect(session.send("继续"));
+    const third = await collect(session.send("继续处理"));
+    const events = [...first, ...second, ...third];
+    assert.ok(draftCalls > 0);
+    assert.equal(toolExecutions, 1);
+    assert.deepEqual(
+      events.filter((event) => event.type === "error"),
+      [],
+    );
+    assert.ok(
+      events.some(
+        (event) =>
+          event.type === "context-compacted" && event.strategy === "summarize" && event.removed > 0,
+      ),
+    );
+    assert.equal(third.at(-1)?.type, "message-finish");
+  } finally {
+    await session.close();
+  }
 });
 
 test("AgentSession summarize 结构化 draft 无效时降级 truncate 且不继续原始历史", async () => {
