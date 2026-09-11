@@ -1,5 +1,11 @@
 # @roll-agent/runtime
 
+## 0.22.1
+
+### Patch Changes
+
+- [#264](https://github.com/steveoon/roll-agent/pull/264) [`1e906e7`](https://github.com/steveoon/roll-agent/commit/1e906e77dd5628fc9aeb0b2b70d059f5d3a23723) Thanks [@steveoon](https://github.com/steveoon)! - Coalesce repeated grounded compaction candidates before validating checkpoint ID uniqueness. Preserve equivalent evidence, reject conflicting identities or evidence overflow, and recover invalid model candidates through the existing deterministic compaction fallback without weakening persisted-state validation.
+
 ## 0.22.0
 
 ### Minor Changes
