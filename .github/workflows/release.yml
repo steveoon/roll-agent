@@ -126,18 +126,18 @@ jobs:
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
         with:
-          fetch-depth: 2
           persist-credentials: false
       - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
         with:
           node-version: 24.18.0
           package-manager-cache: false
       - id: check
-        name: Skip unchanged or already published Core distributions
+        name: Check whether the Core distribution is already published
         run: node scripts/distribution/check-release.mjs
 
   standalone_distribution:
-    needs: [npm_publish, standalone_distribution_gate]
+    # GitHub Releases creates the canonical version tag used to pin distribution source.
+    needs: [npm_publish, github_releases, standalone_distribution_gate]
     if: needs.standalone_distribution_gate.outputs.build == 'true'
     uses: ./.github/workflows/distribution.yml
     permissions:
