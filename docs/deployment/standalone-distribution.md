@@ -52,7 +52,11 @@ node scripts/distribution/render-nginx.mjs /path/outside/checkout/distribution.c
 
 ## 原子发布与失败处理
 
-`release.yml` 在 npm OIDC 发布成功后先运行轻量门禁：只有本次 main 提交相对第一父提交改变了 Core 版本、且线上尚无该版本的完整六平台 manifest，才调用 `distribution.yml`。docs-only 或仅更新 Agent 的提交不重建 Core；成功发布后的工作流重试也不重复构建。线上查询发生非 404 错误或 manifest 不完整时门禁失败，避免把未知状态当作需要重建。失败版本仍可通过原提交重跑或手动工作流恢复。构建 job 没有 SSH credentials；assemble job 校验六个平台后上传完整 publication artifact；只有最后的 deploy step 读取 SSH secrets，且不安装依赖或执行构建。现有 GitHub Release job 保留。
+`release.yml` 在 npm OIDC 发布成功后查询当前 Core 版本的六平台 manifest：404 才请求构建，完整有效则跳过。判断不依赖本次提交是否改变版本号，因此 release 首次失败后，后续同版本的测试修复或文档提交也能补齐缺失发行包。已发布版本不会因普通 main 提交或工作流重试而重复构建；非 404 HTTP 错误、超时和不完整 manifest 都使门禁失败，不覆盖未知或损坏的发行状态。
+
+自动分发等待 GitHub Release job 完成，确保 `@roll-agent/core@<version>` 标签已经创建。`distribution.yml` 的 `resolve_source` job 将该标签解析为固定 commit SHA，验证它属于当前 workflow commit 的祖先，且标签内 Core 的包名与版本正确。正式发布的六平台构建、assemble 和 deploy 都检出同一个 SHA，避免将较新 main 上未发布的代码装进旧版本。标签缺失或不匹配时发布失败，不回退到当前 main。普通分支验证和 `publish=false` 的手动运行继续构建 workflow 的 HEAD。
+
+同版本补发可在 `main` 上手动运行 `distribution.yml` 并选择 `publish=true`；它同样使用 Core 发布标签的源码，无需再次提升版本或发布 npm。仓库发布开关仍需为 `ROLL_DISTRIBUTION_ENABLED=true`。构建 job 没有 SSH credentials；assemble job 校验六个平台后上传完整 publication artifact；只有最后的 deploy step 读取 SSH secrets，且不安装依赖或执行构建。
 
 CI 上传到唯一 `staging/<run-id>-<attempt>`。`finalize.sh` 在服务器取得互斥目录锁，拒绝链接、未知文件数量和非法路径，核对所有 SHA-256 及平台 TSV，再把完整目录移入 `releases/<version>`。最后原子替换 `releases/stable` 符号链接，脚本、manifest 和平台索引同时切换。过期 CI 运行不能降级 stable。
 
