@@ -14,6 +14,7 @@ import type { CompanionServiceController } from "../companion-host/service.ts";
 import { acquireAgentLifecycleLock } from "../registry/process-manager.ts";
 import { KILL_PROCESS_TREE_OUTCOMES } from "./executor-liveness.ts";
 import { SCHEDULER_DAEMON_LOCK_NAME } from "./paths.ts";
+import { loadRuntime, openScheduleStore } from "../cli/commands/schedule-command-utils.ts";
 import {
   rollbackInstallingWindowsSchedulerService,
   uninstallWindowsSchedulerService,
@@ -37,6 +38,59 @@ function createSchedule(store: ScheduleStore, name: string, nowMs: number) {
 
 function openTestStore(store: ScheduleStore) {
   return async () => ({ store, close: () => undefined });
+}
+
+for (const teardown of [
+  uninstallWindowsSchedulerService,
+  rollbackInstallingWindowsSchedulerService,
+]) {
+  test(`${teardown.name}: fenced cleanup can open the ledger despite stale unreadable daemon metadata`, async () => {
+    const dir = mkdtempSync(join(tmpdir(), "roll-fenced-metadata-"));
+    const events: string[] = [];
+    try {
+      new ScheduleStore(dir).close();
+      writeFileSync(join(dir, "daemon.json"), "unreadable stale record");
+      const runtime = await loadRuntime();
+      await teardown({
+        dataDir: dir,
+        controller: {
+          install: async () => undefined,
+          start: async () => undefined,
+          status: async () => ({ installed: true, running: false }),
+          disable: async () => {
+            events.push("disable");
+          },
+          stop: async () => {
+            events.push("stop");
+          },
+          uninstall: async () => {
+            events.push("uninstall");
+          },
+        },
+        openStore: async () => {
+          assert.deepEqual(events, ["disable", "stop"]);
+          assert.throws(
+            () =>
+              openScheduleStore(undefined, runtime, {
+                dataDir: dir,
+                requireExistingDatabase: true,
+              }),
+            /身份不可确认/u,
+          );
+          const store = openScheduleStore(undefined, runtime, {
+            dataDir: dir,
+            requireExistingDatabase: true,
+            daemonLockHeld: true,
+          });
+          events.push("open");
+          return { store, close: () => store.close() };
+        },
+      });
+      assert.deepEqual(events, ["disable", "stop", "open", "uninstall"]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
 }
 
 test("Windows scheduler uninstall disables and stops before revoking owned claims", async () => {

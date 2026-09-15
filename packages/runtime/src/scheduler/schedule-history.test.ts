@@ -3,7 +3,7 @@ import { test } from "node:test";
 import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { DatabaseSync } from "node:sqlite";
+import { DatabaseSync } from "./database-fixture.test.ts";
 import { ScheduleStore, readScheduleHistory, readScheduleRun } from "./schedule-store.ts";
 import { createIntervalTrigger } from "./trigger.ts";
 

@@ -23,6 +23,7 @@ import {
 
 const EXEC_OPTIONS = { toolCallId: "t1", messages: [] } as unknown as ToolExecutionOptions<unknown>;
 const SESSION_CWD = "/workspace/demo";
+const CREATE_DEFAULTS = { startAt: null, cwd: null, rounds: null, maxRun: null };
 
 const READY: ScheduleExecutionReadiness = {
   daemonRunning: false,
@@ -44,6 +45,7 @@ function admissionFixture(): ScheduleCreateAdmission {
     cwd: SESSION_CWD,
     sessionCwd: SESSION_CWD,
     everyMs: 1_800_000,
+    trigger: { kind: "interval", everyMs: 1_800_000 },
     everyDisplay: "每 30 分钟",
     maxRunMs: undefined,
     maxRounds: undefined,
@@ -58,6 +60,84 @@ function admissionFixture(): ScheduleCreateAdmission {
 function fixedPolicy(decision: PolicyDecision): ToolPolicy {
   return { check: () => decision };
 }
+
+test("calendar confirmation renders the saved task zone and passes structured timing without an interval", async () => {
+  const admission: ScheduleCreateAdmission = {
+    ...admissionFixture(),
+    everyMs: undefined,
+    everyDisplay: "每天 08:00（Asia/Shanghai）",
+    trigger: {
+      kind: "calendar",
+      calendar: { frequency: "daily", time: "08:00", timeZone: "Asia/Shanghai" },
+    },
+    firstRunAt: "2026-09-16T00:00:00.000Z",
+  };
+  const harness = makeHarness({
+    policy: fixedPolicy({ action: "confirm" }),
+    approve: true,
+    capture: () => admission,
+  });
+  const result = await harness.execute(SCHEDULE_CREATE_TOOL_ID, {
+    name: "daily",
+    prompt: "检查未读",
+    ...CREATE_DEFAULTS,
+    recurrence: { kind: "daily", time: "08:00", timeZone: "Asia/Shanghai" },
+    rounds: 20,
+  });
+  assert.equal(result.isError, false);
+  assert.equal(harness.createCalls.length, 1);
+  const details = harness.approvalRequests[0]?.input;
+  assert.equal(details?.timeZone, "Asia/Shanghai");
+  assert.equal(details?.firstRunAtIso, "2026-09-16T00:00:00.000Z");
+  assert.match(String(details?.firstRunAt), /08:00:00/u);
+  assert.deepEqual(harness.createCalls[0]?.trigger, admission.trigger);
+});
+
+test("two-round future interval confirmation separates first time, cadence and estimated second time", async () => {
+  const admission: ScheduleCreateAdmission = {
+    ...admissionFixture(),
+    maxRounds: 2,
+    firstRunAt: "2099-01-01T06:20:00.000Z",
+    trigger: {
+      kind: "interval",
+      everyMs: 60_000,
+      timeZone: "Asia/Singapore",
+      startAtMs: Date.parse("2099-01-01T06:20:00Z"),
+    },
+    everyDisplay: "每 1 分钟",
+    everyMs: 60_000,
+  };
+  const harness = makeHarness({
+    policy: fixedPolicy({ action: "confirm" }),
+    capture: () => admission,
+  });
+  await harness.execute(SCHEDULE_CREATE_TOOL_ID, {
+    name: "probe",
+    prompt: "noop",
+    ...CREATE_DEFAULTS,
+    recurrence: { kind: "interval", every: "1m" },
+    startAt: "2099-01-01T14:20",
+    rounds: 2,
+  });
+  const details = harness.approvalRequests[0]?.input;
+  assert.match(String(details?.firstRunAt), /14:20:00/u);
+  assert.match(String(details?.nextRunAtEstimate), /14:21:00/u);
+  assert.equal(details?.recurrence, "每 1 分钟");
+  assert.match(String(details?.timingSemantics), /实际领取时间/u);
+  assert.equal(details?.rounds, "最多自动执行 2 轮");
+  const single = makeHarness({
+    policy: fixedPolicy({ action: "confirm" }),
+    capture: () => ({ ...admission, maxRounds: 1 }),
+  });
+  await single.execute(SCHEDULE_CREATE_TOOL_ID, {
+    name: "probe",
+    prompt: "noop",
+    ...CREATE_DEFAULTS,
+    recurrence: { kind: "interval", every: "1m" },
+    rounds: 1,
+  });
+  assert.equal(single.approvalRequests[0]?.input.nextRunAtEstimate, undefined);
+});
 
 interface Harness {
   readonly captureCalls: unknown[];
@@ -229,7 +309,8 @@ test("create 在 confirm 策略下展示完整预览并在批准后创建", asyn
   const result = await harness.execute(SCHEDULE_CREATE_TOOL_ID, {
     name: "未读巡检",
     prompt: "检查未读消息并汇总",
-    every: "30m",
+    ...CREATE_DEFAULTS,
+    recurrence: { kind: "interval", every: "30m" },
   });
   assert.equal(result.isError, false);
   assert.equal(harness.approvalRequests.length, 1);
@@ -287,7 +368,8 @@ test("create 即使 automaticRunsReady 为 true 也保留 readiness warnings", a
   const result = await harness.execute(SCHEDULE_CREATE_TOOL_ID, {
     name: "巡检",
     prompt: "检查未读消息",
-    every: "30m",
+    ...CREATE_DEFAULTS,
+    recurrence: { kind: "interval", every: "30m" },
   });
 
   assert.equal(result.isError, false);
@@ -299,7 +381,8 @@ test("create 在 policy deny 时不请求确认也不创建", async () => {
   const result = await harness.execute(SCHEDULE_CREATE_TOOL_ID, {
     name: "x",
     prompt: "y",
-    every: "30m",
+    ...CREATE_DEFAULTS,
+    recurrence: { kind: "interval", every: "30m" },
   });
   assert.equal(result.isError, true);
   assert.equal(harness.approvalRequests.length, 0);
@@ -314,7 +397,8 @@ test("create 在用户拒绝后不创建", async () => {
   const result = await harness.execute(SCHEDULE_CREATE_TOOL_ID, {
     name: "x",
     prompt: "y",
-    every: "30m",
+    ...CREATE_DEFAULTS,
+    recurrence: { kind: "interval", every: "30m" },
   });
   assert.equal(result.isError, true);
   assert.match(String(result.output), /已取消执行/u);
@@ -329,7 +413,8 @@ test("create 的 capture 错误直接结构化返回，不触发确认", async (
   const result = await harness.execute(SCHEDULE_CREATE_TOOL_ID, {
     name: "x",
     prompt: "y",
-    every: "bogus",
+    ...CREATE_DEFAULTS,
+    recurrence: { kind: "interval", every: "bogus" },
   });
   assert.equal(result.isError, true);
   assert.match(String(result.output), /格式不对/u);
@@ -364,7 +449,8 @@ test("create 重复定义时提示已存在而不是失败", async () => {
   const result = await harness.execute(SCHEDULE_CREATE_TOOL_ID, {
     name: "未读巡检",
     prompt: "检查未读消息并汇总",
-    every: "30m",
+    ...CREATE_DEFAULTS,
+    recurrence: { kind: "interval", every: "30m" },
   });
   assert.equal(result.isError, false);
   assert.match(String(result.output), /已存在相同定义/u);
@@ -397,7 +483,8 @@ test("create 幂等命中且重新授权时在结果中明示", async () => {
   const result = await harness.execute(SCHEDULE_CREATE_TOOL_ID, {
     name: "未读巡检",
     prompt: "检查未读消息并汇总",
-    every: "30m",
+    ...CREATE_DEFAULTS,
+    recurrence: { kind: "interval", every: "30m" },
   });
   assert.equal(result.isError, false);
   assert.match(String(result.output), /重新授权/u);
@@ -438,7 +525,12 @@ test("AgentSession 集成：create 触发确认，批准后写入并注入 # 定
         type: "tool-call",
         toolCallId: "c1",
         toolName: SCHEDULE_CREATE_TOOL_ID,
-        input: JSON.stringify({ name: "未读巡检", prompt: "检查未读消息并汇总", every: "30m" }),
+        input: JSON.stringify({
+          name: "未读巡检",
+          prompt: "检查未读消息并汇总",
+          ...CREATE_DEFAULTS,
+          recurrence: { kind: "interval", every: "30m" },
+        }),
       },
       {
         type: "finish",
@@ -541,6 +633,10 @@ test("AgentSession 集成：create 触发确认，批准后写入并注入 # 定
   assert.equal(createCalls.length, 1);
 
   const system = captured[0]?.prompt.find((message) => message.role === "system");
+  const advertised = captured[0]?.tools?.find((tool) => tool.name === SCHEDULE_CREATE_TOOL_ID);
+  assert.ok(advertised?.type === "function");
+  assert.equal(advertised.strict, true);
+  assert.match(JSON.stringify(advertised.inputSchema), /"recurrence"/u);
   assert.ok(system);
   assert.match(system.content, /# 定时任务/u);
   assert.match(system.content, new RegExp(SCHEDULE_CREATE_TOOL_ID, "u"));
@@ -556,7 +652,8 @@ test("finite rounds survive admission capture and confirmation, and are shown in
   const result = await harness.execute(SCHEDULE_CREATE_TOOL_ID, {
     name: "未读巡检",
     prompt: "检查未读消息并回复",
-    every: "30m",
+    ...CREATE_DEFAULTS,
+    recurrence: { kind: "interval", every: "30m" },
     rounds: 20,
   });
   assert.equal(result.isError, false);
@@ -578,7 +675,8 @@ test("invalid rounds are rejected before admission, approval or writes", async (
     const result = await harness.execute(SCHEDULE_CREATE_TOOL_ID, {
       name: "巡检",
       prompt: "检查",
-      every: "30m",
+      ...CREATE_DEFAULTS,
+      recurrence: { kind: "interval", every: "30m" },
       rounds,
     });
     assert.equal(result.isError, true, String(rounds));
@@ -586,6 +684,20 @@ test("invalid rounds are rejected before admission, approval or writes", async (
     assert.equal(harness.approvalRequests.length, 0);
     assert.equal(harness.createCalls.length, 0);
   }
+});
+
+test("unknown calendar timing fields are rejected instead of silently creating an interval now", async () => {
+  const harness = makeHarness({});
+  const result = await harness.execute(SCHEDULE_CREATE_TOOL_ID, {
+    name: "typo",
+    prompt: "noop",
+    ...CREATE_DEFAULTS,
+    recurrence: { kind: "interval", every: "30m" },
+    start_at: "2099-01-01T08:00",
+  });
+  assert.equal(result.isError, true);
+  assert.equal(harness.captureCalls.length, 0);
+  assert.equal(harness.approvalRequests.length, 0);
 });
 
 test("list accepts completed filter and reports final round progress", async () => {

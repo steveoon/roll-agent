@@ -14,11 +14,29 @@ import {
   removeDaemonRecord,
   waitForDaemonGeneration,
   writeDaemonRecord,
+  assertCompatibleSchedulerDaemon,
 } from "./daemon-record.ts";
 
 function tempDir(): string {
   return mkdtempSync(join(tmpdir(), "roll-daemon-record-"));
 }
+
+test("daemon schema compatibility refuses a live legacy writer and accepts the current protocol", () => {
+  const dir = tempDir();
+  const path = join(dir, "daemon.json");
+  try {
+    writeDaemonRecord(path, createDaemonRecord("legacy"));
+    assert.throws(() => assertCompatibleSchedulerDaemon(path, 9), /重启/u);
+    const current = createDaemonRecord("current", undefined, 9);
+    writeDaemonRecord(path, current);
+    assert.equal(readDaemonRecord(path)?.schedulerSchemaVersion, 9);
+    assert.doesNotThrow(() => assertCompatibleSchedulerDaemon(path, 9));
+    writeFileSync(path, "malformed");
+    assert.throws(() => assertCompatibleSchedulerDaemon(path, 9), /身份不可确认/u);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
 
 test("daemon worker id includes a per-generation nonce beyond the PID", () => {
   const first = createDaemonWorkerId(4321);

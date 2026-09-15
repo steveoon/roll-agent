@@ -259,6 +259,8 @@ export interface ScheduleStatusSummary {
     readonly liveness: string;
     readonly pid?: number;
     readonly startedAt?: string;
+    readonly schemaVersion?: number;
+    readonly requiresRestart?: boolean;
   };
   readonly service: {
     readonly metadataStatus: string;
@@ -280,6 +282,9 @@ export interface ScheduleStatusSummary {
 }
 
 export interface ScheduleRow {
+  readonly timeZone?: string;
+  readonly nextRunAtDisplay?: string;
+  readonly lastRunAtDisplay?: string;
   readonly rounds: { readonly max: number | null; readonly started: number };
   readonly roundsDisplay: string;
   readonly id: string;

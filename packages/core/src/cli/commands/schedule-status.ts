@@ -10,7 +10,7 @@ import {
 import { log } from "../utils/output.ts";
 import {
   loadRuntime,
-  openScheduleStore,
+  openScheduleReader,
   printJson,
   runScheduleCommand,
 } from "./schedule-command-utils.ts";
@@ -26,7 +26,7 @@ export default defineCommand({
       const paths = createSchedulerPaths(config.scheduler.dataDir);
       const daemon = inspectDaemon(paths.daemonRecordPath);
       const runtime = await loadRuntime();
-      const store = openScheduleStore(config, runtime);
+      const store = openScheduleReader(config, runtime);
       try {
         const schedules = store.listSchedules();
         const nextWakeAtMs = store.nextWakeAtMs();
@@ -43,6 +43,10 @@ export default defineCommand({
             liveness: daemon.liveness,
             pid: daemon.record?.pid,
             startedAt: daemon.record?.startedAt,
+            schemaVersion: daemon.record?.schedulerSchemaVersion,
+            requiresRestart:
+              daemon.liveness === DAEMON_LIVENESS.running &&
+              daemon.record?.schedulerSchemaVersion !== runtime.SCHEDULER_SCHEMA_VERSION,
             logPath: paths.logPath,
           },
           schedules: {
@@ -64,6 +68,11 @@ export default defineCommand({
         log.info(
           `daemon: ${status.daemon.liveness}${status.daemon.pid ? ` (pid ${String(status.daemon.pid)})` : ""}`,
         );
+        if (status.daemon.requiresRestart) {
+          log.warn(
+            "正在运行的 daemon 版本不兼容；查询仍可用，写入任务前请运行 roll schedule service restart（前台 daemon 请停止后重启）",
+          );
+        }
         if (status.serviceInstalling) {
           log.warn(
             "service metadata 仍为 installing（上次 install / restart / update 未完成），在恢复前不会领取任何任务；运行 roll schedule service status 查看原因，再用 roll schedule service restart 恢复",

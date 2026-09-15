@@ -1,4 +1,4 @@
 interface:
   display_name: "Roll Core"
-  short_description: "Operate MCP agents through roll CLI"
-  default_prompt: "Use $roll-core to check agent health, preserve routing keys, and call the right agent/tool through `roll run --json` or `roll ask --json`."
+  short_description: "Operate MCP agents and schedule work through Roll"
+  default_prompt: "Use $roll-core to check agent health, preserve routing keys, call the right agent/tool, or register a bounded interval or calendar schedule with the correct time zone through the Roll CLI."

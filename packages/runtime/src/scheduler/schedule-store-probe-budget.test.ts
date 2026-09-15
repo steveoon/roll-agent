@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
-import { DatabaseSync } from "node:sqlite";
+import { DatabaseSync } from "./database-fixture.test.ts";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createIntervalTrigger } from "./trigger.ts";
@@ -264,7 +264,7 @@ test("已是 v2 的旧账本（无 executor_probed_at 列）打开时会补列�
     assert.ok(columns.includes("tree_tracked_pgids"));
     assert.ok(columns.includes("tree_unsettled"));
     assert.ok(columns.includes("tree_survivor_pids"));
-    assert.equal(version.user_version, 8);
+    assert.equal(version.user_version, 9);
     const claims = reopened.claimDue({
       workerId: "new-daemon",
       nowMs: NOW + SCHEDULER_LIMITS.claimLeaseMs + 1,

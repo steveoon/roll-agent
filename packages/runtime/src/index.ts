@@ -150,6 +150,7 @@ export {
   SCHEDULE_LEDGER_READ_STATUSES,
   ScheduleStore,
   readScheduleLedger,
+  readScheduleOccupancy,
 } from "./scheduler/schedule-store.ts";
 export type {
   ScheduleStoreOptions,
@@ -158,10 +159,14 @@ export type {
   ScheduleLedgerReadStatus,
 } from "./scheduler/schedule-store.ts";
 export { SCHEDULER_LIMITS } from "./scheduler/limits.ts";
+export { SCHEDULER_SCHEMA_VERSION } from "./scheduler/database-version.ts";
 export {
   TRIGGER_KINDS,
   ScheduleTriggerError,
   computeNextRunAtMs,
+  computeFirstRunAtMs,
+  createScheduleTrigger,
+  scheduleTimingInputSchema,
   createIntervalTrigger,
   describeTrigger,
   formatDuration,
@@ -171,7 +176,13 @@ export {
   parseTriggerJson,
   triggerSpecSchema,
 } from "./scheduler/trigger.ts";
-export type { TriggerKind, TriggerSpec } from "./scheduler/trigger.ts";
+export type { TriggerKind, TriggerSpec, ScheduleTimingInput } from "./scheduler/trigger.ts";
+export {
+  calendarScheduleSchema,
+  calendarScheduleInputSchema,
+  systemTimeZone,
+} from "./scheduler/calendar.ts";
+export type { CalendarSchedule, CalendarScheduleInput } from "./scheduler/calendar.ts";
 export {
   CANCEL_INVOCATION_OUTCOMES,
   COMPLETE_INVOCATION_OUTCOMES,

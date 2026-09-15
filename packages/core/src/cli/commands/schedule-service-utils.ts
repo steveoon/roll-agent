@@ -79,6 +79,8 @@ export async function retireWindowsSchedulerService(
       const store = openScheduleStore(undefined, runtime, {
         dataDir: paths.dataDir,
         requireExistingDatabase: true,
+        // Both teardown entrypoints invoke openStore only while holding the daemon fence.
+        daemonLockHeld: true,
       });
       return { store, close: () => store.close() };
     },
@@ -214,15 +216,10 @@ export async function listSchedulerServiceBlockerIds(
     return [];
   }
   const runtime = await loadRuntime();
-  const store = openScheduleStore(undefined, runtime, { dataDir, requireExistingDatabase: true });
-  try {
-    const rows = store.listOccupyingInvocations();
-    return (
-      options.allowInline === true ? rows.filter((row) => !isInlineWorkerId(row.claimedBy)) : rows
-    ).map((row) => row.id);
-  } finally {
-    store.close();
-  }
+  const rows = runtime.readScheduleOccupancy(dataDir);
+  return (
+    options.allowInline === true ? rows.filter((row) => !isInlineWorkerId(row.claimedBy)) : rows
+  ).map((row) => row.id);
 }
 
 export async function countSchedulerServiceBlockers(

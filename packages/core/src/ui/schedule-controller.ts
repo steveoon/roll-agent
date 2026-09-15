@@ -4,6 +4,7 @@ import {
   serializeInvocation,
   serializeSchedule,
   type SerializedInvocation,
+  type ScheduleReaderInstance,
 } from "../cli/commands/schedule-command-utils.ts";
 import type { SchedulerServiceProbe } from "../cli/commands/schedule-service-utils.ts";
 import { cancelScheduledInvocation } from "../scheduler-host/cancel-invocation.ts";
@@ -44,6 +45,7 @@ export type ScheduleLedger = Pick<
 >;
 
 export interface ScheduleLedgerPort {
+  openReader(): Promise<ScheduleReaderInstance>;
   open(): Promise<ScheduleLedger>;
 }
 
@@ -54,6 +56,8 @@ export interface ScheduleHostStatus {
     readonly liveness: DaemonLiveness;
     readonly pid?: number;
     readonly startedAt?: string;
+    readonly schemaVersion?: number;
+    readonly requiresRestart?: boolean;
   };
   readonly service: SchedulerServiceProbe;
   readonly unresolvedPlaceholders: readonly string[];
@@ -192,10 +196,21 @@ export function createRollUiScheduleController(
     }
   };
 
+  const withReader = async <T>(
+    work: (reader: ScheduleReaderInstance) => Promise<T> | T,
+  ): Promise<T> => {
+    const reader = await options.ledger.openReader();
+    try {
+      return await work(reader);
+    } finally {
+      reader.close();
+    }
+  };
+
   return {
     getStatus: async () => {
       const host = await options.host.inspect();
-      return withLedger((ledger) => {
+      return withReader((ledger) => {
         const schedules = ledger.listSchedules();
         const nextWakeAtMs = ledger.nextWakeAtMs();
         return {
@@ -211,7 +226,7 @@ export function createRollUiScheduleController(
       });
     },
     listSchedules: () =>
-      withLedger((ledger) =>
+      withReader((ledger) =>
         ledger.listSchedules().map((schedule) => {
           const live = ledger.findLiveRun(schedule.id);
           return {
@@ -225,7 +240,7 @@ export function createRollUiScheduleController(
       ),
     listRuns: async (request) => {
       const parsed = parseRunsRequest(request);
-      return withLedger((ledger) => {
+      return withReader((ledger) => {
         const schedules = ledger.listSchedules();
         const names = new Map(schedules.map((s) => [s.id, s.name]));
         const withName = (rows: readonly SerializedInvocation[]): SerializedScheduleRun[] =>

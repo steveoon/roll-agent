@@ -57,7 +57,10 @@ function createFakeHost(): FakeHost {
 function createHarness(dir: string, host: ScheduleHostPort = createFakeHost()) {
   const store = new ScheduleStore(dir, { executorLiveness: () => "dead" });
   const controller = createRollUiScheduleController({
-    ledger: { open: async () => new ScheduleStore(dir, { executorLiveness: () => "dead" }) },
+    ledger: {
+      openReader: async () => new ScheduleStore(dir, { readOnly: true }),
+      open: async () => new ScheduleStore(dir, { executorLiveness: () => "dead" }),
+    },
     host,
     authorityDigestFor: () => "digest-b",
   });
@@ -207,6 +210,7 @@ test("schedule-controller resume 在任务被并发删除时报错而非假成�
   const store = new ScheduleStore(dir, { executorLiveness: () => "dead" });
   const controller = createRollUiScheduleController({
     ledger: {
+      openReader: async () => new ScheduleStore(dir, { readOnly: true }),
       open: async () => {
         const real = new ScheduleStore(dir, { executorLiveness: () => "dead" });
         return new Proxy(real, {

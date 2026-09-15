@@ -111,10 +111,13 @@ function buildScheduleSection(ids: ScheduleToolPromptIds): string {
   if (ids.create !== undefined) {
     lines.push(
       `- 用户明确提出周期性、持续性的任务（如"每隔 30 分钟…""每天…"）时，用 ${ids.create} 工具登记定时任务；不要通过 Shell 执行 roll schedule add。`,
-      "- every 只描述触发频率，prompt 描述每次触发要做的工作；缺少频率、工作内容或目标工作区时先向用户澄清。",
+      "- startAt=开始时间，recurrence=重复规则，rounds=总轮数，三个维度独立。recurrence.kind 为 interval/daily/weekly：interval 只填写 every；daily/weekly 填写 time、timeZone，weekly 还需 weekdays（1=周一..7=周日）。timeZone=null 表示省略时区按运行 Roll 的机器时区，创建时保存。不要提交顶层 every/calendar。",
       "- 用户指定执行轮数时，将上限传入 rounds，不要仅写进 prompt；rounds 限制自动触发次数，同轮重试不多计，手动运行不计，省略则不限轮数。",
-      `- ${ids.create} 自带确认步骤，会向用户展示完整参数；调用前不要再重复口头确认。`,
-      "- 仅支持固定间隔，不支持一次性时间点、cron 表达式或时区；用户提出这类需求时明说不支持，不要伪装成间隔任务。",
+      `- ${ids.create} 自带确认步骤；仅在信息齐全时直接调用，不再重复口头确认。补齐缺失信息不是重复确认。用户只说“今天 14:20 开始，共两轮”时，先问“两轮间隔多久？”，不能擅自补成每天一次或任意间隔。只有明确每天/每周时才选 daily/weekly。`,
+      "- 指定未来开始时间用 startAt（YYYY-MM-DDTHH:mm 或带偏移的 ISO 时间）；明天等相对日期按当前运行机器日期和时区转换。今天/明天某时只决定 startAt，不决定 recurrence。interval 首轮在 startAt 执行；daily/weekly 在 startAt 起找匹配时段。明确只执行一次可用 interval、every=1m、rounds=1 和 startAt，间隔不会产生第二轮。",
+      '- 示例：“今天 14:20 开始，每隔 1 分钟，2 轮结束” → recurrence={"kind":"interval","every":"1m"}、startAt=今天的明确日期时间、rounds=2。startAt/cwd/rounds/maxRun 的缺省值写 null；null 不代表允许猜测缺失的重复规则。开始时间已过时重新澄清，不得自动改为明天或立即执行。',
+      "- 参数错误是确定性错误：读取字段路径并修正，不要原样重试相同参数；缺少用户信息时询问用户，不通过 Shell 绕过校验。",
+      "- 每天 8 点每半小时执行 20 轮是每天开启一组循环，本版不支持；不要误登记成每天一次或全天连续间隔。cron 也不支持。缺少频率、工作内容或目标工作区时先澄清。",
       "- 不要替用户安装调度服务；创建结果里的就绪警告要如实转告用户。",
     );
   }
@@ -445,6 +448,7 @@ export function buildCapabilityTurnReminder(context: EffectiveCapabilityTurnCont
     `cwd=${context.cwd}`,
     `platform=${context.platform}`,
     `date=${context.date}`,
+    `timeZone=${Intl.DateTimeFormat().resolvedOptions().timeZone}`,
     ...(context.dynamic.origin
       ? [
           `turnOrigin=${context.dynamic.origin.kind}`,

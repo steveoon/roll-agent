@@ -1,4 +1,4 @@
-import { createElement as h, useState } from "react";
+import { createElement as h, useMemo, useState } from "react";
 import type { ReactElement } from "react";
 import { Box, Text, useInput } from "ink";
 import type { FileChangeDiff } from "@roll-agent/runtime";
@@ -146,6 +146,26 @@ function buildConfirmDiffRows(diff: FileChangeDiff, budget: number): ReactElemen
   return rows;
 }
 
+function wrapParameterLines(value: string, width: number): string[] {
+  const lines: string[] = [];
+  for (const line of value.replaceAll("\t", "  ").split("\n")) {
+    let current = "";
+    let cells = 0;
+    for (const character of line) {
+      const size = displayWidth(character);
+      if (current.length > 0 && cells + size > width) {
+        lines.push(current);
+        current = "";
+        cells = 0;
+      }
+      current += character;
+      cells += size;
+    }
+    lines.push(current);
+  }
+  return lines;
+}
+
 export function ConfirmSelect({
   prompt,
   args,
@@ -160,6 +180,18 @@ export function ConfirmSelect({
   const boundedRows = Math.max(1, Math.floor(maxRows));
   const compact = boundedRows <= COMPACT_CONFIRM_MAX_ROWS;
   const compactContentWidth = Math.max(1, width);
+  const parameterLines = useMemo(
+    () => wrapParameterLines(args, compactContentWidth),
+    [args, compactContentWidth],
+  );
+  const detailHeader = boundedRows >= 4;
+  const detailRows = Math.max(1, boundedRows - 2 - Number(detailHeader));
+  const pageCount = Math.ceil(parameterLines.length / detailRows);
+  const canPage =
+    showArgs && boundedRows >= 3 && (parameterLines.length > 1 || displayWidth(args) > width);
+  const [detailsPage, setDetailsPage] = useState(0);
+  const page = canPage ? Math.min(detailsPage, pageCount) : 0;
+  const displayPrompt = canPage ? `PgDn 参数详情 · ${prompt}` : prompt;
   const compactSessionGrantLabel =
     sessionGrantLabel === undefined ? undefined : normalizeInlineText(sessionGrantLabel);
   const compactSessionGrantLabelFits =
@@ -179,6 +211,14 @@ export function ConfirmSelect({
   const options = confirmOptions(hasSession);
   const [selected, setSelected] = useState<ConfirmOption>("no");
   useInput((input, key) => {
+    if (canPage && key.pageDown) {
+      setDetailsPage((current) => Math.min(current + 1, pageCount));
+      return;
+    }
+    if (canPage && key.pageUp) {
+      setDetailsPage((current) => Math.max(0, current - 1));
+      return;
+    }
     if (key.leftArrow || key.upArrow) {
       setSelected((current) => stepConfirmOption(options, current, -1));
       return;
@@ -206,7 +246,7 @@ export function ConfirmSelect({
   });
   const optionRow = h(
     Box,
-    compact ? { flexShrink: 0 } : { marginTop: 1, flexShrink: 0 },
+    compact || page > 0 ? { flexShrink: 0 } : { marginTop: 1, flexShrink: 0 },
     h(Text, selected === "yes" ? { color: "green" } : {}, `${selected === "yes" ? "❯ " : "  "}Yes`),
     hasSession
       ? h(
@@ -228,6 +268,26 @@ export function ConfirmSelect({
     { marginLeft: compact ? 0 : 1, height: 1, flexShrink: 0, overflowY: "hidden" },
     h(Text, { dimColor: true, wrap: "truncate-end" }, compact ? compactHelp : expandedHelp),
   );
+  if (page > 0) {
+    return h(
+      Box,
+      { flexDirection: "column", width, maxHeight: boundedRows, overflowY: "hidden" },
+      detailHeader
+        ? h(
+            Text,
+            { wrap: "truncate-end" },
+            `参数 ${String(page)}/${String(pageCount)} · PgUp 返回/上一页 · PgDn 下一页`,
+          )
+        : null,
+      ...parameterLines
+        .slice((page - 1) * detailRows, page * detailRows)
+        .map((line, index) =>
+          h(Text, { key: index, dimColor: true, wrap: "truncate-end" }, line || " "),
+        ),
+      optionRow,
+      h(Text, { dimColor: true, wrap: "truncate-end" }, "←→/y/n 确认 · Esc 取消 · PgUp/PgDn 参数"),
+    );
+  }
   if (rowPlan !== undefined) {
     const { explanationRows, showLabel: showLabelRow, showArgs: showArgsRow } = rowPlan;
     return h(
@@ -239,7 +299,7 @@ export function ConfirmSelect({
         flexShrink: 0,
         overflowY: "hidden",
       },
-      h(Text, { wrap: "truncate-end" }, truncateDisplayLine(prompt, compactContentWidth)),
+      h(Text, { wrap: "truncate-end" }, truncateDisplayLine(displayPrompt, compactContentWidth)),
       explanationRows === 0
         ? null
         : h(
@@ -273,7 +333,7 @@ export function ConfirmSelect({
     sessionGrantLabel === undefined
       ? 0
       : Math.max(1, Math.ceil(displayWidth(sessionGrantLabel) / contentWidth));
-  const promptRows = Math.max(1, Math.ceil(displayWidth(prompt) / contentWidth));
+  const promptRows = Math.max(1, Math.ceil(displayWidth(displayPrompt) / contentWidth));
   const fixedRows = 2 + promptRows + explanationRows + labelRows + 2;
   const diffBudget = Math.max(0, boundedRows - 1 - fixedRows);
   const diffRows =
@@ -298,7 +358,7 @@ export function ConfirmSelect({
         flexShrink: 1,
         overflowY: "hidden",
       },
-      h(Text, null, prompt),
+      h(Text, null, displayPrompt),
       explanation === undefined
         ? null
         : h(Text, { color: "cyan" }, wrapDisplayLines(`AI 说明：${explanation}`, contentWidth, 2)),

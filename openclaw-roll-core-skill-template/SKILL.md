@@ -1,7 +1,7 @@
 ---
 name: roll-core
 description: >-
-  Operates registered MCP agents through the stable `roll` CLI surface: inspects lifecycle and env status, discovers tools with `roll agent tools`, invokes tools with `roll run --json`, preserves agent-scoped routing keys such as browserInstance, and routes ambiguous intents with `roll ask --json`. Use when an orchestrator or coding agent must operate or troubleshoot registered Roll agents deterministically.
+  Operates registered MCP agents through the stable `roll` CLI surface: inspects lifecycle and env status, discovers tools with `roll agent tools`, invokes tools with `roll run --json`, preserves agent-scoped routing keys such as browserInstance, and routes ambiguous intents with `roll ask --json`. Registers and inspects bounded interval or daily/weekly calendar schedules with saved time zones. Use when an orchestrator or coding agent must operate or troubleshoot registered Roll agents or schedule their work deterministically.
 ---
 
 # Roll Core
@@ -53,7 +53,7 @@ Machine-readable boundaries:
 | `roll companion status --json` / `roll companion doctor --json` |  |
 | `roll skills install ... --json` |  |
 | `roll run ... --json` / `roll run --batch-* --json` |  |
-| `roll schedule add\|list\|show\|runs\|inspect\|status\|cancel\|run-now ... --json` | `roll schedule pause\|resume\|remove` (exit 0 + stderr line) |
+| `roll schedule add\|extend\|list\|show\|runs\|inspect\|status\|cancel\|run-now ... --json` | `roll schedule pause\|resume\|remove` (exit 0 + stderr line) |
 | `roll schedule service status --json`, `roll schedule service restart --json` | `roll schedule service install\|uninstall`, `roll schedule daemon --foreground` |
 
 ## Startup Gate
@@ -364,7 +364,7 @@ Current roll-core also ships product-level command groups that sit outside the d
 | `roll companion <enroll\|status\|doctor\|start\|stop\|restart\|logs\|...>` | Per-user local daemon lifecycle for remote access; dials an outbound WebSocket to the Relay host and opens no inbound network port | human-readable; `status` / `doctor` accept `--json` |
 | `roll ui` | Local web config console on 127.0.0.1 (config, agents, companion panel) — not a chat UI | human-readable |
 | `roll skills install <dir-or-git-url> [--target ...]` | Install skill docs into orchestrator skill dirs (Claude Code / Codex / generic `.agents`) | human-readable; `--json` supported |
-| `roll schedule <add\|list\|show\|runs\|inspect\|status\|run-now\|cancel\|pause\|resume\|remove\|daemon\|service install\|uninstall\|restart\|status>` | Interval-triggered unattended `roll chat` rounds with a local ledger; see [Scheduled Tasks](#scheduled-tasks) | non-interactive; `--json` on the read/mutate commands listed above |
+| `roll schedule <add\|extend\|list\|show\|runs\|inspect\|status\|run-now\|cancel\|pause\|resume\|remove\|daemon\|service install\|uninstall\|restart\|status>` | Interval or calendar-triggered unattended `roll chat` rounds with a local ledger; see [Scheduled Tasks](#scheduled-tasks) | non-interactive; `--json` on the read/mutate commands listed above |
 
 Rules:
 
@@ -377,21 +377,24 @@ Rules:
 
 ## Scheduled Tasks
 
-`roll schedule` runs one unattended `roll chat` turn per trigger on a fixed interval and keeps every run in a local SQLite ledger. The CLI has no TTY prompts, so orchestrators may drive it directly, and it remains the complete management surface (`pause` / `resume` / `cancel` / `remove` / `service` exist only here and in `roll ui`). Interactive `roll chat` additionally exposes built-in `roll__schedule_create` / `roll__schedule_list` tools (create requires an in-chat human confirmation; unattended scheduled turns get only `schedule_list`), so a ledger you inspect may contain schedules a human created conversationally — treat `roll schedule list --json` as the authoritative view either way.
+`roll schedule` runs one unattended `roll chat` turn per interval or daily/weekly calendar trigger and keeps every run in a local SQLite ledger. The CLI has no TTY prompts, so orchestrators may drive it directly within the user's authorization, and it remains the complete management surface (`pause` / `resume` / `cancel` / `remove` / `service` exist only here and in `roll ui`). Interactive `roll chat` additionally exposes built-in `roll__schedule_create` / `roll__schedule_extend` / `roll__schedule_list` tools (create and extend require an in-chat human confirmation; unattended scheduled turns get only `schedule_list`), so a ledger you inspect may contain schedules a human created conversationally — treat `roll schedule list --json` as the authoritative view either way.
 
 Quick path:
 
 ```bash
 roll schedule add "<prompt>" --name <name> --every 30m --cwd /abs/path --json   # -> { id, status, trigger, nextRunAt?, rounds: { max, started }, roundsDisplay, ... }
-roll schedule run-now <id> --inline --json                                      # one synchronous attempt; exit 1 unless completed / needs_confirmation
+roll schedule run-now <id> --inline --json                                      # optional, separately authorized real execution, even before startAt
 roll schedule extend <id> --rounds 30 --expected-max-rounds 20 --request-id <stable-id> --json # explicitly add quota to a completed finite task
-roll schedule status --json                                                     # { daemon: { liveness, pid }, schedules: { total, active, paused, completed }, nextWakeAt }
+roll schedule status --json                                                     # daemon.liveness, daemon.requiresRestart, schedule counts, nextWakeAt
 roll schedule runs <id> --json                                                  # [{ id, status, threadId, error, pendingActions, outputExcerpt, attempt, ... }]
 ```
 
 Facts an orchestrator must respect:
 
-- **Interval only.** `--every <integer><s|m|h|d>`, 60 s to 365 d (`90m`, not `1.5h`). There is no calendar or run-once-at-time trigger. First run = registration time + interval, or immediately with `--now`; after each trigger the next run is rebased to claim time + interval, so wall-clock phase drifts. Missed triggers (sleep, daemon down) are caught up once, never replayed.
+- **Keep start, recurrence and quota independent.** “Today/tomorrow at 14:20” sets the first-time constraint, not a daily rule. “Two rounds” sets the quota, not the interval. Ask only for missing timing information; once complete, confirm once. Chat tools use a single `recurrence` branch with `kind: interval/daily/weekly` and nullable defaults; see the recipe for the exact contract. Never resolve conflicting fields by silently discarding one, or retry identical invalid arguments.
+- **Choose exactly one recurrence.** `--every <integer><s|m|h|d>` (60 s to 365 d; `90m`, not `1.5h`), `--daily HH:mm`, or `--weekly mon,wed,fri --at HH:mm`. Add `--start-at` for a future start/lower bound and `--rounds` for a finite total. There is no cron, daily batch-of-intervals, or deadline option. Check `roll schedule add --help` first when version support is uncertain; never discard unsupported timing or quota fields. See the [recipe](./references/workflows.md#scheduled-tasks) for CLI and chat field mappings.
+- **Time zone and first execution.** Resolve relative dates such as “tomorrow” on the machine running Roll, not the orchestrator's or browser's clock. A local ISO `--start-at` uses the calendar's `--time-zone` when supplied, otherwise the Roll host's zone; an offset/`Z` fixes an instant. Calendar rules save the resolved IANA zone at creation and keep it after machine-zone changes. Verify returned `nextRunAt` and task-zone display before claiming success. If approval or lock waiting crosses the first occurrence, obtain a new future time/confirmation; do not silently run now. DST gaps skip that date without consuming a round, and repeated times use only the earlier occurrence.
+- **Claim-time anchoring.** Without `--start-at`, an interval first runs registration time + interval (or `--now`, only for an interval without `--start-at`). A future interval starts at `startAt`; each actual claim rebases the next interval, so 08:07 + 30m means 08:37. Calendar rules stay aligned to the saved local time/weekdays, at or after `startAt` if supplied. Missed triggers (sleep, daemon down) are caught up at most once, never replayed as a backlog; all runs of one task share a singleton gate.
 - **Finite automatic rounds.** When the user requests a total limit, pass `--rounds N` (a positive safe integer) to `schedule add`, or `rounds: N` to the in-chat creation tool; do not encode the stopping condition only in the prompt. Omission means unlimited. Each newly claimed automatic invocation consumes one round, including `add --now`; retries and manual `run-now` do not consume extra rounds. `rounds.started` counts consumed automatic rounds, not successes. At the limit no new round is created, but the last round still executes, retries and settles; schedule `completed` means the plan has ended, whereas invocation `completed` means that run succeeded. For detailed progress and recovery, read the [scheduled-task recipe](./references/workflows.md#scheduled-tasks).
 - **Unattended approval.** Any tool call the approval policy would `confirm` is denied instead; the run ends with `status: needs_confirmation` and lists denied `agent.tool` names in `pendingActions`. Under the default `runtime.approval.default: guarded` only read-only tools execute. To let a schedule write or send, set `runtime.approval.overrides["<agent>.<tool>"]: auto` in the config resolved from the schedule's `--cwd` **before** `add`, and keep that list minimal. `default: auto` still denies tools annotated `destructiveHint`.
 - **Authority snapshot.** `add` records a digest of `runtime.approval` + `runtime.shell` from `--cwd`. If either changes later, the next run does not execute and the reason is recorded in `lastError`; the schedule pauses if automatic quota remains, otherwise it ends after settlement. `roll schedule resume <id>` re-records the digest (it is a re-authorization) — run it only after a human confirmed the new boundary. Model, agent, and skill changes are not covered by the digest.
@@ -405,6 +408,9 @@ Boundary rules:
 - `remove` refuses while a run is `claimed` / `running`; stop it first with `roll schedule cancel <invocation-id> --kill`.
 - `remove --abandon` and `cancel --abandon` drop ledger tracking without stopping processes. Treat them as destructive and require explicit human intent.
 - `run-now` without `--inline` only enqueues; parse `status --json` to confirm a daemon is `running` before expecting execution.
+- `run-now` is an extra real execution, even before the requested future start. Do not use it as an automatic smoke test for a task that sends replies or changes data; obtain separate authorization or rehearse a harmless task in an isolated workspace.
+- CLI `add` is not an idempotent retry API. If its result is ambiguous, inspect `list/show --json` for the full task, cwd, trigger and quota before retrying. In-chat creation can reuse the same active definition; do not assume a matching name alone proves equivalence.
+- After a schema upgrade, `list/show/status/runs --json` remain available without migrating the ledger even when an old daemon blocks writes. Check `daemon.requiresRestart` in `status`, then arrange an authorized service restart after live runs settle. Never edit daemon metadata or bypass the writer fence to make registration succeed.
 - A schedule with `status: completed` has reached its automatic round limit: preserve its history and do not call `resume`. Only when the user explicitly requests more rounds, use `schedule extend` with additional rounds and a stable request ID; confirm the old/new total, consumed/remaining rounds, full task, cwd and re-authorization. All unfinished runs, including manual runs, must settle first. Reuse the same ID and expected prior maximum for retries; never silently invent another extension. `pause` leaves it completed; manual `run-now` remains an extra run and does not reopen the plan.
 - For a `paused` schedule, parse `lastError` from `list --json` and `error` from `runs --json` to decide recovery: an authority-drift message means "confirm boundary, then `resume`"; retry exhaustion means "fix the cause, verify with `run-now --inline --json`, then `resume`".
 

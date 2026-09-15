@@ -47,6 +47,18 @@ function statusFixture(overrides: {
 }
 
 describe("schedule-state", () => {
+  it("reports a legacy daemon as a recoverable warning rather than hiding task data", () => {
+    const status = statusFixture({});
+    const warnings = deriveScheduleWarnings({
+      ...status,
+      daemon: { liveness: "running", requiresRestart: true },
+    });
+    assert.ok(
+      warnings.some(
+        (warning) => warning.includes("任务与历史仍可查询") && warning.includes("写入操作暂不可用"),
+      ),
+    );
+  });
   it("keeps one HTTP path per action", () => {
     const actions = Object.keys(SCHEDULE_ACTION_PATHS) as ScheduleAction[];
     assert.deepEqual(actions.sort(), [

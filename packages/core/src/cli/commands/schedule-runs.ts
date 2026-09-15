@@ -3,7 +3,7 @@ import { loadConfig } from "../../config/loader.ts";
 import {
   formatInvocationLine,
   loadRuntime,
-  openScheduleStore,
+  openScheduleReader,
   printJson,
   requireSchedule,
   runScheduleCommand,
@@ -25,7 +25,7 @@ export default defineCommand({
       }
       const { config } = loadConfig();
       const runtime = await loadRuntime();
-      const store = openScheduleStore(config, runtime);
+      const store = openScheduleReader(config, runtime);
       try {
         requireSchedule(store, args.id);
         const rows = store.listInvocations(args.id, limit).map(serializeInvocation);

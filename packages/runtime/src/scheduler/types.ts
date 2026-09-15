@@ -234,6 +234,8 @@ export interface CreateScheduleInput {
   readonly cwd: string;
   readonly trigger: TriggerSpec;
   readonly fireImmediately?: boolean;
+  /** Approval snapshot, checked atomically when inserting a new schedule. */
+  readonly expectedFirstRunAtMs?: number;
   readonly authorityDigest?: string;
   readonly maxRunMs?: number;
   readonly maxRounds?: number;

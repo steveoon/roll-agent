@@ -438,6 +438,7 @@ test("reminder 渲染 turn origin 行", () => {
   assert.match(reminder, /unattended=true/u);
   const plain = buildCapabilityTurnReminder(buildEffectiveCapabilityTurnContext(manifest));
   assert.doesNotMatch(plain, /turnOrigin=/u);
+  assert.ok(plain.includes(`timeZone=${Intl.DateTimeFormat().resolvedOptions().timeZone}`));
 });
 
 test("buildChatSystemPrompt 注入 # 定时任务 段并按 create 可用性裁剪", () => {
@@ -451,7 +452,13 @@ test("buildChatSystemPrompt 注入 # 定时任务 段并按 create 可用性裁�
   assert.match(full, /roll__schedule_create/u);
   assert.match(full, /roll__schedule_list/u);
   assert.match(full, /不要通过 Shell 执行 roll schedule add/u);
-  assert.match(full, /不支持一次性时间点、cron 表达式或时区/u);
+  assert.match(full, /recurrence.kind/u);
+  assert.match(full, /补齐缺失信息不是重复确认/u);
+  assert.match(full, /先问“两轮间隔多久？”，不能擅自补成每天一次/u);
+  assert.match(full, /不要原样重试相同参数/u);
+  assert.match(full, /startAt/u);
+  assert.match(full, /省略时区按运行 Roll 的机器时区/u);
+  assert.match(full, /每天开启一组循环，本版不支持/u);
 
   const listOnly = buildChatSystemPrompt({
     scheduleToolIds: { list: "roll__schedule_list" },

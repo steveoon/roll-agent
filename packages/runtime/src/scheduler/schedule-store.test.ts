@@ -14,7 +14,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { DatabaseSync } from "node:sqlite";
+import { DatabaseSync } from "./database-fixture.test.ts";
 import { ScheduleStore, readScheduleLedger } from "./schedule-store.ts";
 import {
   CANCEL_INVOCATION_OUTCOMES,
@@ -892,7 +892,7 @@ test("打开 schema v1 数据库时自动补齐新列并升级 user_version", ()
     store.close();
     const reopened = new DatabaseSync(join(dir, "schedules.db"));
     const version = reopened.prepare("PRAGMA user_version").get() as { user_version: number };
-    assert.equal(version.user_version, 8);
+    assert.equal(version.user_version, 9);
     const columns = reopened.prepare("PRAGMA table_info(invocations)").all() as Array<{
       readonly name: string;
     }>;
@@ -1011,7 +1011,8 @@ test("v1 库中超过 365 天的 interval 在迁移时被钳位并暂停；损�
     const store = new ScheduleStore(dir);
     const big = store.getSchedule("big");
     assert.equal(big?.status, SCHEDULE_STATUSES.paused);
-    assert.equal(big?.trigger.everyMs, 31_536_000_000);
+    assert.equal(big?.trigger.kind, "interval");
+    if (big?.trigger.kind === "interval") assert.equal(big.trigger.everyMs, 31_536_000_000);
     assert.match(big?.lastError ?? "", /365/u);
     assert.equal(store.listSchedules().length, 2);
     store.close();
@@ -2699,7 +2700,7 @@ test("timeout late terminal CAS 拒绝错误 expectedAttempt，不改写已完�
   }
 });
 
-test("打开 schema v4 数据库时补齐 schedules.max_run_ms 并升级到 v8", () => {
+test("打开 schema v4 数据库时补齐 schedules.max_run_ms 并升级到 v9", () => {
   const dir = tempDir();
   try {
     const legacy = new DatabaseSync(join(dir, "schedules.db"));
@@ -2731,7 +2732,7 @@ test("打开 schema v4 数据库时补齐 schedules.max_run_ms 并升级到 v8",
     store.close();
     const reopened = new DatabaseSync(join(dir, "schedules.db"));
     const version = reopened.prepare("PRAGMA user_version").get() as { user_version: number };
-    assert.equal(version.user_version, 8);
+    assert.equal(version.user_version, 9);
     const columns = reopened.prepare("PRAGMA table_info(schedules)").all() as Array<{
       readonly name: string;
     }>;

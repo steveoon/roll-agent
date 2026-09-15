@@ -22,7 +22,21 @@ export default defineCommand({
       required: true,
     },
     name: { type: "string", description: "任务名称", required: true },
-    every: { type: "string", description: "运行周期，如 30m、2h、1d（最短 60s）", required: true },
+    every: {
+      type: "string",
+      description: "固定间隔，如 30m、2h、1d（最短 60s；与 daily/weekly 三选一）",
+    },
+    daily: { type: "string", description: "每天执行的当地时间，如 08:00" },
+    weekly: { type: "string", description: "每周执行的星期，如 mon,wed,fri（需配合 --at）" },
+    at: { type: "string", description: "每周任务的当地时间，如 08:00" },
+    "time-zone": {
+      type: "string",
+      description: "日历时区，例如 Asia/Shanghai；默认使用并保存本机时区",
+    },
+    "start-at": {
+      type: "string",
+      description: "未来开始时间，如 2026-09-16T08:00（本机/日历时区），也接受带偏移的 ISO 时间",
+    },
     cwd: { type: "string", description: "任务运行的工作目录（默认当前目录）" },
     "max-run": {
       type: "string",
@@ -35,7 +49,56 @@ export default defineCommand({
   },
   async run({ args }) {
     await runScheduleCommand(async () => {
+      if (
+        [args.every, args.daily, args.weekly].filter((value) => value !== undefined).length !== 1
+      ) {
+        throw new Error("--every、--daily、--weekly 必须且只能提供一个");
+      }
+      if (
+        (args.weekly === undefined && args.at !== undefined) ||
+        (args.weekly !== undefined && args.at === undefined)
+      ) {
+        throw new Error("--weekly 必须与 --at 同时使用");
+      }
+      if (args["time-zone"] !== undefined && args.every !== undefined) {
+        throw new Error("--time-zone 仅用于 --daily/--weekly；间隔任务的 start-at 可指定 ISO 偏移");
+      }
+      if (args.now && (args.every === undefined || args["start-at"] !== undefined)) {
+        throw new Error("--now 仅用于普通间隔任务，不能与日历规则或 --start-at 同时使用");
+      }
+      const dayNames = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"];
+      const weekdays = args.weekly?.split(",").map((value) => {
+        const day = value.trim().toLowerCase();
+        const index = dayNames.indexOf(day);
+        if (index < 0) {
+          throw new Error(
+            `--weekly 不支持的星期：${day || "（空值）"}；可选 ${dayNames.join(",")}`,
+          );
+        }
+        return index + 1;
+      });
+      const zone = args["time-zone"] === undefined ? {} : { timeZone: args["time-zone"] };
+      const runtime = await loadRuntime();
+      const trigger = runtime.createScheduleTrigger({
+        ...(args.every === undefined ? {} : { every: args.every }),
+        ...(args.daily === undefined
+          ? {}
+          : { calendar: { frequency: "daily", time: args.daily, ...zone } }),
+        ...(args.weekly === undefined
+          ? {}
+          : {
+              calendar: {
+                frequency: "weekly",
+                time: args.at ?? "",
+                weekdays: weekdays ?? [],
+                ...zone,
+              },
+            }),
+        ...(args["start-at"] === undefined ? {} : { startAt: args["start-at"] }),
+      });
       const maxRounds = args.rounds === undefined ? undefined : parseScheduleRounds(args.rounds);
+      const maxRunMs =
+        args["max-run"] === undefined ? undefined : runtime.parseMaxRunText(args["max-run"]);
       const requestedCwd = resolve(args.cwd ?? process.cwd());
       let cwd: string | undefined;
       try {
@@ -49,20 +112,17 @@ export default defineCommand({
       }
       const { config } = loadConfig();
       const authorityDigest = computeAuthorityDigest(loadConfig({ cwd }).config);
-      const runtime = await loadRuntime();
       const store = openScheduleStore(config, runtime);
       try {
         const record = store.createSchedule({
           name: args.name,
           prompt: args.prompt,
           cwd,
-          trigger: runtime.createIntervalTrigger(args.every),
+          trigger,
           fireImmediately: args.now,
           authorityDigest,
           ...(maxRounds === undefined ? {} : { maxRounds }),
-          ...(args["max-run"] === undefined
-            ? {}
-            : { maxRunMs: runtime.parseMaxRunText(args["max-run"]) }),
+          ...(maxRunMs === undefined ? {} : { maxRunMs }),
         });
         const serialized = serializeSchedule(record);
         if (args.json) {
