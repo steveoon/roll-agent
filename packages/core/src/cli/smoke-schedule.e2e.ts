@@ -7,7 +7,7 @@ import { randomUUID } from "node:crypto";
 import { spawn, type ChildProcess } from "node:child_process";
 import { once } from "node:events";
 import { setTimeout as delay } from "node:timers/promises";
-import { DatabaseSync } from "node:sqlite";
+import { DatabaseSync } from "../scheduler-host/database-fixture.test.ts";
 import { ScheduleStore } from "@roll-agent/runtime";
 import { readProcessStartToken } from "../registry/process-identity.ts";
 import { probeExecutorLiveness } from "../scheduler-host/executor-liveness.ts";

@@ -5,7 +5,7 @@ import { once } from "node:events";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { DatabaseSync } from "node:sqlite";
+import { DatabaseSync } from "./database-fixture.test.ts";
 import { ScheduleStore, readScheduleHistory, readScheduleLedger } from "./schedule-store.ts";
 import { createIntervalTrigger } from "./trigger.ts";
 import type { ClaimedInvocation } from "./types.ts";
@@ -658,7 +658,7 @@ test("finite rounds: a constructor waiting behind another upgrade preserves comm
 });
 
 for (const version of [5, 6] as const) {
-  test(`finite rounds: readonly v${String(version)} and v8 preserve legacy data and migration keeps foreign keys`, () => {
+  test(`finite rounds: readonly v${String(version)} and v9 preserve legacy data and migration keeps foreign keys`, () => {
     const dir = mkdtempSync(join(tmpdir(), "roll-rounds-legacy-"));
     let store: ScheduleStore | undefined;
     try {
@@ -685,7 +685,7 @@ for (const version of [5, 6] as const) {
       assert.equal(store.getInvocation("legacy-run")?.treeUnsettled, true);
       assert.equal(readScheduleLedger(dir).status, "ok");
       const migrated = new DatabaseSync(join(dir, "schedules.db"));
-      assert.equal(migrated.prepare("PRAGMA user_version").get()?.user_version, 8);
+      assert.equal(migrated.prepare("PRAGMA user_version").get()?.user_version, 9);
       assert.deepEqual(migrated.prepare("PRAGMA foreign_key_check").all(), []);
       if (version === 6) {
         assert.equal(

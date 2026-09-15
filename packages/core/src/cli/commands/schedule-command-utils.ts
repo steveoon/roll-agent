@@ -10,14 +10,29 @@ import {
   type InvocationTreeScope,
 } from "../../scheduler-host/invocation-tree.ts";
 import { describeScheduleRounds } from "../../scheduler-host/schedule-rounds.ts";
-import { SCHEDULE_TOKEN_ENV } from "../../scheduler-host/paths.ts";
+import { describeScheduleTiming } from "../../scheduler-host/schedule-display.ts";
+import { SCHEDULE_TOKEN_ENV, createSchedulerPaths } from "../../scheduler-host/paths.ts";
+import { assertCompatibleSchedulerDaemon } from "../../scheduler-host/daemon-record.ts";
 import { backfillScheduleThreadReferences } from "../../scheduler-host/schedule-history.ts";
 
 export type ScheduleStoreInstance = InstanceType<RuntimeModule["ScheduleStore"]>;
+export type ScheduleReaderInstance = Pick<
+  ScheduleStoreInstance,
+  "listSchedules" | "getSchedule" | "listInvocations" | "findLiveRun" | "nextWakeAtMs" | "close"
+>;
+
+export function openScheduleReader(
+  config: RollConfig,
+  runtime: RuntimeModule,
+): ScheduleReaderInstance {
+  return new runtime.ScheduleStore(config.scheduler.dataDir, { readOnly: true });
+}
 
 export interface OpenScheduleStoreOptions {
   readonly dataDir?: string;
   readonly requireExistingDatabase?: boolean;
+  /** Caller must hold the exclusive daemon lock (startup or fenced Windows teardown). */
+  readonly daemonLockHeld?: boolean;
 }
 
 export function openScheduleStore(
@@ -28,6 +43,12 @@ export function openScheduleStore(
   const dataDir = options.dataDir ?? config?.scheduler.dataDir;
   if (dataDir === undefined) {
     throw new Error("无法确定 scheduler data-dir");
+  }
+  if (options.daemonLockHeld !== true) {
+    assertCompatibleSchedulerDaemon(
+      createSchedulerPaths(dataDir).daemonRecordPath,
+      runtime.SCHEDULER_SCHEMA_VERSION,
+    );
   }
   const store = new runtime.ScheduleStore(dataDir, {
     ...(config ? { maxSchedules: config.scheduler.maxSchedules } : {}),
@@ -76,6 +97,7 @@ export function invocationTreeScopeFor(
 
 export function serializeSchedule(record: ScheduleRecord) {
   return {
+    ...describeScheduleTiming(record),
     id: record.id,
     name: record.name,
     status: record.status,
@@ -177,7 +199,10 @@ export function formatScheduleLine(row: SerializedSchedule, hint?: ScheduleLiveR
   return `${base}  ⚠ 运行 ${hint.invocationId}（${hint.status}）进程树未清${pids}；任务不再触发，用 roll schedule cancel ${hint.invocationId} --kill 清场`;
 }
 
-export function requireSchedule(store: ScheduleStoreInstance, id: string): ScheduleRecord {
+export function requireSchedule(
+  store: Pick<ScheduleStoreInstance, "getSchedule">,
+  id: string,
+): ScheduleRecord {
   const record = store.getSchedule(id);
   if (record === undefined) {
     throw new Error(`定时任务 ${id} 不存在；用 roll schedule list 查看`);

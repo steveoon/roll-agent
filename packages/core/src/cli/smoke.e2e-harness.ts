@@ -110,7 +110,8 @@ export function runRoll(
     {
       cwd,
       encoding: "utf-8",
-      env: { ...process.env, NO_COLOR: "1", ...(options.env ?? {}) },
+      // Doctor and service discovery must not inspect the developer's home directory.
+      env: { ...process.env, HOME: cwd, USERPROFILE: cwd, NO_COLOR: "1", ...(options.env ?? {}) },
       input: options.input,
     },
   );
@@ -133,7 +134,7 @@ export function spawnRollProcess(
     ["--experimental-strip-types", "--experimental-sqlite", cliEntry, ...args],
     {
       cwd,
-      env: { ...process.env, NO_COLOR: "1", ...env },
+      env: { ...process.env, HOME: cwd, USERPROFILE: cwd, NO_COLOR: "1", ...env },
       stdio: ["pipe", "pipe", "pipe"],
     },
   );
@@ -155,7 +156,7 @@ export function spawnRollProcess(
 export function spawnNodeScriptProcess(scriptPath: string, cwd: string): SpawnedRollProcess {
   const child = spawn(process.execPath, ["--experimental-strip-types", scriptPath], {
     cwd,
-    env: { ...process.env, NO_COLOR: "1" },
+    env: { ...process.env, HOME: cwd, USERPROFILE: cwd, NO_COLOR: "1" },
     stdio: ["pipe", "pipe", "pipe"],
   });
   const output = { stdout: "", stderr: "" };

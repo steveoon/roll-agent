@@ -520,7 +520,7 @@ Diagnose in this order:
 
 ## Scheduled Tasks
 
-Goal: run a bounded unattended `roll chat` round on a fixed interval and keep the ledger healthy.
+Goal: run bounded unattended `roll chat` rounds on an interval or daily/weekly calendar rule and keep the ledger healthy. Registration and service changes require user intent; examples are not instructions to send live replies during a test.
 
 1. Preflight (same machine and `--cwd` the schedule will use):
 
@@ -553,16 +553,51 @@ Goal: run a bounded unattended `roll chat` round on a fixed interval and keep th
    Check `roll schedule add --help` when the installed version is uncertain: if `--rounds` is absent,
    report the need to upgrade instead of silently creating an unlimited task.
 
+   For “tomorrow at 08:00, every 30 minutes, 20 rounds”, resolve tomorrow to an explicit date on
+   the Roll host first. Replace the quoted date placeholder below; it is not literal CLI input:
+
+   ```bash
+   roll schedule add "<bounded prompt>" --name morning-replies \
+     --every 30m --start-at "<YYYY-MM-DD>T08:00" --rounds 20 --cwd /abs/workspace --json
+   roll schedule add "<bounded prompt>" --name daily-summary \
+     --daily 08:00 --time-zone Asia/Shanghai --rounds 20 --cwd /abs/workspace --json
+   roll schedule add "<bounded prompt>" --name weekly-summary \
+     --weekly mon,wed,fri --at 08:00 --time-zone Asia/Shanghai --rounds 20 --cwd /abs/workspace --json
+   ```
+
+   Use exactly one of `--every`, `--daily`, `--weekly`. `--start-at` is optional for all three:
+   for an interval it is the first execution; for a calendar rule it is a lower bound for matching
+   local clock times. `--now` cannot be combined with `--start-at` or calendar rules. Check the
+   installed help for these flags; unsupported flags require an upgrade, not a lossy approximation.
+   A daily/weekly rule runs once per matching date, not a new group of 20 half-hour rounds each day.
+
+   Omitted time zones use the machine running Roll. Calendar rules persist that zone; changing the
+   machine's zone later does not move existing tasks. `--time-zone` belongs to calendar rules.
+   Local `--start-at` uses that calendar zone, or the host zone for an interval; an ISO offset or
+   `Z` specifies an absolute instant. Read `nextRunAt` and the task-zone display in the result to
+   verify the first execution. If creation/approval misses it, re-confirm a future time instead
+   of silently removing `--start-at`. DST gaps skip the date without charging a round; folds use
+   the earlier occurrence only. Interval claims re-anchor to actual claim time (08:07 → 08:37 for
+   30m), whereas calendars find the next matching local date/time after the claim.
+
+   In interactive chat, `roll__schedule_create` accepts `every: "30m"` or
+   `calendar: { frequency: "daily", time: "08:00", timeZone: "Asia/Shanghai" }`; weekly uses
+   `frequency: "weekly"` and `weekdays: [1, 3, 5]` (Monday = 1, Sunday = 7). Both accept
+   `startAt` and `rounds`; calendar `timeZone` may be omitted for the Roll host default. Review
+   the complete normalized rule, first execution, cwd and quota in the human confirmation.
+
    One successful automatic invocation insertion consumes one round even if startup fails, the
    run fails or is cancelled, or no unread messages exist. Retries keep the same round; `add --now`
    consumes a round and manual `run-now` does not. Pause/resume, daemon restart and history cleanup
    retain the counter. Missed periods consume nothing, so 20 rounds every 30 minutes need not finish
    within 10 hours. Repeating an in-chat create request with the same active definition and limit
    reuses the task without resetting its count; an unlimited task is a different definition.
+   CLI `add` does not provide that deduplication: after an ambiguous result, inspect existing
+   definitions before adding again. Compare the full rule and quota, not just the name.
 
    Keep each round well under the run cap (1 hour by default); use the interval, not one long run, to drain a backlog. If a round genuinely needs longer, set the cap per schedule with `--max-run 6h` (60 s to 24 h) instead of asking for a global change.
 
-4. Test synchronously before trusting the daemon:
+4. Optionally test synchronously, only with separate authorization for immediate execution:
 
    ```bash
    roll schedule run-now <id> --inline --json
@@ -572,6 +607,9 @@ Goal: run a bounded unattended `roll chat` round on a fixed interval and keep th
    - `status: needs_confirmation` -> read `pendingActions`; either add overrides (then `roll schedule resume <id>` to re-record the authority digest) or rewrite the prompt to avoid those tools.
    - exit 1 with `error` -> fix the cause; a manual failure does not pause the schedule.
    - This manual test does not consume the automatic round quota.
+   - It still performs real work and bypasses the future start time. Do not run it automatically
+     on a reply-sending task requested for tomorrow. Use an isolated harmless rehearsal instead,
+     or wait for the first authorized automatic run and inspect its result.
    - This inline attempt obeys the schedule's `--max-run` even without a daemon. On timeout it uses the same process-tree stop sequence as the daemon and exits 1.
 
 5. Make triggers fire without a terminal:
@@ -591,7 +629,7 @@ Goal: run a bounded unattended `roll chat` round on a fixed interval and keep th
 6. Monitor:
 
    ```bash
-   roll schedule status --json              # daemon.liveness, active/paused/completed counts, nextWakeAt
+   roll schedule status --json              # daemon.liveness, daemon.requiresRestart, schedule counts, nextWakeAt
    roll schedule list --json                # per-schedule status, rounds, roundsDisplay, nextRunAt, lastError
    roll schedule runs <id> --json           # recent invocations and their results
    roll schedule list --status completed --json
@@ -608,7 +646,8 @@ Goal: run a bounded unattended `roll chat` round on a fixed interval and keep th
    Preserve the completed task and history. Do not retry `resume`, reset the count, or automatically
    recreate a completed task. If the user explicitly requests more rounds on the same task, use
    `roll schedule extend <id> --rounds 30 --expected-max-rounds 20 --request-id <stable-id> --json`.
-   A 20/20 task becomes 20/50 and waits one full interval from extension before the next round.
+   A 20/20 task becomes 20/50. An interval waits one full interval from extension; a calendar
+   waits for the next matching time in its saved zone. The recurrence and zone are preserved.
    Confirm current-config re-authorization, the preserved task/cwd and before/after limits.
    Every unfinished invocation, including manual runs, must settle first. Retry ambiguous results
    with the same request ID, expected maximum and rounds; replay is a no-op, not extra quota. Manual
@@ -639,6 +678,7 @@ Goal: run a bounded unattended `roll chat` round on a fixed interval and keep th
 Rules:
 
 - Never start `daemon --foreground` or `service install` from batch mode or a tool loop.
-- Before upgrading a pre-v8 scheduler ledger, stop the old daemon and settle active runs and process trees. Then migrate through the new writable CLI entrypoint and start the new service; do not run old and new scheduler versions against the same ledger. Migration retains tasks, runs, thread references and tree metadata; tasks from pre-v7 ledgers stay unlimited and their new counter starts at zero. v7 to v8 retains configured limits and current counters and adds durable extension receipts that survive run-history cleanup. Read-only history supports v5/v6/v7/v8 without migrating the database.
+- Before upgrading a pre-v9 scheduler ledger, stop the old daemon and settle active runs and process trees. Then migrate through the new writable CLI entrypoint and start the new service; do not deliberately mix old and new writers. Migration retains tasks, runs, thread references and tree metadata; tasks from pre-v7 ledgers stay unlimited and their new counter starts at zero. v7/v8 limits, counters and extension receipts are preserved. v9 adds calendar rules and blocks writes from already-open old connections. `list/show/status/runs --json` and history readers support older ledgers without migrating them, even when an old daemon blocks writable commands. `status` exposes `daemon.requiresRestart`; use that diagnostic to arrange a restart, never bypass the fence.
+- On Node 22.6–22.11, query connections use `query_only` SQL write protection because native `readOnly` is unavailable; this is not an OS-level read-only file handle. Query paths do not create or migrate the ledger. Newer Node versions also use native `readOnly`.
 - After upgrading roll or changing the Node install, run `roll schedule service restart` (refuses while a run is live; `--force` interrupts daemon-owned runs, while `run-now --inline` continues). `roll update` does this automatically after Agent maintenance when no run is live, preserves the installed scheduler data-dir, and prints a hint otherwise. Check `roll schedule service status --json` -> `binary.status` or the `Scheduler service` line of `roll doctor --json` when a schedule stops firing after a reboot.
 - Do not use `--abandon` as a shortcut for `remove` or `cancel`; it leaves processes running.

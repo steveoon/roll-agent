@@ -12,6 +12,38 @@ const ESC = "\u001b";
 const SESSION_LABEL = "本会话内不再询问：写入工作目录内的文件";
 const EXTERNAL_SESSION_LABEL = "本会话内不再询问：roll__read_file 访问工作目录外的任意路径";
 
+test("calendar approval exposes full timing and quota through parameter pages in a small terminal", async () => {
+  let approved = false;
+  const ui = render(
+    h(ConfirmSelect, {
+      prompt: "登记定时任务？",
+      args: `name: calendar\nprompt: ${"检查未读消息".repeat(40)}\nfirstRunAt: 2026-09-16 08:00\ntimeZone: Asia/Shanghai\nrounds: 20`,
+      width: 45,
+      maxRows: 9,
+      onDecide: (decision) => {
+        approved = decision.approved;
+      },
+    }),
+  );
+  try {
+    assert.match(ui.lastFrame() ?? "", /PgDn/u);
+    let frames = "";
+    for (let page = 0; page < 12; page++) {
+      ui.stdin.write("\u001b[6~");
+      await delay(10);
+      frames += ui.lastFrame() ?? "";
+    }
+    assert.match(frames, /2026-09-16 08:00/u);
+    assert.match(frames, /Asia\/Shanghai/u);
+    assert.match(frames, /rounds: 20/u);
+    ui.stdin.write("y");
+    await delay(10);
+    assert.equal(approved, true);
+  } finally {
+    ui.unmount();
+  }
+});
+
 function stripAnsi(value: string): string {
   return value.replace(ANSI_STYLE_PATTERN, "");
 }

@@ -4,7 +4,7 @@ import {
   formatScheduleLine,
   liveRunHint,
   loadRuntime,
-  openScheduleStore,
+  openScheduleReader,
   printJson,
   runScheduleCommand,
   serializeSchedule,
@@ -24,7 +24,7 @@ export default defineCommand({
     await runScheduleCommand(async () => {
       const { config } = loadConfig();
       const runtime = await loadRuntime();
-      const store = openScheduleStore(config, runtime);
+      const store = openScheduleReader(config, runtime);
       try {
         if (
           args.status !== "all" &&

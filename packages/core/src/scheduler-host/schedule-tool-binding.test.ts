@@ -1,9 +1,11 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { readScheduleLedger } from "@roll-agent/runtime";
+import { readScheduleLedger, ScheduleStore } from "@roll-agent/runtime";
+import { DatabaseSync } from "./database-fixture.test.ts";
+import { createDaemonRecord, writeDaemonRecord } from "./daemon-record.ts";
 import {
   SCHEDULE_TOOL_ERROR_CODES,
   createScheduleToolBinding,
@@ -36,6 +38,121 @@ function requireAdmission(value: unknown): ScheduleCreateAdmission {
   assert.ok(typeof value === "object" && value !== null && (value as { ok: boolean }).ok === true);
   return value as ScheduleCreateAdmission;
 }
+
+test("live legacy daemon refuses creation before migration, and readiness reports restart required", async () => {
+  const ws = createWorkspace();
+  try {
+    const store = new ScheduleStore(ws.dataDir);
+    store.close();
+    const dbPath = join(ws.dataDir, "schedules.db");
+    const raw = new DatabaseSync(dbPath);
+    raw.exec("PRAGMA user_version=8");
+    raw.close();
+    const before = readFileSync(dbPath);
+    writeDaemonRecord(join(ws.dataDir, "daemon.json"), createDaemonRecord("legacy"));
+    const binding = createScheduleToolBinding({ serviceStatePath: ws.serviceStatePath });
+    const result = binding.captureCreate(
+      { name: "calendar", prompt: "noop", calendar: { frequency: "daily", time: "08:00" } },
+      ws.cwd,
+    );
+    assert.equal(result.ok, false);
+    if (!result.ok) assert.match(result.message, /重启/u);
+    const list = await binding.list({}, ws.cwd);
+    assert.ok(list.ok);
+    assert.equal(list.readiness.automaticRunsReady, false);
+    assert.ok(
+      list.readiness.warnings.some((warning) => warning.code === "daemon-version-mismatch"),
+    );
+    assert.deepEqual(readFileSync(dbPath), before);
+  } finally {
+    ws.close();
+  }
+});
+
+test("calendar binding captures host zone and preserves a future start through approval and duplicate creation", async (t) => {
+  const now = Date.parse("2026-09-15T00:00:00Z");
+  t.mock.timers.enable({ apis: ["Date"], now });
+  const ws = createWorkspace();
+  try {
+    const binding = createScheduleToolBinding({ serviceStatePath: ws.serviceStatePath });
+    const admission = requireAdmission(
+      binding.captureCreate(
+        {
+          name: "calendar",
+          prompt: "检查未读",
+          every: "30m",
+          rounds: 20,
+          startAt: "2026-09-16T08:00:00+08:00",
+        },
+        ws.cwd,
+      ),
+    );
+    assert.equal(admission.firstRunAt, "2026-09-16T00:00:00.000Z");
+    t.mock.timers.setTime(now + 60_000);
+    const result = await binding.create(admission);
+    assert.equal(result.ok, true);
+    if (!result.ok) return;
+    assert.equal(result.schedule.nextRunAt, admission.firstRunAt);
+    assert.deepEqual(result.schedule.trigger.spec, admission.trigger);
+    assert.equal(result.schedule.rounds.max, 20);
+    const replay = await binding.create(admission);
+    assert.ok(replay.ok);
+    assert.equal(replay.created, false);
+    assert.equal(replay.schedule.id, result.schedule.id);
+    const daily = requireAdmission(
+      binding.captureCreate(
+        { name: "daily", prompt: "检查", calendar: { frequency: "daily", time: "08:00" } },
+        ws.cwd,
+      ),
+    );
+    assert.equal(daily.trigger.kind, "calendar");
+    if (daily.trigger.kind === "calendar") {
+      assert.equal(
+        daily.trigger.calendar.timeZone,
+        Intl.DateTimeFormat().resolvedOptions().timeZone,
+      );
+    }
+  } finally {
+    ws.close();
+  }
+});
+
+test("calendar binding rejects expired approvals and conflicting recurrence before creating a ledger", async (t) => {
+  const now = Date.parse("2026-09-15T00:00:00Z");
+  t.mock.timers.enable({ apis: ["Date"], now });
+  const ws = createWorkspace();
+  try {
+    const binding = createScheduleToolBinding({ serviceStatePath: ws.serviceStatePath });
+    assert.equal(
+      binding.captureCreate(
+        {
+          name: "bad",
+          prompt: "bad",
+          every: "30m",
+          calendar: { frequency: "daily", time: "08:00" },
+        },
+        ws.cwd,
+      ).ok,
+      false,
+    );
+    for (const timing of [
+      { every: "30m", startAt: "2026-09-16T08:00:00+08:00" },
+      { calendar: { frequency: "daily" as const, time: "08:00", timeZone: "Asia/Shanghai" } },
+    ]) {
+      t.mock.timers.setTime(now);
+      const admission = requireAdmission(
+        binding.captureCreate({ name: "late", prompt: "late", ...timing }, ws.cwd),
+      );
+      t.mock.timers.setTime(Date.parse(admission.firstRunAt) + 1);
+      const result = await binding.create(admission);
+      assert.equal(result.ok, false);
+      if (!result.ok) assert.equal(result.code, "admission_stale");
+      assert.equal(readScheduleLedger(ws.dataDir).status, "empty");
+    }
+  } finally {
+    ws.close();
+  }
+});
 
 test("schedule-tool-binding captureCreate 产出 canonical admission 与 readiness", () => {
   const ws = createWorkspace();

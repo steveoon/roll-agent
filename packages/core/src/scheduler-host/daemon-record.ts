@@ -1,4 +1,4 @@
-import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { randomUUID } from "node:crypto";
 import {
@@ -14,6 +14,7 @@ export interface SchedulerDaemonRecord {
   readonly startedAt: string;
   readonly workerId: string;
   readonly serviceGeneration?: string;
+  readonly schedulerSchemaVersion?: number;
 }
 
 export const DAEMON_LIVENESS = {
@@ -61,6 +62,7 @@ function isRecordObject(value: unknown): value is Record<string, unknown> {
 export function createDaemonRecord(
   workerId: string,
   serviceGeneration?: string,
+  schedulerSchemaVersion?: number,
 ): SchedulerDaemonRecord {
   const processStartToken = readProcessStartToken(process.pid);
   if (processStartToken === undefined) {
@@ -74,6 +76,7 @@ export function createDaemonRecord(
     startedAt: new Date().toISOString(),
     workerId,
     ...(serviceGeneration === undefined ? {} : { serviceGeneration }),
+    ...(schedulerSchemaVersion === undefined ? {} : { schedulerSchemaVersion }),
   };
 }
 
@@ -105,6 +108,10 @@ export function readDaemonRecord(path: string): SchedulerDaemonRecord | undefine
     !isProcessStartToken(value.processStartToken) ||
     typeof value.startedAt !== "string" ||
     typeof value.workerId !== "string" ||
+    (value.schedulerSchemaVersion !== undefined &&
+      (typeof value.schedulerSchemaVersion !== "number" ||
+        !Number.isSafeInteger(value.schedulerSchemaVersion) ||
+        value.schedulerSchemaVersion < 1)) ||
     (value.serviceGeneration !== undefined &&
       (typeof value.serviceGeneration !== "string" || value.serviceGeneration.length === 0))
   ) {
@@ -115,6 +122,9 @@ export function readDaemonRecord(path: string): SchedulerDaemonRecord | undefine
     processStartToken: value.processStartToken,
     startedAt: value.startedAt,
     workerId: value.workerId,
+    ...(value.schedulerSchemaVersion === undefined
+      ? {}
+      : { schedulerSchemaVersion: value.schedulerSchemaVersion }),
     ...(value.serviceGeneration === undefined
       ? {}
       : { serviceGeneration: value.serviceGeneration }),
@@ -158,6 +168,20 @@ export function inspectDaemon(path: string): DaemonInspection {
     return { liveness: DAEMON_LIVENESS.stopped, record };
   }
   return { liveness: DAEMON_LIVENESS.unverifiable, record };
+}
+
+export function assertCompatibleSchedulerDaemon(path: string, schemaVersion: number): void {
+  const inspection = inspectDaemon(path);
+  if (
+    (inspection.record === undefined && existsSync(path)) ||
+    inspection.liveness === DAEMON_LIVENESS.unverifiable ||
+    (inspection.liveness === DAEMON_LIVENESS.running &&
+      inspection.record?.schedulerSchemaVersion !== schemaVersion)
+  ) {
+    throw new Error(
+      "scheduler daemon 版本不兼容或身份不可确认；请先重启调度服务（前台 daemon 请停止后重新启动），未升级账本",
+    );
+  }
 }
 
 export async function waitForDaemonGeneration(

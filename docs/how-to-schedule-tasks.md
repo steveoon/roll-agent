@@ -1,6 +1,6 @@
 # 使用 `roll schedule` 定时运行 Chat 任务
 
-`roll schedule` 可以按固定间隔，在没有人守着终端时自动运行一轮 `roll chat`。
+`roll schedule` 可以按固定间隔、每天或每周的日历时间，在没有人守着终端时自动运行一轮 `roll chat`。
 每次运行都会创建一个新线程，并把状态、结果摘要和失败原因写入本地账本。
 
 本文中的两个术语：
@@ -76,7 +76,7 @@ roll chat --from-run <invocation-id> --attempt 2
 运行记录中找到；账本状态丢失时显示“历史状态不可用”。会话文件被删除时显示不可用原因，
 不会创建替代数据库。本功能不自动删除执行会话或它们的关联记录。
 
-聊天和 Runtime 初始化只读 scheduler 账本（可读 v5/v6/v7/v8），只给**当前会话库**中有准确关联的
+聊天和 Runtime 初始化只读 scheduler 账本（可读 v5/v6/v7/v8/v9），只给**当前会话库**中有准确关联的
 旧会话补来源，不修改原消息、标题或更新时间，也不升级 scheduler 或其他工作区的数据库。
 `roll schedule` 的存储入口及 daemon 启动负责账本迁移和旧运行关联补写；它们读取已知会话
 位置时使用只读连接。版本不兼容时，聊天跳过补标并提示，不越过入口执行迁移。
@@ -105,6 +105,61 @@ roll schedule add "检查未读消息并汇总，不要调用需要确认的工�
 
 `--every` 支持 `s`、`m`、`h`、`d` 四种单位，例如 `60s`、`30m`、`2h`、`1d`。
 间隔最短 60 秒，最长 365 天。
+
+### 指定开始时间、每天或每周执行
+
+例如“2026 年 9 月 16 日上午 8 点开始检查未读消息，每 30 分钟一次，20 轮后结束”：
+
+```bash
+roll schedule add "检查未读消息并回复" --name "未读消息巡检" \
+  --every 30m --start-at 2026-09-16T08:00 --rounds 20
+```
+
+`--start-at` 不带偏移时，按**运行 Roll 的机器时区**解释；日历任务显式指定了
+`--time-zone` 时则按该时区解释。也接受带偏移的 ISO 时间，例如
+`2026-09-16T08:00:00+08:00`。创建时必须是未来时间，不能只写“明天”这样的相对日期。
+在聊天中可以自然地说“明天上午 8 点”，模型会按每轮上下文中的机器日期和时区转换，
+再在确认界面显示具体日期、时区与对应的 ISO 时间。
+终端确认框内容较长时，可用 PgDn 打开完整参数页，用 PgUp/PgDn 翻页；原有方向键和回车确认方式保持不变。
+
+```bash
+# 每天本机当地时间 08:00，共自动执行 20 次
+roll schedule add "检查未读消息并回复" --name "早间巡检" --daily 08:00 --rounds 20
+
+# 每周一、三、五 08:00，显式使用上海时区
+roll schedule add "检查未读消息并汇总" --name "工作日巡检" \
+  --weekly mon,wed,fri --at 08:00 --time-zone Asia/Shanghai
+```
+
+- `--every`、`--daily`、`--weekly` 必须三选一。`--weekly` 必须配合 `--at`；星期使用
+  `mon,tue,wed,thu,fri,sat,sun`，可用逗号连接。`--time-zone` 仅用于日历规则。
+- 日历时区省略时读取本机系统时区，并**在创建时保存**。以后机器切换时区，已有任务仍按
+  保存的时区运行。显式时区使用 IANA 名称，例如 `Asia/Shanghai`、`America/New_York`。
+  等价时区别名会规范化后再保存和去重。配置台的下次／上次时间优先使用服务端按任务时区生成的展示值，避免浏览器时区造成误读。
+- 日历任务的 `--start-at` 是开始下限：寻找该时间起第一个匹配的日历时段；间隔任务则在
+  `--start-at` 执行第一轮，以后继续按实际领取时间加间隔计算。
+- `--now` 只用于没有 `--start-at` 的普通间隔任务；手动 `run-now` 仍可执行任意任务，
+  不消耗自动轮数，也不改变自动规则。
+- 每天 08:00 不是每隔 24 小时。跨夏令时仍对齐保存时区的 08:00；如果当地钟表跳过
+  目标时刻，当天跳过且不扣轮数；如果目标时刻出现两次，只选择较早的一次。
+- 停机、睡眠、服务未运行或上一轮未结束时，不保证准点执行，也不会唤醒电脑。
+  恢复后最多补一次错过的运行；日历任务的下一轮重新对齐日历时段。
+- 聊天确认期间如果已错过日历任务或指定开始任务的首次时间，会要求重新发起确认，
+  不会把原定时间悄悄改成立即执行。
+- `rounds` 始终是整个任务的总自动轮数。“每天 08:00 开始，每半小时执行 20 轮”属于
+  每天开启一组循环，本版不支持这种组合规则，也不支持 cron 表达式。
+
+上例在没有延迟时第 20 轮约于 17:30 开始，但没有“必须当天结束”的截止时间约束。
+每轮的失败、取消和空结果也占轮数，具体计数规则见下文。
+
+日历规则使用 scheduler 账本 v9。检测到运行中的旧版或身份不可确认的 daemon 时，CLI 和聊天登记入口会拒绝打开写入存储，并提示先重启，避免在旧服务下迁移账本。
+`list`、`show`、`status`、`runs` 使用查询连接，旧 daemon 仍在运行时也可诊断，不会迁移或更改文件权限；`status` 会提示是否需要重启。账本不存在时返回空视图，不创建磁盘账本。
+服务维护的占用检查使用只读查询，不会因检查能否重启而先执行迁移。
+旧版本不能重新打开 v9 账本；对于升级前已经打开的连接，数据库也会拒绝其写入，避免旧进程将新规则静默暂停。
+只读查询兼容 v5-v8，不会自行迁移；通过 `roll schedule` 存储入口或 daemon 启动迁移时保留原有规则、进度和历史。
+v9 的写连接由 ScheduleStore 注册版本标识，原始 SQLite 写入不属于公共接口；只读诊断不需要标识。
+查询连接优先使用原生 `readOnly`，所有支持版本均启用并验证 `PRAGMA query_only=ON`，拒绝 SQL 数据及 schema 写入。Node 22.6–22.11 忽略 `readOnly` 选项时使用此兼容保护，聊天历史、更新前检查和服务维护查询继续可用。
+`query_only` 是 SQL 层保护，不等价于文件级只读，不能保证连接打开时的底层恢复不会写文件；查询代码不执行 checkpoint，也不主动创建缺失账本、初始化或迁移已有账本。需要文件级只读保证时应使用支持原生 `readOnly` 的 Node。
 
 `--max-run` 设定这个任务单次运行的时长上限，语法与 `--every` 相同，范围 60 秒到 24 小时，
 缺省 1 小时。daemon 和 `run-now --inline` 都会在超过上限时终止本次运行；daemon 按失败
@@ -198,29 +253,29 @@ roll chat --session <thread-id>
 在 `roll chat` 里直接说「帮我每隔 30 分钟检查一下未读消息，执行 20 轮后停止」，模型会调用内建的 `roll__schedule_create` 工具登记任务：
 
 - 创建前会弹出确认，展示完整参数（名称、频率、工作目录、任务内容、单次时长上限、轮数上限、首次运行时间）与当前调度服务状态；批准一次只授权这一个任务。
-- 相同定义（内容 + 目录 + 频率 + 时长上限 + 轮数上限）的 active 任务已存在时不会重复创建，工具会返回既有任务并保留累计轮数；已结束任务不参与复用。
+- 相同定义（内容 + 目录 + 完整触发规则，包括开始时间、日历时间/星期/时区 + 时长上限 + 轮数上限）的 active 任务已存在时不会重复创建，工具会返回既有任务并保留累计轮数；已结束任务不参与复用。
 - 权限边界按任务工作目录的配置在创建时记录（与 `roll schedule add` 一致）；调度服务未安装时任务仍会登记成功，但工具会如实提示「不会自动运行」，安装服务仍需人工完成。
 - `roll__schedule_list` 工具让模型查看已登记的任务；暂停、取消、删除仍走 CLI 或 `roll ui` 面板。
 - 定时任务自己的无人值守轮次里没有创建工具——定时任务不能繁殖定时任务。
 
 ## 常用命令
 
-| 目的 | 命令 |
-| --- | --- |
-| 登记任务 | `roll schedule add <prompt> --name <name> --every 30m` |
-| 列出任务 | `roll schedule list` |
-| 查看任务详情 | `roll schedule show <schedule-id>` |
-| 手动入队一次 | `roll schedule run-now <schedule-id>` |
-| 前台执行并等待结果 | `roll schedule run-now <schedule-id> --inline` |
-| 查看运行记录 | `roll schedule runs <schedule-id>` |
-| 暂停任务 | `roll schedule pause <schedule-id>` |
-| 恢复并重新授权 | `roll schedule resume <schedule-id>` |
-| 取消一次运行 | `roll schedule cancel <invocation-id>` |
-| 删除任务及其运行记录 | `roll schedule remove <schedule-id>` |
-| 查看 daemon 状态 | `roll schedule status` |
-| 查看用户服务状态 | `roll schedule service status` |
-| 停止并卸载用户服务 | `roll schedule service uninstall` |
-| 重启用户服务（升级 roll / 切换 Node 后） | `roll schedule service restart` |
+| 目的                                     | 命令                                                   |
+| ---------------------------------------- | ------------------------------------------------------ |
+| 登记任务                                 | `roll schedule add <prompt> --name <name> --every 30m` |
+| 列出任务                                 | `roll schedule list`                                   |
+| 查看任务详情                             | `roll schedule show <schedule-id>`                     |
+| 手动入队一次                             | `roll schedule run-now <schedule-id>`                  |
+| 前台执行并等待结果                       | `roll schedule run-now <schedule-id> --inline`         |
+| 查看运行记录                             | `roll schedule runs <schedule-id>`                     |
+| 暂停任务                                 | `roll schedule pause <schedule-id>`                    |
+| 恢复并重新授权                           | `roll schedule resume <schedule-id>`                   |
+| 取消一次运行                             | `roll schedule cancel <invocation-id>`                 |
+| 删除任务及其运行记录                     | `roll schedule remove <schedule-id>`                   |
+| 查看 daemon 状态                         | `roll schedule status`                                 |
+| 查看用户服务状态                         | `roll schedule service status`                         |
+| 停止并卸载用户服务                       | `roll schedule service uninstall`                      |
+| 重启用户服务（升级 roll / 切换 Node 后） | `roll schedule service restart`                        |
 
 大多数查询命令支持 `--json`。`roll schedule runs` 默认返回最近 20 条记录，也可以用
 `--limit <n>` 调整数量。
@@ -229,15 +284,15 @@ roll chat --session <thread-id>
 
 `roll schedule runs <schedule-id>` 可能显示以下状态：
 
-| 状态 | 含义 |
-| --- | --- |
-| `pending` | 已入队，等待 daemon 接管 |
-| `claimed` | daemon 已取得本次运行的所有权，exec 尚未正式开始 |
-| `running` | exec 正在运行，或因退出/进程树状态无法确认而继续占用单例 |
-| `retry` | 本次尝试失败，等待退避后重试 |
-| `completed` | 已成功完成 |
-| `needs_confirmation` | 任务已结束，但有工具调用因无人值守无法确认而被拒绝 |
-| `failed` | 已终止，不会再自动重试 |
+| 状态                 | 含义                                                     |
+| -------------------- | -------------------------------------------------------- |
+| `pending`            | 已入队，等待 daemon 接管                                 |
+| `claimed`            | daemon 已取得本次运行的所有权，exec 尚未正式开始         |
+| `running`            | exec 正在运行，或因退出/进程树状态无法确认而继续占用单例 |
+| `retry`              | 本次尝试失败，等待退避后重试                             |
+| `completed`          | 已成功完成                                               |
+| `needs_confirmation` | 任务已结束，但有工具调用因无人值守无法确认而被拒绝       |
+| `failed`             | 已终止，不会再自动重试                                   |
 
 每次 invocation 都会创建一个标题为 `[定时] <任务名>` 的新 Chat 线程，不会自动继承上一轮
 的上下文。
@@ -417,11 +472,11 @@ roll schedule cancel <invocation-id> --abandon
 POSIX 上，scheduled exec 会在开始运行前和写入最终结果前清理自己负责的残留进程。清理不
 成功时，invocation 保持 `running`，不会释放单例或启动下一轮。
 
-| 平台 | Roll 能识别和清理的范围 | 已知边界 |
-| --- | --- | --- |
-| Linux | invocation 环境标记、exec 进程组、每条内建 Shell 命令的进程组 | 再次 `setsid`/daemonize，或系统崩溃时，仍可能逃离协作清理链 |
-| macOS | exec 进程组、每条内建 Shell 命令的进程组 | 不读取其他进程的环境和命令行；已离开进程组的 Chromium、Node/Python 守护进程不可见 |
-| Windows | 取消和超时时通过 `taskkill /T /F` 终止 exec 进程树 | 不执行 POSIX 式结束前枚举；只能独立确认 exec 根进程，无法证明所有脱离根进程的后代都已退出 |
+| 平台    | Roll 能识别和清理的范围                                       | 已知边界                                                                                  |
+| ------- | ------------------------------------------------------------- | ----------------------------------------------------------------------------------------- |
+| Linux   | invocation 环境标记、exec 进程组、每条内建 Shell 命令的进程组 | 再次 `setsid`/daemonize，或系统崩溃时，仍可能逃离协作清理链                               |
+| macOS   | exec 进程组、每条内建 Shell 命令的进程组                      | 不读取其他进程的环境和命令行；已离开进程组的 Chromium、Node/Python 守护进程不可见         |
+| Windows | 取消和超时时通过 `taskkill /T /F` 终止 exec 进程树            | 不执行 POSIX 式结束前枚举；只能独立确认 exec 根进程，无法证明所有脱离根进程的后代都已退出 |
 
 Linux 和 macOS 的结束前清场先发送 SIGTERM，2 秒后仍存活才发送 SIGKILL。系统会通过 PID
 和 OS 启动身份避免把已经复用同一 PID/进程组编号的新进程当成旧成员。
@@ -466,11 +521,11 @@ scheduler:
   max-concurrent-runs: 2
 ```
 
-| 配置项 | 默认值 | 有效范围 | 说明 |
-| --- | --- | --- | --- |
-| `scheduler.data-dir` | `~/.roll-agent/scheduler` | 路径 | 存放 `schedules.db`、`scheduler.log` 和 `daemon.json` |
-| `scheduler.max-schedules` | `50` | 1–500 | 可登记的任务数上限 |
-| `scheduler.max-concurrent-runs` | `2` | 1–8 | daemon 可同时运行的不同任务数量 |
+| 配置项                          | 默认值                    | 有效范围 | 说明                                                  |
+| ------------------------------- | ------------------------- | -------- | ----------------------------------------------------- |
+| `scheduler.data-dir`            | `~/.roll-agent/scheduler` | 路径     | 存放 `schedules.db`、`scheduler.log` 和 `daemon.json` |
+| `scheduler.max-schedules`       | `50`                      | 1–500    | 可登记的任务数上限                                    |
+| `scheduler.max-concurrent-runs` | `2`                       | 1–8      | daemon 可同时运行的不同任务数量                       |
 
 相对 `data-dir` 以配置文件所在目录为基准；如果没有配置文件，则以当前工作目录为基准。
 
@@ -590,6 +645,7 @@ roll schedule status
 
   `scheduler.env` 也可声明代理等任意环境变量（值支持 `${ENV_VAR}` 占位符与 `secrets.env` 回退），
   在每次任务运行前合入进程环境；
+
 - 运行 `roll doctor`，「定时任务 Agent 命令可达性」检查项会列出调度环境下找不到的 Agent 启动命令。
 
 ### 任务因权限变化暂停

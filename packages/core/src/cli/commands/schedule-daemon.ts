@@ -90,7 +90,12 @@ export default defineCommand({
         }
         throw error;
       }
-      const record = createDaemonRecord(createDaemonWorkerId(), serviceGeneration);
+      const runtime = await loadRuntime();
+      const record = createDaemonRecord(
+        createDaemonWorkerId(),
+        serviceGeneration,
+        runtime.SCHEDULER_SCHEMA_VERSION,
+      );
       const fileLogger = new FileCompanionLogger(paths.logPath);
       const mirrorToStderr = process.stderr.isTTY === true;
       const logger = {
@@ -107,8 +112,10 @@ export default defineCommand({
           }
         },
       };
-      const runtime = await loadRuntime();
-      const store = openScheduleStore(config, runtime, { dataDir: paths.dataDir });
+      const store = openScheduleStore(config, runtime, {
+        dataDir: paths.dataDir,
+        daemonLockHeld: true,
+      });
       const daemon = new SchedulerDaemon({
         store,
         workerId: record.workerId,

@@ -2,7 +2,7 @@ import { defineCommand } from "citty";
 import { loadConfig } from "../../config/loader.ts";
 import {
   loadRuntime,
-  openScheduleStore,
+  openScheduleReader,
   printJson,
   requireSchedule,
   runScheduleCommand,
@@ -19,7 +19,7 @@ export default defineCommand({
     await runScheduleCommand(async () => {
       const { config } = loadConfig();
       const runtime = await loadRuntime();
-      const store = openScheduleStore(config, runtime);
+      const store = openScheduleReader(config, runtime);
       try {
         const record = serializeSchedule(requireSchedule(store, args.id));
         if (args.json) {

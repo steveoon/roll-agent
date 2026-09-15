@@ -2,20 +2,27 @@ import { realpathSync, statSync } from "node:fs";
 import { isAbsolute, resolve } from "node:path";
 import {
   SCHEDULER_LIMITS,
+  SCHEDULER_SCHEMA_VERSION,
   ScheduleStore,
   ScheduleStoreError,
   ScheduleTriggerError,
-  createIntervalTrigger,
+  createScheduleTrigger,
+  computeFirstRunAtMs,
   describeTrigger,
   formatDuration,
   parseMaxRunText,
   readScheduleLedger,
   type ScheduleRecord,
+  type ScheduleTimingInput,
 } from "@roll-agent/runtime";
 import { loadConfig } from "../config/loader.ts";
 import { auditScheduledServicePlaceholders } from "../config/placeholder-audit.ts";
 import { computeAuthorityDigest } from "./authority.ts";
-import { DAEMON_LIVENESS, inspectDaemon } from "./daemon-record.ts";
+import {
+  DAEMON_LIVENESS,
+  inspectDaemon,
+  assertCompatibleSchedulerDaemon,
+} from "./daemon-record.ts";
 import { probeExecutorLiveness } from "./executor-liveness.ts";
 import { probeInvocationTreeSettled, trackedGroupsFromPersisted } from "./invocation-tree.ts";
 import { describeScheduleRounds } from "./schedule-rounds.ts";
@@ -44,6 +51,7 @@ export interface ScheduleReadinessWarning {
     | "service-not-installed"
     | "daemon-not-running"
     | "data-dir-mismatch"
+    | "daemon-version-mismatch"
     | "unresolved-placeholders";
   readonly message: string;
 }
@@ -55,10 +63,9 @@ export interface ScheduleExecutionReadiness {
   readonly warnings: readonly ScheduleReadinessWarning[];
 }
 
-export interface ScheduleToolCreateRequest {
+export interface ScheduleToolCreateRequest extends ScheduleTimingInput {
   readonly name: string;
   readonly prompt: string;
-  readonly every: string;
   readonly cwd?: string | undefined;
   readonly maxRun?: string | undefined;
   readonly rounds?: number | undefined;
@@ -70,7 +77,8 @@ export interface ScheduleCreateAdmission {
   readonly prompt: string;
   readonly cwd: string;
   readonly sessionCwd: string;
-  readonly everyMs: number;
+  readonly everyMs: number | undefined;
+  readonly trigger: ScheduleRecord["trigger"];
   readonly everyDisplay: string;
   readonly maxRunMs: number | undefined;
   readonly maxRounds: ScheduleRecord["maxRounds"];
@@ -89,7 +97,11 @@ export interface ScheduleToolScheduleView {
   readonly status: ScheduleRecord["status"];
   readonly rounds: { readonly max: number | null; readonly started: number };
   readonly roundsDisplay: string;
-  readonly trigger: { readonly everyMs: number; readonly display: string };
+  readonly trigger: {
+    readonly everyMs?: number | undefined;
+    readonly display: string;
+    readonly spec?: ScheduleRecord["trigger"];
+  };
   readonly maxRun: {
     readonly explicit: boolean;
     readonly effectiveMs: number;
@@ -120,6 +132,7 @@ export interface ScheduleToolListItem {
   readonly rounds: { readonly max: number | null; readonly started: number };
   readonly roundsDisplay: string;
   readonly trigger: string;
+  readonly timeZone?: string | undefined;
   readonly cwd: string;
   readonly promptExcerpt: string;
   readonly maxRun: string;
@@ -243,7 +256,9 @@ function probeReadiness(
   secretsPath: string | undefined,
 ): ScheduleExecutionReadiness {
   const paths = createSchedulerPaths(dataDir);
-  const daemonRunning = inspectDaemon(paths.daemonRecordPath).liveness === DAEMON_LIVENESS.running;
+  const daemon = inspectDaemon(paths.daemonRecordPath);
+  const daemonRunning = daemon.liveness === DAEMON_LIVENESS.running;
+  const daemonCompatible = daemon.record?.schedulerSchemaVersion === SCHEDULER_SCHEMA_VERSION;
   const inspection = inspectSchedulerServiceState(serviceStatePath);
   const serviceInstalled =
     inspection.status === "valid" &&
@@ -251,11 +266,19 @@ function probeReadiness(
   const installedDataDir = inspection.status === "valid" ? inspection.state.dataDir : undefined;
   const dataDirMatches = installedDataDir === undefined || installedDataDir === paths.dataDir;
   const warnings: ScheduleReadinessWarning[] = [];
+  if (daemonRunning && !daemonCompatible) {
+    warnings.push({
+      code: "daemon-version-mismatch",
+      message: "正在运行的 scheduler daemon 不支持当前账本版本，请先重启调度服务",
+    });
+  }
   if (!serviceInstalled) {
     warnings.push({
       code: "service-not-installed",
       message: daemonRunning
-        ? "daemon 正在前台运行，任务当前可以触发；但调度服务未安装，注销或重启电脑后不会自动恢复"
+        ? daemonCompatible
+          ? "daemon 正在前台运行，任务当前可以触发；但调度服务未安装，注销或重启电脑后不会自动恢复"
+          : "旧版 daemon 正在运行，需重启为当前版本；调度服务尚未安装，重启电脑后不会自动恢复"
         : "尚未安装调度服务且 daemon 未运行：任务已登记但不会自动执行；请在 roll ui 的定时任务面板或用 roll schedule service install 安装",
     });
   } else if (!daemonRunning) {
@@ -277,7 +300,7 @@ function probeReadiness(
   return {
     daemonRunning,
     serviceInstalled,
-    automaticRunsReady: serviceInstalled && daemonRunning && dataDirMatches,
+    automaticRunsReady: serviceInstalled && daemonRunning && daemonCompatible && dataDirMatches,
     warnings,
   };
 }
@@ -291,7 +314,11 @@ function toScheduleView(record: ScheduleRecord): ScheduleToolScheduleView {
     status: record.status,
     rounds: { max: record.maxRounds ?? null, started: record.roundsStarted },
     roundsDisplay: describeScheduleRounds(record),
-    trigger: { everyMs: record.trigger.everyMs, display: describeTrigger(record.trigger) },
+    trigger: {
+      ...(record.trigger.kind === "interval" ? { everyMs: record.trigger.everyMs } : {}),
+      display: describeTrigger(record.trigger),
+      spec: record.trigger,
+    },
     maxRun: {
       explicit: record.maxRunMs !== undefined,
       effectiveMs: record.maxRunMs ?? SCHEDULER_LIMITS.maxRunMs,
@@ -315,6 +342,10 @@ function toListItem(record: ScheduleRecord): ScheduleToolListItem {
     rounds: { max: record.maxRounds ?? null, started: record.roundsStarted },
     roundsDisplay: describeScheduleRounds(record),
     trigger: describeTrigger(record.trigger),
+    timeZone:
+      record.trigger.kind === "calendar"
+        ? record.trigger.calendar.timeZone
+        : record.trigger.timeZone,
     cwd: record.cwd,
     promptExcerpt: excerpt,
     maxRun: formatDuration(record.maxRunMs ?? SCHEDULER_LIMITS.maxRunMs),
@@ -415,6 +446,10 @@ export function createScheduleToolBinding(
             "调度账本、工作目录或权限边界在确认期间发生变化，请重新发起确认",
           );
         }
+        assertCompatibleSchedulerDaemon(
+          createSchedulerPaths(ledger.dataDir).daemonRecordPath,
+          SCHEDULER_SCHEMA_VERSION,
+        );
         const store = new ScheduleStore(ledger.dataDir, {
           maxSchedules: ledger.maxSchedules,
           executorLiveness: probeExecutorLiveness,
@@ -437,8 +472,7 @@ export function createScheduleToolBinding(
             current.name !== captured.name ||
             current.prompt !== captured.prompt ||
             current.cwd !== captured.cwd ||
-            current.trigger.kind !== captured.trigger.kind ||
-            current.trigger.everyMs !== captured.trigger.everyMs ||
+            JSON.stringify(current.trigger) !== JSON.stringify(captured.trigger) ||
             current.maxRunMs !== captured.maxRunMs ||
             current.createdAtMs !== captured.createdAtMs
           ) {
@@ -480,26 +514,39 @@ export function createScheduleToolBinding(
         ) {
           return toolError(SCHEDULE_TOOL_ERROR_CODES.invalidInput, "rounds 必须是正安全整数");
         }
-        const trigger = createIntervalTrigger(request.every);
+        const nowMs = Date.now();
+        const trigger = createScheduleTrigger(
+          {
+            ...(request.every === undefined ? {} : { every: request.every }),
+            ...(request.calendar === undefined ? {} : { calendar: request.calendar }),
+            ...(request.startAt === undefined ? {} : { startAt: request.startAt }),
+          },
+          nowMs,
+        );
         const maxRunMs =
           request.maxRun === undefined || request.maxRun.length === 0
             ? undefined
             : parseMaxRunText(request.maxRun);
         const ledger = resolveLedgerContext(sessionCwd);
+        assertCompatibleSchedulerDaemon(
+          createSchedulerPaths(ledger.dataDir).daemonRecordPath,
+          SCHEDULER_SCHEMA_VERSION,
+        );
         return {
           ok: true,
           name: request.name,
           prompt: request.prompt,
           cwd,
           sessionCwd,
-          everyMs: trigger.everyMs,
+          everyMs: trigger.kind === "interval" ? trigger.everyMs : undefined,
+          trigger,
           everyDisplay: describeTrigger(trigger),
           maxRunMs,
           maxRounds: request.rounds,
           maxRunDisplay: formatDuration(maxRunMs ?? SCHEDULER_LIMITS.maxRunMs),
           dataDir: ledger.dataDir,
           authorityDigest: resolveAuthorityDigest(cwd),
-          firstRunAt: new Date(Date.now() + trigger.everyMs).toISOString(),
+          firstRunAt: new Date(computeFirstRunAtMs(trigger, nowMs)).toISOString(),
           readiness: probeReadiness(ledger.dataDir, serviceStatePath, cwd, options.secretsPath),
         };
       } catch (error) {
@@ -509,6 +556,15 @@ export function createScheduleToolBinding(
     create: async (admission) => {
       let ledger: ScheduleLedgerContext;
       try {
+        if (
+          (admission.trigger.kind === "calendar" || admission.trigger.startAtMs !== undefined) &&
+          Date.parse(admission.firstRunAt) <= Date.now()
+        ) {
+          return toolError(
+            SCHEDULE_TOOL_ERROR_CODES.admissionStale,
+            "首次运行时间在确认期间已过，请按新的时间重新确认",
+          );
+        }
         const cwd = canonicalizeCwd(admission.cwd, admission.cwd);
         if (typeof cwd !== "string" || cwd !== admission.cwd) {
           return toolError(
@@ -529,6 +585,14 @@ export function createScheduleToolBinding(
       } catch (error) {
         return fromKnownError(error);
       }
+      try {
+        assertCompatibleSchedulerDaemon(
+          createSchedulerPaths(ledger.dataDir).daemonRecordPath,
+          SCHEDULER_SCHEMA_VERSION,
+        );
+      } catch (error) {
+        return fromKnownError(error);
+      }
       const store = new ScheduleStore(ledger.dataDir, {
         maxSchedules: ledger.maxSchedules,
         executorLiveness: probeExecutorLiveness,
@@ -545,7 +609,10 @@ export function createScheduleToolBinding(
           name: admission.name,
           prompt: admission.prompt,
           cwd: admission.cwd,
-          trigger: { kind: "interval", everyMs: admission.everyMs },
+          trigger: admission.trigger,
+          ...(admission.trigger.kind === "calendar" || admission.trigger.startAtMs !== undefined
+            ? { expectedFirstRunAtMs: Date.parse(admission.firstRunAt) }
+            : {}),
           authorityDigest: admission.authorityDigest,
           ...(admission.maxRounds === undefined ? {} : { maxRounds: admission.maxRounds }),
           ...(admission.maxRunMs !== undefined ? { maxRunMs: admission.maxRunMs } : {}),
@@ -576,7 +643,12 @@ export function createScheduleToolBinding(
       } catch (error) {
         return fromKnownError(error);
       }
-      const ledger = readScheduleLedger(dataDir);
+      let ledger: ReturnType<typeof readScheduleLedger>;
+      try {
+        ledger = readScheduleLedger(dataDir);
+      } catch (error) {
+        return fromKnownError(error);
+      }
       if (ledger.status === "migration-required") {
         return toolError(
           SCHEDULE_TOOL_ERROR_CODES.migrationRequired,

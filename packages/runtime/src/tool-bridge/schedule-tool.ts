@@ -8,6 +8,7 @@ import type {
 } from "@roll-agent/core/scheduler-host/schedule-tool-binding";
 import { buildScheduleExtendTools } from "./schedule-extend-tool.ts";
 import { SCHEDULE_STATUSES } from "../scheduler/types.ts";
+import { calendarScheduleInputSchema, systemTimeZone } from "../scheduler/calendar.ts";
 import { gateToolCall, type ToolBridgeContext } from "./build-tools.ts";
 import type { ToolRegistry } from "./naming.ts";
 import {
@@ -41,35 +42,51 @@ export interface ScheduleToolset {
   readonly listTools: ToolSet;
 }
 
-const scheduleCreateInputSchema = z.object({
-  name: z.string().trim().min(1).max(120).describe("任务名称（确认界面与任务列表中展示）"),
-  prompt: z
-    .string()
-    .trim()
-    .min(1)
-    .max(4000)
-    .describe("每次触发时交给新一轮 chat 的任务描述，写清要做什么"),
-  every: z
-    .string()
-    .trim()
-    .min(1)
-    .describe("触发间隔，格式 <数字><s|m|h|d>，如 30m、2h、1d（最短 60s，最长 365d）"),
-  cwd: z
-    .string()
-    .optional()
-    .describe("任务运行的工作目录；省略时使用当前会话工作目录，相对路径相对会话目录解析"),
-  rounds: z
-    .number()
-    .int()
-    .positive()
-    .max(Number.MAX_SAFE_INTEGER)
-    .optional()
-    .describe("最多自动执行轮数；省略不限轮数。重试和手动运行不额外计数"),
-  maxRun: z
-    .string()
-    .optional()
-    .describe("单次运行时长上限，格式同 every（60s..24h；省略时默认 1 小时）"),
-});
+const scheduleCreateInputSchema = z
+  .object({
+    name: z.string().trim().min(1).max(120).describe("任务名称（确认界面与任务列表中展示）"),
+    prompt: z
+      .string()
+      .trim()
+      .min(1)
+      .max(4000)
+      .describe("每次触发时交给新一轮 chat 的任务描述，写清要做什么"),
+    every: z
+      .string()
+      .trim()
+      .min(1)
+      .optional()
+      .describe("固定间隔，与 calendar 二选一，格式 <数字><s|m|h|d>，如 30m（60s..365d）"),
+    calendar: calendarScheduleInputSchema
+      .optional()
+      .describe(
+        "日历规则，与 every 二选一；time 为 HH:mm，weekly 的 weekdays 为 1=周一..7=周日；省略 timeZone 使用运行 Roll 的机器时区，创建时保存",
+      ),
+    startAt: z
+      .string()
+      .trim()
+      .min(1)
+      .optional()
+      .describe(
+        "未来开始时间，例如 2026-09-16T08:00；不带偏移时按机器时区（日历任务按其 timeZone）解释，也接受带偏移的 ISO 时间；every 首轮在此时执行，calendar 从此时起找匹配日期",
+      ),
+    cwd: z
+      .string()
+      .optional()
+      .describe("任务运行的工作目录；省略时使用当前会话工作目录，相对路径相对会话目录解析"),
+    rounds: z
+      .number()
+      .int()
+      .positive()
+      .max(Number.MAX_SAFE_INTEGER)
+      .optional()
+      .describe("最多自动执行轮数；省略不限轮数。重试和手动运行不额外计数"),
+    maxRun: z
+      .string()
+      .optional()
+      .describe("单次运行时长上限，格式同 every（60s..24h；省略时默认 1 小时）"),
+  })
+  .strict();
 
 const scheduleListInputSchema = z.object({
   status: z
@@ -121,13 +138,19 @@ function renderReadiness(readiness: ScheduleExecutionReadiness): string {
 function buildCreateConfirmationDetails(
   admission: ScheduleCreateAdmission,
 ): Record<string, unknown> {
+  const timeZone =
+    admission.trigger.kind === "calendar"
+      ? admission.trigger.calendar.timeZone
+      : (admission.trigger.timeZone ?? systemTimeZone());
   return {
     name: admission.name,
     prompt: admission.prompt,
     every: admission.everyDisplay,
     cwd: admission.cwd,
     maxRun: admission.maxRunDisplay,
-    firstRunAt: formatLocalTime(admission.firstRunAt),
+    firstRunAt: formatLocalTime(admission.firstRunAt, timeZone),
+    firstRunAtIso: admission.firstRunAt,
+    timeZone,
     rounds:
       admission.maxRounds === undefined
         ? "不限轮数"
@@ -144,9 +167,11 @@ function buildCreateConfirmationDetails(
   };
 }
 
-function formatLocalTime(iso: string): string {
+function formatLocalTime(iso: string, timeZone = systemTimeZone()): string {
   const time = new Date(iso);
-  return Number.isNaN(time.getTime()) ? iso : time.toLocaleString();
+  return Number.isNaN(time.getTime())
+    ? iso
+    : time.toLocaleString("zh-CN", { timeZone, hour12: false });
 }
 
 export function buildScheduleToolset(
@@ -215,7 +240,7 @@ export function buildScheduleToolset(
       : {
           [createId]: tool({
             description:
-              "登记一个按固定间隔重复运行的定时任务：到点后由 roll 调度器发起新一轮无人值守 chat 执行 prompt。创建前会向用户展示完整参数并请求确认，不要在调用前重复询问。可用 rounds 限制自动执行轮数，省略不限轮数。仅支持固定间隔（every），不支持一次性时间点、cron 表达式或时区。",
+              "登记定时任务，由调度器发起新一轮无人值守 chat 执行 prompt。every 固定间隔与 calendar 每天/每周日历规则二选一；startAt 指定未来开始时间。默认按运行 Roll 的机器时区，创建时保存日历时区。rounds 限制总自动轮数，重试不多计。创建自带完整参数确认，不要提前重复询问。不支持 cron 或每天开启一组多轮循环。",
             inputSchema: scheduleCreateInputSchema,
             toModelOutput: ({ output }) => toolResultToModelOutput(output),
             execute: async (
@@ -242,6 +267,10 @@ export function buildScheduleToolset(
                     return toolErrorResult(outcome);
                   }
                   const schedule = outcome.schedule;
+                  const timeZone =
+                    schedule.trigger.spec?.kind === "calendar"
+                      ? schedule.trigger.spec.calendar.timeZone
+                      : (schedule.trigger.spec?.timeZone ?? systemTimeZone());
                   const header = outcome.created
                     ? `已登记定时任务 "${schedule.name}"（${schedule.trigger.display}，单次上限 ${schedule.maxRun.display}）。`
                     : outcome.reauthorized
@@ -250,7 +279,7 @@ export function buildScheduleToolset(
                   const nextNote =
                     schedule.nextRunAt === undefined
                       ? ""
-                      : `下次运行约 ${formatLocalTime(schedule.nextRunAt)}。`;
+                      : `下次运行约 ${formatLocalTime(schedule.nextRunAt, timeZone)}（${timeZone}）。`;
                   const readinessNote =
                     renderReadiness(outcome.readiness) ||
                     (outcome.readiness.automaticRunsReady
@@ -305,7 +334,7 @@ export function buildScheduleToolset(
             const rows = outcome.schedules.map((item) => {
               const nextNote =
                 item.status === "active" && item.nextRunAt !== undefined
-                  ? `，下次 ${formatLocalTime(item.nextRunAt)}`
+                  ? `，下次 ${formatLocalTime(item.nextRunAt, item.timeZone)}（${item.timeZone ?? systemTimeZone()}）`
                   : "";
               const errorNote = item.lastError === undefined ? "" : `，最近错误：${item.lastError}`;
               return `- ${item.name}（${item.status}，${item.trigger}，${item.roundsDisplay}${nextNote}）id=${item.id}\n  内容：${item.promptExcerpt}${errorNote}`;

@@ -405,9 +405,11 @@ function ScheduleItem({ schedule, busy, pending, onToggle, onExtend }: ScheduleI
             : active
               ? schedule.rounds.max !== null && schedule.rounds.started >= schedule.rounds.max
                 ? "自动轮数已用尽，等待本轮结算"
-                : `下次运行 ${schedule.nextRunAt === undefined ? "—" : formatTime(schedule.nextRunAt)}`
+                : `下次运行 ${schedule.nextRunAtDisplay ?? (schedule.nextRunAt === undefined ? "—" : formatTime(schedule.nextRunAt))}`
               : "已暂停 · 恢复后按当前配置重新授权"}
-          {schedule.lastRunAt !== undefined ? ` · 上次 ${formatTime(schedule.lastRunAt)}` : ""}
+          {schedule.lastRunAt !== undefined
+            ? ` · 上次 ${schedule.lastRunAtDisplay ?? formatTime(schedule.lastRunAt)}`
+            : ""}
         </small>
         {schedule.lastError !== undefined && (
           <small className="schedule-item-error">{schedule.lastError}</small>

@@ -4,9 +4,16 @@ import { randomUUID } from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
 import { expandTilde } from "../store/thread-store.ts";
 import { SCHEDULER_LIMITS } from "./limits.ts";
+import { openReadOnlySchedulerDatabase, enableSchedulerQueryOnly } from "./read-only-sqlite.ts";
+import {
+  SCHEDULER_SCHEMA_VERSION as SCHEMA_VERSION,
+  registerSchedulerWriter,
+  installSchedulerWriterGuards,
+} from "./database-version.ts";
 import {
   TRIGGER_KINDS,
   computeNextRunAtMs,
+  computeFirstRunAtMs,
   parseTriggerJson,
   triggerSpecSchema,
   type TriggerSpec,
@@ -57,7 +64,6 @@ import {
   type ScheduleRunHistoryEntry,
 } from "./types.ts";
 
-const SCHEMA_VERSION = 8;
 const BUSY_TIMEOUT_MS = 15_000;
 const TERMINAL_STATUS_PLACEHOLDERS = INVOCATION_TERMINAL_STATUSES.map(() => "?").join(", ");
 
@@ -102,6 +108,8 @@ function validateAuthoritativeSchedulerDatabase(db: DatabaseSync): void {
 }
 
 export interface ScheduleStoreOptions {
+  /** Query-only connection: existing ledgers are never initialized, migrated, or chmod'ed. */
+  readonly readOnly?: boolean;
   readonly maxSchedules?: number;
   readonly claimLeaseMs?: number;
   readonly retryBudget?: number;
@@ -547,6 +555,34 @@ export class ScheduleStore {
     this.invocationRetentionMs =
       options.invocationRetentionMs ?? SCHEDULER_LIMITS.invocationRetentionMs;
     const resolved = expandTilde(dir);
+    if (options.readOnly === true) {
+      const databasePath = resolve(resolved, "schedules.db");
+      const existing = existsSync(databasePath);
+      if (!existing && options.requireExistingDatabase === true) {
+        throw new Error("authoritative scheduler database does not exist");
+      }
+      this.db = existing
+        ? openReadOnlySchedulerDatabase(databasePath)
+        : new DatabaseSync(":memory:");
+      try {
+        if (existing) {
+          const version = this.db.prepare("PRAGMA user_version").get()?.user_version;
+          if (![5, 6, 7, 8, SCHEMA_VERSION].includes(Number(version))) {
+            throw new Error(
+              `scheduler schema v${String(version)} 不支持只读查询；请停止旧 daemon 后由新版 daemon 初始化迁移`,
+            );
+          }
+        } else {
+          // An absent ledger is an empty view; create its query schema only in memory.
+          this.init();
+          enableSchedulerQueryOnly(this.db);
+        }
+      } catch (error) {
+        this.db.close();
+        throw error;
+      }
+      return;
+    }
     if (options.requireExistingDatabase === true && !existsSync(resolved)) {
       throw new Error("authoritative scheduler database does not exist");
     }
@@ -592,6 +628,7 @@ export class ScheduleStore {
        PRAGMA foreign_keys = ON;
        PRAGMA secure_delete = ON;`,
     );
+    registerSchedulerWriter(this.db);
     const versionRow = this.db.prepare("PRAGMA user_version").get() as {
       readonly user_version: number;
     };
@@ -696,7 +733,10 @@ export class ScheduleStore {
             "scheduler 迁移失败：外键关联不完整",
           );
         }
-        this.db.exec(`PRAGMA user_version = ${String(SCHEMA_VERSION)};`);
+        installSchedulerWriterGuards(this.db);
+        if (lockedVersion !== SCHEMA_VERSION) {
+          this.db.exec(`PRAGMA user_version = ${String(SCHEMA_VERSION)};`);
+        }
       });
     } finally {
       if (mayUpgrade) this.db.exec("PRAGMA foreign_keys = ON;");
@@ -818,14 +858,16 @@ export class ScheduleStore {
     }
   }
 
-  createSchedule(input: CreateScheduleInput, nowMs: number = Date.now()): ScheduleRecord {
+  createSchedule(input: CreateScheduleInput, nowMs?: number): ScheduleRecord {
     const valid = validateCreateInput(input);
-    return this.transaction(() => this.insertScheduleInTransaction(valid, input, nowMs));
+    return this.transaction(() =>
+      this.insertScheduleInTransaction(valid, input, nowMs ?? Date.now()),
+    );
   }
 
   createScheduleIdempotent(
     input: CreateScheduleInput,
-    nowMs: number = Date.now(),
+    nowMs?: number,
   ): {
     readonly created: boolean;
     readonly reauthorized: boolean;
@@ -834,6 +876,7 @@ export class ScheduleStore {
     const valid = validateCreateInput(input);
     const defaultMaxRunMs = String(SCHEDULER_LIMITS.maxRunMs);
     return this.transaction(() => {
+      const creationTimeMs = nowMs ?? Date.now();
       const existing = this.db
         .prepare(
           `SELECT * FROM schedules
@@ -854,7 +897,7 @@ export class ScheduleStore {
         if ((existing.authority_digest ?? null) !== nextDigest) {
           this.db
             .prepare("UPDATE schedules SET authority_digest = ?, updated_at = ? WHERE id = ?")
-            .run(nextDigest, nowMs, existing.id);
+            .run(nextDigest, creationTimeMs, existing.id);
           return {
             created: false,
             reauthorized: true,
@@ -870,7 +913,7 @@ export class ScheduleStore {
       return {
         created: true,
         reauthorized: false,
-        schedule: this.insertScheduleInTransaction(valid, input, nowMs),
+        schedule: this.insertScheduleInTransaction(valid, input, creationTimeMs),
       };
     });
   }
@@ -889,9 +932,24 @@ export class ScheduleStore {
         `已达到定时任务上限 ${String(this.maxSchedules)}，请先删除不再需要的任务`,
       );
     }
+    if (
+      input.fireImmediately === true &&
+      (valid.trigger.kind !== "interval" || valid.trigger.startAtMs !== undefined)
+    ) {
+      throw new ScheduleStoreError(
+        SCHEDULE_STORE_ERROR_CODES.invalid,
+        "立即触发不能与日历规则或 startAt 同时使用",
+      );
+    }
     const id = randomUUID();
     const nextRunAt =
-      input.fireImmediately === true ? nowMs : computeNextRunAtMs(valid.trigger, nowMs);
+      input.fireImmediately === true ? nowMs : computeFirstRunAtMs(valid.trigger, nowMs);
+    if (input.expectedFirstRunAtMs !== undefined && nextRunAt !== input.expectedFirstRunAtMs) {
+      throw new ScheduleStoreError(
+        SCHEDULE_STORE_ERROR_CODES.invalid,
+        "首次运行时间在确认后已变化，请重新发起确认",
+      );
+    }
     this.db
       .prepare(
         `INSERT INTO schedules
@@ -2303,13 +2361,15 @@ export function readScheduleLedger(dir: string): ScheduleLedgerReadResult {
   if (!existsSync(databasePath)) {
     return { status: SCHEDULE_LEDGER_READ_STATUSES.empty, schedules: [] };
   }
-  const db = new DatabaseSync(databasePath, { readOnly: true });
+  const db = openReadOnlySchedulerDatabase(databasePath);
+  let snapshotOpen = false;
   try {
     db.exec(`PRAGMA busy_timeout = ${String(BUSY_TIMEOUT_MS)}; BEGIN;`);
+    snapshotOpen = true;
     const versionRow = db.prepare("PRAGMA user_version").get() as {
       readonly user_version: number;
     };
-    if (![5, 6, 7, SCHEMA_VERSION].includes(versionRow.user_version)) {
+    if (![5, 6, 7, 8, SCHEMA_VERSION].includes(versionRow.user_version)) {
       return {
         status: SCHEDULE_LEDGER_READ_STATUSES.migrationRequired,
         schemaVersion: versionRow.user_version,
@@ -2324,7 +2384,11 @@ export function readScheduleLedger(dir: string): ScheduleLedgerReadResult {
       schedules: rows.map((row) => toScheduleRecord(row, db)),
     };
   } finally {
-    db.close();
+    try {
+      if (snapshotOpen) db.exec("ROLLBACK");
+    } finally {
+      db.close();
+    }
   }
 }
 
@@ -2361,12 +2425,14 @@ function readSchedulerSnapshot<T>(
 ): ReadSchedulerSnapshotResult<T> {
   const databasePath = resolve(expandTilde(dir), "schedules.db");
   if (!existsSync(databasePath)) return { status: SCHEDULE_LEDGER_READ_STATUSES.empty };
-  const db = new DatabaseSync(databasePath, { readOnly: true });
+  const db = openReadOnlySchedulerDatabase(databasePath);
+  let snapshotOpen = false;
   try {
     db.exec(`PRAGMA busy_timeout = ${String(BUSY_TIMEOUT_MS)}; BEGIN;`);
+    snapshotOpen = true;
     const version = db.prepare("PRAGMA user_version").get() as { readonly user_version: number };
     // v5 has all invocation columns used by the reader; its reference table is simply absent.
-    if (![5, 6, 7, SCHEMA_VERSION].includes(version.user_version)) {
+    if (![5, 6, 7, 8, SCHEMA_VERSION].includes(version.user_version)) {
       return {
         status: SCHEDULE_LEDGER_READ_STATUSES.migrationRequired,
         schemaVersion: version.user_version,
@@ -2377,8 +2443,32 @@ function readSchedulerSnapshot<T>(
       value: read(db, version.user_version >= 6),
     };
   } finally {
-    db.close();
+    try {
+      // Old Node defers sqlite3_close_v2 until statement GC; end the read transaction now.
+      if (snapshotOpen) db.exec("ROLLBACK");
+    } finally {
+      db.close();
+    }
   }
+}
+
+/** Service maintenance must inspect occupancy without migrating under a live older daemon. */
+export function readScheduleOccupancy(dir: string): readonly InvocationRecord[] {
+  const snapshot = readSchedulerSnapshot(dir, (db) => {
+    const rows = db
+      .prepare(
+        `SELECT * FROM invocations WHERE ${OCCUPYING_RUN_SQL}
+      ORDER BY COALESCE(started_at, created_at) ASC, created_at ASC`,
+      )
+      .all(...OCCUPYING_RUN_PARAMS) as unknown as InvocationRow[];
+    return rows.map(toInvocationRecord);
+  });
+  if (snapshot.status === SCHEDULE_LEDGER_READ_STATUSES.migrationRequired) {
+    throw new Error(
+      `scheduler occupancy 无法读取 schema v${String(snapshot.schemaVersion)}，拒绝把未知占用当成空闲`,
+    );
+  }
+  return snapshot.value ?? [];
 }
 
 function readRunInSnapshot(

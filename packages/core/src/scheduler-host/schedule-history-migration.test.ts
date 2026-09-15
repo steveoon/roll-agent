@@ -11,7 +11,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { DatabaseSync } from "node:sqlite";
+import { DatabaseSync } from "./database-fixture.test.ts";
 import { execFileSync } from "node:child_process";
 import { openScheduleStore } from "../cli/commands/schedule-command-utils.ts";
 import * as runtime from "@roll-agent/runtime";

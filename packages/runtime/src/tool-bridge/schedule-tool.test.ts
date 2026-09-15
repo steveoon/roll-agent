@@ -44,6 +44,7 @@ function admissionFixture(): ScheduleCreateAdmission {
     cwd: SESSION_CWD,
     sessionCwd: SESSION_CWD,
     everyMs: 1_800_000,
+    trigger: { kind: "interval", everyMs: 1_800_000 },
     everyDisplay: "每 30 分钟",
     maxRunMs: undefined,
     maxRounds: undefined,
@@ -58,6 +59,37 @@ function admissionFixture(): ScheduleCreateAdmission {
 function fixedPolicy(decision: PolicyDecision): ToolPolicy {
   return { check: () => decision };
 }
+
+test("calendar confirmation renders the saved task zone and passes structured timing without an interval", async () => {
+  const admission: ScheduleCreateAdmission = {
+    ...admissionFixture(),
+    everyMs: undefined,
+    everyDisplay: "每天 08:00（Asia/Shanghai）",
+    trigger: {
+      kind: "calendar",
+      calendar: { frequency: "daily", time: "08:00", timeZone: "Asia/Shanghai" },
+    },
+    firstRunAt: "2026-09-16T00:00:00.000Z",
+  };
+  const harness = makeHarness({
+    policy: fixedPolicy({ action: "confirm" }),
+    approve: true,
+    capture: () => admission,
+  });
+  const result = await harness.execute(SCHEDULE_CREATE_TOOL_ID, {
+    name: "daily",
+    prompt: "检查未读",
+    calendar: { frequency: "daily", time: "08:00", timeZone: "Asia/Shanghai" },
+    rounds: 20,
+  });
+  assert.equal(result.isError, false);
+  assert.equal(harness.createCalls.length, 1);
+  const details = harness.approvalRequests[0]?.input;
+  assert.equal(details?.timeZone, "Asia/Shanghai");
+  assert.equal(details?.firstRunAtIso, "2026-09-16T00:00:00.000Z");
+  assert.match(String(details?.firstRunAt), /08:00:00/u);
+  assert.deepEqual(harness.createCalls[0]?.trigger, admission.trigger);
+});
 
 interface Harness {
   readonly captureCalls: unknown[];
@@ -586,6 +618,19 @@ test("invalid rounds are rejected before admission, approval or writes", async (
     assert.equal(harness.approvalRequests.length, 0);
     assert.equal(harness.createCalls.length, 0);
   }
+});
+
+test("unknown calendar timing fields are rejected instead of silently creating an interval now", async () => {
+  const harness = makeHarness({});
+  const result = await harness.execute(SCHEDULE_CREATE_TOOL_ID, {
+    name: "typo",
+    prompt: "noop",
+    every: "30m",
+    start_at: "2099-01-01T08:00",
+  });
+  assert.equal(result.isError, true);
+  assert.equal(harness.captureCalls.length, 0);
+  assert.equal(harness.approvalRequests.length, 0);
 });
 
 test("list accepts completed filter and reports final round progress", async () => {

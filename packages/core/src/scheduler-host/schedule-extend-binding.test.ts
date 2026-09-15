@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { DatabaseSync } from "node:sqlite";
+import { DatabaseSync } from "./database-fixture.test.ts";
 import test from "node:test";
 import { ScheduleStore, readScheduleLedger } from "@roll-agent/runtime";
 import { createScheduleToolBinding } from "./schedule-tool-binding.ts";

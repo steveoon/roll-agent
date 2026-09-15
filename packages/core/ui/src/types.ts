@@ -280,6 +280,9 @@ export interface ScheduleStatusSummary {
 }
 
 export interface ScheduleRow {
+  readonly timeZone?: string;
+  readonly nextRunAtDisplay?: string;
+  readonly lastRunAtDisplay?: string;
   readonly rounds: { readonly max: number | null; readonly started: number };
   readonly roundsDisplay: string;
   readonly id: string;

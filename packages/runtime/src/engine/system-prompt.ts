@@ -111,10 +111,11 @@ function buildScheduleSection(ids: ScheduleToolPromptIds): string {
   if (ids.create !== undefined) {
     lines.push(
       `- 用户明确提出周期性、持续性的任务（如"每隔 30 分钟…""每天…"）时，用 ${ids.create} 工具登记定时任务；不要通过 Shell 执行 roll schedule add。`,
-      "- every 只描述触发频率，prompt 描述每次触发要做的工作；缺少频率、工作内容或目标工作区时先向用户澄清。",
+      "- every 固定间隔与 calendar 日历规则二选一；prompt 只描述每轮工作。每天/每周当地时间使用 calendar（frequency、time、可选 timeZone；weekly 的 weekdays 为 1=周一..7=周日）。省略时区按运行 Roll 的机器时区，创建时保存。",
       "- 用户指定执行轮数时，将上限传入 rounds，不要仅写进 prompt；rounds 限制自动触发次数，同轮重试不多计，手动运行不计，省略则不限轮数。",
       `- ${ids.create} 自带确认步骤，会向用户展示完整参数；调用前不要再重复口头确认。`,
-      "- 仅支持固定间隔，不支持一次性时间点、cron 表达式或时区；用户提出这类需求时明说不支持，不要伪装成间隔任务。",
+      "- 指定未来开始时间用 startAt（YYYY-MM-DDTHH:mm 或带偏移的 ISO 时间）；明天等相对日期按当前运行机器日期和时区转换。every 首轮在 startAt 执行，此后按间隔运行；calendar 在 startAt 起找匹配时段。一次执行可用 every 加 rounds:1 和 startAt。",
+      "- 每天 8 点每半小时执行 20 轮是每天开启一组循环，本版不支持；不要误登记成每天一次或全天连续间隔。cron 也不支持。缺少频率、工作内容或目标工作区时先澄清。",
       "- 不要替用户安装调度服务；创建结果里的就绪警告要如实转告用户。",
     );
   }
@@ -445,6 +446,7 @@ export function buildCapabilityTurnReminder(context: EffectiveCapabilityTurnCont
     `cwd=${context.cwd}`,
     `platform=${context.platform}`,
     `date=${context.date}`,
+    `timeZone=${Intl.DateTimeFormat().resolvedOptions().timeZone}`,
     ...(context.dynamic.origin
       ? [
           `turnOrigin=${context.dynamic.origin.kind}`,
