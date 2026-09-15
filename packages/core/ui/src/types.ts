@@ -259,6 +259,8 @@ export interface ScheduleStatusSummary {
     readonly liveness: string;
     readonly pid?: number;
     readonly startedAt?: string;
+    readonly schemaVersion?: number;
+    readonly requiresRestart?: boolean;
   };
   readonly service: {
     readonly metadataStatus: string;

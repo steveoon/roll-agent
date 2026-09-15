@@ -580,11 +580,17 @@ Goal: run bounded unattended `roll chat` rounds on an interval or daily/weekly c
    the earlier occurrence only. Interval claims re-anchor to actual claim time (08:07 → 08:37 for
    30m), whereas calendars find the next matching local date/time after the claim.
 
-   In interactive chat, `roll__schedule_create` accepts `every: "30m"` or
-   `calendar: { frequency: "daily", time: "08:00", timeZone: "Asia/Shanghai" }`; weekly uses
-   `frequency: "weekly"` and `weekdays: [1, 3, 5]` (Monday = 1, Sunday = 7). Both accept
-   `startAt` and `rounds`; calendar `timeZone` may be omitted for the Roll host default. Review
-   the complete normalized rule, first execution, cwd and quota in the human confirmation.
+   In interactive chat, `roll__schedule_create` uses a single `recurrence` object:
+   `{ kind: "interval", every: "30m" }`, `{ kind: "daily", time: "08:00", timeZone: null }`,
+   or `{ kind: "weekly", time: "08:00", timeZone: "Asia/Shanghai", weekdays: [1, 3, 5] }`
+   (Monday = 1, Sunday = 7). `startAt` and `rounds` are independent top-level fields.
+   Do not send top-level `every/calendar`. The strict model contract requires `startAt`, `cwd`,
+   `rounds`, `maxRun` and calendar `timeZone`; use `null` for their defaults. CLI flags are unchanged.
+   “Today at 14:20, two rounds” supplies no interval: ask how far apart the rounds should be;
+   do not turn it into a daily task. Once information is complete, use the single built-in
+   confirmation, including first execution, estimated second execution, saved zone and total quota.
+   A repeated identical invalid create call stops the current inference sequence; correct the
+   indicated fields or ask the user instead of resubmitting unchanged arguments.
 
    One successful automatic invocation insertion consumes one round even if startup fails, the
    run fails or is cancelled, or no unread messages exist. Retries keep the same round; `add --now`

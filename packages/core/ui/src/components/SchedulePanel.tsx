@@ -34,6 +34,8 @@ export function SchedulePanel({ api, onToast, onUnavailable }: SchedulePanelProp
   const [schedules, setSchedules] = useState<readonly ScheduleRow[]>();
   const [runs, setRuns] = useState<readonly ScheduleRunRow[]>();
   const [loadError, setLoadError] = useState<string>();
+  const [loading, setLoading] = useState(true);
+  const loadingRef = useRef(false);
   const [busy, setBusy] = useState<ScheduleAction>();
   const [busyTarget, setBusyTarget] = useState<string>();
   const [expandedRun, setExpandedRun] = useState<string>();
@@ -58,6 +60,9 @@ export function SchedulePanel({ api, onToast, onUnavailable }: SchedulePanelProp
   }
 
   const refresh = useCallback(async (): Promise<void> => {
+    if (loadingRef.current) return;
+    loadingRef.current = true;
+    setLoading(true);
     try {
       const [nextStatus, nextSchedules, nextRuns] = await Promise.all([
         api.getScheduleStatus(),
@@ -74,6 +79,9 @@ export function SchedulePanel({ api, onToast, onUnavailable }: SchedulePanelProp
         return;
       }
       setLoadError(describeError(error));
+    } finally {
+      loadingRef.current = false;
+      setLoading(false);
     }
   }, [api, onUnavailable]);
 
@@ -86,7 +94,14 @@ export function SchedulePanel({ api, onToast, onUnavailable }: SchedulePanelProp
     body?: unknown,
     options: { readonly target?: string; readonly confirm?: string } = {},
   ): Promise<boolean> {
-    if (busyRef.current !== undefined || extensionDecision.current !== undefined) return false;
+    if (
+      busyRef.current !== undefined ||
+      extensionDecision.current !== undefined ||
+      loadingRef.current ||
+      loadError !== undefined
+    ) {
+      return false;
+    }
     const presentation = describeScheduleAction(action);
     const confirmText = options.confirm ?? presentation.confirm;
     if (confirmText !== undefined) {
@@ -122,6 +137,8 @@ export function SchedulePanel({ api, onToast, onUnavailable }: SchedulePanelProp
   }
 
   const acting = busy !== undefined;
+  const controlsBusy = acting || loading || loadError !== undefined;
+  const taskWritesBlocked = controlsBusy || status?.daemon.requiresRestart === true;
   const warnings = status === undefined ? [] : deriveScheduleWarnings(status);
 
   return (
@@ -141,7 +158,8 @@ export function SchedulePanel({ api, onToast, onUnavailable }: SchedulePanelProp
           className="icon-button refresh-button"
           aria-label="刷新定时任务状态"
           title="刷新定时任务状态"
-          disabled={acting}
+          disabled={acting || loading}
+          aria-busy={loading}
           onClick={() => {
             refresh().catch(() => undefined);
           }}
@@ -167,6 +185,9 @@ export function SchedulePanel({ api, onToast, onUnavailable }: SchedulePanelProp
           <strong>状态读取失败</strong>
           <span>{loadError}</span>
           <small>点右上角 ↻ 重试。</small>
+          {status !== undefined && (
+            <small>下方保留上次成功读取的数据，可能已过时；恢复读取前暂停写操作。</small>
+          )}
         </div>
       )}
 
@@ -178,7 +199,8 @@ export function SchedulePanel({ api, onToast, onUnavailable }: SchedulePanelProp
 
       <ServiceCard
         status={status}
-        acting={acting}
+        loading={loading}
+        acting={controlsBusy}
         onAction={async (action) => {
           await runAction(action);
         }}
@@ -195,7 +217,11 @@ export function SchedulePanel({ api, onToast, onUnavailable }: SchedulePanelProp
           )}
         </div>
         {schedules === undefined ? (
-          <LoadingRows label="正在读取任务列表" />
+          loading ? (
+            <LoadingRows label="正在读取任务列表" />
+          ) : (
+            <p className="empty-inline">任务列表读取失败，请重试。</p>
+          )
         ) : schedules.length === 0 ? (
           <p className="empty-inline">
             暂无定时任务。
@@ -207,7 +233,7 @@ export function SchedulePanel({ api, onToast, onUnavailable }: SchedulePanelProp
               <ScheduleItem
                 key={schedule.id}
                 schedule={schedule}
-                busy={acting}
+                busy={taskWritesBlocked}
                 pending={busyTarget === schedule.id}
                 onExtend={(submission) =>
                   runAction("extend", submission.request, {
@@ -236,7 +262,11 @@ export function SchedulePanel({ api, onToast, onUnavailable }: SchedulePanelProp
           </div>
         </div>
         {runs === undefined ? (
-          <LoadingRows label="正在读取运行记录" />
+          loading ? (
+            <LoadingRows label="正在读取运行记录" />
+          ) : (
+            <p className="empty-inline">运行记录读取失败，请重试。</p>
+          )
         ) : runs.length === 0 ? (
           <p className="empty-inline">
             暂无运行记录。
@@ -248,7 +278,7 @@ export function SchedulePanel({ api, onToast, onUnavailable }: SchedulePanelProp
               <RunItem
                 key={run.id}
                 run={run}
-                busy={acting}
+                busy={taskWritesBlocked}
                 pending={busyTarget === run.id}
                 expanded={expandedRun === run.id}
                 onToggleDetail={() => {
@@ -272,12 +302,14 @@ export function SchedulePanel({ api, onToast, onUnavailable }: SchedulePanelProp
 
 interface ServiceCardProps {
   readonly status: ScheduleStatusSummary | undefined;
+  readonly loading: boolean;
   readonly acting: boolean;
   readonly onAction: (action: ScheduleAction) => Promise<void>;
 }
 
-function ServiceCard({ status, acting, onAction }: ServiceCardProps) {
+function ServiceCard({ status, loading, acting, onAction }: ServiceCardProps) {
   if (status === undefined) {
+    if (!loading) return <p className="empty-inline">调度服务状态读取失败，请重试。</p>;
     return (
       <div className="status-loading" role="status">
         <span className="loading-bar" />

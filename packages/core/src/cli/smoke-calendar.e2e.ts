@@ -52,8 +52,8 @@ test("e2e calendar: Roll Core skill installation preserves calendar instructions
 });
 
 test(
-  "e2e calendar: future interval, daily and weekly execute through daemon/exec/model and settle",
-  { timeout: 150_000 },
+  "e2e calendar: future interval ends after two real rounds; daily/weekly and manual execution preserve quota",
+  { timeout: 210_000 },
   async () => {
     const workspace = mkdtempSync(join(tmpdir(), "roll-calendar-success-"));
     const dataDir = join(workspace, "scheduler");
@@ -105,6 +105,7 @@ test(
       });
     });
     let daemon: ReturnType<typeof spawnRollProcess> | undefined;
+    let manualProcess: ReturnType<typeof spawnRollProcess> | undefined;
     let reader: ScheduleStore | undefined;
     try {
       server.listen(0, "127.0.0.1");
@@ -144,7 +145,7 @@ test(
       assert.ok(day);
       const ids: string[] = [];
       for (const [name, flags] of [
-        ["future-interval", ["--every", "30m", "--start-at", local]],
+        ["future-interval", ["--every", "1m", "--start-at", local]],
         ["daily", ["--daily", local.slice(11), "--start-at", local]],
         [
           "weekly",
@@ -169,7 +170,7 @@ test(
             name,
             ...flags,
             "--rounds",
-            "1",
+            name === "future-interval" ? "2" : "1",
             "--json",
           ],
           workspace,
@@ -206,20 +207,25 @@ test(
         diagnostics(),
       );
       await waitForSmokeCondition(
-        "three scheduled turns to settle",
+        "all scheduled rounds to settle",
         () => ids.every((id) => store.getSchedule(id)?.status === "completed"),
         diagnostics,
-        100_000,
+        170_000,
       );
-      assert.equal(requests.length, 3, diagnostics());
+      assert.equal(requests.length, 4, diagnostics());
       assert.ok(requestTimes.every((time) => time >= firstAt));
       for (const id of ids) {
         const schedule = store.getSchedule(id);
-        assert.equal(schedule?.roundsStarted, 1);
-        const runs = store.listInvocations(id);
-        assert.equal(runs.length, 1);
+        const expectedRounds = schedule?.name === "future-interval" ? 2 : 1;
+        assert.equal(schedule?.roundsStarted, expectedRounds);
+        const runs = [...store.listInvocations(id)].sort(
+          (a, b) => a.scheduledForMs - b.scheduledForMs,
+        );
+        assert.equal(runs.length, expectedRounds);
+        assert.ok(runs.every((run) => run.status === "completed" && run.mode === "scheduled"));
         assert.equal(runs[0]?.status, "completed");
         assert.equal(runs[0]?.scheduledForMs, firstAt);
+        if (expectedRounds === 2) assert.ok((runs[1]?.scheduledForMs ?? 0) >= firstAt + 60_000);
         assert.match(runs[0]?.outputExcerpt ?? "", /CALENDAR_E2E_OK/u);
         assert.ok(runs[0]?.threadId);
         const inspected = runRoll(["schedule", "inspect", runs[0]?.id ?? "", "--json"], workspace);
@@ -232,10 +238,28 @@ test(
             body.includes("timeZone=America/New_York") && body.includes("turnOrigin=scheduled"),
         ),
       );
+      const intervalId = ids[0];
+      assert.ok(intervalId);
+      const manual = spawnRollProcess(
+        ["schedule", "run-now", intervalId, "--inline", "--json"],
+        workspace,
+        { TZ: "America/New_York" },
+      );
+      manualProcess = manual;
+      const manualExit = await waitForSpawnedRollExit(manual, "manual scheduled turn", 30_000);
+      assert.equal(manualExit.code, 0, formatSpawnedRollProcess("manual", manual));
+      assert.equal(store.getSchedule(intervalId)?.roundsStarted, 2);
+      assert.equal(store.getSchedule(intervalId)?.status, "completed");
+      assert.equal(store.listInvocations(intervalId).length, 3);
+      assert.equal(requests.length, 5);
       process.child.kill("SIGTERM");
       const exit = await waitForSpawnedRollExit(process, "calendar daemon");
       assert.equal(exit.code, 0, diagnostics());
     } finally {
+      if (manualProcess) {
+        manualProcess.child.kill("SIGTERM");
+        await cleanupSpawnedRollProcess(manualProcess, "manual scheduled turn");
+      }
       if (daemon) {
         daemon.child.kill("SIGTERM");
         await cleanupSpawnedRollProcess(daemon, "calendar daemon");

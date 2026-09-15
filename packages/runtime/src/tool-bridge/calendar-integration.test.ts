@@ -12,9 +12,9 @@ import { ToolRegistry } from "./naming.ts";
 const NOW = Date.parse("2026-09-15T00:00:00Z");
 const START = NOW + 86_400_000;
 for (const timing of [
-  { every: "30m", startAt: "2026-09-16T08:00:00+08:00" },
-  { calendar: { frequency: "daily", time: "08:00", timeZone: "Asia/Shanghai" } },
-  { calendar: { frequency: "weekly", time: "08:00", timeZone: "Asia/Shanghai", weekdays: [3] } },
+  { recurrence: { kind: "interval", every: "30m" }, startAt: "2026-09-16T08:00:00+08:00" },
+  { recurrence: { kind: "daily", time: "08:00", timeZone: "Asia/Shanghai" } },
+  { recurrence: { kind: "weekly", time: "08:00", timeZone: "Asia/Shanghai", weekdays: [3] } },
 ]) {
   test(`real tool + binding + SQLite claim: ${JSON.stringify(timing)}`, async (t) => {
     t.mock.timers.enable({ apis: ["Date"], now: NOW });
@@ -40,10 +40,18 @@ for (const timing of [
       const tool = tools.createTools[SCHEDULE_CREATE_TOOL_ID];
       assert.ok(tool?.execute);
       const schema = await asSchema(tool.inputSchema).jsonSchema;
-      assert.match(JSON.stringify(schema), /"calendar"/u);
+      assert.match(JSON.stringify(schema), /"recurrence"/u);
       assert.doesNotMatch(JSON.stringify(schema), /"default":"Asia/u);
       const result = await tool.execute(
-        { name: "未读巡检", prompt: "检查未读消息", rounds: 20, ...timing },
+        {
+          name: "未读巡检",
+          prompt: "检查未读消息",
+          rounds: 20,
+          cwd: null,
+          maxRun: null,
+          startAt: null,
+          ...timing,
+        },
         {
           toolCallId: "calendar-1",
           messages: [],

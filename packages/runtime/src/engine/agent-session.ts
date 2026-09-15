@@ -48,6 +48,7 @@ import {
 } from "../tool-bridge/agent-install-tool.ts";
 import { buildSkillToolset } from "../tool-bridge/skill-tool.ts";
 import { buildScheduleToolset, type ScheduleToolDeps } from "../tool-bridge/schedule-tool.ts";
+import { createInvalidScheduleRetryGuard } from "../tool-bridge/invalid-schedule-retry.ts";
 import {
   buildFileToolset,
   type SessionFileToolsSettings,
@@ -1545,6 +1546,7 @@ export class AgentSession {
           ...(this.turnTimeoutMs !== undefined ? { timeoutMs: this.turnTimeoutMs } : {}),
         });
         let lastStepToolResultTokens = 0;
+        const invalidScheduleRetryGuard = createInvalidScheduleRetryGuard();
         const createStreamResult = () =>
           streamText({
             model: this.model,
@@ -1557,6 +1559,7 @@ export class AgentSession {
             stopWhen: [
               stepCountIs(Math.max(1, this.maxSteps - activeTurn.completedStepCount)),
               stopOnUserRejected(),
+              invalidScheduleRetryGuard.stop,
               this.stopOnContextPressure(activeTurn),
             ],
             toolApproval: async ({ toolCall }) => {
@@ -2015,11 +2018,12 @@ export class AgentSession {
 
         const visibleResponseMessages = stripReasoningMessages(responseMessages);
         this.messages.push(...visibleResponseMessages);
-        if (userRejectionMessage !== undefined) {
-          const delta = text.length === 0 ? userRejectionMessage : `\n${userRejectionMessage}`;
+        const stopMessage = userRejectionMessage ?? invalidScheduleRetryGuard.message;
+        if (stopMessage !== undefined) {
+          const delta = text.length === 0 ? stopMessage : `\n${stopMessage}`;
           text += delta;
           queue.push({ type: "text-delta", delta });
-          this.messages.push({ role: "assistant", content: userRejectionMessage });
+          this.messages.push({ role: "assistant", content: stopMessage });
         }
         this.debug(queue, "persist", "persisting messages", turnStartedAt, {
           appendedMessages: this.messages.length - turnStart,
@@ -2064,7 +2068,7 @@ export class AgentSession {
           !activeTurn.pausedForContextPressure ||
           lastStepFinishReason !== "tool-calls" ||
           stoppedAtStepLimit ||
-          userRejectionMessage !== undefined
+          stopMessage !== undefined
         ) {
           return;
         }

@@ -109,6 +109,11 @@ export function getInvocationCancelMode(status: string): InvocationCancelMode | 
 
 export function deriveScheduleWarnings(status: ScheduleStatusSummary): readonly string[] {
   const warnings: string[] = [];
+  if (status.daemon.requiresRestart === true) {
+    warnings.push(
+      "正在运行的调度进程版本不兼容：任务与历史仍可查询，写入操作暂不可用。请先重启调度服务；前台 daemon 请停止后重新启动。",
+    );
+  }
   if (
     status.service.installedDataDir !== undefined &&
     status.service.installedDataDir !== status.dataDir

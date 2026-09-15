@@ -76,3 +76,28 @@
 - 额外 CLI / 聊天工具 / Core binding / 账本领取及 daemon 轮数生命周期回归 **8/8 通过**。Core/Runtime 类型检查、改动测试 ESLint/Prettier、Core 生产构建、编译后 `agent health` 懒加载入口、六包隔离 tarball 消费及 React 时区显示反例均通过。
 - GitNexus 刷新后，公共 E2E helper 的文件级影响为 MEDIUM，直接影响 11 个测试文件；源码确认无生产入口依赖。全量未提交变更的图风险仍为 critical，包含此前日历/状态机变更，不能解释为本次测试修补没有风险。图中动态调用及新文件覆盖不足之处仍以源码和真实回归补证。
 - 本次成功链路使用本地模拟模型，不证明真实 OpenClaw 模型的自然语言理解或真实 BOSS 回复效果；未安装/重启真实用户服务，未 commit/push。日志：`template-e2e-before.log`、`template-isolated-diagnostics.log`、`template-e2e-final.log`、`template-calendar-regression.log`、`template-artifacts-final.log`（均在上述临时证据目录）。
+
+## 实际聊天反馈：重复规则模型契约修复
+
+- 用户实测“今天 14:20、两轮”连续三次提交了 `every: "1d"` 与 `calendar: daily`。原工具 Schema 接受双字段，Core/Runtime 则拒绝。独立反例确认这个约束不一致；本地出站 Schema 只要求 name/prompt，未设置工具 strict，因此不能仅凭模型自述断言第三方网关把两项变成必填。
+- 模型工具改用唯一 `recurrence.kind = interval/daily/weekly` 分支，startAt、重复规则、rounds 独立表达。显式 `strict: true`；可缺省字段为 required + nullable，在 Tool Bridge 转换为既有 Core 请求。CLI、触发算法和 v9 账本均不改变，不通过忽略冲突字段绕过校验。
+- 当前配置的 Responses 网关 / `gpt-5.6-terra` 做了无业务执行的真实参数生成验证，固定测试时钟为 2099-01-01 12:00 Asia/Singapore：未来开始＋每分钟＋两轮、每天两轮、每周一/五两轮全部返回有效新结构；原始含糊请求返回“两轮消息之间希望间隔多久？例如每隔 1 分钟。”，未生成创建调用。测试提供了已知 Webhook 能力上下文和明确的目录，不执行返回的调用。四个样例通过不等于所有模型/所有自然语言表达均已验收。
+- 新确认预览区分首次时间、重复频率、预计第二轮和实际领取后重算语义。仅一轮不显示第二轮。缺少间隔先澄清，完整参数只做一次确认，不再擅自推导每天执行。
+- 相同无效创建参数在一个推理序列内重复时停止后续自动重试，并显示原因；修正输入、其他运行错误及下一用户轮次不受阻断。上下文压力同时触发时，旧续跑路径会重新启动已停止循环；追加反例复现 5 次模型调用，修复后仅 2 次。无效调用不写入调度账本。
+- 最终本地验证：Runtime 1471 项（1454 通过、17 平台跳过），Core 1784 项（1781 通过、3 跳过），完整 E2E 69/69。Core/Runtime/UI 类型检查、改动文件 ESLint/Prettier、Core/Runtime 生产构建、Skill 校验和 Changesets 预览通过。
+- 六包解包消费关闭 TypeScript stripping；额外验证打包后的 strict recurrence 工具 → Core binding → 临时 SQLite，保存一分钟间隔、未来开始和两轮上限。没有发送飞书消息或创建真实业务调度。
+- GitNexus 刷新后匹配到 35 个变更符号，但动态调用图仍不完整，零受影响流程不作为无影响证据。修改范围通过实际源码及完整回归补证。
+- 证据：`recurrence-red.log`、`recurrence-pressure-red.log`、`recurrence-pressure-green.log`、`recurrence-provider-final.log`、`recurrence-runtime-final.log`、`recurrence-core-tests.log`、`recurrence-e2e-final.log`、`recurrence-artifacts.log`，均在前述临时证据目录。本次后续改动保留未提交，未更新 PR 或重新触发 CI。
+
+## Roll UI 查询与加载失败修复、完整功能复验
+
+- 在独立临时 home/账本、真实 Roll UI 前后端和 Browser 中复现原截图：旧 daemon 元数据使 Web 读接口进入 `openScheduleStore` 写入守卫；错误发生后状态/列表/历史仍为 undefined，三个骨架持续显示。相同账本的 CLI 只读列表成功。
+- UI ledger port 新增必须显式提供的 `openReader`，状态/任务/运行查询均使用窄只读接口；暂停、恢复、取消、追加轮数继续走原有 guarded writer。临时 v8 账本在查询前后文件内容不变，空账本查询不创建目录；旧 daemon 下写操作依然失败。
+- Host 返回 schemaVersion/requiresRestart，页面展示兼容性警告并阻止任务写操作。加载结束无论成功或失败都会退出 loading；读取失败不是空列表。刷新失败保留上次完整快照并标记过时，恢复前禁用写操作；并发刷新合并，三条查询仍并行执行。
+- Browser 实测通过：初次失败后 loading 指示为 0、刷新按钮可用；恢复后在旧 daemon 警告下展示任务/历史且暂停按钮不可用；再次失败保留任务并提示旧数据；兼容条件恢复后暂停/恢复正常；取消排队的手动运行并查看失败原因；查看成功输出摘要；追加确认取消不改额度，批准后从 1/1 变为 1/3；CLI 删除临时任务后页面正确显示两个空列表。
+- 另从真实 CLI `ui --no-open` 启动新的一次性链接，在 Browser 完成认证并进入任务管理页，成功展示空数据，无 loading 残留。所有测试页面和临时 UI 进程已关闭。OS 用户服务状态只读探测未隔离于 launchd，但未对任何真实用户服务执行安装/重启/卸载。
+- 完整终端 E2E **70/70**：新增真实认证/CSRF HTTP 管理链路测试（旧 daemon 读取、写入拒绝、暂停/恢复、取消、追加幂等重放）；日历执行 E2E 增强为实际等待 interval 两轮结束，再额外手动运行一次并确认自动额度仍为 2，daily/weekly 各执行一次。未 mock 调度时钟、claim 或 executor，模型响应来自本地 HTTP fixture，不执行业务发送。
+- 全量 Core **1783 通过、3 平台跳过**；Runtime **1454 通过、17 平台跳过**；类型检查（Core、Runtime、UI）、改动文件 ESLint/Prettier、生产构建、Changesets 预览通过。新增缺失账本读测试在全量测试后单独复跑通过。
+- 当前真实 Responses 网关的四种模型参数生成样例再次通过，包括“只给开始时间和两轮”时询问间隔；这些调用未执行返回工具。六包隔离 tarball 消费在 Node 24.21 和 Node 22.6 上通过，追加验证打包后 UI 控制器读取旧 daemon 账本并继续拒绝写入。
+- 图工具把编辑前的 UI 控制器和页面影响列为 HIGH；符号索引存在 UNKNOWN/动态调用缺失，使用源码与上述实际链路复验补证，没有将最终图的零流程解释为无影响。本轮没有 commit/push。
+- 临时日志沿用上述证据目录：`ui-fix-red.log`、`ui-fix-controller.log`、`ui-fix-empty-read.log`、`ui-fix-http-e2e.log`、`ui-fix-all-e2e.log`、`ui-fix-core-all.log`、`ui-fix-runtime-all.log`、`ui-fix-provider.log`、`ui-fix-artifacts.log`；`ui-loading-fixture.mts` 保留可重复的浏览器错误/恢复夹具。

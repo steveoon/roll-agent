@@ -17,7 +17,7 @@ import {
   type RollUiScheduleController,
   type ScheduleHostStatus,
 } from "../../ui/index.ts";
-import { loadRuntime, openScheduleStore } from "./schedule-command-utils.ts";
+import { loadRuntime, openScheduleReader, openScheduleStore } from "./schedule-command-utils.ts";
 import {
   assertNodeSqliteAvailable,
   describeSchedulerServiceRestartRefusal,
@@ -32,6 +32,10 @@ export async function createDefaultScheduleController(): Promise<RollUiScheduleC
   await assertNodeSqliteAvailable();
   return createRollUiScheduleController({
     ledger: {
+      openReader: async () => {
+        const { config } = loadConfig();
+        return openScheduleReader(config, await loadRuntime());
+      },
       open: async () => {
         const { config } = loadConfig();
         const runtime = await loadRuntime();
@@ -43,6 +47,7 @@ export async function createDefaultScheduleController(): Promise<RollUiScheduleC
         const { config } = loadConfig();
         const paths = createSchedulerPaths(config.scheduler.dataDir);
         const daemon = inspectDaemon(paths.daemonRecordPath);
+        const runtime = await loadRuntime();
         const service = await probeSchedulerService();
         const audit = auditScheduledServicePlaceholders();
         return {
@@ -50,6 +55,14 @@ export async function createDefaultScheduleController(): Promise<RollUiScheduleC
           logPath: paths.logPath,
           daemon: {
             liveness: daemon.liveness,
+            requiresRestart:
+              daemon.liveness === "running" &&
+              daemon.record?.schedulerSchemaVersion !== runtime.SCHEDULER_SCHEMA_VERSION,
+            ...(daemon.record?.schedulerSchemaVersion === undefined
+              ? {}
+              : {
+                  schemaVersion: daemon.record.schedulerSchemaVersion,
+                }),
             ...(daemon.record !== undefined
               ? { pid: daemon.record.pid, startedAt: daemon.record.startedAt }
               : {}),

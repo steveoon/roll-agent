@@ -8,7 +8,9 @@ import type {
 } from "@roll-agent/core/scheduler-host/schedule-tool-binding";
 import { buildScheduleExtendTools } from "./schedule-extend-tool.ts";
 import { SCHEDULE_STATUSES } from "../scheduler/types.ts";
-import { calendarScheduleInputSchema, systemTimeZone } from "../scheduler/calendar.ts";
+import { systemTimeZone } from "../scheduler/calendar.ts";
+import { computeNextRunAtMs } from "../scheduler/trigger.ts";
+import { scheduleCreateInputSchema, toScheduleCreateRequest } from "./schedule-create-input.ts";
 import { gateToolCall, type ToolBridgeContext } from "./build-tools.ts";
 import type { ToolRegistry } from "./naming.ts";
 import {
@@ -41,52 +43,6 @@ export interface ScheduleToolset {
   readonly extendTools: ToolSet;
   readonly listTools: ToolSet;
 }
-
-const scheduleCreateInputSchema = z
-  .object({
-    name: z.string().trim().min(1).max(120).describe("任务名称（确认界面与任务列表中展示）"),
-    prompt: z
-      .string()
-      .trim()
-      .min(1)
-      .max(4000)
-      .describe("每次触发时交给新一轮 chat 的任务描述，写清要做什么"),
-    every: z
-      .string()
-      .trim()
-      .min(1)
-      .optional()
-      .describe("固定间隔，与 calendar 二选一，格式 <数字><s|m|h|d>，如 30m（60s..365d）"),
-    calendar: calendarScheduleInputSchema
-      .optional()
-      .describe(
-        "日历规则，与 every 二选一；time 为 HH:mm，weekly 的 weekdays 为 1=周一..7=周日；省略 timeZone 使用运行 Roll 的机器时区，创建时保存",
-      ),
-    startAt: z
-      .string()
-      .trim()
-      .min(1)
-      .optional()
-      .describe(
-        "未来开始时间，例如 2026-09-16T08:00；不带偏移时按机器时区（日历任务按其 timeZone）解释，也接受带偏移的 ISO 时间；every 首轮在此时执行，calendar 从此时起找匹配日期",
-      ),
-    cwd: z
-      .string()
-      .optional()
-      .describe("任务运行的工作目录；省略时使用当前会话工作目录，相对路径相对会话目录解析"),
-    rounds: z
-      .number()
-      .int()
-      .positive()
-      .max(Number.MAX_SAFE_INTEGER)
-      .optional()
-      .describe("最多自动执行轮数；省略不限轮数。重试和手动运行不额外计数"),
-    maxRun: z
-      .string()
-      .optional()
-      .describe("单次运行时长上限，格式同 every（60s..24h；省略时默认 1 小时）"),
-  })
-  .strict();
 
 const scheduleListInputSchema = z.object({
   status: z
@@ -146,11 +102,26 @@ function buildCreateConfirmationDetails(
     name: admission.name,
     prompt: admission.prompt,
     every: admission.everyDisplay,
+    recurrence: admission.everyDisplay,
     cwd: admission.cwd,
     maxRun: admission.maxRunDisplay,
     firstRunAt: formatLocalTime(admission.firstRunAt, timeZone),
     firstRunAtIso: admission.firstRunAt,
     timeZone,
+    ...(admission.maxRounds === 1
+      ? {}
+      : {
+          nextRunAtEstimate: formatLocalTime(
+            new Date(
+              computeNextRunAtMs(admission.trigger, Date.parse(admission.firstRunAt)),
+            ).toISOString(),
+            timeZone,
+          ),
+        }),
+    timingSemantics:
+      admission.trigger.kind === "interval"
+        ? "第二轮时间仅为预计；按每轮实际领取时间加间隔计算，延迟领取时顺延，不固定每天执行"
+        : "按保存的时区和日历规则匹配；跳时日期跳过，重复钟点仅执行较早一次",
     rounds:
       admission.maxRounds === undefined
         ? "不限轮数"
@@ -190,10 +161,10 @@ export function buildScheduleToolset(
     if (!parsed.success) {
       return {
         kind: INVALID_CAPTURE,
-        message: `参数校验失败: ${parsed.error.issues.map((issue) => issue.message).join("; ")}`,
+        message: `参数校验失败: ${parsed.error.issues.map((issue) => `${issue.path.join(".") || "input"}: ${issue.message}`).join("; ")}。使用唯一 recurrence 分支；今天/明天某时填写 startAt，缺少两轮间隔先询问用户。缺省字段填写 null。不要原样重试相同参数。`,
       };
     }
-    return deps.port.captureCreate(parsed.data, deps.sessionCwd);
+    return deps.port.captureCreate(toScheduleCreateRequest(parsed.data), deps.sessionCwd);
   };
 
   const createPlan: ToolExecutionPlan = {
@@ -240,8 +211,9 @@ export function buildScheduleToolset(
       : {
           [createId]: tool({
             description:
-              "登记定时任务，由调度器发起新一轮无人值守 chat 执行 prompt。every 固定间隔与 calendar 每天/每周日历规则二选一；startAt 指定未来开始时间。默认按运行 Roll 的机器时区，创建时保存日历时区。rounds 限制总自动轮数，重试不多计。创建自带完整参数确认，不要提前重复询问。不支持 cron 或每天开启一组多轮循环。",
+              "登记定时任务，每轮无人值守 chat 执行 prompt。startAt=开始时间，recurrence=重复规则，rounds=总轮数，三个维度独立。今天/明天某时不是 daily；缺少两轮间隔先澄清，不能猜成每天一次。信息齐全后只做工具自带的完整参数确认，不重复口头确认。可选值用 null 表示缺省。不支持 cron 或每天开启一组多轮循环。",
             inputSchema: scheduleCreateInputSchema,
+            strict: true,
             toModelOutput: ({ output }) => toolResultToModelOutput(output),
             execute: async (
               input,
