@@ -287,6 +287,19 @@ async function waitForValue<T>(read: () => T | undefined, message: string): Prom
   throw new Error(message);
 }
 
+/** Event barrier for virtual-clock tests; the enclosing test timeout bounds missing events. */
+function waitForWireValue<T>(connection: JsonRpcConnection, read: () => T | undefined): Promise<T> {
+  return new Promise((resolve) => {
+    const check = () => {
+      const value = read();
+      if (value !== undefined) resolve(value);
+    };
+    // Register after attachRuntimeProtocolClient so its arrays contain the received message.
+    connection.onMessage(check);
+    check();
+  });
+}
+
 function isNotification(message: JsonRpcMessage): message is JsonRpcNotification {
   return "method" in message && !("id" in message);
 }
@@ -333,7 +346,7 @@ function createApprovalProtocolHarness(
   configureServerConnection?.(serverConn);
   const storeDir = mkdtempSync(join(tmpdir(), "roll-runtime-approval-v11-"));
   const store = new ThreadStore(storeDir);
-  const engine = new ConversationEngine({
+  const engineOptions = {
     config:
       turnTimeoutMs === undefined
         ? config
@@ -366,7 +379,8 @@ function createApprovalProtocolHarness(
     sources: [source("approval-agent", "write", onToolCall)],
     policy: new DefaultToolPolicy(),
     store,
-  });
+  };
+  const engine = new ConversationEngine(engineOptions);
   const service = new RuntimeService(engine, store, { runtimeVersion: "v1.1-test" });
   const server = new RuntimeServer(engine, serverConn, {
     runtimeService: service,
@@ -377,6 +391,7 @@ function createApprovalProtocolHarness(
   });
   return {
     clientConn,
+    model: engineOptions.model,
     engine,
     server,
     service,
@@ -3632,82 +3647,175 @@ test("Runtime Protocol 1.1 在 Turn cancel 时取消未决 server request", asyn
   );
 });
 
-test("Runtime Protocol 1.1 在 Turn timeout 时过期审批并拒绝迟到批准", async (t) => {
-  let executionCount = 0;
-  const harness = createApprovalProtocolHarness(() => {
-    executionCount += 1;
-  }, 100);
-  const client = attachRuntimeProtocolClient(harness.clientConn);
-  t.after(() => harness.close());
+test(
+  "Runtime Protocol 1.1 在 Turn timeout 时过期审批并拒绝迟到批准",
+  { timeout: 10_000 },
+  async (t) => {
+    // Freeze both the absolute approval deadline and its timer before the harness captures Date.now.
+    t.mock.timers.enable({ apis: ["Date", "setTimeout"], now: Date.now() });
+    let executionCount = 0;
+    const harness = createApprovalProtocolHarness(() => {
+      executionCount += 1;
+    }, 100);
+    const client = attachRuntimeProtocolClient(harness.clientConn);
+    t.after(() => harness.close());
 
-  await client.request(1, RUNTIME_METHODS.initialize, {
-    protocolVersions: ["1.1"],
-    client: { name: "timeout-client", version: "1.1.0" },
-  });
-  const created = (await client.request(2, RUNTIME_METHODS.threadCreate, {
-    requestId: "00000000-0000-4000-8000-000000000381",
-    title: "timeout approval",
-  })) as { readonly thread: { readonly id: string } };
-  const turnId = "00000000-0000-4000-8000-000000000382";
-  await client.request(3, RUNTIME_METHODS.turnStart, {
-    requestId: "00000000-0000-4000-8000-000000000383",
-    threadId: created.thread.id,
-    turnId,
-    input: { text: "timeout guarded tool" },
-  });
-  const approvalRequest = await waitForValue(
-    () =>
+    await client.request(1, RUNTIME_METHODS.initialize, {
+      protocolVersions: ["1.1"],
+      client: { name: "timeout-client", version: "1.1.0" },
+    });
+    const created = (await client.request(2, RUNTIME_METHODS.threadCreate, {
+      requestId: "00000000-0000-4000-8000-000000000381",
+      title: "timeout approval",
+    })) as { readonly thread: { readonly id: string } };
+    const turnId = "00000000-0000-4000-8000-000000000382";
+    const approvalReceived = waitForWireValue(harness.clientConn, () =>
       client.wire.find(
         (message): message is JsonRpcRequest =>
           isRequest(message) && message.method === RUNTIME_SERVER_REQUEST_METHODS.approvalRequest,
       ),
-    "超时测试未收到 approval.request",
-  );
-  const cancelNotification = await waitForValue(
-    () =>
-      client.wire.find(
-        (message): message is JsonRpcNotification =>
-          isNotification(message) && message.method === RUNTIME_SERVER_REQUEST_CANCEL_NOTIFICATION,
-      ),
-    "超时后未收到 runtime.serverRequest.cancel",
-  );
-  assert.deepEqual(cancelNotification.params, {
-    serverRequestId: approvalRequest.id,
-    approvalId: (approvalRequest.params as ApprovalRequestParams).approval.id,
-    reason: "Turn 已超时",
-  });
-  const resolution = await waitForValue(
-    () => client.events.find((envelope) => envelope.event.type === "approval.resolved"),
-    "超时后未收到 approval.resolved",
-  );
-  assert.ok(resolution.event.type === "approval.resolved");
-  assert.deepEqual(resolution.event.resolution, {
-    status: "expired",
-    reason: "Turn 已超时",
-  });
-  const terminal = await waitForValue(
-    () =>
+    );
+    const turnCancelled = waitForWireValue(harness.clientConn, () =>
       client.events.find(
         (envelope) => envelope.turnId === turnId && envelope.event.type === "turn.cancelled",
       ),
-    "超时后未收到 turn.cancelled",
-  );
-  assert.ok(terminal.event.type === "turn.cancelled");
-  assert.equal(terminal.event.reason, "timeout");
-  assert.equal(executionCount, 0);
+    );
+    await client.request(3, RUNTIME_METHODS.turnStart, {
+      requestId: "00000000-0000-4000-8000-000000000383",
+      threadId: created.thread.id,
+      turnId,
+      input: { text: "timeout guarded tool" },
+    });
+    const approvalRequest = await approvalReceived;
+    t.mock.timers.tick(99);
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(
+      client.events.some((envelope) => envelope.event.type === "approval.resolved"),
+      false,
+    );
+    assert.equal(
+      client.events.some((envelope) => envelope.event.type === "turn.cancelled"),
+      false,
+    );
+    assert.equal(executionCount, 0);
+    t.mock.timers.tick(1);
+    const terminal = await turnCancelled;
+    const cancelNotification = client.wire.find(
+      (message): message is JsonRpcNotification =>
+        isNotification(message) && message.method === RUNTIME_SERVER_REQUEST_CANCEL_NOTIFICATION,
+    );
+    assert.ok(cancelNotification, "超时后未收到 runtime.serverRequest.cancel");
+    assert.deepEqual(cancelNotification.params, {
+      serverRequestId: approvalRequest.id,
+      approvalId: (approvalRequest.params as ApprovalRequestParams).approval.id,
+      reason: "Turn 已超时",
+    });
+    const resolution = client.events.find(
+      (envelope) => envelope.event.type === "approval.resolved",
+    );
+    assert.ok(resolution, "超时后未收到 approval.resolved");
+    assert.ok(resolution.event.type === "approval.resolved");
+    assert.deepEqual(resolution.event.resolution, {
+      status: "expired",
+      reason: "Turn 已超时",
+    });
+    assert.ok(terminal.event.type === "turn.cancelled");
+    assert.equal(terminal.event.reason, "timeout");
+    assert.ok(client.events.indexOf(resolution) < client.events.indexOf(terminal));
+    assert.equal(executionCount, 0);
 
-  harness.clientConn.send({
-    jsonrpc: "2.0",
-    id: approvalRequest.id,
-    result: { decision: "approve" },
-  });
-  await new Promise<void>((resolve) => setImmediate(resolve));
-  assert.equal(executionCount, 0);
-  assert.equal(
-    client.events.filter((envelope) => envelope.event.type === "approval.resolved").length,
-    1,
-  );
-});
+    harness.clientConn.send({
+      jsonrpc: "2.0",
+      id: approvalRequest.id,
+      result: { decision: "approve" },
+    });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(executionCount, 0);
+    assert.equal(
+      client.events.filter((envelope) => envelope.event.type === "approval.resolved").length,
+      1,
+    );
+  },
+);
+
+test(
+  "Runtime Protocol 1.1 在审批生成前 Turn timeout 时不发送审批也不执行工具",
+  { timeout: 10_000 },
+  async (t) => {
+    t.mock.timers.enable({ apis: ["Date", "setTimeout"], now: Date.now() });
+    let executionCount = 0;
+    const harness = createApprovalProtocolHarness(() => {
+      executionCount += 1;
+    }, 100);
+    const client = attachRuntimeProtocolClient(harness.clientConn);
+    const modelEntered = Promise.withResolvers<void>();
+    const releaseModel = Promise.withResolvers<void>();
+    const originalStream = harness.model.doStream.bind(harness.model);
+    t.mock.method(
+      harness.model,
+      "doStream",
+      async (options: Parameters<typeof originalStream>[0]) => {
+        modelEntered.resolve();
+        await releaseModel.promise;
+        // Like a cancelled provider request, do not emit a tool call after its signal aborts.
+        assert.ok(options.abortSignal);
+        options.abortSignal.throwIfAborted();
+        return originalStream(options);
+      },
+    );
+    t.after(async () => {
+      releaseModel.resolve();
+      await harness.close();
+    });
+    await client.request(1, RUNTIME_METHODS.initialize, {
+      protocolVersions: ["1.1"],
+      client: { name: "timeout-before-approval-client", version: "1.1.0" },
+    });
+    const created = (await client.request(2, RUNTIME_METHODS.threadCreate, {
+      requestId: "00000000-0000-4000-8000-000000000391",
+      title: "timeout before approval",
+    })) as { readonly thread: { readonly id: string } };
+    const turnId = "00000000-0000-4000-8000-000000000392";
+    const turnCancelled = waitForWireValue(harness.clientConn, () =>
+      client.events.find(
+        (envelope) => envelope.turnId === turnId && envelope.event.type === "turn.cancelled",
+      ),
+    );
+    await client.request(3, RUNTIME_METHODS.turnStart, {
+      requestId: "00000000-0000-4000-8000-000000000393",
+      threadId: created.thread.id,
+      turnId,
+      input: { text: "timeout before guarded tool" },
+    });
+    // The real Turn timer is armed, but the mock model cannot produce an approval yet.
+    await modelEntered.promise;
+    t.mock.timers.tick(99);
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(
+      client.events.some((envelope) => envelope.event.type === "turn.cancelled"),
+      false,
+    );
+    t.mock.timers.tick(1);
+    releaseModel.resolve();
+    const terminal = await turnCancelled;
+    assert.ok(terminal.event.type === "turn.cancelled");
+    assert.equal(terminal.event.reason, "timeout");
+    // Flush the cancelled model request so no late approval/execution escapes the assertion.
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(
+      client.wire.some(
+        (message) =>
+          isRequest(message) && message.method === RUNTIME_SERVER_REQUEST_METHODS.approvalRequest,
+      ),
+      false,
+    );
+    assert.equal(
+      client.events.some((envelope) => envelope.event.type === "approval.resolved"),
+      false,
+    );
+    assert.equal(executionCount, 0);
+  },
+);
 
 test("RuntimeServer.abortAll 对未决审批发送 cancel 并 fail-closed 收口", async (t) => {
   const harness = createApprovalProtocolHarness();
