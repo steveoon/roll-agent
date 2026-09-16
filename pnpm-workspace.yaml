@@ -26,6 +26,9 @@ minimumReleaseAgeExclude:
   - "nanoid@3.3.18"
   - "@ai-sdk/deepseek@3.0.31"
   - "@ai-sdk/provider-utils@5.0.29"
+  - "@ai-sdk/deepseek@3.0.45"
+  - "@ai-sdk/provider@4.0.15"
+  - "@ai-sdk/provider-utils@5.0.41"
 blockExoticSubdeps: true
 savePrefix: ""
 strictDepBuilds: true

@@ -33,6 +33,99 @@ describe("createProviderModel", () => {
     assert.equal(model.modelId, "deepseek-v4-flash");
   });
 
+  for (const method of ["doGenerate", "doStream"] as const) {
+    it(`preserves deepseek-flash reasoning across user turns in ${method}`, async () => {
+      const originalFetch = globalThis.fetch;
+      let capturedBody: unknown;
+      try {
+        globalThis.fetch = async (_url, init) => {
+          assert.equal(typeof init?.body, "string");
+          capturedBody = JSON.parse(String(init?.body));
+          return method === "doStream"
+            ? new Response("", { headers: { "content-type": "text/event-stream" } })
+            : Response.json({
+                id: "flash-response",
+                created: 0,
+                model: "deepseek-flash",
+                choices: [{ message: { role: "assistant", content: "ok" }, finish_reason: "stop" }],
+                usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+              });
+        };
+        const model = createProviderModel("deepseek", "deepseek-flash", "test-key");
+        const result = await model[method]({
+          prompt: [
+            { role: "user", content: [{ type: "text", text: "first" }] },
+            {
+              role: "assistant",
+              content: [
+                { type: "reasoning", text: "fixture reasoning" },
+                { type: "text", text: "first answer" },
+              ],
+            },
+            { role: "user", content: [{ type: "text", text: "second" }] },
+            { role: "assistant", content: [{ type: "text", text: "imported answer" }] },
+            { role: "user", content: [{ type: "text", text: "third" }] },
+          ],
+          tools: [{ type: "function", name: "probe", inputSchema: { type: "object" } }],
+          providerOptions: { deepseek: { thinking: { type: "enabled" } } },
+        });
+        if ("stream" in result) await result.stream.cancel();
+      } finally {
+        globalThis.fetch = originalFetch;
+      }
+      assert.ok(isRecord(capturedBody));
+      assert.equal(capturedBody.model, "deepseek-flash");
+      assert.ok(Array.isArray(capturedBody.messages));
+      const messages: unknown[] = capturedBody.messages;
+      assert.deepEqual(
+        messages.filter((message) => isRecord(message) && message.role === "assistant"),
+        [
+          { role: "assistant", content: "first answer", reasoning_content: "fixture reasoning" },
+          { role: "assistant", content: "imported answer", reasoning_content: "" },
+        ],
+      );
+    });
+  }
+
+  it("preserves explicit DeepSeek beta strict mode and tool schemas", async () => {
+    const originalFetch = globalThis.fetch;
+    let capturedBody: unknown;
+    let capturedUrl: string | undefined;
+    const schema = {
+      type: "object" as const,
+      properties: { value: { type: "string" as const } },
+      required: ["value"],
+      additionalProperties: false,
+    };
+    try {
+      globalThis.fetch = async (url, init) => {
+        capturedUrl = String(url);
+        capturedBody = JSON.parse(String(init?.body));
+        return new Response("", { headers: { "content-type": "text/event-stream" } });
+      };
+      const result = await createProviderModel(
+        "deepseek",
+        "deepseek-flash",
+        "test-key",
+        "https://api.deepseek.com/beta/",
+      ).doStream({
+        prompt: [{ role: "user", content: [{ type: "text", text: "probe" }] }],
+        tools: [{ type: "function", name: "probe", inputSchema: schema, strict: true }],
+      });
+      await result.stream.cancel();
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+    assert.equal(capturedUrl, "https://api.deepseek.com/beta/chat/completions");
+    assert.ok(isRecord(capturedBody));
+    assert.deepEqual(capturedBody.tools, [
+      {
+        type: "function",
+        function: { name: "probe", parameters: schema, strict: true },
+      },
+    ]);
+  });
+
   it("forwards DeepSeek vision attachments as image_url content", async () => {
     const originalFetch = globalThis.fetch;
     let capturedBody: unknown;
