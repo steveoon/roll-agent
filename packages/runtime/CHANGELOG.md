@@ -1,5 +1,11 @@
 # @roll-agent/runtime
 
+## 0.23.1
+
+### Patch Changes
+
+- [#271](https://github.com/steveoon/roll-agent/pull/271) [`58259fa`](https://github.com/steveoon/roll-agent/commit/58259fa6f5eeb8b15cb2a00d3ac9204da7a84c5a) Thanks [@steveoon](https://github.com/steveoon)! - Upgrade the DeepSeek provider to preserve reasoning history for `deepseek-flash` in multi-turn tool calls. Adapt strict tool generation hints to DeepSeek standard endpoints while retaining local schema validation and explicit beta strict mode, and recognize the model's 1M context window when no catalog entry is available.
+
 ## 0.23.0
 
 ### Minor Changes
