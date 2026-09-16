@@ -31,6 +31,7 @@ const MODEL_CONTEXT_WINDOWS: readonly ContextWindowEntry[] = [
   { match: "grok-4.6", window: 500_000 },
   { match: "grok-4.5", window: 500_000 },
   { match: "deepseek-v4", window: 1_000_000 },
+  { match: "deepseek-flash", window: 1_000_000 },
   { match: "deepseek-chat", window: 1_000_000 },
   { match: "deepseek-reasoner", window: 1_000_000 },
   { match: "deepseek", window: 128_000 },

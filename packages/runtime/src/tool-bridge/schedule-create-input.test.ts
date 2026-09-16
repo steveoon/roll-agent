@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { asSchema } from "ai";
+import { asSchema, stepCountIs, streamText } from "ai";
 import { buildScheduleToolset, SCHEDULE_CREATE_TOOL_ID } from "./schedule-tool.ts";
 import { ToolRegistry } from "./naming.ts";
 import { scheduleCreateInputSchema, toScheduleCreateRequest } from "./schedule-create-input.ts";
@@ -221,3 +221,112 @@ test("OpenAI Responses wire keeps explicit strict and nested recurrence; returne
     globalThis.fetch = originalFetch;
   }
 });
+
+for (const stringifyRecurrence of [false, true]) {
+  test(`DeepSeek streaming schedule calls retain local validation (string recurrence: ${stringifyRecurrence})`, async () => {
+    const scheduleTool = modelTool();
+    const input = {
+      ...defaults,
+      recurrence: stringifyRecurrence
+        ? JSON.stringify({ kind: "interval", every: "30m" })
+        : { kind: "interval", every: "30m" },
+    };
+    const schema = await asSchema(scheduleTool.inputSchema).jsonSchema;
+    const originalFetch = globalThis.fetch;
+    let requests = 0;
+    let executions = 0;
+    let invalidCalls = 0;
+    try {
+      globalThis.fetch = async (_url, init) => {
+        const body: unknown = JSON.parse(String(init?.body));
+        assert.ok(typeof body === "object" && body !== null && "tools" in body);
+        assert.ok(Array.isArray(body.tools));
+        assert.deepEqual(body.tools[0], {
+          type: "function",
+          function: {
+            name: SCHEDULE_CREATE_TOOL_ID,
+            description: scheduleTool.description,
+            parameters: schema,
+            strict: false,
+          },
+        });
+        requests += 1;
+        if (requests === 2) {
+          assert.ok("messages" in body && Array.isArray(body.messages));
+          const assistant: unknown = body.messages.find(
+            (message: unknown) =>
+              typeof message === "object" && message !== null && "tool_calls" in message,
+          );
+          assert.ok(typeof assistant === "object" && assistant !== null);
+          assert.ok("reasoning_content" in assistant);
+          assert.equal(assistant.reasoning_content, "fixture reasoning");
+        }
+        const deltas =
+          requests === 1
+            ? [
+                { reasoning_content: "fixture reasoning" },
+                {
+                  tool_calls: [
+                    {
+                      index: 0,
+                      id: "fixture-call",
+                      type: "function",
+                      function: {
+                        name: SCHEDULE_CREATE_TOOL_ID,
+                        arguments: JSON.stringify(input),
+                      },
+                    },
+                  ],
+                },
+              ]
+            : [{ content: "done" }];
+        const chunks = deltas.map((delta) => ({
+          id: "fixture",
+          created: 1,
+          model: "deepseek-flash",
+          choices: [{ index: 0, delta, finish_reason: null }],
+        }));
+        const finish = {
+          id: "fixture",
+          created: 1,
+          model: "deepseek-flash",
+          choices: [{ index: 0, delta: {}, finish_reason: requests === 1 ? "tool_calls" : "stop" }],
+          usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+        };
+        return new Response(
+          [...chunks, finish].map((chunk) => `data: ${JSON.stringify(chunk)}\n\n`).join("") +
+            "data: [DONE]\n\n",
+          { headers: { "content-type": "text/event-stream" } },
+        );
+      };
+      const result = streamText({
+        model: createProviderModel("deepseek", "deepseek-flash", "test-key"),
+        prompt: "Validate the fixture schedule without creating a real task",
+        providerOptions: { deepseek: { thinking: { type: "enabled" } } },
+        tools: {
+          [SCHEDULE_CREATE_TOOL_ID]: {
+            description: scheduleTool.description ?? "schedule fixture",
+            inputSchema: scheduleCreateInputSchema,
+            strict: true,
+            execute: async (received) => {
+              executions += 1;
+              assert.deepEqual(received, input);
+              return "fixture accepted";
+            },
+          },
+        },
+        stopWhen: stepCountIs(2),
+      });
+      for await (const part of result.fullStream) {
+        if (part.type === "error") throw part.error;
+        if (part.type === "tool-call" && part.invalid) invalidCalls += 1;
+      }
+      assert.equal(await result.text, "done");
+      assert.equal(requests, 2);
+      assert.equal(executions, stringifyRecurrence ? 0 : 1);
+      assert.equal(invalidCalls, stringifyRecurrence ? 1 : 0);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+}

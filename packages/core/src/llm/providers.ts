@@ -9,6 +9,7 @@ import { createOpenAI } from "@ai-sdk/openai";
 import { createDeepSeek } from "@ai-sdk/deepseek";
 import { createGoogle, type GoogleGenerativeAIProviderOptions } from "@ai-sdk/google";
 import { createXai } from "@ai-sdk/xai";
+import { wrapLanguageModel } from "ai";
 import { runtimeThinkingLevels } from "../config/schema.ts";
 import {
   isRootDefinitionReference,
@@ -191,7 +192,27 @@ const PROVIDER_FACTORIES: Record<string, ProviderFactory> = {
   },
   deepseek: (modelName, { apiKey, baseURL }) => {
     const provider = createDeepSeek({ apiKey, ...(baseURL ? { baseURL } : {}) });
-    return provider(modelName);
+    const model = provider(modelName);
+    if (baseURL?.replace(/\/$/u, "").endsWith("/beta")) return model;
+    // DeepSeek only accepts provider-side strict tool generation on /beta.
+    // Keep the original schemas and AI SDK input validation; adapt only the
+    // generation hint sent to standard endpoints, for both chat and sampling.
+    return wrapLanguageModel({
+      model,
+      middleware: {
+        transformParams: async ({ params }) => {
+          if (!params.tools?.some((tool) => tool.type === "function" && tool.strict === true)) {
+            return params;
+          }
+          return {
+            ...params,
+            tools: params.tools.map((tool) =>
+              tool.type === "function" && tool.strict === true ? { ...tool, strict: false } : tool,
+            ),
+          };
+        },
+      },
+    });
   },
   qwen: (modelName, { apiKey, baseURL }) => {
     const provider = createAlibaba({ apiKey, baseURL: baseURL ?? QWEN_BASE_URL });
