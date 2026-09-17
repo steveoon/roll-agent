@@ -1,81 +1,105 @@
-# 在第三方 App 中展示 Subagent 结构化结果
+# 让第三方 App 展示 Subagent 的结构化结果
 
-Roll 负责结果契约、执行关联、持久化和授权。App 根据受信的 Agent 来源、schemaId 和版本选择自己的组件。Runtime 与客户端 SDK 不加载 Agent 提供的 HTML、JavaScript 或组件代码。
+这份指南面向已有 App 的开发者：让 Subagent 返回业务数据，经 Roll Runtime 传到客户端，再用 App 自己的组件展示。
 
-## 工具作者：显式声明业务输出
+本文以候选人列表为例。同一份数据可以在 Web 中显示为表格，在 Electron 中显示为卡片；Roll 不要求两端使用相同的组件或框架。
+
+## 开始前
+
+确认你已经有可连接的 Runtime、已注册的 Subagent，以及能打开会话的客户端。远程 Web 还需要完成现有的 [Companion / Relay 接入](companion-relay-v1-reference.md)。
+
+| 接入方式 | 所需能力 | 客户端 |
+| --- | --- | --- |
+| 本地 Node / Electron | Runtime Protocol **1.5**，`initialize.features` 包含 `app-output` | `@roll-agent/client-node` |
+| 远程 Web | Runtime Protocol **1.5** + Relay Wire **1.2** + 本机工具授权 | `@roll-agent/relay-client` |
+
+这里的协议版本与 npm 包版本是两套编号。使用未发布分支时，需要配套的本地候选包；不要假定 npm 上的旧包已经包含这些接口。
+
+你只需要按顺序完成四件事：
+
+1. **工具端**：声明输出契约并返回数据。
+2. **连接端**：选择本地或远程接入，远程接入增加本机授权。
+3. **App 端**：按 operation 读取结果，交给自己的渲染器。
+4. **验证**：检查新执行、历史恢复和拒绝状态。
+
+## 1. 为工具声明结构化输出
+
+如果 Subagent 已经声明了输出契约，可以直接跳到第 2 步。
+
+下面是一个最小的 Node Subagent。`output` 定义数据形状，`appOutput` 标识这份业务契约，`execute()` 返回普通对象。
 
 ```ts
+import { defineAgent, defineTool } from "@roll-agent/sdk";
 import { z } from "zod";
-import { defineTool } from "@roll-agent/sdk";
 
 const listCandidates = defineTool({
   name: "list_candidates",
-  description: "Return synthetic candidates",
+  description: "返回用于 UI 联调的合成候选人数据",
   input: z.object({}),
   output: z.object({
-    candidates: z.array(z.object({
-      id: z.string(), name: z.string(), score: z.number(), skills: z.array(z.string()),
-    })),
+    candidates: z.array(
+      z.object({
+        id: z.string(),
+        name: z.string(),
+        score: z.number().min(0).max(1),
+        skills: z.array(z.string()),
+      }),
+    ),
   }),
-  appOutput: { schemaId: "example.candidates", schemaVersion: 1, remoteReadable: true },
+  appOutput: {
+    schemaId: "example.candidates",
+    schemaVersion: 1,
+    remoteReadable: true,
+  },
   annotations: { readOnlyHint: true },
-  execute: async () => ({ candidates: [] }),
+  execute: async () => ({
+    candidates: [
+      {
+        id: "demo-1",
+        name: "李明（演示）",
+        score: 0.9,
+        skills: ["TypeScript", "Node.js"],
+      },
+    ],
+  }),
 });
+
+await defineAgent({
+  name: "structured-output-demo",
+  tools: [listCandidates],
+}).listen();
 ```
 
-`remoteReadable` 默认 false。声明它不等于取得远程授权；仍须本机允许该工具。未声明 `appOutput` 的工具保持原有输出路径。
+**检查结果：**工具通过 MCP `tools/list` 暴露 `outputSchema` 和 `_meta["roll/appOutput"]`；成功调用时，业务对象出现在 `structuredContent` 中。这些包装由 SDK 完成，工具作者无需手动构造。
 
-`output` 是单一契约来源，必须能准确表达为 JSON Schema 对象；不能表示的转换或规则在注册阶段失败。仅支持自包含 schema 和本地 JSON Pointer 引用，不从网络解析 `$ref`。SDK 用 MCP `outputSchema` 和 `structuredContent` 承载结果。
+注意两点：
 
-非 Node Subagent 使用等价 MCP 定义：
+- `remoteReadable` 默认是 `false`。设为 `true` 只表示工具愿意分享，远程读取仍需要第 2 步的本机授权。
+- 输出必须是完整的 JSON 对象。不要为了展示效果修改字段类型，也不要把组件代码放进返回值。
 
-```json
-{
-  "name": "list_candidates",
-  "inputSchema": { "type": "object", "properties": {} },
-  "outputSchema": { "type": "object", "properties": { "candidates": { "type": "array", "items": { "type": "object" } } }, "required": ["candidates"] },
-  "_meta": { "roll/appOutput": { "schemaId": "example.candidates", "schemaVersion": 1, "remoteReadable": true } }
-}
-```
+非 Node Subagent 可以实现同一 MCP 约定，见 [MCP 输出参考](app-output-reference.md#非-node-subagent-的-mcp-约定)。
 
-成功的工具结果把业务对象放在 `structuredContent`，`content` 保留文本回退。不要将输入凭据、原始内部状态或 `_meta` 放进业务 DTO。
+## 2. 选择连接方式
 
-如果工具已经完成操作，但输出验证失败，SDK 返回 `isError: true`，同时带 `_meta["roll/executionStatus"] = "completed"` 和 `_meta["roll/appOutputStatus"] = "invalid"`（或 `"too_large"`）。Runtime 仅对已声明契约且标记配对完整的结果区分“执行完成”和“App 输出不可用”。独立 MCP 实现应使用相同约定；普通 MCP 错误不被猜测为执行成功。输出错误不触发工具自动重试。
+### 本地 Node / Electron
 
-## 本地客户端
-
-Runtime Protocol 1.5 的 `initialize.features` 包含 `app-output`。完成事件和 operation snapshot 中的 `appOutput` 是轻量描述，正文使用只读接口获取：
+沿用现有的 `RollNodeClient` 连接。在协商结果中检查 `app-output`，再按 operation ID 读取：
 
 ```ts
-const response = await client.getOperationResult({ threadId, operationId });
-if (response.result?.output.status === "available") {
-  const { agentName, toolName, output } = response.result;
-  // 先验证来源、schemaId、schemaVersion 和 data，再调用 App 自己注册的组件。
-  renderRegisteredResult({ agentName, toolName, output });
+if (!client.getInitializationResult().features.some((feature) => feature === "app-output")) {
+  throw new Error("当前 Runtime 不支持结构化结果，请先升级");
 }
+
+const response = await client.getOperationResult({ threadId, operationId });
 ```
 
-等价 RPC 为 `operation.result.get({threadId, operationId})`，不存在 operation 时返回 `{result: null}`。不支持该协议时显示能力不支持，不把它表示为空业务数据。
+`threadId` 来自当前会话；`operationId` 来自完成事件的 `operationId` 或 snapshot 中的 `operation.id`。不要把 `toolCallId` 当作 `operationId`。
 
-状态含义：
+Electron 应由主进程使用 Node Client，再通过明确的 IPC 方法把结果交给 renderer。完整连接方式见 [Node Client 参考](client-node-reference.md)。
 
-| 状态 | UI 行为 |
-| --- | --- |
-| available | 使用受信组件，未知契约回退到有界 JSON 或文本 |
-| not_provided | 工具没有提供结构化结果，继续显示已有文本 |
-| invalid | 显示输出不符合契约，不自动重跑工具 |
-| too_large | 显示完整结果超限，不展示被截断的业务对象 |
-| expired | 显示历史结果已到期 |
-| denied | 隐藏正文并清除对应缓存，显示无读取权限 |
-| rejected | 内容凭据检查拒绝；显示 reason/field 诊断，与授权拒绝区分 |
+### 远程 Web
 
-组件错误应局限于单份结果。缓存按 Workspace/thread/operation 隔离；刷新和重连要重新读取。持久事件中的描述是发生当时的事实，当前是否可读以结果查询为准。
-
-## 远程客户端与宿主授权
-
-沿用现有应用后端认证、Workspace 绑定、设备配对和 WSS。首轮信任 Relay 服务转发数据；不提供端到端加密。
-
-在本机 `~/.roll-agent/companion/config.yaml` 的现有配置中加入精确允许列表，保留已有身份、工作区和凭据引用字段：
+先在本机 `~/.roll-agent/companion/config.yaml` 的**已有配置中追加**下面的允许列表，保留原有设备身份、工作区和凭据引用：
 
 ```yaml
 remoteAppOutputs:
@@ -83,59 +107,119 @@ remoteAppOutputs:
     toolName: list_candidates
 ```
 
-默认没有授权。工具的 `remoteReadable`、本机允许列表、当前认证 Workspace 必须同时允许；云端和浏览器不能写入此授权。本机配置每次读取时重新加载，移除条目后新查询立即拒绝；当前已显示的内容无法从用户记忆或外部副本中撤回，App 应在重连/刷新/拒绝时清除自己的缓存。
+授权按 Agent 和工具名称精确匹配。工具声明、本机允许列表、当前认证 Workspace 三者必须同时允许。
 
-Web 需要 Relay Wire 1.2 和 Runtime Protocol 1.5。将客户端版本列表通过应用后端转交 Relay，Workspace 始终从服务端用户绑定记录读取：
+然后让 App 后端把客户端支持的协议版本转交给 Relay：
 
 ```ts
+import { createRelayClient } from "@roll-agent/relay-client";
+
 const client = createRelayClient({
   getSession: async ({ signal, supportedRelayProtocolVersions }) => {
     const response = await fetch("/api/roll/session", {
-      method: "POST", credentials: "include", signal,
+      method: "POST",
+      credentials: "include",
+      signal,
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ supportedRelayProtocolVersions }),
     });
-    if (!response.ok) throw new Error("Session unavailable");
-    return response.json();
+    if (!response.ok) throw new Error("无法创建 Relay 会话");
+    return response.json(); // { connectUrl, expiresAt }
   },
 });
+
 await client.connect();
 const thread = await client.openThread(threadId);
 const capabilities = await thread.capabilities();
 const response = await thread.getResult(operationId);
 ```
 
-应用后端向 `POST /v1/browser-sessions` 发送 `{workspaceId, supportedRelayProtocolVersions}`。未提供版本列表仍按旧客户端处理为 1.1。会话选择的版本签入 ticket，并由 `session.ready.relayProtocolVersion` 确认；正在使用的连接不切换版本。
+应用后端的 `/api/roll/session` 需要：
 
-新结果查询只合并进行中的相同读取，不缓存已完成正文；Relay 也不把查询响应写入重放缓冲。旧 Wire 1.1 继续隐藏 `display`，不传结构化结果。旧新客户端混用通过版本投影兼容，新能力需要整条链路支持。
+1. 校验 App 自己的登录身份。
+2. 从服务端绑定记录查出 `workspaceId`，不接受浏览器自行指定。
+3. 向 Relay 的 `POST /v1/browser-sessions` 发送 `{ workspaceId, supportedRelayProtocolVersions }`。
+4. 将 `{ connectUrl, expiresAt }` 返回浏览器，不返回 Relay 应用密钥。
 
-## 容量和历史语义
+**检查结果：**Relay 会话协商到 Wire 1.2，`thread.getResult()` 能读到结果。未传版本列表会保留旧版 1.1 行为，无法启用新通道。`capabilities` 用于检查当前工具的有效输出能力，数据读取本身仍会再次校验授权。
 
-完整结果最大 256 KiB，schema 最大 32 KiB；均按 UTF-8 字节计。超过上限整份省略，不修改字段类型或删掉部分行后冒充完整结果。每线程最多保留 16 MiB、2000 份结果、30 天，任一上限触发回收。
+可运行的后端示例见 [演示服务器](../examples/structured-output/server.mjs)。它使用演示登录方式；接入业务 App 时复用自己的认证和用户绑定记录。
 
-结果与执行记录同事务落库，提交后才发送完成事件。fork 保留原过期时间；删除线程删除对应结果。旧记录不从 raw、display 或模型消息中推断业务对象。事件 JSON 保持旧格式，新事件描述放在独立存储列，保证旧 Runtime 可以继续读取原有事件。
+## 3. 按结果身份选择 App 自己的组件
 
-## 示例与验收
+先理解结果从哪里来：
 
-`examples/structured-output/` 提供合成候选人 Subagent、定制 Web 表格及演示后端。Electron 参考客户端提供同一契约的候选人卡片。两端组件相互独立。
-
-跨仓隔离联调命令：
-
-```sh
-ROLL_TEST_RELAY_REPO=/absolute/path/to/updated/roll-cloud-relay \
-  node --experimental-strip-types --experimental-sqlite scripts/test-structured-output-e2e.mjs
+```text
+工具执行 → Runtime 校验、保存 → 完成事件 / snapshot 提供结果描述
+                                        ↓
+                            App 按 operationId 查询完整结果
+                                        ↓
+                              校验数据 → 自定义组件
 ```
 
-Relay 仓库需要已构建的新协议候选包或正式发布版本。脚本使用临时配置、真实 Runtime 与 SDK 子进程、实际 Relay WebSocket 服务和正式客户端状态机，不改变用户的 Companion 配对。
+完成事件和 snapshot 的 `appOutput` **只有状态和契约身份，没有业务正文**。收到描述后，再使用上一步的查询方法。
 
-`--serve` 可保留隔离实例用于 GUI 验收。浏览器的回环 QA 适配仅用于本地 WS；不代替线上 WSS/TLS 和部署验证。正式版本包发布前，跨仓本地包验证与从 npm 全新安装的验证应分别记录。
+建议让渲染入口按下面的顺序处理：
 
-## Review corrections before first publication
+| 收到什么 | App 应做什么 |
+| --- | --- |
+| `response.result === null` | 显示结果不存在或已被移除 |
+| `output.status !== "available"` | 清除旧正文，展示对应状态；不要因此重新执行工具 |
+| 来源、schema 和版本都匹配 | 再校验 `output.data`，交给已注册的业务组件 |
+| 契约不认识或版本不支持 | 显示有界 JSON 预览或 `fallbackText` |
+| 某个组件渲染失败 | 只回退当前结果卡片，保持聊天和其他结果可用 |
 
-App DTO content checks are separate from evidence redaction: image/data strings, pagination tokens, invitation codes and uppercase SKU prefixes are normal business data. Explicit credential fields and strong credential formats yield `rejected` with a safe `reason` and optional normalized field category; diagnostics never include the rejected value. These checks are heuristic defense in depth, not a substitute for defining an appropriate public DTO.
+本例的组件匹配条件是：
 
-Invalid Roll output metadata disables only that tool's App output channel, records `appOutputIssue: invalid_contract`, and reports discovery warnings. Other tools remain available. This does not make invalid MCP protocol messages or an uncompileable MCP outputSchema valid; those remain subject to MCP validation.
+```ts
+result.agentName === "structured-output-demo" &&
+result.toolName === "list_candidates" &&
+result.output.status === "available" &&
+result.output.schemaId === "example.candidates" &&
+result.output.schemaVersion === 1
+```
 
-`roll run --json` reports `{ok:true, executionStatus:"completed", appOutputStatus:"invalid"|"too_large", result:...}` for opted-in tools with paired completed-output markers, and exits successfully. `roll ask` and batch run expose appOutputStatus alongside their successful execution result. Ordinary isError failures and untrusted markers without opt-in remain failures.
+匹配成功后，候选人数据位于 `result.output.data.candidates`。App 可以用 React、原生 DOM 或其他框架展示，但仍要验证组件实际读取的字段，不能仅凭 schema 名字信任数据。
 
-App result reads only compare expiry; they never write retention updates. Physical reclamation runs on writes and startup. Wire 1.2 snapshots downgrade explicitly for 1.1 consumers. Only identical mutations may rebind an outstanding request ID to a new controller; queries and changed payloads cannot reuse it across reconnects.
+完整的“读取 → 校验 → 表格渲染 → 回退”实现见 [Web 示例](../examples/structured-output/web.ts)。组件随 App 自身发布，Runtime 不会下载或执行 Subagent 提供的组件代码。
+
+## 4. 验证新执行、历史恢复和授权
+
+先在配置好的联调环境检查：
+
+- **新执行**：产生新的 operation，App 能读取并展示结果。
+- **历史恢复**：刷新页面或重新连接，重新获取 snapshot 和结果后仍能展示。
+- **撤销授权**：从本机允许列表移除工具，再读取时返回 `denied`；App 清除旧正文。
+- **未知契约 / 不可用结果**：显示回退内容或状态，不自动重跑工具。
+
+不要长期缓存已完成结果来代替新的授权检查。结果缓存至少按 Workspace、thread、operation 隔离；断线时清除可见旧数据，重新连接后重新读取。
+
+如果要使用仓库提供的隔离测试，在 Roll 仓库根目录执行：
+
+```sh
+# 使用相邻的 roll-cloud-relay 仓库；也支持现有 worktree 的相邻 relay 目录。
+pnpm test:structured-output
+
+# 保持隔离服务运行，以便查看演示页面。
+pnpm test:structured-output --serve
+```
+
+Relay 不在相邻目录时，显式传入路径：
+
+```sh
+ROLL_TEST_RELAY_REPO=/absolute/path/to/roll-cloud-relay \
+  pnpm test:structured-output
+```
+
+测试需要已准备好的配套协议包和 Relay 依赖。它使用临时配置、实际 SDK/Runtime 子进程和真实 Relay 服务端代码，不修改用户原有的 Companion 配对。
+
+自动测试输出 `passed: true` 表示通过；`--serve` 还会打印页面地址和演示登录信息。测试数据固定，因此**新执行与历史读取可能显示相同内容**；两者区别在会话、operation 和是否发生了工具执行。
+
+本地浏览器联调使用明确的回环 WS 适配。它验证数据链路和 UI，不替代线上 WSS/TLS、正式依赖安装或真实大模型验收。完整运行步骤见 [示例 README](../examples/structured-output/README.md)。
+
+## 排查与进一步阅读
+
+- 结果不可用、容量限制、MCP 返回格式：[结构化结果参考](app-output-reference.md)。
+- 本地 RPC、事件与版本兼容：[Runtime Protocol 参考](runtime-protocol-v1-reference.md)。
+- 远程会话与协议边界：[Companion / Relay 参考](companion-relay-v1-reference.md)。
+- 发布前还需要完成哪些验证：[验证记录](structured-output-validation.md#release-gates-still-open)。
