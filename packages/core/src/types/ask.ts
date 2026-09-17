@@ -1,3 +1,4 @@
+import type { CompletedAppOutputStatus } from "@roll-agent/protocol/app-output";
 import type { RouteDecision, RouteSelection } from "./router.ts";
 
 export const ASK_RESULT_STATUSES = [
@@ -67,6 +68,7 @@ export interface AskFailedResult {
 }
 
 export interface AskSuccessResult {
+  readonly appOutputStatus?: CompletedAppOutputStatus;
   readonly status: "success";
   readonly decision: RouteDecision;
   readonly result: unknown;

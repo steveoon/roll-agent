@@ -135,26 +135,30 @@ describe("independent MCP appOutput discovery", () => {
       outputSchema: listed.outputSchema,
     });
   });
-  it("rejects missing schemas, external references and malformed declarations at discovery", () => {
-    assert.throws(() =>
-      normalizeListedTools([
-        { name: "broken", inputSchema: { type: "object" }, _meta: listed._meta },
-      ]),
-    );
-    assert.throws(
-      () =>
-        normalizeListedTools([
-          {
-            ...listed,
-            outputSchema: {
-              type: "object",
-              properties: { bad: { $ref: "https://example.test/schema" } },
-            },
-          },
-        ]),
-      /local/,
-    );
-    assert.throws(() => normalizeListedTools([{ ...listed, _meta: { "roll/appOutput": "bad" } }]));
+  it("isolates invalid output declarations without removing healthy tools", () => {
+    const broken = [
+      { name: "missing", inputSchema: { type: "object" as const }, _meta: listed._meta },
+      {
+        ...listed,
+        name: "external",
+        outputSchema: {
+          type: "object" as const,
+          properties: { bad: { $ref: "https://example.test/schema" } },
+        },
+      },
+      { ...listed, name: "malformed", _meta: { "roll/appOutput": "bad" } },
+    ];
+    for (const bad of broken) {
+      const issues: unknown[] = [];
+      const tools = normalizeListedTools([bad, listed], {
+        onAppOutputIssue: (issue) => issues.push(issue),
+      });
+      assert.equal(tools.length, 2);
+      assert.equal(tools[0]?.appOutput, undefined);
+      assert.equal(tools[0]?.appOutputIssue, "invalid_contract");
+      assert.equal(tools[1]?.appOutput?.schemaId, "third-party.candidates");
+      assert.deepEqual(issues, [{ toolName: bad.name, code: "invalid_contract" }]);
+    }
   });
   it("keeps an outputSchema without an explicit declaration outside the app channel", () => {
     const [tool] = normalizeListedTools([

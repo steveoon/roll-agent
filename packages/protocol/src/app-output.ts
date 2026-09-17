@@ -37,8 +37,19 @@ export const APP_OUTPUT_UNAVAILABLE_STATUSES = [
   "expired",
   "denied",
 ] as const;
+export const appOutputRejectionSchema = z
+  .object({
+    status: z.literal("rejected"),
+    reason: z.enum(["credential_field", "credential_value"]),
+    field: z.string().max(64).optional(),
+  })
+  .strict()
+  .readonly();
+export type AppOutputRejection = z.infer<typeof appOutputRejectionSchema>;
+
 export const appOutputResultSchema = z
   .discriminatedUnion("status", [
+    appOutputRejectionSchema,
     z
       .object({
         status: z.literal("available"),
@@ -56,6 +67,7 @@ export type AppOutputResult = z.infer<typeof appOutputResultSchema>;
 
 export const appOutputDescriptorSchema = z
   .discriminatedUnion("status", [
+    appOutputRejectionSchema,
     z
       .object({
         status: z.literal("available"),
@@ -69,6 +81,7 @@ export const appOutputDescriptorSchema = z
 export type AppOutputDescriptor = z.infer<typeof appOutputDescriptorSchema>;
 
 export function describeAppOutput(result: AppOutputResult): AppOutputDescriptor {
+  if (result.status === "rejected") return result;
   return result.status === "available"
     ? { status: result.status, schemaId: result.schemaId, schemaVersion: result.schemaVersion }
     : { status: result.status };
@@ -149,4 +162,31 @@ export function validateAppOutputContract(value: unknown): AppOutputContract {
   };
   visit(schema);
   return contract;
+}
+
+/** MCP uses isError for invalid output even when execution has completed. */
+export const COMPLETED_APP_OUTPUT_STATUSES = ["invalid", "too_large"] as const;
+export type CompletedAppOutputStatus = (typeof COMPLETED_APP_OUTPUT_STATUSES)[number];
+export function getCompletedAppOutputStatus(value: unknown): CompletedAppOutputStatus | undefined {
+  if (
+    typeof value !== "object" ||
+    value === null ||
+    !("isError" in value) ||
+    value.isError !== true ||
+    !("_meta" in value)
+  ) {
+    return undefined;
+  }
+  const meta = value._meta;
+  if (
+    typeof meta !== "object" ||
+    meta === null ||
+    !("roll/executionStatus" in meta) ||
+    meta["roll/executionStatus"] !== "completed" ||
+    !(APP_OUTPUT_STATUS_META_KEY in meta)
+  ) {
+    return undefined;
+  }
+  const status = meta[APP_OUTPUT_STATUS_META_KEY];
+  return status === "invalid" || status === "too_large" ? status : undefined;
 }

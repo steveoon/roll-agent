@@ -1,6 +1,7 @@
 import { AjvJsonSchemaValidator } from "@modelcontextprotocol/sdk/validation/ajv";
 import {
   APP_OUTPUT_LIMITS,
+  getCompletedAppOutputStatus,
   APP_OUTPUT_STATUS_META_KEY,
   appOutputResultSchema,
   validateAppOutputContract,
@@ -14,12 +15,7 @@ function isObject(value: unknown): value is Record<string, unknown> {
 
 /** The SDK uses isError to bypass MCP automatic validation after execution has completed. */
 export function hasCompletedAppOutputMarker(value: unknown): boolean {
-  if (!isObject(value) || !isObject(value._meta)) return false;
-  return (
-    value._meta["roll/executionStatus"] === "completed" &&
-    (value._meta[APP_OUTPUT_STATUS_META_KEY] === "invalid" ||
-      value._meta[APP_OUTPUT_STATUS_META_KEY] === "too_large")
-  );
+  return getCompletedAppOutputStatus(value) !== undefined;
 }
 
 /** Only structuredContent from an opted-in tool can become application data. */

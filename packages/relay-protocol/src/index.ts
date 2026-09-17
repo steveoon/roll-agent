@@ -784,7 +784,9 @@ function redactRelayPendingApprovalV11(approval: PendingApproval): PendingApprov
 
 /** Projects a Runtime snapshot into the allowlisted Relay Wire 1.1 query shape. */
 export function projectRelayThreadSnapshotV11(value: unknown): ThreadSnapshotV11 {
-  const legacySnapshot = threadSnapshotV11Schema.safeParse(value);
+  const legacySnapshot = z
+    .union([threadSnapshotV11Schema, relayThreadSnapshotSchemaV12])
+    .safeParse(value);
   const snapshot = legacySnapshot.success
     ? legacySnapshot.data
     : projectThreadSnapshotForVersion("1.1", value);

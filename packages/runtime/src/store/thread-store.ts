@@ -999,7 +999,6 @@ export class ThreadStore {
 
   /** A single SQLite read transaction pins every part of the committed snapshot. */
   readSnapshot(threadId: string): ThreadSnapshot {
-    if (!this.readOnly) this.enforceAppOutputRetention(threadId);
     this.db.exec("BEGIN");
     try {
       const thread = this.getThread(threadId);
@@ -1896,7 +1895,6 @@ export class ThreadStore {
         ? undefined
         : { status: "not_provided" };
     }
-    if (!this.readOnly) this.enforceAppOutputRetention(threadId);
     const row = this.db
       .prepare(
         `SELECT o.descriptor_json, o.expires_at FROM tool_executions e

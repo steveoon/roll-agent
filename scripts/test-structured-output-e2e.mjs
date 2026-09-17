@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { spawn, execFileSync } from "node:child_process";
 import { randomBytes, randomUUID } from "node:crypto";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { resolve, join } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -23,7 +23,12 @@ const root = resolve(import.meta.dirname, "..");
 const serve = process.argv.includes("--serve");
 const relayPort = serve ? Number(process.env.ROLL_TEST_RELAY_PORT ?? 9440) : 0;
 const demoPort = Number(process.env.DEMO_PORT ?? 9441);
-const relayRoot = process.env.ROLL_TEST_RELAY_REPO ?? resolve(root, "../relay");
+const relayRoot =
+  process.env.ROLL_TEST_RELAY_REPO ??
+  [resolve(root, "../roll-cloud-relay"), resolve(root, "../relay")].find((path) =>
+    existsSync(join(path, "src/app.ts")),
+  );
+if (!relayRoot) throw new Error("Set ROLL_TEST_RELAY_REPO to the updated Cloud Relay checkout");
 const { buildApp } = await import(pathToFileURL(join(relayRoot, "src/app.ts")));
 const { loadConfig } = await import(pathToFileURL(join(relayRoot, "src/config.ts")));
 const { createInMemoryEnrollmentStore } = await import(

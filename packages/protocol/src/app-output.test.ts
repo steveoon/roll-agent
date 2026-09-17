@@ -40,3 +40,22 @@ test("application schema limit is measured in UTF-8 bytes and nonobject roots fa
     /object/,
   );
 });
+
+test("content rejection has a diagnostic and remains distinct from authorization denial", async () => {
+  const { appOutputResultSchema, describeAppOutput } = await import("./app-output.ts");
+  const rejection = appOutputResultSchema.parse({
+    status: "rejected",
+    reason: "credential_field",
+    field: "apikey",
+  });
+  assert.deepEqual(describeAppOutput(rejection), rejection);
+  assert.deepEqual(appOutputResultSchema.parse({ status: "denied" }), { status: "denied" });
+  assert.equal(
+    appOutputResultSchema.safeParse({
+      status: "rejected",
+      reason: "credential_field",
+      data: { secret: "no" },
+    }).success,
+    false,
+  );
+});

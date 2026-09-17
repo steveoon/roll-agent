@@ -1,3 +1,4 @@
+import type { CompletedAppOutputStatus } from "@roll-agent/protocol/app-output";
 import { readFileSync } from "node:fs";
 import type { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { defineCommand } from "citty";
@@ -20,12 +21,14 @@ import { preflightToolCall } from "../../tool-runtime/preflight.ts";
 import {
   formatMissingToolMessage,
   formatToolSchemaIssue,
+  formatAppOutputDiscoveryIssue,
   normalizeListedTools,
 } from "../utils/agent-tools.ts";
 import {
   extractTextContent,
   formatToolResultForJsonOutput,
   isToolErrorResult,
+  getCompletedAppOutputStatus,
 } from "../utils/tool-results.ts";
 import { log, redactToolArgsForLog } from "../utils/output.ts";
 import { shouldSkipRuntimeReadinessForTool } from "../../config/runtime-env.ts";
@@ -134,7 +137,20 @@ export default defineCommand({
 
       if (outcome.ok) {
         if (args.json) {
-          console.log(JSON.stringify(formatToolResultForJsonOutput(outcome.result), null, 2));
+          console.log(
+            JSON.stringify(
+              outcome.appOutputStatus === undefined
+                ? formatToolResultForJsonOutput(outcome.result)
+                : {
+                    ok: true,
+                    executionStatus: "completed",
+                    appOutputStatus: outcome.appOutputStatus,
+                    result: formatToolResultForJsonOutput(outcome.result),
+                  },
+              null,
+              2,
+            ),
+          );
         } else {
           printToolResultText(outcome.result);
         }
@@ -209,6 +225,7 @@ interface RunToolBaseResult {
 }
 
 export interface RunToolSuccessResult extends RunToolBaseResult {
+  readonly appOutputStatus?: CompletedAppOutputStatus;
   readonly ok: true;
   readonly result: unknown;
 }
@@ -582,6 +599,7 @@ async function getConnectedAgent(options: RunToolCallOptions): Promise<Connected
   });
   const tools = normalizeListedTools((await client.listTools()).tools, {
     onSchemaIssue: (issue) => log.warn(formatToolSchemaIssue(agent.skill.name, issue)),
+    onAppOutputIssue: (issue) => log.warn(formatAppOutputDiscoveryIssue(agent.skill.name, issue)),
   });
   const envReport = inspectAgentEnvRequirements(
     agent.skill.name,
@@ -640,11 +658,23 @@ async function runToolCall(options: RunToolCallOptions): Promise<RunToolResult> 
       name: options.item.tool,
       arguments: options.item.input,
     });
-    if (isToolErrorResult(result)) {
+    if (isToolErrorResult(result, targetTool.appOutput)) {
       return { ...base, ok: false, error: "tool 返回 isError=true", result };
     }
 
-    return { ...base, ok: true, result };
+    const appOutputStatus =
+      targetTool.appOutput === undefined ? undefined : getCompletedAppOutputStatus(result);
+    if (appOutputStatus !== undefined) {
+      log.warn(
+        `Tool execution completed; App output ${appOutputStatus}. Do not repeat the operation.`,
+      );
+    }
+    return {
+      ...base,
+      ok: true,
+      result,
+      ...(appOutputStatus === undefined ? {} : { appOutputStatus }),
+    };
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     const cause = err instanceof Error && err.cause ? `\n  cause: ${String(err.cause)}` : "";

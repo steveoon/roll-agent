@@ -145,7 +145,20 @@ export interface ToolSchemaIssue extends JsonSchemaRefIssue {
   readonly toolName: string;
 }
 
+export interface AppOutputDiscoveryIssue {
+  readonly toolName: string;
+  readonly code: "invalid_contract";
+}
+
+export function formatAppOutputDiscoveryIssue(
+  agentName: string,
+  issue: AppOutputDiscoveryIssue,
+): string {
+  return `Agent "${agentName}" tool "${issue.toolName}": invalid App output contract; structured results disabled.`;
+}
+
 export interface NormalizeListedToolsOptions {
+  readonly onAppOutputIssue?: (issue: AppOutputDiscoveryIssue) => void;
   readonly onSchemaIssue?: (issue: ToolSchemaIssue) => void;
 }
 
@@ -184,18 +197,25 @@ export function normalizeListedTools(
     for (const issue of unresolved) {
       options.onSchemaIssue?.({ toolName: tool.name, ...issue });
     }
+    let appOutput: AgentTool["appOutput"];
+    let appOutputIssue: AgentTool["appOutputIssue"];
+    if (tool._meta?.[APP_OUTPUT_META_KEY] !== undefined) {
+      try {
+        appOutput = validateDiscoveredAppOutput({
+          ...requireAppOutputDeclaration(tool._meta[APP_OUTPUT_META_KEY]),
+          outputSchema: tool.outputSchema,
+        });
+      } catch {
+        appOutputIssue = "invalid_contract";
+        options.onAppOutputIssue?.({ toolName: tool.name, code: appOutputIssue });
+      }
+    }
     return {
       name: tool.name,
       ...(typeof tool.description === "string" ? { description: tool.description } : {}),
       inputSchema,
-      ...(tool._meta?.[APP_OUTPUT_META_KEY] === undefined
-        ? {}
-        : {
-            appOutput: validateDiscoveredAppOutput({
-              ...requireAppOutputDeclaration(tool._meta[APP_OUTPUT_META_KEY]),
-              outputSchema: tool.outputSchema,
-            }),
-          }),
+      ...(appOutput === undefined ? {} : { appOutput }),
+      ...(appOutputIssue === undefined ? {} : { appOutputIssue }),
       ...(unresolved.length > 0 ? { schemaIssues: unresolved } : {}),
     };
   });

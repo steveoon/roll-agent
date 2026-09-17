@@ -1,3 +1,4 @@
+import { inspectAppOutputContent } from "./app-output-content.ts";
 import { createHash, randomUUID } from "node:crypto";
 import {
   APP_OUTPUT_LIMITS,
@@ -1309,13 +1310,11 @@ export function prepareAppOutputForPersistence(value: AppOutputResult): AppOutpu
       return { status: "too_large" };
     }
     if (result.status !== "available") return result;
-    if (
-      JSON.stringify(redactJsonValue(result.data)) !== JSON.stringify(result.data) ||
-      redactSecretText(result.fallbackText) !== result.fallbackText ||
-      redactSecretText(result.schemaId) !== result.schemaId
-    ) {
-      return { status: "denied" };
-    }
+    const rejection =
+      inspectAppOutputContent(result.data) ??
+      inspectAppOutputContent(result.fallbackText) ??
+      inspectAppOutputContent(result.schemaId);
+    if (rejection) return rejection;
     return result;
   } catch {
     return { status: "invalid" };

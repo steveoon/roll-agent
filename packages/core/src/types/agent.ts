@@ -162,6 +162,7 @@ export interface AgentTool {
   readonly inputSchema: JsonSchemaObject;
   readonly schemaIssues?: readonly JsonSchemaRefIssue[];
   readonly appOutput?: AppOutputContract;
+  readonly appOutputIssue?: "invalid_contract";
 }
 
 export function createDefaultRuntimeForTransport(transport: AgentTransport): AgentRuntime {

@@ -67,6 +67,7 @@ if (response.result?.output.status === "available") {
 | too_large | 显示完整结果超限，不展示被截断的业务对象 |
 | expired | 显示历史结果已到期 |
 | denied | 隐藏正文并清除对应缓存，显示无读取权限 |
+| rejected | 内容凭据检查拒绝；显示 reason/field 诊断，与授权拒绝区分 |
 
 组件错误应局限于单份结果。缓存按 Workspace/thread/operation 隔离；刷新和重连要重新读取。持久事件中的描述是发生当时的事实，当前是否可读以结果查询为准。
 
@@ -128,3 +129,13 @@ ROLL_TEST_RELAY_REPO=/absolute/path/to/updated/roll-cloud-relay \
 Relay 仓库需要已构建的新协议候选包或正式发布版本。脚本使用临时配置、真实 Runtime 与 SDK 子进程、实际 Relay WebSocket 服务和正式客户端状态机，不改变用户的 Companion 配对。
 
 `--serve` 可保留隔离实例用于 GUI 验收。浏览器的回环 QA 适配仅用于本地 WS；不代替线上 WSS/TLS 和部署验证。正式版本包发布前，跨仓本地包验证与从 npm 全新安装的验证应分别记录。
+
+## Review corrections before first publication
+
+App DTO content checks are separate from evidence redaction: image/data strings, pagination tokens, invitation codes and uppercase SKU prefixes are normal business data. Explicit credential fields and strong credential formats yield `rejected` with a safe `reason` and optional normalized field category; diagnostics never include the rejected value. These checks are heuristic defense in depth, not a substitute for defining an appropriate public DTO.
+
+Invalid Roll output metadata disables only that tool's App output channel, records `appOutputIssue: invalid_contract`, and reports discovery warnings. Other tools remain available. This does not make invalid MCP protocol messages or an uncompileable MCP outputSchema valid; those remain subject to MCP validation.
+
+`roll run --json` reports `{ok:true, executionStatus:"completed", appOutputStatus:"invalid"|"too_large", result:...}` for opted-in tools with paired completed-output markers, and exits successfully. `roll ask` and batch run expose appOutputStatus alongside their successful execution result. Ordinary isError failures and untrusted markers without opt-in remain failures.
+
+App result reads only compare expiry; they never write retention updates. Physical reclamation runs on writes and startup. Wire 1.2 snapshots downgrade explicitly for 1.1 consumers. Only identical mutations may rebind an outstanding request ID to a new controller; queries and changed payloads cannot reuse it across reconnects.

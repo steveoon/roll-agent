@@ -57,6 +57,11 @@ test("application output survives restart, is separate from evidence, and keeps 
     now = new Date(now.getTime() + 10 * 86400000);
     assert.deepEqual(store.getAppOutput(thread, item.id), { status: "expired" });
     assert.deepEqual(store.getAppOutput(fork, item.id), { status: "expired" });
+    assert.ok(
+      Number(db.prepare("SELECT SUM(byte_length) AS n FROM operation_app_outputs").get()?.n) > 0,
+    );
+    store.close();
+    store = new ThreadStore(dir, { now: () => now });
     assert.equal(db.prepare("SELECT SUM(byte_length) AS n FROM operation_app_outputs").get()?.n, 0);
     store.deleteThread(thread);
     assert.equal(store.getAppOutput(thread, item.id), undefined);
@@ -83,7 +88,11 @@ test("missing, legacy, sensitive and over-budget results remain distinct", () =>
     assert.equal(store.getAppOutput(thread, "missing"), undefined);
     const secret = record({ ...available, data: { password: "private" } });
     store.appendToolExecution(thread, secret);
-    assert.deepEqual(store.getAppOutput(thread, secret.id), { status: "denied" });
+    assert.deepEqual(store.getAppOutput(thread, secret.id), {
+      status: "rejected",
+      reason: "credential_field",
+      field: "password",
+    });
     const large = record({
       ...available,
       data: { text: "中".repeat(APP_OUTPUT_LIMITS.resultBytes / 3) },
@@ -222,5 +231,85 @@ test("durable event descriptors are immutable after result expiry and legacy eve
     db.close();
     store.close();
     rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("App result reads never update retention rows, including expired reads and snapshots", () => {
+  const dir = mkdtempSync(join(tmpdir(), "roll-app-output-read-"));
+  let now = new Date("2026-09-17T00:00:00Z");
+  const store = new ThreadStore(dir, { now: () => now });
+  const db = new DatabaseSync(join(dir, "threads.db"));
+  try {
+    const thread = store.createThread();
+    const item = record(available);
+    store.appendToolExecution(thread, item);
+    db.exec(
+      "CREATE TRIGGER forbid_result_updates BEFORE UPDATE ON operation_app_outputs BEGIN SELECT RAISE(ABORT, 'read attempted retention write'); END",
+    );
+    assert.equal(store.getAppOutputDescriptor(thread, item.id)?.status, "available");
+    assert.equal(store.getAppOutput(thread, item.id)?.status, "available");
+    assert.equal(store.readSnapshot(thread).appOutputs?.[0]?.result.status, "available");
+    now = new Date(now.getTime() + APP_OUTPUT_LIMITS.maxAgeMs);
+    assert.equal(store.getAppOutputDescriptor(thread, item.id)?.status, "expired");
+    assert.equal(store.getAppOutput(thread, item.id)?.status, "expired");
+    assert.equal(store.readSnapshot(thread).appOutputs?.[0]?.result.status, "expired");
+    assert.ok(
+      Number(db.prepare("SELECT SUM(byte_length) AS n FROM operation_app_outputs").get()?.n) > 0,
+    );
+  } finally {
+    db.close();
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("business DTO fields are preserved; credential rejection is distinct from access denial", () => {
+  const dir = mkdtempSync(join(tmpdir(), "roll-app-output-content-"));
+  const store = new ThreadStore(dir);
+  try {
+    const thread = store.createThread();
+    for (const data of [
+      { image: "https://cdn.example/a.png" },
+      { payload: { data: "plain text" } },
+      { items: [], nextPageToken: "abc123" },
+      { sku: "SK-20260917-A1" },
+      { invite: { token: "join-code-42" } },
+    ]) {
+      const result = record({ ...available, data });
+      store.appendToolExecution(thread, result);
+      assert.deepEqual(store.getAppOutput(thread, result.id), { ...available, data });
+    }
+    const secret = record({ ...available, data: { apiKey: "real-credential-test" } });
+    store.appendToolExecution(thread, secret);
+    assert.deepEqual(store.getAppOutput(thread, secret.id), {
+      status: "rejected",
+      reason: "credential_field",
+      field: "apikey",
+    });
+    assert.deepEqual(store.getAppOutputDescriptor(thread, secret.id), {
+      status: "rejected",
+      reason: "credential_field",
+      field: "apikey",
+    });
+  } finally {
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("strong credential formats remain blocked in free text without blocking uppercase SKU prefixes", () => {
+  for (const value of [
+    "sk-" + "a".repeat(40),
+    "Bearer " + "a".repeat(40),
+    "-----BEGIN PRIVATE KEY-----",
+    "ghp_" + "x".repeat(40),
+    "eyJ" + "a".repeat(16) + "." + "b".repeat(16) + "." + "c".repeat(32),
+  ]) {
+    const result: AppOutputResult | undefined = record({
+      ...available,
+      data: { description: value },
+    }).appOutput;
+    assert.equal(result?.status, "rejected");
+    assert.equal(JSON.stringify(result).includes(value), false);
   }
 });

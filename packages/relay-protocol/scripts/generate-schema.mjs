@@ -45,7 +45,7 @@ import { z } from "zod/v4";
 
 const schemaDir = resolve(import.meta.dirname, "../dist/schema");
 const frozenSchemaHashes = {
-  1.2: "0d37fb1bbcce7a63df77d58420d93bc22d9adb6bf5e15ca308fc7d092a5a5adc",
+  1.2: "7ddb7bff0066b0bfb87e1f25fcaac26f24a45f926a25c6c98bd5f7b58ff30f33",
   "1.0": "0e393e2278d141e620fbdd69da8ed7b805311ba0cccaaf4ff495175bd2edf2c1",
   1.1: "3e8688aad7e60d32915e140e095998410986ab90ef683c2938cca368a8e1c162",
 };

@@ -80,3 +80,39 @@ test("Wire 1.2 completion carries metadata and downgrades without data or descri
     false,
   );
 });
+
+test("Companion V12 snapshots downgrade to strict V11 snapshots", async () => {
+  const { projectRelayThreadSnapshotV12, projectRelayThreadSnapshotV11 } =
+    await import("./index.ts");
+  const at = new Date(0).toISOString();
+  const runtime = {
+    thread: { id: params.threadId, createdAt: at, updatedAt: at, messageCount: 0 },
+    messages: { items: [], nextBeforeSequence: null },
+    operations: {
+      items: [
+        {
+          id: params.operationId,
+          sequence: 0,
+          toolCallId: "call",
+          agentName: "example",
+          toolName: "search",
+          createdAt: at,
+          outcome: { kind: "success" },
+          display: "private",
+          appOutput: { status: "available", schemaId: "example.candidates", schemaVersion: 1 },
+        },
+      ],
+      nextBeforeSequence: null,
+    },
+    pendingApprovals: [],
+    pendingInteractions: [],
+    eventCursor: null,
+    transcriptCompleteness: "complete",
+  };
+  const relay = projectRelayThreadSnapshotV12(runtime);
+  const legacy = projectRelayThreadSnapshotV11(relay);
+  assert.deepEqual(legacy, projectRelayThreadSnapshotV11(runtime));
+  assert.equal(legacy.operations.items[0]?.display, null);
+  assert.equal("appOutput" in legacy.operations.items[0]!, false);
+  assert.throws(() => projectRelayThreadSnapshotV11({ ...relay, raw: "unexpected" }));
+});

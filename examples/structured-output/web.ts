@@ -46,7 +46,10 @@ function renderResult(parent: HTMLElement, response: RelayOperationResult): void
   }
   const output = result.output;
   if (output.status !== "available") {
-    parent.textContent = `Result: ${output.status}`;
+    parent.textContent =
+      output.status === "rejected"
+        ? `Result rejected by content checks: ${output.reason}${output.field ? ` (${output.field})` : ""}`
+        : `Result: ${output.status}`;
     return;
   }
   if (
