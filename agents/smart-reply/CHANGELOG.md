@@ -1,5 +1,12 @@
 # smart-reply-agent
 
+## 1.3.12
+
+### Patch Changes
+
+- Updated dependencies [[`25048bf`](https://github.com/steveoon/roll-agent/commit/25048bfe7568c0588a1ea93fda595cd2e9aaf716)]:
+  - @roll-agent/sdk@0.6.0
+
 ## 1.3.11
 
 ### Patch Changes
