@@ -236,3 +236,138 @@ describe("resolveAgentLogLevel", () => {
     assert.equal(resolveAgentLogLevel("debug"), "debug");
   });
 });
+
+describe("opt-in appOutput MCP contract", () => {
+  async function withClient(
+    tool: Parameters<typeof registerTool>[1],
+    check: (client: Client) => Promise<void>,
+  ) {
+    const server = new McpServer({ name: "app-output-test", version: "1" });
+    registerTool(server, tool, TEST_CONTEXT);
+    const client = new Client({ name: "app-output-client", version: "1" });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+    try {
+      await check(client);
+    } finally {
+      await client.close();
+      await server.close();
+    }
+  }
+
+  it("publishes an output schema and complete structuredContent only for opted-in tools", async () => {
+    const data = { candidates: [{ name: "张三", score: 0.8 }], empty: {} };
+    await withClient(
+      defineTool({
+        name: "candidates",
+        description: "synthetic candidates",
+        input: z.object({}),
+        output: z.object({
+          candidates: z.array(z.object({ name: z.string(), score: z.number() })),
+          empty: z.object({}),
+        }),
+        appOutput: { schemaId: "test.candidates", schemaVersion: 1 },
+        execute: async () => data,
+      }),
+      async (client) => {
+        const listed = (await client.listTools()).tools[0];
+        assert.equal(listed?.outputSchema?.type, "object");
+        assert.deepEqual(listed?._meta?.["roll/appOutput"], {
+          schemaId: "test.candidates",
+          schemaVersion: 1,
+          remoteReadable: false,
+        });
+        const result = await client.callTool({ name: "candidates", arguments: {} });
+        assert.deepEqual(result.structuredContent, data);
+        assert.equal(result.isError, undefined);
+      },
+    );
+  });
+
+  it("retains completed execution evidence when output validation fails after a side effect", async () => {
+    let count = 0;
+    const malformed: unknown = { count: "bad" };
+    await withClient(
+      {
+        name: "effect",
+        description: "effect",
+        input: z.object({}),
+        output: z.object({ count: z.number() }),
+        appOutput: { schemaId: "test.effect", schemaVersion: 1 },
+        execute: async () => {
+          count += 1;
+          return malformed;
+        },
+      },
+      async (client) => {
+        await client.listTools(); // Ensures automatic MCP output validation is active.
+        const result = await client.callTool({ name: "effect", arguments: {} });
+        assert.equal(count, 1);
+        assert.equal(result.structuredContent, undefined);
+        assert.deepEqual(result._meta, {
+          "roll/appOutputStatus": "invalid",
+          "roll/executionStatus": "completed",
+        });
+      },
+    );
+  });
+
+  it("does not truncate oversized data or silently strip undeclared properties", async () => {
+    for (const [data, expected] of [
+      [{ value: "字".repeat(100000) }, "too_large"],
+      [{ value: "ok", secret: "private" }, "invalid"],
+    ] as const) {
+      const tool = {
+        name: "result",
+        description: "result",
+        input: z.object({}),
+        output: z.object({ value: z.string() }),
+        appOutput: { schemaId: "test.result", schemaVersion: 1 },
+        execute: async () => data,
+      };
+      const result = await executeToolForMcp(tool, TEST_CONTEXT, {});
+      assert.equal(result._meta?.["roll/appOutputStatus"], expected);
+      assert.equal(result.structuredContent, undefined);
+      assert.ok(!result.content[0].text.includes("private"));
+    }
+  });
+
+  it("rejects unrepresentable nested transformations before business execution", async () => {
+    let count = 0;
+    const tool = defineTool({
+      name: "transform",
+      description: "transform",
+      input: z.object({}),
+      output: z.object({ name: z.string().transform((v) => v.trim()) }),
+      appOutput: { schemaId: "test.transform", schemaVersion: 1 },
+      execute: async () => {
+        count += 1;
+        return { name: "name" };
+      },
+    });
+    const server = new McpServer({ name: "transform", version: "1" });
+    assert.throws(() => registerTool(server, tool, TEST_CONTEXT), /cannot represent/);
+    await assert.rejects(executeToolForMcp(tool, TEST_CONTEXT, {}), /cannot represent/);
+    assert.equal(count, 0);
+  });
+
+  it("leaves legacy tool results text-only even when output validation would fail", async () => {
+    await withClient(
+      {
+        name: "legacy",
+        description: "legacy",
+        input: z.object({}),
+        output: z.object({ count: z.number() }),
+        execute: async () => ({ count: "historically unchecked" }),
+      },
+      async (client) => {
+        const listed = (await client.listTools()).tools[0];
+        assert.equal(listed?.outputSchema, undefined);
+        const result = await client.callTool({ name: "legacy", arguments: {} });
+        assert.equal(result.structuredContent, undefined);
+        assert.equal(result._meta, undefined);
+        assert.equal(result.isError, undefined);
+      },
+    );
+  });
+});

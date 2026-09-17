@@ -611,7 +611,7 @@ test("RollNodeClient advertises Server Request protocol versions only when handl
   assert.ok(legacyInitialize && "method" in legacyInitialize && "id" in legacyInitialize);
   assert.deepEqual(
     parseRuntimeMethodParams(RUNTIME_METHODS.initialize, legacyInitialize.params).protocolVersions,
-    ["1.4", "1.3", "1.2", "1.0"],
+    ["1.5", "1.4", "1.3", "1.2", "1.0"],
   );
   assert.equal(legacyClient.getInitializationResult().protocolVersion, "1.0");
 
@@ -645,7 +645,7 @@ test("RollNodeClient advertises Server Request protocol versions only when handl
   assert.ok(v11Initialize && "method" in v11Initialize && "id" in v11Initialize);
   assert.deepEqual(
     parseRuntimeMethodParams(RUNTIME_METHODS.initialize, v11Initialize.params).protocolVersions,
-    ["1.4", "1.3", "1.2", "1.1", "1.0"],
+    ["1.5", "1.4", "1.3", "1.2", "1.1", "1.0"],
   );
   assert.equal(v11Client.getInitializationResult().protocolVersion, "1.1");
   assert.equal(
@@ -702,7 +702,7 @@ test("RollNodeClient advertises Server Request protocol versions only when handl
   assert.deepEqual(
     parseRuntimeMethodParams(RUNTIME_METHODS.initialize, fallbackInitialize.params)
       .protocolVersions,
-    ["1.4", "1.3", "1.2", "1.1", "1.0"],
+    ["1.5", "1.4", "1.3", "1.2", "1.1", "1.0"],
   );
   assert.equal(fallbackClient.getInitializationResult().protocolVersion, "1.0");
   assert.equal(
@@ -759,7 +759,7 @@ test("RollNodeClient waits for an empty Protocol 1.2 capability ACK before conne
   assert.ok(initialize && "method" in initialize && "id" in initialize);
   assert.deepEqual(
     parseRuntimeMethodParams(RUNTIME_METHODS.initialize, initialize.params).protocolVersions,
-    ["1.4", "1.3", "1.2", "1.0"],
+    ["1.5", "1.4", "1.3", "1.2", "1.0"],
   );
   await flushMessages();
   assert.equal(settled, false);
@@ -1958,7 +1958,7 @@ test("RollNodeClient rejects a Runtime-selected protocol version it did not adve
     }
     assert.deepEqual(
       parseRuntimeMethodParams(RUNTIME_METHODS.initialize, request.params).protocolVersions,
-      ["1.4", "1.3", "1.2", "1.0"],
+      ["1.5", "1.4", "1.3", "1.2", "1.0"],
     );
     writeJson(transport.stdout, {
       jsonrpc: "2.0",

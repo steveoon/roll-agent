@@ -1,3 +1,4 @@
+import type { AppOutputContract } from "@roll-agent/protocol/app-output";
 import type { JsonSchemaRefIssue } from "../tool-runtime/json-schema-refs.ts";
 
 /** Agent 传输模式 */
@@ -160,6 +161,7 @@ export interface AgentTool {
   readonly description?: string | undefined;
   readonly inputSchema: JsonSchemaObject;
   readonly schemaIssues?: readonly JsonSchemaRefIssue[];
+  readonly appOutput?: AppOutputContract;
 }
 
 export function createDefaultRuntimeForTransport(transport: AgentTransport): AgentRuntime {

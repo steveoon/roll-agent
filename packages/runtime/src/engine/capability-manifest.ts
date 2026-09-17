@@ -1,3 +1,4 @@
+import type { AppOutputDeclaration } from "@roll-agent/protocol/app-output";
 import { asSchema, type ToolSet } from "ai";
 import type { JSONValue } from "@ai-sdk/provider";
 import type { SkillSummary } from "@roll-agent/core/skills/library";
@@ -148,6 +149,7 @@ export interface EffectiveToolCapability {
   readonly transport?: AgentTransport["type"];
   readonly runtimeOwnership?: AgentRuntimeOwnership;
   readonly annotations?: ToolAnnotations;
+  readonly appOutput?: AppOutputDeclaration;
   readonly role: CapabilityToolRole;
   readonly approval: CapabilityApprovalMode;
   readonly description?: string;
@@ -434,6 +436,15 @@ export function buildEffectiveCapabilityManifest(
         ...(route.transport ? { transport: route.transport } : {}),
         ...(route.runtimeOwnership ? { runtimeOwnership: route.runtimeOwnership } : {}),
         ...(route.annotations ? { annotations: { ...route.annotations } } : {}),
+        ...(route.appOutput
+          ? {
+              appOutput: {
+                schemaId: route.appOutput.schemaId,
+                schemaVersion: route.appOutput.schemaVersion,
+                remoteReadable: route.appOutput.remoteReadable,
+              },
+            }
+          : {}),
         role,
         approval: approvalForRole(role),
         ...(typeof description === "string" && description.length > 0 ? { description } : {}),
@@ -524,6 +535,7 @@ function sanitizeToolCapability(tool: EffectiveToolCapability): EffectiveToolCap
     ...(tool.transport ? { transport: tool.transport } : {}),
     ...(tool.runtimeOwnership ? { runtimeOwnership: tool.runtimeOwnership } : {}),
     ...(tool.annotations ? { annotations: { ...tool.annotations } } : {}),
+    ...(tool.appOutput ? { appOutput: { ...tool.appOutput } } : {}),
     role: tool.role,
     approval: tool.approval,
     ...(tool.description ? { description: sanitizeSnapshotString(tool.description) } : {}),

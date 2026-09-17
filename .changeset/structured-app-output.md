@@ -1,0 +1,12 @@
+---
+"@roll-agent/sdk": minor
+"@roll-agent/core": minor
+"@roll-agent/runtime": minor
+"@roll-agent/protocol": minor
+"@roll-agent/client-node": minor
+"@roll-agent/companion": minor
+"@roll-agent/relay-protocol": minor
+"@roll-agent/relay-client": minor
+---
+
+Add opt-in structured App results with portable output contracts, independent durable storage, bounded read-only result retrieval, and client-owned rendering. Runtime Protocol 1.5 and Relay Wire 1.2 preserve older projections; remote results require both producer opt-in and an exact host tool grant. Output validation failures retain execution facts without automatically repeating a completed tool.

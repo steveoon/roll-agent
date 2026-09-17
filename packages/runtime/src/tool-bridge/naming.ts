@@ -1,3 +1,4 @@
+import type { AppOutputContract } from "@roll-agent/protocol/app-output";
 import type {
   AgentRuntimeOwnership,
   AgentSourceType,
@@ -10,6 +11,7 @@ export interface ToolRouteMetadata {
   readonly transport?: AgentTransport["type"];
   readonly runtimeOwnership?: AgentRuntimeOwnership;
   readonly annotations?: ToolAnnotations;
+  readonly appOutput?: AppOutputContract;
 }
 
 export interface ToolRoute extends ToolRouteMetadata {
@@ -40,6 +42,7 @@ export class ToolRegistry {
       ...(metadata.agentSource ? { agentSource: metadata.agentSource } : {}),
       ...(metadata.transport ? { transport: metadata.transport } : {}),
       ...(metadata.runtimeOwnership ? { runtimeOwnership: metadata.runtimeOwnership } : {}),
+      ...(metadata.appOutput ? { appOutput: structuredClone(metadata.appOutput) } : {}),
       ...(metadata.annotations ? { annotations: { ...metadata.annotations } } : {}),
     });
     return id;

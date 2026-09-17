@@ -89,6 +89,18 @@ export const relaySessionReadyControlMessageSchema = z
   .strict()
   .readonly();
 
+export const relaySessionReadyControlMessageSchemaV12 =
+  relaySessionReadyControlMessageSchema.def.innerType
+    .extend({
+      relayProtocolVersion: z.literal("1.2"),
+    })
+    .strict()
+    .readonly();
+export const relaySessionReadyControlMessageSchemaAny = z.union([
+  relaySessionReadyControlMessageSchema,
+  relaySessionReadyControlMessageSchemaV12,
+]);
+
 export const relayWorkspaceStatusControlMessageSchema = z
   .object({
     type: z.literal(RELAY_BROWSER_CONTROL_MESSAGE_TYPES.workspaceStatus),
@@ -106,6 +118,12 @@ export const relaySessionErrorControlMessageSchema = z
   })
   .strict()
   .readonly();
+
+export const relayBrowserControlMessageSchemaAny = z.union([
+  relaySessionReadyControlMessageSchemaAny,
+  relayWorkspaceStatusControlMessageSchema,
+  relaySessionErrorControlMessageSchema,
+]);
 
 export const relayBrowserControlMessageSchema = z.discriminatedUnion("type", [
   relaySessionReadyControlMessageSchema,
@@ -251,3 +269,10 @@ export type RelayWorkspaceStatusControlMessage = z.infer<
 export type RelaySessionErrorControlMessage = z.infer<typeof relaySessionErrorControlMessageSchema>;
 export type RelayBrowserControlMessage = z.infer<typeof relayBrowserControlMessageSchema>;
 export type RelayBrowserFirstControlFrame = z.infer<typeof relayBrowserFirstControlFrameSchema>;
+
+export type RelayBrowserControlMessageAny = z.infer<typeof relayBrowserControlMessageSchemaAny>;
+export function parseRelayBrowserFirstControlFrameAny(
+  value: unknown,
+): z.output<typeof relaySessionReadyControlMessageSchemaAny> {
+  return relaySessionReadyControlMessageSchemaAny.parse(value);
+}

@@ -2,28 +2,28 @@ import {
   RELAY_ERROR_CODES_V11,
   RELAY_MESSAGE_TYPES_V11,
   RELAY_REQUEST_METHODS_V11,
-  RELAY_REQUEST_METHOD_DISPOSITIONS_V11,
+  RELAY_REQUEST_METHOD_DISPOSITIONS_V12,
   parseRelayInteractionCandidateForRequestV11,
   parseRelayRequestParamsForVersion,
   parseRelayRequestResultForVersion,
   relayAckSchemaV11,
-  relayMessageSchemaV11,
+  relayMessageSchemaV12,
   relayRequestIdSchema,
-  relayRequestMethodSchemasV11,
-  relayRuntimeRequestSchemaV11,
+  relayRequestMethodSchemasV12,
+  relayRuntimeRequestSchemaV12,
   type RelayInteractionCancelledV11,
   type RelayInteractionRequestV11,
   type RelayInteractionResolvedV11,
-  type RelayMessageV11,
+  type RelayMessageV12 as RelayMessageV11,
   type RelayRequestMethodForVersion,
   type RelayRequestParamsForVersion,
   type RelayRequestResultForVersion,
-  type RelayRuntimeEventV11,
+  type RelayRuntimeEventV12 as RelayRuntimeEventV11,
   type WorkspaceId,
 } from "@roll-agent/relay-protocol";
 import {
-  parseRelayBrowserFirstControlFrame,
-  relayBrowserControlMessageSchema,
+  parseRelayBrowserFirstControlFrameAny as parseRelayBrowserFirstControlFrame,
+  relayBrowserControlMessageSchemaAny as relayBrowserControlMessageSchema,
   relaySessionDescriptorSchema,
 } from "@roll-agent/relay-protocol/control";
 import { z } from "zod/v4";
@@ -48,21 +48,23 @@ import {
   type RelayWebSocketLike,
 } from "./transport.ts";
 
-type RelayMethodV11 = RelayRequestMethodForVersion<"1.1">;
-type ThreadListWireInput = z.input<(typeof relayRequestMethodSchemasV11)["thread.list"]["params"]>;
+type RelayMethodV11 = RelayRequestMethodForVersion<"1.2">;
+type ThreadListWireInput = z.input<(typeof relayRequestMethodSchemasV12)["thread.list"]["params"]>;
 type ThreadCreateWireInput = z.input<
-  (typeof relayRequestMethodSchemasV11)["thread.create"]["params"]
+  (typeof relayRequestMethodSchemasV12)["thread.create"]["params"]
 >;
-type ThreadListWireResult = RelayRequestResultForVersion<"1.1", "thread.list">;
-type ThreadCreateWireResult = RelayRequestResultForVersion<"1.1", "thread.create">;
-type ThreadOpenWireResult = RelayRequestResultForVersion<"1.1", "thread.open">;
-type ThreadSnapshotWireResult = RelayRequestResultForVersion<"1.1", "thread.snapshot">;
-type TurnStartWireResult = RelayRequestResultForVersion<"1.1", "turn.start">;
-type TurnCancelWireResult = RelayRequestResultForVersion<"1.1", "turn.cancel">;
-type InteractionCandidateWireResult = RelayRequestResultForVersion<"1.1", "interaction.candidate">;
+type ThreadListWireResult = RelayRequestResultForVersion<"1.2", "thread.list">;
+type ThreadCreateWireResult = RelayRequestResultForVersion<"1.2", "thread.create">;
+type ThreadOpenWireResult = RelayRequestResultForVersion<"1.2", "thread.open">;
+type ThreadSnapshotWireResult = RelayRequestResultForVersion<"1.2", "thread.snapshot">;
+type TurnStartWireResult = RelayRequestResultForVersion<"1.2", "turn.start">;
+type TurnCancelWireResult = RelayRequestResultForVersion<"1.2", "turn.cancel">;
+type InteractionCandidateWireResult = RelayRequestResultForVersion<"1.2", "interaction.candidate">;
 
+export type RelayOperationResult = RelayRequestResultForVersion<"1.2", "operation.result.get">;
+export type RelayThreadCapabilities = RelayRequestResultForVersion<"1.2", "thread.capabilities">;
 export type RelayThreadId = ThreadOpenWireResult["thread"]["id"];
-export type RelayTurnId = RelayRequestParamsForVersion<"1.1", "turn.cancel">["turnId"];
+export type RelayTurnId = RelayRequestParamsForVersion<"1.2", "turn.cancel">["turnId"];
 export type RelayInteractionId = RelayInteractionRequestV11["interactionId"];
 export type RelayThreadSummary = ThreadListWireResult["items"][number];
 export type RelayThreadListInput = Omit<ThreadListWireInput, "limit"> & {
@@ -77,6 +79,7 @@ export type RelayInteractionCandidateResult = InteractionCandidateWireResult;
 
 export interface RelaySessionProviderInput {
   readonly signal: AbortSignal;
+  readonly supportedRelayProtocolVersions: readonly ["1.2", "1.1"];
 }
 
 export type RelaySessionProvider = (input: RelaySessionProviderInput) => Promise<unknown>;
@@ -107,6 +110,8 @@ export interface RelayThread {
     options?: RelayRequestOptions,
   ): Promise<RelayInteractionCandidateResult>;
   refresh(options?: RelayRequestOptions): Promise<RelayThreadSnapshot>;
+  getResult(operationId: string, options?: RelayRequestOptions): Promise<RelayOperationResult>;
+  capabilities(options?: RelayRequestOptions): Promise<RelayThreadCapabilities>;
 }
 
 export interface RelayClient {
@@ -354,6 +359,12 @@ class RelayThreadImpl implements RelayThread {
     }
   }
 
+  getResult(operationId: string, options?: RelayRequestOptions): Promise<RelayOperationResult> {
+    return this.#client.getOperationResult(this.id, operationId, options);
+  }
+  capabilities(options?: RelayRequestOptions): Promise<RelayThreadCapabilities> {
+    return this.#client.getThreadCapabilities(this.id, options);
+  }
   async refresh(options?: RelayRequestOptions): Promise<RelayThreadSnapshot> {
     try {
       const snapshot = await this.#client.getThreadSnapshot(this.id, options);
@@ -526,6 +537,8 @@ export class RelayClientImpl implements RelayClient {
   #connectionState: RelayConnectionState = { status: "idle" };
   #socket: RelayWebSocketLike | undefined;
   #workspaceId: WorkspaceId | undefined;
+  #protocolVersion: "1.1" | "1.2" = "1.1";
+  readonly #resultReads = new Map<string, Promise<RelayOperationResult>>();
   #connectPromise: Promise<void> | undefined;
   #sessionAbortController: AbortController | undefined;
   #reconnectTimer: RelayTimerHandle | undefined;
@@ -675,6 +688,44 @@ export class RelayClientImpl implements RelayClient {
     return this.#request(RELAY_REQUEST_METHODS_V11.interactionCandidate, params, options);
   }
 
+  async getThreadCapabilities(
+    threadId: RelayThreadId,
+    options?: RelayRequestOptions,
+  ): Promise<RelayThreadCapabilities> {
+    return this.#request("thread.capabilities", { threadId }, options);
+  }
+
+  getOperationResult(
+    threadId: RelayThreadId,
+    operationId: string,
+    options?: RelayRequestOptions,
+  ): Promise<RelayOperationResult> {
+    if (this.#protocolVersion !== "1.2") {
+      return Promise.reject(
+        transportError(
+          RELAY_CLIENT_TRANSPORT_ERROR_CODES.protocolError,
+          "App results require Relay Wire 1.2",
+          false,
+        ),
+      );
+    }
+    const key = `${this.#streamEpoch}:${this.#workspaceId}:${threadId}:${operationId}`;
+    if (options === undefined) {
+      const existing = this.#resultReads.get(key);
+      if (existing) return existing;
+    }
+    const pending = this.#request("operation.result.get", { threadId, operationId }, options);
+    if (options === undefined) {
+      this.#resultReads.set(key, pending);
+      pending
+        .finally(() => {
+          if (this.#resultReads.get(key) === pending) this.#resultReads.delete(key);
+        })
+        .catch(() => undefined);
+    }
+    return pending;
+  }
+
   async getThreadSnapshot(
     threadId: RelayThreadId,
     options?: RelayRequestOptions,
@@ -741,7 +792,10 @@ export class RelayClientImpl implements RelayClient {
     try {
       let rawSession: unknown;
       try {
-        rawSession = await this.#options.getSession({ signal });
+        rawSession = await this.#options.getSession({
+          signal,
+          supportedRelayProtocolVersions: ["1.2", "1.1"],
+        });
       } catch (error) {
         if (signal.aborted) {
           throw transportError(
@@ -813,6 +867,8 @@ export class RelayClientImpl implements RelayClient {
                 );
               }
               this.#workspaceId = ready.workspaceId;
+              this.#protocolVersion = ready.relayProtocolVersion;
+              this.#resultReads.clear();
               attempt.ready = true;
               attempt.settled = true;
               this.#reconnectAttempt = 0;
@@ -881,7 +937,7 @@ export class RelayClientImpl implements RelayClient {
       return;
     }
 
-    const wire = relayMessageSchemaV11.safeParse(value);
+    const wire = relayMessageSchemaV12.safeParse(value);
     if (!wire.success) {
       throw transportError(
         RELAY_CLIENT_TRANSPORT_ERROR_CODES.protocolError,
@@ -1006,7 +1062,11 @@ export class RelayClientImpl implements RelayClient {
       return;
     }
     try {
-      const result = parseRelayRequestResultForVersion("1.1", pending.method, message.result);
+      const result = parseRelayRequestResultForVersion(
+        this.#protocolVersion,
+        pending.method,
+        message.result,
+      );
       this.#settlePending(pending, undefined, result);
     } catch {
       this.#settlePending(
@@ -1235,7 +1295,7 @@ export class RelayClientImpl implements RelayClient {
     method: TMethod,
     params: unknown,
     options?: RelayRequestOptions,
-  ): Promise<RelayRequestResultForVersion<"1.1", TMethod>> {
+  ): Promise<RelayRequestResultForVersion<"1.2", TMethod>> {
     if (
       this.#connectionState.status !== "connected" ||
       this.#connectionState.workspaceStatus !== "online" ||
@@ -1264,9 +1324,9 @@ export class RelayClientImpl implements RelayClient {
       );
     }
 
-    const normalizedParams = parseRelayRequestParamsForVersion("1.1", method, params);
+    const normalizedParams = parseRelayRequestParamsForVersion("1.2", method, params);
     const requestId = relayRequestIdSchema.parse(this.#runtime.createUuid());
-    const frame = relayRuntimeRequestSchemaV11.parse({
+    const frame = relayRuntimeRequestSchemaV12.parse({
       type: RELAY_MESSAGE_TYPES_V11.runtimeRequest,
       requestId,
       workspaceId: this.#workspaceId,
@@ -1277,9 +1337,9 @@ export class RelayClientImpl implements RelayClient {
     if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
       return Promise.reject(new TypeError("timeoutMs must be a positive finite number"));
     }
-    const mutation = RELAY_REQUEST_METHOD_DISPOSITIONS_V11[method] === "mutation";
+    const mutation = RELAY_REQUEST_METHOD_DISPOSITIONS_V12[method] === "mutation";
 
-    return new Promise<RelayRequestResultForVersion<"1.1", TMethod>>((resolve, reject) => {
+    return new Promise<RelayRequestResultForVersion<"1.2", TMethod>>((resolve, reject) => {
       const abortListener = options?.signal
         ? () => {
             const pending = this.#pendingRequests.get(requestId);
@@ -1308,7 +1368,7 @@ export class RelayClientImpl implements RelayClient {
         mutation,
         sent: false,
         resolve: (value) => {
-          resolve(value as RelayRequestResultForVersion<"1.1", TMethod>);
+          resolve(value as RelayRequestResultForVersion<"1.2", TMethod>);
         },
         reject,
         signal: options?.signal,

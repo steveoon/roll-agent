@@ -67,8 +67,8 @@ const IDS = {
 
 test("Relay Protocol v1.0 freezes message and request registries", () => {
   assert.equal(RELAY_PROTOCOL_VERSION, "1.0");
-  assert.equal(LATEST_RELAY_PROTOCOL_VERSION, "1.1");
-  assert.deepEqual(SUPPORTED_RELAY_PROTOCOL_VERSIONS, ["1.1", "1.0"]);
+  assert.equal(LATEST_RELAY_PROTOCOL_VERSION, "1.2");
+  assert.deepEqual(SUPPORTED_RELAY_PROTOCOL_VERSIONS, ["1.2", "1.1", "1.0"]);
   assert.deepEqual(RELAY_MESSAGE_TYPE_VALUES, [
     "device.connect",
     "runtime.request",

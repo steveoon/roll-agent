@@ -471,6 +471,7 @@ export function buildAgentToolset(
         ...(transport ? { transport } : {}),
         ...(runtimeOwnership ? { runtimeOwnership } : {}),
         ...(annotations ? { annotations } : {}),
+        ...(agentTool.appOutput ? { appOutput: agentTool.appOutput } : {}),
       });
       if (schemaIssues.length > 0) {
         schemaIssuesByToolId[id] = schemaIssues;

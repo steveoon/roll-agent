@@ -9,6 +9,12 @@ import {
   jsonValueSchema,
   normalizeUserInputResult,
   operationGetResultSchema,
+  operationViewV15Schema,
+  operationIdSchema,
+  operationResultGetParamsSchema,
+  operationResultGetResultSchema,
+  appOutputDescriptorSchema,
+  runtimeMethodSchemasV15,
   operationViewSchema,
   pendingApprovalSchema,
   projectThreadSnapshotForVersion,
@@ -30,7 +36,7 @@ import {
 } from "@roll-agent/protocol";
 import { z } from "zod/v4";
 
-export const SUPPORTED_RELAY_PROTOCOL_VERSIONS = ["1.1", "1.0"] as const;
+export const SUPPORTED_RELAY_PROTOCOL_VERSIONS = ["1.2", "1.1", "1.0"] as const;
 export type RelayProtocolVersion = (typeof SUPPORTED_RELAY_PROTOCOL_VERSIONS)[number];
 export const LATEST_RELAY_PROTOCOL_VERSION = SUPPORTED_RELAY_PROTOCOL_VERSIONS[0];
 
@@ -799,7 +805,12 @@ export function projectRelayThreadSnapshotV11(value: unknown): ThreadSnapshotV11
 export function projectRelayOperationGetResultV11(
   value: unknown,
 ): z.output<typeof operationGetResultSchema> {
-  const result = operationGetResultSchema.parse(value);
+  const result = z
+    .union([
+      operationGetResultSchema,
+      z.object({ operation: operationViewV15Schema.nullable() }).strict(),
+    ])
+    .parse(value);
   return operationGetResultSchema.parse({
     operation: result.operation === null ? null : redactRelayOperationViewV11(result.operation),
   });
@@ -979,7 +990,179 @@ export interface RelayProtocolRegistry {
   readonly localOnlyMethods: readonly string[];
 }
 
+/** Wire 1.2 carries complete App results only through an explicit query. */
+export const RELAY_REQUEST_METHODS_V12 = {
+  ...RELAY_REQUEST_METHODS_V11,
+  operationResultGet: "operation.result.get",
+} as const;
+export const RELAY_REQUEST_METHOD_VALUES_V12 = [
+  ...RELAY_REQUEST_METHOD_VALUES_V11,
+  RELAY_REQUEST_METHODS_V12.operationResultGet,
+] as const;
+export const RELAY_REQUEST_METHOD_DISPOSITIONS_V12 = {
+  ...RELAY_REQUEST_METHOD_DISPOSITIONS_V11,
+  [RELAY_REQUEST_METHODS_V12.operationResultGet]: "query",
+} as const;
+export const relayOperationViewSchemaV12 = operationViewV15Schema.def.innerType
+  .extend({ appOutput: appOutputDescriptorSchema.optional() })
+  .readonly();
+export const relayThreadSnapshotSchemaV12 = threadSnapshotV11Schema.def.innerType
+  .extend({
+    operations: z
+      .object({
+        items: z.array(relayOperationViewSchemaV12),
+        nextBeforeSequence: z.number().int().nonnegative().nullable(),
+      })
+      .strict()
+      .readonly(),
+  })
+  .strict()
+  .readonly();
+export const relayRequestMethodSchemasV12 = {
+  ...relayRequestMethodSchemasV11,
+  "thread.open": {
+    ...relayRequestMethodSchemasV11["thread.open"],
+    result: relayThreadSnapshotSchemaV12,
+  },
+  "thread.snapshot": {
+    ...relayRequestMethodSchemasV11["thread.snapshot"],
+    result: relayThreadSnapshotSchemaV12,
+  },
+  "thread.capabilities": runtimeMethodSchemasV15["thread.capabilities"],
+  "operation.get": {
+    ...relayRequestMethodSchemasV11["operation.get"],
+    result: z.object({ operation: relayOperationViewSchemaV12.nullable() }).strict().readonly(),
+  },
+  "operation.result.get": {
+    params: operationResultGetParamsSchema,
+    result: operationResultGetResultSchema,
+  },
+} as const;
+export const relayToolCompletedSchemaV12 = z
+  .object({
+    type: z.literal("tool.completed"),
+    toolCallId: z.string().min(1),
+    agentName: z.string().min(1),
+    toolName: z.string().min(1),
+    outcome: relaySafeToolOutcomeSchemaV11.optional(),
+    appOutput: appOutputDescriptorSchema.optional(),
+    operationId: operationIdSchema.optional(),
+  })
+  .strict()
+  .readonly();
+export const relayRuntimeEventEnvelopeSchemaV12 = relayRuntimeEventEnvelopeSchemaV11.def.innerType
+  .extend({
+    event: z.union([relayTimelineEventSchemaV11, relayToolCompletedSchemaV12]),
+  })
+  .strict()
+  .readonly();
+export const relayDeviceConnectSchemaV12 = relayDeviceConnectSchemaV11.def.innerType
+  .extend({ protocolVersion: z.literal("1.2") })
+  .strict()
+  .readonly();
+export const relayRuntimeRequestSchemaV12 = relayRuntimeRequestSchemaV11.def.innerType
+  .extend({ method: z.enum(RELAY_REQUEST_METHOD_VALUES_V12) })
+  .strict()
+  .readonly();
+export const relayRuntimeEventSchemaV12 = relayRuntimeEventSchemaV11.def.innerType
+  .extend({ event: relayRuntimeEventEnvelopeSchemaV12 })
+  .strict()
+  .readonly();
+export const relayMessageSchemaV12 = z.discriminatedUnion("type", [
+  relayDeviceConnectSchemaV12,
+  relayRuntimeRequestSchemaV12,
+  relayRuntimeResponseSchemaV11,
+  relayRuntimeEventSchemaV12,
+  relayAckSchemaV11,
+  relayGapSchemaV11,
+  relayEncryptedMessageSchemaV11,
+  relayInteractionRequestSchemaV11,
+  relayInteractionResolvedSchemaV11,
+  relayInteractionCancelledSchemaV11,
+]);
+export type RelayMessageV12 = z.output<typeof relayMessageSchemaV12>;
+export type RelayRuntimeRequestV12 = z.output<typeof relayRuntimeRequestSchemaV12>;
+export type RelayRuntimeEventV12 = z.output<typeof relayRuntimeEventSchemaV12>;
+export type RelayRuntimeEventEnvelopeV12 = z.output<typeof relayRuntimeEventEnvelopeSchemaV12>;
+export type RelayRequestMethodV12 = (typeof RELAY_REQUEST_METHOD_VALUES_V12)[number];
+
+export function projectRelayThreadSnapshotV12(
+  value: unknown,
+): z.output<typeof relayThreadSnapshotSchemaV12> {
+  const legacy = projectRelayThreadSnapshotV11(value);
+  const source = z
+    .object({ operations: z.object({ items: z.array(relayOperationViewSchemaV12) }) })
+    .parse(value);
+  const descriptors = new Map(
+    source.operations.items.map((operation) => [operation.id, operation.appOutput]),
+  );
+  return relayThreadSnapshotSchemaV12.parse({
+    ...legacy,
+    operations: {
+      ...legacy.operations,
+      items: legacy.operations.items.map((operation) => ({
+        ...operation,
+        appOutput: descriptors.get(operation.id) ?? { status: "not_provided" },
+      })),
+    },
+  });
+}
+export function projectRelayOperationGetResultV12(
+  value: unknown,
+): z.output<(typeof relayRequestMethodSchemasV12)["operation.get"]["result"]> {
+  const result = relayRequestMethodSchemasV12["operation.get"].result.parse(value);
+  return {
+    operation:
+      result.operation === null
+        ? null
+        : { ...result.operation, outcome: { kind: result.operation.outcome.kind }, display: null },
+  };
+}
+export function projectRuntimeEventEnvelopeForRelayV12(
+  value: unknown,
+): RelayRuntimeEventEnvelopeV12 | undefined {
+  const base = projectRuntimeEventEnvelopeForRelayV11(value);
+  if (!base) return undefined;
+  if (base.event.type !== "tool.completed") return base;
+  const source = z
+    .object({
+      event: z.object({
+        appOutput: appOutputDescriptorSchema.optional(),
+        operationId: operationIdSchema.optional(),
+      }),
+    })
+    .parse(value);
+  return relayRuntimeEventEnvelopeSchemaV12.parse({
+    ...base,
+    event: { ...base.event, ...source.event },
+  });
+}
+/** Downgrade before delivery to a 1.1 browser; never leaks new descriptor fields. */
+export function projectRelayMessageV12ToV11(message: RelayMessageV12): RelayMessageV11 {
+  if (message.type === "device.connect") {
+    return relayDeviceConnectSchemaV11.parse({ ...message, protocolVersion: "1.1" });
+  }
+  if (message.type === "runtime.event" && message.event.event.type === "tool.completed") {
+    const {
+      appOutput: _appOutput,
+      operationId: _operationId,
+      ...event
+    } = relayToolCompletedSchemaV12.parse(message.event.event);
+    return relayMessageSchemaV11.parse({ ...message, event: { ...message.event, event } });
+  }
+  return relayMessageSchemaV11.parse(message);
+}
+
 export const RELAY_PROTOCOL_REGISTRY = {
+  "1.2": {
+    messageTypes: RELAY_MESSAGE_TYPE_VALUES_V11,
+    messageSchema: relayMessageSchemaV12,
+    requestMethods: RELAY_REQUEST_METHOD_VALUES_V12,
+    requestMethodSchemas: relayRequestMethodSchemasV12,
+    requestMethodDispositions: RELAY_REQUEST_METHOD_DISPOSITIONS_V12,
+    mutationMethods: RELAY_MUTATION_REQUEST_METHODS_V11,
+    localOnlyMethods: RELAY_LOCAL_ONLY_REQUEST_METHODS_V11,
+  },
   "1.1": {
     messageTypes: RELAY_MESSAGE_TYPE_VALUES_V11,
     messageSchema: relayMessageSchemaV11,
@@ -1015,10 +1198,10 @@ type RelaySchemaResult<TDefinition> = TDefinition extends {
 export type RelayMessageForVersion<TVersion extends RelayProtocolVersion> = z.output<
   RelayProtocolRegistryMap[TVersion]["messageSchema"]
 >;
-export type RelayRequestMethodForVersion<TVersion extends RelayProtocolVersion> = Extract<
-  keyof RelayProtocolRegistryMap[TVersion]["requestMethodSchemas"],
-  string
->;
+export type RelayRequestMethodForVersion<TVersion extends RelayProtocolVersion> =
+  TVersion extends RelayProtocolVersion
+    ? Extract<keyof RelayProtocolRegistryMap[TVersion]["requestMethodSchemas"], string>
+    : never;
 type RelayRequestMethodDefinitionForVersion<
   TVersion extends RelayProtocolVersion,
   TMethod extends RelayRequestMethodForVersion<TVersion>,
@@ -1288,3 +1471,22 @@ export type RelayRuntimeEvent = z.infer<typeof relayRuntimeEventSchema>;
 export type RelayGap = z.infer<typeof relayGapSchema>;
 /** @deprecated Legacy generic Relay types remain pinned to Wire 1.0. */
 export type RelayEncryptedMessage = z.infer<typeof relayEncryptedMessageSchema>;
+
+export type RelaySupportedMessage = RelayMessageV11 | RelayMessageV12;
+
+/** Keep legacy capability payloads free of unsupported App-output claims. */
+export function projectRelayCapabilitiesV11(value: unknown): JsonValue {
+  const result = jsonValueSchema.parse(value);
+  if (result === null || typeof result !== "object" || Array.isArray(result)) return result;
+  const manifest = result.manifest;
+  if (manifest === null || typeof manifest !== "object" || Array.isArray(manifest)) return result;
+  const { appOutput: _appOutput, ...legacy } = manifest;
+  if (Array.isArray(legacy.tools)) {
+    legacy.tools = legacy.tools.map((tool) => {
+      if (tool === null || typeof tool !== "object" || Array.isArray(tool)) return tool;
+      const { appOutput: _declaration, ...retained } = tool;
+      return retained;
+    });
+  }
+  return { ...result, manifest: legacy };
+}

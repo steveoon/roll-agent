@@ -17,13 +17,19 @@ import {
   projectRelayThreadSnapshotV11,
   relayEnvelopeIdSchema,
   relayMessageSchemaV11,
-  relayRuntimeRequestSchemaV11,
+  relayMessageSchemaV12,
+  relayRuntimeRequestSchemaV12,
+  projectRelayThreadSnapshotV12,
+  projectRelayOperationGetResultV12,
+  projectRelayMessageV12ToV11,
+  projectRelayCapabilitiesV11,
   type DeviceId,
   type RelayEncryptedMessageV11,
-  type RelayMessageV11,
+  type RelayMessageV12,
+  type RelayMessageV11 as LegacyRelayMessageV11,
   type RelayRequestId,
-  type RelayRequestMethodV11,
-  type RelayRuntimeRequestV11,
+  type RelayRequestMethodV12 as RelayRequestMethodV11,
+  type RelayRuntimeRequestV12 as RelayRuntimeRequestV11,
   type WorkspaceId,
 } from "@roll-agent/relay-protocol";
 import { LocalApprovalDeniedError, LocalConfirmationRequiredError } from "./companion-workspace.ts";
@@ -32,11 +38,12 @@ import type {
   RemoteInteractionResponderPolicy,
 } from "./interaction-broker.ts";
 import {
-  materializeRelayFrameV11,
+  materializeRelayFrameV12,
   type CompanionRelayFrameEntryV11,
   type CompanionRelayFrameReplayV11,
 } from "./relay-frame-buffer.ts";
 
+type RelayMessageV11 = RelayMessageV12 | LegacyRelayMessageV11;
 type RelayRuntimeResponseV11 = Extract<RelayMessageV11, { readonly type: "runtime.response" }>;
 
 export interface RelayTransportV11 {
@@ -72,6 +79,7 @@ export interface CompanionRelayBridgeV11Options {
   readonly workspaces: ReadonlyMap<WorkspaceId, CompanionWorkspaceV11Port>;
   readonly ciphers?: ReadonlyMap<WorkspaceId, RelayPayloadCipherV11>;
   readonly maxRequestCacheEntries?: number;
+  readonly protocolVersion?: "1.1" | "1.2";
 }
 
 export interface CompanionRelayConnectionV11Options {
@@ -144,17 +152,32 @@ function relayRequestFingerprintV11(request: RelayRuntimeRequestV11): string {
   return createHash("sha256").update(canonicalizeRelayJson(identity)).digest("hex");
 }
 
-function projectRelayRuntimeResultV11(request: RelayRuntimeRequestV11, value: unknown): JsonValue {
+function projectRelayRuntimeResultV11(
+  request: RelayRuntimeRequestV11,
+  value: unknown,
+  version: "1.1" | "1.2",
+): JsonValue {
   let projected = value;
   if (
     request.method === RELAY_REQUEST_METHODS_V11.threadOpen ||
     request.method === RELAY_REQUEST_METHODS_V11.threadSnapshot
   ) {
-    projected = projectRelayThreadSnapshotV11(value);
+    projected =
+      version === "1.2"
+        ? projectRelayThreadSnapshotV12(value)
+        : projectRelayThreadSnapshotV11(value);
   } else if (request.method === RELAY_REQUEST_METHODS_V11.operationGet) {
-    projected = projectRelayOperationGetResultV11(value);
+    projected =
+      version === "1.2"
+        ? projectRelayOperationGetResultV12(value)
+        : projectRelayOperationGetResultV11(value);
   }
-  return jsonValueSchema.parse(parseRelayRequestResultForVersion("1.1", request.method, projected));
+  if (version === "1.1" && request.method === "thread.capabilities") {
+    projected = projectRelayCapabilitiesV11(projected);
+  }
+  return jsonValueSchema.parse(
+    parseRelayRequestResultForVersion(version, request.method, projected),
+  );
 }
 
 function toRelayErrorV11(error: unknown): NonNullable<RelayRuntimeResponseV11["error"]> {
@@ -204,6 +227,7 @@ function toRelayErrorV11(error: unknown): NonNullable<RelayRuntimeResponseV11["e
  * a frozen Wire 1.0 path; callers must opt into this class to project typed Interactions.
  */
 export class CompanionRelayBridgeV11 {
+  private readonly protocolVersion: "1.1" | "1.2";
   private readonly deviceId: DeviceId;
   private readonly pairingToken: string;
   private readonly workspaces: ReadonlyMap<WorkspaceId, CompanionWorkspaceV11Port>;
@@ -218,6 +242,7 @@ export class CompanionRelayBridgeV11 {
   private closed = false;
 
   constructor(options: CompanionRelayBridgeV11Options) {
+    this.protocolVersion = options.protocolVersion ?? "1.1";
     this.deviceId = options.deviceId;
     this.pairingToken = options.pairingToken;
     this.workspaces = options.workspaces;
@@ -265,7 +290,7 @@ export class CompanionRelayBridgeV11 {
     ];
     this.enqueue(generation, {
       type: RELAY_MESSAGE_TYPES_V11.deviceConnect,
-      protocolVersion: "1.1",
+      protocolVersion: this.protocolVersion,
       deviceId: this.deviceId,
       pairingToken: this.pairingToken,
     });
@@ -302,6 +327,10 @@ export class CompanionRelayBridgeV11 {
   }
 
   private enqueue(generation: RelayTransportGenerationV11, message: RelayMessageV11): void {
+    if (Buffer.byteLength(JSON.stringify(message), "utf8") > 1024 * 1024) {
+      generation.transport.close();
+      return;
+    }
     this.enqueueTask(generation, async () => {
       await generation.transport.send(message);
       if (this.generation !== generation) {
@@ -343,7 +372,9 @@ export class CompanionRelayBridgeV11 {
     if (this.generation !== generation) {
       return;
     }
-    const parsed = relayMessageSchemaV11.safeParse(value);
+    const parsed = (
+      this.protocolVersion === "1.2" ? relayMessageSchemaV12 : relayMessageSchemaV11
+    ).safeParse(value);
     if (!parsed.success) {
       return;
     }
@@ -357,7 +388,7 @@ export class CompanionRelayBridgeV11 {
         return;
       }
       try {
-        const decrypted = relayRuntimeRequestSchemaV11.parse(await cipher.decrypt(message));
+        const decrypted = relayRuntimeRequestSchemaV12.parse(await cipher.decrypt(message));
         if (
           decrypted.workspaceId !== message.workspaceId ||
           decrypted.requestId !== message.requestId
@@ -488,7 +519,10 @@ export class CompanionRelayBridgeV11 {
         },
       });
     }
-    const disposition = getRelayRequestMethodDispositionForVersion("1.1", request.method);
+    const disposition = getRelayRequestMethodDispositionForVersion(
+      this.protocolVersion,
+      request.method,
+    );
     if (disposition !== "mutation") {
       return this.executeRuntimeRequest(request, workspace, generation);
     }
@@ -514,18 +548,21 @@ export class CompanionRelayBridgeV11 {
     generation: RelayTransportGenerationV11,
   ): Promise<RelayRuntimeResponseV11> {
     try {
-      if (getRelayRequestMethodDispositionForVersion("1.1", request.method) === "local-only") {
+      if (
+        getRelayRequestMethodDispositionForVersion(this.protocolVersion, request.method) ===
+        "local-only"
+      ) {
         throw new LocalOnlyRelayRequestV11Error(request.method);
       }
       let params: JsonValue;
       try {
         params = jsonValueSchema.parse(
-          parseRelayRequestParamsForVersion("1.1", request.method, request.params),
+          parseRelayRequestParamsForVersion(this.protocolVersion, request.method, request.params),
         );
       } catch {
         throw new InvalidRelayRequestParamsV11Error();
       }
-      const normalizedRequest = relayRuntimeRequestSchemaV11.parse({ ...request, params });
+      const normalizedRequest = relayRuntimeRequestSchemaV12.parse({ ...request, params });
       const context: RemoteInteractionCandidateContext = {
         signal: generation.controller.signal,
         responderPolicy: generation.responderPolicy,
@@ -538,7 +575,7 @@ export class CompanionRelayBridgeV11 {
         type: RELAY_MESSAGE_TYPES_V11.runtimeResponse,
         requestId: request.requestId,
         workspaceId: request.workspaceId,
-        result: projectRelayRuntimeResultV11(normalizedRequest, result),
+        result: projectRelayRuntimeResultV11(normalizedRequest, result, this.protocolVersion),
       };
     } catch (error: unknown) {
       return {
@@ -570,7 +607,8 @@ export class CompanionRelayBridgeV11 {
     workspaceId: WorkspaceId,
     entry: CompanionRelayFrameEntryV11,
   ): void {
-    const message = materializeRelayFrameV11(workspaceId, entry);
+    const current = materializeRelayFrameV12(workspaceId, entry);
+    const message = this.protocolVersion === "1.2" ? current : projectRelayMessageV12ToV11(current);
     const cipher = this.ciphers.get(workspaceId);
     if (cipher === undefined) {
       this.enqueue(generation, message);

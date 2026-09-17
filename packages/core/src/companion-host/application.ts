@@ -387,7 +387,10 @@ export function createDefaultCompanionApplication(
     }),
     invocation,
     logger,
-    sessionFactory: new DefaultCompanionSessionFactory({ invocation }),
+    sessionFactory: new DefaultCompanionSessionFactory({
+      invocation,
+      configPath: paths.configPath,
+    }),
   });
 }
 

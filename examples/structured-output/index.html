@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>Roll custom result UI</title>
+    <style>
+      body {
+        font: 16px system-ui;
+        max-width: 960px;
+        margin: 3rem auto;
+        padding: 1rem;
+        color: #182338;
+        background: #f4f7fb;
+      }
+      button,
+      select,
+      input {
+        font: inherit;
+        padding: 0.5rem;
+        margin: 0.3rem;
+      }
+      table {
+        width: 100%;
+        border-collapse: collapse;
+        background: white;
+      }
+      td,
+      th {
+        text-align: left;
+        border-bottom: 1px solid #dae2eb;
+        padding: 1rem;
+      }
+      pre {
+        white-space: pre-wrap;
+        max-height: 20rem;
+        overflow: auto;
+      }
+      .result {
+        padding: 1rem;
+        margin-top: 1rem;
+        border: 1px solid #dae2eb;
+        border-radius: 12px;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>Candidate comparison</h1>
+    <p>Synthetic data · custom Web renderer</p>
+    <p id="status" role="status">Connect to a paired test workspace.</p>
+    <button id="connect">Connect</button
+    ><select id="threads" aria-label="Conversation"></select
+    ><button id="open">Open history</button><button id="create">New demo conversation</button
+    ><button id="run">List synthetic candidates</button>
+    <main id="results"></main>
+    <script type="module" src="./web.js"></script>
+  </body>
+</html>

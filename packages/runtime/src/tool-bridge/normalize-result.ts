@@ -1,3 +1,5 @@
+import type { AppOutputContract, AppOutputResult } from "@roll-agent/protocol";
+import { normalizeAppOutput, hasCompletedAppOutputMarker } from "./normalize-app-output.ts";
 import type { JSONValue } from "@ai-sdk/provider";
 import { extractTextContent, isToolErrorResult } from "@roll-agent/core/cli/utils/tool-results";
 
@@ -75,6 +77,7 @@ export type ToolModelOutput =
  * `output` and `isError` are compatibility aliases for callers that have not migrated yet.
  */
 export interface NormalizedToolResult {
+  readonly appOutput?: AppOutputResult;
   readonly raw: unknown;
   readonly model: ToolModelOutput;
   readonly display: unknown;
@@ -494,17 +497,27 @@ function displayProjection(result: unknown, isError: boolean, taskWrapped: boole
   return isError ? "工具执行失败（无可展示的文本结果）" : "工具执行完成（无可展示的文本结果）";
 }
 
-export function normalizeToolResult(result: unknown): NormalizedToolResult {
+export function normalizeToolResult(
+  result: unknown,
+  appOutput?: AppOutputContract,
+): NormalizedToolResult {
   const projected = taskToolResult(result);
-  const isError = isToolErrorResult(projected.value);
+  const isError =
+    isToolErrorResult(projected.value) &&
+    !(appOutput !== undefined && hasCompletedAppOutputMarker(projected.value));
   const display = displayProjection(projected.value, isError, projected.wrapped);
   const outcome: ToolOutcome = isError
     ? { kind: TOOL_OUTCOME_KINDS.toolFailed }
     : { kind: TOOL_OUTCOME_KINDS.success };
-  return createToolResult(outcome, display, {
-    raw: result,
-    model: mcpModelOutput(projected.value, display, isError, projected.wrapped),
-  });
+  return {
+    ...createToolResult(outcome, display, {
+      raw: result,
+      model: mcpModelOutput(projected.value, display, isError, projected.wrapped),
+    }),
+    ...(appOutput === undefined
+      ? {}
+      : { appOutput: normalizeAppOutput(projected.value, appOutput) }),
+  };
 }
 
 export function isToolCancellationExecutionState(

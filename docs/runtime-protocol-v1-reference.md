@@ -4,16 +4,16 @@
 
 | 项目 | 值 |
 |---|---|
-| 最新 Wire protocol | `"1.4"` |
-| 兼容 Wire protocol | `"1.3"`、`"1.2"`、`"1.1"`、`"1.0"` |
+| 最新 Wire protocol | `"1.5"` |
+| 兼容 Wire protocol | `"1.4"`、`"1.3"`、`"1.2"`、`"1.1"`、`"1.0"` |
 | 正式命令 | `roll runtime serve --stdio` |
 | 兼容命令 | `roll chat --server` |
 | Event notification | `runtime.event` |
 | Server Request cancel notification | `runtime.serverRequest.cancel` |
 | 分帧 | NDJSON，一行一个 JSON-RPC 消息 |
 | Runtime 默认接收入站帧上限 | `4 MiB`；通过初始化结果返回 |
-| 1.4/1.3 Client 入站帧最低能力 | `17 MiB`；预算更低的 Client 不得广告 1.4 或 1.3 |
-| Event replay | 1.4/1.3 只重放 durable event；1.2/1.1/1.0 不支持 |
+| 1.5/1.4/1.3 Client 入站帧最低能力 | `17 MiB`；预算更低的 Client 不得广告 1.4 或 1.3 |
+| Event replay | 1.5/1.4/1.3 只重放 durable event；1.2/1.1/1.0 不支持 |
 | Attachments | 1.4 新增 `attachment.stage` / `attachment.chunk` / `attachment.commit` / `attachment.release` 与 `turn.start.input.attachments`；仅当 `initialize` 结果 `features` 含 `"attachments"` 时可用 |
 
 Schema 单一数据源位于 `@roll-agent/protocol`。构建后可读取最新的
@@ -61,7 +61,7 @@ TypeScript 宿主可直接从包根导入：
 
 未带 `ForVersion` 的 Runtime method parser/type、Approval params/cancel/error helper 是冻结的
 1.1 兼容 facade；`runtimeMethodSchemas` 与 `LatestRuntimeServerRequest*` 则表示最新 registry。
-新代码处理 1.4/1.3/1.2/1.1/1.0 矩阵时应按协商版本调用 version-aware helper，避免把新版字段
+新代码处理 1.5/1.4/1.3/1.2/1.1/1.0 矩阵时应按协商版本调用 version-aware helper，避免把新版字段
 泄漏到旧 wire。
 
 `@roll-agent/protocol` 只定义协议、Schema 和类型，不负责启动 Runtime 或管理连接。Node
@@ -74,10 +74,10 @@ Web 接入使用由
 Schema 生成与 fixture 标注；它不表示任意调用方已经实现该版本要求的入站能力。直接使用
 `@roll-agent/protocol` 的 Client 升级依赖后，必须审查新增的 Runtime→Client Request 与
 Notification，并只在 `initialize.protocolVersions` 中广告自己确实实现的版本。
-`RollNodeClient` 会按强制 handler 规则生成版本列表，并在 1.4/1.3/1.2 初始化后自动完成
+`RollNodeClient` 会按强制 handler 规则生成版本列表，并在 1.5/1.4/1.3/1.2 初始化后自动完成
 Client capability handshake。
 
-Protocol 1.4/1.3 的单条 durable event record 最多为 `16 MiB`；加上 Runtime envelope 与
+Protocol 1.5/1.4/1.3 的单条 durable event record 最多为 `16 MiB`；加上 Runtime envelope 与
 JSON-RPC notification 元数据后，广告 `"1.4"` 或 `"1.3"` 即声明 Client 能接收至少 `17 MiB` 的单个
 Runtime→Client NDJSON 帧。本地入站预算低于该值的 Client 必须同时省略 `"1.4"` 与 `"1.3"`。初始化结果中的
 `limits.maxFrameBytes` 表示 Runtime 接收 Client 出站帧的上限；初始化后的 Client 出站上限
@@ -93,7 +93,7 @@ Runtime→Client NDJSON 帧。本地入站预算低于该值的 Client 必须同
   "id": 1,
   "method": "initialize",
   "params": {
-    "protocolVersions": ["1.4", "1.3", "1.2", "1.1", "1.0"],
+    "protocolVersions": ["1.5", "1.4", "1.3", "1.2", "1.1", "1.0"],
     "client": { "name": "my-gui", "version": "1.0.0" }
   }
 }
@@ -108,7 +108,7 @@ Runtime→Client NDJSON 帧。本地入站预算低于该值的 Client 必须同
 |---|---:|---|
 | `maxFrameBytes` | `4 * 1024 * 1024` | Server 接受的单个 NDJSON 帧上限 |
 | `maxPageSize` | `500` | 分页请求允许的最大 `limit` |
-| `eventReplay` | 1.4/1.3 为 `true`；旧版本为 `false` | 是否提供 durable event 持久重放 |
+| `eventReplay` | 1.5/1.4/1.3 为 `true`；旧版本为 `false` | 是否提供 durable event 持久重放 |
 | `idempotencyCacheEntries` | `10,000` | 已完成 mutation 的进程内缓存窗口 |
 | `maxAttachmentBytes` | `16 * 1024 * 1024` | 1.4：单个附件原始字节上限 |
 | `maxAttachmentChunkBytes` | `2 * 1024 * 1024` | 1.4：`attachment.chunk` 单片原始字节上限 |
@@ -121,8 +121,8 @@ Runtime 按客户端 `protocolVersions` 的顺序选择第一个双方支持的�
 
 | Client 能力 | 广告版本 | 新 Runtime 协商结果 | Approval 控制路径 |
 |---|---|---|---|
-| 已注册 `approval.request` handler | `["1.4","1.3","1.2","1.1","1.0"]` | `"1.4"` | capability ACK 后的 Server Request |
-| 未注册 Server Request handler | `["1.4","1.3","1.2","1.0"]` | `"1.4"` | ACK 空集合；Runtime 不投递 Approval |
+| 已注册 `approval.request` handler | `["1.5", "1.4","1.3","1.2","1.1","1.0"]` | `"1.4"` | capability ACK 后的 Server Request |
+| 未注册 Server Request handler | `["1.5", "1.4","1.3","1.2","1.0"]` | `"1.4"` | ACK 空集合；Runtime 不投递 Approval |
 | N-1 Client | `["1.1","1.0"]` | `"1.1"` | Server Request |
 | 旧 Client | `["1.0"]` | `"1.0"` | Event + `approval.respond` |
 | 无共同版本 | 例如 `["2.0"]` | `PROTOCOL_VERSION_UNSUPPORTED` | 不建立协议会话 |
@@ -137,20 +137,20 @@ Runtime 按客户端 `protocolVersions` 的顺序选择第一个双方支持的�
 | `clientApprovalResponses` | `false` | `false` | `false` | `false` | `true` |
 | `requiredServerRequestMethods` | `[]` | `[]` | `[]` | `["approval.request"]` | `[]` |
 
-新 Client 向旧 Runtime 发送 `["1.4","1.3","1.2","1.1","1.0"]` 时，旧 Runtime 可选择 `"1.3"`、`"1.2"`、
+新 Client 向旧 Runtime 发送 `["1.5", "1.4","1.3","1.2","1.1","1.0"]` 时，旧 Runtime 可选择 `"1.3"`、`"1.2"`、
 `"1.1"` 或 `"1.0"`；strict `initialize` params 没有增加 capability 字段。协商结果属于当前
-连接，1.0/1.1 连接不能动态开启 1.4/1.3/1.2 capability。`@roll-agent/client-node` 总能广告
+连接，1.0/1.1 连接不能动态开启 1.5/1.4/1.3/1.2 capability。`@roll-agent/client-node` 总能广告
 没有强制 handler 的 1.2；使用至少 17 MiB 本地入站预算时也会广告 1.4 与 1.3。只有覆盖
 `approval.request` 时才同时广告要求该 handler 的 1.1。
 同一连接重复调用 `initialize` 会返回 `CAPABILITY_UNAVAILABLE`，且不会改变已经固定的
 协议版本与控制路径。
 
 `REQUIRED_RUNTIME_SERVER_REQUEST_METHODS_BY_VERSION` 只描述某个 wire 版本的**必需**
-Client handler，是从上述能力表派生的兼容导出。1.4/1.3/1.2 registry 包含可选的
-`approval.request` 与 `userInput.request`；未来 method 也必须通过 1.4/1.3/1.2 capability 集合显式
+Client handler，是从上述能力表派生的兼容导出。1.5/1.4/1.3/1.2 registry 包含可选的
+`approval.request` 与 `userInput.request`；未来 method 也必须通过 1.5/1.4/1.3/1.2 capability 集合显式
 启用，不能静默追加到 1.1 的必需方法中。
 
-### 1.4/1.3/1.2 Client capability handshake
+### 1.5/1.4/1.3/1.2 Client capability handshake
 
 协商到 `"1.4"`、`"1.3"` 或 `"1.2"` 后，Client 必须先调用：
 
@@ -193,16 +193,16 @@ handler 会串行发送更高 revision。撤销 method 会终止该 method 的�
 
 第一次调用 Runtime Protocol 方法或 legacy `session.*` 方法后，连接会锁定对应协议家族。
 同一连接不能混用两套方法；例如完成 `initialize` 后调用 `session.approve` 会返回
-`CAPABILITY_UNAVAILABLE`。这个边界防止 1.4/1.3/1.2/1.1 Approval 绕过 Server Request 控制路径。
+`CAPABILITY_UNAVAILABLE`。这个边界防止 1.5/1.4/1.3/1.2/1.1 Approval 绕过 Server Request 控制路径。
 
 ## ID 类型
 
 | 字段 | Wire 类型 | 约束 |
 |---|---|---|
 | JSON-RPC `id` | `string` 或 `number` | 请求/响应关联；错误响应还可能为 `null` |
-| `interactionId` | `string` | 1.4/1.3/1.2 逻辑 Interaction UUID；显式重投时保持稳定 |
-| `eventId` | `string` | 1.4/1.3 durable event UUID；只用于事件去重 |
-| `cursor` / Snapshot `eventCursor` | `string` | 1.4/1.3 不透明 `rte1:<eventLogId>:<threadSequence>:<eventId>`；不得拆解生成 |
+| `interactionId` | `string` | 1.5/1.4/1.3/1.2 逻辑 Interaction UUID；显式重投时保持稳定 |
+| `eventId` | `string` | 1.5/1.4/1.3 durable event UUID；只用于事件去重 |
+| `cursor` / Snapshot `eventCursor` | `string` | 1.5/1.4/1.3 不透明 `rte1:<eventLogId>:<threadSequence>:<eventId>`；不得拆解生成 |
 | cancel `serverRequestId` | `string` 或 `number` | 仅 1.1；被取消投递的 JSON-RPC `id` |
 | `threadId`, `turnId`, `approvalId` | `string` | UUID |
 | `runtimeInstanceId`, `requestId` | `string` | UUID |
@@ -214,7 +214,7 @@ handler 会串行发送更高 revision。撤销 method 会终止该 method 的�
 Interaction 链路必须分开以下身份：
 
 - JSON-RPC `id` 只标识当前连接上的一次 Server Request 投递；
-- 1.4/1.3/1.2 `interactionId` 标识逻辑交互，显式重投会换 JSON-RPC `id` 但保持它；
+- 1.5/1.4/1.3/1.2 `interactionId` 标识逻辑交互，显式重投会换 JSON-RPC `id` 但保持它；
 - 1.1 cancel `serverRequestId` 原样引用 JSON-RPC `id`；
 - `approvalId` 是 Approval 领域对象 ID，可出现在 Snapshot 与 View Event 中；
 - mutation `requestId` 只用于 Client → Runtime 写操作幂等，不参与 Server Request 响应。
@@ -267,17 +267,17 @@ operations.items[]          OperationView
 operations.nextBeforeSequence
 activeTurn?
 pendingApprovals[]
-pendingInteractions[]        1.4/1.3/1.2；必需字段，可为空
-eventCursor                  1.4/1.3；必需字段，可为 null
+pendingInteractions[]        1.5/1.4/1.3/1.2；必需字段，可为空
+eventCursor                  1.5/1.4/1.3；必需字段，可为 null
 transcriptCompleteness      complete | legacy_snapshot
 ```
 
-`pendingInteractions` 存在于 1.4/1.3/1.2；`eventCursor` 存在于 1.4/1.3。1.2/1.1/1.0 adapter 会剥离
+`pendingInteractions` 存在于 1.5/1.4/1.3/1.2；`eventCursor` 存在于 1.5/1.4/1.3。1.2/1.1/1.0 adapter 会剥离
 `eventCursor` 与所有 1.3+ event envelope 字段。1.4 的 `messages.items[].parts` 可含 `attachment` 安全元数据
 part（`mediaType` / `bytes` / `displayName?`，不含二进制与本地路径）；投影到 1.3 及更早版本时非 `text` part
 会被静默剥离，纯附件消息会变成 `parts: []`。
 
-1.4/1.3/1.2 的 `activeTurn.status` 为 `running | cancelling | waiting-for-user`；冻结的 1.1/1.0
+1.5/1.4/1.3/1.2 的 `activeTurn.status` 为 `running | cancelling | waiting-for-user`；冻结的 1.1/1.0
 形状只接受 `running | cancelling`。向旧 wire 投影时，`waiting-for-user` 会兼容映射为
 `running`，而不是把未知 enum 值泄漏给旧 Client。
 
@@ -297,7 +297,7 @@ approvalId
 JSON-RPC `id`、Approval `preview`、原始 payload/result 与 secret 不会进入该投影。
 User Input 项包含相同 Interaction metadata 与安全表单字段（title、description、controls、
 choice options），但不包含完整 Result 或任何提交值。1.1/1.0 的 `thread.open`、
-`thread.snapshot` 会完全剥离 `pendingInteractions`。1.4/1.3/1.2 Interaction 若缺少 Runtime 提供的
+`thread.snapshot` 会完全剥离 `pendingInteractions`。1.5/1.4/1.3/1.2 Interaction 若缺少 Runtime 提供的
 绝对 `expiresAt`，则 fail-closed，不会临时伪造 deadline。
 
 消息与 Operation 使用独立游标。首页返回最近一页，但页内保持时间正序；下一页把
@@ -316,7 +316,7 @@ operations 的所有页面后，才能称为恢复了可用的完整历史。
 
 ## 事件
 
-所有事件通过完整的 JSON-RPC Notification 发送。1.4/1.3 envelope 显式区分 durable 与
+所有事件通过完整的 JSON-RPC Notification 发送。1.5/1.4/1.3 envelope 显式区分 durable 与
 ephemeral；两者仍保留进程内 `sequence`，但只有 durable event 具有可恢复身份：
 
 ```json
@@ -341,19 +341,19 @@ ephemeral；两者仍保留进程内 `sequence`，但只有 durable event 具有
 `params.turnId` 在 Schema 中可选。UI 结束活动 Turn、清理 waiter 或刷新 Snapshot 时，必须
 同时匹配目标 `threadId + turnId`，不能把其他 Thread 或旧 Turn 的终止事件当作当前结果。
 
-| 1.4/1.3 durability | event allowlist | 恢复语义 |
+| 1.5/1.4/1.3 durability | event allowlist | 恢复语义 |
 |---|---|---|
 | `durable` | `turn.started`、`message.completed`、`tool.completed`、`approval.required`、`approval.resolved`、`turn.completed`、`turn.cancelled`、`turn.failed`、`capabilities.changed` | 先事务提交事件日志，再发布 live；携带 `eventId` 与 `cursor`，可重放 |
 | `ephemeral` | `message.started`、`message.delta`、`reasoning.summary.delta`、`tool.started`、`tool.output` | 只有进程内 `sequence`；没有 `eventId`/`cursor`，不承诺重放 |
 
-`approval.required` 在 `"1.0"` 是控制事件；在 1.4/1.3/1.2/1.1 仅为只读 View Event。
+`approval.required` 在 `"1.0"` 是控制事件；在 1.5/1.4/1.3/1.2/1.1 仅为只读 View Event。
 Raw model reasoning、Token/reasoning/tool-output delta、原始 Tool input/evidence、
 compaction/debug 事件和 AI SDK `ModelMessage` 都不会进入 durable 日志。Store 提交失败时，
 Runtime 不得发布一个无法恢复的 durable live event。
 
-### 持久事件恢复（1.4/1.3）
+### 持久事件恢复（1.5/1.4/1.3）
 
-`runtime.events.resume` 只在 1.4/1.3 可用。`afterCursor` 是该 Thread 已应用的 checkpoint；首次从
+`runtime.events.resume` 只在 1.5/1.4/1.3 可用。`afterCursor` 是该 Thread 已应用的 checkpoint；首次从
 原始日志起点恢复时传 `null`。`null` 不表示“当前最早保留事件”：如果原始日志前缀已经被
 裁剪，Runtime 必须返回 `EVENT_CURSOR_EXPIRED`，调用方先用 `thread.snapshot` 收敛。Runtime
 使用专用、无副作用的 replay 发送路径逐条发送
@@ -385,7 +385,7 @@ Client 不得在 Response 前把并发 live event 越过 replay 投递给业务�
 暂存、排序、去重和 barrier 校验，默认恢复暂存窗口为 10,000 条 / 32 MiB。
 
 Snapshot fallback 必须使用
-`thread.snapshot({ threadId, limit: 1, recovery: true })`。1.4/1.3 Response 带
+`thread.snapshot({ threadId, limit: 1, recovery: true })`。1.5/1.4/1.3 Response 带
 `recoveryProjection: true`，只保留安全的 Thread/checkpoint/active Turn 元数据，并将 messages、
 operations、pending Approvals、pending Interactions 置为空；这样即使普通 Snapshot 同时含有大型
 消息和大型审批预览，恢复 checkpoint 也始终可装入 17 MiB Client 帧。该投影不是完整 timeline，
@@ -406,8 +406,8 @@ Snapshot 恢复。
 `approval.request`，Client 用同一个 JSON-RPC `id` 返回结果。`approval.required`
 仍可用于渲染审批卡片或观察 pending 状态，但 Client 不得据此调用
 `approval.respond`；在这四个版本上调用该方法会返回 `CAPABILITY_UNAVAILABLE`。
-1.4/1.3/1.2 还要求 `approval.request` 已出现在最近一次 ACK 的 capability 集合中。
-1.4/1.3/1.2 的 User Input 同样只有 `userInput.request` Result 这一条写入路径，并要求该 method
+1.5/1.4/1.3/1.2 还要求 `approval.request` 已出现在最近一次 ACK 的 capability 集合中。
+1.5/1.4/1.3/1.2 的 User Input 同样只有 `userInput.request` Result 这一条写入路径，并要求该 method
 已出现在最近一次 ACK 中；没有 Handler 时 Runtime 不会把内建 `roll__user_input` Tool 暴露
 给模型。
 
@@ -415,7 +415,7 @@ Runtime 会先登记并发送 `approval.request`，再发送对应的只读 `app
 projection，避免 UI 快速响应时控制请求尚未存在。Client 仍应以 Server Request handler
 为唯一决策入口，而不是依赖两条消息的相邻顺序维护业务状态机。
 
-1.4/1.3/1.2 Runtime Request：
+1.5/1.4/1.3/1.2 Runtime Request：
 
 ```json
 {
@@ -464,7 +464,7 @@ projection，避免 UI 快速响应时控制请求尚未存在。Client 仍应�
 `sensitivity`。1.0 不发送 Server Request，继续使用 `approval.required` +
 `approval.respond`。
 
-### User Input 1.4/1.3/1.2
+### User Input 1.5/1.4/1.3/1.2
 
 `userInput.request` Params 使用相同 Interaction metadata，并携带 1..16 个结构化 control：
 
@@ -512,7 +512,7 @@ authentication 或 file-picker 字段。
 ```
 
 Runtime 必须结合原始 Params 二次校验必填项、类型、未知/重复 ID、choice option 与数量边界，
-再按 control 定义顺序规范化。等待期间 1.4/1.3/1.2 Snapshot 使用 `waiting-for-user`，默认 deadline
+再按 control 定义顺序规范化。等待期间 1.5/1.4/1.3/1.2 Snapshot 使用 `waiting-for-user`，默认 deadline
 为 5 分钟或 Turn 剩余期限中的较小值；旧协议投影仍为 `running`。Result 只返回当前 Tool
 调用，完整值不会进入 Runtime Event 或 Snapshot。
 
@@ -534,14 +534,14 @@ Handler 不存在时返回 `-32601`，参数非法时返回 `-32602`，Handler �
 返回 `-32603`。Runtime 对 Client error 或非法结果采取 fail-closed：先把 Approval 收敛为
 `cancelled`，再以 `turn.failed` 结束 Turn；它不会默认批准，也不会伪装成用户主动拒绝。
 
-JSON-RPC `id` 只负责当前投递的 Request/Response 关联；1.4/1.3/1.2 `interactionId` 负责逻辑
+JSON-RPC `id` 只负责当前投递的 Request/Response 关联；1.5/1.4/1.3/1.2 `interactionId` 负责逻辑
 Interaction；`approval.id` 是跨 View、Snapshot 和审计使用的业务 ID。三者与 mutation
 `requestId` 均不能互换。
 
 ### 取消与最终状态
 
 Turn 取消、Turn 终止、deadline、capability 撤销或 Runtime 关闭时，Runtime 会尽力发送。
-1.4/1.3/1.2 形状是：
+1.5/1.4/1.3/1.2 形状是：
 
 ```json
 {
@@ -595,7 +595,7 @@ Client 必须终止对应的本地交互，且不得在取消后发送迟到 Res
 
 当前 `stdio` Transport 是单连接、进程绑定的边界。一个 `RuntimeService` 只接受一个
 活动 `RuntimeProtocolAdapter` 控制连接；第二个 Adapter 会被拒绝，而不是竞相处理同一
-Interaction。1.4/1.3 的事件恢复不会重放 Server Request；断线后没有持久 Interaction
+Interaction。1.5/1.4/1.3 的事件恢复不会重放 Server Request；断线后没有持久 Interaction
 replay/resume，未决 Server Request 会被取消，Runtime
 随关闭流程 fail-closed 结束 Session。Client 重新启动后必须读取 Snapshot 收敛，不能
 重投旧 JSON-RPC `id`。
@@ -644,9 +644,9 @@ Runtime 领域错误的外层 JSON-RPC `error.code` 为 `-32000`；参数 Schema
 | `TURN_ALREADY_ACTIVE` | Thread 已有活动 Turn |
 | `APPROVAL_NOT_FOUND` | Approval 不存在或已失效 |
 | `CAPABILITY_UNAVAILABLE` | 当前 Runtime 不支持所需能力 |
-| `CAPABILITY_REVISION_CONFLICT` | 1.4/1.3/1.2 capability revision 过旧，或同 revision 配不同集合 |
-| `EVENT_CURSOR_EXPIRED` | 1.4/1.3 checkpoint 已被连续前缀裁剪；重新读取 Snapshot |
-| `EVENT_CURSOR_GAP` | 1.4/1.3 cursor 不属于可连续恢复的 Thread 日志；重新读取 Snapshot |
+| `CAPABILITY_REVISION_CONFLICT` | 1.5/1.4/1.3/1.2 capability revision 过旧，或同 revision 配不同集合 |
+| `EVENT_CURSOR_EXPIRED` | 1.5/1.4/1.3 checkpoint 已被连续前缀裁剪；重新读取 Snapshot |
+| `EVENT_CURSOR_GAP` | 1.5/1.4/1.3 cursor 不属于可连续恢复的 Thread 日志；重新读取 Snapshot |
 | `ATTACHMENT_NOT_FOUND` | 1.4：`attachmentId` 不存在、已释放、已过期回收，或不属于请求的 `threadId` |
 | `ATTACHMENT_NOT_COMMITTED` | 1.4：`turn.start` 引用了尚未 `commit` 的附件 |
 | `ATTACHMENT_TOO_LARGE` | 1.4：声明或实际字节数超过 `maxAttachmentBytes`，或 chunks 累计超过声明字节数 |
@@ -689,3 +689,9 @@ Node 客户端默认只对服务端明确标记为 `retryable` 的只读请求�
 请求超时、帧限制、错误类、`onExit()` 语义以及
 stdin close → SIGTERM → SIGKILL 的有界关闭流程，见
 [`@roll-agent/client-node` API 参考](./client-node-reference.md)。
+
+## Protocol 1.5 App output
+
+The `app-output` initialize feature enables read-only `operation.result.get` with `{threadId, operationId}`. The response is `{result: null}` for a missing operation, otherwise `{result: {threadId, operationId, agentName, toolName, createdAt, output}}`. Output statuses: available/not_provided/invalid/too_large/expired/denied. Only available carries schemaId, schemaVersion, remoteReadable, a complete JSON object data and fallbackText.
+
+Protocol 1.5 operation views and tool.completed events carry an appOutput descriptor, never the data. Older projections remove this descriptor. Read full results on demand, including after reconnect. The 256 KiB result and 32 KiB schema budgets count UTF-8 bytes. Data is omitted whole on overflow. Per-thread retention: 16 MiB, 2000 results, 30 days; fork preserves original expiry. Output validation failure does not prove that execution never happened and must not trigger automatic tool retries.

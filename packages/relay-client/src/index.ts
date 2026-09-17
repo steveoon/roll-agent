@@ -3,6 +3,8 @@ export {
   createRelayClient,
   type CreateRelayClientOptions,
   type RelayClient,
+  type RelayOperationResult,
+  type RelayThreadCapabilities,
   type RelayConnectionListener,
   type RelayInteractionCandidateResult,
   type RelayInteractionId,

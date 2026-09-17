@@ -17,3 +17,5 @@ export type {
   ToolResourceHintKind,
 } from "./types/index.ts";
 export { TOOL_RESOURCE_ACCESS_MODES, TOOL_RESOURCE_HINT_KINDS } from "./types/index.ts";
+
+export type { AppOutputDeclaration, AppOutputContract } from "@roll-agent/protocol/app-output";

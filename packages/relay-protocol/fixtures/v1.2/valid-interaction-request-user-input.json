@@ -1,0 +1,40 @@
+{
+  "type": "interaction.request",
+  "workspaceId": "00000000-0000-4000-8000-000000000507",
+  "relaySequence": 4,
+  "interactionId": "00000000-0000-4000-8000-000000000511",
+  "threadId": "00000000-0000-4000-8000-000000000502",
+  "turnId": "00000000-0000-4000-8000-000000000503",
+  "expiresAt": "2026-08-04T00:05:00.000Z",
+  "sensitivity": "normal",
+  "method": "userInput.request",
+  "projection": {
+    "title": "部署配置",
+    "controls": [
+      {
+        "id": "region",
+        "type": "choice",
+        "label": "部署区域",
+        "required": true,
+        "multiple": false,
+        "options": [
+          {
+            "id": "north",
+            "label": "北区"
+          },
+          {
+            "id": "south",
+            "label": "南区"
+          }
+        ]
+      },
+      {
+        "id": "workspace",
+        "type": "text",
+        "label": "目标 Workspace",
+        "required": true,
+        "maxLength": 100
+      }
+    ]
+  }
+}

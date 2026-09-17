@@ -118,3 +118,48 @@ describe("cli/utils/agent-tools", () => {
     assert.match(message, /roll agent tools smoke-test-agent/);
   });
 });
+
+describe("independent MCP appOutput discovery", () => {
+  const listed = {
+    name: "candidates",
+    inputSchema: { type: "object" as const },
+    outputSchema: { type: "object" as const, properties: { name: { type: "string" } } },
+    _meta: { "roll/appOutput": { schemaId: "third-party.candidates", schemaVersion: 2 } },
+  };
+  it("preserves declarations and the original output schema from a non-SDK MCP server", () => {
+    const [tool] = normalizeListedTools([listed]);
+    assert.deepEqual(tool?.appOutput, {
+      schemaId: "third-party.candidates",
+      schemaVersion: 2,
+      remoteReadable: false,
+      outputSchema: listed.outputSchema,
+    });
+  });
+  it("rejects missing schemas, external references and malformed declarations at discovery", () => {
+    assert.throws(() =>
+      normalizeListedTools([
+        { name: "broken", inputSchema: { type: "object" }, _meta: listed._meta },
+      ]),
+    );
+    assert.throws(
+      () =>
+        normalizeListedTools([
+          {
+            ...listed,
+            outputSchema: {
+              type: "object",
+              properties: { bad: { $ref: "https://example.test/schema" } },
+            },
+          },
+        ]),
+      /local/,
+    );
+    assert.throws(() => normalizeListedTools([{ ...listed, _meta: { "roll/appOutput": "bad" } }]));
+  });
+  it("keeps an outputSchema without an explicit declaration outside the app channel", () => {
+    const [tool] = normalizeListedTools([
+      { name: listed.name, inputSchema: listed.inputSchema, outputSchema: listed.outputSchema },
+    ]);
+    assert.equal(tool?.appOutput, undefined);
+  });
+});

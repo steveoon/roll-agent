@@ -1,3 +1,5 @@
+import { APP_OUTPUT_META_KEY } from "@roll-agent/protocol/app-output";
+import { prepareAppOutput, projectAppOutput } from "./app-output.ts";
 import { createServer } from "node:http";
 import { randomUUID } from "node:crypto";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -327,8 +329,10 @@ async function listenHttp(
 /** 将单个 tool 注册到 MCP Server */
 export function registerTool(server: McpServer, tool: AnyToolDefinition, ctx: AgentContext): void {
   // AnyToolDefinition.execute 签名为 (never, ctx) 以阻止直接调用，注册时需转型为可调用签名
+  const appOutput = prepareAppOutput(tool);
   const metadata = {
     ...(tool._meta ?? {}),
+    ...(appOutput ? { [APP_OUTPUT_META_KEY]: appOutput.declaration } : {}),
     ...(tool.resourceHints && tool.resourceHints.length > 0
       ? { [ROLL_RESOURCE_HINTS_META_KEY]: tool.resourceHints }
       : {}),
@@ -338,6 +342,7 @@ export function registerTool(server: McpServer, tool: AnyToolDefinition, ctx: Ag
     {
       description: tool.description,
       inputSchema: getMcpCompatibleInputSchema(tool.input),
+      ...(appOutput ? { outputSchema: tool.output } : {}),
       ...(tool.annotations ? { annotations: tool.annotations } : {}),
       ...(Object.keys(metadata).length > 0 ? { _meta: metadata } : {}),
     },
@@ -358,6 +363,8 @@ type McpToolContentBlock =
 type McpToolResult = {
   isError?: true;
   content: [{ type: "text"; text: string }, ...McpToolContentBlock[]];
+  structuredContent?: Record<string, unknown>;
+  _meta?: Record<string, unknown>;
 };
 
 function extractToolResultImages(result: unknown): {
@@ -391,6 +398,8 @@ export async function executeToolForMcp(
   params: Record<string, unknown>,
   signal?: AbortSignal,
 ): Promise<McpToolResult> {
+  // Reject unsupported output contracts before any business effects, including direct calls.
+  const appOutput = prepareAppOutput(tool);
   const parsedInput = await parseToolInput(tool.input, params);
   const callCtx: AgentContext = signal === undefined ? ctx : { ...ctx, signal };
   try {
@@ -398,6 +407,7 @@ export async function executeToolForMcp(
       parsedInput,
       callCtx,
     );
+    if (appOutput) return await projectAppOutput(tool.output, result);
     const { payload, images } = extractToolResultImages(result);
     return {
       content: [

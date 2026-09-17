@@ -54,3 +54,17 @@ test("ToolRegistry 保留 Agent 来源、transport、runtime lifecycle 与 annot
   });
   assert.notEqual(registry.resolve(id)?.annotations, annotations);
 });
+
+test("ToolRegistry preserves an immutable copy of the application output contract", () => {
+  const registry = new ToolRegistry();
+  const appOutput = {
+    schemaId: "test.candidates",
+    schemaVersion: 1,
+    remoteReadable: false,
+    outputSchema: { type: "object", properties: { name: { type: "string" } } },
+  };
+  const id = registry.register("synthetic", "candidates", { appOutput });
+  assert.deepEqual(registry.resolve(id)?.appOutput, appOutput);
+  appOutput.outputSchema.properties.name.type = "number";
+  assert.notDeepEqual(registry.resolve(id)?.appOutput, appOutput);
+});

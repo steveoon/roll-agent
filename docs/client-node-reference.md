@@ -6,8 +6,8 @@
 |---|---|
 | Node.js | `>=22.6.0` |
 | 默认命令 | `roll runtime serve --stdio` |
-| 最新协议 | Roll Runtime Protocol `"1.4"` |
-| 无 Server Request handler 时 | 默认帧预算下广告 `["1.4","1.3","1.2","1.0"]`；1.4/1.3/1.2 capability 集合为空 |
+| 最新协议 | Roll Runtime Protocol `"1.5"` |
+| 无 Server Request handler 时 | 默认帧预算下广告 `["1.5", "1.4","1.3","1.2","1.0"]`；1.5/1.4/1.3/1.2 capability 集合为空 |
 | 默认请求超时 | `30,000 ms` |
 | 默认本地帧上限 | `17 MiB` |
 | 默认读取重试 | 最多 `1` 次，间隔 `100 ms` |
@@ -34,7 +34,7 @@
 | `clientVersion` | `string` | 当前 `@roll-agent/client-node` 包版本 | 初始化客户端版本 |
 | `onStderr` | `(line) => void` | 无 | 逐行接收 Runtime 日志 |
 | `onTurnOutcomeUnknown` | `(turnId) => void` | 无 | Turn 结果无法确认时调用 |
-| `maxFrameBytes` | `number` | `17 MiB` | 本地入站与初始出站上限；低于 17 MiB 时不广告 1.4/1.3 |
+| `maxFrameBytes` | `number` | `17 MiB` | 本地入站与初始出站上限；低于 17 MiB 时不广告 1.5/1.4/1.3 |
 | `requestTimeoutMs` | `number` | `30,000` | 单次请求超时 |
 | `maxReadRetries` | `number` | `1` | 明确可重试读取的最大重试次数 |
 | `readRetryDelayMs` | `number` | `100` | 读取重试间隔 |
@@ -155,10 +155,10 @@ Handler 必须返回符合 `@roll-agent/protocol` Schema 的结果。用户拒�
 
 | 构造时 handlers | Client 广告 | 可能协商结果 |
 |---|---|---|
-| 注册 `approval.request` | `["1.4","1.3","1.2","1.1","1.0"]` | 新 Runtime 为 `"1.4"`；旧 Runtime 可逐级回退 |
-| 仅注册 `userInput.request` | `["1.4","1.3","1.2","1.0"]` | 新 Runtime 为 `"1.4"`；旧 Runtime 可回退 1.3/1.2/1.0 |
-| 无 handler / 空对象 | `["1.4","1.3","1.2","1.0"]` | 新 Runtime 为 `"1.4"` 且 ACK 空 capability；旧 Runtime 可回退 1.3/1.2/1.0 |
-| 任意 handlers，`maxFrameBytes < 17 MiB` | 上述列表移除 `"1.4"` 与 `"1.3"` | 不会协商 1.4/1.3；按 handler 规则回落到旧版本 |
+| 注册 `approval.request` | `["1.5", "1.4","1.3","1.2","1.1","1.0"]` | 新 Runtime 为 `"1.4"`；旧 Runtime 可逐级回退 |
+| 仅注册 `userInput.request` | `["1.5", "1.4","1.3","1.2","1.0"]` | 新 Runtime 为 `"1.4"`；旧 Runtime 可回退 1.3/1.2/1.0 |
+| 无 handler / 空对象 | `["1.5", "1.4","1.3","1.2","1.0"]` | 新 Runtime 为 `"1.4"` 且 ACK 空 capability；旧 Runtime 可回退 1.3/1.2/1.0 |
+| 任意 handlers，`maxFrameBytes < 17 MiB` | 上述列表移除 `"1.4"` 与 `"1.3"` | 不会协商 1.5/1.4/1.3；按 handler 规则回落到旧版本 |
 
 `"1.3"` 与 `"1.2"` 没有强制 handler；所有 Server Request 都由初始化后的
 `client.capabilities.set` 协商。`"1.1"` 当前唯一必需 handler 是
@@ -236,7 +236,7 @@ Response。
 `30s` timeout。
 1.3/1.2 cancel 使用逻辑 `interactionId`，1.1 cancel 使用当前投递的 JSON-RPC
 `serverRequestId`；Client 都映射到同一个 handler `AbortSignal`。当前 `stdio` 连接
-不支持持久 Server Request replay/resume：1.4/1.3 只恢复 durable View Event，不恢复控制请求。
+不支持持久 Server Request replay/resume：1.5/1.4/1.3 只恢复 durable View Event，不恢复控制请求。
 断线会 abort 全部 handler，重启后应读取 Snapshot 收敛，不能自动重放旧审批、旧 User
 Input 或旧 Turn。
 
@@ -351,3 +351,7 @@ UI 收到未知结果后必须：
 - [Runtime Protocol v1 参考](./runtime-protocol-v1-reference.md)
 - [创建第一个 Runtime UI 客户端](./tutorial-runtime-ui-quickstart.md)
 - [第三方 UI 接入指南](./how-to-build-roll-runtime-ui.md)
+
+## App output (Protocol 1.5)
+
+Check initialize.features for `app-output`, then call `client.getOperationResult({threadId, operationId})` or typed `client.request("operation.result.get", ...)`. Choose a trusted-source/schema/version renderer after validating available data, otherwise render a bounded JSON or text fallback. Reconnect revalidates result state; cached data is not authority.

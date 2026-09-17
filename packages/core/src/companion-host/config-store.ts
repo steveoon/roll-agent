@@ -54,6 +54,9 @@ export class FileCompanionConfigStore implements CompanionConfigStore {
         cwd: parsed.cwd,
         enabled: parsed.enabled,
         credentialRef: parsed.credentialRef,
+        ...(parsed.remoteAppOutputs === undefined
+          ? {}
+          : { remoteAppOutputs: parsed.remoteAppOutputs }),
       },
       { lineWidth: 0 },
     );

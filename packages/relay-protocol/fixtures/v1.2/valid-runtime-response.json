@@ -1,0 +1,8 @@
+{
+  "type": "runtime.response",
+  "requestId": "00000000-0000-4000-8000-000000000505",
+  "workspaceId": "00000000-0000-4000-8000-000000000507",
+  "result": {
+    "accepted": true
+  }
+}

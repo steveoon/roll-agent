@@ -1,0 +1,10 @@
+{
+  "type": "interaction.cancelled",
+  "workspaceId": "00000000-0000-4000-8000-000000000507",
+  "relaySequence": 13,
+  "interactionId": "00000000-0000-4000-8000-000000000511",
+  "threadId": "00000000-0000-4000-8000-000000000502",
+  "turnId": "00000000-0000-4000-8000-000000000503",
+  "method": "approval.request",
+  "reason": "relay-security-sentinel"
+}

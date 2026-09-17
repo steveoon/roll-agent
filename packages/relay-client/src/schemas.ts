@@ -1,16 +1,16 @@
 import {
   relayInteractionRequestSchemaV11,
-  relayRequestMethodSchemasV11,
+  relayRequestMethodSchemasV12,
   type RelayInteractionRequestV11,
 } from "@roll-agent/relay-protocol";
 import { relayClientErrorCodeSchema } from "@roll-agent/relay-protocol/control";
 import { z } from "zod/v4";
 
 const relayThreadIdSchema =
-  relayRequestMethodSchemasV11["thread.open"].params.def.innerType.shape.threadId;
+  relayRequestMethodSchemasV12["thread.open"].params.def.innerType.shape.threadId;
 const relayTurnIdSchema =
-  relayRequestMethodSchemasV11["turn.cancel"].params.def.innerType.shape.turnId;
-const relayThreadSnapshotWireSchema = relayRequestMethodSchemasV11["thread.snapshot"].result;
+  relayRequestMethodSchemasV12["turn.cancel"].params.def.innerType.shape.turnId;
+const relayThreadSnapshotWireSchema = relayRequestMethodSchemasV12["thread.snapshot"].result;
 
 export const RELAY_CONNECTION_STATUSES = {
   idle: "idle",

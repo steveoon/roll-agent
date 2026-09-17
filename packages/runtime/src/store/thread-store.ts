@@ -5,19 +5,27 @@ import { randomUUID } from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
 import { modelMessageSchema, type ModelMessage } from "ai";
 import {
+  APP_OUTPUT_LIMITS,
+  appOutputResultSchema,
+  appOutputDescriptorSchema,
+  describeAppOutput,
+  type AppOutputResult,
+  type AppOutputDescriptor,
   RUNTIME_V13_MAX_DURABLE_EVENT_RECORD_BYTES,
   RUNTIME_V13_MAX_DURABLE_EVENT_RECORDS,
-  runtimeDurableEventV13Schema,
+  runtimeDurableEventV15Schema,
   runtimeEventCursorSchema,
   runtimeEventIdSchema,
   timestampSchema,
   type RuntimeDurableEventV13,
+  type RuntimeDurableEventV15,
   type RuntimeEventCursor,
   type RuntimeEventId,
 } from "@roll-agent/protocol";
 import {
   parsePersistedToolExecutionRecord,
   prepareToolExecutionRecordForPersistence,
+  prepareAppOutputForPersistence,
   redactSecretText,
   type ToolExecutionPersistenceMetadata,
   type ToolExecutionRecord,
@@ -82,7 +90,7 @@ export interface AppendRuntimeEventInput {
   readonly threadId: string;
   readonly turnId?: string;
   readonly timestamp: string;
-  readonly event: RuntimeDurableEventV13;
+  readonly event: RuntimeDurableEventV13 | RuntimeDurableEventV15;
 }
 
 export interface StoredRuntimeEvent {
@@ -92,7 +100,7 @@ export interface StoredRuntimeEvent {
   readonly threadId: string;
   readonly turnId?: string;
   readonly timestamp: string;
-  readonly event: RuntimeDurableEventV13;
+  readonly event: RuntimeDurableEventV15;
 }
 
 export interface ResumeRuntimeEventsResult {
@@ -171,6 +179,11 @@ export interface ForkThreadSnapshotInput {
 }
 
 export interface ThreadSnapshot {
+  readonly appOutputs?: readonly {
+    readonly operationId: string;
+    readonly result: AppOutputResult;
+    readonly expiresAt: string;
+  }[];
   readonly thread: ThreadRecord;
   readonly capturedAt: string;
   readonly messages: readonly ModelMessage[];
@@ -259,6 +272,7 @@ interface RuntimeEventRow {
   readonly turn_id: string | null;
   readonly event_timestamp: string;
   readonly event_json: string;
+  readonly app_output_json?: string | null;
 }
 
 interface RuntimeEventSequenceRow {
@@ -502,6 +516,7 @@ function parseRuntimeEventRow(
   row: RuntimeEventRow,
 ): StoredRuntimeEvent {
   const eventId = runtimeEventIdSchema.parse(row.event_id);
+  const event = runtimeDurableEventV15Schema.parse(JSON.parse(row.event_json));
   return {
     eventId,
     cursor: createStoredRuntimeEventCursor(eventLogId, row.thread_sequence, eventId),
@@ -509,7 +524,10 @@ function parseRuntimeEventRow(
     threadId,
     ...(row.turn_id === null ? {} : { turnId: row.turn_id }),
     timestamp: row.event_timestamp,
-    event: runtimeDurableEventV13Schema.parse(JSON.parse(row.event_json)),
+    event:
+      event.type === "tool.completed" && row.app_output_json != null
+        ? { ...event, appOutput: appOutputDescriptorSchema.parse(JSON.parse(row.app_output_json)) }
+        : event,
   };
 }
 
@@ -644,6 +662,16 @@ export class ThreadStore {
              UNIQUE (thread_id, sequence),
              FOREIGN KEY (thread_id) REFERENCES threads(id) ON DELETE CASCADE
            );
+           CREATE TABLE IF NOT EXISTS operation_app_outputs (
+             thread_id TEXT NOT NULL,
+             operation_id TEXT NOT NULL,
+             result_json TEXT NOT NULL,
+             descriptor_json TEXT NOT NULL,
+             byte_length INTEGER NOT NULL,
+             expires_at TEXT NOT NULL,
+             PRIMARY KEY (thread_id, operation_id),
+             FOREIGN KEY (thread_id, operation_id) REFERENCES tool_executions(thread_id, id) ON DELETE CASCADE
+           );
            CREATE INDEX IF NOT EXISTS idx_tool_executions_thread_call
              ON tool_executions(thread_id, tool_call_id, sequence);
            CREATE TABLE IF NOT EXISTS thread_tool_execution_state (
@@ -737,6 +765,14 @@ export class ThreadStore {
            CREATE INDEX IF NOT EXISTS idx_runtime_events_thread_created
              ON runtime_events(thread_id, created_at, thread_sequence);`,
       );
+      if (
+        !this.db
+          .prepare("PRAGMA table_info(runtime_events)")
+          .all()
+          .some((column) => column.name === "app_output_json")
+      ) {
+        this.db.exec("ALTER TABLE runtime_events ADD COLUMN app_output_json TEXT");
+      }
       this.db.exec(
         `INSERT OR IGNORE INTO thread_tool_execution_state (thread_id, next_sequence)
            SELECT id, 0 FROM threads;
@@ -825,6 +861,7 @@ export class ThreadStore {
       .prepare("SELECT DISTINCT thread_id AS id FROM tool_executions")
       .all() as unknown as ReadonlyArray<{ readonly id: string }>;
     for (const { id } of threadRows) {
+      this.enforceAppOutputRetention(id);
       this.enforceToolExecutionRetentionInTransaction(id, now);
     }
   }
@@ -962,6 +999,7 @@ export class ThreadStore {
 
   /** A single SQLite read transaction pins every part of the committed snapshot. */
   readSnapshot(threadId: string): ThreadSnapshot {
+    if (!this.readOnly) this.enforceAppOutputRetention(threadId);
     this.db.exec("BEGIN");
     try {
       const thread = this.getThread(threadId);
@@ -1036,6 +1074,23 @@ export class ThreadStore {
       const snapshot: ThreadSnapshot = {
         thread,
         capturedAt,
+        appOutputs: hasTable("operation_app_outputs")
+          ? (
+              this.db
+                .prepare(
+                  "SELECT operation_id, result_json, expires_at FROM operation_app_outputs WHERE thread_id = ?",
+                )
+                .all(threadId) as unknown as {
+                operation_id: string;
+                result_json: string;
+                expires_at: string;
+              }[]
+            ).map((row) => ({
+              operationId: row.operation_id,
+              result: this.readAppOutputRow(row.result_json, row.expires_at),
+              expiresAt: row.expires_at,
+            }))
+          : [],
         messages,
         transcript,
         toolExecutions,
@@ -1124,6 +1179,10 @@ export class ThreadStore {
           parsed.createdAt,
         );
       }
+      for (const result of snapshot.appOutputs ?? []) {
+        this.insertAppOutput(id, result.operationId, result.result, result.expiresAt);
+      }
+      this.enforceAppOutputRetention(id);
       this.db
         .prepare("UPDATE thread_tool_execution_state SET next_sequence = ? WHERE thread_id = ?")
         .run(snapshot.nextToolExecutionSequence, id);
@@ -1191,11 +1250,16 @@ export class ThreadStore {
   }
 
   appendRuntimeEvent(input: AppendRuntimeEventInput): StoredRuntimeEvent {
-    const event = runtimeDurableEventV13Schema.parse(input.event);
-    const eventJson = JSON.stringify(event);
+    const event = runtimeDurableEventV15Schema.parse(input.event);
+    // Keep the on-disk event shape readable by older runtimes after rollback.
+    const persistedEvent =
+      event.type === "tool.completed"
+        ? (({ appOutput: _appOutput, ...legacy }) => legacy)(event)
+        : event;
+    const eventJson = JSON.stringify(persistedEvent);
     const timestamp = normalizeRuntimeEventTimestamp(input.timestamp);
     const sizeBytes =
-      Buffer.byteLength(eventJson, "utf8") +
+      Buffer.byteLength(JSON.stringify(event), "utf8") +
       Buffer.byteLength(timestamp, "utf8") +
       Buffer.byteLength(input.turnId ?? "", "utf8");
     if (sizeBytes > RUNTIME_EVENT_RETENTION_POLICY.maxBytesPerThread) {
@@ -1222,8 +1286,8 @@ export class ThreadStore {
         .prepare(
           `INSERT INTO runtime_events
              (thread_id, thread_sequence, event_id, turn_id, event_timestamp,
-              event_json, size_bytes, created_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+              event_json, size_bytes, created_at, app_output_json)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         )
         .run(
           input.threadId,
@@ -1234,6 +1298,7 @@ export class ThreadStore {
           eventJson,
           sizeBytes,
           timestamp,
+          event.type === "tool.completed" ? JSON.stringify(event.appOutput) : null,
         );
       this.db
         .prepare(
@@ -1323,7 +1388,7 @@ export class ThreadStore {
       const afterSequence = parsedCursor?.threadSequence ?? -1;
       const rows = this.db
         .prepare(
-          `SELECT thread_sequence, event_id, turn_id, event_timestamp, event_json
+          `SELECT *
              FROM runtime_events
             WHERE thread_id = ?
               AND thread_sequence > ?
@@ -1704,7 +1769,7 @@ export class ThreadStore {
     }
     const persisted = prepareToolExecutionRecordForPersistence(record);
     const recordJson = JSON.stringify(persisted);
-    const now = new Date().toISOString();
+    const now = this.now().toISOString();
     this.db.exec("BEGIN IMMEDIATE");
     try {
       const sequenceState = this.db
@@ -1733,6 +1798,15 @@ export class ThreadStore {
       this.db
         .prepare("UPDATE thread_tool_execution_state SET next_sequence = ? WHERE thread_id = ?")
         .run(sequence + 1, threadId);
+      if (record.appOutput !== undefined) {
+        this.insertAppOutput(
+          threadId,
+          record.id,
+          record.appOutput,
+          new Date(Date.parse(now) + APP_OUTPUT_LIMITS.maxAgeMs).toISOString(),
+        );
+      }
+      this.enforceAppOutputRetention(threadId);
       this.enforceToolExecutionRetentionInTransaction(threadId, now);
       this.db.prepare("UPDATE threads SET updated_at = ? WHERE id = ?").run(now, threadId);
       this.db.exec("COMMIT");
@@ -1741,6 +1815,118 @@ export class ThreadStore {
       this.db.exec("ROLLBACK");
       throw error;
     }
+  }
+
+  private readAppOutputRow(json: string, expiresAt: string): AppOutputResult {
+    const result = appOutputResultSchema.parse(JSON.parse(json));
+    return result.status === "available" && Date.parse(expiresAt) <= this.now().getTime()
+      ? { status: "expired" }
+      : result;
+  }
+
+  private insertAppOutput(
+    threadId: string,
+    operationId: string,
+    value: AppOutputResult,
+    expiresAt: string,
+  ): void {
+    const result =
+      value.status === "available" && Date.parse(expiresAt) <= this.now().getTime()
+        ? { status: "expired" as const }
+        : prepareAppOutputForPersistence(value);
+    const json = JSON.stringify(result);
+    this.db
+      .prepare(
+        `INSERT INTO operation_app_outputs
+      (thread_id, operation_id, result_json, descriptor_json, byte_length, expires_at) VALUES (?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        threadId,
+        operationId,
+        json,
+        JSON.stringify(describeAppOutput(result)),
+        result.status === "available" ? Buffer.byteLength(json, "utf8") : 0,
+        expiresAt,
+      );
+  }
+
+  private enforceAppOutputRetention(threadId: string): void {
+    const expired = JSON.stringify({ status: "expired" });
+    this.db
+      .prepare(
+        `UPDATE operation_app_outputs SET result_json = ?, descriptor_json = ?, byte_length = 0
+      WHERE thread_id = ? AND byte_length > 0 AND expires_at <= ?`,
+      )
+      .run(expired, expired, threadId, this.now().toISOString());
+    this.db
+      .prepare(
+        `UPDATE operation_app_outputs SET result_json = ?, descriptor_json = ?, byte_length = 0
+      WHERE thread_id = ? AND operation_id IN (
+        SELECT operation_id FROM (
+          SELECT o.operation_id,
+            ROW_NUMBER() OVER (ORDER BY e.sequence DESC) AS rank,
+            SUM(o.byte_length) OVER (ORDER BY e.sequence DESC ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS bytes
+          FROM operation_app_outputs o JOIN tool_executions e ON e.thread_id = o.thread_id AND e.id = o.operation_id
+          WHERE o.thread_id = ? AND o.byte_length > 0
+        ) WHERE rank > ? OR bytes > ?
+      )`,
+      )
+      .run(
+        expired,
+        expired,
+        threadId,
+        threadId,
+        APP_OUTPUT_LIMITS.threadRecords,
+        APP_OUTPUT_LIMITS.threadBytes,
+      );
+  }
+
+  /** Reads only a small descriptor; snapshots never materialize application bodies. */
+  getAppOutputDescriptor(threadId: string, operationId: string): AppOutputDescriptor | undefined {
+    if (
+      this.db
+        .prepare(
+          "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'operation_app_outputs'",
+        )
+        .get() === undefined
+    ) {
+      return this.db
+        .prepare("SELECT 1 FROM tool_executions WHERE thread_id = ? AND id = ?")
+        .get(threadId, operationId) === undefined
+        ? undefined
+        : { status: "not_provided" };
+    }
+    if (!this.readOnly) this.enforceAppOutputRetention(threadId);
+    const row = this.db
+      .prepare(
+        `SELECT o.descriptor_json, o.expires_at FROM tool_executions e
+      LEFT JOIN operation_app_outputs o ON o.thread_id = e.thread_id AND o.operation_id = e.id
+      WHERE e.thread_id = ? AND e.id = ?`,
+      )
+      .get(threadId, operationId) as
+      | { descriptor_json: string | null; expires_at: string | null }
+      | undefined;
+    if (row === undefined) return undefined;
+    if (row.descriptor_json === null) return { status: "not_provided" };
+    const result = appOutputDescriptorSchema.parse(JSON.parse(row.descriptor_json));
+    return result.status === "available" &&
+      row.expires_at !== null &&
+      Date.parse(row.expires_at) <= this.now().getTime()
+      ? { status: "expired" }
+      : result;
+  }
+
+  getAppOutput(threadId: string, operationId: string): AppOutputResult | undefined {
+    const descriptor = this.getAppOutputDescriptor(threadId, operationId);
+    if (descriptor === undefined || descriptor.status !== "available") return descriptor;
+    const row = this.db
+      .prepare(
+        "SELECT result_json FROM operation_app_outputs WHERE thread_id = ? AND operation_id = ?",
+      )
+      .get(threadId, operationId) as { result_json: string } | undefined;
+    return row === undefined
+      ? { status: "not_provided" }
+      : appOutputResultSchema.parse(JSON.parse(row.result_json));
   }
 
   private enforceToolExecutionRetentionInTransaction(threadId: string, now: string): void {

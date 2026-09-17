@@ -500,3 +500,27 @@ test("turn origin 进入 turn context 与 safe snapshot，并截断超长字符�
   assert.ok((longSnapshot.turnContext?.dynamic.origin?.scheduleId.length ?? 0) < 600);
   assert.equal(buildEffectiveCapabilityTurnContext(manifest).dynamic.origin, undefined);
 });
+
+test("capability manifest exposes output identity without leaking the complete output schema", () => {
+  const appOutput = {
+    schemaId: "test.candidates",
+    schemaVersion: 1,
+    remoteReadable: false,
+    outputSchema: { type: "object", description: "internal schema description" },
+  };
+  const manifest = buildEffectiveCapabilityManifest({
+    tools: { candidates: tool({ inputSchema: z.object({}), execute: async () => ({}) }) },
+    toolRoles: { candidates: CAPABILITY_TOOL_ROLES.agent },
+    resolveRoute: () => ({ agentName: "synthetic", toolName: "candidates", appOutput }),
+    skills: [],
+    agentCount: 1,
+    profile: "test",
+    cwd: "/tmp",
+  });
+  assert.deepEqual(manifest.tools[0]?.appOutput, {
+    schemaId: "test.candidates",
+    schemaVersion: 1,
+    remoteReadable: false,
+  });
+  assert.ok(!JSON.stringify(manifest).includes("internal schema description"));
+});

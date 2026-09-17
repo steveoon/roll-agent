@@ -94,7 +94,7 @@ function handleEvent(event: RuntimeEventEnvelopeV13): void {
 
 协议版本与 npm 包版本相互独立。`RUNTIME_PROTOCOL_VERSION` 表示这个包提供的最新 wire
 schema，并不代表调用方已实现对应 Client 能力。当前支持顺序为
-`["1.4", "1.3", "1.2", "1.1", "1.0"]`。`initialize` 请求保持旧 strict 形状；协商到 `"1.2"`、
+`["1.5", "1.4", "1.3", "1.2", "1.1", "1.0"]`。`initialize` 请求保持旧 strict 形状；协商到 `"1.2"`、
 `"1.3"` 或 `"1.4"` 后，
 Client 必须用 `client.capabilities.set` 提交单调 `revision` 与当前 Handler methods，Runtime
 返回 registry 交集后才进入 interaction-ready。ACK 可以为空或为请求集的任意子集，顺序按

@@ -1,3 +1,8 @@
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { FileCompanionConfigStore } from "./config-store.ts";
+import { companionConfigSchema } from "./schema.ts";
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
@@ -11,6 +16,7 @@ import {
   createOfficialRelayResponderContext,
   createOfficialRelayResponderPolicy,
   createP0RemoteRequestPolicy,
+  createRemoteAppOutputPolicy,
 } from "./policy.ts";
 
 const workspaceId = workspaceIdSchema.parse("11111111-1111-4111-8111-111111111111");
@@ -88,4 +94,36 @@ test("P0 request and responder policies fail closed after generation abort", asy
     }),
     false,
   );
+});
+
+test("remote App grants reload persisted config, match exact tools and fail closed after revocation", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "roll-output-grants-"));
+  try {
+    const path = join(directory, "config.yaml");
+    const store = new FileCompanionConfigStore(path);
+    const policy = createRemoteAppOutputPolicy(store, workspaceId);
+    assert.equal(await policy("example", "search"), false);
+    const config = companionConfigSchema.parse({
+      version: 1,
+      deviceId: requestId,
+      workspaceId,
+      cwd: directory,
+      enabled: true,
+      credentialRef: "keychain:test",
+    });
+    await store.save(config);
+    assert.equal(await policy("example", "search"), false);
+    await store.save({
+      ...config,
+      remoteAppOutputs: [{ agentName: "example", toolName: "search" }],
+    });
+    assert.equal(await policy("example", "search"), true);
+    assert.equal(await policy("example", "search-all"), false);
+    await store.save(config);
+    assert.equal(await policy("example", "search"), false);
+    await writeFile(path, "malformed: [");
+    assert.equal(await policy("example", "search"), false);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
 });

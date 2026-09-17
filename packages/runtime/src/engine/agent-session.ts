@@ -1,3 +1,4 @@
+import { describeAppOutput } from "@roll-agent/protocol";
 import type { ChildProcess } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { waitForPromiseSettlement } from "../bounded-wait.ts";
@@ -1757,6 +1758,9 @@ export class AgentSession {
                   agentName: route?.agentName ?? part.toolName,
                   toolName: route?.toolName ?? part.toolName,
                   executionId: record.id,
+                  ...(record.appOutput === undefined
+                    ? {}
+                    : { appOutput: describeAppOutput(record.appOutput) }),
                   outcome,
                   display,
                   output: display,
@@ -1803,6 +1807,9 @@ export class AgentSession {
                   agentName: route?.agentName ?? part.toolName,
                   toolName: route?.toolName ?? part.toolName,
                   executionId: record.id,
+                  ...(record.appOutput === undefined
+                    ? {}
+                    : { appOutput: describeAppOutput(record.appOutput) }),
                   outcome: result.outcome,
                   display: result.display,
                   output,

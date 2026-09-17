@@ -54,11 +54,11 @@ export type RuntimeEventRecoverySnapshotReason =
 
 export type RuntimeDurableEventEnvelope = Extract<
   RuntimeEventEnvelope,
-  { readonly protocolVersion: "1.3" | "1.4"; readonly durability: "durable" }
+  { readonly protocolVersion: "1.3" | "1.4" | "1.5"; readonly durability: "durable" }
 >;
 export type RuntimeEphemeralEventEnvelope = Extract<
   RuntimeEventEnvelope,
-  { readonly protocolVersion: "1.3" | "1.4"; readonly durability: "ephemeral" }
+  { readonly protocolVersion: "1.3" | "1.4" | "1.5"; readonly durability: "ephemeral" }
 >;
 export type RuntimeEventRecoverySnapshot = RuntimeMethodResultForVersion<
   RuntimeProtocolVersion,
@@ -123,12 +123,12 @@ export type RuntimeEventRecoveryStartResult =
       readonly checkpoint: null;
     };
 
-export type DurableRecoveryProtocolVersion = Extract<RuntimeProtocolVersion, "1.3" | "1.4">;
+export type DurableRecoveryProtocolVersion = Extract<RuntimeProtocolVersion, "1.3" | "1.4" | "1.5">;
 
 function supportsDurableRecovery(
   version: RuntimeProtocolVersion,
 ): version is DurableRecoveryProtocolVersion {
-  return version === "1.3" || version === "1.4";
+  return version === "1.3" || version === "1.4" || version === "1.5";
 }
 
 /**
@@ -286,7 +286,9 @@ function isRecoverableDurableEvent(
   event: RuntimeEventEnvelope,
 ): event is RuntimeDurableEventEnvelope {
   return (
-    (event.protocolVersion === "1.3" || event.protocolVersion === "1.4") &&
+    (event.protocolVersion === "1.3" ||
+      event.protocolVersion === "1.4" ||
+      event.protocolVersion === "1.5") &&
     event.durability === "durable"
   );
 }
@@ -295,7 +297,9 @@ function isRecoverableEphemeralEvent(
   event: RuntimeEventEnvelope,
 ): event is RuntimeEphemeralEventEnvelope {
   return (
-    (event.protocolVersion === "1.3" || event.protocolVersion === "1.4") &&
+    (event.protocolVersion === "1.3" ||
+      event.protocolVersion === "1.4" ||
+      event.protocolVersion === "1.5") &&
     event.durability === "ephemeral"
   );
 }

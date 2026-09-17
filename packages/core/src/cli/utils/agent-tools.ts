@@ -1,3 +1,5 @@
+import { AjvJsonSchemaValidator } from "@modelcontextprotocol/sdk/validation/ajv";
+import { APP_OUTPUT_META_KEY, validateAppOutputContract } from "@roll-agent/protocol/app-output";
 import type { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { isJsonSchemaObject, isPlainObject } from "../../tool-runtime/schema.ts";
 import {
@@ -186,6 +188,14 @@ export function normalizeListedTools(
       name: tool.name,
       ...(typeof tool.description === "string" ? { description: tool.description } : {}),
       inputSchema,
+      ...(tool._meta?.[APP_OUTPUT_META_KEY] === undefined
+        ? {}
+        : {
+            appOutput: validateDiscoveredAppOutput({
+              ...requireAppOutputDeclaration(tool._meta[APP_OUTPUT_META_KEY]),
+              outputSchema: tool.outputSchema,
+            }),
+          }),
       ...(unresolved.length > 0 ? { schemaIssues: unresolved } : {}),
     };
   });
@@ -231,4 +241,16 @@ export function formatMissingToolMessage(
   messageLines.push(`使用 \`roll agent tools ${agentName}\` 查看完整 tool 列表与 inputSchema。`);
 
   return messageLines.join("\n");
+}
+
+function requireAppOutputDeclaration(value: unknown): Record<string, unknown> {
+  if (!isPlainObject(value)) throw new Error("Invalid roll/appOutput declaration");
+  return value;
+}
+
+function validateDiscoveredAppOutput(value: unknown) {
+  const contract = validateAppOutputContract(value);
+  // Compile before a tool can run; never discover unsupported validators after effects.
+  new AjvJsonSchemaValidator().getValidator(contract.outputSchema);
+  return contract;
 }
