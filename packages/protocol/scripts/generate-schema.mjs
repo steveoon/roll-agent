@@ -16,6 +16,7 @@ import {
 const schemaDir = resolve(import.meta.dirname, "../dist/schema");
 const latestSchemaPath = resolve(schemaDir, "roll-runtime-protocol-v1.schema.json");
 const fixtureSuites = [
+  { directory: resolve(import.meta.dirname, "../fixtures/v1.5"), defaultVersion: "1.5" },
   {
     directory: resolve(import.meta.dirname, "../fixtures/v1.4"),
     defaultVersion: "1.4",

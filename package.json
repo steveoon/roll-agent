@@ -20,6 +20,7 @@
     "typecheck": "pnpm -r run typecheck",
     "test": "pnpm -r run test",
     "test:scripts": "node --test \"scripts/**/*.test.mjs\"",
+    "test:structured-output": "node --experimental-strip-types --experimental-sqlite scripts/test-structured-output-e2e.mjs",
     "test:e2e": "pnpm --filter @roll-agent/core run test:e2e",
     "perf:chat": "python3 benchmarks/chat-pty/benchmark.py",
     "perf:chat:test": "PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s benchmarks/chat-pty -p 'test_*.py'",

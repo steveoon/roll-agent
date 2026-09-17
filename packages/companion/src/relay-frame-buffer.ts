@@ -3,13 +3,15 @@ import {
   type RuntimeEventEnvelope,
 } from "@roll-agent/protocol";
 import {
-  projectRuntimeEventEnvelopeForRelayV11,
+  projectRuntimeEventEnvelopeForRelayV12,
+  projectRelayMessageV12ToV11,
+  type RelayMessageV11 as LegacyRelayMessageV11,
   relayInteractionCancelledSchemaV11,
   relayInteractionRequestSchemaV11,
   relayInteractionResolvedSchemaV11,
-  relayRuntimeEventSchemaV11,
-  type RelayMessageV11,
-  type RelayRuntimeEventEnvelopeV11,
+  relayRuntimeEventSchemaV12,
+  type RelayMessageV12 as RelayMessageV11,
+  type RelayRuntimeEventEnvelopeV12 as RelayRuntimeEventEnvelopeV11,
   type WorkspaceId,
   workspaceIdSchema,
 } from "@roll-agent/relay-protocol";
@@ -95,13 +97,21 @@ function parseInteractionFrameDraftV11(
   return draft;
 }
 
-/** Materializes and strictly validates an outbound replayable Wire 1.1 frame. */
+/** Materializes and strictly validates the frozen Wire 1.1 projection. */
 export function materializeRelayFrameV11(
+  workspaceId: WorkspaceId,
+  entry: CompanionRelayFrameEntryV11,
+): LegacyRelayMessageV11 {
+  return projectRelayMessageV12ToV11(materializeRelayFrameV12(workspaceId, entry));
+}
+
+/** Materializes Wire 1.2 metadata without embedding business data. */
+export function materializeRelayFrameV12(
   workspaceId: WorkspaceId,
   entry: CompanionRelayFrameEntryV11,
 ): RelayMessageV11 {
   if (entry.type === "runtime.event") {
-    return relayRuntimeEventSchemaV11.parse({ ...entry, workspaceId });
+    return relayRuntimeEventSchemaV12.parse({ ...entry, workspaceId });
   }
   if (entry.type === "interaction.request") {
     return relayInteractionRequestSchemaV11.parse({ ...entry, workspaceId });
@@ -136,7 +146,7 @@ export class CompanionRelayFrameBuffer {
   }
 
   appendRuntimeEvent(event: RuntimeEventEnvelope): CompanionRelayFrameEntryV11 | undefined {
-    const projected = projectRuntimeEventEnvelopeForRelayV11(event);
+    const projected = projectRuntimeEventEnvelopeForRelayV12(event);
     if (projected === undefined) {
       return undefined;
     }

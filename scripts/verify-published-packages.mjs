@@ -113,6 +113,10 @@ const PACKAGE_CHECKS = [
     name: "@roll-agent/protocol",
     cwd: resolve(repoRoot, "packages/protocol"),
     expectedFiles: [
+      "package/dist/app-output.js",
+      "package/dist/app-output.d.ts",
+      "package/dist/schema/roll-runtime-protocol-v1.5.schema.json",
+      "package/fixtures/v1.5/valid-operation-result-get-request.json",
       "package/dist/index.js",
       "package/dist/index.d.ts",
       "package/dist/schema/roll-runtime-protocol-v1.schema.json",
@@ -135,6 +139,7 @@ const PACKAGE_CHECKS = [
     name: "@roll-agent/relay-protocol",
     cwd: resolve(repoRoot, "packages/relay-protocol"),
     expectedFiles: [
+      "package/dist/schema/roll-relay-protocol-v1.2.schema.json",
       "package/dist/index.js",
       "package/dist/index.d.ts",
       "package/dist/conformance.js",
@@ -254,6 +259,7 @@ const PACKAGE_CHECKS = [
       "package/dist/relay-bridge.js",
       "package/dist/relay-frame-buffer.js",
       "package/dist/relay-protocol.js",
+      "package/dist/remote-app-output.js",
       "package/dist/testing.js",
     ],
     verifyManifest(manifest) {

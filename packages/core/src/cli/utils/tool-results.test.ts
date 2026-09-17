@@ -39,3 +39,22 @@ describe("cli/utils/tool-results", () => {
     assert.deepEqual(formatToolResultForJsonOutput(result), result);
   });
 });
+
+it("completed output errors are non-failures only for opted-in tools", () => {
+  const result = {
+    isError: true,
+    _meta: { "roll/executionStatus": "completed", "roll/appOutputStatus": "invalid" },
+  };
+  const contract = {
+    schemaId: "test",
+    schemaVersion: 1,
+    remoteReadable: false,
+    outputSchema: { type: "object" },
+  };
+  assert.equal(isToolErrorResult(result, contract), false);
+  assert.equal(isToolErrorResult(result), true);
+  assert.equal(
+    isToolErrorResult({ isError: true, _meta: { "roll/appOutputStatus": "invalid" } }, contract),
+    true,
+  );
+});

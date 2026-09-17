@@ -1,6 +1,6 @@
 import type { SessionCancellationReason } from "./cancellation.ts";
 import type { ToolOutcome } from "../tool-bridge/normalize-result.ts";
-import type { FileChangeDiff, UserInputForm } from "@roll-agent/protocol";
+import type { AppOutputDescriptor, FileChangeDiff, UserInputForm } from "@roll-agent/protocol";
 import type { SessionUserInputRequestId } from "../interaction/user-input-interaction-manager.ts";
 
 export interface SessionTokenUsage {
@@ -47,6 +47,7 @@ export type SessionEvent =
       readonly toolName: string;
       /** Stable key for querying the typed, append-only execution record. */
       readonly executionId?: string;
+      readonly appOutput?: AppOutputDescriptor;
       readonly outcome?: ToolOutcome;
       readonly display?: unknown;
       /** @deprecated Use `display`. */

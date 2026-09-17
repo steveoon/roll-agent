@@ -102,11 +102,13 @@ export async function executeWithToolApproval(options: {
   const original = structuredClone(options.input);
   const first = await options.call(structuredClone(original));
   const request = readChallenge(first, options.agentTool.name);
-  if (request === undefined) return normalizeToolResult(first);
+  if (request === undefined) return normalizeToolResult(first, options.agentTool.appOutput);
   if (options.signal?.aborted) return cancelled();
   const retry = { ...structuredClone(original), ...request.retryInput };
   // Returned credentials cannot alter business arguments or add fields outside the tool contract.
-  if (!preflightToolCall(options.agentTool, retry).ok) return normalizeToolResult(first);
+  if (!preflightToolCall(options.agentTool, retry).ok) {
+    return normalizeToolResult(first, options.agentTool.appOutput);
+  }
   const preview = structuredClone(original);
   delete preview["scriptApproval"];
   delete preview["toolActionApproval"];
@@ -125,7 +127,9 @@ export async function executeWithToolApproval(options: {
   if (!approval.approved) {
     return failedToolResult(TOOL_OUTCOME_KINDS.userRejected, "用户拒绝本次操作；工具未执行操作");
   }
-  if (Date.parse(request.expiresAt) <= Date.now()) return normalizeToolResult(first);
+  if (Date.parse(request.expiresAt) <= Date.now()) {
+    return normalizeToolResult(first, options.agentTool.appOutput);
+  }
   const policy = options.ctx.policy?.check({
     agentName: options.agentName,
     toolName: options.agentTool.name,
@@ -137,5 +141,5 @@ export async function executeWithToolApproval(options: {
   }
   if (options.signal?.aborted) return cancelled();
   // No loop: a fresh challenge, partial failure or transport error cannot trigger another call.
-  return normalizeToolResult(await options.call(retry));
+  return normalizeToolResult(await options.call(retry), options.agentTool.appOutput);
 }

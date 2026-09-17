@@ -15,7 +15,7 @@ import {
   requestIdSchema,
   runtimeMethodSchemas,
   threadIdSchema,
-  type RuntimeEventEnvelopeV14,
+  type RuntimeEventEnvelopeV15,
   type UserInputForm,
 } from "@roll-agent/protocol";
 import { ThreadStore } from "../store/thread-store.ts";
@@ -284,7 +284,7 @@ test("RuntimeService keeps pending approval on decision failure and cancels thro
   const store = new ThreadStore(dir);
   const fixture = createFixture(store);
   const service = new RuntimeService(fixture.engine, store, { runtimeVersion: "0.9.0-test" });
-  const events: RuntimeEventEnvelopeV14[] = [];
+  const events: RuntimeEventEnvelopeV15[] = [];
   const originalCancel = fixture.session.cancel.bind(fixture.session);
   let cancelCalls = 0;
   fixture.session.cancel = () => {
@@ -415,7 +415,7 @@ test("RuntimeService redacts approval rejection reasons before durable replay", 
   const store = new ThreadStore(dir);
   const fixture = createFixture(store);
   const service = new RuntimeService(fixture.engine, store, { runtimeVersion: "0.9.0-test" });
-  const events: RuntimeEventEnvelopeV14[] = [];
+  const events: RuntimeEventEnvelopeV15[] = [];
   service.onEvent((event) => events.push(event));
   try {
     service.initialize({
@@ -479,7 +479,7 @@ test("RuntimeService cancelTurn releases the approval gate when a resolved liste
   const store = new ThreadStore(dir);
   const fixture = createFixture(store);
   const service = new RuntimeService(fixture.engine, store, { runtimeVersion: "0.9.0-test" });
-  const events: RuntimeEventEnvelopeV14[] = [];
+  const events: RuntimeEventEnvelopeV15[] = [];
   const originalCancel = fixture.session.cancel.bind(fixture.session);
   let cancelCalls = 0;
   fixture.session.cancel = () => {
@@ -613,7 +613,7 @@ for (const terminal of ["error", "cancel"] as const) {
     const store = new ThreadStore(dir);
     const fixture = createMultiStreamFailureFixture(store, terminal);
     const service = new RuntimeService(fixture.engine, store, { runtimeVersion: "0.9.0-test" });
-    const events: RuntimeEventEnvelopeV14[] = [];
+    const events: RuntimeEventEnvelopeV15[] = [];
     service.onEvent((event) => events.push(event));
     try {
       service.initialize({
@@ -653,7 +653,7 @@ test("RuntimeService isolates event listeners before starting and completing a T
   const store = new ThreadStore(dir);
   const fixture = createImmediateFixture(store);
   const service = new RuntimeService(fixture.engine, store, { runtimeVersion: "0.9.0-test" });
-  const eventsAfterThrow: RuntimeEventEnvelopeV14[] = [];
+  const eventsAfterThrow: RuntimeEventEnvelopeV15[] = [];
   service.onEvent(() => {
     throw new Error("listener failed");
   });
@@ -976,7 +976,7 @@ test("RuntimeService durable event Store 失败时不发布 live 且回滚 turn.
   const fixture = createImmediateFixture(store);
   const service = new RuntimeService(fixture.engine, store);
   let database: DatabaseSync | undefined;
-  const events: RuntimeEventEnvelopeV14[] = [];
+  const events: RuntimeEventEnvelopeV15[] = [];
   service.onEvent((event) => events.push(event));
   try {
     await service.createThread(
@@ -1027,7 +1027,7 @@ test("RuntimeService terminal durable 写盘失败会触发 fatal shutdown signa
   const fixture = createImmediateFixture(store);
   const service = new RuntimeService(fixture.engine, store);
   let database: DatabaseSync | undefined;
-  const events: RuntimeEventEnvelopeV14[] = [];
+  const events: RuntimeEventEnvelopeV15[] = [];
   const fatalErrors: unknown[] = [];
   service.onEvent((event) => events.push(event));
   service.onFatalError((error) => fatalErrors.push(error));
@@ -1089,7 +1089,7 @@ test("RuntimeService approval resolution durable 写盘失败会触发 fatal shu
   const fixture = createFixture(store);
   const service = new RuntimeService(fixture.engine, store);
   let database: DatabaseSync | undefined;
-  const events: RuntimeEventEnvelopeV14[] = [];
+  const events: RuntimeEventEnvelopeV15[] = [];
   const fatalErrors: unknown[] = [];
   service.onEvent((event) => events.push(event));
   service.onFatalError((error) => fatalErrors.push(error));
@@ -1149,7 +1149,7 @@ test("RuntimeService v1 supports lifecycle, concurrent approval/cancel and proce
   const store = new ThreadStore(dir);
   const fixture = createFixture(store);
   const service = new RuntimeService(fixture.engine, store, { runtimeVersion: "0.9.0-test" });
-  const events: RuntimeEventEnvelopeV14[] = [];
+  const events: RuntimeEventEnvelopeV15[] = [];
   let terminalSnapshotHadActiveTurn = false;
   service.onEvent((event) => {
     events.push(event);
@@ -1499,7 +1499,7 @@ test("RuntimeService snapshot reads append-only transcript and redacted Tool led
     });
     assert.equal("executionState" in (snapshot.operations.items[0]?.outcome ?? {}), false);
     assert.doesNotThrow(() =>
-      parseRuntimeMethodResultForVersion("1.3", "thread.snapshot", {
+      parseRuntimeMethodResultForVersion("1.5", "thread.snapshot", {
         ...snapshot,
         pendingInteractions: [],
       }),
@@ -1521,7 +1521,7 @@ test("RuntimeService snapshot reads append-only transcript and redacted Tool led
     });
     assert.equal("executionState" in (operation.operation?.outcome ?? {}), false);
     assert.doesNotThrow(() =>
-      parseRuntimeMethodResultForVersion("1.3", "operation.get", operation),
+      parseRuntimeMethodResultForVersion("1.5", "operation.get", operation),
     );
     assert.equal("raw" in (operation.operation ?? {}), false);
     assert.equal("input" in (operation.operation ?? {}), false);

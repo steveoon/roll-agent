@@ -3,7 +3,7 @@ import { getAgentEnvFromAgentsConfig } from "../../config/helpers.ts";
 import { loadAgentsConfig } from "../../config/loader.ts";
 import { ManagedAgentConnectionScope } from "../../mcp/managed-agent-connection.ts";
 import { AgentStore } from "../../registry/store.ts";
-import { normalizeListedTools } from "../utils/agent-tools.ts";
+import { normalizeListedTools, formatAppOutputDiscoveryIssue } from "../utils/agent-tools.ts";
 import { formatAgentToolsTextOutput } from "../utils/agent-tools-output.ts";
 import { log } from "../utils/output.ts";
 
@@ -32,7 +32,10 @@ export default defineCommand({
         ...(agentEnv ? { env: agentEnv } : {}),
       });
       const { tools } = await client.listTools();
-      const normalizedTools = normalizeListedTools(tools);
+      const normalizedTools = normalizeListedTools(tools, {
+        onAppOutputIssue: (issue) =>
+          log.warn(formatAppOutputDiscoveryIssue(agent.skill.name, issue)),
+      });
 
       if (args.json) {
         console.log(JSON.stringify(normalizedTools, null, 2));

@@ -1,0 +1,12 @@
+{
+  "jsonrpc": "2.0",
+  "id": 2,
+  "method": "operation.result.get",
+  "params": {
+    "threadId": "00000000-0000-4000-8000-000000000002",
+    "operationId": "00000000-0000-4000-8000-000000000003",
+    "data": {
+      "unexpected": true
+    }
+  }
+}

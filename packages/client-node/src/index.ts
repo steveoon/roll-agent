@@ -106,6 +106,7 @@ const READ_ONLY_RUNTIME_METHODS = new Set<LatestRuntimeMethod>([
   RUNTIME_METHODS.threadSnapshot,
   RUNTIME_METHODS.threadCapabilities,
   RUNTIME_METHODS.operationGet,
+  RUNTIME_METHODS.operationResultGet,
 ]);
 
 export interface RuntimeClientTransport {
@@ -170,13 +171,13 @@ type MutableRuntimeServerRequestHandlers = {
 
 type DynamicCapabilityRuntimeProtocolVersion = Extract<
   RuntimeProtocolVersion,
-  "1.4" | "1.3" | "1.2"
+  "1.5" | "1.4" | "1.3" | "1.2"
 >;
 
 function usesDynamicServerRequestCapabilities(
   version: RuntimeProtocolVersion,
 ): version is DynamicCapabilityRuntimeProtocolVersion {
-  return version === "1.4" || version === "1.3" || version === "1.2";
+  return version === "1.5" || version === "1.4" || version === "1.3" || version === "1.2";
 }
 
 function setRuntimeServerRequestHandler<TMethod extends RuntimeServerRequestMethod>(
@@ -218,7 +219,7 @@ function supportsRuntimeProtocolVersion(
 }
 
 function parseClientRuntimeServerRequestParams<TMethod extends RuntimeServerRequestMethod>(
-  version: "1.4" | "1.3" | "1.2" | "1.1",
+  version: "1.5" | "1.4" | "1.3" | "1.2" | "1.1",
   method: TMethod,
   value: unknown,
 ): RuntimeServerRequestHandlerParams<TMethod> {
@@ -259,7 +260,7 @@ function parseClientRuntimeMethodResult<TMethod extends LatestRuntimeMethod>(
 }
 
 function parseClientRuntimeServerRequestResult<TMethod extends RuntimeServerRequestMethod>(
-  version: "1.4" | "1.3" | "1.2" | "1.1",
+  version: "1.5" | "1.4" | "1.3" | "1.2" | "1.1",
   method: TMethod,
   value: unknown,
 ): RuntimeServerRequestResultForSupportedVersions<TMethod> {
@@ -624,7 +625,7 @@ export class RollNodeClient {
     this.advertisedProtocolVersions = SUPPORTED_RUNTIME_PROTOCOL_VERSIONS.filter(
       (version) =>
         supportsRuntimeProtocolVersion(version, this.serverRequestHandlers) &&
-        ((version !== "1.3" && version !== "1.4") ||
+        ((version !== "1.3" && version !== "1.4" && version !== "1.5") ||
           this.maxFrameBytes >= RUNTIME_V13_MIN_CLIENT_FRAME_BYTES),
     );
     if (!Number.isInteger(this.maxFrameBytes) || this.maxFrameBytes <= 0) {
@@ -972,6 +973,12 @@ export class RollNodeClient {
     );
   }
 
+  getOperationResult(
+    input: RuntimeMethodInputForVersion<"1.5", "operation.result.get">,
+  ): Promise<RuntimeClientMethodResult<"operation.result.get">> {
+    return this.request(RUNTIME_METHODS.operationResultGet, input);
+  }
+
   private requestEventRecoverySnapshot(threadId: ThreadId): Promise<RuntimeEventRecoverySnapshot> {
     if (this.connectionFailure !== undefined) {
       return Promise.reject(this.connectionFailure);
@@ -983,7 +990,7 @@ export class RollNodeClient {
       return Promise.reject(new RollRuntimeClosingError());
     }
     const protocolVersion = this.getInitializationResult().protocolVersion;
-    if (protocolVersion !== "1.3" && protocolVersion !== "1.4") {
+    if (protocolVersion !== "1.3" && protocolVersion !== "1.4" && protocolVersion !== "1.5") {
       return this.request(RUNTIME_METHODS.threadSnapshot, { threadId, limit: 1 });
     }
     const method = RUNTIME_METHODS.threadSnapshot;
@@ -1013,7 +1020,7 @@ export class RollNodeClient {
       return Promise.reject(new RollRuntimeClosingError());
     }
     const negotiatedVersion = this.getInitializationResult().protocolVersion;
-    if (negotiatedVersion !== "1.3" && negotiatedVersion !== "1.4") {
+    if (negotiatedVersion !== "1.3" && negotiatedVersion !== "1.4" && negotiatedVersion !== "1.5") {
       return Promise.reject(
         new RuntimeEventRecoveryError(
           "runtime.events.resume requires negotiated Runtime Protocol 1.3 or newer",
@@ -1542,7 +1549,7 @@ export class RollNodeClient {
   }
 
   private async dispatchServerRequest<TMethod extends RuntimeServerRequestMethod>(
-    protocolVersion: "1.4" | "1.3" | "1.2" | "1.1",
+    protocolVersion: "1.5" | "1.4" | "1.3" | "1.2" | "1.1",
     id: JsonRpcId,
     method: TMethod,
     input: unknown,

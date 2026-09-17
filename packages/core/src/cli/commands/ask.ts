@@ -23,10 +23,15 @@ import type {
 import {
   formatMissingToolMessage,
   formatToolSchemaIssue,
+  formatAppOutputDiscoveryIssue,
   normalizeListedTools,
 } from "../utils/agent-tools.ts";
 import { log, redactToolArgsForLog } from "../utils/output.ts";
-import { extractTextContent, isToolErrorResult } from "../utils/tool-results.ts";
+import {
+  extractTextContent,
+  isToolErrorResult,
+  getCompletedAppOutputStatus,
+} from "../utils/tool-results.ts";
 
 /** 默认确认阈值：低于此值时跳过执行 */
 const DEFAULT_CONFIRM_THRESHOLD = 0.5;
@@ -170,6 +175,8 @@ export default defineCommand({
       });
       const tools = normalizeListedTools((await client.listTools()).tools, {
         onSchemaIssue: (issue) => log.warn(formatToolSchemaIssue(agent.skill.name, issue)),
+        onAppOutputIssue: (issue) =>
+          log.warn(formatAppOutputDiscoveryIssue(agent.skill.name, issue)),
       });
       const targetTool = tools.find((tool) => tool.name === decision.toolName);
 
@@ -232,7 +239,7 @@ export default defineCommand({
         arguments: finalDecision.input,
       });
 
-      if (isToolErrorResult(toolResult)) {
+      if (isToolErrorResult(toolResult, targetTool.appOutput)) {
         const message = extractTextContent(toolResult.content).join("\n") || "Tool 调用失败";
         const result: AskFailedResult = {
           status: "failed",
@@ -246,8 +253,16 @@ export default defineCommand({
         return;
       }
 
+      const appOutputStatus =
+        targetTool.appOutput === undefined ? undefined : getCompletedAppOutputStatus(toolResult);
+      if (appOutputStatus !== undefined) {
+        log.warn(
+          `Tool execution completed; App output ${appOutputStatus}. Do not repeat the operation.`,
+        );
+      }
       const result: AskSuccessResult = {
         status: "success",
+        ...(appOutputStatus === undefined ? {} : { appOutputStatus }),
         decision: finalDecision,
         result: toolResult,
       };

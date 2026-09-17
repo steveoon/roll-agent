@@ -18,6 +18,9 @@ export const companionConfigSchema = z
     cwd: z.string().min(1).refine(isAbsolute, "cwd must be absolute"),
     enabled: z.boolean(),
     credentialRef: credentialReferenceSchema,
+    remoteAppOutputs: z
+      .array(z.object({ agentName: z.string().min(1), toolName: z.string().min(1) }).strict())
+      .optional(),
   })
   .strict()
   .readonly();

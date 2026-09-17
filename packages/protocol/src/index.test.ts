@@ -80,7 +80,7 @@ import {
   runtimeEventEnvelopeSchema,
   runtimeEventEnvelopeV11Schema,
   runtimeEventEnvelopeV13Schema,
-  runtimeEventEnvelopeV14Schema,
+  runtimeEventEnvelopeV15Schema,
   runtimeEventCursorDistance,
   runtimeEventCursorSchema,
   runtimeEventIdSchema,
@@ -225,14 +225,14 @@ function userInputRequestParams(controls: UserInputForm["controls"]): UserInputR
   });
 }
 
-test("initialize advertises v1.4 first without changing the strict request shape", () => {
+test("initialize advertises v1.5 first without changing the strict request shape", () => {
   const input = {
     protocolVersions: [...SUPPORTED_RUNTIME_PROTOCOL_VERSIONS],
     client: { name: "fixture-client", version: "1.0.0" },
   } as const;
   const parsed = initializeParamsSchema.parse(input);
-  assert.equal(RUNTIME_PROTOCOL_VERSION, "1.4");
-  assert.deepEqual(parsed.protocolVersions, ["1.4", "1.3", "1.2", "1.1", "1.0"]);
+  assert.equal(RUNTIME_PROTOCOL_VERSION, "1.5");
+  assert.deepEqual(parsed.protocolVersions, ["1.5", "1.4", "1.3", "1.2", "1.1", "1.0"]);
   assert.deepEqual(SUPPORTED_RUNTIME_PROTOCOL_VERSIONS_V13, ["1.3", "1.2", "1.1", "1.0"]);
   assert.deepEqual(SUPPORTED_RUNTIME_PROTOCOL_VERSIONS_V12, ["1.2", "1.1", "1.0"]);
   assert.deepEqual(SUPPORTED_RUNTIME_PROTOCOL_VERSIONS_V11, ["1.1", "1.0"]);
@@ -551,11 +551,11 @@ test("runtime event envelope is ordered by runtime instance and sequence", () =>
       delta: "hello",
     },
   } as const;
-  const parsed = runtimeEventEnvelopeV14Schema.parse(input);
+  const parsed = runtimeEventEnvelopeV15Schema.parse(input);
   assert.equal(parsed.sequence, 7);
   assert.equal(parsed.event.type, "message.delta");
   assert.throws(() =>
-    runtimeEventEnvelopeV14Schema.parse({
+    runtimeEventEnvelopeV15Schema.parse({
       ...input,
       durability: "durable",
       eventId: IDS.event,

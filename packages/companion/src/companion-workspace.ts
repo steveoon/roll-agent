@@ -1,8 +1,10 @@
+import { projectRemoteAppOutputCapabilities } from "./remote-app-output.ts";
 import {
   RUNTIME_METHODS,
   RUNTIME_SERVER_REQUEST_METHODS,
   getRuntimeProtocolCapabilities,
   parseRuntimeMethodParams,
+  operationResultGetResultSchema,
   type ApprovalId,
   type ApprovalRequestParams,
   type ApprovalRequestResult,
@@ -11,6 +13,9 @@ import {
   type PendingApproval,
   type RuntimeEventEnvelope,
   type RuntimeMethod,
+  type LatestRuntimeMethodInput,
+  type LatestRuntimeMethodResult,
+  parseLatestRuntimeMethodParams,
   type RuntimeMethodInput,
   type RuntimeMethodParams,
   type RuntimeMethodResult,
@@ -50,7 +55,7 @@ import {
   type RelayInteractionCandidateParamsV11,
   type RelayInteractionCandidateResultV11,
   type RelayRuntimeRequest,
-  type RelayRuntimeRequestV11,
+  type RelayRuntimeRequestV12 as RelayRuntimeRequestV11,
   type WorkspaceId,
 } from "@roll-agent/relay-protocol";
 
@@ -74,6 +79,9 @@ export interface CompanionRuntimeClient {
     method: TMethod,
     input: RuntimeMethodInput<TMethod>,
   ): Promise<RuntimeMethodResultForVersion<RuntimeProtocolVersion, TMethod>>;
+  getOperationResult?(
+    input: LatestRuntimeMethodInput<"operation.result.get">,
+  ): Promise<LatestRuntimeMethodResult<"operation.result.get">>;
   onEvent(listener: (event: RuntimeEventEnvelope) => void): () => void;
   getInitializationResult?(): Pick<InitializeResult, "protocolVersion">;
   close(): void;
@@ -82,6 +90,10 @@ export interface CompanionRuntimeClient {
 
 export interface CompanionWorkspaceOptions extends CompanionEventBufferOptions {
   readonly client: CompanionRuntimeClient;
+  readonly remoteAppOutputPolicy?: (
+    agentName: string,
+    toolName: string,
+  ) => boolean | Promise<boolean>;
   readonly localApprovalPolicy: LocalApprovalPolicy;
   readonly workspaceId?: WorkspaceId;
   readonly interactionBroker?: CompanionInteractionBroker;
@@ -406,6 +418,9 @@ export class CompanionWorkspace {
   readonly relayFramesV11: CompanionRelayFrameBuffer;
 
   private readonly client: CompanionRuntimeClient;
+  private readonly remoteAppOutputPolicy: NonNullable<
+    CompanionWorkspaceOptions["remoteAppOutputPolicy"]
+  >;
   private readonly localApprovalPolicy: LocalApprovalPolicy;
   private readonly protocolCapabilities: RuntimeProtocolCapabilities;
   private readonly interactionBroker: CompanionInteractionBroker | undefined;
@@ -422,6 +437,7 @@ export class CompanionWorkspace {
 
   constructor(options: CompanionWorkspaceOptions) {
     this.client = options.client;
+    this.remoteAppOutputPolicy = options.remoteAppOutputPolicy ?? (() => false);
     this.localApprovalPolicy = options.localApprovalPolicy;
     const protocolVersion = this.client.getInitializationResult?.().protocolVersion ?? "1.0";
     this.protocolCapabilities = getRuntimeProtocolCapabilities(protocolVersion);
@@ -699,7 +715,37 @@ export class CompanionWorkspace {
     request: RelayRuntimeRequestV11,
     context: RemoteInteractionCandidateContext,
   ): Promise<unknown> {
+    if (request.workspaceId !== context.workspaceId || context.signal.aborted) {
+      throw new LocalApprovalDeniedError("Remote Workspace access denied");
+    }
     switch (request.method) {
+      case "operation.result.get": {
+        if (
+          this.client.getInitializationResult?.().protocolVersion !== "1.5" ||
+          !this.client.getOperationResult
+        ) {
+          throw new LocalApprovalDeniedError("Runtime does not support App results");
+        }
+        const result = operationResultGetResultSchema.parse(
+          await this.client.getOperationResult(
+            parseLatestRuntimeMethodParams(RUNTIME_METHODS.operationResultGet, request.params),
+          ),
+        );
+        if (result.result === null) return result;
+        const output = result.result.output;
+        const granted = await this.remoteAppOutputPolicy(
+          result.result.agentName,
+          result.result.toolName,
+        );
+        if (
+          !granted ||
+          context.signal.aborted ||
+          (output.status === "available" && !output.remoteReadable)
+        ) {
+          return { result: { ...result.result, output: { status: "denied" } } };
+        }
+        return result;
+      }
       case RELAY_REQUEST_METHODS_V11.interactionCandidate:
         return this.submitInteractionCandidateV11(
           parseRelayInteractionCandidateParamsV11(request.params),
@@ -745,9 +791,15 @@ export class CompanionWorkspace {
           parseRelayRuntimeMethodParams(RUNTIME_METHODS.threadDetach, request.params),
         );
       case RELAY_REQUEST_METHODS_V11.threadCapabilities:
-        return this.client.request(
-          RUNTIME_METHODS.threadCapabilities,
-          parseRelayRuntimeMethodParams(RUNTIME_METHODS.threadCapabilities, request.params),
+        return projectRemoteAppOutputCapabilities(
+          await this.client.request(
+            RUNTIME_METHODS.threadCapabilities,
+            parseRelayRuntimeMethodParams(RUNTIME_METHODS.threadCapabilities, request.params),
+          ),
+          this.client.getInitializationResult?.().protocolVersion === "1.5" &&
+            this.client.getOperationResult !== undefined,
+          async (agent, tool) =>
+            !context.signal.aborted && (await this.remoteAppOutputPolicy(agent, tool)),
         );
       case RELAY_REQUEST_METHODS_V11.turnStart:
         return this.startTurn(

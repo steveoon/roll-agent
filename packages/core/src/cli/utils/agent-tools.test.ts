@@ -118,3 +118,52 @@ describe("cli/utils/agent-tools", () => {
     assert.match(message, /roll agent tools smoke-test-agent/);
   });
 });
+
+describe("independent MCP appOutput discovery", () => {
+  const listed = {
+    name: "candidates",
+    inputSchema: { type: "object" as const },
+    outputSchema: { type: "object" as const, properties: { name: { type: "string" } } },
+    _meta: { "roll/appOutput": { schemaId: "third-party.candidates", schemaVersion: 2 } },
+  };
+  it("preserves declarations and the original output schema from a non-SDK MCP server", () => {
+    const [tool] = normalizeListedTools([listed]);
+    assert.deepEqual(tool?.appOutput, {
+      schemaId: "third-party.candidates",
+      schemaVersion: 2,
+      remoteReadable: false,
+      outputSchema: listed.outputSchema,
+    });
+  });
+  it("isolates invalid output declarations without removing healthy tools", () => {
+    const broken = [
+      { name: "missing", inputSchema: { type: "object" as const }, _meta: listed._meta },
+      {
+        ...listed,
+        name: "external",
+        outputSchema: {
+          type: "object" as const,
+          properties: { bad: { $ref: "https://example.test/schema" } },
+        },
+      },
+      { ...listed, name: "malformed", _meta: { "roll/appOutput": "bad" } },
+    ];
+    for (const bad of broken) {
+      const issues: unknown[] = [];
+      const tools = normalizeListedTools([bad, listed], {
+        onAppOutputIssue: (issue) => issues.push(issue),
+      });
+      assert.equal(tools.length, 2);
+      assert.equal(tools[0]?.appOutput, undefined);
+      assert.equal(tools[0]?.appOutputIssue, "invalid_contract");
+      assert.equal(tools[1]?.appOutput?.schemaId, "third-party.candidates");
+      assert.deepEqual(issues, [{ toolName: bad.name, code: "invalid_contract" }]);
+    }
+  });
+  it("keeps an outputSchema without an explicit declaration outside the app channel", () => {
+    const [tool] = normalizeListedTools([
+      { name: listed.name, inputSchema: listed.inputSchema, outputSchema: listed.outputSchema },
+    ]);
+    assert.equal(tool?.appOutput, undefined);
+  });
+});

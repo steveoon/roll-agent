@@ -1260,3 +1260,73 @@ test("close() during an in-flight connect keeps the client terminal reason", asy
   await delay(0);
   assert.deepEqual(harness.client.getConnectionState(), { status: "closed", reason: "client" });
 });
+
+test("Wire 1.2 result reads deduplicate in flight, then recheck after grant revocation", async () => {
+  const harness = createHarness();
+  try {
+    const connecting = harness.client.connect();
+    await eventually(() => harness.sockets.length > 0, "socket");
+    const socket = harness.sockets[0];
+    assert.ok(socket);
+    socket.serverOpen();
+    socket.serverMessage({ ...sessionReady(), relayProtocolVersion: "1.2" });
+    await connecting;
+    const thread = await openThread(harness, socket);
+    const operationId = "00000000-0000-4000-8000-000000000050";
+    const first = thread.getResult(operationId);
+    const duplicate = thread.getResult(operationId);
+    assert.equal(first, duplicate);
+    const result = {
+      result: {
+        threadId: THREAD_ID,
+        operationId,
+        agentName: "example",
+        toolName: "search",
+        createdAt: NOW,
+        output: {
+          status: "available",
+          schemaId: "example.candidates",
+          schemaVersion: 1,
+          remoteReadable: true,
+          data: { candidates: [] },
+          fallbackText: "0 candidates",
+        },
+      },
+    };
+    respond(socket, lastRequest(socket, "operation.result.get"), result);
+    assert.deepEqual(await first, result);
+    await duplicate;
+    const revoked = thread.getResult(operationId);
+    assert.equal(
+      parseSent(socket).filter((frame) => frame.method === "operation.result.get").length,
+      2,
+    );
+    respond(socket, lastRequest(socket, "operation.result.get"), {
+      result: { ...result.result, output: { status: "denied" } },
+    });
+    assert.equal((await revoked).result?.output.status, "denied");
+    const caps = thread.capabilities();
+    respond(socket, lastRequest(socket, "thread.capabilities"), { manifest: { tools: [] } });
+    assert.deepEqual(await caps, { manifest: { tools: [] } });
+  } finally {
+    harness.client.close();
+  }
+});
+
+test("Wire 1.1 result API reports unsupported without sending new methods", async () => {
+  const harness = createHarness();
+  try {
+    const socket = await connectHarness(harness);
+    const thread = await openThread(harness, socket);
+    await assert.rejects(
+      thread.getResult("00000000-0000-4000-8000-000000000050"),
+      /require Relay Wire 1.2/,
+    );
+    assert.equal(
+      parseSent(socket).some((frame) => frame.method === "operation.result.get"),
+      false,
+    );
+  } finally {
+    harness.client.close();
+  }
+});

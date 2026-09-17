@@ -39,7 +39,8 @@
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.30.0",
-    "zod": "^3.25.76"
+    "zod": "^3.25.76",
+    "@roll-agent/protocol": "workspace:*"
   },
   "devDependencies": {
     "@types/node": "^22.0.0"

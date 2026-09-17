@@ -28,6 +28,7 @@ import {
 } from "@roll-agent/core/registry/agent-usage-lease";
 import {
   formatToolSchemaIssue,
+  formatAppOutputDiscoveryIssue,
   normalizeListedTools,
 } from "@roll-agent/core/cli/utils/agent-tools";
 import { getAgentEnv } from "@roll-agent/core/config/helpers";
@@ -1040,6 +1041,11 @@ export class ConversationEngine {
       throwIfAborted(options.signal);
       throwIfDeadlineExpired(options.deadlineAt);
       const normalized = normalizeListedTools(listed, {
+        onAppOutputIssue: (issue) =>
+          reportIssue({
+            agentName: agent.skill.name,
+            message: formatAppOutputDiscoveryIssue(agent.skill.name, issue),
+          }),
         onSchemaIssue: (issue) =>
           reportIssue({
             agentName: agent.skill.name,

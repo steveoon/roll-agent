@@ -429,9 +429,16 @@ test("runtime abort, terminal turn, deadline, release, and close share one cance
       assert.equal(broker.cancelTurn(threadId, turnId, "duplicate"), 0);
     }),
   );
-  await t.test("deadline", () =>
-    assertCancelledBy(async () => delay(50), new Date(Date.now() + 20).toISOString()),
-  );
+  await t.test("deadline", async (deadlineTest) => {
+    deadlineTest.mock.timers.enable({
+      apis: ["Date", "setTimeout"],
+      now: Date.parse("2026-09-17T00:00:00.000Z"),
+    });
+    await assertCancelledBy(
+      () => deadlineTest.mock.timers.tick(20),
+      new Date(Date.now() + 20).toISOString(),
+    );
+  });
   await t.test("workspace release", () =>
     assertCancelledBy((_broker, _controller, release) => release()),
   );
@@ -504,9 +511,16 @@ test(
         assert.equal(broker.cancelTurn(threadId, turnId, "turn terminal"), 1);
       }),
     );
-    await t.test("deadline", () =>
-      assertCandidateAbortedBy(async () => delay(40), new Date(Date.now() + 20).toISOString()),
-    );
+    await t.test("deadline", async (deadlineTest) => {
+      deadlineTest.mock.timers.enable({
+        apis: ["Date", "setTimeout"],
+        now: Date.parse("2026-09-17T00:00:00.000Z"),
+      });
+      await assertCandidateAbortedBy(
+        () => deadlineTest.mock.timers.tick(20),
+        new Date(Date.now() + 20).toISOString(),
+      );
+    });
     await t.test("workspace release", () =>
       assertCandidateAbortedBy((_broker, _controller, release) => release()),
     );

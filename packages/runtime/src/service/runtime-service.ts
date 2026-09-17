@@ -2,6 +2,10 @@ import { createHash, randomUUID } from "node:crypto";
 import type { ModelMessage } from "ai";
 import {
   APPROVAL_DIFF_PREVIEW_KEY,
+  type AppOutputDescriptor,
+  type OperationViewV15,
+  type OperationView,
+  initializeResultSchema,
   APPROVAL_EXPLANATION_PREVIEW_KEY,
   RUNTIME_ERROR_CODES,
   RUNTIME_FEATURES_V13,
@@ -17,7 +21,7 @@ import {
   normalizeUserInputResultForForm,
   operationIdSchema,
   parseLatestRuntimeMethodResult,
-  runtimeDurableEventV13Schema,
+  runtimeDurableEventV15Schema,
   runtimeEphemeralEventV13Schema,
   runtimeInstanceIdSchema,
   runtimeProtocolVersionSchema,
@@ -29,10 +33,9 @@ import {
   type InitializeParams,
   type InitializeResult,
   type JsonValue,
-  type OperationView,
   type PendingApproval,
   type RuntimeEvent,
-  type RuntimeEventEnvelopeV14,
+  type RuntimeEventEnvelopeV15,
   type RuntimeEventsResumeParams,
   type RuntimeEventsResumeResult,
   type RuntimeInstanceId,
@@ -42,7 +45,7 @@ import {
   type RuntimeMethodResult,
   type RuntimeProtocolVersion,
   type RuntimeProtocolErrorDataV14,
-  type ThreadSnapshotV14Full,
+  type ThreadSnapshotV15Full,
   type ThreadId,
   type ThreadSummary,
   type TurnId,
@@ -172,7 +175,7 @@ interface PendingUserInputState {
   readonly expiresAt: string;
 }
 
-export type RuntimeThreadSnapshot = Omit<ThreadSnapshotV14Full, "pendingInteractions">;
+export type RuntimeThreadSnapshot = Omit<ThreadSnapshotV15Full, "pendingInteractions">;
 
 export interface RuntimeEventReplayBatch extends RuntimeEventsResumeResult {
   readonly events: readonly StoredRuntimeEvent[];
@@ -469,7 +472,10 @@ function toUiMessage(
   };
 }
 
-function toOperationView(record: SequencedToolExecutionRecord): OperationView {
+function toOperationView(
+  record: SequencedToolExecutionRecord,
+  appOutput: AppOutputDescriptor = { status: "not_provided" },
+): OperationViewV15 {
   const redacted = toRedactedToolExecutionRecordSummary(record);
   return {
     id: operationIdSchema.parse(redacted.id),
@@ -485,6 +491,7 @@ function toOperationView(record: SequencedToolExecutionRecord): OperationView {
         : {}),
     },
     display: safeJson(redacted.display, undefined),
+    appOutput,
   };
 }
 
@@ -537,7 +544,7 @@ export class RuntimeService {
   private readonly settledTurnOwners = new Map<TurnId, ThreadId>();
   private readonly pendingApprovals = new Map<string, PendingApprovalState>();
   private readonly pendingUserInputs = new Map<SessionUserInputRequestId, PendingUserInputState>();
-  private readonly listeners = new Set<(event: RuntimeEventEnvelopeV14) => void>();
+  private readonly listeners = new Set<(event: RuntimeEventEnvelopeV15) => void>();
   private readonly fatalErrorListeners = new Set<(error: unknown) => void>();
   private readonly userInputListeners = new Set<
     (event: RuntimeUserInputInteractionEvent) => void
@@ -605,15 +612,16 @@ export class RuntimeService {
         idempotencyCacheEntries: this.idempotencyCacheEntries,
       },
     };
-    if (protocolVersion === "1.4") {
+    if (protocolVersion === "1.4" || protocolVersion === "1.5") {
       const storeLimits = this.attachmentStore?.limits;
-      return {
+      return initializeResultSchema.parse({
         ...commonResult,
         protocolVersion,
-        features:
-          this.attachmentStore !== undefined
-            ? [...legacyFeatures, "attachments" as const]
-            : [...legacyFeatures],
+        features: [
+          ...legacyFeatures,
+          ...(this.attachmentStore !== undefined ? ["attachments" as const] : []),
+          ...(protocolVersion === "1.5" ? ["app-output" as const] : []),
+        ],
         limits: {
           ...commonResult.limits,
           eventReplay: true,
@@ -624,7 +632,7 @@ export class RuntimeService {
           maxStagedAttachments:
             storeLimits?.maxStagedAttachments ?? RUNTIME_V14_MAX_STAGED_ATTACHMENTS,
         },
-      };
+      });
     }
     return protocolVersion === "1.3"
       ? {
@@ -639,7 +647,7 @@ export class RuntimeService {
         };
   }
 
-  onEvent(listener: (event: RuntimeEventEnvelopeV14) => void): () => void {
+  onEvent(listener: (event: RuntimeEventEnvelopeV15) => void): () => void {
     this.listeners.add(listener);
     return () => {
       this.listeners.delete(listener);
@@ -758,7 +766,9 @@ export class RuntimeService {
         nextBeforeSequence: messagePage.nextBeforeSequence ?? null,
       },
       operations: {
-        items: operationPage.entries.map(toOperationView),
+        items: operationPage.entries.map((entry) =>
+          toOperationView(entry, this.store.getAppOutputDescriptor(params.threadId, entry.id)),
+        ),
         nextBeforeSequence: operationPage.nextBeforeSequence ?? null,
       },
       ...(activeTurn !== undefined ? { activeTurn } : {}),
@@ -1264,12 +1274,39 @@ export class RuntimeService {
     return cancelled;
   }
 
-  getOperation(params: RuntimeMethodParams<"operation.get">): RuntimeMethodResult<"operation.get"> {
+  getOperation(
+    params: RuntimeMethodParams<"operation.get">,
+  ): LatestRuntimeMethodResult<"operation.get"> {
     this.assertOpen();
     this.requireThread(params.threadId);
     const record = this.store.getToolExecution(params.threadId, params.operationId);
     return {
-      operation: record === undefined ? null : toOperationView(record),
+      operation:
+        record === undefined
+          ? null
+          : toOperationView(record, this.store.getAppOutputDescriptor(params.threadId, record.id)),
+    };
+  }
+
+  getOperationResult(
+    params: LatestRuntimeMethodParams<"operation.result.get">,
+  ): LatestRuntimeMethodResult<"operation.result.get"> {
+    this.assertOpen();
+    this.requireThread(params.threadId);
+    const record = this.store.getToolExecution(params.threadId, params.operationId);
+    if (record === undefined) return { result: null };
+    const output = this.store.getAppOutput(params.threadId, params.operationId) ?? {
+      status: "not_provided" as const,
+    };
+    return {
+      result: {
+        threadId: params.threadId,
+        operationId: params.operationId,
+        agentName: record.agentName,
+        toolName: record.toolName,
+        createdAt: record.createdAt,
+        output,
+      },
     };
   }
 
@@ -1342,8 +1379,8 @@ export class RuntimeService {
       threadId,
       ...(turnId !== undefined ? { turnId } : {}),
     } as const;
-    const durableEvent = runtimeDurableEventV13Schema.safeParse(event);
-    const envelope: RuntimeEventEnvelopeV14 = durableEvent.success
+    const durableEvent = runtimeDurableEventV15Schema.safeParse(event);
+    const envelope: RuntimeEventEnvelopeV15 = durableEvent.success
       ? (() => {
           let stored: StoredRuntimeEvent;
           try {
@@ -1536,6 +1573,12 @@ export class RuntimeService {
       case "tool-result":
         this.emit(state.threadId, state.turnId, {
           type: "tool.completed",
+          appOutput:
+            event.executionId === undefined
+              ? { status: "not_provided" }
+              : (this.store.getAppOutputDescriptor(state.threadId, event.executionId) ?? {
+                  status: "not_provided",
+                }),
           toolCallId: event.toolCallId,
           agentName: event.agentName,
           toolName: event.toolName,

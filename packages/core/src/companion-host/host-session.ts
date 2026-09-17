@@ -1,3 +1,5 @@
+import { FileCompanionConfigStore } from "./config-store.ts";
+import { createCompanionPaths } from "./paths.ts";
 import { RollNodeClient, type RuntimeClientExit } from "@roll-agent/client-node";
 import {
   CompanionInteractionBroker,
@@ -17,6 +19,7 @@ import {
   createOfficialRelayResponderContext,
   createOfficialRelayResponderPolicy,
   createP0RemoteRequestPolicy,
+  createRemoteAppOutputPolicy,
 } from "./policy.ts";
 
 const RELAY_OPEN_TIMEOUT_MS = 15_000;
@@ -45,13 +48,18 @@ export interface CompanionSessionFactory {
 
 export class DefaultCompanionSessionFactory implements CompanionSessionFactory {
   private readonly invocation: BundledRollInvocation;
+  private readonly configStore: FileCompanionConfigStore;
   private readonly createWebSocket: CompanionWebSocketFactory;
 
   constructor(options: {
     readonly invocation: BundledRollInvocation;
+    readonly configPath?: string;
     readonly createWebSocket?: CompanionWebSocketFactory;
   }) {
     this.invocation = options.invocation;
+    this.configStore = new FileCompanionConfigStore(
+      options.configPath ?? createCompanionPaths().configPath,
+    );
     this.createWebSocket = options.createWebSocket ?? defaultWebSocketFactory;
   }
 
@@ -70,6 +78,7 @@ export class DefaultCompanionSessionFactory implements CompanionSessionFactory {
         client,
         workspaceId: config.workspaceId,
         interactionBroker,
+        remoteAppOutputPolicy: createRemoteAppOutputPolicy(this.configStore, config.workspaceId),
         // Runtime policy is the sole approval fact source. A Runtime `deny` never creates an
         // Interaction; `confirm` is completed by the authenticated remote responder.
         localApprovalPolicy: () => "allow",
@@ -78,6 +87,7 @@ export class DefaultCompanionSessionFactory implements CompanionSessionFactory {
       const bridge = new CompanionRelayBridgeV11({
         deviceId: config.deviceId,
         pairingToken: credential,
+        protocolVersion: "1.2",
         workspaces,
       });
       const requestPolicy = createP0RemoteRequestPolicy(config.workspaceId);

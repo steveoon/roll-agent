@@ -1,0 +1,7 @@
+{
+  "type": "runtime.gap",
+  "workspaceId": "00000000-0000-4000-8000-000000000507",
+  "fromRelaySequence": 0,
+  "throughRelaySequence": 2,
+  "recovery": "thread.snapshot"
+}

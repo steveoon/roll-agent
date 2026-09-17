@@ -33,7 +33,8 @@
     "./schema": "./dist/schema/roll-relay-protocol-v1.schema.json",
     "./schema/v1.0": "./dist/schema/roll-relay-protocol-v1.schema.json",
     "./schema/v1.1": "./dist/schema/roll-relay-protocol-v1.1.schema.json",
-    "./fixtures/*": "./fixtures/*"
+    "./fixtures/*": "./fixtures/*",
+    "./schema/v1.2": "./dist/schema/roll-relay-protocol-v1.2.schema.json"
   },
   "publishConfig": {
     "access": "public",
@@ -60,7 +61,8 @@
       "./schema": "./dist/schema/roll-relay-protocol-v1.schema.json",
       "./schema/v1.0": "./dist/schema/roll-relay-protocol-v1.schema.json",
       "./schema/v1.1": "./dist/schema/roll-relay-protocol-v1.1.schema.json",
-      "./fixtures/*": "./fixtures/*"
+      "./fixtures/*": "./fixtures/*",
+      "./schema/v1.2": "./dist/schema/roll-relay-protocol-v1.2.schema.json"
     }
   },
   "files": [

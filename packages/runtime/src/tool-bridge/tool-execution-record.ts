@@ -1,4 +1,10 @@
+import { inspectAppOutputContent } from "./app-output-content.ts";
 import { createHash, randomUUID } from "node:crypto";
+import {
+  APP_OUTPUT_LIMITS,
+  appOutputResultSchema,
+  type AppOutputResult,
+} from "@roll-agent/protocol";
 import type { JSONValue } from "@ai-sdk/provider";
 import { TOOL_OUTCOME_KINDS, isToolCancellationExecutionState } from "./normalize-result.ts";
 import type {
@@ -95,6 +101,8 @@ export type ToolExecutionValueEnvelope =
   | RedactedToolExecutionValueEnvelope;
 
 export interface ToolExecutionRecord {
+  /** Transient hand-off to the dedicated result table; never included in record_json. */
+  readonly appOutput?: AppOutputResult;
   readonly version: ToolExecutionRecordVersion;
   readonly id: ToolExecutionRecordId;
   readonly toolCallId: string;
@@ -1266,6 +1274,9 @@ export function createToolExecutionRecord(
     model: cloneModelOutput(input.result.model),
     display: encodeToolExecutionValue(input.result.display),
     outcome: cloneOutcome(input.result.outcome),
+    ...(input.result.appOutput === undefined
+      ? {}
+      : { appOutput: prepareAppOutputForPersistence(input.result.appOutput) }),
   };
 }
 
@@ -1286,4 +1297,26 @@ export function toRedactedToolExecutionRecordSummary(
     outcome: redactOutcome(record.outcome),
     ...(isPersistedToolExecutionRecord(record) ? { persistence: record.persistence } : {}),
   };
+}
+
+/** Reject complete payloads requiring redaction; never silently change a business DTO. */
+export function prepareAppOutputForPersistence(value: AppOutputResult): AppOutputResult {
+  try {
+    const parsed = appOutputResultSchema.safeParse(value);
+    if (!parsed.success) return { status: "invalid" };
+    const result = parsed.data;
+    const serialized = JSON.stringify(result);
+    if (Buffer.byteLength(serialized, "utf8") > APP_OUTPUT_LIMITS.resultBytes) {
+      return { status: "too_large" };
+    }
+    if (result.status !== "available") return result;
+    const rejection =
+      inspectAppOutputContent(result.data) ??
+      inspectAppOutputContent(result.fallbackText) ??
+      inspectAppOutputContent(result.schemaId);
+    if (rejection) return rejection;
+    return result;
+  } catch {
+    return { status: "invalid" };
+  }
 }

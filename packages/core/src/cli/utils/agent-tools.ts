@@ -1,3 +1,5 @@
+import { AjvJsonSchemaValidator } from "@modelcontextprotocol/sdk/validation/ajv";
+import { APP_OUTPUT_META_KEY, validateAppOutputContract } from "@roll-agent/protocol/app-output";
 import type { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { isJsonSchemaObject, isPlainObject } from "../../tool-runtime/schema.ts";
 import {
@@ -143,7 +145,20 @@ export interface ToolSchemaIssue extends JsonSchemaRefIssue {
   readonly toolName: string;
 }
 
+export interface AppOutputDiscoveryIssue {
+  readonly toolName: string;
+  readonly code: "invalid_contract";
+}
+
+export function formatAppOutputDiscoveryIssue(
+  agentName: string,
+  issue: AppOutputDiscoveryIssue,
+): string {
+  return `Agent "${agentName}" tool "${issue.toolName}": invalid App output contract; structured results disabled.`;
+}
+
 export interface NormalizeListedToolsOptions {
+  readonly onAppOutputIssue?: (issue: AppOutputDiscoveryIssue) => void;
   readonly onSchemaIssue?: (issue: ToolSchemaIssue) => void;
 }
 
@@ -182,10 +197,25 @@ export function normalizeListedTools(
     for (const issue of unresolved) {
       options.onSchemaIssue?.({ toolName: tool.name, ...issue });
     }
+    let appOutput: AgentTool["appOutput"];
+    let appOutputIssue: AgentTool["appOutputIssue"];
+    if (tool._meta?.[APP_OUTPUT_META_KEY] !== undefined) {
+      try {
+        appOutput = validateDiscoveredAppOutput({
+          ...requireAppOutputDeclaration(tool._meta[APP_OUTPUT_META_KEY]),
+          outputSchema: tool.outputSchema,
+        });
+      } catch {
+        appOutputIssue = "invalid_contract";
+        options.onAppOutputIssue?.({ toolName: tool.name, code: appOutputIssue });
+      }
+    }
     return {
       name: tool.name,
       ...(typeof tool.description === "string" ? { description: tool.description } : {}),
       inputSchema,
+      ...(appOutput === undefined ? {} : { appOutput }),
+      ...(appOutputIssue === undefined ? {} : { appOutputIssue }),
       ...(unresolved.length > 0 ? { schemaIssues: unresolved } : {}),
     };
   });
@@ -231,4 +261,16 @@ export function formatMissingToolMessage(
   messageLines.push(`使用 \`roll agent tools ${agentName}\` 查看完整 tool 列表与 inputSchema。`);
 
   return messageLines.join("\n");
+}
+
+function requireAppOutputDeclaration(value: unknown): Record<string, unknown> {
+  if (!isPlainObject(value)) throw new Error("Invalid roll/appOutput declaration");
+  return value;
+}
+
+function validateDiscoveredAppOutput(value: unknown) {
+  const contract = validateAppOutputContract(value);
+  // Compile before a tool can run; never discover unsupported validators after effects.
+  new AjvJsonSchemaValidator().getValidator(contract.outputSchema);
+  return contract;
 }
