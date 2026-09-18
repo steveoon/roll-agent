@@ -3,6 +3,7 @@ import { mkdtemp, mkdir, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import type { EnvironmentDiagnostics } from "../config/environment-diagnostic-schema.ts";
 import { deviceIdSchema, workspaceIdSchema } from "@roll-agent/relay-protocol";
 import {
   CompanionApplication,
@@ -121,6 +122,84 @@ class RecordingLogger implements CompanionLogger {
     this.entries.push(message);
   }
 }
+
+test("new CLI falls back to legacy status after an old daemon rejects diagnostics", async () => {
+  const requests: string[] = [];
+  const app = createTestApplication({
+    configStore: new MemoryConfigStore(initialConfig),
+    service: new FakeServiceController([]),
+    control: async (_endpoint, request) => {
+      requests.push(request.type);
+      return request.type === "diagnostics"
+        ? { version: 1, ok: false, code: "INVALID_REQUEST" }
+        : successControlResponse();
+    },
+  });
+  const status = await app.getStatus();
+  assert.equal(status.phase, "stopped");
+  assert.equal(status.environmentDiagnostics, undefined);
+  assert.deepEqual(requests, ["diagnostics", "status"]);
+  await app.stop();
+  assert.equal(requests.at(-1), "stop");
+});
+
+test("doctor uses the service report and cannot pass while Runtime is offline", async () => {
+  const report: EnvironmentDiagnostics = {
+    environment: "service",
+    checkedAt: new Date().toISOString(),
+    blocking: true,
+    truncated: false,
+    issues: [
+      {
+        code: "env-unresolved",
+        severity: "error",
+        variable: "SERVICE_KEY",
+        paths: ["llm.providers.custom.api-key"],
+        message: "环境变量缺失",
+        remedy: "补齐后台配置",
+      },
+    ],
+  };
+  const response = successControlResponse();
+  assert.ok(response.ok);
+  const app = createTestApplication({
+    configStore: new MemoryConfigStore(initialConfig),
+    service: new FakeServiceController([]),
+    control: async () => ({ ...response, environmentDiagnostics: report }),
+    inspectEnvironment: () => {
+      throw new Error("must not inspect caller environment");
+    },
+  });
+  const result = await app.doctor();
+  assert.equal(result.ok, false);
+  assert.equal(result.checks.find((c) => c.name === "runtime")?.ok, false);
+  assert.equal(result.checks.find((c) => c.name === "environment")?.ok, false);
+  assert.deepEqual(result.environmentDiagnostics, report);
+});
+
+test("offline inspection is labelled estimated and is refreshed after configuration changes", async () => {
+  let blocking = true;
+  const app = createTestApplication({
+    configStore: new MemoryConfigStore(initialConfig),
+    service: new FakeServiceController([]),
+    control: missingControlClient,
+    inspectEnvironment: (cwd, environment) => {
+      assert.equal(cwd, initialConfig.cwd);
+      assert.equal(environment, "estimated-service");
+      return {
+        environment,
+        checkedAt: new Date().toISOString(),
+        blocking,
+        truncated: false,
+        issues: [],
+      };
+    },
+  });
+  assert.equal((await app.getStatus()).environmentDiagnostics?.blocking, true);
+  blocking = false;
+  assert.equal((await app.getStatus()).environmentDiagnostics?.blocking, false);
+  assert.equal((await app.doctor()).checks.find((c) => c.name === "environment")?.ok, false);
+});
 
 test("disable fails closed when the live service cannot stop", async () => {
   const events: string[] = [];
@@ -283,6 +362,7 @@ test("foreground Companion refuses an elevated OS identity before starting Runti
 });
 
 function createTestApplication(input: {
+  readonly inspectEnvironment?: CompanionApplicationOptions["inspectEnvironment"];
   readonly configStore: CompanionConfigStore;
   readonly service: CompanionServiceController;
   readonly control: CompanionControlClient;
@@ -293,6 +373,15 @@ function createTestApplication(input: {
 }): CompanionApplication {
   const logger = input.logger ?? new RecordingLogger();
   const options: CompanionApplicationOptions = {
+    inspectEnvironment:
+      input.inspectEnvironment ??
+      ((_cwd, environment) => ({
+        environment,
+        checkedAt: new Date().toISOString(),
+        blocking: false,
+        truncated: false,
+        issues: [],
+      })),
     paths: createCompanionPaths("/tmp/roll-companion-test-home", "darwin"),
     platform: "darwin",
     configStore: input.configStore,
@@ -339,4 +428,57 @@ function successControlResponse(): CompanionControlResponse {
       relayProfile: "roll-cloud-v1",
     },
   };
+}
+
+test("doctor reports malformed enrollment even when status fallback cannot load it", async () => {
+  const app = createTestApplication({
+    configStore: {
+      load: async () => {
+        throw new Error("invalid configuration");
+      },
+      save: async () => {},
+      remove: async () => {},
+    },
+    service: new FakeServiceController([]),
+    control: missingControlClient,
+  });
+  const result = await app.doctor();
+  assert.equal(result.ok, false);
+  assert.equal(result.checks.find((c) => c.name === "enrollment")?.ok, false);
+});
+
+for (const failure of ["internal-error", "transport-error"] as const) {
+  test(`diagnostics ${failure} retries plain status before estimating runtime state`, async () => {
+    const requests: string[] = [];
+    const app = createTestApplication({
+      configStore: new MemoryConfigStore(initialConfig),
+      service: new FakeServiceController([]),
+      inspectEnvironment: () => {
+        throw new Error("must not estimate while status is available");
+      },
+      control: async (_endpoint, request) => {
+        requests.push(request.type);
+        if (request.type === "diagnostics") {
+          if (failure === "transport-error") throw new Error("diagnostics unavailable");
+          return { version: 1, ok: false, code: "INTERNAL_ERROR" };
+        }
+        return {
+          version: 1,
+          ok: true,
+          status: {
+            phase: "running",
+            enabled: true,
+            enrolled: true,
+            runtimeOnline: true,
+            relayProfile: "roll-cloud-v1",
+          },
+        };
+      },
+    });
+    const status = await app.getStatus();
+    assert.equal(status.runtimeOnline, true);
+    assert.equal(status.phase, "running");
+    assert.equal(status.environmentDiagnostics, undefined);
+    assert.deepEqual(requests, ["diagnostics", "status"]);
+  });
 }

@@ -219,6 +219,8 @@ ROLL_TEST_RELAY_REPO=/absolute/path/to/roll-cloud-relay \
 
 ## 排查与进一步阅读
 
+- Companion 显示配置问题或 Runtime 离线：[后台运行环境诊断](how-to-diagnose-companion-environment.md)。
+
 - 结果不可用、容量限制、MCP 返回格式：[结构化结果参考](app-output-reference.md)。
 - 本地 RPC、事件与版本兼容：[Runtime Protocol 参考](runtime-protocol-v1-reference.md)。
 - 远程会话与协议边界：[Companion / Relay 参考](companion-relay-v1-reference.md)。

@@ -1,3 +1,4 @@
+import { environmentDiagnosticsSchema } from "../config/environment-diagnostic-schema.ts";
 import { z } from "zod/v4";
 import { isAbsolute } from "node:path";
 import { deviceIdSchema, workspaceIdSchema } from "@roll-agent/relay-protocol";
@@ -48,7 +49,7 @@ export const companionHostPhaseSchema = z.enum([
 
 export type CompanionHostPhase = z.infer<typeof companionHostPhaseSchema>;
 
-export const companionHostStatusSchema = z
+const companionHostStatusObjectSchema = z
   .object({
     phase: companionHostPhaseSchema,
     enabled: z.boolean(),
@@ -60,12 +61,26 @@ export const companionHostStatusSchema = z
     cwd: z.string().optional(),
     lastError: z.string().optional(),
   })
-  .strict()
-  .readonly();
+  .strict();
+export const companionHostStatusSchema = companionHostStatusObjectSchema.readonly();
 
 export type CompanionHostStatus = z.infer<typeof companionHostStatusSchema>;
 
+// Only local management HTTP/CLI exposes this extension. The original IPC status stays frozen.
+export const companionManagementStatusSchema = companionHostStatusObjectSchema
+  .extend({
+    environmentDiagnostics: environmentDiagnosticsSchema.optional(),
+  })
+  .readonly();
+export type CompanionManagementStatus = z.infer<typeof companionManagementStatusSchema>;
+
 export const companionControlRequestSchema = z.discriminatedUnion("type", [
+  z
+    .object({
+      version: z.literal(COMPANION_CONTROL_PROTOCOL_VERSION),
+      type: z.literal("diagnostics"),
+    })
+    .strict(),
   z
     .object({
       version: z.literal(COMPANION_CONTROL_PROTOCOL_VERSION),
@@ -88,6 +103,7 @@ export const companionControlResponseSchema = z.discriminatedUnion("ok", [
       version: z.literal(COMPANION_CONTROL_PROTOCOL_VERSION),
       ok: z.literal(true),
       status: companionHostStatusSchema,
+      environmentDiagnostics: environmentDiagnosticsSchema.optional(),
     })
     .strict(),
   z
@@ -114,6 +130,7 @@ export const companionDoctorResultSchema = z
   .object({
     ok: z.boolean(),
     checks: z.array(companionDoctorCheckSchema).readonly(),
+    environmentDiagnostics: environmentDiagnosticsSchema.optional(),
   })
   .strict()
   .readonly();

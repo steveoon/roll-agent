@@ -2775,3 +2775,24 @@ test("RollNodeClient drives v1.4 attachment methods and turn.start attachments t
   assert.deepEqual(turnParams.input.attachments, [attachmentId]);
   await client.shutdown();
 });
+
+test("failed process creation preserves ENOENT without starting an initialize request", async () => {
+  const { mkdtemp, rm } = await import("node:fs/promises");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const cwd = await mkdtemp(join(tmpdir(), "roll-client-spawn-"));
+  try {
+    for (const options of [
+      { cwd, command: join(cwd, "missing-node"), args: [] },
+      { cwd: join(cwd, "missing-workspace"), command: process.execPath, args: ["--version"] },
+    ]) {
+      await assert.rejects(RollNodeClient.start(options), (error: unknown) => {
+        assert.ok(error instanceof Error && "code" in error);
+        assert.equal(error.code, "ENOENT");
+        return true;
+      });
+    }
+  } finally {
+    await rm(cwd, { recursive: true, force: true });
+  }
+});

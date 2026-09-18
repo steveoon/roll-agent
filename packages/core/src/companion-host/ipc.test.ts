@@ -12,6 +12,7 @@ import {
   sendCompanionControlRequest,
 } from "./ipc.ts";
 import type { CompanionHostStatus } from "./schema.ts";
+import { companionControlResponseSchema } from "./schema.ts";
 
 const RUNNING_STATUS: CompanionHostStatus = {
   phase: "running",
@@ -20,6 +21,56 @@ const RUNNING_STATUS: CompanionHostStatus = {
   runtimeOnline: true,
   relayProfile: OFFICIAL_RELAY_PROFILE.id,
 };
+
+test("diagnostics is opt-in; legacy status/stop never receive extra fields", async () => {
+  const root = await mkdtemp(join(tmpdir(), "roll-diag-ipc-"));
+  const endpoint = join(root, "control.sock");
+  let calls = 0;
+  const report = {
+    environment: "service" as const,
+    checkedAt: new Date().toISOString(),
+    blocking: false,
+    truncated: false,
+    issues: [],
+  };
+  const server = new CompanionControlServer({
+    endpoint,
+    platform: "linux",
+    handlers: {
+      getStatus: () => RUNNING_STATUS,
+      stop: () => undefined,
+      getDiagnostics: () => {
+        calls++;
+        return report;
+      },
+    },
+  });
+  try {
+    await server.start();
+    for (const type of ["status", "stop"] as const) {
+      const response = await sendCompanionControlRequest(endpoint, { version: 1, type });
+      assert.deepEqual(response, { version: 1, ok: true, status: RUNNING_STATUS });
+    }
+    assert.equal(calls, 0);
+    const response = await sendCompanionControlRequest(endpoint, {
+      version: 1,
+      type: "diagnostics",
+    });
+    assert.ok(response.ok);
+    assert.deepEqual(response.environmentDiagnostics, report);
+    assert.equal(calls, 1);
+    assert.equal(
+      companionControlResponseSchema.safeParse({
+        ...response,
+        environmentDiagnostics: { ...report, secret: "must-not-pass" },
+      }).success,
+      false,
+    );
+  } finally {
+    await server.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
 
 test("control service uses a private Unix socket and handles status/stop", async () => {
   const root = await mkdtemp(join(tmpdir(), "roll-companion-ipc-"));
@@ -125,3 +176,42 @@ test("Windows named pipe never opts into cross-user read or write access", () =>
     writableAll: false,
   });
 });
+
+for (const mode of ["throw", "reject"] as const) {
+  test(`diagnostics ${mode} preserves live status without leaking the error`, async () => {
+    const root = await mkdtemp(join(tmpdir(), "roll-ipc-diag-fault-"));
+    const endpoint = join(root, "control.sock");
+    const messages: string[] = [];
+    const server = new CompanionControlServer({
+      endpoint,
+      platform: "linux",
+      logger: { info: (text) => messages.push(text), error: (text) => messages.push(text) },
+      handlers: {
+        getStatus: () => RUNNING_STATUS,
+        stop: () => undefined,
+        getDiagnostics: () => {
+          const error = new Error("synthetic-secret-never-log");
+          if (mode === "throw") throw error;
+          return Promise.reject(error);
+        },
+      },
+    });
+    try {
+      await server.start();
+      const response = await sendCompanionControlRequest(endpoint, {
+        version: 1,
+        type: "diagnostics",
+      });
+      assert.deepEqual(response, { version: 1, ok: true, status: RUNNING_STATUS });
+      assert.doesNotMatch(JSON.stringify(messages), /synthetic-secret-never-log/);
+      assert.deepEqual(await sendCompanionControlRequest(endpoint, { version: 1, type: "stop" }), {
+        version: 1,
+        ok: true,
+        status: RUNNING_STATUS,
+      });
+    } finally {
+      await server.close();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+}

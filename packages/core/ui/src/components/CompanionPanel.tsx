@@ -1,3 +1,4 @@
+import type { EnvironmentDiagnostics } from "../../../src/config/environment-diagnostic-schema.ts";
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { RollUiApi } from "../api.ts";
 import {
@@ -103,6 +104,7 @@ export function CompanionPanel({ api, onToast, onUnavailable }: CompanionPanelPr
     } finally {
       busyRef.current = undefined;
       setBusy(undefined);
+      setDoctor(undefined);
       await readStatus();
     }
   }
@@ -111,6 +113,7 @@ export function CompanionPanel({ api, onToast, onUnavailable }: CompanionPanelPr
     setDoctorLoading(true);
     try {
       setDoctor(await api.getCompanionDoctor());
+      await readStatus();
     } catch (error) {
       onToast({ tone: "warning", message: describeError(error) });
     } finally {
@@ -298,7 +301,10 @@ function CompanionStatusCard({ status }: { readonly status: CompanionStatus | un
       </div>
     );
   }
-  const phase = describeCompanionPhase(status.phase);
+  const phase =
+    status.environmentDiagnostics?.blocking === true && !status.runtimeOnline
+      ? { label: "需要处理配置", tone: "warn" }
+      : describeCompanionPhase(status.phase);
   return (
     <article className="companion-status-card">
       <div className="companion-status-topline">
@@ -328,8 +334,70 @@ function CompanionStatusCard({ status }: { readonly status: CompanionStatus | un
           </>
         )}
       </div>
-      {status.lastError !== undefined && <p className="companion-last-error">{status.lastError}</p>}
+      {status.lastError !== undefined && status.environmentDiagnostics?.blocking !== true && (
+        <p className="companion-last-error">{status.lastError}</p>
+      )}
+      {status.environmentDiagnostics !== undefined && (
+        <CompanionEnvironmentDiagnostics report={status.environmentDiagnostics} />
+      )}
     </article>
+  );
+}
+
+export function CompanionEnvironmentDiagnostics({
+  report,
+}: {
+  readonly report: EnvironmentDiagnostics;
+}) {
+  return (
+    <section className="companion-doctor" aria-label="后台运行环境诊断">
+      <h4>
+        {report.blocking
+          ? "后台运行环境配置需要处理"
+          : report.issues.length > 0
+            ? "部分配置需要检查"
+            : "配置引用检查通过"}
+      </h4>
+      <p>
+        {report.environment === "service"
+          ? "已按 Companion 进程的实际环境检查。此检查不验证模型或其他远端服务的凭据是否有效。"
+          : "当前为后台环境预检估算，尚未验证实际服务环境。终端中的环境变量不一定在后台可用。"}
+      </p>
+      {report.configPath !== undefined && (
+        <p>
+          配置文件：<code>{report.configPath}</code>
+        </p>
+      )}
+      <ul className="companion-check-list">
+        {report.issues.map((issue, index) => (
+          <li key={`${issue.code}:${issue.variable ?? index}`} className="warn">
+            <div>
+              <strong>
+                {issue.severity === "error" ? "启动阻断" : "配置提醒"} · {issue.message}
+              </strong>
+              {issue.variable !== undefined && (
+                <p>
+                  环境变量：<code>{issue.variable}</code>
+                </p>
+              )}
+              {issue.paths.length > 0 && (
+                <p>
+                  引用位置：
+                  {issue.paths.map((path) => (
+                    <code key={path}>{path} </code>
+                  ))}
+                </p>
+              )}
+              <p>{issue.remedy}</p>
+            </div>
+          </li>
+        ))}
+      </ul>
+      {report.truncated && <p>问题较多，当前仅显示部分项目；处理后请重新检查。</p>}
+      {report.issues.length > 0 && (
+        <p>补齐配置后可使用“刷新 Companion 状态”重新检查，使用“重启”让 Runtime 重新加载配置。</p>
+      )}
+    </section>
   );
 }
 

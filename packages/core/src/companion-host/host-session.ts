@@ -1,6 +1,17 @@
+import {
+  inspectEnvironmentDiagnostics,
+  describeEnvironmentDiagnostics,
+} from "../config/environment-diagnostics.ts";
 import { FileCompanionConfigStore } from "./config-store.ts";
 import { createCompanionPaths } from "./paths.ts";
-import { RollNodeClient, type RuntimeClientExit } from "@roll-agent/client-node";
+import {
+  RollNodeClient,
+  RollRuntimeExitedError,
+  RollProtocolViolationError,
+  RollRequestTimeoutError,
+  RollRpcError,
+  type RuntimeClientExit,
+} from "@roll-agent/client-node";
 import {
   CompanionInteractionBroker,
   CompanionRelayBridgeV11,
@@ -64,13 +75,32 @@ export class DefaultCompanionSessionFactory implements CompanionSessionFactory {
   }
 
   async create(config: CompanionConfig, credential: string): Promise<ManagedCompanionSession> {
+    const diagnostics = inspectEnvironmentDiagnostics({
+      cwd: config.cwd,
+      environment: "service",
+      env: process.env,
+    });
+    if (diagnostics.blocking) {
+      throw new Error(`后台运行环境配置需要处理：${describeEnvironmentDiagnostics(diagnostics)}`);
+    }
     const interactionBroker = new CompanionInteractionBroker();
+    let hasStderr = false;
     const client = await RollNodeClient.start({
       cwd: config.cwd,
       command: this.invocation.command,
       args: this.invocation.runtimeArgs,
       clientName: "roll-companion",
+      // Raw stderr may contain configuration or credentials. Only note its presence; structured
+      // configuration diagnostics above are the source of user-facing environment guidance.
+      onStderr: () => {
+        hasStderr = true;
+      },
       serverRequestHandlers: createRuntimeServerRequestHandlers(interactionBroker),
+    }).catch((error: unknown) => {
+      const exit = describeRuntimeStartupFailure(error);
+      throw new Error(
+        `Runtime 无法启动或初始化${exit}。请检查 Node/Roll 版本及路径，并在绑定的 Workspace 运行 roll doctor。${hasStderr ? "子进程产生了额外诊断输出；为保护配置内容，未将原始 stderr 转发到页面。" : ""}`,
+      );
     });
     try {
       assertBundledRuntimeProtocolVersion(client.getInitializationResult().protocolVersion);
@@ -178,4 +208,32 @@ function defaultWebSocketFactory(url: string): OpenableCompanionWebSocket {
     throw new Error("This bundled Node runtime does not provide WebSocket support");
   }
   return new globalThis.WebSocket(url);
+}
+
+/** Only emit known classes/codes. Error names, messages, paths and arbitrary codes may hold secrets. */
+export function describeRuntimeStartupFailure(error: unknown): string {
+  if (error instanceof RollRuntimeExitedError) {
+    return `（退出码 ${String(error.code)}，信号 ${String(error.signal)}）`;
+  }
+  if (error instanceof RollProtocolViolationError) {
+    return "（RollProtocolViolationError：Runtime 协议校验失败）";
+  }
+  if (error instanceof RollRequestTimeoutError) {
+    return "（RollRequestTimeoutError：Runtime 初始化请求超时）";
+  }
+  if (error instanceof RollRpcError) {
+    return Number.isSafeInteger(error.code)
+      ? `（RollRpcError：错误码 ${String(error.code)}）`
+      : "（RollRpcError）";
+  }
+  if (error instanceof Error && "code" in error) {
+    const known = Object.entries({
+      ENOENT: "（ENOENT：启动命令或工作目录不存在）",
+      EACCES: "（EACCES：启动权限不足）",
+      EPERM: "（EPERM：系统拒绝启动）",
+      ENOEXEC: "（ENOEXEC：可执行文件格式无效）",
+    }).find(([code]) => code === error.code);
+    if (known !== undefined) return known[1];
+  }
+  return "";
 }
