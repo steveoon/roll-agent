@@ -289,6 +289,7 @@ describe("defineAgent tool execution", () => {
       output: z.object({ ok: z.boolean() }),
       annotations: { readOnlyHint: false, destructiveHint: true },
       resourceHints: [{ field: "path", kind: "file", mode: "write" }],
+      observationRetention: { kind: "browser-ax-snapshot" },
       _meta: { owner: "sdk-test" },
       execute: async () => ({ ok: true }),
     });
@@ -305,6 +306,7 @@ describe("defineAgent tool execution", () => {
       assert.deepEqual(listed._meta, {
         owner: "sdk-test",
         "roll/resourceHints": [{ field: "path", kind: "file", mode: "write" }],
+        "roll/observationRetention": { kind: "browser-ax-snapshot" },
       });
     } finally {
       await client.close();

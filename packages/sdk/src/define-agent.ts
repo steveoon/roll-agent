@@ -1,4 +1,5 @@
 import { APP_OUTPUT_META_KEY } from "@roll-agent/protocol/app-output";
+import { OBSERVATION_RETENTION_META_KEY } from "@roll-agent/protocol/observation-retention";
 import { prepareAppOutput, projectAppOutput } from "./app-output.ts";
 import { createServer } from "node:http";
 import { randomUUID } from "node:crypto";
@@ -346,6 +347,9 @@ export function registerTool(server: McpServer, tool: AnyToolDefinition, ctx: Ag
     ...(appOutput ? { [APP_OUTPUT_META_KEY]: appOutput.declaration } : {}),
     ...(tool.resourceHints && tool.resourceHints.length > 0
       ? { [ROLL_RESOURCE_HINTS_META_KEY]: tool.resourceHints }
+      : {}),
+    ...(tool.observationRetention
+      ? { [OBSERVATION_RETENTION_META_KEY]: tool.observationRetention }
       : {}),
   };
   server.registerTool(

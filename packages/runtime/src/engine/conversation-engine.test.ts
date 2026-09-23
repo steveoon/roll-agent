@@ -41,6 +41,7 @@ import {
 import { SUMMARY_PREFIX } from "./compactor.ts";
 import { createToolExecutionRecord } from "../tool-bridge/tool-execution-record.ts";
 import { successfulToolResult } from "../tool-bridge/normalize-result.ts";
+import type { AgentToolSource } from "../tool-bridge/build-tools.ts";
 
 function tempDir(): string {
   return mkdtempSync(join(tmpdir(), "roll-engine-"));
@@ -5242,6 +5243,221 @@ test("buildSessionBashSettings 只在提供 onCommandSpawn 时写入该字段", 
     env: { PATH: "/usr/bin" },
   });
   assert.equal("onCommandSpawn" in without, false);
+});
+
+test("ConversationEngine 从 MCP 声明接入观察投影并拒绝无效声明", async () => {
+  const agent = makeManagedHttpAgent("observing-agent");
+  const issues: AgentBootstrapIssue[] = [];
+  const prompts: LanguageModelV4CallOptions[] = [];
+  let modelIndex = 0;
+  let observationIndex = 0;
+  const model = new MockLanguageModelV4({
+    doStream: async (options) => {
+      prompts.push(options);
+      const index = modelIndex++;
+      const chunks =
+        index < 2
+          ? engineToolCallStep(`observation-${index}`, "observing-agent__snapshot", {})
+          : engineTextStep("done");
+      return {
+        stream: simulateReadableStream<LanguageModelV4StreamPart>({
+          chunks,
+          initialDelayInMs: null,
+          chunkDelayInMs: null,
+        }),
+      };
+    },
+  });
+  const clientManager = {
+    connect: async () => ({
+      listTools: async () => ({
+        tools: [
+          {
+            name: "snapshot",
+            inputSchema: { type: "object", properties: {} },
+            _meta: { "roll/observationRetention": { kind: "browser-ax-snapshot" } },
+          },
+          {
+            name: "invalid_observation",
+            inputSchema: { type: "object", properties: {} },
+            _meta: { "roll/observationRetention": { kind: "unknown" } },
+          },
+        ],
+      }),
+      callTool: async () => {
+        const index = observationIndex++;
+        return {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify({
+                page: { url: "https://example.test" },
+                snapshot: {
+                  snapshotId: `snapshot-${index}`,
+                  browserInstance: "browser-a",
+                  pageId: "page-a",
+                  documentId: "document-a",
+                  nodes: [
+                    {
+                      role: "textbox",
+                      name: `field-${index}`,
+                      ref: "@e1",
+                      depth: 0,
+                      ignored: false,
+                    },
+                  ],
+                  refs: [
+                    {
+                      ref: "@e1",
+                      role: "textbox",
+                      name: `field-${index}`,
+                      nth: 0,
+                      disabled: false,
+                    },
+                  ],
+                  nodeCount: 1,
+                  truncated: false,
+                  maxNodes: 100,
+                  interactiveOnly: true,
+                },
+              }),
+            },
+          ],
+        };
+      },
+    }),
+    disconnectAll: async () => {},
+  } as unknown as McpClientManager;
+  const engine = new ConversationEngine({
+    config: installEngineConfig("/tmp/roll-observation-metadata"),
+    model,
+    agents: [agent],
+    clientManager,
+    ensureAgentReady: async () => {},
+    skillLibrary: null,
+    workspaceInstructions: null,
+    shellProfile: null,
+    onAgentBootstrapIssue: (issue) => issues.push(issue),
+  });
+  try {
+    const session = await engine.createSession();
+    await drain(session.send("inspect"));
+    assert.equal(observationIndex, 2);
+    assert.match(JSON.stringify(prompts[2]?.prompt), /historicalObservation/u);
+    assert.match(issues[0]?.message ?? "", /roll\/observationRetention 无效/u);
+  } finally {
+    await engine.dispose();
+  }
+});
+
+test("SQLite 重启后旧观察继续投影，工具原文与结果 ID 保持可查", async () => {
+  const dir = tempDir();
+  let observations = 0;
+  const source: AgentToolSource = {
+    agentName: "browser",
+    client: {
+      callTool: async () => {
+        const index = observations++;
+        return {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify({
+                page: { url: "https://example.test" },
+                snapshot: {
+                  snapshotId: `snapshot-${index}`,
+                  browserInstance: "browser-a",
+                  pageId: "page-a",
+                  documentId: "document-a",
+                  nodes: [
+                    {
+                      role: "textbox",
+                      name: `field-${index}-${"x".repeat(2_000)}`,
+                      ref: "@e1",
+                      depth: 0,
+                      ignored: false,
+                    },
+                  ],
+                  refs: [
+                    {
+                      ref: "@e1",
+                      role: "textbox",
+                      name: `field-${index}-${"x".repeat(2_000)}`,
+                      nth: 0,
+                      disabled: false,
+                    },
+                  ],
+                  nodeCount: 1,
+                  truncated: false,
+                  maxNodes: 100,
+                  interactiveOnly: true,
+                },
+              }),
+            },
+          ],
+        };
+      },
+    } as unknown as AgentToolSource["client"],
+    tools: [
+      {
+        tool: { name: "snapshot", inputSchema: { type: "object", properties: {} } },
+        annotations: { readOnlyHint: true },
+        observationRetention: { kind: "browser-ax-snapshot" },
+      },
+    ],
+  };
+  const config = installEngineConfig(dir);
+  try {
+    const firstStore = new ThreadStore(dir);
+    const firstEngine = new ConversationEngine({
+      config,
+      model: sequencedEngineModel([
+        engineToolCallStep("snapshot-call-0", "browser__snapshot", {}),
+        engineToolCallStep("snapshot-call-1", "browser__snapshot", {}),
+        engineTextStep("done"),
+      ]),
+      sources: [source],
+      store: firstStore,
+      skillLibrary: null,
+      workspaceInstructions: null,
+    });
+    const firstSession = await firstEngine.createSession();
+    const threadId = firstSession.id;
+    await drain(firstSession.send("inspect"));
+    assert.equal(observations, 2);
+    assert.match(JSON.stringify(firstStore.getMessages(threadId)), /field-0-x{100}/u);
+    const oldId = firstStore.listToolExecutions(threadId)[0]?.id;
+    assert.ok(oldId);
+    await firstEngine.dispose();
+    firstStore.close();
+
+    const reopenedStore = new ThreadStore(dir);
+    let prompt: LanguageModelV4CallOptions["prompt"] = [];
+    const resumedEngine = new ConversationEngine({
+      config,
+      model: textModelCapture((options) => {
+        prompt = options.prompt;
+      }),
+      sources: [source],
+      store: reopenedStore,
+      skillLibrary: null,
+      workspaceInstructions: null,
+    });
+    try {
+      const resumed = await resumedEngine.resumeSession(threadId);
+      await drain(resumed.send("continue"));
+      const modelInput = JSON.stringify(prompt);
+      assert.match(modelInput, /historicalObservation/u);
+      assert.match(modelInput, new RegExp(oldId, "u"));
+      assert.doesNotMatch(modelInput, /field-0-x{100}/u);
+      assert.match(JSON.stringify(reopenedStore.getMessages(threadId)), /field-0-x{100}/u);
+    } finally {
+      await resumedEngine.dispose();
+      reopenedStore.close();
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test("buildSessionExecSettings 只在提供 onCommandSpawn 时写入该字段", () => {

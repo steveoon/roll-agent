@@ -3145,3 +3145,8 @@ export type ThreadSnapshotV15Full = z.infer<typeof threadSnapshotV15FullSchema>;
 export type ThreadSnapshotV15 = z.infer<typeof threadSnapshotV15Schema>;
 export type OperationViewV15 = z.infer<typeof operationViewV15Schema>;
 export type OperationResultView = z.infer<typeof operationResultViewSchema>;
+export {
+  OBSERVATION_RETENTION_META_KEY,
+  observationRetentionDeclarationSchema,
+  type ObservationRetentionDeclaration,
+} from "./observation-retention.ts";

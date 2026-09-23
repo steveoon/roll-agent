@@ -44,6 +44,7 @@ export const browserSnapshot = defineTool({
     "观察陌生页面或表单的首选入口：读取 Accessibility Tree，补充独立选项行、控件上下文和覆盖缺口，返回 @eN、snapshotId 和 iframe 的 frameId。省略或空白 scope 表示整页，默认只返回可交互节点。browser_execute 的 page.snapshot() 受 origin 限制不展开 iframe 时，改用本工具；再用 page.ref(ref,snapshotId) 交给 browser_execute 操作，不要猜测 iframe 下标或把外层页面当作完整表单。",
   input: BrowserSnapshotInputSchema,
   output: BrowserSnapshotOutputSchema,
+  observationRetention: { kind: "browser-ax-snapshot" },
   execute: async (input, ctx) => {
     const runtime = getRuntime();
     const ctxManager = getContextManager();

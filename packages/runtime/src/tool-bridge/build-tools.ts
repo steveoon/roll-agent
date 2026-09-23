@@ -7,6 +7,7 @@ import { basename, dirname, isAbsolute, resolve } from "node:path";
 import { jsonSchema, tool, type ToolExecutionOptions, type ToolSet } from "ai";
 import type { JSONSchema7 } from "@ai-sdk/provider";
 import type { FileChangeDiff } from "@roll-agent/protocol";
+import type { ObservationRetentionDeclaration } from "@roll-agent/protocol/observation-retention";
 import type { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { preflightToolCall } from "@roll-agent/core/tool-runtime/preflight";
 import {
@@ -35,6 +36,7 @@ import {
   type ToolResourceHint,
 } from "./tool-execution-coordinator.ts";
 import { executeWithToolApproval } from "./tool-approval-continuation.ts";
+import { currentObservationModelOutput } from "../engine/observation-projection.ts";
 
 export {
   readExecutionTimeoutMs,
@@ -47,6 +49,7 @@ export interface SourceTool {
   readonly tool: AgentTool;
   readonly annotations: ToolAnnotations | undefined;
   readonly resourceHints?: readonly ToolResourceHint[];
+  readonly observationRetention?: ObservationRetentionDeclaration;
 }
 
 export interface AgentToolSource {
@@ -90,6 +93,7 @@ export interface BuiltToolset {
   readonly tools: ToolSet;
   readonly registry: ToolRegistry;
   readonly schemaIssuesByToolId: Readonly<Record<string, readonly JsonSchemaRefIssue[]>>;
+  readonly observationRetentionByToolId: ReadonlyMap<string, ObservationRetentionDeclaration>;
 }
 
 function mergeSchemaIssues(
@@ -464,10 +468,16 @@ export function buildAgentToolset(
 ): BuiltToolset {
   const tools: ToolSet = {};
   const schemaIssuesByToolId: Record<string, readonly JsonSchemaRefIssue[]> = {};
+  const observationRetentionByToolId = new Map<string, ObservationRetentionDeclaration>();
 
   for (const source of sources) {
     const { client, agentName, agentSource, transport, runtimeOwnership, resourceBaseDir } = source;
-    for (const { tool: listedTool, annotations, resourceHints } of source.tools) {
+    for (const {
+      tool: listedTool,
+      annotations,
+      resourceHints,
+      observationRetention,
+    } of source.tools) {
       const inlined = inlineAcyclicLocalJsonSchemaReferences(listedTool.inputSchema);
       const schemaIssues = mergeSchemaIssues(listedTool.schemaIssues, inlined.unresolved);
       const agentTool: AgentTool = {
@@ -485,6 +495,7 @@ export function buildAgentToolset(
       if (schemaIssues.length > 0) {
         schemaIssuesByToolId[id] = schemaIssues;
       }
+      if (observationRetention) observationRetentionByToolId.set(id, observationRetention);
       const plan: ToolExecutionPlan = {
         prepare: async (input) => {
           const args = asRecord(input);
@@ -505,7 +516,11 @@ export function buildAgentToolset(
       tools[id] = tool({
         description: agentTool.description ?? `${agentTool.name} (via ${agentName})`,
         inputSchema: jsonSchema(agentTool.inputSchema as unknown as JSONSchema7),
-        toModelOutput: ({ output }) => toolResultToModelOutput(output),
+        toModelOutput: ({ output }) =>
+          output.outcome.kind === TOOL_OUTCOME_KINDS.success
+            ? (currentObservationModelOutput(output.raw, observationRetention) ??
+              toolResultToModelOutput(output))
+            : toolResultToModelOutput(output),
         execute: async (
           input: unknown,
           options: ToolExecutionOptions<unknown>,
@@ -550,5 +565,5 @@ export function buildAgentToolset(
     }
   }
 
-  return { tools, registry, schemaIssuesByToolId };
+  return { tools, registry, schemaIssuesByToolId, observationRetentionByToolId };
 }

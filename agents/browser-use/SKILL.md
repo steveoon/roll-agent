@@ -232,13 +232,14 @@ browser_execute(pageId, source, args, capabilities, allowedOrigins, postconditio
 
 1. `@eN` 只来自最近一次 Snapshot。单步工具推荐同时传 `pageId` / `snapshotId`；脚本中的 `page.ref(ref, snapshotId)` 必须绑定同一 browserInstance、页面、document 和最新快照，不能跨页面或跨实例使用。
 2. `@eN` 不等同于 BOSS 推荐页的 `@cN` / `@jN`；`@cN`、`@jN` 只服务对应 `zhipin_*` 工具。
-3. 不要自行构造 `@eN`；只能传 `browser_snapshot.snapshot.refs[].ref`。
+3. 不要自行构造 `@eN`；只能传最新 `browser_snapshot` 返回的节点 `ref`（紧凑模型视图把原 `refs[]` 的定位细节合入节点 `refDetails`，未匹配节点的引用放在 `unmatchedRefs`；MCP 原始结果仍保留 `refs[]`）。
 4. 选择目标时优先匹配 `role + name`，并排除 `disabled:true` 的节点；若目标是非语义短文本控件，使用 `role:"clickable"` / `role:"focusable"` / `role:"editable"`、可见文案和 `properties.domActionable:true` 判断。
 5. 如果 `refs[]` 或 `nodes[]` 中出现 `frameId`，说明该 ref 来自 iframe 子 frame；orchestrator 只需要继续传 `ref` 和必要的 `pageId`，不要手工传或改写 `frameId`。
 6. `snapshot.truncated:true` 表示观察被截断；优先用 `scope` 限定相关表单、弹窗或区域，再按需调整 `maxDepth` / `maxNodes`。同时检查 `coverageWarnings`，不要把未覆盖区域当成空页面。
 7. 页面导航、刷新、弹窗出现、列表重排、筛选变化后，先重新 `browser_snapshot`，不要复用旧 `@eN`。
 8. `browser_snapshot` 是 AX 语义快照，不是完整 HTML、截图或网络状态；需要业务数据时仍应使用对应 read tool。
 9. 当前 iframe 支持是同 target / 同 CDP session 内递归内联；递归受 `maxNodes`、frame 去重和 CDP frame 可解析性限制。跨 target / OOPIF iframe 需要 Native CDP session multiplexing，当前不承诺覆盖。
+10. Roll 会把同一 browserInstance、pageId 的旧观察换成历史摘要，包括导航前的文档；摘要中的 `snapshotId` 只用于核对来源，旧 ref 始终失效。确需查证旧节点时，用摘要的 `resultId` 调用 `roll__observation` 分页回查；回查内容不能作为当前页面操作定位依据。局部、截断或带覆盖警告的快照不能证明整页已覆盖。
 
 单步兼容接口细节见 `references/generic-browser-refs.md`；组合执行、严格定位、审批与经验管理见 [通用页面探索](references/browser-exploration.md)。
 
