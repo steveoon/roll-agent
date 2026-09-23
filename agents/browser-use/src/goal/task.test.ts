@@ -13,8 +13,8 @@ const input = BrowserOperateInputSchema.parse({
   blockedNames: ["发布"],
   maxSteps: 4,
 });
-test("Jev is the default engine and the removed OpenRouter engine is rejected", () => {
-  assert.equal(input.engine, "jev");
+test("engine is selected by Roll configuration and the removed OpenRouter engine is rejected", () => {
+  assert.equal(input.engine, undefined);
   assert.equal(
     BrowserOperateInputSchema.safeParse({
       pageId: "p",

@@ -1361,7 +1361,12 @@ test("ConversationEngine ensures core-managed agents before connecting", async (
 
   const session = await engine.createSession();
 
-  assert.deepEqual(ensured, [{ agentName: "browser-use-agent", env: { TEST_ENV: "1" } }]);
+  assert.deepEqual(ensured, [
+    {
+      agentName: "browser-use-agent",
+      env: { TEST_ENV: "1", BROWSER_OPERATE_ENGINE: "sampling" },
+    },
+  ]);
   assert.deepEqual(connected, ["browser-use-agent"]);
   const capability = session
     .getCapabilityManifest()

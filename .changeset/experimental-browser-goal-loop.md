@@ -1,8 +1,9 @@
 ---
 "@roll-agent/browser-use-agent": minor
+"@roll-agent/core": minor
 ---
 
-Add an experimental bounded browser_operate loop with TypeSafe's official Jev API as the default decision engine and explicit MCP Sampling for comparison. Configure `TYPESAFE_API_KEY` through `agents.env.browser-use-agent` in roll.config or the UI Agent environment editor. Task mode selects observed actions, targets and caller-source values without a secondary model for preparation, per-field checking, generation or recovery. Jev prioritizes prerequisites and required/requested fields from the live page. The fields strategy retains ordered supplied-value execution.
+Add an experimental bounded browser_operate loop with Roll MCP Sampling as its default decision engine. Roll's new `browser.operate.engine: jev` setting explicitly enables the fast TypeSafe Jev mode; configure `TYPESAFE_API_KEY` through `agents.env.browser-use-agent` in roll.config or the UI Agent environment editor. The tool's legacy `engine` input cannot override Roll configuration, and fast mode fails before browser access when the key is missing. Both engines share the same task loop, which selects observed actions, targets and caller-source values without a secondary model for preparation, per-field checking, generation or recovery. The fields strategy retains ordered supplied-value execution.
 
 Copy full supplied values or bounded verbatim goal spans; return unmatched inputs to Roll for missing facts or prepared content. Open editors before discovering their inputs. Preserve native policy, origin, ref, target-freshness, exact input readback and uncertain-action guards. Stop on stagnation without hidden host fallback.
 

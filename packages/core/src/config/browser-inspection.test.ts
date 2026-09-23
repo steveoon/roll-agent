@@ -6,6 +6,7 @@ describe("browser config inspection", () => {
   it("warns when multiple instances are declared without defaultInstance", () => {
     const warnings = collectBrowserConfigWarnings(
       {
+        operate: { engine: "sampling" },
         instances: {
           "boss-a": {
             mode: "managed-cdp",
@@ -34,6 +35,7 @@ describe("browser config inspection", () => {
   it("warns when legacy browser identity env keys coexist with browser.instances", () => {
     const warnings = collectBrowserConfigWarnings(
       {
+        operate: { engine: "sampling" },
         defaultInstance: "boss-a",
         instances: {
           "boss-a": {
@@ -62,6 +64,7 @@ describe("browser config inspection", () => {
   it("warns when legacy browser identity env keys are inherited from shell env", () => {
     const warnings = collectBrowserConfigWarnings(
       {
+        operate: { engine: "sampling" },
         defaultInstance: "boss-a",
         instances: {
           "boss-a": {

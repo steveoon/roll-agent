@@ -488,7 +488,11 @@ function isConfigCatalogNode(value: unknown): value is ConfigCatalogNode {
       return isConfigCatalogNode(value.item);
     case "enum":
       return (
-        Array.isArray(value.options) && value.options.every((option) => typeof option === "string")
+        Array.isArray(value.options) &&
+        value.options.every((option) => typeof option === "string") &&
+        (value.optionLabels === undefined ||
+          (isRecord(value.optionLabels) &&
+            Object.values(value.optionLabels).every((label) => typeof label === "string")))
       );
     case "string":
     case "boolean":

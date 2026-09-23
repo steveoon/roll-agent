@@ -146,6 +146,7 @@ test("agent not running output is a no-op success", () => {
 
 function createBrowserConfig(instanceIds: readonly string[]): BrowserConfig {
   return {
+    operate: { engine: "sampling" },
     instances: Object.fromEntries(
       instanceIds.map((id, index) => [
         id,

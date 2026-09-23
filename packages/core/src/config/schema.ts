@@ -186,6 +186,7 @@ export const browserConfigSchema = z
   .object({
     defaultInstance: z.string().trim().min(1).optional(),
     instances: z.record(z.string(), browserInstanceConfigSchema).default({}),
+    operate: z.object({ engine: z.enum(["sampling", "jev"]).default("sampling") }).default({}),
   })
   .superRefine((browser, ctx) => {
     const instanceEntries = Object.entries(browser.instances);

@@ -24,7 +24,7 @@
 
 Roll根据原始目标一次性准备readTask，不填写坐标、CSS或菜单路径。outputs是要读取的资料名，不能从辅助输入values自动推导。一般填表省略readTask；fields策略不接受readTask。
 
-`browser_operate` 默认使用 Jev，经 TypeSafe 官方 `POST https://api.typesafe.ai/v1/systemone` 决策。密钥从 `roll.config.yaml` 的 `agents.env.browser-use-agent.TYPESAFE_API_KEY` 注入 Agent，也可在 Roll 配置台填写；显式 `sampling` 模式使用宿主模型作对照。旧 `typesafe/jev-1.13` 和 `~typesafe/jev-latest` 名称会归一到官方模型名。
+`browser_operate` 默认使用 Roll 的 MCP Sampling 模型。显式配置 `browser.operate.engine: jev` 才使用 TypeSafe 官方 `POST https://api.typesafe.ai/v1/systemone`；密钥从 `roll.config.yaml` 的 `agents.env.browser-use-agent.TYPESAFE_API_KEY` 注入 Agent，也可在 Roll 配置台填写。缺少密钥时快速模式在操作前报错，不回退。工具的 `engine` 入参不能覆盖配置。旧 `typesafe/jev-1.13` 和 `~typesafe/jev-latest` 模型名称会归一到官方模型名。
 
 官方说明：[API](https://docs.typesafe.ai/api)、[模型](https://docs.typesafe.ai/models)。本轮固定jev-1.13.0，未使用会随版本移动的latest做连续验收。
 

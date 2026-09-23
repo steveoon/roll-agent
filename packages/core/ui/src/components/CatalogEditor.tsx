@@ -816,11 +816,11 @@ function EnumControl({
         <option value="__inherit__">
           {node.defaultValue === undefined
             ? "未设置"
-            : `使用默认值（${String(node.defaultValue)}）`}
+            : `使用默认值（${node.optionLabels?.[String(node.defaultValue)] ?? String(node.defaultValue)}）`}
         </option>
         {node.options.map((option) => (
           <option key={option} value={option}>
-            {option}
+            {node.optionLabels?.[option] ?? option}
           </option>
         ))}
       </select>

@@ -120,13 +120,21 @@ export function getAgentEnv(
   agentName: string,
 ): Readonly<Record<string, string>> | undefined {
   const configuredEnv = getAgentEnvFromAgentsConfig(config.agents, agentName);
-  if (agentName !== "browser-use-agent" || Object.keys(config.browser.instances).length === 0) {
+  if (agentName !== "browser-use-agent") {
     return configuredEnv;
   }
 
   return {
     ...(configuredEnv ?? {}),
-    BROWSER_INSTANCES_JSON: JSON.stringify(config.browser),
+    ...(Object.keys(config.browser.instances).length > 0
+      ? {
+          BROWSER_INSTANCES_JSON: JSON.stringify({
+            defaultInstance: config.browser.defaultInstance,
+            instances: config.browser.instances,
+          }),
+        }
+      : {}),
+    BROWSER_OPERATE_ENGINE: config.browser.operate.engine,
   };
 }
 

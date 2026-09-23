@@ -42,6 +42,13 @@ function makeAgent(): RegisteredAgent {
         optional: [
           { name: "TYPESAFE_API_KEY", purpose: "Jev decisions", secret: true },
           {
+            name: "BROWSER_OPERATE_ENGINE",
+            purpose: "Derived operation engine",
+            secret: false,
+            configurable: false,
+            sourcePath: ["browser", "operate", "engine"],
+          },
+          {
             name: "REPLY_AUTHORITY_URL",
             example: "https://example.test",
             secret: false,
@@ -83,7 +90,7 @@ describe("buildRollConfigCatalog", () => {
     };
     visit(catalog.root);
 
-    assert.equal(leaves.length, 68);
+    assert.equal(leaves.length, 69);
     for (const leaf of leaves) {
       const path = leaf.path.join(".");
       const guidance = findConfigGuidance(path);
@@ -294,6 +301,17 @@ describe("buildRollConfigCatalog", () => {
     assert.equal(cdpUrl.widget, "password");
   });
 
+  it("labels the browser operation engine in the configuration UI catalog", () => {
+    const node = findNode(buildRollConfigCatalog().root, ["browser", "operate", "engine"]);
+    assert.equal(node.kind, "enum");
+    assert.deepEqual(node.options, ["sampling", "jev"]);
+    assert.equal(node.defaultValue, "sampling");
+    assert.deepEqual(node.optionLabels, {
+      sampling: "标准（Roll 模型）",
+      jev: "快速（TypeSafe Jev）",
+    });
+  });
+
   it("marks scheduler.dataDir as the only read-only web form field", () => {
     const catalog = buildRollConfigCatalog();
 
@@ -348,5 +366,10 @@ describe("buildRollConfigCatalog", () => {
     assert.ok(derived);
     assert.equal(derived.configurable, false);
     assert.deepEqual(derived.sourcePath, ["browser", "instances"]);
+
+    const operationEngine = agent.fields.find((field) => field.name === "BROWSER_OPERATE_ENGINE");
+    assert.ok(operationEngine);
+    assert.equal(operationEngine.configurable, false);
+    assert.deepEqual(operationEngine.sourcePath, ["browser", "operate", "engine"]);
   });
 });

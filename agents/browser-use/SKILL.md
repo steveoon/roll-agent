@@ -22,7 +22,7 @@ metadata:
 - `execution`是单次调用的共享执行上下文：初始值、当前可失效状态、最近动作、变化与焦点；读取A和表单共用。unknown先观察，不能当空值补填；set范围内的联动重置可局部修复；preserve变化、归属不明或文档改变交回。`unassigned`变化表示没有绑定到委派字段，必须报告，不自动扩大修改范围。此层没有跨调用session或独立业务计划。
 - `goal` 原样保留用户目标，不总结或重新排版。原样类文字应从用户原文直接截取到 `values`，逐字保留已有换行、空格和标点；原文没有换行就不能自行分段。最终核验也必须按原文检查这些差异，不能用语义相同代替原样一致。
 - Roll 在调用前把已有事实和需要生成的完整文案放进命名 `values`；Jev 选择源值，代码原样复制（保留换行）。也提供有限的 goal 原文片段候选，但不承诺任意自然语言提取、单位转换或自由写作。没有匹配候选返回 `needs_input`；由 Roll 补充已有内容或必要的新资料后继续。网页文本不成为输入事实。
-- 默认 `jev` 使用 TypeSafe 官方 `/v1/systemone`（`TYPESAFE_API_KEY`）；`sampling` 仅供显式对照，使用宿主作为主决策模型。task 循环没有宿主准备、逐项语义检查、字段完成复核或回退助手；Jev 模式不需要 Sampling。`maxTextCalls`、`maxRecoveryDecisions` 仅兼容旧参数，已不生效；`textCalls` 为空，`recoveryDecisions` 为 0。
+- 默认标准模式 `sampling` 使用 Roll MCP Sampling 模型；只有 Roll 配置 `browser.operate.engine: jev` 才使用 TypeSafe 官方 `/v1/systemone`（需 `TYPESAFE_API_KEY`）。工具 `engine` 参数不能切换模式；旧调用传入时必须与配置一致。task 循环没有宿主准备、逐项语义检查、字段完成复核或回退助手；Jev 模式不需要 Sampling。`maxTextCalls`、`maxRecoveryDecisions` 仅兼容旧参数，已不生效；`textCalls` 为空，`recoveryDecisions` 为 0。
 - 保留当前观察、严格 ref/文档/站点检查、遮挡检查、精确输入读回和停滞停止；不会因一个字段判断而召回宿主。输入查询词不等于选中候选，选中候选不一定已确认应用。停滞返回 `needs_reasoning` 和最后观察，Roll 应分析缺口，不能原样无限重试；`executed=true` 的失败动作不能盲目重放。
 - task 决策输入区分字段触发器、菜单候选、查询词和已应用值，并保留可确认的控件归属及标签来源。`pickerFields`、`valueKind` 和字段 ID 是观察线索；未知关系不猜测，菜单文字不能代替字段值。`expanded` 与菜单可见性分开，异步选项未出现时应按原始顺序等待。完成后仍由 Roll 核验整项任务。
 - 导航与只读任务的完成点按原始目标判断：筛选后的空列表也可能是正确结果；列表摘要不等于已进入详情。结合 `selectedTabs`、`pageBusy`、`activePanels` 验收，不能忽略遮挡弹窗。无文字图标的 DOM 属性只是线索，候选缺失或覆盖不完整只能说明尚未找到入口，不能断言页面不存在该入口。

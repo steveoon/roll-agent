@@ -625,6 +625,7 @@ agents:
   it("plans restart, new-session, next-command and manual effects from segment paths", () => {
     const effects = planConfigActivation([
       ["browser", "instances", "boss-a", "cdpPort"],
+      ["browser", "operate", "engine"],
       ["agents", "env", "notify-agent", "FEISHU_BOT_WEBHOOK"],
       ["agents", "dataDir"],
       ["chat", "screenMode"],

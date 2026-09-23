@@ -19,8 +19,6 @@
     { "name": "最高月薪", "text": "6000" }
   ],
   "strategy": "task",
-  "engine": "jev",
-  "model": "typesafe/jev-1.13",
   "allowedOrigins": ["https://example.com"],
   "blockedNames": ["发布", "提交"]
 }
@@ -40,7 +38,7 @@
 
 代码保留站点/策略限制、文档与控件身份检查、可操作性检查、输入精确读回、取消与停滞预算。不执行模型生成的脚本/选择器，不在不确定的动作后自动重放。搜索文字不等于已应用的字段值，模型根据每轮新观察继续选择和确认。
 
-默认 `jev` 使用 TypeSafe 官方接口，不需要宿主 Sampling；显式 `sampling` 使用宿主作为主决策引擎，用于同循环 C/D 对照。不存在第二个辅助模型。旧 `maxTextCalls`、`maxRecoveryDecisions` 参数仅兼容已有调用且不生效；`BROWSER_OPERATE_TEXT_MODEL` 已不使用。输出 `textCalls:[]`、`recoveryDecisions:0`。
+默认 `sampling` 使用 Roll MCP Sampling 模型；Roll 配置 `browser.operate.engine: jev` 后，快速模式使用 TypeSafe 官方接口，不需要宿主 Sampling。工具 `engine` 参数不能覆盖配置。不存在第二个辅助模型。旧 `maxTextCalls`、`maxRecoveryDecisions` 参数仅兼容已有调用且不生效；`BROWSER_OPERATE_TEXT_MODEL` 已不使用。输出 `textCalls:[]`、`recoveryDecisions:0`。
 
 停滞或复杂障碍返回 `needs_reasoning`，Roll 据实际观察决定下一步，不能盲目重跑。`model_done` 是未验证的完成提议：Roll 必须对照完整原始目标统一验收 `finalObservation` 和页面结果。`resolvedValues` 是执行记录；同名字段、搜索框和候选文字不能冒充最终值。如果 `observationFresh:false`，或存在截断、覆盖缺口、冲突，补一次定向只读观察。将错误整理成局部修正任务，保留正确字段；修正后仍要核对原目标。所有验收和返工成本都计入端到端测试，不把快速失败当作提速。
 

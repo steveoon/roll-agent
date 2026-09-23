@@ -44,6 +44,34 @@ export function permittedFrames(tree: NativeCdpFrameTree, origins: readonly stri
   return ids;
 }
 
+export function resolveOperateEngine(
+  requested: BrowserOperateInput["engine"],
+  env: NodeJS.ProcessEnv,
+): NonNullable<BrowserOperateInput["engine"]> {
+  const configured = env["BROWSER_OPERATE_ENGINE"] ?? "sampling";
+  if (configured !== "sampling" && configured !== "jev") {
+    throw new StructuredToolError({
+      code: "configuration_error",
+      message: `Invalid BROWSER_OPERATE_ENGINE: ${configured}`,
+    });
+  }
+  if (requested !== undefined && requested !== configured) {
+    throw new StructuredToolError({
+      code: "invalid_input",
+      message:
+        "browser_operate.engine cannot override browser.operate.engine. Change Roll configuration instead",
+    });
+  }
+  if (configured === "jev" && !env["TYPESAFE_API_KEY"]?.trim()) {
+    throw new StructuredToolError({
+      code: "configuration_error",
+      message:
+        "browser.operate.engine is jev, but TYPESAFE_API_KEY is missing. Configure agents.env.browser-use-agent.TYPESAFE_API_KEY before using fast mode",
+    });
+  }
+  return configured;
+}
+
 export async function operateBrowser(
   rawInput: BrowserOperateInput,
   ctx: AgentContext,
@@ -65,15 +93,10 @@ export async function operateBrowser(
     AbortSignal.timeout(input.timeoutMs),
     ...(ctx.signal ? [ctx.signal] : []),
   ]);
-  const apiKey = process.env["TYPESAFE_API_KEY"];
-  if (input.engine === "jev" && !apiKey) {
-    throw new StructuredToolError({
-      code: "configuration_error",
-      message: "TYPESAFE_API_KEY is required for the Jev decision engine",
-    });
-  }
+  const engine = resolveOperateEngine(input.engine, process.env);
+  const apiKey = process.env["TYPESAFE_API_KEY"]?.trim();
   const provider =
-    input.engine === "sampling"
+    engine === "sampling"
       ? createSamplingProvider(ctx)
       : createJevProvider({ apiKey: apiKey!, model: input.model ?? "jev-latest" });
   const runtime = getRuntime();

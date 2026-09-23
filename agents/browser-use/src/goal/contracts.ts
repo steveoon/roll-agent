@@ -74,7 +74,10 @@ export const BrowserOperateInputSchema = z.object({
     .max(64)
     .default([])
     .describe("禁止操作的控件名称片段，例如最终提交按钮。"),
-  engine: z.enum(["jev", "sampling"]).default("jev"),
+  engine: z
+    .enum(["jev", "sampling"])
+    .optional()
+    .describe("兼容旧调用；只能与 browser.operate.engine 的配置一致，不能切换引擎。"),
   strategy: z
     .enum(["task", "fields"])
     .default("task")
@@ -87,7 +90,7 @@ export const BrowserOperateInputSchema = z.object({
     .max(200)
     .optional()
     .describe(
-      "Jev 使用 TypeSafe 官方接口和 TYPESAFE_API_KEY，默认 jev-latest（可固定 jev-1.13.0）；sampling 仅用于显式对照，使用宿主配置。",
+      "仅快速模式使用 TypeSafe 官方接口和 TYPESAFE_API_KEY，默认 jev-latest（可固定 jev-1.13.0）；标准模式使用 Roll 的 sampling 模型。",
     ),
   maxSteps: z
     .number()
